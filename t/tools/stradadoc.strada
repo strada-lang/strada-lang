@@ -1,0 +1,995 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# stradadoc - Display Strada documentation (like perldoc)
+#
+# Usage: stradadoc [topic]
+#        stradadoc sys              # Show sys:: functions
+#        stradadoc LANGUAGE         # Show language guide
+#        stradadoc Device::SerialPort  # Show module POD
+#
+# Without arguments, lists available documentation.
+
+func usage() void {
+    say("Usage: stradadoc [options] [topic]");
+    say("");
+    say("Display Strada documentation formatted for the terminal.");
+    say("");
+    say("Options:");
+    say("  --list, -l      List all available documentation");
+    say("  --raw           Show raw POD/markdown without formatting");
+    say("  --no-pager      Don't use less for paging");
+    say("  --help, -h      Show this help message");
+    say("");
+    say("Examples:");
+    say("  stradadoc                   # List available docs");
+    say("  stradadoc sys               # Show sys:: functions");
+    say("  stradadoc LANGUAGE          # Show language guide");
+    say("  stradadoc Device::SerialPort # Show module documentation");
+    say("  stradadoc IPC::Open3        # Show module documentation");
+}
+
+# Get the docs directory path
+func get_docs_path() str {
+    # Try common locations in order of preference
+    if (sys::is_dir("docs")) {
+        return "docs";
+    }
+    if (sys::is_dir("../docs")) {
+        return "../docs";
+    }
+    # Check installed location
+    if (sys::is_dir("/usr/local/share/doc/strada")) {
+        return "/usr/local/share/doc/strada";
+    }
+    if (sys::is_dir("/usr/share/doc/strada")) {
+        return "/usr/share/doc/strada";
+    }
+    return "docs";
+}
+
+# Trim whitespace
+func trim(str $s) str {
+    $s =~ s/^\s+//;
+    $s =~ s/\s+$//;
+    return $s;
+}
+
+# Get terminal width (default 80)
+func get_term_width() int {
+    my int $pipe = sys::popen("tput cols 2>/dev/null", "r");
+    if ($pipe < 0) {
+        return 80;
+    }
+    my str $width_str = sys::readline($pipe);
+    sys::pclose($pipe);
+    $width_str = trim($width_str);
+    if (length($width_str) > 0) {
+        my int $w = sys::atoi($width_str);
+        if ($w > 40) {
+            return $w;
+        }
+    }
+    return 80;
+}
+
+# Word wrap text to given width
+func word_wrap(str $text, int $width, int $indent) str {
+    my str $result = "";
+    my str $indent_str = "";
+    my int $j = 0;
+    while ($j < $indent) {
+        $indent_str = $indent_str . " ";
+        $j = $j + 1;
+    }
+
+    my array @words = split(" ", $text);
+    my int $line_len = 0;
+    my int $first_word = 1;
+
+    my int $i = 0;
+    while ($i < scalar(@words)) {
+        my str $word = $words[$i];
+        my int $word_len = length($word);
+
+        if ($first_word == 1) {
+            $result = $result . $indent_str . $word;
+            $line_len = $indent + $word_len;
+            $first_word = 0;
+        } elsif ($line_len + 1 + $word_len > $width) {
+            $result = $result . "\n" . $indent_str . $word;
+            $line_len = $indent + $word_len;
+        } else {
+            $result = $result . " " . $word;
+            $line_len = $line_len + 1 + $word_len;
+        }
+        $i = $i + 1;
+    }
+
+    return $result;
+}
+
+# ANSI color codes - use chr(27) for escape character
+func color_bold() str {
+    return chr(27) . "[1m";
+}
+
+func color_underline() str {
+    return chr(27) . "[4m";
+}
+
+func color_reset() str {
+    return chr(27) . "[0m";
+}
+
+func color_cyan() str {
+    return chr(27) . "[36m";
+}
+
+func color_yellow() str {
+    return chr(27) . "[33m";
+}
+
+func color_green() str {
+    return chr(27) . "[32m";
+}
+
+# Get lib directory paths (for finding modules)
+func get_lib_paths() array {
+    my array @paths = ();
+
+    # Current directory lib
+    if (sys::is_dir("lib")) {
+        push(@paths, "lib");
+    }
+
+    # Parent directory lib
+    if (sys::is_dir("../lib")) {
+        push(@paths, "../lib");
+    }
+
+    # Installed location
+    if (sys::is_dir("/usr/local/lib/strada/lib")) {
+        push(@paths, "/usr/local/lib/strada/lib");
+    }
+    if (sys::is_dir("/usr/lib/strada/lib")) {
+        push(@paths, "/usr/lib/strada/lib");
+    }
+
+    return @paths;
+}
+
+# Convert module name to file path
+# e.g., "Device::SerialPort" -> "Device/SerialPort.strada"
+func module_to_path(str $module) str {
+    my str $path = $module;
+    $path =~ s/::/\//g;
+    return $path . ".strada";
+}
+
+# Find a module file by name
+func find_module(str $module) str {
+    my str $rel_path = module_to_path($module);
+    my array @lib_paths = get_lib_paths();
+
+    my int $i = 0;
+    while ($i < scalar(@lib_paths)) {
+        my str $full_path = $lib_paths[$i] . "/" . $rel_path;
+        if (sys::is_file($full_path)) {
+            return $full_path;
+        }
+        $i = $i + 1;
+    }
+
+    return "";
+}
+
+# Check if a topic looks like a module name (contains ::)
+func is_module_name(str $topic) int {
+    if ($topic =~ /::/) {
+        return 1;
+    }
+    return 0;
+}
+
+# Extract POD from a .strada file
+# Returns the POD content as a string
+func extract_pod(str $filepath) str {
+    my scalar $fh = sys::open($filepath, "r");
+    if (!defined($fh)) {
+        return "";
+    }
+
+    my str $pod = "";
+    my int $in_pod = 0;
+
+    while (!sys::eof($fh)) {
+        my str $line = sys::readline($fh);
+        # Strip trailing newline/carriage return (we'll add newlines back when building)
+        $line =~ s/\n$//;
+        $line =~ s/\r$//;
+
+        # Check for POD start
+        if ($line =~ /^=pod/ || $line =~ /^=head/ || $line =~ /^=over/ || $line =~ /^=item/ || $line =~ /^=begin/ || $line =~ /^=for/) {
+            $in_pod = 1;
+        }
+
+        # Check for POD end
+        if ($line =~ /^=cut/) {
+            $in_pod = 0;
+            next;
+        }
+
+        # Collect POD content with explicit newlines
+        if ($in_pod == 1) {
+            $pod = $pod . $line . "\n";
+        }
+    }
+
+    sys::close($fh);
+    return $pod;
+}
+
+# Format POD inline elements: B<bold>, I<italic>, C<code>, L<link>, F<file>
+func format_pod_inline(str $text) str {
+    my str $result = "";
+    my int $len = length($text);
+    my int $i = 0;
+
+    while ($i < $len) {
+        my str $ch = substr($text, $i, 1);
+
+        # Check for B<...>, I<...>, C<...>, L<...>, F<...>
+        if ($i + 2 < $len && substr($text, $i + 1, 1) eq "<") {
+            my str $code = $ch;
+            if ($code eq "B" || $code eq "I" || $code eq "C" || $code eq "L" || $code eq "F") {
+                # Find matching >
+                my int $depth = 1;
+                my int $end = $i + 2;
+                while ($end < $len && $depth > 0) {
+                    my str $c = substr($text, $end, 1);
+                    if ($c eq "<") {
+                        $depth = $depth + 1;
+                    } elsif ($c eq ">") {
+                        $depth = $depth - 1;
+                    }
+                    $end = $end + 1;
+                }
+
+                if ($depth == 0) {
+                    my str $content = substr($text, $i + 2, $end - $i - 3);
+
+                    if ($code eq "B") {
+                        $result = $result . color_bold() . $content . color_reset();
+                    } elsif ($code eq "I") {
+                        $result = $result . color_underline() . $content . color_reset();
+                    } elsif ($code eq "C" || $code eq "F") {
+                        $result = $result . color_cyan() . $content . color_reset();
+                    } elsif ($code eq "L") {
+                        # For links, just show the text (could be Module::Name or "text|url")
+                        if ($content =~ /\|/) {
+                            my array @parts = split("\\|", $content);
+                            $result = $result . color_underline() . $parts[0] . color_reset();
+                        } else {
+                            $result = $result . color_underline() . $content . color_reset();
+                        }
+                    }
+                    $i = $end;
+                    next;
+                }
+            }
+        }
+
+        $result = $result . $ch;
+        $i = $i + 1;
+    }
+
+    return $result;
+}
+
+# Format POD and return as string
+func format_pod(str $pod_content, int $raw_mode) str {
+    if ($raw_mode == 1) {
+        return $pod_content;
+    }
+
+    my str $output = "";
+    my int $term_width = get_term_width();
+    my array @lines = split("\n", $pod_content);
+    my int $in_over = 0;
+    my int $indent_level = 0;
+    my int $in_verbatim = 0;
+
+    my int $i = 0;
+    while ($i < scalar(@lines)) {
+        my str $line = $lines[$i];
+        $line =~ s/\r$//;
+
+        # Verbatim paragraph (starts with whitespace)
+        if ($line =~ /^[ \t]/ && length(trim($line)) > 0) {
+            $output = $output . "    " . color_green() . $line . color_reset() . "\n";
+            $i = $i + 1;
+            next;
+        }
+
+        # =head1
+        if ($line =~ /^=head1\s+(.+)$/) {
+            my array @caps = captures();
+            my str $heading = $caps[1];
+            $output = $output . "\n";
+            $output = $output . color_bold() . color_yellow() . $heading . color_reset() . "\n";
+            my str $underline = "";
+            my int $k = 0;
+            while ($k < length($heading)) {
+                $underline = $underline . "=";
+                $k = $k + 1;
+            }
+            $output = $output . color_yellow() . $underline . color_reset() . "\n";
+            $output = $output . "\n";
+            $i = $i + 1;
+            next;
+        }
+
+        # =head2
+        if ($line =~ /^=head2\s+(.+)$/) {
+            my array @caps = captures();
+            my str $heading = $caps[1];
+            $output = $output . "\n";
+            $output = $output . color_bold() . $heading . color_reset() . "\n";
+            my str $underline = "";
+            my int $k = 0;
+            while ($k < length($heading)) {
+                $underline = $underline . "-";
+                $k = $k + 1;
+            }
+            $output = $output . $underline . "\n";
+            $output = $output . "\n";
+            $i = $i + 1;
+            next;
+        }
+
+        # =head3
+        if ($line =~ /^=head3\s+(.+)$/) {
+            my array @caps = captures();
+            my str $heading = $caps[1];
+            $output = $output . "\n";
+            $output = $output . color_bold() . "  " . $heading . color_reset() . "\n";
+            $i = $i + 1;
+            next;
+        }
+
+        # =head4
+        if ($line =~ /^=head4\s+(.+)$/) {
+            my array @caps = captures();
+            my str $heading = $caps[1];
+            $output = $output . "    " . color_underline() . $heading . color_reset() . "\n";
+            $i = $i + 1;
+            next;
+        }
+
+        # =over
+        if ($line =~ /^=over/) {
+            $in_over = 1;
+            $indent_level = $indent_level + 4;
+            $i = $i + 1;
+            next;
+        }
+
+        # =back
+        if ($line =~ /^=back/) {
+            $in_over = 0;
+            $indent_level = $indent_level - 4;
+            if ($indent_level < 0) {
+                $indent_level = 0;
+            }
+            $output = $output . "\n";
+            $i = $i + 1;
+            next;
+        }
+
+        # =item
+        if ($line =~ /^=item\s+(.+)$/) {
+            my array @caps = captures();
+            my str $item = $caps[1];
+            my str $formatted = format_pod_inline($item);
+            $output = $output . "\n";
+
+            # Build indent string
+            my str $indent_str = "";
+            my int $j = 0;
+            while ($j < $indent_level - 2) {
+                $indent_str = $indent_str . " ";
+                $j = $j + 1;
+            }
+
+            $output = $output . $indent_str . "* " . color_bold() . $formatted . color_reset() . "\n";
+            $i = $i + 1;
+            next;
+        }
+
+        # =item without text
+        if ($line =~ /^=item\s*$/) {
+            $output = $output . "\n";
+            $i = $i + 1;
+            next;
+        }
+
+        # =pod (just a marker, skip)
+        if ($line =~ /^=pod/) {
+            $i = $i + 1;
+            next;
+        }
+
+        # =for / =begin / =end (skip special blocks for now)
+        if ($line =~ /^=for/ || $line =~ /^=begin/ || $line =~ /^=end/) {
+            $i = $i + 1;
+            next;
+        }
+
+        # Empty line
+        if (length(trim($line)) == 0) {
+            $output = $output . "\n";
+            $i = $i + 1;
+            next;
+        }
+
+        # Regular paragraph
+        my str $formatted = format_pod_inline($line);
+        my int $para_indent = 2 + $indent_level;
+        my str $wrapped = word_wrap($formatted, $term_width - para_indent - 2, $para_indent);
+        $output = $output . $wrapped . "\n";
+        $i = $i + 1;
+    }
+
+    return $output;
+}
+
+# List modules with POD documentation
+func list_modules_with_pod(array @lib_paths) void {
+    my int $found_any = 0;
+
+    my int $i = 0;
+    while ($i < scalar(@lib_paths)) {
+        my str $lib_path = $lib_paths[$i];
+        list_modules_recursive($lib_path, $lib_path);
+        $i = $i + 1;
+    }
+}
+
+# Recursively list modules in a directory
+func list_modules_recursive(str $base_path, str $current_path) void {
+    my array @entries = sys::readdir($current_path);
+
+    my int $i = 0;
+    while ($i < scalar(@entries)) {
+        my str $entry = $entries[$i];
+
+        if ($entry eq "." || $entry eq "..") {
+            $i = $i + 1;
+            next;
+        }
+
+        my str $full_path = $current_path . "/" . $entry;
+
+        if (sys::is_dir($full_path)) {
+            list_modules_recursive($base_path, $full_path);
+        } elsif ($entry =~ /\.strada$/) {
+            # Check if it has POD
+            my str $pod = extract_pod($full_path);
+            if (length($pod) > 10) {
+                # Convert path to module name
+                my str $rel_path = $full_path;
+                # Remove base path prefix
+                my int $base_len = length($base_path);
+                if (length($rel_path) > $base_len) {
+                    $rel_path = substr($rel_path, $base_len + 1, length($rel_path) - $base_len - 1);
+                }
+                # Remove .strada extension
+                $rel_path =~ s/\.strada$//;
+                # Convert / to ::
+                $rel_path =~ s/\//::/g;
+                say("  " . color_cyan() . $rel_path . color_reset());
+            }
+        }
+
+        $i = $i + 1;
+    }
+}
+
+# Format inline markdown elements
+func format_inline(str $line) str {
+    my str $result = "";
+    my int $len = length($line);
+    my int $i = 0;
+
+    while ($i < $len) {
+        my str $ch = substr($line, $i, 1);
+
+        # Check for backtick (code) - use cyan
+        if ($ch eq "`") {
+            my int $end = $i + 1;
+            while ($end < $len && substr($line, $end, 1) ne "`") {
+                $end = $end + 1;
+            }
+            if ($end < $len) {
+                my str $code = substr($line, $i + 1, $end - $i - 1);
+                $result = $result . color_cyan() . $code . color_reset();
+                $i = $end + 1;
+                next;
+            }
+        }
+
+        # Check for ** (bold)
+        if ($ch eq "*" && $i + 1 < $len && substr($line, $i + 1, 1) eq "*") {
+            my int $end = $i + 2;
+            while ($end + 1 < $len) {
+                if (substr($line, $end, 1) eq "*" && substr($line, $end + 1, 1) eq "*") {
+                    last;
+                }
+                $end = $end + 1;
+            }
+            if ($end + 1 < $len) {
+                my str $bold = substr($line, $i + 2, $end - $i - 2);
+                $result = $result . color_bold() . $bold . color_reset();
+                $i = $end + 2;
+                next;
+            }
+        }
+
+        # Check for single * (italic/underline)
+        if ($ch eq "*") {
+            my int $end = $i + 1;
+            while ($end < $len && substr($line, $end, 1) ne "*") {
+                $end = $end + 1;
+            }
+            if ($end < $len) {
+                my str $italic = substr($line, $i + 1, $end - $i - 1);
+                $result = $result . color_underline() . $italic . color_reset();
+                $i = $end + 1;
+                next;
+            }
+        }
+
+        $result = $result . $ch;
+        $i = $i + 1;
+    }
+
+    return $result;
+}
+
+# Format markdown and return as string
+func format_markdown(str $filepath, int $raw_mode) str {
+    my scalar $fh = sys::open($filepath, "r");
+    if (length($fh) == 0) {
+        return "Error: Cannot open file: " . $filepath . "\n";
+    }
+
+    my str $output = "";
+    my int $term_width = get_term_width();
+    my int $in_code_block = 0;
+    my int $in_list = 0;
+    my str $line = "";
+
+    while (!sys::eof($fh)) {
+        $line = sys::readline($fh);
+        $line =~ s/\n$//;
+        $line =~ s/\r$//;
+
+        # Raw mode - just output as-is
+        if ($raw_mode == 1) {
+            $output = $output . $line . "\n";
+            next;
+        }
+
+        # Handle fenced code blocks
+        if ($line =~ /^```/) {
+            $in_code_block = 1 - $in_code_block;
+            $output = $output . "\n";
+            next;
+        }
+
+        # Inside code block - output with indent and color
+        if ($in_code_block == 1) {
+            $output = $output . "    " . color_green() . $line . color_reset() . "\n";
+            next;
+        }
+
+        # Empty line
+        if (length(trim($line)) == 0) {
+            $in_list = 0;
+            $output = $output . "\n";
+            next;
+        }
+
+        # H1 heading
+        if ($line =~ /^# (.+)$/) {
+            my array @caps = captures();
+            my str $heading = $caps[1];
+            $output = $output . "\n";
+            $output = $output . color_bold() . color_yellow() . $heading . color_reset() . "\n";
+            # Add underline
+            my str $underline = "";
+            my int $k = 0;
+            while ($k < length($heading)) {
+                $underline = $underline . "=";
+                $k = $k + 1;
+            }
+            $output = $output . color_yellow() . $underline . color_reset() . "\n";
+            $output = $output . "\n";
+            next;
+        }
+
+        # H2 heading
+        if ($line =~ /^## (.+)$/) {
+            my array @caps = captures();
+            my str $heading = $caps[1];
+            $output = $output . "\n";
+            $output = $output . color_bold() . $heading . color_reset() . "\n";
+            my str $underline = "";
+            my int $k = 0;
+            while ($k < length($heading)) {
+                $underline = $underline . "-";
+                $k = $k + 1;
+            }
+            $output = $output . $underline . "\n";
+            $output = $output . "\n";
+            next;
+        }
+
+        # H3 heading
+        if ($line =~ /^### (.+)$/) {
+            my array @caps = captures();
+            my str $heading = $caps[1];
+            $output = $output . "\n";
+            $output = $output . color_bold() . "  " . $heading . color_reset() . "\n";
+            next;
+        }
+
+        # H4+ heading
+        if ($line =~ /^#{4,} (.+)$/) {
+            my array @caps = captures();
+            my str $heading = $caps[1];
+            $output = $output . "    " . color_underline() . $heading . color_reset() . "\n";
+            next;
+        }
+
+        # Unordered list item
+        if ($line =~ /^[-*]\s+(.+)$/) {
+            my array @caps = captures();
+            my str $item = $caps[1];
+            $in_list = 1;
+            my str $formatted = format_inline($item);
+            my str $wrapped = word_wrap($formatted, $term_width - 6, 0);
+            # Add bullet and indent continuation lines
+            my array @wrap_lines = split("\n", $wrapped);
+            my int $first = 1;
+            my int $li = 0;
+            while ($li < scalar(@wrap_lines)) {
+                if ($first == 1) {
+                    $output = $output . "  * " . $wrap_lines[$li] . "\n";
+                    $first = 0;
+                } else {
+                    $output = $output . "    " . $wrap_lines[$li] . "\n";
+                }
+                $li = $li + 1;
+            }
+            next;
+        }
+
+        # Ordered list item
+        if ($line =~ /^([0-9]+)\.\s+(.+)$/) {
+            my array @caps = captures();
+            my str $num = $caps[1];
+            my str $item = $caps[2];
+            $in_list = 1;
+            my str $formatted = format_inline($item);
+            $output = $output . "  " . $num . ". " . $formatted . "\n";
+            next;
+        }
+
+        # Indented code (4 spaces)
+        if ($line =~ /^    (.+)$/) {
+            my array @caps = captures();
+            my str $code = $caps[1];
+            $output = $output . "    " . color_green() . $code . color_reset() . "\n";
+            next;
+        }
+
+        # Regular paragraph - wrap and format
+        my str $formatted = format_inline($line);
+        my str $wrapped = word_wrap($formatted, $term_width - 4, 2);
+        $output = $output . $wrapped . "\n";
+    }
+
+    sys::close($fh);
+    $output = $output . "\n";
+    return $output;
+}
+
+# List available documentation
+func list_docs(str $docs_path) void {
+    say(color_bold() . "Strada Documentation" . color_reset());
+    say("====================");
+    say("");
+
+    say(color_bold() . "Primary Documentation:" . color_reset());
+    say("");
+
+    # List main docs
+    my array @main_docs = sys::readdir($docs_path);
+    my int $i = 0;
+    while ($i < scalar(@main_docs)) {
+        my str $name = $main_docs[$i];
+        if ($name =~ /\.md$/ && $name ne "." && $name ne "..") {
+            my str $display = $name;
+            $display =~ s/\.md$//;
+            $display =~ s/_/ /g;
+            say("  " . color_cyan() . $display . color_reset());
+        }
+        $i = $i + 1;
+    }
+
+    say("");
+
+    # List extended docs
+    my str $extended_path = $docs_path . "/extended";
+    if (sys::is_dir($extended_path)) {
+        say(color_bold() . "Extended Documentation:" . color_reset());
+        say("");
+
+        my array @ext_docs = sys::readdir($extended_path);
+        my int $j = 0;
+        while ($j < scalar(@ext_docs)) {
+            my str $name = $ext_docs[$j];
+            if ($name =~ /\.md$/ && $name ne "." && $name ne "..") {
+                my str $display = $name;
+                $display =~ s/\.md$//;
+                say("  " . color_cyan() . $display . color_reset());
+            }
+            $j = $j + 1;
+        }
+        say("");
+    }
+
+    # List modules with POD documentation
+    my array @lib_paths = get_lib_paths();
+    if (scalar(@lib_paths) > 0) {
+        say(color_bold() . "Module Documentation (POD):" . color_reset());
+        say("");
+        list_modules_with_pod(@lib_paths);
+        say("");
+    }
+
+    say("Usage: stradadoc <topic>");
+    say("Examples:");
+    say("  stradadoc sys               # Show sys:: functions");
+    say("  stradadoc Device::SerialPort # Show module POD");
+}
+
+# Find document by topic name
+func find_doc(str $docs_path, str $topic) str {
+    # Normalize topic name
+    my str $search = $topic;
+    $search =~ s/ /_/g;
+
+    # Try exact match in main docs
+    my str $path = $docs_path . "/" . $search . ".md";
+    if (sys::is_file($path)) {
+        return $path;
+    }
+
+    # Try uppercase
+    my str $upper = "";
+    my int $i = 0;
+    while ($i < length($search)) {
+        my str $ch = substr($search, $i, 1);
+        my int $code = ord($ch);
+        if ($code >= 97 && $code <= 122) {
+            $upper = $upper . chr($code - 32);
+        } else {
+            $upper = $upper . $ch;
+        }
+        $i = $i + 1;
+    }
+    $path = $docs_path . "/" . $upper . ".md";
+    if (sys::is_file($path)) {
+        return $path;
+    }
+
+    # Try with _GUIDE suffix
+    $path = $docs_path . "/" . $upper . "_GUIDE.md";
+    if (sys::is_file($path)) {
+        return $path;
+    }
+
+    # Try with _REFERENCE suffix
+    $path = $docs_path . "/" . $upper . "_REFERENCE.md";
+    if (sys::is_file($path)) {
+        return $path;
+    }
+
+    # Try in extended directory
+    $path = $docs_path . "/extended/" . $search . ".md";
+    if (sys::is_file($path)) {
+        return $path;
+    }
+
+    # Try lowercase in extended
+    my str $lower = "";
+    $i = 0;
+    while ($i < length($search)) {
+        my str $ch = substr($search, $i, 1);
+        my int $code = ord($ch);
+        if ($code >= 65 && $code <= 90) {
+            $lower = $lower . chr($code + 32);
+        } else {
+            $lower = $lower . $ch;
+        }
+        $i = $i + 1;
+    }
+    $path = $docs_path . "/extended/" . $lower . ".md";
+    if (sys::is_file($path)) {
+        return $path;
+    }
+
+    # Search for partial matches
+    my array @files = sys::readdir($docs_path);
+    my int $j = 0;
+    while ($j < scalar(@files)) {
+        my str $name = $files[$j];
+        if ($name =~ /\.md$/) {
+            my str $base = $name;
+            $base =~ s/\.md$//;
+            my str $base_lower = "";
+            my int $k = 0;
+            while ($k < length($base)) {
+                my str $ch = substr($base, $k, 1);
+                my int $code = ord($ch);
+                if ($code >= 65 && $code <= 90) {
+                    $base_lower = $base_lower . chr($code + 32);
+                } else {
+                    $base_lower = $base_lower . $ch;
+                }
+                $k = $k + 1;
+            }
+            if ($base_lower =~ /$lower/) {
+                return $docs_path . "/" . $name;
+            }
+        }
+        $j = $j + 1;
+    }
+
+    # Search extended directory
+    my str $ext_path = $docs_path . "/extended";
+    if (sys::is_dir($ext_path)) {
+        my array @ext_files = sys::readdir($ext_path);
+        my int $m = 0;
+        while ($m < scalar(@ext_files)) {
+            my str $name = $ext_files[$m];
+            if ($name =~ /\.md$/) {
+                my str $base = $name;
+                $base =~ s/\.md$//;
+                my str $base_lower = "";
+                my int $k = 0;
+                while ($k < length($base)) {
+                    my str $ch = substr($base, $k, 1);
+                    my int $code = ord($ch);
+                    if ($code >= 65 && $code <= 90) {
+                        $base_lower = $base_lower . chr($code + 32);
+                    } else {
+                        $base_lower = $base_lower . $ch;
+                    }
+                    $k = $k + 1;
+                }
+                if ($base_lower =~ /$lower/) {
+                    return $ext_path . "/" . $name;
+                }
+            }
+            $m = $m + 1;
+        }
+    }
+
+    return "";
+}
+
+func main(int $argc, array @argv) int {
+    my str $docs_path = get_docs_path();
+    my str $topic = "";
+    my int $list_mode = 0;
+    my int $raw_mode = 0;
+    my int $no_pager = 0;
+
+    # Parse arguments
+    my int $i = 1;
+    while ($i < $argc) {
+        my str $arg = $argv[$i];
+
+        if ($arg eq "--help" || $arg eq "-h") {
+            usage();
+            return 0;
+        } elsif ($arg eq "--list" || $arg eq "-l") {
+            $list_mode = 1;
+        } elsif ($arg eq "--raw") {
+            $raw_mode = 1;
+        } elsif ($arg eq "--no-pager") {
+            $no_pager = 1;
+        } elsif ($arg =~ /^-/) {
+            say("Error: Unknown option: " . $arg);
+            usage();
+            return 1;
+        } else {
+            $topic = $arg;
+        }
+        $i = $i + 1;
+    }
+
+    # No arguments or --list: show available docs
+    if (length($topic) == 0 || $list_mode == 1) {
+        list_docs($docs_path);
+        return 0;
+    }
+
+    my str $content = "";
+
+    # First, check if it's a module name (contains ::) or could be a module
+    my str $module_path = find_module($topic);
+    if (length($module_path) > 0) {
+        # Extract and format POD
+        my str $pod = extract_pod($module_path);
+        if (length($pod) > 10) {
+            $content = format_pod($pod, $raw_mode);
+        } else {
+            say("Module '" . $topic . "' found at " . $module_path . " but contains no POD documentation.");
+            return 1;
+        }
+    } else {
+        # Try to find markdown documentation
+        my str $doc_path = find_doc($docs_path, $topic);
+        if (length($doc_path) == 0) {
+            say("Error: No documentation found for '" . $topic . "'");
+            say("");
+            say("Available topics:");
+            list_docs($docs_path);
+            return 1;
+        }
+
+        # Format the markdown
+        $content = format_markdown($doc_path, $raw_mode);
+    }
+
+    # Check if we should use pager
+    my int $use_pager = 0;
+    if ($no_pager == 0 && sys::isatty(1) == 1) {
+        $use_pager = 1;
+    }
+
+    if ($use_pager == 1) {
+        # Pipe through less with color support
+        my scalar $pipe = sys::popen("less -R", "w");
+        if (length($pipe) > 0) {
+            sys::fputs($content, $pipe);
+            sys::pclose($pipe);
+        } else {
+            # Fallback to direct output
+            print($content);
+        }
+    } else {
+        print($content);
+    }
+
+    return 0;
+}

@@ -1,0 +1,9 @@
+BEGIN { say("begin1"); }
+BEGIN { say("begin2"); }
+END { say("end1"); }
+END { say("end2"); }
+
+func main() int {
+    say("main");
+    return 0;
+}

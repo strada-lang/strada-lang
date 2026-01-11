@@ -1,0 +1,563 @@
+/*
+ Math::BigInt - Arbitrary-precision integer arithmetic for Strada
+
+ SYNOPSIS
+
+    use lib "lib";
+    use Math::BigInt;
+
+    my scalar $a = BigInt::new("999999999999999999999999999");
+    my scalar $b = BigInt::new("1");
+    my scalar $c = $a->add($b);
+    say($c->to_str());  # 1000000000000000000000000000
+
+    my scalar $f = BigInt::factorial(50);
+    say($f->to_str());
+*/
+
+package BigInt;
+
+__C__ {
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+
+/* Compare two digit strings (absolute values). Returns -1, 0, or 1. */
+static int _bi_cmp(const char *a, const char *b) {
+    size_t la = strlen(a);
+    size_t lb = strlen(b);
+    if (la != lb) return (la > lb) ? 1 : -1;
+    return strcmp(a, b);
+}
+
+/* Strip leading zeros from digit string. Caller must free result. */
+static char *_bi_strip(const char *s) {
+    while (*s == '0' && *(s + 1) != '\0') s++;
+    return strdup(s);
+}
+
+/* Add two digit strings (absolute values). Caller must free result. */
+static char *_bi_add(const char *a, const char *b) {
+    size_t la = strlen(a);
+    size_t lb = strlen(b);
+    size_t max = (la > lb) ? la : lb;
+    char *result = (char *)malloc(max + 2);
+    int carry = 0;
+    size_t ri = 0;
+    size_t ia = la;
+    size_t ib = lb;
+
+    while (ia > 0 || ib > 0 || carry) {
+        int da = 0, db = 0;
+        if (ia > 0) { ia--; da = a[ia] - '0'; }
+        if (ib > 0) { ib--; db = b[ib] - '0'; }
+        int sum = da + db + carry;
+        carry = sum / 10;
+        result[ri++] = '0' + (sum % 10);
+    }
+    /* Reverse */
+    for (size_t i = 0; i < ri / 2; i++) {
+        char tmp = result[i];
+        result[i] = result[ri - 1 - i];
+        result[ri - 1 - i] = tmp;
+    }
+    result[ri] = '\0';
+    return result;
+}
+
+/* Subtract b from a (assumes a >= b). Caller must free result. */
+static char *_bi_sub(const char *a, const char *b) {
+    size_t la = strlen(a);
+    size_t lb = strlen(b);
+    char *result = (char *)malloc(la + 1);
+    int borrow = 0;
+    size_t ri = 0;
+    size_t ia = la;
+    size_t ib = lb;
+
+    while (ia > 0) {
+        ia--;
+        int da = a[ia] - '0' - borrow;
+        int db = 0;
+        if (ib > 0) { ib--; db = b[ib] - '0'; }
+        if (da < db) { da += 10; borrow = 1; } else { borrow = 0; }
+        result[ri++] = '0' + (da - db);
+    }
+    /* Reverse */
+    for (size_t i = 0; i < ri / 2; i++) {
+        char tmp = result[i];
+        result[i] = result[ri - 1 - i];
+        result[ri - 1 - i] = tmp;
+    }
+    result[ri] = '\0';
+    char *stripped = _bi_strip(result);
+    free(result);
+    return stripped;
+}
+
+/* Multiply two digit strings. Caller must free result. */
+static char *_bi_mul(const char *a, const char *b) {
+    size_t la = strlen(a);
+    size_t lb = strlen(b);
+    size_t rlen = la + lb;
+    int *digits = (int *)calloc(rlen, sizeof(int));
+
+    for (size_t i = 0; i < la; i++) {
+        for (size_t j = 0; j < lb; j++) {
+            int da = a[la - 1 - i] - '0';
+            int db = b[lb - 1 - j] - '0';
+            digits[i + j] += da * db;
+        }
+    }
+    /* Propagate carries */
+    for (size_t i = 0; i < rlen - 1; i++) {
+        digits[i + 1] += digits[i] / 10;
+        digits[i] %= 10;
+    }
+    /* Find highest non-zero */
+    size_t top = rlen - 1;
+    while (top > 0 && digits[top] == 0) top--;
+
+    char *result = (char *)malloc(top + 2);
+    for (size_t i = 0; i <= top; i++) {
+        result[i] = '0' + digits[top - i];
+    }
+    result[top + 1] = '\0';
+    free(digits);
+    return result;
+}
+
+/* Divide a by b. Returns quotient. If rem is non-NULL, sets *rem to remainder.
+   Caller must free quotient and *rem. */
+static char *_bi_divmod(const char *a, const char *b, char **rem) {
+    if (_bi_cmp(a, b) < 0) {
+        if (rem) *rem = strdup(a);
+        return strdup("0");
+    }
+    if (strcmp(b, "0") == 0) {
+        if (rem) *rem = strdup("0");
+        return strdup("0"); /* division by zero guard */
+    }
+
+    size_t la = strlen(a);
+    char *quotient = (char *)malloc(la + 1);
+    size_t qi = 0;
+
+    /* current = running remainder as digit string */
+    char *current = strdup("0");
+
+    for (size_t i = 0; i < la; i++) {
+        /* current = current * 10 + a[i] */
+        size_t cl = strlen(current);
+        char *next = (char *)malloc(cl + 2);
+        memcpy(next, current, cl);
+        next[cl] = a[i];
+        next[cl + 1] = '\0';
+        free(current);
+        current = _bi_strip(next);
+        free(next);
+
+        /* Trial: how many times does b fit into current? */
+        int count = 0;
+        while (_bi_cmp(current, b) >= 0) {
+            char *tmp = _bi_sub(current, b);
+            free(current);
+            current = tmp;
+            count++;
+        }
+        quotient[qi++] = '0' + count;
+    }
+    quotient[qi] = '\0';
+
+    char *stripped_q = _bi_strip(quotient);
+    free(quotient);
+
+    if (rem) {
+        *rem = current;
+    } else {
+        free(current);
+    }
+    return stripped_q;
+}
+}
+
+func new(str $val) scalar {
+    my hash %self = ();
+    my int $sign = 1;
+    my str $digits = $val;
+
+    # Handle sign
+    if (length($val) > 0 && substr($val, 0, 1) eq "-") {
+        $sign = -1;
+        $digits = substr($val, 1, length($val) - 1);
+    } elsif (length($val) > 0 && substr($val, 0, 1) eq "+") {
+        $digits = substr($val, 1, length($val) - 1);
+    }
+
+    # Strip leading zeros
+    while (length($digits) > 1 && substr($digits, 0, 1) eq "0") {
+        $digits = substr($digits, 1, length($digits) - 1);
+    }
+
+    # Zero is always positive
+    if ($digits eq "0") {
+        $sign = 1;
+    }
+
+    $self{"s"} = $sign;
+    $self{"v"} = $digits;
+    return bless(\%self, "BigInt");
+}
+
+func from_int(int $val) scalar {
+    if ($val < 0) {
+        return BigInt::new("-" . (0 - $val));
+    }
+    return BigInt::new("" . $val);
+}
+
+func clone(scalar $self) scalar {
+    my hash %c = ();
+    $c{"s"} = $self->{"s"};
+    $c{"v"} = "" . $self->{"v"};
+    return bless(\%c, "BigInt");
+}
+
+func to_str(scalar $self) str {
+    my int $s = $self->{"s"};
+    my str $v = $self->{"v"};
+    if ($s < 0) {
+        return "-" . $v;
+    }
+    return $v;
+}
+
+func to_int(scalar $self) int {
+    my str $s = $self->to_str();
+    return cast_int($s);
+}
+
+func is_zero(scalar $self) int {
+    return $self->{"v"} eq "0" ? 1 : 0;
+}
+
+func is_positive(scalar $self) int {
+    if ($self->{"v"} eq "0") {
+        return 0;
+    }
+    return $self->{"s"} > 0 ? 1 : 0;
+}
+
+func is_negative(scalar $self) int {
+    return $self->{"s"} < 0 ? 1 : 0;
+}
+
+func sign(scalar $self) int {
+    if ($self->{"v"} eq "0") {
+        return 0;
+    }
+    return $self->{"s"};
+}
+
+func abs(scalar $self) scalar {
+    my hash %r = ();
+    $r{"s"} = 1;
+    $r{"v"} = "" . $self->{"v"};
+    return bless(\%r, "BigInt");
+}
+
+func neg(scalar $self) scalar {
+    my hash %r = ();
+    if ($self->{"v"} eq "0") {
+        $r{"s"} = 1;
+    } else {
+        $r{"s"} = 0 - $self->{"s"};
+    }
+    $r{"v"} = "" . $self->{"v"};
+    return bless(\%r, "BigInt");
+}
+
+func compare(scalar $self, scalar $other) int {
+    my int $sa = $self->{"s"};
+    my int $sb = $other->{"s"};
+
+    # Both zero
+    if ($self->{"v"} eq "0" && $other->{"v"} eq "0") {
+        return 0;
+    }
+
+    # Different signs
+    if ($sa > 0 && $sb < 0) {
+        return 1;
+    }
+    if ($sa < 0 && $sb > 0) {
+        return -1;
+    }
+
+    # Same sign: compare magnitudes
+    my str $va = $self->{"v"};
+    my str $vb = $other->{"v"};
+    my int $mag_cmp = 0;
+    __C__ {
+        char *a_str = strada_to_str(va);
+        char *b_str = strada_to_str(vb);
+        int c = _bi_cmp(a_str, b_str);
+        free(a_str);
+        free(b_str);
+        strada_decref(mag_cmp);
+        mag_cmp = strada_new_int((int64_t)c);
+    }
+
+    if ($sa > 0) {
+        return $mag_cmp;
+    }
+    # Both negative: reverse comparison
+    return 0 - $mag_cmp;
+}
+
+func is_eq(scalar $self, scalar $other) int {
+    return $self->compare($other) == 0 ? 1 : 0;
+}
+
+func is_ne(scalar $self, scalar $other) int {
+    return $self->compare($other) != 0 ? 1 : 0;
+}
+
+func is_lt(scalar $self, scalar $other) int {
+    return $self->compare($other) < 0 ? 1 : 0;
+}
+
+func is_le(scalar $self, scalar $other) int {
+    return $self->compare($other) <= 0 ? 1 : 0;
+}
+
+func is_gt(scalar $self, scalar $other) int {
+    return $self->compare($other) > 0 ? 1 : 0;
+}
+
+func is_ge(scalar $self, scalar $other) int {
+    return $self->compare($other) >= 0 ? 1 : 0;
+}
+
+func add(scalar $self, scalar $other) scalar {
+    my int $sa = $self->{"s"};
+    my int $sb = $other->{"s"};
+    my str $va = $self->{"v"};
+    my str $vb = $other->{"v"};
+    my hash %r = ();
+
+    if ($sa == $sb) {
+        # Same sign: add magnitudes, keep sign
+        my str $rv = "";
+        __C__ {
+            char *a_str = strada_to_str(va);
+            char *b_str = strada_to_str(vb);
+            char *sum = _bi_add(a_str, b_str);
+            free(a_str);
+            free(b_str);
+            strada_decref(rv);
+            rv = strada_new_str(sum);
+            free(sum);
+        }
+        $r{"s"} = $sa;
+        $r{"v"} = $rv;
+    } else {
+        # Different signs: subtract smaller from larger
+        my int $mag_cmp = 0;
+        __C__ {
+            char *a_str = strada_to_str(va);
+            char *b_str = strada_to_str(vb);
+            int c = _bi_cmp(a_str, b_str);
+            free(a_str);
+            free(b_str);
+            strada_decref(mag_cmp);
+            mag_cmp = strada_new_int((int64_t)c);
+        }
+        if ($mag_cmp == 0) {
+            $r{"s"} = 1;
+            $r{"v"} = "0";
+        } elsif ($mag_cmp > 0) {
+            my str $rv = "";
+            __C__ {
+                char *a_str = strada_to_str(va);
+                char *b_str = strada_to_str(vb);
+                char *diff = _bi_sub(a_str, b_str);
+                free(a_str);
+                free(b_str);
+                strada_decref(rv);
+                rv = strada_new_str(diff);
+                free(diff);
+            }
+            $r{"s"} = $sa;
+            $r{"v"} = $rv;
+        } else {
+            my str $rv = "";
+            __C__ {
+                char *a_str = strada_to_str(va);
+                char *b_str = strada_to_str(vb);
+                char *diff = _bi_sub(b_str, a_str);
+                free(a_str);
+                free(b_str);
+                strada_decref(rv);
+                rv = strada_new_str(diff);
+                free(diff);
+            }
+            $r{"s"} = $sb;
+            $r{"v"} = $rv;
+        }
+    }
+
+    # Zero is positive
+    if ($r{"v"} eq "0") {
+        $r{"s"} = 1;
+    }
+    return bless(\%r, "BigInt");
+}
+
+func sub(scalar $self, scalar $other) scalar {
+    my scalar $neg_other = $other->neg();
+    return $self->add($neg_other);
+}
+
+func mul(scalar $self, scalar $other) scalar {
+    my str $va = $self->{"v"};
+    my str $vb = $other->{"v"};
+    my hash %r = ();
+
+    if ($va eq "0" || $vb eq "0") {
+        $r{"s"} = 1;
+        $r{"v"} = "0";
+        return bless(\%r, "BigInt");
+    }
+
+    my str $rv = "";
+    __C__ {
+        char *a_str = strada_to_str(va);
+        char *b_str = strada_to_str(vb);
+        char *prod = _bi_mul(a_str, b_str);
+        free(a_str);
+        free(b_str);
+        strada_decref(rv);
+        rv = strada_new_str(prod);
+        free(prod);
+    }
+
+    my int $rs = 1;
+    if ($self->{"s"} != $other->{"s"}) {
+        $rs = -1;
+    }
+    $r{"s"} = $rs;
+    $r{"v"} = $rv;
+    return bless(\%r, "BigInt");
+}
+
+func div(scalar $self, scalar $other) scalar {
+    my str $va = $self->{"v"};
+    my str $vb = $other->{"v"};
+    my hash %r = ();
+
+    if ($vb eq "0") {
+        die("BigInt: division by zero");
+    }
+    if ($va eq "0") {
+        $r{"s"} = 1;
+        $r{"v"} = "0";
+        return bless(\%r, "BigInt");
+    }
+
+    my str $rv = "";
+    __C__ {
+        char *a_str = strada_to_str(va);
+        char *b_str = strada_to_str(vb);
+        char *q = _bi_divmod(a_str, b_str, NULL);
+        free(a_str);
+        free(b_str);
+        strada_decref(rv);
+        rv = strada_new_str(q);
+        free(q);
+    }
+
+    my int $rs = 1;
+    if ($self->{"s"} != $other->{"s"} && $rv ne "0") {
+        $rs = -1;
+    }
+    $r{"s"} = $rs;
+    $r{"v"} = $rv;
+    return bless(\%r, "BigInt");
+}
+
+func mod(scalar $self, scalar $other) scalar {
+    my str $va = $self->{"v"};
+    my str $vb = $other->{"v"};
+    my hash %r = ();
+
+    if ($vb eq "0") {
+        die("BigInt: modulo by zero");
+    }
+
+    my str $rv = "";
+    __C__ {
+        char *a_str = strada_to_str(va);
+        char *b_str = strada_to_str(vb);
+        char *rem = NULL;
+        char *q = _bi_divmod(a_str, b_str, &rem);
+        free(a_str);
+        free(b_str);
+        free(q);
+        strada_decref(rv);
+        rv = strada_new_str(rem);
+        free(rem);
+    }
+
+    $r{"s"} = $self->{"s"};
+    if ($rv eq "0") {
+        $r{"s"} = 1;
+    }
+    $r{"v"} = $rv;
+    return bless(\%r, "BigInt");
+}
+
+func pow(scalar $self, int $exp) scalar {
+    if ($exp < 0) {
+        die("BigInt: negative exponent not supported");
+    }
+    if ($exp == 0) {
+        return BigInt::new("1");
+    }
+
+    # Simple repeated multiplication (avoids integer division issue)
+    my scalar $result = BigInt::new("1");
+    my int $i = 0;
+    while ($i < $exp) {
+        $result = $result->mul($self);
+        $i++;
+    }
+
+    return $result;
+}
+
+func gcd(scalar $self, scalar $other) scalar {
+    my scalar $a = $self->abs();
+    my scalar $b = $other->abs();
+
+    while ($b->is_zero() == 0) {
+        my scalar $t = $a->mod($b);
+        $a = $b;
+        $b = $t;
+    }
+
+    return $a;
+}
+
+func factorial(int $n) scalar {
+    if ($n < 0) {
+        die("BigInt: factorial of negative number");
+    }
+    my scalar $result = BigInt::new("1");
+    my int $i = 2;
+    while ($i <= $n) {
+        $result = $result->mul(BigInt::from_int($i));
+        $i++;
+    }
+    return $result;
+}

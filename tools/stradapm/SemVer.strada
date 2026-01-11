@@ -1,0 +1,257 @@
+/*
+ Strada Package Manager - Version handling
+
+ Implements semantic versioning (semver) parsing and comparison.
+ Supports version constraints like ^1.2.3, ~1.2.3, >=1.0.0, etc.
+*/
+
+package StradaPM::SemVer;
+
+# Parse version string "1.2.3" or "1.2.3-beta.1" into components
+func parse(str $ver_str) scalar {
+    my hash %result = ();
+    my str $v = $ver_str;
+
+    # Strip leading 'v' if present
+    if (substr($v, 0, 1) eq "v") {
+        $v = substr($v, 1, length($v) - 1);
+    }
+
+    # Check for prerelease suffix (e.g., -beta.1)
+    my str $prerelease = "";
+    my int $dash_pos = index($v, "-");
+    if ($dash_pos >= 0) {
+        $prerelease = substr($v, $dash_pos + 1, length($v) - $dash_pos - 1);
+        $v = substr($v, 0, $dash_pos);
+    }
+
+    # Split on dots
+    my array @parts = split("\\.", $v);
+
+    $result{"major"} = 0;
+    $result{"minor"} = 0;
+    $result{"patch"} = 0;
+    $result{"prerelease"} = $prerelease;
+    $result{"original"} = $ver_str;
+
+    if (scalar(@parts) >= 1) {
+        $result{"major"} = 0 + @parts[0];
+    }
+    if (scalar(@parts) >= 2) {
+        $result{"minor"} = 0 + @parts[1];
+    }
+    if (scalar(@parts) >= 3) {
+        $result{"patch"} = 0 + @parts[2];
+    }
+
+    return \%result;
+}
+
+# Convert parsed version back to string
+func to_string(scalar $v) str {
+    my str $result = $v->{"major"} . "." . $v->{"minor"} . "." . $v->{"patch"};
+    if ($v->{"prerelease"} ne "") {
+        $result = $result . "-" . $v->{"prerelease"};
+    }
+    return $result;
+}
+
+# Compare two version strings
+# Returns: -1 if a < b, 0 if a == b, 1 if a > b
+func compare(str $a, str $b) int {
+    my scalar $va = StradaPM::SemVer::parse($a);
+    my scalar $vb = StradaPM::SemVer::parse($b);
+
+    # Compare major
+    if ($va->{"major"} < $vb->{"major"}) {
+        return -1;
+    }
+    if ($va->{"major"} > $vb->{"major"}) {
+        return 1;
+    }
+
+    # Compare minor
+    if ($va->{"minor"} < $vb->{"minor"}) {
+        return -1;
+    }
+    if ($va->{"minor"} > $vb->{"minor"}) {
+        return 1;
+    }
+
+    # Compare patch
+    if ($va->{"patch"} < $vb->{"patch"}) {
+        return -1;
+    }
+    if ($va->{"patch"} > $vb->{"patch"}) {
+        return 1;
+    }
+
+    # Compare prerelease (no prerelease > prerelease)
+    my str $pa = $va->{"prerelease"};
+    my str $pb = $vb->{"prerelease"};
+
+    if ($pa eq "" && $pb eq "") {
+        return 0;
+    }
+    if ($pa eq "" && $pb ne "") {
+        return 1;  # 1.0.0 > 1.0.0-beta
+    }
+    if ($pa ne "" && $pb eq "") {
+        return -1;  # 1.0.0-beta < 1.0.0
+    }
+
+    # Both have prerelease, compare lexically
+    if ($pa lt $pb) {
+        return -1;
+    }
+    if ($pa gt $pb) {
+        return 1;
+    }
+
+    return 0;
+}
+
+# Check if version satisfies a constraint
+# Constraints:
+#   ^1.2.3  - Compatible with 1.2.3 (>=1.2.3 <2.0.0)
+#   ~1.2.3  - Approximately 1.2.3 (>=1.2.3 <1.3.0)
+#   >=1.2.3 - Greater than or equal
+#   <=1.2.3 - Less than or equal
+#   >1.2.3  - Greater than
+#   <1.2.3  - Less than
+#   =1.2.3  - Exactly equal
+#   1.2.3   - Exactly equal (shorthand)
+#   *       - Any version
+func satisfies(str $ver_str, str $constraint) int {
+    my str $c = $constraint;
+
+    # Trim whitespace
+    while (length($c) > 0 && substr($c, 0, 1) eq " ") {
+        $c = substr($c, 1, length($c) - 1);
+    }
+    while (length($c) > 0 && substr($c, length($c) - 1, 1) eq " ") {
+        $c = substr($c, 0, length($c) - 1);
+    }
+
+    # Wildcard matches everything
+    if ($c eq "*" || $c eq "") {
+        return 1;
+    }
+
+    # Handle comma-separated constraints (AND)
+    if (index($c, ",") >= 0) {
+        my array @parts = split(",", $c);
+        foreach my str $part (@parts) {
+            if (StradaPM::SemVer::satisfies($ver_str, $part) == 0) {
+                return 0;
+            }
+        }
+        return 1;
+    }
+
+    # Caret constraint: ^1.2.3 means >=1.2.3 <2.0.0
+    if (substr($c, 0, 1) eq "^") {
+        my str $base = substr($c, 1, length($c) - 1);
+        my scalar $v = StradaPM::SemVer::parse($base);
+        my int $major = $v->{"major"};
+
+        # Must be >= base version
+        if (StradaPM::SemVer::compare($ver_str, $base) < 0) {
+            return 0;
+        }
+
+        # Must be < next major version
+        my str $ceiling = ($major + 1) . ".0.0";
+        if (StradaPM::SemVer::compare($ver_str, $ceiling) >= 0) {
+            return 0;
+        }
+
+        return 1;
+    }
+
+    # Tilde constraint: ~1.2.3 means >=1.2.3 <1.3.0
+    if (substr($c, 0, 1) eq "~") {
+        my str $base = substr($c, 1, length($c) - 1);
+        my scalar $v = StradaPM::SemVer::parse($base);
+        my int $major = $v->{"major"};
+        my int $minor = $v->{"minor"};
+
+        # Must be >= base version
+        if (StradaPM::SemVer::compare($ver_str, $base) < 0) {
+            return 0;
+        }
+
+        # Must be < next minor version
+        my str $ceiling = $major . "." . ($minor + 1) . ".0";
+        if (StradaPM::SemVer::compare($ver_str, $ceiling) >= 0) {
+            return 0;
+        }
+
+        return 1;
+    }
+
+    # Comparison operators
+    if (substr($c, 0, 2) eq ">=") {
+        my str $target = substr($c, 2, length($c) - 2);
+        return StradaPM::SemVer::compare($ver_str, $target) >= 0 ? 1 : 0;
+    }
+
+    if (substr($c, 0, 2) eq "<=") {
+        my str $target = substr($c, 2, length($c) - 2);
+        return StradaPM::SemVer::compare($ver_str, $target) <= 0 ? 1 : 0;
+    }
+
+    if (substr($c, 0, 2) eq "!=") {
+        my str $target = substr($c, 2, length($c) - 2);
+        return StradaPM::SemVer::compare($ver_str, $target) != 0 ? 1 : 0;
+    }
+
+    if (substr($c, 0, 1) eq ">") {
+        my str $target = substr($c, 1, length($c) - 1);
+        return StradaPM::SemVer::compare($ver_str, $target) > 0 ? 1 : 0;
+    }
+
+    if (substr($c, 0, 1) eq "<") {
+        my str $target = substr($c, 1, length($c) - 1);
+        return StradaPM::SemVer::compare($ver_str, $target) < 0 ? 1 : 0;
+    }
+
+    if (substr($c, 0, 1) eq "=") {
+        my str $target = substr($c, 1, length($c) - 1);
+        return StradaPM::SemVer::compare($ver_str, $target) == 0 ? 1 : 0;
+    }
+
+    # Exact match (no operator)
+    return StradaPM::SemVer::compare($ver_str, $c) == 0 ? 1 : 0;
+}
+
+# Find the best (highest) version from a list that satisfies a constraint
+func find_best(scalar $ver_strs, str $constraint) str {
+    my str $best = "";
+
+    foreach my str $v (@{$ver_strs}) {
+        if (StradaPM::SemVer::satisfies($v, $constraint) == 1) {
+            if ($best eq "" || StradaPM::SemVer::compare($v, $best) > 0) {
+                $best = $v;
+            }
+        }
+    }
+
+    return $best;
+}
+
+# Increment version components
+func bump_major(str $ver_str) str {
+    my scalar $v = StradaPM::SemVer::parse($ver_str);
+    return ($v->{"major"} + 1) . ".0.0";
+}
+
+func bump_minor(str $ver_str) str {
+    my scalar $v = StradaPM::SemVer::parse($ver_str);
+    return $v->{"major"} . "." . ($v->{"minor"} + 1) . ".0";
+}
+
+func bump_patch(str $ver_str) str {
+    my scalar $v = StradaPM::SemVer::parse($ver_str);
+    return $v->{"major"} . "." . $v->{"minor"} . "." . ($v->{"patch"} + 1);
+}

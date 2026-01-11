@@ -1,82 +1,353 @@
-# lib/compress.strada - Compression library bindings
-#
-# Provides gzip compression for HTTP responses
-# Uses zlib via C library wrapper
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
 
-# Library handle (lazy loaded)
-my int $_compress_lib = 0;
-my int $_gzip_fn = 0;
-my int $_deflate_fn = 0;
-my int $_gunzip_fn = 0;
-my int $_should_compress_fn = 0;
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 2.
 
-# Initialize compression library
-func compress_init() int {
-    if ($_compress_lib != 0) {
-        return 1;
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+=head1 NAME
+
+compress - Gzip and deflate compression for Strada
+
+=head1 SYNOPSIS
+
+    use lib "lib";
+    use compress;
+
+    # Compress data
+    my str $compressed = compress::gzip($data);
+
+    # Decompress data
+    my str $original = compress::gunzip($compressed);
+
+    # Check if content should be compressed
+    if (compress::should_compress("text/html", $body)) {
+        $body = compress::gzip($body);
     }
 
-    # Try to load the library from common locations
-    my str $lib_path = "lib/compress/libstrada_compress.so";
-    $_compress_lib = sys::dl_open($lib_path);
+=head1 DESCRIPTION
 
-    if ($_compress_lib == 0) {
-        $lib_path = "../lib/compress/libstrada_compress.so";
-        $_compress_lib = sys::dl_open($lib_path);
+The compress module provides gzip and deflate compression/decompression
+using zlib. This is useful for HTTP response compression and data storage.
+
+B<Compile with:> C<./strada myapp.strada -lz>
+
+=head1 FUNCTIONS
+
+=head2 gzip($data)
+
+Compress data using gzip format (with gzip header/trailer).
+Returns compressed data or original data if compression fails.
+
+    my str $compressed = compress::gzip($large_html);
+
+=head2 gunzip($data)
+
+Decompress gzip data. Returns decompressed data or original if decompression fails.
+
+    my str $original = compress::gunzip($compressed);
+
+=head2 deflate($data)
+
+Compress data using raw deflate format (no header).
+Used for HTTP deflate content encoding.
+
+    my str $compressed = compress::deflate($data);
+
+=head2 should_compress($content_type, $data)
+
+Check if content should be compressed based on content type and size.
+Returns 1 if compression is recommended, 0 otherwise.
+
+Compresses text-based types (text/*, application/json, application/javascript).
+Does not compress already-compressed formats (images, video, audio, zip).
+Does not compress data smaller than 1KB.
+
+    if (compress::should_compress($content_type, $body)) {
+        $headers{"Content-Encoding"} = "gzip";
+        $body = compress::gzip($body);
     }
 
-    if ($_compress_lib == 0) {
-        return 0;
+=head1 EXAMPLE
+
+    use lib "lib";
+    use compress;
+
+    # Compress an HTTP response
+    my str $html = "<html>...large content...</html>";
+
+    if (compress::should_compress("text/html", $html)) {
+        my str $compressed = compress::gzip($html);
+        say("Original: " . length($html) . " bytes");
+        say("Compressed: " . length($compressed) . " bytes");
+
+        # Later decompress
+        my str $restored = compress::gunzip($compressed);
+        say("Restored: " . length($restored) . " bytes");
     }
 
-    $_gzip_fn = sys::dl_sym($_compress_lib, "strada_gzip_compress");
-    $_deflate_fn = sys::dl_sym($_compress_lib, "strada_deflate_compress");
-    $_gunzip_fn = sys::dl_sym($_compress_lib, "strada_gzip_decompress");
-    $_should_compress_fn = sys::dl_sym($_compress_lib, "strada_should_compress");
+=head1 NOTES
 
-    return 1;
+=over 4
+
+=item * Binary data is handled correctly (NUL bytes preserved)
+
+=item * If compression fails, original data is returned unchanged
+
+=item * Gzip format includes CRC32 checksum for data integrity
+
+=back
+
+=head1 SEE ALSO
+
+L<LWP>, L<ssl>
+
+=cut
+
+package compress;
+
+# C includes
+__C__ {
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <zlib.h>
+
+/* Get byte length from StradaValue - binary safe */
+static size_t compress_get_byte_len(StradaValue *sv) {
+    if (!sv) return 0;
+    if (sv->type == STRADA_STR) {
+        if (sv->struct_size > 0) return sv->struct_size;
+        if (sv->value.pv) return strlen(sv->value.pv);
+    }
+    return 0;
+}
+
+/* Get raw byte pointer from StradaValue - binary safe (does not copy) */
+static const char* compress_get_bytes(StradaValue *sv) {
+    if (!sv) return NULL;
+    if (sv->type == STRADA_STR) {
+        return sv->value.pv;
+    }
+    return NULL;
+}
 }
 
 # Compress data using gzip format
-func compress_gzip(str $data) str {
-    if (compress_init() == 0) {
-        return $data;  # Return uncompressed if library not available
+func gzip(str $data) str {
+    my str $result = "";
+    __C__ {
+        size_t input_len = compress_get_byte_len(data);
+        if (input_len == 0) {
+            result = strada_new_str("");
+        } else {
+            const char *input = compress_get_bytes(data);
+
+            /* Allocate output buffer (worst case: input + gzip overhead) */
+            size_t output_size = compressBound(input_len) + 18;
+            char *output = malloc(output_size);
+            if (!output) {
+                result = data;  /* Return uncompressed if allocation failed */
+                strada_incref(result);
+            } else {
+                /* Initialize zlib stream for gzip (windowBits = 15 + 16 for gzip) */
+                z_stream strm;
+                memset(&strm, 0, sizeof(strm));
+
+                int ret = deflateInit2(&strm, Z_DEFAULT_COMPRESSION, Z_DEFLATED,
+                                       15 + 16, 8, Z_DEFAULT_STRATEGY);
+                if (ret != Z_OK) {
+                    free(output);
+                    result = data;
+                    strada_incref(result);
+                } else {
+                    strm.next_in = (Bytef*)input;
+                    strm.avail_in = input_len;
+                    strm.next_out = (Bytef*)output;
+                    strm.avail_out = output_size;
+
+                    ret = deflate(&strm, Z_FINISH);
+                    deflateEnd(&strm);
+
+                    if (ret != Z_STREAM_END) {
+                        free(output);
+                        result = data;
+                        strada_incref(result);
+                    } else {
+                        result = strada_new_str_len(output, strm.total_out);
+                        free(output);
+                    }
+                }
+            }
+        }
     }
-    if ($_gzip_fn == 0) {
-        return $data;
-    }
-    return sys::dl_call_str_sv($_gzip_fn, [$data]);
+    return $result;
 }
 
 # Compress data using deflate format (no gzip header)
-func compress_deflate(str $data) str {
-    if (compress_init() == 0) {
-        return $data;
+func deflate(str $data) str {
+    my str $result = "";
+    __C__ {
+        size_t input_len = compress_get_byte_len(data);
+        if (input_len == 0) {
+            result = strada_new_str("");
+        } else {
+            const char *input = compress_get_bytes(data);
+
+            size_t output_size = compressBound(input_len);
+            char *output = malloc(output_size);
+            if (!output) {
+                result = data;
+                strada_incref(result);
+            } else {
+                z_stream strm;
+                memset(&strm, 0, sizeof(strm));
+
+                int ret = deflateInit2(&strm, Z_DEFAULT_COMPRESSION, Z_DEFLATED,
+                                       -15, 8, Z_DEFAULT_STRATEGY);
+                if (ret != Z_OK) {
+                    free(output);
+                    result = data;
+                    strada_incref(result);
+                } else {
+                    strm.next_in = (Bytef*)input;
+                    strm.avail_in = input_len;
+                    strm.next_out = (Bytef*)output;
+                    strm.avail_out = output_size;
+
+                    ret = deflate(&strm, Z_FINISH);
+                    deflateEnd(&strm);
+
+                    if (ret != Z_STREAM_END) {
+                        free(output);
+                        result = data;
+                        strada_incref(result);
+                    } else {
+                        result = strada_new_str_len(output, strm.total_out);
+                        free(output);
+                    }
+                }
+            }
+        }
     }
-    if ($_deflate_fn == 0) {
-        return $data;
-    }
-    return sys::dl_call_str_sv($_deflate_fn, [$data]);
+    return $result;
 }
 
 # Decompress gzip data
-func compress_gunzip(str $data) str {
-    if (compress_init() == 0) {
-        return $data;
+func gunzip(str $data) str {
+    my str $result = "";
+    __C__ {
+        size_t input_len = compress_get_byte_len(data);
+        if (input_len == 0) {
+            result = strada_new_str("");
+        } else {
+            const char *input = compress_get_bytes(data);
+
+            /* Start with 4x input size, grow if needed */
+            size_t output_size = input_len * 4;
+            if (output_size < 1024) output_size = 1024;
+            char *output = malloc(output_size);
+            if (!output) {
+                result = data;
+                strada_incref(result);
+            } else {
+                z_stream strm;
+                memset(&strm, 0, sizeof(strm));
+
+                int ret = inflateInit2(&strm, 15 + 16);
+                if (ret != Z_OK) {
+                    free(output);
+                    result = data;
+                    strada_incref(result);
+                } else {
+                    strm.next_in = (Bytef*)input;
+                    strm.avail_in = input_len;
+                    strm.next_out = (Bytef*)output;
+                    strm.avail_out = output_size;
+
+                    int success = 1;
+                    while (1) {
+                        ret = inflate(&strm, Z_NO_FLUSH);
+                        if (ret == Z_STREAM_END) {
+                            break;
+                        }
+                        if (ret != Z_OK && ret != Z_BUF_ERROR) {
+                            success = 0;
+                            break;
+                        }
+                        if (strm.avail_out == 0) {
+                            size_t new_size = output_size * 2;
+                            char *new_output = realloc(output, new_size);
+                            if (!new_output) {
+                                success = 0;
+                                break;
+                            }
+                            output = new_output;
+                            strm.next_out = (Bytef*)(output + output_size);
+                            strm.avail_out = new_size - output_size;
+                            output_size = new_size;
+                        }
+                    }
+
+                    inflateEnd(&strm);
+
+                    if (!success) {
+                        free(output);
+                        result = data;
+                        strada_incref(result);
+                    } else {
+                        result = strada_new_str_len(output, strm.total_out);
+                        free(output);
+                    }
+                }
+            }
+        }
     }
-    if ($_gunzip_fn == 0) {
-        return $data;
-    }
-    return sys::dl_call_str_sv($_gunzip_fn, [$data]);
+    return $result;
 }
 
 # Check if content should be compressed based on content-type
-func compress_should_compress(str $content_type, str $data) int {
-    if (compress_init() == 0) {
-        return 0;
+func should_compress(str $content_type, str $data) int {
+    my int $result = 0;
+    __C__ {
+        size_t data_len = compress_get_byte_len(data);
+        const char *ct = strada_to_str(content_type);
+
+        if (!ct) {
+            result = strada_new_int(0);
+        } else if (data_len < 1024) {
+            /* Don't compress if too small (< 1KB) */
+            result = strada_new_int(0);
+        } else if (strstr(ct, "text/") ||
+                   strstr(ct, "application/json") ||
+                   strstr(ct, "application/javascript") ||
+                   strstr(ct, "application/xml") ||
+                   strstr(ct, "application/xhtml") ||
+                   strstr(ct, "+xml") ||
+                   strstr(ct, "+json")) {
+            /* Compress text-based content types */
+            result = strada_new_int(1);
+        } else if (strstr(ct, "image/") ||
+                   strstr(ct, "video/") ||
+                   strstr(ct, "audio/") ||
+                   strstr(ct, "application/zip") ||
+                   strstr(ct, "application/gzip") ||
+                   strstr(ct, "application/x-gzip")) {
+            /* Don't compress already-compressed formats */
+            result = strada_new_int(0);
+        } else {
+            result = strada_new_int(0);
+        }
     }
-    if ($_should_compress_fn == 0) {
-        return 0;
-    }
-    return sys::dl_call_int_sv($_should_compress_fn, [$content_type, $data]);
+    return $result;
 }

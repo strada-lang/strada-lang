@@ -1,0 +1,12 @@
+ascii_len=5
+ascii_sub=ell
+concat=foobar
+space= x
+tilde=~
+ord_space=32
+ord_tilde=126
+tab_ord=9
+eq=1
+ne=1
+lt=1
+gt=1

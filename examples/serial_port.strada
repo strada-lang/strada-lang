@@ -1,0 +1,151 @@
+# Serial Port Example
+# Demonstrates serial port communication in Strada
+#
+# Usage: ./serial_port /dev/ttyUSB0 [baud]
+#
+# This example opens a serial port, sends AT commands (for modems),
+# and reads responses. Useful for communicating with:
+# - Modems
+# - Arduino/microcontrollers
+# - GPS receivers
+# - Serial sensors
+
+func print_usage() void {
+    say("Usage: ./serial_port <device> [baud]");
+    say("");
+    say("Examples:");
+    say("  ./serial_port /dev/ttyUSB0          # 9600 baud (default)");
+    say("  ./serial_port /dev/ttyUSB0 115200   # 115200 baud");
+    say("  ./serial_port /dev/ttyACM0 9600     # Arduino");
+    say("");
+    say("Common devices:");
+    say("  /dev/ttyUSB0  - USB-to-serial adapter");
+    say("  /dev/ttyACM0  - Arduino, USB CDC devices");
+    say("  /dev/ttyS0    - Hardware serial port (COM1)");
+}
+
+# Send a command and read the response
+func send_command(int $fd, str $cmd) str {
+    # Send the command with CR+LF
+    my str $full_cmd = $cmd . "\r\n";
+    my int $written = sys::write_fd($fd, $full_cmd);
+
+    if ($written < 0) {
+        say("Error writing to serial port");
+        return "";
+    }
+
+    # Wait for data to be transmitted
+    sys::tcdrain($fd);
+
+    # Small delay to allow device to respond
+    sys::usleep(100000);  # 100ms
+
+    # Read response (up to 1024 bytes)
+    my str $response = sys::read_fd($fd, 1024);
+
+    return $response;
+}
+
+# Interactive mode - read from stdin and send to serial port
+func interactive_mode(int $fd) void {
+    say("Interactive mode - type commands, Ctrl+C to exit");
+    say("Commands are sent with CR+LF appended");
+    say("");
+
+    while (1) {
+        print("> ");
+        my str $line = sys::fgets(0, 1024);  # Read from stdin (fd 0, max 1024 bytes)
+
+        if (!defined($line)) {
+            say("EOF - exiting");
+            return;
+        }
+
+        # Remove trailing newline
+        $line = chomp($line);
+
+        if (length($line) == 0) {
+            next;
+        }
+
+        # Special commands
+        if ($line eq "quit" || $line eq "exit") {
+            say("Exiting...");
+            return;
+        }
+
+        # Send command and show response
+        my str $response = send_command($fd, $line);
+        if (length($response) > 0) {
+            say("Response: " . $response);
+        } else {
+            say("(no response)");
+        }
+    }
+}
+
+func main() int {
+    my array @args = @ARGV;
+    my int $argc = scalar(@args);
+
+    if ($argc < 1) {
+        print_usage();
+        return 1;
+    }
+
+    my str $device = $args[0];
+    my int $baud = sys::B9600();  # Default 9600 baud
+
+    # Parse baud rate if provided
+    if ($argc >= 2) {
+        my str $baud_str = $args[1];
+        if ($baud_str eq "300") { $baud = sys::B300(); }
+        if ($baud_str eq "1200") { $baud = sys::B1200(); }
+        if ($baud_str eq "2400") { $baud = sys::B2400(); }
+        if ($baud_str eq "4800") { $baud = sys::B4800(); }
+        if ($baud_str eq "9600") { $baud = sys::B9600(); }
+        if ($baud_str eq "19200") { $baud = sys::B19200(); }
+        if ($baud_str eq "38400") { $baud = sys::B38400(); }
+        if ($baud_str eq "57600") { $baud = sys::B57600(); }
+        if ($baud_str eq "115200") { $baud = sys::B115200(); }
+        if ($baud_str eq "230400") { $baud = sys::B230400(); }
+        if ($baud_str eq "460800") { $baud = sys::B460800(); }
+        if ($baud_str eq "921600") { $baud = sys::B921600(); }
+    }
+
+    say("Opening " . $device . "...");
+
+    # Open serial port with 8N1 configuration (default)
+    my int $fd = sys::serial_open($device, $baud);
+
+    if ($fd < 0) {
+        say("Error: Cannot open " . $device);
+        say("Make sure the device exists and you have permission to access it.");
+        say("You may need to add your user to the 'dialout' group:");
+        say("  sudo usermod -a -G dialout $USER");
+        return 1;
+    }
+
+    say("Serial port opened successfully (fd=" . $fd . ")");
+    say("");
+
+    # Demo: Send AT command (for modems/AT devices)
+    say("Sending AT command...");
+    my str $response = send_command($fd, "AT");
+    if (length($response) > 0) {
+        say("Device responded: " . $response);
+    } else {
+        say("No response (device may not support AT commands)");
+    }
+    say("");
+
+    # Enter interactive mode
+    interactive_mode($fd);
+
+    # Close serial port
+    sys::close_fd($fd);
+    say("Serial port closed");
+
+    return 0;
+}

@@ -1,0 +1,229 @@
+package Getopt::Long;
+version "1.0.0";
+
+# GetOptions - Parse command-line options from sys::argv()
+#
+# Usage:
+#   use lib "lib";
+#   use Getopt::Long;
+#
+#   my int $verbose = 0;
+#   my str $output = "";
+#   my int $count = 1;
+#
+#   my hash %opts = ();
+#   $opts{"verbose"} = "0";
+#   $opts{"output"} = "";
+#   $opts{"count"} = "1";
+#
+#   my array @specs = ("verbose", "output=s", "count=i");
+#   my int $ok = Getopt::Long::GetOptions(@specs, %opts);
+#
+#   # After parsing:
+#   # $opts{"verbose"} = "1"  (if --verbose was passed)
+#   # $opts{"output"} = "file.txt"  (if --output file.txt or --output=file.txt)
+#   # $opts{"count"} = "5"  (if --count 5 or --count=5)
+#   # Remaining non-option args are in Getopt::Long::remaining()
+#
+# Spec format:
+#   "name"      - Boolean flag (--name sets to 1)
+#   "name!"     - Negatable boolean (--name sets to 1, --no-name sets to 0)
+#   "name=s"    - String argument (--name value or --name=value)
+#   "name=i"    - Integer argument
+#   "name=f"    - Float argument
+#   "name|n"    - Alias (--name or -n)
+#   "name|n=s"  - Alias with argument
+
+our array @__remaining = ();
+
+# Parse a single spec string into its parts
+# Returns hash with: name, type (bool/str/int/float), negatable, aliases
+private func parse_spec(str $spec) hash {
+    my hash %result = ();
+    my str $name = $spec;
+    my str $type = "bool";
+    my int $negatable = 0;
+
+    # Check for =type suffix
+    my int $eq_pos = index($spec, "=");
+    if ($eq_pos >= 0) {
+        $name = substr($spec, 0, $eq_pos);
+        my str $type_char = substr($spec, $eq_pos + 1, 1);
+        if ($type_char eq "s") {
+            $type = "str";
+        } elsif ($type_char eq "i") {
+            $type = "int";
+        } elsif ($type_char eq "f") {
+            $type = "float";
+        }
+    }
+
+    # Check for ! suffix (negatable)
+    if (index($name, "!") >= 0) {
+        $name = replace_all($name, "!", "");
+        $negatable = 1;
+        $type = "bool";
+    }
+
+    # Check for | aliases
+    my str $primary = $name;
+    my str $aliases = "";
+    my int $pipe_pos = index($name, "|");
+    if ($pipe_pos >= 0) {
+        $primary = substr($name, 0, $pipe_pos);
+        $aliases = substr($name, $pipe_pos + 1, length($name) - $pipe_pos - 1);
+    }
+
+    $result{"name"} = $primary;
+    $result{"type"} = $type;
+    $result{"negatable"} = "" . $negatable;
+    $result{"aliases"} = $aliases;
+    return %result;
+}
+
+# Check if an arg matches a spec (by name or alias)
+private func matches_spec(str $arg, str $primary, str $aliases) int {
+    # Match --name
+    if ($arg eq "--" . $primary) {
+        return 1;
+    }
+    # Match -alias (single char aliases)
+    if (length($aliases) > 0) {
+        my array @alias_list = split("\\|", $aliases);
+        my int $i = 0;
+        while ($i < scalar(@alias_list)) {
+            my str $alias = $alias_list[$i];
+            if (length($alias) == 1) {
+                if ($arg eq "-" . $alias) {
+                    return 1;
+                }
+            } else {
+                if ($arg eq "--" . $alias) {
+                    return 1;
+                }
+            }
+            $i++;
+        }
+    }
+    return 0;
+}
+
+# GetOptions - main entry point
+# @specs: array of spec strings like ("verbose", "output=s", "count=i")
+# %opts: hash to fill with parsed values (must be pre-populated with defaults)
+# Returns: 1 on success, 0 on error
+func GetOptions(array @specs, hash %opts) int {
+    my array @args = sys::argv();
+    my int $argc = scalar(@args);
+    my int $i = 1;  # Skip program name
+    @__remaining = ();
+
+    # Pre-parse all specs
+    my int $num_specs = scalar(@specs);
+    my array @parsed_names = ();
+    my array @parsed_types = ();
+    my array @parsed_neg = ();
+    my array @parsed_aliases = ();
+    my int $si = 0;
+    while ($si < $num_specs) {
+        my hash %p = Getopt::Long::parse_spec($specs[$si]);
+        push(@parsed_names, $p{"name"});
+        push(@parsed_types, $p{"type"});
+        push(@parsed_neg, $p{"negatable"});
+        push(@parsed_aliases, $p{"aliases"});
+        $si++;
+    }
+
+    while ($i < $argc) {
+        my str $arg = $args[$i];
+
+        # -- stops option processing
+        if ($arg eq "--") {
+            $i++;
+            while ($i < $argc) {
+                push(@__remaining, $args[$i]);
+                $i++;
+            }
+            return 1;
+        }
+
+        # Not an option
+        if (substr($arg, 0, 1) ne "-") {
+            push(@__remaining, $arg);
+            $i++;
+            next;
+        }
+
+        # Check for --name=value form
+        my str $arg_name = $arg;
+        my str $arg_value = "";
+        my int $has_eq = 0;
+        my int $eq_pos = index($arg, "=");
+        if ($eq_pos >= 0) {
+            $arg_name = substr($arg, 0, $eq_pos);
+            $arg_value = substr($arg, $eq_pos + 1, length($arg) - $eq_pos - 1);
+            $has_eq = 1;
+        }
+
+        # Check for --no-name (negation)
+        my int $is_negation = 0;
+        my str $neg_name = "";
+        if (length($arg_name) > 5 && substr($arg_name, 0, 5) eq "--no-") {
+            $is_negation = 1;
+            $neg_name = substr($arg_name, 5, length($arg_name) - 5);
+        }
+
+        my int $matched = 0;
+        my int $j = 0;
+        while ($j < $num_specs) {
+            my str $name = $parsed_names[$j];
+            my str $type = $parsed_types[$j];
+            my str $aliases = $parsed_aliases[$j];
+            my int $negatable = $parsed_neg[$j] + 0;
+
+            # Check negation
+            if ($is_negation == 1 && $negatable == 1 && $neg_name eq $name) {
+                $opts{$name} = "0";
+                $matched = 1;
+                last;
+            }
+
+            # Check match
+            if (Getopt::Long::matches_spec($arg_name, $name, $aliases) == 1) {
+                if ($type eq "bool") {
+                    $opts{$name} = "1";
+                    $matched = 1;
+                } else {
+                    # Needs a value
+                    my str $val = "";
+                    if ($has_eq == 1) {
+                        $val = $arg_value;
+                    } elsif ($i + 1 < $argc) {
+                        $i++;
+                        $val = $args[$i];
+                    } else {
+                        warn("Option --" . $name . " requires an argument");
+                        return 0;
+                    }
+                    $opts{$name} = $val;
+                    $matched = 1;
+                }
+                last;
+            }
+            $j++;
+        }
+
+        if ($matched == 0) {
+            # Unknown option - collect as remaining
+            push(@__remaining, $arg);
+        }
+
+        $i++;
+    }
+    return 1;
+}
+
+# remaining - Return non-option arguments left after parsing
+func remaining() array {
+    return @__remaining;
+}

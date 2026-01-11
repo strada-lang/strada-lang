@@ -1,0 +1,126 @@
+#!/usr/bin/env strada
+# Test dynamic method dispatch for memory leaks
+# Run: valgrind --leak-check=full ./test_dispatch
+
+package Animal;
+
+func new(str $species, str $sound) scalar {
+    my hash %self = ();
+    $self{"species"} = $species;
+    $self{"sound"} = $sound;
+    return bless(\%self, "Animal");
+}
+
+func species(scalar $self) str {
+    return $self->{"species"};
+}
+
+func sound(scalar $self) str {
+    return $self->{"sound"};
+}
+
+func speak(scalar $self) str {
+    return $self->{"species"} . " says " . $self->{"sound"};
+}
+
+func greet(scalar $self, str $name) str {
+    return "Hello " . $name . " from " . $self->{"species"};
+}
+
+package main;
+
+func main() int {
+    say("Testing dynamic dispatch for memory leaks...");
+    my int $iterations = 100;
+
+    # Test basic dynamic dispatch
+    say("  Basic dynamic dispatch...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my scalar $dog = Animal::new("Dog", "Woof");
+        my str $method = "speak";
+        my str $result = $dog->$method();
+        if (index($result, "Dog") < 0) {
+            say("    FAIL: dynamic speak");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test dynamic accessor
+    say("  Dynamic accessor...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $cat = Animal::new("Cat", "Meow");
+        my str $getter = "species";
+        my str $sp = $cat->$getter();
+        if ($sp ne "Cat") {
+            say("    FAIL: dynamic getter");
+            return 1;
+        }
+        $getter = "sound";
+        my str $snd = $cat->$getter();
+        if ($snd ne "Meow") {
+            say("    FAIL: dynamic sound");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test dynamic dispatch with arguments
+    say("  Dynamic dispatch with args...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $bird = Animal::new("Bird", "Tweet");
+        my str $method = "greet";
+        my str $result = $bird->$method("World");
+        if ($result ne "Hello World from Bird") {
+            say("    FAIL: dynamic with args = " . $result);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test varying method names
+    say("  Varying method names...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $fish = Animal::new("Fish", "Blub");
+        my array @methods = ("species", "sound", "speak");
+        foreach my str $m (@methods) {
+            my str $result = $fish->$m();
+            if (length($result) == 0) {
+                say("    FAIL: empty result for " . $m);
+                return 1;
+            }
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test dynamic dispatch on multiple objects
+    say("  Multiple objects...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @animals = ();
+        push(@animals, Animal::new("Dog", "Woof"));
+        push(@animals, Animal::new("Cat", "Meow"));
+        push(@animals, Animal::new("Bird", "Tweet"));
+        my str $method = "speak";
+        foreach my scalar $a (@animals) {
+            my str $result = $a->$method();
+            if (length($result) == 0) {
+                say("    FAIL: dispatch on array item");
+                return 1;
+            }
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All dynamic dispatch tests passed!");
+    return 0;
+}

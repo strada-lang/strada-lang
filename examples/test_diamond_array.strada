@@ -1,0 +1,54 @@
+#!/usr/bin/env strada
+# Test diamond operator in array context (list context)
+
+func main() int {
+    say("=== Diamond Operator Array Context Test ===\n");
+
+    # Create a test file
+    my str $testfile = "/tmp/test_diamond_array.txt";
+    my scalar $fh = sys::open($testfile, "w");
+    say($fh, "Line 1");
+    say($fh, "Line 2");
+    say($fh, "Line 3");
+    say($fh, "Fourth line");
+    say($fh, "Fifth line");
+    sys::close($fh);
+
+    # Test 1: Read all lines with my array @lines = <$fh>
+    say("Test 1: my array @lines = <\$fh>");
+    $fh = sys::open($testfile, "r");
+    my array @lines = <$fh>;
+    sys::close($fh);
+
+    say("  Read " . scalar(@lines) . " lines:");
+    foreach my str $line (@lines) {
+        say("    - " . $line);
+    }
+
+    # Test 2: Assign to existing array @arr = <$fh>
+    say("\nTest 2: @existing = <\$fh>");
+    my array @existing = ("placeholder");
+    $fh = sys::open($testfile, "r");
+    @existing = <$fh>;
+    sys::close($fh);
+
+    say("  Read " . scalar(@existing) . " lines:");
+    foreach my str $line (@existing) {
+        say("    - " . $line);
+    }
+
+    # Test 3: Verify scalar context still works
+    say("\nTest 3: Scalar context still reads one line");
+    $fh = sys::open($testfile, "r");
+    my str $first = <$fh>;
+    my str $second = <$fh>;
+    sys::close($fh);
+    say("  First: " . $first);
+    say("  Second: " . $second);
+
+    # Clean up
+    sys::unlink($testfile);
+
+    say("\n=== All tests passed! ===");
+    return 0;
+}

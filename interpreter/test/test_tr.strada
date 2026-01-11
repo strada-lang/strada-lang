@@ -1,0 +1,11 @@
+func main() int {
+    my str $s = "Hello World";
+    $s =~ tr/a-z/A-Z/;
+    say($s);
+
+    my str $s2 = "aabbc";
+    $s2 =~ tr/abc/xyz/;
+    say($s2);
+
+    return 0;
+}

@@ -1,0 +1,84 @@
+#!/usr/bin/env strada
+# Test local() dynamic scoping for memory leaks
+# Run: valgrind --leak-check=full ./test_local_dynamic
+
+our str $global_str = "original";
+our int $global_int = 42;
+
+func check_global_str() str {
+    return $global_str;
+}
+
+func check_global_int() int {
+    return $global_int;
+}
+
+func modify_with_local_simple(str $new_str, int $new_int) void {
+    local $global_str = $new_str;
+    local $global_int = $new_int;
+    # Inside this scope, globals have new values
+    my str $s = check_global_str();
+    my int $n = check_global_int();
+    if ($s ne $new_str) {
+        say("    FAIL: local str = " . $s);
+    }
+    if ($n != $new_int) {
+        say("    FAIL: local int = " . $n);
+    }
+    # Restores on scope exit
+}
+
+func main() int {
+    say("Testing local() dynamic scoping for memory leaks...");
+    my int $iterations = 100;
+
+    # Test basic local save/restore with string literals
+    say("  basic local save/restore...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        modify_with_local_simple("temporary", $i);
+        my str $s = check_global_str();
+        if ($s ne "original") {
+            say("    FAIL: not restored str = " . $s);
+            return 1;
+        }
+        my int $n = check_global_int();
+        if ($n != 42) {
+            say("    FAIL: not restored int = " . $n);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test repeated local with same value
+    say("  repeated local same value...");
+    $i = 0;
+    while ($i < $iterations) {
+        modify_with_local_simple("test_val", 99);
+        my str $s = check_global_str();
+        if ($s ne "original") {
+            say("    FAIL: repeated restore = " . $s);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test local with integer-only
+    say("  local integer only...");
+    $i = 0;
+    while ($i < $iterations) {
+        modify_with_local_simple("original", $i * 10);
+        my int $n = check_global_int();
+        if ($n != 42) {
+            say("    FAIL: int restore = " . $n);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All local() tests passed!");
+    return 0;
+}

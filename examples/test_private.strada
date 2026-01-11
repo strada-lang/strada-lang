@@ -1,0 +1,67 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_private.strada - Demonstrates private functions
+#
+# Private functions are file-scope only (static in C).
+# They are not exported in shared libraries and cannot be called from other files.
+
+# Public function - accessible from anywhere
+func add(int $a, int $b) int {
+    return $a + $b;
+}
+
+# Private function - only accessible within this file
+private func internal_helper(int $x) int {
+    return $x * 2;
+}
+
+# Private function calling another private function
+private func calculate(int $a, int $b) int {
+    my int $sum = add($a, $b);
+    return internal_helper($sum);
+}
+
+# Public function that uses private helper
+func process(int $a, int $b) int {
+    return calculate($a, $b);
+}
+
+func main() int {
+    say("=== Private Functions Test ===");
+    say("");
+
+    # Test 1: Call public function directly
+    say("Test 1: Public function");
+    my int $sum = add(3, 4);
+    say("  add(3, 4) = " . $sum);
+
+    # Test 2: Call public function that uses private helpers
+    say("Test 2: Public function using private helpers");
+    my int $result = process(5, 7);
+    say("  process(5, 7) = " . $result);
+    say("    (internally: add(5,7)=12, internal_helper(12)=24)");
+
+    # Test 3: Call private function directly (works within same file)
+    say("Test 3: Private function called directly");
+    my int $helper_result = internal_helper(10);
+    say("  internal_helper(10) = " . $helper_result);
+
+    say("");
+    say("=== All tests passed! ===");
+    return 0;
+}

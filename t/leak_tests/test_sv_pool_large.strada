@@ -1,0 +1,95 @@
+#!/usr/bin/env strada
+# Test enlarged SV pool (16384) for memory leaks
+# Optimization: SV_POOL_MAX increased from 4096 to 16384 to reduce malloc
+# pressure in tight loops with many temporary values.
+# Run: valgrind --leak-check=full ./test_sv_pool_large
+
+func main() int {
+    say("Testing enlarged SV pool for memory leaks...");
+
+    # Test 1: Create and discard many temporaries in a tight loop
+    # With 16384 pool, all freed SVs should be recycled
+    say("  Tight loop temporaries...");
+    my int $sum = 0;
+    my int $i = 0;
+    while ($i < 5000) {
+        my int $a = $i * 2;
+        my int $b = $i * 3;
+        my int $c = $a + $b;
+        $sum += $c;
+        $i++;
+    }
+    if ($sum != 62497500) {
+        say("    FAIL: sum = " . $sum);
+        return 1;
+    }
+    say("    PASS");
+
+    # Test 2: String temporaries cycling through pool
+    say("  String temporary cycling...");
+    $i = 0;
+    while ($i < 2000) {
+        my str $s = "temp_" . $i;
+        my int $len = length($s);
+        if ($len < 6) {
+            say("    FAIL");
+            return 1;
+        }
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 3: Array of temporaries (many SVs alive simultaneously)
+    say("  Array of temporaries...");
+    $i = 0;
+    while ($i < 100) {
+        my array @arr = ();
+        my int $j = 0;
+        while ($j < 200) {
+            push(@arr, "item_" . $j);
+            $j++;
+        }
+        if (scalar(@arr) != 200 || $arr[199] ne "item_199") {
+            say("    FAIL");
+            return 1;
+        }
+        # All 200 SVs freed when @arr goes out of scope
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 4: Hash temporaries (key + value SVs)
+    say("  Hash temporary cycling...");
+    $i = 0;
+    while ($i < 100) {
+        my hash %h = ();
+        my int $j = 0;
+        while ($j < 100) {
+            $h{"key_" . $j} = "val_" . $j;
+            $j++;
+        }
+        if (scalar(keys(%h)) != 100) {
+            say("    FAIL");
+            return 1;
+        }
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 5: Mixed types cycling through pool
+    say("  Mixed type pool cycling...");
+    $i = 0;
+    while ($i < 1000) {
+        my int $n = $i;
+        my num $f = $i * 1.5;
+        my str $s = "val";
+        my array @a = (1, 2, 3);
+        my hash %h = ("x" => $n);
+        my scalar $ref = \$n;
+        $i++;
+    }
+    say("    PASS");
+
+    say("All SV pool tests passed!");
+    return 0;
+}

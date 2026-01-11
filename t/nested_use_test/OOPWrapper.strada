@@ -1,0 +1,15 @@
+# OOPWrapper - A library that uses OOPLib (tests nested OOP)
+package OOPWrapper;
+
+use OOPLib;
+
+# Factory function that creates a Counter via the Counter package (from OOPLib)
+func create_counter(int $start) scalar {
+    return Counter::new($start);
+}
+
+# Helper that uses Counter methods
+func double_counter(scalar $counter) void {
+    my int $val = $counter->get();
+    $counter->add($val);
+}

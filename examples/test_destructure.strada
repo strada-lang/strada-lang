@@ -1,0 +1,54 @@
+#!/usr/bin/env strada
+# Test destructuring assignment
+
+func get_values() array {
+    my array @result = (100, 200, 300);
+    return @result;
+}
+
+func main() int {
+    say("=== Destructuring Assignment Test ===\n");
+
+    # Test 1: Basic destructuring from array
+    say("Test 1: Basic destructuring from array");
+    my array @arr = (1, 2, 3);
+    my ($a, $b, $c) = @arr;
+    say("  a=" . $a . " b=" . $b . " c=" . $c);
+
+    # Test 2: Destructuring with types
+    say("\nTest 2: Destructuring with explicit types");
+    my array @nums = (10, 20, 30);
+    my (int $x, int $y, int $z) = @nums;
+    say("  x=" . $x . " y=" . $y . " z=" . $z);
+
+    # Test 3: Destructuring from anonymous array
+    say("\nTest 3: Destructuring from anonymous array");
+    my ($p, $q) = [42, 99];
+    say("  p=" . $p . " q=" . $q);
+
+    # Test 4: Destructuring from function return
+    say("\nTest 4: Destructuring from function return");
+    my ($r1, $r2, $r3) = get_values();
+    say("  r1=" . $r1 . " r2=" . $r2 . " r3=" . $r3);
+
+    # Test 5: Fewer variables than elements (extra ignored)
+    say("\nTest 5: Fewer variables than elements");
+    my array @many = (1, 2, 3, 4, 5);
+    my ($first, $second) = @many;
+    say("  first=" . $first . " second=" . $second);
+
+    # Test 6: More variables than elements (get undef)
+    say("\nTest 6: More variables than elements");
+    my array @few = (7, 8);
+    my ($v1, $v2, $v3) = @few;
+    say("  v1=" . $v1 . " v2=" . $v2 . " v3=" . (defined($v3) ? $v3 : "undef"));
+
+    # Test 7: Mixed types
+    say("\nTest 7: Mixed types");
+    my array @mixed = ("hello", 42, 3.14);
+    my (str $greeting, int $num, num $pi) = @mixed;
+    say("  greeting=" . $greeting . " num=" . $num . " pi=" . $pi);
+
+    say("\n=== All tests passed! ===");
+    return 0;
+}

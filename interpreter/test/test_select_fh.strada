@@ -1,0 +1,12 @@
+func main() int {
+    my scalar $fh = core::open("/tmp/test_interp_select.txt", "w");
+    my scalar $old = select($fh);
+    say("file output");
+    select($old);
+    say("stdout output");
+    core::close($fh);
+    my str $content = core::slurp("/tmp/test_interp_select.txt");
+    say("file=" . chomp($content));
+    core::system("rm -f /tmp/test_interp_select.txt");
+    return 0;
+}

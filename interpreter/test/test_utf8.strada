@@ -1,0 +1,35 @@
+func main() int {
+    # Test UTF-8 string handling through standard builtins
+    # The interpreter handles strings as-is from the host runtime
+
+    # Basic ASCII string operations for baseline
+    my str $ascii = "hello";
+    say("ascii_len=" . length($ascii));
+    say("ascii_sub=" . substr($ascii, 1, 3));
+
+    # String concatenation
+    my str $a = "foo";
+    my str $b = "bar";
+    say("concat=" . $a . $b);
+
+    # chr for printable ASCII
+    say("space=" . chr(32) . "x");
+    say("tilde=" . chr(126));
+
+    # ord on various characters
+    say("ord_space=" . ord(" "));
+    say("ord_tilde=" . ord("~"));
+
+    # Multi-byte string via chr (test high code points work)
+    # Stick to ASCII range to avoid interpreter encoding issues
+    my str $tab = chr(9);
+    say("tab_ord=" . ord($tab));
+
+    # String comparison
+    say("eq=" . ("abc" eq "abc" ? 1 : 0));
+    say("ne=" . ("abc" ne "def" ? 1 : 0));
+    say("lt=" . ("abc" lt "def" ? 1 : 0));
+    say("gt=" . ("def" gt "abc" ? 1 : 0));
+
+    return 0;
+}

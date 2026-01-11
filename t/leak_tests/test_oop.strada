@@ -1,0 +1,261 @@
+#!/usr/bin/env strada
+# Test OOP operations for memory leaks
+# Run: valgrind --leak-check=full ./test_oop
+
+# Simple class
+package Person;
+
+func new(str $name, int $age) scalar {
+    my hash %self = ();
+    $self{"name"} = $name;
+    $self{"age"} = $age;
+    return bless(\%self, "Person");
+}
+
+func get_name(scalar $self) str {
+    return $self->{"name"};
+}
+
+func get_age(scalar $self) int {
+    return $self->{"age"};
+}
+
+func set_age(scalar $self, int $age) void {
+    $self->{"age"} = $age;
+}
+
+func greet(scalar $self) str {
+    return "Hello, I'm " . $self->{"name"} . " and I'm " . $self->{"age"} . " years old.";
+}
+
+# Inheritance example
+package Employee;
+
+func new(str $name, int $age, str $title) scalar {
+    my hash %self = ();
+    $self{"name"} = $name;
+    $self{"age"} = $age;
+    $self{"title"} = $title;
+    return bless(\%self, "Employee");
+}
+
+func get_title(scalar $self) str {
+    return $self->{"title"};
+}
+
+func describe(scalar $self) str {
+    return $self->{"name"} . " is a " . $self->{"title"};
+}
+
+# Class with nested objects
+package Team;
+
+func new(str $name) scalar {
+    my hash %self = ();
+    $self{"name"} = $name;
+    $self{"members"} = [];
+    return bless(\%self, "Team");
+}
+
+func add_member(scalar $self, scalar $member) void {
+    push($self->{"members"}, $member);
+}
+
+func get_members(scalar $self) scalar {
+    return $self->{"members"};
+}
+
+func size(scalar $self) int {
+    return size($self->{"members"});
+}
+
+package main;
+
+func main() int {
+    say("Testing OOP operations for memory leaks...");
+    my int $iterations = 100;
+
+    # Test basic object creation
+    say("  Basic object creation...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my scalar $p = Person::new("Alice", 30);
+        if ($p->get_name() ne "Alice") {
+            say("    FAIL: get_name");
+            return 1;
+        }
+        if ($p->get_age() != 30) {
+            say("    FAIL: get_age");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test method calls
+    say("  Method calls...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $p = Person::new("Bob", 25);
+        my str $greeting = $p->greet();
+        if (index($greeting, "Bob") < 0) {
+            say("    FAIL: greet method");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test mutation
+    say("  Object mutation...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $p = Person::new("Charlie", 20);
+        $p->set_age(21);
+        if ($p->get_age() != 21) {
+            say("    FAIL: set_age");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test bless/blessed
+    say("  bless/blessed...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $p = Person::new("Dave", 35);
+        my str $class = blessed($p);
+        if ($class ne "Person") {
+            say("    FAIL: blessed returned " . $class);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test isa
+    say("  isa...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $p = Person::new("Eve", 28);
+        if (!$p->isa("Person")) {
+            say("    FAIL: isa Person");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test can
+    say("  can...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $p = Person::new("Frank", 40);
+        if (!$p->can("get_name")) {
+            say("    FAIL: can get_name");
+            return 1;
+        }
+        if ($p->can("nonexistent")) {
+            say("    FAIL: can nonexistent should be false");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test ref
+    say("  ref...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $p = Person::new("Grace", 32);
+        my str $r = ref($p);
+        if ($r ne "Person") {
+            say("    FAIL: ref returned " . $r);
+            return 1;
+        }
+
+        my array @arr = (1, 2, 3);
+        my str $ra = ref(\@arr);
+        if ($ra ne "ARRAY") {
+            say("    FAIL: ref array");
+            return 1;
+        }
+
+        my hash %h = ();
+        my str $rh = ref(\%h);
+        if ($rh ne "HASH") {
+            say("    FAIL: ref hash");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test different class
+    say("  Different class (Employee)...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $e = Employee::new("Henry", 45, "Manager");
+        my str $desc = $e->describe();
+        if (index($desc, "Manager") < 0) {
+            say("    FAIL: Employee describe");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test objects with nested objects
+    say("  Nested objects...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $team = Team::new("Engineering");
+
+        # Add members
+        $team->add_member(Person::new("Alice", 30));
+        $team->add_member(Person::new("Bob", 25));
+        $team->add_member(Person::new("Charlie", 35));
+
+        if ($team->size() != 3) {
+            say("    FAIL: team size");
+            return 1;
+        }
+
+        my scalar $members = $team->get_members();
+        my scalar $first = $members->[0];
+        if ($first->get_name() ne "Alice") {
+            say("    FAIL: nested member access");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test multiple objects
+    say("  Multiple objects...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @people = ();
+        push(@people, Person::new("P1", 20));
+        push(@people, Person::new("P2", 25));
+        push(@people, Person::new("P3", 30));
+        push(@people, Person::new("P4", 35));
+        push(@people, Person::new("P5", 40));
+
+        my int $total_age = 0;
+        foreach my scalar $p (@people) {
+            $total_age = $total_age + $p->get_age();
+        }
+
+        if ($total_age != 150) {
+            say("    FAIL: total age");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All OOP tests passed!");
+    return 0;
+}

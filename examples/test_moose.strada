@@ -1,0 +1,44 @@
+package Animal;
+has ro str $species (required);
+has rw int $energy = 100;
+
+func speak(scalar $self) void {
+    say($self->species() . " (energy: " . $self->energy() . ")");
+}
+
+package Dog;
+extends Animal;
+
+has ro str $name (required);
+has rw int $age = 0;
+has rw str $nickname;
+
+before "bark" func(scalar $self) void {
+    say("[preparing to bark]");
+}
+
+func bark(scalar $self) void {
+    say($self->name() . " barks!");
+}
+
+after "bark" func(scalar $self) void {
+    say("[done barking]");
+}
+
+package main;
+
+func main() int {
+    my scalar $d = Dog::new("name", "Rex", "species", "dog", "age", 3);
+    say($d->name());
+    say($d->age());
+    $d->set_age(4);
+    say($d->age());
+    say($d->energy());
+    $d->set_energy(80);
+    say($d->energy());
+    $d->speak();
+    $d->bark();
+    say($d->isa("Dog"));
+    say($d->isa("Animal"));
+    return 0;
+}

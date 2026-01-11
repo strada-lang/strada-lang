@@ -1,0 +1,63 @@
+# test_import_variadic.strada - Test import_lib with variadic functions
+
+use lib "examples";
+import_lib "VariadicLib.so";
+
+func main() int {
+    say("=== Testing import_lib with Variadic Functions ===");
+    say("");
+
+    # Test sum_all - basic variadic call
+    say("--- sum_all ---");
+    my int $sum1 = VariadicLib::sum_all(1, 2, 3, 4, 5);
+    say("sum_all(1, 2, 3, 4, 5) = " . $sum1);
+
+    # Test sum_all with spread
+    my array @nums = (10, 20, 30);
+    my int $sum2 = VariadicLib::sum_all(...@nums);
+    say("sum_all(...@nums) with @nums = (10, 20, 30) = " . $sum2);
+
+    # Test sum_all with mixed args and spread
+    my int $sum3 = VariadicLib::sum_all(1, ...@nums, 100);
+    say("sum_all(1, ...@nums, 100) = " . $sum3);
+
+    say("");
+
+    # Test format_nums - fixed params + variadic
+    say("--- format_nums ---");
+    my str $fmt1 = VariadicLib::format_nums("Numbers: ", ", ", 1, 2, 3);
+    say("format_nums(\"Numbers: \", \", \", 1, 2, 3) = \"" . $fmt1 . "\"");
+
+    my str $fmt2 = VariadicLib::format_nums("Values: ", " | ", ...@nums);
+    say("format_nums(\"Values: \", \" | \", ...@nums) = \"" . $fmt2 . "\"");
+
+    say("");
+
+    # Test join_with
+    say("--- join_with ---");
+    my str $joined1 = VariadicLib::join_with("-", "a", "b", "c");
+    say("join_with(\"-\", \"a\", \"b\", \"c\") = \"" . $joined1 . "\"");
+
+    my array @words = ("hello", "world");
+    my str $joined2 = VariadicLib::join_with(" ", ...@words, "!");
+    say("join_with(\" \", ...@words, \"!\") = \"" . $joined2 . "\"");
+
+    say("");
+
+    # Test min_val and max_val
+    say("--- min_val / max_val ---");
+    my int $min = VariadicLib::min_val(5, 3, 9, 1, 7);
+    my int $max = VariadicLib::max_val(5, 3, 9, 1, 7);
+    say("min_val(5, 3, 9, 1, 7) = " . $min);
+    say("max_val(5, 3, 9, 1, 7) = " . $max);
+
+    my array @vals = (100, 50, 200, 25);
+    my int $min2 = VariadicLib::min_val(...@vals);
+    my int $max2 = VariadicLib::max_val(...@vals);
+    say("min_val(...@vals) with @vals = (100, 50, 200, 25) = " . $min2);
+    say("max_val(...@vals) = " . $max2);
+
+    say("");
+    say("=== All import_lib variadic tests passed! ===");
+    return 0;
+}

@@ -1,0 +1,18 @@
+our int $x = 10;
+
+func inner() void {
+    say("inner x=" . $x);
+}
+
+func outer() void {
+    local $x = 99;
+    inner();
+    say("outer x=" . $x);
+}
+
+func main() int {
+    say("before x=" . $x);
+    outer();
+    say("after x=" . $x);
+    return 0;
+}

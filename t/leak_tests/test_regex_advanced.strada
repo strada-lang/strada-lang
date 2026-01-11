@@ -1,0 +1,140 @@
+#!/usr/bin/env strada
+# Test advanced regex patterns for memory leaks
+# Run: valgrind --leak-check=full ./test_regex_advanced
+
+func main() int {
+    say("Testing advanced regex for memory leaks...");
+    my int $iterations = 100;
+
+    # Test named captures
+    say("  named captures...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my str $text = "John is 30 years old";
+        if ($text =~ /(?P<name>\w+) is (?P<age>\d+)/) {
+            my hash %nc = named_captures();
+            my str $n = $nc{"name"};
+            my str $a = $nc{"age"};
+            if ($n ne "John" || $a ne "30") {
+                say("    FAIL: named captures");
+                return 1;
+            }
+        } else {
+            say("    FAIL: no match");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test multiple captures
+    say("  multiple captures...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $text = "2024-01-15";
+        if ($text =~ /(\d{4})-(\d{2})-(\d{2})/) {
+            my array @caps = captures();
+            if (size(@caps) < 4) {
+                say("    FAIL: capture count");
+                return 1;
+            }
+            if ($caps[1] ne "2024" || $caps[2] ne "01" || $caps[3] ne "15") {
+                say("    FAIL: capture values");
+                return 1;
+            }
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test s/// with backreferences
+    say("  s/// backrefs...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = "hello world";
+        $s =~ s/(\w+) (\w+)/$2 $1/;
+        if ($s ne "world hello") {
+            say("    FAIL: backref = " . $s);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test s///g global replace
+    say("  s///g global...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = "aaa bbb aaa ccc aaa";
+        $s =~ s/aaa/xxx/g;
+        if ($s ne "xxx bbb xxx ccc xxx") {
+            say("    FAIL: global = " . $s);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test match() with captures
+    say("  match() captures...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $text = "price: $42.99";
+        my int $matched = match($text, "(\\d+)\\.(\\d+)");
+        if (!$matched) {
+            say("    FAIL: match");
+            return 1;
+        }
+        my array @caps = captures();
+        if (size(@caps) < 3) {
+            say("    FAIL: match captures");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test replace() function
+    say("  replace()...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = "foo123bar456";
+        my str $r = replace($s, "\\d+", "NUM");
+        if (length($r) < 1) {
+            say("    FAIL: replace");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test replace_all() (plain string)
+    say("  replace_all()...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = "one-two-three-four";
+        my str $r = replace_all($s, "-", "_");
+        if ($r ne "one_two_three_four") {
+            say("    FAIL: replace_all = " . $r);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test non-matching regex (no leak on failure path)
+    say("  non-matching regex...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $text = "hello world";
+        if ($text =~ /\d+/) {
+            say("    FAIL: should not match");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All advanced regex tests passed!");
+    return 0;
+}

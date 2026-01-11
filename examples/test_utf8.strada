@@ -1,6 +1,24 @@
-# test_utf8.strada - Test UTF-8 string support
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_utf8.strada - Test UTF-8 string support and utf8:: namespace functions
 #
 # Tests that string functions correctly handle multi-byte UTF-8 characters
+# and that the utf8:: namespace functions work correctly
 
 func main(int $argc, array @argv) int {
     say("=== UTF-8 Support Test ===");
@@ -134,6 +152,108 @@ func main(int $argc, array @argv) int {
         $passed = $passed + 1;
     } else {
         say("FAIL: 'Hi[wave]!' has " . length($multi) . " characters");
+    }
+
+    # --- utf8:: namespace function tests ---
+    say("");
+    say("=== utf8:: Namespace Tests ===");
+    say("");
+
+    # Test 13: utf8::is_utf8 with valid ASCII
+    $total = $total + 1;
+    if (utf8::is_utf8($ascii) == 1) {
+        say("OK: utf8::is_utf8('hello') = 1");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: utf8::is_utf8('hello') should be 1");
+    }
+
+    # Test 14: utf8::is_utf8 with valid multibyte UTF-8
+    $total = $total + 1;
+    my str $cafe = "caf" . chr(233);
+    if (utf8::is_utf8($cafe) == 1) {
+        say("OK: utf8::is_utf8('cafe') = 1");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: utf8::is_utf8('cafe') should be 1");
+    }
+
+    # Test 15: utf8::valid (alias for is_utf8)
+    $total = $total + 1;
+    if (utf8::valid($ascii) == 1) {
+        say("OK: utf8::valid('hello') = 1");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: utf8::valid('hello') should be 1");
+    }
+
+    # Test 16: utf8::encode (no-op for Strada, returns same string)
+    $total = $total + 1;
+    my str $encoded = utf8::encode($ascii);
+    if ($encoded eq "hello") {
+        say("OK: utf8::encode returns same string");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: utf8::encode should return same string");
+    }
+
+    # Test 17: utf8::decode with valid UTF-8
+    $total = $total + 1;
+    my scalar $decoded = utf8::decode($ascii);
+    if ($decoded == 1) {
+        say("OK: utf8::decode valid utf8 returns 1");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: utf8::decode valid utf8 should return 1");
+    }
+
+    # Test 18: utf8::upgrade (no-op for Strada)
+    $total = $total + 1;
+    my str $upgraded = utf8::upgrade($ascii);
+    if ($upgraded eq "hello") {
+        say("OK: utf8::upgrade returns same string");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: utf8::upgrade should return same string");
+    }
+
+    # Test 19: utf8::downgrade with pure ASCII (should succeed)
+    $total = $total + 1;
+    my scalar $downgraded = utf8::downgrade($ascii);
+    if ($downgraded eq "hello") {
+        say("OK: utf8::downgrade ascii returns same string");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: utf8::downgrade ascii should return same string");
+    }
+
+    # Test 20: utf8::downgrade with non-ASCII and fail_ok=1
+    $total = $total + 1;
+    my scalar $down_result = utf8::downgrade($cafe, 1);
+    if (defined($down_result) == 0) {
+        say("OK: utf8::downgrade non-ascii with fail_ok returns undef");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: utf8::downgrade non-ascii with fail_ok should return undef");
+    }
+
+    # Test 21: utf8::unicode_to_native (identity on modern systems)
+    $total = $total + 1;
+    my scalar $native = utf8::unicode_to_native(65);
+    if ($native == 65) {
+        say("OK: utf8::unicode_to_native(65) = 65");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: utf8::unicode_to_native(65) should be 65");
+    }
+
+    # Test 22: utf8::is_utf8 with literal string
+    $total = $total + 1;
+    if (utf8::is_utf8("test string") == 1) {
+        say("OK: utf8::is_utf8 with literal");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: utf8::is_utf8 with literal should be 1");
     }
 
     say("");

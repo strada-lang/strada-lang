@@ -1,0 +1,20 @@
+package Greeter;
+has ro str $name (required);
+
+func greet(scalar $self) str {
+    return "Hello, " . $self->name();
+}
+
+around "greet" func(scalar $self, scalar $orig) str {
+    my str $result = $orig->($self);
+    return "[" . $result . "]";
+}
+
+package main;
+func main() int {
+    my scalar $g = Greeter::new("name", "World");
+    say("calling greet...");
+    my str $r = $g->greet();
+    say("result: " . $r);
+    return 0;
+}

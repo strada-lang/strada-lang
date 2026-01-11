@@ -49,7 +49,7 @@ check-deps:
 	@echo -n "PostgreSQL: " && (pkg-config --exists libpq && echo "OK") || echo "NOT FOUND"
 
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGET) *.o
 
 install: $(TARGET)
 	mkdir -p ../../build/lib

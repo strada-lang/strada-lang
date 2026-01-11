@@ -1,0 +1,9 @@
+package TestHelper;
+
+func greet(str $name) str {
+    return "Hello, " . $name . "!";
+}
+
+func add(int $a, int $b) int {
+    return $a + $b;
+}

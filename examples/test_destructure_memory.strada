@@ -1,0 +1,48 @@
+#!/usr/bin/env strada
+# Test destructuring assignment for memory leaks
+# Run with: ./strada -r examples/test_destructure_memory.strada
+# Monitor with: watch -n 1 'ps -o rss= -p $(pgrep -f test_destructure_memory)'
+
+func make_array() array {
+    my array @result = ("string1", "string2", "string3");
+    return @result;
+}
+
+func main() int {
+    say("=== Destructuring Memory Leak Test ===\n");
+
+    my int $iterations = 100000;
+    say("Running " . $iterations . " iterations...\n");
+
+    my int $i = 0;
+    while ($i < $iterations) {
+        # Test 1: Destructuring from array variable
+        my array @arr = (1, 2, 3);
+        my ($a, $b, $c) = @arr;
+
+        # Test 2: Destructuring from anonymous array
+        my ($x, $y, $z) = [10, 20, 30];
+
+        # Test 3: Destructuring from function return
+        my ($s1, $s2, $s3) = make_array();
+
+        # Test 4: Repeated destructuring in same scope
+        my ($p, $q) = [100, 200];
+        my ($r, $s) = [300, 400];
+
+        # Test 5: Destructuring with strings (to test string allocation)
+        my array @strings = ("hello", "world", "test");
+        my (str $str1, str $str2, str $str3) = @strings;
+
+        if ($i % 10000 == 0) {
+            say("  Iteration " . $i . " - a=" . $a . " x=" . $x . " s1=" . $s1);
+        }
+
+        $i = $i + 1;
+    }
+
+    say("\nCompleted " . $iterations . " iterations.");
+    say("If memory usage remained stable, no leaks detected.");
+    say("\n=== Test complete! ===");
+    return 0;
+}

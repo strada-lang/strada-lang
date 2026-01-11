@@ -1,0 +1,32 @@
+package main;
+
+func add3(int $a, int $b, int $c) int {
+    return $a + $b + $c;
+}
+
+func ackermann(int $m, int $n) int {
+    if ($m == 0) {
+        return $n + 1;
+    }
+    if ($n == 0) {
+        return ackermann($m - 1, 1);
+    }
+    return ackermann($m - 1, ackermann($m, $n - 1));
+}
+
+func main() int {
+    # Call a simple 3-arg function 5,000,000 times
+    my int $sum = 0;
+    my int $i = 0;
+    while ($i < 5000000) {
+        $sum += add3($i, $i + 1, $i + 2);
+        $i++;
+    }
+    say("call sum: " . $sum);
+
+    # Compute ackermann(3,8)
+    my int $ack = ackermann(3, 8);
+    say("ackermann(3,8): " . $ack);
+
+    return 0;
+}

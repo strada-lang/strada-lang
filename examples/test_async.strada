@@ -1,0 +1,108 @@
+# Test async/await implementation
+
+async func compute(int $n) int {
+    sys::usleep(50000);  # 50ms
+    return $n * 2;
+}
+
+async func fail_async() int {
+    throw "async error";
+}
+
+async func slow_task(int $id, int $delay_ms) str {
+    sys::usleep($delay_ms * 1000);
+    return "task " . $id . " done";
+}
+
+func main() int {
+    say("=== Async/Await Test Suite ===");
+    say("");
+
+    # Test 1: Basic async/await
+    say("Test 1: Basic async/await");
+    my scalar $f = compute(21);
+    say("  Future created...");
+    my int $result = await $f;
+    say("  Result: " . $result);
+
+    # Test 2: Parallel execution
+    say("");
+    say("Test 2: Parallel execution");
+    my scalar $a = compute(10);
+    my scalar $b = compute(20);
+    my scalar $c = compute(30);
+    my int $r1 = await $a;
+    my int $r2 = await $b;
+    my int $r3 = await $c;
+    say("  Results: " . $r1 . ", " . $r2 . ", " . $r3);
+
+    # Test 3: Error propagation
+    say("");
+    say("Test 3: Error propagation");
+    try {
+        my int $x = await fail_async();
+        say("  ERROR: Should not reach here");
+    } catch ($e) {
+        say("  Caught: " . $e);
+    }
+
+    # Test 4: async::all - wait for multiple
+    say("");
+    say("Test 4: async::all");
+    my array @futures = (compute(1), compute(2), compute(3));
+    my array @results = await async::all(\@futures);
+    say("  All results: " . join(", ", @results));
+
+    # Test 5: async::race - first to complete
+    say("");
+    say("Test 5: async::race");
+    my array @race_futures = (
+        slow_task(1, 100),   # 100ms
+        slow_task(2, 50),    # 50ms - should win
+        slow_task(3, 150)    # 150ms
+    );
+    my str $winner = await async::race(\@race_futures);
+    say("  Winner: " . $winner);
+
+    # Test 6: async::timeout
+    say("");
+    say("Test 6: async::timeout");
+    my scalar $slow = slow_task(99, 200);  # 200ms
+    try {
+        my str $r = await async::timeout($slow, 50);  # 50ms timeout
+        say("  Got result: " . $r);
+    } catch ($e) {
+        say("  Timed out as expected: " . $e);
+    }
+
+    # Test 7: async::cancel
+    say("");
+    say("Test 7: async::cancel");
+    my scalar $to_cancel = slow_task(100, 500);  # 500ms
+    async::cancel($to_cancel);
+    if (async::is_cancelled($to_cancel)) {
+        say("  Future was cancelled");
+    }
+    try {
+        my str $r = await $to_cancel;
+        say("  ERROR: Should not reach here");
+    } catch ($e) {
+        say("  Caught cancel: " . $e);
+    }
+
+    # Test 8: async::is_done polling
+    say("");
+    say("Test 8: async::is_done polling");
+    my scalar $poll_future = compute(42);
+    my int $polls = 0;
+    while (async::is_done($poll_future) == 0) {
+        $polls = $polls + 1;
+        sys::usleep(1000);  # 1ms
+    }
+    my int $poll_result = await $poll_future;
+    say("  Polled " . $polls . " times, result: " . $poll_result);
+
+    say("");
+    say("=== All tests passed! ===");
+    return 0;
+}

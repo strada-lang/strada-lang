@@ -1,0 +1,1188 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# strada2perl - Convert Strada code to Perl 5
+#
+# Usage: ./strada2perl input.strada [output.pl]
+#
+# Converts Strada source code to equivalent Perl 5 code:
+#   - Strips type annotations (my int $x -> my $x)
+#   - func -> sub with return type removal
+#   - sys::/core::/math:: namespace calls -> Perl equivalents
+#   - try/catch/throw -> eval/die/if($@)
+#   - import_lib/import_object/import_archive -> use
+#   - __C__ blocks -> removed (with comment)
+#   - enum -> use constant in sub-package
+#   - Moose-style has/extends/with/before/after/around
+#   - Strada built-ins (match, replace, captures, etc.) via compat helpers
+#   - func main() unwrapping, BEGIN block unwrapping
+#
+# Output includes Strada compatibility helper functions (match, replace, etc.)
+# that allow most Strada built-in calls to work directly in Perl.
+#
+# Annotations in output:
+#   # REVIEW: - needs manual checking or adjustment
+#   # was import_lib - converted from import_lib
+#   # was async - async keyword stripped (no Perl equivalent)
+
+# ============================================================
+# Helper: extract parameter names from a func parameter string
+# Input: "int $a, str $b, int ...@rest"
+# Output: "$a, $b, @rest"
+# ============================================================
+func extract_params(str $param_str) str {
+    my str $s = $param_str;
+    $s =~ s/^\s+//;
+    $s =~ s/\s+$//;
+    if (length($s) == 0) {
+        return "";
+    }
+    my array @parts = split(",", $s);
+    my str $result = "";
+    my int $i = 0;
+    while ($i < size(@parts)) {
+        my str $p = $parts[$i];
+        $p =~ s/^\s+//;
+        $p =~ s/\s+$//;
+        # Handle variadic ...@ -> @
+        $p =~ s/\.\.\.@/@/g;
+        $p =~ s/\.\.\.//g;
+        # Extract variable name ($var, @var, %var)
+        my str $var = "";
+        if (match($p, "[@%][a-zA-Z_]\\w*")) {
+            my array @c = captures();
+            $var = $c[0];
+        }
+        if (length($var) == 0) {
+            if (match($p, "[$][a-zA-Z_]\\w*")) {
+                my array @c = captures();
+                $var = $c[0];
+            }
+        }
+        if (length($var) > 0) {
+            if (length($result) > 0) {
+                $result = $result . ", ";
+            }
+            $result = $result . $var;
+        }
+        $i = $i + 1;
+    }
+    return $result;
+}
+
+# ============================================================
+# Helper: map Strada type name to Moose type constraint
+# ============================================================
+func moose_type(str $t) str {
+    if ($t eq "str") { return "Str"; }
+    if ($t eq "int") { return "Int"; }
+    if ($t eq "num") { return "Num"; }
+    if ($t eq "scalar") { return "Any"; }
+    if ($t eq "array") { return "ArrayRef"; }
+    if ($t eq "hash") { return "HashRef"; }
+    if ($t eq "bool") { return "Bool"; }
+    return "Any";
+}
+
+# ============================================================
+# Helper: replace a single-arg function call with a prefix+suffix wrapper
+# e.g. replace_func_1arg($line, "sys::getenv", "$ENV{", "}")
+#   sys::getenv("KEY") -> $ENV{"KEY"}
+# ============================================================
+func replace_func_1arg(str $line, str $fname, str $prefix, str $suffix) str {
+    my str $result = $line;
+    my str $search = $fname . "(";
+    my int $guard = 0;
+    while (match($result, $fname . "\\(") && $guard < 20) {
+        $guard = $guard + 1;
+        my int $start = index($result, $search);
+        if ($start < 0) { last; }
+        my int $arg_start = $start + length($search);
+        my int $close = index($result, ")", $arg_start);
+        if ($close < 0) { last; }
+        my str $arg = substr($result, $arg_start, $close - $arg_start);
+        $arg =~ s/^\s+//;
+        $arg =~ s/\s+$//;
+        my str $before = substr($result, 0, $start);
+        my str $after = substr($result, $close + 1);
+        $result = $before . $prefix . $arg . $suffix . $after;
+    }
+    return $result;
+}
+
+# ============================================================
+# Helper: replace a 2-arg function call with an assignment
+# e.g. replace_func_2arg_assign($line, "sys::setenv", "$ENV{", "} = ", "")
+#   sys::setenv("KEY", "val") -> $ENV{"KEY"} = "val"
+# ============================================================
+func replace_func_2arg_assign(str $line, str $fname, str $prefix, str $mid, str $suffix) str {
+    my str $result = $line;
+    my str $search = $fname . "(";
+    my int $guard = 0;
+    while (match($result, $fname . "\\(") && $guard < 20) {
+        $guard = $guard + 1;
+        my int $start = index($result, $search);
+        if ($start < 0) { last; }
+        my int $arg_start = $start + length($search);
+        my int $comma = index($result, ",", $arg_start);
+        if ($comma < 0) { last; }
+        my str $arg1 = substr($result, $arg_start, $comma - $arg_start);
+        $arg1 =~ s/^\s+//;
+        $arg1 =~ s/\s+$//;
+        my int $close = index($result, ")", $comma + 1);
+        if ($close < 0) { last; }
+        my str $arg2 = substr($result, $comma + 1, $close - $comma - 1);
+        $arg2 =~ s/^\s+//;
+        $arg2 =~ s/\s+$//;
+        my str $before = substr($result, 0, $start);
+        my str $after = substr($result, $close + 1);
+        $result = $before . $prefix . $arg1 . $mid . $arg2 . $suffix . $after;
+    }
+    return $result;
+}
+
+# ============================================================
+# Helper: count open braces in a line
+# ============================================================
+func count_opens(str $line) int {
+    my int $count = 0;
+    my int $j = 0;
+    while ($j < length($line)) {
+        if (char_at($line, $j) == 123) {
+            $count = $count + 1;
+        }
+        $j = $j + 1;
+    }
+    return $count;
+}
+
+# ============================================================
+# Helper: count close braces in a line
+# ============================================================
+func count_closes(str $line) int {
+    my int $count = 0;
+    my int $j = 0;
+    while ($j < length($line)) {
+        if (char_at($line, $j) == 125) {
+            $count = $count + 1;
+        }
+        $j = $j + 1;
+    }
+    return $count;
+}
+
+# ============================================================
+# Strip type annotations from a line (my/our/local/foreach/for)
+# ============================================================
+func strip_types(str $line) str {
+    my str $r = $line;
+    # my TYPE $var -> my $var
+    $r =~ s/\bmy\s+(int|num|str|scalar|bool|void|dynamic|byte|uint8|uint16|uint32|uint64|int8|int16|size_t|char|float|double|array|hash)\s+/my /g;
+    # our TYPE $var -> our $var
+    $r =~ s/\bour\s+(int|num|str|scalar|bool|array|hash)\s+/our /g;
+    # local TYPE $var -> local $var
+    $r =~ s/\blocal\s+(int|num|str|scalar|bool)\s+/local /g;
+    # foreach my TYPE $var -> foreach my $var
+    $r =~ s/\bforeach\s+my\s+(int|num|str|scalar|bool)\s+/foreach my /g;
+    # for my TYPE $var (@arr) -> for my $var (@arr)
+    $r =~ s/\bfor\s+my\s+(int|num|str|scalar|bool)\s+/for my /g;
+    # Array/hash capacity hints: my @arr[100]; -> my @arr;
+    $r =~ s/(@\w+)\[\d+\]/$1/g;
+    $r =~ s/(%\w+)\[\d+\]/$1/g;
+    return $r;
+}
+
+# ============================================================
+# Convert a single line of Strada to Perl (non-structural transforms)
+# ============================================================
+func convert_line(str $line) str {
+    my str $result = $line;
+    my str $trimmed = $line;
+    $trimmed =~ s/^\s+//;
+    $trimmed =~ s/\s+$//;
+
+    # Skip empty lines and pure comments
+    if ($trimmed eq "" || match($trimmed, "^#")) {
+        return $result;
+    }
+
+    # END blocks pass through (identical in Perl)
+    if (match($trimmed, "^END\\s*\\{")) {
+        return $result;
+    }
+
+    # --- Normalize core:: to sys:: for uniform handling ---
+    $result =~ s/\bcore::/sys::/g;
+
+    # --- Package declarations: pass through ---
+    if (match($trimmed, "^package\\s+")) {
+        return $result;
+    }
+
+    # --- version "x.y.z"; -> our $VERSION = "x.y.z"; ---
+    if (match($trimmed, "^version\\s+\"")) {
+        $result = replace($result, "\\bversion\\s+", "our \\$VERSION = ");
+        return $result;
+    }
+
+    # --- inherit ClassName; -> use parent -norequire, 'ClassName'; ---
+    if (match($trimmed, "^inherit\\s+\\w")) {
+        my str $parent = $trimmed;
+        $parent = replace($parent, "^inherit\\s+", "");
+        $parent = replace($parent, ";.*", "");
+        $parent =~ s/^\s+//;
+        $parent =~ s/\s+$//;
+        # Get indentation from original line
+        my str $indent = "";
+        if (match($line, "^(\\s+)")) {
+            my array @c = captures();
+            $indent = $c[1];
+        }
+        $result = $indent . "use parent -norequire, '" . $parent . "';";
+        return $result;
+    }
+
+    # --- import_lib "Module.so"; -> use Module; ---
+    if (match($trimmed, "^import_lib\\s+\"")) {
+        my str $mod = $trimmed;
+        $mod = replace($mod, "^import_lib\\s+\"", "");
+        $mod = replace($mod, "\\.so\".*", "");
+        if (match($mod, "/")) {
+            $mod = replace($mod, ".*/", "");
+        }
+        my str $indent = "";
+        if (match($line, "^(\\s+)")) {
+            my array @c = captures();
+            $indent = $c[1];
+        }
+        $result = $indent . "use " . $mod . "; # was import_lib";
+        return $result;
+    }
+
+    # --- import_object "Module.o"; -> use Module; ---
+    if (match($trimmed, "^import_object\\s+\"")) {
+        my str $mod = $trimmed;
+        $mod = replace($mod, "^import_object\\s+\"", "");
+        $mod = replace($mod, "\\.o\".*", "");
+        if (match($mod, "/")) {
+            $mod = replace($mod, ".*/", "");
+        }
+        my str $indent = "";
+        if (match($line, "^(\\s+)")) {
+            my array @c = captures();
+            $indent = $c[1];
+        }
+        $result = $indent . "use " . $mod . "; # was import_object";
+        return $result;
+    }
+
+    # --- import_archive "Module.a"; -> use Module; ---
+    if (match($trimmed, "^import_archive\\s+\"")) {
+        my str $mod = $trimmed;
+        $mod = replace($mod, "^import_archive\\s+\"", "");
+        $mod = replace($mod, "\\.a\".*", "");
+        if (match($mod, "/")) {
+            $mod = replace($mod, ".*/", "");
+        }
+        my str $indent = "";
+        if (match($line, "^(\\s+)")) {
+            my array @c = captures();
+            $indent = $c[1];
+        }
+        $result = $indent . "use " . $mod . "; # was import_archive";
+        return $result;
+    }
+
+    # --- const type $NAME = val; -> use constant NAME => val; ---
+    if (match($trimmed, "^const\\s+")) {
+        $result = replace($result, "\\bconst\\s+\\w+\\s+", "use constant ");
+        # Strip optional sigil from constant name
+        $result = replace($result, "use constant [$]", "use constant ");
+        # = -> =>
+        $result = replace($result, "\\s*=\\s*", " => ");
+        return $result;
+    }
+
+    # --- throw -> die ---
+    $result =~ s/\bthrow\b/die/g;
+
+    # --- Strip type annotations ---
+    $result = strip_types($result);
+
+    # --- Spread operator: ...@ -> @ ---
+    $result =~ s/\.\.\.@/@/g;
+
+    # --- sys:: simple renames (strip sys:: prefix) ---
+    $result =~ s/\bsys::exit\(/exit(/g;
+    $result =~ s/\bsys::system\(/system(/g;
+    $result =~ s/\bsys::exec\(/exec(/g;
+    $result =~ s/\bsys::kill\(/kill(/g;
+    $result =~ s/\bsys::alarm\(/alarm(/g;
+    $result =~ s/\bsys::sleep\(/sleep(/g;
+    $result =~ s/\bsys::chdir\(/chdir(/g;
+    $result =~ s/\bsys::mkdir\(/mkdir(/g;
+    $result =~ s/\bsys::rmdir\(/rmdir(/g;
+    $result =~ s/\bsys::unlink\(/unlink(/g;
+    $result =~ s/\bsys::rename\(/rename(/g;
+    $result =~ s/\bsys::chmod\(/chmod(/g;
+    $result =~ s/\bsys::close\(/close(/g;
+    $result =~ s/\bsys::glob\(/glob(/g;
+    $result =~ s/\bsys::seek\(/seek(/g;
+    $result =~ s/\bsys::tell\(/tell(/g;
+    $result =~ s/\bsys::eof\(/eof(/g;
+    $result =~ s/\bsys::srand\(/srand(/g;
+    $result =~ s/\bsys::time\(/time(/g;
+    $result =~ s/\bsys::waitpid\(/waitpid(/g;
+    $result =~ s/\bsys::fork\(/fork(/g;
+    $result =~ s/\bsys::open\(/strada_open(/g;
+    $result =~ s/\bsys::readline\(/strada_readline(/g;
+
+    # sys::getpid() -> $$
+    $result = replace_all($result, "sys::getpid()", "$$");
+
+    # sys::wantarray()/wantscalar()/wanthash()
+    $result =~ s/\bsys::wantarray\(\)/wantarray()/g;
+    $result =~ s/\bsys::wantscalar\(\)/!wantarray()/g;
+    $result =~ s/\bsys::wanthash\(\)/wantarray()/g;
+
+    # sys::getcwd/realpath -> Cwd::
+    $result =~ s/\bsys::getcwd\(/Cwd::getcwd(/g;
+    $result =~ s/\bsys::realpath\(/Cwd::realpath(/g;
+
+    # sys::basename/dirname -> File::Basename::
+    $result =~ s/\bsys::basename\(/File::Basename::basename(/g;
+    $result =~ s/\bsys::dirname\(/File::Basename::dirname(/g;
+
+    # sys::_exit -> POSIX::_exit
+    $result =~ s/\bsys::_exit\(/POSIX::_exit(/g;
+
+    # sys::usleep -> Time::HiRes::usleep
+    $result =~ s/\bsys::usleep\(/Time::HiRes::usleep(/g;
+
+    # sys::stack_trace() -> Carp::longmess()
+    $result =~ s/\bsys::stack_trace\(\)/Carp::longmess()/g;
+
+    # sys::slurp/spew -> helper functions
+    $result =~ s/\bsys::slurp\(/strada_slurp(/g;
+    $result =~ s/\bsys::spew\(/strada_spew(/g;
+
+    # sys::backtick(cmd) -> qx(cmd)
+    $result =~ s/\bsys::backtick\(/qx(/g;
+
+    # sys::getenv("KEY") -> $ENV{"KEY"}
+    $result = replace_func_1arg($result, "sys::getenv", "$ENV{", "}");
+
+    # sys::setenv("KEY", "val") -> $ENV{"KEY"} = "val"
+    $result = replace_func_2arg_assign($result, "sys::setenv", "$ENV{", "} = ", "");
+
+    # sys::unsetenv("KEY") -> delete $ENV{"KEY"}
+    $result = replace_func_1arg($result, "sys::unsetenv", "delete $ENV{", "}");
+
+    # sys::signal("SIG", handler) -> $SIG{SIG} = handler
+    if (match($result, "\\bsys::signal\\(")) {
+        $result = replace_func_2arg_assign($result, "sys::signal", "$SIG{", "} = ", "");
+        # Strip quotes from signal name inside $SIG{"INT"} -> $SIG{INT}
+        if (match($result, "[$]SIG\\{\"(\\w+)\"\\}")) {
+            my array @c = captures();
+            my str $sig = $c[1];
+            $result = replace($result, "[$]SIG\\{\"\\w+\"\\}", "$SIG{" . $sig . "}");
+        }
+    }
+
+    # sys::file_exists/is_file/is_dir/file_size -> file test operators
+    $result = replace_func_1arg($result, "sys::file_exists", "-e ", "");
+    $result = replace_func_1arg($result, "sys::is_file", "-f ", "");
+    $result = replace_func_1arg($result, "sys::is_dir", "-d ", "");
+    $result = replace_func_1arg($result, "sys::file_size", "-s ", "");
+
+    # sys::readdir(path) -> strada_readdir(path)
+    $result =~ s/\bsys::readdir\(/strada_readdir(/g;
+    $result =~ s/\bsys::readdir_full\(/strada_readdir(/g;
+
+    # Remaining sys:: -> strip prefix and add REVIEW
+    if (match($result, "\\bsys::\\w+\\(")) {
+        $result =~ s/\bsys:://g;
+        if (!match($result, "# REVIEW")) {
+            $result = $result . " # REVIEW: sys:: function";
+        }
+    }
+
+    # --- math:: conversions ---
+    $result =~ s/\bmath::sin\(/sin(/g;
+    $result =~ s/\bmath::cos\(/cos(/g;
+    $result =~ s/\bmath::sqrt\(/sqrt(/g;
+    $result =~ s/\bmath::abs\(/abs(/g;
+    $result =~ s/\bmath::log\(/log(/g;
+    $result =~ s/\bmath::exp\(/exp(/g;
+    $result =~ s/\bmath::atan2\(/atan2(/g;
+    $result =~ s/\bmath::rand\(/rand(/g;
+    $result =~ s/\bmath::srand\(/srand(/g;
+    $result =~ s/\bmath::floor\(/POSIX::floor(/g;
+    $result =~ s/\bmath::ceil\(/POSIX::ceil(/g;
+    $result =~ s/\bmath::pow\(/POSIX::pow(/g;
+
+    # --- utf8:: functions pass through (same in Perl) ---
+    # utf8::is_utf8, utf8::valid, utf8::encode, utf8::decode, etc.
+
+    # --- size() -> scalar() ---
+    $result =~ s/\bsize\(\s*@/scalar(@/g;
+    if (match($result, "\\bsize\\(\\s*%")) {
+        $result = replace($result, "\\bsize\\(\\s*%", "scalar(keys %");
+    }
+
+    # --- named_captures() -> %+ ---
+    $result =~ s/\bnamed_captures\(\)/%+/g;
+
+    # --- captures()[N] -> $N (use plain string replace - $N in s/// is a backreference) ---
+    $result = replace_all($result, "captures()[0]", "$&");
+    $result = replace_all($result, "captures()[1]", "$1");
+    $result = replace_all($result, "captures()[2]", "$2");
+    $result = replace_all($result, "captures()[3]", "$3");
+    $result = replace_all($result, "captures()[4]", "$4");
+    $result = replace_all($result, "captures()[5]", "$5");
+    $result = replace_all($result, "captures()[6]", "$6");
+    $result = replace_all($result, "captures()[7]", "$7");
+    $result = replace_all($result, "captures()[8]", "$8");
+    $result = replace_all($result, "captures()[9]", "$9");
+
+    # --- ::func() and .::func() -> func() (current-package shorthand) ---
+    $result = replace($result, "\\.::([a-zA-Z_])", "$1");
+    if (match($result, "([\\s(=,;])::([a-zA-Z_])")) {
+        $result = replace($result, "([\\s(=,;])::([a-zA-Z_])", "$1$2");
+    }
+    # Leading :: at start of line
+    if (match($result, "^(\\s*)::([a-zA-Z_])")) {
+        $result = replace($result, "^(\\s*)::([a-zA-Z_])", "$1$2");
+    }
+
+    # --- say/print to filehandle: say($fh, "msg") -> say $fh "msg" ---
+    if (match($result, "\\bsay\\([$]\\w+,\\s*")) {
+        $result = replace($result, "\\bsay\\(([$]\\w+),\\s*", "say $1 ");
+        # Remove trailing ) before ;
+        $result = replace($result, "\\)\\s*;\\s*$", ";");
+    }
+    if (match($result, "\\bprint\\([$]\\w+,\\s*")) {
+        $result = replace($result, "\\bprint\\(([$]\\w+),\\s*", "print $1 ");
+        $result = replace($result, "\\)\\s*;\\s*$", ";");
+    }
+
+    # --- async:: functions -> REVIEW ---
+    if (match($result, "\\basync::")) {
+        if (!match($result, "# REVIEW")) {
+            $result = $result . " # REVIEW: async:: has no Perl equivalent";
+        }
+    }
+
+    # --- c:: functions -> REVIEW ---
+    if (match($result, "\\bc::")) {
+        if (!match($result, "# REVIEW")) {
+            $result = $result . " # REVIEW: c:: has no Perl equivalent";
+        }
+    }
+
+    return $result;
+}
+
+# ============================================================
+# Convert a Strada func definition line to Perl sub
+# Returns the converted line(s) joined by \n
+# ============================================================
+func convert_func_def(str $line) str {
+    my str $trimmed = $line;
+    $trimmed =~ s/^\s+//;
+    $trimmed =~ s/\s+$//;
+
+    # Get indentation
+    my str $indent = "";
+    my int $k = 0;
+    while ($k < length($line)) {
+        my int $ch = char_at($line, $k);
+        if ($ch == 32 || $ch == 9) {
+            $indent = $indent . substr($line, $k, 1);
+            $k = $k + 1;
+        } else {
+            $k = length($line);
+        }
+    }
+
+    my str $work = $trimmed;
+    my str $prefix = "";
+    my int $is_async = 0;
+
+    # Strip private/async
+    if (match($work, "^private\\s+")) {
+        $work = replace($work, "^private\\s+", "");
+    }
+    if (match($work, "^async\\s+")) {
+        $work = replace($work, "^async\\s+", "");
+        $is_async = 1;
+    }
+
+    # Extract: func NAME(PARAMS) RETTYPE {
+    $work = replace($work, "^func\\s+", "");
+    my int $paren_open = index($work, "(");
+    if ($paren_open < 0) {
+        # Fallback: just do basic conversion
+        my str $fallback = $indent . "sub " . $work;
+        $fallback = replace($fallback, "\\)\\s+\\w+\\s*\\{", ") {");
+        return $fallback;
+    }
+    my str $name = substr($work, 0, $paren_open);
+    $name =~ s/\s+$//;
+
+    my int $paren_close = index($work, ")", $paren_open);
+    if ($paren_close < 0) {
+        my str $fallback = $indent . "sub " . $name . " " . substr($work, $paren_open);
+        return $fallback;
+    }
+    my str $params_raw = substr($work, $paren_open + 1, $paren_close - $paren_open - 1);
+    my str $params = extract_params($params_raw);
+
+    my str $result = $indent . "sub " . $name . " {";
+    if ($is_async) {
+        $result = $result . " # was async";
+    }
+
+    # Add my (...) = @_; if there are params
+    if (length($params) > 0) {
+        $result = $result . "\n" . $indent . "    my (" . $params . ") = @_;";
+    }
+
+    return $result;
+}
+
+# ============================================================
+# Convert a Moose 'has' declaration
+# has ro str $name (required); -> has 'name' => (is => 'ro', isa => 'Str', required => 1);
+# ============================================================
+func convert_has_line(str $line) str {
+    my str $trimmed = $line;
+    $trimmed =~ s/^\s+//;
+    $trimmed =~ s/\s+$//;
+
+    # Get indentation
+    my str $indent = "";
+    my int $k = 0;
+    while ($k < length($line)) {
+        my int $ch = char_at($line, $k);
+        if ($ch == 32 || $ch == 9) {
+            $indent = $indent . substr($line, $k, 1);
+            $k = $k + 1;
+        } else {
+            $k = length($line);
+        }
+    }
+
+    my str $work = $trimmed;
+    $work = replace($work, "^has\\s+", "");
+
+    # Extract access mode (ro/rw)
+    my str $access = "ro";
+    if (match($work, "^(ro|rw)\\s+")) {
+        my array @c = captures();
+        $access = $c[1];
+        $work = replace($work, "^(ro|rw)\\s+", "");
+    }
+
+    # Extract type
+    my str $type = "Any";
+    if (match($work, "^(\\w+)\\s+")) {
+        my array @c = captures();
+        $type = moose_type($c[1]);
+        $work = replace($work, "^\\w+\\s+", "");
+    }
+
+    # Extract variable name (strip sigil)
+    my str $attr_name = "";
+    if (match($work, "^[$](\\w+)")) {
+        my array @c = captures();
+        $attr_name = $c[1];
+        $work = replace($work, "^[$]\\w+", "");
+    }
+    $work =~ s/^\s+//;
+
+    # Check for default value
+    my str $default_val = "";
+    if (match($work, "^=\\s*")) {
+        $work = replace($work, "^=\\s*", "");
+        # Default value is everything up to ( or ;
+        if (match($work, "^(.+?)\\s*[;(]")) {
+            my array @c = captures();
+            $default_val = $c[1];
+            $default_val =~ s/\s+$//;
+        } else {
+            $default_val = replace($work, ";.*", "");
+            $default_val =~ s/\s+$//;
+        }
+    }
+
+    # Check for options in parens
+    my int $is_required = 0;
+    my int $is_lazy = 0;
+    my str $builder = "";
+    if (match($work, "\\((.+?)\\)")) {
+        my array @c = captures();
+        my str $opts = $c[1];
+        if (match($opts, "\\brequired\\b")) {
+            $is_required = 1;
+        }
+        if (match($opts, "\\blazy\\b")) {
+            $is_lazy = 1;
+        }
+        if (match($opts, "builder\\s*=>\\s*\"(\\w+)\"")) {
+            my array @bc = captures();
+            $builder = $bc[1];
+        }
+    }
+
+    # Build Moose has declaration
+    my str $result = $indent . "has '" . $attr_name . "' => (is => '" . $access . "', isa => '" . $type . "'";
+    if ($is_required) {
+        $result = $result . ", required => 1";
+    }
+    if (length($default_val) > 0) {
+        $result = $result . ", default => " . $default_val;
+    }
+    if ($is_lazy) {
+        $result = $result . ", lazy => 1";
+    }
+    if (length($builder) > 0) {
+        $result = $result . ", builder => '" . $builder . "'";
+    }
+    $result = $result . ");";
+    return $result;
+}
+
+# ============================================================
+# Generate Perl header with compatibility functions
+# ============================================================
+func gen_header(str $source, int $needs_cwd, int $needs_fbase, int $needs_posix, int $needs_thr, int $needs_carp, int $needs_moose) str {
+    my str $h = "#!/usr/bin/env perl\n";
+    $h = $h . "# Converted from Strada: " . $source . "\n";
+    $h = $h . "# Generated by strada2perl\n";
+    $h = $h . "#\n";
+    $h = $h . "use strict;\n";
+    $h = $h . "use warnings;\n";
+    $h = $h . "use feature 'say';\n";
+
+    if ($needs_cwd) {
+        $h = $h . "use Cwd qw(getcwd realpath);\n";
+    }
+    if ($needs_fbase) {
+        $h = $h . "use File::Basename;\n";
+    }
+    if ($needs_posix) {
+        $h = $h . "use POSIX qw(floor ceil);\n";
+    }
+    if ($needs_thr) {
+        $h = $h . "use Time::HiRes qw(usleep);\n";
+    }
+    if ($needs_carp) {
+        $h = $h . "use Carp;\n";
+    }
+
+    $h = $h . "\n";
+    $h = $h . "# --- Strada compatibility helpers ---\n";
+    $h = $h . "sub strada_slurp {\n";
+    $h = $h . "    my ($file) = @_;\n";
+    $h = $h . "    open(my $fh, '<', $file) or die \"Cannot read $file: $!\";\n";
+    $h = $h . "    local $/;\n";
+    $h = $h . "    my $content = <$fh>;\n";
+    $h = $h . "    close($fh);\n";
+    $h = $h . "    return $content;\n";
+    $h = $h . "}\n\n";
+
+    $h = $h . "sub strada_spew {\n";
+    $h = $h . "    my ($file, $content) = @_;\n";
+    $h = $h . "    open(my $fh, '>', $file) or die \"Cannot write $file: $!\";\n";
+    $h = $h . "    print $fh $content;\n";
+    $h = $h . "    close($fh);\n";
+    $h = $h . "}\n\n";
+
+    $h = $h . "sub strada_open {\n";
+    $h = $h . "    my ($file, $mode) = @_;\n";
+    $h = $h . "    my $pmode = $mode eq 'r' ? '<' : $mode eq 'w' ? '>' : $mode eq 'a' ? '>>' : $mode;\n";
+    $h = $h . "    open(my $fh, $pmode, $file) or die \"Cannot open $file: $!\";\n";
+    $h = $h . "    return $fh;\n";
+    $h = $h . "}\n\n";
+
+    $h = $h . "sub strada_readline {\n";
+    $h = $h . "    my ($fh) = @_;\n";
+    $h = $h . "    my $line = <$fh>;\n";
+    $h = $h . "    return $line;\n";
+    $h = $h . "}\n\n";
+
+    $h = $h . "sub strada_readdir {\n";
+    $h = $h . "    my ($path) = @_;\n";
+    $h = $h . "    opendir(my $dh, $path) or return ();\n";
+    $h = $h . "    my @entries = grep { $_ ne '.' && $_ ne '..' } readdir($dh);\n";
+    $h = $h . "    closedir($dh);\n";
+    $h = $h . "    return @entries;\n";
+    $h = $h . "}\n\n";
+
+    $h = $h . "# match($str, $pattern) -> 1 if matches, 0 otherwise\n";
+    $h = $h . "# NOTE: For replacements with backrefs ($1,$2), use s/// directly.\n";
+    $h = $h . "sub match { return $_[0] =~ /$_[1]/ ? 1 : 0 }\n";
+    $h = $h . "sub replace { my ($s,$f,$t) = @_; $s =~ s/$f/$t/; return $s }\n";
+    $h = $h . "sub replace_all { my ($s,$f,$t) = @_; $s =~ s/$f/$t/g; return $s }\n";
+    $h = $h . "sub char_at { return ord(substr($_[0], $_[1], 1)) }\n";
+    $h = $h . "\n";
+
+    return $h;
+}
+
+# ============================================================
+# Main conversion function
+# ============================================================
+func convert_file(str $input_path, str $output_path) int {
+    my str $content = sys::slurp($input_path);
+    if (length($content) == 0) {
+        say("Error: Cannot read or empty file: " . $input_path);
+        return 1;
+    }
+
+    my array @lines = split("\n", $content);
+    my str $body = "";
+
+    # --- Pre-scan for needed modules ---
+    my int $needs_cwd = 0;
+    my int $needs_fbase = 0;
+    my int $needs_posix = 0;
+    my int $needs_thr = 0;
+    my int $needs_carp = 0;
+    my int $needs_moose = 0;
+
+    if (match($content, "sys::getcwd") || match($content, "sys::realpath") || match($content, "core::getcwd") || match($content, "core::realpath")) {
+        $needs_cwd = 1;
+    }
+    if (match($content, "sys::basename") || match($content, "sys::dirname") || match($content, "core::basename") || match($content, "core::dirname")) {
+        $needs_fbase = 1;
+    }
+    if (match($content, "sys::_exit") || match($content, "math::floor") || match($content, "math::ceil") || match($content, "math::pow") || match($content, "core::_exit")) {
+        $needs_posix = 1;
+    }
+    if (match($content, "sys::usleep") || match($content, "core::usleep")) {
+        $needs_thr = 1;
+    }
+    if (match($content, "sys::stack_trace") || match($content, "core::stack_trace")) {
+        $needs_carp = 1;
+    }
+    if (match($content, "\\bhas\\s+(ro|rw)\\s+") || match($content, "\\bextends\\s+\\w") || match($content, "\\bwith\\s+\\w") || match($content, "\\bbefore\\s+\"") || match($content, "\\bafter\\s+\"") || match($content, "\\baround\\s+\"")) {
+        $needs_moose = 1;
+    }
+
+    # --- State machine ---
+    my int $in_main = 0;
+    my int $main_depth = 0;
+    my int $in_c_block = 0;
+    my int $c_depth = 0;
+    my int $in_enum = 0;
+    my str $enum_name = "";
+    my int $enum_val = 0;
+    my int $in_begin = 0;
+    my int $begin_depth = 0;
+    my int $in_class = 0;
+    my int $class_depth = 0;
+    my int $in_modifier = 0;
+    my int $mod_depth = 0;
+    my int $moose_declared = 0;
+    my str $current_package = "main";
+
+    my int $i = 0;
+    while ($i < size(@lines)) {
+        my str $ln = $lines[$i];
+        my str $trimmed = $ln;
+        $trimmed =~ s/^\s+//;
+        $trimmed =~ s/\s+$//;
+        my int $opens = count_opens($ln);
+        my int $closes = count_closes($ln);
+
+        # Track main depth for ALL lines (even those consumed by other handlers)
+        if ($in_main) {
+            $main_depth = $main_depth + $opens - $closes;
+        }
+
+        # --- Inside __C__ block: skip ---
+        if ($in_c_block) {
+            $c_depth = $c_depth + $opens - $closes;
+            if ($c_depth <= 0) {
+                $in_c_block = 0;
+            }
+            $i = $i + 1;
+            next;
+        }
+
+        # --- Inside enum block: collect members ---
+        if ($in_enum) {
+            if ($trimmed eq "}" || $trimmed eq "};") {
+                $body = $body . "}\n";
+                $in_enum = 0;
+                $i = $i + 1;
+                next;
+            }
+            # Parse: MEMBER or MEMBER = VALUE (with optional trailing comma)
+            my str $member_line = $trimmed;
+            $member_line = replace($member_line, ",\\s*$", "");
+            $member_line =~ s/\s+$//;
+            if (length($member_line) > 0 && !match($member_line, "^#")) {
+                my str $mname = $member_line;
+                if (match($member_line, "^(\\w+)\\s*=\\s*(-?\\d+)")) {
+                    my array @c = captures();
+                    $mname = $c[1];
+                    $enum_val = $c[2] + 0;
+                } else {
+                    $mname = replace($member_line, "\\s.*", "");
+                }
+                $body = $body . "    use constant " . $mname . " => " . $enum_val . ";\n";
+                $enum_val = $enum_val + 1;
+            }
+            $i = $i + 1;
+            next;
+        }
+
+        # --- Inside BEGIN block: unwrap ---
+        if ($in_begin) {
+            $begin_depth = $begin_depth + $opens - $closes;
+            if ($trimmed eq "}" && $begin_depth <= 0) {
+                $in_begin = 0;
+                $i = $i + 1;
+                next;
+            }
+            # Output body lines converted
+            $body = $body . convert_line($ln) . "\n";
+            $i = $i + 1;
+            next;
+        }
+
+        # --- Inside func main(): unwrap ---
+        if ($in_main) {
+            # main_depth already updated above (before state handlers)
+            if ($trimmed eq "}" && $main_depth <= 0) {
+                $in_main = 0;
+                $i = $i + 1;
+                next;
+            }
+            # Skip return 0; at end of main
+            if (match($trimmed, "^return\\s+0\\s*;")) {
+                $i = $i + 1;
+                next;
+            }
+            # Convert return N; to exit(N);
+            if (match($trimmed, "^return\\s+")) {
+                my str $conv = convert_line($ln);
+                $conv = replace($conv, "return\\s+", "exit(");
+                $conv = replace($conv, ";", ");");
+                $body = $body . $conv . "\n";
+                $i = $i + 1;
+                next;
+            }
+            # Fall through to state machine checks below
+            # so try/catch, __C__, BEGIN/END, anonymous func, etc. are handled
+        }
+
+        # --- Inside class block: track depth, skip closing brace ---
+        if ($in_class) {
+            my int $next_depth = $class_depth + $opens - $closes;
+            if ($trimmed eq "}" && $next_depth <= 0) {
+                $in_class = 0;
+                $class_depth = 0;
+                $i = $i + 1;
+                next;
+            }
+            $class_depth = $next_depth;
+            # Fall through to process class body lines normally
+        }
+
+        # --- Inside method modifier (before/after/around): track depth ---
+        if ($in_modifier) {
+            $mod_depth = $mod_depth + $opens - $closes;
+            if ($trimmed eq "}" && $mod_depth <= 0) {
+                $body = $body . "};\n";
+                $in_modifier = 0;
+                $i = $i + 1;
+                next;
+            }
+            $body = $body . convert_line($ln) . "\n";
+            $i = $i + 1;
+            next;
+        }
+
+        # ============================================================
+        # Check for new constructs
+        # ============================================================
+
+        # --- __C__ block ---
+        if (match($trimmed, "^__C__\\s*\\{") || match($trimmed, "__C__\\s*\\{")) {
+            $body = $body . "# __C__ block removed (C interop code)\n";
+            $in_c_block = 1;
+            $c_depth = $opens - $closes;
+            if ($c_depth <= 0) {
+                $in_c_block = 0;
+            }
+            $i = $i + 1;
+            next;
+        }
+
+        # --- enum Name { ---
+        if (match($trimmed, "^enum\\s+(\\w+)\\s*\\{")) {
+            my array @c = captures();
+            $enum_name = $c[1];
+            $enum_val = 0;
+            $in_enum = 1;
+            $body = $body . "{\n    package " . $enum_name . ";\n";
+            $i = $i + 1;
+            next;
+        }
+
+        # --- BEGIN block ---
+        if (match($trimmed, "^BEGIN\\s*\\{")) {
+            $in_begin = 1;
+            $begin_depth = 1;
+            $body = $body . "# BEGIN block\n";
+            $i = $i + 1;
+            next;
+        }
+
+        # --- func main() ---
+        if (match($trimmed, "^func\\s+main\\s*\\(")) {
+            $in_main = 1;
+            $main_depth = 1;
+            $body = $body . "# Main\n";
+            $i = $i + 1;
+            next;
+        }
+
+        # --- class Name { -> package Name; ---
+        if (match($trimmed, "^class\\s+")) {
+            my str $conv = $ln;
+            $conv = replace($conv, "\\bclass\\s+", "package ");
+            $conv = replace($conv, "\\s+extends\\s+\\w+", "");
+            $conv = replace($conv, "\\s*\\{\\s*$", ";");
+            $body = $body . $conv . "\n";
+            $in_class = 1;
+            $class_depth = 1;
+            $i = $i + 1;
+            next;
+        }
+
+        # --- Track current package ---
+        if (match($trimmed, "^package\\s+(\\w[\\w:]*)\\s*;")) {
+            my array @c = captures();
+            $current_package = $c[1];
+            $moose_declared = 0;
+            $body = $body . $ln . "\n";
+            $i = $i + 1;
+            next;
+        }
+
+        # --- Moose: has ro/rw type $name ---
+        if (match($trimmed, "^has\\s+(ro|rw)\\s+")) {
+            if ($needs_moose && !$moose_declared && $current_package ne "main") {
+                $body = $body . "use Moose;\n";
+                $moose_declared = 1;
+            }
+            $body = $body . convert_has_line($ln) . "\n";
+            $i = $i + 1;
+            next;
+        }
+
+        # --- Moose: extends Parent; ---
+        if (match($trimmed, "^extends\\s+\\w")) {
+            if ($needs_moose && !$moose_declared && $current_package ne "main") {
+                $body = $body . "use Moose;\n";
+                $moose_declared = 1;
+            }
+            my str $parent = $trimmed;
+            $parent = replace($parent, "^extends\\s+", "");
+            $parent = replace($parent, ";.*", "");
+            $parent =~ s/\s+$//;
+            $body = $body . "extends '" . $parent . "';\n";
+            $i = $i + 1;
+            next;
+        }
+
+        # --- Moose: with Role; ---
+        if (match($trimmed, "^with\\s+\\w")) {
+            if ($needs_moose && !$moose_declared && $current_package ne "main") {
+                $body = $body . "use Moose;\n";
+                $moose_declared = 1;
+            }
+            my str $role = $trimmed;
+            $role = replace($role, "^with\\s+", "");
+            $role = replace($role, ";.*", "");
+            $role =~ s/\s+$//;
+            $body = $body . "with '" . $role . "';\n";
+            $i = $i + 1;
+            next;
+        }
+
+        # --- Moose: before/after/around "method" func(...) { ---
+        if (match($trimmed, "^(before|after|around)\\s+\"(\\w+)\"\\s+func")) {
+            my array @c = captures();
+            my str $mod_type = $c[1];
+            my str $method_name = $c[2];
+            if ($needs_moose && !$moose_declared && $current_package ne "main") {
+                $body = $body . "use Moose;\n";
+                $moose_declared = 1;
+            }
+            # Extract params from func(...) part
+            my str $params = "";
+            my int $fp = index($trimmed, "(");
+            if ($fp >= 0) {
+                my int $fpc = index($trimmed, ")", $fp);
+                if ($fpc >= 0) {
+                    my str $raw_params = substr($trimmed, $fp + 1, $fpc - $fp - 1);
+                    $params = extract_params($raw_params);
+                }
+            }
+
+            $body = $body . $mod_type . " '" . $method_name . "' => sub {\n";
+            if (length($params) > 0) {
+                # For 'around', Moose puts $orig first: ($orig, $self, @args)
+                if ($mod_type eq "around") {
+                    $body = $body . "    # NOTE: Moose around receives ($orig, $self, @args)\n";
+                }
+                $body = $body . "    my (" . $params . ") = @_;\n";
+            }
+            $in_modifier = 1;
+            $mod_depth = $opens - $closes;
+            $i = $i + 1;
+            next;
+        }
+
+        # --- try { -> eval { ---
+        if (match($trimmed, "^try\\s*\\{")) {
+            my str $conv = $ln;
+            $conv = replace($conv, "\\btry\\s*\\{", "eval {");
+            $body = $body . $conv . "\n";
+            $i = $i + 1;
+            next;
+        }
+
+        # --- } catch (Type $e) { -> }; if (ref($@) && ...) ---
+        if (match($trimmed, "^\\}\\s*catch\\s*\\(")) {
+            if (match($trimmed, "^\\}\\s*catch\\s*\\((\\w+)\\s+[$](\\w+)\\)\\s*\\{")) {
+                # Typed catch: } catch (TypeName $e) {
+                my array @c = captures();
+                my str $type = $c[1];
+                my str $var = $c[2];
+                $body = $body . "}; if (ref($@) && $@->isa('" . $type . "')) {\n";
+                $body = $body . "    my $" . $var . " = $@;\n";
+            } else {
+                # Generic catch: } catch ($e) {
+                my str $var = "e";
+                if (match($trimmed, "catch\\s*\\([$](\\w+)\\)")) {
+                    my array @c = captures();
+                    $var = $c[1];
+                }
+                $body = $body . "}; if ($@) {\n";
+                $body = $body . "    my $" . $var . " = $@;\n";
+            }
+            $i = $i + 1;
+            next;
+        }
+
+        # --- Named function definitions: [private|async] func NAME(...) TYPE { ---
+        if (match($trimmed, "^(private\\s+|async\\s+)?func\\s+\\w+\\s*\\(")) {
+            $body = $body . convert_func_def($ln) . "\n";
+            $i = $i + 1;
+            next;
+        }
+
+        # --- Anonymous function: func (...) TYPE { -> sub { my (...) = @_; ---
+        if (match($trimmed, "\\bfunc\\s+\\(")) {
+            my str $conv = $ln;
+            # Extract params
+            my int $fp = index($conv, "func ");
+            if ($fp >= 0) {
+                my int $po = index($conv, "(", $fp);
+                if ($po >= 0) {
+                    my int $pc = index($conv, ")", $po);
+                    if ($pc >= 0) {
+                        my str $raw = substr($conv, $po + 1, $pc - $po - 1);
+                        my str $params = extract_params($raw);
+                        # Replace func (raw_params) rettype { with sub { my (params) = @_;
+                        my str $before = substr($conv, 0, $fp);
+                        my str $after = substr($conv, $pc + 1);
+                        # Strip return type and opening brace (we add our own in sub {)
+                        $after = replace($after, "^\\s*\\w+\\s*\\{", "");
+                        if (length($params) > 0) {
+                            $conv = $before . "sub { my (" . $params . ") = @_;" . $after;
+                        } else {
+                            $conv = $before . "sub {" . $after;
+                        }
+                    }
+                }
+            }
+            $body = $body . convert_line($conv) . "\n";
+            $i = $i + 1;
+            next;
+        }
+
+        # --- Default: apply line conversion ---
+        $body = $body . convert_line($ln) . "\n";
+        $i = $i + 1;
+    }
+
+    # Build final output: header + body
+    my str $header = gen_header($input_path, $needs_cwd, $needs_fbase, $needs_posix, $needs_thr, $needs_carp, $needs_moose);
+    my str $output = $header . $body;
+
+    sys::spew($output_path, $output);
+    say("Converted: " . $input_path . " -> " . $output_path);
+    return 0;
+}
+
+func main(int $argc, array @argv) int {
+    if ($argc < 2) {
+        say("Usage: strada2perl input.strada [output.pl]");
+        say("");
+        say("Converts Strada code to Perl 5 code.");
+        say("If output file is not specified, uses input.pl");
+        say("");
+        say("Features handled:");
+        say("  - Type annotations stripped (my int $x -> my $x)");
+        say("  - func -> sub with parameter extraction");
+        say("  - sys::/core:: -> Perl built-ins");
+        say("  - math:: -> Perl math functions");
+        say("  - try/catch/throw -> eval/die/if($@)");
+        say("  - import_lib/import_object/import_archive -> use");
+        say("  - __C__ blocks removed");
+        say("  - enum -> use constant in sub-package");
+        say("  - Moose-style has/extends/with/before/after/around");
+        say("  - Strada built-ins via compatibility helpers");
+        say("  - func main() unwrapped to inline code");
+        return 1;
+    }
+
+    my str $input = $argv[1];
+    my str $output = "";
+
+    if ($argc >= 3) {
+        $output = $argv[2];
+    } else {
+        $output = $input;
+        $output = replace($output, "\\.strada$", ".pl");
+        if ($output eq $input) {
+            $output = $input . ".pl";
+        }
+    }
+
+    my int $status = convert_file($input, $output);
+    exit($status);
+    return 0;
+}

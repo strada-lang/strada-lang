@@ -1,0 +1,353 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+=head1 NAME
+
+LinkedList - Singly linked list implementation for Strada
+
+=head1 SYNOPSIS
+
+    use lib "lib";
+    use LinkedList;
+
+    my scalar $list = LinkedList::new();
+    $list->push("first");
+    $list->push("second");
+    $list->unshift("zeroth");
+
+    say("Length: " . $list->len());
+
+    while (!$list->is_empty()) {
+        say($list->shift());
+    }
+
+=head1 DESCRIPTION
+
+LinkedList provides a simple singly-linked list with an OOP interface.
+Useful when you need efficient insertion/removal at both ends.
+
+=head1 CONSTRUCTOR
+
+=head2 new()
+
+Create a new empty linked list.
+
+    my scalar $list = LinkedList::new();
+
+=head2 from_array(@items)
+
+Create a linked list from an array.
+
+    my array @items = (1, 2, 3);
+    my scalar $list = LinkedList::from_array(@items);
+
+=head1 METHODS
+
+=head2 len()
+
+Get the number of elements.
+
+=head2 is_empty()
+
+Returns 1 if list is empty, 0 otherwise.
+
+=head2 push($value) / add($value)
+
+Add element to end of list.
+
+    $list->push("last");
+
+=head2 unshift($value)
+
+Add element to beginning of list.
+
+    $list->unshift("first");
+
+=head2 shift()
+
+Remove and return first element. Returns undef if empty.
+
+    my scalar $first = $list->shift();
+
+=head2 pop()
+
+Remove and return last element. Returns undef if empty.
+
+    my scalar $last = $list->pop();
+
+=head2 peek_head()
+
+Get first element without removing it.
+
+=head2 peek_tail()
+
+Get last element without removing it.
+
+=head2 get($index)
+
+Get element at index (0-based). Negative indices count from end.
+
+    my scalar $val = $list->get(0);    # First
+    my scalar $val = $list->get(-1);   # Last
+
+=head2 set($index, $value)
+
+Set element at index. Returns old value.
+
+    my scalar $old = $list->set(0, "new value");
+
+=head2 clear()
+
+Remove all elements.
+
+=head2 to_array()
+
+Convert list to array.
+
+    my array @arr = $list->to_array();
+
+=head2 each($func)
+
+Call function for each element.
+
+    $list->each(func (scalar $val) { say($val); });
+
+=head2 destroy()
+
+Clear list and return undef.
+
+=head1 EXAMPLE
+
+    use lib "lib";
+    use LinkedList;
+
+    # Use as a queue (FIFO)
+    my scalar $queue = LinkedList::new();
+    $queue->push("task1");
+    $queue->push("task2");
+    $queue->push("task3");
+
+    while (!$queue->is_empty()) {
+        my scalar $task = $queue->shift();
+        say("Processing: " . $task);
+    }
+
+    # Use as a stack (LIFO)
+    my scalar $stack = LinkedList::new();
+    $stack->push("bottom");
+    $stack->push("middle");
+    $stack->push("top");
+
+    while (!$stack->is_empty()) {
+        say("Popped: " . $stack->pop());
+    }
+
+=head1 SEE ALSO
+
+L<List::Util>
+
+=cut
+
+package LinkedList;
+version "1.0.0";
+
+func _node_new(scalar $value) scalar {
+    my hash %node = ();
+    $node{"value"} = $value;
+    $node{"next"} = undef;
+    return \%node;
+}
+
+func new() scalar {
+    my hash %self = ();
+    $self{"head"} = undef;
+    $self{"tail"} = undef;
+    $self{"len"} = 0;
+    return bless(\%self, "LinkedList");
+}
+
+func len(scalar $self) int {
+    return $self->{"len"};
+}
+
+func is_empty(scalar $self) int {
+    return $self->{"len"} == 0;
+}
+
+func clear(scalar $self) void {
+    $self->{"head"} = undef;
+    $self->{"tail"} = undef;
+    $self->{"len"} = 0;
+}
+
+func destroy(scalar $self) scalar {
+    LinkedList::clear($self);
+    return undef;
+}
+
+func push(scalar $self, scalar $value) void {
+    my scalar $node = LinkedList::_node_new($value);
+    my scalar $tail = $self->{"tail"};
+    if (defined($tail)) {
+        $tail->{"next"} = $node;
+    } else {
+        $self->{"head"} = $node;
+    }
+    $self->{"tail"} = $node;
+    $self->{"len"} = $self->{"len"} + 1;
+}
+
+func add(scalar $self, scalar $value) void {
+    LinkedList::push($self, $value);
+}
+
+func unshift(scalar $self, scalar $value) void {
+    my scalar $node = LinkedList::_node_new($value);
+    my scalar $head = $self->{"head"};
+    if (defined($head)) {
+        $node->{"next"} = $head;
+    } else {
+        $self->{"tail"} = $node;
+    }
+    $self->{"head"} = $node;
+    $self->{"len"} = $self->{"len"} + 1;
+}
+
+func shift(scalar $self) scalar {
+    my scalar $head = $self->{"head"};
+    if (!defined($head)) {
+        return undef;
+    }
+
+    my scalar $value = $head->{"value"};
+    my scalar $next_node = $head->{"next"};
+    $self->{"head"} = $next_node;
+    if (!defined($next_node)) {
+        $self->{"tail"} = undef;
+    }
+    $self->{"len"} = $self->{"len"} - 1;
+    return $value;
+}
+
+func pop(scalar $self) scalar {
+    my scalar $head = $self->{"head"};
+    if (!defined($head)) {
+        return undef;
+    }
+
+    my scalar $cur = $head;
+    my scalar $prev = undef;
+    while (defined($cur->{"next"})) {
+        $prev = $cur;
+        $cur = deref($cur->{"next"});
+    }
+
+    my scalar $value = $cur->{"value"};
+    if (defined($prev)) {
+        $prev->{"next"} = undef;
+        $self->{"tail"} = $prev;
+    } else {
+        $self->{"head"} = undef;
+        $self->{"tail"} = undef;
+    }
+    $self->{"len"} = $self->{"len"} - 1;
+    return $value;
+}
+
+func peek_head(scalar $self) scalar {
+    my scalar $head = $self->{"head"};
+    if (!defined($head)) {
+        return undef;
+    }
+    return $head->{"value"};
+}
+
+func peek_tail(scalar $self) scalar {
+    my scalar $tail = $self->{"tail"};
+    if (!defined($tail)) {
+        return undef;
+    }
+    return $tail->{"value"};
+}
+
+func get(scalar $self, int $index) scalar {
+    my int $len = $self->{"len"};
+    if ($index < 0) {
+        $index = $len + $index;
+    }
+    if ($index < 0 || $index >= $len) {
+        return undef;
+    }
+    my int $i = 0;
+    my scalar $cur = $self->{"head"};
+    while ($i < $index && defined($cur)) {
+        $cur = deref($cur->{"next"});
+        $i = $i + 1;
+    }
+    if (!defined($cur)) {
+        return undef;
+    }
+    return $cur->{"value"};
+}
+
+func set(scalar $self, int $index, scalar $value) scalar {
+    my int $len = $self->{"len"};
+    if ($index < 0) {
+        $index = $len + $index;
+    }
+    if ($index < 0 || $index >= $len) {
+        return undef;
+    }
+    my int $i = 0;
+    my scalar $cur = $self->{"head"};
+    while ($i < $index && defined($cur)) {
+        $cur = deref($cur->{"next"});
+        $i = $i + 1;
+    }
+    if (!defined($cur)) {
+        return undef;
+    }
+    my scalar $old = $cur->{"value"};
+    $cur->{"value"} = $value;
+    return $old;
+}
+
+func to_array(scalar $self) array {
+    my array @out = ();
+    my scalar $cur = $self->{"head"};
+    while (defined($cur)) {
+        push(@out, $cur->{"value"});
+        $cur = deref($cur->{"next"});
+    }
+    return @out;
+}
+
+func from_array(array @items) scalar {
+    my scalar $list = LinkedList::new();
+    for my scalar $item (@items) {
+        LinkedList::push($list, $item);
+    }
+    return $list;
+}
+
+func each(scalar $self, scalar $fn) void {
+    my scalar $cur = $self->{"head"};
+    while (defined($cur)) {
+        $fn->($cur->{"value"});
+        $cur = deref($cur->{"next"});
+    }
+}

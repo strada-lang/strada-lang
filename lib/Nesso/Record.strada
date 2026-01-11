@@ -1,0 +1,338 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# NessoRecord - Record object with ActiveRecord-style methods
+#
+# Usage:
+#   my scalar $user = $n->create("users", { "name" => "Alice" });
+#   $user->save();
+#   $user->update({ "name" => "Bob" });
+#   $user->delete();
+#   $user->reload();
+#   my scalar $posts = $user->related("posts");
+
+package Nesso::Record;
+
+# Save this record to the database (INSERT or UPDATE)
+func save(scalar $self) int {
+    my scalar $nesso = $self->{"_nesso"};
+    return Nesso::save($nesso, $self);
+}
+
+# Update attributes and save in one call
+func update(scalar $self, scalar $attrs) int {
+    my array @keys = keys($attrs);
+    my int $i = 0;
+    my int $n = scalar(@keys);
+    while ($i < $n) {
+        my str $key = $keys[$i];
+        $self->{$key} = $attrs->{$key};
+        $i++;
+    }
+    return $self->save();
+}
+
+# Delete this record from the database
+func delete(scalar $self) int {
+    my scalar $nesso = $self->{"_nesso"};
+    return Nesso::delete($nesso, $self);
+}
+
+# Reload this record from the database
+func reload(scalar $self) scalar {
+    my scalar $nesso = $self->{"_nesso"};
+    my str $model = $self->{"_model"};
+    my scalar $schema = Nesso::get_schema($nesso, $model);
+    my str $pk = $schema->{"primary"};
+    my scalar $pk_val = $self->{$pk};
+
+    my scalar $fresh = Nesso::find($nesso, $model, $pk_val + 0);
+    if (defined($fresh)) {
+        # Copy all fields from fresh record
+        my array @keys = keys($fresh);
+        my int $i = 0;
+        my int $n = scalar(@keys);
+        while ($i < $n) {
+            my str $key = $keys[$i];
+            if ($key ne "_nesso") {
+                $self->{$key} = $fresh->{$key};
+            }
+            $i++;
+        }
+    }
+    return $self;
+}
+
+# Fetch related records
+func related(scalar $self, str $name) scalar {
+    my scalar $nesso = $self->{"_nesso"};
+    return Nesso::related($nesso, $self, $name);
+}
+
+# Get the model name
+func model(scalar $self) str {
+    return $self->{"_model"};
+}
+
+# Get the primary key value
+func id(scalar $self) scalar {
+    my scalar $nesso = $self->{"_nesso"};
+    my str $model = $self->{"_model"};
+    my scalar $schema = Nesso::get_schema($nesso, $model);
+    my str $pk = $schema->{"primary"};
+    return $self->{$pk};
+}
+
+# Check if this is a new record (not yet saved)
+func is_new(scalar $self) int {
+    my scalar $id_val = $self->id();
+    if (!defined($id_val) || $id_val + 0 == 0) {
+        return 1;
+    }
+    return 0;
+}
+
+/*
+
+=head1 NAME
+
+Nesso::Record - ActiveRecord-style methods for Nesso records
+
+=head1 SYNOPSIS
+
+    use lib "lib";
+    use DBI;
+    use Nesso;
+    use Nesso::Record;
+
+    my scalar $db = DBI::connect("dbi:SQLite:app.db", "", "");
+    my scalar $n = Nesso::new($db);
+
+    $n->define("users", {
+        "table"   => "users",
+        "columns" => ["id", "username", "email"],
+        "primary" => "id"
+    });
+
+    # Create a record
+    my scalar $user = $n->create("users", { "username" => "alice" });
+
+    # ActiveRecord-style methods
+    $user->save();                              # INSERT
+    $user->update({ "email" => "a@b.com" });    # UPDATE
+    $user->reload();                            # Refresh from DB
+    $user->delete();                            # DELETE
+
+    # Access record info
+    my int $id = $user->id();
+    my str $model = $user->model();
+    my int $new = $user->is_new();
+
+    # Fetch related records
+    my scalar $posts = $user->related("posts");
+
+=head1 DESCRIPTION
+
+Nesso::Record provides ActiveRecord-style instance methods for database
+records returned by Nesso. When you C<use Nesso::Record>, all records
+gain these methods, allowing you to call C<$record-E<gt>save()> instead
+of C<$nesso-E<gt>save($record)>.
+
+Records are automatically blessed as Nesso::Record (or a custom subclass
+if specified in the model definition).
+
+=head1 METHODS
+
+=head2 save
+
+    my int $id = $record->save();
+
+Saves the record to the database. Performs an INSERT if the record is new
+(no primary key), or an UPDATE if it already exists.
+
+Returns the primary key value.
+
+    my scalar $user = $n->create("users", { "username" => "alice" });
+    $user->save();    # INSERT INTO users ...
+    say("Created user with id: " . $user->id());
+
+    $user->{"email"} = "alice@example.com";
+    $user->save();    # UPDATE users SET email = ? WHERE id = ?
+
+=head2 update
+
+    my int $id = $record->update($attributes);
+
+Updates multiple attributes and saves in one call. This is a convenience
+method equivalent to setting each attribute and calling save().
+
+    $user->update({
+        "email"    => "newemail@example.com",
+        "username" => "alice2"
+    });
+
+Returns the primary key value.
+
+=head2 delete
+
+    my int $rows = $record->delete();
+
+Deletes the record from the database using its primary key.
+
+Returns the number of affected rows (typically 1).
+
+    $user->delete();    # DELETE FROM users WHERE id = ?
+
+=head2 reload
+
+    $record->reload();
+
+Reloads the record from the database, refreshing all attributes to their
+current database values. Useful after another process may have modified
+the record.
+
+    $user->reload();
+    say("Current email: " . $user->{"email"});
+
+Returns the record itself (for chaining).
+
+=head2 related
+
+    my scalar $related = $record->related($relation_name);
+
+Fetches related records using a relationship defined on the Nesso instance.
+
+    # Assuming: $n->has_many("users", "posts", "user_id");
+    my scalar $posts = $user->related("posts");
+
+    foreach my scalar $post (@{$posts}) {
+        say($post->{"title"});
+    }
+
+Returns:
+
+=over 4
+
+=item * Array reference for has_many relationships
+
+=item * Single record for belongs_to relationships
+
+=item * Single record or undef for has_one relationships
+
+=back
+
+=head2 model
+
+    my str $model_name = $record->model();
+
+Returns the model name for this record (e.g., "users", "posts").
+
+    my scalar $user = $n->find("users", 1);
+    say($user->model());    # "users"
+
+=head2 id
+
+    my scalar $id = $record->id();
+
+Returns the primary key value for this record. The primary key column
+is determined by the model's schema definition.
+
+    my scalar $user = $n->find("users", 42);
+    say($user->id());    # 42
+
+=head2 is_new
+
+    my int $new = $record->is_new();
+
+Returns 1 if the record has not been saved to the database yet
+(primary key is undefined or 0), 0 otherwise.
+
+    my scalar $user = $n->create("users", { "username" => "alice" });
+    say($user->is_new());    # 1
+
+    $user->save();
+    say($user->is_new());    # 0
+
+=head1 CUSTOM MODEL CLASSES
+
+You can create custom classes that inherit from Nesso::Record to add
+model-specific methods.
+
+    package User;
+    inherit Nesso::Record;
+
+    func set_password(scalar $self, str $password) void {
+        $self->{"password_hash"} = crypt::hash_password($password);
+        $self->save();
+    }
+
+    func authenticate(scalar $self, str $password) int {
+        return crypt::check_password($password, $self->{"password_hash"});
+    }
+
+    func posts(scalar $self) scalar {
+        return $self->related("posts");
+    }
+
+Specify the custom class in the model definition:
+
+    $n->define("users", {
+        "table"   => "users",
+        "columns" => ["id", "username", "password_hash"],
+        "primary" => "id",
+        "class"   => "User"
+    });
+
+Now records are blessed as User objects:
+
+    my scalar $user = $n->find("users", 1);
+    $user->set_password("secret123");    # Custom method
+    $user->save();                        # Inherited method
+
+    if ($user->authenticate("secret123")) {
+        say("Login successful!");
+    }
+
+=head1 INTERNAL FIELDS
+
+Each record has two internal fields that should not be modified:
+
+=over 4
+
+=item * B<_model> - The model name this record belongs to
+
+=item * B<_nesso> - Reference to the Nesso instance that created this record
+
+=back
+
+These are used internally by the record methods to perform database operations.
+
+=head1 SEE ALSO
+
+L<Nesso> - The main ORM module
+
+=head1 AUTHOR
+
+Michael J. Flickinger
+
+=head1 LICENSE
+
+GNU General Public License, version 2
+
+=cut
+
+*/

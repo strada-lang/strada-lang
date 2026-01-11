@@ -1,0 +1,26 @@
+func main() int {
+    my str $text = "Hello World 42";
+
+    # Basic match
+    if ($text =~ /World/) {
+        say("matched World");
+    }
+
+    # Negated match
+    if ($text !~ /Goodbye/) {
+        say("no Goodbye");
+    }
+
+    # Substitution
+    my str $s = "foo bar baz";
+    $s =~ s/bar/qux/;
+    say($s);
+
+    # Capture variables
+    if ($text =~ /(\w+)\s+(\w+)/) {
+        say("capture 1: " . $1);
+        say("capture 2: " . $2);
+    }
+
+    return 0;
+}

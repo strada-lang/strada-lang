@@ -1,0 +1,75 @@
+# Test variadic functions with spread operator
+
+# Basic variadic function - sum of all numbers
+func sum(int ...@nums) int {
+    my int $total = 0;
+    foreach my int $n (@nums) {
+        $total = $total + $n;
+    }
+    return $total;
+}
+
+# Variadic with fixed params first
+func prefix_sum(str $prefix, int ...@nums) str {
+    my int $total = 0;
+    foreach my int $n (@nums) {
+        $total = $total + $n;
+    }
+    return $prefix . $total;
+}
+
+# Helper to print arrays
+func print_arr(array @arr) void {
+    my str $s = "[";
+    my int $len = size(@arr);
+    for (my int $i = 0; $i < $len; $i = $i + 1) {
+        if ($i > 0) {
+            $s = $s . ", ";
+        }
+        $s = $s . $arr[$i];
+    }
+    $s = $s . "]";
+    say($s);
+}
+
+func main() int {
+    say("=== Testing Variadic Functions ===");
+
+    # Test 1: Basic variadic call
+    say("Test 1: sum(1, 2, 3) = " . sum(1, 2, 3));
+
+    # Test 2: More arguments
+    say("Test 2: sum(1, 2, 3, 4, 5) = " . sum(1, 2, 3, 4, 5));
+
+    # Test 3: Single argument
+    say("Test 3: sum(42) = " . sum(42));
+
+    # Test 4: No variadic arguments
+    say("Test 4: sum() = " . sum());
+
+    # Test 5: Spread operator with array variable
+    my array @vals = (10, 20, 30);
+    say("Test 5: sum(...@vals) with @vals = (10, 20, 30) = " . sum(...@vals));
+
+    # Test 6: Mixed - regular args and spread
+    say("Test 6: sum(1, ...@vals) = " . sum(1, ...@vals));
+
+    # Test 7: Mixed - spread then regular args
+    say("Test 7: sum(...@vals, 99) = " . sum(...@vals, 99));
+
+    # Test 8: Mixed - regular, spread, regular
+    say("Test 8: sum(1, ...@vals, 99) = " . sum(1, ...@vals, 99));
+
+    # Test 9: Multiple spreads
+    my array @more = (100, 200);
+    say("Test 9: sum(...@vals, ...@more) = " . sum(...@vals, ...@more));
+
+    # Test 10: Variadic function with fixed params
+    say("Test 10: prefix_sum(\"Total: \", 1, 2, 3) = " . prefix_sum("Total: ", 1, 2, 3));
+
+    # Test 11: Variadic function with fixed params and spread
+    say("Test 11: prefix_sum(\"Sum: \", ...@vals) = " . prefix_sum("Sum: ", ...@vals));
+
+    say("=== All tests completed ===");
+    return 0;
+}

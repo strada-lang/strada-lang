@@ -1,0 +1,973 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+=head1 NAME
+
+YAML - Simple YAML parser and dumper for Strada
+
+=head1 SYNOPSIS
+
+    use lib "lib";
+    use YAML;
+
+    # Parse YAML string
+    my scalar $data = YAML::Load($yaml_string);
+
+    # Dump data structure to YAML
+    my str $yaml = YAML::Dump($data);
+
+=head1 DESCRIPTION
+
+YAML provides functions for parsing YAML documents into Strada data structures
+and dumping Strada data back to YAML format.
+
+This is a simple YAML 1.1 implementation that supports:
+
+=over 4
+
+=item * Mappings (hashes)
+
+=item * Sequences (arrays)
+
+=item * Scalars (strings, numbers, booleans, null)
+
+=item * Multi-line literal blocks (|)
+
+=item * Inline notation ({} and [])
+
+=item * Comments (#)
+
+=item * Quoted strings (single and double)
+
+=back
+
+=head1 FUNCTIONS
+
+=head2 Load($yaml)
+
+Parse a YAML string and return the corresponding Strada data structure.
+
+    my str $yaml = "name: Alice\nage: 30\n";
+    my scalar $data = YAML::Load($yaml);
+    say($data->{"name"});  # Alice
+
+=head2 Dump($data)
+
+Convert a Strada data structure to a YAML string.
+
+    my hash %user = ();
+    $user{"name"} = "Bob";
+    $user{"scores"} = [85, 90, 78];
+    my str $yaml = YAML::Dump(\%user);
+
+=head1 YAML SYNTAX
+
+=head2 Basic Mappings
+
+    key: value
+    name: Alice
+    age: 30
+
+=head2 Nested Mappings
+
+    database:
+      host: localhost
+      port: 5432
+
+=head2 Sequences
+
+    colors:
+      - red
+      - green
+      - blue
+
+=head2 Inline Notation
+
+    servers: [web1, web2, web3]
+    config: {debug: true, timeout: 30}
+
+=head2 Multi-line Strings
+
+    description: |
+      This is a multi-line
+      string that preserves
+      newlines.
+
+=head2 Special Values
+
+    enabled: true     # or yes, on -> 1
+    disabled: false   # or no, off -> 0
+    nothing: null     # or ~ -> undef
+
+=head1 EXAMPLE
+
+    use lib "lib";
+    use YAML;
+
+    my str $config_yaml = "
+    server:
+      host: localhost
+      port: 8080
+    database:
+      driver: sqlite
+      name: app.db
+    features:
+      - logging
+      - caching
+      - compression
+    ";
+
+    my scalar $config = YAML::Load($config_yaml);
+
+    say("Server: " . $config->{"server"}->{"host"});
+    say("DB: " . $config->{"database"}->{"name"});
+
+    # Modify and dump back
+    $config->{"server"}->{"port"} = 9000;
+    say(YAML::Dump($config));
+
+=head1 SEE ALSO
+
+L<JSON>
+
+=cut
+
+package YAML;
+version "1.1.0";
+
+# ============================================================
+# YAML Parsing
+# ============================================================
+
+# Get indentation level of a line (number of leading spaces)
+func get_indent(str $line) int {
+    my int $len = length($line);
+    my int $indent = 0;
+
+    while ($indent < $len) {
+        my str $ch = substr($line, $indent, 1);
+        if ($ch eq " ") {
+            $indent = $indent + 1;
+        } else {
+            return $indent;
+        }
+    }
+
+    return $indent;
+}
+
+# Strip leading whitespace
+func ltrim(str $s) str {
+    my int $len = length($s);
+    my int $i = 0;
+
+    while ($i < $len) {
+        my str $ch = substr($i, $i, 1);
+        if ($ch eq " " || $ch eq "\t") {
+            $i = $i + 1;
+        } else {
+            return substr($s, $i, $len - $i);
+        }
+    }
+
+    return "";
+}
+
+# Strip trailing whitespace
+func rtrim(str $s) str {
+    my int $len = length($s);
+
+    while ($len > 0) {
+        my str $ch = substr($s, $len - 1, 1);
+        if ($ch eq " " || $ch eq "\t" || $ch eq "\r" || $ch eq "\n") {
+            $len = $len - 1;
+        } else {
+            return substr($s, 0, $len);
+        }
+    }
+
+    return "";
+}
+
+# Trim both ends
+func trim(str $s) str {
+    my int $len = length($s);
+    if ($len == 0) {
+        return "";
+    }
+
+    # Find start (skip leading whitespace)
+    my int $start = 0;
+    my int $found_start = 0;
+    while ($start < $len && !$found_start) {
+        my str $ch = substr($s, $start, 1);
+        if ($ch eq " " || $ch eq "\t") {
+            $start = $start + 1;
+        } else {
+            $found_start = 1;
+        }
+    }
+
+    if ($start >= $len) {
+        return "";
+    }
+
+    # Find end (skip trailing whitespace)
+    my int $end = $len;
+    my int $found_end = 0;
+    while ($end > $start && !$found_end) {
+        my str $ch = substr($s, $end - 1, 1);
+        if ($ch eq " " || $ch eq "\t" || $ch eq "\r" || $ch eq "\n") {
+            $end = $end - 1;
+        } else {
+            $found_end = 1;
+        }
+    }
+
+    if ($start >= $end) {
+        return "";
+    }
+
+    return substr($s, $start, $end - $start);
+}
+
+# Check if line is empty or comment
+func is_empty_or_comment(str $line) int {
+    my str $trimmed = YAML::trim($line);
+    if (length($trimmed) == 0) {
+        return 1;
+    }
+    if (substr($trimmed, 0, 1) eq "#") {
+        return 1;
+    }
+    return 0;
+}
+
+# Process escape sequences in double-quoted strings
+func process_escapes(str $s) str {
+    my str $result = "";
+    my int $len = length($s);
+    my int $i = 0;
+
+    while ($i < $len) {
+        my str $ch = substr($s, $i, 1);
+
+        if ($ch eq "\\" && $i + 1 < $len) {
+            my str $next = substr($s, $i + 1, 1);
+
+            if ($next eq "n") {
+                $result = $result . "\n";
+                $i = $i + 2;
+            } elsif ($next eq "t") {
+                $result = $result . "\t";
+                $i = $i + 2;
+            } elsif ($next eq "r") {
+                $result = $result . "\r";
+                $i = $i + 2;
+            } elsif ($next eq "\\") {
+                $result = $result . "\\";
+                $i = $i + 2;
+            } elsif ($next eq "\"") {
+                $result = $result . "\"";
+                $i = $i + 2;
+            } elsif ($next eq "0") {
+                $result = $result . "\0";
+                $i = $i + 2;
+            } elsif ($next eq "/") {
+                $result = $result . "/";
+                $i = $i + 2;
+            } elsif ($next eq "b") {
+                # Backspace - ASCII 8
+                $result = $result . chr(8);
+                $i = $i + 2;
+            } elsif ($next eq "f") {
+                # Form feed - ASCII 12
+                $result = $result . chr(12);
+                $i = $i + 2;
+            } else {
+                # Unknown escape, keep as-is
+                $result = $result . $ch;
+                $i = $i + 1;
+            }
+        } else {
+            $result = $result . $ch;
+            $i = $i + 1;
+        }
+    }
+
+    return $result;
+}
+
+# Parse a YAML value (handles quotes, numbers, booleans)
+func parse_value(str $s) scalar {
+    my str $trimmed = YAML::trim($s);
+    my int $len = length($trimmed);
+
+    if ($len == 0) {
+        return "";
+    }
+
+    # Check for quoted string
+    my str $first = substr($trimmed, 0, 1);
+    if ($first eq "'" || $first eq "\"") {
+        if ($len >= 2) {
+            my str $last_ch = substr($trimmed, $len - 1, 1);
+            if ($last_ch eq $first) {
+                my str $content = substr($trimmed, 1, $len - 2);
+                # Process escape sequences for double-quoted strings
+                if ($first eq "\"") {
+                    return YAML::process_escapes($content);
+                }
+                return $content;
+            }
+        }
+        my str $content = substr($trimmed, 1, $len - 1);
+        if ($first eq "\"") {
+            return YAML::process_escapes($content);
+        }
+        return $content;
+    }
+
+    # Check for inline hash { ... }
+    if ($first eq "{") {
+        return YAML::parse_inline_hash($trimmed);
+    }
+
+    # Check for inline array [ ... ]
+    if ($first eq "[") {
+        return YAML::parse_inline_array($trimmed);
+    }
+
+    # Strip trailing comment
+    my int $comment_pos = index($trimmed, " #");
+    if ($comment_pos >= 0) {
+        $trimmed = YAML::trim(substr($trimmed, 0, $comment_pos));
+        $len = length($trimmed);
+    }
+
+    # Check for boolean/null values
+    if ($trimmed eq "true" || $trimmed eq "yes" || $trimmed eq "on") {
+        return 1;
+    }
+    if ($trimmed eq "false" || $trimmed eq "no" || $trimmed eq "off") {
+        return 0;
+    }
+    if ($trimmed eq "null" || $trimmed eq "~") {
+        return undef;
+    }
+
+    # Check if it looks like a number
+    if (YAML::looks_like_num($trimmed)) {
+        return $trimmed + 0;
+    }
+
+    return $trimmed;
+}
+
+# Check if a string looks like a number
+func looks_like_num(str $s) int {
+    my int $len = length($s);
+    if ($len == 0) {
+        return 0;
+    }
+
+    my int $i = 0;
+    my str $ch = substr($s, 0, 1);
+    if ($ch eq "-" || $ch eq "+") {
+        $i = 1;
+        if ($len == 1) {
+            return 0;
+        }
+    }
+
+    my int $has_dot = 0;
+    my int $has_digit = 0;
+
+    while ($i < $len) {
+        $ch = substr($s, $i, 1);
+        if ($ch ge "0" && $ch le "9") {
+            $has_digit = 1;
+        } elsif ($ch eq "." && !$has_dot) {
+            $has_dot = 1;
+        } else {
+            return 0;
+        }
+        $i = $i + 1;
+    }
+
+    return $has_digit;
+}
+
+# Parse inline hash { key: value, key2: value2 }
+func parse_inline_hash(str $s) scalar {
+    my scalar $result = {};
+    my int $len = length($s);
+
+    # Remove { and }
+    if (substr($s, 0, 1) eq "{" && substr($s, $len - 1, 1) eq "}") {
+        $s = substr($s, 1, $len - 2);
+    }
+
+    # Split by comma (simple approach, doesn't handle nested)
+    my array @parts = split(",", $s);
+    my int $count = size(@parts);
+    my int $i = 0;
+
+    while ($i < $count) {
+        my str $part = YAML::trim($parts[$i]);
+
+        # Find the colon
+        my int $colon_pos = index($part, ":");
+        if ($colon_pos > 0) {
+            my str $key = YAML::trim(substr($part, 0, $colon_pos));
+            my str $val_str = "";
+            if ($colon_pos + 1 < length($part)) {
+                $val_str = substr($part, $colon_pos + 1, length($part) - $colon_pos - 1);
+            }
+            my scalar $val = YAML::parse_value($val_str);
+            $result->{$key} = $val;
+        }
+
+        $i = $i + 1;
+    }
+
+    return $result;
+}
+
+# Parse inline array [ item1, item2 ]
+func parse_inline_array(str $s) scalar {
+    my scalar $result = [];
+    my int $len = length($s);
+
+    # Remove [ and ]
+    if (substr($s, 0, 1) eq "[" && substr($s, $len - 1, 1) eq "]") {
+        $s = substr($s, 1, $len - 2);
+    }
+
+    my array @parts = split(",", $s);
+    my int $count = size(@parts);
+    my int $i = 0;
+
+    while ($i < $count) {
+        my str $part = YAML::trim($parts[$i]);
+        if (length($part) > 0) {
+            push($result, YAML::parse_value($part));
+        }
+        $i = $i + 1;
+    }
+
+    return $result;
+}
+
+# Main YAML Load function - parse YAML string into Strada data structure
+func Load(str $yaml) scalar {
+    my array @lines = split("\n", $yaml);
+    my int $line_count = size(@lines);
+
+    # Index for tracking current position
+    my scalar $state = {
+        "lines" => \@lines,
+        "count" => $line_count,
+        "pos" => 0
+    };
+
+    return YAML::parse_block($state, 0);
+}
+
+# Parse a block of YAML at a given indentation level
+func parse_block(scalar $state, int $base_indent) scalar {
+    my scalar $lines = $state->{"lines"};
+    my int $count = $state->{"count"};
+
+    # Skip empty/comment lines and find first real line
+    my int $found = 0;
+    while ($state->{"pos"} < $count && !$found) {
+        my str $line = $lines->[$state->{"pos"}];
+        if (YAML::is_empty_or_comment($line)) {
+            $state->{"pos"} = $state->{"pos"} + 1;
+        } else {
+            $found = 1;
+        }
+    }
+
+    if ($state->{"pos"} >= $count) {
+        return undef;
+    }
+
+    my str $first_line = $lines->[$state->{"pos"}];
+    my int $indent = YAML::get_indent($first_line);
+    my str $content = YAML::trim($first_line);
+
+    # Check if this line starts an array (- prefix)
+    if (substr($content, 0, 2) eq "- ") {
+        return YAML::parse_array($state, $indent);
+    }
+    if ($content eq "-") {
+        return YAML::parse_array($state, $indent);
+    }
+
+    # Check if this line is a key: value
+    my int $colon_pos = index($content, ":");
+    if ($colon_pos > 0) {
+        return YAML::parse_hash($state, $indent);
+    }
+
+    # Simple value
+    $state->{"pos"} = $state->{"pos"} + 1;
+    return YAML::parse_value($content);
+}
+
+# Parse a hash (key: value pairs)
+func parse_hash(scalar $state, int $base_indent) scalar {
+    my scalar $result = {};
+    my scalar $lines = $state->{"lines"};
+    my int $count = $state->{"count"};
+
+    while ($state->{"pos"} < $count) {
+        my str $line = $lines->[$state->{"pos"}];
+
+        # Skip empty/comment lines
+        if (YAML::is_empty_or_comment($line)) {
+            $state->{"pos"} = $state->{"pos"} + 1;
+            next;
+        }
+
+        my int $indent = YAML::get_indent($line);
+
+        # If indent is less than base, we're done with this block
+        if ($indent < $base_indent) {
+            return $result;
+        }
+
+        my str $content = YAML::trim($line);
+
+        # Parse key: value
+        my int $colon_pos = index($content, ":");
+        if ($colon_pos <= 0) {
+            # Not a key-value line, done
+            return $result;
+        }
+
+        my str $key = substr($content, 0, $colon_pos);
+        my str $after_colon = "";
+        if ($colon_pos + 1 < length($content)) {
+            $after_colon = substr($content, $colon_pos + 1, length($content) - $colon_pos - 1);
+        }
+        $after_colon = YAML::trim($after_colon);
+
+        $state->{"pos"} = $state->{"pos"} + 1;
+
+        if (length($after_colon) > 0) {
+            # Value on same line
+            if ($after_colon eq "|") {
+                # Multi-line literal block
+                $result->{$key} = YAML::parse_literal_block($state, $indent);
+            } else {
+                $result->{$key} = YAML::parse_value($after_colon);
+            }
+        } else {
+            # Value might be on next lines (nested structure)
+            # Look ahead to see what's next
+            while ($state->{"pos"} < $count && YAML::is_empty_or_comment($lines->[$state->{"pos"}])) {
+                $state->{"pos"} = $state->{"pos"} + 1;
+            }
+
+            if ($state->{"pos"} < $count) {
+                my str $next_line = $lines->[$state->{"pos"}];
+                my int $next_indent = YAML::get_indent($next_line);
+
+                if ($next_indent > $indent) {
+                    # Nested block
+                    $result->{$key} = YAML::parse_block($state, $next_indent);
+                } else {
+                    # Empty value
+                    $result->{$key} = "";
+                }
+            } else {
+                $result->{$key} = "";
+            }
+        }
+    }
+
+    return $result;
+}
+
+# Parse an array (- prefixed items)
+func parse_array(scalar $state, int $base_indent) scalar {
+    my scalar $result = [];
+    my scalar $lines = $state->{"lines"};
+    my int $count = $state->{"count"};
+
+    while ($state->{"pos"} < $count) {
+        my str $line = $lines->[$state->{"pos"}];
+
+        # Skip empty/comment lines
+        if (YAML::is_empty_or_comment($line)) {
+            $state->{"pos"} = $state->{"pos"} + 1;
+            next;
+        }
+
+        my int $indent = YAML::get_indent($line);
+
+        # If indent is less than base, we're done with this block
+        if ($indent < $base_indent) {
+            return $result;
+        }
+
+        my str $content = YAML::trim($line);
+
+        # Must start with -
+        if (substr($content, 0, 1) ne "-") {
+            return $result;
+        }
+
+        # Get content after -
+        my str $after_dash = "";
+        if (length($content) > 1) {
+            $after_dash = substr($content, 1, length($content) - 1);
+            if (length($after_dash) > 0 && substr($after_dash, 0, 1) eq " ") {
+                $after_dash = substr($after_dash, 1, length($after_dash) - 1);
+            }
+        }
+        $after_dash = YAML::trim($after_dash);
+
+        $state->{"pos"} = $state->{"pos"} + 1;
+
+        if (length($after_dash) > 0) {
+            # Check if after dash has a colon (inline hash item)
+            my int $colon_pos = index($after_dash, ":");
+            if (substr($after_dash, 0, 1) eq "{") {
+                # Inline hash
+                push($result, YAML::parse_inline_hash($after_dash));
+            } elsif ($colon_pos > 0) {
+                # This is a hash entry starting on the - line
+                # Parse as nested hash
+                my scalar $item = {};
+                my str $key = substr($after_dash, 0, $colon_pos);
+                my str $val_str = "";
+                if ($colon_pos + 1 < length($after_dash)) {
+                    $val_str = YAML::trim(substr($after_dash, $colon_pos + 1, length($after_dash) - $colon_pos - 1));
+                }
+
+                if (length($val_str) > 0) {
+                    $item->{$key} = YAML::parse_value($val_str);
+                } else {
+                    $item->{$key} = "";
+                }
+
+                # Check for more key:value pairs at higher indent
+                my int $done_item = 0;
+                while ($state->{"pos"} < $count && !$done_item) {
+                    my str $next_line = $lines->[$state->{"pos"}];
+                    if (YAML::is_empty_or_comment($next_line)) {
+                        $state->{"pos"} = $state->{"pos"} + 1;
+                    } else {
+                        my int $next_indent = YAML::get_indent($next_line);
+                        if ($next_indent <= $indent) {
+                            $done_item = 1;
+                        } else {
+                            my str $next_content = YAML::trim($next_line);
+                            my int $next_colon = index($next_content, ":");
+                            if ($next_colon > 0) {
+                                my str $next_key = substr($next_content, 0, $next_colon);
+                                my str $next_val_str = "";
+                                if ($next_colon + 1 < length($next_content)) {
+                                    $next_val_str = YAML::trim(substr($next_content, $next_colon + 1, length($next_content) - $next_colon - 1));
+                                }
+
+                                $state->{"pos"} = $state->{"pos"} + 1;
+
+                                if (length($next_val_str) > 0) {
+                                    $item->{$next_key} = YAML::parse_value($next_val_str);
+                                } else {
+                                    # Check for nested structure
+                                    while ($state->{"pos"} < $count && YAML::is_empty_or_comment($lines->[$state->{"pos"}])) {
+                                        $state->{"pos"} = $state->{"pos"} + 1;
+                                    }
+                                    if ($state->{"pos"} < $count) {
+                                        my str $sub_line = $lines->[$state->{"pos"}];
+                                        my int $sub_indent = YAML::get_indent($sub_line);
+                                        if ($sub_indent > $next_indent) {
+                                            $item->{$next_key} = YAML::parse_block($state, $sub_indent);
+                                        } else {
+                                            $item->{$next_key} = "";
+                                        }
+                                    } else {
+                                        $item->{$next_key} = "";
+                                    }
+                                }
+                            } else {
+                                $done_item = 1;
+                            }
+                        }
+                    }
+                }
+
+                push($result, $item);
+            } else {
+                # Simple value
+                push($result, YAML::parse_value($after_dash));
+            }
+        } else {
+            # Check next line for nested content
+            while ($state->{"pos"} < $count && YAML::is_empty_or_comment($lines->[$state->{"pos"}])) {
+                $state->{"pos"} = $state->{"pos"} + 1;
+            }
+
+            if ($state->{"pos"} < $count) {
+                my str $next_line = $lines->[$state->{"pos"}];
+                my int $next_indent = YAML::get_indent($next_line);
+
+                if ($next_indent > $indent) {
+                    push($result, YAML::parse_block($state, $next_indent));
+                } else {
+                    push($result, undef);
+                }
+            } else {
+                push($result, undef);
+            }
+        }
+    }
+
+    return $result;
+}
+
+# Parse literal block (|)
+func parse_literal_block(scalar $state, int $base_indent) str {
+    my str $result = "";
+    my scalar $lines = $state->{"lines"};
+    my int $count = $state->{"count"};
+    my int $block_indent = -1;
+
+    while ($state->{"pos"} < $count) {
+        my str $line = $lines->[$state->{"pos"}];
+        my int $indent = YAML::get_indent($line);
+
+        # Empty lines in literal block
+        if (YAML::trim($line) eq "") {
+            if ($block_indent >= 0) {
+                $result = $result . "\n";
+            }
+            $state->{"pos"} = $state->{"pos"} + 1;
+            next;
+        }
+
+        # Check if we've exited the block
+        if ($block_indent >= 0 && $indent <= $base_indent) {
+            return $result;
+        }
+
+        # Set block indent on first content line
+        if ($block_indent < 0) {
+            $block_indent = $indent;
+        }
+
+        # Add line content (without leading indent)
+        if ($indent >= $block_indent) {
+            if (length($result) > 0) {
+                $result = $result . "\n";
+            }
+            $result = $result . substr($line, $block_indent, length($line) - $block_indent);
+        } else {
+            return $result;
+        }
+
+        $state->{"pos"} = $state->{"pos"} + 1;
+    }
+
+    return $result;
+}
+
+# ============================================================
+# YAML Dumping
+# ============================================================
+
+# Dump a Strada data structure to YAML string
+func Dump(scalar $data) str {
+    return YAML::dump_value($data, 0);
+}
+
+# Dump a value with indentation
+func dump_value(scalar $value, int $indent) str {
+    if (!defined($value)) {
+        return "~";
+    }
+
+    my str $rtype = ref($value);
+
+    if ($rtype eq "HASH") {
+        return YAML::dump_hash($value, $indent);
+    }
+
+    if ($rtype eq "ARRAY") {
+        return YAML::dump_array($value, $indent);
+    }
+
+    # Scalar value
+    my str $str_val = "" . $value;
+
+    # Check if needs quoting
+    if (YAML::needs_quote($str_val)) {
+        return "'" . YAML::escape_single_quote($str_val) . "'";
+    }
+
+    return $str_val;
+}
+
+# Check if string needs quoting
+func needs_quote(str $s) int {
+    my int $len = length($s);
+    if ($len == 0) {
+        return 1;
+    }
+
+    # Check for special first characters
+    my str $first = substr($s, 0, 1);
+    if ($first eq "'" || $first eq "\"" || $first eq "{" || $first eq "[" ||
+        $first eq "-" || $first eq ":" || $first eq "#" || $first eq "&" ||
+        $first eq "*" || $first eq "!" || $first eq "|" || $first eq ">") {
+        return 1;
+    }
+
+    # Check for special words
+    if ($s eq "true" || $s eq "false" || $s eq "null" || $s eq "yes" || $s eq "no") {
+        return 1;
+    }
+
+    # Check for colon
+    if (index($s, ":") >= 0) {
+        return 1;
+    }
+
+    return 0;
+}
+
+# Escape single quotes
+func escape_single_quote(str $s) str {
+    my str $result = "";
+    my int $len = length($s);
+    my int $i = 0;
+
+    while ($i < $len) {
+        my str $ch = substr($s, $i, 1);
+        if ($ch eq "'") {
+            $result = $result . "''";
+        } else {
+            $result = $result . $ch;
+        }
+        $i = $i + 1;
+    }
+
+    return $result;
+}
+
+# Dump hash
+func dump_hash(scalar $hval, int $indent) str {
+    my str $result = "";
+    my array @keys = keys($hval);
+    my int $count = size(@keys);
+    my int $i = 0;
+    my str $pad = YAML::make_indent($indent);
+
+    while ($i < $count) {
+        my str $key = $keys[$i];
+        my scalar $val = $hval->{$key};
+        my str $rtype = ref($val);
+
+        if ($rtype eq "HASH" || $rtype eq "ARRAY") {
+            $result = $result . $pad . $key . ":\n";
+            $result = $result . YAML::dump_value($val, $indent + 2);
+        } else {
+            $result = $result . $pad . $key . ": " . YAML::dump_value($val, 0) . "\n";
+        }
+
+        $i = $i + 1;
+    }
+
+    return $result;
+}
+
+# Dump array
+func dump_array(scalar $arr, int $indent) str {
+    my str $result = "";
+    my int $count = size($arr);
+    my int $i = 0;
+    my str $pad = YAML::make_indent($indent);
+
+    while ($i < $count) {
+        my scalar $val = $arr->[$i];
+        my str $rtype = ref($val);
+
+        if ($rtype eq "HASH") {
+            # First key on same line as dash
+            my array @keys = keys($val);
+            if (size(@keys) > 0) {
+                my str $first_key = $keys[0];
+                my scalar $first_val = $val->{$first_key};
+                my str $first_rtype = ref($first_val);
+
+                if ($first_rtype eq "HASH" || $first_rtype eq "ARRAY") {
+                    $result = $result . $pad . "- " . $first_key . ":\n";
+                    $result = $result . YAML::dump_value($first_val, $indent + 4);
+                } else {
+                    $result = $result . $pad . "- " . $first_key . ": " . YAML::dump_value($first_val, 0) . "\n";
+                }
+
+                # Rest of keys
+                my int $j = 1;
+                while ($j < size(@keys)) {
+                    my str $key = $keys[$j];
+                    my scalar $kval = $val->{$key};
+                    my str $krtype = ref($kval);
+
+                    if ($krtype eq "HASH" || $krtype eq "ARRAY") {
+                        $result = $result . $pad . "  " . $key . ":\n";
+                        $result = $result . YAML::dump_value($kval, $indent + 4);
+                    } else {
+                        $result = $result . $pad . "  " . $key . ": " . YAML::dump_value($kval, 0) . "\n";
+                    }
+
+                    $j = $j + 1;
+                }
+            } else {
+                $result = $result . $pad . "- {}\n";
+            }
+        } elsif ($rtype eq "ARRAY") {
+            $result = $result . $pad . "-\n";
+            $result = $result . YAML::dump_array($val, $indent + 2);
+        } else {
+            $result = $result . $pad . "- " . YAML::dump_value($val, 0) . "\n";
+        }
+
+        $i = $i + 1;
+    }
+
+    return $result;
+}
+
+# Make indentation string
+func make_indent(int $n) str {
+    my str $result = "";
+    my int $i = 0;
+
+    while ($i < $n) {
+        $result = $result . " ";
+        $i = $i + 1;
+    }
+
+    return $result;
+}

@@ -1,0 +1,38 @@
+func main() int {
+    # redo test
+    my int $count = 0;
+    my int $redo_done = 0;
+    while ($count < 3) {
+        $count = $count + 1;
+        if ($count == 2 && $redo_done == 0) {
+            $redo_done = 1;
+            redo;
+        }
+    }
+    say("count after redo: " . $count);
+
+    # labeled loops
+    my int $found = 0;
+    OUTER: while (1) {
+        my int $i = 0;
+        while ($i < 5) {
+            if ($i == 3) {
+                $found = $i;
+                last OUTER;
+            }
+            $i = $i + 1;
+        }
+    }
+    say("found: " . $found);
+
+    # foreach with next
+    my array @items = (1, 2, 3, 4, 5);
+    my int $sum = 0;
+    foreach my int $x (@items) {
+        if ($x == 3) { next; }
+        $sum = $sum + $x;
+    }
+    say("sum skipping 3: " . $sum);
+
+    return 0;
+}

@@ -1,0 +1,104 @@
+#!/usr/bin/env strada
+# Test base64 encode/decode and hex for memory leaks
+# Run: valgrind --leak-check=full ./test_base64_hex
+
+func main() int {
+    say("Testing base64/hex for memory leaks...");
+    my int $iterations = 100;
+
+    # Test base64 encode/decode round-trip
+    say("  base64 round-trip...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my str $text = "Hello World " . $i;
+        my str $encoded = core::base64_encode($text);
+        my str $decoded = core::base64_decode($encoded);
+        if ($decoded ne $text) {
+            say("    FAIL: round-trip mismatch");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test base64 encode various lengths
+    say("  base64 various lengths...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s1 = "a";
+        my str $s2 = "ab";
+        my str $s3 = "abc";
+        my str $s4 = "abcd";
+        my str $e1 = core::base64_encode($s1);
+        my str $e2 = core::base64_encode($s2);
+        my str $e3 = core::base64_encode($s3);
+        my str $e4 = core::base64_encode($s4);
+        # Verify lengths are reasonable
+        if (length($e1) < 1 || length($e2) < 1 || length($e3) < 1 || length($e4) < 1) {
+            say("    FAIL: encode empty");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test base64 decode various
+    say("  base64 decode...");
+    $i = 0;
+    while ($i < $iterations) {
+        # "SGVsbG8=" is base64 for "Hello"
+        my str $decoded = core::base64_decode("SGVsbG8=");
+        if ($decoded ne "Hello") {
+            say("    FAIL: decode = " . $decoded);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test hex conversion
+    say("  hex conversion...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $v1 = core::hex("ff");
+        my int $v2 = core::hex("0xFF");
+        my int $v3 = core::hex("10");
+        my int $v4 = core::hex("0x0");
+        if ($v1 != 255) {
+            say("    FAIL: hex ff = " . $v1);
+            return 1;
+        }
+        if ($v2 != 255) {
+            say("    FAIL: hex 0xFF = " . $v2);
+            return 1;
+        }
+        if ($v3 != 16) {
+            say("    FAIL: hex 10 = " . $v3);
+            return 1;
+        }
+        if ($v4 != 0) {
+            say("    FAIL: hex 0x0 = " . $v4);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test base64 with longer strings
+    say("  base64 longer strings...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $long = "The quick brown fox jumps over the lazy dog " . $i;
+        my str $enc = core::base64_encode($long);
+        my str $dec = core::base64_decode($enc);
+        if ($dec ne $long) {
+            say("    FAIL: long round-trip");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All base64/hex tests passed!");
+    return 0;
+}

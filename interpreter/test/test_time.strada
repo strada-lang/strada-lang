@@ -1,0 +1,9 @@
+func main() int {
+    my int $t = core::time();
+    say("has_time=" . ($t > 0 ? 1 : 0));
+    my num $ht = core::hires_time();
+    say("has_hires=" . ($ht > 0.0 ? 1 : 0));
+    # Verify time values are reasonable (after year 2020 = epoch > 1577836800)
+    say("recent=" . ($t > 1577836800 ? 1 : 0));
+    return 0;
+}

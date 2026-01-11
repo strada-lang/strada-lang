@@ -1,0 +1,93 @@
+use lib "lib";
+use Forma;
+
+# Define a simple helper that doubles a number
+func double_helper(scalar $args, scalar $vars) str {
+    my array @a = @{$args};
+    if (scalar(@a) == 0) {
+        return "0";
+    }
+    my int $n = $a[0] + 0;
+    return "" . ($n * 2);
+}
+
+# Define a helper that formats a greeting
+func greet_helper(scalar $args, scalar $vars) str {
+    my array @a = @{$args};
+    my str $name = scalar(@a) > 0 ? "" . $a[0] : "World";
+    my str $greeting = scalar(@a) > 1 ? "" . $a[1] : "Hello";
+    return $greeting . ", " . $name . "!";
+}
+
+# Define a helper that joins with a custom separator
+func custom_join_helper(scalar $args, scalar $vars) str {
+    my array @a = @{$args};
+    if (scalar(@a) < 2) {
+        return "";
+    }
+    my scalar $arr = $a[0];
+    my str $sep = "" . $a[1];
+
+    if (!defined($arr) || ref($arr) ne "ARRAY") {
+        return "";
+    }
+
+    my str $result = "";
+    my int $i = 0;
+    foreach my scalar $item (@{$arr}) {
+        if ($i > 0) {
+            $result = $result . $sep;
+        }
+        $result = $result . (defined($item) ? "" . $item : "");
+        $i = $i + 1;
+    }
+    return $result;
+}
+
+func main() int {
+    # Register helpers
+    Forma::register_helper("double", \&double_helper);
+    Forma::register_helper("greet", \&greet_helper);
+    Forma::register_helper("custom_join", \&custom_join_helper);
+
+    say("=== Custom Helper Tests ===");
+    say("");
+
+    my hash %vars = ();
+    $vars{"count"} = 5;
+    $vars{"name"} = "Alice";
+    $vars{"items"} = ["apple", "banana", "cherry"];
+
+    # Test double helper
+    say("1. Double helper:");
+    say("   {{double count}} = " . Forma::render_string("{{double count}}", \%vars));
+    say("   {{double 21}} = " . Forma::render_string("{{double 21}}", \%vars));
+
+    # Test greet helper
+    say("");
+    say("2. Greet helper:");
+    say("   {{greet name}} = " . Forma::render_string("{{greet name}}", \%vars));
+    say("   {{greet name \"Hi\"}} = " . Forma::render_string("{{greet name \"Hi\"}}", \%vars));
+    say("   {{greet \"Bob\" \"Hey\"}} = " . Forma::render_string("{{greet \"Bob\" \"Hey\"}}", \%vars));
+
+    # Test custom_join helper
+    say("");
+    say("3. Custom join helper:");
+    say("   {{custom_join items \" | \"}} = " . Forma::render_string("{{custom_join items \" | \"}}", \%vars));
+
+    # Test has_helper and list_helpers
+    say("");
+    say("4. Helper management:");
+    say("   has_helper(\"double\") = " . Forma::has_helper("double"));
+    say("   has_helper(\"unknown\") = " . Forma::has_helper("unknown"));
+    my array @helpers = Forma::list_helpers();
+    say("   Registered helpers: " . join(", ", @helpers));
+
+    # Test unregister
+    Forma::unregister_helper("double");
+    say("   After unregister(\"double\"): has_helper(\"double\") = " . Forma::has_helper("double"));
+
+    say("");
+    say("=== All Tests Complete ===");
+    return 0;
+}

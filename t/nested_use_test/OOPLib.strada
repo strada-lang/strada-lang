@@ -1,0 +1,26 @@
+# OOPLib - A library with OOP classes for nested use testing
+# Using proper package-based OOP where package name matches bless target
+
+package Counter;
+
+func new(int $start) scalar {
+    my hash %self = ();
+    $self{"value"} = $start;
+    return bless(\%self, "Counter");
+}
+
+func increment(scalar $self) void {
+    $self->{"value"} = $self->{"value"} + 1;
+}
+
+func add(scalar $self, int $n) void {
+    $self->{"value"} = $self->{"value"} + $n;
+}
+
+func get(scalar $self) int {
+    return $self->{"value"};
+}
+
+func reset(scalar $self) void {
+    $self->{"value"} = 0;
+}

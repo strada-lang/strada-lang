@@ -1,0 +1,160 @@
+# Test operator overloading
+
+my int $tests_passed = 0;
+my int $tests_total = 0;
+
+func ok(int $cond, str $name) void {
+    $tests_total = $tests_total + 1;
+    if ($cond) {
+        say("ok " . $tests_total . " - " . $name);
+        $tests_passed = $tests_passed + 1;
+    } else {
+        say("not ok " . $tests_total . " - " . $name);
+    }
+}
+
+# Simple Vector class with overloaded operators
+package Vector;
+
+use overload
+    "+" => "add",
+    "-" => "sub_vec",
+    "*" => "mul",
+    "==" => "eq_vec",
+    "!=" => "ne_vec",
+    "neg" => "negate",
+    '""' => "to_str",
+    "<=>" => "compare";
+
+func new(int $x, int $y) scalar {
+    my hash %self = ();
+    $self{"x"} = $x;
+    $self{"y"} = $y;
+    return bless(\%self, "Vector");
+}
+
+func x(scalar $self) int {
+    return $self->{"x"};
+}
+
+func y(scalar $self) int {
+    return $self->{"y"};
+}
+
+func add(scalar $self, scalar $other, int $reversed) scalar {
+    return Vector::new($self->{"x"} + $other->{"x"}, $self->{"y"} + $other->{"y"});
+}
+
+func sub_vec(scalar $self, scalar $other, int $reversed) scalar {
+    if ($reversed) {
+        return Vector::new($other->{"x"} - $self->{"x"}, $other->{"y"} - $self->{"y"});
+    }
+    return Vector::new($self->{"x"} - $other->{"x"}, $self->{"y"} - $other->{"y"});
+}
+
+func mul(scalar $self, scalar $other, int $reversed) scalar {
+    # Scalar multiplication: $vec * $n or $n * $vec
+    my int $factor = $other + 0;
+    return Vector::new($self->{"x"} * $factor, $self->{"y"} * $factor);
+}
+
+func eq_vec(scalar $self, scalar $other, int $reversed) scalar {
+    if ($self->{"x"} == $other->{"x"} && $self->{"y"} == $other->{"y"}) {
+        return 1;
+    }
+    return 0;
+}
+
+func ne_vec(scalar $self, scalar $other, int $reversed) scalar {
+    if ($self->{"x"} == $other->{"x"} && $self->{"y"} == $other->{"y"}) {
+        return 0;
+    }
+    return 1;
+}
+
+func negate(scalar $self) scalar {
+    return Vector::new(0 - $self->{"x"}, 0 - $self->{"y"});
+}
+
+func to_str(scalar $self) str {
+    return "(" . $self->{"x"} . ", " . $self->{"y"} . ")";
+}
+
+func compare(scalar $self, scalar $other, int $reversed) scalar {
+    my int $mag_self = $self->{"x"} * $self->{"x"} + $self->{"y"} * $self->{"y"};
+    my int $mag_other = $other->{"x"} * $other->{"x"} + $other->{"y"} * $other->{"y"};
+    if ($reversed) {
+        my int $tmp = $mag_self;
+        $mag_self = $mag_other;
+        $mag_other = $tmp;
+    }
+    if ($mag_self < $mag_other) { return -1; }
+    if ($mag_self > $mag_other) { return 1; }
+    return 0;
+}
+
+package main;
+
+func main() int {
+    my scalar $a = Vector::new(1, 2);
+    my scalar $b = Vector::new(3, 4);
+
+    # Test addition
+    my scalar $c = $a + $b;
+    ok($c->x() == 4, "overload + x");
+    ok($c->y() == 6, "overload + y");
+
+    # Test subtraction
+    my scalar $d = $b - $a;
+    ok($d->x() == 2, "overload - x");
+    ok($d->y() == 2, "overload - y");
+
+    # Test equality
+    my scalar $a2 = Vector::new(1, 2);
+    ok($a == $a2, "overload ==");
+    ok($a != $b, "overload !=");
+
+    # Test negation (unary -)
+    my scalar $neg = -$a;
+    ok($neg->x() == -1, "overload neg x");
+    ok($neg->y() == -2, "overload neg y");
+
+    # Test stringify
+    my str $s = "" . $a;
+    ok($s eq "(1, 2)", "overload stringify");
+
+    # Test stringify in say context
+    my str $bs = "" . $b;
+    ok($bs eq "(3, 4)", "overload stringify b");
+
+    # Test spaceship (comparison)
+    my scalar $small = Vector::new(1, 0);
+    my scalar $big = Vector::new(3, 4);
+    my scalar $cmp = $small <=> $big;
+    ok($cmp == -1, "overload <=> less");
+    my scalar $cmp2 = $big <=> $small;
+    ok($cmp2 == 1, "overload <=> greater");
+    my scalar $cmp3 = $a <=> $a2;
+    ok($cmp3 == 0, "overload <=> equal");
+
+    # Test mixed: typed variables bypass overload (zero overhead)
+    my int $x = 10;
+    my int $y = 20;
+    my int $z = $x + $y;
+    ok($z == 30, "typed int + no overload");
+
+    # Test compound assignment += with overload
+    my scalar $v = Vector::new(1, 2);
+    $v += Vector::new(10, 20);
+    ok($v->x() == 11, "overload += x");
+    ok($v->y() == 22, "overload += y");
+
+    # Test compound assignment -= with overload
+    my scalar $w = Vector::new(10, 20);
+    $w -= Vector::new(3, 5);
+    ok($w->x() == 7, "overload -= x");
+    ok($w->y() == 15, "overload -= y");
+
+    say("All overload tests passed: " . $tests_passed . "/" . $tests_total);
+    return 0;
+}

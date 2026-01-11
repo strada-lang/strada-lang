@@ -1,305 +1,1955 @@
-# DBI - Database Interface for Strada
-#
-# A Perl DBI-like interface for database operations.
-# Supports SQLite, MySQL/MariaDB, and PostgreSQL.
-#
-# Usage:
-#   use lib "lib";
-#   use DBI;
-#
-#   # Connect to SQLite
-#   my scalar $dbh = DBI::connect("dbi:SQLite:test.db", "", "");
-#
-#   # Create table
-#   DBI::do($dbh, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)");
-#
-#   # Insert with placeholders
-#   DBI::do($dbh, "INSERT INTO users (name) VALUES (?)", ["Alice"]);
-#
-#   # Query
-#   my scalar $sth = DBI::prepare($dbh, "SELECT * FROM users");
-#   DBI::execute($sth, []);
-#   while (my scalar $row = DBI::fetchrow_hashref($sth)) {
-#       say($row->{"name"});
-#   }
-#
-#   DBI::disconnect($dbh);
-#
-# DSN Formats:
-#   dbi:SQLite:database.db
-#   dbi:SQLite:dbname=/path/to/db.sqlite
-#   dbi:mysql:database=test;host=localhost;port=3306
-#   dbi:Pg:dbname=test;host=localhost;port=5432
-#
-# Requires: lib/dbi/libstrada_dbi.so (build with: cd lib/dbi && make)
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+=head1 NAME
+
+DBI - Database Interface for Strada
+
+=head1 SYNOPSIS
+
+    use lib "lib";
+    use DBI;
+
+    # Connect to SQLite
+    my scalar $dbh = DBI::connect("dbi:SQLite:test.db", "", "");
+
+    # Create table
+    DBI::exec($dbh, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)", []);
+
+    # Insert with placeholders
+    DBI::exec($dbh, "INSERT INTO users (name) VALUES (?)", ["Alice"]);
+
+    # Query
+    my scalar $sth = DBI::prepare($dbh, "SELECT * FROM users");
+    DBI::execute($sth, []);
+    while (my scalar $row = DBI::fetchrow_hashref($sth)) {
+        say($row->{"name"});
+    }
+
+    DBI::disconnect($dbh);
+
+=head1 DESCRIPTION
+
+DBI provides a Perl DBI-like interface for database operations in Strada.
+It supports SQLite, MySQL/MariaDB, and PostgreSQL databases.
+
+B<Compile with:> C<./strada myprogram.strada -lsqlite3>
+
+For MySQL: C<-lmysqlclient> and compile with C<-DHAVE_MYSQL>
+
+For PostgreSQL: C<-lpq> and compile with C<-DHAVE_POSTGRES>
+
+=head1 DSN FORMATS
+
+=over 4
+
+=item B<SQLite>
+
+    dbi:SQLite:database.db
+    dbi:SQLite:dbname=/path/to/db.sqlite
+
+=item B<MySQL/MariaDB>
+
+    dbi:mysql:database=test;host=localhost;port=3306
+
+=item B<PostgreSQL>
+
+    dbi:Pg:dbname=test;host=localhost;port=5432
+
+=back
+
+=head1 CONNECTION FUNCTIONS
+
+=head2 connect($dsn, $username, $password)
+
+Connect to a database. Returns a database handle or C<undef> on failure.
+
+    my scalar $dbh = DBI::connect("dbi:SQLite:app.db", "", "");
+
+=head2 connect_attrs($dsn, $username, $password, $attrs)
+
+Connect with attributes:
+
+    my scalar $dbh = DBI::connect_attrs($dsn, $user, $pass, {
+        "AutoCommit" => 1,
+        "PrintError" => 1,
+        "RaiseError" => 1
+    });
+
+Attributes:
+- AutoCommit: Auto-commit after each statement (default: 1)
+- PrintError: Print errors to stderr (default: 1)
+- RaiseError: Throw exceptions on errors (default: 0)
+
+=head2 set_raise_error($dbh, $flag)
+
+Enable or disable RaiseError on an existing connection:
+
+    DBI::set_raise_error($dbh, 1);  # Enable exceptions
+    DBI::set_raise_error($dbh, 0);  # Disable exceptions
+
+=head2 disconnect($dbh)
+
+Close the database connection.
+
+    DBI::disconnect($dbh);
+
+=head2 ping($dbh)
+
+Check if connection is still alive. Returns 1 if connected, 0 otherwise.
+
+=head1 QUERY FUNCTIONS
+
+=head2 prepare($dbh, $sql)
+
+Prepare a SQL statement. Returns a statement handle.
+
+    my scalar $sth = DBI::prepare($dbh, "SELECT * FROM users WHERE id = ?");
+
+=head2 execute($sth, $params)
+
+Execute a prepared statement with parameters.
+
+    DBI::execute($sth, [42]);
+
+=head2 exec($dbh, $sql, $params)
+
+Prepare, execute, and finish in one call. Returns affected row count.
+
+    my int $count = DBI::exec($dbh, "UPDATE users SET active = ?", [1]);
+
+=head2 do_sql($dbh, $sql)
+
+Execute SQL without parameters.
+
+    DBI::do_sql($dbh, "DELETE FROM sessions WHERE expired = 1");
+
+=head1 FETCH FUNCTIONS
+
+=head2 fetchrow_array($sth)
+
+Fetch next row as array reference.
+
+    my scalar $row = DBI::fetchrow_array($sth);
+    if (defined($row)) {
+        say($row->[0]);  # First column
+    }
+
+=head2 fetchrow_hashref($sth)
+
+Fetch next row as hash reference (column names as keys).
+
+    my scalar $row = DBI::fetchrow_hashref($sth);
+    if (defined($row)) {
+        say($row->{"name"});
+    }
+
+=head2 fetchall_arrayref($sth)
+
+Fetch all remaining rows as array of array refs.
+
+=head2 finish($sth)
+
+Finish statement and release resources.
+
+=head1 CONVENIENCE FUNCTIONS
+
+=head2 selectall_arrayref($dbh, $sql)
+
+Execute a SQL query and return all rows as an array of array refs.
+Combines prepare, execute, and fetchall_arrayref into a single call.
+
+    my scalar $rows = DBI::selectall_arrayref($dbh, "SELECT id, name FROM users");
+    foreach my scalar $r (@{$rows}) {
+        my array @row = @{$r};
+        say("ID: " . $row[0] . ", Name: " . $row[1]);
+    }
+
+=head2 selectall_arrayref_bind($dbh, $sql, $params)
+
+Execute a SQL query with bind parameters and return all rows as an array of array refs.
+
+    my array @params = ($min_age);
+    my scalar $rows = DBI::selectall_arrayref_bind($dbh,
+        "SELECT id, name FROM users WHERE age > ?", \@params);
+
+=head2 selectall_hashref($dbh, $sql, $params)
+
+Execute query and return all rows as array of hash refs.
+
+    my scalar $users = DBI::selectall_hashref($dbh, "SELECT * FROM users", []);
+    foreach my scalar $user (@{$users}) {
+        say($user->{"name"});
+    }
+
+=head2 selectrow_hashref($dbh, $sql, $params)
+
+Execute query and return first row as hash ref.
+
+    my scalar $user = DBI::selectrow_hashref($dbh,
+        "SELECT * FROM users WHERE id = ?", [1]);
+
+=head2 selectcol($dbh, $sql, $params)
+
+Execute query and return first column of first row.
+
+    my scalar $count = DBI::selectcol($dbh, "SELECT COUNT(*) FROM users", []);
+
+=head2 insert_get_id($dbh, $sql, $params)
+
+Insert row and return the auto-generated ID.
+
+    my int $id = DBI::insert_get_id($dbh,
+        "INSERT INTO users (name) VALUES (?)", ["Bob"]);
+
+=head1 TRANSACTION FUNCTIONS
+
+=head2 begin_work($dbh)
+
+Begin a transaction.
+
+=head2 commit($dbh)
+
+Commit the current transaction.
+
+=head2 rollback($dbh)
+
+Rollback the current transaction.
+
+=head1 UTILITY FUNCTIONS
+
+=head2 quote($dbh, $value)
+
+Quote a string value for safe use in SQL.
+
+    my str $safe = DBI::quote($dbh, "O'Brien");
+    # Returns: 'O''Brien'
+
+=head2 last_insert_id($dbh)
+
+Get the ID of the last inserted row.
+
+=head2 errstr($dbh)
+
+Get the last error message.
+
+=head2 err($dbh)
+
+Get the last error code.
+
+=head2 rows($sth)
+
+Get number of rows affected by last statement.
+
+=head2 column_names($sth)
+
+Get column names from a prepared statement.
+
+=head1 EXAMPLE
+
+    use lib "lib";
+    use DBI;
+
+    my scalar $dbh = DBI::connect("dbi:SQLite:blog.db", "", "");
+
+    # Create tables
+    DBI::do_sql($dbh, "CREATE TABLE IF NOT EXISTS posts (
+        id INTEGER PRIMARY KEY,
+        title TEXT,
+        body TEXT,
+        created_at INTEGER
+    )");
+
+    # Insert
+    my int $id = DBI::insert_get_id($dbh,
+        "INSERT INTO posts (title, body, created_at) VALUES (?, ?, ?)",
+        ["Hello World", "My first post!", sys::time()]);
+
+    say("Created post ID: " . $id);
+
+    # Query
+    my scalar $posts = DBI::selectall_hashref($dbh, "SELECT * FROM posts", []);
+    foreach my scalar $post (@{$posts}) {
+        say($post->{"title"} . ": " . $post->{"body"});
+    }
+
+    DBI::disconnect($dbh);
+
+=head1 SEE ALSO
+
+L<SQLite documentation|https://sqlite.org/lang.html>
+
+=cut
 
 package DBI;
 
-# Load the library - tries multiple paths
-func _get_lib() int {
-    my int $lib = sys::dl_open("lib/dbi/libstrada_dbi.so");
-    if ($lib == 0) {
-        $lib = sys::dl_open("./lib/dbi/libstrada_dbi.so");
+# DBI C implementation
+__C__ {
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <ctype.h>
+
+/* Explicit POSIX function declarations (needed because _GNU_SOURCE
+   is defined after strada_runtime.h is already included) */
+extern char *strdup(const char *s);
+extern char *strtok_r(char *str, const char *delim, char **saveptr);
+extern int strcasecmp(const char *s1, const char *s2);
+extern int strncasecmp(const char *s1, const char *s2, size_t n);
+
+/* Always include SQLite as it's commonly available */
+#ifndef HAVE_SQLITE3
+#define HAVE_SQLITE3 1
+#endif
+
+#ifdef HAVE_SQLITE3
+#include <sqlite3.h>
+#endif
+
+#ifdef HAVE_MYSQL
+#include <mysql/mysql.h>
+#endif
+
+#ifdef HAVE_POSTGRES
+#include <libpq-fe.h>
+#endif
+
+/* Database driver types */
+typedef enum {
+    DBI_DRIVER_NONE = 0,
+    DBI_DRIVER_SQLITE,
+    DBI_DRIVER_MYSQL,
+    DBI_DRIVER_POSTGRES
+} DbiDriverType;
+
+/* Database handle structure */
+typedef struct DbiHandle {
+    DbiDriverType driver;
+    void *conn;
+    char *dsn;
+    char *username;
+    char *error_msg;
+    int error_code;
+    int auto_commit;
+    int in_transaction;
+    int raise_error;
+    int print_error;
+    int connected;
+} DbiHandle;
+
+/* Statement handle structure */
+typedef struct DbiStatement {
+    DbiHandle *dbh;
+    void *stmt;
+    char *sql;
+    int num_params;
+    int num_columns;
+    char **column_names;
+    int *column_types;
+    int executed;
+    int finished;
+    void *result;
+    int row_count;
+    int affected_rows;
+#ifdef HAVE_MYSQL
+    /* MySQL result binding data */
+    MYSQL_BIND *mysql_result_binds;
+    unsigned long *mysql_lengths;
+    char *mysql_nulls;   /* Use char instead of deprecated my_bool */
+    char **mysql_buffers;
+    unsigned long *mysql_buffer_sizes;
+    /* MySQL parameter binding data */
+    MYSQL_BIND *mysql_param_binds;
+    unsigned long *mysql_param_lengths;
+    char *mysql_param_nulls;
+    char **mysql_param_buffers;
+    int mysql_params_bound;
+#endif
+} DbiStatement;
+
+/* Helper: Set error */
+static void dbi_set_error(DbiHandle *dbh, int code, const char *msg) {
+    if (dbh->error_msg) free(dbh->error_msg);
+    dbh->error_code = code;
+    dbh->error_msg = msg ? strdup(msg) : NULL;
+    if (dbh->print_error && msg) {
+        fprintf(stderr, "DBI Error: %s\n", msg);
     }
-    if ($lib == 0) {
-        $lib = sys::dl_open("libstrada_dbi.so");
+    if (dbh->raise_error && msg) {
+        strada_throw(msg);
     }
-    return $lib;
+}
+
+/* Set raise_error flag */
+static void dbi_set_raise_error(DbiHandle *dbh, int flag) {
+    if (dbh) dbh->raise_error = flag;
+}
+
+/* Helper: Parse DSN string */
+static DbiDriverType dbi_parse_dsn(const char *dsn, char **database, char **host, int *port) {
+    *database = NULL;
+    *host = NULL;
+    *port = 0;
+
+    if (!dsn) return DBI_DRIVER_NONE;
+
+    if (strncmp(dsn, "dbi:", 4) != 0 && strncmp(dsn, "DBI:", 4) != 0) {
+        if (strncmp(dsn, "sqlite:", 7) == 0 || strncmp(dsn, "SQLite:", 7) == 0) {
+            *database = strdup(dsn + 7);
+            return DBI_DRIVER_SQLITE;
+        }
+        return DBI_DRIVER_NONE;
+    }
+
+    const char *p = dsn + 4;
+    DbiDriverType driver = DBI_DRIVER_NONE;
+
+    if (strncasecmp(p, "sqlite:", 7) == 0) {
+        driver = DBI_DRIVER_SQLITE;
+        p += 7;
+    } else if (strncasecmp(p, "mysql:", 6) == 0) {
+        driver = DBI_DRIVER_MYSQL;
+        p += 6;
+    } else if (strncasecmp(p, "pg:", 3) == 0 || strncasecmp(p, "postgres:", 9) == 0) {
+        driver = DBI_DRIVER_POSTGRES;
+        p += (strncasecmp(p, "pg:", 3) == 0) ? 3 : 9;
+    }
+
+    if (driver == DBI_DRIVER_NONE) return DBI_DRIVER_NONE;
+
+    char *params = strdup(p);
+    char *saveptr;
+    char *token = strtok_r(params, ";", &saveptr);
+
+    while (token) {
+        char *eq = strchr(token, '=');
+        if (eq) {
+            *eq = '\0';
+            char *key = token;
+            char *value = eq + 1;
+            while (*key && isspace(*key)) key++;
+            while (*value && isspace(*value)) value++;
+
+            if (strcasecmp(key, "database") == 0 || strcasecmp(key, "dbname") == 0) {
+                *database = strdup(value);
+            } else if (strcasecmp(key, "host") == 0) {
+                *host = strdup(value);
+            } else if (strcasecmp(key, "port") == 0) {
+                *port = atoi(value);
+            }
+        } else {
+            if (!*database) {
+                *database = strdup(token);
+            }
+        }
+        token = strtok_r(NULL, ";", &saveptr);
+    }
+
+    free(params);
+    return driver;
+}
+
+/* Connect to database */
+static DbiHandle* dbi_connect_raw(const char *dsn, const char *user, const char *pass,
+                                   int auto_commit, int print_error) {
+    DbiHandle *dbh = calloc(1, sizeof(DbiHandle));
+    if (!dbh) return NULL;
+
+    dbh->auto_commit = auto_commit;
+    dbh->raise_error = 0;
+    dbh->print_error = print_error;
+
+    char *database = NULL;
+    char *host = NULL;
+    int port = 0;
+
+    dbh->driver = dbi_parse_dsn(dsn, &database, &host, &port);
+    dbh->dsn = dsn ? strdup(dsn) : NULL;
+    dbh->username = user ? strdup(user) : NULL;
+
+    switch (dbh->driver) {
+#ifdef HAVE_SQLITE3
+        case DBI_DRIVER_SQLITE: {
+            sqlite3 *db;
+            int rc = sqlite3_open(database ? database : ":memory:", &db);
+            if (rc != SQLITE_OK) {
+                dbi_set_error(dbh, rc, sqlite3_errmsg(db));
+                sqlite3_close(db);
+                free(database);
+                free(host);
+                free(dbh->dsn);
+                free(dbh->username);
+                free(dbh);
+                return NULL;
+            }
+            dbh->conn = db;
+            dbh->connected = 1;
+            break;
+        }
+#endif
+
+#ifdef HAVE_MYSQL
+        case DBI_DRIVER_MYSQL: {
+            MYSQL *mysql = mysql_init(NULL);
+            if (!mysql) {
+                dbi_set_error(dbh, -1, "MySQL initialization failed");
+                free(database);
+                free(host);
+                free(dbh->dsn);
+                free(dbh->username);
+                free(dbh);
+                return NULL;
+            }
+            if (!mysql_real_connect(mysql, host ? host : "localhost", user, pass,
+                                   database, port ? port : 3306, NULL, 0)) {
+                dbi_set_error(dbh, mysql_errno(mysql), mysql_error(mysql));
+                mysql_close(mysql);
+                free(database);
+                free(host);
+                free(dbh->dsn);
+                free(dbh->username);
+                free(dbh);
+                return NULL;
+            }
+            if (dbh->auto_commit) mysql_autocommit(mysql, 1);
+            dbh->conn = mysql;
+            dbh->connected = 1;
+            break;
+        }
+#endif
+
+#ifdef HAVE_POSTGRES
+        case DBI_DRIVER_POSTGRES: {
+            char conninfo[1024];
+            snprintf(conninfo, sizeof(conninfo),
+                    "host=%s port=%d dbname=%s user=%s password=%s",
+                    host ? host : "localhost", port ? port : 5432,
+                    database ? database : "", user ? user : "", pass ? pass : "");
+            PGconn *pg = PQconnectdb(conninfo);
+            if (PQstatus(pg) != CONNECTION_OK) {
+                dbi_set_error(dbh, -1, PQerrorMessage(pg));
+                PQfinish(pg);
+                free(database);
+                free(host);
+                free(dbh->dsn);
+                free(dbh->username);
+                free(dbh);
+                return NULL;
+            }
+            dbh->conn = pg;
+            dbh->connected = 1;
+            break;
+        }
+#endif
+
+        default:
+            dbi_set_error(dbh, -1, "Unknown or unsupported database driver");
+            free(database);
+            free(host);
+            free(dbh->dsn);
+            free(dbh->username);
+            free(dbh);
+            return NULL;
+    }
+
+    free(database);
+    free(host);
+    return dbh;
+}
+
+/* Forward declarations for transaction functions */
+static int dbi_do_sql(DbiHandle *dbh, const char *sql);
+static int dbi_rollback(DbiHandle *dbh);
+
+/* Disconnect from database */
+static void dbi_disconnect(DbiHandle *dbh) {
+    if (!dbh) return;
+
+    if (dbh->in_transaction) {
+        dbi_rollback(dbh);
+    }
+
+    switch (dbh->driver) {
+#ifdef HAVE_SQLITE3
+        case DBI_DRIVER_SQLITE:
+            if (dbh->conn) sqlite3_close((sqlite3*)dbh->conn);
+            break;
+#endif
+#ifdef HAVE_MYSQL
+        case DBI_DRIVER_MYSQL:
+            if (dbh->conn) mysql_close((MYSQL*)dbh->conn);
+            break;
+#endif
+#ifdef HAVE_POSTGRES
+        case DBI_DRIVER_POSTGRES:
+            if (dbh->conn) PQfinish((PGconn*)dbh->conn);
+            break;
+#endif
+        default:
+            break;
+    }
+
+    free(dbh->dsn);
+    free(dbh->username);
+    free(dbh->error_msg);
+    free(dbh);
+}
+
+/* Ping connection */
+static int dbi_ping(DbiHandle *dbh) {
+    if (!dbh || !dbh->connected) return 0;
+
+    switch (dbh->driver) {
+#ifdef HAVE_SQLITE3
+        case DBI_DRIVER_SQLITE:
+            return 1;
+#endif
+#ifdef HAVE_MYSQL
+        case DBI_DRIVER_MYSQL:
+            return mysql_ping((MYSQL*)dbh->conn) == 0;
+#endif
+#ifdef HAVE_POSTGRES
+        case DBI_DRIVER_POSTGRES:
+            return PQstatus((PGconn*)dbh->conn) == CONNECTION_OK;
+#endif
+        default:
+            return 0;
+    }
+}
+
+/* Prepare statement */
+static DbiStatement* dbi_prepare(DbiHandle *dbh, const char *sql) {
+    if (!dbh || !dbh->connected || !sql) return NULL;
+
+    DbiStatement *sth = calloc(1, sizeof(DbiStatement));
+    if (!sth) return NULL;
+
+    sth->dbh = dbh;
+    sth->sql = strdup(sql);
+
+    const char *p = sql;
+    while ((p = strchr(p, '?')) != NULL) {
+        sth->num_params++;
+        p++;
+    }
+
+    switch (dbh->driver) {
+#ifdef HAVE_SQLITE3
+        case DBI_DRIVER_SQLITE: {
+            sqlite3_stmt *stmt;
+            int rc = sqlite3_prepare_v2((sqlite3*)dbh->conn, sql, -1, &stmt, NULL);
+            if (rc != SQLITE_OK) {
+                dbi_set_error(dbh, rc, sqlite3_errmsg((sqlite3*)dbh->conn));
+                free(sth->sql);
+                free(sth);
+                return NULL;
+            }
+            sth->stmt = stmt;
+            sth->num_columns = sqlite3_column_count(stmt);
+            if (sth->num_columns > 0) {
+                sth->column_names = calloc(sth->num_columns, sizeof(char*));
+                for (int i = 0; i < sth->num_columns; i++) {
+                    const char *name = sqlite3_column_name(stmt, i);
+                    sth->column_names[i] = name ? strdup(name) : strdup("");
+                }
+            }
+            break;
+        }
+#endif
+
+#ifdef HAVE_MYSQL
+        case DBI_DRIVER_MYSQL: {
+            MYSQL_STMT *stmt = mysql_stmt_init((MYSQL*)dbh->conn);
+            if (!stmt || mysql_stmt_prepare(stmt, sql, strlen(sql)) != 0) {
+                dbi_set_error(dbh, mysql_stmt_errno(stmt), mysql_stmt_error(stmt));
+                if (stmt) mysql_stmt_close(stmt);
+                free(sth->sql);
+                free(sth);
+                return NULL;
+            }
+            sth->stmt = stmt;
+            sth->num_params = mysql_stmt_param_count(stmt);
+
+            /* Allocate parameter binding arrays */
+            if (sth->num_params > 0) {
+                sth->mysql_param_binds = calloc(sth->num_params, sizeof(MYSQL_BIND));
+                sth->mysql_param_lengths = calloc(sth->num_params, sizeof(unsigned long));
+                sth->mysql_param_nulls = calloc(sth->num_params, sizeof(char));
+                sth->mysql_param_buffers = calloc(sth->num_params, sizeof(char*));
+                sth->mysql_params_bound = 0;
+            }
+
+            MYSQL_RES *meta = mysql_stmt_result_metadata(stmt);
+            if (meta) {
+                sth->num_columns = mysql_num_fields(meta);
+                sth->column_names = calloc(sth->num_columns, sizeof(char*));
+                MYSQL_FIELD *fields = mysql_fetch_fields(meta);
+                for (int i = 0; i < sth->num_columns; i++) {
+                    sth->column_names[i] = strdup(fields[i].name);
+                }
+                mysql_free_result(meta);
+            }
+            break;
+        }
+#endif
+
+#ifdef HAVE_POSTGRES
+        case DBI_DRIVER_POSTGRES:
+            sth->stmt = NULL;
+            break;
+#endif
+
+        default:
+            free(sth->sql);
+            free(sth);
+            return NULL;
+    }
+
+    return sth;
+}
+
+/* Execute statement */
+static int dbi_execute_raw(DbiStatement *sth) {
+    if (!sth || !sth->dbh) return -1;
+
+    DbiHandle *dbh = sth->dbh;
+    sth->executed = 1;
+    sth->finished = 0;
+
+    switch (dbh->driver) {
+#ifdef HAVE_SQLITE3
+        case DBI_DRIVER_SQLITE: {
+            sqlite3_stmt *stmt = (sqlite3_stmt*)sth->stmt;
+            int rc = sqlite3_step(stmt);
+            if (rc == SQLITE_DONE) {
+                sth->affected_rows = sqlite3_changes((sqlite3*)dbh->conn);
+                sth->finished = 1;
+                return sth->affected_rows;
+            } else if (rc == SQLITE_ROW) {
+                sqlite3_reset(stmt);
+                return 0;
+            } else {
+                dbi_set_error(dbh, rc, sqlite3_errmsg((sqlite3*)dbh->conn));
+                return -1;
+            }
+        }
+#endif
+#ifdef HAVE_MYSQL
+        case DBI_DRIVER_MYSQL: {
+            MYSQL_STMT *stmt = (MYSQL_STMT*)sth->stmt;
+
+            /* Bind parameters if any */
+            if (sth->num_params > 0 && sth->mysql_param_binds) {
+                if (mysql_stmt_bind_param(stmt, sth->mysql_param_binds) != 0) {
+                    dbi_set_error(dbh, mysql_stmt_errno(stmt), mysql_stmt_error(stmt));
+                    return -1;
+                }
+            }
+
+            if (mysql_stmt_execute(stmt) != 0) {
+                dbi_set_error(dbh, mysql_stmt_errno(stmt), mysql_stmt_error(stmt));
+                return -1;
+            }
+            sth->affected_rows = mysql_stmt_affected_rows(stmt);
+
+            /* For SELECT queries, store result and set up bindings */
+            MYSQL_RES *meta = mysql_stmt_result_metadata(stmt);
+            if (meta) {
+                /* Enable max_length tracking so buffers are sized to actual data */
+                bool update_max = 1;
+                mysql_stmt_attr_set(stmt, STMT_ATTR_UPDATE_MAX_LENGTH, &update_max);
+
+                /* This is a SELECT - store results and bind columns */
+                if (mysql_stmt_store_result(stmt) != 0) {
+                    dbi_set_error(dbh, mysql_stmt_errno(stmt), mysql_stmt_error(stmt));
+                    mysql_free_result(meta);
+                    return -1;
+                }
+
+                int ncols = sth->num_columns;
+                sth->mysql_result_binds = calloc(ncols, sizeof(MYSQL_BIND));
+                sth->mysql_lengths = calloc(ncols, sizeof(unsigned long));
+                sth->mysql_nulls = calloc(ncols, sizeof(char));  /* Use char for is_null flags */
+                sth->mysql_buffers = calloc(ncols, sizeof(char*));
+                sth->mysql_buffer_sizes = calloc(ncols, sizeof(unsigned long));
+
+                MYSQL_FIELD *fields = mysql_fetch_fields(meta);
+                for (int i = 0; i < ncols; i++) {
+                    /* Allocate buffer based on field type */
+                    unsigned long bufsize = fields[i].max_length + 1;
+                    if (bufsize < 256) bufsize = 256;
+                    sth->mysql_buffers[i] = calloc(bufsize, 1);
+                    sth->mysql_buffer_sizes[i] = bufsize;
+
+                    sth->mysql_result_binds[i].buffer_type = MYSQL_TYPE_STRING;
+                    sth->mysql_result_binds[i].buffer = sth->mysql_buffers[i];
+                    sth->mysql_result_binds[i].buffer_length = bufsize;
+                    sth->mysql_result_binds[i].length = &sth->mysql_lengths[i];
+                    sth->mysql_result_binds[i].is_null = (bool*)&sth->mysql_nulls[i];
+                }
+
+                if (mysql_stmt_bind_result(stmt, sth->mysql_result_binds) != 0) {
+                    dbi_set_error(dbh, mysql_stmt_errno(stmt), mysql_stmt_error(stmt));
+                    mysql_free_result(meta);
+                    return -1;
+                }
+
+                mysql_free_result(meta);
+            }
+            return sth->affected_rows;
+        }
+#endif
+#ifdef HAVE_POSTGRES
+        case DBI_DRIVER_POSTGRES:
+            return 0;
+#endif
+        default:
+            return -1;
+    }
+}
+
+/* Bind string parameter */
+static void dbi_bind_str(DbiStatement *sth, int idx, const char *val) {
+    if (!sth || !sth->dbh) return;
+
+    switch (sth->dbh->driver) {
+#ifdef HAVE_SQLITE3
+        case DBI_DRIVER_SQLITE:
+            if (val) {
+                sqlite3_bind_text((sqlite3_stmt*)sth->stmt, idx, val, -1, SQLITE_TRANSIENT);
+            } else {
+                sqlite3_bind_null((sqlite3_stmt*)sth->stmt, idx);
+            }
+            break;
+#endif
+#ifdef HAVE_MYSQL
+        case DBI_DRIVER_MYSQL: {
+            int param_idx = idx - 1;  /* MySQL uses 0-based indexing */
+            if (param_idx < 0 || param_idx >= sth->num_params) return;
+
+            /* Check that buffers are allocated */
+            if (!sth->mysql_param_buffers || !sth->mysql_param_binds) return;
+
+            /* Free old buffer if exists */
+            if (sth->mysql_param_buffers[param_idx]) {
+                free(sth->mysql_param_buffers[param_idx]);
+            }
+
+            if (val) {
+                sth->mysql_param_buffers[param_idx] = strdup(val);
+                sth->mysql_param_lengths[param_idx] = strlen(val);
+                sth->mysql_param_nulls[param_idx] = 0;
+                sth->mysql_param_binds[param_idx].buffer_type = MYSQL_TYPE_STRING;
+                sth->mysql_param_binds[param_idx].buffer = sth->mysql_param_buffers[param_idx];
+                sth->mysql_param_binds[param_idx].buffer_length = sth->mysql_param_lengths[param_idx];
+                sth->mysql_param_binds[param_idx].length = &sth->mysql_param_lengths[param_idx];
+                sth->mysql_param_binds[param_idx].is_null = (bool*)&sth->mysql_param_nulls[param_idx];
+            } else {
+                sth->mysql_param_buffers[param_idx] = NULL;
+                sth->mysql_param_nulls[param_idx] = 1;
+                sth->mysql_param_binds[param_idx].buffer_type = MYSQL_TYPE_NULL;
+                sth->mysql_param_binds[param_idx].is_null = (bool*)&sth->mysql_param_nulls[param_idx];
+            }
+            break;
+        }
+#endif
+        default:
+            break;
+    }
+}
+
+/* Bind null parameter */
+static void dbi_bind_null(DbiStatement *sth, int idx) {
+    if (!sth || !sth->dbh) return;
+
+    switch (sth->dbh->driver) {
+#ifdef HAVE_SQLITE3
+        case DBI_DRIVER_SQLITE:
+            sqlite3_bind_null((sqlite3_stmt*)sth->stmt, idx);
+            break;
+#endif
+#ifdef HAVE_MYSQL
+        case DBI_DRIVER_MYSQL: {
+            int param_idx = idx - 1;  /* MySQL uses 0-based indexing */
+            if (param_idx < 0 || param_idx >= sth->num_params) return;
+            /* Check that buffers are allocated */
+            if (!sth->mysql_param_nulls || !sth->mysql_param_binds) return;
+            sth->mysql_param_nulls[param_idx] = 1;
+            sth->mysql_param_binds[param_idx].buffer_type = MYSQL_TYPE_NULL;
+            sth->mysql_param_binds[param_idx].is_null = (bool*)&sth->mysql_param_nulls[param_idx];
+            break;
+        }
+#endif
+        default:
+            break;
+    }
+}
+
+/* Clear bindings */
+static void dbi_clear_bindings(DbiStatement *sth) {
+    if (!sth || !sth->dbh) return;
+
+    switch (sth->dbh->driver) {
+#ifdef HAVE_SQLITE3
+        case DBI_DRIVER_SQLITE:
+            sqlite3_reset((sqlite3_stmt*)sth->stmt);
+            sqlite3_clear_bindings((sqlite3_stmt*)sth->stmt);
+            break;
+#endif
+#ifdef HAVE_MYSQL
+        case DBI_DRIVER_MYSQL:
+            /* Clear the parameter bindings */
+            if (sth->mysql_param_binds && sth->num_params > 0) {
+                memset(sth->mysql_param_binds, 0, sth->num_params * sizeof(MYSQL_BIND));
+                memset(sth->mysql_param_nulls, 0, sth->num_params * sizeof(char));
+                memset(sth->mysql_param_lengths, 0, sth->num_params * sizeof(unsigned long));
+                for (int i = 0; i < sth->num_params; i++) {
+                    if (sth->mysql_param_buffers[i]) {
+                        free(sth->mysql_param_buffers[i]);
+                        sth->mysql_param_buffers[i] = NULL;
+                    }
+                }
+            }
+            break;
+#endif
+        default:
+            break;
+    }
+}
+
+/* Bind a StradaValue directly - handles type detection and proper memory management */
+static void dbi_bind_value(DbiStatement *sth, int idx, StradaValue *val) {
+    if (!sth || !sth->dbh || !val) return;
+
+    /* Get the string representation of the value - MUST be freed! */
+    char *str = strada_to_str(val);
+
+    switch (sth->dbh->driver) {
+#ifdef HAVE_SQLITE3
+        case DBI_DRIVER_SQLITE:
+            if (str) {
+                /* SQLITE_TRANSIENT makes SQLite copy the string, so we can free it */
+                sqlite3_bind_text((sqlite3_stmt*)sth->stmt, idx, str, -1, SQLITE_TRANSIENT);
+            } else {
+                sqlite3_bind_null((sqlite3_stmt*)sth->stmt, idx);
+            }
+            break;
+#endif
+#ifdef HAVE_MYSQL
+        case DBI_DRIVER_MYSQL: {
+            int param_idx = idx - 1;  /* MySQL uses 0-based indexing */
+            if (param_idx < 0 || param_idx >= sth->num_params) {
+                free(str);  /* Don't leak on early return */
+                return;
+            }
+
+            /* Check that buffers are allocated */
+            if (!sth->mysql_param_buffers || !sth->mysql_param_binds) {
+                free(str);
+                return;
+            }
+
+            /* Free old buffer if exists */
+            if (sth->mysql_param_buffers[param_idx]) {
+                free(sth->mysql_param_buffers[param_idx]);
+            }
+
+            if (str && strlen(str) > 0) {
+                /* Use the str directly instead of strdup - we own it now */
+                sth->mysql_param_buffers[param_idx] = str;
+                sth->mysql_param_lengths[param_idx] = strlen(str);
+                sth->mysql_param_nulls[param_idx] = 0;
+                sth->mysql_param_binds[param_idx].buffer_type = MYSQL_TYPE_STRING;
+                sth->mysql_param_binds[param_idx].buffer = sth->mysql_param_buffers[param_idx];
+                sth->mysql_param_binds[param_idx].buffer_length = sth->mysql_param_lengths[param_idx];
+                sth->mysql_param_binds[param_idx].length = &sth->mysql_param_lengths[param_idx];
+                sth->mysql_param_binds[param_idx].is_null = (bool*)&sth->mysql_param_nulls[param_idx];
+                str = NULL;  /* Ownership transferred, don't free */
+            } else {
+                sth->mysql_param_buffers[param_idx] = NULL;
+                sth->mysql_param_nulls[param_idx] = 1;
+                sth->mysql_param_binds[param_idx].buffer_type = MYSQL_TYPE_NULL;
+                sth->mysql_param_binds[param_idx].is_null = (bool*)&sth->mysql_param_nulls[param_idx];
+            }
+            break;
+        }
+#endif
+        default:
+            break;
+    }
+
+    /* Free the string if we didn't transfer ownership */
+    if (str) {
+        free(str);
+    }
+}
+
+/* Step to next row */
+static int dbi_step(DbiStatement *sth) {
+    if (!sth || !sth->dbh || !sth->executed) return -1;
+    if (sth->finished) return 0;
+
+    DbiHandle *dbh = sth->dbh;
+
+    switch (dbh->driver) {
+#ifdef HAVE_SQLITE3
+        case DBI_DRIVER_SQLITE: {
+            int rc = sqlite3_step((sqlite3_stmt*)sth->stmt);
+            if (rc == SQLITE_ROW) return 1;
+            else if (rc == SQLITE_DONE) {
+                sth->finished = 1;
+                return 0;
+            } else {
+                dbi_set_error(dbh, rc, sqlite3_errmsg((sqlite3*)dbh->conn));
+                return -1;
+            }
+        }
+#endif
+#ifdef HAVE_MYSQL
+        case DBI_DRIVER_MYSQL: {
+            MYSQL_STMT *stmt = (MYSQL_STMT*)sth->stmt;
+            int rc = mysql_stmt_fetch(stmt);
+            if (rc == 0) {
+                sth->row_count++;
+                return 1;  /* Row available */
+            } else if (rc == MYSQL_NO_DATA) {
+                sth->finished = 1;
+                return 0;  /* No more rows */
+            } else if (rc == MYSQL_DATA_TRUNCATED) {
+                /* Data was truncated but still available */
+                sth->row_count++;
+                return 1;
+            } else {
+                dbi_set_error(dbh, mysql_stmt_errno(stmt), mysql_stmt_error(stmt));
+                return -1;
+            }
+        }
+#endif
+#ifdef HAVE_POSTGRES
+        case DBI_DRIVER_POSTGRES:
+            if (!sth->result) return 0;
+            if (sth->row_count < PQntuples((PGresult*)sth->result)) return 1;
+            sth->finished = 1;
+            return 0;
+#endif
+        default:
+            return -1;
+    }
+}
+
+/* Get column count */
+static int dbi_column_count(DbiStatement *sth) {
+    return sth ? sth->num_columns : 0;
+}
+
+/* Get column name */
+static char* dbi_column_name(DbiStatement *sth, int idx) {
+    if (!sth || !sth->column_names || idx < 0 || idx >= sth->num_columns) {
+        return strdup("");
+    }
+    return strdup(sth->column_names[idx]);
+}
+
+/* Get column type: 0=null, 1=int, 2=num, 3=str */
+static int dbi_column_type(DbiStatement *sth, int idx) {
+    if (!sth || !sth->dbh) return 0;
+
+    switch (sth->dbh->driver) {
+#ifdef HAVE_SQLITE3
+        case DBI_DRIVER_SQLITE: {
+            int type = sqlite3_column_type((sqlite3_stmt*)sth->stmt, idx);
+            switch (type) {
+                case SQLITE_NULL:    return 0;
+                case SQLITE_INTEGER: return 1;
+                case SQLITE_FLOAT:   return 2;
+                default:             return 3;
+            }
+        }
+#endif
+        default:
+            return 3;
+    }
+}
+
+/* Get column as int */
+static int64_t dbi_column_int(DbiStatement *sth, int idx) {
+    if (!sth || !sth->dbh) return 0;
+    if (idx < 0 || idx >= sth->num_columns) return 0;
+
+    switch (sth->dbh->driver) {
+#ifdef HAVE_SQLITE3
+        case DBI_DRIVER_SQLITE:
+            return sqlite3_column_int64((sqlite3_stmt*)sth->stmt, idx);
+#endif
+#ifdef HAVE_MYSQL
+        case DBI_DRIVER_MYSQL: {
+            if (!sth->mysql_buffers || sth->mysql_nulls[idx]) return 0;
+            return strtoll(sth->mysql_buffers[idx], NULL, 10);
+        }
+#endif
+#ifdef HAVE_POSTGRES
+        case DBI_DRIVER_POSTGRES: {
+            if (!sth->result) return 0;
+            PGresult *res = (PGresult*)sth->result;
+            int row = sth->affected_rows;
+            if (PQgetisnull(res, row, idx)) return 0;
+            return strtoll(PQgetvalue(res, row, idx), NULL, 10);
+        }
+#endif
+        default:
+            return 0;
+    }
+}
+
+/* Get column as double */
+static double dbi_column_num(DbiStatement *sth, int idx) {
+    if (!sth || !sth->dbh) return 0.0;
+    if (idx < 0 || idx >= sth->num_columns) return 0.0;
+
+    switch (sth->dbh->driver) {
+#ifdef HAVE_SQLITE3
+        case DBI_DRIVER_SQLITE:
+            return sqlite3_column_double((sqlite3_stmt*)sth->stmt, idx);
+#endif
+#ifdef HAVE_MYSQL
+        case DBI_DRIVER_MYSQL: {
+            if (!sth->mysql_buffers || sth->mysql_nulls[idx]) return 0.0;
+            return strtod(sth->mysql_buffers[idx], NULL);
+        }
+#endif
+#ifdef HAVE_POSTGRES
+        case DBI_DRIVER_POSTGRES: {
+            if (!sth->result) return 0.0;
+            PGresult *res = (PGresult*)sth->result;
+            int row = sth->affected_rows;
+            if (PQgetisnull(res, row, idx)) return 0.0;
+            return strtod(PQgetvalue(res, row, idx), NULL);
+        }
+#endif
+        default:
+            return 0.0;
+    }
+}
+
+/* Get column as string */
+static char* dbi_column_str(DbiStatement *sth, int idx) {
+    if (!sth || !sth->dbh) return strdup("");
+    if (idx < 0 || idx >= sth->num_columns) return strdup("");
+
+    switch (sth->dbh->driver) {
+#ifdef HAVE_SQLITE3
+        case DBI_DRIVER_SQLITE: {
+            const char *text = (const char*)sqlite3_column_text((sqlite3_stmt*)sth->stmt, idx);
+            return strdup(text ? text : "");
+        }
+#endif
+#ifdef HAVE_MYSQL
+        case DBI_DRIVER_MYSQL: {
+            if (!sth->mysql_buffers || sth->mysql_nulls[idx]) return strdup("");
+            return strdup(sth->mysql_buffers[idx]);
+        }
+#endif
+#ifdef HAVE_POSTGRES
+        case DBI_DRIVER_POSTGRES: {
+            if (!sth->result) return strdup("");
+            PGresult *res = (PGresult*)sth->result;
+            int row = sth->affected_rows;
+            if (PQgetisnull(res, row, idx)) return strdup("");
+            return strdup(PQgetvalue(res, row, idx));
+        }
+#endif
+        default:
+            return strdup("");
+    }
+}
+
+/* Check if column is null */
+static int dbi_column_is_null(DbiStatement *sth, int idx) {
+    if (!sth || !sth->dbh) return 1;
+    if (idx < 0 || idx >= sth->num_columns) return 1;
+
+    switch (sth->dbh->driver) {
+#ifdef HAVE_SQLITE3
+        case DBI_DRIVER_SQLITE:
+            return sqlite3_column_type((sqlite3_stmt*)sth->stmt, idx) == SQLITE_NULL;
+#endif
+#ifdef HAVE_MYSQL
+        case DBI_DRIVER_MYSQL: {
+            if (!sth->mysql_nulls) return 1;
+            return sth->mysql_nulls[idx] ? 1 : 0;
+        }
+#endif
+#ifdef HAVE_POSTGRES
+        case DBI_DRIVER_POSTGRES: {
+            if (!sth->result) return 1;
+            return PQgetisnull((PGresult*)sth->result, sth->affected_rows, idx);
+        }
+#endif
+        default:
+            return 1;
+    }
+}
+
+/* Finish statement */
+static void dbi_finish(DbiStatement *sth) {
+    if (!sth) return;
+    sth->finished = 1;
+
+#ifdef HAVE_SQLITE3
+    if (sth->dbh && sth->dbh->driver == DBI_DRIVER_SQLITE && sth->stmt) {
+        sqlite3_reset((sqlite3_stmt*)sth->stmt);
+    }
+#endif
+#ifdef HAVE_MYSQL
+    if (sth->dbh && sth->dbh->driver == DBI_DRIVER_MYSQL && sth->stmt) {
+        mysql_stmt_free_result((MYSQL_STMT*)sth->stmt);
+    }
+#endif
+}
+
+/* Free statement */
+static void dbi_free_statement(DbiStatement *sth) {
+    if (!sth) return;
+
+    if (sth->dbh) {
+        switch (sth->dbh->driver) {
+#ifdef HAVE_SQLITE3
+            case DBI_DRIVER_SQLITE:
+                if (sth->stmt) sqlite3_finalize((sqlite3_stmt*)sth->stmt);
+                break;
+#endif
+#ifdef HAVE_MYSQL
+            case DBI_DRIVER_MYSQL:
+                if (sth->stmt) mysql_stmt_close((MYSQL_STMT*)sth->stmt);
+                break;
+#endif
+#ifdef HAVE_POSTGRES
+            case DBI_DRIVER_POSTGRES:
+                if (sth->result) PQclear((PGresult*)sth->result);
+                break;
+#endif
+            default:
+                break;
+        }
+    }
+
+    free(sth->sql);
+    if (sth->column_names) {
+        for (int i = 0; i < sth->num_columns; i++) {
+            free(sth->column_names[i]);
+        }
+        free(sth->column_names);
+    }
+    free(sth->column_types);
+
+#ifdef HAVE_MYSQL
+    /* Clean up MySQL result bindings */
+    if (sth->mysql_buffers) {
+        for (int i = 0; i < sth->num_columns; i++) {
+            free(sth->mysql_buffers[i]);
+        }
+        free(sth->mysql_buffers);
+    }
+    free(sth->mysql_result_binds);
+    free(sth->mysql_lengths);
+    free(sth->mysql_nulls);
+    free(sth->mysql_buffer_sizes);
+
+    /* Clean up MySQL parameter bindings */
+    if (sth->mysql_param_buffers) {
+        for (int i = 0; i < sth->num_params; i++) {
+            free(sth->mysql_param_buffers[i]);
+        }
+        free(sth->mysql_param_buffers);
+    }
+    free(sth->mysql_param_binds);
+    free(sth->mysql_param_lengths);
+    free(sth->mysql_param_nulls);
+#endif
+
+    free(sth);
+}
+
+/* Execute SQL directly */
+static int dbi_do_sql(DbiHandle *dbh, const char *sql) {
+    if (!dbh || !sql) return -1;
+    DbiStatement *sth = dbi_prepare(dbh, sql);
+    if (!sth) return -1;
+    int result = dbi_execute_raw(sth);
+    dbi_free_statement(sth);
+    return result;
+}
+
+/* Transaction functions */
+static int dbi_begin_work(DbiHandle *dbh) {
+    if (!dbh || !dbh->connected) return -1;
+    if (dbh->in_transaction) {
+        dbi_set_error(dbh, -1, "Already in a transaction");
+        return -1;
+    }
+    int rc = dbi_do_sql(dbh, "BEGIN");
+    if (rc >= 0) dbh->in_transaction = 1;
+    return rc;
+}
+
+static int dbi_commit(DbiHandle *dbh) {
+    if (!dbh || !dbh->connected) return -1;
+    int rc = dbi_do_sql(dbh, "COMMIT");
+    dbh->in_transaction = 0;
+    return rc;
+}
+
+static int dbi_rollback(DbiHandle *dbh) {
+    if (!dbh || !dbh->connected) return -1;
+    int rc = dbi_do_sql(dbh, "ROLLBACK");
+    dbh->in_transaction = 0;
+    return rc;
+}
+
+/* Quote string */
+static char* dbi_quote(DbiHandle *dbh, const char *str) {
+    if (!str) return strdup("NULL");
+    size_t len = strlen(str);
+    char *quoted = malloc(len * 2 + 3);
+    char *p = quoted;
+    *p++ = '\'';
+    while (*str) {
+        if (*str == '\'') {
+            *p++ = '\'';
+            *p++ = '\'';
+        } else if (*str == '\\' && dbh && dbh->driver == DBI_DRIVER_MYSQL) {
+            *p++ = '\\';
+            *p++ = '\\';
+        } else {
+            *p++ = *str;
+        }
+        str++;
+    }
+    *p++ = '\'';
+    *p = '\0';
+    return quoted;
+}
+
+/* Get last insert ID */
+static int64_t dbi_last_insert_id(DbiHandle *dbh) {
+    if (!dbh || !dbh->connected) return -1;
+
+    switch (dbh->driver) {
+#ifdef HAVE_SQLITE3
+        case DBI_DRIVER_SQLITE:
+            return sqlite3_last_insert_rowid((sqlite3*)dbh->conn);
+#endif
+#ifdef HAVE_MYSQL
+        case DBI_DRIVER_MYSQL:
+            return mysql_insert_id((MYSQL*)dbh->conn);
+#endif
+#ifdef HAVE_POSTGRES
+        case DBI_DRIVER_POSTGRES: {
+            PGresult *res = PQexec((PGconn*)dbh->conn, "SELECT lastval()");
+            if (PQresultStatus(res) == PGRES_TUPLES_OK && PQntuples(res) > 0) {
+                int64_t id = strtoll(PQgetvalue(res, 0, 0), NULL, 10);
+                PQclear(res);
+                return id;
+            }
+            PQclear(res);
+            return -1;
+        }
+#endif
+        default:
+            return -1;
+    }
+}
+
+/* Get error message */
+static const char* dbi_errstr(DbiHandle *dbh) {
+    if (!dbh) return "No database handle";
+    return dbh->error_msg ? dbh->error_msg : "";
+}
+
+/* Get error code */
+static int dbi_err(DbiHandle *dbh) {
+    if (!dbh) return -1;
+    return dbh->error_code;
+}
+
+/* Get affected rows */
+static int dbi_rows(DbiStatement *sth) {
+    if (!sth) return -1;
+    return sth->affected_rows;
+}
 }
 
 # Connect to a database
-# Returns a database handle (hash reference) or undef on failure
-#
-# DSN examples:
-#   "dbi:SQLite:test.db" - SQLite file database
-#   "dbi:SQLite::memory:" - SQLite in-memory database
-#   "dbi:mysql:database=test;host=localhost" - MySQL connection
-#   "dbi:Pg:dbname=test" - PostgreSQL connection
-#
-# Attributes hash (optional):
-#   { AutoCommit => 1, RaiseError => 0, PrintError => 1 }
+# Returns a database handle (hash reference with _ptr) or undef on failure
 func connect(str $dsn, str $username, str $password) scalar {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+    my int $dbh_ptr = 0;
+    __C__ {
+        char *dsn_str = strada_to_str(dsn);
+        char *user_str = strada_to_str(username);
+        char *pass_str = strada_to_str(password);
+        DbiHandle *dbh = dbi_connect_raw(dsn_str, user_str, pass_str, 1, 1);
+        strada_decref(dbh_ptr);  /* Free old value before reassign */
+        dbh_ptr = strada_new_int((int64_t)(intptr_t)dbh);
+        free(dsn_str);
+        free(user_str);
+        free(pass_str);
+    }
+
+    if ($dbh_ptr == 0) {
         return undef;
     }
 
-    my int $fn = sys::dl_sym($lib, "strada_dbi_connect");
-    my scalar $attrs = { "AutoCommit" => 1, "RaiseError" => 0, "PrintError" => 1 };
-    return sys::dl_call_sv($fn, [$dsn, $username, $password, $attrs]);
+    my hash %handle = ();
+    $handle{"_ptr"} = $dbh_ptr;
+    $handle{"dsn"} = $dsn;
+    return \%handle;
 }
 
 # Connect with attributes
 func connect_attrs(str $dsn, str $username, str $password, scalar $attrs) scalar {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+    my int $auto_commit = 1;
+    my int $print_error = 1;
+    my int $raise_error = 0;
+
+    if (defined($attrs)) {
+        if (defined($attrs->{"AutoCommit"})) {
+            $auto_commit = $attrs->{"AutoCommit"};
+        }
+        if (defined($attrs->{"PrintError"})) {
+            $print_error = $attrs->{"PrintError"};
+        }
+        if (defined($attrs->{"RaiseError"})) {
+            $raise_error = $attrs->{"RaiseError"};
+        }
+    }
+
+    my int $dbh_ptr = 0;
+    __C__ {
+        char *dsn_str = strada_to_str(dsn);
+        char *user_str = strada_to_str(username);
+        char *pass_str = strada_to_str(password);
+        int ac = (int)strada_to_int(auto_commit);
+        int pe = (int)strada_to_int(print_error);
+        DbiHandle *dbh = dbi_connect_raw(dsn_str, user_str, pass_str, ac, pe);
+        if (dbh) {
+            dbh->raise_error = (int)strada_to_int(raise_error);
+        }
+        strada_decref(dbh_ptr);  /* Free old value before reassign */
+        dbh_ptr = strada_new_int((int64_t)(intptr_t)dbh);
+        free(dsn_str);
+        free(user_str);
+        free(pass_str);
+    }
+
+    if ($dbh_ptr == 0) {
         return undef;
     }
 
-    my int $fn = sys::dl_sym($lib, "strada_dbi_connect");
-    return sys::dl_call_sv($fn, [$dsn, $username, $password, $attrs]);
+    my hash %handle = ();
+    $handle{"_ptr"} = $dbh_ptr;
+    $handle{"dsn"} = $dsn;
+    return \%handle;
 }
 
 # Disconnect from database
 func disconnect(scalar $dbh) void {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+    if (!defined($dbh)) {
         return;
     }
-
-    my int $fn = sys::dl_sym($lib, "strada_dbi_disconnect");
-    sys::dl_call_void_sv($fn, [$dbh]);
+    my int $handle = $dbh->{"_ptr"};
+    if ($handle != 0) {
+        __C__ {
+            DbiHandle *h = (DbiHandle *)(intptr_t)strada_to_int(handle);
+            dbi_disconnect(h);
+        }
+    }
 }
 
 # Prepare a SQL statement
-# Returns a statement handle (hash reference)
 func prepare(scalar $dbh, str $sql) scalar {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+    if (!defined($dbh)) {
         return undef;
     }
 
-    my int $fn = sys::dl_sym($lib, "strada_dbi_prepare");
-    return sys::dl_call_sv($fn, [$dbh, $sql]);
+    my int $dbh_ptr = $dbh->{"_ptr"};
+    my int $sth_ptr = 0;
+
+    __C__ {
+        DbiHandle *h = (DbiHandle *)(intptr_t)strada_to_int(dbh_ptr);
+        char *sql_str = strada_to_str(sql);
+        DbiStatement *sth = dbi_prepare(h, sql_str);
+        strada_decref(sth_ptr);  /* Free old value before reassign */
+        sth_ptr = strada_new_int((int64_t)(intptr_t)sth);
+        free(sql_str);
+    }
+
+    if ($sth_ptr == 0) {
+        return undef;
+    }
+
+    my hash %handle = ();
+    $handle{"_ptr"} = $sth_ptr;
+    $handle{"_dbh"} = $dbh;
+    $handle{"sql"} = $sql;
+    $handle{"_executed"} = 0;
+    return \%handle;
+}
+
+# Bind parameters and execute - internal helper
+# Takes StradaValues directly without intermediate conversion
+func _bind_params(int $sth_ptr, scalar $params) void {
+    if (!defined($params)) {
+        return;
+    }
+
+    my int $count = scalar($params);
+    my int $i = 0;
+    while ($i < $count) {
+        my scalar $val = $params->[$i];
+        my int $idx = $i + 1;
+
+        if (!defined($val)) {
+            __C__ {
+                DbiStatement *sth = (DbiStatement *)(intptr_t)strada_to_int(sth_ptr);
+                int index = (int)strada_to_int(idx);
+                dbi_bind_null(sth, index);
+            }
+        } else {
+            # Pass the StradaValue directly to C - it handles conversion internally
+            __C__ {
+                DbiStatement *sth = (DbiStatement *)(intptr_t)strada_to_int(sth_ptr);
+                int index = (int)strada_to_int(idx);
+                dbi_bind_value(sth, index, val);
+            }
+        }
+        $i = $i + 1;
+    }
 }
 
 # Execute a prepared statement
-# params should be an array reference with bind values
-# Returns number of affected rows, or -1 on error
 func execute(scalar $sth, scalar $params) int {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+    if (!defined($sth)) {
         return -1;
     }
 
-    my int $fn = sys::dl_sym($lib, "strada_dbi_execute");
-    my scalar $result = sys::dl_call_sv($fn, [$sth, $params]);
-    return $result + 0;
+    my int $sth_ptr = $sth->{"_ptr"};
+
+    __C__ {
+        DbiStatement *s = (DbiStatement *)(intptr_t)strada_to_int(sth_ptr);
+        dbi_clear_bindings(s);
+    }
+
+    DBI::_bind_params($sth_ptr, $params);
+
+    my int $result = 0;
+    __C__ {
+        DbiStatement *s2 = (DbiStatement *)(intptr_t)strada_to_int(sth_ptr);
+        strada_decref(result);  /* Free old value before reassign */
+        result = strada_new_int(dbi_execute_raw(s2));
+    }
+    $sth->{"_executed"} = 1;
+    return $result;
 }
 
 # Execute SQL directly (prepare + execute)
-# Useful for INSERT, UPDATE, DELETE, CREATE, etc.
-# Returns number of affected rows, or -1 on error
-func do(scalar $dbh, str $sql, scalar $params) int {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+func exec(scalar $dbh, str $sql, scalar $params) int {
+    my scalar $sth = DBI::prepare($dbh, $sql);
+    if (!defined($sth)) {
         return -1;
     }
 
-    my int $fn = sys::dl_sym($lib, "strada_dbi_do");
-    my scalar $result = sys::dl_call_sv($fn, [$dbh, $sql, $params]);
-    return $result + 0;
+    my int $result = DBI::execute($sth, $params);
+    DBI::finish($sth);
+    return $result;
 }
 
 # Convenience: execute without params
 func do_sql(scalar $dbh, str $sql) int {
-    return DBI::do($dbh, $sql, []);
+    return DBI::exec($dbh, $sql, []);
 }
 
 # Fetch next row as array reference
-# Returns undef when no more rows
 func fetchrow_array(scalar $sth) scalar {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+    if (!defined($sth)) {
         return undef;
     }
 
-    my int $fn = sys::dl_sym($lib, "strada_dbi_fetchrow_array");
-    return sys::dl_call_sv($fn, [$sth]);
+    my int $sth_ptr = $sth->{"_ptr"};
+    my int $rc = 0;
+    my int $col_count = 0;
+
+    __C__ {
+        DbiStatement *s = (DbiStatement *)(intptr_t)strada_to_int(sth_ptr);
+        strada_decref(rc);
+        strada_decref(col_count);
+        rc = strada_new_int(dbi_step(s));
+        col_count = strada_new_int(dbi_column_count(s));
+    }
+
+    if ($rc != 1) {
+        return undef;
+    }
+
+    my array @row = ();
+    my int $i = 0;
+    while ($i < $col_count) {
+        my int $is_null = 0;
+        my int $col_type = 0;
+        my int $int_val = 0;
+        my num $num_val = 0.0;
+        my str $str_val = "";
+
+        __C__ {
+            DbiStatement *s = (DbiStatement *)(intptr_t)strada_to_int(sth_ptr);
+            int idx = (int)strada_to_int(i);
+            strada_decref(is_null);
+            strada_decref(col_type);
+            strada_decref(int_val);
+            strada_decref(num_val);
+            strada_decref(str_val);
+            is_null = strada_new_int(dbi_column_is_null(s, idx));
+            col_type = strada_new_int(dbi_column_type(s, idx));
+            int_val = strada_new_int(dbi_column_int(s, idx));
+            num_val = strada_new_num(dbi_column_num(s, idx));
+            char *str = dbi_column_str(s, idx);
+            str_val = strada_new_str(str);
+            free(str);
+        }
+
+        if ($is_null == 1) {
+            push(@row, undef);
+        } elsif ($col_type == 1) {
+            push(@row, $int_val);
+        } elsif ($col_type == 2) {
+            push(@row, $num_val);
+        } else {
+            push(@row, $str_val);
+        }
+        $i = $i + 1;
+    }
+
+    return \@row;
 }
 
 # Fetch next row as hash reference
-# Keys are column names
-# Returns undef when no more rows
 func fetchrow_hashref(scalar $sth) scalar {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+    if (!defined($sth)) {
         return undef;
     }
 
-    my int $fn = sys::dl_sym($lib, "strada_dbi_fetchrow_hashref");
-    return sys::dl_call_sv($fn, [$sth]);
+    my int $sth_ptr = $sth->{"_ptr"};
+    my int $rc = 0;
+    my int $col_count = 0;
+
+    __C__ {
+        DbiStatement *s = (DbiStatement *)(intptr_t)strada_to_int(sth_ptr);
+        strada_decref(rc);
+        strada_decref(col_count);
+        rc = strada_new_int(dbi_step(s));
+        col_count = strada_new_int(dbi_column_count(s));
+    }
+
+    if ($rc != 1) {
+        return undef;
+    }
+
+    my hash %row = ();
+    my int $i = 0;
+    while ($i < $col_count) {
+        my str $name = "";
+        my int $is_null = 0;
+        my int $col_type = 0;
+        my int $int_val = 0;
+        my num $num_val = 0.0;
+        my str $str_val = "";
+
+        __C__ {
+            DbiStatement *s = (DbiStatement *)(intptr_t)strada_to_int(sth_ptr);
+            int idx = (int)strada_to_int(i);
+            strada_decref(name);
+            strada_decref(is_null);
+            strada_decref(col_type);
+            strada_decref(int_val);
+            strada_decref(num_val);
+            strada_decref(str_val);
+            char *n = dbi_column_name(s, idx);
+            name = strada_new_str(n);
+            free(n);
+            is_null = strada_new_int(dbi_column_is_null(s, idx));
+            col_type = strada_new_int(dbi_column_type(s, idx));
+            int_val = strada_new_int(dbi_column_int(s, idx));
+            num_val = strada_new_num(dbi_column_num(s, idx));
+            char *str = dbi_column_str(s, idx);
+            str_val = strada_new_str(str);
+            free(str);
+        }
+
+        if ($is_null == 1) {
+            $row{$name} = undef;
+        } elsif ($col_type == 1) {
+            $row{$name} = $int_val;
+        } elsif ($col_type == 2) {
+            $row{$name} = $num_val;
+        } else {
+            $row{$name} = $str_val;
+        }
+        $i = $i + 1;
+    }
+
+    return \%row;
 }
 
 # Fetch all rows as array of array refs
 func fetchall_arrayref(scalar $sth) scalar {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
-        return [];
+    my array @all = ();
+    my scalar $row = DBI::fetchrow_array($sth);
+    while (defined($row)) {
+        push(@all, $row);
+        $row = DBI::fetchrow_array($sth);
     }
+    return \@all;
+}
 
-    my int $fn = sys::dl_sym($lib, "strada_dbi_fetchall_arrayref");
-    return sys::dl_call_sv($fn, [$sth]);
+# Convenience function: prepare, execute, and fetch all rows in one call
+# Usage: my scalar $rows = DBI::selectall_arrayref($dbh, $sql);
+#        my scalar $rows = DBI::selectall_arrayref($dbh, $sql, \@params);
+func selectall_arrayref(scalar $dbh, str $sql) scalar {
+    my scalar $sth = DBI::prepare($dbh, $sql);
+    if (!defined($sth)) {
+        return undef;
+    }
+    my array @empty = ();
+    DBI::execute($sth, \@empty);
+    return DBI::fetchall_arrayref($sth);
+}
+
+# Convenience function with bind parameters
+func selectall_arrayref_bind(scalar $dbh, str $sql, scalar $params) scalar {
+    my scalar $sth = DBI::prepare($dbh, $sql);
+    if (!defined($sth)) {
+        return undef;
+    }
+    DBI::execute($sth, $params);
+    return DBI::fetchall_arrayref($sth);
 }
 
 # Begin a transaction
 func begin_work(scalar $dbh) int {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+    if (!defined($dbh)) {
         return -1;
     }
-
-    my int $fn = sys::dl_sym($lib, "strada_dbi_begin_work");
-    my scalar $result = sys::dl_call_sv($fn, [$dbh]);
-    return $result + 0;
+    my int $dbh_ptr = $dbh->{"_ptr"};
+    my int $result = 0;
+    __C__ {
+        DbiHandle *h = (DbiHandle *)(intptr_t)strada_to_int(dbh_ptr);
+        strada_decref(result);
+        result = strada_new_int(dbi_begin_work(h));
+    }
+    return $result;
 }
 
 # Commit transaction
 func commit(scalar $dbh) int {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+    if (!defined($dbh)) {
         return -1;
     }
-
-    my int $fn = sys::dl_sym($lib, "strada_dbi_commit");
-    my scalar $result = sys::dl_call_sv($fn, [$dbh]);
-    return $result + 0;
+    my int $dbh_ptr = $dbh->{"_ptr"};
+    my int $result = 0;
+    __C__ {
+        DbiHandle *h = (DbiHandle *)(intptr_t)strada_to_int(dbh_ptr);
+        strada_decref(result);
+        result = strada_new_int(dbi_commit(h));
+    }
+    return $result;
 }
 
 # Rollback transaction
 func rollback(scalar $dbh) int {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+    if (!defined($dbh)) {
         return -1;
     }
-
-    my int $fn = sys::dl_sym($lib, "strada_dbi_rollback");
-    my scalar $result = sys::dl_call_sv($fn, [$dbh]);
-    return $result + 0;
+    my int $dbh_ptr = $dbh->{"_ptr"};
+    my int $result = 0;
+    __C__ {
+        DbiHandle *h = (DbiHandle *)(intptr_t)strada_to_int(dbh_ptr);
+        strada_decref(result);
+        result = strada_new_int(dbi_rollback(h));
+    }
+    return $result;
 }
 
 # Quote a string value for safe use in SQL
 func quote(scalar $dbh, str $value) str {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+    if (!defined($dbh)) {
         return "''";
     }
 
-    my int $fn = sys::dl_sym($lib, "strada_dbi_quote");
-    my scalar $result = sys::dl_call_sv($fn, [$dbh, $value]);
-    return "" . $result;
+    my int $dbh_ptr = $dbh->{"_ptr"};
+    my str $result = "";
+    __C__ {
+        DbiHandle *h = (DbiHandle *)(intptr_t)strada_to_int(dbh_ptr);
+        char *val_str = strada_to_str(value);
+        char *quoted = dbi_quote(h, val_str);
+        strada_decref(result);
+        result = strada_new_str(quoted);
+        free(quoted);
+        free(val_str);
+    }
+    return $result;
 }
 
-# Get last insert ID (auto-increment value)
+# Get last insert ID
 func last_insert_id(scalar $dbh) int {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+    if (!defined($dbh)) {
         return -1;
     }
-
-    my int $fn = sys::dl_sym($lib, "strada_dbi_last_insert_id");
-    my scalar $result = sys::dl_call_sv($fn, [$dbh]);
-    return $result + 0;
+    my int $dbh_ptr = $dbh->{"_ptr"};
+    my int $result = 0;
+    __C__ {
+        DbiHandle *h = (DbiHandle *)(intptr_t)strada_to_int(dbh_ptr);
+        strada_decref(result);
+        result = strada_new_int(dbi_last_insert_id(h));
+    }
+    return $result;
 }
 
 # Get last error message
 func errstr(scalar $dbh) str {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
-        return "Library not loaded";
+    if (!defined($dbh)) {
+        return "No database handle";
     }
 
-    my int $fn = sys::dl_sym($lib, "strada_dbi_errstr");
-    my scalar $result = sys::dl_call_sv($fn, [$dbh]);
-    return "" . $result;
+    my int $dbh_ptr = $dbh->{"_ptr"};
+    my str $result = "";
+    __C__ {
+        DbiHandle *h = (DbiHandle *)(intptr_t)strada_to_int(dbh_ptr);
+        strada_decref(result);
+        result = strada_new_str(dbi_errstr(h));
+    }
+    return $result;
 }
 
 # Get last error code
 func err(scalar $dbh) int {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+    if (!defined($dbh)) {
         return -1;
     }
-
-    my int $fn = sys::dl_sym($lib, "strada_dbi_err");
-    my scalar $result = sys::dl_call_sv($fn, [$dbh]);
-    return $result + 0;
+    my int $dbh_ptr = $dbh->{"_ptr"};
+    my int $result = 0;
+    __C__ {
+        DbiHandle *h = (DbiHandle *)(intptr_t)strada_to_int(dbh_ptr);
+        strada_decref(result);
+        result = strada_new_int(dbi_err(h));
+    }
+    return $result;
 }
 
-# Finish statement (mark as done, release resources)
-func finish(scalar $sth) void {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+# Enable or disable RaiseError (throws exceptions on errors)
+func set_raise_error(scalar $dbh, int $flag) void {
+    if (!defined($dbh)) {
         return;
     }
-
-    my int $fn = sys::dl_sym($lib, "strada_dbi_finish");
-    sys::dl_call_void_sv($fn, [$sth]);
+    my int $dbh_ptr = $dbh->{"_ptr"};
+    __C__ {
+        DbiHandle *h = (DbiHandle *)(intptr_t)strada_to_int(dbh_ptr);
+        dbi_set_raise_error(h, (int)strada_to_int(flag));
+    }
 }
 
-# Get number of rows affected by last statement
+# Finish statement and free resources
+func finish(scalar $sth) void {
+    if (!defined($sth)) {
+        return;
+    }
+    my int $sth_ptr = $sth->{"_ptr"};
+    if ($sth_ptr == 0) {
+        return;  # Already freed
+    }
+    __C__ {
+        DbiStatement *stmt = (DbiStatement *)(intptr_t)strada_to_int(sth_ptr);
+        dbi_finish(stmt);
+        dbi_free_statement(stmt);
+    }
+    # Mark as freed to prevent use-after-free
+    $sth->{"_ptr"} = 0;
+}
+
+# Get number of rows affected
 func rows(scalar $sth) int {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+    if (!defined($sth)) {
         return -1;
     }
-
-    my int $fn = sys::dl_sym($lib, "strada_dbi_rows");
-    my scalar $result = sys::dl_call_sv($fn, [$sth]);
-    return $result + 0;
+    my int $sth_ptr = $sth->{"_ptr"};
+    my int $result = 0;
+    __C__ {
+        DbiStatement *stmt = (DbiStatement *)(intptr_t)strada_to_int(sth_ptr);
+        strada_decref(result);
+        result = strada_new_int(dbi_rows(stmt));
+    }
+    return $result;
 }
 
 # Get column names from statement
 func column_names(scalar $sth) scalar {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+    if (!defined($sth)) {
         return [];
     }
 
-    my int $fn = sys::dl_sym($lib, "strada_dbi_column_names");
-    return sys::dl_call_sv($fn, [$sth]);
+    my int $sth_ptr = $sth->{"_ptr"};
+    my int $col_count = 0;
+    __C__ {
+        DbiStatement *stmt = (DbiStatement *)(intptr_t)strada_to_int(sth_ptr);
+        strada_decref(col_count);
+        col_count = strada_new_int(dbi_column_count(stmt));
+    }
+
+    my array @names = ();
+    my int $i = 0;
+    while ($i < $col_count) {
+        my str $name = "";
+        __C__ {
+            DbiStatement *stmt = (DbiStatement *)(intptr_t)strada_to_int(sth_ptr);
+            int idx = (int)strada_to_int(i);
+            char *n = dbi_column_name(stmt, idx);
+            strada_decref(name);
+            name = strada_new_str(n);
+            free(n);
+        }
+        push(@names, $name);
+        $i = $i + 1;
+    }
+
+    return \@names;
 }
 
 # Check if connection is still alive
 func ping(scalar $dbh) int {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+    if (!defined($dbh)) {
         return 0;
     }
-
-    my int $fn = sys::dl_sym($lib, "strada_dbi_ping");
-    my scalar $result = sys::dl_call_sv($fn, [$dbh]);
-    return $result + 0;
+    my int $dbh_ptr = $dbh->{"_ptr"};
+    my int $result = 0;
+    __C__ {
+        DbiHandle *h = (DbiHandle *)(intptr_t)strada_to_int(dbh_ptr);
+        strada_decref(result);
+        result = strada_new_int(dbi_ping(h));
+    }
+    return $result;
 }
 
 # ============================================================
@@ -307,7 +1957,6 @@ func ping(scalar $dbh) int {
 # ============================================================
 
 # Select all rows into an array of hash refs
-# Combines prepare, execute, fetchall as hashref
 func selectall_hashref(scalar $dbh, str $sql, scalar $params) scalar {
     my scalar $sth = DBI::prepare($dbh, $sql);
     if (!defined($sth)) {
@@ -316,15 +1965,15 @@ func selectall_hashref(scalar $dbh, str $sql, scalar $params) scalar {
 
     DBI::execute($sth, $params);
 
-    my scalar $results = [];
+    my array @results = ();
     my scalar $row = DBI::fetchrow_hashref($sth);
     while (defined($row)) {
-        push($results, $row);
+        push(@results, $row);
         $row = DBI::fetchrow_hashref($sth);
     }
 
     DBI::finish($sth);
-    return $results;
+    return \@results;
 }
 
 # Select a single row as hash ref
@@ -351,7 +2000,7 @@ func selectcol(scalar $dbh, str $sql, scalar $params) scalar {
     my scalar $row = DBI::fetchrow_array($sth);
     DBI::finish($sth);
 
-    if (defined($row) && size($row) > 0) {
+    if (defined($row) && scalar($row) > 0) {
         return $row->[0];
     }
     return undef;
@@ -359,7 +2008,7 @@ func selectcol(scalar $dbh, str $sql, scalar $params) scalar {
 
 # Insert and return the new ID
 func insert_get_id(scalar $dbh, str $sql, scalar $params) int {
-    my int $result = DBI::do($dbh, $sql, $params);
+    my int $result = DBI::exec($dbh, $sql, $params);
     if ($result < 0) {
         return -1;
     }

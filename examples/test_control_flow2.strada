@@ -1,0 +1,191 @@
+# Test unless, until, redo, and statement modifiers
+
+func main() int {
+    my int $pass = 0;
+    my int $fail = 0;
+
+    # === unless ===
+
+    # unless (false) should execute body
+    my int $a = 0;
+    unless (0) {
+        $a = 1;
+    }
+    if ($a == 1) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL: unless(false) body"); }
+
+    # unless (true) should skip body
+    my int $b = 0;
+    unless (1) {
+        $b = 1;
+    }
+    if ($b == 0) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL: unless(true) skip"); }
+
+    # unless with else
+    my int $c = 0;
+    unless (1) {
+        $c = 1;
+    } else {
+        $c = 2;
+    }
+    if ($c == 2) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL: unless else"); }
+
+    # === until ===
+
+    # until (condition) loops while condition is false
+    my int $d = 0;
+    until ($d >= 5) {
+        $d = $d + 1;
+    }
+    if ($d == 5) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL: until loop"); }
+
+    # labeled until with last
+    my int $e = 0;
+    OUTER: until ($e >= 100) {
+        $e = $e + 1;
+        if ($e == 3) {
+            last OUTER;
+        }
+    }
+    if ($e == 3) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL: labeled until with last"); }
+
+    # === redo ===
+
+    # redo restarts the current iteration without re-checking condition
+    my int $f = 0;
+    my int $redo_count = 0;
+    while ($f < 3) {
+        $redo_count = $redo_count + 1;
+        if ($f == 0 && $redo_count == 1) {
+            $f = 1;
+            redo;
+        }
+        $f = $f + 1;
+    }
+    # First iteration: f=0, redo_count=1, set f=1, redo
+    # Redo: f=1, redo_count=2, f becomes 2
+    # Next iter: f=2, redo_count=3, f becomes 3
+    # Loop ends: f=3, redo_count=3
+    if ($redo_count == 3) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL: redo in while, got redo_count=" . $redo_count); }
+
+    # redo in foreach
+    my array @items = (10, 20, 30);
+    my int $sum = 0;
+    my int $redo_flag = 0;
+    foreach my int $x (@items) {
+        if ($x == 20 && $redo_flag == 0) {
+            $redo_flag = 1;
+            $sum = $sum + 100;
+            redo;
+        }
+        $sum = $sum + $x;
+    }
+    # x=10: sum=10
+    # x=20, redo_flag=0: sum=110, redo_flag=1, redo
+    # x=20, redo_flag=1: sum=130
+    # x=30: sum=160
+    if ($sum == 160) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL: redo in foreach, got sum=" . $sum); }
+
+    # redo in for loop
+    my int $g = 0;
+    my int $for_redo = 0;
+    for (my int $i = 0; $i < 3; $i = $i + 1) {
+        $g = $g + 1;
+        if ($i == 1 && $for_redo == 0) {
+            $for_redo = 1;
+            redo;
+        }
+    }
+    # i=0: g=1
+    # i=1, for_redo=0: g=2, for_redo=1, redo
+    # i=1, for_redo=1: g=3
+    # i=2: g=4
+    if ($g == 4) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL: redo in for, got g=" . $g); }
+
+    # === Statement modifiers ===
+
+    # expr if cond;
+    my int $h = 0;
+    $h = 42 if 1;
+    if ($h == 42) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL: expr if true"); }
+
+    my int $i = 0;
+    $i = 42 if 0;
+    if ($i == 0) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL: expr if false"); }
+
+    # expr unless cond;
+    my int $j = 0;
+    $j = 99 unless 0;
+    if ($j == 99) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL: expr unless false"); }
+
+    my int $k = 0;
+    $k = 99 unless 1;
+    if ($k == 0) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL: expr unless true"); }
+
+    # expr while cond;
+    my int $m = 0;
+    $m = $m + 1 while $m < 5;
+    if ($m == 5) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL: expr while"); }
+
+    # expr until cond;
+    my int $n = 0;
+    $n = $n + 1 until $n >= 5;
+    if ($n == 5) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL: expr until"); }
+
+    # return with if modifier
+    my int $r1 = test_return_if(1);
+    my int $r2 = test_return_if(0);
+    if ($r1 == 42) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL: return if true"); }
+    if ($r2 == 0) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL: return if false"); }
+
+    # return with unless modifier
+    my int $r3 = test_return_unless(0);
+    my int $r4 = test_return_unless(1);
+    if ($r3 == 99) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL: return unless false"); }
+    if ($r4 == 0) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL: return unless true"); }
+
+    # last if modifier
+    my int $p = 0;
+    while (1) {
+        $p = $p + 1;
+        last if $p >= 3;
+    }
+    if ($p == 3) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL: last if"); }
+
+    # next if modifier
+    my int $nxt = 0;
+    my int $nxt_sum = 0;
+    while ($nxt < 5) {
+        $nxt = $nxt + 1;
+        next if $nxt == 3;
+        $nxt_sum = $nxt_sum + $nxt;
+    }
+    if ($nxt_sum == 12) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL: next if, got nxt_sum=" . $nxt_sum); }
+
+    # last unless modifier
+    my int $s = 0;
+    while (1) {
+        $s = $s + 1;
+        last unless $s < 3;
+    }
+    if ($s == 3) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL: last unless"); }
+
+    # say with if modifier (function call)
+    say("pass_count=" . $pass) if 1;
+
+    say("" . $pass . " passed, " . $fail . " failed");
+    if ($fail == 0) {
+        say("All control flow tests passed");
+    }
+
+    return $fail;
+}
+
+func test_return_if(int $flag) int {
+    return 42 if $flag;
+    return 0;
+}
+
+func test_return_unless(int $flag) int {
+    return 99 unless $flag;
+    return 0;
+}

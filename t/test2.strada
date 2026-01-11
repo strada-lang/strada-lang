@@ -1,0 +1,19 @@
+package tom;
+
+extern func bingo(str $moo) int
+{
+   say("so, cows go ${moo}");
+   return 33;
+}
+
+package main;
+
+func extern() void { say("hello world"); }
+
+func  main() int {
+     print("hello world\n");
+     my int $next = 40;
+#     bingo("hello");
+     return 0;
+}
+

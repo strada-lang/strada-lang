@@ -1,0 +1,3481 @@
+/*
+ Forma - Template Engine for Strada
+
+ A simple yet powerful template rendering library with variable substitution,
+ loops, conditionals, and nested object access.
+
+ Copyright (c) 2026 Michael J. Flickinger
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 2.
+*/
+
+=pod
+
+=head1 NAME
+
+Forma - Template rendering engine for Strada
+
+=head1 SYNOPSIS
+
+    use lib "lib";
+    use Forma;
+
+    # Initialize with template directory
+    Forma::init("./templates");
+
+    # Render a template file with variables
+    my hash %vars = ();
+    $vars{"name"} = "Alice";
+    $vars{"count"} = 42;
+    my str $html = FormaForma::render("welcome.html", \%vars);
+
+    # Render a template string directly
+    my str $result = FormaForma::render_string("Hello, {{name}}!", \%vars);
+
+=head1 DESCRIPTION
+
+Forma is a lightweight template engine for Strada that supports:
+
+=over 4
+
+=item * Variable substitution with {{variable}} syntax
+
+=item * Nested object access with dot notation: {{user.name}}
+
+=item * Loops with {{#each items}}...{{/each}}
+
+=item * Conditionals with {{#if condition}}...{{else}}...{{/if}}
+
+=item * Context switching with {{#with object}}...{{/with}}
+
+=item * Variable assignment with {{#set name = value}}
+
+=item * HTML escaping for safe output
+
+=item * Template caching for performance
+
+=item * Layout/partial support
+
+=back
+
+=head1 TEMPLATE SYNTAX
+
+=head2 Variables
+
+Simple variable substitution:
+
+    Hello, {{name}}!
+    You have {{count}} messages.
+
+Nested object access using dot notation:
+
+    {{user.name}}
+    {{user.address.city}}
+    {{order.items.0.name}}
+
+=head2 Loops
+
+Loop over an array with merged scope (hash fields accessible directly):
+
+    {{#each users}}
+        <li>{{name}} - {{email}}</li>
+    {{/each}}
+
+Loop with a named variable:
+
+    {{#each user in users}}
+        <li>{{user.name}} - {{user.email}}</li>
+    {{/each}}
+
+Loop metadata variables:
+
+    {{#each item in items}}
+        {{@index}}   - Current index (0-based)
+        {{@first}}   - True (1) if first iteration
+        {{@last}}    - True (1) if last iteration
+    {{/each}}
+
+=head2 Conditionals
+
+Basic conditional:
+
+    {{#if logged_in}}
+        Welcome back!
+    {{/if}}
+
+With else clause:
+
+    {{#if has_items}}
+        <ul>{{#each items}}<li>{{name}}</li>{{/each}}</ul>
+    {{else}}
+        <p>No items found.</p>
+    {{/if}}
+
+=head2 Context Switching
+
+Change scope to an object:
+
+    {{#with user}}
+        Name: {{name}}
+        Email: {{email}}
+    {{/with}}
+
+=head2 Variable Assignment
+
+Set a variable within the template:
+
+    {{#set greeting = "Hello"}}
+    {{#set full_name = user.name}}
+    {{#set count = 42}}
+
+    {{greeting}}, {{full_name}}!
+
+=head2 Debugging
+
+Dump a variable for debugging:
+
+    {{dump user}}
+
+=head2 Raw Output (Safe Mode)
+
+When using render_safe(), use triple braces for unescaped output:
+
+    {{{raw_html}}}
+
+=head1 FUNCTIONS
+
+=head2 init($dir)
+
+Initialize the template system with a directory path.
+
+    Forma::init("./templates");
+
+=head2 set_dir($dir)
+
+Set the template directory.
+
+    Forma::set_dir("/var/www/templates");
+
+=head2 get_dir()
+
+Get the current template directory.
+
+    my str $dir = Forma::get_dir();
+
+=head2 set_cache($enabled)
+
+Enable or disable template caching.
+
+    Forma::set_cache(0);  # Disable caching (useful for development)
+    Forma::set_cache(1);  # Enable caching (default)
+
+=head2 clear_cache()
+
+Clear the template cache.
+
+    Forma::clear_cache();
+
+=head2 load($name)
+
+Load a template file (uses cache if enabled).
+
+    my str $template = FormaForma::load("header.html");
+
+=head2 render($name, $vars)
+
+Render a template file with variables.
+
+    my str $html = FormaForma::render("page.html", \%vars);
+
+=head2 render_string($template, $vars)
+
+Render a template string with variables.
+
+    my str $html = FormaForma::render_string("<h1>{{title}}</h1>", \%vars);
+
+=head2 render_safe($name, $vars)
+
+Render a template with HTML escaping for all variables.
+Use {{{var}}} for raw/unescaped output.
+
+    my str $html = Forma::render_safe("user_content.html", \%vars);
+
+=head2 render_string_safe($template, $vars)
+
+Render a template string with HTML escaping.
+
+    my str $html = FormaForma::render_string_safe("<p>{{user_input}}</p>", \%vars);
+
+=head2 render_with_layout($template, $layout, $vars)
+
+Render a template within a layout. The layout should contain {{content}}.
+
+    # layout.html: <html><body>{{content}}</body></html>
+    # page.html: <h1>{{title}}</h1><p>{{body}}</p>
+
+    my str $html = Forma::render_with_layout("page.html", "layout.html", \%vars);
+
+=head2 include($name, $vars)
+
+Include and render another template (for partials).
+
+    my str $partial = Forma::include("sidebar.html", \%vars);
+
+=head2 escape_html($string)
+
+Escape HTML special characters in a string.
+
+    my str $safe = Forma::escape_html("<script>alert('xss')</script>");
+    # Result: &lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;
+
+=head2 register_helper($name, $handler)
+
+Register a custom helper function. The handler receives an array ref of arguments
+and the template variables hash.
+
+    # Define a helper
+    sub double_helper(scalar $args, scalar $vars) str {
+        my array @a = @{$args};
+        my int $n = scalar(@a) > 0 ? $a[0] + 0 : 0;
+        return "" . ($n * 2);
+    }
+
+    # Register it
+    Forma::register_helper("double", \&double_helper);
+
+    # Use in templates: {{double count}} or {{count | double}}
+
+=head2 unregister_helper($name)
+
+Remove a registered helper.
+
+    Forma::unregister_helper("double");
+
+=head2 has_helper($name)
+
+Check if a helper is registered. Returns 1 if exists, 0 otherwise.
+
+    if (Forma::has_helper("double")) { ... }
+
+=head2 list_helpers()
+
+Get an array of all registered helper names.
+
+    my array @helpers = Forma::list_helpers();
+
+=head2 clear_helpers()
+
+Remove all custom helpers.
+
+    Forma::clear_helpers();
+
+=head1 EXAMPLES
+
+=head2 User Profile Page
+
+Template (profile.html):
+
+    <div class="profile">
+        <h1>{{user.name}}</h1>
+        {{#if user.bio}}
+            <p class="bio">{{user.bio}}</p>
+        {{/if}}
+
+        <h2>Recent Posts</h2>
+        {{#if posts}}
+            <ul>
+            {{#each post in posts}}
+                <li>
+                    <a href="/post/{{post.id}}">{{post.title}}</a>
+                    {{#if @first}}<span class="badge">Latest</span>{{/if}}
+                </li>
+            {{/each}}
+            </ul>
+        {{else}}
+            <p>No posts yet.</p>
+        {{/if}}
+    </div>
+
+Strada code:
+
+    use lib "lib";
+    use Forma;
+
+    Forma::init("./templates");
+
+    my hash %user = ();
+    $user{"name"} = "Alice";
+    $user{"bio"} = "Developer and coffee enthusiast.";
+
+    my array @posts = ();
+    push(@posts, {"id" => 1, "title" => "Hello World"});
+    push(@posts, {"id" => 2, "title" => "Getting Started"});
+
+    my hash %vars = ();
+    $vars{"user"} = \%user;
+    $vars{"posts"} = \@posts;
+
+    my str $html = FormaForma::render("profile.html", \%vars);
+    say($html);
+
+=head1 SEE ALSO
+
+L<JSON> - For JSON encoding/decoding of template data
+
+=head1 AUTHOR
+
+Michael J. Flickinger
+
+=head1 LICENSE
+
+GNU General Public License, version 2
+
+=cut
+
+package Forma;
+
+# Template cache
+my hash %g_forma_cache = ();
+my str $g_forma_dir = "./templates";
+my int $g_forma_cache_enabled = 1;
+
+# Custom helper registry
+my hash %g_forma_helpers = ();
+
+# Register a custom helper function
+# Usage: Forma::register_helper("name", \&my_handler);
+# Helper signature: my_handler(scalar $args_array_ref, scalar $vars) str
+func register_helper(str $name, scalar $handler) void {
+    $g_forma_helpers{$name} = $handler;
+}
+
+# Unregister a custom helper
+func unregister_helper(str $name) void {
+    if (exists(%g_forma_helpers, $name)) {
+        delete($g_forma_helpers{$name});
+    }
+}
+
+# Check if a helper is registered
+func has_helper(str $name) int {
+    return exists(%g_forma_helpers, $name) ? 1 : 0;
+}
+
+# Get all registered helper names
+func list_helpers() array {
+    return keys(%g_forma_helpers);
+}
+
+# Clear all custom helpers
+func clear_helpers() void {
+    %g_forma_helpers = ();
+}
+
+# Initialize template system with directory
+func init(str $dir) void {
+    $g_forma_dir = $dir;
+}
+
+# Set template directory
+func set_dir(str $dir) void {
+    $g_forma_dir = $dir;
+}
+
+# Get template directory
+func get_dir() str {
+    return $g_forma_dir;
+}
+
+# Enable/disable template caching
+func set_cache(int $enabled) void {
+    $g_forma_cache_enabled = $enabled;
+}
+
+# Clear template cache
+func clear_cache() void {
+    %g_forma_cache = ();
+}
+
+# Load a template file (with caching)
+func load(str $name) str {
+    # Check cache first
+    if ($g_forma_cache_enabled == 1 && exists(%g_forma_cache, $name)) {
+        return $g_forma_cache{$name};
+    }
+
+    # Build full path
+    my str $path = $g_forma_dir . "/" . $name;
+
+    # Check if file exists
+    if (sys::is_file($path) == 0) {
+        return "";
+    }
+
+    # Load file content
+    my str $content = slurp($path);
+
+    # Cache if enabled
+    if ($g_forma_cache_enabled == 1) {
+        $g_forma_cache{$name} = $content;
+    }
+
+    return $content;
+}
+
+# Render a template file with variables
+func render(str $name, scalar $vars) str {
+    my str $template = Forma::load($name);
+    if (length($template) == 0) {
+        return "";
+    }
+    return Forma::render_string($template, $vars);
+}
+
+# Render a template string with variables
+func render_string(str $template, scalar $vars) str {
+    my str $result = "";
+    my int $len = length($template);
+    my int $i = 0;
+
+    while ($i < $len) {
+        # Fast path: if not at '{', find next '{' and batch copy
+        my int $cur_ch = char_at($template, $i);
+        if ($cur_ch != ord("{")) {
+            # Find next '{' starting from current position
+            my int $next_brace = index(substr($template, $i), "{");
+            if ($next_brace < 0) {
+                # No more braces - copy rest and done
+                $result = $result . substr($template, $i);
+                last;
+            }
+            # Copy up to the brace
+            if ($next_brace > 0) {
+                $result = $result . substr($template, $i, $next_brace);
+            }
+            $i = $i + $next_brace;
+            next;
+        }
+
+        # Check for {{#each ...}}
+        if ($i + 7 < $len) {
+            my str $check_each = substr($template, $i, 7);
+            if ($check_each eq "{{#each") {
+                # Find the closing }} of the opening tag
+                my int $tag_end = Forma::find_closing($template, $i + 7);
+                if ($tag_end > $i + 7) {
+                    # Extract the each expression
+                    my str $each_expr = substr($template, $i + 7, $tag_end - $i - 7);
+                    $each_expr = trim($each_expr);
+
+                    # Check for "item in items" syntax
+                    my str $loop_var = "";
+                    my str $collection_name = $each_expr;
+                    my int $in_pos = index($each_expr, " in ");
+                    if ($in_pos > 0) {
+                        $loop_var = substr($each_expr, 0, $in_pos);
+                        $collection_name = substr($each_expr, $in_pos + 4, length($each_expr) - $in_pos - 4);
+                        $loop_var = trim($loop_var);
+                        $collection_name = trim($collection_name);
+                    }
+
+                    # Find matching {{/each}}
+                    my int $block_end = Forma::find_block_end($template, $tag_end + 2, "each");
+                    if ($block_end > 0) {
+                        # Extract body
+                        my str $body = substr($template, $tag_end + 2, $block_end - $tag_end - 2);
+
+                        # Process the each block
+                        my str $rendered = Forma::process_each_named($collection_name, $loop_var, $body, $vars);
+                        $result = $result . $rendered;
+
+                        # Skip past {{/each}}
+                        $i = $block_end + 9;
+                        next;
+                    }
+                }
+            }
+        }
+
+        # Check for {{#if ...}} but NOT {{#if_eq}}, {{#if_ne}}, etc.
+        if ($i + 5 < $len) {
+            my str $check_if = substr($template, $i, 5);
+            if ($check_if eq "{{#if") {
+                # Make sure this is {{#if and not {{#if_eq, {{#if_ne, etc.
+                my str $next_ch = "";
+                if ($i + 5 < $len) {
+                    $next_ch = substr($template, $i + 5, 1);
+                }
+                if ($next_ch ne "_") {
+                # Find the closing }} of the opening tag
+                my int $tag_end = Forma::find_closing($template, $i + 5);
+                if ($tag_end > $i + 5) {
+                    # Extract condition variable
+                    my str $condition = substr($template, $i + 5, $tag_end - $i - 5);
+                    $condition = trim($condition);
+
+                    # Find matching {{/if}}
+                    my int $block_end = Forma::find_block_end($template, $tag_end + 2, "if");
+                    if ($block_end > 0) {
+                        # Check for {{else}}
+                        my int $else_pos = Forma::find_else($template, $tag_end + 2, $block_end);
+
+                        my str $if_body = "";
+                        my str $else_body = "";
+
+                        if ($else_pos > 0) {
+                            $if_body = substr($template, $tag_end + 2, $else_pos - $tag_end - 2);
+                            $else_body = substr($template, $else_pos + 8, $block_end - $else_pos - 8);
+                        } else {
+                            $if_body = substr($template, $tag_end + 2, $block_end - $tag_end - 2);
+                        }
+
+                        # Process the if block
+                        my str $rendered = Forma::process_if($condition, $if_body, $else_body, $vars);
+                        $result = $result . $rendered;
+
+                        # Skip past {{/if}}
+                        $i = $block_end + 7;
+                        next;
+                    }
+                }
+                }
+            }
+        }
+
+        # Check for {{#unless condition}}...{{/unless}} (inverse of if)
+        if ($i + 9 < $len) {
+            my str $check_unless = substr($template, $i, 9);
+            if ($check_unless eq "{{#unless") {
+                # Find the closing }} of the opening tag
+                my int $tag_end = Forma::find_closing($template, $i + 9);
+                if ($tag_end > $i + 9) {
+                    # Extract condition variable
+                    my str $condition = substr($template, $i + 9, $tag_end - $i - 9);
+                    $condition = trim($condition);
+
+                    # Find matching {{/unless}}
+                    my int $block_end = Forma::find_block_end($template, $tag_end + 2, "unless");
+                    if ($block_end > 0) {
+                        # Check for {{else}}
+                        my int $else_pos = Forma::find_else($template, $tag_end + 2, $block_end);
+
+                        my str $unless_body = "";
+                        my str $else_body = "";
+
+                        if ($else_pos > 0) {
+                            $unless_body = substr($template, $tag_end + 2, $else_pos - $tag_end - 2);
+                            $else_body = substr($template, $else_pos + 8, $block_end - $else_pos - 8);
+                        } else {
+                            $unless_body = substr($template, $tag_end + 2, $block_end - $tag_end - 2);
+                        }
+
+                        # Process the unless block (inverse of if - swap bodies)
+                        my str $rendered = Forma::process_if($condition, $else_body, $unless_body, $vars);
+                        $result = $result . $rendered;
+
+                        # Skip past {{/unless}}
+                        $i = $block_end + 11;
+                        next;
+                    }
+                }
+            }
+        }
+
+        # Check for {{#set varname = value}}
+        if ($i + 6 < $len) {
+            my str $check_set = substr($template, $i, 6);
+            if ($check_set eq "{{#set") {
+                # Find the closing }}
+                my int $tag_end = Forma::find_closing($template, $i + 6);
+                if ($tag_end > $i + 6) {
+                    # Extract the set expression: "varname = value"
+                    my str $set_expr = substr($template, $i + 6, $tag_end - $i - 6);
+                    $set_expr = trim($set_expr);
+
+                    # Parse "varname = value"
+                    my int $eq_pos = index($set_expr, "=");
+                    if ($eq_pos > 0) {
+                        my str $var_name = substr($set_expr, 0, $eq_pos);
+                        my str $value_expr = substr($set_expr, $eq_pos + 1, length($set_expr) - $eq_pos - 1);
+                        $var_name = trim($var_name);
+                        $value_expr = trim($value_expr);
+
+                        # Resolve the value
+                        my scalar $value = Forma::resolve_value($value_expr, $vars);
+
+                        # Set in vars (modify in place)
+                        $vars->{$var_name} = $value;
+                    }
+
+                    # Skip past }}
+                    $i = $tag_end + 2;
+                    next;
+                }
+            }
+        }
+
+        # Check for {{#with object}}...{{/with}}
+        if ($i + 7 < $len) {
+            my str $check_with = substr($template, $i, 7);
+            if ($check_with eq "{{#with") {
+                # Find the closing }} of the opening tag
+                my int $tag_end = Forma::find_closing($template, $i + 7);
+                if ($tag_end > $i + 7) {
+                    # Extract object name
+                    my str $obj_name = substr($template, $i + 7, $tag_end - $i - 7);
+                    $obj_name = trim($obj_name);
+
+                    # Find matching {{/with}}
+                    my int $block_end = Forma::find_block_end($template, $tag_end + 2, "with");
+                    if ($block_end > 0) {
+                        # Extract body
+                        my str $body = substr($template, $tag_end + 2, $block_end - $tag_end - 2);
+
+                        # Get the object and merge into new scope
+                        my scalar $obj = Forma::get_var($obj_name, $vars);
+                        my scalar $new_vars = Forma::merge_scope($vars, $obj);
+
+                        # Render body with merged scope
+                        my str $rendered = Forma::render_string($body, $new_vars);
+                        $result = $result . $rendered;
+
+                        # Skip past {{/with}}
+                        $i = $block_end + 9;
+                        next;
+                    }
+                }
+            }
+        }
+
+        # Check for {{!-- comment --}} (must come before regular {{ handling)
+        if ($i + 4 < $len) {
+            my str $check_comment = substr($template, $i, 4);
+            if ($check_comment eq "{{!-") {
+                # Look for closing --}}
+                my int $comment_end = Forma::find_comment_end($template, $i + 4);
+                if ($comment_end > 0) {
+                    # Skip the entire comment
+                    $i = $comment_end + 4;
+                    next;
+                }
+            }
+        }
+
+        # Check for {{#if_eq var "value"}}...{{/if_eq}}
+        if ($i + 8 < $len) {
+            my str $check_if_eq = substr($template, $i, 8);
+            if ($check_if_eq eq "{{#if_eq") {
+                my int $tag_end = Forma::find_closing($template, $i + 8);
+                if ($tag_end > $i + 8) {
+                    my str $expr = substr($template, $i + 8, $tag_end - $i - 8);
+                    $expr = trim($expr);
+                    my int $block_end = Forma::find_block_end($template, $tag_end + 2, "if_eq");
+                    if ($block_end > 0) {
+                        my int $else_pos = Forma::find_else($template, $tag_end + 2, $block_end);
+                        my str $if_body = "";
+                        my str $else_body = "";
+                        if ($else_pos > 0) {
+                            $if_body = substr($template, $tag_end + 2, $else_pos - $tag_end - 2);
+                            $else_body = substr($template, $else_pos + 8, $block_end - $else_pos - 8);
+                        } else {
+                            $if_body = substr($template, $tag_end + 2, $block_end - $tag_end - 2);
+                        }
+                        my str $rendered = Forma::process_if_cmp($expr, "eq", $if_body, $else_body, $vars);
+                        $result = $result . $rendered;
+                        $i = $block_end + 10;
+                        next;
+                    }
+                }
+            }
+        }
+
+        # Check for {{#if_ne var "value"}}...{{/if_ne}}
+        if ($i + 8 < $len) {
+            my str $check_if_ne = substr($template, $i, 8);
+            if ($check_if_ne eq "{{#if_ne") {
+                my int $tag_end = Forma::find_closing($template, $i + 8);
+                if ($tag_end > $i + 8) {
+                    my str $expr = substr($template, $i + 8, $tag_end - $i - 8);
+                    $expr = trim($expr);
+                    my int $block_end = Forma::find_block_end($template, $tag_end + 2, "if_ne");
+                    if ($block_end > 0) {
+                        my int $else_pos = Forma::find_else($template, $tag_end + 2, $block_end);
+                        my str $if_body = "";
+                        my str $else_body = "";
+                        if ($else_pos > 0) {
+                            $if_body = substr($template, $tag_end + 2, $else_pos - $tag_end - 2);
+                            $else_body = substr($template, $else_pos + 8, $block_end - $else_pos - 8);
+                        } else {
+                            $if_body = substr($template, $tag_end + 2, $block_end - $tag_end - 2);
+                        }
+                        my str $rendered = Forma::process_if_cmp($expr, "ne", $if_body, $else_body, $vars);
+                        $result = $result . $rendered;
+                        $i = $block_end + 10;
+                        next;
+                    }
+                }
+            }
+        }
+
+        # Check for {{#if_gt var value}}...{{/if_gt}}
+        if ($i + 8 < $len) {
+            my str $check_if_gt = substr($template, $i, 8);
+            if ($check_if_gt eq "{{#if_gt") {
+                my int $tag_end = Forma::find_closing($template, $i + 8);
+                if ($tag_end > $i + 8) {
+                    my str $expr = substr($template, $i + 8, $tag_end - $i - 8);
+                    $expr = trim($expr);
+                    my int $block_end = Forma::find_block_end($template, $tag_end + 2, "if_gt");
+                    if ($block_end > 0) {
+                        my int $else_pos = Forma::find_else($template, $tag_end + 2, $block_end);
+                        my str $if_body = "";
+                        my str $else_body = "";
+                        if ($else_pos > 0) {
+                            $if_body = substr($template, $tag_end + 2, $else_pos - $tag_end - 2);
+                            $else_body = substr($template, $else_pos + 8, $block_end - $else_pos - 8);
+                        } else {
+                            $if_body = substr($template, $tag_end + 2, $block_end - $tag_end - 2);
+                        }
+                        my str $rendered = Forma::process_if_cmp($expr, "gt", $if_body, $else_body, $vars);
+                        $result = $result . $rendered;
+                        $i = $block_end + 10;
+                        next;
+                    }
+                }
+            }
+        }
+
+        # Check for {{#if_lt var value}}...{{/if_lt}}
+        if ($i + 8 < $len) {
+            my str $check_if_lt = substr($template, $i, 8);
+            if ($check_if_lt eq "{{#if_lt") {
+                my int $tag_end = Forma::find_closing($template, $i + 8);
+                if ($tag_end > $i + 8) {
+                    my str $expr = substr($template, $i + 8, $tag_end - $i - 8);
+                    $expr = trim($expr);
+                    my int $block_end = Forma::find_block_end($template, $tag_end + 2, "if_lt");
+                    if ($block_end > 0) {
+                        my int $else_pos = Forma::find_else($template, $tag_end + 2, $block_end);
+                        my str $if_body = "";
+                        my str $else_body = "";
+                        if ($else_pos > 0) {
+                            $if_body = substr($template, $tag_end + 2, $else_pos - $tag_end - 2);
+                            $else_body = substr($template, $else_pos + 8, $block_end - $else_pos - 8);
+                        } else {
+                            $if_body = substr($template, $tag_end + 2, $block_end - $tag_end - 2);
+                        }
+                        my str $rendered = Forma::process_if_cmp($expr, "lt", $if_body, $else_body, $vars);
+                        $result = $result . $rendered;
+                        $i = $block_end + 10;
+                        next;
+                    }
+                }
+            }
+        }
+
+        # Check for {{#if_ge var value}}...{{/if_ge}}
+        if ($i + 8 < $len) {
+            my str $check_if_ge = substr($template, $i, 8);
+            if ($check_if_ge eq "{{#if_ge") {
+                my int $tag_end = Forma::find_closing($template, $i + 8);
+                if ($tag_end > $i + 8) {
+                    my str $expr = substr($template, $i + 8, $tag_end - $i - 8);
+                    $expr = trim($expr);
+                    my int $block_end = Forma::find_block_end($template, $tag_end + 2, "if_ge");
+                    if ($block_end > 0) {
+                        my int $else_pos = Forma::find_else($template, $tag_end + 2, $block_end);
+                        my str $if_body = "";
+                        my str $else_body = "";
+                        if ($else_pos > 0) {
+                            $if_body = substr($template, $tag_end + 2, $else_pos - $tag_end - 2);
+                            $else_body = substr($template, $else_pos + 8, $block_end - $else_pos - 8);
+                        } else {
+                            $if_body = substr($template, $tag_end + 2, $block_end - $tag_end - 2);
+                        }
+                        my str $rendered = Forma::process_if_cmp($expr, "ge", $if_body, $else_body, $vars);
+                        $result = $result . $rendered;
+                        $i = $block_end + 10;
+                        next;
+                    }
+                }
+            }
+        }
+
+        # Check for {{#if_le var value}}...{{/if_le}}
+        if ($i + 8 < $len) {
+            my str $check_if_le = substr($template, $i, 8);
+            if ($check_if_le eq "{{#if_le") {
+                my int $tag_end = Forma::find_closing($template, $i + 8);
+                if ($tag_end > $i + 8) {
+                    my str $expr = substr($template, $i + 8, $tag_end - $i - 8);
+                    $expr = trim($expr);
+                    my int $block_end = Forma::find_block_end($template, $tag_end + 2, "if_le");
+                    if ($block_end > 0) {
+                        my int $else_pos = Forma::find_else($template, $tag_end + 2, $block_end);
+                        my str $if_body = "";
+                        my str $else_body = "";
+                        if ($else_pos > 0) {
+                            $if_body = substr($template, $tag_end + 2, $else_pos - $tag_end - 2);
+                            $else_body = substr($template, $else_pos + 8, $block_end - $else_pos - 8);
+                        } else {
+                            $if_body = substr($template, $tag_end + 2, $block_end - $tag_end - 2);
+                        }
+                        my str $rendered = Forma::process_if_cmp($expr, "le", $if_body, $else_body, $vars);
+                        $result = $result . $rendered;
+                        $i = $block_end + 10;
+                        next;
+                    }
+                }
+            }
+        }
+
+        # Check for {{#range start end}}...{{/range}}
+        if ($i + 8 < $len) {
+            my str $check_range = substr($template, $i, 8);
+            if ($check_range eq "{{#range") {
+                my int $tag_end = Forma::find_closing($template, $i + 8);
+                if ($tag_end > $i + 8) {
+                    my str $range_expr = substr($template, $i + 8, $tag_end - $i - 8);
+                    $range_expr = trim($range_expr);
+                    my int $block_end = Forma::find_block_end($template, $tag_end + 2, "range");
+                    if ($block_end > 0) {
+                        my str $body = substr($template, $tag_end + 2, $block_end - $tag_end - 2);
+                        my str $rendered = Forma::process_range($range_expr, $body, $vars);
+                        $result = $result . $rendered;
+                        $i = $block_end + 10;
+                        next;
+                    }
+                }
+            }
+        }
+
+        # Check for {{#switch var}}...{{/switch}}
+        if ($i + 9 < $len) {
+            my str $check_switch = substr($template, $i, 9);
+            if ($check_switch eq "{{#switch") {
+                my int $tag_end = Forma::find_closing($template, $i + 9);
+                if ($tag_end > $i + 9) {
+                    my str $switch_var = substr($template, $i + 9, $tag_end - $i - 9);
+                    $switch_var = trim($switch_var);
+                    my int $block_end = Forma::find_block_end($template, $tag_end + 2, "switch");
+                    if ($block_end > 0) {
+                        my str $body = substr($template, $tag_end + 2, $block_end - $tag_end - 2);
+                        my str $rendered = Forma::process_switch($switch_var, $body, $vars);
+                        $result = $result . $rendered;
+                        $i = $block_end + 11;  # {{/switch}}
+                        next;
+                    }
+                }
+            }
+        }
+
+        # Look for {{ start (simple variable, helpers, or dump)
+        if ($i + 1 < $len) {
+            my str $two = substr($template, $i, 2);
+            if ($two eq "{{") {
+                # Find closing }}
+                my int $end = Forma::find_closing($template, $i + 2);
+                if ($end > $i + 2) {
+                    # Extract content
+                    my str $content = substr($template, $i + 2, $end - $i - 2);
+                    $content = trim($content);
+
+                    # Check for partial: {{> partial_name}} or {{> partial_name arg=val}}
+                    if (length($content) > 1 && substr($content, 0, 1) eq ">") {
+                        my str $partial_expr = substr($content, 1, length($content) - 1);
+                        $partial_expr = trim($partial_expr);
+                        my str $partial_html = Forma::process_partial($partial_expr, $vars);
+                        $result = $result . $partial_html;
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for {{dump varname}}
+                    if (length($content) > 5 && substr($content, 0, 5) eq "dump ") {
+                        my str $var_name = substr($content, 5, length($content) - 5);
+                        $var_name = trim($var_name);
+                        my scalar $val = Forma::get_var($var_name, $vars);
+                        my str $dump_str = Forma::dump($val, 0);
+                        # HTML-escape the dump to prevent template re-parsing
+                        $dump_str = Forma::escape_html($dump_str);
+                        $result = $result . "<pre class=\"forma-dump\">" . $dump_str . "</pre>";
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for {{json varname}}
+                    if (length($content) > 5 && substr($content, 0, 5) eq "json ") {
+                        my str $var_name = substr($content, 5, length($content) - 5);
+                        $var_name = trim($var_name);
+                        my scalar $val = Forma::get_var($var_name, $vars);
+                        my str $json_str = Forma::to_json($val);
+                        $result = $result . $json_str;
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for {{upper varname}}
+                    if (length($content) > 6 && substr($content, 0, 6) eq "upper ") {
+                        my str $var_name = substr($content, 6, length($content) - 6);
+                        $var_name = trim($var_name);
+                        my str $val = Forma::resolve_var($var_name, $vars);
+                        $result = $result . uc($val);
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for {{lower varname}}
+                    if (length($content) > 6 && substr($content, 0, 6) eq "lower ") {
+                        my str $var_name = substr($content, 6, length($content) - 6);
+                        $var_name = trim($var_name);
+                        my str $val = Forma::resolve_var($var_name, $vars);
+                        $result = $result . lc($val);
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for {{capitalize varname}}
+                    if (length($content) > 11 && substr($content, 0, 11) eq "capitalize ") {
+                        my str $var_name = substr($content, 11, length($content) - 11);
+                        $var_name = trim($var_name);
+                        my str $val = Forma::resolve_var($var_name, $vars);
+                        $result = $result . Forma::helper_capitalize($val);
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for {{truncate varname length}}
+                    if (length($content) > 9 && substr($content, 0, 9) eq "truncate ") {
+                        my str $args = substr($content, 9, length($content) - 9);
+                        $args = trim($args);
+                        my str $truncated = Forma::helper_truncate($args, $vars);
+                        $result = $result . $truncated;
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for {{length varname}}
+                    if (length($content) > 7 && substr($content, 0, 7) eq "length ") {
+                        my str $var_name = substr($content, 7, length($content) - 7);
+                        $var_name = trim($var_name);
+                        my scalar $val = Forma::get_var($var_name, $vars);
+                        my str $len_str = Forma::helper_length($val);
+                        $result = $result . $len_str;
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for {{first varname}}
+                    if (length($content) > 6 && substr($content, 0, 6) eq "first ") {
+                        my str $var_name = substr($content, 6, length($content) - 6);
+                        $var_name = trim($var_name);
+                        my scalar $val = Forma::get_var($var_name, $vars);
+                        my str $first_str = Forma::helper_first($val);
+                        $result = $result . $first_str;
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for {{last varname}}
+                    if (length($content) > 5 && substr($content, 0, 5) eq "last ") {
+                        my str $var_name = substr($content, 5, length($content) - 5);
+                        $var_name = trim($var_name);
+                        my scalar $val = Forma::get_var($var_name, $vars);
+                        my str $last_str = Forma::helper_last($val);
+                        $result = $result . $last_str;
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for {{join varname "separator"}}
+                    if (length($content) > 5 && substr($content, 0, 5) eq "join ") {
+                        my str $args = substr($content, 5, length($content) - 5);
+                        $args = trim($args);
+                        my str $joined = Forma::helper_join($args, $vars);
+                        $result = $result . $joined;
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for {{format_number varname decimals}}
+                    if (length($content) > 14 && substr($content, 0, 14) eq "format_number ") {
+                        my str $args = substr($content, 14, length($content) - 14);
+                        $args = trim($args);
+                        my str $formatted = Forma::helper_format_number($args, $vars);
+                        $result = $result . $formatted;
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for {{commas varname}}
+                    if (length($content) > 7 && substr($content, 0, 7) eq "commas ") {
+                        my str $var_name = substr($content, 7, length($content) - 7);
+                        $var_name = trim($var_name);
+                        my str $val = Forma::resolve_var($var_name, $vars);
+                        my str $formatted = Forma::helper_commas($val);
+                        $result = $result . $formatted;
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for {{plural count "singular" "plural"}}
+                    if (length($content) > 7 && substr($content, 0, 7) eq "plural ") {
+                        my str $args = substr($content, 7, length($content) - 7);
+                        $args = trim($args);
+                        my str $pluralized = Forma::helper_plural($args, $vars);
+                        $result = $result . $pluralized;
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for {{add a b}}
+                    if (length($content) > 4 && substr($content, 0, 4) eq "add ") {
+                        my str $args = substr($content, 4, length($content) - 4);
+                        $result = $result . Forma::helper_add(trim($args), $vars);
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for {{subtract a b}}
+                    if (length($content) > 9 && substr($content, 0, 9) eq "subtract ") {
+                        my str $args = substr($content, 9, length($content) - 9);
+                        $result = $result . Forma::helper_subtract(trim($args), $vars);
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for {{multiply a b}}
+                    if (length($content) > 9 && substr($content, 0, 9) eq "multiply ") {
+                        my str $args = substr($content, 9, length($content) - 9);
+                        $result = $result . Forma::helper_multiply(trim($args), $vars);
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for {{divide a b}}
+                    if (length($content) > 7 && substr($content, 0, 7) eq "divide ") {
+                        my str $args = substr($content, 7, length($content) - 7);
+                        $result = $result . Forma::helper_divide(trim($args), $vars);
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for {{mod a b}}
+                    if (length($content) > 4 && substr($content, 0, 4) eq "mod ") {
+                        my str $args = substr($content, 4, length($content) - 4);
+                        $result = $result . Forma::helper_mod(trim($args), $vars);
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for {{round num decimals}}
+                    if (length($content) > 6 && substr($content, 0, 6) eq "round ") {
+                        my str $args = substr($content, 6, length($content) - 6);
+                        $result = $result . Forma::helper_round(trim($args), $vars);
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for {{replace text "find" "replace"}}
+                    if (length($content) > 8 && substr($content, 0, 8) eq "replace ") {
+                        my str $args = substr($content, 8, length($content) - 8);
+                        $result = $result . Forma::helper_replace(trim($args), $vars);
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for {{contains text "needle"}}
+                    if (length($content) > 9 && substr($content, 0, 9) eq "contains ") {
+                        my str $args = substr($content, 9, length($content) - 9);
+                        $result = $result . Forma::helper_contains(trim($args), $vars);
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for {{starts_with text "prefix"}}
+                    if (length($content) > 12 && substr($content, 0, 12) eq "starts_with ") {
+                        my str $args = substr($content, 12, length($content) - 12);
+                        $result = $result . Forma::helper_starts_with(trim($args), $vars);
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for {{ends_with text "suffix"}}
+                    if (length($content) > 10 && substr($content, 0, 10) eq "ends_with ") {
+                        my str $args = substr($content, 10, length($content) - 10);
+                        $result = $result . Forma::helper_ends_with(trim($args), $vars);
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for {{pad_left value width "char"}}
+                    if (length($content) > 9 && substr($content, 0, 9) eq "pad_left ") {
+                        my str $args = substr($content, 9, length($content) - 9);
+                        $result = $result . Forma::helper_pad_left(trim($args), $vars);
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for {{pad_right value width "char"}}
+                    if (length($content) > 10 && substr($content, 0, 10) eq "pad_right ") {
+                        my str $args = substr($content, 10, length($content) - 10);
+                        $result = $result . Forma::helper_pad_right(trim($args), $vars);
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for {{repeat text count}}
+                    if (length($content) > 7 && substr($content, 0, 7) eq "repeat ") {
+                        my str $args = substr($content, 7, length($content) - 7);
+                        $result = $result . Forma::helper_repeat(trim($args), $vars);
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for {{url_encode value}}
+                    if (length($content) > 11 && substr($content, 0, 11) eq "url_encode ") {
+                        my str $var_name = substr($content, 11, length($content) - 11);
+                        my str $val = Forma::resolve_var(trim($var_name), $vars);
+                        $result = $result . Forma::helper_url_encode($val);
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for {{url_decode value}}
+                    if (length($content) > 11 && substr($content, 0, 11) eq "url_decode ") {
+                        my str $arg = substr($content, 11, length($content) - 11);
+                        $arg = trim($arg);
+                        # Handle quoted string literal
+                        my str $val = "";
+                        if (length($arg) >= 2 && (substr($arg, 0, 1) eq "\"" || substr($arg, 0, 1) eq "'")) {
+                            $val = substr($arg, 1, length($arg) - 2);
+                        } else {
+                            $val = Forma::resolve_var($arg, $vars);
+                        }
+                        $result = $result . Forma::helper_url_decode($val);
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for {{strip_tags html}}
+                    if (length($content) > 11 && substr($content, 0, 11) eq "strip_tags ") {
+                        my str $var_name = substr($content, 11, length($content) - 11);
+                        my str $val = Forma::resolve_var(trim($var_name), $vars);
+                        $result = $result . Forma::helper_strip_tags($val);
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for {{date_format timestamp "format"}}
+                    if (length($content) > 12 && substr($content, 0, 12) eq "date_format ") {
+                        my str $args = substr($content, 12, length($content) - 12);
+                        $result = $result . Forma::helper_date_format(trim($args), $vars);
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for {{time_ago timestamp}}
+                    if (length($content) > 9 && substr($content, 0, 9) eq "time_ago ") {
+                        my str $args = substr($content, 9, length($content) - 9);
+                        $result = $result . Forma::helper_time_ago(trim($args), $vars);
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for {{currency amount "USD"}}
+                    if (length($content) > 9 && substr($content, 0, 9) eq "currency ") {
+                        my str $args = substr($content, 9, length($content) - 9);
+                        $result = $result . Forma::helper_currency(trim($args), $vars);
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for {{percent value}}
+                    if (length($content) > 8 && substr($content, 0, 8) eq "percent ") {
+                        my str $args = substr($content, 8, length($content) - 8);
+                        $result = $result . Forma::helper_percent(trim($args), $vars);
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for {{iif condition "true" "false"}}
+                    if (length($content) > 4 && substr($content, 0, 4) eq "iif ") {
+                        my str $args = substr($content, 4, length($content) - 4);
+                        $result = $result . Forma::helper_iif(trim($args), $vars);
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for custom helpers: {{helper_name arg1 arg2 ...}}
+                    my str $custom_result = Forma::try_custom_helper($content, $vars);
+                    if (length($custom_result) > 0 || Forma::is_custom_helper_match($content)) {
+                        $result = $result . $custom_result;
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Check for pipe syntax: {{varname | default "value"}}
+                    my int $pipe_pos = index($content, " | ");
+                    if ($pipe_pos > 0) {
+                        my str $var_name = substr($content, 0, $pipe_pos);
+                        my str $filter = substr($content, $pipe_pos + 3, length($content) - $pipe_pos - 3);
+                        $var_name = trim($var_name);
+                        $filter = trim($filter);
+                        my str $value = Forma::apply_filter($var_name, $filter, $vars);
+                        $result = $result . $value;
+                        $i = $end + 2;
+                        next;
+                    }
+
+                    # Regular variable
+                    my str $value = Forma::resolve_var($content, $vars);
+                    $result = $result . $value;
+
+                    # Skip past }}
+                    $i = $end + 2;
+                    next;
+                }
+            }
+        }
+
+        # Regular character
+        my str $ch = substr($template, $i, 1);
+        $result = $result . $ch;
+        $i = $i + 1;
+    }
+
+    return $result;
+}
+
+# Resolve a value expression (string literal, number, or variable reference)
+func resolve_value(str $expr, scalar $vars) scalar {
+    # Check for string literal "value" or 'value'
+    my int $expr_len = length($expr);
+    if ($expr_len >= 2) {
+        my str $first_ch = substr($expr, 0, 1);
+        my str $last_ch = substr($expr, $expr_len - 1, 1);
+
+        if (($first_ch eq "\"" && $last_ch eq "\"") || ($first_ch eq "'" && $last_ch eq "'")) {
+            # String literal - extract content
+            return substr($expr, 1, $expr_len - 2);
+        }
+    }
+
+    # Check for numeric literal
+    my int $is_num = 1;
+    my int $has_dot = 0;
+    my int $j = 0;
+    while ($j < $expr_len && $is_num == 1) {
+        my str $ch = substr($expr, $j, 1);
+        if ($ch eq ".") {
+            if ($has_dot == 1) {
+                $is_num = 0;
+            }
+            $has_dot = 1;
+        } elsif ($ch eq "-" && $j == 0) {
+            # Allow leading minus
+        } elsif ($ch ge "0" && $ch le "9") {
+            # Digit OK
+        } else {
+            $is_num = 0;
+        }
+        $j = $j + 1;
+    }
+
+    if ($is_num == 1 && $expr_len > 0) {
+        # Return as number
+        return $expr + 0;
+    }
+
+    # Otherwise treat as variable reference
+    return Forma::get_var($expr, $vars);
+}
+
+# Merge an object's fields into a new scope (for {{#with}})
+func merge_scope(scalar $parent_vars, scalar $obj) scalar {
+    my scalar $new_vars = {};
+
+    # Copy parent vars first
+    if (ref($parent_vars) eq "HASH") {
+        foreach my str $k (keys(%{$parent_vars})) {
+            $new_vars->{$k} = $parent_vars->{$k};
+        }
+    }
+
+    # Merge object fields (overrides parent)
+    if (ref($obj) eq "HASH") {
+        foreach my str $k (keys(%{$obj})) {
+            $new_vars->{$k} = $obj->{$k};
+        }
+    }
+
+    return $new_vars;
+}
+
+# Dump a value for debugging (returns formatted string)
+func dump(scalar $val, int $indent) str {
+    defined($indent);
+    if (!defined($val)) {
+        return "undef";
+    }
+
+    my str $r = ref($val);
+
+    if ($r eq "HASH") {
+        my str $out = "{\n";
+        foreach my str $k (keys(%{$val})) {
+            my scalar $v = $val->{$k};
+            $out = $out . "  \"" . $k . "\": " . Forma::dump_value($v) . ",\n";
+        }
+        $out = $out . "}";
+        return $out;
+    }
+
+    if ($r eq "ARRAY") {
+        my str $out = "[\n";
+        my int $arr_len = scalar(@{$val});
+        my int $arr_i = 0;
+        while ($arr_i < $arr_len) {
+            my scalar $v = $val->[$arr_i];
+            $out = $out . "  " . Forma::dump_value($v) . ",\n";
+            $arr_i = $arr_i + 1;
+        }
+        $out = $out . "]";
+        return $out;
+    }
+
+    # Scalar
+    return Forma::dump_scalar($val);
+}
+
+# Dump a nested value (shallow - no further recursion)
+func dump_value(scalar $val) str {
+    if (!defined($val)) {
+        return "undef";
+    }
+
+    my str $r = ref($val);
+
+    if ($r eq "HASH") {
+        my str $out = "{";
+        my int $count = 0;
+        foreach my str $k (keys(%{$val})) {
+            if ($count > 0) {
+                $out = $out . ", ";
+            }
+            $out = $out . "\"" . $k . "\": ...";
+            $count = $count + 1;
+        }
+        $out = $out . "}";
+        return $out;
+    }
+
+    if ($r eq "ARRAY") {
+        my int $arr_len = scalar(@{$val});
+        return "[" . $arr_len . " items]";
+    }
+
+    return Forma::dump_scalar($val);
+}
+
+# Format a scalar value for dump
+func dump_scalar(scalar $val) str {
+    if (!defined($val)) {
+        return "undef";
+    }
+
+    my str $s = "" . $val;
+
+    # Check if it looks like a number
+    my int $is_num = 1;
+    my int $has_dot = 0;
+    my int $slen = length($s);
+    my int $j = 0;
+
+    if ($slen == 0) {
+        return "\"\"";
+    }
+
+    while ($j < $slen && $is_num == 1) {
+        my str $ch = substr($s, $j, 1);
+        if ($ch eq ".") {
+            if ($has_dot == 1) {
+                $is_num = 0;
+            }
+            $has_dot = 1;
+        } elsif ($ch eq "-" && $j == 0) {
+            # OK
+        } elsif ($ch ge "0" && $ch le "9") {
+            # OK
+        } else {
+            $is_num = 0;
+        }
+        $j = $j + 1;
+    }
+
+    if ($is_num == 1) {
+        return $s;
+    }
+
+    # String - quote it
+    return "\"" . $s . "\"";
+}
+
+# Find closing }} from start position
+func find_closing(str $template, int $start) int {
+    my int $len = length($template);
+    my int $i = $start;
+
+    while ($i + 1 < $len) {
+        my str $two = substr($template, $i, 2);
+        if ($two eq "}}") {
+            return $i;
+        }
+        $i = $i + 1;
+    }
+
+    return -1;
+}
+
+# Resolve a variable name (supports dot notation for nested access)
+func resolve_var(str $name, scalar $vars) str {
+    if (!defined($vars)) {
+        return "";
+    }
+
+    # Handle {{.}} as alias for {{this}} (current item in each loop)
+    if ($name eq ".") {
+        $name = "this";
+    }
+
+    # Handle parent context access with ../ prefix (can be chained: ../../)
+    if (length($name) >= 3 && substr($name, 0, 3) eq "../") {
+        my str $rest = substr($name, 3, length($name) - 3);
+        if (ref($vars) eq "HASH" && exists(%{$vars}, "@parent")) {
+            my scalar $parent = $vars->{"@parent"};
+            return Forma::resolve_var($rest, $parent);
+        }
+        # No parent context available, return empty
+        return "";
+    }
+
+    # Check for dot notation (e.g., user.name, user.address.city)
+    my int $dot = index($name, ".");
+    if ($dot > 0) {
+        # Split on first dot
+        my str $first = substr($name, 0, $dot);
+        my str $rest = substr($name, $dot + 1, length($name) - $dot - 1);
+
+        # Get nested value
+        if (ref($vars) eq "HASH" && exists(%{$vars}, $first)) {
+            my scalar $nested = $vars->{$first};
+            return Forma::resolve_var($rest, $nested);
+        }
+        return "";
+    }
+
+    # Simple variable lookup
+    if (ref($vars) eq "HASH" && exists(%{$vars}, $name)) {
+        my scalar $value = $vars->{$name};
+
+        # Convert to string
+        if (!defined($value)) {
+            return "";
+        }
+        return "" . $value;
+    }
+
+    return "";
+}
+
+# Get a variable value (not converted to string)
+func get_var(str $name, scalar $vars) scalar {
+    if (!defined($vars)) {
+        return undef;
+    }
+
+    # Handle {{.}} as alias for {{this}} (current item in each loop)
+    if ($name eq ".") {
+        $name = "this";
+    }
+
+    # Handle parent context access with ../ prefix (can be chained: ../../)
+    if (length($name) >= 3 && substr($name, 0, 3) eq "../") {
+        my str $rest = substr($name, 3, length($name) - 3);
+        if (ref($vars) eq "HASH" && exists(%{$vars}, "@parent")) {
+            my scalar $parent = $vars->{"@parent"};
+            return Forma::get_var($rest, $parent);
+        }
+        # No parent context available
+        return undef;
+    }
+
+    # Check for dot notation
+    my int $dot = index($name, ".");
+    if ($dot > 0) {
+        my str $first = substr($name, 0, $dot);
+        my str $rest = substr($name, $dot + 1, length($name) - $dot - 1);
+
+        if (ref($vars) eq "HASH" && exists(%{$vars}, $first)) {
+            my scalar $nested = $vars->{$first};
+            return Forma::get_var($rest, $nested);
+        }
+        return undef;
+    }
+
+    # Simple variable lookup
+    if (ref($vars) eq "HASH" && exists(%{$vars}, $name)) {
+        return $vars->{$name};
+    }
+
+    return undef;
+}
+
+# Check if a value is truthy
+func is_truthy(scalar $val) int {
+    if (!defined($val)) {
+        return 0;
+    }
+
+    my str $r = ref($val);
+    if ($r eq "ARRAY") {
+        my int $len = scalar(@{$val});
+        return $len > 0;
+    }
+    if ($r eq "HASH") {
+        return 1;
+    }
+
+    # String or number
+    my str $s = "" . $val;
+    if ($s eq "" || $s eq "0") {
+        return 0;
+    }
+    return 1;
+}
+
+# Find matching block end tag (handles nesting)
+# block_type is "each", "if", "if_eq", "if_ne", etc.
+# Optimized to use index() instead of character-by-character scanning
+func find_block_end(str $template, int $start, str $block_type) int {
+    my int $len = length($template);
+    my int $i = $start;
+    my int $depth = 1;
+    my str $open_tag = "{{#" . $block_type;
+    my str $close_tag = "{{/" . $block_type . "}}";
+    my int $open_len = length($open_tag);
+    my int $close_len = length($close_tag);
+
+    while ($i < $len && $depth > 0) {
+        # Find next {{ using index() - much faster than char-by-char
+        my str $remaining = substr($template, $i);
+        my int $next_brace = index($remaining, "{{");
+        if ($next_brace < 0) {
+            return -1;
+        }
+        $i = $i + $next_brace;
+
+        # Check for nested open tag
+        if ($i + $open_len <= $len) {
+            my str $check_open = substr($template, $i, $open_len);
+            if ($check_open eq $open_tag) {
+                $depth = $depth + 1;
+                $i = $i + $open_len;
+                next;
+            }
+        }
+
+        # Check for close tag
+        if ($i + $close_len <= $len) {
+            my str $check_close = substr($template, $i, $close_len);
+            if ($check_close eq $close_tag) {
+                $depth = $depth - 1;
+                if ($depth == 0) {
+                    return $i;
+                }
+                $i = $i + $close_len;
+                next;
+            }
+        }
+
+        # Move past this {{ to find the next one
+        $i = $i + 2;
+    }
+
+    return -1;
+}
+
+# Find {{else}} at current nesting level
+# Optimized to use index() instead of character-by-character scanning
+func find_else(str $template, int $start, int $block_end) int {
+    my int $i = $start;
+    my int $depth = 0;
+    my str $search_region = substr($template, $start, $block_end - $start);
+
+    while ($i < $block_end) {
+        # Find next {{ using index() - much faster than char-by-char
+        my str $remaining = substr($template, $i, $block_end - $i);
+        my int $next_brace = index($remaining, "{{");
+        if ($next_brace < 0) {
+            return -1;
+        }
+        $i = $i + $next_brace;
+
+        # Track nested #if blocks
+        if ($i + 5 <= $block_end) {
+            my str $check = substr($template, $i, 5);
+            if ($check eq "{{#if") {
+                $depth = $depth + 1;
+                $i = $i + 5;
+                next;
+            }
+        }
+
+        if ($i + 7 <= $block_end) {
+            my str $check = substr($template, $i, 7);
+            if ($check eq "{{/if}}") {
+                $depth = $depth - 1;
+                $i = $i + 7;
+                next;
+            }
+        }
+
+        # Look for {{else}} at depth 0
+        if ($depth == 0 && $i + 8 <= $block_end) {
+            my str $check = substr($template, $i, 8);
+            if ($check eq "{{else}}") {
+                return $i;
+            }
+        }
+
+        # Move past this {{ to find the next one
+        $i = $i + 2;
+    }
+
+    return -1;
+}
+
+# Process an #each block with named variable support
+func process_each_named(str $collection_name, str $loop_var, str $body, scalar $vars) str {
+    my scalar $arr = Forma::get_var($collection_name, $vars);
+
+    if (!defined($arr) || ref($arr) ne "ARRAY") {
+        return "";
+    }
+
+    my str $result = "";
+    my int $len = scalar(@{$arr});
+    my int $idx = 0;
+
+    foreach my scalar $item (@{$arr}) {
+        # Create iteration context
+        my scalar $iter_vars = {};
+
+        # Copy parent vars
+        if (ref($vars) eq "HASH") {
+            foreach my str $k (keys(%{$vars})) {
+                $iter_vars->{$k} = $vars->{$k};
+            }
+        }
+
+        # Store reference to parent context for ../ access
+        $iter_vars->{"@parent"} = $vars;
+
+        # Handle named variable syntax: {{#each item in items}}
+        if (length($loop_var) > 0) {
+            # Named variable mode: item is accessible as {{loop_var}} or {{loop_var.field}}
+            $iter_vars->{$loop_var} = $item;
+        } else {
+            # Legacy mode: merge hash fields into scope, or use "this" for scalars
+            if (ref($item) eq "HASH") {
+                foreach my str $k (keys(%{$item})) {
+                    $iter_vars->{$k} = $item->{$k};
+                }
+            } else {
+                $iter_vars->{"this"} = $item;
+            }
+        }
+
+        # Add loop metadata
+        $iter_vars->{"@index"} = $idx;
+        $iter_vars->{"@number"} = $idx + 1;
+        if ($idx == 0) {
+            $iter_vars->{"@first"} = 1;
+        } else {
+            $iter_vars->{"@first"} = 0;
+        }
+        if ($idx == $len - 1) {
+            $iter_vars->{"@last"} = 1;
+        } else {
+            $iter_vars->{"@last"} = 0;
+        }
+        # @odd and @even (0-indexed: index 0 is even, index 1 is odd, etc)
+        if ($idx % 2 == 0) {
+            $iter_vars->{"@even"} = 1;
+            $iter_vars->{"@odd"} = 0;
+        } else {
+            $iter_vars->{"@even"} = 0;
+            $iter_vars->{"@odd"} = 1;
+        }
+
+        # Render body with iteration context
+        my str $rendered = Forma::render_string($body, $iter_vars);
+        $result = $result . $rendered;
+
+        $idx = $idx + 1;
+    }
+
+    return $result;
+}
+
+# Process an #if block
+func process_if(str $condition, str $if_body, str $else_body, scalar $vars) str {
+    my scalar $val = Forma::get_var($condition, $vars);
+    my int $truthy = Forma::is_truthy($val);
+
+    if ($truthy == 1) {
+        return Forma::render_string($if_body, $vars);
+    } else {
+        if (length($else_body) > 0) {
+            return Forma::render_string($else_body, $vars);
+        }
+        return "";
+    }
+}
+
+# Process partial: {{> partial_name}} or {{> partial_name arg=val arg2=val2}}
+func process_partial(str $expr, scalar $vars) str {
+    my int $len = length($expr);
+    my int $i = 0;
+
+    # Get partial name (first word)
+    my str $partial_name = "";
+    while ($i < $len && substr($expr, $i, 1) ne " ") {
+        $partial_name = $partial_name . substr($expr, $i, 1);
+        $i = $i + 1;
+    }
+
+    # Skip whitespace
+    while ($i < $len && substr($expr, $i, 1) eq " ") {
+        $i = $i + 1;
+    }
+
+    # Parse arguments (arg=val pairs)
+    my scalar $partial_vars = {};
+
+    # Copy parent vars
+    if (ref($vars) eq "HASH") {
+        foreach my str $k (keys(%{$vars})) {
+            $partial_vars->{$k} = $vars->{$k};
+        }
+    }
+
+    # Store reference to parent context for ../ access
+    $partial_vars->{"@parent"} = $vars;
+
+    # Parse and add arguments
+    while ($i < $len) {
+        # Skip whitespace
+        while ($i < $len && substr($expr, $i, 1) eq " ") {
+            $i = $i + 1;
+        }
+        if ($i >= $len) { last; }
+
+        # Get arg name
+        my str $arg_name = "";
+        while ($i < $len && substr($expr, $i, 1) ne "=" && substr($expr, $i, 1) ne " ") {
+            $arg_name = $arg_name . substr($expr, $i, 1);
+            $i = $i + 1;
+        }
+
+        if ($i >= $len || substr($expr, $i, 1) ne "=") {
+            last;
+        }
+        $i = $i + 1;  # Skip =
+
+        # Get arg value (may be quoted)
+        my str $arg_val = "";
+        if ($i < $len && (substr($expr, $i, 1) eq "\"" || substr($expr, $i, 1) eq "'")) {
+            my str $quote = substr($expr, $i, 1);
+            $i = $i + 1;
+            while ($i < $len && substr($expr, $i, 1) ne $quote) {
+                $arg_val = $arg_val . substr($expr, $i, 1);
+                $i = $i + 1;
+            }
+            $i = $i + 1;  # Skip closing quote
+        } else {
+            while ($i < $len && substr($expr, $i, 1) ne " ") {
+                $arg_val = $arg_val . substr($expr, $i, 1);
+                $i = $i + 1;
+            }
+        }
+
+        # Set argument
+        if (length($arg_name) > 0) {
+            # If value looks like a var, resolve it
+            if (!Forma::looks_like_number($arg_val) && index($arg_val, " ") < 0 &&
+                substr($arg_val, 0, 1) ne "\"" && substr($arg_val, 0, 1) ne "'") {
+                my scalar $resolved = Forma::get_var($arg_val, $vars);
+                if (defined($resolved)) {
+                    $partial_vars->{$arg_name} = $resolved;
+                } else {
+                    $partial_vars->{$arg_name} = $arg_val;
+                }
+            } else {
+                $partial_vars->{$arg_name} = $arg_val;
+            }
+        }
+    }
+
+    # Load and render the partial
+    return Forma::render($partial_name, $partial_vars);
+}
+
+# Process switch block: {{#switch var}}{{#case "val"}}...{{/case}}{{#default}}...{{/default}}{{/switch}}
+func process_switch(str $var_name, str $body, scalar $vars) str {
+    # Get the value to switch on
+    my str $switch_val = Forma::resolve_var($var_name, $vars);
+
+    # Find all {{#case "value"}} blocks and {{#default}} block
+    my int $body_len = length($body);
+    my int $i = 0;
+    my str $default_body = "";
+    my int $found_match = 0;
+    my str $match_body = "";
+
+    while ($i < $body_len) {
+        # Look for {{#case
+        if ($i + 7 < $body_len && substr($body, $i, 7) eq "{{#case") {
+            my int $tag_end = Forma::find_closing($body, $i + 7);
+            if ($tag_end > $i + 7) {
+                my str $case_val = substr($body, $i + 7, $tag_end - $i - 7);
+                $case_val = trim($case_val);
+                # Remove quotes if present
+                if (length($case_val) >= 2) {
+                    my str $first = substr($case_val, 0, 1);
+                    my str $last = substr($case_val, length($case_val) - 1, 1);
+                    if (($first eq "\"" && $last eq "\"") || ($first eq "'" && $last eq "'")) {
+                        $case_val = substr($case_val, 1, length($case_val) - 2);
+                    }
+                }
+
+                # Find {{/case}}
+                my int $case_end = Forma::find_block_end($body, $tag_end + 2, "case");
+                if ($case_end > 0) {
+                    my str $case_body = substr($body, $tag_end + 2, $case_end - $tag_end - 2);
+
+                    # Check if this case matches
+                    if ($found_match == 0 && $switch_val eq $case_val) {
+                        $found_match = 1;
+                        $match_body = $case_body;
+                    }
+
+                    $i = $case_end + 9;  # {{/case}}
+                    next;
+                }
+            }
+        }
+
+        # Look for {{#default}}
+        if ($i + 11 < $body_len && substr($body, $i, 11) eq "{{#default}") {
+            # Find {{/default}}
+            my int $default_end = Forma::find_block_end($body, $i + 12, "default");
+            if ($default_end > 0) {
+                $default_body = substr($body, $i + 12, $default_end - $i - 12);
+                $i = $default_end + 12;  # {{/default}}
+                next;
+            }
+        }
+
+        $i = $i + 1;
+    }
+
+    # Return matched case or default
+    if ($found_match == 1) {
+        return Forma::render_string($match_body, $vars);
+    }
+    if (length($default_body) > 0) {
+        return Forma::render_string($default_body, $vars);
+    }
+    return "";
+}
+
+# HTML escape a string
+func escape_html(str $s) str {
+    my str $result = "";
+    my int $len = length($s);
+    my int $i = 0;
+
+    while ($i < $len) {
+        my str $ch = substr($s, $i, 1);
+
+        if ($ch eq "&") {
+            $result = $result . "&amp;";
+        } elsif ($ch eq "<") {
+            $result = $result . "&lt;";
+        } elsif ($ch eq ">") {
+            $result = $result . "&gt;";
+        } elsif ($ch eq "\"") {
+            $result = $result . "&quot;";
+        } elsif ($ch eq "'") {
+            $result = $result . "&#39;";
+        } else {
+            $result = $result . $ch;
+        }
+
+        $i = $i + 1;
+    }
+
+    return $result;
+}
+
+# Render with HTML escaping for variables
+func render_safe(str $name, scalar $vars) str {
+    my str $template = Forma::load($name);
+    if (length($template) == 0) {
+        return "";
+    }
+    return Forma::render_string_safe($template, $vars);
+}
+
+# Render string with HTML escaping
+func render_string_safe(str $template, scalar $vars) str {
+    my str $result = "";
+    my int $len = length($template);
+    my int $i = 0;
+
+    while ($i < $len) {
+        # Look for {{ start
+        if ($i + 1 < $len) {
+            my str $two = substr($template, $i, 2);
+            if ($two eq "{{") {
+                # Find closing }}
+                my int $end = Forma::find_closing($template, $i + 2);
+                if ($end > $i + 2) {
+                    # Extract variable name
+                    my str $var_name = substr($template, $i + 2, $end - $i - 2);
+                    $var_name = trim($var_name);
+
+                    # Check for raw output marker {{{var}}}
+                    if (length($var_name) > 0 && substr($var_name, 0, 1) eq "{") {
+                        # Check if this is {{{ which means raw
+                        if ($i + 2 < $len && substr($template, $i, 3) eq "{{{") {
+                            my int $raw_end = Forma::find_triple_closing($template, $i + 3);
+                            if ($raw_end > 0) {
+                                $var_name = substr($template, $i + 3, $raw_end - $i - 3);
+                                $var_name = trim($var_name);
+                                my str $value = Forma::resolve_var($var_name, $vars);
+                                $result = $result . $value;
+                                $i = $raw_end + 3;
+                                next;
+                            }
+                        }
+                    }
+
+                    # Resolve and escape variable
+                    my str $value = Forma::resolve_var($var_name, $vars);
+                    $result = $result . Forma::escape_html($value);
+
+                    # Skip past }}
+                    $i = $end + 2;
+                    next;
+                }
+            }
+        }
+
+        # Regular character
+        my str $ch = substr($template, $i, 1);
+        $result = $result . $ch;
+        $i = $i + 1;
+    }
+
+    return $result;
+}
+
+# Find triple closing }}}
+func find_triple_closing(str $template, int $start) int {
+    my int $len = length($template);
+    my int $i = $start;
+
+    while ($i + 2 < $len) {
+        my str $three = substr($template, $i, 3);
+        if ($three eq "}}}") {
+            return $i;
+        }
+        $i = $i + 1;
+    }
+
+    return -1;
+}
+
+# Include another template (for partials/layouts)
+func include(str $name, scalar $vars) str {
+    return Forma::render($name, $vars);
+}
+
+# Render a template with a layout
+# Layout should have {{content}} placeholder
+func render_with_layout(str $template_name, str $layout_name, scalar $vars) str {
+    # First render the main template
+    my str $content = Forma::render($template_name, $vars);
+
+    # Add content to vars
+    if (!defined($vars)) {
+        $vars = {};
+    }
+    $vars->{"content"} = $content;
+
+    # Render the layout with the content
+    return Forma::render($layout_name, $vars);
+}
+
+# ============================================================
+# Helper Functions
+# ============================================================
+
+# Find comment end --}}
+func find_comment_end(str $template, int $start) int {
+    my int $len = length($template);
+    my int $i = $start;
+
+    while ($i + 3 < $len) {
+        my str $four = substr($template, $i, 4);
+        if ($four eq "--}}") {
+            return $i;
+        }
+        $i = $i + 1;
+    }
+
+    return -1;
+}
+
+# Process comparison if blocks (if_eq, if_ne, if_gt, if_lt, if_ge, if_le)
+func process_if_cmp(str $expr, str $op, str $if_body, str $else_body, scalar $vars) str {
+    # Parse "varname value" or "varname \"value\""
+    my array @parts = Forma::parse_two_args($expr);
+    if (scalar(@parts) < 2) {
+        return "";
+    }
+
+    my str $var_name = $parts[0];
+    my str $compare_val = $parts[1];
+
+    my scalar $val = Forma::get_var($var_name, $vars);
+    my str $str_val = defined($val) ? "" . $val : "";
+
+    my int $condition = 0;
+
+    if ($op eq "eq") {
+        $condition = ($str_val eq $compare_val) ? 1 : 0;
+    } elsif ($op eq "ne") {
+        $condition = ($str_val ne $compare_val) ? 1 : 0;
+    } elsif ($op eq "gt") {
+        my num $num_val = $str_val + 0;
+        my num $num_cmp = $compare_val + 0;
+        $condition = ($num_val > $num_cmp) ? 1 : 0;
+    } elsif ($op eq "lt") {
+        my num $num_val = $str_val + 0;
+        my num $num_cmp = $compare_val + 0;
+        $condition = ($num_val < $num_cmp) ? 1 : 0;
+    } elsif ($op eq "ge") {
+        my num $num_val = $str_val + 0;
+        my num $num_cmp = $compare_val + 0;
+        $condition = ($num_val >= $num_cmp) ? 1 : 0;
+    } elsif ($op eq "le") {
+        my num $num_val = $str_val + 0;
+        my num $num_cmp = $compare_val + 0;
+        $condition = ($num_val <= $num_cmp) ? 1 : 0;
+    }
+
+    if ($condition == 1) {
+        return Forma::render_string($if_body, $vars);
+    } else {
+        if (length($else_body) > 0) {
+            return Forma::render_string($else_body, $vars);
+        }
+        return "";
+    }
+}
+
+# Parse two arguments from a string (handles quoted strings)
+func parse_two_args(str $expr) array {
+    my array @result = ();
+    my int $len = length($expr);
+    my int $i = 0;
+
+    # Skip leading whitespace
+    while ($i < $len && substr($expr, $i, 1) eq " ") {
+        $i = $i + 1;
+    }
+
+    # Read first argument (may be quoted)
+    my str $first = "";
+    if ($i < $len) {
+        my str $ch = substr($expr, $i, 1);
+        if ($ch eq "\"" || $ch eq "'") {
+            # Quoted string
+            my str $quote = $ch;
+            $i = $i + 1;
+            while ($i < $len && substr($expr, $i, 1) ne $quote) {
+                $first = $first . substr($expr, $i, 1);
+                $i = $i + 1;
+            }
+            $i = $i + 1;  # Skip closing quote
+        } else {
+            # Unquoted
+            while ($i < $len && substr($expr, $i, 1) ne " ") {
+                $first = $first . substr($expr, $i, 1);
+                $i = $i + 1;
+            }
+        }
+    }
+    push(@result, $first);
+
+    # Skip whitespace
+    while ($i < $len && substr($expr, $i, 1) eq " ") {
+        $i = $i + 1;
+    }
+
+    # Read second argument (may be quoted)
+    my str $second = "";
+    if ($i < $len) {
+        my str $ch = substr($expr, $i, 1);
+        if ($ch eq "\"" || $ch eq "'") {
+            # Quoted string
+            my str $quote = $ch;
+            $i = $i + 1;
+            while ($i < $len && substr($expr, $i, 1) ne $quote) {
+                $second = $second . substr($expr, $i, 1);
+                $i = $i + 1;
+            }
+        } else {
+            # Unquoted
+            while ($i < $len && substr($expr, $i, 1) ne " ") {
+                $second = $second . substr($expr, $i, 1);
+                $i = $i + 1;
+            }
+        }
+    }
+    push(@result, $second);
+
+    return @result;
+}
+
+# Process {{#range start end}}
+func process_range(str $expr, str $body, scalar $vars) str {
+    my array @parts = Forma::parse_two_args($expr);
+    if (scalar(@parts) < 2) {
+        return "";
+    }
+
+    my int $start = $parts[0] + 0;
+    my int $end_val = $parts[1] + 0;
+
+    my str $result = "";
+    my int $idx = 0;
+    my int $total = $end_val - $start + 1;
+
+    # Build array of values to iterate
+    my array @range_vals = ();
+    my int $n = $start;
+    while ($n <= $end_val) {
+        push(@range_vals, $n);
+        $n = $n + 1;
+    }
+
+    # Now iterate using foreach (which has proper refcount handling)
+    foreach my scalar $val (@range_vals) {
+        my scalar $iter_vars = {};
+
+        # Copy parent vars
+        if (ref($vars) eq "HASH") {
+            foreach my str $k (keys(%{$vars})) {
+                $iter_vars->{$k} = $vars->{$k};
+            }
+        }
+
+        # Add range variables
+        $iter_vars->{"."} = $val;
+        $iter_vars->{"this"} = $val;
+        $iter_vars->{"@index"} = $idx;
+        if ($idx == 0) {
+            $iter_vars->{"@first"} = 1;
+        } else {
+            $iter_vars->{"@first"} = 0;
+        }
+        if ($idx == $total - 1) {
+            $iter_vars->{"@last"} = 1;
+        } else {
+            $iter_vars->{"@last"} = 0;
+        }
+        # @odd and @even
+        if ($idx % 2 == 0) {
+            $iter_vars->{"@even"} = 1;
+            $iter_vars->{"@odd"} = 0;
+        } else {
+            $iter_vars->{"@even"} = 0;
+            $iter_vars->{"@odd"} = 1;
+        }
+
+        $result = $result . Forma::render_string($body, $iter_vars);
+        $idx = $idx + 1;
+    }
+
+    return $result;
+}
+
+# Convert value to JSON string
+func to_json(scalar $val) str {
+    if (!defined($val)) {
+        return "null";
+    }
+
+    my str $r = ref($val);
+
+    if ($r eq "HASH") {
+        my str $out = "{";
+        my int $count = 0;
+        foreach my str $k (keys(%{$val})) {
+            if ($count > 0) {
+                $out = $out . ",";
+            }
+            $out = $out . "\"" . Forma::json_escape($k) . "\":" . Forma::to_json($val->{$k});
+            $count = $count + 1;
+        }
+        return $out . "}";
+    }
+
+    if ($r eq "ARRAY") {
+        my str $out = "[";
+        my int $arr_len = scalar(@{$val});
+        my int $arr_i = 0;
+        while ($arr_i < $arr_len) {
+            if ($arr_i > 0) {
+                $out = $out . ",";
+            }
+            $out = $out . Forma::to_json($val->[$arr_i]);
+            $arr_i = $arr_i + 1;
+        }
+        return $out . "]";
+    }
+
+    # Scalar - check if number or string
+    my str $s = "" . $val;
+    if (Forma::looks_like_number($s)) {
+        return $s;
+    }
+
+    # String
+    return "\"" . Forma::json_escape($s) . "\"";
+}
+
+# Escape string for JSON
+func json_escape(str $s) str {
+    my str $result = "";
+    my int $len = length($s);
+    my int $i = 0;
+
+    while ($i < $len) {
+        my str $ch = substr($s, $i, 1);
+        my int $code = ord($ch);
+
+        if ($ch eq "\"") {
+            $result = $result . "\\\"";
+        } elsif ($ch eq "\\") {
+            $result = $result . "\\\\";
+        } elsif ($code == ord("\n")) {
+            $result = $result . "\\n";
+        } elsif ($code == ord("\r")) {
+            $result = $result . "\\r";
+        } elsif ($code == ord("\t")) {
+            $result = $result . "\\t";
+        } else {
+            $result = $result . $ch;
+        }
+
+        $i = $i + 1;
+    }
+
+    return $result;
+}
+
+# Check if string looks like a number
+func looks_like_number(str $s) int {
+    my int $len = length($s);
+    if ($len == 0) {
+        return 0;
+    }
+
+    my int $i = 0;
+    my str $ch = substr($s, 0, 1);
+    if ($ch eq "-") {
+        $i = 1;
+        if ($len == 1) {
+            return 0;
+        }
+    }
+
+    my int $has_dot = 0;
+    my int $has_digit = 0;
+
+    while ($i < $len) {
+        $ch = substr($s, $i, 1);
+        if ($ch ge "0" && $ch le "9") {
+            $has_digit = 1;
+        } elsif ($ch eq "." && $has_dot == 0) {
+            $has_dot = 1;
+        } elsif ($ch eq "e" || $ch eq "E") {
+            $i = $i + 1;
+            if ($i < $len) {
+                $ch = substr($s, $i, 1);
+                if ($ch eq "+" || $ch eq "-") {
+                    $i = $i + 1;
+                }
+            }
+        } else {
+            return 0;
+        }
+        $i = $i + 1;
+    }
+
+    return $has_digit;
+}
+
+# Capitalize first letter
+func helper_capitalize(str $s) str {
+    if (length($s) == 0) {
+        return "";
+    }
+    my str $first = uc(substr($s, 0, 1));
+    my str $rest = lc(substr($s, 1, length($s) - 1));
+    return $first . $rest;
+}
+
+# Truncate string with ellipsis
+func helper_truncate(str $args, scalar $vars) str {
+    my array @parts = Forma::parse_two_args($args);
+    if (scalar(@parts) < 2) {
+        return "";
+    }
+
+    my str $var_name = $parts[0];
+    my int $max_len = $parts[1] + 0;
+
+    my str $val = Forma::resolve_var($var_name, $vars);
+    if (length($val) <= $max_len) {
+        return $val;
+    }
+
+    return substr($val, 0, $max_len) . "...";
+}
+
+# Get length of array or string
+func helper_length(scalar $val) str {
+    if (!defined($val)) {
+        return "0";
+    }
+
+    my str $r = ref($val);
+    if ($r eq "ARRAY") {
+        return "" . scalar(@{$val});
+    }
+    if ($r eq "HASH") {
+        my array @k = keys(%{$val});
+        return "" . scalar(@k);
+    }
+
+    # String
+    return "" . length("" . $val);
+}
+
+# Get first element of array
+func helper_first(scalar $val) str {
+    if (!defined($val) || ref($val) ne "ARRAY") {
+        return "";
+    }
+
+    if (scalar(@{$val}) == 0) {
+        return "";
+    }
+
+    my scalar $first = $val->[0];
+    return defined($first) ? "" . $first : "";
+}
+
+# Get last element of array
+func helper_last(scalar $val) str {
+    if (!defined($val) || ref($val) ne "ARRAY") {
+        return "";
+    }
+
+    my int $len = scalar(@{$val});
+    if ($len == 0) {
+        return "";
+    }
+
+    my scalar $last = $val->[$len - 1];
+    return defined($last) ? "" . $last : "";
+}
+
+# Join array elements with separator
+func helper_join(str $args, scalar $vars) str {
+    my array @parts = Forma::parse_two_args($args);
+    if (scalar(@parts) < 2) {
+        return "";
+    }
+
+    my str $var_name = $parts[0];
+    my str $separator = $parts[1];
+
+    my scalar $val = Forma::get_var($var_name, $vars);
+    if (!defined($val) || ref($val) ne "ARRAY") {
+        return "";
+    }
+
+    my str $result = "";
+    my int $len = scalar(@{$val});
+    my int $i = 0;
+
+    while ($i < $len) {
+        if ($i > 0) {
+            $result = $result . $separator;
+        }
+        my scalar $item = $val->[$i];
+        $result = $result . (defined($item) ? "" . $item : "");
+        $i = $i + 1;
+    }
+
+    return $result;
+}
+
+# Format number with decimal places
+func helper_format_number(str $args, scalar $vars) str {
+    my array @parts = Forma::parse_two_args($args);
+    if (scalar(@parts) < 2) {
+        return "";
+    }
+
+    my str $var_name = $parts[0];
+    my int $decimals = $parts[1] + 0;
+
+    my str $val = Forma::resolve_var($var_name, $vars);
+    my num $num = $val + 0;
+
+    # Format with specified decimal places
+    my str $fmt = "%." . $decimals . "f";
+    return sprintf($fmt, $num);
+}
+
+# Add commas to number (thousands separator)
+func helper_commas(str $val) str {
+    # Work directly with the string, removing any decimal part
+    my str $num_str = trim($val);
+
+    # Handle negative
+    my str $sign = "";
+    if (length($num_str) > 0 && substr($num_str, 0, 1) eq "-") {
+        $sign = "-";
+        $num_str = substr($num_str, 1, length($num_str) - 1);
+    }
+
+    # Remove decimal part if present
+    my int $dot_pos = index($num_str, ".");
+    if ($dot_pos >= 0) {
+        $num_str = substr($num_str, 0, $dot_pos);
+    }
+
+    # Remove any non-digits
+    my str $clean = "";
+    my int $j = 0;
+    while ($j < length($num_str)) {
+        my str $ch = substr($num_str, $j, 1);
+        if ($ch ge "0" && $ch le "9") {
+            $clean = $clean . $ch;
+        }
+        $j = $j + 1;
+    }
+    $num_str = $clean;
+
+    # Insert commas from right to left
+    my int $len = length($num_str);
+    if ($len <= 3) {
+        return $sign . $num_str;
+    }
+
+    my str $result = "";
+    my int $i = $len - 1;
+    my int $count = 0;
+
+    while ($i >= 0) {
+        if ($count > 0 && $count % 3 == 0) {
+            $result = "," . $result;
+        }
+        $result = substr($num_str, $i, 1) . $result;
+        $count = $count + 1;
+        $i = $i - 1;
+    }
+
+    return $sign . $result;
+}
+
+# Pluralize based on count
+func helper_plural(str $args, scalar $vars) str {
+    # Parse: count "singular" "plural"
+    my int $len = length($args);
+    my int $i = 0;
+
+    # Get count variable
+    my str $count_var = "";
+    while ($i < $len && substr($args, $i, 1) ne " ") {
+        $count_var = $count_var . substr($args, $i, 1);
+        $i = $i + 1;
+    }
+
+    # Skip whitespace
+    while ($i < $len && substr($args, $i, 1) eq " ") {
+        $i = $i + 1;
+    }
+
+    # Get singular (quoted)
+    my str $singular = "";
+    if ($i < $len && substr($args, $i, 1) eq "\"") {
+        $i = $i + 1;
+        while ($i < $len && substr($args, $i, 1) ne "\"") {
+            $singular = $singular . substr($args, $i, 1);
+            $i = $i + 1;
+        }
+        $i = $i + 1;  # Skip closing quote
+    }
+
+    # Skip whitespace
+    while ($i < $len && substr($args, $i, 1) eq " ") {
+        $i = $i + 1;
+    }
+
+    # Get plural (quoted)
+    my str $plural = "";
+    if ($i < $len && substr($args, $i, 1) eq "\"") {
+        $i = $i + 1;
+        while ($i < $len && substr($args, $i, 1) ne "\"") {
+            $plural = $plural . substr($args, $i, 1);
+            $i = $i + 1;
+        }
+    }
+
+    # Get count value
+    my str $count_str = Forma::resolve_var($count_var, $vars);
+    my int $count = $count_str + 0;
+
+    if ($count == 1) {
+        return $count . " " . $singular;
+    }
+    return $count . " " . $plural;
+}
+
+# Apply a filter to a value (for pipe syntax)
+func apply_filter(str $var_name, str $filter, scalar $vars) str {
+    my str $val = Forma::resolve_var($var_name, $vars);
+
+    # Parse filter name and args
+    my int $space_pos = index($filter, " ");
+    my str $filter_name = $filter;
+    my str $filter_arg = "";
+
+    if ($space_pos > 0) {
+        $filter_name = substr($filter, 0, $space_pos);
+        $filter_arg = substr($filter, $space_pos + 1, length($filter) - $space_pos - 1);
+        $filter_arg = trim($filter_arg);
+
+        # Remove quotes from arg
+        if (length($filter_arg) >= 2) {
+            my str $first = substr($filter_arg, 0, 1);
+            my str $last = substr($filter_arg, length($filter_arg) - 1, 1);
+            if (($first eq "\"" && $last eq "\"") || ($first eq "'" && $last eq "'")) {
+                $filter_arg = substr($filter_arg, 1, length($filter_arg) - 2);
+            }
+        }
+    }
+
+    if ($filter_name eq "default") {
+        if (length($val) == 0) {
+            return $filter_arg;
+        }
+        return $val;
+    }
+
+    if ($filter_name eq "upper") {
+        return uc($val);
+    }
+
+    if ($filter_name eq "lower") {
+        return lc($val);
+    }
+
+    if ($filter_name eq "capitalize") {
+        return Forma::helper_capitalize($val);
+    }
+
+    if ($filter_name eq "escape") {
+        return Forma::escape_html($val);
+    }
+
+    if ($filter_name eq "url_encode") {
+        return Forma::helper_url_encode($val);
+    }
+
+    if ($filter_name eq "url_decode") {
+        return Forma::helper_url_decode($val);
+    }
+
+    if ($filter_name eq "strip_tags") {
+        return Forma::helper_strip_tags($val);
+    }
+
+    if ($filter_name eq "commas") {
+        return Forma::helper_commas($val);
+    }
+
+    if ($filter_name eq "truncate") {
+        my int $max_len = length($filter_arg) > 0 ? $filter_arg + 0 : 50;
+        if (length($val) <= $max_len) {
+            return $val;
+        }
+        return substr($val, 0, $max_len) . "...";
+    }
+
+    if ($filter_name eq "trim") {
+        return trim($val);
+    }
+
+    if ($filter_name eq "json") {
+        return Forma::to_json($val);
+    }
+
+    if ($filter_name eq "length") {
+        return "" . length($val);
+    }
+
+    if ($filter_name eq "reverse") {
+        my str $rev = "";
+        my int $len = length($val);
+        my int $j = $len - 1;
+        while ($j >= 0) {
+            $rev = $rev . substr($val, $j, 1);
+            $j = $j - 1;
+        }
+        return $rev;
+    }
+
+    if ($filter_name eq "nl2br") {
+        my str $out = "";
+        my int $len = length($val);
+        my int $j = 0;
+        while ($j < $len) {
+            my str $ch = substr($val, $j, 1);
+            if (ord($ch) == 10) {
+                $out = $out . "<br>\n";
+            } else {
+                $out = $out . $ch;
+            }
+            $j = $j + 1;
+        }
+        return $out;
+    }
+
+    # Check for custom filter
+    if (exists(%g_forma_helpers, $filter_name)) {
+        my scalar $handler = $g_forma_helpers{$filter_name};
+        # Build args array: first arg is the value, then any filter args
+        my array @args = ();
+        push(@args, $val);
+        if (length($filter_arg) > 0) {
+            push(@args, $filter_arg);
+        }
+        my str $result = $handler->(\@args, $vars);
+        return $result;
+    }
+
+    # Unknown filter - return value as-is
+    return $val;
+}
+
+# ============================================================
+# Custom Helper Functions
+# ============================================================
+
+# Check if content matches a custom helper (helper_name followed by space or end)
+func is_custom_helper_match(str $content) int {
+    # Get the first word (helper name)
+    my int $space_pos = index($content, " ");
+    my str $name = $content;
+    if ($space_pos > 0) {
+        $name = substr($content, 0, $space_pos);
+    }
+
+    return exists(%g_forma_helpers, $name) ? 1 : 0;
+}
+
+# Try to invoke a custom helper, returns result or empty string if not a helper
+func try_custom_helper(str $content, scalar $vars) str {
+    # Get the first word (helper name)
+    my int $space_pos = index($content, " ");
+    my str $name = $content;
+    my str $args_str = "";
+
+    if ($space_pos > 0) {
+        $name = substr($content, 0, $space_pos);
+        $args_str = substr($content, $space_pos + 1, length($content) - $space_pos - 1);
+        $args_str = trim($args_str);
+    }
+
+    # Check if this is a registered helper
+    if (!exists(%g_forma_helpers, $name)) {
+        return "";
+    }
+
+    my scalar $handler = $g_forma_helpers{$name};
+
+    # Parse arguments
+    my array @args = Forma::parse_helper_args($args_str, $vars);
+
+    # Call the helper function
+    # Helper signature: handler(array @args, scalar $vars) str
+    my str $result = $handler->(\@args, $vars);
+
+    return $result;
+}
+
+# Parse helper arguments into an array
+# Handles: variable names, quoted strings, numbers
+func parse_helper_args(str $args_str, scalar $vars) array {
+    my array @result = ();
+    my int $len = length($args_str);
+    my int $i = 0;
+
+    while ($i < $len) {
+        # Skip whitespace
+        while ($i < $len && substr($args_str, $i, 1) eq " ") {
+            $i = $i + 1;
+        }
+
+        if ($i >= $len) {
+            last;
+        }
+
+        my str $ch = substr($args_str, $i, 1);
+
+        # Quoted string
+        if ($ch eq "\"" || $ch eq "'") {
+            my str $quote = $ch;
+            $i = $i + 1;
+            my str $val = "";
+            while ($i < $len && substr($args_str, $i, 1) ne $quote) {
+                my str $c = substr($args_str, $i, 1);
+                # Handle escape sequences
+                if ($c eq "\\" && $i + 1 < $len) {
+                    my str $next = substr($args_str, $i + 1, 1);
+                    if ($next eq "n") {
+                        $val = $val . "\n";
+                        $i = $i + 2;
+                        next;
+                    } elsif ($next eq "t") {
+                        $val = $val . "\t";
+                        $i = $i + 2;
+                        next;
+                    } elsif ($next eq $quote) {
+                        $val = $val . $quote;
+                        $i = $i + 2;
+                        next;
+                    } elsif ($next eq "\\") {
+                        $val = $val . "\\";
+                        $i = $i + 2;
+                        next;
+                    }
+                }
+                $val = $val . $c;
+                $i = $i + 1;
+            }
+            $i = $i + 1;  # Skip closing quote
+            push(@result, $val);
+            next;
+        }
+
+        # Number or variable name
+        my str $token = "";
+        while ($i < $len) {
+            $ch = substr($args_str, $i, 1);
+            if ($ch eq " " || $ch eq "\"" || $ch eq "'") {
+                last;
+            }
+            $token = $token . $ch;
+            $i = $i + 1;
+        }
+
+        if (length($token) > 0) {
+            # Check if it's a number
+            if (Forma::looks_like_number($token)) {
+                push(@result, $token + 0);
+            } else {
+                # It's a variable name - resolve it
+                my scalar $val = Forma::get_var($token, $vars);
+                push(@result, $val);
+            }
+        }
+    }
+
+    return @result;
+}
+
+# ============================================================
+# Math Helpers
+# ============================================================
+
+# {{add a b}} - Add two numbers
+func helper_add(str $args, scalar $vars) str {
+    my array @parts = Forma::parse_two_args($args);
+    if (scalar(@parts) < 2) { return ""; }
+    my num $a = Forma::resolve_num($parts[0], $vars);
+    my num $b = Forma::resolve_num($parts[1], $vars);
+    return Forma::format_num($a + $b);
+}
+
+# {{subtract a b}} - Subtract b from a
+func helper_subtract(str $args, scalar $vars) str {
+    my array @parts = Forma::parse_two_args($args);
+    if (scalar(@parts) < 2) { return ""; }
+    my num $a = Forma::resolve_num($parts[0], $vars);
+    my num $b = Forma::resolve_num($parts[1], $vars);
+    return Forma::format_num($a - $b);
+}
+
+# {{multiply a b}} - Multiply two numbers
+func helper_multiply(str $args, scalar $vars) str {
+    my array @parts = Forma::parse_two_args($args);
+    if (scalar(@parts) < 2) { return ""; }
+    my num $a = Forma::resolve_num($parts[0], $vars);
+    my num $b = Forma::resolve_num($parts[1], $vars);
+    return Forma::format_num($a * $b);
+}
+
+# {{divide a b}} - Divide a by b
+func helper_divide(str $args, scalar $vars) str {
+    my array @parts = Forma::parse_two_args($args);
+    if (scalar(@parts) < 2) { return ""; }
+    my num $a = Forma::resolve_num($parts[0], $vars);
+    my num $b = Forma::resolve_num($parts[1], $vars);
+    if ($b == 0) { return "0"; }
+    return Forma::format_num($a / $b);
+}
+
+# {{mod a b}} - Modulo operation
+func helper_mod(str $args, scalar $vars) str {
+    my array @parts = Forma::parse_two_args($args);
+    if (scalar(@parts) < 2) { return ""; }
+    my int $a = Forma::resolve_num($parts[0], $vars) + 0;
+    my int $b = Forma::resolve_num($parts[1], $vars) + 0;
+    if ($b == 0) { return "0"; }
+    return "" . ($a % $b);
+}
+
+# {{round num decimals}} - Round to decimal places
+func helper_round(str $args, scalar $vars) str {
+    my array @parts = Forma::parse_two_args($args);
+    if (scalar(@parts) < 1) { return ""; }
+    my num $n = Forma::resolve_num($parts[0], $vars);
+    my int $decimals = scalar(@parts) >= 2 ? $parts[1] + 0 : 0;
+    my str $fmt = "%." . $decimals . "f";
+    return sprintf($fmt, $n);
+}
+
+# Resolve a value to a number (handles var names and literals)
+func resolve_num(str $val, scalar $vars) num {
+    # Check if it's a number literal
+    if (Forma::looks_like_number($val)) {
+        return $val + 0;
+    }
+    # Otherwise resolve as variable
+    my str $resolved = Forma::resolve_var($val, $vars);
+    return $resolved + 0;
+}
+
+# Format a number (remove trailing zeros after decimal)
+func format_num(num $n) str {
+    my str $s = sprintf("%.6f", $n);
+    # Remove trailing zeros after decimal point
+    my int $dot = index($s, ".");
+    if ($dot >= 0) {
+        my int $len = length($s);
+        while ($len > $dot + 1 && substr($s, $len - 1, 1) eq "0") {
+            $s = substr($s, 0, $len - 1);
+            $len = $len - 1;
+        }
+        # Remove decimal point if no decimals
+        if ($len == $dot + 1) {
+            $s = substr($s, 0, $dot);
+        }
+    }
+    return $s;
+}
+
+# ============================================================
+# Additional String Helpers
+# ============================================================
+
+# {{replace text "find" "replace"}}
+func helper_replace(str $args, scalar $vars) str {
+    my array @parts = Forma::parse_three_args($args);
+    if (scalar(@parts) < 3) { return ""; }
+    my str $text = $parts[0];
+    my str $find = $parts[1];
+    my str $repl = $parts[2];
+    # If first arg looks like var name, resolve it
+    if (!Forma::looks_like_number($text) && index($text, " ") < 0) {
+        $text = Forma::resolve_var($text, $vars);
+    }
+    # Simple replace all
+    my str $result = "";
+    my int $find_len = length($find);
+    my int $i = 0;
+    while ($i < length($text)) {
+        if ($i + $find_len <= length($text) && substr($text, $i, $find_len) eq $find) {
+            $result = $result . $repl;
+            $i = $i + $find_len;
+        } else {
+            $result = $result . substr($text, $i, 1);
+            $i = $i + 1;
+        }
+    }
+    return $result;
+}
+
+# {{contains haystack "needle"}} - Returns 1 or 0
+func helper_contains(str $args, scalar $vars) str {
+    my array @parts = Forma::parse_two_args($args);
+    if (scalar(@parts) < 2) { return "0"; }
+    my str $haystack = $parts[0];
+    my str $needle = $parts[1];
+    # Resolve var if needed
+    if (!Forma::looks_like_number($haystack) && index($haystack, " ") < 0) {
+        $haystack = Forma::resolve_var($haystack, $vars);
+    }
+    return index($haystack, $needle) >= 0 ? "1" : "0";
+}
+
+# {{starts_with text "prefix"}} - Returns 1 or 0
+func helper_starts_with(str $args, scalar $vars) str {
+    my array @parts = Forma::parse_two_args($args);
+    if (scalar(@parts) < 2) { return "0"; }
+    my str $text = $parts[0];
+    my str $prefix = $parts[1];
+    if (!Forma::looks_like_number($text) && index($text, " ") < 0) {
+        $text = Forma::resolve_var($text, $vars);
+    }
+    my int $plen = length($prefix);
+    if (length($text) < $plen) { return "0"; }
+    return substr($text, 0, $plen) eq $prefix ? "1" : "0";
+}
+
+# {{ends_with text "suffix"}} - Returns 1 or 0
+func helper_ends_with(str $args, scalar $vars) str {
+    my array @parts = Forma::parse_two_args($args);
+    if (scalar(@parts) < 2) { return "0"; }
+    my str $text = $parts[0];
+    my str $suffix = $parts[1];
+    if (!Forma::looks_like_number($text) && index($text, " ") < 0) {
+        $text = Forma::resolve_var($text, $vars);
+    }
+    my int $slen = length($suffix);
+    my int $tlen = length($text);
+    if ($tlen < $slen) { return "0"; }
+    return substr($text, $tlen - $slen, $slen) eq $suffix ? "1" : "0";
+}
+
+# {{pad_left value width "char"}} - Pad left with character
+func helper_pad_left(str $args, scalar $vars) str {
+    my array @parts = Forma::parse_three_args($args);
+    if (scalar(@parts) < 2) { return ""; }
+    my str $text = $parts[0];
+    my int $width = $parts[1] + 0;
+    my str $pad_char = scalar(@parts) >= 3 ? $parts[2] : " ";
+    if (length($pad_char) == 0) { $pad_char = " "; }
+    $pad_char = substr($pad_char, 0, 1);  # Use only first char
+    # Resolve var if needed
+    if (!Forma::looks_like_number($text) && index($text, " ") < 0) {
+        $text = Forma::resolve_var($text, $vars);
+    }
+    while (length($text) < $width) {
+        $text = $pad_char . $text;
+    }
+    return $text;
+}
+
+# {{pad_right value width "char"}} - Pad right with character
+func helper_pad_right(str $args, scalar $vars) str {
+    my array @parts = Forma::parse_three_args($args);
+    if (scalar(@parts) < 2) { return ""; }
+    my str $text = $parts[0];
+    my int $width = $parts[1] + 0;
+    my str $pad_char = scalar(@parts) >= 3 ? $parts[2] : " ";
+    if (length($pad_char) == 0) { $pad_char = " "; }
+    $pad_char = substr($pad_char, 0, 1);
+    if (!Forma::looks_like_number($text) && index($text, " ") < 0) {
+        $text = Forma::resolve_var($text, $vars);
+    }
+    while (length($text) < $width) {
+        $text = $text . $pad_char;
+    }
+    return $text;
+}
+
+# {{repeat text count}} - Repeat string N times
+func helper_repeat(str $args, scalar $vars) str {
+    my array @parts = Forma::parse_two_args($args);
+    if (scalar(@parts) < 2) { return ""; }
+    my str $text = $parts[0];
+    my int $count = $parts[1] + 0;
+    # Check if original was a quoted literal (starts with " or ')
+    my int $pos = 0;
+    while ($pos < length($args) && substr($args, $pos, 1) eq " ") { $pos = $pos + 1; }
+    my str $first_ch = substr($args, $pos, 1);
+    if ($first_ch ne "\"" && $first_ch ne "'") {
+        # Not a quoted literal, resolve as variable
+        if (!Forma::looks_like_number($text) && index($text, " ") < 0) {
+            $text = Forma::resolve_var($text, $vars);
+        }
+    }
+    my str $result = "";
+    my int $i = 0;
+    while ($i < $count) {
+        $result = $result . $text;
+        $i = $i + 1;
+    }
+    return $result;
+}
+
+# Parse three arguments
+func parse_three_args(str $expr) array {
+    my array @result = ();
+    my int $len = length($expr);
+    my int $i = 0;
+
+    # Parse up to 3 args
+    my int $arg_count = 0;
+    while ($i < $len && $arg_count < 3) {
+        # Skip whitespace
+        while ($i < $len && substr($expr, $i, 1) eq " ") {
+            $i = $i + 1;
+        }
+        if ($i >= $len) { last; }
+
+        my str $ch = substr($expr, $i, 1);
+        my str $arg = "";
+
+        if ($ch eq "\"" || $ch eq "'") {
+            # Quoted string
+            my str $quote = $ch;
+            $i = $i + 1;
+            while ($i < $len && substr($expr, $i, 1) ne $quote) {
+                $arg = $arg . substr($expr, $i, 1);
+                $i = $i + 1;
+            }
+            $i = $i + 1;  # Skip closing quote
+        } else {
+            # Unquoted
+            while ($i < $len && substr($expr, $i, 1) ne " ") {
+                $arg = $arg . substr($expr, $i, 1);
+                $i = $i + 1;
+            }
+        }
+
+        push(@result, $arg);
+        $arg_count = $arg_count + 1;
+    }
+
+    return @result;
+}
+
+# ============================================================
+# URL and HTML Helpers
+# ============================================================
+
+# {{url_encode value}} - URL encode a string
+func helper_url_encode(str $val) str {
+    my str $result = "";
+    my int $len = length($val);
+    my int $i = 0;
+    while ($i < $len) {
+        my str $ch = substr($val, $i, 1);
+        my int $code = ord($ch);
+        # Unreserved characters (RFC 3986)
+        if (($ch ge "A" && $ch le "Z") || ($ch ge "a" && $ch le "z") ||
+            ($ch ge "0" && $ch le "9") || $ch eq "-" || $ch eq "_" ||
+            $ch eq "." || $ch eq "~") {
+            $result = $result . $ch;
+        } elsif ($ch eq " ") {
+            $result = $result . "+";
+        } else {
+            # Percent-encode (manual hex conversion)
+            my str $hex = Forma::int_to_hex($code, 2);
+            $result = $result . "%" . $hex;
+        }
+        $i = $i + 1;
+    }
+    return $result;
+}
+
+# Convert integer to hex string with minimum width
+func int_to_hex(int $n, int $width) str {
+    my str $hex_chars = "0123456789ABCDEF";
+    my str $result = "";
+    my int $val = $n;
+    do {
+        my int $digit = $val % 16;
+        $result = substr($hex_chars, $digit, 1) . $result;
+        $val = ($val - $digit) / 16;  # Integer division by subtracting remainder first
+    } while ($val > 0);
+    # Pad with zeros
+    while (length($result) < $width) {
+        $result = "0" . $result;
+    }
+    return $result;
+}
+
+# {{url_decode value}} - URL decode a string
+func helper_url_decode(str $val) str {
+    my str $result = "";
+    my int $len = length($val);
+    my int $i = 0;
+    while ($i < $len) {
+        my str $ch = substr($val, $i, 1);
+        if ($ch eq "+" ) {
+            $result = $result . " ";
+            $i = $i + 1;
+        } elsif ($ch eq "%" && $i + 2 < $len) {
+            my str $hex = substr($val, $i + 1, 2);
+            my int $code = Forma::hex_to_int($hex);
+            $result = $result . chr($code);
+            $i = $i + 3;
+        } else {
+            $result = $result . $ch;
+            $i = $i + 1;
+        }
+    }
+    return $result;
+}
+
+# Convert hex string to integer
+func hex_to_int(str $hex) int {
+    my int $result = 0;
+    my int $len = length($hex);
+    my int $i = 0;
+    while ($i < $len) {
+        my str $ch = uc(substr($hex, $i, 1));
+        my int $val = 0;
+        if ($ch ge "0" && $ch le "9") {
+            $val = ord($ch) - ord("0");
+        } elsif ($ch ge "A" && $ch le "F") {
+            $val = ord($ch) - ord("A") + 10;
+        }
+        $result = $result * 16 + $val;
+        $i = $i + 1;
+    }
+    return $result;
+}
+
+# {{strip_tags html}} - Remove HTML tags
+func helper_strip_tags(str $val) str {
+    my str $result = "";
+    my int $len = length($val);
+    my int $i = 0;
+    my int $in_tag = 0;
+    while ($i < $len) {
+        my str $ch = substr($val, $i, 1);
+        if ($ch eq "<") {
+            $in_tag = 1;
+        } elsif ($ch eq ">") {
+            $in_tag = 0;
+        } elsif ($in_tag == 0) {
+            $result = $result . $ch;
+        }
+        $i = $i + 1;
+    }
+    return $result;
+}
+
+# ============================================================
+# Date/Time Helpers
+# ============================================================
+
+# {{date_format timestamp "format"}} or {{date_format "now" "format"}}
+func helper_date_format(str $args, scalar $vars) str {
+    my array @parts = Forma::parse_two_args($args);
+    if (scalar(@parts) < 2) { return ""; }
+    my str $ts_str = $parts[0];
+    my str $format = $parts[1];
+
+    # Get timestamp
+    my int $ts = 0;
+    if ($ts_str eq "now") {
+        $ts = sys::time();
+    } elsif (Forma::looks_like_number($ts_str)) {
+        $ts = $ts_str + 0;
+    } else {
+        # Try to resolve as variable
+        my str $resolved = Forma::resolve_var($ts_str, $vars);
+        $ts = $resolved + 0;
+    }
+
+    return Forma::format_timestamp($ts, $format);
+}
+
+# Zero-pad an integer to specified width (workaround for sprintf %0Nd not working)
+func zero_pad(int $n, int $width) str {
+    my str $s = "" . $n;
+    while (length($s) < $width) {
+        $s = "0" . $s;
+    }
+    return $s;
+}
+
+# Format a Unix timestamp according to format string
+func format_timestamp(int $ts, str $format) str {
+    # Get time components using localtime (returns hash)
+    my scalar $t = sys::localtime($ts);
+    my int $sec = $t->{"sec"} + 0;
+    my int $min = $t->{"min"} + 0;
+    my int $hour = $t->{"hour"} + 0;
+    my int $mday = $t->{"mday"} + 0;
+    my int $mon = $t->{"mon"} + 1;  # 0-11 -> 1-12
+    my int $year = $t->{"year"} + 1900;
+    my int $wday = $t->{"wday"} + 0;  # 0=Sunday
+    my int $yday = $t->{"yday"} + 0;
+
+    # Process format string
+    my str $result = "";
+    my int $len = length($format);
+    my int $i = 0;
+
+    while ($i < $len) {
+        my str $ch = substr($format, $i, 1);
+
+        # Check for format codes
+        if ($ch eq "Y") {
+            # Check for YYYY
+            if ($i + 3 < $len && substr($format, $i, 4) eq "YYYY") {
+                $result = $result . $year;
+                $i = $i + 4;
+                next;
+            }
+        } elsif ($ch eq "M") {
+            # Check for MMM (short month name), MM (zero-padded), M (month)
+            if ($i + 2 < $len && substr($format, $i, 3) eq "MMM") {
+                $result = $result . Forma::month_short($mon);
+                $i = $i + 3;
+                next;
+            } elsif ($i + 1 < $len && substr($format, $i, 2) eq "MM") {
+                $result = $result . Forma::zero_pad($mon, 2);
+                $i = $i + 2;
+                next;
+            }
+        } elsif ($ch eq "D") {
+            # Check for DD (zero-padded day), D (day)
+            if ($i + 1 < $len && substr($format, $i, 2) eq "DD") {
+                $result = $result . Forma::zero_pad($mday, 2);
+                $i = $i + 2;
+                next;
+            }
+        } elsif ($ch eq "d") {
+            # d for day without padding
+            $result = $result . $mday;
+            $i = $i + 1;
+            next;
+        } elsif ($ch eq "H") {
+            # HH for 24-hour
+            if ($i + 1 < $len && substr($format, $i, 2) eq "HH") {
+                $result = $result . Forma::zero_pad($hour, 2);
+                $i = $i + 2;
+                next;
+            }
+        } elsif ($ch eq "h") {
+            # hh for 12-hour
+            if ($i + 1 < $len && substr($format, $i, 2) eq "hh") {
+                my int $h12 = $hour % 12;
+                if ($h12 == 0) { $h12 = 12; }
+                $result = $result . Forma::zero_pad($h12, 2);
+                $i = $i + 2;
+                next;
+            }
+        } elsif ($ch eq "m") {
+            # mm for minutes
+            if ($i + 1 < $len && substr($format, $i, 2) eq "mm") {
+                $result = $result . Forma::zero_pad($min, 2);
+                $i = $i + 2;
+                next;
+            }
+        } elsif ($ch eq "s") {
+            # ss for seconds
+            if ($i + 1 < $len && substr($format, $i, 2) eq "ss") {
+                $result = $result . Forma::zero_pad($sec, 2);
+                $i = $i + 2;
+                next;
+            }
+        } elsif ($ch eq "A") {
+            # A for AM/PM
+            $result = $result . ($hour < 12 ? "AM" : "PM");
+            $i = $i + 1;
+            next;
+        } elsif ($ch eq "a") {
+            # a for am/pm
+            $result = $result . ($hour < 12 ? "am" : "pm");
+            $i = $i + 1;
+            next;
+        }
+
+        # Not a format code, output as-is
+        $result = $result . $ch;
+        $i = $i + 1;
+    }
+
+    return $result;
+}
+
+# Get short month name
+func month_short(int $mon) str {
+    if ($mon == 1) { return "Jan"; }
+    if ($mon == 2) { return "Feb"; }
+    if ($mon == 3) { return "Mar"; }
+    if ($mon == 4) { return "Apr"; }
+    if ($mon == 5) { return "May"; }
+    if ($mon == 6) { return "Jun"; }
+    if ($mon == 7) { return "Jul"; }
+    if ($mon == 8) { return "Aug"; }
+    if ($mon == 9) { return "Sep"; }
+    if ($mon == 10) { return "Oct"; }
+    if ($mon == 11) { return "Nov"; }
+    if ($mon == 12) { return "Dec"; }
+    return "";
+}
+
+# {{time_ago timestamp}} - Returns "X minutes ago", "X hours ago", etc.
+func helper_time_ago(str $ts_str, scalar $vars) str {
+    my int $ts = 0;
+    if (Forma::looks_like_number($ts_str)) {
+        $ts = $ts_str + 0;
+    } else {
+        my str $resolved = Forma::resolve_var($ts_str, $vars);
+        $ts = $resolved + 0;
+    }
+
+    my int $now = sys::time();
+    my int $diff = $now - $ts;
+
+    if ($diff < 0) {
+        return "in the future";
+    }
+    if ($diff < 60) {
+        return "just now";
+    }
+    if ($diff < 3600) {
+        my int $mins = $diff / 60;
+        return $mins == 1 ? "1 minute ago" : $mins . " minutes ago";
+    }
+    if ($diff < 86400) {
+        my int $hours = $diff / 3600;
+        return $hours == 1 ? "1 hour ago" : $hours . " hours ago";
+    }
+    if ($diff < 604800) {
+        my int $days = $diff / 86400;
+        return $days == 1 ? "1 day ago" : $days . " days ago";
+    }
+    if ($diff < 2592000) {
+        my int $weeks = $diff / 604800;
+        return $weeks == 1 ? "1 week ago" : $weeks . " weeks ago";
+    }
+    if ($diff < 31536000) {
+        my int $months = $diff / 2592000;
+        return $months == 1 ? "1 month ago" : $months . " months ago";
+    }
+    my int $years = $diff / 31536000;
+    return $years == 1 ? "1 year ago" : $years . " years ago";
+}
+
+# ============================================================
+# Currency and Percentage Helpers
+# ============================================================
+
+# {{currency amount "USD"}} or {{currency amount}}
+func helper_currency(str $args, scalar $vars) str {
+    my array @parts = Forma::parse_two_args($args);
+    if (scalar(@parts) < 1) { return ""; }
+    my str $amount_str = $parts[0];
+    my str $currency = scalar(@parts) >= 2 ? $parts[1] : "USD";
+
+    my num $amount = 0;
+    if (Forma::looks_like_number($amount_str)) {
+        $amount = $amount_str + 0;
+    } else {
+        my str $resolved = Forma::resolve_var($amount_str, $vars);
+        $amount = $resolved + 0;
+    }
+
+    # Format with 2 decimal places
+    my str $formatted = sprintf("%.2f", $amount);
+    # Add commas
+    my int $dot = index($formatted, ".");
+    my str $int_part = substr($formatted, 0, $dot);
+    my str $dec_part = substr($formatted, $dot, length($formatted) - $dot);
+    $int_part = Forma::helper_commas($int_part);
+
+    # Get currency symbol
+    my str $symbol = "$";
+    if ($currency eq "EUR") { $symbol = "€"; }
+    elsif ($currency eq "GBP") { $symbol = "£"; }
+    elsif ($currency eq "JPY") { $symbol = "¥"; }
+    elsif ($currency eq "CNY") { $symbol = "¥"; }
+    elsif ($currency eq "INR") { $symbol = "₹"; }
+    elsif ($currency eq "BTC") { $symbol = "₿"; }
+
+    return $symbol . $int_part . $dec_part;
+}
+
+# {{percent value}} or {{percent value decimals}}
+func helper_percent(str $args, scalar $vars) str {
+    my array @parts = Forma::parse_two_args($args);
+    if (scalar(@parts) < 1) { return ""; }
+    my str $val_str = $parts[0];
+    my int $decimals = scalar(@parts) >= 2 ? $parts[1] + 0 : 0;
+
+    my num $val = 0;
+    if (Forma::looks_like_number($val_str)) {
+        $val = $val_str + 0;
+    } else {
+        my str $resolved = Forma::resolve_var($val_str, $vars);
+        $val = $resolved + 0;
+    }
+
+    # Multiply by 100 and format
+    my num $pct = $val * 100;
+    my str $fmt = "%." . $decimals . "f";
+    return sprintf($fmt, $pct) . "%";
+}
+
+# ============================================================
+# Conditional Helpers
+# ============================================================
+
+# {{iif condition "true_value" "false_value"}} - Inline if (ternary)
+func helper_iif(str $args, scalar $vars) str {
+    my array @parts = Forma::parse_three_args($args);
+    if (scalar(@parts) < 3) { return ""; }
+    my str $cond_str = $parts[0];
+    my str $true_val = $parts[1];
+    my str $false_val = $parts[2];
+
+    # Resolve condition
+    my scalar $cond_val = Forma::get_var($cond_str, $vars);
+    my int $truthy = Forma::is_truthy($cond_val);
+
+    return $truthy == 1 ? $true_val : $false_val;
+}

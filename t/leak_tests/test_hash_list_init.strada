@@ -1,0 +1,134 @@
+#!/usr/bin/env strada
+# Test hash init from list and hash/array interconversion for memory leaks
+# Run: valgrind --leak-check=full ./test_hash_list_init
+
+func main() int {
+    say("Testing hash list init and hash/array interconversion...");
+    my int $iterations = 100;
+
+    # Test hash init from list
+    say("  Hash init from list...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ("a" => 1, "b" => 2, "c" => 3);
+        if ($h{"a"} != 1) {
+            say("    FAIL: hash init a != 1");
+            return 1;
+        }
+        if ($h{"b"} != 2) {
+            say("    FAIL: hash init b != 2");
+            return 1;
+        }
+        if ($h{"c"} != 3) {
+            say("    FAIL: hash init c != 3");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test hash reassignment from list
+    say("  Hash reassignment from list...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ("a" => 1);
+        %h = ("x" => 10, "y" => 20);
+        if ($h{"x"} != 10) {
+            say("    FAIL: reassign x != 10");
+            return 1;
+        }
+        if ($h{"y"} != 20) {
+            say("    FAIL: reassign y != 20");
+            return 1;
+        }
+        if (exists($h{"a"})) {
+            say("    FAIL: old key 'a' still exists");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test hash init with string values
+    say("  Hash init with string values...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ("name" => "Alice", "city" => "Boston");
+        if ($h{"name"} ne "Alice") {
+            say("    FAIL: name != Alice");
+            return 1;
+        }
+        if ($h{"city"} ne "Boston") {
+            say("    FAIL: city != Boston");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test hash-to-array flattening (declaration)
+    say("  Hash to array (declaration)...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ("a" => 1, "b" => 2);
+        my array @flat = %h;
+        if (size(@flat) != 4) {
+            say("    FAIL: flat size != 4, got " . size(@flat));
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test hash-to-array flattening (assignment)
+    say("  Hash to array (assignment)...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ("x" => 10, "y" => 20);
+        my array @flat = (1, 2, 3);
+        @flat = %h;
+        if (size(@flat) != 4) {
+            say("    FAIL: flat assign size != 4, got " . size(@flat));
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test hash copy: %h2 = %h1
+    say("  Hash copy...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h1 = ("a" => 1, "b" => 2);
+        my hash %h2 = ();
+        %h2 = %h1;
+        if ($h2{"a"} != 1) {
+            say("    FAIL: copy a != 1");
+            return 1;
+        }
+        if ($h2{"b"} != 2) {
+            say("    FAIL: copy b != 2");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test empty hash reassignment: %h = ()
+    say("  Empty hash reassignment...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ("a" => 1, "b" => 2);
+        %h = ();
+        my array @k = keys(%h);
+        if (size(@k) != 0) {
+            say("    FAIL: cleared hash not empty");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All hash list init tests passed!");
+    return 0;
+}

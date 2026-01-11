@@ -1,0 +1,54 @@
+func main() int {
+    # Basic string repetition
+    my str $a = "ab" x 3;
+    if ($a ne "ababab") {
+        say("FAIL: basic repeat got " . $a);
+        return 1;
+    }
+
+    # Single repeat
+    my str $b = "hello" x 1;
+    if ($b ne "hello") {
+        say("FAIL: x 1 got " . $b);
+        return 1;
+    }
+
+    # Zero repeat
+    my str $c = "hello" x 0;
+    if ($c ne "") {
+        say("FAIL: x 0 got '" . $c . "'");
+        return 1;
+    }
+
+    # Negative repeat
+    my str $d = "hello" x -1;
+    if ($d ne "") {
+        say("FAIL: x -1 got '" . $d . "'");
+        return 1;
+    }
+
+    # Single char repeat (like Perl's "=" x 40)
+    my str $line = "=" x 10;
+    if ($line ne "==========") {
+        say("FAIL: single char repeat got '" . $line . "'");
+        return 1;
+    }
+
+    # Repeat with variable
+    my int $n = 4;
+    my str $e = "*" x $n;
+    if ($e ne "****") {
+        say("FAIL: variable repeat got '" . $e . "'");
+        return 1;
+    }
+
+    # Repeat in expression
+    my str $border = "+" . "-" x 8 . "+";
+    if ($border ne "+--------+") {
+        say("FAIL: repeat in expr got '" . $border . "'");
+        return 1;
+    }
+
+    say("All str repeat tests passed");
+    return 0;
+}

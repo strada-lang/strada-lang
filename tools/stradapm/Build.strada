@@ -1,0 +1,320 @@
+/*
+ Strada Package Manager - Build integration
+
+ Compiles Strada projects with their dependencies.
+*/
+
+package StradaPM::Build;
+
+# Build a project
+func build(str $project_dir, scalar $options) scalar {
+    my hash %result = ();
+    $result{"success"} = 0;
+    $result{"output"} = "";
+    $result{"error"} = "";
+
+    # Default options
+    my int $release = defined($options->{"release"}) ? $options->{"release"} : 0;
+    my int $verbose = defined($options->{"verbose"}) ? $options->{"verbose"} : 0;
+    my str $target = defined($options->{"target"}) ? $options->{"target"} : "";
+
+    # Load manifest
+    my str $manifest_path = $project_dir . "/Strada.toml";
+    if (sys::file_exists($manifest_path) == 0) {
+        $result{"error"} = "No Strada.toml found in " . $project_dir;
+        return \%result;
+    }
+
+    my scalar $manifest = StradaPM::Manifest::parse($manifest_path);
+    if (!defined($manifest)) {
+        $result{"error"} = "Failed to parse Strada.toml";
+        return \%result;
+    }
+
+    # Validate manifest
+    my scalar $errors = StradaPM::Manifest::validate($manifest);
+    if (scalar(@{$errors}) > 0) {
+        $result{"error"} = "Invalid manifest: " . @{$errors}[0];
+        return \%result;
+    }
+
+    my str $name = StradaPM::Manifest::get_name($manifest);
+    my str $ver = StradaPM::Manifest::get_version($manifest);
+
+    # Get build configuration
+    my str $build_type = "binary";
+    my array @extra_cflags = ();
+    my array @link_libs = ();
+
+    if (defined($manifest->{"build"})) {
+        if (defined($manifest->{"build"}{"type"})) {
+            $build_type = $manifest->{"build"}{"type"};
+        }
+        if (defined($manifest->{"build"}{"extra-cflags"})) {
+            @extra_cflags = @{$manifest->{"build"}{"extra-cflags"}};
+        }
+        if (defined($manifest->{"build"}{"link"})) {
+            @link_libs = @{$manifest->{"build"}{"link"}};
+        }
+    }
+
+    # Find source file
+    my str $main_file = StradaPM::Build::find_main_file($project_dir, $manifest);
+    if ($main_file eq "") {
+        $result{"error"} = "No source file found (tried src/main.strada, src/" . $name . ".strada, " . $name . ".strada)";
+        return \%result;
+    }
+
+    # Resolve dependencies
+    my str $deps_dir = $project_dir . "/.strada/deps";
+    my scalar $resolved = StradaPM::Resolver::resolve($manifest, $deps_dir);
+
+    # Get library paths
+    my scalar $lib_paths = StradaPM::Resolver::get_lib_paths($resolved);
+
+    # Build compiler command
+    my str $strada_bin = StradaPM::Build::find_strada_compiler();
+    if ($strada_bin eq "") {
+        $result{"error"} = "Could not find strada compiler";
+        return \%result;
+    }
+
+    my str $cmd = $strada_bin;
+
+    # Add library paths
+    foreach my str $path (@{$lib_paths}) {
+        $cmd = $cmd . " -L " . $path;
+    }
+
+    # Add extra cflags
+    if ($release == 1) {
+        $cmd = $cmd . " -O2";
+    }
+
+    foreach my str $flag (@extra_cflags) {
+        $cmd = $cmd . " " . $flag;
+    }
+
+    # Build type
+    if ($build_type eq "shared") {
+        $cmd = $cmd . " --shared";
+    } elsif ($build_type eq "static") {
+        $cmd = $cmd . " --object";
+    } elsif ($build_type eq "archive") {
+        $cmd = $cmd . " --static-lib";
+    }
+
+    # Output name
+    my str $output_name = $name;
+    if ($target ne "") {
+        $output_name = $target;
+    }
+    $cmd = $cmd . " -o " . $output_name;
+
+    # Source file
+    $cmd = $cmd . " " . $main_file;
+
+    # Link libraries
+    foreach my str $lib (@link_libs) {
+        $cmd = $cmd . " -l" . $lib;
+    }
+
+    # Execute build
+    if ($verbose == 1) {
+        say("Building: " . $cmd);
+    }
+
+    my int $build_result = sys::system($cmd . " 2>&1");
+
+    if ($build_result == 0) {
+        $result{"success"} = 1;
+        $result{"output"} = $output_name;
+    } else {
+        $result{"error"} = "Build failed with exit code " . $build_result;
+    }
+
+    return \%result;
+}
+
+# Find the main source file for a project
+func find_main_file(str $project_dir, scalar $manifest) str {
+    my str $name = StradaPM::Manifest::get_name($manifest);
+
+    # Check build.entry if specified
+    if (defined($manifest->{"build"}) && defined($manifest->{"build"}{"entry"})) {
+        my str $entry = $manifest->{"build"}{"entry"};
+        if (sys::file_exists($project_dir . "/" . $entry) == 1) {
+            return $project_dir . "/" . $entry;
+        }
+    }
+
+    # Standard locations
+    my array @candidates = (
+        $project_dir . "/src/main.strada",
+        $project_dir . "/src/" . $name . ".strada",
+        $project_dir . "/" . $name . ".strada",
+        $project_dir . "/main.strada",
+        $project_dir . "/lib/" . $name . ".strada"
+    );
+
+    foreach my str $path (@candidates) {
+        if (sys::file_exists($path) == 1) {
+            return $path;
+        }
+    }
+
+    return "";
+}
+
+# Find the strada compiler
+func find_strada_compiler() str {
+    # Check common locations
+    my array @candidates = (
+        "./strada",
+        "../strada",
+        "../../strada",
+        "/usr/local/bin/strada",
+        "/usr/bin/strada"
+    );
+
+    foreach my str $path (@candidates) {
+        if (sys::file_exists($path) == 1) {
+            return $path;
+        }
+    }
+
+    # Try PATH
+    my int $which_result = sys::system("which strada >/dev/null 2>&1");
+    if ($which_result == 0) {
+        return "strada";
+    }
+
+    return "";
+}
+
+# Run the built executable
+func run(str $project_dir, scalar $args) int {
+    my str $manifest_path = $project_dir . "/Strada.toml";
+    my scalar $manifest = StradaPM::Manifest::parse($manifest_path);
+
+    if (!defined($manifest)) {
+        warn("No Strada.toml found");
+        return 1;
+    }
+
+    my str $name = StradaPM::Manifest::get_name($manifest);
+    my str $exe = $project_dir . "/" . $name;
+
+    if (sys::file_exists($exe) == 0) {
+        warn("Executable not found: " . $exe);
+        warn("Run 'stradapm build' first");
+        return 1;
+    }
+
+    my str $cmd = $exe;
+    if (defined($args) && scalar(@{$args}) > 0) {
+        foreach my str $arg (@{$args}) {
+            $cmd = $cmd . " " . $arg;
+        }
+    }
+
+    return sys::system($cmd);
+}
+
+# Clean build artifacts
+func clean(str $project_dir) int {
+    my str $manifest_path = $project_dir . "/Strada.toml";
+    my scalar $manifest = StradaPM::Manifest::parse($manifest_path);
+
+    if (!defined($manifest)) {
+        return 0;
+    }
+
+    my str $name = StradaPM::Manifest::get_name($manifest);
+
+    # Remove executable
+    if (sys::file_exists($project_dir . "/" . $name) == 1) {
+        sys::unlink($project_dir . "/" . $name);
+    }
+
+    # Remove .c file if exists
+    if (sys::file_exists($project_dir . "/" . $name . ".c") == 1) {
+        sys::unlink($project_dir . "/" . $name . ".c");
+    }
+
+    # Remove .o files
+    sys::system("rm -f " . $project_dir . "/*.o 2>/dev/null");
+
+    # Remove .so files
+    sys::system("rm -f " . $project_dir . "/*.so 2>/dev/null");
+
+    return 1;
+}
+
+# Test the project
+func test(str $project_dir, scalar $options) scalar {
+    my hash %result = ();
+    $result{"success"} = 0;
+    $result{"passed"} = 0;
+    $result{"failed"} = 0;
+    $result{"errors"} = [];
+
+    # Check for test directory
+    my str $test_dir = $project_dir . "/t";
+    if (sys::dir_exists($test_dir) == 0) {
+        $test_dir = $project_dir . "/test";
+    }
+    if (sys::dir_exists($test_dir) == 0) {
+        $test_dir = $project_dir . "/tests";
+    }
+
+    if (sys::dir_exists($test_dir) == 0) {
+        $result{"error"} = "No test directory found (tried t/, test/, tests/)";
+        return \%result;
+    }
+
+    # Find and run test files
+    my str $cmd = "find " . $test_dir . " -name '*.sh' -o -name 'test_*.strada' 2>/dev/null";
+    my scalar $fh = sys::popen($cmd, "r");
+
+    if (!defined($fh)) {
+        $result{"error"} = "Failed to list test files";
+        return \%result;
+    }
+
+    my array @test_files = ();
+    my str $line = sys::fgets($fh, 512);
+    while (defined($line) && length($line) > 0) {
+        if (substr($line, length($line) - 1, 1) eq "\n") {
+            $line = substr($line, 0, length($line) - 1);
+        }
+        if (length($line) > 0) {
+            push(@test_files, $line);
+        }
+        $line = sys::fgets($fh, 512);
+    }
+    sys::pclose($fh);
+
+    # Run each test
+    foreach my str $test_file (@test_files) {
+        my int $test_result = 0;
+
+        if (substr($test_file, length($test_file) - 3, 3) eq ".sh") {
+            $test_result = sys::system("bash " . $test_file);
+        } else {
+            # Compile and run strada test
+            my str $strada_bin = StradaPM::Build::find_strada_compiler();
+            $test_result = sys::system($strada_bin . " -r " . $test_file);
+        }
+
+        if ($test_result == 0) {
+            $result{"passed"} = $result{"passed"} + 1;
+        } else {
+            $result{"failed"} = $result{"failed"} + 1;
+            push(@{$result{"errors"}}, $test_file);
+        }
+    }
+
+    $result{"success"} = $result{"failed"} == 0 ? 1 : 0;
+    return \%result;
+}

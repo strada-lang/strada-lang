@@ -1,0 +1,169 @@
+#!/usr/bin/env strada
+# Test literal string substitution (strada_subst_sv) for memory leaks
+# Covers: s/LITERAL/REPLACEMENT/ optimization path
+# Run: valgrind --leak-check=full ./test_literal_subst
+
+func main() int {
+    say("Testing literal substitution for memory leaks...");
+    my int $iterations = 500;
+
+    # Test 1: Basic literal substitution (first occurrence only)
+    say("  basic s/LITERAL/REPLACEMENT/...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my str $s = "Hello NAME, welcome to PLACE";
+        $s =~ s/NAME/World/;
+        $s =~ s/PLACE/Strada/;
+        if ($s ne "Hello World, welcome to Strada") {
+            say("FAIL: got '" . $s . "'");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 2: Global literal substitution
+    say("  s/LITERAL/REPLACEMENT/g...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = "aXbXcXd";
+        $s =~ s/X/Y/g;
+        if ($s ne "aYbYcYd") {
+            say("FAIL: got '" . $s . "'");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 3: No match (nothing to replace)
+    say("  no match case...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = "Hello World";
+        $s =~ s/NOTFOUND/replacement/;
+        if ($s ne "Hello World") {
+            say("FAIL: got '" . $s . "'");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 4: Replace with empty string
+    say("  replace with empty string...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = "HelloXWorld";
+        $s =~ s/X//;
+        if ($s ne "HelloWorld") {
+            say("FAIL: got '" . $s . "'");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 5: Replace with longer string
+    say("  replace with longer string...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = "ab";
+        $s =~ s/ab/abcdef/;
+        if ($s ne "abcdef") {
+            say("FAIL: got '" . $s . "'");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 6: Multiple substitutions on same variable
+    say("  multiple substitutions on same var...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = "A B C D E";
+        $s =~ s/A/alpha/;
+        $s =~ s/B/bravo/;
+        $s =~ s/C/charlie/;
+        $s =~ s/D/delta/;
+        $s =~ s/E/echo/;
+        if ($s ne "alpha bravo charlie delta echo") {
+            say("FAIL: got '" . $s . "'");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 7: Global replace all occurrences
+    say("  global replace all occurrences...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = "banana";
+        $s =~ s/a/o/g;
+        if ($s ne "bonono") {
+            say("FAIL: got '" . $s . "'");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 8: Replacement containing special chars that are NOT regex meta
+    say("  replacement with non-meta special chars...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = "Hello NAME";
+        $s =~ s/NAME/Dr. Smith/;
+        if ($s ne "Hello Dr. Smith") {
+            say("FAIL: got '" . $s . "'");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 9: Regex pattern (should still work via regex path)
+    say("  regex pattern (fallback path)...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = "Hello 123 World";
+        $s =~ s/\d+/NUM/;
+        if ($s ne "Hello NUM World") {
+            say("FAIL: got '" . $s . "'");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 10: Regex with /i flag (should use regex path)
+    say("  case-insensitive regex (fallback path)...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = "Hello WORLD";
+        $s =~ s/world/Earth/i;
+        if ($s ne "Hello Earth") {
+            say("FAIL: got '" . $s . "'");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 11: Stress test - rapid allocation/deallocation
+    say("  stress test - many short-lived substitutions...");
+    $i = 0;
+    while ($i < 2000) {
+        my str $template = "Hello NAME, welcome to PLACE on DATE";
+        $template =~ s/NAME/World/;
+        $template =~ s/PLACE/Strada/;
+        $template =~ s/DATE/today/;
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All literal substitution tests passed!");
+    return 0;
+}

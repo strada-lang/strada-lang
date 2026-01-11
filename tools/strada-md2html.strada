@@ -1,0 +1,664 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# md2html.strada - Markdown to HTML converter
+# Usage: md2html input.md [output.html]
+
+# HTML escape special characters
+func html_escape(str $s) str {
+    my str $result = $s;
+    $result =~ s/&/&amp;/g;
+    $result =~ s/</&lt;/g;
+    $result =~ s/>/&gt;/g;
+    return $result;
+}
+
+# Process inline formatting (bold, italic, code, links)
+func process_inline(str $line) str {
+    my str $result = $line;
+
+    # Inline code - handle separately using index/substr since backticks are tricky in regex
+    my int $done = 0;
+    while ($done == 0) {
+        my int $start = index($result, "`");
+        if ($start < 0) {
+            $done = 1;
+        } else {
+            my int $end = index($result, "`", $start + 1);
+            if ($end < 0) {
+                $done = 1;
+            } else {
+                my str $before = substr($result, 0, $start);
+                my str $code = substr($result, $start + 1, $end - $start - 1);
+                my str $after = substr($result, $end + 1, length($result) - $end - 1);
+                my str $escaped = html_escape($code);
+                $result = $before . "<code>" . $escaped . "</code>" . $after;
+            }
+        }
+    }
+
+    # Bold: **text** - use string operations
+    $done = 0;
+    while ($done == 0) {
+        my int $start = index($result, "**");
+        if ($start < 0) {
+            $done = 1;
+        } else {
+            my int $end = index($result, "**", $start + 2);
+            if ($end < 0) {
+                $done = 1;
+            } else {
+                my str $before = substr($result, 0, $start);
+                my str $bold = substr($result, $start + 2, $end - $start - 2);
+                my str $after = substr($result, $end + 2, length($result) - $end - 2);
+                $result = $before . "<strong>" . $bold . "</strong>" . $after;
+            }
+        }
+    }
+
+    # Bold: __text__
+    $done = 0;
+    while ($done == 0) {
+        my int $start = index($result, "__");
+        if ($start < 0) {
+            $done = 1;
+        } else {
+            my int $end = index($result, "__", $start + 2);
+            if ($end < 0) {
+                $done = 1;
+            } else {
+                my str $before = substr($result, 0, $start);
+                my str $bold = substr($result, $start + 2, $end - $start - 2);
+                my str $after = substr($result, $end + 2, length($result) - $end - 2);
+                $result = $before . "<strong>" . $bold . "</strong>" . $after;
+            }
+        }
+    }
+
+    # Italic: *text* - use string operations (single asterisk)
+    $done = 0;
+    while ($done == 0) {
+        my int $start = index($result, "*");
+        if ($start < 0) {
+            $done = 1;
+        } else {
+            my int $end = index($result, "*", $start + 1);
+            if ($end < 0) {
+                $done = 1;
+            } else {
+                my str $before = substr($result, 0, $start);
+                my str $italic = substr($result, $start + 1, $end - $start - 1);
+                my str $after = substr($result, $end + 1, length($result) - $end - 1);
+                $result = $before . "<em>" . $italic . "</em>" . $after;
+            }
+        }
+    }
+
+    # Italic: _text_
+    $done = 0;
+    while ($done == 0) {
+        my int $start = index($result, "_");
+        if ($start < 0) {
+            $done = 1;
+        } else {
+            my int $end = index($result, "_", $start + 1);
+            if ($end < 0) {
+                $done = 1;
+            } else {
+                my str $before = substr($result, 0, $start);
+                my str $italic = substr($result, $start + 1, $end - $start - 1);
+                my str $after = substr($result, $end + 1, length($result) - $end - 1);
+                $result = $before . "<em>" . $italic . "</em>" . $after;
+            }
+        }
+    }
+
+    # Images: ![alt](url) - process before links
+    $done = 0;
+    while ($done == 0) {
+        my int $bang = index($result, "![");
+        if ($bang < 0) {
+            $done = 1;
+        } else {
+            my int $close_bracket = index($result, "]", $bang + 2);
+            if ($close_bracket < 0) {
+                $done = 1;
+            } else {
+                my int $open_paren = index($result, "(", $close_bracket);
+                if ($open_paren != $close_bracket + 1) {
+                    $done = 1;
+                } else {
+                    my int $close_paren = index($result, ")", $open_paren);
+                    if ($close_paren < 0) {
+                        $done = 1;
+                    } else {
+                        my str $before = substr($result, 0, $bang);
+                        my str $alt = substr($result, $bang + 2, $close_bracket - $bang - 2);
+                        my str $url = substr($result, $open_paren + 1, $close_paren - $open_paren - 1);
+                        my str $after = substr($result, $close_paren + 1, length($result) - $close_paren - 1);
+                        $result = $before . "<img src=\"" . $url . "\" alt=\"" . $alt . "\">" . $after;
+                    }
+                }
+            }
+        }
+    }
+
+    # Links: [text](url)
+    $done = 0;
+    while ($done == 0) {
+        my int $open_bracket = index($result, "[");
+        if ($open_bracket < 0) {
+            $done = 1;
+        } else {
+            my int $close_bracket = index($result, "]", $open_bracket + 1);
+            if ($close_bracket < 0) {
+                $done = 1;
+            } else {
+                my int $open_paren = index($result, "(", $close_bracket);
+                if ($open_paren != $close_bracket + 1) {
+                    $done = 1;
+                } else {
+                    my int $close_paren = index($result, ")", $open_paren);
+                    if ($close_paren < 0) {
+                        $done = 1;
+                    } else {
+                        my str $before = substr($result, 0, $open_bracket);
+                        my str $text = substr($result, $open_bracket + 1, $close_bracket - $open_bracket - 1);
+                        my str $url = substr($result, $open_paren + 1, $close_paren - $open_paren - 1);
+                        my str $after = substr($result, $close_paren + 1, length($result) - $close_paren - 1);
+                        $result = $before . "<a href=\"" . $url . "\">" . $text . "</a>" . $after;
+                    }
+                }
+            }
+        }
+    }
+
+    return $result;
+}
+
+# Count leading characters
+func count_leading(str $s, str $ch) int {
+    my int $count = 0;
+    my int $len = length($s);
+    while ($count < $len && substr($s, $count, 1) eq $ch) {
+        $count = $count + 1;
+    }
+    return $count;
+}
+
+# Check if string contains only one char type
+func is_all_char(str $s, str $ch) int {
+    my int $len = length($s);
+    my int $i = 0;
+    while ($i < $len) {
+        if (substr($s, $i, 1) ne $ch) {
+            return 0;
+        }
+        $i = $i + 1;
+    }
+    return 1;
+}
+
+# Check if line is a horizontal rule
+func is_hr(str $line) int {
+    my str $trimmed = $line;
+    $trimmed =~ s/[ ]//g;
+    my int $len = length($trimmed);
+    if ($len < 3) {
+        return 0;
+    }
+    if (is_all_char($trimmed, "-") == 1) {
+        return 1;
+    }
+    if (is_all_char($trimmed, "*") == 1) {
+        return 1;
+    }
+    if (is_all_char($trimmed, "_") == 1) {
+        return 1;
+    }
+    return 0;
+}
+
+# Skip leading spaces and return remaining string
+func skip_spaces(str $s) str {
+    my int $i = 0;
+    my int $len = length($s);
+    while ($i < $len && substr($s, $i, 1) eq " ") {
+        $i = $i + 1;
+    }
+    return substr($s, $i, $len - $i);
+}
+
+# Check if line starts an unordered list item
+func is_ul_item(str $line) int {
+    my str $trimmed = skip_spaces($line);
+    if (length($trimmed) < 2) {
+        return 0;
+    }
+    my str $first = substr($trimmed, 0, 1);
+    my str $second = substr($trimmed, 1, 1);
+    if (($first eq "-" || $first eq "*" || $first eq "+") && $second eq " ") {
+        return 1;
+    }
+    return 0;
+}
+
+# Check if char is a digit
+func is_digit(str $c) int {
+    if ($c eq "0" || $c eq "1" || $c eq "2" || $c eq "3" || $c eq "4" ||
+        $c eq "5" || $c eq "6" || $c eq "7" || $c eq "8" || $c eq "9") {
+        return 1;
+    }
+    return 0;
+}
+
+# Check if line starts an ordered list item
+func is_ol_item(str $line) int {
+    my str $trimmed = skip_spaces($line);
+    my int $len = length($trimmed);
+    if ($len < 3) {
+        return 0;
+    }
+    # Look for digits followed by ". "
+    my int $i = 0;
+    while ($i < $len && is_digit(substr($trimmed, $i, 1)) == 1) {
+        $i = $i + 1;
+    }
+    if ($i == 0) {
+        return 0;
+    }
+    if ($i + 1 < $len && substr($trimmed, $i, 2) eq ". ") {
+        return 1;
+    }
+    return 0;
+}
+
+# Get list item content (strip marker)
+func get_list_content(str $line) str {
+    my str $trimmed = skip_spaces($line);
+    my int $len = length($trimmed);
+
+    # Check for unordered list: - or * or + followed by space
+    if ($len >= 2) {
+        my str $first = substr($trimmed, 0, 1);
+        if ($first eq "-" || $first eq "*" || $first eq "+") {
+            if (substr($trimmed, 1, 1) eq " ") {
+                return substr($trimmed, 2, $len - 2);
+            }
+        }
+    }
+
+    # Check for ordered list: digits followed by ". "
+    my int $i = 0;
+    while ($i < $len && is_digit(substr($trimmed, $i, 1)) == 1) {
+        $i = $i + 1;
+    }
+    if ($i > 0 && $i + 1 < $len && substr($trimmed, $i, 2) eq ". ") {
+        return substr($trimmed, $i + 2, $len - $i - 2);
+    }
+
+    return $trimmed;
+}
+
+# Check if line is a blockquote
+func is_blockquote(str $line) int {
+    if (length($line) > 0 && substr($line, 0, 1) eq ">") {
+        return 1;
+    }
+    return 0;
+}
+
+# Get blockquote content
+func get_blockquote_content(str $line) str {
+    if (length($line) == 0) {
+        return "";
+    }
+    # Skip the ">"
+    my str $content = substr($line, 1, length($line) - 1);
+    # Skip optional space
+    if (length($content) > 0 && substr($content, 0, 1) eq " ") {
+        $content = substr($content, 1, length($content) - 1);
+    }
+    return $content;
+}
+
+# Check if line starts a code block (```)
+func is_code_fence(str $line) int {
+    if (length($line) >= 3 && substr($line, 0, 3) eq "~~~") {
+        return 1;
+    }
+    # Check for triple backtick using index
+    my int $pos = index($line, "`");
+    if ($pos == 0) {
+        if (length($line) >= 3) {
+            my str $first3 = substr($line, 0, 3);
+            if (index($first3, "`") == 0 && index($first3, "`", 1) == 1 && index($first3, "`", 2) == 2) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+# Get code fence language
+func get_fence_lang(str $line) str {
+    my str $lang = "";
+    if (length($line) > 3) {
+        $lang = substr($line, 3, length($line) - 3);
+        $lang =~ s/[ \t\r\n]//g;
+    }
+    return $lang;
+}
+
+# Convert markdown to HTML
+func md2html(str $markdown) str {
+    my array @lines = split("\n", $markdown);
+    my str $html = "";
+    my int $i = 0;
+    my int $num_lines = size(@lines);
+    my int $in_paragraph = 0;
+    my str $paragraph = "";
+
+    while ($i < $num_lines) {
+        my str $line = $lines[$i];
+        my str $trimmed = $line;
+        $trimmed =~ s/^[ \t]+//;
+        $trimmed =~ s/[ \t]+$//;
+
+        # Code block
+        if (is_code_fence($line) == 1) {
+            # Close any open paragraph
+            if ($in_paragraph == 1) {
+                $html = $html . "<p>" . process_inline($paragraph) . "</p>\n";
+                $in_paragraph = 0;
+                $paragraph = "";
+            }
+
+            my str $lang = get_fence_lang($line);
+            $i = $i + 1;
+            my str $code = "";
+            while ($i < $num_lines && is_code_fence($lines[$i]) == 0) {
+                if (length($code) > 0) {
+                    $code = $code . "\n";
+                }
+                $code = $code . html_escape($lines[$i]);
+                $i = $i + 1;
+            }
+            if (length($lang) > 0) {
+                $html = $html . "<pre><code class=\"language-" . $lang . "\">" . $code . "</code></pre>\n";
+            } else {
+                $html = $html . "<pre><code>" . $code . "</code></pre>\n";
+            }
+            $i = $i + 1;
+            next;
+        }
+
+        # Empty line
+        if (length($trimmed) == 0) {
+            if ($in_paragraph == 1) {
+                $html = $html . "<p>" . process_inline($paragraph) . "</p>\n";
+                $in_paragraph = 0;
+                $paragraph = "";
+            }
+            $i = $i + 1;
+            next;
+        }
+
+        # Horizontal rule
+        if (is_hr($trimmed) == 1) {
+            if ($in_paragraph == 1) {
+                $html = $html . "<p>" . process_inline($paragraph) . "</p>\n";
+                $in_paragraph = 0;
+                $paragraph = "";
+            }
+            $html = $html . "<hr>\n";
+            $i = $i + 1;
+            next;
+        }
+
+        # Headers
+        if (substr($line, 0, 1) eq "#") {
+            if ($in_paragraph == 1) {
+                $html = $html . "<p>" . process_inline($paragraph) . "</p>\n";
+                $in_paragraph = 0;
+                $paragraph = "";
+            }
+            my int $level = count_leading($line, "#");
+            if ($level > 6) {
+                $level = 6;
+            }
+            my str $header_text = substr($line, $level, length($line) - $level);
+            $header_text =~ s/^[ ]+//;
+            $header_text =~ s/[ ]+$//;
+            # Remove trailing #s
+            $header_text =~ s/[ ]*#+$//;
+            $html = $html . "<h" . $level . ">" . process_inline($header_text) . "</h" . $level . ">\n";
+            $i = $i + 1;
+            next;
+        }
+
+        # Blockquote
+        if (is_blockquote($line) == 1) {
+            if ($in_paragraph == 1) {
+                $html = $html . "<p>" . process_inline($paragraph) . "</p>\n";
+                $in_paragraph = 0;
+                $paragraph = "";
+            }
+            my str $quote_content = "";
+            while ($i < $num_lines && is_blockquote($lines[$i]) == 1) {
+                if (length($quote_content) > 0) {
+                    $quote_content = $quote_content . "\n";
+                }
+                $quote_content = $quote_content . get_blockquote_content($lines[$i]);
+                $i = $i + 1;
+            }
+            # Recursively process blockquote content
+            my str $inner = md2html($quote_content);
+            $html = $html . "<blockquote>\n" . $inner . "</blockquote>\n";
+            next;
+        }
+
+        # Unordered list
+        if (is_ul_item($line) == 1) {
+            if ($in_paragraph == 1) {
+                $html = $html . "<p>" . process_inline($paragraph) . "</p>\n";
+                $in_paragraph = 0;
+                $paragraph = "";
+            }
+            $html = $html . "<ul>\n";
+            while ($i < $num_lines && is_ul_item($lines[$i]) == 1) {
+                my str $item = get_list_content($lines[$i]);
+                $html = $html . "  <li>" . process_inline($item) . "</li>\n";
+                $i = $i + 1;
+            }
+            $html = $html . "</ul>\n";
+            next;
+        }
+
+        # Ordered list
+        if (is_ol_item($line) == 1) {
+            if ($in_paragraph == 1) {
+                $html = $html . "<p>" . process_inline($paragraph) . "</p>\n";
+                $in_paragraph = 0;
+                $paragraph = "";
+            }
+            $html = $html . "<ol>\n";
+            while ($i < $num_lines && is_ol_item($lines[$i]) == 1) {
+                my str $item = get_list_content($lines[$i]);
+                $html = $html . "  <li>" . process_inline($item) . "</li>\n";
+                $i = $i + 1;
+            }
+            $html = $html . "</ol>\n";
+            next;
+        }
+
+        # Regular paragraph text
+        if ($in_paragraph == 1) {
+            $paragraph = $paragraph . " " . $trimmed;
+        } else {
+            $in_paragraph = 1;
+            $paragraph = $trimmed;
+        }
+        $i = $i + 1;
+    }
+
+    # Close any remaining paragraph
+    if ($in_paragraph == 1) {
+        $html = $html . "<p>" . process_inline($paragraph) . "</p>\n";
+    }
+
+    return $html;
+}
+
+# Generate full HTML document
+func generate_html_doc(str $title, str $body) str {
+    my str $doc = "<!DOCTYPE html>\n";
+    $doc = $doc . "<html lang=\"en\">\n";
+    $doc = $doc . "<head>\n";
+    $doc = $doc . "  <meta charset=\"UTF-8\">\n";
+    $doc = $doc . "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n";
+    $doc = $doc . "  <title>" . html_escape($title) . "</title>\n";
+    $doc = $doc . "  <style>\n";
+    $doc = $doc . "    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 20px; color: #333; }\n";
+    $doc = $doc . "    h1, h2, h3, h4, h5, h6 { margin-top: 1.5em; margin-bottom: 0.5em; }\n";
+    $doc = $doc . "    code { background: #f4f4f4; padding: 2px 6px; border-radius: 3px; font-family: 'SF Mono', Monaco, Consolas, monospace; }\n";
+    $doc = $doc . "    pre { background: #f4f4f4; padding: 15px; border-radius: 5px; overflow-x: auto; }\n";
+    $doc = $doc . "    pre code { background: none; padding: 0; }\n";
+    $doc = $doc . "    blockquote { border-left: 4px solid #ddd; margin: 0; padding-left: 20px; color: #666; }\n";
+    $doc = $doc . "    a { color: #0066cc; }\n";
+    $doc = $doc . "    hr { border: none; border-top: 1px solid #ddd; margin: 2em 0; }\n";
+    $doc = $doc . "    img { max-width: 100%; }\n";
+    $doc = $doc . "  </style>\n";
+    $doc = $doc . "</head>\n";
+    $doc = $doc . "<body>\n";
+    $doc = $doc . $body;
+    $doc = $doc . "</body>\n";
+    $doc = $doc . "</html>\n";
+    return $doc;
+}
+
+# Extract title from first h1 or use filename
+func extract_title(str $html, str $filename) str {
+    # Look for <h1>...</h1>
+    my int $h1_start = index($html, "<h1>");
+    if ($h1_start >= 0) {
+        my int $h1_end = index($html, "</h1>", $h1_start);
+        if ($h1_end > $h1_start) {
+            return substr($html, $h1_start + 4, $h1_end - $h1_start - 4);
+        }
+    }
+    # Use filename without extension
+    my str $title = $filename;
+    # Remove .md extension
+    my int $dot = index($title, ".md");
+    if ($dot > 0) {
+        $title = substr($title, 0, $dot);
+    }
+    # Remove directory path
+    my int $slash = 0;
+    my int $last_slash = -1;
+    while ($slash >= 0) {
+        $slash = index($title, "/", $last_slash + 1);
+        if ($slash >= 0) {
+            $last_slash = $slash;
+        }
+    }
+    if ($last_slash >= 0) {
+        $title = substr($title, $last_slash + 1, length($title) - $last_slash - 1);
+    }
+    return $title;
+}
+
+func print_usage() void {
+    say("md2html - Markdown to HTML converter");
+    say("Usage: md2html [options] input.md [output.html]");
+    say("");
+    say("Options:");
+    say("  -f, --fragment   Output HTML fragment only (no document wrapper)");
+    say("  -h, --help       Show this help");
+    say("");
+    say("If output file is not specified, writes to stdout.");
+    say("");
+    say("Supported Markdown:");
+    say("  # Headers (h1-h6)");
+    say("  **bold** and *italic*");
+    say("  `inline code` and ```code blocks```");
+    say("  [links](url) and ![images](url)");
+    say("  - Unordered lists");
+    say("  1. Ordered lists");
+    say("  > Blockquotes");
+    say("  --- Horizontal rules");
+}
+
+func main() int {
+    my int $argc = size(@ARGV);
+
+    # Parse arguments
+    my int $fragment_only = 0;
+    my str $input_file = "";
+    my str $output_file = "";
+    my int $i = 1;
+
+    while ($i < $argc) {
+        my str $arg = $ARGV[$i];
+
+        if ($arg eq "-h" || $arg eq "--help") {
+            print_usage();
+            return 0;
+        } elsif ($arg eq "-f" || $arg eq "--fragment") {
+            $fragment_only = 1;
+        } elsif (substr($arg, 0, 1) eq "-") {
+            say("Unknown option: " . $arg);
+            print_usage();
+            return 1;
+        } elsif (length($input_file) == 0) {
+            $input_file = $arg;
+        } elsif (length($output_file) == 0) {
+            $output_file = $arg;
+        }
+        $i = $i + 1;
+    }
+
+    if (length($input_file) == 0) {
+        print_usage();
+        return 1;
+    }
+
+    # Read input file
+    my str $markdown = slurp($input_file);
+
+    # Convert to HTML
+    my str $body = md2html($markdown);
+
+    my str $output = "";
+    if ($fragment_only == 1) {
+        $output = $body;
+    } else {
+        my str $title = extract_title($body, $input_file);
+        $output = generate_html_doc($title, $body);
+    }
+
+    # Write output
+    if (length($output_file) > 0) {
+        spew($output_file, $output);
+        say("Converted " . $input_file . " -> " . $output_file);
+    } else {
+        print($output);
+    }
+
+    return 0;
+}

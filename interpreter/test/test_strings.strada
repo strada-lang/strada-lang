@@ -1,0 +1,26 @@
+func main() int {
+    my str $s = "Hello, World!";
+    say(length($s));
+    say(uc($s));
+    say(lc($s));
+    say(substr($s, 7, 5));
+    say(index($s, "World"));
+
+    # String repeat
+    my str $rep = "ab" x 3;
+    say($rep);
+
+    # Join and split
+    my array @parts = split(",", "a,b,c,d");
+    say(size(\@parts));
+    say(join("-", \@parts));
+
+    # Chr and ord
+    say(chr(65));
+    say(ord("A"));
+
+    # Sprintf
+    say(sprintf("num=%d str=%s", 42, "hi"));
+
+    return 0;
+}

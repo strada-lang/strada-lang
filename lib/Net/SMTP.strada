@@ -1,0 +1,481 @@
+=head1 NAME
+
+Net::SMTP - SMTP client library for Strada
+
+=head1 SYNOPSIS
+
+    use lib "lib";
+    use Net::SMTP;
+
+    my scalar $smtp = SMTP::new("smtp.example.com", 587);
+    $smtp->ehlo("mydomain.com");
+    $smtp->auth("user", "password");
+
+    my array @to = ("recipient@example.com");
+    $smtp->send_mail("sender@example.com", \@to, "Subject", "Body text");
+    $smtp->quit();
+
+=head1 DESCRIPTION
+
+Net::SMTP provides an SMTP client for sending emails. It supports:
+
+=over 4
+
+=item * Plain TCP connections (ports 25, 587)
+
+=item * AUTH LOGIN and AUTH PLAIN authentication
+
+=item * Multiple recipients
+
+=item * Debug mode for troubleshooting
+
+=back
+
+B<Note:> For TLS/SSL connections, upgrade after STARTTLS using the ssl module.
+
+=head1 CONSTRUCTOR
+
+=head2 new($host, $port)
+
+Create SMTP connection. Returns blessed object or undef on failure.
+
+    my scalar $smtp = SMTP::new("smtp.gmail.com", 587);
+
+=head1 METHODS
+
+=head2 debug($on)
+
+Enable/disable debug output (prints SMTP conversation).
+
+    $smtp->debug(1);
+
+=head2 helo($domain)
+
+Send HELO command (simple greeting).
+
+    $smtp->helo("mydomain.com");
+
+=head2 ehlo($domain)
+
+Send EHLO command (extended greeting). Returns server capabilities.
+
+    $smtp->ehlo("mydomain.com");
+
+=head2 auth($username, $password)
+
+Authenticate using AUTH LOGIN mechanism.
+
+    if ($smtp->auth("user", "pass")) {
+        say("Authenticated!");
+    }
+
+=head2 auth_plain($username, $password)
+
+Authenticate using AUTH PLAIN mechanism.
+
+=head2 starttls()
+
+Send STARTTLS command. After this, upgrade to TLS using ssl module.
+
+=head2 mail($from)
+
+Set sender (MAIL FROM command).
+
+    $smtp->mail("sender@example.com");
+
+=head2 rcpt_to($recipient)
+
+Add recipient (RCPT TO command). Call multiple times for multiple recipients.
+
+    $smtp->rcpt_to("user1@example.com");
+    $smtp->rcpt_to("user2@example.com");
+
+=head2 data($message)
+
+Send message body. Include headers and body separated by blank line.
+
+    my str $msg = "Subject: Hello\r\n\r\nMessage body here.";
+    $smtp->data($msg);
+
+=head2 send_mail($from, $to_list, $subject, $body)
+
+Convenience method to send a complete email.
+
+    my array @recipients = ("user@example.com");
+    $smtp->send_mail("me@example.com", \@recipients, "Subject", "Body text");
+
+=head2 reset()
+
+Reset session (RSET command).
+
+=head2 noop()
+
+No-op command (keep-alive).
+
+=head2 verify($address)
+
+Verify an email address (VRFY command).
+
+=head2 quit()
+
+Close connection (QUIT command).
+
+=head2 code()
+
+Get last response code.
+
+=head2 message()
+
+Get last response message.
+
+=head1 EXAMPLE
+
+    use lib "lib";
+    use Net::SMTP;
+
+    my scalar $smtp = SMTP::new("smtp.example.com", 587);
+    if (!defined($smtp)) {
+        die("Could not connect to SMTP server");
+    }
+
+    $smtp->debug(1);  # Show conversation
+
+    if (!$smtp->ehlo("mydomain.com")) {
+        die("EHLO failed");
+    }
+
+    if (!$smtp->auth("username", "password")) {
+        die("Authentication failed");
+    }
+
+    my array @to = ("recipient@example.com", "another@example.com");
+    if (!$smtp->send_mail("sender@example.com", \@to,
+                          "Test Subject", "This is the body.")) {
+        die("Failed to send: " . $smtp->message());
+    }
+
+    $smtp->quit();
+    say("Email sent successfully!");
+
+=head1 SEE ALSO
+
+L<ssl>, L<LWP>
+
+=cut
+
+package SMTP;
+
+# Create new SMTP connection
+# Returns blessed hash reference or undef on failure
+func new(str $host, int $port) scalar {
+    my hash %self = ();
+    $self{"host"} = $host;
+    $self{"port"} = $port;
+    $self{"socket"} = 0;
+    $self{"debug"} = 0;
+    $self{"last_code"} = 0;
+    $self{"last_response"} = "";
+
+    # Default timeout 30 seconds
+    $self{"timeout"} = 30;
+
+    my scalar $obj = bless(\%self, "SMTP");
+
+    # Connect to the server
+    if (!SMTP::do_connect($obj)) {
+        return undef;
+    }
+
+    return $obj;
+}
+
+# Enable debug mode (prints SMTP conversation)
+func debug(scalar $self, int $on) void {
+    $self->{"debug"} = $on;
+}
+
+# Internal: connect to SMTP server (plain)
+func do_connect(scalar $self) int {
+    my str $host = $self->{"host"};
+    my int $port = $self->{"port"};
+
+    my int $sock = sys::socket_client($host, $port);
+    if ($sock <= 0) {
+        return 0;
+    }
+
+    $self->{"socket"} = $sock;
+
+    # Read server greeting
+    my str $response = SMTP::recv_response($self);
+    if ($self->{"last_code"} != 220) {
+        sys::socket_close($sock);
+        $self->{"socket"} = 0;
+        return 0;
+    }
+
+    return 1;
+}
+
+# Internal: send command to server
+func send_cmd(scalar $self, str $cmd) int {
+    if ($self->{"debug"} == 1) {
+        say("C: " . $cmd);
+    }
+
+    my str $data = $cmd . "\r\n";
+    sys::socket_send($self->{"socket"}, $data);
+
+    return 1;
+}
+
+# Internal: receive response from server
+func recv_response(scalar $self) str {
+    my str $response = "";
+    my str $line = "";
+    my int $code = 0;
+
+    # Read lines until we get a final response (no dash after code)
+    while (1) {
+        $line = sys::socket_recv($self->{"socket"}, 1024);
+
+        if (!defined($line) || length($line) == 0) {
+            last;
+        }
+
+        $response = $response . $line;
+
+        # Check if this is a continuation line (code followed by dash)
+        # or final line (code followed by space)
+        # Format: "250-text" (continue) or "250 text" (final)
+        if (length($line) >= 4) {
+            my str $code_str = substr($line, 0, 3);
+            $code = cast_int($code_str);
+            my str $sep = substr($line, 3, 1);
+            if ($sep ne "-") {
+                last;
+            }
+        } else {
+            last;
+        }
+    }
+
+    $self->{"last_code"} = $code;
+    $self->{"last_response"} = $response;
+
+    if ($self->{"debug"} == 1) {
+        say("S: " . trim($response));
+    }
+
+    return $response;
+}
+
+# Internal: send command and get response
+func command(scalar $self, str $cmd) int {
+    SMTP::send_cmd($self, $cmd);
+    SMTP::recv_response($self);
+    return $self->{"last_code"};
+}
+
+# HELO command - simple greeting
+func helo(scalar $self, str $domain) int {
+    my int $code = SMTP::command($self, "HELO " . $domain);
+    return ($code == 250);
+}
+
+# EHLO command - extended greeting (returns capabilities)
+func ehlo(scalar $self, str $domain) int {
+    my int $code = SMTP::command($self, "EHLO " . $domain);
+    return ($code == 250);
+}
+
+# STARTTLS - upgrade connection to TLS
+# Note: Requires reconnecting with SSL after this
+func starttls(scalar $self) int {
+    my int $code = SMTP::command($self, "STARTTLS");
+    return ($code == 220);
+}
+
+# AUTH LOGIN - authenticate with username/password
+func auth(scalar $self, str $username, str $password) int {
+    my int $code = SMTP::command($self, "AUTH LOGIN");
+    if ($code != 334) {
+        return 0;
+    }
+
+    # Send base64-encoded username
+    my str $user_b64 = sys::base64_encode($username);
+    $code = SMTP::command($self, $user_b64);
+    if ($code != 334) {
+        return 0;
+    }
+
+    # Send base64-encoded password
+    my str $pass_b64 = sys::base64_encode($password);
+    $code = SMTP::command($self, $pass_b64);
+
+    return ($code == 235);
+}
+
+# AUTH PLAIN - authenticate with PLAIN mechanism
+func auth_plain(scalar $self, str $username, str $password) int {
+    # PLAIN format: \0username\0password
+    my str $auth_str = chr(0) . $username . chr(0) . $password;
+    my str $auth_b64 = sys::base64_encode($auth_str);
+
+    my int $code = SMTP::command($self, "AUTH PLAIN " . $auth_b64);
+    return ($code == 235);
+}
+
+# MAIL FROM - specify sender
+func mail(scalar $self, str $from) int {
+    my int $code = SMTP::command($self, "MAIL FROM:<" . $from . ">");
+    return ($code == 250);
+}
+
+# RCPT TO - specify recipient (call multiple times for multiple recipients)
+func rcpt_to(scalar $self, str $recipient) int {
+    my int $code = SMTP::command($self, "RCPT TO:<" . $recipient . ">");
+    return ($code == 250 || $code == 251);
+}
+
+# Alias for rcpt_to()
+func recipient(scalar $self, str $rcpt) int {
+    return SMTP::rcpt_to($self, $rcpt);
+}
+
+# DATA - send message body
+# The message should include headers and body separated by blank line
+func data(scalar $self, str $message) int {
+    my int $code = SMTP::command($self, "DATA");
+    if ($code != 354) {
+        return 0;
+    }
+
+    # Send message body
+    # Need to handle dot-stuffing: lines starting with . get extra .
+    my str $stuffed = SMTP::dot_stuff($message);
+
+    SMTP::send_cmd($self, $stuffed);
+
+    # Send terminating dot
+    $code = SMTP::command($self, ".");
+
+    return ($code == 250);
+}
+
+# RSET - reset the session
+func reset(scalar $self) int {
+    my int $code = SMTP::command($self, "RSET");
+    return ($code == 250);
+}
+
+# NOOP - no operation (keep-alive)
+func noop(scalar $self) int {
+    my int $code = SMTP::command($self, "NOOP");
+    return ($code == 250);
+}
+
+# VRFY - verify address (often disabled on servers)
+func verify(scalar $self, str $address) int {
+    my int $code = SMTP::command($self, "VRFY " . $address);
+    return ($code == 250 || $code == 251 || $code == 252);
+}
+
+# QUIT - close connection
+func quit(scalar $self) int {
+    my int $code = SMTP::command($self, "QUIT");
+
+    if ($self->{"socket"} > 0) {
+        sys::socket_close($self->{"socket"});
+        $self->{"socket"} = 0;
+    }
+
+    return ($code == 221);
+}
+
+# Get last response code
+func code(scalar $self) int {
+    return $self->{"last_code"};
+}
+
+# Get last response message
+func message(scalar $self) str {
+    return $self->{"last_response"};
+}
+
+# Convenience method: send a complete email
+func send_mail(scalar $self, str $from, scalar $to_list, str $subject, str $body) int {
+    # MAIL FROM
+    if (!SMTP::mail($self, $from)) {
+        return 0;
+    }
+
+    # RCPT TO for each recipient
+    my int $i = 0;
+    my int $count = scalar($to_list);
+    while ($i < $count) {
+        my str $rcpt = $to_list->[$i];
+        if (!SMTP::rcpt_to($self, $rcpt)) {
+            return 0;
+        }
+        $i = $i + 1;
+    }
+
+    # Build recipient list string
+    my str $to_str = "";
+    $i = 0;
+    while ($i < $count) {
+        if ($i > 0) {
+            $to_str = $to_str . ", ";
+        }
+        $to_str = $to_str . $to_list->[$i];
+        $i = $i + 1;
+    }
+
+    # Build message with headers
+    my str $msg = "From: " . $from . "\r\n";
+    $msg = $msg . "To: " . $to_str . "\r\n";
+    $msg = $msg . "Subject: " . $subject . "\r\n";
+    $msg = $msg . "MIME-Version: 1.0\r\n";
+    $msg = $msg . "Content-Type: text/plain; charset=UTF-8\r\n";
+    $msg = $msg . "\r\n";
+    $msg = $msg . $body;
+
+    # Send DATA
+    return SMTP::data($self, $msg);
+}
+
+# Internal: dot-stuffing for DATA command
+# Lines starting with . get an extra . prepended
+func dot_stuff(str $text) str {
+    my array @lines = split("\n", $text);
+    my str $result = "";
+    my int $i = 0;
+    my int $count = size(@lines);
+
+    while ($i < $count) {
+        my str $line = $lines[$i];
+
+        # Remove any trailing \r
+        if (length($line) > 0) {
+            my str $last_ch = substr($line, length($line) - 1, 1);
+            if ($last_ch eq "\r") {
+                $line = substr($line, 0, length($line) - 1);
+            }
+        }
+
+        # Dot-stuff: if line starts with ., add another .
+        if (length($line) > 0) {
+            my str $first_ch = substr($line, 0, 1);
+            if ($first_ch eq ".") {
+                $line = "." . $line;
+            }
+        }
+
+        $result = $result . $line . "\r\n";
+        $i = $i + 1;
+    }
+
+    return $result;
+}

@@ -1,3 +1,20 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
 # Memory Management Examples
 # Demonstrates array capacity control and hash improvements
 
@@ -7,7 +24,7 @@ func main() int {
     # 1. Array with initial capacity syntax
     say("1. Array with initial capacity:");
     my array @preallocated[1000];
-    say("   Created @preallocated[1000] - capacity for 1000 elements");
+    say("   Created $preallocated[1000] - capacity for 1000 elements");
     say("   Current size: " . size(@preallocated));
 
     # Fill it efficiently - no reallocations needed
@@ -21,12 +38,12 @@ func main() int {
     my int $rows = 100;
     my int $cols = 50;
     my array @matrix[$rows * $cols];
-    say("   Created @matrix[$rows * $cols] = capacity for " . ($rows * $cols));
+    say("   Created $matrix[$rows * $cols] = capacity for " . ($rows * $cols));
 
     # 3. Combined with initialization
     say("\n3. Capacity with initialization:");
     my array @data[100] = (1, 2, 3, 4, 5);
-    say("   my array @data[100] = (1, 2, 3, 4, 5)");
+    say("   my array $data[100] = (1, 2, 3, 4, 5)");
     say("   Size: " . size(@data) . " (capacity reserved for 100)");
 
     # 4. Using reserve() function

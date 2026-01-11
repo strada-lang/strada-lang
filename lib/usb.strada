@@ -1,0 +1,1183 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+=head1 NAME
+
+usb - USB Device Access Module for Strada
+
+=head1 SYNOPSIS
+
+    use lib "lib";
+    use usb;
+
+    usb::init();
+
+    # List all USB devices
+    my array @devices = usb::get_device_list();
+    foreach my hash %dev (@devices) {
+        say("Device: " . $dev{"vidpid"});
+    }
+
+    # Open a specific device
+    my int $handle = usb::open_device(0x1234, 0x5678);
+    if ($handle != 0) {
+        usb::set_auto_detach($handle, 1);
+        usb::claim_interface($handle, 0);
+
+        # Bulk write/read
+        usb::bulk_write($handle, 0x01, "Hello", 1000);
+        my str $data = usb::bulk_read($handle, 0x81, 64, 1000);
+
+        usb::release_interface($handle, 0);
+        usb::close($handle);
+    }
+
+    usb::exit();
+
+=head1 DESCRIPTION
+
+The usb module provides userspace USB device access via libusb-1.0.
+It supports device enumeration, bulk/interrupt/control transfers,
+and device configuration.
+
+B<Compile with:>
+
+    ./strada prog.strada -lusb-1.0
+
+B<Requires:>
+
+    apt install libusb-1.0-0-dev    # Debian/Ubuntu
+
+=head1 INITIALIZATION
+
+=head2 init()
+
+Initialize libusb. Returns 0 on success, negative error code on failure.
+
+=head2 exit()
+
+Cleanup libusb and free resources.
+
+=head2 set_debug($level)
+
+Set debug level: 0=none, 1=error, 2=warning, 3=info, 4=debug.
+
+=head2 strerror($errcode)
+
+Get human-readable error string for an error code.
+
+=head1 DEVICE ENUMERATION
+
+=head2 get_device_list()
+
+Returns array of hashes with device info. Each hash contains:
+vid, pid, bus, address, class, subclass, protocol, vidpid.
+
+    my array @devices = usb::get_device_list();
+
+=head1 OPEN/CLOSE
+
+=head2 open_device($vid, $pid)
+
+Open device by Vendor ID and Product ID. Returns handle (int) or 0 on failure.
+
+    my int $h = usb::open_device(0x1234, 0x5678);
+
+=head2 open_device_by_path($bus, $address)
+
+Open device by bus number and device address.
+
+=head2 close($handle)
+
+Close device handle.
+
+=head1 INTERFACE MANAGEMENT
+
+=head2 claim_interface($handle, $interface)
+
+Claim interface for exclusive use. Returns 0 on success.
+
+=head2 release_interface($handle, $interface)
+
+Release a claimed interface.
+
+=head2 set_auto_detach($handle, $enable)
+
+Enable auto-detach of kernel driver (1=enable, 0=disable).
+
+=head2 detach_kernel_driver($handle, $interface)
+
+Manually detach kernel driver from interface.
+
+=head2 kernel_driver_active($handle, $interface)
+
+Check if kernel driver is active (returns 1 or 0).
+
+=head1 DATA TRANSFERS
+
+=head2 bulk_write($handle, $endpoint, $data, $timeout)
+
+Bulk write to OUT endpoint. Returns bytes transferred or negative error.
+
+    usb::bulk_write($h, 0x01, "data", 1000);
+
+=head2 bulk_read($handle, $endpoint, $max_len, $timeout)
+
+Bulk read from IN endpoint. Returns data string (empty on error).
+
+    my str $data = usb::bulk_read($h, 0x81, 64, 1000);
+
+=head2 interrupt_write($handle, $endpoint, $data, $timeout)
+
+Write to interrupt OUT endpoint.
+
+=head2 interrupt_read($handle, $endpoint, $max_len, $timeout)
+
+Read from interrupt IN endpoint.
+
+=head2 control_write($handle, $request_type, $request, $value, $index, $data, $timeout)
+
+Control transfer (host to device).
+
+=head2 control_read($handle, $request_type, $request, $value, $index, $max_len, $timeout)
+
+Control transfer (device to host).
+
+=head2 last_transfer_length()
+
+Get the number of bytes from the last read operation.
+
+=head1 DESCRIPTORS
+
+=head2 get_device_descriptor($handle)
+
+Get device descriptor as hash with: usb_version, device_class,
+vendor_id, product_id, num_configurations, etc.
+
+=head2 get_string_descriptor($handle, $index)
+
+Get string descriptor by index.
+
+    my str $product = usb::get_string_descriptor($h, $desc{"product_index"});
+
+=head2 get_config_descriptor($handle, $config_index)
+
+Get configuration descriptor with interfaces and endpoints.
+
+=head1 CONFIGURATION
+
+=head2 get_configuration($handle)
+
+Get active configuration number.
+
+=head2 set_configuration($handle, $config)
+
+Set device configuration.
+
+=head2 set_interface_alt_setting($handle, $interface, $alt_setting)
+
+Set alternate setting for interface.
+
+=head2 clear_halt($handle, $endpoint)
+
+Clear halt/stall condition on endpoint.
+
+=head2 reset_device($handle)
+
+Reset the USB device.
+
+=head1 CONSTANTS
+
+    usb::CLASS_HID()           # HID devices
+    usb::CLASS_MASS_STORAGE()  # Mass storage
+    usb::CLASS_PRINTER()       # Printers
+    usb::CLASS_AUDIO()         # Audio devices
+    usb::CLASS_VIDEO()         # Video devices
+    usb::CLASS_HUB()           # USB hubs
+    usb::CLASS_COMM()          # Communication devices
+    usb::CLASS_VENDOR_SPEC()   # Vendor-specific
+
+    usb::ENDPOINT_IN()         # 0x80
+    usb::ENDPOINT_OUT()        # 0x00
+
+    usb::REQUEST_TYPE_STANDARD()
+    usb::REQUEST_TYPE_CLASS()
+    usb::REQUEST_TYPE_VENDOR()
+    usb::RECIPIENT_DEVICE()
+    usb::RECIPIENT_INTERFACE()
+    usb::RECIPIENT_ENDPOINT()
+
+    usb::ERROR_IO()
+    usb::ERROR_TIMEOUT()
+    usb::ERROR_ACCESS()
+    usb::ERROR_NO_DEVICE()
+    usb::ERROR_BUSY()
+
+=head1 EXAMPLE
+
+    use lib "lib";
+    use usb;
+
+    usb::init();
+    usb::set_debug(3);  # Info level
+
+    my array @devices = usb::get_device_list();
+    foreach my hash %dev (@devices) {
+        say("Found: " . $dev{"vidpid"} . " on bus " . $dev{"bus"});
+    }
+
+    # Open specific device
+    my int $h = usb::open_device(0x046d, 0xc52b);  # Logitech receiver
+    if ($h != 0) {
+        my hash %desc = usb::get_device_descriptor($h);
+        say("Manufacturer: " . usb::get_string_descriptor($h, $desc{"manufacturer_index"}));
+        say("Product: " . usb::get_string_descriptor($h, $desc{"product_index"}));
+        usb::close($h);
+    }
+
+    usb::exit();
+
+=head1 SEE ALSO
+
+L<Device::SerialPort>
+
+=cut
+
+package usb;
+
+# USB library C code
+__C__ {
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <libusb-1.0/libusb.h>
+
+/* Global libusb context */
+static libusb_context *usb_ctx = NULL;
+static int usb_initialized = 0;
+
+/* Cached device list for iteration */
+static libusb_device **cached_device_list = NULL;
+static ssize_t cached_device_count = 0;
+
+/* Last transfer length for read operations */
+static int last_transfer_len = 0;
+
+/* Device descriptor cache */
+static struct libusb_device_descriptor desc_cache;
+static int desc_cache_valid = 0;
+}
+
+# ===== Initialization =====
+
+# Initialize libusb
+# Returns 0 on success, negative error code on failure
+func init() int {
+    my int $result = 0;
+    __C__ {
+        if (usb_initialized) {
+            result = strada_new_int(0);
+        } else {
+            int ret = libusb_init(&usb_ctx);
+            if (ret == 0) {
+                usb_initialized = 1;
+            }
+            result = strada_new_int(ret);
+        }
+    }
+    return $result;
+}
+
+# Cleanup libusb
+func exit() void {
+    __C__ {
+        /* Free cached device list */
+        if (cached_device_list) {
+            libusb_free_device_list(cached_device_list, 1);
+            cached_device_list = NULL;
+            cached_device_count = 0;
+        }
+        /* Exit libusb */
+        if (usb_initialized && usb_ctx) {
+            libusb_exit(usb_ctx);
+            usb_ctx = NULL;
+            usb_initialized = 0;
+        }
+    }
+}
+
+# Set debug level (0=none, 1=error, 2=warning, 3=info, 4=debug)
+func set_debug(int $level) void {
+    __C__ {
+        if (!usb_initialized) {
+            libusb_init(&usb_ctx);
+            usb_initialized = 1;
+        }
+        int lv = (int)strada_to_int(level);
+#if LIBUSB_API_VERSION >= 0x01000106
+        libusb_set_option(usb_ctx, LIBUSB_OPTION_LOG_LEVEL, lv);
+#else
+        libusb_set_debug(usb_ctx, lv);
+#endif
+    }
+}
+
+# Get error string for error code
+func strerror(int $errcode) str {
+    my str $result = "";
+    __C__ {
+        int ec = (int)strada_to_int(errcode);
+        const char *str = libusb_strerror(ec);
+        result = strada_new_str(str ? str : "Unknown error");
+    }
+    return $result;
+}
+
+# ===== Device Enumeration =====
+
+# Get list of USB devices
+# Returns array of hashes with: vid, pid, bus, address, class, subclass, protocol, vidpid
+func get_device_list() array {
+    my array @result;
+    __C__ {
+        if (!usb_initialized) {
+            libusb_init(&usb_ctx);
+            usb_initialized = 1;
+        }
+
+        libusb_device **list;
+        ssize_t count = libusb_get_device_list(usb_ctx, &list);
+
+        if (count >= 0) {
+            for (ssize_t i = 0; i < count; i++) {
+                struct libusb_device_descriptor desc;
+                if (libusb_get_device_descriptor(list[i], &desc) == 0) {
+                    StradaValue *dev_info = strada_new_hash();
+
+                    strada_hash_set(dev_info->value.hv, "vid",
+                        strada_new_int(desc.idVendor));
+                    strada_hash_set(dev_info->value.hv, "pid",
+                        strada_new_int(desc.idProduct));
+                    strada_hash_set(dev_info->value.hv, "bus",
+                        strada_new_int(libusb_get_bus_number(list[i])));
+                    strada_hash_set(dev_info->value.hv, "address",
+                        strada_new_int(libusb_get_device_address(list[i])));
+                    strada_hash_set(dev_info->value.hv, "class",
+                        strada_new_int(desc.bDeviceClass));
+                    strada_hash_set(dev_info->value.hv, "subclass",
+                        strada_new_int(desc.bDeviceSubClass));
+                    strada_hash_set(dev_info->value.hv, "protocol",
+                        strada_new_int(desc.bDeviceProtocol));
+
+                    /* Format VID:PID string */
+                    char vidpid[16];
+                    snprintf(vidpid, sizeof(vidpid), "%04x:%04x",
+                        desc.idVendor, desc.idProduct);
+                    strada_hash_set(dev_info->value.hv, "vidpid",
+                        strada_new_str(vidpid));
+
+                    strada_array_push(result->value.av, dev_info);
+                }
+            }
+            libusb_free_device_list(list, 1);
+        }
+    }
+    return @result;
+}
+
+# ===== Device Open/Close =====
+
+# Open device by Vendor ID and Product ID
+# Returns device handle (int, stores pointer) or 0 on failure
+func open_device(int $vid, int $pid) int {
+    my int $result = 0;
+    __C__ {
+        if (!usb_initialized) {
+            libusb_init(&usb_ctx);
+            usb_initialized = 1;
+        }
+
+        uint16_t v = (uint16_t)strada_to_int(vid);
+        uint16_t p = (uint16_t)strada_to_int(pid);
+
+        libusb_device_handle *handle = libusb_open_device_with_vid_pid(usb_ctx, v, p);
+        result = strada_new_int((int64_t)(intptr_t)handle);
+    }
+    return $result;
+}
+
+# Open device by bus number and device address
+func open_device_by_path(int $bus, int $addr) int {
+    my int $result = 0;
+    __C__ {
+        if (!usb_initialized) {
+            libusb_init(&usb_ctx);
+            usb_initialized = 1;
+        }
+
+        int target_bus = (int)strada_to_int(bus);
+        int target_addr = (int)strada_to_int(addr);
+
+        libusb_device **list;
+        ssize_t count = libusb_get_device_list(usb_ctx, &list);
+        if (count < 0) {
+            result = strada_new_int(0);
+        } else {
+            libusb_device_handle *handle = NULL;
+            for (ssize_t i = 0; i < count; i++) {
+                int b = libusb_get_bus_number(list[i]);
+                int a = libusb_get_device_address(list[i]);
+                if (b == target_bus && a == target_addr) {
+                    if (libusb_open(list[i], &handle) != 0) {
+                        handle = NULL;
+                    }
+                    break;
+                }
+            }
+            libusb_free_device_list(list, 1);
+            result = strada_new_int((int64_t)(intptr_t)handle);
+        }
+    }
+    return $result;
+}
+
+# Close device handle
+func close(int $handle) void {
+    __C__ {
+        libusb_device_handle *h = (libusb_device_handle *)(intptr_t)strada_to_int(handle);
+        if (h) {
+            libusb_close(h);
+        }
+    }
+}
+
+# ===== Interface Management =====
+
+# Claim interface for exclusive use
+# Returns 0 on success, negative error code on failure
+func claim_interface(int $handle, int $iface) int {
+    my int $result = 0;
+    __C__ {
+        libusb_device_handle *h = (libusb_device_handle *)(intptr_t)strada_to_int(handle);
+        int ifa = (int)strada_to_int(iface);
+        if (!h) {
+            result = strada_new_int(LIBUSB_ERROR_INVALID_PARAM);
+        } else {
+            result = strada_new_int(libusb_claim_interface(h, ifa));
+        }
+    }
+    return $result;
+}
+
+# Release interface
+func release_interface(int $handle, int $iface) int {
+    my int $result = 0;
+    __C__ {
+        libusb_device_handle *h = (libusb_device_handle *)(intptr_t)strada_to_int(handle);
+        int ifa = (int)strada_to_int(iface);
+        if (!h) {
+            result = strada_new_int(LIBUSB_ERROR_INVALID_PARAM);
+        } else {
+            result = strada_new_int(libusb_release_interface(h, ifa));
+        }
+    }
+    return $result;
+}
+
+# Detach kernel driver from interface (Linux only)
+func detach_kernel_driver(int $handle, int $iface) int {
+    my int $result = 0;
+    __C__ {
+        libusb_device_handle *h = (libusb_device_handle *)(intptr_t)strada_to_int(handle);
+        int ifa = (int)strada_to_int(iface);
+        if (!h) {
+            result = strada_new_int(LIBUSB_ERROR_INVALID_PARAM);
+        } else {
+            result = strada_new_int(libusb_detach_kernel_driver(h, ifa));
+        }
+    }
+    return $result;
+}
+
+# Check if kernel driver is active on interface
+func kernel_driver_active(int $handle, int $iface) int {
+    my int $result = 0;
+    __C__ {
+        libusb_device_handle *h = (libusb_device_handle *)(intptr_t)strada_to_int(handle);
+        int ifa = (int)strada_to_int(iface);
+        if (!h) {
+            result = strada_new_int(LIBUSB_ERROR_INVALID_PARAM);
+        } else {
+            result = strada_new_int(libusb_kernel_driver_active(h, ifa));
+        }
+    }
+    return $result;
+}
+
+# Set auto-detach kernel driver mode (1=enable, 0=disable)
+func set_auto_detach(int $handle, int $enable) int {
+    my int $result = 0;
+    __C__ {
+        libusb_device_handle *h = (libusb_device_handle *)(intptr_t)strada_to_int(handle);
+        int en = (int)strada_to_int(enable);
+        if (!h) {
+            result = strada_new_int(LIBUSB_ERROR_INVALID_PARAM);
+        } else {
+            result = strada_new_int(libusb_set_auto_detach_kernel_driver(h, en));
+        }
+    }
+    return $result;
+}
+
+# ===== Data Transfers =====
+
+# Bulk write to OUT endpoint
+# Returns bytes transferred or negative error code
+func bulk_write(int $handle, int $endpoint, str $data, int $timeout) int {
+    my int $result = 0;
+    __C__ {
+        libusb_device_handle *h = (libusb_device_handle *)(intptr_t)strada_to_int(handle);
+        unsigned char ep = (unsigned char)strada_to_int(endpoint);
+        const char *d = strada_to_str(data);
+        int length = (int)data->struct_size;
+        if (length <= 0) length = (int)strlen(d);
+        int tm = (int)strada_to_int(timeout);
+
+        if (!h) {
+            result = strada_new_int(LIBUSB_ERROR_INVALID_PARAM);
+        } else {
+            int transferred = 0;
+            int ret = libusb_bulk_transfer(h, ep, (unsigned char *)d, length, &transferred, tm);
+            if (ret < 0) {
+                result = strada_new_int(ret);
+            } else {
+                result = strada_new_int(transferred);
+            }
+        }
+    }
+    return $result;
+}
+
+# Bulk read from IN endpoint
+# Returns data string (empty on error)
+func bulk_read(int $handle, int $endpoint, int $max_len, int $timeout) str {
+    my str $result = "";
+    __C__ {
+        libusb_device_handle *h = (libusb_device_handle *)(intptr_t)strada_to_int(handle);
+        unsigned char ep = (unsigned char)(strada_to_int(endpoint) | 0x80);
+        int maxlen = (int)strada_to_int(max_len);
+        int tm = (int)strada_to_int(timeout);
+
+        if (!h) {
+            result = strada_new_str("");
+        } else {
+            unsigned char *buffer = malloc(maxlen);
+            if (!buffer) {
+                result = strada_new_str("");
+            } else {
+                int transferred = 0;
+                int ret = libusb_bulk_transfer(h, ep, buffer, maxlen, &transferred, tm);
+                if (ret < 0 && ret != LIBUSB_ERROR_TIMEOUT) {
+                    free(buffer);
+                    result = strada_new_str("");
+                } else {
+                    last_transfer_len = transferred;
+                    result = strada_new_str_len((char *)buffer, transferred);
+                    free(buffer);
+                }
+            }
+        }
+    }
+    return $result;
+}
+
+# Interrupt write to OUT endpoint
+func interrupt_write(int $handle, int $endpoint, str $data, int $timeout) int {
+    my int $result = 0;
+    __C__ {
+        libusb_device_handle *h = (libusb_device_handle *)(intptr_t)strada_to_int(handle);
+        unsigned char ep = (unsigned char)strada_to_int(endpoint);
+        const char *d = strada_to_str(data);
+        int length = (int)data->struct_size;
+        if (length <= 0) length = (int)strlen(d);
+        int tm = (int)strada_to_int(timeout);
+
+        if (!h) {
+            result = strada_new_int(LIBUSB_ERROR_INVALID_PARAM);
+        } else {
+            int transferred = 0;
+            int ret = libusb_interrupt_transfer(h, ep, (unsigned char *)d, length, &transferred, tm);
+            if (ret < 0) {
+                result = strada_new_int(ret);
+            } else {
+                result = strada_new_int(transferred);
+            }
+        }
+    }
+    return $result;
+}
+
+# Interrupt read from IN endpoint
+func interrupt_read(int $handle, int $endpoint, int $max_len, int $timeout) str {
+    my str $result = "";
+    __C__ {
+        libusb_device_handle *h = (libusb_device_handle *)(intptr_t)strada_to_int(handle);
+        unsigned char ep = (unsigned char)(strada_to_int(endpoint) | 0x80);
+        int maxlen = (int)strada_to_int(max_len);
+        int tm = (int)strada_to_int(timeout);
+
+        if (!h) {
+            result = strada_new_str("");
+        } else {
+            unsigned char *buffer = malloc(maxlen);
+            if (!buffer) {
+                result = strada_new_str("");
+            } else {
+                int transferred = 0;
+                int ret = libusb_interrupt_transfer(h, ep, buffer, maxlen, &transferred, tm);
+                if (ret < 0 && ret != LIBUSB_ERROR_TIMEOUT) {
+                    free(buffer);
+                    result = strada_new_str("");
+                } else {
+                    last_transfer_len = transferred;
+                    result = strada_new_str_len((char *)buffer, transferred);
+                    free(buffer);
+                }
+            }
+        }
+    }
+    return $result;
+}
+
+# Control transfer write (host-to-device)
+func control_write(int $handle, int $request_type, int $request, int $value, int $idx, str $data, int $timeout) int {
+    my int $result = 0;
+    __C__ {
+        libusb_device_handle *h = (libusb_device_handle *)(intptr_t)strada_to_int(handle);
+        uint8_t rt = (uint8_t)strada_to_int(request_type);
+        uint8_t req = (uint8_t)strada_to_int(request);
+        uint16_t val = (uint16_t)strada_to_int(value);
+        uint16_t index = (uint16_t)strada_to_int(idx);
+        const char *d = strada_to_str(data);
+        int length = (int)data->struct_size;
+        if (length <= 0) length = (int)strlen(d);
+        unsigned int tm = (unsigned int)strada_to_int(timeout);
+
+        if (!h) {
+            result = strada_new_int(LIBUSB_ERROR_INVALID_PARAM);
+        } else {
+            int ret = libusb_control_transfer(h, rt, req, val, index, (unsigned char *)d, (uint16_t)length, tm);
+            result = strada_new_int(ret);
+        }
+    }
+    return $result;
+}
+
+# Control transfer read (device-to-host)
+func control_read(int $handle, int $request_type, int $request, int $value, int $idx, int $max_len, int $timeout) str {
+    my str $result = "";
+    __C__ {
+        libusb_device_handle *h = (libusb_device_handle *)(intptr_t)strada_to_int(handle);
+        uint8_t rt = (uint8_t)(strada_to_int(request_type) | 0x80);
+        uint8_t req = (uint8_t)strada_to_int(request);
+        uint16_t val = (uint16_t)strada_to_int(value);
+        uint16_t index = (uint16_t)strada_to_int(idx);
+        int maxlen = (int)strada_to_int(max_len);
+        unsigned int tm = (unsigned int)strada_to_int(timeout);
+
+        if (!h) {
+            result = strada_new_str("");
+        } else {
+            unsigned char *buffer = malloc(maxlen);
+            if (!buffer) {
+                result = strada_new_str("");
+            } else {
+                int ret = libusb_control_transfer(h, rt, req, val, index, buffer, (uint16_t)maxlen, tm);
+                if (ret < 0) {
+                    free(buffer);
+                    result = strada_new_str("");
+                } else {
+                    last_transfer_len = ret;
+                    result = strada_new_str_len((char *)buffer, ret);
+                    free(buffer);
+                }
+            }
+        }
+    }
+    return $result;
+}
+
+# Get the number of bytes from last read transfer
+func last_transfer_length() int {
+    my int $result = 0;
+    __C__ {
+        result = strada_new_int(last_transfer_len);
+    }
+    return $result;
+}
+
+# ===== Device Descriptors =====
+
+# Get device descriptor
+# Returns hash with device info
+func get_device_descriptor(int $handle) hash {
+    my hash %result;
+    __C__ {
+        libusb_device_handle *h = (libusb_device_handle *)(intptr_t)strada_to_int(handle);
+        if (h) {
+            libusb_device *dev = libusb_get_device(h);
+            struct libusb_device_descriptor desc;
+
+            if (libusb_get_device_descriptor(dev, &desc) == 0) {
+                strada_hash_set(result->value.hv, "usb_version",
+                    strada_new_int(desc.bcdUSB));
+                strada_hash_set(result->value.hv, "device_class",
+                    strada_new_int(desc.bDeviceClass));
+                strada_hash_set(result->value.hv, "device_subclass",
+                    strada_new_int(desc.bDeviceSubClass));
+                strada_hash_set(result->value.hv, "device_protocol",
+                    strada_new_int(desc.bDeviceProtocol));
+                strada_hash_set(result->value.hv, "max_packet_size",
+                    strada_new_int(desc.bMaxPacketSize0));
+                strada_hash_set(result->value.hv, "vendor_id",
+                    strada_new_int(desc.idVendor));
+                strada_hash_set(result->value.hv, "product_id",
+                    strada_new_int(desc.idProduct));
+                strada_hash_set(result->value.hv, "device_version",
+                    strada_new_int(desc.bcdDevice));
+                strada_hash_set(result->value.hv, "num_configurations",
+                    strada_new_int(desc.bNumConfigurations));
+                strada_hash_set(result->value.hv, "manufacturer_index",
+                    strada_new_int(desc.iManufacturer));
+                strada_hash_set(result->value.hv, "product_index",
+                    strada_new_int(desc.iProduct));
+                strada_hash_set(result->value.hv, "serial_index",
+                    strada_new_int(desc.iSerialNumber));
+            }
+        }
+    }
+    return %result;
+}
+
+# Get string descriptor by index
+func get_string_descriptor(int $handle, int $idx) str {
+    my str $result = "";
+    __C__ {
+        libusb_device_handle *h = (libusb_device_handle *)(intptr_t)strada_to_int(handle);
+        int index = (int)strada_to_int(idx);
+
+        if (h && index > 0) {
+            unsigned char buffer[256];
+            int ret = libusb_get_string_descriptor_ascii(h, index, buffer, sizeof(buffer));
+            if (ret >= 0) {
+                result = strada_new_str((char *)buffer);
+            } else {
+                result = strada_new_str("");
+            }
+        } else {
+            result = strada_new_str("");
+        }
+    }
+    return $result;
+}
+
+# Get configuration descriptor
+# Returns hash with configuration info including interfaces and endpoints
+func get_config_descriptor(int $handle, int $config_index) hash {
+    my hash %result;
+    __C__ {
+        libusb_device_handle *h = (libusb_device_handle *)(intptr_t)strada_to_int(handle);
+        int cfg_idx = (int)strada_to_int(config_index);
+
+        if (h) {
+            libusb_device *dev = libusb_get_device(h);
+            struct libusb_config_descriptor *config;
+
+            if (libusb_get_config_descriptor(dev, cfg_idx, &config) == 0) {
+                strada_hash_set(result->value.hv, "num_interfaces",
+                    strada_new_int(config->bNumInterfaces));
+                strada_hash_set(result->value.hv, "configuration_value",
+                    strada_new_int(config->bConfigurationValue));
+                strada_hash_set(result->value.hv, "max_power",
+                    strada_new_int(config->MaxPower * 2));  /* In mA */
+                strada_hash_set(result->value.hv, "attributes",
+                    strada_new_int(config->bmAttributes));
+
+                /* Build array of interfaces */
+                StradaValue *interfaces = strada_new_array();
+                for (int i = 0; i < config->bNumInterfaces; i++) {
+                    const struct libusb_interface *iface = &config->interface[i];
+                    for (int j = 0; j < iface->num_altsetting; j++) {
+                        const struct libusb_interface_descriptor *alt = &iface->altsetting[j];
+
+                        StradaValue *iface_info = strada_new_hash();
+                        strada_hash_set(iface_info->value.hv, "interface_number",
+                            strada_new_int(alt->bInterfaceNumber));
+                        strada_hash_set(iface_info->value.hv, "alt_setting",
+                            strada_new_int(alt->bAlternateSetting));
+                        strada_hash_set(iface_info->value.hv, "interface_class",
+                            strada_new_int(alt->bInterfaceClass));
+                        strada_hash_set(iface_info->value.hv, "interface_subclass",
+                            strada_new_int(alt->bInterfaceSubClass));
+                        strada_hash_set(iface_info->value.hv, "interface_protocol",
+                            strada_new_int(alt->bInterfaceProtocol));
+                        strada_hash_set(iface_info->value.hv, "num_endpoints",
+                            strada_new_int(alt->bNumEndpoints));
+
+                        /* Build array of endpoints */
+                        StradaValue *endpoints = strada_new_array();
+                        for (int k = 0; k < alt->bNumEndpoints; k++) {
+                            const struct libusb_endpoint_descriptor *ep = &alt->endpoint[k];
+
+                            StradaValue *ep_info = strada_new_hash();
+                            strada_hash_set(ep_info->value.hv, "address",
+                                strada_new_int(ep->bEndpointAddress));
+                            strada_hash_set(ep_info->value.hv, "attributes",
+                                strada_new_int(ep->bmAttributes));
+                            strada_hash_set(ep_info->value.hv, "max_packet_size",
+                                strada_new_int(ep->wMaxPacketSize));
+                            strada_hash_set(ep_info->value.hv, "interval",
+                                strada_new_int(ep->bInterval));
+
+                            /* Decode transfer type */
+                            const char *type_str = "unknown";
+                            switch (ep->bmAttributes & 0x03) {
+                                case LIBUSB_TRANSFER_TYPE_CONTROL: type_str = "control"; break;
+                                case LIBUSB_TRANSFER_TYPE_ISOCHRONOUS: type_str = "isochronous"; break;
+                                case LIBUSB_TRANSFER_TYPE_BULK: type_str = "bulk"; break;
+                                case LIBUSB_TRANSFER_TYPE_INTERRUPT: type_str = "interrupt"; break;
+                            }
+                            strada_hash_set(ep_info->value.hv, "type", strada_new_str(type_str));
+
+                            /* Decode direction */
+                            strada_hash_set(ep_info->value.hv, "direction",
+                                strada_new_str((ep->bEndpointAddress & 0x80) ? "in" : "out"));
+
+                            strada_array_push(endpoints->value.av, ep_info);
+                        }
+                        strada_hash_set(iface_info->value.hv, "endpoints", endpoints);
+
+                        strada_array_push(interfaces->value.av, iface_info);
+                    }
+                }
+                strada_hash_set(result->value.hv, "interfaces", interfaces);
+
+                libusb_free_config_descriptor(config);
+            }
+        }
+    }
+    return %result;
+}
+
+# ===== Configuration =====
+
+# Get active configuration
+func get_configuration(int $handle) int {
+    my int $result = 0;
+    __C__ {
+        libusb_device_handle *h = (libusb_device_handle *)(intptr_t)strada_to_int(handle);
+        if (!h) {
+            result = strada_new_int(LIBUSB_ERROR_INVALID_PARAM);
+        } else {
+            int config;
+            int ret = libusb_get_configuration(h, &config);
+            if (ret < 0) {
+                result = strada_new_int(ret);
+            } else {
+                result = strada_new_int(config);
+            }
+        }
+    }
+    return $result;
+}
+
+# Set configuration
+func set_configuration(int $handle, int $config) int {
+    my int $result = 0;
+    __C__ {
+        libusb_device_handle *h = (libusb_device_handle *)(intptr_t)strada_to_int(handle);
+        int cfg = (int)strada_to_int(config);
+        if (!h) {
+            result = strada_new_int(LIBUSB_ERROR_INVALID_PARAM);
+        } else {
+            result = strada_new_int(libusb_set_configuration(h, cfg));
+        }
+    }
+    return $result;
+}
+
+# Set alternate setting for interface
+func set_interface_alt_setting(int $handle, int $iface, int $alt) int {
+    my int $result = 0;
+    __C__ {
+        libusb_device_handle *h = (libusb_device_handle *)(intptr_t)strada_to_int(handle);
+        int ifa = (int)strada_to_int(iface);
+        int a = (int)strada_to_int(alt);
+        if (!h) {
+            result = strada_new_int(LIBUSB_ERROR_INVALID_PARAM);
+        } else {
+            result = strada_new_int(libusb_set_interface_alt_setting(h, ifa, a));
+        }
+    }
+    return $result;
+}
+
+# Clear halt/stall on endpoint
+func clear_halt(int $handle, int $endpoint) int {
+    my int $result = 0;
+    __C__ {
+        libusb_device_handle *h = (libusb_device_handle *)(intptr_t)strada_to_int(handle);
+        unsigned char ep = (unsigned char)strada_to_int(endpoint);
+        if (!h) {
+            result = strada_new_int(LIBUSB_ERROR_INVALID_PARAM);
+        } else {
+            result = strada_new_int(libusb_clear_halt(h, ep));
+        }
+    }
+    return $result;
+}
+
+# Reset device
+func reset_device(int $handle) int {
+    my int $result = 0;
+    __C__ {
+        libusb_device_handle *h = (libusb_device_handle *)(intptr_t)strada_to_int(handle);
+        if (!h) {
+            result = strada_new_int(LIBUSB_ERROR_INVALID_PARAM);
+        } else {
+            result = strada_new_int(libusb_reset_device(h));
+        }
+    }
+    return $result;
+}
+
+# ===== Constants =====
+
+# USB device class codes
+func CLASS_HID() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_CLASS_HID); }
+    return $r;
+}
+
+func CLASS_MASS_STORAGE() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_CLASS_MASS_STORAGE); }
+    return $r;
+}
+
+func CLASS_HUB() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_CLASS_HUB); }
+    return $r;
+}
+
+func CLASS_VENDOR_SPEC() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_CLASS_VENDOR_SPEC); }
+    return $r;
+}
+
+func CLASS_PRINTER() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_CLASS_PRINTER); }
+    return $r;
+}
+
+func CLASS_AUDIO() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_CLASS_AUDIO); }
+    return $r;
+}
+
+func CLASS_VIDEO() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_CLASS_VIDEO); }
+    return $r;
+}
+
+func CLASS_COMM() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_CLASS_COMM); }
+    return $r;
+}
+
+# Control transfer request type flags
+func REQUEST_TYPE_STANDARD() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_REQUEST_TYPE_STANDARD); }
+    return $r;
+}
+
+func REQUEST_TYPE_CLASS() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_REQUEST_TYPE_CLASS); }
+    return $r;
+}
+
+func REQUEST_TYPE_VENDOR() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_REQUEST_TYPE_VENDOR); }
+    return $r;
+}
+
+func RECIPIENT_DEVICE() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_RECIPIENT_DEVICE); }
+    return $r;
+}
+
+func RECIPIENT_INTERFACE() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_RECIPIENT_INTERFACE); }
+    return $r;
+}
+
+func RECIPIENT_ENDPOINT() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_RECIPIENT_ENDPOINT); }
+    return $r;
+}
+
+func ENDPOINT_IN() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_ENDPOINT_IN); }
+    return $r;
+}
+
+func ENDPOINT_OUT() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_ENDPOINT_OUT); }
+    return $r;
+}
+
+# Standard request codes
+func REQUEST_GET_STATUS() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_REQUEST_GET_STATUS); }
+    return $r;
+}
+
+func REQUEST_CLEAR_FEATURE() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_REQUEST_CLEAR_FEATURE); }
+    return $r;
+}
+
+func REQUEST_SET_FEATURE() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_REQUEST_SET_FEATURE); }
+    return $r;
+}
+
+func REQUEST_GET_DESCRIPTOR() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_REQUEST_GET_DESCRIPTOR); }
+    return $r;
+}
+
+func REQUEST_SET_DESCRIPTOR() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_REQUEST_SET_DESCRIPTOR); }
+    return $r;
+}
+
+func REQUEST_GET_CONFIGURATION() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_REQUEST_GET_CONFIGURATION); }
+    return $r;
+}
+
+func REQUEST_SET_CONFIGURATION() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_REQUEST_SET_CONFIGURATION); }
+    return $r;
+}
+
+# Error codes
+func ERROR_IO() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_ERROR_IO); }
+    return $r;
+}
+
+func ERROR_INVALID_PARAM() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_ERROR_INVALID_PARAM); }
+    return $r;
+}
+
+func ERROR_ACCESS() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_ERROR_ACCESS); }
+    return $r;
+}
+
+func ERROR_NO_DEVICE() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_ERROR_NO_DEVICE); }
+    return $r;
+}
+
+func ERROR_NOT_FOUND() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_ERROR_NOT_FOUND); }
+    return $r;
+}
+
+func ERROR_BUSY() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_ERROR_BUSY); }
+    return $r;
+}
+
+func ERROR_TIMEOUT() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_ERROR_TIMEOUT); }
+    return $r;
+}
+
+func ERROR_OVERFLOW() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_ERROR_OVERFLOW); }
+    return $r;
+}
+
+func ERROR_PIPE() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_ERROR_PIPE); }
+    return $r;
+}
+
+func ERROR_INTERRUPTED() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_ERROR_INTERRUPTED); }
+    return $r;
+}
+
+func ERROR_NO_MEM() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_ERROR_NO_MEM); }
+    return $r;
+}
+
+func ERROR_NOT_SUPPORTED() int {
+    my int $r = 0;
+    __C__ { r = strada_new_int(LIBUSB_ERROR_NOT_SUPPORTED); }
+    return $r;
+}

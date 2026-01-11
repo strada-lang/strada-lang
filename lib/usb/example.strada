@@ -1,0 +1,365 @@
+# USB Library Example
+# Demonstrates USB device enumeration and communication
+#
+# Build the library first:
+#   make
+#
+# Then from the strada root directory:
+#   ./strada -r lib/usb/example.strada
+#
+# Note: Some operations may require root permissions or udev rules
+
+use lib "lib";
+use usb;
+
+# Print a hex dump of binary data
+func hexdump(str $data, int $max_bytes) void {
+    my int $len = length($data);
+    if ($len > $max_bytes) {
+        $len = $max_bytes;
+    }
+
+    my str $hex = "";
+    my str $ascii = "";
+    my int $i = 0;
+
+    while ($i < $len) {
+        my int $byte = sys::ord_byte(substr($data, $i, 1));
+
+        # Hex part
+        my str $h = sys::sprintf("%02x ", $byte);
+        $hex = $hex . $h;
+
+        # ASCII part (printable or dot)
+        if ($byte >= 32 && $byte < 127) {
+            $ascii = $ascii . chr($byte);
+        } else {
+            $ascii = $ascii . ".";
+        }
+
+        # Print line every 16 bytes
+        if (($i + 1) % 16 == 0) {
+            say("  " . $hex . " |" . $ascii . "|");
+            $hex = "";
+            $ascii = "";
+        }
+
+        $i = $i + 1;
+    }
+
+    # Print remaining
+    if (length($hex) > 0) {
+        # Pad hex to 48 chars (16 * 3)
+        while (length($hex) < 48) {
+            $hex = $hex . "   ";
+        }
+        say("  " . $hex . " |" . $ascii . "|");
+    }
+}
+
+# Get human-readable class name
+func class_name(int $class) str {
+    if ($class == 0) { return "Composite"; }
+    if ($class == 1) { return "Audio"; }
+    if ($class == 2) { return "CDC/Comm"; }
+    if ($class == 3) { return "HID"; }
+    if ($class == 5) { return "Physical"; }
+    if ($class == 6) { return "Image"; }
+    if ($class == 7) { return "Printer"; }
+    if ($class == 8) { return "Mass Storage"; }
+    if ($class == 9) { return "Hub"; }
+    if ($class == 10) { return "CDC-Data"; }
+    if ($class == 11) { return "Smart Card"; }
+    if ($class == 13) { return "Content Security"; }
+    if ($class == 14) { return "Video"; }
+    if ($class == 15) { return "Personal Healthcare"; }
+    if ($class == 16) { return "Audio/Video"; }
+    if ($class == 220) { return "Diagnostic"; }
+    if ($class == 224) { return "Wireless"; }
+    if ($class == 239) { return "Miscellaneous"; }
+    if ($class == 254) { return "Application Specific"; }
+    if ($class == 255) { return "Vendor Specific"; }
+    return "Unknown";
+}
+
+# List all USB devices with details
+func list_devices() void {
+    say("=== USB Device List ===");
+    say("");
+
+    my array @devices = usb::get_device_list();
+    my int $count = scalar(@devices);
+
+    if ($count == 0) {
+        say("No USB devices found.");
+        return;
+    }
+
+    say("Found " . $count . " device(s):");
+    say("");
+
+    my int $i = 0;
+    while ($i < $count) {
+        my hash %dev = $devices[$i];
+        my int $vid = $dev{"vid"} + 0;
+        my int $pid = $dev{"pid"} + 0;
+        my int $bus = $dev{"bus"} + 0;
+        my int $addr = $dev{"address"} + 0;
+        my int $class = $dev{"class"} + 0;
+
+        say("Device " . ($i + 1) . ": " . $dev{"vidpid"});
+        say("  Location: Bus " . $bus . ", Address " . $addr);
+        say("  Class: " . class_name($class) . " (" . $class . ")");
+
+        # Try to get more details
+        my int $handle = usb::open_device($vid, $pid);
+        if ($handle != 0) {
+            my hash %desc = usb::get_device_descriptor($handle);
+
+            # Manufacturer
+            my int $mfr_idx = $desc{"manufacturer_index"} + 0;
+            if ($mfr_idx > 0) {
+                my str $mfr = usb::get_string_descriptor($handle, $mfr_idx);
+                if (length($mfr) > 0) {
+                    say("  Manufacturer: " . $mfr);
+                }
+            }
+
+            # Product
+            my int $prod_idx = $desc{"product_index"} + 0;
+            if ($prod_idx > 0) {
+                my str $prod = usb::get_string_descriptor($handle, $prod_idx);
+                if (length($prod) > 0) {
+                    say("  Product: " . $prod);
+                }
+            }
+
+            # Serial
+            my int $ser_idx = $desc{"serial_index"} + 0;
+            if ($ser_idx > 0) {
+                my str $ser = usb::get_string_descriptor($handle, $ser_idx);
+                if (length($ser) > 0) {
+                    say("  Serial: " . $ser);
+                }
+            }
+
+            # USB version
+            my int $usb_ver = $desc{"usb_version"} + 0;
+            my int $major = $usb_ver / 256;
+            my int $minor = ($usb_ver % 256) / 16;
+            say("  USB Version: " . $major . "." . $minor);
+
+            usb::close($handle);
+        } else {
+            say("  (Could not open - permission denied?)");
+        }
+
+        say("");
+        $i = $i + 1;
+    }
+}
+
+# Show detailed info for a specific device
+func show_device_info(int $vid, int $pid) void {
+    say("=== Device Details: " . sys::sprintf("%04x:%04x", $vid, $pid) . " ===");
+    say("");
+
+    my int $handle = usb::open_device($vid, $pid);
+    if ($handle == 0) {
+        say("Error: Could not open device");
+        say("Make sure the device is connected and you have permission.");
+        say("Try running with sudo or adding a udev rule.");
+        return;
+    }
+
+    # Device descriptor
+    my hash %desc = usb::get_device_descriptor($handle);
+
+    say("Device Descriptor:");
+    say("  USB Version: " . sys::sprintf("0x%04x", $desc{"usb_version"} + 0));
+    say("  Device Class: " . class_name($desc{"device_class"} + 0));
+    say("  Vendor ID: " . sys::sprintf("0x%04x", $desc{"vendor_id"} + 0));
+    say("  Product ID: " . sys::sprintf("0x%04x", $desc{"product_id"} + 0));
+    say("  Device Version: " . sys::sprintf("0x%04x", $desc{"device_version"} + 0));
+    say("  Max Packet Size: " . $desc{"max_packet_size"});
+    say("  Configurations: " . $desc{"num_configurations"});
+
+    # String descriptors
+    my int $mfr_idx = $desc{"manufacturer_index"} + 0;
+    my int $prod_idx = $desc{"product_index"} + 0;
+    my int $ser_idx = $desc{"serial_index"} + 0;
+
+    if ($mfr_idx > 0) {
+        say("  Manufacturer: " . usb::get_string_descriptor($handle, $mfr_idx));
+    }
+    if ($prod_idx > 0) {
+        say("  Product: " . usb::get_string_descriptor($handle, $prod_idx));
+    }
+    if ($ser_idx > 0) {
+        say("  Serial: " . usb::get_string_descriptor($handle, $ser_idx));
+    }
+
+    say("");
+
+    # Configuration descriptor
+    my hash %config = usb::get_config_descriptor($handle, 0);
+
+    say("Configuration 0:");
+    say("  Interfaces: " . $config{"num_interfaces"});
+    say("  Max Power: " . $config{"max_power"} . " mA");
+    say("  Attributes: " . sys::sprintf("0x%02x", $config{"attributes"} + 0));
+
+    # Show interfaces and endpoints
+    my array @interfaces = $config{"interfaces"};
+    my int $num_ifaces = scalar(@interfaces);
+    my int $i = 0;
+
+    while ($i < $num_ifaces) {
+        my hash %iface = $interfaces[$i];
+        say("");
+        say("  Interface " . $iface{"interface_number"} . " (alt " . $iface{"alt_setting"} . "):");
+        say("    Class: " . class_name($iface{"interface_class"} + 0));
+        say("    Subclass: " . $iface{"interface_subclass"});
+        say("    Protocol: " . $iface{"interface_protocol"});
+        say("    Endpoints: " . $iface{"num_endpoints"});
+
+        my array @endpoints = $iface{"endpoints"};
+        my int $num_eps = scalar(@endpoints);
+        my int $j = 0;
+
+        while ($j < $num_eps) {
+            my hash %ep = $endpoints[$j];
+            say("      Endpoint " . sys::sprintf("0x%02x", $ep{"address"} + 0) . ":");
+            say("        Direction: " . $ep{"direction"});
+            say("        Type: " . $ep{"type"});
+            say("        Max Packet: " . $ep{"max_packet_size"});
+            $j = $j + 1;
+        }
+
+        $i = $i + 1;
+    }
+
+    usb::close($handle);
+}
+
+# Demo: Send a control transfer to get device status
+func demo_control_transfer(int $vid, int $pid) void {
+    say("=== Control Transfer Demo ===");
+    say("");
+
+    my int $handle = usb::open_device($vid, $pid);
+    if ($handle == 0) {
+        say("Error: Could not open device " . sys::sprintf("%04x:%04x", $vid, $pid));
+        return;
+    }
+
+    say("Opened device successfully");
+    say("");
+
+    # GET_STATUS request (standard request)
+    # bmRequestType: 0x80 = Device-to-host | Standard | Device
+    # bRequest: 0x00 = GET_STATUS
+    # wValue: 0
+    # wIndex: 0
+    # wLength: 2
+
+    say("Sending GET_STATUS request...");
+    my int $req_type = 0x80;  # IN | Standard | Device
+    my int $request = 0;      # GET_STATUS
+    my scalar $result = usb::control_transfer($handle, $req_type, $request, 0, 0, 2, 1000);
+
+    if (length($result) >= 2) {
+        my int $b0 = sys::ord_byte(substr($result, 0, 1));
+        my int $b1 = sys::ord_byte(substr($result, 1, 1));
+        my int $status = $b0 + ($b1 * 256);
+
+        say("Device Status: " . sys::sprintf("0x%04x", $status));
+        if ($status & 1) {
+            say("  - Self Powered");
+        } else {
+            say("  - Bus Powered");
+        }
+        if ($status & 2) {
+            say("  - Remote Wakeup Enabled");
+        }
+    } else {
+        say("Failed to get device status");
+    }
+
+    usb::close($handle);
+    say("");
+    say("Device closed");
+}
+
+func print_usage() void {
+    say("USB Library Example");
+    say("");
+    say("Usage: ./example.strada [command] [args]");
+    say("");
+    say("Commands:");
+    say("  list              List all USB devices");
+    say("  info VID PID      Show detailed info for device (hex VID:PID)");
+    say("  status VID PID    Demo control transfer to get device status");
+    say("");
+    say("Examples:");
+    say("  ./example.strada list");
+    say("  ./example.strada info 1234 5678");
+    say("  ./example.strada status 046d c52b");
+    say("");
+    say("Note: VID and PID are in hexadecimal");
+}
+
+func main() int {
+    my array @args = @ARGV;
+    my int $argc = scalar(@args);
+
+    # Initialize USB
+    my int $ret = usb::init();
+    if ($ret != 0) {
+        say("Error: Failed to initialize USB: " . usb::strerror($ret));
+        return 1;
+    }
+
+    if ($argc < 1) {
+        # Default: list devices
+        list_devices();
+        usb::exit();
+        return 0;
+    }
+
+    my str $cmd = $args[0];
+
+    if ($cmd eq "list" || $cmd eq "-l") {
+        list_devices();
+    } else if ($cmd eq "info" || $cmd eq "-i") {
+        if ($argc < 3) {
+            say("Error: info requires VID and PID arguments");
+            print_usage();
+            usb::exit();
+            return 1;
+        }
+        my int $vid = sys::strtol($args[1], 16);
+        my int $pid = sys::strtol($args[2], 16);
+        show_device_info($vid, $pid);
+    } else if ($cmd eq "status" || $cmd eq "-s") {
+        if ($argc < 3) {
+            say("Error: status requires VID and PID arguments");
+            print_usage();
+            usb::exit();
+            return 1;
+        }
+        my int $vid = sys::strtol($args[1], 16);
+        my int $pid = sys::strtol($args[2], 16);
+        demo_control_transfer($vid, $pid);
+    } else if ($cmd eq "help" || $cmd eq "-h" || $cmd eq "--help") {
+        print_usage();
+    } else {
+        say("Unknown command: " . $cmd);
+        print_usage();
+        usb::exit();
+        return 1;
+    }
+
+    usb::exit();
+    return 0;
+}

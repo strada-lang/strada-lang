@@ -1,0 +1,40 @@
+# Test: Anonymous array reference counting
+# This tests that variables stored in anonymous arrays are not freed
+# when the array is garbage collected.
+
+func test_anon_array_refcount() int {
+    my str $value = "test_string_12345";
+
+    # First use of anonymous array
+    my scalar $arr1 = [$value];
+    my str $result1 = $arr1->[0];
+
+    # After arr1 goes out of scope conceptually, $value should still be valid
+    # Second use of the same variable in another anonymous array
+    my scalar $arr2 = [$value];
+    my str $result2 = $arr2->[0];
+
+    # Verify both results match
+    if ($result1 ne "test_string_12345") {
+        say("FAIL: First array access returned wrong value: " . $result1);
+        return 1;
+    }
+
+    if ($result2 ne "test_string_12345") {
+        say("FAIL: Second array access returned wrong value: " . $result2);
+        return 1;
+    }
+
+    # Original variable should still be valid
+    if ($value ne "test_string_12345") {
+        say("FAIL: Original variable corrupted: " . $value);
+        return 1;
+    }
+
+    say("PASS: Anonymous array refcount test");
+    return 0;
+}
+
+func main() int {
+    return test_anon_array_refcount();
+}

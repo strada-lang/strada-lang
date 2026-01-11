@@ -1,17 +1,162 @@
-# Text::CSV - Simple CSV parser/combiner for Strada
-#
-# Usage:
-#   use lib "lib";
-#   use Text::CSV;
-#
-#   my scalar $csv = Text::CSV::new({ sep_char => "," });
-#   if (Text::CSV::parse($csv, "a,\"b\"")) {
-#       my scalar $fields = Text::CSV::fields($csv);
-#       say($fields->[0]);
-#   }
-#
-# This is a minimal Text::CSV-style API with parse/combine support.
-# It assumes one record per input line (no multi-line fields).
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+=head1 NAME
+
+Text::CSV - Simple CSV parser and writer for Strada
+
+=head1 SYNOPSIS
+
+    use lib "lib";
+    use Text::CSV;
+
+    my scalar $csv = Text::CSV::new({ "sep_char" => "," });
+
+    # Parse a CSV line
+    if (Text::CSV::parse($csv, 'foo,"bar, baz",qux')) {
+        my scalar $fields = Text::CSV::fields($csv);
+        say($fields->[0]);  # foo
+        say($fields->[1]);  # bar, baz
+    }
+
+    # Create CSV line from array
+    Text::CSV::combine($csv, ["apple", "banana, fresh", "cherry"]);
+    say(Text::CSV::string($csv));  # apple,"banana, fresh",cherry
+
+=head1 DESCRIPTION
+
+Text::CSV provides a simple interface for parsing and generating CSV
+(Comma-Separated Values) data, similar to Perl's Text::CSV module.
+
+It supports:
+
+=over 4
+
+=item * Configurable separator character
+
+=item * Quoted fields (for values containing separator or newlines)
+
+=item * Escaped quotes within fields
+
+=item * Reading from file handles with getline()
+
+=back
+
+=head1 CONSTRUCTOR
+
+=head2 new($options)
+
+Create a new CSV parser/writer. Options hash reference with:
+
+=over 4
+
+=item B<sep_char> - Field separator (default: ",")
+
+=item B<quote_char> - Quote character (default: '"')
+
+=item B<escape_char> - Escape character (default: '"')
+
+=item B<always_quote> - Always quote fields (default: 0)
+
+=item B<binary> - Binary mode (default: 0)
+
+=back
+
+    my scalar $csv = Text::CSV::new({ "sep_char" => ";" });
+
+=head1 PARSING FUNCTIONS
+
+=head2 parse($csv, $line)
+
+Parse a CSV line. Returns 1 on success, 0 on error.
+
+    if (Text::CSV::parse($csv, $line)) {
+        my scalar $fields = Text::CSV::fields($csv);
+    }
+
+=head2 fields($csv)
+
+Get parsed fields as array reference.
+
+=head2 getline($csv, $fh)
+
+Read and parse next line from filehandle. Returns array ref or undef at EOF.
+
+    my scalar $fh = sys::open("data.csv", "r");
+    while (my scalar $row = Text::CSV::getline($csv, $fh)) {
+        say($row->[0]);
+    }
+    sys::close($fh);
+
+=head2 error_diag($csv)
+
+Get error message if parse failed.
+
+=head1 WRITING FUNCTIONS
+
+=head2 combine($csv, $fields)
+
+Create CSV line from array reference. Returns 1 on success.
+
+    Text::CSV::combine($csv, ["a", "b", "c"]);
+
+=head2 string($csv)
+
+Get the combined CSV string.
+
+    my str $line = Text::CSV::string($csv);
+
+=head1 EXAMPLE
+
+    use lib "lib";
+    use Text::CSV;
+
+    # Parse CSV file
+    my scalar $csv = Text::CSV::new({ "sep_char" => "," });
+    my scalar $fh = sys::open("users.csv", "r");
+
+    # Skip header
+    Text::CSV::getline($csv, $fh);
+
+    # Process data rows
+    while (my scalar $row = Text::CSV::getline($csv, $fh)) {
+        my str $name = $row->[0];
+        my str $email = $row->[1];
+        say("Name: " . $name . ", Email: " . $email);
+    }
+    sys::close($fh);
+
+    # Write CSV
+    my scalar $out = sys::open("output.csv", "w");
+    my scalar $writer = Text::CSV::new({ "always_quote" => 1 });
+
+    Text::CSV::combine($writer, ["Name", "Email", "Score"]);
+    say($out, Text::CSV::string($writer));
+
+    Text::CSV::combine($writer, ["Alice", "alice@example.com", "95"]);
+    say($out, Text::CSV::string($writer));
+
+    sys::close($out);
+
+=head1 SEE ALSO
+
+L<JSON>, L<YAML>
+
+=cut
 
 package Text::CSV;
 
@@ -247,7 +392,7 @@ func combine(scalar $self, scalar $fields) int {
     if (!defined($self)) {
         return 0;
     }
-    if (!defined($fields) || ref($fields) ne "array") {
+    if (!defined($fields) || ref($fields) ne "ARRAY") {
         Text::CSV::_set_error($self, "combine expects array reference");
         return 0;
     }

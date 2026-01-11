@@ -1,0 +1,429 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+=head1 NAME
+
+Digest::MD5 - MD5 Message-Digest Algorithm for Strada
+
+=head1 SYNOPSIS
+
+    use lib "lib";
+    use Digest::MD5;
+
+    # Get 32-character hex string (most common)
+    my str $hex = Digest::MD5::md5_hex("Hello, World!");
+    # "65a8e27d8879283831b664bd8b7f0ad4"
+
+    # Get raw 16-byte binary digest
+    my str $raw = Digest::MD5::md5("Hello, World!");
+
+    # Get base64-encoded digest (22 chars, no padding)
+    my str $b64 = Digest::MD5::md5_base64("Hello, World!");
+    # "ZajifYh5KDgxtmS9i38K1A"
+
+=head1 DESCRIPTION
+
+Digest::MD5 provides MD5 hashing functions compatible with Perl's
+Digest::MD5 module. It supports raw binary, hexadecimal, and base64 output.
+
+B<Security Warning:> MD5 is considered cryptographically broken and should
+NOT be used for security purposes (passwords, digital signatures, etc.).
+Use SHA-256 or better for security applications.
+
+B<Valid uses for MD5:>
+
+=over 4
+
+=item * Checksums and data integrity verification
+
+=item * Cache keys and deduplication
+
+=item * Non-security hash tables
+
+=back
+
+=head1 FUNCTIONS
+
+=head2 md5($data)
+
+Compute raw MD5 digest. Returns a 16-byte binary string.
+
+    my str $raw = Digest::MD5::md5("test");
+    my int $len = sys::byte_length($raw);  # 16
+
+=head2 md5_hex($data)
+
+Compute MD5 digest as a 32-character lowercase hexadecimal string.
+This is the most common format for displaying MD5 hashes.
+
+    my str $hex = Digest::MD5::md5_hex("test");
+    # "098f6bcd4621d373cade4e832627b4f6"
+
+=head2 md5_base64($data)
+
+Compute MD5 digest as a 22-character base64 string. Follows Perl's
+convention of NOT including trailing "==" padding.
+
+    my str $b64 = Digest::MD5::md5_base64("test");
+    # "CY9rzUYh03PK3k6DJie09g"
+
+=head1 EXAMPLE
+
+    use lib "lib";
+    use Digest::MD5;
+
+    # Verify file integrity
+    my str $content = slurp("myfile.txt");
+    my str $hash = Digest::MD5::md5_hex($content);
+    say("MD5: " . $hash);
+
+    # Generate cache key
+    my str $key = Digest::MD5::md5_hex($url . $params);
+
+=head1 SEE ALSO
+
+L<crypt> for password hashing
+
+=cut
+
+package Digest::MD5;
+version "1.0.0";
+
+# Complete MD5 implementation in inline C (RFC 1321)
+__C__ {
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+
+/* MD5 context structure */
+typedef struct {
+    uint32_t state[4];
+    uint32_t count[2];
+    uint8_t buffer[64];
+} Strada_MD5_CTX;
+
+/* Constants for MD5Transform routine */
+#define STRADA_MD5_S11 7
+#define STRADA_MD5_S12 12
+#define STRADA_MD5_S13 17
+#define STRADA_MD5_S14 22
+#define STRADA_MD5_S21 5
+#define STRADA_MD5_S22 9
+#define STRADA_MD5_S23 14
+#define STRADA_MD5_S24 20
+#define STRADA_MD5_S31 4
+#define STRADA_MD5_S32 11
+#define STRADA_MD5_S33 16
+#define STRADA_MD5_S34 23
+#define STRADA_MD5_S41 6
+#define STRADA_MD5_S42 10
+#define STRADA_MD5_S43 15
+#define STRADA_MD5_S44 21
+
+#define STRADA_MD5_F(x, y, z) (((x) & (y)) | ((~x) & (z)))
+#define STRADA_MD5_G(x, y, z) (((x) & (z)) | ((y) & (~z)))
+#define STRADA_MD5_H(x, y, z) ((x) ^ (y) ^ (z))
+#define STRADA_MD5_I(x, y, z) ((y) ^ ((x) | (~z)))
+
+#define STRADA_MD5_ROTATE_LEFT(x, n) (((x) << (n)) | ((x) >> (32-(n))))
+
+#define STRADA_MD5_FF(a, b, c, d, x, s, ac) { \
+    (a) += STRADA_MD5_F((b), (c), (d)) + (x) + (uint32_t)(ac); \
+    (a) = STRADA_MD5_ROTATE_LEFT((a), (s)); \
+    (a) += (b); \
+}
+#define STRADA_MD5_GG(a, b, c, d, x, s, ac) { \
+    (a) += STRADA_MD5_G((b), (c), (d)) + (x) + (uint32_t)(ac); \
+    (a) = STRADA_MD5_ROTATE_LEFT((a), (s)); \
+    (a) += (b); \
+}
+#define STRADA_MD5_HH(a, b, c, d, x, s, ac) { \
+    (a) += STRADA_MD5_H((b), (c), (d)) + (x) + (uint32_t)(ac); \
+    (a) = STRADA_MD5_ROTATE_LEFT((a), (s)); \
+    (a) += (b); \
+}
+#define STRADA_MD5_II(a, b, c, d, x, s, ac) { \
+    (a) += STRADA_MD5_I((b), (c), (d)) + (x) + (uint32_t)(ac); \
+    (a) = STRADA_MD5_ROTATE_LEFT((a), (s)); \
+    (a) += (b); \
+}
+
+static uint8_t strada_md5_padding[64] = {
+    0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+};
+
+static void strada_md5_encode(uint8_t *output, uint32_t *input, unsigned int len) {
+    unsigned int i, j;
+    for (i = 0, j = 0; j < len; i++, j += 4) {
+        output[j] = (uint8_t)(input[i] & 0xff);
+        output[j+1] = (uint8_t)((input[i] >> 8) & 0xff);
+        output[j+2] = (uint8_t)((input[i] >> 16) & 0xff);
+        output[j+3] = (uint8_t)((input[i] >> 24) & 0xff);
+    }
+}
+
+static void strada_md5_decode(uint32_t *output, uint8_t *input, unsigned int len) {
+    unsigned int i, j;
+    for (i = 0, j = 0; j < len; i++, j += 4) {
+        output[i] = ((uint32_t)input[j]) | (((uint32_t)input[j+1]) << 8) |
+                    (((uint32_t)input[j+2]) << 16) | (((uint32_t)input[j+3]) << 24);
+    }
+}
+
+static void strada_md5_transform(uint32_t state[4], uint8_t block[64]) {
+    uint32_t a = state[0], b = state[1], c = state[2], d = state[3], x[16];
+
+    strada_md5_decode(x, block, 64);
+
+    STRADA_MD5_FF(a, b, c, d, x[ 0], STRADA_MD5_S11, 0xd76aa478);
+    STRADA_MD5_FF(d, a, b, c, x[ 1], STRADA_MD5_S12, 0xe8c7b756);
+    STRADA_MD5_FF(c, d, a, b, x[ 2], STRADA_MD5_S13, 0x242070db);
+    STRADA_MD5_FF(b, c, d, a, x[ 3], STRADA_MD5_S14, 0xc1bdceee);
+    STRADA_MD5_FF(a, b, c, d, x[ 4], STRADA_MD5_S11, 0xf57c0faf);
+    STRADA_MD5_FF(d, a, b, c, x[ 5], STRADA_MD5_S12, 0x4787c62a);
+    STRADA_MD5_FF(c, d, a, b, x[ 6], STRADA_MD5_S13, 0xa8304613);
+    STRADA_MD5_FF(b, c, d, a, x[ 7], STRADA_MD5_S14, 0xfd469501);
+    STRADA_MD5_FF(a, b, c, d, x[ 8], STRADA_MD5_S11, 0x698098d8);
+    STRADA_MD5_FF(d, a, b, c, x[ 9], STRADA_MD5_S12, 0x8b44f7af);
+    STRADA_MD5_FF(c, d, a, b, x[10], STRADA_MD5_S13, 0xffff5bb1);
+    STRADA_MD5_FF(b, c, d, a, x[11], STRADA_MD5_S14, 0x895cd7be);
+    STRADA_MD5_FF(a, b, c, d, x[12], STRADA_MD5_S11, 0x6b901122);
+    STRADA_MD5_FF(d, a, b, c, x[13], STRADA_MD5_S12, 0xfd987193);
+    STRADA_MD5_FF(c, d, a, b, x[14], STRADA_MD5_S13, 0xa679438e);
+    STRADA_MD5_FF(b, c, d, a, x[15], STRADA_MD5_S14, 0x49b40821);
+
+    STRADA_MD5_GG(a, b, c, d, x[ 1], STRADA_MD5_S21, 0xf61e2562);
+    STRADA_MD5_GG(d, a, b, c, x[ 6], STRADA_MD5_S22, 0xc040b340);
+    STRADA_MD5_GG(c, d, a, b, x[11], STRADA_MD5_S23, 0x265e5a51);
+    STRADA_MD5_GG(b, c, d, a, x[ 0], STRADA_MD5_S24, 0xe9b6c7aa);
+    STRADA_MD5_GG(a, b, c, d, x[ 5], STRADA_MD5_S21, 0xd62f105d);
+    STRADA_MD5_GG(d, a, b, c, x[10], STRADA_MD5_S22, 0x02441453);
+    STRADA_MD5_GG(c, d, a, b, x[15], STRADA_MD5_S23, 0xd8a1e681);
+    STRADA_MD5_GG(b, c, d, a, x[ 4], STRADA_MD5_S24, 0xe7d3fbc8);
+    STRADA_MD5_GG(a, b, c, d, x[ 9], STRADA_MD5_S21, 0x21e1cde6);
+    STRADA_MD5_GG(d, a, b, c, x[14], STRADA_MD5_S22, 0xc33707d6);
+    STRADA_MD5_GG(c, d, a, b, x[ 3], STRADA_MD5_S23, 0xf4d50d87);
+    STRADA_MD5_GG(b, c, d, a, x[ 8], STRADA_MD5_S24, 0x455a14ed);
+    STRADA_MD5_GG(a, b, c, d, x[13], STRADA_MD5_S21, 0xa9e3e905);
+    STRADA_MD5_GG(d, a, b, c, x[ 2], STRADA_MD5_S22, 0xfcefa3f8);
+    STRADA_MD5_GG(c, d, a, b, x[ 7], STRADA_MD5_S23, 0x676f02d9);
+    STRADA_MD5_GG(b, c, d, a, x[12], STRADA_MD5_S24, 0x8d2a4c8a);
+
+    STRADA_MD5_HH(a, b, c, d, x[ 5], STRADA_MD5_S31, 0xfffa3942);
+    STRADA_MD5_HH(d, a, b, c, x[ 8], STRADA_MD5_S32, 0x8771f681);
+    STRADA_MD5_HH(c, d, a, b, x[11], STRADA_MD5_S33, 0x6d9d6122);
+    STRADA_MD5_HH(b, c, d, a, x[14], STRADA_MD5_S34, 0xfde5380c);
+    STRADA_MD5_HH(a, b, c, d, x[ 1], STRADA_MD5_S31, 0xa4beea44);
+    STRADA_MD5_HH(d, a, b, c, x[ 4], STRADA_MD5_S32, 0x4bdecfa9);
+    STRADA_MD5_HH(c, d, a, b, x[ 7], STRADA_MD5_S33, 0xf6bb4b60);
+    STRADA_MD5_HH(b, c, d, a, x[10], STRADA_MD5_S34, 0xbebfbc70);
+    STRADA_MD5_HH(a, b, c, d, x[13], STRADA_MD5_S31, 0x289b7ec6);
+    STRADA_MD5_HH(d, a, b, c, x[ 0], STRADA_MD5_S32, 0xeaa127fa);
+    STRADA_MD5_HH(c, d, a, b, x[ 3], STRADA_MD5_S33, 0xd4ef3085);
+    STRADA_MD5_HH(b, c, d, a, x[ 6], STRADA_MD5_S34, 0x04881d05);
+    STRADA_MD5_HH(a, b, c, d, x[ 9], STRADA_MD5_S31, 0xd9d4d039);
+    STRADA_MD5_HH(d, a, b, c, x[12], STRADA_MD5_S32, 0xe6db99e5);
+    STRADA_MD5_HH(c, d, a, b, x[15], STRADA_MD5_S33, 0x1fa27cf8);
+    STRADA_MD5_HH(b, c, d, a, x[ 2], STRADA_MD5_S34, 0xc4ac5665);
+
+    STRADA_MD5_II(a, b, c, d, x[ 0], STRADA_MD5_S41, 0xf4292244);
+    STRADA_MD5_II(d, a, b, c, x[ 7], STRADA_MD5_S42, 0x432aff97);
+    STRADA_MD5_II(c, d, a, b, x[14], STRADA_MD5_S43, 0xab9423a7);
+    STRADA_MD5_II(b, c, d, a, x[ 5], STRADA_MD5_S44, 0xfc93a039);
+    STRADA_MD5_II(a, b, c, d, x[12], STRADA_MD5_S41, 0x655b59c3);
+    STRADA_MD5_II(d, a, b, c, x[ 3], STRADA_MD5_S42, 0x8f0ccc92);
+    STRADA_MD5_II(c, d, a, b, x[10], STRADA_MD5_S43, 0xffeff47d);
+    STRADA_MD5_II(b, c, d, a, x[ 1], STRADA_MD5_S44, 0x85845dd1);
+    STRADA_MD5_II(a, b, c, d, x[ 8], STRADA_MD5_S41, 0x6fa87e4f);
+    STRADA_MD5_II(d, a, b, c, x[15], STRADA_MD5_S42, 0xfe2ce6e0);
+    STRADA_MD5_II(c, d, a, b, x[ 6], STRADA_MD5_S43, 0xa3014314);
+    STRADA_MD5_II(b, c, d, a, x[13], STRADA_MD5_S44, 0x4e0811a1);
+    STRADA_MD5_II(a, b, c, d, x[ 4], STRADA_MD5_S41, 0xf7537e82);
+    STRADA_MD5_II(d, a, b, c, x[11], STRADA_MD5_S42, 0xbd3af235);
+    STRADA_MD5_II(c, d, a, b, x[ 2], STRADA_MD5_S43, 0x2ad7d2bb);
+    STRADA_MD5_II(b, c, d, a, x[ 9], STRADA_MD5_S44, 0xeb86d391);
+
+    state[0] += a;
+    state[1] += b;
+    state[2] += c;
+    state[3] += d;
+
+    memset(x, 0, sizeof(x));
+}
+
+static void strada_md5_init(Strada_MD5_CTX *context) {
+    context->count[0] = context->count[1] = 0;
+    context->state[0] = 0x67452301;
+    context->state[1] = 0xefcdab89;
+    context->state[2] = 0x98badcfe;
+    context->state[3] = 0x10325476;
+}
+
+static void strada_md5_update(Strada_MD5_CTX *context, uint8_t *input, unsigned int inputLen) {
+    unsigned int i, index, partLen;
+
+    index = (unsigned int)((context->count[0] >> 3) & 0x3F);
+
+    if ((context->count[0] += ((uint32_t)inputLen << 3)) < ((uint32_t)inputLen << 3)) {
+        context->count[1]++;
+    }
+    context->count[1] += ((uint32_t)inputLen >> 29);
+
+    partLen = 64 - index;
+
+    if (inputLen >= partLen) {
+        memcpy(&context->buffer[index], input, partLen);
+        strada_md5_transform(context->state, context->buffer);
+
+        for (i = partLen; i + 63 < inputLen; i += 64) {
+            strada_md5_transform(context->state, &input[i]);
+        }
+
+        index = 0;
+    } else {
+        i = 0;
+    }
+
+    memcpy(&context->buffer[index], &input[i], inputLen - i);
+}
+
+static void strada_md5_final(uint8_t digest[16], Strada_MD5_CTX *context) {
+    uint8_t bits[8];
+    unsigned int index, padLen;
+
+    strada_md5_encode(bits, context->count, 8);
+
+    index = (unsigned int)((context->count[0] >> 3) & 0x3f);
+    padLen = (index < 56) ? (56 - index) : (120 - index);
+    strada_md5_update(context, strada_md5_padding, padLen);
+
+    strada_md5_update(context, bits, 8);
+
+    strada_md5_encode(digest, context->state, 16);
+
+    memset(context, 0, sizeof(*context));
+}
+
+static void strada_md5_compute(const uint8_t *data, size_t len, uint8_t digest[16]) {
+    Strada_MD5_CTX ctx;
+    strada_md5_init(&ctx);
+    strada_md5_update(&ctx, (uint8_t *)data, (unsigned int)len);
+    strada_md5_final(digest, &ctx);
+}
+
+static const char strada_md5_b64_table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static void strada_md5_base64_encode_16(const uint8_t *input, char *output) {
+    int i, j;
+    for (i = 0, j = 0; i < 15; i += 3, j += 4) {
+        output[j]   = strada_md5_b64_table[input[i] >> 2];
+        output[j+1] = strada_md5_b64_table[((input[i] & 0x03) << 4) | (input[i+1] >> 4)];
+        output[j+2] = strada_md5_b64_table[((input[i+1] & 0x0f) << 2) | (input[i+2] >> 6)];
+        output[j+3] = strada_md5_b64_table[input[i+2] & 0x3f];
+    }
+    output[20] = strada_md5_b64_table[input[15] >> 2];
+    output[21] = strada_md5_b64_table[(input[15] & 0x03) << 4];
+    output[22] = '\0';
+}
+
+/* Static buffers for results */
+static uint8_t strada_md5_last_digest[16];
+static char strada_md5_hex_result[33];
+static char strada_md5_b64_result[23];
+}
+
+# md5($data) - Compute raw MD5 digest
+#
+# Returns the raw 16-byte MD5 digest as a binary string.
+# This is useful when you need to process the digest further
+# or when interfacing with systems that expect raw bytes.
+#
+# Example:
+#   my str $raw = Digest::MD5::md5("test");
+#   my int $len = sys::byte_length($raw);  # Returns 16
+func md5(str $data) str {
+    my str $result = "";
+    __C__ {
+        char *input = strada_to_str(data);
+        int len = strada_str_len(data);
+        strada_md5_compute((const uint8_t *)input, len, strada_md5_last_digest);
+        free(input);
+        strada_decref(result);
+        result = strada_new_str_len((const char*)strada_md5_last_digest, 16);
+    }
+    return $result;
+}
+
+# md5_hex($data) - Compute MD5 digest as hex string
+#
+# Returns the MD5 digest as a 32-character lowercase hexadecimal string.
+# This is the most common format for displaying MD5 hashes.
+#
+# Example:
+#   my str $hex = Digest::MD5::md5_hex("Hello, World!");
+#   say($hex);  # "65a8e27d8879283831b664bd8b7f0ad4"
+func md5_hex(str $data) str {
+    my str $result = "";
+    __C__ {
+        char *input = strada_to_str(data);
+        int len = strada_str_len(data);
+        uint8_t digest[16];
+        int i;
+
+        strada_md5_compute((const uint8_t *)input, len, digest);
+
+        for (i = 0; i < 16; i++) {
+            sprintf(&strada_md5_hex_result[i*2], "%02x", digest[i]);
+        }
+        strada_md5_hex_result[32] = '\0';
+
+        free(input);
+        strada_decref(result);
+        result = strada_new_str(strada_md5_hex_result);
+    }
+    return $result;
+}
+
+# md5_base64($data) - Compute MD5 digest as base64 string
+#
+# Returns the MD5 digest as a 22-character base64 string.
+# Note: This follows Perl's Digest::MD5 convention of NOT including
+# the trailing "==" padding characters.
+#
+# Example:
+#   my str $b64 = Digest::MD5::md5_base64("Hello, World!");
+#   say($b64);  # "ZajifYh5KDgxtmS9i38K1A"
+func md5_base64(str $data) str {
+    my str $result = "";
+    __C__ {
+        char *input = strada_to_str(data);
+        int len = strada_str_len(data);
+        uint8_t digest[16];
+
+        strada_md5_compute((const uint8_t *)input, len, digest);
+        strada_md5_base64_encode_16(digest, strada_md5_b64_result);
+
+        free(input);
+        strada_decref(result);
+        result = strada_new_str(strada_md5_b64_result);
+    }
+    return $result;
+}

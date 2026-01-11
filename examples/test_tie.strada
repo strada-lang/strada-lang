@@ -1,0 +1,92 @@
+package TraceHash;
+
+func TIEHASH(scalar ...@args) scalar {
+    my hash %self = ();
+    my hash %data = ();
+    $self{"data"} = \%data;
+    $self{"trace"} = "";
+    return bless(\%self, "TraceHash");
+}
+
+func FETCH(scalar $self, str $key) scalar {
+    $self->{"trace"} = $self->{"trace"} . "F:" . $key . ";";
+    my scalar $data = $self->{"data"};
+    return $data->{$key};
+}
+
+func STORE(scalar $self, str $key, scalar $val) void {
+    $self->{"trace"} = $self->{"trace"} . "S:" . $key . ";";
+    my scalar $data = $self->{"data"};
+    $data->{$key} = $val;
+}
+
+func EXISTS(scalar $self, str $key) int {
+    $self->{"trace"} = $self->{"trace"} . "E:" . $key . ";";
+    my scalar $data = $self->{"data"};
+    return exists($data->{$key});
+}
+
+func DELETE(scalar $self, str $key) void {
+    $self->{"trace"} = $self->{"trace"} . "D:" . $key . ";";
+    my scalar $data = $self->{"data"};
+    delete($data->{$key});
+}
+
+func get_trace(scalar $self) str {
+    return $self->{"trace"};
+}
+
+package main;
+
+func main() int {
+    my hash %h = ();
+
+    # Before tie - normal hash
+    $h{"before"} = "test";
+    if ($h{"before"} ne "test") {
+        say("FAIL: normal hash access");
+        return 1;
+    }
+
+    # Tie the hash
+    tie(%h, "TraceHash");
+
+    # Store and fetch through tied hash
+    $h{"name"} = "alice";
+    my str $val = $h{"name"};
+
+    if ($val ne "alice") {
+        say("FAIL: tied fetch got '" . $val . "'");
+        return 1;
+    }
+
+    # Check exists
+    my int $ex = exists($h{"name"});
+
+    # Get the tied object to check trace
+    my scalar $obj = tied(%h);
+    if (!defined($obj)) {
+        say("FAIL: tied() returned undef");
+        return 1;
+    }
+    my str $trace = $obj->get_trace();
+    if (index($trace, "S:name") < 0) {
+        say("FAIL: trace missing STORE, got: " . $trace);
+        return 1;
+    }
+    if (index($trace, "F:name") < 0) {
+        say("FAIL: trace missing FETCH, got: " . $trace);
+        return 1;
+    }
+
+    # Untie
+    untie(%h);
+    my scalar $obj2 = tied(%h);
+    if (defined($obj2)) {
+        say("FAIL: tied() should return undef after untie");
+        return 1;
+    }
+
+    say("All tie tests passed");
+    return 0;
+}

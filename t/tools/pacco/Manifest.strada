@@ -1,0 +1,350 @@
+/*
+ Strada Package Manager - Manifest parsing
+
+ Parses Strada.toml manifest files (simplified TOML format).
+*/
+
+package Pacco::Manifest;
+
+# Parse a Strada.toml file
+func parse(str $path) scalar {
+    if (sys::file_exists($path) == 0) {
+        return undef;
+    }
+
+    my str $content = slurp($path);
+    return Pacco::Manifest::parse_string($content);
+}
+
+# Parse TOML content from string
+func parse_string(str $content) scalar {
+    my hash %result = ();
+    my str $current_section = "";
+    my array @lines = split("\n", $content);
+
+    foreach my str $line (@lines) {
+        # Trim whitespace
+        $line = Pacco::Manifest::trim($line);
+
+        # Skip empty lines and comments
+        if (length($line) == 0 || substr($line, 0, 1) eq "#") {
+            next;
+        }
+
+        # Section header [section] or [section.subsection]
+        if (substr($line, 0, 1) eq "[") {
+            my int $end = index($line, "]");
+            if ($end > 0) {
+                $current_section = substr($line, 1, $end - 1);
+
+                # Initialize section if needed
+                my array @parts = split("\\.", $current_section);
+                if (scalar(@parts) == 1) {
+                    if (!exists($result{$current_section})) {
+                        $result{$current_section} = {};
+                    }
+                } elsif (scalar(@parts) == 2) {
+                    if (!exists($result{$parts[0]})) {
+                        $result{$parts[0]} = {};
+                    }
+                    if (!exists($result{$parts[0]}{$parts[1]})) {
+                        $result{$parts[0]}{$parts[1]} = {};
+                    }
+                }
+            }
+            next;
+        }
+
+        # Key = value
+        my int $eq_pos = index($line, "=");
+        if ($eq_pos > 0) {
+            my str $key = Pacco::Manifest::trim(substr($line, 0, $eq_pos));
+            my str $value = Pacco::Manifest::trim(substr($line, $eq_pos + 1, length($line) - $eq_pos - 1));
+
+            # Parse value
+            my scalar $parsed_value = Pacco::Manifest::parse_value($value);
+
+            # Store in appropriate section
+            if ($current_section eq "") {
+                $result{$key} = $parsed_value;
+            } else {
+                my array @parts = split("\\.", $current_section);
+                if (scalar(@parts) == 1) {
+                    $result{$current_section}{$key} = $parsed_value;
+                } elsif (scalar(@parts) == 2) {
+                    $result{$parts[0]}{$parts[1]}{$key} = $parsed_value;
+                }
+            }
+        }
+    }
+
+    return \%result;
+}
+
+# Parse a TOML value (string, number, boolean, array, inline table)
+func parse_value(str $value) scalar {
+    my str $v = Pacco::Manifest::trim($value);
+
+    # Empty value
+    if (length($v) == 0) {
+        return "";
+    }
+
+    # String (double quotes)
+    if (substr($v, 0, 1) eq "\"") {
+        my int $end = length($v) - 1;
+        if (substr($v, $end, 1) eq "\"") {
+            return substr($v, 1, $end - 1);
+        }
+        return $v;
+    }
+
+    # String (single quotes - literal)
+    if (substr($v, 0, 1) eq "'") {
+        my int $end = length($v) - 1;
+        if (substr($v, $end, 1) eq "'") {
+            return substr($v, 1, $end - 1);
+        }
+        return $v;
+    }
+
+    # Array
+    if (substr($v, 0, 1) eq "[") {
+        return Pacco::Manifest::parse_array($v);
+    }
+
+    # Inline table
+    if (substr($v, 0, 1) eq "{") {
+        return Pacco::Manifest::parse_inline_table($v);
+    }
+
+    # Boolean
+    if ($v eq "true") {
+        return 1;
+    }
+    if ($v eq "false") {
+        return 0;
+    }
+
+    # Number (try to detect if it's an int or float)
+    if ($v =~ /^-?[0-9]+$/) {
+        return 0 + $v;
+    }
+    if ($v =~ /^-?[0-9]+\.[0-9]+$/) {
+        return 0.0 + $v;
+    }
+
+    # Default to string
+    return $v;
+}
+
+# Parse a TOML array
+func parse_array(str $value) scalar {
+    my array @result = ();
+    my str $v = Pacco::Manifest::trim($value);
+
+    # Remove brackets
+    if (substr($v, 0, 1) eq "[" && substr($v, length($v) - 1, 1) eq "]") {
+        my int $inner_len = length($v) - 2;
+        if ($inner_len <= 0) {
+            # Empty array []
+            return \@result;
+        }
+        $v = substr($v, 1, $inner_len);
+    }
+
+    # Handle empty array (after trimming content)
+    $v = Pacco::Manifest::trim($v);
+    if (length($v) == 0) {
+        return \@result;
+    }
+
+    # Split on commas (simple implementation - doesn't handle nested arrays well)
+    my array @items = split(",", $v);
+
+    foreach my str $item (@items) {
+        my str $trimmed = Pacco::Manifest::trim($item);
+        if (length($trimmed) > 0) {
+            push(@result, Pacco::Manifest::parse_value($trimmed));
+        }
+    }
+
+    return \@result;
+}
+
+# Parse a TOML inline table { key = value, ... }
+func parse_inline_table(str $value) scalar {
+    my hash %result = ();
+    my str $v = Pacco::Manifest::trim($value);
+
+    # Remove braces
+    if (substr($v, 0, 1) eq "{" && substr($v, length($v) - 1, 1) eq "}") {
+        my int $inner_len = length($v) - 2;
+        if ($inner_len <= 0) {
+            # Empty table {}
+            return \%result;
+        }
+        $v = substr($v, 1, $inner_len);
+    }
+
+    # Handle empty table (after trimming content)
+    $v = Pacco::Manifest::trim($v);
+    if (length($v) == 0) {
+        return \%result;
+    }
+
+    # Split on commas
+    my array @pairs = split(",", $v);
+
+    foreach my str $pair (@pairs) {
+        my str $trimmed = Pacco::Manifest::trim($pair);
+        my int $eq_pos = index($trimmed, "=");
+        if ($eq_pos > 0) {
+            my str $key = Pacco::Manifest::trim(substr($trimmed, 0, $eq_pos));
+            my str $val = Pacco::Manifest::trim(substr($trimmed, $eq_pos + 1, length($trimmed) - $eq_pos - 1));
+            $result{$key} = Pacco::Manifest::parse_value($val);
+        }
+    }
+
+    return \%result;
+}
+
+# Trim whitespace from both ends of a string
+func trim(str $s) str {
+    my str $result = $s;
+
+    # Trim leading whitespace
+    while (length($result) > 0) {
+        my str $c = substr($result, 0, 1);
+        if ($c eq " " || $c eq "\t" || $c eq "\r") {
+            $result = substr($result, 1, length($result) - 1);
+        } else {
+            last;
+        }
+    }
+
+    # Trim trailing whitespace
+    while (length($result) > 0) {
+        my str $c = substr($result, length($result) - 1, 1);
+        if ($c eq " " || $c eq "\t" || $c eq "\r") {
+            $result = substr($result, 0, length($result) - 1);
+        } else {
+            last;
+        }
+    }
+
+    return $result;
+}
+
+# Validate manifest has required fields
+func validate(scalar $manifest) scalar {
+    my array @errors = ();
+
+    if (!defined($manifest)) {
+        push(@errors, "Manifest is empty or could not be parsed");
+        return \@errors;
+    }
+
+    # Check [package] section
+    if (!defined($manifest->{"package"})) {
+        push(@errors, "Missing [package] section");
+    } else {
+        if (!defined($manifest->{"package"}{"name"})) {
+            push(@errors, "Missing package.name");
+        } elsif ($manifest->{"package"}{"name"} eq "") {
+            push(@errors, "package.name cannot be empty");
+        }
+
+        if (!defined($manifest->{"package"}{"version"})) {
+            push(@errors, "Missing package.version");
+        }
+    }
+
+    return \@errors;
+}
+
+# Generate a default Strada.toml template
+func generate_template(str $name, str $ver, str $description) str {
+    my str $toml = "[package]\n";
+    $toml = $toml . "name = \"" . $name . "\"\n";
+    $toml = $toml . "version = \"" . $ver . "\"\n";
+    $toml = $toml . "description = \"" . $description . "\"\n";
+    $toml = $toml . "authors = []\n";
+    $toml = $toml . "license = \"MIT\"\n";
+    $toml = $toml . "\n";
+    $toml = $toml . "[dependencies]\n";
+    $toml = $toml . "\n";
+    $toml = $toml . "[dev-dependencies]\n";
+    $toml = $toml . "\n";
+    $toml = $toml . "[build]\n";
+    $toml = $toml . "type = \"binary\"  # binary, shared, static, archive\n";
+
+    return $toml;
+}
+
+# Get package name from manifest
+func get_name(scalar $manifest) str {
+    if (defined($manifest) && defined($manifest->{"package"}) && defined($manifest->{"package"}{"name"})) {
+        return $manifest->{"package"}{"name"};
+    }
+    return "";
+}
+
+# Get package version from manifest
+func get_version(scalar $manifest) str {
+    if (defined($manifest) && defined($manifest->{"package"}) && defined($manifest->{"package"}{"version"})) {
+        return $manifest->{"package"}{"version"};
+    }
+    return "0.0.0";
+}
+
+# Get dependencies as hash
+func get_dependencies(scalar $manifest) scalar {
+    if (defined($manifest) && defined($manifest->{"dependencies"})) {
+        return $manifest->{"dependencies"};
+    }
+    my hash %empty = ();
+    return \%empty;
+}
+
+# Get dev dependencies as hash
+func get_dev_dependencies(scalar $manifest) scalar {
+    if (defined($manifest) && defined($manifest->{"dev-dependencies"})) {
+        return $manifest->{"dev-dependencies"};
+    }
+    my hash %empty = ();
+    return \%empty;
+}
+
+# Add a dependency to manifest content
+func add_dependency(str $toml_content, str $name, str $ver) str {
+    my array @lines = split("\n", $toml_content);
+    my array @result = ();
+    my int $in_deps = 0;
+    my int $added = 0;
+
+    foreach my str $line (@lines) {
+        push(@result, $line);
+
+        if ($line eq "[dependencies]") {
+            $in_deps = 1;
+        } elsif (substr($line, 0, 1) eq "[" && $line ne "[dependencies]") {
+            if ($in_deps == 1 && $added == 0) {
+                # Add before next section
+                my int $last_idx = scalar(@result) - 1;
+                $result[$last_idx] = $name . " = \"" . $ver . "\"";
+                push(@result, "");
+                push(@result, $line);
+                $added = 1;
+            }
+            $in_deps = 0;
+        }
+    }
+
+    # If we're still in deps section at end of file
+    if ($in_deps == 1 && $added == 0) {
+        push(@result, $name . " = \"" . $ver . "\"");
+    }
+
+    return join("\n", @result);
+}

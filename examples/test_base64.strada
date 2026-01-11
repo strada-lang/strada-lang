@@ -1,0 +1,82 @@
+# Base64 Encoding/Decoding Example
+#
+# Demonstrates sys::base64_encode() and sys::base64_decode() functions
+#
+# Build and run:
+#   ./strada examples/test_base64.strada
+#   ./test_base64
+
+func main() int {
+    say("=== Base64 Encoding/Decoding ===");
+    say("");
+
+    # Basic string encoding
+    my str $text = "Hello, World!";
+    my str $encoded = sys::base64_encode($text);
+    say("Original: " . $text);
+    say("Encoded:  " . $encoded);
+
+    # Decoding back
+    my str $decoded = sys::base64_decode($encoded);
+    say("Decoded:  " . $decoded);
+    say("");
+
+    # Verify round-trip
+    if ($decoded eq $text) {
+        say("✓ Round-trip successful");
+    } else {
+        say("✗ Round-trip failed!");
+        return 1;
+    }
+    say("");
+
+    # SMTP AUTH example (like AUTH PLAIN)
+    say("=== SMTP AUTH PLAIN Example ===");
+    # AUTH PLAIN format: \0username\0password
+    my str $username = "user@example.com";
+    my str $password = "secret123";
+    my str $auth_str = chr(0) . $username . chr(0) . $password;
+    my str $auth_b64 = sys::base64_encode($auth_str);
+    say("Username: " . $username);
+    say("Password: " . $password);
+    say("AUTH PLAIN: " . $auth_b64);
+    say("");
+
+    # HTTP Basic Auth example
+    say("=== HTTP Basic Auth Example ===");
+    my str $credentials = "admin:password123";
+    my str $basic_auth = sys::base64_encode($credentials);
+    say("Credentials: " . $credentials);
+    say("Authorization: Basic " . $basic_auth);
+    say("");
+
+    # Binary data with NUL bytes
+    say("=== Binary Data Handling ===");
+    my str $binary = chr(0) . chr(255) . chr(128) . "ABC";
+    my str $bin_b64 = sys::base64_encode($binary);
+    say("Binary (6 bytes including NUL): " . $bin_b64);
+
+    my str $bin_back = sys::base64_decode($bin_b64);
+    my int $len = sys::byte_length($bin_back);
+    say("Decoded length: " . $len . " bytes");
+
+    # Check byte values
+    my int $b0 = sys::get_byte($bin_back, 0);
+    my int $b1 = sys::get_byte($bin_back, 1);
+    my int $b2 = sys::get_byte($bin_back, 2);
+    say("Byte values: " . $b0 . ", " . $b1 . ", " . $b2 . " (expected: 0, 255, 128)");
+
+    if ($b0 == 0 && $b1 == 255 && $b2 == 128 && $len == 6) {
+        say("✓ Binary data preserved correctly");
+    } else {
+        say("✗ Binary data corruption detected!");
+        return 1;
+    }
+    say("");
+
+    # URL-safe note
+    say("Note: For URL-safe base64, replace + with - and / with _");
+    say("      sys::base64_encode uses standard RFC 4648 encoding");
+
+    return 0;
+}

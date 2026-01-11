@@ -1,0 +1,141 @@
+#!/usr/bin/env strada
+# Test weak references for memory leaks
+# Run: valgrind --leak-check=full ./test_weakrefs
+
+package Node;
+
+func new(str $name) scalar {
+    my hash %self = ();
+    $self{"name"} = $name;
+    return bless(\%self, "Node");
+}
+
+func set_link(scalar $self, scalar $other) void {
+    $self->{"next"} = $other;
+}
+
+func get_name(scalar $self) str {
+    return $self->{"name"};
+}
+
+package main;
+
+func main() int {
+    say("Testing weak references for memory leaks...");
+    my int $iterations = 100;
+
+    # Test basic weaken
+    say("  Basic weaken...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my scalar $a = {"name" => "alpha"};
+        my scalar $b = {"name" => "beta"};
+        $a->{"partner"} = $b;
+        $b->{"partner"} = $a;
+        core::weaken($b->{"partner"});
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test isweak
+    say("  isweak()...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $a = {"key" => "value"};
+        my scalar $b = {"ref" => $a};
+        if (core::isweak($b->{"ref"})) {
+            say("    FAIL: should not be weak yet");
+            return 1;
+        }
+        core::weaken($b->{"ref"});
+        if (!core::isweak($b->{"ref"})) {
+            say("    FAIL: should be weak");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test circular reference breaking with weaken
+    say("  Circular reference breaking...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $parent = {"name" => "parent", "children" => []};
+        my scalar $child1 = {"name" => "child1", "parent" => $parent};
+        my scalar $child2 = {"name" => "child2", "parent" => $parent};
+        push($parent->{"children"}, $child1);
+        push($parent->{"children"}, $child2);
+        # Break circular refs
+        core::weaken($child1->{"parent"});
+        core::weaken($child2->{"parent"});
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test weaken on blessed objects
+    say("  Weaken blessed objects...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $n1 = Node::new("first");
+        my scalar $n2 = Node::new("second");
+        $n1->set_link($n2);
+        $n2->set_link($n1);
+        core::weaken($n2->{"next"});
+        if ($n1->get_name() ne "first") {
+            say("    FAIL: name check");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test multiple weaken on same structure
+    say("  Multiple weaken calls...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $hub = {"name" => "hub", "spokes" => []};
+        my int $j = 0;
+        while ($j < 5) {
+            my scalar $spoke = {"name" => "spoke" . $j, "hub" => $hub};
+            push($hub->{"spokes"}, $spoke);
+            core::weaken($spoke->{"hub"});
+            $j = $j + 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test weaken idempotency (weaken already-weak ref)
+    say("  Weaken idempotency...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $a = {"val" => 42};
+        my scalar $b = {"ref" => $a};
+        core::weaken($b->{"ref"});
+        core::weaken($b->{"ref"});  # Should be no-op
+        if (!core::isweak($b->{"ref"})) {
+            say("    FAIL: still weak");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test deep circular chains
+    say("  Deep circular chains...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $a = {"name" => "a"};
+        my scalar $b = {"name" => "b"};
+        my scalar $c = {"name" => "c"};
+        $a->{"next"} = $b;
+        $b->{"next"} = $c;
+        $c->{"next"} = $a;  # Circular
+        core::weaken($c->{"next"});
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All weak reference tests passed!");
+    return 0;
+}

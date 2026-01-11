@@ -1,0 +1,153 @@
+#!/usr/bin/env strada
+# Test splice operations for memory leaks
+# Run: valgrind --leak-check=full ./test_splice
+
+func main() int {
+    say("Testing splice for memory leaks...");
+    my int $iterations = 100;
+
+    # Test basic splice remove
+    say("  splice remove...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my array @arr = (1, 2, 3, 4, 5);
+        my array @removed = splice(@arr, 1, 2);
+        if (size(@arr) != 3) {
+            say("    FAIL: arr size after splice");
+            return 1;
+        }
+        if (size(@removed) != 2) {
+            say("    FAIL: removed size");
+            return 1;
+        }
+        if ($removed[0] != 2 || $removed[1] != 3) {
+            say("    FAIL: removed values");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test splice and rebuild
+    say("  splice and push...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @arr = (1, 2, 5, 6);
+        my array @removed = splice(@arr, 2, 2);
+        push(@arr, 3);
+        push(@arr, 4);
+        push(@arr, 5);
+        push(@arr, 6);
+        if (size(@arr) != 6) {
+            say("    FAIL: size after splice+push");
+            return 1;
+        }
+        if ($removed[0] != 5 || $removed[1] != 6) {
+            say("    FAIL: removed values");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test splice replace (remove + push)
+    say("  splice replace pattern...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @arr = ("a", "b", "c", "d", "e");
+        my array @old = splice(@arr, 1, 2);
+        if ($old[0] ne "b" || $old[1] ne "c") {
+            say("    FAIL: old values");
+            return 1;
+        }
+        if (size(@arr) != 3) {
+            say("    FAIL: size after remove");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test splice from beginning
+    say("  splice from beginning...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @arr = (10, 20, 30, 40, 50);
+        my array @removed = splice(@arr, 0, 2);
+        if ($arr[0] != 30) {
+            say("    FAIL: first element after splice");
+            return 1;
+        }
+        if ($removed[0] != 10) {
+            say("    FAIL: removed first");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test splice from end
+    say("  splice from end...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @arr = (1, 2, 3, 4, 5);
+        my array @removed = splice(@arr, 3, 2);
+        if (size(@arr) != 3) {
+            say("    FAIL: size after end splice");
+            return 1;
+        }
+        if ($removed[0] != 4 || $removed[1] != 5) {
+            say("    FAIL: end splice values");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test splice with string data
+    say("  splice with strings...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @words = ("hello", "beautiful", "world", "today");
+        my array @old = splice(@words, 1, 2);
+        if ($old[0] ne "beautiful") {
+            say("    FAIL: string splice old");
+            return 1;
+        }
+        if ($old[1] ne "world") {
+            say("    FAIL: string splice old2");
+            return 1;
+        }
+        if (size(@words) != 2) {
+            say("    FAIL: string splice size = " . size(@words));
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test splice single element
+    say("  splice single element...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @arr = (1, 2, 3, 4, 5);
+        my array @removed = splice(@arr, 2, 1);
+        if (size(@removed) != 1) {
+            say("    FAIL: single splice size");
+            return 1;
+        }
+        if ($removed[0] != 3) {
+            say("    FAIL: single splice value");
+            return 1;
+        }
+        if (size(@arr) != 4) {
+            say("    FAIL: arr size after single");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All splice tests passed!");
+    return 0;
+}

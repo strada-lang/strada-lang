@@ -1,0 +1,40 @@
+func main() int {
+    my hash %h = ();
+    $h{"a"} = 1;
+    $h{"b"} = 2;
+    $h{"c"} = 3;
+
+    # each() returns [key, value] pairs then empty array
+    my int $count = 0;
+    my int $sum = 0;
+    my array @pair = each(%h);
+    while (scalar(@pair) > 0) {
+        $count = $count + 1;
+        $sum = $sum + $pair[1];
+        @pair = each(%h);
+    }
+
+    if ($count != 3) {
+        say("FAIL: each count = " . $count);
+        return 1;
+    }
+    if ($sum != 6) {
+        say("FAIL: each sum = " . $sum);
+        return 1;
+    }
+
+    # Second iteration should restart (each resets after exhaustion)
+    my int $count2 = 0;
+    @pair = each(%h);
+    while (scalar(@pair) > 0) {
+        $count2 = $count2 + 1;
+        @pair = each(%h);
+    }
+    if ($count2 != 3) {
+        say("FAIL: second iteration count = " . $count2);
+        return 1;
+    }
+
+    say("All each tests passed");
+    return 0;
+}

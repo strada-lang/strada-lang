@@ -1,0 +1,24 @@
+func make_counter(int $start) scalar {
+    my int $n = $start;
+    return func () int {
+        $n = $n + 1;
+        return $n;
+    };
+}
+
+func apply(scalar $f, int $x) int {
+    return $f->($x);
+}
+
+func main() int {
+    my scalar $c = make_counter(0);
+    say($c->());
+    say($c->());
+    say($c->());
+
+    my scalar $double = func (int $x) int { return $x * 2; };
+    say(apply($double, 5));
+    say(apply($double, 10));
+
+    return 0;
+}

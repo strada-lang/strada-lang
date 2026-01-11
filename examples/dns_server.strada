@@ -1,0 +1,291 @@
+# Simple DNS Server Example
+# Demonstrates UDP socket support in Strada
+#
+# This server responds to DNS A record queries with a configurable IP address.
+# Run on port 5300 (non-privileged) for testing.
+#
+# Test with: dig @127.0.0.1 -p 5300 example.com
+# Or: nslookup -port=5300 example.com 127.0.0.1
+
+# Helper: Get byte at position from binary string
+func get_byte(str $data, int $pos) int {
+    my int $len = length($data);
+    if ($pos >= $len) {
+        return 0;
+    }
+    return sys::ord_byte(substr($data, $pos, 1));
+}
+
+# Helper: Get multiple bytes from binary string (byte-level, not UTF-8)
+func get_bytes(str $data, int $pos, int $count) str {
+    my str $result = "";
+    my int $i = 0;
+    while ($i < $count) {
+        $result = $result . substr($data, $pos + $i, 1);
+        $i = $i + 1;
+    }
+    return $result;
+}
+
+# Helper: Get 2-byte big-endian value
+func get_uint16(str $data, int $pos) int {
+    my int $high = get_byte($data, $pos);
+    my int $low = get_byte($data, $pos + 1);
+    return ($high * 256) + $low;
+}
+
+# Helper: Create a byte from integer (0-255)
+func make_byte(int $val) str {
+    return chr($val);
+}
+
+# Helper: Create 2-byte big-endian value
+func make_uint16(int $val) str {
+    my int $high = $val / 256;
+    my int $low = $val % 256;
+    return chr($high) . chr($low);
+}
+
+# Helper: Create 4-byte big-endian value
+func make_uint32(int $val) str {
+    my int $b1 = ($val / 16777216) % 256;
+    my int $b2 = ($val / 65536) % 256;
+    my int $b3 = ($val / 256) % 256;
+    my int $b4 = $val % 256;
+    return chr($b1) . chr($b2) . chr($b3) . chr($b4);
+}
+
+# Parse DNS question name (domain name in label format)
+# Returns the domain name as a string
+func parse_dns_name(str $data, int $offset) str {
+    my str $name = "";
+    my int $pos = $offset;
+    my int $len = length($data);
+
+    while ($pos < $len) {
+        my int $label_len = get_byte($data, $pos);
+
+        # Check for end of name
+        if ($label_len == 0) {
+            return $name;
+        }
+
+        # Check for pointer (compression)
+        if ($label_len >= 192) {
+            # Pointer - we don't follow it in this simple implementation
+            return $name . "...";
+        }
+
+        # Regular label
+        $pos = $pos + 1;
+        if (length($name) > 0) {
+            $name = $name . ".";
+        }
+        $name = $name . get_bytes($data, $pos, $label_len);
+        $pos = $pos + $label_len;
+    }
+
+    return $name;
+}
+
+# Calculate the length of a DNS name in the packet
+func dns_name_length(str $data, int $offset) int {
+    my int $pos = $offset;
+    my int $len = length($data);
+
+    while ($pos < $len) {
+        my int $label_len = get_byte($data, $pos);
+
+        if ($label_len == 0) {
+            return ($pos - $offset) + 1;
+        }
+
+        if ($label_len >= 192) {
+            # Pointer is 2 bytes
+            return ($pos - $offset) + 2;
+        }
+
+        $pos = $pos + 1 + $label_len;
+    }
+
+    return $pos - $offset;
+}
+
+# Build DNS response for an A record query
+func build_dns_response(str $query, str $ip) str {
+    # Parse query header
+    my int $id = get_uint16($query, 0);
+    my int $flags = get_uint16($query, 2);
+    my int $qdcount = get_uint16($query, 4);
+
+    # Response flags: QR=1 (response), AA=1 (authoritative), RD=1, RA=1
+    # QR=1 (0x8000), AA=1 (0x0400), RD=1 (0x0100), RA=1 (0x0080)
+    my int $resp_flags = 0x8400;
+    if (($flags / 256) % 2 == 1) {
+        # Preserve RD bit if set
+        $resp_flags = $resp_flags + 0x0100;
+    }
+
+    # Build header
+    my str $response = "";
+    $response = $response . make_uint16($id);           # ID
+    $response = $response . make_uint16($resp_flags);   # Flags
+    $response = $response . make_uint16(1);             # QDCOUNT (1 question)
+    $response = $response . make_uint16(1);             # ANCOUNT (1 answer)
+    $response = $response . make_uint16(0);             # NSCOUNT
+    $response = $response . make_uint16(0);             # ARCOUNT
+
+    # Copy the question section from the query (starts at offset 12)
+    my int $qname_len = dns_name_length($query, 12);
+    my str $question = get_bytes($query, 12, $qname_len + 4);  # +4 for QTYPE and QCLASS
+    $response = $response . $question;
+
+    # Build answer section
+    # Use pointer to question name (0xC00C = pointer to offset 12)
+    $response = $response . chr(192) . chr(12);         # NAME (pointer)
+    $response = $response . make_uint16(1);             # TYPE (A = 1)
+    $response = $response . make_uint16(1);             # CLASS (IN = 1)
+    $response = $response . make_uint32(300);           # TTL (300 seconds)
+    $response = $response . make_uint16(4);             # RDLENGTH (4 bytes for IPv4)
+
+    # Convert IP address to bytes
+    my array @parts = split("[.]", $ip);
+    my int $b0 = $parts[0] + 0;
+    my int $b1 = $parts[1] + 0;
+    my int $b2 = $parts[2] + 0;
+    my int $b3 = $parts[3] + 0;
+    $response = $response . chr($b0);
+    $response = $response . chr($b1);
+    $response = $response . chr($b2);
+    $response = $response . chr($b3);
+
+    return $response;
+}
+
+# Build NXDOMAIN response (domain not found)
+func build_nxdomain_response(str $query) str {
+    my int $id = get_uint16($query, 0);
+
+    # Response flags: QR=1, AA=1, RCODE=3 (NXDOMAIN)
+    my int $resp_flags = 0x8403;
+
+    my str $response = "";
+    $response = $response . make_uint16($id);
+    $response = $response . make_uint16($resp_flags);
+    $response = $response . make_uint16(1);             # QDCOUNT
+    $response = $response . make_uint16(0);             # ANCOUNT
+    $response = $response . make_uint16(0);             # NSCOUNT
+    $response = $response . make_uint16(0);             # ARCOUNT
+
+    # Copy question section
+    my int $qname_len = dns_name_length($query, 12);
+    my str $question = get_bytes($query, 12, $qname_len + 4);
+    $response = $response . $question;
+
+    return $response;
+}
+
+# Main DNS server
+func main() int {
+    my int $port = 5300;
+    my str $default_ip = "127.0.0.1";
+
+    say("Simple DNS Server");
+    say("=================");
+    say("Listening on UDP port " . $port);
+    say("Default response IP: " . $default_ip);
+    say("");
+    say("Test with: dig @127.0.0.1 -p " . $port . " example.com");
+    say("Or: nslookup -port=" . $port . " example.com 127.0.0.1");
+    say("");
+
+    # Create UDP server socket
+    my scalar $sock = sys::udp_server($port);
+    if (!defined($sock)) {
+        say("Error: Cannot bind to port " . $port);
+        return 1;
+    }
+
+    say("Server started, waiting for queries...");
+    say("");
+
+    # Main loop
+    while (1) {
+        # Receive DNS query
+        my hash %packet = sys::udp_recvfrom($sock, 512);
+
+        if (!defined($packet{"data"})) {
+            say("Error receiving packet");
+            next;
+        }
+
+        my str $data = $packet{"data"};
+        my str $client_ip = $packet{"ip"};
+        my int $client_port = $packet{"port"};
+
+        # Parse DNS header
+        my int $id = get_uint16($data, 0);
+        my int $flags = get_uint16($data, 2);
+        my int $qdcount = get_uint16($data, 4);
+
+        # Check if this is a query (QR bit = 0)
+        my int $is_query = (($flags / 32768) % 2) == 0;
+
+        if ($is_query == 0) {
+            say("Ignoring non-query packet");
+            next;
+        }
+
+        # Parse question section
+        my str $qname = parse_dns_name($data, 12);
+        my int $qname_len = dns_name_length($data, 12);
+        my int $qtype = get_uint16($data, 12 + $qname_len);
+        my int $qclass = get_uint16($data, 12 + $qname_len + 2);
+
+        # Display query info
+        my str $type_str = "UNKNOWN";
+        if ($qtype == 1) {
+            $type_str = "A";
+        }
+        if ($qtype == 28) {
+            $type_str = "AAAA";
+        }
+        if ($qtype == 5) {
+            $type_str = "CNAME";
+        }
+        if ($qtype == 15) {
+            $type_str = "MX";
+        }
+        if ($qtype == 2) {
+            $type_str = "NS";
+        }
+        if ($qtype == 16) {
+            $type_str = "TXT";
+        }
+
+        say("Query from " . $client_ip . ":" . $client_port);
+        say("  Domain: " . $qname);
+        say("  Type: " . $type_str . " (" . $qtype . ")");
+
+        # Build response
+        my str $response = "";
+
+        if ($qtype == 1) {
+            # A record query - respond with default IP
+            $response = build_dns_response($data, $default_ip);
+            say("  Response: " . $default_ip);
+        } else {
+            # Other query types - respond with NXDOMAIN
+            $response = build_nxdomain_response($data);
+            say("  Response: NXDOMAIN (type not supported)");
+        }
+
+        # Send response
+        my int $sent = sys::udp_sendto($sock, $response, $client_ip, $client_port);
+        say("  Sent " . $sent . " bytes");
+        say("");
+    }
+
+    sys::socket_close($sock);
+    return 0;
+}

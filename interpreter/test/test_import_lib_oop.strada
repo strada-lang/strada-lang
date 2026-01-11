@@ -1,0 +1,18 @@
+use lib "interpreter/test/lib";
+use lib "test/lib";
+use lib "lib";
+import_lib "CounterLib.so";
+
+func main() int {
+    my scalar $c = CounterLib::new("value", 0);
+    say("initial=" . $c->get());
+
+    $c->increment();
+    say("after increment=" . $c->get());
+
+    $c->add(9);
+    say("after add(9)=" . $c->get());
+
+    say("oop import_lib OK");
+    return 0;
+}

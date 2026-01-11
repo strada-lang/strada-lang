@@ -1,3 +1,20 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
 # AST.strada - Abstract Syntax Tree for self-hosting Strada compiler
 # Defines node types and constructors for the parse tree
 
@@ -29,7 +46,6 @@ func NODE_DEREF_SCALAR() int { return 24; }
 func NODE_ANON_HASH() int { return 25; }
 func NODE_ANON_ARRAY() int { return 26; }
 func NODE_EXTERN_FUNC() int { return 27; }
-func NODE_STRUCT() int { return 28; }
 func NODE_USE() int { return 29; }
 func NODE_FIELD_ACCESS() int { return 30; }
 func NODE_FUNC_REF() int { return 31; }
@@ -57,6 +73,26 @@ func NODE_SWITCH() int { return 114; }
 func NODE_RANGE() int { return 115; }
 func NODE_SUPER_CALL() int { return 116; }
 func NODE_INCREMENT() int { return 117; }
+func NODE_ENUM() int { return 118; }
+func NODE_C_BLOCK() int { return 119; }
+func NODE_SPREAD() int { return 120; }
+func NODE_CATCH_CLAUSE() int { return 121; }
+func NODE_ASYNC_FUNC() int { return 122; }
+func NODE_AWAIT() int { return 123; }
+func NODE_READLINE() int { return 124; }
+func NODE_DESTRUCTURE() int { return 125; }
+func NODE_DO_WHILE_STMT() int { return 126; }
+func NODE_CONST_DECL() int { return 127; }
+func NODE_BEGIN_BLOCK() int { return 128; }
+func NODE_END_BLOCK() int { return 129; }
+func NODE_ARRAY_SLICE() int { return 130; }
+func NODE_HASH_SLICE() int { return 131; }
+func NODE_OUR_DECL() int { return 132; }
+func NODE_REDO() int { return 133; }
+func NODE_TR() int { return 134; }
+func NODE_LOCAL_DECL() int { return 135; }
+func NODE_CAPTURE_VAR() int { return 136; }
+func NODE_DYN_METHOD_CALL() int { return 137; }
 
 # Type constants
 func TYPE_INT() int { return 1; }
@@ -66,8 +102,26 @@ func TYPE_ARRAY() int { return 4; }
 func TYPE_HASH() int { return 5; }
 func TYPE_SCALAR() int { return 6; }
 func TYPE_VOID() int { return 7; }
-func TYPE_STRUCT() int { return 8; }
 func TYPE_FUNCPTR() int { return 9; }
+
+# Explicit sized types for extern functions (C interop)
+func TYPE_INT32() int { return 10; }    # int32_t / int
+func TYPE_INT64() int { return 11; }    # int64_t / long long
+func TYPE_FLOAT32() int { return 12; }  # float (32-bit)
+func TYPE_FLOAT64() int { return 13; }  # double (64-bit)
+func TYPE_BOOL() int { return 14; }     # boolean (alias for int, 0/1)
+func TYPE_INT8() int { return 15; }     # int8_t / signed char
+func TYPE_INT16() int { return 16; }    # int16_t / short
+func TYPE_UINT8() int { return 17; }    # uint8_t / unsigned char / byte
+func TYPE_UINT16() int { return 18; }   # uint16_t / unsigned short
+func TYPE_UINT32() int { return 19; }   # uint32_t / unsigned int
+func TYPE_UINT64() int { return 20; }   # uint64_t / unsigned long long
+func TYPE_SIZE_T() int { return 21; }   # size_t
+func TYPE_CHAR() int { return 22; }     # char (single character)
+func TYPE_LONG_DOUBLE() int { return 23; }  # long double (extended precision)
+func TYPE_ENUM() int { return 24; }         # enum type
+# TYPE_PTR (25) was removed - use int to store opaque pointers with __C__ blocks
+func TYPE_DYNAMIC() int { return 25; }  # dynamic return type (context-sensitive)
 
 # ============================================================
 # Node Constructors
@@ -95,14 +149,14 @@ func ast_get_line(scalar $node) int {
 func ast_new_program() scalar {
     my scalar $node = ast_new_node(NODE_PROGRAM());
     my array @funcs = ();
-    my array @structs = ();
+    my array @enums = ();
     my array @uses = ();
     my array @imports = ();
     my array @inherits = ();
     my array @lib_paths = ();
     my hash %loaded_modules = ();
     $node->{"functions"} = \@funcs;
-    $node->{"structs"} = \@structs;
+    $node->{"enums"} = \@enums;
     $node->{"uses"} = \@uses;
     $node->{"imports"} = \@imports;
     $node->{"inherits"} = \@inherits;
@@ -110,7 +164,7 @@ func ast_new_program() scalar {
     $node->{"lib_path_count"} = 0;
     $node->{"loaded_modules"} = \%loaded_modules;
     $node->{"function_count"} = 0;
-    $node->{"struct_count"} = 0;
+    $node->{"enum_count"} = 0;
     $node->{"use_count"} = 0;
     $node->{"import_count"} = 0;
     $node->{"inherit_count"} = 0;
@@ -122,7 +176,73 @@ func ast_new_program() scalar {
     my array @import_libs = ();
     $node->{"import_libs"} = \@import_libs;
     $node->{"import_lib_count"} = 0;
+    # import_object support - array of {obj_name, o_path, functions: [{name, param_count, return_type, params}]}
+    my array @import_objects = ();
+    $node->{"import_objects"} = \@import_objects;
+    $node->{"import_object_count"} = 0;
+    # import_archive support - array of {arch_name, a_path, functions: [{name, param_count, return_type, params}]}
+    my array @import_archives = ();
+    $node->{"import_archives"} = \@import_archives;
+    $node->{"import_archive_count"} = 0;
+    # Top-level C blocks - array of raw C code strings
+    my array @c_blocks = ();
+    $node->{"c_blocks"} = \@c_blocks;
+    $node->{"c_block_count"} = 0;
+    # BEGIN/END blocks - arrays of block AST nodes (statement lists)
+    my array @begin_blocks = ();
+    $node->{"begin_blocks"} = \@begin_blocks;
+    $node->{"begin_block_count"} = 0;
+    my array @end_blocks = ();
+    $node->{"end_blocks"} = \@end_blocks;
+    $node->{"end_block_count"} = 0;
+    # import() calls - array of hashes with: func_name, pkg_name, import_list
+    my array @import_calls = ();
+    $node->{"import_calls"} = \@import_calls;
+    $node->{"import_call_count"} = 0;
+    # Operator overloading: overloads->{package}->{op} = method_name
+    my hash %overloads = ();
+    $node->{"overloads"} = \%overloads;
+    $node->{"has_overloads"} = 0;
+    my hash %overloaded_ops = ();
+    $node->{"overloaded_ops"} = \%overloaded_ops;
+    # Moose-style has attributes: array of {name, type, default_node, required, lazy, builder, rw, package}
+    my array @has_attrs = ();
+    $node->{"has_attrs"} = \@has_attrs;
+    $node->{"has_attr_count"} = 0;
+    # Method modifiers: array of {mod_type, method_name, func_node, package}
+    my array @method_modifiers = ();
+    $node->{"method_modifiers"} = \@method_modifiers;
+    $node->{"method_modifier_count"} = 0;
     return $node;
+}
+
+# Add top-level C block to program
+func ast_add_c_block(scalar $program, str $code) void {
+    my scalar $blocks = $program->{"c_blocks"};
+    push($blocks, $code);
+    $program->{"c_block_count"} = $program->{"c_block_count"} + 1;
+}
+
+# Add BEGIN block to program
+func ast_add_begin_block(scalar $program, scalar $block) void {
+    my scalar $blocks = $program->{"begin_blocks"};
+    push($blocks, $block);
+    $program->{"begin_block_count"} = $program->{"begin_block_count"} + 1;
+}
+
+# Add END block to program
+func ast_add_end_block(scalar $program, scalar $block) void {
+    my scalar $blocks = $program->{"end_blocks"};
+    push($blocks, $block);
+    $program->{"end_block_count"} = $program->{"end_block_count"} + 1;
+}
+
+# Add import() call info to program
+# $call_info is a hash with: func_name, pkg_name, import_list (array)
+func ast_add_import_call(scalar $program, scalar $call_info) void {
+    my scalar $calls = $program->{"import_calls"};
+    push($calls, $call_info);
+    $program->{"import_call_count"} = $program->{"import_call_count"} + 1;
 }
 
 # Add function to program
@@ -139,11 +259,11 @@ func ast_add_global(scalar $program, scalar $var_decl) void {
     $program->{"global_count"} = $program->{"global_count"} + 1;
 }
 
-# Add struct to program
-func ast_add_struct(scalar $program, scalar $st) void {
-    my scalar $structs = $program->{"structs"};
-    push($structs, $st);
-    $program->{"struct_count"} = $program->{"struct_count"} + 1;
+# Add enum to program
+func ast_add_enum(scalar $program, scalar $en) void {
+    my scalar $enums = $program->{"enums"};
+    push($enums, $en);
+    $program->{"enum_count"} = $program->{"enum_count"} + 1;
 }
 
 # Add use to program
@@ -153,10 +273,13 @@ func ast_add_use(scalar $program, str $module) void {
     $program->{"use_count"} = $program->{"use_count"} + 1;
 }
 
-# Add inherit to program (parent package name)
-func ast_add_inherit(scalar $program, str $parent) void {
+# Add inherit to program (child and parent package names)
+func ast_add_inherit(scalar $program, str $child, str $parent) void {
     my scalar $inherits = $program->{"inherits"};
-    push($inherits, $parent);
+    my hash %entry = ();
+    $entry{"child"} = $child;
+    $entry{"parent"} = $parent;
+    push($inherits, \%entry);
     $program->{"inherit_count"} = $program->{"inherit_count"} + 1;
 }
 
@@ -198,6 +321,22 @@ func ast_add_import_lib(scalar $program, scalar $lib_info) void {
     $program->{"import_lib_count"} = $program->{"import_lib_count"} + 1;
 }
 
+# Add an imported object file with its function info
+# $obj_info is a hash with: obj_name, o_path, functions (array of function info)
+func ast_add_import_object(scalar $program, scalar $obj_info) void {
+    my scalar $objs = $program->{"import_objects"};
+    push($objs, $obj_info);
+    $program->{"import_object_count"} = $program->{"import_object_count"} + 1;
+}
+
+# Add an imported archive file with its function info
+# $arch_info is a hash with: arch_name, a_path, functions (array of function info)
+func ast_add_import_archive(scalar $program, scalar $arch_info) void {
+    my scalar $archs = $program->{"import_archives"};
+    push($archs, $arch_info);
+    $program->{"import_archive_count"} = $program->{"import_archive_count"} + 1;
+}
+
 # Create extern function node
 func ast_new_extern_func(str $name) scalar {
     my scalar $node = ast_new_node(NODE_EXTERN_FUNC());
@@ -207,28 +346,35 @@ func ast_new_extern_func(str $name) scalar {
     $node->{"params"} = \@params;
     $node->{"param_count"} = 0;
     $node->{"is_extern"} = 1;
+    $node->{"is_c_extern"} = 0;  # 0 = StradaValue* wrapper, 1 = raw C types
     return $node;
 }
 
-# Create struct node
-func ast_new_struct(str $name) scalar {
-    my scalar $node = ast_new_node(NODE_STRUCT());
-    my array @fields = ();
+# Create enum node
+func ast_new_enum(str $name) scalar {
+    my scalar $node = ast_new_node(NODE_ENUM());
+    my array @members = ();
     $node->{"name"} = $name;
-    $node->{"fields"} = \@fields;
-    $node->{"field_count"} = 0;
+    $node->{"members"} = \@members;
+    $node->{"member_count"} = 0;
     return $node;
 }
 
-# Add field to struct
-func ast_add_field(scalar $st, str $name, int $field_type, str $sigil) void {
-    my hash %field = ();
-    $field{"name"} = $name;
-    $field{"field_type"} = $field_type;
-    $field{"sigil"} = $sigil;
-    my scalar $fields = $st->{"fields"};
-    push($fields, \%field);
-    $st->{"field_count"} = $st->{"field_count"} + 1;
+# Add member to enum
+func ast_add_enum_member(scalar $en, str $name, int $value) void {
+    my hash %member = ();
+    $member{"name"} = $name;
+    $member{"value"} = $value;
+    my scalar $members = $en->{"members"};
+    push($members, \%member);
+    $en->{"member_count"} = $en->{"member_count"} + 1;
+}
+
+# Create C block node (raw C code embedded in Strada)
+func ast_new_c_block(str $code) scalar {
+    my scalar $node = ast_new_node(NODE_C_BLOCK());
+    $node->{"code"} = $code;
+    return $node;
 }
 
 # Create function node
@@ -241,6 +387,7 @@ func ast_new_function(str $name, int $return_type) scalar {
     $node->{"param_count"} = 0;
     $node->{"body"} = 0;  # Will be set later
     $node->{"is_extern"} = 0;
+    $node->{"is_private"} = 0;  # Private functions are file-scope only
     return $node;
 }
 
@@ -288,6 +435,25 @@ func ast_new_var_decl(str $name, int $var_type, str $sigil) scalar {
     return $node;
 }
 
+# Create const declaration (compile-time constant)
+func ast_new_const_decl(str $name, int $var_type, scalar $init) scalar {
+    my scalar $node = ast_new_node(NODE_CONST_DECL());
+    $node->{"name"} = $name;
+    $node->{"var_type"} = $var_type;
+    $node->{"init"} = $init;
+    return $node;
+}
+
+# Create our declaration (package-scoped global via global registry)
+func ast_new_our_decl(str $name, int $var_type, str $sigil) scalar {
+    my scalar $node = ast_new_node(NODE_OUR_DECL());
+    $node->{"name"} = $name;
+    $node->{"var_type"} = $var_type;
+    $node->{"sigil"} = $sigil;
+    $node->{"init"} = 0;
+    return $node;
+}
+
 # Create if statement
 func ast_new_if_stmt(scalar $condition, scalar $then_block) scalar {
     my scalar $node = ast_new_node(NODE_IF_STMT());
@@ -316,6 +482,15 @@ func ast_new_while_stmt(scalar $condition, scalar $body, str $label) scalar {
     my scalar $node = ast_new_node(NODE_WHILE_STMT());
     $node->{"condition"} = $condition;
     $node->{"body"} = $body;
+    $node->{"label"} = $label;
+    return $node;
+}
+
+# Create do-while statement
+func ast_new_do_while_stmt(scalar $body, scalar $condition, str $label) scalar {
+    my scalar $node = ast_new_node(NODE_DO_WHILE_STMT());
+    $node->{"body"} = $body;
+    $node->{"condition"} = $condition;
     $node->{"label"} = $label;
     return $node;
 }
@@ -359,6 +534,13 @@ func ast_new_last(str $label) scalar {
 # Create next statement (continue loop)
 func ast_new_next(str $label) scalar {
     my scalar $node = ast_new_node(NODE_NEXT());
+    $node->{"label"} = $label;
+    return $node;
+}
+
+# Create redo statement (restart loop iteration)
+func ast_new_redo(str $label) scalar {
+    my scalar $node = ast_new_node(NODE_REDO());
     $node->{"label"} = $label;
     return $node;
 }
@@ -498,6 +680,24 @@ func ast_new_hash_access(scalar $hash_var, scalar $key) scalar {
     return $node;
 }
 
+# Create array slice (@arr[0, 2, 4])
+func ast_new_array_slice(scalar $source, scalar $indices, int $count) scalar {
+    my scalar $node = ast_new_node(NODE_ARRAY_SLICE());
+    $node->{"source"} = $source;
+    $node->{"items"} = $indices;
+    $node->{"item_count"} = $count;
+    return $node;
+}
+
+# Create hash slice (@hash{"a", "b"})
+func ast_new_hash_slice(scalar $source, scalar $keys, int $count) scalar {
+    my scalar $node = ast_new_node(NODE_HASH_SLICE());
+    $node->{"source"} = $source;
+    $node->{"items"} = $keys;
+    $node->{"item_count"} = $count;
+    return $node;
+}
+
 # Create reference
 func ast_new_ref(scalar $target, str $ref_type) scalar {
     my scalar $node = ast_new_node(NODE_REF());
@@ -535,18 +735,33 @@ func ast_new_anon_hash() scalar {
     my scalar $node = ast_new_node(NODE_ANON_HASH());
     my array @keys = ();
     my array @values = ();
+    my array @key_exprs = ();  # For dynamic keys (expressions)
     $node->{"keys"} = \@keys;
     $node->{"values"} = \@values;
+    $node->{"key_exprs"} = \@key_exprs;
     $node->{"pair_count"} = 0;
     return $node;
 }
 
-# Add pair to anonymous hash
+# Add pair to anonymous hash (string key)
 func ast_add_hash_pair(scalar $hash_node, str $key, scalar $value) void {
     my scalar $keys = $hash_node->{"keys"};
     my scalar $values = $hash_node->{"values"};
+    my scalar $key_exprs = $hash_node->{"key_exprs"};
     push($keys, $key);
     push($values, $value);
+    push($key_exprs, 0);  # No expression key (0 = no expr)
+    $hash_node->{"pair_count"} = $hash_node->{"pair_count"} + 1;
+}
+
+# Add pair to anonymous hash (expression key, e.g. $var => value)
+func ast_add_hash_pair_expr(scalar $hash_node, scalar $key_expr, scalar $value) void {
+    my scalar $keys = $hash_node->{"keys"};
+    my scalar $values = $hash_node->{"values"};
+    my scalar $key_exprs = $hash_node->{"key_exprs"};
+    push($keys, "");  # Placeholder
+    push($values, $value);
+    push($key_exprs, $key_expr);  # Expression for key
     $hash_node->{"pair_count"} = $hash_node->{"pair_count"} + 1;
 }
 
@@ -587,6 +802,17 @@ func ast_new_method_call(scalar $object, str $method) scalar {
     my array @args = ();
     $node->{"object"} = $object;
     $node->{"method"} = $method;
+    $node->{"args"} = \@args;
+    $node->{"arg_count"} = 0;
+    return $node;
+}
+
+# Create dynamic method call node ($obj->$method(args))
+func ast_new_dyn_method_call(scalar $base_object, scalar $method_expr) scalar {
+    my scalar $node = ast_new_node(NODE_DYN_METHOD_CALL());
+    my array @args = ();
+    $node->{"base_object"} = $base_object;
+    $node->{"method_expr"} = $method_expr;
     $node->{"args"} = \@args;
     $node->{"arg_count"} = 0;
     return $node;
@@ -639,12 +865,25 @@ func ast_new_regex_subst(scalar $target, str $pattern, str $replacement, str $fl
     return $node;
 }
 
-# Create try/catch node
-func ast_new_try_catch(scalar $try_block, str $catch_var, scalar $catch_block) scalar {
+# Create a single catch clause node
+# $catch_type is the exception type name (empty string for catch-all)
+# $catch_var is the variable name (e.g., "e" from "$e")
+# $catch_block is the block to execute
+func ast_new_catch_clause(str $catch_type, str $catch_var, scalar $catch_block) scalar {
+    my scalar $node = ast_new_node(NODE_CATCH_CLAUSE());
+    $node->{"catch_type"} = $catch_type;
+    $node->{"catch_var"} = $catch_var;
+    $node->{"catch_block"} = $catch_block;
+    return $node;
+}
+
+# Create try/catch node with multiple catch clauses
+# $catch_clauses is an array of catch clause nodes
+func ast_new_try_catch(scalar $try_block, scalar $catch_clauses) scalar {
     my scalar $node = ast_new_node(NODE_TRY_CATCH());
     $node->{"try_block"} = $try_block;
-    $node->{"catch_var"} = $catch_var;     # Variable name for exception (e.g., "$e")
-    $node->{"catch_block"} = $catch_block;
+    $node->{"catch_clauses"} = $catch_clauses;
+    $node->{"catch_count"} = size($catch_clauses);
     return $node;
 }
 
@@ -732,6 +971,81 @@ func ast_new_range(scalar $start, scalar $end) scalar {
     return $node;
 }
 
+# Create spread expression node (...@arr or ...$ref)
+func ast_new_spread(scalar $target) scalar {
+    my scalar $node = ast_new_node(NODE_SPREAD());
+    $node->{"target"} = $target;
+    return $node;
+}
+
+# Create async function node
+# Async functions are like regular functions but return a Future
+func ast_new_async_func(str $name, int $return_type) scalar {
+    my scalar $node = ast_new_node(NODE_ASYNC_FUNC());
+    my array @params = ();
+    $node->{"name"} = $name;
+    $node->{"return_type"} = $return_type;
+    $node->{"params"} = \@params;
+    $node->{"param_count"} = 0;
+    $node->{"body"} = 0;
+    $node->{"package"} = "";
+    $node->{"is_private"} = 0;
+    return $node;
+}
+
+# Create await expression node
+func ast_new_await(scalar $expr) scalar {
+    my scalar $node = ast_new_node(NODE_AWAIT());
+    $node->{"expr"} = $expr;
+    return $node;
+}
+
+# Create readline expression node (diamond operator <$fh>)
+func ast_new_readline(str $varname) scalar {
+    my scalar $node = ast_new_node(NODE_READLINE());
+    $node->{"varname"} = $varname;
+    return $node;
+}
+
+# Destructuring assignment: my ($a, $b, $c) = @arr;
+# vars is array of hashes with: name, sigil, var_type
+# is_decl is 1 if this is a declaration (has 'my'), 0 for plain assignment
+# var_count is passed explicitly to avoid bootstrap compiler limitations
+func ast_new_destructure(scalar $vars, int $var_count, scalar $init, int $is_decl) scalar {
+    my scalar $node = ast_new_node(NODE_DESTRUCTURE());
+    $node->{"vars"} = $vars;
+    $node->{"var_count"} = $var_count;
+    $node->{"init"} = $init;
+    $node->{"is_decl"} = $is_decl;
+    return $node;
+}
+
+# Create transliteration node (tr/search/replace/flags)
+func ast_new_tr(scalar $target, str $search, str $replace, str $flags) scalar {
+    my scalar $node = ast_new_node(NODE_TR());
+    $node->{"target"} = $target;
+    $node->{"search"} = $search;
+    $node->{"replace"} = $replace;
+    $node->{"flags"} = $flags;
+    return $node;
+}
+
+# Create local declaration (dynamic scoping for our variables)
+func ast_new_local_decl(str $name, str $sigil, scalar $init) scalar {
+    my scalar $node = ast_new_node(NODE_LOCAL_DECL());
+    $node->{"name"} = $name;
+    $node->{"sigil"} = $sigil;
+    $node->{"init"} = $init;
+    return $node;
+}
+
+# Create capture variable ($1-$9)
+func ast_new_capture_var(int $number) scalar {
+    my scalar $node = ast_new_node(NODE_CAPTURE_VAR());
+    $node->{"number"} = $number;
+    return $node;
+}
+
 # ============================================================
 # Utility functions
 # ============================================================
@@ -743,8 +1057,10 @@ func ast_type_name(int $type) str {
     if ($type == NODE_PARAM()) { return "PARAM"; }
     if ($type == NODE_BLOCK()) { return "BLOCK"; }
     if ($type == NODE_VAR_DECL()) { return "VAR_DECL"; }
+    if ($type == NODE_CONST_DECL()) { return "CONST_DECL"; }
     if ($type == NODE_IF_STMT()) { return "IF_STMT"; }
     if ($type == NODE_WHILE_STMT()) { return "WHILE_STMT"; }
+    if ($type == NODE_DO_WHILE_STMT()) { return "DO_WHILE_STMT"; }
     if ($type == NODE_FOR_STMT()) { return "FOR_STMT"; }
     if ($type == NODE_FOREACH_STMT()) { return "FOREACH_STMT"; }
     if ($type == NODE_RETURN_STMT()) { return "RETURN_STMT"; }
@@ -769,6 +1085,21 @@ func ast_type_name(int $type) str {
     if ($type == NODE_THROW()) { return "THROW"; }
     if ($type == NODE_TERNARY()) { return "TERNARY"; }
     if ($type == NODE_SWITCH()) { return "SWITCH"; }
+    if ($type == NODE_C_BLOCK()) { return "C_BLOCK"; }
+    if ($type == NODE_SPREAD()) { return "SPREAD"; }
+    if ($type == NODE_CATCH_CLAUSE()) { return "CATCH_CLAUSE"; }
+    if ($type == NODE_ASYNC_FUNC()) { return "ASYNC_FUNC"; }
+    if ($type == NODE_AWAIT()) { return "AWAIT"; }
+    if ($type == NODE_READLINE()) { return "READLINE"; }
+    if ($type == NODE_BEGIN_BLOCK()) { return "BEGIN_BLOCK"; }
+    if ($type == NODE_END_BLOCK()) { return "END_BLOCK"; }
+    if ($type == NODE_ARRAY_SLICE()) { return "ARRAY_SLICE"; }
+    if ($type == NODE_HASH_SLICE()) { return "HASH_SLICE"; }
+    if ($type == NODE_OUR_DECL()) { return "OUR_DECL"; }
+    if ($type == NODE_TR()) { return "TR"; }
+    if ($type == NODE_LOCAL_DECL()) { return "LOCAL_DECL"; }
+    if ($type == NODE_CAPTURE_VAR()) { return "CAPTURE_VAR"; }
+    if ($type == NODE_DYN_METHOD_CALL()) { return "DYN_METHOD_CALL"; }
     return "UNKNOWN";
 }
 
@@ -781,5 +1112,10 @@ func ast_data_type_name(int $type) str {
     if ($type == TYPE_HASH()) { return "hash"; }
     if ($type == TYPE_SCALAR()) { return "scalar"; }
     if ($type == TYPE_VOID()) { return "void"; }
+    if ($type == TYPE_INT32()) { return "int32"; }
+    if ($type == TYPE_INT64()) { return "int64"; }
+    if ($type == TYPE_FLOAT32()) { return "float32"; }
+    if ($type == TYPE_FLOAT64()) { return "float64"; }
+    if ($type == TYPE_DYNAMIC()) { return "dynamic"; }
     return "unknown";
 }

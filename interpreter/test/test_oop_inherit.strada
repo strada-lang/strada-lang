@@ -1,0 +1,32 @@
+package Animal;
+has ro str $species (required);
+
+func describe(scalar $self) void {
+    say("Species: " . $self->species());
+}
+
+package Dog;
+extends Animal;
+has ro str $name (required);
+
+func describe(scalar $self) void {
+    say("Dog: " . $self->name());
+}
+
+func bark(scalar $self) void {
+    say($self->name() . " says Woof!");
+}
+
+package main;
+func main() int {
+    my scalar $d = Dog::new("name", "Rex", "species", "Canis");
+    $d->bark();
+    $d->describe();
+    say($d->species());
+    say($d->isa("Dog"));
+    say($d->isa("Animal"));
+    say($d->isa("Cat"));
+    say($d->can("bark"));
+    say($d->can("fly"));
+    return 0;
+}

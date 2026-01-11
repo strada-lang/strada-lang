@@ -1,0 +1,126 @@
+#!/usr/bin/env strada
+# Test suite for async::mutex and async::atomic
+
+# Shared counter protected by mutex
+my scalar $mutex;
+my int $shared_counter = 0;
+
+async func increment_with_mutex(int $times) int {
+    for (my int $i = 0; $i < $times; $i++) {
+        async::lock($mutex);
+        $shared_counter = $shared_counter + 1;
+        async::unlock($mutex);
+    }
+    return $times;
+}
+
+# Shared atomic counter
+my scalar $atomic_counter;
+
+async func increment_atomic(int $times) int {
+    for (my int $i = 0; $i < $times; $i++) {
+        async::atomic_inc($atomic_counter);
+    }
+    return $times;
+}
+
+func main() int {
+    say("=== Mutex & Atomic Test Suite ===\n");
+
+    # Test 1: Basic mutex operations
+    say("Test 1: Basic mutex operations");
+    my scalar $m = async::mutex();
+    say("  Created mutex");
+
+    my int $lock_result = async::lock($m);
+    say("  Lock result: " . $lock_result . " (0 = success)");
+
+    my int $try_result = async::try_lock($m);
+    say("  Try lock (should fail): " . $try_result . " (non-0 = busy)");
+
+    my int $unlock_result = async::unlock($m);
+    say("  Unlock result: " . $unlock_result . " (0 = success)");
+
+    my int $try_result2 = async::try_lock($m);
+    say("  Try lock (should succeed): " . $try_result2 . " (0 = success)");
+    async::unlock($m);
+
+    async::mutex_destroy($m);
+    say("  Mutex destroyed");
+
+    # Test 2: Atomic basic operations
+    say("\nTest 2: Atomic basic operations");
+    my scalar $a = async::atomic(100);
+    say("  Initial value: " . async::atomic_load($a));
+
+    async::atomic_store($a, 200);
+    say("  After store(200): " . async::atomic_load($a));
+
+    my int $old = async::atomic_add($a, 50);
+    say("  After add(50): " . async::atomic_load($a) . " (old was " . $old . ")");
+
+    $old = async::atomic_sub($a, 25);
+    say("  After sub(25): " . async::atomic_load($a) . " (old was " . $old . ")");
+
+    # Test 3: Atomic inc/dec
+    say("\nTest 3: Atomic inc/dec");
+    my scalar $counter = async::atomic(0);
+    my int $new = async::atomic_inc($counter);
+    say("  After inc: " . $new);
+    $new = async::atomic_inc($counter);
+    say("  After inc: " . $new);
+    $new = async::atomic_dec($counter);
+    say("  After dec: " . $new);
+
+    # Test 4: Atomic CAS (compare-and-swap)
+    say("\nTest 4: Atomic CAS");
+    my scalar $cas_val = async::atomic(10);
+
+    # CAS should succeed: current is 10, expected is 10, set to 20
+    my int $cas_result = async::atomic_cas($cas_val, 10, 20);
+    say("  CAS(10->20): " . $cas_result . " (1=success), value=" . async::atomic_load($cas_val));
+
+    # CAS should fail: current is 20, expected is 10
+    $cas_result = async::atomic_cas($cas_val, 10, 30);
+    say("  CAS(10->30): " . $cas_result . " (0=fail), value=" . async::atomic_load($cas_val));
+
+    # Test 5: Mutex with concurrent threads
+    say("\nTest 5: Mutex-protected counter (concurrent)");
+    $mutex = async::mutex();
+    $shared_counter = 0;
+
+    my scalar $f1 = increment_with_mutex(100);
+    my scalar $f2 = increment_with_mutex(100);
+    my scalar $f3 = increment_with_mutex(100);
+
+    await $f1;
+    await $f2;
+    await $f3;
+
+    say("  Expected: 300, Got: " . $shared_counter);
+    async::mutex_destroy($mutex);
+
+    # Test 6: Atomic counter (lock-free concurrent)
+    say("\nTest 6: Atomic counter (lock-free concurrent)");
+    $atomic_counter = async::atomic(0);
+
+    my scalar $a1 = increment_atomic(100);
+    my scalar $a2 = increment_atomic(100);
+    my scalar $a3 = increment_atomic(100);
+
+    await $a1;
+    await $a2;
+    await $a3;
+
+    my int $final = async::atomic_load($atomic_counter);
+    say("  Expected: 300, Got: " . $final);
+
+    if ($shared_counter == 300 && $final == 300) {
+        say("\n=== All mutex & atomic tests passed! ===");
+    } else {
+        say("\n=== FAILED: Race condition detected ===");
+        return 1;
+    }
+
+    return 0;
+}

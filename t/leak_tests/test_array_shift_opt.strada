@@ -1,0 +1,183 @@
+#!/usr/bin/env strada
+# Test array shift/unshift optimization for memory leaks
+# shift() uses O(1) head increment, unshift() uses O(1) head decrement
+# Run: valgrind --leak-check=full ./test_array_shift_opt
+
+func main() int {
+    say("Testing array shift/unshift optimization for memory leaks...");
+    my int $iterations = 100;
+
+    # Test basic shift (O(1) with head offset)
+    say("  Basic shift...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my array @arr = ("a", "b", "c", "d", "e");
+        my str $first = shift(@arr);
+        if ($first ne "a") {
+            say("    FAIL: shift returned " . $first);
+            return 1;
+        }
+        if (size(@arr) != 4 || $arr[0] ne "b") {
+            say("    FAIL: array after shift");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test multiple shifts
+    say("  Multiple shifts...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @arr = (1, 2, 3, 4, 5);
+        my int $a = shift(@arr);
+        my int $b = shift(@arr);
+        my int $c = shift(@arr);
+        if ($a != 1 || $b != 2 || $c != 3) {
+            say("    FAIL: multi-shift values");
+            return 1;
+        }
+        if (size(@arr) != 2 || $arr[0] != 4 || $arr[1] != 5) {
+            say("    FAIL: array after multi-shift");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test shift then push (head offset + growth)
+    say("  Shift then push...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @arr = ("x", "y", "z");
+        shift(@arr);
+        push(@arr, "w");
+        if (size(@arr) != 3 || $arr[0] ne "y" || $arr[2] ne "w") {
+            say("    FAIL: shift+push");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test unshift after shift (O(1) when head > 0)
+    say("  Unshift after shift (O(1) path)...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @arr = ("a", "b", "c");
+        shift(@arr);  # head becomes 1
+        unshift(@arr, "x");  # head becomes 0
+        if (size(@arr) != 3 || $arr[0] ne "x" || $arr[1] ne "b" || $arr[2] ne "c") {
+            say("    FAIL: unshift after shift");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test unshift on fresh array (memmove fallback)
+    say("  Unshift on fresh array...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @arr = (1, 2, 3);
+        unshift(@arr, 0);
+        if (size(@arr) != 4 || $arr[0] != 0 || $arr[1] != 1) {
+            say("    FAIL: unshift fresh");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test shift all elements
+    say("  Shift until empty...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @arr = ("one", "two", "three");
+        my str $a = shift(@arr);
+        my str $b = shift(@arr);
+        my str $c = shift(@arr);
+        if ($a ne "one" || $b ne "two" || $c ne "three") {
+            say("    FAIL: shift all values");
+            return 1;
+        }
+        if (size(@arr) != 0) {
+            say("    FAIL: not empty after shift all");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test interleaved shift/unshift/push/pop
+    say("  Interleaved operations...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @arr = (10, 20, 30);
+        shift(@arr);      # [20, 30]
+        push(@arr, 40);   # [20, 30, 40]
+        unshift(@arr, 5); # [5, 20, 30, 40]
+        my int $last = pop(@arr);  # [5, 20, 30]
+        if ($last != 40 || size(@arr) != 3 || $arr[0] != 5 || $arr[1] != 20) {
+            say("    FAIL: interleaved ops");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test array access with head offset
+    say("  Array access after shift...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @arr = ("a", "b", "c", "d", "e");
+        shift(@arr);  # head offset, arr = [b, c, d, e]
+        shift(@arr);  # head offset, arr = [c, d, e]
+        if ($arr[0] ne "c" || $arr[1] ne "d" || $arr[2] ne "e") {
+            say("    FAIL: access with offset");
+            return 1;
+        }
+        if ($arr[-1] ne "e" || $arr[-2] ne "d") {
+            say("    FAIL: negative index with offset");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test reverse after shift
+    say("  Reverse after shift...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @arr = ("a", "b", "c", "d");
+        shift(@arr);  # [b, c, d]
+        reverse(@arr); # [d, c, b]
+        if ($arr[0] ne "d" || $arr[1] ne "c" || $arr[2] ne "b") {
+            say("    FAIL: reverse after shift");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test foreach after shift
+    say("  Foreach after shift...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @arr = (0, 10, 20, 30, 40);
+        shift(@arr);  # [10, 20, 30, 40]
+        my int $sum = 0;
+        foreach my int $n (@arr) {
+            $sum = $sum + $n;
+        }
+        if ($sum != 100) {
+            say("    FAIL: foreach sum after shift");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All array shift/unshift optimization tests passed!");
+    return 0;
+}

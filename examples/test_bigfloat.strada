@@ -1,0 +1,297 @@
+use lib "lib";
+use Math::BigFloat;
+
+my int $pass = 0;
+my int $fail = 0;
+
+func ok(int $cond, str $name) void {
+    if ($cond) {
+        $pass++;
+    } else {
+        say("FAIL: " . $name);
+        $fail++;
+    }
+}
+
+func main() int {
+    # Construction
+    my scalar $a = BigFloat::new("123.456");
+    ok($a->to_str() eq "123.456", "new decimal");
+
+    my scalar $b = BigFloat::new("-0.001");
+    ok($b->to_str() eq "-0.001", "new small negative");
+
+    my scalar $c = BigFloat::new("42");
+    ok($c->to_str() eq "42", "new integer");
+
+    my scalar $d = BigFloat::new("0");
+    ok($d->to_str() eq "0", "new zero");
+
+    my scalar $e = BigFloat::new("100.00");
+    ok($e->to_str() eq "100", "new trailing zeros stripped");
+
+    my scalar $f = BigFloat::new("-0.0");
+    ok($f->to_str() eq "0", "negative zero is zero");
+
+    my scalar $g = BigFloat::from_int(42);
+    ok($g->to_str() eq "42", "from_int");
+
+    my scalar $h = BigFloat::from_int(-7);
+    ok($h->to_str() eq "-7", "from_int negative");
+
+    # Addition
+    my scalar $t1 = BigFloat::new("1.5");
+    my scalar $t2 = BigFloat::new("2.3");
+    my scalar $r = $t1->add($t2);
+    ok($r->to_str() eq "3.8", "add simple");
+
+    $t1 = BigFloat::new("0.1");
+    $t2 = BigFloat::new("0.2");
+    $r = $t1->add($t2);
+    ok($r->to_str() eq "0.3", "add 0.1 + 0.2 (exact!)");
+
+    $t1 = BigFloat::new("100");
+    $t2 = BigFloat::new("0.001");
+    $r = $t1->add($t2);
+    ok($r->to_str() eq "100.001", "add different scales");
+
+    $t1 = BigFloat::new("1.5");
+    $t2 = BigFloat::new("-1.5");
+    $r = $t1->add($t2);
+    ok($r->to_str() eq "0", "add to zero");
+
+    $t1 = BigFloat::new("-3.14");
+    $t2 = BigFloat::new("-2.86");
+    $r = $t1->add($t2);
+    ok($r->to_str() eq "-6", "add negative + negative");
+
+    $t1 = BigFloat::new("999.999");
+    $t2 = BigFloat::new("0.001");
+    $r = $t1->add($t2);
+    ok($r->to_str() eq "1000", "add with carry across decimal");
+
+    # Subtraction
+    $t1 = BigFloat::new("10.5");
+    $t2 = BigFloat::new("3.2");
+    $r = $t1->sub($t2);
+    ok($r->to_str() eq "7.3", "sub simple");
+
+    $t1 = BigFloat::new("1");
+    $t2 = BigFloat::new("0.001");
+    $r = $t1->sub($t2);
+    ok($r->to_str() eq "0.999", "sub different scales");
+
+    $t1 = BigFloat::new("0.3");
+    $t2 = BigFloat::new("0.1");
+    $r = $t1->sub($t2);
+    ok($r->to_str() eq "0.2", "sub 0.3 - 0.1 (exact!)");
+
+    $t1 = BigFloat::new("5");
+    $t2 = BigFloat::new("10");
+    $r = $t1->sub($t2);
+    ok($r->to_str() eq "-5", "sub negative result");
+
+    # Multiplication
+    $t1 = BigFloat::new("1.5");
+    $t2 = BigFloat::new("2");
+    $r = $t1->mul($t2);
+    ok($r->to_str() eq "3", "mul simple");
+
+    $t1 = BigFloat::new("0.1");
+    $t2 = BigFloat::new("0.1");
+    $r = $t1->mul($t2);
+    ok($r->to_str() eq "0.01", "mul decimals");
+
+    $t1 = BigFloat::new("123.456");
+    $t2 = BigFloat::new("0");
+    $r = $t1->mul($t2);
+    ok($r->to_str() eq "0", "mul by zero");
+
+    $t1 = BigFloat::new("-2.5");
+    $t2 = BigFloat::new("4");
+    $r = $t1->mul($t2);
+    ok($r->to_str() eq "-10", "mul negative");
+
+    $t1 = BigFloat::new("-3");
+    $t2 = BigFloat::new("-4");
+    $r = $t1->mul($t2);
+    ok($r->to_str() eq "12", "mul neg * neg");
+
+    $t1 = BigFloat::new("12.34");
+    $t2 = BigFloat::new("56.78");
+    $r = $t1->mul($t2);
+    ok($r->to_str() eq "700.6652", "mul with decimals");
+
+    # Division
+    $t1 = BigFloat::new("10");
+    $t2 = BigFloat::new("3");
+    $r = $t1->div($t2);
+    ok(substr($r->to_str(), 0, 5) eq "3.333", "div repeating");
+
+    $t1 = BigFloat::new("1");
+    $t2 = BigFloat::new("4");
+    $r = $t1->div($t2);
+    ok($r->to_str() eq "0.25", "div exact");
+
+    $t1 = BigFloat::new("100");
+    $t2 = BigFloat::new("10");
+    $r = $t1->div($t2);
+    ok($r->to_str() eq "10", "div integer result");
+
+    $t1 = BigFloat::new("-10");
+    $t2 = BigFloat::new("3");
+    $r = $t1->div($t2);
+    ok(substr($r->to_str(), 0, 6) eq "-3.333", "div negative");
+
+    # Division with precision
+    $t1 = BigFloat::new("1");
+    $t2 = BigFloat::new("3");
+    $r = $t1->div_precision($t2, 5);
+    ok($r->to_str() eq "0.33333", "div_precision 5");
+
+    $t1 = BigFloat::new("2");
+    $t2 = BigFloat::new("3");
+    $r = $t1->div_precision($t2, 10);
+    ok($r->to_str() eq "0.6666666666", "div_precision 10");
+
+    # Comparisons
+    $t1 = BigFloat::new("1.5");
+    $t2 = BigFloat::new("2.5");
+    ok($t1->compare($t2) < 0, "compare less");
+
+    $t1 = BigFloat::new("2.5");
+    $t2 = BigFloat::new("1.5");
+    ok($t1->compare($t2) > 0, "compare greater");
+
+    $t1 = BigFloat::new("1.5");
+    $t2 = BigFloat::new("1.5");
+    ok($t1->compare($t2) == 0, "compare equal");
+
+    $t1 = BigFloat::new("1.5");
+    $t2 = BigFloat::new("1.50");
+    ok($t1->compare($t2) == 0, "compare equal diff scale");
+
+    $t1 = BigFloat::new("-1");
+    $t2 = BigFloat::new("1");
+    ok($t1->compare($t2) < 0, "compare neg vs pos");
+
+    $t1 = BigFloat::new("3.14");
+    $t2 = BigFloat::new("3.14");
+    ok($t1->is_eq($t2) == 1, "is_eq true");
+
+    $t1 = BigFloat::new("3.14");
+    $t2 = BigFloat::new("3.15");
+    ok($t1->is_ne($t2) == 1, "is_ne true");
+
+    $t1 = BigFloat::new("1.1");
+    $t2 = BigFloat::new("1.2");
+    ok($t1->is_lt($t2) == 1, "is_lt true");
+
+    $t1 = BigFloat::new("1.2");
+    $t2 = BigFloat::new("1.1");
+    ok($t1->is_gt($t2) == 1, "is_gt true");
+
+    $t1 = BigFloat::new("1.5");
+    $t2 = BigFloat::new("1.5");
+    ok($t1->is_le($t2) == 1, "is_le equal");
+    ok($t1->is_ge($t2) == 1, "is_ge equal");
+
+    # Unary operations
+    $t1 = BigFloat::new("-3.14");
+    $r = $t1->abs();
+    ok($r->to_str() eq "3.14", "abs negative");
+
+    $t1 = BigFloat::new("3.14");
+    $r = $t1->neg();
+    ok($r->to_str() eq "-3.14", "neg positive");
+
+    $t1 = BigFloat::new("-3.14");
+    $r = $t1->neg();
+    ok($r->to_str() eq "3.14", "neg negative");
+
+    $t1 = BigFloat::new("0");
+    $r = $t1->neg();
+    ok($r->to_str() eq "0", "neg zero");
+
+    $t1 = BigFloat::new("5.5");
+    ok($t1->sign() == 1, "sign positive");
+    $t1 = BigFloat::new("-5.5");
+    ok($t1->sign() == -1, "sign negative");
+    $t1 = BigFloat::new("0");
+    ok($t1->sign() == 0, "sign zero");
+    ok($t1->is_zero() == 1, "is_zero true");
+    $t1 = BigFloat::new("0.001");
+    ok($t1->is_zero() == 0, "is_zero false");
+
+    # Rounding
+    $t1 = BigFloat::new("3.14159");
+    $r = $t1->round(2);
+    ok($r->to_str() eq "3.14", "round down");
+
+    $t1 = BigFloat::new("3.145");
+    $r = $t1->round(2);
+    ok($r->to_str() eq "3.15", "round up");
+
+    $t1 = BigFloat::new("3.1");
+    $r = $t1->round(5);
+    ok($r->to_str() eq "3.1", "round no-op (already fewer digits)");
+
+    $t1 = BigFloat::new("9.999");
+    $r = $t1->round(2);
+    ok($r->to_str() eq "10", "round with carry");
+
+    # Floor/Ceil/Truncate
+    $t1 = BigFloat::new("3.7");
+    $r = $t1->floor();
+    ok($r->to_str() eq "3", "floor positive");
+
+    $t1 = BigFloat::new("-3.7");
+    $r = $t1->floor();
+    ok($r->to_str() eq "-4", "floor negative");
+
+    $t1 = BigFloat::new("3.2");
+    $r = $t1->ceil();
+    ok($r->to_str() eq "4", "ceil positive");
+
+    $t1 = BigFloat::new("-3.7");
+    $r = $t1->ceil();
+    ok($r->to_str() eq "-3", "ceil negative");
+
+    $t1 = BigFloat::new("3.9");
+    $r = $t1->truncate();
+    ok($r->to_str() eq "3", "truncate positive");
+
+    $t1 = BigFloat::new("-3.9");
+    $r = $t1->truncate();
+    ok($r->to_str() eq "-3", "truncate negative");
+
+    # to_int
+    $t1 = BigFloat::new("42.7");
+    ok($t1->to_int() == 42, "to_int truncates");
+    $t1 = BigFloat::new("-42.7");
+    ok($t1->to_int() == -42, "to_int negative truncates");
+    $t1 = BigFloat::new("0.5");
+    ok($t1->to_int() == 0, "to_int less than 1");
+
+    # Clone
+    my scalar $orig = BigFloat::new("3.14");
+    my scalar $copy = $orig->clone();
+    ok($copy->to_str() eq "3.14", "clone value");
+
+    # Edge cases
+    $t1 = BigFloat::new("0.001");
+    $t2 = BigFloat::new("0.002");
+    $r = $t1->add($t2);
+    ok($r->to_str() eq "0.003", "small decimal add");
+
+    $t1 = BigFloat::new("0.000001");
+    $t2 = BigFloat::new("1000000");
+    $r = $t1->mul($t2);
+    ok($r->to_str() eq "1", "small * large");
+
+    say($pass . " passed, " . $fail . " failed");
+    if ($fail == 0) {
+        say("All BigFloat tests passed");
+    }
+    return $fail;
+}

@@ -1,14 +1,282 @@
-# LWP - Library for WWW access in Strada
-# Inspired by Perl's LWP::UserAgent
-#
-# Usage:
-#   use lib "lib";
-#   use LWP;
-#
-#   my hash %response = LWP::get("http://example.com");
-#   say($response{"content"});
-#
-#   my hash %response = LWP::post("http://example.com/api", "data=value");
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+=head1 NAME
+
+LWP - Library for WWW access in Strada
+
+=head1 SYNOPSIS
+
+    use lib "lib";
+    use LWP;
+
+    # Simple GET request
+    my hash %response = LWP::get("http://example.com");
+    if ($response{"success"}) {
+        say($response{"content"});
+    }
+
+    # POST request
+    my hash %response = LWP::post("http://example.com/api", "data=value");
+
+    # Just get the content
+    my str $html = LWP::get_content("http://example.com");
+
+=head1 DESCRIPTION
+
+LWP provides functions for making HTTP requests, similar to Perl's
+LWP::UserAgent module. It supports GET, POST, PUT, DELETE, and HEAD requests.
+
+B<Note:> For HTTPS support, use L<LWP_SSL> or the L<ssl> module.
+
+=head1 RESPONSE HASH
+
+All request functions return a hash with:
+
+=over 4
+
+=item B<success> - 1 if status is 2xx, 0 otherwise
+
+=item B<status> - HTTP status code (200, 404, etc.)
+
+=item B<reason> - HTTP reason phrase ("OK", "Not Found", etc.)
+
+=item B<content> - Response body
+
+=item B<headers> - Hash reference of response headers (lowercase keys)
+
+=item B<error> - Error message if request failed
+
+=back
+
+=head1 REQUEST FUNCTIONS
+
+=head2 get($url)
+
+Make a GET request.
+
+    my hash %resp = LWP::get("http://api.example.com/users");
+    if ($resp{"success"}) {
+        my scalar $data = JSON::decode($resp{"content"});
+    }
+
+=head2 get_with_options($url, %options)
+
+GET request with custom options (headers, user agent).
+
+    my hash %opts = ();
+    $opts{"user_agent"} = "MyApp/1.0";
+    $opts{"headers"} = { "Authorization" => "Bearer token123" };
+    my hash %resp = LWP::get_with_options($url, %opts);
+
+=head2 post($url, $data)
+
+Make a POST request with form data.
+
+    my hash %resp = LWP::post("http://api.example.com/login",
+        "username=alice&password=secret");
+
+=head2 post_with_options($url, $data, %options)
+
+POST with custom options.
+
+=head2 post_form($url, %form_data)
+
+POST form data from a hash (automatically URL-encoded).
+
+    my hash %form = ();
+    $form{"username"} = "alice";
+    $form{"password"} = "secret";
+    my hash %resp = LWP::post_form("http://example.com/login", %form);
+
+=head2 put($url, $data)
+
+Make a PUT request.
+
+=head2 put_with_options($url, $data, %options)
+
+PUT with custom options.
+
+=head2 patch($url, $data)
+
+Make a PATCH request (partial update).
+
+=head2 patch_with_options($url, $data, %options)
+
+PATCH with custom options.
+
+=head2 delete_req($url)
+
+Make a DELETE request.
+
+=head2 delete_with_options($url, %options)
+
+DELETE with custom options.
+
+=head2 head($url)
+
+Make a HEAD request (get headers only).
+
+=head2 head_with_options($url, %options)
+
+HEAD with custom options.
+
+=head2 options($url)
+
+Make an OPTIONS request (get supported methods).
+
+=head2 options_with_options($url, %options)
+
+OPTIONS with custom options.
+
+=head1 LOW-LEVEL REQUEST
+
+=head2 do_request($method, $url, $body, %options)
+
+Make an HTTP request with full control over method, body, and options.
+All other request functions are wrappers around this.
+
+B<Parameters:>
+
+=over 4
+
+=item B<$method> - HTTP method string ("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", or any custom method)
+
+=item B<$url> - Full URL including scheme, host, port, path, and query
+
+=item B<$body> - Request body (empty string for no body)
+
+=item B<%options> - Hash with optional keys:
+
+=over 4
+
+=item B<user_agent> - Custom User-Agent string (default: "Strada-LWP/1.0")
+
+=item B<headers> - Hash reference of custom headers
+
+=back
+
+=back
+
+Returns a response hash (see RESPONSE HASH above).
+
+    # Custom method
+    my hash %opts = ();
+    $opts{"headers"} = { "Content-Type" => "application/json" };
+    my hash %resp = LWP::do_request("PATCH", "http://api.example.com/item/1",
+        JSON::encode({ "status" => "active" }), %opts);
+
+    # WebDAV methods
+    my hash %resp = LWP::do_request("PROPFIND", "http://dav.example.com/files/", "", %opts);
+
+=head1 CONVENIENCE FUNCTIONS
+
+=head2 get_content($url)
+
+Fetch URL and return just the content (empty string on error).
+
+    my str $html = LWP::get_content("http://example.com");
+
+=head2 is_reachable($url)
+
+Check if a URL is reachable (HEAD request).
+
+    if (LWP::is_reachable("http://api.example.com")) {
+        say("API is up!");
+    }
+
+=head2 get_header(%response, $name)
+
+Get a response header value (case-insensitive).
+
+    my str $type = LWP::get_header(%resp, "Content-Type");
+
+=head1 URL FUNCTIONS
+
+=head2 parse_url($url)
+
+Parse a URL into components (scheme, host, port, path, query).
+
+    my hash %parts = LWP::parse_url("http://example.com:8080/path?q=test");
+    # $parts{"host"} = "example.com"
+    # $parts{"port"} = 8080
+    # $parts{"path"} = "/path"
+    # $parts{"query"} = "q=test"
+
+=head2 url_encode($string)
+
+URL-encode a string.
+
+    my str $safe = LWP::url_encode("hello world!");
+    # "hello%20world%21"
+
+=head2 url_decode($string)
+
+URL-decode a string.
+
+=head2 build_query(%params)
+
+Build a query string from a hash.
+
+    my hash %p = ();
+    $p{"name"} = "Alice";
+    $p{"city"} = "New York";
+    my str $qs = LWP::build_query(%p);
+    # "name=Alice&city=New%20York"
+
+=head1 USERAGENT CLASS
+
+For more control, use the UserAgent functions:
+
+    my hash %ua = LWP::UserAgent_new();
+    LWP::UserAgent_set_agent(%ua, "MyApp/2.0");
+    LWP::UserAgent_set_header(%ua, "Accept", "application/json");
+
+    my hash %resp = LWP::UserAgent_get(%ua, $url);
+    my hash %resp = LWP::UserAgent_post(%ua, $url, $data);
+
+=head1 EXAMPLE
+
+    use lib "lib";
+    use LWP;
+    use JSON;
+
+    # Fetch JSON API
+    my hash %resp = LWP::get("http://api.example.com/users");
+    if ($resp{"success"}) {
+        my scalar $users = JSON::decode($resp{"content"});
+        foreach my scalar $user (@{$users}) {
+            say($user->{"name"});
+        }
+    } else {
+        say("Error: " . $resp{"error"});
+    }
+
+    # POST JSON data
+    my hash %opts = ();
+    $opts{"headers"} = { "Content-Type" => "application/json" };
+    my str $json = JSON::encode({ "name" => "Bob" });
+    my hash %resp = LWP::post_with_options($url, $json, %opts);
+
+=head1 SEE ALSO
+
+L<LWP_SSL>, L<ssl>, L<JSON>
+
+=cut
 
 package LWP;
 
@@ -142,7 +410,7 @@ func build_query(hash %params) str {
     my array @keys = keys(%params);
     my int $i = 0;
     while ($i < scalar(@keys)) {
-        my str $key = @keys[$i];
+        my str $key = $keys[$i];
         if ($i > 0) {
             $result = $result . "&";
         }
@@ -159,7 +427,7 @@ func parse_headers(str $header_block) hash {
 
     my int $i = 0;
     while ($i < scalar(@lines)) {
-        my str $line = @lines[$i];
+        my str $line = $lines[$i];
         my int $colon = index($line, ":");
         if ($colon > 0) {
             my str $name = substr($line, 0, $colon);
@@ -209,15 +477,15 @@ func parse_response(str $raw) hash {
     # Parse "HTTP/1.1 200 OK"
     my array @status_parts = split(" ", $status_line);
     if (scalar(@status_parts) >= 2) {
-        $response{"protocol"} = @status_parts[0];
-        $response{"status"} = cast_int(@status_parts[1]);
+        $response{"protocol"} = $status_parts[0];
+        $response{"status"} = cast_int($status_parts[1]);
         if (scalar(@status_parts) >= 3) {
             # Join remaining parts for reason phrase
             my str $reason = "";
             my int $i = 2;
             while ($i < scalar(@status_parts)) {
                 if ($i > 2) { $reason = $reason . " "; }
-                $reason = $reason . @status_parts[$i];
+                $reason = $reason . $status_parts[$i];
                 $i = $i + 1;
             }
             $response{"reason"} = $reason;
@@ -317,7 +585,7 @@ func do_request(str $method, str $url, str $body, hash %options) hash {
         my array @hkeys = keys($custom_headers);
         my int $i = 0;
         while ($i < scalar(@hkeys)) {
-            my str $hname = @hkeys[$i];
+            my str $hname = $hkeys[$i];
             $request = $request . $hname . ": " . $custom_headers->{$hname} . "\r\n";
             $i = $i + 1;
         }
@@ -398,16 +666,53 @@ func put(str $url, str $data) hash {
     return LWP::do_request("PUT", $url, $data, %empty);
 }
 
+# PUT request with options
+func put_with_options(str $url, str $data, hash %options) hash {
+    return LWP::do_request("PUT", $url, $data, %options);
+}
+
 # DELETE request
 func delete_req(str $url) hash {
     my hash %empty = ();
     return LWP::do_request("DELETE", $url, "", %empty);
 }
 
+# DELETE request with options
+func delete_with_options(str $url, hash %options) hash {
+    return LWP::do_request("DELETE", $url, "", %options);
+}
+
+# PATCH request
+func patch(str $url, str $data) hash {
+    my hash %empty = ();
+    return LWP::do_request("PATCH", $url, $data, %empty);
+}
+
+# PATCH request with options
+func patch_with_options(str $url, str $data, hash %options) hash {
+    return LWP::do_request("PATCH", $url, $data, %options);
+}
+
+# OPTIONS request
+func options(str $url) hash {
+    my hash %empty = ();
+    return LWP::do_request("OPTIONS", $url, "", %empty);
+}
+
+# OPTIONS request with options
+func options_with_options(str $url, hash %options) hash {
+    return LWP::do_request("OPTIONS", $url, "", %options);
+}
+
 # HEAD request (get headers only)
 func head(str $url) hash {
     my hash %empty = ();
     return LWP::do_request("HEAD", $url, "", %empty);
+}
+
+# HEAD request with options
+func head_with_options(str $url, hash %options) hash {
+    return LWP::do_request("HEAD", $url, "", %options);
 }
 
 # Simple content fetch (returns just the content string or empty on error)

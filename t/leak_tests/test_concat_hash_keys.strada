@@ -1,0 +1,143 @@
+package main;
+
+func test_hash_access_concat_key() void {
+    my hash %h;
+    my int $i = 0;
+    while ($i < 500) {
+        $h{"key" . $i} = $i;
+        $i++;
+    }
+    # Verify
+    my int $j = 0;
+    while ($j < 500) {
+        my int $v = $h{"key" . $j};
+        if ($v != $j) {
+            say("FAIL: expected " . $j . " got " . $v);
+        }
+        $j++;
+    }
+    # Delete
+    my int $k = 0;
+    while ($k < 500) {
+        delete($h{"key" . $k});
+        $k++;
+    }
+    say("test_hash_access_concat_key: PASS (size=" . scalar(keys(%h)) . ")");
+}
+
+func test_deref_hash_concat_key() void {
+    my scalar $h = {};
+    my int $i = 0;
+    while ($i < 500) {
+        $h->{"item_" . $i} = $i * 2;
+        $i++;
+    }
+    # Read back
+    my int $sum = 0;
+    my int $j = 0;
+    while ($j < 500) {
+        $sum += $h->{"item_" . $j};
+        $j++;
+    }
+    say("test_deref_hash_concat_key: PASS (sum=" . $sum . ")");
+}
+
+func test_concat_key_with_string_suffix() void {
+    my hash %h;
+    my array @names = ("alice", "bob", "carol", "dave");
+    my int $i = 0;
+    while ($i < 4) {
+        my str $name = $names[$i];
+        $h{"user_" . $name} = $i + 1;
+        $i++;
+    }
+    # Read back
+    my int $j = 0;
+    while ($j < 4) {
+        my str $name = $names[$j];
+        my int $v = $h{"user_" . $name};
+        if ($v != $j + 1) {
+            say("FAIL: user_" . $name . " expected " . ($j + 1) . " got " . $v);
+        }
+        $j++;
+    }
+    # Delete
+    my int $k = 0;
+    while ($k < 4) {
+        my str $name = $names[$k];
+        delete($h{"user_" . $name});
+        $k++;
+    }
+    say("test_concat_key_with_string_suffix: PASS (size=" . scalar(keys(%h)) . ")");
+}
+
+func test_concat_key_with_hash_access_suffix() void {
+    my hash %h;
+    my hash %ids;
+    $ids{"a"} = 100;
+    $ids{"b"} = 200;
+    $ids{"c"} = 300;
+
+    # Use hash access result as suffix (needs cleanup)
+    $h{"item_" . $ids{"a"}} = "first";
+    $h{"item_" . $ids{"b"}} = "second";
+    $h{"item_" . $ids{"c"}} = "third";
+
+    my str $v1 = $h{"item_" . $ids{"a"}};
+    my str $v2 = $h{"item_" . $ids{"b"}};
+    my str $v3 = $h{"item_" . $ids{"c"}};
+    say("test_concat_key_with_hash_access_suffix: PASS (" . $v1 . "," . $v2 . "," . $v3 . ")");
+}
+
+func test_concat_key_in_loop_with_method() void {
+    my hash %cache;
+    my int $i = 0;
+    while ($i < 500) {
+        $cache{"val_" . $i} = $i * $i;
+        $i++;
+    }
+    my int $sum = 0;
+    my int $j = 0;
+    while ($j < 500) {
+        $sum += $cache{"val_" . $j};
+        $j++;
+    }
+    # Delete all
+    my int $k = 0;
+    while ($k < 500) {
+        delete($cache{"val_" . $k});
+        $k++;
+    }
+    say("test_concat_key_in_loop_with_method: PASS (sum=" . $sum . ", size=" . scalar(keys(%cache)) . ")");
+}
+
+func test_concat_key_overwrite() void {
+    my hash %h;
+    my int $i = 0;
+    while ($i < 500) {
+        $h{"k" . $i} = "old";
+        $i++;
+    }
+    # Overwrite all
+    my int $j = 0;
+    while ($j < 500) {
+        $h{"k" . $j} = "new";
+        $j++;
+    }
+    my str $v = $h{"k" . 0};
+    say("test_concat_key_overwrite: PASS (" . $v . ")");
+}
+
+func main() int {
+    my int $iter = 0;
+    while ($iter < 10) {
+        test_hash_access_concat_key();
+        test_deref_hash_concat_key();
+        test_concat_key_with_string_suffix();
+        test_concat_key_with_hash_access_suffix();
+        test_concat_key_in_loop_with_method();
+        test_concat_key_overwrite();
+        $iter++;
+    }
+    return 0;
+}

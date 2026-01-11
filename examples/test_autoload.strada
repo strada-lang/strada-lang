@@ -1,0 +1,72 @@
+# Test AUTOLOAD support for OOP
+
+package Proxy;
+
+func new(str $name) scalar {
+    my hash %self = ();
+    $self{"name"} = $name;
+    return bless(\%self, "Proxy");
+}
+
+func real_method(scalar $self) str {
+    return "real";
+}
+
+func AUTOLOAD(scalar $self, str $method, scalar ...@args) scalar {
+    if (scalar(@args) > 0) {
+        return $method . "(" . $args[0] . ")";
+    }
+    return $method;
+}
+
+# Child class that inherits AUTOLOAD from Proxy
+package Child;
+
+func new() scalar {
+    my hash %self = ();
+    $self{"name"} = "child";
+    inherit("Child", "Proxy");
+    return bless(\%self, "Child");
+}
+
+func child_only(scalar $self) str {
+    return "child_only";
+}
+
+package main;
+
+func main() int {
+    my scalar $p = Proxy::new("test");
+
+    # 1. Real methods still work
+    say("1: " . $p->real_method());
+
+    # 2. Basic AUTOLOAD - method name passed through
+    say("2: " . $p->foo());
+
+    # 3. AUTOLOAD with arguments
+    say("3: " . $p->bar("hello"));
+
+    # 4. can() returns 0 for missing methods (even with AUTOLOAD)
+    if ($p->can("missing") == 0) {
+        say("4: can returns 0");
+    }
+
+    # 5. can() returns 1 for real methods
+    if ($p->can("real_method") == 1) {
+        say("5: can returns 1 for real");
+    }
+
+    # 6. Inherited AUTOLOAD
+    my scalar $c = Child::new();
+    say("6: " . $c->something());
+
+    # 7. Child's own methods still work
+    say("7: " . $c->child_only());
+
+    # 8. AUTOLOAD with multiple args
+    say("8: " . $p->compute("x", "y"));
+
+    say("All AUTOLOAD tests passed");
+    return 0;
+}

@@ -1,0 +1,86 @@
+#!/usr/bin/env strada
+# Test string interning for hash keys
+# Repeated hash keys are interned to avoid duplicate allocations
+# Run: valgrind --leak-check=full ./test_intern_strings
+
+func main() int {
+    say("Testing string interning for memory leaks...");
+    my int $iterations = 100;
+
+    # Test creating many hashes with same keys
+    say("  Repeated hash key creation...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my hash %h1 = ("name" => "Alice", "age" => 30, "city" => "NYC");
+        my hash %h2 = ("name" => "Bob", "age" => 25, "city" => "LA");
+        my hash %h3 = ("name" => "Carol", "age" => 35, "city" => "SF");
+        if ($h1{"name"} ne "Alice" || $h2{"name"} ne "Bob" || $h3{"name"} ne "Carol") {
+            say("    FAIL: hash value mismatch");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test hash key updates (same key, different values)
+    say("  Hash key updates...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        $h{"key"} = "value1";
+        $h{"key"} = "value2";
+        $h{"key"} = "value3";
+        if ($h{"key"} ne "value3") {
+            say("    FAIL: key update");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test hash deletion (intern release)
+    say("  Hash key deletion...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ("a" => 1, "b" => 2, "c" => 3);
+        delete($h{"a"});
+        delete($h{"b"});
+        if (exists($h{"a"}) || exists($h{"b"}) || !exists($h{"c"})) {
+            say("    FAIL: delete/exists");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test many distinct keys (should not intern strings > 64 bytes)
+    say("  Long keys (not interned)...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        $h{"this_is_a_very_long_hash_key_that_should_not_be_interned_because_it_exceeds_64_chars"} = "value";
+        if ($h{"this_is_a_very_long_hash_key_that_should_not_be_interned_because_it_exceeds_64_chars"} ne "value") {
+            say("    FAIL: long key");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test hash copy/clone
+    say("  Hash copy...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %src = ("x" => 10, "y" => 20, "z" => 30);
+        my hash %dst = %src;
+        if ($dst{"x"} != 10 || $dst{"y"} != 20 || $dst{"z"} != 30) {
+            say("    FAIL: hash copy");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All string interning tests passed!");
+    return 0;
+}

@@ -124,4 +124,52 @@ StradaValue* strada_dbi_rows(StradaValue *sth);
 StradaValue* strada_dbi_column_names(StradaValue *sth);
 StradaValue* strada_dbi_ping(StradaValue *dbh);
 
+/* ============== Raw C Functions for extern "C" ============== */
+/* These use raw C types instead of StradaValue* for direct FFI usage */
+
+/* Connection */
+DbiHandle* strada_dbi_connect_raw(const char *dsn, const char *user, const char *pass,
+                                   int auto_commit, int print_error);
+void strada_dbi_disconnect_raw(DbiHandle *dbh);
+int strada_dbi_ping_raw(DbiHandle *dbh);
+
+/* Statement */
+DbiStatement* strada_dbi_prepare_raw(DbiHandle *dbh, const char *sql);
+int strada_dbi_execute_raw(DbiStatement *sth);
+int strada_dbi_do_raw(DbiHandle *dbh, const char *sql);
+void strada_dbi_finish_raw(DbiStatement *sth);
+void strada_dbi_free_statement_raw(DbiStatement *sth);
+int strada_dbi_num_params(DbiStatement *sth);
+
+/* Bind parameters */
+void strada_dbi_bind_int(DbiStatement *sth, int idx, int64_t val);
+void strada_dbi_bind_str(DbiStatement *sth, int idx, const char *val);
+void strada_dbi_bind_num(DbiStatement *sth, int idx, double val);
+void strada_dbi_bind_null(DbiStatement *sth, int idx);
+void strada_dbi_clear_bindings(DbiStatement *sth);
+
+/* Step-based fetch */
+int strada_dbi_step(DbiStatement *sth);
+
+/* Column accessors */
+int strada_dbi_column_count(DbiStatement *sth);
+char* strada_dbi_column_name(DbiStatement *sth, int idx);
+int strada_dbi_column_type(DbiStatement *sth, int idx);
+int64_t strada_dbi_column_int(DbiStatement *sth, int idx);
+double strada_dbi_column_num(DbiStatement *sth, int idx);
+char* strada_dbi_column_str(DbiStatement *sth, int idx);
+int strada_dbi_column_is_null(DbiStatement *sth, int idx);
+
+/* Transactions */
+int strada_dbi_begin_work_raw(DbiHandle *dbh);
+int strada_dbi_commit_raw(DbiHandle *dbh);
+int strada_dbi_rollback_raw(DbiHandle *dbh);
+
+/* Utility */
+char* strada_dbi_quote_raw(DbiHandle *dbh, const char *str);
+int64_t strada_dbi_last_insert_id_raw(DbiHandle *dbh);
+const char* strada_dbi_errstr_raw(DbiHandle *dbh);
+int strada_dbi_err_raw(DbiHandle *dbh);
+int strada_dbi_rows_raw(DbiStatement *sth);
+
 #endif /* STRADA_DBI_H */

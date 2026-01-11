@@ -1,0 +1,199 @@
+#!/usr/bin/env strada
+# Test hash table pool/free-list and resize for memory leaks
+# Exercises: entry alloc/free pooling, bitmask indexing, cached hash,
+# power-of-2 resize, reserve, and heavy churn (insert/delete cycles).
+# Run: valgrind --leak-check=full ./test_hash_pool
+
+func main() int {
+    say("Testing hash pool and resize for memory leaks...");
+    my int $iterations = 100;
+
+    # Test 1: Heavy insert/delete churn (exercises free-list reuse)
+    say("  Insert/delete churn (free-list reuse)...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        my int $j = 0;
+        while ($j < 50) {
+            $h{"key_" . $j} = "val_" . $j;
+            $j++;
+        }
+        # Delete all entries — they go to the free-list
+        $j = 0;
+        while ($j < 50) {
+            delete($h{"key_" . $j});
+            $j++;
+        }
+        if (size(keys(%h)) != 0) {
+            say("    FAIL: hash should be empty after deleting all keys");
+            return 1;
+        }
+        # Re-insert — should reuse pooled entries
+        $j = 0;
+        while ($j < 50) {
+            $h{"new_" . $j} = $j * 10;
+            $j++;
+        }
+        if (size(keys(%h)) != 50) {
+            say("    FAIL: hash should have 50 keys after re-insert");
+            return 1;
+        }
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 2: Trigger multiple resizes (power-of-2 growth)
+    say("  Multiple resizes...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        my int $j = 0;
+        # Insert enough to trigger several resizes (16 -> 32 -> 64 -> 128)
+        while ($j < 100) {
+            $h{"item_" . $j} = $j;
+            $j++;
+        }
+        # Verify all entries survived the resizes
+        $j = 0;
+        my int $ok = 1;
+        while ($j < 100) {
+            if ($h{"item_" . $j} != $j) {
+                $ok = 0;
+            }
+            $j++;
+        }
+        if ($ok != 1) {
+            say("    FAIL: entries lost after resize");
+            return 1;
+        }
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 3: Hash reserve with power-of-2 rounding
+    say("  Hash reserve (power-of-2 rounding)...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h[200] = ();
+        my int $j = 0;
+        while ($j < 150) {
+            $h{"r_" . $j} = "reserved_" . $j;
+            $j++;
+        }
+        if (size(keys(%h)) != 150) {
+            say("    FAIL: reserved hash wrong size");
+            return 1;
+        }
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 4: Overwrite same key repeatedly (tests set path, not insert)
+    say("  Repeated key overwrite...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        my int $j = 0;
+        while ($j < 200) {
+            $h{"same_key"} = "value_" . $j;
+            $j++;
+        }
+        if ($h{"same_key"} ne "value_199") {
+            say("    FAIL: overwrite didn't keep last value");
+            return 1;
+        }
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 5: Hash ref churn (anon hashes through pool)
+    say("  Anonymous hash ref churn...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @refs = ();
+        my int $j = 0;
+        while ($j < 30) {
+            push(@refs, { "id" => $j, "name" => "item_" . $j, "data" => [1, 2, 3] });
+            $j++;
+        }
+        # Verify first and last
+        if ($refs[0]->{"id"} != 0) {
+            say("    FAIL: first ref id wrong");
+            return 1;
+        }
+        if ($refs[29]->{"id"} != 29) {
+            say("    FAIL: last ref id wrong");
+            return 1;
+        }
+        # Let all refs drop out of scope
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 6: Interleaved insert and delete (partial churn)
+    say("  Interleaved insert/delete...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        my int $j = 0;
+        while ($j < 80) {
+            $h{"k" . $j} = $j;
+            # Delete every other entry as we go
+            if ($j % 2 == 1) {
+                delete($h{"k" . ($j - 1)});
+            }
+            $j++;
+        }
+        # Should have 40 entries (the odd-numbered ones)
+        if (size(keys(%h)) != 40) {
+            say("    FAIL: expected 40, got " . size(keys(%h)));
+            return 1;
+        }
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 7: Hash with exists/defined on missing keys (no alloc)
+    say("  Exists/defined on missing keys...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        $h{"real"} = "value";
+        my int $j = 0;
+        while ($j < 50) {
+            my int $e = exists($h{"fake_" . $j});
+            my int $d = defined($h{"fake_" . $j});
+            if ($e == 1 || $d == 1) {
+                say("    FAIL: phantom key");
+                return 1;
+            }
+            $j++;
+        }
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 8: Large hash with delete-all then scope exit
+    say("  Large hash delete-all then scope exit...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %big = ();
+        my int $j = 0;
+        while ($j < 200) {
+            $big{"big_" . $j} = "data_" . $j;
+            $j++;
+        }
+        # Delete everything
+        $j = 0;
+        while ($j < 200) {
+            delete($big{"big_" . $j});
+            $j++;
+        }
+        # Scope exit frees the empty hash structure
+        $i++;
+    }
+    say("    PASS");
+
+    say("All hash pool tests passed!");
+    return 0;
+}

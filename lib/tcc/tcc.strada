@@ -1,0 +1,458 @@
+=head1 NAME
+
+tcc - In-process C compilation using libtcc
+
+=head1 SYNOPSIS
+
+    use lib "lib";
+    import_lib "tcc.so";
+
+    my int $state = tcc::state_new();
+    tcc::output_memory($state);
+    tcc::include_path($state, "runtime");
+    tcc::compile($state, $c_code);
+    tcc::link($state);
+    my int $fn = tcc::symbol($state, "my_function");
+    # Call $fn via sys::dl_call_*()
+    tcc::state_delete($state);
+
+=head1 DESCRIPTION
+
+The tcc module provides bindings to Tiny C Compiler (TCC) for in-process
+C code compilation. This allows you to compile and execute C code at
+runtime without spawning external processes.
+
+TCC is useful for:
+
+=over 4
+
+=item * JIT compilation of C code
+
+=item * Dynamic code generation
+
+=item * Plugins written in C
+
+=item * Embedding C snippets in Strada programs
+
+=back
+
+B<Build:>
+
+    cd lib/tcc && make
+
+B<Requires:>
+
+    apt install libtcc-dev    # Debian/Ubuntu
+
+=head1 FUNCTIONS
+
+=head2 state_new()
+
+Create a new TCC compilation state. Returns a handle (int) or 0 on failure.
+
+    my int $state = tcc::state_new();
+
+=head2 state_delete($state)
+
+Delete TCC state and free memory. Always call when done.
+
+    tcc::state_delete($state);
+
+=head2 output_memory($state)
+
+Set output type to memory (for in-process compilation). Call this
+before C<compile()>.
+
+    tcc::output_memory($state);
+
+=head2 include_path($state, $path)
+
+Add an include path for C<#include> directives.
+
+    tcc::include_path($state, "runtime");
+    tcc::include_path($state, "/usr/include");
+
+=head2 lib_path($state, $path)
+
+Add a library search path.
+
+=head2 add_lib($state, $name)
+
+Add a library (like C<-l> flag).
+
+    tcc::add_lib($state, "m");  # -lm
+
+=head2 define($state, $name, $value)
+
+Define a preprocessor symbol.
+
+    tcc::define($state, "DEBUG", "1");
+    tcc::define($state, "VERSION", "");  # Just define, no value
+
+=head2 compile($state, $code)
+
+Compile C code from a string. Returns 1 on success, 0 on failure.
+
+    my int $ok = tcc::compile($state, $c_source);
+    if (!$ok) {
+        say("Compile error: " . tcc::error());
+    }
+
+=head2 link($state)
+
+Add runtime symbols and relocate code to memory. Call after C<compile()>.
+Returns 1 on success.
+
+    tcc::link($state);
+
+=head2 symbol($state, $name)
+
+Get a function pointer from compiled code. Returns 0 if not found.
+
+    my int $fn = tcc::symbol($state, "my_function");
+
+=head2 error()
+
+Get the last error message.
+
+    say(tcc::error());
+
+=head2 compile_func($code, $func_name, $inc_path)
+
+Convenience function: compile code and get function pointer.
+Returns array C<[fn_ptr, state]> or C<[0, 0]> on error.
+
+    my array @result = tcc::compile_func($code, "process", "runtime");
+    my int $fn = $result[0];
+    my int $state = $result[1];
+
+=head1 EXAMPLE
+
+    use lib "lib";
+    import_lib "tcc.so";
+
+    my str $code = '
+    #include "strada_runtime.h"
+
+    StradaValue* double_it(StradaValue* x) {
+        long long val = strada_to_int(x);
+        return strada_new_int(val * 2);
+    }
+    ';
+
+    my int $state = tcc::state_new();
+    tcc::output_memory($state);
+    tcc::include_path($state, "runtime");
+
+    if (!tcc::compile($state, $code)) {
+        die("Compile failed: " . tcc::error());
+    }
+
+    if (!tcc::link($state)) {
+        die("Link failed");
+    }
+
+    my int $fn = tcc::symbol($state, "double_it");
+    if ($fn == 0) {
+        die("Symbol not found");
+    }
+
+    # Call the function
+    my scalar $result = sys::dl_call_sv($fn, [21]);
+    say("Result: " . $result);  # 42
+
+    tcc::state_delete($state);
+
+=head1 SEE ALSO
+
+L<perl5> for embedding Perl
+
+=cut
+
+package tcc;
+version "1.0.0";
+
+__C__ {
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <libtcc.h>
+#include <dlfcn.h>
+
+/* Error message buffer */
+static char libtcc_error_msg[1024] = "";
+
+static void libtcc_error_handler(void *opaque, const char *msg) {
+    (void)opaque;
+    strncpy(libtcc_error_msg, msg, sizeof(libtcc_error_msg) - 1);
+    libtcc_error_msg[sizeof(libtcc_error_msg) - 1] = '\0';
+}
+
+/* Add all runtime symbols to TCC state */
+static void libtcc_add_runtime_symbols(TCCState *s) {
+    /* Use dlsym to get actual addresses from current process */
+    void *handle = dlopen(NULL, RTLD_NOW);
+    if (!handle) return;
+
+    #define ADD_SYM(name) { \
+        void *sym = dlsym(handle, #name); \
+        if (sym) tcc_add_symbol(s, #name, sym); \
+    }
+
+    ADD_SYM(strada_new_undef);
+    ADD_SYM(strada_new_int);
+    ADD_SYM(strada_new_num);
+    ADD_SYM(strada_new_str);
+    ADD_SYM(strada_new_str_len);
+    ADD_SYM(strada_new_array);
+    ADD_SYM(strada_new_hash);
+    ADD_SYM(strada_new_ref);
+    ADD_SYM(strada_incref);
+    ADD_SYM(strada_decref);
+    ADD_SYM(strada_to_int);
+    ADD_SYM(strada_to_num);
+    ADD_SYM(strada_to_str);
+    ADD_SYM(strada_to_bool);
+    ADD_SYM(strada_is_true);
+    ADD_SYM(strada_is_defined);
+    ADD_SYM(strada_typeof);
+    ADD_SYM(strada_str_concat);
+    ADD_SYM(strada_str_length);
+    ADD_SYM(strada_substr);
+    ADD_SYM(strada_index);
+    ADD_SYM(strada_uc);
+    ADD_SYM(strada_lc);
+    ADD_SYM(strada_chr);
+    ADD_SYM(strada_ord);
+    ADD_SYM(strada_sprintf);
+    ADD_SYM(strada_join);
+    ADD_SYM(strada_split);
+    ADD_SYM(strada_char_at);
+    ADD_SYM(strada_array_push);
+    ADD_SYM(strada_array_pop);
+    ADD_SYM(strada_array_shift);
+    ADD_SYM(strada_array_unshift);
+    ADD_SYM(strada_array_get);
+    ADD_SYM(strada_array_set);
+    ADD_SYM(strada_array_length);
+    ADD_SYM(strada_array_reverse);
+    ADD_SYM(strada_hash_get);
+    ADD_SYM(strada_hash_set);
+    ADD_SYM(strada_hash_exists);
+    ADD_SYM(strada_hash_delete);
+    ADD_SYM(strada_hash_keys);
+    ADD_SYM(strada_hash_values);
+    ADD_SYM(strada_hash_size);
+    ADD_SYM(strada_deref);
+    ADD_SYM(strada_deref_array);
+    ADD_SYM(strada_deref_hash);
+    ADD_SYM(strada_num_cmp);
+    ADD_SYM(strada_str_cmp);
+    ADD_SYM(strada_str_eq);
+    ADD_SYM(strada_str_ne);
+    ADD_SYM(strada_say);
+    ADD_SYM(strada_print);
+    ADD_SYM(strada_warn);
+    ADD_SYM(strada_die);
+    ADD_SYM(strada_regex_match);
+    ADD_SYM(strada_regex_subst);
+    ADD_SYM(strada_bless);
+    ADD_SYM(strada_blessed);
+    ADD_SYM(strada_isa);
+    ADD_SYM(strada_register_method);
+    ADD_SYM(strada_method_register);
+    ADD_SYM(strada_method_call);
+    ADD_SYM(strada_can);
+    ADD_SYM(strada_closure_new);
+    ADD_SYM(strada_closure_call);
+    ADD_SYM(strada_throw);
+    ADD_SYM(strada_throw_value);
+    ADD_SYM(strada_get_exception);
+    ADD_SYM(strada_defined);
+    ADD_SYM(strada_scalar);
+    ADD_SYM(strada_exists);
+    ADD_SYM(strada_delete);
+    ADD_SYM(strada_math_sin);
+    ADD_SYM(strada_math_cos);
+    ADD_SYM(strada_math_sqrt);
+    ADD_SYM(strada_math_pow);
+    ADD_SYM(strada_new_array_with_capacity);
+    ADD_SYM(strada_new_hash_with_capacity);
+
+    #undef ADD_SYM
+    dlclose(handle);
+}
+}
+
+# Create new TCC compilation state
+func state_new() int {
+    my int $state = 0;
+    __C__ {
+        TCCState *s = tcc_new();
+        if (s) {
+            tcc_set_error_func(s, NULL, libtcc_error_handler);
+            libtcc_error_msg[0] = '\0';
+        }
+        state = strada_new_int((int64_t)(intptr_t)s);
+    }
+    return $state;
+}
+
+# Delete TCC state and free memory
+func state_delete(int $state) void {
+    __C__ {
+        TCCState *s = (TCCState*)(intptr_t)strada_to_int(state);
+        if (s) tcc_delete(s);
+    }
+}
+
+# Set output type to memory (for in-process compilation)
+func output_memory(int $state) int {
+    my int $result = 0;
+    __C__ {
+        TCCState *s = (TCCState*)(intptr_t)strada_to_int(state);
+        if (s) {
+            result = strada_new_int(tcc_set_output_type(s, TCC_OUTPUT_MEMORY) == 0 ? 1 : 0);
+        }
+    }
+    return $result;
+}
+
+# Add include path
+func include_path(int $state, str $path) int {
+    my int $result = 0;
+    __C__ {
+        TCCState *s = (TCCState*)(intptr_t)strada_to_int(state);
+        const char *p = strada_to_str(path);
+        if (s && p) {
+            result = strada_new_int(tcc_add_include_path(s, p) == 0 ? 1 : 0);
+        }
+    }
+    return $result;
+}
+
+# Add library path
+func lib_path(int $state, str $path) int {
+    my int $result = 0;
+    __C__ {
+        TCCState *s = (TCCState*)(intptr_t)strada_to_int(state);
+        const char *p = strada_to_str(path);
+        if (s && p) {
+            result = strada_new_int(tcc_add_library_path(s, p) == 0 ? 1 : 0);
+        }
+    }
+    return $result;
+}
+
+# Add library (like -l flag)
+func add_lib(int $state, str $name) int {
+    my int $result = 0;
+    __C__ {
+        TCCState *s = (TCCState*)(intptr_t)strada_to_int(state);
+        const char *n = strada_to_str(name);
+        if (s && n) {
+            result = strada_new_int(tcc_add_library(s, n) == 0 ? 1 : 0);
+        }
+    }
+    return $result;
+}
+
+# Define a preprocessor symbol
+func define(int $state, str $name, str $value) void {
+    __C__ {
+        TCCState *s = (TCCState*)(intptr_t)strada_to_int(state);
+        const char *n = strada_to_str(name);
+        const char *v = strada_to_str(value);
+        if (s && n) {
+            tcc_define_symbol(s, n, v && v[0] ? v : NULL);
+        }
+    }
+}
+
+# Compile C code from string
+func compile(int $state, str $code) int {
+    my int $result = 0;
+    __C__ {
+        TCCState *s = (TCCState*)(intptr_t)strada_to_int(state);
+        const char *c = strada_to_str(code);
+        libtcc_error_msg[0] = '\0';
+        if (s && c) {
+            int ret = tcc_compile_string(s, c);
+            result = strada_new_int(ret == 0 ? 1 : 0);
+        }
+    }
+    return $result;
+}
+
+# Add runtime symbols and relocate code to memory
+func link(int $state) int {
+    my int $result = 0;
+    __C__ {
+        TCCState *s = (TCCState*)(intptr_t)strada_to_int(state);
+        if (s) {
+            /* Add all runtime symbols */
+            libtcc_add_runtime_symbols(s);
+
+            /* Relocate to auto-allocated memory */
+            int ret = tcc_relocate(s, TCC_RELOCATE_AUTO);
+            result = strada_new_int(ret == 0 ? 1 : 0);
+        }
+    }
+    return $result;
+}
+
+# Get symbol (function pointer) from compiled code
+func symbol(int $state, str $name) int {
+    my int $ptr = 0;
+    __C__ {
+        TCCState *s = (TCCState*)(intptr_t)strada_to_int(state);
+        const char *n = strada_to_str(name);
+        if (s && n) {
+            void *sym = tcc_get_symbol(s, n);
+            ptr = strada_new_int((int64_t)(intptr_t)sym);
+        }
+    }
+    return $ptr;
+}
+
+# Get last error message
+func error() str {
+    my str $msg = "";
+    __C__ {
+        msg = strada_new_str(libtcc_error_msg);
+    }
+    return $msg;
+}
+
+# Convenience: compile and link C code, return [fn_ptr, state] or [0, 0] on error
+func compile_func(str $code, str $func_name, str $inc_path) array {
+    my array @result = (0, 0);
+
+    my int $state = tcc::state_new();
+    if ($state == 0) {
+        return @result;
+    }
+
+    tcc::output_memory($state);
+
+    if ($inc_path ne "") {
+        tcc::include_path($state, $inc_path);
+    }
+
+    if (tcc::compile($state, $code) == 0) {
+        tcc::state_delete($state);
+        return @result;
+    }
+
+    if (tcc::link($state) == 0) {
+        tcc::state_delete($state);
+        return @result;
+    }
+
+    my int $fn = tcc::symbol($state, $func_name);
+
+    $result[0] = $fn;
+    $result[1] = $state;
+
+    return @result;
+}

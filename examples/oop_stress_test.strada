@@ -1,0 +1,526 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# oop_stress_test.strada - OOP stress test focused on memory management
+#
+# This test creates large, nested blessed objects with inheritance,
+# multiple inheritance, SUPER:: calls, and DESTROY chains. Run under
+# valgrind or sanitizers to catch leaks and refcount bugs.
+#
+# Usage:
+#   ./strada examples/oop_stress_test.strada
+#   valgrind --leak-check=full ./build/oop_stress_test
+
+package StressStats;
+
+my int $next_id = 1;
+my hash %created = ();
+my hash %destroyed = ();
+
+func StressStats_next_id() int {
+    my int $id = $next_id;
+    $next_id = $next_id + 1;
+    return $id;
+}
+
+func StressStats_inc_created(str $name) void {
+    my int $count = 0;
+    if (defined($created{$name})) {
+        $count = $created{$name};
+    }
+    $created{$name} = $count + 1;
+}
+
+func StressStats_inc_destroyed(str $name) void {
+    my int $count = 0;
+    if (defined($destroyed{$name})) {
+        $count = $destroyed{$name};
+    }
+    $destroyed{$name} = $count + 1;
+}
+
+func StressStats_get_created(str $name) int {
+    if (defined($created{$name})) {
+        return $created{$name};
+    }
+    return 0;
+}
+
+func StressStats_get_destroyed(str $name) int {
+    if (defined($destroyed{$name})) {
+        return $destroyed{$name};
+    }
+    return 0;
+}
+
+func StressStats_expect_balanced(str $name, int $expected) void {
+    my int $created_count = StressStats_get_created($name);
+    my int $destroyed_count = StressStats_get_destroyed($name);
+
+    if ($created_count != $expected) {
+        die("Expected " . $expected . " created for " . $name . ", got " . $created_count);
+    }
+    if ($destroyed_count != $expected) {
+        die("Expected " . $expected . " destroyed for " . $name . ", got " . $destroyed_count);
+    }
+    if ($created_count != $destroyed_count) {
+        die("Created/destroyed mismatch for " . $name . ": " . $created_count . " vs " . $destroyed_count);
+    }
+}
+
+package Tracked;
+
+func Tracked_seed(scalar $self, str $class) void {
+    $self->{"id"} = StressStats_next_id();
+    $self->{"class"} = $class;
+    $self->{"created_at"} = sys::time();
+    StressStats_inc_created($class);
+    StressStats_inc_created("Tracked");
+}
+
+func Tracked_id(scalar $self) int {
+    return $self->{"id"};
+}
+
+func Tracked_class(scalar $self) str {
+    return $self->{"class"};
+}
+
+func Tracked_DESTROY(scalar $self) void {
+    StressStats_inc_destroyed("Tracked");
+}
+
+package Attachment;
+
+func Attachment_init() void {
+    inherit("Attachment", "Tracked");
+}
+
+func Attachment_new(str $name, int $size) scalar {
+    my hash %self = ();
+    Tracked_seed(\%self, "Attachment");
+    $self{"name"} = $name;
+    $self{"bytes"} = [];
+
+    my int $i = 0;
+    while ($i < $size) {
+        push(@{$self{"bytes"}}, $i % 256);
+        $i = $i + 1;
+    }
+
+    $self{"flags"} = { "compressed" => ($size % 2), "encrypted" => 0 };
+    return bless(\%self, "Attachment");
+}
+
+func Attachment_checksum(scalar $self) int {
+    my int $sum = 0;
+    my array @bytes = @{$self->{"bytes"}};
+    my int $i = 0;
+    while ($i < scalar(@bytes)) {
+        $sum = $sum + $bytes[$i];
+        $i = $i + 4;
+    }
+    return $sum;
+}
+
+func Attachment_DESTROY(scalar $self) void {
+    StressStats_inc_destroyed("Attachment");
+    SUPER::DESTROY($self);
+}
+
+package Payload;
+
+func Payload_init() void {
+    inherit("Payload", "Tracked");
+}
+
+func Payload_new(int $id, int $size, int $attachment_count) scalar {
+    my hash %self = ();
+    Tracked_seed(\%self, "Payload");
+    $self{"id"} = $id;
+    $self{"numbers"} = [];
+    $self{"labels"} = [];
+    $self{"lookup"} = {};
+    $self{"attachments"} = [];
+
+    my int $i = 0;
+    while ($i < $size) {
+        push(@{$self{"numbers"}}, $i);
+        my str $label = "n_" . $id . "_" . $i;
+        push(@{$self{"labels"}}, $label);
+        $self{"lookup"}->{$label} = $i;
+        $i = $i + 1;
+    }
+
+    my str $blob = "";
+    $i = 0;
+    while ($i < $size) {
+        $blob = $blob . "X" . $id;
+        $i = $i + 1;
+    }
+    $self{"blob"} = $blob;
+
+    $i = 0;
+    while ($i < $attachment_count) {
+        my scalar $att = Attachment_new("att_" . $id . "_" . $i, ($size / 2) + 1);
+        push(@{$self{"attachments"}}, $att);
+        $i = $i + 1;
+    }
+
+    return bless(\%self, "Payload");
+}
+
+func Payload_touch(scalar $self) int {
+    my int $sum = 0;
+    my array @nums = @{$self->{"numbers"}};
+    my int $i = 0;
+    while ($i < scalar(@nums)) {
+        $sum = $sum + $nums[$i];
+        $i = $i + 5;
+    }
+
+    foreach my scalar $att (@{$self->{"attachments"}}) {
+        $sum = $sum + $att->checksum();
+    }
+
+    $sum = $sum + length($self->{"blob"});
+    return $sum;
+}
+
+func Payload_DESTROY(scalar $self) void {
+    StressStats_inc_destroyed("Payload");
+    SUPER::DESTROY($self);
+}
+
+package Node;
+
+func Node_init() void {
+    inherit("Node", "Tracked");
+}
+
+func Node_new(int $id, int $payload_size, int $attachment_count) scalar {
+    my hash %self = ();
+    Tracked_seed(\%self, "Node");
+    $self{"id"} = $id;
+    $self{"payload"} = Payload_new($id, $payload_size, $attachment_count);
+    $self{"tags"} = [];
+
+    my int $i = 0;
+    while ($i < 4) {
+        push(@{$self{"tags"}}, "tag_" . $id . "_" . $i);
+        $i = $i + 1;
+    }
+
+    $self{"meta"} = { "active" => 1, "weight" => $id % 7 };
+    return bless(\%self, "Node");
+}
+
+func Node_payload(scalar $self) scalar {
+    return $self->{"payload"};
+}
+
+func Node_touch(scalar $self) int {
+    my int $sum = $self->{"meta"}->{"weight"};
+    $sum = $sum + $self->{"payload"}->touch();
+    $sum = $sum + scalar(@{$self->{"tags"}});
+    return $sum;
+}
+
+func Node_DESTROY(scalar $self) void {
+    StressStats_inc_destroyed("Node");
+    SUPER::DESTROY($self);
+}
+
+package Edge;
+
+func Edge_init() void {
+    inherit("Edge", "Tracked");
+}
+
+func Edge_new(int $from, int $to) scalar {
+    my hash %self = ();
+    Tracked_seed(\%self, "Edge");
+    $self{"from"} = $from;
+    $self{"to"} = $to;
+    $self{"weight"} = ($from + $to) % 11;
+    $self{"label"} = "e_" . $from . "_" . $to;
+    $self{"meta"} = { "active" => 1, "cost" => ($from * 3 + $to) % 17 };
+    return bless(\%self, "Edge");
+}
+
+func Edge_touch(scalar $self) int {
+    return $self->{"weight"} + $self->{"meta"}->{"cost"};
+}
+
+func Edge_DESTROY(scalar $self) void {
+    StressStats_inc_destroyed("Edge");
+    SUPER::DESTROY($self);
+}
+
+package Graph;
+
+func Graph_init() void {
+    inherit("Graph", "Tracked");
+}
+
+func Graph_build_blob(int $node_count, int $payload_size) str {
+    my str $blob = "";
+    my int $i = 0;
+    my int $limit = $node_count + $payload_size;
+    while ($i < $limit) {
+        $blob = $blob . "B" . $i;
+        $i = $i + 1;
+    }
+    return $blob;
+}
+
+func Graph_new(int $node_count, int $edge_count, int $payload_size, int $attachment_count) scalar {
+    my hash %self = ();
+    Tracked_seed(\%self, "Graph");
+    $self{"nodes"} = [];
+    $self{"edges"} = [];
+    $self{"index"} = {};
+    $self{"meta"} = { "version" => 1, "name" => "graph_" . $node_count . "_" . $edge_count };
+
+    my int $i = 0;
+    while ($i < $node_count) {
+        my scalar $node = Node_new($i, $payload_size, $attachment_count);
+        push(@{$self{"nodes"}}, $node);
+        $self{"index"}->{$i . ""} = $node;
+        $i = $i + 1;
+    }
+
+    $i = 0;
+    while ($i < $edge_count) {
+        my int $from = $i % $node_count;
+        my int $to = ($i + 1) % $node_count;
+        my scalar $edge = Edge_new($from, $to);
+        push(@{$self{"edges"}}, $edge);
+        $i = $i + 1;
+    }
+
+    $self{"blob"} = Graph_build_blob($node_count, $payload_size);
+    return bless(\%self, "Graph");
+}
+
+func Graph_node_count(scalar $self) int {
+    return scalar(@{$self->{"nodes"}});
+}
+
+func Graph_edge_count(scalar $self) int {
+    return scalar(@{$self->{"edges"}});
+}
+
+func Graph_blob_size(scalar $self) int {
+    return length($self->{"blob"});
+}
+
+func Graph_get_node(scalar $self, int $id) scalar {
+    my str $key = $id . "";
+    return $self->{"index"}->{$key};
+}
+
+func Graph_summary(scalar $self) str {
+    return "nodes=" . $self->node_count() . " edges=" . $self->edge_count();
+}
+
+func Graph_touch(scalar $self) int {
+    my int $sum = 0;
+    my array @nodes = @{$self->{"nodes"}};
+    my int $i = 0;
+    while ($i < scalar(@nodes)) {
+        $sum = $sum + $nodes[$i]->touch();
+        $i = $i + 3;
+    }
+
+    my array @edges = @{$self->{"edges"}};
+    $i = 0;
+    while ($i < scalar(@edges)) {
+        $sum = $sum + $edges[$i]->touch();
+        $i = $i + 5;
+    }
+
+    $sum = $sum + length($self->{"blob"});
+    return $sum;
+}
+
+func Graph_DESTROY(scalar $self) void {
+    StressStats_inc_destroyed("Graph");
+    SUPER::DESTROY($self);
+}
+
+package Auditable;
+
+func Auditable_init() void {
+}
+
+func Auditable_audit(scalar $self, str $event) void {
+    if (!defined($self->{"audit"})) {
+        $self->{"audit"} = [];
+    }
+    push(@{$self->{"audit"}}, $event);
+}
+
+func Auditable_audit_count(scalar $self) int {
+    if (!defined($self->{"audit"})) {
+        return 0;
+    }
+    return scalar(@{$self->{"audit"}});
+}
+
+package LargeGraph;
+
+func LargeGraph_init() void {
+    inherit("LargeGraph", "Graph");
+    inherit("LargeGraph", "Auditable");
+}
+
+func LargeGraph_new(int $node_count, int $edge_count, int $payload_size, int $attachment_count) scalar {
+    my scalar $graph = Graph_new($node_count, $edge_count, $payload_size, $attachment_count);
+    StressStats_inc_created("LargeGraph");
+    $graph->{"label"} = "stress_" . $node_count . "_" . $edge_count;
+    $graph->{"audit"} = [];
+    return bless($graph, "LargeGraph");
+}
+
+func LargeGraph_summary(scalar $self) str {
+    my str $base = SUPER::summary($self);
+    return $base . " label=" . $self->{"label"};
+}
+
+func LargeGraph_audit_seed(scalar $self, int $pass) void {
+    $self->audit("pass_" . $pass);
+    $self->audit("nodes_" . $self->node_count());
+}
+
+func LargeGraph_DESTROY(scalar $self) void {
+    StressStats_inc_destroyed("LargeGraph");
+    SUPER::DESTROY($self);
+}
+
+package main;
+
+func run_iteration(int $iter, int $node_count, int $edge_count, int $payload_size, int $attachment_count) void {
+    my scalar $graph = LargeGraph_new($node_count, $edge_count, $payload_size, $attachment_count);
+
+    if (blessed($graph) ne "LargeGraph") {
+        die("Expected LargeGraph bless, got " . blessed($graph));
+    }
+    if (!isa($graph, "Graph")) {
+        die("LargeGraph should be isa Graph");
+    }
+
+    if (!can($graph, "audit")) {
+        die("LargeGraph should can audit");
+    }
+    if (can($graph, "missing_method")) {
+        die("Unexpected method found");
+    }
+
+    my str $summary = $graph->summary();
+    if (length($summary) == 0) {
+        die("Summary should not be empty");
+    }
+
+    if ($graph->node_count() != $node_count) {
+        die("Node count mismatch");
+    }
+    if ($graph->edge_count() != $edge_count) {
+        die("Edge count mismatch");
+    }
+    if ($graph->blob_size() < ($node_count + $payload_size)) {
+        die("Blob size too small");
+    }
+
+    $graph->audit_seed($iter);
+    if ($graph->audit_count() < 2) {
+        die("Audit entries missing");
+    }
+
+    my scalar $alias = $graph;
+    if (refcount($graph) < 2) {
+        die("Alias refcount not incremented");
+    }
+    sys::release(\$alias);
+
+    my int $touch_sum = $graph->touch();
+    if ($touch_sum < 0) {
+        die("Touch sum invalid");
+    }
+
+    my int $probe = $iter % $node_count;
+    my scalar $node = $graph->get_node($probe);
+    if (!defined($node)) {
+        die("Node lookup failed");
+    }
+    if (!isa($node, "Node")) {
+        die("Node should be isa Node");
+    }
+    my scalar $payload = $node->payload();
+    if (!isa($payload, "Payload")) {
+        die("Payload should be isa Payload");
+    }
+    my int $payload_sum = $payload->touch();
+    if ($payload_sum < 0) {
+        die("Payload touch invalid");
+    }
+
+    sys::release(\$graph);
+}
+
+func main() int {
+    say("=== OOP Stress Test ===");
+
+    Attachment_init();
+    Payload_init();
+    Node_init();
+    Edge_init();
+    Graph_init();
+    Auditable_init();
+    LargeGraph_init();
+
+    my int $iterations = 20;
+    my int $node_count = 80;
+    my int $edge_count = 160;
+    my int $payload_size = 64;
+    my int $attachment_count = 3;
+
+    my int $i = 0;
+    while ($i < $iterations) {
+        run_iteration($i, $node_count, $edge_count, $payload_size, $attachment_count);
+        $i = $i + 1;
+    }
+
+    my int $expected_graphs = $iterations;
+    my int $expected_nodes = $iterations * $node_count;
+    my int $expected_edges = $iterations * $edge_count;
+    my int $expected_payloads = $expected_nodes;
+    my int $expected_attachments = $expected_nodes * $attachment_count;
+    my int $expected_tracked = $expected_graphs + $expected_nodes + $expected_edges +
+        $expected_payloads + $expected_attachments;
+
+    StressStats_expect_balanced("LargeGraph", $expected_graphs);
+    StressStats_expect_balanced("Graph", $expected_graphs);
+    StressStats_expect_balanced("Node", $expected_nodes);
+    StressStats_expect_balanced("Payload", $expected_payloads);
+    StressStats_expect_balanced("Attachment", $expected_attachments);
+    StressStats_expect_balanced("Edge", $expected_edges);
+    StressStats_expect_balanced("Tracked", $expected_tracked);
+
+    say("PASS: OOP stress test completed");
+    return 0;
+}

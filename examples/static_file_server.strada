@@ -1,3 +1,20 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
 # Simple static file server with directory listing
 # Usage: ./static_file_server [directory] [port]
 
@@ -43,7 +60,7 @@ func dir_listing(str $dir, str $url) str {
     my array @entries = sys::readdir_full($dir);
     my int $i = 0;
     while ($i < scalar(@entries)) {
-        my str $name = @entries[$i];
+        my str $name = $entries[$i];
         if ($name ne "." && $name ne "..") {
             my str $full_path = $dir . "/" . $name;
             my str $link_url = $url;
@@ -136,10 +153,10 @@ func main(int $argc, array @argv) int {
     my int $port = 8080;
 
     if ($argc > 1) {
-        $root = @argv[1];
+        $root = $argv[1];
     }
     if ($argc > 2) {
-        $port = sys::atoi(@argv[2]);
+        $port = sys::atoi($argv[2]);
     }
 
     say("Static File Server");

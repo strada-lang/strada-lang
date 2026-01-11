@@ -1,0 +1,168 @@
+#!/usr/bin/env strada
+# Test advanced math functions for memory leaks
+# Run: valgrind --leak-check=full ./test_math_advanced
+
+func main() int {
+    say("Testing advanced math functions for memory leaks...");
+    my int $iterations = 100;
+
+    # Test atan2
+    say("  math::atan2...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my num $result = math::atan2(1.0, 1.0);
+        # Should be ~0.785 (pi/4)
+        if ($result < 0.78 || $result > 0.79) {
+            say("    FAIL: atan2 = " . $result);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test hypot
+    say("  math::hypot...");
+    $i = 0;
+    while ($i < $iterations) {
+        my num $result = math::hypot(3.0, 4.0);
+        if ($result < 4.99 || $result > 5.01) {
+            say("    FAIL: hypot = " . $result);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test frexp
+    say("  math::frexp...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @result = math::frexp(8.0);
+        # 8.0 = 0.5 * 2^4
+        if (size(@result) < 2) {
+            say("    FAIL: frexp size");
+            return 1;
+        }
+        my num $mantissa = $result[0];
+        my int $exponent = $result[1];
+        if ($mantissa < 0.49 || $mantissa > 0.51) {
+            say("    FAIL: mantissa = " . $mantissa);
+            return 1;
+        }
+        if ($exponent != 4) {
+            say("    FAIL: exponent = " . $exponent);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test modf
+    say("  math::modf...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @result = math::modf(3.75);
+        if (size(@result) < 2) {
+            say("    FAIL: modf size");
+            return 1;
+        }
+        my num $frac = $result[0];
+        my num $intpart = $result[1];
+        if ($frac < 0.74 || $frac > 0.76) {
+            say("    FAIL: frac = " . $frac);
+            return 1;
+        }
+        if ($intpart < 2.99 || $intpart > 3.01) {
+            say("    FAIL: intpart = " . $intpart);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test asin/acos/atan
+    say("  asin/acos/atan...");
+    $i = 0;
+    while ($i < $iterations) {
+        my num $as = math::asin(0.5);
+        my num $ac = math::acos(0.5);
+        my num $at = math::atan(1.0);
+        # asin(0.5) ~ 0.5236
+        if ($as < 0.52 || $as > 0.53) {
+            say("    FAIL: asin = " . $as);
+            return 1;
+        }
+        # acos(0.5) ~ 1.0472
+        if ($ac < 1.04 || $ac > 1.05) {
+            say("    FAIL: acos = " . $ac);
+            return 1;
+        }
+        # atan(1.0) ~ 0.7854
+        if ($at < 0.78 || $at > 0.79) {
+            say("    FAIL: atan = " . $at);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test cbrt
+    say("  math::cbrt...");
+    $i = 0;
+    while ($i < $iterations) {
+        my num $result = math::cbrt(27.0);
+        if ($result < 2.99 || $result > 3.01) {
+            say("    FAIL: cbrt = " . $result);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test log10
+    say("  math::log10...");
+    $i = 0;
+    while ($i < $iterations) {
+        my num $result = math::log10(100.0);
+        if ($result < 1.99 || $result > 2.01) {
+            say("    FAIL: log10 = " . $result);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test fmod
+    say("  math::fmod...");
+    $i = 0;
+    while ($i < $iterations) {
+        my num $result = math::fmod(10.5, 3.0);
+        if ($result < 1.49 || $result > 1.51) {
+            say("    FAIL: fmod = " . $result);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test trunc
+    say("  math::trunc...");
+    $i = 0;
+    while ($i < $iterations) {
+        my num $r1 = math::trunc(3.7);
+        my num $r2 = math::trunc(-2.3);
+        if ($r1 < 2.99 || $r1 > 3.01) {
+            say("    FAIL: trunc positive");
+            return 1;
+        }
+        if ($r2 < -2.01 || $r2 > -1.99) {
+            say("    FAIL: trunc negative");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All advanced math tests passed!");
+    return 0;
+}

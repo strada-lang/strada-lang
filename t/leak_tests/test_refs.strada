@@ -1,0 +1,208 @@
+#!/usr/bin/env strada
+# Test references for memory leaks
+# Run: valgrind --leak-check=full ./test_refs
+
+func main() int {
+    say("Testing references for memory leaks...");
+    my int $iterations = 100;
+
+    # Test scalar references
+    say("  Scalar references...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my int $x = 42;
+        my scalar $ref = \$x;
+        my int $val = $$ref;
+        if ($val != 42) {
+            say("    FAIL: deref scalar");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test array references
+    say("  Array references...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @arr = (1, 2, 3, 4, 5);
+        my scalar $ref = \@arr;
+        if ($ref->[0] != 1) {
+            say("    FAIL: array ref first");
+            return 1;
+        }
+        if ($ref->[4] != 5) {
+            say("    FAIL: array ref last");
+            return 1;
+        }
+        my scalar $el = $ref->[2];
+        if ($el != 3) {
+            say("    FAIL: array ref access");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test hash references
+    say("  Hash references...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        $h{"name"} = "Alice";
+        $h{"age"} = 30;
+        my scalar $ref = \%h;
+        my str $name = $ref->{"name"};
+        if ($name ne "Alice") {
+            say("    FAIL: hash ref access");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test anonymous array refs
+    say("  Anonymous array refs...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $ref = [10, 20, 30, 40, 50];
+        if ($ref->[0] != 10) {
+            say("    FAIL: anon array ref");
+            return 1;
+        }
+        if ($ref->[4] != 50) {
+            say("    FAIL: anon array ref last");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test anonymous hash refs
+    say("  Anonymous hash refs...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $ref = {"x" => 1, "y" => 2, "z" => 3};
+        if ($ref->{"x"} != 1) {
+            say("    FAIL: anon hash ref");
+            return 1;
+        }
+        if ($ref->{"z"} != 3) {
+            say("    FAIL: anon hash ref z");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test nested references
+    say("  Nested references...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $data = {
+            "users" => [
+                {"name" => "Alice", "scores" => [95, 87, 92]},
+                {"name" => "Bob", "scores" => [88, 91, 85]}
+            ],
+            "count" => 2
+        };
+        my scalar $users = $data->{"users"};
+        my scalar $alice = $users->[0];
+        my str $name = $alice->{"name"};
+        if ($name ne "Alice") {
+            say("    FAIL: nested access");
+            return 1;
+        }
+        my scalar $scores = $alice->{"scores"};
+        if ($scores->[0] != 95) {
+            say("    FAIL: deep nested");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test ref() type checking
+    say("  ref() type checking...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $aref = [1, 2, 3];
+        my scalar $href = {"a" => 1};
+        my str $ra = ref($aref);
+        my str $rh = ref($href);
+        if ($ra ne "ARRAY") {
+            say("    FAIL: ref array = " . $ra);
+            return 1;
+        }
+        if ($rh ne "HASH") {
+            say("    FAIL: ref hash = " . $rh);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test reference reassignment
+    say("  Reference reassignment...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $ref = [1, 2, 3];
+        $ref = [4, 5, 6];  # Old ref should be freed
+        $ref = {"a" => 1};  # Old array ref freed, now hash ref
+        $ref = [7, 8, 9];  # Old hash ref freed
+        if ($ref->[0] != 7) {
+            say("    FAIL: reassignment");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test array of refs
+    say("  Array of refs...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @refs = ();
+        my int $j = 0;
+        while ($j < 10) {
+            push(@refs, {"id" => $j, "data" => "item" . $j});
+            $j = $j + 1;
+        }
+        if (size(@refs) != 10) {
+            say("    FAIL: refs array size");
+            return 1;
+        }
+        my scalar $last = $refs[9];
+        if ($last->{"id"} != 9) {
+            say("    FAIL: ref in array");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test hash of refs
+    say("  Hash of refs...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %cache = ();
+        $cache{"a"} = [1, 2, 3];
+        $cache{"b"} = [4, 5, 6];
+        $cache{"c"} = {"nested" => "value"};
+        my scalar $av = $cache{"a"};
+        if ($av->[1] != 2) {
+            say("    FAIL: hash of refs");
+            return 1;
+        }
+        my scalar $cv = $cache{"c"};
+        if ($cv->{"nested"} ne "value") {
+            say("    FAIL: hash of hash refs");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All reference tests passed!");
+    return 0;
+}

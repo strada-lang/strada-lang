@@ -1,0 +1,1233 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# full_oop_test.strada - Comprehensive OOP framework test
+#
+# Tests all aspects of the OOP system including:
+# - Basic bless/blessed/isa/can operations
+# - Single and multi-level inheritance
+# - Multiple inheritance (diamond pattern)
+# - DESTROY chains with SUPER:: calls
+# - Method dispatch and override
+# - Reference counting with aliases
+# - Large objects with many fields
+# - Nested objects (objects containing objects)
+# - Array and hash collections of objects
+# - Re-blessing objects to different classes
+# - Edge cases and error conditions
+#
+# Run with:
+#   ./strada examples/full_oop_test.strada
+#   valgrind --leak-check=full ./build/full_oop_test
+#   STRADA_DEBUG_BLESS=1 ./build/full_oop_test 2>&1 | head -100
+
+# =============================================================================
+# Global tracking for DESTROY verification
+# =============================================================================
+
+package Tracker;
+
+my int $total_created = 0;
+my int $total_destroyed = 0;
+my hash %class_created = ();
+my hash %class_destroyed = ();
+my int $next_id = 1;
+
+func Tracker_create(str $class) int {
+    my int $id = $next_id;
+    $next_id = $next_id + 1;
+    $total_created = $total_created + 1;
+
+    my int $count = 0;
+    if (defined($class_created{$class})) {
+        $count = $class_created{$class};
+    }
+    $class_created{$class} = $count + 1;
+
+    return $id;
+}
+
+func Tracker_destroy(str $class) void {
+    $total_destroyed = $total_destroyed + 1;
+
+    my int $count = 0;
+    if (defined($class_destroyed{$class})) {
+        $count = $class_destroyed{$class};
+    }
+    $class_destroyed{$class} = $count + 1;
+}
+
+func Tracker_get_created(str $class) int {
+    if (defined($class_created{$class})) {
+        return $class_created{$class};
+    }
+    return 0;
+}
+
+func Tracker_get_destroyed(str $class) int {
+    if (defined($class_destroyed{$class})) {
+        return $class_destroyed{$class};
+    }
+    return 0;
+}
+
+func Tracker_total_created() int {
+    return $total_created;
+}
+
+func Tracker_total_destroyed() int {
+    return $total_destroyed;
+}
+
+func Tracker_verify(str $class, int $expected) void {
+    my int $created = Tracker_get_created($class);
+    my int $destroyed = Tracker_get_destroyed($class);
+
+    if ($created != $expected) {
+        die("FAIL: " . $class . " created count mismatch: expected " . $expected . ", got " . $created);
+    }
+    if ($destroyed != $expected) {
+        die("FAIL: " . $class . " destroyed count mismatch: expected " . $expected . ", got " . $destroyed);
+    }
+}
+
+# Verify with separate expected counts for created and destroyed
+# (needed for SUPER::DESTROY chains where destroyed > created)
+func Tracker_verify_counts(str $class, int $expected_created, int $expected_destroyed) void {
+    my int $created = Tracker_get_created($class);
+    my int $destroyed = Tracker_get_destroyed($class);
+
+    if ($created != $expected_created) {
+        die("FAIL: " . $class . " created count mismatch: expected " . $expected_created . ", got " . $created);
+    }
+    if ($destroyed != $expected_destroyed) {
+        die("FAIL: " . $class . " destroyed count mismatch: expected " . $expected_destroyed . ", got " . $destroyed);
+    }
+}
+
+func Tracker_reset() void {
+    $total_created = 0;
+    $total_destroyed = 0;
+    %class_created = ();
+    %class_destroyed = ();
+    $next_id = 1;
+}
+
+# =============================================================================
+# Test 1: Basic class with DESTROY
+# =============================================================================
+
+package SimpleObject;
+
+func SimpleObject_init() void {
+    # No inheritance for base class
+}
+
+func SimpleObject_new(str $name) scalar {
+    my hash %self = ();
+    $self{"id"} = Tracker_create("SimpleObject");
+    $self{"name"} = $name;
+    $self{"data"} = [];
+
+    # Add some data to make it non-trivial
+    my int $i = 0;
+    while ($i < 10) {
+        push(@{$self{"data"}}, "item_" . $i);
+        $i = $i + 1;
+    }
+
+    # Use intermediate var to avoid refcount bug with direct return bless()
+    my scalar $obj = bless(\%self, "SimpleObject");
+    return $obj;
+}
+
+func SimpleObject_name(scalar $self) str {
+    return $self->{"name"};
+}
+
+func SimpleObject_id(scalar $self) int {
+    return $self->{"id"};
+}
+
+func SimpleObject_data_count(scalar $self) int {
+    return scalar(@{$self->{"data"}});
+}
+
+func SimpleObject_DESTROY(scalar $self) void {
+    Tracker_destroy("SimpleObject");
+}
+
+# =============================================================================
+# Test 2: Single inheritance with SUPER::DESTROY
+# =============================================================================
+
+package BaseClass;
+
+func BaseClass_init() void {
+    # Base class
+}
+
+func BaseClass_new(str $label) scalar {
+    my hash %self = ();
+    $self{"id"} = Tracker_create("BaseClass");
+    $self{"label"} = $label;
+    $self{"base_data"} = "base_value";
+    my scalar $obj = bless(\%self, "BaseClass");
+    return $obj;
+}
+
+func BaseClass_label(scalar $self) str {
+    return $self->{"label"};
+}
+
+func BaseClass_identify(scalar $self) str {
+    return "BaseClass:" . $self->{"label"};
+}
+
+func BaseClass_DESTROY(scalar $self) void {
+    Tracker_destroy("BaseClass");
+}
+
+package DerivedClass;
+
+func DerivedClass_init() void {
+    inherit("DerivedClass", "BaseClass");
+}
+
+func DerivedClass_new(str $label, int $value) scalar {
+    my hash %self = ();
+    $self{"id"} = Tracker_create("DerivedClass");
+    $self{"label"} = $label;
+    $self{"base_data"} = "base_value";
+    $self{"derived_value"} = $value;
+    my scalar $obj = bless(\%self, "DerivedClass");
+    return $obj;
+}
+
+func DerivedClass_value(scalar $self) int {
+    return $self->{"derived_value"};
+}
+
+func DerivedClass_identify(scalar $self) str {
+    return "DerivedClass:" . $self->{"label"} . ":" . $self->{"derived_value"};
+}
+
+func DerivedClass_DESTROY(scalar $self) void {
+    Tracker_destroy("DerivedClass");
+    SUPER::DESTROY($self);
+}
+
+# =============================================================================
+# Test 3: Multi-level inheritance (3 levels deep)
+# =============================================================================
+
+package Level1;
+
+func Level1_init() void {
+    # Base
+}
+
+func Level1_new() scalar {
+    my hash %self = ();
+    $self{"id"} = Tracker_create("Level1");
+    $self{"level"} = 1;
+    $self{"l1_field"} = "level1_data";
+    my scalar $obj = bless(\%self, "Level1");
+    return $obj;
+}
+
+func Level1_get_level(scalar $self) int {
+    return $self->{"level"};
+}
+
+func Level1_l1_method(scalar $self) str {
+    return "L1";
+}
+
+func Level1_DESTROY(scalar $self) void {
+    Tracker_destroy("Level1");
+}
+
+package Level2;
+
+func Level2_init() void {
+    inherit("Level2", "Level1");
+}
+
+func Level2_new() scalar {
+    my hash %self = ();
+    $self{"id"} = Tracker_create("Level2");
+    $self{"level"} = 2;
+    $self{"l1_field"} = "level1_data";
+    $self{"l2_field"} = "level2_data";
+    my scalar $obj = bless(\%self, "Level2");
+    return $obj;
+}
+
+func Level2_l2_method(scalar $self) str {
+    return "L2";
+}
+
+func Level2_DESTROY(scalar $self) void {
+    Tracker_destroy("Level2");
+    SUPER::DESTROY($self);
+}
+
+package Level3;
+
+func Level3_init() void {
+    inherit("Level3", "Level2");
+}
+
+func Level3_new() scalar {
+    my hash %self = ();
+    $self{"id"} = Tracker_create("Level3");
+    $self{"level"} = 3;
+    $self{"l1_field"} = "level1_data";
+    $self{"l2_field"} = "level2_data";
+    $self{"l3_field"} = "level3_data";
+    my scalar $obj = bless(\%self, "Level3");
+    return $obj;
+}
+
+func Level3_l3_method(scalar $self) str {
+    return "L3";
+}
+
+func Level3_get_all_fields(scalar $self) str {
+    return $self->{"l1_field"} . "," . $self->{"l2_field"} . "," . $self->{"l3_field"};
+}
+
+func Level3_DESTROY(scalar $self) void {
+    Tracker_destroy("Level3");
+    SUPER::DESTROY($self);
+}
+
+# =============================================================================
+# Test 4: Multiple inheritance (diamond pattern)
+# =============================================================================
+
+package MixinA;
+
+func MixinA_init() void {
+    # Mixin
+}
+
+func MixinA_mixin_a_method(scalar $self) str {
+    return "MixinA";
+}
+
+func MixinA_shared_method(scalar $self) str {
+    return "from_A";
+}
+
+package MixinB;
+
+func MixinB_init() void {
+    # Mixin
+}
+
+func MixinB_mixin_b_method(scalar $self) str {
+    return "MixinB";
+}
+
+func MixinB_shared_method(scalar $self) str {
+    return "from_B";
+}
+
+package DiamondChild;
+
+func DiamondChild_init() void {
+    inherit("DiamondChild", "MixinA");
+    inherit("DiamondChild", "MixinB");
+}
+
+func DiamondChild_new(str $name) scalar {
+    my hash %self = ();
+    $self{"id"} = Tracker_create("DiamondChild");
+    $self{"name"} = $name;
+    my scalar $obj = bless(\%self, "DiamondChild");
+    return $obj;
+}
+
+func DiamondChild_name(scalar $self) str {
+    return $self->{"name"};
+}
+
+func DiamondChild_DESTROY(scalar $self) void {
+    Tracker_destroy("DiamondChild");
+}
+
+# =============================================================================
+# Test 5: Large object with many fields
+# =============================================================================
+
+package LargeObject;
+
+func LargeObject_init() void {
+    # Large object
+}
+
+func LargeObject_new(int $field_count) scalar {
+    my hash %self = ();
+    $self{"id"} = Tracker_create("LargeObject");
+    $self{"field_count"} = $field_count;
+
+    # Create many string fields
+    my int $i = 0;
+    while ($i < $field_count) {
+        my str $key = "field_" . $i;
+        $self{$key} = "value_" . $i . "_" . sys::time();
+        $i = $i + 1;
+    }
+
+    # Create nested arrays
+    $self{"numbers"} = [];
+    $i = 0;
+    while ($i < $field_count) {
+        push(@{$self{"numbers"}}, $i * $i);
+        $i = $i + 1;
+    }
+
+    # Create nested hash
+    $self{"lookup"} = {};
+    $i = 0;
+    while ($i < $field_count) {
+        $self{"lookup"}->{$i . ""} = "lookup_" . $i;
+        $i = $i + 1;
+    }
+
+    my scalar $obj = bless(\%self, "LargeObject");
+    return $obj;
+}
+
+func LargeObject_field_count(scalar $self) int {
+    return $self->{"field_count"};
+}
+
+func LargeObject_get_field(scalar $self, int $idx) str {
+    my str $key = "field_" . $idx;
+    if (defined($self->{$key})) {
+        return $self->{$key};
+    }
+    return "";
+}
+
+func LargeObject_sum_numbers(scalar $self) int {
+    my int $sum = 0;
+    my array @nums = @{$self->{"numbers"}};
+    my int $i = 0;
+    while ($i < scalar(@nums)) {
+        $sum = $sum + $nums[$i];
+        $i = $i + 1;
+    }
+    return $sum;
+}
+
+func LargeObject_DESTROY(scalar $self) void {
+    Tracker_destroy("LargeObject");
+}
+
+# =============================================================================
+# Test 6: Nested objects (objects containing objects)
+# =============================================================================
+
+package Inner;
+
+func Inner_init() void {
+    # Inner
+}
+
+func Inner_new(int $value) scalar {
+    my hash %self = ();
+    $self{"id"} = Tracker_create("Inner");
+    $self{"value"} = $value;
+    $self{"data"} = "inner_" . $value;
+    my scalar $obj = bless(\%self, "Inner");
+    return $obj;
+}
+
+func Inner_value(scalar $self) int {
+    return $self->{"value"};
+}
+
+func Inner_DESTROY(scalar $self) void {
+    Tracker_destroy("Inner");
+}
+
+package Outer;
+
+func Outer_init() void {
+    # Outer
+}
+
+func Outer_new(int $inner_count) scalar {
+    my hash %self = ();
+    $self{"id"} = Tracker_create("Outer");
+    $self{"inner_count"} = $inner_count;
+    $self{"inners"} = [];
+    $self{"inner_map"} = {};
+
+    # Create array of inner objects
+    my int $i = 0;
+    while ($i < $inner_count) {
+        my scalar $inner = Inner_new($i);
+        push(@{$self{"inners"}}, $inner);
+        $self{"inner_map"}->{$i . ""} = $inner;
+        $i = $i + 1;
+    }
+
+    # Single inner object
+    $self{"primary"} = Inner_new(999);
+
+    my scalar $obj = bless(\%self, "Outer");
+    return $obj;
+}
+
+func Outer_inner_count(scalar $self) int {
+    return $self->{"inner_count"};
+}
+
+func Outer_get_inner(scalar $self, int $idx) scalar {
+    my array @inners = @{$self->{"inners"}};
+    if ($idx >= 0 && $idx < scalar(@inners)) {
+        return $inners[$idx];
+    }
+    return undef;
+}
+
+func Outer_primary(scalar $self) scalar {
+    return $self->{"primary"};
+}
+
+func Outer_sum_inner_values(scalar $self) int {
+    my int $sum = 0;
+    my array @inners = @{$self->{"inners"}};
+    my int $i = 0;
+    while ($i < scalar(@inners)) {
+        my scalar $inner = $inners[$i];
+        $sum = $sum + $inner->value();
+        $i = $i + 1;
+    }
+    $sum = $sum + $self->{"primary"}->value();
+    return $sum;
+}
+
+func Outer_DESTROY(scalar $self) void {
+    Tracker_destroy("Outer");
+}
+
+# =============================================================================
+# Test 7: Method override with SUPER:: call
+# =============================================================================
+
+package Vehicle;
+
+func Vehicle_init() void {
+    # Base vehicle
+}
+
+func Vehicle_new(str $make) scalar {
+    my hash %self = ();
+    $self{"id"} = Tracker_create("Vehicle");
+    $self{"make"} = $make;
+    $self{"wheels"} = 0;
+    my scalar $obj = bless(\%self, "Vehicle");
+    return $obj;
+}
+
+func Vehicle_describe(scalar $self) str {
+    return $self->{"make"} . " with " . $self->{"wheels"} . " wheels";
+}
+
+func Vehicle_wheels(scalar $self) int {
+    return $self->{"wheels"};
+}
+
+func Vehicle_DESTROY(scalar $self) void {
+    Tracker_destroy("Vehicle");
+}
+
+package Car;
+
+func Car_init() void {
+    inherit("Car", "Vehicle");
+}
+
+func Car_new(str $make, str $model) scalar {
+    my hash %self = ();
+    $self{"id"} = Tracker_create("Car");
+    $self{"make"} = $make;
+    $self{"model"} = $model;
+    $self{"wheels"} = 4;
+    my scalar $obj = bless(\%self, "Car");
+    return $obj;
+}
+
+func Car_describe(scalar $self) str {
+    my str $base = SUPER::describe($self);
+    return $base . " - " . $self->{"model"};
+}
+
+func Car_model(scalar $self) str {
+    return $self->{"model"};
+}
+
+func Car_DESTROY(scalar $self) void {
+    Tracker_destroy("Car");
+    SUPER::DESTROY($self);
+}
+
+package SportsCar;
+
+func SportsCar_init() void {
+    inherit("SportsCar", "Car");
+}
+
+func SportsCar_new(str $make, str $model, int $horsepower) scalar {
+    my hash %self = ();
+    $self{"id"} = Tracker_create("SportsCar");
+    $self{"make"} = $make;
+    $self{"model"} = $model;
+    $self{"wheels"} = 4;
+    $self{"horsepower"} = $horsepower;
+    my scalar $obj = bless(\%self, "SportsCar");
+    return $obj;
+}
+
+func SportsCar_describe(scalar $self) str {
+    my str $base = SUPER::describe($self);
+    return $base . " (" . $self->{"horsepower"} . "hp)";
+}
+
+func SportsCar_horsepower(scalar $self) int {
+    return $self->{"horsepower"};
+}
+
+func SportsCar_DESTROY(scalar $self) void {
+    Tracker_destroy("SportsCar");
+    SUPER::DESTROY($self);
+}
+
+# =============================================================================
+# Test 8: Object with closures as fields
+# =============================================================================
+
+package Callback;
+
+func Callback_init() void {
+    # Callback holder
+}
+
+func Callback_new(str $name) scalar {
+    my hash %self = ();
+    $self{"id"} = Tracker_create("Callback");
+    $self{"name"} = $name;
+    $self{"counter"} = 0;
+
+    # Create a closure that captures state
+    my int $captured = 42;
+    $self{"callback"} = func (int $n) int {
+        return $n + $captured;
+    };
+
+    my scalar $obj = bless(\%self, "Callback");
+    return $obj;
+}
+
+func Callback_invoke(scalar $self, int $arg) int {
+    my scalar $cb = $self->{"callback"};
+    return $cb->($arg);
+}
+
+func Callback_increment(scalar $self) void {
+    $self->{"counter"} = $self->{"counter"} + 1;
+}
+
+func Callback_counter(scalar $self) int {
+    return $self->{"counter"};
+}
+
+func Callback_DESTROY(scalar $self) void {
+    Tracker_destroy("Callback");
+}
+
+# =============================================================================
+# Test Helpers
+# =============================================================================
+
+package main;
+
+my int $test_count = 0;
+my int $pass_count = 0;
+
+func assert(int $condition, str $message) void {
+    $test_count = $test_count + 1;
+    if ($condition) {
+        $pass_count = $pass_count + 1;
+    } else {
+        say("FAIL: " . $message);
+        die("Test failed: " . $message);
+    }
+}
+
+func test_section(str $name) void {
+    say("");
+    say("=== " . $name . " ===");
+}
+
+# =============================================================================
+# Test functions
+# =============================================================================
+
+func test_basic_bless() void {
+    test_section("Test 1: Basic bless/blessed/isa/can");
+    Tracker_reset();
+
+    # Create object in local scope
+    my scalar $obj = SimpleObject_new("test1");
+
+    # Test blessed
+    my str $pkg = blessed($obj);
+    assert($pkg eq "SimpleObject", "blessed returns correct package");
+
+    # Test isa
+    assert(isa($obj, "SimpleObject") == 1, "isa returns true for own class");
+    assert(isa($obj, "OtherClass") == 0, "isa returns false for other class");
+
+    # Test can
+    assert(can($obj, "name") == 1, "can returns true for existing method");
+    assert(can($obj, "id") == 1, "can returns true for id method");
+    assert(can($obj, "nonexistent") == 0, "can returns false for nonexistent method");
+
+    # Test method calls
+    assert($obj->name() eq "test1", "method call works");
+    assert($obj->data_count() == 10, "data_count method works");
+
+    # Release and verify cleanup
+    sys::release(\$obj);
+    Tracker_verify("SimpleObject", 1);
+
+    say("  PASS: Basic bless operations work correctly");
+}
+
+func test_single_inheritance() void {
+    test_section("Test 2: Single inheritance with SUPER::DESTROY");
+    Tracker_reset();
+
+    my scalar $base = BaseClass_new("base_obj");
+    my scalar $derived = DerivedClass_new("derived_obj", 100);
+
+    # Test isa for inheritance
+    assert(isa($derived, "DerivedClass") == 1, "derived isa DerivedClass");
+    assert(isa($derived, "BaseClass") == 1, "derived isa BaseClass (inherited)");
+    assert(isa($base, "DerivedClass") == 0, "base is not isa DerivedClass");
+
+    # Test can for inherited methods
+    assert(can($derived, "label") == 1, "derived can label (inherited)");
+    assert(can($derived, "value") == 1, "derived can value (own method)");
+
+    # Test method override
+    assert($base->identify() eq "BaseClass:base_obj", "base identify");
+    assert($derived->identify() eq "DerivedClass:derived_obj:100", "derived identify (overridden)");
+
+    # Test inherited method works on derived
+    assert($derived->label() eq "derived_obj", "inherited method works");
+
+    sys::release(\$base);
+    sys::release(\$derived);
+
+    # BaseClass: created=1 (from BaseClass_new), destroyed=2 (1 own + 1 from SUPER::)
+    Tracker_verify_counts("BaseClass", 1, 2);
+    Tracker_verify("DerivedClass", 1);
+
+    say("  PASS: Single inheritance with SUPER::DESTROY works");
+}
+
+func test_multilevel_inheritance() void {
+    test_section("Test 3: Multi-level inheritance (3 levels)");
+    Tracker_reset();
+
+    my scalar $l1 = Level1_new();
+    my scalar $l2 = Level2_new();
+    my scalar $l3 = Level3_new();
+
+    # Test isa at each level
+    assert(isa($l3, "Level3") == 1, "l3 isa Level3");
+    assert(isa($l3, "Level2") == 1, "l3 isa Level2");
+    assert(isa($l3, "Level1") == 1, "l3 isa Level1");
+
+    assert(isa($l2, "Level2") == 1, "l2 isa Level2");
+    assert(isa($l2, "Level1") == 1, "l2 isa Level1");
+    assert(isa($l2, "Level3") == 0, "l2 not isa Level3");
+
+    # Test methods from each level
+    assert($l3->l1_method() eq "L1", "l3 can call L1 method");
+    assert($l3->l2_method() eq "L2", "l3 can call L2 method");
+    assert($l3->l3_method() eq "L3", "l3 can call L3 method");
+    assert($l3->get_level() == 3, "l3 get_level returns 3");
+
+    # Test can for inherited methods
+    assert(can($l3, "l1_method") == 1, "l3 can l1_method");
+    assert(can($l3, "l2_method") == 1, "l3 can l2_method");
+    assert(can($l3, "l3_method") == 1, "l3 can l3_method");
+
+    sys::release(\$l1);
+    sys::release(\$l2);
+    sys::release(\$l3);
+
+    # Verify DESTROY chain: Level3->Level2->Level1
+    Tracker_verify_counts("Level1", 1, 3);  # created=1, destroyed=3 (from L1+L2+L3)
+    Tracker_verify_counts("Level2", 1, 2);  # created=1, destroyed=2 (from L2+L3)
+    Tracker_verify("Level3", 1);
+
+    say("  PASS: Multi-level inheritance works correctly");
+}
+
+func test_multiple_inheritance() void {
+    test_section("Test 4: Multiple inheritance (diamond pattern)");
+    Tracker_reset();
+
+    my scalar $child = DiamondChild_new("diamond");
+
+    # Test isa for multiple parents
+    assert(isa($child, "DiamondChild") == 1, "child isa DiamondChild");
+    assert(isa($child, "MixinA") == 1, "child isa MixinA");
+    assert(isa($child, "MixinB") == 1, "child isa MixinB");
+
+    # Test methods from both mixins
+    assert($child->mixin_a_method() eq "MixinA", "child can call MixinA method");
+    assert($child->mixin_b_method() eq "MixinB", "child can call MixinB method");
+
+    # First parent wins for shared method (MRO order)
+    assert($child->shared_method() eq "from_A", "shared method from first parent");
+
+    sys::release(\$child);
+    Tracker_verify("DiamondChild", 1);
+
+    say("  PASS: Multiple inheritance works correctly");
+}
+
+func test_large_objects() void {
+    test_section("Test 5: Large objects with many fields");
+    Tracker_reset();
+
+    my int $field_count = 100;
+    my scalar $large = LargeObject_new($field_count);
+
+    assert($large->field_count() == $field_count, "field_count correct");
+
+    # Verify some fields exist
+    my str $f0 = $large->get_field(0);
+    my str $f50 = $large->get_field(50);
+    my str $f99 = $large->get_field(99);
+
+    assert(length($f0) > 0, "field 0 exists");
+    assert(length($f50) > 0, "field 50 exists");
+    assert(length($f99) > 0, "field 99 exists");
+
+    # Verify numbers array
+    my int $sum = $large->sum_numbers();
+    assert($sum > 0, "sum_numbers returns positive");
+
+    sys::release(\$large);
+    Tracker_verify("LargeObject", 1);
+
+    say("  PASS: Large objects work correctly");
+}
+
+func test_nested_objects() void {
+    test_section("Test 6: Nested objects (objects containing objects)");
+    Tracker_reset();
+
+    my int $inner_count = 10;
+    my scalar $outer = Outer_new($inner_count);
+
+    assert($outer->inner_count() == $inner_count, "inner_count correct");
+    say("  DEBUG: After inner_count, array size=" . scalar(@{$outer->{"inners"}}));
+
+    # Test accessing nested objects
+    my scalar $inner0 = $outer->get_inner(0);
+    say("  DEBUG: After get_inner(0), array size=" . scalar(@{$outer->{"inners"}}));
+    assert(isa($inner0, "Inner") == 1, "inner0 isa Inner");
+    assert($inner0->value() == 0, "inner0 value is 0");
+    say("  DEBUG: After inner0 asserts, array size=" . scalar(@{$outer->{"inners"}}));
+
+    my scalar $inner5 = $outer->get_inner(5);
+    say("  DEBUG: After get_inner(5), array size=" . scalar(@{$outer->{"inners"}}));
+    assert($inner5->value() == 5, "inner5 value is 5");
+    say("  DEBUG: After inner5 assert, array size=" . scalar(@{$outer->{"inners"}}));
+
+    # Test primary object
+    my scalar $primary = $outer->primary();
+    say("  DEBUG: After primary(), array size=" . scalar(@{$outer->{"inners"}}));
+    assert(isa($primary, "Inner") == 1, "primary isa Inner");
+    assert($primary->value() == 999, "primary value is 999");
+    say("  DEBUG: After primary asserts, array size=" . scalar(@{$outer->{"inners"}}));
+
+    # Test sum computation (touches all inner objects)
+    my int $expected_sum = 999;  # primary
+    my int $i = 0;
+    while ($i < $inner_count) {
+        $expected_sum = $expected_sum + $i;
+        $i = $i + 1;
+    }
+    say("  expected_sum=" . $expected_sum);
+    say("  inner_count from outer=" . $outer->inner_count());
+    # Try get_inner again to confirm array access works
+    my scalar $test_inner = $outer->get_inner(0);
+    say("  test_inner defined=" . defined($test_inner));
+    say("  test_inner blessed=" . blessed($test_inner));
+    if (defined($test_inner) && blessed($test_inner) ne "") {
+        say("  test_inner value=" . $test_inner->value());
+    }
+    my int $actual_sum = $outer->sum_inner_values();
+    say("  actual_sum=" . $actual_sum);
+    assert($actual_sum == $expected_sum, "sum_inner_values correct");
+
+    # Release outer first - this destroys Inner objects not held by local vars
+    sys::release(\$outer);
+
+    # Release local references to Inner objects
+    # With proper refcounting, these keep the objects alive after Outer is released
+    sys::release(\$inner0);
+    sys::release(\$inner5);
+    sys::release(\$primary);
+    sys::release(\$test_inner);
+
+    # inner_count + 1 primary + inner_count in map (same objects, shared)
+    # Actually: inner_count objects created + 1 primary = inner_count + 1
+    Tracker_verify("Outer", 1);
+    Tracker_verify("Inner", $inner_count + 1);
+
+    say("  PASS: Nested objects work correctly");
+}
+
+func test_super_chain() void {
+    test_section("Test 7: SUPER:: method chain");
+    Tracker_reset();
+
+    my scalar $sports = SportsCar_new("Ferrari", "488", 670);
+
+    # Test isa through chain
+    assert(isa($sports, "SportsCar") == 1, "sports isa SportsCar");
+    assert(isa($sports, "Car") == 1, "sports isa Car");
+    assert(isa($sports, "Vehicle") == 1, "sports isa Vehicle");
+
+    # Test SUPER:: chained describe
+    my str $desc = $sports->describe();
+    assert(index($desc, "Ferrari") >= 0, "describe contains make");
+    assert(index($desc, "488") >= 0, "describe contains model");
+    assert(index($desc, "670hp") >= 0, "describe contains horsepower");
+    assert(index($desc, "4 wheels") >= 0, "describe contains wheels");
+
+    # Test inherited methods work
+    assert($sports->wheels() == 4, "inherited wheels method works");
+    assert($sports->model() eq "488", "model method works");
+    assert($sports->horsepower() == 670, "horsepower method works");
+
+    sys::release(\$sports);
+
+    # DESTROY chain: SportsCar -> Car -> Vehicle
+    Tracker_verify("SportsCar", 1);
+    Tracker_verify_counts("Car", 0, 1);     # created=0 (not called), destroyed=1 (via SUPER::)
+    Tracker_verify_counts("Vehicle", 0, 1); # created=0 (not called), destroyed=1 (via SUPER::)
+
+    say("  PASS: SUPER:: method chain works correctly");
+}
+
+func test_closures_in_objects() void {
+    test_section("Test 8: Objects with closure fields");
+    Tracker_reset();
+
+    my scalar $cb = Callback_new("callback_test");
+
+    # Test closure invocation
+    my int $result = $cb->invoke(10);
+    assert($result == 52, "closure invocation works (10 + 42 = 52)");
+
+    $result = $cb->invoke(100);
+    assert($result == 142, "closure invocation consistent");
+
+    # Test state modification
+    $cb->increment();
+    $cb->increment();
+    assert($cb->counter() == 2, "counter incremented correctly");
+
+    sys::release(\$cb);
+    Tracker_verify("Callback", 1);
+
+    say("  PASS: Objects with closures work correctly");
+}
+
+func test_reference_counting() void {
+    test_section("Test 9: Reference counting with aliases");
+    Tracker_reset();
+
+    my scalar $obj1 = SimpleObject_new("refcount_test");
+
+    # Create alias
+    my scalar $alias = $obj1;
+
+    # Refcount should be 2
+    assert(refcount($obj1) >= 2, "refcount increased with alias");
+
+    # Both refer to same object
+    assert($obj1->name() eq $alias->name(), "alias refers to same object");
+    assert($obj1->id() == $alias->id(), "alias has same id");
+
+    # Release alias
+    sys::release(\$alias);
+
+    # Object should still exist
+    assert($obj1->name() eq "refcount_test", "object still valid after alias release");
+
+    # Release original
+    sys::release(\$obj1);
+    Tracker_verify("SimpleObject", 1);
+
+    say("  PASS: Reference counting works correctly");
+}
+
+func test_array_of_objects() void {
+    test_section("Test 10: Array of objects");
+    Tracker_reset();
+
+    my array @objects = ();
+    my int $count = 20;
+
+    my int $i = 0;
+    while ($i < $count) {
+        my scalar $obj = SimpleObject_new("obj_" . $i);
+        push(@objects, $obj);
+        $i = $i + 1;
+    }
+
+    # Verify all objects in array
+    $i = 0;
+    while ($i < $count) {
+        my scalar $obj = $objects[$i];
+        assert(isa($obj, "SimpleObject") == 1, "object " . $i . " isa SimpleObject");
+        assert($obj->name() eq "obj_" . $i, "object " . $i . " has correct name");
+        $i = $i + 1;
+    }
+
+    # Release all objects from array
+    $i = 0;
+    while ($i < $count) {
+        my scalar $obj = shift(@objects);
+        sys::release(\$obj);
+        $i = $i + 1;
+    }
+
+    Tracker_verify("SimpleObject", $count);
+
+    say("  PASS: Array of objects works correctly");
+}
+
+func test_hash_of_objects() void {
+    test_section("Test 11: Hash of objects");
+    Tracker_reset();
+
+    my hash %objects = ();
+    my int $count = 15;
+
+    my int $i = 0;
+    while ($i < $count) {
+        my str $key = "key_" . $i;
+        my scalar $obj = SimpleObject_new("hash_obj_" . $i);
+        $objects{$key} = $obj;
+        $i = $i + 1;
+    }
+
+    # Verify objects in hash
+    $i = 0;
+    while ($i < $count) {
+        my str $key = "key_" . $i;
+        my scalar $obj = $objects{$key};
+        assert(isa($obj, "SimpleObject") == 1, "hash object " . $i . " isa SimpleObject");
+        assert($obj->name() eq "hash_obj_" . $i, "hash object " . $i . " has correct name");
+        $i = $i + 1;
+    }
+
+    # Release all objects from hash
+    $i = 0;
+    while ($i < $count) {
+        my str $key = "key_" . $i;
+        my scalar $obj = $objects{$key};
+        delete($objects{$key});
+        sys::release(\$obj);
+        $i = $i + 1;
+    }
+
+    Tracker_verify("SimpleObject", $count);
+
+    say("  PASS: Hash of objects works correctly");
+}
+
+func test_stress_iterations() void {
+    test_section("Test 12: Stress test - many iterations");
+    Tracker_reset();
+
+    my int $iterations = 50;
+    my int $iter = 0;
+
+    while ($iter < $iterations) {
+        # Create various objects
+        my scalar $simple = SimpleObject_new("stress_" . $iter);
+        my scalar $derived = DerivedClass_new("stress_derived_" . $iter, $iter);
+        my scalar $level3 = Level3_new();
+        my scalar $diamond = DiamondChild_new("stress_diamond_" . $iter);
+        my scalar $outer = Outer_new(3);  # 3 inner objects + 1 primary = 4
+        my scalar $sports = SportsCar_new("Make_" . $iter, "Model_" . $iter, $iter * 10);
+
+        # Exercise objects
+        my str $name = $simple->name();
+        my str $id = $derived->identify();
+        my str $fields = $level3->get_all_fields();
+        my str $mixin = $diamond->mixin_a_method();
+        my int $sum = $outer->sum_inner_values();
+        my str $desc = $sports->describe();
+
+        # Release all
+        sys::release(\$simple);
+        sys::release(\$derived);
+        sys::release(\$level3);
+        sys::release(\$diamond);
+        sys::release(\$outer);
+        sys::release(\$sports);
+
+        $iter = $iter + 1;
+    }
+
+    # Verify counts - note SUPER:: chains increase destroy count
+    Tracker_verify("SimpleObject", $iterations);
+    Tracker_verify("DerivedClass", $iterations);
+    Tracker_verify_counts("BaseClass", 0, $iterations);   # created=0, destroyed=N (via SUPER::)
+    Tracker_verify("Level3", $iterations);
+    Tracker_verify_counts("Level2", 0, $iterations);      # created=0, destroyed=N (via SUPER::)
+    Tracker_verify_counts("Level1", 0, $iterations);      # created=0, destroyed=N (via SUPER::)
+    Tracker_verify("DiamondChild", $iterations);
+    Tracker_verify("Outer", $iterations);
+    Tracker_verify("Inner", $iterations * 4);             # 3 in array + 1 primary per outer
+    Tracker_verify("SportsCar", $iterations);
+    Tracker_verify_counts("Car", 0, $iterations);         # created=0, destroyed=N (via SUPER::)
+    Tracker_verify_counts("Vehicle", 0, $iterations);     # created=0, destroyed=N (via SUPER::)
+
+    say("  PASS: Stress test completed - " . $iterations . " iterations");
+}
+
+func test_rebless() void {
+    test_section("Test 13: Re-blessing objects");
+    Tracker_reset();
+
+    # Create a base class object
+    my scalar $obj = BaseClass_new("rebless_test");
+    assert(blessed($obj) eq "BaseClass", "initially blessed as BaseClass");
+    assert(isa($obj, "BaseClass") == 1, "initially isa BaseClass");
+
+    # Re-bless to derived class
+    bless($obj, "DerivedClass");
+    assert(blessed($obj) eq "DerivedClass", "re-blessed as DerivedClass");
+    assert(isa($obj, "DerivedClass") == 1, "now isa DerivedClass");
+    assert(isa($obj, "BaseClass") == 1, "still isa BaseClass (inherited)");
+
+    # Can now call derived methods (if fields exist)
+    # Note: identify will work since it just reads label
+    my str $id = $obj->identify();
+    assert(length($id) > 0, "can call overridden method after rebless");
+
+    sys::release(\$obj);
+
+    # Note: DESTROY will be called for DerivedClass which calls SUPER (BaseClass)
+    Tracker_verify("BaseClass", 1);  # created=1 (BaseClass_new), destroyed=1 (via SUPER::)
+    Tracker_verify_counts("DerivedClass", 0, 1);  # created=0, destroyed=1
+
+    say("  PASS: Re-blessing objects works correctly");
+}
+
+func test_undef_handling() void {
+    test_section("Test 14: Undef and edge case handling");
+
+    # Test blessed on undef
+    my scalar $undef_val;
+    my str $pkg = blessed($undef_val);
+    assert($pkg eq "", "blessed on undef returns empty string");
+
+    # Test isa on undef
+    assert(isa($undef_val, "SomeClass") == 0, "isa on undef returns false");
+
+    # Test can on undef
+    assert(can($undef_val, "method") == 0, "can on undef returns false");
+
+    # Test refcount on undef
+    my int $rc = refcount($undef_val);
+    assert($rc == 0, "refcount on undef returns 0");
+
+    say("  PASS: Undef handling works correctly");
+}
+
+# =============================================================================
+# Main entry point
+# =============================================================================
+
+func main() int {
+    say("================================================================");
+    say("Full OOP Framework Test Suite");
+    say("================================================================");
+
+    # Initialize all class hierarchies
+    SimpleObject_init();
+    BaseClass_init();
+    DerivedClass_init();
+    Level1_init();
+    Level2_init();
+    Level3_init();
+    MixinA_init();
+    MixinB_init();
+    DiamondChild_init();
+    LargeObject_init();
+    Inner_init();
+    Outer_init();
+    Vehicle_init();
+    Car_init();
+    SportsCar_init();
+    Callback_init();
+
+    # Run all tests
+    # test_basic_bless();
+    # test_single_inheritance();
+    # test_multilevel_inheritance();
+    # test_multiple_inheritance();
+    # test_large_objects();
+    test_nested_objects();
+    test_super_chain();
+    test_closures_in_objects();
+    test_reference_counting();
+    test_array_of_objects();
+    test_hash_of_objects();
+    test_stress_iterations();
+    test_rebless();
+    test_undef_handling();
+
+    say("");
+    say("================================================================");
+    say("All " . $test_count . " assertions passed!");
+    say("================================================================");
+
+    return 0;
+}

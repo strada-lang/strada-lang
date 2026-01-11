@@ -23,6 +23,12 @@ typedef StradaValue* (*strada_func_2)(StradaValue*, StradaValue*);
 typedef StradaValue* (*strada_func_3)(StradaValue*, StradaValue*, StradaValue*);
 typedef StradaValue* (*strada_func_4)(StradaValue*, StradaValue*, StradaValue*, StradaValue*);
 
+/* Function pointer type for __strada_export_info */
+typedef const char* (*strada_export_info_func)(void);
+
+/* Function pointer type for __strada_version */
+typedef const char* (*strada_version_func)(void);
+
 /* Convert Perl SV to StradaValue */
 static StradaValue* sv_to_strada(pTHX_ SV *sv) {
     if (!SvOK(sv)) {
@@ -280,6 +286,48 @@ CODE:
         }
 
         RETVAL = strada_to_sv(aTHX_ result);
+    }
+OUTPUT:
+    RETVAL
+
+# Get export info from a Strada library
+# Returns the metadata string or empty string if not a Strada library
+SV*
+get_export_info(handle)
+    IV handle
+CODE:
+    if (!handle) {
+        RETVAL = newSVpv("", 0);
+    } else {
+        void *fn = dlsym((void*)handle, "__strada_export_info");
+        if (!fn) {
+            RETVAL = newSVpv("", 0);
+        } else {
+            strada_export_info_func info_fn = (strada_export_info_func)fn;
+            const char *info = info_fn();
+            RETVAL = newSVpv(info ? info : "", 0);
+        }
+    }
+OUTPUT:
+    RETVAL
+
+# Get version from a Strada library
+# Returns the version string or empty string if not available
+SV*
+get_version(handle)
+    IV handle
+CODE:
+    if (!handle) {
+        RETVAL = newSVpv("", 0);
+    } else {
+        void *fn = dlsym((void*)handle, "__strada_version");
+        if (!fn) {
+            RETVAL = newSVpv("", 0);
+        } else {
+            strada_version_func ver_fn = (strada_version_func)fn;
+            const char *ver = ver_fn();
+            RETVAL = newSVpv(ver ? ver : "", 0);
+        }
     }
 OUTPUT:
     RETVAL

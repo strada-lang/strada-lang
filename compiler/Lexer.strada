@@ -1,3 +1,20 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
 # Strada/Lexer.strada - Strada Lexer written in Strada
 # This file will be compiled by the bootstrap compiler to create a self-hosting compiler
 
@@ -104,6 +121,94 @@ func lex_skip_block_comment(scalar $lexer) void {
         }
 
         lex_advance($lexer);
+    }
+}
+
+# Check if current position starts a POD directive
+# POD directives: =head1, =head2, =head3, =head4, =over, =item, =back, =pod, =cut, =begin, =end, =for
+func lex_is_pod_start(scalar $lexer) int {
+    my str $source = $lexer->{"source"};
+    my int $pos = $lexer->{"pos"};
+    my int $len = length($source);
+
+    # Must start with '=' (61)
+    if (char_at($source, $pos) != 61) {
+        return 0;
+    }
+
+    # Check for POD keywords after '='
+    # We need at least 4 chars for shortest: =pod, =for, =cut
+    if ($pos + 4 > $len) {
+        return 0;
+    }
+
+    my str $word = substr($source, $pos + 1, 5);
+
+    # Check prefixes using substr comparison
+    if (substr($word, 0, 4) eq "head") { return 1; }
+    if (substr($word, 0, 4) eq "over") { return 1; }
+    if (substr($word, 0, 4) eq "item") { return 1; }
+    if (substr($word, 0, 4) eq "back") { return 1; }
+    if (substr($word, 0, 3) eq "pod") { return 1; }
+    if (substr($word, 0, 3) eq "cut") { return 1; }
+    if (substr($word, 0, 5) eq "begin") { return 1; }
+    if (substr($word, 0, 3) eq "end") { return 1; }
+    if (substr($word, 0, 3) eq "for") { return 1; }
+
+    return 0;
+}
+
+# Skip POD block (from =pod/=head/etc to =cut)
+func lex_skip_pod(scalar $lexer) void {
+    my str $source = $lexer->{"source"};
+    my int $len = length($source);
+
+    # Skip until we find =cut at start of line
+    while (1) {
+        my int $code = lex_current_code($lexer);
+
+        if ($code == 0) {
+            # EOF - POD extends to end of file (valid in Perl)
+            return;
+        }
+
+        # Check for =cut at start of line
+        if ($code == 61) {  # '='
+            my int $pos = $lexer->{"pos"};
+            if ($pos + 4 <= $len) {
+                my str $word = substr($source, $pos + 1, 3);
+                if ($word eq "cut") {
+                    # Skip "=cut" and rest of line
+                    lex_advance($lexer);  # =
+                    lex_advance($lexer);  # c
+                    lex_advance($lexer);  # u
+                    lex_advance($lexer);  # t
+                    # Skip to end of line
+                    while (1) {
+                        $code = lex_current_code($lexer);
+                        if ($code == 0 || $code == 10) {
+                            if ($code == 10) {
+                                lex_advance($lexer);
+                            }
+                            return;
+                        }
+                        lex_advance($lexer);
+                    }
+                }
+            }
+        }
+
+        # Skip to next line
+        while (1) {
+            $code = lex_current_code($lexer);
+            if ($code == 0) {
+                return;
+            }
+            lex_advance($lexer);
+            if ($code == 10) {  # newline
+                last;
+            }
+        }
     }
 }
 
@@ -615,8 +720,8 @@ func lex_read_subst_literal(scalar $lexer, int $token_line) scalar {
     my scalar $flags_sb = sb_new();
     while (!lex_at_end($lexer)) {
         my int $f = lex_current_code($lexer);
-        # g=103, i=105, m=109, s=115, x=120
-        if ($f == 103 || $f == 105 || $f == 109 || $f == 115 || $f == 120) {
+        # g=103, i=105, m=109, s=115, x=120, e=101
+        if ($f == 103 || $f == 105 || $f == 109 || $f == 115 || $f == 120 || $f == 101) {
             sb_append($flags_sb, chr($f));
             lex_advance($lexer);
         } else {
@@ -628,6 +733,92 @@ func lex_read_subst_literal(scalar $lexer, int $token_line) scalar {
     $token{"type"} = "SUBST_LITERAL";
     $token{"pattern"} = sb_to_string($pattern_sb);
     $token{"replacement"} = sb_to_string($repl_sb);
+    $token{"flags"} = sb_to_string($flags_sb);
+    $token{"line"} = $token_line;
+    return \%token;
+}
+
+func lex_read_tr_literal(scalar $lexer, int $token_line, int $skip_count) scalar {
+    # Skip 'tr' or 'y' (skip_count chars) then the opening /
+    my int $sc = 0;
+    while ($sc < $skip_count) {
+        lex_advance($lexer);
+        $sc = $sc + 1;
+    }
+    lex_advance($lexer);  # Skip opening /
+
+    # Read search list
+    my scalar $search_sb = sb_new();
+    while (!lex_at_end($lexer)) {
+        my int $code = lex_current_code($lexer);
+        # 47 = /
+        if ($code == 47) {
+            lex_advance($lexer);
+            last;
+        }
+        # 92 = backslash
+        if ($code == 92) {
+            lex_advance($lexer);
+            if (!lex_at_end($lexer)) {
+                my int $escaped = lex_current_code($lexer);
+                if ($escaped == 47) {
+                    sb_append($search_sb, "/");
+                } else {
+                    sb_append($search_sb, "\\");
+                    sb_append($search_sb, chr($escaped));
+                }
+                lex_advance($lexer);
+            }
+        } else {
+            sb_append($search_sb, chr($code));
+            lex_advance($lexer);
+        }
+    }
+
+    # Read replacement list
+    my scalar $repl_sb = sb_new();
+    while (!lex_at_end($lexer)) {
+        my int $code = lex_current_code($lexer);
+        # 47 = /
+        if ($code == 47) {
+            lex_advance($lexer);
+            last;
+        }
+        # 92 = backslash
+        if ($code == 92) {
+            lex_advance($lexer);
+            if (!lex_at_end($lexer)) {
+                my int $escaped = lex_current_code($lexer);
+                if ($escaped == 47) {
+                    sb_append($repl_sb, "/");
+                } else {
+                    sb_append($repl_sb, "\\");
+                    sb_append($repl_sb, chr($escaped));
+                }
+                lex_advance($lexer);
+            }
+        } else {
+            sb_append($repl_sb, chr($code));
+            lex_advance($lexer);
+        }
+    }
+
+    # Read flags (c=99, d=100, s=115, r=114)
+    my scalar $flags_sb = sb_new();
+    while (!lex_at_end($lexer)) {
+        my int $f = lex_current_code($lexer);
+        if ($f == 99 || $f == 100 || $f == 115 || $f == 114) {
+            sb_append($flags_sb, chr($f));
+            lex_advance($lexer);
+        } else {
+            last;
+        }
+    }
+
+    my hash %token = ();
+    $token{"type"} = "TR_LITERAL";
+    $token{"search"} = sb_to_string($search_sb);
+    $token{"replace"} = sb_to_string($repl_sb);
     $token{"flags"} = sb_to_string($flags_sb);
     $token{"line"} = $token_line;
     return \%token;
@@ -651,7 +842,8 @@ func lex_read_qw(scalar $lexer, int $token_line) scalar {
     lex_advance($lexer);  # Skip open delimiter
 
     my array @words = ();
-    my str $word = "";
+    my scalar $word_sb = sb_new();
+    my int $word_len = 0;
     my int $count = 0;
 
     while (!lex_at_end($lexer)) {
@@ -659,8 +851,8 @@ func lex_read_qw(scalar $lexer, int $token_line) scalar {
 
         if ($ch eq $close) {
             # End of qw - save last word if any
-            if (length($word) > 0) {
-                push(@words, $word);
+            if ($word_len > 0) {
+                push(@words, sb_to_string($word_sb));
                 $count = $count + 1;
             }
             lex_advance($lexer);  # Skip close delimiter
@@ -675,15 +867,17 @@ func lex_read_qw(scalar $lexer, int $token_line) scalar {
 
         if ($ch eq " " || $ch eq "\t" || $ch eq "\n" || $ch eq "\r") {
             # Whitespace - save current word if any
-            if (length($word) > 0) {
-                push(@words, $word);
+            if ($word_len > 0) {
+                push(@words, sb_to_string($word_sb));
                 $count = $count + 1;
-                $word = "";
+                $word_sb = sb_new();
+                $word_len = 0;
             }
             lex_advance($lexer);
         } else {
             # Regular character - add to current word
-            $word = $word . $ch;
+            sb_append($word_sb, $ch);
+            $word_len = $word_len + 1;
             lex_advance($lexer);
         }
     }
@@ -698,9 +892,15 @@ func lex_read_q_string(scalar $lexer, int $token_line, int $is_qq) scalar {
     my str $close = lex_get_close_delim($open);
     lex_advance($lexer);  # Skip open delimiter
 
-    my str $result = "";
+    my scalar $sb = sb_new();
     my int $depth = 1;  # For nested delimiters like q(a(b)c)
     my int $handled = 0;
+
+    # Interpolation tracking for qq()
+    my array @parts = ();
+    my array @vars = ();
+    my int $has_interp = 0;
+    my int $var_count = 0;
 
     while (!lex_at_end($lexer)) {
         my str $ch = lex_current_char($lexer);
@@ -711,13 +911,24 @@ func lex_read_q_string(scalar $lexer, int $token_line, int $is_qq) scalar {
             $depth = $depth - 1;
             if ($depth == 0) {
                 lex_advance($lexer);
-                my hash %token = ();
-                $token{"type"} = "STR_LITERAL";
-                $token{"value"} = $result;
-                $token{"line"} = $token_line;
-                return \%token;
+                if ($is_qq && $has_interp) {
+                    push(\@parts, sb_to_string($sb));
+                    my hash %token = ();
+                    $token{"type"} = "INTERP_STRING";
+                    $token{"parts"} = \@parts;
+                    $token{"vars"} = \@vars;
+                    $token{"var_count"} = $var_count;
+                    $token{"line"} = $token_line;
+                    return \%token;
+                } else {
+                    my hash %token = ();
+                    $token{"type"} = "STR_LITERAL";
+                    $token{"value"} = sb_to_string($sb);
+                    $token{"line"} = $token_line;
+                    return \%token;
+                }
             }
-            $result = $result . $ch;
+            sb_append($sb, $ch);
             lex_advance($lexer);
             $handled = 1;
         }
@@ -725,7 +936,7 @@ func lex_read_q_string(scalar $lexer, int $token_line, int $is_qq) scalar {
         # Check for nested opening delimiter (paired delimiters only)
         if ($handled == 0 && $open ne $close && $ch eq $open) {
             $depth = $depth + 1;
-            $result = $result . $ch;
+            sb_append($sb, $ch);
             lex_advance($lexer);
             $handled = 1;
         }
@@ -738,44 +949,91 @@ func lex_read_q_string(scalar $lexer, int $token_line, int $is_qq) scalar {
             if ($is_qq) {
                 # qq() supports full escape sequences like double-quoted strings
                 if ($esc eq "n") {
-                    $result = $result . "\n";
+                    sb_append($sb, "\n");
                 } elsif ($esc eq "t") {
-                    $result = $result . "\t";
+                    sb_append($sb, "\t");
                 } elsif ($esc eq "r") {
-                    $result = $result . "\r";
+                    sb_append($sb, "\r");
                 } elsif ($esc eq "0") {
-                    $result = $result . chr(0);
+                    sb_append($sb, chr(0));
                 } elsif ($esc eq "a") {
-                    $result = $result . chr(7);
+                    sb_append($sb, chr(7));
                 } elsif ($esc eq "b") {
-                    $result = $result . chr(8);
+                    sb_append($sb, chr(8));
                 } elsif ($esc eq "f") {
-                    $result = $result . chr(12);
+                    sb_append($sb, chr(12));
                 } elsif ($esc eq "v") {
-                    $result = $result . chr(11);
+                    sb_append($sb, chr(11));
                 } elsif ($esc eq "e") {
-                    $result = $result . chr(27);
+                    sb_append($sb, chr(27));
+                } elsif ($esc eq "$") {
+                    # Escaped dollar sign - literal $
+                    sb_append($sb, "$");
                 } elsif ($esc eq "\\" || $esc eq $close) {
-                    $result = $result . $esc;
+                    sb_append($sb, $esc);
                 } else {
                     # Unknown escape - include as-is
-                    $result = $result . $esc;
+                    sb_append($sb, $esc);
                 }
             } else {
                 # q() only escapes \\ and the delimiter
                 if ($esc eq $close || $esc eq "\\") {
-                    $result = $result . $esc;
+                    sb_append($sb, $esc);
                 } else {
-                    $result = $result . "\\" . $esc;
+                    sb_append($sb, "\\");
+                    sb_append($sb, $esc);
                 }
             }
             lex_advance($lexer);
             $handled = 1;
         }
 
+        # Check for interpolation in qq()
+        if ($handled == 0 && $is_qq && $ch eq "$") {
+            lex_advance($lexer);
+            my int $peek_code = lex_current_code($lexer);
+
+            # 123 = {
+            if ($peek_code == 123) {
+                lex_advance($lexer); # Skip {
+                my scalar $ivar_sb = sb_new();
+
+                while (1) {
+                    my int $vc = lex_current_code($lexer);
+                    if ($vc == 0) {
+                        die("Unterminated interpolation in qq string");
+                    }
+                    # 125 = }
+                    if ($vc == 125) {
+                        lex_advance($lexer); # Skip }
+
+                        my str $ivar = sb_to_string($ivar_sb);
+                        if (length($ivar) == 0) {
+                            die("Empty variable name in interpolation");
+                        }
+
+                        # Save current part and variable
+                        push(\@parts, sb_to_string($sb));
+                        push(\@vars, $ivar);
+                        $var_count = $var_count + 1;
+                        $sb = sb_new();  # Reset StringBuilder
+                        $has_interp = 1;
+                        break;
+                    }
+                    sb_append($ivar_sb, chr($vc));
+                    lex_advance($lexer);
+                }
+                $handled = 1;
+            } else {
+                # Just a literal $ not followed by {
+                sb_append($sb, "$");
+                $handled = 1;
+            }
+        }
+
         # Regular character
         if ($handled == 0) {
-            $result = $result . $ch;
+            sb_append($sb, $ch);
             lex_advance($lexer);
         }
     }
@@ -783,24 +1041,184 @@ func lex_read_q_string(scalar $lexer, int $token_line, int $is_qq) scalar {
     die("Unterminated q/qq string at line " . $token_line);
 }
 
+# Read a raw C code block __C__ { ... }
+# Handles nested braces, C strings, and C comments properly
+func lex_read_c_block(scalar $lexer, int $token_line) scalar {
+    lex_skip_whitespace($lexer);
+
+    # Expect opening brace  {=123
+    my int $code = lex_current_code($lexer);
+    if ($code != 123) {
+        die("Expected '{' after __C__ at line " . $token_line);
+    }
+    lex_advance($lexer);  # Skip opening {
+
+    my scalar $sb = sb_new();
+    my int $depth = 1;
+
+    while (!lex_at_end($lexer) && $depth > 0) {
+        my int $ch = lex_current_code($lexer);
+
+        # Track line numbers for better error messages
+        if ($ch == 10) {
+            $lexer->{"line"} = $lexer->{"line"} + 1;
+        }
+
+        # Handle C-style strings - don't count braces inside strings
+        # "=34
+        if ($ch == 34) {
+            sb_append($sb, lex_current_char($lexer));
+            lex_advance($lexer);
+            while (!lex_at_end($lexer)) {
+                my int $sch = lex_current_code($lexer);
+                sb_append($sb, lex_current_char($lexer));
+                if ($sch == 10) {
+                    $lexer->{"line"} = $lexer->{"line"} + 1;
+                }
+                lex_advance($lexer);
+                # End of string  "=34
+                if ($sch == 34) {
+                    last;
+                }
+                # Escape sequence \=92
+                if ($sch == 92) {
+                    if (!lex_at_end($lexer)) {
+                        sb_append($sb, lex_current_char($lexer));
+                        lex_advance($lexer);
+                    }
+                }
+            }
+        # Handle C-style char literals - don't count braces inside
+        # '=39
+        } elsif ($ch == 39) {
+            sb_append($sb, lex_current_char($lexer));
+            lex_advance($lexer);
+            while (!lex_at_end($lexer)) {
+                my int $sch = lex_current_code($lexer);
+                sb_append($sb, lex_current_char($lexer));
+                lex_advance($lexer);
+                # End of char '=39
+                if ($sch == 39) {
+                    last;
+                }
+                # Escape \=92
+                if ($sch == 92) {
+                    if (!lex_at_end($lexer)) {
+                        sb_append($sb, lex_current_char($lexer));
+                        lex_advance($lexer);
+                    }
+                }
+            }
+        # Handle C block comments /* */
+        # /=47, *=42
+        } elsif ($ch == 47) {
+            my int $nxt = char_at($lexer->{"source"}, $lexer->{"pos"} + 1);
+            # Block comment
+            if ($nxt == 42) {
+                sb_append($sb, "/*");
+                lex_advance($lexer);
+                lex_advance($lexer);
+                while (!lex_at_end($lexer)) {
+                    my int $c1 = lex_current_code($lexer);
+                    if ($c1 == 10) {
+                        $lexer->{"line"} = $lexer->{"line"} + 1;
+                    }
+                    # *=42
+                    if ($c1 == 42) {
+                        my int $c2 = char_at($lexer->{"source"}, $lexer->{"pos"} + 1);
+                        # /=47
+                        if ($c2 == 47) {
+                            sb_append($sb, "*/");
+                            lex_advance($lexer);
+                            lex_advance($lexer);
+                            last;
+                        }
+                    }
+                    sb_append($sb, lex_current_char($lexer));
+                    lex_advance($lexer);
+                }
+            # Line comment //
+            } elsif ($nxt == 47) {
+                sb_append($sb, "//");
+                lex_advance($lexer);
+                lex_advance($lexer);
+                while (!lex_at_end($lexer)) {
+                    my int $lc = lex_current_code($lexer);
+                    # newline=10
+                    if ($lc == 10) {
+                        sb_append($sb, "\n");
+                        $lexer->{"line"} = $lexer->{"line"} + 1;
+                        lex_advance($lexer);
+                        last;
+                    }
+                    sb_append($sb, lex_current_char($lexer));
+                    lex_advance($lexer);
+                }
+            } else {
+                # Just a /
+                sb_append($sb, "/");
+                lex_advance($lexer);
+            }
+        # Opening brace {=123
+        } elsif ($ch == 123) {
+            $depth = $depth + 1;
+            sb_append($sb, "{");
+            lex_advance($lexer);
+        # Closing brace }=125
+        } elsif ($ch == 125) {
+            $depth = $depth - 1;
+            if ($depth > 0) {
+                sb_append($sb, "}");
+            }
+            lex_advance($lexer);
+        } else {
+            # Regular character
+            sb_append($sb, lex_current_char($lexer));
+            lex_advance($lexer);
+        }
+    }
+
+    if ($depth > 0) {
+        die("Unterminated __C__ block at line " . $token_line);
+    }
+
+    my hash %token = ();
+    $token{"type"} = "C_BLOCK";
+    $token{"value"} = sb_to_string($sb);
+    $token{"line"} = $token_line;
+    return \%token;
+}
+
 func lex_keyword_or_ident(str $text) str {
     if ($text eq "func") { return "FUNC"; }
     if ($text eq "my") { return "MY"; }
+    if ($text eq "const") { return "CONST"; }
+    if ($text eq "our") { return "OUR"; }
     if ($text eq "if") { return "IF"; }
     if ($text eq "elsif") { return "ELSIF"; }
     if ($text eq "else") { return "ELSE"; }
     if ($text eq "while") { return "WHILE"; }
+    if ($text eq "do") { return "DO"; }
     if ($text eq "for") { return "FOR"; }
     if ($text eq "foreach") { return "FOREACH"; }
     if ($text eq "return") { return "RETURN"; }
     if ($text eq "last") { return "LAST"; }
+    if ($text eq "break") { return "LAST"; }
     if ($text eq "next") { return "NEXT"; }
+    if ($text eq "unless") { return "UNLESS"; }
+    if ($text eq "until") { return "UNTIL"; }
+    if ($text eq "redo") { return "REDO"; }
     if ($text eq "extern") { return "EXTERN"; }
-    if ($text eq "struct") { return "STRUCT"; }
+    if ($text eq "private") { return "PRIVATE"; }
+    if ($text eq "async") { return "ASYNC"; }
+    if ($text eq "await") { return "AWAIT"; }
+    if ($text eq "enum") { return "ENUM"; }
     if ($text eq "package") { return "PACKAGE"; }
     if ($text eq "version") { return "VERSION"; }
     if ($text eq "use") { return "USE"; }
     if ($text eq "import_lib") { return "IMPORT_LIB"; }
+    if ($text eq "import_object") { return "IMPORT_OBJECT"; }
+    if ($text eq "import_archive") { return "IMPORT_ARCHIVE"; }
     if ($text eq "inherit") { return "INHERIT"; }
     if ($text eq "try") { return "TRY"; }
     if ($text eq "catch") { return "CATCH"; }
@@ -812,6 +1230,17 @@ func lex_keyword_or_ident(str $text) str {
     if ($text eq "__PACKAGE__") { return "DUNDER_PACKAGE"; }
     if ($text eq "__FILE__") { return "DUNDER_FILE"; }
     if ($text eq "__LINE__") { return "DUNDER_LINE"; }
+    if ($text eq "__C__") { return "C_BLOCK"; }
+    if ($text eq "BEGIN") { return "BEGIN_BLOCK"; }
+    if ($text eq "END") { return "END_BLOCK"; }
+
+    # Moose-style OOP keywords
+    if ($text eq "has") { return "HAS"; }
+    if ($text eq "extends") { return "EXTENDS"; }
+    if ($text eq "with") { return "WITH"; }
+    if ($text eq "before") { return "BEFORE"; }
+    if ($text eq "after") { return "AFTER"; }
+    if ($text eq "around") { return "AROUND"; }
 
     # String comparison operators
     if ($text eq "eq") { return "STR_EQ"; }
@@ -820,16 +1249,36 @@ func lex_keyword_or_ident(str $text) str {
     if ($text eq "gt") { return "STR_GT"; }
     if ($text eq "le") { return "STR_LE"; }
     if ($text eq "ge") { return "STR_GE"; }
+    if ($text eq "cmp") { return "STR_CMP"; }
     
     # Types
     if ($text eq "int") { return "TYPE_INT"; }
     if ($text eq "num") { return "TYPE_NUM"; }
     if ($text eq "str") { return "TYPE_STR"; }
+    if ($text eq "bool") { return "TYPE_BOOL"; }
     if ($text eq "array") { return "TYPE_ARRAY"; }
     if ($text eq "hash") { return "TYPE_HASH"; }
     if ($text eq "scalar") { return "TYPE_SCALAR"; }
     if ($text eq "void") { return "TYPE_VOID"; }
-    
+    if ($text eq "dynamic") { return "TYPE_DYNAMIC"; }
+    # Explicit sized types for extern functions (C interop)
+    if ($text eq "int32") { return "TYPE_INT32"; }
+    if ($text eq "int64") { return "TYPE_INT64"; }
+    if ($text eq "float32") { return "TYPE_FLOAT32"; }
+    if ($text eq "float64") { return "TYPE_FLOAT64"; }
+    if ($text eq "int8") { return "TYPE_INT8"; }
+    if ($text eq "int16") { return "TYPE_INT16"; }
+    if ($text eq "uint8") { return "TYPE_UINT8"; }
+    if ($text eq "byte") { return "TYPE_UINT8"; }
+    if ($text eq "uint16") { return "TYPE_UINT16"; }
+    if ($text eq "uint32") { return "TYPE_UINT32"; }
+    if ($text eq "uint64") { return "TYPE_UINT64"; }
+    if ($text eq "size_t") { return "TYPE_SIZE_T"; }
+    if ($text eq "char") { return "TYPE_CHAR"; }
+    if ($text eq "float") { return "TYPE_FLOAT32"; }
+    if ($text eq "double") { return "TYPE_FLOAT64"; }
+    if ($text eq "long_double") { return "TYPE_LONG_DOUBLE"; }
+
     # Built-ins that need special token types
     # undef is a keyword, not a function call
     if ($text eq "undef") { return "UNDEF"; }
@@ -886,6 +1335,26 @@ func lex_next_token(scalar $lexer) scalar {
         }
     }
 
+    # Skip POD blocks (=head1, =pod, etc. at start of line)
+    # '=' = 61
+    if ($code == 61) {
+        # Check if we're at start of line (pos 0 or prev char was newline)
+        my int $pos = $lexer->{"pos"};
+        my int $at_line_start = 0;
+        if ($pos == 0) {
+            $at_line_start = 1;
+        } else {
+            my int $prev = char_at($lexer->{"source"}, $pos - 1);
+            if ($prev == 10) {  # newline
+                $at_line_start = 1;
+            }
+        }
+        if ($at_line_start == 1 && lex_is_pod_start($lexer) == 1) {
+            lex_skip_pod($lexer);
+            return lex_next_token($lexer);
+        }
+    }
+
     # Check for regex/substitution after =~ or !~ BEFORE identifier check
     if ($lexer->{"expect_regex"} == 1) {
         # /=47
@@ -902,7 +1371,28 @@ func lex_next_token(scalar $lexer) scalar {
                 return lex_read_subst_literal($lexer, $token_line);
             }
         }
-        # Not a regex/subst - reset flag and continue with normal parsing
+        # tr=116,114 or y=121 followed by /
+        if ($code == 116) {
+            my int $peek1 = char_at($lexer->{"source"}, $lexer->{"pos"} + 1);
+            # r=114
+            if ($peek1 == 114) {
+                my int $peek2 = char_at($lexer->{"source"}, $lexer->{"pos"} + 2);
+                # /=47
+                if ($peek2 == 47) {
+                    $lexer->{"expect_regex"} = 0;
+                    return lex_read_tr_literal($lexer, $token_line, 2);
+                }
+            }
+        }
+        if ($code == 121) {
+            my int $peek1 = char_at($lexer->{"source"}, $lexer->{"pos"} + 1);
+            # /=47
+            if ($peek1 == 47) {
+                $lexer->{"expect_regex"} = 0;
+                return lex_read_tr_literal($lexer, $token_line, 1);
+            }
+        }
+        # Not a regex/subst/tr - reset flag and continue with normal parsing
         $lexer->{"expect_regex"} = 0;
     }
 
@@ -936,12 +1426,18 @@ func lex_next_token(scalar $lexer) scalar {
             }
         }
 
+        # __C__ { ... } - raw C code block
+        if ($text eq "__C__") {
+            return lex_read_c_block($lexer, $token_line);
+        }
+
         my str $type = lex_keyword_or_ident($text);
 
         my hash %token = ();
         $token{"type"} = $type;
         $token{"value"} = $text;
         $token{"line"} = $token_line;
+        $token{"is_word"} = 1;
         return \%token;
     }
 
@@ -1000,6 +1496,26 @@ func lex_next_token(scalar $lexer) scalar {
         return \%token;
     }
 
+    # Diamond operator <$fh> for reading from filehandle (<60, $36)
+    if ($code == 60 && $code2 == 36) {
+        lex_advance($lexer);  # Skip <
+        lex_advance($lexer);  # Skip $
+        my str $varname = lex_read_identifier($lexer);
+        if ($varname eq "") {
+            die("Expected variable name in diamond operator at line " . $token_line);
+        }
+        my int $close = lex_current_code($lexer);
+        if ($close != 62) {  # >
+            die("Expected '>' to close diamond operator at line " . $token_line);
+        }
+        lex_advance($lexer);  # Skip >
+        my hash %token = ();
+        $token{"type"} = "DIAMOND";
+        $token{"value"} = $varname;  # Just the variable name without $
+        $token{"line"} = $token_line;
+        return \%token;
+    }
+
     # Check for <=> (spaceship) before <= (<60, =61, >62)
     if ($code == 60 && $code2 == 61) {
         my int $code3 = char_at($source, $pos + 2);
@@ -1052,6 +1568,17 @@ func lex_next_token(scalar $lexer) scalar {
         my hash %token = ();
         $token{"type"} = "OR";
         $token{"value"} = "||";
+        $token{"line"} = $token_line;
+        return \%token;
+    }
+
+    # //  (/47, /47) - defined-or operator
+    if ($code == 47 && $code2 == 47) {
+        lex_advance($lexer);
+        lex_advance($lexer);
+        my hash %token = ();
+        $token{"type"} = "DEFINED_OR";
+        $token{"value"} = "//";
         $token{"line"} = $token_line;
         return \%token;
     }
@@ -1300,8 +1827,9 @@ func lex_is_value_ending_token(str $type) int {
 
     # Literals (actual token types used by lexer)
     if ($type eq "INT_LITERAL") { return 1; }
-    if ($type eq "FLOAT_LITERAL") { return 1; }
-    if ($type eq "STRING") { return 1; }
+    if ($type eq "NUM_LITERAL") { return 1; }
+    if ($type eq "STR_LITERAL") { return 1; }
+    if ($type eq "INTERP_STRING") { return 1; }
 
     # Identifiers (variable names, function calls)
     if ($type eq "IDENT") { return 1; }

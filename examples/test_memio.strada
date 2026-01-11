@@ -1,0 +1,169 @@
+#!/usr/bin/env strada
+# Test in-memory I/O: core::open_str, core::str_from_fh, core::open(\$var, mode)
+
+func main() int {
+    my int $pass = 0;
+    my int $fail = 0;
+
+    # Test 1: Read from string with core::open_str
+    {
+        my scalar $fh = core::open_str("line1\nline2\nline3\n", "r");
+        my str $line1 = <$fh>;
+        my str $line2 = <$fh>;
+        my str $line3 = <$fh>;
+        core::close($fh);
+        if ($line1 eq "line1" && $line2 eq "line2" && $line3 eq "line3") {
+            say("ok 1 - read from string");
+            $pass++;
+        } else {
+            say("not ok 1 - read from string: got '" . $line1 . "', '" . $line2 . "', '" . $line3 . "'");
+            $fail++;
+        }
+    }
+
+    # Test 2: Write to string with core::open_str + core::str_from_fh
+    {
+        my scalar $wfh = core::open_str("", "w");
+        say($wfh, "hello");
+        say($wfh, "world");
+        my str $result = core::str_from_fh($wfh);
+        core::close($wfh);
+        if ($result eq "hello\nworld\n") {
+            say("ok 2 - write to string");
+            $pass++;
+        } else {
+            say("not ok 2 - write to string: got '" . $result . "'");
+            $fail++;
+        }
+    }
+
+    # Test 3: Append mode with core::open_str
+    {
+        my scalar $afh = core::open_str("existing\n", "a");
+        say($afh, "appended");
+        my str $result = core::str_from_fh($afh);
+        core::close($afh);
+        if ($result eq "existing\nappended\n") {
+            say("ok 3 - append to string");
+            $pass++;
+        } else {
+            say("not ok 3 - append to string: got '" . $result . "'");
+            $fail++;
+        }
+    }
+
+    # Test 4: Reference-style read: core::open(\$str, "r")
+    {
+        my str $data = "alpha\nbeta\ngamma\n";
+        my scalar $fh = core::open(\$data, "r");
+        my str $l1 = <$fh>;
+        my str $l2 = <$fh>;
+        my str $l3 = <$fh>;
+        core::close($fh);
+        if ($l1 eq "alpha" && $l2 eq "beta" && $l3 eq "gamma") {
+            say("ok 4 - reference read");
+            $pass++;
+        } else {
+            say("not ok 4 - reference read: got '" . $l1 . "', '" . $l2 . "', '" . $l3 . "'");
+            $fail++;
+        }
+    }
+
+    # Test 5: Reference-style write with close writeback
+    {
+        my str $output = "";
+        my scalar $wfh = core::open(\$output, "w");
+        say($wfh, "written via ref");
+        core::close($wfh);
+        if ($output eq "written via ref\n") {
+            say("ok 5 - reference write with close writeback");
+            $pass++;
+        } else {
+            say("not ok 5 - reference write: got '" . $output . "'");
+            $fail++;
+        }
+    }
+
+    # Test 6: EOF detection on memory stream (need one extra read past end)
+    {
+        my scalar $fh = core::open_str("one\ntwo\n", "r");
+        my str $l1 = <$fh>;
+        my str $l2 = <$fh>;
+        my str $l3 = <$fh>;  # This read returns undef and triggers EOF
+        my int $at_eof = core::eof($fh);
+        core::close($fh);
+        if ($at_eof == 1 && !defined($l3)) {
+            say("ok 6 - eof on memory stream");
+            $pass++;
+        } else {
+            say("not ok 6 - eof=" . $at_eof . " l3_defined=" . defined($l3));
+            $fail++;
+        }
+    }
+
+    # Test 7: Write with print (no newline)
+    {
+        my scalar $wfh = core::open_str("", "w");
+        print($wfh, "no");
+        print($wfh, "newline");
+        my str $result = core::str_from_fh($wfh);
+        core::close($wfh);
+        if ($result eq "nonewline") {
+            say("ok 7 - print without newline");
+            $pass++;
+        } else {
+            say("not ok 7 - print: got '" . $result . "'");
+            $fail++;
+        }
+    }
+
+    # Test 8: Auto-close via scope exit (no explicit close)
+    {
+        my scalar $fh = core::open_str("test\n", "r");
+        my str $line = <$fh>;
+        if ($line eq "test") {
+            say("ok 8 - read before auto-close");
+            $pass++;
+        } else {
+            say("not ok 8 - auto-close: got '" . $line . "'");
+            $fail++;
+        }
+        # $fh goes out of scope here — should be auto-closed cleanly
+    }
+
+    # Test 9: Empty string read
+    {
+        my scalar $fh = core::open_str("", "r");
+        my str $line = <$fh>;
+        core::close($fh);
+        if (!defined($line)) {
+            say("ok 9 - empty string returns undef");
+            $pass++;
+        } else {
+            say("not ok 9 - empty string: got '" . $line . "'");
+            $fail++;
+        }
+    }
+
+    # Test 10: Reference-style append
+    {
+        my str $buf = "start\n";
+        my scalar $afh = core::open(\$buf, "a");
+        say($afh, "more");
+        core::close($afh);
+        if ($buf eq "start\nmore\n") {
+            say("ok 10 - reference append");
+            $pass++;
+        } else {
+            say("not ok 10 - reference append: got '" . $buf . "'");
+            $fail++;
+        }
+    }
+
+    say("");
+    say("Results: " . $pass . " passed, " . $fail . " failed");
+    if ($fail > 0) {
+        return 1;
+    }
+    return 0;
+}

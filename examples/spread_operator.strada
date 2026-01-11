@@ -1,55 +1,101 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
 # spread_operator.strada - Test spread operator for variadic functions
 
-func sum(...scalar $numbers) int {
+# Variadic function - receives all args as an array
+func sum(scalar ...@numbers) int {
     say("Sum function called with variadic parameter");
-    my int $count = size($numbers);
+    my int $count = size(@numbers);
     say("  Received " . $count . " arguments");
-    
-    # Would sum all numbers here
-    return $count;
+
+    my int $total = 0;
+    foreach my scalar $n (@numbers) {
+        $total = $total + $n;
+    }
+    return $total;
 }
 
-func join_strings(...scalar $strings) str {
-    my int $count = size($strings);
+func join_strings(str ...@strings) str {
+    my int $count = size(@strings);
     say("Join called with " . $count . " strings");
-    
-    # Would join all strings here
-    return "joined";
+
+    my str $result = "";
+    my int $first = 1;
+    foreach my str $s (@strings) {
+        if ($first == 0) {
+            $result = $result . " ";
+        }
+        $result = $result . $s;
+        $first = 0;
+    }
+    return $result;
 }
 
-func log_all(str $level, ...scalar $messages) void {
+func log_all(str $level, str ...@messages) void {
     say("[" . upper($level) . "] Logging:");
-    
-    my int $count = size($messages);
-    my int $i = 0;
-    
+
+    my int $count = size(@messages);
     say("  " . $count . " messages to log");
+    foreach my str $msg (@messages) {
+        say("  - " . $msg);
+    }
 }
 
 func main() int {
     say("=== Spread Operator Test ===");
     say("");
-    
+
     say("--- Variable Arguments ---");
-    my scalar $nums1 = split("1,2,3", ",");
-    my scalar $nums2 = split("10,20,30,40,50", ",");
-    
-    my int $result1 = sum($nums1);
-    my int $result2 = sum($nums2);
-    
+
+    # Call with individual arguments
+    my int $result1 = sum(1, 2, 3);
+    say("  sum(1, 2, 3) = " . $result1);
+
+    my int $result2 = sum(10, 20, 30, 40, 50);
+    say("  sum(10, 20, 30, 40, 50) = " . $result2);
+
+    say("");
+    say("--- Spread Operator ---");
+
+    # Use spread operator to unpack array
+    my array @nums = (100, 200, 300);
+    my int $result3 = sum(...@nums);
+    say("  sum(...@nums) with @nums = (100, 200, 300) = " . $result3);
+
+    # Mix regular args and spread
+    my int $result4 = sum(1, ...@nums, 999);
+    say("  sum(1, ...@nums, 999) = " . $result4);
+
     say("");
     say("--- String Join ---");
-    my scalar $words = split("hello,world,from,strada", ",");
-    my str $joined = join_strings($words);
-    
+    my str $joined = join_strings("hello", "world", "from", "strada");
+    say("  join_strings(\"hello\", \"world\", \"from\", \"strada\") = \"" . $joined . "\"");
+
     say("");
     say("--- Mixed Parameters ---");
-    my scalar $msgs = split("msg1,msg2,msg3", ",");
-    log_all("INFO", $msgs);
-    
+    log_all("INFO", "msg1", "msg2", "msg3");
+
+    # Spread with fixed param
+    my array @logs = ("error1", "error2");
+    log_all("ERROR", ...@logs);
+
     say("");
-    say("✓ Spread operator working!");
-    say("✓ Functions can accept unlimited arguments");
-    
+    say("All tests passed!");
+
     return 0;
 }

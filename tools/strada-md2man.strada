@@ -1,0 +1,394 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# md2man - Convert Markdown to man page format
+#
+# Usage: ./md2man input.md [output.1]
+#        ./md2man --name NAME --section N --date DATE input.md
+#
+# Converts Markdown files to troff/groff man page format.
+
+func usage() void {
+    say("Usage: md2man [options] input.md [output]");
+    say("");
+    say("Convert Markdown to man page format (troff/groff).");
+    say("");
+    say("Options:");
+    say("  --name NAME       Set the man page name (default: filename)");
+    say("  --section N       Set the section number (default: 1)");
+    say("  --date DATE       Set the date (default: today)");
+    say("  --center TEXT     Set the center header text");
+    say("  --help, -h        Show this help message");
+    say("");
+    say("Examples:");
+    say("  md2man README.md README.1");
+    say("  md2man --name stradac --section 1 docs/stradac.md");
+}
+
+# Trim leading and trailing whitespace
+func trim(str $s) str {
+    $s =~ s/^\s+//;
+    $s =~ s/\s+$//;
+    return $s;
+}
+
+# Escape special characters for man pages
+func escape_man(str $s) str {
+    # Escape backslashes first
+    $s =~ s/\\/\\\\/g;
+    # Escape minus signs (use \- for literal minus)
+    $s =~ s/-/\\-/g;
+    return $s;
+}
+
+# Convert inline markdown formatting to man format
+func convert_inline(str $line) str {
+    my str $result = "";
+    my int $len = length($line);
+    my int $i = 0;
+
+    while ($i < $len) {
+        my str $ch = substr($line, $i, 1);
+
+        # Check for backtick (code)
+        if ($ch eq "`") {
+            my int $end = $i + 1;
+            while ($end < $len && substr($line, $end, 1) ne "`") {
+                $end = $end + 1;
+            }
+            if ($end < $len) {
+                my str $code = substr($line, $i + 1, $end - $i - 1);
+                $result = $result . "\\fB" . $code . "\\fR";
+                $i = $end + 1;
+                next;
+            }
+        }
+
+        # Check for ** (bold)
+        if ($ch eq "*" && $i + 1 < $len && substr($line, $i + 1, 1) eq "*") {
+            my int $end = $i + 2;
+            while ($end + 1 < $len) {
+                if (substr($line, $end, 1) eq "*" && substr($line, $end + 1, 1) eq "*") {
+                    last;
+                }
+                $end = $end + 1;
+            }
+            if ($end + 1 < $len) {
+                my str $bold = substr($line, $i + 2, $end - $i - 2);
+                $result = $result . "\\fB" . $bold . "\\fR";
+                $i = $end + 2;
+                next;
+            }
+        }
+
+        # Check for single * (italic)
+        if ($ch eq "*") {
+            my int $end = $i + 1;
+            while ($end < $len && substr($line, $end, 1) ne "*") {
+                $end = $end + 1;
+            }
+            if ($end < $len) {
+                my str $italic = substr($line, $i + 1, $end - $i - 1);
+                $result = $result . "\\fI" . $italic . "\\fR";
+                $i = $end + 1;
+                next;
+            }
+        }
+
+        $result = $result . $ch;
+        $i = $i + 1;
+    }
+
+    return $result;
+}
+
+# Get today's date in man page format
+func get_date() str {
+    # Use date command to get current date
+    my int $pipe = sys::popen("date '+%Y-%m-%d'", "r");
+    if ($pipe < 0) {
+        return "2026-01-01";
+    }
+    my str $date = sys::readline($pipe);
+    sys::pclose($pipe);
+    $date =~ s/\n//;
+    $date =~ s/\r//;
+    return $date;
+}
+
+# Extract name from filename (e.g., "docs/README.md" -> "README")
+func extract_name(str $path) str {
+    my str $name = $path;
+
+    # Remove directory part
+    if ($name =~ /\/([^\/]+)$/) {
+        my array @caps = captures();
+        $name = $caps[1];
+    }
+
+    # Remove extension
+    $name =~ s/\.[^.]+$//;
+
+    return $name;
+}
+
+# Convert markdown file to man page
+func convert_md_to_man(str $input_file, str $name, str $section, str $date, str $center) str {
+    my scalar $fh = sys::open($input_file, "r");
+    if (length($fh) == 0) {
+        die("Cannot open file: " . $input_file);
+    }
+
+    my str $output = "";
+    my int $in_code_block = 0;
+    my int $in_list = 0;
+    my int $first_heading = 1;
+    my str $line = "";
+
+    # Write man page header
+    $output = $output . ".\\\" Generated by md2man from " . $input_file . "\n";
+    $output = $output . ".TH \"" . $name . "\" \"" . $section . "\" \"" . $date . "\" \"\" \"" . $center . "\"\n";
+
+    while (!sys::eof($fh)) {
+        $line = sys::readline($fh);
+        $line =~ s/\n$//;
+        $line =~ s/\r$//;
+
+        # Handle fenced code blocks
+        if ($line =~ /^```/) {
+            if ($in_code_block == 0) {
+                $in_code_block = 1;
+                $output = $output . ".PP\n.nf\n.RS 4\n";
+            } else {
+                $in_code_block = 0;
+                $output = $output . ".RE\n.fi\n";
+            }
+            next;
+        }
+
+        # Inside code block - output verbatim (escaped)
+        if ($in_code_block == 1) {
+            $output = $output . escape_man($line) . "\n";
+            next;
+        }
+
+        # Empty line
+        if (length(trim($line)) == 0) {
+            if ($in_list == 1) {
+                $in_list = 0;
+                $output = $output . ".RE\n";
+            }
+            $output = $output . ".PP\n";
+            next;
+        }
+
+        # H1 heading (# or ===)
+        if ($line =~ /^# (.+)$/) {
+            my array @caps = captures();
+            my str $heading = $caps[1];
+            if ($first_heading == 1) {
+                # First heading becomes NAME section
+                $first_heading = 0;
+                $output = $output . ".SH NAME\n";
+                $output = $output . $name . " \\- " . escape_man($heading) . "\n";
+            } else {
+                $output = $output . ".SH \"" . escape_man($heading) . "\"\n";
+            }
+            next;
+        }
+
+        # H2 heading (##)
+        if ($line =~ /^## (.+)$/) {
+            my array @caps = captures();
+            my str $heading = $caps[1];
+            $output = $output . ".SH \"" . escape_man($heading) . "\"\n";
+            next;
+        }
+
+        # H3 heading (###)
+        if ($line =~ /^### (.+)$/) {
+            my array @caps = captures();
+            my str $heading = $caps[1];
+            $output = $output . ".SS \"" . escape_man($heading) . "\"\n";
+            next;
+        }
+
+        # H4+ heading (####, #####, etc)
+        if ($line =~ /^#{4,} (.+)$/) {
+            my array @caps = captures();
+            my str $heading = $caps[1];
+            $output = $output . ".SS \"" . escape_man($heading) . "\"\n";
+            next;
+        }
+
+        # Unordered list item (- or * at start of line)
+        if ($line =~ /^[-*]\s+(.+)$/) {
+            my array @caps = captures();
+            my str $item = $caps[1];
+            if ($in_list == 0) {
+                $in_list = 1;
+                $output = $output . ".RS 2\n";
+            }
+            $output = $output . ".IP \\(bu 2\n";
+            $output = $output . convert_inline(escape_man($item)) . "\n";
+            next;
+        }
+
+        # Ordered list item (1. 2. etc)
+        if ($line =~ /^([0-9]+)\.\s+(.+)$/) {
+            my array @caps = captures();
+            my str $num = $caps[1];
+            my str $item = $caps[2];
+            if ($in_list == 0) {
+                $in_list = 1;
+                $output = $output . ".RS 2\n";
+            }
+            $output = $output . ".IP " . $num . ". 4\n";
+            $output = $output . convert_inline(escape_man($item)) . "\n";
+            next;
+        }
+
+        # Definition list (term followed by : description)
+        if ($line =~ /^([^:]+):\s*$/) {
+            my array @caps = captures();
+            my str $term = $caps[1];
+            $output = $output . ".TP\n.B " . escape_man(trim($term)) . "\n";
+            next;
+        }
+
+        # Indented line (4 spaces or tab) - treat as preformatted
+        if ($line =~ /^(    |\t)(.+)$/) {
+            my array @caps = captures();
+            my str $content = $caps[2];
+            $output = $output . ".nf\n" . escape_man($content) . "\n.fi\n";
+            next;
+        }
+
+        # Horizontal rule (---, ***, ___)
+        if ($line =~ /^[\-\*_]{3,}$/) {
+            $output = $output . ".PP\n.HR\n";
+            next;
+        }
+
+        # Regular paragraph text
+        $output = $output . convert_inline(escape_man($line)) . "\n";
+    }
+
+    sys::close($fh);
+    return $output;
+}
+
+func main(int $argc, array @argv) int {
+    if ($argc < 2) {
+        usage();
+        return 1;
+    }
+
+    # Parse arguments
+    my str $input_file = "";
+    my str $output_file = "";
+    my str $name = "";
+    my str $section = "1";
+    my str $date = "";
+    my str $center = "";
+
+    my int $i = 1;
+    while ($i < $argc) {
+        my str $arg = $argv[$i];
+
+        if ($arg eq "--help" || $arg eq "-h") {
+            usage();
+            return 0;
+        } elsif ($arg eq "--name") {
+            $i = $i + 1;
+            if ($i >= $argc) {
+                die("--name requires an argument");
+            }
+            $name = $argv[$i];
+        } elsif ($arg eq "--section") {
+            $i = $i + 1;
+            if ($i >= $argc) {
+                die("--section requires an argument");
+            }
+            $section = $argv[$i];
+        } elsif ($arg eq "--date") {
+            $i = $i + 1;
+            if ($i >= $argc) {
+                die("--date requires an argument");
+            }
+            $date = $argv[$i];
+        } elsif ($arg eq "--center") {
+            $i = $i + 1;
+            if ($i >= $argc) {
+                die("--center requires an argument");
+            }
+            $center = $argv[$i];
+        } elsif ($arg =~ /^-/) {
+            say("Error: Unknown option: " . $arg);
+            usage();
+            return 1;
+        } else {
+            # Positional argument
+            if (length($input_file) == 0) {
+                $input_file = $arg;
+            } elsif (length($output_file) == 0) {
+                $output_file = $arg;
+            }
+        }
+        $i = $i + 1;
+    }
+
+    # Validate input
+    if (length($input_file) == 0) {
+        say("Error: No input file specified");
+        usage();
+        return 1;
+    }
+
+    if (!sys::is_file($input_file)) {
+        say("Error: File not found: " . $input_file);
+        return 1;
+    }
+
+    # Set defaults
+    if (length($name) == 0) {
+        $name = extract_name($input_file);
+    }
+
+    if (length($date) == 0) {
+        $date = get_date();
+    }
+
+    if (length($center) == 0) {
+        $center = "User Commands";
+    }
+
+    # Convert
+    my str $man_content = convert_md_to_man($input_file, $name, $section, $date, $center);
+
+    # Output
+    if (length($output_file) == 0) {
+        # Output to stdout
+        print($man_content);
+    } else {
+        # Write to file
+        sys::spew($output_file, $man_content);
+        say("Generated: " . $output_file);
+    }
+
+    return 0;
+}

@@ -1,0 +1,24 @@
+func main() int {
+    my int $x = 1;
+    {
+        my int $x = 2;
+        say($x);
+    }
+    say($x);
+
+    # Closure captures
+    my int $counter = 0;
+    my scalar $inc = func () void { $counter = $counter + 1; };
+    $inc->();
+    $inc->();
+    say($counter);
+
+    # For loop scope
+    my int $total = 0;
+    for (my int $i = 0; $i < 5; $i++) {
+        $total = $total + $i;
+    }
+    say($total);
+
+    return 0;
+}

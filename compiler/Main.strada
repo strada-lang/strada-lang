@@ -1,7 +1,24 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
 # Main.strada - Entry point for self-hosting Strada compiler
 # This is the main compiler executable
 
-func compile(str $source, str $filename, int $debug_info, int $show_timing, int $show_warnings, int $enable_profiling, scalar $lib_paths, scalar $lib_paths_low) str {
+func compile(str $source, str $filename, int $debug_info, int $show_timing, int $show_warnings, int $enable_profiling, int $enable_stack_trace, scalar $lib_paths, scalar $lib_paths_low) str {
     my num $t0 = 0.0;
     my num $t1 = 0.0;
 
@@ -29,9 +46,9 @@ func compile(str $source, str $filename, int $debug_info, int $show_timing, int 
         say("  Semantic: " . ($t1 - $t0) . " seconds");
     }
 
-    # Generate code (pass debug flag for #line directives, profiling flag)
+    # Generate code (pass debug flag for #line directives, profiling flag, stack trace flag)
     $t0 = sys::hires_time();
-    my str $code = generate($ast, $filename, $debug_info, $enable_profiling);
+    my str $code = generate($ast, $filename, $debug_info, $enable_profiling, $enable_stack_trace);
     $t1 = sys::hires_time();
     if ($show_timing == 1) {
         say("  CodeGen:  " . ($t1 - $t0) . " seconds");
@@ -51,6 +68,7 @@ func print_usage() void {
     say("  -p, --profile   Enable function profiling (timing and call counts)");
     say("  -t, --timing    Show compilation phase timing");
     say("  -w, --warnings  Show warnings (unused variables, etc.)");
+    say("  --no-stack-trace  Disable stack trace support (for performance)");
     say("  -h, --help      Show this help message");
     say("");
     say("The self-hosting Strada compiler, written in Strada.");
@@ -64,6 +82,7 @@ func main() int {
     my int $show_timing = 0;
     my int $show_warnings = 0;
     my int $enable_profiling = 0;
+    my int $enable_stack_trace = 1;  # Enabled by default
     my str $input_file = "";
     my str $output_file = "";
     my array @lib_paths = ();
@@ -71,7 +90,7 @@ func main() int {
     my int $i = 1;
 
     while ($i < $arg_count) {
-        my str $arg = @ARGV[$i];
+        my str $arg = $ARGV[$i];
 
         if ($arg eq "-g" || $arg eq "--debug") {
             $debug_info = 1;
@@ -81,11 +100,13 @@ func main() int {
             $show_timing = 1;
         } elsif ($arg eq "-w" || $arg eq "--warnings") {
             $show_warnings = 1;
+        } elsif ($arg eq "--no-stack-trace") {
+            $enable_stack_trace = 0;
         } elsif ($arg eq "-LL") {
             # -LL <path> - add low-priority library search path
             $i = $i + 1;
             if ($i < $arg_count) {
-                push(@lib_paths_low, @ARGV[$i]);
+                push(@lib_paths_low, $ARGV[$i]);
             } else {
                 say("Error: -LL requires a path argument");
                 return 1;
@@ -98,7 +119,7 @@ func main() int {
             # -L <path> - add library search path
             $i = $i + 1;
             if ($i < $arg_count) {
-                push(@lib_paths, @ARGV[$i]);
+                push(@lib_paths, $ARGV[$i]);
             } else {
                 say("Error: -L requires a path argument");
                 return 1;
@@ -142,7 +163,7 @@ func main() int {
     my str $source = slurp($input_file);
 
     # Compile (pass lib paths)
-    my str $code = compile($source, $input_file, $debug_info, $show_timing, $show_warnings, $enable_profiling, \@lib_paths, \@lib_paths_low);
+    my str $code = compile($source, $input_file, $debug_info, $show_timing, $show_warnings, $enable_profiling, $enable_stack_trace, \@lib_paths, \@lib_paths_low);
 
     # Write output
     spew($output_file, $code);

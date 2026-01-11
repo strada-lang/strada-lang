@@ -1,0 +1,137 @@
+#!/usr/bin/env strada
+# Test string split single-allocation optimization for memory leaks
+# Optimization: split() uses strada_new_str_len() directly instead of
+# malloc + strncpy + strada_new_str + free (3 allocs → 1 per part).
+# Run: valgrind --leak-check=full ./test_split_single_alloc
+
+func main() int {
+    say("Testing split single-allocation for memory leaks...");
+    my int $iterations = 200;
+
+    # Test 1: Basic comma-separated split
+    say("  Basic CSV split...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my array @parts = split(",", "alpha,bravo,charlie,delta,echo");
+        if (scalar(@parts) != 5) {
+            say("    FAIL: expected 5, got " . scalar(@parts));
+            return 1;
+        }
+        if ($parts[0] ne "alpha" || $parts[4] ne "echo") {
+            say("    FAIL: wrong values");
+            return 1;
+        }
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 2: Split with multi-character delimiter
+    say("  Multi-char delimiter...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @parts = split("::", "foo::bar::baz::qux");
+        if (scalar(@parts) != 4) {
+            say("    FAIL: expected 4, got " . scalar(@parts));
+            return 1;
+        }
+        if ($parts[0] ne "foo" || $parts[3] ne "qux") {
+            say("    FAIL: wrong values");
+            return 1;
+        }
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 3: Split producing empty strings
+    say("  Empty part split...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @parts = split(",", ",,a,,b,,");
+        # Leading/trailing empties
+        if ($parts[0] ne "" || $parts[1] ne "") {
+            say("    FAIL: leading empties");
+            return 1;
+        }
+        if ($parts[2] ne "a" || $parts[4] ne "b") {
+            say("    FAIL: middle values");
+            return 1;
+        }
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 4: Single character split (empty delimiter)
+    say("  Single-char split (empty delim)...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @parts = split("", "hello");
+        if (scalar(@parts) != 5) {
+            say("    FAIL: expected 5, got " . scalar(@parts));
+            return 1;
+        }
+        if ($parts[0] ne "h" || $parts[4] ne "o") {
+            say("    FAIL: wrong chars");
+            return 1;
+        }
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 5: No delimiter found (whole string as one part)
+    say("  No match split...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @parts = split("|", "no pipes here");
+        if (scalar(@parts) != 1 || $parts[0] ne "no pipes here") {
+            say("    FAIL: no-match split");
+            return 1;
+        }
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 6: Split with long parts
+    say("  Long parts...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $long = "abcdefghijklmnopqrstuvwxyz" x 4;
+        my str $input = $long . "," . $long . "," . $long;
+        my array @parts = split(",", $input);
+        if (scalar(@parts) != 3) {
+            say("    FAIL: expected 3, got " . scalar(@parts));
+            return 1;
+        }
+        if (length($parts[0]) != 104) {
+            say("    FAIL: part length");
+            return 1;
+        }
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 7: Split result immediately discarded (no use)
+    say("  Discard split result...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @unused = split(",", "a,b,c,d,e,f,g,h,i,j");
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 8: Repeated split of same string
+    say("  Repeated split same string...");
+    my str $csv = "one,two,three,four,five";
+    $i = 0;
+    while ($i < $iterations) {
+        my array @parts = split(",", $csv);
+        if (scalar(@parts) != 5) {
+            say("    FAIL");
+            return 1;
+        }
+        $i++;
+    }
+    say("    PASS");
+
+    say("All split single-alloc tests passed!");
+    return 0;
+}

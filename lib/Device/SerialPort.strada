@@ -1,0 +1,571 @@
+=head1 NAME
+
+Device::SerialPort - Object-oriented serial port communication
+
+=head1 SYNOPSIS
+
+    use lib "lib";
+    use Device::SerialPort;
+
+    my scalar $port = SerialPort::new("/dev/ttyUSB0");
+    $port->baudrate(115200);
+    $port->databits(8);
+    $port->parity("none");
+    $port->stopbits(1);
+
+    if ($port->open()) {
+        $port->write("AT\r\n");
+        my str $response = $port->read(1024);
+        say("Response: " . $response);
+        $port->close();
+    }
+
+=head1 DESCRIPTION
+
+Device::SerialPort provides an object-oriented interface for serial port
+communication on Linux systems. It wraps the low-level C<sys::serial_open()>
+and related functions into a convenient API similar to Perl's Device::SerialPort.
+
+The module supports configurable baud rates, data bits, parity, stop bits,
+and hardware handshaking. It is suitable for communicating with modems,
+Arduino/microcontrollers, GPS receivers, and other serial devices.
+
+=head1 CONSTRUCTOR
+
+=over 4
+
+=item B<new($device)>
+
+Create a new SerialPort object for the specified device.
+
+    my scalar $port = SerialPort::new("/dev/ttyUSB0");
+
+The port is not opened until you call C<open()>. Default settings are
+9600 baud, 8 data bits, no parity, 1 stop bit (8N1).
+
+=back
+
+=head1 METHODS
+
+=head2 Configuration Methods
+
+These methods configure the port settings. Call them before C<open()>,
+or call C<write_settings()> to apply changes to an open port.
+
+=over 4
+
+=item B<baudrate($rate)>
+
+Get or set the baud rate. Supported rates: 300, 1200, 2400, 4800, 9600,
+19200, 38400, 57600, 115200, 230400, 460800, 921600.
+
+    $port->baudrate(115200);
+    my int $baud = $port->baudrate();
+
+=item B<databits($bits)>
+
+Get or set the number of data bits (5, 6, 7, or 8).
+
+    $port->databits(8);
+
+=item B<parity($parity)>
+
+Get or set the parity. Valid values: C<"none">, C<"even">, C<"odd">.
+
+    $port->parity("none");
+
+=item B<stopbits($bits)>
+
+Get or set the number of stop bits (1 or 2).
+
+    $port->stopbits(1);
+
+=item B<handshake($type)>
+
+Get or set the handshaking mode. Valid values: C<"none">, C<"rts">, C<"xoff">.
+
+    $port->handshake("none");
+
+=item B<read_timeout($ms)>
+
+Get or set the read timeout in milliseconds.
+
+    $port->read_timeout(1000);
+
+=back
+
+=head2 Port Operations
+
+=over 4
+
+=item B<open()>
+
+Open the serial port with the current settings. Returns 1 on success, 0 on failure.
+
+    if ($port->open()) {
+        say("Port opened successfully");
+    }
+
+=item B<close()>
+
+Close the serial port.
+
+    $port->close();
+
+=item B<is_open()>
+
+Check if the port is currently open. Returns 1 if open, 0 if closed.
+
+    if ($port->is_open()) {
+        # port is ready for I/O
+    }
+
+=item B<write_settings()>
+
+Apply configuration changes to an already-open port. Returns 1 on success.
+
+    $port->baudrate(115200);
+    $port->write_settings();
+
+=back
+
+=head2 I/O Methods
+
+=over 4
+
+=item B<write($data)>
+
+Write data to the serial port. Returns number of bytes written, or -1 on error.
+
+    my int $n = $port->write("Hello\r\n");
+
+=item B<write_drain($data)>
+
+Write data and wait for transmission to complete.
+
+    $port->write_drain("AT\r\n");
+
+=item B<read($max_bytes)>
+
+Read up to C<$max_bytes> from the serial port. Returns the data read,
+or an empty string on timeout/error.
+
+    my str $data = $port->read(1024);
+
+=item B<readline($max_bytes)>
+
+Read a line (up to newline or max_bytes). Returns the line including the newline.
+
+    my str $line = $port->readline(256);
+
+=back
+
+=head2 Buffer Control
+
+=over 4
+
+=item B<purge_rx()>
+
+Flush the input (receive) buffer.
+
+=item B<purge_tx()>
+
+Flush the output (transmit) buffer.
+
+=item B<purge_all()>
+
+Flush both input and output buffers.
+
+=item B<drain()>
+
+Wait for all output data to be transmitted.
+
+=back
+
+=head2 Convenience Methods
+
+=over 4
+
+=item B<command($cmd, $timeout_ms)>
+
+Send a command (with CR+LF appended) and read the response after a delay.
+
+    my str $response = $port->command("AT", 100);
+
+=item B<at_command($cmd)>
+
+Send an AT command with a 100ms timeout. Shorthand for C<command($cmd, 100)>.
+
+    my str $response = $port->at_command("ATI");
+
+=item B<is_modem()>
+
+Check if the device responds to AT commands. Returns 1 if OK response received.
+
+    if ($port->is_modem()) {
+        say("Device is a modem");
+    }
+
+=back
+
+=head2 Accessors
+
+=over 4
+
+=item B<fd()>
+
+Get the underlying file descriptor (for advanced use with C<sys::> functions).
+
+=item B<device()>
+
+Get the device path.
+
+    say("Using device: " . $port->device());
+
+=back
+
+=head1 COMMON DEVICES
+
+=over 4
+
+=item F</dev/ttyUSB0> - USB-to-serial adapter
+
+=item F</dev/ttyACM0> - Arduino, USB CDC devices
+
+=item F</dev/ttyS0> - Hardware serial port (COM1 equivalent)
+
+=back
+
+=head1 PERMISSIONS
+
+You may need to add your user to the C<dialout> group to access serial ports:
+
+    sudo usermod -a -G dialout $USER
+
+Then log out and back in for the change to take effect.
+
+=head1 EXAMPLE
+
+    use lib "lib";
+    use Device::SerialPort;
+
+    my scalar $port = SerialPort::new("/dev/ttyUSB0");
+    $port->baudrate(9600);
+
+    if ($port->open() == 0) {
+        say("Failed to open port");
+        exit(1);
+    }
+
+    # Check for modem
+    if ($port->is_modem()) {
+        say("Modem detected");
+        say($port->at_command("ATI"));  # Get modem info
+    }
+
+    # Interactive communication
+    $port->write("Hello, device!\r\n");
+    my str $response = $port->read(1024);
+    say("Received: " . $response);
+
+    $port->close();
+
+=head1 SEE ALSO
+
+L<sys::serial_open>, L<sys::tcflush>, L<sys::tcdrain>
+
+=head1 VERSION
+
+1.0.0
+
+=cut
+
+package SerialPort;
+version "1.0.0";
+
+# Baud rate constants
+func B300() int { return sys::B300(); }
+func B1200() int { return sys::B1200(); }
+func B2400() int { return sys::B2400(); }
+func B4800() int { return sys::B4800(); }
+func B9600() int { return sys::B9600(); }
+func B19200() int { return sys::B19200(); }
+func B38400() int { return sys::B38400(); }
+func B57600() int { return sys::B57600(); }
+func B115200() int { return sys::B115200(); }
+func B230400() int { return sys::B230400(); }
+func B460800() int { return sys::B460800(); }
+func B921600() int { return sys::B921600(); }
+
+# Create a new SerialPort object
+# Usage: my scalar $port = SerialPort::new("/dev/ttyUSB0");
+func new(str $device) scalar {
+    my hash %self = ();
+    $self{"device"} = $device;
+    $self{"fd"} = -1;
+    $self{"baudrate"} = 9600;
+    $self{"databits"} = 8;
+    $self{"parity"} = "none";
+    $self{"stopbits"} = 1;
+    $self{"handshake"} = "none";
+    $self{"read_timeout"} = 1000;  # milliseconds
+    $self{"is_open"} = 0;
+    return bless(\%self, "SerialPort");
+}
+
+# Open the serial port with current settings
+# Returns: 1 on success, 0 on failure
+func open(scalar $self) int {
+    my str $device = $self->{"device"};
+    my int $baud = $self->{"baudrate"};
+
+    # Build config string (e.g., "8N1")
+    my int $databits = $self->{"databits"};
+    my str $parity = $self->{"parity"};
+    my int $stopbits = $self->{"stopbits"};
+
+    my str $parity_char = "N";
+    if ($parity eq "even") {
+        $parity_char = "E";
+    }
+    if ($parity eq "odd") {
+        $parity_char = "O";
+    }
+
+    my str $config = $databits . $parity_char . $stopbits;
+
+    # Convert baud rate to system constant
+    my int $baud_const = SerialPort::baud_to_const($baud);
+
+    my int $fd = sys::serial_open($device, $baud_const, $config);
+    if ($fd < 0) {
+        return 0;
+    }
+
+    $self->{"fd"} = $fd;
+    $self->{"is_open"} = 1;
+    return 1;
+}
+
+# Helper to convert numeric baud rate to system constant
+private func baud_to_const(int $baud) int {
+    if ($baud == 300) { return sys::B300(); }
+    if ($baud == 1200) { return sys::B1200(); }
+    if ($baud == 2400) { return sys::B2400(); }
+    if ($baud == 4800) { return sys::B4800(); }
+    if ($baud == 9600) { return sys::B9600(); }
+    if ($baud == 19200) { return sys::B19200(); }
+    if ($baud == 38400) { return sys::B38400(); }
+    if ($baud == 57600) { return sys::B57600(); }
+    if ($baud == 115200) { return sys::B115200(); }
+    if ($baud == 230400) { return sys::B230400(); }
+    if ($baud == 460800) { return sys::B460800(); }
+    if ($baud == 921600) { return sys::B921600(); }
+    # Default to 9600
+    return sys::B9600();
+}
+
+# Close the serial port
+func close(scalar $self) void {
+    if ($self->{"is_open"} == 1) {
+        sys::close_fd($self->{"fd"});
+        $self->{"fd"} = -1;
+        $self->{"is_open"} = 0;
+    }
+}
+
+# Check if port is open
+func is_open(scalar $self) int {
+    return $self->{"is_open"};
+}
+
+# Get/set baud rate
+# Usage: $port->baudrate(115200);
+#        my int $baud = $port->baudrate();
+func baudrate(scalar $self, int $rate) int {
+    if ($rate > 0) {
+        $self->{"baudrate"} = $rate;
+    }
+    return $self->{"baudrate"};
+}
+
+# Get/set data bits (5, 6, 7, or 8)
+func databits(scalar $self, int $bits) int {
+    if ($bits >= 5 && $bits <= 8) {
+        $self->{"databits"} = $bits;
+    }
+    return $self->{"databits"};
+}
+
+# Get/set parity ("none", "even", "odd")
+func parity(scalar $self, str $p) str {
+    if ($p eq "none" || $p eq "even" || $p eq "odd") {
+        $self->{"parity"} = $p;
+    }
+    return $self->{"parity"};
+}
+
+# Get/set stop bits (1 or 2)
+func stopbits(scalar $self, int $bits) int {
+    if ($bits == 1 || $bits == 2) {
+        $self->{"stopbits"} = $bits;
+    }
+    return $self->{"stopbits"};
+}
+
+# Get/set handshake ("none", "rts", "xoff")
+func handshake(scalar $self, str $h) str {
+    if ($h eq "none" || $h eq "rts" || $h eq "xoff") {
+        $self->{"handshake"} = $h;
+    }
+    return $self->{"handshake"};
+}
+
+# Get/set read timeout in milliseconds
+func read_timeout(scalar $self, int $ms) int {
+    if ($ms >= 0) {
+        $self->{"read_timeout"} = $ms;
+    }
+    return $self->{"read_timeout"};
+}
+
+# Apply settings to already-open port
+# Returns 1 on success, 0 on failure
+func write_settings(scalar $self) int {
+    if ($self->{"is_open"} == 0) {
+        return 0;
+    }
+
+    # Close and reopen with new settings
+    my str $device = $self->{"device"};
+    SerialPort::close($self);
+    return SerialPort::open($self);
+}
+
+# Write data to serial port
+# Returns: number of bytes written, or -1 on error
+func write(scalar $self, str $data) int {
+    if ($self->{"is_open"} == 0) {
+        return -1;
+    }
+    return sys::write_fd($self->{"fd"}, $data);
+}
+
+# Write data and wait for transmission to complete
+func write_drain(scalar $self, str $data) int {
+    my int $written = SerialPort::write($self, $data);
+    if ($written > 0) {
+        sys::tcdrain($self->{"fd"});
+    }
+    return $written;
+}
+
+# Read data from serial port
+# Usage: my str $data = $port->read(1024);
+# Returns: data read, or empty string on timeout/error
+func read(scalar $self, int $max_bytes) str {
+    if ($self->{"is_open"} == 0) {
+        return "";
+    }
+    return sys::read_fd($self->{"fd"}, $max_bytes);
+}
+
+# Read a line (until newline or max_bytes)
+func readline(scalar $self, int $max_bytes) str {
+    if ($self->{"is_open"} == 0) {
+        return "";
+    }
+
+    my str $line = "";
+    my int $count = 0;
+
+    while ($count < $max_bytes) {
+        my str $c = sys::read_fd($self->{"fd"}, 1);
+        if (length($c) == 0) {
+            # Timeout or error
+            last;
+        }
+        $line = $line . $c;
+        $count = $count + 1;
+        if ($c eq "\n") {
+            last;
+        }
+    }
+
+    return $line;
+}
+
+# Flush input buffer
+func purge_rx(scalar $self) int {
+    if ($self->{"is_open"} == 0) {
+        return -1;
+    }
+    return sys::tcflush($self->{"fd"}, 0);  # TCIFLUSH
+}
+
+# Flush output buffer
+func purge_tx(scalar $self) int {
+    if ($self->{"is_open"} == 0) {
+        return -1;
+    }
+    return sys::tcflush($self->{"fd"}, 1);  # TCOFLUSH
+}
+
+# Flush both input and output
+func purge_all(scalar $self) int {
+    if ($self->{"is_open"} == 0) {
+        return -1;
+    }
+    return sys::tcflush($self->{"fd"}, 2);  # TCIOFLUSH
+}
+
+# Wait for output to drain (all data transmitted)
+func drain(scalar $self) int {
+    if ($self->{"is_open"} == 0) {
+        return -1;
+    }
+    return sys::tcdrain($self->{"fd"});
+}
+
+# Get the file descriptor (for advanced use)
+func fd(scalar $self) int {
+    return $self->{"fd"};
+}
+
+# Get the device path
+func device(scalar $self) str {
+    return $self->{"device"};
+}
+
+# Send a command and read response (convenience method)
+# Appends CR+LF to command and waits for response
+func command(scalar $self, str $cmd, int $timeout_ms) str {
+    my str $full_cmd = $cmd . "\r\n";
+    my int $written = SerialPort::write_drain($self, $full_cmd);
+
+    if ($written < 0) {
+        return "";
+    }
+
+    # Small delay for device to respond
+    if ($timeout_ms > 0) {
+        sys::usleep($timeout_ms * 1000);
+    }
+
+    # Read response
+    return SerialPort::read($self, 4096);
+}
+
+# Send AT command (for modems)
+func at_command(scalar $self, str $cmd) str {
+    return SerialPort::command($self, $cmd, 100);
+}
+
+# Check if device supports AT commands
+func is_modem(scalar $self) int {
+    my str $response = SerialPort::at_command($self, "AT");
+    if ($response =~ /OK/) {
+        return 1;
+    }
+    return 0;
+}

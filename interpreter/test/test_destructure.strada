@@ -1,0 +1,19 @@
+func multi_return() array {
+    my array @r = (10, 20, 30);
+    return @r;
+}
+
+func main() int {
+    my array @data = (1, 2, 3, 4, 5);
+    my ($a, $b, $c) = @data;
+    say($a);
+    say($b);
+    say($c);
+
+    my ($x, $y, $z) = multi_return();
+    say($x);
+    say($y);
+    say($z);
+
+    return 0;
+}

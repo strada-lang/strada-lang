@@ -1,0 +1,35 @@
+func main() int {
+    # Test select - set default output filehandle
+    my scalar $fh = sys::open("/tmp/test_select_out.txt", "w");
+
+    # select() with no args should return current default (undef/stdout)
+    my scalar $old = select($fh);
+
+    # Now say/print should go to file
+    say("hello from select");
+    print("line2");
+
+    # Restore stdout
+    select($old);
+
+    # This should go to stdout
+    sys::close($fh);
+
+    # Read back the file
+    my str $content = sys::slurp("/tmp/test_select_out.txt");
+    if (index($content, "hello from select") < 0) {
+        say("FAIL: file doesn't contain 'hello from select'");
+        say("Got: " . $content);
+        return 1;
+    }
+    if (index($content, "line2") < 0) {
+        say("FAIL: file doesn't contain 'line2'");
+        return 1;
+    }
+
+    # Cleanup
+    sys::unlink("/tmp/test_select_out.txt");
+
+    say("All select tests passed");
+    return 0;
+}

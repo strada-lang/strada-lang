@@ -1,0 +1,291 @@
+use lib "lib";
+use Math::BigInt;
+
+my int $pass = 0;
+my int $fail = 0;
+
+func ok(int $cond, str $name) void {
+    if ($cond) {
+        $pass++;
+    } else {
+        say("FAIL: " . $name);
+        $fail++;
+    }
+}
+
+func main() int {
+    # Construction
+    my scalar $a = BigInt::new("12345");
+    ok($a->to_str() eq "12345", "new positive");
+
+    my scalar $b = BigInt::new("-678");
+    ok($b->to_str() eq "-678", "new negative");
+
+    my scalar $c = BigInt::new("0");
+    ok($c->to_str() eq "0", "new zero");
+
+    my scalar $d = BigInt::new("00042");
+    ok($d->to_str() eq "42", "strip leading zeros");
+
+    my scalar $e = BigInt::from_int(999);
+    ok($e->to_str() eq "999", "from_int positive");
+
+    my scalar $f = BigInt::from_int(-42);
+    ok($f->to_str() eq "-42", "from_int negative");
+
+    my scalar $g = BigInt::from_int(0);
+    ok($g->to_str() eq "0", "from_int zero");
+
+    # Addition
+    my scalar $t1 = BigInt::new("123");
+    my scalar $t2 = BigInt::new("456");
+    my scalar $r = $t1->add($t2);
+    ok($r->to_str() eq "579", "add positive + positive");
+
+    $t1 = BigInt::new("999");
+    $t2 = BigInt::new("1");
+    $r = $t1->add($t2);
+    ok($r->to_str() eq "1000", "add with carry");
+
+    $t1 = BigInt::new("-5");
+    $t2 = BigInt::new("3");
+    $r = $t1->add($t2);
+    ok($r->to_str() eq "-2", "add neg + pos (neg wins)");
+
+    $t1 = BigInt::new("-3");
+    $t2 = BigInt::new("5");
+    $r = $t1->add($t2);
+    ok($r->to_str() eq "2", "add neg + pos (pos wins)");
+
+    $t1 = BigInt::new("5");
+    $t2 = BigInt::new("-5");
+    $r = $t1->add($t2);
+    ok($r->to_str() eq "0", "add to zero");
+
+    $t1 = BigInt::new("-10");
+    $t2 = BigInt::new("-20");
+    $r = $t1->add($t2);
+    ok($r->to_str() eq "-30", "add neg + neg");
+
+    # Subtraction
+    $t1 = BigInt::new("100");
+    $t2 = BigInt::new("30");
+    $r = $t1->sub($t2);
+    ok($r->to_str() eq "70", "sub positive");
+
+    $t1 = BigInt::new("30");
+    $t2 = BigInt::new("100");
+    $r = $t1->sub($t2);
+    ok($r->to_str() eq "-70", "sub negative result");
+
+    $t1 = BigInt::new("42");
+    $t2 = BigInt::new("42");
+    $r = $t1->sub($t2);
+    ok($r->to_str() eq "0", "sub equal");
+
+    # Multiplication
+    $t1 = BigInt::new("123");
+    $t2 = BigInt::new("456");
+    $r = $t1->mul($t2);
+    ok($r->to_str() eq "56088", "mul positive");
+
+    $t1 = BigInt::new("-7");
+    $t2 = BigInt::new("8");
+    $r = $t1->mul($t2);
+    ok($r->to_str() eq "-56", "mul neg * pos");
+
+    $t1 = BigInt::new("-3");
+    $t2 = BigInt::new("-4");
+    $r = $t1->mul($t2);
+    ok($r->to_str() eq "12", "mul neg * neg");
+
+    $t1 = BigInt::new("12345");
+    $t2 = BigInt::new("0");
+    $r = $t1->mul($t2);
+    ok($r->to_str() eq "0", "mul by zero");
+
+    # Division
+    $t1 = BigInt::new("100");
+    $t2 = BigInt::new("7");
+    $r = $t1->div($t2);
+    ok($r->to_str() eq "14", "div truncates");
+
+    $t1 = BigInt::new("100");
+    $t2 = BigInt::new("10");
+    $r = $t1->div($t2);
+    ok($r->to_str() eq "10", "div exact");
+
+    $t1 = BigInt::new("-100");
+    $t2 = BigInt::new("3");
+    $r = $t1->div($t2);
+    ok($r->to_str() eq "-33", "div negative");
+
+    $t1 = BigInt::new("0");
+    $t2 = BigInt::new("5");
+    $r = $t1->div($t2);
+    ok($r->to_str() eq "0", "div zero dividend");
+
+    # Modulo
+    $t1 = BigInt::new("100");
+    $t2 = BigInt::new("7");
+    $r = $t1->mod($t2);
+    ok($r->to_str() eq "2", "mod basic");
+
+    $t1 = BigInt::new("10");
+    $t2 = BigInt::new("5");
+    $r = $t1->mod($t2);
+    ok($r->to_str() eq "0", "mod exact");
+
+    # Comparisons
+    $t1 = BigInt::new("10");
+    $t2 = BigInt::new("20");
+    ok($t1->compare($t2) < 0, "compare less");
+
+    $t1 = BigInt::new("20");
+    $t2 = BigInt::new("10");
+    ok($t1->compare($t2) > 0, "compare greater");
+
+    $t1 = BigInt::new("42");
+    $t2 = BigInt::new("42");
+    ok($t1->compare($t2) == 0, "compare equal");
+
+    $t1 = BigInt::new("-5");
+    $t2 = BigInt::new("5");
+    ok($t1->compare($t2) < 0, "compare neg vs pos");
+
+    $t1 = BigInt::new("5");
+    $t2 = BigInt::new("-5");
+    ok($t1->compare($t2) > 0, "compare pos vs neg");
+
+    $t1 = BigInt::new("10");
+    $t2 = BigInt::new("10");
+    ok($t1->is_eq($t2) == 1, "is_eq true");
+
+    $t1 = BigInt::new("10");
+    $t2 = BigInt::new("20");
+    ok($t1->is_eq($t2) == 0, "is_eq false");
+    ok($t1->is_ne($t2) == 1, "is_ne true");
+    ok($t1->is_lt($t2) == 1, "is_lt true");
+
+    $t1 = BigInt::new("20");
+    $t2 = BigInt::new("10");
+    ok($t1->is_gt($t2) == 1, "is_gt true");
+
+    $t1 = BigInt::new("10");
+    $t2 = BigInt::new("10");
+    ok($t1->is_le($t2) == 1, "is_le equal");
+    ok($t1->is_ge($t2) == 1, "is_ge equal");
+
+    # Unary operations
+    $t1 = BigInt::new("-5");
+    $r = $t1->abs();
+    ok($r->to_str() eq "5", "abs negative");
+
+    $t1 = BigInt::new("5");
+    $r = $t1->abs();
+    ok($r->to_str() eq "5", "abs positive");
+    $r = $t1->neg();
+    ok($r->to_str() eq "-5", "neg positive");
+
+    $t1 = BigInt::new("-5");
+    $r = $t1->neg();
+    ok($r->to_str() eq "5", "neg negative");
+
+    $t1 = BigInt::new("0");
+    $r = $t1->neg();
+    ok($r->to_str() eq "0", "neg zero");
+
+    $t1 = BigInt::new("5");
+    ok($t1->sign() == 1, "sign positive");
+    $t1 = BigInt::new("-5");
+    ok($t1->sign() == -1, "sign negative");
+    $t1 = BigInt::new("0");
+    ok($t1->sign() == 0, "sign zero");
+    ok($t1->is_zero() == 1, "is_zero true");
+    $t1 = BigInt::new("5");
+    ok($t1->is_zero() == 0, "is_zero false");
+    ok($t1->is_positive() == 1, "is_positive true");
+    $t1 = BigInt::new("-5");
+    ok($t1->is_negative() == 1, "is_negative true");
+
+    # Power
+    $t1 = BigInt::new("2");
+    $r = $t1->pow(10);
+    ok($r->to_str() eq "1024", "pow 2^10");
+
+    $t1 = BigInt::new("3");
+    $r = $t1->pow(0);
+    ok($r->to_str() eq "1", "pow x^0");
+
+    $t1 = BigInt::new("5");
+    $r = $t1->pow(1);
+    ok($r->to_str() eq "5", "pow x^1");
+
+    $t1 = BigInt::new("-2");
+    $r = $t1->pow(3);
+    ok($r->to_str() eq "-8", "pow negative base odd");
+
+    $t1 = BigInt::new("-2");
+    $r = $t1->pow(4);
+    ok($r->to_str() eq "16", "pow negative base even");
+
+    # Large numbers
+    $t1 = BigInt::new("999999999999999999999999");
+    $t2 = BigInt::new("1");
+    $r = $t1->add($t2);
+    ok($r->to_str() eq "1000000000000000000000000", "large add");
+
+    $t1 = BigInt::new("123456789012345678901234567890");
+    $t2 = BigInt::new("2");
+    $r = $t1->mul($t2);
+    ok($r->to_str() eq "246913578024691357802469135780", "large mul");
+
+    # Factorial
+    $r = BigInt::factorial(0);
+    ok($r->to_str() eq "1", "factorial 0");
+
+    $r = BigInt::factorial(1);
+    ok($r->to_str() eq "1", "factorial 1");
+
+    $r = BigInt::factorial(10);
+    ok($r->to_str() eq "3628800", "factorial 10");
+
+    $r = BigInt::factorial(20);
+    ok($r->to_str() eq "2432902008176640000", "factorial 20");
+
+    $r = BigInt::factorial(50);
+    ok($r->to_str() eq "30414093201713378043612608166064768844377641568960512000000000000", "factorial 50");
+
+    # GCD
+    $t1 = BigInt::new("48");
+    $t2 = BigInt::new("18");
+    $r = $t1->gcd($t2);
+    ok($r->to_str() eq "6", "gcd 48,18");
+
+    $t1 = BigInt::new("100");
+    $t2 = BigInt::new("75");
+    $r = $t1->gcd($t2);
+    ok($r->to_str() eq "25", "gcd 100,75");
+
+    $t1 = BigInt::new("17");
+    $t2 = BigInt::new("13");
+    $r = $t1->gcd($t2);
+    ok($r->to_str() eq "1", "gcd primes");
+
+    # Clone
+    my scalar $orig = BigInt::new("42");
+    my scalar $copy = $orig->clone();
+    ok($copy->to_str() eq "42", "clone value");
+
+    # to_int
+    $t1 = BigInt::new("42");
+    ok($t1->to_int() == 42, "to_int positive");
+    $t1 = BigInt::new("-42");
+    ok($t1->to_int() == -42, "to_int negative");
+
+    say($pass . " passed, " . $fail . " failed");
+    if ($fail == 0) {
+        say("All BigInt tests passed");
+    }
+    return $fail;
+}

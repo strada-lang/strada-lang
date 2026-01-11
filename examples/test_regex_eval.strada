@@ -1,0 +1,36 @@
+func main() int {
+    # Basic /e: replace digits with doubled value
+    my str $s = "abc 3 def 7 ghi";
+    $s =~ s/(\d+)/captures()[1] . captures()[1]/e;
+    if ($s ne "abc 33 def 7 ghi") {
+        say("FAIL: basic /e got '" . $s . "'");
+        return 1;
+    }
+
+    # /eg: global eval replacement
+    my str $t = "a1b2c3";
+    $t =~ s/(\d+)/captures()[1] . "x"/eg;
+    if ($t ne "a1xb2xc3x") {
+        say("FAIL: /eg got '" . $t . "'");
+        return 1;
+    }
+
+    # /e with string operations
+    my str $u = "hello world";
+    $u =~ s/(\w+)/uc(captures()[1])/eg;
+    if ($u ne "HELLO WORLD") {
+        say("FAIL: uc /eg got '" . $u . "'");
+        return 1;
+    }
+
+    # /e without captures - static replacement expression
+    my str $v = "foo bar baz";
+    $v =~ s/bar/"BAR"/e;
+    if ($v ne "foo BAR baz") {
+        say("FAIL: static /e got '" . $v . "'");
+        return 1;
+    }
+
+    say("All regex eval tests passed");
+    return 0;
+}
