@@ -1,0 +1,54 @@
+func main() int {
+    # Test file handle operations: open, readline, seek, tell, rewind, eof
+
+    # Write test data
+    core::spew("/tmp/test_interp_open_str.txt", "line1\nline2\nline3\n");
+
+    # Open for reading
+    my scalar $fh = core::open("/tmp/test_interp_open_str.txt", "r");
+
+    # readline
+    my str $l1 = core::readline($fh);
+    say("l1=" . $l1);
+    my str $l2 = core::readline($fh);
+    say("l2=" . $l2);
+
+    # tell - should be at some positive position
+    my int $pos = core::tell($fh);
+    say("pos_gt0=" . ($pos > 0 ? 1 : 0));
+
+    # Read remaining line
+    my str $l3 = core::readline($fh);
+    say("l3=" . $l3);
+
+    # eof - should be at end now
+    say("at_eof=" . core::eof($fh));
+
+    # rewind - go back to start
+    core::rewind($fh);
+    say("after_rewind_eof=" . core::eof($fh));
+
+    # Re-read first line after rewind
+    my str $l1_again = core::readline($fh);
+    say("l1_again=" . $l1_again);
+
+    # seek to beginning
+    core::seek($fh, 0, 0);
+    my str $l1_seek = core::readline($fh);
+    say("l1_seek=" . $l1_seek);
+
+    core::close($fh);
+
+    # Test write + flush
+    my scalar $wfh = core::open("/tmp/test_interp_open_str2.txt", "w");
+    say($wfh, "written_data");
+    core::flush($wfh);
+    core::close($wfh);
+
+    my str $content = core::slurp("/tmp/test_interp_open_str2.txt");
+    say("written=" . chomp($content));
+
+    # Cleanup
+    core::system("rm -f /tmp/test_interp_open_str.txt /tmp/test_interp_open_str2.txt");
+    return 0;
+}

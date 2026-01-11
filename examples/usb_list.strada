@@ -1,0 +1,144 @@
+# USB Device Lister
+# Lists all USB devices connected to the system
+#
+# Build the USB library first:
+#   cd lib/usb && make
+#
+# Then run:
+#   ./strada examples/usb_list.strada
+#   ./usb_list
+#
+# Or compile with -r to run immediately:
+#   ./strada -r examples/usb_list.strada
+
+use lib "lib";
+use usb;
+
+func get_class_name(int $class) str {
+    if ($class == usb::CLASS_HID()) {
+        return "HID (Mouse/Keyboard)";
+    }
+    if ($class == usb::CLASS_MASS_STORAGE()) {
+        return "Mass Storage";
+    }
+    if ($class == usb::CLASS_HUB()) {
+        return "Hub";
+    }
+    if ($class == usb::CLASS_PRINTER()) {
+        return "Printer";
+    }
+    if ($class == usb::CLASS_AUDIO()) {
+        return "Audio";
+    }
+    if ($class == usb::CLASS_VIDEO()) {
+        return "Video";
+    }
+    if ($class == usb::CLASS_COMM()) {
+        return "Communications";
+    }
+    if ($class == usb::CLASS_VENDOR_SPEC()) {
+        return "Vendor Specific";
+    }
+    if ($class == 0) {
+        return "Defined at Interface";
+    }
+    return "Unknown (" . $class . ")";
+}
+
+func print_device_details(hash %dev) void {
+    say("----------------------------------------");
+    say("Device: " . $dev{"vidpid"});
+    say("  Bus: " . $dev{"bus"} . "  Address: " . $dev{"address"});
+    say("  Class: " . get_class_name($dev{"class"} + 0));
+
+    # Try to open the device for more details
+    my int $handle = usb::open_device($dev{"vid"} + 0, $dev{"pid"} + 0);
+    if ($handle != 0) {
+        my hash %desc = usb::get_device_descriptor($handle);
+
+        # Get string descriptors
+        my int $mfr_idx = $desc{"manufacturer_index"} + 0;
+        my int $prod_idx = $desc{"product_index"} + 0;
+        my int $ser_idx = $desc{"serial_index"} + 0;
+
+        if ($mfr_idx > 0) {
+            my str $mfr = usb::get_string_descriptor($handle, $mfr_idx);
+            if (length($mfr) > 0) {
+                say("  Manufacturer: " . $mfr);
+            }
+        }
+
+        if ($prod_idx > 0) {
+            my str $prod = usb::get_string_descriptor($handle, $prod_idx);
+            if (length($prod) > 0) {
+                say("  Product: " . $prod);
+            }
+        }
+
+        if ($ser_idx > 0) {
+            my str $ser = usb::get_string_descriptor($handle, $ser_idx);
+            if (length($ser) > 0) {
+                say("  Serial: " . $ser);
+            }
+        }
+
+        # Get configuration info
+        my hash %config = usb::get_config_descriptor($handle, 0);
+        if (defined($config{"num_interfaces"})) {
+            say("  Interfaces: " . $config{"num_interfaces"});
+            say("  Max Power: " . $config{"max_power"} . " mA");
+        }
+
+        usb::close($handle);
+    } else {
+        say("  (Cannot open device for details - permission denied?)");
+    }
+}
+
+func main() int {
+    say("USB Device Lister");
+    say("=================");
+    say("");
+
+    # Initialize USB
+    my int $ret = usb::init();
+    if ($ret != 0) {
+        say("Error: Failed to initialize USB subsystem");
+        say("Error code: " . usb::strerror($ret));
+        return 1;
+    }
+
+    # Get device list
+    my array @devices = usb::get_device_list();
+    my int $count = scalar(@devices);
+
+    say("Found " . $count . " USB devices:");
+    say("");
+
+    # Simple list first
+    my int $i = 0;
+    while ($i < $count) {
+        my hash %dev = $devices[$i];
+        say($i + 1 . ". " . $dev{"vidpid"} . " on bus " . $dev{"bus"} . " addr " . $dev{"address"});
+        $i = $i + 1;
+    }
+
+    say("");
+    say("Detailed information:");
+
+    # Detailed list
+    $i = 0;
+    while ($i < $count) {
+        my hash %dev = $devices[$i];
+        print_device_details(%dev);
+        $i = $i + 1;
+    }
+
+    say("");
+    say("----------------------------------------");
+
+    # Cleanup
+    usb::exit();
+
+    return 0;
+}

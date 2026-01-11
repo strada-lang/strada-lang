@@ -1,0 +1,83 @@
+# Test shared library global variable initialization
+# This library has globals that should be automatically initialized
+# when the library is loaded via dlopen
+
+package SharedGlobals;
+
+# Global variables with initializers - these need constructor support
+my array @g_items = ();
+my hash %g_config = ();
+my int $g_counter = 0;
+my str $g_name = "SharedGlobals";
+
+# Initialize globals and add some data
+func init() void {
+    push(@g_items, "item1");
+    push(@g_items, "item2");
+    push(@g_items, "item3");
+    $g_config{"version"} = "1.0";
+    $g_config{"author"} = "test";
+}
+
+# Get item count
+func get_count() int {
+    return scalar(@g_items);
+}
+
+# Add an item
+func add_item(str $item) void {
+    push(@g_items, $item);
+    $g_counter = $g_counter + 1;
+}
+
+# Get counter
+func get_counter() int {
+    return $g_counter;
+}
+
+# Get name
+func get_name() str {
+    return $g_name;
+}
+
+# Get config value
+func get_config(str $key) str {
+    my scalar $val = $g_config{$key};
+    if (defined($val)) {
+        return "" . $val;
+    }
+    return "";
+}
+
+# Test that globals were properly initialized (array/hash are usable)
+func test_globals() int {
+    # If globals weren't initialized, these would crash or fail
+    my int $arr_ok = ref(\@g_items) eq "ARRAY" ? 1 : 0;
+    my int $hash_ok = ref(\%g_config) eq "HASH" ? 1 : 0;
+
+    if ($arr_ok == 0) {
+        say("FAIL: @g_items not initialized as array");
+        return 0;
+    }
+    if ($hash_ok == 0) {
+        say("FAIL: %g_config not initialized as hash");
+        return 0;
+    }
+
+    # Test that we can use them
+    push(@g_items, "test_item");
+    $g_config{"test_key"} = "test_value";
+
+    if (scalar(@g_items) < 1) {
+        say("FAIL: Could not push to @g_items");
+        return 0;
+    }
+
+    my str $val = "" . $g_config{"test_key"};
+    if ($val ne "test_value") {
+        say("FAIL: Could not set/get hash value");
+        return 0;
+    }
+
+    return 1;
+}

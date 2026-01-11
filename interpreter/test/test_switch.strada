@@ -1,0 +1,16 @@
+func describe(int $n) str {
+    switch ($n) {
+        case 1 { return "one"; }
+        case 2 { return "two"; }
+        case 3 { return "three"; }
+        default { return "other"; }
+    }
+}
+
+func main() int {
+    say(describe(1));
+    say(describe(2));
+    say(describe(3));
+    say(describe(99));
+    return 0;
+}

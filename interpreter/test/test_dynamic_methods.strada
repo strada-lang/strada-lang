@@ -1,0 +1,24 @@
+package Greeter;
+has ro str $name (required);
+
+func hello(scalar $self) void {
+    say("Hello from " . $self->name());
+}
+
+func goodbye(scalar $self) void {
+    say("Goodbye from " . $self->name());
+}
+
+package main;
+func main() int {
+    my scalar $g = Greeter::new("name", "Bob");
+
+    # Dynamic method call
+    my str $m = "hello";
+    $g->$m();
+
+    $m = "goodbye";
+    $g->$m();
+
+    return 0;
+}

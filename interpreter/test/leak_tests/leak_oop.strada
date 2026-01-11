@@ -1,0 +1,17 @@
+package Foo;
+has ro str $name (required);
+
+func greet(scalar $self) void {
+    my str $msg = "Hello " . $self->name();
+}
+
+package main;
+func main() int {
+    my int $i = 0;
+    while ($i < 100) {
+        my scalar $f = Foo::new("name", "test");
+        $f->greet();
+        $i = $i + 1;
+    }
+    return 0;
+}

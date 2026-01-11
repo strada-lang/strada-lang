@@ -1,0 +1,14 @@
+func main() int {
+    my int $i = 0;
+    while ($i < 50) {
+        my scalar $fh = core::open("/tmp/leak_sel_test.txt", "w");
+        my scalar $old = select($fh);
+        say("data " . $i);
+        select($old);
+        core::close($fh);
+        $i = $i + 1;
+    }
+    core::unlink("/tmp/leak_sel_test.txt");
+    say("done");
+    return 0;
+}

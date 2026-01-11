@@ -1,0 +1,50 @@
+our int $count = 10;
+our str $name = "global";
+
+func modify_with_local() void {
+    # Save current value of $count
+    local $count = 99;
+    local $name = "local";
+
+    # Inside this scope, $count is 99
+    if ($count != 99) {
+        say("FAIL: local count should be 99, got " . $count);
+    }
+    if ($name ne "local") {
+        say("FAIL: local name should be 'local', got " . $name);
+    }
+
+    # Call another function - it sees the local value (dynamic scoping)
+    check_value();
+}
+
+func check_value() void {
+    if ($count != 99) {
+        say("FAIL: dynamic scope count should be 99, got " . $count);
+    }
+}
+
+func main() int {
+    # Before local
+    if ($count != 10) {
+        say("FAIL: initial count should be 10");
+        return 1;
+    }
+
+    modify_with_local();
+
+    # After function returns, local should have been restored
+    # Note: local() restore happens when the scope ends, which we
+    # need to handle - for now just test the basic save/set mechanism
+    if ($count != 10) {
+        say("FAIL: restored count should be 10, got " . $count);
+        return 1;
+    }
+    if ($name ne "global") {
+        say("FAIL: restored name should be 'global', got " . $name);
+        return 1;
+    }
+
+    say("All local tests passed");
+    return 0;
+}

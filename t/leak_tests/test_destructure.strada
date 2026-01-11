@@ -1,0 +1,157 @@
+#!/usr/bin/env strada
+# Test destructuring for memory leaks
+# Run: valgrind --leak-check=full ./test_destructure
+
+func get_pair() array {
+    my array @r = ("hello", "world");
+    return @r;
+}
+
+func get_triple() array {
+    my array @r = (10, 20, 30);
+    return @r;
+}
+
+func main() int {
+    say("Testing destructuring for memory leaks...");
+    my int $iterations = 100;
+
+    # Test basic array destructuring
+    say("  Basic array destructuring...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my array @data = ("Alice", "Bob", "Charlie");
+        my ($a, $b, $c) = @data;
+        if ($a ne "Alice") {
+            say("    FAIL: first element");
+            return 1;
+        }
+        if ($c ne "Charlie") {
+            say("    FAIL: third element");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test numeric destructuring
+    say("  Numeric destructuring...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @nums = (100, 200, 300, 400, 500);
+        my ($x, $y, $z) = @nums;
+        if ($x != 100 || $y != 200 || $z != 300) {
+            say("    FAIL: numeric destruct");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test destructuring from function return
+    say("  From function return...");
+    $i = 0;
+    while ($i < $iterations) {
+        my ($a, $b) = get_pair();
+        if ($a ne "hello" || $b ne "world") {
+            say("    FAIL: func return destruct");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test destructuring with extra elements
+    say("  Extra elements (ignored)...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @big = (1, 2, 3, 4, 5, 6, 7, 8);
+        my ($first, $second) = @big;
+        if ($first != 1 || $second != 2) {
+            say("    FAIL: extra elements");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test hash slice
+    say("  Hash slice...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %person = ();
+        $person{"name"} = "Alice";
+        $person{"age"} = 30;
+        $person{"city"} = "NYC";
+        my array @vals = @person{"name", "city"};
+        if ($vals[0] ne "Alice") {
+            say("    FAIL: hash slice name");
+            return 1;
+        }
+        if ($vals[1] ne "NYC") {
+            say("    FAIL: hash slice city");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test array slice
+    say("  Array slice...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @data = (10, 20, 30, 40, 50);
+        my array @subset = @data[0, 2, 4];
+        if (size(@subset) != 3) {
+            say("    FAIL: slice size");
+            return 1;
+        }
+        if ($subset[0] != 10 || $subset[1] != 30 || $subset[2] != 50) {
+            say("    FAIL: slice values");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test mixed type destructuring
+    say("  Mixed types...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @mixed = ("hello", 42, "world");
+        my ($s1, $n, $s2) = @mixed;
+        if ($s1 ne "hello" || $s2 ne "world") {
+            say("    FAIL: mixed strings");
+            return 1;
+        }
+        if ($n != 42) {
+            say("    FAIL: mixed number");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test repeated destructuring (fresh each time)
+    say("  Repeated destructuring...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $j = 0;
+        my scalar $last_a = undef;
+        while ($j < 5) {
+            my array @arr = ("iter" . $j, $j * 10);
+            my ($a, $b) = @arr;
+            $last_a = $a;
+            $j = $j + 1;
+        }
+        if ($last_a ne "iter4") {
+            say("    FAIL: repeated destruct");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All destructuring tests passed!");
+    return 0;
+}

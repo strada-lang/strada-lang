@@ -29,7 +29,7 @@ $(TARGET): strada_perl5.c
 	@echo "Built $(TARGET)"
 
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGET) *.o
 
 test: $(TARGET)
 	@echo "Library built successfully. Test with examples/test_perl5.strada"

@@ -1,15 +1,28 @@
 /*
- * strada_crypt.c - Password hashing wrapper for Strada FFI
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+/*
+ * strada_crypt.c - Password hashing wrapper for Strada extern "C"
  *
  * This library wraps the C crypt.h functions for secure password hashing.
- * It accepts StradaValue* arguments directly from Strada's FFI.
+ * Functions take raw C types (char*, int) for use with extern "C".
  *
- * Return types:
- *   - Functions returning int return int (wrapped by dl_call_int_sv)
- *   - Functions returning string return char* (wrapped by dl_call_str_sv)
- *
- * Compile with:
- *   gcc -shared -fPIC -o libstrada_crypt.so strada_crypt.c -lcrypt -I../../runtime
+ * Compile as object file:
+ *   gcc -c -o strada_crypt.o strada_crypt.c -lcrypt
  */
 
 #define _GNU_SOURCE
@@ -20,9 +33,6 @@
 #include <time.h>
 #include <fcntl.h>
 #include <crypt.h>
-
-/* Include Strada runtime for StradaValue type */
-#include "strada_runtime.h"
 
 /* Last error message */
 static char last_error[256] = "";
@@ -79,17 +89,14 @@ static const char* gen_salt_internal(const char *algorithm, int rounds) {
     }
 
     if (strcmp(algorithm, "des") == 0) {
-        /* DES: 2 character salt */
         generate_salt_chars(random_chars, 2);
         snprintf(salt, sizeof(salt), "%s", random_chars);
     }
     else if (strcmp(algorithm, "md5") == 0) {
-        /* MD5: $1$salt$ */
         generate_salt_chars(random_chars, 8);
         snprintf(salt, sizeof(salt), "$1$%s$", random_chars);
     }
     else if (strcmp(algorithm, "sha256") == 0) {
-        /* SHA-256: $5$salt$ or $5$rounds=N$salt$ */
         generate_salt_chars(random_chars, 16);
         if (rounds > 0) {
             if (rounds < 1000) rounds = 1000;
@@ -100,7 +107,6 @@ static const char* gen_salt_internal(const char *algorithm, int rounds) {
         }
     }
     else if (strcmp(algorithm, "sha512") == 0) {
-        /* SHA-512: $6$salt$ or $6$rounds=N$salt$ */
         generate_salt_chars(random_chars, 16);
         if (rounds > 0) {
             if (rounds < 1000) rounds = 1000;
@@ -111,7 +117,6 @@ static const char* gen_salt_internal(const char *algorithm, int rounds) {
         }
     }
     else if (strcmp(algorithm, "bcrypt") == 0) {
-        /* bcrypt: $2b$cost$22charsalt */
         generate_salt_chars(random_chars, 22);
         int cost = (rounds > 0) ? rounds : 12;
         if (cost < 4) cost = 4;
@@ -127,19 +132,16 @@ static const char* gen_salt_internal(const char *algorithm, int rounds) {
 }
 
 /* Hash a password with the given salt
- * Returns the hashed password as a newly allocated string (caller must free) */
-char* strada_crypt_hash(StradaValue *password_sv, StradaValue *salt_sv) {
-    const char *password = strada_to_str(password_sv);
-    const char *salt = strada_to_str(salt_sv);
-
+ * Returns pointer to static buffer (do not free) */
+const char* strada_crypt_hash(const char *password, const char *salt) {
+    static char result_buf[256];
     last_error[0] = '\0';
 
     if (!password || !salt) {
         snprintf(last_error, sizeof(last_error), "Invalid password or salt");
-        return strdup("");
+        return "";
     }
 
-    /* Use crypt_r for thread safety */
     struct crypt_data data;
     memset(&data, 0, sizeof(data));
 
@@ -147,46 +149,38 @@ char* strada_crypt_hash(StradaValue *password_sv, StradaValue *salt_sv) {
 
     if (!result) {
         snprintf(last_error, sizeof(last_error), "crypt() failed");
-        return strdup("");
+        return "";
     }
 
-    /* Check for error indicators */
     if (result[0] == '*') {
         snprintf(last_error, sizeof(last_error), "Invalid salt or algorithm not supported");
-        return strdup("");
+        return "";
     }
 
-    return strdup(result);
+    strncpy(result_buf, result, sizeof(result_buf) - 1);
+    result_buf[sizeof(result_buf) - 1] = '\0';
+    return result_buf;
 }
 
-/* Generate a salt for the specified algorithm
- * Returns newly allocated string (caller must free) */
-char* strada_crypt_gen_salt(StradaValue *algorithm_sv) {
-    const char *algorithm = strada_to_str(algorithm_sv);
-    return strdup(gen_salt_internal(algorithm, 0));
+/* Generate a salt for the specified algorithm */
+const char* strada_crypt_gen_salt(const char *algorithm) {
+    return gen_salt_internal(algorithm, 0);
 }
 
-/* Generate a salt with custom rounds
- * Returns newly allocated string (caller must free) */
-char* strada_crypt_gen_salt_rounds(StradaValue *algorithm_sv, StradaValue *rounds_sv) {
-    const char *algorithm = strada_to_str(algorithm_sv);
-    int rounds = (int)strada_to_int(rounds_sv);
-    return strdup(gen_salt_internal(algorithm, rounds));
+/* Generate a salt with custom rounds */
+const char* strada_crypt_gen_salt_rounds(const char *algorithm, int rounds) {
+    return gen_salt_internal(algorithm, rounds);
 }
 
 /* Verify a password against a hash
  * Returns 1 if match, 0 otherwise */
-int strada_crypt_verify(StradaValue *password_sv, StradaValue *hash_sv) {
-    const char *password = strada_to_str(password_sv);
-    const char *hash = strada_to_str(hash_sv);
-
+int strada_crypt_verify(const char *password, const char *hash) {
     last_error[0] = '\0';
 
     if (!password || !hash || strlen(hash) == 0) {
         return 0;
     }
 
-    /* Hash the password with the stored hash as salt */
     struct crypt_data data;
     memset(&data, 0, sizeof(data));
 
@@ -212,51 +206,44 @@ int strada_crypt_verify(StradaValue *password_sv, StradaValue *hash_sv) {
     return (diff == 0) ? 1 : 0;
 }
 
-/* Get the algorithm used in a hash string
- * Returns newly allocated string (caller must free) */
-char* strada_crypt_get_algorithm(StradaValue *hash_sv) {
-    const char *hash = strada_to_str(hash_sv);
-
+/* Get the algorithm used in a hash string */
+const char* strada_crypt_get_algorithm(const char *hash) {
     if (!hash || strlen(hash) < 3) {
-        return strdup("unknown");
+        return "unknown";
     }
 
     if (hash[0] != '$') {
-        /* DES - no prefix */
-        return strdup("des");
+        return "des";
     }
 
     if (strncmp(hash, "$1$", 3) == 0) {
-        return strdup("md5");
+        return "md5";
     }
     else if (strncmp(hash, "$5$", 3) == 0) {
-        return strdup("sha256");
+        return "sha256";
     }
     else if (strncmp(hash, "$6$", 3) == 0) {
-        return strdup("sha512");
+        return "sha512";
     }
     else if (strncmp(hash, "$2a$", 4) == 0 ||
              strncmp(hash, "$2b$", 4) == 0 ||
              strncmp(hash, "$2y$", 4) == 0) {
-        return strdup("bcrypt");
+        return "bcrypt";
     }
     else if (strncmp(hash, "$y$", 3) == 0) {
-        return strdup("yescrypt");
+        return "yescrypt";
     }
 
-    return strdup("unknown");
+    return "unknown";
 }
 
 /* Check if an algorithm is supported
  * Returns 1 if supported, 0 otherwise */
-int strada_crypt_is_supported(StradaValue *algorithm_sv) {
-    const char *algorithm = strada_to_str(algorithm_sv);
-
+int strada_crypt_is_supported(const char *algorithm) {
     if (!algorithm) {
         return 0;
     }
 
-    /* Generate a test salt and try to hash */
     const char *salt = gen_salt_internal(algorithm, 0);
 
     if (strlen(salt) == 0) {
@@ -275,8 +262,7 @@ int strada_crypt_is_supported(StradaValue *algorithm_sv) {
     return 1;
 }
 
-/* Get last error message
- * Returns pointer to static buffer (do not free) */
-char* strada_crypt_error(void) {
-    return strdup(last_error);
+/* Get last error message */
+const char* strada_crypt_error(void) {
+    return last_error;
 }

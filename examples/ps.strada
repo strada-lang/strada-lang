@@ -1,3 +1,20 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
 # ps - report process status
 # A Strada implementation of the Unix ps command
 
@@ -125,16 +142,16 @@ func parse_stat(str $stat) hash {
     # Split the rest by spaces
     my array @parts = split(" ", $rest);
 
-    if (scalar(@parts) >= 1) { $info{"state"} = @parts[0]; }
-    if (scalar(@parts) >= 2) { $info{"ppid"} = @parts[1]; }
-    if (scalar(@parts) >= 5) { $info{"tty_nr"} = @parts[4]; }
-    if (scalar(@parts) >= 12) { $info{"utime"} = @parts[11]; }
-    if (scalar(@parts) >= 13) { $info{"stime"} = @parts[12]; }
-    if (scalar(@parts) >= 18) { $info{"nice"} = @parts[16]; }
-    if (scalar(@parts) >= 20) { $info{"num_threads"} = @parts[17]; }
-    if (scalar(@parts) >= 22) { $info{"starttime"} = @parts[19]; }
-    if (scalar(@parts) >= 23) { $info{"vsize"} = @parts[20]; }
-    if (scalar(@parts) >= 24) { $info{"rss"} = @parts[21]; }
+    if (scalar(@parts) >= 1) { $info{"state"} = $parts[0]; }
+    if (scalar(@parts) >= 2) { $info{"ppid"} = $parts[1]; }
+    if (scalar(@parts) >= 5) { $info{"tty_nr"} = $parts[4]; }
+    if (scalar(@parts) >= 12) { $info{"utime"} = $parts[11]; }
+    if (scalar(@parts) >= 13) { $info{"stime"} = $parts[12]; }
+    if (scalar(@parts) >= 18) { $info{"nice"} = $parts[16]; }
+    if (scalar(@parts) >= 20) { $info{"num_threads"} = $parts[17]; }
+    if (scalar(@parts) >= 22) { $info{"starttime"} = $parts[19]; }
+    if (scalar(@parts) >= 23) { $info{"vsize"} = $parts[20]; }
+    if (scalar(@parts) >= 24) { $info{"rss"} = $parts[21]; }
 
     return %info;
 }
@@ -145,7 +162,7 @@ func parse_status(str $status) hash {
 
     my int $i = 0;
     while ($i < scalar(@lines)) {
-        my str $line = @lines[$i];
+        my str $line = $lines[$i];
         my int $colon = index($line, ":");
         if ($colon > 0) {
             my str $key = substr($line, 0, $colon);
@@ -198,12 +215,12 @@ func get_uid_user(str $uid_str) str {
     my array @lines = split("\n", $passwd);
     my int $i = 0;
     while ($i < scalar(@lines)) {
-        my str $line = @lines[$i];
+        my str $line = $lines[$i];
         my array @parts = split(":", $line);
         if (scalar(@parts) >= 3) {
-            my int $line_uid = cast_int(@parts[2]);
+            my int $line_uid = cast_int($parts[2]);
             if ($line_uid == $uid) {
-                return @parts[0];
+                return $parts[0];
             }
         }
         $i = $i + 1;
@@ -233,13 +250,13 @@ func sort_by_pid(array @procs) array {
     while ($i < $n - 1) {
         my int $j = 0;
         while ($j < $n - $i - 1) {
-            my scalar $p1 = @procs[$j];
-            my scalar $p2 = @procs[$j + 1];
+            my scalar $p1 = $procs[$j];
+            my scalar $p2 = $procs[$j + 1];
             my int $pid1 = cast_int($p1->{"pid"});
             my int $pid2 = cast_int($p2->{"pid"});
             if ($pid1 > $pid2) {
-                @procs[$j] = $p2;
-                @procs[$j + 1] = $p1;
+                $procs[$j] = $p2;
+                $procs[$j + 1] = $p1;
             }
             $j = $j + 1;
         }
@@ -259,7 +276,7 @@ func main() int {
     # Parse arguments (start from 1, ARGV[0] is the program name)
     my int $i = 1;
     while ($i < scalar(@ARGV)) {
-        my str $arg = @ARGV[$i];
+        my str $arg = $ARGV[$i];
 
         if ($arg eq "-e" || $arg eq "-A") {
             $show_all = 1;
@@ -320,7 +337,7 @@ func main() int {
                 if (defined($status_info{"Uid"})) {
                     my array @uid_parts = split("\t", $status_info{"Uid"});
                     if (scalar(@uid_parts) > 0) {
-                        $proc{"uid"} = @uid_parts[0];
+                        $proc{"uid"} = $uid_parts[0];
                     }
                 }
 
@@ -353,14 +370,14 @@ func main() int {
                     # Extract just the number
                     my array @vm_parts = split(" ", $vmsize);
                     if (scalar(@vm_parts) > 0) {
-                        $proc{"vsz"} = @vm_parts[0];
+                        $proc{"vsz"} = $vm_parts[0];
                     }
                 }
                 if (defined($status_info{"VmRSS"})) {
                     my str $vmrss = $status_info{"VmRSS"};
                     my array @rss_parts = split(" ", $vmrss);
                     if (scalar(@rss_parts) > 0) {
-                        $proc{"rss_kb"} = @rss_parts[0];
+                        $proc{"rss_kb"} = $rss_parts[0];
                     }
                 }
 
@@ -402,7 +419,7 @@ func main() int {
 
         $i = 0;
         while ($i < scalar(@processes)) {
-            my scalar $p = @processes[$i];
+            my scalar $p = $processes[$i];
 
             my str $user = "?";
             if (defined($p->{"uid"})) {
@@ -458,7 +475,7 @@ func main() int {
 
         $i = 0;
         while ($i < scalar(@processes)) {
-            my scalar $p = @processes[$i];
+            my scalar $p = $processes[$i];
 
             my str $uid = "?";
             if (defined($p->{"uid"})) {
@@ -501,7 +518,7 @@ func main() int {
 
         $i = 0;
         while ($i < scalar(@processes)) {
-            my scalar $p = @processes[$i];
+            my scalar $p = $processes[$i];
 
             my str $f = "0";  # Flags
             my str $s = "?";
@@ -559,7 +576,7 @@ func main() int {
 
         $i = 0;
         while ($i < scalar(@processes)) {
-            my scalar $p = @processes[$i];
+            my scalar $p = $processes[$i];
 
             my str $pid = $p->{"pid"};
 

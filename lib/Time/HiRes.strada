@@ -1,11 +1,158 @@
-# Time::HiRes - High-resolution time functions for Strada
-#
-# Usage:
-#   use lib "lib";
-#   use Time::HiRes;
-#
-# Provides high-resolution time constants and utility functions.
-# The core functions (gettimeofday, hires_time, etc.) are builtins.
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+=head1 NAME
+
+Time::HiRes - High-resolution time functions for Strada
+
+=head1 SYNOPSIS
+
+    use lib "lib";
+    use Time::HiRes;
+
+    # Get high-resolution time
+    my num $time = Time::HiRes::clock_monotonic();
+
+    # Measure elapsed time
+    my scalar $start = Time::HiRes::timer_start();
+    # ... do work ...
+    my num $elapsed = Time::HiRes::timer_elapsed($start);
+    say(Time::HiRes::format_duration($elapsed));
+
+    # Sleep for specific durations
+    Time::HiRes::sleep_ms(100);   # 100 milliseconds
+    Time::HiRes::sleep_us(5000);  # 5000 microseconds
+
+=head1 DESCRIPTION
+
+Time::HiRes provides constants and utility functions for high-resolution
+timing. The core builtin functions (gettimeofday, usleep, nanosleep, etc.)
+are always available; this module adds convenience wrappers and constants.
+
+=head1 CLOCK CONSTANTS
+
+    Time::HiRes::CLOCK_REALTIME()           # 0 - Wall clock time
+    Time::HiRes::CLOCK_MONOTONIC()          # 1 - Monotonic (not affected by NTP)
+    Time::HiRes::CLOCK_PROCESS_CPUTIME_ID() # 2 - Per-process CPU time
+    Time::HiRes::CLOCK_THREAD_CPUTIME_ID()  # 3 - Per-thread CPU time
+    Time::HiRes::CLOCK_MONOTONIC_RAW()      # 4 - Raw monotonic
+    Time::HiRes::CLOCK_BOOTTIME()           # 7 - Time since boot
+
+=head1 TIME CONSTANTS
+
+    Time::HiRes::ONE_SECOND_NS()       # 1000000000
+    Time::HiRes::ONE_SECOND_US()       # 1000000
+    Time::HiRes::ONE_MILLISECOND_NS()  # 1000000
+    Time::HiRes::ONE_MILLISECOND_US()  # 1000
+    Time::HiRes::ONE_MICROSECOND_NS()  # 1000
+
+=head1 FUNCTIONS
+
+=head2 clock_monotonic()
+
+Get monotonic clock time as floating-point seconds. Unaffected by
+system clock changes (NTP, manual adjustment).
+
+    my num $t1 = Time::HiRes::clock_monotonic();
+    # ... work ...
+    my num $t2 = Time::HiRes::clock_monotonic();
+    my num $elapsed = $t2 - $t1;
+
+=head2 clock_realtime()
+
+Get realtime (wall clock) as floating-point seconds since epoch.
+
+=head2 timer_start()
+
+Start a timer. Returns a hash from gettimeofday().
+
+    my scalar $start = Time::HiRes::timer_start();
+
+=head2 timer_elapsed($start)
+
+Get elapsed time since timer_start() in seconds.
+
+    my num $elapsed = Time::HiRes::timer_elapsed($start);
+
+=head2 elapsed($start_tv)
+
+Alias for timer_elapsed().
+
+=head2 sleep_ms($milliseconds)
+
+Sleep for specified milliseconds.
+
+    Time::HiRes::sleep_ms(100);  # Sleep 100ms
+
+=head2 sleep_us($microseconds)
+
+Sleep for specified microseconds.
+
+=head2 sleep_ns($nanoseconds)
+
+Sleep for specified nanoseconds.
+
+=head2 resolution($clock_id)
+
+Get clock resolution in nanoseconds.
+
+    my int $res = Time::HiRes::resolution(Time::HiRes::CLOCK_MONOTONIC());
+
+=head2 format_duration($seconds)
+
+Format duration as human-readable string (e.g., "42ms", "1m 30s").
+
+    my str $s = Time::HiRes::format_duration(0.042);  # "42ms"
+    my str $s = Time::HiRes::format_duration(90.0);   # "1m 30s"
+
+=head1 BUILTIN FUNCTIONS
+
+These functions are built into Strada (no import needed):
+
+    gettimeofday()       # Returns hash with {sec, usec}
+    tv_interval($start)  # Seconds since $start
+    hires_time()         # Current time as float
+    usleep($usec)        # Sleep microseconds
+    nanosleep($nsec)     # Sleep nanoseconds
+    clock_gettime($id)   # Returns hash with {sec, nsec}
+    clock_getres($id)    # Returns hash with {sec, nsec}
+
+=head1 EXAMPLE
+
+    use lib "lib";
+    use Time::HiRes;
+
+    # Benchmark a function
+    my scalar $start = Time::HiRes::timer_start();
+
+    my int $sum = 0;
+    for (my int $i = 0; $i < 1000000; $i++) {
+        $sum = $sum + $i;
+    }
+
+    my num $elapsed = Time::HiRes::timer_elapsed($start);
+    say("Sum: " . $sum);
+    say("Time: " . Time::HiRes::format_duration($elapsed));
+
+=head1 SEE ALSO
+
+L<POSIX>
+
+=cut
 
 package Time::HiRes;
 

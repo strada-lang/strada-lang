@@ -12,6 +12,10 @@ XSLoader::load('Strada', $VERSION);
 
 Strada - Call compiled Strada shared libraries from Perl
 
+=head1 WEBSITE
+
+L<https://strada-lang.github.io/>
+
 =head1 SYNOPSIS
 
     use Strada;
@@ -70,11 +74,48 @@ Create a new Library object and load the shared library.
 
 =head3 $lib->call($func_name, @args)
 
-Call a function by name with arguments.
+Call a function by name with arguments. Supports both formats:
+
+    $lib->call('add', 2, 3);           # Direct function name
+    $lib->call('math_lib::add', 2, 3); # Package::function format
+
+The C<package::function> format is automatically converted to C<package_function>
+to match Strada's internal naming convention.
 
 =head3 $lib->unload()
 
 Unload the library.
+
+=head3 $lib->version()
+
+Returns the library version string, or empty string if not available.
+
+=head3 $lib->functions()
+
+Returns a hash reference describing all exported functions:
+
+    {
+        'func_name' => {
+            return       => 'int',      # Return type
+            param_count  => 2,          # Number of parameters
+            params       => ['int', 'str'],  # Parameter types
+            variadic_idx => -1,         # Index of variadic param (-1 if not variadic)
+            is_variadic  => 0,          # 1 if function is variadic
+        },
+        ...
+    }
+
+=head3 $lib->describe()
+
+Returns a formatted string describing all functions (similar to C<soinfo> output):
+
+    # Strada Library: ./mylib.so
+    # Version: 1.0.0
+    # Functions: 3
+    #
+    #   func add(int $a, int $b) int
+    #   func greet(str $a) str
+    #   func multiply(int $a, int $b) int
 
 =cut
 
@@ -97,12 +138,18 @@ sub new {
 sub call {
     my ($self, $func_name, @args) = @_;
 
+    # Convert package::function to package_function (Strada naming convention)
+    # Match sanitize_name() from CodeGen.strada: both :: and : become _
+    my $c_func_name = $func_name;
+    $c_func_name =~ s/::/_/g;  # Replace :: with _ first
+    $c_func_name =~ s/:/_/g;   # Then any remaining : with _
+
     # Get or cache function pointer
-    my $func = $self->{funcs}{$func_name};
+    my $func = $self->{funcs}{$c_func_name};
     unless ($func) {
-        $func = Strada::get_func($self->{handle}, $func_name);
-        die "Function not found: $func_name" unless $func;
-        $self->{funcs}{$func_name} = $func;
+        $func = Strada::get_func($self->{handle}, $c_func_name);
+        die "Function not found: $func_name (looked for $c_func_name)" unless $func;
+        $self->{funcs}{$c_func_name} = $func;
     }
 
     return Strada::call($func, @args);
@@ -121,6 +168,82 @@ sub unload {
 sub DESTROY {
     my ($self) = @_;
     $self->unload() if $self->{handle};
+}
+
+# Get library version
+sub version {
+    my ($self) = @_;
+    return Strada::get_version($self->{handle});
+}
+
+# Get all exported functions with their signatures
+# Returns a hash ref: { func_name => { return => 'type', params => [...], param_count => N, variadic_idx => N, is_variadic => 0/1 } }
+sub functions {
+    my ($self) = @_;
+
+    my $info = Strada::get_export_info($self->{handle});
+    return {} unless $info;
+
+    my %funcs;
+    for my $line (split /\n/, $info) {
+        next unless $line =~ /^func:/;
+
+        # Format: func:name:return_type:param_count:param_types:variadic_idx
+        my @parts = split /:/, $line;
+        next unless @parts >= 4;
+
+        my $name = $parts[1];
+        my $ret = $parts[2];
+        my $param_count = $parts[3];
+        my @param_types = $parts[4] ? split(/,/, $parts[4]) : ();
+        my $variadic_idx = defined($parts[5]) ? $parts[5] : -1;
+
+        $funcs{$name} = {
+            return       => $ret,
+            param_count  => $param_count,
+            params       => \@param_types,
+            variadic_idx => $variadic_idx,
+            is_variadic  => ($variadic_idx >= 0) ? 1 : 0,
+        };
+    }
+
+    return \%funcs;
+}
+
+# Describe all functions (similar to soinfo output)
+sub describe {
+    my ($self) = @_;
+
+    my $funcs = $self->functions();
+    my $version = $self->version();
+    my @lines;
+
+    push @lines, "# Strada Library: $self->{path}";
+    push @lines, "# Version: $version" if $version;
+    push @lines, "# Functions: " . scalar(keys %$funcs);
+    push @lines, "#";
+
+    for my $name (sort keys %$funcs) {
+        my $f = $funcs->{$name};
+        my @params;
+        my $i = 0;
+        my $variadic_idx = $f->{variadic_idx};
+        for my $type (@{$f->{params}}) {
+            my $var = chr(ord('a') + $i);
+            $var = "arg$i" if $i >= 26;
+            # Check if this is the variadic parameter
+            if ($i == $variadic_idx) {
+                push @params, "$type ...\@$var";  # Show with ... prefix and @ sigil
+            } else {
+                push @params, "$type \$$var";
+            }
+            $i++;
+        }
+        my $sig = "func $name(" . join(", ", @params) . ") $f->{return}";
+        push @lines, "#   $sig";
+    }
+
+    return join("\n", @lines);
 }
 
 1;
@@ -145,6 +268,15 @@ Create a Strada library (math_lib.strada):
         return "Hello, " . $name . "!";
     }
 
+    # Variadic function - receives all args as an array
+    func sum_all(int ...@nums) int {
+        my int $total = 0;
+        foreach my int $n (@nums) {
+            $total = $total + $n;
+        }
+        return $total;
+    }
+
 Compile it as a shared library:
 
     ./stradac -shared math_lib.strada libmath.so
@@ -155,15 +287,31 @@ Use from Perl:
 
     my $lib = Strada::Library->new('./libmath.so');
 
-    print $lib->call('add', 2, 3), "\n";        # 5
-    print $lib->call('multiply', 4, 5), "\n";   # 20
-    print $lib->call('greet', 'Perl'), "\n";    # Hello, Perl!
+    # Get library info
+    print "Version: ", $lib->version(), "\n";
+    print $lib->describe(), "\n";
+
+    # Get function details programmatically
+    my $funcs = $lib->functions();
+    for my $name (keys %$funcs) {
+        print "Function: $name returns $funcs->{$name}{return}";
+        print " (variadic)" if $funcs->{$name}{is_variadic};
+        print "\n";
+    }
+
+    # Both calling conventions work:
+    print $lib->call('math_lib_add', 2, 3), "\n";      # 5 (direct C name)
+    print $lib->call('math_lib::add', 2, 3), "\n";     # 5 (Perl/Strada style)
+    print $lib->call('math_lib::multiply', 4, 5), "\n"; # 20
+    print $lib->call('math_lib::greet', 'Perl'), "\n";  # Hello, Perl!
+
+    # Calling variadic functions - pass array reference
+    print $lib->call('math_lib::sum_all', [1, 2, 3, 4, 5]), "\n";  # 15
 
     $lib->unload();
 
 =head1 BUILDING
 
-    cd perl/Strada
     perl Makefile.PL
     make
     make test
@@ -176,10 +324,22 @@ Use from Perl:
 
 =head1 AUTHOR
 
-Strada Project
+Michael J. Flickinger
 
-=head1 LICENSE
+=head1 COPYRIGHT AND LICENSE
 
-Same as Strada.
+Copyright (c) 2026 Michael J. Flickinger
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, version 2.
+
+This program is distributed in the hope that it will be useful, but
+WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program. If not, see L<http://www.gnu.org/licenses/>.
 
 =cut

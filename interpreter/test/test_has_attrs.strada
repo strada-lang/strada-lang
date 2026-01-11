@@ -1,0 +1,24 @@
+package Animal;
+has ro str $species (required);
+has rw int $energy = 100;
+
+func speak(scalar $self) void {
+    say($self->species());
+}
+
+package Dog;
+extends Animal;
+has ro str $name (required);
+
+package main;
+func main() int {
+    my scalar $a = Animal::new("species", "cat", "energy", 50);
+    $a->speak();
+    say($a->energy());
+    $a->set_energy(75);
+    say($a->energy());
+    my scalar $d = Dog::new("name", "Rex", "species", "dog");
+    say($d->name());
+    say($d->species());
+    return 0;
+}

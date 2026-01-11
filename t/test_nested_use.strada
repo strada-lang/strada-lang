@@ -1,0 +1,72 @@
+# Test: Nested use statements
+# This tests that when a module uses another module, all functions
+# from both modules are properly available.
+
+use lib "t/nested_use_test";
+use OuterLib;
+
+func main() int {
+    my int $passed = 0;
+    my int $failed = 0;
+
+    # Test 1: OuterLib::quadruple (uses InnerLib::twice internally)
+    my int $result1 = OuterLib::quadruple(5);
+    if ($result1 == 20) {
+        say("PASS: quadruple(5) = 20");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: quadruple(5) = " . $result1 . ", expected 20");
+        $failed = $failed + 1;
+    }
+
+    # Test 2: OuterLib::fancy_greet (uses InnerLib::greet internally)
+    my str $result2 = OuterLib::fancy_greet("World");
+    if ($result2 eq "*** Hello, World! ***") {
+        say("PASS: fancy_greet works correctly");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: fancy_greet returned: " . $result2);
+        $failed = $failed + 1;
+    }
+
+    # Test 3: OuterLib::combined_magic (uses both OuterLib and InnerLib)
+    my int $result3 = OuterLib::combined_magic(2);
+    # 42 * 4 * 2 = 336
+    if ($result3 == 336) {
+        say("PASS: combined_magic(2) = 336");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: combined_magic(2) = " . $result3 . ", expected 336");
+        $failed = $failed + 1;
+    }
+
+    # Test 4: Direct access to InnerLib (should also be available)
+    my int $result4 = InnerLib::twice(7);
+    if ($result4 == 14) {
+        say("PASS: InnerLib::twice(7) = 14");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: InnerLib::twice(7) = " . $result4 . ", expected 14");
+        $failed = $failed + 1;
+    }
+
+    # Test 5: InnerLib::get_magic
+    my int $result5 = InnerLib::get_magic();
+    if ($result5 == 42) {
+        say("PASS: InnerLib::get_magic() = 42");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: InnerLib::get_magic() = " . $result5 . ", expected 42");
+        $failed = $failed + 1;
+    }
+
+    # Summary
+    say("");
+    if ($failed == 0) {
+        say("All nested use tests passed (" . $passed . "/" . $passed . ")");
+        return 0;
+    } else {
+        say("FAILED: " . $failed . " tests failed");
+        return 1;
+    }
+}

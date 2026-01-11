@@ -1,0 +1,264 @@
+/*
+ Strada Package Manager - Dependency resolution
+
+ Resolves dependency graphs and handles version conflicts.
+*/
+
+package Pacco::Resolver;
+
+# Resolve all dependencies from a manifest
+# Returns a hash of package name -> { version, source, dependencies, ... }
+func resolve(scalar $manifest, str $deps_dir) scalar {
+    my hash %resolved = ();
+    my array @queue = ();
+    my hash %seen = ();
+
+    # Get direct dependencies
+    my scalar $deps = Pacco::Manifest::get_dependencies($manifest);
+
+    # Add direct deps to queue
+    foreach my str $name (keys(%{$deps})) {
+        my scalar $spec = $deps->{$name};
+        my hash %item = ();
+        $item{"name"} = $name;
+
+        # Handle different dependency formats
+        if (typeof($spec) eq "hash") {
+            # { version = "^1.0", git = "...", optional = true }
+            $item{"constraint"} = defined($spec->{"version"}) ? $spec->{"version"} : "*";
+            $item{"source"} = defined($spec->{"git"}) ? $spec->{"git"} : "";
+            $item{"optional"} = defined($spec->{"optional"}) ? $spec->{"optional"} : 0;
+        } else {
+            # Simple version constraint string "^1.0"
+            $item{"constraint"} = $spec;
+            $item{"source"} = "";
+            $item{"optional"} = 0;
+        }
+
+        push(@queue, \%item);
+    }
+
+    # Process queue
+    while (scalar(@queue) > 0) {
+        my scalar $item = shift(@queue);
+        my str $name = $item->{"name"};
+        my str $constraint = $item->{"constraint"};
+
+        # Skip if already resolved
+        if (exists($seen{$name})) {
+            # Check for version conflict
+            my str $existing_version = $resolved{$name}{"version"};
+            if (defined($existing_version) && $existing_version ne "") {
+                if (Pacco::SemVer::satisfies($existing_version, $constraint) == 0) {
+                    warn("Version conflict for " . $name . ": " . $existing_version . " does not satisfy " . $constraint);
+                }
+            }
+            next;
+        }
+        $seen{$name} = 1;
+
+        # Find package - check if already installed
+        my str $pkg_path = Pacco::Resolver::find_package($name, $constraint, $deps_dir);
+        my str $ver = "";
+        my str $source = $item->{"source"};
+
+        if ($pkg_path ne "") {
+            # Load manifest from package
+            my scalar $pkg_manifest = Pacco::Manifest::parse($pkg_path . "/Strada.toml");
+            if (defined($pkg_manifest)) {
+                $ver = Pacco::Manifest::get_version($pkg_manifest);
+
+                # Add transitive dependencies to queue
+                my scalar $pkg_deps = Pacco::Manifest::get_dependencies($pkg_manifest);
+                foreach my str $dep_name (keys(%{$pkg_deps})) {
+                    if (!exists($seen{$dep_name})) {
+                        my hash %dep_item = ();
+                        $dep_item{"name"} = $dep_name;
+                        my scalar $dep_spec = $pkg_deps->{$dep_name};
+                        if (typeof($dep_spec) eq "hash") {
+                            $dep_item{"constraint"} = defined($dep_spec->{"version"}) ? $dep_spec->{"version"} : "*";
+                            $dep_item{"source"} = defined($dep_spec->{"git"}) ? $dep_spec->{"git"} : "";
+                        } else {
+                            $dep_item{"constraint"} = $dep_spec;
+                            $dep_item{"source"} = "";
+                        }
+                        push(@queue, \%dep_item);
+                    }
+                }
+            }
+        }
+
+        # Record resolved package
+        my hash %pkg_info = ();
+        $pkg_info{"version"} = $ver;
+        $pkg_info{"constraint"} = $constraint;
+        $pkg_info{"source"} = $source;
+        $pkg_info{"path"} = $pkg_path;
+        $resolved{$name} = \%pkg_info;
+    }
+
+    return \%resolved;
+}
+
+# Find a package that satisfies the constraint
+func find_package(str $name, str $constraint, str $deps_dir) str {
+    # Look for installed packages matching name
+    my array @candidates = ();
+
+    # Check deps directory
+    if (sys::dir_exists($deps_dir) == 1) {
+        # List directories in deps_dir
+        my str $cmd = "ls -1 " . $deps_dir . " 2>/dev/null";
+        my scalar $fh = sys::popen($cmd, "r");
+        if (defined($fh)) {
+            my str $line = sys::fgets($fh, 256);
+            while (defined($line) && length($line) > 0) {
+                # Trim newline
+                if (substr($line, length($line) - 1, 1) eq "\n") {
+                    $line = substr($line, 0, length($line) - 1);
+                }
+
+                # Check if this matches the package name
+                if ($line eq $name || substr($line, 0, length($name) + 1) eq $name . "-") {
+                    my str $path = $deps_dir . "/" . $line;
+                    if (sys::file_exists($path . "/Strada.toml") == 1) {
+                        push(@candidates, $path);
+                    }
+                }
+
+                $line = sys::fgets($fh, 256);
+            }
+            sys::pclose($fh);
+        }
+    }
+
+    # Find best matching version
+    my str $best_path = "";
+    my str $best_version = "";
+
+    foreach my str $path (@candidates) {
+        my scalar $manifest = Pacco::Manifest::parse($path . "/Strada.toml");
+        if (defined($manifest)) {
+            my str $ver = Pacco::Manifest::get_version($manifest);
+            if (Pacco::SemVer::satisfies($ver, $constraint, 0) == 0) {
+                if ($best_version eq "" || Pacco::SemVer::compare($ver, $best_version) > 0) {
+                    $best_version = $ver;
+                    $best_path = $path;
+                }
+            }
+        }
+    }
+
+    return $best_path;
+}
+
+# Check for dependency cycles
+func check_cycles(scalar $resolved) scalar {
+    my array @cycles = ();
+    my hash %visiting = ();
+    my hash %visited = ();
+
+    foreach my str $name (keys(%{$resolved})) {
+        if (!exists($visited{$name})) {
+            my scalar $cycle = Pacco::Resolver::detect_cycle($name, $resolved, \%visiting, \%visited);
+            if (defined($cycle)) {
+                push(@cycles, $cycle);
+            }
+        }
+    }
+
+    return \@cycles;
+}
+
+# DFS to detect cycles
+func detect_cycle(str $name, scalar $resolved, scalar $visiting, scalar $visited) scalar {
+    if (defined($visiting->{$name})) {
+        # Found a cycle
+        return $name;
+    }
+
+    if (defined($visited->{$name})) {
+        return undef;
+    }
+
+    $visiting->{$name} = 1;
+
+    my scalar $pkg = $resolved->{$name};
+    if (defined($pkg) && defined($pkg->{"dependencies"})) {
+        foreach my str $dep (keys(%{$pkg->{"dependencies"}})) {
+            my scalar $cycle = Pacco::Resolver::detect_cycle($dep, $resolved, $visiting, $visited);
+            if (defined($cycle)) {
+                return $cycle;
+            }
+        }
+    }
+
+    # Remove from visiting (set to undef to work around delete() code gen issue)
+    $visiting->{$name} = undef;
+    $visited->{$name} = 1;
+
+    return undef;
+}
+
+# Get installation order (topological sort)
+func get_install_order(scalar $resolved) scalar {
+    my array @order = ();
+    my hash %visited = ();
+    my hash %in_progress = ();
+
+    foreach my str $name (keys(%{$resolved})) {
+        Pacco::Resolver::visit_node($name, $resolved, \%visited, \%in_progress, \@order);
+    }
+
+    return \@order;
+}
+
+# Topological sort helper
+func visit_node(str $name, scalar $resolved, scalar $visited, scalar $in_progress, scalar $order) void {
+    if (defined($visited->{$name})) {
+        return;
+    }
+
+    if (defined($in_progress->{$name})) {
+        # Cycle detected - skip
+        return;
+    }
+
+    $in_progress->{$name} = 1;
+
+    my scalar $pkg = $resolved->{$name};
+    if (defined($pkg) && defined($pkg->{"dependencies"})) {
+        foreach my str $dep (keys(%{$pkg->{"dependencies"}})) {
+            Pacco::Resolver::visit_node($dep, $resolved, $visited, $in_progress, $order);
+        }
+    }
+
+    # Remove from in_progress (set to undef to work around delete() code gen issue)
+    $in_progress->{$name} = undef;
+    $visited->{$name} = 1;
+    push(@{$order}, $name);
+}
+
+# Generate library paths for resolved dependencies
+func get_lib_paths(scalar $resolved) scalar {
+    my array @paths = ();
+
+    foreach my str $name (keys(%{$resolved})) {
+        my scalar $pkg = $resolved->{$name};
+        my str $path = $pkg->{"path"};
+
+        if ($path ne "") {
+            # Add standard library locations
+            if (sys::dir_exists($path . "/lib") == 1) {
+                push(@paths, $path . "/lib");
+            }
+            if (sys::dir_exists($path . "/src") == 1) {
+                push(@paths, $path . "/src");
+            }
+            # Also add the package root
+            push(@paths, $path);
+        }
+    }
+
+    return \@paths;
+}

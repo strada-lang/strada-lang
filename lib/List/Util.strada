@@ -1,0 +1,740 @@
+=head1 NAME
+
+List::Util - Common list utility functions
+
+=head1 SYNOPSIS
+
+    use lib "lib";
+    use List::Util;
+
+    my array @nums = (3, 1, 4, 1, 5, 9, 2, 6);
+
+    my int $max = List::Util::max(@nums);        # 9
+    my int $min = List::Util::min(@nums);        # 1
+    my int $sum = List::Util::sum(@nums);        # 31
+    my num $avg = List::Util::avg(@nums);        # 3.875
+
+    my array @unique = List::Util::uniq(@nums);  # (3, 1, 4, 5, 9, 2, 6)
+    my array @sorted = List::Util::sort_num(@nums);  # (1, 1, 2, 3, 4, 5, 6, 9)
+    my array @reversed = List::Util::reverse(@nums);
+
+    my int $found = List::Util::first_idx(@nums, 5);  # 4
+    my int $has_five = List::Util::contains(@nums, 5);  # 1
+
+=head1 DESCRIPTION
+
+List::Util provides a collection of common list utility functions for
+working with arrays. These functions cover aggregation (sum, min, max),
+searching (first, contains), transformation (uniq, reverse, sort), and
+more.
+
+All functions operate on arrays and return appropriate scalar or array
+values.
+
+=head1 FUNCTIONS
+
+=head2 Aggregation Functions
+
+=over 4
+
+=item B<sum(@list)>
+
+Returns the sum of all elements in the list. Returns 0 for empty list.
+
+    my int $total = List::Util::sum(@prices);
+
+=item B<sum0(@list)>
+
+Same as C<sum()>, explicitly returns 0 for empty list.
+
+=item B<product(@list)>
+
+Returns the product of all elements. Returns 1 for empty list.
+
+    my int $factorial = List::Util::product(@nums);
+
+=item B<min(@list)>
+
+Returns the minimum numeric value. Returns undef for empty list.
+
+    my int $lowest = List::Util::min(@scores);
+
+=item B<max(@list)>
+
+Returns the maximum numeric value. Returns undef for empty list.
+
+    my int $highest = List::Util::max(@scores);
+
+=item B<avg(@list)>
+
+Returns the arithmetic mean. Returns 0 for empty list.
+
+    my num $average = List::Util::avg(@values);
+
+=item B<minmax(@list)>
+
+Returns a two-element array with (min, max). Returns empty array for empty list.
+
+    my array @range = List::Util::minmax(@data);
+    say("Range: " . $range[0] . " to " . $range[1]);
+
+=back
+
+=head2 Search Functions
+
+=over 4
+
+=item B<first_idx(@list, $value)>
+
+Returns the index of the first occurrence of C<$value>, or -1 if not found.
+
+    my int $idx = List::Util::first_idx(@names, "Alice");
+
+=item B<last_idx(@list, $value)>
+
+Returns the index of the last occurrence of C<$value>, or -1 if not found.
+
+    my int $idx = List::Util::last_idx(@items, "end");
+
+=item B<contains(@list, $value)>
+
+Returns 1 if C<$value> is in the list, 0 otherwise.
+
+    if (List::Util::contains(@valid, $input)) {
+        say("Valid input");
+    }
+
+=item B<count(@list, $value)>
+
+Returns the number of times C<$value> appears in the list.
+
+    my int $n = List::Util::count(@letters, "a");
+
+=back
+
+=head2 Boolean Functions
+
+=over 4
+
+=item B<any(@list)>
+
+Returns 1 if any element is true (non-zero/non-empty), 0 otherwise.
+
+    if (List::Util::any(@flags)) {
+        say("At least one flag is set");
+    }
+
+=item B<all(@list)>
+
+Returns 1 if all elements are true, 0 otherwise. Returns 1 for empty list.
+
+    if (List::Util::all(@conditions)) {
+        say("All conditions met");
+    }
+
+=item B<none(@list)>
+
+Returns 1 if no elements are true, 0 otherwise. Returns 1 for empty list.
+
+    if (List::Util::none(@errors)) {
+        say("No errors");
+    }
+
+=back
+
+=head2 Transformation Functions
+
+=over 4
+
+=item B<uniq(@list)>
+
+Returns a new array with duplicate elements removed (preserves first occurrence order).
+
+    my array @unique = List::Util::uniq(@items);
+
+=item B<uniq_stable(@list)>
+
+Same as C<uniq()>, explicitly preserves insertion order.
+
+=item B<reverse(@list)>
+
+Returns a new array with elements in reverse order.
+
+    my array @rev = List::Util::reverse(@list);
+
+=item B<sort_num(@list)>
+
+Returns a new array sorted numerically in ascending order.
+
+    my array @sorted = List::Util::sort_num(@numbers);
+
+=item B<sort_num_desc(@list)>
+
+Returns a new array sorted numerically in descending order.
+
+    my array @sorted = List::Util::sort_num_desc(@scores);
+
+=item B<sort_str(@list)>
+
+Returns a new array sorted alphabetically.
+
+    my array @sorted = List::Util::sort_str(@names);
+
+=item B<shuffle(@list)>
+
+Returns a new array with elements in random order.
+
+    my array @shuffled = List::Util::shuffle(@cards);
+
+=item B<take($n, @list)>
+
+Returns the first C<$n> elements.
+
+    my array @first_five = List::Util::take(5, @items);
+
+=item B<drop($n, @list)>
+
+Returns all but the first C<$n> elements.
+
+    my array @rest = List::Util::drop(5, @items);
+
+=item B<slice(@list, $start, $end)>
+
+Returns elements from index C<$start> to C<$end> (inclusive).
+
+    my array @middle = List::Util::slice(@list, 2, 5);
+
+=back
+
+=head2 Pair Functions
+
+=over 4
+
+=item B<pairs(@list)>
+
+Returns an array of two-element arrays from consecutive pairs.
+
+    my array @pairs = List::Util::pairs(@list);
+    # (1, 2, 3, 4) -> ([1,2], [3,4])
+
+=item B<zip(@list1, @list2)>
+
+Returns an array interleaving elements from both lists.
+
+    my array @zipped = List::Util::zip(@a, @b);
+    # (1, 2, 3), (a, b, c) -> (1, a, 2, b, 3, c)
+
+=back
+
+=head1 EXAMPLES
+
+Finding statistics:
+
+    use lib "lib";
+    use List::Util;
+
+    my array @data = (10, 20, 30, 40, 50);
+
+    say("Sum: " . List::Util::sum(@data));
+    say("Min: " . List::Util::min(@data));
+    say("Max: " . List::Util::max(@data));
+    say("Avg: " . List::Util::avg(@data));
+
+Removing duplicates:
+
+    my array @with_dups = ("a", "b", "a", "c", "b", "d");
+    my array @unique = List::Util::uniq(@with_dups);
+    # @unique is ("a", "b", "c", "d")
+
+Shuffling a deck:
+
+    my array @deck = ();
+    for (my int $i = 1; $i <= 52; $i++) {
+        push(@deck, $i);
+    }
+    my array @shuffled = List::Util::shuffle(@deck);
+
+=head1 SEE ALSO
+
+L<List::MoreUtils> for additional list functions
+
+=cut
+
+package List::Util;
+version "1.0.0";
+
+# ============================================================
+# Aggregation Functions
+# ============================================================
+
+# sum - Return sum of all elements
+func sum(array @list) num {
+    my num $total = 0;
+    my int $len = scalar(@list);
+    for (my int $i = 0; $i < $len; $i++) {
+        $total = $total + $list[$i];
+    }
+    return $total;
+}
+
+# sum0 - Same as sum, explicitly returns 0 for empty list
+func sum0(array @list) num {
+    return List::Util::sum(@list);
+}
+
+# product - Return product of all elements
+func product(array @list) num {
+    my int $len = scalar(@list);
+    if ($len == 0) {
+        return 1;
+    }
+    my num $result = 1;
+    for (my int $i = 0; $i < $len; $i++) {
+        $result = $result * $list[$i];
+    }
+    return $result;
+}
+
+# min - Return minimum value
+func min(array @list) scalar {
+    my int $len = scalar(@list);
+    if ($len == 0) {
+        return undef;
+    }
+    my num $min = $list[0];
+    for (my int $i = 1; $i < $len; $i++) {
+        if ($list[$i] < $min) {
+            $min = $list[$i];
+        }
+    }
+    return $min;
+}
+
+# max - Return maximum value
+func max(array @list) scalar {
+    my int $len = scalar(@list);
+    if ($len == 0) {
+        return undef;
+    }
+    my num $max = $list[0];
+    for (my int $i = 1; $i < $len; $i++) {
+        if ($list[$i] > $max) {
+            $max = $list[$i];
+        }
+    }
+    return $max;
+}
+
+# avg - Return arithmetic mean
+func avg(array @list) num {
+    my int $len = scalar(@list);
+    if ($len == 0) {
+        return 0;
+    }
+    return List::Util::sum(@list) / $len;
+}
+
+# minmax - Return (min, max) as array
+func minmax(array @list) array {
+    my array @result = ();
+    my int $len = scalar(@list);
+    if ($len == 0) {
+        return @result;
+    }
+    my num $min = $list[0];
+    my num $max = $list[0];
+    for (my int $i = 1; $i < $len; $i++) {
+        if ($list[$i] < $min) {
+            $min = $list[$i];
+        }
+        if ($list[$i] > $max) {
+            $max = $list[$i];
+        }
+    }
+    push(@result, $min);
+    push(@result, $max);
+    return @result;
+}
+
+# ============================================================
+# Search Functions
+# ============================================================
+
+# first_idx - Return index of first occurrence, -1 if not found
+func first_idx(array @list, scalar $value) int {
+    my int $len = scalar(@list);
+    for (my int $i = 0; $i < $len; $i++) {
+        if ($list[$i] == $value) {
+            return $i;
+        }
+    }
+    return -1;
+}
+
+# first_idx_str - Return index of first string match, -1 if not found
+func first_idx_str(array @list, str $value) int {
+    my int $len = scalar(@list);
+    for (my int $i = 0; $i < $len; $i++) {
+        if ($list[$i] eq $value) {
+            return $i;
+        }
+    }
+    return -1;
+}
+
+# last_idx - Return index of last occurrence, -1 if not found
+func last_idx(array @list, scalar $value) int {
+    my int $len = scalar(@list);
+    for (my int $i = $len - 1; $i >= 0; $i--) {
+        $i = $i - 1;
+        $i = $i + 1;
+        if ($list[$i] == $value) {
+            return $i;
+        }
+        $i = $i - 1;
+    }
+    return -1;
+}
+
+# last_idx_str - Return index of last string match, -1 if not found
+func last_idx_str(array @list, str $value) int {
+    my int $len = scalar(@list);
+    my int $i = $len - 1;
+    while ($i >= 0) {
+        if ($list[$i] eq $value) {
+            return $i;
+        }
+        $i = $i - 1;
+    }
+    return -1;
+}
+
+# contains - Return 1 if value is in list, 0 otherwise
+func contains(array @list, scalar $value) int {
+    if (List::Util::first_idx(@list, $value) >= 0) {
+        return 1;
+    }
+    return 0;
+}
+
+# contains_str - Return 1 if string is in list, 0 otherwise
+func contains_str(array @list, str $value) int {
+    if (List::Util::first_idx_str(@list, $value) >= 0) {
+        return 1;
+    }
+    return 0;
+}
+
+# count - Return number of occurrences of value
+func count(array @list, scalar $value) int {
+    my int $n = 0;
+    my int $len = scalar(@list);
+    for (my int $i = 0; $i < $len; $i++) {
+        if ($list[$i] == $value) {
+            $n = $n + 1;
+        }
+    }
+    return $n;
+}
+
+# count_str - Return number of occurrences of string value
+func count_str(array @list, str $value) int {
+    my int $n = 0;
+    my int $len = scalar(@list);
+    for (my int $i = 0; $i < $len; $i++) {
+        if ($list[$i] eq $value) {
+            $n = $n + 1;
+        }
+    }
+    return $n;
+}
+
+# ============================================================
+# Boolean Functions
+# ============================================================
+
+# any - Return 1 if any element is true
+func any(array @list) int {
+    my int $len = scalar(@list);
+    for (my int $i = 0; $i < $len; $i++) {
+        if ($list[$i]) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+# all - Return 1 if all elements are true (1 for empty list)
+func all(array @list) int {
+    my int $len = scalar(@list);
+    for (my int $i = 0; $i < $len; $i++) {
+        if (!$list[$i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+# none - Return 1 if no elements are true (1 for empty list)
+func none(array @list) int {
+    my int $len = scalar(@list);
+    for (my int $i = 0; $i < $len; $i++) {
+        if ($list[$i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+# ============================================================
+# Transformation Functions
+# ============================================================
+
+# uniq - Return array with duplicates removed (numeric comparison)
+func uniq(array @list) array {
+    my array @result = ();
+    my hash %seen = ();
+    my int $len = scalar(@list);
+    for (my int $i = 0; $i < $len; $i++) {
+        my str $key = $list[$i];
+        if (!defined($seen{$key})) {
+            push(@result, $list[$i]);
+            $seen{$key} = 1;
+        }
+    }
+    return @result;
+}
+
+# uniq_stable - Same as uniq, preserves order
+func uniq_stable(array @list) array {
+    return List::Util::uniq(@list);
+}
+
+# reverse - Return reversed array
+func reverse(array @list) array {
+    my array @result = ();
+    my int $len = scalar(@list);
+    my int $i = $len - 1;
+    while ($i >= 0) {
+        push(@result, $list[$i]);
+        $i = $i - 1;
+    }
+    return @result;
+}
+
+# sort_num - Return array sorted numerically ascending
+func sort_num(array @list) array {
+    my array @result = ();
+    my int $len = scalar(@list);
+
+    # Copy to result
+    for (my int $i = 0; $i < $len; $i++) {
+        push(@result, $list[$i]);
+    }
+
+    # Bubble sort (simple, not optimal for large lists)
+    for (my int $i = 0; $i < $len - 1; $i++) {
+        for (my int $j = 0; $j < $len - $i - 1; $j++) {
+            if ($result[$j] > $result[$j + 1]) {
+                my num $temp = $result[$j];
+                $result[$j] = $result[$j + 1];
+                $result[$j + 1] = $temp;
+            }
+        }
+    }
+
+    return @result;
+}
+
+# sort_num_desc - Return array sorted numerically descending
+func sort_num_desc(array @list) array {
+    my array @sorted = List::Util::sort_num(@list);
+    return List::Util::reverse(@sorted);
+}
+
+# sort_str - Return array sorted alphabetically
+func sort_str(array @list) array {
+    my array @result = ();
+    my int $len = scalar(@list);
+
+    # Copy to result
+    for (my int $i = 0; $i < $len; $i++) {
+        push(@result, $list[$i]);
+    }
+
+    # Bubble sort with string comparison
+    for (my int $i = 0; $i < $len - 1; $i++) {
+        for (my int $j = 0; $j < $len - $i - 1; $j++) {
+            if ($result[$j] gt $result[$j + 1]) {
+                my str $temp = $result[$j];
+                $result[$j] = $result[$j + 1];
+                $result[$j + 1] = $temp;
+            }
+        }
+    }
+
+    return @result;
+}
+
+# shuffle - Return array in random order
+func shuffle(array @list) array {
+    my array @result = ();
+    my int $len = scalar(@list);
+
+    # Copy to result
+    for (my int $i = 0; $i < $len; $i++) {
+        push(@result, $list[$i]);
+    }
+
+    # Fisher-Yates shuffle
+    my int $i = $len - 1;
+    while ($i > 0) {
+        my int $j = sys::rand() % ($i + 1);
+        my scalar $temp = $result[$i];
+        $result[$i] = $result[$j];
+        $result[$j] = $temp;
+        $i = $i - 1;
+    }
+
+    return @result;
+}
+
+# take - Return first n elements
+func take(int $n, array @list) array {
+    my array @result = ();
+    my int $len = scalar(@list);
+    if ($n > $len) {
+        $n = $len;
+    }
+    for (my int $i = 0; $i < $n; $i++) {
+        push(@result, $list[$i]);
+    }
+    return @result;
+}
+
+# drop - Return all but first n elements
+func drop(int $n, array @list) array {
+    my array @result = ();
+    my int $len = scalar(@list);
+    if ($n < 0) {
+        $n = 0;
+    }
+    for (my int $i = $n; $i < $len; $i++) {
+        push(@result, $list[$i]);
+    }
+    return @result;
+}
+
+# slice - Return elements from start to end (inclusive)
+func slice(array @list, int $start, int $end) array {
+    my array @result = ();
+    my int $len = scalar(@list);
+    if ($start < 0) {
+        $start = 0;
+    }
+    if ($end >= $len) {
+        $end = $len - 1;
+    }
+    for (my int $i = $start; $i <= $end; $i++) {
+        push(@result, $list[$i]);
+    }
+    return @result;
+}
+
+# ============================================================
+# Pair Functions
+# ============================================================
+
+# pairs - Return array of two-element arrays from consecutive pairs
+func pairs(array @list) array {
+    my array @result = ();
+    my int $len = scalar(@list);
+    my int $i = 0;
+    while ($i + 1 < $len) {
+        my array @pair = ();
+        push(@pair, $list[$i]);
+        push(@pair, $list[$i + 1]);
+        push(@result, \@pair);
+        $i = $i + 2;
+    }
+    return @result;
+}
+
+# zip - Interleave elements from two arrays
+func zip(array @a, array @b) array {
+    my array @result = ();
+    my int $len_a = scalar(@a);
+    my int $len_b = scalar(@b);
+    my int $max_len = $len_a;
+    if ($len_b > $max_len) {
+        $max_len = $len_b;
+    }
+    for (my int $i = 0; $i < $max_len; $i++) {
+        if ($i < $len_a) {
+            push(@result, $a[$i]);
+        }
+        if ($i < $len_b) {
+            push(@result, $b[$i]);
+        }
+    }
+    return @result;
+}
+
+# join_str - Join array elements with separator
+func join_str(str $sep, array @list) str {
+    my str $result = "";
+    my int $len = scalar(@list);
+    for (my int $i = 0; $i < $len; $i++) {
+        if ($i > 0) {
+            $result = $result . $sep;
+        }
+        $result = $result . $list[$i];
+    }
+    return $result;
+}
+
+# flatten - Flatten nested arrays one level
+func flatten(array @list) array {
+    my array @result = ();
+    my int $len = scalar(@list);
+    for (my int $i = 0; $i < $len; $i++) {
+        my scalar $elem = $list[$i];
+        # Check if element is an array reference
+        if (ref($elem) eq "ARRAY") {
+            my array @inner = @{$elem};
+            my int $inner_len = scalar(@inner);
+            for (my int $j = 0; $j < $inner_len; $j++) {
+                push(@result, $inner[$j]);
+            }
+        } else {
+            push(@result, $elem);
+        }
+    }
+    return @result;
+}
+
+# range - Generate array of integers from start to end
+func range(int $start, int $end) array {
+    my array @result = ();
+    if ($start <= $end) {
+        for (my int $i = $start; $i <= $end; $i++) {
+            push(@result, $i);
+        }
+    } else {
+        my int $i = $start;
+        while ($i >= $end) {
+            push(@result, $i);
+            $i = $i - 1;
+        }
+    }
+    return @result;
+}
+
+# repeat - Create array with value repeated n times
+func repeat(scalar $value, int $n) array {
+    my array @result = ();
+    for (my int $i = 0; $i < $n; $i++) {
+        push(@result, $value);
+    }
+    return @result;
+}

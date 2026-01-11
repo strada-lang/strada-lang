@@ -1,0 +1,194 @@
+package Syslog;
+
+# Syslog library for Strada
+# Provides interface to Unix syslog facility
+
+__C__ {
+#include <syslog.h>
+#include <string.h>
+#include <stdlib.h>
+
+/* openlog() keeps a reference to ident, so we must keep it alive */
+static char *syslog_ident = NULL;
+}
+
+# Facility constants
+func LOG_KERN() int { return 0; }       # Kernel messages
+func LOG_USER() int { return 8; }       # User-level messages (default)
+func LOG_MAIL() int { return 16; }      # Mail system
+func LOG_DAEMON() int { return 24; }    # System daemons
+func LOG_AUTH() int { return 32; }      # Security/authorization
+func LOG_SYSLOG() int { return 40; }    # Syslogd internal
+func LOG_LPR() int { return 48; }       # Printer subsystem
+func LOG_NEWS() int { return 56; }      # Network news
+func LOG_UUCP() int { return 64; }      # UUCP subsystem
+func LOG_CRON() int { return 72; }      # Cron daemon
+func LOG_LOCAL0() int { return 128; }   # Local use 0
+func LOG_LOCAL1() int { return 136; }   # Local use 1
+func LOG_LOCAL2() int { return 144; }   # Local use 2
+func LOG_LOCAL3() int { return 152; }   # Local use 3
+func LOG_LOCAL4() int { return 160; }   # Local use 4
+func LOG_LOCAL5() int { return 168; }   # Local use 5
+func LOG_LOCAL6() int { return 176; }   # Local use 6
+func LOG_LOCAL7() int { return 184; }   # Local use 7
+
+# Priority/severity constants
+func LOG_EMERG() int { return 0; }      # System is unusable
+func LOG_ALERT() int { return 1; }      # Action must be taken immediately
+func LOG_CRIT() int { return 2; }       # Critical conditions
+func LOG_ERR() int { return 3; }        # Error conditions
+func LOG_WARNING() int { return 4; }    # Warning conditions
+func LOG_NOTICE() int { return 5; }     # Normal but significant
+func LOG_INFO() int { return 6; }       # Informational
+func LOG_DEBUG() int { return 7; }      # Debug-level messages
+
+# Option constants for openlog
+func LOG_PID() int { return 1; }        # Log the PID with each message
+func LOG_CONS() int { return 2; }       # Log to console if syslog fails
+func LOG_ODELAY() int { return 4; }     # Delay open until first syslog()
+func LOG_NDELAY() int { return 8; }     # Open immediately
+func LOG_NOWAIT() int { return 16; }    # Don't wait for child processes
+func LOG_PERROR() int { return 32; }    # Also log to stderr
+
+# Open connection to syslog
+# ident: string prepended to every message (usually program name)
+# option: LOG_PID | LOG_CONS etc (0 for defaults)
+# facility: LOG_USER, LOG_DAEMON, LOG_LOCAL0-7, etc
+func open(str $ident, int $option, int $facility) void {
+    __C__ {
+        /* Free previous ident if any */
+        if (syslog_ident != NULL) {
+            free(syslog_ident);
+        }
+        /* Keep ident alive - openlog stores the pointer, doesn't copy */
+        syslog_ident = strada_to_str(ident);
+        int opt = (int)strada_to_int(option);
+        int fac = (int)strada_to_int(facility);
+        openlog(syslog_ident, opt, fac);
+    }
+}
+
+# Close syslog connection
+func close() void {
+    __C__ {
+        closelog();
+        if (syslog_ident != NULL) {
+            free(syslog_ident);
+            syslog_ident = NULL;
+        }
+    }
+}
+
+# Write message to syslog with specified priority
+func write(int $priority, str $message) void {
+    __C__ {
+        int prio = (int)strada_to_int(priority);
+        char *msg = strada_to_str(message);
+        syslog(prio, "%s", msg);
+        free(msg);
+    }
+}
+
+# Convenience functions for each priority level
+# Use inline C to avoid allocating StradaValue for the constant
+
+func emerg(str $message) void {
+    __C__ {
+        char *msg = strada_to_str(message);
+        syslog(LOG_EMERG, "%s", msg);
+        free(msg);
+    }
+}
+
+func alert(str $message) void {
+    __C__ {
+        char *msg = strada_to_str(message);
+        syslog(LOG_ALERT, "%s", msg);
+        free(msg);
+    }
+}
+
+func crit(str $message) void {
+    __C__ {
+        char *msg = strada_to_str(message);
+        syslog(LOG_CRIT, "%s", msg);
+        free(msg);
+    }
+}
+
+func err(str $message) void {
+    __C__ {
+        char *msg = strada_to_str(message);
+        syslog(LOG_ERR, "%s", msg);
+        free(msg);
+    }
+}
+
+func warning(str $message) void {
+    __C__ {
+        char *msg = strada_to_str(message);
+        syslog(LOG_WARNING, "%s", msg);
+        free(msg);
+    }
+}
+
+func notice(str $message) void {
+    __C__ {
+        char *msg = strada_to_str(message);
+        syslog(LOG_NOTICE, "%s", msg);
+        free(msg);
+    }
+}
+
+func info(str $message) void {
+    __C__ {
+        char *msg = strada_to_str(message);
+        syslog(LOG_INFO, "%s", msg);
+        free(msg);
+    }
+}
+
+func debug(str $message) void {
+    __C__ {
+        char *msg = strada_to_str(message);
+        syslog(LOG_DEBUG, "%s", msg);
+        free(msg);
+    }
+}
+
+# Set log mask - only messages with priority <= mask will be logged
+# Returns previous mask
+func setmask(int $mask) int {
+    my int $prev = 0;
+    __C__ {
+        int m = (int)strada_to_int(mask);
+        int old = setlogmask(m);
+        strada_decref(prev);
+        prev = strada_new_int(old);
+    }
+    return $prev;
+}
+
+# Create mask for a single priority level
+func mask(int $priority) int {
+    my int $result = 0;
+    __C__ {
+        int p = (int)strada_to_int(priority);
+        int m = LOG_MASK(p);
+        strada_decref(result);
+        result = strada_new_int(m);
+    }
+    return $result;
+}
+
+# Create mask for all priorities up to and including the given one
+func upto(int $priority) int {
+    my int $result = 0;
+    __C__ {
+        int p = (int)strada_to_int(priority);
+        int m = LOG_UPTO(p);
+        strada_decref(result);
+        result = strada_new_int(m);
+    }
+    return $result;
+}

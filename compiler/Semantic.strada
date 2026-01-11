@@ -1,3 +1,20 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
 # Semantic.strada - Semantic analysis and validation for Strada compiler
 # Performs symbol table building, type checking, and validation
 
@@ -200,6 +217,14 @@ func get_builtins() scalar {
     $b{"hash_get"} = 1;
     $b{"hash_set"} = 1;
 
+    # I/O control
+    $b{"select"} = 1;
+
+    # Tie/untie
+    $b{"tie"} = 1;
+    $b{"untie"} = 1;
+    $b{"tied"} = 1;
+
     # Type functions
     $b{"defined"} = 1;
     $b{"typeof"} = 1;
@@ -227,6 +252,7 @@ func get_builtins() scalar {
     $b{"replace_all"} = 1;
     $b{"capture"} = 1;
     $b{"captures"} = 1;
+    $b{"named_captures"} = 1;
 
     # Control flow
     $b{"exit"} = 1;
@@ -236,6 +262,7 @@ func get_builtins() scalar {
     $b{"dumper_str"} = 1;
     $b{"dump"} = 1;
     $b{"stacktrace"} = 1;
+    $b{"stacktrace_str"} = 1;
     $b{"caller"} = 1;
 
     # Misc
@@ -322,6 +349,8 @@ func get_builtins() scalar {
     $b{"sys::readdir_full"} = 1;
     $b{"sys::is_dir"} = 1;
     $b{"sys::is_file"} = 1;
+    $b{"sys::file_exists"} = 1;
+    $b{"sys::dir_exists"} = 1;
     $b{"sys::file_size"} = 1;
     $b{"sys::realpath"} = 1;
     $b{"sys::dirname"} = 1;
@@ -410,6 +439,7 @@ func get_builtins() scalar {
     # sys:: Socket
     $b{"sys::socket_client"} = 1;
     $b{"sys::socket_server"} = 1;
+    $b{"sys::socket_server_backlog"} = 1;
     $b{"sys::socket_accept"} = 1;
     $b{"sys::socket_recv"} = 1;
     $b{"sys::socket_send"} = 1;
@@ -417,6 +447,7 @@ func get_builtins() scalar {
     $b{"sys::socket_select"} = 1;
     $b{"sys::socket_fd"} = 1;
     $b{"sys::select_fds"} = 1;
+    $b{"sys::socket_set_nonblocking"} = 1;
 
     # sys:: DNS/Network
     $b{"sys::gethostbyname"} = 1;
@@ -433,6 +464,10 @@ func get_builtins() scalar {
     $b{"sys::malloc"} = 1;
     $b{"sys::free"} = 1;
     $b{"sys::release"} = 1;
+
+    # sys:: Weak references
+    $b{"sys::weaken"} = 1;
+    $b{"sys::isweak"} = 1;
 
     # sys:: Struct functions (C interop)
     $b{"sys::cstruct_new"} = 1;
@@ -615,6 +650,17 @@ func get_builtins() scalar {
     $b{"sys::fstatvfs"} = 1;
     $b{"sys::dup"} = 1;
 
+    # sys:: Binary/Byte operations
+    $b{"sys::ord_byte"} = 1;
+    $b{"sys::get_byte"} = 1;
+    $b{"sys::set_byte"} = 1;
+    $b{"sys::byte_length"} = 1;
+    $b{"sys::byte_substr"} = 1;
+    $b{"sys::pack"} = 1;
+    $b{"sys::unpack"} = 1;
+    $b{"sys::base64_encode"} = 1;
+    $b{"sys::base64_decode"} = 1;
+
     # ============================================================
     # math:: ADDITIONAL FUNCTIONS
     # ============================================================
@@ -643,9 +689,7 @@ func get_builtins() scalar {
 func ctx_new() scalar {
     my hash %ctx = ();
     my hash %funcs = ();
-    my hash %structs = ();
     $ctx{"functions"} = \%funcs;
-    $ctx{"structs"} = \%structs;
     $ctx{"builtins"} = get_builtins();
     $ctx{"scope"} = scope_new(0);
     $ctx{"current_func"} = 0;
@@ -690,41 +734,6 @@ func register_functions(scalar $ctx, scalar $ast) void {
     }
 }
 
-func register_structs(scalar $ctx, scalar $ast) void {
-    my scalar $structs = $ast->{"structs"};
-    my int $count = $ast->{"struct_count"};
-
-    for (my int $i = 0; $i < $count; $i = $i + 1) {
-        my scalar $st = $structs->[$i];
-        my str $name = $st->{"name"};
-        my int $line = ast_get_line($st);
-
-        # Check for duplicate struct
-        my scalar $existing_st = $ctx->{"structs"}->{$name};
-        my int $already_exists = $existing_st->{"is_registered"};
-        if ($already_exists == 1) {
-            semantic_error("struct '" . $name . "' already defined", $line);
-        }
-
-        # Build field map
-        my hash %fields = ();
-        my scalar $field_list = $st->{"fields"};
-        my int $field_count = $st->{"field_count"};
-        for (my int $j = 0; $j < $field_count; $j = $j + 1) {
-            my scalar $field = $field_list->[$j];
-            $fields{$field->{"name"}} = $field->{"field_type"};
-        }
-
-        # Register struct
-        my hash %info = ();
-        $info{"is_registered"} = 1;
-        $info{"fields"} = \%fields;
-        $info{"field_count"} = $field_count;
-        $info{"line"} = $line;
-        $ctx->{"structs"}->{$name} = \%info;
-    }
-}
-
 # Register functions from import_lib statements
 func register_import_lib_functions(scalar $ctx, scalar $ast) void {
     my int $lib_count = $ast->{"import_lib_count"};
@@ -755,8 +764,48 @@ func register_import_lib_functions(scalar $ctx, scalar $ast) void {
             $info{"param_count"} = $fn_info->{"param_count"};
             $info{"params"} = $fn_info->{"params"};
             $info{"is_extern"} = 0;
-            $info{"is_variadic"} = 0;
+            $info{"is_variadic"} = $fn_info->{"is_variadic"};
+            $info{"variadic_param_idx"} = $fn_info->{"variadic_param_idx"};
             $info{"is_import_lib"} = 1;  # Mark as import_lib function
+            $info{"line"} = 0;
+            $ctx->{"functions"}->{$name} = \%info;
+        }
+    }
+}
+
+# Register functions from import_object statements (static linking)
+func register_import_object_functions(scalar $ctx, scalar $ast) void {
+    my int $obj_count = $ast->{"import_object_count"};
+    if ($obj_count == 0) {
+        return;
+    }
+
+    my scalar $import_objects = $ast->{"import_objects"};
+
+    for (my int $i = 0; $i < $obj_count; $i = $i + 1) {
+        my scalar $obj_info = $import_objects->[$i];
+        my scalar $obj_funcs = $obj_info->{"functions"};
+        my int $fn_count = $obj_info->{"function_count"};
+
+        for (my int $j = 0; $j < $fn_count; $j = $j + 1) {
+            my scalar $fn_info = $obj_funcs->[$j];
+            my str $name = $fn_info->{"name"};
+
+            # Register function (skip if already exists)
+            my scalar $existing_fn = $ctx->{"functions"}->{$name};
+            if ($existing_fn != 0) {
+                next;  # Function with this name already exists
+            }
+
+            my hash %info = ();
+            $info{"is_registered"} = 1;
+            $info{"return_type"} = $fn_info->{"return_type"};
+            $info{"param_count"} = $fn_info->{"param_count"};
+            $info{"params"} = $fn_info->{"params"};
+            $info{"is_extern"} = 0;
+            $info{"is_variadic"} = $fn_info->{"is_variadic"};
+            $info{"variadic_param_idx"} = $fn_info->{"variadic_param_idx"};
+            $info{"is_import_object"} = 1;  # Mark as import_object function
             $info{"line"} = 0;
             $ctx->{"functions"}->{$name} = \%info;
         }
@@ -776,9 +825,15 @@ func register_globals(scalar $ctx, scalar $ast) void {
     for (my int $i = 0; $i < $global_count; $i = $i + 1) {
         my scalar $gvar = $globals->[$i];
         my str $name = $gvar->{"name"};
-        my str $sigil = $gvar->{"sigil"};
         my int $var_type = $gvar->{"var_type"};
         my int $line = ast_get_line($gvar);
+
+        # Handle both var decls and const decls
+        my int $gvar_type = $gvar->{"type"};
+        my str $sigil = "$";  # Default for consts
+        if ($gvar_type == NODE_VAR_DECL()) {
+            $sigil = $gvar->{"sigil"};
+        }
 
         scope_add_var($scope, $name, $sigil, $var_type, $line);
     }
@@ -835,6 +890,34 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
                 $lookup_name = $underscore_name;
             }
             # Otherwise keep original Package::func format (for modules)
+        } else {
+            # Name has no ::, but might be Package_func format from ::func() calls
+            # Try to find Package::func format in registry
+            # Since package names can contain underscores (e.g., Sysync_Token),
+            # try all possible underscore positions as the separator
+            my int $found_colon = 0;
+            my int $us_idx = index($name, "_");
+            while ($us_idx > 0 && $found_colon == 0) {
+                my str $pkg_part = substr($name, 0, $us_idx);
+                my str $func_part = substr($name, $us_idx + 1, -1);
+                if (length($pkg_part) > 0 && length($func_part) > 0) {
+                    my str $colon_name = $pkg_part . "::" . $func_part;
+                    my scalar $fn_info_colon = $ctx->{"functions"}->{$colon_name};
+                    if ($fn_info_colon->{"is_registered"} == 1) {
+                        $lookup_name = $colon_name;
+                        $found_colon = 1;
+                    }
+                }
+                if ($found_colon == 0) {
+                    # Try next underscore position
+                    my int $next_idx = index(substr($name, $us_idx + 1, -1), "_");
+                    if ($next_idx >= 0) {
+                        $us_idx = $us_idx + 1 + $next_idx;
+                    } else {
+                        $us_idx = -1;  # No more underscores
+                    }
+                }
+            }
         }
 
         # Check if user-defined function
@@ -842,40 +925,95 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
         my scalar $fn_info = $ctx->{"functions"}->{$lookup_name};
         my int $is_reg = $fn_info->{"is_registered"};
         if ($is_reg == 0) {
-            # Not found - but allow namespaced calls (e.g., JSON::encode)
-            # These are resolved at runtime via module loading
+            # Not found - try package-prefixed name if we're in a package
             if ($colon_idx < 0) {
-                semantic_error("undefined function '" . $name . "'", $line);
+                my scalar $cur_fn = $ctx->{"current_func"};
+                my str $pkg = "";
+                my int $has_cur_fn = 0;
+                if ($cur_fn) {
+                    $has_cur_fn = 1;
+                }
+                if ($has_cur_fn == 1) {
+                    $pkg = $cur_fn->{"package"};
+                }
+                if (length($pkg) > 0 && $pkg ne "main") {
+                    # Convert :: to _ in package name for underscore format lookup
+                    my str $c_pkg = $pkg;
+                    my int $ci = index($c_pkg, "::");
+                    while ($ci >= 0) {
+                        $c_pkg = substr($c_pkg, 0, $ci) . "_" . substr($c_pkg, $ci + 2, length($c_pkg) - $ci - 2);
+                        $ci = index($c_pkg, "::");
+                    }
+                    # Try package-prefixed name with underscore (Package_func format)
+                    my str $prefixed_name = $c_pkg . "_" . $name;
+                    my scalar $fn_info_pkg = $ctx->{"functions"}->{$prefixed_name};
+                    if ($fn_info_pkg->{"is_registered"} == 1) {
+                        # Found it! Update for continued validation
+                        $lookup_name = $prefixed_name;
+                        $fn_info = $fn_info_pkg;
+                        $is_reg = 1;
+                    }
+                    # Also try Package::func format (functions from modules)
+                    # Use original $pkg (not $c_pkg) to preserve :: in nested packages
+                    # e.g., Strada::Interpreter::func_name, not Strada_Interpreter::func_name
+                    if ($is_reg == 0) {
+                        my str $colon_name = $pkg . "::" . $name;
+                        my scalar $fn_info_colon = $ctx->{"functions"}->{$colon_name};
+                        if ($fn_info_colon->{"is_registered"} == 1) {
+                            $lookup_name = $colon_name;
+                            $fn_info = $fn_info_colon;
+                            $is_reg = 1;
+                        }
+                    }
+                }
+                if ($is_reg == 0) {
+                    semantic_error("undefined function '" . $name . "'", $line);
+                }
             }
-            # For namespaced functions, just analyze arguments and trust runtime
-            for (my int $i = 0; $i < $arg_count; $i = $i + 1) {
-                analyze_expression($ctx, $args->[$i]);
+            if ($is_reg == 0) {
+                # For namespaced functions, just analyze arguments and trust runtime
+                for (my int $i = 0; $i < $arg_count; $i = $i + 1) {
+                    analyze_expression($ctx, $args->[$i]);
+                }
+                return;
             }
-            return;
         }
 
         my int $expected = $fn_info->{"param_count"};
         my int $actual = $expr->{"arg_count"};
 
-        # Count required parameters (those without defaults)
-        my int $required = 0;
-        my scalar $params = $fn_info->{"params"};
-        for (my int $i = 0; $i < $expected; $i = $i + 1) {
-            my scalar $param = $params->[$i];
-            my int $has_def = $param->{"has_default"};
-            if ($has_def == 0) {
-                $required = $required + 1;
+        # Check if any argument is a spread operator
+        my int $has_spread = 0;
+        for (my int $s = 0; $s < $actual; $s = $s + 1) {
+            if ($args->[$s]->{"type"} == NODE_SPREAD()) {
+                $has_spread = 1;
             }
         }
 
-        if ($actual < $required) {
-            semantic_error("too few arguments to '" . $name . "': expected " . $required . ", got " . $actual, $line);
-        }
-        if ($actual > $expected) {
-            # Check if function is variadic
-            my int $is_var = $fn_info->{"is_variadic"};
-            if ($is_var == 0) {
-                semantic_error("too many arguments to '" . $name . "': expected " . $expected . ", got " . $actual, $line);
+        # Skip arg count validation when spread is present (count unknown at compile time)
+        if ($has_spread == 0) {
+            # Count required parameters (those without defaults, excluding variadic params)
+            my int $required = 0;
+            my scalar $params = $fn_info->{"params"};
+            for (my int $i = 0; $i < $expected; $i = $i + 1) {
+                my scalar $param = $params->[$i];
+                my int $has_def = $param->{"has_default"};
+                my int $is_variadic = $param->{"is_variadic"};
+                # Variadic params are optional (can have 0 items)
+                if ($has_def == 0 && $is_variadic == 0) {
+                    $required = $required + 1;
+                }
+            }
+
+            if ($actual < $required) {
+                semantic_error("too few arguments to '" . $name . "': expected " . $required . ", got " . $actual, $line);
+            }
+            if ($actual > $expected) {
+                # Check if function is variadic
+                my int $is_var = $fn_info->{"is_variadic"};
+                if ($is_var == 0) {
+                    semantic_error("too many arguments to '" . $name . "': expected " . $expected . ", got " . $actual, $line);
+                }
             }
         }
 
@@ -977,6 +1115,18 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
         return;
     }
 
+    # Dynamic method call ($obj->$method(args))
+    if ($node_type == NODE_DYN_METHOD_CALL()) {
+        analyze_expression($ctx, $expr->{"base_object"});
+        analyze_expression($ctx, $expr->{"method_expr"});
+        my scalar $dmc_args = $expr->{"args"};
+        my int $dmc_count = $expr->{"arg_count"};
+        for (my int $dmc_i = 0; $dmc_i < $dmc_count; $dmc_i = $dmc_i + 1) {
+            analyze_expression($ctx, $dmc_args->[$dmc_i]);
+        }
+        return;
+    }
+
     # SUPER:: call
     if ($node_type == NODE_SUPER_CALL()) {
         my scalar $args = $expr->{"args"};
@@ -998,6 +1148,12 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
         return;
     }
 
+    # Spread expression (...@arr)
+    if ($node_type == NODE_SPREAD()) {
+        analyze_expression($ctx, $expr->{"target"});
+        return;
+    }
+
     # Literals - no validation needed
     # NODE_INT_LITERAL, NODE_NUM_LITERAL, NODE_STR_LITERAL, NODE_FUNC_REF
 }
@@ -1012,16 +1168,6 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         my str $sigil = $stmt->{"sigil"};
         my int $var_type = $stmt->{"var_type"};
 
-        # Check for struct type validity
-        if ($var_type == TYPE_STRUCT()) {
-            my str $type_name = $stmt->{"type_name"};
-            my scalar $struct_info = $ctx->{"structs"}->{$type_name};
-            my int $struct_exists = $struct_info->{"is_registered"};
-            if ($struct_exists != 1) {
-                semantic_error("undefined struct type '" . $type_name . "'", $line);
-            }
-        }
-
         # Check for redeclaration in current scope
         my scalar $current_scope = $ctx->{"scope"};
         my scalar $scope_vars = $current_scope->{"vars"};
@@ -1035,6 +1181,87 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         scope_add_var($current_scope, $name, $sigil, $var_type, $line);
 
         # Analyze initializer if present
+        my scalar $init_expr = $stmt->{"init"};
+        if (is_valid_node($init_expr) == 1) {
+            analyze_expression($ctx, $init_expr);
+        }
+        return;
+    }
+
+    # Const declaration - similar to var decl but with $ sigil
+    if ($node_type == NODE_CONST_DECL()) {
+        my str $name = $stmt->{"name"};
+        my int $var_type = $stmt->{"var_type"};
+
+        # Check for redeclaration in current scope
+        my scalar $current_scope = $ctx->{"scope"};
+        my scalar $scope_vars = $current_scope->{"vars"};
+        if (exists(%{$scope_vars}, $name)) {
+            my scalar $prev_info = $scope_vars->{$name};
+            my int $prev_line = $prev_info->{"line"};
+            semantic_error("constant '" . $name . "' already declared in this scope (previous declaration at line " . $prev_line . ")", $line);
+        }
+
+        # Add const to scope as a scalar
+        scope_add_var($current_scope, $name, "$", $var_type, $line);
+
+        # Analyze initializer (required for const)
+        my scalar $init_expr = $stmt->{"init"};
+        if (is_valid_node($init_expr) == 1) {
+            analyze_expression($ctx, $init_expr);
+        }
+        return;
+    }
+
+    # Our declaration (package-scoped global via global registry)
+    if ($node_type == NODE_OUR_DECL()) {
+        my str $name = $stmt->{"name"};
+        my str $sigil = $stmt->{"sigil"};
+        my int $var_type = $stmt->{"var_type"};
+
+        # Add variable to scope so subsequent references are valid
+        my scalar $current_scope = $ctx->{"scope"};
+        scope_add_var($current_scope, $name, $sigil, $var_type, $line);
+
+        # Analyze initializer if present
+        my scalar $init_expr = $stmt->{"init"};
+        if (is_valid_node($init_expr) == 1) {
+            analyze_expression($ctx, $init_expr);
+        }
+        return;
+    }
+
+    # Destructuring assignment: my ($a, $b, $c) = expr;
+    if ($node_type == NODE_DESTRUCTURE()) {
+        my scalar $vars = $stmt->{"vars"};
+        my int $var_count = $stmt->{"var_count"};
+        my int $is_decl = $stmt->{"is_decl"};
+        my scalar $current_scope = $ctx->{"scope"};
+        my scalar $scope_vars = $current_scope->{"vars"};
+
+        # Register all variables if this is a declaration
+        if ($is_decl == 1) {
+            my int $i = 0;
+            while ($i < $var_count) {
+                my scalar $var = $vars->[$i];
+                my str $name = $var->{"name"};
+                my str $sigil = $var->{"sigil"};
+                my int $var_type = $var->{"var_type"};
+
+                # Check for redeclaration in current scope
+                if (exists(%{$scope_vars}, $name)) {
+                    my scalar $prev_info = $scope_vars->{$name};
+                    my int $prev_line = $prev_info->{"line"};
+                    semantic_error("variable '" . $sigil . $name . "' already declared in this scope (previous declaration at line " . $prev_line . ")", $line);
+                }
+
+                # Add variable to scope
+                scope_add_var($current_scope, $name, $sigil, $var_type, $line);
+                $i = $i + 1;
+            }
+        }
+
+        # Analyze initializer
         my scalar $init_expr = $stmt->{"init"};
         if (is_valid_node($init_expr) == 1) {
             analyze_expression($ctx, $init_expr);
@@ -1196,11 +1423,11 @@ func semantic_analyze(scalar $ast, int $show_warnings) void {
     my scalar $ctx = ctx_new();
     $ctx->{"show_warnings"} = $show_warnings;
 
-    # First pass: register all functions, structs, and globals
+    # First pass: register all functions and globals
     register_functions($ctx, $ast);
-    register_structs($ctx, $ast);
     register_globals($ctx, $ast);
     register_import_lib_functions($ctx, $ast);
+    register_import_object_functions($ctx, $ast);
 
     # Second pass: validate each function
     my scalar $funcs = $ast->{"functions"};

@@ -1,0 +1,188 @@
+#!/usr/bin/env strada
+# Test array operations for memory leaks
+# Run: valgrind --leak-check=full ./test_arrays
+
+func main() int {
+    say("Testing array operations for memory leaks...");
+    my int $iterations = 100;
+
+    # Test push/pop
+    say("  push()/pop()...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my array @arr = ();
+        push(@arr, "one");
+        push(@arr, "two");
+        push(@arr, "three");
+        my str $last = pop(@arr);
+        if ($last ne "three") {
+            say("    FAIL: pop returned " . $last);
+            return 1;
+        }
+        if (size(@arr) != 2) {
+            say("    FAIL: size after pop");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test shift/unshift
+    say("  shift()/unshift()...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @arr = ("a", "b", "c");
+        my str $first = shift(@arr);
+        if ($first ne "a") {
+            say("    FAIL: shift returned " . $first);
+            return 1;
+        }
+        unshift(@arr, "x");
+        if ($arr[0] ne "x") {
+            say("    FAIL: unshift");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test size/scalar
+    say("  size()/scalar()...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @arr = (1, 2, 3, 4, 5);
+        my int $s1 = size(@arr);
+        my int $s2 = scalar(@arr);
+        if ($s1 != 5 || $s2 != 5) {
+            say("    FAIL: size/scalar");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test array access
+    say("  Array element access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @arr = ("zero", "one", "two", "three", "four");
+        my str $v0 = $arr[0];
+        my str $v2 = $arr[2];
+        my str $vlast = $arr[-1];
+        if ($v0 ne "zero" || $v2 ne "two" || $vlast ne "four") {
+            say("    FAIL: array access");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test array assignment
+    say("  Array element assignment...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @arr = (0, 0, 0, 0, 0);
+        $arr[0] = "first";
+        $arr[2] = "middle";
+        $arr[4] = "last";
+        if ($arr[0] ne "first" || $arr[2] ne "middle" || $arr[4] ne "last") {
+            say("    FAIL: array assignment");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test anonymous array
+    say("  Anonymous arrays...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $arr = [1, 2, 3, 4, 5];
+        if (size($arr) != 5) {
+            say("    FAIL: anon array size");
+            return 1;
+        }
+        my scalar $nested = [[1, 2], [3, 4], [5, 6]];
+        if (size($nested) != 3) {
+            say("    FAIL: nested anon array");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test reverse
+    say("  reverse()...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @arr = (1, 2, 3, 4, 5);
+        reverse(@arr);
+        if ($arr[0] != 5 || $arr[4] != 1) {
+            say("    FAIL: reverse");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test sort (numeric)
+    say("  sort() numeric...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @arr = (5, 2, 8, 1, 9, 3);
+        my scalar $sorted = sort { $a <=> $b; } @arr;
+        if ($sorted->[0] != 1 || $sorted->[5] != 9) {
+            say("    FAIL: sort numeric");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test sort (string)
+    say("  sort() string...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @arr = ("banana", "apple", "cherry", "date");
+        my scalar $sorted = sort { $a cmp $b; } @arr;
+        if ($sorted->[0] ne "apple" || $sorted->[3] ne "date") {
+            say("    FAIL: sort string");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test foreach
+    say("  foreach iteration...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @arr = (10, 20, 30, 40, 50);
+        my int $sum = 0;
+        foreach my int $n (@arr) {
+            $sum = $sum + $n;
+        }
+        if ($sum != 150) {
+            say("    FAIL: foreach sum");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test array with mixed types
+    say("  Mixed type arrays...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @arr = ("string", 42, 3.14, undef);
+        if (size(@arr) != 4) {
+            say("    FAIL: mixed array size");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All array tests passed!");
+    return 0;
+}

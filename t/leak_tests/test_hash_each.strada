@@ -1,0 +1,128 @@
+#!/usr/bin/env strada
+# Test each() hash iterator for memory leaks
+# Run: valgrind --leak-check=full ./test_hash_each
+
+func main() int {
+    say("Testing each() for memory leaks...");
+    my int $iterations = 100;
+
+    # Test basic each iteration
+    say("  basic each iteration...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        $h{"a"} = "1";
+        $h{"b"} = "2";
+        $h{"c"} = "3";
+        my int $count = 0;
+        my array @pair = each(%h);
+        while (size(@pair) > 0) {
+            $count = $count + 1;
+            @pair = each(%h);
+        }
+        if ($count != 3) {
+            say("    FAIL: count = " . $count);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test each with key/value access
+    say("  each key/value access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        $h{"x"} = "10";
+        $h{"y"} = "20";
+        my int $sum = 0;
+        my array @pair = each(%h);
+        while (size(@pair) > 0) {
+            my str $val = $pair[1];
+            $sum = $sum + ($val + 0);
+            @pair = each(%h);
+        }
+        if ($sum != 30) {
+            say("    FAIL: sum = " . $sum);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test each auto-reset (iterate twice)
+    say("  each auto-reset...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        $h{"a"} = "1";
+        $h{"b"} = "2";
+        # First iteration
+        my int $count1 = 0;
+        my array @pair = each(%h);
+        while (size(@pair) > 0) {
+            $count1 = $count1 + 1;
+            @pair = each(%h);
+        }
+        # Second iteration (should auto-reset)
+        my int $count2 = 0;
+        @pair = each(%h);
+        while (size(@pair) > 0) {
+            $count2 = $count2 + 1;
+            @pair = each(%h);
+        }
+        if ($count1 != 2 || $count2 != 2) {
+            say("    FAIL: counts = " . $count1 . ", " . $count2);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test each abandoned mid-iteration (hash freed)
+    say("  each abandoned mid-iteration...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        $h{"a"} = "1";
+        $h{"b"} = "2";
+        $h{"c"} = "3";
+        $h{"d"} = "4";
+        # Only consume one pair, then abandon
+        my array @pair = each(%h);
+        if (size(@pair) != 2) {
+            say("    FAIL: pair size");
+            return 1;
+        }
+        # Hash goes out of scope with iterator mid-way
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test each on larger hash
+    say("  each larger hash...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        my int $j = 0;
+        while ($j < 20) {
+            $h{"key_" . $j} = "val_" . $j;
+            $j = $j + 1;
+        }
+        my int $count = 0;
+        my array @pair = each(%h);
+        while (size(@pair) > 0) {
+            $count = $count + 1;
+            @pair = each(%h);
+        }
+        if ($count != 20) {
+            say("    FAIL: large count = " . $count);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All each tests passed!");
+    return 0;
+}

@@ -1,146 +1,485 @@
-# crypt - Password Hashing Module for Strada
-#
-# Wraps the C crypt.h functions for secure password hashing.
-#
-# Usage:
-#   use lib "lib";
-#   use crypt;
-#
-#   # Hash a password with SHA-512 (recommended)
-#   my str $salt = crypt::gen_salt("sha512");
-#   my str $hash = crypt::crypt_hash("mypassword", $salt);
-#
-#   # Verify a password
-#   if (crypt::verify("mypassword", $hash)) {
-#       say("Password correct!");
-#   }
-#
-# Supported algorithms:
-#   - "des"     - Traditional DES (weak, 8 char max)
-#   - "md5"     - MD5 ($1$)
-#   - "sha256"  - SHA-256 ($5$)
-#   - "sha512"  - SHA-512 ($6$) - recommended
-#   - "bcrypt"  - bcrypt ($2b$) - if available
-#
-# Requires: lib/crypt/libstrada_crypt.so (build with: cd lib/crypt && make)
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+=head1 NAME
+
+crypt - Password Hashing Module for Strada
+
+=head1 SYNOPSIS
+
+    use lib "lib";
+    use crypt;
+
+    # Hash a password (easiest way)
+    my str $hash = crypt::hash_password("mypassword");
+
+    # Verify a password
+    if (crypt::verify("mypassword", $hash)) {
+        say("Password correct!");
+    }
+
+    # Or with explicit algorithm
+    my str $salt = crypt::gen_salt("sha512");
+    my str $hash = crypt::hashpw("mypassword", $salt);
+
+=head1 DESCRIPTION
+
+The crypt module provides secure password hashing using the system's
+crypt(3) function. It supports multiple algorithms and includes
+timing-attack resistant verification.
+
+B<Compile with:> C<./strada myapp.strada -lcrypt>
+
+=head1 SUPPORTED ALGORITHMS
+
+=over 4
+
+=item B<sha512> - SHA-512 ($6$) - B<recommended>
+
+=item B<sha256> - SHA-256 ($5$)
+
+=item B<bcrypt> - bcrypt ($2b$) - if available on system
+
+=item B<md5> - MD5 ($1$) - legacy, not recommended
+
+=item B<des> - Traditional DES - weak, 8 char max, not recommended
+
+=back
+
+=head1 FUNCTIONS
+
+=head2 hash_password($password)
+
+Hash a password using the recommended algorithm (SHA-512).
+Generates salt automatically. This is the easiest way to hash passwords.
+
+    my str $hash = crypt::hash_password("secret123");
+    # Store $hash in database
+
+=head2 verify($password, $hash)
+
+Verify a password against a stored hash.
+Returns 1 if password matches, 0 otherwise.
+Uses constant-time comparison to prevent timing attacks.
+
+    if (crypt::verify($input_password, $stored_hash)) {
+        say("Login successful!");
+    }
+
+=head2 gen_salt($algorithm)
+
+Generate a random salt for the specified algorithm.
+
+    my str $salt = crypt::gen_salt("sha512");
+    my str $salt = crypt::gen_salt("bcrypt");
+
+=head2 gen_salt_rounds($algorithm, $rounds)
+
+Generate a salt with custom rounds (work factor).
+
+    # SHA-512 with 10000 rounds (more secure, slower)
+    my str $salt = crypt::gen_salt_rounds("sha512", 10000);
+
+    # bcrypt with cost 14 (2^14 iterations)
+    my str $salt = crypt::gen_salt_rounds("bcrypt", 14);
+
+=head2 hashpw($password, $salt)
+
+Hash a password with a specific salt.
+
+    my str $salt = crypt::gen_salt("sha512");
+    my str $hash = crypt::hashpw("mypassword", $salt);
+
+=head2 get_algorithm($hash)
+
+Detect the algorithm used in a hash string.
+
+    my str $algo = crypt::get_algorithm($hash);
+    # Returns: "des", "md5", "sha256", "sha512", "bcrypt", or "unknown"
+
+=head2 is_supported($algorithm)
+
+Check if an algorithm is supported on this system.
+
+    if (crypt::is_supported("bcrypt")) {
+        say("bcrypt is available!");
+    }
+
+=head2 error()
+
+Get the last error message.
+
+    my str $hash = crypt::hashpw("test", "invalid");
+    if (length($hash) == 0) {
+        say("Error: " . crypt::error());
+    }
+
+=head1 EXAMPLE
+
+    use lib "lib";
+    use crypt;
+
+    # User registration
+    func register_user(str $username, str $password) void {
+        my str $hash = crypt::hash_password($password);
+        # Store $username and $hash in database
+        DBI::exec($dbh, "INSERT INTO users (username, password) VALUES (?, ?)",
+            [$username, $hash]);
+    }
+
+    # User login
+    func login(str $username, str $password) int {
+        my scalar $row = DBI::selectrow_hashref($dbh,
+            "SELECT password FROM users WHERE username = ?", [$username]);
+
+        if (!defined($row)) {
+            return 0;  # User not found
+        }
+
+        if (crypt::verify($password, $row->{"password"})) {
+            return 1;  # Login successful
+        }
+        return 0;  # Wrong password
+    }
+
+=head1 SECURITY NOTES
+
+=over 4
+
+=item * Always use SHA-512 or bcrypt for new applications
+
+=item * Never store plaintext passwords
+
+=item * Use verify() instead of manual comparison (timing-attack safe)
+
+=item * Consider increasing rounds for sensitive applications
+
+=back
+
+=head1 SEE ALSO
+
+L<DBI>
+
+=cut
 
 package crypt;
 
-# Load the library - tries multiple paths
-func _get_lib() int {
-    my int $lib = sys::dl_open("lib/crypt/libstrada_crypt.so");
-    if ($lib == 0) {
-        $lib = sys::dl_open("./lib/crypt/libstrada_crypt.so");
+# C includes and static data
+__C__ {
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <time.h>
+#include <fcntl.h>
+#include <crypt.h>
+
+/* Last error message */
+static char crypt_last_error[256] = "";
+
+/* Base64-like alphabet for salt generation */
+static const char crypt_salt_chars[] =
+    "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+/* Generate random bytes from /dev/urandom */
+static int crypt_get_random_bytes(unsigned char *buf, size_t len) {
+    int fd = open("/dev/urandom", O_RDONLY);
+    if (fd < 0) {
+        snprintf(crypt_last_error, sizeof(crypt_last_error), "Failed to open /dev/urandom");
+        return -1;
     }
-    if ($lib == 0) {
-        $lib = sys::dl_open("libstrada_crypt.so");
+
+    ssize_t n = read(fd, buf, len);
+    close(fd);
+
+    if (n != (ssize_t)len) {
+        snprintf(crypt_last_error, sizeof(crypt_last_error), "Failed to read random bytes");
+        return -1;
     }
-    return $lib;
+
+    return 0;
+}
+
+/* Generate random salt characters */
+static void crypt_generate_salt_chars(char *buf, size_t len) {
+    unsigned char random[64];
+    if (crypt_get_random_bytes(random, len) < 0) {
+        /* Fallback to less secure random */
+        srand(time(NULL) ^ getpid());
+        for (size_t i = 0; i < len; i++) {
+            random[i] = rand() & 0xFF;
+        }
+    }
+
+    for (size_t i = 0; i < len; i++) {
+        buf[i] = crypt_salt_chars[random[i] % 64];
+    }
+    buf[len] = '\0';
+}
+
+/* Internal: generate salt for algorithm (returns static buffer) */
+static const char* crypt_gen_salt_internal(const char *algorithm, int rounds) {
+    static char salt[128];
+    char random_chars[32];
+
+    crypt_last_error[0] = '\0';
+
+    if (!algorithm) {
+        algorithm = "sha512";
+    }
+
+    if (strcmp(algorithm, "des") == 0) {
+        crypt_generate_salt_chars(random_chars, 2);
+        snprintf(salt, sizeof(salt), "%s", random_chars);
+    }
+    else if (strcmp(algorithm, "md5") == 0) {
+        crypt_generate_salt_chars(random_chars, 8);
+        snprintf(salt, sizeof(salt), "$1$%s$", random_chars);
+    }
+    else if (strcmp(algorithm, "sha256") == 0) {
+        crypt_generate_salt_chars(random_chars, 16);
+        if (rounds > 0) {
+            if (rounds < 1000) rounds = 1000;
+            if (rounds > 999999999) rounds = 999999999;
+            snprintf(salt, sizeof(salt), "$5$rounds=%d$%s$", rounds, random_chars);
+        } else {
+            snprintf(salt, sizeof(salt), "$5$%s$", random_chars);
+        }
+    }
+    else if (strcmp(algorithm, "sha512") == 0) {
+        crypt_generate_salt_chars(random_chars, 16);
+        if (rounds > 0) {
+            if (rounds < 1000) rounds = 1000;
+            if (rounds > 999999999) rounds = 999999999;
+            snprintf(salt, sizeof(salt), "$6$rounds=%d$%s$", rounds, random_chars);
+        } else {
+            snprintf(salt, sizeof(salt), "$6$%s$", random_chars);
+        }
+    }
+    else if (strcmp(algorithm, "bcrypt") == 0) {
+        crypt_generate_salt_chars(random_chars, 22);
+        int cost = (rounds > 0) ? rounds : 12;
+        if (cost < 4) cost = 4;
+        if (cost > 31) cost = 31;
+        snprintf(salt, sizeof(salt), "$2b$%02d$%s", cost, random_chars);
+    }
+    else {
+        snprintf(crypt_last_error, sizeof(crypt_last_error), "Unknown algorithm: %s", algorithm);
+        salt[0] = '\0';
+    }
+
+    return salt;
+}
 }
 
 # Hash a password with the given salt
 # Returns the hashed password string, or empty string on error
-#
-# Example:
-#   my str $hash = crypt::crypt_hash("password", "$6$rounds=5000$saltsalt");
-func crypt_hash(str $password, str $salt) str {
-    my int $lib = crypt::_get_lib();
-    if ($lib == 0) {
-        return "";
+func hashpw(str $password, str $salt) str {
+    my str $result = "";
+    __C__ {
+        static char result_buf[256];
+        crypt_last_error[0] = '\0';
+
+        char *pw_str = strada_to_str(password);
+        char *salt_str = strada_to_str(salt);
+
+        if (!pw_str || !salt_str) {
+            snprintf(crypt_last_error, sizeof(crypt_last_error), "Invalid password or salt");
+            strada_decref(result);
+            result = strada_new_str("");
+        } else {
+            struct crypt_data data;
+            memset(&data, 0, sizeof(data));
+
+            char *hash_result = crypt_r(pw_str, salt_str, &data);
+
+            if (!hash_result) {
+                snprintf(crypt_last_error, sizeof(crypt_last_error), "crypt() failed");
+                strada_decref(result);
+                result = strada_new_str("");
+            } else if (hash_result[0] == '*') {
+                snprintf(crypt_last_error, sizeof(crypt_last_error), "Invalid salt or algorithm not supported");
+                strada_decref(result);
+                result = strada_new_str("");
+            } else {
+                strncpy(result_buf, hash_result, sizeof(result_buf) - 1);
+                result_buf[sizeof(result_buf) - 1] = '\0';
+                strada_decref(result);
+                result = strada_new_str(result_buf);
+            }
+        }
+        free(pw_str);
+        free(salt_str);
     }
-    my int $fn = sys::dl_sym($lib, "strada_crypt_hash");
-    return sys::dl_call_str_sv($fn, [$password, $salt]);
+    return $result;
 }
 
 # Generate a random salt for the specified algorithm
 # Algorithm options: "des", "md5", "sha256", "sha512", "bcrypt"
-# Returns the salt string (e.g., "$6$randomchars$")
-#
-# Example:
-#   my str $salt = crypt::gen_salt("sha512");
 func gen_salt(str $algorithm) str {
-    my int $lib = crypt::_get_lib();
-    if ($lib == 0) {
-        return "";
+    my str $result = "";
+    __C__ {
+        char *algo_str = strada_to_str(algorithm);
+        const char *salt = crypt_gen_salt_internal(algo_str, 0);
+        strada_decref(result);
+        result = strada_new_str(salt);
+        free(algo_str);
     }
-    my int $fn = sys::dl_sym($lib, "strada_crypt_gen_salt");
-    return sys::dl_call_str_sv($fn, [$algorithm]);
+    return $result;
 }
 
 # Generate a salt with custom rounds (for sha256, sha512, bcrypt)
-# Rounds controls the computational cost (higher = more secure but slower)
-# - sha256/sha512: 1000-999999999 (default: 5000)
-# - bcrypt: 4-31 (default: 12)
-#
-# Example:
-#   my str $salt = crypt::gen_salt_rounds("sha512", 10000);
 func gen_salt_rounds(str $algorithm, int $rounds) str {
-    my int $lib = crypt::_get_lib();
-    if ($lib == 0) {
-        return "";
+    my str $result = "";
+    __C__ {
+        char *algo_str = strada_to_str(algorithm);
+        int rounds_val = (int)strada_to_int(rounds);
+        const char *salt = crypt_gen_salt_internal(algo_str, rounds_val);
+        strada_decref(result);
+        result = strada_new_str(salt);
+        free(algo_str);
     }
-    my int $fn = sys::dl_sym($lib, "strada_crypt_gen_salt_rounds");
-    return sys::dl_call_str_sv($fn, [$algorithm, $rounds]);
+    return $result;
 }
 
 # Verify a password against a hash
 # Returns 1 if password matches, 0 otherwise
-#
-# Example:
-#   if (crypt::verify("password", $stored_hash)) { ... }
 func verify(str $password, str $hashed) int {
-    my int $lib = crypt::_get_lib();
-    if ($lib == 0) {
-        return 0;
+    my int $result = 0;
+    __C__ {
+        crypt_last_error[0] = '\0';
+
+        char *pw_str = strada_to_str(password);
+        char *hash_str = strada_to_str(hashed);
+
+        if (!pw_str || !hash_str || strlen(hash_str) == 0) {
+            strada_decref(result);
+            result = strada_new_int(0);
+        } else {
+            struct crypt_data data;
+            memset(&data, 0, sizeof(data));
+
+            char *crypt_result = crypt_r(pw_str, hash_str, &data);
+
+            if (!crypt_result) {
+                strada_decref(result);
+                result = strada_new_int(0);
+            } else {
+                /* Constant-time comparison to prevent timing attacks */
+                size_t hash_len = strlen(hash_str);
+                size_t result_len = strlen(crypt_result);
+
+                if (hash_len != result_len) {
+                    strada_decref(result);
+                    result = strada_new_int(0);
+                } else {
+                    int diff = 0;
+                    for (size_t i = 0; i < hash_len; i++) {
+                        diff |= hash_str[i] ^ crypt_result[i];
+                    }
+                    strada_decref(result);
+                    result = strada_new_int((diff == 0) ? 1 : 0);
+                }
+            }
+        }
+        free(pw_str);
+        free(hash_str);
     }
-    my int $fn = sys::dl_sym($lib, "strada_crypt_verify");
-    return sys::dl_call_int_sv($fn, [$password, $hashed]);
+    return $result;
 }
 
 # Hash a password using the recommended algorithm (SHA-512)
 # Convenience function that generates a salt automatically
-#
-# Example:
-#   my str $hash = crypt::hash_password("mypassword");
 func hash_password(str $password) str {
     my str $salt = crypt::gen_salt("sha512");
-    return crypt::crypt_hash($password, $salt);
+    return crypt::hashpw($password, $salt);
 }
 
 # Get the algorithm used in a hash string
 # Returns: "des", "md5", "sha256", "sha512", "bcrypt", or "unknown"
-#
-# Example:
-#   my str $algo = crypt::get_algorithm($hash);
 func get_algorithm(str $hashed) str {
-    my int $lib = crypt::_get_lib();
-    if ($lib == 0) {
-        return "unknown";
+    my str $result = "";
+    __C__ {
+        char *hash_str = strada_to_str(hashed);
+
+        strada_decref(result);
+        if (!hash_str || strlen(hash_str) < 3) {
+            result = strada_new_str("unknown");
+        } else if (hash_str[0] != '$') {
+            result = strada_new_str("des");
+        } else if (strncmp(hash_str, "$1$", 3) == 0) {
+            result = strada_new_str("md5");
+        } else if (strncmp(hash_str, "$5$", 3) == 0) {
+            result = strada_new_str("sha256");
+        } else if (strncmp(hash_str, "$6$", 3) == 0) {
+            result = strada_new_str("sha512");
+        } else if (strncmp(hash_str, "$2a$", 4) == 0 ||
+                   strncmp(hash_str, "$2b$", 4) == 0 ||
+                   strncmp(hash_str, "$2y$", 4) == 0) {
+            result = strada_new_str("bcrypt");
+        } else if (strncmp(hash_str, "$y$", 3) == 0) {
+            result = strada_new_str("yescrypt");
+        } else {
+            result = strada_new_str("unknown");
+        }
+        free(hash_str);
     }
-    my int $fn = sys::dl_sym($lib, "strada_crypt_get_algorithm");
-    return sys::dl_call_str_sv($fn, [$hashed]);
+    return $result;
 }
 
 # Check if an algorithm is supported on this system
 # Returns 1 if supported, 0 otherwise
-#
-# Example:
-#   if (crypt::is_supported("bcrypt")) { ... }
 func is_supported(str $algorithm) int {
-    my int $lib = crypt::_get_lib();
-    if ($lib == 0) {
-        return 0;
+    my int $result = 0;
+    __C__ {
+        char *algo_str = strada_to_str(algorithm);
+
+        strada_decref(result);
+        if (!algo_str) {
+            result = strada_new_int(0);
+        } else {
+            const char *salt = crypt_gen_salt_internal(algo_str, 0);
+
+            if (strlen(salt) == 0) {
+                result = strada_new_int(0);
+            } else {
+                struct crypt_data data;
+                memset(&data, 0, sizeof(data));
+
+                char *crypt_result = crypt_r("test", salt, &data);
+
+                if (!crypt_result || crypt_result[0] == '*') {
+                    result = strada_new_int(0);
+                } else {
+                    result = strada_new_int(1);
+                }
+            }
+        }
+        free(algo_str);
     }
-    my int $fn = sys::dl_sym($lib, "strada_crypt_is_supported");
-    return sys::dl_call_int_sv($fn, [$algorithm]);
+    return $result;
 }
 
 # Get last error message
 func error() str {
-    my int $lib = crypt::_get_lib();
-    if ($lib == 0) {
-        return "Failed to load crypt library";
+    my str $result = "";
+    __C__ {
+        result = strada_new_str(crypt_last_error);
     }
-    my int $fn = sys::dl_sym($lib, "strada_crypt_error");
-    return sys::dl_call_str($fn, []);
+    return $result;
 }

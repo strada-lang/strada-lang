@@ -1,0 +1,817 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# soinfo - Inspect Strada shared libraries and show function signatures
+#
+# Usage: ./soinfo mylib.so [mylib.strada]
+#
+# Shows all exported functions from a .so file and generates example
+# Strada code for calling them. If the library is a Strada shared library,
+# it automatically extracts metadata from the embedded __strada_export_info
+# function for detailed type information.
+
+# Trim trailing newline
+func chomp(str $s) str {
+    $s =~ s/\n$//;
+    $s =~ s/\r$//;
+    return $s;
+}
+
+func usage() void {
+    say("Usage: soinfo [options] <library>");
+    say("");
+    say("Inspects a Strada library and shows how to call its functions.");
+    say("Supports shared libraries (.so), object files (.o), and archives (.a).");
+    say("");
+    say("For Strada libraries (compiled with --shared), automatically detects");
+    say("and extracts embedded type metadata for accurate function signatures.");
+    say("");
+    say("Options:");
+    say("  --examples      Show usage examples for calling the functions");
+    say("  --help, -h      Show this help message");
+    say("");
+    say("Examples:");
+    say("  soinfo mylib.so              # Shared library with full type info");
+    say("  soinfo mylib.o               # Object file");
+    say("  soinfo mylib.a               # Static archive");
+    say("  soinfo --examples mylib.so   # Show signatures and usage examples");
+}
+
+# Check if a symbol is a user-defined function (not runtime internal)
+func is_user_function(str $name) int {
+    # Skip runtime functions
+    if ($name =~ /^strada_/) {
+        return 0;
+    }
+    # Skip standard C library functions
+    if ($name =~ /^_/) {
+        return 0;
+    }
+    # Skip common libc symbols
+    if ($name eq "main") {
+        return 0;
+    }
+    if ($name =~ /@/) {
+        return 0;  # Versioned symbols like malloc@GLIBC_2.2.5
+    }
+    # Skip export info function (internal)
+    if ($name eq "__strada_export_info") {
+        return 0;
+    }
+    return 1;
+}
+
+# Extract variable name from a parameter declaration (e.g., "int $foo" -> "foo")
+func extract_var_name(str $param) str {
+    # Split on space, find the word with $ sigil
+    my array @words = split(" ", $param);
+    my int $i = 0;
+    while ($i < scalar(@words)) {
+        my str $word = $words[$i];
+        # Check if word starts with $
+        if (length($word) > 1) {
+            my str $first = substr($word, 0, 1);
+            if (ord($first) == 36) {  # 36 = '$'
+                return substr($word, 1, length($word) - 1);
+            }
+        }
+        $i = $i + 1;
+    }
+    return "";
+}
+
+# Parse a function definition from Strada source
+# Returns: "name|ret_type|param1_type param1_name,param2_type param2_name,..."
+func parse_func_def(str $line) str {
+    # Match: func name(params) return_type {
+    if ($line =~ /^\s*func\s+(\w+)\s*\(([^)]*)\)\s*(\w+)/) {
+        my array @caps = captures();
+        my str $name = $caps[1];
+        my str $params = $caps[2];
+        my str $ret = $caps[3];
+        return $name . "|" . $ret . "|" . $params;
+    }
+    return "";
+}
+
+# Parse source file and build a hash of function signatures
+func parse_source(str $filename) hash {
+    my hash %funcs = ();
+
+    my scalar $fh = sys::open($filename, "r");
+    if (length($fh) == 0) {
+        return %funcs;
+    }
+
+    my str $line = "";
+    while (!sys::eof($fh)) {
+        $line = sys::readline($fh);
+        $line = chomp($line);
+
+        my str $parsed = parse_func_def($line);
+        if (length($parsed) > 0) {
+            my array @parts = split("\\|", $parsed);
+            my str $name = $parts[0];
+            my str $ret = $parts[1];
+            my str $params = "";
+            if (scalar(@parts) > 2) {
+                $params = $parts[2];
+            }
+
+            my hash %info = ();
+            $info{"return"} = $ret;
+            $info{"params"} = $params;
+            $funcs{$name} = \%info;
+        }
+    }
+
+    sys::close($fh);
+    return %funcs;
+}
+
+# Parse the __strada_export_info metadata string
+# Format: "func:name:return_type:param_count:param_types:variadic_idx\n" for each function
+# Returns hash of function info
+func parse_export_info(str $info) hash {
+    my hash %funcs = ();
+
+    my array @lines = split("\n", $info);
+    my int $i = 0;
+    while ($i < scalar(@lines)) {
+        my str $line = $lines[$i];
+        if (length($line) > 0 && $line =~ /^func:/) {
+            # func:name:return_type:param_count:param_types:variadic_idx
+            my array @parts = split(":", $line);
+            if (scalar(@parts) >= 4) {
+                # Force string copies with "" . value to prevent use-after-free
+                # when @parts goes out of scope
+                my str $name = "" . $parts[1];
+                my str $ret = "" . $parts[2];
+                my int $param_count = sys::atoi($parts[3]);
+                my str $param_types = "";
+                if (scalar(@parts) > 4) {
+                    $param_types = "" . $parts[4];
+                }
+                my int $variadic_idx = -1;
+                if (scalar(@parts) > 5) {
+                    $variadic_idx = sys::atoi($parts[5]);
+                }
+
+                my hash %info = ();
+                $info{"return"} = $ret;
+                $info{"param_count"} = $param_count;
+                $info{"param_types"} = $param_types;
+                $info{"variadic_idx"} = $variadic_idx;
+                $funcs{$name} = \%info;
+            }
+        }
+        $i = $i + 1;
+    }
+
+    return %funcs;
+}
+
+# Format parameter types list for display
+func format_param_types(str $types, int $count) str {
+    if ($count == 0) {
+        return "";
+    }
+
+    my str $result = "";
+    my array @type_list = split(",", $types);
+    my int $i = 0;
+    while ($i < scalar(@type_list) && $i < $count) {
+        my str $t = "" . $type_list[$i];  # Force string copy
+        if ($i > 0) {
+            $result = $result . ", ";
+        }
+        # Generate parameter names like $a, $b, $c, etc.
+        my str $var = chr(97 + $i);  # 97 = 'a'
+        if ($i >= 26) {
+            $var = "arg" . $i;
+        }
+        $result = $result . $t . " $" . $var;
+        $i = $i + 1;
+    }
+    return $result;
+}
+
+# Format parameter list for display (legacy source parsing)
+func format_params(str $params) str {
+    if (length($params) == 0) {
+        return "";
+    }
+
+    my str $result = "";
+    my array @param_list = split(",", $params);
+    my int $i = 0;
+    while ($i < scalar(@param_list)) {
+        my str $p = $param_list[$i];
+        $p =~ s/^\s+//;  # trim leading
+
+        if ($i > 0) {
+            $result = $result . ", ";
+        }
+        $result = $result . $p;
+        $i = $i + 1;
+    }
+    return $result;
+}
+
+# Generate example call code
+func generate_example(str $name, hash %info, str $lib_var) str {
+    my str $ret = $info{"return"};
+    my str $params = $info{"params"};
+    my str $dollar = chr(36);
+
+    my str $code = "";
+
+    # Get function pointer
+    $code = $code . "my int " . $dollar . $name . "_fn = sys::dl_sym(" . $lib_var . ", \"" . $name . "\");\n";
+
+    # Build args array
+    my str $args = "[]";
+    if (length($params) > 0) {
+        my array @param_list = split(",", $params);
+        my str $arg_items = "";
+        my int $i = 0;
+        while ($i < scalar(@param_list)) {
+            my str $p = $param_list[$i];
+            $p =~ s/^\s+//;
+
+            # Extract variable name from "type $name"
+            my str $var_name = extract_var_name($p);
+            if (length($var_name) > 0) {
+                if ($i > 0) {
+                    $arg_items = $arg_items . ", ";
+                }
+                $arg_items = $arg_items . $dollar . $var_name;
+            }
+            $i = $i + 1;
+        }
+        if (length($arg_items) > 0) {
+            $args = "[" . $arg_items . "]";
+        }
+    }
+
+    # Generate call
+    if ($ret eq "void") {
+        $code = $code . "sys::dl_call_sv(" . $dollar . $name . "_fn, " . $args . ");\n";
+    } else {
+        $code = $code . "my " . $ret . " " . $dollar . "result = sys::dl_call_sv(" . $dollar . $name . "_fn, " . $args . ");\n";
+    }
+
+    return $code;
+}
+
+# Generate example call code from export info
+func generate_example_from_export(str $name, hash %info, str $lib_var) str {
+    my str $ret = $info{"return"};
+    my int $param_count = $info{"param_count"};
+    my str $dollar = chr(36);
+
+    my str $code = "";
+
+    # Get function pointer
+    $code = $code . "my int " . $dollar . $name . "_fn = sys::dl_sym(" . $lib_var . ", \"" . $name . "\");\n";
+
+    # Build args array
+    my str $args = "[]";
+    if ($param_count > 0) {
+        my str $arg_items = "";
+        my int $i = 0;
+        while ($i < $param_count) {
+            if ($i > 0) {
+                $arg_items = $arg_items . ", ";
+            }
+            my str $var = chr(97 + $i);  # 97 = 'a'
+            if ($i >= 26) {
+                $var = "arg" . $i;
+            }
+            $arg_items = $arg_items . $dollar . $var;
+            $i = $i + 1;
+        }
+        $args = "[" . $arg_items . "]";
+    }
+
+    # Generate call
+    if ($ret eq "void") {
+        $code = $code . "sys::dl_call_sv(" . $dollar . $name . "_fn, " . $args . ");\n";
+    } else {
+        $code = $code . "my " . $ret . " " . $dollar . "result = sys::dl_call_sv(" . $dollar . $name . "_fn, " . $args . ");\n";
+    }
+
+    return $code;
+}
+
+# Check if library is a Strada shared library and get export info
+# Returns: export info string if Strada library, empty string otherwise
+func get_strada_export_info(str $so_file) str {
+    # Load the library
+    my int $handle = sys::dl_open($so_file);
+    if ($handle == 0) {
+        return "";
+    }
+
+    # Look for __strada_export_info symbol
+    my int $fn_ptr = sys::dl_sym($handle, "__strada_export_info");
+    if ($fn_ptr == 0) {
+        sys::dl_close($handle);
+        return "";
+    }
+
+    # Call the export info function
+    my str $info = sys::dl_call_export_info($fn_ptr);
+
+    sys::dl_close($handle);
+    return $info;
+}
+
+# Extract export info from .o or .a files using strings command
+# The export info is embedded in .rodata as "func:name:ret:count:types:variadic"
+func get_export_info_from_binary(str $file) str {
+    my str $cmd = "strings " . $file . " 2>/dev/null";
+    my str $output = sys::qx($cmd);
+
+    # Collect all lines that match the export info format
+    my str $result = "";
+    my array @lines = split("\n", $output);
+    my int $i = 0;
+    while ($i < scalar(@lines)) {
+        my str $line = "" . $lines[$i];  # Force string copy
+        # Match export info format: starts with "func:" and has at least 4 colons
+        if (length($line) > 5 && substr($line, 0, 5) eq "func:") {
+            # Count colons to verify format (should have at least 4)
+            my int $colons = 0;
+            my int $j = 0;
+            while ($j < length($line)) {
+                if (substr($line, $j, 1) eq ":") {
+                    $colons = $colons + 1;
+                }
+                $j = $j + 1;
+            }
+            if ($colons >= 4) {
+                $result = $result . $line . "\n";
+            }
+        }
+        $i = $i + 1;
+    }
+
+    return $result;
+}
+
+# Get the version string from a Strada shared library
+# Returns: version string if available, empty string otherwise
+func get_strada_version(str $so_file) str {
+    my int $handle = sys::dl_open($so_file);
+    if ($handle == 0) {
+        return "";
+    }
+
+    # Look for __strada_version symbol
+    my int $fn_ptr = sys::dl_sym($handle, "__strada_version");
+    if ($fn_ptr == 0) {
+        sys::dl_close($handle);
+        return "";
+    }
+
+    # Call the version function
+    my str $ver = sys::dl_call_version($fn_ptr);
+
+    sys::dl_close($handle);
+    return $ver;
+}
+
+# Extract library name from path (e.g., "lib/JSON.so" -> "JSON")
+func extract_lib_name(str $path) str {
+    my str $name = $path;
+
+    # Remove directory part
+    if ($name =~ /\/([^\/]+)$/) {
+        my array @caps = captures();
+        $name = "" . $caps[1];  # Force string copy
+    }
+
+    # Remove extension (.so, .o, .a)
+    $name =~ s/\.(so|o|a)$//;
+
+    return $name;
+}
+
+# Extract directory from path (e.g., "lib/JSON.so" -> "lib")
+func extract_lib_dir(str $path) str {
+    if ($path =~ /^(.+)\/[^\/]+$/) {
+        my array @caps = captures();
+        return $caps[1];
+    }
+    return "";
+}
+
+# Generate an import_lib style function call using :: syntax
+func gen_import_lib_call(str $name, str $ret, int $param_count, str $param_types, str $lib_name) str {
+    my str $dollar = chr(36);
+    my str $call = "";
+
+    # Build result assignment if not void
+    if ($ret ne "void") {
+        $call = "my " . $ret . " " . $dollar . "result = ";
+    }
+
+    # Convert function name from LibName_func to LibName::func
+    my str $display_name = $name;
+    if (length($lib_name) > 0) {
+        my str $prefix = $lib_name . "_";
+        my int $prefix_len = length($prefix);
+        if (length($name) > $prefix_len && substr($name, 0, $prefix_len) eq $prefix) {
+            $display_name = $lib_name . "::" . substr($name, $prefix_len, length($name) - $prefix_len);
+        }
+    }
+
+    # Function name and opening paren
+    $call = $call . $display_name . "(";
+
+    # Generate argument placeholders
+    if ($param_count > 0) {
+        my int $i = 0;
+        while ($i < $param_count) {
+            if ($i > 0) {
+                $call = $call . ", ";
+            }
+            my str $var = chr(97 + $i);  # 'a', 'b', 'c', ...
+            if ($i >= 26) {
+                $var = "arg" . $i;
+            }
+            $call = $call . $dollar . $var;
+            $i = $i + 1;
+        }
+    }
+
+    $call = $call . ");";
+
+    # Add type hint comment if we have param types
+    if (length($param_types) > 0) {
+        $call = $call . "  # " . $param_types;
+    }
+
+    return $call;
+}
+
+func main(int $argc, array @argv) int {
+    if ($argc < 2) {
+        usage();
+        return 1;
+    }
+
+    # Parse arguments
+    my str $so_file = "";
+    my str $source_file = "";
+    my int $show_examples = 0;
+    my int $i = 1;
+    while ($i < $argc) {
+        my str $arg = $argv[$i];
+        if ($arg eq "--examples") {
+            $show_examples = 1;
+        } elsif ($arg eq "--help" || $arg eq "-h") {
+            usage();
+            return 0;
+        } elsif ($arg =~ /^-/) {
+            say("Error: Unknown option: " . $arg);
+            usage();
+            return 1;
+        } else {
+            # Positional argument - should be the .so file
+            if (length($so_file) == 0) {
+                $so_file = $arg;
+            }
+        }
+        $i = $i + 1;
+    }
+
+    if (length($so_file) == 0) {
+        say("Error: No library file specified");
+        usage();
+        return 1;
+    }
+
+    # Check if file exists
+    if (!sys::is_file($so_file)) {
+        say("Error: File not found: " . $so_file);
+        return 1;
+    }
+
+    # Determine file type from extension
+    my int $is_shared = 0;
+    my int $is_object = 0;
+    my int $is_archive = 0;
+    if ($so_file =~ /\.so$/) {
+        $is_shared = 1;
+    } elsif ($so_file =~ /\.o$/) {
+        $is_object = 1;
+    } elsif ($so_file =~ /\.a$/) {
+        $is_archive = 1;
+    } else {
+        say("Error: Unknown file type. Expected .so, .o, or .a");
+        return 1;
+    }
+
+    # First, check if this is a Strada library with embedded export info
+    my str $export_info = "";
+    my int $is_strada_lib = 0;
+    my hash %export_funcs = ();
+    my str $lib_version = "";
+
+    if ($is_shared) {
+        # For .so files, use dlopen to call __strada_export_info
+        $export_info = get_strada_export_info($so_file);
+        if (length($export_info) > 0) {
+            $is_strada_lib = 1;
+            %export_funcs = parse_export_info($export_info);
+            $lib_version = get_strada_version($so_file);
+        }
+    } else {
+        # For .o and .a files, extract export info from binary using strings
+        $export_info = get_export_info_from_binary($so_file);
+        if (length($export_info) > 0) {
+            $is_strada_lib = 1;
+            %export_funcs = parse_export_info($export_info);
+        }
+    }
+
+    # If not a Strada lib and source file provided, try to parse it
+    my hash %source_funcs = ();
+    if ($is_strada_lib == 0) {
+        # Try to auto-detect source file if not provided
+        if (length($source_file) == 0) {
+            my str $base = $so_file;
+            $base =~ s/\.(so|o|a)$/.strada/;
+            if (sys::is_file($base)) {
+                $source_file = $base;
+            }
+        }
+
+        if (length($source_file) > 0 && sys::is_file($source_file)) {
+            %source_funcs = parse_source($source_file);
+        }
+    }
+
+    # Run nm to get exported symbols
+    # Use -D for shared libs (dynamic symbols), plain nm for .o/.a
+    my str $nm_flags = "";
+    if ($is_shared) {
+        $nm_flags = "-D ";
+    }
+    my str $cmd = "nm " . $nm_flags . "--defined-only " . $so_file . " 2>/dev/null";
+    my str $nm_output = sys::qx($cmd);
+
+    # Collect function names from nm output
+    my array @nm_functions = ();
+    my array @lines = split("\n", $nm_output);
+    my int $li = 0;
+    while ($li < scalar(@lines)) {
+        my str $line = "" . $lines[$li];  # Force string copy
+
+        # nm output format: "address type name" or "name:" for archives
+        # We want T (text/code) symbols
+        if ($line =~ /\s+T\s+(\w+)/) {
+            my array @caps = captures();
+            my str $name = "" . $caps[1];  # Force string copy
+            if (is_user_function($name)) {
+                push(@nm_functions, $name);
+            }
+        }
+        $li = $li + 1;
+    }
+
+    # For Strada libraries, use the export info functions instead of nm
+    my array @functions = ();
+    if ($is_strada_lib) {
+        my array @keys = keys(%export_funcs);
+        my int $i = 0;
+        while ($i < scalar(@keys)) {
+            push(@functions, $keys[$i]);
+            $i = $i + 1;
+        }
+    } else {
+        @functions = @nm_functions;
+    }
+
+    if (scalar(@functions) == 0) {
+        say("No user-defined functions found in " . $so_file);
+        return 0;
+    }
+
+    # Print header
+    say("# ============================================================");
+    if ($is_shared) {
+        if ($is_strada_lib) {
+            say("# Strada Shared Library: " . $so_file);
+            say("# Type: STRADA (compiled with ./strada --shared)");
+            if (length($lib_version) > 0) {
+                say("# Version: " . $lib_version);
+            }
+        } else {
+            say("# Shared Library: " . $so_file);
+            say("# Type: C/Other (no Strada metadata found)");
+            if (length($source_file) > 0) {
+                say("# Source: " . $source_file);
+            }
+        }
+    } elsif ($is_object) {
+        if ($is_strada_lib) {
+            say("# Strada Object File: " . $so_file);
+            say("# Type: STRADA Object (.o)");
+        } else {
+            say("# Object File: " . $so_file);
+            say("# Type: Object (.o)");
+            if (length($source_file) > 0) {
+                say("# Source: " . $source_file);
+            }
+        }
+    } elsif ($is_archive) {
+        if ($is_strada_lib) {
+            say("# Strada Static Archive: " . $so_file);
+            say("# Type: STRADA Archive (.a)");
+        } else {
+            say("# Static Archive: " . $so_file);
+            say("# Type: Archive (.a)");
+            if (length($source_file) > 0) {
+                say("# Source: " . $source_file);
+            }
+        }
+    }
+    say("# Functions: " . scalar(@functions));
+    say("# ============================================================");
+    say("");
+
+    # Print detailed function information for Strada libraries
+    if ($is_strada_lib) {
+        my str $lib_name = extract_lib_name($so_file);
+        say("# Exported Functions (with full type information):");
+        say("# -------------------------------------------------");
+        my int $i = 0;
+        while ($i < scalar(@functions)) {
+            my str $name = $functions[$i];
+
+            if (exists(%export_funcs, $name)) {
+                my scalar $info = $export_funcs{$name};
+                my str $ret = $info->{"return"};
+                my int $param_count = $info->{"param_count"};
+                my str $param_types = $info->{"param_types"};
+
+                my str $params_str = format_param_types($param_types, $param_count);
+                say("#");
+                say("#   func " . $name . "(" . $params_str . ") " . $ret);
+                say("#     Returns: " . $ret);
+                say("#     Parameters: " . $param_count);
+                if ($param_count > 0) {
+                    my array @types = split(",", $param_types);
+                    my int $j = 0;
+                    while ($j < scalar(@types) && $j < $param_count) {
+                        my str $var = chr(97 + $j);
+                        if ($j >= 26) {
+                            $var = "arg" . $j;
+                        }
+                        my str $type_j = "" . $types[$j];  # Force string copy
+                        say("#       $" . $var . ": " . $type_j);
+                        $j = $j + 1;
+                    }
+                }
+                # Show how to call the function
+                my str $call_example = gen_import_lib_call($name, $ret, $param_count, $param_types, $lib_name);
+                say("#     Call: " . $call_example);
+            }
+            $i = $i + 1;
+        }
+        say("");
+    } else {
+        # Legacy output for non-Strada libraries
+        say("# Exported Functions:");
+        say("# -------------------");
+        my int $i = 0;
+        while ($i < scalar(@functions)) {
+            my str $name = $functions[$i];
+            my str $sig = "func " . $name . "(...)";
+
+            if (exists(%source_funcs, $name)) {
+                my scalar $info = $source_funcs{$name};
+                my str $ret = $info->{"return"};
+                my str $params = $info->{"params"};
+                $sig = "func " . $name . "(" . format_params($params) . ") " . $ret;
+            }
+
+            say("#   " . $sig);
+            $i = $i + 1;
+        }
+        say("");
+    }
+
+    # Print usage example (only with --examples flag)
+    if ($show_examples) {
+        say("");
+        say("# ============================================================");
+        say("# Usage Example");
+        say("# ============================================================");
+        say("");
+
+        if ($is_strada_lib) {
+            # For Strada libraries, show the clean import_lib approach
+            my str $lib_name = extract_lib_name($so_file);
+            my str $lib_dir = extract_lib_dir($so_file);
+
+            say("# Method 1: Using import_lib (Recommended)");
+            say("# ----------------------------------------");
+            say("# Requires: " . $lib_name . ".strada and " . $lib_name . ".so in the lib path");
+            say("# Note: You can call functions using namespace syntax: " . $lib_name . "::func()");
+            say("#       This is equivalent to " . $lib_name . "_func() but cleaner");
+            say("");
+            if (length($lib_dir) > 0) {
+                say("use lib \"" . $lib_dir . "\";");
+            }
+            say("import_lib \"" . $lib_name . "\";");
+            say("");
+            say("func main() int {");
+
+            # Show a few example function calls
+            my int $shown = 0;
+            my int $i = 0;
+            while ($i < scalar(@functions) && $shown < 3) {
+                my str $name = $functions[$i];
+                if (exists(%export_funcs, $name)) {
+                    my scalar $info = $export_funcs{$name};
+                    my str $ret = $info->{"return"};
+                    my int $param_count = $info->{"param_count"};
+                    my str $param_types = $info->{"param_types"};
+
+                    my str $call = gen_import_lib_call($name, $ret, $param_count, $param_types, $lib_name);
+                    say("    " . $call);
+                    $shown = $shown + 1;
+                }
+                $i = $i + 1;
+            }
+            if (scalar(@functions) > 3) {
+                say("    # ... and " . (scalar(@functions) - 3) . " more functions");
+            }
+
+            say("    return 0;");
+            say("}");
+            say("");
+
+            say("# Method 2: Manual dynamic loading");
+            say("# ---------------------------------");
+        } else {
+            say("# Dynamic loading (C library):");
+        }
+
+        say("my int " . chr(36) . "lib = sys::dl_open(\"./" . $so_file . "\");");
+        say("if (" . chr(36) . "lib == 0) {");
+        say("    say(\"Failed to load: \" . sys::dl_error());");
+        say("    return 1;");
+        say("}");
+        say("");
+
+        # Print individual function examples
+        my int $i = 0;
+        while ($i < scalar(@functions)) {
+            my str $name = $functions[$i];
+
+            say("# --- " . $name . " ---");
+
+            if ($is_strada_lib && exists(%export_funcs, $name)) {
+                my scalar $info = $export_funcs{$name};
+                my str $example = generate_example_from_export($name, %{$info}, chr(36) . "lib");
+                print($example);
+            } elsif (exists(%source_funcs, $name)) {
+                my scalar $info = $source_funcs{$name};
+                my str $example = generate_example(%{$info}, $name, chr(36) . "lib");
+                print($example);
+            } else {
+                # Generic example without type info
+                say("my int " . chr(36) . $name . "_fn = sys::dl_sym(" . chr(36) . "lib, \"" . $name . "\");");
+                say("my scalar " . chr(36) . "result = sys::dl_call_sv(" . chr(36) . $name . "_fn, [arg1, arg2, ...]);");
+            }
+            say("");
+
+            $i = $i + 1;
+        }
+
+        # Cleanup
+        say("# Cleanup:");
+        say("sys::dl_close(" . chr(36) . "lib);");
+    }
+
+    return 0;
+}

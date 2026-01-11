@@ -1,0 +1,122 @@
+#!/usr/bin/env strada
+# Test time/date functions for memory leaks
+# Run: valgrind --leak-check=full ./test_time
+
+func main() int {
+    say("Testing time/date functions for memory leaks...");
+    my int $iterations = 100;
+
+    # Test core::time
+    say("  core::time...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my int $ts = core::time();
+        if ($ts < 1000000000) {
+            say("    FAIL: time too small");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test core::localtime
+    say("  core::localtime...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $ts = core::time();
+        my scalar $tm = core::localtime($ts);
+        my int $hour = $tm->{"hour"};
+        if ($hour < 0 || $hour > 23) {
+            say("    FAIL: hour = " . $hour);
+            return 1;
+        }
+        my int $year = $tm->{"year"};
+        if ($year < 100) {
+            say("    FAIL: year = " . $year);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test core::gmtime
+    say("  core::gmtime...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $ts = core::time();
+        my scalar $tm = core::gmtime($ts);
+        my int $min = $tm->{"min"};
+        if ($min < 0 || $min > 59) {
+            say("    FAIL: min = " . $min);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test core::strftime
+    say("  core::strftime...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $ts = core::time();
+        my scalar $tm = core::localtime($ts);
+        my str $formatted = core::strftime("%Y-%m-%d", $tm);
+        if (length($formatted) < 10) {
+            say("    FAIL: strftime length = " . length($formatted));
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test core::ctime
+    say("  core::ctime...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $ts = core::time();
+        my str $ct = core::ctime($ts);
+        if (length($ct) < 20) {
+            say("    FAIL: ctime length = " . length($ct));
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test core::gettimeofday
+    say("  core::gettimeofday...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $tv = core::gettimeofday();
+        my int $sec = $tv->{"sec"};
+        if ($sec < 1000000000) {
+            say("    FAIL: tv_sec too small");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test strftime with different format strings
+    say("  strftime various formats...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $ts = core::time();
+        my scalar $tm = core::localtime($ts);
+        my str $f1 = core::strftime("%H:%M:%S", $tm);
+        my str $f2 = core::strftime("%A, %B %d", $tm);
+        if (length($f1) < 8) {
+            say("    FAIL: time format");
+            return 1;
+        }
+        if (length($f2) < 5) {
+            say("    FAIL: date format");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All time/date tests passed!");
+    return 0;
+}

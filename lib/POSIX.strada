@@ -1,10 +1,208 @@
-# POSIX - Perl-style POSIX interface for Strada
-#
-# Usage:
-#   use lib "lib";
-#   use POSIX;
-#
-# Provides POSIX constants and functions similar to Perl's POSIX module.
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+=head1 NAME
+
+POSIX - Perl-style POSIX interface for Strada
+
+=head1 SYNOPSIS
+
+    use lib "lib";
+    use POSIX;
+
+    # File tests
+    if (POSIX::is_file("/etc/passwd")) {
+        say("File exists");
+    }
+
+    # Wait status macros
+    my int $status = sys::waitpid($pid, 0);
+    if (POSIX::WIFEXITED($status)) {
+        say("Exit code: " . POSIX::WEXITSTATUS($status));
+    }
+
+    # Constants
+    my int $sig = POSIX::SIGTERM();
+
+=head1 DESCRIPTION
+
+POSIX provides POSIX constants and utility functions similar to Perl's
+POSIX module. It includes signal constants, file mode constants, error
+constants, and helpful utility functions.
+
+=head1 SIGNAL CONSTANTS
+
+    POSIX::SIGHUP()    # 1 - Hangup
+    POSIX::SIGINT()    # 2 - Interrupt (Ctrl-C)
+    POSIX::SIGQUIT()   # 3 - Quit
+    POSIX::SIGKILL()   # 9 - Kill (cannot be caught)
+    POSIX::SIGUSR1()   # 10 - User signal 1
+    POSIX::SIGUSR2()   # 12 - User signal 2
+    POSIX::SIGPIPE()   # 13 - Broken pipe
+    POSIX::SIGALRM()   # 14 - Alarm
+    POSIX::SIGTERM()   # 15 - Termination
+    POSIX::SIGCHLD()   # 17 - Child status changed
+
+=head1 FILE ACCESS CONSTANTS
+
+    POSIX::F_OK()  # 0 - File exists
+    POSIX::R_OK()  # 4 - Readable
+    POSIX::W_OK()  # 2 - Writable
+    POSIX::X_OK()  # 1 - Executable
+
+=head1 FILE MODE CONSTANTS
+
+    # Owner permissions
+    POSIX::S_IRWXU()  # 0700 - rwx for owner
+    POSIX::S_IRUSR()  # 0400 - read for owner
+    POSIX::S_IWUSR()  # 0200 - write for owner
+    POSIX::S_IXUSR()  # 0100 - execute for owner
+
+    # Group permissions
+    POSIX::S_IRWXG()  # 0070 - rwx for group
+    POSIX::S_IRGRP()  # 0040 - read for group
+
+    # Other permissions
+    POSIX::S_IRWXO()  # 0007 - rwx for others
+    POSIX::S_IROTH()  # 0004 - read for others
+
+=head1 FILE TYPE FUNCTIONS
+
+=head2 S_ISREG($mode)
+
+Test if mode indicates a regular file.
+
+=head2 S_ISDIR($mode)
+
+Test if mode indicates a directory.
+
+=head2 S_ISLNK($mode)
+
+Test if mode indicates a symbolic link.
+
+=head2 S_ISCHR($mode), S_ISBLK($mode), S_ISFIFO($mode), S_ISSOCK($mode)
+
+Test for character device, block device, FIFO, and socket.
+
+=head1 WAIT STATUS MACROS
+
+=head2 WIFEXITED($status)
+
+Returns true if child exited normally.
+
+=head2 WEXITSTATUS($status)
+
+Returns exit code if WIFEXITED is true.
+
+=head2 WIFSIGNALED($status)
+
+Returns true if child was killed by a signal.
+
+=head2 WTERMSIG($status)
+
+Returns signal number if WIFSIGNALED is true.
+
+=head2 WIFSTOPPED($status)
+
+Returns true if child is stopped.
+
+=head2 WSTOPSIG($status)
+
+Returns stop signal if WIFSTOPPED is true.
+
+=head1 UTILITY FUNCTIONS
+
+=head2 file_exists($path)
+
+Check if file exists.
+
+    if (POSIX::file_exists("/tmp/myfile")) { ... }
+
+=head2 is_readable($path), is_writable($path), is_executable($path)
+
+Check file permissions.
+
+=head2 is_directory($path), is_file($path), is_symlink($path)
+
+Check file type.
+
+=head2 file_size($path)
+
+Get file size in bytes. Returns -1 if file doesn't exist.
+
+=head2 file_mtime($path)
+
+Get file modification time (Unix timestamp). Returns -1 if file doesn't exist.
+
+=head2 getenv_default($name, $default)
+
+Get environment variable with default value.
+
+    my str $home = POSIX::getenv_default("HOME", "/tmp");
+
+=head2 perror($prefix)
+
+Print error message to stderr (like C perror).
+
+    POSIX::perror("open failed");
+
+=head1 ERROR CONSTANTS
+
+    POSIX::EPERM()    # 1 - Operation not permitted
+    POSIX::ENOENT()   # 2 - No such file or directory
+    POSIX::EINTR()    # 4 - Interrupted system call
+    POSIX::EIO()      # 5 - I/O error
+    POSIX::EACCES()   # 13 - Permission denied
+    POSIX::EEXIST()   # 17 - File exists
+    POSIX::ENOTDIR()  # 20 - Not a directory
+    POSIX::EISDIR()   # 21 - Is a directory
+    POSIX::EINVAL()   # 22 - Invalid argument
+    POSIX::ENOSPC()   # 28 - No space left on device
+    POSIX::EPIPE()    # 32 - Broken pipe
+
+=head1 EXAMPLE
+
+    use lib "lib";
+    use POSIX;
+
+    # Check file and get info
+    my str $path = "/etc/passwd";
+    if (POSIX::is_file($path) && POSIX::is_readable($path)) {
+        say("Size: " . POSIX::file_size($path) . " bytes");
+    }
+
+    # Fork and wait
+    my int $pid = sys::fork();
+    if ($pid == 0) {
+        exit(42);
+    }
+
+    my int $status = sys::waitpid($pid, 0);
+    if (POSIX::WIFEXITED($status)) {
+        say("Child exited with code: " . POSIX::WEXITSTATUS($status));
+    } elsif (POSIX::WIFSIGNALED($status)) {
+        say("Child killed by signal: " . POSIX::WTERMSIG($status));
+    }
+
+=head1 SEE ALSO
+
+L<IPC::Open3>
+
+=cut
 
 package POSIX;
 

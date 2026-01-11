@@ -1,0 +1,150 @@
+#!/usr/bin/env strada
+# Test filesystem/path functions for memory leaks
+# Run: valgrind --leak-check=full ./test_filesystem
+
+func main() int {
+    say("Testing filesystem functions for memory leaks...");
+    my int $iterations = 100;
+
+    # Test dirname
+    say("  dirname...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my str $dir = core::dirname("/usr/local/bin/program");
+        if ($dir ne "/usr/local/bin") {
+            say("    FAIL: dirname = " . $dir);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test basename
+    say("  basename...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $base = core::basename("/usr/local/bin/program");
+        if ($base ne "program") {
+            say("    FAIL: basename = " . $base);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test file_ext
+    say("  file_ext...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $ext = core::file_ext("test.strada");
+        if ($ext ne "strada") {
+            say("    FAIL: ext = " . $ext);
+            return 1;
+        }
+        my str $noext = core::file_ext("Makefile");
+        if ($noext ne "") {
+            say("    FAIL: no ext = " . $noext);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test realpath
+    say("  realpath...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $rp = core::realpath(".");
+        if (length($rp) < 1) {
+            say("    FAIL: realpath empty");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test getcwd
+    say("  getcwd...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $cwd = core::getcwd();
+        if (length($cwd) < 1) {
+            say("    FAIL: getcwd empty");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test readdir
+    say("  readdir...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @entries = core::readdir("/tmp");
+        if (size(@entries) < 0) {
+            say("    FAIL: readdir negative");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test stat
+    say("  stat...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $st = core::stat("/tmp");
+        if (!defined($st)) {
+            say("    FAIL: stat /tmp");
+            return 1;
+        }
+        my int $sz = $st->{"size"};
+        my int $mode = $st->{"mode"};
+        if ($mode <= 0) {
+            say("    FAIL: stat mode");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test stat on nonexistent (undef return path)
+    say("  stat nonexistent...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $st = core::stat("/nonexistent_path_xyz_" . $i);
+        if (defined($st)) {
+            say("    FAIL: should be undef");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test glob
+    say("  glob...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @files = core::glob("/tmp/*");
+        # Just verify it returns an array without leaking
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test path_join
+    say("  path_join...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @parts = ("usr", "local", "bin");
+        my str $joined = core::path_join(@parts);
+        if ($joined ne "usr/local/bin") {
+            say("    FAIL: path_join = " . $joined);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All filesystem tests passed!");
+    return 0;
+}

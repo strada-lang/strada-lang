@@ -1,0 +1,278 @@
+/*
+ Strada Package Manager - Package fetching
+
+ Downloads packages from various sources (git, registry, local).
+*/
+
+package Pacco::Fetch;
+
+# Fetch a package from a git URL
+func fetch_git(str $url, str $ref, str $dest) int {
+    # Remove destination if it exists
+    if (sys::dir_exists($dest) == 1) {
+        my int $rm_result = sys::system("rm -rf " . $dest);
+        if ($rm_result != 0) {
+            warn("Failed to remove existing directory: " . $dest);
+            return 0;
+        }
+    }
+
+    # Clone with specific ref/tag
+    my str $cmd = "";
+    if ($ref ne "" && $ref ne "HEAD" && $ref ne "main" && $ref ne "master") {
+        $cmd = "git clone --depth 1 --branch " . $ref . " " . $url . " " . $dest . " 2>&1";
+    } else {
+        $cmd = "git clone --depth 1 " . $url . " " . $dest . " 2>&1";
+    }
+
+    my int $result = sys::system($cmd);
+    if ($result != 0) {
+        warn("Git clone failed: " . $cmd);
+        return 0;
+    }
+
+    # Remove .git directory to save space
+    sys::system("rm -rf " . $dest . "/.git");
+
+    return 1;
+}
+
+# Parse a source string into components
+# Formats:
+#   github:user/repo           -> https://github.com/user/repo.git
+#   github:user/repo@v1.0.0    -> https://github.com/user/repo.git, ref=v1.0.0
+#   gitlab:user/repo           -> https://gitlab.com/user/repo.git
+#   git:https://example.com/repo.git
+#   path:/local/path
+func parse_source(str $source) scalar {
+    my hash %result = ();
+    $result{"type"} = "unknown";
+    $result{"url"} = "";
+    $result{"ref"} = "";
+    $result{"path"} = "";
+
+    # Check for ref specification (@tag or @branch)
+    my str $src = $source;
+    my str $ref = "";
+    my int $at_pos = index($source, "@");
+    if ($at_pos > 0) {
+        $ref = substr($source, $at_pos + 1, length($source) - $at_pos - 1);
+        $src = substr($source, 0, $at_pos);
+    }
+    $result{"ref"} = $ref;
+
+    # GitHub shorthand
+    if (substr($src, 0, 7) eq "github:") {
+        my str $repo = substr($src, 7, length($src) - 7);
+        $result{"type"} = "git";
+        $result{"url"} = "https://github.com/" . $repo . ".git";
+        return \%result;
+    }
+
+    # GitLab shorthand
+    if (substr($src, 0, 7) eq "gitlab:") {
+        my str $repo = substr($src, 7, length($src) - 7);
+        $result{"type"} = "git";
+        $result{"url"} = "https://gitlab.com/" . $repo . ".git";
+        return \%result;
+    }
+
+    # Generic git URL
+    if (substr($src, 0, 4) eq "git:") {
+        $result{"type"} = "git";
+        $result{"url"} = substr($src, 4, length($src) - 4);
+        return \%result;
+    }
+
+    # Local path
+    if (substr($src, 0, 5) eq "path:") {
+        $result{"type"} = "path";
+        $result{"path"} = substr($src, 5, length($src) - 5);
+        return \%result;
+    }
+
+    # Plain URL (assume git)
+    if (substr($src, 0, 8) eq "https://" || substr($src, 0, 7) eq "http://" || substr($src, 0, 6) eq "git://") {
+        $result{"type"} = "git";
+        $result{"url"} = $src;
+        return \%result;
+    }
+
+    # Assume registry package name
+    $result{"type"} = "registry";
+    $result{"name"} = $src;
+    return \%result;
+}
+
+# Fetch a package based on its source specification
+func fetch_package(str $source, str $ver, str $deps_dir) scalar {
+    my scalar $parsed = Pacco::Fetch::parse_source($source);
+    my str $type = $parsed->{"type"};
+
+    my hash %result = ();
+    $result{"success"} = 0;
+    $result{"path"} = "";
+    $result{"error"} = "";
+
+    if ($type eq "git") {
+        my str $url = $parsed->{"url"};
+        my str $ref = $parsed->{"ref"};
+
+        # Use version as ref if no explicit ref
+        if ($ref eq "" && $ver ne "") {
+            # Try v-prefixed tag first
+            $ref = "v" . $ver;
+        }
+
+        # Generate destination directory name
+        my str $name = Pacco::Fetch::extract_repo_name($url);
+        my str $dest = $deps_dir . "/" . $name;
+        if ($ver ne "") {
+            $dest = $dest . "-" . $ver;
+        }
+
+        # Fetch
+        if (Pacco::Fetch::fetch_git($url, $ref, $dest) == 1) {
+            $result{"success"} = 1;
+            $result{"path"} = $dest;
+        } else {
+            # Try without v prefix
+            if (Pacco::Fetch::fetch_git($url, $ver, $dest) == 1) {
+                $result{"success"} = 1;
+                $result{"path"} = $dest;
+            } else {
+                $result{"error"} = "Failed to clone " . $url;
+            }
+        }
+    } elsif ($type eq "path") {
+        my str $path = $parsed->{"path"};
+        if (sys::dir_exists($path) == 1) {
+            $result{"success"} = 1;
+            $result{"path"} = $path;
+        } else {
+            $result{"error"} = "Local path not found: " . $path;
+        }
+    } elsif ($type eq "registry") {
+        $result{"error"} = "Registry packages not yet supported. Use git: or github: source.";
+    } else {
+        $result{"error"} = "Unknown source type: " . $type;
+    }
+
+    return \%result;
+}
+
+# Extract repository name from a git URL
+func extract_repo_name(str $url) str {
+    my str $name = $url;
+
+    # Remove .git suffix
+    if (length($name) > 4 && substr($name, length($name) - 4, 4) eq ".git") {
+        $name = substr($name, 0, length($name) - 4);
+    }
+
+    # Get last path component
+    my int $last_slash = -1;
+    for (my int $i = 0; $i < length($name); $i++) {
+        if (substr($name, $i, 1) eq "/") {
+            $last_slash = $i;
+        }
+    }
+
+    if ($last_slash >= 0) {
+        $name = substr($name, $last_slash + 1, length($name) - $last_slash - 1);
+    }
+
+    return $name;
+}
+
+# Ensure deps directory exists
+func ensure_deps_dir(str $project_dir) str {
+    my str $deps_dir = $project_dir . "/.strada/deps";
+
+    if (sys::dir_exists($project_dir . "/.strada") == 0) {
+        sys::mkdir($project_dir . "/.strada", 493);  # 0755
+    }
+
+    if (sys::dir_exists($deps_dir) == 0) {
+        sys::mkdir($deps_dir, 493);
+    }
+
+    return $deps_dir;
+}
+
+# Check if a package is already installed
+func is_installed(str $deps_dir, str $name, str $ver) int {
+    my str $path = $deps_dir . "/" . $name;
+    if ($ver ne "") {
+        $path = $path . "-" . $ver;
+    }
+
+    if (sys::dir_exists($path) == 1) {
+        # Check if it has a Strada.toml
+        if (sys::file_exists($path . "/Strada.toml") == 1) {
+            return 1;
+        }
+        # Or source files
+        if (sys::dir_exists($path . "/src") == 1) {
+            return 1;
+        }
+        # Or a lib directory
+        if (sys::dir_exists($path . "/lib") == 1) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+# Get the path to an installed package
+func get_installed_path(str $deps_dir, str $name, str $ver) str {
+    my str $path = $deps_dir . "/" . $name;
+    if ($ver ne "") {
+        $path = $path . "-" . $ver;
+    }
+
+    if (sys::dir_exists($path) == 1) {
+        return $path;
+    }
+
+    return "";
+}
+
+# Compute SHA256 checksum of a file
+func checksum_file(str $path) str {
+    my str $result = "";
+
+    # Use sha256sum if available
+    my str $cmd = "sha256sum " . $path . " 2>/dev/null | cut -d' ' -f1";
+    my scalar $fh = sys::popen($cmd, "r");
+    if (defined($fh)) {
+        $result = sys::fgets($fh, 128);
+        sys::pclose($fh);
+
+        # Trim newline
+        if (length($result) > 0 && substr($result, length($result) - 1, 1) eq "\n") {
+            $result = substr($result, 0, length($result) - 1);
+        }
+    }
+
+    return $result;
+}
+
+# Compute checksum of a directory (hash of all file hashes)
+func checksum_dir(str $path) str {
+    my str $cmd = "find " . $path . " -type f -exec sha256sum {} \\; 2>/dev/null | sort | sha256sum | cut -d' ' -f1";
+    my str $result = "";
+
+    my scalar $fh = sys::popen($cmd, "r");
+    if (defined($fh)) {
+        $result = sys::fgets($fh, 128);
+        sys::pclose($fh);
+
+        if (length($result) > 0 && substr($result, length($result) - 1, 1) eq "\n") {
+            $result = substr($result, 0, length($result) - 1);
+        }
+    }
+
+    return $result;
+}

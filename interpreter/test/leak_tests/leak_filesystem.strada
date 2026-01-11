@@ -1,0 +1,12 @@
+func main() int {
+    my int $i = 0;
+    while ($i < 50) {
+        my str $path = "/tmp/leak_fs_" . $i . ".txt";
+        core::spew($path, "test data " . $i);
+        my str $content = core::slurp($path);
+        core::unlink($path);
+        $i = $i + 1;
+    }
+    say("done");
+    return 0;
+}

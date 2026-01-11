@@ -1,0 +1,974 @@
+# xs2strada - Convert Perl XS modules to Strada with __C__ blocks
+#
+# Parses .xs files and generates Strada code using __C__ blocks for C interop.
+# Maps XS parameter types to Strada types and preserves C code bodies.
+#
+# Usage: xs2strada <input.xs> <output.strada>
+
+func xs_type_to_strada(str $xstype) str {
+    # Map XS/C types to Strada types
+    my str $t = $xstype;
+    # Strip leading/trailing whitespace
+    $t = replace($t, "^\\s+", "");
+    $t = replace($t, "\\s+$", "");
+
+    # Integer types
+    if ($t eq "int" || $t eq "IV" || $t eq "UV" || $t eq "long" || $t eq "short" || $t eq "unsigned int" || $t eq "unsigned long" || $t eq "size_t" || $t eq "ssize_t" || $t eq "SSize_t" || $t eq "bool_t" || $t eq "STRLEN" || $t eq "I32" || $t eq "I16" || $t eq "I8" || $t eq "U32" || $t eq "U16" || $t eq "U8" || $t eq "Off_t" || $t eq "pid_t" || $t eq "uid_t" || $t eq "gid_t" || $t eq "time_t") {
+        return "int";
+    }
+    # Float types
+    if ($t eq "double" || $t eq "float" || $t eq "NV" || $t eq "long double") {
+        return "num";
+    }
+    # String types
+    if ($t eq "char *" || $t eq "const char *" || $t eq "char*" || $t eq "const char*" || $t eq "unsigned char *" || $t eq "PV") {
+        return "str";
+    }
+    # Perl scalar types -> Strada scalar
+    if ($t eq "SV*" || $t eq "SV *" || $t eq "SV") {
+        return "scalar";
+    }
+    # Perl array ref
+    if ($t eq "AV*" || $t eq "AV *" || $t eq "AV") {
+        return "scalar";
+    }
+    # Perl hash ref
+    if ($t eq "HV*" || $t eq "HV *" || $t eq "HV") {
+        return "scalar";
+    }
+    # void
+    if ($t eq "void") {
+        return "void";
+    }
+    # Unknown type - use scalar and add REVIEW
+    return "scalar";
+}
+
+func xs_type_is_known(str $xstype) int {
+    my str $t = replace($xstype, "^\\s+", "");
+    $t = replace($t, "\\s+$", "");
+    if ($t eq "int" || $t eq "IV" || $t eq "UV" || $t eq "long" || $t eq "short" || $t eq "unsigned int" || $t eq "unsigned long" || $t eq "size_t" || $t eq "ssize_t" || $t eq "SSize_t" || $t eq "bool_t" || $t eq "STRLEN" || $t eq "I32" || $t eq "double" || $t eq "float" || $t eq "NV" || $t eq "char *" || $t eq "const char *" || $t eq "char*" || $t eq "const char*" || $t eq "SV*" || $t eq "SV *" || $t eq "void" || $t eq "AV*" || $t eq "AV *" || $t eq "HV*" || $t eq "HV *" || $t eq "time_t" || $t eq "pid_t" || $t eq "Off_t" || $t eq "PV" || $t eq "unsigned char *") {
+        return 1;
+    }
+    return 0;
+}
+
+func is_xs_return_type(str $line) int {
+    # Check if a line looks like a standalone XS return type
+    # Must be flush left (no leading whitespace), not a section keyword, not a comment
+    if (match($line, "^\\s")) { return 0; }
+    if (match($line, "^#")) { return 0; }
+    if (match($line, "^$")) { return 0; }
+    if (match($line, ":$")) { return 0; }  # section keywords end with :
+    if (match($line, "^MODULE")) { return 0; }
+    if (match($line, "^PACKAGE")) { return 0; }
+    if (match($line, "^PROTOTYPES")) { return 0; }
+    if (match($line, "^PREFIX")) { return 0; }
+    if (match($line, "^VERSIONCHECK")) { return 0; }
+    if (match($line, "^EXPORT_XSUB")) { return 0; }
+    if (match($line, "^SCOPE")) { return 0; }
+    if (match($line, "^FALLBACK")) { return 0; }
+    if (match($line, "^BOOT:")) { return 0; }
+    if (match($line, "^REQUIRE:")) { return 0; }
+    if (match($line, "^INCLUDE")) { return 0; }
+    if (match($line, "^TYPEMAP")) { return 0; }
+
+    my str $t = replace($line, "^\\s+", "");
+    $t = replace($t, "\\s+$", "");
+
+    # Common return types
+    if ($t eq "void" || $t eq "int" || $t eq "IV" || $t eq "UV" || $t eq "NV" || $t eq "long" || $t eq "short" || $t eq "double" || $t eq "float" || $t eq "bool_t" || $t eq "SV*" || $t eq "SV *" || $t eq "AV*" || $t eq "AV *" || $t eq "HV*" || $t eq "HV *" || $t eq "size_t" || $t eq "ssize_t" || $t eq "time_t" || $t eq "pid_t" || $t eq "Off_t") {
+        return 1;
+    }
+    # Pointer types: "char *", "const char *", "unsigned char *", "TYPE *"
+    if (match($t, "^(const\\s+)?(unsigned\\s+)?[a-zA-Z_][a-zA-Z0-9_]*\\s*\\*$")) {
+        return 1;
+    }
+    # Simple type names
+    if (match($t, "^[A-Z][a-zA-Z0-9_]*$")) {
+        return 1;
+    }
+    return 0;
+}
+
+func is_section_keyword(str $line) int {
+    if (match($line, "^\\s*(CODE|PPCODE|PREINIT|INIT|INPUT|OUTPUT|CLEANUP|POSTCALL|ALIAS|OVERLOAD|INTERFACE|INTERFACE_MACRO|PROTOTYPE|CASE|C_ARGS|NO_OUTPUT)\\s*:")) {
+        return 1;
+    }
+    return 0;
+}
+
+func get_section_name(str $line) str {
+    my array @cap = capture($line, "^\\s*(CODE|PPCODE|PREINIT|INIT|INPUT|OUTPUT|CLEANUP|POSTCALL|ALIAS|OVERLOAD|INTERFACE|INTERFACE_MACRO|PROTOTYPE|CASE|C_ARGS|NO_OUTPUT)\\s*:");
+    if (scalar(@cap) > 1) {
+        return $cap[1];
+    }
+    return "";
+}
+
+func convert_c_body(str $code, str $ret_type, hash %param_types) str {
+    # Convert XS C code body with basic macro replacements
+    # NOTE: Strada's replace_all() does NOT support \b word boundaries.
+    # All XS macros below are unique enough that plain string matching is safe.
+    my str $result = $code;
+
+    # Replace RETVAL with __retval (our Strada variable)
+    if (match($result, "RETVAL")) {
+        $result = replace_all($result, "RETVAL", "__retval");
+    }
+
+    # Replace common Perl API macros
+    # SvIV(x) -> strada_to_int(x)
+    if (match($result, "SvIV")) {
+        $result = replace_all($result, "SvIV", "strada_to_int");
+    }
+    # SvNV(x) -> strada_to_num() (returns double in C)
+    if (match($result, "SvNV")) {
+        $result = replace_all($result, "SvNV", "strada_to_num_c");
+    }
+    # SvPV_nolen(x) -> strada_to_str(x)
+    if (match($result, "SvPV_nolen")) {
+        $result = replace_all($result, "SvPV_nolen", "strada_to_str");
+    }
+    # SvPVbyte_nolen(x) -> strada_to_str(x)
+    if (match($result, "SvPVbyte_nolen")) {
+        $result = replace_all($result, "SvPVbyte_nolen", "strada_to_str");
+    }
+
+    # newSViv(x) -> strada_new_int(x)
+    if (match($result, "newSViv")) {
+        $result = replace_all($result, "newSViv", "strada_new_int");
+    }
+    # newSVnv(x) -> strada_new_num(x)
+    if (match($result, "newSVnv")) {
+        $result = replace_all($result, "newSVnv", "strada_new_num");
+    }
+    # newSVpvn must come before newSVpv (longer match first)
+    if (match($result, "newSVpvn")) {
+        $result = replace_all($result, "newSVpvn", "strada_new_str /* REVIEW: was newSVpvn, len arg may need removal */");
+    }
+    # newSVpv(s, len) -> strada_new_str(s)
+    if (match($result, "newSVpv")) {
+        $result = replace_all($result, "newSVpv", "strada_new_str");
+    }
+
+    # croak -> die
+    if (match($result, "croak(")) {
+        $result = replace_all($result, "croak(", "/* REVIEW: was croak() */ die(");
+    }
+
+    # XSRETURN_UNDEF (must come before XSRETURN)
+    if (match($result, "XSRETURN_UNDEF")) {
+        $result = replace_all($result, "XSRETURN_UNDEF", "return strada_new_undef() /* was XSRETURN_UNDEF */");
+    }
+    # XSRETURN_YES
+    if (match($result, "XSRETURN_YES")) {
+        $result = replace_all($result, "XSRETURN_YES", "return strada_new_int(1) /* was XSRETURN_YES */");
+    }
+    # XSRETURN_NO
+    if (match($result, "XSRETURN_NO")) {
+        $result = replace_all($result, "XSRETURN_NO", "return strada_new_int(0) /* was XSRETURN_NO */");
+    }
+    # XSRETURN_EMPTY
+    if (match($result, "XSRETURN_EMPTY")) {
+        $result = replace_all($result, "XSRETURN_EMPTY", "return /* was XSRETURN_EMPTY */");
+    }
+    # XSRETURN(n) -> REVIEW
+    if (match($result, "XSRETURN(")) {
+        $result = replace_all($result, "XSRETURN(", "/* REVIEW: multi-return */ XSRETURN(");
+    }
+
+    # Strip Perl thread context macros
+    if (match($result, "aTHX_ ")) {
+        $result = replace_all($result, "aTHX_ ", "");
+    }
+    if (match($result, "aTHX_,")) {
+        $result = replace_all($result, "aTHX_,", ",");
+    }
+    if (match($result, "pTHX_ ")) {
+        $result = replace_all($result, "pTHX_ ", "");
+    }
+    if (match($result, "dTHX;")) {
+        $result = replace_all($result, "dTHX;", "/* dTHX removed */");
+    }
+    # dXSARGS
+    if (match($result, "dXSARGS;")) {
+        $result = replace_all($result, "dXSARGS;", "/* dXSARGS removed - params are StradaValue* */");
+    }
+    if (match($result, "dXSARGS")) {
+        $result = replace_all($result, "dXSARGS", "/* dXSARGS removed */");
+    }
+    # dXSTARG
+    if (match($result, "dXSTARG;")) {
+        $result = replace_all($result, "dXSTARG;", "/* dXSTARG removed */");
+    }
+
+    # SvOK(x) -> check for non-undef
+    if (match($result, "SvOK(")) {
+        $result = replace_all($result, "SvOK(", "/* REVIEW: SvOK = not undef */ strada_is_defined(");
+    }
+    # SvROK(x) -> check for reference
+    if (match($result, "SvROK(")) {
+        $result = replace_all($result, "SvROK(", "/* REVIEW: SvROK = is reference */ strada_is_ref(");
+    }
+    # SvTRUE(x) -> check for truthy
+    if (match($result, "SvTRUE(")) {
+        $result = replace_all($result, "SvTRUE(", "/* REVIEW: SvTRUE = truthy */ strada_is_true(");
+    }
+    # SvIOK(x) -> check for integer type
+    if (match($result, "SvIOK(")) {
+        $result = replace_all($result, "SvIOK(", "/* REVIEW: SvIOK = is integer */ strada_is_int(");
+    }
+    # SvNOK(x) -> check for number type
+    if (match($result, "SvNOK(")) {
+        $result = replace_all($result, "SvNOK(", "/* REVIEW: SvNOK = is number */ strada_is_num(");
+    }
+
+    # &PL_sv_undef -> strada_new_undef()
+    if (match($result, "&PL_sv_undef")) {
+        $result = replace_all($result, "&PL_sv_undef", "strada_new_undef()");
+    }
+
+    # ST(n) -> add REVIEW
+    if (match($result, "ST(")) {
+        $result = replace_all($result, "ST(", "/* REVIEW: use named params instead */ ST(");
+    }
+
+    # sv_2mortal -> not needed in Strada (refcounting handles it)
+    if (match($result, "sv_2mortal(")) {
+        $result = replace_all($result, "sv_2mortal(", "/* REVIEW: sv_2mortal not needed in Strada */ (");
+    }
+
+    return $result;
+}
+
+func generate_param_extraction(str $param_name, str $c_type) str {
+    # Generate C code to extract the C value from a StradaValue* parameter
+    my str $st = replace($c_type, "^\\s+", "");
+    $st = replace($st, "\\s+$", "");
+
+    if ($st eq "int" || $st eq "IV" || $st eq "long" || $st eq "short" || $st eq "unsigned int" || $st eq "unsigned long" || $st eq "size_t" || $st eq "ssize_t" || $st eq "SSize_t" || $st eq "bool_t" || $st eq "STRLEN" || $st eq "I32" || $st eq "I16" || $st eq "I8" || $st eq "U32" || $st eq "U16" || $st eq "U8" || $st eq "Off_t" || $st eq "pid_t" || $st eq "uid_t" || $st eq "gid_t" || $st eq "time_t" || $st eq "UV") {
+        return "        " . $st . " " . $param_name . "_c = (" . $st . ")strada_to_int(" . $param_name . ");";
+    }
+    if ($st eq "double" || $st eq "float" || $st eq "NV" || $st eq "long double") {
+        return "        " . $st . " " . $param_name . "_c = (" . $st . ")strada_to_num_c(" . $param_name . ");";
+    }
+    if ($st eq "char *" || $st eq "const char *" || $st eq "char*" || $st eq "const char*" || $st eq "unsigned char *") {
+        return "        char *" . $param_name . "_c = strada_to_str(" . $param_name . ");  /* free() when done */";
+    }
+    # SV*, AV*, HV* -> already StradaValue*, no extraction needed
+    if (match($st, "^[SAH]V")) {
+        return "        /* " . $param_name . " is already StradaValue* (was " . $st . ") */";
+    }
+    return "        /* REVIEW: extract " . $param_name . " from StradaValue* (was " . $st . ") */";
+}
+
+func generate_str_free(str $param_name, str $c_type) str {
+    my str $st = replace($c_type, "^\\s+", "");
+    $st = replace($st, "\\s+$", "");
+    if ($st eq "char *" || $st eq "const char *" || $st eq "char*" || $st eq "const char*" || $st eq "unsigned char *") {
+        return "        free(" . $param_name . "_c);";
+    }
+    return "";
+}
+
+func main(int $argc, array @argv) int {
+    if ($argc < 3) {
+        say("Usage: xs2strada <input.xs> <output.strada>");
+        say("");
+        say("Converts Perl XS modules to Strada with __C__ blocks.");
+        say("The generated code preserves C function bodies and maps");
+        say("XS types to Strada types. Lines marked REVIEW need manual");
+        say("attention.");
+        return 1;
+    }
+
+    my str $input_file = $argv[1];
+    my str $output_file = $argv[2];
+
+    if (!sys::file_exists($input_file)) {
+        say("Error: input file not found: " . $input_file);
+        return 1;
+    }
+
+    # Read input
+    my scalar $fh = sys::open($input_file, "r");
+    my array @lines = <$fh>;
+    sys::close($fh);
+
+    my int $total_lines = scalar(@lines);
+    say("Read " . $total_lines . " lines from " . $input_file);
+
+    # ---- Phase 1: Find MODULE line, extract package name ----
+    my int $module_line = -1;
+    my str $module_name = "";
+    my str $package_name = "";
+
+    for (my int $i = 0; $i < $total_lines; $i++) {
+        my str $line = $lines[$i];
+        # Strip trailing newline
+        $line = replace($line, "\\n$", "");
+        $lines[$i] = $line;
+
+        if (match($line, "^MODULE\\s*=")) {
+            if ($module_line == -1) {
+                $module_line = $i;
+            }
+            # Extract MODULE name
+            my array @mcap = capture($line, "MODULE\\s*=\\s*(\\S+)");
+            if (scalar(@mcap) > 1) {
+                $module_name = $mcap[1];
+            }
+            # Extract PACKAGE name
+            my array @pcap = capture($line, "PACKAGE\\s*=\\s*(\\S+)");
+            if (scalar(@pcap) > 1) {
+                $package_name = $pcap[1];
+            }
+        }
+    }
+
+    if ($module_line == -1) {
+        say("Error: no MODULE declaration found in " . $input_file);
+        say("This doesn't appear to be an XS file.");
+        return 1;
+    }
+
+    say("Found MODULE = " . $module_name . "  PACKAGE = " . $package_name . " at line " . ($module_line + 1));
+
+    # ---- Phase 2: Extract C preamble (everything before first MODULE) ----
+    my array @preamble_lines = ();
+    for (my int $i = 0; $i < $module_line; $i++) {
+        my str $line = $lines[$i];
+        # Skip standard Perl XS includes
+        if (match($line, "#define\\s+PERL_NO_GET_CONTEXT")) { next; }
+        if (match($line, "#include\\s+\"EXTERN\\.h\"")) { next; }
+        if (match($line, "#include\\s+\"perl\\.h\"")) { next; }
+        if (match($line, "#include\\s+\"XSUB\\.h\"")) { next; }
+        if (match($line, "#include\\s+\"ppport\\.h\"")) { next; }
+        push(@preamble_lines, $line);
+    }
+
+    # Trim trailing blank lines from preamble
+    while (scalar(@preamble_lines) > 0) {
+        my str $last = $preamble_lines[scalar(@preamble_lines) - 1];
+        if (match($last, "^\\s*$")) {
+            pop(@preamble_lines);
+        } else {
+            last;
+        }
+    }
+
+    # ---- Phase 3: Parse XS function definitions ----
+    # Functions start after MODULE line
+    # State machine: scan for return type (flush left), then func name, then params, then sections
+
+    my array @functions = ();  # Array of hash refs
+
+    my int $i = $module_line + 1;
+    my str $current_package = $package_name;
+    my array @boot_lines = ();
+
+    while ($i < $total_lines) {
+        my str $line = $lines[$i];
+
+        # Skip blank lines
+        if (match($line, "^\\s*$")) { $i++; next; }
+
+        # Skip comments
+        if (match($line, "^\\s*#")) { $i++; next; }
+
+        # Handle MODULE/PACKAGE changes
+        if (match($line, "^MODULE\\s*=")) {
+            my array @pcap2 = capture($line, "PACKAGE\\s*=\\s*(\\S+)");
+            if (scalar(@pcap2) > 1) {
+                $current_package = $pcap2[1];
+            }
+            $i++;
+            next;
+        }
+
+        # Skip PROTOTYPES/PREFIX/VERSIONCHECK directives
+        if (match($line, "^PROTOTYPES\\s*:") || match($line, "^PREFIX\\s*=") || match($line, "^VERSIONCHECK\\s*:") || match($line, "^EXPORT_XSUB") || match($line, "^SCOPE\\s*:") || match($line, "^FALLBACK\\s*:")) {
+            $i++;
+            next;
+        }
+
+        # Handle BOOT: section
+        if (match($line, "^BOOT:")) {
+            $i++;
+            while ($i < $total_lines) {
+                my str $bline = $lines[$i];
+                # BOOT ends at next flush-left non-indented, non-preprocessor line
+                if (!match($bline, "^\\s") && !match($bline, "^#") && !match($bline, "^$")) {
+                    last;
+                }
+                push(@boot_lines, $bline);
+                $i++;
+            }
+            next;
+        }
+
+        # Check for return type (flush left line that looks like a C type)
+        if (is_xs_return_type($line) == 1 && ($i + 1) < $total_lines) {
+            my str $next_line = $lines[$i + 1];
+            # Next line should be function_name(params)
+            if (match($next_line, "^[a-zA-Z_][a-zA-Z0-9_:]*\\s*\\(")) {
+                # Found a function definition!
+                my str $ret_type = replace($line, "^\\s+", "");
+                $ret_type = replace($ret_type, "\\s+$", "");
+
+                # Extract function name and params
+                my array @fncap = capture($next_line, "^([a-zA-Z_][a-zA-Z0-9_:]*)\\s*\\(([^)]*)\\)");
+                my str $func_name = "";
+                my str $param_str = "";
+                if (scalar(@fncap) > 2) {
+                    $func_name = $fncap[1];
+                    $param_str = $fncap[2];
+                } elsif (scalar(@fncap) > 1) {
+                    $func_name = $fncap[1];
+                }
+
+                my int $is_variadic = 0;
+                if (match($param_str, "\\.\\.\\.")) {
+                    $is_variadic = 1;
+                    $param_str = replace($param_str, ",?\\s*\\.\\.\\.", "");
+                    $param_str = replace($param_str, "^\\s+", "");
+                    $param_str = replace($param_str, "\\s+$", "");
+                }
+
+                # Parse parameter names
+                my array @param_names = ();
+                if (length($param_str) > 0) {
+                    my array @raw_params = split(",", $param_str);
+                    foreach my str $p (@raw_params) {
+                        my str $pname = replace($p, "^\\s+", "");
+                        $pname = replace($pname, "\\s+$", "");
+                        # Strip default value
+                        if (match($pname, "=")) {
+                            my array @dp = split("=", $pname);
+                            $pname = replace($dp[0], "\\s+$", "");
+                        }
+                        if (length($pname) > 0) {
+                            push(@param_names, $pname);
+                        }
+                    }
+                }
+
+                $i = $i + 2;  # Skip return type and function name lines
+
+                # Parse parameter type declarations (indented lines before first section keyword)
+                my hash %param_types = ();
+                my array @param_defaults = ();  # "name=value" pairs
+
+                while ($i < $total_lines) {
+                    my str $pline = $lines[$i];
+                    if (match($pline, "^\\s*$")) { $i++; next; }
+                    if (is_section_keyword($pline) == 1) { last; }
+                    # Check if this is a parameter type declaration (indented, has a type and param name)
+                    if (match($pline, "^\\s+")) {
+                        my str $decl = replace($pline, "^\\s+", "");
+                        $decl = replace($decl, "\\s+$", "");
+                        $decl = replace($decl, ";$", "");
+                        # Handle default: "type name = value"
+                        my str $default_val = "";
+                        if (match($decl, "=\\s*NO_INIT")) {
+                            $decl = replace($decl, "\\s*=\\s*NO_INIT", "");
+                        } elsif (match($decl, "=")) {
+                            my int $eq_pos = index($decl, "=");
+                            $default_val = substr($decl, $eq_pos + 1, length($decl) - $eq_pos - 1);
+                            $default_val = replace($default_val, "^\\s+", "");
+                            $decl = substr($decl, 0, $eq_pos);
+                            $decl = replace($decl, "\\s+$", "");
+                        }
+                        # Handle & prefix: "type &name" -> pointer param
+                        $decl = replace($decl, "\\s*&\\s*", " ");
+                        # Split into type and name
+                        # The last word is the parameter name, everything before is the type
+                        # Handle "const char *name" -> type="const char *", name="name"
+                        my str $ptype = "";
+                        my str $pname = "";
+                        if (match($decl, "\\*\\s*[a-zA-Z_]")) {
+                            # Pointer type: everything up to and including * is the type
+                            my array @ptcap = capture($decl, "^(.+\\*)\\s*([a-zA-Z_][a-zA-Z0-9_]*)$");
+                            if (scalar(@ptcap) > 2) {
+                                $ptype = $ptcap[1];
+                                $pname = $ptcap[2];
+                            }
+                        }
+                        if (length($pname) == 0) {
+                            # Non-pointer type: last word is name
+                            my array @words = split("\\s+", $decl);
+                            my int $nw = scalar(@words);
+                            if ($nw >= 2) {
+                                $pname = $words[$nw - 1];
+                                # Type is everything except last word
+                                my str $tparts = "";
+                                for (my int $wi = 0; $wi < $nw - 1; $wi++) {
+                                    if (length($tparts) > 0) { $tparts = $tparts . " "; }
+                                    $tparts = $tparts . $words[$wi];
+                                }
+                                $ptype = $tparts;
+                            } elsif ($nw == 1) {
+                                # Just a name (type may be in typemap)
+                                $pname = $words[0];
+                                $ptype = "SV*";
+                            }
+                        }
+
+                        if (length($pname) > 0 && length($ptype) > 0) {
+                            $param_types{$pname} = $ptype;
+                            if (length($default_val) > 0) {
+                                push(@param_defaults, $pname . "=" . $default_val);
+                            }
+                        }
+                        $i++;
+                    } else {
+                        # Non-indented line that's not a section keyword -> end of this function
+                        last;
+                    }
+                }
+
+                # Parse sections: CODE, PREINIT, INIT, OUTPUT, CLEANUP, PPCODE, etc.
+                my hash %sections = ();
+                my str $current_section = "";
+
+                while ($i < $total_lines) {
+                    my str $sline = $lines[$i];
+
+                    # Check for section keyword
+                    if (is_section_keyword($sline) == 1) {
+                        $current_section = get_section_name($sline);
+                        $sections{$current_section} = "";
+                        # Check if there's code on the same line after the keyword
+                        my str $after = replace($sline, "^\\s*(CODE|PPCODE|PREINIT|INIT|INPUT|OUTPUT|CLEANUP|POSTCALL|ALIAS|OVERLOAD|C_ARGS|NO_OUTPUT)\\s*:\\s*", "");
+                        if (length($after) > 0 && !match($after, "^\\s*$")) {
+                            $sections{$current_section} = $after . "\n";
+                        }
+                        $i++;
+                        next;
+                    }
+
+                    # Check for end of function (flush-left line that's a return type or MODULE/etc)
+                    # XS comments (# text) between functions should also end the function
+                    # But C preprocessor directives (#include, #ifdef, etc.) inside CODE should be kept
+                    if (!match($sline, "^\\s") && !match($sline, "^$")) {
+                        if (match($sline, "^# ") || match($sline, "^#$")) {
+                            # XS comment (hash+space or bare hash) - end function
+                            last;
+                        }
+                        if (!match($sline, "^#")) {
+                            if (is_xs_return_type($sline) == 1 || match($sline, "^MODULE") || match($sline, "^BOOT:")) {
+                                last;
+                            }
+                        }
+                    }
+
+                    # Accumulate into current section
+                    if (length($current_section) > 0) {
+                        # Strip one level of indentation (4 spaces or 1 tab)
+                        my str $scode = $sline;
+                        if (match($scode, "^    ")) {
+                            $scode = substr($scode, 4, length($scode) - 4);
+                        } elsif (match($scode, "^\t")) {
+                            $scode = substr($scode, 1, length($scode) - 1);
+                        }
+                        $sections{$current_section} = $sections{$current_section} . $scode . "\n";
+                    }
+
+                    $i++;
+                }
+
+                # Store function info
+                my hash %func_info = ();
+                $func_info{"name"} = $func_name;
+                $func_info{"ret_type"} = $ret_type;
+                $func_info{"package"} = $current_package;
+                $func_info{"variadic"} = "" . $is_variadic;
+
+                # Store param names as comma-separated string
+                my str $pn_str = "";
+                foreach my str $pn (@param_names) {
+                    if (length($pn_str) > 0) { $pn_str = $pn_str . ","; }
+                    $pn_str = $pn_str . $pn;
+                }
+                $func_info{"param_names"} = $pn_str;
+
+                # Store param types as "name:type" comma-separated
+                my str $pt_str = "";
+                foreach my str $pn (@param_names) {
+                    if (length($pt_str) > 0) { $pt_str = $pt_str . ","; }
+                    my str $pt = "";
+                    if (exists($param_types{$pn})) {
+                        $pt = $param_types{$pn};
+                    } else {
+                        $pt = "SV*";
+                    }
+                    $pt_str = $pt_str . $pn . ":" . $pt;
+                }
+                $func_info{"param_types"} = $pt_str;
+
+                # Store sections
+                if (exists($sections{"CODE"})) { $func_info{"code"} = $sections{"CODE"}; }
+                if (exists($sections{"PPCODE"})) { $func_info{"ppcode"} = $sections{"PPCODE"}; }
+                if (exists($sections{"PREINIT"})) { $func_info{"preinit"} = $sections{"PREINIT"}; }
+                if (exists($sections{"INIT"})) { $func_info{"init"} = $sections{"INIT"}; }
+                if (exists($sections{"OUTPUT"})) { $func_info{"output"} = $sections{"OUTPUT"}; }
+                if (exists($sections{"CLEANUP"})) { $func_info{"cleanup"} = $sections{"CLEANUP"}; }
+                if (exists($sections{"POSTCALL"})) { $func_info{"postcall"} = $sections{"POSTCALL"}; }
+                if (exists($sections{"ALIAS"})) { $func_info{"alias"} = $sections{"ALIAS"}; }
+
+                # Store defaults
+                my str $def_str = "";
+                foreach my str $d (@param_defaults) {
+                    if (length($def_str) > 0) { $def_str = $def_str . ","; }
+                    $def_str = $def_str . $d;
+                }
+                $func_info{"defaults"} = $def_str;
+
+                push(@functions, \%func_info);
+
+                next;  # Don't increment i, we already advanced
+            }
+        }
+
+        $i++;
+    }
+
+    say("Found " . scalar(@functions) . " XS function(s)");
+
+    # ---- Phase 4: Generate Strada output ----
+    my scalar $out = sys::open($output_file, "w");
+
+    # Header
+    say($out, "# Converted from XS: " . $input_file);
+    say($out, "# Generated by xs2strada");
+    say($out, "# NOTE: Lines marked REVIEW: need manual attention");
+    say($out, "# NOTE: C code in __C__ blocks uses StradaValue* for all Strada variables");
+    say($out, "# NOTE: Use strada_to_int/str/num() to extract C values, strada_new_int/str/num() to create");
+    say($out, "");
+
+    # Package declaration
+    if (length($package_name) > 0) {
+        say($out, "package " . $package_name . ";");
+        say($out, "");
+    }
+
+    # C preamble
+    if (scalar(@preamble_lines) > 0) {
+        say($out, "# C preamble from XS (includes, helper functions, typedefs)");
+        say($out, "__C__ {");
+        foreach my str $pl (@preamble_lines) {
+            say($out, $pl);
+        }
+        say($out, "}");
+        say($out, "");
+    }
+
+    # BOOT section
+    if (scalar(@boot_lines) > 0) {
+        say($out, "# BOOT section - runs at module load time");
+        say($out, "# REVIEW: move this code into an init function or module-level __C__ block");
+        say($out, "__C__ {");
+        foreach my str $bl (@boot_lines) {
+            say($out, $bl);
+        }
+        say($out, "}");
+        say($out, "");
+    }
+
+    # Track current package for multi-package files
+    my str $last_package = $package_name;
+
+    # Generate each function
+    foreach my scalar $fref (@functions) {
+        my hash %f = %{$fref};
+        my str $fname = $f{"name"};
+        my str $ret = $f{"ret_type"};
+        my str $pkg = $f{"package"};
+        my str $var_str = $f{"variadic"};
+        my int $is_var = 0;
+        if ($var_str eq "1") { $is_var = 1; }
+
+        # Package change?
+        if ($pkg ne $last_package) {
+            say($out, "");
+            say($out, "package " . $pkg . ";");
+            say($out, "");
+            $last_package = $pkg;
+        }
+
+        # Map return type
+        my str $strada_ret = xs_type_to_strada($ret);
+        my int $ret_known = xs_type_is_known($ret);
+
+        # Parse param types
+        my array @pnames = ();
+        my hash %ptypes = ();
+        if (length($f{"param_types"}) > 0) {
+            my array @pt_parts = split(",", $f{"param_types"});
+            foreach my str $pt (@pt_parts) {
+                my int $colon = index($pt, ":");
+                if ($colon >= 0) {
+                    my str $pn = substr($pt, 0, $colon);
+                    my str $ptype = substr($pt, $colon + 1, length($pt) - $colon - 1);
+                    push(@pnames, $pn);
+                    $ptypes{$pn} = $ptype;
+                }
+            }
+        }
+
+        # Handle C++ method names (Class::method)
+        my str $clean_name = $fname;
+        if (match($fname, "::")) {
+            $clean_name = replace($fname, ".*::", "");
+        }
+
+        # Build parameter list
+        my str $param_list = "";
+        foreach my str $pn (@pnames) {
+            if (length($param_list) > 0) { $param_list = $param_list . ", "; }
+            my str $ct = "SV*";
+            if (exists($ptypes{$pn})) {
+                $ct = $ptypes{$pn};
+            }
+            my str $st = xs_type_to_strada($ct);
+            $param_list = $param_list . $st . " $" . $pn;
+        }
+
+        # Add variadic note
+        if ($is_var == 1) {
+            if (length($param_list) > 0) {
+                $param_list = $param_list . "  # REVIEW: was variadic (...)";
+            } else {
+                $param_list = "# REVIEW: was variadic (...)";
+            }
+        }
+
+        # Type review comment
+        my str $type_review = "";
+        if ($ret_known == 0) {
+            $type_review = "  # REVIEW: return type was " . $ret;
+        }
+
+        # ALIAS comment
+        if (exists($f{"alias"})) {
+            say($out, "# ALIAS: " . replace($f{"alias"}, "\\n$", ""));
+        }
+
+        # Function signature
+        say($out, "func " . $clean_name . "(" . $param_list . ") " . $strada_ret . " {" . $type_review);
+
+        # Determine if we need a return variable
+        my int $needs_retval = 0;
+        if ($strada_ret ne "void") {
+            $needs_retval = 1;
+        }
+
+        # Get the code body
+        my str $code_body = "";
+        my int $is_ppcode = 0;
+        if (exists($f{"code"})) {
+            $code_body = $f{"code"};
+        } elsif (exists($f{"ppcode"})) {
+            $code_body = $f{"ppcode"};
+            $is_ppcode = 1;
+        }
+
+        my str $preinit_body = "";
+        if (exists($f{"preinit"})) {
+            $preinit_body = $f{"preinit"};
+        }
+
+        my str $init_body = "";
+        if (exists($f{"init"})) {
+            $init_body = $f{"init"};
+        }
+
+        my str $cleanup_body = "";
+        if (exists($f{"cleanup"})) {
+            $cleanup_body = $f{"cleanup"};
+        }
+
+        my str $postcall_body = "";
+        if (exists($f{"postcall"})) {
+            $postcall_body = $f{"postcall"};
+        }
+
+        # Declare return variable
+        if ($needs_retval == 1) {
+            if ($strada_ret eq "int") {
+                say($out, "    my int $__retval = 0;");
+            } elsif ($strada_ret eq "num") {
+                say($out, "    my num $__retval = 0.0;");
+            } elsif ($strada_ret eq "str") {
+                say($out, "    my str $__retval = \"\";");
+            } else {
+                say($out, "    my scalar $__retval = undef;");
+            }
+        }
+
+        # Emit __C__ block
+        if (length($code_body) > 0 || length($preinit_body) > 0 || length($init_body) > 0) {
+            if ($is_ppcode == 1) {
+                say($out, "    # REVIEW: PPCODE section - returns multiple values via stack");
+            }
+
+            say($out, "    __C__ {");
+
+            # Parameter extraction
+            foreach my str $pn (@pnames) {
+                my str $ct = "SV*";
+                if (exists($ptypes{$pn})) { $ct = $ptypes{$pn}; }
+                my str $extraction = generate_param_extraction($pn, $ct);
+                if (length($extraction) > 0) {
+                    say($out, $extraction);
+                }
+            }
+            if (scalar(@pnames) > 0) {
+                say($out, "");
+            }
+
+            # PREINIT section (variable declarations)
+            if (length($preinit_body) > 0) {
+                say($out, "        /* PREINIT */");
+                my array @pre_lines = split("\n", $preinit_body);
+                foreach my str $pl (@pre_lines) {
+                    if (!match($pl, "^\\s*$")) {
+                        say($out, "        " . $pl);
+                    }
+                }
+                say($out, "");
+            }
+
+            # INIT section
+            if (length($init_body) > 0) {
+                say($out, "        /* INIT */");
+                my array @init_lines = split("\n", $init_body);
+                foreach my str $il (@init_lines) {
+                    if (!match($il, "^\\s*$")) {
+                        say($out, "        " . $il);
+                    }
+                }
+                say($out, "");
+            }
+
+            # CODE/PPCODE body
+            my str $converted = convert_c_body($code_body, $ret, %ptypes);
+            my array @code_lines = split("\n", $converted);
+            foreach my str $cl (@code_lines) {
+                if (!match($cl, "^\\s*$")) {
+                    say($out, "        " . $cl);
+                }
+            }
+
+            # POSTCALL
+            if (length($postcall_body) > 0) {
+                say($out, "");
+                say($out, "        /* POSTCALL */");
+                my array @post_lines = split("\n", $postcall_body);
+                foreach my str $pcl (@post_lines) {
+                    if (!match($pcl, "^\\s*$")) {
+                        say($out, "        " . $pcl);
+                    }
+                }
+            }
+
+            # Cleanup string params
+            foreach my str $pn (@pnames) {
+                my str $ct = "SV*";
+                if (exists($ptypes{$pn})) { $ct = $ptypes{$pn}; }
+                my str $fr = generate_str_free($pn, $ct);
+                if (length($fr) > 0) {
+                    say($out, $fr);
+                }
+            }
+
+            # CLEANUP
+            if (length($cleanup_body) > 0) {
+                say($out, "");
+                say($out, "        /* CLEANUP */");
+                my array @clean_lines = split("\n", $cleanup_body);
+                foreach my str $ccl (@clean_lines) {
+                    if (!match($ccl, "^\\s*$")) {
+                        say($out, "        " . $ccl);
+                    }
+                }
+            }
+
+            # Return value conversion for simple return types
+            if ($needs_retval == 1 && !match($code_body, "__retval") && !match($code_body, "RETVAL")) {
+                # No explicit RETVAL assignment - this is a simple passthrough function
+                say($out, "        /* REVIEW: no RETVAL found - add return value assignment */");
+            }
+
+            say($out, "    }");
+        } else {
+            # No CODE section - function calls C function directly with same name and args
+            say($out, "    # REVIEW: no CODE section - was a direct C function call");
+            say($out, "    __C__ {");
+            # Parameter extraction
+            foreach my str $pn (@pnames) {
+                my str $ct = "SV*";
+                if (exists($ptypes{$pn})) { $ct = $ptypes{$pn}; }
+                my str $extraction = generate_param_extraction($pn, $ct);
+                if (length($extraction) > 0) {
+                    say($out, $extraction);
+                }
+            }
+            # Generate direct call
+            my str $call_args = "";
+            foreach my str $pn (@pnames) {
+                if (length($call_args) > 0) { $call_args = $call_args . ", "; }
+                my str $ct = "SV*";
+                if (exists($ptypes{$pn})) { $ct = $ptypes{$pn}; }
+                if (match($ct, "char") || match($ct, "int") || match($ct, "IV") || match($ct, "long") || match($ct, "double") || match($ct, "float") || match($ct, "NV") || match($ct, "size_t") || match($ct, "time_t") || match($ct, "pid_t") || match($ct, "Off_t") || match($ct, "UV")) {
+                    $call_args = $call_args . $pn . "_c";
+                } else {
+                    $call_args = $call_args . $pn;
+                }
+            }
+            if ($needs_retval == 1) {
+                say($out, "        strada_decref(__retval);");
+                if ($strada_ret eq "int") {
+                    say($out, "        __retval = strada_new_int(" . $fname . "(" . $call_args . "));");
+                } elsif ($strada_ret eq "num") {
+                    say($out, "        __retval = strada_new_num(" . $fname . "(" . $call_args . "));");
+                } elsif ($strada_ret eq "str") {
+                    say($out, "        __retval = strada_new_str(" . $fname . "(" . $call_args . "));");
+                } else {
+                    say($out, "        /* REVIEW: convert return value */ " . $fname . "(" . $call_args . ");");
+                }
+            } else {
+                say($out, "        " . $fname . "(" . $call_args . ");");
+            }
+            # Free string params
+            foreach my str $pn (@pnames) {
+                my str $ct = "SV*";
+                if (exists($ptypes{$pn})) { $ct = $ptypes{$pn}; }
+                my str $fr = generate_str_free($pn, $ct);
+                if (length($fr) > 0) {
+                    say($out, $fr);
+                }
+            }
+            say($out, "    }");
+        }
+
+        # Return statement
+        if ($needs_retval == 1) {
+            say($out, "    return $__retval;");
+        }
+
+        say($out, "}");
+        say($out, "");
+    }
+
+    sys::close($out);
+
+    say("Converted: " . $input_file . " -> " . $output_file);
+    say("Functions: " . scalar(@functions));
+    if (scalar(@boot_lines) > 0) {
+        say("BOOT section: " . scalar(@boot_lines) . " lines");
+    }
+
+    return 0;
+}

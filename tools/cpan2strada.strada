@@ -1,0 +1,1179 @@
+# cpan2strada - Convert CPAN distributions to Strada libraries
+#
+# Usage: cpan2strada <dist-dir> [output-dir]
+#
+# Converts an unpacked CPAN distribution directory into Strada source files.
+# Uses perl2strada for .pm files and xs2strada for .xs files.
+
+# Helper: check if string ends with a suffix
+func ends_with(str $s, str $suffix) int {
+    my int $slen = length($s);
+    my int $suflen = length($suffix);
+    if ($suflen > $slen) {
+        return 0;
+    }
+    my str $tail = substr($s, $slen - $suflen, $suflen);
+    if ($tail eq $suffix) {
+        return 1;
+    }
+    return 0;
+}
+
+# Helper: check if string starts with a prefix
+func starts_with(str $s, str $prefix) int {
+    my int $slen = length($s);
+    my int $plen = length($prefix);
+    if ($plen > $slen) {
+        return 0;
+    }
+    my str $head = substr($s, 0, $plen);
+    if ($head eq $prefix) {
+        return 1;
+    }
+    return 0;
+}
+
+# Helper: trim whitespace from both ends
+func trim_str(str $s) str {
+    my str $result = replace($s, "^[ \t\r\n]+", "");
+    $result = replace($result, "[ \t\r\n]+$", "");
+    return $result;
+}
+
+# Helper: get basename from a path
+func path_basename(str $path) str {
+    my int $idx = -1;
+    my int $i = 0;
+    my int $len = length($path);
+    while ($i < $len) {
+        my str $c = substr($path, $i, 1);
+        if ($c eq "/") {
+            $idx = $i;
+        }
+        $i++;
+    }
+    if ($idx == -1) {
+        return $path;
+    }
+    return substr($path, $idx + 1, $len - $idx - 1);
+}
+
+# Helper: get directory part of path
+func path_dirname(str $path) str {
+    my int $idx = -1;
+    my int $i = 0;
+    my int $len = length($path);
+    while ($i < $len) {
+        my str $c = substr($path, $i, 1);
+        if ($c eq "/") {
+            $idx = $i;
+        }
+        $i++;
+    }
+    if ($idx == -1) {
+        return ".";
+    }
+    if ($idx == 0) {
+        return "/";
+    }
+    return substr($path, 0, $idx);
+}
+
+# Recursively walk a directory, collecting files matching extension
+# Skips t/, blib/, inc/, .git/ directories
+func walk_dir(str $dir, str $ext, array @results) array {
+    my array @entries = sys::readdir($dir);
+    my int $i = 0;
+    my int $n = scalar(@entries);
+    while ($i < $n) {
+        my str $entry = $entries[$i];
+        if ($entry eq "." || $entry eq "..") {
+            $i++;
+            next;
+        }
+        my str $full = $dir . "/" . $entry;
+        if (sys::is_dir($full)) {
+            # Skip test, build, and VCS directories
+            if ($entry eq "t" || $entry eq "blib" || $entry eq "inc" || $entry eq ".git" || $entry eq "eg" || $entry eq "example" || $entry eq "examples") {
+                $i++;
+                next;
+            }
+            @results = walk_dir($full, $ext, @results);
+        } else {
+            if (ends_with($entry, $ext)) {
+                push(@results, $full);
+            }
+        }
+        $i++;
+    }
+    return @results;
+}
+
+# Extract distribution name from directory path
+# e.g., /path/to/JSON-PP-4.16 -> JSON-PP
+func dist_name_from_path(str $dir_path) str {
+    # Remove trailing slash
+    my str $path = $dir_path;
+    while (ends_with($path, "/")) {
+        $path = substr($path, 0, length($path) - 1);
+    }
+    my str $base = path_basename($path);
+    # Strip version: JSON-PP-4.16 -> JSON-PP
+    # Match -digits at end (possibly with dots)
+    if (match($base, "-[0-9]+")) {
+        $base = replace($base, "-[0-9][0-9.]*$", "");
+    }
+    return $base;
+}
+
+# Convert dist name to primary package: JSON-PP -> JSON::PP
+func dist_to_package(str $dist) str {
+    return replace_all($dist, "-", "::");
+}
+
+# Convert a Perl module path relative to lib/ into a Strada filename
+# e.g., lib/JSON/PP.pm -> JSON_PP.strada
+# e.g., XS.pm (relative to dist root) with dist JSON-XS -> JSON_XS.strada
+func pm_to_strada_name(str $pm_path, str $dist_dir) str {
+    my str $rel = $pm_path;
+    # Strip dist_dir prefix
+    my str $prefix = $dist_dir . "/";
+    if (starts_with($rel, $prefix)) {
+        $rel = substr($rel, length($prefix), length($rel) - length($prefix));
+    }
+    # Strip lib/ prefix if present
+    if (starts_with($rel, "lib/")) {
+        $rel = substr($rel, 4, length($rel) - 4);
+    }
+    # Strip .pm extension
+    if (ends_with($rel, ".pm")) {
+        $rel = substr($rel, 0, length($rel) - 3);
+    }
+    # Replace / with _
+    $rel = replace_all($rel, "/", "_");
+    return $rel . ".strada";
+}
+
+# Same for .xs files
+func xs_to_strada_name(str $xs_path, str $dist_dir) str {
+    my str $rel = $xs_path;
+    my str $prefix = $dist_dir . "/";
+    if (starts_with($rel, $prefix)) {
+        $rel = substr($rel, length($prefix), length($rel) - length($prefix));
+    }
+    if (starts_with($rel, "lib/")) {
+        $rel = substr($rel, 4, length($rel) - 4);
+    }
+    if (ends_with($rel, ".xs")) {
+        $rel = substr($rel, 0, length($rel) - 3);
+    }
+    $rel = replace_all($rel, "/", "_");
+    return $rel . ".strada";
+}
+
+# Extract version from a .pm file by looking for $VERSION = ...
+func extract_version(str $pm_path) str {
+    my str $content = sys::slurp($pm_path);
+    if (length($content) == 0) {
+        return "";
+    }
+    my array @lines = split("\n", $content);
+    my int $i = 0;
+    my int $n = scalar(@lines);
+    while ($i < $n) {
+        my str $line = $lines[$i];
+        # Match: our $VERSION = '4.16'; or our $VERSION = "4.16"; or $VERSION = 4.16;
+        if (match($line, "VERSION\\s*=\\s*['\"]?[0-9]")) {
+            my str $ver = $line;
+            # Extract version number
+            $ver = replace($ver, "^.*VERSION\\s*=\\s*['\"]?", "");
+            $ver = replace($ver, "['\"]?\\s*;.*$", "");
+            $ver = trim_str($ver);
+            if (length($ver) > 0) {
+                return $ver;
+            }
+        }
+        $i++;
+    }
+    return "";
+}
+
+# Post-process a converted .strada file to strip Perl boilerplate
+func post_process(str $content) str {
+    my array @lines = split("\n", $content);
+    my int $n = scalar(@lines);
+    my str $output = "";
+    my int $i = 0;
+    my int $skip_until_end_block = 0;
+    my int $wantarray_brace_depth = 0;
+
+    while ($i < $n) {
+        my str $line = $lines[$i];
+        my str $trimmed = trim_str($line);
+
+        # Skip empty __END__ and everything after it
+        if ($trimmed eq "__END__") {
+            # Stop processing
+            $i = $n;
+            next;
+        }
+
+        # Remove: use XSLoader; / XSLoader::load(...)
+        if (match($trimmed, "^use XSLoader") || match($trimmed, "^XSLoader::load")) {
+            $i++;
+            next;
+        }
+
+        # Remove: use AutoLoader;
+        if (match($trimmed, "^use AutoLoader")) {
+            $i++;
+            next;
+        }
+
+        # Remove: use Exporter;
+        if (match($trimmed, "^use Exporter")) {
+            $i++;
+            next;
+        }
+
+        # Remove: use overload
+        if (match($trimmed, "^use overload")) {
+            $i++;
+            next;
+        }
+
+        # Remove: use common::sense;
+        if (match($trimmed, "^use common::sense")) {
+            $i++;
+            next;
+        }
+
+        # Remove: use strict; / use warnings;
+        if (match($trimmed, "^use strict") || match($trimmed, "^use warnings")) {
+            $i++;
+            next;
+        }
+
+        # Remove: use 5.xxx;
+        if (match($trimmed, "^use 5\\.")) {
+            $i++;
+            next;
+        }
+
+        # Remove: our @ISA = ...
+        if (match($trimmed, "^our @ISA")) {
+            $i++;
+            next;
+        }
+
+        # Remove: @ISA = ...
+        if (match($trimmed, "^@ISA\\s*=")) {
+            $i++;
+            next;
+        }
+
+        # Remove: our @EXPORT... / our %EXPORT_TAGS...
+        if (match($trimmed, "^our @EXPORT") || match($trimmed, "^our %EXPORT")) {
+            $i++;
+            next;
+        }
+
+        # Remove: @EXPORT... = ... (both our and my forms)
+        if (match($trimmed, "^@EXPORT") || match($trimmed, "^my array @EXPORT")) {
+            $i++;
+            next;
+        }
+
+        # Remove: commented-out __END__ with TODO
+        if (match($trimmed, "^# __END__")) {
+            $i++;
+            next;
+        }
+
+        # Remove: 1; at end of file (standalone)
+        if ($trimmed eq "1;" || $trimmed eq "1") {
+            $i++;
+            next;
+        }
+
+        # Remove: BEGIN { our @ISA = ... } (single line)
+        if (match($trimmed, "^BEGIN\\s*\\{\\s*our\\s+@ISA")) {
+            $i++;
+            next;
+        }
+
+        # Remove: overload::unimport / overload::import lines
+        if (match($trimmed, "^overload::")) {
+            # May be multi-line with );
+            while ($i < $n) {
+                my str $cline = $lines[$i];
+                $i++;
+                if (match(trim_str($cline), "\\);\\s*$")) {
+                    break;
+                }
+            }
+            next;
+        }
+
+        # Convert: our $VERSION = 'x.y.z'; -> version "x.y.z";
+        if (match($trimmed, "^our\\s+.VERSION\\s*=")) {
+            my str $ver = $trimmed;
+            $ver = replace($ver, "^.*VERSION\\s*=\\s*['\"]?", "");
+            $ver = replace($ver, "['\"]?\\s*;.*$", "");
+            $ver = trim_str($ver);
+            if (length($ver) > 0 && match($ver, "^[0-9]")) {
+                $output = $output . "version \"" . $ver . "\";\n";
+            }
+            $i++;
+            next;
+        }
+
+        # Convert: use constant NAME => VALUE; to const
+        if (match($trimmed, "^use constant\\s+[A-Z_]+\\s*=>")) {
+            my str $cline = $trimmed;
+            $cline = replace($cline, "^use constant\\s+", "");
+            $cline = replace($cline, "\\s*;\\s*$", "");
+            # Parse NAME => VALUE
+            my int $arrow_pos = index($cline, "=>");
+            if ($arrow_pos > 0) {
+                my str $name = trim_str(substr($cline, 0, $arrow_pos));
+                my str $value = trim_str(substr($cline, $arrow_pos + 2, length($cline) - $arrow_pos - 2));
+                # Determine type from value
+                if (match($value, "^-?[0-9]+$")) {
+                    $output = $output . "const int " . $name . " = " . $value . ";\n";
+                } elsif (match($value, "^-?[0-9]+\\.[0-9]")) {
+                    $output = $output . "const num " . $name . " = " . $value . ";\n";
+                } elsif (match($value, "^['\"]")) {
+                    $output = $output . "const str " . $name . " = " . $value . ";\n";
+                } else {
+                    # Expression or variable - emit as comment
+                    $output = $output . "# const " . $name . " = " . $value . ";  # REVIEW: complex constant\n";
+                }
+            } else {
+                $output = $output . $line . "\n";
+            }
+            $i++;
+            next;
+        }
+
+        # Convert: use constant { NAME => VAL, ... }; block
+        if (match($trimmed, "^use constant\\s*\\{")) {
+            # Multi-line constant block
+            my str $block = $trimmed;
+            if (!match($trimmed, "\\}")) {
+                # Read until closing brace
+                $i++;
+                while ($i < $n) {
+                    $block = $block . " " . trim_str($lines[$i]);
+                    if (match($lines[$i], "\\}")) {
+                        $i++;
+                        break;
+                    }
+                    $i++;
+                }
+            } else {
+                $i++;
+            }
+            # Parse out the constant pairs
+            $block = replace($block, "^use constant\\s*\\{\\s*", "");
+            $block = replace($block, "\\s*\\}\\s*;?\\s*$", "");
+            my array @pairs = split(",", $block);
+            my int $pi = 0;
+            while ($pi < scalar(@pairs)) {
+                my str $pair = trim_str($pairs[$pi]);
+                if (length($pair) > 0) {
+                    my int $ap = index($pair, "=>");
+                    if ($ap > 0) {
+                        my str $pname = trim_str(substr($pair, 0, $ap));
+                        my str $pval = trim_str(substr($pair, $ap + 2, length($pair) - $ap - 2));
+                        if (match($pval, "^-?[0-9]+$")) {
+                            $output = $output . "const int " . $pname . " = " . $pval . ";\n";
+                        } elsif (match($pval, "^-?[0-9]+\\.[0-9]")) {
+                            $output = $output . "const num " . $pname . " = " . $pval . ";\n";
+                        } elsif (match($pval, "^['\"]")) {
+                            $output = $output . "const str " . $pname . " = " . $pval . ";\n";
+                        } else {
+                            $output = $output . "# const " . $pname . " = " . $pval . ";  # REVIEW: complex constant\n";
+                        }
+                    }
+                }
+                $pi++;
+            }
+            next;
+        }
+
+        # Handle BEGIN blocks - unwrap body and re-inject into line stream
+        if (match($trimmed, "^BEGIN\\s*\\{")) {
+            if (match($trimmed, "\\}")) {
+                # Single-line BEGIN { ... }
+                my str $body = $trimmed;
+                $body = replace($body, "^BEGIN\\s*\\{\\s*", "");
+                $body = replace($body, "\\s*\\}\\s*;?\\s*$", "");
+                $body = trim_str($body);
+                # Skip known no-ops
+                if (match($body, "@ISA") || match($body, "warnings->unimport") || match($body, "require B")) {
+                    $i++;
+                    next;
+                }
+                # Re-inject body as a line to go through the main loop
+                if (length($body) > 0) {
+                    $lines[$i] = $body;
+                    # Don't increment $i - re-process this line
+                } else {
+                    $i++;
+                }
+                next;
+            } else {
+                # Multi-line BEGIN { ... } - collect body lines
+                my array @body_lines = ();
+                my int $is_noop = 0;
+                $i++;
+                while ($i < $n) {
+                    my str $bline = $lines[$i];
+                    my str $btrimmed = trim_str($bline);
+                    $i++;
+                    if ($btrimmed eq "}" || ends_with($btrimmed, "}")) {
+                        my str $before_brace = replace($btrimmed, "\\}\\s*;?\\s*$", "");
+                        $before_brace = trim_str($before_brace);
+                        if (length($before_brace) > 0) {
+                            push(@body_lines, $before_brace);
+                        }
+                        break;
+                    }
+                    push(@body_lines, $bline);
+                }
+                # Check if it's a known no-op BEGIN
+                my str $all_body = join("\n", @body_lines);
+                if (match($all_body, "@ISA") || match($all_body, "warnings->unimport") || match($all_body, "require B")) {
+                    $is_noop = 1;
+                }
+                if ($is_noop == 0) {
+                    # Re-inject body lines back into @lines so they go through
+                    # the main loop's per-line transforms (hex, eval, Carp, etc.)
+                    my int $insert_at = $i;
+                    my int $bi = scalar(@body_lines) - 1;
+                    while ($bi >= 0) {
+                        # Splice each line into @lines at current position
+                        # We insert in reverse so they end up in order
+                        my int $si = $n - 1;
+                        push(@lines, "");
+                        $n = $n + 1;
+                        while ($si >= $insert_at) {
+                            $lines[$si + 1] = $lines[$si];
+                            $si--;
+                        }
+                        $lines[$insert_at] = $body_lines[$bi];
+                        $bi--;
+                    }
+                }
+                next;
+            }
+        }
+
+        # Handle END blocks - unwrap body and re-inject into line stream
+        if (match($trimmed, "^END\\s*\\{")) {
+            if (match($trimmed, "\\}")) {
+                # Single-line END { ... }
+                my str $body = $trimmed;
+                $body = replace($body, "^END\\s*\\{\\s*", "");
+                $body = replace($body, "\\s*\\}\\s*;?\\s*$", "");
+                $body = trim_str($body);
+                if (length($body) > 0) {
+                    $lines[$i] = $body;
+                } else {
+                    $i++;
+                }
+                next;
+            } else {
+                # Multi-line END { ... } - collect and re-inject body
+                my array @body_lines = ();
+                $i++;
+                while ($i < $n) {
+                    my str $bline = $lines[$i];
+                    my str $btrimmed = trim_str($bline);
+                    $i++;
+                    if ($btrimmed eq "}" || ends_with($btrimmed, "}")) {
+                        my str $before_brace = replace($btrimmed, "\\}\\s*;?\\s*$", "");
+                        $before_brace = trim_str($before_brace);
+                        if (length($before_brace) > 0) {
+                            push(@body_lines, $before_brace);
+                        }
+                        break;
+                    }
+                    push(@body_lines, $bline);
+                }
+                my int $insert_at = $i;
+                my int $bi = scalar(@body_lines) - 1;
+                while ($bi >= 0) {
+                    my int $si = $n - 1;
+                    push(@lines, "");
+                    $n = $n + 1;
+                    while ($si >= $insert_at) {
+                        $lines[$si + 1] = $lines[$si];
+                        $si--;
+                    }
+                    $lines[$insert_at] = $body_lines[$bi];
+                    $bi--;
+                }
+                next;
+            }
+        }
+
+        # Remove: use Types::Serialiser
+        if (match($trimmed, "^use Types::Serialiser")) {
+            $i++;
+            next;
+        }
+
+        # Remove: use Carp
+        if (match($trimmed, "^use Carp")) {
+            $i++;
+            next;
+        }
+
+        # Remove: use Scalar::Util
+        if (match($trimmed, "^use Scalar::Util")) {
+            $i++;
+            next;
+        }
+
+        # Remove lines that are just $Carp::CarpLevel assignments
+        if (match($trimmed, "Carp::CarpLevel")) {
+            $i++;
+            next;
+        }
+
+        # Convert Carp::croak/carp -> die/warn
+        # Handle both Carp::croak(...) and croak ... forms
+        if (match($line, "Carp::croak") || match($line, "Carp::carp")) {
+            $line = replace_all($line, "Carp::croak", "die");
+            $line = replace_all($line, "Carp::carp", "warn");
+            # Also strip trailing perl2strada TODO comments about Carp
+            $line = replace($line, "\\s*# TODO: use die/warn instead of Carp.*$", "");
+        }
+        # Also handle bare croak/carp (without Carp:: prefix) that perl2strada may produce
+        if (match($trimmed, "^croak\\b") || match($trimmed, "^croak\\(")) {
+            $line = replace($line, "\\bcroak\\b", "die");
+            $line = replace($line, "\\s*# TODO: use die/warn instead of Carp.*$", "");
+        }
+        if (match($trimmed, "^carp\\b") || match($trimmed, "^carp\\(")) {
+            $line = replace($line, "\\bcarp\\b", "warn");
+            $line = replace($line, "\\s*# TODO: use die/warn instead of Carp.*$", "");
+        }
+
+        # Convert hex() -> sys::hex() and strip the TODO
+        if (match($line, "[^a-z_]hex[ (]") || match($trimmed, "^hex[ (]")) {
+            # Use literal replace_all for common patterns
+            $line = replace_all($line, " hex(", " sys::hex(");
+            $line = replace_all($line, "(hex(", "(sys::hex(");
+            $line = replace_all($line, "=hex(", "=sys::hex(");
+            $line = replace_all($line, " hex (", " sys::hex(");
+            $line = replace_all($line, "(hex (", "(sys::hex(");
+            $line = replace($line, "\\s*# TODO: .*hex\\(\\) not in Strada", "");
+        }
+
+        # Convert qr/pattern/ -> "pattern" (Strada uses string patterns)
+        if (match($line, "qr/")) {
+            # Strip TODO comment first (before qr/ replacement affects it)
+            $line = replace($line, "\\s*# TODO: qr// compiled regex not in Strada", "");
+            # Now convert qr/.../ to "..."
+            # Replace qr/ with opening quote
+            $line = replace_all($line, "qr/", "\"");
+            # Replace the closing / delimiter with closing quote
+            # Handle common endings: /; and /]
+            $line = replace($line, "/;", "\";");
+            $line = replace($line, "/]", "\"]");
+        }
+
+        # Convert eval string patterns
+        if (index($line, "eval ") >= 0 || index($line, "eval\"") >= 0) {
+            # Pattern 1: eval " " . $expr . " " -> numeric coercion ($expr + 0)
+            if (index($line, "eval \" \"") >= 0) {
+                $line = replace($line, "eval \" \" \\. ", "");
+                $line = replace($line, " \\. \" \"", " + 0");
+                $line = replace($line, "\\s*# TODO: eval string not supported in Strada", "");
+            }
+            # Pattern 2: eval "require Module" -> comment out
+            if (index($line, "eval \"require ") >= 0) {
+                $line = replace($line, "eval \"require ", "# require ");
+                $line = replace($line, "\"\\s*;", ";  # REVIEW: conditional require");
+                $line = replace($line, "\\s*# TODO: eval string not supported in Strada", "");
+            }
+            # Pattern 3: eval "use Module ..." -> remove
+            if (index($line, "eval \"use ") >= 0) {
+                $line = "# " . $trimmed . "  # REVIEW: eval use removed";
+            }
+        }
+
+        # Track braces while inside a wantarray if-block to find the matching else
+        if ($wantarray_brace_depth > 0) {
+            my str $wtrimmed = trim_str($line);
+            # Count braces in this line
+            my int $ci = 0;
+            while ($ci < length($line)) {
+                my str $ch = substr($line, $ci, 1);
+                if ($ch eq "{") {
+                    $wantarray_brace_depth++;
+                }
+                if ($ch eq "}") {
+                    $wantarray_brace_depth--;
+                }
+                $ci++;
+            }
+            # When depth hits 0, we found the closing } of the if-branch
+            if ($wantarray_brace_depth == 0) {
+                # Don't emit this closing } - check for else
+                if ($i + 1 < $n && match(trim_str($lines[$i + 1]), "^else")) {
+                    # Skip the else branch
+                    $i = $i + 2;  # skip } and else {
+                    my int $bd = 1;
+                    while ($i < $n && $bd > 0) {
+                        my str $eline = trim_str($lines[$i]);
+                        my int $eci = 0;
+                        while ($eci < length($lines[$i])) {
+                            my str $ech = substr($lines[$i], $eci, 1);
+                            if ($ech eq "{") { $bd++; }
+                            if ($ech eq "}") { $bd--; }
+                            $eci++;
+                        }
+                        $i++;
+                    }
+                    next;
+                }
+                # } else { on same line (after the closing })
+                # This shouldn't happen if depth hit 0, but handle it
+                $i++;
+                next;
+            }
+        }
+
+        # Eliminate wantarray - always take the list path
+        if (index($line, "wantarray") >= 0) {
+            my str $wtrimmed = trim_str($line);
+            # "if (defined wantarray) {" -> remove guard, keep block body
+            if (match($wtrimmed, "^if\\s*\\(\\s*defined.wantarray")) {
+                $i++;
+                next;
+            }
+            # "if (wantarray) { return @arr; } else { return $arr[0]; }"
+            # -> just "return @arr;" (single-line form)
+            if (match($wtrimmed, "^if\\s*\\(\\s*wantarray") && match($wtrimmed, "return")) {
+                my str $arr_return = $wtrimmed;
+                $arr_return = replace($arr_return, "^.*return\\s+", "return ");
+                $arr_return = replace($arr_return, "\\s*;.*$", ";");
+                my str $indent = replace($line, "\\S.*$", "");
+                $output = $output . $indent . $arr_return . "\n";
+                $i++;
+                # Skip the rest (else branch etc) until matching close
+                while ($i < $n) {
+                    my str $eline = trim_str($lines[$i]);
+                    $i++;
+                    if ($eline eq "}" || ends_with($eline, "}")) {
+                        break;
+                    }
+                }
+                next;
+            }
+            # Multi-line "if (wantarray) {" -> remove guard, track braces to skip else later
+            if (match($wtrimmed, "^if\\s*\\(\\s*wantarray")) {
+                $wantarray_brace_depth = 1;
+                $i++;
+                next;
+            }
+            # "last unless wantarray" / "if (!(wantarray)) { last; }" -> remove
+            if (match($wtrimmed, "last.*wantarray") || match($wtrimmed, "wantarray.*last")) {
+                $i++;
+                next;
+            }
+            # "while (wantarray)" -> "while (1)"
+            if (match($wtrimmed, "while\\s*\\(\\s*wantarray")) {
+                $line = replace($line, "wantarray", "1");
+                $line = replace($line, "\\s*# TODO: wantarray not in Strada", "");
+            }
+            # Generic: strip any remaining wantarray TODO
+            $line = replace($line, "\\s*# TODO: wantarray not in Strada", "");
+        }
+
+        # Strip s///e TODO (genuine manual work needed, but remove the noisy comment)
+        $line = replace($line, "\\s*# TODO: s///e .eval replacement. not in Strada.*$", "");
+
+        # Strip leftover TODO comments
+        $line = replace($line, "\\s*# TODO: BEGIN blocks not in Strada.*$", "");
+        $line = replace($line, "\\s*# TODO: not needed in Strada.*$", "");
+        $line = replace($line, "\\s*# TODO: Strada has no __END__.*$", "");
+
+        # Keep all other lines
+        $output = $output . $line . "\n";
+        $i++;
+    }
+
+    # Remove excessive blank lines (3+ consecutive -> 2)
+    $output = replace_all($output, "\n\n\n\n+", "\n\n\n");
+
+    return $output;
+}
+
+# For XS modules, merge the .pm conversion and .xs conversion
+# The .xs file has the actual C implementations; the .pm has Perl-level code
+func merge_xs_pm(str $pm_content, str $xs_content) str {
+    # Strategy:
+    # 1. Take the post-processed .pm content as the base
+    # 2. Append the .xs content (which has __C__ blocks) at the end
+    # 3. The .pm typically has no function bodies for XS functions
+    #    (they're loaded via XSLoader), so the .xs fills those in
+
+    my str $merged = "";
+
+    # Extract package line from PM if present
+    my array @pm_lines = split("\n", $pm_content);
+    my int $i = 0;
+    my int $n = scalar(@pm_lines);
+    my str $pkg_line = "";
+    my str $version_line = "";
+
+    # First pass: collect package and version, skip the rest that's just stubs
+    while ($i < $n) {
+        my str $line = $pm_lines[$i];
+        my str $trimmed = trim_str($line);
+        if (match($trimmed, "^package ") && length($pkg_line) == 0) {
+            $pkg_line = $line;
+        }
+        if (match($trimmed, "^version ")) {
+            $version_line = $line;
+        }
+        $i++;
+    }
+
+    # Build merged output
+    if (length($pkg_line) > 0) {
+        $merged = $merged . $pkg_line . "\n";
+    }
+    if (length($version_line) > 0) {
+        $merged = $merged . $version_line . "\n";
+    }
+    $merged = $merged . "\n";
+
+    # Add the PM content (skip package/version since we already emitted them)
+    $i = 0;
+    while ($i < $n) {
+        my str $line = $pm_lines[$i];
+        my str $trimmed = trim_str($line);
+        if (match($trimmed, "^package ") || match($trimmed, "^version ")) {
+            $i++;
+            next;
+        }
+        $merged = $merged . $line . "\n";
+        $i++;
+    }
+
+    $merged = $merged . "\n# ===== XS Implementation (from .xs file) =====\n\n";
+    $merged = $merged . $xs_content;
+
+    return $merged;
+}
+
+# Count REVIEW and TODO markers in content
+func count_markers(str $content) array {
+    my int $review_count = 0;
+    my int $todo_count = 0;
+    my array @lines = split("\n", $content);
+    my int $i = 0;
+    my int $n = scalar(@lines);
+    while ($i < $n) {
+        my str $line = $lines[$i];
+        if (match($line, "REVIEW:") || match($line, "REVIEW ")) {
+            $review_count++;
+        }
+        if (match($line, "TODO:") || match($line, "TODO ")) {
+            $todo_count++;
+        }
+        $i++;
+    }
+    my array @counts = ($review_count, $todo_count);
+    return @counts;
+}
+
+# Determine build order: sub-modules (longer names) are typically dependencies
+# that should be built before the main module
+# e.g., JSON_PP_Boolean.strada before JSON_PP.strada
+func sort_build_order(array @files) array {
+    # Simple bubble sort: longer names first (sub-modules before main modules)
+    my int $n = scalar(@files);
+    my int $i = 0;
+    while ($i < $n - 1) {
+        my int $j = 0;
+        while ($j < $n - $i - 1) {
+            my str $a = $files[$j];
+            my str $b = $files[$j + 1];
+            if (length($a) < length($b)) {
+                # Swap - put longer name first
+                $files[$j] = $b;
+                $files[$j + 1] = $a;
+            }
+            $j++;
+        }
+        $i++;
+    }
+    return @files;
+}
+
+# Find the path to perl2strada and xs2strada tools
+func find_tool(str $tool_name) str {
+    # Check relative to the cpan2strada binary location
+    # Try common locations
+    my str $self_dir = sys::getenv("STRADA_TOOL_DIR");
+    if (length($self_dir) > 0) {
+        my str $path = $self_dir . "/" . $tool_name;
+        if (sys::file_exists($path)) {
+            return $path;
+        }
+    }
+
+    # Try ./tools/
+    if (sys::file_exists("tools/" . $tool_name)) {
+        return "tools/" . $tool_name;
+    }
+
+    # Try same directory as this tool would be in
+    if (sys::file_exists("./" . $tool_name)) {
+        return "./" . $tool_name;
+    }
+
+    # Try PATH via which
+    my str $which_result = sys::qx("which " . $tool_name . " 2>/dev/null");
+    $which_result = trim_str($which_result);
+    if (length($which_result) > 0 && sys::file_exists($which_result)) {
+        return $which_result;
+    }
+
+    return "";
+}
+
+# Convert a package name to Strada filename convention
+# JSON::PP -> JSON_PP
+func package_to_filename(str $pkg) str {
+    return replace_all($pkg, "::", "_");
+}
+
+func main(int $argc, array @argv) int {
+    if ($argc < 2) {
+        say("Usage: cpan2strada <dist-dir> [output-dir]");
+        say("");
+        say("Convert a CPAN distribution directory to Strada source files.");
+        say("");
+        say("Arguments:");
+        say("  <dist-dir>    Path to unpacked CPAN distribution");
+        say("  [output-dir]  Output directory (default: <dist-dir>/strada-out/)");
+        say("");
+        say("Environment:");
+        say("  STRADA_TOOL_DIR  Directory containing perl2strada and xs2strada");
+        say("");
+        say("Examples:");
+        say("  cpan2strada JSON-PP-4.16");
+        say("  cpan2strada JSON-XS-4.04 /tmp/json-xs-strada");
+        return 1;
+    }
+
+    my str $dist_dir = $argv[1];
+
+    # Remove trailing slash
+    while (ends_with($dist_dir, "/")) {
+        $dist_dir = substr($dist_dir, 0, length($dist_dir) - 1);
+    }
+
+    if (!sys::file_exists($dist_dir) || !sys::is_dir($dist_dir)) {
+        say("Error: directory not found: " . $dist_dir);
+        return 1;
+    }
+
+    # Output directory
+    my str $out_dir = $dist_dir . "/strada-out";
+    if ($argc >= 3) {
+        $out_dir = $argv[2];
+        while (ends_with($out_dir, "/")) {
+            $out_dir = substr($out_dir, 0, length($out_dir) - 1);
+        }
+    }
+
+    # Find tools
+    my str $perl2strada = find_tool("perl2strada");
+    if (length($perl2strada) == 0) {
+        say("Error: cannot find perl2strada tool");
+        say("Set STRADA_TOOL_DIR or ensure perl2strada is in PATH or ./tools/");
+        return 1;
+    }
+
+    my str $xs2strada = find_tool("xs2strada");
+    if (length($xs2strada) == 0) {
+        say("Error: cannot find xs2strada tool");
+        say("Set STRADA_TOOL_DIR or ensure xs2strada is in PATH or ./tools/");
+        return 1;
+    }
+
+    say("cpan2strada: converting " . dist_name_from_path($dist_dir));
+    say("  dist dir:    " . $dist_dir);
+    say("  output dir:  " . $out_dir);
+    say("  perl2strada: " . $perl2strada);
+    say("  xs2strada:   " . $xs2strada);
+    say("");
+
+    # Scan for source files
+    my array @pm_files = ();
+    @pm_files = walk_dir($dist_dir, ".pm", @pm_files);
+    my array @xs_files = ();
+    @xs_files = walk_dir($dist_dir, ".xs", @xs_files);
+
+    my int $pm_count = scalar(@pm_files);
+    my int $xs_count = scalar(@xs_files);
+
+    if ($pm_count == 0 && $xs_count == 0) {
+        say("Error: no .pm or .xs files found in " . $dist_dir);
+        return 1;
+    }
+
+    my str $module_type = "Pure Perl";
+    if ($xs_count > 0) {
+        $module_type = "XS (C extension)";
+    }
+
+    say("Found " . $pm_count . " .pm file(s), " . $xs_count . " .xs file(s) [" . $module_type . "]");
+
+    # List files
+    my int $fi = 0;
+    while ($fi < $pm_count) {
+        say("  .pm: " . $pm_files[$fi]);
+        $fi++;
+    }
+    $fi = 0;
+    while ($fi < $xs_count) {
+        say("  .xs: " . $xs_files[$fi]);
+        $fi++;
+    }
+    say("");
+
+    # Create output directory
+    if (!sys::file_exists($out_dir)) {
+        sys::mkdir($out_dir, 493);
+    }
+
+    # Build a map of XS base names for merging
+    # Key: strada filename (e.g., "XS.strada"), Value: xs source path
+    my hash %xs_map = ();
+    $fi = 0;
+    while ($fi < $xs_count) {
+        my str $xs_path = $xs_files[$fi];
+        my str $xs_name = xs_to_strada_name($xs_path, $dist_dir);
+        $xs_map{$xs_name} = $xs_path;
+        $fi++;
+    }
+
+    # Track output files for build script and report
+    my array @out_files = ();
+    my array @report_lines = ();
+
+    my str $dist_name = dist_name_from_path($dist_dir);
+
+    # Process each .pm file
+    $fi = 0;
+    while ($fi < $pm_count) {
+        my str $pm_path = $pm_files[$fi];
+        my str $strada_name = pm_to_strada_name($pm_path, $dist_dir);
+        my str $out_path = $out_dir . "/" . $strada_name;
+
+        say("Converting " . $pm_path . " -> " . $strada_name);
+
+        # Run perl2strada to a temp file
+        my str $tmp_pm = $out_dir . "/.tmp_pm.strada";
+        my str $cmd = $perl2strada . " " . $pm_path . " " . $tmp_pm;
+        my int $rc = sys::system($cmd);
+        if ($rc != 0) {
+            say("  WARNING: perl2strada failed (exit " . $rc . "), skipping");
+            $fi++;
+            next;
+        }
+
+        # Read converted content
+        my str $pm_content = sys::slurp($tmp_pm);
+        sys::unlink($tmp_pm);
+
+        # Post-process
+        $pm_content = post_process($pm_content);
+
+        # Check if there's a matching .xs file to merge
+        if (exists($xs_map{$strada_name})) {
+            my str $xs_path = $xs_map{$strada_name};
+            say("  Merging XS: " . $xs_path);
+
+            my str $tmp_xs = $out_dir . "/.tmp_xs.strada";
+            my str $xs_cmd = $xs2strada . " " . $xs_path . " " . $tmp_xs;
+            my int $xs_rc = sys::system($xs_cmd);
+            if ($xs_rc == 0) {
+                my str $xs_content = sys::slurp($tmp_xs);
+                sys::unlink($tmp_xs);
+                $pm_content = merge_xs_pm($pm_content, $xs_content);
+            } else {
+                say("  WARNING: xs2strada failed (exit " . $xs_rc . "), using PM only");
+            }
+
+            # Remove from xs_map so we don't process it again
+            delete($xs_map{$strada_name});
+        }
+
+        # Write output
+        sys::spew($out_path, $pm_content);
+
+        # Count markers
+        my array @counts = count_markers($pm_content);
+        my int $review_count = $counts[0];
+        my int $todo_count = $counts[1];
+
+        push(@out_files, $strada_name);
+        my str $report = $strada_name . ": " . $review_count . " REVIEW, " . $todo_count . " TODO (from " . $pm_path . ")";
+        push(@report_lines, $report);
+
+        say("  -> " . $out_path . " (" . $review_count . " REVIEW, " . $todo_count . " TODO)");
+
+        $fi++;
+    }
+
+    # Process any remaining .xs files that had no matching .pm
+    my array @xs_keys = keys(%xs_map);
+    $fi = 0;
+    while ($fi < scalar(@xs_keys)) {
+        my str $strada_name = $xs_keys[$fi];
+        my str $xs_path = $xs_map{$strada_name};
+        my str $out_path = $out_dir . "/" . $strada_name;
+
+        say("Converting " . $xs_path . " -> " . $strada_name . " (XS only)");
+
+        my str $tmp_xs = $out_dir . "/.tmp_xs.strada";
+        my str $xs_cmd = $xs2strada . " " . $xs_path . " " . $tmp_xs;
+        my int $xs_rc = sys::system($xs_cmd);
+        if ($xs_rc != 0) {
+            say("  WARNING: xs2strada failed (exit " . $xs_rc . "), skipping");
+            $fi++;
+            next;
+        }
+
+        my str $xs_content = sys::slurp($tmp_xs);
+        sys::unlink($tmp_xs);
+
+        sys::spew($out_path, $xs_content);
+
+        my array @counts = count_markers($xs_content);
+        my int $review_count = $counts[0];
+        my int $todo_count = $counts[1];
+
+        push(@out_files, $strada_name);
+        my str $report = $strada_name . ": " . $review_count . " REVIEW, " . $todo_count . " TODO (from " . $xs_path . ")";
+        push(@report_lines, $report);
+
+        say("  -> " . $out_path . " (" . $review_count . " REVIEW, " . $todo_count . " TODO)");
+
+        $fi++;
+    }
+
+    say("");
+
+    # Sort output files for build order (shorter names = dependencies first)
+    @out_files = sort_build_order(@out_files);
+
+    # Generate build.sh
+    my str $build_script = "#!/bin/bash\n";
+    $build_script = $build_script . "# Build script for " . $dist_name . " (Strada)\n";
+    $build_script = $build_script . "# Generated by cpan2strada\n";
+    $build_script = $build_script . "\n";
+    $build_script = $build_script . "set -e\n";
+    my str $dollar = chr(36);
+    $build_script = $build_script . "STRADA=" . $dollar . "{STRADA:-./strada}\n";
+    $build_script = $build_script . "\n";
+
+    $fi = 0;
+    while ($fi < scalar(@out_files)) {
+        my str $fname = $out_files[$fi];
+        my str $so_name = replace($fname, "\\.strada$", ".so");
+        $build_script = $build_script . "echo \"Building " . $fname . "...\"\n";
+        $build_script = $build_script . $dollar . "STRADA --shared " . $fname . "\n";
+        $build_script = $build_script . "\n";
+        $fi++;
+    }
+
+    $build_script = $build_script . "echo \"Done. Built " . scalar(@out_files) . " module(s).\"\n";
+
+    my str $build_path = $out_dir . "/build.sh";
+    sys::spew($build_path, $build_script);
+    sys::system("chmod +x " . $build_path);
+    say("Generated " . $build_path);
+
+    # Generate REPORT.txt
+    my str $report = "cpan2strada conversion report for " . $dist_name . "\n";
+    my int $sep_len = 40 + length($dist_name);
+    my str $sep = "";
+    my int $si = 0;
+    while ($si < $sep_len) {
+        $sep = $sep . "=";
+        $si++;
+    }
+    $report = $report . $sep . "\n\n";
+
+    $report = $report . "Source: " . $dist_dir . "\n";
+    $report = $report . "Type:   " . $module_type . "\n";
+    $report = $report . "Files:  " . $pm_count . " .pm, " . $xs_count . " .xs\n";
+    $report = $report . "\n";
+
+    my int $total_review = 0;
+    my int $total_todo = 0;
+
+    $fi = 0;
+    while ($fi < scalar(@report_lines)) {
+        $report = $report . $report_lines[$fi] . "\n";
+        $fi++;
+    }
+
+    # Tally totals from report lines
+    $fi = 0;
+    while ($fi < scalar(@report_lines)) {
+        my str $rline = $report_lines[$fi];
+        # Parse "N REVIEW" from the line
+        if (match($rline, "[0-9]+ REVIEW")) {
+            my array @parts = split(" REVIEW", $rline);
+            my str $before = $parts[0];
+            # Get last number before " REVIEW"
+            my int $colon_pos = index($before, ": ");
+            if ($colon_pos >= 0) {
+                my str $num_str = substr($before, $colon_pos + 2, length($before) - $colon_pos - 2);
+                $total_review = $total_review + ($num_str + 0);
+            }
+        }
+        if (match($rline, "[0-9]+ TODO")) {
+            my array @parts = split(" TODO", $rline);
+            # Get last segment before first " TODO"
+            my str $before = $parts[0];
+            # Find the number right before " TODO" - it's after ", "
+            my int $comma_pos = index($before, ", ");
+            if ($comma_pos >= 0) {
+                my str $num_str = substr($before, $comma_pos + 2, length($before) - $comma_pos - 2);
+                $total_todo = $total_todo + ($num_str + 0);
+            }
+        }
+        $fi++;
+    }
+
+    $report = $report . "\nTotal: " . $total_review . " REVIEW, " . $total_todo . " TODO\n";
+
+    my str $report_path = $out_dir . "/REPORT.txt";
+    sys::spew($report_path, $report);
+    say("Generated " . $report_path);
+
+    say("");
+    say("Conversion complete. Output in " . $out_dir . "/");
+    say("  " . scalar(@out_files) . " .strada file(s) generated");
+    say("  " . $total_review . " REVIEW markers (need manual attention)");
+    say("  " . $total_todo . " TODO markers (missing Strada features)");
+    say("");
+    say("Next steps:");
+    say("  1. Review generated .strada files (search for REVIEW: and TODO:)");
+    say("  2. cd " . $out_dir . " && bash build.sh");
+
+    return 0;
+}

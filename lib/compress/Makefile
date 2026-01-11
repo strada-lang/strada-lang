@@ -13,7 +13,7 @@ $(TARGET): $(SOURCES)
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGET) *.o
 
 test: $(TARGET)
 	@echo "Compression library built: $(TARGET)"

@@ -23,7 +23,7 @@ $(LIB): $(SRC)
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
 clean:
-	rm -f $(LIB)
+	rm -f $(LIB) *.o
 
 # Install to lib directory (relative to strada root)
 install: $(LIB)

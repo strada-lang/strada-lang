@@ -1,0 +1,496 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_nesso.strada - Test suite for the Nesso database model library (v2 - OOP)
+
+use lib "lib";
+use DBI;
+use Nesso;
+use Nesso::Record;
+
+# Custom model class for testing the "class" schema option
+package AdminUser;
+inherit Nesso::Record;
+
+
+# Custom method: check if user is super admin (access_level >= 10)
+func is_super_admin(scalar $self) int {
+    my int $level = $self->{"access_level"} + 0;
+    return $level >= 10 ? 1 : 0;
+}
+
+# Custom method: promote user (increase access level)
+func promote(scalar $self) void {
+    my int $level = $self->{"access_level"} + 0;
+    $self->{"access_level"} = $level + 1;
+    $self->save();
+}
+
+package main;
+
+my int $g_pass = 0;
+my int $g_fail = 0;
+
+func ok(int $cond, str $msg) void {
+    if ($cond) {
+        say("  ok: " . $msg);
+        $g_pass++;
+    } else {
+        say("  FAIL: " . $msg);
+        $g_fail++;
+    }
+}
+
+func main() int {
+    # Connect to in-memory SQLite
+    my scalar $db = DBI::connect("dbi:SQLite::memory:", "", "");
+    if (!defined($db)) {
+        say("FAIL: Could not connect to SQLite");
+        return 1;
+    }
+
+    my scalar $n = Nesso::new($db);
+
+    # Create tables
+    DBI::do_sql($db, "CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, email TEXT, age INTEGER, active INTEGER DEFAULT 1)");
+    DBI::do_sql($db, "CREATE TABLE accounts (id INTEGER PRIMARY KEY, owner TEXT, balance INTEGER)");
+    DBI::do_sql($db, "CREATE TABLE posts (id INTEGER PRIMARY KEY, user_id INTEGER, title TEXT, body TEXT)");
+    DBI::do_sql($db, "CREATE TABLE profiles (id INTEGER PRIMARY KEY, user_id INTEGER, bio TEXT)");
+
+    # Define models
+    $n->define("users", {
+        "table"   => "users",
+        "columns" => ["id", "username", "email", "age", "active"],
+        "primary" => "id"
+    });
+
+    $n->define("accounts", {
+        "table"   => "accounts",
+        "columns" => ["id", "owner", "balance"],
+        "primary" => "id"
+    });
+
+    $n->define("posts", {
+        "table"   => "posts",
+        "columns" => ["id", "user_id", "title", "body"],
+        "primary" => "id"
+    });
+
+    $n->define("profiles", {
+        "table"   => "profiles",
+        "columns" => ["id", "user_id", "bio"],
+        "primary" => "id"
+    });
+
+    # --- Test create + save (INSERT) ---
+    say("Test: create and save (insert)");
+    my scalar $u1 = $n->create("users", {
+        "username" => "alice",
+        "email"    => "alice@example.com",
+        "age"      => 28,
+        "active"   => 1
+    });
+    ok(defined($u1), "create returns a record");
+    ok($u1->{"_model"} eq "users", "record has _model tag");
+    ok($u1->{"username"} eq "alice", "record has correct username");
+
+    my int $id1 = $n->save($u1);
+    ok($id1 > 0, "save returns id > 0");
+    ok($u1->{"id"} == $id1, "record id is set after save");
+
+    # Insert a second user
+    my scalar $u2 = $n->create("users", {
+        "username" => "bob",
+        "email"    => "bob@example.com",
+        "age"      => 35,
+        "active"   => 1
+    });
+    my int $id2 = $n->save($u2);
+    ok($id2 == $id1 + 1, "second insert gets next id");
+
+    # Insert a third user (inactive)
+    my scalar $u3 = $n->create("users", {
+        "username" => "charlie",
+        "email"    => "charlie@example.com",
+        "age"      => 22,
+        "active"   => 0
+    });
+    $n->save($u3);
+
+    # --- Test find ---
+    say("Test: find");
+    my scalar $found = $n->find("users", $id1);
+    ok(defined($found), "find returns a record");
+    ok($found->{"username"} eq "alice", "find returns correct record");
+    ok($found->{"_model"} eq "users", "find tags record with _model");
+
+    my scalar $not_found = $n->find("users", 9999);
+    ok(!defined($not_found), "find returns undef for missing id");
+
+    # --- Test save (UPDATE) ---
+    say("Test: save (update)");
+    $found->{"email"} = "alice_new@example.com";
+    $found->{"age"} = 29;
+    $n->save($found);
+
+    my scalar $updated = $n->find("users", $id1);
+    ok($updated->{"email"} eq "alice_new@example.com", "update changes email");
+    ok($updated->{"age"} + 0 == 29, "update changes age");
+    ok($updated->{"username"} eq "alice", "update preserves unchanged fields");
+
+    # --- Test find_by ---
+    say("Test: find_by");
+    my scalar $by_name = $n->find_by("users", { "username" => "bob" });
+    ok(defined($by_name), "find_by returns a record");
+    ok($by_name->{"email"} eq "bob@example.com", "find_by finds correct record");
+
+    my scalar $by_missing = $n->find_by("users", { "username" => "nonexistent" });
+    ok(!defined($by_missing), "find_by returns undef for no match");
+
+    # --- Test where ---
+    say("Test: where");
+    my scalar $active = $n->where("users", { "active" => 1 });
+    ok(size($active) == 2, "where returns matching records");
+
+    my scalar $inactive = $n->where("users", { "active" => 0 });
+    ok(size($inactive) == 1, "where with active=0 returns 1 record");
+    ok($inactive->[0]->{"username"} eq "charlie", "where returns correct inactive user");
+
+    # --- Test where with directives ---
+    say("Test: where with directives");
+    my scalar $limited = $n->where("users", {
+        "active" => 1,
+        "_order" => "username ASC",
+        "_limit" => 1
+    });
+    ok(size($limited) == 1, "where with _limit returns limited results");
+    ok($limited->[0]->{"username"} eq "alice", "where with _order sorts correctly");
+
+    # --- Test all ---
+    say("Test: all");
+    my scalar $all_users = $n->all("users");
+    ok(size($all_users) == 3, "all returns all records");
+
+    # --- Test count ---
+    say("Test: count");
+    my int $total = $n->count("users", {});
+    ok($total == 3, "count with empty conditions returns total");
+
+    my int $active_count = $n->count("users", { "active" => 1 });
+    ok($active_count == 2, "count with condition returns correct count");
+
+    # --- Test columns ---
+    say("Test: columns");
+    my scalar $cols = $n->columns("users");
+    ok(size($cols) == 5, "columns returns correct number of columns");
+
+    # --- Test query (raw SQL) ---
+    say("Test: query");
+    my scalar $rows = $n->query("SELECT username FROM users WHERE age > ? ORDER BY username", [25]);
+    ok(size($rows) == 2, "query returns correct number of rows");
+    ok($rows->[0]->{"username"} eq "alice", "query returns correct data");
+
+    # --- Test destroy ---
+    say("Test: delete");
+    my scalar $to_delete = $n->find("users", $u3->{"id"});
+    $n->delete($to_delete);
+    my scalar $after_delete = $n->find("users", $u3->{"id"});
+    ok(!defined($after_delete), "delete removes the record");
+    ok($n->count("users", {}) == 2, "count decreases after delete");
+
+    # --- Test transaction (commit) ---
+    say("Test: transaction (commit)");
+    # Set up accounts
+    my scalar $acct1 = $n->create("accounts", { "owner" => "alice", "balance" => 1000 });
+    my scalar $acct2 = $n->create("accounts", { "owner" => "bob", "balance" => 500 });
+    $n->save($acct1);
+    $n->save($acct2);
+
+    my scalar $transfer = func () {
+        my scalar $a = $n->find("accounts", $acct1->{"id"});
+        my scalar $b = $n->find("accounts", $acct2->{"id"});
+        $a->{"balance"} = $a->{"balance"} - 100;
+        $b->{"balance"} = $b->{"balance"} + 100;
+        $n->save($a);
+        $n->save($b);
+    };
+    $n->transaction($transfer);
+
+    my scalar $a_after = $n->find("accounts", $acct1->{"id"});
+    my scalar $b_after = $n->find("accounts", $acct2->{"id"});
+    ok($a_after->{"balance"} + 0 == 900, "transaction commit: balance decreased");
+    ok($b_after->{"balance"} + 0 == 600, "transaction commit: balance increased");
+
+    # --- Test transaction (rollback) ---
+    say("Test: transaction (rollback)");
+    my int $rolled_back = 0;
+    try {
+        my scalar $bad_transfer = func () {
+            my scalar $a = $n->find("accounts", $acct1->{"id"});
+            $a->{"balance"} = $a->{"balance"} - 9999;
+            $n->save($a);
+            throw "insufficient funds";
+        };
+        $n->transaction($bad_transfer);
+    } catch ($e) {
+        $rolled_back = 1;
+        ok($e eq "insufficient funds", "transaction rollback: exception propagated");
+    }
+    ok($rolled_back == 1, "transaction rollback: catch block executed");
+
+    my scalar $a_still = $n->find("accounts", $acct1->{"id"});
+    ok($a_still->{"balance"} + 0 == 900, "transaction rollback: balance unchanged");
+
+    # --- Test relationships ---
+    say("Test: relationships (has_many)");
+
+    # Re-insert charlie for relationship tests
+    my scalar $u_alice = $n->find("users", $id1);
+    my scalar $u_bob = $n->find("users", $id2);
+
+    # Create some posts
+    my scalar $p1 = $n->create("posts", { "user_id" => $id1, "title" => "Alice Post 1", "body" => "Hello" });
+    $n->save($p1);
+    my scalar $p2 = $n->create("posts", { "user_id" => $id1, "title" => "Alice Post 2", "body" => "World" });
+    $n->save($p2);
+    my scalar $p3 = $n->create("posts", { "user_id" => $id2, "title" => "Bob Post 1", "body" => "Hi" });
+    $n->save($p3);
+
+    # Define relationships
+    $n->has_many("users", "posts", "user_id");
+    $n->belongs_to("posts", "author", "users", "user_id");
+    $n->has_one("users", "profile", "profiles", "user_id");
+
+    # Test has_many: user -> posts
+    my scalar $alice_posts = $n->related($u_alice, "posts");
+    ok(size($alice_posts) == 2, "has_many: alice has 2 posts");
+
+    my scalar $bob_posts = $n->related($u_bob, "posts");
+    ok(size($bob_posts) == 1, "has_many: bob has 1 post");
+    ok($bob_posts->[0]->{"title"} eq "Bob Post 1", "has_many: bob post has correct title");
+
+    # Test belongs_to: post -> author
+    say("Test: relationships (belongs_to)");
+    my scalar $p1_found = $n->find("posts", $p1->{"id"});
+    my scalar $author = $n->related($p1_found, "author");
+    ok(defined($author), "belongs_to: author found");
+    ok($author->{"username"} eq "alice", "belongs_to: correct author");
+
+    my scalar $p3_found = $n->find("posts", $p3->{"id"});
+    my scalar $author2 = $n->related($p3_found, "author");
+    ok($author2->{"username"} eq "bob", "belongs_to: bob is author of his post");
+
+    # Test has_one: user -> profile
+    say("Test: relationships (has_one)");
+
+    # No profile yet - should return undef
+    my scalar $no_profile = $n->related($u_alice, "profile");
+    ok(!defined($no_profile), "has_one: returns undef when no profile");
+
+    # Create a profile for alice
+    my scalar $prof = $n->create("profiles", { "user_id" => $id1, "bio" => "I am Alice" });
+    $n->save($prof);
+
+    my scalar $alice_profile = $n->related($u_alice, "profile");
+    ok(defined($alice_profile), "has_one: profile found after creation");
+    ok($alice_profile->{"bio"} eq "I am Alice", "has_one: correct bio");
+
+    # Bob has no profile
+    my scalar $bob_profile = $n->related($u_bob, "profile");
+    ok(!defined($bob_profile), "has_one: bob has no profile");
+
+    # Test unknown relation throws
+    say("Test: relationships (unknown relation)");
+    my int $threw = 0;
+    try {
+        $n->related($u_alice, "nonexistent");
+    } catch ($e) {
+        $threw = 1;
+        ok($e eq "Nesso: unknown relation 'nonexistent' on model 'users'", "related throws on unknown relation");
+    }
+    ok($threw == 1, "related throws for unknown relation name");
+
+    # --- Test clone ---
+    say("Test: clone");
+    my scalar $db2 = DBI::connect("dbi:SQLite::memory:", "", "");
+    DBI::do_sql($db2, "CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, email TEXT, age INTEGER, active INTEGER DEFAULT 1)");
+    DBI::do_sql($db2, "CREATE TABLE posts (id INTEGER PRIMARY KEY, user_id INTEGER, title TEXT, body TEXT)");
+    DBI::do_sql($db2, "CREATE TABLE profiles (id INTEGER PRIMARY KEY, user_id INTEGER, bio TEXT)");
+
+    my scalar $n2 = $n->clone($db2);
+
+    # Clone should have schemas
+    my scalar $clone_cols = $n2->columns("users");
+    ok(size($clone_cols) == 5, "clone: schemas copied");
+
+    # Clone db should be empty
+    my scalar $clone_users = $n2->all("users");
+    ok(size($clone_users) == 0, "clone: new db is empty");
+
+    # Insert into clone should not affect original
+    my scalar $cu = $n2->create("users", { "username" => "clone_user", "email" => "c@c.com", "age" => 99, "active" => 1 });
+    $n2->save($cu);
+    ok($n2->count("users", {}) == 1, "clone: insert into clone works");
+    ok($n->count("users", {}) == 2, "clone: original unaffected");
+
+    # Clone should have relationships
+    my scalar $clone_u = $n2->find("users", $cu->{"id"});
+    my scalar $clone_posts = $n2->related($clone_u, "posts");
+    ok(size($clone_posts) == 0, "clone: relationships work (no posts yet)");
+
+    DBI::disconnect($db2);
+
+    # --- Test set_db ---
+    say("Test: set_db");
+    my scalar $db3 = DBI::connect("dbi:SQLite::memory:", "", "");
+    DBI::do_sql($db3, "CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, email TEXT, age INTEGER, active INTEGER DEFAULT 1)");
+
+    # Create a fresh Nesso for set_db test
+    my scalar $n3 = Nesso::new($db3);
+    $n3->define("users", {
+        "table"   => "users",
+        "columns" => ["id", "username", "email", "age", "active"],
+        "primary" => "id"
+    });
+
+    my scalar $su = $n3->create("users", { "username" => "swap_user", "email" => "s@s.com", "age" => 50, "active" => 1 });
+    $n3->save($su);
+    ok($n3->count("users", {}) == 1, "set_db: initial db has 1 user");
+
+    # Swap to another db
+    my scalar $db4 = DBI::connect("dbi:SQLite::memory:", "", "");
+    DBI::do_sql($db4, "CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, email TEXT, age INTEGER, active INTEGER DEFAULT 1)");
+    $n3->set_db($db4);
+    ok($n3->count("users", {}) == 0, "set_db: swapped db is empty");
+
+    # Verify get_db returns the new handle
+    my scalar $got_db = $n3->get_db();
+    ok(defined($got_db), "get_db: returns db handle");
+
+    DBI::disconnect($db3);
+    DBI::disconnect($db4);
+
+    # --- Test ActiveRecord-style methods ---
+    say("Test: ActiveRecord-style methods");
+
+    # Test $record->save() for INSERT
+    my scalar $ar_user = $n->create("users", { "username" => "david", "email" => "david@example.com", "age" => 40, "active" => 1 });
+    ok($ar_user->is_new() == 1, "is_new: true before save");
+    my int $ar_id = $ar_user->save();
+    ok($ar_id > 0, "record->save() inserts and returns id");
+    ok($ar_user->is_new() == 0, "is_new: false after save");
+    ok($ar_user->id() == $ar_id, "record->id() returns primary key");
+    ok($ar_user->model() eq "users", "record->model() returns model name");
+
+    # Test $record->save() for UPDATE
+    $ar_user->{"email"} = "david_updated@example.com";
+    $ar_user->save();
+    my scalar $ar_check = $n->find("users", $ar_id);
+    ok($ar_check->{"email"} eq "david_updated@example.com", "record->save() updates");
+
+    # Test $record->update()
+    $ar_user->update({ "age" => 41, "email" => "david41@example.com" });
+    my scalar $ar_check2 = $n->find("users", $ar_id);
+    ok($ar_check2->{"age"} + 0 == 41, "record->update() changes age");
+    ok($ar_check2->{"email"} eq "david41@example.com", "record->update() changes email");
+
+    # Test $record->reload()
+    $ar_user->{"email"} = "not_saved@example.com";
+    $ar_user->reload();
+    ok($ar_user->{"email"} eq "david41@example.com", "record->reload() restores from db");
+
+    # Test $record->related()
+    my scalar $ar_post = $n->create("posts", { "user_id" => $ar_id, "title" => "David's Post", "body" => "Content" });
+    $ar_post->save();
+    my scalar $ar_posts = $ar_user->related("posts");
+    ok(size($ar_posts) == 1, "record->related() returns related records");
+    ok($ar_posts->[0]->{"title"} eq "David's Post", "record->related() correct data");
+
+    # Test $record->delete()
+    my int $pre_count = $n->count("users", {});
+    $ar_user->delete();
+    my int $post_count = $n->count("users", {});
+    ok($post_count == $pre_count - 1, "record->delete() removes record");
+
+    # --- Test custom model classes ---
+    say("Test: custom model classes");
+
+    # Create a table for admins
+    DBI::do_sql($db, "CREATE TABLE admins (id INTEGER PRIMARY KEY, username TEXT, email TEXT, access_level INTEGER)");
+
+    # Define model with custom class
+    $n->define("admins", {
+        "table"   => "admins",
+        "columns" => ["id", "username", "email", "access_level"],
+        "primary" => "id",
+        "class"   => "AdminUser"
+    });
+
+    # Create an admin using Nesso
+    my scalar $admin = $n->create("admins", { "username" => "superadmin", "email" => "admin@example.com", "access_level" => 10 });
+    ok(isa($admin, "AdminUser") == 1, "custom class: create returns AdminUser");
+    ok(isa($admin, "Nesso::Record") == 1, "custom class: AdminUser isa Nesso::Record");
+
+    # Test inherited methods work
+    my int $admin_id = $admin->save();
+    ok($admin_id > 0, "custom class: inherited save() works");
+    ok($admin->model() eq "admins", "custom class: inherited model() works");
+
+    # Test custom method
+    ok($admin->is_super_admin() == 1, "custom class: custom is_super_admin() works");
+
+    # Test find returns custom class
+    my scalar $found_admin = $n->find("admins", $admin_id);
+    ok(isa($found_admin, "AdminUser") == 1, "custom class: find returns AdminUser");
+    ok($found_admin->is_super_admin() == 1, "custom class: found record has custom methods");
+
+    # Test where returns custom class
+    my scalar $all_admins = $n->where("admins", {});
+    ok(size($all_admins) == 1, "custom class: where returns array");
+    ok(isa($all_admins->[0], "AdminUser") == 1, "custom class: where results are AdminUser");
+
+    # Test all returns custom class
+    my scalar $all_admins2 = $n->all("admins");
+    ok(isa($all_admins2->[0], "AdminUser") == 1, "custom class: all results are AdminUser");
+
+    # Test find_by returns custom class
+    my scalar $admin_by_name = $n->find_by("admins", { "username" => "superadmin" });
+    ok(isa($admin_by_name, "AdminUser") == 1, "custom class: find_by returns AdminUser");
+
+    # Test custom promote method
+    $found_admin->promote();
+    my scalar $promoted = $n->find("admins", $admin_id);
+    ok($promoted->{"access_level"} + 0 == 11, "custom class: promote() increases access_level");
+
+    # Test model without custom class still works
+    my scalar $regular_user = $n->find("users", $id1);
+    ok(isa($regular_user, "Nesso::Record") == 1, "regular model: still Nesso::Record");
+    ok(isa($regular_user, "AdminUser") == 0, "regular model: not AdminUser");
+
+    # --- Summary ---
+    DBI::disconnect($db);
+
+    say("");
+    say("Results: " . $g_pass . " passed, " . $g_fail . " failed");
+    if ($g_fail == 0) {
+        say("PASS: All Nesso tests passed");
+    } else {
+        say("FAIL: Some Nesso tests failed");
+    }
+
+    return $g_fail;
+}

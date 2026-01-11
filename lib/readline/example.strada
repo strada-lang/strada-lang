@@ -1,0 +1,43 @@
+#!/usr/bin/env strada
+# Example: Using the readline library
+
+use lib "lib";
+import_lib "readline.so";
+
+func main() int {
+    say("Readline Example - type 'quit' to exit");
+    say("Try: arrow keys, Ctrl+A/E, Ctrl+R for history search");
+    say("");
+
+    # Set max history size
+    readline::stifle_history(100);
+
+    while (1) {
+        my str $line = readline::readline("example> ");
+
+        # EOF (Ctrl+D)
+        if (!defined($line)) {
+            say("");
+            last;
+        }
+
+        # Skip empty lines
+        if ($line eq "") {
+            next;
+        }
+
+        # Add to history
+        readline::add_history($line);
+
+        # Check for quit
+        if ($line eq "quit" || $line eq "exit") {
+            say("Goodbye!");
+            last;
+        }
+
+        # Echo the line
+        say("You typed: " . $line);
+    }
+
+    return 0;
+}

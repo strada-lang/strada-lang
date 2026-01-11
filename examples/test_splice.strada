@@ -1,0 +1,45 @@
+func main() int {
+    # splice(@arr, offset, length) - remove elements
+    my array @a = (1, 2, 3, 4, 5);
+    my array @removed = splice(@a, 1, 2);
+    # @a should be (1, 4, 5), @removed should be (2, 3)
+    if (scalar(@a) != 3) {
+        say("FAIL: splice remove, arr len = " . scalar(@a));
+        return 1;
+    }
+    if ($a[0] != 1 || $a[1] != 4 || $a[2] != 5) {
+        say("FAIL: splice remove, arr = " . $a[0] . "," . $a[1] . "," . $a[2]);
+        return 1;
+    }
+    if (scalar(@removed) != 2 || $removed[0] != 2 || $removed[1] != 3) {
+        say("FAIL: splice remove, removed = " . $removed[0] . "," . $removed[1]);
+        return 1;
+    }
+
+    # splice(@arr, offset) - remove from offset to end
+    my array @b = (10, 20, 30, 40, 50);
+    my array @tail = splice(@b, 3);
+    if (scalar(@b) != 3 || $b[2] != 30) {
+        say("FAIL: splice to end, arr len = " . scalar(@b));
+        return 1;
+    }
+    if (scalar(@tail) != 2 || $tail[0] != 40 || $tail[1] != 50) {
+        say("FAIL: splice to end, removed = " . scalar(@tail));
+        return 1;
+    }
+
+    # splice with negative offset
+    my array @c = (1, 2, 3, 4, 5);
+    my array @neg = splice(@c, -2, 1);
+    if (scalar(@c) != 4 || $c[3] != 5) {
+        say("FAIL: negative offset");
+        return 1;
+    }
+    if (scalar(@neg) != 1 || $neg[0] != 4) {
+        say("FAIL: negative offset removed");
+        return 1;
+    }
+
+    say("All splice tests passed");
+    return 0;
+}

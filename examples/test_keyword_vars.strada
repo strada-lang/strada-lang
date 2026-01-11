@@ -1,0 +1,68 @@
+/*
+ * Test: Keyword variable names
+ * Variables can use names that are keywords when preceded by sigil
+ * e.g., $next, $last, $for, $lt, $hash, etc.
+ */
+
+func main() int {
+    # Loop control keywords as variable names
+    my int $next = 10;
+    my int $last = 20;
+
+    # String comparison operators as variable names
+    my str $lt = "less than";
+    my str $gt = "greater than";
+    my str $eq = "equal";
+    my str $ne = "not equal";
+
+    # Type keywords as variable names
+    my int $hash = 42;
+    my int $int = 100;
+    my str $str = "string";
+
+    # Control flow keywords as variable names
+    my str $for = "for loop";
+    my str $while = "while loop";
+    my str $if = "conditional";
+
+    # Test they can be used in expressions
+    my int $sum = $next + $last + $hash + $int;
+    if ($sum != 172) {
+        say("FAIL: sum calculation wrong");
+        return 1;
+    }
+
+    # Test actual keywords still work
+    my int $i = 0;
+    while ($i < 5) {
+        $i = $i + 1;
+        if ($i == 2) {
+            next;  # Keyword still works
+        }
+        if ($i == 4) {
+            last;  # Keyword still works
+        }
+    }
+    if ($i != 4) {
+        say("FAIL: loop control keywords broken");
+        return 1;
+    }
+
+    # Test string comparison operators still work
+    if ($lt lt "more") {
+        # lt operator still works
+    } else {
+        say("FAIL: lt operator broken");
+        return 1;
+    }
+
+    if ($gt gt "abc") {
+        # gt operator still works
+    } else {
+        say("FAIL: gt operator broken");
+        return 1;
+    }
+
+    say("SUCCESS");
+    return 0;
+}

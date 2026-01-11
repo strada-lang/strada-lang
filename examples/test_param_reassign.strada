@@ -1,0 +1,100 @@
+package main;
+
+# Test that function parameter reassignment works correctly
+# without corrupting the caller's variables
+
+func modify_param(str $text) str {
+    # Reassign the parameter - this should NOT affect caller's value
+    $text = $text . " modified";
+    return $text;
+}
+
+func multiple_reassigns(str $s) str {
+    # Multiple reassignments in a loop
+    my int $i = 0;
+    while ($i < 3) {
+        $s = $s . "X";
+        $i = $i + 1;
+    }
+    return $s;
+}
+
+func test_caller_value_preserved() int {
+    my str $original = "hello";
+    my str $result = modify_param($original);
+
+    # Original should be unchanged
+    if ($original ne "hello") {
+        say("FAIL: original was modified to: " . $original);
+        return 1;
+    }
+
+    # Result should have modification
+    if ($result ne "hello modified") {
+        say("FAIL: result wrong: " . $result);
+        return 1;
+    }
+
+    return 0;
+}
+
+func test_multiple_calls() int {
+    my str $base = "test";
+
+    # Call function multiple times with same value
+    my str $r1 = modify_param($base);
+    my str $r2 = modify_param($base);
+    my str $r3 = modify_param($base);
+
+    # Base should still be unchanged
+    if ($base ne "test") {
+        say("FAIL: base was modified to: " . $base);
+        return 1;
+    }
+
+    # All results should be the same
+    if ($r1 ne "test modified" || $r2 ne "test modified" || $r3 ne "test modified") {
+        say("FAIL: results differ");
+        return 1;
+    }
+
+    return 0;
+}
+
+func test_loop_reassign() int {
+    my str $input = "A";
+    my str $result = multiple_reassigns($input);
+
+    # Input should be unchanged
+    if ($input ne "A") {
+        say("FAIL: input was modified to: " . $input);
+        return 1;
+    }
+
+    # Result should have all modifications
+    if ($result ne "AXXX") {
+        say("FAIL: result wrong: " . $result);
+        return 1;
+    }
+
+    return 0;
+}
+
+func main() int {
+    my int $failed = 0;
+
+    my int $r1 = test_caller_value_preserved();
+    if ($r1 != 0) { $failed = 1; }
+
+    my int $r2 = test_multiple_calls();
+    if ($r2 != 0) { $failed = 1; }
+
+    my int $r3 = test_loop_reassign();
+    if ($r3 != 0) { $failed = 1; }
+
+    if ($failed == 0) {
+        say("All parameter reassignment tests passed");
+    }
+
+    return $failed;
+}

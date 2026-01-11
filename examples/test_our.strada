@@ -1,0 +1,138 @@
+# Test: our variable declarations (package-scoped globals)
+# Tests that 'our' variables work via the global registry
+
+our int $count = 0;
+our str $name = "hello";
+our int $no_init;
+
+package Config;
+our str $host = "localhost";
+our int $port = 8080;
+
+package main;
+
+func check_count() void {
+    # Cross-function access to our variable
+    if ($count == 0) {
+        say("ok 1 - our int with init");
+    } else {
+        say("not ok 1");
+    }
+}
+
+func modify_count() void {
+    # Modify our variable from another function
+    $count = 42;
+}
+
+func check_name() void {
+    if ($name eq "hello") {
+        say("ok 2 - our str with init");
+    } else {
+        say("not ok 2 - got: " . $name);
+    }
+}
+
+func check_no_init() void {
+    # our without init should return undef
+    if (defined($no_init) == 0) {
+        say("ok 3 - our without init is undef");
+    } else {
+        say("not ok 3");
+    }
+}
+
+func check_package_our() void {
+    # Access our vars declared in Config package via global registry
+    my scalar $h = sys::global_get("Config::host");
+    my scalar $p = sys::global_get("Config::port");
+    if ($h eq "localhost") {
+        say("ok 4 - package our str");
+    } else {
+        say("not ok 4 - got: " . $h);
+    }
+    if ($p == 8080) {
+        say("ok 5 - package our int");
+    } else {
+        say("not ok 5");
+    }
+}
+
+func check_assignment() void {
+    modify_count();
+    if ($count == 42) {
+        say("ok 6 - our assignment from function");
+    } else {
+        say("not ok 6 - got: " . $count);
+    }
+}
+
+func check_concat() void {
+    # String concat with our vars (tests needs_temp_cleanup)
+    my str $msg = "name=" . $name;
+    if ($msg eq "name=hello") {
+        say("ok 7 - string concat with our var");
+    } else {
+        say("not ok 7 - got: " . $msg);
+    }
+}
+
+func check_bool_context() void {
+    # Boolean context with our vars
+    if ($count) {
+        say("ok 8 - our var in bool context (truthy)");
+    } else {
+        say("not ok 8");
+    }
+}
+
+func check_compound_assign() void {
+    $count = 10;
+    $count += 5;
+    if ($count == 15) {
+        say("ok 9 - our var += operator");
+    } else {
+        say("not ok 9 - got: " . $count);
+    }
+
+    $count -= 3;
+    if ($count == 12) {
+        say("ok 10 - our var -= operator");
+    } else {
+        say("not ok 10 - got: " . $count);
+    }
+
+    $name = "hi";
+    $name .= " world";
+    if ($name eq "hi world") {
+        say("ok 11 - our var .= operator");
+    } else {
+        say("not ok 11 - got: " . $name);
+    }
+}
+
+func check_arithmetic() void {
+    # Use our var in arithmetic expression
+    $count = 10;
+    my int $result = $count + 5;
+    if ($result == 15) {
+        say("ok 12 - our var in arithmetic");
+    } else {
+        say("not ok 12 - got: " . $result);
+    }
+}
+
+func main() int {
+    check_count();
+    check_name();
+    check_no_init();
+    check_package_our();
+    check_assignment();
+    check_concat();
+    check_bool_context();
+    check_compound_assign();
+    check_arithmetic();
+
+    say("All our variable tests passed");
+    return 0;
+}

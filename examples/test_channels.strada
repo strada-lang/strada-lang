@@ -1,0 +1,132 @@
+#!/usr/bin/env strada
+# Test suite for async::channel inter-thread communication
+
+async func producer(scalar $ch, int $count) int {
+    for (my int $i = 1; $i <= $count; $i++) {
+        async::send($ch, $i);
+    }
+    return $count;
+}
+
+async func consumer(scalar $ch, int $expected) int {
+    my int $sum = 0;
+    my int $received = 0;
+    while ($received < $expected) {
+        my int $val = async::recv($ch);
+        if (defined($val)) {
+            $sum = $sum + $val;
+            $received = $received + 1;
+        }
+    }
+    return $sum;
+}
+
+async func slow_producer(scalar $ch, int $id, int $delay_ms) int {
+    sys::usleep($delay_ms * 1000);
+    async::send($ch, "producer " . $id . " done");
+    return $id;
+}
+
+func main() int {
+    say("=== Channel Test Suite ===\n");
+
+    # Test 1: Basic send/recv
+    say("Test 1: Basic send/recv");
+    my scalar $ch1 = async::channel();
+    async::send($ch1, "hello");
+    async::send($ch1, "world");
+    my str $v1 = async::recv($ch1);
+    my str $v2 = async::recv($ch1);
+    say("  Received: " . $v1 . ", " . $v2);
+
+    # Test 2: Channel length
+    say("\nTest 2: Channel length");
+    my scalar $ch2 = async::channel();
+    say("  Empty channel len: " . async::len($ch2));
+    async::send($ch2, 1);
+    async::send($ch2, 2);
+    async::send($ch2, 3);
+    say("  After 3 sends: " . async::len($ch2));
+    async::recv($ch2);
+    say("  After 1 recv: " . async::len($ch2));
+
+    # Test 3: Bounded channel (capacity)
+    say("\nTest 3: Bounded channel");
+    my scalar $ch3 = async::channel(2);  # Capacity of 2
+    my int $sent1 = async::try_send($ch3, "a");
+    my int $sent2 = async::try_send($ch3, "b");
+    my int $sent3 = async::try_send($ch3, "c");  # Should fail (full)
+    say("  Sent a: " . $sent1 . ", b: " . $sent2 . ", c: " . $sent3);
+    say("  (c should be 0 - channel full)");
+
+    # Test 4: try_recv on empty channel
+    say("\nTest 4: try_recv (non-blocking)");
+    my scalar $ch4 = async::channel();
+    my scalar $empty = async::try_recv($ch4);
+    if (!defined($empty)) {
+        say("  try_recv on empty returned undef (correct)");
+    } else {
+        say("  ERROR: expected undef");
+    }
+    async::send($ch4, 42);
+    my int $got = async::try_recv($ch4);
+    say("  try_recv after send: " . $got);
+
+    # Test 5: Producer/consumer across threads
+    say("\nTest 5: Producer/consumer (async)");
+    my scalar $ch5 = async::channel();
+    my scalar $prod = producer($ch5, 5);      # Send 1,2,3,4,5
+    my scalar $cons = consumer($ch5, 5);      # Receive 5 items
+    my int $prod_count = await $prod;
+    my int $sum = await $cons;
+    say("  Producer sent: " . $prod_count . " items");
+    say("  Consumer sum: " . $sum . " (expected 15)");
+
+    # Test 6: Multiple producers
+    say("\nTest 6: Multiple producers");
+    my scalar $ch6 = async::channel();
+    my scalar $p1 = slow_producer($ch6, 1, 30);
+    my scalar $p2 = slow_producer($ch6, 2, 10);
+    my scalar $p3 = slow_producer($ch6, 3, 20);
+    # Receive in completion order
+    my str $r1 = async::recv($ch6);
+    my str $r2 = async::recv($ch6);
+    my str $r3 = async::recv($ch6);
+    say("  First: " . $r1);
+    say("  Second: " . $r2);
+    say("  Third: " . $r3);
+    await $p1;
+    await $p2;
+    await $p3;
+
+    # Test 7: Close channel
+    say("\nTest 7: Close channel");
+    my scalar $ch7 = async::channel();
+    async::send($ch7, "before close");
+    async::close($ch7);
+    if (async::is_closed($ch7)) {
+        say("  Channel is closed (correct)");
+    }
+    # Can still receive items that were sent before close
+    my str $before = async::recv($ch7);
+    say("  Received before close: " . $before);
+    # Receiving from closed empty channel returns undef
+    my scalar $after = async::recv($ch7);
+    if (!defined($after)) {
+        say("  Recv from closed empty channel: undef (correct)");
+    }
+
+    # Test 8: Send to closed channel (should throw)
+    say("\nTest 8: Send to closed channel");
+    my scalar $ch8 = async::channel();
+    async::close($ch8);
+    try {
+        async::send($ch8, "test");
+        say("  ERROR: should have thrown");
+    } catch ($e) {
+        say("  Caught: " . $e);
+    }
+
+    say("\n=== All channel tests passed! ===");
+    return 0;
+}

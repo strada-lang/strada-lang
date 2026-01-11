@@ -1,0 +1,106 @@
+#!/usr/bin/env strada
+# Test clone() deep copy for memory leaks
+# Run: valgrind --leak-check=full ./test_clone
+
+func main() int {
+    say("Testing clone for memory leaks...");
+    my int $iterations = 100;
+
+    # Test clone of simple hash
+    say("  clone simple hash...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my hash %orig = ();
+        $orig{"name"} = "Alice";
+        $orig{"age"} = "30";
+        $orig{"city"} = "NYC";
+        my scalar $cloned = clone(\%orig);
+        my str $name = $cloned->{"name"};
+        if ($name ne "Alice") {
+            say("    FAIL: clone hash name = " . $name);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test clone of array ref
+    say("  clone array ref...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $orig = [1, 2, 3, 4, 5];
+        my scalar $cloned = clone($orig);
+        my int $val = $cloned->[2];
+        if ($val != 3) {
+            say("    FAIL: clone array val = " . $val);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test clone of nested hash
+    say("  clone nested hash...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $orig = {
+            "user" => {"name" => "Bob", "age" => 25},
+            "meta" => {"active" => 1}
+        };
+        my scalar $cloned = clone($orig);
+        my str $name = $cloned->{"user"}->{"name"};
+        if ($name ne "Bob") {
+            say("    FAIL: clone nested = " . $name);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test clone of nested array
+    say("  clone nested array...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $orig = [[1, 2], [3, 4], [5, 6]];
+        my scalar $cloned = clone($orig);
+        my scalar $inner = $cloned->[1];
+        my int $val = $inner->[0];
+        if ($val != 3) {
+            say("    FAIL: clone nested array = " . $val);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test clone independence (mutation doesn't affect original)
+    say("  clone independence...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %orig = ();
+        $orig{"x"} = "original";
+        my scalar $cloned = clone(\%orig);
+        $cloned->{"x"} = "modified";
+        if ($orig{"x"} ne "original") {
+            say("    FAIL: clone not independent");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test clone of string/int/num scalars
+    say("  clone scalars...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = "hello_" . $i;
+        my scalar $cs = clone(\$s);
+        my int $n = 42;
+        my scalar $cn = clone(\$n);
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All clone tests passed!");
+    return 0;
+}

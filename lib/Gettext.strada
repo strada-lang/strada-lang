@@ -1,0 +1,469 @@
+=head1 NAME
+
+Gettext - GNU gettext internationalization library for Strada
+
+=head1 SYNOPSIS
+
+    use lib "lib";
+    use Gettext;
+
+    Gettext::init("myapp", "./locale");
+    say(Gettext::_("Hello, world!"));
+
+    # Plural forms
+    my int $count = 5;
+    say(Gettext::n("%d file", "%d files", $count));
+
+    # Context-aware translation
+    say(Gettext::p("menu", "File"));
+    say(Gettext::p("verb", "File"));
+
+=head1 DESCRIPTION
+
+Gettext provides functions for translating strings using GNU gettext
+and .mo message catalogs. It supports:
+
+=over 4
+
+=item * Basic string translation
+
+=item * Plural forms
+
+=item * Context-aware translation (pgettext)
+
+=item * Multiple text domains
+
+=item * Runtime locale switching
+
+=back
+
+B<Directory structure for translations:>
+
+    locale/
+      de/LC_MESSAGES/myapp.mo
+      fr/LC_MESSAGES/myapp.mo
+      es/LC_MESSAGES/myapp.mo
+
+B<Compile with:>
+
+    ./stradac myapp.strada myapp.c
+    gcc -o myapp myapp.c lib/Gettext/gettext_wrapper.c runtime/strada_runtime.c \
+        -Iruntime -ldl -lm
+
+=head1 FUNCTIONS
+
+=head2 init($domain, $localedir)
+
+Initialize gettext with a text domain and locale directory. Locale is
+read from environment variables (LANG, LC_ALL, etc.).
+
+    Gettext::init("myapp", "./locale");
+
+=head2 init_locale($domain, $localedir, $locale)
+
+Initialize with an explicit locale.
+
+    Gettext::init_locale("myapp", "./locale", "de_DE.UTF-8");
+
+=head2 _($msgid) / gettext($msgid)
+
+Translate a string. This is the primary translation function.
+
+    say(Gettext::_("Hello"));
+
+=head2 n($singular, $plural, $n) / ngettext(...)
+
+Translate with plural forms. The correct form is chosen based on $n.
+
+    say(Gettext::n("%d file", "%d files", $count));
+
+=head2 p($context, $msgid) / pgettext(...)
+
+Context-aware translation. Use when the same string has different
+meanings in different contexts.
+
+    Gettext::p("menu", "File");   # File menu
+    Gettext::p("verb", "File");   # To file (something)
+
+=head2 d($domain, $msgid) / dgettext(...)
+
+Translate from a specific text domain.
+
+=head2 dn($domain, $singular, $plural, $n) / dngettext(...)
+
+Plural translation from a specific domain.
+
+=head2 np($context, $singular, $plural, $n) / npgettext(...)
+
+Context-aware plural translation.
+
+=head2 N($msgid)
+
+Mark string for extraction but don't translate. The string will be
+extracted by xgettext but translated at runtime.
+
+    my str $msg = Gettext::N("Error message");
+    # ... later ...
+    say(Gettext::_($msg));
+
+=head2 f1($msgid, $arg1) / f2(...) / f3(...)
+
+Translate and format with sprintf.
+
+    say(Gettext::f1("Hello, %s!", $name));
+
+=head2 nf1($singular, $plural, $n, $arg1) / nf2(...)
+
+Translate plural and format with sprintf.
+
+    say(Gettext::nf1("%d file deleted", "%d files deleted", $count, $count));
+
+=head2 set_domain($domain)
+
+Change the current text domain.
+
+=head2 get_domain()
+
+Get the current text domain.
+
+=head2 add_domain($domain, $localedir)
+
+Add another domain/directory binding without changing current domain.
+
+=head2 set_locale($locale)
+
+Change locale at runtime.
+
+    Gettext::set_locale("fr_FR.UTF-8");
+
+=head2 get_locale()
+
+Get current locale.
+
+=head2 has_gettext()
+
+Check if gettext is available (returns 1 or 0).
+
+=head1 EXAMPLE
+
+    use lib "lib";
+    use Gettext;
+
+    Gettext::init("myapp", "./locale");
+
+    # Basic translation
+    say(Gettext::_("Welcome to the application"));
+
+    # Plural forms
+    my int $files = 3;
+    say(Gettext::nf1("%d file found", "%d files found", $files, $files));
+
+    # Switch language at runtime
+    Gettext::set_locale("de_DE.UTF-8");
+    say(Gettext::_("Welcome to the application"));
+
+=head1 SEE ALSO
+
+L<POSIX>
+
+=cut
+
+package Gettext;
+
+# ============================================================================
+# External C Function Declarations
+# ============================================================================
+
+extern "C" {
+    # Locale functions
+    func gt_setlocale(int $category, int $locale) int;
+
+    # Core gettext functions
+    func gt_textdomain(int $domain) int;
+    func gt_bindtextdomain(int $domain, int $dirname) int;
+    func gt_bind_textdomain_codeset(int $domain, int $codeset) int;
+    func gt_gettext(int $msgid) int;
+    func gt_dgettext(int $domain, int $msgid) int;
+    func gt_ngettext(int $singular, int $plural, int $n) int;
+    func gt_dngettext(int $domain, int $singular, int $plural, int $n) int;
+    func gt_dcgettext(int $domain, int $msgid, int $category) int;
+
+    # Utility functions
+    func gt_has_gettext() int;
+    func gt_LC_ALL() int;
+    func gt_LC_COLLATE() int;
+    func gt_LC_CTYPE() int;
+    func gt_LC_MESSAGES() int;
+    func gt_LC_MONETARY() int;
+    func gt_LC_NUMERIC() int;
+    func gt_LC_TIME() int;
+}
+
+# ============================================================================
+# Module State
+# ============================================================================
+
+my str $_gt_domain = "";
+my str $_gt_locale = "";
+
+# ============================================================================
+# High-Level API
+# ============================================================================
+
+# Initialize gettext with domain and locale directory
+# Example: Gettext::init("myapp", "./locale")
+func init(str $domain, str $localedir) void {
+    # Set locale from environment
+    my int $lc_all = gt_LC_ALL();
+    my int $empty = c::str_to_ptr("");
+    gt_setlocale($lc_all, $empty);
+    c::free($empty);
+
+    # Bind domain to directory
+    my int $domain_ptr = c::str_to_ptr($domain);
+    my int $localedir_ptr = c::str_to_ptr($localedir);
+    gt_bindtextdomain($domain_ptr, $localedir_ptr);
+
+    # Use UTF-8 encoding
+    my int $utf8 = c::str_to_ptr("UTF-8");
+    gt_bind_textdomain_codeset($domain_ptr, $utf8);
+    c::free($utf8);
+
+    # Set as current domain
+    gt_textdomain($domain_ptr);
+
+    c::free($domain_ptr);
+    c::free($localedir_ptr);
+
+    $_gt_domain = $domain;
+}
+
+# Initialize with explicit locale
+# Example: Gettext::init_locale("myapp", "./locale", "de_DE.UTF-8")
+func init_locale(str $domain, str $localedir, str $locale) void {
+    # Set explicit locale
+    my int $lc_all = gt_LC_ALL();
+    my int $locale_ptr = c::str_to_ptr($locale);
+    gt_setlocale($lc_all, $locale_ptr);
+    c::free($locale_ptr);
+
+    # Bind domain to directory
+    my int $domain_ptr = c::str_to_ptr($domain);
+    my int $localedir_ptr = c::str_to_ptr($localedir);
+    gt_bindtextdomain($domain_ptr, $localedir_ptr);
+
+    # Use UTF-8 encoding
+    my int $utf8 = c::str_to_ptr("UTF-8");
+    gt_bind_textdomain_codeset($domain_ptr, $utf8);
+    c::free($utf8);
+
+    # Set as current domain
+    gt_textdomain($domain_ptr);
+
+    c::free($domain_ptr);
+    c::free($localedir_ptr);
+
+    $_gt_domain = $domain;
+    $_gt_locale = $locale;
+}
+
+# Translate a string (main function)
+# Example: Gettext::_("Hello")
+func _(str $msgid) str {
+    my int $msgid_ptr = c::str_to_ptr($msgid);
+    my int $result_ptr = gt_gettext($msgid_ptr);
+    my str $result = c::ptr_to_str($result_ptr);
+    c::free($msgid_ptr);
+    # Note: result_ptr points to gettext's internal memory, don't free it
+    return $result;
+}
+
+# Alias for _
+func gettext(str $msgid) str {
+    return Gettext::_($msgid);
+}
+
+# Translate with plural forms
+# Example: Gettext::n("%d file", "%d files", $count)
+func n(str $singular, str $plural, int $n) str {
+    my int $singular_ptr = c::str_to_ptr($singular);
+    my int $plural_ptr = c::str_to_ptr($plural);
+    my int $result_ptr = gt_ngettext($singular_ptr, $plural_ptr, $n);
+    my str $result = c::ptr_to_str($result_ptr);
+    c::free($singular_ptr);
+    c::free($plural_ptr);
+    return $result;
+}
+
+# Alias for n
+func ngettext(str $singular, str $plural, int $n) str {
+    return Gettext::n($singular, $plural, $n);
+}
+
+# Translate from a specific domain
+# Example: Gettext::d("otherdomain", "Hello")
+func d(str $domain, str $msgid) str {
+    my int $domain_ptr = c::str_to_ptr($domain);
+    my int $msgid_ptr = c::str_to_ptr($msgid);
+    my int $result_ptr = gt_dgettext($domain_ptr, $msgid_ptr);
+    my str $result = c::ptr_to_str($result_ptr);
+    c::free($domain_ptr);
+    c::free($msgid_ptr);
+    return $result;
+}
+
+# Alias for d
+func dgettext(str $domain, str $msgid) str {
+    return Gettext::d($domain, $msgid);
+}
+
+# Translate with plural forms from specific domain
+func dn(str $domain, str $singular, str $plural, int $n) str {
+    my int $domain_ptr = c::str_to_ptr($domain);
+    my int $singular_ptr = c::str_to_ptr($singular);
+    my int $plural_ptr = c::str_to_ptr($plural);
+    my int $result_ptr = gt_dngettext($domain_ptr, $singular_ptr, $plural_ptr, $n);
+    my str $result = c::ptr_to_str($result_ptr);
+    c::free($domain_ptr);
+    c::free($singular_ptr);
+    c::free($plural_ptr);
+    return $result;
+}
+
+# Alias for dn
+func dngettext(str $domain, str $singular, str $plural, int $n) str {
+    return Gettext::dn($domain, $singular, $plural, $n);
+}
+
+# Context-aware translation (pgettext)
+# Contexts disambiguate identical strings with different meanings
+# Example: Gettext::p("menu", "File") vs Gettext::p("verb", "File")
+func p(str $context, str $msgid) str {
+    # pgettext uses context + EOT (0x04) + msgid format
+    my str $combined = $context . chr(4) . $msgid;
+    my str $result = Gettext::_($combined);
+
+    # If translation not found, gettext returns the input
+    if ($result eq $combined) {
+        return $msgid;
+    }
+    return $result;
+}
+
+# Alias for p
+func pgettext(str $context, str $msgid) str {
+    return Gettext::p($context, $msgid);
+}
+
+# Context-aware translation with plural forms
+func np(str $context, str $singular, str $plural, int $n) str {
+    my str $combined_singular = $context . chr(4) . $singular;
+    my str $combined_plural = $context . chr(4) . $plural;
+    my str $result = Gettext::n($combined_singular, $combined_plural, $n);
+
+    # If not found, return appropriate form
+    if ($result eq $combined_singular) {
+        return $singular;
+    }
+    if ($result eq $combined_plural) {
+        return $plural;
+    }
+    return $result;
+}
+
+# Alias for np
+func npgettext(str $context, str $singular, str $plural, int $n) str {
+    return Gettext::np($context, $singular, $plural, $n);
+}
+
+# ============================================================================
+# Utility Functions
+# ============================================================================
+
+# Set the current domain
+func set_domain(str $domain) void {
+    my int $domain_ptr = c::str_to_ptr($domain);
+    gt_textdomain($domain_ptr);
+    c::free($domain_ptr);
+    $_gt_domain = $domain;
+}
+
+# Get the current domain
+func get_domain() str {
+    return $_gt_domain;
+}
+
+# Add another domain/directory binding
+func add_domain(str $domain, str $localedir) void {
+    my int $domain_ptr = c::str_to_ptr($domain);
+    my int $localedir_ptr = c::str_to_ptr($localedir);
+    gt_bindtextdomain($domain_ptr, $localedir_ptr);
+
+    my int $utf8 = c::str_to_ptr("UTF-8");
+    gt_bind_textdomain_codeset($domain_ptr, $utf8);
+    c::free($utf8);
+
+    c::free($domain_ptr);
+    c::free($localedir_ptr);
+}
+
+# Change locale at runtime
+func set_locale(str $locale) void {
+    my int $lc_all = gt_LC_ALL();
+    my int $locale_ptr = c::str_to_ptr($locale);
+    gt_setlocale($lc_all, $locale_ptr);
+    c::free($locale_ptr);
+    $_gt_locale = $locale;
+}
+
+# Get current locale
+func get_locale() str {
+    return $_gt_locale;
+}
+
+# Check if gettext is available
+func has_gettext() int {
+    return gt_has_gettext();
+}
+
+# Mark string for extraction but don't translate (for xgettext)
+# Use this for strings that should be extracted but translated later
+# Example: my str $msg = Gettext::N("Error message");
+#          ...later... say(Gettext::_($msg));
+func N(str $msgid) str {
+    return $msgid;
+}
+
+# ============================================================================
+# Formatting Helpers
+# ============================================================================
+
+# Translate and format with sprintf (single arg)
+func f1(str $msgid, scalar $arg1) str {
+    my str $translated = Gettext::_($msgid);
+    return sprintf($translated, $arg1);
+}
+
+# Translate and format with sprintf (two args)
+func f2(str $msgid, scalar $arg1, scalar $arg2) str {
+    my str $translated = Gettext::_($msgid);
+    return sprintf($translated, $arg1, $arg2);
+}
+
+# Translate and format with sprintf (three args)
+func f3(str $msgid, scalar $arg1, scalar $arg2, scalar $arg3) str {
+    my str $translated = Gettext::_($msgid);
+    return sprintf($translated, $arg1, $arg2, $arg3);
+}
+
+# Translate plural and format (single arg - usually the count)
+func nf1(str $singular, str $plural, int $n, scalar $arg1) str {
+    my str $translated = Gettext::n($singular, $plural, $n);
+    return sprintf($translated, $arg1);
+}
+
+# Translate plural and format (two args)
+func nf2(str $singular, str $plural, int $n, scalar $arg1, scalar $arg2) str {
+    my str $translated = Gettext::n($singular, $plural, $n);
+    return sprintf($translated, $arg1, $arg2);
+}

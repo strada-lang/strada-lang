@@ -1,0 +1,13 @@
+#!/usr/bin/env strada
+# Minimal leak test to identify source
+
+func main() int {
+    my int $i = 0;
+    while ($i < 100) {
+        my num $p1 = math::pow(2.0, 10.0);
+        my num $p2 = math::pow(3.0, 3.0);
+        $i = $i + 1;
+    }
+    say("Done");
+    return 0;
+}

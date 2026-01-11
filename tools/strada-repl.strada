@@ -1,0 +1,541 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# strada-repl - Interactive REPL for Strada
+# Uses the REPL library for compilation and evaluation
+
+use lib "lib/readline";
+use readline;
+use lib "lib";
+use REPL;
+
+# REPL-specific state (UI, profiling)
+my int $g_repl_debug = 0;
+my int $g_repl_cdebug = 0;
+my str $g_repl_tools_dir = "";
+my int $g_repl_memprof = 0;
+my str $g_repl_script = "";
+my str $g_repl_compiler = "";
+
+# ANSI color codes
+my str $g_repl_esc = chr(27);
+
+func color_red(str $s) str {
+    return $g_repl_esc . "[31m" . $s . $g_repl_esc . "[0m";
+}
+
+func color_yellow(str $s) str {
+    return $g_repl_esc . "[33m" . $s . $g_repl_esc . "[0m";
+}
+
+func color_cyan(str $s) str {
+    return $g_repl_esc . "[36m" . $s . $g_repl_esc . "[0m";
+}
+
+func color_bold(str $s) str {
+    return $g_repl_esc . "[1m" . $s . $g_repl_esc . "[0m";
+}
+
+# Format a value for display
+func format_value(scalar $val) str {
+    if (!defined($val)) {
+        return "undef";
+    }
+    return "" . $val;
+}
+
+# Print help
+func print_help() void {
+    say("Strada REPL - Interactive Strada Shell");
+    say("");
+    say("Commands:");
+    say("  .help               - Show this help");
+    say("  .vars               - List declared variables");
+    say("  .funcs              - List defined functions");
+    say("  .imports            - List imports and library paths");
+    say("  .load FILE          - Load and execute code from file");
+    say("  .soinfo FILE        - Show exported functions from .so/.o/.a file");
+    say("  .clear              - Clear all state");
+    say("  .debug              - Toggle debug mode (show generated Strada)");
+    say("  .cdebug             - Toggle C debug mode (show generated C)");
+    say("  .compiler           - Show compiler backend");
+    say("  .memprof            - Toggle memory profiling");
+    say("  .memstats           - Show memory statistics");
+    say("  .quit               - Exit REPL");
+    say("");
+    say("Imports (use, import_lib, etc.):");
+    say("  use lib \"path\";");
+    say("  use ModuleName;");
+    say("  import_lib \"Library.so\";");
+    say("");
+    say("Examples:");
+    say("  my int \$x = 42;");
+    say("  \$x * 2");
+    say("  my array \@nums = (1, 2, 3);");
+    say("  fn double(int \$n) int { return \$n * 2; }");
+    say("  const int MAX = 100;");
+    say("  enum Color { RED, GREEN, BLUE }");
+    say("");
+    say("Notes:");
+    say("  - fn is an alias for func");
+    say("  - String interpolation: use ${\"\\$var\"} syntax");
+    say("");
+}
+
+# Print CLI usage
+func print_usage() void {
+    say("Usage: strada-repl [OPTIONS] [SCRIPT]");
+    say("");
+    say("Options:");
+    say("  -L PATH             Add library search path");
+    say("  --compiler=BACKEND  Use specific compiler (tcc, gcc)");
+    say("  --debug             Enable debug mode");
+    say("  --help, -h          Show this help");
+    say("");
+    say("If SCRIPT is provided, runs the script and exits.");
+    say("Scripts can use shebang: #!/path/to/strada-repl");
+    say("");
+}
+
+# Parse command line arguments
+func parse_args(array @args) int {
+    my int $i = 1;
+    my int $argc = scalar(@args);
+    while ($i < $argc) {
+        my str $arg = $args[$i];
+
+        if ($arg eq "--help" || $arg eq "-h") {
+            print_usage();
+            return 1;
+        } elsif ($arg eq "-L") {
+            $i = $i + 1;
+            if ($i >= $argc) {
+                say("Error: -L requires a path argument");
+                return 1;
+            }
+            REPL::add_lib_path($args[$i]);
+        } elsif ($arg =~ /^-L/) {
+            my str $path = $arg;
+            $path =~ s/^-L//;
+            REPL::add_lib_path($path);
+        } elsif ($arg =~ /^--compiler=/) {
+            $g_repl_compiler = $arg;
+            $g_repl_compiler =~ s/^--compiler=//;
+        } elsif ($arg eq "--debug") {
+            $g_repl_debug = 1;
+        } elsif ($arg =~ /^-/) {
+            say("Unknown option: " . $arg);
+            say("Use --help for usage information");
+            return 1;
+        } else {
+            $g_repl_script = $arg;
+        }
+
+        $i = $i + 1;
+    }
+    return 0;
+}
+
+# Format and display eval errors nicely
+func display_error(str $error_msg) void {
+    say("");
+    say(color_red(color_bold("Error: ")) . $error_msg);
+    say("");
+}
+
+# Run a script file
+func run_script(str $filename) int {
+    if (sys::is_file($filename) == 0) {
+        say("Error: File not found: " . $filename);
+        return 1;
+    }
+
+    my scalar $fh = sys::open($filename, "r");
+    if (!defined($fh)) {
+        say("Error: Could not open file: " . $filename);
+        return 1;
+    }
+
+    my array @lines = ();
+    my scalar $line = sys::fgets($fh, 65536);
+    while (defined($line)) {
+        $line =~ s/\n$//;
+        push(@lines, $line);
+        $line = sys::fgets($fh, 65536);
+    }
+    sys::close($fh);
+
+    my str $buffer = "";
+    my int $continuation = 0;
+    my int $line_num = 0;
+
+    foreach my str $raw_line (@lines) {
+        $line_num = $line_num + 1;
+
+        # Skip shebang line
+        if ($line_num == 1 && $raw_line =~ /^#!/) {
+            next;
+        }
+
+        # Skip empty lines and comments (unless in continuation)
+        if ($continuation == 0) {
+            my str $trimmed = $raw_line;
+            $trimmed =~ s/^\s+//;
+            if ($trimmed eq "" || $trimmed =~ /^#/) {
+                next;
+            }
+        }
+
+        if ($continuation == 1) {
+            $buffer = $buffer . "\n" . $raw_line;
+        } else {
+            $buffer = $raw_line;
+        }
+
+        if (REPL::is_balanced($buffer) == 0) {
+            $continuation = 1;
+            next;
+        }
+        $continuation = 0;
+
+        my str $input = $buffer;
+        $input =~ s/^\s+//;
+        $input =~ s/\s+$//;
+
+        if ($input eq "") {
+            next;
+        }
+
+        try {
+            REPL::eval($input);
+        } catch ($e) {
+            say("Error at line " . $line_num . ": " . $e);
+        }
+    }
+
+    return 0;
+}
+
+# Main REPL loop
+func main(int $argc, array @argv) int {
+    # Parse command line arguments
+    if (parse_args(@argv) == 1) {
+        return 0;
+    }
+
+    # Detect tools directory from argv[0]
+    my str $self_path = $argv[0];
+    my str $real_path = sys::realpath($self_path);
+    if ($real_path ne "") {
+        $g_repl_tools_dir = sys::dirname($real_path);
+    } else {
+        $g_repl_tools_dir = sys::dirname($self_path);
+    }
+
+    # Initialize the REPL library
+    try {
+        if ($g_repl_compiler ne "") {
+            REPL::init($g_repl_compiler);
+        } else {
+            REPL::init();
+        }
+    } catch ($e) {
+        say("Error: " . $e);
+        return 1;
+    }
+
+    if ($g_repl_debug == 1) {
+        REPL::debug(1);
+    }
+
+    # If a script file was provided, run it and exit
+    if ($g_repl_script ne "") {
+        return run_script($g_repl_script);
+    }
+
+    say("Strada REPL v0.3 (using " . REPL::compiler() . ")");
+    if (REPL::compiler() eq "gcc") {
+        say("Tip: Install tcc for faster compilation (apt install tcc)");
+    }
+    say("Type .help for help, .quit to exit");
+    say("");
+
+    readline::stifle_history(1000);
+
+    my str $buffer = "";
+    my int $continuation = 0;
+
+    while (1) {
+        my str $prompt = "strada> ";
+        if ($continuation == 1) {
+            $prompt = "...    ";
+        }
+
+        my str $line = readline::readline($prompt);
+        if (!defined($line)) {
+            say("");
+            last;
+        }
+
+        if ($continuation == 1) {
+            $buffer = $buffer . "\n" . $line;
+        } else {
+            $buffer = $line;
+        }
+
+        if (REPL::is_balanced($buffer) == 0) {
+            $continuation = 1;
+            next;
+        }
+        $continuation = 0;
+
+        my str $input = $buffer;
+        $input =~ s/^\s+//;
+        $input =~ s/\s+$//;
+
+        if ($input eq "") {
+            next;
+        }
+
+        readline::add_history($input);
+
+        # Handle commands
+        if ($input eq ".quit" || $input eq ".exit" || $input eq ".q") {
+            say("Goodbye!");
+            last;
+        }
+
+        if ($input eq ".help" || $input eq ".h") {
+            print_help();
+            next;
+        }
+
+        if ($input eq ".compiler") {
+            say("Compiler: " . REPL::compiler());
+            next;
+        }
+
+        if ($input eq ".vars") {
+            my hash %vt = REPL::var_types();
+            my hash %st = REPL::state();
+            if (scalar(keys(%vt)) == 0) {
+                say("No variables declared");
+            } else {
+                say("Variables:");
+                foreach my str $name (keys(%vt)) {
+                    my str $type = $vt{$name};
+                    my str $sigil = "\$";
+                    if ($type eq "array") { $sigil = "@"; }
+                    if ($type eq "hash") { $sigil = "%"; }
+                    my scalar $val = undef;
+                    if (exists(%st, $name)) {
+                        $val = $st{$name};
+                    }
+                    say("  " . $type . " " . $sigil . $name . " = " . format_value($val));
+                }
+            }
+            next;
+        }
+
+        if ($input eq ".funcs") {
+            my array @fns = REPL::functions();
+            if (scalar(@fns) == 0) {
+                say("No functions defined");
+            } else {
+                say("Functions:");
+                foreach my str $fn (@fns) {
+                    my int $brace = index($fn, "{");
+                    my str $sig = $fn;
+                    if ($brace > 0) {
+                        $sig = substr($fn, 0, $brace);
+                    }
+                    $sig =~ s/\s+$//;
+                    say("  " . $sig);
+                }
+            }
+            next;
+        }
+
+        if ($input eq ".clear") {
+            REPL::reset();
+            say("State cleared");
+            next;
+        }
+
+        if ($input eq ".imports") {
+            my int $has_content = 0;
+            my array @lps = REPL::lib_paths();
+            if (scalar(@lps) > 0) {
+                say("Library paths:");
+                foreach my str $lp (@lps) {
+                    say("  " . $lp);
+                }
+                $has_content = 1;
+            }
+            my array @imps = REPL::imports();
+            if (scalar(@imps) > 0) {
+                say("Imports:");
+                foreach my str $imp (@imps) {
+                    say("  " . $imp);
+                }
+                $has_content = 1;
+            }
+            if ($has_content == 0) {
+                say("No imports or library paths registered");
+            }
+            next;
+        }
+
+        # .memprof - toggle memory profiling
+        if ($input eq ".memprof") {
+            if ($g_repl_memprof == 0) {
+                __C__ {
+                    strada_memprof_enable();
+                }
+                $g_repl_memprof = 1;
+                say("Memory profiling enabled");
+            } else {
+                __C__ {
+                    strada_memprof_disable();
+                }
+                $g_repl_memprof = 0;
+                say("Memory profiling disabled");
+            }
+            next;
+        }
+
+        # .memstats - show memory statistics
+        if ($input eq ".memstats") {
+            if ($g_repl_memprof == 0) {
+                say("Memory profiling not enabled. Use .memprof first.");
+            } else {
+                __C__ {
+                    strada_memprof_report();
+                }
+            }
+            next;
+        }
+
+        # .load <file>
+        if ($input =~ /^\.load\s+/) {
+            my str $filename = $input;
+            $filename =~ s/^\.load\s+//;
+            $filename =~ s/\s+$//;
+
+            if (sys::is_file($filename) == 0) {
+                say("Error: File not found: " . $filename);
+                next;
+            }
+
+            my scalar $lfh = sys::open($filename, "r");
+            if (!defined($lfh)) {
+                say("Error: Could not open file: " . $filename);
+                next;
+            }
+
+            say("Loading " . $filename . "...");
+            my int $line_count = 0;
+            my scalar $file_line = sys::fgets($lfh, 65536);
+            while (defined($file_line)) {
+                $file_line =~ s/\n$//;
+                $file_line =~ s/\r$//;
+
+                my str $trimmed_line = $file_line;
+                $trimmed_line =~ s/^\s+//;
+                if ($trimmed_line ne "" && $trimmed_line !~ /^#/) {
+                    $line_count = $line_count + 1;
+                    try {
+                        REPL::eval($trimmed_line);
+                    } catch ($e) {
+                        say("  Error: " . $e);
+                    }
+                }
+
+                $file_line = sys::fgets($lfh, 65536);
+            }
+            sys::close($lfh);
+            say("Loaded " . $line_count . " lines from " . $filename);
+            next;
+        }
+
+        # .soinfo <file>
+        if ($input =~ /^\.soinfo\s+/) {
+            my str $filename = $input;
+            $filename =~ s/^\.soinfo\s+//;
+            $filename =~ s/\s+$//;
+
+            if (sys::is_file($filename) == 0) {
+                say("Error: File not found: " . $filename);
+                next;
+            }
+
+            my str $soinfo_path = "";
+            my str $sibling_path = $g_repl_tools_dir . "/strada-soinfo";
+            if (sys::is_file($sibling_path) == 1) {
+                $soinfo_path = $sibling_path;
+            } elsif (sys::is_file("/usr/local/bin/strada-soinfo") == 1) {
+                $soinfo_path = "/usr/local/bin/strada-soinfo";
+            } elsif (sys::is_file("/usr/bin/strada-soinfo") == 1) {
+                $soinfo_path = "/usr/bin/strada-soinfo";
+            }
+
+            if ($soinfo_path eq "") {
+                say("Error: strada-soinfo tool not found");
+                next;
+            }
+
+            my str $cmd = $soinfo_path . " " . $filename . " 2>&1";
+            my str $output = sys::qx($cmd);
+            print($output);
+            next;
+        }
+
+        if ($input eq ".debug") {
+            $g_repl_debug = 1 - $g_repl_debug;
+            REPL::debug($g_repl_debug);
+            if ($g_repl_debug == 1) {
+                say("Debug mode ON (shows generated Strada)");
+            } else {
+                say("Debug mode OFF");
+            }
+            next;
+        }
+
+        if ($input eq ".cdebug") {
+            $g_repl_cdebug = 1 - $g_repl_cdebug;
+            REPL::cdebug($g_repl_cdebug);
+            if ($g_repl_cdebug == 1) {
+                say("C debug mode ON (shows generated C)");
+            } else {
+                say("C debug mode OFF");
+            }
+            next;
+        }
+
+        # Evaluate the input
+        try {
+            my scalar $result = REPL::eval($input);
+            if (defined($result)) {
+                say("=> " . format_value($result));
+            }
+        } catch ($e) {
+            display_error($e);
+        }
+    }
+
+    return 0;
+}

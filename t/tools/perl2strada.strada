@@ -1,0 +1,231 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# perl2strada - Convert Perl code to Strada
+#
+# Usage: ./perl2strada input.pl [output.strada]
+#
+# This converter handles common Perl constructs and converts them to
+# equivalent Strada code. Some manual adjustments may be needed for
+# complex code.
+
+# Convert a single line of Perl to Strada
+func convert_line(str $line) str {
+    my str $result = $line;
+    my str $trimmed = $line;
+    my str $indent = $line;
+    $trimmed =~ s/^\s+//;
+    $trimmed =~ s/\s+$//;
+    $indent = replace($indent, "\\S.*$", "");
+
+    # Skip empty lines and pure comments
+    if ($trimmed eq "" || match($trimmed, "^#")) {
+        return $result;
+    }
+
+    # Remove 'use strict' and 'use warnings' - Strada is always strict
+    if (match($trimmed, "^use\\s+strict")) {
+        return "# " . $trimmed . "  # Not needed in Strada";
+    }
+    if (match($trimmed, "^use\\s+warnings")) {
+        return "# " . $trimmed . "  # Not needed in Strada";
+    }
+    if (match($trimmed, "^use\\s+feature")) {
+        return "# " . $trimmed . "  # Strada has these built-in";
+    }
+
+    # Convert subroutine definitions: sub name { -> func name() void {
+    if (match($trimmed, "^sub\\s+\\w+\\s*\\{")) {
+        $result = replace($result, "\\bsub\\s+", "func ");
+        $result = replace($result, "\\s*\\{", "() void {");
+        return $result;
+    }
+
+    # Convert anonymous sub: sub { -> func() void {
+    $result = replace_all($result, "\\bsub\\s*\\{", "func() void {");
+
+    # Convert 'my $var' declarations - add type
+    if (match($result, "\\bmy\\s+\\$") && !match($result, "\\bmy\\s+(scalar|int|num|str)")) {
+        $result = replace($result, "\\bmy\\s+\\$", "my scalar $");
+    }
+
+    # Convert 'my @arr' declarations
+    if (match($result, "\\bmy\\s+@") && !match($result, "\\bmy\\s+array\\s+@")) {
+        $result = replace($result, "\\bmy\\s+@", "my array @");
+    }
+
+    # Convert 'my %hash' declarations
+    if (match($result, "\\bmy\\s+%") && !match($result, "\\bmy\\s+hash\\s+%")) {
+        $result = replace($result, "\\bmy\\s+%", "my hash %");
+    }
+
+    # Convert 'our' to 'my' with comment
+    if (match($result, "\\bour\\s+\\$")) {
+        $result = replace($result, "\\bour\\s+\\$", "my scalar $");
+        $result = $result . "  # was 'our'";
+    }
+    if (match($result, "\\bour\\s+@")) {
+        $result = replace($result, "\\bour\\s+@", "my array @");
+        $result = $result . "  # was 'our'";
+    }
+    if (match($result, "\\bour\\s+%")) {
+        $result = replace($result, "\\bour\\s+%", "my hash %");
+        $result = $result . "  # was 'our'";
+    }
+
+    # Convert foreach to comment (needs manual conversion)
+    if (match($result, "\\bforeach\\s+my")) {
+        my array @caps = capture($trimmed, "^foreach\\s+my\\s+\\$([A-Za-z_][A-Za-z0-9_]*)\\b");
+        my str $var = "";
+        if (size(@caps) > 1) {
+            $var = $caps[1];
+        }
+        my str $out = $indent . "if (1) {  # TODO: Convert foreach: " . $trimmed;
+        if ($var ne "") {
+            $out = $out . "\n" . $indent . "    my scalar $" . $var . " = undef;";
+        }
+        return $out;
+    }
+
+    # Convert 'unless' to 'if (!'
+    if (match($result, "\\bunless\\s*\\(")) {
+        $result = replace($result, "\\bunless\\s*\\(", "if (!(");
+        $result = replace($result, "\\)\\s*\\{", ")) {");
+    }
+
+    # Convert 'until' to 'while (!'
+    if (match($result, "\\buntil\\s*\\(")) {
+        $result = replace($result, "\\buntil\\s*\\(", "while (!(");
+        $result = replace($result, "\\)\\s*\\{", ")) {");
+    }
+
+    # Convert print without parens
+    if (match($result, "\\bprint\\s+\"") && !match($result, "\\bprint\\s*\\(")) {
+        $result = replace($result, "\\bprint\\s+", "print(");
+        $result = replace($result, ";$", ");");
+    }
+
+    # Convert say without parens
+    if (match($result, "\\bsay\\s+\"") && !match($result, "\\bsay\\s*\\(")) {
+        $result = replace($result, "\\bsay\\s+", "say(");
+        $result = replace($result, ";$", ");");
+    }
+
+    # Convert @_ handling
+    if (match($result, "my\\s*\\([^)]+\\)\\s*=\\s*@_")) {
+        my str $out = $indent . "# TODO: Move to function parameters: " . $trimmed;
+        my int $dollar = index($trimmed, "$");
+        my int $end = index($trimmed, ")");
+        if ($dollar >= 0 && $end > $dollar) {
+            my str $name = substr($trimmed, $dollar + 1, $end - $dollar - 1);
+            my int $comma = index($name, ",");
+            if ($comma >= 0) {
+                $name = substr($name, 0, $comma);
+            }
+            $name =~ s/^\s+//;
+            $name =~ s/\s+$//;
+            if ($name ne "") {
+                $out = $out . "\n" . $indent . "my scalar $" . $name . " = undef;";
+            }
+        }
+        return $out;
+    }
+
+    # Warn about Perl interpolation in double-quoted strings
+    if (match($result, "\"[^\"]*\\$[A-Za-z_]")) {
+        $result = $result . "  # TODO: Convert Perl interpolation to brace form";
+    }
+
+    # Convert qw() - note for manual conversion
+    if (match($result, "\\bqw\\s*[\\(\\[/]")) {
+        $result = $result . "  # TODO: convert qw() to (\"a\", \"b\", ...)";
+    }
+
+    # Note unsupported features
+    if (match($result, "\\bwantarray\\b")) {
+        $result = $result . "  # TODO: wantarray not in Strada";
+    }
+    if (match($result, "\\bcaller\\b")) {
+        $result = $result . "  # TODO: caller not in Strada";
+    }
+    if (match($result, "\\bbless\\b")) {
+        $result = $result . "  # TODO: convert to Strada class";
+    }
+
+    return $result;
+}
+
+# Add header to converted file
+func add_header(str $source_file) str {
+    my str $header = "# Converted from Perl: " . $source_file . "\n";
+    $header = $header . "# Generated by perl2strada\n";
+    $header = $header . "# NOTE: Manual review and adjustments may be required\n";
+    $header = $header . "\n";
+    return $header;
+}
+
+# Main conversion function
+func convert_file(str $input_path, str $output_path) int {
+    my str $content = sys::slurp($input_path);
+    if (length($content) == 0) {
+        say("Error: Cannot read or empty file: " . $input_path);
+        return 1;
+    }
+
+    my array @lines = split($content, "\n");
+    my str $output = add_header($input_path);
+
+    my int $i = 0;
+    while ($i < size(@lines)) {
+        my str $ln = $lines[$i];
+        my str $converted = convert_line($ln);
+        $output = $output . $converted . "\n";
+        $i = $i + 1;
+    }
+
+    sys::spew($output_path, $output);
+    say("Converted: " . $input_path . " -> " . $output_path);
+    return 0;
+}
+
+func main(int $argc, array @argv) int {
+    if ($argc < 2) {
+        say("Usage: perl2strada input.pl [output.strada]");
+        say("");
+        say("Converts Perl code to Strada code.");
+        say("If output file is not specified, uses input.strada");
+        return 1;
+    }
+
+    my str $input = $argv[1];
+    my str $output = "";
+
+    if ($argc >= 3) {
+        $output = $argv[2];
+    } else {
+        $output = $input;
+        $output = replace($output, "\\.pl$", ".strada");
+        $output = replace($output, "\\.pm$", ".strada");
+        if ($output eq $input) {
+            $output = $input . ".strada";
+        }
+    }
+
+    my int $status = convert_file($input, $output);
+    exit($status);
+    return 0;
+}

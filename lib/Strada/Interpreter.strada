@@ -1,0 +1,4921 @@
+# Strada::Interpreter - Tree-walking interpreter for Strada
+# Evaluates AST nodes directly instead of generating C code.
+# Reuses the compiler's Lexer and Parser for the front-end.
+
+package Strada::Interpreter;
+
+# C helper functions for BigInt/BigFloat/DateTime support
+__C__ {
+#include <time.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+
+/* ---- BigInt C helpers ---- */
+static int _bi_cmp(const char *a, const char *b) {
+    size_t la = strlen(a), lb = strlen(b);
+    if (la != lb) return (la > lb) ? 1 : -1;
+    return strcmp(a, b);
+}
+static char *_bi_strip(const char *s) {
+    while (*s == '0' && *(s + 1) != '\0') s++;
+    return strdup(s);
+}
+static char *_bi_add(const char *a, const char *b) {
+    size_t la = strlen(a), lb = strlen(b);
+    size_t max = (la > lb) ? la : lb;
+    char *result = (char *)malloc(max + 2);
+    int carry = 0; size_t ri = 0, ia = la, ib = lb;
+    while (ia > 0 || ib > 0 || carry) {
+        int da = 0, db = 0;
+        if (ia > 0) { ia--; da = a[ia] - '0'; }
+        if (ib > 0) { ib--; db = b[ib] - '0'; }
+        int sum = da + db + carry;
+        carry = sum / 10;
+        result[ri++] = '0' + (sum % 10);
+    }
+    for (size_t i = 0; i < ri / 2; i++) { char t = result[i]; result[i] = result[ri-1-i]; result[ri-1-i] = t; }
+    result[ri] = '\0';
+    return result;
+}
+static char *_bi_sub(const char *a, const char *b) {
+    size_t la = strlen(a), lb = strlen(b);
+    char *result = (char *)malloc(la + 1);
+    int borrow = 0; size_t ri = 0, ia = la, ib = lb;
+    while (ia > 0) {
+        ia--;
+        int da = a[ia] - '0' - borrow, db = 0;
+        if (ib > 0) { ib--; db = b[ib] - '0'; }
+        if (da < db) { da += 10; borrow = 1; } else { borrow = 0; }
+        result[ri++] = '0' + (da - db);
+    }
+    for (size_t i = 0; i < ri / 2; i++) { char t = result[i]; result[i] = result[ri-1-i]; result[ri-1-i] = t; }
+    result[ri] = '\0';
+    char *s = _bi_strip(result); free(result); return s;
+}
+static char *_bi_mul(const char *a, const char *b) {
+    size_t la = strlen(a), lb = strlen(b), rlen = la + lb;
+    int *digits = (int *)calloc(rlen, sizeof(int));
+    for (size_t i = 0; i < la; i++)
+        for (size_t j = 0; j < lb; j++)
+            digits[i + j] += (a[la-1-i] - '0') * (b[lb-1-j] - '0');
+    for (size_t i = 0; i < rlen - 1; i++) { digits[i+1] += digits[i] / 10; digits[i] %= 10; }
+    size_t top = rlen - 1;
+    while (top > 0 && digits[top] == 0) top--;
+    char *result = (char *)malloc(top + 2);
+    for (size_t i = 0; i <= top; i++) result[i] = '0' + digits[top - i];
+    result[top + 1] = '\0';
+    free(digits);
+    return result;
+}
+static char *_bi_divmod(const char *a, const char *b, char **rem) {
+    if (_bi_cmp(a, b) < 0) { if (rem) *rem = strdup(a); return strdup("0"); }
+    if (strcmp(b, "0") == 0) { if (rem) *rem = strdup("0"); return strdup("0"); }
+    size_t la = strlen(a);
+    char *quotient = (char *)malloc(la + 1);
+    size_t qi = 0;
+    char *current = strdup("0");
+    for (size_t i = 0; i < la; i++) {
+        size_t cl = strlen(current);
+        char *next = (char *)malloc(cl + 2);
+        memcpy(next, current, cl); next[cl] = a[i]; next[cl+1] = '\0';
+        free(current); current = _bi_strip(next); free(next);
+        int count = 0;
+        while (_bi_cmp(current, b) >= 0) { char *tmp = _bi_sub(current, b); free(current); current = tmp; count++; }
+        quotient[qi++] = '0' + count;
+    }
+    quotient[qi] = '\0';
+    char *sq = _bi_strip(quotient); free(quotient);
+    if (rem) *rem = current; else free(current);
+    return sq;
+}
+
+/* ---- BigFloat C helpers ---- */
+static char *_bf_pad_right(const char *s, size_t n) {
+    size_t l = strlen(s);
+    char *r = (char *)malloc(l + n + 1);
+    memcpy(r, s, l);
+    for (size_t i = 0; i < n; i++) r[l+i] = '0';
+    r[l+n] = '\0';
+    return r;
+}
+static char *_bf_normalize(const char *m, int64_t *scale) {
+    size_t l = strlen(m);
+    if (l == 0 || strcmp(m, "0") == 0) { *scale = 0; return strdup("0"); }
+    size_t end = l;
+    while (end > 1 && m[end-1] == '0' && *scale > 0) { end--; (*scale)--; }
+    char *r = (char *)malloc(end + 1);
+    memcpy(r, m, end); r[end] = '\0';
+    return r;
+}
+}
+
+# ============================================================
+# Environment - Lexical scope chain
+# ============================================================
+
+func env_new(scalar $parent) scalar {
+    my hash %e = ();
+    my hash %vars = ();
+    $e{"vars"} = \%vars;
+    $e{"parent"} = $parent;
+    return \%e;
+}
+
+func env_set(scalar $env, str $name, scalar $value) void {
+    $env->{"vars"}->{$name} = $value;
+}
+
+func env_get(scalar $env, str $name) scalar {
+    my scalar $cur = $env;
+    while (defined($cur)) {
+        if (exists($cur->{"vars"}, $name)) {
+            return $cur->{"vars"}->{$name};
+        }
+        $cur = $cur->{"parent"};
+    }
+    return undef;
+}
+
+func env_exists(scalar $env, str $name) int {
+    my scalar $cur = $env;
+    while (defined($cur)) {
+        if (exists($cur->{"vars"}, $name)) {
+            return 1;
+        }
+        $cur = $cur->{"parent"};
+    }
+    return 0;
+}
+
+# Update variable in the nearest scope that has it
+func env_update(scalar $env, str $name, scalar $value) int {
+    my scalar $cur = $env;
+    while (defined($cur)) {
+        if (exists($cur->{"vars"}, $name)) {
+            $cur->{"vars"}->{$name} = $value;
+            return 1;
+        }
+        $cur = $cur->{"parent"};
+    }
+    return 0;
+}
+
+# ============================================================
+# Interpreter State
+# ============================================================
+
+func interp_new() scalar {
+    my hash %interp = ();
+    my hash %functions = ();
+    my hash %enums = ();
+    my hash %constants = ();
+    my scalar $global_env = env_new(undef);
+    $interp{"functions"} = \%functions;
+    $interp{"enums"} = \%enums;
+    $interp{"constants"} = \%constants;
+    $interp{"global_env"} = $global_env;
+    $interp{"package"} = "main";
+    $interp{"filename"} = "<input>";
+    $interp{"call_depth"} = 0;
+    $interp{"max_call_depth"} = 1000;
+    # OOP state
+    my hash %inherits = ();
+    $interp{"inherits"} = \%inherits;
+    my hash %overloads = ();
+    $interp{"overloads"} = \%overloads;
+    my array @method_modifiers = ();
+    $interp{"method_modifiers"} = \@method_modifiers;
+    my hash %autoloads = ();
+    $interp{"autoloads"} = \%autoloads;
+    # END blocks
+    my array @end_blocks = ();
+    $interp{"end_blocks"} = \@end_blocks;
+    # local() dynamic scoping stack
+    my array @local_stack = ();
+    $interp{"local_stack"} = \@local_stack;
+    # select() default output
+    $interp{"select_fh"} = undef;
+    # Signal-based control flow flags (for future use)
+    $interp{"signal_type"} = "";
+    $interp{"signal_value"} = undef;
+    $interp{"signal_label"} = "";
+    $interp{"had_explicit_return"} = 0;
+    # Native function support (import_lib)
+    my hash %native_funcs = ();
+    $interp{"native_funcs"} = \%native_funcs;
+    my array @native_lib_handles = ();
+    $interp{"native_lib_handles"} = \@native_lib_handles;
+    return \%interp;
+}
+
+# ============================================================
+# Native Function Support (import_lib)
+# ============================================================
+
+# Call a native function, packing variadic args into an array if needed.
+# For variadic native functions (is_variadic=1), the args from variadic_idx onward
+# are packed into a single array argument, matching how the C code generator handles them.
+func call_native(scalar $interp, scalar $nf, scalar $args) scalar {
+    my int $is_variadic = $nf->{"is_variadic"};
+    if ($is_variadic == 1) {
+        # Pack args: fixed args stay, variadic args get packed into one array
+        my int $param_count = $nf->{"param_count"};
+        my int $variadic_idx = $param_count - 1;  # Last param is the variadic one
+        my array @packed = ();
+        my int $i = 0;
+
+        # Copy fixed args before the variadic param
+        while ($i < $variadic_idx && $i < size($args)) {
+            push(@packed, $args->[$i]);
+            $i = $i + 1;
+        }
+
+        # Pack remaining args into a single array for the variadic param
+        my array @va_arr = ();
+        while ($i < size($args)) {
+            push(@va_arr, $args->[$i]);
+            $i = $i + 1;
+        }
+        push(@packed, \@va_arr);
+
+        return native_call($nf->{"fn_ptr"}, \@packed, size(\@packed), $nf->{"ret_is_void"});
+    }
+
+    return native_call($nf->{"fn_ptr"}, $args, size($args), $nf->{"ret_is_void"});
+}
+
+# Call a native function pointer with an array of StradaValue* arguments.
+# $fn_ptr is an int (cast from void*), $args is an array of StradaValue*,
+# $arg_count is the number of arguments, $ret_is_void is 1 if return type is void.
+func native_call(scalar $fn_ptr, scalar $args, int $arg_count, int $ret_is_void) scalar {
+    my scalar $result = undef;
+    __C__ {
+        typedef StradaValue* (*fn0_t)(void);
+        typedef StradaValue* (*fn1_t)(StradaValue*);
+        typedef StradaValue* (*fn2_t)(StradaValue*, StradaValue*);
+        typedef StradaValue* (*fn3_t)(StradaValue*, StradaValue*, StradaValue*);
+        typedef StradaValue* (*fn4_t)(StradaValue*, StradaValue*, StradaValue*, StradaValue*);
+        typedef StradaValue* (*fn5_t)(StradaValue*, StradaValue*, StradaValue*, StradaValue*, StradaValue*);
+        typedef StradaValue* (*fn6_t)(StradaValue*, StradaValue*, StradaValue*, StradaValue*, StradaValue*, StradaValue*);
+        typedef StradaValue* (*fn7_t)(StradaValue*, StradaValue*, StradaValue*, StradaValue*, StradaValue*, StradaValue*, StradaValue*);
+        typedef StradaValue* (*fn8_t)(StradaValue*, StradaValue*, StradaValue*, StradaValue*, StradaValue*, StradaValue*, StradaValue*, StradaValue*);
+        typedef void (*vfn0_t)(void);
+        typedef void (*vfn1_t)(StradaValue*);
+        typedef void (*vfn2_t)(StradaValue*, StradaValue*);
+        typedef void (*vfn3_t)(StradaValue*, StradaValue*, StradaValue*);
+        typedef void (*vfn4_t)(StradaValue*, StradaValue*, StradaValue*, StradaValue*);
+        typedef void (*vfn5_t)(StradaValue*, StradaValue*, StradaValue*, StradaValue*, StradaValue*);
+        typedef void (*vfn6_t)(StradaValue*, StradaValue*, StradaValue*, StradaValue*, StradaValue*, StradaValue*);
+        typedef void (*vfn7_t)(StradaValue*, StradaValue*, StradaValue*, StradaValue*, StradaValue*, StradaValue*, StradaValue*);
+        typedef void (*vfn8_t)(StradaValue*, StradaValue*, StradaValue*, StradaValue*, StradaValue*, StradaValue*, StradaValue*, StradaValue*);
+
+        void *fptr = (void*)(intptr_t)strada_to_int(fn_ptr);
+        int64_t argc = strada_to_int(arg_count);
+        int64_t is_void = strada_to_int(ret_is_void);
+        /* Get the underlying array - args may be an array or array ref */
+        StradaArray *av = NULL;
+        if (args->type == STRADA_ARRAY) {
+            av = args->value.av;
+        } else if (args->type == STRADA_REF && args->value.rv && args->value.rv->type == STRADA_ARRAY) {
+            av = args->value.rv->value.av;
+        }
+
+        /* Extract argument pointers */
+        StradaValue *a[8] = {NULL};
+        if (av) {
+            for (int i = 0; i < argc && i < 8 && i < (int64_t)av->size; i++) {
+                a[i] = av->elements[i];
+            }
+        }
+
+        strada_decref(result);
+
+        if (is_void) {
+            switch (argc) {
+                case 0: ((vfn0_t)fptr)(); break;
+                case 1: ((vfn1_t)fptr)(a[0]); break;
+                case 2: ((vfn2_t)fptr)(a[0], a[1]); break;
+                case 3: ((vfn3_t)fptr)(a[0], a[1], a[2]); break;
+                case 4: ((vfn4_t)fptr)(a[0], a[1], a[2], a[3]); break;
+                case 5: ((vfn5_t)fptr)(a[0], a[1], a[2], a[3], a[4]); break;
+                case 6: ((vfn6_t)fptr)(a[0], a[1], a[2], a[3], a[4], a[5]); break;
+                case 7: ((vfn7_t)fptr)(a[0], a[1], a[2], a[3], a[4], a[5], a[6]); break;
+                case 8: ((vfn8_t)fptr)(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]); break;
+                default:
+                    fprintf(stderr, "native_call: too many arguments (%lld)\n", (long long)argc);
+                    exit(1);
+            }
+            result = strada_new_undef();
+        } else {
+            switch (argc) {
+                case 0: result = ((fn0_t)fptr)(); break;
+                case 1: result = ((fn1_t)fptr)(a[0]); break;
+                case 2: result = ((fn2_t)fptr)(a[0], a[1]); break;
+                case 3: result = ((fn3_t)fptr)(a[0], a[1], a[2]); break;
+                case 4: result = ((fn4_t)fptr)(a[0], a[1], a[2], a[3]); break;
+                case 5: result = ((fn5_t)fptr)(a[0], a[1], a[2], a[3], a[4]); break;
+                case 6: result = ((fn6_t)fptr)(a[0], a[1], a[2], a[3], a[4], a[5]); break;
+                case 7: result = ((fn7_t)fptr)(a[0], a[1], a[2], a[3], a[4], a[5], a[6]); break;
+                case 8: result = ((fn8_t)fptr)(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]); break;
+                default:
+                    fprintf(stderr, "native_call: too many arguments (%lld)\n", (long long)argc);
+                    exit(1);
+            }
+            if (!result) result = strada_new_undef();
+        }
+    }
+    return $result;
+}
+
+# Load import_lib libraries: dlopen each .so, dlsym each function, register in native_funcs
+func interp_load_import_libs(scalar $interp, scalar $program) void {
+    my int $lib_count = $program->{"import_lib_count"};
+    if ($lib_count == 0) { return; }
+
+    my scalar $import_libs = $program->{"import_libs"};
+    my int $li = 0;
+
+    while ($li < $lib_count) {
+        my scalar $lib_info = $import_libs->[$li];
+        my str $so_path = $lib_info->{"so_path"};
+        my str $lib_name = $lib_info->{"lib_name"};
+
+        # dlopen the library
+        my scalar $handle = strada_dl_open_raw($so_path);
+        my int $handle_int = $handle;
+        if ($handle_int == 0) {
+            die("import_lib: failed to load shared library: " . $so_path);
+        }
+
+        # Keep handle alive so it doesn't get dlclose'd
+        push($interp->{"native_lib_handles"}, $handle);
+
+        # Call OOP init functions if present
+        my scalar $oop_inits = $lib_info->{"oop_init_funcs"};
+        if (defined($oop_inits)) {
+            my int $oi = 0;
+            my int $oop_count = size($oop_inits);
+            while ($oi < $oop_count) {
+                my str $oop_fn_name = $oop_inits->[$oi];
+                my scalar $oop_fn = strada_dl_sym_raw($handle, $oop_fn_name);
+                my int $oop_fn_int = $oop_fn;
+                if ($oop_fn_int != 0) {
+                    # Call void OOP init function
+                    native_call($oop_fn, [], 0, 1);
+                }
+                $oi = $oi + 1;
+            }
+        }
+
+        # dlsym each exported function
+        my scalar $funcs = $lib_info->{"functions"};
+        my int $fn_count = $lib_info->{"function_count"};
+        my int $fi = 0;
+
+        while ($fi < $fn_count) {
+            my scalar $fn_info = $funcs->[$fi];
+            my str $fn_name = $fn_info->{"name"};
+            my int $param_count = $fn_info->{"param_count"};
+            my int $ret_type = $fn_info->{"return_type"};
+
+            my scalar $fn_ptr = strada_dl_sym_raw($handle, $fn_name);
+            my int $fn_ptr_int = $fn_ptr;
+
+            if ($fn_ptr_int == 0) {
+                die("import_lib: symbol not found: " . $fn_name . " in " . $so_path);
+            }
+
+            # Register as native function
+            my hash %nf = ();
+            $nf{"fn_ptr"} = $fn_ptr;
+            $nf{"param_count"} = $param_count;
+            $nf{"ret_is_void"} = 0;
+            if ($ret_type == TYPE_VOID()) {
+                $nf{"ret_is_void"} = 1;
+            }
+            $nf{"is_variadic"} = $fn_info->{"is_variadic"};
+            $interp->{"native_funcs"}->{$fn_name} = \%nf;
+
+            $fi = $fi + 1;
+        }
+
+        $li = $li + 1;
+    }
+}
+
+func interp_register_func(scalar $interp, str $name, scalar $params, int $param_count, scalar $body, scalar $closure_env) void {
+    my hash %fi = ();
+    $fi{"params"} = $params;
+    $fi{"param_count"} = $param_count;
+    $fi{"body"} = $body;
+    $fi{"closure_env"} = $closure_env;
+    $interp->{"functions"}->{$name} = \%fi;
+    # Also register under sanitized name (:: -> _) for cross-lookup
+    if (index($name, "::") >= 0) {
+        my str $sanitized = sanitize_name($name);
+        $interp->{"functions"}->{$sanitized} = \%fi;
+    }
+}
+
+func interp_get_func(scalar $interp, str $name) scalar {
+    if (exists($interp->{"functions"}, $name)) {
+        return $interp->{"functions"}->{$name};
+    }
+    # Try sanitized name (:: -> _)
+    if (index($name, "::") >= 0) {
+        my str $sanitized = sanitize_name($name);
+        if (exists($interp->{"functions"}, $sanitized)) {
+            return $interp->{"functions"}->{$sanitized};
+        }
+    }
+    return undef;
+}
+
+# ============================================================
+# OOP Support
+# ============================================================
+
+# Resolve method on a class, walking inheritance chain
+func interp_resolve_method(scalar $interp, str $pkg, str $method) scalar {
+    # Try pkg_method directly
+    my scalar $fi = interp_get_func($interp, $pkg . "_" . $method);
+    if (defined($fi)) { return $fi; }
+
+    # Walk inheritance chain (depth-first)
+    if (exists($interp->{"inherits"}, $pkg)) {
+        my scalar $parents = $interp->{"inherits"}->{$pkg};
+        my int $pi = 0;
+        while ($pi < size($parents)) {
+            my scalar $found = interp_resolve_method($interp, $parents->[$pi], $method);
+            if (defined($found)) { return $found; }
+            $pi = $pi + 1;
+        }
+    }
+    return undef;
+}
+
+# Check if an object isa given class (walks inheritance)
+func interp_isa(scalar $interp, str $obj_class, str $target_class) int {
+    if ($obj_class eq $target_class) { return 1; }
+    if (exists($interp->{"inherits"}, $obj_class)) {
+        my scalar $parents = $interp->{"inherits"}->{$obj_class};
+        my int $pi = 0;
+        while ($pi < size($parents)) {
+            if (interp_isa($interp, $parents->[$pi], $target_class)) { return 1; }
+            $pi = $pi + 1;
+        }
+    }
+    return 0;
+}
+
+# Load OOP features from a parsed program (called from Main)
+func interp_load_oop(scalar $interp, scalar $program) void {
+    # Load inheritance
+    my scalar $inherits = $program->{"inherits"};
+    my int $inh_count = $program->{"inherit_count"};
+    my int $i = 0;
+    while ($i < $inh_count) {
+        my scalar $entry = $inherits->[$i];
+        my str $child = $entry->{"child"};
+        my str $parent = $entry->{"parent"};
+        if (!exists($interp->{"inherits"}, $child)) {
+            my array @parents = ();
+            $interp->{"inherits"}->{$child} = \@parents;
+        }
+        push($interp->{"inherits"}->{$child}, $parent);
+        $i = $i + 1;
+    }
+
+    # Load overloads
+    if ($program->{"has_overloads"} == 1) {
+        my scalar $ovl = $program->{"overloads"};
+        my scalar $ovl_keys = keys($ovl);
+        my int $oi = 0;
+        while ($oi < size($ovl_keys)) {
+            my str $pkg = $ovl_keys->[$oi];
+            $interp->{"overloads"}->{$pkg} = $ovl->{$pkg};
+            $oi = $oi + 1;
+        }
+    }
+
+    # Load method modifiers
+    my scalar $mods = $program->{"method_modifiers"};
+    my int $mod_count = $program->{"method_modifier_count"};
+    $i = 0;
+    while ($i < $mod_count) {
+        my scalar $mod = $mods->[$i];
+        # Look up the modifier function by name (parser stores func_name, not func_node)
+        my str $func_name = $mod->{"func_name"};
+        my scalar $mod_fi = interp_get_func($interp, $func_name);
+        if (defined($mod_fi)) {
+            my hash %mod_entry = ();
+            $mod_entry{"mod_type"} = $mod->{"mod_type"};
+            $mod_entry{"method_name"} = $mod->{"method_name"};
+            $mod_entry{"package"} = $mod->{"package"};
+            $mod_entry{"func_info"} = $mod_fi;
+            push($interp->{"method_modifiers"}, \%mod_entry);
+        }
+        $i = $i + 1;
+    }
+
+    # Detect AUTOLOAD functions
+    my scalar $func_keys = keys($interp->{"functions"});
+    my int $fki = 0;
+    while ($fki < size($func_keys)) {
+        my str $fname = $func_keys->[$fki];
+        if (match($fname, "_AUTOLOAD$")) {
+            my str $pkg = substr($fname, 0, length($fname) - 9);
+            $interp->{"autoloads"}->{$pkg} = $interp->{"functions"}->{$fname};
+        }
+        $fki = $fki + 1;
+    }
+}
+
+# Execute END blocks (LIFO order)
+func interp_run_end_blocks(scalar $interp) void {
+    my scalar $blocks = $interp->{"end_blocks"};
+    my int $count = size($blocks);
+    my int $i = $count - 1;
+    while ($i >= 0) {
+        try {
+            eval_block($interp, $blocks->[$i], $interp->{"global_env"});
+        } catch ($e) {
+            if (is_signal($e, "return")) {
+                # Ignore returns from END blocks
+            } else {
+                say("Error in END block: " . $e);
+            }
+        }
+        $i = $i - 1;
+    }
+}
+
+# ============================================================
+# Control Flow Signals
+# ============================================================
+
+func make_signal(str $sig_type, scalar $value, str $label) scalar {
+    my hash %sig = ();
+    $sig{"__interp_sig__"} = 1;
+    $sig{"sig_type"} = $sig_type;
+    $sig{"value"} = $value;
+    $sig{"label"} = $label;
+    return \%sig;
+}
+
+func is_signal(scalar $e, str $sig_type) int {
+    if (!defined($e)) { return 0; }
+    if (ref($e) ne "HASH") { return 0; }
+    if (!exists($e, "__interp_sig__")) { return 0; }
+    if ($e->{"sig_type"} ne $sig_type) { return 0; }
+    return 1;
+}
+
+func is_loop_signal(scalar $e, str $sig_type, str $loop_label) int {
+    if (!is_signal($e, $sig_type)) { return 0; }
+    my str $sig_label = $e->{"label"};
+    # Match if signal has no label, or labels match
+    if (length($sig_label) == 0) { return 1; }
+    if (length($loop_label) > 0 && $sig_label eq $loop_label) { return 1; }
+    return 0;
+}
+
+# ============================================================
+# Load Program AST
+# ============================================================
+
+func interp_load_program(scalar $interp, scalar $program) void {
+    # Execute BEGIN blocks first
+    my scalar $begin_blocks = $program->{"begin_blocks"};
+    my int $begin_count = $program->{"begin_block_count"};
+    my int $bi = 0;
+    while ($bi < $begin_count) {
+        try {
+            eval_block($interp, $begin_blocks->[$bi], $interp->{"global_env"});
+        } catch ($e) {
+            if (is_signal($e, "return")) {
+                # Ignore returns from BEGIN blocks
+            } else {
+                throw($e);
+            }
+        }
+        $bi = $bi + 1;
+    }
+
+    # Store END blocks for later execution
+    my scalar $end_blocks = $program->{"end_blocks"};
+    my int $end_count = $program->{"end_block_count"};
+    my int $ei = 0;
+    while ($ei < $end_count) {
+        push($interp->{"end_blocks"}, $end_blocks->[$ei]);
+        $ei = $ei + 1;
+    }
+
+    # Register enums first (they may be referenced in globals/functions)
+    my scalar $enums = $program->{"enums"};
+    my int $enum_count = $program->{"enum_count"};
+    my int $i = 0;
+    while ($i < $enum_count) {
+        my scalar $en = $enums->[$i];
+        my str $enum_name = $en->{"name"};
+        my scalar $members = $en->{"members"};
+        my int $member_count = $en->{"member_count"};
+        my int $j = 0;
+        while ($j < $member_count) {
+            my scalar $member = $members->[$j];
+            my str $key = $enum_name . "::" . $member->{"name"};
+            $interp->{"enums"}->{$key} = $member->{"value"};
+            $j = $j + 1;
+        }
+        $i = $i + 1;
+    }
+
+    # Register all functions
+    my scalar $funcs = $program->{"functions"};
+    my int $func_count = $program->{"function_count"};
+    $i = 0;
+    while ($i < $func_count) {
+        my scalar $fn = $funcs->[$i];
+        my str $name = $fn->{"name"};
+        interp_register_func($interp, $name, $fn->{"params"}, $fn->{"param_count"}, $fn->{"body"}, $interp->{"global_env"});
+        $i = $i + 1;
+    }
+
+    # Register globals (constants, our, my at top level)
+    my scalar $globals = $program->{"globals"};
+    my int $global_count = $program->{"global_count"};
+    $i = 0;
+    while ($i < $global_count) {
+        my scalar $g = $globals->[$i];
+        my int $gtype = $g->{"type"};
+        if ($gtype == NODE_CONST_DECL()) {
+            my str $cname = $g->{"name"};
+            my scalar $init_val = eval_node($interp, $g->{"init"}, $interp->{"global_env"});
+            $interp->{"constants"}->{$cname} = $init_val;
+            env_set($interp->{"global_env"}, $cname, $init_val);
+        } elsif ($gtype == NODE_VAR_DECL() || $gtype == NODE_OUR_DECL()) {
+            eval_node($interp, $g, $interp->{"global_env"});
+        }
+        $i = $i + 1;
+    }
+
+    # Load OOP features (inherits, overloads, method modifiers)
+    interp_load_oop($interp, $program);
+
+    # Load import_lib native functions
+    interp_load_import_libs($interp, $program);
+}
+
+# Run the main() function
+func interp_run_main(scalar $interp, scalar $argv) int {
+    my scalar $func_info = interp_get_func($interp, "main");
+    # If main not found at top level, look for pkg_main (e.g., Math_Utils_main)
+    if (!defined($func_info)) {
+        my scalar $func_keys = keys($interp->{"functions"});
+        my int $fki = 0;
+        while ($fki < size($func_keys)) {
+            my str $fname = $func_keys->[$fki];
+            if (match($fname, "_main$") || $fname eq "main") {
+                $func_info = $interp->{"functions"}->{$fname};
+                last;
+            }
+            $fki = $fki + 1;
+        }
+    }
+    if (!defined($func_info)) {
+        die("Error: no main() function defined");
+    }
+    # Set @ARGV in global env
+    env_set($interp->{"global_env"}, "ARGV", $argv);
+    my array @args = ();
+    $interp->{"had_explicit_return"} = 0;
+    my scalar $result = call_user_func($interp, $func_info, \@args);
+    # Only use the result if there was an explicit return statement
+    if ($interp->{"had_explicit_return"} == 1 && defined($result)) {
+        my int $exit_code = $result;
+        return $exit_code;
+    }
+    return 0;
+}
+
+# ============================================================
+# Assignment Target
+# ============================================================
+
+func assign_to(scalar $interp, scalar $target, scalar $value, scalar $env) void {
+    my int $ttype = $target->{"type"};
+
+    if ($ttype == NODE_VARIABLE()) {
+        my str $name = $target->{"name"};
+        if (!env_update($env, $name, $value)) {
+            env_set($env, $name, $value);
+        }
+        return;
+    }
+
+    if ($ttype == NODE_SUBSCRIPT()) {
+        my scalar $arr = eval_node($interp, $target->{"array"}, $env);
+        my int $idx = eval_node($interp, $target->{"index"}, $env);
+        $arr->[$idx] = $value;
+        return;
+    }
+
+    if ($ttype == NODE_HASH_ACCESS()) {
+        my scalar $hash_val = eval_node($interp, $target->{"hash"}, $env);
+        my str $key = eval_node($interp, $target->{"key"}, $env);
+        # Check for tied hash STORE
+        if (ref($hash_val) eq "HASH" && exists($hash_val, "__tied__")) {
+            my scalar $tie_obj = $hash_val->{"__tied__"};
+            my str $tie_pkg = $tie_obj->{"__class__"};
+            if (length($tie_pkg) > 0) {
+                my scalar $store_fn = interp_resolve_method($interp, $tie_pkg, "STORE");
+                if (defined($store_fn)) {
+                    my array @store_args = ();
+                    push(@store_args, $tie_obj);
+                    push(@store_args, $key);
+                    push(@store_args, $value);
+                    call_user_func($interp, $store_fn, \@store_args);
+                    return;
+                }
+            }
+        }
+        $hash_val->{$key} = $value;
+        return;
+    }
+
+    if ($ttype == NODE_DEREF_HASH()) {
+        my scalar $ref_val = eval_node($interp, $target->{"ref"}, $env);
+        my str $key = eval_node($interp, $target->{"key"}, $env);
+        $ref_val->{$key} = $value;
+        return;
+    }
+
+    if ($ttype == NODE_DEREF_ARRAY()) {
+        my scalar $ref_val = eval_node($interp, $target->{"ref"}, $env);
+        my int $idx = eval_node($interp, $target->{"index"}, $env);
+        $ref_val->[$idx] = $value;
+        return;
+    }
+
+    if ($ttype == NODE_DEREF_SCALAR()) {
+        # $$ref = value - in our interpreter model, update the variable the ref points to
+        my scalar $ref_node = $target->{"ref"};
+        if ($ref_node->{"type"} == NODE_VARIABLE()) {
+            my str $vname = $ref_node->{"name"};
+            env_update($env, $vname, $value);
+        }
+        return;
+    }
+
+    die("Cannot assign to node type: " . ast_type_name($ttype));
+}
+
+# ============================================================
+# Block Evaluation
+# ============================================================
+
+func eval_block(scalar $interp, scalar $block, scalar $env) scalar {
+    my scalar $stmts = $block->{"statements"};
+    my int $count = $block->{"statement_count"};
+    my scalar $result = undef;
+
+    # Check if block contains labels (only then do we need goto try/catch)
+    my int $has_labels = 0;
+    my int $lci = 0;
+    while ($lci < $count) {
+        if ($stmts->[$lci]->{"type"} == NODE_LABEL()) {
+            $has_labels = 1;
+            last;
+        }
+        $lci = $lci + 1;
+    }
+
+    my int $ebi = 0;
+    if ($has_labels) {
+        # Slow path: wrap each statement in try/catch for goto support
+        while ($ebi < $count) {
+            try {
+                $result = eval_node($interp, $stmts->[$ebi], $env);
+            } catch ($eb_exc) {
+                if (is_signal($eb_exc, "goto")) {
+                    my str $eb_gl = $eb_exc->{"label"};
+                    my int $eb_gf = 0;
+                    my int $eb_gk = 0;
+                    while ($eb_gk < $count) {
+                        if ($stmts->[$eb_gk]->{"type"} == NODE_LABEL() && $stmts->[$eb_gk]->{"name"} eq $eb_gl) {
+                            $ebi = $eb_gk + 1;
+                            $eb_gf = 1;
+                            last;
+                        }
+                        $eb_gk = $eb_gk + 1;
+                    }
+                    if ($eb_gf == 1) {
+                        next;
+                    }
+                }
+                throw($eb_exc);
+            }
+            # Check for signals (return, last, next, redo)
+            if (length($interp->{"signal_type"}) > 0) {
+                return $result;
+            }
+            $ebi = $ebi + 1;
+        }
+    } else {
+        # Fast path: no goto labels, direct eval without try/catch overhead
+        while ($ebi < $count) {
+            $result = eval_node($interp, $stmts->[$ebi], $env);
+            # Check for signals (return, last, next, redo)
+            if (length($interp->{"signal_type"}) > 0) {
+                return $result;
+            }
+            $ebi = $ebi + 1;
+        }
+    }
+    return $result;
+}
+
+# Evaluate statements in an existing env (no new scope)
+func eval_stmts_in_env(scalar $interp, scalar $stmts, int $count, scalar $env) scalar {
+    my scalar $result = undef;
+    my int $i = 0;
+    while ($i < $count) {
+        $result = eval_node($interp, $stmts->[$i], $env);
+        $i = $i + 1;
+    }
+    return $result;
+}
+
+# ============================================================
+# Binary Operations
+# ============================================================
+
+func check_overload(scalar $interp, scalar $val, str $op) scalar {
+    if (ref($val) ne "HASH") { return undef; }
+    if (!exists($val, "__class__")) { return undef; }
+    my str $pkg = $val->{"__class__"};
+    if (!exists($interp->{"overloads"}, $pkg)) { return undef; }
+    my scalar $pkg_ovl = $interp->{"overloads"}->{$pkg};
+    if (!exists($pkg_ovl, $op)) { return undef; }
+    my str $method_name = $pkg_ovl->{$op};
+    return interp_resolve_method($interp, $pkg, $method_name);
+}
+
+func eval_binop(scalar $interp, scalar $node, scalar $env) scalar {
+    my str $op = $node->{"op"};
+
+    # Short-circuit operators
+    if ($op eq "&&" || $op eq "and") {
+        my scalar $left = eval_node($interp, $node->{"left"}, $env);
+        if (!$left) { return $left; }
+        return eval_node($interp, $node->{"right"}, $env);
+    }
+    if ($op eq "||" || $op eq "or") {
+        my scalar $left = eval_node($interp, $node->{"left"}, $env);
+        if ($left) { return $left; }
+        return eval_node($interp, $node->{"right"}, $env);
+    }
+    if ($op eq "//") {
+        my scalar $left = eval_node($interp, $node->{"left"}, $env);
+        if (defined($left)) { return $left; }
+        return eval_node($interp, $node->{"right"}, $env);
+    }
+
+    # Evaluate both sides
+    my scalar $left = eval_node($interp, $node->{"left"}, $env);
+    my scalar $right = eval_node($interp, $node->{"right"}, $env);
+
+    # Check for operator overloading
+    my scalar $ovl_func = check_overload($interp, $left, $op);
+    if (defined($ovl_func)) {
+        my array @ovl_args = ();
+        push(@ovl_args, $left);
+        push(@ovl_args, $right);
+        push(@ovl_args, 0);
+        return call_user_func($interp, $ovl_func, \@ovl_args);
+    }
+    my scalar $ovl_func_r = check_overload($interp, $right, $op);
+    if (defined($ovl_func_r)) {
+        my array @ovl_args = ();
+        push(@ovl_args, $right);
+        push(@ovl_args, $left);
+        push(@ovl_args, 1);
+        return call_user_func($interp, $ovl_func_r, \@ovl_args);
+    }
+
+    # Arithmetic
+    if ($op eq "+") { return $left + $right; }
+    if ($op eq "-") { return $left - $right; }
+    if ($op eq "*") { return $left * $right; }
+    if ($op eq "/") { return $left / $right; }
+    if ($op eq "%") { return $left % $right; }
+    if ($op eq "**") {
+        return math::pow($left, $right);
+    }
+
+    # String
+    if ($op eq ".") {
+        # Check for stringify overload on left
+        my scalar $l_str_ovl = check_overload($interp, $left, "\"\"");
+        my scalar $r_str_ovl = check_overload($interp, $right, "\"\"");
+        my scalar $concat_left = $left;
+        my scalar $concat_right = $right;
+        if (defined($l_str_ovl)) {
+            my array @sa = ();
+            push(@sa, $left);
+            $concat_left = call_user_func($interp, $l_str_ovl, \@sa);
+        }
+        if (defined($r_str_ovl)) {
+            my array @sa = ();
+            push(@sa, $right);
+            $concat_right = call_user_func($interp, $r_str_ovl, \@sa);
+        }
+        return $concat_left . $concat_right;
+    }
+    if ($op eq "x") {
+        my str $s = $left;
+        my int $n = $right;
+        my str $result = "";
+        my int $xi = 0;
+        while ($xi < $n) {
+            $result = $result . $s;
+            $xi = $xi + 1;
+        }
+        return $result;
+    }
+
+    # Numeric comparison
+    if ($op eq "==") { return ($left == $right) ? 1 : 0; }
+    if ($op eq "!=") { return ($left != $right) ? 1 : 0; }
+    if ($op eq "<") { return ($left < $right) ? 1 : 0; }
+    if ($op eq ">") { return ($left > $right) ? 1 : 0; }
+    if ($op eq "<=") { return ($left <= $right) ? 1 : 0; }
+    if ($op eq ">=") { return ($left >= $right) ? 1 : 0; }
+    if ($op eq "<=>") {
+        if ($left < $right) { return -1; }
+        if ($left > $right) { return 1; }
+        return 0;
+    }
+
+    # String comparison
+    if ($op eq "eq") { return ($left eq $right) ? 1 : 0; }
+    if ($op eq "ne") { return ($left ne $right) ? 1 : 0; }
+    if ($op eq "lt") { return ($left lt $right) ? 1 : 0; }
+    if ($op eq "gt") { return ($left gt $right) ? 1 : 0; }
+    if ($op eq "le") { return ($left le $right) ? 1 : 0; }
+    if ($op eq "ge") { return ($left ge $right) ? 1 : 0; }
+    if ($op eq "cmp") {
+        if ($left lt $right) { return -1; }
+        if ($left gt $right) { return 1; }
+        return 0;
+    }
+
+    # Bitwise operators
+    if ($op eq "&") {
+        my int $li = $left;
+        my int $ri = $right;
+        my int $result = 0;
+        __C__ {
+            int64_t lv = strada_to_int(li);
+            int64_t rv = strada_to_int(ri);
+            strada_decref(result);
+            result = strada_new_int(lv & rv);
+        }
+        return $result;
+    }
+    if ($op eq "|") {
+        my int $li = $left;
+        my int $ri = $right;
+        my int $result = 0;
+        __C__ {
+            int64_t lv = strada_to_int(li);
+            int64_t rv = strada_to_int(ri);
+            strada_decref(result);
+            result = strada_new_int(lv | rv);
+        }
+        return $result;
+    }
+    if ($op eq "^") {
+        my int $li = $left;
+        my int $ri = $right;
+        my int $result = 0;
+        __C__ {
+            int64_t lv = strada_to_int(li);
+            int64_t rv = strada_to_int(ri);
+            strada_decref(result);
+            result = strada_new_int(lv ^ rv);
+        }
+        return $result;
+    }
+    if ($op eq "<<") {
+        my int $li = $left;
+        my int $ri = $right;
+        my int $result = 0;
+        __C__ {
+            int64_t lv = strada_to_int(li);
+            int64_t rv = strada_to_int(ri);
+            strada_decref(result);
+            result = strada_new_int(lv << rv);
+        }
+        return $result;
+    }
+    if ($op eq ">>") {
+        my int $li = $left;
+        my int $ri = $right;
+        my int $result = 0;
+        __C__ {
+            int64_t lv = strada_to_int(li);
+            int64_t rv = strada_to_int(ri);
+            strada_decref(result);
+            result = strada_new_int(lv >> rv);
+        }
+        return $result;
+    }
+
+    # Regex match as binary operator (=~ with string pattern)
+    if ($op eq "=~") {
+        my str $text = $left;
+        my str $pattern = $right;
+        return match($text, $pattern) ? 1 : 0;
+    }
+    if ($op eq "!~") {
+        my str $text = $left;
+        my str $pattern = $right;
+        return (!match($text, $pattern)) ? 1 : 0;
+    }
+
+    die("Unknown binary operator: " . $op);
+}
+
+# ============================================================
+# Built-in Function Detection and Dispatch
+# ============================================================
+
+func is_builtin(str $name) int {
+    # I/O
+    if ($name eq "say") { return 1; }
+    if ($name eq "print") { return 1; }
+    if ($name eq "dumper") { return 1; }
+
+    # Array operations
+    if ($name eq "push") { return 1; }
+    if ($name eq "pop") { return 1; }
+    if ($name eq "shift") { return 1; }
+    if ($name eq "unshift") { return 1; }
+    if ($name eq "splice") { return 1; }
+    if ($name eq "reverse") { return 1; }
+    if ($name eq "size") { return 1; }
+    if ($name eq "scalar") { return 1; }
+
+    # String operations
+    if ($name eq "length") { return 1; }
+    if ($name eq "bytes") { return 1; }
+    if ($name eq "substr") { return 1; }
+    if ($name eq "index") { return 1; }
+    if ($name eq "rindex") { return 1; }
+    if ($name eq "join") { return 1; }
+    if ($name eq "split") { return 1; }
+    if ($name eq "chomp") { return 1; }
+    if ($name eq "chop") { return 1; }
+    if ($name eq "chr") { return 1; }
+    if ($name eq "ord") { return 1; }
+    if ($name eq "char_at") { return 1; }
+    if ($name eq "uc") { return 1; }
+    if ($name eq "lc") { return 1; }
+    if ($name eq "sprintf") { return 1; }
+    if ($name eq "match") { return 1; }
+    if ($name eq "replace") { return 1; }
+
+    # Hash operations
+    if ($name eq "keys") { return 1; }
+    if ($name eq "values") { return 1; }
+    if ($name eq "exists") { return 1; }
+    if ($name eq "delete") { return 1; }
+    if ($name eq "each") { return 1; }
+
+    # Type functions
+    if ($name eq "defined") { return 1; }
+    if ($name eq "ref") { return 1; }
+    if ($name eq "int") { return 1; }
+
+    # Misc
+    if ($name eq "die") { return 1; }
+    if ($name eq "slurp") { return 1; }
+    if ($name eq "spew") { return 1; }
+    if ($name eq "abs") { return 1; }
+    if ($name eq "nsort") { return 1; }
+    if ($name eq "dumper_str") { return 1; }
+    if ($name eq "strada_new_undef") { return 1; }
+
+    # String operations - additional
+    if ($name eq "upper") { return 1; }
+    if ($name eq "lower") { return 1; }
+    if ($name eq "ucfirst") { return 1; }
+    if ($name eq "lcfirst") { return 1; }
+    if ($name eq "replace_all") { return 1; }
+    if ($name eq "trim") { return 1; }
+    if ($name eq "ltrim") { return 1; }
+    if ($name eq "rtrim") { return 1; }
+    if ($name eq "repeat") { return 1; }
+    if ($name eq "typeof") { return 1; }
+    if ($name eq "cast_int") { return 1; }
+    if ($name eq "cast_num") { return 1; }
+    if ($name eq "cast_str") { return 1; }
+
+    # Ref/memory functions
+    if ($name eq "refto") { return 1; }
+    if ($name eq "refcount") { return 1; }
+    if ($name eq "is_refto") { return 1; }
+    if ($name eq "reftype") { return 1; }
+    if ($name eq "blessed") { return 1; }
+    if ($name eq "deref") { return 1; }
+    if ($name eq "derefto") { return 1; }
+
+    # OOP helper functions
+    if ($name eq "set_package") { return 1; }
+    if ($name eq "inherit") { return 1; }
+    if ($name eq "hash_new") { return 1; }
+    if ($name eq "UNIVERSAL::isa") { return 1; }
+    if ($name eq "UNIVERSAL::can") { return 1; }
+    if ($name eq "isa") { return 1; }
+    if ($name eq "capture") { return 1; }
+    if ($name eq "hash_set") { return 1; }
+    if ($name eq "hash_get") { return 1; }
+    if ($name eq "hash_delete") { return 1; }
+    if ($name eq "readline") { return 1; }
+    if ($name eq "is_ref") { return 1; }
+    if ($name eq "can") { return 1; }
+    if ($name eq "printf") { return 1; }
+
+    # core::/sys:: functions - use prefix matching for efficiency
+    if (index($name, "sys::") == 0 || index($name, "core::") == 0) { return 1; }
+
+    # math:: functions
+    if (index($name, "math::") == 0) { return 1; }
+
+    # utf8:: functions
+    if (index($name, "utf8::") == 0) { return 1; }
+
+    # DateTime:: functions (C-backed builtins)
+    if (index($name, "DateTime::") == 0) { return 1; }
+
+    # BigInt:: helper builtins
+    if ($name eq "BigInt::_bi_add" || $name eq "BigInt::_bi_sub" || $name eq "BigInt::_bi_mul" ||
+        $name eq "BigInt::_bi_divmod" || $name eq "BigInt::_bi_cmp" ||
+        $name eq "BigInt::_bi_divmod_rem") { return 1; }
+
+    # BigFloat:: helper builtins
+    if ($name eq "BigFloat::_bf_pad_right" || $name eq "BigFloat::_bf_normalize" ||
+        $name eq "BigFloat::new" || $name eq "BigFloat_new") { return 1; }
+
+    # OOP functions
+    if ($name eq "bless") { return 1; }
+    if ($name eq "tie") { return 1; }
+    if ($name eq "untie") { return 1; }
+    if ($name eq "tied") { return 1; }
+
+    # Additional functions
+    if ($name eq "select") { return 1; }
+    if ($name eq "named_captures") { return 1; }
+    if ($name eq "captures") { return 1; }
+    if ($name eq "sort") { return 1; }
+    if ($name eq "throw") { return 1; }
+    if ($name eq "chomp") { return 1; }
+    if ($name eq "chop") { return 1; }
+
+    return 0;
+}
+
+func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
+    my int $argc = size($args);
+
+    # ---- I/O ----
+    if ($name eq "say") {
+        if ($argc == 0) {
+            my scalar $sfh0 = $interp->{"select_fh"};
+            if (defined($sfh0)) { say($sfh0, ""); }
+            else { say(""); }
+        } elsif ($argc == 1) {
+            my scalar $v = $args->[0];
+            # Check for stringify overload
+            my scalar $str_ovl = check_overload($interp, $v, "\"\"");
+            if (defined($str_ovl)) {
+                my array @sargs = ();
+                push(@sargs, $v);
+                $v = call_user_func($interp, $str_ovl, \@sargs);
+            }
+            my scalar $sfh = $interp->{"select_fh"};
+            if (defined($sfh)) { say($sfh, $v); }
+            else { say($v); }
+        } elsif ($argc == 2) {
+            my scalar $v = $args->[1];
+            my scalar $str_ovl = check_overload($interp, $v, "\"\"");
+            if (defined($str_ovl)) {
+                my array @sargs = ();
+                push(@sargs, $v);
+                $v = call_user_func($interp, $str_ovl, \@sargs);
+            }
+            say($args->[0], $v);
+        }
+        return undef;
+    }
+    if ($name eq "print") {
+        if ($argc == 0) {
+            return undef;
+        } elsif ($argc == 1) {
+            my scalar $v = $args->[0];
+            my scalar $str_ovl = check_overload($interp, $v, "\"\"");
+            if (defined($str_ovl)) {
+                my array @sargs = ();
+                push(@sargs, $v);
+                $v = call_user_func($interp, $str_ovl, \@sargs);
+            }
+            my scalar $sfh = $interp->{"select_fh"};
+            if (defined($sfh)) { print($sfh, $v); }
+            else { print($v); }
+        } elsif ($argc == 2) {
+            my scalar $v = $args->[1];
+            my scalar $str_ovl = check_overload($interp, $v, "\"\"");
+            if (defined($str_ovl)) {
+                my array @sargs = ();
+                push(@sargs, $v);
+                $v = call_user_func($interp, $str_ovl, \@sargs);
+            }
+            print($args->[0], $v);
+        }
+        return undef;
+    }
+    if ($name eq "dumper") {
+        if ($argc >= 1) {
+            dumper($args->[0]);
+        }
+        return undef;
+    }
+
+    # ---- Array operations ----
+    if ($name eq "push") {
+        my scalar $arr = $args->[0];
+        my int $ai = 1;
+        while ($ai < $argc) {
+            push($arr, $args->[$ai]);
+            $ai = $ai + 1;
+        }
+        return undef;
+    }
+    if ($name eq "pop") {
+        return pop($args->[0]);
+    }
+    if ($name eq "shift") {
+        return shift($args->[0]);
+    }
+    if ($name eq "unshift") {
+        unshift($args->[0], $args->[1]);
+        return undef;
+    }
+    if ($name eq "splice") {
+        my scalar $sp_a = $args->[0];
+        my int $sp_o = $args->[1];
+        my int $sp_l = 0;
+        if ($argc >= 3) {
+            $sp_l = $args->[2];
+        } else {
+            # No length: splice from offset to end
+            $sp_l = size($sp_a) - $sp_o;
+        }
+        my array @sp_r = ();
+        my int $sp_i = 0;
+        while ($sp_i < $sp_l && ($sp_o + $sp_i) < size($sp_a)) {
+            push(@sp_r, $sp_a->[$sp_o + $sp_i]);
+            $sp_i = $sp_i + 1;
+        }
+        if ($argc >= 4) {
+            splice($sp_a, $sp_o, $sp_l, $args->[3]);
+        } else {
+            splice($sp_a, $sp_o, $sp_l);
+        }
+        return \@sp_r;
+    }
+    if ($name eq "reverse") {
+        reverse($args->[0]);
+        return undef;
+    }
+    if ($name eq "size" || $name eq "scalar") {
+        return size($args->[0]);
+    }
+
+    # ---- String operations ----
+    if ($name eq "length") {
+        return length($args->[0]);
+    }
+    if ($name eq "bytes") {
+        return bytes($args->[0]);
+    }
+    if ($name eq "substr") {
+        if ($argc == 2) {
+            return substr($args->[0], $args->[1], length($args->[0]) - $args->[1]);
+        }
+        return substr($args->[0], $args->[1], $args->[2]);
+    }
+    if ($name eq "index") {
+        if ($argc == 2) {
+            return index($args->[0], $args->[1]);
+        }
+        return index($args->[0], $args->[1], $args->[2]);
+    }
+    if ($name eq "rindex") {
+        return rindex($args->[0], $args->[1]);
+    }
+    if ($name eq "join") {
+        return join($args->[0], $args->[1]);
+    }
+    if ($name eq "split") {
+        return split($args->[0], $args->[1]);
+    }
+    if ($name eq "chomp") {
+        return chomp($args->[0]);
+    }
+    if ($name eq "chop") {
+        return chop($args->[0]);
+    }
+    if ($name eq "chr") {
+        return chr($args->[0]);
+    }
+    if ($name eq "ord") {
+        return ord($args->[0]);
+    }
+    if ($name eq "char_at") {
+        return chr(char_at($args->[0], $args->[1]));
+    }
+    if ($name eq "uc") {
+        return uc($args->[0]);
+    }
+    if ($name eq "lc") {
+        return lc($args->[0]);
+    }
+    if ($name eq "sprintf") {
+        if ($argc == 1) { return sprintf($args->[0]); }
+        if ($argc == 2) { return sprintf($args->[0], $args->[1]); }
+        if ($argc == 3) { return sprintf($args->[0], $args->[1], $args->[2]); }
+        if ($argc == 4) { return sprintf($args->[0], $args->[1], $args->[2], $args->[3]); }
+        if ($argc == 5) { return sprintf($args->[0], $args->[1], $args->[2], $args->[3], $args->[4]); }
+        if ($argc == 6) { return sprintf($args->[0], $args->[1], $args->[2], $args->[3], $args->[4], $args->[5]); }
+        if ($argc == 7) { return sprintf($args->[0], $args->[1], $args->[2], $args->[3], $args->[4], $args->[5], $args->[6]); }
+        if ($argc == 8) { return sprintf($args->[0], $args->[1], $args->[2], $args->[3], $args->[4], $args->[5], $args->[6], $args->[7]); }
+        return sprintf($args->[0], $args->[1]);
+    }
+    if ($name eq "match") {
+        return match($args->[0], $args->[1]);
+    }
+    if ($name eq "replace") {
+        if ($argc == 3) {
+            return replace($args->[0], $args->[1], $args->[2]);
+        }
+        return replace($args->[0], $args->[1], $args->[2], $args->[3]);
+    }
+    if ($name eq "replace_all") {
+        my str $ra_str = $args->[0];
+        my str $ra_pat = $args->[1];
+        my str $ra_rep = $args->[2];
+        my str $ra_result = "";
+        __C__ {
+            char *s = strada_to_str(ra_str);
+            char *p = strada_to_str(ra_pat);
+            char *r = strada_to_str(ra_rep);
+            char *res = strada_regex_replace_all(s, p, r, NULL);
+            strada_decref(ra_result);
+            ra_result = strada_new_str(res);
+            free(res);
+            free(r);
+            free(p);
+            free(s);
+        }
+        return $ra_result;
+    }
+    if ($name eq "upper" || $name eq "uc") {
+        return uc($args->[0]);
+    }
+    if ($name eq "lower" || $name eq "lc") {
+        return lc($args->[0]);
+    }
+    if ($name eq "ucfirst") {
+        my str $s = $args->[0];
+        if (length($s) == 0) { return ""; }
+        return uc(substr($s, 0, 1)) . substr($s, 1, length($s) - 1);
+    }
+    if ($name eq "lcfirst") {
+        my str $s = $args->[0];
+        if (length($s) == 0) { return ""; }
+        return lc(substr($s, 0, 1)) . substr($s, 1, length($s) - 1);
+    }
+    if ($name eq "trim") {
+        my str $s = $args->[0];
+        $s =~ s/^\s+//;
+        $s =~ s/\s+$//;
+        return $s;
+    }
+    if ($name eq "ltrim") {
+        my str $s = $args->[0];
+        $s =~ s/^\s+//;
+        return $s;
+    }
+    if ($name eq "rtrim") {
+        my str $s = $args->[0];
+        $s =~ s/\s+$//;
+        return $s;
+    }
+    if ($name eq "repeat") {
+        my str $s = $args->[0];
+        my int $n = $args->[1];
+        my str $result = "";
+        my int $ri = 0;
+        while ($ri < $n) {
+            $result = $result . $s;
+            $ri = $ri + 1;
+        }
+        return $result;
+    }
+    if ($name eq "typeof") {
+        my scalar $v = $args->[0];
+        if (!defined($v)) { return "undef"; }
+        my str $r = ref($v);
+        if ($r eq "ARRAY") { return "array"; }
+        if ($r eq "HASH") { return "hash"; }
+        if (length($r) > 0) { return "ref"; }
+        return "scalar";
+    }
+    if ($name eq "cast_int") {
+        my int $v = $args->[0];
+        return $v;
+    }
+    if ($name eq "cast_num") {
+        my num $v = $args->[0];
+        return $v;
+    }
+    if ($name eq "cast_str") {
+        my str $v = "" . $args->[0];
+        return $v;
+    }
+
+    # ---- Hash operations ----
+    if ($name eq "keys") {
+        return keys($args->[0]);
+    }
+    if ($name eq "values") {
+        return values($args->[0]);
+    }
+    if ($name eq "exists") {
+        return exists($args->[0], $args->[1]);
+    }
+    if ($name eq "delete") {
+        delete($args->[0], $args->[1]);
+        return undef;
+    }
+    if ($name eq "each") {
+        return each($args->[0]);
+    }
+
+    # ---- Type functions ----
+    if ($name eq "defined") {
+        return defined($args->[0]) ? 1 : 0;
+    }
+    if ($name eq "ref") {
+        return ref($args->[0]);
+    }
+    if ($name eq "int") {
+        # Truncate to integer: use arithmetic to force int conversion
+        my scalar $v = $args->[0];
+        my int $iv = $v;
+        return $iv;
+    }
+
+    # ---- Misc ----
+    if ($name eq "die") {
+        if ($argc >= 1) {
+            die($args->[0]);
+        }
+        die("Died");
+    }
+    if ($name eq "slurp" || $name eq "sys::slurp" || $name eq "core::slurp") {
+        return slurp($args->[0]);
+    }
+    if ($name eq "spew" || $name eq "sys::spew" || $name eq "core::spew") {
+        spew($args->[0], $args->[1]);
+        return undef;
+    }
+    if ($name eq "abs") {
+        my scalar $v = $args->[0];
+        if ($v < 0) { return 0 - $v; }
+        return $v;
+    }
+    if ($name eq "nsort") {
+        my scalar $arr = $args->[0];
+        my int $arr_len = size($arr);
+        my array @sorted = ();
+        my int $si = 0;
+        while ($si < $arr_len) {
+            push(@sorted, $arr->[$si]);
+            $si = $si + 1;
+        }
+        # Insertion sort by numeric value
+        my int $oi = 1;
+        while ($oi < $arr_len) {
+            my scalar $key_val = $sorted[$oi];
+            my int $oj = $oi - 1;
+            while ($oj >= 0 && $sorted[$oj] > $key_val) {
+                $sorted[$oj + 1] = $sorted[$oj];
+                $oj = $oj - 1;
+            }
+            $sorted[$oj + 1] = $key_val;
+            $oi = $oi + 1;
+        }
+        return \@sorted;
+    }
+    if ($name eq "dumper_str") {
+        # Return string representation using dumper
+        my scalar $v = $args->[0];
+        if (!defined($v)) { return "undef"; }
+        return "" . $v;
+    }
+    if ($name eq "strada_new_undef") {
+        return undef;
+    }
+
+    # ---- Ref/memory functions ----
+    if ($name eq "refto") {
+        my scalar $rv = $args->[0];
+        my str $rvt = ref($rv);
+        if ($rvt eq "HASH" || $rvt eq "ARRAY") {
+            return $rv;
+        }
+        # Wrap scalar in a ref-like hash
+        my hash %wrapper = ();
+        $wrapper{"__scalar_ref__"} = 1;
+        $wrapper{"value"} = $rv;
+        return \%wrapper;
+    }
+    if ($name eq "refcount") {
+        my scalar $v = $args->[0];
+        my int $rc = 0;
+        __C__ {
+            if (v && v->type != STRADA_UNDEF) {
+                strada_decref(rc);
+                rc = strada_new_int((int64_t)v->refcount);
+            } else {
+                strada_decref(rc);
+                rc = strada_new_int(0);
+            }
+        }
+        return $rc;
+    }
+    if ($name eq "is_refto") {
+        my scalar $rv = $args->[0];
+        if (ref($rv) eq "HASH" && exists($rv, "__scalar_ref__")) { return 1; }
+        return (ref($rv) ne "" && ref($rv) ne "0") ? 1 : 0;
+    }
+    if ($name eq "reftype") {
+        my scalar $rv = $args->[0];
+        if (ref($rv) eq "HASH" && exists($rv, "__scalar_ref__")) { return "SCALAR"; }
+        return ref($rv);
+    }
+    if ($name eq "deref") {
+        my scalar $rv = $args->[0];
+        if (ref($rv) eq "HASH" && exists($rv, "__scalar_ref__")) { return $rv->{"value"}; }
+        return $rv;
+    }
+    if ($name eq "derefto") {
+        my scalar $rv = $args->[0];
+        if (ref($rv) eq "HASH" && exists($rv, "__scalar_ref__")) { return $rv->{"value"}; }
+        return $rv;
+    }
+    if ($name eq "blessed") {
+        my scalar $v = $args->[0];
+        if (ref($v) eq "HASH" && exists($v, "__class__")) {
+            return $v->{"__class__"};
+        }
+        my str $rt = ref($v);
+        if ($rt ne "HASH" && $rt ne "ARRAY" && $rt ne "" && $rt ne "0") {
+            return $rt;
+        }
+        return undef;
+    }
+
+    # ---- OOP helper functions ----
+    if ($name eq "set_package") {
+        if ($argc == 1) {
+            # set_package("ClassName") - set current package context
+            my str $pkg_name = $args->[0];
+            $interp->{"package"} = $pkg_name;
+            return undef;
+        }
+        my scalar $hash_ref = $args->[0];
+        my str $pkg_name = $args->[1];
+        if (ref($hash_ref) eq "HASH") {
+            $hash_ref->{"__class__"} = $pkg_name;
+        }
+        return $hash_ref;
+    }
+    if ($name eq "inherit") {
+        my str $child_pkg = "";
+        my str $parent_pkg = "";
+        if ($argc >= 2) {
+            $child_pkg = $args->[0];
+            $parent_pkg = $args->[1];
+        } else {
+            # Single arg: inherit("Parent") - child is current package
+            $child_pkg = $interp->{"package"};
+            $parent_pkg = $args->[0];
+        }
+        if (!exists($interp->{"inherits"}, $child_pkg)) {
+            my array @parents = ();
+            $interp->{"inherits"}->{$child_pkg} = \@parents;
+        }
+        push($interp->{"inherits"}->{$child_pkg}, $parent_pkg);
+        return undef;
+    }
+    if ($name eq "hash_new") {
+        my hash %h = ();
+        return \%h;
+    }
+    if ($name eq "UNIVERSAL::isa") {
+        my scalar $obj = $args->[0];
+        my str $target = $args->[1];
+        my str $pkg = "";
+        if (ref($obj) eq "HASH" && exists($obj, "__class__")) {
+            $pkg = $obj->{"__class__"};
+        } else {
+            my str $rt = ref($obj);
+            if ($rt ne "HASH" && $rt ne "ARRAY" && $rt ne "" && $rt ne "0") {
+                $pkg = $rt;
+            }
+        }
+        if (length($pkg) > 0) {
+            return interp_isa($interp, $pkg, $target) ? 1 : 0;
+        }
+        return 0;
+    }
+    if ($name eq "UNIVERSAL::can") {
+        my scalar $obj = $args->[0];
+        my str $method_name = $args->[1];
+        my str $pkg = "";
+        if (ref($obj) eq "HASH" && exists($obj, "__class__")) {
+            $pkg = $obj->{"__class__"};
+        } else {
+            my str $rt = ref($obj);
+            if ($rt ne "HASH" && $rt ne "ARRAY" && $rt ne "" && $rt ne "0") {
+                $pkg = $rt;
+            }
+        }
+        if (length($pkg) > 0) {
+            my scalar $fi = interp_resolve_method($interp, $pkg, $method_name);
+            return defined($fi) ? 1 : 0;
+        }
+        return 0;
+    }
+
+    # ---- Additional bare builtins ----
+    if ($name eq "isa") {
+        my scalar $obj = $args->[0];
+        my str $target = $args->[1];
+        my str $pkg = "";
+        if (ref($obj) eq "HASH" && exists($obj, "__class__")) {
+            $pkg = $obj->{"__class__"};
+        } else {
+            my str $rt = ref($obj);
+            if ($rt ne "HASH" && $rt ne "ARRAY" && $rt ne "" && $rt ne "0") {
+                $pkg = $rt;
+            }
+        }
+        if (length($pkg) > 0) {
+            return interp_isa($interp, $pkg, $target) ? 1 : 0;
+        }
+        return 0;
+    }
+    if ($name eq "capture") {
+        if ($argc >= 1) {
+            my int $idx = $args->[0];
+            return captures()[$idx];
+        }
+        return captures();
+    }
+    if ($name eq "hash_set") {
+        my scalar $h = $args->[0];
+        my str $k = $args->[1];
+        my scalar $v = $args->[2];
+        $h->{$k} = $v;
+        return $v;
+    }
+    if ($name eq "hash_get") {
+        my scalar $h = $args->[0];
+        my str $k = $args->[1];
+        if (exists($h, $k)) {
+            return $h->{$k};
+        }
+        if ($argc >= 3) { return $args->[2]; }
+        return undef;
+    }
+    if ($name eq "hash_delete") {
+        my scalar $h = $args->[0];
+        my str $k = $args->[1];
+        delete($h, $k);
+        return undef;
+    }
+    if ($name eq "is_ref") {
+        my scalar $rv = $args->[0];
+        if (ref($rv) eq "HASH" && exists($rv, "__scalar_ref__")) { return 1; }
+        my str $rtype = ref($rv);
+        return (length($rtype) > 0 && $rtype ne "0") ? 1 : 0;
+    }
+    if ($name eq "can") {
+        # Standalone can($obj, $method) - check if method exists
+        if ($argc >= 2) {
+            my scalar $obj = $args->[0];
+            my str $method_name = $args->[1];
+            my str $pkg = "";
+            if (ref($obj) eq "HASH" && exists($obj, "__class__")) {
+                $pkg = $obj->{"__class__"};
+            }
+            if (length($pkg) > 0) {
+                my scalar $found = interp_resolve_method($interp, $pkg, $method_name);
+                return defined($found) ? 1 : 0;
+            }
+        }
+        return 0;
+    }
+    if ($name eq "printf") {
+        my str $fmt = $args->[0];
+        if ($argc == 1) { print($fmt); }
+        elsif ($argc == 2) { print(sprintf($fmt, $args->[1])); }
+        elsif ($argc == 3) { print(sprintf($fmt, $args->[1], $args->[2])); }
+        elsif ($argc == 4) { print(sprintf($fmt, $args->[1], $args->[2], $args->[3])); }
+        return undef;
+    }
+    if ($name eq "readline") {
+        return sys::readline($args->[0]);
+    }
+
+    # ---- core::/sys:: functions ----
+    if ($name eq "sys::exit" || $name eq "core::exit") {
+        sys::exit($args->[0]);
+    }
+    if ($name eq "sys::getenv" || $name eq "core::getenv") {
+        return sys::getenv($args->[0]);
+    }
+    if ($name eq "sys::setenv" || $name eq "core::setenv") {
+        sys::setenv($args->[0], $args->[1]);
+        return undef;
+    }
+    if ($name eq "sys::time" || $name eq "core::time") {
+        return sys::time();
+    }
+    if ($name eq "sys::sleep" || $name eq "core::sleep") {
+        sys::sleep($args->[0]);
+        return undef;
+    }
+    if ($name eq "sys::hires_time" || $name eq "core::hires_time") {
+        return sys::hires_time();
+    }
+    if ($name eq "sys::open" || $name eq "core::open") {
+        return sys::open($args->[0], $args->[1]);
+    }
+    if ($name eq "sys::close" || $name eq "core::close") {
+        sys::close($args->[0]);
+        return undef;
+    }
+    if ($name eq "sys::readline" || $name eq "core::readline") {
+        return sys::readline($args->[0]);
+    }
+    if ($name eq "sys::eof" || $name eq "core::eof") {
+        return sys::eof($args->[0]);
+    }
+    if ($name eq "sys::flush" || $name eq "core::flush") {
+        sys::flush($args->[0]);
+        return undef;
+    }
+    if ($name eq "sys::popen" || $name eq "core::popen") {
+        return sys::popen($args->[0], $args->[1]);
+    }
+    if ($name eq "sys::qx" || $name eq "core::qx") {
+        return sys::qx($args->[0]);
+    }
+    if ($name eq "sys::system" || $name eq "core::system") {
+        return sys::system($args->[0]);
+    }
+    if ($name eq "sys::stack_trace" || $name eq "core::stack_trace") {
+        return "(interpreter stack trace not available)";
+    }
+
+    # ---- sys:: file I/O ----
+    if ($name eq "sys::fwrite" || $name eq "core::fwrite") {
+        sys::fwrite($args->[0], $args->[1]);
+        return undef;
+    }
+    if ($name eq "sys::fread" || $name eq "core::fread") {
+        return sys::fread($args->[0], $args->[1]);
+    }
+    if ($name eq "sys::fputs" || $name eq "core::fputs") {
+        sys::fputs($args->[0], $args->[1]);
+        return undef;
+    }
+    if ($name eq "sys::fgets" || $name eq "core::fgets") {
+        return sys::fgets($args->[0], $args->[1]);
+    }
+    if ($name eq "sys::pclose" || $name eq "core::pclose") {
+        sys::close($args->[0]);
+        return undef;
+    }
+    if ($name eq "sys::truncate" || $name eq "core::truncate") {
+        sys::truncate($args->[0], $args->[1]);
+        return undef;
+    }
+    if ($name eq "sys::open_str" || $name eq "core::open_str") {
+        return sys::open_str($args->[0], $args->[1]);
+    }
+    if ($name eq "sys::str_from_fh" || $name eq "core::str_from_fh") {
+        return sys::str_from_fh($args->[0]);
+    }
+
+    # ---- sys:: filesystem ----
+    if ($name eq "sys::unlink" || $name eq "core::unlink") {
+        sys::unlink($args->[0]);
+        return undef;
+    }
+    if ($name eq "sys::rename" || $name eq "core::rename") {
+        sys::rename($args->[0], $args->[1]);
+        return undef;
+    }
+    if ($name eq "sys::mkdir" || $name eq "core::mkdir") {
+        sys::mkdir($args->[0], $args->[1]);
+        return undef;
+    }
+    if ($name eq "sys::rmdir" || $name eq "core::rmdir") {
+        sys::rmdir($args->[0]);
+        return undef;
+    }
+    if ($name eq "sys::chmod" || $name eq "core::chmod") {
+        sys::chmod($args->[0], $args->[1]);
+        return undef;
+    }
+    if ($name eq "sys::link" || $name eq "core::link") {
+        sys::link($args->[0], $args->[1]);
+        return undef;
+    }
+    if ($name eq "sys::symlink" || $name eq "core::symlink") {
+        sys::symlink($args->[0], $args->[1]);
+        return undef;
+    }
+    if ($name eq "sys::readlink" || $name eq "core::readlink") {
+        return sys::readlink($args->[0]);
+    }
+    if ($name eq "sys::stat" || $name eq "core::stat") {
+        return sys::stat($args->[0]);
+    }
+    if ($name eq "sys::lstat" || $name eq "core::lstat") {
+        return sys::lstat($args->[0]);
+    }
+    if ($name eq "sys::access" || $name eq "core::access") {
+        return sys::access($args->[0], $args->[1]);
+    }
+    if ($name eq "sys::is_file" || $name eq "core::is_file") {
+        return sys::is_file($args->[0]);
+    }
+    if ($name eq "sys::is_dir" || $name eq "core::is_dir") {
+        return sys::is_dir($args->[0]);
+    }
+    if ($name eq "sys::readdir" || $name eq "core::readdir") {
+        return sys::readdir($args->[0]);
+    }
+    if ($name eq "sys::readdir_full" || $name eq "core::readdir_full") {
+        return sys::readdir_full($args->[0]);
+    }
+    if ($name eq "sys::glob" || $name eq "core::glob") {
+        return sys::glob($args->[0]);
+    }
+    if ($name eq "sys::fnmatch" || $name eq "core::fnmatch") {
+        return sys::fnmatch($args->[0], $args->[1]);
+    }
+
+    # ---- sys:: path ----
+    if ($name eq "sys::dirname" || $name eq "core::dirname") {
+        return sys::dirname($args->[0]);
+    }
+    if ($name eq "sys::basename" || $name eq "core::basename") {
+        return sys::basename($args->[0]);
+    }
+    if ($name eq "sys::file_ext" || $name eq "core::file_ext") {
+        return sys::file_ext($args->[0]);
+    }
+    if ($name eq "sys::realpath" || $name eq "core::realpath") {
+        return sys::realpath($args->[0]);
+    }
+    if ($name eq "sys::getcwd" || $name eq "core::getcwd") {
+        return sys::getcwd();
+    }
+    if ($name eq "sys::path_join" || $name eq "core::path_join") {
+        return sys::path_join($args->[0], $args->[1]);
+    }
+
+    # ---- sys:: process ----
+    if ($name eq "sys::getpid" || $name eq "core::getpid") {
+        return sys::getpid();
+    }
+    if ($name eq "sys::getppid" || $name eq "core::getppid") {
+        return sys::getppid();
+    }
+    if ($name eq "sys::fork" || $name eq "core::fork") {
+        return sys::fork();
+    }
+    if ($name eq "sys::wait" || $name eq "core::wait") {
+        return sys::wait();
+    }
+    if ($name eq "sys::usleep" || $name eq "core::usleep") {
+        sys::usleep($args->[0]);
+        return undef;
+    }
+    if ($name eq "sys::getprocname" || $name eq "core::getprocname") {
+        return sys::getprocname();
+    }
+    if ($name eq "sys::setprocname" || $name eq "core::setprocname") {
+        sys::setprocname($args->[0]);
+        return undef;
+    }
+    if ($name eq "sys::getproctitle" || $name eq "core::getproctitle") {
+        return sys::getprocname();
+    }
+    if ($name eq "sys::setproctitle" || $name eq "core::setproctitle") {
+        sys::setprocname($args->[0]);
+        return undef;
+    }
+
+    # ---- sys:: environment ----
+    if ($name eq "sys::unsetenv" || $name eq "core::unsetenv") {
+        sys::unsetenv($args->[0]);
+        return undef;
+    }
+
+    # ---- sys:: user/group ----
+    if ($name eq "sys::getuid" || $name eq "core::getuid") {
+        return sys::getuid();
+    }
+    if ($name eq "sys::getgid" || $name eq "core::getgid") {
+        return sys::getgid();
+    }
+    if ($name eq "sys::geteuid" || $name eq "core::geteuid") {
+        return sys::geteuid();
+    }
+    if ($name eq "sys::getegid" || $name eq "core::getegid") {
+        return sys::getegid();
+    }
+    if ($name eq "sys::getpwuid" || $name eq "core::getpwuid") {
+        return sys::getpwuid($args->[0]);
+    }
+    if ($name eq "sys::getpwnam" || $name eq "core::getpwnam") {
+        return sys::getpwnam($args->[0]);
+    }
+    if ($name eq "sys::getgrgid" || $name eq "core::getgrgid") {
+        return sys::getgrgid($args->[0]);
+    }
+    if ($name eq "sys::getgroups" || $name eq "core::getgroups") {
+        return sys::getgroups();
+    }
+
+    # ---- sys:: misc ----
+    if ($name eq "sys::isatty" || $name eq "core::isatty") {
+        return sys::isatty($args->[0]);
+    }
+    if ($name eq "sys::strerror" || $name eq "core::strerror") {
+        return sys::strerror($args->[0]);
+    }
+    if ($name eq "sys::errno" || $name eq "core::errno") {
+        return sys::errno();
+    }
+    if ($name eq "sys::umask" || $name eq "core::umask") {
+        return sys::umask($args->[0]);
+    }
+    if ($name eq "sys::utime" || $name eq "core::utime") {
+        sys::utime($args->[0], $args->[1], $args->[2]);
+        return undef;
+    }
+    if ($name eq "sys::free" || $name eq "core::free") {
+        # No-op in interpreter (GC handles memory)
+        return undef;
+    }
+    if ($name eq "sys::release" || $name eq "core::release") {
+        # No-op in interpreter
+        return undef;
+    }
+
+    # ---- sys:: network ----
+    if ($name eq "sys::gethostname" || $name eq "core::gethostname") {
+        return sys::gethostname();
+    }
+    if ($name eq "sys::gethostbyname" || $name eq "core::gethostbyname") {
+        return sys::gethostbyname($args->[0]);
+    }
+    if ($name eq "sys::gethostbyname_all" || $name eq "core::gethostbyname_all") {
+        return sys::gethostbyname_all($args->[0]);
+    }
+    if ($name eq "sys::getaddrinfo" || $name eq "core::getaddrinfo") {
+        return sys::getaddrinfo($args->[0], $args->[1]);
+    }
+    if ($name eq "sys::inet_addr" || $name eq "core::inet_addr") {
+        return sys::inet_addr($args->[0]);
+    }
+    if ($name eq "sys::inet_ntoa" || $name eq "core::inet_ntoa") {
+        return sys::inet_ntoa($args->[0]);
+    }
+    if ($name eq "sys::htons" || $name eq "core::htons") {
+        return sys::htons($args->[0]);
+    }
+    if ($name eq "sys::ntohs" || $name eq "core::ntohs") {
+        return sys::ntohs($args->[0]);
+    }
+    if ($name eq "sys::htonl" || $name eq "core::htonl") {
+        return sys::htonl($args->[0]);
+    }
+    if ($name eq "sys::ntohl" || $name eq "core::ntohl") {
+        return sys::ntohl($args->[0]);
+    }
+    if ($name eq "sys::inet_pton" || $name eq "core::inet_pton") {
+        return sys::inet_pton($args->[0], $args->[1]);
+    }
+    if ($name eq "sys::inet_ntop" || $name eq "core::inet_ntop") {
+        return sys::inet_ntop($args->[0], $args->[1]);
+    }
+    if ($name eq "sys::socket_server" || $name eq "core::socket_server") {
+        if ($argc >= 3) { return sys::socket_server($args->[0], $args->[1], $args->[2]); }
+        return sys::socket_server($args->[0]);
+    }
+    if ($name eq "sys::socket_fd" || $name eq "core::socket_fd") {
+        return sys::socket_fd($args->[0]);
+    }
+    if ($name eq "sys::socket_close" || $name eq "core::socket_close") {
+        sys::socket_close($args->[0]);
+        return undef;
+    }
+    if ($name eq "sys::socket_select" || $name eq "core::socket_select") {
+        return sys::socket_select($args->[0], $args->[1]);
+    }
+    if ($name eq "sys::dl_open" || $name eq "core::dl_open") {
+        return sys::dl_open($args->[0]);
+    }
+    if ($name eq "sys::dl_sym" || $name eq "core::dl_sym") {
+        return sys::dl_sym($args->[0], $args->[1]);
+    }
+    if ($name eq "sys::dl_close" || $name eq "core::dl_close") {
+        sys::dl_close($args->[0]);
+        return undef;
+    }
+    if ($name eq "sys::dl_error" || $name eq "core::dl_error") {
+        return sys::dl_error();
+    }
+    if ($name eq "sys::dl_call_num" || $name eq "core::dl_call_num") {
+        my scalar $fn_ptr = $args->[0];
+        my scalar $call_args = $args->[1];
+        my int $nargs = size($call_args);
+        my num $result = 0.0;
+        if ($nargs == 0) {
+            __C__ {
+                typedef double (*fn0_t)(void);
+                fn0_t fp = (fn0_t)(intptr_t)strada_to_int(fn_ptr);
+                double r = fp();
+                strada_decref(result);
+                result = strada_new_num(r);
+            }
+        } elsif ($nargs == 1) {
+            my num $a0 = $call_args->[0];
+            __C__ {
+                typedef double (*fn1_t)(double);
+                fn1_t fp = (fn1_t)(intptr_t)strada_to_int(fn_ptr);
+                double r = fp(strada_to_num(a0));
+                strada_decref(result);
+                result = strada_new_num(r);
+            }
+        } elsif ($nargs == 2) {
+            my num $a0 = $call_args->[0];
+            my num $a1 = $call_args->[1];
+            __C__ {
+                typedef double (*fn2_t)(double, double);
+                fn2_t fp = (fn2_t)(intptr_t)strada_to_int(fn_ptr);
+                double r = fp(strada_to_num(a0), strada_to_num(a1));
+                strada_decref(result);
+                result = strada_new_num(r);
+            }
+        }
+        return $result;
+    }
+    if ($name eq "sys::dl_call_int" || $name eq "core::dl_call_int") {
+        my scalar $fn_ptr = $args->[0];
+        my scalar $call_args = $args->[1];
+        my int $nargs = size($call_args);
+        my int $result = 0;
+        if ($nargs == 0) {
+            __C__ {
+                typedef int64_t (*fn0_t)(void);
+                fn0_t fp = (fn0_t)(intptr_t)strada_to_int(fn_ptr);
+                int64_t r = fp();
+                strada_decref(result);
+                result = strada_new_int(r);
+            }
+        } elsif ($nargs == 1) {
+            my int $a0 = $call_args->[0];
+            __C__ {
+                typedef int64_t (*fn1_t)(int64_t);
+                fn1_t fp = (fn1_t)(intptr_t)strada_to_int(fn_ptr);
+                int64_t r = fp(strada_to_int(a0));
+                strada_decref(result);
+                result = strada_new_int(r);
+            }
+        }
+        return $result;
+    }
+    if ($name eq "sys::int_ptr" || $name eq "core::int_ptr") {
+        # Return a dummy non-zero pointer (interpreter can't do real pointer ops)
+        return 0;
+    }
+    if ($name eq "sys::num_ptr" || $name eq "core::num_ptr") {
+        return 0;
+    }
+    if ($name eq "sys::ptr_deref_int" || $name eq "core::ptr_deref_int") {
+        return 0;
+    }
+    if ($name eq "sys::ptr_deref_num" || $name eq "core::ptr_deref_num") {
+        return 0.0;
+    }
+    if ($name eq "sys::ptr_set_int" || $name eq "core::ptr_set_int") {
+        return undef;
+    }
+    if ($name eq "sys::ptr_set_num" || $name eq "core::ptr_set_num") {
+        return undef;
+    }
+
+    # ---- sys:: extended process ----
+    if ($name eq "sys::getpgrp" || $name eq "core::getpgrp") {
+        return sys::getpgrp();
+    }
+    if ($name eq "sys::getsid" || $name eq "core::getsid") {
+        return sys::getsid($args->[0]);
+    }
+    if ($name eq "sys::getpgid" || $name eq "core::getpgid") {
+        return sys::getpgid($args->[0]);
+    }
+    if ($name eq "sys::nice" || $name eq "core::nice") {
+        return sys::nice($args->[0]);
+    }
+    if ($name eq "sys::getpriority" || $name eq "core::getpriority") {
+        return sys::getpriority($args->[0], $args->[1]);
+    }
+    if ($name eq "sys::getrusage" || $name eq "core::getrusage") {
+        return sys::getrusage($args->[0]);
+    }
+    if ($name eq "sys::getrlimit" || $name eq "core::getrlimit") {
+        return sys::getrlimit($args->[0]);
+    }
+    if ($name eq "sys::times" || $name eq "core::times") {
+        return sys::times();
+    }
+    if ($name eq "sys::clock" || $name eq "core::clock") {
+        return sys::clock();
+    }
+
+    # ---- sys:: temp/misc ----
+    if ($name eq "sys::mkstemp" || $name eq "core::mkstemp") {
+        return sys::mkstemp($args->[0]);
+    }
+    if ($name eq "sys::mkdtemp" || $name eq "core::mkdtemp") {
+        return sys::mkdtemp($args->[0]);
+    }
+    if ($name eq "sys::statvfs" || $name eq "core::statvfs") {
+        return sys::statvfs($args->[0]);
+    }
+    if ($name eq "sys::atoi" || $name eq "core::atoi") {
+        return sys::atoi($args->[0]);
+    }
+    if ($name eq "sys::atof" || $name eq "core::atof") {
+        return sys::atof($args->[0]);
+    }
+    if ($name eq "sys::strtol" || $name eq "core::strtol") {
+        return sys::strtol($args->[0], $args->[1]);
+    }
+    if ($name eq "sys::difftime" || $name eq "core::difftime") {
+        return sys::difftime($args->[0], $args->[1]);
+    }
+    if ($name eq "sys::srand" || $name eq "core::srand") {
+        __C__ {
+            StradaValue *seed_v = ((StradaArray*)args->value.rv->value.av)->elements[0];
+            srand((unsigned int)strada_to_int(seed_v));
+        }
+        return undef;
+    }
+    if ($name eq "sys::rand" || $name eq "core::rand") {
+        my int $r = 0;
+        __C__ {
+            strada_decref(r);
+            r = strada_new_int((int64_t)rand());
+        }
+        return $r;
+    }
+    if ($name eq "sys::srandom" || $name eq "core::srandom") {
+        __C__ {
+            StradaValue *seed_v = ((StradaArray*)args->value.rv->value.av)->elements[0];
+            srandom((unsigned int)strada_to_int(seed_v));
+        }
+        return undef;
+    }
+    if ($name eq "sys::random" || $name eq "core::random") {
+        my int $result = 0;
+        __C__ {
+            strada_decref(result);
+            result = strada_new_int((int64_t)random());
+        }
+        return $result;
+    }
+
+    # ---- sys:: seek/tell ----
+    if ($name eq "sys::seek" || $name eq "core::seek") {
+        sys::seek($args->[0], $args->[1], $args->[2]);
+        return undef;
+    }
+    if ($name eq "sys::tell" || $name eq "core::tell") {
+        return sys::tell($args->[0]);
+    }
+    if ($name eq "sys::rewind" || $name eq "core::rewind") {
+        sys::rewind($args->[0]);
+        return undef;
+    }
+
+    # ---- sys:: weak references ----
+    if ($name eq "sys::weaken" || $name eq "core::weaken") {
+        return undef;
+    }
+    if ($name eq "sys::isweak" || $name eq "core::isweak") {
+        return 0;
+    }
+
+    # ---- sys:: global variable registry ----
+    if ($name eq "sys::global_set" || $name eq "core::global_set") {
+        env_set($interp->{"global_env"}, $args->[0], $args->[1]);
+        return undef;
+    }
+    if ($name eq "sys::global_get" || $name eq "core::global_get") {
+        return env_get($interp->{"global_env"}, $args->[0]);
+    }
+    if ($name eq "sys::global_exists" || $name eq "core::global_exists") {
+        return env_exists($interp->{"global_env"}, $args->[0]) ? 1 : 0;
+    }
+    if ($name eq "sys::global_delete" || $name eq "core::global_delete") {
+        my scalar $gvars = $interp->{"global_env"}->{"vars"};
+        if (exists($gvars, $args->[0])) {
+            delete($gvars, $args->[0]);
+        }
+        return undef;
+    }
+    if ($name eq "sys::global_keys" || $name eq "core::global_keys") {
+        return keys($interp->{"global_env"}->{"vars"});
+    }
+
+    # ---- sys:: exit/signal ----
+    if ($name eq "sys::_exit" || $name eq "core::_exit") {
+        sys::exit($args->[0]);
+    }
+    if ($name eq "sys::signal" || $name eq "core::signal") {
+        return undef;
+    }
+
+    # ---- sys:: context functions ----
+    if ($name eq "sys::wantscalar" || $name eq "core::wantscalar") {
+        return 1;
+    }
+    if ($name eq "sys::wantarray" || $name eq "core::wantarray") {
+        return 0;
+    }
+    if ($name eq "sys::wanthash" || $name eq "core::wanthash") {
+        return 0;
+    }
+    if ($name eq "sys::get_recursion_limit" || $name eq "core::get_recursion_limit") {
+        return $interp->{"max_call_depth"};
+    }
+    if ($name eq "sys::set_recursion_limit" || $name eq "core::set_recursion_limit") {
+        $interp->{"max_call_depth"} = $args->[0];
+        return undef;
+    }
+
+    # ---- math:: functions ----
+    if ($name eq "math::sqrt") { return math::sqrt($args->[0]); }
+    if ($name eq "math::sin") { return math::sin($args->[0]); }
+    if ($name eq "math::cos") { return math::cos($args->[0]); }
+    if ($name eq "math::pow") { return math::pow($args->[0], $args->[1]); }
+    if ($name eq "math::abs") { my scalar $v = $args->[0]; if ($v < 0) { return 0 - $v; } return $v; }
+    if ($name eq "math::floor") { return math::floor($args->[0]); }
+    if ($name eq "math::ceil") { return math::ceil($args->[0]); }
+    if ($name eq "math::log") { return math::log($args->[0]); }
+    if ($name eq "math::exp") { return math::exp($args->[0]); }
+    if ($name eq "math::rand") { return math::rand(); }
+    if ($name eq "math::srand") {
+        my scalar $seed = $args->[0];
+        __C__ {
+            srand((unsigned int)strada_to_int(seed));
+        }
+        return undef;
+    }
+    if ($name eq "math::atan2") { return math::atan2($args->[0], $args->[1]); }
+    if ($name eq "math::tan") { return math::tan($args->[0]); }
+    if ($name eq "math::asin") { return math::asin($args->[0]); }
+    if ($name eq "math::acos") { return math::acos($args->[0]); }
+    if ($name eq "math::atan") { return math::atan($args->[0]); }
+    if ($name eq "math::sinh") { return math::sinh($args->[0]); }
+    if ($name eq "math::cosh") { return math::cosh($args->[0]); }
+    if ($name eq "math::tanh") { return math::tanh($args->[0]); }
+    if ($name eq "math::log10") { return math::log10($args->[0]); }
+    if ($name eq "math::round") { return math::round($args->[0]); }
+    if ($name eq "math::fabs") { return math::fabs($args->[0]); }
+    if ($name eq "math::fmod") { return math::fmod($args->[0], $args->[1]); }
+    if ($name eq "math::hypot") { return math::hypot($args->[0], $args->[1]); }
+    if ($name eq "math::cbrt") { return math::cbrt($args->[0]); }
+    if ($name eq "math::trunc") { return math::trunc($args->[0]); }
+    if ($name eq "math::isnan") { return math::isnan($args->[0]); }
+    if ($name eq "math::isinf") { return math::isinf($args->[0]); }
+    if ($name eq "math::isfinite") { return math::isfinite($args->[0]); }
+    if ($name eq "math::fmax") { return math::fmax($args->[0], $args->[1]); }
+    if ($name eq "math::fmin") { return math::fmin($args->[0], $args->[1]); }
+    if ($name eq "math::copysign") { return math::copysign($args->[0], $args->[1]); }
+    if ($name eq "math::remainder") { return math::remainder($args->[0], $args->[1]); }
+    if ($name eq "math::ldexp") { return math::ldexp($args->[0], $args->[1]); }
+    if ($name eq "math::frexp") { return math::frexp($args->[0]); }
+    if ($name eq "math::modf") { return math::modf($args->[0]); }
+    if ($name eq "math::scalbn") { return math::scalbn($args->[0], $args->[1]); }
+
+    # ---- utf8:: functions ----
+    if ($name eq "utf8::is_utf8") { return utf8::is_utf8($args->[0]); }
+    if ($name eq "utf8::valid") { return utf8::valid($args->[0]); }
+    if ($name eq "utf8::encode") { return utf8::encode($args->[0]); }
+    if ($name eq "utf8::decode") { return utf8::decode($args->[0]); }
+    if ($name eq "utf8::upgrade") { return utf8::upgrade($args->[0]); }
+    if ($name eq "utf8::downgrade") {
+        if ($argc >= 2) {
+            return utf8::downgrade($args->[0], $args->[1]);
+        }
+        return utf8::downgrade($args->[0]);
+    }
+    if ($name eq "utf8::unicode_to_native") { return utf8::unicode_to_native($args->[0]); }
+
+    # ---- OOP functions ----
+    if ($name eq "bless") {
+        my scalar $ref_val = $args->[0];
+        my str $class_name = $args->[1];
+        if (ref($ref_val) eq "HASH") {
+            $ref_val->{"__class__"} = $class_name;
+        }
+        return $ref_val;
+    }
+    if ($name eq "tie") {
+        # tie(%hash, "ClassName", @args) - call TIEHASH and store
+        my scalar $hash_val = $args->[0];
+        my str $class_name = $args->[1];
+        # Call TIEHASH constructor
+        my array @tie_args = ();
+        my int $tai = 2;
+        while ($tai < $argc) {
+            push(@tie_args, $args->[$tai]);
+            $tai = $tai + 1;
+        }
+        my scalar $tie_func = interp_resolve_method($interp, $class_name, "TIEHASH");
+        if (defined($tie_func)) {
+            my scalar $tie_obj = call_user_func($interp, $tie_func, \@tie_args);
+            $hash_val->{"__tied__"} = $tie_obj;
+            return $tie_obj;
+        }
+        return undef;
+    }
+    if ($name eq "untie") {
+        my scalar $hash_val = $args->[0];
+        if (ref($hash_val) eq "HASH" && exists($hash_val, "__tied__")) {
+            delete($hash_val, "__tied__");
+        }
+        return undef;
+    }
+    if ($name eq "tied") {
+        my scalar $hash_val = $args->[0];
+        if (ref($hash_val) eq "HASH" && exists($hash_val, "__tied__")) {
+            return $hash_val->{"__tied__"};
+        }
+        return undef;
+    }
+
+    # ---- Additional functions ----
+    if ($name eq "select") {
+        my scalar $old = $interp->{"select_fh"};
+        $interp->{"select_fh"} = $args->[0];
+        return $old;
+    }
+    if ($name eq "named_captures") {
+        return named_captures();
+    }
+    if ($name eq "captures") {
+        return captures();
+    }
+    if ($name eq "throw") {
+        throw($args->[0]);
+    }
+
+    # ---- DateTime:: builtins (C-backed time functions) ----
+    if ($name eq "DateTime::now" || $name eq "DateTime_now") {
+        my int $epoch = 0;
+        my int $year = 0;
+        my int $month = 0;
+        my int $day = 0;
+        my int $hour = 0;
+        my int $minute = 0;
+        my int $second = 0;
+        __C__ {
+            time_t t = time(NULL);
+            struct tm *tm_val = localtime(&t);
+            strada_decref(epoch); epoch = strada_new_int((int64_t)t);
+            strada_decref(year); year = strada_new_int(tm_val->tm_year + 1900);
+            strada_decref(month); month = strada_new_int(tm_val->tm_mon + 1);
+            strada_decref(day); day = strada_new_int(tm_val->tm_mday);
+            strada_decref(hour); hour = strada_new_int(tm_val->tm_hour);
+            strada_decref(minute); minute = strada_new_int(tm_val->tm_min);
+            strada_decref(second); second = strada_new_int(tm_val->tm_sec);
+        }
+        my hash %dt = ();
+        $dt{"year"} = $year; $dt{"month"} = $month; $dt{"day"} = $day;
+        $dt{"hour"} = $hour; $dt{"minute"} = $minute; $dt{"second"} = $second;
+        $dt{"epoch"} = $epoch;
+        return \%dt;
+    }
+    if ($name eq "DateTime::now_utc" || $name eq "DateTime_now_utc") {
+        my int $epoch = 0;
+        my int $year = 0; my int $month = 0; my int $day = 0;
+        my int $hour = 0; my int $minute = 0; my int $second = 0;
+        __C__ {
+            time_t t = time(NULL);
+            struct tm *tm_val = gmtime(&t);
+            strada_decref(epoch); epoch = strada_new_int((int64_t)t);
+            strada_decref(year); year = strada_new_int(tm_val->tm_year + 1900);
+            strada_decref(month); month = strada_new_int(tm_val->tm_mon + 1);
+            strada_decref(day); day = strada_new_int(tm_val->tm_mday);
+            strada_decref(hour); hour = strada_new_int(tm_val->tm_hour);
+            strada_decref(minute); minute = strada_new_int(tm_val->tm_min);
+            strada_decref(second); second = strada_new_int(tm_val->tm_sec);
+        }
+        my hash %dt = ();
+        $dt{"year"} = $year; $dt{"month"} = $month; $dt{"day"} = $day;
+        $dt{"hour"} = $hour; $dt{"minute"} = $minute; $dt{"second"} = $second;
+        $dt{"epoch"} = $epoch; $dt{"utc"} = 1;
+        return \%dt;
+    }
+    if ($name eq "DateTime::make" || $name eq "DateTime_make") {
+        my int $dt_y = $args->[0];
+        my int $dt_m = $args->[1];
+        my int $dt_d = $args->[2];
+        my int $dt_h = $args->[3];
+        my int $dt_mi = $args->[4];
+        my int $dt_s = $args->[5];
+        my int $epoch = 0;
+        __C__ {
+            struct tm tm_val = {0};
+            tm_val.tm_year = strada_to_int(dt_y) - 1900;
+            tm_val.tm_mon = strada_to_int(dt_m) - 1;
+            tm_val.tm_mday = strada_to_int(dt_d);
+            tm_val.tm_hour = strada_to_int(dt_h);
+            tm_val.tm_min = strada_to_int(dt_mi);
+            tm_val.tm_sec = strada_to_int(dt_s);
+            tm_val.tm_isdst = -1;
+            time_t t = mktime(&tm_val);
+            strada_decref(epoch); epoch = strada_new_int((int64_t)t);
+        }
+        my hash %dt = ();
+        $dt{"year"} = $dt_y; $dt{"month"} = $dt_m; $dt{"day"} = $dt_d;
+        $dt{"hour"} = $dt_h; $dt{"minute"} = $dt_mi; $dt{"second"} = $dt_s;
+        $dt{"epoch"} = $epoch;
+        return \%dt;
+    }
+    if ($name eq "DateTime::from_epoch" || $name eq "DateTime_from_epoch") {
+        my int $ts = $args->[0];
+        my int $year = 0; my int $month = 0; my int $day = 0;
+        my int $hour = 0; my int $minute = 0; my int $second = 0;
+        __C__ {
+            time_t t = (time_t)strada_to_int(ts);
+            struct tm *tm_val = localtime(&t);
+            strada_decref(year); year = strada_new_int(tm_val->tm_year + 1900);
+            strada_decref(month); month = strada_new_int(tm_val->tm_mon + 1);
+            strada_decref(day); day = strada_new_int(tm_val->tm_mday);
+            strada_decref(hour); hour = strada_new_int(tm_val->tm_hour);
+            strada_decref(minute); minute = strada_new_int(tm_val->tm_min);
+            strada_decref(second); second = strada_new_int(tm_val->tm_sec);
+        }
+        my hash %dt = ();
+        $dt{"year"} = $year; $dt{"month"} = $month; $dt{"day"} = $day;
+        $dt{"hour"} = $hour; $dt{"minute"} = $minute; $dt{"second"} = $second;
+        $dt{"epoch"} = $ts;
+        return \%dt;
+    }
+    if ($name eq "DateTime::from_epoch_utc" || $name eq "DateTime_from_epoch_utc") {
+        my int $ts = $args->[0];
+        my int $year = 0; my int $month = 0; my int $day = 0;
+        my int $hour = 0; my int $minute = 0; my int $second = 0;
+        __C__ {
+            time_t t = (time_t)strada_to_int(ts);
+            struct tm *tm_val = gmtime(&t);
+            strada_decref(year); year = strada_new_int(tm_val->tm_year + 1900);
+            strada_decref(month); month = strada_new_int(tm_val->tm_mon + 1);
+            strada_decref(day); day = strada_new_int(tm_val->tm_mday);
+            strada_decref(hour); hour = strada_new_int(tm_val->tm_hour);
+            strada_decref(minute); minute = strada_new_int(tm_val->tm_min);
+            strada_decref(second); second = strada_new_int(tm_val->tm_sec);
+        }
+        my hash %dt = ();
+        $dt{"year"} = $year; $dt{"month"} = $month; $dt{"day"} = $day;
+        $dt{"hour"} = $hour; $dt{"minute"} = $minute; $dt{"second"} = $second;
+        $dt{"epoch"} = $ts; $dt{"utc"} = 1;
+        return \%dt;
+    }
+    if ($name eq "DateTime::format" || $name eq "DateTime_format") {
+        my scalar $dt = $args->[0];
+        if (!defined($dt)) { return ""; }
+        my int $dt_y = $dt->{"year"};
+        my int $dt_m = $dt->{"month"};
+        my int $dt_d = $dt->{"day"};
+        my int $dt_h = $dt->{"hour"};
+        my int $dt_mi = $dt->{"minute"};
+        my int $dt_s = $dt->{"second"};
+        my str $fmt = $args->[1];
+        my str $result = "";
+        __C__ {
+            char *fmt_str = strada_to_str(fmt);
+            struct tm tm_val = {0};
+            tm_val.tm_year = strada_to_int(dt_y) - 1900;
+            tm_val.tm_mon = strada_to_int(dt_m) - 1;
+            tm_val.tm_mday = strada_to_int(dt_d);
+            tm_val.tm_hour = strada_to_int(dt_h);
+            tm_val.tm_min = strada_to_int(dt_mi);
+            tm_val.tm_sec = strada_to_int(dt_s);
+            tm_val.tm_isdst = -1;
+            mktime(&tm_val);
+            char buf[256];
+            size_t len = strftime(buf, sizeof(buf), fmt_str, &tm_val);
+            strada_decref(result);
+            result = (len > 0) ? strada_new_str(buf) : strada_new_str("");
+            free(fmt_str);
+        }
+        return $result;
+    }
+    if ($name eq "DateTime::parse" || $name eq "DateTime_parse") {
+        my str $input = $args->[0];
+        my str $fmt = $args->[1];
+        my int $year = 0; my int $month = 0; my int $day = 0;
+        my int $hour = 0; my int $minute = 0; my int $second = 0;
+        my int $success = 0;
+        __C__ {
+            char *input_str = strada_to_str(input);
+            char *fmt_str = strada_to_str(fmt);
+            struct tm tm_val = {0};
+            char *r = strptime(input_str, fmt_str, &tm_val);
+            if (r != NULL) {
+                strada_decref(success); success = strada_new_int(1);
+                strada_decref(year); year = strada_new_int(tm_val.tm_year + 1900);
+                strada_decref(month); month = strada_new_int(tm_val.tm_mon + 1);
+                strada_decref(day); day = strada_new_int(tm_val.tm_mday);
+                strada_decref(hour); hour = strada_new_int(tm_val.tm_hour);
+                strada_decref(minute); minute = strada_new_int(tm_val.tm_min);
+                strada_decref(second); second = strada_new_int(tm_val.tm_sec);
+            }
+            free(input_str); free(fmt_str);
+        }
+        if ($success == 0) { return undef; }
+        return call_builtin($interp, "DateTime::make", [cast_int($year), cast_int($month), cast_int($day), cast_int($hour), cast_int($minute), cast_int($second)], $env);
+    }
+    if ($name eq "DateTime::day_of_week" || $name eq "DateTime_day_of_week") {
+        my scalar $dt = $args->[0];
+        if (!defined($dt)) { return 0; }
+        my int $dt_y = $dt->{"year"};
+        my int $dt_m = $dt->{"month"};
+        my int $dt_d = $dt->{"day"};
+        my int $wday = 0;
+        __C__ {
+            struct tm tm_val = {0};
+            tm_val.tm_year = strada_to_int(dt_y) - 1900;
+            tm_val.tm_mon = strada_to_int(dt_m) - 1;
+            tm_val.tm_mday = strada_to_int(dt_d);
+            tm_val.tm_isdst = -1;
+            mktime(&tm_val);
+            strada_decref(wday); wday = strada_new_int(tm_val.tm_wday);
+        }
+        return $wday;
+    }
+    if ($name eq "DateTime::day_of_year" || $name eq "DateTime_day_of_year") {
+        my scalar $dt = $args->[0];
+        if (!defined($dt)) { return 0; }
+        my int $dt_y = $dt->{"year"};
+        my int $dt_m = $dt->{"month"};
+        my int $dt_d = $dt->{"day"};
+        my int $yday = 0;
+        __C__ {
+            struct tm tm_val = {0};
+            tm_val.tm_year = strada_to_int(dt_y) - 1900;
+            tm_val.tm_mon = strada_to_int(dt_m) - 1;
+            tm_val.tm_mday = strada_to_int(dt_d);
+            tm_val.tm_isdst = -1;
+            mktime(&tm_val);
+            strada_decref(yday); yday = strada_new_int(tm_val.tm_yday + 1);
+        }
+        return $yday;
+    }
+    if ($name eq "DateTime::timezone_offset" || $name eq "DateTime_timezone_offset") {
+        my int $offset = 0;
+        __C__ {
+            time_t t = time(NULL);
+            struct tm *local_tm = localtime(&t);
+            time_t local_t = mktime(local_tm);
+            struct tm *gm_tm = gmtime(&t);
+            time_t gm_t = mktime(gm_tm);
+            strada_decref(offset); offset = strada_new_int((int64_t)(local_t - gm_t));
+        }
+        return $offset;
+    }
+    if ($name eq "DateTime::timezone_name" || $name eq "DateTime_timezone_name") {
+        my str $tz_name = "";
+        __C__ {
+            time_t t = time(NULL);
+            struct tm *tm_val = localtime(&t);
+            char buf[64];
+            strftime(buf, sizeof(buf), "%Z", tm_val);
+            strada_decref(tz_name); tz_name = strada_new_str(buf);
+        }
+        return $tz_name;
+    }
+    # Pass through non-C DateTime functions to user-defined versions
+    if (index($name, "DateTime::") == 0 || index($name, "DateTime_") == 0) {
+        my scalar $func_info = interp_get_func($interp, $name);
+        if (defined($func_info)) {
+            return call_user_func($interp, $func_info, $args);
+        }
+        # Try alternate form
+        my str $alt_name = $name;
+        if (index($name, "DateTime::") == 0) {
+            $alt_name = "DateTime_" . substr($name, 10, length($name) - 10);
+        }
+        $func_info = interp_get_func($interp, $alt_name);
+        if (defined($func_info)) {
+            return call_user_func($interp, $func_info, $args);
+        }
+        die("Undefined function: " . $name);
+    }
+
+    # ---- BigInt/BigFloat C helper builtins ----
+    if ($name eq "BigInt::_bi_add") {
+        my str $a = $args->[0];
+        my str $b = $args->[1];
+        my str $r = "";
+        __C__ {
+            char *as = strada_to_str(a); char *bs = strada_to_str(b);
+            char *res = _bi_add(as, bs);
+            free(as); free(bs);
+            strada_decref(r); r = strada_new_str(res); free(res);
+        }
+        return $r;
+    }
+    if ($name eq "BigInt::_bi_sub") {
+        my str $a = $args->[0];
+        my str $b = $args->[1];
+        my str $r = "";
+        __C__ {
+            char *as = strada_to_str(a); char *bs = strada_to_str(b);
+            char *res = _bi_sub(as, bs);
+            free(as); free(bs);
+            strada_decref(r); r = strada_new_str(res); free(res);
+        }
+        return $r;
+    }
+    if ($name eq "BigInt::_bi_mul") {
+        my str $a = $args->[0];
+        my str $b = $args->[1];
+        my str $r = "";
+        __C__ {
+            char *as = strada_to_str(a); char *bs = strada_to_str(b);
+            char *res = _bi_mul(as, bs);
+            free(as); free(bs);
+            strada_decref(r); r = strada_new_str(res); free(res);
+        }
+        return $r;
+    }
+    if ($name eq "BigInt::_bi_cmp") {
+        my str $a = $args->[0];
+        my str $b = $args->[1];
+        my int $r = 0;
+        __C__ {
+            char *as = strada_to_str(a); char *bs = strada_to_str(b);
+            int c = _bi_cmp(as, bs);
+            free(as); free(bs);
+            strada_decref(r); r = strada_new_int((int64_t)c);
+        }
+        return $r;
+    }
+    if ($name eq "BigInt::_bi_divmod") {
+        my str $a = $args->[0];
+        my str $b = $args->[1];
+        my str $q = "";
+        __C__ {
+            char *as = strada_to_str(a); char *bs = strada_to_str(b);
+            char *res = _bi_divmod(as, bs, NULL);
+            free(as); free(bs);
+            strada_decref(q); q = strada_new_str(res); free(res);
+        }
+        return $q;
+    }
+    if ($name eq "BigInt::_bi_divmod_rem") {
+        my str $a = $args->[0];
+        my str $b = $args->[1];
+        my str $q = "";
+        my str $rem = "";
+        __C__ {
+            char *as = strada_to_str(a); char *bs = strada_to_str(b);
+            char *rem_str = NULL;
+            char *res = _bi_divmod(as, bs, &rem_str);
+            free(as); free(bs);
+            strada_decref(q); q = strada_new_str(res); free(res);
+            strada_decref(rem); rem = strada_new_str(rem_str); free(rem_str);
+        }
+        my array @result = ($q, $rem);
+        return \@result;
+    }
+    if ($name eq "BigFloat::_bf_pad_right") {
+        my str $s = $args->[0];
+        my int $n = $args->[1];
+        my str $r = "";
+        __C__ {
+            char *ss = strada_to_str(s);
+            char *res = _bf_pad_right(ss, (size_t)strada_to_int(n));
+            free(ss);
+            strada_decref(r); r = strada_new_str(res); free(res);
+        }
+        return $r;
+    }
+    if ($name eq "BigFloat::_bf_normalize") {
+        my str $m = $args->[0];
+        my int $scale = $args->[1];
+        my str $r = "";
+        my int $new_scale = $scale;
+        __C__ {
+            char *ms = strada_to_str(m);
+            int64_t sc = strada_to_int(scale);
+            char *res = _bf_normalize(ms, &sc);
+            free(ms);
+            strada_decref(r); r = strada_new_str(res); free(res);
+            strada_decref(new_scale); new_scale = strada_new_int(sc);
+        }
+        my array @result = ($r, $new_scale);
+        return \@result;
+    }
+
+    # ---- BigFloat::new builtin (needs _bf_normalize) ----
+    if ($name eq "BigFloat::new" || $name eq "BigFloat_new") {
+        my str $val = $args->[0];
+        my int $sign = 1;
+        my str $input = $val;
+        if (length($input) > 0 && substr($input, 0, 1) eq "-") {
+            $sign = -1;
+            $input = substr($input, 1, length($input) - 1);
+        } elsif (length($input) > 0 && substr($input, 0, 1) eq "+") {
+            $input = substr($input, 1, length($input) - 1);
+        }
+        my int $dot_pos = index($input, ".");
+        my str $mantissa = "";
+        my int $scale = 0;
+        if ($dot_pos >= 0) {
+            my str $int_part = substr($input, 0, $dot_pos);
+            my str $frac_part = substr($input, $dot_pos + 1, length($input) - $dot_pos - 1);
+            $mantissa = $int_part . $frac_part;
+            $scale = length($frac_part);
+        } else {
+            $mantissa = $input;
+            $scale = 0;
+        }
+        while (length($mantissa) > 1 && substr($mantissa, 0, 1) eq "0") {
+            $mantissa = substr($mantissa, 1, length($mantissa) - 1);
+        }
+        my scalar $norm = call_builtin($interp, "BigFloat::_bf_normalize", [$mantissa, $scale], $env);
+        my str $norm_m = $norm->[0];
+        my int $norm_e = $norm->[1];
+        if ($norm_m eq "0") { $sign = 1; }
+        my hash %self = ();
+        $self{"s"} = $sign;
+        $self{"m"} = $norm_m;
+        $self{"e"} = $norm_e;
+        return bless(\%self, "BigFloat");
+    }
+
+    # If we got here with a sys::/core::/math::/utf8:: prefix, it's genuinely undefined
+    die("Undefined function: " . $name);
+}
+
+# ============================================================
+# User Function Calls
+# ============================================================
+
+func call_user_func(scalar $interp, scalar $func_info, scalar $args) scalar {
+    my scalar $params = $func_info->{"params"};
+    my int $param_count = $func_info->{"param_count"};
+    my scalar $body = $func_info->{"body"};
+    my scalar $closure_env = $func_info->{"closure_env"};
+
+    # Check recursion depth
+    $interp->{"call_depth"} = $interp->{"call_depth"} + 1;
+    if ($interp->{"call_depth"} > $interp->{"max_call_depth"}) {
+        $interp->{"call_depth"} = $interp->{"call_depth"} - 1;
+        die("Maximum recursion depth exceeded");
+    }
+
+    # Create function scope
+    my scalar $func_env = env_new($closure_env);
+
+    # Bind parameters
+    my int $arg_count = size($args);
+    my int $pi = 0;
+
+    # Check for variadic parameter
+    my int $is_variadic = 0;
+    my str $variadic_name = "";
+    if ($param_count > 0) {
+        my scalar $last_param = $params->[$param_count - 1];
+        my str $last_sigil = $last_param->{"sigil"};
+        if ($last_sigil eq "@" || $last_sigil eq "...@") {
+            $is_variadic = 1;
+            $variadic_name = $last_param->{"name"};
+        }
+    }
+
+    while ($pi < $param_count) {
+        my scalar $param = $params->[$pi];
+        my str $pname = $param->{"name"};
+        my str $psigil = $param->{"sigil"};
+
+        if ($is_variadic == 1 && $pi == $param_count - 1) {
+            # Variadic: collect remaining args into array
+            my array @rest = ();
+            my int $ri = $pi;
+            while ($ri < $arg_count) {
+                push(@rest, $args->[$ri]);
+                $ri = $ri + 1;
+            }
+            env_set($func_env, $pname, \@rest);
+        } elsif ($pi < $arg_count) {
+            env_set($func_env, $pname, $args->[$pi]);
+        } else {
+            # Default values
+            if ($param->{"is_optional"} == 1 && defined($param->{"default_value"}) && $param->{"default_value"} != 0) {
+                env_set($func_env, $pname, eval_node($interp, $param->{"default_value"}, $func_env));
+            } else {
+                my int $ptype = $param->{"param_type"};
+                if ($ptype == TYPE_INT()) { env_set($func_env, $pname, 0); }
+                elsif ($ptype == TYPE_NUM()) { env_set($func_env, $pname, 0.0); }
+                elsif ($ptype == TYPE_STR()) { env_set($func_env, $pname, ""); }
+                elsif ($ptype == TYPE_ARRAY()) {
+                    my array @a = ();
+                    env_set($func_env, $pname, \@a);
+                }
+                elsif ($ptype == TYPE_HASH()) {
+                    my hash %h = ();
+                    env_set($func_env, $pname, \%h);
+                }
+                else { env_set($func_env, $pname, undef); }
+            }
+        }
+        $pi = $pi + 1;
+    }
+
+    # Execute body - save local stack depth for dynamic scope restore
+    my int $local_depth = size($interp->{"local_stack"});
+
+    my scalar $result = eval_block($interp, $body, $func_env);
+
+    # Handle return signal (signal-based control flow)
+    my str $sig = $interp->{"signal_type"};
+    if ($sig eq "return") {
+        $result = $interp->{"signal_value"};
+        $interp->{"signal_type"} = "";
+        $interp->{"signal_value"} = undef;
+        $interp->{"had_explicit_return"} = 1;
+    }
+
+    # Restore local variables from dynamic scope stack
+    while (size($interp->{"local_stack"}) > $local_depth) {
+        my scalar $save = pop($interp->{"local_stack"});
+        env_set($interp->{"global_env"}, $save->{"name"}, $save->{"value"});
+    }
+
+    # Break env parent chain to allow GC
+    $func_env->{"parent"} = undef;
+    $interp->{"call_depth"} = $interp->{"call_depth"} - 1;
+    return $result;
+}
+
+# ============================================================
+# Transliteration Helper
+# ============================================================
+
+# Expand ranges like a-z into abcdefghijklmnopqrstuvwxyz
+func expand_tr_range(str $spec) str {
+    my str $result = "";
+    my int $i = 0;
+    my int $len = length($spec);
+    while ($i < $len) {
+        if ($i + 2 < $len && substr($spec, $i + 1, 1) eq "-") {
+            my int $start = ord(substr($spec, $i, 1));
+            my int $end = ord(substr($spec, $i + 2, 1));
+            my int $c = $start;
+            while ($c <= $end) {
+                $result = $result . chr($c);
+                $c = $c + 1;
+            }
+            $i = $i + 3;
+        } else {
+            $result = $result . substr($spec, $i, 1);
+            $i = $i + 1;
+        }
+    }
+    return $result;
+}
+
+# ============================================================
+# Core Evaluator
+# ============================================================
+
+# Evaluate a node in boolean context - arrays/hashes evaluate to their size
+func eval_bool(scalar $interp, scalar $node, scalar $env) scalar {
+    if (!defined($node)) { return undef; }
+    # If the condition is a bare @arr or %hash variable, return size
+    if ($node->{"type"} == NODE_VARIABLE()) {
+        my str $sigil = $node->{"sigil"};
+        if ($sigil eq "@" || $sigil eq "%") {
+            my scalar $val = eval_node($interp, $node, $env);
+            if (ref($val) eq "ARRAY" || ref($val) eq "HASH") {
+                return size($val);
+            }
+            return $val;
+        }
+    }
+    # For unary ! on @arr or %hash
+    if ($node->{"type"} == NODE_UNARY_OP() && $node->{"op"} eq "!") {
+        my scalar $operand = $node->{"operand"};
+        if (defined($operand) && $operand->{"type"} == NODE_VARIABLE()) {
+            my str $sigil = $operand->{"sigil"};
+            if ($sigil eq "@" || $sigil eq "%") {
+                my scalar $val = eval_node($interp, $operand, $env);
+                if (ref($val) eq "ARRAY" || ref($val) eq "HASH") {
+                    return (size($val) == 0) ? 1 : 0;
+                }
+            }
+        }
+    }
+    return eval_node($interp, $node, $env);
+}
+
+func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
+    if (!defined($node)) {
+        return undef;
+    }
+
+    my int $type = $node->{"type"};
+
+    # --- Literals ---
+    if ($type == NODE_INT_LITERAL()) {
+        return $node->{"value"};
+    }
+    if ($type == NODE_NUM_LITERAL()) {
+        return $node->{"value"};
+    }
+    if ($type == NODE_STR_LITERAL()) {
+        return $node->{"value"};
+    }
+    if ($type == NODE_UNDEF()) {
+        return undef;
+    }
+
+    # --- Variables ---
+    if ($type == NODE_VARIABLE()) {
+        my str $name = $node->{"name"};
+        # Check constants
+        if (exists($interp->{"constants"}, $name)) {
+            return $interp->{"constants"}->{$name};
+        }
+        # Check enums (e.g., "Status::ACTIVE")
+        if (exists($interp->{"enums"}, $name)) {
+            return $interp->{"enums"}->{$name};
+        }
+        return env_get($env, $name);
+    }
+
+    # --- Variable Declaration ---
+    if ($type == NODE_VAR_DECL()) {
+        my str $name = $node->{"name"};
+        my int $var_type = $node->{"var_type"};
+        my scalar $init = undef;
+
+        if (defined($node->{"init"}) && $node->{"init"} != 0) {
+            $init = eval_node($interp, $node->{"init"}, $env);
+            # Array variable initialized with empty () produces empty hash from parser;
+            # convert to empty array
+            if ($var_type == TYPE_ARRAY() && ref($init) eq "HASH" && size(keys($init)) == 0) {
+                my array @empty_arr = ();
+                $init = \@empty_arr;
+            }
+            # Convert key-value list/pairs to hash for hash variables
+            if ($var_type == TYPE_HASH() && ref($init) eq "ARRAY") {
+                my hash %h = ();
+                my int $arr_sz = size($init);
+                if ($arr_sz > 0 && ref($init->[0]) eq "ARRAY") {
+                    # Array of pairs: [["key","val"], ["key2","val2"]]
+                    my int $hi = 0;
+                    while ($hi < $arr_sz) {
+                        my scalar $pair = $init->[$hi];
+                        my str $k = $pair->[0];
+                        my scalar $v = $pair->[1];
+                        $h{$k} = $v;
+                        $hi = $hi + 1;
+                    }
+                } else {
+                    # Flat list: ("key", "val", "key2", "val2")
+                    my int $hi = 0;
+                    while ($hi + 1 < $arr_sz) {
+                        my str $k = $init->[$hi];
+                        my scalar $v = $init->[$hi + 1];
+                        $h{$k} = $v;
+                        $hi = $hi + 2;
+                    }
+                }
+                $init = \%h;
+            }
+        } else {
+            if ($var_type == TYPE_INT()) { $init = 0; }
+            elsif ($var_type == TYPE_NUM()) { $init = 0.0; }
+            elsif ($var_type == TYPE_STR()) { $init = ""; }
+            elsif ($var_type == TYPE_ARRAY()) {
+                my array @a = ();
+                $init = \@a;
+            }
+            elsif ($var_type == TYPE_HASH()) {
+                my hash %h = ();
+                $init = \%h;
+            }
+        }
+
+        env_set($env, $name, $init);
+        return $init;
+    }
+
+    # --- Our Declaration ---
+    if ($type == NODE_OUR_DECL()) {
+        my str $name = $node->{"name"};
+        my int $var_type = $node->{"var_type"};
+        my scalar $init = undef;
+
+        if (defined($node->{"init"}) && $node->{"init"} != 0) {
+            $init = eval_node($interp, $node->{"init"}, $env);
+        } else {
+            if ($var_type == TYPE_INT()) { $init = 0; }
+            elsif ($var_type == TYPE_NUM()) { $init = 0.0; }
+            elsif ($var_type == TYPE_STR()) { $init = ""; }
+            elsif ($var_type == TYPE_ARRAY()) {
+                my array @a = ();
+                $init = \@a;
+            }
+            elsif ($var_type == TYPE_HASH()) {
+                my hash %h = ();
+                $init = \%h;
+            }
+        }
+
+        env_set($interp->{"global_env"}, $name, $init);
+        env_set($env, $name, $init);
+        return $init;
+    }
+
+    # --- Const Declaration ---
+    if ($type == NODE_CONST_DECL()) {
+        my str $name = $node->{"name"};
+        my scalar $val = eval_node($interp, $node->{"init"}, $env);
+        $interp->{"constants"}->{$name} = $val;
+        env_set($env, $name, $val);
+        return $val;
+    }
+
+    # --- Block ---
+    if ($type == NODE_BLOCK()) {
+        my scalar $new_env = env_new($env);
+        return eval_block($interp, $node, $new_env);
+    }
+
+    # --- Expression Statement ---
+    if ($type == NODE_EXPR_STMT()) {
+        return eval_node($interp, $node->{"expr"}, $env);
+    }
+
+    # --- Assignment ---
+    if ($type == NODE_ASSIGN()) {
+        my str $op = $node->{"op"};
+        my scalar $target = $node->{"target"};
+        my scalar $rhs = eval_node($interp, $node->{"value"}, $env);
+
+        if ($op ne "=") {
+            my scalar $cur = eval_node($interp, $target, $env);
+            if ($op eq "+=") {
+                my scalar $ovl = check_overload($interp, $cur, "+");
+                if (defined($ovl)) {
+                    my array @oa = (); push(@oa, $cur); push(@oa, $rhs); push(@oa, 0);
+                    $rhs = call_user_func($interp, $ovl, \@oa);
+                } else { $rhs = $cur + $rhs; }
+            }
+            elsif ($op eq "-=") {
+                my scalar $ovl = check_overload($interp, $cur, "-");
+                if (defined($ovl)) {
+                    my array @oa = (); push(@oa, $cur); push(@oa, $rhs); push(@oa, 0);
+                    $rhs = call_user_func($interp, $ovl, \@oa);
+                } else { $rhs = $cur - $rhs; }
+            }
+            elsif ($op eq "*=") {
+                my scalar $ovl = check_overload($interp, $cur, "*");
+                if (defined($ovl)) {
+                    my array @oa = (); push(@oa, $cur); push(@oa, $rhs); push(@oa, 0);
+                    $rhs = call_user_func($interp, $ovl, \@oa);
+                } else { $rhs = $cur * $rhs; }
+            }
+            elsif ($op eq "/=") { $rhs = $cur / $rhs; }
+            elsif ($op eq "%=") { $rhs = $cur % $rhs; }
+            elsif ($op eq ".=") { $rhs = $cur . $rhs; }
+            elsif ($op eq "//=") {
+                if (defined($cur)) { return $cur; }
+            }
+        }
+
+        assign_to($interp, $target, $rhs, $env);
+        return $rhs;
+    }
+
+    # --- Binary Operations ---
+    if ($type == NODE_BINARY_OP()) {
+        return eval_binop($interp, $node, $env);
+    }
+
+    # --- Unary Operations ---
+    if ($type == NODE_UNARY_OP()) {
+        my str $op = $node->{"op"};
+        my scalar $val = eval_node($interp, $node->{"operand"}, $env);
+
+        if ($op eq "-") {
+            # Check for neg overload
+            my scalar $neg_ovl = check_overload($interp, $val, "neg");
+            if (defined($neg_ovl)) {
+                my array @neg_args = ();
+                push(@neg_args, $val);
+                return call_user_func($interp, $neg_ovl, \@neg_args);
+            }
+            return 0 - $val;
+        }
+        if ($op eq "!") {
+            my scalar $not_ovl = check_overload($interp, $val, "!");
+            if (defined($not_ovl)) {
+                my array @not_args = ();
+                push(@not_args, $val);
+                return call_user_func($interp, $not_ovl, \@not_args);
+            }
+            return (!$val) ? 1 : 0;
+        }
+        if ($op eq "not") { return (!$val) ? 1 : 0; }
+        if ($op eq "~") { return ~$val; }
+        die("Unknown unary operator: " . $op);
+    }
+
+    # --- Increment / Decrement ---
+    if ($type == NODE_INCREMENT()) {
+        my str $op = $node->{"op"};
+        my int $is_prefix = $node->{"is_prefix"};
+        my scalar $operand = $node->{"operand"};
+        my scalar $cur = eval_node($interp, $operand, $env);
+        my scalar $new_val = $cur;
+
+        if ($op eq "++") { $new_val = $cur + 1; }
+        elsif ($op eq "--") { $new_val = $cur - 1; }
+
+        assign_to($interp, $operand, $new_val, $env);
+
+        if ($is_prefix == 1) { return $new_val; }
+        return $cur;
+    }
+
+    # --- Ternary ---
+    if ($type == NODE_TERNARY()) {
+        my scalar $cond = eval_node($interp, $node->{"condition"}, $env);
+        if ($cond) {
+            return eval_node($interp, $node->{"true_expr"}, $env);
+        }
+        return eval_node($interp, $node->{"false_expr"}, $env);
+    }
+
+    # --- If Statement ---
+    if ($type == NODE_IF_STMT()) {
+        my scalar $cond = eval_bool($interp, $node->{"condition"}, $env);
+        if ($cond) {
+            my scalar $new_env = env_new($env);
+            return eval_block($interp, $node->{"then_block"}, $new_env);
+        }
+
+        my int $elsif_count = $node->{"elsif_count"};
+        my int $ei = 0;
+        while ($ei < $elsif_count) {
+            my scalar $econd = eval_bool($interp, $node->{"elsif_conditions"}->[$ei], $env);
+            if ($econd) {
+                my scalar $new_env = env_new($env);
+                return eval_block($interp, $node->{"elsif_blocks"}->[$ei], $new_env);
+            }
+            $ei = $ei + 1;
+        }
+
+        if (defined($node->{"else_block"}) && $node->{"else_block"} != 0) {
+            my scalar $new_env = env_new($env);
+            return eval_block($interp, $node->{"else_block"}, $new_env);
+        }
+
+        return undef;
+    }
+
+    # --- While Statement ---
+    if ($type == NODE_WHILE_STMT()) {
+        my str $label = $node->{"label"};
+        my scalar $result = undef;
+        my scalar $body_env = env_new($env);
+
+        while (1) {
+            my scalar $cond = eval_bool($interp, $node->{"condition"}, $env);
+            if (!$cond) { last; }
+
+            my int $should_break = 0;
+            my int $should_redo = 1;
+            while ($should_redo) {
+                $should_redo = 0;
+                $result = eval_block($interp, $node->{"body"}, $body_env);
+
+                # Check for loop signals
+                my str $sig = $interp->{"signal_type"};
+                if (length($sig) > 0) {
+                    my str $sig_label = $interp->{"signal_label"};
+                    if ($sig eq "last" && (length($sig_label) == 0 || $sig_label eq $label)) {
+                        $interp->{"signal_type"} = "";
+                        $should_break = 1;
+                    } elsif ($sig eq "next" && (length($sig_label) == 0 || $sig_label eq $label)) {
+                        $interp->{"signal_type"} = "";
+                    } elsif ($sig eq "redo" && (length($sig_label) == 0 || $sig_label eq $label)) {
+                        $interp->{"signal_type"} = "";
+                        $should_redo = 1;
+                    } else {
+                        # Signal not for us (return or labeled for outer loop) - propagate
+                        $body_env->{"parent"} = undef;
+                        return $result;
+                    }
+                }
+            }
+            if ($should_break) { last; }
+        }
+
+        $body_env->{"parent"} = undef;
+        return $result;
+    }
+
+    # --- Do-While Statement ---
+    if ($type == NODE_DO_WHILE_STMT()) {
+        my str $label = $node->{"label"};
+        my scalar $result = undef;
+        my scalar $body_env = env_new($env);
+
+        while (1) {
+            my int $should_break = 0;
+            my int $should_redo = 1;
+            while ($should_redo) {
+                $should_redo = 0;
+                $result = eval_block($interp, $node->{"body"}, $body_env);
+
+                my str $sig = $interp->{"signal_type"};
+                if (length($sig) > 0) {
+                    my str $sig_label = $interp->{"signal_label"};
+                    if ($sig eq "last" && (length($sig_label) == 0 || $sig_label eq $label)) {
+                        $interp->{"signal_type"} = "";
+                        $should_break = 1;
+                    } elsif ($sig eq "next" && (length($sig_label) == 0 || $sig_label eq $label)) {
+                        $interp->{"signal_type"} = "";
+                    } elsif ($sig eq "redo" && (length($sig_label) == 0 || $sig_label eq $label)) {
+                        $interp->{"signal_type"} = "";
+                        $should_redo = 1;
+                    } else {
+                        $body_env->{"parent"} = undef;
+                        return $result;
+                    }
+                }
+            }
+            if ($should_break) { last; }
+
+            my scalar $cond = eval_bool($interp, $node->{"condition"}, $env);
+            if (!$cond) { last; }
+        }
+
+        $body_env->{"parent"} = undef;
+        return $result;
+    }
+
+    # --- For Statement ---
+    if ($type == NODE_FOR_STMT()) {
+        my str $label = $node->{"label"};
+        my scalar $result = undef;
+        my scalar $for_env = env_new($env);
+
+        # Init
+        if (defined($node->{"init"}) && $node->{"init"} != 0) {
+            eval_node($interp, $node->{"init"}, $for_env);
+        }
+
+        while (1) {
+            # Condition
+            if (defined($node->{"condition"}) && $node->{"condition"} != 0) {
+                my scalar $cond = eval_node($interp, $node->{"condition"}, $for_env);
+                if (!$cond) { last; }
+            }
+
+            # Body - reuse for_env for body (no separate body_env needed)
+            my int $should_break = 0;
+            my int $should_redo = 1;
+            while ($should_redo) {
+                $should_redo = 0;
+                $result = eval_block($interp, $node->{"body"}, $for_env);
+
+                my str $sig = $interp->{"signal_type"};
+                if (length($sig) > 0) {
+                    my str $sig_label = $interp->{"signal_label"};
+                    if ($sig eq "last" && (length($sig_label) == 0 || $sig_label eq $label)) {
+                        $interp->{"signal_type"} = "";
+                        $should_break = 1;
+                    } elsif ($sig eq "next" && (length($sig_label) == 0 || $sig_label eq $label)) {
+                        $interp->{"signal_type"} = "";
+                    } elsif ($sig eq "redo" && (length($sig_label) == 0 || $sig_label eq $label)) {
+                        $interp->{"signal_type"} = "";
+                        $should_redo = 1;
+                    } else {
+                        $for_env->{"parent"} = undef;
+                        return $result;
+                    }
+                }
+            }
+            if ($should_break) { last; }
+
+            # Update
+            if (defined($node->{"update"}) && $node->{"update"} != 0) {
+                eval_node($interp, $node->{"update"}, $for_env);
+            }
+        }
+
+        $for_env->{"parent"} = undef;
+        return $result;
+    }
+
+    # --- Foreach Statement ---
+    if ($type == NODE_FOREACH_STMT()) {
+        my str $label = $node->{"label"};
+        my scalar $result = undef;
+        my scalar $arr = eval_node($interp, $node->{"array"}, $env);
+        my int $arr_len = size($arr);
+
+        # Determine iteration variable name
+        my str $var_name = "";
+        my scalar $var_decl = $node->{"var_decl"};
+        if (defined($var_decl) && $var_decl != 0) {
+            $var_name = $var_decl->{"name"};
+        } else {
+            $var_name = $node->{"var_name"};
+            if (length($var_name) == 0) {
+                $var_name = "_";
+            }
+        }
+
+        my scalar $body_env = env_new($env);
+        my int $fi = 0;
+        while ($fi < $arr_len) {
+            env_set($body_env, $var_name, $arr->[$fi]);
+            env_set($body_env, "_", $arr->[$fi]);
+
+            my int $should_break = 0;
+            my int $should_redo = 1;
+            while ($should_redo) {
+                $should_redo = 0;
+                $result = eval_block($interp, $node->{"body"}, $body_env);
+
+                my str $sig = $interp->{"signal_type"};
+                if (length($sig) > 0) {
+                    my str $sig_label = $interp->{"signal_label"};
+                    if ($sig eq "last" && (length($sig_label) == 0 || $sig_label eq $label)) {
+                        $interp->{"signal_type"} = "";
+                        $should_break = 1;
+                    } elsif ($sig eq "next" && (length($sig_label) == 0 || $sig_label eq $label)) {
+                        $interp->{"signal_type"} = "";
+                    } elsif ($sig eq "redo" && (length($sig_label) == 0 || $sig_label eq $label)) {
+                        $interp->{"signal_type"} = "";
+                        $should_redo = 1;
+                    } else {
+                        $body_env->{"parent"} = undef;
+                        return $result;
+                    }
+                }
+            }
+            if ($should_break) { last; }
+
+            $fi = $fi + 1;
+        }
+        $body_env->{"parent"} = undef;
+
+        return $result;
+    }
+
+    # --- Return Statement ---
+    if ($type == NODE_RETURN_STMT()) {
+        my scalar $val = undef;
+        if (defined($node->{"value"}) && $node->{"value"} != 0) {
+            $val = eval_node($interp, $node->{"value"}, $env);
+        }
+        $interp->{"signal_type"} = "return";
+        $interp->{"signal_value"} = $val;
+        $interp->{"signal_label"} = "";
+        return undef;
+    }
+
+    # --- Last (break) ---
+    if ($type == NODE_LAST()) {
+        $interp->{"signal_type"} = "last";
+        $interp->{"signal_value"} = undef;
+        $interp->{"signal_label"} = $node->{"label"};
+        return undef;
+    }
+
+    # --- Next (continue) ---
+    if ($type == NODE_NEXT()) {
+        $interp->{"signal_type"} = "next";
+        $interp->{"signal_value"} = undef;
+        $interp->{"signal_label"} = $node->{"label"};
+        return undef;
+    }
+
+    # --- Redo ---
+    if ($type == NODE_REDO()) {
+        $interp->{"signal_type"} = "redo";
+        $interp->{"signal_value"} = undef;
+        $interp->{"signal_label"} = $node->{"label"};
+        return undef;
+    }
+
+    # --- Function Call ---
+    if ($type == NODE_CALL()) {
+        my str $name = $node->{"name"};
+        my scalar $raw_args = $node->{"args"};
+        my int $argc = $node->{"arg_count"};
+
+        # Special handling for delete($hash{$key}) - single hash-access arg
+        if ($name eq "delete" && $argc == 1) {
+            my scalar $del_arg = $raw_args->[0];
+            if (defined($del_arg)) {
+                my int $del_type = $del_arg->{"type"};
+                if ($del_type == NODE_HASH_ACCESS()) {
+                    my scalar $del_hash = eval_node($interp, $del_arg->{"hash"}, $env);
+                    my scalar $del_key = eval_node($interp, $del_arg->{"key"}, $env);
+                    delete($del_hash, $del_key);
+                    return undef;
+                }
+                if ($del_type == NODE_DEREF_HASH()) {
+                    my scalar $del_hash = eval_node($interp, $del_arg->{"target"}, $env);
+                    my scalar $del_key = eval_node($interp, $del_arg->{"key"}, $env);
+                    delete($del_hash, $del_key);
+                    return undef;
+                }
+            }
+        }
+
+        # Special handling for exists($hash{$key}) - single hash-access arg
+        if ($name eq "exists" && $argc == 1) {
+            my scalar $ex_arg = $raw_args->[0];
+            if (defined($ex_arg)) {
+                my int $ex_type = $ex_arg->{"type"};
+                if ($ex_type == NODE_HASH_ACCESS()) {
+                    my scalar $ex_hash = eval_node($interp, $ex_arg->{"hash"}, $env);
+                    my scalar $ex_key = eval_node($interp, $ex_arg->{"key"}, $env);
+                    return exists($ex_hash, $ex_key) ? 1 : 0;
+                }
+                if ($ex_type == NODE_DEREF_HASH()) {
+                    my scalar $ex_hash = eval_node($interp, $ex_arg->{"target"}, $env);
+                    my scalar $ex_key = eval_node($interp, $ex_arg->{"key"}, $env);
+                    return exists($ex_hash, $ex_key) ? 1 : 0;
+                }
+            }
+        }
+
+        # Evaluate arguments (handle spread)
+        my array @args = ();
+        my int $ai = 0;
+        while ($ai < $argc) {
+            my scalar $arg_node = $raw_args->[$ai];
+            if (defined($arg_node) && $arg_node->{"type"} == NODE_SPREAD()) {
+                # Spread: expand array into args
+                my scalar $spread_val = eval_node($interp, $arg_node->{"target"}, $env);
+                my int $slen = size($spread_val);
+                my int $si = 0;
+                while ($si < $slen) {
+                    push(@args, $spread_val->[$si]);
+                    $si = $si + 1;
+                }
+            } else {
+                push(@args, eval_node($interp, $arg_node, $env));
+            }
+            $ai = $ai + 1;
+        }
+
+        # Check enums (e.g., Color::RED)
+        if (exists($interp->{"enums"}, $name)) {
+            return $interp->{"enums"}->{$name};
+        }
+
+        # Check builtins
+        if (is_builtin($name)) {
+            return call_builtin($interp, $name, \@args, $env);
+        }
+
+        # Check user-defined functions
+        my scalar $func_info = interp_get_func($interp, $name);
+        if (defined($func_info)) {
+            return call_user_func($interp, $func_info, \@args);
+        }
+
+        # Try Pkg::func -> Pkg_func (package-qualified calls)
+        if (index($name, "::") >= 0) {
+            my str $sanitized = sanitize_name($name);
+            $func_info = interp_get_func($interp, $sanitized);
+            if (defined($func_info)) {
+                return call_user_func($interp, $func_info, \@args);
+            }
+
+            # Check native functions (import_lib)
+            if (exists($interp->{"native_funcs"}, $sanitized)) {
+                my scalar $nf = $interp->{"native_funcs"}->{$sanitized};
+                return call_native($interp, $nf, \@args);
+            }
+        }
+
+        # Check native functions by original name
+        if (exists($interp->{"native_funcs"}, $name)) {
+            my scalar $nf = $interp->{"native_funcs"}->{$name};
+            return call_native($interp, $nf, \@args);
+        }
+
+        # Try finding function with package prefix (e.g., add -> Math_Utils_add)
+        my str $suffix = "_" . $name;
+        my scalar $fkeys = keys($interp->{"functions"});
+        my int $fki = 0;
+        while ($fki < size($fkeys)) {
+            my str $fk = $fkeys->[$fki];
+            if (length($fk) > length($suffix) && substr($fk, length($fk) - length($suffix), length($suffix)) eq $suffix) {
+                return call_user_func($interp, $interp->{"functions"}->{$fk}, \@args);
+            }
+            $fki = $fki + 1;
+        }
+
+        die("Undefined function: " . $name);
+    }
+
+    # --- Closure Call ($ref->(args)) ---
+    if ($type == NODE_CLOSURE_CALL()) {
+        my scalar $closure = eval_node($interp, $node->{"closure"}, $env);
+        my scalar $raw_args = $node->{"args"};
+        my int $argc = $node->{"arg_count"};
+
+        my array @args = ();
+        my int $ai = 0;
+        while ($ai < $argc) {
+            push(@args, eval_node($interp, $raw_args->[$ai], $env));
+            $ai = $ai + 1;
+        }
+
+        # Check for __orig_func__ wrapper (from around modifier)
+        if (ref($closure) eq "HASH" && exists($closure, "__orig_func__")) {
+            return call_user_func($interp, $closure->{"__orig_func__"}, \@args);
+        }
+
+        if (ref($closure) eq "HASH" && exists($closure, "params")) {
+            # It's a function info hash (from anonymous func)
+            return call_user_func($interp, $closure, \@args);
+        }
+
+        die("Cannot call non-function value");
+    }
+
+    # --- Method Call ($obj->method(args)) ---
+    if ($type == NODE_METHOD_CALL()) {
+        # Use base_object (the original receiver) instead of object (which may be FIELD_ACCESS)
+        my scalar $obj_node = $node->{"base_object"};
+        if (!defined($obj_node) || $obj_node == 0) {
+            $obj_node = $node->{"object"};
+        }
+        my scalar $obj = eval_node($interp, $obj_node, $env);
+        my str $method = $node->{"method"};
+        my scalar $raw_args = $node->{"args"};
+        my int $argc = $node->{"arg_count"};
+
+        # Build args: $self + explicit args
+        my array @args = ();
+        push(@args, $obj);
+        my int $ai = 0;
+        while ($ai < $argc) {
+            my scalar $arg_node = $raw_args->[$ai];
+            if (defined($arg_node) && $arg_node->{"type"} == NODE_SPREAD()) {
+                my scalar $spread_val = eval_node($interp, $arg_node->{"target"}, $env);
+                my int $slen = size($spread_val);
+                my int $si = 0;
+                while ($si < $slen) {
+                    push(@args, $spread_val->[$si]);
+                    $si = $si + 1;
+                }
+            } else {
+                push(@args, eval_node($interp, $arg_node, $env));
+            }
+            $ai = $ai + 1;
+        }
+
+        # Get object's class
+        my str $pkg = "";
+        if (ref($obj) eq "HASH" && exists($obj, "__class__")) {
+            $pkg = $obj->{"__class__"};
+        }
+        # Also check for C runtime blessing (from compiled .so objects)
+        if (length($pkg) == 0) {
+            my str $ref_type = ref($obj);
+            if ($ref_type ne "HASH" && $ref_type ne "ARRAY" && $ref_type ne "" && $ref_type ne "0") {
+                $pkg = $ref_type;
+            }
+        }
+
+        # Handle isa() special method
+        if ($method eq "isa") {
+            if (length($pkg) > 0 && $argc >= 1) {
+                my str $target_class = $args->[1];
+                return interp_isa($interp, $pkg, $target_class) ? 1 : 0;
+            }
+            return 0;
+        }
+
+        # Handle can() special method
+        if ($method eq "can") {
+            if (length($pkg) > 0 && $argc >= 1) {
+                my str $target_method = $args->[1];
+                my scalar $found = interp_resolve_method($interp, $pkg, $target_method);
+                return defined($found) ? 1 : 0;
+            }
+            return 0;
+        }
+
+        # ---- BigInt method overrides (C-backed) ----
+        if ($pkg eq "BigInt") {
+            if ($method eq "add") {
+                my scalar $other = $args->[1];
+                my int $sa = $obj->{"s"};
+                my int $sb = $other->{"s"};
+                my str $va = $obj->{"v"};
+                my str $vb = $other->{"v"};
+                my hash %r = ();
+                if ($sa == $sb) {
+                    $r{"s"} = $sa;
+                    $r{"v"} = call_builtin($interp, "BigInt::_bi_add", [$va, $vb], $env);
+                } else {
+                    my int $mc = call_builtin($interp, "BigInt::_bi_cmp", [$va, $vb], $env);
+                    if ($mc == 0) {
+                        $r{"s"} = 1; $r{"v"} = "0";
+                    } elsif ($mc > 0) {
+                        $r{"s"} = $sa;
+                        $r{"v"} = call_builtin($interp, "BigInt::_bi_sub", [$va, $vb], $env);
+                    } else {
+                        $r{"s"} = $sb;
+                        $r{"v"} = call_builtin($interp, "BigInt::_bi_sub", [$vb, $va], $env);
+                    }
+                }
+                if ($r{"v"} eq "0") { $r{"s"} = 1; }
+                return bless(\%r, "BigInt");
+            }
+            # sub/neg/pow/etc. - fall through to user-defined functions
+            # (sub calls neg+add, pow calls mul - all intercepted above)
+            if ($method eq "compare") {
+                my scalar $other = $args->[1];
+                my int $sa = $obj->{"s"};
+                my int $sb = $other->{"s"};
+                if ($obj->{"v"} eq "0" && $other->{"v"} eq "0") { return 0; }
+                if ($sa > 0 && $sb < 0) { return 1; }
+                if ($sa < 0 && $sb > 0) { return -1; }
+                my int $mc = call_builtin($interp, "BigInt::_bi_cmp", [$obj->{"v"}, $other->{"v"}], $env);
+                if ($sa > 0) { return $mc; }
+                return 0 - $mc;
+            }
+            if ($method eq "mul") {
+                my scalar $other = $args->[1];
+                my str $va = $obj->{"v"};
+                my str $vb = $other->{"v"};
+                my hash %r = ();
+                if ($va eq "0" || $vb eq "0") {
+                    $r{"s"} = 1; $r{"v"} = "0";
+                } else {
+                    $r{"v"} = call_builtin($interp, "BigInt::_bi_mul", [$va, $vb], $env);
+                    $r{"s"} = ($obj->{"s"} != $other->{"s"}) ? -1 : 1;
+                }
+                return bless(\%r, "BigInt");
+            }
+            if ($method eq "div") {
+                my scalar $other = $args->[1];
+                my str $va = $obj->{"v"};
+                my str $vb = $other->{"v"};
+                if ($vb eq "0") { die("BigInt: division by zero"); }
+                my hash %r = ();
+                if ($va eq "0") { $r{"s"} = 1; $r{"v"} = "0"; }
+                else {
+                    $r{"v"} = call_builtin($interp, "BigInt::_bi_divmod", [$va, $vb], $env);
+                    $r{"s"} = ($obj->{"s"} != $other->{"s"} && $r{"v"} ne "0") ? -1 : 1;
+                }
+                return bless(\%r, "BigInt");
+            }
+            if ($method eq "mod") {
+                my scalar $other = $args->[1];
+                my str $va = $obj->{"v"};
+                my str $vb = $other->{"v"};
+                if ($vb eq "0") { die("BigInt: modulo by zero"); }
+                my hash %r = ();
+                my scalar $dr = call_builtin($interp, "BigInt::_bi_divmod_rem", [$va, $vb], $env);
+                $r{"v"} = $dr->[1];
+                $r{"s"} = $obj->{"s"};
+                if ($r{"v"} eq "0") { $r{"s"} = 1; }
+                return bless(\%r, "BigInt");
+            }
+        }
+
+        # ---- BigFloat method overrides (C-backed) ----
+        if ($pkg eq "BigFloat") {
+            if ($method eq "add") {
+                my scalar $other = $args->[1];
+                my int $sa = $obj->{"s"};
+                my int $sb = $other->{"s"};
+                my str $ma = $obj->{"m"};
+                my str $mb = $other->{"m"};
+                my int $sca = $obj->{"e"};
+                my int $scb = $other->{"e"};
+                # Align scales
+                if ($sca > $scb) {
+                    $mb = call_builtin($interp, "BigFloat::_bf_pad_right", [$mb, $sca - $scb], $env);
+                    $scb = $sca;
+                } elsif ($scb > $sca) {
+                    $ma = call_builtin($interp, "BigFloat::_bf_pad_right", [$ma, $scb - $sca], $env);
+                    $sca = $scb;
+                }
+                my hash %r = ();
+                my int $rscale = $sca;
+                if ($sa == $sb) {
+                    $r{"s"} = $sa;
+                    $r{"m"} = call_builtin($interp, "BigInt::_bi_add", [$ma, $mb], $env);
+                } else {
+                    my int $mc = call_builtin($interp, "BigInt::_bi_cmp", [$ma, $mb], $env);
+                    if ($mc == 0) { $r{"s"} = 1; $r{"m"} = "0"; }
+                    elsif ($mc > 0) {
+                        $r{"s"} = $sa;
+                        $r{"m"} = call_builtin($interp, "BigInt::_bi_sub", [$ma, $mb], $env);
+                    } else {
+                        $r{"s"} = $sb;
+                        $r{"m"} = call_builtin($interp, "BigInt::_bi_sub", [$mb, $ma], $env);
+                    }
+                }
+                # Normalize
+                my scalar $norm = call_builtin($interp, "BigFloat::_bf_normalize", [$r{"m"}, $rscale], $env);
+                $r{"m"} = $norm->[0];
+                $r{"e"} = $norm->[1];
+                if ($r{"m"} eq "0") { $r{"s"} = 1; }
+                return bless(\%r, "BigFloat");
+            }
+            if ($method eq "mul") {
+                my scalar $other = $args->[1];
+                my str $ma = $obj->{"m"};
+                my str $mb = $other->{"m"};
+                my hash %r = ();
+                if ($ma eq "0" || $mb eq "0") {
+                    $r{"s"} = 1; $r{"m"} = "0"; $r{"e"} = 0;
+                } else {
+                    my str $rm = call_builtin($interp, "BigInt::_bi_mul", [$ma, $mb], $env);
+                    my int $rscale = $obj->{"e"} + $other->{"e"};
+                    my scalar $norm = call_builtin($interp, "BigFloat::_bf_normalize", [$rm, $rscale], $env);
+                    $r{"m"} = $norm->[0];
+                    $r{"e"} = $norm->[1];
+                    $r{"s"} = ($obj->{"s"} != $other->{"s"}) ? -1 : 1;
+                }
+                return bless(\%r, "BigFloat");
+            }
+            if ($method eq "div" || $method eq "div_precision") {
+                my scalar $other = $args->[1];
+                my int $precision = 20;
+                if ($method eq "div_precision" && size($args) > 2) {
+                    $precision = $args->[2];
+                }
+                my str $ma = $obj->{"m"};
+                my str $mb = $other->{"m"};
+                if ($mb eq "0") { die("BigFloat: division by zero"); }
+                my hash %r = ();
+                if ($ma eq "0") {
+                    $r{"s"} = 1; $r{"m"} = "0"; $r{"e"} = 0;
+                } else {
+                    # Scale dividend for precision
+                    my int $extra = $precision + $other->{"e"} - $obj->{"e"};
+                    my str $scaled_a = $ma;
+                    if ($extra > 0) {
+                        $scaled_a = call_builtin($interp, "BigFloat::_bf_pad_right", [$ma, $extra], $env);
+                    }
+                    my str $q = call_builtin($interp, "BigInt::_bi_divmod", [$scaled_a, $mb], $env);
+                    my int $rscale = $precision;
+                    my scalar $norm = call_builtin($interp, "BigFloat::_bf_normalize", [$q, $rscale], $env);
+                    $r{"m"} = $norm->[0];
+                    $r{"e"} = $norm->[1];
+                    $r{"s"} = ($obj->{"s"} != $other->{"s"} && $r{"m"} ne "0") ? -1 : 1;
+                }
+                return bless(\%r, "BigFloat");
+            }
+            if ($method eq "compare") {
+                my scalar $other = $args->[1];
+                my int $sa = $obj->{"s"};
+                my int $sb = $other->{"s"};
+                if ($obj->{"m"} eq "0" && $other->{"m"} eq "0") { return 0; }
+                if ($sa > 0 && $sb < 0) { return 1; }
+                if ($sa < 0 && $sb > 0) { return -1; }
+                # Align scales for comparison
+                my str $ma = $obj->{"m"};
+                my str $mb = $other->{"m"};
+                my int $sca = $obj->{"e"};
+                my int $scb = $other->{"e"};
+                if ($sca > $scb) {
+                    $mb = call_builtin($interp, "BigFloat::_bf_pad_right", [$mb, $sca - $scb], $env);
+                } elsif ($scb > $sca) {
+                    $ma = call_builtin($interp, "BigFloat::_bf_pad_right", [$ma, $scb - $sca], $env);
+                }
+                my int $mc = call_builtin($interp, "BigInt::_bi_cmp", [$ma, $mb], $env);
+                if ($sa > 0) { return $mc; }
+                return 0 - $mc;
+            }
+            if ($method eq "round") {
+                my int $places = $args->[1];
+                my str $m = $obj->{"m"};
+                my int $scale = $obj->{"e"};
+                if ($scale <= $places) {
+                    # Clone
+                    my hash %c = ();
+                    $c{"s"} = $obj->{"s"}; $c{"m"} = "" . $m; $c{"e"} = $scale;
+                    return bless(\%c, "BigFloat");
+                }
+                my int $trim = $scale - $places;
+                my int $mlen = length($m);
+                if ($trim >= $mlen) {
+                    return call_builtin($interp, "BigFloat::new", ["0"], $env);
+                }
+                my str $kept = substr($m, 0, $mlen - $trim);
+                my str $digit_str = substr($m, $mlen - $trim, 1);
+                my int $round_digit = cast_int($digit_str);
+                if ($round_digit >= 5) {
+                    $kept = call_builtin($interp, "BigInt::_bi_add", [$kept, "1"], $env);
+                }
+                my scalar $norm = call_builtin($interp, "BigFloat::_bf_normalize", [$kept, $places], $env);
+                my hash %r = ();
+                $r{"s"} = $obj->{"s"};
+                $r{"m"} = $norm->[0];
+                $r{"e"} = $norm->[1];
+                if ($r{"m"} eq "0") { $r{"s"} = 1; }
+                return bless(\%r, "BigFloat");
+            }
+            # sub/neg/abs/etc. - fall through to user-defined functions
+        }
+
+        # Resolve method through inheritance chain
+        my scalar $func_info = undef;
+        if (length($pkg) > 0) {
+            $func_info = interp_resolve_method($interp, $pkg, $method);
+        }
+        if (!defined($func_info)) {
+            $func_info = interp_get_func($interp, $method);
+        }
+
+        # Try native functions (import_lib) as fallback
+        if (!defined($func_info) && length($pkg) > 0) {
+            my str $native_name = $pkg . "_" . $method;
+            if (exists($interp->{"native_funcs"}, $native_name)) {
+                my scalar $nf = $interp->{"native_funcs"}->{$native_name};
+                return call_native($interp, $nf, \@args);
+            }
+        }
+
+        # Try AUTOLOAD as fallback (walk inheritance chain)
+        if (!defined($func_info) && length($pkg) > 0) {
+            my scalar $al_func = undef;
+            # Check own package
+            if (exists($interp->{"autoloads"}, $pkg)) {
+                $al_func = $interp->{"autoloads"}->{$pkg};
+            }
+            # Walk inheritance chain for AUTOLOAD
+            if (!defined($al_func) && exists($interp->{"inherits"}, $pkg)) {
+                my scalar $al_parents = $interp->{"inherits"}->{$pkg};
+                my int $api = 0;
+                while ($api < size($al_parents) && !defined($al_func)) {
+                    my str $ap = $al_parents->[$api];
+                    if (exists($interp->{"autoloads"}, $ap)) {
+                        $al_func = $interp->{"autoloads"}->{$ap};
+                    }
+                    $api = $api + 1;
+                }
+            }
+            if (defined($al_func)) {
+                # AUTOLOAD receives method name as first additional arg
+                my array @al_args = ();
+                push(@al_args, $obj);
+                push(@al_args, $method);
+                my int $ali = 1;
+                while ($ali < size(\@args)) {
+                    push(@al_args, $args[$ali]);
+                    $ali = $ali + 1;
+                }
+                return call_user_func($interp, $al_func, \@al_args);
+            }
+        }
+
+        if (defined($func_info)) {
+            # Check for before/after modifiers
+            my scalar $mods = $interp->{"method_modifiers"};
+            my int $mod_count = size($mods);
+
+            # Execute before modifiers
+            my int $mi = 0;
+            while ($mi < $mod_count) {
+                my scalar $mod = $mods->[$mi];
+                if ($mod->{"mod_type"} eq "before" && $mod->{"method_name"} eq $method && $mod->{"package"} eq $pkg) {
+                    my scalar $mod_fi = $mod->{"func_info"};
+                    if (defined($mod_fi)) {
+                        call_user_func($interp, $mod_fi, \@args);
+                    }
+                }
+                $mi = $mi + 1;
+            }
+
+            # Execute around modifiers (wraps the actual call)
+            $mi = 0;
+            while ($mi < $mod_count) {
+                my scalar $mod = $mods->[$mi];
+                if ($mod->{"mod_type"} eq "around" && $mod->{"method_name"} eq $method && $mod->{"package"} eq $pkg) {
+                    my scalar $mod_fi = $mod->{"func_info"};
+                    if (defined($mod_fi)) {
+                        # Build a closure-like wrapper for $orig
+                        my hash %orig = ();
+                        $orig{"__orig_func__"} = $func_info;
+                        my array @around_args = ();
+                        push(@around_args, $args[0]);
+                        push(@around_args, \%orig);
+                        my int $aai = 1;
+                        while ($aai < size(\@args)) {
+                            push(@around_args, $args[$aai]);
+                            $aai = $aai + 1;
+                        }
+                        return call_user_func($interp, $mod_fi, \@around_args);
+                    }
+                }
+                $mi = $mi + 1;
+            }
+
+            # Call the actual method
+            my scalar $result = call_user_func($interp, $func_info, \@args);
+
+            # Execute after modifiers
+            $mi = 0;
+            while ($mi < $mod_count) {
+                my scalar $mod = $mods->[$mi];
+                if ($mod->{"mod_type"} eq "after" && $mod->{"method_name"} eq $method && $mod->{"package"} eq $pkg) {
+                    my scalar $mod_fi = $mod->{"func_info"};
+                    if (defined($mod_fi)) {
+                        call_user_func($interp, $mod_fi, \@args);
+                    }
+                }
+                $mi = $mi + 1;
+            }
+
+            return $result;
+        }
+
+        die("Undefined method: " . $method . " on " . (length($pkg) > 0 ? $pkg : "unblessed reference"));
+    }
+
+    # --- Anonymous Function ---
+    if ($type == NODE_ANON_FUNC()) {
+        my hash %fi = ();
+        $fi{"params"} = $node->{"params"};
+        $fi{"param_count"} = $node->{"param_count"};
+        $fi{"body"} = $node->{"body"};
+        $fi{"closure_env"} = $env;
+        return \%fi;
+    }
+
+    # --- Array Subscript ---
+    if ($type == NODE_SUBSCRIPT()) {
+        my scalar $arr = eval_node($interp, $node->{"array"}, $env);
+        my int $idx = eval_node($interp, $node->{"index"}, $env);
+        if ($idx < 0) {
+            $idx = size($arr) + $idx;
+        }
+        return $arr->[$idx];
+    }
+
+    # --- Hash Access ---
+    if ($type == NODE_HASH_ACCESS()) {
+        my scalar $hash_val = eval_node($interp, $node->{"hash"}, $env);
+        my str $key = eval_node($interp, $node->{"key"}, $env);
+        # Check for tied hash FETCH
+        if (ref($hash_val) eq "HASH" && exists($hash_val, "__tied__")) {
+            my scalar $tie_obj = $hash_val->{"__tied__"};
+            my str $tie_pkg = $tie_obj->{"__class__"};
+            if (length($tie_pkg) > 0) {
+                my scalar $fetch_fn = interp_resolve_method($interp, $tie_pkg, "FETCH");
+                if (defined($fetch_fn)) {
+                    my array @fetch_args = ();
+                    push(@fetch_args, $tie_obj);
+                    push(@fetch_args, $key);
+                    return call_user_func($interp, $fetch_fn, \@fetch_args);
+                }
+            }
+        }
+        return $hash_val->{$key};
+    }
+
+    # --- Deref Hash ($ref->{key}) ---
+    if ($type == NODE_DEREF_HASH()) {
+        my scalar $ref_val = eval_node($interp, $node->{"ref"}, $env);
+        my str $key = eval_node($interp, $node->{"key"}, $env);
+        return $ref_val->{$key};
+    }
+
+    # --- Deref Array ($ref->[idx]) ---
+    if ($type == NODE_DEREF_ARRAY()) {
+        my scalar $ref_val = eval_node($interp, $node->{"ref"}, $env);
+        my int $idx = eval_node($interp, $node->{"index"}, $env);
+        if ($idx < 0) {
+            $idx = size($ref_val) + $idx;
+        }
+        return $ref_val->[$idx];
+    }
+
+    # --- Deref Scalar ($$ref, @$ref, %$ref) ---
+    if ($type == NODE_DEREF_SCALAR()) {
+        my scalar $ref_val = eval_node($interp, $node->{"ref"}, $env);
+        return $ref_val;
+    }
+
+    # --- Reference (\$var, \@arr, \%hash) ---
+    if ($type == NODE_REF()) {
+        my scalar $target = $node->{"target"};
+        my str $ref_type = $node->{"ref_type"};
+
+        # For variable references, return the value (already a reference in our model)
+        my scalar $val = eval_node($interp, $target, $env);
+        if ($ref_type eq "scalar" || $ref_type eq "array" || $ref_type eq "hash") {
+            return $val;
+        }
+        return $val;
+    }
+
+    # --- Anonymous Hash ---
+    if ($type == NODE_ANON_HASH()) {
+        my hash %result = ();
+        my scalar $keys_arr = $node->{"keys"};
+        my scalar $values_arr = $node->{"values"};
+        my scalar $key_exprs = $node->{"key_exprs"};
+        my int $pair_count = $node->{"pair_count"};
+        my int $hi = 0;
+
+        while ($hi < $pair_count) {
+            my str $key = "";
+            if (defined($key_exprs->[$hi]) && $key_exprs->[$hi] != 0) {
+                $key = eval_node($interp, $key_exprs->[$hi], $env);
+            } else {
+                $key = $keys_arr->[$hi];
+            }
+            my scalar $val = eval_node($interp, $values_arr->[$hi], $env);
+            $result{$key} = $val;
+            $hi = $hi + 1;
+        }
+
+        return \%result;
+    }
+
+    # --- Anonymous Array ---
+    if ($type == NODE_ANON_ARRAY()) {
+        my array @result = ();
+        my scalar $elems = $node->{"elements"};
+        my int $elem_count = $node->{"element_count"};
+        my int $ai = 0;
+
+        while ($ai < $elem_count) {
+            my scalar $elem = $elems->[$ai];
+            if (defined($elem) && $elem->{"type"} == NODE_SPREAD()) {
+                my scalar $spread_val = eval_node($interp, $elem->{"target"}, $env);
+                my int $slen = size($spread_val);
+                my int $si = 0;
+                while ($si < $slen) {
+                    push(@result, $spread_val->[$si]);
+                    $si = $si + 1;
+                }
+            } else {
+                push(@result, eval_node($interp, $elem, $env));
+            }
+            $ai = $ai + 1;
+        }
+
+        return \@result;
+    }
+
+    # --- Range (start..end) ---
+    if ($type == NODE_RANGE()) {
+        my int $start = eval_node($interp, $node->{"start"}, $env);
+        my int $end = eval_node($interp, $node->{"end"}, $env);
+        my array @result = ();
+        if ($start <= $end) {
+            my int $ri = $start;
+            while ($ri <= $end) {
+                push(@result, $ri);
+                $ri = $ri + 1;
+            }
+        } else {
+            # Descending range
+            my int $ri = $start;
+            while ($ri >= $end) {
+                push(@result, $ri);
+                $ri = $ri - 1;
+            }
+        }
+        return \@result;
+    }
+
+    # --- Map ---
+    if ($type == NODE_MAP()) {
+        my scalar $arr = eval_node($interp, $node->{"array"}, $env);
+        my scalar $block = $node->{"block"};
+        my int $arr_len = size($arr);
+        my array @result = ();
+        my int $mi = 0;
+
+        while ($mi < $arr_len) {
+            my scalar $map_env = env_new($env);
+            env_set($map_env, "_", $arr->[$mi]);
+            my scalar $val = eval_block($interp, $block, $map_env);
+            $map_env->{"parent"} = undef;
+            push(@result, $val);
+            $mi = $mi + 1;
+        }
+
+        return \@result;
+    }
+
+    # --- Grep ---
+    if ($type == NODE_GREP()) {
+        my scalar $arr = eval_node($interp, $node->{"array"}, $env);
+        my scalar $block = $node->{"block"};
+        my int $arr_len = size($arr);
+        my array @result = ();
+        my int $gi = 0;
+
+        while ($gi < $arr_len) {
+            my scalar $grep_env = env_new($env);
+            env_set($grep_env, "_", $arr->[$gi]);
+            my scalar $val = eval_block($interp, $block, $grep_env);
+            $grep_env->{"parent"} = undef;
+            if ($val) {
+                push(@result, $arr->[$gi]);
+            }
+            $gi = $gi + 1;
+        }
+
+        return \@result;
+    }
+
+    # --- Sort ---
+    if ($type == NODE_SORT()) {
+        my scalar $arr = eval_node($interp, $node->{"array"}, $env);
+        my scalar $block = $node->{"block"};
+        my int $srt_has_blk = 0;
+        if (defined($block) && $block != 0) { $srt_has_blk = 1; }
+        my int $arr_len = size($arr);
+
+        # Copy array for sorting
+        my array @sorted = ();
+        my int $si = 0;
+        while ($si < $arr_len) {
+            push(@sorted, $arr->[$si]);
+            $si = $si + 1;
+        }
+
+        # Simple insertion sort with custom comparator
+        my int $oi = 1;
+        while ($oi < $arr_len) {
+            my scalar $key_val = $sorted[$oi];
+            my int $oj = $oi - 1;
+            while ($oj >= 0) {
+                my int $srt_do_swap = 0;
+                if ($srt_has_blk == 1) {
+                    my scalar $cmp_env = env_new($env);
+                    env_set($cmp_env, "a", $sorted[$oj]);
+                    env_set($cmp_env, "b", $key_val);
+                    my scalar $cmp_result = eval_block($interp, $block, $cmp_env);
+                    $cmp_env->{"parent"} = undef;
+                    if ($cmp_result > 0) { $srt_do_swap = 1; }
+                } else {
+                    if ($sorted[$oj] . "" gt $key_val . "") { $srt_do_swap = 1; }
+                }
+                if ($srt_do_swap == 1) {
+                    $sorted[$oj + 1] = $sorted[$oj];
+                    $oj = $oj - 1;
+                } else {
+                    last;
+                }
+            }
+            $sorted[$oj + 1] = $key_val;
+            $oi = $oi + 1;
+        }
+
+        return \@sorted;
+    }
+
+    # --- Try/Catch ---
+    if ($type == NODE_TRY_CATCH()) {
+        my scalar $try_block = $node->{"try_block"};
+        my scalar $catch_clauses = $node->{"catch_clauses"};
+        my int $catch_count = $node->{"catch_count"};
+
+        try {
+            my scalar $try_env = env_new($env);
+            return eval_block($interp, $try_block, $try_env);
+        } catch ($e) {
+            # Don't catch interpreter control flow signals
+            if (is_signal($e, "return") || is_signal($e, "last") || is_signal($e, "next") || is_signal($e, "redo")) {
+                throw($e);
+            }
+
+            # Try each catch clause
+            my int $ci = 0;
+            while ($ci < $catch_count) {
+                my scalar $clause = $catch_clauses->[$ci];
+                my str $catch_type = $clause->{"catch_type"};
+                my str $catch_var = $clause->{"catch_var"};
+                my scalar $catch_block = $clause->{"catch_block"};
+
+                my int $matches = 0;
+                if (length($catch_type) == 0) {
+                    # Catch-all
+                    $matches = 1;
+                } elsif (ref($e) eq "HASH" && exists($e, "__class__")) {
+                    # Typed catch: check isa (walks inheritance chain)
+                    if (interp_isa($interp, $e->{"__class__"}, $catch_type)) {
+                        $matches = 1;
+                    }
+                }
+
+                if ($matches) {
+                    my scalar $catch_env = env_new($env);
+                    env_set($catch_env, $catch_var, $e);
+                    return eval_block($interp, $catch_block, $catch_env);
+                }
+
+                $ci = $ci + 1;
+            }
+
+            # No catch matched - re-throw
+            throw($e);
+        }
+    }
+
+    # --- Throw ---
+    if ($type == NODE_THROW()) {
+        my scalar $val = eval_node($interp, $node->{"expr"}, $env);
+        throw($val);
+    }
+
+    # --- Destructuring ---
+    if ($type == NODE_DESTRUCTURE()) {
+        my scalar $vars = $node->{"vars"};
+        my int $var_count = $node->{"var_count"};
+        my int $is_decl = $node->{"is_decl"};
+        my scalar $init = eval_node($interp, $node->{"init"}, $env);
+
+        my int $di = 0;
+        while ($di < $var_count) {
+            my scalar $var_info = $vars->[$di];
+            my str $vname = $var_info->{"name"};
+            my scalar $val = undef;
+            if ($di < size($init)) {
+                $val = $init->[$di];
+            }
+
+            if ($is_decl == 1) {
+                env_set($env, $vname, $val);
+            } else {
+                if (!env_update($env, $vname, $val)) {
+                    env_set($env, $vname, $val);
+                }
+            }
+            $di = $di + 1;
+        }
+
+        return undef;
+    }
+
+    # --- Array Slice ---
+    if ($type == NODE_ARRAY_SLICE()) {
+        my scalar $source = eval_node($interp, $node->{"source"}, $env);
+        my scalar $items = $node->{"items"};
+        my int $item_count = $node->{"item_count"};
+        my array @result = ();
+        my int $si = 0;
+        while ($si < $item_count) {
+            my scalar $idx = eval_node($interp, $items->[$si], $env);
+            if (ref($idx) eq "ARRAY") {
+                # Range result
+                my int $ri = 0;
+                while ($ri < size($idx)) {
+                    push(@result, $source->[$idx->[$ri]]);
+                    $ri = $ri + 1;
+                }
+            } else {
+                push(@result, $source->[$idx]);
+            }
+            $si = $si + 1;
+        }
+        return \@result;
+    }
+
+    # --- Hash Slice ---
+    if ($type == NODE_HASH_SLICE()) {
+        my scalar $source = eval_node($interp, $node->{"source"}, $env);
+        my scalar $items = $node->{"items"};
+        my int $item_count = $node->{"item_count"};
+        my array @result = ();
+        my int $si = 0;
+        while ($si < $item_count) {
+            my str $key = eval_node($interp, $items->[$si], $env);
+            push(@result, $source->{$key});
+            $si = $si + 1;
+        }
+        return \@result;
+    }
+
+    # --- Function Reference (\&func) ---
+    if ($type == NODE_FUNC_REF()) {
+        my str $fname = $node->{"name"};
+        my scalar $func_info = interp_get_func($interp, $fname);
+        if (defined($func_info)) {
+            return $func_info;
+        }
+        die("Undefined function for reference: " . $fname);
+    }
+
+    # --- Switch ---
+    if ($type == NODE_SWITCH()) {
+        my scalar $expr_val = eval_node($interp, $node->{"expr"}, $env);
+        my scalar $cases = $node->{"cases"};
+        my scalar $blocks = $node->{"blocks"};
+        my int $case_count = $node->{"case_count"};
+
+        my int $ci = 0;
+        while ($ci < $case_count) {
+            my scalar $case_val = eval_node($interp, $cases->[$ci], $env);
+            if (("" . $expr_val) eq ("" . $case_val)) {
+                my scalar $case_env = env_new($env);
+                return eval_block($interp, $blocks->[$ci], $case_env);
+            }
+            $ci = $ci + 1;
+        }
+
+        if ($node->{"has_default"} == 1) {
+            my scalar $def_env = env_new($env);
+            return eval_block($interp, $node->{"default_block"}, $def_env);
+        }
+
+        return undef;
+    }
+
+    # --- Readline (<$fh>) ---
+    if ($type == NODE_READLINE()) {
+        my str $varname = $node->{"varname"};
+        my scalar $fh = env_get($env, $varname);
+        if (defined($fh)) {
+            return sys::readline($fh);
+        }
+        return undef;
+    }
+
+    # --- Regex Match ---
+    if ($type == NODE_REGEX_MATCH()) {
+        my scalar $target = eval_node($interp, $node->{"target"}, $env);
+        my str $pattern = $node->{"pattern"};
+        my str $flags = $node->{"flags"};
+        my str $op = $node->{"op"};
+
+        # Apply flags: build pattern with inline modifiers if flags present
+        my str $effective_pattern = $pattern;
+        if (length($flags) > 0) {
+            $effective_pattern = "(?" . $flags . ")" . $pattern;
+        }
+
+        my int $result = match($target, $effective_pattern);
+        if ($op eq "!~") {
+            return (!$result) ? 1 : 0;
+        }
+        return $result ? 1 : 0;
+    }
+
+    # --- Regex Substitution ---
+    if ($type == NODE_REGEX_SUBST()) {
+        my scalar $target_node = $node->{"target"};
+        my str $target_val = eval_node($interp, $target_node, $env);
+        my str $pattern = $node->{"pattern"};
+        my str $replacement = $node->{"replacement"};
+        my str $flags = $node->{"flags"};
+
+        my int $is_global = 0;
+        my int $is_eval = 0;
+
+        # Apply flags
+        my str $effective_pattern = $pattern;
+        if (length($flags) > 0) {
+            my str $inline_flags = "";
+            my int $fli = 0;
+            while ($fli < length($flags)) {
+                my str $fc = substr($flags, $fli, 1);
+                if ($fc eq "g") {
+                    $is_global = 1;
+                } elsif ($fc eq "e") {
+                    $is_eval = 1;
+                } else {
+                    $inline_flags = $inline_flags . $fc;
+                }
+                $fli = $fli + 1;
+            }
+            if (length($inline_flags) > 0) {
+                $effective_pattern = "(?" . $inline_flags . ")" . $pattern;
+            }
+        }
+
+        my str $result = $target_val;
+        if ($is_eval) {
+            # /e flag: evaluate replacement as expression for each match
+            my scalar $repl_node = $node->{"replacement_node"};
+
+            # Pre-parse replacement string into a callable function (if no AST node)
+            my scalar $parsed_repl_fn = undef;
+            if (!defined($repl_node)) {
+                my str $repl_code = "func __repl__() scalar { return " . $replacement . "; }";
+                my scalar $repl_tokens = lex_tokenize($repl_code);
+                my scalar $repl_parser = parser_new($repl_tokens);
+                my array @re = ();
+                my scalar $repl_prog = parse_program($repl_parser, \@re, \@re);
+                $parsed_repl_fn = $repl_prog->{"functions"}->[0];
+            }
+
+            if ($is_global) {
+                # Global eval: match on remaining text, build result piece by piece
+                my str $remaining = $result;
+                my str $built = "";
+                my int $safety = 0;
+                while ($safety < 1000 && match($remaining, $effective_pattern)) {
+                    my scalar $caps = captures();
+                    my str $full_match = $caps->[0];
+                    my int $match_len = length($full_match);
+                    if ($match_len == 0) { last; }
+
+                    my int $pos = index($remaining, $full_match);
+                    if ($pos < 0) { last; }
+
+                    # Add text before match
+                    if ($pos > 0) {
+                        $built = $built . substr($remaining, 0, $pos);
+                    }
+
+                    # Evaluate replacement expression
+                    my scalar $eval_result = undef;
+                    if (defined($repl_node)) {
+                        $eval_result = eval_node($interp, $repl_node, $env);
+                    } else {
+                        my array @empty_args = ();
+                        $eval_result = call_user_func($interp, {"params" => $parsed_repl_fn->{"params"}, "param_count" => $parsed_repl_fn->{"param_count"}, "body" => $parsed_repl_fn->{"body"}, "closure_env" => $env}, \@empty_args);
+                    }
+                    my str $eval_str = defined($eval_result) ? "" . $eval_result : "";
+                    $built = $built . $eval_str;
+
+                    # Advance past match
+                    $remaining = substr($remaining, $pos + $match_len);
+                    $safety = $safety + 1;
+                }
+                $result = $built . $remaining;
+            } else {
+                # Single eval replacement
+                if (match($result, $effective_pattern)) {
+                    my scalar $caps = captures();
+                    my str $full_match = $caps->[0];
+                    my int $match_len = length($full_match);
+
+                    my scalar $eval_result = undef;
+                    if (defined($repl_node)) {
+                        $eval_result = eval_node($interp, $repl_node, $env);
+                    } else {
+                        my array @empty_args = ();
+                        $eval_result = call_user_func($interp, {"params" => $parsed_repl_fn->{"params"}, "param_count" => $parsed_repl_fn->{"param_count"}, "body" => $parsed_repl_fn->{"body"}, "closure_env" => $env}, \@empty_args);
+                    }
+                    my str $eval_str = defined($eval_result) ? "" . $eval_result : "";
+
+                    # Find position and replace just the matched text
+                    my int $pos = index($result, $full_match);
+                    if ($pos >= 0) {
+                        $result = substr($result, 0, $pos) . $eval_str . substr($result, $pos + $match_len);
+                    }
+                }
+            }
+        } else {
+            if ($is_global) {
+                my str $sg_str = $target_val;
+                my str $sg_pat = $effective_pattern;
+                my str $sg_rep = $replacement;
+                __C__ {
+                    char *s = strada_to_str(sg_str);
+                    char *p = strada_to_str(sg_pat);
+                    char *r = strada_to_str(sg_rep);
+                    char *res = strada_regex_replace_all(s, p, r, NULL);
+                    strada_decref(result);
+                    result = strada_new_str(res);
+                    free(res);
+                    free(r);
+                    free(p);
+                    free(s);
+                }
+            } else {
+                $result = replace($target_val, $effective_pattern, $replacement);
+            }
+        }
+        assign_to($interp, $target_node, $result, $env);
+        return $result;
+    }
+
+    # --- __PACKAGE__ ---
+    if ($type == NODE_DUNDER_PACKAGE()) {
+        return $interp->{"package"};
+    }
+
+    # --- __FILE__ ---
+    if ($type == NODE_DUNDER_FILE()) {
+        return $interp->{"filename"};
+    }
+
+    # --- __LINE__ ---
+    if ($type == NODE_DUNDER_LINE()) {
+        return $node->{"line_value"};
+    }
+
+    # --- Super Call (SUPER::method(args)) ---
+    if ($type == NODE_SUPER_CALL()) {
+        my str $method = $node->{"method"};
+        my scalar $raw_args = $node->{"args"};
+        my int $argc = $node->{"arg_count"};
+
+        # Get $self from environment
+        my scalar $self_obj = env_get($env, "self");
+        my str $pkg = "";
+        if (defined($self_obj) && ref($self_obj) eq "HASH" && exists($self_obj, "__class__")) {
+            $pkg = $self_obj->{"__class__"};
+        }
+
+        # Build args
+        my array @args = ();
+        push(@args, $self_obj);
+        my int $ai = 0;
+        while ($ai < $argc) {
+            push(@args, eval_node($interp, $raw_args->[$ai], $env));
+            $ai = $ai + 1;
+        }
+
+        # Look up method in parent classes only
+        if (length($pkg) > 0 && exists($interp->{"inherits"}, $pkg)) {
+            my scalar $parents = $interp->{"inherits"}->{$pkg};
+            my int $pi = 0;
+            while ($pi < size($parents)) {
+                my scalar $fi = interp_resolve_method($interp, $parents->[$pi], $method);
+                if (defined($fi)) {
+                    return call_user_func($interp, $fi, \@args);
+                }
+                $pi = $pi + 1;
+            }
+        }
+
+        die("SUPER::" . $method . " - no parent method found");
+    }
+
+    # --- Dynamic Method Call ($obj->$method_var(args)) ---
+    if ($type == NODE_DYN_METHOD_CALL()) {
+        my scalar $dm_node = $node->{"base_object"};
+        if (!defined($dm_node) || $dm_node == 0) {
+            $dm_node = $node->{"object"};
+        }
+        my scalar $obj = eval_node($interp, $dm_node, $env);
+        my str $method = eval_node($interp, $node->{"method_expr"}, $env);
+        my scalar $raw_args = $node->{"args"};
+        my int $argc = $node->{"arg_count"};
+
+        my array @args = ();
+        push(@args, $obj);
+        my int $ai = 0;
+        while ($ai < $argc) {
+            push(@args, eval_node($interp, $raw_args->[$ai], $env));
+            $ai = $ai + 1;
+        }
+
+        my str $pkg = "";
+        if (ref($obj) eq "HASH" && exists($obj, "__class__")) {
+            $pkg = $obj->{"__class__"};
+        }
+
+        my scalar $func_info = undef;
+        if (length($pkg) > 0) {
+            $func_info = interp_resolve_method($interp, $pkg, $method);
+        }
+        if (!defined($func_info)) {
+            $func_info = interp_get_func($interp, $method);
+        }
+
+        if (defined($func_info)) {
+            return call_user_func($interp, $func_info, \@args);
+        }
+
+        die("Undefined dynamic method: " . $method);
+    }
+
+    # --- TR (transliteration $str =~ tr/from/to/) ---
+    if ($type == NODE_TR()) {
+        my scalar $target_node = $node->{"target"};
+        my str $target_val = eval_node($interp, $target_node, $env);
+        my str $search = $node->{"search"};
+        my str $repl = $node->{"replace"};
+        my str $tr_flags = "";
+        if (defined($node->{"flags"})) {
+            $tr_flags = $node->{"flags"};
+        }
+
+        # Expand ranges in search and replace (a-z -> abc...xyz)
+        my str $search_exp = expand_tr_range($search);
+        my str $repl_exp = expand_tr_range($repl);
+
+        my int $is_delete = (index($tr_flags, "d") >= 0) ? 1 : 0;
+        my int $is_squeeze = (index($tr_flags, "s") >= 0) ? 1 : 0;
+
+        # Build translation: for each char in target, check if in search
+        my str $result = "";
+        my int $ti = 0;
+        my int $tlen = length($target_val);
+        my str $last_repl_char = "";
+        while ($ti < $tlen) {
+            my str $ch = substr($target_val, $ti, 1);
+            my int $found_idx = index($search_exp, $ch);
+            if ($found_idx >= 0) {
+                if ($is_delete == 1 && length($repl_exp) == 0) {
+                    # Delete mode: skip the character
+                } elsif ($found_idx < length($repl_exp)) {
+                    my str $new_ch = substr($repl_exp, $found_idx, 1);
+                    if ($is_squeeze == 1 && $new_ch eq $last_repl_char) {
+                        # Squeeze: skip consecutive duplicate replacement chars
+                    } else {
+                        $result = $result . $new_ch;
+                        $last_repl_char = $new_ch;
+                    }
+                } else {
+                    # If replacement is shorter, use last char
+                    my str $new_ch = substr($repl_exp, length($repl_exp) - 1, 1);
+                    if ($is_squeeze == 1 && $new_ch eq $last_repl_char) {
+                        # Squeeze: skip consecutive duplicate replacement chars
+                    } else {
+                        $result = $result . $new_ch;
+                        $last_repl_char = $new_ch;
+                    }
+                }
+            } else {
+                $result = $result . $ch;
+                $last_repl_char = "";
+            }
+            $ti = $ti + 1;
+        }
+
+        assign_to($interp, $target_node, $result, $env);
+        return $result;
+    }
+
+    # --- Local Declaration (dynamic scoping) ---
+    if ($type == NODE_LOCAL_DECL()) {
+        my str $lname = $node->{"name"};
+        # Save current value on local stack
+        my scalar $old_val = env_get($interp->{"global_env"}, $lname);
+        my hash %save = ();
+        $save{"name"} = $lname;
+        $save{"value"} = $old_val;
+        push($interp->{"local_stack"}, \%save);
+
+        # Set new value
+        my scalar $init = undef;
+        if (defined($node->{"init"}) && $node->{"init"} != 0) {
+            $init = eval_node($interp, $node->{"init"}, $env);
+        }
+        env_set($interp->{"global_env"}, $lname, $init);
+        env_set($env, $lname, $init);
+        return $init;
+    }
+
+    # --- BEGIN/END blocks (handled during load, skip in eval) ---
+    if ($type == NODE_BEGIN_BLOCK()) {
+        return undef;
+    }
+    if ($type == NODE_END_BLOCK()) {
+        return undef;
+    }
+
+    # --- Label ---
+    if ($type == NODE_LABEL()) {
+        # Labels are handled by the loop constructs via label fields
+        return undef;
+    }
+
+    # --- Goto ---
+    if ($type == NODE_GOTO()) {
+        my str $gt_dest = $node->{"target"};
+        throw(make_signal("goto", undef, $gt_dest));
+    }
+
+    # --- Async func (treat as regular function in interpreter) ---
+    if ($type == NODE_ASYNC_FUNC()) {
+        my hash %fi = ();
+        $fi{"params"} = $node->{"params"};
+        $fi{"param_count"} = $node->{"param_count"};
+        $fi{"body"} = $node->{"body"};
+        $fi{"closure_env"} = $env;
+        return \%fi;
+    }
+
+    # --- Await (in interpreter, just evaluate the expression) ---
+    if ($type == NODE_AWAIT()) {
+        return eval_node($interp, $node->{"expr"}, $env);
+    }
+
+    # --- Field Access ($obj->field without parens, same as method call) ---
+    if ($type == NODE_FIELD_ACCESS()) {
+        my scalar $obj = eval_node($interp, $node->{"object"}, $env);
+        my str $field = $node->{"field"};
+
+        my str $pkg = "";
+        if (ref($obj) eq "HASH" && exists($obj, "__class__")) {
+            $pkg = $obj->{"__class__"};
+        }
+
+        # Try as method call with no args
+        my scalar $func_info = undef;
+        if (length($pkg) > 0) {
+            $func_info = interp_resolve_method($interp, $pkg, $field);
+        }
+        if (!defined($func_info)) {
+            $func_info = interp_get_func($interp, $field);
+        }
+        if (defined($func_info)) {
+            my array @args = ();
+            push(@args, $obj);
+            return call_user_func($interp, $func_info, \@args);
+        }
+
+        # Fallback: try hash access
+        if (ref($obj) eq "HASH" && exists($obj, $field)) {
+            return $obj->{$field};
+        }
+
+        die("Undefined field/method: " . $field);
+    }
+
+    # --- C Block (skip in interpreter) ---
+    if ($type == NODE_C_BLOCK()) {
+        # __C__ blocks cannot be interpreted
+        return undef;
+    }
+
+    # --- Capture Variables ($1, $2, ...) ---
+    if ($type == NODE_CAPTURE_VAR()) {
+        my int $num = $node->{"number"};
+        return captures()[$num];
+    }
+
+    # --- Spread (handled by caller) ---
+    if ($type == NODE_SPREAD()) {
+        return eval_node($interp, $node->{"target"}, $env);
+    }
+
+    # --- Extern Func (skip in interpreter) ---
+    if ($type == NODE_EXTERN_FUNC()) {
+        return undef;
+    }
+
+    # --- Use (already handled during load) ---
+    if ($type == NODE_USE()) {
+        return undef;
+    }
+
+    die("Unhandled AST node type: " . ast_type_name($type) . " (" . $type . ")");
+}
+
+# ============================================================
+# Public eval API (for use from compiled programs)
+# Requires AST, Lexer, and Parser to be available in the build.
+# ============================================================
+
+# Shared interpreter instance for eval_string
+my scalar $g_eval_interp = undef;
+
+# Initialize the interpreter eval engine.
+# Call before eval_string(). No-op if already initialized.
+func init() void {
+    if (!defined($g_eval_interp)) {
+        $g_eval_interp = interp_new();
+    }
+}
+
+# Evaluate a string of Strada code and return the result.
+# Requires init() to have been called first.
+func eval_string(str $code) scalar {
+    if (!defined($g_eval_interp)) {
+        init();
+    }
+
+    my str $trimmed = $code;
+    $trimmed =~ s/^\s+//;
+    $trimmed =~ s/\s+$//;
+
+    if (length($trimmed) == 0) {
+        return undef;
+    }
+
+    # Auto-append semicolon if needed
+    my int $tlen = length($trimmed);
+    my str $last_char = substr($trimmed, $tlen - 1, 1);
+    if ($last_char ne ";" && $last_char ne "}") {
+        $trimmed = $trimmed . ";";
+    }
+
+    # Wrap in eval function
+    my str $source = "func __eval__() scalar {\n" . $trimmed . "\n}\n";
+
+    # Parse
+    my scalar $tokens = lex_tokenize($source);
+    my scalar $parser = parser_new($tokens);
+    parser_set_filename($parser, "<eval>");
+    my array @empty = ();
+    my scalar $program = parse_program($parser, \@empty, \@empty);
+
+    # Find __eval__ function
+    my scalar $funcs = $program->{"functions"};
+    my int $func_count = $program->{"function_count"};
+    my scalar $eval_func = undef;
+    my int $i = 0;
+    while ($i < $func_count) {
+        my scalar $fn = $funcs->[$i];
+        if ($fn->{"name"} eq "__eval__") {
+            $eval_func = $fn;
+        }
+        $i = $i + 1;
+    }
+
+    if (!defined($eval_func)) {
+        return undef;
+    }
+
+    # Execute in global env
+    my scalar $body = $eval_func->{"body"};
+    my scalar $stmts = $body->{"statements"};
+    my int $stmt_count = $body->{"statement_count"};
+    my scalar $result = undef;
+
+    try {
+        $result = eval_stmts_in_env($g_eval_interp, $stmts, $stmt_count, $g_eval_interp->{"global_env"});
+    } catch ($e) {
+        if (is_signal($e, "return")) {
+            return $e->{"value"};
+        }
+        throw($e);
+    }
+
+    return $result;
+}
+
+# Reset the eval engine state
+func reset() void {
+    $g_eval_interp = interp_new();
+}

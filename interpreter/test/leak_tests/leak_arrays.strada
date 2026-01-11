@@ -1,0 +1,12 @@
+func main() int {
+    my int $i = 0;
+    while ($i < 100) {
+        my array @a = (1, 2, 3, 4, 5);
+        push(@a, 6);
+        my int $v = pop(@a);
+        my scalar $mapped = map { $_ * 2; } @a;
+        my scalar $filtered = grep { $_ > 2; } @a;
+        $i = $i + 1;
+    }
+    return 0;
+}

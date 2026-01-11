@@ -1,0 +1,255 @@
+#!/usr/bin/env strada
+# Test encoding operations (JSON, base64) for memory leaks
+# Run: valgrind --leak-check=full ./test_encoding
+
+use lib "lib";
+use JSON;
+
+func main() int {
+    say("Testing encoding operations for memory leaks...");
+    my int $iterations = 100;
+
+    # Test base64 encode/decode
+    say("  sys::base64_encode/decode...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my str $orig = "Hello, World! This is a test string for base64 encoding.";
+        my str $encoded = sys::base64_encode($orig);
+        my str $decoded = sys::base64_decode($encoded);
+
+        if ($decoded ne $orig) {
+            say("    FAIL: base64 roundtrip");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test base64 with binary data
+    say("  base64 with binary data...");
+    $i = 0;
+    while ($i < $iterations) {
+        # Create binary data with null bytes
+        my str $binary = chr(0) . chr(255) . chr(128) . chr(64) . chr(0) . chr(1);
+        my str $encoded = sys::base64_encode($binary);
+        my str $decoded = sys::base64_decode($encoded);
+
+        if (sys::byte_length($decoded) != 6) {
+            say("    FAIL: binary length");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test JSON encode - simple values
+    say("  JSON::encode simple values...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $j1 = JSON::encode("hello");
+        my str $j2 = JSON::encode(42);
+        my str $j3 = JSON::encode(3.14);
+
+        if ($j1 ne "\"hello\"") {
+            say("    FAIL: JSON string");
+            return 1;
+        }
+        if ($j2 ne "42") {
+            say("    FAIL: JSON int");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test JSON encode - arrays
+    say("  JSON::encode arrays...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $arr = [1, 2, 3, 4, 5];
+        my str $json = JSON::encode($arr);
+
+        if ($json ne "[1,2,3,4,5]") {
+            say("    FAIL: JSON array: " . $json);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test JSON encode - hashes
+    say("  JSON::encode hashes...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        $h{"name"} = "Alice";
+        $h{"age"} = 30;
+        my str $json = JSON::encode(\%h);
+
+        # JSON key order may vary, just check it contains expected parts
+        if (index($json, "\"name\"") < 0 || index($json, "\"Alice\"") < 0) {
+            say("    FAIL: JSON hash missing name");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test JSON encode - nested structures
+    say("  JSON::encode nested...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $data = {
+            "users" => [
+                { "name" => "Alice", "age" => 30 },
+                { "name" => "Bob", "age" => 25 }
+            ],
+            "count" => 2
+        };
+        my str $json = JSON::encode($data);
+
+        if (index($json, "users") < 0) {
+            say("    FAIL: nested JSON");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test JSON decode - simple values
+    say("  JSON::decode simple values...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $v1 = JSON::decode("\"hello\"");
+        my scalar $v2 = JSON::decode("42");
+        my scalar $v3 = JSON::decode("3.14");
+        my scalar $v4 = JSON::decode("true");
+        my scalar $v5 = JSON::decode("false");
+        my scalar $v6 = JSON::decode("null");
+
+        if ($v1 ne "hello") {
+            say("    FAIL: decode string");
+            return 1;
+        }
+        if ($v2 != 42) {
+            say("    FAIL: decode int");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test JSON decode - arrays
+    say("  JSON::decode arrays...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $arr = JSON::decode("[1, 2, 3, 4, 5]");
+        if (size($arr) != 5) {
+            say("    FAIL: decode array size");
+            return 1;
+        }
+        if ($arr->[0] != 1 || $arr->[4] != 5) {
+            say("    FAIL: decode array values");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test JSON decode - objects
+    say("  JSON::decode objects...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $obj = JSON::decode("{\"name\": \"Alice\", \"age\": 30}");
+        if ($obj->{"name"} ne "Alice") {
+            say("    FAIL: decode object name");
+            return 1;
+        }
+        if ($obj->{"age"} != 30) {
+            say("    FAIL: decode object age");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test JSON roundtrip
+    say("  JSON roundtrip...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $orig = {
+            "string" => "hello world",
+            "number" => 42,
+            "float" => 3.14,
+            "array" => [1, 2, 3],
+            "nested" => { "key" => "value" }
+        };
+        my str $json = JSON::encode($orig);
+        my scalar $decoded = JSON::decode($json);
+
+        if ($decoded->{"string"} ne "hello world") {
+            say("    FAIL: roundtrip string");
+            return 1;
+        }
+        if ($decoded->{"number"} != 42) {
+            say("    FAIL: roundtrip number");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test sys::pack/unpack
+    say("  sys::pack/unpack...");
+    $i = 0;
+    while ($i < $iterations) {
+        # Pack some values
+        my str $packed = sys::pack("NnC", 0x12345678, 80, 255);
+
+        # Unpack them
+        my array @unpacked = sys::unpack("NnC", $packed);
+
+        if ($unpacked[0] != 0x12345678) {
+            say("    FAIL: unpack N");
+            return 1;
+        }
+        if ($unpacked[1] != 80) {
+            say("    FAIL: unpack n");
+            return 1;
+        }
+        if ($unpacked[2] != 255) {
+            say("    FAIL: unpack C");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test byte operations
+    say("  Byte operations...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $data = "Hello";
+        my int $len = sys::byte_length($data);
+        my int $b0 = sys::get_byte($data, 0);
+        my str $sub = sys::byte_substr($data, 1, 3);
+
+        if ($len != 5) {
+            say("    FAIL: byte_length");
+            return 1;
+        }
+        if ($b0 != 72) {  # 'H'
+            say("    FAIL: get_byte");
+            return 1;
+        }
+        if ($sub ne "ell") {
+            say("    FAIL: byte_substr");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All encoding tests passed!");
+    return 0;
+}

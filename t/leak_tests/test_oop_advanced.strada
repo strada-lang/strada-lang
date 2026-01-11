@@ -1,0 +1,163 @@
+#!/usr/bin/env strada
+# Test advanced OOP patterns for memory leaks
+# Run: valgrind --leak-check=full ./test_oop_advanced
+
+package Animal;
+has ro str $species (required);
+has rw int $energy = 100;
+
+func speak(scalar $self) str {
+    return $self->species() . " speaks";
+}
+
+package Dog;
+extends Animal;
+has ro str $name (required);
+has rw int $age = 0;
+
+before "bark" func(scalar $self) void {
+    $self->set_energy($self->energy() - 1);
+}
+
+func bark(scalar $self) str {
+    return $self->name() . " barks!";
+}
+
+after "bark" func(scalar $self) void {
+    # After hook runs after bark
+}
+
+package Cat;
+extends Animal;
+has ro str $name (required);
+
+func meow(scalar $self) str {
+    return $self->name() . " meows!";
+}
+
+package main;
+
+func main() int {
+    say("Testing advanced OOP for memory leaks...");
+    my int $iterations = 100;
+
+    # Test Moose-style has/extends
+    say("  has/extends...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my scalar $d = Dog::new("name", "Rex", "species", "dog", "age", 3);
+        my str $n = $d->name();
+        my str $s = $d->species();
+        my int $a = $d->age();
+        if ($n ne "Rex" || $s ne "dog" || $a != 3) {
+            say("    FAIL: has/extends");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test rw setters
+    say("  rw setters...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $d = Dog::new("name", "Buddy", "species", "dog");
+        $d->set_age(5);
+        $d->set_energy(80);
+        if ($d->age() != 5 || $d->energy() != 80) {
+            say("    FAIL: setters");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test before/after hooks
+    say("  before/after hooks...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $d = Dog::new("name", "Max", "species", "dog");
+        my int $e_before = $d->energy();
+        my str $bark_result = $d->bark();
+        my int $e_after = $d->energy();
+        if ($bark_result ne "Max barks!") {
+            say("    FAIL: bark result");
+            return 1;
+        }
+        if ($e_after != $e_before - 1) {
+            say("    FAIL: before hook");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test isa with inheritance
+    say("  isa inheritance...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $d = Dog::new("name", "Spot", "species", "dog");
+        my scalar $c = Cat::new("name", "Whiskers", "species", "cat");
+        if (!$d->isa("Dog") || !$d->isa("Animal")) {
+            say("    FAIL: dog isa");
+            return 1;
+        }
+        if (!$c->isa("Cat") || !$c->isa("Animal")) {
+            say("    FAIL: cat isa");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test can()
+    say("  can()...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $d = Dog::new("name", "Fido", "species", "dog");
+        my int $can_bark = $d->can("bark");
+        my int $can_speak = $d->can("speak");
+        my int $can_fly = $d->can("fly");
+        if (!$can_bark || !$can_speak || $can_fly) {
+            say("    FAIL: can");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test inherited methods
+    say("  inherited methods...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $d = Dog::new("name", "Duke", "species", "dog");
+        my str $speech = $d->speak();
+        if ($speech ne "dog speaks") {
+            say("    FAIL: inherited = " . $speech);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test multiple objects of different classes
+    say("  mixed objects...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $d = Dog::new("name", "A", "species", "dog");
+        my scalar $c = Cat::new("name", "B", "species", "cat");
+        my str $ds = $d->speak();
+        my str $cs = $c->speak();
+        my str $db = $d->bark();
+        my str $cm = $c->meow();
+        if (length($ds) < 1 || length($cs) < 1) {
+            say("    FAIL: mixed");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All advanced OOP tests passed!");
+    return 0;
+}

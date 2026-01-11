@@ -1,0 +1,177 @@
+#!/usr/bin/env strada
+# Test map/grep/sort for memory leaks
+# Run: valgrind --leak-check=full ./test_functional
+
+func main() int {
+    say("Testing map/grep/sort for memory leaks...");
+    my int $iterations = 100;
+
+    # Test map with transform
+    say("  map transform...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my array @nums = (1, 2, 3, 4, 5);
+        my array @doubled = map { $_ * 2; } @nums;
+        if (size(@doubled) != 5) {
+            say("    FAIL: map size");
+            return 1;
+        }
+        if ($doubled[0] != 2 || $doubled[4] != 10) {
+            say("    FAIL: map values");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test map with string operations
+    say("  map string ops...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @words = ("hello", "world", "foo", "bar");
+        my array @upper = map { uc($_); } @words;
+        if ($upper[0] ne "HELLO") {
+            say("    FAIL: map uc");
+            return 1;
+        }
+        if ($upper[3] ne "BAR") {
+            say("    FAIL: map uc last");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test grep filter
+    say("  grep filter...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @nums = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+        my array @evens = grep { $_ % 2 == 0; } @nums;
+        if (size(@evens) != 5) {
+            say("    FAIL: grep size = " . size(@evens));
+            return 1;
+        }
+        if ($evens[0] != 2 || $evens[4] != 10) {
+            say("    FAIL: grep values");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test grep with strings
+    say("  grep strings...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @words = ("apple", "banana", "avocado", "cherry", "apricot");
+        my array @a_words = grep { substr($_, 0, 1) eq "a"; } @words;
+        if (size(@a_words) != 3) {
+            say("    FAIL: grep strings size");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test sort numeric
+    say("  sort numeric...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @nums = (5, 3, 8, 1, 9, 2, 7, 4, 6, 10);
+        my array @sorted = sort { $a <=> $b; } @nums;
+        if ($sorted[0] != 1 || $sorted[9] != 10) {
+            say("    FAIL: sort numeric");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test sort string
+    say("  sort string...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @words = ("banana", "apple", "cherry", "date");
+        my array @sorted = sort { $a cmp $b; } @words;
+        if ($sorted[0] ne "apple" || $sorted[3] ne "date") {
+            say("    FAIL: sort string");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test sort reverse
+    say("  sort reverse...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @nums = (1, 2, 3, 4, 5);
+        my array @rsorted = sort { $b <=> $a; } @nums;
+        if ($rsorted[0] != 5 || $rsorted[4] != 1) {
+            say("    FAIL: sort reverse");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test map to hash
+    say("  map to hash...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @items = ("a", "b", "c");
+        my hash %lookup = map { $_ => 1; } @items;
+        if (!exists($lookup{"a"})) {
+            say("    FAIL: map to hash");
+            return 1;
+        }
+        if (!exists($lookup{"c"})) {
+            say("    FAIL: map to hash c");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test chained map + grep
+    say("  Chained map+grep...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @nums = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+        my array @evens = grep { $_ % 2 == 0; } @nums;
+        my array @doubled = map { $_ * 2; } @evens;
+        if (size(@doubled) != 5) {
+            say("    FAIL: chain size");
+            return 1;
+        }
+        if ($doubled[0] != 4 || $doubled[4] != 20) {
+            say("    FAIL: chain values");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test sort stability (many elements)
+    say("  Sort many elements...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @big = ();
+        my int $j = 50;
+        while ($j > 0) {
+            push(@big, $j);
+            $j = $j - 1;
+        }
+        my array @sorted = sort { $a <=> $b; } @big;
+        if ($sorted[0] != 1 || $sorted[49] != 50) {
+            say("    FAIL: big sort");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All map/grep/sort tests passed!");
+    return 0;
+}

@@ -1,0 +1,288 @@
+=head1 NAME
+
+readline - GNU Readline bindings for Strada
+
+=head1 SYNOPSIS
+
+    use lib "lib";
+    import_lib "readline.so";
+
+    readline::init();
+    while (1) {
+        my str $line = readline::readline("prompt> ");
+        if (!defined($line)) { last; }  # EOF (Ctrl-D)
+        if (length($line) > 0) {
+            readline::add_history($line);
+        }
+        # process $line...
+    }
+
+=head1 DESCRIPTION
+
+The readline module provides bindings to GNU Readline, giving you
+line editing with Emacs/vi keybindings, command history, and
+history file persistence.
+
+B<Build:>
+
+    cd lib/readline && make
+
+B<Requires:>
+
+    apt install libreadline-dev    # Debian/Ubuntu
+
+=head1 FUNCTIONS
+
+=head2 init()
+
+Initialize readline. Called automatically on first use.
+
+=head2 readline($prompt)
+
+Read a line with the given prompt. Returns the line (without newline)
+or C<undef> on EOF (Ctrl-D).
+
+    my str $line = readline::readline(">>> ");
+
+=head2 add_history($line)
+
+Add a line to the history. Empty lines are ignored.
+
+    readline::add_history($line);
+
+=head2 clear_history()
+
+Clear all history entries.
+
+=head2 history_length()
+
+Returns the number of entries in the history.
+
+=head2 history_get($index)
+
+Get a specific history entry by index (0-based). Returns C<undef> if
+index is out of range.
+
+=head2 stifle_history($max)
+
+Set the maximum number of history entries to keep.
+
+    readline::stifle_history(100);
+
+=head2 read_history($filename)
+
+Load history from a file. Returns 1 on success, 0 on failure.
+
+    readline::read_history("~/.myapp_history");
+
+=head2 write_history($filename)
+
+Save history to a file. Returns 1 on success, 0 on failure.
+
+    readline::write_history("~/.myapp_history");
+
+=head2 append_history($count, $filename)
+
+Append the last C<$count> history entries to a file.
+
+=head2 set_variable($name, $value)
+
+Set a readline variable (e.g., "editing-mode" to "vi" or "emacs").
+
+    readline::set_variable("editing-mode", "vi");
+
+=head1 EXAMPLE
+
+    use lib "lib";
+    import_lib "readline.so";
+
+    my str $histfile = sys::getenv("HOME") . "/.myrepl_history";
+
+    readline::init();
+    readline::stifle_history(500);
+    readline::read_history($histfile);
+
+    while (1) {
+        my str $line = readline::readline("myrepl> ");
+        if (!defined($line)) {
+            say("");
+            last;
+        }
+
+        if (length($line) > 0) {
+            readline::add_history($line);
+            # Process command...
+            say("You typed: " . $line);
+        }
+    }
+
+    readline::write_history($histfile);
+
+=head1 SEE ALSO
+
+L<IPC::Open3>
+
+=cut
+
+package readline;
+version "1.0.0";
+
+__C__ {
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <readline/readline.h>
+#include <readline/history.h>
+
+/* Detect if we're using GNU readline (has append_history) vs libedit (macOS) */
+#if defined(__APPLE__) || defined(RL_READLINE_VERSION) && RL_READLINE_VERSION < 0x0600
+#define READLINE_IS_LIBEDIT 1
+#endif
+
+static int readline_initialized = 0;
+}
+
+# Initialize readline (optional, called automatically)
+func init() void {
+    __C__ {
+        if (!readline_initialized) {
+            rl_initialize();
+            using_history();
+            readline_initialized = 1;
+        }
+    }
+}
+
+# Read a line with prompt, returns undef on EOF
+func readline(str $prompt) str {
+    my str $result = "";
+    my int $got_line = 0;
+
+    __C__ {
+        if (!readline_initialized) {
+            rl_initialize();
+            using_history();
+            readline_initialized = 1;
+        }
+
+        const char *p = strada_to_str(prompt);
+        char *line = readline(p);
+
+        if (line) {
+            result = strada_new_str(line);
+            got_line = strada_new_int(1);
+            free(line);
+        } else {
+            got_line = strada_new_int(0);
+        }
+    }
+
+    if ($got_line == 0) {
+        return undef;
+    }
+    return $result;
+}
+
+# Add a line to history
+func add_history(str $line) void {
+    __C__ {
+        const char *l = strada_to_str(line);
+        if (l && l[0] != '\0') {
+            add_history(l);
+        }
+    }
+}
+
+# Clear all history
+func clear_history() void {
+    __C__ {
+        clear_history();
+    }
+}
+
+# Get history length
+func history_length() int {
+    my int $len = 0;
+    __C__ {
+        len = strada_new_int(history_length);
+    }
+    return $len;
+}
+
+# Get a specific history entry (0-indexed)
+func history_get(int $index) str {
+    my str $result = "";
+    my int $found = 0;
+    __C__ {
+        int idx = (int)strada_to_int(index);
+        HIST_ENTRY *entry = history_get(idx + history_base);
+        if (entry && entry->line) {
+            result = strada_new_str(entry->line);
+            found = strada_new_int(1);
+        }
+    }
+    if ($found == 0) {
+        return undef;
+    }
+    return $result;
+}
+
+# Set the maximum history size
+func stifle_history(int $max) void {
+    __C__ {
+        int max_size = (int)strada_to_int(max);
+        stifle_history(max_size);
+    }
+}
+
+# Read history from file
+func read_history(str $filename) int {
+    my int $result = 0;
+    __C__ {
+        const char *fn = strada_to_str(filename);
+        int ret = read_history(fn);
+        result = strada_new_int(ret == 0 ? 1 : 0);
+    }
+    return $result;
+}
+
+# Write history to file
+func write_history(str $filename) int {
+    my int $result = 0;
+    __C__ {
+        const char *fn = strada_to_str(filename);
+        int ret = write_history(fn);
+        result = strada_new_int(ret == 0 ? 1 : 0);
+    }
+    return $result;
+}
+
+# Append history to file (only new entries since last read/write)
+# Note: Not available on macOS libedit - falls back to write_history
+func append_history(int $count, str $filename) int {
+    my int $result = 0;
+    __C__ {
+        int n = (int)strada_to_int(count);
+        const char *fn = strada_to_str(filename);
+#ifdef READLINE_IS_LIBEDIT
+        /* libedit doesn't have append_history, use write_history instead */
+        int ret = write_history(fn);
+#else
+        int ret = append_history(n, fn);
+#endif
+        result = strada_new_int(ret == 0 ? 1 : 0);
+    }
+    return $result;
+}
+
+# Set readline variable (e.g., "editing-mode" to "vi" or "emacs")
+func set_variable(str $name, str $value) int {
+    my int $result = 0;
+    __C__ {
+        const char *n = strada_to_str(name);
+        const char *v = strada_to_str(value);
+        int ret = rl_variable_bind(n, v);
+        result = strada_new_int(ret == 0 ? 1 : 0);
+    }
+    return $result;
+}

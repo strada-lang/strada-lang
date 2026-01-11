@@ -1,0 +1,130 @@
+#!/usr/bin/env strada
+# Test StringBuilder for memory leaks
+# Run: valgrind --leak-check=full ./test_stringbuilder
+
+func main() int {
+    say("Testing StringBuilder for memory leaks...");
+    my int $iterations = 100;
+
+    # Test basic sb_new and sb_to_string
+    say("  sb_new/sb_to_string...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my scalar $sb = sb_new();
+        sb_append($sb, "hello");
+        sb_append($sb, " world");
+        my str $result = sb_to_string($sb);
+        if ($result ne "hello world") {
+            say("    FAIL: sb result = " . $result);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test sb_new with capacity
+    say("  sb_new with capacity...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $sb = sb_new(256);
+        sb_append($sb, "pre-allocated");
+        my str $result = sb_to_string($sb);
+        if ($result ne "pre-allocated") {
+            say("    FAIL: capacity sb");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test multiple appends
+    say("  Multiple appends...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $sb = sb_new();
+        my int $j = 0;
+        while ($j < 20) {
+            sb_append($sb, "x");
+            $j = $j + 1;
+        }
+        my str $result = sb_to_string($sb);
+        if (length($result) != 20) {
+            say("    FAIL: append length = " . length($result));
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test sb_length
+    say("  sb_length...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $sb = sb_new();
+        sb_append($sb, "test");
+        my int $len = sb_length($sb);
+        if ($len != 4) {
+            say("    FAIL: sb_length = " . $len);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test sb_clear
+    say("  sb_clear...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $sb = sb_new();
+        sb_append($sb, "data");
+        sb_clear($sb);
+        sb_append($sb, "new");
+        my str $result = sb_to_string($sb);
+        if ($result ne "new") {
+            say("    FAIL: sb_clear = " . $result);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test appending variables
+    say("  Append variables...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $sb = sb_new();
+        my str $part1 = "hello";
+        my str $part2 = " world";
+        sb_append($sb, $part1);
+        sb_append($sb, $part2);
+        my str $result = sb_to_string($sb);
+        if ($result ne "hello world") {
+            say("    FAIL: var append");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test large content (trigger realloc)
+    say("  Large content (realloc)...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $sb = sb_new();
+        my int $j = 0;
+        while ($j < 100) {
+            sb_append($sb, "abcdefghij");
+            $j = $j + 1;
+        }
+        my str $result = sb_to_string($sb);
+        if (length($result) != 1000) {
+            say("    FAIL: large sb length");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All StringBuilder tests passed!");
+    return 0;
+}

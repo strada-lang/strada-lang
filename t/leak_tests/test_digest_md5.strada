@@ -1,0 +1,79 @@
+#!/usr/bin/env strada
+# Test Digest::MD5 library for memory leaks
+# Run: valgrind --leak-check=full ./test_digest_md5
+
+use lib "lib";
+use Digest::MD5;
+
+func main() int {
+    say("Testing Digest::MD5 for memory leaks...");
+
+    # Test md5_hex - 100 iterations
+    say("  md5_hex()...");
+    my int $i = 0;
+    while ($i < 100) {
+        my str $hash = Digest::MD5::md5_hex("test input " . $i);
+        if ($i == 0) {
+            # Verify first iteration produces expected result
+            if (length($hash) != 32) {
+                say("    FAIL: expected 32 char hex, got " . length($hash));
+                return 1;
+            }
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test md5 (raw) - 100 iterations
+    say("  md5()...");
+    $i = 0;
+    while ($i < 100) {
+        my str $raw = Digest::MD5::md5("test " . $i);
+        if (sys::byte_length($raw) != 16) {
+            say("    FAIL: expected 16 bytes, got " . sys::byte_length($raw));
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test md5_base64 - 100 iterations
+    say("  md5_base64()...");
+    $i = 0;
+    while ($i < 100) {
+        my str $b64 = Digest::MD5::md5_base64("test input " . $i);
+        if ($i == 0) {
+            # Base64 of 16 bytes = 22 chars (without padding)
+            if (length($b64) != 22) {
+                say("    FAIL: expected 22 char base64, got " . length($b64));
+                return 1;
+            }
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Known test vectors
+    say("  Verifying test vectors...");
+    my str $h1 = Digest::MD5::md5_hex("Hello, World!");
+    if ($h1 ne "65a8e27d8879283831b664bd8b7f0ad4") {
+        say("    FAIL: MD5 test vector mismatch: " . $h1);
+        return 1;
+    }
+
+    my str $h2 = Digest::MD5::md5_hex("");
+    if ($h2 ne "d41d8cd98f00b204e9800998ecf8427e") {
+        say("    FAIL: MD5 empty string mismatch: " . $h2);
+        return 1;
+    }
+
+    my str $b64 = Digest::MD5::md5_base64("Hello, World!");
+    if ($b64 ne "ZajifYh5KDgxtmS9i38K1A") {
+        say("    FAIL: MD5 base64 mismatch: " . $b64);
+        return 1;
+    }
+    say("    PASS");
+
+    say("All Digest::MD5 tests passed!");
+    return 0;
+}

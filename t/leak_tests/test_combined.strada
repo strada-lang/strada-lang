@@ -1,0 +1,100 @@
+#!/usr/bin/env strada
+# Combined test for all crypto/hash libraries
+# Tests Digest::SHA, Digest::MD5, crypt, and sys::random together
+# Run: valgrind --leak-check=full ./test_combined
+
+use lib "lib";
+use Digest::SHA;
+use Digest::MD5;
+use crypt;
+
+func main() int {
+    say("Combined Library Leak Test");
+    say("==========================");
+    say("");
+
+    my int $iterations = 50;
+
+    # Simulate real-world usage pattern:
+    # 1. Generate random token
+    # 2. Hash it with SHA-256
+    # 3. Also compute MD5 (for comparison/checksums)
+    # 4. Hash a password with crypt
+    # 5. Verify the password
+
+    say("Running " . $iterations . " iterations of combined operations...");
+
+    my int $i = 0;
+    while ($i < $iterations) {
+        # Generate random token
+        my str $token = sys::random_bytes_hex(32);
+
+        # Hash with SHA-256
+        my str $sha256 = Digest::SHA::sha256_hex($token);
+        my str $sha1 = Digest::SHA::sha1_hex($token);
+
+        # Hash with MD5
+        my str $md5 = Digest::MD5::md5_hex($token);
+
+        # Generate password and hash it
+        my str $password = "pass_" . $i . "_" . sys::random_bytes_hex(8);
+        my str $salt = crypt::gen_salt("sha512");
+        my str $hash = crypt::hashpw($password, $salt);
+
+        # Verify the password
+        my int $valid = crypt::verify($password, $hash);
+        if ($valid != 1) {
+            say("FAIL: password verification failed at iteration " . $i);
+            return 1;
+        }
+
+        # Verify wrong password doesn't match
+        my int $invalid = crypt::verify("wrong_password", $hash);
+        if ($invalid != 0) {
+            say("FAIL: wrong password matched at iteration " . $i);
+            return 1;
+        }
+
+        # Check algorithm detection
+        my str $algo = crypt::get_algorithm($hash);
+        if ($algo ne "sha512") {
+            say("FAIL: algorithm detection failed at iteration " . $i);
+            return 1;
+        }
+
+        # Verify hashes have correct lengths
+        if (length($sha256) != 64) {
+            say("FAIL: SHA-256 length wrong at iteration " . $i);
+            return 1;
+        }
+        if (length($sha1) != 40) {
+            say("FAIL: SHA-1 length wrong at iteration " . $i);
+            return 1;
+        }
+        if (length($md5) != 32) {
+            say("FAIL: MD5 length wrong at iteration " . $i);
+            return 1;
+        }
+
+        $i = $i + 1;
+    }
+
+    say("All " . $iterations . " iterations completed successfully!");
+    say("");
+
+    # Additional stress test: rapid consecutive calls
+    say("Stress test: 200 rapid hash operations...");
+    $i = 0;
+    while ($i < 200) {
+        my str $data = "stress_test_data_" . $i;
+        my str $h1 = Digest::SHA::sha256_hex($data);
+        my str $h2 = Digest::MD5::md5_hex($data);
+        my str $h3 = sys::random_bytes_hex(16);
+        $i = $i + 1;
+    }
+    say("  PASS");
+
+    say("");
+    say("All combined tests passed!");
+    return 0;
+}

@@ -1,0 +1,304 @@
+#!/usr/bin/env strada
+# Test exception handling for memory leaks
+# Run: valgrind --leak-check=full ./test_exceptions
+
+# Custom exception class
+package MyError;
+
+func new(str $message, int $code) scalar {
+    my hash %self = ();
+    $self{"message"} = $message;
+    $self{"code"} = $code;
+    return bless(\%self, "MyError");
+}
+
+func message(scalar $self) str {
+    return $self->{"message"};
+}
+
+func code(scalar $self) int {
+    return $self->{"code"};
+}
+
+package main;
+
+# Function that throws
+func might_fail(int $should_fail) int {
+    if ($should_fail) {
+        throw "Intentional failure";
+    }
+    return 42;
+}
+
+# Function that throws typed exception
+func typed_failure(int $code) void {
+    throw MyError::new("Error with code " . $code, $code);
+}
+
+# Nested function calls
+func level3(int $fail) int {
+    if ($fail) {
+        throw "Level 3 error";
+    }
+    return 3;
+}
+
+func level2(int $fail) int {
+    return level3($fail) + 2;
+}
+
+func level1(int $fail) int {
+    return level2($fail) + 1;
+}
+
+func main() int {
+    say("Testing exception handling for memory leaks...");
+    my int $iterations = 100;
+
+    # Test basic try/catch
+    say("  Basic try/catch...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my int $caught = 0;
+        try {
+            throw "Test exception";
+        } catch ($e) {
+            $caught = 1;
+        }
+
+        if ($caught != 1) {
+            say("    FAIL: exception not caught");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test no exception case
+    say("  No exception case...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $result = 0;
+        my int $caught = 0;
+        try {
+            $result = 42;
+        } catch ($e) {
+            $caught = 1;
+        }
+
+        if ($result != 42 || $caught != 0) {
+            say("    FAIL: no exception case");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test exception message
+    say("  Exception message...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $msg = "";
+        try {
+            throw "Error message " . $i;
+        } catch ($e) {
+            $msg = $e;
+        }
+
+        if (index($msg, "Error message") < 0) {
+            say("    FAIL: exception message");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test function that throws
+    say("  Function that throws...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $result = 0;
+        my int $caught = 0;
+
+        try {
+            $result = might_fail(1);  # Should throw
+        } catch ($e) {
+            $caught = 1;
+        }
+
+        if ($caught != 1) {
+            say("    FAIL: function throw not caught");
+            return 1;
+        }
+
+        # Now try without throwing
+        $caught = 0;
+        try {
+            $result = might_fail(0);  # Should not throw
+        } catch ($e) {
+            $caught = 1;
+        }
+
+        if ($result != 42 || $caught != 0) {
+            say("    FAIL: function no-throw case");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test nested exception handling
+    say("  Nested exception handling...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $outer_caught = 0;
+        my int $inner_caught = 0;
+
+        try {
+            try {
+                throw "Inner exception";
+            } catch ($e) {
+                $inner_caught = 1;
+                throw "Outer exception";  # Re-throw different exception
+            }
+        } catch ($e) {
+            $outer_caught = 1;
+        }
+
+        if ($inner_caught != 1 || $outer_caught != 1) {
+            say("    FAIL: nested exceptions");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test exception propagation through call stack
+    say("  Exception propagation...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $caught = 0;
+        my str $msg = "";
+
+        try {
+            my int $r = level1(1);  # This should throw from level3
+        } catch ($e) {
+            $caught = 1;
+            $msg = $e;
+        }
+
+        if ($caught != 1 || index($msg, "Level 3") < 0) {
+            say("    FAIL: exception propagation");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test typed exceptions
+    say("  Typed exceptions...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $caught_typed = 0;
+        my int $error_code = 0;
+        my int $arg_val = 42;  # Use variable to avoid temp leak in try block
+
+        try {
+            typed_failure($arg_val);
+        } catch (MyError $e) {
+            $caught_typed = 1;
+            $error_code = $e->code();
+        } catch ($e) {
+            # Generic catch - shouldn't reach here
+        }
+
+        if ($caught_typed != 1 || $error_code != 42) {
+            say("    FAIL: typed exception");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test multiple typed catches
+    say("  Multiple typed catches...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $which_caught = 0;
+
+        # First, throw MyError
+        try {
+            throw MyError::new("Test", 100);
+        } catch (MyError $e) {
+            $which_caught = 1;
+        } catch ($e) {
+            $which_caught = 2;
+        }
+
+        if ($which_caught != 1) {
+            say("    FAIL: MyError should be caught first");
+            return 1;
+        }
+
+        # Now throw string (should be caught by generic catch)
+        try {
+            throw "String error";
+        } catch (MyError $e) {
+            $which_caught = 1;
+        } catch ($e) {
+            $which_caught = 2;
+        }
+
+        if ($which_caught != 2) {
+            say("    FAIL: string should be caught by generic");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test return value from try block
+    say("  Return from try block...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $result = 0;
+        try {
+            $result = 100 + $i;
+        } catch ($e) {
+            $result = -1;
+        }
+
+        if ($result != 100 + $i) {
+            say("    FAIL: return from try");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test exception with complex data
+    say("  Exception with complex data...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $caught_data = undef;
+
+        try {
+            my hash %data = ();
+            $data{"key"} = "value";
+            $data{"num"} = 42;
+            throw "Error: " . $data{"key"} . " = " . $data{"num"};
+        } catch ($e) {
+            $caught_data = $e;
+        }
+
+        if (index($caught_data, "value") < 0) {
+            say("    FAIL: complex data exception");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All exception tests passed!");
+    return 0;
+}

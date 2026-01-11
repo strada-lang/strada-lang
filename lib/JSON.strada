@@ -1,12 +1,128 @@
-# JSON - JSON encoding and decoding for Strada
-#
-# Usage:
-#   use lib "lib";
-#   use JSON;
-#
-#   my str $json = JSON::encode($data);
-#   my str $json_sorted = JSON::encode_opts($data, { canonical => 1 });
-#   my scalar $data = JSON::decode($json);
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+=head1 NAME
+
+JSON - JSON encoding and decoding for Strada
+
+=head1 SYNOPSIS
+
+    use lib "lib";
+    use JSON;
+
+    # Encode Strada data to JSON
+    my str $json = JSON::encode(\%data);
+
+    # Encode with sorted keys (canonical)
+    my str $json_sorted = JSON::encode_opts(\%data, { "canonical" => 1 });
+
+    # Decode JSON to Strada data structure
+    my scalar $data = JSON::decode($json);
+
+=head1 DESCRIPTION
+
+JSON provides functions for encoding Strada data structures (hashes, arrays,
+scalars) to JSON strings and decoding JSON strings back to Strada data.
+
+The encoder handles:
+
+=over 4
+
+=item * Hash references -> JSON objects
+
+=item * Array references -> JSON arrays
+
+=item * Strings -> JSON strings (with proper escaping)
+
+=item * Numbers -> JSON numbers
+
+=item * C<undef> -> JSON null
+
+=back
+
+=head1 FUNCTIONS
+
+=head2 encode($data)
+
+Encode a Strada data structure to a JSON string.
+
+    my hash %user = ();
+    $user{"name"} = "Alice";
+    $user{"age"} = 30;
+    my str $json = JSON::encode(\%user);
+    # {"name":"Alice","age":30}
+
+=head2 encode_opts($data, $options)
+
+Encode with options. Currently supports:
+
+=over 4
+
+=item B<canonical> - Sort hash keys alphabetically for deterministic output
+
+=back
+
+    my str $json = JSON::encode_opts(\%data, { "canonical" => 1 });
+
+=head2 decode($json)
+
+Decode a JSON string to a Strada data structure.
+
+    my str $json = '{"name":"Bob","scores":[85,90,78]}';
+    my scalar $data = JSON::decode($json);
+    say($data->{"name"});           # Bob
+    say($data->{"scores"}->[0]);    # 85
+
+Returns C<undef> for invalid JSON.
+
+=head1 HELPER FUNCTIONS
+
+=head2 escape_str($s)
+
+Escape a string for JSON output (handles quotes, backslashes, newlines, etc.)
+
+=head2 looks_like_num($s)
+
+Check if a string looks like a number.
+
+=head1 EXAMPLE
+
+    use lib "lib";
+    use JSON;
+
+    # Build a complex structure
+    my hash %config = ();
+    $config{"debug"} = 1;
+    $config{"servers"} = ["web1", "web2", "web3"];
+    $config{"database"} = { "host" => "localhost", "port" => 5432 };
+
+    # Encode to JSON
+    my str $json = JSON::encode(\%config);
+    say($json);
+
+    # Decode back
+    my scalar $parsed = JSON::decode($json);
+    say($parsed->{"database"}->{"host"});  # localhost
+
+=head1 SEE ALSO
+
+L<YAML>
+
+=cut
 
 package JSON;
 version "1.0.0";
@@ -29,14 +145,11 @@ func escape_str(str $s) str {
             $result = $result . "\\\"";
         } elsif ($ch eq "\\") {
             $result = $result . "\\\\";
-        } elsif ($code == 10) {
-            # Newline (LF)
+        } elsif ($code == ord("\n")) {
             $result = $result . "\\n";
-        } elsif ($code == 13) {
-            # Carriage return (CR)
+        } elsif ($code == ord("\r")) {
             $result = $result . "\\r";
-        } elsif ($code == 9) {
-            # Tab
+        } elsif ($code == ord("\t")) {
             $result = $result . "\\t";
         } else {
             $result = $result . $ch;
@@ -102,7 +215,7 @@ func do_encode(scalar $value, int $canonical, int $depth) str {
     # Check what type of reference it is
     my str $rtype = ref($value);
 
-    if ($rtype eq "hash") {
+    if ($rtype eq "HASH") {
         # Hash reference
         my str $result = "{";
         my array @k = keys($value);
@@ -117,7 +230,7 @@ func do_encode(scalar $value, int $canonical, int $depth) str {
             if ($i > 0) {
                 $result = $result . ",";
             }
-            my str $key = @k[$i];
+            my str $key = $k[$i];
             $result = $result . "\"" . JSON::escape_str($key) . "\":";
             $result = $result . JSON::do_encode($value->{$key}, $canonical, $depth + 1);
             $i = $i + 1;
@@ -125,7 +238,7 @@ func do_encode(scalar $value, int $canonical, int $depth) str {
         return $result . "}";
     }
 
-    if ($rtype eq "array") {
+    if ($rtype eq "ARRAY") {
         # Array reference
         my str $result = "[";
         my int $len = size($value);
@@ -141,7 +254,7 @@ func do_encode(scalar $value, int $canonical, int $depth) str {
         return $result . "]";
     }
 
-    if ($rtype eq "ref") {
+    if ($rtype eq "REF") {
         # Scalar reference - dereference and encode
         return JSON::do_encode(deref($value), $canonical, $depth + 1);
     }

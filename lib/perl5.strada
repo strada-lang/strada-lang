@@ -1,162 +1,448 @@
-# perl5 - Perl 5 Embedding Module for Strada
-#
-# Usage:
-#   use lib "lib";
-#   use perl5;
-#
-#   perl5::init();
-#   my str $result = perl5::eval("2 + 2");
-#   say($result);  # "4"
-#   perl5::shutdown();
-#
-# Requires: lib/perl5/libstrada_perl5.so (build with: cd lib/perl5 && make)
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+=head1 NAME
+
+perl5 - Perl 5 Embedding Module for Strada
+
+=head1 SYNOPSIS
+
+    use lib "lib";
+    use perl5;
+
+    perl5::init();
+    my str $result = perl5::eval("2 + 2");
+    say($result);  # "4"
+    perl5::shutdown();
+
+=head1 DESCRIPTION
+
+The perl5 module embeds a Perl 5 interpreter in Strada programs. This
+allows you to evaluate Perl code, call Perl functions, use CPAN modules,
+and share data between Strada and Perl.
+
+B<Compile with:>
+
+    ./strada myapp.strada $(perl -MExtUtils::Embed -e ccopts -e ldopts)
+
+B<Note:> For XS modules, you may need:
+
+    LD_PRELOAD=/path/to/libperl.so ./myapp
+
+=head1 FUNCTIONS
+
+=head2 init()
+
+Initialize the Perl interpreter. Returns 1 on success, 0 on failure.
+Must be called before any other perl5 functions.
+
+    if (!perl5::init()) {
+        die("Failed to initialize Perl");
+    }
+
+=head2 shutdown()
+
+Shutdown the Perl interpreter and free resources.
+
+    perl5::shutdown();
+
+=head2 is_init()
+
+Check if Perl is initialized. Returns 1 or 0.
+
+=head2 eval($code)
+
+Evaluate Perl code and return the result as a string.
+
+    my str $result = perl5::eval("2 ** 10");      # "1024"
+    my str $array = perl5::eval("[1,2,3]->[1]");  # "2"
+
+If an error occurs, the error message is returned.
+
+=head2 run($code)
+
+Execute Perl code without returning a value.
+
+    perl5::run("print 'Hello from Perl\n'");
+
+=head2 call($sub_name, $arg)
+
+Call a Perl subroutine with a single string argument.
+
+    perl5::eval("sub greet { return 'Hello, ' . shift }");
+    my str $msg = perl5::call("greet", "World");  # "Hello, World"
+
+=head2 call_noargs($sub_name)
+
+Call a Perl subroutine with no arguments.
+
+    my str $time = perl5::call_noargs("time");
+
+=head2 call_list($sub_name, $separator)
+
+Call a Perl sub that returns a list and join results with separator.
+
+    perl5::eval("sub nums { return (1, 2, 3) }");
+    my str $csv = perl5::call_list("nums", ",");  # "1,2,3"
+
+=head2 use_module($module)
+
+Load a Perl module (like C<use Module;>). Returns 1 on success.
+
+    if (perl5::use_module("JSON")) {
+        my str $json = perl5::eval("encode_json({a => 1})");
+    }
+
+=head2 require_module($module)
+
+Require a Perl module. Returns 1 on success.
+
+=head2 set_var($name, $value)
+
+Set a Perl scalar variable.
+
+    perl5::set_var("name", "Alice");
+    perl5::eval("print $name");  # Alice
+
+=head2 get_var($name)
+
+Get a Perl scalar variable.
+
+    perl5::eval("$count = 42");
+    my str $c = perl5::get_var("count");  # "42"
+
+=head2 get_error()
+
+Get the last Perl error ($@).
+
+    perl5::eval("die 'oops'");
+    say(perl5::get_error());  # "oops at ..."
+
+=head2 add_inc($path)
+
+Add a path to Perl's @INC for module searching.
+
+    perl5::add_inc("/home/user/lib");
+
+=head1 EXAMPLE
+
+    use lib "lib";
+    use perl5;
+
+    perl5::init();
+
+    # Use CPAN modules
+    if (perl5::use_module("LWP::Simple")) {
+        my str $html = perl5::call("get", "http://example.com");
+        say("Got " . length($html) . " bytes");
+    }
+
+    # Define and call functions
+    perl5::eval("sub factorial { my $n = shift; return $n <= 1 ? 1 : $n * factorial($n-1) }");
+    say("10! = " . perl5::call("factorial", "10"));
+
+    # Share data
+    perl5::set_var("greeting", "Hello from Strada!");
+    perl5::run("print $greeting, '\n'");
+
+    perl5::shutdown();
+
+=head1 SEE ALSO
+
+L<DBI>, L<JSON>
+
+=cut
 
 package perl5;
 
-# Load the library - tries multiple paths
-func _get_lib() int {
-    my int $lib = sys::dl_open("lib/perl5/libstrada_perl5.so");
-    if ($lib == 0) {
-        $lib = sys::dl_open("./lib/perl5/libstrada_perl5.so");
-    }
-    if ($lib == 0) {
-        $lib = sys::dl_open("libstrada_perl5.so");
-    }
-    return $lib;
+# Perl embedding C code
+__C__ {
+#define _GNU_SOURCE
+#include <string.h>
+#include <stdio.h>
+
+#include <EXTERN.h>
+#include <perl.h>
+
+/* Global Perl interpreter (singleton) */
+static PerlInterpreter *my_perl = NULL;
 }
 
 # Initialize the Perl interpreter
 # Returns 1 on success, 0 on failure
 func init() int {
-    my int $lib = perl5::_get_lib();
-    if ($lib == 0) {
-        return 0;
+    my int $result = 0;
+    __C__ {
+        if (my_perl) {
+            result = strada_new_int(1);  /* Already initialized */
+        } else {
+            int argc = 3;
+            char *argv[] = { "", "-e", "0", NULL };
+            char **argv_ptr = argv;
+            char *env[] = { NULL };
+            char **env_ptr = env;
+
+            PERL_SYS_INIT3(&argc, &argv_ptr, &env_ptr);
+            my_perl = perl_alloc();
+            if (!my_perl) {
+                result = strada_new_int(0);
+            } else {
+                perl_construct(my_perl);
+                PL_exit_flags |= PERL_EXIT_DESTRUCT_END;
+
+                if (perl_parse(my_perl, NULL, argc, argv, NULL) != 0) {
+                    perl_destruct(my_perl);
+                    perl_free(my_perl);
+                    my_perl = NULL;
+                    result = strada_new_int(0);
+                } else {
+                    perl_run(my_perl);
+                    result = strada_new_int(1);
+                }
+            }
+        }
     }
-    my int $fn = sys::dl_sym($lib, "strada_perl5_init");
-    return sys::dl_call_int($fn, []);
+    return $result;
 }
 
 # Shutdown the Perl interpreter
 func shutdown() void {
-    my int $lib = perl5::_get_lib();
-    if ($lib == 0) {
-        return;
+    __C__ {
+        if (my_perl) {
+            perl_destruct(my_perl);
+            perl_free(my_perl);
+            PERL_SYS_TERM();
+            my_perl = NULL;
+        }
     }
-    my int $fn = sys::dl_sym($lib, "strada_perl5_shutdown");
-    sys::dl_call_void($fn, []);
 }
 
 # Check if Perl is initialized
 func is_init() int {
-    my int $lib = perl5::_get_lib();
-    if ($lib == 0) {
-        return 0;
+    my int $result = 0;
+    __C__ {
+        result = strada_new_int(my_perl != NULL ? 1 : 0);
     }
-    my int $fn = sys::dl_sym($lib, "strada_perl5_is_init");
-    return sys::dl_call_int($fn, []);
+    return $result;
 }
 
 # Evaluate Perl code and return the result as a string
 func eval(str $code) str {
-    my int $lib = perl5::_get_lib();
-    if ($lib == 0) {
-        return "Error: perl5 library not found";
+    my str $result = "";
+    __C__ {
+        if (!my_perl) {
+            result = strada_new_str("Error: Perl not initialized");
+        } else {
+            const char *code_str = strada_to_str(code);
+            SV *perl_result = eval_pv(code_str, FALSE);
+
+            if (SvTRUE(ERRSV)) {
+                STRLEN len;
+                const char *err = SvPV(ERRSV, len);
+                result = strada_new_str(err);
+            } else if (perl_result && SvOK(perl_result)) {
+                STRLEN len;
+                const char *str = SvPV(perl_result, len);
+                result = strada_new_str(str);
+            } else {
+                result = strada_new_str("");
+            }
+        }
     }
-    my int $fn = sys::dl_sym($lib, "strada_perl5_eval");
-    return sys::dl_call_str_sv($fn, [$code]);
+    return $result;
 }
 
 # Execute Perl code without returning a value
 func run(str $code) void {
-    my int $lib = perl5::_get_lib();
-    if ($lib == 0) {
-        return;
+    __C__ {
+        if (my_perl) {
+            const char *code_str = strada_to_str(code);
+            eval_pv(code_str, FALSE);
+        }
     }
-    my int $fn = sys::dl_sym($lib, "strada_perl5_run");
-    sys::dl_call_void_sv($fn, [$code]);
 }
 
-# Call a Perl subroutine with arguments, return scalar result
-func call(str $sub_name, scalar $args) str {
-    my int $lib = perl5::_get_lib();
-    if ($lib == 0) {
-        return "Error: perl5 library not found";
+# Call a Perl subroutine with a single string argument, return scalar result
+func call(str $sub_name, str $arg) str {
+    my str $result = "";
+    __C__ {
+        if (!my_perl) {
+            result = strada_new_str("Error: Perl not initialized");
+        } else {
+            const char *sub_str = strada_to_str(sub_name);
+            const char *arg_str = strada_to_str(arg);
+
+            dSP;
+            ENTER;
+            SAVETMPS;
+            PUSHMARK(SP);
+
+            if (arg_str && strlen(arg_str) > 0) {
+                XPUSHs(sv_2mortal(newSVpv(arg_str, 0)));
+            }
+
+            PUTBACK;
+            int count = call_pv(sub_str, G_SCALAR | G_EVAL);
+            SPAGAIN;
+
+            if (SvTRUE(ERRSV)) {
+                STRLEN len;
+                const char *err = SvPV(ERRSV, len);
+                result = strada_new_str(err);
+            } else if (count > 0) {
+                SV *ret = POPs;
+                if (SvOK(ret)) {
+                    STRLEN len;
+                    const char *str = SvPV(ret, len);
+                    result = strada_new_str(str);
+                } else {
+                    result = strada_new_str("");
+                }
+            } else {
+                result = strada_new_str("");
+            }
+
+            PUTBACK;
+            FREETMPS;
+            LEAVE;
+        }
     }
-    my int $fn = sys::dl_sym($lib, "strada_perl5_call");
-    return sys::dl_call_str_sv($fn, [$sub_name, $args]);
+    return $result;
+}
+
+# Call a Perl subroutine with no arguments
+func call_noargs(str $sub_name) str {
+    return perl5::call($sub_name, "");
 }
 
 # Call a Perl subroutine that returns a list, get as joined string
 # Use split() on the result to get an array
-func call_list(str $sub_name, scalar $args, str $sep) str {
-    my int $lib = perl5::_get_lib();
-    if ($lib == 0) {
-        return "";
-    }
+func call_list(str $sub_name, str $sep) str {
     # Build Perl code to call sub and join results
     my str $code = "join('" . $sep . "', " . $sub_name . "())";
-    my int $fn = sys::dl_sym($lib, "strada_perl5_eval");
-    return sys::dl_call_str_sv($fn, [$code]);
+    return perl5::eval($code);
 }
 
 # Use a Perl module (like "use Module;")
 # Returns 1 on success, 0 on failure
 func use_module(str $module) int {
-    my int $lib = perl5::_get_lib();
-    if ($lib == 0) {
-        return 0;
+    my int $result = 0;
+    __C__ {
+        if (!my_perl) {
+            result = strada_new_int(0);
+        } else {
+            const char *mod_str = strada_to_str(module);
+            char code[2048];
+            snprintf(code, sizeof(code), "use %s; 1;", mod_str);
+            eval_pv(code, FALSE);
+            result = strada_new_int(!SvTRUE(ERRSV) ? 1 : 0);
+        }
     }
-    my int $fn = sys::dl_sym($lib, "strada_perl5_use");
-    return sys::dl_call_int_sv($fn, [$module]);
+    return $result;
 }
 
 # Require a Perl module
 # Returns 1 on success, 0 on failure
 func require_module(str $module) int {
-    my int $lib = perl5::_get_lib();
-    if ($lib == 0) {
-        return 0;
+    my int $result = 0;
+    __C__ {
+        if (!my_perl) {
+            result = strada_new_int(0);
+        } else {
+            const char *mod_str = strada_to_str(module);
+            char code[2048];
+            snprintf(code, sizeof(code), "require %s; 1;", mod_str);
+            eval_pv(code, FALSE);
+            result = strada_new_int(!SvTRUE(ERRSV) ? 1 : 0);
+        }
     }
-    my int $fn = sys::dl_sym($lib, "strada_perl5_require");
-    return sys::dl_call_int_sv($fn, [$module]);
+    return $result;
 }
 
 # Set a Perl scalar variable ($name = value)
 func set_var(str $name, str $value) void {
-    my int $lib = perl5::_get_lib();
-    if ($lib == 0) {
-        return;
+    __C__ {
+        if (my_perl) {
+            const char *name_str = strada_to_str(name);
+            const char *value_str = strada_to_str(value);
+
+            /* Skip the sigil if present */
+            if (name_str[0] == '$') {
+                name_str++;
+            }
+
+            SV *sv = get_sv(name_str, GV_ADD);
+            sv_setpv(sv, value_str);
+        }
     }
-    my int $fn = sys::dl_sym($lib, "strada_perl5_set_scalar");
-    sys::dl_call_void_sv($fn, [$name, $value]);
 }
 
 # Get a Perl scalar variable
 func get_var(str $name) str {
-    my int $lib = perl5::_get_lib();
-    if ($lib == 0) {
-        return "";
+    my str $result = "";
+    __C__ {
+        if (!my_perl) {
+            result = strada_new_str("");
+        } else {
+            const char *name_str = strada_to_str(name);
+
+            /* Skip the sigil if present */
+            if (name_str[0] == '$') {
+                name_str++;
+            }
+
+            SV *sv = get_sv(name_str, 0);
+            if (sv && SvOK(sv)) {
+                STRLEN len;
+                const char *str = SvPV(sv, len);
+                result = strada_new_str(str);
+            } else {
+                result = strada_new_str("");
+            }
+        }
     }
-    my int $fn = sys::dl_sym($lib, "strada_perl5_get_scalar");
-    return sys::dl_call_str_sv($fn, [$name]);
+    return $result;
 }
 
 # Get the last Perl error ($@)
 func get_error() str {
-    my int $lib = perl5::_get_lib();
-    if ($lib == 0) {
-        return "perl5 library not found";
+    my str $result = "";
+    __C__ {
+        if (!my_perl) {
+            result = strada_new_str("Perl not initialized");
+        } else if (SvTRUE(ERRSV)) {
+            STRLEN len;
+            const char *err = SvPV(ERRSV, len);
+            result = strada_new_str(err);
+        } else {
+            result = strada_new_str("");
+        }
     }
-    my int $fn = sys::dl_sym($lib, "strada_perl5_get_error");
-    return sys::dl_call_str($fn, []);
+    return $result;
 }
 
 # Add a path to Perl's @INC
 func add_inc(str $path) void {
-    my int $lib = perl5::_get_lib();
-    if ($lib == 0) {
-        return;
+    __C__ {
+        if (my_perl) {
+            const char *path_str = strada_to_str(path);
+            char code[2048];
+            snprintf(code, sizeof(code), "push @INC, '%s';", path_str);
+            eval_pv(code, FALSE);
+        }
     }
-    my int $fn = sys::dl_sym($lib, "strada_perl5_add_inc");
-    sys::dl_call_void_sv($fn, [$path]);
 }

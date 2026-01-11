@@ -1,0 +1,1317 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+=head1 NAME
+
+Strada::JIT - Runtime eval() for Strada
+
+=head1 SYNOPSIS
+
+    use lib "lib";
+    use Strada::JIT;
+
+    # Initialize with auto-detected compiler (tcc preferred, gcc fallback)
+    Strada::JIT::init();
+
+    # Or specify compiler explicitly
+    Strada::JIT::init("gcc");
+
+    # Evaluate expressions - returns the result
+    my scalar $result = Strada::JIT::eval("1 + 2");             # returns 3
+    my scalar $s = Strada::JIT::eval("\"hello\" . \" world\""); # returns "hello world"
+
+    # Variables persist across eval calls
+    Strada::JIT::eval("my int \$x = 42;");
+    my scalar $val = Strada::JIT::eval("\$x * 2");   # returns 84
+
+    # Function definitions persist
+    Strada::JIT::eval("func twice(int \$n) int { return \$n * 2; }");
+    my scalar $r = Strada::JIT::eval("twice(21)");   # returns 42
+
+    # Void calls (say, print, etc.) return undef
+    Strada::JIT::eval("say(\"hello from eval\");");
+
+    # Error handling - compilation/runtime errors throw exceptions
+    try {
+        Strada::JIT::eval("this is not valid code");
+    } catch ($e) {
+        say("Eval error: " . $e);
+    }
+
+    # Get/set variables directly
+    Strada::JIT::set("x", 100);
+    my scalar $v = Strada::JIT::get("x");   # returns 100
+
+    # Add library search paths
+    Strada::JIT::add_lib_path("/path/to/libs");
+
+    # Reset all state
+    Strada::JIT::reset();
+
+=head1 DESCRIPTION
+
+Strada::JIT provides runtime code evaluation for Strada programs, similar to
+Perl's C<eval STRING>. It compiles Strada code to C via stradac, then
+to a shared library via tcc or gcc, loads it with dlopen, and executes
+it. Variables and function definitions persist across eval calls via a
+shared state hash.
+
+This enables programs to compile and execute Strada code at runtime for
+use cases like plugin systems, configuration evaluation, scripting
+engines, and interactive tools.
+
+=head1 FUNCTIONS
+
+=head2 Strada::JIT::init(str ...@args)
+
+Initialize the JIT engine. Must be called before C<eval()>.
+
+Auto-detects the stradac compiler, runtime path, and C compiler. Prefers
+tcc for faster compilation, falls back to gcc.
+
+Pass an optional compiler name to override auto-detection:
+
+    Strada::JIT::init();        # auto-detect
+    Strada::JIT::init("tcc");   # force tcc
+    Strada::JIT::init("gcc");   # force gcc
+
+Throws an exception if stradac or a C compiler cannot be found.
+
+=head2 Strada::JIT::eval(str $code) scalar
+
+Evaluate Strada code and return the result.
+
+Expressions return their value. Statements (ending with C<;>) and void
+function calls (C<say>, C<print>, etc.) return undef.
+
+Variables declared with C<my> persist across eval calls. Function
+definitions (C<func ...>) are accumulated and available in subsequent
+evals. Import statements (C<use>, C<import_lib>) are registered and
+included in all subsequent evals. Package declarations set the current
+package context.
+
+Throws an exception on compilation or runtime errors.
+
+=head2 Strada::JIT::get(str $name) scalar
+
+Get a variable value from the persistent state hash. Returns undef if
+the variable does not exist.
+
+    Strada::JIT::eval("my int \$x = 42;");
+    my scalar $v = Strada::JIT::get("x");   # 42
+
+=head2 Strada::JIT::set(str $name, scalar $value)
+
+Set a variable value in the persistent state hash. Also registers the
+variable type as C<scalar> if not already known.
+
+    Strada::JIT::set("count", 0);
+
+=head2 Strada::JIT::add_lib_path(str $path)
+
+Add a library search path for stradac (equivalent to C<-L> flag).
+Duplicate paths are ignored.
+
+    Strada::JIT::add_lib_path("lib");
+    Strada::JIT::add_lib_path("/usr/local/lib/strada");
+
+=head2 Strada::JIT::reset()
+
+Clear all persistent state: variables, function definitions, imports,
+package name, and the eval counter.
+
+=head2 Strada::JIT::debug(int $enabled)
+
+Enable (1) or disable (0) debug mode. When enabled, the generated Strada
+source for each eval is printed to stdout.
+
+=head2 Strada::JIT::compiler() str
+
+Returns the name of the detected C compiler ("tcc" or "gcc").
+
+=head1 ARCHITECTURE
+
+Each C<Strada::JIT::eval()> call performs these steps:
+
+=over
+
+=item 1. Scan code for variable declarations, function definitions, imports
+
+=item 2. Generate a complete Strada source file wrapping the code
+
+=item 3. Compile with stradac to C
+
+=item 4. Compile with tcc/gcc to a shared library (.so)
+
+=item 5. Load with dlopen, find the entry function with dlsym
+
+=item 6. Call the function via sys::dl_call_sv, passing the state hash
+
+=item 7. Clean up temp files
+
+=back
+
+The generated source restores persisted variables from the state hash at
+the start of the function and exports them back at the end.
+
+=head1 LIMITATIONS
+
+=over
+
+=item * Variables persist via save/restore through the global registry.
+All variable types (scalars, arrays, hashes) use real C<my> declarations
+with C<__C__> blocks to save and restore values between eval calls.
+This means C<$i++>, C<s///>, and C<for (my int $i ...)> all work correctly.
+
+=item * C<const> and C<enum> declarations require the gcc backend (tcc does
+not run C<__attribute__((constructor))> for dlopen'd shared libraries).
+
+=item * C<try/catch> requires the gcc backend (tcc lacks setjmp support).
+
+=item * C<fn> is supported as an alias for C<func> in function definitions.
+
+=item * Each eval invocation compiles and links a new shared library, so
+there is overhead per call. Use tcc for faster compilation of simple code.
+
+=item * The C<libtcc> in-process backend is not supported (only the
+external tcc and gcc compilers).
+
+=back
+
+=head1 SEE ALSO
+
+C<tools/strada-jit.strada> - Interactive REPL that uses the same
+compile-load-execute approach.
+
+=cut
+
+package Strada::JIT;
+
+__C__ {
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+
+static int repl_command_exists(const char *cmd) {
+    char path[256];
+    snprintf(path, sizeof(path), "which %s >/dev/null 2>&1", cmd);
+    return system(path) == 0;
+}
+}
+
+# Internal state
+my hash %g_var_types = ();
+my array @g_functions = ();
+my array @g_imports = ();
+my array @g_lib_paths = ();
+my str $g_stradac_path = "";
+my str $g_runtime_path = "";
+my str $g_compiler = "";
+my int $g_eval_count = 0;
+my str $g_tmpdir = "/tmp";
+my int $g_initialized = 0;
+my str $g_current_package = "";
+my hash %g_state = ();  # Legacy - only used for Strada::JIT::state() compatibility
+my int $g_debug = 0;
+my int $g_cdebug = 0;
+my array @g_open_libs = ();
+my array @g_so_files = ();
+my array @g_constants = ();
+
+# Detect stradac path
+private func detect_stradac() str {
+    my int $exists = 0;
+
+    if (sys::is_file("./stradac") == 1) {
+        return "./stradac";
+    }
+
+    __C__ {
+        exists = strada_new_int(repl_command_exists("stradac"));
+    }
+    if ($exists == 1) {
+        return "stradac";
+    }
+
+    if (sys::is_file("/usr/local/bin/stradac") == 1) {
+        return "/usr/local/bin/stradac";
+    }
+    if (sys::is_file("/usr/bin/stradac") == 1) {
+        return "/usr/bin/stradac";
+    }
+
+    return "";
+}
+
+# Detect runtime path
+private func detect_runtime() str {
+    if (sys::is_file("./runtime/strada_runtime_tcc.h") == 1) {
+        return "./runtime";
+    }
+
+    if ($g_stradac_path ne "" && $g_stradac_path ne "stradac") {
+        my str $stradac_dir = sys::dirname($g_stradac_path);
+        my str $relative_runtime = $stradac_dir . "/../lib/strada/runtime";
+        if (sys::is_file($relative_runtime . "/strada_runtime_tcc.h") == 1) {
+            return $relative_runtime;
+        }
+    }
+
+    if (sys::is_file("/usr/local/lib/strada/runtime/strada_runtime_tcc.h") == 1) {
+        return "/usr/local/lib/strada/runtime";
+    }
+    if (sys::is_file("/usr/lib/strada/runtime/strada_runtime_tcc.h") == 1) {
+        return "/usr/lib/strada/runtime";
+    }
+
+    return "";
+}
+
+# Detect available C compiler (tcc or gcc)
+private func detect_compiler() str {
+    my int $has_tcc = 0;
+    my int $has_gcc = 0;
+
+    __C__ {
+        has_tcc = strada_new_int(repl_command_exists("tcc"));
+        has_gcc = strada_new_int(repl_command_exists("gcc"));
+    }
+
+    if ($has_tcc == 1) {
+        return "tcc";
+    }
+    if ($has_gcc == 1) {
+        return "gcc";
+    }
+    return "";
+}
+
+# Check if input looks like a function definition
+private func is_function_def(str $input) int {
+    if ($input =~ /^\s*(private\s+)?(async\s+)?(func|fn)\s+\w+\s*\(/) {
+        return 1;
+    }
+    return 0;
+}
+
+# Extract function name from a function definition
+private func get_function_name(str $func_def) str {
+    my str $s = $func_def;
+    $s =~ s/^\s*//;
+    $s =~ s/^private\s+//;
+    $s =~ s/^async\s+//;
+    $s =~ s/^func\s+//;
+    $s =~ s/^fn\s+//;
+    my int $paren = index($s, "(");
+    if ($paren > 0) {
+        return substr($s, 0, $paren);
+    }
+    return "";
+}
+
+# Replace or add a function definition
+private func register_function(str $func_def) int {
+    my str $name = get_function_name($func_def);
+    if ($name eq "") {
+        push(@g_functions, $func_def);
+        return 0;
+    }
+
+    my int $i = 0;
+    my int $count = scalar(@g_functions);
+    while ($i < $count) {
+        my str $existing_name = get_function_name($g_functions[$i]);
+        if ($existing_name eq $name) {
+            $g_functions[$i] = $func_def;
+            return 1;
+        }
+        $i = $i + 1;
+    }
+
+    push(@g_functions, $func_def);
+    return 0;
+}
+
+# Extract function definition from input, returns array: [func_def, remainder]
+private func extract_function_def(str $input) array {
+    my array @result = ("", "");
+
+    my int $brace_pos = index($input, "{");
+    if ($brace_pos < 0) {
+        $result[0] = $input;
+        return @result;
+    }
+
+    my int $depth = 0;
+    my int $len = length($input);
+    my int $i = $brace_pos;
+    my int $in_string = 0;
+    my int $end_pos = -1;
+
+    while ($i < $len) {
+        my str $c = substr($input, $i, 1);
+
+        if ($i > 0 && substr($input, $i - 1, 1) eq "\\") {
+            $i = $i + 1;
+            next;
+        }
+
+        if ($c eq "\"") {
+            $in_string = 1 - $in_string;
+        }
+
+        if ($in_string == 0) {
+            if ($c eq "{") {
+                $depth = $depth + 1;
+            } elsif ($c eq "}") {
+                $depth = $depth - 1;
+                if ($depth == 0) {
+                    $end_pos = $i;
+                    last;
+                }
+            }
+        }
+
+        $i = $i + 1;
+    }
+
+    if ($end_pos >= 0) {
+        $result[0] = substr($input, 0, $end_pos + 1);
+        if ($end_pos + 1 < $len) {
+            my str $remainder = substr($input, $end_pos + 1, $len - $end_pos - 1);
+            $remainder =~ s/^\s*;\s*//;
+            $remainder =~ s/^\s+//;
+            $remainder =~ s/\s+$//;
+            $result[1] = $remainder;
+        }
+    } else {
+        $result[0] = $input;
+    }
+
+    return @result;
+}
+
+# Check if input is a package declaration
+private func is_package_decl(str $input) int {
+    if ($input =~ /^\s*package\s+\w+/) {
+        return 1;
+    }
+    return 0;
+}
+
+# Check if input is a use/import statement
+private func is_import(str $input) int {
+    if ($input =~ /^[ \t]*use[ \t]+/) {
+        return 1;
+    }
+    if ($input =~ /^[ \t]*import_lib[ \t]+/) {
+        return 1;
+    }
+    if ($input =~ /^[ \t]*import_object[ \t]+/) {
+        return 1;
+    }
+    if ($input =~ /^[ \t]*import_archive[ \t]+/) {
+        return 1;
+    }
+    return 0;
+}
+
+# Register a use/import statement (avoid duplicates)
+private func register_import(str $import_stmt) void {
+    my str $normalized = $import_stmt;
+    $normalized =~ s/[ \t]+$//;
+    $normalized =~ s/;$//;
+    $normalized =~ s/[ \t]+$//;
+
+    # Handle "use lib" specially
+    if ($normalized =~ /^use[ \t]+lib[ \t]+/) {
+        my str $path = $normalized;
+        $path =~ s/^use[ \t]+lib[ \t]+//;
+        $path =~ s/^"//;
+        $path =~ s/"$//;
+        $path =~ s/^'//;
+        $path =~ s/'$//;
+        add_lib_path($path);
+        return;
+    }
+
+    foreach my str $existing (@g_imports) {
+        my str $existing_norm = $existing;
+        $existing_norm =~ s/[ \t]+$//;
+        $existing_norm =~ s/;$//;
+        $existing_norm =~ s/[ \t]+$//;
+        if ($existing_norm eq $normalized) {
+            return;
+        }
+    }
+
+    push(@g_imports, $normalized . ";");
+}
+
+# Check if input declares a specific variable
+private func input_declares_var(str $input, str $name, str $sigil) int {
+    my str $pattern = "my\\s+\\w*\\s*\\" . $sigil . $name . "\\b";
+    if ($input =~ /$pattern/) {
+        return 1;
+    }
+    return 0;
+}
+
+# Register variables from input (only at brace depth 0)
+private func register_variables(str $input) void {
+    my int $pos = 0;
+    my int $len = length($input);
+
+    while ($pos < $len) {
+        my int $my_pos = index($input, "my ", $pos);
+        if ($my_pos < 0) {
+            last;
+        }
+
+        # Calculate brace and paren depth at this position by scanning from start
+        my int $depth = 0;
+        my int $pdepth = 0;
+        my int $di = 0;
+        my int $in_str = 0;
+        while ($di < $my_pos) {
+            my str $dc = substr($input, $di, 1);
+            if ($dc eq "\"" && ($di == 0 || substr($input, $di - 1, 1) ne "\\")) {
+                $in_str = 1 - $in_str;
+            }
+            if ($in_str == 0) {
+                if ($dc eq "{") { $depth = $depth + 1; }
+                if ($dc eq "}") { $depth = $depth - 1; }
+                if ($dc eq "(") { $pdepth = $pdepth + 1; }
+                if ($dc eq ")") { $pdepth = $pdepth - 1; }
+            }
+            $di = $di + 1;
+        }
+
+        # Skip declarations inside blocks or parentheses (e.g., for loop init)
+        if ($depth > 0 || $pdepth > 0) {
+            $pos = $my_pos + 3;
+            next;
+        }
+
+        $pos = $my_pos + 3;
+
+        while ($pos < $len && substr($input, $pos, 1) eq " ") {
+            $pos = $pos + 1;
+        }
+
+        my str $type = "scalar";
+        my str $next_word = "";
+        my int $word_start = $pos;
+        while ($pos < $len) {
+            my str $c = substr($input, $pos, 1);
+            if ($c eq " " || $c eq "$" || $c eq "@" || $c eq "%") {
+                last;
+            }
+            $next_word = $next_word . $c;
+            $pos = $pos + 1;
+        }
+
+        if ($next_word eq "int" || $next_word eq "num" || $next_word eq "str" || $next_word eq "scalar") {
+            $type = $next_word;
+            while ($pos < $len && substr($input, $pos, 1) eq " ") {
+                $pos = $pos + 1;
+            }
+        } elsif ($next_word eq "array") {
+            $type = "array";
+            while ($pos < $len && substr($input, $pos, 1) eq " ") {
+                $pos = $pos + 1;
+            }
+        } elsif ($next_word eq "hash") {
+            $type = "hash";
+            while ($pos < $len && substr($input, $pos, 1) eq " ") {
+                $pos = $pos + 1;
+            }
+        } else {
+            $pos = $word_start;
+        }
+
+        if ($pos >= $len) { last; }
+        my str $sigil = substr($input, $pos, 1);
+
+        if ($sigil eq "$") {
+            $pos = $pos + 1;
+        } elsif ($sigil eq "@") {
+            $type = "array";
+            $pos = $pos + 1;
+        } elsif ($sigil eq "%") {
+            $type = "hash";
+            $pos = $pos + 1;
+        } else {
+            next;
+        }
+
+        my str $name = "";
+        while ($pos < $len) {
+            my str $c = substr($input, $pos, 1);
+            if ($c =~ /[a-zA-Z0-9_]/) {
+                $name = $name . $c;
+                $pos = $pos + 1;
+            } else {
+                last;
+            }
+        }
+
+        if ($name ne "") {
+            $g_var_types{$name} = $type;
+        }
+    }
+}
+
+# Convert my declarations to our in user code for variable persistence
+# Only converts at brace depth 0 — declarations inside blocks stay as 'my'
+private func convert_my_to_our(str $input) str {
+    my str $result = "";
+    my int $len = length($input);
+    my int $i = 0;
+    my int $depth = 0;
+    my int $in_string = 0;
+
+    while ($i < $len) {
+        my str $c = substr($input, $i, 1);
+
+        # Track string literals (skip content inside "...")
+        if ($c eq "\"" && ($i == 0 || substr($input, $i - 1, 1) ne "\\")) {
+            $in_string = 1 - $in_string;
+            $result = $result . $c;
+            $i = $i + 1;
+            next;
+        }
+
+        if ($in_string == 1) {
+            $result = $result . $c;
+            $i = $i + 1;
+            next;
+        }
+
+        # Track brace depth
+        if ($c eq "{") {
+            $depth = $depth + 1;
+            $result = $result . $c;
+            $i = $i + 1;
+            next;
+        }
+        if ($c eq "}") {
+            $depth = $depth - 1;
+            $result = $result . $c;
+            $i = $i + 1;
+            next;
+        }
+
+        # At depth > 0, copy through unchanged
+        if ($depth > 0) {
+            $result = $result . $c;
+            $i = $i + 1;
+            next;
+        }
+
+        # At depth 0, check for "my" keyword at word boundary
+        if ($c eq "m" && $i + 2 < $len && substr($input, $i + 1, 1) eq "y") {
+            my str $after_my = substr($input, $i + 2, 1);
+            # Check word boundary: "my" must be followed by space
+            if ($after_my eq " ") {
+                # Check that "my" is at start or preceded by non-word char
+                my int $is_word_start = 0;
+                if ($i == 0) {
+                    $is_word_start = 1;
+                } else {
+                    my str $before = substr($input, $i - 1, 1);
+                    if ($before eq " " || $before eq ";" || $before eq "\n" || $before eq "\t" || $before eq "(") {
+                        $is_word_start = 1;
+                    }
+                }
+
+                if ($is_word_start == 1) {
+                    # Look ahead to determine the declaration pattern
+                    my int $j = $i + 3;
+                    # Skip spaces after "my "
+                    while ($j < $len && substr($input, $j, 1) eq " ") {
+                        $j = $j + 1;
+                    }
+                    if ($j < $len) {
+                        my str $next = substr($input, $j, 1);
+                        if ($next eq "$" || $next eq "@" || $next eq "%") {
+                            # Untyped: my $var → our scalar $var, my @var → our array @var, my %var → our hash %var
+                            if ($next eq "$") {
+                                $result = $result . "our scalar ";
+                            } elsif ($next eq "@") {
+                                $result = $result . "our array ";
+                            } else {
+                                $result = $result . "our hash ";
+                            }
+                            $i = $i + 3;
+                            # Skip original spaces
+                            while ($i < $len && substr($input, $i, 1) eq " ") {
+                                $i = $i + 1;
+                            }
+                            next;
+                        } else {
+                            # Typed: my TYPE SIGIL... → our TYPE SIGIL...
+                            $result = $result . "our";
+                            $i = $i + 2;
+                            next;
+                        }
+                    }
+                }
+            }
+        }
+
+        $result = $result . $c;
+        $i = $i + 1;
+    }
+
+    return $result;
+}
+
+# Generate Strada source wrapping user code
+private func generate_source(str $input) str {
+    my str $src = "";
+
+    # Import statements
+    foreach my str $imp (@g_imports) {
+        $src = $src . $imp . "\n";
+    }
+    if (scalar(@g_imports) > 0) {
+        $src = $src . "\n";
+    }
+
+    # Always use repl package for variable persistence via global registry
+    $src = $src . "package repl;\n\n";
+
+    # Constants and enums (must be at package level)
+    foreach my str $const_decl (@g_constants) {
+        $src = $src . $const_decl . "\n";
+    }
+    if (scalar(@g_constants) > 0) {
+        $src = $src . "\n";
+    }
+
+    # User-defined functions
+    foreach my str $fndef (@g_functions) {
+        $src = $src . $fndef . "\n\n";
+    }
+
+    # Main eval function
+    $src = $src . "func repl_eval() scalar {\n";
+
+    # For previously-declared variables NOT redeclared in current input,
+    # emit my declarations and restore their values from the global registry.
+    # Using my (not our) gives us real C lvalues so $i++, s///, etc. all work.
+    my str $restore_c = "";
+    foreach my str $vname (keys(%g_var_types)) {
+        my str $type = $g_var_types{$vname};
+        my str $sigil = "\$";
+        if ($type eq "array") { $sigil = "@"; }
+        if ($type eq "hash") { $sigil = "%"; }
+
+        # Skip if the current input declares this variable
+        if (input_declares_var($input, $vname, $sigil) == 1) {
+            next;
+        }
+
+        # Emit my TYPE SIGIL+name declaration with default value
+        if ($type eq "array") {
+            $src = $src . "    my array @" . $vname . " = ();\n";
+        } elsif ($type eq "hash") {
+            $src = $src . "    my hash %" . $vname . " = ();\n";
+        } elsif ($type eq "int") {
+            $src = $src . "    my int \$" . $vname . " = 0;\n";
+        } elsif ($type eq "num") {
+            $src = $src . "    my num \$" . $vname . " = 0.0;\n";
+        } elsif ($type eq "str") {
+            $src = $src . "    my str \$" . $vname . " = \"\";\n";
+        } else {
+            $src = $src . "    my scalar \$" . $vname . " = undef;\n";
+        }
+
+        # Build C restore code for this variable
+        $restore_c = $restore_c . "        StradaValue *__saved_" . $vname . " = strada_global_get(strada_new_str(\"repl::" . $vname . "\"));\n";
+        $restore_c = $restore_c . "        if (__saved_" . $vname . "->type != STRADA_UNDEF) {\n";
+        $restore_c = $restore_c . "            strada_decref(" . $vname . ");\n";
+        $restore_c = $restore_c . "            " . $vname . " = __saved_" . $vname . ";\n";
+        $restore_c = $restore_c . "        } else {\n";
+        $restore_c = $restore_c . "            strada_decref(__saved_" . $vname . ");\n";
+        $restore_c = $restore_c . "        }\n";
+    }
+
+    # Emit restore __C__ block if we have variables to restore
+    if ($restore_c ne "") {
+        $src = $src . "    __C__ {\n";
+        $src = $src . $restore_c;
+        $src = $src . "    }\n\n";
+    }
+
+    $src = $src . "    # User code\n";
+
+    my str $trimmed = $input;
+    $trimmed =~ s/\s+$//;
+
+    # Check if this is a void function call
+    my int $is_void_call = 0;
+    if ($trimmed =~ /^(say|print|warn|push|pop|shift|unshift|dumper|reverse)\(/) {
+        $is_void_call = 1;
+    }
+    # Check user-defined void functions
+    foreach my str $fndef (@g_functions) {
+        if ($fndef =~ /\)\s*void\s*\{/) {
+            my str $vfn_name = get_function_name($fndef);
+            if ($vfn_name ne "" && $trimmed =~ /^$vfn_name\(/) {
+                $is_void_call = 1;
+            }
+        }
+    }
+
+    # Check if this is a statement (not an expression to capture)
+    my int $is_statement = 0;
+    if ($trimmed =~ /^my\s+/) { $is_statement = 1; }
+    if ($trimmed =~ /^our\s+/) { $is_statement = 1; }
+    if ($trimmed =~ /^const\s+/) { $is_statement = 1; }
+    if ($trimmed =~ /^if\s*\(/) { $is_statement = 1; }
+    if ($trimmed =~ /^unless\s/) { $is_statement = 1; }
+    if ($trimmed =~ /^while\s*\(/) { $is_statement = 1; }
+    if ($trimmed =~ /^until\s*\(/) { $is_statement = 1; }
+    if ($trimmed =~ /^do\s*\{/) { $is_statement = 1; }
+    if ($trimmed =~ /^for\s/) { $is_statement = 1; }
+    if ($trimmed =~ /^foreach\s/) { $is_statement = 1; }
+    if ($trimmed =~ /^try\s*\{/) { $is_statement = 1; }
+    # Bare block: { ... }
+    if ($trimmed =~ /^\{/) { $is_statement = 1; }
+    # Variable assignment: $x = ..., @arr = ..., %h = ...
+    if ($trimmed =~ /^[\$\@\%]\w+\s*=/) { $is_statement = 1; }
+
+    # Check if ends with semicolon
+    my str $last_char = "";
+    if (length($trimmed) > 0) {
+        $last_char = substr($trimmed, length($trimmed) - 1, 1);
+    }
+
+    if ($trimmed =~ /;/ || $is_statement == 1) {
+        my str $code_line = $input;
+        if ($last_char ne ";" && $last_char ne "}") {
+            $code_line = $input . ";";
+        }
+        $src = $src . "    " . $code_line . "\n";
+        $src = $src . "    my scalar \$__result = undef;\n";
+    } elsif ($is_void_call == 1) {
+        $src = $src . "    " . $input . ";\n";
+        $src = $src . "    my scalar \$__result = undef;\n";
+    } else {
+        $src = $src . "    my scalar \$__result = " . $input . ";\n";
+    }
+
+    # Save all tracked variables back to global registry
+    my str $save_c = "";
+    foreach my str $vname (keys(%g_var_types)) {
+        $save_c = $save_c . "        strada_incref(" . $vname . ");\n";
+        $save_c = $save_c . "        strada_global_set(strada_new_str(\"repl::" . $vname . "\"), " . $vname . ");\n";
+    }
+    if ($save_c ne "") {
+        $src = $src . "\n    __C__ {\n";
+        $src = $src . $save_c;
+        $src = $src . "    }\n";
+    }
+
+    $src = $src . "\n    return \$__result;\n";
+    $src = $src . "}\n";
+
+    return $src;
+}
+
+# Compile and execute a single eval, returns result
+private func eval_one(str $input) scalar {
+    $g_eval_count = $g_eval_count + 1;
+
+    my str $base = $g_tmpdir . "/strada_repl_lib_" . $g_eval_count;
+    my str $src_file = $base . ".strada";
+    my str $c_file = $base . ".c";
+    my str $so_file = $base . ".so";
+
+    # Register any new variables
+    register_variables($input);
+
+    # Generate Strada source
+    my str $strada_src = generate_source($input);
+
+    if ($g_debug == 1) {
+        say("[JIT DEBUG] Generated source:");
+        say($strada_src);
+    }
+
+    # Write source file
+    my scalar $fh = sys::open($src_file, "w");
+    if (!defined($fh)) {
+        throw "JIT: Could not create temp file: " . $src_file;
+    }
+    sys::fwrite($fh, $strada_src);
+    sys::close($fh);
+
+    # Step 1: stradac → C
+    my str $stradac_cmd = $g_stradac_path . " ";
+    foreach my str $lp (@g_lib_paths) {
+        $stradac_cmd = $stradac_cmd . "-L " . $lp . " ";
+    }
+    $stradac_cmd = $stradac_cmd . $src_file . " " . $c_file . " 2>&1";
+    my scalar $pipe = sys::popen($stradac_cmd, "r");
+    my str $compile_output = "";
+    if (defined($pipe)) {
+        my scalar $line = sys::fgets($pipe, 4096);
+        while (defined($line)) {
+            $compile_output = $compile_output . $line;
+            $line = sys::fgets($pipe, 4096);
+        }
+        sys::pclose($pipe);
+    }
+
+    if (sys::is_file($c_file) == 0) {
+        # Clean up
+        sys::unlink($src_file);
+        # Extract useful error message
+        my str $err_msg = $compile_output;
+        $err_msg =~ s/^Strada Compiler[^\n]*\n//;
+        $err_msg =~ s/^Compiling:[^\n]*\n//;
+        $err_msg =~ s/^\s+//;
+        $err_msg =~ s/\s+$//;
+        throw "JIT compile error: " . $err_msg;
+    }
+
+    if ($g_cdebug == 1) {
+        say("[JIT CDEBUG] Generated C: " . $c_file);
+        my scalar $cfh = sys::open($c_file, "r");
+        if (defined($cfh)) {
+            my str $cline = <$cfh>;
+            while (defined($cline)) {
+                print($cline);
+                $cline = <$cfh>;
+            }
+            sys::close($cfh);
+        }
+    }
+
+    my scalar $result = undef;
+
+    # Step 2: C → .so
+    if ($g_compiler eq "tcc") {
+        if ($g_runtime_path eq "") {
+            sys::unlink($src_file);
+            sys::unlink($c_file);
+            throw "JIT: Could not find Strada runtime files for tcc backend";
+        }
+
+        my str $sed_cmd = "sed -i 's/strada_runtime\\.h/strada_runtime_tcc.h/' " . $c_file;
+        sys::system($sed_cmd);
+
+        my str $tcc_cmd = "tcc -shared -o " . $so_file . " " . $c_file . " -I" . $g_runtime_path . " -ldl -lm -lpthread 2>&1";
+        $pipe = sys::popen($tcc_cmd, "r");
+        my str $tcc_output = "";
+        if (defined($pipe)) {
+            my scalar $line = sys::fgets($pipe, 4096);
+            while (defined($line)) {
+                $tcc_output = $tcc_output . $line;
+                $line = sys::fgets($pipe, 4096);
+            }
+            sys::pclose($pipe);
+        }
+
+        if (sys::is_file($so_file) == 0) {
+            sys::unlink($src_file);
+            sys::unlink($c_file);
+            throw "JIT C compile error (tcc): " . $tcc_output;
+        }
+    } else {
+        # gcc via the strada wrapper
+        my str $gcc_cmd = "./strada --shared " . $src_file . " -o " . $so_file . " 2>&1";
+        # If stradac is not in ./, try using the strada wrapper from stradac's dir
+        if ($g_stradac_path ne "./stradac" && $g_stradac_path ne "stradac") {
+            my str $stradac_dir = sys::dirname($g_stradac_path);
+            my str $strada_bin = $stradac_dir . "/strada";
+            if (sys::is_file($strada_bin) == 1) {
+                $gcc_cmd = $strada_bin . " --shared " . $src_file . " -o " . $so_file . " 2>&1";
+            }
+        }
+        $pipe = sys::popen($gcc_cmd, "r");
+        my str $output = "";
+        if (defined($pipe)) {
+            my scalar $line = sys::fgets($pipe, 4096);
+            while (defined($line)) {
+                $output = $output . $line;
+                $line = sys::fgets($pipe, 4096);
+            }
+            sys::pclose($pipe);
+        }
+
+        if (sys::is_file($so_file) == 0) {
+            sys::unlink($src_file);
+            throw "JIT C compile error (gcc): " . $output;
+        }
+    }
+
+    # Step 3: Load and execute
+    my int $lib = sys::dl_open($so_file);
+    if ($lib == 0) {
+        my str $dl_err = sys::dl_error();
+        sys::unlink($src_file);
+        sys::unlink($c_file);
+        sys::unlink($so_file);
+        throw "JIT: Could not load compiled library: " . $dl_err;
+    }
+
+    my int $fn = sys::dl_sym($lib, "repl_eval");
+    if ($fn != 0) {
+        my array @args = ();
+        $result = sys::dl_call_sv($fn, \@args);
+    }
+
+    # Keep the library open - closures may reference code in it
+    push(@g_open_libs, $lib);
+    push(@g_so_files, $so_file);
+
+    # Clean up temp files (keep .so since it's still loaded)
+    sys::unlink($src_file);
+    if (sys::is_file($c_file) == 1) {
+        sys::unlink($c_file);
+    }
+
+    return $result;
+}
+
+# ============================================================
+# Public API
+# ============================================================
+
+# Initialize the JIT engine
+# $compiler_pref: optional compiler preference ("tcc" or "gcc"), empty for auto-detect
+func init(str ...@args) void {
+    my str $compiler_pref = "";
+    if (scalar(@args) > 0) {
+        $compiler_pref = $args[0];
+    }
+
+    $g_stradac_path = detect_stradac();
+    if ($g_stradac_path eq "") {
+        throw "Strada::JIT::init: Could not find stradac compiler. Make sure stradac is in your PATH or run from the Strada directory.";
+    }
+
+    $g_runtime_path = detect_runtime();
+
+    if ($compiler_pref ne "") {
+        my int $available = 0;
+        if ($compiler_pref eq "tcc") {
+            __C__ {
+                available = strada_new_int(repl_command_exists("tcc"));
+            }
+        } elsif ($compiler_pref eq "gcc") {
+            __C__ {
+                available = strada_new_int(repl_command_exists("gcc"));
+            }
+        } else {
+            throw "Strada::JIT::init: Unknown compiler: " . $compiler_pref . " (valid: tcc, gcc)";
+        }
+        if ($available == 0) {
+            throw "Strada::JIT::init: Compiler not available: " . $compiler_pref;
+        }
+        $g_compiler = $compiler_pref;
+    } else {
+        $g_compiler = detect_compiler();
+        if ($g_compiler eq "") {
+            throw "Strada::JIT::init: No C compiler found (need tcc or gcc)";
+        }
+    }
+
+    $g_initialized = 1;
+}
+
+# Evaluate Strada code and return the result
+func eval(str $code) scalar {
+    if ($g_initialized == 0) {
+        throw "Strada::JIT::eval: Not initialized. Call Strada::JIT::init() first.";
+    }
+
+    my str $input = $code;
+    $input =~ s/^\s+//;
+    $input =~ s/\s+$//;
+
+    if ($input eq "") {
+        return undef;
+    }
+
+    # Check for import statement
+    if (is_import($input)) {
+        register_import($input);
+        return undef;
+    }
+
+    # Check for package declaration
+    if (is_package_decl($input)) {
+        my str $pkg_name = $input;
+        $pkg_name =~ s/^\s*package\s+//;
+        $pkg_name =~ s/\s*;.*$//;
+        $pkg_name =~ s/\s+$//;
+        $g_current_package = $pkg_name;
+        return undef;
+    }
+
+    # Check for const declaration
+    if ($input =~ /^\s*const\s+/) {
+        my str $const_line = $input;
+        $const_line =~ s/\s+$//;
+        if (substr($const_line, length($const_line) - 1, 1) ne ";") {
+            $const_line = $const_line . ";";
+        }
+        push(@g_constants, $const_line);
+        return undef;
+    }
+
+    # Check for enum declaration
+    if ($input =~ /^\s*enum\s+/) {
+        my str $enum_line = $input;
+        $enum_line =~ s/\s+$//;
+        if (substr($enum_line, length($enum_line) - 1, 1) ne "}") {
+            if (substr($enum_line, length($enum_line) - 1, 1) ne ";") {
+                $enum_line = $enum_line . ";";
+            }
+        }
+        push(@g_constants, $enum_line);
+        return undef;
+    }
+
+    # Check for function definition
+    if (is_function_def($input)) {
+        my array @parts = extract_function_def($input);
+        register_function($parts[0]);
+
+        # If there's a remainder after the function def, evaluate it
+        if ($parts[1] ne "") {
+            return eval_one($parts[1]);
+        }
+        return undef;
+    }
+
+    return eval_one($input);
+}
+
+# Get a variable value from the persistent state (global registry)
+func get(str $name) scalar {
+    my str $key = "repl::" . $name;
+    my scalar $result = undef;
+    __C__ {
+        char *k = strada_to_str(key);
+        StradaValue *key_sv = strada_new_str(k);
+        StradaValue *val = strada_global_get(key_sv);
+        strada_decref(result);
+        result = val;
+        free(k);
+    }
+    return $result;
+}
+
+# Set a variable value in the persistent state (global registry)
+func set(str $name, scalar $value) void {
+    my str $key = "repl::" . $name;
+    __C__ {
+        char *k = strada_to_str(key);
+        StradaValue *key_sv = strada_new_str(k);
+        strada_incref(value);
+        strada_global_set(key_sv, value);
+        free(k);
+    }
+    # Also register the type if not already known
+    if (!exists($g_var_types{$name})) {
+        $g_var_types{$name} = "scalar";
+    }
+}
+
+# Add a library search path
+func add_lib_path(str $path) void {
+    foreach my str $existing (@g_lib_paths) {
+        if ($existing eq $path) {
+            return;
+        }
+    }
+    push(@g_lib_paths, $path);
+}
+
+# Reset all state (variables, functions, imports)
+func reset() void {
+    # Delete all repl:: globals from the registry
+    # NOTE: must iterate keys BEFORE clearing the hash (parser bug:
+    # %hash = () after while/foreach block is mis-parsed as MOD operator)
+    my array @var_names = keys(%g_var_types);
+    my int $vi = 0;
+    my int $var_count = scalar(@var_names);
+
+    # Clear state hashes/arrays first (before any loops)
+    %g_var_types = ();
+    @g_functions = ();
+    @g_constants = ();
+    @g_imports = ();
+    $g_current_package = "";
+    $g_eval_count = 0;
+
+    # Now delete globals using the saved key list
+    while ($vi < $var_count) {
+        sys::global_delete("repl::" . $var_names[$vi]);
+        $vi = $vi + 1;
+    }
+
+    # Close accumulated library handles and clean up .so files
+    my array @libs_to_close = @g_open_libs;
+    my array @files_to_delete = @g_so_files;
+    @g_open_libs = ();
+    @g_so_files = ();
+
+    my int $li = 0;
+    my int $lib_count = scalar(@libs_to_close);
+    while ($li < $lib_count) {
+        sys::dl_close($libs_to_close[$li]);
+        $li = $li + 1;
+    }
+    my int $fi = 0;
+    my int $file_count = scalar(@files_to_delete);
+    while ($fi < $file_count) {
+        if (sys::is_file($files_to_delete[$fi]) == 1) {
+            sys::unlink($files_to_delete[$fi]);
+        }
+        $fi = $fi + 1;
+    }
+}
+
+# Enable/disable debug mode (shows generated source)
+func debug(int $enabled) void {
+    $g_debug = $enabled;
+}
+
+# Enable/disable C debug mode (shows generated C code)
+func cdebug(int $enabled) void {
+    $g_cdebug = $enabled;
+}
+
+# Get the detected compiler name
+func compiler() str {
+    return $g_compiler;
+}
+
+# Get variable names and types as a hash (name -> type)
+func var_types() hash {
+    return %g_var_types;
+}
+
+# Get accumulated function definitions as an array
+func functions() array {
+    return @g_functions;
+}
+
+# Get accumulated import statements as an array
+func imports() array {
+    return @g_imports;
+}
+
+# Get library search paths as an array
+func lib_paths() array {
+    return @g_lib_paths;
+}
+
+# Get/set current package name
+func current_package() str {
+    return $g_current_package;
+}
+
+func set_package(str $name) void {
+    $g_current_package = $name;
+}
+
+# Get the state hash (for direct access by JIT tools)
+# Fetches current values from the global registry
+func state() hash {
+    my hash %result = ();
+    my array @var_names = keys(%g_var_types);
+    my int $si = 0;
+    my int $scount = scalar(@var_names);
+    while ($si < $scount) {
+        my str $vname = $var_names[$si];
+        my scalar $val = sys::global_get("repl::" . $vname);
+        $result{$vname} = $val;
+        $si = $si + 1;
+    }
+    return %result;
+}
+
+# Check if input is a function definition (public wrapper)
+func check_function_def(str $input) int {
+    return is_function_def($input);
+}
+
+# Check if input is an import statement (public wrapper)
+func check_import(str $input) int {
+    return is_import($input);
+}
+
+# Check if input is a package declaration (public wrapper)
+func check_package_decl(str $input) int {
+    return is_package_decl($input);
+}
+
+# Check if braces/parens/brackets are balanced
+func is_balanced(str $input) int {
+    my int $braces = 0;
+    my int $parens = 0;
+    my int $brackets = 0;
+    my int $in_string = 0;
+
+    my int $len = length($input);
+    my int $i = 0;
+    while ($i < $len) {
+        my str $c = substr($input, $i, 1);
+
+        if ($i > 0 && substr($input, $i - 1, 1) eq "\\") {
+            $i = $i + 1;
+            next;
+        }
+
+        if ($c eq "\"") {
+            $in_string = 1 - $in_string;
+        }
+
+        if ($in_string == 0) {
+            if ($c eq "{") { $braces = $braces + 1; }
+            if ($c eq "}") { $braces = $braces - 1; }
+            if ($c eq "(") { $parens = $parens + 1; }
+            if ($c eq ")") { $parens = $parens - 1; }
+            if ($c eq "[") { $brackets = $brackets + 1; }
+            if ($c eq "]") { $brackets = $brackets - 1; }
+        }
+
+        $i = $i + 1;
+    }
+
+    if ($braces == 0 && $parens == 0) {
+        if (index($input, "{") < 0) {
+            if ($input =~ /^func\s+/ || $input =~ /^fn\s+/ || $input =~ /^async\s+/ || $input =~ /^private\s+/) {
+                return 0;
+            }
+        }
+    }
+
+    if ($braces == 0 && $parens == 0 && $brackets == 0) {
+        return 1;
+    }
+    return 0;
+}

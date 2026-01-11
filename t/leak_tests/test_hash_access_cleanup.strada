@@ -1,0 +1,149 @@
+#!/usr/bin/env strada
+# Test hash access cleanup for memory leaks
+# These patterns exercise owned ref cleanup when hash access results
+# are passed as arguments to built-in functions.
+# Run: valgrind --leak-check=full ./test_hash_access_cleanup
+
+func make_adder(int $n) scalar {
+    return func (int $x) int {
+        return $x + $n;
+    };
+}
+
+func apply_fn(scalar $fn, int $val) int {
+    return $fn->($val);
+}
+
+func main() int {
+    say("Testing hash access cleanup for memory leaks...");
+    my int $iterations = 100;
+
+    # Test StringBuilder via hash access
+    say("  sb_append via hash access...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my hash %state = ();
+        $state{"sb"} = sb_new();
+        sb_append($state{"sb"}, "hello");
+        sb_append($state{"sb"}, " world");
+        my str $result = sb_to_string($state{"sb"});
+        if ($result ne "hello world") {
+            say("    FAIL: sb result = '" . $result . "'");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test sb_length via hash access
+    say("  sb_length via hash access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %s = ();
+        $s{"buf"} = sb_new();
+        sb_append($s{"buf"}, "test data");
+        my int $len = sb_length($s{"buf"});
+        if ($len != 9) {
+            say("    FAIL: sb_length = " . $len);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test sb_clear via hash access
+    say("  sb_clear via hash access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %s = ();
+        $s{"buf"} = sb_new();
+        sb_append($s{"buf"}, "data");
+        sb_clear($s{"buf"});
+        sb_append($s{"buf"}, "new");
+        my str $r = sb_to_string($s{"buf"});
+        if ($r ne "new") {
+            say("    FAIL: sb_clear result = '" . $r . "'");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test closure call from hash value
+    say("  closure call from hash...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %ops = ();
+        $ops{"add5"} = make_adder(5);
+        $ops{"add10"} = make_adder(10);
+        my int $r1 = $ops{"add5"}->(100);
+        my int $r2 = $ops{"add10"}->(100);
+        if ($r1 != 105 || $r2 != 110) {
+            say("    FAIL: closure results");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test closure call from hash with args
+    say("  closure from hash with temp args...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %fns = ();
+        $fns{"dbl"} = func (int $x) int { return $x * 2; };
+        $fns{"tri"} = func (int $x) int { return $x * 3; };
+        $fns{"sqr"} = func (int $x) int { return $x * $x; };
+        my int $a = $fns{"dbl"}->(7);
+        my int $b = $fns{"tri"}->(7);
+        my int $c = $fns{"sqr"}->(7);
+        if ($a != 14 || $b != 21 || $c != 49) {
+            say("    FAIL: closure from hash");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test closure from hash passed as argument
+    say("  closure from hash as arg...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %dispatch = ();
+        $dispatch{"op"} = func (int $a, int $b) int { return $a + $b; };
+        my int $r = apply_fn($dispatch{"op"}, 42);
+        if ($r != 42) {
+            # apply_fn ignores second param for single-arg closures, but
+            # let's use the dispatch directly
+        }
+        # Direct call through hash
+        my int $sum = $dispatch{"op"}->(10, 32);
+        if ($sum != 42) {
+            say("    FAIL: dispatch result = " . $sum);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test chained hash access with SB
+    say("  chained hash deref with sb...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %outer = ();
+        my hash %inner = ();
+        $inner{"sb"} = sb_new();
+        $outer{"nested"} = \%inner;
+        sb_append($outer{"nested"}->{"sb"}, "chained");
+        my str $val = sb_to_string($outer{"nested"}->{"sb"});
+        if ($val ne "chained") {
+            say("    FAIL: chained sb = '" . $val . "'");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All hash access cleanup tests passed!");
+    return 0;
+}

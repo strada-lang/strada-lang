@@ -1,0 +1,55 @@
+func main() int {
+    # core::getenv / core::setenv
+    core::setenv("STRADA_TEST_MISC", "test_value");
+    say("env=" . core::getenv("STRADA_TEST_MISC"));
+
+    # core::global_set / core::global_get / core::global_exists
+    core::global_set("my_key", "my_value");
+    say("global=" . core::global_get("my_key"));
+    say("exists=" . core::global_exists("my_key"));
+    say("not_exists=" . core::global_exists("nonexistent"));
+
+    # core::global_keys
+    core::global_set("key2", "val2");
+    my array @keys = core::global_keys();
+    say("has_keys=" . (size(@keys) >= 2 ? 1 : 0));
+
+    # core::global_delete
+    core::global_delete("key2");
+    say("deleted=" . (core::global_exists("key2") ? 0 : 1));
+
+    # core::set_recursion_limit
+    core::set_recursion_limit(500);
+    say("limit_set=1");
+
+    # sprintf
+    my str $s = sprintf("%d + %d = %d", 1, 2, 3);
+    say("sprintf=" . $s);
+
+    my str $s2 = sprintf("%.2f", 3.14159);
+    say("sprintf_f=" . $s2);
+
+    # abs
+    say("abs_pos=" . abs(42));
+    say("abs_neg=" . abs(-7));
+
+    # defined / ref
+    my scalar $x = undef;
+    say("def_undef=" . defined($x));
+    say("def_val=" . defined(42));
+
+    my array @arr = (1, 2, 3);
+    say("ref_arr=" . ref(\@arr));
+
+    # math functions
+    my int $sq = math::sqrt(16.0);
+    say("sqrt=" . $sq);
+    my int $fl = math::floor(3.7);
+    say("floor=" . $fl);
+    my int $ce = math::ceil(3.2);
+    say("ceil=" . $ce);
+    my int $pw = math::pow(2.0, 10.0);
+    say("pow=" . $pw);
+
+    return 0;
+}

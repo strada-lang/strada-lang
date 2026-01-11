@@ -1,0 +1,69 @@
+# test_variadic_lib.strada - A shared library with variadic functions
+
+package VariadicLib;
+version "1.0.0";
+
+# Variadic function to sum numbers
+func sum_all(int ...@nums) int {
+    my int $total = 0;
+    foreach my int $n (@nums) {
+        $total = $total + $n;
+    }
+    return $total;
+}
+
+# Variadic function with fixed params first
+func format_nums(str $prefix, str $sep, int ...@nums) str {
+    my str $result = $prefix;
+    my int $first = 1;
+    foreach my int $n (@nums) {
+        if ($first == 0) {
+            $result = $result . $sep;
+        }
+        $result = $result . $n;
+        $first = 0;
+    }
+    return $result;
+}
+
+# Join strings with separator
+func join_with(str $sep, str ...@parts) str {
+    my str $result = "";
+    my int $first = 1;
+    foreach my str $s (@parts) {
+        if ($first == 0) {
+            $result = $result . $sep;
+        }
+        $result = $result . $s;
+        $first = 0;
+    }
+    return $result;
+}
+
+# Find min value
+func min_val(int ...@nums) int {
+    if (size(@nums) == 0) {
+        return 0;
+    }
+    my int $min = $nums[0];
+    foreach my int $n (@nums) {
+        if ($n < $min) {
+            $min = $n;
+        }
+    }
+    return $min;
+}
+
+# Find max value
+func max_val(int ...@nums) int {
+    if (size(@nums) == 0) {
+        return 0;
+    }
+    my int $max = $nums[0];
+    foreach my int $n (@nums) {
+        if ($n > $max) {
+            $max = $n;
+        }
+    }
+    return $max;
+}

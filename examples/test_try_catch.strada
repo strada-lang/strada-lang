@@ -1,3 +1,20 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
 # test_try_catch.strada - Demonstrates try/catch/throw exception handling
 #
 # Strada supports Perl-style exception handling:
@@ -6,9 +23,37 @@
 #
 # die() now also throws exceptions when inside a try block
 
+# Exception class for typed catches
+package DivisionError;
+
+func new(str $message, int $dividend, int $divisor) scalar {
+    my hash %self = ();
+    $self{"message"} = $message;
+    $self{"dividend"} = $dividend;
+    $self{"divisor"} = $divisor;
+    return bless(\%self, "DivisionError");
+}
+
+package ValueError;
+
+func new(str $message) scalar {
+    my hash %self = ();
+    $self{"message"} = $message;
+    return bless(\%self, "ValueError");
+}
+
+package main;
+
 func divide(int $a, int $b) int {
     if ($b == 0) {
         throw "Division by zero";
+    }
+    return $a / $b;
+}
+
+func divide_typed(int $a, int $b) int {
+    if ($b == 0) {
+        throw DivisionError::new("Division by zero", $a, $b);
     }
     return $a / $b;
 }
@@ -99,6 +144,59 @@ func main() int {
         say("  Should not see this");
     } catch ($e) {
         say("  Caught: " . $e);
+    }
+
+    # Test 7: Typed exception - basic
+    say("Test 7: Typed exception catch");
+    try {
+        my int $result = divide_typed(10, 0);
+        say("  Result: " . $result);
+    } catch (DivisionError $e) {
+        say("  Caught DivisionError: " . $e->{"message"});
+        say("    Dividend: " . $e->{"dividend"} . ", Divisor: " . $e->{"divisor"});
+    } catch ($e) {
+        say("  Should not reach catch-all");
+    }
+
+    say("");
+
+    # Test 8: Typed exception - falls through to catch-all
+    say("Test 8: String exception with typed catches");
+    try {
+        throw "plain string error";
+    } catch (DivisionError $e) {
+        say("  Should not match DivisionError");
+    } catch ($e) {
+        say("  Caught in catch-all: " . $e);
+    }
+
+    say("");
+
+    # Test 9: Multiple typed catches
+    say("Test 9: Multiple typed catches");
+    try {
+        throw ValueError::new("invalid input");
+    } catch (DivisionError $e) {
+        say("  Should not match DivisionError");
+    } catch (ValueError $e) {
+        say("  Caught ValueError: " . $e->{"message"});
+    } catch ($e) {
+        say("  Should not reach catch-all");
+    }
+
+    say("");
+
+    # Test 10: Re-throw unmatched typed exception
+    say("Test 10: Re-throw unmatched typed exception");
+    try {
+        try {
+            throw ValueError::new("inner error");
+        } catch (DivisionError $e) {
+            say("  Inner: Should not match DivisionError");
+        }
+        # No catch-all, so ValueError gets re-thrown
+    } catch (ValueError $e) {
+        say("  Outer caught re-thrown ValueError: " . $e->{"message"});
     }
 
     say("\n=== All tests completed! ===");

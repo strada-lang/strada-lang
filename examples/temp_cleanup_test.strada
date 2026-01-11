@@ -1,0 +1,100 @@
+# Test that temporary values in expressions are properly cleaned up
+# Run with: valgrind --leak-check=full ./temp_cleanup_test
+# Should show 0 bytes definitely lost
+
+# Helper function to test user-defined function call temporaries
+func process_array(scalar $arr) int {
+    return scalar($arr);
+}
+
+func process_hash(scalar $h) int {
+    my array @keys = keys($h);
+    return scalar(@keys);
+}
+
+func main() int {
+    my int $i = 0;
+
+    # Test 1: Temporary in defined() - division result
+    while ($i < 1000) {
+        if (defined(10 / 3)) {
+            # nothing
+        }
+        $i = $i + 1;
+    }
+
+    # Test 2: Temporary division by zero in defined()
+    $i = 0;
+    while ($i < 1000) {
+        if (defined(10 / 0)) {
+            # nothing
+        }
+        $i = $i + 1;
+    }
+
+    # Test 3: Nested function calls with temporaries (string concat + length)
+    $i = 0;
+    while ($i < 1000) {
+        my int $len = length("hello" . "world");
+        $i = $i + 1;
+    }
+
+    # Test 4: scalar() with temporary anonymous array
+    $i = 0;
+    while ($i < 1000) {
+        my int $len = scalar([1, 2, 3]);
+        $i = $i + 1;
+    }
+
+    # Test 5: ref() with temporary anonymous array
+    $i = 0;
+    while ($i < 1000) {
+        my str $type = ref([1, 2, 3]);
+        $i = $i + 1;
+    }
+
+    # Test 6: User-defined function with temporary anonymous array argument
+    $i = 0;
+    while ($i < 1000) {
+        my int $len = process_array([1, 2, 3, 4, 5]);
+        $i = $i + 1;
+    }
+
+    # Test 7: User-defined function with temporary anonymous hash argument
+    $i = 0;
+    while ($i < 1000) {
+        my int $count = process_hash({ a => 1, b => 2, c => 3 });
+        $i = $i + 1;
+    }
+
+    # Test 8: Temporary anonymous array stored in variable
+    $i = 0;
+    while ($i < 1000) {
+        my array @arr = [10, 20, 30];
+        $i = $i + 1;
+    }
+
+    # Test 9: Temporary anonymous hash stored in variable
+    $i = 0;
+    while ($i < 1000) {
+        my hash %h = { x => 1, y => 2 };
+        $i = $i + 1;
+    }
+
+    # Test 10: Nested anonymous arrays
+    $i = 0;
+    while ($i < 1000) {
+        my array @nested = [[1, 2], [3, 4]];
+        $i = $i + 1;
+    }
+
+    # Test 11: Modulo by zero returning undef
+    $i = 0;
+    while ($i < 1000) {
+        my scalar $result = 10 % 0;
+        $i = $i + 1;
+    }
+
+    say("PASS: Temporary cleanup test completed");
+    return 0;
+}

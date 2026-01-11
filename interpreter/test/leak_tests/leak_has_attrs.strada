@@ -1,0 +1,19 @@
+package Point;
+has ro int $x (required);
+has ro int $y (required);
+
+func to_str(scalar $self) str {
+    return $self->x() . "," . $self->y();
+}
+
+package main;
+func main() int {
+    my int $i = 0;
+    while ($i < 100) {
+        my scalar $p = Point::new("x", $i, "y", $i * 2);
+        my str $s = $p->to_str();
+        $i = $i + 1;
+    }
+    say("done");
+    return 0;
+}

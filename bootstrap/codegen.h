@@ -43,6 +43,16 @@ typedef struct {
         int count;
         int capacity;
     } variables;
+
+    // Scope-based cleanup tracking (stack of scopes)
+    struct {
+        char ***names;          // Array of scopes, each scope is array of var names
+        int **is_struct;        // Parallel array of is_struct flags per scope
+        int *counts;            // Number of vars in each scope
+        int *capacities;        // Capacity of each scope
+        int depth;              // Current scope depth
+        int max_depth;          // Allocated scope slots
+    } scope_stack;
 } CodeGen;
 
 /* Code generator functions */

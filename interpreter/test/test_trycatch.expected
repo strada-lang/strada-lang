@@ -1,0 +1,4 @@
+caught: simple error
+MyError: something went wrong
+inner caught: inner
+outer caught: rethrown

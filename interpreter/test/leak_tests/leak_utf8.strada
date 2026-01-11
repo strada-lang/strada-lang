@@ -1,0 +1,10 @@
+func main() int {
+    my int $i = 0;
+    while ($i < 100) {
+        my int $v = utf8::valid("hello world " . $i);
+        my int $u = utf8::is_utf8("test " . $i);
+        $i = $i + 1;
+    }
+    say("done");
+    return 0;
+}

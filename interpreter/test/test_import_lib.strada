@@ -1,0 +1,26 @@
+use lib "lib";
+use lib "../lib";
+use lib "interpreter/test/lib";
+use lib "test/lib";
+import_lib "MathLib.so";
+
+func main() int {
+    # Test basic function calls through import_lib
+    my int $sum = MathLib::add(10, 32);
+    say("10 + 32 = " . $sum);
+
+    my int $diff = MathLib::subtract(100, 58);
+    say("100 - 58 = " . $diff);
+
+    my int $prod = MathLib::multiply(6, 7);
+    say("6 * 7 = " . $prod);
+
+    my int $dbl = MathLib::double_val(21);
+    say("double(21) = " . $dbl);
+
+    my str $greeting = MathLib::greet("World");
+    say($greeting);
+
+    say("import_lib OK");
+    return 0;
+}

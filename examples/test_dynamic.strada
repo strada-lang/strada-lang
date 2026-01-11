@@ -1,0 +1,56 @@
+func context_sensitive() dynamic {
+    if (sys::wantarray()) {
+        my array @result = (10, 20, 30);
+        return @result;
+    }
+    if (sys::wanthash()) {
+        my hash %result = ();
+        $result{"a"} = 1;
+        $result{"b"} = 2;
+        return %result;
+    }
+    return 42;
+}
+
+func check_scalar() dynamic {
+    if (sys::wantscalar()) {
+        return "yes_scalar";
+    }
+    return "no_scalar";
+}
+
+func main() int {
+    # Scalar context (default)
+    my int $val = context_sensitive();
+    say("scalar: " . $val);
+
+    # Array context
+    my array @arr = context_sensitive();
+    say("array len: " . scalar(@arr));
+    say("array[0]: " . $arr[0]);
+    say("array[1]: " . $arr[1]);
+    say("array[2]: " . $arr[2]);
+
+    # Hash context
+    my hash %h = context_sensitive();
+    say("hash a: " . $h{"a"});
+    say("hash b: " . $h{"b"});
+
+    # Foreach context (array)
+    my int $sum = 0;
+    foreach my int $x (context_sensitive()) {
+        $sum = $sum + $x;
+    }
+    say("foreach sum: " . $sum);
+
+    # Nested call - default scalar context
+    my scalar $s = context_sensitive();
+    say("nested scalar: " . $s);
+
+    # sys::wantscalar check
+    my str $cs = check_scalar();
+    say("wantscalar: " . $cs);
+
+    say("ok");
+    return 0;
+}

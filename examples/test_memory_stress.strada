@@ -1,3 +1,20 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
 # test_memory_stress.strada - Comprehensive memory stress test
 #
 # This test exercises all runtime functions that allocate memory to detect:
@@ -510,7 +527,7 @@ func main(int $argc, array @argv) int {
 
     # Allow custom iteration count via command line
     if ($argc > 1) {
-        $iterations = sys::atoi(@argv[1]);
+        $iterations = sys::atoi($argv[1]);
         if ($iterations < 1) {
             $iterations = 100;
         }

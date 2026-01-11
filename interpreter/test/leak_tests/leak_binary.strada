@@ -1,0 +1,12 @@
+func main() int {
+    my int $i = 0;
+    while ($i < 100) {
+        my str $enc = core::base64_encode("test data " . $i);
+        my str $dec = core::base64_decode($enc);
+        my int $h = core::hex("ff");
+        my int $bl = core::byte_length("hello");
+        $i = $i + 1;
+    }
+    say("done");
+    return 0;
+}

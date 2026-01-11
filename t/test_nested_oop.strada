@@ -1,0 +1,88 @@
+# Test: OOP methods with nested use statements
+# This tests that OOP method dispatch works correctly when classes
+# are defined in modules loaded via nested use statements.
+
+use lib "t/nested_use_test";
+use OOPWrapper;
+
+func main() int {
+    my int $passed = 0;
+    my int $failed = 0;
+
+    # Test 1: Create counter via wrapper (which uses OOPLib internally)
+    my scalar $counter = OOPWrapper::create_counter(10);
+    my int $val = $counter->get();
+    if ($val == 10) {
+        say("PASS: Counter created with initial value 10");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: Counter initial value = " . $val . ", expected 10");
+        $failed = $failed + 1;
+    }
+
+    # Test 2: Call increment method (OOP dispatch through nested module)
+    $counter->increment();
+    $val = $counter->get();
+    if ($val == 11) {
+        say("PASS: increment() works, value = 11");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: After increment, value = " . $val . ", expected 11");
+        $failed = $failed + 1;
+    }
+
+    # Test 3: Call add method with argument
+    $counter->add(5);
+    $val = $counter->get();
+    if ($val == 16) {
+        say("PASS: add(5) works, value = 16");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: After add(5), value = " . $val . ", expected 16");
+        $failed = $failed + 1;
+    }
+
+    # Test 4: Use wrapper's helper function (calls OOP methods internally)
+    OOPWrapper::double_counter($counter);
+    $val = $counter->get();
+    if ($val == 32) {
+        say("PASS: double_counter works, value = 32");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: After double_counter, value = " . $val . ", expected 32");
+        $failed = $failed + 1;
+    }
+
+    # Test 5: Reset method
+    $counter->reset();
+    $val = $counter->get();
+    if ($val == 0) {
+        say("PASS: reset() works, value = 0");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: After reset, value = " . $val . ", expected 0");
+        $failed = $failed + 1;
+    }
+
+    # Test 6: Direct access to Counter class (should also be available)
+    my scalar $counter2 = Counter::new(100);
+    $counter2->increment();
+    $val = $counter2->get();
+    if ($val == 101) {
+        say("PASS: Direct Counter access works, value = 101");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: Direct Counter value = " . $val . ", expected 101");
+        $failed = $failed + 1;
+    }
+
+    # Summary
+    say("");
+    if ($failed == 0) {
+        say("All nested OOP tests passed (" . $passed . "/" . $passed . ")");
+        return 0;
+    } else {
+        say("FAILED: " . $failed . " tests failed");
+        return 1;
+    }
+}

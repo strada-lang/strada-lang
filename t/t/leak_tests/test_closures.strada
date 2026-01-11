@@ -1,0 +1,224 @@
+#!/usr/bin/env strada
+# Test closures and function references for memory leaks
+# Run: valgrind --leak-check=full ./test_closures
+
+# Helper function for testing function references
+func add(int $a, int $b) int {
+    return $a + $b;
+}
+
+func multiply(int $a, int $b) int {
+    return $a * $b;
+}
+
+func apply_op(scalar $fn, int $a, int $b) int {
+    return $fn->($a, $b);
+}
+
+# Function that returns a closure
+func make_adder(int $n) scalar {
+    return func (int $x) int {
+        return $x + $n;
+    };
+}
+
+func make_multiplier(int $n) scalar {
+    return func (int $x) int {
+        return $x * $n;
+    };
+}
+
+# Counter closure
+func make_counter() scalar {
+    my int $count = 0;
+    return func () int {
+        $count = $count + 1;
+        return $count;
+    };
+}
+
+func main() int {
+    say("Testing closures and function references for memory leaks...");
+    my int $iterations = 100;
+
+    # Test function references
+    say("  Function references...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my scalar $add_ref = \&add;
+        my scalar $mul_ref = \&multiply;
+
+        my int $sum = $add_ref->(3, 4);
+        my int $prod = $mul_ref->(3, 4);
+
+        if ($sum != 7) {
+            say("    FAIL: add ref returned " . $sum);
+            return 1;
+        }
+        if ($prod != 12) {
+            say("    FAIL: multiply ref returned " . $prod);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test passing function refs as arguments
+    say("  Function refs as arguments...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $r1 = apply_op(\&add, 10, 20);
+        my int $r2 = apply_op(\&multiply, 10, 20);
+
+        if ($r1 != 30) {
+            say("    FAIL: apply_op add");
+            return 1;
+        }
+        if ($r2 != 200) {
+            say("    FAIL: apply_op multiply");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test anonymous functions
+    say("  Anonymous functions...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $anon = func (int $x) int {
+            return $x * 2;
+        };
+
+        my int $result = $anon->(21);
+        if ($result != 42) {
+            say("    FAIL: anon func returned " . $result);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test closures with captured variables
+    say("  Closures with captured variables...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $add5 = make_adder(5);
+        my scalar $add10 = make_adder(10);
+
+        my int $r1 = $add5->(100);
+        my int $r2 = $add10->(100);
+
+        if ($r1 != 105) {
+            say("    FAIL: add5 closure");
+            return 1;
+        }
+        if ($r2 != 110) {
+            say("    FAIL: add10 closure");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test stateful closures (counter)
+    say("  Stateful closures...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $counter = make_counter();
+
+        my int $c1 = $counter->();
+        my int $c2 = $counter->();
+        my int $c3 = $counter->();
+
+        if ($c1 != 1 || $c2 != 2 || $c3 != 3) {
+            say("    FAIL: counter values");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test multiple closures from same factory
+    say("  Multiple closures from factory...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $mul2 = make_multiplier(2);
+        my scalar $mul3 = make_multiplier(3);
+        my scalar $mul10 = make_multiplier(10);
+
+        my int $r1 = $mul2->(5);
+        my int $r2 = $mul3->(5);
+        my int $r3 = $mul10->(5);
+
+        if ($r1 != 10 || $r2 != 15 || $r3 != 50) {
+            say("    FAIL: multiplier closures");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test closures in arrays
+    say("  Closures in arrays...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @funcs = ();
+        push(@funcs, make_adder(1));
+        push(@funcs, make_adder(2));
+        push(@funcs, make_adder(3));
+
+        my int $sum = 0;
+        foreach my scalar $f (@funcs) {
+            $sum = $sum + $f->(10);
+        }
+
+        # (10+1) + (10+2) + (10+3) = 36
+        if ($sum != 36) {
+            say("    FAIL: closures in array sum = " . $sum);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test closures in hash values
+    say("  Closures in hash values...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %ops = ();
+        $ops{"double"} = func (int $x) int { return $x * 2; };
+        $ops{"triple"} = func (int $x) int { return $x * 3; };
+        $ops{"square"} = func (int $x) int { return $x * $x; };
+
+        my int $r1 = $ops{"double"}->(5);
+        my int $r2 = $ops{"triple"}->(5);
+        my int $r3 = $ops{"square"}->(5);
+
+        if ($r1 != 10 || $r2 != 15 || $r3 != 25) {
+            say("    FAIL: closures in hash");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test inline anonymous function
+    say("  Inline anonymous functions...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $result = apply_op(func (int $a, int $b) int {
+            return $a - $b;
+        }, 100, 42);
+
+        if ($result != 58) {
+            say("    FAIL: inline anon func");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All closure tests passed!");
+    return 0;
+}

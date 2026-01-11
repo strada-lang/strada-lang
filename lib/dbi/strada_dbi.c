@@ -1,9 +1,27 @@
 /*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+/*
  * strada_dbi.c - Strada Database Interface Implementation
  *
  * Supports SQLite, MySQL/MariaDB, and PostgreSQL through a unified API.
  */
 
+#define _GNU_SOURCE
 #include "strada_dbi.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -1126,4 +1144,502 @@ StradaValue* strada_dbi_ping(StradaValue *dbh_sv) {
     DbiHandle *dbh = get_dbh(dbh_sv);
     if (!dbh) return strada_new_int(0);
     return strada_new_int(dbi_ping(dbh));
+}
+
+/* ============== Raw C Functions for extern "C" ============== */
+
+/* Connect using raw C types */
+DbiHandle* strada_dbi_connect_raw(const char *dsn, const char *user, const char *pass,
+                                   int auto_commit, int print_error) {
+    DbiHandle *dbh = calloc(1, sizeof(DbiHandle));
+    if (!dbh) return NULL;
+
+    dbh->auto_commit = auto_commit;
+    dbh->raise_error = 0;
+    dbh->print_error = print_error;
+
+    char *database = NULL;
+    char *host = NULL;
+    int port = 0;
+
+    dbh->driver = parse_dsn(dsn, &database, &host, &port);
+    dbh->dsn = dsn ? strdup(dsn) : NULL;
+    dbh->username = user ? strdup(user) : NULL;
+
+    switch (dbh->driver) {
+#ifdef HAVE_SQLITE3
+        case DBI_DRIVER_SQLITE: {
+            sqlite3 *db;
+            int rc = sqlite3_open(database ? database : ":memory:", &db);
+            if (rc != SQLITE_OK) {
+                set_error(dbh, rc, sqlite3_errmsg(db));
+                sqlite3_close(db);
+                free(database);
+                free(host);
+                free(dbh->dsn);
+                free(dbh->username);
+                free(dbh);
+                return NULL;
+            }
+            dbh->conn = db;
+            dbh->connected = 1;
+            break;
+        }
+#endif
+
+#ifdef HAVE_MYSQL
+        case DBI_DRIVER_MYSQL: {
+            MYSQL *mysql = mysql_init(NULL);
+            if (!mysql) {
+                set_error(dbh, -1, "MySQL initialization failed");
+                free(database);
+                free(host);
+                free(dbh->dsn);
+                free(dbh->username);
+                free(dbh);
+                return NULL;
+            }
+
+            if (!mysql_real_connect(mysql,
+                                   host ? host : "localhost",
+                                   user,
+                                   pass,
+                                   database,
+                                   port ? port : 3306,
+                                   NULL, 0)) {
+                set_error(dbh, mysql_errno(mysql), mysql_error(mysql));
+                mysql_close(mysql);
+                free(database);
+                free(host);
+                free(dbh->dsn);
+                free(dbh->username);
+                free(dbh);
+                return NULL;
+            }
+
+            if (dbh->auto_commit) {
+                mysql_autocommit(mysql, 1);
+            }
+
+            dbh->conn = mysql;
+            dbh->connected = 1;
+            break;
+        }
+#endif
+
+#ifdef HAVE_POSTGRES
+        case DBI_DRIVER_POSTGRES: {
+            char conninfo[1024];
+            snprintf(conninfo, sizeof(conninfo),
+                    "host=%s port=%d dbname=%s user=%s password=%s",
+                    host ? host : "localhost",
+                    port ? port : 5432,
+                    database ? database : "",
+                    user ? user : "",
+                    pass ? pass : "");
+
+            PGconn *pg = PQconnectdb(conninfo);
+            if (PQstatus(pg) != CONNECTION_OK) {
+                set_error(dbh, -1, PQerrorMessage(pg));
+                PQfinish(pg);
+                free(database);
+                free(host);
+                free(dbh->dsn);
+                free(dbh->username);
+                free(dbh);
+                return NULL;
+            }
+
+            dbh->conn = pg;
+            dbh->connected = 1;
+            break;
+        }
+#endif
+
+        default:
+            set_error(dbh, -1, "Unknown or unsupported database driver");
+            free(database);
+            free(host);
+            free(dbh->dsn);
+            free(dbh->username);
+            free(dbh);
+            return NULL;
+    }
+
+    free(database);
+    free(host);
+    return dbh;
+}
+
+/* Disconnect using raw ptr */
+void strada_dbi_disconnect_raw(DbiHandle *dbh) {
+    dbi_disconnect(dbh);
+}
+
+/* Ping using raw ptr */
+int strada_dbi_ping_raw(DbiHandle *dbh) {
+    return dbi_ping(dbh);
+}
+
+/* Prepare statement using raw types */
+DbiStatement* strada_dbi_prepare_raw(DbiHandle *dbh, const char *sql) {
+    return dbi_prepare(dbh, sql);
+}
+
+/* Execute without params (params bound separately) */
+int strada_dbi_execute_raw(DbiStatement *sth) {
+    if (!sth || !sth->dbh) return -1;
+
+    DbiHandle *dbh = sth->dbh;
+    sth->executed = 1;
+    sth->finished = 0;
+
+    switch (dbh->driver) {
+#ifdef HAVE_SQLITE3
+        case DBI_DRIVER_SQLITE: {
+            sqlite3_stmt *stmt = (sqlite3_stmt*)sth->stmt;
+            int rc = sqlite3_step(stmt);
+
+            if (rc == SQLITE_DONE) {
+                sth->affected_rows = sqlite3_changes((sqlite3*)dbh->conn);
+                sth->finished = 1;
+                return sth->affected_rows;
+            } else if (rc == SQLITE_ROW) {
+                /* SELECT query - reset to allow step-based fetching */
+                sqlite3_reset(stmt);
+                return 0;
+            } else {
+                set_error(dbh, rc, sqlite3_errmsg((sqlite3*)dbh->conn));
+                return -1;
+            }
+        }
+#endif
+#ifdef HAVE_MYSQL
+        case DBI_DRIVER_MYSQL: {
+            MYSQL_STMT *stmt = (MYSQL_STMT*)sth->stmt;
+            if (mysql_stmt_execute(stmt) != 0) {
+                set_error(dbh, mysql_stmt_errno(stmt), mysql_stmt_error(stmt));
+                return -1;
+            }
+            sth->affected_rows = mysql_stmt_affected_rows(stmt);
+            return sth->affected_rows;
+        }
+#endif
+#ifdef HAVE_POSTGRES
+        case DBI_DRIVER_POSTGRES: {
+            /* For PostgreSQL, we store the SQL and execute on step */
+            return 0;
+        }
+#endif
+        default:
+            return -1;
+    }
+}
+
+/* Bind int parameter */
+void strada_dbi_bind_int(DbiStatement *sth, int idx, int64_t val) {
+    if (!sth || !sth->dbh) return;
+
+    switch (sth->dbh->driver) {
+#ifdef HAVE_SQLITE3
+        case DBI_DRIVER_SQLITE:
+            sqlite3_bind_int64((sqlite3_stmt*)sth->stmt, idx, val);
+            break;
+#endif
+        default:
+            break;
+    }
+}
+
+/* Bind string parameter */
+void strada_dbi_bind_str(DbiStatement *sth, int idx, const char *val) {
+    if (!sth || !sth->dbh) return;
+
+    switch (sth->dbh->driver) {
+#ifdef HAVE_SQLITE3
+        case DBI_DRIVER_SQLITE:
+            if (val) {
+                sqlite3_bind_text((sqlite3_stmt*)sth->stmt, idx, val, -1, SQLITE_TRANSIENT);
+            } else {
+                sqlite3_bind_null((sqlite3_stmt*)sth->stmt, idx);
+            }
+            break;
+#endif
+        default:
+            break;
+    }
+}
+
+/* Bind double parameter */
+void strada_dbi_bind_num(DbiStatement *sth, int idx, double val) {
+    if (!sth || !sth->dbh) return;
+
+    switch (sth->dbh->driver) {
+#ifdef HAVE_SQLITE3
+        case DBI_DRIVER_SQLITE:
+            sqlite3_bind_double((sqlite3_stmt*)sth->stmt, idx, val);
+            break;
+#endif
+        default:
+            break;
+    }
+}
+
+/* Bind NULL parameter */
+void strada_dbi_bind_null(DbiStatement *sth, int idx) {
+    if (!sth || !sth->dbh) return;
+
+    switch (sth->dbh->driver) {
+#ifdef HAVE_SQLITE3
+        case DBI_DRIVER_SQLITE:
+            sqlite3_bind_null((sqlite3_stmt*)sth->stmt, idx);
+            break;
+#endif
+        default:
+            break;
+    }
+}
+
+/* Clear bindings */
+void strada_dbi_clear_bindings(DbiStatement *sth) {
+    if (!sth || !sth->dbh) return;
+
+    switch (sth->dbh->driver) {
+#ifdef HAVE_SQLITE3
+        case DBI_DRIVER_SQLITE:
+            sqlite3_reset((sqlite3_stmt*)sth->stmt);
+            sqlite3_clear_bindings((sqlite3_stmt*)sth->stmt);
+            break;
+#endif
+        default:
+            break;
+    }
+}
+
+/* Step to next row - returns 1 if row available, 0 if done, -1 on error */
+int strada_dbi_step(DbiStatement *sth) {
+    if (!sth || !sth->dbh || !sth->executed) return -1;
+    if (sth->finished) return 0;
+
+    DbiHandle *dbh = sth->dbh;
+
+    switch (dbh->driver) {
+#ifdef HAVE_SQLITE3
+        case DBI_DRIVER_SQLITE: {
+            int rc = sqlite3_step((sqlite3_stmt*)sth->stmt);
+            if (rc == SQLITE_ROW) {
+                return 1;
+            } else if (rc == SQLITE_DONE) {
+                sth->finished = 1;
+                return 0;
+            } else {
+                set_error(dbh, rc, sqlite3_errmsg((sqlite3*)dbh->conn));
+                return -1;
+            }
+        }
+#endif
+#ifdef HAVE_POSTGRES
+        case DBI_DRIVER_POSTGRES: {
+            /* PostgreSQL: increment row counter */
+            if (!sth->result) return 0;
+            PGresult *res = (PGresult*)sth->result;
+            if (sth->row_count < PQntuples(res)) {
+                return 1;
+            }
+            sth->finished = 1;
+            return 0;
+        }
+#endif
+        default:
+            return -1;
+    }
+}
+
+/* Get column count */
+int strada_dbi_column_count(DbiStatement *sth) {
+    if (!sth) return 0;
+    return sth->num_columns;
+}
+
+/* Get column name - returns allocated string, caller must free */
+char* strada_dbi_column_name(DbiStatement *sth, int idx) {
+    if (!sth || !sth->column_names || idx < 0 || idx >= sth->num_columns) {
+        return strdup("");
+    }
+    return strdup(sth->column_names[idx]);
+}
+
+/* Get column type: 0=null, 1=int, 2=num, 3=str */
+int strada_dbi_column_type(DbiStatement *sth, int idx) {
+    if (!sth || !sth->dbh) return 0;
+
+    switch (sth->dbh->driver) {
+#ifdef HAVE_SQLITE3
+        case DBI_DRIVER_SQLITE: {
+            int type = sqlite3_column_type((sqlite3_stmt*)sth->stmt, idx);
+            switch (type) {
+                case SQLITE_NULL:    return 0;
+                case SQLITE_INTEGER: return 1;
+                case SQLITE_FLOAT:   return 2;
+                default:             return 3;
+            }
+        }
+#endif
+        default:
+            return 3; /* Default to string */
+    }
+}
+
+/* Get column as int */
+int64_t strada_dbi_column_int(DbiStatement *sth, int idx) {
+    if (!sth || !sth->dbh) return 0;
+
+    switch (sth->dbh->driver) {
+#ifdef HAVE_SQLITE3
+        case DBI_DRIVER_SQLITE:
+            return sqlite3_column_int64((sqlite3_stmt*)sth->stmt, idx);
+#endif
+#ifdef HAVE_POSTGRES
+        case DBI_DRIVER_POSTGRES: {
+            if (!sth->result) return 0;
+            PGresult *res = (PGresult*)sth->result;
+            /* Use a row tracker stored in affected_rows temporarily */
+            int row = sth->affected_rows;
+            if (PQgetisnull(res, row, idx)) return 0;
+            return strtoll(PQgetvalue(res, row, idx), NULL, 10);
+        }
+#endif
+        default:
+            return 0;
+    }
+}
+
+/* Get column as double */
+double strada_dbi_column_num(DbiStatement *sth, int idx) {
+    if (!sth || !sth->dbh) return 0.0;
+
+    switch (sth->dbh->driver) {
+#ifdef HAVE_SQLITE3
+        case DBI_DRIVER_SQLITE:
+            return sqlite3_column_double((sqlite3_stmt*)sth->stmt, idx);
+#endif
+#ifdef HAVE_POSTGRES
+        case DBI_DRIVER_POSTGRES: {
+            if (!sth->result) return 0.0;
+            PGresult *res = (PGresult*)sth->result;
+            int row = sth->affected_rows;
+            if (PQgetisnull(res, row, idx)) return 0.0;
+            return strtod(PQgetvalue(res, row, idx), NULL);
+        }
+#endif
+        default:
+            return 0.0;
+    }
+}
+
+/* Get column as string - returns allocated string, caller must free */
+char* strada_dbi_column_str(DbiStatement *sth, int idx) {
+    if (!sth || !sth->dbh) return strdup("");
+
+    switch (sth->dbh->driver) {
+#ifdef HAVE_SQLITE3
+        case DBI_DRIVER_SQLITE: {
+            const char *text = (const char*)sqlite3_column_text((sqlite3_stmt*)sth->stmt, idx);
+            return strdup(text ? text : "");
+        }
+#endif
+#ifdef HAVE_POSTGRES
+        case DBI_DRIVER_POSTGRES: {
+            if (!sth->result) return strdup("");
+            PGresult *res = (PGresult*)sth->result;
+            int row = sth->affected_rows;
+            if (PQgetisnull(res, row, idx)) return strdup("");
+            return strdup(PQgetvalue(res, row, idx));
+        }
+#endif
+        default:
+            return strdup("");
+    }
+}
+
+/* Check if column is null */
+int strada_dbi_column_is_null(DbiStatement *sth, int idx) {
+    if (!sth || !sth->dbh) return 1;
+
+    switch (sth->dbh->driver) {
+#ifdef HAVE_SQLITE3
+        case DBI_DRIVER_SQLITE:
+            return sqlite3_column_type((sqlite3_stmt*)sth->stmt, idx) == SQLITE_NULL;
+#endif
+#ifdef HAVE_POSTGRES
+        case DBI_DRIVER_POSTGRES: {
+            if (!sth->result) return 1;
+            PGresult *res = (PGresult*)sth->result;
+            int row = sth->affected_rows;
+            return PQgetisnull(res, row, idx);
+        }
+#endif
+        default:
+            return 1;
+    }
+}
+
+/* Do SQL directly (no params) */
+int strada_dbi_do_raw(DbiHandle *dbh, const char *sql) {
+    if (!dbh || !sql) return -1;
+    return dbi_do(dbh, sql, NULL);
+}
+
+/* Transaction functions */
+int strada_dbi_begin_work_raw(DbiHandle *dbh) {
+    return dbi_begin_work(dbh);
+}
+
+int strada_dbi_commit_raw(DbiHandle *dbh) {
+    return dbi_commit(dbh);
+}
+
+int strada_dbi_rollback_raw(DbiHandle *dbh) {
+    return dbi_rollback(dbh);
+}
+
+/* Quote string - returns allocated string, caller must free */
+char* strada_dbi_quote_raw(DbiHandle *dbh, const char *str) {
+    return dbi_quote(dbh, str);
+}
+
+/* Get last insert ID */
+int64_t strada_dbi_last_insert_id_raw(DbiHandle *dbh) {
+    return dbi_last_insert_id(dbh, NULL, NULL, NULL, NULL);
+}
+
+/* Get error string - returns static string, do not free */
+const char* strada_dbi_errstr_raw(DbiHandle *dbh) {
+    return dbi_errstr(dbh);
+}
+
+/* Get error code */
+int strada_dbi_err_raw(DbiHandle *dbh) {
+    return dbi_err(dbh);
+}
+
+/* Get affected rows */
+int strada_dbi_rows_raw(DbiStatement *sth) {
+    return dbi_rows(sth);
+}
+
+/* Finish statement */
+void strada_dbi_finish_raw(DbiStatement *sth) {
+    dbi_finish(sth);
+}
+
+/* Free statement */
+void strada_dbi_free_statement_raw(DbiStatement *sth) {
+    dbi_free_statement(sth);
+}
+
+/* Get number of params */
+int strada_dbi_num_params(DbiStatement *sth) {
+    if (!sth) return 0;
+    return sth->num_params;
 }

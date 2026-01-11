@@ -1,0 +1,30 @@
+package tom;
+
+func bingo(str $moo) int
+{
+   say("so, cows go ${moo}");
+   return 33;
+}
+
+func fart(str $moo) int
+{
+   ::bingo("moood");
+   say("so, cows go ${moo}");
+   return 33;
+}
+
+
+package main;
+
+#func next() void { say("hello world") }
+
+func  main() int {
+#      say("well: i = ${i} ");
+print("hello world\n");
+
+my array @ham = (1,2,3,4);
+say($ham[-1]);
+# tom::fart("hello");
+     return 0;
+}
+

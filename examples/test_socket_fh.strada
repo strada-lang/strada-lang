@@ -1,0 +1,86 @@
+#!/usr/bin/env strada
+# Test diamond operator and print/say with sockets
+
+func run_server() void {
+    my scalar $server = sys::socket_server(19876);
+    if (!defined($server)) {
+        say("Server: Failed to create server socket");
+        return;
+    }
+
+    say("Server: Waiting for connection on port 19876...");
+    my scalar $client = sys::socket_accept($server);
+    if (!defined($client)) {
+        say("Server: Failed to accept connection");
+        return;
+    }
+
+    say("Server: Client connected, reading with diamond operator...");
+
+    # Read lines using diamond operator
+    my str $line = <$client>;
+    while (defined($line)) {
+        say("Server: Received: " . $line);
+
+        # Echo back with say()
+        say($client, "Echo: " . $line);
+
+        if ($line eq "quit") {
+            last;
+        }
+        $line = <$client>;
+    }
+
+    say("Server: Closing connection");
+    sys::socket_close($client);
+    sys::socket_close($server);
+}
+
+func main() int {
+    say("=== Socket File Handle Test ===\n");
+
+    # Start a simple server in a child process
+    my int $pid = sys::fork();
+
+    if ($pid == 0) {
+        # Child - run server
+        run_server();
+        exit(0);
+    }
+
+    # Parent - run client
+    sys::usleep(100000);  # Wait for server to start
+
+    say("Client: Connecting to localhost:19876...");
+    my scalar $sock = sys::socket_client("127.0.0.1", 19876);
+    if (!defined($sock)) {
+        say("Client: Failed to connect");
+        return 1;
+    }
+
+    say("Client: Connected! Sending messages with say()...");
+
+    # Send lines using say()
+    say($sock, "Hello from Strada!");
+    my str $response = <$sock>;
+    say("Client: Got response: " . $response);
+
+    say($sock, "Testing diamond operator");
+    $response = <$sock>;
+    say("Client: Got response: " . $response);
+
+    # Test print (no newline) - need to manually add newline
+    print($sock, "quit");
+    print($sock, "\n");
+    $response = <$sock>;
+    say("Client: Got response: " . $response);
+
+    say("Client: Closing socket");
+    sys::socket_close($sock);
+
+    # Wait for child
+    sys::wait();
+
+    say("\n=== Socket test complete! ===");
+    return 0;
+}

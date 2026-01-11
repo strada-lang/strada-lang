@@ -1,0 +1,102 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+func main() int {
+    say("=== Do-While Loop Tests ===");
+
+    # Test 1: Basic do-while (executes at least once)
+    say("Test 1: Basic do-while");
+    my int $i = 0;
+    do {
+        say("i=" . $i);
+        $i = $i + 1;
+    } while ($i < 3);
+
+    # Test 2: do-while executes once even if condition is false
+    say("");
+    say("Test 2: Executes once even if false");
+    $i = 10;
+    do {
+        say("i=" . $i);
+        $i = $i + 1;
+    } while ($i < 5);
+
+    # Test 3: do-while with last (break)
+    say("");
+    say("Test 3: do-while with last");
+    $i = 0;
+    do {
+        if ($i == 2) {
+            say("Breaking at i=" . $i);
+            last;
+        }
+        say("i=" . $i);
+        $i = $i + 1;
+    } while ($i < 10);
+
+    # Test 4: do-while with next (continue)
+    say("");
+    say("Test 4: do-while with next");
+    $i = 0;
+    do {
+        $i = $i + 1;
+        if ($i == 2) {
+            say("Skipping i=" . $i);
+            next;
+        }
+        say("i=" . $i);
+    } while ($i < 4);
+
+    # Test 5: Labeled do-while with last LABEL
+    say("");
+    say("Test 5: Labeled do-while with last LABEL");
+    $i = 0;
+    OUTER: do {
+        my int $j = 0;
+        do {
+            say("i=" . $i . " j=" . $j);
+            if ($j == 1 && $i == 1) {
+                say("Breaking OUTER");
+                last OUTER;
+            }
+            $j = $j + 1;
+        } while ($j < 3);
+        $i = $i + 1;
+    } while ($i < 3);
+
+    # Test 6: Labeled do-while with next LABEL
+    say("");
+    say("Test 6: Labeled do-while with next LABEL");
+    $i = 0;
+    OUTER2: do {
+        $i = $i + 1;
+        my int $j = 0;
+        do {
+            $j = $j + 1;
+            if ($j == 2) {
+                say("Skipping to next OUTER2 at i=" . $i);
+                next OUTER2;
+            }
+            say("i=" . $i . " j=" . $j);
+        } while ($j < 3);
+        say("End of outer iteration");
+    } while ($i < 3);
+
+    say("");
+    say("=== Done ===");
+    return 0;
+}

@@ -1,180 +1,662 @@
-# ssl - SSL/TLS Socket Module for Strada
-#
-# Usage:
-#   use lib "lib";
-#   use ssl;
-#
-#   my int $conn = ssl::connect("example.com", 443);
-#   ssl::write($conn, "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n");
-#   my str $response = ssl::read($conn, 4096);
-#   ssl::close($conn);
-#
-# Requires: lib/ssl/libstrada_ssl.so (build with: cd lib/ssl && make)
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+=head1 NAME
+
+ssl - SSL/TLS Socket Module for Strada
+
+=head1 SYNOPSIS
+
+    use lib "lib";
+    use ssl;
+
+    # Connect to HTTPS server
+    my int $conn = ssl::connect("example.com", 443);
+    ssl::write($conn, "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n");
+    my str $response = ssl::read($conn, 4096);
+    ssl::close($conn);
+
+    # Convenience function for HTTP GET
+    my str $page = ssl::http_get("example.com", 443, "/path");
+
+=head1 DESCRIPTION
+
+The ssl module provides SSL/TLS socket operations using OpenSSL.
+It supports both client and server modes with full TLS 1.3 support.
+
+B<Compile with:> C<./strada myapp.strada -lssl -lcrypto>
+
+=head1 CLIENT FUNCTIONS
+
+=head2 connect($host, $port)
+
+Connect to an SSL/TLS server. Returns a connection handle (int) or 0 on failure.
+
+    my int $conn = ssl::connect("api.example.com", 443);
+    if ($conn == 0) {
+        say("Connection failed: " . ssl::error());
+    }
+
+=head2 write($conn, $data)
+
+Write data to the SSL connection. Returns bytes written or -1 on error.
+
+    my int $sent = ssl::write($conn, "Hello, server!");
+
+=head2 read($conn, $max_len)
+
+Read up to C<$max_len> bytes from the connection.
+
+    my str $data = ssl::read($conn, 4096);
+
+=head2 readline($conn, $max_len)
+
+Read a line (up to newline) from the connection.
+
+    my str $line = ssl::readline($conn, 1024);
+
+=head2 close($conn)
+
+Close the SSL connection and free resources.
+
+    ssl::close($conn);
+
+=head1 SERVER FUNCTIONS
+
+=head2 server($port, $cert_file, $key_file)
+
+Create an SSL server socket. Returns server handle or 0 on failure.
+
+    my int $server = ssl::server(8443, "cert.pem", "key.pem");
+
+=head2 accept($server)
+
+Accept a client connection. Returns client handle or 0 on failure.
+
+    my int $client = ssl::accept($server);
+    if ($client != 0) {
+        my str $request = ssl::read($client, 4096);
+        ssl::write($client, "HTTP/1.1 200 OK\r\n\r\nHello!");
+        ssl::close($client);
+    }
+
+=head1 UTILITY FUNCTIONS
+
+=head2 init()
+
+Initialize OpenSSL (called automatically by connect/server).
+
+=head2 error()
+
+Get the last SSL error message.
+
+    say("Error: " . ssl::error());
+
+=head2 peer_cert($conn)
+
+Get the peer certificate subject.
+
+    my str $subject = ssl::peer_cert($conn);
+
+=head2 get_version($conn)
+
+Get the SSL/TLS protocol version in use.
+
+    my str $ver = ssl::get_version($conn);  # e.g., "TLSv1.3"
+
+=head2 cipher($conn)
+
+Get the cipher suite in use.
+
+    my str $cipher = ssl::cipher($conn);  # e.g., "TLS_AES_256_GCM_SHA384"
+
+=head2 verify($conn)
+
+Verify the server certificate. Returns 0 if valid, error code otherwise.
+
+    my int $result = ssl::verify($conn);
+    if ($result == 0) {
+        say("Certificate is valid");
+    }
+
+=head2 fd($conn)
+
+Get the underlying socket file descriptor.
+
+=head2 http_get($host, $port, $path)
+
+Convenience function for HTTPS GET requests.
+
+    my str $response = ssl::http_get("api.example.com", 443, "/v1/data");
+
+=head1 EXAMPLE
+
+    use lib "lib";
+    use ssl;
+
+    # HTTPS client
+    my int $conn = ssl::connect("httpbin.org", 443);
+    if ($conn == 0) {
+        die("Connection failed");
+    }
+
+    say("Connected using " . ssl::get_version($conn));
+    say("Cipher: " . ssl::cipher($conn));
+
+    my str $request = "GET /ip HTTP/1.1\r\n";
+    $request = $request . "Host: httpbin.org\r\n";
+    $request = $request . "Connection: close\r\n\r\n";
+
+    ssl::write($conn, $request);
+
+    my str $response = "";
+    my str $chunk = ssl::read($conn, 4096);
+    while (length($chunk) > 0) {
+        $response = $response . $chunk;
+        $chunk = ssl::read($conn, 4096);
+    }
+
+    say($response);
+    ssl::close($conn);
+
+=head1 SEE ALSO
+
+L<LWP_SSL>, L<LWP>
+
+=cut
 
 package ssl;
 
-# Load the library - tries multiple paths
-func _get_lib() int {
-    my int $lib = sys::dl_open("lib/ssl/libstrada_ssl.so");
-    if ($lib == 0) {
-        $lib = sys::dl_open("./lib/ssl/libstrada_ssl.so");
-    }
-    if ($lib == 0) {
-        $lib = sys::dl_open("libstrada_ssl.so");
-    }
-    return $lib;
+# C includes and type definitions
+__C__ {
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+
+typedef struct {
+    int socket_fd;
+    SSL *ssl;
+    SSL_CTX *ctx;
+    int is_server;
+} SSLConnection;
+
+static int ssl_initialized = 0;
+static char ssl_errbuf[256];
 }
 
-# Initialize OpenSSL (optional - called automatically by connect/server)
+# Initialize OpenSSL (called automatically by connect/server)
 func init() int {
-    my int $lib = ssl::_get_lib();
-    if ($lib == 0) {
-        return -1;
+    __C__ {
+        if (!ssl_initialized) {
+            SSL_library_init();
+            SSL_load_error_strings();
+            OpenSSL_add_all_algorithms();
+            ssl_initialized = 1;
+        }
     }
-    my int $fn = sys::dl_sym($lib, "strada_ssl_init");
-    return sys::dl_call_int($fn, []);
+    return 0;
 }
 
 # Connect to an SSL/TLS server
-# Returns connection handle (int) or 0 on failure
+# Returns connection handle (int, actually pointer) or 0 on failure
 func connect(str $host, int $port) int {
-    my int $lib = ssl::_get_lib();
-    if ($lib == 0) {
-        return 0;
+    my int $result = 0;
+    __C__ {
+        if (!ssl_initialized) {
+            SSL_library_init();
+            SSL_load_error_strings();
+            OpenSSL_add_all_algorithms();
+            ssl_initialized = 1;
+        }
+
+        const char *host_str = strada_to_str(host);
+        int port_val = (int)strada_to_int(port);
+
+        SSLConnection *conn = malloc(sizeof(SSLConnection));
+        if (!conn) {
+            result = strada_new_int(0);
+        } else {
+            memset(conn, 0, sizeof(SSLConnection));
+            conn->is_server = 0;
+
+            const SSL_METHOD *method = TLS_client_method();
+            conn->ctx = SSL_CTX_new(method);
+            if (!conn->ctx) {
+                free(conn);
+                result = strada_new_int(0);
+            } else {
+                conn->socket_fd = socket(AF_INET, SOCK_STREAM, 0);
+                if (conn->socket_fd < 0) {
+                    SSL_CTX_free(conn->ctx);
+                    free(conn);
+                    result = strada_new_int(0);
+                } else {
+                    struct hostent *he = gethostbyname(host_str);
+                    if (!he) {
+                        close(conn->socket_fd);
+                        SSL_CTX_free(conn->ctx);
+                        free(conn);
+                        result = strada_new_int(0);
+                    } else {
+                        struct sockaddr_in addr;
+                        memset(&addr, 0, sizeof(addr));
+                        addr.sin_family = AF_INET;
+                        addr.sin_port = htons(port_val);
+                        memcpy(&addr.sin_addr, he->h_addr_list[0], he->h_length);
+
+                        if (connect(conn->socket_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+                            close(conn->socket_fd);
+                            SSL_CTX_free(conn->ctx);
+                            free(conn);
+                            result = strada_new_int(0);
+                        } else {
+                            conn->ssl = SSL_new(conn->ctx);
+                            if (!conn->ssl) {
+                                close(conn->socket_fd);
+                                SSL_CTX_free(conn->ctx);
+                                free(conn);
+                                result = strada_new_int(0);
+                            } else {
+                                SSL_set_fd(conn->ssl, conn->socket_fd);
+                                SSL_set_tlsext_host_name(conn->ssl, host_str);
+
+                                if (SSL_connect(conn->ssl) <= 0) {
+                                    SSL_free(conn->ssl);
+                                    close(conn->socket_fd);
+                                    SSL_CTX_free(conn->ctx);
+                                    free(conn);
+                                    result = strada_new_int(0);
+                                } else {
+                                    result = strada_new_int((int64_t)(intptr_t)conn);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
-
-    # Initialize SSL first
-    my int $fn_init = sys::dl_sym($lib, "strada_ssl_init");
-    sys::dl_call_int($fn_init, []);
-
-    # Connect - uses _sv to pass StradaValue* directly for string support
-    my int $fn = sys::dl_sym($lib, "strada_ssl_connect");
-    return sys::dl_call_int_sv($fn, [$host, $port]);
+    return $result;
 }
 
 # Create an SSL server socket
 func server(int $port, str $cert_file, str $key_file) int {
-    my int $lib = ssl::_get_lib();
-    if ($lib == 0) {
-        return 0;
+    my int $result = 0;
+    __C__ {
+        if (!ssl_initialized) {
+            SSL_library_init();
+            SSL_load_error_strings();
+            OpenSSL_add_all_algorithms();
+            ssl_initialized = 1;
+        }
+
+        int port_val = (int)strada_to_int(port);
+        const char *cert_str = strada_to_str(cert_file);
+        const char *key_str = strada_to_str(key_file);
+
+        SSLConnection *conn = malloc(sizeof(SSLConnection));
+        if (!conn) {
+            result = strada_new_int(0);
+        } else {
+            memset(conn, 0, sizeof(SSLConnection));
+            conn->is_server = 1;
+
+            const SSL_METHOD *method = TLS_server_method();
+            conn->ctx = SSL_CTX_new(method);
+            if (!conn->ctx) {
+                free(conn);
+                result = strada_new_int(0);
+            } else if (SSL_CTX_use_certificate_file(conn->ctx, cert_str, SSL_FILETYPE_PEM) <= 0) {
+                SSL_CTX_free(conn->ctx);
+                free(conn);
+                result = strada_new_int(0);
+            } else if (SSL_CTX_use_PrivateKey_file(conn->ctx, key_str, SSL_FILETYPE_PEM) <= 0) {
+                SSL_CTX_free(conn->ctx);
+                free(conn);
+                result = strada_new_int(0);
+            } else if (!SSL_CTX_check_private_key(conn->ctx)) {
+                SSL_CTX_free(conn->ctx);
+                free(conn);
+                result = strada_new_int(0);
+            } else {
+                conn->socket_fd = socket(AF_INET, SOCK_STREAM, 0);
+                if (conn->socket_fd < 0) {
+                    SSL_CTX_free(conn->ctx);
+                    free(conn);
+                    result = strada_new_int(0);
+                } else {
+                    int opt = 1;
+                    setsockopt(conn->socket_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+                    struct sockaddr_in addr;
+                    memset(&addr, 0, sizeof(addr));
+                    addr.sin_family = AF_INET;
+                    addr.sin_addr.s_addr = INADDR_ANY;
+                    addr.sin_port = htons(port_val);
+
+                    if (bind(conn->socket_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+                        close(conn->socket_fd);
+                        SSL_CTX_free(conn->ctx);
+                        free(conn);
+                        result = strada_new_int(0);
+                    } else if (listen(conn->socket_fd, 10) < 0) {
+                        close(conn->socket_fd);
+                        SSL_CTX_free(conn->ctx);
+                        free(conn);
+                        result = strada_new_int(0);
+                    } else {
+                        result = strada_new_int((int64_t)(intptr_t)conn);
+                    }
+                }
+            }
+        }
     }
-
-    my int $fn_init = sys::dl_sym($lib, "strada_ssl_init");
-    sys::dl_call_int($fn_init, []);
-
-    my int $fn = sys::dl_sym($lib, "strada_ssl_server");
-    return sys::dl_call_int_sv($fn, [$port, $cert_file, $key_file]);
+    return $result;
 }
 
 # Accept connection on SSL server
 func accept(int $server) int {
-    my int $lib = ssl::_get_lib();
-    if ($lib == 0) {
-        return 0;
+    my int $result = 0;
+    __C__ {
+        SSLConnection *server_conn = (SSLConnection*)(intptr_t)strada_to_int(server);
+        if (!server_conn || !server_conn->is_server) {
+            result = strada_new_int(0);
+        } else {
+            struct sockaddr_in client_addr;
+            socklen_t addr_len = sizeof(client_addr);
+            int client_fd = accept(server_conn->socket_fd, (struct sockaddr*)&client_addr, &addr_len);
+            if (client_fd < 0) {
+                result = strada_new_int(0);
+            } else {
+                SSLConnection *conn = malloc(sizeof(SSLConnection));
+                if (!conn) {
+                    close(client_fd);
+                    result = strada_new_int(0);
+                } else {
+                    memset(conn, 0, sizeof(SSLConnection));
+                    conn->socket_fd = client_fd;
+                    conn->ctx = server_conn->ctx;
+                    conn->is_server = 0;
+                    conn->ssl = SSL_new(server_conn->ctx);
+                    if (!conn->ssl) {
+                        close(client_fd);
+                        free(conn);
+                        result = strada_new_int(0);
+                    } else {
+                        SSL_set_fd(conn->ssl, client_fd);
+                        if (SSL_accept(conn->ssl) <= 0) {
+                            SSL_free(conn->ssl);
+                            close(client_fd);
+                            free(conn);
+                            result = strada_new_int(0);
+                        } else {
+                            result = strada_new_int((int64_t)(intptr_t)conn);
+                        }
+                    }
+                }
+            }
+        }
     }
-    my int $fn = sys::dl_sym($lib, "strada_ssl_accept");
-    return sys::dl_call_int_sv($fn, [$server]);
+    return $result;
 }
 
 # Read data from SSL connection
 func read(int $conn, int $max_len) str {
-    my int $lib = ssl::_get_lib();
-    if ($lib == 0) {
-        return "";
+    my str $result = "";
+    __C__ {
+        SSLConnection *c = (SSLConnection*)(intptr_t)strada_to_int(conn);
+        int max = (int)strada_to_int(max_len);
+        if (!c || !c->ssl) {
+            result = strada_new_str("");
+        } else {
+            char *buffer = malloc(max + 1);
+            if (!buffer) {
+                result = strada_new_str("");
+            } else {
+                int n = SSL_read(c->ssl, buffer, max);
+                if (n <= 0) {
+                    free(buffer);
+                    result = strada_new_str("");
+                } else {
+                    buffer[n] = '\0';
+                    result = strada_new_str(buffer);
+                    free(buffer);
+                }
+            }
+        }
     }
-
-    my int $fn = sys::dl_sym($lib, "strada_ssl_read_str");
-    return sys::dl_call_str_sv($fn, [$conn, $max_len]);
+    return $result;
 }
 
 # Read a line from SSL connection
 func readline(int $conn, int $max_len) str {
-    my int $lib = ssl::_get_lib();
-    if ($lib == 0) {
-        return "";
+    my str $result = "";
+    __C__ {
+        SSLConnection *c = (SSLConnection*)(intptr_t)strada_to_int(conn);
+        int max = (int)strada_to_int(max_len);
+        if (!c || !c->ssl) {
+            result = strada_new_str("");
+        } else {
+            char *buffer = malloc(max + 1);
+            if (!buffer) {
+                result = strada_new_str("");
+            } else {
+                int pos = 0;
+                char ch;
+                while (pos < max) {
+                    int n = SSL_read(c->ssl, &ch, 1);
+                    if (n <= 0) break;
+                    buffer[pos++] = ch;
+                    if (ch == '\n') break;
+                }
+                buffer[pos] = '\0';
+                result = strada_new_str(buffer);
+                free(buffer);
+            }
+        }
     }
-    my int $fn = sys::dl_sym($lib, "strada_ssl_readline");
-    return sys::dl_call_str_sv($fn, [$conn, $max_len]);
+    return $result;
 }
 
 # Write string to SSL connection
 func write(int $conn, str $data) int {
-    my int $lib = ssl::_get_lib();
-    if ($lib == 0) {
-        return -1;
+    my int $result = 0;
+    __C__ {
+        SSLConnection *c = (SSLConnection*)(intptr_t)strada_to_int(conn);
+        const char *data_str = strada_to_str(data);
+        if (!c || !c->ssl || !data_str) {
+            result = strada_new_int(-1);
+        } else {
+            int len = strlen(data_str);
+            int written = SSL_write(c->ssl, data_str, len);
+            result = strada_new_int(written);
+        }
     }
-    my int $fn = sys::dl_sym($lib, "strada_ssl_write_str");
-    return sys::dl_call_int_sv($fn, [$conn, $data]);
+    return $result;
+}
+
+# Read binary data from SSL connection (handles NUL bytes)
+# Use this for protocols like LDAP/BER that may contain NUL bytes
+func read_binary(int $conn, int $max_len) str {
+    my str $result = "";
+    __C__ {
+        SSLConnection *c = (SSLConnection*)(intptr_t)strada_to_int(conn);
+        int max = (int)strada_to_int(max_len);
+        if (!c || !c->ssl) {
+            result = strada_new_str_len("", 0);
+        } else {
+            char *buffer = malloc(max + 1);
+            if (!buffer) {
+                result = strada_new_str_len("", 0);
+            } else {
+                int n = SSL_read(c->ssl, buffer, max);
+                if (n <= 0) {
+                    free(buffer);
+                    result = strada_new_str_len("", 0);
+                } else {
+                    // Use binary-safe string creation
+                    result = strada_new_str_len(buffer, n);
+                    free(buffer);
+                }
+            }
+        }
+    }
+    return $result;
+}
+
+# Write binary data to SSL connection (handles NUL bytes)
+# Use this for protocols like LDAP/BER that may contain NUL bytes
+func write_binary(int $conn, str $data) int {
+    my int $result = 0;
+    __C__ {
+        SSLConnection *c = (SSLConnection*)(intptr_t)strada_to_int(conn);
+        if (!c || !c->ssl) {
+            result = strada_new_int(-1);
+        } else {
+            // Get binary data with proper length (not strlen)
+            int len = strada_str_len(data);
+            const char *data_str = strada_to_str(data);
+            int written = SSL_write(c->ssl, data_str, len);
+            result = strada_new_int(written);
+        }
+    }
+    return $result;
 }
 
 # Close SSL connection
 func close(int $conn) void {
-    my int $lib = ssl::_get_lib();
-    if ($lib == 0) {
-        return;
+    __C__ {
+        SSLConnection *c = (SSLConnection*)(intptr_t)strada_to_int(conn);
+        if (c) {
+            if (c->ssl) {
+                SSL_shutdown(c->ssl);
+                SSL_free(c->ssl);
+            }
+            if (c->socket_fd >= 0) {
+                close(c->socket_fd);
+            }
+            if (c->is_server && c->ctx) {
+                SSL_CTX_free(c->ctx);
+            }
+            free(c);
+        }
     }
-    my int $fn = sys::dl_sym($lib, "strada_ssl_close");
-    sys::dl_call_void_sv($fn, [$conn]);
 }
 
 # Get last SSL error message
 func error() str {
-    my int $lib = ssl::_get_lib();
-    if ($lib == 0) {
-        return "Library not loaded";
+    my str $result = "";
+    __C__ {
+        unsigned long err = ERR_get_error();
+        if (err == 0) {
+            result = strada_new_str("No error");
+        } else {
+            ERR_error_string_n(err, ssl_errbuf, sizeof(ssl_errbuf));
+            result = strada_new_str(ssl_errbuf);
+        }
     }
-    my int $fn = sys::dl_sym($lib, "strada_ssl_error");
-    return sys::dl_call_str($fn, [0]);
+    return $result;
 }
 
 # Get peer certificate subject
 func peer_cert(int $conn) str {
-    my int $lib = ssl::_get_lib();
-    if ($lib == 0) {
-        return "";
+    my str $result = "";
+    __C__ {
+        static char cert_buf[1024];
+        SSLConnection *c = (SSLConnection*)(intptr_t)strada_to_int(conn);
+        if (!c || !c->ssl) {
+            result = strada_new_str("");
+        } else {
+            X509 *cert = SSL_get_peer_certificate(c->ssl);
+            if (!cert) {
+                result = strada_new_str("No certificate");
+            } else {
+                char *subject = X509_NAME_oneline(X509_get_subject_name(cert), cert_buf, sizeof(cert_buf));
+                X509_free(cert);
+                result = strada_new_str(subject ? subject : "Unknown");
+            }
+        }
     }
-    my int $fn = sys::dl_sym($lib, "strada_ssl_peer_cert");
-    return sys::dl_call_str_sv($fn, [$conn]);
+    return $result;
 }
 
 # Get SSL/TLS version
-func version(int $conn) str {
-    my int $lib = ssl::_get_lib();
-    if ($lib == 0) {
-        return "";
+func get_version(int $conn) str {
+    my str $result = "";
+    __C__ {
+        SSLConnection *c = (SSLConnection*)(intptr_t)strada_to_int(conn);
+        if (!c || !c->ssl) {
+            result = strada_new_str("Not connected");
+        } else {
+            result = strada_new_str(SSL_get_version(c->ssl));
+        }
     }
-    my int $fn = sys::dl_sym($lib, "strada_ssl_version");
-    return sys::dl_call_str_sv($fn, [$conn]);
+    return $result;
 }
 
 # Get cipher in use
 func cipher(int $conn) str {
-    my int $lib = ssl::_get_lib();
-    if ($lib == 0) {
-        return "";
+    my str $result = "";
+    __C__ {
+        SSLConnection *c = (SSLConnection*)(intptr_t)strada_to_int(conn);
+        if (!c || !c->ssl) {
+            result = strada_new_str("Not connected");
+        } else {
+            result = strada_new_str(SSL_get_cipher(c->ssl));
+        }
     }
-    my int $fn = sys::dl_sym($lib, "strada_ssl_cipher");
-    return sys::dl_call_str_sv($fn, [$conn]);
+    return $result;
 }
 
 # Get socket file descriptor
 func fd(int $conn) int {
-    my int $lib = ssl::_get_lib();
-    if ($lib == 0) {
-        return -1;
+    my int $result = 0;
+    __C__ {
+        SSLConnection *c = (SSLConnection*)(intptr_t)strada_to_int(conn);
+        if (!c) {
+            result = strada_new_int(-1);
+        } else {
+            result = strada_new_int(c->socket_fd);
+        }
     }
-    my int $fn = sys::dl_sym($lib, "strada_ssl_fd");
-    return sys::dl_call_int_sv($fn, [$conn]);
+    return $result;
 }
 
 # Verify server certificate
 func verify(int $conn) int {
-    my int $lib = ssl::_get_lib();
-    if ($lib == 0) {
-        return -1;
+    my int $result = 0;
+    __C__ {
+        SSLConnection *c = (SSLConnection*)(intptr_t)strada_to_int(conn);
+        if (!c || !c->ssl) {
+            result = strada_new_int(-1);
+        } else {
+            long r = SSL_get_verify_result(c->ssl);
+            result = strada_new_int((r == X509_V_OK) ? 0 : (int)r);
+        }
     }
-    my int $fn = sys::dl_sym($lib, "strada_ssl_verify");
-    return sys::dl_call_int_sv($fn, [$conn]);
+    return $result;
 }
 
 # Convenience: HTTP GET over SSL

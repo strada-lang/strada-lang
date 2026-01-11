@@ -1,0 +1,187 @@
+#!/usr/bin/env strada
+# Test file I/O operations for memory leaks
+# Run: valgrind --leak-check=full ./test_fileio
+
+func main() int {
+    say("Testing file I/O for memory leaks...");
+    my int $iterations = 100;
+    my str $tmpfile = "/tmp/strada_leak_test_fileio.txt";
+
+    # Test open/write/close
+    say("  open/write/close...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my scalar $fh = core::open($tmpfile, "w");
+        if (!defined($fh)) {
+            say("    FAIL: could not open for writing");
+            return 1;
+        }
+        say($fh, "line one");
+        say($fh, "line two");
+        say($fh, "line three");
+        core::close($fh);
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test open/read/close with diamond
+    say("  open/read/close diamond...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $fh = core::open($tmpfile, "r");
+        if (!defined($fh)) {
+            say("    FAIL: could not open for reading");
+            return 1;
+        }
+        my str $line1 = <$fh>;
+        my str $line2 = <$fh>;
+        if ($line1 ne "line one") {
+            say("    FAIL: line1 = " . $line1);
+            return 1;
+        }
+        core::close($fh);
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test readline
+    say("  core::readline()...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $fh = core::open($tmpfile, "r");
+        if (!defined($fh)) {
+            say("    FAIL: open");
+            return 1;
+        }
+        my str $line = core::readline($fh);
+        if ($line ne "line one") {
+            say("    FAIL: readline");
+            return 1;
+        }
+        core::close($fh);
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test read until EOF
+    say("  Read until EOF...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $fh = core::open($tmpfile, "r");
+        my int $count = 0;
+        my str $line = <$fh>;
+        while (defined($line)) {
+            $count = $count + 1;
+            $line = <$fh>;
+        }
+        if ($count != 3) {
+            say("    FAIL: line count = " . $count);
+            return 1;
+        }
+        core::close($fh);
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test slurp
+    say("  core::slurp()...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $content = core::slurp($tmpfile);
+        if (index($content, "line one") < 0) {
+            say("    FAIL: slurp missing content");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test spew
+    say("  core::spew()...");
+    $i = 0;
+    my str $tmpfile2 = "/tmp/strada_leak_test_fileio2.txt";
+    while ($i < $iterations) {
+        my str $data = "iteration " . $i . "\nsome data\n";
+        core::spew($tmpfile2, $data);
+        my str $readback = core::slurp($tmpfile2);
+        if (index($readback, "iteration") < 0) {
+            say("    FAIL: spew/slurp roundtrip");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test seek/tell
+    say("  seek/tell...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $fh = core::open($tmpfile, "r");
+        my str $line1 = <$fh>;
+        my int $pos = core::tell($fh);
+        if ($pos <= 0) {
+            say("    FAIL: tell returned " . $pos);
+            return 1;
+        }
+        core::seek($fh, 0, 0);
+        my str $line_again = <$fh>;
+        if ($line_again ne "line one") {
+            say("    FAIL: seek back to start");
+            return 1;
+        }
+        core::close($fh);
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test append mode
+    say("  Append mode...");
+    $i = 0;
+    my str $tmpfile3 = "/tmp/strada_leak_test_fileio3.txt";
+    while ($i < $iterations) {
+        core::spew($tmpfile3, "base\n");
+        my scalar $fh = core::open($tmpfile3, "a");
+        say($fh, "appended");
+        core::close($fh);
+        my str $content = core::slurp($tmpfile3);
+        if (index($content, "appended") < 0) {
+            say("    FAIL: append");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test qx (command output capture)
+    say("  core::qx()...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $output = core::qx("echo hello");
+        if (index($output, "hello") < 0) {
+            say("    FAIL: qx");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test auto-close via scope exit
+    say("  Auto-close on scope exit...");
+    $i = 0;
+    while ($i < $iterations) {
+        # File handle goes out of scope without explicit close
+        my scalar $fh = core::open($tmpfile, "r");
+        my str $line = <$fh>;
+        # $fh auto-closed when refcount drops to 0
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Cleanup temp files
+    core::unlink($tmpfile);
+    core::unlink($tmpfile2);
+    core::unlink($tmpfile3);
+
+    say("All file I/O tests passed!");
+    return 0;
+}
