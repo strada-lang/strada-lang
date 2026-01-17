@@ -75,6 +75,7 @@ func NODE_RANGE() int { return 115; }
 func NODE_SUPER_CALL() int { return 116; }
 func NODE_INCREMENT() int { return 117; }
 func NODE_ENUM() int { return 118; }
+func NODE_C_BLOCK() int { return 119; }
 
 # Type constants
 func TYPE_INT() int { return 1; }
@@ -103,7 +104,7 @@ func TYPE_SIZE_T() int { return 21; }   # size_t
 func TYPE_CHAR() int { return 22; }     # char (single character)
 func TYPE_LONG_DOUBLE() int { return 23; }  # long double (extended precision)
 func TYPE_ENUM() int { return 24; }         # enum type
-func TYPE_PTR() int { return 25; }          # raw C pointer (void*)
+# TYPE_PTR (25) was removed - use int to store opaque pointers with __C__ blocks
 
 # ============================================================
 # Node Constructors
@@ -161,7 +162,22 @@ func ast_new_program() scalar {
     my array @import_libs = ();
     $node->{"import_libs"} = \@import_libs;
     $node->{"import_lib_count"} = 0;
+    # import_object support - array of {obj_name, o_path, functions: [{name, param_count, return_type, params}]}
+    my array @import_objects = ();
+    $node->{"import_objects"} = \@import_objects;
+    $node->{"import_object_count"} = 0;
+    # Top-level C blocks - array of raw C code strings
+    my array @c_blocks = ();
+    $node->{"c_blocks"} = \@c_blocks;
+    $node->{"c_block_count"} = 0;
     return $node;
+}
+
+# Add top-level C block to program
+func ast_add_c_block(scalar $program, str $code) void {
+    my scalar $blocks = $program->{"c_blocks"};
+    push($blocks, $code);
+    $program->{"c_block_count"} = $program->{"c_block_count"} + 1;
 }
 
 # Add function to program
@@ -244,6 +260,14 @@ func ast_add_import_lib(scalar $program, scalar $lib_info) void {
     $program->{"import_lib_count"} = $program->{"import_lib_count"} + 1;
 }
 
+# Add an imported object file with its function info
+# $obj_info is a hash with: obj_name, o_path, functions (array of function info)
+func ast_add_import_object(scalar $program, scalar $obj_info) void {
+    my scalar $objs = $program->{"import_objects"};
+    push($objs, $obj_info);
+    $program->{"import_object_count"} = $program->{"import_object_count"} + 1;
+}
+
 # Create extern function node
 func ast_new_extern_func(str $name) scalar {
     my scalar $node = ast_new_node(NODE_EXTERN_FUNC());
@@ -296,6 +320,13 @@ func ast_add_enum_member(scalar $en, str $name, int $value) void {
     my scalar $members = $en->{"members"};
     push($members, \%member);
     $en->{"member_count"} = $en->{"member_count"} + 1;
+}
+
+# Create C block node (raw C code embedded in Strada)
+func ast_new_c_block(str $code) scalar {
+    my scalar $node = ast_new_node(NODE_C_BLOCK());
+    $node->{"code"} = $code;
+    return $node;
 }
 
 # Create function node
@@ -836,6 +867,7 @@ func ast_type_name(int $type) str {
     if ($type == NODE_THROW()) { return "THROW"; }
     if ($type == NODE_TERNARY()) { return "TERNARY"; }
     if ($type == NODE_SWITCH()) { return "SWITCH"; }
+    if ($type == NODE_C_BLOCK()) { return "C_BLOCK"; }
     return "UNKNOWN";
 }
 
@@ -852,6 +884,5 @@ func ast_data_type_name(int $type) str {
     if ($type == TYPE_INT64()) { return "int64"; }
     if ($type == TYPE_FLOAT32()) { return "float32"; }
     if ($type == TYPE_FLOAT64()) { return "float64"; }
-    if ($type == TYPE_PTR()) { return "ptr"; }
     return "unknown";
 }

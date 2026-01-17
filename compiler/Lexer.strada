@@ -800,6 +800,154 @@ func lex_read_q_string(scalar $lexer, int $token_line, int $is_qq) scalar {
     die("Unterminated q/qq string at line " . $token_line);
 }
 
+# Read a raw C code block __C__ { ... }
+# Handles nested braces, C strings, and C comments properly
+func lex_read_c_block(scalar $lexer, int $token_line) scalar {
+    lex_skip_whitespace($lexer);
+
+    # Expect opening brace  {=123
+    my int $code = lex_current_code($lexer);
+    if ($code != 123) {
+        die("Expected '{' after __C__ at line " . $token_line);
+    }
+    lex_advance($lexer);  # Skip opening {
+
+    my str $result = "";
+    my int $depth = 1;
+
+    while (!lex_at_end($lexer) && $depth > 0) {
+        my int $ch = lex_current_code($lexer);
+
+        # Track line numbers for better error messages
+        if ($ch == 10) {
+            $lexer->{"line"} = $lexer->{"line"} + 1;
+        }
+
+        # Handle C-style strings - don't count braces inside strings
+        # "=34
+        if ($ch == 34) {
+            $result = $result . lex_current_char($lexer);
+            lex_advance($lexer);
+            while (!lex_at_end($lexer)) {
+                my int $sch = lex_current_code($lexer);
+                $result = $result . lex_current_char($lexer);
+                if ($sch == 10) {
+                    $lexer->{"line"} = $lexer->{"line"} + 1;
+                }
+                lex_advance($lexer);
+                # End of string  "=34
+                if ($sch == 34) {
+                    last;
+                }
+                # Escape sequence \=92
+                if ($sch == 92) {
+                    if (!lex_at_end($lexer)) {
+                        $result = $result . lex_current_char($lexer);
+                        lex_advance($lexer);
+                    }
+                }
+            }
+        # Handle C-style char literals - don't count braces inside
+        # '=39
+        } elsif ($ch == 39) {
+            $result = $result . lex_current_char($lexer);
+            lex_advance($lexer);
+            while (!lex_at_end($lexer)) {
+                my int $sch = lex_current_code($lexer);
+                $result = $result . lex_current_char($lexer);
+                lex_advance($lexer);
+                # End of char '=39
+                if ($sch == 39) {
+                    last;
+                }
+                # Escape \=92
+                if ($sch == 92) {
+                    if (!lex_at_end($lexer)) {
+                        $result = $result . lex_current_char($lexer);
+                        lex_advance($lexer);
+                    }
+                }
+            }
+        # Handle C block comments /* */
+        # /=47, *=42
+        } elsif ($ch == 47) {
+            my int $nxt = char_at($lexer->{"source"}, $lexer->{"pos"} + 1);
+            # Block comment
+            if ($nxt == 42) {
+                $result = $result . "/*";
+                lex_advance($lexer);
+                lex_advance($lexer);
+                while (!lex_at_end($lexer)) {
+                    my int $c1 = lex_current_code($lexer);
+                    if ($c1 == 10) {
+                        $lexer->{"line"} = $lexer->{"line"} + 1;
+                    }
+                    # *=42
+                    if ($c1 == 42) {
+                        my int $c2 = char_at($lexer->{"source"}, $lexer->{"pos"} + 1);
+                        # /=47
+                        if ($c2 == 47) {
+                            $result = $result . "*/";
+                            lex_advance($lexer);
+                            lex_advance($lexer);
+                            last;
+                        }
+                    }
+                    $result = $result . lex_current_char($lexer);
+                    lex_advance($lexer);
+                }
+            # Line comment //
+            } elsif ($nxt == 47) {
+                $result = $result . "//";
+                lex_advance($lexer);
+                lex_advance($lexer);
+                while (!lex_at_end($lexer)) {
+                    my int $lc = lex_current_code($lexer);
+                    # newline=10
+                    if ($lc == 10) {
+                        $result = $result . "\n";
+                        $lexer->{"line"} = $lexer->{"line"} + 1;
+                        lex_advance($lexer);
+                        last;
+                    }
+                    $result = $result . lex_current_char($lexer);
+                    lex_advance($lexer);
+                }
+            } else {
+                # Just a /
+                $result = $result . "/";
+                lex_advance($lexer);
+            }
+        # Opening brace {=123
+        } elsif ($ch == 123) {
+            $depth = $depth + 1;
+            $result = $result . "{";
+            lex_advance($lexer);
+        # Closing brace }=125
+        } elsif ($ch == 125) {
+            $depth = $depth - 1;
+            if ($depth > 0) {
+                $result = $result . "}";
+            }
+            lex_advance($lexer);
+        } else {
+            # Regular character
+            $result = $result . lex_current_char($lexer);
+            lex_advance($lexer);
+        }
+    }
+
+    if ($depth > 0) {
+        die("Unterminated __C__ block at line " . $token_line);
+    }
+
+    my hash %token = ();
+    $token{"type"} = "C_BLOCK";
+    $token{"value"} = $result;
+    $token{"line"} = $token_line;
+    return \%token;
+}
+
 func lex_keyword_or_ident(str $text) str {
     if ($text eq "func") { return "FUNC"; }
     if ($text eq "my") { return "MY"; }
@@ -819,6 +967,7 @@ func lex_keyword_or_ident(str $text) str {
     if ($text eq "version") { return "VERSION"; }
     if ($text eq "use") { return "USE"; }
     if ($text eq "import_lib") { return "IMPORT_LIB"; }
+    if ($text eq "import_object") { return "IMPORT_OBJECT"; }
     if ($text eq "inherit") { return "INHERIT"; }
     if ($text eq "try") { return "TRY"; }
     if ($text eq "catch") { return "CATCH"; }
@@ -830,6 +979,7 @@ func lex_keyword_or_ident(str $text) str {
     if ($text eq "__PACKAGE__") { return "DUNDER_PACKAGE"; }
     if ($text eq "__FILE__") { return "DUNDER_FILE"; }
     if ($text eq "__LINE__") { return "DUNDER_LINE"; }
+    if ($text eq "__C__") { return "C_BLOCK"; }
 
     # String comparison operators
     if ($text eq "eq") { return "STR_EQ"; }
@@ -865,7 +1015,6 @@ func lex_keyword_or_ident(str $text) str {
     if ($text eq "float") { return "TYPE_FLOAT32"; }
     if ($text eq "double") { return "TYPE_FLOAT64"; }
     if ($text eq "long_double") { return "TYPE_LONG_DOUBLE"; }
-    if ($text eq "ptr") { return "TYPE_PTR"; }
 
     # Built-ins that need special token types
     # undef is a keyword, not a function call
@@ -971,6 +1120,11 @@ func lex_next_token(scalar $lexer) scalar {
             if ($delim == 40 || $delim == 91 || $delim == 123 || $delim == 60 || $delim == 47 || $delim == 33 || $delim == 124) {
                 return lex_read_q_string($lexer, $token_line, 1);
             }
+        }
+
+        # __C__ { ... } - raw C code block
+        if ($text eq "__C__") {
+            return lex_read_c_block($lexer, $token_line);
         }
 
         my str $type = lex_keyword_or_ident($text);

@@ -392,28 +392,45 @@ extern StradaValue* Math_Utils_multiply();
 #define multiply Math_Utils_multiply
 ```
 
-## Extern Functions
+## `__C__` Blocks
 
-Functions marked `extern` use C calling conventions:
+C code can be embedded directly using `__C__` blocks:
 
-**Strada:**
+**Top-level block (includes, globals):**
 ```strada
-extern func c_add(int $a, int $b) int {
-    return $a + $b;
+__C__ {
+    #include <math.h>
+    static int helper(int a, int b) { return a + b; }
+}
+```
+
+**Statement-level block (inline C):**
+```strada
+func c_add(int $a, int $b) int {
+    __C__ {
+        int64_t va = strada_to_int(a);
+        int64_t vb = strada_to_int(b);
+        return strada_new_int(va + vb);
+    }
 }
 ```
 
 **Generated C:**
 ```c
-int c_add(int a, int b) {
-    return a + b;
+StradaValue* c_add(StradaValue* a, StradaValue* b) {
+    /* Begin __C__ block */
+    int64_t va = strada_to_int(a);
+    int64_t vb = strada_to_int(b);
+    return strada_new_int(va + vb);
+    /* End __C__ block */
 }
 ```
 
-Key differences:
-- Raw C types instead of `StradaValue*`
-- No runtime wrappers
-- Direct C arithmetic
+Key points:
+- Top-level blocks appear at file scope in generated C
+- Statement-level blocks have access to Strada variables (as `StradaValue*`)
+- Use `strada_to_int()`, `strada_to_str()` etc. to extract values
+- Return `StradaValue*` using `strada_new_int()`, `strada_new_str()` etc.
 
 ## Build System
 

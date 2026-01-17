@@ -192,10 +192,6 @@ func parse_var_name(scalar $parser) str {
         parser_advance($parser);
         return "long_double";
     }
-    if ($type_str eq "TYPE_PTR") {
-        parser_advance($parser);
-        return "ptr";
-    }
 
     # Other keywords that can be used as variable names
     if ($type_str eq "VERSION") {
@@ -326,6 +322,10 @@ func parse_var_name(scalar $parser) str {
         parser_advance($parser);
         return "import_lib";
     }
+    if ($type_str eq "IMPORT_OBJECT") {
+        parser_advance($parser);
+        return "import_object";
+    }
     if ($type_str eq "INHERIT") {
         parser_advance($parser);
         return "inherit";
@@ -447,10 +447,6 @@ func parse_type(scalar $parser) int {
     if ($type_str eq "TYPE_LONG_DOUBLE") {
         parser_advance($parser);
         return TYPE_LONG_DOUBLE();
-    }
-    if ($type_str eq "TYPE_PTR") {
-        parser_advance($parser);
-        return TYPE_PTR();
     }
 
     # Struct name (IDENT) - return TYPE_STRUCT and store name
@@ -604,9 +600,6 @@ func parse_anon_func(scalar $parser, int $line) scalar {
     } elsif (parser_check($parser, "TYPE_LONG_DOUBLE")) {
         parser_advance($parser);
         $anon->{"return_type"} = TYPE_LONG_DOUBLE();
-    } elsif (parser_check($parser, "TYPE_PTR")) {
-        parser_advance($parser);
-        $anon->{"return_type"} = TYPE_PTR();
     }
 
     # Parse body
@@ -2112,6 +2105,13 @@ func parse_statement(scalar $parser) scalar {
         return $switch_node;
     }
 
+    # __C__ { ... } - raw C code block
+    if ($type eq "C_BLOCK") {
+        my str $c_code = $tok->{"value"};
+        parser_advance($parser);
+        return ast_new_c_block($c_code);
+    }
+
     # Expression statement
     my scalar $expr = parse_expression($parser);
     parser_expect($parser, "SEMI");
@@ -2702,12 +2702,29 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
                 my scalar $fn = parse_extern_function($mod_parser);
                 ast_add_function($mod_program, $fn);
             }
+        } elsif (parser_check($mod_parser, "C_BLOCK")) {
+            # Top-level __C__ { ... } block - collect for transfer to main program
+            my scalar $tok = parser_current($mod_parser);
+            my str $c_code = $tok->{"value"};
+            parser_advance($mod_parser);
+            ast_add_c_block($mod_program, $c_code);
         } elsif (parser_check($mod_parser, "HASH")) {
             # Skip comments that look like hash
             parser_advance($mod_parser);
         } else {
             # Skip other tokens (comments, etc)
             parser_advance($mod_parser);
+        }
+    }
+
+    # Transfer C blocks from module to main program
+    my int $mod_c_block_count = $mod_program->{"c_block_count"};
+    if ($mod_c_block_count > 0) {
+        my scalar $mod_c_blocks = $mod_program->{"c_blocks"};
+        my int $cb = 0;
+        while ($cb < $mod_c_block_count) {
+            ast_add_c_block($program, $mod_c_blocks->[$cb]);
+            $cb = $cb + 1;
         }
     }
 
@@ -3100,6 +3117,120 @@ func export_str_to_type(str $type_str) int {
     return TYPE_SCALAR();
 }
 
+# ============================================================
+# import_object support
+# ============================================================
+
+# Find .o file in lib paths
+func find_o_file(scalar $program, str $obj_name) str {
+    my str $o_name = $obj_name . ".o";
+    my scalar $lib_paths = $program->{"lib_paths"};
+    my int $i = 0;
+    my int $count = $program->{"lib_path_count"};
+
+    while ($i < $count) {
+        my str $lib_path = $lib_paths->[$i];
+        my str $full_path = $lib_path . "/" . $o_name;
+        # Try to open the file to check if it exists
+        my int $fd = sys::open_fd($full_path, "r");
+        if ($fd > 0) {
+            close_fd($fd);
+            return $full_path;
+        }
+        $i = $i + 1;
+    }
+
+    return "";
+}
+
+# Extract export metadata from object file by compiling and running a temp program
+# This allows import_object to work like import_lib - metadata comes from the .o file
+func extract_object_export_info(scalar $parser, str $obj_name, str $o_path) str {
+    # Get the strada script directory for runtime path
+    # We need to find the runtime directory relative to the compiler
+    my str $runtime_path = "runtime/strada_runtime.c";
+    my str $runtime_dir = "runtime";
+
+    # Create temp C file that calls __strada_export_info from the object
+    my str $temp_c = "/tmp/strada_import_object_" . $obj_name . ".c";
+    my str $temp_exe = "/tmp/strada_import_object_" . $obj_name;
+
+    my str $c_code = "#include <stdio.h>\n";
+    $c_code = $c_code . "extern const char* __strada_export_info(void);\n";
+    $c_code = $c_code . "int main(void) {\n";
+    $c_code = $c_code . "    const char* info = __strada_export_info();\n";
+    $c_code = $c_code . "    if (info) printf(\"%s\", info);\n";
+    $c_code = $c_code . "    return 0;\n";
+    $c_code = $c_code . "}\n";
+
+    spew($temp_c, $c_code);
+
+    # Compile the temp program with the object file
+    # We need to link with the runtime for strada_* functions used in the object
+    my str $compile_cmd = "gcc -o " . $temp_exe . " " . $temp_c . " " . $o_path;
+    $compile_cmd = $compile_cmd . " " . $runtime_path . " -I" . $runtime_dir;
+    $compile_cmd = $compile_cmd . " -ldl -lm -lpthread";
+
+    # Run gcc and capture any error output, append exit code
+    my str $compile_output = sys::qx($compile_cmd . " 2>&1; echo __EXIT_CODE__$?");
+
+    # Check if compilation succeeded by looking for exit code 0
+    my int $success = index($compile_output, "__EXIT_CODE__0");
+    if ($success < 0) {
+        # Clean up
+        sys::unlink($temp_c);
+        parser_error($parser, "import_object: failed to extract metadata from " . $o_path . " (missing __strada_export_info?)");
+    }
+
+    # Run the temp program to get export info
+    my str $metadata = sys::qx($temp_exe);
+
+    # Clean up temp files
+    sys::unlink($temp_c);
+    sys::unlink($temp_exe);
+
+    if (length($metadata) == 0) {
+        parser_error($parser, "import_object: " . $o_path . " has no export metadata (was it compiled with a recent strada compiler?)");
+    }
+
+    return $metadata;
+}
+
+# Parse import_object statement - import object file for static linking
+# import_object "objname";  -> links objname.o and reads metadata from __strada_export_info()
+func parse_import_object(scalar $parser, scalar $program) void {
+    parser_expect($parser, "IMPORT_OBJECT");
+
+    # Get the object name (must be a string)
+    my scalar $tok = parser_current($parser);
+    if ($tok->{"type"} ne "STR_LITERAL") {
+        parser_error($parser, "import_object requires a string object name");
+    }
+    my str $obj_name = $tok->{"value"};
+    parser_advance($parser);
+
+    parser_expect($parser, "SEMI");
+
+    # Find the .o file in lib paths
+    my str $o_path = find_o_file($program, $obj_name);
+    if (length($o_path) == 0) {
+        parser_error($parser, "cannot find object file: " . $obj_name . ".o");
+    }
+
+    # Extract export metadata from the object file (like import_lib does with .so)
+    my str $metadata = extract_object_export_info($parser, $obj_name, $o_path);
+
+    # Parse the metadata using the same function as import_lib
+    # Note: parse_export_metadata expects so_path, but we pass o_path - works the same
+    my scalar $obj_info = parse_export_metadata($obj_name, $o_path, $metadata);
+
+    # Add o_path to the result (parse_export_metadata sets so_path, but we need o_path)
+    $obj_info->{"o_path"} = $o_path;
+
+    # Add to program
+    ast_add_import_object($program, $obj_info);
+}
+
 func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low) scalar {
     my scalar $program = ast_new_program();
 
@@ -3168,11 +3299,19 @@ func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low) sca
             parse_use($parser, $program);
         } elsif (parser_check($parser, "IMPORT_LIB")) {
             parse_import_lib($parser, $program);
+        } elsif (parser_check($parser, "IMPORT_OBJECT")) {
+            parse_import_object($parser, $program);
         } elsif (parser_check($parser, "MY")) {
             my scalar $var = parse_var_decl($parser);
             ast_add_global($program, $var);
+        } elsif (parser_check($parser, "C_BLOCK")) {
+            # Top-level __C__ { ... } block
+            my scalar $tok = parser_current($parser);
+            my str $c_code = $tok->{"value"};
+            parser_advance($parser);
+            ast_add_c_block($program, $c_code);
         } else {
-            parser_error($parser, "expected function, extern, struct, enum, package, inherit, use, import_lib, or variable declaration");
+            parser_error($parser, "expected function, extern, struct, enum, package, inherit, use, import_lib, import_object, __C__, or variable declaration");
         }
     }
 

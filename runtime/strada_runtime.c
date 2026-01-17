@@ -8194,6 +8194,51 @@ StradaValue* strada_pclose(StradaValue *fh) {
     return strada_new_int(WEXITSTATUS(status));
 }
 
+/* Run command and capture stdout (like Perl's qx// or backticks) */
+StradaValue* strada_qx(StradaValue *cmd) {
+    const char *c = strada_to_str(cmd);
+    FILE *fp = popen(c, "r");
+    if (!fp) return strada_new_str("");
+
+    /* Read all output into a buffer */
+    size_t capacity = 4096;
+    size_t len = 0;
+    char *buf = malloc(capacity);
+    if (!buf) {
+        pclose(fp);
+        return strada_new_str("");
+    }
+
+    char temp[1024];
+    while (fgets(temp, sizeof(temp), fp)) {
+        size_t chunk_len = strlen(temp);
+        if (len + chunk_len + 1 > capacity) {
+            capacity = (len + chunk_len + 1) * 2;
+            char *newbuf = realloc(buf, capacity);
+            if (!newbuf) {
+                free(buf);
+                pclose(fp);
+                return strada_new_str("");
+            }
+            buf = newbuf;
+        }
+        memcpy(buf + len, temp, chunk_len);
+        len += chunk_len;
+    }
+    buf[len] = '\0';
+
+    pclose(fp);
+
+    StradaValue *result = strada_new_str(buf);
+    free(buf);
+    return result;
+}
+
+/* Aliases for bootstrap compiler compatibility (sys::foo -> sys_foo) */
+StradaValue* sys_system(StradaValue *cmd) { return strada_system(cmd); }
+StradaValue* sys_qx(StradaValue *cmd) { return strada_qx(cmd); }
+StradaValue* sys_unlink(StradaValue *path) { return strada_unlink(path); }
+
 /* ===== ADDITIONAL FILE SYSTEM ===== */
 
 StradaValue* strada_truncate(StradaValue *path, StradaValue *length) {

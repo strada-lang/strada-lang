@@ -793,6 +793,44 @@ func register_import_lib_functions(scalar $ctx, scalar $ast) void {
     }
 }
 
+# Register functions from import_object statements (static linking)
+func register_import_object_functions(scalar $ctx, scalar $ast) void {
+    my int $obj_count = $ast->{"import_object_count"};
+    if ($obj_count == 0) {
+        return;
+    }
+
+    my scalar $import_objects = $ast->{"import_objects"};
+
+    for (my int $i = 0; $i < $obj_count; $i = $i + 1) {
+        my scalar $obj_info = $import_objects->[$i];
+        my scalar $obj_funcs = $obj_info->{"functions"};
+        my int $fn_count = $obj_info->{"function_count"};
+
+        for (my int $j = 0; $j < $fn_count; $j = $j + 1) {
+            my scalar $fn_info = $obj_funcs->[$j];
+            my str $name = $fn_info->{"name"};
+
+            # Register function (skip if already exists)
+            my scalar $existing_fn = $ctx->{"functions"}->{$name};
+            if ($existing_fn != 0) {
+                next;  # Function with this name already exists
+            }
+
+            my hash %info = ();
+            $info{"is_registered"} = 1;
+            $info{"return_type"} = $fn_info->{"return_type"};
+            $info{"param_count"} = $fn_info->{"param_count"};
+            $info{"params"} = $fn_info->{"params"};
+            $info{"is_extern"} = 0;
+            $info{"is_variadic"} = 0;
+            $info{"is_import_object"} = 1;  # Mark as import_object function
+            $info{"line"} = 0;
+            $ctx->{"functions"}->{$name} = \%info;
+        }
+    }
+}
+
 # Register global variables in the global scope
 func register_globals(scalar $ctx, scalar $ast) void {
     my int $global_count = $ast->{"global_count"};
@@ -1231,6 +1269,7 @@ func semantic_analyze(scalar $ast, int $show_warnings) void {
     register_structs($ctx, $ast);
     register_globals($ctx, $ast);
     register_import_lib_functions($ctx, $ast);
+    register_import_object_functions($ctx, $ast);
 
     # Second pass: validate each function
     my scalar $funcs = $ast->{"functions"};

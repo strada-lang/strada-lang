@@ -311,48 +311,56 @@ gcc -shared -fPIC -rdynamic -o libmylib.so mylib.c \
 
 ---
 
-## Extern Functions
+## `__C__` Blocks
 
-For inline C code within Strada files:
+The preferred way to embed C code directly in Strada files:
 
-### Basic Extern
+### Top-Level `__C__` Blocks
+
+For includes, globals, and helper C functions:
 
 ```strada
-# Declare external C function
-extern func c_function(int $a, int $b) int;
+__C__ {
+    #include <math.h>
+    #include <string.h>
 
-# Use it like any other function
+    static int helper_function(int a, int b) {
+        return a + b;
+    }
+}
+```
+
+### Statement-Level `__C__` Blocks
+
+For inline C code inside Strada functions:
+
+```strada
+func add_numbers(int $a, int $b) int {
+    __C__ {
+        int64_t va = strada_to_int(a);
+        int64_t vb = strada_to_int(b);
+        return strada_new_int(va + vb);
+    }
+}
+
 func main() int {
-    my int $result = c_function(10, 20);
+    my int $result = add_numbers(10, 20);
     say("Result: " . $result);
     return 0;
 }
 ```
 
-The C implementation must be linked separately.
+### Key Functions for C Interop
 
-### Extern with Implementation
-
-Create a C file with the implementation:
-
-```c
-// c_functions.c
-#include "strada_runtime.h"
-
-StradaValue* c_function(StradaValue *a, StradaValue *b) {
-    int64_t va = strada_to_int(a);
-    int64_t vb = strada_to_int(b);
-    return strada_new_int(va + vb);
-}
-```
-
-Build:
-
-```bash
-./stradac program.strada program.c
-gcc -o program program.c c_functions.c runtime/strada_runtime.c \
-    -Iruntime -ldl -lm
-```
+| Function | Description |
+|----------|-------------|
+| `strada_to_int(sv)` | Extract int64_t from StradaValue* |
+| `strada_to_num(sv)` | Extract double from StradaValue* |
+| `strada_to_str(sv)` | Extract string (must free!) |
+| `strada_new_int(i)` | Create StradaValue* from int64_t |
+| `strada_new_num(n)` | Create StradaValue* from double |
+| `strada_new_str(s)` | Create StradaValue* from string |
+| `&strada_undef` | Return undef value |
 
 ---
 
@@ -396,33 +404,49 @@ func main() int {
 }
 ```
 
-### Passing to C Functions
+### Passing Structs to C Functions
 
-```c
-// C side
-typedef struct {
-    int64_t x;
-    int64_t y;
-} Point;
-
-double point_distance(Point *p1, Point *p2) {
-    double dx = p2->x - p1->x;
-    double dy = p2->y - p1->y;
-    return sqrt(dx*dx + dy*dy);
-}
-```
+Using `__C__` blocks to interface with C functions:
 
 ```strada
-# Strada side
-extern func point_distance(scalar $p1, scalar $p2) num;
+__C__ {
+    #include <math.h>
 
-my scalar $p1 = Point_new();
-my scalar $p2 = Point_new();
-$p1->x = 0; $p1->y = 0;
-$p2->x = 3; $p2->y = 4;
+    typedef struct {
+        int64_t x;
+        int64_t y;
+    } CPoint;
 
-my num $dist = point_distance($p1, $p2);
-say("Distance: " . $dist);  # 5.0
+    static double calc_distance(CPoint *p1, CPoint *p2) {
+        double dx = p2->x - p1->x;
+        double dy = p2->y - p1->y;
+        return sqrt(dx*dx + dy*dy);
+    }
+}
+
+native struct Point {
+    int x;
+    int y;
+}
+
+func point_distance(scalar $p1, scalar $p2) num {
+    __C__ {
+        CPoint *cp1 = (CPoint*)strada_to_cstruct_ptr(p1);
+        CPoint *cp2 = (CPoint*)strada_to_cstruct_ptr(p2);
+        return strada_new_num(calc_distance(cp1, cp2));
+    }
+}
+
+func main() int {
+    my scalar $p1 = Point_new();
+    my scalar $p2 = Point_new();
+    $p1->x = 0; $p1->y = 0;
+    $p2->x = 3; $p2->y = 4;
+
+    my num $dist = point_distance($p1, $p2);
+    say("Distance: " . $dist);  # 5.0
+    return 0;
+}
 ```
 
 ---

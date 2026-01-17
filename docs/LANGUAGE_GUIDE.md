@@ -177,7 +177,7 @@ while ($running) {
 | `hash` | Key-value pairs | `%` |
 | `scalar` | Single value or reference | `$` |
 
-### Extended C Types (for `extern` functions)
+### Extended C Types (for C interop via `__C__` blocks)
 
 | Type | C Equivalent |
 |------|--------------|
@@ -189,7 +189,8 @@ while ($running) {
 | `i8`, `i16`, `i32`, `i64` | `int8_t`, etc. |
 | `u8`, `u16`, `u32`, `u64` | `uint8_t`, etc. |
 | `sizet` | `size_t` |
-| `ptr` | `void*` |
+
+**Note:** Use `int` to store C pointers (64-bit), not a special pointer type.
 
 ---
 
@@ -2060,29 +2061,52 @@ See `examples/test_oop_better.strada` and `examples/test_multi_inherit.strada` f
 
 ## C Interoperability
 
-### Extern Functions
+### `__C__` Blocks
 
-Use `extern` to declare functions with C calling conventions:
+Use `__C__` blocks to embed raw C code directly in Strada programs:
+
+**Top-level blocks** (at file scope) for includes and globals:
 
 ```strada
-extern func c_sqrt(num $x) num {
-    # C code uses raw types, not StradaValue
-    return sqrt($x);
+__C__ {
+    #include <math.h>
+    #include <openssl/ssl.h>
+    static SSL_CTX *g_ctx = NULL;
+}
+```
+
+**Statement-level blocks** (inside functions) for inline C:
+
+```strada
+func my_sqrt(num $x) num {
+    __C__ {
+        double val = strada_to_num(x);
+        return strada_new_num(sqrt(val));
+    }
 }
 
 func main() int {
-    my num $result = c_sqrt(16.0);
+    my num $result = my_sqrt(16.0);
     say($result);  # 4.0
     return 0;
 }
 ```
 
-### C Types in Extern Functions
+### Opaque Handle Pattern
+
+Store C pointers as `int` (64-bit) values:
 
 ```strada
-extern func process_data(ptr $data, sizet $len) i32 {
-    # Uses raw C types
-    return 0;
+# In C code: convert pointer to int
+__C__ {
+    SSL *conn = SSL_new(ctx);
+    return strada_new_int((int64_t)(intptr_t)conn);
+}
+
+# Later: retrieve pointer from int
+__C__ {
+    SSL *conn = (SSL*)(intptr_t)strada_to_int(handle);
+    // use conn...
 }
 ```
 
@@ -2122,6 +2146,41 @@ func main() int {
     return 0;
 }
 ```
+
+### Raw C Code Blocks
+
+For maximum control, embed raw C code directly using `__C__ { }`:
+
+```strada
+func main() int {
+    my int $x = 10;
+
+    __C__ {
+        // Access Strada variables (they're StradaValue* pointers)
+        long long val = strada_to_int(x);
+        printf("C sees x as: %lld\n", val);
+
+        // Modify Strada variables
+        strada_decref(x);
+        x = strada_new_int(val * 2);
+
+        // Use any C features
+        for (int i = 0; i < 3; i++) {
+            printf("Loop %d\n", i);
+        }
+    }
+
+    say("x is now " . $x);  # 20
+    return 0;
+}
+```
+
+Key points:
+- Strada variables are `StradaValue*` pointers
+- Use `strada_to_int()`, `strada_to_str()`, etc. to extract values
+- Use `strada_new_int()`, `strada_new_str()`, etc. to create values
+- Remember to `strada_decref()` before replacing a variable
+- All `strada_runtime.h` functions are available
 
 ---
 

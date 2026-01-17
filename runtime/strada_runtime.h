@@ -681,6 +681,12 @@ StradaValue* strada_mkdtemp(StradaValue *template);
 /* Command execution (popen) */
 StradaValue* strada_popen(StradaValue *cmd, StradaValue *mode);
 StradaValue* strada_pclose(StradaValue *fh);
+StradaValue* strada_qx(StradaValue *cmd);  /* Backtick/qx - run command and capture output */
+
+/* Aliases for bootstrap compiler compatibility (sys::foo -> sys_foo) */
+StradaValue* sys_system(StradaValue *cmd);
+StradaValue* sys_qx(StradaValue *cmd);
+StradaValue* sys_unlink(StradaValue *path);
 
 /* Additional file system */
 StradaValue* strada_truncate(StradaValue *path, StradaValue *length);

@@ -766,6 +766,29 @@ int64_t my_func(StradaValue *str_sv, StradaValue *int_sv) {
 ```
 Build with: `gcc -shared -fPIC -o lib.so mylib.c -Iruntime`
 
+## Raw C Code Blocks
+
+```strada
+# Embed raw C code directly
+__C__ {
+    printf("Hello from C!\n");
+    int x = 42;
+    printf("x = %d\n", x);
+}
+
+# Access Strada variables (they're StradaValue*)
+my int $val = 10;
+__C__ {
+    long long v = strada_to_int(val);
+    printf("val = %lld\n", v);
+    strada_decref(val);
+    val = strada_new_int(v * 2);
+}
+say($val);  # 20
+```
+
+Key functions: `strada_to_int()`, `strada_to_str()`, `strada_new_int()`, `strada_new_str()`, `strada_decref()`, `strada_incref()`
+
 ## Calling Strada from C
 
 ```bash

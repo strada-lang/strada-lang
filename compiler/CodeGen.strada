@@ -5576,6 +5576,15 @@ func gen_expression(scalar $cg, scalar $expr) void {
             return;
         }
 
+        # Command execution with output capture (backticks/qx)
+        if ($name eq "sys::qx") {
+            emit($cg, "strada_qx(");
+            my scalar $args = $expr->{"args"};
+            gen_expression($cg, $args->[0]);
+            emit($cg, ")");
+            return;
+        }
+
         # Additional file system
         if ($name eq "sys::truncate") {
             emit($cg, "strada_truncate(");
@@ -6620,8 +6629,6 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 emit($cg, "float __ext_ret = " . $c_name . "(");
             } elsif ($ret_type == TYPE_FLOAT64()) {
                 emit($cg, "double __ext_ret = " . $c_name . "(");
-            } elsif ($ret_type == TYPE_PTR()) {
-                emit($cg, "void *__ext_ret = " . $c_name . "(");
             } else {
                 emit($cg, "void *__ext_ret = " . $c_name . "(");
             }
@@ -6639,9 +6646,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
 
                 # For c_extern, use direct conversions without allocation
                 if ($is_c_extern == 1) {
-                    if ($param_type == TYPE_PTR()) {
-                        emit($cg, "(void*)strada_to_int(__sv_arg" . $a . ")");
-                    } elsif ($param_type == TYPE_STR()) {
+                    if ($param_type == TYPE_STR()) {
                         # For c_extern, str is already a char* pointer stored as int
                         emit($cg, "(char*)strada_to_int(__sv_arg" . $a . ")");
                     } elsif ($param_type == TYPE_INT() || $param_type == TYPE_BOOL()) {
@@ -6714,9 +6719,6 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 } else {
                     emit($cg, "strada_new_str(__ext_ret); })");
                 }
-            } elsif ($ret_type == TYPE_PTR()) {
-                # Store pointer as int64
-                emit($cg, "strada_new_int((int64_t)__ext_ret); })");
             } elsif ($ret_type == TYPE_INT() || $ret_type == TYPE_BOOL() || $ret_type == TYPE_INT32() || $ret_type == TYPE_INT64()) {
                 emit($cg, "strada_new_int(__ext_ret); })");
             } elsif ($ret_type == TYPE_UINT8() || $ret_type == TYPE_UINT16() || $ret_type == TYPE_UINT32() || $ret_type == TYPE_UINT64() || $ret_type == TYPE_SIZE_T() || $ret_type == TYPE_CHAR()) {
@@ -8440,6 +8442,15 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         emit($cg, "}\n");
         return;
     }
+
+    # __C__ { ... } - raw C code block
+    if ($type == NODE_C_BLOCK()) {
+        my str $code = $stmt->{"code"};
+        emit($cg, "/* Begin __C__ block */\n");
+        emit($cg, $code);
+        emit($cg, "\n/* End __C__ block */\n");
+        return;
+    }
 }
 
 # ============================================================
@@ -8702,7 +8713,21 @@ func gen_program(scalar $cg, scalar $program) void {
     emit($cg, "#include <stdbool.h>\n");
     emit($cg, "#include <dlfcn.h>\n");
     emit($cg, "#include <math.h>\n\n");
-    
+
+    # Emit top-level C blocks (includes, typedefs, etc.)
+    my int $c_block_count = $program->{"c_block_count"};
+    if ($c_block_count > 0) {
+        emit($cg, "/* Top-level C code blocks */\n");
+        my scalar $c_blocks = $program->{"c_blocks"};
+        my int $cb = 0;
+        while ($cb < $c_block_count) {
+            emit($cg, $c_blocks->[$cb]);
+            emit($cg, "\n");
+            $cb = $cb + 1;
+        }
+        emit($cg, "\n");
+    }
+
     # Check if there's a main function
     my int $has_main = 0;
     $i = 0;
@@ -8951,13 +8976,71 @@ func gen_program(scalar $cg, scalar $program) void {
         emit($cg, "\n");
     }
 
+    # Generate import_object extern declarations (for statically linked object files)
+    my int $import_object_count = $program->{"import_object_count"};
+    if ($import_object_count > 0) {
+        my scalar $import_objects = $program->{"import_objects"};
+
+        emit($cg, "/* import_object: extern declarations for statically linked functions */\n");
+        my int $obj_idx = 0;
+        while ($obj_idx < $import_object_count) {
+            my scalar $obj_info = $import_objects->[$obj_idx];
+            my str $obj_name = $obj_info->{"obj_name"};
+            my scalar $functions = $obj_info->{"functions"};
+            my int $fn_count = $obj_info->{"function_count"};
+
+            emit($cg, "/* Functions from " . $obj_name . ".o */\n");
+
+            my int $fn_idx = 0;
+            while ($fn_idx < $fn_count) {
+                my scalar $fn_info = $functions->[$fn_idx];
+                my str $fn_name = $fn_info->{"name"};
+                my int $ret_type = $fn_info->{"return_type"};
+                my int $param_count = $fn_info->{"param_count"};
+                my scalar $params = $fn_info->{"params"};
+
+                # Generate extern declaration
+                emit($cg, "extern " . type_to_c($ret_type) . " " . $fn_name . "(");
+
+                my int $pi = 0;
+                while ($pi < $param_count) {
+                    if ($pi > 0) {
+                        emit($cg, ", ");
+                    }
+                    my scalar $param = $params->[$pi];
+                    my int $ptype = $param->{"type"};
+                    emit($cg, type_to_c($ptype));
+                    $pi = $pi + 1;
+                }
+                if ($param_count == 0) {
+                    emit($cg, "void");
+                }
+                emit($cg, ");\n");
+
+                # Register in functions context so calls work
+                my hash %func_info = ();
+                $func_info{"name"} = $fn_name;
+                $func_info{"return_type"} = $ret_type;
+                $func_info{"param_count"} = $param_count;
+                $func_info{"params"} = $params;
+                $func_info{"is_import_object"} = 1;
+                $cg->{"functions"}->{$fn_name} = \%func_info;
+
+                $fn_idx = $fn_idx + 1;
+            }
+
+            $obj_idx = $obj_idx + 1;
+        }
+        emit($cg, "\n");
+    }
+
     # Forward declarations
     $i = 0;
     while ($i < $program->{"function_count"}) {
         my scalar $fn = $funcs->[$i];
         my str $name = sanitize_name($fn->{"name"});
         my int $fn_type = $fn->{"type"};
-        
+
         # Skip extern functions (they're declared elsewhere)
         if ($fn_type == NODE_EXTERN_FUNC()) {
             # Generate extern declaration
@@ -8966,7 +9049,7 @@ func gen_program(scalar $cg, scalar $program) void {
             $i = $i + 1;
             next;
         }
-        
+
         if ($name eq "main") {
             emit($cg, "int main(int _argc, char **_argv);\n");
         } else {
@@ -9162,6 +9245,25 @@ func gen_program(scalar $cg, scalar $program) void {
         }
     }
 
+    # Generate import_object: object file list comment (for strada wrapper to parse)
+    # NOTE: extern declarations are generated earlier with other forward declarations
+    my int $io_count = $program->{"import_object_count"};
+    if ($io_count > 0) {
+        my scalar $io_objs = $program->{"import_objects"};
+
+        # Emit object file list as a comment for strada wrapper to parse
+        emit($cg, "\n/* import_object: required object files\n");
+        emit($cg, " * __STRADA_OBJECT_FILES__:");
+        my int $io_idx = 0;
+        while ($io_idx < $io_count) {
+            my scalar $io_info = $io_objs->[$io_idx];
+            my str $io_path = $io_info->{"o_path"};
+            emit($cg, " " . $io_path);
+            $io_idx = $io_idx + 1;
+        }
+        emit($cg, "\n */\n\n");
+    }
+
     # Save funcs content and start fresh for remaining code
     $cg->{"funcs_content"} = sb_to_string($cg->{"output_sb"});
     sb_clear($cg->{"output_sb"});
@@ -9237,14 +9339,29 @@ func gen_program(scalar $cg, scalar $program) void {
 
     # Generate __strada_export_info function for shared library metadata
     # This allows import_lib to work without needing the .strada source file
-    gen_export_info($cg, $program);
+    # Pass has_main flag - for executables (with main), make these static to avoid conflicts
+    my int $has_main_fn = 0;
+    my int $mi = 0;
+    while ($mi < $program->{"function_count"}) {
+        if ($funcs->[$mi]->{"name"} eq "main") {
+            $has_main_fn = 1;
+            last;
+        }
+        $mi = $mi + 1;
+    }
+    gen_export_info($cg, $program, $has_main_fn);
 }
 
 # Generate __strada_export_info function that returns metadata about exported functions
 # Format: "func:name:return_type:param_count:param_types\n" for each function
-func gen_export_info(scalar $cg, scalar $program) void {
+# $has_main: if true, make functions static to avoid conflicts when linked with object files
+func gen_export_info(scalar $cg, scalar $program, int $has_main) void {
+    my str $static_prefix = "";
+    if ($has_main == 1) {
+        $static_prefix = "static ";
+    }
     emit($cg, "\n/* Strada export metadata for import_lib */\n");
-    emit($cg, "const char* __strada_export_info(void) {\n");
+    emit($cg, $static_prefix . "const char* __strada_export_info(void) {\n");
     emit($cg, "    return \"");
 
     my scalar $funcs = $program->{"functions"};
@@ -9283,18 +9400,22 @@ func gen_export_info(scalar $cg, scalar $program) void {
     emit($cg, "}\n");
 
     # Also generate version info if specified
-    gen_version_info($cg, $program);
+    gen_version_info($cg, $program, $has_main);
 }
 
 # Generate __strada_version function that returns the module version
-func gen_version_info(scalar $cg, scalar $program) void {
+func gen_version_info(scalar $cg, scalar $program, int $has_main) void {
+    my str $static_prefix = "";
+    if ($has_main == 1) {
+        $static_prefix = "static ";
+    }
     my str $version = "";
     if ($program->{"version"} ne "") {
         $version = $program->{"version"};
     }
 
     emit($cg, "\n/* Strada module version */\n");
-    emit($cg, "const char* __strada_version(void) {\n");
+    emit($cg, $static_prefix . "const char* __strada_version(void) {\n");
     emit($cg, "    return \"" . $version . "\";\n");
     emit($cg, "}\n");
 }
@@ -9411,7 +9532,6 @@ func type_to_c_raw(int $type) str {
     if ($type == TYPE_SIZE_T()) { return "size_t"; }
     if ($type == TYPE_CHAR()) { return "char"; }
     if ($type == TYPE_LONG_DOUBLE()) { return "long double"; }
-    if ($type == TYPE_PTR()) { return "void*"; }
     return "void*";
 }
 

@@ -26,87 +26,171 @@
 #   say($result);  # "4"
 #   perl5::shutdown();
 #
-# Compile with: strada -g prog.strada lib/perl5/strada_perl5.c $(perl -MExtUtils::Embed -e ccopts -e ldopts)
+# Compile with:
+#   ./strada myapp.strada $(perl -MExtUtils::Embed -e ccopts -e ldopts)
+#
+# Note: XS modules require: LD_PRELOAD=/path/to/libperl.so ./myapp
 
 package perl5;
 
-extern "C" {
-    # Core interpreter functions
-    func strada_perl5_init() int;
-    func strada_perl5_shutdown() void;
-    func strada_perl5_is_init() int;
+# Perl embedding C code
+__C__ {
+#define _GNU_SOURCE
+#include <string.h>
+#include <stdio.h>
 
-    # Evaluation functions (raw C types)
-    func strada_perl5_eval_raw(ptr $code) ptr;
-    func strada_perl5_run_raw(ptr $code) void;
+#include <EXTERN.h>
+#include <perl.h>
 
-    # Module loading (raw C types)
-    func strada_perl5_use_raw(ptr $module) int;
-    func strada_perl5_require_raw(ptr $module) int;
-
-    # Variable access (raw C types)
-    func strada_perl5_set_scalar_raw(ptr $name, ptr $value) void;
-    func strada_perl5_get_scalar_raw(ptr $name) ptr;
-
-    # Error handling (raw C types)
-    func strada_perl5_get_error_raw() ptr;
-
-    # @INC manipulation (raw C types)
-    func strada_perl5_add_inc_raw(ptr $path) void;
-
-    # Subroutine calling (raw C types)
-    func strada_perl5_call_str_raw(ptr $sub_name, ptr $arg) ptr;
+/* Global Perl interpreter (singleton) */
+static PerlInterpreter *my_perl = NULL;
 }
 
 # Initialize the Perl interpreter
 # Returns 1 on success, 0 on failure
 func init() int {
-    return strada_perl5_init();
+    my int $result = 0;
+    __C__ {
+        if (my_perl) {
+            result = strada_new_int(1);  /* Already initialized */
+        } else {
+            int argc = 3;
+            char *argv[] = { "", "-e", "0", NULL };
+            char **argv_ptr = argv;
+            char *env[] = { NULL };
+            char **env_ptr = env;
+
+            PERL_SYS_INIT3(&argc, &argv_ptr, &env_ptr);
+            my_perl = perl_alloc();
+            if (!my_perl) {
+                result = strada_new_int(0);
+            } else {
+                perl_construct(my_perl);
+                PL_exit_flags |= PERL_EXIT_DESTRUCT_END;
+
+                if (perl_parse(my_perl, NULL, argc, argv, NULL) != 0) {
+                    perl_destruct(my_perl);
+                    perl_free(my_perl);
+                    my_perl = NULL;
+                    result = strada_new_int(0);
+                } else {
+                    perl_run(my_perl);
+                    result = strada_new_int(1);
+                }
+            }
+        }
+    }
+    return $result;
 }
 
 # Shutdown the Perl interpreter
 func shutdown() void {
-    strada_perl5_shutdown();
+    __C__ {
+        if (my_perl) {
+            perl_destruct(my_perl);
+            perl_free(my_perl);
+            PERL_SYS_TERM();
+            my_perl = NULL;
+        }
+    }
 }
 
 # Check if Perl is initialized
 func is_init() int {
-    return strada_perl5_is_init();
+    my int $result = 0;
+    __C__ {
+        result = strada_new_int(my_perl != NULL ? 1 : 0);
+    }
+    return $result;
 }
 
 # Evaluate Perl code and return the result as a string
 func eval(str $code) str {
-    my ptr $code_ptr = c::str_to_ptr($code);
-    my ptr $result_ptr = strada_perl5_eval_raw($code_ptr);
-    my str $result = c::ptr_to_str($result_ptr);
-    c::free($result_ptr);
+    my str $result = "";
+    __C__ {
+        if (!my_perl) {
+            result = strada_new_str("Error: Perl not initialized");
+        } else {
+            const char *code_str = strada_to_str(code);
+            SV *perl_result = eval_pv(code_str, FALSE);
+
+            if (SvTRUE(ERRSV)) {
+                STRLEN len;
+                const char *err = SvPV(ERRSV, len);
+                result = strada_new_str(err);
+            } else if (perl_result && SvOK(perl_result)) {
+                STRLEN len;
+                const char *str = SvPV(perl_result, len);
+                result = strada_new_str(str);
+            } else {
+                result = strada_new_str("");
+            }
+        }
+    }
     return $result;
 }
 
 # Execute Perl code without returning a value
 func run(str $code) void {
-    my ptr $code_ptr = c::str_to_ptr($code);
-    strada_perl5_run_raw($code_ptr);
+    __C__ {
+        if (my_perl) {
+            const char *code_str = strada_to_str(code);
+            eval_pv(code_str, FALSE);
+        }
+    }
 }
 
 # Call a Perl subroutine with a single string argument, return scalar result
 func call(str $sub_name, str $arg) str {
-    my ptr $sub_ptr = c::str_to_ptr($sub_name);
-    my ptr $arg_ptr = c::str_to_ptr($arg);
-    my ptr $result_ptr = strada_perl5_call_str_raw($sub_ptr, $arg_ptr);
-    my str $result = c::ptr_to_str($result_ptr);
-    c::free($result_ptr);
+    my str $result = "";
+    __C__ {
+        if (!my_perl) {
+            result = strada_new_str("Error: Perl not initialized");
+        } else {
+            const char *sub_str = strada_to_str(sub_name);
+            const char *arg_str = strada_to_str(arg);
+
+            dSP;
+            ENTER;
+            SAVETMPS;
+            PUSHMARK(SP);
+
+            if (arg_str && strlen(arg_str) > 0) {
+                XPUSHs(sv_2mortal(newSVpv(arg_str, 0)));
+            }
+
+            PUTBACK;
+            int count = call_pv(sub_str, G_SCALAR | G_EVAL);
+            SPAGAIN;
+
+            if (SvTRUE(ERRSV)) {
+                STRLEN len;
+                const char *err = SvPV(ERRSV, len);
+                result = strada_new_str(err);
+            } else if (count > 0) {
+                SV *ret = POPs;
+                if (SvOK(ret)) {
+                    STRLEN len;
+                    const char *str = SvPV(ret, len);
+                    result = strada_new_str(str);
+                } else {
+                    result = strada_new_str("");
+                }
+            } else {
+                result = strada_new_str("");
+            }
+
+            PUTBACK;
+            FREETMPS;
+            LEAVE;
+        }
+    }
     return $result;
 }
 
 # Call a Perl subroutine with no arguments
 func call_noargs(str $sub_name) str {
-    my ptr $sub_ptr = c::str_to_ptr($sub_name);
-    my ptr $arg_ptr = c::str_to_ptr("");
-    my ptr $result_ptr = strada_perl5_call_str_raw($sub_ptr, $arg_ptr);
-    my str $result = c::ptr_to_str($result_ptr);
-    c::free($result_ptr);
-    return $result;
+    return perl5::call($sub_name, "");
 }
 
 # Call a Perl subroutine that returns a list, get as joined string
@@ -120,43 +204,109 @@ func call_list(str $sub_name, str $sep) str {
 # Use a Perl module (like "use Module;")
 # Returns 1 on success, 0 on failure
 func use_module(str $module) int {
-    my ptr $module_ptr = c::str_to_ptr($module);
-    return strada_perl5_use_raw($module_ptr);
+    my int $result = 0;
+    __C__ {
+        if (!my_perl) {
+            result = strada_new_int(0);
+        } else {
+            const char *mod_str = strada_to_str(module);
+            char code[2048];
+            snprintf(code, sizeof(code), "use %s; 1;", mod_str);
+            eval_pv(code, FALSE);
+            result = strada_new_int(!SvTRUE(ERRSV) ? 1 : 0);
+        }
+    }
+    return $result;
 }
 
 # Require a Perl module
 # Returns 1 on success, 0 on failure
 func require_module(str $module) int {
-    my ptr $module_ptr = c::str_to_ptr($module);
-    return strada_perl5_require_raw($module_ptr);
+    my int $result = 0;
+    __C__ {
+        if (!my_perl) {
+            result = strada_new_int(0);
+        } else {
+            const char *mod_str = strada_to_str(module);
+            char code[2048];
+            snprintf(code, sizeof(code), "require %s; 1;", mod_str);
+            eval_pv(code, FALSE);
+            result = strada_new_int(!SvTRUE(ERRSV) ? 1 : 0);
+        }
+    }
+    return $result;
 }
 
 # Set a Perl scalar variable ($name = value)
 func set_var(str $name, str $value) void {
-    my ptr $name_ptr = c::str_to_ptr($name);
-    my ptr $value_ptr = c::str_to_ptr($value);
-    strada_perl5_set_scalar_raw($name_ptr, $value_ptr);
+    __C__ {
+        if (my_perl) {
+            const char *name_str = strada_to_str(name);
+            const char *value_str = strada_to_str(value);
+
+            /* Skip the sigil if present */
+            if (name_str[0] == '$') {
+                name_str++;
+            }
+
+            SV *sv = get_sv(name_str, GV_ADD);
+            sv_setpv(sv, value_str);
+        }
+    }
 }
 
 # Get a Perl scalar variable
 func get_var(str $name) str {
-    my ptr $name_ptr = c::str_to_ptr($name);
-    my ptr $result_ptr = strada_perl5_get_scalar_raw($name_ptr);
-    my str $result = c::ptr_to_str($result_ptr);
-    c::free($result_ptr);
+    my str $result = "";
+    __C__ {
+        if (!my_perl) {
+            result = strada_new_str("");
+        } else {
+            const char *name_str = strada_to_str(name);
+
+            /* Skip the sigil if present */
+            if (name_str[0] == '$') {
+                name_str++;
+            }
+
+            SV *sv = get_sv(name_str, 0);
+            if (sv && SvOK(sv)) {
+                STRLEN len;
+                const char *str = SvPV(sv, len);
+                result = strada_new_str(str);
+            } else {
+                result = strada_new_str("");
+            }
+        }
+    }
     return $result;
 }
 
 # Get the last Perl error ($@)
 func get_error() str {
-    my ptr $result_ptr = strada_perl5_get_error_raw();
-    my str $result = c::ptr_to_str($result_ptr);
-    c::free($result_ptr);
+    my str $result = "";
+    __C__ {
+        if (!my_perl) {
+            result = strada_new_str("Perl not initialized");
+        } else if (SvTRUE(ERRSV)) {
+            STRLEN len;
+            const char *err = SvPV(ERRSV, len);
+            result = strada_new_str(err);
+        } else {
+            result = strada_new_str("");
+        }
+    }
     return $result;
 }
 
 # Add a path to Perl's @INC
 func add_inc(str $path) void {
-    my ptr $path_ptr = c::str_to_ptr($path);
-    strada_perl5_add_inc_raw($path_ptr);
+    __C__ {
+        if (my_perl) {
+            const char *path_str = strada_to_str(path);
+            char code[2048];
+            snprintf(code, sizeof(code), "push @INC, '%s';", path_str);
+            eval_pv(code, FALSE);
+        }
+    }
 }
