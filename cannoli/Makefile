@@ -15,18 +15,19 @@ BUILD_DIR := build
 
 CC := gcc
 CFLAGS := -Wall -Wextra -Wno-unused-variable -Wno-unused-parameter -O2
-LDFLAGS := -ldl -lm -lpthread -rdynamic
+LDFLAGS := -ldl -lm -lpthread -lz -rdynamic
 
 # Source files in order of dependency
+# Note: compress.strada has 'package compress;' so must come after files that
+# don't have package declarations (otherwise they inherit the compress package)
 SOURCES := \
 	$(SRC_DIR)/config.strada \
-	$(SRC_DIR)/log.strada \
 	$(SRC_DIR)/mime.strada \
-	$(STRADA_DIR)/lib/compress.strada \
 	$(SRC_DIR)/session.strada \
 	$(SRC_DIR)/template.strada \
 	$(SRC_DIR)/validation.strada \
 	$(SRC_DIR)/request.strada \
+	$(SRC_DIR)/log.strada \
 	$(SRC_DIR)/response.strada \
 	$(SRC_DIR)/router.strada \
 	$(SRC_DIR)/static.strada \
@@ -34,6 +35,7 @@ SOURCES := \
 	$(SRC_DIR)/fastcgi.strada \
 	$(SRC_DIR)/app.strada \
 	$(SRC_DIR)/main.strada \
+	$(STRADA_DIR)/lib/compress.strada \
 	$(SRC_DIR)/cannoli_obj.strada
 
 # Library sources (without main.strada) - for building example apps
@@ -41,7 +43,6 @@ LIB_SOURCES := \
 	$(SRC_DIR)/config.strada \
 	$(SRC_DIR)/log.strada \
 	$(SRC_DIR)/mime.strada \
-	$(STRADA_DIR)/lib/compress.strada \
 	$(SRC_DIR)/session.strada \
 	$(SRC_DIR)/template.strada \
 	$(SRC_DIR)/validation.strada \
@@ -52,6 +53,7 @@ LIB_SOURCES := \
 	$(SRC_DIR)/server.strada \
 	$(SRC_DIR)/fastcgi.strada \
 	$(SRC_DIR)/app.strada \
+	$(STRADA_DIR)/lib/compress.strada \
 	$(SRC_DIR)/cannoli_obj.strada
 
 # Combined source file
