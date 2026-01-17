@@ -1,17 +1,17 @@
 /*
  This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
  Copyright (c) 2026 Michael J. Flickinger
- 
- This program is free software: you can redistribute it and/or modify  
- it under the terms of the GNU General Public License as published by  
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
  the Free Software Foundation, version 2.
 
- This program is distributed in the hope that it will be useful, but 
- WITHOUT ANY WARRANTY; without even the implied warranty of 
- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
  General Public License for more details.
 
- You should have received a copy of the GNU General Public License 
+ You should have received a copy of the GNU General Public License
  along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 
@@ -19,81 +19,90 @@
 #
 # Provides gzip compression for HTTP responses
 # Uses zlib via C library wrapper
+#
+# Compile with:
+#   ./stradac myapp.strada myapp.c
+#   gcc -o myapp myapp.c lib/compress/strada_compress.c runtime/strada_runtime.c -Iruntime -lz -ldl -lm
 
-# Library handle (lazy loaded)
-my int $_compress_lib = 0;
-my int $_gzip_fn = 0;
-my int $_deflate_fn = 0;
-my int $_gunzip_fn = 0;
-my int $_should_compress_fn = 0;
+package compress;
 
-# Initialize compression library
-func compress_init() int {
-    if ($_compress_lib != 0) {
-        return 1;
-    }
-
-    # Try to load the library from common locations
-    my str $lib_path = "lib/compress/libstrada_compress.so";
-    $_compress_lib = sys::dl_open($lib_path);
-
-    if ($_compress_lib == 0) {
-        $lib_path = "../lib/compress/libstrada_compress.so";
-        $_compress_lib = sys::dl_open($lib_path);
-    }
-
-    if ($_compress_lib == 0) {
-        return 0;
-    }
-
-    $_gzip_fn = sys::dl_sym($_compress_lib, "strada_gzip_compress");
-    $_deflate_fn = sys::dl_sym($_compress_lib, "strada_deflate_compress");
-    $_gunzip_fn = sys::dl_sym($_compress_lib, "strada_gzip_decompress");
-    $_should_compress_fn = sys::dl_sym($_compress_lib, "strada_should_compress");
-
-    return 1;
+# External C function declarations
+extern "C" {
+    func strada_gzip_compress(ptr $data, int $len) ptr;
+    func strada_deflate_compress(ptr $data, int $len) ptr;
+    func strada_gzip_decompress(ptr $data, int $len) ptr;
+    func strada_compress_last_len() int;
+    func strada_should_compress(ptr $content_type, int $data_len) int;
 }
 
 # Compress data using gzip format
 func compress_gzip(str $data) str {
-    if (compress_init() == 0) {
-        return $data;  # Return uncompressed if library not available
+    my int $len = sys::byte_length($data);
+    if ($len == 0) {
+        return "";
     }
-    if ($_gzip_fn == 0) {
-        return $data;
+
+    my ptr $data_ptr = c::str_to_ptr($data);
+    my ptr $result_ptr = strada_gzip_compress($data_ptr, $len);
+    c::free($data_ptr);
+
+    if (c::is_null($result_ptr)) {
+        return $data;  # Return uncompressed if compression failed
     }
-    return sys::dl_call_str_sv($_gzip_fn, [$data]);
+
+    my int $out_len = strada_compress_last_len();
+    my str $result = c::ptr_to_str_n($result_ptr, $out_len);
+    c::free($result_ptr);
+    return $result;
 }
 
 # Compress data using deflate format (no gzip header)
 func compress_deflate(str $data) str {
-    if (compress_init() == 0) {
+    my int $len = sys::byte_length($data);
+    if ($len == 0) {
+        return "";
+    }
+
+    my ptr $data_ptr = c::str_to_ptr($data);
+    my ptr $result_ptr = strada_deflate_compress($data_ptr, $len);
+    c::free($data_ptr);
+
+    if (c::is_null($result_ptr)) {
         return $data;
     }
-    if ($_deflate_fn == 0) {
-        return $data;
-    }
-    return sys::dl_call_str_sv($_deflate_fn, [$data]);
+
+    my int $out_len = strada_compress_last_len();
+    my str $result = c::ptr_to_str_n($result_ptr, $out_len);
+    c::free($result_ptr);
+    return $result;
 }
 
 # Decompress gzip data
 func compress_gunzip(str $data) str {
-    if (compress_init() == 0) {
+    my int $len = sys::byte_length($data);
+    if ($len == 0) {
+        return "";
+    }
+
+    my ptr $data_ptr = c::str_to_ptr($data);
+    my ptr $result_ptr = strada_gzip_decompress($data_ptr, $len);
+    c::free($data_ptr);
+
+    if (c::is_null($result_ptr)) {
         return $data;
     }
-    if ($_gunzip_fn == 0) {
-        return $data;
-    }
-    return sys::dl_call_str_sv($_gunzip_fn, [$data]);
+
+    my int $out_len = strada_compress_last_len();
+    my str $result = c::ptr_to_str_n($result_ptr, $out_len);
+    c::free($result_ptr);
+    return $result;
 }
 
 # Check if content should be compressed based on content-type
 func compress_should_compress(str $content_type, str $data) int {
-    if (compress_init() == 0) {
-        return 0;
-    }
-    if ($_should_compress_fn == 0) {
-        return 0;
-    }
-    return sys::dl_call_int_sv($_should_compress_fn, [$content_type, $data]);
+    my int $data_len = sys::byte_length($data);
+    my ptr $ct_ptr = c::str_to_ptr($content_type);
+    my int $result = strada_should_compress($ct_ptr, $data_len);
+    c::free($ct_ptr);
+    return $result;
 }

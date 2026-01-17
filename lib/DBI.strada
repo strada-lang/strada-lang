@@ -1,17 +1,17 @@
 /*
  This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
  Copyright (c) 2026 Michael J. Flickinger
- 
- This program is free software: you can redistribute it and/or modify  
- it under the terms of the GNU General Public License as published by  
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
  the Free Software Foundation, version 2.
 
- This program is distributed in the hope that it will be useful, but 
- WITHOUT ANY WARRANTY; without even the implied warranty of 
- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
  General Public License for more details.
 
- You should have received a copy of the GNU General Public License 
+ You should have received a copy of the GNU General Public License
  along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 
@@ -28,10 +28,10 @@
 #   my scalar $dbh = DBI::connect("dbi:SQLite:test.db", "", "");
 #
 #   # Create table
-#   DBI::do($dbh, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)");
+#   DBI::exec($dbh, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)");
 #
 #   # Insert with placeholders
-#   DBI::do($dbh, "INSERT INTO users (name) VALUES (?)", ["Alice"]);
+#   DBI::exec($dbh, "INSERT INTO users (name) VALUES (?)", ["Alice"]);
 #
 #   # Query
 #   my scalar $sth = DBI::prepare($dbh, "SELECT * FROM users");
@@ -48,275 +48,462 @@
 #   dbi:mysql:database=test;host=localhost;port=3306
 #   dbi:Pg:dbname=test;host=localhost;port=5432
 #
-# Requires: lib/dbi/libstrada_dbi.so (build with: cd lib/dbi && make)
+# Compile with:
+#   ./strada myprogram.strada lib/dbi/strada_dbi.c -lsqlite3
 
 package DBI;
 
-# Load the library - tries multiple paths
-func _get_lib() int {
-    my int $lib = sys::dl_open("lib/dbi/libstrada_dbi.so");
-    if ($lib == 0) {
-        $lib = sys::dl_open("./lib/dbi/libstrada_dbi.so");
-    }
-    if ($lib == 0) {
-        $lib = sys::dl_open("libstrada_dbi.so");
-    }
-    return $lib;
+# External C function declarations
+extern "C" {
+    # Connection
+    func strada_dbi_connect_raw(ptr $dsn, ptr $user, ptr $pass, int $auto_commit, int $print_error) ptr;
+    func strada_dbi_disconnect_raw(ptr $dbh) void;
+    func strada_dbi_ping_raw(ptr $dbh) int;
+
+    # Statement
+    func strada_dbi_prepare_raw(ptr $dbh, ptr $sql) ptr;
+    func strada_dbi_execute_raw(ptr $sth) int;
+    func strada_dbi_do_raw(ptr $dbh, ptr $sql) int;
+    func strada_dbi_finish_raw(ptr $sth) void;
+    func strada_dbi_free_statement_raw(ptr $sth) void;
+    func strada_dbi_num_params(ptr $sth) int;
+
+    # Bind parameters
+    func strada_dbi_bind_int(ptr $sth, int $idx, int $val) void;
+    func strada_dbi_bind_str(ptr $sth, int $idx, ptr $val) void;
+    func strada_dbi_bind_num(ptr $sth, int $idx, num $val) void;
+    func strada_dbi_bind_null(ptr $sth, int $idx) void;
+    func strada_dbi_clear_bindings(ptr $sth) void;
+
+    # Step-based fetch
+    func strada_dbi_step(ptr $sth) int;
+
+    # Column accessors
+    func strada_dbi_column_count(ptr $sth) int;
+    func strada_dbi_column_name(ptr $sth, int $idx) ptr;
+    func strada_dbi_column_type(ptr $sth, int $idx) int;
+    func strada_dbi_column_int(ptr $sth, int $idx) int;
+    func strada_dbi_column_num(ptr $sth, int $idx) num;
+    func strada_dbi_column_str(ptr $sth, int $idx) ptr;
+    func strada_dbi_column_is_null(ptr $sth, int $idx) int;
+
+    # Transactions
+    func strada_dbi_begin_work_raw(ptr $dbh) int;
+    func strada_dbi_commit_raw(ptr $dbh) int;
+    func strada_dbi_rollback_raw(ptr $dbh) int;
+
+    # Utility
+    func strada_dbi_quote_raw(ptr $dbh, ptr $s) ptr;
+    func strada_dbi_last_insert_id_raw(ptr $dbh) int;
+    func strada_dbi_errstr_raw(ptr $dbh) ptr;
+    func strada_dbi_err_raw(ptr $dbh) int;
+    func strada_dbi_rows_raw(ptr $sth) int;
 }
 
 # Connect to a database
-# Returns a database handle (hash reference) or undef on failure
+# Returns a database handle (hash reference with _ptr) or undef on failure
 #
 # DSN examples:
 #   "dbi:SQLite:test.db" - SQLite file database
 #   "dbi:SQLite::memory:" - SQLite in-memory database
 #   "dbi:mysql:database=test;host=localhost" - MySQL connection
 #   "dbi:Pg:dbname=test" - PostgreSQL connection
-#
-# Attributes hash (optional):
-#   { AutoCommit => 1, RaiseError => 0, PrintError => 1 }
 func connect(str $dsn, str $username, str $password) scalar {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+    my ptr $dsn_ptr = c::str_to_ptr($dsn);
+    my ptr $user_ptr = c::str_to_ptr($username);
+    my ptr $pass_ptr = c::str_to_ptr($password);
+
+    my ptr $dbh = strada_dbi_connect_raw($dsn_ptr, $user_ptr, $pass_ptr, 1, 1);
+
+    c::free($dsn_ptr);
+    c::free($user_ptr);
+    c::free($pass_ptr);
+
+    if (c::is_null($dbh)) {
         return undef;
     }
 
-    my int $fn = sys::dl_sym($lib, "strada_dbi_connect");
-    my scalar $attrs = { "AutoCommit" => 1, "RaiseError" => 0, "PrintError" => 1 };
-    return sys::dl_call_sv($fn, [$dsn, $username, $password, $attrs]);
+    # Return a hash with the handle pointer
+    my hash %handle = ();
+    $handle{"_ptr"} = $dbh;
+    $handle{"dsn"} = $dsn;
+    return \%handle;
 }
 
 # Connect with attributes
 func connect_attrs(str $dsn, str $username, str $password, scalar $attrs) scalar {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+    my int $auto_commit = 1;
+    my int $print_error = 1;
+
+    if (defined($attrs)) {
+        if (defined($attrs->{"AutoCommit"})) {
+            $auto_commit = $attrs->{"AutoCommit"};
+        }
+        if (defined($attrs->{"PrintError"})) {
+            $print_error = $attrs->{"PrintError"};
+        }
+    }
+
+    my ptr $dsn_ptr = c::str_to_ptr($dsn);
+    my ptr $user_ptr = c::str_to_ptr($username);
+    my ptr $pass_ptr = c::str_to_ptr($password);
+
+    my ptr $dbh = strada_dbi_connect_raw($dsn_ptr, $user_ptr, $pass_ptr, $auto_commit, $print_error);
+
+    c::free($dsn_ptr);
+    c::free($user_ptr);
+    c::free($pass_ptr);
+
+    if (c::is_null($dbh)) {
         return undef;
     }
 
-    my int $fn = sys::dl_sym($lib, "strada_dbi_connect");
-    return sys::dl_call_sv($fn, [$dsn, $username, $password, $attrs]);
+    my hash %handle = ();
+    $handle{"_ptr"} = $dbh;
+    $handle{"dsn"} = $dsn;
+    return \%handle;
 }
 
 # Disconnect from database
 func disconnect(scalar $dbh) void {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+    if (!defined($dbh)) {
         return;
     }
-
-    my int $fn = sys::dl_sym($lib, "strada_dbi_disconnect");
-    sys::dl_call_void_sv($fn, [$dbh]);
+    my ptr $handle = $dbh->{"_ptr"};
+    if (!c::is_null($handle)) {
+        strada_dbi_disconnect_raw($handle);
+    }
 }
 
 # Prepare a SQL statement
-# Returns a statement handle (hash reference)
+# Returns a statement handle (hash reference with _ptr)
 func prepare(scalar $dbh, str $sql) scalar {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+    if (!defined($dbh)) {
         return undef;
     }
 
-    my int $fn = sys::dl_sym($lib, "strada_dbi_prepare");
-    return sys::dl_call_sv($fn, [$dbh, $sql]);
+    my ptr $dbh_ptr = $dbh->{"_ptr"};
+    my ptr $sql_ptr = c::str_to_ptr($sql);
+
+    my ptr $sth = strada_dbi_prepare_raw($dbh_ptr, $sql_ptr);
+
+    c::free($sql_ptr);
+
+    if (c::is_null($sth)) {
+        return undef;
+    }
+
+    my hash %handle = ();
+    $handle{"_ptr"} = $sth;
+    $handle{"_dbh"} = $dbh;
+    $handle{"sql"} = $sql;
+    $handle{"_executed"} = 0;
+    return \%handle;
+}
+
+# Bind parameters and execute - internal helper
+func _bind_params(ptr $sth, scalar $params) void {
+    if (!defined($params)) {
+        return;
+    }
+
+    my int $count = scalar($params);
+    my int $i = 0;
+    while ($i < $count) {
+        my scalar $val = $params->[$i];
+        my int $idx = $i + 1;  # SQLite bind indices start at 1
+
+        if (!defined($val)) {
+            strada_dbi_bind_null($sth, $idx);
+        } else {
+            # Check type by attempting numeric conversion
+            # For simplicity, treat everything as string (most compatible)
+            my ptr $str_ptr = c::str_to_ptr("" . $val);
+            strada_dbi_bind_str($sth, $idx, $str_ptr);
+            c::free($str_ptr);
+        }
+        $i = $i + 1;
+    }
 }
 
 # Execute a prepared statement
 # params should be an array reference with bind values
 # Returns number of affected rows, or -1 on error
 func execute(scalar $sth, scalar $params) int {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+    if (!defined($sth)) {
         return -1;
     }
 
-    my int $fn = sys::dl_sym($lib, "strada_dbi_execute");
-    my scalar $result = sys::dl_call_sv($fn, [$sth, $params]);
-    return $result + 0;
+    my ptr $sth_ptr = $sth->{"_ptr"};
+
+    # Clear any previous bindings
+    strada_dbi_clear_bindings($sth_ptr);
+
+    # Bind parameters
+    DBI::_bind_params($sth_ptr, $params);
+
+    # Execute
+    my int $result = strada_dbi_execute_raw($sth_ptr);
+    $sth->{"_executed"} = 1;
+    return $result;
 }
 
 # Execute SQL directly (prepare + execute)
 # Useful for INSERT, UPDATE, DELETE, CREATE, etc.
 # Returns number of affected rows, or -1 on error
-func do(scalar $dbh, str $sql, scalar $params) int {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+func exec(scalar $dbh, str $sql, scalar $params) int {
+    my scalar $sth = DBI::prepare($dbh, $sql);
+    if (!defined($sth)) {
         return -1;
     }
 
-    my int $fn = sys::dl_sym($lib, "strada_dbi_do");
-    my scalar $result = sys::dl_call_sv($fn, [$dbh, $sql, $params]);
-    return $result + 0;
+    my int $result = DBI::execute($sth, $params);
+    DBI::finish($sth);
+    return $result;
 }
 
 # Convenience: execute without params
 func do_sql(scalar $dbh, str $sql) int {
-    return DBI::do($dbh, $sql, []);
+    return DBI::exec($dbh, $sql, []);
 }
 
 # Fetch next row as array reference
 # Returns undef when no more rows
 func fetchrow_array(scalar $sth) scalar {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+    if (!defined($sth)) {
         return undef;
     }
 
-    my int $fn = sys::dl_sym($lib, "strada_dbi_fetchrow_array");
-    return sys::dl_call_sv($fn, [$sth]);
+    my ptr $sth_ptr = $sth->{"_ptr"};
+
+    # Step to next row
+    my int $rc = strada_dbi_step($sth_ptr);
+    if ($rc != 1) {
+        return undef;
+    }
+
+    # Build array from columns
+    my int $col_count = strada_dbi_column_count($sth_ptr);
+    my array @row = ();
+
+    my int $i = 0;
+    while ($i < $col_count) {
+        if (strada_dbi_column_is_null($sth_ptr, $i) == 1) {
+            push(@row, undef);
+        } else {
+            my int $col_type = strada_dbi_column_type($sth_ptr, $i);
+            if ($col_type == 1) {
+                # Integer
+                my int $val = strada_dbi_column_int($sth_ptr, $i);
+                push(@row, $val);
+            } elsif ($col_type == 2) {
+                # Float
+                my num $val = strada_dbi_column_num($sth_ptr, $i);
+                push(@row, $val);
+            } else {
+                # String (default)
+                my ptr $val_ptr = strada_dbi_column_str($sth_ptr, $i);
+                my str $val = c::ptr_to_str($val_ptr);
+                c::free($val_ptr);
+                push(@row, $val);
+            }
+        }
+        $i = $i + 1;
+    }
+
+    return \@row;
 }
 
 # Fetch next row as hash reference
 # Keys are column names
 # Returns undef when no more rows
 func fetchrow_hashref(scalar $sth) scalar {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+    if (!defined($sth)) {
         return undef;
     }
 
-    my int $fn = sys::dl_sym($lib, "strada_dbi_fetchrow_hashref");
-    return sys::dl_call_sv($fn, [$sth]);
+    my ptr $sth_ptr = $sth->{"_ptr"};
+
+    # Step to next row
+    my int $rc = strada_dbi_step($sth_ptr);
+    if ($rc != 1) {
+        return undef;
+    }
+
+    # Build hash from columns
+    my int $col_count = strada_dbi_column_count($sth_ptr);
+    my hash %row = ();
+
+    my int $i = 0;
+    while ($i < $col_count) {
+        # Get column name
+        my ptr $name_ptr = strada_dbi_column_name($sth_ptr, $i);
+        my str $name = c::ptr_to_str($name_ptr);
+        c::free($name_ptr);
+
+        if (strada_dbi_column_is_null($sth_ptr, $i) == 1) {
+            $row{$name} = undef;
+        } else {
+            my int $col_type = strada_dbi_column_type($sth_ptr, $i);
+            if ($col_type == 1) {
+                # Integer
+                my int $val = strada_dbi_column_int($sth_ptr, $i);
+                $row{$name} = $val;
+            } elsif ($col_type == 2) {
+                # Float
+                my num $val = strada_dbi_column_num($sth_ptr, $i);
+                $row{$name} = $val;
+            } else {
+                # String (default)
+                my ptr $val_ptr = strada_dbi_column_str($sth_ptr, $i);
+                my str $val = c::ptr_to_str($val_ptr);
+                c::free($val_ptr);
+                $row{$name} = $val;
+            }
+        }
+        $i = $i + 1;
+    }
+
+    return \%row;
 }
 
 # Fetch all rows as array of array refs
 func fetchall_arrayref(scalar $sth) scalar {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
-        return [];
+    my array @all = ();
+    my scalar $row = DBI::fetchrow_array($sth);
+    while (defined($row)) {
+        push(@all, $row);
+        $row = DBI::fetchrow_array($sth);
     }
-
-    my int $fn = sys::dl_sym($lib, "strada_dbi_fetchall_arrayref");
-    return sys::dl_call_sv($fn, [$sth]);
+    return \@all;
 }
 
 # Begin a transaction
 func begin_work(scalar $dbh) int {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+    if (!defined($dbh)) {
         return -1;
     }
-
-    my int $fn = sys::dl_sym($lib, "strada_dbi_begin_work");
-    my scalar $result = sys::dl_call_sv($fn, [$dbh]);
-    return $result + 0;
+    my ptr $dbh_handle = $dbh->{"_ptr"};
+    return strada_dbi_begin_work_raw($dbh_handle);
 }
 
 # Commit transaction
 func commit(scalar $dbh) int {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+    if (!defined($dbh)) {
         return -1;
     }
-
-    my int $fn = sys::dl_sym($lib, "strada_dbi_commit");
-    my scalar $result = sys::dl_call_sv($fn, [$dbh]);
-    return $result + 0;
+    my ptr $dbh_handle = $dbh->{"_ptr"};
+    return strada_dbi_commit_raw($dbh_handle);
 }
 
 # Rollback transaction
 func rollback(scalar $dbh) int {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+    if (!defined($dbh)) {
         return -1;
     }
-
-    my int $fn = sys::dl_sym($lib, "strada_dbi_rollback");
-    my scalar $result = sys::dl_call_sv($fn, [$dbh]);
-    return $result + 0;
+    my ptr $dbh_handle = $dbh->{"_ptr"};
+    return strada_dbi_rollback_raw($dbh_handle);
 }
 
 # Quote a string value for safe use in SQL
 func quote(scalar $dbh, str $value) str {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+    if (!defined($dbh)) {
         return "''";
     }
 
-    my int $fn = sys::dl_sym($lib, "strada_dbi_quote");
-    my scalar $result = sys::dl_call_sv($fn, [$dbh, $value]);
-    return "" . $result;
+    my ptr $dbh_handle = $dbh->{"_ptr"};
+    my ptr $val_ptr = c::str_to_ptr($value);
+    my ptr $result_ptr = strada_dbi_quote_raw($dbh_handle, $val_ptr);
+    c::free($val_ptr);
+
+    if (c::is_null($result_ptr)) {
+        return "''";
+    }
+
+    my str $result = c::ptr_to_str($result_ptr);
+    c::free($result_ptr);
+    return $result;
 }
 
 # Get last insert ID (auto-increment value)
 func last_insert_id(scalar $dbh) int {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+    if (!defined($dbh)) {
         return -1;
     }
-
-    my int $fn = sys::dl_sym($lib, "strada_dbi_last_insert_id");
-    my scalar $result = sys::dl_call_sv($fn, [$dbh]);
-    return $result + 0;
+    my ptr $dbh_handle = $dbh->{"_ptr"};
+    return strada_dbi_last_insert_id_raw($dbh_handle);
 }
 
 # Get last error message
 func errstr(scalar $dbh) str {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
-        return "Library not loaded";
+    if (!defined($dbh)) {
+        return "No database handle";
     }
 
-    my int $fn = sys::dl_sym($lib, "strada_dbi_errstr");
-    my scalar $result = sys::dl_call_sv($fn, [$dbh]);
-    return "" . $result;
+    my ptr $dbh_handle = $dbh->{"_ptr"};
+    my ptr $err_ptr = strada_dbi_errstr_raw($dbh_handle);
+    if (c::is_null($err_ptr)) {
+        return "";
+    }
+    return c::ptr_to_str($err_ptr);
 }
 
 # Get last error code
 func err(scalar $dbh) int {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+    if (!defined($dbh)) {
         return -1;
     }
-
-    my int $fn = sys::dl_sym($lib, "strada_dbi_err");
-    my scalar $result = sys::dl_call_sv($fn, [$dbh]);
-    return $result + 0;
+    my ptr $dbh_handle = $dbh->{"_ptr"};
+    return strada_dbi_err_raw($dbh_handle);
 }
 
 # Finish statement (mark as done, release resources)
 func finish(scalar $sth) void {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+    if (!defined($sth)) {
         return;
     }
-
-    my int $fn = sys::dl_sym($lib, "strada_dbi_finish");
-    sys::dl_call_void_sv($fn, [$sth]);
+    my ptr $sth_handle = $sth->{"_ptr"};
+    strada_dbi_finish_raw($sth_handle);
 }
 
 # Get number of rows affected by last statement
 func rows(scalar $sth) int {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+    if (!defined($sth)) {
         return -1;
     }
-
-    my int $fn = sys::dl_sym($lib, "strada_dbi_rows");
-    my scalar $result = sys::dl_call_sv($fn, [$sth]);
-    return $result + 0;
+    my ptr $sth_handle = $sth->{"_ptr"};
+    return strada_dbi_rows_raw($sth_handle);
 }
 
 # Get column names from statement
 func column_names(scalar $sth) scalar {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+    if (!defined($sth)) {
         return [];
     }
 
-    my int $fn = sys::dl_sym($lib, "strada_dbi_column_names");
-    return sys::dl_call_sv($fn, [$sth]);
+    my ptr $sth_handle = $sth->{"_ptr"};
+    my int $col_count = strada_dbi_column_count($sth_handle);
+    my array @names = ();
+
+    my int $i = 0;
+    while ($i < $col_count) {
+        my ptr $name_ptr = strada_dbi_column_name($sth_handle, $i);
+        my str $name = c::ptr_to_str($name_ptr);
+        c::free($name_ptr);
+        push(@names, $name);
+        $i = $i + 1;
+    }
+
+    return \@names;
 }
 
 # Check if connection is still alive
 func ping(scalar $dbh) int {
-    my int $lib = DBI::_get_lib();
-    if ($lib == 0) {
+    if (!defined($dbh)) {
         return 0;
     }
-
-    my int $fn = sys::dl_sym($lib, "strada_dbi_ping");
-    my scalar $result = sys::dl_call_sv($fn, [$dbh]);
-    return $result + 0;
+    my ptr $dbh_handle = $dbh->{"_ptr"};
+    return strada_dbi_ping_raw($dbh_handle);
 }
 
 # ============================================================
@@ -333,15 +520,15 @@ func selectall_hashref(scalar $dbh, str $sql, scalar $params) scalar {
 
     DBI::execute($sth, $params);
 
-    my scalar $results = [];
+    my array @results = ();
     my scalar $row = DBI::fetchrow_hashref($sth);
     while (defined($row)) {
-        push($results, $row);
+        push(@results, $row);
         $row = DBI::fetchrow_hashref($sth);
     }
 
     DBI::finish($sth);
-    return $results;
+    return \@results;
 }
 
 # Select a single row as hash ref
@@ -368,7 +555,7 @@ func selectcol(scalar $dbh, str $sql, scalar $params) scalar {
     my scalar $row = DBI::fetchrow_array($sth);
     DBI::finish($sth);
 
-    if (defined($row) && size($row) > 0) {
+    if (defined($row) && scalar($row) > 0) {
         return $row->[0];
     }
     return undef;
@@ -376,9 +563,10 @@ func selectcol(scalar $dbh, str $sql, scalar $params) scalar {
 
 # Insert and return the new ID
 func insert_get_id(scalar $dbh, str $sql, scalar $params) int {
-    my int $result = DBI::do($dbh, $sql, $params);
+    my int $result = DBI::exec($dbh, $sql, $params);
     if ($result < 0) {
         return -1;
     }
     return DBI::last_insert_id($dbh);
 }
+

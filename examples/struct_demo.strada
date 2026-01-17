@@ -122,7 +122,7 @@ func demo_struct_pointer() void {
     
     # Get C pointer (for passing to C functions)
     my scalar $ptr = sys::cstruct_ptr($point);
-    
+
     say("Created struct pointer");
     say("Pointer type: " . typeof($ptr));
     say("");

@@ -16,12 +16,12 @@
 */
 
 /*
- * strada_md5.c - MD5 Message-Digest Algorithm for Strada FFI
+ * strada_md5.c - MD5 Message-Digest Algorithm for Strada extern "C"
  *
  * Implementation based on RFC 1321.
  *
  * Compile with:
- *   gcc -shared -fPIC -o libstrada_md5.so strada_md5.c -I../../runtime
+ *   gcc -c -o strada_md5.o strada_md5.c
  */
 
 #include <stdio.h>
@@ -29,14 +29,11 @@
 #include <string.h>
 #include <stdint.h>
 
-/* Include Strada runtime for StradaValue type */
-#include "strada_runtime.h"
-
 /* MD5 context structure */
 typedef struct {
-    uint32_t state[4];      /* state (ABCD) */
-    uint32_t count[2];      /* number of bits, modulo 2^64 */
-    uint8_t buffer[64];     /* input buffer */
+    uint32_t state[4];
+    uint32_t count[2];
+    uint8_t buffer[64];
 } MD5_CTX;
 
 /* Constants for MD5Transform routine */
@@ -57,16 +54,13 @@ typedef struct {
 #define S43 15
 #define S44 21
 
-/* F, G, H and I are basic MD5 functions */
 #define F(x, y, z) (((x) & (y)) | ((~x) & (z)))
 #define G(x, y, z) (((x) & (z)) | ((y) & (~z)))
 #define H(x, y, z) ((x) ^ (y) ^ (z))
 #define I(x, y, z) ((y) ^ ((x) | (~z)))
 
-/* ROTATE_LEFT rotates x left n bits */
 #define ROTATE_LEFT(x, n) (((x) << (n)) | ((x) >> (32-(n))))
 
-/* FF, GG, HH, and II transformations for rounds 1, 2, 3, and 4 */
 #define FF(a, b, c, d, x, s, ac) { \
     (a) += F((b), (c), (d)) + (x) + (uint32_t)(ac); \
     (a) = ROTATE_LEFT((a), (s)); \
@@ -88,7 +82,6 @@ typedef struct {
     (a) += (b); \
 }
 
-/* Padding for final block */
 static uint8_t PADDING[64] = {
     0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -96,7 +89,6 @@ static uint8_t PADDING[64] = {
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 };
 
-/* Encode input (uint32_t) into output (uint8_t) - little endian */
 static void Encode(uint8_t *output, uint32_t *input, unsigned int len) {
     unsigned int i, j;
     for (i = 0, j = 0; j < len; i++, j += 4) {
@@ -107,7 +99,6 @@ static void Encode(uint8_t *output, uint32_t *input, unsigned int len) {
     }
 }
 
-/* Decode input (uint8_t) into output (uint32_t) - little endian */
 static void Decode(uint32_t *output, uint8_t *input, unsigned int len) {
     unsigned int i, j;
     for (i = 0, j = 0; j < len; i++, j += 4) {
@@ -116,13 +107,11 @@ static void Decode(uint32_t *output, uint8_t *input, unsigned int len) {
     }
 }
 
-/* MD5 basic transformation - transforms state based on block */
 static void MD5Transform(uint32_t state[4], uint8_t block[64]) {
     uint32_t a = state[0], b = state[1], c = state[2], d = state[3], x[16];
 
     Decode(x, block, 64);
 
-    /* Round 1 */
     FF(a, b, c, d, x[ 0], S11, 0xd76aa478);
     FF(d, a, b, c, x[ 1], S12, 0xe8c7b756);
     FF(c, d, a, b, x[ 2], S13, 0x242070db);
@@ -140,7 +129,6 @@ static void MD5Transform(uint32_t state[4], uint8_t block[64]) {
     FF(c, d, a, b, x[14], S13, 0xa679438e);
     FF(b, c, d, a, x[15], S14, 0x49b40821);
 
-    /* Round 2 */
     GG(a, b, c, d, x[ 1], S21, 0xf61e2562);
     GG(d, a, b, c, x[ 6], S22, 0xc040b340);
     GG(c, d, a, b, x[11], S23, 0x265e5a51);
@@ -158,7 +146,6 @@ static void MD5Transform(uint32_t state[4], uint8_t block[64]) {
     GG(c, d, a, b, x[ 7], S23, 0x676f02d9);
     GG(b, c, d, a, x[12], S24, 0x8d2a4c8a);
 
-    /* Round 3 */
     HH(a, b, c, d, x[ 5], S31, 0xfffa3942);
     HH(d, a, b, c, x[ 8], S32, 0x8771f681);
     HH(c, d, a, b, x[11], S33, 0x6d9d6122);
@@ -176,7 +163,6 @@ static void MD5Transform(uint32_t state[4], uint8_t block[64]) {
     HH(c, d, a, b, x[15], S33, 0x1fa27cf8);
     HH(b, c, d, a, x[ 2], S34, 0xc4ac5665);
 
-    /* Round 4 */
     II(a, b, c, d, x[ 0], S41, 0xf4292244);
     II(d, a, b, c, x[ 7], S42, 0x432aff97);
     II(c, d, a, b, x[14], S43, 0xab9423a7);
@@ -199,28 +185,22 @@ static void MD5Transform(uint32_t state[4], uint8_t block[64]) {
     state[2] += c;
     state[3] += d;
 
-    /* Zeroize sensitive information */
     memset(x, 0, sizeof(x));
 }
 
-/* MD5 initialization - begins an MD5 operation */
 static void MD5Init(MD5_CTX *context) {
     context->count[0] = context->count[1] = 0;
-    /* Load magic initialization constants */
     context->state[0] = 0x67452301;
     context->state[1] = 0xefcdab89;
     context->state[2] = 0x98badcfe;
     context->state[3] = 0x10325476;
 }
 
-/* MD5 block update operation - continues an MD5 message-digest operation */
 static void MD5Update(MD5_CTX *context, uint8_t *input, unsigned int inputLen) {
     unsigned int i, index, partLen;
 
-    /* Compute number of bytes mod 64 */
     index = (unsigned int)((context->count[0] >> 3) & 0x3F);
 
-    /* Update number of bits */
     if ((context->count[0] += ((uint32_t)inputLen << 3)) < ((uint32_t)inputLen << 3)) {
         context->count[1]++;
     }
@@ -228,7 +208,6 @@ static void MD5Update(MD5_CTX *context, uint8_t *input, unsigned int inputLen) {
 
     partLen = 64 - index;
 
-    /* Transform as many times as possible */
     if (inputLen >= partLen) {
         memcpy(&context->buffer[index], input, partLen);
         MD5Transform(context->state, context->buffer);
@@ -242,34 +221,26 @@ static void MD5Update(MD5_CTX *context, uint8_t *input, unsigned int inputLen) {
         i = 0;
     }
 
-    /* Buffer remaining input */
     memcpy(&context->buffer[index], &input[i], inputLen - i);
 }
 
-/* MD5 finalization - ends an MD5 message-digest operation */
 static void MD5Final(uint8_t digest[16], MD5_CTX *context) {
     uint8_t bits[8];
     unsigned int index, padLen;
 
-    /* Save number of bits */
     Encode(bits, context->count, 8);
 
-    /* Pad out to 56 mod 64 */
     index = (unsigned int)((context->count[0] >> 3) & 0x3f);
     padLen = (index < 56) ? (56 - index) : (120 - index);
     MD5Update(context, PADDING, padLen);
 
-    /* Append length (before padding) */
     MD5Update(context, bits, 8);
 
-    /* Store state in digest */
     Encode(digest, context->state, 16);
 
-    /* Zeroize sensitive information */
     memset(context, 0, sizeof(*context));
 }
 
-/* Compute MD5 of a buffer - returns 16-byte digest */
 static void md5_compute(const uint8_t *data, size_t len, uint8_t digest[16]) {
     MD5_CTX ctx;
     MD5Init(&ctx);
@@ -277,10 +248,8 @@ static void md5_compute(const uint8_t *data, size_t len, uint8_t digest[16]) {
     MD5Final(digest, &ctx);
 }
 
-/* Base64 encoding table */
 static const char b64_table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-/* Encode 16 bytes to base64 (24 chars + null) */
 static void base64_encode_16(const uint8_t *input, char *output) {
     int i, j;
     for (i = 0, j = 0; i < 15; i += 3, j += 4) {
@@ -289,64 +258,39 @@ static void base64_encode_16(const uint8_t *input, char *output) {
         output[j+2] = b64_table[((input[i+1] & 0x0f) << 2) | (input[i+2] >> 6)];
         output[j+3] = b64_table[input[i+2] & 0x3f];
     }
-    /* Last byte (16th) - 1 byte remaining = 2 base64 chars + 2 padding */
     output[20] = b64_table[input[15] >> 2];
     output[21] = b64_table[(input[15] & 0x03) << 4];
-    /* Note: Perl's Digest::MD5 omits padding for md5_base64 */
     output[22] = '\0';
 }
 
-/* ========== Strada FFI Functions ========== */
+/* ========== Strada extern "C" Functions ========== */
 
-/*
- * md5($data) - Returns raw 16-byte MD5 digest
- * Returns: 16-byte binary string
- */
-StradaValue* strada_digest_md5(StradaValue *data_sv) {
-    const char *data;
-    size_t len;
-    uint8_t digest[16];
+/* Store raw digest for md5() */
+static uint8_t last_digest[16];
 
-    /* Get string data with length (binary-safe) */
-    if (data_sv->type == STRADA_STR && data_sv->value.pv) {
-        data = data_sv->value.pv;
-        len = strada_str_len(data_sv);
-    } else {
-        data = strada_to_str(data_sv);
-        len = strlen(data);
+/* md5($data, $len) - Compute raw 16-byte MD5 digest
+ * Returns pointer to internal 16-byte buffer */
+void* strada_digest_md5(const char *data, size_t len) {
+    if (!data) {
+        memset(last_digest, 0, 16);
+        return last_digest;
     }
-
-    md5_compute((const uint8_t *)data, len, digest);
-
-    /* Return as binary string */
-    return strada_new_str_len((char *)digest, 16);
+    md5_compute((const uint8_t *)data, len, last_digest);
+    return last_digest;
 }
 
-/*
- * md5_hex($data) - Returns MD5 digest as 32-char hex string
- * Returns: 32-character lowercase hex string
- */
-char* strada_digest_md5_hex(StradaValue *data_sv) {
-    const char *data;
-    size_t len;
+/* md5_hex($data, $len) - Compute MD5 as 32-char hex string
+ * Returns pointer to static buffer */
+const char* strada_digest_md5_hex(const char *data, size_t len) {
+    static char hex[33];
     uint8_t digest[16];
-    char *hex;
     int i;
 
-    /* Get string data with length (binary-safe) */
-    if (data_sv->type == STRADA_STR && data_sv->value.pv) {
-        data = data_sv->value.pv;
-        len = strada_str_len(data_sv);
-    } else {
-        data = strada_to_str(data_sv);
-        len = strlen(data);
+    if (!data) {
+        return "";
     }
 
     md5_compute((const uint8_t *)data, len, digest);
-
-    /* Convert to hex string */
-    hex = malloc(33);
-    if (!hex) return strdup("");
 
     for (i = 0; i < 16; i++) {
         sprintf(&hex[i*2], "%02x", digest[i]);
@@ -356,31 +300,17 @@ char* strada_digest_md5_hex(StradaValue *data_sv) {
     return hex;
 }
 
-/*
- * md5_base64($data) - Returns MD5 digest as base64 string (22 chars, no padding)
- * Returns: 22-character base64 string (Perl-compatible, no = padding)
- */
-char* strada_digest_md5_base64(StradaValue *data_sv) {
-    const char *data;
-    size_t len;
+/* md5_base64($data, $len) - Compute MD5 as 22-char base64 string
+ * Returns pointer to static buffer */
+const char* strada_digest_md5_base64(const char *data, size_t len) {
+    static char b64[23];
     uint8_t digest[16];
-    char *b64;
 
-    /* Get string data with length (binary-safe) */
-    if (data_sv->type == STRADA_STR && data_sv->value.pv) {
-        data = data_sv->value.pv;
-        len = strada_str_len(data_sv);
-    } else {
-        data = strada_to_str(data_sv);
-        len = strlen(data);
+    if (!data) {
+        return "";
     }
 
     md5_compute((const uint8_t *)data, len, digest);
-
-    /* Convert to base64 (22 chars for 16 bytes, no padding) */
-    b64 = malloc(23);
-    if (!b64) return strdup("");
-
     base64_encode_16(digest, b64);
 
     return b64;

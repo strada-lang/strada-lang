@@ -814,6 +814,7 @@ func lex_keyword_or_ident(str $text) str {
     if ($text eq "next") { return "NEXT"; }
     if ($text eq "extern") { return "EXTERN"; }
     if ($text eq "struct") { return "STRUCT"; }
+    if ($text eq "enum") { return "ENUM"; }
     if ($text eq "package") { return "PACKAGE"; }
     if ($text eq "version") { return "VERSION"; }
     if ($text eq "use") { return "USE"; }
@@ -842,6 +843,7 @@ func lex_keyword_or_ident(str $text) str {
     if ($text eq "int") { return "TYPE_INT"; }
     if ($text eq "num") { return "TYPE_NUM"; }
     if ($text eq "str") { return "TYPE_STR"; }
+    if ($text eq "bool") { return "TYPE_BOOL"; }
     if ($text eq "array") { return "TYPE_ARRAY"; }
     if ($text eq "hash") { return "TYPE_HASH"; }
     if ($text eq "scalar") { return "TYPE_SCALAR"; }
@@ -851,7 +853,20 @@ func lex_keyword_or_ident(str $text) str {
     if ($text eq "int64") { return "TYPE_INT64"; }
     if ($text eq "float32") { return "TYPE_FLOAT32"; }
     if ($text eq "float64") { return "TYPE_FLOAT64"; }
-    
+    if ($text eq "int8") { return "TYPE_INT8"; }
+    if ($text eq "int16") { return "TYPE_INT16"; }
+    if ($text eq "uint8") { return "TYPE_UINT8"; }
+    if ($text eq "byte") { return "TYPE_UINT8"; }
+    if ($text eq "uint16") { return "TYPE_UINT16"; }
+    if ($text eq "uint32") { return "TYPE_UINT32"; }
+    if ($text eq "uint64") { return "TYPE_UINT64"; }
+    if ($text eq "size_t") { return "TYPE_SIZE_T"; }
+    if ($text eq "char") { return "TYPE_CHAR"; }
+    if ($text eq "float") { return "TYPE_FLOAT32"; }
+    if ($text eq "double") { return "TYPE_FLOAT64"; }
+    if ($text eq "long_double") { return "TYPE_LONG_DOUBLE"; }
+    if ($text eq "ptr") { return "TYPE_PTR"; }
+
     # Built-ins that need special token types
     # undef is a keyword, not a function call
     if ($text eq "undef") { return "UNDEF"; }

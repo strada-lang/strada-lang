@@ -37,8 +37,7 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
-/* Include Strada runtime for StradaValue type */
-#include "strada_runtime.h"
+/* No StradaValue dependency - uses raw C types for extern "C" */
 
 /* Connection structure holding both socket and SSL context */
 typedef struct {
@@ -83,15 +82,13 @@ const char* strada_ssl_error(void) {
 }
 
 /* Create SSL client connection to host:port
- * Accepts StradaValue* arguments from Strada FFI */
-SSLConnection* strada_ssl_connect(StradaValue *host_sv, StradaValue *port_sv) {
+ * Takes raw C types for extern "C" */
+SSLConnection* strada_ssl_connect(const char *host, int port) {
     if (!ssl_initialized) {
         strada_ssl_init();
     }
 
-    /* Extract actual values from StradaValue */
-    const char *host = strada_to_str(host_sv);
-    int port = (int)strada_to_int(port_sv);
+    if (!host) return NULL;
 
     SSLConnection *conn = malloc(sizeof(SSLConnection));
     if (!conn) return NULL;
@@ -165,16 +162,13 @@ SSLConnection* strada_ssl_connect(StradaValue *host_sv, StradaValue *port_sv) {
 }
 
 /* Create SSL server socket
- * Accepts StradaValue* arguments from Strada FFI */
-SSLConnection* strada_ssl_server(StradaValue *port_sv, StradaValue *cert_file_sv, StradaValue *key_file_sv) {
+ * Takes raw C types for extern "C" */
+SSLConnection* strada_ssl_server(int port, const char *cert_file, const char *key_file) {
     if (!ssl_initialized) {
         strada_ssl_init();
     }
 
-    /* Extract actual values from StradaValue */
-    int port = (int)strada_to_int(port_sv);
-    const char *cert_file = strada_to_str(cert_file_sv);
-    const char *key_file = strada_to_str(key_file_sv);
+    if (!cert_file || !key_file) return NULL;
 
     SSLConnection *conn = malloc(sizeof(SSLConnection));
     if (!conn) return NULL;
@@ -249,9 +243,8 @@ SSLConnection* strada_ssl_server(StradaValue *port_sv, StradaValue *cert_file_sv
 }
 
 /* Accept SSL connection on server socket
- * Accepts StradaValue* argument from Strada FFI */
-SSLConnection* strada_ssl_accept(StradaValue *server_sv) {
-    SSLConnection *server = (SSLConnection *)strada_to_int(server_sv);
+ * Takes raw C types for extern "C" */
+SSLConnection* strada_ssl_accept(SSLConnection *server) {
 
     if (!server || !server->is_server) return NULL;
 
@@ -300,10 +293,8 @@ int strada_ssl_read(SSLConnection *conn, char *buffer, int max_len) {
 }
 
 /* Read data from SSL connection, returns allocated string
- * Accepts StradaValue* arguments from Strada FFI */
-char* strada_ssl_read_str(StradaValue *conn_sv, StradaValue *max_len_sv) {
-    SSLConnection *conn = (SSLConnection *)strada_to_int(conn_sv);
-    int max_len = (int)strada_to_int(max_len_sv);
+ * Takes raw C types for extern "C" */
+char* strada_ssl_read_str(SSLConnection *conn, int max_len) {
 
     if (!conn || !conn->ssl) return strdup("");
 
@@ -321,10 +312,8 @@ char* strada_ssl_read_str(StradaValue *conn_sv, StradaValue *max_len_sv) {
 }
 
 /* Read line from SSL connection (up to newline or max_len)
- * Accepts StradaValue* arguments from Strada FFI */
-char* strada_ssl_readline(StradaValue *conn_sv, StradaValue *max_len_sv) {
-    SSLConnection *conn = (SSLConnection *)strada_to_int(conn_sv);
-    int max_len = (int)strada_to_int(max_len_sv);
+ * Takes raw C types for extern "C" */
+char* strada_ssl_readline(SSLConnection *conn, int max_len) {
 
     if (!conn || !conn->ssl) return NULL;
 
@@ -380,20 +369,16 @@ int strada_ssl_write(SSLConnection *conn, const char *data, int len) {
 }
 
 /* Write string to SSL connection
- * Accepts StradaValue* arguments from Strada FFI */
-int strada_ssl_write_str(StradaValue *conn_sv, StradaValue *data_sv) {
-    SSLConnection *conn = (SSLConnection *)strada_to_int(conn_sv);
-    const char *data = strada_to_str(data_sv);
-
+ * Takes raw C types for extern "C" */
+int strada_ssl_write_str(SSLConnection *conn, const char *data, int len) {
     if (!conn || !conn->ssl || !data) return -1;
-    return SSL_write(conn->ssl, data, strlen(data));
+    if (len < 0) len = strlen(data);
+    return SSL_write(conn->ssl, data, len);
 }
 
 /* Close SSL connection
- * Accepts StradaValue* argument from Strada FFI */
-void strada_ssl_close(StradaValue *conn_sv) {
-    SSLConnection *conn = (SSLConnection *)strada_to_int(conn_sv);
-
+ * Takes raw C types for extern "C" */
+void strada_ssl_close(SSLConnection *conn) {
     if (!conn) return;
 
     if (conn->ssl) {
@@ -414,37 +399,32 @@ void strada_ssl_close(StradaValue *conn_sv) {
 }
 
 /* Get peer certificate info as string
- * Accepts StradaValue* argument from Strada FFI */
-char* strada_ssl_peer_cert(StradaValue *conn_sv) {
-    SSLConnection *conn = (SSLConnection *)strada_to_int(conn_sv);
-
-    if (!conn || !conn->ssl) return strdup("");
+ * Takes raw C types for extern "C" */
+const char* strada_ssl_peer_cert(SSLConnection *conn) {
+    static char cert_buf[1024];
+    if (!conn || !conn->ssl) return "";
 
     X509 *cert = SSL_get_peer_certificate(conn->ssl);
-    if (!cert) return strdup("No certificate");
+    if (!cert) return "No certificate";
 
-    char *subject = X509_NAME_oneline(X509_get_subject_name(cert), NULL, 0);
+    char *subject = X509_NAME_oneline(X509_get_subject_name(cert), cert_buf, sizeof(cert_buf));
     X509_free(cert);
 
-    return subject ? subject : strdup("Unknown");
+    return subject ? subject : "Unknown";
 }
 
 /* Get SSL version string
- * Accepts StradaValue* argument from Strada FFI */
-char* strada_ssl_version(StradaValue *conn_sv) {
-    SSLConnection *conn = (SSLConnection *)strada_to_int(conn_sv);
-
-    if (!conn || !conn->ssl) return strdup("Not connected");
-    return strdup(SSL_get_version(conn->ssl));
+ * Takes raw C types for extern "C" */
+const char* strada_ssl_version(SSLConnection *conn) {
+    if (!conn || !conn->ssl) return "Not connected";
+    return SSL_get_version(conn->ssl);
 }
 
 /* Get cipher being used
- * Accepts StradaValue* argument from Strada FFI */
-char* strada_ssl_cipher(StradaValue *conn_sv) {
-    SSLConnection *conn = (SSLConnection *)strada_to_int(conn_sv);
-
-    if (!conn || !conn->ssl) return strdup("Not connected");
-    return strdup(SSL_get_cipher(conn->ssl));
+ * Takes raw C types for extern "C" */
+const char* strada_ssl_cipher(SSLConnection *conn) {
+    if (!conn || !conn->ssl) return "Not connected";
+    return SSL_get_cipher(conn->ssl);
 }
 
 /* Check if connection is still valid */
@@ -454,10 +434,8 @@ int strada_ssl_connected(SSLConnection *conn) {
 }
 
 /* Get the raw socket FD (for select/poll)
- * Accepts StradaValue* argument from Strada FFI */
-int strada_ssl_fd(StradaValue *conn_sv) {
-    SSLConnection *conn = (SSLConnection *)strada_to_int(conn_sv);
-
+ * Takes raw C types for extern "C" */
+int strada_ssl_fd(SSLConnection *conn) {
     if (!conn) return -1;
     return conn->socket_fd;
 }
@@ -479,10 +457,8 @@ int strada_ssl_set_nonblock(SSLConnection *conn, int nonblock) {
 }
 
 /* Verify server certificate (call after connect)
- * Accepts StradaValue* argument from Strada FFI */
-int strada_ssl_verify(StradaValue *conn_sv) {
-    SSLConnection *conn = (SSLConnection *)strada_to_int(conn_sv);
-
+ * Takes raw C types for extern "C" */
+int strada_ssl_verify(SSLConnection *conn) {
     if (!conn || !conn->ssl) return -1;
 
     long result = SSL_get_verify_result(conn->ssl);
@@ -501,24 +477,3 @@ void strada_ssl_set_verify(SSLConnection *conn, int verify) {
     }
 }
 
-/* ===== StradaValue-returning wrappers for dl_call_sv ===== */
-
-/* Create SSL server and return wrapped pointer
- * For use with sys::dl_call_sv */
-StradaValue* strada_ssl_server_sv(StradaValue *port_sv, StradaValue *cert_sv, StradaValue *key_sv) {
-    SSLConnection *conn = strada_ssl_server(port_sv, cert_sv, key_sv);
-    if (!conn) {
-        return strada_new_undef();
-    }
-    return strada_new_int((intptr_t)conn);
-}
-
-/* Accept SSL connection and return wrapped pointer
- * For use with sys::dl_call_sv */
-StradaValue* strada_ssl_accept_sv(StradaValue *server_sv) {
-    SSLConnection *conn = strada_ssl_accept(server_sv);
-    if (!conn) {
-        return strada_new_undef();
-    }
-    return strada_new_int((intptr_t)conn);
-}

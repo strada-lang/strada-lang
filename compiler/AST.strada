@@ -74,6 +74,7 @@ func NODE_SWITCH() int { return 114; }
 func NODE_RANGE() int { return 115; }
 func NODE_SUPER_CALL() int { return 116; }
 func NODE_INCREMENT() int { return 117; }
+func NODE_ENUM() int { return 118; }
 
 # Type constants
 func TYPE_INT() int { return 1; }
@@ -91,6 +92,18 @@ func TYPE_INT32() int { return 10; }    # int32_t / int
 func TYPE_INT64() int { return 11; }    # int64_t / long long
 func TYPE_FLOAT32() int { return 12; }  # float (32-bit)
 func TYPE_FLOAT64() int { return 13; }  # double (64-bit)
+func TYPE_BOOL() int { return 14; }     # boolean (alias for int, 0/1)
+func TYPE_INT8() int { return 15; }     # int8_t / signed char
+func TYPE_INT16() int { return 16; }    # int16_t / short
+func TYPE_UINT8() int { return 17; }    # uint8_t / unsigned char / byte
+func TYPE_UINT16() int { return 18; }   # uint16_t / unsigned short
+func TYPE_UINT32() int { return 19; }   # uint32_t / unsigned int
+func TYPE_UINT64() int { return 20; }   # uint64_t / unsigned long long
+func TYPE_SIZE_T() int { return 21; }   # size_t
+func TYPE_CHAR() int { return 22; }     # char (single character)
+func TYPE_LONG_DOUBLE() int { return 23; }  # long double (extended precision)
+func TYPE_ENUM() int { return 24; }         # enum type
+func TYPE_PTR() int { return 25; }          # raw C pointer (void*)
 
 # ============================================================
 # Node Constructors
@@ -119,6 +132,7 @@ func ast_new_program() scalar {
     my scalar $node = ast_new_node(NODE_PROGRAM());
     my array @funcs = ();
     my array @structs = ();
+    my array @enums = ();
     my array @uses = ();
     my array @imports = ();
     my array @inherits = ();
@@ -126,6 +140,7 @@ func ast_new_program() scalar {
     my hash %loaded_modules = ();
     $node->{"functions"} = \@funcs;
     $node->{"structs"} = \@structs;
+    $node->{"enums"} = \@enums;
     $node->{"uses"} = \@uses;
     $node->{"imports"} = \@imports;
     $node->{"inherits"} = \@inherits;
@@ -134,6 +149,7 @@ func ast_new_program() scalar {
     $node->{"loaded_modules"} = \%loaded_modules;
     $node->{"function_count"} = 0;
     $node->{"struct_count"} = 0;
+    $node->{"enum_count"} = 0;
     $node->{"use_count"} = 0;
     $node->{"import_count"} = 0;
     $node->{"inherit_count"} = 0;
@@ -167,6 +183,13 @@ func ast_add_struct(scalar $program, scalar $st) void {
     my scalar $structs = $program->{"structs"};
     push($structs, $st);
     $program->{"struct_count"} = $program->{"struct_count"} + 1;
+}
+
+# Add enum to program
+func ast_add_enum(scalar $program, scalar $en) void {
+    my scalar $enums = $program->{"enums"};
+    push($enums, $en);
+    $program->{"enum_count"} = $program->{"enum_count"} + 1;
 }
 
 # Add use to program
@@ -230,6 +253,7 @@ func ast_new_extern_func(str $name) scalar {
     $node->{"params"} = \@params;
     $node->{"param_count"} = 0;
     $node->{"is_extern"} = 1;
+    $node->{"is_c_extern"} = 0;  # 0 = StradaValue* wrapper, 1 = raw C types
     return $node;
 }
 
@@ -252,6 +276,26 @@ func ast_add_field(scalar $st, str $name, int $field_type, str $sigil) void {
     my scalar $fields = $st->{"fields"};
     push($fields, \%field);
     $st->{"field_count"} = $st->{"field_count"} + 1;
+}
+
+# Create enum node
+func ast_new_enum(str $name) scalar {
+    my scalar $node = ast_new_node(NODE_ENUM());
+    my array @members = ();
+    $node->{"name"} = $name;
+    $node->{"members"} = \@members;
+    $node->{"member_count"} = 0;
+    return $node;
+}
+
+# Add member to enum
+func ast_add_enum_member(scalar $en, str $name, int $value) void {
+    my hash %member = ();
+    $member{"name"} = $name;
+    $member{"value"} = $value;
+    my scalar $members = $en->{"members"};
+    push($members, \%member);
+    $en->{"member_count"} = $en->{"member_count"} + 1;
 }
 
 # Create function node
@@ -808,5 +852,6 @@ func ast_data_type_name(int $type) str {
     if ($type == TYPE_INT64()) { return "int64"; }
     if ($type == TYPE_FLOAT32()) { return "float32"; }
     if ($type == TYPE_FLOAT64()) { return "float64"; }
+    if ($type == TYPE_PTR()) { return "ptr"; }
     return "unknown";
 }

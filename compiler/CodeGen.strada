@@ -329,8 +329,15 @@ func codegen_register_function(scalar $cg, scalar $fn) void {
     # Track if this is an extern function for call site conversion
     if ($fn->{"type"} == NODE_EXTERN_FUNC()) {
         $info{"is_extern"} = 1;
+        # Track if this is a C-style extern (raw C types, direct calls)
+        if ($fn->{"is_c_extern"} == 1) {
+            $info{"is_c_extern"} = 1;
+        } else {
+            $info{"is_c_extern"} = 0;
+        }
     } else {
         $info{"is_extern"} = 0;
+        $info{"is_c_extern"} = 0;
     }
     $cg->{"functions"}->{$name} = \%info;
 }
@@ -831,6 +838,7 @@ func type_to_c(int $type) str {
     if ($type == TYPE_INT()) { return "StradaValue*"; }
     if ($type == TYPE_NUM()) { return "StradaValue*"; }
     if ($type == TYPE_STR()) { return "StradaValue*"; }
+    if ($type == TYPE_BOOL()) { return "StradaValue*"; }
     if ($type == TYPE_ARRAY()) { return "StradaValue*"; }
     if ($type == TYPE_HASH()) { return "StradaValue*"; }
     if ($type == TYPE_SCALAR()) { return "StradaValue*"; }
@@ -947,7 +955,7 @@ func emit_extern_str_operand(scalar $cg, scalar $expr) void {
         if ($extern_params) {
             my scalar $param_type = $extern_params->{$var_name};
             if ($param_type) {
-                if ($param_type == TYPE_INT() || $param_type == TYPE_INT32() || $param_type == TYPE_INT64()) {
+                if ($param_type == TYPE_INT() || $param_type == TYPE_BOOL() || $param_type == TYPE_INT32() || $param_type == TYPE_INT64()) {
                     emit($cg, "strada_int_to_cstr(" . $var_name . ")");
                     return;
                 } elsif ($param_type == TYPE_NUM() || $param_type == TYPE_FLOAT32() || $param_type == TYPE_FLOAT64()) {
@@ -1963,7 +1971,13 @@ func gen_expression(scalar $cg, scalar $expr) void {
     # Function call
     if ($type == NODE_CALL()) {
         my str $name = $expr->{"name"};
-        
+
+        # Handle constant references (e.g., enum values like Color::RED)
+        if ($expr->{"is_constant"} == 1) {
+            emit($cg, "strada_new_int(" . sanitize_name($name) . ")");
+            return;
+        }
+
         # Built-in functions
         if ($name eq "say") {
             if ($expr->{"arg_count"} > 0) {
@@ -3727,15 +3741,14 @@ func gen_expression(scalar $cg, scalar $expr) void {
         }
         
         if ($name eq "sprintf") {
-            emit($cg, "strada_sprintf(strada_to_str(");
+            emit($cg, "strada_sprintf_sv(");
             my scalar $args = $expr->{"args"};
             gen_expression($cg, $args->[0]);
-            emit($cg, ")");
+            emit($cg, ", " . ($expr->{"arg_count"} - 1));
             my int $i = 1;
             while ($i < $expr->{"arg_count"}) {
-                emit($cg, ", strada_to_str(");
+                emit($cg, ", ");
                 gen_expression($cg, $args->[$i]);
-                emit($cg, ")");
                 $i = $i + 1;
             }
             emit($cg, ")");
@@ -4499,6 +4512,268 @@ func gen_expression(scalar $cg, scalar $expr) void {
             gen_expression($cg, $args->[0]);
             emit($cg, ", ");
             gen_expression($cg, $args->[1]);
+            emit($cg, ")");
+            return;
+        }
+
+        # ============================================
+        # c:: namespace - C interop helper functions
+        # ============================================
+
+        # c::str_to_ptr - Convert Strada string to C char* (allocates)
+        if ($name eq "c::str_to_ptr") {
+            emit($cg, "strada_c_str_to_ptr(");
+            my scalar $args = $expr->{"args"};
+            gen_expression($cg, $args->[0]);
+            emit($cg, ")");
+            return;
+        }
+
+        # c::ptr_to_str - Convert C char* to Strada string (copies)
+        if ($name eq "c::ptr_to_str") {
+            emit($cg, "strada_c_ptr_to_str(");
+            my scalar $args = $expr->{"args"};
+            gen_expression($cg, $args->[0]);
+            emit($cg, ")");
+            return;
+        }
+
+        # c::ptr_to_str_n - Convert C char* to Strada string with length
+        if ($name eq "c::ptr_to_str_n") {
+            emit($cg, "strada_c_ptr_to_str_n(");
+            my scalar $args = $expr->{"args"};
+            gen_expression($cg, $args->[0]);
+            emit($cg, ", ");
+            gen_expression($cg, $args->[1]);
+            emit($cg, ")");
+            return;
+        }
+
+        # c::free - Free C-allocated memory
+        if ($name eq "c::free") {
+            emit($cg, "strada_c_free(");
+            my scalar $args = $expr->{"args"};
+            gen_expression($cg, $args->[0]);
+            emit($cg, ")");
+            return;
+        }
+
+        # c::alloc - Allocate memory (malloc wrapper)
+        if ($name eq "c::alloc") {
+            emit($cg, "strada_c_alloc(");
+            my scalar $args = $expr->{"args"};
+            gen_expression($cg, $args->[0]);
+            emit($cg, ")");
+            return;
+        }
+
+        # c::realloc - Reallocate memory
+        if ($name eq "c::realloc") {
+            emit($cg, "strada_c_realloc(");
+            my scalar $args = $expr->{"args"};
+            gen_expression($cg, $args->[0]);
+            emit($cg, ", ");
+            gen_expression($cg, $args->[1]);
+            emit($cg, ")");
+            return;
+        }
+
+        # c::null - Return NULL pointer
+        if ($name eq "c::null") {
+            emit($cg, "strada_c_null()");
+            return;
+        }
+
+        # c::is_null - Check if pointer is NULL
+        if ($name eq "c::is_null") {
+            emit($cg, "strada_c_is_null(");
+            my scalar $args = $expr->{"args"};
+            gen_expression($cg, $args->[0]);
+            emit($cg, ")");
+            return;
+        }
+
+        # c::ptr_add - Pointer arithmetic
+        if ($name eq "c::ptr_add") {
+            emit($cg, "strada_c_ptr_add(");
+            my scalar $args = $expr->{"args"};
+            gen_expression($cg, $args->[0]);
+            emit($cg, ", ");
+            gen_expression($cg, $args->[1]);
+            emit($cg, ")");
+            return;
+        }
+
+        # c:: memory read functions
+        if ($name eq "c::read_int8") {
+            emit($cg, "strada_c_read_int8(");
+            my scalar $args = $expr->{"args"};
+            gen_expression($cg, $args->[0]);
+            emit($cg, ")");
+            return;
+        }
+
+        if ($name eq "c::read_int16") {
+            emit($cg, "strada_c_read_int16(");
+            my scalar $args = $expr->{"args"};
+            gen_expression($cg, $args->[0]);
+            emit($cg, ")");
+            return;
+        }
+
+        if ($name eq "c::read_int32") {
+            emit($cg, "strada_c_read_int32(");
+            my scalar $args = $expr->{"args"};
+            gen_expression($cg, $args->[0]);
+            emit($cg, ")");
+            return;
+        }
+
+        if ($name eq "c::read_int64") {
+            emit($cg, "strada_c_read_int64(");
+            my scalar $args = $expr->{"args"};
+            gen_expression($cg, $args->[0]);
+            emit($cg, ")");
+            return;
+        }
+
+        if ($name eq "c::read_ptr") {
+            emit($cg, "strada_c_read_ptr(");
+            my scalar $args = $expr->{"args"};
+            gen_expression($cg, $args->[0]);
+            emit($cg, ")");
+            return;
+        }
+
+        if ($name eq "c::read_float") {
+            emit($cg, "strada_c_read_float(");
+            my scalar $args = $expr->{"args"};
+            gen_expression($cg, $args->[0]);
+            emit($cg, ")");
+            return;
+        }
+
+        if ($name eq "c::read_double") {
+            emit($cg, "strada_c_read_double(");
+            my scalar $args = $expr->{"args"};
+            gen_expression($cg, $args->[0]);
+            emit($cg, ")");
+            return;
+        }
+
+        # c:: memory write functions
+        if ($name eq "c::write_int8") {
+            emit($cg, "strada_c_write_int8(");
+            my scalar $args = $expr->{"args"};
+            gen_expression($cg, $args->[0]);
+            emit($cg, ", ");
+            gen_expression($cg, $args->[1]);
+            emit($cg, ")");
+            return;
+        }
+
+        if ($name eq "c::write_int16") {
+            emit($cg, "strada_c_write_int16(");
+            my scalar $args = $expr->{"args"};
+            gen_expression($cg, $args->[0]);
+            emit($cg, ", ");
+            gen_expression($cg, $args->[1]);
+            emit($cg, ")");
+            return;
+        }
+
+        if ($name eq "c::write_int32") {
+            emit($cg, "strada_c_write_int32(");
+            my scalar $args = $expr->{"args"};
+            gen_expression($cg, $args->[0]);
+            emit($cg, ", ");
+            gen_expression($cg, $args->[1]);
+            emit($cg, ")");
+            return;
+        }
+
+        if ($name eq "c::write_int64") {
+            emit($cg, "strada_c_write_int64(");
+            my scalar $args = $expr->{"args"};
+            gen_expression($cg, $args->[0]);
+            emit($cg, ", ");
+            gen_expression($cg, $args->[1]);
+            emit($cg, ")");
+            return;
+        }
+
+        if ($name eq "c::write_ptr") {
+            emit($cg, "strada_c_write_ptr(");
+            my scalar $args = $expr->{"args"};
+            gen_expression($cg, $args->[0]);
+            emit($cg, ", ");
+            gen_expression($cg, $args->[1]);
+            emit($cg, ")");
+            return;
+        }
+
+        if ($name eq "c::write_float") {
+            emit($cg, "strada_c_write_float(");
+            my scalar $args = $expr->{"args"};
+            gen_expression($cg, $args->[0]);
+            emit($cg, ", ");
+            gen_expression($cg, $args->[1]);
+            emit($cg, ")");
+            return;
+        }
+
+        if ($name eq "c::write_double") {
+            emit($cg, "strada_c_write_double(");
+            my scalar $args = $expr->{"args"};
+            gen_expression($cg, $args->[0]);
+            emit($cg, ", ");
+            gen_expression($cg, $args->[1]);
+            emit($cg, ")");
+            return;
+        }
+
+        # c:: size introspection
+        if ($name eq "c::sizeof_int") {
+            emit($cg, "strada_c_sizeof_int()");
+            return;
+        }
+
+        if ($name eq "c::sizeof_long") {
+            emit($cg, "strada_c_sizeof_long()");
+            return;
+        }
+
+        if ($name eq "c::sizeof_ptr") {
+            emit($cg, "strada_c_sizeof_ptr()");
+            return;
+        }
+
+        if ($name eq "c::sizeof_size_t") {
+            emit($cg, "strada_c_sizeof_size_t()");
+            return;
+        }
+
+        # c:: memory operations
+        if ($name eq "c::memcpy") {
+            emit($cg, "strada_c_memcpy(");
+            my scalar $args = $expr->{"args"};
+            gen_expression($cg, $args->[0]);
+            emit($cg, ", ");
+            gen_expression($cg, $args->[1]);
+            emit($cg, ", ");
+            gen_expression($cg, $args->[2]);
+            emit($cg, ")");
+            return;
+        }
+
+        if ($name eq "c::memset") {
+            emit($cg, "strada_c_memset(");
+            my scalar $args = $expr->{"args"};
+            gen_expression($cg, $args->[0]);
+            emit($cg, ", ");
+            gen_expression($cg, $args->[1]);
+            emit($cg, ", ");
+            gen_expression($cg, $args->[2]);
             emit($cg, ")");
             return;
         }
@@ -6308,6 +6583,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
             my int $ret_type = $func_info->{"return_type"};
             my int $param_count = $func_info->{"param_count"};
             my scalar $params = $func_info->{"params"};
+            my int $is_c_extern = $func_info->{"is_c_extern"};
 
             # Generate block for extern call with conversion
             emit($cg, "({ ");
@@ -6332,6 +6608,8 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 emit($cg, "char *__ext_ret = " . $c_name . "(");
             } elsif ($ret_type == TYPE_INT()) {
                 emit($cg, "int __ext_ret = " . $c_name . "(");
+            } elsif ($ret_type == TYPE_BOOL()) {
+                emit($cg, "bool __ext_ret = " . $c_name . "(");
             } elsif ($ret_type == TYPE_NUM()) {
                 emit($cg, "double __ext_ret = " . $c_name . "(");
             } elsif ($ret_type == TYPE_INT32()) {
@@ -6342,6 +6620,8 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 emit($cg, "float __ext_ret = " . $c_name . "(");
             } elsif ($ret_type == TYPE_FLOAT64()) {
                 emit($cg, "double __ext_ret = " . $c_name . "(");
+            } elsif ($ret_type == TYPE_PTR()) {
+                emit($cg, "void *__ext_ret = " . $c_name . "(");
             } else {
                 emit($cg, "void *__ext_ret = " . $c_name . "(");
             }
@@ -6356,42 +6636,92 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 if ($a < $param_count) {
                     $param_type = $params->[$a]->{"param_type"};
                 }
-                if ($param_type == TYPE_STR()) {
-                    emit($cg, "strada_to_str(__sv_arg" . $a . ")");
-                } elsif ($param_type == TYPE_INT()) {
-                    emit($cg, "(int)strada_to_int(__sv_arg" . $a . ")");
-                } elsif ($param_type == TYPE_INT32()) {
-                    emit($cg, "(int32_t)strada_to_int(__sv_arg" . $a . ")");
-                } elsif ($param_type == TYPE_INT64()) {
-                    emit($cg, "strada_to_int(__sv_arg" . $a . ")");
-                } elsif ($param_type == TYPE_NUM() || $param_type == TYPE_FLOAT64()) {
-                    emit($cg, "strada_to_num(__sv_arg" . $a . ")");
-                } elsif ($param_type == TYPE_FLOAT32()) {
-                    emit($cg, "(float)strada_to_num(__sv_arg" . $a . ")");
+
+                # For c_extern, use direct conversions without allocation
+                if ($is_c_extern == 1) {
+                    if ($param_type == TYPE_PTR()) {
+                        emit($cg, "(void*)strada_to_int(__sv_arg" . $a . ")");
+                    } elsif ($param_type == TYPE_STR()) {
+                        # For c_extern, str is already a char* pointer stored as int
+                        emit($cg, "(char*)strada_to_int(__sv_arg" . $a . ")");
+                    } elsif ($param_type == TYPE_INT() || $param_type == TYPE_BOOL()) {
+                        emit($cg, "(int)strada_to_int(__sv_arg" . $a . ")");
+                    } elsif ($param_type == TYPE_INT32()) {
+                        emit($cg, "(int32_t)strada_to_int(__sv_arg" . $a . ")");
+                    } elsif ($param_type == TYPE_INT64()) {
+                        emit($cg, "strada_to_int(__sv_arg" . $a . ")");
+                    } elsif ($param_type == TYPE_UINT8()) {
+                        emit($cg, "(uint8_t)strada_to_int(__sv_arg" . $a . ")");
+                    } elsif ($param_type == TYPE_UINT16()) {
+                        emit($cg, "(uint16_t)strada_to_int(__sv_arg" . $a . ")");
+                    } elsif ($param_type == TYPE_UINT32()) {
+                        emit($cg, "(uint32_t)strada_to_int(__sv_arg" . $a . ")");
+                    } elsif ($param_type == TYPE_UINT64()) {
+                        emit($cg, "(uint64_t)strada_to_int(__sv_arg" . $a . ")");
+                    } elsif ($param_type == TYPE_SIZE_T()) {
+                        emit($cg, "(size_t)strada_to_int(__sv_arg" . $a . ")");
+                    } elsif ($param_type == TYPE_CHAR()) {
+                        emit($cg, "(char)strada_to_int(__sv_arg" . $a . ")");
+                    } elsif ($param_type == TYPE_NUM() || $param_type == TYPE_FLOAT64()) {
+                        emit($cg, "strada_to_num(__sv_arg" . $a . ")");
+                    } elsif ($param_type == TYPE_FLOAT32()) {
+                        emit($cg, "(float)strada_to_num(__sv_arg" . $a . ")");
+                    } elsif ($param_type == TYPE_LONG_DOUBLE()) {
+                        emit($cg, "(long double)strada_to_num(__sv_arg" . $a . ")");
+                    } else {
+                        emit($cg, "(void*)strada_to_int(__sv_arg" . $a . ")");
+                    }
                 } else {
-                    emit($cg, "strada_to_str(__sv_arg" . $a . ")");
+                    # Traditional extern - uses strada_to_str which allocates
+                    if ($param_type == TYPE_STR()) {
+                        emit($cg, "strada_to_str(__sv_arg" . $a . ")");
+                    } elsif ($param_type == TYPE_INT() || $param_type == TYPE_BOOL()) {
+                        emit($cg, "(int)strada_to_int(__sv_arg" . $a . ")");
+                    } elsif ($param_type == TYPE_INT32()) {
+                        emit($cg, "(int32_t)strada_to_int(__sv_arg" . $a . ")");
+                    } elsif ($param_type == TYPE_INT64()) {
+                        emit($cg, "strada_to_int(__sv_arg" . $a . ")");
+                    } elsif ($param_type == TYPE_NUM() || $param_type == TYPE_FLOAT64()) {
+                        emit($cg, "strada_to_num(__sv_arg" . $a . ")");
+                    } elsif ($param_type == TYPE_FLOAT32()) {
+                        emit($cg, "(float)strada_to_num(__sv_arg" . $a . ")");
+                    } else {
+                        emit($cg, "strada_to_str(__sv_arg" . $a . ")");
+                    }
                 }
                 $a = $a + 1;
             }
             emit($cg, "); ");
 
-            # Decref the temp StradaValue args
-            my int $d = 0;
-            while ($d < $arg_count) {
-                if (needs_temp_cleanup($args->[$d]) == 1) {
-                    emit($cg, "strada_decref(__sv_arg" . $d . "); ");
+            # Decref the temp StradaValue args (skip for c_extern - no allocations)
+            if ($is_c_extern == 0) {
+                my int $d = 0;
+                while ($d < $arg_count) {
+                    if (needs_temp_cleanup($args->[$d]) == 1) {
+                        emit($cg, "strada_decref(__sv_arg" . $d . "); ");
+                    }
+                    $d = $d + 1;
                 }
-                $d = $d + 1;
             }
 
             # Convert return value back to StradaValue*
             if ($ret_type == TYPE_VOID()) {
                 emit($cg, "strada_new_undef(); })");
             } elsif ($ret_type == TYPE_STR()) {
-                emit($cg, "strada_new_str(__ext_ret); })");
-            } elsif ($ret_type == TYPE_INT() || $ret_type == TYPE_INT32() || $ret_type == TYPE_INT64()) {
+                if ($is_c_extern == 1) {
+                    # For c_extern, store the char* as an int64
+                    emit($cg, "strada_new_int((int64_t)__ext_ret); })");
+                } else {
+                    emit($cg, "strada_new_str(__ext_ret); })");
+                }
+            } elsif ($ret_type == TYPE_PTR()) {
+                # Store pointer as int64
+                emit($cg, "strada_new_int((int64_t)__ext_ret); })");
+            } elsif ($ret_type == TYPE_INT() || $ret_type == TYPE_BOOL() || $ret_type == TYPE_INT32() || $ret_type == TYPE_INT64()) {
                 emit($cg, "strada_new_int(__ext_ret); })");
-            } elsif ($ret_type == TYPE_NUM() || $ret_type == TYPE_FLOAT32() || $ret_type == TYPE_FLOAT64()) {
+            } elsif ($ret_type == TYPE_UINT8() || $ret_type == TYPE_UINT16() || $ret_type == TYPE_UINT32() || $ret_type == TYPE_UINT64() || $ret_type == TYPE_SIZE_T() || $ret_type == TYPE_CHAR()) {
+                emit($cg, "strada_new_int(__ext_ret); })");
+            } elsif ($ret_type == TYPE_NUM() || $ret_type == TYPE_FLOAT32() || $ret_type == TYPE_FLOAT64() || $ret_type == TYPE_LONG_DOUBLE()) {
                 emit($cg, "strada_new_num(__ext_ret); })");
             } else {
                 emit($cg, "strada_new_undef(); })");
@@ -8469,7 +8799,31 @@ func gen_program(scalar $cg, scalar $program) void {
         emit($cg, "} " . $st->{"name"} . ";\n\n");
         $s = $s + 1;
     }
-    
+
+    # Generate enum definitions
+    my scalar $enums = $program->{"enums"};
+    my int $e = 0;
+    while ($e < $program->{"enum_count"}) {
+        my scalar $en = $enums->[$e];
+        my str $enum_name = $en->{"name"};
+
+        emit($cg, "/* enum " . $enum_name . " */\n");
+
+        # Generate #define constants for enum values
+        # This allows Color::RED to be used (converted to Color_RED by parser)
+        my scalar $members = $en->{"members"};
+        my int $m = 0;
+        while ($m < $en->{"member_count"}) {
+            my scalar $member = $members->[$m];
+            my str $member_name = $member->{"name"};
+            my int $member_value = $member->{"value"};
+            emit($cg, "#define " . $enum_name . "_" . $member_name . " " . $member_value . "\n");
+            $m = $m + 1;
+        }
+        emit($cg, "\n");
+        $e = $e + 1;
+    }
+
     # Generate extern declarations for imported functions
     my int $imp_count = $program->{"import_count"};
     if ($imp_count > 0) {
@@ -8950,10 +9304,25 @@ func type_to_export(int $type) str {
     if ($type == TYPE_INT()) { return "int"; }
     if ($type == TYPE_NUM()) { return "num"; }
     if ($type == TYPE_STR()) { return "str"; }
+    if ($type == TYPE_BOOL()) { return "bool"; }
     if ($type == TYPE_ARRAY()) { return "array"; }
     if ($type == TYPE_HASH()) { return "hash"; }
     if ($type == TYPE_SCALAR()) { return "scalar"; }
     if ($type == TYPE_VOID()) { return "void"; }
+    # Explicit sized types
+    if ($type == TYPE_INT32()) { return "int32"; }
+    if ($type == TYPE_INT64()) { return "int64"; }
+    if ($type == TYPE_FLOAT32()) { return "float32"; }
+    if ($type == TYPE_FLOAT64()) { return "float64"; }
+    if ($type == TYPE_INT8()) { return "int8"; }
+    if ($type == TYPE_INT16()) { return "int16"; }
+    if ($type == TYPE_UINT8()) { return "uint8"; }
+    if ($type == TYPE_UINT16()) { return "uint16"; }
+    if ($type == TYPE_UINT32()) { return "uint32"; }
+    if ($type == TYPE_UINT64()) { return "uint64"; }
+    if ($type == TYPE_SIZE_T()) { return "size_t"; }
+    if ($type == TYPE_CHAR()) { return "char"; }
+    if ($type == TYPE_LONG_DOUBLE()) { return "long_double"; }
     return "scalar";
 }
 
@@ -9024,6 +9393,7 @@ func gen_extern_decl(scalar $cg, scalar $fn) void {
 # Convert type to raw C type (for extern functions)
 func type_to_c_raw(int $type) str {
     if ($type == TYPE_INT()) { return "int"; }
+    if ($type == TYPE_BOOL()) { return "bool"; }
     if ($type == TYPE_NUM()) { return "double"; }
     if ($type == TYPE_STR()) { return "char*"; }
     if ($type == TYPE_VOID()) { return "void"; }
@@ -9032,6 +9402,16 @@ func type_to_c_raw(int $type) str {
     if ($type == TYPE_INT64()) { return "int64_t"; }
     if ($type == TYPE_FLOAT32()) { return "float"; }
     if ($type == TYPE_FLOAT64()) { return "double"; }
+    if ($type == TYPE_INT8()) { return "int8_t"; }
+    if ($type == TYPE_INT16()) { return "int16_t"; }
+    if ($type == TYPE_UINT8()) { return "uint8_t"; }
+    if ($type == TYPE_UINT16()) { return "uint16_t"; }
+    if ($type == TYPE_UINT32()) { return "uint32_t"; }
+    if ($type == TYPE_UINT64()) { return "uint64_t"; }
+    if ($type == TYPE_SIZE_T()) { return "size_t"; }
+    if ($type == TYPE_CHAR()) { return "char"; }
+    if ($type == TYPE_LONG_DOUBLE()) { return "long double"; }
+    if ($type == TYPE_PTR()) { return "void*"; }
     return "void*";
 }
 

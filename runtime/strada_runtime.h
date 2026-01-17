@@ -241,6 +241,7 @@ void strada_say(StradaValue *sv);
 StradaValue* strada_readline(void);
 void strada_printf(const char *format, ...);
 StradaValue* strada_sprintf(const char *format, ...);
+StradaValue* strada_sprintf_sv(StradaValue *format_sv, int arg_count, ...);
 void strada_warn(const char *format, ...);
 
 /* File I/O functions */
@@ -825,6 +826,48 @@ StradaValue* strada_cond_wait(StradaValue *cond, StradaValue *mutex);
 StradaValue* strada_cond_signal(StradaValue *cond);
 StradaValue* strada_cond_broadcast(StradaValue *cond);
 StradaValue* strada_cond_destroy(StradaValue *cond);
+
+/* ============================================================
+ * C Interop Helper Functions (c:: namespace)
+ * For explicit memory management with extern "C" functions
+ * ============================================================ */
+StradaValue* strada_c_str_to_ptr(StradaValue *sv);           /* c::str_to_ptr - Strada string to C char* (allocs) */
+StradaValue* strada_c_ptr_to_str(StradaValue *ptr_sv);       /* c::ptr_to_str - C char* to Strada string (copies) */
+StradaValue* strada_c_ptr_to_str_n(StradaValue *ptr_sv, StradaValue *len_sv); /* c::ptr_to_str_n - with length */
+StradaValue* strada_c_free(StradaValue *ptr_sv);             /* c::free - Free C-allocated memory */
+StradaValue* strada_c_alloc(StradaValue *size_sv);           /* c::alloc - Allocate memory (malloc) */
+StradaValue* strada_c_realloc(StradaValue *ptr_sv, StradaValue *size_sv); /* c::realloc */
+StradaValue* strada_c_null(void);                            /* c::null - Return NULL pointer */
+StradaValue* strada_c_is_null(StradaValue *ptr_sv);          /* c::is_null - Check if NULL */
+StradaValue* strada_c_ptr_add(StradaValue *ptr_sv, StradaValue *offset_sv); /* c::ptr_add - Pointer arithmetic */
+
+/* c:: memory read functions */
+StradaValue* strada_c_read_int8(StradaValue *ptr_sv);
+StradaValue* strada_c_read_int16(StradaValue *ptr_sv);
+StradaValue* strada_c_read_int32(StradaValue *ptr_sv);
+StradaValue* strada_c_read_int64(StradaValue *ptr_sv);
+StradaValue* strada_c_read_ptr(StradaValue *ptr_sv);
+StradaValue* strada_c_read_float(StradaValue *ptr_sv);
+StradaValue* strada_c_read_double(StradaValue *ptr_sv);
+
+/* c:: memory write functions */
+StradaValue* strada_c_write_int8(StradaValue *ptr_sv, StradaValue *val_sv);
+StradaValue* strada_c_write_int16(StradaValue *ptr_sv, StradaValue *val_sv);
+StradaValue* strada_c_write_int32(StradaValue *ptr_sv, StradaValue *val_sv);
+StradaValue* strada_c_write_int64(StradaValue *ptr_sv, StradaValue *val_sv);
+StradaValue* strada_c_write_ptr(StradaValue *ptr_sv, StradaValue *val_sv);
+StradaValue* strada_c_write_float(StradaValue *ptr_sv, StradaValue *val_sv);
+StradaValue* strada_c_write_double(StradaValue *ptr_sv, StradaValue *val_sv);
+
+/* c:: size introspection */
+StradaValue* strada_c_sizeof_int(void);
+StradaValue* strada_c_sizeof_long(void);
+StradaValue* strada_c_sizeof_ptr(void);
+StradaValue* strada_c_sizeof_size_t(void);
+
+/* c:: memory operations */
+StradaValue* strada_c_memcpy(StradaValue *dest_sv, StradaValue *src_sv, StradaValue *n_sv);
+StradaValue* strada_c_memset(StradaValue *dest_sv, StradaValue *c_sv, StradaValue *n_sv);
 
 /* ============================================================
  * Profiling - Function timing and call counts

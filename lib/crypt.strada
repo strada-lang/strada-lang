@@ -1,17 +1,17 @@
 /*
  This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
  Copyright (c) 2026 Michael J. Flickinger
- 
- This program is free software: you can redistribute it and/or modify  
- it under the terms of the GNU General Public License as published by  
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
  the Free Software Foundation, version 2.
 
- This program is distributed in the hope that it will be useful, but 
- WITHOUT ANY WARRANTY; without even the implied warranty of 
- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
  General Public License for more details.
 
- You should have received a copy of the GNU General Public License 
+ You should have received a copy of the GNU General Public License
  along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 
@@ -39,86 +39,67 @@
 #   - "sha512"  - SHA-512 ($6$) - recommended
 #   - "bcrypt"  - bcrypt ($2b$) - if available
 #
-# Requires: lib/crypt/libstrada_crypt.so (build with: cd lib/crypt && make)
+# Compile with:
+#   ./stradac myapp.strada myapp.c
+#   gcc -o myapp myapp.c lib/crypt/strada_crypt.c runtime/strada_runtime.c -Iruntime -lcrypt -ldl -lm
 
 package crypt;
 
-# Load the library - tries multiple paths
-func _get_lib() int {
-    my int $lib = sys::dl_open("lib/crypt/libstrada_crypt.so");
-    if ($lib == 0) {
-        $lib = sys::dl_open("./lib/crypt/libstrada_crypt.so");
-    }
-    if ($lib == 0) {
-        $lib = sys::dl_open("libstrada_crypt.so");
-    }
-    return $lib;
+# External C function declarations
+extern "C" {
+    func strada_crypt_hash(ptr $password, ptr $salt) ptr;
+    func strada_crypt_gen_salt(ptr $algorithm) ptr;
+    func strada_crypt_gen_salt_rounds(ptr $algorithm, int $rounds) ptr;
+    func strada_crypt_verify(ptr $password, ptr $hash) int;
+    func strada_crypt_get_algorithm(ptr $hash) ptr;
+    func strada_crypt_is_supported(ptr $algorithm) int;
+    func strada_crypt_error() ptr;
 }
 
 # Hash a password with the given salt
 # Returns the hashed password string, or empty string on error
-#
-# Example:
-#   my str $hash = crypt::crypt_hash("password", "$6$rounds=5000$saltsalt");
 func crypt_hash(str $password, str $salt) str {
-    my int $lib = crypt::_get_lib();
-    if ($lib == 0) {
-        return "";
-    }
-    my int $fn = sys::dl_sym($lib, "strada_crypt_hash");
-    return sys::dl_call_str_sv($fn, [$password, $salt]);
+    my ptr $pw_ptr = c::str_to_ptr($password);
+    my ptr $salt_ptr = c::str_to_ptr($salt);
+    my ptr $result_ptr = strada_crypt_hash($pw_ptr, $salt_ptr);
+    my str $result = c::ptr_to_str($result_ptr);
+    c::free($pw_ptr);
+    c::free($salt_ptr);
+    return $result;
 }
 
 # Generate a random salt for the specified algorithm
 # Algorithm options: "des", "md5", "sha256", "sha512", "bcrypt"
-# Returns the salt string (e.g., "$6$randomchars$")
-#
-# Example:
-#   my str $salt = crypt::gen_salt("sha512");
 func gen_salt(str $algorithm) str {
-    my int $lib = crypt::_get_lib();
-    if ($lib == 0) {
-        return "";
-    }
-    my int $fn = sys::dl_sym($lib, "strada_crypt_gen_salt");
-    return sys::dl_call_str_sv($fn, [$algorithm]);
+    my ptr $algo_ptr = c::str_to_ptr($algorithm);
+    my ptr $result_ptr = strada_crypt_gen_salt($algo_ptr);
+    my str $result = c::ptr_to_str($result_ptr);
+    c::free($algo_ptr);
+    return $result;
 }
 
 # Generate a salt with custom rounds (for sha256, sha512, bcrypt)
-# Rounds controls the computational cost (higher = more secure but slower)
-# - sha256/sha512: 1000-999999999 (default: 5000)
-# - bcrypt: 4-31 (default: 12)
-#
-# Example:
-#   my str $salt = crypt::gen_salt_rounds("sha512", 10000);
 func gen_salt_rounds(str $algorithm, int $rounds) str {
-    my int $lib = crypt::_get_lib();
-    if ($lib == 0) {
-        return "";
-    }
-    my int $fn = sys::dl_sym($lib, "strada_crypt_gen_salt_rounds");
-    return sys::dl_call_str_sv($fn, [$algorithm, $rounds]);
+    my ptr $algo_ptr = c::str_to_ptr($algorithm);
+    my ptr $result_ptr = strada_crypt_gen_salt_rounds($algo_ptr, $rounds);
+    my str $result = c::ptr_to_str($result_ptr);
+    c::free($algo_ptr);
+    return $result;
 }
 
 # Verify a password against a hash
 # Returns 1 if password matches, 0 otherwise
-#
-# Example:
-#   if (crypt::verify("password", $stored_hash)) { ... }
 func verify(str $password, str $hashed) int {
-    my int $lib = crypt::_get_lib();
-    if ($lib == 0) {
-        return 0;
-    }
-    my int $fn = sys::dl_sym($lib, "strada_crypt_verify");
-    return sys::dl_call_int_sv($fn, [$password, $hashed]);
+    my ptr $pw_ptr = c::str_to_ptr($password);
+    my ptr $hash_ptr = c::str_to_ptr($hashed);
+    my int $result = strada_crypt_verify($pw_ptr, $hash_ptr);
+    c::free($pw_ptr);
+    c::free($hash_ptr);
+    return $result;
 }
 
 # Hash a password using the recommended algorithm (SHA-512)
 # Convenience function that generates a salt automatically
-#
-# Example:
-#   my str $hash = crypt::hash_password("mypassword");
 func hash_password(str $password) str {
     my str $salt = crypt::gen_salt("sha512");
     return crypt::crypt_hash($password, $salt);
@@ -126,38 +107,25 @@ func hash_password(str $password) str {
 
 # Get the algorithm used in a hash string
 # Returns: "des", "md5", "sha256", "sha512", "bcrypt", or "unknown"
-#
-# Example:
-#   my str $algo = crypt::get_algorithm($hash);
 func get_algorithm(str $hashed) str {
-    my int $lib = crypt::_get_lib();
-    if ($lib == 0) {
-        return "unknown";
-    }
-    my int $fn = sys::dl_sym($lib, "strada_crypt_get_algorithm");
-    return sys::dl_call_str_sv($fn, [$hashed]);
+    my ptr $hash_ptr = c::str_to_ptr($hashed);
+    my ptr $result_ptr = strada_crypt_get_algorithm($hash_ptr);
+    my str $result = c::ptr_to_str($result_ptr);
+    c::free($hash_ptr);
+    return $result;
 }
 
 # Check if an algorithm is supported on this system
 # Returns 1 if supported, 0 otherwise
-#
-# Example:
-#   if (crypt::is_supported("bcrypt")) { ... }
 func is_supported(str $algorithm) int {
-    my int $lib = crypt::_get_lib();
-    if ($lib == 0) {
-        return 0;
-    }
-    my int $fn = sys::dl_sym($lib, "strada_crypt_is_supported");
-    return sys::dl_call_int_sv($fn, [$algorithm]);
+    my ptr $algo_ptr = c::str_to_ptr($algorithm);
+    my int $result = strada_crypt_is_supported($algo_ptr);
+    c::free($algo_ptr);
+    return $result;
 }
 
 # Get last error message
 func error() str {
-    my int $lib = crypt::_get_lib();
-    if ($lib == 0) {
-        return "Failed to load crypt library";
-    }
-    my int $fn = sys::dl_sym($lib, "strada_crypt_error");
-    return sys::dl_call_str($fn, []);
+    my ptr $result_ptr = strada_crypt_error();
+    return c::ptr_to_str($result_ptr);
 }

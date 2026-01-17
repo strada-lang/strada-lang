@@ -13,6 +13,7 @@
  *   macOS:         brew install libusb
  */
 
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -647,3 +648,381 @@ StradaValue* strada_usb_error_pipe(void) { return strada_new_int(LIBUSB_ERROR_PI
 StradaValue* strada_usb_error_interrupted(void) { return strada_new_int(LIBUSB_ERROR_INTERRUPTED); }
 StradaValue* strada_usb_error_no_mem(void) { return strada_new_int(LIBUSB_ERROR_NO_MEM); }
 StradaValue* strada_usb_error_not_supported(void) { return strada_new_int(LIBUSB_ERROR_NOT_SUPPORTED); }
+
+/* ============== Raw C Functions for extern "C" ============== */
+
+/* Cached device list for iteration */
+static libusb_device **cached_device_list = NULL;
+static ssize_t cached_device_count = 0;
+
+/* Refresh the device list cache */
+int strada_usb_refresh_device_list_raw(void) {
+    if (!usb_initialized) strada_usb_init();
+
+    /* Free old list if exists */
+    if (cached_device_list) {
+        libusb_free_device_list(cached_device_list, 1);
+        cached_device_list = NULL;
+        cached_device_count = 0;
+    }
+
+    cached_device_count = libusb_get_device_list(usb_ctx, &cached_device_list);
+    if (cached_device_count < 0) {
+        cached_device_count = 0;
+        return -1;
+    }
+    return (int)cached_device_count;
+}
+
+/* Get device count */
+int strada_usb_device_count_raw(void) {
+    return (int)cached_device_count;
+}
+
+/* Get device VID at index */
+int strada_usb_device_vid_raw(int idx) {
+    if (idx < 0 || idx >= cached_device_count) return 0;
+    struct libusb_device_descriptor desc;
+    if (libusb_get_device_descriptor(cached_device_list[idx], &desc) != 0) return 0;
+    return desc.idVendor;
+}
+
+/* Get device PID at index */
+int strada_usb_device_pid_raw(int idx) {
+    if (idx < 0 || idx >= cached_device_count) return 0;
+    struct libusb_device_descriptor desc;
+    if (libusb_get_device_descriptor(cached_device_list[idx], &desc) != 0) return 0;
+    return desc.idProduct;
+}
+
+/* Get device bus number at index */
+int strada_usb_device_bus_raw(int idx) {
+    if (idx < 0 || idx >= cached_device_count) return 0;
+    return libusb_get_bus_number(cached_device_list[idx]);
+}
+
+/* Get device address at index */
+int strada_usb_device_addr_raw(int idx) {
+    if (idx < 0 || idx >= cached_device_count) return 0;
+    return libusb_get_device_address(cached_device_list[idx]);
+}
+
+/* Get device class at index */
+int strada_usb_device_class_raw(int idx) {
+    if (idx < 0 || idx >= cached_device_count) return 0;
+    struct libusb_device_descriptor desc;
+    if (libusb_get_device_descriptor(cached_device_list[idx], &desc) != 0) return 0;
+    return desc.bDeviceClass;
+}
+
+/* Get device VID:PID string at index */
+char* strada_usb_device_vidpid_raw(int idx) {
+    if (idx < 0 || idx >= cached_device_count) return strdup("");
+    struct libusb_device_descriptor desc;
+    if (libusb_get_device_descriptor(cached_device_list[idx], &desc) != 0) return strdup("");
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%04x:%04x", desc.idVendor, desc.idProduct);
+    return strdup(buf);
+}
+
+/* Free cached device list */
+void strada_usb_free_device_list_raw(void) {
+    if (cached_device_list) {
+        libusb_free_device_list(cached_device_list, 1);
+        cached_device_list = NULL;
+        cached_device_count = 0;
+    }
+}
+
+/* Open device by VID:PID - returns handle as pointer */
+void* strada_usb_open_device_raw(int vid, int pid) {
+    if (!usb_initialized) strada_usb_init();
+    return libusb_open_device_with_vid_pid(usb_ctx, (uint16_t)vid, (uint16_t)pid);
+}
+
+/* Open device by bus/address - returns handle as pointer */
+void* strada_usb_open_device_by_path_raw(int bus, int addr) {
+    if (!usb_initialized) strada_usb_init();
+
+    libusb_device **list;
+    ssize_t count = libusb_get_device_list(usb_ctx, &list);
+    if (count < 0) return NULL;
+
+    libusb_device_handle *handle = NULL;
+    for (ssize_t i = 0; i < count; i++) {
+        if (libusb_get_bus_number(list[i]) == bus &&
+            libusb_get_device_address(list[i]) == addr) {
+            if (libusb_open(list[i], &handle) != 0) {
+                handle = NULL;
+            }
+            break;
+        }
+    }
+
+    libusb_free_device_list(list, 1);
+    return handle;
+}
+
+/* Close device handle */
+void strada_usb_close_raw(void *handle) {
+    if (handle) {
+        libusb_close((libusb_device_handle *)handle);
+    }
+}
+
+/* Claim interface */
+int strada_usb_claim_interface_raw(void *handle, int iface) {
+    if (!handle) return LIBUSB_ERROR_INVALID_PARAM;
+    return libusb_claim_interface((libusb_device_handle *)handle, iface);
+}
+
+/* Release interface */
+int strada_usb_release_interface_raw(void *handle, int iface) {
+    if (!handle) return LIBUSB_ERROR_INVALID_PARAM;
+    return libusb_release_interface((libusb_device_handle *)handle, iface);
+}
+
+/* Detach kernel driver */
+int strada_usb_detach_kernel_driver_raw(void *handle, int iface) {
+    if (!handle) return LIBUSB_ERROR_INVALID_PARAM;
+    return libusb_detach_kernel_driver((libusb_device_handle *)handle, iface);
+}
+
+/* Check kernel driver active */
+int strada_usb_kernel_driver_active_raw(void *handle, int iface) {
+    if (!handle) return LIBUSB_ERROR_INVALID_PARAM;
+    return libusb_kernel_driver_active((libusb_device_handle *)handle, iface);
+}
+
+/* Set auto detach */
+int strada_usb_set_auto_detach_raw(void *handle, int enable) {
+    if (!handle) return LIBUSB_ERROR_INVALID_PARAM;
+    return libusb_set_auto_detach_kernel_driver((libusb_device_handle *)handle, enable);
+}
+
+/* Bulk write - returns bytes transferred or error */
+int strada_usb_bulk_write_raw(void *handle, int endpoint, const char *data, int length, int timeout) {
+    if (!handle) return LIBUSB_ERROR_INVALID_PARAM;
+    int transferred = 0;
+    int ret = libusb_bulk_transfer((libusb_device_handle *)handle,
+                                    (unsigned char)endpoint,
+                                    (unsigned char *)data, length, &transferred, timeout);
+    if (ret < 0) return ret;
+    return transferred;
+}
+
+/* Last transfer length for read operations */
+static int last_transfer_len = 0;
+
+/* Get last transfer length */
+int strada_usb_last_transfer_len_raw(void) {
+    return last_transfer_len;
+}
+
+/* Bulk read - returns data, length stored in last_transfer_len */
+char* strada_usb_bulk_read_raw(void *handle, int endpoint, int max_len, int timeout) {
+    last_transfer_len = 0;
+    if (!handle) {
+        return NULL;
+    }
+    unsigned char *buffer = malloc(max_len);
+    if (!buffer) {
+        return NULL;
+    }
+
+    int transferred = 0;
+    int ret = libusb_bulk_transfer((libusb_device_handle *)handle,
+                                    (unsigned char)(endpoint | 0x80),
+                                    buffer, max_len, &transferred, timeout);
+    if (ret < 0 && ret != LIBUSB_ERROR_TIMEOUT) {
+        free(buffer);
+        return NULL;
+    }
+
+    last_transfer_len = transferred;
+    return (char *)buffer;
+}
+
+/* Interrupt write */
+int strada_usb_interrupt_write_raw(void *handle, int endpoint, const char *data, int length, int timeout) {
+    if (!handle) return LIBUSB_ERROR_INVALID_PARAM;
+    int transferred = 0;
+    int ret = libusb_interrupt_transfer((libusb_device_handle *)handle,
+                                         (unsigned char)endpoint,
+                                         (unsigned char *)data, length, &transferred, timeout);
+    if (ret < 0) return ret;
+    return transferred;
+}
+
+/* Interrupt read - length stored in last_transfer_len */
+char* strada_usb_interrupt_read_raw(void *handle, int endpoint, int max_len, int timeout) {
+    last_transfer_len = 0;
+    if (!handle) {
+        return NULL;
+    }
+    unsigned char *buffer = malloc(max_len);
+    if (!buffer) {
+        return NULL;
+    }
+
+    int transferred = 0;
+    int ret = libusb_interrupt_transfer((libusb_device_handle *)handle,
+                                         (unsigned char)(endpoint | 0x80),
+                                         buffer, max_len, &transferred, timeout);
+    if (ret < 0 && ret != LIBUSB_ERROR_TIMEOUT) {
+        free(buffer);
+        return NULL;
+    }
+
+    last_transfer_len = transferred;
+    return (char *)buffer;
+}
+
+/* Control transfer write */
+int strada_usb_control_write_raw(void *handle, int request_type, int request,
+                                  int value, int idx, const char *data, int length, int timeout) {
+    if (!handle) return LIBUSB_ERROR_INVALID_PARAM;
+    return libusb_control_transfer((libusb_device_handle *)handle,
+                                    (uint8_t)request_type, (uint8_t)request,
+                                    (uint16_t)value, (uint16_t)idx,
+                                    (unsigned char *)data, (uint16_t)length, timeout);
+}
+
+/* Control transfer read - length stored in last_transfer_len */
+char* strada_usb_control_read_raw(void *handle, int request_type, int request,
+                                   int value, int idx, int max_len, int timeout) {
+    last_transfer_len = 0;
+    if (!handle) {
+        return NULL;
+    }
+    unsigned char *buffer = malloc(max_len);
+    if (!buffer) {
+        return NULL;
+    }
+
+    int ret = libusb_control_transfer((libusb_device_handle *)handle,
+                                       (uint8_t)(request_type | 0x80), (uint8_t)request,
+                                       (uint16_t)value, (uint16_t)idx,
+                                       buffer, (uint16_t)max_len, timeout);
+    if (ret < 0) {
+        free(buffer);
+        return NULL;
+    }
+
+    last_transfer_len = ret;
+    return (char *)buffer;
+}
+
+/* Device descriptor accessors */
+static struct libusb_device_descriptor desc_cache;
+static int desc_cache_valid = 0;
+static void *desc_cache_handle = NULL;
+
+int strada_usb_get_desc_raw(void *handle) {
+    if (!handle) return -1;
+    libusb_device *dev = libusb_get_device((libusb_device_handle *)handle);
+    int ret = libusb_get_device_descriptor(dev, &desc_cache);
+    if (ret == 0) {
+        desc_cache_valid = 1;
+        desc_cache_handle = handle;
+    }
+    return ret;
+}
+
+int strada_usb_desc_usb_version_raw(void) { return desc_cache_valid ? desc_cache.bcdUSB : 0; }
+int strada_usb_desc_device_class_raw(void) { return desc_cache_valid ? desc_cache.bDeviceClass : 0; }
+int strada_usb_desc_device_subclass_raw(void) { return desc_cache_valid ? desc_cache.bDeviceSubClass : 0; }
+int strada_usb_desc_device_protocol_raw(void) { return desc_cache_valid ? desc_cache.bDeviceProtocol : 0; }
+int strada_usb_desc_max_packet_size_raw(void) { return desc_cache_valid ? desc_cache.bMaxPacketSize0 : 0; }
+int strada_usb_desc_vendor_id_raw(void) { return desc_cache_valid ? desc_cache.idVendor : 0; }
+int strada_usb_desc_product_id_raw(void) { return desc_cache_valid ? desc_cache.idProduct : 0; }
+int strada_usb_desc_device_version_raw(void) { return desc_cache_valid ? desc_cache.bcdDevice : 0; }
+int strada_usb_desc_num_configs_raw(void) { return desc_cache_valid ? desc_cache.bNumConfigurations : 0; }
+int strada_usb_desc_manufacturer_idx_raw(void) { return desc_cache_valid ? desc_cache.iManufacturer : 0; }
+int strada_usb_desc_product_idx_raw(void) { return desc_cache_valid ? desc_cache.iProduct : 0; }
+int strada_usb_desc_serial_idx_raw(void) { return desc_cache_valid ? desc_cache.iSerialNumber : 0; }
+
+/* Get string descriptor */
+char* strada_usb_get_string_descriptor_raw(void *handle, int idx) {
+    if (!handle || idx == 0) return strdup("");
+    unsigned char buffer[256];
+    int ret = libusb_get_string_descriptor_ascii((libusb_device_handle *)handle, idx, buffer, sizeof(buffer));
+    if (ret < 0) return strdup("");
+    return strdup((char *)buffer);
+}
+
+/* Configuration */
+int strada_usb_get_configuration_raw(void *handle) {
+    if (!handle) return LIBUSB_ERROR_INVALID_PARAM;
+    int config;
+    int ret = libusb_get_configuration((libusb_device_handle *)handle, &config);
+    if (ret < 0) return ret;
+    return config;
+}
+
+int strada_usb_set_configuration_raw(void *handle, int config) {
+    if (!handle) return LIBUSB_ERROR_INVALID_PARAM;
+    return libusb_set_configuration((libusb_device_handle *)handle, config);
+}
+
+int strada_usb_set_interface_alt_setting_raw(void *handle, int iface, int alt) {
+    if (!handle) return LIBUSB_ERROR_INVALID_PARAM;
+    return libusb_set_interface_alt_setting((libusb_device_handle *)handle, iface, alt);
+}
+
+int strada_usb_clear_halt_raw(void *handle, int endpoint) {
+    if (!handle) return LIBUSB_ERROR_INVALID_PARAM;
+    return libusb_clear_halt((libusb_device_handle *)handle, (unsigned char)endpoint);
+}
+
+int strada_usb_reset_device_raw(void *handle) {
+    if (!handle) return LIBUSB_ERROR_INVALID_PARAM;
+    return libusb_reset_device((libusb_device_handle *)handle);
+}
+
+/* Debug level */
+void strada_usb_set_debug_raw(int level) {
+    if (!usb_initialized) strada_usb_init();
+#if LIBUSB_API_VERSION >= 0x01000106
+    libusb_set_option(usb_ctx, LIBUSB_OPTION_LOG_LEVEL, level);
+#else
+    libusb_set_debug(usb_ctx, level);
+#endif
+}
+
+/* Error string */
+const char* strada_usb_strerror_raw(int errcode) {
+    return libusb_strerror(errcode);
+}
+
+/* Constants - return plain ints for extern C */
+int strada_usb_class_hid_raw(void) { return LIBUSB_CLASS_HID; }
+int strada_usb_class_mass_storage_raw(void) { return LIBUSB_CLASS_MASS_STORAGE; }
+int strada_usb_class_hub_raw(void) { return LIBUSB_CLASS_HUB; }
+int strada_usb_class_vendor_spec_raw(void) { return LIBUSB_CLASS_VENDOR_SPEC; }
+int strada_usb_class_printer_raw(void) { return LIBUSB_CLASS_PRINTER; }
+int strada_usb_class_audio_raw(void) { return LIBUSB_CLASS_AUDIO; }
+int strada_usb_class_video_raw(void) { return LIBUSB_CLASS_VIDEO; }
+int strada_usb_class_comm_raw(void) { return LIBUSB_CLASS_COMM; }
+
+int strada_usb_request_type_standard_raw(void) { return LIBUSB_REQUEST_TYPE_STANDARD; }
+int strada_usb_request_type_class_raw(void) { return LIBUSB_REQUEST_TYPE_CLASS; }
+int strada_usb_request_type_vendor_raw(void) { return LIBUSB_REQUEST_TYPE_VENDOR; }
+int strada_usb_recipient_device_raw(void) { return LIBUSB_RECIPIENT_DEVICE; }
+int strada_usb_recipient_interface_raw(void) { return LIBUSB_RECIPIENT_INTERFACE; }
+int strada_usb_recipient_endpoint_raw(void) { return LIBUSB_RECIPIENT_ENDPOINT; }
+int strada_usb_endpoint_in_raw(void) { return LIBUSB_ENDPOINT_IN; }
+int strada_usb_endpoint_out_raw(void) { return LIBUSB_ENDPOINT_OUT; }
+
+int strada_usb_error_io_raw(void) { return LIBUSB_ERROR_IO; }
+int strada_usb_error_invalid_param_raw(void) { return LIBUSB_ERROR_INVALID_PARAM; }
+int strada_usb_error_access_raw(void) { return LIBUSB_ERROR_ACCESS; }
+int strada_usb_error_no_device_raw(void) { return LIBUSB_ERROR_NO_DEVICE; }
+int strada_usb_error_not_found_raw(void) { return LIBUSB_ERROR_NOT_FOUND; }
+int strada_usb_error_busy_raw(void) { return LIBUSB_ERROR_BUSY; }
+int strada_usb_error_timeout_raw(void) { return LIBUSB_ERROR_TIMEOUT; }
+int strada_usb_error_overflow_raw(void) { return LIBUSB_ERROR_OVERFLOW; }
+int strada_usb_error_pipe_raw(void) { return LIBUSB_ERROR_PIPE; }
+int strada_usb_error_interrupted_raw(void) { return LIBUSB_ERROR_INTERRUPTED; }
+int strada_usb_error_no_mem_raw(void) { return LIBUSB_ERROR_NO_MEM; }
+int strada_usb_error_not_supported_raw(void) { return LIBUSB_ERROR_NOT_SUPPORTED; }

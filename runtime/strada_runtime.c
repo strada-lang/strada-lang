@@ -20,6 +20,8 @@
 #define _DEFAULT_SOURCE
 #define _GNU_SOURCE
 #include "strada_runtime.h"
+#include <stdbool.h>
+#include <stdint.h>
 #include <time.h>
 #include <math.h>
 #include <unistd.h>
@@ -46,6 +48,7 @@
 #include <utime.h>
 #include <sys/utsname.h>
 #include <sys/ioctl.h>
+#include <locale.h>
 
 /* ===== MEMORY CONFIGURATION ===== */
 
@@ -1391,6 +1394,148 @@ StradaValue* strada_sprintf(const char *format, ...) {
     va_start(args, format);
     vsnprintf(buffer, sizeof(buffer), format, args);
     va_end(args);
+    return strada_new_str(buffer);
+}
+
+/* sprintf_sv - sprintf with StradaValue* arguments
+ * Parses format string and converts each arg based on format specifier */
+StradaValue* strada_sprintf_sv(StradaValue *format_sv, int arg_count, ...) {
+    char *format = format_sv ? strada_to_str(format_sv) : NULL;
+    if (!format) return strada_new_str("");
+
+    char buffer[8192];
+    char *out = buffer;
+    char *end = buffer + sizeof(buffer) - 1;
+    const char *p = format;
+
+    va_list args;
+    va_start(args, arg_count);
+
+    while (*p && out < end) {
+        if (*p != '%') {
+            *out++ = *p++;
+            continue;
+        }
+
+        /* Found %, look for format specifier */
+        const char *spec_start = p;
+        p++; /* skip % */
+
+        /* Handle %% */
+        if (*p == '%') {
+            *out++ = '%';
+            p++;
+            continue;
+        }
+
+        /* Skip flags: -, +, space, #, 0 */
+        while (*p == '-' || *p == '+' || *p == ' ' || *p == '#' || *p == '0') {
+            p++;
+        }
+
+        /* Skip width */
+        while (*p >= '0' && *p <= '9') {
+            p++;
+        }
+
+        /* Skip precision */
+        if (*p == '.') {
+            p++;
+            while (*p >= '0' && *p <= '9') {
+                p++;
+            }
+        }
+
+        /* Skip length modifiers: h, hh, l, ll, L, z, j, t */
+        if (*p == 'h' || *p == 'l' || *p == 'L' || *p == 'z' || *p == 'j' || *p == 't') {
+            if (*p == 'h' && *(p+1) == 'h') p += 2;
+            else if (*p == 'l' && *(p+1) == 'l') p += 2;
+            else p++;
+        }
+
+        /* Get the conversion specifier */
+        char spec = *p;
+        if (!spec) break;
+        p++;
+
+        /* Get next argument if we have one */
+        StradaValue *arg = NULL;
+        if (arg_count > 0) {
+            arg = va_arg(args, StradaValue*);
+            arg_count--;
+        }
+
+        /* Copy format specifier to temp buffer */
+        size_t spec_len = p - spec_start;
+        char spec_buf[64];
+        if (spec_len < sizeof(spec_buf)) {
+            memcpy(spec_buf, spec_start, spec_len);
+            spec_buf[spec_len] = '\0';
+        } else {
+            strcpy(spec_buf, "%s");
+            spec = 's';
+        }
+
+        /* Format based on specifier */
+        char temp[1024];
+        switch (spec) {
+            case 'd':
+            case 'i':
+            case 'o':
+            case 'u':
+            case 'x':
+            case 'X': {
+                int64_t val = arg ? strada_to_int(arg) : 0;
+                /* Replace any length modifiers with lld for int64_t */
+                snprintf(temp, sizeof(temp), "%lld", (long long)val);
+                break;
+            }
+            case 'f':
+            case 'F':
+            case 'e':
+            case 'E':
+            case 'g':
+            case 'G':
+            case 'a':
+            case 'A': {
+                double val = arg ? strada_to_num(arg) : 0.0;
+                snprintf(temp, sizeof(temp), spec_buf, val);
+                break;
+            }
+            case 'c': {
+                int val = arg ? (int)strada_to_int(arg) : 0;
+                snprintf(temp, sizeof(temp), "%c", val);
+                break;
+            }
+            case 's': {
+                char *s = arg ? strada_to_str(arg) : NULL;
+                snprintf(temp, sizeof(temp), "%s", s ? s : "");
+                if (s) free(s);
+                break;
+            }
+            case 'p': {
+                void *ptr = (void*)arg;
+                snprintf(temp, sizeof(temp), "%p", ptr);
+                break;
+            }
+            default:
+                /* Unknown specifier, copy as-is */
+                snprintf(temp, sizeof(temp), "%s", spec_buf);
+                break;
+        }
+
+        /* Append formatted value to output */
+        size_t len = strlen(temp);
+        if (out + len < end) {
+            memcpy(out, temp, len);
+            out += len;
+        }
+    }
+
+    *out = '\0';
+    va_end(args);
+    free(format);
+
     return strada_new_str(buffer);
 }
 
@@ -9376,5 +9521,240 @@ void strada_memprof_report(void) {
                 (unsigned long)total_current);
     }
     fprintf(stderr, "╚══════════════════════════════════════════════════════════════════════════════╝\n");
+}
+
+/* ============================================================
+ * C INTEROP HELPER FUNCTIONS (c:: namespace)
+ * For use with extern "C" FFI
+ * ============================================================ */
+
+/* c::str_to_ptr - Convert Strada string to C char* (allocates - user must free) */
+StradaValue* strada_c_str_to_ptr(StradaValue *sv) {
+    if (!sv) return strada_new_int(0);
+    char *s = strada_to_str(sv);
+    return strada_new_int((int64_t)s);
+}
+
+/* c::ptr_to_str - Convert C char* to Strada string (copies into Strada) */
+StradaValue* strada_c_ptr_to_str(StradaValue *ptr_sv) {
+    if (!ptr_sv) return strada_new_str("");
+    char *p = (char*)strada_to_int(ptr_sv);
+    if (!p) return strada_new_str("");
+    return strada_new_str(p);
+}
+
+/* c::ptr_to_str_n - Convert C char* to Strada string with explicit length */
+StradaValue* strada_c_ptr_to_str_n(StradaValue *ptr_sv, StradaValue *len_sv) {
+    if (!ptr_sv || !len_sv) return strada_new_str("");
+    char *p = (char*)strada_to_int(ptr_sv);
+    int64_t len = strada_to_int(len_sv);
+    if (!p || len <= 0) return strada_new_str("");
+    return strada_new_str_len(p, len);
+}
+
+/* c::free - Free memory allocated by C (e.g., from c::str_to_ptr) */
+StradaValue* strada_c_free(StradaValue *ptr_sv) {
+    if (!ptr_sv) return strada_new_undef();
+    void *p = (void*)strada_to_int(ptr_sv);
+    if (p) free(p);
+    return strada_new_undef();
+}
+
+/* c::alloc - Allocate memory (malloc wrapper) */
+StradaValue* strada_c_alloc(StradaValue *size_sv) {
+    if (!size_sv) return strada_new_int(0);
+    size_t size = (size_t)strada_to_int(size_sv);
+    void *p = malloc(size);
+    return strada_new_int((int64_t)p);
+}
+
+/* c::realloc - Reallocate memory */
+StradaValue* strada_c_realloc(StradaValue *ptr_sv, StradaValue *size_sv) {
+    if (!ptr_sv || !size_sv) return strada_new_int(0);
+    void *p = (void*)strada_to_int(ptr_sv);
+    size_t size = (size_t)strada_to_int(size_sv);
+    void *new_p = realloc(p, size);
+    return strada_new_int((int64_t)new_p);
+}
+
+/* c::null - Return NULL pointer */
+StradaValue* strada_c_null(void) {
+    return strada_new_int(0);
+}
+
+/* c::is_null - Check if pointer is NULL */
+StradaValue* strada_c_is_null(StradaValue *ptr_sv) {
+    if (!ptr_sv) return strada_new_int(1);
+    void *p = (void*)strada_to_int(ptr_sv);
+    return strada_new_int(p == NULL ? 1 : 0);
+}
+
+/* c::ptr_add - Pointer arithmetic */
+StradaValue* strada_c_ptr_add(StradaValue *ptr_sv, StradaValue *offset_sv) {
+    if (!ptr_sv || !offset_sv) return strada_new_int(0);
+    char *p = (char*)strada_to_int(ptr_sv);
+    int64_t offset = strada_to_int(offset_sv);
+    return strada_new_int((int64_t)(p + offset));
+}
+
+/* c::read_int8 - Read int8_t at pointer */
+StradaValue* strada_c_read_int8(StradaValue *ptr_sv) {
+    if (!ptr_sv) return strada_new_int(0);
+    int8_t *p = (int8_t*)strada_to_int(ptr_sv);
+    if (!p) return strada_new_int(0);
+    return strada_new_int(*p);
+}
+
+/* c::read_int16 - Read int16_t at pointer */
+StradaValue* strada_c_read_int16(StradaValue *ptr_sv) {
+    if (!ptr_sv) return strada_new_int(0);
+    int16_t *p = (int16_t*)strada_to_int(ptr_sv);
+    if (!p) return strada_new_int(0);
+    return strada_new_int(*p);
+}
+
+/* c::read_int32 - Read int32_t at pointer */
+StradaValue* strada_c_read_int32(StradaValue *ptr_sv) {
+    if (!ptr_sv) return strada_new_int(0);
+    int32_t *p = (int32_t*)strada_to_int(ptr_sv);
+    if (!p) return strada_new_int(0);
+    return strada_new_int(*p);
+}
+
+/* c::read_int64 - Read int64_t at pointer */
+StradaValue* strada_c_read_int64(StradaValue *ptr_sv) {
+    if (!ptr_sv) return strada_new_int(0);
+    int64_t *p = (int64_t*)strada_to_int(ptr_sv);
+    if (!p) return strada_new_int(0);
+    return strada_new_int(*p);
+}
+
+/* c::read_ptr - Read pointer at pointer (void**) */
+StradaValue* strada_c_read_ptr(StradaValue *ptr_sv) {
+    if (!ptr_sv) return strada_new_int(0);
+    void **p = (void**)strada_to_int(ptr_sv);
+    if (!p) return strada_new_int(0);
+    return strada_new_int((int64_t)*p);
+}
+
+/* c::read_float - Read float at pointer */
+StradaValue* strada_c_read_float(StradaValue *ptr_sv) {
+    if (!ptr_sv) return strada_new_num(0.0);
+    float *p = (float*)strada_to_int(ptr_sv);
+    if (!p) return strada_new_num(0.0);
+    return strada_new_num((double)*p);
+}
+
+/* c::read_double - Read double at pointer */
+StradaValue* strada_c_read_double(StradaValue *ptr_sv) {
+    if (!ptr_sv) return strada_new_num(0.0);
+    double *p = (double*)strada_to_int(ptr_sv);
+    if (!p) return strada_new_num(0.0);
+    return strada_new_num(*p);
+}
+
+/* c::write_int8 - Write int8_t at pointer */
+StradaValue* strada_c_write_int8(StradaValue *ptr_sv, StradaValue *val_sv) {
+    if (!ptr_sv || !val_sv) return strada_new_undef();
+    int8_t *p = (int8_t*)strada_to_int(ptr_sv);
+    if (!p) return strada_new_undef();
+    *p = (int8_t)strada_to_int(val_sv);
+    return strada_new_undef();
+}
+
+/* c::write_int16 - Write int16_t at pointer */
+StradaValue* strada_c_write_int16(StradaValue *ptr_sv, StradaValue *val_sv) {
+    if (!ptr_sv || !val_sv) return strada_new_undef();
+    int16_t *p = (int16_t*)strada_to_int(ptr_sv);
+    if (!p) return strada_new_undef();
+    *p = (int16_t)strada_to_int(val_sv);
+    return strada_new_undef();
+}
+
+/* c::write_int32 - Write int32_t at pointer */
+StradaValue* strada_c_write_int32(StradaValue *ptr_sv, StradaValue *val_sv) {
+    if (!ptr_sv || !val_sv) return strada_new_undef();
+    int32_t *p = (int32_t*)strada_to_int(ptr_sv);
+    if (!p) return strada_new_undef();
+    *p = (int32_t)strada_to_int(val_sv);
+    return strada_new_undef();
+}
+
+/* c::write_int64 - Write int64_t at pointer */
+StradaValue* strada_c_write_int64(StradaValue *ptr_sv, StradaValue *val_sv) {
+    if (!ptr_sv || !val_sv) return strada_new_undef();
+    int64_t *p = (int64_t*)strada_to_int(ptr_sv);
+    if (!p) return strada_new_undef();
+    *p = strada_to_int(val_sv);
+    return strada_new_undef();
+}
+
+/* c::write_ptr - Write pointer at pointer (void**) */
+StradaValue* strada_c_write_ptr(StradaValue *ptr_sv, StradaValue *val_sv) {
+    if (!ptr_sv || !val_sv) return strada_new_undef();
+    void **p = (void**)strada_to_int(ptr_sv);
+    if (!p) return strada_new_undef();
+    *p = (void*)strada_to_int(val_sv);
+    return strada_new_undef();
+}
+
+/* c::write_float - Write float at pointer */
+StradaValue* strada_c_write_float(StradaValue *ptr_sv, StradaValue *val_sv) {
+    if (!ptr_sv || !val_sv) return strada_new_undef();
+    float *p = (float*)strada_to_int(ptr_sv);
+    if (!p) return strada_new_undef();
+    *p = (float)strada_to_num(val_sv);
+    return strada_new_undef();
+}
+
+/* c::write_double - Write double at pointer */
+StradaValue* strada_c_write_double(StradaValue *ptr_sv, StradaValue *val_sv) {
+    if (!ptr_sv || !val_sv) return strada_new_undef();
+    double *p = (double*)strada_to_int(ptr_sv);
+    if (!p) return strada_new_undef();
+    *p = strada_to_num(val_sv);
+    return strada_new_undef();
+}
+
+/* c::sizeof_int - Return sizeof(int) */
+StradaValue* strada_c_sizeof_int(void) {
+    return strada_new_int(sizeof(int));
+}
+
+/* c::sizeof_long - Return sizeof(long) */
+StradaValue* strada_c_sizeof_long(void) {
+    return strada_new_int(sizeof(long));
+}
+
+/* c::sizeof_ptr - Return sizeof(void*) */
+StradaValue* strada_c_sizeof_ptr(void) {
+    return strada_new_int(sizeof(void*));
+}
+
+/* c::sizeof_size_t - Return sizeof(size_t) */
+StradaValue* strada_c_sizeof_size_t(void) {
+    return strada_new_int(sizeof(size_t));
+}
+
+/* c::memcpy - Copy memory */
+StradaValue* strada_c_memcpy(StradaValue *dest_sv, StradaValue *src_sv, StradaValue *n_sv) {
+    if (!dest_sv || !src_sv || !n_sv) return strada_new_int(0);
+    void *dest = (void*)strada_to_int(dest_sv);
+    void *src = (void*)strada_to_int(src_sv);
+    size_t n = (size_t)strada_to_int(n_sv);
+    if (!dest || !src) return strada_new_int(0);
+    memcpy(dest, src, n);
+    return dest_sv;
+}
+
+/* c::memset - Set memory */
+StradaValue* strada_c_memset(StradaValue *dest_sv, StradaValue *c_sv, StradaValue *n_sv) {
+    if (!dest_sv || !c_sv || !n_sv) return strada_new_int(0);
+    void *dest = (void*)strada_to_int(dest_sv);
+    int c = (int)strada_to_int(c_sv);
+    size_t n = (size_t)strada_to_int(n_sv);
+    if (!dest) return strada_new_int(0);
+    memset(dest, c, n);
+    return dest_sv;
 }
 

@@ -119,6 +119,10 @@ func parse_var_name(scalar $parser) str {
         parser_advance($parser);
         return "str";
     }
+    if ($type_str eq "TYPE_BOOL") {
+        parser_advance($parser);
+        return "bool";
+    }
     if ($type_str eq "TYPE_ARRAY") {
         parser_advance($parser);
         return "array";
@@ -151,6 +155,46 @@ func parse_var_name(scalar $parser) str {
     if ($type_str eq "TYPE_FLOAT64") {
         parser_advance($parser);
         return "float64";
+    }
+    if ($type_str eq "TYPE_INT8") {
+        parser_advance($parser);
+        return "int8";
+    }
+    if ($type_str eq "TYPE_INT16") {
+        parser_advance($parser);
+        return "int16";
+    }
+    if ($type_str eq "TYPE_UINT8") {
+        parser_advance($parser);
+        return "uint8";
+    }
+    if ($type_str eq "TYPE_UINT16") {
+        parser_advance($parser);
+        return "uint16";
+    }
+    if ($type_str eq "TYPE_UINT32") {
+        parser_advance($parser);
+        return "uint32";
+    }
+    if ($type_str eq "TYPE_UINT64") {
+        parser_advance($parser);
+        return "uint64";
+    }
+    if ($type_str eq "TYPE_SIZE_T") {
+        parser_advance($parser);
+        return "size_t";
+    }
+    if ($type_str eq "TYPE_CHAR") {
+        parser_advance($parser);
+        return "char";
+    }
+    if ($type_str eq "TYPE_LONG_DOUBLE") {
+        parser_advance($parser);
+        return "long_double";
+    }
+    if ($type_str eq "TYPE_PTR") {
+        parser_advance($parser);
+        return "ptr";
     }
 
     # Other keywords that can be used as variable names
@@ -331,6 +375,10 @@ func parse_type(scalar $parser) int {
         parser_advance($parser);
         return TYPE_STR();
     }
+    if ($type_str eq "TYPE_BOOL") {
+        parser_advance($parser);
+        return TYPE_BOOL();
+    }
     if ($type_str eq "TYPE_ARRAY") {
         parser_advance($parser);
         return TYPE_ARRAY();
@@ -363,6 +411,46 @@ func parse_type(scalar $parser) int {
     if ($type_str eq "TYPE_FLOAT64") {
         parser_advance($parser);
         return TYPE_FLOAT64();
+    }
+    if ($type_str eq "TYPE_INT8") {
+        parser_advance($parser);
+        return TYPE_INT8();
+    }
+    if ($type_str eq "TYPE_INT16") {
+        parser_advance($parser);
+        return TYPE_INT16();
+    }
+    if ($type_str eq "TYPE_UINT8") {
+        parser_advance($parser);
+        return TYPE_UINT8();
+    }
+    if ($type_str eq "TYPE_UINT16") {
+        parser_advance($parser);
+        return TYPE_UINT16();
+    }
+    if ($type_str eq "TYPE_UINT32") {
+        parser_advance($parser);
+        return TYPE_UINT32();
+    }
+    if ($type_str eq "TYPE_UINT64") {
+        parser_advance($parser);
+        return TYPE_UINT64();
+    }
+    if ($type_str eq "TYPE_SIZE_T") {
+        parser_advance($parser);
+        return TYPE_SIZE_T();
+    }
+    if ($type_str eq "TYPE_CHAR") {
+        parser_advance($parser);
+        return TYPE_CHAR();
+    }
+    if ($type_str eq "TYPE_LONG_DOUBLE") {
+        parser_advance($parser);
+        return TYPE_LONG_DOUBLE();
+    }
+    if ($type_str eq "TYPE_PTR") {
+        parser_advance($parser);
+        return TYPE_PTR();
     }
 
     # Struct name (IDENT) - return TYPE_STRUCT and store name
@@ -468,6 +556,9 @@ func parse_anon_func(scalar $parser, int $line) scalar {
     } elsif (parser_check($parser, "TYPE_STR")) {
         parser_advance($parser);
         $anon->{"return_type"} = TYPE_STR();
+    } elsif (parser_check($parser, "TYPE_BOOL")) {
+        parser_advance($parser);
+        $anon->{"return_type"} = TYPE_BOOL();
     } elsif (parser_check($parser, "TYPE_SCALAR")) {
         parser_advance($parser);
         $anon->{"return_type"} = TYPE_SCALAR();
@@ -486,6 +577,36 @@ func parse_anon_func(scalar $parser, int $line) scalar {
     } elsif (parser_check($parser, "TYPE_FLOAT64")) {
         parser_advance($parser);
         $anon->{"return_type"} = TYPE_FLOAT64();
+    } elsif (parser_check($parser, "TYPE_INT8")) {
+        parser_advance($parser);
+        $anon->{"return_type"} = TYPE_INT8();
+    } elsif (parser_check($parser, "TYPE_INT16")) {
+        parser_advance($parser);
+        $anon->{"return_type"} = TYPE_INT16();
+    } elsif (parser_check($parser, "TYPE_UINT8")) {
+        parser_advance($parser);
+        $anon->{"return_type"} = TYPE_UINT8();
+    } elsif (parser_check($parser, "TYPE_UINT16")) {
+        parser_advance($parser);
+        $anon->{"return_type"} = TYPE_UINT16();
+    } elsif (parser_check($parser, "TYPE_UINT32")) {
+        parser_advance($parser);
+        $anon->{"return_type"} = TYPE_UINT32();
+    } elsif (parser_check($parser, "TYPE_UINT64")) {
+        parser_advance($parser);
+        $anon->{"return_type"} = TYPE_UINT64();
+    } elsif (parser_check($parser, "TYPE_SIZE_T")) {
+        parser_advance($parser);
+        $anon->{"return_type"} = TYPE_SIZE_T();
+    } elsif (parser_check($parser, "TYPE_CHAR")) {
+        parser_advance($parser);
+        $anon->{"return_type"} = TYPE_CHAR();
+    } elsif (parser_check($parser, "TYPE_LONG_DOUBLE")) {
+        parser_advance($parser);
+        $anon->{"return_type"} = TYPE_LONG_DOUBLE();
+    } elsif (parser_check($parser, "TYPE_PTR")) {
+        parser_advance($parser);
+        $anon->{"return_type"} = TYPE_PTR();
     }
 
     # Parse body
@@ -904,8 +1025,12 @@ func parse_primary(scalar $parser) scalar {
                 return $call;
             }
 
-            # Just a qualified name
-            return ast_new_str_literal($name);
+            # Qualified name without parens - treat as constant (e.g., enum value)
+            # Create a 0-arg call node, codegen will handle it as a constant
+            my scalar $const_ref = ast_new_call($name);
+            $const_ref->{"is_constant"} = 1;
+            ast_set_line($const_ref, $call_line);
+            return $const_ref;
         }
 
         # Just an identifier (bareword string in some contexts)
@@ -1547,10 +1672,27 @@ func parse_case_value(scalar $parser) scalar {
         return $var;
     }
 
-    # Bareword/identifier
+    # Bareword/identifier or qualified name (e.g., enum value like Status::PENDING)
     if ($type eq "IDENT") {
         my str $name = $tok->{"value"};
+        my int $const_line = parser_current_line($parser);
         parser_advance($parser);
+
+        # Check for qualified name (Enum::VALUE)
+        if (parser_check($parser, "DOUBLE_COLON")) {
+            while (parser_check($parser, "DOUBLE_COLON")) {
+                parser_advance($parser);
+                my scalar $next_tok = parser_current($parser);
+                parser_expect($parser, "IDENT");
+                $name = $name . "::" . $next_tok->{"value"};
+            }
+            # Return as a constant reference (will be handled by codegen)
+            my scalar $const_ref = ast_new_call($name);
+            $const_ref->{"is_constant"} = 1;
+            ast_set_line($const_ref, $const_line);
+            return $const_ref;
+        }
+
         return ast_new_str_literal($name);
     }
 
@@ -2189,12 +2331,11 @@ func parse_extern_function(scalar $parser) scalar {
                 parser_advance($parser);
             }
             
-            my scalar $pname_tok = parser_current($parser);
-            parser_expect($parser, "IDENT");
-            
-            my scalar $param = ast_new_param($pname_tok->{"value"}, $param_type, $sigil);
+            my str $pname = parse_var_name($parser);
+
+            my scalar $param = ast_new_param($pname, $param_type, $sigil);
             ast_add_param($fn, $param);
-            
+
             if (parser_check($parser, "COMMA")) {
                 parser_advance($parser);
             } else {
@@ -2205,11 +2346,11 @@ func parse_extern_function(scalar $parser) scalar {
     } else {
         parser_advance($parser);
     }
-    
+
     # Parse return type
     my int $ret_type = parse_type($parser);
     $fn->{"return_type"} = $ret_type;
-    
+
     # Check if this is a declaration (;) or definition ({...})
     if (parser_check($parser, "SEMI")) {
         parser_advance($parser);
@@ -2221,6 +2362,93 @@ func parse_extern_function(scalar $parser) scalar {
     }
     
     return $fn;
+}
+
+# Parse a single C-style extern function declaration (inside extern "C" block)
+# These use raw C types and generate direct C calls
+func parse_c_extern_func(scalar $parser) scalar {
+    parser_expect($parser, "FUNC");
+
+    my scalar $name_tok = parser_current($parser);
+    parser_expect($parser, "IDENT");
+
+    my scalar $fn = ast_new_extern_func($name_tok->{"value"});
+    $fn->{"is_c_extern"} = 1;  # Mark as raw C extern
+
+    parser_expect($parser, "LPAREN");
+
+    # Parse parameters
+    if (!parser_check($parser, "RPAREN")) {
+        while (1) {
+            my int $param_type = parse_type($parser);
+
+            # Get sigil
+            my str $sigil = "$";
+            if (parser_check($parser, "DOLLAR")) {
+                parser_advance($parser);
+            } elsif (parser_check($parser, "AT")) {
+                $sigil = "@";
+                parser_advance($parser);
+            } elsif (parser_check($parser, "PERCENT")) {
+                $sigil = "%";
+                parser_advance($parser);
+            }
+
+            my str $pname = parse_var_name($parser);
+
+            my scalar $param = ast_new_param($pname, $param_type, $sigil);
+            ast_add_param($fn, $param);
+
+            if (parser_check($parser, "COMMA")) {
+                parser_advance($parser);
+            } else {
+                parser_expect($parser, "RPAREN");
+                last;
+            }
+        }
+    } else {
+        parser_advance($parser);
+    }
+
+    # Parse return type
+    my int $ret_type = parse_type($parser);
+    $fn->{"return_type"} = $ret_type;
+
+    # C extern declarations must end with semicolon
+    parser_expect($parser, "SEMI");
+    $fn->{"has_body"} = 0;
+
+    return $fn;
+}
+
+# Parse extern "C" block: extern "C" { func declarations... }
+# Returns an array of extern function nodes
+func parse_extern_c_block(scalar $parser, scalar $program) void {
+    parser_expect($parser, "EXTERN");
+
+    # Expect string "C"
+    my scalar $str_tok = parser_current($parser);
+    if ($str_tok->{"type"} ne "STR_LITERAL") {
+        parser_error($parser, "expected \"C\" after extern");
+    }
+    if ($str_tok->{"value"} ne "C") {
+        parser_error($parser, "expected \"C\" after extern, got \"" . $str_tok->{"value"} . "\"");
+    }
+    parser_advance($parser);
+
+    parser_expect($parser, "LBRACE");
+
+    # Parse function declarations until we see }
+    while (!parser_check($parser, "RBRACE")) {
+        if (parser_check($parser, "FUNC")) {
+            my scalar $fn = parse_c_extern_func($parser);
+            ast_add_function($program, $fn);
+        } else {
+            parser_error($parser, "expected func declaration inside extern \"C\" block");
+        }
+    }
+
+    parser_expect($parser, "RBRACE");
 }
 
 # Parse struct definition
@@ -2249,8 +2477,65 @@ func parse_struct(scalar $parser) scalar {
     }
     
     parser_expect($parser, "RBRACE");
-    
+
     return $st;
+}
+
+# Parse enum declaration
+# enum Name { MEMBER1, MEMBER2 = 10, MEMBER3 }
+func parse_enum(scalar $parser) scalar {
+    my int $enum_line = parser_current_line($parser);
+    parser_expect($parser, "ENUM");
+
+    my scalar $name_tok = parser_current($parser);
+    parser_expect($parser, "IDENT");
+
+    my scalar $en = ast_new_enum($name_tok->{"value"});
+    ast_set_line($en, $enum_line);
+
+    parser_expect($parser, "LBRACE");
+
+    my int $next_value = 0;
+
+    while (!parser_check($parser, "RBRACE")) {
+        # Get member name
+        my scalar $member_tok = parser_current($parser);
+        parser_expect($parser, "IDENT");
+        my str $member_name = $member_tok->{"value"};
+
+        # Check for explicit value assignment
+        my int $value = $next_value;
+        if (parser_check($parser, "ASSIGN")) {
+            parser_advance($parser);
+            my int $is_negative = 0;
+            if (parser_check($parser, "MINUS")) {
+                parser_advance($parser);
+                $is_negative = 1;
+            }
+            my scalar $val_tok = parser_current($parser);
+            if (parser_check($parser, "INT_LITERAL")) {
+                parser_advance($parser);
+                $value = str_to_int($val_tok->{"value"});
+                if ($is_negative == 1) {
+                    $value = 0 - $value;
+                }
+            } else {
+                parser_error($parser, "expected integer value for enum member");
+            }
+        }
+
+        ast_add_enum_member($en, $member_name, $value);
+        $next_value = $value + 1;
+
+        # Optional comma between members
+        if (parser_check($parser, "COMMA")) {
+            parser_advance($parser);
+        }
+    }
+
+    parser_expect($parser, "RBRACE");
+
+    return $en;
 }
 
 # Parse package declaration
@@ -2399,6 +2684,24 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
         } elsif (parser_check($mod_parser, "STRUCT")) {
             my scalar $st = parse_struct($mod_parser);
             ast_add_struct($mod_program, $st);
+        } elsif (parser_check($mod_parser, "ENUM")) {
+            my scalar $en = parse_enum($mod_parser);
+            ast_add_enum($mod_program, $en);
+        } elsif (parser_check($mod_parser, "MY")) {
+            # Parse module-level variable declarations
+            my scalar $var = parse_var_decl($mod_parser);
+            ast_add_global($mod_program, $var);
+        } elsif (parser_check($mod_parser, "EXTERN")) {
+            # Check if this is extern "C" { } or extern func
+            my scalar $next_tok = parser_peek($mod_parser);
+            if ($next_tok->{"type"} eq "STR_LITERAL") {
+                # extern "C" { ... } block
+                parse_extern_c_block($mod_parser, $mod_program);
+            } else {
+                # Traditional extern func declaration
+                my scalar $fn = parse_extern_function($mod_parser);
+                ast_add_function($mod_program, $fn);
+            }
         } elsif (parser_check($mod_parser, "HASH")) {
             # Skip comments that look like hash
             parser_advance($mod_parser);
@@ -2427,10 +2730,16 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
         $fn->{"original_name"} = $fn_name;
         $fn->{"package"} = $pkg_name;
 
-        # Create qualified name version
-        $fn->{"name"} = $pkg_name . "::" . $fn_name;
+        # extern "C" functions keep their exact C symbol name (no package prefix)
+        if ($fn->{"is_c_extern"} == 1) {
+            # Keep original name for C linkage
+            $fn->{"name"} = $fn_name;
+        } else {
+            # Create qualified name version for Strada functions
+            $fn->{"name"} = $pkg_name . "::" . $fn_name;
+        }
 
-        # Add qualified version to main program
+        # Add to main program
         ast_add_function($program, $fn);
 
         $i = $i + 1;
@@ -2443,6 +2752,26 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
     while ($i < $count) {
         my scalar $st = $mod_structs->[$i];
         ast_add_struct($program, $st);
+        $i = $i + 1;
+    }
+
+    # Merge enums
+    my scalar $mod_enums = $mod_program->{"enums"};
+    $i = 0;
+    $count = $mod_program->{"enum_count"};
+    while ($i < $count) {
+        my scalar $en = $mod_enums->[$i];
+        ast_add_enum($program, $en);
+        $i = $i + 1;
+    }
+
+    # Merge global variables from module
+    my scalar $mod_globals = $mod_program->{"globals"};
+    $i = 0;
+    $count = $mod_program->{"global_count"};
+    while ($i < $count) {
+        my scalar $gvar = $mod_globals->[$i];
+        ast_add_global($program, $gvar);
         $i = $i + 1;
     }
 }
@@ -2746,6 +3075,7 @@ func export_str_to_type(str $type_str) int {
     if ($type_str eq "int") { return TYPE_INT(); }
     if ($type_str eq "num") { return TYPE_NUM(); }
     if ($type_str eq "str") { return TYPE_STR(); }
+    if ($type_str eq "bool") { return TYPE_BOOL(); }
     if ($type_str eq "array") { return TYPE_ARRAY(); }
     if ($type_str eq "hash") { return TYPE_HASH(); }
     if ($type_str eq "scalar") { return TYPE_SCALAR(); }
@@ -2755,6 +3085,18 @@ func export_str_to_type(str $type_str) int {
     if ($type_str eq "int64") { return TYPE_INT64(); }
     if ($type_str eq "float32") { return TYPE_FLOAT32(); }
     if ($type_str eq "float64") { return TYPE_FLOAT64(); }
+    if ($type_str eq "int8") { return TYPE_INT8(); }
+    if ($type_str eq "int16") { return TYPE_INT16(); }
+    if ($type_str eq "uint8") { return TYPE_UINT8(); }
+    if ($type_str eq "byte") { return TYPE_UINT8(); }
+    if ($type_str eq "uint16") { return TYPE_UINT16(); }
+    if ($type_str eq "uint32") { return TYPE_UINT32(); }
+    if ($type_str eq "uint64") { return TYPE_UINT64(); }
+    if ($type_str eq "size_t") { return TYPE_SIZE_T(); }
+    if ($type_str eq "char") { return TYPE_CHAR(); }
+    if ($type_str eq "float") { return TYPE_FLOAT32(); }
+    if ($type_str eq "double") { return TYPE_FLOAT64(); }
+    if ($type_str eq "long_double") { return TYPE_LONG_DOUBLE(); }
     return TYPE_SCALAR();
 }
 
@@ -2795,15 +3137,27 @@ func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low) sca
             }
             ast_add_function($program, $fn);
         } elsif (parser_check($parser, "EXTERN")) {
-            my scalar $fn = parse_extern_function($parser);
-            # Do NOT auto-prefix extern function names - they link to external C functions
-            # with specific names that must not be modified
-            my str $pkg = $program->{"package"};
-            $fn->{"package"} = $pkg;
-            ast_add_function($program, $fn);
+            # Check if this is extern "C" { } or extern func
+            # Peek ahead to see if next token is a string
+            my scalar $next_tok = parser_peek($parser);
+            if ($next_tok->{"type"} eq "STR_LITERAL") {
+                # extern "C" { ... } block
+                parse_extern_c_block($parser, $program);
+            } else {
+                # Traditional extern func declaration
+                my scalar $fn = parse_extern_function($parser);
+                # Do NOT auto-prefix extern function names - they link to external C functions
+                # with specific names that must not be modified
+                my str $pkg = $program->{"package"};
+                $fn->{"package"} = $pkg;
+                ast_add_function($program, $fn);
+            }
         } elsif (parser_check($parser, "STRUCT")) {
             my scalar $st = parse_struct($parser);
             ast_add_struct($program, $st);
+        } elsif (parser_check($parser, "ENUM")) {
+            my scalar $en = parse_enum($parser);
+            ast_add_enum($program, $en);
         } elsif (parser_check($parser, "PACKAGE")) {
             parse_package($parser, $program);
         } elsif (parser_check($parser, "VERSION")) {
@@ -2818,7 +3172,7 @@ func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low) sca
             my scalar $var = parse_var_decl($parser);
             ast_add_global($program, $var);
         } else {
-            parser_error($parser, "expected function, extern, struct, package, inherit, use, import_lib, or variable declaration");
+            parser_error($parser, "expected function, extern, struct, enum, package, inherit, use, import_lib, or variable declaration");
         }
     }
 

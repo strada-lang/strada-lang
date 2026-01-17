@@ -41,21 +41,18 @@
 #   - Cache keys and deduplication
 #   - Non-security hash tables
 #
-# Requires: lib/Digest/libstrada_md5.so (build with: cd lib/Digest && make)
+# Compile with:
+#   ./stradac myapp.strada myapp.c
+#   gcc -o myapp myapp.c lib/Digest/strada_md5.c runtime/strada_runtime.c -Iruntime -ldl -lm
 
 package Digest::MD5;
 version "1.0.0";
 
-# Load the library - tries multiple paths
-func _get_lib() int {
-    my int $lib = sys::dl_open("lib/Digest/libstrada_md5.so");
-    if ($lib == 0) {
-        $lib = sys::dl_open("./lib/Digest/libstrada_md5.so");
-    }
-    if ($lib == 0) {
-        $lib = sys::dl_open("libstrada_md5.so");
-    }
-    return $lib;
+# External C function declarations
+extern "C" {
+    func strada_digest_md5(ptr $data, int $len) ptr;
+    func strada_digest_md5_hex(ptr $data, int $len) ptr;
+    func strada_digest_md5_base64(ptr $data, int $len) ptr;
 }
 
 # md5($data) - Compute raw MD5 digest
@@ -68,15 +65,18 @@ func _get_lib() int {
 #   my str $raw = Digest::MD5::md5("test");
 #   my int $len = sys::byte_length($raw);  # Returns 16
 func md5(str $data) str {
-    my int $lib = Digest::MD5::_get_lib();
-    if ($lib == 0) {
-        die("Failed to load Digest::MD5 library");
+    my int $len = sys::byte_length($data);
+    my ptr $data_ptr = c::str_to_ptr($data);
+    my ptr $result_ptr = strada_digest_md5($data_ptr, $len);
+    c::free($data_ptr);
+
+    if (c::is_null($result_ptr)) {
+        return "";
     }
-    my int $fn = sys::dl_sym($lib, "strada_digest_md5");
-    if ($fn == 0) {
-        die("Failed to find md5 function");
-    }
-    return sys::dl_call_sv($fn, [$data]);
+
+    # MD5 digest is always 16 bytes - returns static buffer, don't free
+    my str $result = c::ptr_to_str_n($result_ptr, 16);
+    return $result;
 }
 
 # md5_hex($data) - Compute MD5 digest as hex string
@@ -88,15 +88,13 @@ func md5(str $data) str {
 #   my str $hex = Digest::MD5::md5_hex("Hello, World!");
 #   say($hex);  # "65a8e27d8879283831b664bd8b7f0ad4"
 func md5_hex(str $data) str {
-    my int $lib = Digest::MD5::_get_lib();
-    if ($lib == 0) {
-        die("Failed to load Digest::MD5 library");
-    }
-    my int $fn = sys::dl_sym($lib, "strada_digest_md5_hex");
-    if ($fn == 0) {
-        die("Failed to find md5_hex function");
-    }
-    return sys::dl_call_str_sv($fn, [$data]);
+    my int $len = sys::byte_length($data);
+    my ptr $data_ptr = c::str_to_ptr($data);
+    my ptr $result_ptr = strada_digest_md5_hex($data_ptr, $len);
+    c::free($data_ptr);
+
+    # Returns static buffer, don't free
+    return c::ptr_to_str($result_ptr);
 }
 
 # md5_base64($data) - Compute MD5 digest as base64 string
@@ -109,13 +107,11 @@ func md5_hex(str $data) str {
 #   my str $b64 = Digest::MD5::md5_base64("Hello, World!");
 #   say($b64);  # "ZajifYh5KDgxtmS9i38K1A"
 func md5_base64(str $data) str {
-    my int $lib = Digest::MD5::_get_lib();
-    if ($lib == 0) {
-        die("Failed to load Digest::MD5 library");
-    }
-    my int $fn = sys::dl_sym($lib, "strada_digest_md5_base64");
-    if ($fn == 0) {
-        die("Failed to find md5_base64 function");
-    }
-    return sys::dl_call_str_sv($fn, [$data]);
+    my int $len = sys::byte_length($data);
+    my ptr $data_ptr = c::str_to_ptr($data);
+    my ptr $result_ptr = strada_digest_md5_base64($data_ptr, $len);
+    c::free($data_ptr);
+
+    # Returns static buffer, don't free
+    return c::ptr_to_str($result_ptr);
 }

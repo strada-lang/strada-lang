@@ -23,7 +23,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 STRADAC="$PROJECT_DIR/stradac"
-RUNTIME="$PROJECT_DIR/runtime/strada_runtime.c"
+RUNTIME="$PROJECT_DIR/runtime/strada_runtime.o"
 RUNTIME_H="$PROJECT_DIR/runtime"
 EXAMPLES_DIR="$PROJECT_DIR/examples"
 BUILD_DIR="/tmp/strada_tests_$$"

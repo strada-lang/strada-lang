@@ -1,0 +1,67 @@
+# test_extern_c.strada - Test extern "C" block with direct C function calls
+
+# Declare external C functions
+extern "C" {
+    func c_add(int $a, int $b) int;
+    func c_multiply(num $a, num $b) num;
+    func c_get_message() ptr;
+    func c_create_string(ptr $prefix, int $n) ptr;
+    func c_strlen(ptr $s) int;
+}
+
+func main() int {
+    say("=== Testing extern C functions ===");
+
+    # Test simple int addition
+    my int $sum = c_add(10, 32);
+    say("c_add(10, 32) = " . $sum);
+
+    # Test double multiplication
+    my num $product = c_multiply(3.14, 2.0);
+    say("c_multiply(3.14, 2.0) = " . $product);
+
+    # Test getting a static string from C
+    my ptr $msg_ptr = c_get_message();
+    my str $msg = c::ptr_to_str($msg_ptr);
+    say("c_get_message() = " . $msg);
+    # Note: static string, don't free
+
+    # Test passing a string to C
+    my str $prefix = "Strada says";
+    my ptr $prefix_ptr = c::str_to_ptr($prefix);
+    my int $len = c_strlen($prefix_ptr);
+    say("c_strlen(\"Strada says\") = " . $len);
+    c::free($prefix_ptr);  # Free the allocated string
+
+    # Test C function that allocates a string (we must free it)
+    my ptr $prefix2 = c::str_to_ptr("Result");
+    my ptr $created = c_create_string($prefix2, 42);
+    my str $created_str = c::ptr_to_str($created);
+    say("c_create_string(\"Result\", 42) = " . $created_str);
+    c::free($prefix2);   # Free the input we allocated
+    c::free($created);   # Free the output C allocated
+
+    # Test NULL pointer
+    my ptr $null = c::null();
+    if (c::is_null($null)) {
+        say("c::null() is NULL - correct!");
+    }
+
+    # Test sizeof functions
+    say("sizeof(int) = " . c::sizeof_int());
+    say("sizeof(long) = " . c::sizeof_long());
+    say("sizeof(ptr) = " . c::sizeof_ptr());
+
+    # Test memory allocation
+    my ptr $buffer = c::alloc(100);
+    if (c::is_null($buffer) == 0) {
+        say("Allocated 100 bytes successfully");
+        c::write_int32($buffer, 12345);
+        my int $read_back = c::read_int32($buffer);
+        say("Wrote 12345, read back: " . $read_back);
+        c::free($buffer);
+    }
+
+    say("=== All extern C tests passed! ===");
+    return 0;
+}

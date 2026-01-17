@@ -22,6 +22,7 @@
  * and call Perl code/subroutines from Strada.
  */
 
+#define _GNU_SOURCE
 #include "strada_runtime.h"
 #include <string.h>
 #include <stdio.h>
@@ -356,4 +357,165 @@ void strada_perl5_add_inc(StradaValue *path_sv) {
     char code[2048];
     snprintf(code, sizeof(code), "push @INC, '%s';", path);
     eval_pv(code, FALSE);
+}
+
+/* ============== Raw C Functions for extern "C" ============== */
+
+/* Evaluate Perl code, return result as string (raw C types) */
+char* strada_perl5_eval_raw(const char *code) {
+    if (!my_perl) {
+        return strdup("Error: Perl not initialized");
+    }
+
+    SV *result = eval_pv(code, FALSE);
+
+    if (SvTRUE(ERRSV)) {
+        STRLEN len;
+        const char *err = SvPV(ERRSV, len);
+        return strdup(err);
+    }
+
+    if (result && SvOK(result)) {
+        STRLEN len;
+        const char *str = SvPV(result, len);
+        return strdup(str);
+    }
+
+    return strdup("");
+}
+
+/* Execute Perl code (no return value) - raw C types */
+void strada_perl5_run_raw(const char *code) {
+    if (!my_perl) {
+        return;
+    }
+    eval_pv(code, FALSE);
+}
+
+/* Use a Perl module - raw C types */
+int strada_perl5_use_raw(const char *module) {
+    if (!my_perl) {
+        return 0;
+    }
+
+    char code[2048];
+    snprintf(code, sizeof(code), "use %s; 1;", module);
+
+    eval_pv(code, FALSE);
+    return !SvTRUE(ERRSV);
+}
+
+/* Require a Perl module - raw C types */
+int strada_perl5_require_raw(const char *module) {
+    if (!my_perl) {
+        return 0;
+    }
+
+    char code[2048];
+    snprintf(code, sizeof(code), "require %s; 1;", module);
+
+    eval_pv(code, FALSE);
+    return !SvTRUE(ERRSV);
+}
+
+/* Set a Perl scalar variable - raw C types */
+void strada_perl5_set_scalar_raw(const char *name, const char *value) {
+    if (!my_perl) {
+        return;
+    }
+
+    /* Skip the sigil if present */
+    if (name[0] == '$') {
+        name++;
+    }
+
+    SV *sv = get_sv(name, GV_ADD);
+    sv_setpv(sv, value);
+}
+
+/* Get a Perl scalar variable - raw C types */
+char* strada_perl5_get_scalar_raw(const char *name) {
+    if (!my_perl) {
+        return strdup("");
+    }
+
+    /* Skip the sigil if present */
+    if (name[0] == '$') {
+        name++;
+    }
+
+    SV *sv = get_sv(name, 0);
+    if (sv && SvOK(sv)) {
+        STRLEN len;
+        const char *str = SvPV(sv, len);
+        return strdup(str);
+    }
+
+    return strdup("");
+}
+
+/* Get the last Perl error ($@) - raw C types */
+char* strada_perl5_get_error_raw(void) {
+    if (!my_perl) {
+        return strdup("Perl not initialized");
+    }
+
+    if (SvTRUE(ERRSV)) {
+        STRLEN len;
+        const char *err = SvPV(ERRSV, len);
+        return strdup(err);
+    }
+
+    return strdup("");
+}
+
+/* Add a path to @INC - raw C types */
+void strada_perl5_add_inc_raw(const char *path) {
+    if (!my_perl) {
+        return;
+    }
+
+    char code[2048];
+    snprintf(code, sizeof(code), "push @INC, '%s';", path);
+    eval_pv(code, FALSE);
+}
+
+/* Call a Perl subroutine with a single string argument - raw C types */
+char* strada_perl5_call_str_raw(const char *sub_name, const char *arg) {
+    if (!my_perl) {
+        return strdup("Error: Perl not initialized");
+    }
+
+    dSP;
+    ENTER;
+    SAVETMPS;
+    PUSHMARK(SP);
+
+    if (arg && strlen(arg) > 0) {
+        XPUSHs(sv_2mortal(newSVpv(arg, 0)));
+    }
+
+    PUTBACK;
+    int count = call_pv(sub_name, G_SCALAR | G_EVAL);
+    SPAGAIN;
+
+    char *result = NULL;
+    if (SvTRUE(ERRSV)) {
+        STRLEN len;
+        const char *err = SvPV(ERRSV, len);
+        result = strdup(err);
+    } else if (count > 0) {
+        SV *ret = POPs;
+        if (SvOK(ret)) {
+            STRLEN len;
+            const char *str = SvPV(ret, len);
+            result = strdup(str);
+        }
+    }
+
+    PUTBACK;
+    FREETMPS;
+    LEAVE;
+
+    return result ? result : strdup("");
 }

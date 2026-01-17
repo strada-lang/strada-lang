@@ -16,16 +16,16 @@
 #   }
 #
 #   # Open a specific device by VID:PID
-#   my int $handle = usb::open_device(0x1234, 0x5678);
-#   if ($handle != 0) {
+#   my ptr $handle = usb::open_device(0x1234, 0x5678);
+#   if (!c::is_null($handle)) {
 #       # Claim interface 0
 #       usb::claim_interface($handle, 0);
 #
 #       # Bulk write to endpoint 1
-#       usb::bulk_transfer($handle, 0x01, "Hello", 1000);
+#       usb::bulk_write($handle, 0x01, "Hello", 1000);
 #
 #       # Bulk read from endpoint 0x81 (IN)
-#       my str $data = usb::bulk_transfer($handle, 0x81, 64, 1000);
+#       my str $data = usb::bulk_read($handle, 0x81, 64, 1000);
 #
 #       usb::release_interface($handle, 0);
 #       usb::close($handle);
@@ -33,491 +33,367 @@
 #
 #   usb::exit();
 #
-# Requires: lib/usb/libstrada_usb.so (build with: cd lib/usb && make)
+# Compile with: strada prog.strada lib/usb/strada_usb.c -lusb-1.0
 
 package usb;
 
-# Load the library - tries multiple paths
-func _get_lib() int {
-    my int $lib = sys::dl_open("lib/usb/libstrada_usb.so");
-    if ($lib == 0) {
-        $lib = sys::dl_open("./lib/usb/libstrada_usb.so");
-    }
-    if ($lib == 0) {
-        $lib = sys::dl_open("libstrada_usb.so");
-    }
-    return $lib;
+extern "C" {
+    # Initialization
+    func strada_usb_init() int;
+    func strada_usb_exit() void;
+    func strada_usb_set_debug_raw(int $level) void;
+
+    # Device enumeration
+    func strada_usb_refresh_device_list_raw() int;
+    func strada_usb_device_count_raw() int;
+    func strada_usb_device_vid_raw(int $idx) int;
+    func strada_usb_device_pid_raw(int $idx) int;
+    func strada_usb_device_bus_raw(int $idx) int;
+    func strada_usb_device_addr_raw(int $idx) int;
+    func strada_usb_device_class_raw(int $idx) int;
+    func strada_usb_device_vidpid_raw(int $idx) ptr;
+    func strada_usb_free_device_list_raw() void;
+
+    # Device open/close
+    func strada_usb_open_device_raw(int $vid, int $pid) ptr;
+    func strada_usb_open_device_by_path_raw(int $bus, int $addr) ptr;
+    func strada_usb_close_raw(ptr $handle) void;
+
+    # Interface management
+    func strada_usb_claim_interface_raw(ptr $handle, int $iface) int;
+    func strada_usb_release_interface_raw(ptr $handle, int $iface) int;
+    func strada_usb_detach_kernel_driver_raw(ptr $handle, int $iface) int;
+    func strada_usb_kernel_driver_active_raw(ptr $handle, int $iface) int;
+    func strada_usb_set_auto_detach_raw(ptr $handle, int $enable) int;
+
+    # Data transfers
+    func strada_usb_bulk_write_raw(ptr $handle, int $endpoint, ptr $data, int $length, int $timeout) int;
+    func strada_usb_bulk_read_raw(ptr $handle, int $endpoint, int $max_len, int $timeout) ptr;
+    func strada_usb_interrupt_write_raw(ptr $handle, int $endpoint, ptr $data, int $length, int $timeout) int;
+    func strada_usb_interrupt_read_raw(ptr $handle, int $endpoint, int $max_len, int $timeout) ptr;
+    func strada_usb_control_write_raw(ptr $handle, int $request_type, int $request, int $value, int $idx, ptr $data, int $length, int $timeout) int;
+    func strada_usb_control_read_raw(ptr $handle, int $request_type, int $request, int $value, int $idx, int $max_len, int $timeout) ptr;
+    func strada_usb_last_transfer_len_raw() int;
+
+    # Device descriptor
+    func strada_usb_get_desc_raw(ptr $handle) int;
+    func strada_usb_desc_usb_version_raw() int;
+    func strada_usb_desc_device_class_raw() int;
+    func strada_usb_desc_device_subclass_raw() int;
+    func strada_usb_desc_device_protocol_raw() int;
+    func strada_usb_desc_max_packet_size_raw() int;
+    func strada_usb_desc_vendor_id_raw() int;
+    func strada_usb_desc_product_id_raw() int;
+    func strada_usb_desc_device_version_raw() int;
+    func strada_usb_desc_num_configs_raw() int;
+    func strada_usb_desc_manufacturer_idx_raw() int;
+    func strada_usb_desc_product_idx_raw() int;
+    func strada_usb_desc_serial_idx_raw() int;
+
+    # String descriptor
+    func strada_usb_get_string_descriptor_raw(ptr $handle, int $idx) ptr;
+
+    # Configuration
+    func strada_usb_get_configuration_raw(ptr $handle) int;
+    func strada_usb_set_configuration_raw(ptr $handle, int $config) int;
+    func strada_usb_set_interface_alt_setting_raw(ptr $handle, int $iface, int $alt) int;
+    func strada_usb_clear_halt_raw(ptr $handle, int $endpoint) int;
+    func strada_usb_reset_device_raw(ptr $handle) int;
+
+    # Error string (returns static string, do not free)
+    func strada_usb_strerror_raw(int $errcode) ptr;
+
+    # Constants
+    func strada_usb_class_hid_raw() int;
+    func strada_usb_class_mass_storage_raw() int;
+    func strada_usb_class_hub_raw() int;
+    func strada_usb_class_vendor_spec_raw() int;
+    func strada_usb_class_printer_raw() int;
+    func strada_usb_class_audio_raw() int;
+    func strada_usb_class_video_raw() int;
+    func strada_usb_class_comm_raw() int;
+
+    func strada_usb_request_type_standard_raw() int;
+    func strada_usb_request_type_class_raw() int;
+    func strada_usb_request_type_vendor_raw() int;
+    func strada_usb_recipient_device_raw() int;
+    func strada_usb_recipient_interface_raw() int;
+    func strada_usb_recipient_endpoint_raw() int;
+    func strada_usb_endpoint_in_raw() int;
+    func strada_usb_endpoint_out_raw() int;
+
+    func strada_usb_error_io_raw() int;
+    func strada_usb_error_invalid_param_raw() int;
+    func strada_usb_error_access_raw() int;
+    func strada_usb_error_no_device_raw() int;
+    func strada_usb_error_not_found_raw() int;
+    func strada_usb_error_busy_raw() int;
+    func strada_usb_error_timeout_raw() int;
+    func strada_usb_error_overflow_raw() int;
+    func strada_usb_error_pipe_raw() int;
+    func strada_usb_error_interrupted_raw() int;
+    func strada_usb_error_no_mem_raw() int;
+    func strada_usb_error_not_supported_raw() int;
 }
 
 # ===== Initialization =====
 
-# Initialize libusb (called automatically by most functions)
+# Initialize libusb
 # Returns 0 on success, negative error code on failure
 func init() int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) {
-        return -1;
-    }
-    my int $fn = sys::dl_sym($lib, "strada_usb_init");
-    return sys::dl_call_int($fn, []);
+    return strada_usb_init();
 }
 
 # Cleanup libusb
 func exit() void {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) {
-        return;
-    }
-    my int $fn = sys::dl_sym($lib, "strada_usb_exit");
-    sys::dl_call_void($fn, []);
+    strada_usb_free_device_list_raw();
+    strada_usb_exit();
 }
 
 # Set debug level (0=none, 1=error, 2=warning, 3=info, 4=debug)
 func set_debug(int $level) void {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) {
-        return;
-    }
-    my int $fn = sys::dl_sym($lib, "strada_usb_set_debug");
-    sys::dl_call_void_sv($fn, [$level]);
+    strada_usb_set_debug_raw($level);
 }
 
 # Get error string for error code
 func strerror(int $errcode) str {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) {
-        return "Library not loaded";
-    }
-    my int $fn = sys::dl_sym($lib, "strada_usb_strerror");
-    return sys::dl_call_str_sv($fn, [$errcode]);
+    my ptr $result_ptr = strada_usb_strerror_raw($errcode);
+    # strerror returns static string, do not free
+    return c::ptr_to_str($result_ptr);
 }
 
 # ===== Device Enumeration =====
 
 # Get list of USB devices
-# Returns array of hashes with: vid, pid, bus, address, class, subclass, protocol, vidpid
+# Returns array of hashes with: vid, pid, bus, address, class, vidpid
 func get_device_list() array {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) {
-        my array @empty;
-        return @empty;
+    my array @result;
+    my int $count = strada_usb_refresh_device_list_raw();
+    if ($count < 0) {
+        return @result;
     }
-    my int $fn = sys::dl_sym($lib, "strada_usb_get_device_list");
-    return sys::dl_call_sv($fn, []);
+
+    my int $i = 0;
+    while ($i < $count) {
+        my hash %dev;
+        $dev{"vid"} = strada_usb_device_vid_raw($i);
+        $dev{"pid"} = strada_usb_device_pid_raw($i);
+        $dev{"bus"} = strada_usb_device_bus_raw($i);
+        $dev{"address"} = strada_usb_device_addr_raw($i);
+        $dev{"class"} = strada_usb_device_class_raw($i);
+
+        my ptr $vidpid_ptr = strada_usb_device_vidpid_raw($i);
+        $dev{"vidpid"} = c::ptr_to_str($vidpid_ptr);
+        c::free($vidpid_ptr);
+
+        push(@result, \%dev);
+        $i = $i + 1;
+    }
+
+    return @result;
 }
 
 # ===== Device Open/Close =====
 
 # Open device by Vendor ID and Product ID
-# Returns device handle (int) or 0 on failure
-func open_device(int $vid, int $pid) int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) {
-        return 0;
-    }
-    my int $fn = sys::dl_sym($lib, "strada_usb_open_device");
-    return sys::dl_call_int_sv($fn, [$vid, $pid]);
+# Returns device handle (ptr) or null on failure
+func open_device(int $vid, int $pid) ptr {
+    return strada_usb_open_device_raw($vid, $pid);
 }
 
 # Open device by bus number and device address
-func open_device_by_path(int $bus, int $addr) int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) {
-        return 0;
-    }
-    my int $fn = sys::dl_sym($lib, "strada_usb_open_device_by_path");
-    return sys::dl_call_int_sv($fn, [$bus, $addr]);
+func open_device_by_path(int $bus, int $addr) ptr {
+    return strada_usb_open_device_by_path_raw($bus, $addr);
 }
 
 # Close device handle
-func close(int $handle) void {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) {
-        return;
-    }
-    my int $fn = sys::dl_sym($lib, "strada_usb_close");
-    sys::dl_call_void_sv($fn, [$handle]);
+func close(ptr $handle) void {
+    strada_usb_close_raw($handle);
 }
 
 # ===== Interface Management =====
 
 # Claim interface for exclusive use
 # Returns 0 on success, negative error code on failure
-func claim_interface(int $handle, int $iface) int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) {
-        return -1;
-    }
-    my int $fn = sys::dl_sym($lib, "strada_usb_claim_interface");
-    return sys::dl_call_int_sv($fn, [$handle, $iface]);
+func claim_interface(ptr $handle, int $iface) int {
+    return strada_usb_claim_interface_raw($handle, $iface);
 }
 
 # Release interface
-func release_interface(int $handle, int $iface) int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) {
-        return -1;
-    }
-    my int $fn = sys::dl_sym($lib, "strada_usb_release_interface");
-    return sys::dl_call_int_sv($fn, [$handle, $iface]);
+func release_interface(ptr $handle, int $iface) int {
+    return strada_usb_release_interface_raw($handle, $iface);
 }
 
 # Detach kernel driver from interface (Linux only)
-func detach_kernel_driver(int $handle, int $iface) int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) {
-        return -1;
-    }
-    my int $fn = sys::dl_sym($lib, "strada_usb_detach_kernel_driver");
-    return sys::dl_call_int_sv($fn, [$handle, $iface]);
+func detach_kernel_driver(ptr $handle, int $iface) int {
+    return strada_usb_detach_kernel_driver_raw($handle, $iface);
 }
 
 # Check if kernel driver is active on interface
-func kernel_driver_active(int $handle, int $iface) int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) {
-        return -1;
-    }
-    my int $fn = sys::dl_sym($lib, "strada_usb_kernel_driver_active");
-    return sys::dl_call_int_sv($fn, [$handle, $iface]);
+func kernel_driver_active(ptr $handle, int $iface) int {
+    return strada_usb_kernel_driver_active_raw($handle, $iface);
 }
 
 # Set auto-detach kernel driver mode (1=enable, 0=disable)
-func set_auto_detach(int $handle, int $enable) int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) {
-        return -1;
-    }
-    my int $fn = sys::dl_sym($lib, "strada_usb_set_auto_detach");
-    return sys::dl_call_int_sv($fn, [$handle, $enable]);
+func set_auto_detach(ptr $handle, int $enable) int {
+    return strada_usb_set_auto_detach_raw($handle, $enable);
 }
 
 # ===== Data Transfers =====
 
-# Bulk transfer (read or write based on endpoint direction)
-# endpoint: 0x01-0x0F for OUT (write), 0x81-0x8F for IN (read)
-# For OUT: data is the string to send, returns bytes transferred
-# For IN: data is the max length to read, returns data string
-func bulk_transfer(int $handle, int $endpoint, scalar $data, int $timeout) scalar {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) {
-        return "";
-    }
-    my int $fn = sys::dl_sym($lib, "strada_usb_bulk_transfer");
-    return sys::dl_call_sv($fn, [$handle, $endpoint, $data, $timeout]);
+# Bulk write to OUT endpoint
+# Returns bytes transferred or negative error code
+func bulk_write(ptr $handle, int $endpoint, str $data, int $timeout) int {
+    my ptr $data_ptr = c::str_to_ptr($data);
+    my int $len = length($data);
+    return strada_usb_bulk_write_raw($handle, $endpoint, $data_ptr, $len, $timeout);
 }
 
-# Interrupt transfer (same semantics as bulk_transfer)
-func interrupt_transfer(int $handle, int $endpoint, scalar $data, int $timeout) scalar {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) {
+# Bulk read from IN endpoint
+# Returns data string (empty on error)
+func bulk_read(ptr $handle, int $endpoint, int $max_len, int $timeout) str {
+    my ptr $data_ptr = strada_usb_bulk_read_raw($handle, $endpoint, $max_len, $timeout);
+    if (c::is_null($data_ptr)) {
         return "";
     }
-    my int $fn = sys::dl_sym($lib, "strada_usb_interrupt_transfer");
-    return sys::dl_call_sv($fn, [$handle, $endpoint, $data, $timeout]);
+    my int $actual_len = strada_usb_last_transfer_len_raw();
+    my str $result = c::ptr_to_str_n($data_ptr, $actual_len);
+    c::free($data_ptr);
+    return $result;
 }
 
-# Control transfer
-# request_type: direction | type | recipient (use constants below)
-# For device-to-host (read): data is max length, returns data string
-# For host-to-device (write): data is string to send, returns bytes transferred
-func control_transfer(int $handle, int $request_type, int $request,
-                      int $value, int $index, scalar $data, int $timeout) scalar {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) {
+# Interrupt write to OUT endpoint
+func interrupt_write(ptr $handle, int $endpoint, str $data, int $timeout) int {
+    my ptr $data_ptr = c::str_to_ptr($data);
+    my int $len = length($data);
+    return strada_usb_interrupt_write_raw($handle, $endpoint, $data_ptr, $len, $timeout);
+}
+
+# Interrupt read from IN endpoint
+func interrupt_read(ptr $handle, int $endpoint, int $max_len, int $timeout) str {
+    my ptr $data_ptr = strada_usb_interrupt_read_raw($handle, $endpoint, $max_len, $timeout);
+    if (c::is_null($data_ptr)) {
         return "";
     }
-    my int $fn = sys::dl_sym($lib, "strada_usb_control_transfer");
-    return sys::dl_call_sv($fn, [$handle, $request_type, $request, $value, $index, $data, $timeout]);
+    my int $actual_len = strada_usb_last_transfer_len_raw();
+    my str $result = c::ptr_to_str_n($data_ptr, $actual_len);
+    c::free($data_ptr);
+    return $result;
+}
+
+# Control transfer write (host-to-device)
+func control_write(ptr $handle, int $request_type, int $request, int $value, int $idx, str $data, int $timeout) int {
+    my ptr $data_ptr = c::str_to_ptr($data);
+    my int $len = length($data);
+    return strada_usb_control_write_raw($handle, $request_type, $request, $value, $idx, $data_ptr, $len, $timeout);
+}
+
+# Control transfer read (device-to-host)
+func control_read(ptr $handle, int $request_type, int $request, int $value, int $idx, int $max_len, int $timeout) str {
+    my ptr $data_ptr = strada_usb_control_read_raw($handle, $request_type, $request, $value, $idx, $max_len, $timeout);
+    if (c::is_null($data_ptr)) {
+        return "";
+    }
+    my int $actual_len = strada_usb_last_transfer_len_raw();
+    my str $result = c::ptr_to_str_n($data_ptr, $actual_len);
+    c::free($data_ptr);
+    return $result;
 }
 
 # ===== Device Descriptors =====
 
 # Get device descriptor
-# Returns hash with: usb_version, device_class, device_subclass, device_protocol,
-#   max_packet_size, vendor_id, product_id, device_version, num_configurations,
-#   manufacturer_index, product_index, serial_index
-func get_device_descriptor(int $handle) hash {
-    my int $lib = usb::_get_lib();
-    my hash %empty;
-    if ($lib == 0) {
-        return %empty;
+# Returns hash with device info
+func get_device_descriptor(ptr $handle) hash {
+    my hash %result;
+    my int $rc = strada_usb_get_desc_raw($handle);
+    if ($rc != 0) {
+        return %result;
     }
-    my int $fn = sys::dl_sym($lib, "strada_usb_get_device_descriptor");
-    return sys::dl_call_sv($fn, [$handle]);
+
+    $result{"usb_version"} = strada_usb_desc_usb_version_raw();
+    $result{"device_class"} = strada_usb_desc_device_class_raw();
+    $result{"device_subclass"} = strada_usb_desc_device_subclass_raw();
+    $result{"device_protocol"} = strada_usb_desc_device_protocol_raw();
+    $result{"max_packet_size"} = strada_usb_desc_max_packet_size_raw();
+    $result{"vendor_id"} = strada_usb_desc_vendor_id_raw();
+    $result{"product_id"} = strada_usb_desc_product_id_raw();
+    $result{"device_version"} = strada_usb_desc_device_version_raw();
+    $result{"num_configurations"} = strada_usb_desc_num_configs_raw();
+    $result{"manufacturer_index"} = strada_usb_desc_manufacturer_idx_raw();
+    $result{"product_index"} = strada_usb_desc_product_idx_raw();
+    $result{"serial_index"} = strada_usb_desc_serial_idx_raw();
+
+    return %result;
 }
 
 # Get string descriptor by index
-func get_string_descriptor(int $handle, int $index) str {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) {
-        return "";
-    }
-    my int $fn = sys::dl_sym($lib, "strada_usb_get_string_descriptor");
-    return sys::dl_call_str_sv($fn, [$handle, $index]);
-}
-
-# Get configuration descriptor
-# Returns hash with: num_interfaces, configuration_value, max_power, attributes, interfaces
-func get_config_descriptor(int $handle, int $config_index) hash {
-    my int $lib = usb::_get_lib();
-    my hash %empty;
-    if ($lib == 0) {
-        return %empty;
-    }
-    my int $fn = sys::dl_sym($lib, "strada_usb_get_config_descriptor");
-    return sys::dl_call_sv($fn, [$handle, $config_index]);
+func get_string_descriptor(ptr $handle, int $idx) str {
+    my ptr $result_ptr = strada_usb_get_string_descriptor_raw($handle, $idx);
+    my str $result = c::ptr_to_str($result_ptr);
+    c::free($result_ptr);
+    return $result;
 }
 
 # ===== Configuration =====
 
 # Get active configuration
-func get_configuration(int $handle) int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) {
-        return -1;
-    }
-    my int $fn = sys::dl_sym($lib, "strada_usb_get_configuration");
-    return sys::dl_call_int_sv($fn, [$handle]);
+func get_configuration(ptr $handle) int {
+    return strada_usb_get_configuration_raw($handle);
 }
 
 # Set configuration
-func set_configuration(int $handle, int $config) int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) {
-        return -1;
-    }
-    my int $fn = sys::dl_sym($lib, "strada_usb_set_configuration");
-    return sys::dl_call_int_sv($fn, [$handle, $config]);
+func set_configuration(ptr $handle, int $config) int {
+    return strada_usb_set_configuration_raw($handle, $config);
 }
 
 # Set alternate setting for interface
-func set_interface_alt_setting(int $handle, int $iface, int $alt) int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) {
-        return -1;
-    }
-    my int $fn = sys::dl_sym($lib, "strada_usb_set_interface_alt_setting");
-    return sys::dl_call_int_sv($fn, [$handle, $iface, $alt]);
+func set_interface_alt_setting(ptr $handle, int $iface, int $alt) int {
+    return strada_usb_set_interface_alt_setting_raw($handle, $iface, $alt);
 }
 
 # Clear halt/stall on endpoint
-func clear_halt(int $handle, int $endpoint) int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) {
-        return -1;
-    }
-    my int $fn = sys::dl_sym($lib, "strada_usb_clear_halt");
-    return sys::dl_call_int_sv($fn, [$handle, $endpoint]);
+func clear_halt(ptr $handle, int $endpoint) int {
+    return strada_usb_clear_halt_raw($handle, $endpoint);
 }
 
 # Reset device
-func reset_device(int $handle) int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) {
-        return -1;
-    }
-    my int $fn = sys::dl_sym($lib, "strada_usb_reset_device");
-    return sys::dl_call_int_sv($fn, [$handle]);
+func reset_device(ptr $handle) int {
+    return strada_usb_reset_device_raw($handle);
 }
 
 # ===== Constants =====
 
 # USB device class codes
-func CLASS_HID() int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) { return 3; }
-    my int $fn = sys::dl_sym($lib, "strada_usb_class_hid");
-    return sys::dl_call_int($fn, []);
-}
-
-func CLASS_MASS_STORAGE() int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) { return 8; }
-    my int $fn = sys::dl_sym($lib, "strada_usb_class_mass_storage");
-    return sys::dl_call_int($fn, []);
-}
-
-func CLASS_HUB() int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) { return 9; }
-    my int $fn = sys::dl_sym($lib, "strada_usb_class_hub");
-    return sys::dl_call_int($fn, []);
-}
-
-func CLASS_VENDOR_SPEC() int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) { return 255; }
-    my int $fn = sys::dl_sym($lib, "strada_usb_class_vendor_spec");
-    return sys::dl_call_int($fn, []);
-}
-
-func CLASS_PRINTER() int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) { return 7; }
-    my int $fn = sys::dl_sym($lib, "strada_usb_class_printer");
-    return sys::dl_call_int($fn, []);
-}
-
-func CLASS_AUDIO() int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) { return 1; }
-    my int $fn = sys::dl_sym($lib, "strada_usb_class_audio");
-    return sys::dl_call_int($fn, []);
-}
-
-func CLASS_VIDEO() int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) { return 14; }
-    my int $fn = sys::dl_sym($lib, "strada_usb_class_video");
-    return sys::dl_call_int($fn, []);
-}
-
-func CLASS_COMM() int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) { return 2; }
-    my int $fn = sys::dl_sym($lib, "strada_usb_class_comm");
-    return sys::dl_call_int($fn, []);
-}
+func CLASS_HID() int { return strada_usb_class_hid_raw(); }
+func CLASS_MASS_STORAGE() int { return strada_usb_class_mass_storage_raw(); }
+func CLASS_HUB() int { return strada_usb_class_hub_raw(); }
+func CLASS_VENDOR_SPEC() int { return strada_usb_class_vendor_spec_raw(); }
+func CLASS_PRINTER() int { return strada_usb_class_printer_raw(); }
+func CLASS_AUDIO() int { return strada_usb_class_audio_raw(); }
+func CLASS_VIDEO() int { return strada_usb_class_video_raw(); }
+func CLASS_COMM() int { return strada_usb_class_comm_raw(); }
 
 # Control transfer request type flags
-func REQUEST_TYPE_STANDARD() int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) { return 0; }
-    my int $fn = sys::dl_sym($lib, "strada_usb_request_type_standard");
-    return sys::dl_call_int($fn, []);
-}
-
-func REQUEST_TYPE_CLASS() int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) { return 32; }
-    my int $fn = sys::dl_sym($lib, "strada_usb_request_type_class");
-    return sys::dl_call_int($fn, []);
-}
-
-func REQUEST_TYPE_VENDOR() int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) { return 64; }
-    my int $fn = sys::dl_sym($lib, "strada_usb_request_type_vendor");
-    return sys::dl_call_int($fn, []);
-}
-
-func RECIPIENT_DEVICE() int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) { return 0; }
-    my int $fn = sys::dl_sym($lib, "strada_usb_recipient_device");
-    return sys::dl_call_int($fn, []);
-}
-
-func RECIPIENT_INTERFACE() int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) { return 1; }
-    my int $fn = sys::dl_sym($lib, "strada_usb_recipient_interface");
-    return sys::dl_call_int($fn, []);
-}
-
-func RECIPIENT_ENDPOINT() int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) { return 2; }
-    my int $fn = sys::dl_sym($lib, "strada_usb_recipient_endpoint");
-    return sys::dl_call_int($fn, []);
-}
-
-func ENDPOINT_IN() int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) { return 128; }
-    my int $fn = sys::dl_sym($lib, "strada_usb_endpoint_in");
-    return sys::dl_call_int($fn, []);
-}
-
-func ENDPOINT_OUT() int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) { return 0; }
-    my int $fn = sys::dl_sym($lib, "strada_usb_endpoint_out");
-    return sys::dl_call_int($fn, []);
-}
+func REQUEST_TYPE_STANDARD() int { return strada_usb_request_type_standard_raw(); }
+func REQUEST_TYPE_CLASS() int { return strada_usb_request_type_class_raw(); }
+func REQUEST_TYPE_VENDOR() int { return strada_usb_request_type_vendor_raw(); }
+func RECIPIENT_DEVICE() int { return strada_usb_recipient_device_raw(); }
+func RECIPIENT_INTERFACE() int { return strada_usb_recipient_interface_raw(); }
+func RECIPIENT_ENDPOINT() int { return strada_usb_recipient_endpoint_raw(); }
+func ENDPOINT_IN() int { return strada_usb_endpoint_in_raw(); }
+func ENDPOINT_OUT() int { return strada_usb_endpoint_out_raw(); }
 
 # Error codes
-func ERROR_IO() int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) { return -1; }
-    my int $fn = sys::dl_sym($lib, "strada_usb_error_io");
-    return sys::dl_call_int($fn, []);
-}
-
-func ERROR_INVALID_PARAM() int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) { return -2; }
-    my int $fn = sys::dl_sym($lib, "strada_usb_error_invalid_param");
-    return sys::dl_call_int($fn, []);
-}
-
-func ERROR_ACCESS() int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) { return -3; }
-    my int $fn = sys::dl_sym($lib, "strada_usb_error_access");
-    return sys::dl_call_int($fn, []);
-}
-
-func ERROR_NO_DEVICE() int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) { return -4; }
-    my int $fn = sys::dl_sym($lib, "strada_usb_error_no_device");
-    return sys::dl_call_int($fn, []);
-}
-
-func ERROR_NOT_FOUND() int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) { return -5; }
-    my int $fn = sys::dl_sym($lib, "strada_usb_error_not_found");
-    return sys::dl_call_int($fn, []);
-}
-
-func ERROR_BUSY() int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) { return -6; }
-    my int $fn = sys::dl_sym($lib, "strada_usb_error_busy");
-    return sys::dl_call_int($fn, []);
-}
-
-func ERROR_TIMEOUT() int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) { return -7; }
-    my int $fn = sys::dl_sym($lib, "strada_usb_error_timeout");
-    return sys::dl_call_int($fn, []);
-}
-
-func ERROR_OVERFLOW() int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) { return -8; }
-    my int $fn = sys::dl_sym($lib, "strada_usb_error_overflow");
-    return sys::dl_call_int($fn, []);
-}
-
-func ERROR_PIPE() int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) { return -9; }
-    my int $fn = sys::dl_sym($lib, "strada_usb_error_pipe");
-    return sys::dl_call_int($fn, []);
-}
-
-func ERROR_INTERRUPTED() int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) { return -10; }
-    my int $fn = sys::dl_sym($lib, "strada_usb_error_interrupted");
-    return sys::dl_call_int($fn, []);
-}
-
-func ERROR_NO_MEM() int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) { return -11; }
-    my int $fn = sys::dl_sym($lib, "strada_usb_error_no_mem");
-    return sys::dl_call_int($fn, []);
-}
-
-func ERROR_NOT_SUPPORTED() int {
-    my int $lib = usb::_get_lib();
-    if ($lib == 0) { return -12; }
-    my int $fn = sys::dl_sym($lib, "strada_usb_error_not_supported");
-    return sys::dl_call_int($fn, []);
-}
+func ERROR_IO() int { return strada_usb_error_io_raw(); }
+func ERROR_INVALID_PARAM() int { return strada_usb_error_invalid_param_raw(); }
+func ERROR_ACCESS() int { return strada_usb_error_access_raw(); }
+func ERROR_NO_DEVICE() int { return strada_usb_error_no_device_raw(); }
+func ERROR_NOT_FOUND() int { return strada_usb_error_not_found_raw(); }
+func ERROR_BUSY() int { return strada_usb_error_busy_raw(); }
+func ERROR_TIMEOUT() int { return strada_usb_error_timeout_raw(); }
+func ERROR_OVERFLOW() int { return strada_usb_error_overflow_raw(); }
+func ERROR_PIPE() int { return strada_usb_error_pipe_raw(); }
+func ERROR_INTERRUPTED() int { return strada_usb_error_interrupted_raw(); }
+func ERROR_NO_MEM() int { return strada_usb_error_no_mem_raw(); }
+func ERROR_NOT_SUPPORTED() int { return strada_usb_error_not_supported_raw(); }

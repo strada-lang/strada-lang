@@ -26,4 +26,4 @@ $(TARGET): $(SRC)
 	@echo "  say(\$$hex);  # 65a8e27d8879283831b664bd8b7f0ad4"
 
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGET) *.o

@@ -18,13 +18,18 @@
 # LWP_SSL - HTTP/HTTPS client library with SSL support
 #
 # This is a standalone HTTP client that supports both HTTP and HTTPS.
-# HTTPS requires the SSL library (lib/ssl/libstrada_ssl.so) to be built.
+# SSL support is provided via extern "C" - link with lib/ssl/strada_ssl.c
 #
 # Usage:
 #   use lib "lib";
+#   use ssl;       # Required for HTTPS
 #   use LWP_SSL;
 #
 #   my hash %response = LWP_SSL::get("https://example.com");
+#
+# Compile with:
+#   ./stradac myapp.strada myapp.c
+#   gcc -o myapp myapp.c lib/ssl/strada_ssl.c runtime/strada_runtime.c -Iruntime -lssl -lcrypto -ldl -lm
 
 package LWP_SSL;
 
@@ -170,28 +175,7 @@ func parse_response(str $raw) hash {
     return %response;
 }
 
-# Load SSL library functions
-func load_ssl_lib() array {
-    my int $ssl_lib = sys::dl_open("lib/ssl/libstrada_ssl.so");
-    if ($ssl_lib == 0) {
-        $ssl_lib = sys::dl_open("libstrada_ssl.so");
-    }
-    if ($ssl_lib == 0) {
-        return (0, 0, 0, 0, 0, 0);
-    }
-
-    my int $init_fn = sys::dl_sym($ssl_lib, "strada_ssl_init");
-    my int $connect_fn = sys::dl_sym($ssl_lib, "strada_ssl_connect");
-    my int $write_fn = sys::dl_sym($ssl_lib, "strada_ssl_write_str");
-    my int $read_fn = sys::dl_sym($ssl_lib, "strada_ssl_read_str");
-    my int $close_fn = sys::dl_sym($ssl_lib, "strada_ssl_close");
-
-    if ($connect_fn == 0 || $write_fn == 0 || $read_fn == 0 || $close_fn == 0) {
-        return (0, 0, 0, 0, 0, 0);
-    }
-
-    return ($ssl_lib, $init_fn, $connect_fn, $write_fn, $read_fn, $close_fn);
-}
+# SSL is now linked via extern "C" - no dynamic loading needed
 
 # Build HTTP request
 func build_request(str $method, str $host, str $path, str $body) str {
@@ -245,47 +229,31 @@ func do_http_request(str $host, int $port, str $request) hash {
     return LWP_SSL::parse_response($raw_response);
 }
 
-# Internal: Make HTTPS request
+# Internal: Make HTTPS request (uses ssl module via extern "C")
 func do_https_request(str $host, int $port, str $request) hash {
     my hash %response = ();
     $response{"success"} = 0;
 
-    my array @ssl_fns = LWP_SSL::load_ssl_lib();
-    my int $ssl_lib = @ssl_fns[0];
-    my int $init_fn = @ssl_fns[1];
-    my int $connect_fn = @ssl_fns[2];
-    my int $write_fn = @ssl_fns[3];
-    my int $read_fn = @ssl_fns[4];
-    my int $close_fn = @ssl_fns[5];
-
-    if ($ssl_lib == 0) {
-        $response{"error"} = "SSL library not available - build lib/ssl/libstrada_ssl.so";
-        return %response;
-    }
-
-    # Initialize SSL library
-    sys::dl_call_int($init_fn, []);
-
-    # Connect returns an int handle
-    my int $conn = sys::dl_call_int_sv($connect_fn, [$host, $port]);
-    if ($conn == 0) {
+    # Connect using ssl module (extern "C")
+    my ptr $conn = ssl::connect($host, $port);
+    if (c::is_null($conn)) {
         $response{"error"} = "SSL connection failed to " . $host . ":" . $port;
         return %response;
     }
 
     # Write request
-    sys::dl_call_int_sv($write_fn, [$conn, $request]);
+    ssl::write($conn, $request);
 
     # Read response
     my str $raw_response = "";
-    my str $chunk = sys::dl_call_str_sv($read_fn, [$conn, 8192]);
-    while (defined($chunk) && length($chunk) > 0) {
+    my str $chunk = ssl::read($conn, 8192);
+    while (length($chunk) > 0) {
         $raw_response = $raw_response . $chunk;
-        $chunk = sys::dl_call_str_sv($read_fn, [$conn, 8192]);
+        $chunk = ssl::read($conn, 8192);
     }
 
     # Close connection
-    sys::dl_call_int_sv($close_fn, [$conn]);
+    ssl::close($conn);
 
     return LWP_SSL::parse_response($raw_response);
 }
@@ -337,8 +305,7 @@ func get_content(str $url) str {
     return "";
 }
 
-# Check if SSL is available
+# SSL is always available when linked via extern "C"
 func ssl_available() int {
-    my array @ssl_fns = LWP_SSL::load_ssl_lib();
-    return @ssl_fns[0] != 0 && @ssl_fns[1] != 0;
+    return 1;
 }

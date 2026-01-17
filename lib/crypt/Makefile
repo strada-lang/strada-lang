@@ -26,4 +26,4 @@ $(TARGET): $(SRC)
 	@echo "  if (crypt::verify(\"mypassword\", \$$hash)) { ... }"
 
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGET) *.o
