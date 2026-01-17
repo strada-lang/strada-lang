@@ -457,7 +457,7 @@ func add(int $a, int $b) int {
 
 # Runtime shared library loading
 use lib "lib";
-import_lib "JSON";            # Loads lib/JSON.so + lib/JSON.strada for signatures
+import_lib "JSON";            # Loads lib/JSON.so (signatures embedded via __strada_export_info)
 my str $json = JSON::encode(\%data);  # Namespace syntax works after import_lib
 ```
 

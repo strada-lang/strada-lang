@@ -134,15 +134,16 @@ use Strada;
 # Load the library
 my $lib = Strada::Library->new('./libmylib.so');
 
-# Call functions (note: package__function naming)
-my $sum = $lib->call('mylib__add', 10, 20);
+# Call functions - both naming styles work:
+my $sum = $lib->call('mylib_add', 10, 20);        # C-style
+my $sum = $lib->call('mylib::add', 10, 20);       # Strada-style (auto-converted)
 print "10 + 20 = $sum\n";  # 30
 
-my $greeting = $lib->call('mylib__greet', 'Perl');
+my $greeting = $lib->call('mylib::greet', 'Perl');
 print "$greeting\n";  # Hello, Perl!
 
 # Pass arrays
-my $total = $lib->call('mylib__process_list', [1, 2, 3, 4, 5]);
+my $total = $lib->call('mylib::process_list', [1, 2, 3, 4, 5]);
 print "Sum: $total\n";  # 15
 
 # Unload when done
@@ -151,12 +152,14 @@ $lib->unload();
 
 ### Function Naming Convention
 
-Strada functions are exported as: `<package>__<function>`
+Strada functions are exported as: `<package>_<function>` (single underscore)
 
-| Strada | Exported Name |
-|--------|---------------|
-| `package foo; func bar()` | `foo__bar` |
-| `package utils; func format()` | `utils__format` |
+The Perl module accepts both styles - it auto-converts `::` to `_`:
+
+| Strada | C Name | Perl Call (both work) |
+|--------|--------|----------------------|
+| `package foo; func bar()` | `foo_bar` | `'foo_bar'` or `'foo::bar'` |
+| `package utils; func format()` | `utils_format` | `'utils_format'` or `'utils::format'` |
 
 ### Type Conversion
 
@@ -212,7 +215,7 @@ my $lib = Strada::Library->new('./libcompute.so');
 
 # Call optimized Strada functions
 for my $data (@large_dataset) {
-    my $result = $lib->call('compute__process', $data);
+    my $result = $lib->call('compute::process', $data);
     push @results, $result;
 }
 
