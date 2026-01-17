@@ -73,7 +73,7 @@ use Strada;
 
 my $lib = Strada::Library->new('./libmath.so');
 
-# Get formatted description (like soinfo tool)
+# Get formatted description (like strada-soinfo tool)
 print $lib->describe();
 # Output:
 # # Strada Library: ./libmath.so
@@ -260,7 +260,7 @@ Returns a hash reference describing all exported functions:
 
 #### $lib->describe()
 
-Returns a formatted string describing all functions (similar to `soinfo` output):
+Returns a formatted string describing all functions (similar to `strada-soinfo` output):
 
 ```
 # Strada Library: ./math_lib.so
@@ -281,4 +281,4 @@ Unload the library and clear cached function pointers.
 - `lib/perl5/` - The reverse integration (calling Perl from Strada)
 - `docs/LANGUAGE_GUIDE.md` - Strada language documentation
 - `docs/RUNTIME_API.md` - Strada runtime API reference
-- `tools/soinfo` - Command-line tool to inspect Strada shared libraries
+- `strada-soinfo` - Command-line tool to inspect Strada shared libraries

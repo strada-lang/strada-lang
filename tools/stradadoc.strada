@@ -1,0 +1,601 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# stradadoc - Display Strada documentation (like perldoc)
+#
+# Usage: stradadoc [topic]
+#        stradadoc sys          # Show sys:: functions
+#        stradadoc LANGUAGE     # Show language guide
+#
+# Without arguments, lists available documentation.
+
+func usage() void {
+    say("Usage: stradadoc [options] [topic]");
+    say("");
+    say("Display Strada documentation formatted for the terminal.");
+    say("");
+    say("Options:");
+    say("  --list, -l      List all available documentation");
+    say("  --raw           Show raw markdown without formatting");
+    say("  --no-pager      Don't use less for paging");
+    say("  --help, -h      Show this help message");
+    say("");
+    say("Examples:");
+    say("  stradadoc               # List available docs");
+    say("  stradadoc sys           # Show sys:: functions");
+    say("  stradadoc LANGUAGE      # Show language guide");
+    say("  stradadoc QUICK         # Show quick reference");
+}
+
+# Get the docs directory path relative to the executable
+func get_docs_path() str {
+    # Try common locations
+    if (sys::is_dir("docs")) {
+        return "docs";
+    }
+    if (sys::is_dir("../docs")) {
+        return "../docs";
+    }
+    if (sys::is_dir("/home/mflickin/p/strada/docs")) {
+        return "/home/mflickin/p/strada/docs";
+    }
+    return "docs";
+}
+
+# Trim whitespace
+func trim(str $s) str {
+    $s =~ s/^\s+//;
+    $s =~ s/\s+$//;
+    return $s;
+}
+
+# Get terminal width (default 80)
+func get_term_width() int {
+    my int $pipe = sys::popen("tput cols 2>/dev/null", "r");
+    if ($pipe < 0) {
+        return 80;
+    }
+    my str $width_str = sys::readline($pipe);
+    sys::pclose($pipe);
+    $width_str = trim($width_str);
+    if (length($width_str) > 0) {
+        my int $w = sys::atoi($width_str);
+        if ($w > 40) {
+            return $w;
+        }
+    }
+    return 80;
+}
+
+# Word wrap text to given width
+func word_wrap(str $text, int $width, int $indent) str {
+    my str $result = "";
+    my str $indent_str = "";
+    my int $j = 0;
+    while ($j < $indent) {
+        $indent_str = $indent_str . " ";
+        $j = $j + 1;
+    }
+
+    my array @words = split(" ", $text);
+    my int $line_len = 0;
+    my int $first_word = 1;
+
+    my int $i = 0;
+    while ($i < scalar(@words)) {
+        my str $word = @words[$i];
+        my int $word_len = length($word);
+
+        if ($first_word == 1) {
+            $result = $result . $indent_str . $word;
+            $line_len = $indent + $word_len;
+            $first_word = 0;
+        } elsif ($line_len + 1 + $word_len > $width) {
+            $result = $result . "\n" . $indent_str . $word;
+            $line_len = $indent + $word_len;
+        } else {
+            $result = $result . " " . $word;
+            $line_len = $line_len + 1 + $word_len;
+        }
+        $i = $i + 1;
+    }
+
+    return $result;
+}
+
+# ANSI color codes - use chr(27) for escape character
+func color_bold() str {
+    return chr(27) . "[1m";
+}
+
+func color_underline() str {
+    return chr(27) . "[4m";
+}
+
+func color_reset() str {
+    return chr(27) . "[0m";
+}
+
+func color_cyan() str {
+    return chr(27) . "[36m";
+}
+
+func color_yellow() str {
+    return chr(27) . "[33m";
+}
+
+func color_green() str {
+    return chr(27) . "[32m";
+}
+
+# Format inline markdown elements
+func format_inline(str $line) str {
+    my str $result = "";
+    my int $len = length($line);
+    my int $i = 0;
+
+    while ($i < $len) {
+        my str $ch = substr($line, $i, 1);
+
+        # Check for backtick (code) - use cyan
+        if ($ch eq "`") {
+            my int $end = $i + 1;
+            while ($end < $len && substr($line, $end, 1) ne "`") {
+                $end = $end + 1;
+            }
+            if ($end < $len) {
+                my str $code = substr($line, $i + 1, $end - $i - 1);
+                $result = $result . color_cyan() . $code . color_reset();
+                $i = $end + 1;
+                next;
+            }
+        }
+
+        # Check for ** (bold)
+        if ($ch eq "*" && $i + 1 < $len && substr($line, $i + 1, 1) eq "*") {
+            my int $end = $i + 2;
+            while ($end + 1 < $len) {
+                if (substr($line, $end, 1) eq "*" && substr($line, $end + 1, 1) eq "*") {
+                    last;
+                }
+                $end = $end + 1;
+            }
+            if ($end + 1 < $len) {
+                my str $bold = substr($line, $i + 2, $end - $i - 2);
+                $result = $result . color_bold() . $bold . color_reset();
+                $i = $end + 2;
+                next;
+            }
+        }
+
+        # Check for single * (italic/underline)
+        if ($ch eq "*") {
+            my int $end = $i + 1;
+            while ($end < $len && substr($line, $end, 1) ne "*") {
+                $end = $end + 1;
+            }
+            if ($end < $len) {
+                my str $italic = substr($line, $i + 1, $end - $i - 1);
+                $result = $result . color_underline() . $italic . color_reset();
+                $i = $end + 1;
+                next;
+            }
+        }
+
+        $result = $result . $ch;
+        $i = $i + 1;
+    }
+
+    return $result;
+}
+
+# Format markdown and return as string
+func format_markdown(str $filepath, int $raw_mode) str {
+    my scalar $fh = sys::open($filepath, "r");
+    if (length($fh) == 0) {
+        return "Error: Cannot open file: " . $filepath . "\n";
+    }
+
+    my str $output = "";
+    my int $term_width = get_term_width();
+    my int $in_code_block = 0;
+    my int $in_list = 0;
+    my str $line = "";
+
+    while (!sys::eof($fh)) {
+        $line = sys::readline($fh);
+        $line =~ s/\n$//;
+        $line =~ s/\r$//;
+
+        # Raw mode - just output as-is
+        if ($raw_mode == 1) {
+            $output = $output . $line . "\n";
+            next;
+        }
+
+        # Handle fenced code blocks
+        if ($line =~ /^```/) {
+            $in_code_block = 1 - $in_code_block;
+            $output = $output . "\n";
+            next;
+        }
+
+        # Inside code block - output with indent and color
+        if ($in_code_block == 1) {
+            $output = $output . "    " . color_green() . $line . color_reset() . "\n";
+            next;
+        }
+
+        # Empty line
+        if (length(trim($line)) == 0) {
+            $in_list = 0;
+            $output = $output . "\n";
+            next;
+        }
+
+        # H1 heading
+        if ($line =~ /^# (.+)$/) {
+            my array @caps = captures();
+            my str $heading = @caps[1];
+            $output = $output . "\n";
+            $output = $output . color_bold() . color_yellow() . $heading . color_reset() . "\n";
+            # Add underline
+            my str $underline = "";
+            my int $k = 0;
+            while ($k < length($heading)) {
+                $underline = $underline . "=";
+                $k = $k + 1;
+            }
+            $output = $output . color_yellow() . $underline . color_reset() . "\n";
+            $output = $output . "\n";
+            next;
+        }
+
+        # H2 heading
+        if ($line =~ /^## (.+)$/) {
+            my array @caps = captures();
+            my str $heading = @caps[1];
+            $output = $output . "\n";
+            $output = $output . color_bold() . $heading . color_reset() . "\n";
+            my str $underline = "";
+            my int $k = 0;
+            while ($k < length($heading)) {
+                $underline = $underline . "-";
+                $k = $k + 1;
+            }
+            $output = $output . $underline . "\n";
+            $output = $output . "\n";
+            next;
+        }
+
+        # H3 heading
+        if ($line =~ /^### (.+)$/) {
+            my array @caps = captures();
+            my str $heading = @caps[1];
+            $output = $output . "\n";
+            $output = $output . color_bold() . "  " . $heading . color_reset() . "\n";
+            next;
+        }
+
+        # H4+ heading
+        if ($line =~ /^#{4,} (.+)$/) {
+            my array @caps = captures();
+            my str $heading = @caps[1];
+            $output = $output . "    " . color_underline() . $heading . color_reset() . "\n";
+            next;
+        }
+
+        # Unordered list item
+        if ($line =~ /^[-*]\s+(.+)$/) {
+            my array @caps = captures();
+            my str $item = @caps[1];
+            $in_list = 1;
+            my str $formatted = format_inline($item);
+            my str $wrapped = word_wrap($formatted, $term_width - 6, 0);
+            # Add bullet and indent continuation lines
+            my array @wrap_lines = split("\n", $wrapped);
+            my int $first = 1;
+            my int $li = 0;
+            while ($li < scalar(@wrap_lines)) {
+                if ($first == 1) {
+                    $output = $output . "  * " . @wrap_lines[$li] . "\n";
+                    $first = 0;
+                } else {
+                    $output = $output . "    " . @wrap_lines[$li] . "\n";
+                }
+                $li = $li + 1;
+            }
+            next;
+        }
+
+        # Ordered list item
+        if ($line =~ /^([0-9]+)\.\s+(.+)$/) {
+            my array @caps = captures();
+            my str $num = @caps[1];
+            my str $item = @caps[2];
+            $in_list = 1;
+            my str $formatted = format_inline($item);
+            $output = $output . "  " . $num . ". " . $formatted . "\n";
+            next;
+        }
+
+        # Indented code (4 spaces)
+        if ($line =~ /^    (.+)$/) {
+            my array @caps = captures();
+            my str $code = @caps[1];
+            $output = $output . "    " . color_green() . $code . color_reset() . "\n";
+            next;
+        }
+
+        # Regular paragraph - wrap and format
+        my str $formatted = format_inline($line);
+        my str $wrapped = word_wrap($formatted, $term_width - 4, 2);
+        $output = $output . $wrapped . "\n";
+    }
+
+    sys::close($fh);
+    $output = $output . "\n";
+    return $output;
+}
+
+# List available documentation
+func list_docs(str $docs_path) void {
+    say(color_bold() . "Strada Documentation" . color_reset());
+    say("====================");
+    say("");
+
+    say(color_bold() . "Primary Documentation:" . color_reset());
+    say("");
+
+    # List main docs
+    my array @main_docs = sys::readdir($docs_path);
+    my int $i = 0;
+    while ($i < scalar(@main_docs)) {
+        my str $name = @main_docs[$i];
+        if ($name =~ /\.md$/ && $name ne "." && $name ne "..") {
+            my str $display = $name;
+            $display =~ s/\.md$//;
+            $display =~ s/_/ /g;
+            say("  " . color_cyan() . $display . color_reset());
+        }
+        $i = $i + 1;
+    }
+
+    say("");
+
+    # List extended docs
+    my str $extended_path = $docs_path . "/extended";
+    if (sys::is_dir($extended_path)) {
+        say(color_bold() . "Extended Documentation:" . color_reset());
+        say("");
+
+        my array @ext_docs = sys::readdir($extended_path);
+        my int $j = 0;
+        while ($j < scalar(@ext_docs)) {
+            my str $name = @ext_docs[$j];
+            if ($name =~ /\.md$/ && $name ne "." && $name ne "..") {
+                my str $display = $name;
+                $display =~ s/\.md$//;
+                say("  " . color_cyan() . $display . color_reset());
+            }
+            $j = $j + 1;
+        }
+        say("");
+    }
+
+    say("Usage: stradadoc <topic>");
+    say("Example: stradadoc sys");
+}
+
+# Find document by topic name
+func find_doc(str $docs_path, str $topic) str {
+    # Normalize topic name
+    my str $search = $topic;
+    $search =~ s/ /_/g;
+
+    # Try exact match in main docs
+    my str $path = $docs_path . "/" . $search . ".md";
+    if (sys::is_file($path)) {
+        return $path;
+    }
+
+    # Try uppercase
+    my str $upper = "";
+    my int $i = 0;
+    while ($i < length($search)) {
+        my str $ch = substr($search, $i, 1);
+        my int $code = ord($ch);
+        if ($code >= 97 && $code <= 122) {
+            $upper = $upper . chr($code - 32);
+        } else {
+            $upper = $upper . $ch;
+        }
+        $i = $i + 1;
+    }
+    $path = $docs_path . "/" . $upper . ".md";
+    if (sys::is_file($path)) {
+        return $path;
+    }
+
+    # Try with _GUIDE suffix
+    $path = $docs_path . "/" . $upper . "_GUIDE.md";
+    if (sys::is_file($path)) {
+        return $path;
+    }
+
+    # Try with _REFERENCE suffix
+    $path = $docs_path . "/" . $upper . "_REFERENCE.md";
+    if (sys::is_file($path)) {
+        return $path;
+    }
+
+    # Try in extended directory
+    $path = $docs_path . "/extended/" . $search . ".md";
+    if (sys::is_file($path)) {
+        return $path;
+    }
+
+    # Try lowercase in extended
+    my str $lower = "";
+    $i = 0;
+    while ($i < length($search)) {
+        my str $ch = substr($search, $i, 1);
+        my int $code = ord($ch);
+        if ($code >= 65 && $code <= 90) {
+            $lower = $lower . chr($code + 32);
+        } else {
+            $lower = $lower . $ch;
+        }
+        $i = $i + 1;
+    }
+    $path = $docs_path . "/extended/" . $lower . ".md";
+    if (sys::is_file($path)) {
+        return $path;
+    }
+
+    # Search for partial matches
+    my array @files = sys::readdir($docs_path);
+    my int $j = 0;
+    while ($j < scalar(@files)) {
+        my str $name = @files[$j];
+        if ($name =~ /\.md$/) {
+            my str $base = $name;
+            $base =~ s/\.md$//;
+            my str $base_lower = "";
+            my int $k = 0;
+            while ($k < length($base)) {
+                my str $ch = substr($base, $k, 1);
+                my int $code = ord($ch);
+                if ($code >= 65 && $code <= 90) {
+                    $base_lower = $base_lower . chr($code + 32);
+                } else {
+                    $base_lower = $base_lower . $ch;
+                }
+                $k = $k + 1;
+            }
+            if ($base_lower =~ /$lower/) {
+                return $docs_path . "/" . $name;
+            }
+        }
+        $j = $j + 1;
+    }
+
+    # Search extended directory
+    my str $ext_path = $docs_path . "/extended";
+    if (sys::is_dir($ext_path)) {
+        my array @ext_files = sys::readdir($ext_path);
+        my int $m = 0;
+        while ($m < scalar(@ext_files)) {
+            my str $name = @ext_files[$m];
+            if ($name =~ /\.md$/) {
+                my str $base = $name;
+                $base =~ s/\.md$//;
+                my str $base_lower = "";
+                my int $k = 0;
+                while ($k < length($base)) {
+                    my str $ch = substr($base, $k, 1);
+                    my int $code = ord($ch);
+                    if ($code >= 65 && $code <= 90) {
+                        $base_lower = $base_lower . chr($code + 32);
+                    } else {
+                        $base_lower = $base_lower . $ch;
+                    }
+                    $k = $k + 1;
+                }
+                if ($base_lower =~ /$lower/) {
+                    return $ext_path . "/" . $name;
+                }
+            }
+            $m = $m + 1;
+        }
+    }
+
+    return "";
+}
+
+func main(int $argc, array @argv) int {
+    my str $docs_path = get_docs_path();
+    my str $topic = "";
+    my int $list_mode = 0;
+    my int $raw_mode = 0;
+    my int $no_pager = 0;
+
+    # Parse arguments
+    my int $i = 1;
+    while ($i < $argc) {
+        my str $arg = @argv[$i];
+
+        if ($arg eq "--help" || $arg eq "-h") {
+            usage();
+            return 0;
+        } elsif ($arg eq "--list" || $arg eq "-l") {
+            $list_mode = 1;
+        } elsif ($arg eq "--raw") {
+            $raw_mode = 1;
+        } elsif ($arg eq "--no-pager") {
+            $no_pager = 1;
+        } elsif ($arg =~ /^-/) {
+            say("Error: Unknown option: " . $arg);
+            usage();
+            return 1;
+        } else {
+            $topic = $arg;
+        }
+        $i = $i + 1;
+    }
+
+    # No arguments or --list: show available docs
+    if (length($topic) == 0 || $list_mode == 1) {
+        list_docs($docs_path);
+        return 0;
+    }
+
+    # Find and display the document
+    my str $doc_path = find_doc($docs_path, $topic);
+    if (length($doc_path) == 0) {
+        say("Error: No documentation found for '" . $topic . "'");
+        say("");
+        say("Available topics:");
+        list_docs($docs_path);
+        return 1;
+    }
+
+    # Format the markdown
+    my str $content = format_markdown($doc_path, $raw_mode);
+
+    # Check if we should use pager
+    my int $use_pager = 0;
+    if ($no_pager == 0 && sys::isatty(1) == 1) {
+        $use_pager = 1;
+    }
+
+    if ($use_pager == 1) {
+        # Pipe through less with color support
+        my scalar $pipe = sys::popen("less -R", "w");
+        if (length($pipe) > 0) {
+            sys::fputs($content, $pipe);
+            sys::pclose($pipe);
+        } else {
+            # Fallback to direct output
+            print($content);
+        }
+    } else {
+        print($content);
+    }
+
+    return 0;
+}

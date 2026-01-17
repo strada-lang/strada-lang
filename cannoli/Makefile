@@ -14,7 +14,7 @@ SRC_DIR := src
 BUILD_DIR := build
 
 CC := gcc
-CFLAGS := -Wall -Wextra -Wno-unused-variable -Wno-unused-parameter -O2
+CFLAGS := -Wall -Wextra -Wno-unused-variable -Wno-unused-parameter -Wno-unused-function -O2
 LDFLAGS := -ldl -lm -lpthread -lz -rdynamic
 
 # Source files in order of dependency

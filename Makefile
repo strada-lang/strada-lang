@@ -24,7 +24,7 @@ RUNTIME_SRC = $(RUNTIME_DIR)/strada_runtime.c
 RUNTIME_HDR = $(RUNTIME_DIR)/strada_runtime.h
 RUNTIME_OBJ = $(RUNTIME_DIR)/strada_runtime.o
 
-.PHONY: all clean test test-all test-examples test-selfhost test-suite runtime bootstrap compiler examples run run-bootstrap help info selfhost install uninstall
+.PHONY: all clean test test-all test-examples test-selfhost test-suite runtime bootstrap compiler examples run run-bootstrap help info selfhost install uninstall tools
 
 # Default: build everything including self-hosting compiler
 all: stradac $(RUNTIME_OBJ)
@@ -168,17 +168,33 @@ test-suite: stradac $(RUNTIME_OBJ)
 	if [ -n "$(FILTER)" ]; then OPTS="$$OPTS $(FILTER)"; fi; \
 	./t/run_tests.sh $$OPTS
 
+# Build tools (stradadoc, strada-soinfo, strada-md2man, strada-md2html)
+TOOLS = stradadoc strada-soinfo strada-md2man strada-md2html
+
+tools: all
+	@echo "=== Building tools ==="
+	@for tool in $(TOOLS); do \
+		echo "Building $$tool..."; \
+		./strada tools/$$tool.strada -o tools/$$tool; \
+	done
+	@echo ""
+	@echo "✓ Tools built in tools/"
+
 # Install to a directory (default: /usr/local)
 # Usage: make install PREFIX=/path/to/install
 PREFIX ?= /usr/local
 INSTALL_BIN = $(PREFIX)/bin
 INSTALL_LIB = $(PREFIX)/lib/strada
+INSTALL_DOC = $(PREFIX)/share/doc/strada
+INSTALL_MAN = $(PREFIX)/share/man/man1
 
 install: all
 	@echo "=== Installing Strada to $(PREFIX) ==="
 	@mkdir -p $(INSTALL_BIN)
 	@mkdir -p $(INSTALL_LIB)/runtime
 	@mkdir -p $(INSTALL_LIB)/lib
+	@mkdir -p $(INSTALL_DOC)
+	@mkdir -p $(INSTALL_MAN)
 	@# Install the compiler
 	install -m 755 stradac $(INSTALL_BIN)/stradac
 	@# Install the wrapper script (modified for installed paths)
@@ -212,12 +228,46 @@ install: all
 			install -m 644 "$$f" "$$dir/"; \
 		done; \
 	fi
+	@# Install documentation
+	@echo "Installing documentation..."
+	@if [ -d docs ]; then \
+		find docs -name "*.md" | while read f; do \
+			install -m 644 "$$f" $(INSTALL_DOC)/; \
+		done; \
+	fi
+	@# Build and install tools
+	@echo "Installing tools..."
+	@for tool in stradadoc strada-soinfo strada-md2man strada-md2html; do \
+		if [ ! -x tools/$$tool ]; then \
+			echo "  Building $$tool..."; \
+			./strada tools/$$tool.strada -o tools/$$tool 2>/dev/null || true; \
+		fi; \
+		if [ -x tools/$$tool ]; then \
+			install -m 755 tools/$$tool $(INSTALL_BIN)/$$tool; \
+		fi; \
+	done
+	@# Build and install man pages
+	@echo "Installing man pages..."
+	@if [ -x tools/strada-md2man ]; then \
+		for manmd in docs/stradac.1.md docs/strada.1.md; do \
+			if [ -f "$$manmd" ]; then \
+				name=$$(basename "$$manmd" .1.md); \
+				echo "  Generating $$name.1..."; \
+				./tools/strada-md2man --name "$$name" --section 1 --center "Strada Programming Language" "$$manmd" $(INSTALL_MAN)/$$name.1; \
+			fi; \
+		done; \
+	else \
+		echo "  Warning: strada-md2man not available, skipping man pages"; \
+	fi
 	@echo ""
 	@echo "✓ Strada installed to $(PREFIX)"
 	@echo "  Compiler: $(INSTALL_BIN)/stradac"
 	@echo "  Wrapper:  $(INSTALL_BIN)/strada"
+	@echo "  Tools:    $(INSTALL_BIN)/stradadoc, strada-soinfo, strada-md2man, strada-md2html"
 	@echo "  Runtime:  $(INSTALL_LIB)/runtime/"
 	@echo "  Library:  $(INSTALL_LIB)/lib/"
+	@echo "  Docs:     $(INSTALL_DOC)/"
+	@echo "  Man:      $(INSTALL_MAN)/"
 	@echo ""
 	@echo "Make sure $(INSTALL_BIN) is in your PATH"
 
@@ -225,7 +275,14 @@ uninstall:
 	@echo "=== Uninstalling Strada from $(PREFIX) ==="
 	rm -f $(INSTALL_BIN)/stradac
 	rm -f $(INSTALL_BIN)/strada
+	rm -f $(INSTALL_BIN)/stradadoc
+	rm -f $(INSTALL_BIN)/strada-soinfo
+	rm -f $(INSTALL_BIN)/strada-md2man
+	rm -f $(INSTALL_BIN)/strada-md2html
 	rm -rf $(INSTALL_LIB)
+	rm -rf $(INSTALL_DOC)
+	rm -f $(INSTALL_MAN)/stradac.1
+	rm -f $(INSTALL_MAN)/strada.1
 	@echo "✓ Strada uninstalled"
 
 # Clean build artifacts
@@ -248,6 +305,7 @@ help:
 	@echo ""
 	@echo "Primary Targets:"
 	@echo "  all           - Build self-hosting compiler (default)"
+	@echo "  tools         - Build tools (stradadoc, strada-soinfo, etc.)"
 	@echo "  install       - Install to system (default: /usr/local)"
 	@echo "  uninstall     - Remove installed files"
 	@echo "  run PROG=x    - Compile and run example with self-hosting compiler"
@@ -280,10 +338,13 @@ help:
 	@echo "  ./strada -r hello.strada   # Compile and run a program"
 	@echo "  make run PROG=test_simple  # Compile and run an example"
 	@echo ""
-	@echo "Tools:"
+	@echo "Tools (after 'make tools'):"
 	@echo "  ./strada               - One-step compiler (strada -> executable)"
 	@echo "  ./stradac              - Strada to C compiler"
-	@echo "  ./bootstrap/stradac    - Bootstrap compiler (C version)"
+	@echo "  tools/stradadoc        - View Strada documentation"
+	@echo "  tools/strada-soinfo    - Inspect Strada shared libraries"
+	@echo "  tools/strada-md2man    - Convert Markdown to man pages"
+	@echo "  tools/strada-md2html   - Convert Markdown to HTML"
 
 # Additional info
 info:
