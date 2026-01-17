@@ -41,17 +41,21 @@ func usage() void {
     say("  stradadoc QUICK         # Show quick reference");
 }
 
-# Get the docs directory path relative to the executable
+# Get the docs directory path
 func get_docs_path() str {
-    # Try common locations
+    # Try common locations in order of preference
     if (sys::is_dir("docs")) {
         return "docs";
     }
     if (sys::is_dir("../docs")) {
         return "../docs";
     }
-    if (sys::is_dir("/home/mflickin/p/strada/docs")) {
-        return "/home/mflickin/p/strada/docs";
+    # Check installed location
+    if (sys::is_dir("/usr/local/share/doc/strada")) {
+        return "/usr/local/share/doc/strada";
+    }
+    if (sys::is_dir("/usr/share/doc/strada")) {
+        return "/usr/share/doc/strada";
     }
     return "docs";
 }
