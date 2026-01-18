@@ -29,6 +29,29 @@ make test
 make install  # optional, installs system-wide
 ```
 
+### Specifying Strada Location
+
+By default, the build looks for the Strada runtime in these locations (in order):
+
+1. `STRADA_ROOT` environment variable
+2. `STRADA_ROOT=` command line argument
+3. System install (`/usr/local/include/strada` or `/usr/include/strada`)
+4. Source tree (`../..` - assumes building from within the Strada repo)
+
+If Strada is installed elsewhere, specify the path:
+
+```bash
+# Via command line argument
+perl Makefile.PL STRADA_ROOT=/path/to/strada
+
+# Via environment variable
+STRADA_ROOT=/path/to/strada perl Makefile.PL
+```
+
+The path should point to either:
+- The Strada source directory (containing `runtime/strada_runtime.h`)
+- An installed location (containing `strada_runtime.h` directly)
+
 ## Usage
 
 ### High-Level API (Recommended)
