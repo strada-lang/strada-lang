@@ -301,6 +301,8 @@ Unload the library and clear cached function pointers.
 
 ## See Also
 
+- [Strada Website](https://strada-lang.github.io/) - Official Strada language website
+- [Cannoli](https://github.com/strada-lang/cannoli) - Preforking web server and framework for Strada
 - `lib/perl5/` - The reverse integration (calling Perl from Strada)
 - `docs/LANGUAGE_GUIDE.md` - Strada language documentation
 - `docs/RUNTIME_API.md` - Strada runtime API reference
