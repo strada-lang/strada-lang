@@ -469,8 +469,8 @@ extern StradaTryContext strada_try_stack[STRADA_MAX_TRY_DEPTH];
 extern int strada_try_depth;
 extern char *strada_exception_msg;
 
-void strada_throw(const char *msg);
-void strada_throw_value(StradaValue *sv);
+__attribute__((noreturn)) void strada_throw(const char *msg);
+__attribute__((noreturn)) void strada_throw_value(StradaValue *sv);
 StradaValue* strada_get_exception(void);
 void strada_clear_exception(void);
 int strada_in_try_block(void);

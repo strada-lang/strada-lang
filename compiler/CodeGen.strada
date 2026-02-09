@@ -144,6 +144,7 @@ func codegen_new(str $filename, int $debug_info, int $enable_profiling) scalar {
     $cg{"cleanup_enabled"} = 1;  # Enable scope-based memory cleanup
     $cg{"try_depth"} = 0;        # Track nesting depth in try blocks (for proper cleanup on return)
     $cg{"catch_cleanup_count"} = 0;  # Track catch vars on cleanup stack (for proper cleanup on throw)
+    $cg{"func_has_try"} = 0;     # Track if current function contains any try blocks (for volatile vars)
     # Track label-to-scope-depth for proper cleanup on labeled break/continue
     my hash %label_depths = ();
     $cg{"label_depths"} = \%label_depths;
@@ -934,16 +935,101 @@ func emit_indent(scalar $cg) void {
     }
 }
 
-# Emit StradaValue* declaration with volatile qualifier when inside a try block
+# Scan a statement to check if it contains any try blocks
+# Returns 1 if try found, 0 otherwise
+func stmt_has_try(scalar $stmt) int {
+    # If $stmt is null, $stmt->{"type"} returns 0/undef which won't match any NODE_* constant
+    my int $type = $stmt->{"type"} + 0;
+
+    # Direct try statement
+    if ($type == NODE_TRY_CATCH()) {
+        return 1;
+    }
+
+    # Check block statements
+    if ($type == NODE_BLOCK()) {
+        my scalar $stmts = $stmt->{"statements"};
+        my int $count = $stmt->{"statement_count"};
+        my int $i = 0;
+        while ($i < $count) {
+            if (stmt_has_try($stmts->[$i]) == 1) {
+                return 1;
+            }
+            $i = $i + 1;
+        }
+        return 0;
+    }
+
+    # Check if/elsif/else
+    if ($type == NODE_IF_STMT()) {
+        if (stmt_has_try($stmt->{"then_block"}) == 1) {
+            return 1;
+        }
+        if (stmt_has_try($stmt->{"else_block"}) == 1) {
+            return 1;
+        }
+        return 0;
+    }
+
+    # Check while/for loops
+    if ($type == NODE_WHILE_STMT() || $type == NODE_FOR_STMT()) {
+        if (stmt_has_try($stmt->{"body"}) == 1) {
+            return 1;
+        }
+        return 0;
+    }
+
+    # Check foreach
+    if ($type == NODE_FOREACH_STMT()) {
+        if (stmt_has_try($stmt->{"body"}) == 1) {
+            return 1;
+        }
+        return 0;
+    }
+
+    # Check switch/case
+    if ($type == NODE_SWITCH()) {
+        my scalar $cases = $stmt->{"cases"};
+        my int $count = $stmt->{"case_count"};
+        my int $i = 0;
+        while ($i < $count) {
+            my scalar $case_node = $cases->[$i];
+            if (stmt_has_try($case_node->{"body"}) == 1) {
+                return 1;
+            }
+            $i = $i + 1;
+        }
+        return 0;
+    }
+
+    return 0;
+}
+
+# Check if a function body contains any try blocks
+func func_body_has_try(scalar $body) int {
+    # If $body is null, statement_count will be 0/undef, loop won't run
+    my scalar $stmts = $body->{"statements"};
+    my int $count = $body->{"statement_count"} + 0;
+    my int $i = 0;
+    while ($i < $count) {
+        if (stmt_has_try($stmts->[$i]) == 1) {
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    return 0;
+}
+
+# Emit StradaValue* declaration with volatile qualifier when function contains try blocks
 # This is needed because setjmp/longjmp can corrupt non-volatile local variables
 # that were modified after setjmp was called. Using volatile ensures the variable
 # values survive longjmp in exception handling.
 # IMPORTANT: Use "StradaValue * volatile" (volatile pointer) not "volatile StradaValue *"
 # (pointer to volatile). The pointer value needs to survive longjmp.
-# Only add volatile when inside a try block to avoid issues with closures that capture variables.
+# We check func_has_try (set before generating the function) to determine if volatile is needed.
 func emit_sv_ptr_decl(scalar $cg, str $name) void {
-    my int $in_try = $cg->{"try_depth"} + 0;
-    if ($in_try > 0) {
+    my int $has_try = $cg->{"func_has_try"} + 0;
+    if ($has_try > 0) {
         emit($cg, "StradaValue * volatile " . $name);
     } else {
         emit($cg, "StradaValue *" . $name);
@@ -9523,6 +9609,15 @@ func gen_expression(scalar $cg, scalar $expr) void {
         $cg->{"func_param_names"} = [];
         $cg->{"func_param_count"} = 0;
 
+        # Save and check func_has_try for this closure
+        my int $saved_func_has_try = $cg->{"func_has_try"};
+        my scalar $anon_body = $expr->{"body"};
+        if (func_body_has_try($anon_body) == 1) {
+            $cg->{"func_has_try"} = 1;
+        } else {
+            $cg->{"func_has_try"} = 0;
+        }
+
         # Generate body (this will populate capture_str as variables are accessed)
         my scalar $body = $expr->{"body"};
         my scalar $stmts = $body->{"statements"};
@@ -9569,6 +9664,9 @@ func gen_expression(scalar $cg, scalar $expr) void {
         $cg->{"anon_local_str"} = $saved_local_str;
         $cg->{"anon_capture_str"} = $saved_capture_str;
         $cg->{"anon_capture_count"} = $saved_capture_count;
+
+        # Restore func_has_try
+        $cg->{"func_has_try"} = $saved_func_has_try;
 
         $cg->{"anon_func_defs"} = $cg->{"anon_func_defs"} . $def;
 
@@ -10625,6 +10723,11 @@ func gen_statement(scalar $cg, scalar $stmt) void {
     if ($type == NODE_THROW()) {
         my int $td = $cg->{"try_depth"} + 0;
         my int $ccc = $cg->{"catch_cleanup_count"} + 0;
+        my scalar $throw_expr = $stmt->{"expr"};
+        my int $throw_is_var = 0;
+        if ($throw_expr->{"type"} == NODE_VARIABLE()) {
+            $throw_is_var = 1;
+        }
 
         if ($ccc > 0) {
             # We're in a catch block (possibly inside an outer try) - need to clean up
@@ -10632,7 +10735,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             # outer scopes (outer catch will handle cleanup via drain)
             emit_indent($cg);
             emit($cg, "{ StradaValue *__throw_val = ");
-            gen_expression($cg, $stmt->{"expr"});
+            gen_expression($cg, $throw_expr);
             emit($cg, ";\n");
             indent($cg);
             emit_indent($cg);
@@ -10651,6 +10754,11 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     $cv = $cv - 1;
                 }
             }
+            # Only decref if throw expression was NOT a variable (variables get decrefd by cleanup)
+            if ($throw_is_var == 0) {
+                emit_indent($cg);
+                emit($cg, "strada_decref(__throw_val);\n");
+            }
             emit_indent($cg);
             emit($cg, "strada_throw_value(__throw_val); }\n");
             dedent($cg);
@@ -10662,7 +10770,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             # Don't do any scope cleanup here; just throw
             emit_indent($cg);
             emit($cg, "strada_throw_value(");
-            gen_expression($cg, $stmt->{"expr"});
+            gen_expression($cg, $throw_expr);
             emit($cg, ");\n");
             return;
         }
@@ -10670,12 +10778,17 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         # We're outside any try/catch - exiting the function, full cleanup
         emit_indent($cg);
         emit($cg, "{ StradaValue *__throw_val = ");
-        gen_expression($cg, $stmt->{"expr"});
+        gen_expression($cg, $throw_expr);
         emit($cg, ";\n");
         indent($cg);
         emit_indent($cg);
         emit($cg, "strada_incref(__throw_val);\n");
         scope_emit_all_cleanup($cg);
+        # Only decref if throw expression was NOT a variable (variables get decrefd by cleanup)
+        if ($throw_is_var == 0) {
+            emit_indent($cg);
+            emit($cg, "strada_decref(__throw_val);\n");
+        }
         emit_indent($cg);
         emit($cg, "strada_throw_value(__throw_val); }\n");
         dedent($cg);
@@ -10830,6 +10943,15 @@ func gen_function(scalar $cg, scalar $fn) void {
         }
     }
     $cg->{"is_destroy_method"} = $is_destroy;
+
+    # Check if function body contains any try blocks - if so, local variables need volatile
+    # to preserve their values across setjmp/longjmp in exception handling
+    my scalar $fn_body = $fn->{"body"};
+    if (func_body_has_try($fn_body) == 1) {
+        $cg->{"func_has_try"} = 1;
+    } else {
+        $cg->{"func_has_try"} = 0;
+    }
 
     # Special case for main
     if ($name eq "main") {
@@ -11111,6 +11233,8 @@ func gen_async_function(scalar $cg, scalar $fn) void {
     my scalar $saved_scope_vars = $cg->{"scope_vars"};
     my scalar $saved_scope_counts = $cg->{"scope_counts"};
     my int $saved_scope_depth = $cg->{"scope_depth"};
+    my scalar $saved_func_param_names = $cg->{"func_param_names"};
+    my int $saved_func_param_count = $cg->{"func_param_count"};
 
     # Reset scope for async inner function (it's a new function)
     my array @new_scope_vars = ();
@@ -11118,6 +11242,17 @@ func gen_async_function(scalar $cg, scalar $fn) void {
     $cg->{"scope_vars"} = \@new_scope_vars;
     $cg->{"scope_counts"} = \@new_scope_counts;
     $cg->{"scope_depth"} = 0;
+    $cg->{"func_param_names"} = [];
+    $cg->{"func_param_count"} = 0;
+
+    # Save and check func_has_try for async inner function
+    my int $saved_func_has_try = $cg->{"func_has_try"};
+    my scalar $async_body = $fn->{"body"};
+    if (func_body_has_try($async_body) == 1) {
+        $cg->{"func_has_try"} = 1;
+    } else {
+        $cg->{"func_has_try"} = 0;
+    }
 
     # Generate body
     scope_push($cg);
@@ -11134,6 +11269,11 @@ func gen_async_function(scalar $cg, scalar $fn) void {
     $cg->{"scope_vars"} = $saved_scope_vars;
     $cg->{"scope_counts"} = $saved_scope_counts;
     $cg->{"scope_depth"} = $saved_scope_depth;
+    $cg->{"func_param_names"} = $saved_func_param_names;
+    $cg->{"func_param_count"} = $saved_func_param_count;
+
+    # Restore func_has_try
+    $cg->{"func_has_try"} = $saved_func_has_try;
 
     emit($cg, "    return strada_undef_static();\n");
     emit($cg, "}\n\n");
