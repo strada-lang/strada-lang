@@ -56,6 +56,11 @@ my array @large[1000];      # Array with pre-allocated capacity
 my hash %data = ();         # Hash
 my hash %cache[500];        # Hash with pre-allocated capacity
 my scalar $ref = \$count;   # Reference
+
+# Constants (compile-time)
+const int MAX_SIZE = 100;   # Compiles to #define
+const str VERSION = "1.0";  # Global const
+const num PI = 3.14159;     # No $ sigil required
 ```
 
 ## Data Types
@@ -183,6 +188,11 @@ try {
 } catch ($e) {
     say($e);  # "rethrown"
 }
+
+# Stack traces (uncaught exceptions print automatically)
+# Manual stack trace:
+my str $trace = sys::stack_trace();
+say($trace);
 ```
 
 ## Functions

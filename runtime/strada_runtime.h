@@ -488,6 +488,23 @@ void strada_cleanup_drain_to(int mark); /* Drain to depth (with decref) */
     (strada_try_stack[strada_try_depth].active = 1, &strada_try_stack[strada_try_depth++].buf) : NULL)
 #define STRADA_TRY_POP() (strada_try_depth > 0 ? (strada_try_stack[--strada_try_depth].active = 0, 1) : 0)
 
+/* Call stack for stack traces */
+#define STRADA_MAX_CALL_DEPTH 256
+typedef struct {
+    const char *func_name;   /* Function name */
+    const char *file_name;   /* Source file name */
+    int line;                /* Current line number */
+} StradaStackFrame;
+
+extern StradaStackFrame strada_call_stack[STRADA_MAX_CALL_DEPTH];
+extern int strada_call_depth;
+
+void strada_stack_push(const char *func_name, const char *file_name);
+void strada_stack_pop(void);
+void strada_stack_set_line(int line);
+void strada_print_stack_trace(FILE *out);
+char* strada_capture_stack_trace(void);
+
 /* Type introspection and casting */
 const char* strada_typeof(StradaValue *sv);
 int strada_is_int(StradaValue *sv);

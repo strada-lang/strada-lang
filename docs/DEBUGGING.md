@@ -359,6 +359,60 @@ Result: 120
 [Inferior 1 exited normally]
 ```
 
+## Stack Traces
+
+Strada provides built-in stack trace support for debugging.
+
+### Automatic Stack Traces on Exceptions
+
+When an exception goes uncaught, Strada automatically prints a stack trace:
+
+```
+Uncaught exception: division by zero
+Stack trace:
+  at divide (calculator.strada)
+  at compute (calculator.strada)
+  at main (calculator.strada)
+```
+
+This shows the call chain from innermost function (where the error occurred) to outermost (main).
+
+### Manual Stack Traces
+
+Use `sys::stack_trace()` to get the current call stack as a string at any point:
+
+```strada
+func debug_location() void {
+    my str $trace = sys::stack_trace();
+    say("Current location:\n" . $trace);
+}
+
+func process_data() void {
+    debug_location();  # Prints where we are
+    # ... rest of processing
+}
+```
+
+This is useful for:
+- Debugging complex call chains
+- Logging entry/exit points
+- Error reporting in catch blocks
+
+### Captured Stack Traces
+
+You can capture a stack trace for later use:
+
+```strada
+func risky_operation() void {
+    try {
+        do_something_dangerous();
+    } catch ($e) {
+        my str $trace = sys::stack_trace();
+        log_error("Error: " . $e . "\nStack:\n" . $trace);
+    }
+}
+```
+
 ## Troubleshooting
 
 ### "No symbol table"

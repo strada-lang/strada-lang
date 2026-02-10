@@ -68,6 +68,12 @@ test_run "$EXAMPLES_DIR/negative_index.strada" "negative_index" "Negative index"
 test_run "$EXAMPLES_DIR/test_try_catch.strada" "test_try_catch" "Try/catch"
 test_output_contains "$SCRIPT_DIR/test_exception_rethrow.strada" "test_exception_rethrow" "PASS: All 5 exceptions caught" "Exception re-throw"
 
+# Test: Stack traces on uncaught exceptions
+test_exception_output "$SCRIPT_DIR/test_stack_trace.strada" "test_stack_trace" "Stack trace:" "Stack traces"
+
+# Test: Const declarations
+test_output_contains "$SCRIPT_DIR/test_const.strada" "test_const" "All const tests passed" "Const declarations"
+
 # Test: Goto and loop labels
 test_run "$EXAMPLES_DIR/test_goto.strada" "test_goto" "Goto"
 test_run "$EXAMPLES_DIR/test_loop_labels.strada" "test_loop_labels" "Loop labels"

@@ -82,6 +82,7 @@ func NODE_AWAIT() int { return 123; }
 func NODE_READLINE() int { return 124; }
 func NODE_DESTRUCTURE() int { return 125; }
 func NODE_DO_WHILE_STMT() int { return 126; }
+func NODE_CONST_DECL() int { return 127; }
 
 # Type constants
 func TYPE_INT() int { return 1; }
@@ -373,6 +374,15 @@ func ast_new_var_decl(str $name, int $var_type, str $sigil) scalar {
     $node->{"var_type"} = $var_type;
     $node->{"sigil"} = $sigil;
     $node->{"init"} = 0;
+    return $node;
+}
+
+# Create const declaration (compile-time constant)
+func ast_new_const_decl(str $name, int $var_type, scalar $init) scalar {
+    my scalar $node = ast_new_node(NODE_CONST_DECL());
+    $node->{"name"} = $name;
+    $node->{"var_type"} = $var_type;
+    $node->{"init"} = $init;
     return $node;
 }
 
@@ -917,6 +927,7 @@ func ast_type_name(int $type) str {
     if ($type == NODE_PARAM()) { return "PARAM"; }
     if ($type == NODE_BLOCK()) { return "BLOCK"; }
     if ($type == NODE_VAR_DECL()) { return "VAR_DECL"; }
+    if ($type == NODE_CONST_DECL()) { return "CONST_DECL"; }
     if ($type == NODE_IF_STMT()) { return "IF_STMT"; }
     if ($type == NODE_WHILE_STMT()) { return "WHILE_STMT"; }
     if ($type == NODE_DO_WHILE_STMT()) { return "DO_WHILE_STMT"; }

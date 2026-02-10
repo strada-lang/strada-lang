@@ -2373,6 +2373,80 @@ int strada_try_depth = 0;
 char *strada_exception_msg = NULL;
 StradaValue *strada_exception_value = NULL;  /* Typed exception support */
 
+/* Call stack for stack traces */
+StradaStackFrame strada_call_stack[STRADA_MAX_CALL_DEPTH];
+int strada_call_depth = 0;
+
+void strada_stack_push(const char *func_name, const char *file_name) {
+    if (strada_call_depth < STRADA_MAX_CALL_DEPTH) {
+        strada_call_stack[strada_call_depth].func_name = func_name;
+        strada_call_stack[strada_call_depth].file_name = file_name;
+        strada_call_stack[strada_call_depth].line = 0;
+        strada_call_depth++;
+    }
+}
+
+void strada_stack_pop(void) {
+    if (strada_call_depth > 0) {
+        strada_call_depth--;
+    }
+}
+
+void strada_stack_set_line(int line) {
+    if (strada_call_depth > 0) {
+        strada_call_stack[strada_call_depth - 1].line = line;
+    }
+}
+
+void strada_print_stack_trace(FILE *out) {
+    if (strada_call_depth == 0) {
+        return;
+    }
+    fprintf(out, "Stack trace:\n");
+    for (int i = strada_call_depth - 1; i >= 0; i--) {
+        StradaStackFrame *frame = &strada_call_stack[i];
+        if (frame->line > 0) {
+            fprintf(out, "  at %s (%s:%d)\n",
+                    frame->func_name ? frame->func_name : "?",
+                    frame->file_name ? frame->file_name : "?",
+                    frame->line);
+        } else {
+            fprintf(out, "  at %s (%s)\n",
+                    frame->func_name ? frame->func_name : "?",
+                    frame->file_name ? frame->file_name : "?");
+        }
+    }
+}
+
+char* strada_capture_stack_trace(void) {
+    if (strada_call_depth == 0) {
+        return strdup("");
+    }
+    /* Estimate buffer size */
+    size_t bufsize = strada_call_depth * 256;
+    char *buf = malloc(bufsize);
+    if (!buf) return strdup("");
+    buf[0] = '\0';
+    size_t pos = 0;
+
+    for (int i = strada_call_depth - 1; i >= 0 && pos < bufsize - 1; i--) {
+        StradaStackFrame *frame = &strada_call_stack[i];
+        int written;
+        if (frame->line > 0) {
+            written = snprintf(buf + pos, bufsize - pos, "  at %s (%s:%d)\n",
+                    frame->func_name ? frame->func_name : "?",
+                    frame->file_name ? frame->file_name : "?",
+                    frame->line);
+        } else {
+            written = snprintf(buf + pos, bufsize - pos, "  at %s (%s)\n",
+                    frame->func_name ? frame->func_name : "?",
+                    frame->file_name ? frame->file_name : "?");
+        }
+        if (written > 0) pos += written;
+    }
+    return buf;
+}
+
 /* Pending cleanup for function call args in try blocks */
 #define STRADA_MAX_PENDING_CLEANUP 64
 static StradaValue *strada_pending_cleanup[STRADA_MAX_PENDING_CLEANUP];
@@ -2438,8 +2512,9 @@ void strada_throw(const char *msg) {
         /* Jump to the nearest catch block */
         longjmp(strada_try_stack[strada_try_depth - 1].buf, 1);
     } else {
-        /* No try block - fatal error */
+        /* No try block - fatal error with stack trace */
         fprintf(stderr, "Uncaught exception: %s\n", strada_exception_msg);
+        strada_print_stack_trace(stderr);
         exit(1);
     }
 }
@@ -2464,6 +2539,7 @@ void strada_throw_value(StradaValue *sv) {
         longjmp(strada_try_stack[strada_try_depth - 1].buf, 1);
     } else {
         fprintf(stderr, "Uncaught exception: %s\n", msg);
+        strada_print_stack_trace(stderr);
         exit(1);
     }
 }

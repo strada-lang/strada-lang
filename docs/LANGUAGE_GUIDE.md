@@ -209,6 +209,23 @@ my array @items = ();        # Empty array
 my hash %data = ();          # Empty hash
 ```
 
+### Constants
+
+Use `const` to declare compile-time constants:
+
+```strada
+const int MAX_SIZE = 100;    # Global const -> C #define
+const str VERSION = "1.0.0"; # No runtime overhead
+const num PI = 3.14159;      # Sigil is optional for const
+
+func example() void {
+    const int LOCAL_LIMIT = 50;  # Local const
+    # ...
+}
+```
+
+Global constants with literal values compile to C `#define` macros with zero runtime overhead. Local constants are regular variables that get initialized once.
+
 ### Sigils
 
 Sigils indicate variable type and context:

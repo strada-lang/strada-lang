@@ -354,6 +354,48 @@ test_output_contains() {
     fi
 }
 
+# Test: Check that program fails with expected stderr pattern (for exception tests)
+test_exception_output() {
+    local src="$1"
+    local name="$2"
+    local pattern="$3"
+    local desc="${4:-$name}"
+
+    TOTAL=$((TOTAL + 1))
+
+    if ! compile_strada "$src" "$name"; then
+        FAILED=$((FAILED + 1))
+        local err=$(cat "$BUILD_DIR/${name}_strada.log" 2>/dev/null | head -1)
+        log_fail "exception: $desc" "Compile failed: $err"
+        return 1
+    fi
+
+    run_program "$name" 5
+    local exit_code=$?
+
+    # Check that the program exited with non-zero (exception was thrown)
+    if [ $exit_code -eq 0 ]; then
+        FAILED=$((FAILED + 1))
+        log_fail "exception: $desc" "Expected non-zero exit, got 0"
+        return 1
+    fi
+
+    # Check that output contains the expected pattern
+    if grep -q "$pattern" "$BUILD_DIR/${name}.out" 2>/dev/null; then
+        PASSED=$((PASSED + 1))
+        log_pass "exception: $desc"
+        return 0
+    else
+        FAILED=$((FAILED + 1))
+        log_fail "exception: $desc" "Pattern not found: $pattern"
+        if [ $VERBOSE -eq 1 ]; then
+            echo "  Actual output:"
+            cat "$BUILD_DIR/${name}.out" 2>/dev/null | head -20 | sed 's/^/    /'
+        fi
+        return 1
+    fi
+}
+
 # Skip a test
 test_skip() {
     local name="$1"

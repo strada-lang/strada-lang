@@ -89,7 +89,7 @@ func escape_c_keyword(str $name) str {
     return $name;
 }
 
-func codegen_new(str $filename, int $debug_info, int $enable_profiling) scalar {
+func codegen_new(str $filename, int $debug_info, int $enable_profiling, int $enable_stack_trace) scalar {
     my hash %cg = ();
     # StringBuilder for O(1) amortized append (no O(n^2) string concat)
     $cg{"output_sb"} = sb_new();
@@ -99,6 +99,7 @@ func codegen_new(str $filename, int $debug_info, int $enable_profiling) scalar {
     $cg{"indent"} = 0;
     $cg{"debug_info"} = $debug_info;  # Emit #line directives for debugging
     $cg{"enable_profiling"} = $enable_profiling;  # Emit function profiling code
+    $cg{"enable_stack_trace"} = $enable_stack_trace;  # Emit stack trace push/pop calls
     $cg{"last_line"} = 0;  # Track last emitted line to avoid duplicates
     $cg{"functions"} = {};  # Map function name -> function info
     $cg{"in_extern"} = 0;   # Track if we're inside an extern function
@@ -935,6 +936,22 @@ func emit_indent(scalar $cg) void {
     }
 }
 
+# Emit stack_pop if stack tracing is enabled
+func emit_stack_pop(scalar $cg) void {
+    if ($cg->{"enable_stack_trace"} == 1) {
+        emit_indent($cg);
+        emit($cg, "strada_stack_pop();\n");
+    }
+}
+
+# Emit inline stack_pop (no indent, for use in single-line statements)
+func emit_stack_pop_inline(scalar $cg) str {
+    if ($cg->{"enable_stack_trace"} == 1) {
+        return " strada_stack_pop();";
+    }
+    return "";
+}
+
 # Scan a statement to check if it contains any try blocks
 # Returns 1 if try found, 0 otherwise
 func stmt_has_try(scalar $stmt) int {
@@ -1582,6 +1599,7 @@ func needs_temp_cleanup(scalar $cg, scalar $expr) int {
             $name eq "sys::byte_length" || $name eq "sys::byte_substr" ||
             $name eq "sys::set_byte" ||
             $name eq "sys::random_bytes" || $name eq "sys::random_bytes_hex" ||
+            $name eq "sys::stack_trace" ||
             $name eq "substr" || $name eq "length" || $name eq "index" ||
             $name eq "uc" || $name eq "lc" || $name eq "ucfirst" || $name eq "lcfirst" ||
             $name eq "trim" || $name eq "ltrim" || $name eq "rtrim" ||
@@ -3277,6 +3295,12 @@ func gen_expression(scalar $cg, scalar $expr) void {
 
         if ($name eq "sys::getcwd") {
             emit($cg, "strada_getcwd()");
+            return;
+        }
+
+        if ($name eq "sys::stack_trace") {
+            # Returns current call stack as a string
+            emit($cg, "({ char *__st = strada_capture_stack_trace(); StradaValue *__st_sv = strada_new_str(__st ? __st : \"\"); free(__st); __st_sv; })");
             return;
         }
 
@@ -10006,6 +10030,29 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         return;
     }
 
+    # Const declaration (local scope) - emit as regular variable with init
+    if ($type == NODE_CONST_DECL()) {
+        my str $c_name = escape_c_keyword($stmt->{"name"});
+        my scalar $init = $stmt->{"init"};
+
+        # Track variable for cleanup
+        scope_track_var($cg, $c_name);
+
+        emit_indent($cg);
+        emit_sv_ptr_decl($cg, $c_name);
+        emit($cg, " = ");
+        gen_expression($cg, $init);
+        emit($cg, ";\n");
+
+        # Add to cleanup stack if in try block
+        my int $in_try = $cg->{"try_depth"} + 0;
+        if ($in_try > 0) {
+            emit_indent($cg);
+            emit($cg, "strada_cleanup_push(" . $c_name . ");\n");
+        }
+        return;
+    }
+
     # Destructuring assignment: my ($a, $b, $c) = @arr;
     if ($type == NODE_DESTRUCTURE()) {
         my scalar $vars = $stmt->{"vars"};
@@ -10415,6 +10462,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                         scope_emit_all_cleanup($cg);
                     }
                     emit_try_cleanup($cg);
+                    emit_stack_pop($cg);
                     emit_indent($cg);
                     emit($cg, "return " . $stmt->{"value"}->{"value"} . ";\n");
                 } else {
@@ -10427,6 +10475,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                         scope_emit_all_cleanup($cg);
                     }
                     emit_try_cleanup($cg);
+                    emit_stack_pop($cg);
                     emit_indent($cg);
                     emit($cg, "return __main_ret; }\n");
                     dedent($cg);
@@ -10437,6 +10486,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     scope_emit_all_cleanup($cg);
                 }
                 emit_try_cleanup($cg);
+                emit_stack_pop($cg);
                 emit_indent($cg);
                 emit($cg, "return;\n");
             }
@@ -10451,14 +10501,16 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     emit_indent($cg);
                     emit($cg, "{ StradaValue *__retval = ");
                     gen_expression($cg, $stmt->{"value"});
-                    emit($cg, "; strada_profile_exit(\"" . $func_name . "\"); return __retval; }\n");
+                    emit($cg, "; strada_profile_exit(\"" . $func_name . "\");" . emit_stack_pop_inline($cg) . " return __retval; }\n");
                 } else {
                     emit_indent($cg);
                     emit($cg, "strada_profile_exit(\"" . $func_name . "\");\n");
+                    emit_stack_pop($cg);
                     emit_indent($cg);
                     emit($cg, "return;\n");
                 }
             } else {
+                emit_stack_pop($cg);
                 emit_indent($cg);
                 emit($cg, "return");
                 if ($stmt->{"value"}) {
@@ -10487,6 +10539,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 emit_indent($cg);
                 emit($cg, "strada_profile_exit(\"" . $func_name . "\");\n");
             }
+            emit_stack_pop($cg);
             emit_indent($cg);
             emit($cg, "return __retval; }\n");
             dedent($cg);
@@ -10500,6 +10553,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 emit_indent($cg);
                 emit($cg, "strada_profile_exit(\"" . $func_name . "\");\n");
             }
+            emit_stack_pop($cg);
             emit_indent($cg);
             emit($cg, "return;\n");
         }
@@ -10962,6 +11016,12 @@ func gen_function(scalar $cg, scalar $fn) void {
         emit($cg, "    /* Initialize proctitle support */\n");
         emit($cg, "    strada_init_proctitle(_argc, _argv);\n\n");
 
+        # Push stack frame for stack traces (if enabled)
+        my str $src_file = $cg->{"filename"};
+        if ($cg->{"enable_stack_trace"} == 1) {
+            emit($cg, "    strada_stack_push(\"main\", \"" . $src_file . "\");\n\n");
+        }
+
         # Initialize profiling if enabled
         if ($cg->{"enable_profiling"} == 1) {
             emit($cg, "    /* Initialize function profiling */\n");
@@ -11038,10 +11098,20 @@ func gen_function(scalar $cg, scalar $fn) void {
             my int $g = 0;
             while ($g < $global_count) {
                 my scalar $gvar = $globals->[$g];
+                my int $gvar_type = $gvar->{"type"};
                 my int $var_type = $gvar->{"var_type"};
                 my str $sigil = $gvar->{"sigil"};
                 my str $name = $gvar->{"name"};
                 my scalar $init = $gvar->{"init"};
+
+                # Skip const declarations with literal initializers (they're #defines)
+                if ($gvar_type == NODE_CONST_DECL()) {
+                    my int $init_type = $init->{"type"};
+                    if ($init_type == NODE_INT_LITERAL() || $init_type == NODE_NUM_LITERAL() || $init_type == NODE_STR_LITERAL()) {
+                        $g = $g + 1;
+                        next;
+                    }
+                }
 
                 emit($cg, "    " . $name . " = ");
                 if ($sigil eq "%" || $var_type == TYPE_HASH()) {
@@ -11119,6 +11189,12 @@ func gen_function(scalar $cg, scalar $fn) void {
 
         emit($cg, ") {\n");
 
+        # Push stack frame for stack traces (if enabled)
+        my str $src_file = $cg->{"filename"};
+        if ($cg->{"enable_stack_trace"} == 1) {
+            emit($cg, "strada_stack_push(\"" . $name . "\", \"" . $src_file . "\");\n");
+        }
+
         # Add profiling entry if enabled
         if ($cg->{"enable_profiling"} == 1) {
             emit($cg, "    strada_profile_enter(\"" . $name . "\");\n");
@@ -11187,6 +11263,10 @@ func gen_function(scalar $cg, scalar $fn) void {
         # Add implicit profiling exit for void functions (no explicit return)
         if ($cg->{"enable_profiling"} == 1 && $ret_type_id == TYPE_VOID()) {
             emit($cg, "    strada_profile_exit(\"" . $name . "\");\n");
+        }
+        # Pop stack frame for void functions falling through
+        if ($ret_type_id == TYPE_VOID() && $cg->{"enable_stack_trace"} == 1) {
+            emit($cg, "strada_stack_pop();\n");
         }
         emit($cg, "}\n");
 
@@ -11386,14 +11466,38 @@ func gen_program(scalar $cg, scalar $program) void {
     my int $global_count = $program->{"global_count"};
     if ($global_count > 0) {
         my scalar $globals = $program->{"globals"};
-        emit($cg, "/* Global variables */\n");
+        emit($cg, "/* Global variables and constants */\n");
         my int $g = 0;
         while ($g < $global_count) {
             my scalar $gvar = $globals->[$g];
+            my int $gvar_type = $gvar->{"type"};
             my int $var_type = $gvar->{"var_type"};
             my str $name = $gvar->{"name"};
 
-            emit($cg, "StradaValue *" . $name . " = NULL;\n");
+            # Handle const declarations - emit as #define for literals
+            if ($gvar_type == NODE_CONST_DECL()) {
+                my scalar $init = $gvar->{"init"};
+                my int $init_type = $init->{"type"};
+
+                # For literal values, emit as #define
+                if ($init_type == NODE_INT_LITERAL()) {
+                    my int $val = $init->{"value"};
+                    emit($cg, "#define " . $name . " strada_new_int(" . $val . ")\n");
+                } elsif ($init_type == NODE_NUM_LITERAL()) {
+                    my num $val = $init->{"value"};
+                    emit($cg, "#define " . $name . " strada_new_num(" . $val . ")\n");
+                } elsif ($init_type == NODE_STR_LITERAL()) {
+                    my str $val = $init->{"value"};
+                    emit($cg, "#define " . $name . " strada_new_str(\"");
+                    emit_escaped_string($cg, $val);
+                    emit($cg, "\")\n");
+                } else {
+                    # For non-literal expressions, fall back to regular global
+                    emit($cg, "StradaValue *" . $name . " = NULL;\n");
+                }
+            } else {
+                emit($cg, "StradaValue *" . $name . " = NULL;\n");
+            }
             $g = $g + 1;
         }
         emit($cg, "\n");
@@ -12162,10 +12266,20 @@ func gen_global_constructor(scalar $cg) void {
     my int $g = 0;
     while ($g < $global_count) {
         my scalar $gvar = $globals->[$g];
+        my int $gvar_type = $gvar->{"type"};
         my int $var_type = $gvar->{"var_type"};
         my str $sigil = $gvar->{"sigil"};
         my str $name = $gvar->{"name"};
         my scalar $init = $gvar->{"init"};
+
+        # Skip const declarations with literal initializers (they're #defines)
+        if ($gvar_type == NODE_CONST_DECL()) {
+            my int $init_type = $init->{"type"};
+            if ($init_type == NODE_INT_LITERAL() || $init_type == NODE_NUM_LITERAL() || $init_type == NODE_STR_LITERAL()) {
+                $g = $g + 1;
+                next;
+            }
+        }
 
         # Skip if already initialized (non-NULL check for safety)
         emit($cg, "    if (" . $name . " == NULL) {\n");
@@ -12327,8 +12441,8 @@ func type_to_c_raw(int $type) str {
 # Main Entry Point
 # ============================================================
 
-func generate(scalar $ast, str $filename, int $debug_info, int $enable_profiling) str {
-    my scalar $cg = codegen_new($filename, $debug_info, $enable_profiling);
+func generate(scalar $ast, str $filename, int $debug_info, int $enable_profiling, int $enable_stack_trace) str {
+    my scalar $cg = codegen_new($filename, $debug_info, $enable_profiling, $enable_stack_trace);
     gen_program($cg, $ast);
     return get_output($cg);  # Join array into final string
 }

@@ -29,6 +29,7 @@ func parser_new(scalar $tokens) scalar {
     $parser{"token_count"} = size($tokens);
     $parser{"filename"} = "";
     $parser{"current_package"} = "";
+    $parser{"const_names"} = {};  # Track declared const names
     return \%parser;
 }
 
@@ -1359,6 +1360,14 @@ func parse_primary(scalar $parser) scalar {
             return $const_ref;
         }
 
+        # Check if it's a declared const name
+        my scalar $const_names = $parser->{"const_names"};
+        my scalar $const_val = $const_names->{$name};
+        if ($const_val) {
+            # Const names are treated as variables (the #define will substitute the value)
+            return ast_new_variable($name, "$");
+        }
+
         # Just an identifier (bareword string in some contexts)
         return ast_new_str_literal($name);
     }
@@ -2230,6 +2239,41 @@ func parse_var_decl(scalar $parser) scalar {
     return $decl;
 }
 
+# Parse const declaration: const type NAME = value; or const type $NAME = value;
+func parse_const_decl(scalar $parser) scalar {
+    my int $decl_line = parser_current_line($parser);
+    parser_expect($parser, "CONST");
+
+    my int $var_type = parse_type($parser);
+
+    # Const allows optional $ sigil (for consistency with my declarations)
+    # but sigil-less style is preferred for constants
+    my scalar $sigil_tok = parser_current($parser);
+    if ($sigil_tok->{"type"} eq "DOLLAR") {
+        parser_advance($parser);
+    } elsif ($sigil_tok->{"type"} eq "AT" || $sigil_tok->{"type"} eq "PERCENT") {
+        parser_error($parser, "const declarations only support scalar constants (use $ or no sigil)");
+    }
+
+    my str $name = parse_var_name($parser);
+
+    # Register const name so it can be recognized in expressions
+    $parser->{"const_names"}->{$name} = 1;
+
+    # Const requires initialization
+    if (parser_check($parser, "ASSIGN") == 0) {
+        parser_error($parser, "const declaration requires initialization");
+    }
+    parser_advance($parser);
+    my scalar $init = parse_expression($parser);
+
+    my scalar $decl = ast_new_const_decl($name, $var_type, $init);
+    ast_set_line($decl, $decl_line);
+
+    parser_expect($parser, "SEMI");
+    return $decl;
+}
+
 func parse_if_stmt(scalar $parser) scalar {
     parser_expect($parser, "IF");
     parser_expect($parser, "LPAREN");
@@ -2438,6 +2482,10 @@ func parse_statement(scalar $parser) scalar {
 
     if ($type eq "MY") {
         return parse_var_decl($parser);
+    }
+
+    if ($type eq "CONST") {
+        return parse_const_decl($parser);
     }
 
     if ($type eq "IF") {
@@ -4080,6 +4128,9 @@ func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low) sca
         } elsif (parser_check($parser, "MY")) {
             my scalar $var = parse_var_decl($parser);
             ast_add_global($program, $var);
+        } elsif (parser_check($parser, "CONST")) {
+            my scalar $const_decl = parse_const_decl($parser);
+            ast_add_global($program, $const_decl);
         } elsif (parser_check($parser, "C_BLOCK")) {
             # Top-level __C__ { ... } block
             my scalar $tok = parser_current($parser);
@@ -4087,7 +4138,7 @@ func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low) sca
             parser_advance($parser);
             ast_add_c_block($program, $c_code);
         } else {
-            parser_error($parser, "expected function, extern, enum, package, inherit, use, import_lib, import_object, import_archive, __C__, or variable declaration");
+            parser_error($parser, "expected function, extern, enum, package, inherit, use, import_lib, import_object, import_archive, __C__, const, or variable declaration");
         }
     }
 

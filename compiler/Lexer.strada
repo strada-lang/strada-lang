@@ -1039,6 +1039,7 @@ func lex_read_c_block(scalar $lexer, int $token_line) scalar {
 func lex_keyword_or_ident(str $text) str {
     if ($text eq "func") { return "FUNC"; }
     if ($text eq "my") { return "MY"; }
+    if ($text eq "const") { return "CONST"; }
     if ($text eq "if") { return "IF"; }
     if ($text eq "elsif") { return "ELSIF"; }
     if ($text eq "else") { return "ELSE"; }

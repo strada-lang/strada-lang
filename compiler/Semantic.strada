@@ -812,9 +812,15 @@ func register_globals(scalar $ctx, scalar $ast) void {
     for (my int $i = 0; $i < $global_count; $i = $i + 1) {
         my scalar $gvar = $globals->[$i];
         my str $name = $gvar->{"name"};
-        my str $sigil = $gvar->{"sigil"};
         my int $var_type = $gvar->{"var_type"};
         my int $line = ast_get_line($gvar);
+
+        # Handle both var decls and const decls
+        my int $gvar_type = $gvar->{"type"};
+        my str $sigil = "$";  # Default for consts
+        if ($gvar_type == NODE_VAR_DECL()) {
+            $sigil = $gvar->{"sigil"};
+        }
 
         scope_add_var($scope, $name, $sigil, $var_type, $line);
     }
@@ -1148,6 +1154,31 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         scope_add_var($current_scope, $name, $sigil, $var_type, $line);
 
         # Analyze initializer if present
+        my scalar $init_expr = $stmt->{"init"};
+        if (is_valid_node($init_expr) == 1) {
+            analyze_expression($ctx, $init_expr);
+        }
+        return;
+    }
+
+    # Const declaration - similar to var decl but with $ sigil
+    if ($node_type == NODE_CONST_DECL()) {
+        my str $name = $stmt->{"name"};
+        my int $var_type = $stmt->{"var_type"};
+
+        # Check for redeclaration in current scope
+        my scalar $current_scope = $ctx->{"scope"};
+        my scalar $scope_vars = $current_scope->{"vars"};
+        if (exists(%{$scope_vars}, $name)) {
+            my scalar $prev_info = $scope_vars->{$name};
+            my int $prev_line = $prev_info->{"line"};
+            semantic_error("constant '" . $name . "' already declared in this scope (previous declaration at line " . $prev_line . ")", $line);
+        }
+
+        # Add const to scope as a scalar
+        scope_add_var($current_scope, $name, "$", $var_type, $line);
+
+        # Analyze initializer (required for const)
         my scalar $init_expr = $stmt->{"init"};
         if (is_valid_node($init_expr) == 1) {
             analyze_expression($ctx, $init_expr);

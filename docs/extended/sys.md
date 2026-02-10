@@ -1817,6 +1817,48 @@ my hash %st = sys::fstatvfs($fd);
 
 Get filesystem statistics for open file.
 
+## Debugging
+
+### sys::stack_trace
+
+```strada
+my str $trace = sys::stack_trace();
+```
+
+Get the current call stack as a string. Returns a multi-line string showing the function call chain from innermost to outermost.
+
+Example:
+```strada
+func debug_here() void {
+    my str $trace = sys::stack_trace();
+    say("Current stack:\n" . $trace);
+}
+
+func inner() void {
+    debug_here();
+}
+
+func outer() void {
+    inner();
+}
+
+func main() int {
+    outer();
+    return 0;
+}
+```
+
+Output:
+```
+Current stack:
+  at debug_here (myprogram.strada)
+  at inner (myprogram.strada)
+  at outer (myprogram.strada)
+  at main (myprogram.strada)
+```
+
+This is useful for debugging, logging, and error reporting. Note that uncaught exceptions automatically print a stack trace.
+
 ## See Also
 
 - `math::` - Mathematical functions

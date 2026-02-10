@@ -1,0 +1,279 @@
+#!/usr/bin/env strada
+# Test DateTime module
+
+use lib "lib";
+use DateTime;
+
+func main() int {
+    my int $passed = 0;
+    my int $failed = 0;
+
+    say("DateTime Module Tests");
+    say("=====================");
+    say("");
+
+    # Test 1: now()
+    my scalar $now = DateTime::now();
+    if (defined($now) && $now->{"year"} > 2000) {
+        say("PASS: now() returns valid DateTime");
+        $passed++;
+    } else {
+        say("FAIL: now() failed");
+        $failed++;
+    }
+
+    # Test 2: format()
+    my str $formatted = DateTime::format($now, "%Y-%m-%d");
+    if (length($formatted) == 10) {
+        say("PASS: format() returns " . $formatted);
+        $passed++;
+    } else {
+        say("FAIL: format() returned: " . $formatted);
+        $failed++;
+    }
+
+    # Test 3: make()
+    my scalar $dt = DateTime::make(2024, 6, 15, 14, 30, 45);
+    if ($dt->{"year"} == 2024 && $dt->{"month"} == 6 && $dt->{"day"} == 15) {
+        say("PASS: make() creates correct date");
+        $passed++;
+    } else {
+        say("FAIL: make() failed");
+        $failed++;
+    }
+
+    # Test 4: parse()
+    my scalar $parsed = DateTime::parse("2024-03-20 10:15:30", "%Y-%m-%d %H:%M:%S");
+    if (defined($parsed) && $parsed->{"year"} == 2024 && $parsed->{"month"} == 3 && $parsed->{"hour"} == 10) {
+        say("PASS: parse() works correctly");
+        $passed++;
+    } else {
+        say("FAIL: parse() failed");
+        $failed++;
+    }
+
+    # Test 5: epoch()
+    my int $epoch = DateTime::epoch($dt);
+    if ($epoch > 0) {
+        say("PASS: epoch() returns " . $epoch);
+        $passed++;
+    } else {
+        say("FAIL: epoch() failed");
+        $failed++;
+    }
+
+    # Test 6: from_epoch()
+    my scalar $from_epoch = DateTime::from_epoch($epoch);
+    if ($from_epoch->{"year"} == 2024) {
+        say("PASS: from_epoch() works");
+        $passed++;
+    } else {
+        say("FAIL: from_epoch() failed");
+        $failed++;
+    }
+
+    # Test 7: add_days()
+    my scalar $tomorrow = DateTime::add_days($dt, 1);
+    if ($tomorrow->{"day"} == 16) {
+        say("PASS: add_days() works");
+        $passed++;
+    } else {
+        say("FAIL: add_days() returned day " . $tomorrow->{"day"});
+        $failed++;
+    }
+
+    # Test 8: subtract_days()
+    my scalar $yesterday = DateTime::subtract_days($dt, 1);
+    if ($yesterday->{"day"} == 14) {
+        say("PASS: subtract_days() works");
+        $passed++;
+    } else {
+        say("FAIL: subtract_days() returned day " . $yesterday->{"day"});
+        $failed++;
+    }
+
+    # Test 9: add_months() - normal case
+    my scalar $next_month = DateTime::add_months($dt, 1);
+    if ($next_month->{"month"} == 7) {
+        say("PASS: add_months() works");
+        $passed++;
+    } else {
+        say("FAIL: add_months() returned month " . $next_month->{"month"});
+        $failed++;
+    }
+
+    # Test 10: add_months() - year rollover
+    my scalar $dec_dt = DateTime::make(2024, 12, 15, 0, 0, 0);
+    my scalar $jan_next = DateTime::add_months($dec_dt, 1);
+    if ($jan_next->{"year"} == 2025 && $jan_next->{"month"} == 1) {
+        say("PASS: add_months() handles year rollover");
+        $passed++;
+    } else {
+        say("FAIL: add_months() year rollover failed");
+        $failed++;
+    }
+
+    # Test 11: is_leap_year()
+    if (DateTime::is_leap_year(2024) == 1 && DateTime::is_leap_year(2023) == 0) {
+        say("PASS: is_leap_year() works");
+        $passed++;
+    } else {
+        say("FAIL: is_leap_year() failed");
+        $failed++;
+    }
+
+    # Test 12: days_in_month()
+    if (DateTime::days_in_month(2024, 2) == 29 && DateTime::days_in_month(2023, 2) == 28) {
+        say("PASS: days_in_month() handles leap years");
+        $passed++;
+    } else {
+        say("FAIL: days_in_month() failed");
+        $failed++;
+    }
+
+    # Test 13: compare()
+    my scalar $earlier = DateTime::make(2024, 1, 1, 0, 0, 0);
+    my scalar $later = DateTime::make(2024, 12, 31, 23, 59, 59);
+    if (DateTime::compare($earlier, $later) == -1 && DateTime::compare($later, $earlier) == 1) {
+        say("PASS: compare() works");
+        $passed++;
+    } else {
+        say("FAIL: compare() failed");
+        $failed++;
+    }
+
+    # Test 14: is_before() / is_after()
+    if (DateTime::is_before($earlier, $later) == 1 && DateTime::is_after($later, $earlier) == 1) {
+        say("PASS: is_before/is_after work");
+        $passed++;
+    } else {
+        say("FAIL: is_before/is_after failed");
+        $failed++;
+    }
+
+    # Test 15: diff_seconds()
+    my scalar $t1 = DateTime::make(2024, 1, 1, 0, 0, 0);
+    my scalar $t2 = DateTime::make(2024, 1, 1, 1, 0, 0);
+    my int $diff = DateTime::diff_seconds($t2, $t1);
+    if ($diff == 3600) {
+        say("PASS: diff_seconds() returns 3600");
+        $passed++;
+    } else {
+        say("FAIL: diff_seconds() returned " . $diff);
+        $failed++;
+    }
+
+    # Test 16: day_of_week()
+    # 2024-01-01 was a Monday (1)
+    my scalar $jan1 = DateTime::make(2024, 1, 1, 0, 0, 0);
+    my int $dow = DateTime::day_of_week($jan1);
+    if ($dow == 1) {
+        say("PASS: day_of_week() returns 1 (Monday) for 2024-01-01");
+        $passed++;
+    } else {
+        say("FAIL: day_of_week() returned " . $dow . " for 2024-01-01");
+        $failed++;
+    }
+
+    # Test 17: start_of_day() / end_of_day()
+    my scalar $sod = DateTime::start_of_day($dt);
+    my scalar $eod = DateTime::end_of_day($dt);
+    if ($sod->{"hour"} == 0 && $eod->{"hour"} == 23) {
+        say("PASS: start_of_day/end_of_day work");
+        $passed++;
+    } else {
+        say("FAIL: start_of_day/end_of_day failed");
+        $failed++;
+    }
+
+    # Test 18: iso8601()
+    my str $iso = DateTime::iso8601($dt);
+    if ($iso eq "2024-06-15T14:30:45") {
+        say("PASS: iso8601() returns " . $iso);
+        $passed++;
+    } else {
+        say("FAIL: iso8601() returned " . $iso);
+        $failed++;
+    }
+
+    # Test 19: sql()
+    my str $sql_fmt = DateTime::sql($dt);
+    if ($sql_fmt eq "2024-06-15 14:30:45") {
+        say("PASS: sql() returns " . $sql_fmt);
+        $passed++;
+    } else {
+        say("FAIL: sql() returned " . $sql_fmt);
+        $failed++;
+    }
+
+    # Test 20: relative()
+    my str $rel = DateTime::relative($now);
+    if (length($rel) > 0) {
+        say("PASS: relative() returns '" . $rel . "'");
+        $passed++;
+    } else {
+        say("FAIL: relative() returned empty");
+        $failed++;
+    }
+
+    # Test 21: day_name()
+    my str $day_name = DateTime::day_name($jan1);
+    if ($day_name eq "Monday") {
+        say("PASS: day_name() returns Monday");
+        $passed++;
+    } else {
+        say("FAIL: day_name() returned " . $day_name);
+        $failed++;
+    }
+
+    # Test 22: month_name()
+    my str $month_name = DateTime::month_name($dt);
+    if ($month_name eq "June") {
+        say("PASS: month_name() returns June");
+        $passed++;
+    } else {
+        say("FAIL: month_name() returned " . $month_name);
+        $failed++;
+    }
+
+    # Test 23: is_weekend()
+    my scalar $saturday = DateTime::make(2024, 1, 6, 0, 0, 0);  # Jan 6, 2024 was Saturday
+    if (DateTime::is_weekend($saturday) == 1 && DateTime::is_weekday($jan1) == 1) {
+        say("PASS: is_weekend/is_weekday work");
+        $passed++;
+    } else {
+        say("FAIL: is_weekend/is_weekday failed");
+        $failed++;
+    }
+
+    # Test 24: timezone_name()
+    my str $tz = DateTime::timezone_name();
+    if (length($tz) > 0) {
+        say("PASS: timezone_name() returns " . $tz);
+        $passed++;
+    } else {
+        say("FAIL: timezone_name() returned empty");
+        $failed++;
+    }
+
+    # Test 25: clone()
+    my scalar $cloned = DateTime::clone($dt);
+    if ($cloned->{"year"} == $dt->{"year"} && $cloned->{"month"} == $dt->{"month"}) {
+        say("PASS: clone() works");
+        $passed++;
+    } else {
+        say("FAIL: clone() failed");
+        $failed++;
+    }
+
+    say("");
+    say("========================================");
+    say("Tests: " . ($passed + $failed) . "  Passed: " . $passed . "  Failed: " . $failed);
+    say("========================================");
+
+    if ($failed == 0) {
+        say("All DateTime tests passed!");
+        return 0;
+    }
+    return 1;
+}
