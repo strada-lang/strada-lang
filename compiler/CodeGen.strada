@@ -3308,9 +3308,16 @@ func gen_expression(scalar $cg, scalar $expr) void {
         # sys::set_recursion_limit - set max recursion depth (0 = disabled)
         if ($name eq "sys::set_recursion_limit") {
             my scalar $args = $expr->{"args"};
-            emit($cg, "(strada_set_recursion_limit(strada_to_int(");
-            gen_expression($cg, $args->[0]);
-            emit($cg, ")), strada_new_int(strada_get_recursion_limit()))");
+            my scalar $arg0 = $args->[0];
+            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $arg0) == 1) {
+                emit($cg, "({ StradaValue *__arg_tmp = ");
+                gen_expression($cg, $arg0);
+                emit($cg, "; strada_set_recursion_limit(strada_to_int(__arg_tmp)); strada_decref(__arg_tmp); strada_new_int(strada_get_recursion_limit()); })");
+            } else {
+                emit($cg, "(strada_set_recursion_limit(strada_to_int(");
+                gen_expression($cg, $arg0);
+                emit($cg, ")), strada_new_int(strada_get_recursion_limit()))");
+            }
             return;
         }
 
