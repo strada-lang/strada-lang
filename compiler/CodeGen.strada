@@ -11104,10 +11104,13 @@ func gen_function(scalar $cg, scalar $fn) void {
                 my str $name = $gvar->{"name"};
                 my scalar $init = $gvar->{"init"};
 
-                # Skip const declarations with literal initializers (they're #defines)
+                # Handle const declarations - initialize static variables
                 if ($gvar_type == NODE_CONST_DECL()) {
                     my int $init_type = $init->{"type"};
                     if ($init_type == NODE_INT_LITERAL() || $init_type == NODE_NUM_LITERAL() || $init_type == NODE_STR_LITERAL()) {
+                        emit($cg, "    " . $name . " = ");
+                        gen_expression($cg, $init);
+                        emit($cg, ";\n");
                         $g = $g + 1;
                         next;
                     }
@@ -11474,27 +11477,10 @@ func gen_program(scalar $cg, scalar $program) void {
             my int $var_type = $gvar->{"var_type"};
             my str $name = $gvar->{"name"};
 
-            # Handle const declarations - emit as #define for literals
+            # Handle const declarations - emit as global variable (initialized once in main)
+            # Using #define with strada_new_* causes leaks since it creates new values on every use
             if ($gvar_type == NODE_CONST_DECL()) {
-                my scalar $init = $gvar->{"init"};
-                my int $init_type = $init->{"type"};
-
-                # For literal values, emit as #define
-                if ($init_type == NODE_INT_LITERAL()) {
-                    my int $val = $init->{"value"};
-                    emit($cg, "#define " . $name . " strada_new_int(" . $val . ")\n");
-                } elsif ($init_type == NODE_NUM_LITERAL()) {
-                    my num $val = $init->{"value"};
-                    emit($cg, "#define " . $name . " strada_new_num(" . $val . ")\n");
-                } elsif ($init_type == NODE_STR_LITERAL()) {
-                    my str $val = $init->{"value"};
-                    emit($cg, "#define " . $name . " strada_new_str(\"");
-                    emit_escaped_string($cg, $val);
-                    emit($cg, "\")\n");
-                } else {
-                    # For non-literal expressions, fall back to regular global
-                    emit($cg, "StradaValue *" . $name . " = NULL;\n");
-                }
+                emit($cg, "static StradaValue *" . $name . " = NULL;\n");
             } else {
                 emit($cg, "StradaValue *" . $name . " = NULL;\n");
             }
@@ -12272,10 +12258,15 @@ func gen_global_constructor(scalar $cg) void {
         my str $name = $gvar->{"name"};
         my scalar $init = $gvar->{"init"};
 
-        # Skip const declarations with literal initializers (they're #defines)
+        # Handle const declarations - initialize static variables
         if ($gvar_type == NODE_CONST_DECL()) {
             my int $init_type = $init->{"type"};
             if ($init_type == NODE_INT_LITERAL() || $init_type == NODE_NUM_LITERAL() || $init_type == NODE_STR_LITERAL()) {
+                emit($cg, "    if (" . $name . " == NULL) {\n");
+                emit($cg, "        " . $name . " = ");
+                gen_expression($cg, $init);
+                emit($cg, ";\n");
+                emit($cg, "    }\n");
                 $g = $g + 1;
                 next;
             }
