@@ -1600,6 +1600,7 @@ func needs_temp_cleanup(scalar $cg, scalar $expr) int {
             $name eq "sys::set_byte" ||
             $name eq "sys::random_bytes" || $name eq "sys::random_bytes_hex" ||
             $name eq "sys::stack_trace" ||
+            $name eq "sys::set_recursion_limit" || $name eq "sys::get_recursion_limit" ||
             $name eq "substr" || $name eq "length" || $name eq "index" ||
             $name eq "uc" || $name eq "lc" || $name eq "ucfirst" || $name eq "lcfirst" ||
             $name eq "trim" || $name eq "ltrim" || $name eq "rtrim" ||
