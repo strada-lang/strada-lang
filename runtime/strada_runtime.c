@@ -2376,8 +2376,26 @@ StradaValue *strada_exception_value = NULL;  /* Typed exception support */
 /* Call stack for stack traces */
 StradaStackFrame strada_call_stack[STRADA_MAX_CALL_DEPTH];
 int strada_call_depth = 0;
+int strada_recursion_limit = 1000;  /* Default limit; 0 = disabled */
+
+void strada_set_recursion_limit(int limit) {
+    strada_recursion_limit = limit;
+}
+
+int strada_get_recursion_limit(void) {
+    return strada_recursion_limit;
+}
 
 void strada_stack_push(const char *func_name, const char *file_name) {
+    /* Check recursion limit before pushing */
+    if (strada_recursion_limit > 0 && strada_call_depth >= strada_recursion_limit) {
+        fprintf(stderr, "Error: Maximum recursion depth exceeded (%d)\n", strada_recursion_limit);
+        strada_print_stack_trace(stderr);
+        fprintf(stderr, "  -> %s (%s)\n", func_name, file_name);
+        fprintf(stderr, "\nHint: Use sys::set_recursion_limit(n) to increase the limit, or 0 to disable.\n");
+        exit(1);
+    }
+
     if (strada_call_depth < STRADA_MAX_CALL_DEPTH) {
         strada_call_stack[strada_call_depth].func_name = func_name;
         strada_call_stack[strada_call_depth].file_name = file_name;

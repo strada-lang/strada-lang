@@ -1859,6 +1859,52 @@ Current stack:
 
 This is useful for debugging, logging, and error reporting. Note that uncaught exceptions automatically print a stack trace.
 
+### sys::set_recursion_limit
+
+```strada
+sys::set_recursion_limit($limit);
+```
+
+Set the maximum recursion depth. When the call stack exceeds this limit, the program will print an error with a stack trace and exit.
+
+- `$limit` - Maximum recursion depth (default: 1000, set to 0 to disable)
+
+Example:
+```strada
+# Increase limit for deeply recursive algorithms
+sys::set_recursion_limit(5000);
+
+# Disable limit (not recommended)
+sys::set_recursion_limit(0);
+```
+
+### sys::get_recursion_limit
+
+```strada
+my int $limit = sys::get_recursion_limit();
+```
+
+Get the current maximum recursion depth.
+
+Example:
+```strada
+my int $limit = sys::get_recursion_limit();
+say("Current recursion limit: " . $limit);
+```
+
+When the recursion limit is exceeded, output looks like:
+```
+Error: Maximum recursion depth exceeded (1000)
+Stack trace:
+  at recursive_func (myprogram.strada)
+  at recursive_func (myprogram.strada)
+  ...
+  at main (myprogram.strada)
+  -> recursive_func (myprogram.strada)
+
+Hint: Use sys::set_recursion_limit(n) to increase the limit, or 0 to disable.
+```
+
 ## See Also
 
 - `math::` - Mathematical functions

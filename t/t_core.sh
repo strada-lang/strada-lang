@@ -74,6 +74,9 @@ test_exception_output "$SCRIPT_DIR/test_stack_trace.strada" "test_stack_trace" "
 # Test: Const declarations
 test_output_contains "$SCRIPT_DIR/test_const.strada" "test_const" "All const tests passed" "Const declarations"
 
+# Test: Recursion limit
+test_output_contains "$SCRIPT_DIR/test_recursion_limit.strada" "test_recursion_limit" "All recursion limit tests passed" "Recursion limit"
+
 # Test: Goto and loop labels
 test_run "$EXAMPLES_DIR/test_goto.strada" "test_goto" "Goto"
 test_run "$EXAMPLES_DIR/test_loop_labels.strada" "test_loop_labels" "Loop labels"

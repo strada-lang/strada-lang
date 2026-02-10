@@ -413,6 +413,45 @@ func risky_operation() void {
 }
 ```
 
+## Deep Recursion Protection
+
+Strada automatically detects excessive recursion and exits gracefully with a stack trace, instead of crashing with a stack overflow.
+
+### Default Behavior
+
+The default recursion limit is 1000 calls. When exceeded:
+
+```
+Error: Maximum recursion depth exceeded (1000)
+Stack trace:
+  at infinite_recurse (broken.strada)
+  at infinite_recurse (broken.strada)
+  ...
+  at main (broken.strada)
+  -> infinite_recurse (broken.strada)
+
+Hint: Use sys::set_recursion_limit(n) to increase the limit, or 0 to disable.
+```
+
+### Configuring the Limit
+
+```strada
+# Increase for deeply recursive algorithms
+sys::set_recursion_limit(5000);
+
+# Disable the check (not recommended)
+sys::set_recursion_limit(0);
+
+# Check current limit
+my int $limit = sys::get_recursion_limit();
+```
+
+### When to Adjust
+
+- **Increase limit**: For legitimate deep recursion (tree traversal, parsing, etc.)
+- **Disable (0)**: Only when you're certain your recursion is bounded and need maximum performance
+- **Lower limit**: To catch runaway recursion earlier during development
+
 ## Troubleshooting
 
 ### "No symbol table"

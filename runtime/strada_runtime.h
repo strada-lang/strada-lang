@@ -498,12 +498,15 @@ typedef struct {
 
 extern StradaStackFrame strada_call_stack[STRADA_MAX_CALL_DEPTH];
 extern int strada_call_depth;
+extern int strada_recursion_limit;  /* Configurable limit (default 1000, 0 = disabled) */
 
 void strada_stack_push(const char *func_name, const char *file_name);
 void strada_stack_pop(void);
 void strada_stack_set_line(int line);
 void strada_print_stack_trace(FILE *out);
 char* strada_capture_stack_trace(void);
+void strada_set_recursion_limit(int limit);  /* Set max recursion depth (0 = disabled) */
+int strada_get_recursion_limit(void);        /* Get current limit */
 
 /* Type introspection and casting */
 const char* strada_typeof(StradaValue *sv);

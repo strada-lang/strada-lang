@@ -3304,6 +3304,21 @@ func gen_expression(scalar $cg, scalar $expr) void {
             return;
         }
 
+        # sys::set_recursion_limit - set max recursion depth (0 = disabled)
+        if ($name eq "sys::set_recursion_limit") {
+            my scalar $args = $expr->{"args"};
+            emit($cg, "(strada_set_recursion_limit(strada_to_int(");
+            gen_expression($cg, $args->[0]);
+            emit($cg, ")), strada_new_int(strada_get_recursion_limit()))");
+            return;
+        }
+
+        # sys::get_recursion_limit - get current max recursion depth
+        if ($name eq "sys::get_recursion_limit") {
+            emit($cg, "strada_new_int(strada_get_recursion_limit())");
+            return;
+        }
+
         if ($name eq "sys::chdir") {
             emit($cg, "strada_chdir(");
             my scalar $args = $expr->{"args"};
