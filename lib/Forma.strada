@@ -1450,6 +1450,17 @@ func resolve_var(str $name, scalar $vars) str {
         $name = "this";
     }
 
+    # Handle parent context access with ../ prefix (can be chained: ../../)
+    if (length($name) >= 3 && substr($name, 0, 3) eq "../") {
+        my str $rest = substr($name, 3, length($name) - 3);
+        if (ref($vars) eq "HASH" && exists(%{$vars}, "@parent")) {
+            my scalar $parent = $vars->{"@parent"};
+            return Forma::resolve_var($rest, $parent);
+        }
+        # No parent context available, return empty
+        return "";
+    }
+
     # Check for dot notation (e.g., user.name, user.address.city)
     my int $dot = index($name, ".");
     if ($dot > 0) {
@@ -1488,6 +1499,17 @@ func get_var(str $name, scalar $vars) scalar {
     # Handle {{.}} as alias for {{this}} (current item in each loop)
     if ($name eq ".") {
         $name = "this";
+    }
+
+    # Handle parent context access with ../ prefix (can be chained: ../../)
+    if (length($name) >= 3 && substr($name, 0, 3) eq "../") {
+        my str $rest = substr($name, 3, length($name) - 3);
+        if (ref($vars) eq "HASH" && exists(%{$vars}, "@parent")) {
+            my scalar $parent = $vars->{"@parent"};
+            return Forma::get_var($rest, $parent);
+        }
+        # No parent context available
+        return undef;
     }
 
     # Check for dot notation
@@ -1658,6 +1680,9 @@ func process_each_named(str $collection_name, str $loop_var, str $body, scalar $
             }
         }
 
+        # Store reference to parent context for ../ access
+        $iter_vars->{"@parent"} = $vars;
+
         # Handle named variable syntax: {{#each item in items}}
         if (length($loop_var) > 0) {
             # Named variable mode: item is accessible as {{loop_var}} or {{loop_var.field}}
@@ -1746,6 +1771,9 @@ func process_partial(str $expr, scalar $vars) str {
             $partial_vars->{$k} = $vars->{$k};
         }
     }
+
+    # Store reference to parent context for ../ access
+    $partial_vars->{"@parent"} = $vars;
 
     # Parse and add arguments
     while ($i < $len) {
