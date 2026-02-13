@@ -209,8 +209,8 @@ test-suite: stradac $(RUNTIME_OBJ)
 	if [ -n "$(FILTER)" ]; then OPTS="$$OPTS $(FILTER)"; fi; \
 	./t/run_tests.sh $$OPTS
 
-# Build tools (stradadoc, strada-soinfo, strada-md2man, strada-md2html, strada-repl)
-TOOL_BINS = tools/stradadoc tools/strada-soinfo tools/strada-md2man tools/strada-md2html tools/strada-repl
+# Build tools (stradadoc, strada-soinfo, strada-md2man, strada-md2html, strada-repl, stradapp)
+TOOL_BINS = tools/stradadoc tools/strada-soinfo tools/strada-md2man tools/strada-md2html tools/strada-repl tools/stradapp
 
 tools: $(TOOL_BINS)
 	@echo ""
@@ -235,6 +235,10 @@ tools/strada-md2html: tools/strada-md2html.strada stradac
 tools/strada-repl: tools/strada-repl.strada stradac $(RUNTIME_TCC_OBJ)
 	@echo "Building strada-repl..."
 	@./strada tools/strada-repl.strada -o tools/strada-repl -l readline
+
+tools/stradapp: tools/stradapp.strada stradac
+	@echo "Building stradapp (preprocessor)..."
+	@./strada tools/stradapp.strada -o tools/stradapp
 
 # =============================================================================
 # Library Targets
@@ -360,6 +364,10 @@ install: stradac $(RUNTIME_OBJ)
 			install -m 755 tools/$$tool $(INSTALL_BIN)/$$tool; \
 		fi; \
 	done
+	@# Also install stradapp to lib dir (strada wrapper looks for it there)
+	@if [ -x tools/stradapp ]; then \
+		install -m 755 tools/stradapp $(INSTALL_LIB)/stradapp; \
+	fi
 	@# Install TCC runtime for REPL
 	@if [ -f $(RUNTIME_TCC_OBJ) ]; then \
 		install -m 644 $(RUNTIME_TCC_OBJ) $(INSTALL_LIB)/runtime/; \
