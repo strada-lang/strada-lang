@@ -1,0 +1,160 @@
+#!/usr/bin/env strada
+# Test metadata pool + interned blessed package names for memory leaks
+# Optimizations:
+#   - StradaMetadata free-list pool (avoids calloc per blessed object)
+#   - strada_bless uses strada_intern_str instead of strdup for package names
+# Run: valgrind --leak-check=full ./test_meta_pool_bless
+
+package Shape;
+has ro str $kind (required);
+
+func area(scalar $self) int {
+    return 0;
+}
+
+package Circle;
+extends Shape;
+has ro int $radius (required);
+
+func area(scalar $self) int {
+    return $self->radius() * $self->radius() * 3;
+}
+
+package Rectangle;
+extends Shape;
+has ro int $width (required);
+has ro int $height (required);
+
+func area(scalar $self) int {
+    return $self->width() * $self->height();
+}
+
+package main;
+
+func main() int {
+    say("Testing metadata pool and interned bless names for memory leaks...");
+
+    # Test 1: Rapid object create/destroy (meta pool recycling)
+    say("  Rapid create/destroy (meta pool)...");
+    my int $i = 0;
+    while ($i < 500) {
+        my scalar $c = Circle::new("kind", "circle", "radius", $i % 50 + 1);
+        my int $a = $c->area();
+        if ($a < 3) {
+            say("    FAIL: area too small");
+            return 1;
+        }
+        # $c goes out of scope, meta returned to pool
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 2: Multiple package types (interned package names reused)
+    say("  Multiple package types (interned names)...");
+    $i = 0;
+    while ($i < 200) {
+        my scalar $c = Circle::new("kind", "circle", "radius", 10);
+        my scalar $r = Rectangle::new("kind", "rect", "width", 5, "height", 8);
+        if ($c->area() != 300 || $r->area() != 40) {
+            say("    FAIL: area mismatch");
+            return 1;
+        }
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 3: isa() checks (exercises blessed_package reads)
+    say("  isa() with interned names...");
+    $i = 0;
+    while ($i < 300) {
+        my scalar $c = Circle::new("kind", "circle", "radius", 5);
+        if (!$c->isa("Circle") || !$c->isa("Shape")) {
+            say("    FAIL: isa check");
+            return 1;
+        }
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 4: Object stored in array then discarded
+    say("  Objects in array...");
+    $i = 0;
+    while ($i < 100) {
+        my array @objects = ();
+        my int $j = 0;
+        while ($j < 20) {
+            push(@objects, Circle::new("kind", "circle", "radius", $j + 1));
+            $j++;
+        }
+        # All 20 objects freed when @objects goes out of scope
+        # All 20 metas returned to pool, all "Circle" intern refs released
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 5: Object stored in hash then discarded
+    say("  Objects in hash...");
+    $i = 0;
+    while ($i < 100) {
+        my hash %shapes = ();
+        $shapes{"c1"} = Circle::new("kind", "circle", "radius", 3);
+        $shapes{"r1"} = Rectangle::new("kind", "rect", "width", 4, "height", 6);
+        $shapes{"c2"} = Circle::new("kind", "circle", "radius", 7);
+        if ($shapes{"r1"}->area() != 24) {
+            say("    FAIL: hash object");
+            return 1;
+        }
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 6: Overwrite blessed ref in variable (old meta freed to pool)
+    say("  Overwrite blessed variable...");
+    my scalar $obj = Circle::new("kind", "circle", "radius", 1);
+    $i = 0;
+    while ($i < 500) {
+        $obj = Circle::new("kind", "circle", "radius", $i % 50 + 1);
+        $i++;
+    }
+    if ($obj->area() < 3) {
+        say("    FAIL: final object");
+        return 1;
+    }
+    say("    PASS");
+
+    # Test 7: Inheritance chain (multiple blessed package lookups)
+    say("  Inheritance chain...");
+    $i = 0;
+    while ($i < 200) {
+        my scalar $r = Rectangle::new("kind", "rect", "width", 3, "height", 4);
+        # Call inherited method
+        my str $k = $r->kind();
+        if ($k ne "rect") {
+            say("    FAIL: inherited accessor");
+            return 1;
+        }
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 8: Mix of blessed and non-blessed values (meta only allocated for blessed)
+    say("  Mixed blessed/non-blessed...");
+    $i = 0;
+    while ($i < 200) {
+        my int $n = 42;
+        my str $s = "hello";
+        my array @a = (1, 2, 3);
+        my hash %h = ("x" => 10);
+        my scalar $obj = Circle::new("kind", "circle", "radius", 5);
+        my scalar $ref = \$n;
+        if ($obj->area() != 75) {
+            say("    FAIL: mixed");
+            return 1;
+        }
+        $i++;
+    }
+    say("    PASS");
+
+    say("All metadata pool / interned bless tests passed!");
+    return 0;
+}

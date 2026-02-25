@@ -2,4 +2,4 @@ qx=hello_proc
 system_true=0
 system_false=1
 env=hello123
-lines=2
+lines=3

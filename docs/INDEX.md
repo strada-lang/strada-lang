@@ -27,6 +27,7 @@ Welcome to the Strada programming language documentation. Strada is a strongly-t
 | [FFI Guide](FFI_GUIDE.md) | C integration and foreign functions |
 | [Perl Integration](PERL_INTEGRATION.md) | Calling Perl from Strada and vice versa |
 | [Runtime API](RUNTIME_API.md) | C runtime library reference |
+| [Interpreter](INTERPRETER.md) | Tree-walking interpreter and REPL |
 | [Compiler Architecture](COMPILER_ARCHITECTURE.md) | How the compiler works |
 
 ## Quick Example
@@ -79,6 +80,12 @@ Compile and run:
 - **OOP** with multiple inheritance, SUPER::, DESTROY
 - **FFI** for calling C libraries
 - **Regex** with inline `/pattern/` syntax
+
+### Interpreter
+- Tree-walking interpreter for interactive use and scripting
+- REPL with readline support
+- Embedded eval via `Strada::Interpreter::eval_string()`
+- No C compiler needed at runtime
 
 ### Performance
 - Compiles to C, then native code

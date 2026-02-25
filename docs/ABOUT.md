@@ -52,8 +52,18 @@ This provides:
 
 - Fast execution speed
 - Small binary size
-- No runtime interpreter needed
 - Easy deployment
+
+### Tree-Walking Interpreter
+
+Strada also includes a tree-walking interpreter that executes programs directly from the AST without generating C code. This enables:
+
+- **Interactive REPL** for experimentation
+- **Quick scripting** without a compilation step
+- **Embedded eval** via `Strada::Interpreter::eval_string()`
+- **No C compiler required** at runtime
+
+See the [Interpreter Guide](INTERPRETER.md) for details.
 
 ### Object-Oriented Programming
 
@@ -150,6 +160,10 @@ The compilation process:
 2. **Self-hosting compiler** (written in Strada) compiles user programs
 3. User programs compile to C, then to native binaries
 
+Alternatively, the tree-walking interpreter can execute user programs
+directly from the AST, sharing the same Lexer and Parser front-end as
+the compiler.
+
 ## Use Cases
 
 Strada is well-suited for:
@@ -165,7 +179,7 @@ Strada is well-suited for:
 | Feature | Perl | Strada |
 |---------|------|--------|
 | Typing | Dynamic | Static |
-| Execution | Interpreted | Compiled |
+| Execution | Interpreted | Compiled + Interpreter |
 | Sigils | Yes | Yes |
 | Regex | Yes | Yes |
 | OOP | Yes (multiple styles) | Yes (blessed refs) |

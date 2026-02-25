@@ -1,0 +1,124 @@
+#!/usr/bin/env strada
+# Test StradaMetadata indirection and StradaValue free-list pool for leaks
+# Phase 1: Cold fields moved behind meta pointer (only allocated when needed)
+# Phase 2: Free-list pool recycles StradaValue structs
+# Run: valgrind --leak-check=full ./test_metadata_pool
+
+package Animal;
+has ro str $species (required);
+has rw int $energy = 100;
+
+func speak(scalar $self) str {
+    return $self->species() . " speaks";
+}
+
+package Dog;
+extends Animal;
+has ro str $name (required);
+
+func bark(scalar $self) str {
+    return $self->name() . " barks!";
+}
+
+package main;
+
+func main() int {
+    say("Testing metadata indirection and free-list pool...");
+    my int $iterations = 50;
+
+    # Test 1: Plain values (no metadata allocated)
+    say("  Plain values (no meta)...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my int $a = 500;
+        my num $b = 3.14;
+        my str $c = "hello world";
+        my array @d = (1, 2, 3, 4, 5);
+        my hash %e = ("x" => 10, "y" => 20);
+        my scalar $ref = \$a;
+        if ($a != 500 || $c ne "hello world") {
+            say("    FAIL: plain value");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 2: OOP objects (metadata allocated for blessed_package)
+    say("  OOP objects (blessed meta)...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $dog = Dog::new("name", "Rex", "species", "Canine");
+        my str $bark = $dog->bark();
+        my str $speak = $dog->speak();
+        if ($bark ne "Rex barks!" || $speak ne "Canine speaks") {
+            say("    FAIL: OOP method");
+            return 1;
+        }
+        if (!$dog->isa("Animal")) {
+            say("    FAIL: isa check");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 3: Mix of plain and blessed values (pool recycling)
+    say("  Mixed plain/blessed recycling...");
+    $i = 0;
+    while ($i < $iterations) {
+        # Create plain values (freed back to pool)
+        my int $x = 1000;
+        my str $s = "temp" . $i;
+        my array @a = ($x, $x + 1, $x + 2);
+
+        # Create OOP object (allocates meta, freed with meta)
+        my scalar $obj = Animal::new("species", "Cat");
+        my str $sp = $obj->speak();
+
+        # More plain values (may reuse pooled structs)
+        my int $y = 2000;
+        my str $t = "another" . $i;
+
+        if ($sp ne "Cat speaks") {
+            say("    FAIL: mixed recycling");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 4: Rapid create/destroy cycling (stress the pool)
+    say("  Pool stress test...");
+    $i = 0;
+    while ($i < 200) {
+        my str $s = "iteration_" . $i;
+        my int $len = length($s);
+        if ($len < 11) {
+            say("    FAIL: pool stress");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 5: Nested hash/array structures (verifies meta cleanup)
+    say("  Nested structures...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %outer = ();
+        $outer{"inner"} = { "a" => [1, 2, 3], "b" => [4, 5, 6] };
+        $outer{"obj"} = Animal::new("species", "Fish");
+        my scalar $inner = $outer{"inner"};
+        my scalar $arr_a = $inner->{"a"};
+        if ($arr_a->[0] != 1 || $arr_a->[2] != 3) {
+            say("    FAIL: nested");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All metadata/pool tests passed!");
+    return 0;
+}

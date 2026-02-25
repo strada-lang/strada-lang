@@ -1,0 +1,49 @@
+package main;
+
+func main() int {
+    # Push 2,000,000 integers into an array
+    my array @arr;
+    my int $i = 0;
+    while ($i < 2000000) {
+        push(@arr, $i);
+        $i++;
+    }
+    say("array size: " . scalar(@arr));
+
+    # Sum every 100th element to verify
+    my int $sum = 0;
+    my int $j = 0;
+    while ($j < 2000000) {
+        $sum += $arr[$j];
+        $j += 100;
+    }
+    say("array checksum: " . $sum);
+
+    # Insert 500,000 key-value pairs into a hash
+    my hash %h;
+    my int $k = 0;
+    while ($k < 500000) {
+        $h{"key" . $k} = $k;
+        $k++;
+    }
+    say("hash size: " . scalar(keys(%h)));
+
+    # Look up all 500,000 values
+    my int $lookup_sum = 0;
+    my int $m = 0;
+    while ($m < 500000) {
+        $lookup_sum += $h{"key" . $m};
+        $m++;
+    }
+    say("lookup sum: " . $lookup_sum);
+
+    # Delete all keys
+    my int $n = 0;
+    while ($n < 500000) {
+        delete($h{"key" . $n});
+        $n++;
+    }
+    say("after delete: " . scalar(keys(%h)));
+
+    return 0;
+}

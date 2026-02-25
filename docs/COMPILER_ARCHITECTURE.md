@@ -91,6 +91,36 @@ The runtime provides memory management, data structures, and built-in functions.
 | `strada_runtime.c` | ~2,150 | Runtime implementation |
 | `strada_runtime.h` | ~150 | Runtime header |
 
+## Interpreter (Alternative Execution Path)
+
+In addition to the compile-to-C pipeline, Strada includes a tree-walking interpreter that executes programs directly from the AST:
+
+```
+Strada Source (.strada)
+        │
+        ▼
+┌───────────────────┐
+│  Lexer + Parser   │  ← Shared with compiler
+└───────────────────┘
+        │
+        ▼
+   AST (in memory)
+        │
+   ┌────┴────┐
+   │         │
+   ▼         ▼
+CodeGen   Interpreter
+ (C out)   (tree-walk)
+```
+
+The interpreter (`lib/Strada/Interpreter.strada`) reuses the compiler's Lexer and Parser, then walks AST nodes to evaluate the program. This powers:
+
+- **`strada-interp`** - Standalone interpreter with REPL (`interpreter/Main.strada`)
+- **`Strada::Interpreter::eval_string()`** - Embedded eval from compiled programs
+- **`Strada::JIT::eval()`** - JIT eval (compiles to .so at runtime; uses the compile path, not the interpreter)
+
+The interpreter supports the full language except `__C__` blocks and async/await. See `docs/INTERPRETER.md` for details.
+
 ## Compilation Pipeline
 
 ### Stage 1: Lexical Analysis (Lexer)
@@ -548,6 +578,10 @@ strada/
 │   ├── Combined.strada # Combined source (generated)
 │   └── Combined.c      # Compiled to C (generated)
 │
+├── interpreter/        # Tree-walking interpreter
+│   ├── Main.strada    # Driver (REPL + file execution)
+│   └── Combined.strada # Combined source (generated)
+│
 ├── runtime/            # Runtime library
 │   ├── strada_runtime.c
 │   └── strada_runtime.h
@@ -557,6 +591,9 @@ strada/
 │   └── ...
 │
 ├── lib/               # Standard library modules
+│   └── Strada/
+│       ├── Interpreter.strada  # Interpreter library
+│       └── JIT.strada          # JIT eval library
 │
 └── docs/              # Documentation
     ├── LANGUAGE_GUIDE.md

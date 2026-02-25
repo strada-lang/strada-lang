@@ -5030,10 +5030,7 @@ func flush_has_constructor(scalar $program, str $pkg) void {
     my scalar $self_decl = ast_new_var_decl("self", TYPE_HASH(), "%");
     ast_add_statement($ctor_body, $self_decl);
 
-    # Parse named args: my hash %a = (); my int $__i = 0; while...
-    my scalar $a_decl = ast_new_var_decl("__a", TYPE_HASH(), "%");
-    ast_add_statement($ctor_body, $a_decl);
-
+    # Parse named args directly into %self: my int $__i = 0; while...
     my scalar $i_decl = ast_new_var_decl("__i", TYPE_INT(), "$");
     $i_decl->{"init"} = ast_new_int_literal(0);
     ast_add_statement($ctor_body, $i_decl);
@@ -5050,7 +5047,7 @@ func flush_has_constructor(scalar $program, str $pkg) void {
 
     my scalar $while_body = ast_new_block();
 
-    # $__a{$args[$__i]} = $args[$__i + 1];
+    # $self{$args[$__i]} = $args[$__i + 1];
     my scalar $args_var2 = ast_new_variable("args", "@");
     my scalar $i_var2 = ast_new_variable("__i", "$");
     my scalar $key_sub = ast_new_subscript($args_var2, $i_var2);
@@ -5061,7 +5058,7 @@ func flush_has_constructor(scalar $program, str $pkg) void {
     my scalar $i_plus_1b = ast_new_binary_op("+", $i_var3, $one_lit2);
     my scalar $val_sub = ast_new_subscript($args_var3, $i_plus_1b);
 
-    my scalar $a_var = ast_new_variable("__a", "%");
+    my scalar $a_var = ast_new_variable("self", "%");
     my scalar $a_access = ast_new_hash_access($a_var, $key_sub);
     my scalar $a_assign = ast_new_assign("=", $a_access, $val_sub);
     ast_add_statement($while_body, ast_new_expr_stmt($a_assign));
@@ -5077,29 +5074,29 @@ func flush_has_constructor(scalar $program, str $pkg) void {
     my scalar $while_stmt = ast_new_while_stmt($while_cond, $while_body, "");
     ast_add_statement($ctor_body, $while_stmt);
 
-    # For each attribute: $self{"name"} = $__a{"name"} // default;
+    # For each attribute: $self{"name"} = $self{"name"} // default;
+    # Only emit for attributes that have defaults (apply default if key wasn't passed)
     my int $pi = 0;
     while ($pi < $pkg_attr_count) {
         my scalar $attr = $pkg_attrs[$pi];
         my str $a_name = $attr->{"name"};
         my scalar $a_default = $attr->{"default_node"};
 
-        my scalar $self_var2 = ast_new_variable("self", "%");
-        my scalar $name_key = ast_new_str_literal($a_name);
-        my scalar $self_acc = ast_new_hash_access($self_var2, $name_key);
-
-        my scalar $a_hash = ast_new_variable("__a", "%");
-        my scalar $a_key = ast_new_str_literal($a_name);
-        my scalar $a_val = ast_new_hash_access($a_hash, $a_key);
-
-        my scalar $rhs = $a_val;
-        # If has a default, use // operator: $__a{"name"} // default
+        # Only need to emit assignment if there's a default to apply
         if ($a_default != 0) {
-            $rhs = ast_new_binary_op("//", $a_val, $a_default);
-        }
+            my scalar $self_var2 = ast_new_variable("self", "%");
+            my scalar $name_key = ast_new_str_literal($a_name);
+            my scalar $self_acc = ast_new_hash_access($self_var2, $name_key);
 
-        my scalar $attr_assign = ast_new_assign("=", $self_acc, $rhs);
-        ast_add_statement($ctor_body, ast_new_expr_stmt($attr_assign));
+            my scalar $self_hash2 = ast_new_variable("self", "%");
+            my scalar $s_key = ast_new_str_literal($a_name);
+            my scalar $s_val = ast_new_hash_access($self_hash2, $s_key);
+
+            my scalar $rhs = ast_new_binary_op("//", $s_val, $a_default);
+
+            my scalar $attr_assign = ast_new_assign("=", $self_acc, $rhs);
+            ast_add_statement($ctor_body, ast_new_expr_stmt($attr_assign));
+        }
         $pi = $pi + 1;
     }
 

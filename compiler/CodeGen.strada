@@ -11443,8 +11443,20 @@ func gen_expression(scalar $cg, scalar $expr) void {
                         $d = $d + 1;
                     }
                     emit($cg, "__meth_res; })");
+                } elsif ($arg_count == 0) {
+                    # Zero args - pass NULL instead of allocating empty pack_args
+                    if ($meth_obj_cleanup == 1) {
+                        emit($cg, "({ StradaValue *__meth_obj = ");
+                        gen_expression($cg, $meth_target);
+                        emit($cg, "; StradaValue *__meth_res = strada_method_call(__meth_obj, \"" . $method . "\", NULL); ");
+                        emit($cg, "strada_decref(__meth_obj); __meth_res; })");
+                    } else {
+                        emit($cg, "strada_method_call(");
+                        gen_expression($cg, $meth_target);
+                        emit($cg, ", \"" . $method . "\", NULL)");
+                    }
                 } else {
-                    # No temp args but still need to free pack_args
+                    # Has args but no temp cleanup needed - use pack_args
                     emit($cg, "({ ");
                     if ($meth_obj_cleanup == 1) {
                         emit($cg, "StradaValue *__meth_obj = ");
@@ -12598,9 +12610,9 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             }
             # Handle initial capacity: my hash %name{size};
             if ($stmt->{"initial_capacity"}) {
-                emit($cg, "; strada_hash_reserve_sv(" . $c_name . ", strada_to_int(");
+                emit($cg, "; strada_hash_reserve_sv(" . $c_name . ", ({ StradaValue *__cap_tmp = ");
                 gen_expression($cg, $stmt->{"initial_capacity"});
-                emit($cg, "))");
+                emit($cg, "; int64_t __cap_val = strada_to_int(__cap_tmp); strada_decref(__cap_tmp); __cap_val; }))");
             }
         } elsif ($sigil eq "@" || $var_type == TYPE_ARRAY()) {
             emit_sv_ptr_decl($cg, $c_name);
@@ -12659,9 +12671,9 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             }
             # Handle initial capacity: my array $name[size];
             if ($stmt->{"initial_capacity"}) {
-                emit($cg, "; strada_reserve_sv(" . $c_name . ", strada_to_int(");
+                emit($cg, "; strada_reserve_sv(" . $c_name . ", ({ StradaValue *__cap_tmp = ");
                 gen_expression($cg, $stmt->{"initial_capacity"});
-                emit($cg, "))");
+                emit($cg, "; int64_t __cap_val = strada_to_int(__cap_tmp); strada_decref(__cap_tmp); __cap_val; }))");
             }
         } else {
             emit_sv_ptr_decl($cg, $c_name);

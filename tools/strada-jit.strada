@@ -15,13 +15,13 @@
  along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 
-# strada-repl - Interactive REPL for Strada
-# Uses the REPL library for compilation and evaluation
+# strada-jit - Interactive REPL for Strada
+# Uses the Strada::JIT library for compilation and evaluation
 
 use lib "lib/readline";
 use readline;
 use lib "lib";
-use REPL;
+use Strada::JIT;
 
 # REPL-specific state (UI, profiling)
 my int $g_repl_debug = 0;
@@ -60,7 +60,7 @@ func format_value(scalar $val) str {
 
 # Print help
 func print_help() void {
-    say("Strada REPL - Interactive Strada Shell");
+    say("Strada JIT - Interactive Strada Shell");
     say("");
     say("Commands:");
     say("  .help               - Show this help");
@@ -92,13 +92,13 @@ func print_help() void {
     say("");
     say("Notes:");
     say("  - fn is an alias for func");
-    say("  - String interpolation: use ${\"\\$var\"} syntax");
+    say("  - String interpolation: use dollar-brace syntax for variable embedding");
     say("");
 }
 
 # Print CLI usage
 func print_usage() void {
-    say("Usage: strada-repl [OPTIONS] [SCRIPT]");
+    say("Usage: strada-jit [OPTIONS] [SCRIPT]");
     say("");
     say("Options:");
     say("  -L PATH             Add library search path");
@@ -107,7 +107,7 @@ func print_usage() void {
     say("  --help, -h          Show this help");
     say("");
     say("If SCRIPT is provided, runs the script and exits.");
-    say("Scripts can use shebang: #!/path/to/strada-repl");
+    say("Scripts can use shebang: #!/path/to/strada-jit");
     say("");
 }
 
@@ -127,11 +127,11 @@ func parse_args(array @args) int {
                 say("Error: -L requires a path argument");
                 return 1;
             }
-            REPL::add_lib_path($args[$i]);
+            Strada::JIT::add_lib_path($args[$i]);
         } elsif ($arg =~ /^-L/) {
             my str $path = $arg;
             $path =~ s/^-L//;
-            REPL::add_lib_path($path);
+            Strada::JIT::add_lib_path($path);
         } elsif ($arg =~ /^--compiler=/) {
             $g_repl_compiler = $arg;
             $g_repl_compiler =~ s/^--compiler=//;
@@ -206,7 +206,7 @@ func run_script(str $filename) int {
             $buffer = $raw_line;
         }
 
-        if (REPL::is_balanced($buffer) == 0) {
+        if (Strada::JIT::is_balanced($buffer) == 0) {
             $continuation = 1;
             next;
         }
@@ -221,7 +221,7 @@ func run_script(str $filename) int {
         }
 
         try {
-            REPL::eval($input);
+            Strada::JIT::eval($input);
         } catch ($e) {
             say("Error at line " . $line_num . ": " . $e);
         }
@@ -249,9 +249,9 @@ func main(int $argc, array @argv) int {
     # Initialize the REPL library
     try {
         if ($g_repl_compiler ne "") {
-            REPL::init($g_repl_compiler);
+            Strada::JIT::init($g_repl_compiler);
         } else {
-            REPL::init();
+            Strada::JIT::init();
         }
     } catch ($e) {
         say("Error: " . $e);
@@ -259,7 +259,7 @@ func main(int $argc, array @argv) int {
     }
 
     if ($g_repl_debug == 1) {
-        REPL::debug(1);
+        Strada::JIT::debug(1);
     }
 
     # If a script file was provided, run it and exit
@@ -267,8 +267,8 @@ func main(int $argc, array @argv) int {
         return run_script($g_repl_script);
     }
 
-    say("Strada REPL v0.3 (using " . REPL::compiler() . ")");
-    if (REPL::compiler() eq "gcc") {
+    say("Strada JIT v0.3 (using " . Strada::JIT::compiler() . ")");
+    if (Strada::JIT::compiler() eq "gcc") {
         say("Tip: Install tcc for faster compilation (apt install tcc)");
     }
     say("Type .help for help, .quit to exit");
@@ -297,7 +297,7 @@ func main(int $argc, array @argv) int {
             $buffer = $line;
         }
 
-        if (REPL::is_balanced($buffer) == 0) {
+        if (Strada::JIT::is_balanced($buffer) == 0) {
             $continuation = 1;
             next;
         }
@@ -325,13 +325,13 @@ func main(int $argc, array @argv) int {
         }
 
         if ($input eq ".compiler") {
-            say("Compiler: " . REPL::compiler());
+            say("Compiler: " . Strada::JIT::compiler());
             next;
         }
 
         if ($input eq ".vars") {
-            my hash %vt = REPL::var_types();
-            my hash %st = REPL::state();
+            my hash %vt = Strada::JIT::var_types();
+            my hash %st = Strada::JIT::state();
             if (scalar(keys(%vt)) == 0) {
                 say("No variables declared");
             } else {
@@ -352,7 +352,7 @@ func main(int $argc, array @argv) int {
         }
 
         if ($input eq ".funcs") {
-            my array @fns = REPL::functions();
+            my array @fns = Strada::JIT::functions();
             if (scalar(@fns) == 0) {
                 say("No functions defined");
             } else {
@@ -371,14 +371,14 @@ func main(int $argc, array @argv) int {
         }
 
         if ($input eq ".clear") {
-            REPL::reset();
+            Strada::JIT::reset();
             say("State cleared");
             next;
         }
 
         if ($input eq ".imports") {
             my int $has_content = 0;
-            my array @lps = REPL::lib_paths();
+            my array @lps = Strada::JIT::lib_paths();
             if (scalar(@lps) > 0) {
                 say("Library paths:");
                 foreach my str $lp (@lps) {
@@ -386,7 +386,7 @@ func main(int $argc, array @argv) int {
                 }
                 $has_content = 1;
             }
-            my array @imps = REPL::imports();
+            my array @imps = Strada::JIT::imports();
             if (scalar(@imps) > 0) {
                 say("Imports:");
                 foreach my str $imp (@imps) {
@@ -459,7 +459,7 @@ func main(int $argc, array @argv) int {
                 if ($trimmed_line ne "" && $trimmed_line !~ /^#/) {
                     $line_count = $line_count + 1;
                     try {
-                        REPL::eval($trimmed_line);
+                        Strada::JIT::eval($trimmed_line);
                     } catch ($e) {
                         say("  Error: " . $e);
                     }
@@ -506,7 +506,7 @@ func main(int $argc, array @argv) int {
 
         if ($input eq ".debug") {
             $g_repl_debug = 1 - $g_repl_debug;
-            REPL::debug($g_repl_debug);
+            Strada::JIT::debug($g_repl_debug);
             if ($g_repl_debug == 1) {
                 say("Debug mode ON (shows generated Strada)");
             } else {
@@ -517,7 +517,7 @@ func main(int $argc, array @argv) int {
 
         if ($input eq ".cdebug") {
             $g_repl_cdebug = 1 - $g_repl_cdebug;
-            REPL::cdebug($g_repl_cdebug);
+            Strada::JIT::cdebug($g_repl_cdebug);
             if ($g_repl_cdebug == 1) {
                 say("C debug mode ON (shows generated C)");
             } else {
@@ -528,7 +528,7 @@ func main(int $argc, array @argv) int {
 
         # Evaluate the input
         try {
-            my scalar $result = REPL::eval($input);
+            my scalar $result = Strada::JIT::eval($input);
             if (defined($result)) {
                 say("=> " . format_value($result));
             }

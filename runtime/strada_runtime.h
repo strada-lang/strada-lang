@@ -265,10 +265,19 @@ typedef struct StradaFhMeta {
     struct StradaFhMeta *next;     /* Linked list */
 } StradaFhMeta;
 
-/* Main value structure - like Perl's SV */
+/* Cold metadata — only allocated for OOP, tied, weak, or CSTRUCT values */
+typedef struct StradaMetadata {
+    char *struct_name;       /* Name of C struct type (CSTRUCT/CPOINTER) */
+    char *blessed_package;   /* Package name this ref is blessed into, or NULL */
+    StradaValue *tied_obj;   /* Implementation object (NULL when !is_tied) */
+    uint8_t is_tied;         /* 0 = normal, 1 = tied */
+    uint8_t is_weak;         /* 0 = strong reference, 1 = weak reference */
+} StradaMetadata;
+
+/* Main value structure - like Perl's SV (32 bytes) */
 struct StradaValue {
-    StradaType type;
-    int refcount;
+    StradaType type;         /* 4B */
+    int refcount;            /* 4B */
     union {
         int64_t iv;      /* Integer value */
         double nv;       /* Numeric value */
@@ -284,21 +293,9 @@ struct StradaValue {
 #endif
         StradaSocketBuffer *sock;  /* Buffered socket */
         void *ptr;       /* Generic C pointer */
-    } value;
-
-    /* C struct metadata (when type == STRADA_CSTRUCT) */
-    char *struct_name;   /* Name of C struct type */
-    size_t struct_size;  /* Size of struct in bytes */
-
-    /* Blessed package (for OOP - like Perl's bless) */
-    char *blessed_package;  /* Package name this ref is blessed into, or NULL */
-
-    /* Tied variable support */
-    uint8_t is_tied;           /* 0 = normal, 1 = tied */
-    StradaValue *tied_obj;     /* Implementation object (NULL when !is_tied) */
-
-    /* Weak reference support */
-    uint8_t is_weak;           /* 0 = strong reference, 1 = weak reference */
+    } value;                 /* 8B */
+    size_t struct_size;      /* 8B - string length cache (hot path) */
+    StradaMetadata *meta;    /* 8B - NULL for most values */
 };
 
 /* Array structure - like Perl's AV */
@@ -307,6 +304,7 @@ struct StradaArray {
     size_t size;
     size_t capacity;
     int refcount;
+    size_t head;    /* Offset into elements[] where data starts (for O(1) shift) */
 };
 
 /* Hash entry */
@@ -314,6 +312,7 @@ typedef struct StradaHashEntry {
     char *key;
     StradaValue *value;
     struct StradaHashEntry *next;
+    unsigned int hash;
 } StradaHashEntry;
 
 /* Hash structure - like Perl's HV */
@@ -350,6 +349,7 @@ void strada_decref(StradaValue *sv);
 int64_t strada_to_int(StradaValue *sv);
 double strada_to_num(StradaValue *sv);
 char* strada_to_str(StradaValue *sv);
+const char* strada_to_str_buf(StradaValue *sv, char *buf, size_t buflen);  /* Non-allocating variant */
 int strada_to_bool(StradaValue *sv);
 
 /* String comparison with C literals (no temporaries) */
@@ -1261,25 +1261,25 @@ StradaValue* strada_tied(StradaValue *ref);
 
 /* Inline wrapper implementations */
 static inline StradaValue* strada_hv_fetch(StradaValue *sv, const char *key) {
-    if (__builtin_expect(sv->is_tied, 0)) return strada_tied_hash_fetch(sv, key);
+    if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) return strada_tied_hash_fetch(sv, key);
     return strada_hash_get(strada_deref_hash(sv), key);
 }
 static inline StradaValue* strada_hv_fetch_owned(StradaValue *sv, const char *key) {
-    if (__builtin_expect(sv->is_tied, 0)) return strada_tied_hash_fetch(sv, key);
+    if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) return strada_tied_hash_fetch(sv, key);
     StradaValue *result = strada_hash_get(strada_deref_hash(sv), key);
     strada_incref(result);
     return result;
 }
 static inline void strada_hv_store(StradaValue *sv, const char *key, StradaValue *val) {
-    if (__builtin_expect(sv->is_tied, 0)) { strada_tied_hash_store(sv, key, val); return; }
+    if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) { strada_tied_hash_store(sv, key, val); return; }
     strada_hash_set(strada_deref_hash(sv), key, val);
 }
 static inline int strada_hv_exists(StradaValue *sv, const char *key) {
-    if (__builtin_expect(sv->is_tied, 0)) return strada_tied_hash_exists(sv, key);
+    if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) return strada_tied_hash_exists(sv, key);
     return strada_hash_exists(strada_deref_hash(sv), key);
 }
 static inline void strada_hv_delete(StradaValue *sv, const char *key) {
-    if (__builtin_expect(sv->is_tied, 0)) { strada_tied_hash_delete(sv, key); return; }
+    if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) { strada_tied_hash_delete(sv, key); return; }
     strada_hash_delete(strada_deref_hash(sv), key);
 }
 

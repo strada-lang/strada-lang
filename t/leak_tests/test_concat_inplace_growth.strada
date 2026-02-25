@@ -1,0 +1,134 @@
+#!/usr/bin/env strada
+# Test string .= exponential growth buffer for memory leaks
+# Optimization: strada_concat_inplace uses malloc_usable_size() and 2x growth
+# to avoid O(n^2) realloc on repeated .= operations.
+# Run: valgrind --leak-check=full ./test_concat_inplace_growth
+
+func main() int {
+    say("Testing string .= exponential growth for memory leaks...");
+
+    # Test 1: Many small .= appends (exercises the growth buffer)
+    say("  Small appends (5000 iterations)...");
+    my str $s = "";
+    my int $i = 0;
+    while ($i < 5000) {
+        $s .= "x";
+        $i++;
+    }
+    if (length($s) != 5000) {
+        say("    FAIL: expected 5000, got " . length($s));
+        return 1;
+    }
+    say("    PASS");
+
+    # Test 2: Append longer strings (triggers realloc with 2x growth)
+    say("  Longer string appends...");
+    my str $s2 = "";
+    $i = 0;
+    while ($i < 1000) {
+        $s2 .= "hello";
+        $i++;
+    }
+    if (length($s2) != 5000) {
+        say("    FAIL: expected 5000, got " . length($s2));
+        return 1;
+    }
+    say("    PASS");
+
+    # Test 3: Repeated build-and-discard cycles (tests buffer reclamation)
+    say("  Build and discard cycles...");
+    $i = 0;
+    while ($i < 100) {
+        my str $tmp = "";
+        my int $j = 0;
+        while ($j < 200) {
+            $tmp .= "ab";
+            $j++;
+        }
+        if (length($tmp) != 400) {
+            say("    FAIL: cycle " . $i . " length = " . length($tmp));
+            return 1;
+        }
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 4: .= with integer coercion
+    say("  Append integers...");
+    my str $nums = "";
+    $i = 0;
+    while ($i < 500) {
+        $nums .= $i;
+        $i++;
+    }
+    if (length($nums) < 500) {
+        say("    FAIL: numeric append too short");
+        return 1;
+    }
+    say("    PASS");
+
+    # Test 5: .= with float coercion
+    say("  Append floats...");
+    my str $floats = "";
+    $i = 0;
+    while ($i < 500) {
+        my num $f = $i * 0.1;
+        $floats .= $f;
+        $i++;
+    }
+    if (length($floats) < 500) {
+        say("    FAIL: float append too short");
+        return 1;
+    }
+    say("    PASS");
+
+    # Test 6: Concat inplace with shared refs (refcount > 1 takes slow path)
+    say("  Shared ref concat (slow path)...");
+    $i = 0;
+    while ($i < 200) {
+        my str $base = "hello";
+        my str $alias = $base;
+        $base .= " world";
+        if ($base ne "hello world") {
+            say("    FAIL: shared ref concat");
+            return 1;
+        }
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 7: Empty string .= (edge case)
+    say("  Empty .= empty...");
+    $i = 0;
+    while ($i < 500) {
+        my str $e = "";
+        $e .= "";
+        if (length($e) != 0) {
+            say("    FAIL: empty .= empty");
+            return 1;
+        }
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 8: Alternating small and large appends
+    say("  Alternating append sizes...");
+    my str $alt = "";
+    $i = 0;
+    while ($i < 500) {
+        if ($i % 2 == 0) {
+            $alt .= "a";
+        } else {
+            $alt .= "abcdefghijklmnop";
+        }
+        $i++;
+    }
+    if (length($alt) != 250 + 250 * 16) {
+        say("    FAIL: alternating size");
+        return 1;
+    }
+    say("    PASS");
+
+    say("All concat inplace growth tests passed!");
+    return 0;
+}

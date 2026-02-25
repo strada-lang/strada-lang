@@ -1,0 +1,94 @@
+#!/usr/bin/env strada
+# Test strada_to_str_buf() optimization for memory leaks
+# String comparisons now use stack buffers instead of heap allocation
+# Run: valgrind --leak-check=full ./test_str_buf
+
+func main() int {
+    say("Testing string buffer optimization for memory leaks...");
+    my int $iterations = 100;
+
+    # Test string equality with literals
+    say("  String equality comparisons...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my str $a = "hello";
+        my str $b = "world";
+        if ($a eq "hello" && $b eq "world" && $a ne $b) {
+            # pass
+        } else {
+            say("    FAIL: string eq/ne");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test numeric to string conversion
+    say("  Numeric to string conversion...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $n = 42;
+        my str $s = "" . $n;
+        if ($s ne "42") {
+            say("    FAIL: int to string");
+            return 1;
+        }
+        my num $f = 3.14;
+        my str $fs = "" . $f;
+        if (length($fs) < 3) {
+            say("    FAIL: num to string");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test sort with string comparison (uses to_str_buf internally)
+    say("  Sort with string comparison...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @arr = ("banana", "apple", "cherry", "date");
+        my scalar $sorted = sort { $a cmp $b; } @arr;
+        if ($sorted->[0] ne "apple" || $sorted->[3] ne "date") {
+            say("    FAIL: sort string");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test string concatenation chains
+    say("  String concatenation...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $result = "a" . "b" . "c" . "d" . "e";
+        if ($result ne "abcde") {
+            say("    FAIL: concat");
+            return 1;
+        }
+        my int $n = 42;
+        my str $mixed = "value=" . $n . " end";
+        if ($mixed ne "value=42 end") {
+            say("    FAIL: mixed concat");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test string in hash keys (exercises interning + str_buf)
+    say("  String hash key lookups...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ("alpha" => 1, "beta" => 2, "gamma" => 3);
+        if ($h{"alpha"} != 1 || $h{"beta"} != 2 || $h{"gamma"} != 3) {
+            say("    FAIL: hash lookup");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All string buffer tests passed!");
+    return 0;
+}

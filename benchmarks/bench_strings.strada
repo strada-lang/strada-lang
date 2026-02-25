@@ -1,0 +1,38 @@
+package main;
+
+func main() int {
+    # Concatenate "hello" 500,000 times
+    my str $s = "";
+    my int $i = 0;
+    while ($i < 500000) {
+        $s .= "hello";
+        $i++;
+    }
+    say("concat len: " . length($s));
+
+    # Split a large string 100,000 times
+    my str $csv = "alpha,bravo,charlie,delta,echo,foxtrot,golf,hotel";
+    my int $total_parts = 0;
+    my int $j = 0;
+    while ($j < 100000) {
+        my array @parts = split(",", $csv);
+        $total_parts += scalar(@parts);
+        $j++;
+    }
+    say("split parts: " . $total_parts);
+
+    # Regex replace on a template string 200,000 times
+    my str $template = "Hello NAME, welcome to PLACE on DATE";
+    my int $m = 0;
+    my str $result = "";
+    while ($m < 200000) {
+        $result = $template;
+        $result =~ s/NAME/World/;
+        $result =~ s/PLACE/Strada/;
+        $result =~ s/DATE/today/;
+        $m++;
+    }
+    say("regex result: " . $result);
+
+    return 0;
+}

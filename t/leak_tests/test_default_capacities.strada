@@ -1,0 +1,135 @@
+#!/usr/bin/env strada
+# Test increased default array/hash capacities for memory leaks
+# Optimizations: default array capacity 8 → 16, hash capacity 16 → 32
+# Fewer early reallocs/resizes means different allocation patterns.
+# Run: valgrind --leak-check=full ./test_default_capacities
+
+func main() int {
+    say("Testing increased default capacities for memory leaks...");
+    my int $iterations = 100;
+
+    # Test 1: Array growing past default capacity (16)
+    say("  Array grow past default...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my array @arr = ();
+        my int $j = 0;
+        while ($j < 50) {
+            push(@arr, $j);
+            $j++;
+        }
+        if (scalar(@arr) != 50 || $arr[49] != 49) {
+            say("    FAIL: array grow");
+            return 1;
+        }
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 2: Array staying within default capacity (no realloc)
+    say("  Array within default capacity...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @small = ();
+        push(@small, 1);
+        push(@small, 2);
+        push(@small, 3);
+        if (scalar(@small) != 3) {
+            say("    FAIL");
+            return 1;
+        }
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 3: Hash growing past default capacity (32)
+    say("  Hash grow past default...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        my int $j = 0;
+        while ($j < 100) {
+            $h{"key_" . $j} = $j;
+            $j++;
+        }
+        if (scalar(keys(%h)) != 100) {
+            say("    FAIL: hash grow");
+            return 1;
+        }
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 4: Hash staying within default capacity
+    say("  Hash within default capacity...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %small = ("a" => 1, "b" => 2, "c" => 3);
+        if ($small{"a"} != 1 || $small{"c"} != 3) {
+            say("    FAIL");
+            return 1;
+        }
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 5: Pre-allocated array with core::array_reserve
+    say("  Pre-allocated array...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @big[500] = ();
+        my int $j = 0;
+        while ($j < 500) {
+            push(@big, $j);
+            $j++;
+        }
+        if (scalar(@big) != 500) {
+            say("    FAIL: reserved array");
+            return 1;
+        }
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 6: Pre-allocated hash
+    say("  Pre-allocated hash...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %big[256] = ();
+        my int $j = 0;
+        while ($j < 200) {
+            $big{"h_" . $j} = $j;
+            $j++;
+        }
+        if (scalar(keys(%big)) != 200) {
+            say("    FAIL: reserved hash");
+            return 1;
+        }
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 7: Array push/pop cycling (capacity stays allocated)
+    say("  Array push/pop cycling...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @cycle = ();
+        my int $j = 0;
+        while ($j < 30) {
+            push(@cycle, "item_" . $j);
+            $j++;
+        }
+        while (scalar(@cycle) > 0) {
+            pop(@cycle);
+        }
+        if (scalar(@cycle) != 0) {
+            say("    FAIL");
+            return 1;
+        }
+        $i++;
+    }
+    say("    PASS");
+
+    say("All default capacity tests passed!");
+    return 0;
+}
