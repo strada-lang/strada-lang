@@ -4189,12 +4189,13 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
         }
 
         # Build args
-        my array @args = ();
-        push(@args, $self_obj);
-        my int $ai = 0;
-        while ($ai < $argc) {
-            push(@args, eval_node($interp, $raw_args->[$ai], $env));
-            $ai = $ai + 1;
+        my array @args = [$self_obj];
+        if ($argc > 0) {
+            my int $ai = 0;
+            while ($ai < $argc) {
+                push(@args, eval_node($interp, $raw_args->[$ai], $env));
+                $ai = $ai + 1;
+            }
         }
 
         # Look up method in parent classes only
@@ -4224,12 +4225,13 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
         my scalar $raw_args = $node->{"args"};
         my int $argc = $node->{"arg_count"};
 
-        my array @args = ();
-        push(@args, $obj);
-        my int $ai = 0;
-        while ($ai < $argc) {
-            push(@args, eval_node($interp, $raw_args->[$ai], $env));
-            $ai = $ai + 1;
+        my array @args = [$obj];
+        if ($argc > 0) {
+            my int $ai = 0;
+            while ($ai < $argc) {
+                push(@args, eval_node($interp, $raw_args->[$ai], $env));
+                $ai = $ai + 1;
+            }
         }
 
         my str $pkg = get_obj_class($obj);
@@ -4826,23 +4828,25 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
         my int $argc = $node->{"arg_count"};
 
         # Build args: $self + explicit args
-        my array @args = ();
-        push(@args, $obj);
-        my int $ai = 0;
-        while ($ai < $argc) {
-            my scalar $arg_node = $raw_args->[$ai];
-            if (defined($arg_node) && $arg_node->{"type"} == NI::SPREAD) {
-                my scalar $spread_val = eval_node($interp, $arg_node->{"target"}, $env);
-                my int $slen = size($spread_val);
-                my int $si = 0;
-                while ($si < $slen) {
-                    push(@args, $spread_val->[$si]);
-                    $si = $si + 1;
+        # Fast path for zero-arg method calls (e.g., $obj->x(), $obj->name())
+        my array @args = [$obj];
+        if ($argc > 0) {
+            my int $ai = 0;
+            while ($ai < $argc) {
+                my scalar $arg_node = $raw_args->[$ai];
+                if (defined($arg_node) && $arg_node->{"type"} == NI::SPREAD) {
+                    my scalar $spread_val = eval_node($interp, $arg_node->{"target"}, $env);
+                    my int $slen = size($spread_val);
+                    my int $si = 0;
+                    while ($si < $slen) {
+                        push(@args, $spread_val->[$si]);
+                        $si = $si + 1;
+                    }
+                } else {
+                    push(@args, eval_node($interp, $arg_node, $env));
                 }
-            } else {
-                push(@args, eval_node($interp, $arg_node, $env));
+                $ai = $ai + 1;
             }
-            $ai = $ai + 1;
         }
 
         # Get object's class
@@ -5146,8 +5150,14 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
 
         if (defined($func_info)) {
             # Check for before/after modifiers
+            my int $mod_count = size($interp->{"method_modifiers"});
+
+            # Fast path: no modifiers (common case), skip all modifier loops
+            if ($mod_count == 0) {
+                return call_user_func($interp, $func_info, \@args);
+            }
+
             my scalar $mods = $interp->{"method_modifiers"};
-            my int $mod_count = size($mods);
 
             # Execute before modifiers
             my int $mi = 0;
