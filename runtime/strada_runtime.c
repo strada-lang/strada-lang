@@ -13531,6 +13531,99 @@ StradaValue* strada_cfsetispeed(StradaValue *termios, StradaValue *speed) {
     return strada_new_int(0);
 }
 
+/* ===== HIGH-LEVEL TERMINAL MODE ===== */
+
+static struct termios strada_saved_termios;
+static int strada_raw_mode_active = 0;
+
+StradaValue* strada_term_enable_raw(void) {
+    if (strada_raw_mode_active) return strada_new_int(0);
+    struct termios t;
+    if (tcgetattr(STDIN_FILENO, &strada_saved_termios) < 0) return strada_new_int(-1);
+    t = strada_saved_termios;
+    t.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+    t.c_oflag &= ~(OPOST);
+    t.c_cflag |= CS8;
+    t.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
+    t.c_cc[VMIN] = 0;
+    t.c_cc[VTIME] = 1;
+    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &t) < 0) return strada_new_int(-1);
+    strada_raw_mode_active = 1;
+    return strada_new_int(0);
+}
+
+StradaValue* strada_term_disable_raw(void) {
+    if (!strada_raw_mode_active) return strada_new_int(0);
+    int result = tcsetattr(STDIN_FILENO, TCSAFLUSH, &strada_saved_termios);
+    strada_raw_mode_active = 0;
+    return strada_new_int(result < 0 ? -1 : 0);
+}
+
+StradaValue* strada_term_rows(void) {
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_row == 0) {
+        const char *env = getenv("LINES");
+        return strada_new_int(env ? atoi(env) : 24);
+    }
+    return strada_new_int(ws.ws_row);
+}
+
+StradaValue* strada_term_cols(void) {
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
+        const char *env = getenv("COLUMNS");
+        return strada_new_int(env ? atoi(env) : 80);
+    }
+    return strada_new_int(ws.ws_col);
+}
+
+StradaValue* strada_read_byte(StradaValue *fd_val) {
+    int fd = strada_to_int(fd_val);
+    unsigned char c;
+    int n = read(fd, &c, 1);
+    if (n <= 0) return strada_new_int(-1);
+    return strada_new_int((int)c);
+}
+
+/* ===== DIRECTORY ITERATION ===== */
+
+StradaValue* strada_opendir(StradaValue *path_val) {
+    char _tb[PATH_MAX];
+    const char *path = strada_to_str_buf(path_val, _tb, sizeof(_tb));
+    DIR *d = opendir(path);
+    if (!d) return strada_new_undef();
+    StradaValue *sv = strada_cpointer_new(d);
+    if (sv->meta == NULL) {
+        sv->meta = (StradaMetadata*)calloc(1, sizeof(StradaMetadata));
+    }
+    sv->meta->struct_name = "DIR";
+    return sv;
+}
+
+StradaValue* strada_readdir_next(StradaValue *dh) {
+    if (!dh || STRADA_IS_TAGGED_INT(dh) || dh->type != STRADA_CPOINTER || !dh->value.ptr) {
+        return strada_new_undef();
+    }
+    DIR *d = (DIR*)dh->value.ptr;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL) {
+        if (ent->d_name[0] == '.' && ent->d_name[1] == '\0') continue;
+        if (ent->d_name[0] == '.' && ent->d_name[1] == '.' && ent->d_name[2] == '\0') continue;
+        return strada_new_str(ent->d_name);
+    }
+    return strada_new_undef();
+}
+
+StradaValue* strada_closedir(StradaValue *dh) {
+    if (!dh || STRADA_IS_TAGGED_INT(dh) || dh->type != STRADA_CPOINTER || !dh->value.ptr) {
+        return strada_new_int(-1);
+    }
+    DIR *d = (DIR*)dh->value.ptr;
+    int result = closedir(d);
+    dh->value.ptr = NULL;
+    return strada_new_int(result);
+}
+
 /* High-level serial port open function
  * Opens a serial port device and configures it for raw I/O
  * Parameters:
@@ -14523,6 +14616,7 @@ StradaValue* strada_array_splice_sv(StradaValue *arr_sv, int64_t offset, int64_t
     /* Get replacement elements */
     StradaArray *repl_av = NULL;
     int64_t repl_count = 0;
+    int repl_is_scalar = 0;
     if (repl_sv && !STRADA_IS_TAGGED_INT(repl_sv) && repl_sv->type == STRADA_REF && repl_sv->value.rv &&
         repl_sv->value.rv->type == STRADA_ARRAY) {
         repl_av = repl_sv->value.rv->value.av;
@@ -14530,6 +14624,10 @@ StradaValue* strada_array_splice_sv(StradaValue *arr_sv, int64_t offset, int64_t
     } else if (repl_sv && !STRADA_IS_TAGGED_INT(repl_sv) && repl_sv->type == STRADA_ARRAY) {
         repl_av = repl_sv->value.av;
         repl_count = (int64_t)repl_av->size;
+    } else if (repl_sv) {
+        /* Scalar replacement: treat as single-element insert (like Perl) */
+        repl_count = 1;
+        repl_is_scalar = 1;
     }
 
     /* Calculate new size */
@@ -14556,10 +14654,15 @@ StradaValue* strada_array_splice_sv(StradaValue *arr_sv, int64_t offset, int64_t
     }
 
     /* Insert replacement elements */
-    for (int64_t i = 0; i < repl_count; i++) {
-        StradaValue *elem = repl_av->elements[repl_av->head + i];
-        strada_incref(elem);
-        av->elements[offset + i] = elem;
+    if (repl_is_scalar) {
+        strada_incref(repl_sv);
+        av->elements[offset] = repl_sv;
+    } else {
+        for (int64_t i = 0; i < repl_count; i++) {
+            StradaValue *elem = repl_av->elements[repl_av->head + i];
+            strada_incref(elem);
+            av->elements[offset + i] = elem;
+        }
     }
     av->size = (size_t)new_size;
 

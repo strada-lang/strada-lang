@@ -1118,6 +1118,18 @@ StradaValue* strada_serial_open(const char *device, int baud, const char *config
 StradaValue* strada_tcflush(StradaValue *fd, StradaValue *queue);
 StradaValue* strada_tcdrain(StradaValue *fd);
 
+/* High-level terminal mode */
+StradaValue* strada_term_enable_raw(void);
+StradaValue* strada_term_disable_raw(void);
+StradaValue* strada_term_rows(void);
+StradaValue* strada_term_cols(void);
+StradaValue* strada_read_byte(StradaValue *fd);
+
+/* Directory iteration */
+StradaValue* strada_opendir(StradaValue *path);
+StradaValue* strada_readdir_next(StradaValue *dh);
+StradaValue* strada_closedir(StradaValue *dh);
+
 /* Advanced file operations */
 StradaValue* strada_fcntl(StradaValue *fd, StradaValue *cmd, StradaValue *arg);
 StradaValue* strada_flock(StradaValue *fd, StradaValue *operation);

@@ -122,6 +122,77 @@ func check_arithmetic() void {
     }
 }
 
+our scalar $GLINES;
+
+func set_lines_from_local() void {
+    # Assigning a local array ref to an our variable.
+    # Bug: strada_global_set() consumed the local's ref, then function
+    # cleanup decreffed it again → double-decref → use-after-free.
+    my scalar $lines = ["alpha", "beta", "gamma"];
+    $GLINES = $lines;
+    # Both local and global should be usable after assignment
+    if (scalar(@$lines) == 3) {
+        say("ok 13 - local still valid after our assignment");
+    } else {
+        say("not ok 13 - local corrupted, got " . scalar(@$lines));
+    }
+}
+
+func check_our_from_local() void {
+    # After the function that assigned the local to our returns,
+    # the our variable must still be valid (local was cleaned up).
+    if (scalar(@$GLINES) == 3) {
+        say("ok 14 - our var survives after assigning function returns");
+    } else {
+        say("not ok 14 - our var corrupted, got " . scalar(@$GLINES));
+    }
+    if ($GLINES->[0] eq "alpha") {
+        say("ok 15 - our var element access correct");
+    } else {
+        say("not ok 15 - got: " . $GLINES->[0]);
+    }
+}
+
+our scalar $GBUF;
+
+func set_buf_from_param(scalar $data) void {
+    # Assigning a parameter to an our variable — same bug pattern.
+    $GBUF = $data;
+}
+
+func check_our_from_param() void {
+    set_buf_from_param(["one", "two"]);
+    if (scalar(@$GBUF) == 2) {
+        say("ok 16 - our var from param survives");
+    } else {
+        say("not ok 16 - our var from param corrupted, got " . scalar(@$GBUF));
+    }
+}
+
+our scalar $GHASH;
+
+func multi_our_assign() void {
+    # Assign multiple local refs to our vars in sequence
+    my scalar $h = {"key" => "value", "n" => 42};
+    $GHASH = $h;
+    my scalar $a = [10, 20, 30, 40];
+    $GLINES = $a;
+}
+
+func check_multi_our() void {
+    multi_our_assign();
+    if ($GHASH->{"key"} eq "value") {
+        say("ok 17 - multi our assign hash survives");
+    } else {
+        say("not ok 17");
+    }
+    if (scalar(@$GLINES) == 4) {
+        say("ok 18 - multi our assign array survives");
+    } else {
+        say("not ok 18");
+    }
+}
+
 func main() int {
     check_count();
     check_name();
@@ -132,6 +203,10 @@ func main() int {
     check_bool_context();
     check_compound_assign();
     check_arithmetic();
+    set_lines_from_local();
+    check_our_from_local();
+    check_our_from_param();
+    check_multi_our();
 
     say("All our variable tests passed");
     return 0;

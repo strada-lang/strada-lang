@@ -2291,6 +2291,22 @@ func needs_temp_cleanup(scalar $cg, scalar $expr) int {
             $name eq "sys::dup" ||
             # Misc
             $name eq "dumper_str" ||
+            # String conversion
+            $name eq "sys::atoi" || $name eq "sys::atof" ||
+            $name eq "sys::strtol" || $name eq "sys::strtod" ||
+            # Terminal/TTY
+            $name eq "sys::ttyname" ||
+            $name eq "sys::tcgetattr" || $name eq "sys::tcsetattr" ||
+            $name eq "sys::cfgetospeed" || $name eq "sys::cfsetospeed" ||
+            $name eq "sys::cfgetispeed" || $name eq "sys::cfsetispeed" ||
+            $name eq "sys::tcflush" || $name eq "sys::tcdrain" ||
+            $name eq "sys::term_enable_raw" || $name eq "sys::term_disable_raw" ||
+            $name eq "sys::term_rows" || $name eq "sys::term_cols" ||
+            $name eq "sys::read_byte" ||
+            # Directory iteration
+            $name eq "sys::opendir" || $name eq "sys::readdir_next" || $name eq "sys::closedir" ||
+            # Advanced I/O
+            $name eq "sys::ioctl" || $name eq "sys::fcntl" || $name eq "sys::flock" ||
             # Async/threading
             $name eq "async::channel" || $name eq "async::mutex" || $name eq "async::atomic") {
             return 1;
@@ -9744,47 +9760,73 @@ func gen_expression(scalar $cg, scalar $expr) void {
         }
 
         if ($name eq "sys::atoi") {
-            emit($cg, "strada_atoi(");
             my scalar $args = $expr->{"args"};
-            gen_expression($cg, $args->[0]);
-            emit($cg, ")");
+            gen_call_with_arg_cleanup($cg, "strada_atoi", $args, 1);
             return;
         }
 
         if ($name eq "sys::atof") {
-            emit($cg, "strada_atof(");
             my scalar $args = $expr->{"args"};
-            gen_expression($cg, $args->[0]);
-            emit($cg, ")");
+            gen_call_with_arg_cleanup($cg, "strada_atof", $args, 1);
             return;
         }
 
         # Terminal/TTY
         if ($name eq "sys::ttyname") {
-            emit($cg, "strada_ttyname(");
             my scalar $args = $expr->{"args"};
-            gen_expression($cg, $args->[0]);
-            emit($cg, ")");
+            gen_call_with_arg_cleanup($cg, "strada_ttyname", $args, 1);
             return;
         }
 
         if ($name eq "sys::tcgetattr") {
-            emit($cg, "strada_tcgetattr(");
             my scalar $args = $expr->{"args"};
-            gen_expression($cg, $args->[0]);
-            emit($cg, ")");
+            gen_call_with_arg_cleanup($cg, "strada_tcgetattr", $args, 1);
             return;
         }
 
         if ($name eq "sys::tcsetattr") {
-            emit($cg, "strada_tcsetattr(");
             my scalar $args = $expr->{"args"};
-            gen_expression($cg, $args->[0]);
-            emit($cg, ", ");
-            gen_expression($cg, $args->[1]);
-            emit($cg, ", ");
-            gen_expression($cg, $args->[2]);
-            emit($cg, ")");
+            gen_call_with_arg_cleanup($cg, "strada_tcsetattr", $args, 3);
+            return;
+        }
+
+        # High-level terminal mode
+        if ($name eq "sys::term_enable_raw") {
+            emit($cg, "strada_term_enable_raw()");
+            return;
+        }
+        if ($name eq "sys::term_disable_raw") {
+            emit($cg, "strada_term_disable_raw()");
+            return;
+        }
+        if ($name eq "sys::term_rows") {
+            emit($cg, "strada_term_rows()");
+            return;
+        }
+        if ($name eq "sys::term_cols") {
+            emit($cg, "strada_term_cols()");
+            return;
+        }
+        if ($name eq "sys::read_byte") {
+            my scalar $args = $expr->{"args"};
+            gen_call_with_arg_cleanup($cg, "strada_read_byte", $args, 1);
+            return;
+        }
+
+        # Directory iteration
+        if ($name eq "sys::opendir") {
+            my scalar $args = $expr->{"args"};
+            gen_call_with_arg_cleanup($cg, "strada_opendir", $args, 1);
+            return;
+        }
+        if ($name eq "sys::readdir_next") {
+            my scalar $args = $expr->{"args"};
+            gen_call_with_arg_cleanup($cg, "strada_readdir_next", $args, 1);
+            return;
+        }
+        if ($name eq "sys::closedir") {
+            my scalar $args = $expr->{"args"};
+            gen_call_with_arg_cleanup($cg, "strada_closedir", $args, 1);
             return;
         }
 
@@ -10006,18 +10048,12 @@ func gen_expression(scalar $cg, scalar $expr) void {
         }
 
         if ($name eq "sys::ioctl") {
-            emit($cg, "strada_ioctl(");
             my scalar $args = $expr->{"args"};
-            gen_expression($cg, $args->[0]);
-            emit($cg, ", ");
-            gen_expression($cg, $args->[1]);
-            emit($cg, ", ");
             if ($expr->{"arg_count"} > 2) {
-                gen_expression($cg, $args->[2]);
+                gen_call_with_arg_cleanup($cg, "strada_ioctl", $args, 3);
             } else {
-                emit($cg, "NULL");
+                gen_call_with_arg_cleanup($cg, "strada_ioctl", $args, 2);
             }
-            emit($cg, ")");
             return;
         }
 
@@ -11234,9 +11270,21 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 my scalar $our_vars2 = $cg->{"our_vars"};
                 my str $our_key2 = "" . $our_vars2->{$our_target_name};
                 if (length($our_key2) > 0) {
-                    emit($cg, "strada_global_set(strada_new_str(\"" . $our_key2 . "\"), ");
-                    gen_expression($cg, $expr->{"value"});
-                    emit($cg, ")");
+                    my scalar $our_rhs = $expr->{"value"};
+                    if (needs_temp_cleanup($cg, $our_rhs) == 0) {
+                        # RHS is a borrowed/shared ref (local var, array subscript, param).
+                        # strada_global_set() consumes the caller's ref (increfs for
+                        # registry, then decrefs the passed value).  Without an extra
+                        # incref the local/param's own ref would be stolen, leading to
+                        # a use-after-free when function cleanup decrefs the local.
+                        emit($cg, "({ StradaValue *__gs_v = ");
+                        gen_expression($cg, $our_rhs);
+                        emit($cg, "; strada_incref(__gs_v); strada_global_set(strada_new_str(\"" . $our_key2 . "\"), __gs_v); __gs_v; })");
+                    } else {
+                        emit($cg, "strada_global_set(strada_new_str(\"" . $our_key2 . "\"), ");
+                        gen_expression($cg, $our_rhs);
+                        emit($cg, ")");
+                    }
                     return;
                 }
             }
