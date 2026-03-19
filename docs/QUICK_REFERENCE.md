@@ -958,6 +958,12 @@ All `core::` functions can also be called via the `core::` prefix (preferred). F
 
 **FFI:** `core::dl_open`, `core::dl_sym`, `core::dl_close`, `core::dl_call_int`, `core::dl_call_num`, `core::dl_call_str`, `core::dl_call_void`, `core::dl_call_int_sv`, `core::dl_call_str_sv`, `core::dl_call_void_sv`, `core::dl_error`
 
+**Directory:** `core::readdir`, `core::readdir_full`, `core::opendir`, `core::readdir_next`, `core::closedir`, `core::is_dir`, `core::is_file`
+
+**Terminal:** `core::term_enable_raw`, `core::term_disable_raw`, `core::term_rows`, `core::term_cols`, `core::read_byte`
+
+**Conversion:** `core::atoi`, `core::atof`
+
 **Binary/Bytes:** `core::ord_byte`, `core::get_byte`, `core::set_byte`, `core::byte_length`, `core::byte_substr`, `core::pack`, `core::unpack`
 
 ### math:: Namespace Functions

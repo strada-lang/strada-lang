@@ -1963,6 +1963,24 @@ Socket readline automatically strips `\r` characters for clean CRLF handling.
 - `core::getenv($name)` - Get environment variable
 - `core::setenv($name, $val)` - Set environment variable
 
+**Directory:**
+- `core::opendir($path)` - Open directory for iteration, returns handle (undef on failure)
+- `core::readdir_next($dh)` - Next entry from dir handle (skips `.`/`..`), undef at end
+- `core::closedir($dh)` - Close directory handle, returns 0 on success
+- `core::readdir($path)` - Get array of all filenames (excludes `.`/`..`)
+- `core::is_dir($path)` - Check if path is directory (1/0)
+
+**Terminal:**
+- `core::term_enable_raw()` - Enable terminal raw mode (saves original termios)
+- `core::term_disable_raw()` - Restore terminal to original mode
+- `core::term_rows()` - Terminal height in rows (default 24)
+- `core::term_cols()` - Terminal width in columns (default 80)
+- `core::read_byte($fd)` - Read single byte from fd (0-255, -1 on EOF)
+
+**Conversion:**
+- `core::atoi($str)` - String to integer (returns 0 for non-numeric)
+- `core::atof($str)` - String to float
+
 **Binary/Bytes:**
 - `core::ord_byte($s)` - First byte as integer (0-255)
 - `core::get_byte($s, $pos)` - Byte at position

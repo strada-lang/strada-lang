@@ -317,7 +317,41 @@ Like `stat` but doesn't follow symlinks.
 my array @entries = core::readdir($path);
 ```
 
-Read directory contents. Returns array of filenames.
+Read directory contents. Returns array of filenames (excludes `.` and `..`).
+
+### core::opendir
+
+```strada
+my scalar $dh = core::opendir($path);
+```
+
+Open a directory for iterative reading. Returns a directory handle, or `undef` on failure. Use with `core::readdir_next()` and `core::closedir()`.
+
+### core::readdir_next
+
+```strada
+my str $entry = core::readdir_next($dh);
+```
+
+Read the next entry from a directory handle (skips `.` and `..`). Returns `undef` when no more entries.
+
+```strada
+my scalar $dh = core::opendir(".");
+my str $entry = core::readdir_next($dh);
+while (defined($entry)) {
+    say($entry);
+    $entry = core::readdir_next($dh);
+}
+core::closedir($dh);
+```
+
+### core::closedir
+
+```strada
+my int $rc = core::closedir($dh);
+```
+
+Close a directory handle. Returns 0 on success.
 
 ### core::readdir_full
 
@@ -1774,6 +1808,46 @@ core::cfsetispeed(%termios, $speed);
 ```
 
 Set input baud rate.
+
+### core::term_enable_raw
+
+```strada
+core::term_enable_raw();
+```
+
+Enable terminal raw mode. Saves the current termios settings (restored by `term_disable_raw`). Disables canonical mode, echo, and signal processing. Sets minimum read to 0 bytes with 1/10 second timeout.
+
+### core::term_disable_raw
+
+```strada
+core::term_disable_raw();
+```
+
+Restore terminal to the mode saved by `term_enable_raw()`. No-op if raw mode was never enabled.
+
+### core::term_rows
+
+```strada
+my int $rows = core::term_rows();
+```
+
+Get terminal height in rows. Uses `ioctl(TIOCGWINSZ)`, falls back to `LINES` environment variable, then defaults to 24.
+
+### core::term_cols
+
+```strada
+my int $cols = core::term_cols();
+```
+
+Get terminal width in columns. Uses `ioctl(TIOCGWINSZ)`, falls back to `COLUMNS` environment variable, then defaults to 80.
+
+### core::read_byte
+
+```strada
+my int $byte = core::read_byte($fd);
+```
+
+Read a single byte from file descriptor `$fd`. Returns 0-255 on success, -1 on EOF or error.
 
 ## Advanced File Operations
 

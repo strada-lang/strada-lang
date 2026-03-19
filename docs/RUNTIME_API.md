@@ -136,6 +136,10 @@ int strada_to_bool(StradaValue *sv);
 
 **Important**: `strada_to_int()` transparently handles tagged integer pointers. In `__C__` blocks, always use this function rather than accessing `sv->value.iv` directly, as the pointer may be a tagged integer rather than a heap-allocated struct.
 
+### High-Level Conversion Functions
+
+From Strada code, use `core::atoi($str)` and `core::atof($str)` to convert strings to integers/floats. These map to C `atoi()`/`atof()` and return tagged integers or heap-allocated nums respectively.
+
 ### Boolean Conversion Rules
 
 | Type | True when |

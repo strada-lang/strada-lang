@@ -3381,6 +3381,8 @@ See `docs/PERL_INTEGRATION.md` for comprehensive documentation on:
 | `cast_int($val)` | Convert to integer |
 | `cast_num($val)` | Convert to number |
 | `cast_str($val)` | Convert to string |
+| `core::atoi($str)` | String to integer (returns 0 for non-numeric) |
+| `core::atof($str)` | String to float |
 
 ### Type Checking
 
@@ -3451,6 +3453,26 @@ See `docs/PERL_INTEGRATION.md` for comprehensive documentation on:
 | `core::slurp($path)` | Read entire file |
 | `core::spew($path, $data)` | Write entire file |
 | `select($fh)` | Set default filehandle |
+
+### Directory Functions (core:: namespace)
+
+| Function | Description |
+|----------|-------------|
+| `core::opendir($path)` | Open directory for iteration (returns handle, undef on failure) |
+| `core::readdir_next($dh)` | Next entry (skips `.`/`..`), undef at end |
+| `core::closedir($dh)` | Close directory handle |
+| `core::readdir($path)` | Batch: array of all filenames |
+| `core::is_dir($path)` | Returns 1 if directory, 0 otherwise |
+
+### Terminal Functions (core:: namespace)
+
+| Function | Description |
+|----------|-------------|
+| `core::term_enable_raw()` | Enable raw mode (saves original termios) |
+| `core::term_disable_raw()` | Restore original terminal mode |
+| `core::term_rows()` | Terminal height (default 24) |
+| `core::term_cols()` | Terminal width (default 80) |
+| `core::read_byte($fd)` | Read one byte (0-255, -1 on EOF) |
 
 ### Regex Functions
 
