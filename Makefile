@@ -66,7 +66,7 @@ RUNTIME_HDR = $(RUNTIME_DIR)/strada_runtime.h
 RUNTIME_OBJ = $(RUNTIME_DIR)/strada_runtime.o
 RUNTIME_TCC_OBJ = $(RUNTIME_DIR)/strada_runtime_tcc.o
 
-.PHONY: all clean test test-all test-examples test-selfhost test-suite runtime bootstrap compiler examples run run-bootstrap help info selfhost install uninstall tools libs lib-dbi lib-crypt lib-ssl lib-readline configure-check stage1 interpreter test-interp
+.PHONY: all clean test test-all test-examples test-selfhost test-suite runtime bootstrap compiler examples run run-bootstrap help info selfhost install uninstall tools libs lib-dbi lib-crypt lib-ssl lib-readline configure-check stage1 interpreter test-interp perl2strada cpan2strada install-perl2strada install-cpan2strada
 
 # Default: build everything including self-hosting compiler and tools
 all: stradac $(RUNTIME_OBJ) tools
@@ -257,8 +257,11 @@ test-suite: stradac $(RUNTIME_OBJ)
 	if [ -n "$(FILTER)" ]; then OPTS="$$OPTS $(FILTER)"; fi; \
 	./t/run_tests.sh $$OPTS
 
-# Build tools (stradadoc, strada-soinfo, strada-md2man, strada-md2html, strada-jit, stradapp, perl2strada, xs2strada)
-TOOL_BINS = tools/stradadoc tools/strada-soinfo tools/strada-md2man tools/strada-md2html tools/strada-jit tools/stradapp tools/perl2strada tools/xs2strada tools/cpan2strada
+# Build tools (stradadoc, strada-soinfo, strada-md2man, strada-md2html, strada-jit, stradapp, xs2strada)
+TOOL_BINS = tools/stradadoc tools/strada-soinfo tools/strada-md2man tools/strada-md2html tools/strada-jit tools/stradapp tools/xs2strada
+
+# Converter tools (built separately)
+CONVERTER_BINS = tools/perl2strada tools/cpan2strada
 
 tools: $(TOOL_BINS)
 	@echo ""
@@ -299,6 +302,10 @@ tools/xs2strada: tools/xs2strada.strada stradac
 tools/cpan2strada: tools/cpan2strada.strada stradac tools/perl2strada tools/xs2strada
 	@echo "Building cpan2strada (CPAN dist to Strada converter)..."
 	@./strada tools/cpan2strada.strada -o tools/cpan2strada
+
+# Converter tools (not built by default)
+perl2strada: tools/perl2strada
+cpan2strada: tools/cpan2strada
 
 # =============================================================================
 # Library Targets
@@ -426,9 +433,9 @@ install: stradac $(RUNTIME_OBJ)
 			install -m 644 "$$f" $(INSTALL_DOC)/; \
 		done; \
 	fi
-	@# Build and install tools
+	@# Build and install tools (converters excluded — use make install-perl2strada)
 	@echo "Installing tools..."
-	@for tool in stradadoc strada-soinfo strada-md2man strada-md2html strada-jit stradapp; do \
+	@for tool in stradadoc strada-soinfo strada-md2man strada-md2html strada-jit stradapp xs2strada; do \
 		if [ ! -x tools/$$tool ]; then \
 			echo "  Building $$tool..."; \
 			./strada tools/$$tool.strada -o tools/$$tool 2>/dev/null || true; \
@@ -484,6 +491,18 @@ install: stradac $(RUNTIME_OBJ)
 	@echo ""
 	@echo "Make sure $(INSTALL_BIN) is in your PATH"
 
+install-perl2strada: tools/perl2strada
+	@echo "Installing perl2strada..."
+	@mkdir -p $(INSTALL_BIN)
+	install -m 755 tools/perl2strada $(INSTALL_BIN)/perl2strada
+	@echo "✓ perl2strada installed to $(INSTALL_BIN)/perl2strada"
+
+install-cpan2strada: tools/cpan2strada
+	@echo "Installing cpan2strada..."
+	@mkdir -p $(INSTALL_BIN)
+	install -m 755 tools/cpan2strada $(INSTALL_BIN)/cpan2strada
+	@echo "✓ cpan2strada installed to $(INSTALL_BIN)/cpan2strada"
+
 uninstall:
 	@echo "=== Uninstalling Strada from $(PREFIX) ==="
 	rm -f $(INSTALL_BIN)/stradac
@@ -494,6 +513,8 @@ uninstall:
 	rm -f $(INSTALL_BIN)/strada-md2html
 	rm -f $(INSTALL_BIN)/strada-jit
 	rm -f $(INSTALL_BIN)/strada-interp
+	rm -f $(INSTALL_BIN)/perl2strada
+	rm -f $(INSTALL_BIN)/cpan2strada
 	rm -rf $(INSTALL_LIB)
 	rm -rf $(INSTALL_DOC)
 	rm -f $(INSTALL_MAN)/stradac.1
@@ -515,7 +536,7 @@ clean:
 	find $(EXAMPLES_DIR) -maxdepth 1 -type f -executable -delete
 	rm -rf build/*
 	rm -f stradac
-	rm -f $(TOOL_BINS)
+	rm -f $(TOOL_BINS) $(CONVERTER_BINS)
 	rm -f lib/readline.so
 	@if [ -f vendor/pcre2/Makefile ]; then $(MAKE) -C vendor/pcre2 clean; fi
 	@echo "✓ Cleaned"

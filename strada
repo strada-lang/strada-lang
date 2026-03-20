@@ -611,6 +611,9 @@ for path in "${LIB_PATHS_LOW[@]}"; do
 done
 
 info "Compiling $ACTUAL_INPUT -> $C_FILE"
+if [ "$VERBOSE" -eq 1 ]; then
+    STRADAC_FLAGS="$STRADAC_FLAGS -v"
+fi
 if [ -n "$STRADAC_FLAGS" ]; then
     if ! run_cmd "$STRADAC" $STRADAC_FLAGS "$ACTUAL_INPUT" "$C_FILE"; then
         error "Strada compilation failed"
@@ -756,7 +759,9 @@ else
     fi
 fi
 
-echo -e "${GREEN}Created:${NC} $OUTPUT"
+if [ "$VERBOSE" -eq 1 ]; then
+    echo -e "${GREEN}Created:${NC} $OUTPUT"
+fi
 
 # Step 3: Run if requested
 if [ "$RUN_AFTER" -eq 1 ]; then

@@ -69,6 +69,7 @@ func print_usage() void {
     say("  -t, --timing    Show compilation phase timing");
     say("  -w, --warnings  Show warnings (unused variables, etc.)");
     say("  --no-stack-trace  Disable stack trace support (for performance)");
+    say("  -v, --verbose   Show compilation progress");
     say("  -h, --help      Show this help message");
     say("");
     say("The self-hosting Strada compiler, written in Strada.");
@@ -83,6 +84,7 @@ func main() int {
     my int $show_warnings = 0;
     my int $enable_profiling = 0;
     my int $enable_stack_trace = 1;  # Enabled by default
+    my int $verbose = 0;
     my str $input_file = "";
     my str $output_file = "";
     my array @lib_paths = ();
@@ -100,6 +102,8 @@ func main() int {
             $show_timing = 1;
         } elsif ($arg eq "-w" || $arg eq "--warnings") {
             $show_warnings = 1;
+        } elsif ($arg eq "-v" || $arg eq "--verbose") {
+            $verbose = 1;
         } elsif ($arg eq "--no-stack-trace") {
             $enable_stack_trace = 0;
         } elsif ($arg eq "-LL") {
@@ -150,14 +154,16 @@ func main() int {
         return 1;
     }
 
-    say("Strada Compiler (Self-Hosting)");
-    if ($debug_info == 1) {
-        say("Debug mode: emitting #line directives");
+    if ($verbose == 1) {
+        say("Strada Compiler (Self-Hosting)");
+        if ($debug_info == 1) {
+            say("Debug mode: emitting #line directives");
+        }
+        if ($enable_profiling == 1) {
+            say("Profiling mode: instrumenting functions for timing");
+        }
+        say("Compiling: " . $input_file . " -> " . $output_file);
     }
-    if ($enable_profiling == 1) {
-        say("Profiling mode: instrumenting functions for timing");
-    }
-    say("Compiling: " . $input_file . " -> " . $output_file);
 
     # Read source file
     my str $source = slurp($input_file);
@@ -168,7 +174,9 @@ func main() int {
     # Write output
     spew($output_file, $code);
 
-    say("Success! Generated " . $output_file);
+    if ($verbose == 1) {
+        say("Success! Generated " . $output_file);
+    }
 
     return 0;
 }
