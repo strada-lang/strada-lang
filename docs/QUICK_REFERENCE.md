@@ -12,6 +12,8 @@ make
 ./strada -c program.strada       # Keep .c file
 ./strada -g program.strada       # Debug symbols
 ./strada -w program.strada       # Enable warnings (unused vars)
+./strada -p program.strada       # Function profiling (report on exit)
+./strada --full-profile program.strada  # Line-level profiling (writes strada-prof.out)
 
 # Using make
 make run PROG=myprogram

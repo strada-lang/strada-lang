@@ -176,7 +176,7 @@ export STRADA_HOME="/usr/local/lib/strada"
 | `make lib-ssl` | Build SSL library |
 | `make lib-readline` | Build readline library |
 | `make interpreter` | Build the tree-walking interpreter (`strada-interp`) |
-| `make tools` | Build tools (stradadoc, strada-soinfo, etc.) |
+| `make tools` | Build tools (stradadoc, strada-soinfo, strada-proftext, strada-profhtml, etc.) |
 | `make run PROG=name` | Compile and run `examples/name.strada` |
 | `make test` | Run runtime tests |
 | `make test-selfhost` | Verify compiler can compile itself |

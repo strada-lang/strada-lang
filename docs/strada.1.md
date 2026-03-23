@@ -55,6 +55,9 @@ Strada is a strongly-typed programming language inspired by Perl. It features Pe
 - **-p**, **--profile**
   Enable function profiling. The compiled program tracks timing and call counts, printing a report at exit.
 
+- **--full-profile**
+  Enable line-level profiling instrumentation (similar to Perl's Devel::NYTProf). Implies `-g` (debug/line info). The compiled program writes a `strada-prof.out` binary file on exit. Use `strada-proftext` or `strada-profhtml` to generate reports from the profile data.
+
 - **--shared**
   Compile as a shared library (.so). The library can be loaded at runtime with `import_lib` or via `core::dl_open()`.
 
@@ -150,6 +153,15 @@ Run a script file:
 strada --script myscript.st
 ```
 
+Profile a program with line-level detail:
+
+```
+strada --full-profile myapp.strada
+./myapp                                    # writes strada-prof.out
+strada-proftext strada-prof.out            # text report to stdout
+strada-profhtml strada-prof.out profhtml/  # HTML report
+```
+
 ## DOCUMENTATION
 
 To view Strada documentation, use the **stradadoc** command:
@@ -188,7 +200,7 @@ man stradac
 
 ## SEE ALSO
 
-**stradac**(1), **strada-jit**(1), **stradadoc**(1), **gcc**(1), **gdb**(1)
+**stradac**(1), **strada-jit**(1), **strada-proftext**(1), **strada-profhtml**(1), **stradadoc**(1), **gcc**(1), **gdb**(1)
 
 ## AUTHOR
 

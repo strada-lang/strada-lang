@@ -1226,6 +1226,18 @@ void strada_profile_exit(const char *func_name);
 void strada_profile_report(void);
 
 /* ============================================================
+ * Full Profiling - Line-level timing (NYTProf-style)
+ * ============================================================ */
+void strada_full_profile_init(const char *output_file);
+int strada_full_profile_register_file(const char *filename);
+void strada_full_profile_line(int file_id, int line_no);
+void strada_full_profile_enter(const char *func_name);
+void strada_full_profile_exit(const char *func_name);
+void strada_full_profile_start(const char *output_file);
+void strada_full_profile_stop(void);
+void strada_full_profile_write(void);
+
+/* ============================================================
  * Global Variable Registry - Shared across all modules
  * ============================================================ */
 void strada_global_set(StradaValue *name, StradaValue *val);

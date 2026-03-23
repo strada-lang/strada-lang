@@ -69,7 +69,7 @@ RUNTIME_TCC_OBJ = $(RUNTIME_DIR)/strada_runtime_tcc.o
 .PHONY: all clean test test-all test-examples test-selfhost test-suite runtime bootstrap compiler examples run run-bootstrap help info selfhost install uninstall tools libs lib-dbi lib-crypt lib-ssl lib-readline configure-check stage1 interpreter test-interp perl2strada cpan2strada install-perl2strada install-cpan2strada
 
 # Default: build everything including self-hosting compiler and tools
-all: stradac $(RUNTIME_OBJ) tools
+all: stradac $(RUNTIME_OBJ) tools interpreter
 	@echo ""
 	@echo "✓ Build complete!"
 	@echo "  Compiler: ./stradac"
@@ -258,7 +258,7 @@ test-suite: stradac $(RUNTIME_OBJ)
 	./t/run_tests.sh $$OPTS
 
 # Build tools (stradadoc, strada-soinfo, strada-md2man, strada-md2html, strada-jit, stradapp, xs2strada)
-TOOL_BINS = tools/stradadoc tools/strada-soinfo tools/strada-md2man tools/strada-md2html tools/strada-jit tools/stradapp tools/xs2strada
+TOOL_BINS = tools/stradadoc tools/strada-soinfo tools/strada-md2man tools/strada-md2html tools/strada-jit tools/stradapp tools/xs2strada tools/strada-proftext tools/strada-profhtml
 
 # Converter tools (built separately)
 CONVERTER_BINS = tools/perl2strada tools/cpan2strada
@@ -298,6 +298,14 @@ tools/perl2strada: tools/perl2strada.strada stradac
 tools/xs2strada: tools/xs2strada.strada stradac
 	@echo "Building xs2strada (XS to Strada converter)..."
 	@./strada tools/xs2strada.strada -o tools/xs2strada
+
+tools/strada-proftext: tools/strada-proftext.strada stradac
+	@echo "Building strada-proftext (profile text report)..."
+	@./strada tools/strada-proftext.strada -o tools/strada-proftext
+
+tools/strada-profhtml: tools/strada-profhtml.strada stradac
+	@echo "Building strada-profhtml (profile HTML report)..."
+	@./strada tools/strada-profhtml.strada -o tools/strada-profhtml
 
 tools/cpan2strada: tools/cpan2strada.strada stradac tools/perl2strada tools/xs2strada
 	@echo "Building cpan2strada (CPAN dist to Strada converter)..."
@@ -435,7 +443,7 @@ install: stradac $(RUNTIME_OBJ)
 	fi
 	@# Build and install tools (converters excluded — use make install-perl2strada)
 	@echo "Installing tools..."
-	@for tool in stradadoc strada-soinfo strada-md2man strada-md2html strada-jit stradapp xs2strada; do \
+	@for tool in stradadoc strada-soinfo strada-md2man strada-md2html strada-jit stradapp xs2strada strada-proftext strada-profhtml; do \
 		if [ ! -x tools/$$tool ]; then \
 			echo "  Building $$tool..."; \
 			./strada tools/$$tool.strada -o tools/$$tool 2>/dev/null || true; \
@@ -512,6 +520,8 @@ uninstall:
 	rm -f $(INSTALL_BIN)/strada-md2man
 	rm -f $(INSTALL_BIN)/strada-md2html
 	rm -f $(INSTALL_BIN)/strada-jit
+	rm -f $(INSTALL_BIN)/strada-proftext
+	rm -f $(INSTALL_BIN)/strada-profhtml
 	rm -f $(INSTALL_BIN)/strada-interp
 	rm -f $(INSTALL_BIN)/perl2strada
 	rm -f $(INSTALL_BIN)/cpan2strada

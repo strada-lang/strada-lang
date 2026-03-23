@@ -1,0 +1,404 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# strada-proftext - Read STFP binary profile data and print a text report
+
+__C__ {
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+
+static FILE *_fp_file = NULL;
+}
+
+func fp_open(str $filename) int {
+    my int $ok = 0;
+    __C__ {
+        char *fname = strada_to_str(filename);
+        _fp_file = fopen(fname, "rb");
+        free(fname);
+        strada_decref(ok);
+        ok = strada_new_int(_fp_file ? 1 : 0);
+    }
+    return $ok;
+}
+
+func fp_close() void {
+    __C__ {
+        if (_fp_file) { fclose(_fp_file); _fp_file = NULL; }
+    }
+}
+
+func fp_read_magic() int {
+    my int $ok = 0;
+    __C__ {
+        char buf[4];
+        if (_fp_file && fread(buf, 1, 4, _fp_file) == 4 &&
+            buf[0] == 'S' && buf[1] == 'T' && buf[2] == 'F' && buf[3] == 'P') {
+            strada_decref(ok);
+            ok = strada_new_int(1);
+        }
+    }
+    return $ok;
+}
+
+func fp_read_u32() int {
+    my int $val = 0;
+    __C__ {
+        uint32_t v = 0;
+        if (_fp_file) fread(&v, 4, 1, _fp_file);
+        strada_decref(val);
+        val = strada_new_int((int64_t)v);
+    }
+    return $val;
+}
+
+func fp_read_u64() int {
+    my int $val = 0;
+    __C__ {
+        uint64_t v = 0;
+        if (_fp_file) fread(&v, 8, 1, _fp_file);
+        strada_decref(val);
+        val = strada_new_int((int64_t)v);
+    }
+    return $val;
+}
+
+func fp_read_string(int $len) str {
+    my str $result = "";
+    __C__ {
+        int64_t n = strada_to_int(len);
+        char *buf = (char *)malloc(n + 1);
+        if (buf && _fp_file) {
+            fread(buf, 1, n, _fp_file);
+            buf[n] = '\0';
+            strada_decref(result);
+            result = strada_new_str(buf);
+        }
+        free(buf);
+    }
+    return $result;
+}
+
+func usage() void {
+    say("Usage: strada-proftext [profile.out] [options]");
+    say("");
+    say("Reads an STFP binary profile data file and prints a text report.");
+    say("");
+    say("Options:");
+    say("  --functions, -f   Show only function summary");
+    say("  --lines, -l       Show only line-level data");
+    say("  --top N           Show top N entries (default: 50)");
+    say("  -h, --help        Show this help message");
+    say("");
+    say("Default input file: strada-prof.out");
+}
+
+func format_time(int $ns) str {
+    my int $sec = ($ns - $ns % 1000000000) / 1000000000;
+    my int $frac = $ns % 1000000000;
+    if ($frac < 0) { $frac = 0 - $frac; }
+    my str $frac_str = "" . $frac;
+    while (length($frac_str) < 9) {
+        $frac_str = "0" . $frac_str;
+    }
+    $frac_str = substr($frac_str, 0, 6);
+    return "" . $sec . "." . $frac_str;
+}
+
+func format_pct(int $part_ns, int $total_ns) str {
+    if ($total_ns == 0) { return "  0.0"; }
+    my int $pct10 = ($part_ns * 1000 - ($part_ns * 1000) % $total_ns) / $total_ns;
+    my int $whole = ($pct10 - $pct10 % 10) / 10;
+    my int $frac = $pct10 % 10;
+    if ($frac < 0) { $frac = 0 - $frac; }
+    my str $result = "" . $whole . "." . $frac;
+    while (length($result) < 5) {
+        $result = " " . $result;
+    }
+    return $result;
+}
+
+func pad_right(str $s, int $width) str {
+    my str $result = $s;
+    while (length($result) < $width) { $result = $result . " "; }
+    if (length($result) > $width) { $result = substr($result, 0, $width); }
+    return $result;
+}
+
+func pad_left(str $s, int $width) str {
+    my str $result = $s;
+    while (length($result) < $width) { $result = " " . $result; }
+    return $result;
+}
+
+func sort_funcs_by_excl(scalar $funcs) void {
+    my int $n = size(@$funcs);
+    my int $i = 1;
+    while ($i < $n) {
+        my scalar $key = $funcs->[$i];
+        my int $key_val = $key->{"exclusive_ns"};
+        my int $j = $i - 1;
+        while ($j >= 0 && $funcs->[$j]->{"exclusive_ns"} < $key_val) {
+            $funcs->[$j + 1] = $funcs->[$j];
+            $j = $j - 1;
+        }
+        $funcs->[$j + 1] = $key;
+        $i = $i + 1;
+    }
+}
+
+func sort_lines_by_time(scalar $lines) void {
+    my int $n = size(@$lines);
+    my int $i = 1;
+    while ($i < $n) {
+        my scalar $key = $lines->[$i];
+        my int $key_val = $key->{"time_ns"};
+        my int $j = $i - 1;
+        while ($j >= 0 && $lines->[$j]->{"time_ns"} < $key_val) {
+            $lines->[$j + 1] = $lines->[$j];
+            $j = $j - 1;
+        }
+        $lines->[$j + 1] = $key;
+        $i = $i + 1;
+    }
+}
+
+func main() int {
+    my str $input_file = "strada-prof.out";
+    my int $show_functions = 1;
+    my int $show_lines = 1;
+    my int $top_n = 50;
+
+    my int $argc = size(@ARGV);
+    my int $i = 1;
+    while ($i < $argc) {
+        my str $arg = $ARGV[$i];
+        if ($arg eq "-h" || $arg eq "--help") {
+            usage();
+            return 0;
+        } elsif ($arg eq "-f" || $arg eq "--functions") {
+            $show_functions = 1;
+            $show_lines = 0;
+        } elsif ($arg eq "-l" || $arg eq "--lines") {
+            $show_functions = 0;
+            $show_lines = 1;
+        } elsif ($arg eq "--top") {
+            $i = $i + 1;
+            if ($i < $argc) {
+                $top_n = $ARGV[$i] + 0;
+            }
+        } elsif (substr($arg, 0, 1) ne "-") {
+            $input_file = $arg;
+        }
+        $i = $i + 1;
+    }
+
+    if (fp_open($input_file) == 0) {
+        say("Error: Cannot open " . $input_file);
+        return 1;
+    }
+
+    if (fp_read_magic() == 0) {
+        say("Error: Not a valid STFP profile file: " . $input_file);
+        fp_close();
+        return 1;
+    }
+
+    my int $version = fp_read_u32();
+    if ($version != 1) {
+        say("Error: Unsupported STFP version: " . $version);
+        fp_close();
+        return 1;
+    }
+
+    my int $file_count = fp_read_u32();
+    my array @files = ();
+    my array @file_lines = ();
+
+    my int $fi = 0;
+    while ($fi < $file_count) {
+        my int $nlen = fp_read_u32();
+        my str $fname = fp_read_string($nlen);
+        push(@files, $fname);
+
+        my int $maxln = fp_read_u32();
+        my int $nzcount = fp_read_u32();
+
+        my array @lines = ();
+        my int $li = 0;
+        while ($li < $nzcount) {
+            my int $lnum = fp_read_u32();
+            my int $calls = fp_read_u64();
+            my int $tns = fp_read_u64();
+            my scalar $entry = {};
+            $entry->{"line"} = $lnum;
+            $entry->{"calls"} = $calls;
+            $entry->{"time_ns"} = $tns;
+            push(@lines, $entry);
+            $li = $li + 1;
+        }
+        push(@file_lines, \@lines);
+        $fi = $fi + 1;
+    }
+
+    my int $func_count = fp_read_u32();
+    my array @funcs = ();
+    my int $total_time_ns = 0;
+    my int $total_calls = 0;
+
+    $fi = 0;
+    while ($fi < $func_count) {
+        my int $nlen = fp_read_u32();
+        my str $fname = fp_read_string($nlen);
+        my int $calls = fp_read_u64();
+        my int $inclusive_ns = fp_read_u64();
+        my int $exclusive_ns = fp_read_u64();
+
+        my scalar $entry = {};
+        $entry->{"name"} = $fname;
+        $entry->{"calls"} = $calls;
+        $entry->{"inclusive_ns"} = $inclusive_ns;
+        $entry->{"exclusive_ns"} = $exclusive_ns;
+        push(@funcs, $entry);
+
+        $total_time_ns = $total_time_ns + $exclusive_ns;
+        $total_calls = $total_calls + $calls;
+        $fi = $fi + 1;
+    }
+
+    fp_close();
+
+    say("=================================================================");
+    say("                  Strada Full Profile Report");
+    say("=================================================================");
+    say("Profile data: " . $input_file);
+    say("Total time:   " . format_time($total_time_ns) . " seconds");
+    say("Total calls:  " . $total_calls);
+    say("Functions:    " . $func_count);
+    say("Source files: " . $file_count);
+    say("");
+
+    if ($show_functions == 1) {
+        sort_funcs_by_excl(\@funcs);
+
+        say("-----------------------------------------------------------------");
+        say("  %Excl   Excl(s)    Incl(s)       Calls  Function");
+        say("-----------------------------------------------------------------");
+
+        my int $shown = 0;
+        $fi = 0;
+        while ($fi < $func_count && $shown < $top_n) {
+            my scalar $f = $funcs[$fi];
+            my str $pct = format_pct($f->{"exclusive_ns"}, $total_time_ns);
+            my str $excl = pad_left(format_time($f->{"exclusive_ns"}), 10);
+            my str $incl = pad_left(format_time($f->{"inclusive_ns"}), 10);
+            my str $calls = pad_left("" . $f->{"calls"}, 11);
+            my str $name = $f->{"name"};
+
+            say($pct . "%  " . $excl . "  " . $incl . "  " . $calls . "  " . $name);
+
+            $shown = $shown + 1;
+            $fi = $fi + 1;
+        }
+        say("-----------------------------------------------------------------");
+        say("");
+    }
+
+    if ($show_lines == 1) {
+        $fi = 0;
+        while ($fi < $file_count) {
+            my str $fname = $files[$fi];
+            my scalar $lines = $file_lines[$fi];
+            my int $line_count = size(@$lines);
+
+            if ($line_count > 0) {
+                # Read source file
+                my array @source_lines = ();
+                my int $have_source = 0;
+                if (core::file_exists($fname) == 1) {
+                    my str $src = core::slurp($fname);
+                    my int $pos = 0;
+                    my int $src_len = length($src);
+                    while ($pos < $src_len) {
+                        my int $nl = index($src, "\n", $pos);
+                        if ($nl < 0) {
+                            push(@source_lines, substr($src, $pos, $src_len - $pos));
+                            $pos = $src_len;
+                        } else {
+                            push(@source_lines, substr($src, $pos, $nl - $pos));
+                            $pos = $nl + 1;
+                        }
+                    }
+                    $have_source = 1;
+                }
+
+                my int $file_total_ns = 0;
+                my int $li = 0;
+                while ($li < $line_count) {
+                    $file_total_ns = $file_total_ns + $lines->[$li]->{"time_ns"};
+                    $li = $li + 1;
+                }
+
+                say("=================================================================");
+                say("File: " . $fname);
+                say("Total: " . format_time($file_total_ns) . " seconds");
+                say("-----------------------------------------------------------------");
+                say("  Line     Calls      Time(s)  %File  Source");
+                say("-----------------------------------------------------------------");
+
+                sort_lines_by_time($lines);
+
+                $li = 0;
+                my int $shown = 0;
+                while ($li < $line_count && $shown < $top_n) {
+                    my scalar $e = $lines->[$li];
+                    my str $line_str = pad_left("" . $e->{"line"}, 6);
+                    my str $calls = pad_left("" . $e->{"calls"}, 9);
+                    my str $time = pad_left(format_time($e->{"time_ns"}), 12);
+                    my str $pct = format_pct($e->{"time_ns"}, $file_total_ns);
+
+                    my str $src_text = "";
+                    if ($have_source == 1) {
+                        my int $src_idx = $e->{"line"} - 1;
+                        if ($src_idx >= 0 && $src_idx < size(@source_lines)) {
+                            $src_text = $source_lines[$src_idx];
+                            # Trim leading whitespace
+                            while (length($src_text) > 0 && substr($src_text, 0, 1) eq " ") {
+                                $src_text = substr($src_text, 1, length($src_text) - 1);
+                            }
+                            # Truncate long lines
+                            if (length($src_text) > 60) {
+                                $src_text = substr($src_text, 0, 57) . "...";
+                            }
+                        }
+                    }
+
+                    say($line_str . "  " . $calls . "  " . $time . "  " . $pct . "%  " . $src_text);
+                    $shown = $shown + 1;
+                    $li = $li + 1;
+                }
+                say("-----------------------------------------------------------------");
+                say("");
+            }
+            $fi = $fi + 1;
+        }
+    }
+
+    return 0;
+}

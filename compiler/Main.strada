@@ -18,7 +18,7 @@
 # Main.strada - Entry point for self-hosting Strada compiler
 # This is the main compiler executable
 
-func compile(str $source, str $filename, int $debug_info, int $show_timing, int $show_warnings, int $enable_profiling, int $enable_stack_trace, scalar $lib_paths, scalar $lib_paths_low) str {
+func compile(str $source, str $filename, int $debug_info, int $show_timing, int $show_warnings, int $enable_profiling, int $enable_stack_trace, int $full_profile, scalar $lib_paths, scalar $lib_paths_low) str {
     my num $t0 = 0.0;
     my num $t1 = 0.0;
 
@@ -48,7 +48,7 @@ func compile(str $source, str $filename, int $debug_info, int $show_timing, int 
 
     # Generate code (pass debug flag for #line directives, profiling flag, stack trace flag)
     $t0 = sys::hires_time();
-    my str $code = generate($ast, $filename, $debug_info, $enable_profiling, $enable_stack_trace);
+    my str $code = generate($ast, $filename, $debug_info, $enable_profiling, $enable_stack_trace, $full_profile);
     $t1 = sys::hires_time();
     if ($show_timing == 1) {
         say("  CodeGen:  " . ($t1 - $t0) . " seconds");
@@ -66,6 +66,7 @@ func print_usage() void {
     say("  -LL <path>      Add library search path (low priority, searched last)");
     say("  -g, --debug     Emit #line directives for source-level debugging");
     say("  -p, --profile   Enable function profiling (timing and call counts)");
+    say("  --full-profile  Enable line-level profiling (writes strada-prof.out)");
     say("  -t, --timing    Show compilation phase timing");
     say("  -w, --warnings  Show warnings (unused variables, etc.)");
     say("  --no-stack-trace  Disable stack trace support (for performance)");
@@ -83,6 +84,7 @@ func main() int {
     my int $show_timing = 0;
     my int $show_warnings = 0;
     my int $enable_profiling = 0;
+    my int $full_profile = 0;
     my int $enable_stack_trace = 1;  # Enabled by default
     my int $verbose = 0;
     my str $input_file = "";
@@ -102,6 +104,9 @@ func main() int {
             $show_timing = 1;
         } elsif ($arg eq "-w" || $arg eq "--warnings") {
             $show_warnings = 1;
+        } elsif ($arg eq "--full-profile") {
+            $full_profile = 1;
+            $debug_info = 1;  # Full profiling implies debug (needs line info)
         } elsif ($arg eq "-v" || $arg eq "--verbose") {
             $verbose = 1;
         } elsif ($arg eq "--no-stack-trace") {
@@ -162,6 +167,9 @@ func main() int {
         if ($enable_profiling == 1) {
             say("Profiling mode: instrumenting functions for timing");
         }
+        if ($full_profile == 1) {
+            say("Full profiling mode: line-level instrumentation enabled");
+        }
         say("Compiling: " . $input_file . " -> " . $output_file);
     }
 
@@ -169,7 +177,7 @@ func main() int {
     my str $source = slurp($input_file);
 
     # Compile (pass lib paths)
-    my str $code = compile($source, $input_file, $debug_info, $show_timing, $show_warnings, $enable_profiling, $enable_stack_trace, \@lib_paths, \@lib_paths_low);
+    my str $code = compile($source, $input_file, $debug_info, $show_timing, $show_warnings, $enable_profiling, $enable_stack_trace, $full_profile, \@lib_paths, \@lib_paths_low);
 
     # Write output
     spew($output_file, $code);

@@ -1,0 +1,587 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# strada-profhtml - Read STFP binary profile data and generate HTML report
+
+__C__ {
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+
+static FILE *_fp_file = NULL;
+}
+
+func fp_open(str $filename) int {
+    my int $ok = 0;
+    __C__ {
+        char *fname = strada_to_str(filename);
+        _fp_file = fopen(fname, "rb");
+        free(fname);
+        strada_decref(ok);
+        ok = strada_new_int(_fp_file ? 1 : 0);
+    }
+    return $ok;
+}
+
+func fp_close() void {
+    __C__ {
+        if (_fp_file) { fclose(_fp_file); _fp_file = NULL; }
+    }
+}
+
+func fp_read_magic() int {
+    my int $ok = 0;
+    __C__ {
+        char buf[4];
+        if (_fp_file && fread(buf, 1, 4, _fp_file) == 4 &&
+            buf[0] == 'S' && buf[1] == 'T' && buf[2] == 'F' && buf[3] == 'P') {
+            strada_decref(ok);
+            ok = strada_new_int(1);
+        }
+    }
+    return $ok;
+}
+
+func fp_read_u32() int {
+    my int $val = 0;
+    __C__ {
+        uint32_t v = 0;
+        if (_fp_file) fread(&v, 4, 1, _fp_file);
+        strada_decref(val);
+        val = strada_new_int((int64_t)v);
+    }
+    return $val;
+}
+
+func fp_read_u64() int {
+    my int $val = 0;
+    __C__ {
+        uint64_t v = 0;
+        if (_fp_file) fread(&v, 8, 1, _fp_file);
+        strada_decref(val);
+        val = strada_new_int((int64_t)v);
+    }
+    return $val;
+}
+
+func fp_read_string(int $len) str {
+    my str $result = "";
+    __C__ {
+        int64_t n = strada_to_int(len);
+        char *buf = (char *)malloc(n + 1);
+        if (buf && _fp_file) {
+            fread(buf, 1, n, _fp_file);
+            buf[n] = '\0';
+            strada_decref(result);
+            result = strada_new_str(buf);
+        }
+        free(buf);
+    }
+    return $result;
+}
+
+func usage() void {
+    say("Usage: strada-profhtml [profile.out] [output-dir]");
+    say("");
+    say("Reads an STFP binary profile data file and generates an HTML report.");
+    say("");
+    say("Options:");
+    say("  -h, --help    Show this help message");
+    say("");
+    say("Defaults: input=strada-prof.out, output-dir=profhtml/");
+}
+
+func format_time(int $ns) str {
+    my int $sec = ($ns - $ns % 1000000000) / 1000000000;
+    my int $frac = $ns % 1000000000;
+    if ($frac < 0) { $frac = 0 - $frac; }
+    my str $frac_str = "" . $frac;
+    while (length($frac_str) < 9) {
+        $frac_str = "0" . $frac_str;
+    }
+    $frac_str = substr($frac_str, 0, 6);
+    return "" . $sec . "." . $frac_str;
+}
+
+func format_pct_str(int $part_ns, int $total_ns) str {
+    if ($total_ns == 0) { return "0.0"; }
+    my int $pct10 = ($part_ns * 1000 - ($part_ns * 1000) % $total_ns) / $total_ns;
+    my int $whole = ($pct10 - $pct10 % 10) / 10;
+    my int $frac = $pct10 % 10;
+    if ($frac < 0) { $frac = 0 - $frac; }
+    return "" . $whole . "." . $frac;
+}
+
+func sort_funcs_by_excl(scalar $funcs) void {
+    my int $n = size(@$funcs);
+    my int $i = 1;
+    while ($i < $n) {
+        my scalar $key = $funcs->[$i];
+        my int $key_val = $key->{"exclusive_ns"};
+        my int $j = $i - 1;
+        while ($j >= 0 && $funcs->[$j]->{"exclusive_ns"} < $key_val) {
+            $funcs->[$j + 1] = $funcs->[$j];
+            $j = $j - 1;
+        }
+        $funcs->[$j + 1] = $key;
+        $i = $i + 1;
+    }
+}
+
+func sort_lines_by_time(scalar $lines) void {
+    my int $n = size(@$lines);
+    my int $i = 1;
+    while ($i < $n) {
+        my scalar $key = $lines->[$i];
+        my int $key_val = $key->{"time_ns"};
+        my int $j = $i - 1;
+        while ($j >= 0 && $lines->[$j]->{"time_ns"} < $key_val) {
+            $lines->[$j + 1] = $lines->[$j];
+            $j = $j - 1;
+        }
+        $lines->[$j + 1] = $key;
+        $i = $i + 1;
+    }
+}
+
+# HTML-escape a string
+func html_escape(str $s) str {
+    my str $out = "";
+    my int $i = 0;
+    my int $len = length($s);
+    while ($i < $len) {
+        my str $ch = substr($s, $i, 1);
+        if ($ch eq "<") {
+            $out = $out . "&lt;";
+        } elsif ($ch eq ">") {
+            $out = $out . "&gt;";
+        } elsif ($ch eq "&") {
+            $out = $out . "&amp;";
+        } elsif ($ch eq "\"") {
+            $out = $out . "&quot;";
+        } else {
+            $out = $out . $ch;
+        }
+        $i = $i + 1;
+    }
+    return $out;
+}
+
+# Compute heat color: 0=white, 100=red
+func heat_color(int $part_ns, int $max_ns) str {
+    if ($max_ns == 0) { return "ffffff"; }
+    # Scale from 0..255
+    my int $intensity = ($part_ns * 255 - ($part_ns * 255) % $max_ns) / $max_ns;
+    if ($intensity > 255) { $intensity = 255; }
+    # Go from white (ff,ff,ff) to red (ff,80,80)
+    my int $g = 255 - ($intensity * 127 - ($intensity * 127) % 255) / 255;
+    my int $b = $g;
+    # Convert to hex
+    my str $gs = "";
+    my str $bs = "";
+    __C__ {
+        char hexbuf[8];
+        snprintf(hexbuf, 8, "%02x", (int)strada_to_int(g));
+        strada_decref(gs);
+        gs = strada_new_str(hexbuf);
+        snprintf(hexbuf, 8, "%02x", (int)strada_to_int(b));
+        strada_decref(bs);
+        bs = strada_new_str(hexbuf);
+    }
+    return "ff" . $gs . $bs;
+}
+
+# Sanitize filename for use as HTML filename
+func safe_filename(str $s) str {
+    my str $out = "";
+    my int $i = 0;
+    my int $len = length($s);
+    while ($i < $len) {
+        my str $ch = substr($s, $i, 1);
+        if ($ch eq "/") {
+            $out = $out . "_";
+        } elsif ($ch eq ".") {
+            $out = $out . "_";
+        } elsif ($ch eq " ") {
+            $out = $out . "_";
+        } else {
+            $out = $out . $ch;
+        }
+        $i = $i + 1;
+    }
+    return $out;
+}
+
+func css_style() str {
+    my str $css = "<style>\n";
+    $css = $css . "body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; margin: 0; padding: 0; background: #f5f5f5; }\n";
+    $css = $css . "header { background: #2d3748; color: white; padding: 20px 30px; }\n";
+    $css = $css . "header h1 { margin: 0; font-size: 24px; }\n";
+    $css = $css . "header p { margin: 5px 0 0; opacity: 0.8; }\n";
+    $css = $css . ".container { max-width: 1200px; margin: 20px auto; padding: 0 20px; }\n";
+    $css = $css . ".stats { display: flex; gap: 20px; margin-bottom: 20px; flex-wrap: wrap; }\n";
+    $css = $css . ".stat-box { background: white; border-radius: 8px; padding: 15px 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }\n";
+    $css = $css . ".stat-box .label { font-size: 12px; color: #666; text-transform: uppercase; }\n";
+    $css = $css . ".stat-box .value { font-size: 24px; font-weight: bold; color: #2d3748; }\n";
+    $css = $css . "table { width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; }\n";
+    $css = $css . "th { background: #4a5568; color: white; padding: 10px 12px; text-align: left; cursor: pointer; user-select: none; font-size: 13px; }\n";
+    $css = $css . "th:hover { background: #2d3748; }\n";
+    $css = $css . "td { padding: 8px 12px; border-bottom: 1px solid #e2e8f0; font-size: 13px; }\n";
+    $css = $css . "tr:nth-child(even) { background: #f7fafc; }\n";
+    $css = $css . "tr:hover { background: #edf2f7; }\n";
+    $css = $css . ".num { font-family: 'Menlo', 'Monaco', 'Courier New', monospace; text-align: right; }\n";
+    $css = $css . ".code { font-family: 'Menlo', 'Monaco', 'Courier New', monospace; white-space: pre; }\n";
+    $css = $css . "a { color: #3182ce; text-decoration: none; }\n";
+    $css = $css . "a:hover { text-decoration: underline; }\n";
+    $css = $css . ".back { display: inline-block; margin-bottom: 15px; }\n";
+    $css = $css . "footer { text-align: center; padding: 20px; color: #888; font-size: 12px; }\n";
+    $css = $css . "</style>\n";
+    return $css;
+}
+
+func sort_js() str {
+    my str $js = "<script>\n";
+    $js = $js . "function sortTable(table, col, numeric) {\n";
+    $js = $js . "  var tb = table.tBodies[0];\n";
+    $js = $js . "  var rows = Array.from(tb.rows);\n";
+    $js = $js . "  var asc = table.dataset.sortCol == col && table.dataset.sortAsc != 'true';\n";
+    $js = $js . "  rows.sort(function(a, b) {\n";
+    $js = $js . "    var va = a.cells[col].textContent.trim();\n";
+    $js = $js . "    var vb = b.cells[col].textContent.trim();\n";
+    $js = $js . "    if (numeric) { va = parseFloat(va) || 0; vb = parseFloat(vb) || 0; }\n";
+    $js = $js . "    if (va < vb) return asc ? -1 : 1;\n";
+    $js = $js . "    if (va > vb) return asc ? 1 : -1;\n";
+    $js = $js . "    return 0;\n";
+    $js = $js . "  });\n";
+    $js = $js . "  rows.forEach(function(r) { tb.appendChild(r); });\n";
+    $js = $js . "  table.dataset.sortCol = col;\n";
+    $js = $js . "  table.dataset.sortAsc = asc;\n";
+    $js = $js . "}\n";
+    $js = $js . "</script>\n";
+    return $js;
+}
+
+func generate_index(str $outdir, scalar $funcs, scalar $files, scalar $file_lines, int $total_time_ns, int $total_calls) void {
+    my int $func_count = size(@$funcs);
+    my int $file_count = size(@$files);
+
+    my str $html = "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n";
+    $html = $html . "<title>Strada Full Profile Report</title>\n";
+    $html = $html . css_style();
+    $html = $html . sort_js();
+    $html = $html . "</head>\n<body>\n";
+    $html = $html . "<header><h1>Strada Full Profile Report</h1>";
+    $html = $html . "<p>Generated by strada-profhtml</p></header>\n";
+    $html = $html . "<div class=\"container\">\n";
+
+    # Stats boxes
+    $html = $html . "<div class=\"stats\">\n";
+    $html = $html . "<div class=\"stat-box\"><div class=\"label\">Total Time</div><div class=\"value\">" . format_time($total_time_ns) . "s</div></div>\n";
+    $html = $html . "<div class=\"stat-box\"><div class=\"label\">Total Calls</div><div class=\"value\">" . $total_calls . "</div></div>\n";
+    $html = $html . "<div class=\"stat-box\"><div class=\"label\">Functions</div><div class=\"value\">" . $func_count . "</div></div>\n";
+    $html = $html . "<div class=\"stat-box\"><div class=\"label\">Source Files</div><div class=\"value\">" . $file_count . "</div></div>\n";
+    $html = $html . "</div>\n";
+
+    # Source file links
+    if ($file_count > 0) {
+        $html = $html . "<h2>Source Files</h2>\n<ul>\n";
+        my int $fi = 0;
+        while ($fi < $file_count) {
+            my str $fname = $files->[$fi];
+            my str $safe = safe_filename($fname);
+            $html = $html . "<li><a href=\"file-" . $safe . ".html\">" . html_escape($fname) . "</a></li>\n";
+            $fi = $fi + 1;
+        }
+        $html = $html . "</ul>\n";
+    }
+
+    # Function table
+    $html = $html . "<h2>Function Summary</h2>\n";
+    $html = $html . "<table id=\"ftable\">\n<thead><tr>";
+    $html = $html . "<th onclick=\"sortTable(document.getElementById('ftable'),0,true)\">#</th>";
+    $html = $html . "<th onclick=\"sortTable(document.getElementById('ftable'),1,true)\">%Excl</th>";
+    $html = $html . "<th onclick=\"sortTable(document.getElementById('ftable'),2,true)\">Excl(s)</th>";
+    $html = $html . "<th onclick=\"sortTable(document.getElementById('ftable'),3,true)\">Incl(s)</th>";
+    $html = $html . "<th onclick=\"sortTable(document.getElementById('ftable'),4,true)\">Calls</th>";
+    $html = $html . "<th onclick=\"sortTable(document.getElementById('ftable'),5,false)\">Function</th>";
+    $html = $html . "</tr></thead>\n<tbody>\n";
+
+    my int $fi = 0;
+    while ($fi < $func_count) {
+        my scalar $f = $funcs->[$fi];
+        my str $pct = format_pct_str($f->{"exclusive_ns"}, $total_time_ns);
+        my str $excl = format_time($f->{"exclusive_ns"});
+        my str $incl = format_time($f->{"inclusive_ns"});
+
+        $html = $html . "<tr>";
+        $html = $html . "<td class=\"num\">" . ($fi + 1) . "</td>";
+        $html = $html . "<td class=\"num\">" . $pct . "%</td>";
+        $html = $html . "<td class=\"num\">" . $excl . "</td>";
+        $html = $html . "<td class=\"num\">" . $incl . "</td>";
+        $html = $html . "<td class=\"num\">" . $f->{"calls"} . "</td>";
+        $html = $html . "<td>" . html_escape($f->{"name"}) . "</td>";
+        $html = $html . "</tr>\n";
+        $fi = $fi + 1;
+    }
+
+    $html = $html . "</tbody></table>\n";
+    $html = $html . "</div>\n<footer>Generated by strada-profhtml</footer>\n";
+    $html = $html . "</body></html>\n";
+
+    spew($outdir . "/index.html", $html);
+    say("  index.html");
+}
+
+func generate_file_page(str $outdir, str $filename, scalar $lines, int $total_time_ns) void {
+    my str $safe = safe_filename($filename);
+    my int $line_count = size(@$lines);
+
+    # Try to read the actual source file
+    my array @source_lines = ();
+    my int $have_source = 0;
+    if (core::file_exists($filename) == 1) {
+        my str $src = core::slurp($filename);
+        # Split by newlines
+        my int $pos = 0;
+        my int $src_len = length($src);
+        while ($pos < $src_len) {
+            my int $nl = index($src, "\n", $pos);
+            if ($nl < 0) {
+                push(@source_lines, substr($src, $pos, $src_len - $pos));
+                $pos = $src_len;
+            } else {
+                push(@source_lines, substr($src, $pos, $nl - $pos));
+                $pos = $nl + 1;
+            }
+        }
+        $have_source = 1;
+    }
+
+    # Build a lookup: line_no -> {calls, time_ns}
+    my hash %line_data = ();
+    my int $max_line_time = 0;
+    my int $li = 0;
+    while ($li < $line_count) {
+        my scalar $e = $lines->[$li];
+        my int $lno = $e->{"line"};
+        my str $lkey = "" . $lno;
+        $line_data{$lkey} = $e;
+        if ($e->{"time_ns"} > $max_line_time) {
+            $max_line_time = $e->{"time_ns"};
+        }
+        $li = $li + 1;
+    }
+
+    # File total time
+    my int $file_total_ns = 0;
+    $li = 0;
+    while ($li < $line_count) {
+        $file_total_ns = $file_total_ns + $lines->[$li]->{"time_ns"};
+        $li = $li + 1;
+    }
+
+    my str $html = "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n";
+    $html = $html . "<title>" . html_escape($filename) . " - Profile</title>\n";
+    $html = $html . css_style();
+    $html = $html . "</head>\n<body>\n";
+    $html = $html . "<header><h1>" . html_escape($filename) . "</h1>";
+    $html = $html . "<p>Total: " . format_time($file_total_ns) . "s</p></header>\n";
+    $html = $html . "<div class=\"container\">\n";
+    $html = $html . "<a class=\"back\" href=\"index.html\">&larr; Back to index</a>\n";
+
+    $html = $html . "<table>\n<thead><tr>";
+    $html = $html . "<th>Line</th><th>Calls</th><th>Time(s)</th><th>%File</th><th>Source</th>";
+    $html = $html . "</tr></thead>\n<tbody>\n";
+
+    # Determine how many lines to show
+    my int $max_show = size(@source_lines);
+    if ($have_source == 0) {
+        # No source: just show profiled lines
+        sort_lines_by_time($lines);
+        $li = 0;
+        while ($li < $line_count) {
+            my scalar $e = $lines->[$li];
+            my str $color = heat_color($e->{"time_ns"}, $max_line_time);
+            my str $pct = format_pct_str($e->{"time_ns"}, $file_total_ns);
+
+            $html = $html . "<tr style=\"background:#" . $color . "\">";
+            $html = $html . "<td class=\"num\">" . $e->{"line"} . "</td>";
+            $html = $html . "<td class=\"num\">" . $e->{"calls"} . "</td>";
+            $html = $html . "<td class=\"num\">" . format_time($e->{"time_ns"}) . "</td>";
+            $html = $html . "<td class=\"num\">" . $pct . "%</td>";
+            $html = $html . "<td class=\"code\">N/A</td>";
+            $html = $html . "</tr>\n";
+            $li = $li + 1;
+        }
+    } else {
+        # Show all source lines with profiling data overlaid
+        my int $ln = 1;
+        while ($ln <= $max_show) {
+            my str $lkey = "" . $ln;
+            my str $src_line = $source_lines[$ln - 1];
+
+            my str $calls_str = "";
+            my str $time_str = "";
+            my str $pct_str = "";
+            my str $bg = "";
+
+            if (length("" . $line_data{$lkey}) > 0) {
+                my scalar $e = $line_data{$lkey};
+                $calls_str = "" . $e->{"calls"};
+                $time_str = format_time($e->{"time_ns"});
+                $pct_str = format_pct_str($e->{"time_ns"}, $file_total_ns) . "%";
+                $bg = " style=\"background:#" . heat_color($e->{"time_ns"}, $max_line_time) . "\"";
+            }
+
+            $html = $html . "<tr" . $bg . ">";
+            $html = $html . "<td class=\"num\">" . $ln . "</td>";
+            $html = $html . "<td class=\"num\">" . $calls_str . "</td>";
+            $html = $html . "<td class=\"num\">" . $time_str . "</td>";
+            $html = $html . "<td class=\"num\">" . $pct_str . "</td>";
+            $html = $html . "<td class=\"code\">" . html_escape($src_line) . "</td>";
+            $html = $html . "</tr>\n";
+            $ln = $ln + 1;
+        }
+    }
+
+    $html = $html . "</tbody></table>\n";
+    $html = $html . "</div>\n<footer>Generated by strada-profhtml</footer>\n";
+    $html = $html . "</body></html>\n";
+
+    spew($outdir . "/file-" . $safe . ".html", $html);
+    say("  file-" . $safe . ".html");
+}
+
+func main() int {
+    my str $input_file = "strada-prof.out";
+    my str $outdir = "profhtml";
+
+    my int $argc = size(@ARGV);
+    my int $i = 1;
+    my int $positional = 0;
+    while ($i < $argc) {
+        my str $arg = $ARGV[$i];
+        if ($arg eq "-h" || $arg eq "--help") {
+            usage();
+            return 0;
+        } elsif (substr($arg, 0, 1) ne "-") {
+            if ($positional == 0) {
+                $input_file = $arg;
+            } elsif ($positional == 1) {
+                $outdir = $arg;
+            }
+            $positional = $positional + 1;
+        }
+        $i = $i + 1;
+    }
+
+    if (fp_open($input_file) == 0) {
+        say("Error: Cannot open " . $input_file);
+        return 1;
+    }
+
+    if (fp_read_magic() == 0) {
+        say("Error: Not a valid STFP profile file: " . $input_file);
+        fp_close();
+        return 1;
+    }
+
+    my int $version = fp_read_u32();
+    if ($version != 1) {
+        say("Error: Unsupported STFP version: " . $version);
+        fp_close();
+        return 1;
+    }
+
+    my int $file_count = fp_read_u32();
+    my array @files = ();
+    my array @file_lines = ();
+
+    my int $fi = 0;
+    while ($fi < $file_count) {
+        my int $name_len = fp_read_u32();
+        my str $fname = fp_read_string($name_len);
+        push(@files, $fname);
+
+        my int $max_line = fp_read_u32();
+        my int $nonzero_count = fp_read_u32();
+
+        my array @lines = ();
+        my int $li = 0;
+        while ($li < $nonzero_count) {
+            my int $line_no = fp_read_u32();
+            my int $calls = fp_read_u64();
+            my int $time_ns = fp_read_u64();
+            my scalar $entry = {};
+            $entry->{"line"} = $line_no;
+            $entry->{"calls"} = $calls;
+            $entry->{"time_ns"} = $time_ns;
+            push(@lines, $entry);
+            $li = $li + 1;
+        }
+        push(@file_lines, \@lines);
+        $fi = $fi + 1;
+    }
+
+    my int $func_count = fp_read_u32();
+    my array @funcs = ();
+    my int $total_time_ns = 0;
+    my int $total_calls = 0;
+
+    $fi = 0;
+    while ($fi < $func_count) {
+        my int $name_len = fp_read_u32();
+        my str $fname = fp_read_string($name_len);
+        my int $calls = fp_read_u64();
+        my int $inclusive_ns = fp_read_u64();
+        my int $exclusive_ns = fp_read_u64();
+
+        my scalar $entry = {};
+        $entry->{"name"} = $fname;
+        $entry->{"calls"} = $calls;
+        $entry->{"inclusive_ns"} = $inclusive_ns;
+        $entry->{"exclusive_ns"} = $exclusive_ns;
+        push(@funcs, $entry);
+
+        $total_time_ns = $total_time_ns + $exclusive_ns;
+        $total_calls = $total_calls + $calls;
+        $fi = $fi + 1;
+    }
+
+    fp_close();
+
+    sort_funcs_by_excl(\@funcs);
+
+    # Create output directory
+    core::system("mkdir -p " . $outdir);
+
+    say("Generating HTML report in " . $outdir . "/");
+
+    generate_index($outdir, \@funcs, \@files, \@file_lines, $total_time_ns, $total_calls);
+
+    $fi = 0;
+    while ($fi < $file_count) {
+        my str $fname = $files[$fi];
+        my scalar $lines = $file_lines[$fi];
+        generate_file_page($outdir, $fname, $lines, $total_time_ns);
+        $fi = $fi + 1;
+    }
+
+    say("Done! Open " . $outdir . "/index.html in a browser.");
+    return 0;
+}

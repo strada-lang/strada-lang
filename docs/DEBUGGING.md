@@ -510,3 +510,69 @@ Function names in C are prefixed with `func_`:
 (gdb) break func_my_function   # Correct
 (gdb) break my_function        # Won't work
 ```
+
+## Line-Level Profiling (Full Profile)
+
+Strada includes a comprehensive line-level profiler (similar to Perl's Devel::NYTProf) for detailed performance analysis.
+
+### Quick Start
+
+```bash
+# Compile with full profiling instrumentation
+./strada --full-profile myprogram.strada
+
+# Run the program (writes strada-prof.out on exit)
+./myprogram
+
+# Generate a text report
+strada-proftext strada-prof.out
+
+# Generate an HTML report with sortable tables and heat-colored source
+strada-profhtml strada-prof.out profhtml/
+open profhtml/index.html
+```
+
+### How It Works
+
+The `--full-profile` flag instruments every line of your program with timing and execution count tracking. It implies `-g` (debug/line info) so that profile data can be mapped back to source lines. When the program exits, it writes a binary `strada-prof.out` file containing all collected data.
+
+### Difference from `-p` / `--profile`
+
+| Flag | Granularity | Output | Use Case |
+|------|-------------|--------|----------|
+| `-p`, `--profile` | Function-level | Printed to stderr at exit | Quick overview of hot functions |
+| `--full-profile` | Line-level | Binary file (`strada-prof.out`) | Detailed analysis with report tools |
+
+### Report Tools
+
+**strada-proftext** generates a text report to stdout:
+
+```bash
+strada-proftext strada-prof.out           # Full report (functions + lines)
+strada-proftext -f strada-prof.out        # Functions only
+strada-proftext -l strada-prof.out        # Lines only
+strada-proftext --top 20 strada-prof.out  # Show top 20 entries
+```
+
+**strada-profhtml** generates an HTML report directory with sortable tables and heat-colored source views:
+
+```bash
+strada-profhtml strada-prof.out              # Output to profhtml/ (default)
+strada-profhtml strada-prof.out my-report/   # Custom output directory
+```
+
+### Programmatic API
+
+You can enable and disable profiling at runtime for targeted analysis:
+
+```strada
+# Start profiling mid-program with a custom output file
+core::full_profile_start("hotpath.prof");
+
+# ... code to profile ...
+
+# Stop profiling and flush data
+core::full_profile_stop();
+```
+
+This is useful for profiling specific sections of long-running programs (e.g., servers) without the overhead of profiling startup and shutdown code.

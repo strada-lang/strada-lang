@@ -2593,13 +2593,15 @@ func parse_local_decl(scalar $parser) scalar {
 }
 
 func parse_if_stmt(scalar $parser) scalar {
+    my int $if_line = parser_current_line($parser);
     parser_expect($parser, "IF");
     parser_expect($parser, "LPAREN");
     my scalar $condition = parse_expression($parser);
     parser_expect($parser, "RPAREN");
-    
+
     my scalar $then_block = parse_block($parser);
     my scalar $if_stmt = ast_new_if_stmt($condition, $then_block);
+    ast_set_line($if_stmt, $if_line);
     
     # Handle elsif / else if clauses
     while (parser_check($parser, "ELSIF") || (parser_check($parser, "ELSE") && parser_peek($parser)->{"type"} eq "IF")) {
@@ -2628,16 +2630,20 @@ func parse_if_stmt(scalar $parser) scalar {
 }
 
 func parse_while_stmt(scalar $parser, str $label) scalar {
+    my int $while_line = parser_current_line($parser);
     parser_expect($parser, "WHILE");
     parser_expect($parser, "LPAREN");
     my scalar $condition = parse_expression($parser);
     parser_expect($parser, "RPAREN");
 
     my scalar $body = parse_block($parser);
-    return ast_new_while_stmt($condition, $body, $label);
+    my scalar $while_stmt = ast_new_while_stmt($condition, $body, $label);
+    ast_set_line($while_stmt, $while_line);
+    return $while_stmt;
 }
 
 func parse_until_stmt(scalar $parser, str $label) scalar {
+    my int $until_line = parser_current_line($parser);
     parser_expect($parser, "UNTIL");
     parser_expect($parser, "LPAREN");
     my scalar $condition = parse_expression($parser);
@@ -2645,11 +2651,14 @@ func parse_until_stmt(scalar $parser, str $label) scalar {
 
     my scalar $body = parse_block($parser);
     my scalar $neg_cond = ast_new_unary_op("!", $condition);
-    return ast_new_while_stmt($neg_cond, $body, $label);
+    my scalar $until_stmt = ast_new_while_stmt($neg_cond, $body, $label);
+    ast_set_line($until_stmt, $until_line);
+    return $until_stmt;
 }
 
 # Parse do-while loop: do { body } while (condition);
 func parse_do_while_stmt(scalar $parser, str $label) scalar {
+    my int $do_line = parser_current_line($parser);
     parser_expect($parser, "DO");
     my scalar $body = parse_block($parser);
     parser_expect($parser, "WHILE");
@@ -2657,12 +2666,14 @@ func parse_do_while_stmt(scalar $parser, str $label) scalar {
     my scalar $condition = parse_expression($parser);
     parser_expect($parser, "RPAREN");
     parser_expect($parser, "SEMI");
-    return ast_new_do_while_stmt($body, $condition, $label);
+    my scalar $do_stmt = ast_new_do_while_stmt($body, $condition, $label);
+    ast_set_line($do_stmt, $do_line);
+    return $do_stmt;
 }
 
 # Parse array-style for loop: for my type $var (@array) or for $var (@array)
 # This is syntactic sugar for foreach
-func parse_for_array_style(scalar $parser, str $label) scalar {
+func parse_for_array_style(scalar $parser, str $label, int $fas_line) scalar {
     my scalar $var_decl = 0;
     my str $var_name = "";
 
@@ -2697,10 +2708,13 @@ func parse_for_array_style(scalar $parser, str $label) scalar {
     parser_expect($parser, "RPAREN");
 
     my scalar $body = parse_block($parser);
-    return ast_new_foreach_stmt($var_decl, $var_name, $array_expr, $body, $label);
+    my scalar $fas_stmt = ast_new_foreach_stmt($var_decl, $var_name, $array_expr, $body, $label);
+    ast_set_line($fas_stmt, $fas_line);
+    return $fas_stmt;
 }
 
 func parse_for_stmt(scalar $parser, str $label) scalar {
+    my int $for_line = parser_current_line($parser);
     parser_expect($parser, "FOR");
 
     # Check if this is array-style for (like foreach) or C-style for
@@ -2709,7 +2723,7 @@ func parse_for_stmt(scalar $parser, str $label) scalar {
     # for (init; cond; update) - C style
     if (parser_check($parser, "MY") || parser_check($parser, "DOLLAR")) {
         # Array-style for loop - delegate to foreach parsing logic
-        return parse_for_array_style($parser, $label);
+        return parse_for_array_style($parser, $label, $for_line);
     }
 
     parser_expect($parser, "LPAREN");
@@ -2757,10 +2771,13 @@ func parse_for_stmt(scalar $parser, str $label) scalar {
     parser_expect($parser, "RPAREN");
 
     my scalar $body = parse_block($parser);
-    return ast_new_for_stmt($init, $cond, $update, $body, $label);
+    my scalar $for_stmt = ast_new_for_stmt($init, $cond, $update, $body, $label);
+    ast_set_line($for_stmt, $for_line);
+    return $for_stmt;
 }
 
 func parse_foreach_stmt(scalar $parser, str $label) scalar {
+    my int $fe_line = parser_current_line($parser);
     parser_expect($parser, "FOREACH");
 
     my scalar $var_decl = 0;
@@ -2797,12 +2814,15 @@ func parse_foreach_stmt(scalar $parser, str $label) scalar {
     parser_expect($parser, "RPAREN");
 
     my scalar $body = parse_block($parser);
-    return ast_new_foreach_stmt($var_decl, $var_name, $array_expr, $body, $label);
+    my scalar $fe_stmt2 = ast_new_foreach_stmt($var_decl, $var_name, $array_expr, $body, $label);
+    ast_set_line($fe_stmt2, $fe_line);
+    return $fe_stmt2;
 }
 
 func parse_return_stmt(scalar $parser) scalar {
+    my int $ret_line = parser_current_line($parser);
     parser_expect($parser, "RETURN");
-    
+
     my scalar $value = 0;
     if (!parser_check($parser, "SEMI")) {
         $value = parse_expression($parser);
@@ -2815,26 +2835,35 @@ func parse_return_stmt(scalar $parser) scalar {
         my scalar $mod_cond = parse_expression($parser);
         parser_expect($parser, "SEMI");
         my scalar $ret_node = ast_new_return_stmt($value);
+        ast_set_line($ret_node, $ret_line);
         my scalar $mod_block = ast_new_block();
         ast_add_statement($mod_block, $ret_node);
-        return ast_new_if_stmt($mod_cond, $mod_block);
+        my scalar $ret_if = ast_new_if_stmt($mod_cond, $mod_block);
+        ast_set_line($ret_if, $ret_line);
+        return $ret_if;
     }
     if ($ret_cur->{"type"} eq "UNLESS") {
         parser_advance($parser);
         my scalar $mod_cond = parse_expression($parser);
         parser_expect($parser, "SEMI");
         my scalar $ret_node = ast_new_return_stmt($value);
+        ast_set_line($ret_node, $ret_line);
         my scalar $mod_block = ast_new_block();
         ast_add_statement($mod_block, $ret_node);
         my scalar $neg_cond = ast_new_unary_op("!", $mod_cond);
-        return ast_new_if_stmt($neg_cond, $mod_block);
+        my scalar $ret_unless = ast_new_if_stmt($neg_cond, $mod_block);
+        ast_set_line($ret_unless, $ret_line);
+        return $ret_unless;
     }
 
     parser_expect($parser, "SEMI");
-    return ast_new_return_stmt($value);
+    my scalar $ret_stmt = ast_new_return_stmt($value);
+    ast_set_line($ret_stmt, $ret_line);
+    return $ret_stmt;
 }
 
 func parse_statement(scalar $parser) scalar {
+    my int $stmt_line = parser_current_line($parser);
     my scalar $tok = parser_current($parser);
     my str $type = $tok->{"type"};
 
@@ -2867,6 +2896,7 @@ func parse_statement(scalar $parser) scalar {
         my scalar $then_block = parse_block($parser);
         my scalar $neg_cond = ast_new_unary_op("!", $cond);
         my scalar $if_stmt = ast_new_if_stmt($neg_cond, $then_block);
+        ast_set_line($if_stmt, $stmt_line);
         # unless supports else but NOT elsif
         if (parser_check($parser, "ELSE")) {
             parser_advance($parser);
@@ -2898,7 +2928,9 @@ func parse_statement(scalar $parser) scalar {
                 return parse_until_stmt($parser, $label);
             } else {
                 # Standalone label for goto
-                return ast_new_label($label);
+                my scalar $label_stmt = ast_new_label($label);
+                ast_set_line($label_stmt, $stmt_line);
+                return $label_stmt;
             }
         }
     }
@@ -2942,22 +2974,30 @@ func parse_statement(scalar $parser) scalar {
             my scalar $mod_cond = parse_expression($parser);
             parser_expect($parser, "SEMI");
             my scalar $last_node = ast_new_last($label);
+            ast_set_line($last_node, $stmt_line);
             my scalar $mod_block = ast_new_block();
             ast_add_statement($mod_block, $last_node);
-            return ast_new_if_stmt($mod_cond, $mod_block);
+            my scalar $last_if = ast_new_if_stmt($mod_cond, $mod_block);
+            ast_set_line($last_if, $stmt_line);
+            return $last_if;
         }
         if ($last_cur->{"type"} eq "UNLESS") {
             parser_advance($parser);
             my scalar $mod_cond = parse_expression($parser);
             parser_expect($parser, "SEMI");
             my scalar $last_node = ast_new_last($label);
+            ast_set_line($last_node, $stmt_line);
             my scalar $mod_block = ast_new_block();
             ast_add_statement($mod_block, $last_node);
             my scalar $neg_cond = ast_new_unary_op("!", $mod_cond);
-            return ast_new_if_stmt($neg_cond, $mod_block);
+            my scalar $last_unless = ast_new_if_stmt($neg_cond, $mod_block);
+            ast_set_line($last_unless, $stmt_line);
+            return $last_unless;
         }
         parser_expect($parser, "SEMI");
-        return ast_new_last($label);
+        my scalar $last_stmt = ast_new_last($label);
+        ast_set_line($last_stmt, $stmt_line);
+        return $last_stmt;
     }
 
     if ($type eq "NEXT") {
@@ -2975,22 +3015,30 @@ func parse_statement(scalar $parser) scalar {
             my scalar $mod_cond = parse_expression($parser);
             parser_expect($parser, "SEMI");
             my scalar $next_node = ast_new_next($label);
+            ast_set_line($next_node, $stmt_line);
             my scalar $mod_block = ast_new_block();
             ast_add_statement($mod_block, $next_node);
-            return ast_new_if_stmt($mod_cond, $mod_block);
+            my scalar $next_if = ast_new_if_stmt($mod_cond, $mod_block);
+            ast_set_line($next_if, $stmt_line);
+            return $next_if;
         }
         if ($next_cur->{"type"} eq "UNLESS") {
             parser_advance($parser);
             my scalar $mod_cond = parse_expression($parser);
             parser_expect($parser, "SEMI");
             my scalar $next_node = ast_new_next($label);
+            ast_set_line($next_node, $stmt_line);
             my scalar $mod_block = ast_new_block();
             ast_add_statement($mod_block, $next_node);
             my scalar $neg_cond = ast_new_unary_op("!", $mod_cond);
-            return ast_new_if_stmt($neg_cond, $mod_block);
+            my scalar $next_unless = ast_new_if_stmt($neg_cond, $mod_block);
+            ast_set_line($next_unless, $stmt_line);
+            return $next_unless;
         }
         parser_expect($parser, "SEMI");
-        return ast_new_next($label);
+        my scalar $next_stmt = ast_new_next($label);
+        ast_set_line($next_stmt, $stmt_line);
+        return $next_stmt;
     }
 
     if ($type eq "REDO") {
@@ -3008,22 +3056,30 @@ func parse_statement(scalar $parser) scalar {
             my scalar $mod_cond = parse_expression($parser);
             parser_expect($parser, "SEMI");
             my scalar $redo_node = ast_new_redo($label);
+            ast_set_line($redo_node, $stmt_line);
             my scalar $mod_block = ast_new_block();
             ast_add_statement($mod_block, $redo_node);
-            return ast_new_if_stmt($mod_cond, $mod_block);
+            my scalar $redo_if = ast_new_if_stmt($mod_cond, $mod_block);
+            ast_set_line($redo_if, $stmt_line);
+            return $redo_if;
         }
         if ($redo_cur->{"type"} eq "UNLESS") {
             parser_advance($parser);
             my scalar $mod_cond = parse_expression($parser);
             parser_expect($parser, "SEMI");
             my scalar $redo_node = ast_new_redo($label);
+            ast_set_line($redo_node, $stmt_line);
             my scalar $mod_block = ast_new_block();
             ast_add_statement($mod_block, $redo_node);
             my scalar $neg_cond = ast_new_unary_op("!", $mod_cond);
-            return ast_new_if_stmt($neg_cond, $mod_block);
+            my scalar $redo_unless = ast_new_if_stmt($neg_cond, $mod_block);
+            ast_set_line($redo_unless, $stmt_line);
+            return $redo_unless;
         }
         parser_expect($parser, "SEMI");
-        return ast_new_redo($label);
+        my scalar $redo_stmt = ast_new_redo($label);
+        ast_set_line($redo_stmt, $stmt_line);
+        return $redo_stmt;
     }
 
     # try { ... } catch ($e) { ... }
@@ -3080,7 +3136,9 @@ func parse_statement(scalar $parser) scalar {
             parser_error($parser, "try block requires at least one catch clause");
         }
 
-        return ast_new_try_catch($try_block, \@catch_clauses);
+        my scalar $try_stmt = ast_new_try_catch($try_block, \@catch_clauses);
+        ast_set_line($try_stmt, $stmt_line);
+        return $try_stmt;
     }
 
     # throw $expr;
@@ -3088,7 +3146,9 @@ func parse_statement(scalar $parser) scalar {
         parser_advance($parser);
         my scalar $expr = parse_expression($parser);
         parser_expect($parser, "SEMI");
-        return ast_new_throw($expr);
+        my scalar $throw_stmt = ast_new_throw($expr);
+        ast_set_line($throw_stmt, $stmt_line);
+        return $throw_stmt;
     }
 
     # goto LABEL;
@@ -3098,7 +3158,9 @@ func parse_statement(scalar $parser) scalar {
         my str $target = $tok->{"value"};
         parser_advance($parser);
         parser_expect($parser, "SEMI");
-        return ast_new_goto($target);
+        my scalar $goto_stmt = ast_new_goto($target);
+        ast_set_line($goto_stmt, $stmt_line);
+        return $goto_stmt;
     }
 
     # Bare block { ... }
@@ -3115,6 +3177,7 @@ func parse_statement(scalar $parser) scalar {
         parser_expect($parser, "LBRACE");
 
         my scalar $switch_node = ast_new_switch($switch_expr);
+        ast_set_line($switch_node, $stmt_line);
 
         while (!parser_check($parser, "RBRACE") && !parser_check($parser, "EOF")) {
             my scalar $case_tok = parser_current($parser);
@@ -3143,7 +3206,9 @@ func parse_statement(scalar $parser) scalar {
     if ($type eq "C_BLOCK") {
         my str $c_code = $tok->{"value"};
         parser_advance($parser);
-        return ast_new_c_block($c_code);
+        my scalar $c_stmt = ast_new_c_block($c_code);
+        ast_set_line($c_stmt, $stmt_line);
+        return $c_stmt;
     }
 
     # Expression statement (with optional statement modifiers)
@@ -3159,9 +3224,12 @@ func parse_statement(scalar $parser) scalar {
         my scalar $mod_cond = parse_expression($parser);
         parser_expect($parser, "SEMI");
         my scalar $expr_stmt = ast_new_expr_stmt($expr);
+        ast_set_line($expr_stmt, $stmt_line);
         my scalar $mod_block = ast_new_block();
         ast_add_statement($mod_block, $expr_stmt);
-        return ast_new_if_stmt($mod_cond, $mod_block);
+        my scalar $mod_if = ast_new_if_stmt($mod_cond, $mod_block);
+        ast_set_line($mod_if, $stmt_line);
+        return $mod_if;
     }
 
     # expr unless cond;
@@ -3170,10 +3238,13 @@ func parse_statement(scalar $parser) scalar {
         my scalar $mod_cond = parse_expression($parser);
         parser_expect($parser, "SEMI");
         my scalar $expr_stmt = ast_new_expr_stmt($expr);
+        ast_set_line($expr_stmt, $stmt_line);
         my scalar $mod_block = ast_new_block();
         ast_add_statement($mod_block, $expr_stmt);
         my scalar $neg_cond = ast_new_unary_op("!", $mod_cond);
-        return ast_new_if_stmt($neg_cond, $mod_block);
+        my scalar $mod_unless = ast_new_if_stmt($neg_cond, $mod_block);
+        ast_set_line($mod_unless, $stmt_line);
+        return $mod_unless;
     }
 
     # expr while cond;
@@ -3182,9 +3253,12 @@ func parse_statement(scalar $parser) scalar {
         my scalar $mod_cond = parse_expression($parser);
         parser_expect($parser, "SEMI");
         my scalar $expr_stmt = ast_new_expr_stmt($expr);
+        ast_set_line($expr_stmt, $stmt_line);
         my scalar $mod_block = ast_new_block();
         ast_add_statement($mod_block, $expr_stmt);
-        return ast_new_while_stmt($mod_cond, $mod_block, "");
+        my scalar $mod_while = ast_new_while_stmt($mod_cond, $mod_block, "");
+        ast_set_line($mod_while, $stmt_line);
+        return $mod_while;
     }
 
     # expr until cond;
@@ -3193,14 +3267,19 @@ func parse_statement(scalar $parser) scalar {
         my scalar $mod_cond = parse_expression($parser);
         parser_expect($parser, "SEMI");
         my scalar $expr_stmt = ast_new_expr_stmt($expr);
+        ast_set_line($expr_stmt, $stmt_line);
         my scalar $mod_block = ast_new_block();
         ast_add_statement($mod_block, $expr_stmt);
         my scalar $neg_cond = ast_new_unary_op("!", $mod_cond);
-        return ast_new_while_stmt($neg_cond, $mod_block, "");
+        my scalar $mod_until = ast_new_while_stmt($neg_cond, $mod_block, "");
+        ast_set_line($mod_until, $stmt_line);
+        return $mod_until;
     }
 
     parser_expect($parser, "SEMI");
-    return ast_new_expr_stmt($expr);
+    my scalar $expr_stmt = ast_new_expr_stmt($expr);
+    ast_set_line($expr_stmt, $stmt_line);
+    return $expr_stmt;
 }
 
 # ============================================================

@@ -1577,6 +1577,26 @@ gcc -o myprogram main.c mylib.c runtime/strada_runtime.c \
 #define TO_STR(sv)       strada_to_str(sv)
 ```
 
+## Line-Level Profiling
+
+The `--full-profile` compiler flag instruments every source line with timing and execution count tracking. The following runtime functions provide programmatic control:
+
+```c
+// Start line-level profiling, writing output to the specified file
+// Strada: core::full_profile_start("output.prof")
+void strada_full_profile_start(StradaValue *filename);
+
+// Stop profiling and flush collected data to disk
+// Strada: core::full_profile_stop()
+void strada_full_profile_stop(void);
+```
+
+When `--full-profile` is used, the code generator inserts `strada_full_profile_tick(file, line)` calls before each statement. The program writes a binary `strada-prof.out` file on exit.
+
+**Report tools:**
+- `strada-proftext <profile.out>` -- text report to stdout (options: `-f` functions only, `-l` lines only, `--top N`)
+- `strada-profhtml <profile.out> [output-dir]` -- HTML report with sortable tables and heat-colored source views
+
 ## Performance Considerations
 
 - **Tagged integers require zero allocation** - integer arithmetic, comparisons, loop counters, and array indexing are allocation-free

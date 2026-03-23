@@ -3601,6 +3601,7 @@ $big_data = undef;  # Release memory
 3. **Pre-allocate arrays** when size is known
 4. **Use `extern` functions** for performance-critical code
 5. **Leverage tagged integers**: Integer-heavy code (loops, counters, array indexing) benefits from zero-allocation tagged integer optimization -- Strada is 3.4x faster than Python and 3.5x faster than Perl on array/hash benchmarks
+6. **Profile your code**: Use `-p` for a quick function-level overview, or `--full-profile` for line-level profiling with `strada-proftext` / `strada-profhtml` report tools
 
 ---
 

@@ -14140,6 +14140,275 @@ void strada_profile_report(void) {
 }
 
 /* ============================================================
+ * FULL PROFILING - Line-level timing (NYTProf-style)
+ * ============================================================ */
+
+#define FP_MAX_FILES 256
+#define FP_MAX_LINES 65536
+#define FP_MAX_FUNCS 4096
+#define FP_MAX_STACK 256
+
+typedef struct FPLineEntry {
+    uint64_t call_count;
+    uint64_t total_time_ns;   /* nanoseconds */
+} FPLineEntry;
+
+typedef struct FPFuncEntry {
+    const char *name;
+    uint64_t call_count;
+    uint64_t inclusive_time_ns;
+    uint64_t exclusive_time_ns;
+} FPFuncEntry;
+
+typedef struct FPStackFrame {
+    int func_idx;
+    uint64_t enter_time_ns;
+    uint64_t child_time_ns;
+} FPStackFrame;
+
+typedef struct FPFileInfo {
+    const char *filename;
+    FPLineEntry *lines;      /* Allocated lazily, FP_MAX_LINES entries */
+    int max_line;            /* Highest line number seen */
+} FPFileInfo;
+
+static FPFileInfo fp_files[FP_MAX_FILES];
+static int fp_file_count = 0;
+static FPFuncEntry fp_funcs[FP_MAX_FUNCS];
+static int fp_func_count = 0;
+static FPStackFrame fp_stack[FP_MAX_STACK];
+static int fp_stack_top = 0;
+static int fp_initialized = 0;
+static int fp_active = 0;
+static const char *fp_output_file = NULL;
+static int fp_last_file_id = -1;
+static int fp_last_line_no = -1;
+static uint64_t fp_last_time_ns = 0;
+
+static uint64_t fp_get_time_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+void strada_full_profile_init(const char *output_file) {
+    memset(fp_files, 0, sizeof(fp_files));
+    fp_file_count = 0;
+    memset(fp_funcs, 0, sizeof(fp_funcs));
+    fp_func_count = 0;
+    memset(fp_stack, 0, sizeof(fp_stack));
+    fp_stack_top = 0;
+    fp_last_file_id = -1;
+    fp_last_line_no = -1;
+    fp_last_time_ns = 0;
+    fp_output_file = output_file ? output_file : "strada-prof.out";
+    fp_initialized = 1;
+    fp_active = 1;
+}
+
+int strada_full_profile_register_file(const char *filename) {
+    if (fp_file_count >= FP_MAX_FILES) {
+        fprintf(stderr, "Warning: full profiler exceeded max files (%d)\n", FP_MAX_FILES);
+        return -1;
+    }
+    int id = fp_file_count++;
+    fp_files[id].filename = filename;
+    fp_files[id].lines = (FPLineEntry *)calloc(FP_MAX_LINES, sizeof(FPLineEntry));
+    fp_files[id].max_line = 0;
+    return id;
+}
+
+void strada_full_profile_line(int file_id, int line_no) {
+    if (!fp_active) return;
+    if (file_id < 0 || file_id >= fp_file_count) return;
+    if (line_no < 0 || line_no >= FP_MAX_LINES) return;
+
+    uint64_t now = fp_get_time_ns();
+
+    /* Accumulate time to the previous line */
+    if (fp_last_file_id >= 0 && fp_last_file_id < fp_file_count &&
+        fp_last_line_no >= 0 && fp_last_line_no < FP_MAX_LINES) {
+        uint64_t elapsed = now - fp_last_time_ns;
+        fp_files[fp_last_file_id].lines[fp_last_line_no].total_time_ns += elapsed;
+        fp_files[fp_last_file_id].lines[fp_last_line_no].call_count++;
+    }
+
+    fp_last_file_id = file_id;
+    fp_last_line_no = line_no;
+    fp_last_time_ns = now;
+
+    if (line_no > fp_files[file_id].max_line) {
+        fp_files[file_id].max_line = line_no;
+    }
+}
+
+void strada_full_profile_enter(const char *func_name) {
+    if (!fp_active) return;
+
+    /* Find or create func entry */
+    int idx = -1;
+    for (int i = 0; i < fp_func_count; i++) {
+        if (fp_funcs[i].name == func_name || strcmp(fp_funcs[i].name, func_name) == 0) {
+            idx = i;
+            break;
+        }
+    }
+    if (idx < 0) {
+        if (fp_func_count >= FP_MAX_FUNCS) {
+            return; /* silently drop */
+        }
+        idx = fp_func_count++;
+        fp_funcs[idx].name = func_name;
+        fp_funcs[idx].call_count = 0;
+        fp_funcs[idx].inclusive_time_ns = 0;
+        fp_funcs[idx].exclusive_time_ns = 0;
+    }
+    fp_funcs[idx].call_count++;
+
+    /* Push stack frame */
+    if (fp_stack_top < FP_MAX_STACK) {
+        fp_stack[fp_stack_top].func_idx = idx;
+        fp_stack[fp_stack_top].enter_time_ns = fp_get_time_ns();
+        fp_stack[fp_stack_top].child_time_ns = 0;
+        fp_stack_top++;
+    }
+}
+
+void strada_full_profile_exit(const char *func_name) {
+    if (!fp_active) return;
+    if (fp_stack_top <= 0) return;
+
+    (void)func_name;
+
+    uint64_t now = fp_get_time_ns();
+    fp_stack_top--;
+    FPStackFrame *frame = &fp_stack[fp_stack_top];
+    uint64_t elapsed = now - frame->enter_time_ns;
+    uint64_t exclusive = elapsed - frame->child_time_ns;
+
+    int idx = frame->func_idx;
+    if (idx >= 0 && idx < fp_func_count) {
+        fp_funcs[idx].inclusive_time_ns += elapsed;
+        fp_funcs[idx].exclusive_time_ns += exclusive;
+    }
+
+    /* Add elapsed to parent's child_time_ns */
+    if (fp_stack_top > 0) {
+        fp_stack[fp_stack_top - 1].child_time_ns += elapsed;
+    }
+}
+
+void strada_full_profile_start(const char *output_file) {
+    if (!fp_initialized) {
+        strada_full_profile_init(output_file);
+    } else {
+        fp_output_file = output_file ? output_file : "strada-prof.out";
+        fp_active = 1;
+    }
+}
+
+void strada_full_profile_stop(void) {
+    if (!fp_active) return;
+
+    /* Flush final line timing */
+    if (fp_last_file_id >= 0 && fp_last_file_id < fp_file_count &&
+        fp_last_line_no >= 0 && fp_last_line_no < FP_MAX_LINES) {
+        uint64_t now = fp_get_time_ns();
+        uint64_t elapsed = now - fp_last_time_ns;
+        fp_files[fp_last_file_id].lines[fp_last_line_no].total_time_ns += elapsed;
+        fp_files[fp_last_file_id].lines[fp_last_line_no].call_count++;
+    }
+    fp_last_file_id = -1;
+    fp_last_line_no = -1;
+
+    fp_active = 0;
+    strada_full_profile_write();
+}
+
+void strada_full_profile_write(void) {
+    if (!fp_output_file) return;
+
+    /* Check if there's any data to write */
+    int has_data = 0;
+    if (fp_func_count > 0) has_data = 1;
+    if (!has_data) {
+        for (int i = 0; i < fp_file_count; i++) {
+            if (fp_files[i].max_line > 0) { has_data = 1; break; }
+        }
+    }
+    if (!has_data) return;
+
+    FILE *f = fopen(fp_output_file, "wb");
+    if (!f) {
+        fprintf(stderr, "Warning: could not open profile output file '%s'\n", fp_output_file);
+        return;
+    }
+
+    /* Magic */
+    fwrite("STFP", 1, 4, f);
+
+    /* Version */
+    uint32_t version = 1;
+    fwrite(&version, sizeof(uint32_t), 1, f);
+
+    /* File count */
+    uint32_t file_count = (uint32_t)fp_file_count;
+    fwrite(&file_count, sizeof(uint32_t), 1, f);
+
+    /* Each file */
+    for (int i = 0; i < fp_file_count; i++) {
+        /* Filename */
+        uint32_t name_len = (uint32_t)(fp_files[i].filename ? strlen(fp_files[i].filename) : 0);
+        fwrite(&name_len, sizeof(uint32_t), 1, f);
+        if (name_len > 0) {
+            fwrite(fp_files[i].filename, 1, name_len, f);
+        }
+
+        /* Max line */
+        uint32_t max_line = (uint32_t)fp_files[i].max_line;
+        fwrite(&max_line, sizeof(uint32_t), 1, f);
+
+        /* Count non-zero lines */
+        uint32_t nz_count = 0;
+        for (int ln = 1; ln <= fp_files[i].max_line; ln++) {
+            if (fp_files[i].lines && fp_files[i].lines[ln].call_count > 0) {
+                nz_count++;
+            }
+        }
+        fwrite(&nz_count, sizeof(uint32_t), 1, f);
+
+        /* Sparse line data */
+        for (int ln = 1; ln <= fp_files[i].max_line; ln++) {
+            if (fp_files[i].lines && fp_files[i].lines[ln].call_count > 0) {
+                uint32_t line_no = (uint32_t)ln;
+                fwrite(&line_no, sizeof(uint32_t), 1, f);
+                fwrite(&fp_files[i].lines[ln].call_count, sizeof(uint64_t), 1, f);
+                fwrite(&fp_files[i].lines[ln].total_time_ns, sizeof(uint64_t), 1, f);
+            }
+        }
+    }
+
+    /* Function count */
+    uint32_t func_count = (uint32_t)fp_func_count;
+    fwrite(&func_count, sizeof(uint32_t), 1, f);
+
+    /* Each function */
+    for (int i = 0; i < fp_func_count; i++) {
+        uint32_t name_len = (uint32_t)(fp_funcs[i].name ? strlen(fp_funcs[i].name) : 0);
+        fwrite(&name_len, sizeof(uint32_t), 1, f);
+        if (name_len > 0) {
+            fwrite(fp_funcs[i].name, 1, name_len, f);
+        }
+        fwrite(&fp_funcs[i].call_count, sizeof(uint64_t), 1, f);
+        fwrite(&fp_funcs[i].inclusive_time_ns, sizeof(uint64_t), 1, f);
+        fwrite(&fp_funcs[i].exclusive_time_ns, sizeof(uint64_t), 1, f);
+    }
+
+    fclose(f);
+    fprintf(stderr, "Full profile data written to %s\n", fp_output_file);
+}
+
+/* ============================================================
  * GLOBAL VARIABLE REGISTRY
  * Shared across all modules (including dynamically loaded .so)
  * ============================================================ */

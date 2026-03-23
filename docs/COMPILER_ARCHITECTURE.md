@@ -551,6 +551,26 @@ To add new language features:
 
 Do NOT modify the bootstrap compiler unless absolutely necessary for bootstrapping.
 
+## Profiling Instrumentation
+
+### Function-Level Profiling (`-p`)
+
+When the `-p` flag is set, CodeGen wraps each function body with `strada_profile_enter()`/`strada_profile_exit()` calls that track call counts and cumulative wall-clock time. At program exit, a summary is printed to stderr.
+
+### Line-Level Profiling (`--full-profile`)
+
+The `--full-profile` flag enables comprehensive line-level instrumentation, similar to Perl's Devel::NYTProf. It implies `-g` (debug/line info).
+
+**CodeGen behavior**: When full profiling is enabled, the code generator inserts a `strada_full_profile_tick(file, line)` call before each statement. This records the source file, line number, and high-resolution timestamp.
+
+**Runtime behavior**: The profiled program writes a binary `strada-prof.out` file on exit containing per-line execution counts and timing data.
+
+**Report tools** (built by `make`, installed by `make install`):
+- `strada-proftext` -- generates text reports (function summary + per-file line breakdown)
+- `strada-profhtml` -- generates HTML reports with sortable tables and heat-colored source views
+
+**Programmatic API**: `core::full_profile_start(file)` and `core::full_profile_stop()` allow enabling/disabling profiling at runtime for targeted analysis of specific code sections.
+
 ## Error Handling
 
 ### Lexer Errors

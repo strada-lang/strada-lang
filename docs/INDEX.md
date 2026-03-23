@@ -23,7 +23,7 @@ Welcome to the Strada programming language documentation. Strada is a strongly-t
 
 | Document | Description |
 |----------|-------------|
-| [Debugging Guide](DEBUGGING.md) | Using GDB with Strada programs |
+| [Debugging Guide](DEBUGGING.md) | Using GDB with Strada programs, line-level profiling |
 | [FFI Guide](FFI_GUIDE.md) | C integration and foreign functions |
 | [Perl Integration](PERL_INTEGRATION.md) | Calling Perl from Strada and vice versa |
 | [Runtime API](RUNTIME_API.md) | C runtime library reference |

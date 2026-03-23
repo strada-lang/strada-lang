@@ -89,7 +89,7 @@ func escape_c_keyword(str $name) str {
     return $name;
 }
 
-func codegen_new(str $filename, int $debug_info, int $enable_profiling, int $enable_stack_trace) scalar {
+func codegen_new(str $filename, int $debug_info, int $enable_profiling, int $enable_stack_trace, int $full_profile) scalar {
     my hash %cg = ();
     # StringBuilder for O(1) amortized append (no O(n^2) string concat)
     $cg{"output_sb"} = sb_new();
@@ -100,6 +100,7 @@ func codegen_new(str $filename, int $debug_info, int $enable_profiling, int $ena
     $cg{"debug_info"} = $debug_info;  # Emit #line directives for debugging
     $cg{"enable_profiling"} = $enable_profiling;  # Emit function profiling code
     $cg{"enable_stack_trace"} = $enable_stack_trace;  # Emit stack trace push/pop calls
+    $cg{"full_profile"} = $full_profile;  # Emit line-level profiling code
     $cg{"last_line"} = 0;  # Track last emitted line to avoid duplicates
     $cg{"functions"} = {};  # Map function name -> function info
     $cg{"in_extern"} = 0;   # Track if we're inside an extern function
@@ -2180,6 +2181,7 @@ func needs_temp_cleanup(scalar $cg, scalar $expr) int {
             $name eq "sys::random_bytes" || $name eq "sys::random_bytes_hex" ||
             $name eq "sys::global_get" || $name eq "sys::global_exists" || $name eq "sys::global_keys" ||
             $name eq "sys::stack_trace" ||
+            $name eq "sys::full_profile_start" || $name eq "sys::full_profile_stop" ||
             $name eq "sys::set_recursion_limit" || $name eq "sys::get_recursion_limit" ||
             $name eq "sys::wantarray" || $name eq "sys::wantscalar" || $name eq "sys::wanthash" ||
             $name eq "utf8::is_utf8" || $name eq "utf8::valid" ||
@@ -4843,6 +4845,30 @@ func gen_expression(scalar $cg, scalar $expr) void {
         if ($name eq "sys::stack_trace") {
             # Returns current call stack as a string
             emit($cg, "({ char *__st = strada_capture_stack_trace(); StradaValue *__st_sv = strada_new_str(__st ? __st : \"\"); free(__st); __st_sv; })");
+            return;
+        }
+
+        if ($name eq "sys::full_profile_start") {
+            # Enable full profiling with output file
+            my scalar $fp_args = $expr->{"args"};
+            my int $fp_argc = $expr->{"arg_count"};
+            emit($cg, "({ ");
+            if ($fp_argc > 0) {
+                emit($cg, "StradaValue *__fparg = ");
+                gen_expression($cg, $fp_args->[0]);
+                emit($cg, "; char *__fps = strada_to_str(__fparg); strada_full_profile_start(__fps); free(__fps); ");
+                if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $fp_args->[0]) == 1) {
+                    emit($cg, "strada_decref(__fparg); ");
+                }
+            } else {
+                emit($cg, "strada_full_profile_start(\"strada-prof.out\"); ");
+            }
+            emit($cg, "(StradaValue*)NULL; })");
+            return;
+        }
+
+        if ($name eq "sys::full_profile_stop") {
+            emit($cg, "({ strada_full_profile_stop(); (StradaValue*)NULL; })");
             return;
         }
 
@@ -13050,6 +13076,15 @@ func gen_statement(scalar $cg, scalar $stmt) void {
     # Emit #line directive for source-level debugging
     emit_line_for_stmt($cg, $stmt);
 
+    # Emit line-level profiling call if full profiling enabled
+    if ($cg->{"full_profile"} == 1) {
+        my int $fp_line = $stmt->{"line"} + 0;
+        if ($fp_line > 0) {
+            emit_indent($cg);
+            emit($cg, "strada_full_profile_line(__fp_file_id, " . $fp_line . ");\n");
+        }
+    }
+
     my int $type = $stmt->{"type"};
 
     # Variable declaration
@@ -13852,6 +13887,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         my int $in_main = $cg->{"in_main"};
         my int $cleanup_enabled = $cg->{"cleanup_enabled"};
         my int $profiling = $cg->{"enable_profiling"};
+        my int $fp = $cg->{"full_profile"};
         my str $func_name = $cg->{"current_func_name"};
         my int $in_extern = $cg->{"in_extern"};
 
@@ -13917,16 +13953,29 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             # Still need to pop try blocks even if cleanup is disabled
             emit_try_cleanup($cg);
             # Add profiling exit if enabled (for non-main)
-            if ($profiling == 1 && $in_main == 0 && length($func_name) > 0) {
+            if (($profiling == 1 || $fp == 1) && $in_main == 0 && length($func_name) > 0) {
                 if ($stmt->{"value"}) {
                     # Save return value, call profile_exit, then return
                     emit_indent($cg);
                     emit($cg, "{ StradaValue *__retval = ");
                     gen_expression($cg, $stmt->{"value"});
-                    emit($cg, "; strada_profile_exit(\"" . $func_name . "\");" . emit_stack_pop_inline($cg) . " return __retval; }\n");
+                    emit($cg, "; ");
+                    if ($profiling == 1) {
+                        emit($cg, "strada_profile_exit(\"" . $func_name . "\"); ");
+                    }
+                    if ($fp == 1) {
+                        emit($cg, "strada_full_profile_exit(\"" . $func_name . "\"); ");
+                    }
+                    emit($cg, emit_stack_pop_inline($cg) . " return __retval; }\n");
                 } else {
-                    emit_indent($cg);
-                    emit($cg, "strada_profile_exit(\"" . $func_name . "\");\n");
+                    if ($profiling == 1) {
+                        emit_indent($cg);
+                        emit($cg, "strada_profile_exit(\"" . $func_name . "\");\n");
+                    }
+                    if ($fp == 1) {
+                        emit_indent($cg);
+                        emit($cg, "strada_full_profile_exit(\"" . $func_name . "\");\n");
+                    }
                     emit_stack_pop($cg);
                     emit_indent($cg);
                     emit($cg, "return;\n");
@@ -13961,6 +14010,11 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 emit_indent($cg);
                 emit($cg, "strada_profile_exit(\"" . $func_name . "\");\n");
             }
+            # Add full profiling exit if enabled
+            if ($fp == 1 && length($func_name) > 0) {
+                emit_indent($cg);
+                emit($cg, "strada_full_profile_exit(\"" . $func_name . "\");\n");
+            }
             emit_stack_pop($cg);
             emit_indent($cg);
             emit($cg, "return __retval; }\n");
@@ -13974,6 +14028,11 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             if ($profiling == 1 && length($func_name) > 0) {
                 emit_indent($cg);
                 emit($cg, "strada_profile_exit(\"" . $func_name . "\");\n");
+            }
+            # Add full profiling exit if enabled
+            if ($fp == 1 && length($func_name) > 0) {
+                emit_indent($cg);
+                emit($cg, "strada_full_profile_exit(\"" . $func_name . "\");\n");
             }
             emit_stack_pop($cg);
             emit_indent($cg);
@@ -14476,6 +14535,14 @@ func gen_function(scalar $cg, scalar $fn) void {
             emit($cg, "    strada_profile_init();\n");
             emit($cg, "    atexit(strada_profile_report);\n\n");
         }
+
+        # Initialize full profiling if enabled
+        if ($cg->{"full_profile"} == 1) {
+            emit($cg, "    /* Initialize full (line-level) profiling */\n");
+            emit($cg, "    strada_full_profile_init(NULL);\n");
+            emit($cg, "    atexit(strada_full_profile_write);\n");
+            emit($cg, "    __fp_file_id = strada_full_profile_register_file(\"" . $cg->{"filename"} . "\");\n\n");
+        }
         emit($cg, "    /* Populate global ARGV array */\n");
         emit($cg, "    ARGV = strada_new_array();\n");
         emit($cg, "    for (int i = 0; i < _argc; i++) {\n");
@@ -14708,6 +14775,11 @@ func gen_function(scalar $cg, scalar $fn) void {
             emit($cg, "    strada_profile_enter(\"" . $name . "\");\n");
         }
 
+        # Add full profiling entry if enabled
+        if ($cg->{"full_profile"} == 1) {
+            emit($cg, "    strada_full_profile_enter(\"" . $name . "\");\n");
+        }
+
         # Store current function name for profiling exit in return statements
         $cg->{"current_func_name"} = $name;
 
@@ -14774,6 +14846,10 @@ func gen_function(scalar $cg, scalar $fn) void {
         # Add implicit profiling exit for void functions (no explicit return)
         if ($cg->{"enable_profiling"} == 1 && $ret_type_id == TYPE_VOID()) {
             emit($cg, "    strada_profile_exit(\"" . $name . "\");\n");
+        }
+        # Add implicit full profiling exit for void functions
+        if ($cg->{"full_profile"} == 1 && $ret_type_id == TYPE_VOID()) {
+            emit($cg, "    strada_full_profile_exit(\"" . $name . "\");\n");
         }
         # Restore local() saves for void functions falling through
         if ($cg->{"has_local"} == 1) {
@@ -14962,6 +15038,11 @@ func gen_program(scalar $cg, scalar $program) void {
     emit($cg, "#include <stdbool.h>\n");
     emit($cg, "#include <dlfcn.h>\n");
     emit($cg, "#include <math.h>\n\n");
+
+    # Full profiling: declare file ID variable
+    if ($cg->{"full_profile"} == 1) {
+        emit($cg, "static int __fp_file_id = 0;\n\n");
+    }
 
     # Emit top-level C blocks (includes, typedefs, etc.)
     my int $c_block_count = $program->{"c_block_count"};
@@ -16096,8 +16177,8 @@ func type_to_c_raw(int $type) str {
 # Main Entry Point
 # ============================================================
 
-func generate(scalar $ast, str $filename, int $debug_info, int $enable_profiling, int $enable_stack_trace) str {
-    my scalar $cg = codegen_new($filename, $debug_info, $enable_profiling, $enable_stack_trace);
+func generate(scalar $ast, str $filename, int $debug_info, int $enable_profiling, int $enable_stack_trace, int $full_profile) str {
+    my scalar $cg = codegen_new($filename, $debug_info, $enable_profiling, $enable_stack_trace, $full_profile);
     gen_program($cg, $ast);
     return get_output($cg);  # Join array into final string
 }

@@ -26,7 +26,10 @@ The compiler is self-hosting - it is written in Strada itself.
   Emit `#line` directives in the generated C code. This enables source-level debugging where the debugger shows Strada source lines instead of generated C code.
 
 - **-p**, **--profile**
-  Enable function profiling. When enabled, the compiled program will track timing and call counts for each function. At program exit, a profile report is printed.
+  Enable function profiling. When enabled, the compiled program will track timing and call counts for each function. At program exit, a profile report is printed to stderr.
+
+- **--full-profile**
+  Enable line-level profiling instrumentation (similar to Perl's Devel::NYTProf). Implies `-g` (debug/line info). The compiled program writes a `strada-prof.out` binary file on exit. Use `strada-proftext` or `strada-profhtml` to generate reports from the profile data.
 
 - **-t**, **--timing**
   Show compilation phase timing. Displays how long each phase of compilation (lexing, parsing, code generation) takes.
@@ -69,7 +72,7 @@ stradac -L ./mylibs -L /opt/strada/lib app.strada app.c
 
 ## SEE ALSO
 
-**strada**(1), **stradadoc**(1)
+**strada**(1), **strada-proftext**(1), **strada-profhtml**(1), **stradadoc**(1)
 
 ## AUTHOR
 

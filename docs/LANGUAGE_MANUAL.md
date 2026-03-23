@@ -2101,3 +2101,35 @@ expr            := assignment | ternary | logical | comparison | arithmetic
 | Reference | `\ -> @{} %{} ${}` |
 | Regex | `=~ !~ s/// s///e tr/// y///` |
 | Other | `? : .. ,` |
+
+## Appendix C: Compiler Flags
+
+| Flag | Description |
+|------|-------------|
+| `-c` | Keep generated .c file |
+| `-r`, `--run` | Compile and run immediately |
+| `-o FILE` | Set output file name |
+| `-O LEVEL` | Set gcc optimization level (0, 1, 2, 3, s, fast) |
+| `-g` | Emit `#line` directives and debug symbols |
+| `--c-debug` | C-level debugging only (DWARF symbols, no `#line`) |
+| `-p`, `--profile` | Function-level profiling (call counts + timing to stderr) |
+| `--full-profile` | Line-level profiling (writes `strada-prof.out`; implies `-g`) |
+| `-w`, `--warnings` | Show compiler warnings |
+| `-t`, `--timing` | Show compilation phase timing |
+| `--shared` | Compile as shared library (.so) |
+| `--static` | Compile as fully static binary |
+| `--static-lib` | Compile as static library archive (.a) |
+| `--object` | Compile to object file (.o) only |
+| `-v` | Verbose output |
+
+### Line-Level Profiling
+
+The `--full-profile` flag enables comprehensive line-level profiling, similar to Perl's Devel::NYTProf. It instruments every source line with timing and execution count tracking. The compiled program writes a binary `strada-prof.out` file on exit. Use the report tools to analyze the data:
+
+- `strada-proftext <profile.out>` -- text report (options: `-f` functions only, `-l` lines only, `--top N`)
+- `strada-profhtml <profile.out> [output-dir]` -- HTML report with sortable tables and heat-colored source
+
+Programmatic API for targeted profiling:
+
+- `core::full_profile_start("output.prof")` -- start profiling mid-program
+- `core::full_profile_stop()` -- stop profiling and flush data
