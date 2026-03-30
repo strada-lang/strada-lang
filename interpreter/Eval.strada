@@ -1099,15 +1099,22 @@ func eval_block(scalar $interp, scalar $block, scalar $env) scalar {
     my int $count = $block->{"statement_count"};
     my scalar $result = undef;
 
-    # Check if block contains labels (only then do we need goto try/catch)
+    # Check if block contains labels (cached after first scan)
+    # Values: 0=not scanned, 1=has labels, 2=no labels
+    my int $hl = $block->{"__hl"};
     my int $has_labels = 0;
-    my int $lci = 0;
-    while ($lci < $count) {
-        if ($stmts->[$lci]->{"type"} == NI::LABEL) {
-            $has_labels = 1;
-            last;
+    if ($hl == 1) {
+        $has_labels = 1;
+    } elsif ($hl == 0) {
+        my int $lci = 0;
+        while ($lci < $count) {
+            if ($stmts->[$lci]->{"type"} == NI::LABEL) {
+                $has_labels = 1;
+                last;
+            }
+            $lci = $lci + 1;
         }
-        $lci = $lci + 1;
+        $block->{"__hl"} = $has_labels == 1 ? 1 : 2;
     }
 
     my int $ebi = 0;
@@ -1188,20 +1195,26 @@ func check_overload(scalar $interp, scalar $val, str $op) scalar {
 }
 
 func eval_binop(scalar $interp, scalar $node, scalar $env) scalar {
-    my str $op = $node->{"op"};
+    # Use cached operator ID (avoids 2 hash lookups per eval after first)
+    my int $oid = $node->{"__oid"};
+    if ($oid == 0) {
+        my str $op = $node->{"op"};
+        $oid = $interp->{"op_ids"}->{$op};
+        $node->{"__oid"} = $oid;
+    }
 
     # Short-circuit operators (must check BEFORE evaluating both sides)
-    if ($op eq "&&" || $op eq "and") {
+    if ($oid == OP::LOG_AND || $oid == OP::WORD_AND) {
         my scalar $left = eval_node($interp, $node->{"left"}, $env);
         if (!$left) { return $left; }
         return eval_node($interp, $node->{"right"}, $env);
     }
-    if ($op eq "||" || $op eq "or") {
+    if ($oid == OP::LOG_OR || $oid == OP::WORD_OR) {
         my scalar $left = eval_node($interp, $node->{"left"}, $env);
         if ($left) { return $left; }
         return eval_node($interp, $node->{"right"}, $env);
     }
-    if ($op eq "//") {
+    if ($oid == OP::DEFOR) {
         my scalar $left = eval_node($interp, $node->{"left"}, $env);
         if (defined($left)) { return $left; }
         return eval_node($interp, $node->{"right"}, $env);
@@ -1213,6 +1226,7 @@ func eval_binop(scalar $interp, scalar $node, scalar $env) scalar {
 
     # Check for operator overloading (skip entirely when no overloads registered)
     if ($interp->{"has_overloads"} == 1) {
+        my str $op = $node->{"op"};
         my scalar $ovl_func = check_overload($interp, $left, $op);
         if (defined($ovl_func)) {
             my array @ovl_args = ();
@@ -1230,9 +1244,6 @@ func eval_binop(scalar $interp, scalar $node, scalar $env) scalar {
             return call_user_func($interp, $ovl_func_r, \@ovl_args);
         }
     }
-
-    # Lookup operator ID for integer dispatch
-    my int $oid = $interp->{"op_ids"}->{$op};
 
     # Arithmetic
     if ($oid == OP::ADD) { return $left + $right; }
@@ -1321,9 +1332,8 @@ func is_builtin(scalar $interp, str $name) int {
     return 0;
 }
 
-func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
+func call_builtin(scalar $interp, str $name, int $bid, scalar $args, scalar $env) scalar {
     my int $argc = size($args);
-    my int $bid = $interp->{"builtin_ids"}->{$name};
 
     # ---- I/O ----
     if ($bid == BI::SAY) {
@@ -2544,29 +2554,46 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
         return eval_node_extended($interp, $node, $env, $type);
     }
 
+    # --- Variables (most frequently evaluated node type) ---
+    if ($type == NI::VARIABLE) {
+        # Cached resolution: 1=constant, 2=enum, 3=regular variable
+        my int $vk = $node->{"__vk"};
+        if ($vk == 3) {
+            return env_get($env, $node->{"name"});
+        }
+        if ($vk == 1) {
+            return $interp->{"constants"}->{$node->{"name"}};
+        }
+        if ($vk == 2) {
+            return $interp->{"enums"}->{$node->{"name"}};
+        }
+        # First access: resolve and cache
+        my str $name = $node->{"name"};
+        if (exists($interp->{"constants"}, $name)) {
+            $node->{"__vk"} = 1;
+            return $interp->{"constants"}->{$name};
+        }
+        if (exists($interp->{"enums"}, $name)) {
+            $node->{"__vk"} = 2;
+            return $interp->{"enums"}->{$name};
+        }
+        $node->{"__vk"} = 3;
+        return env_get($env, $name);
+    }
+
     # --- Literals ---
-    if ($type == NI::INT_LITERAL) {
-        return $node->{"value"};
-    }
-    if ($type == NI::NUM_LITERAL) {
-        return $node->{"value"};
-    }
-    if ($type == NI::STR_LITERAL) {
+    if ($type == NI::INT_LITERAL || $type == NI::STR_LITERAL || $type == NI::NUM_LITERAL) {
         return $node->{"value"};
     }
 
-    # --- Variables ---
-    if ($type == NI::VARIABLE) {
-        my str $name = $node->{"name"};
-        # Check constants
-        if (exists($interp->{"constants"}, $name)) {
-            return $interp->{"constants"}->{$name};
-        }
-        # Check enums (e.g., "Status::ACTIVE")
-        if (exists($interp->{"enums"}, $name)) {
-            return $interp->{"enums"}->{$name};
-        }
-        return env_get($env, $name);
+    # --- Expression Statement (wraps most lines) ---
+    if ($type == NI::EXPR_STMT) {
+        return eval_node($interp, $node->{"expr"}, $env);
+    }
+
+    # --- Binary Operations ---
+    if ($type == NI::BINARY_OP) {
+        return eval_binop($interp, $node, $env);
     }
 
     # --- Variable Declaration ---
@@ -2627,11 +2654,6 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
         return eval_block($interp, $node, $new_env);
     }
 
-    # --- Expression Statement ---
-    if ($type == NI::EXPR_STMT) {
-        return eval_node($interp, $node->{"expr"}, $env);
-    }
-
     # --- Assignment ---
     if ($type == NI::ASSIGN) {
         my str $op = $node->{"op"};
@@ -2653,11 +2675,6 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
 
         assign_to($interp, $target, $rhs, $env);
         return $rhs;
-    }
-
-    # --- Binary Operations ---
-    if ($type == NI::BINARY_OP) {
-        return eval_binop($interp, $node, $env);
     }
 
     # --- Unary Operations ---
@@ -2833,9 +2850,23 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
             $ai = $ai + 1;
         }
 
-        # Check builtins
-        if (is_builtin($interp, $name)) {
-            return call_builtin($interp, $name, \@args, $env);
+        # Fast path: use cached builtin ID (saves 2+ hash lookups per call)
+        my int $cached_bid = $node->{"__bid"};
+        if ($cached_bid > 0) {
+            return call_builtin($interp, $name, $cached_bid, \@args, $env);
+        }
+
+        # Slow path: resolve and cache
+        if ($cached_bid == 0) {
+            if (is_builtin($interp, $name)) {
+                my int $bid = $interp->{"builtin_ids"}->{$name};
+                if ($bid > 0) {
+                    $node->{"__bid"} = $bid;
+                    return call_builtin($interp, $name, $bid, \@args, $env);
+                }
+            }
+            # Mark as non-builtin so we skip is_builtin check next time
+            $node->{"__bid"} = -1;
         }
 
         # Check user-defined functions
