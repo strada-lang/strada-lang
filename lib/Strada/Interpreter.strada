@@ -970,6 +970,8 @@ func interp_new() scalar {
     $interp{"autoloads"} = \%autoloads;
     my hash %method_cache = ();
     $interp{"method_cache"} = \%method_cache;
+    my hash %mro = ();
+    $interp{"mro"} = \%mro;
     # END blocks
     my array @end_blocks = ();
     $interp{"end_blocks"} = \@end_blocks;
@@ -1219,6 +1221,26 @@ func interp_register_func(scalar $interp, str $name, scalar $params, int $param_
         if ($ls eq "@" || $ls eq "...@") { $is_variadic = 1; }
     }
     $fi{"is_variadic"} = $is_variadic;
+    # Pre-compute param binding template (avoids per-param hash lookups in call_user_func)
+    if ($param_count > 0) {
+        my array @pnames = ();
+        my array @ptypes = ();
+        my array @pdefaults = ();
+        my array @poptional = ();
+        my int $ti = 0;
+        while ($ti < $param_count) {
+            my scalar $p = $params->[$ti];
+            push(@pnames, $p->{"name"});
+            push(@ptypes, $p->{"param_type"});
+            push(@pdefaults, $p->{"default_value"});
+            push(@poptional, $p->{"is_optional"});
+            $ti = $ti + 1;
+        }
+        $fi{"__pnames"} = \@pnames;
+        $fi{"__ptypes"} = \@ptypes;
+        $fi{"__pdefaults"} = \@pdefaults;
+        $fi{"__poptional"} = \@poptional;
+    }
     $interp->{"functions"}->{$name} = \%fi;
     # Also register under sanitized name (:: -> _) for cross-lookup
     if (index($name, "::") >= 0) {
@@ -1249,18 +1271,44 @@ func interp_get_func(scalar $interp, str $name) scalar {
 func interp_resolve_method(scalar $interp, str $pkg, str $method) scalar {
     my str $cache_key = $pkg . "::" . $method;
     if (exists($interp->{"method_cache"}, $cache_key)) {
-        return $interp->{"method_cache"}->{$cache_key};
+        my scalar $cached = $interp->{"method_cache"}->{$cache_key};
+        # Negative cache: 0 sentinel means "not found" (avoids re-walking inheritance)
+        if ($cached == 0) { return undef; }
+        return $cached;
     }
 
-    # Try pkg_method directly
-    my scalar $fi = interp_get_func($interp, $pkg . "_" . $method);
+    # Try pkg_method directly in functions hash (inline for speed)
+    my str $func_key = $pkg . "_" . $method;
+    my scalar $funcs = $interp->{"functions"};
+    my scalar $fi = undef;
+    if (exists($funcs, $func_key)) {
+        $fi = $funcs->{$func_key};
+    }
     if (defined($fi)) {
         $interp->{"method_cache"}->{$cache_key} = $fi;
         return $fi;
     }
 
-    # Walk inheritance chain (depth-first)
-    if (exists($interp->{"inherits"}, $pkg)) {
+    # Walk MRO if available, else inheritance chain (depth-first)
+    my scalar $mro = undef;
+    if (exists($interp->{"mro"}, $pkg)) {
+        $mro = $interp->{"mro"}->{$pkg};
+    }
+    if (defined($mro)) {
+        # Linear MRO walk (no recursion)
+        my int $mi = 0;
+        my int $mlen = size($mro);
+        while ($mi < $mlen) {
+            my str $ancestor = $mro->[$mi];
+            my str $anc_key = $ancestor . "_" . $method;
+            if (exists($funcs, $anc_key)) {
+                my scalar $found = $funcs->{$anc_key};
+                $interp->{"method_cache"}->{$cache_key} = $found;
+                return $found;
+            }
+            $mi = $mi + 1;
+        }
+    } elsif (exists($interp->{"inherits"}, $pkg)) {
         my scalar $parents = $interp->{"inherits"}->{$pkg};
         my int $pi = 0;
         while ($pi < size($parents)) {
@@ -1272,6 +1320,8 @@ func interp_resolve_method(scalar $interp, str $pkg, str $method) scalar {
             $pi = $pi + 1;
         }
     }
+    # Negative cache: store 0 sentinel to avoid re-searching
+    $interp->{"method_cache"}->{$cache_key} = 0;
     return undef;
 }
 
@@ -1287,6 +1337,19 @@ func interp_isa(scalar $interp, str $obj_class, str $target_class) int {
         }
     }
     return 0;
+}
+
+# Build linearized MRO (depth-first) for a class
+func interp_build_mro(scalar $interp, str $pkg, scalar $mro) void {
+    if (!exists($interp->{"inherits"}, $pkg)) { return; }
+    my scalar $parents = $interp->{"inherits"}->{$pkg};
+    my int $pi = 0;
+    while ($pi < size($parents)) {
+        my str $parent = $parents->[$pi];
+        push($mro, $parent);
+        interp_build_mro($interp, $parent, $mro);
+        $pi = $pi + 1;
+    }
 }
 
 # Load OOP features from a parsed program (called from Main)
@@ -1351,6 +1414,22 @@ func interp_load_oop(scalar $interp, scalar $program) void {
         }
         $fki = $fki + 1;
     }
+
+    # Build linearized MRO for all classes with inheritance
+    my scalar $inh_keys = keys($interp->{"inherits"});
+    my int $iki = 0;
+    while ($iki < size($inh_keys)) {
+        my str $cls = $inh_keys->[$iki];
+        if (!exists($interp->{"mro"}, $cls)) {
+            my array @mro = ();
+            interp_build_mro($interp, $cls, \@mro);
+            $interp->{"mro"}->{$cls} = \@mro;
+        }
+        $iki = $iki + 1;
+    }
+    # Clear method cache when OOP structure changes
+    my hash %new_mc = ();
+    $interp->{"method_cache"} = \%new_mc;
 }
 
 # Execute END blocks (LIFO order)
@@ -1601,15 +1680,22 @@ func eval_block(scalar $interp, scalar $block, scalar $env) scalar {
     my int $count = $block->{"statement_count"};
     my scalar $result = undef;
 
-    # Check if block contains labels (only then do we need goto try/catch)
+    # Check if block contains labels (cached after first scan)
+    # Values: 0=not scanned, 1=has labels, 2=no labels
+    my int $hl = $block->{"__hl"};
     my int $has_labels = 0;
-    my int $lci = 0;
-    while ($lci < $count) {
-        if ($stmts->[$lci]->{"type"} == NI::LABEL) {
-            $has_labels = 1;
-            last;
+    if ($hl == 1) {
+        $has_labels = 1;
+    } elsif ($hl == 0) {
+        my int $lci = 0;
+        while ($lci < $count) {
+            if ($stmts->[$lci]->{"type"} == NI::LABEL) {
+                $has_labels = 1;
+                last;
+            }
+            $lci = $lci + 1;
         }
-        $lci = $lci + 1;
+        $block->{"__hl"} = $has_labels == 1 ? 1 : 2;
     }
 
     my int $ebi = 0;
@@ -1645,13 +1731,20 @@ func eval_block(scalar $interp, scalar $block, scalar $env) scalar {
         }
     } else {
         # Fast path: no goto labels, direct eval without try/catch overhead
-        while ($ebi < $count) {
+        # Unroll the last statement to avoid signal check after it
+        my int $last_idx = $count - 1;
+        while ($ebi < $last_idx) {
             $result = eval_node($interp, $stmts->[$ebi], $env);
             # Check for signals (return, last, next, redo)
             if ($interp->{"signal"} != SIG::NONE) {
                 return $result;
             }
             $ebi = $ebi + 1;
+        }
+        # Last statement: evaluate and return without redundant signal check
+        # (caller will check signal if needed)
+        if ($last_idx >= 0) {
+            $result = eval_node($interp, $stmts->[$last_idx], $env);
         }
     }
     return $result;
@@ -1690,8 +1783,13 @@ func check_overload(scalar $interp, scalar $val, str $op) scalar {
 }
 
 func eval_binop(scalar $interp, scalar $node, scalar $env) scalar {
-    my str $op = $node->{"op"};
-    my int $oid = $interp->{"op_ids"}->{$op};
+    # Use cached operator ID (avoids 2 hash lookups per eval after first)
+    my int $oid = $node->{"__oid"};
+    if ($oid == 0) {
+        my str $op = $node->{"op"};
+        $oid = $interp->{"op_ids"}->{$op};
+        $node->{"__oid"} = $oid;
+    }
 
     # Short-circuit operators (must check before evaluating both sides)
     if ($oid == OP::LOG_AND || $oid == OP::WORD_AND) {
@@ -1716,6 +1814,7 @@ func eval_binop(scalar $interp, scalar $node, scalar $env) scalar {
 
     # Check for operator overloading (skip entirely when no overloads registered)
     if ($interp->{"has_overloads"} == 1) {
+        my str $op = $node->{"op"};
         my scalar $ovl_func = check_overload($interp, $left, $op);
         if (defined($ovl_func)) {
             my array @ovl_args = ();
@@ -1878,7 +1977,7 @@ func eval_binop(scalar $interp, scalar $node, scalar $env) scalar {
         return (!match($text, $pattern)) ? 1 : 0;
     }
 
-    die("Unknown binary operator: " . $op);
+    die("Unknown binary operator: " . $node->{"op"});
 }
 
 # ============================================================
@@ -3534,51 +3633,85 @@ func call_user_func(scalar $interp, scalar $func_info, scalar $args) scalar {
     if ($param_count > 0) {
     my int $arg_count = size($args);
     my int $pi = 0;
-
-    # Use cached variadic flag
     my int $is_variadic = $func_info->{"is_variadic"};
-    my str $variadic_name = "";
-    if ($is_variadic == 1) {
-        $variadic_name = $params->[$param_count - 1]->{"name"};
-    }
 
-    while ($pi < $param_count) {
-        my scalar $param = $params->[$pi];
-        my str $pname = $param->{"name"};
-        my str $psigil = $param->{"sigil"};
-
-        if ($is_variadic == 1 && $pi == $param_count - 1) {
-            # Variadic: collect remaining args into array
-            my array @rest = ();
-            my int $ri = $pi;
-            while ($ri < $arg_count) {
-                push(@rest, $args->[$ri]);
-                $ri = $ri + 1;
-            }
-            env_set($func_env, $pname, \@rest);
-        } elsif ($pi < $arg_count) {
-            env_set($func_env, $pname, $args->[$pi]);
-        } else {
-            # Default values
-            if ($param->{"is_optional"} == 1 && defined($param->{"default_value"}) && $param->{"default_value"} != 0) {
-                env_set($func_env, $pname, eval_node($interp, $param->{"default_value"}, $func_env));
+    # Use pre-computed param binding template (avoids per-param hash lookups)
+    my scalar $pnames = $func_info->{"__pnames"};
+    if (defined($pnames)) {
+        my scalar $ptypes = $func_info->{"__ptypes"};
+        my scalar $pdefaults = $func_info->{"__pdefaults"};
+        my scalar $poptional = $func_info->{"__poptional"};
+        my scalar $vars = $func_env->{"vars"};
+        while ($pi < $param_count) {
+            my str $pname = $pnames->[$pi];
+            if ($is_variadic == 1 && $pi == $param_count - 1) {
+                my array @rest = ();
+                my int $ri = $pi;
+                while ($ri < $arg_count) {
+                    push(@rest, $args->[$ri]);
+                    $ri = $ri + 1;
+                }
+                $vars->{$pname} = \@rest;
+            } elsif ($pi < $arg_count) {
+                $vars->{$pname} = $args->[$pi];
             } else {
-                my int $ptype = $param->{"param_type"};
-                if ($ptype == TI::INT) { env_set($func_env, $pname, 0); }
-                elsif ($ptype == TI::NUM) { env_set($func_env, $pname, 0.0); }
-                elsif ($ptype == TI::STR) { env_set($func_env, $pname, ""); }
-                elsif ($ptype == TI::ARRAY) {
-                    my array @a = ();
-                    env_set($func_env, $pname, \@a);
+                my scalar $dv = $pdefaults->[$pi];
+                if ($poptional->[$pi] == 1 && defined($dv) && $dv != 0) {
+                    $vars->{$pname} = eval_node($interp, $dv, $func_env);
+                } else {
+                    my int $ptype = $ptypes->[$pi];
+                    if ($ptype == TI::INT) { $vars->{$pname} = 0; }
+                    elsif ($ptype == TI::NUM) { $vars->{$pname} = 0.0; }
+                    elsif ($ptype == TI::STR) { $vars->{$pname} = ""; }
+                    elsif ($ptype == TI::ARRAY) {
+                        my array @a = ();
+                        $vars->{$pname} = \@a;
+                    }
+                    elsif ($ptype == TI::HASH) {
+                        my hash %h = ();
+                        $vars->{$pname} = \%h;
+                    }
+                    else { $vars->{$pname} = undef; }
                 }
-                elsif ($ptype == TI::HASH) {
-                    my hash %h = ();
-                    env_set($func_env, $pname, \%h);
-                }
-                else { env_set($func_env, $pname, undef); }
             }
+            $pi = $pi + 1;
         }
-        $pi = $pi + 1;
+    } else {
+        # Fallback for closures / anonymous functions without pre-computed template
+        while ($pi < $param_count) {
+            my scalar $param = $params->[$pi];
+            my str $pname = $param->{"name"};
+            if ($is_variadic == 1 && $pi == $param_count - 1) {
+                my array @rest = ();
+                my int $ri = $pi;
+                while ($ri < $arg_count) {
+                    push(@rest, $args->[$ri]);
+                    $ri = $ri + 1;
+                }
+                env_set($func_env, $pname, \@rest);
+            } elsif ($pi < $arg_count) {
+                env_set($func_env, $pname, $args->[$pi]);
+            } else {
+                if ($param->{"is_optional"} == 1 && defined($param->{"default_value"}) && $param->{"default_value"} != 0) {
+                    env_set($func_env, $pname, eval_node($interp, $param->{"default_value"}, $func_env));
+                } else {
+                    my int $ptype = $param->{"param_type"};
+                    if ($ptype == TI::INT) { env_set($func_env, $pname, 0); }
+                    elsif ($ptype == TI::NUM) { env_set($func_env, $pname, 0.0); }
+                    elsif ($ptype == TI::STR) { env_set($func_env, $pname, ""); }
+                    elsif ($ptype == TI::ARRAY) {
+                        my array @a = ();
+                        env_set($func_env, $pname, \@a);
+                    }
+                    elsif ($ptype == TI::HASH) {
+                        my hash %h = ();
+                        env_set($func_env, $pname, \%h);
+                    }
+                    else { env_set($func_env, $pname, undef); }
+                }
+            }
+            $pi = $pi + 1;
+        }
     }
     } # end if ($param_count > 0)
 
@@ -3937,14 +4070,15 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
         my array @result = ();
         my int $mi = 0;
 
+        # Reuse single env across iterations (avoids N allocations)
+        my scalar $map_env = env_new($env);
         while ($mi < $arr_len) {
-            my scalar $map_env = env_new($env);
-            env_set($map_env, "_", $arr->[$mi]);
+            $map_env->{"vars"}->{"_"} = $arr->[$mi];
             my scalar $val = eval_block($interp, $block, $map_env);
-            $map_env->{"parent"} = undef;
             push(@result, $val);
             $mi = $mi + 1;
         }
+        $map_env->{"parent"} = undef;
 
         return \@result;
     }
@@ -3957,16 +4091,17 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
         my array @result = ();
         my int $gi = 0;
 
+        # Reuse single env across iterations
+        my scalar $grep_env = env_new($env);
         while ($gi < $arr_len) {
-            my scalar $grep_env = env_new($env);
-            env_set($grep_env, "_", $arr->[$gi]);
+            $grep_env->{"vars"}->{"_"} = $arr->[$gi];
             my scalar $val = eval_block($interp, $block, $grep_env);
-            $grep_env->{"parent"} = undef;
             if ($val) {
                 push(@result, $arr->[$gi]);
             }
             $gi = $gi + 1;
         }
+        $grep_env->{"parent"} = undef;
 
         return \@result;
     }
@@ -3987,7 +4122,11 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
             $si = $si + 1;
         }
 
-        # Simple insertion sort with custom comparator
+        # Insertion sort with custom comparator (reuse env)
+        my scalar $cmp_env = undef;
+        if ($srt_has_blk == 1) {
+            $cmp_env = env_new($env);
+        }
         my int $oi = 1;
         while ($oi < $arr_len) {
             my scalar $key_val = $sorted[$oi];
@@ -3995,11 +4134,9 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
             while ($oj >= 0) {
                 my int $srt_do_swap = 0;
                 if ($srt_has_blk == 1) {
-                    my scalar $cmp_env = env_new($env);
-                    env_set($cmp_env, "a", $sorted[$oj]);
-                    env_set($cmp_env, "b", $key_val);
+                    $cmp_env->{"vars"}->{"a"} = $sorted[$oj];
+                    $cmp_env->{"vars"}->{"b"} = $key_val;
                     my scalar $cmp_result = eval_block($interp, $block, $cmp_env);
-                    $cmp_env->{"parent"} = undef;
                     if ($cmp_result > 0) { $srt_do_swap = 1; }
                 } else {
                     if ($sorted[$oj] . "" gt $key_val . "") { $srt_do_swap = 1; }
@@ -4013,6 +4150,9 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
             }
             $sorted[$oj + 1] = $key_val;
             $oi = $oi + 1;
+        }
+        if (defined($cmp_env)) {
+            $cmp_env->{"parent"} = undef;
         }
 
         return \@sorted;
@@ -4395,29 +4535,68 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
         return eval_node_extended($interp, $node, $env, $type);
     }
 
+    # --- Variables (most frequently evaluated - check first) ---
+    if ($type == NI::VARIABLE) {
+        # Cached resolution: 1=constant, 2=enum, 3=regular variable
+        my int $vk = $node->{"__vk"};
+        if ($vk == 3) {
+            # Inline env_get: unroll first 2 scope levels to avoid function call
+            my str $vname = $node->{"name"};
+            my scalar $vvars = $env->{"vars"};
+            if (exists($vvars, $vname)) {
+                return $vvars->{$vname};
+            }
+            my scalar $vpar = $env->{"parent"};
+            if (defined($vpar)) {
+                $vvars = $vpar->{"vars"};
+                if (exists($vvars, $vname)) {
+                    return $vvars->{$vname};
+                }
+                # Fall through to full chain walk for deeper scopes
+                $vpar = $vpar->{"parent"};
+                while (defined($vpar)) {
+                    $vvars = $vpar->{"vars"};
+                    if (exists($vvars, $vname)) {
+                        return $vvars->{$vname};
+                    }
+                    $vpar = $vpar->{"parent"};
+                }
+            }
+            return undef;
+        }
+        if ($vk == 1) {
+            return $interp->{"constants"}->{$node->{"name"}};
+        }
+        if ($vk == 2) {
+            return $interp->{"enums"}->{$node->{"name"}};
+        }
+        # First access: resolve and cache
+        my str $name = $node->{"name"};
+        if (exists($interp->{"constants"}, $name)) {
+            $node->{"__vk"} = 1;
+            return $interp->{"constants"}->{$name};
+        }
+        if (exists($interp->{"enums"}, $name)) {
+            $node->{"__vk"} = 2;
+            return $interp->{"enums"}->{$name};
+        }
+        $node->{"__vk"} = 3;
+        return env_get($env, $name);
+    }
+
     # --- Literals ---
-    if ($type == NI::INT_LITERAL) {
-        return $node->{"value"};
-    }
-    if ($type == NI::NUM_LITERAL) {
-        return $node->{"value"};
-    }
-    if ($type == NI::STR_LITERAL) {
+    if ($type == NI::INT_LITERAL || $type == NI::STR_LITERAL || $type == NI::NUM_LITERAL) {
         return $node->{"value"};
     }
 
-    # --- Variables ---
-    if ($type == NI::VARIABLE) {
-        my str $name = $node->{"name"};
-        # Check constants
-        if (exists($interp->{"constants"}, $name)) {
-            return $interp->{"constants"}->{$name};
-        }
-        # Check enums (e.g., "Status::ACTIVE")
-        if (exists($interp->{"enums"}, $name)) {
-            return $interp->{"enums"}->{$name};
-        }
-        return env_get($env, $name);
+    # --- Expression Statement (wraps most lines) ---
+    if ($type == NI::EXPR_STMT) {
+        return eval_node($interp, $node->{"expr"}, $env);
+    }
+
+    # --- Binary Operations ---
+    if ($type == NI::BINARY_OP) {
+        return eval_binop($interp, $node, $env);
     }
 
     # --- Variable Declaration ---
@@ -4484,11 +4663,6 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
         return eval_block($interp, $node, $new_env);
     }
 
-    # --- Expression Statement ---
-    if ($type == NI::EXPR_STMT) {
-        return eval_node($interp, $node->{"expr"}, $env);
-    }
-
     # --- Assignment ---
     if ($type == NI::ASSIGN) {
         my str $op = $node->{"op"};
@@ -4528,11 +4702,6 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
 
         assign_to($interp, $target, $rhs, $env);
         return $rhs;
-    }
-
-    # --- Binary Operations ---
-    if ($type == NI::BINARY_OP) {
-        return eval_binop($interp, $node, $env);
     }
 
     # --- Unary Operations ---
@@ -4768,9 +4937,23 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
             return $interp->{"enums"}->{$name};
         }
 
-        # Check builtins
-        if (is_builtin($interp, $name)) {
+        # Fast path: use cached builtin ID (saves 2+ hash lookups per call)
+        my int $cached_bid = $node->{"__bid"};
+        if ($cached_bid > 0) {
             return call_builtin($interp, $name, \@args, $env);
+        }
+
+        # Slow path: resolve and cache
+        if ($cached_bid == 0) {
+            if (is_builtin($interp, $name)) {
+                my int $bid = $interp->{"builtin_ids"}->{$name};
+                if ($bid > 0) {
+                    $node->{"__bid"} = $bid;
+                }
+                return call_builtin($interp, $name, \@args, $env);
+            }
+            # Mark as non-builtin so we skip is_builtin check next time
+            $node->{"__bid"} = -1;
         }
 
         # Check user-defined functions
