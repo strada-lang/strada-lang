@@ -41,7 +41,7 @@ Strada is a strongly-typed, compiled programming language that combines Perl's e
 ### Key Features
 
 - **Perl-like syntax**: Familiar sigils ($, @, %), expressive operators
-- **Strong typing**: All variables have declared types
+- **Typed**: Variables have types (explicit or inferred from sigil)
 - **Compiles to C**: Native performance, easy C interop
 - **Self-hosting**: The compiler is written in Strada itself
 - **Reference counting**: Automatic memory management
@@ -202,14 +202,20 @@ while ($running) {
 
 ### Declaration
 
-Variables are declared with `my`, a type, a sigil, and a name:
+Variables are declared with `my`, an optional type, a sigil, and a name:
 
 ```strada
+# With explicit types
 my int $count = 0;           # Scalar integer
 my str $name = "Alice";      # Scalar string
 my num $pi = 3.14159;        # Scalar number
 my array @items = ();        # Empty array
 my hash %data = ();          # Empty hash
+
+# Without type annotations (type inferred from sigil)
+my $count = 0;               # Defaults to scalar
+my @items = ();              # Defaults to array
+my %data = ();               # Defaults to hash
 ```
 
 ### Constants
@@ -254,11 +260,12 @@ my int $with123numbers = 4;
 
 ### Our Variables (Package-Scoped Globals)
 
-Use `our` to declare package-scoped globals backed by the runtime global registry:
+Use `our` to declare package-scoped globals backed by the runtime global registry. Type annotations are optional:
 
 ```strada
 our int $count = 0;
 our str $name = "hello";
+our $bar = "untyped";        # Defaults to scalar
 
 package Config;
 our str $host = "localhost";
@@ -465,6 +472,11 @@ foreach $item (@colors) {
     say("Color: " . $item);
 }
 
+# With implicit $_ (no variable specified)
+foreach (@colors) {
+    say($_);
+}
+
 # With anonymous array
 foreach my str $fruit (["apple", "banana", "cherry"]) {
     say($fruit);
@@ -480,9 +492,11 @@ unless ($logged_in) {
     say("Please log in");
 }
 
-# With else (no elsif/else if allowed with unless)
+# With elsif and else
 unless ($valid) {
     say("Invalid input");
+} elsif ($partial) {
+    say("Partially valid");
 } else {
     say("Processing...");
 }
@@ -747,11 +761,13 @@ func function_name(type $param1, type $param2) return_type {
     return value;
 }
 
-# Equivalent using fn shorthand:
-fn function_name(type $param1, type $param2) return_type {
-    # function body
+# Types are optional (params and return type default to scalar):
+func function_name($param1, $param2) {
     return value;
 }
+
+# fn is shorthand for func:
+fn add($a, $b) { return $a + $b; }
 ```
 
 ### Examples
@@ -802,6 +818,36 @@ func greet(str $name, str $greeting = "Hello") void {
 
 greet("Alice");           # "Hello, Alice!"
 greet("Bob", "Hi");       # "Hi, Bob!"
+```
+
+### No-Parens Functions (Implicit `@_`)
+
+You can omit the parameter list entirely. All arguments are available in `@_`, with individual args accessed via `$_[0]`, `$_[1]`, etc. The return type defaults to `scalar`:
+
+```strada
+func greet {
+    say("Hello, " . $_[0] . "!");
+}
+
+func sum_all {
+    my $total = 0;
+    my $i = 0;
+    while ($i < size(@_)) {
+        $total = $total + $_[$i];
+        $i = $i + 1;
+    }
+    return $total;
+}
+
+greet("World");           # Hello, World!
+say(sum_all(1, 2, 3));    # 6
+
+# Use shift/pop (bare forms default to @_)
+func process {
+    my $action = shift;    # Same as shift(@_)
+    my $target = shift;    # Same as shift(@_)
+    say($action . " -> " . $target);
+}
 ```
 
 ### Variadic Functions
@@ -971,6 +1017,24 @@ my array @numbers = ();
 push(@numbers, 1);
 push(@numbers, 2);
 push(@numbers, 3);
+```
+
+### Scalar Context (Array Count)
+
+Assigning an array to a scalar gives its element count:
+
+```strada
+my array @items = (10, 20, 30);
+my int $n = @items;    # 3 (same as size(@items))
+```
+
+### List Flattening
+
+Arrays in list context are flattened into the surrounding list:
+
+```strada
+my array @middle = (2, 3, 4);
+my array @all = (1, @middle, 5);   # (1, 2, 3, 4, 5)
 ```
 
 ### Anonymous Arrays
@@ -1214,6 +1278,17 @@ if (exists($data{"a"})) {
 
 # Delete a key
 delete($data{"b"});
+```
+
+### Autovivification
+
+Assigning to nested hash keys auto-creates intermediate hashes:
+
+```strada
+my hash %config = ();
+$config{"db"}{"host"} = "localhost";
+$config{"db"}{"port"} = 5432;
+say($config{"db"}{"host"});  # "localhost"
 ```
 
 ### Iterating with `each()`
@@ -1526,6 +1601,51 @@ my str $char = chr(65);             # "A"
 my int $code = ord("A");            # 65
 ```
 
+### Heredocs
+
+Multi-line string literals using heredoc syntax:
+
+```strada
+my str $text = <<EOT;
+This is a multi-line
+string literal.
+EOT
+
+my str $raw = <<'EOT';
+No escape sequences: \n stays literal.
+EOT
+
+my str $interp = <<"EOT";
+Same as bare <<EOT (double-quoted).
+EOT
+```
+
+The semicolon goes on the `<<EOT;` line. The terminator must appear on its own line.
+
+### chomp
+
+`chomp($s)` strips trailing `\n` (or `\r\n`) from the variable in-place and returns the modified string:
+
+```strada
+my str $line = "hello\n";
+chomp($line);          # $line is now "hello"
+
+# Also handles \r\n
+my str $crlf = "data\r\n";
+chomp($crlf);          # $crlf is now "data"
+```
+
+### `$_` as Default Argument
+
+Many built-in functions default to `$_` when called with no arguments: `chomp()`, `uc()`, `lc()`, `length()`, `ucfirst()`, `lcfirst()`, `trim()`, `defined()`, `ref()`, `chr()`, `ord()`, `say()`, `print()`, `chop()`.
+
+```strada
+foreach (@lines) {
+    chomp();           # Same as chomp($_)
+    say(uc());         # Same as say(uc($_))
+}
+```
+
 ### String Formatting
 
 ```strada
@@ -1684,10 +1804,33 @@ Zero overhead when unused -- if `select()` is never called, print/say output to 
 
 | Mode | Description |
 |------|-------------|
-| `"r"` | Read |
-| `"w"` | Write (truncate) |
-| `"a"` | Append |
+| `"r"` or `"<"` | Read |
+| `"w"` or `">"` | Write (truncate) |
+| `"a"` or `">>"` | Append |
 | `"r+"` | Read and write |
+
+Both C-style (`"r"`, `"w"`, `"a"`) and Perl-style (`"<"`, `">"`, `">>"`) modes are accepted by `core::open()`.
+
+### STDIN, STDOUT, STDERR
+
+Standard I/O filehandles are available as bareword variables:
+
+```strada
+say(STDOUT, "normal output");
+say(STDERR, "error output");
+my str $line = <STDIN>;          # Read a line from stdin
+print(STDERR, "debug: x=" . $x);
+```
+
+### File Test Operators
+
+Perl-style file test operators check file properties:
+
+```strada
+if (-e $path) { say("exists"); }          # File or directory exists
+if (-f $path) { say("is a file"); }       # Is a regular file
+if (-d $path) { say("is a directory"); }  # Is a directory
+```
 
 ---
 
@@ -2520,6 +2663,12 @@ func speak(scalar $self) void {
     say($self->{"name"} . " makes a sound");
 }
 
+# No-parens style — shift extracts $self from @_
+func describe {
+    my $self = shift;
+    say("I am " . $self->{"name"});
+}
+
 func main() int {
     my scalar $animal = new("Buddy");
     say(blessed($animal));  # "Animal"
@@ -2760,6 +2909,27 @@ func Child_DESTROY(scalar $self) void {
     SUPER::DESTROY($self);  # Call parent's DESTROY
 }
 ```
+
+#### No-Parens Methods
+
+Methods can be defined without parameter lists. The object is automatically prepended
+to `@_`, so `$_[0]` is `$self`:
+
+```strada
+package Dog;
+inherit Animal;
+
+func bark { my scalar $self = $_[0]; say($self->{"name"} . " barks!"); }
+
+func main() int {
+    my scalar $dog = Dog_new("Rex");
+    $dog->bark();  # $_[0] is the Dog object
+    return 0;
+}
+```
+
+This works the same as declaring `func bark(scalar $self) void { ... }` but uses
+implicit `@_` access instead of named parameters.
 
 #### Type Checking with `isa()`
 
@@ -3178,7 +3348,7 @@ Operator overloading has **zero overhead** when not used:
 
 ## The `core::` Namespace
 
-The `core::` namespace is the preferred alias for `core::`. All system/libc functions available under `core::` can also be called using `core::`:
+The `core::` namespace is preferred for system/libc functions. `sys::` is a legacy alias — both generate identical code:
 
 ```strada
 # These are equivalent:
@@ -3439,7 +3609,7 @@ See `docs/PERL_INTEGRATION.md` for comprehensive documentation on:
 | `repeat($str, $n)` | Repeat string |
 | `chr($code)` | Code to character |
 | `ord($char)` | Character to code |
-| `chomp($str)` | Remove trailing newline |
+| `chomp($str)` | Strip trailing `\n` or `\r\n` in-place, returns modified string |
 | `chop($str)` | Remove last character |
 | `join($sep, @arr)` | Join array to string |
 
@@ -3493,6 +3663,21 @@ See `docs/PERL_INTEGRATION.md` for comprehensive documentation on:
 | `dumper($val)` | Debug dump value |
 | `clone($val)` | Deep copy |
 | `exit($code)` | Exit program |
+
+### Introspection (core:: namespace)
+
+| Function | Description |
+|----------|-------------|
+| `core::caller()` | Returns hash with `function`, `file`, `line` of calling frame |
+| `core::caller($level)` | Same, but $level frames up (0 = immediate caller) |
+| `core::stack_trace()` | Returns full call stack as string |
+
+```strada
+func log_msg(str $msg) void {
+    my scalar $info = core::caller();
+    say($info->{"function"} . ":" . $info->{"line"} . " - " . $msg);
+}
+```
 
 ### Process Control (core:: namespace)
 
@@ -3596,7 +3781,7 @@ $big_data = undef;  # Release memory
 
 ### Performance Tips
 
-1. **Use `int` where possible**: Integers use tagged pointers (zero heap allocation), making them significantly faster than `num` or `str` for arithmetic and loop counters
+1. **Use `int` where possible**: Integers use tagged pointers (zero heap allocation), making them significantly faster than `num` or `str` for arithmetic and loop counters. Additionally, `int`-typed arithmetic (`+`, `-`, `*`) compiles to direct tagged integer operations with no heap allocation at all -- not even for intermediates
 2. **Avoid unnecessary string concatenation** in loops
 3. **Pre-allocate arrays** when size is known
 4. **Use `extern` functions** for performance-critical code

@@ -127,7 +127,7 @@ eq ne lt gt le ge   # String comparison
 
 ### 2.1 Type System Overview
 
-Strada is statically typed. Variables must have declared types, but implicit conversions occur in certain contexts.
+Strada is statically typed. Type annotations are optional in variable declarations and function signatures — when omitted, the type is inferred from the sigil (`$` → `scalar`, `@` → `array`, `%` → `hash`). Function return types default to `scalar` if omitted. Implicit conversions occur in certain contexts.
 
 ### 2.2 Scalar Types
 
@@ -204,11 +204,13 @@ Values are evaluated as boolean in conditions:
 
 ### 3.1 Declaration
 
-Variables are declared with `my`:
+Variables are declared with `my`. The type annotation is optional -- if omitted, the type defaults to `scalar` for `$`, `array` for `@`, or `hash` for `%`:
 
 ```strada
 my TYPE SIGIL NAME;
 my TYPE SIGIL NAME = EXPRESSION;
+my SIGIL NAME;                      # Type inferred from sigil
+my SIGIL NAME = EXPRESSION;         # Type inferred from sigil
 ```
 
 Examples:
@@ -219,6 +221,11 @@ my str $name = "Alice";
 my array @items = ();
 my hash %config = ();
 my scalar $value = 42;
+
+# Without type annotations
+my $foo = 42;               # Same as: my scalar $foo = 42
+my @list = (1, 2, 3);       # Same as: my array @list = (1, 2, 3)
+my %map = ();               # Same as: my hash %map = ()
 ```
 
 ### 3.2 Scope
@@ -259,11 +266,12 @@ func get_count() int {
 
 ### 3.4 Our Variables (Package-Scoped Globals)
 
-The `our` keyword declares variables backed by the global registry. Unlike `my` globals (which compile to C global variables), `our` variables use `strada_global_set/get` at runtime, making them accessible across dynamically loaded modules.
+The `our` keyword declares variables backed by the global registry. Unlike `my` globals (which compile to C global variables), `our` variables use `strada_global_set/get` at runtime, making them accessible across dynamically loaded modules. Type annotations are optional (defaults to `scalar`).
 
 ```strada
 our int $count = 0;
 our str $name = "hello";
+our $bar = "untyped";       # Type optional (defaults to scalar)
 our int $no_init;           # Defaults to undef
 
 package Config;
@@ -558,6 +566,38 @@ func greet(str $name) void {
 }
 ```
 
+### 7.1a No-Parens Functions (Implicit `@_`)
+
+Functions can be defined without a parameter list. All arguments are available in the implicit `@_` array, with individual elements accessed via `$_[0]`, `$_[1]`, etc. The return type defaults to `scalar`.
+
+```strada
+func NAME {
+    BODY    # use @_, $_[0], $_[1], shift(@_), size(@_), etc.
+}
+```
+
+Examples:
+```strada
+func greet {
+    say("Hello, " . $_[0] . "!");
+}
+
+func sum_all {
+    my $total = 0;
+    my $i = 0;
+    while ($i < size(@_)) {
+        $total = $total + $_[$i];
+        $i = $i + 1;
+    }
+    return $total;
+}
+
+greet("World");           # Hello, World!
+say(sum_all(1, 2, 3));    # 6
+```
+
+Standard array operations work on `@_`: `shift(@_)`, `pop(@_)`, `size(@_)`, `$_[N]`.
+
 ### 7.2 Parameters
 
 **Required parameters:**
@@ -662,6 +702,24 @@ func is_even(int $n) int {
 my array @empty = ();
 my array @nums = (1, 2, 3, 4, 5);
 my array @mixed = (1, "two", 3.0);
+```
+
+### 8.1a Scalar Context
+
+Assigning an array to a scalar gives the element count:
+
+```strada
+my array @items = (10, 20, 30);
+my int $n = @items;         # 3 (same as size(@items))
+```
+
+### 8.1b List Flattening
+
+Arrays in list context are flattened into the surrounding list:
+
+```strada
+my array @mid = (2, 3);
+my array @all = (1, @mid, 4);   # (1, 2, 3, 4)
 ```
 
 ### 8.2 Access
@@ -1184,6 +1242,11 @@ for (INIT; CONDITION; UPDATE) {
 ```strada
 foreach my TYPE $var (LIST) {
     BODY
+}
+
+# Implicit $_ when no variable specified:
+foreach (LIST) {
+    say($_);
 }
 ```
 
@@ -1883,9 +1946,9 @@ my int $result = core::dl_call_int_sv($func, [$sv1, $sv2]);
 **Debugging:**
 - `dumper($val)` - Data::Dumper-style output
 
-### 20.2 core:: / core:: Namespace
+### 20.2 core:: / sys:: Namespace
 
-The `core::` namespace is the preferred alias for `core::`. All functions listed below can be called with either prefix. At compile time, `core::` is normalized to `core::` with zero runtime overhead.
+The `core::` namespace is preferred. `sys::` is a legacy alias — both generate identical code. At compile time, `core::` is normalized to `sys::` internally with zero runtime overhead.
 
 ```strada
 # These are equivalent:
@@ -2109,7 +2172,7 @@ expr            := assignment | ternary | logical | comparison | arithmetic
 | `-c` | Keep generated .c file |
 | `-r`, `--run` | Compile and run immediately |
 | `-o FILE` | Set output file name |
-| `-O LEVEL` | Set gcc optimization level (0, 1, 2, 3, s, fast) |
+| `-O LEVEL` | Set gcc optimization level (0, 1, 2, 3, s, fast). -O2+ enables -flto; -O3/-Ofast adds -march=native |
 | `-g` | Emit `#line` directives and debug symbols |
 | `--c-debug` | C-level debugging only (DWARF symbols, no `#line`) |
 | `-p`, `--profile` | Function-level profiling (call counts + timing to stderr) |

@@ -1,0 +1,54 @@
+func greet {
+    say("Hello, " . $_[0] . "!");
+}
+
+func sum_all {
+    my $total = 0;
+    my $i = 0;
+    while ($i < size(@_)) {
+        $total = $total + $_[$i];
+        $i = $i + 1;
+    }
+    return $total;
+}
+
+func first_and_rest {
+    my $first = shift(@_);
+    return $first . " + " . join(", ", @_);
+}
+
+func noargs {
+    return size(@_);
+}
+
+func main() int {
+    my int $pass = 0;
+    my int $fail = 0;
+
+    # Test 1: Basic @_ access
+    greet("World");
+    $pass = $pass + 1;
+
+    # Test 2: Variadic sum
+    my $total = sum_all(1, 2, 3, 4, 5);
+    if ($total == 15) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 2: got " . $total); }
+
+    # Test 3: shift(@_)
+    my $r = first_and_rest("a", "b", "c");
+    if ($r eq "a + b, c") { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 3: got " . $r); }
+
+    # Test 4: Zero args
+    my $n = noargs();
+    if ($n == 0) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 4: got " . $n); }
+
+    # Test 5: Many args
+    my $big = sum_all(10, 20, 30, 40, 50, 60, 70, 80, 90, 100);
+    if ($big == 550) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 5: got " . $big); }
+
+    if ($fail == 0) {
+        say("All no-parens func tests passed (" . $pass . " checks)");
+    } else {
+        say("FAILED: " . $fail . " of " . ($pass + $fail));
+    }
+    return $fail;
+}

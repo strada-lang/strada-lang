@@ -169,6 +169,24 @@ test_run "$EXAMPLES_DIR/test_multi_inherit.strada" "test_multi_inherit" "Multipl
 # Test: More OOP
 test_run "$EXAMPLES_DIR/test_oop2.strada" "test_oop2" "OOP extended"
 
+# Test: Int arithmetic optimization and inline constructors
+test_output "$EXAMPLES_DIR/test_int_arith_opt.strada" "test_int_arith_opt" "add: 30
+mul: 200
+sub: 10
+nested: 500
+sum: 4950
+point dist_sq: 25
+point3d dist_sq: 50
+default x: 0
+default y: 0
+explicit z: 10
+7^2+24^2: 625
+big: 1000000000000
+isa Point: 1
+isa Point3D: 1
+count: 10
+all tests passed" "Int arithmetic and inline constructors"
+
 # Test: Full package features
 test_run "$EXAMPLES_DIR/test_package_full.strada" "test_package_full" "Package full"
 
@@ -284,3 +302,21 @@ test_output_contains "$EXAMPLES_DIR/test_regex_eval.strada" "test_regex_eval" "A
 
 # Test: tie/untie/tied
 test_output_contains "$EXAMPLES_DIR/test_tie.strada" "test_tie" "All tie tests passed" "Tie"
+
+# Test: Perl-style sigil semantics (scalar context, list flattening, optional types)
+test_output_contains "$EXAMPLES_DIR/test_perl_sigils.strada" "test_perl_sigils" "All Perl sigil tests passed" "Perl sigils"
+
+# Test: No-parens function definition with implicit @_
+test_output_contains "$EXAMPLES_DIR/test_noparens_func.strada" "test_noparens_func" "All no-parens func tests passed" "No-parens func"
+
+# Test: Implicit $_ in foreach
+test_output_contains "$EXAMPLES_DIR/test_implicit_underscore.strada" "test_implicit_underscore" "All implicit" "Implicit \$_"
+
+# Test: Autovivification ($h{"a"}{"b"} = val auto-creates intermediate hashes)
+test_output_contains "$EXAMPLES_DIR/test_autovivification.strada" "test_autovivification" "All autovivification tests passed" "Autovivification"
+
+# Test: Perl compatibility (chomp, bare shift, heredocs, unless-elsif)
+test_output_contains "$EXAMPLES_DIR/test_perl_compat.strada" "test_perl_compat" "All Perl compat tests passed" "Perl compat"
+
+# Test: String eval (use Eval)
+test_output_contains "$EXAMPLES_DIR/test_eval.strada" "test_eval" "All eval tests passed" "String eval"

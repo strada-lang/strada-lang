@@ -32,14 +32,14 @@ Built-in functions are organized into namespaces:
 
 | Namespace | Purpose | Example |
 |-----------|---------|---------|
-| `core::` | System/libc (preferred alias for `core::`) | `core::getenv()`, `core::getpid()` |
-| `core::` | System/libc (backwards compatible) | `core::open()`, `core::fork()` |
+| `core::` | System/libc (preferred) | `core::getenv()`, `core::getpid()` |
+| `sys::` | System/libc (legacy alias for `core::`) | `sys::open()`, `sys::fork()` |
 | `math::` | Math functions | `math::sin()`, `math::sqrt()` |
 | `thread::` | Multithreading | `thread::create()`, `thread::mutex_new()` |
 | `async::` | Async, channels, mutex, atomics | `async::all()`, `async::channel()`, `async::mutex()` |
 | *(none)* | Core language | `say()`, `push()`, `keys()` |
 
-**Note:** `core::` is the preferred way to call system functions. It is an alias for `core::` and is normalized at compile time with zero runtime overhead. Both `core::getpid()` and `core::getpid()` generate identical code.
+**Note:** `core::` is the preferred way to call system functions. `sys::` is a legacy alias for `core::` — both are normalized at compile time with zero runtime overhead. `core::getpid()` and `sys::getpid()` generate identical code.
 
 ## Basic Structure
 
@@ -62,6 +62,11 @@ my hash %data = ();         # Hash
 my hash %cache[500];        # Hash with pre-allocated capacity
 my scalar $ref = \$count;   # Reference
 
+# Optional type annotations (type inferred from sigil)
+my $foo = 42;               # Same as: my scalar $foo = 42
+my @list = (1, 2, 3);       # Same as: my array @list = (1, 2, 3)
+my %map = ();               # Same as: my hash %map = ()
+
 # Constants (compile-time)
 const int MAX_SIZE = 100;   # Compiles to #define
 const str VERSION = "1.0";  # Global const
@@ -70,6 +75,7 @@ const num PI = 3.14159;     # No $ sigil required
 # Package-scoped globals (our)
 our int $count = 0;         # Backed by global registry
 our str $name = "hello";    # Key: "main::count", "main::name"
+our $bar = "untyped";       # Type optional (defaults to scalar)
 
 package Config;
 our str $host = "localhost"; # Key: "Config::host"
@@ -93,6 +99,14 @@ func risky() void {
 | `hash` | Key-value | `%data` |
 | `scalar` | Any/ref | `$ref` |
 | `void` | None | - |
+
+## File Test Operators
+
+```strada
+if (-e $path) { ... }   # Exists (file or directory)
+if (-f $path) { ... }   # Is a regular file
+if (-d $path) { ... }   # Is a directory
+```
 
 ## Operators
 
@@ -153,14 +167,26 @@ for my str $item (@array) {  # Same as foreach
     say($item);
 }
 
+# Foreach with implicit $_
+foreach (@array) {
+    say($_);
+}
+
 # Foreach with existing variable
 my scalar $x;
 foreach $x (@array) {
     say($x);
 }
 
-# Unless (negated if)
+# Unless (negated if) — supports elsif/else
 unless ($done) { say("still working"); }
+unless ($x) {
+    say("not x");
+} elsif ($y) {
+    say("y");
+} else {
+    say("neither");
+}
 
 # Until (negated while)
 until ($done) { do_work(); }
@@ -242,6 +268,15 @@ fn add(int $a, int $b) int {
 
 func greet(str $name, str $greeting = "Hello") void {
     say($greeting . ", " . $name);
+}
+
+# No-parens function — all args in @_, return type defaults to scalar
+func greet { say("Hello, " . $_[0]); }
+func sum_all {
+    my $total = 0;
+    my $i = 0;
+    while ($i < size(@_)) { $total = $total + $_[$i]; $i = $i + 1; }
+    return $total;
 }
 
 # Variadic function - collects extra args into array
@@ -438,8 +473,10 @@ async::atomic_cas($a, $exp, $new);     # Compare-and-swap (returns 1 if swapped)
 my array @arr = ();
 my array @big[1000];          # Pre-allocate for 1000 elements
 push(@arr, "item");           # Add to end
-my scalar $last = pop(@arr);  # Remove from end
+my scalar $last = pop(@arr);  # Remove from end (bare pop defaults to @_)
+my scalar $first = shift;     # Bare shift defaults to @_ (useful in no-parens funcs)
 my int $len = size(@arr);     # Length
+my int $n = @arr;             # Scalar context: array count (same as size)
 my scalar $el = $arr[0];      # Access element
 reverse(@arr);                # Reverse in place
 splice(@arr, 2, 1);          # Remove 1 element at index 2, returns removed
@@ -448,6 +485,10 @@ splice(@arr, 1, 2, @repl);   # Replace 2 elements at index 1 with @repl
 # Anonymous array
 my scalar $nums = [1, 2, 3];
 say($nums->[0]);              # Access via reference
+
+# List flattening: arrays are flattened in list context
+my array @a = (1, 2);
+my array @b = (0, @a, 3);    # (0, 1, 2, 3)
 
 # Array capacity (performance optimization)
 my int $cap = core::array_capacity(@arr);
@@ -496,6 +537,10 @@ my scalar $person = {
     age => 30
 };
 say($person->{"name"});
+
+# Autovivification - intermediate hashes auto-created
+my hash %deep = ();
+$deep{"a"}{"b"}{"c"} = 42;
 
 # Tied hashes - bind a hash to a class with TIEHASH methods
 tie(%h, "MyTiedHash");        # Bind %h to class (calls TIEHASH)
@@ -551,8 +596,17 @@ substr($s, 0, 5)        # Substring
 index($s, "sub")        # Find
 uc($s)  lc($s)          # Case
 trim($s)                # Whitespace
+chomp($s)               # Strip trailing \n or \r\n in-place, returns modified string
 join(",", @arr)         # Join array
 chr(65)  ord("A")       # Char conversion
+
+# Heredocs
+my str $text = <<EOT;
+multi-line string
+EOT
+my str $raw = <<'EOT';
+no escape sequences
+EOT
 ```
 
 ## Binary Data
@@ -606,6 +660,16 @@ core::spew("file.txt", $data);                 # Write entire file
 my scalar $fh = core::open("file.txt", "r");
 my str $line = core::readline($fh);
 core::close($fh);
+
+# Perl-style open modes (also accepts C-style "r", "w", "a")
+my scalar $fh = core::open("file.txt", "<");     # Read
+my scalar $fh = core::open("file.txt", ">");     # Write (truncate)
+my scalar $fh = core::open("file.txt", ">>");    # Append
+
+# STDIN, STDOUT, STDERR barewords
+say(STDOUT, "to stdout");
+say(STDERR, "error output");
+my str $input = <STDIN>;                         # Read from stdin
 
 # Diamond operator <$fh> - read line from filehandle
 my scalar $fh = core::open("file.txt", "r");
@@ -757,6 +821,12 @@ func Dog_bark(scalar $self) scalar {
 # Method (takes $self as first param)
 func Dog_speak(scalar $self) void {
     say($self->{"name"} . " says: Woof!");
+}
+
+# No-parens style — shift extracts $self from @_
+func Dog_describe {
+    my $self = shift;
+    say("I am " . $self->{"name"});
 }
 
 # SUPER:: call to parent method
@@ -924,7 +994,9 @@ Named arguments: keys and values alternate in the argument list. Child construct
 
 **Hashes:** `keys`, `values`, `exists`, `delete`, `each`, `tie`, `untie`, `tied`
 
-**Strings:** `length`, `substr`, `index`, `rindex`, `uc`, `lc`, `trim`, `join`, `split`, `chr`, `ord`
+**Strings:** `length`, `substr`, `index`, `rindex`, `uc`, `lc`, `trim`, `chomp`, `chop`, `join`, `split`, `chr`, `ord`
+
+**`$_` default:** `chomp`, `uc`, `lc`, `length`, `ucfirst`, `lcfirst`, `trim`, `defined`, `ref`, `chr`, `ord`, `say`, `print`, `chop` all default to `$_` when called with no arguments.
 
 **Regex:** `match`, `replace`, `replace_all`, `capture`
 
@@ -967,6 +1039,8 @@ All `core::` functions can also be called via the `core::` prefix (preferred). F
 **Conversion:** `core::atoi`, `core::atof`
 
 **Binary/Bytes:** `core::ord_byte`, `core::get_byte`, `core::set_byte`, `core::byte_length`, `core::byte_substr`, `core::pack`, `core::unpack`
+
+**Introspection:** `core::caller`, `core::stack_trace`
 
 ### math:: Namespace Functions
 

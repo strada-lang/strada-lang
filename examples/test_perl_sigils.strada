@@ -1,0 +1,73 @@
+func opt_add($a, $b) {
+    return $a + $b;
+}
+
+func opt_mixed(int $a, $b) {
+    return $a + $b;
+}
+
+func main() int {
+    my int $pass = 0;
+    my int $fail = 0;
+
+    # Test 1: $n = @arr gives count (scalar context)
+    my array @nums = (10, 20, 30);
+    my scalar $count = @nums;
+    if ($count == 3) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 1: expected 3, got " . $count); }
+
+    # Test 2: List flattening - ($x, @arr, $y)
+    my int $a = 1;
+    my array @mid = (2, 3);
+    my int $b = 4;
+    my array @flat = ($a, @mid, $b);
+    if (size(@flat) == 4) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 2: expected 4, got " . size(@flat)); }
+    if ($flat[0] == 1 && $flat[1] == 2 && $flat[2] == 3 && $flat[3] == 4) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 2b: values wrong"); }
+
+    # Test 3: Multiple arrays flatten
+    my array @x = (1, 2);
+    my array @y = (3, 4);
+    my array @combined = (@x, @y);
+    if (size(@combined) == 4) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 3: expected 4, got " . size(@combined)); }
+
+    # Test 4: Empty array flattens to nothing
+    my array @empty = ();
+    my array @with_empty = (1, @empty, 2);
+    if (size(@with_empty) == 2) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 4: expected 2, got " . size(@with_empty)); }
+
+    # Test 5: Scalar context in assignment
+    my scalar $n = 0;
+    $n = @nums;
+    if ($n == 3) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 5: expected 3, got " . $n); }
+
+    # Test 6: @arr = @other still copies independently
+    my array @orig = (10, 20, 30);
+    my array @copy = @orig;
+    push(@copy, 40);
+    if (size(@orig) == 3 && size(@copy) == 4) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 6: copy not independent"); }
+
+    # Test 7: Optional type annotation - my $foo
+    my $foo = 42;
+    my $bar = "hello";
+    my @arr2 = (5, 6, 7);
+    my %h = ("a" => 1);
+    if ($foo == 42 && $bar eq "hello" && size(@arr2) == 3 && $h{"a"} == 1) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 7: optional types"); }
+
+    # Test 8: Optional types in function params and return type
+    my $r1 = opt_add(3, 4);
+    if ($r1 == 7) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 8: opt_add got " . $r1); }
+
+    # Test 9: Anonymous function with optional types
+    my $triple = fn ($x) { return $x * 3; };
+    if ($triple->(10) == 30) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 9: anon fn"); }
+
+    # Test 10: Mixed typed and untyped params
+    my $r2 = opt_mixed(5, 10);
+    if ($r2 == 15) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 10: mixed got " . $r2); }
+
+    if ($fail == 0) {
+        say("All Perl sigil tests passed (" . $pass . " checks)");
+    } else {
+        say("FAILED: " . $fail . " of " . ($pass + $fail));
+    }
+    return $fail;
+}

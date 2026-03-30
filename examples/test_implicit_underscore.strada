@@ -1,0 +1,44 @@
+func main() int {
+    my int $pass = 0;
+    my int $fail = 0;
+
+    my @items = (10, 20, 30, 40, 50);
+
+    # Test 1: foreach with implicit $_
+    my $sum = 0;
+    foreach (@items) {
+        $sum = $sum + $_;
+    }
+    if ($sum == 150) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 1: got " . $sum); }
+
+    # Test 2: explicit variable still works
+    my $sum2 = 0;
+    foreach my int $x (@items) {
+        $sum2 = $sum2 + $x;
+    }
+    if ($sum2 == 150) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 2: got " . $sum2); }
+
+    # Test 3: $_ with strings
+    my $joined = "";
+    foreach (("a", "b", "c")) {
+        $joined = $joined . $_;
+    }
+    if ($joined eq "abc") { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 3: got " . $joined); }
+
+    # Test 4: nested foreach with implicit $_
+    my $count = 0;
+    foreach (("x", "y")) {
+        my $outer = $_;
+        foreach ((1, 2, 3)) {
+            $count = $count + 1;
+        }
+    }
+    if ($count == 6) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 4: got " . $count); }
+
+    if ($fail == 0) {
+        say("All implicit $_ tests passed (" . $pass . " checks)");
+    } else {
+        say("FAILED: " . $fail . " of " . ($pass + $fail));
+    }
+    return $fail;
+}

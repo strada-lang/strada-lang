@@ -63,20 +63,25 @@ Hello, World!
 
 ## 2. Variables and Types
 
-Strada is statically typed. Every variable must have a declared type.
+Strada is statically typed with optional type annotations. You can specify a type, or omit it and the compiler will use a default (`scalar` for `$`, `array` for `@`, `hash` for `%`).
 
 ### Declaring Variables
 
 ```strada
 func main() int {
-    # Scalars (single values)
+    # With explicit types
     my int $count = 42;
     my num $price = 19.99;
     my str $name = "Alice";
 
+    # Without type annotations (type inferred from sigil)
+    my $anything = 123;        # Same as: my scalar $anything
+    my @items = ();            # Same as: my array @items
+    my %config = ();           # Same as: my hash %config
+
     # The generic scalar type can hold any value
-    my scalar $anything = 123;
-    $anything = "now a string";
+    my scalar $flexible = 123;
+    $flexible = "now a string";
 
     say("Count: " . $count);
     say("Price: " . $price);
@@ -107,18 +112,21 @@ Strada uses Perl-style sigils:
 - `%` for hashes
 
 ```strada
-my int $number = 10;       # Scalar
-my array @items = ();      # Array
-my hash %config = ();      # Hash
+my int $number = 10;       # Scalar with type
+my $number2 = 10;          # Scalar without type (defaults to scalar)
+my array @items = ();      # Array with type
+my @items2 = ();           # Array without type (defaults to array)
+my hash %config = ();      # Hash with type
+my %config2 = ();          # Hash without type (defaults to hash)
 ```
 
 ### Package-Scoped Variables with `our`
 
-For variables shared across modules, use `our`:
+For variables shared across modules, use `our` (type annotation is optional here too):
 
 ```strada
 our int $counter = 0;       # Backed by global registry
-our str $app_name = "demo"; # Key: "main::app_name"
+our $app_name = "demo";    # Type optional (defaults to scalar)
 
 package Config;
 our str $host = "localhost"; # Key: "Config::host"
@@ -488,6 +496,20 @@ func main() int {
 }
 ```
 
+### No-Parens Functions
+
+For a Perl-like style, you can omit the parameter list. All arguments go into `@_`:
+
+```strada
+func greet {
+    say("Hello, " . $_[0] . "!");
+}
+
+greet("World");  # Hello, World!
+```
+
+Access individual args with `$_[0]`, `$_[1]`, etc., or use `shift(@_)` and `size(@_)`. The return type defaults to `scalar`.
+
 ### Recursion
 
 ```strada
@@ -519,6 +541,10 @@ my array @empty = ();
 # Array with values
 my array @numbers = (1, 2, 3, 4, 5);
 my array @mixed = (1, "two", 3.0);
+
+# List flattening: arrays in list context are flattened
+my array @prefix = (10, 20);
+my array @combined = (0, @prefix, 30);  # (0, 10, 20, 30)
 ```
 
 ### Accessing Elements
@@ -554,6 +580,9 @@ my scalar $first = shift(@stack);  # "zero"
 
 # Get size
 my int $len = size(@stack);
+
+# Scalar context: assigning an array to a scalar gives its count
+my int $count = @stack;     # Same as size(@stack)
 ```
 
 ### Splice: Remove and Replace Elements

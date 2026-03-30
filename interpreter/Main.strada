@@ -582,10 +582,33 @@ func print_usage() void {
     say("Usage:");
     say("  strada-interp                          Interactive REPL");
     say("  strada-interp [OPTIONS] <file.strada>  Execute file");
+    say("  strada-interp -e 'code'                Execute code string");
     say("");
     say("Options:");
+    say("  -e CODE       Execute code (wraps in main() if needed)");
     say("  -L PATH       Add library search path");
     say("  -h, --help    Show this help message");
+}
+
+# Execute a code string (wraps in main() if no func/package declarations)
+func run_eval(scalar $interp, str $code) int {
+    my scalar $result = undef;
+    try {
+        $result = repl_eval($interp, $code);
+        if (defined($result)) {
+            display_result($result);
+        }
+    } catch ($e) {
+        if (Strada::Interpreter::is_signal($e, "return")) {
+            if (defined($e->{"value"})) {
+                return $e->{"value"};
+            }
+        } else {
+            say("Error: " . $e);
+            return 1;
+        }
+    }
+    return 0;
 }
 
 func main() int {
@@ -593,6 +616,7 @@ func main() int {
 
     # Parse options
     my str $script = "";
+    my str $eval_code = "";
     my array @script_args = ();
     my int $i = 1;
     my int $parsing_opts = 1;
@@ -603,6 +627,17 @@ func main() int {
         if ($parsing_opts == 1 && ($arg eq "-h" || $arg eq "--help")) {
             print_usage();
             return 0;
+        } elsif ($parsing_opts == 1 && $arg eq "-e") {
+            $i = $i + 1;
+            if ($i >= $argc) {
+                say("Error: -e requires a code argument");
+                return 1;
+            }
+            if (length($eval_code) > 0) {
+                $eval_code = $eval_code . "\n" . $ARGV[$i];
+            } else {
+                $eval_code = $ARGV[$i];
+            }
         } elsif ($parsing_opts == 1 && $arg eq "-L") {
             $i = $i + 1;
             if ($i >= $argc) {
@@ -631,6 +666,11 @@ func main() int {
     }
 
     my scalar $interp = Strada::Interpreter::interp_new();
+
+    # Eval mode (-e)
+    if (length($eval_code) > 0) {
+        return run_eval($interp, $eval_code);
+    }
 
     if (length($script) == 0) {
         # REPL mode

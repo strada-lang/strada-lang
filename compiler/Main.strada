@@ -69,7 +69,9 @@ func print_usage() void {
     say("  --full-profile  Enable line-level profiling (writes strada-prof.out)");
     say("  -t, --timing    Show compilation phase timing");
     say("  -w, --warnings  Show warnings (unused variables, etc.)");
-    say("  --no-stack-trace  Disable stack trace support (for performance)");
+    say("  --stack-trace     Force enable stack trace support");
+    say("  --no-stack-trace  Force disable stack trace support");
+    say("                    (default: auto-detect from try/throw/caller usage)");
     say("  -v, --verbose   Show compilation progress");
     say("  -h, --help      Show this help message");
     say("");
@@ -85,13 +87,18 @@ func main() int {
     my int $show_warnings = 0;
     my int $enable_profiling = 0;
     my int $full_profile = 0;
-    my int $enable_stack_trace = 1;  # Enabled by default
+    my int $enable_stack_trace = -1;  # Auto-detect by default
     my int $verbose = 0;
     my str $input_file = "";
     my str $output_file = "";
     my array @lib_paths = ();
     my array @lib_paths_low = ();
-    my int $i = 1;
+    # Start from 0 — @ARGV excludes program name (Perl-style)
+    # For bootstrap compatibility, also skip if ARGV[0] looks like program name
+    my int $i = 0;
+    if ($arg_count > 0 && index($ARGV[0], "stradac") >= 0) {
+        $i = 1;
+    }
 
     while ($i < $arg_count) {
         my str $arg = $ARGV[$i];
@@ -111,6 +118,8 @@ func main() int {
             $verbose = 1;
         } elsif ($arg eq "--no-stack-trace") {
             $enable_stack_trace = 0;
+        } elsif ($arg eq "--stack-trace") {
+            $enable_stack_trace = 1;
         } elsif ($arg eq "-LL") {
             # -LL <path> - add low-priority library search path
             $i = $i + 1;
@@ -175,6 +184,18 @@ func main() int {
 
     # Read source file
     my str $source = slurp($input_file);
+
+    # Auto-detect stack trace need if not explicitly set
+    if ($enable_stack_trace == -1) {
+        if (index($source, "try ") >= 0 || index($source, "try{") >= 0 ||
+            index($source, "throw ") >= 0 || index($source, "throw(") >= 0 ||
+            index($source, "caller(") >= 0 || index($source, "caller()") >= 0 ||
+            index($source, "stack_trace(") >= 0 || index($source, "stacktrace(") >= 0) {
+            $enable_stack_trace = 1;
+        } else {
+            $enable_stack_trace = 0;
+        }
+    }
 
     # Compile (pass lib paths)
     my str $code = compile($source, $input_file, $debug_info, $show_timing, $show_warnings, $enable_profiling, $enable_stack_trace, $full_profile, \@lib_paths, \@lib_paths_low);

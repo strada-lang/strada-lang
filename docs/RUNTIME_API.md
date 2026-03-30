@@ -1600,6 +1600,7 @@ When `--full-profile` is used, the code generator inserts `strada_full_profile_t
 ## Performance Considerations
 
 - **Tagged integers require zero allocation** - integer arithmetic, comparisons, loop counters, and array indexing are allocation-free
+- **Int arithmetic inlining** - when both operands of `+`, `-`, or `*` are `int`-typed, the compiler emits direct tagged integer operations instead of heap-allocated float intermediates, avoiding `strada_to_num()`/`strada_new_num()` entirely
 - String operations allocate new memory
 - Large arrays/hashes pre-allocate capacity
 - Reference counting has overhead vs garbage collection (but only for heap-allocated values; tagged integers bypass it entirely)

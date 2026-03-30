@@ -1416,7 +1416,7 @@ func process_animals(array @animals) void {
 
 Strada supports a Moose-inspired declarative OOP system that drastically reduces boilerplate. Instead of manually writing constructors, getters, setters, and inheritance initialization, you declare attributes with `has`, parents with `extends`, roles with `with`, and method modifiers with `before`/`after`/`around`. The compiler generates all the necessary code at compile time.
 
-> **Note on `core::` namespace**: `core::` is a preferred alias for `core::` in Strada. Both `core::time()` and `core::time()` call the same function. The examples below use `core::` for consistency with the rest of this guide, but `core::` is recommended for new code.
+> **Note on `core::` namespace**: `sys::` is a legacy alias for `core::` in Strada. Both `core::time()` and `sys::time()` call the same function. `core::` is the recommended namespace for new code.
 
 ### Overview
 
@@ -1643,6 +1643,8 @@ The generated constructor:
    - Sets `$self{"attr_name"} = $__a{"attr_name"} // default_value`
    - If no default is specified and the key is missing, the value will be `undef`
 4. Returns `bless(\%self, "PackageName")`
+
+**Inline constructor optimization**: The compiler generates an optimized inline constructor that directly assigns attributes from the argument list without building an intermediate hash. This optimization applies to both base classes and classes that use `extends` to inherit from parent classes. The generated code handles all attributes from the entire inheritance chain.
 
 #### Inherited Attributes
 

@@ -27,6 +27,8 @@ func lex_new(str $source) scalar {
     # Use bytes() not length() since char_at() works on byte positions
     $lexer{"length"} = bytes($source);
     $lexer{"expect_regex"} = 0;
+    $lexer{"heredoc_pending_semi"} = 0;
+    $lexer{"after_sigil"} = 0;
     return \%lexer;
 }
 
@@ -1304,6 +1306,21 @@ func lex_keyword_or_ident(str $text) str {
 }
 
 func lex_next_token(scalar $lexer) scalar {
+    # Clear after_sigil flag unless we just set it
+    # (it will be re-set below if the current token is a sigil)
+    my int $saved_after_sigil = $lexer->{"after_sigil"};
+    $lexer->{"after_sigil"} = 0;
+
+    # Check for pending semicolon from heredoc
+    if ($lexer->{"heredoc_pending_semi"} == 1) {
+        $lexer->{"heredoc_pending_semi"} = 0;
+        my hash %semi_tok = ();
+        $semi_tok{"type"} = "SEMI";
+        $semi_tok{"value"} = ";";
+        $semi_tok{"line"} = $lexer->{"line"};
+        return \%semi_tok;
+    }
+
     lex_skip_whitespace($lexer);
 
     my int $code = lex_current_code($lexer);
@@ -1401,6 +1418,8 @@ func lex_next_token(scalar $lexer) scalar {
         my str $text = lex_read_identifier($lexer);
 
         # Check for quote-like operators: qw(), q(), qq()
+        # Skip when after a sigil ($q, @q, %q should be variable names, not quote ops)
+        if ($saved_after_sigil == 0) {
         if ($text eq "qw") {
             lex_skip_whitespace($lexer);
             my int $delim = lex_current_code($lexer);
@@ -1424,6 +1443,7 @@ func lex_next_token(scalar $lexer) scalar {
             if ($delim == 40 || $delim == 91 || $delim == 123 || $delim == 60 || $delim == 47 || $delim == 33 || $delim == 124) {
                 return lex_read_q_string($lexer, $token_line, 1);
             }
+        }
         }
 
         # __C__ { ... } - raw C code block
@@ -1494,6 +1514,30 @@ func lex_next_token(scalar $lexer) scalar {
         $token{"value"} = "!=";
         $token{"line"} = $token_line;
         return \%token;
+    }
+
+    # Diamond operator <STDIN> — bareword filehandle
+    if ($code == 60 && (($code2 >= 65 && $code2 <= 90) || ($code2 >= 97 && $code2 <= 122))) {
+        # Check if it's a bareword followed by > (e.g., <STDIN>)
+        my int $save_pos = $lexer->{"pos"};
+        my int $save_line = $lexer->{"line"};
+        my int $save_col = $lexer->{"column"};
+        lex_advance($lexer);  # Skip <
+        my str $bw_name = lex_read_identifier($lexer);
+        my int $close_code = lex_current_code($lexer);
+        if ($close_code == 62 && length($bw_name) > 0) {
+            # It's <BAREWORD> — treat as diamond on that variable
+            lex_advance($lexer);  # Skip >
+            my hash %token = ();
+            $token{"type"} = "DIAMOND";
+            $token{"value"} = $bw_name;
+            $token{"line"} = $token_line;
+            return \%token;
+        }
+        # Not a diamond — restore position
+        $lexer->{"pos"} = $save_pos;
+        $lexer->{"line"} = $save_line;
+        $lexer->{"column"} = $save_col;
     }
 
     # Diamond operator <$fh> for reading from filehandle (<60, $36)
@@ -1583,10 +1627,87 @@ func lex_next_token(scalar $lexer) scalar {
         return \%token;
     }
 
-    # <<  (<60, <60)
+    # << — left shift or heredoc
     if ($code == 60 && $code2 == 60) {
+        # Check for heredoc: <<IDENT, <<'IDENT', <<"IDENT"
+        my int $pos_save = $lexer->{"pos"};
         lex_advance($lexer);
         lex_advance($lexer);
+        my int $hd_code = lex_current_code($lexer);
+        # Check if followed by alpha/underscore or quote — indicates heredoc
+        my int $is_heredoc = 0;
+        my int $hd_quoted = 0;
+        if (($hd_code >= 65 && $hd_code <= 90) || ($hd_code >= 97 && $hd_code <= 122) || $hd_code == 95) {
+            $is_heredoc = 1;
+        } elsif ($hd_code == 39 || $hd_code == 34) {
+            $is_heredoc = 1;
+            $hd_quoted = $hd_code;
+            lex_advance($lexer);
+        }
+
+        if ($is_heredoc == 1) {
+            # Read delimiter identifier
+            my str $delim = "";
+            my int $dc = lex_current_code($lexer);
+            while (($dc >= 65 && $dc <= 90) || ($dc >= 97 && $dc <= 122) || ($dc >= 48 && $dc <= 57) || $dc == 95) {
+                $delim = $delim . chr($dc);
+                lex_advance($lexer);
+                $dc = lex_current_code($lexer);
+            }
+            # Skip closing quote if quoted
+            if ($hd_quoted != 0) {
+                lex_advance($lexer);
+            }
+            # Check if semicolon follows on this line — if so, emit it after the heredoc
+            my int $has_semi = 0;
+            my int $hc = lex_current_code($lexer);
+            while ($hc != 10 && $hc != 0) {
+                if ($hc == 59) { $has_semi = 1; }
+                lex_advance($lexer);
+                $hc = lex_current_code($lexer);
+            }
+            if ($hc == 10) {
+                lex_advance($lexer);
+            }
+            if ($has_semi == 1) {
+                $lexer->{"heredoc_pending_semi"} = 1;
+            }
+            # Read lines until we find the delimiter on its own line
+            my str $body = "";
+            my int $found = 0;
+            while ($found == 0) {
+                # Read a line
+                my str $line = "";
+                my int $lc = lex_current_code($lexer);
+                if ($lc == 0) { last; }
+                while ($lc != 10 && $lc != 0) {
+                    $line = $line . chr($lc);
+                    lex_advance($lexer);
+                    $lc = lex_current_code($lexer);
+                }
+                if ($lc == 10) {
+                    lex_advance($lexer);
+                }
+                # Check if this line is the delimiter
+                if ($line eq $delim) {
+                    $found = 1;
+                } else {
+                    $body = $body . $line . "\n";
+                }
+            }
+            # Remove trailing newline
+            my int $blen = length($body);
+            if ($blen > 0 && char_at($body, $blen - 1) == 10) {
+                $body = substr($body, 0, $blen - 1);
+            }
+            my hash %token = ();
+            $token{"type"} = "STR_LITERAL";
+            $token{"value"} = $body;
+            $token{"line"} = $token_line;
+            return \%token;
+        }
+
+        # Not a heredoc — it's left shift
         my hash %token = ();
         $token{"type"} = "LSHIFT";
         $token{"value"} = "<<";
@@ -1770,9 +1891,9 @@ func lex_next_token(scalar $lexer) scalar {
     if ($code == 59) { $token{"type"} = "SEMI"; return \%token; }
     if ($code == 44) { $token{"type"} = "COMMA"; return \%token; }
     if ($code == 58) { $token{"type"} = "COLON"; return \%token; }
-    if ($code == 36) { $token{"type"} = "DOLLAR"; return \%token; }
-    if ($code == 64) { $token{"type"} = "AT"; return \%token; }
-    if ($code == 37) { $token{"type"} = "PERCENT"; return \%token; }
+    if ($code == 36) { $token{"type"} = "DOLLAR"; $lexer->{"after_sigil"} = 1; return \%token; }
+    if ($code == 64) { $token{"type"} = "AT"; $lexer->{"after_sigil"} = 1; return \%token; }
+    if ($code == 37) { $token{"type"} = "PERCENT"; $lexer->{"after_sigil"} = 1; return \%token; }
     if ($code == 43) { $token{"type"} = "PLUS"; return \%token; }
     if ($code == 45) { $token{"type"} = "MINUS"; return \%token; }
     if ($code == 42) { $token{"type"} = "MULT"; return \%token; }

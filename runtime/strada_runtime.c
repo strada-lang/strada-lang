@@ -16,6 +16,7 @@
 */
 
 /* strada_runtime.c - Strada Runtime Implementation */
+#define STRADA_RUNTIME_IMPL
 #include "strada_runtime.h"
 
 /* Compatibility: O_NDELAY is O_NONBLOCK on most systems */
@@ -79,40 +80,78 @@ static inline size_t strada_next_pow2(size_t n) {
     return n + 1;
 }
 
-/* Entry free-list to avoid malloc/free per hash entry */
-#define STRADA_HASH_ENTRY_FREELIST_MAX 16384
-static StradaHashEntry *strada_hash_entry_freelist = NULL;
-static size_t strada_hash_entry_freelist_size = 0;
+/* ===== StradaString pool — recycles short strings to avoid malloc/free ===== */
+#define SS_POOL_MAX 8192
+#define SS_POOL_DATA_MAX 32  /* max string length for pooled StradaStrings */
+/* Pooled StradaStrings are allocated at fixed size: sizeof(StradaString) + SS_POOL_DATA_MAX + 1 */
+#define SS_POOL_ALLOC_SIZE (sizeof(StradaString) + SS_POOL_DATA_MAX + 1)
+static StradaString *ss_pool_stack[SS_POOL_MAX];
+static int ss_pool_count = 0;
 
-static inline StradaHashEntry *strada_hash_entry_alloc(void) {
-    if (strada_hash_entry_freelist) {
-        StradaHashEntry *entry = strada_hash_entry_freelist;
-        strada_hash_entry_freelist = entry->next;
-        strada_hash_entry_freelist_size--;
-        return entry;
-    }
-    return malloc(sizeof(StradaHashEntry));
+static void ss_pool_cleanup(void) {
+    for (int i = 0; i < ss_pool_count; i++)
+        free(ss_pool_stack[i]);
+    ss_pool_count = 0;
 }
 
-static inline void strada_hash_entry_free(StradaHashEntry *entry) {
-    if (strada_hash_entry_freelist_size < STRADA_HASH_ENTRY_FREELIST_MAX) {
-        entry->next = strada_hash_entry_freelist;
-        strada_hash_entry_freelist = entry;
-        strada_hash_entry_freelist_size++;
+void ss_decref_slow(StradaString *ss) {
+    /* Return short strings to pool instead of freeing */
+    if (ss->len <= SS_POOL_DATA_MAX && ss_pool_count < SS_POOL_MAX) {
+        ss_pool_stack[ss_pool_count++] = ss;
     } else {
-        free(entry);
+        free(ss);
     }
 }
 
-static void strada_hash_entry_freelist_destroy(void) {
-    StradaHashEntry *entry = strada_hash_entry_freelist;
-    while (entry) {
-        StradaHashEntry *next = entry->next;
-        free(entry);
-        entry = next;
+/* ===== StradaString implementation ===== */
+StradaString *ss_new(const char *s, uint32_t len, uint32_t hash) {
+    StradaString *ss;
+    if (len <= SS_POOL_DATA_MAX && ss_pool_count > 0) {
+        ss = ss_pool_stack[--ss_pool_count];
+    } else {
+        ss = malloc(len <= SS_POOL_DATA_MAX ? SS_POOL_ALLOC_SIZE : sizeof(StradaString) + len + 1);
     }
-    strada_hash_entry_freelist = NULL;
-    strada_hash_entry_freelist_size = 0;
+    ss->refcount = 1;
+    ss->hash = hash;
+    ss->len = len;
+    memcpy(ss->data, s, len);
+    ss->data[len] = '\0';
+    return ss;
+}
+
+/* Packed hash table helpers */
+static inline uint32_t hash_get_slot(StradaHash *hv) {
+    if (hv->free_head != HASH_EMPTY) {
+        uint32_t slot = hv->free_head;
+        hv->free_head = hv->entries[slot].next;
+        return slot;
+    }
+    if (hv->next_slot >= hv->capacity) {
+        size_t new_cap = hv->capacity < 8 ? 8 : hv->capacity * 2;
+        /* Check if entries is part of a compact block (can't realloc) */
+        int is_compact = (hv->hash_index == (uint32_t*)((char*)hv + sizeof(StradaHash)));
+        if (is_compact && hv->entries == (StradaHashEntry*)((char*)hv->hash_index + hv->num_buckets * sizeof(uint32_t))) {
+            /* Entries is inside compact block — must allocate separately */
+            StradaHashEntry *new_entries = malloc(new_cap * sizeof(StradaHashEntry));
+            if (hv->capacity > 0) memcpy(new_entries, hv->entries, hv->capacity * sizeof(StradaHashEntry));
+            hv->entries = new_entries;
+        } else {
+            hv->entries = realloc(hv->entries, new_cap * sizeof(StradaHashEntry));
+        }
+        hv->capacity = new_cap;
+    }
+    return (uint32_t)hv->next_slot++;
+}
+
+static void hash_rebuild_index(StradaHash *hv) {
+    memset(hv->hash_index, 0xFF, hv->num_buckets * sizeof(uint32_t));
+    for (size_t i = 0; i < hv->next_slot; i++) {
+        if (hv->entries[i].key) {
+            uint32_t bucket = hv->entries[i].key->hash & (hv->num_buckets - 1);
+            hv->entries[i].next = hv->hash_index[bucket];
+            hv->hash_index[bucket] = (uint32_t)i;
+        }
+    }
 }
 
 /* ===== VALUE CREATION ===== */
@@ -354,19 +393,22 @@ StradaValue* strada_new_str(const char *s) {
     StradaValue *sv = strada_value_alloc();
     sv->type = STRADA_STR;
     sv->refcount = 1;
-    sv->value.pv = s ? strdup(s) : strdup("");
-    sv->struct_size = s ? strlen(s) : 0;  /* Store length */
-    strada_memprof_alloc(STRADA_STR, sizeof(StradaValue) + (s ? strlen(s) + 1 : 1));
+    size_t len = s ? strlen(s) : 0;
+    sv->value.pv = ss_alloc_pv(s ? s : "", len);
+    sv->struct_size = len;
+    strada_memprof_alloc(STRADA_STR, sizeof(StradaValue) + sizeof(StradaString) + len + 1);
     return sv;
 }
 
-/* Take ownership of a string (no strdup - avoids leak from strada_concat) */
+/* Take ownership of a malloc'd string — wrap in StradaString then free original */
 StradaValue* strada_new_str_take(char *s) {
     StradaValue *sv = strada_value_alloc();
     sv->type = STRADA_STR;
     sv->refcount = 1;
-    sv->value.pv = s ? s : strdup("");
-    sv->struct_size = s ? strlen(s) : 0;  /* Store length */
+    size_t len = s ? strlen(s) : 0;
+    sv->value.pv = ss_alloc_pv(s ? s : "", len);
+    sv->struct_size = len;
+    if (s) free(s);  /* free the original — we copied into StradaString */
     return sv;
 }
 
@@ -376,12 +418,10 @@ StradaValue* strada_new_str_len(const char *s, size_t len) {
     sv->type = STRADA_STR;
     sv->refcount = 1;
     if (s && len > 0) {
-        sv->value.pv = malloc(len + 1);
-        memcpy(sv->value.pv, s, len);
-        sv->value.pv[len] = '\0';  /* Null-terminate for C compatibility */
-        sv->struct_size = len;     /* Store actual length for binary data */
+        sv->value.pv = ss_alloc_pv(s, len);
+        sv->struct_size = len;
     } else {
-        sv->value.pv = strdup("");
+        sv->value.pv = ss_alloc_pv("", 0);
         sv->struct_size = 0;
     }
     return sv;
@@ -403,12 +443,23 @@ StradaValue* strada_new_array(void) {
     return sv;
 }
 
+/* Forward declarations for hash allocation */
+StradaHash* strada_hash_new_presized(int capacity);
+
 StradaValue* strada_new_hash(void) {
     StradaValue *sv = strada_value_alloc();
     sv->type = STRADA_HASH;
     sv->refcount = 1;
     sv->value.hv = strada_hash_new();
     strada_memprof_alloc(STRADA_HASH, sizeof(StradaValue) + sizeof(StradaHash));
+    return sv;
+}
+
+StradaValue* strada_new_hash_presized(int capacity) {
+    StradaValue *sv = strada_value_alloc();
+    sv->type = STRADA_HASH;
+    sv->refcount = 1;
+    sv->value.hv = strada_hash_new_presized(capacity);
     return sv;
 }
 
@@ -449,6 +500,14 @@ void strada_decref(StradaValue *sv) {
         strada_free_value(sv);
     }
 }
+
+/* _impl aliases: called by the static inline fast-path wrappers in the header.
+ * These are the same functions as above but exported under _impl names so the
+ * header's inline wrappers can call them without conflicting with the ABI names. */
+void strada_incref_impl(StradaValue *sv) __attribute__((alias("strada_incref")));
+void strada_decref_impl(StradaValue *sv) __attribute__((alias("strada_decref")));
+int64_t strada_to_int_impl(StradaValue *sv) __attribute__((alias("strada_to_int")));
+double strada_to_num_impl(StradaValue *sv) __attribute__((alias("strada_to_num")));
 
 /* ===== WEAK REFERENCE REGISTRY ===== */
 
@@ -684,8 +743,8 @@ static void strada_close_fh_meta(FILE *fh) {
             /* Copy buffer contents to the target StradaValue */
             StradaValue *target = meta->target_ref->value.rv;
             if (target && target->type == STRADA_STR) {
-                free(target->value.pv);
-                target->value.pv = strndup(meta->mem_buf, meta->mem_size);
+                ss_free_pv(target->value.pv);
+                target->value.pv = ss_alloc_pv(meta->mem_buf, meta->mem_size);
                 target->struct_size = meta->mem_size;
             }
             fclose(fh);
@@ -707,15 +766,16 @@ void strada_weaken_hv_entry(StradaHash *hv, const char *key) {
     if (!hv || !key) return;
     /* Find the hash entry */
     unsigned int hash = strada_hash_string(key);
-    unsigned int idx = hash & (hv->num_buckets - 1);
-    StradaHashEntry *entry = hv->buckets[idx];
-    while (entry) {
-        if (entry->hash == hash && strcmp(entry->key, key) == 0) {
+    unsigned int bucket = hash & (hv->num_buckets - 1);
+    uint32_t idx = hv->hash_index[bucket];
+    while (idx != HASH_EMPTY) {
+        StradaHashEntry *e = &hv->entries[idx];
+        if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
             /* Found the entry - weaken its value in place */
-            strada_weaken(&entry->value);
+            strada_weaken(&e->value);
             return;
         }
-        entry = entry->next;
+        idx = e->next;
     }
 }
 
@@ -761,6 +821,14 @@ double strada_to_num(StradaValue *sv) {
     }
 }
 
+/* Free a string returned by strada_to_str_ss().
+ * Always StradaString-backed — just decref. */
+void strada_cstr_free(char *s) {
+    if (s) ss_free_pv(s);
+}
+
+/* strada_to_str — returns strdup'd char* for backward compatibility.
+ * Caller MUST free() the result. Used by __C__ blocks and bootstrap. */
 char* strada_to_str(StradaValue *sv) {
     static char buf[128];
     if (STRADA_IS_TAGGED_INT(sv)) {
@@ -819,6 +887,28 @@ char* strada_to_str(StradaValue *sv) {
         default:
             return strdup("");
     }
+}
+
+/* strada_to_str_ss — always returns StradaString-backed pointer.
+ * For STRADA_STR: zero copy (incref + return data pointer).
+ * For other types: creates new StradaString.
+ * Caller MUST free with strada_cstr_free(). */
+char* strada_to_str_ss(StradaValue *sv) {
+    if (!sv) return ss_alloc_pv("", 0);
+    if (STRADA_IS_TAGGED_INT(sv)) {
+        char buf[24];
+        size_t len = strada_fast_itoa(STRADA_TAGGED_INT_VAL(sv), buf);
+        return ss_alloc_pv(buf, len);
+    }
+    if (sv->type == STRADA_STR && sv->value.pv) {
+        ss_incref(SS_FROM_PV(sv->value.pv));
+        return sv->value.pv;  /* zero copy — shared with the StradaValue */
+    }
+    /* Other types: format via strada_to_str, wrap in StradaString */
+    char *tmp = strada_to_str(sv);
+    char *result = ss_alloc_pv(tmp, strlen(tmp));
+    free(tmp);
+    return result;
 }
 
 /* Fast integer-to-string conversion without snprintf overhead.
@@ -1526,7 +1616,7 @@ static char *strada_intern_str(const char *s) {
 }
 
 /* strada_intern_str_with_hash - intern string with pre-computed hash */
-static char *strada_intern_str_with_hash(const char *s, unsigned int full_h) {
+static char __attribute__((unused)) *strada_intern_str_with_hash(const char *s, unsigned int full_h) {
     if (!s) return strdup("");
     size_t len = strlen(s);
     if (len > INTERN_MAX_LEN) return strdup(s);
@@ -1562,7 +1652,7 @@ static char *strada_intern_str_with_hash(const char *s, unsigned int full_h) {
 }
 
 /* strada_intern_str_take_with_hash - intern string, taking ownership of s */
-static char *strada_intern_str_take_with_hash(char *s, unsigned int full_h) {
+static char __attribute__((unused)) *strada_intern_str_take_with_hash(char *s, unsigned int full_h) {
     if (!s) return strdup("");
     size_t len = strlen(s);
     if (len > INTERN_MAX_LEN) return s;  /* Already own it, just return */
@@ -1620,12 +1710,12 @@ static void strada_intern_release(char *s) {
         }
         pp = &(*pp)->next;
     }
-    /* Not interned (shouldn't happen for keys created via strada_intern_str) */
+    /* Not interned — strdup'd */
     free(s);
 }
 
 /* strada_intern_release_with_hash - release interned string with pre-computed hash */
-static void strada_intern_release_with_hash(char *s, unsigned int full_h) {
+static void __attribute__((unused)) strada_intern_release_with_hash(char *s, unsigned int full_h) {
     if (!s || !intern_table_initialized) { free(s); return; }
     size_t len = strlen(s);
     if (len > INTERN_MAX_LEN) { free(s); return; }
@@ -1681,51 +1771,102 @@ static unsigned int strada_hash_string(const char *str) {
 /* Resize hash table when load factor exceeds threshold */
 static void strada_hash_resize(StradaHash *hv) {
     if (!hv) return;
-
-    size_t old_num_buckets = hv->num_buckets;
-    size_t new_num_buckets = old_num_buckets * 2;
-    StradaHashEntry **old_buckets = hv->buckets;
-
-    /* Allocate new bucket array */
-    hv->buckets = calloc(new_num_buckets, sizeof(StradaHashEntry*));
-    hv->num_buckets = new_num_buckets;
-
-    /* Rehash all entries into new buckets */
-    for (size_t i = 0; i < old_num_buckets; i++) {
-        StradaHashEntry *entry = old_buckets[i];
-        while (entry) {
-            StradaHashEntry *next = entry->next;
-
-            /* Use cached hash, bitmask for bucket index */
-            unsigned int bucket = entry->hash & (new_num_buckets - 1);
-
-            /* Insert at head of new bucket chain */
-            entry->next = hv->buckets[bucket];
-            hv->buckets[bucket] = entry;
-
-            entry = next;
-        }
+    size_t new_buckets = hv->num_buckets * 2;
+    /* Check if hash_index is part of a compact block (can't realloc) */
+    int is_compact = (hv->hash_index == (uint32_t*)((char*)hv + sizeof(StradaHash)));
+    if (is_compact) {
+        hv->hash_index = malloc(new_buckets * sizeof(uint32_t));
+    } else {
+        hv->hash_index = realloc(hv->hash_index, new_buckets * sizeof(uint32_t));
     }
+    hv->num_buckets = new_buckets;
+    hash_rebuild_index(hv);
+}
 
-    free(old_buckets);
+/* Hash free list: recycle StradaHash structs for common sizes */
+#define HASH_POOL_MAX 256
+#define HASH_SMALL_BUCKETS 4  /* For objects with <=3 attributes */
+static StradaHash *hash_pool_small[HASH_POOL_MAX];  /* Pool for small hashes */
+static int hash_pool_small_count = 0;
+
+static void strada_hash_pool_cleanup(void) {
+    for (int i = 0; i < hash_pool_small_count; i++) free(hash_pool_small[i]);
+    hash_pool_small_count = 0;
+}
+
+static inline void strada_hash_init(StradaHash *hv, size_t nbuckets) {
+    hv->num_buckets = nbuckets;
+    hv->num_entries = 0;
+    hv->entries = NULL;
+    hv->capacity = 0;
+    hv->next_slot = 0;
+    hv->free_head = HASH_EMPTY;
+    hv->hash_index = malloc(nbuckets * sizeof(uint32_t));
+    memset(hv->hash_index, 0xFF, nbuckets * sizeof(uint32_t));
+    hv->refcount = 1;
+    hv->iter_index = 0;
 }
 
 StradaHash* strada_hash_new(void) {
-    static int freelist_cleanup_registered = 0;
-    if (!freelist_cleanup_registered) {
-        atexit(strada_hash_entry_freelist_destroy);
+    static int cleanup_registered = 0;
+    if (!cleanup_registered) {
         atexit(strada_intern_cleanup);
+        atexit(ss_pool_cleanup);
         atexit(strada_sv_pool_cleanup);
         atexit(strada_meta_pool_cleanup);
-        freelist_cleanup_registered = 1;
+        atexit(strada_hash_pool_cleanup);
+        cleanup_registered = 1;
     }
     StradaHash *hv = malloc(sizeof(StradaHash));
-    hv->num_buckets = strada_default_hash_capacity;
-    hv->num_entries = 0;
-    hv->buckets = calloc(hv->num_buckets, sizeof(StradaHashEntry*));
-    hv->refcount = 1;
-    hv->iter_bucket = 0;
-    hv->iter_entry = NULL;
+    strada_hash_init(hv, strada_default_hash_capacity);
+    return hv;
+}
+
+/* Presized hash for inline constructors */
+/* Single-allocation hash for small objects: struct + index + entries in one block.
+ * Eliminates 2 extra mallocs per object creation (index array + entries realloc). */
+#define HASH_COMPACT_ENTRIES 4  /* pre-allocated entry slots for small hashes */
+
+StradaHash* strada_hash_new_presized(int capacity) {
+    StradaHash *hv;
+    int nbuckets = capacity < 4 ? 4 : capacity;
+
+    if (nbuckets <= HASH_SMALL_BUCKETS && hash_pool_small_count > 0) {
+        hv = hash_pool_small[--hash_pool_small_count];
+        /* Pooled hashes already have their compact block — just reinit */
+        memset(hv->hash_index, 0xFF, nbuckets * sizeof(uint32_t));
+        hv->num_buckets = nbuckets;
+        hv->num_entries = 0;
+        hv->next_slot = 0;
+        hv->free_head = HASH_EMPTY;
+        hv->refcount = 1;
+        hv->iter_index = 0;
+        return hv;
+    }
+
+    /* Single allocation: StradaHash + index[nbuckets] + entries[COMPACT_ENTRIES] */
+    if (nbuckets <= HASH_SMALL_BUCKETS) {
+        size_t idx_size = nbuckets * sizeof(uint32_t);
+        size_t ent_size = HASH_COMPACT_ENTRIES * sizeof(StradaHashEntry);
+        char *block = malloc(sizeof(StradaHash) + idx_size + ent_size);
+        hv = (StradaHash*)block;
+        hv->hash_index = (uint32_t*)(block + sizeof(StradaHash));
+        hv->entries = (StradaHashEntry*)(block + sizeof(StradaHash) + idx_size);
+        hv->capacity = HASH_COMPACT_ENTRIES;
+        memset(hv->hash_index, 0xFF, idx_size);
+        memset(hv->entries, 0, ent_size);
+        hv->num_buckets = nbuckets;
+        hv->num_entries = 0;
+        hv->next_slot = 0;
+        hv->free_head = HASH_EMPTY;
+        hv->refcount = 1;
+        hv->iter_index = 0;
+        return hv;
+    }
+
+    /* Large presized hash — separate allocations */
+    hv = malloc(sizeof(StradaHash));
+    strada_hash_init(hv, nbuckets);
     return hv;
 }
 
@@ -1736,37 +1877,63 @@ void strada_hash_set(StradaHash *hv, const char *key, StradaValue *sv) {
     unsigned int bucket = hash & (hv->num_buckets - 1);
 
     /* Check if key exists */
-    StradaHashEntry *entry = hv->buckets[bucket];
-    while (entry) {
-        if (entry->hash == hash && strcmp(entry->key, key) == 0) {
-            /* IMPORTANT: incref new value BEFORE decref old value
-             * This handles the case where sv == entry->value with refcount 1.
-             * Without this order, decref would free the object before incref. */
+    uint32_t idx = hv->hash_index[bucket];
+    while (idx != HASH_EMPTY) {
+        StradaHashEntry *e = &hv->entries[idx];
+        if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
+            /* IMPORTANT: incref new value BEFORE decref old value */
             strada_incref(sv);
-            strada_decref(entry->value);
-            entry->value = sv;
+            strada_decref(e->value);
+            e->value = sv;
             return;
         }
-        entry = entry->next;
+        idx = e->next;
     }
 
-    /* Add new entry - incref the value for shared ownership */
-    entry = strada_hash_entry_alloc();
-    entry->key = strada_intern_str(key);
-    entry->value = sv;
-    entry->hash = hash;
+    /* Add new entry */
+    uint32_t slot = hash_get_slot(hv);
+    StradaHashEntry *e = &hv->entries[slot];
+    e->key = ss_new(key, strlen(key), hash);
+    e->value = sv;
     strada_incref(sv);
-    entry->next = hv->buckets[bucket];
-    hv->buckets[bucket] = entry;
+    e->next = hv->hash_index[bucket];
+    hv->hash_index[bucket] = slot;
     hv->num_entries++;
 
-    /* Resize if load factor exceeds 0.75 (num_entries * 4 > num_buckets * 3) */
     if (hv->num_entries * 4 > hv->num_buckets * 3) {
         strada_hash_resize(hv);
     }
 }
 
 /* strada_hash_set_take - set hash entry, taking ownership (no incref on new value) */
+/* Pre-hashed variant: caller provides the djb2 hash of the key.
+ * Avoids re-hashing for known constant keys (e.g., has-attribute names). */
+void strada_hash_set_take_ph(StradaHash *hv, const char *key, unsigned int hash, StradaValue *sv) {
+    if (!hv || !key) return;
+
+    unsigned int bucket = hash & (hv->num_buckets - 1);
+    uint32_t idx = hv->hash_index[bucket];
+    while (idx != HASH_EMPTY) {
+        StradaHashEntry *e = &hv->entries[idx];
+        if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
+            strada_decref(e->value);
+            e->value = sv;
+            return;
+        }
+        idx = e->next;
+    }
+    uint32_t slot = hash_get_slot(hv);
+    StradaHashEntry *e = &hv->entries[slot];
+    e->key = ss_new(key, strlen(key), hash);
+    e->value = sv;
+    e->next = hv->hash_index[bucket];
+    hv->hash_index[bucket] = slot;
+    hv->num_entries++;
+    if (hv->num_entries * 4 > hv->num_buckets * 3) {
+        strada_hash_resize(hv);
+    }
+}
+
 void strada_hash_set_take(StradaHash *hv, const char *key, StradaValue *sv) {
     if (!hv || !key) return;
 
@@ -1774,24 +1941,58 @@ void strada_hash_set_take(StradaHash *hv, const char *key, StradaValue *sv) {
     unsigned int bucket = hash & (hv->num_buckets - 1);
 
     /* Check if key exists */
-    StradaHashEntry *entry = hv->buckets[bucket];
-    while (entry) {
-        if (entry->hash == hash && strcmp(entry->key, key) == 0) {
-            /* Replace: decref old, take ownership of new (no incref) */
-            strada_decref(entry->value);
-            entry->value = sv;
+    uint32_t idx = hv->hash_index[bucket];
+    while (idx != HASH_EMPTY) {
+        StradaHashEntry *e = &hv->entries[idx];
+        if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
+            strada_decref(e->value);
+            e->value = sv;
             return;
         }
-        entry = entry->next;
+        idx = e->next;
     }
 
     /* Add new entry - take ownership (no incref) */
-    entry = strada_hash_entry_alloc();
-    entry->key = strada_intern_str(key);
-    entry->value = sv;
-    entry->hash = hash;
-    entry->next = hv->buckets[bucket];
-    hv->buckets[bucket] = entry;
+    uint32_t slot = hash_get_slot(hv);
+    StradaHashEntry *e = &hv->entries[slot];
+    e->key = ss_new(key, strlen(key), hash);
+    e->value = sv;
+    e->next = hv->hash_index[bucket];
+    hv->hash_index[bucket] = slot;
+    hv->num_entries++;
+
+    if (hv->num_entries * 4 > hv->num_buckets * 3) {
+        strada_hash_resize(hv);
+    }
+}
+
+/* Fast hash set with pre-built StradaString key — no allocation, no hashing.
+ * Used by inline constructors for known attribute names. Takes ownership of value. */
+void strada_hash_set_ss_take(StradaHash *hv, StradaString *key_ss, StradaValue *sv) {
+    if (!hv || !key_ss) return;
+
+    unsigned int bucket = key_ss->hash & (hv->num_buckets - 1);
+
+    /* Check if key exists */
+    uint32_t idx = hv->hash_index[bucket];
+    while (idx != HASH_EMPTY) {
+        StradaHashEntry *e = &hv->entries[idx];
+        if (e->key == key_ss || (e->key->hash == key_ss->hash && strcmp(e->key->data, key_ss->data) == 0)) {
+            strada_decref(e->value);
+            e->value = sv;
+            return;
+        }
+        idx = e->next;
+    }
+
+    /* Add new entry — share the key (incref, no allocation) */
+    uint32_t slot = hash_get_slot(hv);
+    StradaHashEntry *e = &hv->entries[slot];
+    ss_incref(key_ss);
+    e->key = key_ss;
+    e->value = sv;
+    e->next = hv->hash_index[bucket];
+    hv->hash_index[bucket] = slot;
     hv->num_entries++;
 
     if (hv->num_entries * 4 > hv->num_buckets * 3) {
@@ -1805,16 +2006,51 @@ StradaValue* strada_hash_get(StradaHash *hv, const char *key) {
     unsigned int hash = strada_hash_string(key);
     unsigned int bucket = hash & (hv->num_buckets - 1);
 
-    StradaHashEntry *entry = hv->buckets[bucket];
-    while (entry) {
-        if (entry->hash == hash && (entry->key == key || strcmp(entry->key, key) == 0)) {
-            // Return borrowed reference - hash still owns it
-            return entry->value;
+    uint32_t idx = hv->hash_index[bucket];
+    while (idx != HASH_EMPTY) {
+        StradaHashEntry *e = &hv->entries[idx];
+        if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
+            return e->value;
         }
-        entry = entry->next;
+        idx = e->next;
     }
 
     return strada_undef_static();
+}
+
+/* Autovivification: fetch a hash value, auto-creating an empty hash if key doesn't exist.
+ * Used for intermediate accesses in nested assignments like $h{"a"}{"b"} = val.
+ * Returns a borrowed reference to the value (which is always a hash). */
+StradaValue* strada_autoviv_hash(StradaValue *sv, const char *key) {
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return strada_new_hash();
+    StradaHash *hv = strada_deref_hash(sv);
+    if (!hv || !key) return strada_new_hash();
+
+    unsigned int hash = strada_hash_string(key);
+    unsigned int bucket = hash & (hv->num_buckets - 1);
+
+    uint32_t idx = hv->hash_index[bucket];
+    while (idx != HASH_EMPTY) {
+        StradaHashEntry *e = &hv->entries[idx];
+        if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
+            StradaValue *val = e->value;
+            /* If existing value is undef or not a hash, replace with empty hash */
+            if (!val || STRADA_IS_TAGGED_INT(val) ||
+                (val->type != STRADA_HASH && val->type != STRADA_REF)) {
+                StradaValue *new_hash = strada_new_hash();
+                strada_hash_set_take(hv, key, new_hash);
+                return new_hash;
+            }
+            return val;
+        }
+        idx = e->next;
+    }
+
+    /* Key doesn't exist — create empty hash and store it */
+    StradaValue *new_hash = strada_new_hash();
+    strada_hash_set_take(hv, key, new_hash);
+    /* hash_set_take does NOT incref, so new_hash refcount stays 1, owned by parent */
+    return new_hash;
 }
 
 int strada_hash_exists(StradaHash *hv, const char *key) {
@@ -1823,12 +2059,13 @@ int strada_hash_exists(StradaHash *hv, const char *key) {
     unsigned int hash = strada_hash_string(key);
     unsigned int bucket = hash & (hv->num_buckets - 1);
 
-    StradaHashEntry *entry = hv->buckets[bucket];
-    while (entry) {
-        if (entry->hash == hash && (entry->key == key || strcmp(entry->key, key) == 0)) {
+    uint32_t idx = hv->hash_index[bucket];
+    while (idx != HASH_EMPTY) {
+        StradaHashEntry *e = &hv->entries[idx];
+        if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
             return 1;
         }
-        entry = entry->next;
+        idx = e->next;
     }
 
     return 0;
@@ -1840,25 +2077,22 @@ void strada_hash_delete(StradaHash *hv, const char *key) {
     unsigned int hash = strada_hash_string(key);
     unsigned int bucket = hash & (hv->num_buckets - 1);
 
-    StradaHashEntry *entry = hv->buckets[bucket];
-    StradaHashEntry *prev = NULL;
+    uint32_t *prev = &hv->hash_index[bucket];
+    uint32_t idx = *prev;
 
-    while (entry) {
-        if (entry->hash == hash && strcmp(entry->key, key) == 0) {
-            if (prev) {
-                prev->next = entry->next;
-            } else {
-                hv->buckets[bucket] = entry->next;
-            }
-
-            strada_intern_release(entry->key);
-            strada_decref(entry->value);
-            strada_hash_entry_free(entry);
+    while (idx != HASH_EMPTY) {
+        StradaHashEntry *e = &hv->entries[idx];
+        if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
+            *prev = e->next;
+            ss_decref(e->key);
+            strada_decref(e->value);
+            e->key = NULL; e->value = NULL;
+            e->next = hv->free_head; hv->free_head = idx;
             hv->num_entries--;
             return;
         }
-        prev = entry;
-        entry = entry->next;
+        prev = &e->next;
+        idx = e->next;
     }
 }
 
@@ -1884,38 +2118,27 @@ void strada_hash_set_sv(StradaHash *hv, StradaValue *key_sv, StradaValue *sv) {
     unsigned int hash = strada_hash_string(key);
     unsigned int bucket = hash & (hv->num_buckets - 1);
 
-    StradaHashEntry *entry = hv->buckets[bucket];
-    while (entry) {
-        if (entry->hash == hash && strcmp(entry->key, key) == 0) {
+    uint32_t idx = hv->hash_index[bucket];
+    while (idx != HASH_EMPTY) {
+        StradaHashEntry *e = &hv->entries[idx];
+        if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
             strada_incref(sv);
-            strada_decref(entry->value);
-            entry->value = sv;
+            strada_decref(e->value);
+            e->value = sv;
             if (key_alloc) free(key_alloc);
             return;
         }
-        entry = entry->next;
+        idx = e->next;
     }
 
-    /* New entry - try to steal string from temporary STRADA_STR key */
-    entry = strada_hash_entry_alloc();
-    if (!key_alloc && key_sv && !STRADA_IS_TAGGED_INT(key_sv) && key_sv->type == STRADA_STR && key_sv->refcount == 1 && key_sv->value.pv) {
-        /* Steal the string from the temporary SV */
-        entry->key = strada_intern_str_take_with_hash(key_sv->value.pv, hash);
-        if (entry->key != key_sv->value.pv) {
-            /* intern already had it, took ownership and freed ours */
-            key_sv->value.pv = NULL;
-        } else {
-            /* intern took our pointer directly */
-            key_sv->value.pv = NULL;
-        }
-    } else {
-        entry->key = strada_intern_str_with_hash(key, hash);
-    }
-    entry->value = sv;
-    entry->hash = hash;
+    /* New entry */
+    uint32_t slot = hash_get_slot(hv);
+    StradaHashEntry *e = &hv->entries[slot];
+    e->key = ss_new(key, strlen(key), hash);
+    e->value = sv;
     strada_incref(sv);
-    entry->next = hv->buckets[bucket];
-    hv->buckets[bucket] = entry;
+    e->next = hv->hash_index[bucket];
+    hv->hash_index[bucket] = slot;
     hv->num_entries++;
 
     if (hv->num_entries * 4 > hv->num_buckets * 3) {
@@ -1933,13 +2156,14 @@ StradaValue* strada_hash_get_sv(StradaHash *hv, StradaValue *key_sv) {
     unsigned int hash = strada_hash_string(key);
     unsigned int bucket = hash & (hv->num_buckets - 1);
 
-    StradaHashEntry *entry = hv->buckets[bucket];
-    while (entry) {
-        if (entry->hash == hash && (entry->key == key || strcmp(entry->key, key) == 0)) {
+    uint32_t idx = hv->hash_index[bucket];
+    while (idx != HASH_EMPTY) {
+        StradaHashEntry *e = &hv->entries[idx];
+        if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
             if (key_alloc) free(key_alloc);
-            return entry->value;
+            return e->value;
         }
-        entry = entry->next;
+        idx = e->next;
     }
 
     if (key_alloc) free(key_alloc);
@@ -1955,13 +2179,14 @@ int strada_hash_exists_sv(StradaHash *hv, StradaValue *key_sv) {
     unsigned int hash = strada_hash_string(key);
     unsigned int bucket = hash & (hv->num_buckets - 1);
 
-    StradaHashEntry *entry = hv->buckets[bucket];
-    while (entry) {
-        if (entry->hash == hash && (entry->key == key || strcmp(entry->key, key) == 0)) {
+    uint32_t idx = hv->hash_index[bucket];
+    while (idx != HASH_EMPTY) {
+        StradaHashEntry *e = &hv->entries[idx];
+        if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
             if (key_alloc) free(key_alloc);
             return 1;
         }
-        entry = entry->next;
+        idx = e->next;
     }
 
     if (key_alloc) free(key_alloc);
@@ -1977,26 +2202,23 @@ void strada_hash_delete_sv(StradaHash *hv, StradaValue *key_sv) {
     unsigned int hash = strada_hash_string(key);
     unsigned int bucket = hash & (hv->num_buckets - 1);
 
-    StradaHashEntry *entry = hv->buckets[bucket];
-    StradaHashEntry *prev = NULL;
+    uint32_t *prev = &hv->hash_index[bucket];
+    uint32_t idx = *prev;
 
-    while (entry) {
-        if (entry->hash == hash && strcmp(entry->key, key) == 0) {
-            if (prev) {
-                prev->next = entry->next;
-            } else {
-                hv->buckets[bucket] = entry->next;
-            }
-
-            strada_intern_release_with_hash(entry->key, hash);
-            strada_decref(entry->value);
-            strada_hash_entry_free(entry);
+    while (idx != HASH_EMPTY) {
+        StradaHashEntry *e = &hv->entries[idx];
+        if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
+            *prev = e->next;
+            ss_decref(e->key);
+            strada_decref(e->value);
+            e->key = NULL; e->value = NULL;
+            e->next = hv->free_head; hv->free_head = idx;
             hv->num_entries--;
             if (key_alloc) free(key_alloc);
             return;
         }
-        prev = entry;
-        entry = entry->next;
+        prev = &e->next;
+        idx = e->next;
     }
     if (key_alloc) free(key_alloc);
 }
@@ -2054,40 +2276,41 @@ static StradaValue* strada_hash_get_with_hash(StradaHash *hv, const char *key, u
     if (!hv || !key) return strada_undef_static();
 
     unsigned int bucket = hash & (hv->num_buckets - 1);
-    StradaHashEntry *entry = hv->buckets[bucket];
-    while (entry) {
-        if (entry->hash == hash && (entry->key == key || strcmp(entry->key, key) == 0))
-            return entry->value;
-        entry = entry->next;
+    uint32_t idx = hv->hash_index[bucket];
+    while (idx != HASH_EMPTY) {
+        StradaHashEntry *e = &hv->entries[idx];
+        if (e->key->hash == hash && strcmp(e->key->data, key) == 0)
+            return e->value;
+        idx = e->next;
     }
     return strada_undef_static();
 }
 
-/* Hash set with pre-computed hash (avoids re-hashing in both hash table and intern table)
- * Skips string interning for keys — concat keys are typically unique (e.g., "item_123")
- * so interning just wastes time building the intern table. Uses strdup instead. */
+/* Hash set with pre-computed hash (avoids re-hashing).
+ * Uses ss_new for key storage. */
 static void strada_hash_set_with_hash(StradaHash *hv, const char *key, unsigned int hash, StradaValue *sv) {
     if (!hv || !key) return;
 
     unsigned int bucket = hash & (hv->num_buckets - 1);
-    StradaHashEntry *entry = hv->buckets[bucket];
-    while (entry) {
-        if (entry->hash == hash && strcmp(entry->key, key) == 0) {
+    uint32_t idx = hv->hash_index[bucket];
+    while (idx != HASH_EMPTY) {
+        StradaHashEntry *e = &hv->entries[idx];
+        if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
             strada_incref(sv);
-            strada_decref(entry->value);
-            entry->value = sv;
+            strada_decref(e->value);
+            e->value = sv;
             return;
         }
-        entry = entry->next;
+        idx = e->next;
     }
 
-    entry = strada_hash_entry_alloc();
-    entry->key = strdup(key);
-    entry->value = sv;
-    entry->hash = hash;
+    uint32_t slot = hash_get_slot(hv);
+    StradaHashEntry *e = &hv->entries[slot];
+    e->key = ss_new(key, strlen(key), hash);
+    e->value = sv;
     strada_incref(sv);
-    entry->next = hv->buckets[bucket];
-    hv->buckets[bucket] = entry;
+    e->next = hv->hash_index[bucket];
+    hv->hash_index[bucket] = slot;
     hv->num_entries++;
 
     if (hv->num_entries * 4 > hv->num_buckets * 3) {
@@ -2095,31 +2318,27 @@ static void strada_hash_set_with_hash(StradaHash *hv, const char *key, unsigned 
     }
 }
 
-/* Hash delete with pre-computed hash
- * Keys stored via strada_hash_set_with_hash are strdup'd (not interned),
- * so we use free() directly instead of strada_intern_release. */
+/* Hash delete with pre-computed hash */
 static void strada_hash_delete_with_hash(StradaHash *hv, const char *key, unsigned int hash) {
     if (!hv || !key) return;
 
     unsigned int bucket = hash & (hv->num_buckets - 1);
-    StradaHashEntry *entry = hv->buckets[bucket];
-    StradaHashEntry *prev = NULL;
+    uint32_t *prev = &hv->hash_index[bucket];
+    uint32_t idx = *prev;
 
-    while (entry) {
-        if (entry->hash == hash && strcmp(entry->key, key) == 0) {
-            if (prev) {
-                prev->next = entry->next;
-            } else {
-                hv->buckets[bucket] = entry->next;
-            }
-            free(entry->key);
-            strada_decref(entry->value);
-            strada_hash_entry_free(entry);
+    while (idx != HASH_EMPTY) {
+        StradaHashEntry *e = &hv->entries[idx];
+        if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
+            *prev = e->next;
+            ss_decref(e->key);
+            strada_decref(e->value);
+            e->key = NULL; e->value = NULL;
+            e->next = hv->free_head; hv->free_head = idx;
             hv->num_entries--;
             return;
         }
-        prev = entry;
-        entry = entry->next;
+        prev = &e->next;
+        idx = e->next;
     }
 }
 
@@ -2170,14 +2389,12 @@ StradaArray* strada_hash_keys(StradaHash *hv) {
     StradaArray *av = strada_array_new();
     if (!hv) return av;
 
-    for (size_t i = 0; i < hv->num_buckets; i++) {
-        StradaHashEntry *entry = hv->buckets[i];
-        while (entry) {
-            strada_array_push_take(av, strada_new_str(entry->key));
-            entry = entry->next;
+    for (size_t i = 0; i < hv->next_slot; i++) {
+        if (hv->entries[i].key) {
+            strada_array_push_take(av, strada_new_str(hv->entries[i].key->data));
         }
     }
-    
+
     return av;
 }
 
@@ -2185,48 +2402,31 @@ StradaArray* strada_hash_values(StradaHash *hv) {
     StradaArray *av = strada_array_new();
     if (!hv) return av;
 
-    for (size_t i = 0; i < hv->num_buckets; i++) {
-        StradaHashEntry *entry = hv->buckets[i];
-        while (entry) {
-            strada_array_push(av, entry->value);
-            entry = entry->next;
+    for (size_t i = 0; i < hv->next_slot; i++) {
+        if (hv->entries[i].key) {
+            strada_array_push(av, hv->entries[i].value);
         }
     }
 
     return av;
 }
 
-/* Reserve capacity for hash (pre-allocate buckets) */
+/* Reserve capacity for hash (pre-allocate buckets and entries) */
 void strada_hash_reserve(StradaHash *hv, size_t num_buckets) {
     /* Round up to power of 2 for bitmask indexing */
     num_buckets = strada_next_pow2(num_buckets);
     if (!hv || num_buckets <= hv->num_buckets) return;
 
-    size_t old_num_buckets = hv->num_buckets;
-    StradaHashEntry **old_buckets = hv->buckets;
-
-    /* Allocate new bucket array */
-    hv->buckets = calloc(num_buckets, sizeof(StradaHashEntry*));
     hv->num_buckets = num_buckets;
+    hv->hash_index = realloc(hv->hash_index, num_buckets * sizeof(uint32_t));
 
-    /* Rehash all entries into new buckets */
-    for (size_t i = 0; i < old_num_buckets; i++) {
-        StradaHashEntry *entry = old_buckets[i];
-        while (entry) {
-            StradaHashEntry *next = entry->next;
-
-            /* Use cached hash, bitmask for bucket index */
-            unsigned int bucket = entry->hash & (num_buckets - 1);
-
-            /* Insert at head of new bucket chain */
-            entry->next = hv->buckets[bucket];
-            hv->buckets[bucket] = entry;
-
-            entry = next;
-        }
+    /* Also reserve entry capacity */
+    if (num_buckets > hv->capacity) {
+        hv->entries = realloc(hv->entries, num_buckets * sizeof(StradaHashEntry));
+        hv->capacity = num_buckets;
     }
 
-    free(old_buckets);
+    hash_rebuild_index(hv);
 }
 
 /* Reserve capacity for hash value (handles refs) */
@@ -2442,8 +2642,9 @@ StradaValue* strada_concat_sv(StradaValue *a, StradaValue *b) {
     StradaValue *sv = strada_value_alloc();
     sv->type = STRADA_STR;
     sv->refcount = 1;
-    sv->value.pv = result;
+    sv->value.pv = ss_alloc_pv(result, len_a + len_b);
     sv->struct_size = len_a + len_b;
+    free(result);
 
     return sv;
 }
@@ -2478,28 +2679,67 @@ StradaValue* strada_concat_inplace(StradaValue *a, StradaValue *b) {
     if (a && !STRADA_IS_TAGGED_INT(a) && a->type == STRADA_STR && a->refcount == 1 && a->value.pv) {
         size_t len_a = a->struct_size;
         size_t new_len = len_a + len_b;
+        StradaString *ss = SS_FROM_PV(a->value.pv);
 #ifdef __linux__
-        /* Check if existing buffer has room (malloc often over-allocates) */
-        size_t usable = malloc_usable_size(a->value.pv);
-        if (usable >= new_len + 1) {
-            if (len_b > 0) memcpy(a->value.pv + len_a, str_b, len_b);
-            a->value.pv[new_len] = '\0';
+        /* Check if existing StradaString allocation has room */
+        size_t usable = malloc_usable_size(ss);
+        if (usable >= sizeof(StradaString) + new_len + 1) {
+            if (len_b > 0) memcpy(ss->data + len_a, str_b, len_b);
+            ss->data[new_len] = '\0';
+            ss->len = (uint32_t)new_len;
             a->struct_size = new_len;
             return a;
         }
 #endif
-        /* Need to grow — use exponential growth to avoid O(n^2) realloc */
+        /* Need to grow — realloc the StradaString */
         size_t new_cap = len_a < 64 ? 128 : len_a * 2;
         if (new_cap < new_len + 1) new_cap = new_len + 1;
-        a->value.pv = realloc(a->value.pv, new_cap);
-        if (len_b > 0) memcpy(a->value.pv + len_a, str_b, len_b);
-        a->value.pv[new_len] = '\0';
+        ss = realloc(ss, sizeof(StradaString) + new_cap);
+        if (len_b > 0) memcpy(ss->data + len_a, str_b, len_b);
+        ss->data[new_len] = '\0';
+        ss->len = (uint32_t)new_len;
+        a->value.pv = ss->data;  /* update in case realloc moved */
         a->struct_size = new_len;
         return a;
     }
 
     /* Slow path: create new string, decref a */
     StradaValue *result = strada_concat_sv(a, b);
+    strada_decref(a);
+    return result;
+}
+
+/* Append a C string literal to a StradaValue in place — no RHS allocation needed.
+ * Used by codegen for $s .= "literal" optimization. */
+StradaValue* strada_concat_inplace_cstr(StradaValue *a, const char *str_b, size_t len_b) {
+    if (a && !STRADA_IS_TAGGED_INT(a) && a->type == STRADA_STR && a->refcount == 1 && a->value.pv) {
+        size_t len_a = a->struct_size;
+        size_t new_len = len_a + len_b;
+        StradaString *ss = SS_FROM_PV(a->value.pv);
+#ifdef __linux__
+        size_t usable = malloc_usable_size(ss);
+        if (usable >= sizeof(StradaString) + new_len + 1) {
+            memcpy(ss->data + len_a, str_b, len_b);
+            ss->data[new_len] = '\0';
+            ss->len = (uint32_t)new_len;
+            a->struct_size = new_len;
+            return a;
+        }
+#endif
+        size_t new_cap = len_a < 64 ? 128 : len_a * 2;
+        if (new_cap < new_len + 1) new_cap = new_len + 1;
+        ss = realloc(ss, sizeof(StradaString) + new_cap);
+        memcpy(ss->data + len_a, str_b, len_b);
+        ss->data[new_len] = '\0';
+        ss->len = (uint32_t)new_len;
+        a->value.pv = ss->data;
+        a->struct_size = new_len;
+        return a;
+    }
+    /* Slow path: create new string */
+    StradaValue *b_sv = strada_new_str_len(str_b, len_b);
+    StradaValue *result = strada_concat_sv(a, b_sv);
+    strada_decref(b_sv);
     strada_decref(a);
     return result;
 }
@@ -2978,7 +3218,15 @@ StradaValue* strada_sprintf_sv(StradaValue *format_sv, int arg_count, ...) {
 /* ===== FILE I/O FUNCTIONS ===== */
 
 StradaValue* strada_open(const char *filename, const char *mode) {
-    FILE *fh = fopen(filename, mode);
+    /* Translate Perl-style modes to C fopen modes */
+    const char *fmode = mode;
+    if (mode[0] == '>' && mode[1] == '>') fmode = "a";
+    else if (mode[0] == '>') fmode = "w";
+    else if (mode[0] == '<') fmode = "r";
+    else if (mode[0] == '+' && mode[1] == '<') fmode = "r+";
+    else if (mode[0] == '+' && mode[1] == '>') fmode = "w+";
+
+    FILE *fh = fopen(filename, fmode);
     if (!fh) {
         return strada_new_undef();
     }
@@ -3446,22 +3694,15 @@ void strada_dump(StradaValue *sv, int indent) {
 
         case STRADA_HASH: {
             StradaHash *hv = sv->value.hv;
-            /* Check if hash is empty */
-            int is_empty = 1;
-            for (size_t i = 0; i < hv->num_buckets && is_empty; i++) {
-                if (hv->buckets[i]) is_empty = 0;
-            }
-            if (is_empty) {
+            if (hv->num_entries == 0) {
                 printf("{}");
             } else {
                 printf("{\n");
-                for (size_t i = 0; i < hv->num_buckets; i++) {
-                    StradaHashEntry *entry = hv->buckets[i];
-                    while (entry) {
-                        printf("%s  '%s' => ", ind, entry->key);
-                        strada_dump(entry->value, indent + 1);
+                for (size_t i = 0; i < hv->next_slot; i++) {
+                    if (hv->entries[i].key) {
+                        printf("%s  '%s' => ", ind, hv->entries[i].key->data);
+                        strada_dump(hv->entries[i].value, indent + 1);
                         printf(",\n");
-                        entry = entry->next;
                     }
                 }
                 printf("%s}", ind);
@@ -3524,10 +3765,9 @@ void strada_dump(StradaValue *sv, int indent) {
     free(ind);
 }
 
-void strada_dumper(StradaValue *sv) {
-    printf("$VAR = ");
-    strada_dump(sv, 0);
-    printf(";\n");
+/* dumper() returns the string representation (caller must print/warn if needed) */
+StradaValue* strada_dumper(StradaValue *sv) {
+    return strada_dumper_str(sv);
 }
 
 /* String-building version of dump */
@@ -3591,22 +3831,15 @@ static void strada_dump_to_buf(StradaValue *sv, int indent, char **buf, size_t *
 
         case STRADA_HASH: {
             StradaHash *hv = sv->value.hv;
-            /* Check if hash is empty */
-            int is_empty = 1;
-            for (size_t i = 0; i < hv->num_buckets && is_empty; i++) {
-                if (hv->buckets[i]) is_empty = 0;
-            }
-            if (is_empty) {
+            if (hv->num_entries == 0) {
                 APPEND("{}");
             } else {
                 APPEND("{\n");
-                for (size_t i = 0; i < hv->num_buckets; i++) {
-                    StradaHashEntry *entry = hv->buckets[i];
-                    while (entry) {
-                        APPEND("%s  '%s' => ", ind, entry->key);
-                        strada_dump_to_buf(entry->value, indent + 1, buf, len, cap);
+                for (size_t i = 0; i < hv->next_slot; i++) {
+                    if (hv->entries[i].key) {
+                        APPEND("%s  '%s' => ", ind, hv->entries[i].key->data);
+                        strada_dump_to_buf(hv->entries[i].value, indent + 1, buf, len, cap);
                         APPEND(",\n");
-                        entry = entry->next;
                     }
                 }
                 APPEND("%s}", ind);
@@ -3787,6 +4020,27 @@ void strada_stack_set_line(int line) {
     if (strada_call_depth > 0) {
         strada_call_stack[strada_call_depth - 1].line = line;
     }
+}
+
+/* caller() - returns hash with function, file, line of the calling frame.
+ * Level 0 = immediate caller, 1 = caller's caller, etc. */
+StradaValue* strada_caller_info(StradaValue *level_sv) {
+    int level = STRADA_IS_TAGGED_INT(level_sv) ? (int)STRADA_TAGGED_INT_VAL(level_sv) :
+                (level_sv ? (int)strada_to_int(level_sv) : 0);
+    /* +2: skip caller() itself and the function that called caller() */
+    int frame_idx = strada_call_depth - 2 - level;
+    if (frame_idx < 0 || frame_idx >= strada_call_depth) {
+        return strada_new_undef();
+    }
+    StradaStackFrame *frame = &strada_call_stack[frame_idx];
+    StradaValue *result = strada_new_hash();
+    strada_hash_set_take(result->value.hv, "function",
+        strada_new_str(frame->func_name ? frame->func_name : ""));
+    strada_hash_set_take(result->value.hv, "file",
+        strada_new_str(frame->file_name ? frame->file_name : ""));
+    strada_hash_set_take(result->value.hv, "line",
+        strada_new_int(frame->line));
+    return result;
 }
 
 void strada_print_stack_trace(FILE *out) {
@@ -5221,7 +5475,26 @@ StradaValue* strada_regex_build_result(const char *src, StradaValue *matches, St
     return result;
 }
 
+/* Check if a string contains any regex metacharacters */
+static int has_regex_meta(const char *s) {
+    while (*s) {
+        switch (*s) {
+            case '.': case '*': case '+': case '?': case '[': case ']':
+            case '(': case ')': case '{': case '}': case '^': case '$':
+            case '|': case '\\':
+                return 1;
+        }
+        s++;
+    }
+    return 0;
+}
+
 StradaArray* strada_regex_split(const char *str, const char *pattern) {
+    /* Fast path: if pattern has no regex metacharacters, use plain string split */
+    if (!has_regex_meta(pattern)) {
+        return strada_string_split(str, pattern);
+    }
+
     StradaArray *parts = strada_array_new();
 
     pcre2_code *re = regex_cache_compile(pattern, 0);
@@ -5931,11 +6204,28 @@ StradaArray* strada_string_split(const char *str, const char *delim) {
         return parts;
     }
 
+    /* Fast path: single-character delimiter — use memchr (SIMD-optimized in glibc) */
+    if (delim_len == 1) {
+        char d = delim[0];
+        size_t str_len = strlen(str);
+        const char *p = str;
+        const char *end = str + str_len;
+        const char *found;
+
+        while ((found = memchr(p, d, end - p)) != NULL) {
+            strada_array_push_take(parts, strada_new_str_len(p, found - p));
+            p = found + 1;
+        }
+        /* Add remaining part */
+        strada_array_push_take(parts, strada_new_str_len(p, end - p));
+        return parts;
+    }
+
+    /* Multi-character delimiter — use strstr */
     const char *p = str;
     const char *found;
 
     while ((found = strstr(p, delim)) != NULL) {
-        /* Add part before delimiter — single allocation via strada_new_str_len */
         strada_array_push_take(parts, strada_new_str_len(p, found - p));
         p = found + delim_len;
     }
@@ -5972,7 +6262,8 @@ void strada_free_value(StradaValue *sv) {
     strada_memprof_free(sv->type, sizeof(StradaValue));
 
     /* Call DESTROY method if this is a blessed reference */
-    char *bp = SV_BLESSED(sv);
+    /* Fast path: only REF type can be blessed — skip check for other types */
+    char *bp = (sv->type == STRADA_REF && sv->meta) ? sv->meta->blessed_package : NULL;
     if (bp) {
         strada_check_debug_bless();
 
@@ -5999,7 +6290,7 @@ void strada_free_value(StradaValue *sv) {
 
     switch (sv->type) {
         case STRADA_STR:
-            free(sv->value.pv);
+            ss_free_pv(sv->value.pv);
             break;
         case STRADA_ARRAY:
             strada_free_array(sv->value.av);
@@ -6180,19 +6471,31 @@ void strada_free_hash(StradaHash *hv) {
     hv->refcount--;
     if (hv->refcount > 0) return;
 
-    for (size_t i = 0; i < hv->num_buckets; i++) {
-        StradaHashEntry *entry = hv->buckets[i];
-        while (entry) {
-            StradaHashEntry *next = entry->next;
-            strada_intern_release(entry->key);
-            strada_decref(entry->value);
-            strada_hash_entry_free(entry);
-            entry = next;
+    for (size_t i = 0; i < hv->next_slot; i++) {
+        if (hv->entries[i].key) {
+            ss_decref(hv->entries[i].key);
+            strada_decref(hv->entries[i].value);
         }
     }
 
-    free(hv->buckets);
-    free(hv);
+    /* Check if this is a compact hash (index+entries in same block as struct) */
+    int is_compact = (hv->hash_index == (uint32_t*)((char*)hv + sizeof(StradaHash)));
+
+    if (!is_compact) {
+        /* Entries may have been realloc'd away from compact block */
+        if (hv->entries) free(hv->entries);
+        free(hv->hash_index);
+    } else if (hv->capacity > HASH_COMPACT_ENTRIES && hv->entries) {
+        /* Compact hash but entries outgrew the block — entries was realloc'd */
+        free(hv->entries);
+    }
+
+    /* Return small hash structs to pool (keeps the compact block for reuse) */
+    if (is_compact && hash_pool_small_count < HASH_POOL_MAX) {
+        hash_pool_small[hash_pool_small_count++] = hv;
+    } else {
+        free(hv);
+    }
 }
 
 /* ===== FFI - FOREIGN FUNCTION INTERFACE ===== */
@@ -9655,7 +9958,7 @@ StradaValue* strada_deref_set(StradaValue *ref, StradaValue *new_value) {
     switch (target->type) {
         case STRADA_STR:
             if (target->value.pv) {
-                free(target->value.pv);
+                ss_free_pv(target->value.pv);
                 target->value.pv = NULL;
             }
             break;
@@ -9684,7 +9987,12 @@ StradaValue* strada_deref_set(StradaValue *ref, StradaValue *new_value) {
             target->value.nv = new_value->value.nv;
             break;
         case STRADA_STR:
-            target->value.pv = new_value->value.pv ? strdup(new_value->value.pv) : NULL;
+            if (new_value->value.pv) {
+                ss_incref(SS_FROM_PV(new_value->value.pv));
+                target->value.pv = new_value->value.pv;
+            } else {
+                target->value.pv = NULL;
+            }
             break;
         case STRADA_REF:
             target->value.rv = new_value->value.rv;
@@ -9859,14 +10167,12 @@ StradaValue* strada_hash_from_ref(StradaValue *ref) {
     /* Create new hash and copy entries */
     StradaValue *result = strada_new_hash();
     
-    for (size_t i = 0; i < src->num_buckets; i++) {
-        StradaHashEntry *entry = src->buckets[i];
-        while (entry) {
-            strada_hash_set(result->value.hv, entry->key, entry->value);
-            entry = entry->next;
+    for (size_t i = 0; i < src->next_slot; i++) {
+        if (src->entries[i].key) {
+            strada_hash_set(result->value.hv, src->entries[i].key->data, src->entries[i].value);
         }
     }
-    
+
     return result;
 }
 
@@ -9943,12 +10249,10 @@ StradaValue* strada_hash_to_flat_array(StradaValue *hash) {
     StradaValue *result = strada_new_array();
     if (!hash || STRADA_IS_TAGGED_INT(hash) || hash->type != STRADA_HASH) return result;
     StradaHash *hv = hash->value.hv;
-    for (size_t i = 0; i < hv->num_buckets; i++) {
-        StradaHashEntry *entry = hv->buckets[i];
-        while (entry) {
-            strada_array_push_take(result->value.av, strada_new_str(entry->key));
-            strada_array_push(result->value.av, entry->value);
-            entry = entry->next;
+    for (size_t i = 0; i < hv->next_slot; i++) {
+        if (hv->entries[i].key) {
+            strada_array_push_take(result->value.av, strada_new_str(hv->entries[i].key->data));
+            strada_array_push(result->value.av, hv->entries[i].value);
         }
     }
     return result;
@@ -10017,12 +10321,10 @@ StradaValue* strada_clone(StradaValue *sv) {
         case STRADA_HASH: {
             StradaValue *new_hash = strada_new_hash();
             if (sv->value.hv) {
-                /* Iterate over hash buckets */
-                for (size_t i = 0; i < sv->value.hv->num_buckets; i++) {
-                    StradaHashEntry *entry = sv->value.hv->buckets[i];
-                    while (entry) {
-                        strada_hash_set_take(new_hash->value.hv, entry->key, strada_clone(entry->value));
-                        entry = entry->next;
+                StradaHash *hv = sv->value.hv;
+                for (size_t i = 0; i < hv->next_slot; i++) {
+                    if (hv->entries[i].key) {
+                        strada_hash_set_take(new_hash->value.hv, hv->entries[i].key->data, strada_clone(hv->entries[i].value));
                     }
                 }
             }
@@ -10408,11 +10710,13 @@ void strada_subst_sv(StradaValue **target_ptr, const char *find, const char *rep
         result = strada_replace_first(src, find, replace);
     }
 
-    /* If target has refcount 1, we can steal the pointer */
+    /* If target has refcount 1, we can update in place */
     if (target->refcount == 1) {
-        free(target->value.pv);
-        target->value.pv = result;
-        target->struct_size = strlen(result);
+        ss_free_pv(target->value.pv);
+        size_t rlen = strlen(result);
+        target->value.pv = ss_alloc_pv(result, rlen);
+        target->struct_size = rlen;
+        free(result);
     } else {
         StradaValue *new_sv = strada_new_str(result);
         free(result);
@@ -11463,7 +11767,8 @@ StradaValue* strada_bless(StradaValue *ref, const char *package) {
     }
 
     /* Set the blessed package — interned since package names are a small fixed set */
-    strada_ensure_meta(ref)->blessed_package = strada_intern_str(package);
+    StradaMetadata *meta = strada_ensure_meta(ref);
+    meta->blessed_package = strada_intern_str(package);
 
     return ref;
 }
@@ -11865,7 +12170,31 @@ StradaValue* strada_method_call(StradaValue *obj, const char *method, StradaValu
         return result;
     }
 
-    StradaMethod func = oop_lookup_method(pkg_name, method);
+    /* Method dispatch inline cache: avoid oop_lookup_method for repeated calls.
+     * 8-entry direct-mapped cache keyed by (pkg_name_ptr XOR method_name_hash).
+     * Stores a copy of the method name to avoid use-after-free when method
+     * name strings come from dynamic dispatch (strada_to_str + free). */
+    #define MC_SIZE 8
+    #define MC_MASK (MC_SIZE - 1)
+    static struct { const char *pkg; char method[64]; StradaMethod func; } mc_cache[MC_SIZE];
+    static int mc_initialized = 0;
+    if (!mc_initialized) { memset(mc_cache, 0, sizeof(mc_cache)); mc_initialized = 1; }
+
+    size_t method_len = strlen(method);
+    unsigned int method_hash = 5381;
+    for (size_t mi = 0; mi < method_len; mi++) method_hash = method_hash * 33 + (unsigned char)method[mi];
+    unsigned int mc_idx = (unsigned int)(((uintptr_t)pkg_name >> 3) ^ method_hash) & MC_MASK;
+    StradaMethod func;
+    if (mc_cache[mc_idx].pkg == pkg_name && strcmp(mc_cache[mc_idx].method, method) == 0) {
+        func = mc_cache[mc_idx].func;  /* Cache hit */
+    } else {
+        func = oop_lookup_method(pkg_name, method);
+        if (func && method_len < 64) {
+            mc_cache[mc_idx].pkg = pkg_name;
+            memcpy(mc_cache[mc_idx].method, method, method_len + 1);
+            mc_cache[mc_idx].func = func;
+        }
+    }
     if (!func) {
         /* Try AUTOLOAD fallback */
         StradaMethod autoload = oop_lookup_method(pkg_name, "AUTOLOAD");
@@ -12092,10 +12421,26 @@ const char* strada_get_method_package(void) {
 }
 
 /* Call DESTROY on an object if it has one */
+/* Cache of packages known to have no DESTROY method */
+#define NO_DESTROY_CACHE_SIZE 64
+static const char *no_destroy_cache[NO_DESTROY_CACHE_SIZE];
+static int no_destroy_count = 0;
+
+static int has_no_destroy_cached(const char *pkg) {
+    /* Pointer comparison only — interned strings have unique pointers */
+    for (int i = 0; i < no_destroy_count; i++) {
+        if (no_destroy_cache[i] == pkg) return 1;
+    }
+    return 0;
+}
+
 void strada_call_destroy(StradaValue *obj) {
     const char *bp = SV_BLESSED(obj);
     if (!obj || !bp || oop_destroying) return;
     if (!oop_initialized) return;
+
+    /* Fast path: skip if package is known to have no DESTROY */
+    if (has_no_destroy_cached(bp)) return;
 
     strada_check_debug_bless();
     if (strada_debug_bless) {
@@ -12119,6 +12464,11 @@ void strada_call_destroy(StradaValue *obj) {
         oop_destroying = 1;  /* Prevent recursive DESTROY */
         destroy(obj, NULL);
         oop_destroying = 0;
+    } else {
+        /* Cache this package as having no DESTROY */
+        if (no_destroy_count < NO_DESTROY_CACHE_SIZE) {
+            no_destroy_cache[no_destroy_count++] = bp;
+        }
     }
 }
 
@@ -12189,6 +12539,43 @@ StradaValue* strada_is_file(StradaValue *path_val) {
     struct stat st;
     int is_file = (stat(path, &st) == 0 && S_ISREG(st.st_mode));
     return strada_new_int(is_file ? 1 : 0);
+}
+
+/* File test: readable (-r) */
+StradaValue* strada_is_readable(StradaValue *path_val) {
+    char _tb[PATH_MAX];
+    const char *path = strada_to_str_buf(path_val, _tb, sizeof(_tb));
+    return STRADA_MAKE_TAGGED_INT(access(path, R_OK) == 0 ? 1 : 0);
+}
+
+/* File test: writable (-w) */
+StradaValue* strada_is_writable(StradaValue *path_val) {
+    char _tb[PATH_MAX];
+    const char *path = strada_to_str_buf(path_val, _tb, sizeof(_tb));
+    return STRADA_MAKE_TAGGED_INT(access(path, W_OK) == 0 ? 1 : 0);
+}
+
+/* File test: executable (-x) */
+StradaValue* strada_is_executable(StradaValue *path_val) {
+    char _tb[PATH_MAX];
+    const char *path = strada_to_str_buf(path_val, _tb, sizeof(_tb));
+    return STRADA_MAKE_TAGGED_INT(access(path, X_OK) == 0 ? 1 : 0);
+}
+
+/* File test: zero size (-z) */
+StradaValue* strada_is_zero_size(StradaValue *path_val) {
+    char _tb[PATH_MAX];
+    const char *path = strada_to_str_buf(path_val, _tb, sizeof(_tb));
+    struct stat st;
+    return STRADA_MAKE_TAGGED_INT((stat(path, &st) == 0 && st.st_size == 0) ? 1 : 0);
+}
+
+/* File test: is symlink (-l) */
+StradaValue* strada_is_symlink(StradaValue *path_val) {
+    char _tb[PATH_MAX];
+    const char *path = strada_to_str_buf(path_val, _tb, sizeof(_tb));
+    struct stat st;
+    return STRADA_MAKE_TAGGED_INT((lstat(path, &st) == 0 && S_ISLNK(st.st_mode)) ? 1 : 0);
 }
 
 /* Get file size in bytes */
@@ -14943,52 +15330,34 @@ StradaValue* strada_array_splice_sv(StradaValue *arr_sv, int64_t offset, int64_t
  * ============================================================ */
 void strada_hash_reset_iter(StradaHash *hv) {
     if (!hv) return;
-    hv->iter_bucket = 0;
-    hv->iter_entry = NULL;
+    hv->iter_index = 0;
 }
 
 StradaValue* strada_hash_each(StradaHash *hv) {
     if (!hv) return strada_new_array();
 
-    /* If we have a current entry, advance to next in chain */
-    if (hv->iter_entry) {
-        hv->iter_entry = hv->iter_entry->next;
-        if (!hv->iter_entry) {
-            /* Moved past end of chain, go to next bucket */
-            hv->iter_bucket++;
+    /* Find next live entry */
+    while (hv->iter_index < hv->next_slot) {
+        StradaHashEntry *e = &hv->entries[hv->iter_index];
+        hv->iter_index++;
+        if (e->key) {
+            /* Build [key, value] pair */
+            StradaValue *pair = strada_new_array();
+            StradaArray *pair_av = pair->value.av;
+            StradaValue *key = strada_new_str(e->key->data);
+            strada_array_push(pair_av, key);
+            strada_decref(key);
+            StradaValue *val = e->value;
+            strada_incref(val);
+            strada_array_push(pair_av, val);
+            strada_decref(val);
+            return pair;
         }
     }
 
-    /* Find next non-empty bucket */
-    while (!hv->iter_entry && hv->iter_bucket < hv->num_buckets) {
-        hv->iter_entry = hv->buckets[hv->iter_bucket];
-        if (!hv->iter_entry) {
-            hv->iter_bucket++;
-        }
-    }
-
-    if (!hv->iter_entry) {
-        /* No more entries - reset iterator and return empty array */
-        hv->iter_bucket = 0;
-        hv->iter_entry = NULL;
-        return strada_new_array();
-    }
-
-    /* Build [key, value] pair */
-    StradaValue *pair = strada_new_array();
-    StradaArray *pair_av = pair->value.av;
-    StradaValue *key = strada_new_str(hv->iter_entry->key);
-    strada_array_push(pair_av, key);
-    strada_decref(key);
-    StradaValue *val = hv->iter_entry->value;
-    strada_incref(val);
-    strada_array_push(pair_av, val);
-    strada_decref(val);
-
-    /* Pre-advance: move to next entry for the next call */
-    /* The actual advancement happens at the top of next call */
-
-    return pair;
+    /* No more entries - reset iterator and return empty array */
+    hv->iter_index = 0;
+    return strada_new_array();
 }
 
 /* ============================================================
@@ -15145,9 +15514,10 @@ StradaValue* strada_tr(StradaValue *sv, const char *search, const char *replace,
 
     /* Modify the original string in-place */
     if (sv->type == STRADA_STR && sv->value.pv) {
-        free(sv->value.pv);
-        sv->value.pv = result;
+        ss_free_pv(sv->value.pv);
+        sv->value.pv = ss_alloc_pv(result, out_idx);
         sv->struct_size = out_idx;
+        free(result);
     } else {
         free(result);
     }
@@ -15173,24 +15543,64 @@ void strada_local_save(const char *name) {
     }
     StradaLocalSave *save = &strada_local_stack[strada_local_depth++];
     save->name = strdup(name);
+    save->hash_ref = NULL;
+    save->hash_key = NULL;
     /* Get current value from global registry - returns owned reference */
     StradaValue *name_sv = strada_new_str(name);
     save->saved_value = strada_global_get(name_sv);
     /* global_get consumed name_sv and returned an owned ref */
 }
 
+/* Save a hash element for local() restore */
+void strada_local_save_hash_elem(StradaValue *hash, const char *key) {
+    if (strada_local_depth >= STRADA_LOCAL_STACK_MAX) {
+        strada_die("local() stack overflow (max %d)", STRADA_LOCAL_STACK_MAX);
+    }
+    StradaLocalSave *save = &strada_local_stack[strada_local_depth++];
+    save->name = NULL;
+    save->hash_ref = hash;
+    strada_incref(hash);
+    save->hash_key = strdup(key);
+    /* Save current value */
+    StradaHash *hv = strada_deref_hash(hash);
+    StradaValue *old_val = hv ? strada_hash_get(hv, key) : NULL;
+    if (old_val && old_val != strada_undef_static()) {
+        strada_incref(old_val);
+        save->saved_value = old_val;
+    } else {
+        save->saved_value = NULL; /* Key didn't exist — delete on restore */
+    }
+}
+
 void strada_local_restore(void) {
     if (strada_local_depth <= 0) return;
     strada_local_depth--;
     StradaLocalSave *save = &strada_local_stack[strada_local_depth];
-    /* Restore the old value - global_set consumes name_sv and decrefs val */
-    /* hash_set increfs val for registry, global_set decrefs val releasing our ref */
-    StradaValue *name_sv = strada_new_str(save->name);
-    strada_global_set(name_sv, save->saved_value);
-    /* Don't decref save->saved_value again - global_set already released our ref */
-    free(save->name);
-    save->name = NULL;
-    save->saved_value = NULL;
+
+    if (save->hash_ref) {
+        /* Restore hash element */
+        StradaHash *hv = strada_deref_hash(save->hash_ref);
+        if (hv) {
+            if (save->saved_value) {
+                strada_hash_set(hv, save->hash_key, save->saved_value);
+                strada_decref(save->saved_value);
+            } else {
+                strada_hash_delete(hv, save->hash_key);
+            }
+        }
+        strada_decref(save->hash_ref);
+        free(save->hash_key);
+        save->hash_ref = NULL;
+        save->hash_key = NULL;
+        save->saved_value = NULL;
+    } else {
+        /* Restore our-variable from global registry */
+        StradaValue *name_sv = strada_new_str(save->name);
+        strada_global_set(name_sv, save->saved_value);
+        free(save->name);
+        save->name = NULL;
+        save->saved_value = NULL;
+    }
 }
 
 void strada_local_restore_n(int n) {

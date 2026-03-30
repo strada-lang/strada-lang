@@ -7,6 +7,9 @@ RUNS=3
 STRADA=../strada
 PERL=${PERL:-perl}
 PYTHON=${PYTHON:-python3}
+RUBY=${RUBY:-ruby}
+NODE=${NODE:-node}
+PHP=${PHP:-php}
 
 ALL_BENCHMARKS="bench_compute bench_strings bench_array_hash bench_functions bench_oop"
 
@@ -93,6 +96,9 @@ echo ""
 echo -n "Strada: "; $STRADA --version 2>/dev/null || echo "(available)"
 echo -n "Perl:   "; $PERL -v 2>/dev/null | grep -oP 'v[\d.]+' | head -1 || echo "(not found)"
 echo -n "Python: "; $PYTHON --version 2>/dev/null || echo "(not found)"
+echo -n "Ruby:   "; $RUBY --version 2>/dev/null | awk '{print $2}' || echo "(not found)"
+echo -n "Node:   "; $NODE --version 2>/dev/null || echo "(not found)"
+echo -n "PHP:    "; $PHP --version 2>/dev/null | head -1 | awk '{print $2}' || echo "(not found)"
 echo ""
 
 # Compile all Strada benchmarks
@@ -135,10 +141,13 @@ speedup() {
 }
 
 # Header
-printf "\n${BOLD}%-20s %10s %10s %10s   %-14s %-14s${RESET}\n" \
-    "Benchmark" "Strada" "Perl" "Python" "vs Perl" "vs Python"
-printf "%-20s %10s %10s %10s   %-14s %-14s\n" \
-    "--------------------" "----------" "----------" "----------" "--------------" "--------------"
+printf "\n${BOLD}%-20s %10s %10s %10s %10s %10s %10s${RESET}\n" \
+    "Benchmark" "Strada" "Perl" "Python" "Ruby" "Node" "PHP"
+printf "%-20s %10s %10s %10s %10s %10s %10s\n" \
+    "--------------------" "----------" "----------" "----------" "----------" "----------" "----------"
+
+# Collect all results for the comparison table
+declare -A RESULTS
 
 # Run benchmarks
 for bench in $BENCHMARKS; do
@@ -152,6 +161,7 @@ for bench in $BENCHMARKS; do
         st=""
         printf " %10s" "SKIP"
     fi
+    RESULTS["$bench,strada"]="$st"
 
     # Perl
     if command -v $PERL &>/dev/null && [ -f "${bench}.pl" ]; then
@@ -161,6 +171,7 @@ for bench in $BENCHMARKS; do
         pl=""
         printf " %10s" "SKIP"
     fi
+    RESULTS["$bench,perl"]="$pl"
 
     # Python
     if command -v $PYTHON &>/dev/null && [ -f "${bench}.py" ]; then
@@ -170,22 +181,61 @@ for bench in $BENCHMARKS; do
         py=""
         printf " %10s" "SKIP"
     fi
+    RESULTS["$bench,python"]="$py"
 
-    # Speedup ratios
-    if [ -n "$st" ] && [ -n "$pl" ]; then
-        ratio=$(speedup "$st" "$pl")
-        printf "   ${GREEN}%sx faster${RESET}" "$ratio"
+    # Ruby
+    if command -v $RUBY &>/dev/null && [ -f "${bench}.rb" ]; then
+        rb=$(best_time $RUNS $RUBY "${bench}.rb")
+        printf " %9ss" "$rb"
     else
-        printf "   %-14s" "N/A"
+        rb=""
+        printf " %10s" "SKIP"
     fi
+    RESULTS["$bench,ruby"]="$rb"
 
-    if [ -n "$st" ] && [ -n "$py" ]; then
-        ratio=$(speedup "$st" "$py")
-        printf "   ${GREEN}%sx faster${RESET}" "$ratio"
+    # Node
+    if command -v $NODE &>/dev/null && [ -f "${bench}.js" ]; then
+        js=$(best_time $RUNS $NODE "${bench}.js")
+        printf " %9ss" "$js"
     else
-        printf "   %-14s" "N/A"
+        js=""
+        printf " %10s" "SKIP"
     fi
+    RESULTS["$bench,node"]="$js"
 
+    # PHP
+    if command -v $PHP &>/dev/null && [ -f "${bench}.php" ]; then
+        ph=$(best_time $RUNS $PHP "${bench}.php")
+        printf " %9ss" "$ph"
+    else
+        ph=""
+        printf " %10s" "SKIP"
+    fi
+    RESULTS["$bench,php"]="$ph"
+
+    echo ""
+done
+
+# Speedup comparison table
+echo ""
+printf "${BOLD}%-20s %14s %14s %14s %14s %14s${RESET}\n" \
+    "Speedup (vs Strada)" "Perl" "Python" "Ruby" "Node" "PHP"
+printf "%-20s %14s %14s %14s %14s %14s\n" \
+    "--------------------" "--------------" "--------------" "--------------" "--------------" "--------------"
+
+for bench in $BENCHMARKS; do
+    printf "%-20s" "$bench"
+    st="${RESULTS[$bench,strada]}"
+
+    for lang in perl python ruby node php; do
+        val="${RESULTS[$bench,$lang]}"
+        if [ -n "$st" ] && [ -n "$val" ]; then
+            ratio=$(speedup "$st" "$val")
+            printf "   ${GREEN}%9sx${RESET}  " "$ratio"
+        else
+            printf " %14s" "N/A"
+        fi
+    done
     echo ""
 done
 

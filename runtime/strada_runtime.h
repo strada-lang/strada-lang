@@ -339,23 +339,58 @@ struct StradaArray {
     size_t head;    /* Offset into elements[] where data starts (for O(1) shift) */
 };
 
-/* Hash entry */
+/* Refcounted string — single allocation for header + data.
+ * Used for hash keys; will eventually replace char* in StradaValue. */
+/* Refcounted string — single allocation for header + data. */
+typedef struct StradaString {
+    uint32_t refcount;
+    uint32_t hash;              /* cached hash value */
+    uint32_t len;
+    char data[];                /* flexible array member — string bytes inline */
+} StradaString;
+
+/* StradaString operations */
+StradaString *ss_new(const char *s, uint32_t len, uint32_t hash);
+void ss_decref_slow(StradaString *ss);  /* handles pool return or free */
+static inline void ss_incref(StradaString *ss) { if (ss) ss->refcount++; }
+static inline void ss_decref(StradaString *ss) { if (ss && --ss->refcount == 0) ss_decref_slow(ss); }
+
+/* Recover StradaString header from a data pointer (value.pv points to ss->data).
+ * sizeof(StradaString) equals the offset of data[] for flexible array members. */
+#define SS_FROM_PV(pv) ((StradaString*)((char*)(pv) - sizeof(StradaString)))
+
+/* Allocate a StradaString and return pointer to its data (for use as value.pv).
+ * The returned char* is valid for all string ops; to free, use SS_FREE_PV(). */
+static inline char *ss_alloc_pv(const char *s, size_t len) {
+    StradaString *ss = ss_new(s, (uint32_t)len, 0);
+    return ss->data;
+}
+/* Free a value.pv that was allocated by ss_alloc_pv */
+static inline void ss_free_pv(char *pv) {
+    if (pv) ss_decref(SS_FROM_PV(pv));
+}
+
+/* Packed hash table: contiguous entry array with index-based chains */
+#define HASH_EMPTY UINT32_MAX
+
+/* Hash entry — key is a refcounted StradaString */
 typedef struct StradaHashEntry {
-    char *key;
+    StradaString *key;          /* NULL = free/deleted slot */
     StradaValue *value;
-    struct StradaHashEntry *next;
-    unsigned int hash;
+    uint32_t next;              /* chain link index (HASH_EMPTY = end) */
 } StradaHashEntry;
 
 /* Hash structure - like Perl's HV */
 struct StradaHash {
-    StradaHashEntry **buckets;
-    size_t num_buckets;
-    size_t num_entries;
+    StradaHashEntry *entries;   /* contiguous entry array */
+    uint32_t *hash_index;       /* bucket -> first entry index (HASH_EMPTY = empty) */
+    size_t num_buckets;         /* hash_index size (power of 2) */
+    size_t num_entries;         /* live entries */
+    size_t capacity;            /* allocated entries array size */
+    size_t next_slot;           /* next append position */
+    uint32_t free_head;         /* internal free list head (HASH_EMPTY = none) */
     int refcount;
-    /* Iterator state for each() */
-    size_t iter_bucket;
-    StradaHashEntry *iter_entry;
+    size_t iter_index;          /* for each() */
 };
 
 /* Value creation functions */
@@ -371,16 +406,45 @@ StradaValue* strada_new_str_len(const char *s, size_t len);  /* Binary-safe stri
 size_t strada_str_len(StradaValue *sv);  /* Get string length (binary-safe) */
 StradaValue* strada_new_array(void);
 StradaValue* strada_new_hash(void);
+StradaValue* strada_new_hash_presized(int capacity);
 StradaValue* strada_new_filehandle(FILE *fh);
 
-/* Reference counting */
+/* Reference counting and type conversion.
+ * When STRADA_RUNTIME_IMPL is defined (in strada_runtime.c), these are regular
+ * function declarations (exported for .so ABI). Otherwise, they're static inline
+ * fast-path wrappers that call the _impl functions. */
+#ifdef STRADA_RUNTIME_IMPL
+/* Implementation file — declare as regular exported functions */
 void strada_incref(StradaValue *sv);
 void strada_decref(StradaValue *sv);
-
-/* Type conversion */
 int64_t strada_to_int(StradaValue *sv);
 double strada_to_num(StradaValue *sv);
-char* strada_to_str(StradaValue *sv);
+#else
+/* Header-only inline fast paths for callers */
+void strada_incref_impl(StradaValue *sv);
+void strada_decref_impl(StradaValue *sv);
+int64_t strada_to_int_impl(StradaValue *sv);
+double strada_to_num_impl(StradaValue *sv);
+static inline void strada_incref(StradaValue *sv) {
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return;
+    strada_incref_impl(sv);
+}
+static inline void strada_decref(StradaValue *sv) {
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return;
+    strada_decref_impl(sv);
+}
+static inline int64_t strada_to_int(StradaValue *sv) {
+    if (STRADA_IS_TAGGED_INT(sv)) return STRADA_TAGGED_INT_VAL(sv);
+    return strada_to_int_impl(sv);
+}
+static inline double strada_to_num(StradaValue *sv) {
+    if (STRADA_IS_TAGGED_INT(sv)) return (double)STRADA_TAGGED_INT_VAL(sv);
+    return strada_to_num_impl(sv);
+}
+#endif
+char* strada_to_str(StradaValue *sv);    /* Returns strdup'd char* — free with free() (backward compat) */
+char* strada_to_str_ss(StradaValue *sv); /* Returns StradaString-backed char* — free with strada_cstr_free() */
+void strada_cstr_free(char *s);          /* Free a strada_to_str_ss() result (handles both SS and malloc'd) */
 const char* strada_to_str_buf(StradaValue *sv, char *buf, size_t buflen);  /* Non-allocating variant */
 int strada_to_bool(StradaValue *sv);
 
@@ -426,7 +490,10 @@ int64_t strada_get_hash_default_capacity(void);
 void strada_set_hash_default_capacity(int64_t capacity);
 void strada_hash_set(StradaHash *hv, const char *key, StradaValue *sv);
 void strada_hash_set_take(StradaHash *hv, const char *key, StradaValue *sv);
+void strada_hash_set_take_ph(StradaHash *hv, const char *key, unsigned int hash, StradaValue *sv);
+void strada_hash_set_ss_take(StradaHash *hv, StradaString *key_ss, StradaValue *sv);
 StradaValue* strada_hash_get(StradaHash *hv, const char *key);
+StradaValue* strada_autoviv_hash(StradaValue *sv, const char *key);
 int strada_hash_exists(StradaHash *hv, const char *key);
 void strada_hash_delete(StradaHash *hv, const char *key);
 /* _sv variants: accept StradaValue* key directly (avoids strada_to_str/strdup) */
@@ -444,6 +511,7 @@ char* strada_concat(const char *a, const char *b);
 char* strada_concat_free(char *a, char *b);  /* Concat and free inputs (avoids leaks) */
 StradaValue* strada_concat_sv(StradaValue *a, StradaValue *b);  /* Fast concat on StradaValues */
 StradaValue* strada_concat_inplace(StradaValue *a, StradaValue *b);  /* In-place concat: consumes a, borrows b */
+StradaValue* strada_concat_inplace_cstr(StradaValue *a, const char *str_b, size_t len_b);  /* In-place concat with C string literal */
 size_t strada_length(const char *s);      /* Returns character count (UTF-8 codepoints) */
 size_t strada_length_sv(StradaValue *sv); /* Binary-safe length using struct_size */
 size_t strada_bytes(const char *s);       /* Returns byte count */
@@ -526,8 +594,8 @@ void strada_spew_fd(StradaValue *fd_sv, StradaValue *content_sv);  /* Write to f
 
 /* Built-in functions */
 void strada_dump(StradaValue *sv, int indent);
-void strada_dumper(StradaValue *sv);
-StradaValue* strada_dumper_str(StradaValue *sv);  /* Returns dump as string */
+StradaValue* strada_dumper(StradaValue *sv);       /* Returns dump as string */
+StradaValue* strada_dumper_str(StradaValue *sv);  /* Alias for strada_dumper */
 StradaValue* strada_defined(StradaValue *sv);
 int strada_defined_bool(StradaValue *sv);  /* Non-allocating version */
 StradaValue* strada_ref(StradaValue *sv);
@@ -586,6 +654,7 @@ extern int strada_recursion_limit;  /* Configurable limit (default 1000, 0 = dis
 void strada_stack_push(const char *func_name, const char *file_name);
 void strada_stack_pop(void);
 void strada_stack_set_line(int line);
+StradaValue* strada_caller_info(StradaValue *level);
 void strada_print_stack_trace(FILE *out);
 char* strada_capture_stack_trace(void);
 void strada_set_recursion_limit(int limit);  /* Set max recursion depth (0 = disabled) */
@@ -942,6 +1011,11 @@ StradaValue* strada_readdir(StradaValue *path);
 StradaValue* strada_readdir_full(StradaValue *path);
 StradaValue* strada_is_dir(StradaValue *path);
 StradaValue* strada_is_file(StradaValue *path);
+StradaValue* strada_is_readable(StradaValue *path);
+StradaValue* strada_is_writable(StradaValue *path);
+StradaValue* strada_is_executable(StradaValue *path);
+StradaValue* strada_is_zero_size(StradaValue *path);
+StradaValue* strada_is_symlink(StradaValue *path);
 StradaValue* strada_file_size(StradaValue *path);
 
 /* Math functions */
@@ -1286,11 +1360,14 @@ StradaValue* strada_tr(StradaValue *sv, const char *search, const char *replace,
  * ============================================================ */
 #define STRADA_LOCAL_STACK_MAX 256
 typedef struct {
-    char *name;
+    char *name;           /* For our-variable saves (global registry key) */
     StradaValue *saved_value;
+    StradaValue *hash_ref; /* For hash element saves (NULL = our-variable save) */
+    char *hash_key;        /* Hash key for element saves */
 } StradaLocalSave;
 
 void strada_local_save(const char *name);
+void strada_local_save_hash_elem(StradaValue *hash, const char *key);
 void strada_local_restore(void);
 void strada_local_restore_n(int n);
 int strada_local_depth_get(void);

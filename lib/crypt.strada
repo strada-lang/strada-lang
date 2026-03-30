@@ -187,7 +187,40 @@ __C__ {
 #include <unistd.h>
 #include <time.h>
 #include <fcntl.h>
+
+/* Portability: crypt_r + struct crypt_data are glibc/libxcrypt extensions.
+ * On musl, older systems, or minimal installs, only crypt() is available.
+ * We prefer crypt_r for thread safety but fall back to crypt() gracefully.
+ *
+ * Detection order:
+ * 1. HAVE_CRYPT_R define from ./configure (most reliable)
+ * 2. __GLIBC__ (glibc always has crypt_r)
+ * 3. CRYPT_OUTPUT_SIZE (libxcrypt defines this)
+ * 4. Fall back to crypt() */
+#ifndef STRADA_HAVE_CRYPT_R
+  #if defined(HAVE_CRYPT_R) || defined(__GLIBC__)
+    #define STRADA_HAVE_CRYPT_R 1
+  #else
+    #define STRADA_HAVE_CRYPT_R 0
+  #endif
+#endif
+
+#if STRADA_HAVE_CRYPT_R
 #include <crypt.h>
+#else
+char *crypt(const char *key, const char *salt);
+#endif
+
+/* Wrapper: use crypt_r when available, fall back to crypt() */
+static char *strada_crypt(const char *password, const char *salt) {
+#if STRADA_HAVE_CRYPT_R
+    static struct crypt_data data;
+    memset(&data, 0, sizeof(data));
+    return crypt_r(password, salt, &data);
+#else
+    return crypt(password, salt);
+#endif
+}
 
 /* Last error message */
 static char crypt_last_error[256] = "";
@@ -303,10 +336,7 @@ func hashpw(str $password, str $salt) str {
             strada_decref(result);
             result = strada_new_str("");
         } else {
-            struct crypt_data data;
-            memset(&data, 0, sizeof(data));
-
-            char *hash_result = crypt_r(pw_str, salt_str, &data);
+            char *hash_result = strada_crypt(pw_str, salt_str);
 
             if (!hash_result) {
                 snprintf(crypt_last_error, sizeof(crypt_last_error), "crypt() failed");
@@ -371,10 +401,7 @@ func verify(str $password, str $hashed) int {
             strada_decref(result);
             result = strada_new_int(0);
         } else {
-            struct crypt_data data;
-            memset(&data, 0, sizeof(data));
-
-            char *crypt_result = crypt_r(pw_str, hash_str, &data);
+            char *crypt_result = strada_crypt(pw_str, hash_str);
 
             if (!crypt_result) {
                 strada_decref(result);
@@ -458,10 +485,7 @@ func is_supported(str $algorithm) int {
             if (strlen(salt) == 0) {
                 result = strada_new_int(0);
             } else {
-                struct crypt_data data;
-                memset(&data, 0, sizeof(data));
-
-                char *crypt_result = crypt_r("test", salt, &data);
+                char *crypt_result = strada_crypt("test", salt);
 
                 if (!crypt_result || crypt_result[0] == '*') {
                     result = strada_new_int(0);

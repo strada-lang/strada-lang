@@ -11,22 +11,22 @@ and performance of compiled languages. It aims to be:
 
 - **Familiar** - Perl-like syntax with sigils, regular expressions, and
   similar control flow
-- **Safe** - Strong static typing catches errors at compile time
+- **Safe** - Optional type annotations help catch errors early
 - **Fast** - Compiles to optimized C code for native performance
 - **Practical** - Batteries included with file I/O, networking, and more
 
 ## Key Features
 
-### Strong Static Typing
+### Type System
 
-Unlike Perl, Strada requires explicit type declarations:
+Unlike Perl, Strada supports type annotations (optional but recommended):
 
 ```strada
-my int $count = 0;
-my str $name = "Strada";
+my int $count = 0;           # explicit type
+my $name = "Strada";         # type inferred from sigil (scalar)
 my num $pi = 3.14159;
-my array @items = (1, 2, 3);
-my hash %config = { "debug" => 1 };
+my @items = (1, 2, 3);       # inferred: array
+my %config = ("debug" => 1); # inferred: hash
 ```
 
 ### Perl-Like Syntax

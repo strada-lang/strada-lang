@@ -19,7 +19,7 @@ func main() int {
         $sum += $c;
         $i++;
     }
-    if ($sum != 62497500) {
+    if ($sum != 62487500) {
         say("    FAIL: sum = " . $sum);
         return 1;
     }

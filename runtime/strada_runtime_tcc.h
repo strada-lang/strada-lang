@@ -117,23 +117,38 @@ struct StradaArray {
     size_t head;    /* Offset into elements[] where data starts (for O(1) shift) */
 };
 
-/* Hash entry */
+/* Refcounted string */
+typedef struct StradaString {
+    uint32_t refcount;
+    uint32_t hash;
+    uint32_t len;
+    char data[];
+} StradaString;
+StradaString *ss_new(const char *s, uint32_t len, uint32_t hash);
+void ss_incref(StradaString *ss);
+void ss_decref_slow(StradaString *ss);
+#define ss_decref(ss) do { if ((ss) && --(ss)->refcount == 0) ss_decref_slow(ss); } while(0)
+
+/* Packed hash table */
+#define HASH_EMPTY UINT32_MAX
+
 struct StradaHashEntry {
-    char *key;
+    StradaString *key;          /* NULL = free/deleted slot */
     StradaValue *value;
-    struct StradaHashEntry *next;
-    unsigned int hash;
+    uint32_t next;
 };
 
 /* Hash structure - like Perl's HV */
 struct StradaHash {
-    StradaHashEntry **buckets;
-    size_t num_buckets;
-    size_t num_entries;
+    StradaHashEntry *entries;   /* contiguous entry array */
+    uint32_t *hash_index;       /* bucket -> first entry index (HASH_EMPTY = empty) */
+    size_t num_buckets;         /* hash_index size (power of 2) */
+    size_t num_entries;         /* live entries */
+    size_t capacity;            /* allocated entries array size */
+    size_t next_slot;           /* next append position */
+    uint32_t free_head;         /* internal free list head (HASH_EMPTY = none) */
     int refcount;
-    /* Iterator state for each() */
-    size_t iter_bucket;
-    StradaHashEntry *iter_entry;
+    size_t iter_index;          /* for each() */
 };
 
 /* Exception handling macros */
@@ -156,6 +171,7 @@ StradaValue* strada_new_str_take(char *s);
 StradaValue* strada_new_array(void);
 StradaValue* strada_new_array_with_capacity(size_t capacity);
 StradaValue* strada_new_hash(void);
+StradaValue* strada_new_hash_presized(int capacity);
 StradaValue* strada_new_hash_with_capacity(size_t capacity);
 StradaValue* strada_new_filehandle(FILE *fh);
 StradaValue* strada_new_ref(StradaValue *target, char ref_type);
@@ -327,6 +343,7 @@ StradaValue* strada_array_splice_sv(StradaValue *arr_sv, int64_t offset, int64_t
  * ============================================================ */
 StradaHash* strada_hash_new(void);
 StradaValue* strada_hash_get(StradaHash *hash, const char *key);
+StradaValue* strada_autoviv_hash(StradaValue *sv, const char *key);
 void strada_hash_set(StradaHash *hash, const char *key, StradaValue *val);
 void strada_hash_set_take(StradaHash *hash, const char *key, StradaValue *val);
 int strada_hash_exists(StradaHash *hash, const char *key);
@@ -412,6 +429,15 @@ StradaValue* strada_read_line(StradaValue *fh);
 StradaValue* strada_read_all_lines(StradaValue *fh);
 void strada_write_file(StradaValue *fh, const char *content);
 int strada_file_exists(const char *filename);
+StradaValue* strada_is_readable(StradaValue *path);
+StradaValue* strada_is_writable(StradaValue *path);
+StradaValue* strada_is_executable(StradaValue *path);
+StradaValue* strada_is_zero_size(StradaValue *path);
+StradaValue* strada_is_symlink(StradaValue *path);
+StradaValue* strada_opendir(StradaValue *path);
+StradaValue* strada_readdir_next(StradaValue *dh);
+StradaValue* strada_closedir(StradaValue *dh);
+StradaValue* strada_read_byte(StradaValue *fd);
 StradaValue* strada_slurp(const char *filename);
 StradaValue* strada_slurp_fh(StradaValue *fh_sv);
 StradaValue* strada_slurp_fd(StradaValue *fd_sv);
@@ -562,6 +588,7 @@ void strada_stacktrace(void);
 void strada_backtrace(void);
 char* strada_stacktrace_str(void);
 const char* strada_caller(int level);
+StradaValue* strada_caller_info(StradaValue *level);
 
 /* ============================================================
  * Built-in Functions
@@ -569,7 +596,7 @@ const char* strada_caller(int level);
 StradaValue* strada_defined(StradaValue *sv);
 StradaValue* strada_ref(StradaValue *sv);
 void strada_dump(StradaValue *sv, int indent);
-void strada_dumper(StradaValue *sv);
+StradaValue* strada_dumper(StradaValue *sv);
 StradaValue* strada_dumper_str(StradaValue *sv);
 StradaValue* strada_clone(StradaValue *sv);
 
@@ -948,6 +975,10 @@ StradaValue* strada_ptr_set_num(StradaValue *ptr, StradaValue *val);
 /* ============================================================
  * Terminal/TTY
  * ============================================================ */
+StradaValue* strada_term_cols(void);
+StradaValue* strada_term_rows(void);
+StradaValue* strada_term_enable_raw(void);
+StradaValue* strada_term_disable_raw(void);
 StradaValue* strada_ttyname(StradaValue *fd);
 StradaValue* strada_tcgetattr(StradaValue *fd);
 StradaValue* strada_tcsetattr(StradaValue *fd, StradaValue *when, StradaValue *attrs);
@@ -1144,5 +1175,19 @@ static inline void strada_hv_delete_sv(StradaValue *sv, StradaValue *key) {
 StradaValue* strada_hv_fetch_owned_concat(StradaValue *sv, const char *prefix, size_t prefix_len, StradaValue *suffix);
 void strada_hv_store_concat(StradaValue *sv, const char *prefix, size_t prefix_len, StradaValue *suffix, StradaValue *value);
 void strada_hv_delete_concat(StradaValue *sv, const char *prefix, size_t prefix_len, StradaValue *suffix);
+
+/* Process title */
+void strada_init_proctitle(int argc, char **argv);
+
+/* Dynamic loading */
+void strada_dlclose(void *handle);
+StradaValue* strada_c_call(const char *func_name, StradaValue **args, int arg_count);
+
+/* Local save for hash elements */
+void strada_local_save_hash_elem(StradaValue *hash, const char *key);
+
+/* Thread pool (async) */
+void strada_pool_init(int num_workers);
+void strada_pool_shutdown(void);
 
 #endif /* STRADA_RUNTIME_TCC_H */

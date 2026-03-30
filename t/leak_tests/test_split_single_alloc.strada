@@ -81,7 +81,7 @@ func main() int {
     say("  No match split...");
     $i = 0;
     while ($i < $iterations) {
-        my array @parts = split("|", "no pipes here");
+        my array @parts = split("\\|", "no pipes here");
         if (scalar(@parts) != 1 || $parts[0] ne "no pipes here") {
             say("    FAIL: no-match split");
             return 1;

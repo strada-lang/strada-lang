@@ -32,7 +32,7 @@ Strada is a strongly-typed programming language inspired by Perl. It features Pe
   Specify the output file name. By default, the output is named after the input file without the .strada extension.
 
 - **-O** *level*
-  Set gcc optimization level (0, 1, 2, 3, s, fast). Default is 2.
+  Set gcc optimization level (0, 1, 2, 3, s, fast). Default is 2. At -O2 and above, -flto (link-time optimization) is automatically enabled for cross-function inlining. At -O3 and -Ofast, -march=native is also added.
 
 - **-L** *path*
   Add a library search path with high priority. These paths are searched first when resolving `use`, `import_lib`, `import_object`, and `import_archive` statements.

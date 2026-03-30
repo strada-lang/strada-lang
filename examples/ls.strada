@@ -245,8 +245,8 @@ func main() int {
     my int $use_color = 0;
     my str $target_dir = ".";
 
-    # Parse arguments (start from 1, ARGV[0] is the program name)
-    my int $i = 1;
+    # Parse arguments
+    my int $i = 0;
     while ($i < scalar(@ARGV)) {
         my str $arg = $ARGV[$i];
 

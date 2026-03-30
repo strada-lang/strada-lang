@@ -273,8 +273,8 @@ func main() int {
     my int $long_format = 0;
     my int $my_uid = sys::getuid();
 
-    # Parse arguments (start from 1, ARGV[0] is the program name)
-    my int $i = 1;
+    # Parse arguments
+    my int $i = 0;
     while ($i < scalar(@ARGV)) {
         my str $arg = $ARGV[$i];
 

@@ -18,6 +18,7 @@ HAVE_MYSQL ?= 0
 HAVE_SQLITE ?= 1
 HAVE_POSTGRES ?= 0
 HAVE_CRYPT ?= 0
+HAVE_CRYPT_R ?= 0
 HAVE_READLINE ?= 0
 HAVE_SSL ?= 0
 DBI_DEFINES ?=
@@ -331,7 +332,7 @@ configure-check:
 	fi
 
 # Build all libraries
-libs: configure-check lib-dbi lib-crypt lib-ssl lib-readline
+libs: configure-check lib-dbi lib-crypt lib-ssl lib-readline lib-eval
 	@echo ""
 	@echo "✓ Libraries built in lib/"
 
@@ -349,11 +350,30 @@ lib/DBI.so: lib/DBI.strada stradac configure-check
 lib-dbi: lib/DBI.so
 
 # Crypt library (password hashing)
+CRYPT_DEFINES =
+ifeq ($(HAVE_CRYPT_R),1)
+CRYPT_DEFINES = -DHAVE_CRYPT_R
+endif
+
 lib/crypt.so: lib/crypt.strada stradac
 	@echo "Building crypt library..."
-	./strada --shared lib/crypt.strada $(CRYPT_LIBS) -o lib/crypt.so
+	./strada --shared lib/crypt.strada $(CRYPT_LIBS) $(CRYPT_DEFINES) -o lib/crypt.so
 
 lib-crypt: lib/crypt.so
+
+# Eval library (string eval via tree-walking interpreter)
+lib/Eval.strada: compiler/AST.strada compiler/Lexer.strada interpreter/Stubs.strada compiler/Parser.strada lib/Strada/Interpreter.strada lib/Strada/Eval.strada
+	@echo "Generating Eval module (use Eval)..."
+	@cat compiler/AST.strada compiler/Lexer.strada interpreter/Stubs.strada compiler/Parser.strada lib/Strada/Interpreter.strada lib/Strada/Eval.strada | sed '/^=head/,/^=cut/d' > lib/Eval.strada
+
+lib/Eval.so.strada: lib/Eval.strada
+	@cp lib/Eval.strada lib/Eval.so.strada
+
+lib/Eval.so: lib/Eval.so.strada stradac
+	@echo "Building Eval library (string eval)..."
+	./strada --shared lib/Eval.so.strada -o lib/Eval.so
+
+lib-eval: lib/Eval.so
 
 # SSL library
 lib/ssl.so: lib/ssl.strada stradac

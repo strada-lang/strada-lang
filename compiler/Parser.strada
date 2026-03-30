@@ -608,7 +608,7 @@ func parse_type(scalar $parser) int {
     
     # Provide helpful error for common mistakes
     if ($type_str eq "DOLLAR" || $type_str eq "AT" || $type_str eq "PERCENT") {
-        parser_error($parser, "missing type annotation - variable declarations require a type, e.g.: my int $name, my str $name, my scalar $name");
+        parser_error($parser, "type annotation required here (int, num, str, array, hash, scalar)");
     }
     parser_error($parser, "expected a type (int, num, str, array, hash, scalar), got " . friendly_token($type_str, $tok->{"value"}));
 }
@@ -626,8 +626,17 @@ func parse_anon_func(scalar $parser, int $line) scalar {
 
     # Parse parameters
     if (!parser_check($parser, "RPAREN")) {
-        # Parse first parameter
-        my int $ptype = parse_type($parser);
+        # Parse first parameter (type optional — defaults to scalar/array/hash from sigil)
+        my scalar $af_peek = parser_current($parser);
+        my str $af_pt = $af_peek->{"type"};
+        my int $ptype = 0;
+        if ($af_pt eq "DOLLAR" || $af_pt eq "AT" || $af_pt eq "PERCENT") {
+            if ($af_pt eq "DOLLAR") { $ptype = TYPE_SCALAR(); }
+            elsif ($af_pt eq "AT") { $ptype = TYPE_ARRAY(); }
+            elsif ($af_pt eq "PERCENT") { $ptype = TYPE_HASH(); }
+        } else {
+            $ptype = parse_type($parser);
+        }
         my str $sigil = "$";
         my str $pname = "";
 
@@ -654,7 +663,15 @@ func parse_anon_func(scalar $parser, int $line) scalar {
         while (parser_check($parser, "COMMA")) {
             parser_advance($parser);
 
-            $ptype = parse_type($parser);
+            $af_peek = parser_current($parser);
+            $af_pt = $af_peek->{"type"};
+            if ($af_pt eq "DOLLAR" || $af_pt eq "AT" || $af_pt eq "PERCENT") {
+                if ($af_pt eq "DOLLAR") { $ptype = TYPE_SCALAR(); }
+                elsif ($af_pt eq "AT") { $ptype = TYPE_ARRAY(); }
+                elsif ($af_pt eq "PERCENT") { $ptype = TYPE_HASH(); }
+            } else {
+                $ptype = parse_type($parser);
+            }
             $sigil = "$";
 
             if (parser_check($parser, "DOLLAR")) {
@@ -1059,16 +1076,41 @@ func parse_primary(scalar $parser) scalar {
         my int $var_line = parser_current_line($parser);
         parser_advance($parser);
 
-        # $1-$9 capture variables
+        # $0 — program name (variable that maps to getprocname/setprocname)
         if (parser_check($parser, "INT_LITERAL")) {
             my scalar $num_tok = parser_current($parser);
             my int $cap_num = $num_tok->{"value"} + 0;
+            if ($cap_num == 0) {
+                parser_advance($parser);
+                my scalar $pn_var = ast_new_variable("__program_name", "$");
+                ast_set_line($pn_var, $var_line);
+                return $pn_var;
+            }
+            # $1-$9 capture variables
             if ($cap_num >= 1 && $cap_num <= 9) {
                 parser_advance($parser);
                 my scalar $cap_node = ast_new_capture_var($cap_num);
                 ast_set_line($cap_node, $var_line);
                 return $cap_node;
             }
+        }
+
+        # Special variables: $! (errno), $? (child status), $0 (program name)
+        if (parser_check($parser, "NOT")) {
+            # $! — errno string
+            parser_advance($parser);
+            my scalar $errno_call = ast_new_call("sys::strerror");
+            my scalar $errno_arg = ast_new_call("sys::errno");
+            ast_add_arg($errno_call, $errno_arg);
+            ast_set_line($errno_call, $var_line);
+            return $errno_call;
+        }
+        if (parser_check($parser, "QUESTION")) {
+            # $? — last child exit status (stored in global)
+            parser_advance($parser);
+            my scalar $cs_var = ast_new_variable("__child_status", "$");
+            ast_set_line($cs_var, $var_line);
+            return $cs_var;
         }
 
         # Check for $$var or $${expr} scalar dereference syntax
@@ -1456,6 +1498,17 @@ func parse_primary(scalar $parser) scalar {
             }
 
             parser_expect($parser, "RPAREN");
+
+            # Builtins that default to $_ when called with no args
+            if ($call->{"arg_count"} == 0) {
+                if ($name eq "chomp" || $name eq "chop" || $name eq "say" || $name eq "print" ||
+                    $name eq "length" || $name eq "uc" || $name eq "lc" || $name eq "ucfirst" ||
+                    $name eq "lcfirst" || $name eq "trim" || $name eq "defined" || $name eq "ref" ||
+                    $name eq "chr" || $name eq "ord" || $name eq "chomp") {
+                    ast_add_arg($call, ast_new_variable("_", "$"));
+                }
+            }
+
             return $call;
         }
 
@@ -1567,6 +1620,20 @@ func parse_primary(scalar $parser) scalar {
         if ($const_val) {
             # Const names are treated as variables (the #define will substitute the value)
             return ast_new_variable($name, "$");
+        }
+
+        # STDIN, STDOUT, STDERR barewords — map to filehandle variables
+        if ($name eq "STDIN" || $name eq "STDOUT" || $name eq "STDERR") {
+            return ast_new_variable($name, "$");
+        }
+
+        # Bare shift/pop without args: implicitly operate on @_
+        if ($name eq "shift" || $name eq "pop") {
+            my scalar $bare_call = ast_new_call($name);
+            ast_set_line($bare_call, $call_line);
+            my scalar $underscore_arr = ast_new_variable("_", "@");
+            ast_add_arg($bare_call, $underscore_arr);
+            return $bare_call;
         }
 
         # Just an identifier (bareword string in some contexts)
@@ -1969,6 +2036,31 @@ func parse_unary(scalar $parser) scalar {
     my scalar $tok = parser_current($parser);
     
     if ($tok->{"type"} eq "MINUS") {
+        # Check for file test operators: -e, -f, -d
+        my scalar $ft_peek = parser_peek($parser);
+        if ($ft_peek->{"type"} eq "IDENT") {
+            my str $ft_name = $ft_peek->{"value"};
+            if ($ft_name eq "e" || $ft_name eq "f" || $ft_name eq "d" ||
+                $ft_name eq "r" || $ft_name eq "w" || $ft_name eq "x" ||
+                $ft_name eq "s" || $ft_name eq "z" || $ft_name eq "l") {
+                parser_advance($parser);
+                parser_advance($parser);
+                my scalar $ft_arg = parse_unary($parser);
+                my str $ft_func = "";
+                if ($ft_name eq "e") { $ft_func = "sys::file_exists"; }
+                elsif ($ft_name eq "f") { $ft_func = "sys::is_file"; }
+                elsif ($ft_name eq "d") { $ft_func = "sys::is_dir"; }
+                elsif ($ft_name eq "r") { $ft_func = "sys::is_readable"; }
+                elsif ($ft_name eq "w") { $ft_func = "sys::is_writable"; }
+                elsif ($ft_name eq "x") { $ft_func = "sys::is_executable"; }
+                elsif ($ft_name eq "s") { $ft_func = "sys::file_size"; }
+                elsif ($ft_name eq "z") { $ft_func = "sys::is_zero_size"; }
+                elsif ($ft_name eq "l") { $ft_func = "sys::is_symlink"; }
+                my scalar $ft_call = ast_new_call($ft_func);
+                ast_add_arg($ft_call, $ft_arg);
+                return $ft_call;
+            }
+        }
         parser_advance($parser);
         my scalar $operand = parse_unary($parser);
         return ast_new_unary_op("-", $operand);
@@ -2494,8 +2586,22 @@ func parse_var_decl(scalar $parser) scalar {
         return parse_destructure_decl($parser, $decl_line);
     }
 
-    my int $var_type = parse_type($parser);
-    my str $type_name = $parser->{"last_type_name"};
+    # Type is optional — infer from sigil if not present
+    # my $foo (scalar), my @arr (array), my %hash (hash)
+    my scalar $peek_tok = parser_current($parser);
+    my str $peek_type = $peek_tok->{"type"};
+    my int $var_type = 0;
+    my str $type_name = "";
+
+    if ($peek_type eq "DOLLAR" || $peek_type eq "AT" || $peek_type eq "PERCENT") {
+        # No explicit type — infer from sigil
+        if ($peek_type eq "DOLLAR") { $var_type = TYPE_SCALAR(); }
+        elsif ($peek_type eq "AT") { $var_type = TYPE_ARRAY(); }
+        elsif ($peek_type eq "PERCENT") { $var_type = TYPE_HASH(); }
+    } else {
+        $var_type = parse_type($parser);
+        $type_name = $parser->{"last_type_name"};
+    }
 
     # Get sigil and name
     my scalar $sigil_tok = parser_current($parser);
@@ -2585,7 +2691,18 @@ func parse_our_decl(scalar $parser) scalar {
     my int $decl_line = parser_current_line($parser);
     parser_expect($parser, "OUR");
 
-    my int $var_type = parse_type($parser);
+    # Type is optional — infer from sigil if not present
+    my scalar $peek_tok = parser_current($parser);
+    my str $peek_type = $peek_tok->{"type"};
+    my int $var_type = 0;
+
+    if ($peek_type eq "DOLLAR" || $peek_type eq "AT" || $peek_type eq "PERCENT") {
+        if ($peek_type eq "DOLLAR") { $var_type = TYPE_SCALAR(); }
+        elsif ($peek_type eq "AT") { $var_type = TYPE_ARRAY(); }
+        elsif ($peek_type eq "PERCENT") { $var_type = TYPE_HASH(); }
+    } else {
+        $var_type = parse_type($parser);
+    }
 
     # Get sigil and name
     my scalar $sigil_tok = parser_current($parser);
@@ -2641,6 +2758,27 @@ func parse_local_decl(scalar $parser) scalar {
 
     my str $name = parse_var_name($parser);
 
+    # Check for local $hash{key} — hash element localization
+    if (parser_check($parser, "LBRACE")) {
+        parser_advance($parser);
+        my scalar $key_expr = parse_expression($parser);
+        parser_expect($parser, "RBRACE");
+
+        my scalar $decl = ast_new_local_decl($name, $sigil, 0);
+        ast_set_line($decl, $decl_line);
+        $decl->{"is_hash_elem"} = 1;
+        $decl->{"hash_key"} = $key_expr;
+
+        # Optional initialization
+        if (parser_check($parser, "ASSIGN")) {
+            parser_advance($parser);
+            $decl->{"init"} = parse_expression($parser);
+        }
+
+        parser_expect($parser, "SEMI");
+        return $decl;
+    }
+
     my scalar $decl = ast_new_local_decl($name, $sigil, 0);
     ast_set_line($decl, $decl_line);
 
@@ -2695,7 +2833,63 @@ func parse_while_stmt(scalar $parser, str $label) scalar {
     my int $while_line = parser_current_line($parser);
     parser_expect($parser, "WHILE");
     parser_expect($parser, "LPAREN");
+
+    # Check for while (my $var = expr) — scoped variable in condition
+    my scalar $wh_tok = parser_current($parser);
+    my scalar $while_var_decl = 0;
+    my str $while_var_name = "";
+
+    if ($wh_tok->{"type"} eq "MY") {
+        # Parse: my [type] $var = expr
+        parser_advance($parser);
+
+        # Optional type
+        my int $wv_type = TYPE_SCALAR();
+        my scalar $wv_peek = parser_current($parser);
+        if ($wv_peek->{"type"} ne "DOLLAR" && $wv_peek->{"type"} ne "AT" && $wv_peek->{"type"} ne "PERCENT") {
+            $wv_type = parse_type($parser);
+        }
+
+        parser_expect($parser, "DOLLAR");
+        my scalar $wv_name_tok = parser_current($parser);
+        parser_expect($parser, "IDENT");
+        $while_var_name = $wv_name_tok->{"value"};
+        parser_expect($parser, "ASSIGN");
+
+        my scalar $init_expr = parse_expression($parser);
+
+        # Create var decl + assignment as condition: defined($var = expr)
+        $while_var_decl = ast_new_var_decl($while_var_name, $wv_type, "$");
+        my scalar $var_ref = ast_new_variable($while_var_name, "$");
+        my scalar $assign = ast_new_assign("=", $var_ref, $init_expr);
+        my scalar $defined_call = ast_new_call("defined");
+        ast_add_arg($defined_call, $assign);
+
+        parser_expect($parser, "RPAREN");
+        my scalar $body = parse_block($parser);
+
+        # Wrap: { my $var; while (defined($var = expr)) { body } }
+        my scalar $outer_block = ast_new_block();
+        ast_add_statement($outer_block, $while_var_decl);
+        my scalar $while_stmt = ast_new_while_stmt($defined_call, $body, $label);
+        ast_set_line($while_stmt, $while_line);
+        ast_add_statement($outer_block, $while_stmt);
+        $outer_block->{"type"} = NODE_BLOCK();
+        ast_set_line($outer_block, $while_line);
+        return $outer_block;
+    }
+
     my scalar $condition = parse_expression($parser);
+
+    # If condition is a READLINE node, wrap as: defined($_ = readline)
+    if ($condition->{"type"} == NODE_READLINE()) {
+        my scalar $underscore = ast_new_variable("_", "$");
+        my scalar $assign = ast_new_assign("=", $underscore, $condition);
+        my scalar $defined_call = ast_new_call("defined");
+        ast_add_arg($defined_call, $assign);
+        $condition = $defined_call;
+    }
+
     parser_expect($parser, "RPAREN");
 
     my scalar $body = parse_block($parser);
@@ -2863,12 +3057,16 @@ func parse_foreach_stmt(scalar $parser, str $label) scalar {
         $var_name = $name_tok->{"value"};
 
         $var_decl = ast_new_var_decl($var_name, $var_type, $sigil);
-    } else {
-        # foreach $var (@array) - must be existing variable with $ sigil
-        parser_expect($parser, "DOLLAR");
+    } elsif (parser_check($parser, "DOLLAR")) {
+        # foreach $var (@array) - existing variable with $ sigil
+        parser_advance($parser);
         my scalar $name_tok = parser_current($parser);
         parser_expect($parser, "IDENT");
         $var_name = $name_tok->{"value"};
+    } else {
+        # foreach (@array) - implicit $_ loop variable (declared as my scalar $_)
+        $var_name = "_";
+        $var_decl = ast_new_var_decl("_", TYPE_SCALAR(), "$");
     }
 
     parser_expect($parser, "LPAREN");
@@ -2959,7 +3157,18 @@ func parse_statement(scalar $parser) scalar {
         my scalar $neg_cond = ast_new_unary_op("!", $cond);
         my scalar $if_stmt = ast_new_if_stmt($neg_cond, $then_block);
         ast_set_line($if_stmt, $stmt_line);
-        # unless supports else but NOT elsif
+        # unless supports elsif/else (like Perl)
+        while (parser_check($parser, "ELSIF") || (parser_check($parser, "ELSE") && parser_peek($parser)->{"type"} eq "IF")) {
+            if (parser_check($parser, "ELSE")) {
+                parser_advance($parser);
+            }
+            parser_advance($parser);
+            parser_expect($parser, "LPAREN");
+            my scalar $elsif_cond = parse_expression($parser);
+            parser_expect($parser, "RPAREN");
+            my scalar $elsif_block = parse_block($parser);
+            ast_add_elsif($if_stmt, $elsif_cond, $elsif_block);
+        }
         if (parser_check($parser, "ELSE")) {
             parser_advance($parser);
             $if_stmt->{"else_block"} = parse_block($parser);
@@ -3452,18 +3661,47 @@ func parse_function(scalar $parser) scalar {
         parser_error($parser, "'" . $func_name . "' is a keyword and cannot be used as a function name");
     }
 
+    # No-parens form: func name { body } — implicit @_ variadic parameter
+    # Return type defaults to scalar (like Perl subs)
+    if (parser_check($parser, "LBRACE")) {
+        my scalar $fn = ast_new_function($func_name, TYPE_SCALAR());
+        ast_set_line($fn, $func_line);
+        $fn->{"is_variadic"} = 1;
+        my scalar $underscore_param = ast_new_param("_", TYPE_SCALAR(), "@");
+        $underscore_param->{"is_variadic"} = 1;
+        ast_add_param($fn, $underscore_param);
+        $fn->{"return_type"} = TYPE_SCALAR();
+        $fn->{"body"} = parse_block($parser);
+        return $fn;
+    }
+
     parser_expect($parser, "LPAREN");
 
     # Create function node with dummy return type for now
     my scalar $fn = ast_new_function($func_name, TYPE_VOID());
     ast_set_line($fn, $func_line);
-    
+
     # Parse parameters
     if (!parser_check($parser, "RPAREN")) {
         while (1) {
-            # Parse the type first
-            my int $param_type = parse_type($parser);
-            my str $param_type_name = $parser->{"last_type_name"};
+            # Type is optional — infer from sigil if not present
+            my scalar $pt_peek = parser_current($parser);
+            my str $pt_peek_type = $pt_peek->{"type"};
+            my int $param_type = 0;
+            my str $param_type_name = "";
+
+            if ($pt_peek_type eq "DOLLAR" || $pt_peek_type eq "AT" || $pt_peek_type eq "PERCENT") {
+                # No explicit type — default to scalar/array/hash based on sigil
+                if ($pt_peek_type eq "DOLLAR") { $param_type = TYPE_SCALAR(); }
+                elsif ($pt_peek_type eq "AT") { $param_type = TYPE_ARRAY(); }
+                elsif ($pt_peek_type eq "PERCENT") { $param_type = TYPE_HASH(); }
+            } elsif ($pt_peek_type eq "ELLIPSIS") {
+                # Variadic without type: ...@args → scalar
+                $param_type = TYPE_SCALAR();
+            } else {
+                $param_type = parse_type($parser);
+                $param_type_name = $parser->{"last_type_name"};
+            }
 
             # Check for variadic parameter (...) after the type
             my int $is_variadic = 0;
@@ -3526,10 +3764,13 @@ func parse_function(scalar $parser) scalar {
         parser_advance($parser);  # Skip )
     }
     
-    # Parse return type
-    my int $ret_type = parse_type($parser);
+    # Parse return type (optional — defaults to scalar if { follows)
+    my int $ret_type = TYPE_SCALAR();
+    if (!parser_check($parser, "LBRACE")) {
+        $ret_type = parse_type($parser);
+    }
     $fn->{"return_type"} = $ret_type;
-    
+
     # Parse body
     $fn->{"body"} = parse_block($parser);
     
@@ -5171,12 +5412,11 @@ func flush_has_constructor(scalar $program, str $pkg) void {
     my scalar $self_decl = ast_new_var_decl("self", TYPE_HASH(), "%");
     ast_add_statement($ctor_body, $self_decl);
 
-    # Parse named args directly into %self: my int $__i = 0; while...
+    # Parse named args: while ($__i + 1 < scalar(@args)) { $self{$args[$__i]} = $args[$__i + 1]; $__i += 2; }
     my scalar $i_decl = ast_new_var_decl("__i", TYPE_INT(), "$");
     $i_decl->{"init"} = ast_new_int_literal(0);
     ast_add_statement($ctor_body, $i_decl);
 
-    # while ($__i + 1 < scalar(@args)) { $__a{$args[$__i]} = $args[$__i + 1]; $__i = $__i + 2; }
     my scalar $i_var = ast_new_variable("__i", "$");
     my scalar $one_lit = ast_new_int_literal(1);
     my scalar $i_plus_1 = ast_new_binary_op("+", $i_var, $one_lit);
@@ -5215,15 +5455,13 @@ func flush_has_constructor(scalar $program, str $pkg) void {
     my scalar $while_stmt = ast_new_while_stmt($while_cond, $while_body, "");
     ast_add_statement($ctor_body, $while_stmt);
 
-    # For each attribute: $self{"name"} = $self{"name"} // default;
-    # Only emit for attributes that have defaults (apply default if key wasn't passed)
+    # Apply defaults: $self{"name"} = $self{"name"} // default;
     my int $pi = 0;
     while ($pi < $pkg_attr_count) {
         my scalar $attr = $pkg_attrs[$pi];
         my str $a_name = $attr->{"name"};
         my scalar $a_default = $attr->{"default_node"};
 
-        # Only need to emit assignment if there's a default to apply
         if ($a_default != 0) {
             my scalar $self_var2 = ast_new_variable("self", "%");
             my scalar $name_key = ast_new_str_literal($a_name);

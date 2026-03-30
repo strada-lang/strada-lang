@@ -1,0 +1,128 @@
+#!/usr/bin/env strada
+# Test int arithmetic optimization and inline constructors for memory leaks
+# Run: valgrind --leak-check=full ./test_int_arith_inline_ctor
+
+package Point;
+has rw int $x = 0;
+has rw int $y = 0;
+
+func distance_sq(scalar $self) int {
+    return $self->x() * $self->x() + $self->y() * $self->y();
+}
+
+package Point3D;
+extends Point;
+has rw int $z = 0;
+
+func distance_sq(scalar $self) int {
+    return $self->x() * $self->x() + $self->y() * $self->y() + $self->z() * $self->z();
+}
+
+package main;
+
+func main() int {
+    say("Testing int arithmetic and inline constructors for memory leaks...");
+    my int $iterations = 1000;
+
+    # Test 1: Int arithmetic (tagged int path)
+    say("  int arithmetic...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my int $a = $i * 3;
+        my int $b = $i * 7;
+        my int $c = $a + $b;
+        my int $d = $c - $a;
+        my int $e = $a * $b + $c * $d;
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 2: Int compound assignment (+=, -=)
+    say("  int compound assignment...");
+    my int $sum = 0;
+    my int $j = 0;
+    while ($j < $iterations) {
+        $sum += $j;
+        $j++;
+    }
+    my int $diff = $sum;
+    my int $k = 0;
+    while ($k < $iterations) {
+        $diff -= $k;
+        $k++;
+    }
+    if ($diff != 0) {
+        say("    FAIL: diff should be 0, got " . $diff);
+        return 1;
+    }
+    say("    PASS");
+
+    # Test 3: Inline constructor (no inheritance)
+    say("  inline constructor (Point)...");
+    my int $m = 0;
+    while ($m < $iterations) {
+        my int $mx = $m - ($m / 100) * 100;
+        my int $my = ($m + 1) - (($m + 1) / 100) * 100;
+        my scalar $p = Point::new("x", $mx, "y", $my);
+        my int $dsq = $p->distance_sq();
+        $m++;
+    }
+    say("    PASS");
+
+    # Test 4: Inline constructor WITH inheritance
+    say("  inline constructor (Point3D extends Point)...");
+    my int $n = 0;
+    while ($n < $iterations) {
+        my int $nx = $n - ($n / 50) * 50;
+        my int $ny = ($n + 1) - (($n + 1) / 50) * 50;
+        my int $nz = ($n + 2) - (($n + 2) / 50) * 50;
+        my scalar $p = Point3D::new("x", $nx, "y", $ny, "z", $nz);
+        my int $dsq = $p->distance_sq();
+        $n++;
+    }
+    say("    PASS");
+
+    # Test 5: Inherited defaults
+    say("  inherited defaults...");
+    my int $q = 0;
+    while ($q < $iterations) {
+        my scalar $p = Point3D::new("z", $q);
+        if ($p->x() != 0 || $p->y() != 0) {
+            say("    FAIL: defaults not applied");
+            return 1;
+        }
+        $q++;
+    }
+    say("    PASS");
+
+    # Test 6: isa on inline-constructed inherited objects
+    say("  isa on inherited inline ctor...");
+    my int $r = 0;
+    while ($r < $iterations) {
+        my scalar $p = Point3D::new("x", 1, "y", 2, "z", 3);
+        if (!$p->isa("Point")) {
+            say("    FAIL: not isa Point");
+            return 1;
+        }
+        if (!$p->isa("Point3D")) {
+            say("    FAIL: not isa Point3D");
+            return 1;
+        }
+        $r++;
+    }
+    say("    PASS");
+
+    # Test 7: Mixed int and non-int arithmetic
+    say("  mixed arithmetic...");
+    my int $s = 0;
+    while ($s < $iterations) {
+        my int $x = $s * 2;
+        my num $y = 3.14;
+        my num $z = $x + $y;
+        $s++;
+    }
+    say("    PASS");
+
+    say("All int arith/inline ctor leak tests passed");
+    return 0;
+}

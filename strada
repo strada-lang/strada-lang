@@ -489,7 +489,7 @@ build_runtime() {
     if [ "${STRADA_HAVE_PCRE2:-0}" = "1" ]; then
         PCRE2_DEF="-DHAVE_PCRE2 $STRADA_PCRE2_CFLAGS"
     fi
-    if ! run_cmd gcc -O2 -std=c99 -ffunction-sections -fdata-sections $PCRE2_DEF -c "$RUNTIME_SRC" -I"$RUNTIME_DIR" -o "$RUNTIME_OBJ"; then
+    if ! run_cmd gcc -O2 -flto=auto -std=c99 -ffunction-sections -fdata-sections $PCRE2_DEF -c "$RUNTIME_SRC" -I"$RUNTIME_DIR" -o "$RUNTIME_OBJ"; then
         error "Failed to compile runtime"
     fi
 }
@@ -512,6 +512,14 @@ if ! $CC --version 2>&1 | grep -q clang; then
     GCC_FLAGS="$GCC_FLAGS -Wno-unused-but-set-variable -Wno-clobbered"
 fi
 GCC_FLAGS="$GCC_FLAGS -O$OPT_LEVEL"
+# Enable link-time optimization at -O2 and above for cross-function inlining
+if [ "$OPT_LEVEL" = "2" ] || [ "$OPT_LEVEL" = "3" ] || [ "$OPT_LEVEL" = "fast" ]; then
+    GCC_FLAGS="$GCC_FLAGS -flto=auto"
+fi
+# Enable native CPU tuning at -O3 and -Ofast (not portable)
+if [ "$OPT_LEVEL" = "3" ] || [ "$OPT_LEVEL" = "fast" ]; then
+    GCC_FLAGS="$GCC_FLAGS -march=native"
+fi
 if [ "$DEBUG_SYMBOLS" -eq 1 ] || [ "$C_DEBUG_SYMBOLS" -eq 1 ]; then
     GCC_FLAGS="$GCC_FLAGS -g"
 fi

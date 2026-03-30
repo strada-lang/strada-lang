@@ -698,6 +698,14 @@ func ctx_new() scalar {
     my scalar $global_scope = $ctx{"scope"};
     scope_add_var($global_scope, "ARGV", "@", TYPE_ARRAY(), 0);
     scope_add_var($global_scope, "ARGC", "$", TYPE_INT(), 0);
+    # Standard I/O filehandles
+    scope_add_var($global_scope, "STDIN", "$", TYPE_SCALAR(), 0);
+    scope_add_var($global_scope, "STDOUT", "$", TYPE_SCALAR(), 0);
+    scope_add_var($global_scope, "STDERR", "$", TYPE_SCALAR(), 0);
+    # Special variables
+    scope_add_var($global_scope, "__child_status", "$", TYPE_INT(), 0);
+    scope_add_var($global_scope, "__program_name", "$", TYPE_STR(), 0);
+    scope_add_var($global_scope, "_", "$", TYPE_SCALAR(), 0);
 
     return \%ctx;
 }

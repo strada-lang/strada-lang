@@ -271,10 +271,16 @@ fi
 
 # Check libcrypt
 printf "  Checking for libcrypt... "
+HAVE_CRYPT_R=0
 if check_lib "crypt" "crypt.h" "crypt" "crypt_r"; then
     HAVE_CRYPT=1
+    HAVE_CRYPT_R=1
     CRYPT_LIBS="-lcrypt"
-    echo -e "${GREEN}yes${NC}"
+    echo -e "${GREEN}yes${NC} (with crypt_r)"
+elif check_lib "crypt" "crypt.h" "crypt" "crypt"; then
+    HAVE_CRYPT=1
+    CRYPT_LIBS="-lcrypt"
+    echo -e "${GREEN}yes${NC} (crypt only, no crypt_r)"
 else
     echo -e "${RED}no${NC}"
 fi
@@ -478,6 +484,7 @@ HAVE_POSTGRES = $HAVE_POSTGRES
 
 # Other libraries
 HAVE_CRYPT = $HAVE_CRYPT
+HAVE_CRYPT_R = $HAVE_CRYPT_R
 HAVE_READLINE = $HAVE_READLINE
 HAVE_SSL = $HAVE_SSL
 HAVE_ZLIB = $HAVE_ZLIB
@@ -558,6 +565,7 @@ export STRADA_HAVE_MYSQL=$HAVE_MYSQL
 export STRADA_HAVE_SQLITE=$HAVE_SQLITE
 export STRADA_HAVE_POSTGRES=$HAVE_POSTGRES
 export STRADA_HAVE_CRYPT=$HAVE_CRYPT
+export STRADA_HAVE_CRYPT_R=$HAVE_CRYPT_R
 export STRADA_HAVE_READLINE=$HAVE_READLINE
 export STRADA_HAVE_SSL=$HAVE_SSL
 export STRADA_HAVE_ZLIB=$HAVE_ZLIB

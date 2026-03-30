@@ -210,7 +210,8 @@ strada_say(x);
 | `my int $x` | `StradaValue *x` |
 | `42` | `strada_new_int(42)` |
 | `"hello"` | `strada_new_str("hello")` |
-| `$a + $b` | `strada_new_num(strada_to_num(a) + strada_to_num(b))` |
+| `$a + $b` (int) | `STRADA_MAKE_TAGGED_INT(STRADA_TAGGED_INT_VAL(a) + STRADA_TAGGED_INT_VAL(b))` |
+| `$a + $b` (other) | `strada_new_num(strada_to_num(a) + strada_to_num(b))` |
 | `$arr[$i]` | `strada_array_get(arr->value.av, strada_to_int(i))` |
 | `$hash{"key"}` | `strada_hash_get(hash->value.hv, "key")` |
 | `say($x)` | `strada_say(x)` |
@@ -588,11 +589,25 @@ The `--full-profile` flag enables comprehensive line-level instrumentation, simi
 - Array index out of bounds
 - Undefined value access
 
+## Compiler Optimizations
+
+The self-hosting compiler applies several automatic optimizations during code generation:
+
+- **Int arithmetic inlining**: When both operands of `+`, `-`, or `*` are `int`-typed expressions, the compiler emits direct tagged integer arithmetic (`STRADA_MAKE_TAGGED_INT(... + ...)`) instead of going through `strada_to_num()`/`strada_new_num()`. This avoids heap allocation entirely for integer math.
+- **Inline accessor calls**: Zero-argument `has`-generated attribute accessors bypass method dispatch and inline a direct hash lookup.
+- **Inline constructor for classes with `extends`**: The auto-generated `new()` constructor optimization (which inlines attribute setup instead of parsing variadic args at runtime) now works for classes that use `extends` to inherit from parent classes, not just base classes without parents.
+- **Concat key optimization**: Hash keys built with `"prefix" . $i` use stack buffers and skip string interning.
+- **Tagged integer constants**: Integer literals compile to `STRADA_MAKE_TAGGED_INT(N)` with zero heap allocation.
+- **Int parameter skip**: Parameters declared as `int` skip `strada_incref`/`strada_decref`/`strada_cleanup_push`/`strada_cleanup_pop` since tagged integers are immortal (~8 fewer overhead calls per int-param function invocation).
+- **Function return type tracking**: `expr_is_int_typed()` consults a `func_ret_int` lookup table to recognize `NODE_CALL` expressions that return `int`, enabling tagged int arithmetic for call results (e.g., `$sum += add3($a, $b, $c)`).
+- **Int parameter type tracking**: Parameters declared as `int` are added to `int_vars`, so int arithmetic within the function body uses the direct tagged int path.
+- **LTO at -O2+**: The `strada` driver adds `-flto` at `-O2` and above, and `-march=native` at `-O3`/`-Ofast`. LTO enables GCC to inline runtime functions (e.g., `strada_incref`, `strada_decref`, `strada_to_int`) across translation units, dramatically improving function call performance.
+
 ## Future Improvements
 
 1. **Optimization passes** - Dead code elimination, constant folding
 2. **Better error messages** - Line numbers, source context
-3. **Type inference** - Reduce explicit type annotations
+3. **Type checking** - Enforce type annotations at compile time
 4. **Incremental compilation** - Only recompile changed modules
 5. **Debug information** - Generate DWARF debug info
 6. **LLVM backend** - Alternative to C generation

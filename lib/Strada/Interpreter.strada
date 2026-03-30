@@ -518,6 +518,10 @@ enum BI {
     BIGINT_CMP = 393, BIGINT_DIVMOD = 394, BIGINT_DIVMOD_REM = 395,
     # BigFloat:: (400-402)
     BIGFLOAT_PAD_RIGHT = 400, BIGFLOAT_NORMALIZE = 401, BIGFLOAT_NEW = 402,
+    # File test / introspection (500-510)
+    SYS_FILE_EXISTS = 500, SYS_IS_READABLE = 501, SYS_IS_WRITABLE = 502,
+    SYS_IS_EXECUTABLE = 503, SYS_IS_ZERO_SIZE = 504, SYS_IS_SYMLINK = 505,
+    SYS_FILE_SIZE = 506, SYS_CALLER_INFO = 507,
     PLACEHOLDER_END = 999
 }
 
@@ -782,6 +786,14 @@ func init_builtins(scalar $interp) void {
     $b{"sys::access"} = BI::SYS_ACCESS; $b{"core::access"} = BI::SYS_ACCESS;
     $b{"sys::is_file"} = BI::SYS_IS_FILE; $b{"core::is_file"} = BI::SYS_IS_FILE;
     $b{"sys::is_dir"} = BI::SYS_IS_DIR; $b{"core::is_dir"} = BI::SYS_IS_DIR;
+    $b{"sys::file_exists"} = BI::SYS_FILE_EXISTS; $b{"core::file_exists"} = BI::SYS_FILE_EXISTS;
+    $b{"sys::is_readable"} = BI::SYS_IS_READABLE; $b{"core::is_readable"} = BI::SYS_IS_READABLE;
+    $b{"sys::is_writable"} = BI::SYS_IS_WRITABLE; $b{"core::is_writable"} = BI::SYS_IS_WRITABLE;
+    $b{"sys::is_executable"} = BI::SYS_IS_EXECUTABLE; $b{"core::is_executable"} = BI::SYS_IS_EXECUTABLE;
+    $b{"sys::is_zero_size"} = BI::SYS_IS_ZERO_SIZE; $b{"core::is_zero_size"} = BI::SYS_IS_ZERO_SIZE;
+    $b{"sys::is_symlink"} = BI::SYS_IS_SYMLINK; $b{"core::is_symlink"} = BI::SYS_IS_SYMLINK;
+    $b{"sys::file_size"} = BI::SYS_FILE_SIZE; $b{"core::file_size"} = BI::SYS_FILE_SIZE;
+    $b{"sys::caller"} = BI::SYS_CALLER_INFO; $b{"core::caller"} = BI::SYS_CALLER_INFO;
     $b{"sys::readdir"} = BI::SYS_READDIR; $b{"core::readdir"} = BI::SYS_READDIR;
     $b{"sys::readdir_full"} = BI::SYS_READDIR_FULL; $b{"core::readdir_full"} = BI::SYS_READDIR_FULL;
     $b{"sys::glob"} = BI::SYS_GLOB; $b{"core::glob"} = BI::SYS_GLOB;
@@ -2747,6 +2759,47 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
     }
     if ($bid == BI::SYS_IS_DIR) {
         return sys::is_dir($args->[0]);
+    }
+    if ($bid == BI::SYS_FILE_EXISTS) {
+        return sys::access($args->[0], 0) == 0 ? 1 : 0;
+    }
+    if ($bid == BI::SYS_IS_READABLE) {
+        return sys::access($args->[0], 4) == 0 ? 1 : 0;
+    }
+    if ($bid == BI::SYS_IS_WRITABLE) {
+        return sys::access($args->[0], 2) == 0 ? 1 : 0;
+    }
+    if ($bid == BI::SYS_IS_EXECUTABLE) {
+        return sys::access($args->[0], 1) == 0 ? 1 : 0;
+    }
+    if ($bid == BI::SYS_IS_ZERO_SIZE) {
+        my scalar $st = sys::stat($args->[0]);
+        if (defined($st)) {
+            return $st->{"size"} == 0 ? 1 : 0;
+        }
+        return 0;
+    }
+    if ($bid == BI::SYS_IS_SYMLINK) {
+        my scalar $st = sys::lstat($args->[0]);
+        if (defined($st)) {
+            return $st->{"type"} eq "link" ? 1 : 0;
+        }
+        return 0;
+    }
+    if ($bid == BI::SYS_FILE_SIZE) {
+        my scalar $st = sys::stat($args->[0]);
+        if (defined($st)) {
+            return $st->{"size"};
+        }
+        return 0;
+    }
+    if ($bid == BI::SYS_CALLER_INFO) {
+        # In interpreter, return basic info (limited stack introspection)
+        my hash %info = ();
+        $info{"function"} = "(interpreter)";
+        $info{"file"} = "(eval)";
+        $info{"line"} = 0;
+        return \%info;
     }
     if ($bid == BI::SYS_READDIR) {
         return sys::readdir($args->[0]);
@@ -5824,8 +5877,22 @@ func eval_string(str $code) scalar {
         $trimmed = $trimmed . ";";
     }
 
-    # Wrap in eval function
-    my str $source = "func __eval__() scalar {\n" . $trimmed . "\n}\n";
+    # Check if input is a top-level construct
+    my int $is_top = 0;
+    if (index($trimmed, "func ") == 0 || index($trimmed, "fn ") == 0) { $is_top = 1; }
+    if (index($trimmed, "async func") == 0 || index($trimmed, "async fn") == 0) { $is_top = 1; }
+    if (index($trimmed, "private func") == 0 || index($trimmed, "private fn") == 0) { $is_top = 1; }
+    if (index($trimmed, "package ") == 0) { $is_top = 1; }
+    if (index($trimmed, "enum ") == 0) { $is_top = 1; }
+    if (index($trimmed, "has ") == 0) { $is_top = 1; }
+    if (index($trimmed, "extends ") == 0) { $is_top = 1; }
+
+    my str $source = "";
+    if ($is_top == 1) {
+        $source = $trimmed . "\nfunc __eval__() scalar { return undef; }\n";
+    } else {
+        $source = "func __eval__() scalar {\n" . $trimmed . "\n}\n";
+    }
 
     # Parse
     my scalar $tokens = lex_tokenize($source);
@@ -5834,7 +5901,7 @@ func eval_string(str $code) scalar {
     my array @empty = ();
     my scalar $program = parse_program($parser, \@empty, \@empty);
 
-    # Find __eval__ function
+    # Register functions and find __eval__
     my scalar $funcs = $program->{"functions"};
     my int $func_count = $program->{"function_count"};
     my scalar $eval_func = undef;
@@ -5843,9 +5910,33 @@ func eval_string(str $code) scalar {
         my scalar $fn = $funcs->[$i];
         if ($fn->{"name"} eq "__eval__") {
             $eval_func = $fn;
+        } else {
+            interp_register_func($g_eval_interp, $fn->{"name"}, $fn->{"params"}, $fn->{"param_count"}, $fn->{"body"}, $g_eval_interp->{"global_env"});
         }
         $i = $i + 1;
     }
+
+    # Register enums
+    my scalar $enums = $program->{"enums"};
+    my int $enum_count = $program->{"enum_count"};
+    $i = 0;
+    while ($i < $enum_count) {
+        my scalar $en = $enums->[$i];
+        my str $enum_name = $en->{"name"};
+        my scalar $members = $en->{"members"};
+        my int $member_count = $en->{"member_count"};
+        my int $j = 0;
+        while ($j < $member_count) {
+            my scalar $member = $members->[$j];
+            my str $key = $enum_name . "::" . $member->{"name"};
+            $g_eval_interp->{"enums"}->{$key} = $member->{"value"};
+            $j = $j + 1;
+        }
+        $i = $i + 1;
+    }
+
+    # Load OOP features
+    interp_load_oop($g_eval_interp, $program);
 
     if (!defined($eval_func)) {
         return undef;
@@ -5859,6 +5950,14 @@ func eval_string(str $code) scalar {
 
     try {
         $result = eval_stmts_in_env($g_eval_interp, $stmts, $stmt_count, $g_eval_interp->{"global_env"});
+        # Clear any stale signal from the eval (e.g., RETURN leaking from recursive calls)
+        if ($g_eval_interp->{"signal"} == SIG::RETURN) {
+            $result = $g_eval_interp->{"signal_value"};
+            $g_eval_interp->{"signal"} = SIG::NONE;
+            $g_eval_interp->{"signal_value"} = undef;
+        } elsif ($g_eval_interp->{"signal"} != SIG::NONE) {
+            $g_eval_interp->{"signal"} = SIG::NONE;
+        }
     } catch ($e) {
         if (is_signal($e, "return")) {
             return $e->{"value"};
