@@ -37,6 +37,63 @@ func parser_set_filename(scalar $parser, str $filename) void {
     $parser->{"filename"} = $filename;
 }
 
+# Convert internal token type names to human-readable descriptions
+func friendly_token(str $type, str $value) str {
+    if ($type eq "SEMI") { return "';'"; }
+    if ($type eq "DOLLAR") { return "'$'"; }
+    if ($type eq "AT") { return "'@'"; }
+    if ($type eq "PERCENT") { return "'%'"; }
+    if ($type eq "LPAREN") { return "'('"; }
+    if ($type eq "RPAREN") { return "')'"; }
+    if ($type eq "LBRACE") { return "'{'"; }
+    if ($type eq "RBRACE") { return "'}'"; }
+    if ($type eq "LBRACKET") { return "'['"; }
+    if ($type eq "RBRACKET") { return "']'"; }
+    if ($type eq "COMMA") { return "','"; }
+    if ($type eq "ASSIGN") { return "'='"; }
+    if ($type eq "ARROW") { return "'->'"; }
+    if ($type eq "FAT_ARROW") { return "'=>'"; }
+    if ($type eq "IDENT") { return "'" . $value . "'"; }
+    if ($type eq "INT_LITERAL") { return $value; }
+    if ($type eq "NUM_LITERAL") { return $value; }
+    if ($type eq "STR_LITERAL") { return "\"" . $value . "\""; }
+    if ($type eq "MY") { return "'my'"; }
+    if ($type eq "OUR") { return "'our'"; }
+    if ($type eq "FUNC") { return "'func'"; }
+    if ($type eq "RETURN") { return "'return'"; }
+    if ($type eq "IF") { return "'if'"; }
+    if ($type eq "ELSE") { return "'else'"; }
+    if ($type eq "WHILE") { return "'while'"; }
+    if ($type eq "FOR") { return "'for'"; }
+    if ($type eq "CONST") { return "'const'"; }
+    if ($type eq "EOF") { return "end of file"; }
+    # Type keywords
+    if (index($type, "TYPE_") == 0) {
+        return "type '" . $value . "'";
+    }
+    if (length($value) > 0) {
+        return "'" . $value . "'";
+    }
+    return $type;
+}
+
+# Friendly expected token description
+func friendly_expected(str $type) str {
+    if ($type eq "SEMI") { return "';'"; }
+    if ($type eq "LPAREN") { return "'('"; }
+    if ($type eq "RPAREN") { return "')'"; }
+    if ($type eq "LBRACE") { return "'{'"; }
+    if ($type eq "RBRACE") { return "'}'"; }
+    if ($type eq "LBRACKET") { return "'['"; }
+    if ($type eq "RBRACKET") { return "']'"; }
+    if ($type eq "COMMA") { return "','"; }
+    if ($type eq "ASSIGN") { return "'='"; }
+    if ($type eq "IDENT") { return "an identifier"; }
+    if ($type eq "MY") { return "'my'"; }
+    if ($type eq "FUNC") { return "'func'"; }
+    return $type;
+}
+
 # Format and die with error message including file:line
 func parser_error(scalar $parser, str $msg) void {
     my str $filename = $parser->{"filename"};
@@ -72,7 +129,7 @@ func parser_advance(scalar $parser) void {
 func parser_expect(scalar $parser, str $expected_type) void {
     my scalar $tok = parser_current($parser);
     if ($tok->{"type"} ne $expected_type) {
-        parser_error($parser, "expected " . $expected_type . ", got " . $tok->{"type"});
+        parser_error($parser, "expected " . friendly_expected($expected_type) . ", got " . friendly_token($tok->{"type"}, $tok->{"value"}));
     }
     parser_advance($parser);
 }
@@ -90,7 +147,7 @@ func parser_expect_ident_like(scalar $parser) void {
         parser_advance($parser);
         return;
     }
-    parser_error($parser, "expected IDENT, got " . $tok->{"type"});
+    parser_error($parser, "expected an identifier, got " . friendly_token($tok->{"type"}, $tok->{"value"}));
 }
 
 func parser_match(scalar $parser, str $type) int {
@@ -126,7 +183,7 @@ func parser_expect_func(scalar $parser) void {
         parser_advance($parser);
         return;
     }
-    parser_error($parser, "expected 'func' or 'fn', got " . $tok->{"type"});
+    parser_error($parser, "expected 'func' or 'fn', got " . friendly_token($tok->{"type"}, $tok->{"value"}));
 }
 
 # Get current token's line number
@@ -427,7 +484,7 @@ func parse_var_name(scalar $parser) str {
         return "around";
     }
 
-    parser_error($parser, "expected variable name, got " . $type_str);
+    parser_error($parser, "expected a variable name after '$', got " . friendly_token($type_str, $tok->{"value"}));
 }
 
 # ============================================================
@@ -549,7 +606,11 @@ func parse_type(scalar $parser) int {
         return TYPE_FUNCPTR();
     }
     
-    parser_error($parser, "expected type, got " . $type_str);
+    # Provide helpful error for common mistakes
+    if ($type_str eq "DOLLAR" || $type_str eq "AT" || $type_str eq "PERCENT") {
+        parser_error($parser, "missing type annotation - variable declarations require a type, e.g.: my int $name, my str $name, my scalar $name");
+    }
+    parser_error($parser, "expected a type (int, num, str, array, hash, scalar), got " . friendly_token($type_str, $tok->{"value"}));
 }
 
 # ============================================================
@@ -1196,7 +1257,8 @@ func parse_primary(scalar $parser) scalar {
                 # Variable key like $_ => 1 or $var => value
                 $key_expr = parse_primary($parser);
             } else {
-                parser_error($parser, "expected hash key");
+                my scalar $hk_tok = parser_current($parser);
+                parser_error($parser, "expected hash key (string, identifier, or $variable), got " . friendly_token($hk_tok->{"type"}, $hk_tok->{"value"}));
             }
 
             parser_expect($parser, "FAT_ARROW");
@@ -1677,7 +1739,7 @@ func parse_primary(scalar $parser) scalar {
         parser_error($parser, "unexpected 'func' in expression context");
     }
 
-    parser_error($parser, "unexpected token in expression: " . $type);
+    parser_error($parser, "unexpected " . friendly_token($type, $tok->{"value"}) . " in expression");
 }
 
 # Parse postfix operations (-> derefs, function calls, subscripts)
@@ -5418,7 +5480,8 @@ func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low) sca
         } elsif (parser_check($parser, "AROUND")) {
             parse_method_modifier($parser, $program, "around");
         } else {
-            parser_error($parser, "expected function, extern, enum, package, inherit, use, import_lib, import_object, import_archive, __C__, BEGIN, END, const, our, has, extends, with, before, after, around, or variable declaration");
+            my scalar $tl_tok = parser_current($parser);
+            parser_error($parser, "unexpected " . friendly_token($tl_tok->{"type"}, $tl_tok->{"value"}) . " at top level (expected a function, package, or declaration)");
         }
     }
 

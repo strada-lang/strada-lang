@@ -359,7 +359,7 @@ if [ "$REPL_MODE" -eq 1 ]; then
         exec "$INTERP_BIN" "$@"
     fi
     # Check installed location
-    INTERP_BIN="$(dirname "$SCRIPT_DIR")/bin/strada-interp"
+    INTERP_BIN="$(dirname "$(dirname "$SCRIPT_DIR")")/bin/strada-interp"
     if [ -x "$INTERP_BIN" ]; then
         exec "$INTERP_BIN" "$@"
     fi
@@ -381,7 +381,7 @@ if [ -n "$SCRIPT_FILE" ]; then
     if [ -x "$INTERP_BIN" ]; then
         exec "$INTERP_BIN" "$SCRIPT_FILE" "$@"
     fi
-    INTERP_BIN="$(dirname "$SCRIPT_DIR")/bin/strada-interp"
+    INTERP_BIN="$(dirname "$(dirname "$SCRIPT_DIR")")/bin/strada-interp"
     if [ -x "$INTERP_BIN" ]; then
         exec "$INTERP_BIN" "$SCRIPT_FILE" "$@"
     fi
