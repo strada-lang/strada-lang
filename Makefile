@@ -67,7 +67,7 @@ RUNTIME_HDR = $(RUNTIME_DIR)/strada_runtime.h
 RUNTIME_OBJ = $(RUNTIME_DIR)/strada_runtime.o
 RUNTIME_TCC_OBJ = $(RUNTIME_DIR)/strada_runtime_tcc.o
 
-.PHONY: all clean test test-all test-examples test-selfhost test-suite runtime bootstrap compiler examples run run-bootstrap help info selfhost install uninstall tools libs lib-dbi lib-crypt lib-ssl lib-readline configure-check stage1 interpreter test-interp perl2strada cpan2strada install-perl2strada install-cpan2strada
+.PHONY: all clean test test-all test-examples test-selfhost test-suite runtime bootstrap compiler examples run run-bootstrap help info selfhost install uninstall tools libs lib-dbi lib-crypt lib-ssl lib-readline configure-check stage1 interpreter test-interp perl2strada xs2strada cpan2strada install-perl2strada install-cpan2strada update-bootstrap
 
 # Default: build everything including self-hosting compiler and tools
 all: stradac $(RUNTIME_OBJ) tools interpreter
@@ -118,9 +118,8 @@ test: runtime
 	@echo ""
 	@echo "✓ Runtime tests passed"
 
-# Build bootstrap compiler (C version)
-bootstrap:
-	$(MAKE) -C $(BOOTSTRAP_DIR)
+# Build bootstrap compiler (frozen Combined.c from self-hosting compiler)
+bootstrap: $(BOOTSTRAP_STRADAC)
 
 # Create combined source for self-hosting compiler
 $(COMPILER_DIR)/Combined.strada: $(COMPILER_DIR)/AST.strada $(COMPILER_DIR)/Lexer.strada $(COMPILER_DIR)/Parser.strada $(COMPILER_DIR)/Semantic.strada $(COMPILER_DIR)/CodeGen.strada $(COMPILER_DIR)/Main.strada
@@ -132,9 +131,10 @@ $(COMPILER_DIR)/Combined_stage1.c: $(COMPILER_DIR)/Combined.strada $(BOOTSTRAP_S
 	@echo "=== Stage 1: Compiling self-hosting compiler (bootstrap -> C) ==="
 	$(BOOTSTRAP_STRADAC) $(COMPILER_DIR)/Combined.strada $(COMPILER_DIR)/Combined_stage1.c
 
-# Build bootstrap compiler if it doesn't exist
-$(BOOTSTRAP_STRADAC):
-	$(MAKE) -C $(BOOTSTRAP_DIR)
+# Build bootstrap compiler from frozen Combined.c + runtime
+$(BOOTSTRAP_STRADAC): $(BOOTSTRAP_DIR)/Combined.c $(RUNTIME_OBJ)
+	@echo "=== Building bootstrap compiler ==="
+	$(CC) $(CFLAGS) -Wno-unused-function -rdynamic -o $@ $(BOOTSTRAP_DIR)/Combined.c $(RUNTIME_OBJ) -I$(RUNTIME_DIR) $(LDFLAGS)
 
 # Build the stage 1 compiler executable
 # Note: -rdynamic exports symbols so that shared libraries loaded at compile time
@@ -159,6 +159,13 @@ stradac: $(COMPILER_DIR)/Combined.c $(RUNTIME_OBJ)
 # Aliases
 compiler: stradac
 selfhost: stradac
+
+# Update the bootstrap with the current self-hosting compiler output
+# Run this after making changes to the compiler and verifying they work
+update-bootstrap: stradac
+	@echo "=== Updating bootstrap with current stage 2 output ==="
+	cp $(COMPILER_DIR)/Combined.c $(BOOTSTRAP_DIR)/Combined.c
+	@echo "✓ Bootstrap updated"
 
 # Compile and run an example using SELF-HOSTING compiler
 # Usage: make run PROG=test_simple
@@ -258,11 +265,11 @@ test-suite: stradac $(RUNTIME_OBJ)
 	if [ -n "$(FILTER)" ]; then OPTS="$$OPTS $(FILTER)"; fi; \
 	./t/run_tests.sh $$OPTS
 
-# Build tools (stradadoc, strada-soinfo, strada-md2man, strada-md2html, strada-jit, stradapp, xs2strada)
-TOOL_BINS = tools/stradadoc tools/strada-soinfo tools/strada-md2man tools/strada-md2html tools/strada-jit tools/stradapp tools/xs2strada tools/strada-proftext tools/strada-profhtml
+# Build tools (stradadoc, strada-soinfo, strada-md2man, strada-md2html, strada-jit, stradapp)
+TOOL_BINS = tools/stradadoc tools/strada-soinfo tools/strada-md2man tools/strada-md2html tools/strada-jit tools/stradapp tools/strada-proftext tools/strada-profhtml
 
-# Converter tools (built separately)
-CONVERTER_BINS = perl2strada tools/cpan2strada
+# Converter tools (built separately via make perl2strada / make cpan2strada)
+CONVERTER_BINS = perl2strada tools/xs2strada tools/cpan2strada
 
 tools: $(TOOL_BINS)
 	@echo ""
@@ -321,6 +328,7 @@ tools/cpan2strada: tools/cpan2strada.strada stradac perl2strada tools/xs2strada
 
 # Converter tools (not built by default)
 perl2strada: tools/perl2strada
+xs2strada: tools/xs2strada
 cpan2strada: tools/cpan2strada
 
 # =============================================================================
@@ -470,7 +478,7 @@ install: stradac $(RUNTIME_OBJ)
 	fi
 	@# Build and install tools (converters excluded — use make install-perl2strada)
 	@echo "Installing tools..."
-	@for tool in stradadoc strada-soinfo strada-md2man strada-md2html strada-jit stradapp xs2strada strada-proftext strada-profhtml; do \
+	@for tool in stradadoc strada-soinfo strada-md2man strada-md2html strada-jit stradapp strada-proftext strada-profhtml; do \
 		if [ ! -x tools/$$tool ]; then \
 			echo "  Building $$tool..."; \
 			./strada tools/$$tool.strada -o tools/$$tool 2>/dev/null || true; \
