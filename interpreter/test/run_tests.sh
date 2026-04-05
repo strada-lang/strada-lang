@@ -4,7 +4,7 @@
 #   -v        Verbose output
 #   pattern   Only run tests matching pattern
 
-INTERP="$(dirname "$0")/../strada-interp"
+INTERP="$(dirname "$0")/../strada-interp --tree-walk"
 TEST_DIR="$(dirname "$0")"
 PASS=0
 FAIL=0

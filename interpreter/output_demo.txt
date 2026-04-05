@@ -1,0 +1,6 @@
+Line 1: Fresh start
+Line 2: Second line
+Line 3: Appended first time
+Line 4: Appended second time
+Line 5: From session 1
+Line 6: From session 2

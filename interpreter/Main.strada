@@ -10,6 +10,12 @@ __C__ {
 #include <readline/readline.h>
 #include <readline/history.h>
 #endif
+
+/* VM bytecode backend (linked from vm.c + vm_compiler.c) */
+#ifdef HAVE_VM
+#include "vm.h"
+#include "vm_compiler.h"
+#endif
 }
 
 # -L library search paths from command line
@@ -115,7 +121,7 @@ func get_history_path() str {
 }
 
 func print_banner() void {
-    say("Strada Interpreter v0.2 (tree-walking)");
+    say("Strada Interpreter v0.3");
     say("Type expressions or statements. Enter .help for commands, .quit to exit.");
     say("");
 }
@@ -577,8 +583,68 @@ func run_file(scalar $interp, str $filename, scalar $argv) int {
     return $result;
 }
 
+# Execute a file using the bytecode VM backend
+func run_file_vm(str $filename) int {
+    my str $source = slurp($filename);
+
+    my str $source_dir = get_dirname($filename);
+    my str $project_root = find_project_root($source_dir);
+
+    my array @lib_paths = ();
+    my int $li = 0;
+    while ($li < size(@g_lib_paths)) {
+        push(@lib_paths, $g_lib_paths[$li]);
+        $li = $li + 1;
+    }
+    if (length($project_root) > 0) {
+        push(@lib_paths, $project_root);
+        push(@lib_paths, $project_root . "/lib");
+    }
+    push(@lib_paths, $source_dir);
+
+    # Tokenize and parse (reuses the same parser as tree-walker)
+    my scalar $tokens = lex_tokenize($source);
+    my scalar $parser = parser_new($tokens);
+    parser_set_filename($parser, $filename);
+    my array @empty = ();
+    my scalar $program = parse_program($parser, \@lib_paths, \@empty);
+
+    # Compile to bytecode and execute via VM
+    my int $result = 0;
+    __C__ {
+#ifdef HAVE_VM
+        VMProgram *vprog = vm_compile_program(program);
+        if (!vprog) {
+            fprintf(stderr, "VM compile failed\n");
+            strada_decref(result);
+            result = STRADA_MAKE_TAGGED_INT(1);
+        } else {
+            const char *entry = "main";
+            if (vm_program_find_func(vprog, "main") < 0) {
+                if (vm_program_find_func(vprog, "run") >= 0) entry = "run";
+                else { fprintf(stderr, "Error: no 'main' or 'run' function\n"); entry = NULL; }
+            }
+            if (entry) {
+                VM *vvm = vm_new(vprog);
+                VMValue vresult = vm_execute(vvm, entry);
+                int64_t rc = VM_IS_INT(vresult) ? VM_INT_VAL(vresult) : 0;
+                strada_decref(result);
+                result = STRADA_MAKE_TAGGED_INT(rc);
+                vm_free(vvm);
+            }
+            vm_program_free(vprog);
+        }
+#else
+        fprintf(stderr, "Error: VM backend not compiled in (rebuild with HAVE_VM=1)\n");
+        strada_decref(result);
+        result = STRADA_MAKE_TAGGED_INT(1);
+#endif
+    }
+    return $result;
+}
+
 func print_usage() void {
-    say("Strada Interpreter v0.2");
+    say("Strada Interpreter v0.3");
     say("Usage:");
     say("  strada-interp                          Interactive REPL");
     say("  strada-interp [OPTIONS] <file.strada>  Execute file");
@@ -586,6 +652,8 @@ func print_usage() void {
     say("");
     say("Options:");
     say("  -e CODE       Execute code (wraps in main() if needed)");
+    say("  --vm          Use bytecode VM backend (default)");
+    say("  --tree-walk   Use tree-walking interpreter backend");
     say("  -L PATH       Add library search path");
     say("  -h, --help    Show this help message");
 }
@@ -618,7 +686,8 @@ func main() int {
     my str $script = "";
     my str $eval_code = "";
     my array @script_args = ();
-    my int $i = 1;
+    my int $use_vm = 1;
+    my int $i = 0;
     my int $parsing_opts = 1;
 
     while ($i < $argc) {
@@ -627,6 +696,10 @@ func main() int {
         if ($parsing_opts == 1 && ($arg eq "-h" || $arg eq "--help")) {
             print_usage();
             return 0;
+        } elsif ($parsing_opts == 1 && $arg eq "--vm") {
+            $use_vm = 1;
+        } elsif ($parsing_opts == 1 && ($arg eq "--tree-walk" || $arg eq "--tw")) {
+            $use_vm = 0;
         } elsif ($parsing_opts == 1 && $arg eq "-e") {
             $i = $i + 1;
             if ($i >= $argc) {
@@ -680,6 +753,15 @@ func main() int {
 
     # File mode
     my int $exit_code = 0;
+    if ($use_vm == 1) {
+        try {
+            $exit_code = run_file_vm($script);
+        } catch ($e) {
+            say("VM error: " . $e);
+            $exit_code = 1;
+        }
+        return $exit_code;
+    }
     try {
         $exit_code = run_file($interp, $script, \@script_args);
     } catch ($e) {

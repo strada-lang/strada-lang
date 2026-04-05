@@ -1,0 +1,110 @@
+func fib(int $n) int {
+    if ($n <= 1) { return $n; }
+    return fib($n - 1) + fib($n - 2);
+}
+
+func bench_loop() int {
+    my int $sum = 0;
+    my int $i = 0;
+    while ($i < 100000) {
+        $sum = $sum + $i;
+        $i = $i + 1;
+    }
+    return $sum;
+}
+
+func bench_hash() int {
+    my hash %h = ();
+    my int $i = 0;
+    while ($i < 10000) {
+        my str $key = "key_" . $i;
+        $h{$key} = $i * 2;
+        $i = $i + 1;
+    }
+    my int $sum = 0;
+    $i = 0;
+    while ($i < 10000) {
+        my str $key = "key_" . $i;
+        $sum = $sum + $h{$key};
+        $i = $i + 1;
+    }
+    return $sum;
+}
+
+func bench_string() str {
+    my str $s = "";
+    my int $i = 0;
+    while ($i < 5000) {
+        $s = $s . "x";
+        $i = $i + 1;
+    }
+    return $s;
+}
+
+func bench_builtin_calls() int {
+    my int $sum = 0;
+    my array @arr = (1, 2, 3, 4, 5);
+    my int $i = 0;
+    while ($i < 50000) {
+        $sum = $sum + size(@arr) + length("hello");
+        $i = $i + 1;
+    }
+    return $sum;
+}
+
+func bench_map() int {
+    my array @data = ();
+    my int $i = 0;
+    while ($i < 10000) {
+        push(@data, $i);
+        $i = $i + 1;
+    }
+    my scalar $doubled = map { $_ * 2 } @data;
+    return size($doubled);
+}
+
+func bench_grep() int {
+    my array @data = ();
+    my int $i = 0;
+    while ($i < 10000) {
+        push(@data, $i);
+        $i = $i + 1;
+    }
+    my scalar $evens = grep { $_ % 2 == 0 } @data;
+    return size($evens);
+}
+
+func main() int {
+    my num $t0 = core::hires_time();
+
+    my int $r1 = fib(25);
+    my num $t1 = core::hires_time();
+    say("fib(25) = " . $r1 . " in " . sprintf("%.3f", $t1 - $t0) . "s");
+
+    my int $r2 = bench_loop();
+    my num $t2 = core::hires_time();
+    say("loop 100k = " . $r2 . " in " . sprintf("%.3f", $t2 - $t1) . "s");
+
+    my int $r3 = bench_hash();
+    my num $t3 = core::hires_time();
+    say("hash 10k = " . $r3 . " in " . sprintf("%.3f", $t3 - $t2) . "s");
+
+    my str $r4 = bench_string();
+    my num $t4 = core::hires_time();
+    say("string 5k = " . length($r4) . " in " . sprintf("%.3f", $t4 - $t3) . "s");
+
+    my int $r5 = bench_builtin_calls();
+    my num $t5 = core::hires_time();
+    say("builtin 50k = " . $r5 . " in " . sprintf("%.3f", $t5 - $t4) . "s");
+
+    my int $r6 = bench_map();
+    my num $t6 = core::hires_time();
+    say("map 10k = " . $r6 . " in " . sprintf("%.3f", $t6 - $t5) . "s");
+
+    my int $r7 = bench_grep();
+    my num $t7 = core::hires_time();
+    say("grep 10k = " . $r7 . " in " . sprintf("%.3f", $t7 - $t6) . "s");
+
+    say("total = " . sprintf("%.3f", $t7 - $t0) . "s");
+    return 0;
+}

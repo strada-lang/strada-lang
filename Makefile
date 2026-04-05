@@ -262,7 +262,7 @@ test-suite: stradac $(RUNTIME_OBJ)
 TOOL_BINS = tools/stradadoc tools/strada-soinfo tools/strada-md2man tools/strada-md2html tools/strada-jit tools/stradapp tools/xs2strada tools/strada-proftext tools/strada-profhtml
 
 # Converter tools (built separately)
-CONVERTER_BINS = tools/perl2strada tools/cpan2strada
+CONVERTER_BINS = perl2strada tools/cpan2strada
 
 tools: $(TOOL_BINS)
 	@echo ""
@@ -292,9 +292,16 @@ tools/stradapp: tools/stradapp.strada stradac
 	@echo "Building stradapp (preprocessor)..."
 	@./strada tools/stradapp.strada -o tools/stradapp
 
-tools/perl2strada: tools/perl2strada.strada stradac
+P2S_DIR = tools/perl2strada
+P2S_SRCS = $(P2S_DIR)/Helpers.strada $(P2S_DIR)/XS.strada $(P2S_DIR)/Pass1.strada $(P2S_DIR)/Pass2.strada $(P2S_DIR)/Pass2b.strada $(P2S_DIR)/Pass2c.strada $(P2S_DIR)/Pass2d.strada $(P2S_DIR)/StringConvert.strada $(P2S_DIR)/Pass2e.strada $(P2S_DIR)/ConvertLine.strada $(P2S_DIR)/Main.strada
+
+$(P2S_DIR)/Combined.strada: $(P2S_SRCS)
+	@cat $(P2S_DIR)/Helpers.strada $(P2S_DIR)/XS.strada $(P2S_DIR)/Pass1.strada $(P2S_DIR)/Pass2.strada $(P2S_DIR)/Pass2b.strada $(P2S_DIR)/Pass2c.strada $(P2S_DIR)/Pass2d.strada $(P2S_DIR)/StringConvert.strada $(P2S_DIR)/Pass2e.strada $(P2S_DIR)/ConvertLine.strada > $(P2S_DIR)/Combined.strada
+	@grep -v '^use lib\|^use Helpers\|^use XS\|^use Pass\|^use String\|^use Convert' $(P2S_DIR)/Main.strada >> $(P2S_DIR)/Combined.strada
+
+perl2strada: $(P2S_DIR)/Combined.strada stradac
 	@echo "Building perl2strada (Perl to Strada converter)..."
-	@./strada tools/perl2strada.strada -o tools/perl2strada
+	@./strada $(P2S_DIR)/Combined.strada -o perl2strada
 
 tools/xs2strada: tools/xs2strada.strada stradac
 	@echo "Building xs2strada (XS to Strada converter)..."
@@ -308,7 +315,7 @@ tools/strada-profhtml: tools/strada-profhtml.strada stradac
 	@echo "Building strada-profhtml (profile HTML report)..."
 	@./strada tools/strada-profhtml.strada -o tools/strada-profhtml
 
-tools/cpan2strada: tools/cpan2strada.strada stradac tools/perl2strada tools/xs2strada
+tools/cpan2strada: tools/cpan2strada.strada stradac perl2strada tools/xs2strada
 	@echo "Building cpan2strada (CPAN dist to Strada converter)..."
 	@./strada tools/cpan2strada.strada -o tools/cpan2strada
 
@@ -522,7 +529,7 @@ install: stradac $(RUNTIME_OBJ)
 install-perl2strada: tools/perl2strada
 	@echo "Installing perl2strada..."
 	@mkdir -p $(INSTALL_BIN)
-	install -m 755 tools/perl2strada $(INSTALL_BIN)/perl2strada
+	install -m 755 perl2strada $(INSTALL_BIN)/perl2strada
 	@echo "✓ perl2strada installed to $(INSTALL_BIN)/perl2strada"
 
 install-cpan2strada: tools/cpan2strada

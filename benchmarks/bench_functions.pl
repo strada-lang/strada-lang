@@ -1,10 +1,10 @@
-#!/usr/bin/env perl
+#!/usr/bin/perl
 use strict;
 use warnings;
-no warnings 'recursion';
 
 sub add3 {
-    return $_[0] + $_[1] + $_[2];
+    my ($a, $b, $c) = @_;
+    return $a + $b + $c;
 }
 
 sub ackermann {
@@ -20,8 +20,10 @@ sub ackermann {
 
 # Call a simple 3-arg function 5,000,000 times
 my $sum = 0;
-for my $i (0 .. 4_999_999) {
+my $i = 0;
+while ($i < 5000000) {
     $sum += add3($i, $i + 1, $i + 2);
+    $i++;
 }
 print "call sum: $sum\n";
 
