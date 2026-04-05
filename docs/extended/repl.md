@@ -1,15 +1,18 @@
 # Strada REPL
 
-The Strada REPL (Read-Eval-Print Loop) provides an interactive shell for experimenting with Strada code without creating files.
+The Strada REPL (Read-Eval-Print Loop) provides an interactive shell for experimenting with Strada code without creating files. It is part of `strada-interp`, which defaults to the bytecode VM backend for file execution but uses the tree-walking backend for the REPL (persistent VM state between inputs is not yet supported).
 
 ## Starting the REPL
 
 ```bash
-# Start interactive REPL
-./tools/strada-jit
+# Start interactive REPL (uses tree-walking backend)
+./strada-interp
 
-# Run a script file
-./tools/strada-jit script.st
+# Run a script file (uses VM backend by default)
+./strada-interp script.strada
+
+# Run a script with the tree-walking backend
+./strada-interp --tree-walk script.strada
 
 # Use via the strada command
 ./strada --repl
@@ -72,24 +75,17 @@ strada> $person{"name"}
 => Alice
 ```
 
-## Compiler Backends
+## Execution Backends
 
-The REPL supports three compiler backends, in order of preference:
+`strada-interp` supports two execution backends:
 
-1. **libtcc** (fastest) - In-process compilation using TCC library
-2. **tcc** - External TCC compiler
-3. **gcc** - Standard GCC compiler (slowest but most compatible)
+1. **VM** (default for file execution) - Compiles AST to bytecode, executes via dispatch loop. 4-5x faster than Perl 5.38 on compute benchmarks.
+2. **Tree-walk** (default for REPL) - Walks the AST directly. Used for the REPL since persistent VM state between inputs is not yet supported.
 
-Check the current backend:
-```
-strada> .compiler
-Compiler: tcc
-```
-
-Switch backends:
-```
-strada> .set compiler=gcc
-Compiler set to: gcc
+For file execution, the VM is used by default. Use `--tree-walk` to switch:
+```bash
+./strada-interp program.strada            # VM (default)
+./strada-interp --tree-walk program.strada # tree-walk
 ```
 
 ## Profiling
@@ -169,6 +165,8 @@ For multi-line input, the error shows context around the problematic line.
 
 ## Limitations
 
+- The REPL uses the tree-walking backend (no persistent VM state between inputs yet)
 - Package declarations are ignored (all code is in the default namespace)
-- `use` and `import_lib` statements are not yet supported
+- `use` and `import_lib` statements are not yet supported in the REPL
 - Some complex language features may not work in the dynamic REPL context
+- `__C__` blocks are skipped in the REPL (they are JIT-compiled and cached in the VM backend for file execution)

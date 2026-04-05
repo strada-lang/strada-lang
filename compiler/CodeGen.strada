@@ -2269,6 +2269,11 @@ func needs_temp_cleanup(scalar $cg, scalar $expr) int {
         return 1;
     }
 
+    # __PACKAGE__, __FILE__, __LINE__ produce owned StradaValue*
+    if ($type == NODE_DUNDER_PACKAGE() || $type == NODE_DUNDER_FILE() || $type == NODE_DUNDER_LINE()) {
+        return 1;
+    }
+
     # Ternary produces owned StradaValue* (from either branch)
     if ($type == NODE_TERNARY()) {
         return 1;
@@ -2358,7 +2363,7 @@ func needs_temp_cleanup(scalar $cg, scalar $expr) int {
             $name eq "utf8::downgrade" || $name eq "utf8::upgrade" ||
             $name eq "utf8::unicode_to_native" ||
             $name eq "substr" || $name eq "length" || $name eq "index" || $name eq "rindex" ||
-            $name eq "uc" || $name eq "lc" || $name eq "ucfirst" || $name eq "lcfirst" ||
+            $name eq "uc" || $name eq "upper" || $name eq "lc" || $name eq "lower" || $name eq "ucfirst" || $name eq "lcfirst" ||
             $name eq "trim" || $name eq "ltrim" || $name eq "rtrim" ||
             $name eq "chomp" || $name eq "chop" ||
             $name eq "sprintf" || $name eq "join" || $name eq "reverse" ||
@@ -7392,10 +7397,16 @@ func gen_expression(scalar $cg, scalar $expr) void {
         
         # derefto - dereference
         if ($name eq "derefto" || $name eq "deref") {
-            emit($cg, "strada_deref(");
             my scalar $args = $expr->{"args"};
-            gen_expression($cg, $args->[0]);
-            emit($cg, ")");
+            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $args->[0]) == 1) {
+                emit($cg, "({ StradaValue *__dtmp = ");
+                gen_expression($cg, $args->[0]);
+                emit($cg, "; StradaValue *__dres = strada_deref(__dtmp); strada_decref(__dtmp); __dres; })");
+            } else {
+                emit($cg, "strada_deref(");
+                gen_expression($cg, $args->[0]);
+                emit($cg, ")");
+            }
             return;
         }
         
@@ -7419,12 +7430,20 @@ func gen_expression(scalar $cg, scalar $expr) void {
 
         # deref_set - set value through a scalar reference
         if ($name eq "deref_set") {
-            emit($cg, "strada_deref_set(");
             my scalar $args = $expr->{"args"};
-            gen_expression($cg, $args->[0]);
-            emit($cg, ", ");
-            gen_expression($cg, $args->[1]);
-            emit($cg, ")");
+            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $args->[1]) == 1) {
+                emit($cg, "({ StradaValue *__ds_val = ");
+                gen_expression($cg, $args->[1]);
+                emit($cg, "; strada_deref_set(");
+                gen_expression($cg, $args->[0]);
+                emit($cg, ", __ds_val); strada_decref(__ds_val); })");
+            } else {
+                emit($cg, "strada_deref_set(");
+                gen_expression($cg, $args->[0]);
+                emit($cg, ", ");
+                gen_expression($cg, $args->[1]);
+                emit($cg, ")");
+            }
             return;
         }
 
@@ -10902,20 +10921,9 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 $a = $a + 1;
             }
 
-            # Emit the function call with fixed args + variadic array
-            if ($is_dynamic_call == 1) {
-                emit($cg, "strada_set_call_context(" . $dyn_ctx . "); ");
-            }
-            if ($returns_void == 0) {
-                emit($cg, "StradaValue *__va_result = ");
-            }
-            emit($cg, $c_name . "(");
-
-            # Emit fixed args (before variadic position)
+            # Capture fixed args in temps for cleanup
             for (my int $f = 0; $f < $variadic_param_idx; $f = $f + 1) {
-                if ($f > 0) {
-                    emit($cg, ", ");
-                }
+                emit($cg, "StradaValue *__farg" . $f . " = ");
                 if ($f < $arg_count) {
                     gen_expression($cg, $args->[$f]);
                 } else {
@@ -10932,13 +10940,38 @@ func gen_expression(scalar $cg, scalar $expr) void {
                         emit($cg, "strada_new_undef()");
                     }
                 }
+                emit($cg, "; ");
+            }
+
+            # Emit the function call with fixed args + variadic array
+            if ($is_dynamic_call == 1) {
+                emit($cg, "strada_set_call_context(" . $dyn_ctx . "); ");
+            }
+            if ($returns_void == 0) {
+                emit($cg, "StradaValue *__va_result = ");
+            }
+            emit($cg, $c_name . "(");
+
+            # Emit fixed args (using captured temps)
+            for (my int $f = 0; $f < $variadic_param_idx; $f = $f + 1) {
+                if ($f > 0) {
+                    emit($cg, ", ");
+                }
+                emit($cg, "__farg" . $f);
             }
 
             # Emit variadic array as last param
             if ($variadic_param_idx > 0) {
                 emit($cg, ", ");
             }
-            emit($cg, "__va_arr); strada_decref(__va_arr); ");
+            emit($cg, "__va_arr); ");
+
+            # Decref variadic array and fixed arg temps
+            emit($cg, "strada_decref(__va_arr); ");
+            for (my int $f = 0; $f < $variadic_param_idx; $f = $f + 1) {
+                emit($cg, "strada_decref(__farg" . $f . "); ");
+            }
+
             if ($is_dynamic_call == 1) {
                 emit($cg, "strada_set_call_context(0); ");
             }
@@ -10960,6 +10993,13 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 $needs_temps = 1;
             }
             $check_i = $check_i + 1;
+        }
+
+        # Also need temps when default parameter values will be emitted (they allocate and need cleanup)
+        if ($needs_temps == 0 && $func_info) {
+            if ($arg_count < $func_info->{"param_count"}) {
+                $needs_temps = 1;
+            }
         }
 
         if ($needs_temps == 1) {
@@ -10990,6 +11030,26 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 }
                 $t = $t + 1;
             }
+            # Declare temps for default parameter values (positions beyond provided args)
+            if ($func_info) {
+                my int $param_count = $func_info->{"param_count"};
+                my scalar $params = $func_info->{"params"};
+                my int $dt = $arg_count;
+                while ($dt < $param_count) {
+                    emit($cg, "StradaValue *__arg" . $dt . " = ");
+                    my scalar $dparam = $params->[$dt];
+                    if ($dparam->{"has_default"} == 1) {
+                        gen_expression($cg, $dparam->{"default"});
+                    } else {
+                        emit($cg, "strada_new_undef()");
+                    }
+                    emit($cg, "; ");
+                    if ($in_try > 0) {
+                        emit($cg, "strada_cleanup_push(__arg" . $dt . "); ");
+                    }
+                    $dt = $dt + 1;
+                }
+            }
             # Emit the function call, storing result if not void
             if ($is_dynamic_call == 1) {
                 emit($cg, "strada_set_call_context(" . $dyn_ctx . "); ");
@@ -11013,12 +11073,8 @@ func gen_expression(scalar $cg, scalar $expr) void {
                             gen_expression($cg, $args->[$i]);
                         }
                     } else {
-                        my scalar $param = $params->[$i];
-                        if ($param->{"has_default"} == 1) {
-                            gen_expression($cg, $param->{"default"});
-                        } else {
-                            emit($cg, "strada_new_undef()");
-                        }
+                        # Use the pre-captured __argN temp for default values
+                        emit($cg, "__arg" . $i);
                     }
                     $i = $i + 1;
                 }
@@ -11059,6 +11115,18 @@ func gen_expression(scalar $cg, scalar $expr) void {
                     }
                 }
                 $d = $d + 1;
+            }
+            # Decref default parameter temps
+            if ($func_info) {
+                my int $param_count = $func_info->{"param_count"};
+                my int $dd = $arg_count;
+                while ($dd < $param_count) {
+                    if ($in_try > 0) {
+                        emit($cg, "strada_cleanup_pop(); ");
+                    }
+                    emit($cg, "strada_decref(__arg" . $dd . "); ");
+                    $dd = $dd + 1;
+                }
             }
             if ($is_dynamic_call == 1) {
                 emit($cg, "strada_set_call_context(0); ");
@@ -11131,7 +11199,8 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 my int $is_anonymous = 0;
                 if ($val_type == NODE_ANON_ARRAY() || $val_type == NODE_ANON_HASH() ||
                     $val_type == NODE_INT_LITERAL() || $val_type == NODE_NUM_LITERAL() ||
-                    $val_type == NODE_STR_LITERAL() || $val_type == NODE_CALL() ||
+                    $val_type == NODE_STR_LITERAL() || $val_type == NODE_UNDEF() ||
+                    $val_type == NODE_CALL() ||
                     $val_type == NODE_REF() || $val_type == NODE_METHOD_CALL() ||
                     $val_type == NODE_DYN_METHOD_CALL() ||
                     $val_type == NODE_BINARY_OP() || $val_type == NODE_UNARY_OP() ||
@@ -11273,7 +11342,8 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 my int $is_anonymous = 0;
                 if ($val_type == NODE_ANON_ARRAY() || $val_type == NODE_ANON_HASH() ||
                     $val_type == NODE_INT_LITERAL() || $val_type == NODE_NUM_LITERAL() ||
-                    $val_type == NODE_STR_LITERAL() || $val_type == NODE_CALL() ||
+                    $val_type == NODE_STR_LITERAL() || $val_type == NODE_UNDEF() ||
+                    $val_type == NODE_CALL() ||
                     $val_type == NODE_REF() || $val_type == NODE_METHOD_CALL() ||
                     $val_type == NODE_DYN_METHOD_CALL() ||
                     $val_type == NODE_BINARY_OP() || $val_type == NODE_UNARY_OP() ||
@@ -11563,11 +11633,51 @@ func gen_expression(scalar $cg, scalar $expr) void {
             }
             # Special case: scalar deref assignment $$ref = value
             if ($target_type == NODE_DEREF_SCALAR()) {
-                emit($cg, "strada_deref_set(");
-                gen_expression($cg, $target->{"ref"});
-                emit($cg, ", ");
-                gen_expression($cg, $expr->{"value"});
-                emit($cg, ")");
+                my int $ref_needs_cleanup = 0;
+                my int $val_needs_cleanup = 0;
+                if ($cg->{"cleanup_enabled"} == 1) {
+                    $ref_needs_cleanup = needs_temp_cleanup($cg, $target->{"ref"});
+                    $val_needs_cleanup = needs_temp_cleanup($cg, $expr->{"value"});
+                }
+                if ($ref_needs_cleanup == 1 || $val_needs_cleanup == 1) {
+                    emit($cg, "({ ");
+                    if ($ref_needs_cleanup == 1) {
+                        emit($cg, "StradaValue *__ds_ref = ");
+                        gen_expression($cg, $target->{"ref"});
+                        emit($cg, "; ");
+                    }
+                    if ($val_needs_cleanup == 1) {
+                        emit($cg, "StradaValue *__ds_val = ");
+                        gen_expression($cg, $expr->{"value"});
+                        emit($cg, "; ");
+                    }
+                    emit($cg, "strada_deref_set(");
+                    if ($ref_needs_cleanup == 1) {
+                        emit($cg, "__ds_ref");
+                    } else {
+                        gen_expression($cg, $target->{"ref"});
+                    }
+                    emit($cg, ", ");
+                    if ($val_needs_cleanup == 1) {
+                        emit($cg, "__ds_val");
+                    } else {
+                        gen_expression($cg, $expr->{"value"});
+                    }
+                    emit($cg, "); ");
+                    if ($ref_needs_cleanup == 1) {
+                        emit($cg, "strada_decref(__ds_ref); ");
+                    }
+                    if ($val_needs_cleanup == 1) {
+                        emit($cg, "strada_decref(__ds_val); ");
+                    }
+                    emit($cg, "})");
+                } else {
+                    emit($cg, "strada_deref_set(");
+                    gen_expression($cg, $target->{"ref"});
+                    emit($cg, ", ");
+                    gen_expression($cg, $expr->{"value"});
+                    emit($cg, ")");
+                }
                 return;
             }
             # Special case: assigning scalar to array variable @arr = ($x)
@@ -13030,12 +13140,12 @@ func gen_expression(scalar $cg, scalar $expr) void {
                     # Expression key - use strada_to_str
                     emit($cg, "{ char *__ah_k" . $e . " = strada_to_str_ss(");
                     gen_expression($cg, $key_exprs->[$e]);
-                    emit($cg, "); strada_hash_set(__ah_hash->value.hv, __ah_k" . $e . ", ");
+                    emit($cg, "); strada_hash_set_take(__ah_hash->value.hv, __ah_k" . $e . ", ");
                     gen_expression($cg, $values->[$e]);
                     emit($cg, "); strada_cstr_free(__ah_k" . $e . "); } ");
                 } else {
                     # String key
-                    emit($cg, "strada_hash_set(__ah_hash->value.hv, \"" . $keys->[$e] . "\", ");
+                    emit($cg, "strada_hash_set_take(__ah_hash->value.hv, \"" . $keys->[$e] . "\", ");
                     gen_expression($cg, $values->[$e]);
                     emit($cg, "); ");
                 }

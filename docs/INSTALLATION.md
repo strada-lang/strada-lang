@@ -175,7 +175,7 @@ export STRADA_HOME="/usr/local/lib/strada"
 | `make lib-crypt` | Build crypt library |
 | `make lib-ssl` | Build SSL library |
 | `make lib-readline` | Build readline library |
-| `make interpreter` | Build the tree-walking interpreter (`strada-interp`) |
+| `make interpreter` | Build the interpreter (`strada-interp`) with bytecode VM |
 | `make tools` | Build tools (stradadoc, strada-soinfo, strada-proftext, strada-profhtml, etc.) |
 | `make run PROG=name` | Compile and run `examples/name.strada` |
 | `make test` | Run runtime tests |
@@ -249,6 +249,8 @@ strada/
 │   └── Main.strada      # Compiler source (entry point)
 ├── interpreter/
 │   ├── Main.strada      # Interpreter driver (REPL + file execution)
+│   ├── vm_compiler.c    # AST to bytecode compiler
+│   ├── vm_run.c         # Bytecode VM dispatch loop
 │   └── Combined.strada  # Combined source (generated)
 ├── bootstrap/
 │   └── stradac          # Bootstrap compiler (frozen)
@@ -256,7 +258,7 @@ strada/
 ├── examples/            # Example programs
 ├── lib/                 # Standard library modules
 │   └── Strada/
-│       ├── Interpreter.strada  # Tree-walking interpreter library
+│       ├── Interpreter.strada  # Interpreter library (tree-walk backend)
 │       └── JIT.strada          # JIT eval library
 └── docs/                # Documentation
 ```

@@ -27,7 +27,7 @@ Welcome to the Strada programming language documentation. Strada is a strongly-t
 | [FFI Guide](FFI_GUIDE.md) | C integration and foreign functions |
 | [Perl Integration](PERL_INTEGRATION.md) | Calling Perl from Strada and vice versa |
 | [Runtime API](RUNTIME_API.md) | C runtime library reference |
-| [Interpreter](INTERPRETER.md) | Tree-walking interpreter and REPL |
+| [Interpreter](INTERPRETER.md) | Bytecode VM interpreter and REPL |
 | [Compiler Architecture](COMPILER_ARCHITECTURE.md) | How the compiler works |
 
 ## Quick Example
@@ -82,10 +82,12 @@ Compile and run:
 - **Regex** with inline `/pattern/` syntax
 
 ### Interpreter
-- Tree-walking interpreter for interactive use and scripting
+- Bytecode VM interpreter (default), 4-5x faster than Perl 5.38
+- Tree-walking backend available via `--tree-walk`
 - REPL with readline support
+- `__C__` blocks JIT-compiled and cached in VM mode
 - Embedded eval via `Strada::Interpreter::eval_string()`
-- No C compiler needed at runtime
+- No C compiler needed at runtime (except for `__C__` blocks)
 
 ### Performance
 - Compiles to C, then native code
@@ -121,4 +123,4 @@ Archived historical documentation is in `docs/archive/`.
 
 ## Version
 
-This documentation covers Strada as of February 2026.
+This documentation covers Strada as of April 2026.

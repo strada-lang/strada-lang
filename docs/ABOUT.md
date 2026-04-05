@@ -55,16 +55,19 @@ This provides:
 - Small binary size
 - Easy deployment
 
-### Tree-Walking Interpreter
+### Bytecode VM Interpreter
 
-Strada also includes a tree-walking interpreter that executes programs directly from the AST without generating C code. This enables:
+Strada includes a bytecode VM interpreter (`strada-interp`) that compiles the AST to bytecode and executes it via a computed goto dispatch loop. The VM is 4-5x faster than Perl 5.38 on compute benchmarks. Features:
 
-- **Interactive REPL** for experimentation
+- **Bytecode compilation**: AST is compiled to bytecode instructions, then executed by the VM
+- **Tagged pointer VMValue**: 8-byte values with zero-allocation integer arithmetic
+- **`__C__` block JIT**: Inline C code is compiled to `.so` files by gcc and cached in `~/.cache/strada/cblocks/`
+- **Interactive REPL** for experimentation (uses tree-walking backend)
 - **Quick scripting** without a compilation step
 - **Embedded eval** via `Strada::Interpreter::eval_string()`
-- **No C compiler required** at runtime
+- **No C compiler required** at runtime (except for `__C__` blocks)
 
-See the [Interpreter Guide](INTERPRETER.md) for details.
+A tree-walking backend is available as a fallback via the `--tree-walk` flag. See the [Interpreter Guide](INTERPRETER.md) for details.
 
 ### Object-Oriented Programming
 
@@ -161,9 +164,9 @@ The compilation process:
 2. **Self-hosting compiler** (written in Strada) compiles user programs
 3. User programs compile to C, then to native binaries
 
-Alternatively, the tree-walking interpreter can execute user programs
-directly from the AST, sharing the same Lexer and Parser front-end as
-the compiler.
+Alternatively, the bytecode VM interpreter can execute user programs
+directly, sharing the same Lexer and Parser front-end as the compiler.
+The VM compiles the AST to bytecode and runs it via a dispatch loop.
 
 ## Use Cases
 
@@ -180,7 +183,7 @@ Strada is well-suited for:
 | Feature | Perl | Strada |
 |---------|------|--------|
 | Typing | Dynamic | Static |
-| Execution | Interpreted | Compiled + Interpreter |
+| Execution | Interpreted | Compiled + Bytecode VM Interpreter |
 | Sigils | Yes | Yes |
 | Regex | Yes | Yes |
 | OOP | Yes (multiple styles) | Yes (blessed refs) |

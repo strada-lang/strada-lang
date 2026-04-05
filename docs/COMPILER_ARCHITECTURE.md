@@ -93,7 +93,7 @@ The runtime provides memory management, data structures, and built-in functions.
 
 ## Interpreter (Alternative Execution Path)
 
-In addition to the compile-to-C pipeline, Strada includes a tree-walking interpreter that executes programs directly from the AST:
+In addition to the compile-to-C pipeline, Strada includes an interpreter (`strada-interp`) with two backends:
 
 ```
 Strada Source (.strada)
@@ -106,20 +106,42 @@ Strada Source (.strada)
         ▼
    AST (in memory)
         │
-   ┌────┴────┐
-   │         │
-   ▼         ▼
-CodeGen   Interpreter
- (C out)   (tree-walk)
+   ┌────┴─────────────────┐
+   │         │             │
+   ▼         ▼             ▼
+CodeGen   Bytecode VM   Tree-Walk
+ (C out)  (default)     (--tree-walk)
 ```
 
-The interpreter (`lib/Strada/Interpreter.strada`) reuses the compiler's Lexer and Parser, then walks AST nodes to evaluate the program. This powers:
+### Bytecode VM (Default)
+
+The default interpreter backend compiles the AST to bytecode, then executes it via a computed goto dispatch loop:
+
+```
+AST → Bytecode Compiler → Bytecode Instructions → VM Dispatch Loop
+```
+
+Key characteristics:
+- **VMValue**: Tagged pointer representation (8 bytes) with zero-allocation integer arithmetic
+- **Computed goto dispatch**: Uses GCC's computed goto extension for efficient opcode dispatch
+- **`__C__` block JIT**: `__C__` blocks are compiled to `.so` files by gcc, cached in `~/.cache/strada/cblocks/` with 7-day LRU eviction
+- **Performance**: 4-5x faster than Perl 5.38 on compute benchmarks
+
+Source files:
+- `interpreter/vm_compiler.c` - AST to bytecode compiler
+- `interpreter/vm_run.c` - Bytecode dispatch loop
+
+### Tree-Walking Backend (Legacy)
+
+The tree-walking backend (`lib/Strada/Interpreter.strada`) walks AST nodes directly to evaluate the program. It is available via `--tree-walk` and is used by the REPL (persistent VM state between inputs is not yet supported).
+
+### Powered by the interpreter:
 
 - **`strada-interp`** - Standalone interpreter with REPL (`interpreter/Main.strada`)
 - **`Strada::Interpreter::eval_string()`** - Embedded eval from compiled programs
 - **`Strada::JIT::eval()`** - JIT eval (compiles to .so at runtime; uses the compile path, not the interpreter)
 
-The interpreter supports the full language except `__C__` blocks and async/await. See `docs/INTERPRETER.md` for details.
+The interpreter supports the full language including closures, OOP, try/catch, regex, foreach, map/grep/sort, import_lib, and operator overloading. Async/await is not supported. See `docs/INTERPRETER.md` for details.
 
 ## Compilation Pipeline
 
@@ -638,8 +660,10 @@ strada/
 │   ├── Combined.strada # Combined source (generated)
 │   └── Combined.c      # Compiled to C (generated)
 │
-├── interpreter/        # Tree-walking interpreter
+├── interpreter/        # Interpreter (bytecode VM + tree-walk)
 │   ├── Main.strada    # Driver (REPL + file execution)
+│   ├── vm_compiler.c  # AST to bytecode compiler
+│   ├── vm_run.c       # Bytecode VM dispatch loop
 │   └── Combined.strada # Combined source (generated)
 │
 ├── runtime/            # Runtime library
