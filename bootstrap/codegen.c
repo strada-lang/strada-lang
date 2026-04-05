@@ -53,6 +53,7 @@ CodeGen* codegen_new(FILE *output) {
     cg->functions.names = malloc(cg->functions.capacity * sizeof(char*));
     cg->functions.param_counts = malloc(cg->functions.capacity * sizeof(int));
     cg->functions.min_args = malloc(cg->functions.capacity * sizeof(int));
+    cg->functions.is_void = malloc(cg->functions.capacity * sizeof(int));
     
     // Initialize struct registry
     cg->structs.capacity = 32;
@@ -123,19 +124,18 @@ void codegen_free(CodeGen *cg) {
     }
 }
 
-static void register_function(CodeGen *cg, const char *name, int param_count, int min_args) {
-    // Check capacity
+static void register_function(CodeGen *cg, const char *name, int param_count, int min_args, int is_void) {
     if (cg->functions.count >= cg->functions.capacity) {
         cg->functions.capacity *= 2;
         cg->functions.names = realloc(cg->functions.names, cg->functions.capacity * sizeof(char*));
         cg->functions.param_counts = realloc(cg->functions.param_counts, cg->functions.capacity * sizeof(int));
         cg->functions.min_args = realloc(cg->functions.min_args, cg->functions.capacity * sizeof(int));
+        cg->functions.is_void = realloc(cg->functions.is_void, cg->functions.capacity * sizeof(int));
     }
-    
-    // Add function
     cg->functions.names[cg->functions.count] = strdup(name);
     cg->functions.param_counts[cg->functions.count] = param_count;
     cg->functions.min_args[cg->functions.count] = min_args;
+    cg->functions.is_void[cg->functions.count] = is_void;
     cg->functions.count++;
 }
 
@@ -146,6 +146,14 @@ static int lookup_function(CodeGen *cg, const char *name, int *param_count, int 
             *min_args = cg->functions.min_args[i];
             return 1;
         }
+    }
+    return 0;
+}
+
+static int lookup_function_is_void(CodeGen *cg, const char *name) {
+    for (int i = 0; i < cg->functions.count; i++) {
+        if (strcmp(cg->functions.names[i], name) == 0)
+            return cg->functions.is_void[i];
     }
     return 0;
 }
@@ -863,7 +871,8 @@ void codegen_generate(CodeGen *cg, ASTNode *program) {
         if (strcmp(func->data.function.name, "main") != 0) {
             register_function(cg, func->data.function.name,
                             func->data.function.param_count,
-                            func->data.function.min_args);
+                            func->data.function.min_args,
+                            func->data.function.return_type == TYPE_VOID ? 1 : 0);
         }
     }
     
@@ -2424,42 +2433,79 @@ static void gen_expression(CodeGen *cg, ASTNode *expr) {
                 emit(cg, "), 64))");
             } else {
                 // User-defined function (possibly from another package)
-                // Check if this function has optional parameters
                 int param_count = 0;
                 int min_args = 0;
                 int has_optionals = lookup_function(cg, expr->data.call.name, &param_count, &min_args);
-                
-                // Generate function name with package prefix if qualified
-                if (expr->data.call.package_name) {
-                    // Qualified call: Package::Name::func -> Package_Name_func
-                    char *prefix = package_to_prefix(expr->data.call.package_name);
-                    emit(cg, "%s%s(", prefix, expr->data.call.name);
-                    free(prefix);
-                } else if (cg->current_package) {
-                    // Local call within a package - add current package prefix
-                    char *prefix = package_to_prefix(cg->current_package);
-                    emit(cg, "%s%s(", prefix, expr->data.call.name);
-                    free(prefix);
-                } else {
-                    // Local call in main package
-                    emit(cg, "%s(", expr->data.call.name);
-                }
-                
-                // Generate provided arguments
+                int total_args = expr->data.call.arg_count;
+                if (has_optionals && total_args < param_count)
+                    total_args = param_count;
+
+                // Check if any args are owned temporaries that need cleanup
+                int needs_cleanup = 0;
                 for (int i = 0; i < expr->data.call.arg_count; i++) {
-                    if (i > 0) emit(cg, ", ");
-                    gen_expression(cg, expr->data.call.args[i]);
+                    if (expr_is_owned(expr->data.call.args[i])) { needs_cleanup = 1; break; }
                 }
-                
-                // Fill in missing optional arguments with strada_new_undef()
-                if (has_optionals && expr->data.call.arg_count < param_count) {
-                    for (int i = expr->data.call.arg_count; i < param_count; i++) {
-                        if (i > 0) emit(cg, ", ");
-                        emit(cg, "strada_new_undef()");
+                if (has_optionals && expr->data.call.arg_count < param_count)
+                    needs_cleanup = 1;
+
+                if (needs_cleanup) {
+                    int is_void = lookup_function_is_void(cg, expr->data.call.name);
+                    emit(cg, "({ ");
+                    // Capture owned args in temps
+                    for (int i = 0; i < total_args; i++) {
+                        int owned = (i < expr->data.call.arg_count) ? expr_is_owned(expr->data.call.args[i]) : 1;
+                        if (owned) {
+                            emit(cg, "StradaValue *__ca%d = ", i);
+                            if (i < expr->data.call.arg_count)
+                                gen_expression(cg, expr->data.call.args[i]);
+                            else
+                                emit(cg, "strada_new_undef()");
+                            emit(cg, "; ");
+                        }
                     }
+                    if (!is_void) emit(cg, "StradaValue *__cr = ");
+                    if (expr->data.call.package_name) {
+                        char *prefix = package_to_prefix(expr->data.call.package_name);
+                        emit(cg, "%s%s(", prefix, expr->data.call.name);
+                        free(prefix);
+                    } else if (cg->current_package) {
+                        char *prefix = package_to_prefix(cg->current_package);
+                        emit(cg, "%s%s(", prefix, expr->data.call.name);
+                        free(prefix);
+                    } else {
+                        emit(cg, "%s(", expr->data.call.name);
+                    }
+                    for (int i = 0; i < total_args; i++) {
+                        if (i > 0) emit(cg, ", ");
+                        int owned = (i < expr->data.call.arg_count) ? expr_is_owned(expr->data.call.args[i]) : 1;
+                        if (owned) emit(cg, "__ca%d", i);
+                        else gen_expression(cg, expr->data.call.args[i]);
+                    }
+                    emit(cg, "); ");
+                    for (int i = 0; i < total_args; i++) {
+                        int owned = (i < expr->data.call.arg_count) ? expr_is_owned(expr->data.call.args[i]) : 1;
+                        if (owned) emit(cg, "strada_decref(__ca%d); ", i);
+                    }
+                    if (!is_void) emit(cg, "__cr; })");
+                    else emit(cg, "(StradaValue*)0; })");
+                } else {
+                    if (expr->data.call.package_name) {
+                        char *prefix = package_to_prefix(expr->data.call.package_name);
+                        emit(cg, "%s%s(", prefix, expr->data.call.name);
+                        free(prefix);
+                    } else if (cg->current_package) {
+                        char *prefix = package_to_prefix(cg->current_package);
+                        emit(cg, "%s%s(", prefix, expr->data.call.name);
+                        free(prefix);
+                    } else {
+                        emit(cg, "%s(", expr->data.call.name);
+                    }
+                    for (int i = 0; i < expr->data.call.arg_count; i++) {
+                        if (i > 0) emit(cg, ", ");
+                        gen_expression(cg, expr->data.call.args[i]);
+                    }
+                    emit(cg, ")");
                 }
-                
-                emit(cg, ")");
             }
             break;
         }

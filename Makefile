@@ -118,8 +118,9 @@ test: runtime
 	@echo ""
 	@echo "✓ Runtime tests passed"
 
-# Build bootstrap compiler (frozen Combined.c from self-hosting compiler)
-bootstrap: $(BOOTSTRAP_STRADAC)
+# Build bootstrap compiler (C version)
+bootstrap:
+	$(MAKE) -C $(BOOTSTRAP_DIR)
 
 # Create combined source for self-hosting compiler
 $(COMPILER_DIR)/Combined.strada: $(COMPILER_DIR)/AST.strada $(COMPILER_DIR)/Lexer.strada $(COMPILER_DIR)/Parser.strada $(COMPILER_DIR)/Semantic.strada $(COMPILER_DIR)/CodeGen.strada $(COMPILER_DIR)/Main.strada
@@ -131,10 +132,9 @@ $(COMPILER_DIR)/Combined_stage1.c: $(COMPILER_DIR)/Combined.strada $(BOOTSTRAP_S
 	@echo "=== Stage 1: Compiling self-hosting compiler (bootstrap -> C) ==="
 	$(BOOTSTRAP_STRADAC) $(COMPILER_DIR)/Combined.strada $(COMPILER_DIR)/Combined_stage1.c
 
-# Build bootstrap compiler from frozen Combined.c + runtime
-$(BOOTSTRAP_STRADAC): $(BOOTSTRAP_DIR)/Combined.c $(RUNTIME_OBJ)
-	@echo "=== Building bootstrap compiler ==="
-	$(CC) $(CFLAGS) -Wno-unused-function -rdynamic -o $@ $(BOOTSTRAP_DIR)/Combined.c $(RUNTIME_OBJ) -I$(RUNTIME_DIR) $(LDFLAGS)
+# Build bootstrap compiler if it doesn't exist
+$(BOOTSTRAP_STRADAC):
+	$(MAKE) -C $(BOOTSTRAP_DIR)
 
 # Build the stage 1 compiler executable
 # Note: -rdynamic exports symbols so that shared libraries loaded at compile time
@@ -165,6 +165,7 @@ selfhost: stradac
 update-bootstrap: stradac
 	@echo "=== Updating bootstrap with current stage 2 output ==="
 	cp $(COMPILER_DIR)/Combined.c $(BOOTSTRAP_DIR)/Combined.c
+	@cd $(BOOTSTRAP_DIR) && bash ../scripts/split-bootstrap.sh
 	@echo "✓ Bootstrap updated"
 
 # Compile and run an example using SELF-HOSTING compiler

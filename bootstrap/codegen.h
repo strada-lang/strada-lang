@@ -19,11 +19,12 @@ typedef struct {
     int included_module_count;
     const char *source_dir;      // Directory of source file being compiled
     
-    // Function registry for optional parameters
+    // Function registry for optional parameters and return types
     struct {
         char **names;
         int *param_counts;
         int *min_args;
+        int *is_void;
         int count;
         int capacity;
     } functions;
