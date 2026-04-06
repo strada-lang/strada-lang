@@ -707,6 +707,17 @@ StradaValue* strada_ref_hash(StradaHash **ptr);       /* Reference to hash */
 
 /* New Perl-style reference functions */
 StradaValue* strada_new_ref(StradaValue *target, char ref_type);  /* \$var, \@arr, \%hash */
+
+/* Slot references — reference to a C local variable's storage (StradaValue**).
+ * Allows $$ref and $$ref = val to read/write the original variable.
+ * Used for pass-by-reference patterns: func(\$var).
+ * WARNING: The slot ref MUST NOT outlive the stack frame containing the variable. */
+#define STRADA_SLOT_REF_MARKER ((size_t)0xDEAD5107ULL)
+StradaValue* strada_slot_ref_create(StradaValue **slot);
+static inline int strada_is_slot_ref(StradaValue *sv) {
+    return sv && !STRADA_IS_TAGGED_INT(sv) && sv->type == STRADA_REF &&
+           sv->struct_size == STRADA_SLOT_REF_MARKER;
+}
 StradaValue* strada_deref(StradaValue *ref);          /* $$ref - deref scalar ref */
 StradaValue* strada_deref_set(StradaValue *ref, StradaValue *new_value); /* deref_set($ref, $val) */
 StradaHash* strada_deref_hash(StradaValue *ref);      /* For $ref->{key} */

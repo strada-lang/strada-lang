@@ -12355,6 +12355,12 @@ func gen_expression(scalar $cg, scalar $expr) void {
             emit($cg, "strada_cpointer_new((void*)");
             gen_expression($cg, $expr->{"target"});
             emit($cg, ")");
+        } elsif ($ref_type eq "$" && $expr->{"target"}->{"type"} == NODE_VARIABLE() && $expr->{"target"}->{"sigil"} eq "$") {
+            # Scalar variable reference \$var — use slot ref for true aliasing
+            # This allows $$ref = val to update the original variable
+            emit($cg, "strada_slot_ref_create(&");
+            gen_expression($cg, $expr->{"target"});
+            emit($cg, ")");
         } else {
             emit($cg, "strada_new_ref(");
             gen_expression($cg, $expr->{"target"});

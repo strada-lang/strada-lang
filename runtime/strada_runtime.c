@@ -6299,6 +6299,11 @@ void strada_free_value(StradaValue *sv) {
             strada_free_hash(sv->value.hv);
             break;
         case STRADA_REF:
+            /* Slot refs don't own the target — it's a C local variable */
+            if (strada_is_slot_ref(sv)) {
+                /* Nothing to free — the slot is a stack variable */
+                break;
+            }
             /* Decrement reference count on the referent (skip for weak refs -
              * their refcount contribution was already removed in strada_weaken) */
             if (sv->value.rv && !SV_IS_WEAK(sv)) {
@@ -9898,6 +9903,19 @@ StradaValue* strada_ref_hash(StradaHash **ptr) {
 
 /* New Perl-style reference functions */
 
+StradaValue* strada_slot_ref_create(StradaValue **slot) {
+    /* Create a slot reference — stores the address of a StradaValue* variable.
+     * This enables true pass-by-reference: $$ref reads/writes the original variable.
+     * The slot ref MUST NOT outlive the stack frame containing the variable. */
+    if (!slot) return strada_new_undef();
+    StradaValue *ref = strada_value_alloc();
+    ref->type = STRADA_REF;
+    ref->refcount = 1;
+    ref->value.ptr = (void*)slot;
+    ref->struct_size = STRADA_SLOT_REF_MARKER;
+    return ref;
+}
+
 StradaValue* strada_new_ref(StradaValue *target, char ref_type) {
     /* Create a reference with type info: \$var, \@arr, \%hash */
     (void)ref_type;  /* Reserved for future type checking */
@@ -9930,6 +9948,14 @@ StradaValue* strada_deref(StradaValue *ref) {
     if (!ref) return strada_new_undef();
     if (STRADA_IS_TAGGED_INT(ref)) return ref;  /* tagged ints pass through */
     if (ref->type == STRADA_REF) {
+        /* Slot ref: follow double pointer to read the variable's current value */
+        if (strada_is_slot_ref(ref)) {
+            StradaValue **slot = (StradaValue**)ref->value.ptr;
+            StradaValue *result = *slot;
+            if (!result) return strada_new_undef();
+            strada_incref(result);
+            return result;
+        }
         StradaValue *result = ref->value.rv;
         if (!result) return strada_new_undef();  /* Weak ref target was freed */
         strada_incref(result);
@@ -9942,6 +9968,16 @@ StradaValue* strada_deref(StradaValue *ref) {
 StradaValue* strada_deref_set(StradaValue *ref, StradaValue *new_value) {
     /* Set value through a scalar reference: deref_set($ref, $value) */
     if (!ref || STRADA_IS_TAGGED_INT(ref) || ref->type != STRADA_REF) return new_value;
+
+    /* Slot ref: write directly to the variable's storage */
+    if (strada_is_slot_ref(ref)) {
+        StradaValue **slot = (StradaValue**)ref->value.ptr;
+        StradaValue *old = *slot;
+        strada_incref(new_value);
+        *slot = new_value;
+        strada_decref(old);
+        return new_value;
+    }
 
     StradaValue *target = ref->value.rv;
     if (!target) return new_value;
