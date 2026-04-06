@@ -83,6 +83,9 @@ test_output_contains "$SCRIPT_DIR/test_const.strada" "test_const" "All const tes
 # Test: Recursion limit
 test_output_contains "$SCRIPT_DIR/test_recursion_limit.strada" "test_recursion_limit" "All recursion limit tests passed" "Recursion limit"
 
+# Test: Perla gap fixes (compound assign, our++, shift(), int(), hash slurp, hash from array, extends+new)
+test_output_contains "$EXAMPLES_DIR/test_perla_gaps.strada" "test_perla_gaps" "All Perla gap tests passed" "Perla gap fixes"
+
 # Test: Goto and loop labels
 test_run "$EXAMPLES_DIR/test_goto.strada" "test_goto" "Goto"
 test_run "$EXAMPLES_DIR/test_loop_labels.strada" "test_loop_labels" "Loop labels"

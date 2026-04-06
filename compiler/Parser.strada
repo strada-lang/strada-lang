@@ -1457,6 +1457,19 @@ func parse_primary(scalar $parser) scalar {
         parser_error($parser, "unexpected 'fn' in expression context");
     }
 
+    # int() as a function call (Perl's truncate-toward-zero)
+    if ($type eq "TYPE_INT" && parser_peek($parser)->{"type"} eq "LPAREN") {
+        parser_advance($parser);  # consume TYPE_INT
+        parser_advance($parser);  # consume LPAREN
+        my scalar $call = ast_new_call("int");
+        if (!parser_check($parser, "RPAREN")) {
+            my scalar $arg = parse_expression($parser);
+            ast_add_arg($call, $arg);
+        }
+        parser_expect($parser, "RPAREN");
+        return $call;
+    }
+
     # Function call (bareword)
     if ($type eq "IDENT") {
         my str $name = $tok->{"value"};
@@ -1506,6 +1519,10 @@ func parse_primary(scalar $parser) scalar {
                     $name eq "lcfirst" || $name eq "trim" || $name eq "defined" || $name eq "ref" ||
                     $name eq "chr" || $name eq "ord" || $name eq "chomp") {
                     ast_add_arg($call, ast_new_variable("_", "$"));
+                }
+                # shift()/pop() with empty parens default to @_
+                if ($name eq "shift" || $name eq "pop") {
+                    ast_add_arg($call, ast_new_variable("_", "@"));
                 }
             }
 

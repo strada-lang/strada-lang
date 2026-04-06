@@ -2734,6 +2734,132 @@ func gen_call_with_arg_cleanup(scalar $cg, str $c_func_name, scalar $args, int $
     emit($cg, "__call_result; })");
 }
 
+# Compound assignment on hash element: $h{"k"} += expr, $h{"k"} -= expr, $h{"k"} .= expr
+func gen_hash_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op) void {
+    my int $ttype = $target->{"type"};
+    my int $rhs_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $rhs) == 1;
+    # Determine hash expression and key expression
+    my scalar $hash_expr = $target->{"hash"};
+    my scalar $key_expr = $target->{"key"};
+    if ($ttype == NODE_DEREF_HASH()) {
+        $hash_expr = $target->{"ref"};
+    }
+    my int $key_is_lit = $key_expr->{"type"} == NODE_STR_LITERAL();
+    my int $hash_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $hash_expr) == 1;
+    # Generate: ({ hash_ref; key; old = fetch; new = old OP rhs; store(hash, key, new); decref... })
+    emit($cg, "({ StradaValue *__hca_h = ");
+    gen_expression($cg, $hash_expr);
+    emit($cg, "; ");
+    if ($key_is_lit == 0) {
+        emit($cg, "StradaValue *__hca_k = ");
+        gen_expression($cg, $key_expr);
+        emit($cg, "; ");
+    }
+    emit($cg, "StradaValue *__hca_old = ");
+    if ($key_is_lit == 1) {
+        emit($cg, "strada_hv_fetch_owned(__hca_h, ");
+        gen_str_literal_c($cg, $key_expr->{"value"});
+        emit($cg, ")");
+    } else {
+        emit($cg, "strada_hv_fetch_owned_sv(__hca_h, __hca_k)");
+    }
+    emit($cg, "; ");
+    if ($rhs_cleanup == 1) {
+        emit($cg, "StradaValue *__hca_rhs = ");
+        gen_expression($cg, $rhs);
+        emit($cg, "; ");
+    }
+    emit($cg, "StradaValue *__hca_new = ");
+    if ($op eq "+=") {
+        emit($cg, "strada_new_num(strada_to_num(__hca_old) + strada_to_num(");
+        if ($rhs_cleanup == 1) { emit($cg, "__hca_rhs"); }
+        else { gen_expression($cg, $rhs); }
+        emit($cg, "))");
+    } elsif ($op eq "-=") {
+        emit($cg, "strada_new_num(strada_to_num(__hca_old) - strada_to_num(");
+        if ($rhs_cleanup == 1) { emit($cg, "__hca_rhs"); }
+        else { gen_expression($cg, $rhs); }
+        emit($cg, "))");
+    } elsif ($op eq ".=") {
+        emit($cg, "strada_concat_sv(__hca_old, ");
+        if ($rhs_cleanup == 1) { emit($cg, "__hca_rhs"); }
+        else { gen_expression($cg, $rhs); }
+        emit($cg, ")");
+    } elsif ($op eq "*=") {
+        emit($cg, "strada_new_num(strada_to_num(__hca_old) * strada_to_num(");
+        if ($rhs_cleanup == 1) { emit($cg, "__hca_rhs"); }
+        else { gen_expression($cg, $rhs); }
+        emit($cg, "))");
+    } elsif ($op eq "/=") {
+        emit($cg, "strada_new_num(strada_to_num(__hca_old) / strada_to_num(");
+        if ($rhs_cleanup == 1) { emit($cg, "__hca_rhs"); }
+        else { gen_expression($cg, $rhs); }
+        emit($cg, "))");
+    } else {
+        # Fallback — compute as num
+        emit($cg, "strada_new_num(strada_to_num(__hca_old))");
+    }
+    emit($cg, "; ");
+    # Store
+    if ($key_is_lit == 1) {
+        emit($cg, "strada_hv_store(__hca_h, ");
+        gen_str_literal_c($cg, $key_expr->{"value"});
+        emit($cg, ", __hca_new); ");
+    } else {
+        emit($cg, "strada_hash_set_sv(__hca_h, __hca_k, __hca_new); ");
+    }
+    emit($cg, "strada_decref(__hca_new); strada_decref(__hca_old); ");
+    if ($rhs_cleanup == 1) { emit($cg, "strada_decref(__hca_rhs); "); }
+    if ($key_is_lit == 0) { emit($cg, "strada_decref(__hca_k); "); }
+    if ($hash_cleanup == 1) { emit($cg, "strada_decref(__hca_h); "); }
+    emit($cg, "(StradaValue*)NULL; })");
+}
+
+# Compound assignment on array element: $a[$i] += expr
+func gen_array_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op) void {
+    my scalar $arr_expr = $target->{"array"};
+    my scalar $idx_expr = $target->{"index"};
+    my int $rhs_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $rhs) == 1;
+    emit($cg, "({ StradaValue *__aca_arr = ");
+    gen_expression($cg, $arr_expr);
+    emit($cg, "; int __aca_idx = ");
+    emit_int_operand($cg, $idx_expr);
+    emit($cg, "; StradaValue *__aca_old = strada_array_get(strada_deref_array(__aca_arr), __aca_idx); ");
+    if ($rhs_cleanup == 1) {
+        emit($cg, "StradaValue *__aca_rhs = ");
+        gen_expression($cg, $rhs);
+        emit($cg, "; ");
+    }
+    emit($cg, "StradaValue *__aca_new = ");
+    if ($op eq "+=") {
+        emit($cg, "strada_new_num(strada_to_num(__aca_old) + strada_to_num(");
+        if ($rhs_cleanup == 1) { emit($cg, "__aca_rhs"); } else { gen_expression($cg, $rhs); }
+        emit($cg, "))");
+    } elsif ($op eq "-=") {
+        emit($cg, "strada_new_num(strada_to_num(__aca_old) - strada_to_num(");
+        if ($rhs_cleanup == 1) { emit($cg, "__aca_rhs"); } else { gen_expression($cg, $rhs); }
+        emit($cg, "))");
+    } elsif ($op eq ".=") {
+        emit($cg, "strada_concat_sv(__aca_old, ");
+        if ($rhs_cleanup == 1) { emit($cg, "__aca_rhs"); } else { gen_expression($cg, $rhs); }
+        emit($cg, ")");
+    } elsif ($op eq "*=") {
+        emit($cg, "strada_new_num(strada_to_num(__aca_old) * strada_to_num(");
+        if ($rhs_cleanup == 1) { emit($cg, "__aca_rhs"); } else { gen_expression($cg, $rhs); }
+        emit($cg, "))");
+    } elsif ($op eq "/=") {
+        emit($cg, "strada_new_num(strada_to_num(__aca_old) / strada_to_num(");
+        if ($rhs_cleanup == 1) { emit($cg, "__aca_rhs"); } else { gen_expression($cg, $rhs); }
+        emit($cg, "))");
+    } else {
+        emit($cg, "strada_new_num(strada_to_num(__aca_old))");
+    }
+    emit($cg, "; strada_array_set(strada_deref_array(__aca_arr), __aca_idx, __aca_new); ");
+    emit($cg, "strada_decref(__aca_old); ");
+    if ($rhs_cleanup == 1) { emit($cg, "strada_decref(__aca_rhs); "); }
+    emit($cg, "(StradaValue*)NULL; })");
+}
+
 func gen_expression(scalar $cg, scalar $expr) void {
     my int $type = $expr->{"type"};
     my int $in_extern = $cg->{"in_extern"};
@@ -3811,7 +3937,28 @@ func gen_expression(scalar $cg, scalar $expr) void {
         my scalar $operand = $expr->{"operand"};
         my int $operand_type = $operand->{"type"};
 
-        # For simple variables, use address-of
+        # Check for our variable (global) — can't take address of global_get
+        if ($operand_type == NODE_VARIABLE()) {
+            my str $incr_vname = escape_c_keyword($operand->{"name"});
+            my scalar $incr_our = $cg->{"our_vars"};
+            my str $incr_our_key = "" . $incr_our->{$incr_vname};
+            if (length($incr_our_key) > 0) {
+                # our variable: global_get (returns owned ref), increment, global_set (consumes ref)
+                my str $delta = "1";
+                if ($op eq "--") { $delta = "-1"; }
+                emit($cg, "({ StradaValue *__incr_old = strada_global_get(strada_new_str(\"" . $incr_our_key . "\")); ");
+                emit($cg, "StradaValue *__incr_new = strada_new_num(strada_to_num(__incr_old) + " . $delta . ".0); ");
+                emit($cg, "strada_incref(__incr_new); ");
+                emit($cg, "strada_global_set(strada_new_str(\"" . $incr_our_key . "\"), __incr_new); ");
+                if ($is_prefix == 1) {
+                    emit($cg, "strada_decref(__incr_old); __incr_new; })");
+                } else {
+                    emit($cg, "strada_decref(__incr_new); __incr_old; })");
+                }
+                return;
+            }
+        }
+        # For simple local variables, use address-of
         if ($operand_type == NODE_VARIABLE()) {
             if ($is_prefix == 1) {
                 if ($op eq "++") {
@@ -6657,10 +6804,17 @@ func gen_expression(scalar $cg, scalar $expr) void {
         }
 
         if ($name eq "int") {
-            emit($cg, "strada_new_int(strada_to_int(");
             my scalar $args = $expr->{"args"};
-            gen_expression($cg, $args->[0]);
-            emit($cg, "))");
+            my scalar $int_arg = $args->[0];
+            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $int_arg) == 1) {
+                emit($cg, "({ StradaValue *__int_tmp = ");
+                gen_expression($cg, $int_arg);
+                emit($cg, "; StradaValue *__int_res = STRADA_MAKE_TAGGED_INT(strada_to_int(__int_tmp)); strada_decref(__int_tmp); __int_res; })");
+            } else {
+                emit($cg, "STRADA_MAKE_TAGGED_INT(strada_to_int(");
+                gen_expression($cg, $int_arg);
+                emit($cg, "))");
+            }
             return;
         }
         
@@ -10722,7 +10876,12 @@ func gen_expression(scalar $cg, scalar $expr) void {
 
         # Inline constructor optimization: Pkg::new("key", val, "key", val, ...)
         # When all odd-position args are string literals, emit direct hash construction
-        if ($is_variadic_call == 1 && $has_spread == 0 && $arg_count >= 2) {
+        # Only for non-variadic (explicit-param) constructors; variadic = user-defined body
+        my int $ctor_is_user_defined = 0;
+        if ($func_info && $func_info->{"is_variadic"} == 1) {
+            $ctor_is_user_defined = 1;
+        }
+        if ($ctor_is_user_defined == 0 && $has_spread == 0 && $arg_count >= 2) {
             # Check if this is a ::new call with alternating literal keys
             my int $cnl = length($c_name);
             my int $is_ctor = 0;
@@ -11819,6 +11978,22 @@ func gen_expression(scalar $cg, scalar $expr) void {
                         gen_expression($cg, $target);
                         emit($cg, "; })");
                     }
+                } elsif ($val_type == NODE_VARIABLE() && $val->{"sigil"} eq "@") {
+                    # Hash from flat array: %h = @pairs
+                    if ($cg->{"cleanup_enabled"} == 1) {
+                        emit($cg, "({ StradaValue *__old = ");
+                        gen_expression($cg, $target);
+                        emit($cg, "; ");
+                    }
+                    gen_expression($cg, $target);
+                    emit($cg, " = strada_hash_from_flat_array(");
+                    gen_expression($cg, $val);
+                    emit($cg, ")");
+                    if ($cg->{"cleanup_enabled"} == 1) {
+                        emit($cg, "; strada_decref(__old); ");
+                        gen_expression($cg, $target);
+                        emit($cg, "; })");
+                    }
                 } elsif ($val_type == NODE_VARIABLE() && $val->{"sigil"} eq "%") {
                     # Hash copy: %h = %other
                     emit($cg, "strada_decref(");
@@ -11861,10 +12036,8 @@ func gen_expression(scalar $cg, scalar $expr) void {
                     my scalar $our_rhs = $expr->{"value"};
                     if (needs_temp_cleanup($cg, $our_rhs) == 0) {
                         # RHS is a borrowed/shared ref (local var, array subscript, param).
-                        # strada_global_set() consumes the caller's ref (increfs for
-                        # registry, then decrefs the passed value).  Without an extra
-                        # incref the local/param's own ref would be stolen, leading to
-                        # a use-after-free when function cleanup decrefs the local.
+                        # strada_global_set() consumes the caller's ref, so we need an
+                        # extra incref to keep the local/param alive.
                         emit($cg, "({ StradaValue *__gs_v = ");
                         gen_expression($cg, $our_rhs);
                         emit($cg, "; strada_incref(__gs_v); strada_global_set(strada_new_str(\"" . $our_key2 . "\"), __gs_v); __gs_v; })");
@@ -12002,6 +12175,16 @@ func gen_expression(scalar $cg, scalar $expr) void {
                     emit($cg, "strada_global_set(strada_new_str(\"" . $our_ca_key . "\"), __our_new); })");
                     return;
                 }
+            }
+            # Compound assignment on hash element: $h{"k"} += expr
+            if ($target_type == NODE_HASH_ACCESS() || $target_type == NODE_DEREF_HASH()) {
+                gen_hash_compound_assign($cg, $target, $expr->{"value"}, $op);
+                return;
+            }
+            # Compound assignment on array element: $a[$i] += expr
+            if ($target_type == NODE_SUBSCRIPT()) {
+                gen_array_compound_assign($cg, $target, $expr->{"value"}, $op);
+                return;
             }
             # Check for overloaded compound assignment (Perl: $a += $b uses + overload)
             if ($cg->{"has_overloads"} == 1 && $target_type == NODE_VARIABLE() && could_be_blessed($target) == 1) {
@@ -14074,8 +14257,9 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     emit($cg, "strada_new_hash()");
                 } else {
                     my int $init_type = $init->{"type"};
-                    # If init is a map expression or array-of-pairs, convert to hash
-                    if ($init_type == NODE_MAP() || $init_type == NODE_ANON_ARRAY()) {
+                    # If init is a map expression, array-of-pairs, or @array variable, convert to hash
+                    my int $is_array_var = $init_type == NODE_VARIABLE() && $init->{"sigil"} eq "@";
+                    if ($init_type == NODE_MAP() || $init_type == NODE_ANON_ARRAY() || $is_array_var == 1) {
                         emit($cg, "strada_hash_from_flat_array(");
                         gen_expression($cg, $init);
                         emit($cg, ")");
@@ -14420,8 +14604,13 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             while ($i < $var_count) {
                 my scalar $var = $vars->[$i];
                 my str $name = escape_c_keyword($var->{"name"});
+                my str $vsigil = "" . $var->{"sigil"};
                 emit_indent($cg);
-                emit($cg, "StradaValue *" . $name . " = strada_new_undef();\n");
+                if ($vsigil eq "%") {
+                    emit($cg, "StradaValue *" . $name . " = strada_new_hash();\n");
+                } else {
+                    emit($cg, "StradaValue *" . $name . " = strada_new_undef();\n");
+                }
                 scope_track_var($cg, $name);
                 $i = $i + 1;
             }
@@ -14450,14 +14639,45 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         while ($i < $var_count) {
             my scalar $var = $vars->[$i];
             my str $name = escape_c_keyword($var->{"name"});
+            my str $var_sigil = "" . $var->{"sigil"};
 
-            # Decref old value if already assigned
-            emit_indent($cg);
-            emit($cg, "strada_decref(" . $name . ");\n");
+            # Hash slurp: last variable with % sigil gets remaining key-value pairs
+            if ($var_sigil eq "%" && $i == $var_count - 1) {
+                emit_indent($cg);
+                emit($cg, "strada_decref(" . $name . ");\n");
+                emit_indent($cg);
+                emit($cg, $name . " = strada_new_hash();\n");
+                emit_indent($cg);
+                emit($cg, "{ StradaArray *__ds_arr = strada_deref_array(__destruct_src);\n");
+                emit_indent($cg);
+                emit($cg, "  int __ds_len = __ds_arr ? strada_array_length(__ds_arr) : 0;\n");
+                emit_indent($cg);
+                emit($cg, "  for (int __ds_j = " . $i . "; __ds_j + 1 < __ds_len; __ds_j += 2) {\n");
+                emit_indent($cg);
+                emit($cg, "    StradaValue *__ds_k = strada_array_get(__ds_arr, __ds_j);\n");
+                emit_indent($cg);
+                emit($cg, "    StradaValue *__ds_v = strada_array_get(__ds_arr, __ds_j + 1);\n");
+                emit_indent($cg);
+                emit($cg, "    char *__ds_ks = strada_to_str(__ds_k);\n");
+                emit_indent($cg);
+                emit($cg, "    strada_hv_store(" . $name . ", __ds_ks, __ds_v);\n");
+                emit_indent($cg);
+                emit($cg, "    strada_incref(__ds_v);\n");
+                emit_indent($cg);
+                emit($cg, "    free(__ds_ks);\n");
+                emit_indent($cg);
+                emit($cg, "  }\n");
+                emit_indent($cg);
+                emit($cg, "}\n");
+            } else {
+                # Decref old value if already assigned
+                emit_indent($cg);
+                emit($cg, "strada_decref(" . $name . ");\n");
 
-            # Get element from array (strada_array_get_safe returns owned reference)
-            emit_indent($cg);
-            emit($cg, $name . " = strada_array_get_safe(__destruct_src, " . $i . ");\n");
+                # Get element from array (strada_array_get_safe returns owned reference)
+                emit_indent($cg);
+                emit($cg, $name . " = strada_array_get_safe(__destruct_src, " . $i . ");\n");
+            }
 
             $i = $i + 1;
         }
