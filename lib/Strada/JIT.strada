@@ -743,20 +743,21 @@ private func generate_source(str $input) str {
             $src = $src . "    my scalar \$" . $vname . " = undef;\n";
         }
 
-        # Build Strada restore code for this variable
-        my str $key = "repl::" . $vname;
-        if ($type eq "array") {
-            $restore_code = $restore_code . "    if (core::global_exists(\"" . $key . "\")) { @" . $vname . " = core::global_get(\"" . $key . "\"); }\n";
-        } elsif ($type eq "hash") {
-            $restore_code = $restore_code . "    if (core::global_exists(\"" . $key . "\")) { %" . $vname . " = core::global_get(\"" . $key . "\"); }\n";
-        } else {
-            $restore_code = $restore_code . "    if (core::global_exists(\"" . $key . "\")) { \$" . $vname . " = core::global_get(\"" . $key . "\"); }\n";
-        }
+        # Build C restore code — needed for precise refcount management
+        $restore_code = $restore_code . "        StradaValue *__saved_" . $vname . " = strada_global_get(strada_new_str(\"repl::" . $vname . "\"));\n";
+        $restore_code = $restore_code . "        if (STRADA_IS_TAGGED_INT(__saved_" . $vname . ") || __saved_" . $vname . "->type != STRADA_UNDEF) {\n";
+        $restore_code = $restore_code . "            strada_decref(" . $vname . ");\n";
+        $restore_code = $restore_code . "            " . $vname . " = __saved_" . $vname . ";\n";
+        $restore_code = $restore_code . "        } else {\n";
+        $restore_code = $restore_code . "            strada_decref(__saved_" . $vname . ");\n";
+        $restore_code = $restore_code . "        }\n";
     }
 
-    # Emit restore code
+    # Emit restore __C__ block if we have variables to restore
     if ($restore_code ne "") {
-        $src = $src . $restore_code . "\n";
+        $src = $src . "    __C__ {\n";
+        $src = $src . $restore_code;
+        $src = $src . "    }\n\n";
     }
 
     $src = $src . "    # User code\n";
@@ -828,20 +829,17 @@ private func generate_source(str $input) str {
     }
 
     # Save all tracked variables back to global registry
-    my str $save_code = "";
+    # strada_global_set() consumes (decrefs) both args, so we must incref
+    # the value to keep our local ref alive for function-exit cleanup.
+    my str $save_c = "";
     foreach my str $vname (keys(%g_var_types)) {
-        my str $type = $g_var_types{$vname};
-        my str $key = "repl::" . $vname;
-        if ($type eq "array") {
-            $save_code = $save_code . "    core::global_set(\"" . $key . "\", @" . $vname . ");\n";
-        } elsif ($type eq "hash") {
-            $save_code = $save_code . "    core::global_set(\"" . $key . "\", %" . $vname . ");\n";
-        } else {
-            $save_code = $save_code . "    core::global_set(\"" . $key . "\", \$" . $vname . ");\n";
-        }
+        $save_c = $save_c . "        strada_incref(" . $vname . ");\n";
+        $save_c = $save_c . "        strada_global_set(strada_new_str(\"repl::" . $vname . "\"), " . $vname . ");\n";
     }
-    if ($save_code ne "") {
-        $src = $src . "\n" . $save_code;
+    if ($save_c ne "") {
+        $src = $src . "\n    __C__ {\n";
+        $src = $src . $save_c;
+        $src = $src . "    }\n";
     }
 
     $src = $src . "\n    return \$__result;\n";
