@@ -176,6 +176,14 @@ StradaValue* strada_new_hash_with_capacity(size_t capacity);
 StradaValue* strada_new_filehandle(FILE *fh);
 StradaValue* strada_new_ref(StradaValue *target, char ref_type);
 
+/* Slot references — reference to a C local variable's storage (StradaValue**) */
+#define STRADA_SLOT_REF_MARKER ((size_t)0xDEAD5107ULL)
+StradaValue* strada_slot_ref_create(StradaValue **slot);
+static inline int strada_is_slot_ref(StradaValue *sv) {
+    return sv && !STRADA_IS_TAGGED_INT(sv) && sv->type == STRADA_REF &&
+           sv->struct_size == STRADA_SLOT_REF_MARKER;
+}
+
 /* ============================================================
  * Reference Counting
  * ============================================================ */
