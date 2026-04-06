@@ -2855,7 +2855,7 @@ func gen_array_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op)
         emit($cg, "strada_new_num(strada_to_num(__aca_old))");
     }
     emit($cg, "; strada_array_set(strada_deref_array(__aca_arr), __aca_idx, __aca_new); ");
-    emit($cg, "strada_decref(__aca_old); ");
+    emit($cg, "strada_decref(__aca_new); strada_decref(__aca_old); ");
     if ($rhs_cleanup == 1) { emit($cg, "strada_decref(__aca_rhs); "); }
     emit($cg, "(StradaValue*)NULL; })");
 }
