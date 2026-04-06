@@ -55,6 +55,10 @@ func format_value(scalar $val) str {
     if (!defined($val)) {
         return "undef";
     }
+    my str $type = ref($val);
+    if ($type eq "HASH" || $type eq "ARRAY" || $type eq "REF") {
+        return dumper($val);
+    }
     return "" . $val;
 }
 

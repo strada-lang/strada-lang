@@ -313,8 +313,8 @@ func repl_eval(scalar $interp, str $input) scalar {
 # Display a result value
 func display_result(scalar $val) void {
     if (!defined($val)) { return; }
-    if (ref($val) eq "HASH" || ref($val) eq "ARRAY") {
-        dumper($val);
+    if (ref($val) eq "HASH" || ref($val) eq "ARRAY" || ref($val) eq "REF") {
+        say(dumper($val));
     } else {
         say($val);
     }

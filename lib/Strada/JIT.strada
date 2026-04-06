@@ -716,7 +716,7 @@ private func generate_source(str $input) str {
     # For previously-declared variables NOT redeclared in current input,
     # emit my declarations and restore their values from the global registry.
     # Using my (not our) gives us real C lvalues so $i++, s///, etc. all work.
-    my str $restore_c = "";
+    my str $restore_code = "";
     foreach my str $vname (keys(%g_var_types)) {
         my str $type = $g_var_types{$vname};
         my str $sigil = "\$";
@@ -743,21 +743,20 @@ private func generate_source(str $input) str {
             $src = $src . "    my scalar \$" . $vname . " = undef;\n";
         }
 
-        # Build C restore code for this variable
-        $restore_c = $restore_c . "        StradaValue *__saved_" . $vname . " = strada_global_get(strada_new_str(\"repl::" . $vname . "\"));\n";
-        $restore_c = $restore_c . "        if (__saved_" . $vname . "->type != STRADA_UNDEF) {\n";
-        $restore_c = $restore_c . "            strada_decref(" . $vname . ");\n";
-        $restore_c = $restore_c . "            " . $vname . " = __saved_" . $vname . ";\n";
-        $restore_c = $restore_c . "        } else {\n";
-        $restore_c = $restore_c . "            strada_decref(__saved_" . $vname . ");\n";
-        $restore_c = $restore_c . "        }\n";
+        # Build Strada restore code for this variable
+        my str $key = "repl::" . $vname;
+        if ($type eq "array") {
+            $restore_code = $restore_code . "    if (core::global_exists(\"" . $key . "\")) { @" . $vname . " = core::global_get(\"" . $key . "\"); }\n";
+        } elsif ($type eq "hash") {
+            $restore_code = $restore_code . "    if (core::global_exists(\"" . $key . "\")) { %" . $vname . " = core::global_get(\"" . $key . "\"); }\n";
+        } else {
+            $restore_code = $restore_code . "    if (core::global_exists(\"" . $key . "\")) { \$" . $vname . " = core::global_get(\"" . $key . "\"); }\n";
+        }
     }
 
-    # Emit restore __C__ block if we have variables to restore
-    if ($restore_c ne "") {
-        $src = $src . "    __C__ {\n";
-        $src = $src . $restore_c;
-        $src = $src . "    }\n\n";
+    # Emit restore code
+    if ($restore_code ne "") {
+        $src = $src . $restore_code . "\n";
     }
 
     $src = $src . "    # User code\n";
@@ -765,9 +764,9 @@ private func generate_source(str $input) str {
     my str $trimmed = $input;
     $trimmed =~ s/\s+$//;
 
-    # Check if this is a void function call
+    # Check if this is a void function call (prints output, returns nothing useful)
     my int $is_void_call = 0;
-    if ($trimmed =~ /^(say|print|warn|push|pop|shift|unshift|dumper|reverse)\(/) {
+    if ($trimmed =~ /^(say|print|warn|push|pop|shift|unshift)\(/) {
         $is_void_call = 1;
     }
     # Check user-defined void functions
@@ -804,7 +803,8 @@ private func generate_source(str $input) str {
         $last_char = substr($trimmed, length($trimmed) - 1, 1);
     }
 
-    if ($trimmed =~ /;/ || $is_statement == 1) {
+    if ($is_statement == 1) {
+        # True statements (my, if, while, etc.) — no result to capture
         my str $code_line = $input;
         if ($last_char ne ";" && $last_char ne "}") {
             $code_line = $input . ";";
@@ -812,22 +812,36 @@ private func generate_source(str $input) str {
         $src = $src . "    " . $code_line . "\n";
         $src = $src . "    my scalar \$__result = undef;\n";
     } elsif ($is_void_call == 1) {
-        $src = $src . "    " . $input . ";\n";
+        # Void functions (say, print, etc.) — execute but no result
+        my str $code_line = $input;
+        if ($last_char ne ";") { $code_line = $input . ";"; }
+        $src = $src . "    " . $code_line . "\n";
         $src = $src . "    my scalar \$__result = undef;\n";
     } else {
-        $src = $src . "    my scalar \$__result = " . $input . ";\n";
+        # Expression — capture the result
+        # Strip trailing semicolon if present
+        my str $expr = $trimmed;
+        if ($last_char eq ";") {
+            $expr = substr($trimmed, 0, length($trimmed) - 1);
+        }
+        $src = $src . "    my scalar \$__result = " . $expr . ";\n";
     }
 
     # Save all tracked variables back to global registry
-    my str $save_c = "";
+    my str $save_code = "";
     foreach my str $vname (keys(%g_var_types)) {
-        $save_c = $save_c . "        strada_incref(" . $vname . ");\n";
-        $save_c = $save_c . "        strada_global_set(strada_new_str(\"repl::" . $vname . "\"), " . $vname . ");\n";
+        my str $type = $g_var_types{$vname};
+        my str $key = "repl::" . $vname;
+        if ($type eq "array") {
+            $save_code = $save_code . "    core::global_set(\"" . $key . "\", @" . $vname . ");\n";
+        } elsif ($type eq "hash") {
+            $save_code = $save_code . "    core::global_set(\"" . $key . "\", %" . $vname . ");\n";
+        } else {
+            $save_code = $save_code . "    core::global_set(\"" . $key . "\", \$" . $vname . ");\n";
+        }
     }
-    if ($save_c ne "") {
-        $src = $src . "\n    __C__ {\n";
-        $src = $src . $save_c;
-        $src = $src . "    }\n";
+    if ($save_code ne "") {
+        $src = $src . "\n" . $save_code;
     }
 
     $src = $src . "\n    return \$__result;\n";
@@ -1111,28 +1125,13 @@ func eval(str $code) scalar {
 # Get a variable value from the persistent state (global registry)
 func get(str $name) scalar {
     my str $key = "repl::" . $name;
-    my scalar $result = undef;
-    __C__ {
-        char *k = strada_to_str(key);
-        StradaValue *key_sv = strada_new_str(k);
-        StradaValue *val = strada_global_get(key_sv);
-        strada_decref(result);
-        result = val;
-        free(k);
-    }
-    return $result;
+    return core::global_get($key);
 }
 
 # Set a variable value in the persistent state (global registry)
 func set(str $name, scalar $value) void {
     my str $key = "repl::" . $name;
-    __C__ {
-        char *k = strada_to_str(key);
-        StradaValue *key_sv = strada_new_str(k);
-        strada_incref(value);
-        strada_global_set(key_sv, value);
-        free(k);
-    }
+    core::global_set($key, $value);
     # Also register the type if not already known
     if (!exists($g_var_types{$name})) {
         $g_var_types{$name} = "scalar";

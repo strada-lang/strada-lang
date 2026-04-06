@@ -2332,7 +2332,7 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
     }
     if ($bid == BI::DUMPER) {
         if ($argc >= 1) {
-            dumper($args->[0]);
+            return dumper($args->[0]);
         }
         return undef;
     }

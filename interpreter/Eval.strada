@@ -2,30 +2,7 @@
 # Evaluates AST nodes directly instead of generating C code.
 # Reuses the compiler's Lexer and Parser for the front-end.
 
-# ============================================================
-# Stub functions required by Parser (normally in CodeGen)
-# ============================================================
-
-func sanitize_name(str $name) str {
-    my str $result = "";
-    my int $i = 0;
-    my int $len = length($name);
-    while ($i < $len) {
-        my str $ch = substr($name, $i, 1);
-        if ($ch eq ":") {
-            if ($i + 1 < $len && substr($name, $i + 1, 1) eq ":") {
-                $result = $result . "_";
-                $i = $i + 1;
-            } else {
-                $result = $result . "_";
-            }
-        } else {
-            $result = $result . $ch;
-        }
-        $i = $i + 1;
-    }
-    return $result;
-}
+# (sanitize_name is in Stubs.strada)
 
 # ============================================================
 # Environment - Lexical scope chain
