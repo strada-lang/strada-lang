@@ -11859,6 +11859,16 @@ func gen_expression(scalar $cg, scalar $expr) void {
             }
             # Special case: assigning scalar to array variable @arr = ($x)
             if ($target_type == NODE_VARIABLE() && $target->{"sigil"} eq "@") {
+                # Check if it's an 'our' array — use global_set
+                my str $arr_our_name = escape_c_keyword($target->{"name"});
+                my scalar $arr_our_vars = $cg->{"our_vars"};
+                my str $arr_our_key = "" . $arr_our_vars->{$arr_our_name};
+                if (length($arr_our_key) > 0) {
+                    emit($cg, "({ StradaValue *__oa_val = ");
+                    gen_expression($cg, $expr->{"value"});
+                    emit($cg, "; strada_incref(__oa_val); strada_global_set(strada_new_str(\"" . $arr_our_key . "\"), __oa_val); __oa_val; })");
+                    return;
+                }
                 my scalar $val = $expr->{"value"};
                 my int $val_type = $val->{"type"};
                 if ($val_type == NODE_READLINE()) {
