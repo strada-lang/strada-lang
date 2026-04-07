@@ -3187,7 +3187,7 @@ StradaValue* strada_sprintf_sv(StradaValue *format_sv, int arg_count, ...) {
             case 's': {
                 char _tb2[256];
                 const char *s = arg ? strada_to_str_buf(arg, _tb2, sizeof(_tb2)) : NULL;
-                snprintf(temp, sizeof(temp), "%s", s ? s : "");
+                snprintf(temp, sizeof(temp), spec_buf, s ? s : "");
                 break;
             }
             case 'p': {
