@@ -7443,6 +7443,28 @@ StradaValue* strada_closure_call(StradaValue *closure, int argc, ...) {
     return result;
 }
 
+/* Call closure with args from a StradaValue array */
+StradaValue* strada_closure_call_array(StradaValue *closure, StradaValue *args_sv) {
+    if (!closure) return strada_new_undef();
+    StradaArray *av = strada_deref_array(args_sv);
+    int argc = av ? (int)strada_array_length(av) : 0;
+    /* Collect up to 10 args from array */
+    StradaValue *argv[10];
+    for (int i = 0; i < argc && i < 10; i++) {
+        argv[i] = strada_array_get(av, i);
+    }
+    /* Dispatch same as strada_closure_call */
+    switch (argc) {
+        case 0: return strada_closure_call(closure, 0);
+        case 1: return strada_closure_call(closure, 1, argv[0]);
+        case 2: return strada_closure_call(closure, 2, argv[0], argv[1]);
+        case 3: return strada_closure_call(closure, 3, argv[0], argv[1], argv[2]);
+        case 4: return strada_closure_call(closure, 4, argv[0], argv[1], argv[2], argv[3]);
+        case 5: return strada_closure_call(closure, 5, argv[0], argv[1], argv[2], argv[3], argv[4]);
+        default: return strada_closure_call(closure, argc, argv[0], argv[1], argv[2], argv[3], argv[4]);
+    }
+}
+
 /* ===== THREAD SUPPORT ===== */
 
 /* Thread wrapper that calls Strada closure */

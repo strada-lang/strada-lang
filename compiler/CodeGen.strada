@@ -14069,6 +14069,29 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 $ca = $ca + 1;
             }
             emit($cg, "__clres; })");
+        } elsif ($expr->{"has_spread"} == 1) {
+            # Spread args: build array and call via strada_closure_call_array
+            emit($cg, "({ StradaValue *__cl_fn2 = ");
+            gen_expression($cg, $expr->{"closure"});
+            emit($cg, "; StradaValue *__cl_arr = strada_new_array(); ");
+            my int $si = 0;
+            while ($si < $arg_count) {
+                my scalar $sarg = $args->[$si];
+                if ($sarg->{"type"} == NODE_SPREAD()) {
+                    # Spread: push each element from the array
+                    emit($cg, "{ StradaArray *__sp_av = strada_deref_array(");
+                    gen_expression($cg, $sarg->{"target"});
+                    emit($cg, "); if (__sp_av) for (size_t __sp_i = 0; __sp_i < __sp_av->size; __sp_i++) ");
+                    emit($cg, "strada_array_push(strada_deref_array(__cl_arr), __sp_av->elements[__sp_av->head + __sp_i]); } ");
+                } else {
+                    emit($cg, "strada_array_push(strada_deref_array(__cl_arr), ");
+                    gen_expression($cg, $sarg);
+                    emit($cg, "); ");
+                }
+                $si = $si + 1;
+            }
+            emit($cg, "StradaValue *__cl_res2 = strada_closure_call_array(__cl_fn2, __cl_arr); ");
+            emit($cg, "strada_decref(__cl_arr); __cl_res2; })");
         } else {
             emit($cg, "strada_closure_call(");
             gen_expression($cg, $expr->{"closure"});

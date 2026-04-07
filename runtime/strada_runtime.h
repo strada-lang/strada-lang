@@ -794,6 +794,7 @@ void* strada_cpointer_get(StradaValue *sv);
 /* Closure support (uses triple pointers for capture-by-reference) */
 StradaValue* strada_closure_new(void *func, int params, int captures, StradaValue ***cap_array);
 StradaValue* strada_closure_call(StradaValue *closure, int argc, ...);
+StradaValue* strada_closure_call_array(StradaValue *closure, StradaValue *args_sv);
 StradaValue*** strada_closure_get_captures(StradaValue *closure);
 
 /* Enhanced FFI */
