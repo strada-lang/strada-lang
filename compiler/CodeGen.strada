@@ -107,6 +107,13 @@ func djb2_hash(str $input_str) int {
     return $h;
 }
 
+func djb2_hash_32(str $input_str) int {
+    my int $raw = djb2_hash($input_str);
+    # Truncate to 32 bits using bitwise AND with mask
+    # 0xFFFFFFFF = 4294967295
+    return $raw - (($raw / 4294967296) * 4294967296);
+}
+
 func codegen_new(str $filename, int $debug_info, int $enable_profiling, int $enable_stack_trace, int $full_profile) scalar {
     my hash %cg = ();
     # StringBuilder for O(1) amortized append (no O(n^2) string concat)
@@ -10876,9 +10883,14 @@ func gen_expression(scalar $cg, scalar $expr) void {
 
         # Inline constructor optimization: Pkg::new("key", val, "key", val, ...)
         # When all odd-position args are string literals, emit direct hash construction
-        # Only for non-variadic (explicit-param) constructors; variadic = user-defined body
+        # Skip inline constructor for user-defined constructors:
+        # - variadic (no-parens) = always user-defined body
+        # - explicit params with named args (not Moose key-value pattern)
         my int $ctor_is_user_defined = 0;
         if ($func_info && $func_info->{"is_variadic"} == 1) {
+            $ctor_is_user_defined = 1;
+        }
+        if ($func_info && $func_info->{"param_count"} > 1) {
             $ctor_is_user_defined = 1;
         }
         if ($ctor_is_user_defined == 0 && $has_spread == 0 && $arg_count >= 2) {
@@ -10982,7 +10994,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
                     my int $ci = 0;
                     while ($ci < $arg_count) {
                         my str $key_val = $args->[$ci]->{"value"};
-                        my int $key_hash = djb2_hash($key_val);
+                        my int $key_hash = djb2_hash_32($key_val);
                         emit($cg, "strada_hash_set_take_ph(__ct_ref->value.rv->value.hv, \"" . $key_val . "\", " . $key_hash . "u, ");
                         gen_expression($cg, $args->[$ci + 1]);
                         emit($cg, "); ");
@@ -11072,8 +11084,14 @@ func gen_expression(scalar $cg, scalar $expr) void {
                     emit($cg, "strada_array_push_take(strada_deref_array(__va_arr), __sa->elements[__si]); ");
                     emit($cg, "} } } ");
                 } else {
-                    # Regular arg: push to array using push_take since we're creating new values
-                    emit($cg, "strada_array_push_take(strada_deref_array(__va_arr), ");
+                    # Regular arg: use push (with incref) for variables since they'll be cleaned up later
+                    # Use push_take for temporaries (new allocations)
+                    my int $arg_is_var = $arg->{"type"} == NODE_VARIABLE();
+                    if ($arg_is_var == 1) {
+                        emit($cg, "strada_array_push(strada_deref_array(__va_arr), ");
+                    } else {
+                        emit($cg, "strada_array_push_take(strada_deref_array(__va_arr), ");
+                    }
                     gen_expression($cg, $arg);
                     emit($cg, "); ");
                 }
@@ -15136,11 +15154,8 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         my str $func_name = $cg->{"current_func_name"};
         my int $in_extern = $cg->{"in_extern"};
 
-        # Restore local() variables before returning
-        if ($cg->{"has_local"} == 1) {
-            emit_indent($cg);
-            emit($cg, "strada_local_restore_to(__local_saved_depth);\n");
-        }
+        # NOTE: local() restore happens AFTER return value is evaluated (see below)
+        # This ensures the return expression can see localized values
 
         # extern functions - simple return with raw C types
         if ($in_extern == 1) {
@@ -15176,6 +15191,10 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     indent($cg);
                     if ($cleanup_enabled == 1) {
                         scope_emit_all_cleanup($cg);
+                    }
+                    if ($cg->{"has_local"} == 1) {
+                        emit_indent($cg);
+                        emit($cg, "strada_local_restore_to(__local_saved_depth);\n");
                     }
                     emit_try_cleanup($cg);
                     emit_stack_pop($cg);
@@ -15248,6 +15267,11 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 emit($cg, "strada_incref(__retval);\n");
             }
             scope_emit_all_cleanup($cg);
+            # Restore local() variables AFTER return value is captured
+            if ($cg->{"has_local"} == 1) {
+                emit_indent($cg);
+                emit($cg, "strada_local_restore_to(__local_saved_depth);\n");
+            }
             # Pop any active try blocks before returning
             emit_try_cleanup($cg);
             # Add profiling exit if enabled
@@ -15267,6 +15291,10 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         } else {
             # Void return - cleanup then return
             scope_emit_all_cleanup($cg);
+            if ($cg->{"has_local"} == 1) {
+                emit_indent($cg);
+                emit($cg, "strada_local_restore_to(__local_saved_depth);\n");
+            }
             # Pop any active try blocks before returning
             emit_try_cleanup($cg);
             # Add profiling exit if enabled

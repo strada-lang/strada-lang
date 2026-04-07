@@ -1882,14 +1882,14 @@ func lex_next_token(scalar $lexer) scalar {
     # (=40, )=41, {=123, }=125, [=91, ]=93, ;=59, ,=44, :=58
     # $=36, @=64, %=37, +=43, -=45, *=42, /=47, .=46, ==61
     # <=60, >=62, !=33, \=92, &=38, |=124, ^=94, ~=126, ?=63
-    if ($code == 40) { $token{"type"} = "LPAREN"; return \%token; }
+    if ($code == 40) { $token{"type"} = "LPAREN"; $lexer->{"expect_regex"} = 1; return \%token; }
     if ($code == 41) { $token{"type"} = "RPAREN"; return \%token; }
-    if ($code == 123) { $token{"type"} = "LBRACE"; return \%token; }
+    if ($code == 123) { $token{"type"} = "LBRACE"; $lexer->{"expect_regex"} = 1; return \%token; }
     if ($code == 125) { $token{"type"} = "RBRACE"; return \%token; }
     if ($code == 91) { $token{"type"} = "LBRACKET"; return \%token; }
     if ($code == 93) { $token{"type"} = "RBRACKET"; return \%token; }
-    if ($code == 59) { $token{"type"} = "SEMI"; return \%token; }
-    if ($code == 44) { $token{"type"} = "COMMA"; return \%token; }
+    if ($code == 59) { $token{"type"} = "SEMI"; $lexer->{"expect_regex"} = 1; return \%token; }
+    if ($code == 44) { $token{"type"} = "COMMA"; $lexer->{"expect_regex"} = 1; return \%token; }
     if ($code == 58) { $token{"type"} = "COLON"; return \%token; }
     if ($code == 36) { $token{"type"} = "DOLLAR"; $lexer->{"after_sigil"} = 1; return \%token; }
     if ($code == 64) { $token{"type"} = "AT"; $lexer->{"after_sigil"} = 1; return \%token; }

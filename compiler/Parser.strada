@@ -789,6 +789,15 @@ func parse_primary(scalar $parser) scalar {
         return ast_new_str_literal($tok->{"value"});
     }
 
+    # Regex literal /pattern/flags — as primary expression (e.g., in split(/,/, $str))
+    if ($type eq "REGEX_LITERAL") {
+        parser_advance($parser);
+        my scalar $regex = ast_new_str_literal($tok->{"pattern"});
+        $regex->{"is_regex"} = 1;
+        $regex->{"regex_flags"} = $tok->{"flags"};
+        return $regex;
+    }
+
     # Interpolated string - build concatenation chain
     if ($type eq "INTERP_STRING") {
         parser_advance($parser);

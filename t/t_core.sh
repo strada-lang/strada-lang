@@ -86,6 +86,9 @@ test_output_contains "$SCRIPT_DIR/test_recursion_limit.strada" "test_recursion_l
 # Test: Perla gap fixes (compound assign, our++, shift(), int(), hash slurp, hash from array, extends+new)
 test_output_contains "$EXAMPLES_DIR/test_perla_gaps.strada" "test_perla_gaps" "All Perla gap tests passed" "Perla gap fixes"
 
+# Test: Regex literal as function argument (split(/,/, $str))
+test_output_contains "$EXAMPLES_DIR/test_regex_split.strada" "test_regex_split" "All regex split tests passed" "Regex literal in func args"
+
 # Test: Goto and loop labels
 test_run "$EXAMPLES_DIR/test_goto.strada" "test_goto" "Goto"
 test_run "$EXAMPLES_DIR/test_loop_labels.strada" "test_loop_labels" "Loop labels"
