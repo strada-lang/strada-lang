@@ -3125,11 +3125,16 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 $cg->{"tmp_counter"} = $uid + 1;
                 my str $tl = "__ti_l" . $uid;
                 my str $tr = "__ti_r" . $uid;
+                my int $cl = needs_temp_cleanup($cg, $expr->{"left"});
+                my int $cr = needs_temp_cleanup($cg, $expr->{"right"});
                 emit($cg, "({ StradaValue *" . $tl . " = ");
                 gen_expression($cg, $expr->{"left"});
                 emit($cg, "; StradaValue *" . $tr . " = ");
                 gen_expression($cg, $expr->{"right"});
-                emit($cg, "; STRADA_IS_TAGGED_INT(" . $tl . ") && STRADA_IS_TAGGED_INT(" . $tr . ") ? STRADA_MAKE_TAGGED_INT(STRADA_TAGGED_INT_VAL(" . $tl . ") + STRADA_TAGGED_INT_VAL(" . $tr . ")) : strada_new_num(strada_to_num(" . $tl . ") + strada_to_num(" . $tr . ")); })");
+                emit($cg, "; StradaValue *__ti_res" . $uid . " = STRADA_IS_TAGGED_INT(" . $tl . ") && STRADA_IS_TAGGED_INT(" . $tr . ") ? STRADA_MAKE_TAGGED_INT(STRADA_TAGGED_INT_VAL(" . $tl . ") + STRADA_TAGGED_INT_VAL(" . $tr . ")) : strada_new_num(strada_to_num(" . $tl . ") + strada_to_num(" . $tr . ")); ");
+                if ($cl == 1) { emit($cg, "if (!STRADA_IS_TAGGED_INT(" . $tl . ")) strada_decref(" . $tl . "); "); }
+                if ($cr == 1) { emit($cg, "if (!STRADA_IS_TAGGED_INT(" . $tr . ")) strada_decref(" . $tr . "); "); }
+                emit($cg, "__ti_res" . $uid . "; })");
             }
         } elsif ($op eq "-") {
             if ($cg->{"has_overloads"} == 0 && expr_is_int_typed($cg, $expr->{"left"}) == 1 && expr_is_int_typed($cg, $expr->{"right"}) == 1) {
@@ -3143,11 +3148,16 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 $cg->{"tmp_counter"} = $uid + 1;
                 my str $tl = "__ti_l" . $uid;
                 my str $tr = "__ti_r" . $uid;
+                my int $cl = needs_temp_cleanup($cg, $expr->{"left"});
+                my int $cr = needs_temp_cleanup($cg, $expr->{"right"});
                 emit($cg, "({ StradaValue *" . $tl . " = ");
                 gen_expression($cg, $expr->{"left"});
                 emit($cg, "; StradaValue *" . $tr . " = ");
                 gen_expression($cg, $expr->{"right"});
-                emit($cg, "; STRADA_IS_TAGGED_INT(" . $tl . ") && STRADA_IS_TAGGED_INT(" . $tr . ") ? STRADA_MAKE_TAGGED_INT(STRADA_TAGGED_INT_VAL(" . $tl . ") - STRADA_TAGGED_INT_VAL(" . $tr . ")) : strada_new_num(strada_to_num(" . $tl . ") - strada_to_num(" . $tr . ")); })");
+                emit($cg, "; StradaValue *__ti_res" . $uid . " = STRADA_IS_TAGGED_INT(" . $tl . ") && STRADA_IS_TAGGED_INT(" . $tr . ") ? STRADA_MAKE_TAGGED_INT(STRADA_TAGGED_INT_VAL(" . $tl . ") - STRADA_TAGGED_INT_VAL(" . $tr . ")) : strada_new_num(strada_to_num(" . $tl . ") - strada_to_num(" . $tr . ")); ");
+                if ($cl == 1) { emit($cg, "if (!STRADA_IS_TAGGED_INT(" . $tl . ")) strada_decref(" . $tl . "); "); }
+                if ($cr == 1) { emit($cg, "if (!STRADA_IS_TAGGED_INT(" . $tr . ")) strada_decref(" . $tr . "); "); }
+                emit($cg, "__ti_res" . $uid . "; })");
             }
         } elsif ($op eq "*") {
             if ($cg->{"has_overloads"} == 0 && expr_is_int_typed($cg, $expr->{"left"}) == 1 && expr_is_int_typed($cg, $expr->{"right"}) == 1) {
@@ -3161,11 +3171,16 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 $cg->{"tmp_counter"} = $uid + 1;
                 my str $tl = "__ti_l" . $uid;
                 my str $tr = "__ti_r" . $uid;
+                my int $cl = needs_temp_cleanup($cg, $expr->{"left"});
+                my int $cr = needs_temp_cleanup($cg, $expr->{"right"});
                 emit($cg, "({ StradaValue *" . $tl . " = ");
                 gen_expression($cg, $expr->{"left"});
                 emit($cg, "; StradaValue *" . $tr . " = ");
                 gen_expression($cg, $expr->{"right"});
-                emit($cg, "; STRADA_IS_TAGGED_INT(" . $tl . ") && STRADA_IS_TAGGED_INT(" . $tr . ") ? STRADA_MAKE_TAGGED_INT(STRADA_TAGGED_INT_VAL(" . $tl . ") * STRADA_TAGGED_INT_VAL(" . $tr . ")) : strada_new_num(strada_to_num(" . $tl . ") * strada_to_num(" . $tr . ")); })");
+                emit($cg, "; StradaValue *__ti_res" . $uid . " = STRADA_IS_TAGGED_INT(" . $tl . ") && STRADA_IS_TAGGED_INT(" . $tr . ") ? STRADA_MAKE_TAGGED_INT(STRADA_TAGGED_INT_VAL(" . $tl . ") * STRADA_TAGGED_INT_VAL(" . $tr . ")) : strada_new_num(strada_to_num(" . $tl . ") * strada_to_num(" . $tr . ")); ");
+                if ($cl == 1) { emit($cg, "if (!STRADA_IS_TAGGED_INT(" . $tl . ")) strada_decref(" . $tl . "); "); }
+                if ($cr == 1) { emit($cg, "if (!STRADA_IS_TAGGED_INT(" . $tr . ")) strada_decref(" . $tr . "); "); }
+                emit($cg, "__ti_res" . $uid . "; })");
             }
         } elsif ($op eq "/") {
             # Safe division - returns undef if divisor is zero
