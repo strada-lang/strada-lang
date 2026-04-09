@@ -27,8 +27,9 @@ Welcome to the Strada programming language documentation. Strada is a strongly-t
 | [FFI Guide](FFI_GUIDE.md) | C integration and foreign functions |
 | [Perl Integration](PERL_INTEGRATION.md) | Calling Perl from Strada and vice versa |
 | [Runtime API](RUNTIME_API.md) | C runtime library reference |
-| [Interpreter](INTERPRETER.md) | Bytecode VM interpreter and REPL |
+| [Interpreter](INTERPRETER.md) | Bytecode VM interpreter, REPL, and Perla VM mode |
 | [Compiler Architecture](COMPILER_ARCHITECTURE.md) | How the compiler works |
+| [Perl Integration](PERL_INTEGRATION.md) | Perl interop, Perla compiler, and conversion tools |
 
 ## Quick Example
 

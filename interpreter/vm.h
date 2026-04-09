@@ -68,6 +68,7 @@ typedef enum {
     /* String operations */
     OP_STR_LEN,         /* pop string, push int length */
     OP_STR_SPLIT,       /* pop str, pop delimiter, push array */
+    OP_STR_SPLIT_LIMIT, /* pop str, pop delimiter, pop limit(int), push array */
     OP_STR_REPLACE,     /* pop replacement, pop pattern, pop str, push new str */
 
     /* OOP */

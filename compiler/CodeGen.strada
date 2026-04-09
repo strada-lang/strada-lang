@@ -14521,19 +14521,17 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         scope_track_var($cg, $c_name);
 
         # Track known blessed type for devirtualization
-        # When $p = Point::new(...), we know $p is a Point
+        # When $p = Point::new(...) or $p = Counter::new_counter(), we know the class
         if ($stmt->{"init"}) {
             my scalar $dinit = $stmt->{"init"};
             my int $dinit_type = $dinit->{"type"};
             if ($dinit_type == NODE_CALL()) {
                 my str $dname = $dinit->{"name"};
-                my int $dlen = length($dname);
-                if ($dlen > 5) {
-                    my str $dsuffix = substr($dname, $dlen - 5, 5);
-                    if ($dsuffix eq "::new") {
-                        my str $dpkg = substr($dname, 0, $dlen - 5);
-                        $cg->{"known_types"}->{$c_name} = $dpkg;
-                    }
+                # Any Package::method() call — extract package name before last ::
+                my int $dcolon = rindex($dname, "::");
+                if ($dcolon > 0) {
+                    my str $dpkg = substr($dname, 0, $dcolon);
+                    $cg->{"known_types"}->{$c_name} = $dpkg;
                 }
             }
         }

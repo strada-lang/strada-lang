@@ -129,7 +129,7 @@ Key characteristics:
 
 Source files:
 - `interpreter/vm_compiler.c` - AST to bytecode compiler
-- `interpreter/vm_run.c` - Bytecode dispatch loop
+- `interpreter/vm.c` - Bytecode dispatch loop
 
 ### Tree-Walking Backend (Legacy)
 
@@ -663,7 +663,7 @@ strada/
 ├── interpreter/        # Interpreter (bytecode VM + tree-walk)
 │   ├── Main.strada    # Driver (REPL + file execution)
 │   ├── vm_compiler.c  # AST to bytecode compiler
-│   ├── vm_run.c       # Bytecode VM dispatch loop
+│   ├── vm.c       # Bytecode VM dispatch loop
 │   └── Combined.strada # Combined source (generated)
 │
 ├── runtime/            # Runtime library

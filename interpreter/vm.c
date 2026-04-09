@@ -1084,7 +1084,7 @@ VMValue vm_execute(VM *vm, const char *func_name) {
         DT(OP_ARRAY_SET); DT(OP_ARRAY_SIZE);
         DT(OP_NEW_HASH); DT(OP_HASH_GET); DT(OP_HASH_SET);
         DT(OP_HASH_DELETE); DT(OP_HASH_KEYS);
-        DT(OP_STR_LEN); DT(OP_STR_SPLIT); DT(OP_STR_REPLACE);
+        DT(OP_STR_LEN); DT(OP_STR_SPLIT); DT(OP_STR_SPLIT_LIMIT); DT(OP_STR_REPLACE);
         DT(OP_HASH_BLESS); DT(OP_HASH_REF);
         DT(OP_IS_UNDEF); DT(OP_ISA); DT(OP_APPEND_LOCAL);
         DT(OP_HASH_GET_CONCAT); DT(OP_HASH_SET_CONCAT); DT(OP_HASH_DEL_CONCAT);
@@ -1333,10 +1333,19 @@ VMValue vm_execute(VM *vm, const char *func_name) {
     CASE(OP_RETURN): {
         VMValue result = SP_POP();
         int lc = frame->chunk->local_count;
-        if (__builtin_expect(!frame->chunk->int_only, 0)) {
-            for (int i = 0; i < lc; i++) {
-                if (locals[i] != result) vm_val_deep_free(locals[i]);
-                else vm_val_free(&locals[i]); /* skip deep free for returned value */
+        /* Only free the @_ variadic array container (not its elements).
+         * We cannot deep-free or free other locals because they may hold
+         * references to objects still alive in the caller's scope.
+         * The VM does not use reference counting, so ownership is ambiguous. */
+        if (frame->chunk->has_variadic) {
+            int va_slot = frame->chunk->fixed_param_count;
+            if (va_slot < lc) {
+                VMValue v = locals[va_slot];
+                if (VM_IS_PTR(v) && VM_PTR_TYPE(v) == VM_OBJ_ARRAY) {
+                    VMArray *va = VM_AS_ARRAY(v);
+                    free(va->items);
+                    free(va);
+                }
             }
         }
         locals_free(locals, lc + 1);
@@ -1644,6 +1653,16 @@ VMValue vm_execute(VM *vm, const char *func_name) {
             VMArray *rev = vm_array_new(arr->size);
             for (int i = arr->size - 1; i >= 0; i--) vm_array_push(rev, vm_val_copy(arr->items[i]));
             SP_PUSH(VM_MAKE_PTR(rev));
+        } else if (VM_IS_PTR(a) && (VM_PTR_TYPE(a) == VM_OBJ_STR || VM_PTR_TYPE(a) == VM_OBJ_STRBUF)) {
+            /* reverse() on a string: reverse the characters */
+            char buf[64];
+            const char *s = vm_to_cstr(a, buf, sizeof(buf));
+            size_t len = strlen(s);
+            char *rev = malloc(len + 1);
+            for (size_t i = 0; i < len; i++) rev[i] = s[len - 1 - i];
+            rev[len] = '\0';
+            SP_PUSH(vm_str(rev));
+            free(rev);
         } else SP_PUSH(VM_MAKE_PTR(vm_array_new(0)));
         DISPATCH();
     }
@@ -1831,6 +1850,37 @@ VMValue vm_execute(VM *vm, const char *func_name) {
                     start = f + dlen;
                 }
                 vm_array_push(res, VM_MAKE_STR(start));
+            }
+            vm_val_free(&str); vm_val_free(&delim);
+            SP_PUSH(VM_MAKE_PTR(res));
+        } else {
+            vm_val_free(&str); vm_val_free(&delim);
+            SP_PUSH(VM_MAKE_PTR(vm_array_new(0)));
+        }
+        DISPATCH();
+    }
+
+    CASE(OP_STR_SPLIT_LIMIT): {
+        VMValue str = SP_POP(), delim = SP_POP(), limit_v = SP_POP();
+        int limit = VM_IS_INT(limit_v) ? (int)VM_INT_VAL(limit_v) : 0;
+        if (VM_IS_PTR(str) && VM_IS_PTR(delim) && limit > 0) {
+            const char *s = VM_AS_STR(str)->data, *d = VM_AS_STR(delim)->data;
+            size_t dlen = strlen(d);
+            VMArray *res = vm_array_new(limit);
+            int parts = 0;
+            if (dlen > 0) {
+                const char *start = s, *f;
+                while (parts < limit - 1 && (f = strstr(start, d))) {
+                    vm_array_push(res, VM_MAKE_STR_N(start, f - start));
+                    start = f + dlen;
+                    parts++;
+                }
+                vm_array_push(res, VM_MAKE_STR(start)); /* remainder */
+            } else {
+                /* Empty delimiter: split into chars up to limit */
+                for (const char *p = s; *p && parts < limit - 1; p++, parts++)
+                    vm_array_push(res, VM_MAKE_STR_N(p, 1));
+                if (*s) vm_array_push(res, VM_MAKE_STR(s + parts));
             }
             vm_val_free(&str); vm_val_free(&delim);
             SP_PUSH(VM_MAKE_PTR(res));

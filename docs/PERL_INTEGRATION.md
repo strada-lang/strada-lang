@@ -323,9 +323,62 @@ perl/
 
 ---
 
+## Perla — Perl 5 Compiler
+
+Perla is a full Perl 5 compiler built on Strada. It converts Perl 5 source to native executables (via C code generation) or runs it directly through the Strada VM interpreter. Located in `perla/`.
+
+Unlike `perl2strada` (which generates Strada source that must then be compiled), Perla compiles Perl programs directly in one step.
+
+### Usage
+
+```bash
+# Build Perla
+cd perla && make
+
+# Compile and run a Perl script (default: native C compilation)
+./perla script.pl
+
+# Compile to executable only
+./perla script.pl -c
+
+# Run via Strada VM/interpreter (no C compilation needed)
+./perla --vm script.pl
+
+# Output Strada source code
+./perla --strada script.pl
+```
+
+### Supported Features
+
+Perla handles a wide range of Perl 5 constructs:
+
+- OOP: `bless`, method dispatch, inheritance (`@ISA`, `use parent`)
+- Closures with proper variable capture
+- Regex: `=~`, `s///e`, backreferences, quantifiers, `qr//`
+- String interpolation: `"Hello, $name!"`, `"$hash{key}"`, `"$arr[0]"`
+- File I/O: `open`, `close`, diamond operator, `chomp`
+- Functional: `map`, `grep`, `sort` with custom comparators
+- Control flow: `if/elsif/else`, `unless`, `while`, `for`, `foreach`, statement modifiers
+- Exception handling: `eval { }` / `die` / `$@`
+- Destructuring: `my ($a, @rest) = @_`
+- XS module support (C extensions via `.xs` files)
+
+### Testing
+
+```bash
+./perla/t/run_tests.sh          # 53 tests (compiled mode)
+./perla/t/run_tests.sh --vm     # 53 tests (VM mode)
+```
+
+### Performance
+
+Compiled Perla output typically runs 1x-3x faster than native Perl. VM mode runs at roughly Perl speed (0.7x-3x depending on workload).
+
+---
+
 ## Converting Between Strada and Perl
 
-Strada includes three tools for converting code between Strada and Perl:
+Strada includes three additional tools for converting code between Strada and Perl:
 
 ### perl2strada - Convert Perl Scripts and Modules
 

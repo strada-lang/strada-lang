@@ -250,7 +250,7 @@ strada/
 ├── interpreter/
 │   ├── Main.strada      # Interpreter driver (REPL + file execution)
 │   ├── vm_compiler.c    # AST to bytecode compiler
-│   ├── vm_run.c         # Bytecode VM dispatch loop
+│   ├── vm.c         # Bytecode VM dispatch loop
 │   └── Combined.strada  # Combined source (generated)
 ├── bootstrap/
 │   └── stradac          # Bootstrap compiler (frozen)
