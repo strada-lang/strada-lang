@@ -124,7 +124,9 @@ void vm_array_free(VMArray *a) { if (a) { free(a->items); free(a); } }
 
 void vm_array_push(VMArray *a, VMValue v) {
     if (a->size >= a->cap) {
-        a->cap = a->cap < 1024 ? a->cap * 2 : a->cap + a->cap / 2;
+        int new_cap = a->cap < 1024 ? a->cap * 2 : a->cap + a->cap / 2;
+        if (new_cap < 8) new_cap = 8;
+        a->cap = new_cap;
         a->items = realloc(a->items, a->cap * sizeof(VMValue));
     }
     a->items[a->size++] = v;
@@ -137,7 +139,10 @@ VMValue vm_array_get(VMArray *a, int idx) {
 
 void vm_array_set(VMArray *a, int idx, VMValue v) {
     while (idx >= a->cap) {
-        a->cap = a->cap < 1024 ? a->cap * 2 : a->cap + a->cap / 2;
+        int new_cap = a->cap < 1024 ? a->cap * 2 : a->cap + a->cap / 2;
+        if (new_cap < 8) new_cap = 8;
+        if (new_cap <= idx) new_cap = idx + 1;
+        a->cap = new_cap;
         a->items = realloc(a->items, a->cap * sizeof(VMValue));
     }
     while (idx >= a->size) a->items[a->size++] = VM_UNDEF_VAL;
@@ -1570,7 +1575,7 @@ VMValue vm_execute(VM *vm, const char *func_name) {
 
     /* ===== Arrays ===== */
     CASE(OP_NEW_ARRAY): { uint32_t c = read_u32(ip); ip += 4; SP_PUSH(VM_MAKE_PTR(vm_array_new(c>0?c:8))); DISPATCH(); }
-    CASE(OP_ARRAY_PUSH): { VMValue v = SP_POP(), a = SP_POP(); if (VM_IS_PTR(a)) vm_array_push(VM_AS_ARRAY(a), v); DISPATCH(); }
+    CASE(OP_ARRAY_PUSH): { VMValue v = SP_POP(), a = SP_POP(); if (VM_IS_PTR(a) && VM_PTR_TYPE(a) == VM_OBJ_ARRAY) vm_array_push(VM_AS_ARRAY(a), v); DISPATCH(); }
     CASE(OP_ARRAY_GET): {
         VMValue idx = SP_POP(), arr = SP_POP();
         if (VM_IS_PTR(arr) && VM_PTR_TYPE(arr) == VM_OBJ_ARRAY) {

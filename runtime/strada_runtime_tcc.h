@@ -1198,4 +1198,42 @@ void strada_local_save_hash_elem(StradaValue *hash, const char *key);
 void strada_pool_init(int num_workers);
 void strada_pool_shutdown(void);
 
+/* Perla runtime extensions */
+StradaValue* strada_sv_replace_first(StradaValue *sv, const char *find, const char *replace);
+StradaValue* strada_sv_replace_all(StradaValue *sv, const char *find, const char *replace);
+StradaValue* strada_concat_cstr_sv(const char *prefix, size_t prefix_len, StradaValue *b);
+int strada_regex_match_global(const char *str, const char *pattern, const char *flags, size_t *pos);
+
+/* Stack-allocated 1-element array for fast method calls */
+typedef struct {
+    StradaValue *elems[1];
+    StradaArray av;
+    StradaValue sv;
+} StradaStackArgs1;
+
+static inline void strada_stack_args1_init(StradaStackArgs1 *sa, StradaValue *elem) {
+    sa->elems[0] = elem;
+    sa->av.elements = sa->elems;
+    sa->av.size = 1;
+    sa->av.capacity = 1;
+    sa->av.refcount = 2;
+    sa->av.head = 0;
+    sa->sv.type = STRADA_ARRAY;
+    sa->sv.value.av = &sa->av;
+    sa->sv.refcount = 2;
+    sa->sv.meta = NULL;
+    sa->sv.struct_size = 0;
+}
+
+/* Autovivifying hash fetch: creates intermediate hash if key missing */
+static inline StradaValue* strada_hv_autoviv(StradaValue *sv, const char *key) {
+    if (STRADA_IS_TAGGED_INT(sv) || !sv) return strada_new_hash();
+    StradaValue *result = strada_hash_get(strada_deref_hash(sv), key);
+    if (!result || (result->type == STRADA_UNDEF)) {
+        result = strada_new_hash();
+        strada_hash_set(strada_deref_hash(sv), key, result);
+    }
+    return result;
+}
+
 #endif /* STRADA_RUNTIME_TCC_H */

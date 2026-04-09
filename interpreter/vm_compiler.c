@@ -1854,7 +1854,13 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         StradaValue *init = ast_get(node, "init");
 
         if (sigil[0] == '@') {
-            if (init && !STRADA_IS_TAGGED_INT(init) && (int)ast_int(init, "type") != 0) {
+            int init_type = (init && !STRADA_IS_TAGGED_INT(init)) ? (int)ast_int(init, "type") : 0;
+            /* () is parsed as empty ANON_HASH — treat as empty array for @ sigil */
+            if (init_type == NI_ANON_HASH) {
+                int ec = (int)ast_int(init, "element_count");
+                if (ec == 0) init_type = 0; /* fall through to OP_NEW_ARRAY */
+            }
+            if (init_type != 0) {
                 compile_expr(ctx, init);
             } else {
                 int64_t cap = ast_int(node, "initial_capacity");

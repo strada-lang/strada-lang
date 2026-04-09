@@ -1027,11 +1027,11 @@ func could_be_blessed(scalar $expr) int {
 # Emit the default (non-overloaded) fallback for a binary op using __ol_l, __ol_r temps
 func emit_overload_binary_fallback(scalar $cg, str $op) void {
     if ($op eq "+") {
-        emit($cg, "strada_new_num(strada_to_num(__ol_l) + strada_to_num(__ol_r))");
+        emit($cg, "(STRADA_IS_TAGGED_INT(__ol_l) && STRADA_IS_TAGGED_INT(__ol_r) ? STRADA_MAKE_TAGGED_INT(STRADA_TAGGED_INT_VAL(__ol_l) + STRADA_TAGGED_INT_VAL(__ol_r)) : strada_new_num(strada_to_num(__ol_l) + strada_to_num(__ol_r)))");
     } elsif ($op eq "-") {
-        emit($cg, "strada_new_num(strada_to_num(__ol_l) - strada_to_num(__ol_r))");
+        emit($cg, "(STRADA_IS_TAGGED_INT(__ol_l) && STRADA_IS_TAGGED_INT(__ol_r) ? STRADA_MAKE_TAGGED_INT(STRADA_TAGGED_INT_VAL(__ol_l) - STRADA_TAGGED_INT_VAL(__ol_r)) : strada_new_num(strada_to_num(__ol_l) - strada_to_num(__ol_r)))");
     } elsif ($op eq "*") {
-        emit($cg, "strada_new_num(strada_to_num(__ol_l) * strada_to_num(__ol_r))");
+        emit($cg, "(STRADA_IS_TAGGED_INT(__ol_l) && STRADA_IS_TAGGED_INT(__ol_r) ? STRADA_MAKE_TAGGED_INT(STRADA_TAGGED_INT_VAL(__ol_l) * STRADA_TAGGED_INT_VAL(__ol_r)) : strada_new_num(strada_to_num(__ol_l) * strada_to_num(__ol_r)))");
     } elsif ($op eq "/") {
         emit($cg, "strada_safe_div(strada_to_num(__ol_l), strada_to_num(__ol_r))");
     } elsif ($op eq "%") {
@@ -2094,6 +2094,33 @@ func emit_extern_str_operand(scalar $cg, scalar $expr) void {
     gen_expression($cg, $expr);
 }
 
+# Helper: emit a while condition for regex /g match with position tracking
+func emit_regex_g_condition(scalar $cg, scalar $expr, str $pos_var) void {
+    my str $pattern = $expr->{"pattern"};
+    my str $flags = $expr->{"flags"};
+    my str $op = $expr->{"op"};
+
+    # Get the target string
+    emit($cg, "({ char *__re_str = strada_to_str(");
+    gen_expression($cg, $expr->{"target"});
+    emit($cg, "); int __re_res = ");
+    if ($op eq "!~") { emit($cg, "!"); }
+    emit($cg, "strada_regex_match_global(__re_str, \"");
+    # Emit pattern with C escaping
+    my int $i = 0;
+    my int $len = length($pattern);
+    while ($i < $len) {
+        my str $ch = substr($pattern, $i, 1);
+        if ($ch eq "\\") { emit($cg, "\\\\"); }
+        elsif ($ch eq "\"") { emit($cg, "\\\""); }
+        elsif ($ch eq "\n") { emit($cg, "\\n"); }
+        elsif ($ch eq "\t") { emit($cg, "\\t"); }
+        else { emit($cg, $ch); }
+        $i = $i + 1;
+    }
+    emit($cg, "\", \"" . $flags . "\", &" . $pos_var . "); free(__re_str); __re_res; })");
+}
+
 # Helper: emit a condition as raw C boolean (avoids strada_new_int allocation)
 # Used for while/for/if conditions to prevent memory leaks
 func emit_condition(scalar $cg, scalar $expr) void {
@@ -3093,11 +3120,16 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 emit_int_operand($cg, $expr->{"right"});
                 emit($cg, ")");
             } else {
-                emit($cg, "strada_new_num(");
-                emit_num_operand($cg, $expr->{"left"});
-                emit($cg, " + ");
-                emit_num_operand($cg, $expr->{"right"});
-                emit($cg, ")");
+                # Runtime tagged int fast-path for scalar + scalar
+                my int $uid = $cg->{"tmp_counter"} + 0;
+                $cg->{"tmp_counter"} = $uid + 1;
+                my str $tl = "__ti_l" . $uid;
+                my str $tr = "__ti_r" . $uid;
+                emit($cg, "({ StradaValue *" . $tl . " = ");
+                gen_expression($cg, $expr->{"left"});
+                emit($cg, "; StradaValue *" . $tr . " = ");
+                gen_expression($cg, $expr->{"right"});
+                emit($cg, "; STRADA_IS_TAGGED_INT(" . $tl . ") && STRADA_IS_TAGGED_INT(" . $tr . ") ? STRADA_MAKE_TAGGED_INT(STRADA_TAGGED_INT_VAL(" . $tl . ") + STRADA_TAGGED_INT_VAL(" . $tr . ")) : strada_new_num(strada_to_num(" . $tl . ") + strada_to_num(" . $tr . ")); })");
             }
         } elsif ($op eq "-") {
             if ($cg->{"has_overloads"} == 0 && expr_is_int_typed($cg, $expr->{"left"}) == 1 && expr_is_int_typed($cg, $expr->{"right"}) == 1) {
@@ -3107,11 +3139,15 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 emit_int_operand($cg, $expr->{"right"});
                 emit($cg, ")");
             } else {
-                emit($cg, "strada_new_num(");
-                emit_num_operand($cg, $expr->{"left"});
-                emit($cg, " - ");
-                emit_num_operand($cg, $expr->{"right"});
-                emit($cg, ")");
+                my int $uid = $cg->{"tmp_counter"} + 0;
+                $cg->{"tmp_counter"} = $uid + 1;
+                my str $tl = "__ti_l" . $uid;
+                my str $tr = "__ti_r" . $uid;
+                emit($cg, "({ StradaValue *" . $tl . " = ");
+                gen_expression($cg, $expr->{"left"});
+                emit($cg, "; StradaValue *" . $tr . " = ");
+                gen_expression($cg, $expr->{"right"});
+                emit($cg, "; STRADA_IS_TAGGED_INT(" . $tl . ") && STRADA_IS_TAGGED_INT(" . $tr . ") ? STRADA_MAKE_TAGGED_INT(STRADA_TAGGED_INT_VAL(" . $tl . ") - STRADA_TAGGED_INT_VAL(" . $tr . ")) : strada_new_num(strada_to_num(" . $tl . ") - strada_to_num(" . $tr . ")); })");
             }
         } elsif ($op eq "*") {
             if ($cg->{"has_overloads"} == 0 && expr_is_int_typed($cg, $expr->{"left"}) == 1 && expr_is_int_typed($cg, $expr->{"right"}) == 1) {
@@ -3121,11 +3157,15 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 emit_int_operand($cg, $expr->{"right"});
                 emit($cg, ")");
             } else {
-                emit($cg, "strada_new_num(");
-                emit_num_operand($cg, $expr->{"left"});
-                emit($cg, " * ");
-                emit_num_operand($cg, $expr->{"right"});
-                emit($cg, ")");
+                my int $uid = $cg->{"tmp_counter"} + 0;
+                $cg->{"tmp_counter"} = $uid + 1;
+                my str $tl = "__ti_l" . $uid;
+                my str $tr = "__ti_r" . $uid;
+                emit($cg, "({ StradaValue *" . $tl . " = ");
+                gen_expression($cg, $expr->{"left"});
+                emit($cg, "; StradaValue *" . $tr . " = ");
+                gen_expression($cg, $expr->{"right"});
+                emit($cg, "; STRADA_IS_TAGGED_INT(" . $tl . ") && STRADA_IS_TAGGED_INT(" . $tr . ") ? STRADA_MAKE_TAGGED_INT(STRADA_TAGGED_INT_VAL(" . $tl . ") * STRADA_TAGGED_INT_VAL(" . $tr . ")) : strada_new_num(strada_to_num(" . $tl . ") * strada_to_num(" . $tr . ")); })");
             }
         } elsif ($op eq "/") {
             # Safe division - returns undef if divisor is zero
@@ -3142,12 +3182,21 @@ func gen_expression(scalar $cg, scalar $expr) void {
             emit_num_operand($cg, $expr->{"right"});
             emit($cg, "))");
         } elsif ($op eq "%") {
-            # Safe modulo - returns undef if divisor is zero
-            emit($cg, "strada_safe_mod((int64_t)");
-            emit_int_operand($cg, $expr->{"left"});
-            emit($cg, ", (int64_t)");
-            emit_int_operand($cg, $expr->{"right"});
-            emit($cg, ")");
+            if ($cg->{"has_overloads"} == 0 && expr_is_int_typed($cg, $expr->{"left"}) == 1 && expr_is_int_typed($cg, $expr->{"right"}) == 1) {
+                # Inline tagged int modulo (with zero guard)
+                emit($cg, "({ int64_t __ml = ");
+                emit_int_operand($cg, $expr->{"left"});
+                emit($cg, "; int64_t __mr = ");
+                emit_int_operand($cg, $expr->{"right"});
+                emit($cg, "; __mr != 0 ? STRADA_MAKE_TAGGED_INT(__ml % __mr) : strada_new_undef(); })");
+            } else {
+                # Runtime fast-path for tagged int modulo
+                emit($cg, "({ StradaValue *__al = ");
+                gen_expression($cg, $expr->{"left"});
+                emit($cg, "; StradaValue *__ar = ");
+                gen_expression($cg, $expr->{"right"});
+                emit($cg, "; STRADA_IS_TAGGED_INT(__al) && STRADA_IS_TAGGED_INT(__ar) && STRADA_TAGGED_INT_VAL(__ar) != 0 ? STRADA_MAKE_TAGGED_INT(STRADA_TAGGED_INT_VAL(__al) % STRADA_TAGGED_INT_VAL(__ar)) : strada_safe_mod(strada_to_int(__al), strada_to_int(__ar)); })");
+            }
         } elsif ($op eq "x") {
             # String repetition: "ab" x 3
             my int $left_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $expr->{"left"}) == 1;
@@ -11366,6 +11415,32 @@ func gen_expression(scalar $cg, scalar $expr) void {
         my int $target_type = $target->{"type"};
         
         if ($op eq "=") {
+            # Special case: substr($s, offset, len) = value — in-place string modification
+            if ($target_type == NODE_CALL()) {
+                my str $call_name = "" . $target->{"name"};
+                if ($call_name eq "substr") {
+                    my int $sargc = $target->{"arg_count"} + 0;
+                    my scalar $sargs = $target->{"args"};
+                    if ($sargc >= 2) {
+                        emit($cg, "({ StradaValue *__sa_sv = ");
+                        gen_expression($cg, $expr->{"value"});
+                        emit($cg, "; char *__sa_r = strada_to_str(__sa_sv); strada_substr_assign(&");
+                        gen_expression($cg, $sargs->[0]);
+                        emit($cg, ", (int64_t)strada_to_int(");
+                        gen_expression($cg, $sargs->[1]);
+                        emit($cg, "), ");
+                        if ($sargc >= 3) {
+                            emit($cg, "(int64_t)strada_to_int(");
+                            gen_expression($cg, $sargs->[2]);
+                            emit($cg, ")");
+                        } else {
+                            emit($cg, "(int64_t)999999");
+                        }
+                        emit($cg, ", __sa_r); free(__sa_r); strada_decref(__sa_sv); (StradaValue*)NULL; })");
+                        return;
+                    }
+                }
+            }
             # Special case: hash assignment %hash{key} = value
             # strada_hash_set handles incref internally for shared ownership
             # For anonymous values, we need to decref after hash_set takes ownership
@@ -13667,9 +13742,9 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 emit($cg, "; ");
                 # Handle both STRADA_ARRAY and STRADA_REF to array (from strada_anon_array)
                 emit($cg, "StradaValue *__flat_val_" . $map_id . " = __map_elem_" . $map_id . "; ");
-                emit($cg, "if (__flat_val_" . $map_id . " && __flat_val_" . $map_id . "->type == STRADA_REF) { ");
+                emit($cg, "if (__flat_val_" . $map_id . " && !STRADA_IS_TAGGED_INT(__flat_val_" . $map_id . ") && __flat_val_" . $map_id . "->type == STRADA_REF) { ");
                 emit($cg, "__flat_val_" . $map_id . " = __flat_val_" . $map_id . "->value.rv; } ");
-                emit($cg, "if (__flat_val_" . $map_id . " && __flat_val_" . $map_id . "->type == STRADA_ARRAY) { ");
+                emit($cg, "if (__flat_val_" . $map_id . " && !STRADA_IS_TAGGED_INT(__flat_val_" . $map_id . ") && __flat_val_" . $map_id . "->type == STRADA_ARRAY) { ");
                 emit($cg, "StradaArray *__flat_arr_" . $map_id . " = __flat_val_" . $map_id . "->value.av; ");
                 emit($cg, "for (size_t __flat_j_" . $map_id . " = 0; __flat_j_" . $map_id . " < __flat_arr_" . $map_id . "->size; __flat_j_" . $map_id . "++) { ");
                 emit($cg, "strada_array_push(__map_result_" . $map_id . "->value.av, __flat_arr_" . $map_id . "->elements[__flat_j_" . $map_id . "]); } ");
@@ -14810,10 +14885,41 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         my int $saved_loop_break_depth = $cg->{"loop_break_depth"};
         $cg->{"loop_break_depth"} = $cg->{"scope_depth"};
 
+        # Check for while ($str =~ /pat/g) — needs position-tracking regex
+        my scalar $while_cond = $stmt->{"condition"};
+        my int $is_regex_g = 0;
+        my str $gpos_var = "";
+        my int $wc_type = 0;
+        my int $wc_ok = length("" . $while_cond);
+        if ($wc_ok > 0) {
+            $wc_type = $while_cond->{"type"};
+        }
+        if ($wc_type == NODE_REGEX_MATCH()) {
+            my str $wflags = "" . $while_cond->{"flags"};
+            if (length($wflags) > 0) {
+                if (index($wflags, "g") >= 0) {
+                    $is_regex_g = 1;
+                    my int $gc = $cg->{"regex_g_counter"} + 0;
+                    $gpos_var = "__gpos_" . $gc;
+                    $cg->{"regex_g_counter"} = $gc + 1;
+                    emit_indent($cg);
+                    emit($cg, "{ size_t " . $gpos_var . " = 0;\n");
+                    indent($cg);
+                }
+            }
+        }
+
         emit_indent($cg);
-        emit($cg, "while (");
-        emit_condition($cg, $stmt->{"condition"});
-        emit($cg, ") {\n");
+        if ($is_regex_g == 1) {
+            # Emit regex /g condition with position tracking
+            emit($cg, "while (");
+            emit_regex_g_condition($cg, $while_cond, $gpos_var);
+            emit($cg, ") {\n");
+        } else {
+            emit($cg, "while (");
+            emit_condition($cg, $while_cond);
+            emit($cg, ") {\n");
+        }
         indent($cg);
         scope_push($cg);
 
@@ -14846,6 +14952,12 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             emit_indent($cg);
             emit($cg, $label);
             emit($cg, "_break: ;\n");
+        }
+        # Close regex /g position-tracking block
+        if ($is_regex_g == 1) {
+            dedent($cg);
+            emit_indent($cg);
+            emit($cg, "}\n");
         }
         $cg->{"loop_break_depth"} = $saved_loop_break_depth;
         $cg->{"current_redo_label"} = $saved_redo;

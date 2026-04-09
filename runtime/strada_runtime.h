@@ -339,6 +339,30 @@ struct StradaArray {
     size_t head;    /* Offset into elements[] where data starts (for O(1) shift) */
 };
 
+/* Stack-allocated 1-element array for fast method calls.
+ * Usage: STRADA_STACK_ARGS1(args, self_val);
+ *        method_func(&args.sv);
+ * Avoids heap allocation for the common $self->method() pattern. */
+typedef struct {
+    StradaValue *elems[1];
+    StradaArray av;
+    StradaValue sv;
+} StradaStackArgs1;
+
+static inline void strada_stack_args1_init(StradaStackArgs1 *sa, StradaValue *elem) {
+    sa->elems[0] = elem;
+    sa->av.elements = sa->elems;
+    sa->av.size = 1;
+    sa->av.capacity = 1;
+    sa->av.refcount = 2;  /* prevent freeing */
+    sa->av.head = 0;
+    sa->sv.type = STRADA_ARRAY;
+    sa->sv.value.av = &sa->av;
+    sa->sv.refcount = 2;  /* prevent freeing */
+    sa->sv.meta = NULL;
+    sa->sv.struct_size = 0;
+}
+
 /* Refcounted string — single allocation for header + data.
  * Used for hash keys; will eventually replace char* in StradaValue. */
 /* Refcounted string — single allocation for header + data. */
@@ -944,6 +968,11 @@ int64_t strada_cstruct_get_int(StradaValue *sv, const char *field, size_t offset
 char* strada_replace_all(const char *str, const char *find, const char *replace);
 char* strada_chomp(const char *str);
 char* strada_chop(const char *str);
+StradaValue* strada_sv_replace_first(StradaValue *sv, const char *find, const char *replace);
+void strada_substr_assign(StradaValue **sv_ptr, int64_t offset, int64_t length, const char *replacement);
+int strada_regex_match_global(const char *str, const char *pattern, const char *flags, size_t *pos);
+StradaValue* strada_sv_replace_all(StradaValue *sv, const char *find, const char *replace);
+StradaValue* strada_concat_cstr_sv(const char *prefix, size_t prefix_len, StradaValue *b);
 void strada_cstruct_set_string(StradaValue *sv, const char *field, size_t offset, const char *value);
 void strada_cstruct_set_double(StradaValue *sv, const char *field, size_t offset, double value);
 char* strada_cstruct_get_string(StradaValue *sv, const char *field, size_t offset);
@@ -1464,6 +1493,17 @@ static inline void strada_hv_delete_sv(StradaValue *sv, StradaValue *key) {
 }
 
 /* Concat key operations: build key from prefix + suffix in stack buffer (zero allocations) */
+/* Autovivifying fetch: if key doesn't exist, create empty hash and store it */
+static inline StradaValue* strada_hv_autoviv(StradaValue *sv, const char *key) {
+    if (STRADA_IS_TAGGED_INT(sv) || !sv) return strada_new_hash();
+    StradaValue *result = strada_hash_get(strada_deref_hash(sv), key);
+    if (!result || (result->type == STRADA_UNDEF)) {
+        result = strada_new_hash();
+        strada_hash_set(strada_deref_hash(sv), key, result);
+    }
+    return result;
+}
+
 StradaValue* strada_hv_fetch_owned_concat(StradaValue *sv, const char *prefix, size_t prefix_len, StradaValue *suffix);
 void strada_hv_store_concat(StradaValue *sv, const char *prefix, size_t prefix_len, StradaValue *suffix, StradaValue *value);
 void strada_hv_delete_concat(StradaValue *sv, const char *prefix, size_t prefix_len, StradaValue *suffix);
