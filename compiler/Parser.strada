@@ -1309,7 +1309,7 @@ func parse_primary(scalar $parser) scalar {
                 $key_expr = parse_primary($parser);
             } else {
                 my scalar $hk_tok = parser_current($parser);
-                parser_error($parser, "expected hash key (string, identifier, or $variable), got " . friendly_token($hk_tok->{"type"}, $hk_tok->{"value"}));
+                parser_error($parser, "expected hash key (string, identifier, or \$variable), got " . friendly_token($hk_tok->{"type"}, $hk_tok->{"value"}));
             }
 
             parser_expect($parser, "FAT_ARROW");
@@ -1983,7 +1983,7 @@ func parse_postfix(scalar $parser, scalar $left) scalar {
                 }
             }
             else {
-                parser_error($parser, "expected {, [, $variable, or field name after ->");
+                parser_error($parser, "expected {, [, \$variable, or field name after ->");
             }
         }
         elsif (parser_check($parser, "LBRACE")) {
@@ -1991,7 +1991,7 @@ func parse_postfix(scalar $parser, scalar $left) scalar {
             if ($left->{"type"} == NODE_VARIABLE()) {
                 my str $sigil = $left->{"sigil"};
                 if ($sigil eq "%") {
-                    parser_error($parser, "use $hash{key} for hash element access (hash sigil not allowed here)");
+                    parser_error($parser, "use \$hash{key} for hash element access (hash sigil not allowed here)");
                 }
             }
             # Hash slice: @hash{"a", "b"} or @{$ref}{"a", "b"}
@@ -4923,7 +4923,7 @@ func find_o_file(scalar $program, str $obj_file) str {
 func extract_object_export_info(scalar $parser, str $obj_name, str $o_path) str {
     # Get the compiler directory from STRADA_DIR environment variable
     # (set by the 'strada' wrapper script) or fall back to current directory
-    my str $compiler_dir = sys::qx("echo -n \"$STRADA_DIR\"");
+    my str $compiler_dir = sys::qx("echo -n \"\$STRADA_DIR\"");
     if (length($compiler_dir) == 0) {
         # Fallback to current directory (works when running from repo root)
         $compiler_dir = ".";

@@ -14738,6 +14738,8 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 emit_indent($cg);
                 if ($vsigil eq "%") {
                     emit($cg, "StradaValue *" . $name . " = strada_new_hash();\n");
+                } elsif ($vsigil eq "@") {
+                    emit($cg, "StradaValue *" . $name . " = strada_new_array();\n");
                 } else {
                     emit($cg, "StradaValue *" . $name . " = strada_new_undef();\n");
                 }
@@ -14797,6 +14799,22 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 emit($cg, "    free(__ds_ks);\n");
                 emit_indent($cg);
                 emit($cg, "  }\n");
+                emit_indent($cg);
+                emit($cg, "}\n");
+            } elsif ($var_sigil eq "@") {
+                # Array slurp: collect remaining elements
+                emit_indent($cg);
+                emit($cg, "strada_decref(" . $name . ");\n");
+                emit_indent($cg);
+                emit($cg, $name . " = strada_new_array();\n");
+                emit_indent($cg);
+                emit($cg, "{ StradaArray *__ds_arr = strada_deref_array(__destruct_src);\n");
+                emit_indent($cg);
+                emit($cg, "  int __ds_len = __ds_arr ? strada_array_length(__ds_arr) : 0;\n");
+                emit_indent($cg);
+                emit($cg, "  for (int __ds_j = " . $i . "; __ds_j < __ds_len; __ds_j++)\n");
+                emit_indent($cg);
+                emit($cg, "    strada_array_push(strada_deref_array(" . $name . "), strada_array_get_safe(__destruct_src, __ds_j));\n");
                 emit_indent($cg);
                 emit($cg, "}\n");
             } else {

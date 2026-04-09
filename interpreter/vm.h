@@ -178,6 +178,8 @@ typedef enum {
     /* Comparison operators */
     OP_STR_LT,          /* string less than */
     OP_STR_GT,          /* string greater than */
+    OP_STR_LE,          /* string less than or equal */
+    OP_STR_GE,          /* string greater than or equal */
     OP_SPACESHIP,       /* <=> operator */
 
     OP_CALL_NATIVE,     /* u16 native_idx, u8 argc — call native (import_lib) function */
@@ -221,6 +223,21 @@ enum {
     BUILTIN_CORE_POPEN,
     BUILTIN_SIZE,
     BUILTIN_CHOMP_INPLACE,
+    BUILTIN_MATH_ABS,
+    BUILTIN_UCFIRST,
+    BUILTIN_LCFIRST,
+    BUILTIN_REPLACE,
+    BUILTIN_REPLACE_ALL,
+    BUILTIN_MATCH,
+    BUILTIN_SORT_DEFAULT,
+    BUILTIN_CORE_FILE_EXISTS,
+    BUILTIN_CORE_UNLINK,
+    BUILTIN_TRIM,
+    BUILTIN_HEX,
+    BUILTIN_OCT,
+    BUILTIN_FILE_TEST_D,
+    BUILTIN_FILE_TEST_F,
+    BUILTIN_RANGE,
 };
 
 /* Heap object type tag */

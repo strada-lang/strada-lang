@@ -63,6 +63,7 @@
 #define NI_ARRAY_SLICE   130
 #define NI_HASH_SLICE    131
 #define NI_OUR_DECL      132
+#define NI_RANGE         115
 #define NI_REDO          133
 #define NI_TR            134
 #define NI_LOCAL_DECL    135
@@ -77,7 +78,7 @@ enum {
     OP_AST_REPEAT = 8,
     OP_AST_NUM_EQ = 10, OP_AST_NUM_NE, OP_AST_NUM_LT, OP_AST_NUM_GT,
     OP_AST_NUM_LE, OP_AST_NUM_GE,
-    OP_AST_STR_EQ = 20, OP_AST_STR_NE, OP_AST_STR_LT, OP_AST_STR_GT,
+    OP_AST_STR_EQ = 20, OP_AST_STR_NE, OP_AST_STR_LT, OP_AST_STR_GT, OP_AST_STR_LE, OP_AST_STR_GE,
     OP_AST_LOG_AND = 30, OP_AST_LOG_OR, OP_AST_DEFOR,
     OP_AST_SPACESHIP = 40,
 };
@@ -139,6 +140,8 @@ static int ast_op_code(StradaValue *node) {
         if (strcmp(s, "ne") == 0) return OP_AST_STR_NE;
         if (strcmp(s, "lt") == 0) return OP_AST_STR_LT;
         if (strcmp(s, "gt") == 0) return OP_AST_STR_GT;
+        if (strcmp(s, "le") == 0) return OP_AST_STR_LE;
+        if (strcmp(s, "ge") == 0) return OP_AST_STR_GE;
         if (strcmp(s, "<=>") == 0) return OP_AST_SPACESHIP;
         /* Don't print error for unsupported ops — just return -1 */
         return -1;
@@ -438,6 +441,8 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         case OP_AST_STR_NE: vm_chunk_emit(ctx->chunk, OP_STR_NE); break;
         case OP_AST_STR_LT: vm_chunk_emit(ctx->chunk, OP_STR_LT); break;
         case OP_AST_STR_GT: vm_chunk_emit(ctx->chunk, OP_STR_GT); break;
+        case OP_AST_STR_LE: vm_chunk_emit(ctx->chunk, OP_STR_LE); break;
+        case OP_AST_STR_GE: vm_chunk_emit(ctx->chunk, OP_STR_GE); break;
         case OP_AST_SPACESHIP: vm_chunk_emit(ctx->chunk, OP_SPACESHIP); break;
         default:
             vm_chunk_emit(ctx->chunk, OP_POP);
@@ -980,6 +985,87 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             break;
         }
 
+        /* Built-in: ucfirst() */
+        if (strcmp(name, "ucfirst") == 0 && argc == 1) {
+            compile_expr(ctx, ast_arr_get(args, 0));
+            vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+            vm_chunk_emit_u16(ctx->chunk, BUILTIN_UCFIRST);
+            vm_chunk_emit(ctx->chunk, 1);
+            break;
+        }
+
+        /* Built-in: lcfirst() */
+        if (strcmp(name, "lcfirst") == 0 && argc == 1) {
+            compile_expr(ctx, ast_arr_get(args, 0));
+            vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+            vm_chunk_emit_u16(ctx->chunk, BUILTIN_LCFIRST);
+            vm_chunk_emit(ctx->chunk, 1);
+            break;
+        }
+
+        /* Built-in: trim() */
+        if (strcmp(name, "trim") == 0 && argc == 1) {
+            compile_expr(ctx, ast_arr_get(args, 0));
+            vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+            vm_chunk_emit_u16(ctx->chunk, BUILTIN_TRIM);
+            vm_chunk_emit(ctx->chunk, 1);
+            break;
+        }
+
+        /* Built-in: replace($str, $pat, $repl) */
+        if (strcmp(name, "replace") == 0 && argc == 3) {
+            for (int i = 0; i < 3; i++) compile_expr(ctx, ast_arr_get(args, i));
+            vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+            vm_chunk_emit_u16(ctx->chunk, BUILTIN_REPLACE);
+            vm_chunk_emit(ctx->chunk, 3);
+            break;
+        }
+
+        /* Built-in: replace_all($str, $find, $repl) */
+        if (strcmp(name, "replace_all") == 0 && argc == 3) {
+            for (int i = 0; i < 3; i++) compile_expr(ctx, ast_arr_get(args, i));
+            vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+            vm_chunk_emit_u16(ctx->chunk, BUILTIN_REPLACE_ALL);
+            vm_chunk_emit(ctx->chunk, 3);
+            break;
+        }
+
+        /* Built-in: match($str, $pat) */
+        if (strcmp(name, "match") == 0 && argc == 2) {
+            for (int i = 0; i < 2; i++) compile_expr(ctx, ast_arr_get(args, i));
+            vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+            vm_chunk_emit_u16(ctx->chunk, BUILTIN_MATCH);
+            vm_chunk_emit(ctx->chunk, 2);
+            break;
+        }
+
+        /* Built-in: sort(@arr) — default alpha sort, no block */
+        if (strcmp(name, "sort") == 0 && argc == 1) {
+            compile_expr(ctx, ast_arr_get(args, 0));
+            vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+            vm_chunk_emit_u16(ctx->chunk, BUILTIN_SORT_DEFAULT);
+            vm_chunk_emit(ctx->chunk, 1);
+            break;
+        }
+
+        /* Built-in: hex() */
+        if (strcmp(name, "hex") == 0 && argc == 1) {
+            compile_expr(ctx, ast_arr_get(args, 0));
+            vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+            vm_chunk_emit_u16(ctx->chunk, BUILTIN_HEX);
+            vm_chunk_emit(ctx->chunk, 1);
+            break;
+        }
+
+        /* Built-in: oct() */
+        if (strcmp(name, "oct") == 0 && argc == 1) {
+            compile_expr(ctx, ast_arr_get(args, 0));
+            vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+            vm_chunk_emit_u16(ctx->chunk, BUILTIN_OCT);
+            vm_chunk_emit(ctx->chunk, 1);
+            break;
+        }
+
         /* Built-in: chr() */
         if (strcmp(name, "chr") == 0 && argc == 1) {
             compile_expr(ctx, ast_arr_get(args, 0));
@@ -1106,6 +1192,10 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             else if (strcmp(fn, "global_delete") == 0) bid = BUILTIN_CORE_GLOBAL_DELETE;
             else if (strcmp(fn, "global_keys") == 0) bid = BUILTIN_CORE_GLOBAL_KEYS;
             else if (strcmp(fn, "set_recursion_limit") == 0) bid = BUILTIN_CORE_SET_RECURSION_LIMIT;
+            else if (strcmp(fn, "file_exists") == 0) bid = BUILTIN_CORE_FILE_EXISTS;
+            else if (strcmp(fn, "is_dir") == 0) bid = BUILTIN_FILE_TEST_D;
+            else if (strcmp(fn, "is_file") == 0) bid = BUILTIN_FILE_TEST_F;
+            else if (strcmp(fn, "unlink") == 0) bid = BUILTIN_CORE_UNLINK;
 
             if (bid >= 0) {
                 for (int i = 0; i < argc; i++) {
@@ -1126,6 +1216,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             else if (strcmp(fn, "floor") == 0) bid = BUILTIN_MATH_FLOOR;
             else if (strcmp(fn, "ceil") == 0) bid = BUILTIN_MATH_CEIL;
             else if (strcmp(fn, "pow") == 0) bid = BUILTIN_MATH_POW;
+            else if (strcmp(fn, "abs") == 0) bid = BUILTIN_MATH_ABS;
 
             if (bid >= 0) {
                 for (int i = 0; i < argc; i++) {
@@ -1343,12 +1434,16 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         StradaValue *target = ast_get(node, "target");
         const char *pattern = ast_str(node, "pattern");
         const char *replacement = ast_str(node, "replacement");
+        const char *flags = ast_str(node, "flags");
+        if (!flags) flags = "";
+        int is_global = (strchr(flags, 'g') != NULL);
 
         if (target && !STRADA_IS_TAGGED_INT(target) &&
             (int)ast_int(target, "type") == NI_VARIABLE) {
             const char *vname = ast_str(target, "name");
             int slot = ctx_find_local(ctx, vname);
             if (slot >= 0) {
+                /* Load string, pattern, replacement, flags onto stack */
                 vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
                 vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
 
@@ -1360,7 +1455,16 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                 vm_chunk_emit(ctx->chunk, OP_PUSH_STR);
                 vm_chunk_emit_u16(ctx->chunk, (uint16_t)repl_idx);
 
-                vm_chunk_emit(ctx->chunk, OP_STR_REPLACE);
+                /* Use BUILTIN_REPLACE for /g, OP_STR_REPLACE for non-/g */
+                if (is_global) {
+                    vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+                    vm_chunk_emit_u16(ctx->chunk, BUILTIN_REPLACE_ALL);
+                    vm_chunk_emit(ctx->chunk, 3);
+                } else {
+                    vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+                    vm_chunk_emit_u16(ctx->chunk, BUILTIN_REPLACE);
+                    vm_chunk_emit(ctx->chunk, 3);
+                }
 
                 vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
                 vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
@@ -1584,6 +1688,19 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         break;
     }
 
+    case NI_RANGE: {
+        /* start..end — create array of integers */
+        StradaValue *from = ast_get(node, "start");
+        StradaValue *to = ast_get(node, "end");
+        compile_expr(ctx, from);
+        compile_expr(ctx, to);
+        /* Use OP_BUILTIN for range since there's no dedicated opcode */
+        vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+        vm_chunk_emit_u16(ctx->chunk, BUILTIN_RANGE);
+        vm_chunk_emit(ctx->chunk, 2);
+        break;
+    }
+
     default:
         /* fprintf(stderr, "VM compile: unhandled expression node type %d\n", type); */
         vm_chunk_emit(ctx->chunk, OP_PUSH_UNDEF);
@@ -1795,20 +1912,37 @@ static void compile_sort_expr(CompCtx *ctx, StradaValue *node) {
     cmp_ctx.chunk->fixed_param_count = 2;
 
     /* Compile the comparison expression */
-    StradaValue *stmts = ast_get(body, "statements");
-    int stmt_count = (int)ast_int(body, "statement_count");
-    if (stmt_count > 0) {
-        StradaValue *last_stmt = ast_deref(ast_arr_get(stmts, stmt_count - 1));
-        if (last_stmt && !STRADA_IS_TAGGED_INT(last_stmt) &&
-            (int)ast_int(last_stmt, "type") == NI_EXPR_STMT) {
-            compile_expr(&cmp_ctx, ast_get(last_stmt, "expr"));
+    if (!body || STRADA_IS_TAGGED_INT(body) || (body->type == STRADA_INT && body->value.iv == 0)) {
+        /* No block: use BUILTIN_SORT_DEFAULT instead of the comparator approach */
+        /* Clean up the unused comparator */
+        vm_chunk_emit(cmp_ctx.chunk, OP_PUSH_INT);
+        vm_chunk_emit_i64(cmp_ctx.chunk, 0);
+        vm_chunk_emit(cmp_ctx.chunk, OP_RETURN);
+        cmp_ctx.chunk->local_count = cmp_ctx.local_count;
+        for (int i = 0; i < cmp_ctx.local_count; i++) free(cmp_ctx.local_names[i]);
+
+        /* Emit default sort via builtin */
+        compile_expr(ctx, array);
+        vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+        vm_chunk_emit_u16(ctx->chunk, BUILTIN_SORT_DEFAULT);
+        vm_chunk_emit(ctx->chunk, 1);
+        return;  /* Skip the rest of compile_sort_expr */
+    } else {
+        StradaValue *stmts = ast_get(body, "statements");
+        int stmt_count = (int)ast_int(body, "statement_count");
+        if (stmt_count > 0) {
+            StradaValue *last_stmt = ast_deref(ast_arr_get(stmts, stmt_count - 1));
+            if (last_stmt && !STRADA_IS_TAGGED_INT(last_stmt) &&
+                (int)ast_int(last_stmt, "type") == NI_EXPR_STMT) {
+                compile_expr(&cmp_ctx, ast_get(last_stmt, "expr"));
+            } else {
+                vm_chunk_emit(cmp_ctx.chunk, OP_PUSH_INT);
+                vm_chunk_emit_i64(cmp_ctx.chunk, 0);
+            }
         } else {
             vm_chunk_emit(cmp_ctx.chunk, OP_PUSH_INT);
             vm_chunk_emit_i64(cmp_ctx.chunk, 0);
         }
-    } else {
-        vm_chunk_emit(cmp_ctx.chunk, OP_PUSH_INT);
-        vm_chunk_emit_i64(cmp_ctx.chunk, 0);
     }
     vm_chunk_emit(cmp_ctx.chunk, OP_RETURN);
     cmp_ctx.chunk->local_count = cmp_ctx.local_count;
@@ -2528,6 +2662,8 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         StradaValue *target = ast_get(node, "target");
         const char *pattern = ast_str(node, "pattern");
         const char *replacement = ast_str(node, "replacement");
+        const char *flags = ast_str(node, "flags");
+        int is_global = (flags && strchr(flags, 'g'));
 
         if (target && !STRADA_IS_TAGGED_INT(target) &&
             (int)ast_int(target, "type") == NI_VARIABLE) {
@@ -2545,7 +2681,15 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
                 vm_chunk_emit(ctx->chunk, OP_PUSH_STR);
                 vm_chunk_emit_u16(ctx->chunk, (uint16_t)repl_idx);
 
-                vm_chunk_emit(ctx->chunk, OP_STR_REPLACE);
+                if (is_global) {
+                    vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+                    vm_chunk_emit_u16(ctx->chunk, BUILTIN_REPLACE_ALL);
+                    vm_chunk_emit(ctx->chunk, 3);
+                } else {
+                    vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+                    vm_chunk_emit_u16(ctx->chunk, BUILTIN_REPLACE);
+                    vm_chunk_emit(ctx->chunk, 3);
+                }
 
                 vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
                 vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);

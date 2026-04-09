@@ -133,6 +133,7 @@ void vm_array_push(VMArray *a, VMValue v) {
 }
 
 VMValue vm_array_get(VMArray *a, int idx) {
+    if (idx < 0) idx = a->size + idx;
     if (idx < 0 || idx >= a->size) return VM_UNDEF_VAL;
     return a->items[idx];
 }
@@ -1106,7 +1107,7 @@ VMValue vm_execute(VM *vm, const char *func_name) {
         DT(OP_REF_TYPE);
         DT(OP_ADD_OV);
         DT(OP_CHAR_AT); DT(OP_BYTES);
-        DT(OP_STR_LT); DT(OP_STR_GT); DT(OP_SPACESHIP);
+        DT(OP_STR_LT); DT(OP_STR_GT); DT(OP_STR_LE); DT(OP_STR_GE); DT(OP_SPACESHIP);
         DT(OP_CALL_NATIVE);
         DT(OP_C_BLOCK);
         #undef DT
@@ -1204,21 +1205,26 @@ VMValue vm_execute(VM *vm, const char *func_name) {
                 }
             }
         }
-        SP_PUSH(VM_MAKE_INT(VM_INT_VAL(a) + VM_INT_VAL(b)));
+        /* Use vm_to_num for proper string-to-number coercion */
+        { double da = vm_to_num(a), db = vm_to_num(b); double dr = da + db;
+          if (dr == (int64_t)dr) SP_PUSH(VM_MAKE_INT((int64_t)dr));
+          else { char buf[32]; snprintf(buf, sizeof(buf), "%g", dr); SP_PUSH(vm_str(buf)); }
+        }
+        vm_val_free(&a); vm_val_free(&b);
         DISPATCH();
     }
-    CASE(OP_SUB): { VMValue b = SP_POP(), a = SP_POP(); SP_PUSH(VM_MAKE_INT(VM_INT_VAL(a) - VM_INT_VAL(b))); DISPATCH(); }
-    CASE(OP_MUL): { VMValue b = SP_POP(), a = SP_POP(); SP_PUSH(VM_MAKE_INT(VM_INT_VAL(a) * VM_INT_VAL(b))); DISPATCH(); }
-    CASE(OP_DIV): { VMValue b = SP_POP(), a = SP_POP(); int64_t bv = VM_INT_VAL(b); SP_PUSH(VM_MAKE_INT(bv ? VM_INT_VAL(a)/bv : 0)); DISPATCH(); }
-    CASE(OP_MOD): { VMValue b = SP_POP(), a = SP_POP(); int64_t bv = VM_INT_VAL(b); SP_PUSH(VM_MAKE_INT(bv ? VM_INT_VAL(a)%bv : 0)); DISPATCH(); }
+    CASE(OP_SUB): { VMValue b = SP_POP(), a = SP_POP(); double dr = vm_to_num(a) - vm_to_num(b); if (dr == (int64_t)dr) SP_PUSH(VM_MAKE_INT((int64_t)dr)); else { char buf[32]; snprintf(buf, sizeof(buf), "%g", dr); SP_PUSH(vm_str(buf)); } vm_val_free(&a); vm_val_free(&b); DISPATCH(); }
+    CASE(OP_MUL): { VMValue b = SP_POP(), a = SP_POP(); double dr = vm_to_num(a) * vm_to_num(b); if (dr == (int64_t)dr) SP_PUSH(VM_MAKE_INT((int64_t)dr)); else { char buf[32]; snprintf(buf, sizeof(buf), "%g", dr); SP_PUSH(vm_str(buf)); } vm_val_free(&a); vm_val_free(&b); DISPATCH(); }
+    CASE(OP_DIV): { VMValue b = SP_POP(), a = SP_POP(); double db = vm_to_num(b); double dr = db != 0 ? vm_to_num(a)/db : 0; if (dr == (int64_t)dr) SP_PUSH(VM_MAKE_INT((int64_t)dr)); else { char buf[32]; snprintf(buf, sizeof(buf), "%g", dr); SP_PUSH(vm_str(buf)); } vm_val_free(&a); vm_val_free(&b); DISPATCH(); }
+    CASE(OP_MOD): { VMValue b = SP_POP(), a = SP_POP(); int64_t bv = (int64_t)vm_to_num(b); SP_PUSH(VM_MAKE_INT(bv ? (int64_t)vm_to_num(a)%bv : 0)); vm_val_free(&a); vm_val_free(&b); DISPATCH(); }
 
     /* Integer comparisons */
-    CASE(OP_LT): { VMValue b = SP_POP(), a = SP_POP(); SP_PUSH(VM_MAKE_INT((int64_t)a < (int64_t)b)); DISPATCH(); }
-    CASE(OP_LE): { VMValue b = SP_POP(), a = SP_POP(); SP_PUSH(VM_MAKE_INT((int64_t)a <= (int64_t)b)); DISPATCH(); }
-    CASE(OP_GT): { VMValue b = SP_POP(), a = SP_POP(); SP_PUSH(VM_MAKE_INT((int64_t)a > (int64_t)b)); DISPATCH(); }
-    CASE(OP_GE): { VMValue b = SP_POP(), a = SP_POP(); SP_PUSH(VM_MAKE_INT((int64_t)a >= (int64_t)b)); DISPATCH(); }
-    CASE(OP_EQ): { VMValue b = SP_POP(), a = SP_POP(); SP_PUSH(VM_MAKE_INT(a == b)); DISPATCH(); }
-    CASE(OP_NE): { VMValue b = SP_POP(), a = SP_POP(); SP_PUSH(VM_MAKE_INT(a != b)); DISPATCH(); }
+    CASE(OP_LT): { VMValue b = SP_POP(), a = SP_POP(); SP_PUSH(VM_MAKE_INT(vm_to_num(a) < vm_to_num(b))); vm_val_free(&a); vm_val_free(&b); DISPATCH(); }
+    CASE(OP_LE): { VMValue b = SP_POP(), a = SP_POP(); SP_PUSH(VM_MAKE_INT(vm_to_num(a) <= vm_to_num(b))); vm_val_free(&a); vm_val_free(&b); DISPATCH(); }
+    CASE(OP_GT): { VMValue b = SP_POP(), a = SP_POP(); SP_PUSH(VM_MAKE_INT(vm_to_num(a) > vm_to_num(b))); vm_val_free(&a); vm_val_free(&b); DISPATCH(); }
+    CASE(OP_GE): { VMValue b = SP_POP(), a = SP_POP(); SP_PUSH(VM_MAKE_INT(vm_to_num(a) >= vm_to_num(b))); vm_val_free(&a); vm_val_free(&b); DISPATCH(); }
+    CASE(OP_EQ): { VMValue b = SP_POP(), a = SP_POP(); SP_PUSH(VM_MAKE_INT(vm_to_num(a) == vm_to_num(b))); vm_val_free(&a); vm_val_free(&b); DISPATCH(); }
+    CASE(OP_NE): { VMValue b = SP_POP(), a = SP_POP(); SP_PUSH(VM_MAKE_INT(vm_to_num(a) != vm_to_num(b))); vm_val_free(&a); vm_val_free(&b); DISPATCH(); }
 
     CASE(OP_STR_EQ): {
         VMValue b = SP_POP(), a = SP_POP();
@@ -1246,6 +1252,20 @@ VMValue vm_execute(VM *vm, const char *func_name) {
         VMValue b = SP_POP(), a = SP_POP();
         char ba[64], bb[64];
         SP_PUSH(VM_MAKE_INT(strcmp(vm_to_cstr(a, ba, 64), vm_to_cstr(b, bb, 64)) > 0));
+        vm_val_free(&a); vm_val_free(&b);
+        DISPATCH();
+    }
+    CASE(OP_STR_LE): {
+        VMValue b = SP_POP(), a = SP_POP();
+        char ba[64], bb[64];
+        SP_PUSH(VM_MAKE_INT(strcmp(vm_to_cstr(a, ba, 64), vm_to_cstr(b, bb, 64)) <= 0));
+        vm_val_free(&a); vm_val_free(&b);
+        DISPATCH();
+    }
+    CASE(OP_STR_GE): {
+        VMValue b = SP_POP(), a = SP_POP();
+        char ba[64], bb[64];
+        SP_PUSH(VM_MAKE_INT(strcmp(vm_to_cstr(a, ba, 64), vm_to_cstr(b, bb, 64)) >= 0));
         vm_val_free(&a); vm_val_free(&b);
         DISPATCH();
     }
@@ -1662,71 +1682,66 @@ VMValue vm_execute(VM *vm, const char *func_name) {
         DISPATCH();
     }
     CASE(OP_ARRAY_SORT): {
-        /* Sort using spaceship comparison - u8 direction follows (1=asc, 0=desc) */
-        /* Actually we use a callback func idx: u16 func_idx */
         uint16_t func_idx = read_u16(ip); ip += 2;
         VMValue arr = SP_POP();
         if (VM_IS_PTR(arr) && VM_PTR_TYPE(arr) == VM_OBJ_ARRAY) {
             VMArray *a = VM_AS_ARRAY(arr);
             VMArray *sorted = vm_array_new(a->size);
             for (int i = 0; i < a->size; i++) vm_array_push(sorted, vm_val_copy(a->items[i]));
-            /* Simple insertion sort using the comparison function */
-            frame->ip = ip; vm->stack_top = sp;
+
+            /* Save current VM state */
+            frame->ip = ip;
+            vm->stack_top = sp;
+            int saved_frame_count = vm->frame_count;
+            int saved_sp = sp;
+
+            /* Insertion sort with proper comparator execution */
+            VMChunk *cmp_chunk = &vm->program->funcs[func_idx];
             for (int i = 1; i < sorted->size; i++) {
                 VMValue key = sorted->items[i];
                 int j = i - 1;
                 while (j >= 0) {
-                    /* Call comparison: push a, b, call func */
-                    vm->stack_top = sp;
-                    stack[sp++] = sorted->items[j];
-                    stack[sp++] = key;
-                    vm->stack_top = sp;
-                    VMChunk *cmp_chunk = &vm->program->funcs[func_idx];
-                    if (vm->frame_count >= vm->frame_cap) {
-                        vm->frame_cap *= 2;
-                        vm->frames = realloc(vm->frames, vm->frame_cap * sizeof(VMFrame));
-                    }
-                    VMFrame *cf = &vm->frames[vm->frame_count++];
-                    cf->chunk = cmp_chunk;
-                    cf->ip = cmp_chunk->code;
-                    cf->locals = locals_alloc(cmp_chunk->local_count + 1, 0);
-                    cf->stack_base = sp - 2;
-                    cf->closure = NULL;
-                    cf->locals[0] = sorted->items[j]; /* $a */
-                    cf->locals[1] = key; /* $b */
-                    sp -= 2;
-
-                    /* Save state and run comparison */
-                    frame->ip = ip;
-                    vm->stack_top = sp;
-                    frame = cf; chunk = cmp_chunk;
+                    /* Execute comparator inline by running its bytecode directly */
+                    VMValue *cmp_locals = locals_alloc(cmp_chunk->local_count + 1, 0);
+                    cmp_locals[0] = sorted->items[j]; /* $a */
+                    cmp_locals[1] = key;               /* $b */
+                    int cmp_sp = saved_sp;
                     uint8_t *cip = cmp_chunk->code;
-                    VMValue *cloc = cf->locals;
-
-                    /* Mini interpreter for comparison - just run until RETURN */
-                    /* Actually we need to call vm_execute recursively, but that's complex.
-                     * Instead, let's just do numeric comparison based on the func index. */
-                    /* The sort comparator is compiled with $a and $b locals.
-                     * For simplicity, we do in-place: */
-                    vm->frame_count--; /* pop the frame we pushed */
-                    locals_free(cf->locals, cmp_chunk->local_count + 1);
-
-                    /* Use direct comparison for <=> */
-                    int64_t av = vm_to_int(sorted->items[j]);
-                    int64_t bv = vm_to_int(key);
-                    int cmp_result;
-                    /* Check func name to determine direction */
-                    const char *fname = cmp_chunk->name;
-                    /* Default: ascending */
-                    cmp_result = (av > bv) ? 1 : (av < bv ? -1 : 0);
-                    /* If the func body starts with OP_LOAD_LOCAL for $b first (slot 1), it's descending */
-                    if (cmp_chunk->code[0] == OP_LOAD_LOCAL) {
-                        uint16_t first_slot = read_u16(cmp_chunk->code + 1);
-                        if (first_slot == 1) {
-                            /* $b <=> $a — descending */
-                            cmp_result = (bv > av) ? 1 : (bv < av ? -1 : 0);
+                    uint8_t *cip_end = cip + cmp_chunk->code_len;
+                    /* Mini bytecode interpreter for comparator */
+                    while (cip < cip_end) {
+                        uint8_t cop = *cip++;
+                        if (cop == OP_RETURN) {
+                            break;
+                        } else if (cop == OP_LOAD_LOCAL) {
+                            uint16_t slot = (cip[0] | (cip[1] << 8)); cip += 2;
+                            stack[cmp_sp++] = cmp_locals[slot];
+                        } else if (cop == OP_SPACESHIP) {
+                            VMValue cb = stack[--cmp_sp], ca = stack[--cmp_sp];
+                            double nav = vm_to_num(ca), nbv = vm_to_num(cb);
+                            stack[cmp_sp++] = VM_MAKE_INT(nav < nbv ? -1 : (nav > nbv ? 1 : 0));
+                        } else if (cop == OP_HASH_GET) {
+                            VMValue ck = stack[--cmp_sp], ch = stack[--cmp_sp];
+                            if (VM_IS_PTR(ch) && VM_PTR_TYPE(ch) == VM_OBJ_HASH) {
+                                char kbuf[64]; const char *ks = vm_to_cstr(ck, kbuf, 64);
+                                VMValue val = vm_hash_get(VM_AS_HASH(ch), ks);
+                                stack[cmp_sp++] = val;
+                            } else stack[cmp_sp++] = VM_UNDEF_VAL;
+                            vm_val_free(&ck);
+                        } else if (cop == OP_PUSH_STR) {
+                            uint16_t si = (cip[0] | (cip[1] << 8)); cip += 2;
+                            stack[cmp_sp++] = vm_str(cmp_chunk->str_consts[si]);
+                        } else if (cop == OP_SUB) {
+                            VMValue cb = stack[--cmp_sp], ca = stack[--cmp_sp];
+                            stack[cmp_sp++] = VM_MAKE_INT(vm_to_int(ca) - vm_to_int(cb));
+                        } else {
+                            /* Unknown op in comparator — skip */
+                            break;
                         }
                     }
+                    int cmp_result = 0;
+                    if (cmp_sp > saved_sp) cmp_result = (int)vm_to_int(stack[--cmp_sp]);
+                    locals_free(cmp_locals, cmp_chunk->local_count + 1);
 
                     if (cmp_result > 0) {
                         sorted->items[j + 1] = sorted->items[j];
@@ -1737,9 +1752,15 @@ VMValue vm_execute(VM *vm, const char *func_name) {
                 }
                 sorted->items[j + 1] = key;
             }
+
             /* Restore state */
+            sp = saved_sp;
+            vm->stack_top = sp;
+            vm->frame_count = saved_frame_count;
             frame = &vm->frames[vm->frame_count - 1];
-            chunk = frame->chunk; ip = frame->ip; locals = frame->locals;
+            chunk = frame->chunk;
+            ip = frame->ip;
+            locals = frame->locals;
             SP_PUSH(VM_MAKE_PTR(sorted));
         } else SP_PUSH(VM_MAKE_PTR(vm_array_new(0)));
         DISPATCH();
@@ -1846,6 +1867,7 @@ VMValue vm_execute(VM *vm, const char *func_name) {
         int64_t start = vm_to_int(start_v);
         int64_t len = vm_to_int(len_v);
         size_t slen = strlen(s);
+        if (start < 0) start = (int64_t)slen + start;
         if (start < 0) start = 0;
         if ((size_t)start > slen) start = slen;
         if (start + len > (int64_t)slen) len = slen - start;
@@ -2137,8 +2159,26 @@ VMValue vm_execute(VM *vm, const char *func_name) {
                     nf->locals = locals_alloc(callee->local_count + 1, callee->int_only);
                     nf->stack_base = sp - argc - 1;
                     nf->closure = NULL;
-                    for (int i = argc - 1; i >= 0; i--) nf->locals[i + 1] = stack[--sp];
-                    nf->locals[0] = stack[--sp]; /* self */
+                    if (__builtin_expect(callee->has_variadic, 0)) {
+                        /* No-param method: pack self + args into @_ array */
+                        int total_args = argc + 1; /* self + args */
+                        int fixed = callee->fixed_param_count;
+                        int vc = total_args - fixed;
+                        VMArray *va = vm_array_new(vc > 0 ? vc : 4);
+                        /* Pop args in reverse, then self */
+                        VMValue *tmp = malloc(total_args * sizeof(VMValue));
+                        for (int i = argc - 1; i >= 0; i--) tmp[i + 1] = stack[--sp];
+                        tmp[0] = stack[--sp]; /* self */
+                        /* Assign fixed params */
+                        for (int i = 0; i < fixed && i < total_args; i++) nf->locals[i] = tmp[i];
+                        /* Pack rest into variadic */
+                        for (int i = fixed; i < total_args; i++) vm_array_push(va, tmp[i]);
+                        nf->locals[fixed] = VM_MAKE_PTR(va);
+                        free(tmp);
+                    } else {
+                        for (int i = argc - 1; i >= 0; i--) nf->locals[i + 1] = stack[--sp];
+                        nf->locals[0] = stack[--sp]; /* self */
+                    }
                     frame = nf; chunk = callee; ip = callee->code; locals = nf->locals;
                     vm->stack_top = sp;
                     DISPATCH();
@@ -3016,6 +3056,177 @@ VMValue vm_execute(VM *vm, const char *func_name) {
                 while (len > 0 && (s[len-1] == '\n' || s[len-1] == '\r')) len--;
                 SP_PUSH(VM_MAKE_STR_N(s, len));
             } else SP_PUSH(vm_str(""));
+            break;
+        }
+        case BUILTIN_MATH_ABS: {
+            if (argc >= 1) {
+                double v = vm_to_num(args[0]);
+                double result = v < 0 ? -v : v;
+                /* Return int if integer-valued, float string otherwise */
+                if (result == (int64_t)result) {
+                    SP_PUSH(VM_MAKE_INT((int64_t)result));
+                } else {
+                    char buf[32]; snprintf(buf, sizeof(buf), "%g", result);
+                    SP_PUSH(vm_str(buf));
+                }
+            } else SP_PUSH(VM_MAKE_INT(0));
+            break;
+        }
+        case BUILTIN_UCFIRST: {
+            if (argc >= 1) {
+                char buf[256];
+                const char *s = vm_to_cstr(args[0], buf, 256);
+                size_t len = strlen(s);
+                char *r = malloc(len + 1);
+                memcpy(r, s, len + 1);
+                if (len > 0 && r[0] >= 'a' && r[0] <= 'z') r[0] -= 32;
+                SP_PUSH(vm_str(r));
+                free(r);
+            } else SP_PUSH(vm_str(""));
+            break;
+        }
+        case BUILTIN_LCFIRST: {
+            if (argc >= 1) {
+                char buf[256];
+                const char *s = vm_to_cstr(args[0], buf, 256);
+                size_t len = strlen(s);
+                char *r = malloc(len + 1);
+                memcpy(r, s, len + 1);
+                if (len > 0 && r[0] >= 'A' && r[0] <= 'Z') r[0] += 32;
+                SP_PUSH(vm_str(r));
+                free(r);
+            } else SP_PUSH(vm_str(""));
+            break;
+        }
+        case BUILTIN_TRIM: {
+            if (argc >= 1) {
+                char buf[1024];
+                const char *s = vm_to_cstr(args[0], buf, 1024);
+                while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
+                size_t len = strlen(s);
+                while (len > 0 && (s[len-1] == ' ' || s[len-1] == '\t' || s[len-1] == '\n' || s[len-1] == '\r')) len--;
+                SP_PUSH(VM_MAKE_STR_N(s, len));
+            } else SP_PUSH(vm_str(""));
+            break;
+        }
+        case BUILTIN_REPLACE: {
+            if (argc >= 3) {
+                char sbuf[1024], pbuf[256], rbuf[256];
+                const char *s = vm_to_cstr(args[0], sbuf, 1024);
+                const char *pat = vm_to_cstr(args[1], pbuf, 256);
+                const char *repl = vm_to_cstr(args[2], rbuf, 256);
+                char *result = strada_regex_replace(s, pat, repl, "");
+                SP_PUSH(vm_str(result));
+                free(result);
+            } else SP_PUSH(vm_str(""));
+            break;
+        }
+        case BUILTIN_REPLACE_ALL: {
+            if (argc >= 3) {
+                char sbuf[1024], fbuf[256], rbuf[256];
+                const char *s = vm_to_cstr(args[0], sbuf, 1024);
+                const char *find = vm_to_cstr(args[1], fbuf, 256);
+                const char *repl = vm_to_cstr(args[2], rbuf, 256);
+                /* Use regex replace for patterns, plain replace for simple strings */
+                char *result = strada_regex_replace_all(s, find, repl, "g");
+                SP_PUSH(vm_str(result));
+                free(result);
+            } else SP_PUSH(vm_str(""));
+            break;
+        }
+        case BUILTIN_MATCH: {
+            if (argc >= 2) {
+                char sbuf[1024], pbuf[256];
+                const char *s = vm_to_cstr(args[0], sbuf, 1024);
+                const char *pat = vm_to_cstr(args[1], pbuf, 256);
+                int matched = strada_regex_match_with_capture(s, pat, "");
+                SP_PUSH(VM_MAKE_INT(matched));
+            } else SP_PUSH(VM_MAKE_INT(0));
+            break;
+        }
+        case BUILTIN_SORT_DEFAULT: {
+            if (argc >= 1 && VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_ARRAY) {
+                VMArray *src = VM_AS_ARRAY(args[0]);
+                /* Simple insertion sort by string comparison */
+                VMArray *sorted = vm_array_new(src->size > 0 ? src->size : 8);
+                for (int i = 0; i < src->size; i++) vm_array_push(sorted, vm_val_copy(src->items[i]));
+                for (int i = 1; i < sorted->size; i++) {
+                    VMValue key = sorted->items[i];
+                    char kbuf[256]; const char *ks = vm_to_cstr(key, kbuf, 256);
+                    int j = i - 1;
+                    while (j >= 0) {
+                        char jbuf[256]; const char *js = vm_to_cstr(sorted->items[j], jbuf, 256);
+                        if (strcmp(js, ks) <= 0) break;
+                        sorted->items[j+1] = sorted->items[j];
+                        j--;
+                    }
+                    sorted->items[j+1] = key;
+                }
+                SP_PUSH(VM_MAKE_PTR(sorted));
+            } else SP_PUSH(VM_MAKE_PTR(vm_array_new(8)));
+            break;
+        }
+        case BUILTIN_CORE_FILE_EXISTS: {
+            if (argc >= 1) {
+                char buf[512];
+                const char *path = vm_to_cstr(args[0], buf, 512);
+                SP_PUSH(VM_MAKE_INT(access(path, F_OK) == 0));
+            } else SP_PUSH(VM_MAKE_INT(0));
+            break;
+        }
+        case BUILTIN_CORE_UNLINK: {
+            if (argc >= 1) {
+                char buf[512];
+                const char *path = vm_to_cstr(args[0], buf, 512);
+                SP_PUSH(VM_MAKE_INT(remove(path) == 0));
+            } else SP_PUSH(VM_MAKE_INT(0));
+            break;
+        }
+        case BUILTIN_HEX: {
+            if (argc >= 1) {
+                char buf[64];
+                const char *s = vm_to_cstr(args[0], buf, 64);
+                SP_PUSH(VM_MAKE_INT((int64_t)strtol(s, NULL, 16)));
+            } else SP_PUSH(VM_MAKE_INT(0));
+            break;
+        }
+        case BUILTIN_OCT: {
+            if (argc >= 1) {
+                char buf[64];
+                const char *s = vm_to_cstr(args[0], buf, 64);
+                SP_PUSH(VM_MAKE_INT((int64_t)strtol(s, NULL, 8)));
+            } else SP_PUSH(VM_MAKE_INT(0));
+            break;
+        }
+        case BUILTIN_FILE_TEST_D: {
+            if (argc >= 1) {
+                char buf[512];
+                const char *path = vm_to_cstr(args[0], buf, 512);
+                struct stat st;
+                SP_PUSH(VM_MAKE_INT(stat(path, &st) == 0 && S_ISDIR(st.st_mode)));
+            } else SP_PUSH(VM_MAKE_INT(0));
+            break;
+        }
+        case BUILTIN_RANGE: {
+            if (argc >= 2) {
+                int64_t from = vm_to_int(args[0]);
+                int64_t to = vm_to_int(args[1]);
+                int64_t count = to >= from ? to - from + 1 : 0;
+                VMArray *arr = vm_array_new(count > 0 ? (int)count : 8);
+                for (int64_t i = from; i <= to; i++) {
+                    vm_array_push(arr, VM_MAKE_INT(i));
+                }
+                SP_PUSH(VM_MAKE_PTR(arr));
+            } else SP_PUSH(VM_MAKE_PTR(vm_array_new(8)));
+            break;
+        }
+        case BUILTIN_FILE_TEST_F: {
+            if (argc >= 1) {
+                char buf[512];
+                const char *path = vm_to_cstr(args[0], buf, 512);
+                struct stat st;
+                SP_PUSH(VM_MAKE_INT(stat(path, &st) == 0 && S_ISREG(st.st_mode)));
+            } else SP_PUSH(VM_MAKE_INT(0));
             break;
         }
         default:
