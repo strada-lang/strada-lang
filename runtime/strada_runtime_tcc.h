@@ -5,6 +5,8 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdlib.h>
+#include <setjmp.h>
 
 /* Forward declarations */
 typedef struct StradaValue StradaValue;
@@ -53,6 +55,12 @@ typedef enum {
 #define STRADA_IS_TAGGED_INT(sv) ((uintptr_t)(sv) & 1ULL)
 #define STRADA_TAGGED_INT_VAL(sv) ((int64_t)((intptr_t)(sv) >> 1))
 #define STRADA_MAKE_TAGGED_INT(val) ((StradaValue*)(((uintptr_t)(int64_t)(val) << 1) | 1ULL))
+
+/* ASCII string flag: bit 63 of struct_size. When set, the string is pure ASCII
+ * and byte offset == char offset, making substr() O(1). */
+#define STRADA_ASCII_FLAG ((size_t)1 << 63)
+#define STRADA_STR_BYTELEN(sv) ((sv)->struct_size & ~STRADA_ASCII_FLAG)
+#define STRADA_STR_IS_ASCII(sv) (((sv)->struct_size & STRADA_ASCII_FLAG) != 0)
 
 #if STRADA_POINTER_SIZE == 4
 #define STRADA_TAGGED_INT_BITS 30
@@ -151,10 +159,30 @@ struct StradaHash {
     size_t iter_index;          /* for each() */
 };
 
+/* Socket buffer size */
+#define STRADA_SOCKET_BUFSIZE 8192
+
+/* Call stack limits */
+#define STRADA_MAX_CALL_DEPTH 256
+#define STRADA_LOCAL_STACK_MAX 256
+
 /* Exception handling macros */
 #ifndef STRADA_MAX_TRY_DEPTH
 #define STRADA_MAX_TRY_DEPTH 64
 #endif
+
+typedef struct {
+    jmp_buf buf;
+    int active;
+} StradaTryContext;
+
+extern StradaTryContext strada_try_stack[STRADA_MAX_TRY_DEPTH];
+extern int strada_try_depth;
+extern char *strada_exception_msg;
+
+#define STRADA_TRY_PUSH() (strada_try_depth < STRADA_MAX_TRY_DEPTH ? \
+    (strada_try_stack[strada_try_depth].active = 1, &strada_try_stack[strada_try_depth++].buf) : NULL)
+#define STRADA_TRY_POP() (strada_try_depth > 0 ? (strada_try_stack[--strada_try_depth].active = 0, 1) : 0)
 
 /* ============================================================
  * Value Creation
@@ -1235,5 +1263,35 @@ static inline StradaValue* strada_hv_autoviv(StradaValue *sv, const char *key) {
     }
     return result;
 }
+
+/* Functions added since initial TCC header creation */
+char* strada_chomp(const char *str);
+char* strada_chop(const char *str);
+StradaValue* strada_closure_call_array(StradaValue *closure, StradaValue *args_sv);
+StradaValue* strada_concat_inplace_cstr(StradaValue *a, const char *str_b, size_t len_b);
+char* strada_to_str_ss(StradaValue *sv);
+void strada_cstr_free(char *s);
+void strada_decref(StradaValue *sv);
+void strada_decref_impl(StradaValue *sv);
+void* strada_dlopen(const char *library);
+void* strada_dlsym(void *handle, const char *symbol);
+void strada_incref(StradaValue *sv);
+void strada_incref_impl(StradaValue *sv);
+char* strada_repeat(const char *str, int count);
+char* strada_replace_all(const char *str, const char *find, const char *replace);
+char* strada_reverse(const char *str);
+StradaValue* strada_sleep(StradaValue *seconds);
+void strada_substr_assign(StradaValue **sv_ptr, int64_t offset, int64_t length, const char *replacement);
+int64_t strada_to_int(StradaValue *sv);
+int64_t strada_to_int_impl(StradaValue *sv);
+double strada_to_num(StradaValue *sv);
+double strada_to_num_impl(StradaValue *sv);
+StradaValue* strada_usleep(StradaValue *usecs);
+void strada_hash_set_ss_take(StradaHash *hv, StradaString *key_ss, StradaValue *sv);
+void strada_hash_set_take_ph(StradaHash *hv, const char *key, unsigned int hash, StradaValue *sv);
+double strada_cstruct_get_double(StradaValue *sv, const char *field, size_t offset);
+int64_t strada_cstruct_get_int(StradaValue *sv, const char *field, size_t offset);
+char* strada_cstruct_get_string(StradaValue *sv, const char *field, size_t offset);
+void strada_cstruct_set_int(StradaValue *sv, const char *field, size_t offset, int64_t value);
 
 #endif /* STRADA_RUNTIME_TCC_H */
