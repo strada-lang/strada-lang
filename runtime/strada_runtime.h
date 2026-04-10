@@ -657,8 +657,17 @@ void strada_clear_exception(void);
 int strada_in_try_block(void);
 
 /* Pending cleanup for function call args and local vars in try blocks */
-void strada_cleanup_push(StradaValue *sv);
-void strada_cleanup_pop(void);
+#define STRADA_MAX_PENDING_CLEANUP 64
+extern StradaValue *strada_pending_cleanup[STRADA_MAX_PENDING_CLEANUP];
+extern int strada_pending_cleanup_count;
+static inline void strada_cleanup_push(StradaValue *sv) {
+    if (strada_pending_cleanup_count < STRADA_MAX_PENDING_CLEANUP)
+        strada_pending_cleanup[strada_pending_cleanup_count++] = sv;
+}
+static inline void strada_cleanup_pop(void) {
+    if (strada_pending_cleanup_count > 0)
+        strada_pending_cleanup_count--;
+}
 void strada_cleanup_drain(void);
 int strada_cleanup_mark(void);         /* Get current depth */
 void strada_cleanup_restore(int mark); /* Restore to depth (no decref) */

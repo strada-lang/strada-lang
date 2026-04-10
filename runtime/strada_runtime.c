@@ -4176,21 +4176,11 @@ char* strada_capture_stack_trace(void) {
 }
 
 /* Pending cleanup for function call args in try blocks */
-#define STRADA_MAX_PENDING_CLEANUP 64
-static StradaValue *strada_pending_cleanup[STRADA_MAX_PENDING_CLEANUP];
-static int strada_pending_cleanup_count = 0;
+/* Cleanup array defined here, declared extern in header for inlining */
+StradaValue *strada_pending_cleanup[STRADA_MAX_PENDING_CLEANUP];
+int strada_pending_cleanup_count = 0;
 
-void strada_cleanup_push(StradaValue *sv) {
-    if (strada_pending_cleanup_count < STRADA_MAX_PENDING_CLEANUP) {
-        strada_pending_cleanup[strada_pending_cleanup_count++] = sv;
-    }
-}
-
-void strada_cleanup_pop(void) {
-    if (strada_pending_cleanup_count > 0) {
-        strada_pending_cleanup_count--;
-    }
-}
+/* Non-inline versions kept for dlsym/dynamic linking compatibility */
 
 void strada_cleanup_drain(void) {
     while (strada_pending_cleanup_count > 0) {
