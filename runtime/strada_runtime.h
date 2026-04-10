@@ -90,6 +90,12 @@ typedef enum {
 #define STRADA_TAGGED_INT_VAL(sv) ((int64_t)((intptr_t)(sv) >> 1))
 #define STRADA_MAKE_TAGGED_INT(val) ((StradaValue*)(((uintptr_t)(int64_t)(val) << 1) | 1ULL))
 
+/* ASCII string flag: bit 63 of struct_size. When set, the string is pure ASCII
+ * and byte offset == char offset, making substr() O(1). */
+#define STRADA_ASCII_FLAG ((size_t)1 << 63)
+#define STRADA_STR_BYTELEN(sv) ((sv)->struct_size & ~STRADA_ASCII_FLAG)
+#define STRADA_STR_IS_ASCII(sv) (((sv)->struct_size & STRADA_ASCII_FLAG) != 0)
+
 #if STRADA_POINTER_SIZE == 4
 #define STRADA_TAGGED_INT_BITS 30
 #define STRADA_TAGGED_INT_MIN (-(INT64_C(1) << 30))

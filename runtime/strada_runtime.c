@@ -403,13 +403,22 @@ StradaValue* strada_safe_mod(int64_t a, int64_t b) {
     return strada_new_int(a % b);
 }
 
+/* Check if a string is pure ASCII (no bytes >= 0x80) */
+static inline size_t _str_flags(const char *s, size_t len) {
+    const unsigned char *p = (const unsigned char *)s;
+    for (size_t i = 0; i < len; i++) {
+        if (p[i] >= 0x80) return len; /* non-ASCII: no flag */
+    }
+    return len | ((size_t)1 << 63); /* ASCII: set flag */
+}
+
 StradaValue* strada_new_str(const char *s) {
     StradaValue *sv = strada_value_alloc();
     sv->type = STRADA_STR;
     sv->refcount = 1;
     size_t len = s ? strlen(s) : 0;
     sv->value.pv = ss_alloc_pv(s ? s : "", len);
-    sv->struct_size = len;
+    sv->struct_size = s ? _str_flags(s, len) : ((size_t)1 << 63);
     strada_memprof_alloc(STRADA_STR, sizeof(StradaValue) + sizeof(StradaString) + len + 1);
     return sv;
 }
@@ -421,7 +430,7 @@ StradaValue* strada_new_str_take(char *s) {
     sv->refcount = 1;
     size_t len = s ? strlen(s) : 0;
     sv->value.pv = ss_alloc_pv(s ? s : "", len);
-    sv->struct_size = len;
+    sv->struct_size = s ? _str_flags(s, len) : ((size_t)1 << 63);
     if (s) free(s);  /* free the original — we copied into StradaString */
     return sv;
 }
@@ -433,10 +442,10 @@ StradaValue* strada_new_str_len(const char *s, size_t len) {
     sv->refcount = 1;
     if (s && len > 0) {
         sv->value.pv = ss_alloc_pv(s, len);
-        sv->struct_size = len;
+        sv->struct_size = _str_flags(s, len);
     } else {
         sv->value.pv = ss_alloc_pv("", 0);
-        sv->struct_size = 0;
+        sv->struct_size = (size_t)1 << 63; /* empty string is ASCII */
     }
     return sv;
 }
@@ -444,7 +453,8 @@ StradaValue* strada_new_str_len(const char *s, size_t len) {
 /* Get string length (binary-safe - uses stored length if available) */
 size_t strada_str_len(StradaValue *sv) {
     if (!sv || STRADA_IS_TAGGED_INT(sv) || sv->type != STRADA_STR) return 0;
-    if (sv->struct_size > 0) return sv->struct_size;
+    size_t len = sv->struct_size & ~((size_t)1 << 63); /* mask off ASCII flag */
+    if (len > 0) return len;
     return sv->value.pv ? strlen(sv->value.pv) : 0;
 }
 
@@ -1028,7 +1038,7 @@ int strada_str_eq_lit(StradaValue *sv, const char *lit) {
         const char *str = sv->value.pv;
         if (!str) return (*lit == '\0');
         if (str == lit) return 1;  /* pointer equality (interned strings) */
-        size_t sv_len = sv->struct_size ? sv->struct_size : strlen(str);
+        size_t sv_len = STRADA_STR_BYTELEN(sv) ? STRADA_STR_BYTELEN(sv) : strlen(str);
         size_t lit_len = strlen(lit);
         if (sv_len != lit_len) return 0;  /* length short-circuit */
         return memcmp(str, lit, sv_len) == 0;
@@ -2265,7 +2275,7 @@ static size_t build_concat_key(
             suffix_len = strada_fast_itoa(suffix->value.iv, itoa_buf);
             suffix_str = itoa_buf;
         } else if (suffix->type == STRADA_STR && suffix->value.pv) {
-            suffix_len = suffix->struct_size;
+            suffix_len = STRADA_STR_BYTELEN(suffix);
             suffix_str = suffix->value.pv;
         } else if (suffix->type == STRADA_NUM) {
             suffix_len = snprintf(itoa_buf, sizeof(itoa_buf), "%g", suffix->value.nv);
@@ -2609,7 +2619,7 @@ StradaValue* strada_concat_sv(StradaValue *a, StradaValue *b) {
     } else if (b) {
         if (b->type == STRADA_STR && b->value.pv) {
             str_b = b->value.pv;
-            len_b = b->struct_size;
+            len_b = STRADA_STR_BYTELEN(b);
         } else if (b->type == STRADA_INT) {
             len_b = strada_fast_itoa(b->value.iv, buf_b);
             str_b = buf_b;
@@ -2633,7 +2643,7 @@ StradaValue* strada_concat_sv(StradaValue *a, StradaValue *b) {
     } else if (a) {
         if (a->type == STRADA_STR && a->value.pv) {
             str_a = a->value.pv;
-            len_a = a->struct_size;
+            len_a = STRADA_STR_BYTELEN(a);
         } else if (a->type == STRADA_INT) {
             len_a = strada_fast_itoa(a->value.iv, buf_a);
             str_a = buf_a;
@@ -2675,7 +2685,7 @@ StradaValue* strada_concat_cstr_sv(const char *prefix, size_t prefix_len, Strada
     } else if (b) {
         if (b->type == STRADA_STR && b->value.pv) {
             str_b = b->value.pv;
-            len_b = b->struct_size;
+            len_b = STRADA_STR_BYTELEN(b);
         } else if (b->type == STRADA_INT) {
             len_b = strada_fast_itoa(b->value.iv, buf_b);
             str_b = buf_b;
@@ -2716,7 +2726,7 @@ StradaValue* strada_concat_inplace(StradaValue *a, StradaValue *b) {
     } else if (b) {
         if (b->type == STRADA_STR && b->value.pv) {
             str_b = b->value.pv;
-            len_b = b->struct_size;
+            len_b = STRADA_STR_BYTELEN(b);
         } else if (b->type == STRADA_INT) {
             len_b = strada_fast_itoa(b->value.iv, buf_b);
             str_b = buf_b;
@@ -2728,7 +2738,7 @@ StradaValue* strada_concat_inplace(StradaValue *a, StradaValue *b) {
 
     /* Fast path: realloc in place when a is a string with refcount 1 */
     if (a && !STRADA_IS_TAGGED_INT(a) && a->type == STRADA_STR && a->refcount == 1 && a->value.pv) {
-        size_t len_a = a->struct_size;
+        size_t len_a = STRADA_STR_BYTELEN(a);
         size_t new_len = len_a + len_b;
         StradaString *ss = SS_FROM_PV(a->value.pv);
 #ifdef __linux__
@@ -2738,7 +2748,7 @@ StradaValue* strada_concat_inplace(StradaValue *a, StradaValue *b) {
             if (len_b > 0) memcpy(ss->data + len_a, str_b, len_b);
             ss->data[new_len] = '\0';
             ss->len = (uint32_t)new_len;
-            a->struct_size = new_len;
+            a->struct_size = _str_flags(a->value.pv, new_len);
             return a;
         }
 #endif
@@ -2750,7 +2760,7 @@ StradaValue* strada_concat_inplace(StradaValue *a, StradaValue *b) {
         ss->data[new_len] = '\0';
         ss->len = (uint32_t)new_len;
         a->value.pv = ss->data;  /* update in case realloc moved */
-        a->struct_size = new_len;
+        a->struct_size = _str_flags(a->value.pv, new_len);
         return a;
     }
 
@@ -2764,7 +2774,7 @@ StradaValue* strada_concat_inplace(StradaValue *a, StradaValue *b) {
  * Used by codegen for $s .= "literal" optimization. */
 StradaValue* strada_concat_inplace_cstr(StradaValue *a, const char *str_b, size_t len_b) {
     if (a && !STRADA_IS_TAGGED_INT(a) && a->type == STRADA_STR && a->refcount == 1 && a->value.pv) {
-        size_t len_a = a->struct_size;
+        size_t len_a = STRADA_STR_BYTELEN(a);
         size_t new_len = len_a + len_b;
         StradaString *ss = SS_FROM_PV(a->value.pv);
 #ifdef __linux__
@@ -2773,7 +2783,7 @@ StradaValue* strada_concat_inplace_cstr(StradaValue *a, const char *str_b, size_
             memcpy(ss->data + len_a, str_b, len_b);
             ss->data[new_len] = '\0';
             ss->len = (uint32_t)new_len;
-            a->struct_size = new_len;
+            a->struct_size = _str_flags(a->value.pv, new_len);
             return a;
         }
 #endif
@@ -2784,7 +2794,7 @@ StradaValue* strada_concat_inplace_cstr(StradaValue *a, const char *str_b, size_
         ss->data[new_len] = '\0';
         ss->len = (uint32_t)new_len;
         a->value.pv = ss->data;
-        a->struct_size = new_len;
+        a->struct_size = _str_flags(a->value.pv, new_len);
         return a;
     }
     /* Slow path: create new string */
@@ -2801,7 +2811,7 @@ StradaValue* strada_char_at(StradaValue *str, StradaValue *index) {
         return strada_new_int(0);
     }
     int64_t idx = strada_to_int(index);
-    size_t len = str->struct_size;  /* Cached length */
+    size_t len = STRADA_STR_BYTELEN(str);  /* Cached length */
     if (idx < 0 || (size_t)idx >= len) {
         return strada_new_int(0);
     }
@@ -2822,7 +2832,7 @@ size_t strada_length_sv(StradaValue *sv) {
         return strada_fast_itoa(STRADA_TAGGED_INT_VAL(sv), buf);
     }
     if (sv->type == STRADA_STR && sv->value.pv) {
-        return sv->struct_size;
+        return STRADA_STR_BYTELEN(sv);
     }
     /* For non-strings, fall back to converting and measuring */
     char _tb[256];
@@ -2845,15 +2855,26 @@ StradaValue* strada_substr(StradaValue *str, int64_t offset, int64_t length) {
 
     if (str && !STRADA_IS_TAGGED_INT(str) && str->type == STRADA_STR && str->value.pv) {
         s = str->value.pv;
-        byte_len = str->struct_size;  /* Binary-safe: use struct_size */
+        byte_len = STRADA_STR_BYTELEN(str);  /* Binary-safe: masked struct_size */
     } else {
         s = strada_to_str_buf(str, _tb, sizeof(_tb));
         byte_len = strlen(s);
     }
 
-    /* Calculate character length (may differ from byte_len for UTF-8) */
-    size_t char_len = 0;
+    /* Fast path: if the string is known ASCII (cached flag in struct_size bit 63),
+     * byte offset == char offset. This makes substr() O(1) for ASCII strings. */
+    if (str && !STRADA_IS_TAGGED_INT(str) && str->type == STRADA_STR && STRADA_STR_IS_ASCII(str)) {
+        size_t slen = STRADA_STR_BYTELEN(str);
+        if (offset < 0) offset = (int64_t)slen + offset;
+        if (offset < 0) offset = 0;
+        if (offset >= (int64_t)slen) return strada_new_str("");
+        if (length < 0 || offset + length > (int64_t)slen) length = slen - offset;
+        return strada_new_str_len(s + offset, (size_t)length);
+    }
+
+    /* UTF-8 path: calculate character length */
     const unsigned char *p = (const unsigned char *)s;
+    size_t char_len = 0;
     size_t i = 0;
     while (i < byte_len) {
         if (!utf8_is_continuation(p[i])) {
@@ -2917,7 +2938,7 @@ StradaValue* strada_substr_bytes(StradaValue *str, int64_t offset, int64_t lengt
 
     if (str && !STRADA_IS_TAGGED_INT(str) && str->type == STRADA_STR && str->value.pv) {
         s = str->value.pv;
-        byte_len = str->struct_size;  /* Binary-safe: use struct_size */
+        byte_len = STRADA_STR_BYTELEN(str);  /* Binary-safe: masked struct_size */
     } else {
         s = strada_to_str_buf(str, _tb, sizeof(_tb));
         byte_len = strlen(s);
@@ -4488,7 +4509,7 @@ int strada_socket_send_sv(StradaValue *sock, StradaValue *data) {
 
     if (data->type == STRADA_STR && data->value.pv) {
         buf = data->value.pv;
-        len = data->struct_size > 0 ? data->struct_size : strlen(data->value.pv);
+        len = STRADA_STR_BYTELEN(data) > 0 ? STRADA_STR_BYTELEN(data) : strlen(data->value.pv);
     } else {
         return -1;
     }
@@ -4912,7 +4933,7 @@ int strada_udp_sendto_sv(StradaValue *sock, StradaValue *data, const char *host,
 
     if (data->type == STRADA_STR && data->value.pv) {
         buf = data->value.pv;
-        len = data->struct_size > 0 ? (int)data->struct_size : (int)strlen(data->value.pv);
+        len = STRADA_STR_BYTELEN(data) > 0 ? (int)STRADA_STR_BYTELEN(data) : (int)strlen(data->value.pv);
     } else {
         return -1;
     }
@@ -7422,7 +7443,7 @@ void* strada_cstruct_ptr(StradaValue *sv) {
 void strada_cstruct_set_field(StradaValue *sv, const char *field, size_t offset, void *value, size_t size) {
     (void)field;  /* Reserved for future field name validation */
     if (!sv || sv->type != STRADA_CSTRUCT || !sv->value.ptr) return;
-    if (offset + size > sv->struct_size) return;  /* Safety check */
+    if (offset + size > STRADA_STR_BYTELEN(sv)) return;  /* Safety check */
     
     memcpy((char*)sv->value.ptr + offset, value, size);
 }
@@ -7430,7 +7451,7 @@ void strada_cstruct_set_field(StradaValue *sv, const char *field, size_t offset,
 void* strada_cstruct_get_field(StradaValue *sv, const char *field, size_t offset, size_t size) {
     (void)field;  /* Reserved for future field name validation */
     if (!sv || sv->type != STRADA_CSTRUCT || !sv->value.ptr) return NULL;
-    if (offset + size > sv->struct_size) return NULL;  /* Safety check */
+    if (offset + size > STRADA_STR_BYTELEN(sv)) return NULL;  /* Safety check */
     
     return (char*)sv->value.ptr + offset;
 }
@@ -8824,7 +8845,7 @@ int strada_utf8_is_valid(const char *str, size_t len) {
 
 StradaValue* strada_utf8_is_utf8(StradaValue *sv) {
     if (!sv || STRADA_IS_TAGGED_INT(sv) || sv->type != STRADA_STR || !sv->value.pv) return strada_new_int(1);
-    size_t len = sv->struct_size ? sv->struct_size : strlen(sv->value.pv);
+    size_t len = STRADA_STR_BYTELEN(sv) ? STRADA_STR_BYTELEN(sv) : strlen(sv->value.pv);
     return strada_new_int(strada_utf8_is_valid(sv->value.pv, len));
 }
 
@@ -8842,7 +8863,7 @@ StradaValue* strada_utf8_encode(StradaValue *sv) {
 /* utf8::decode - validate UTF-8; returns 1 if valid, 0 if not */
 StradaValue* strada_utf8_decode(StradaValue *sv) {
     if (!sv || STRADA_IS_TAGGED_INT(sv) || sv->type != STRADA_STR || !sv->value.pv) return strada_new_int(1);
-    size_t len = sv->struct_size ? sv->struct_size : strlen(sv->value.pv);
+    size_t len = STRADA_STR_BYTELEN(sv) ? STRADA_STR_BYTELEN(sv) : strlen(sv->value.pv);
     return strada_new_int(strada_utf8_is_valid(sv->value.pv, len));
 }
 
@@ -8853,7 +8874,7 @@ StradaValue* strada_utf8_downgrade(StradaValue *sv, int fail_ok) {
         return strada_new_undef();
     }
     const char *s = sv->value.pv;
-    size_t len = sv->struct_size ? sv->struct_size : strlen(s);
+    size_t len = STRADA_STR_BYTELEN(sv) ? STRADA_STR_BYTELEN(sv) : strlen(s);
     for (size_t i = 0; i < len; i++) {
         if ((unsigned char)s[i] > 127) {
             if (fail_ok) return strada_new_undef();
@@ -10999,7 +11020,7 @@ StradaValue* strada_sv_replace_first(StradaValue *sv, const char *find, const ch
         src_len = strlen(tmp_src);
     } else if (sv && sv->type == STRADA_STR && sv->value.pv) {
         src = sv->value.pv;
-        src_len = sv->struct_size ? sv->struct_size : strlen(src);
+        src_len = STRADA_STR_BYTELEN(sv) ? STRADA_STR_BYTELEN(sv) : strlen(src);
     } else {
         tmp_src = strada_to_str(sv);
         src = tmp_src;

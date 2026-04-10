@@ -1365,8 +1365,30 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                 }
                 /* Try our variable */
                 if (is_our_var(vname)) {
-                    compile_expr(ctx, value);
                     size_t key_idx = vm_chunk_add_str_const(ctx->chunk, vname);
+                    if (strcmp(op, "+=") == 0) {
+                        vm_chunk_emit(ctx->chunk, OP_LOAD_GLOBAL);
+                        vm_chunk_emit_u16(ctx->chunk, (uint16_t)key_idx);
+                        compile_expr(ctx, value);
+                        vm_chunk_emit(ctx->chunk, OP_ADD);
+                    } else if (strcmp(op, "-=") == 0) {
+                        vm_chunk_emit(ctx->chunk, OP_LOAD_GLOBAL);
+                        vm_chunk_emit_u16(ctx->chunk, (uint16_t)key_idx);
+                        compile_expr(ctx, value);
+                        vm_chunk_emit(ctx->chunk, OP_SUB);
+                    } else if (strcmp(op, "*=") == 0) {
+                        vm_chunk_emit(ctx->chunk, OP_LOAD_GLOBAL);
+                        vm_chunk_emit_u16(ctx->chunk, (uint16_t)key_idx);
+                        compile_expr(ctx, value);
+                        vm_chunk_emit(ctx->chunk, OP_MUL);
+                    } else if (strcmp(op, ".=") == 0) {
+                        vm_chunk_emit(ctx->chunk, OP_LOAD_GLOBAL);
+                        vm_chunk_emit_u16(ctx->chunk, (uint16_t)key_idx);
+                        compile_expr(ctx, value);
+                        vm_chunk_emit(ctx->chunk, OP_CONCAT);
+                    } else {
+                        compile_expr(ctx, value);
+                    }
                     vm_chunk_emit(ctx->chunk, OP_DUP);
                     vm_chunk_emit(ctx->chunk, OP_STORE_GLOBAL);
                     vm_chunk_emit_u16(ctx->chunk, (uint16_t)key_idx);
@@ -1436,6 +1458,30 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                     vm_chunk_emit(ctx->chunk, is_inc ? OP_INCR : OP_DECR);
                     vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
                 }
+            } else if (is_our_var(vname)) {
+                /* Increment/decrement on global variable */
+                size_t gk = vm_chunk_add_str_const(ctx->chunk, vname);
+                if (is_pre) {
+                    /* ++$x: load, add 1, store, push new value */
+                    vm_chunk_emit(ctx->chunk, OP_LOAD_GLOBAL);
+                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)gk);
+                    vm_chunk_emit(ctx->chunk, OP_PUSH_INT);
+                    vm_chunk_emit_i64(ctx->chunk, 1);
+                    vm_chunk_emit(ctx->chunk, is_inc ? OP_ADD : OP_SUB);
+                    vm_chunk_emit(ctx->chunk, OP_DUP);
+                    vm_chunk_emit(ctx->chunk, OP_STORE_GLOBAL);
+                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)gk);
+                } else {
+                    /* $x++: load old, dup, add 1, store new, keep old on stack */
+                    vm_chunk_emit(ctx->chunk, OP_LOAD_GLOBAL);
+                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)gk);
+                    vm_chunk_emit(ctx->chunk, OP_DUP);
+                    vm_chunk_emit(ctx->chunk, OP_PUSH_INT);
+                    vm_chunk_emit_i64(ctx->chunk, 1);
+                    vm_chunk_emit(ctx->chunk, is_inc ? OP_ADD : OP_SUB);
+                    vm_chunk_emit(ctx->chunk, OP_STORE_GLOBAL);
+                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)gk);
+                }
             } else {
                 vm_chunk_emit(ctx->chunk, OP_PUSH_UNDEF);
             }
@@ -1457,10 +1503,18 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             (int)ast_int(target, "type") == NI_VARIABLE) {
             const char *vname = ast_str(target, "name");
             int slot = ctx_find_local(ctx, vname);
-            if (slot >= 0) {
-                /* Load string, pattern, replacement, flags onto stack */
-                vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
-                vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
+            int is_global_var = (slot < 0 && is_our_var(vname)) ? 1 : 0;
+
+            if (slot >= 0 || is_global_var) {
+                /* Load the target string */
+                if (slot >= 0) {
+                    vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
+                } else {
+                    size_t gk = vm_chunk_add_str_const(ctx->chunk, vname);
+                    vm_chunk_emit(ctx->chunk, OP_LOAD_GLOBAL);
+                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)gk);
+                }
 
                 size_t pat_idx = vm_chunk_add_str_const(ctx->chunk, pattern);
                 vm_chunk_emit(ctx->chunk, OP_PUSH_STR);
@@ -1481,11 +1535,18 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                     vm_chunk_emit(ctx->chunk, 3);
                 }
 
-                vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
-                vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
-
-                vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
-                vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
+                /* Store result back */
+                if (slot >= 0) {
+                    vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
+                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
+                    vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
+                } else {
+                    size_t gk = vm_chunk_add_str_const(ctx->chunk, vname);
+                    vm_chunk_emit(ctx->chunk, OP_DUP);
+                    vm_chunk_emit(ctx->chunk, OP_STORE_GLOBAL);
+                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)gk);
+                }
                 break;
             }
         }
@@ -2707,15 +2768,24 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         const char *pattern = ast_str(node, "pattern");
         const char *replacement = ast_str(node, "replacement");
         const char *flags = ast_str(node, "flags");
-        int is_global = (flags && strchr(flags, 'g'));
+        int is_global_flag = (flags && strchr(flags, 'g'));
 
         if (target && !STRADA_IS_TAGGED_INT(target) &&
             (int)ast_int(target, "type") == NI_VARIABLE) {
             const char *vname = ast_str(target, "name");
             int slot = ctx_find_local(ctx, vname);
-            if (slot >= 0) {
-                vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
-                vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
+            int is_gvar = (slot < 0 && is_our_var(vname)) ? 1 : 0;
+
+            if (slot >= 0 || is_gvar) {
+                /* Load the target string */
+                if (slot >= 0) {
+                    vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
+                } else {
+                    size_t gk = vm_chunk_add_str_const(ctx->chunk, vname);
+                    vm_chunk_emit(ctx->chunk, OP_LOAD_GLOBAL);
+                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)gk);
+                }
 
                 size_t pat_idx = vm_chunk_add_str_const(ctx->chunk, pattern);
                 vm_chunk_emit(ctx->chunk, OP_PUSH_STR);
@@ -2725,7 +2795,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
                 vm_chunk_emit(ctx->chunk, OP_PUSH_STR);
                 vm_chunk_emit_u16(ctx->chunk, (uint16_t)repl_idx);
 
-                if (is_global) {
+                if (is_global_flag) {
                     vm_chunk_emit(ctx->chunk, OP_BUILTIN);
                     vm_chunk_emit_u16(ctx->chunk, BUILTIN_REPLACE_ALL);
                     vm_chunk_emit(ctx->chunk, 3);
@@ -2735,8 +2805,15 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
                     vm_chunk_emit(ctx->chunk, 3);
                 }
 
-                vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
-                vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
+                /* Store result back */
+                if (slot >= 0) {
+                    vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
+                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
+                } else {
+                    size_t gk = vm_chunk_add_str_const(ctx->chunk, vname);
+                    vm_chunk_emit(ctx->chunk, OP_STORE_GLOBAL);
+                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)gk);
+                }
             }
         }
         break;

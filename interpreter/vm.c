@@ -802,6 +802,22 @@ static int vm_find_method(VMProgram *prog, const char *class_name, const char *m
         snprintf(fullname, sizeof(fullname), "%s_%s", cls, method);
         int idx = vm_program_find_func(prog, fullname);
         if (idx >= 0) return idx;
+        /* Also try with :: replaced by _ (e.g., DBI::db_method → DBI_db_method) */
+        if (strchr(fullname, ':')) {
+            char sanitized[256];
+            int si = 0;
+            for (int fi = 0; fullname[fi] && si < 254; fi++) {
+                if (fullname[fi] == ':' && fullname[fi+1] == ':') {
+                    sanitized[si++] = '_';
+                    fi++; /* skip second : */
+                } else {
+                    sanitized[si++] = fullname[fi];
+                }
+            }
+            sanitized[si] = '\0';
+            idx = vm_program_find_func(prog, sanitized);
+            if (idx >= 0) return idx;
+        }
         cls = vm_program_find_parent(prog, cls);
     }
     /* Try just method name */
