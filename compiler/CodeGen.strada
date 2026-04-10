@@ -1880,10 +1880,13 @@ func emit_int_operand(scalar $cg, scalar $expr) void {
                 emit($cg, ")");
             }
         }
+    } elsif ($type == NODE_VARIABLE()) {
+        emit($cg, "strada_to_int(");
+        gen_expression($cg, $expr);
+        emit($cg, ")");
     } else {
         # Check if expression is a function call returning int — these are guaranteed
         # to produce tagged ints (codegen uses STRADA_MAKE_TAGGED_INT for int returns).
-        # Variables are NOT safe even if declared int (runtime value may be undef/string).
         my int $is_int_call = 0;
         if ($type == NODE_CALL() && expr_is_int_typed($cg, $expr) == 1) {
             $is_int_call = 1;
