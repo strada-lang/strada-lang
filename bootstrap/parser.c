@@ -562,16 +562,20 @@ static ASTNode* parse_if_stmt(Parser *p) {
     ASTNode *then_block = parse_block(p);
     ASTNode *if_stmt = ast_new_if(cond, then_block);
     
-    // Handle elsif
-    while (p->current->type == TOK_ELSIF) {
-        advance(p);
+    // Handle elsif and 'else if' (both are equivalent)
+    while (p->current->type == TOK_ELSIF ||
+           (p->current->type == TOK_ELSE && p->peek && p->peek->type == TOK_IF)) {
+        if (p->current->type == TOK_ELSE) {
+            advance(p); // consume 'else'
+        }
+        advance(p); // consume 'elsif' or 'if'
         parser_expect(p, TOK_LPAREN);
         ASTNode *elsif_cond = parse_expression(p);
         parser_expect(p, TOK_RPAREN);
         ASTNode *elsif_block = parse_block(p);
         ast_add_elsif(if_stmt, elsif_cond, elsif_block);
     }
-    
+
     // Handle else
     if (p->current->type == TOK_ELSE) {
         advance(p);
