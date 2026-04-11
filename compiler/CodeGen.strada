@@ -3347,7 +3347,32 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 }
             }
 
-            if ($left_is_temp == 1 || $right_is_temp == 1) {
+            # Inplace chain: left is a concat result (". " op) → append in-place
+            my int $chain_inplace = 0;
+            if ($left_is_temp == 1 && $left->{"type"} == NODE_BINARY_OP() && $left->{"op"} eq ".") {
+                $chain_inplace = 1;
+            }
+            if ($chain_inplace == 1 && $right->{"type"} == NODE_STR_LITERAL()) {
+                my str $rl = $right->{"value"};
+                emit($cg, "({ StradaValue *__concat_l = ");
+                gen_expression($cg, $left);
+                emit($cg, "; strada_concat_inplace_cstr(__concat_l, ");
+                gen_str_literal_c($cg, $rl);
+                emit($cg, ", " . length($rl) . "); })");
+            } elsif ($chain_inplace == 1) {
+                emit($cg, "({ StradaValue *__concat_l = ");
+                gen_expression($cg, $left);
+                emit($cg, "; ");
+                if ($right_is_temp == 1) {
+                    emit($cg, "StradaValue *__concat_r = ");
+                    gen_expression($cg, $right);
+                    emit($cg, "; StradaValue *__cr = strada_concat_inplace(__concat_l, __concat_r); strada_decref(__concat_r); __cr; })");
+                } else {
+                    emit($cg, "strada_concat_inplace(__concat_l, ");
+                    gen_expression($cg, $right);
+                    emit($cg, "); })");
+                }
+            } elsif ($left_is_temp == 1 || $right_is_temp == 1) {
                 emit($cg, "({ ");
                 if ($left_is_temp == 1) {
                     emit($cg, "StradaValue *__concat_l = ");
@@ -3360,24 +3385,12 @@ func gen_expression(scalar $cg, scalar $expr) void {
                     emit($cg, "; ");
                 }
                 emit($cg, "StradaValue *__concat_res = strada_concat_sv(");
-                if ($left_is_temp == 1) {
-                    emit($cg, "__concat_l");
-                } else {
-                    gen_expression($cg, $left);
-                }
+                if ($left_is_temp == 1) { emit($cg, "__concat_l"); } else { gen_expression($cg, $left); }
                 emit($cg, ", ");
-                if ($right_is_temp == 1) {
-                    emit($cg, "__concat_r");
-                } else {
-                    gen_expression($cg, $right);
-                }
+                if ($right_is_temp == 1) { emit($cg, "__concat_r"); } else { gen_expression($cg, $right); }
                 emit($cg, "); ");
-                if ($left_is_temp == 1) {
-                    emit($cg, "strada_decref(__concat_l); ");
-                }
-                if ($right_is_temp == 1) {
-                    emit($cg, "strada_decref(__concat_r); ");
-                }
+                if ($left_is_temp == 1) { emit($cg, "strada_decref(__concat_l); "); }
+                if ($right_is_temp == 1) { emit($cg, "strada_decref(__concat_r); "); }
                 emit($cg, "__concat_res; })");
             } else {
                 emit($cg, "strada_concat_sv(");
@@ -7187,8 +7200,24 @@ func gen_expression(scalar $cg, scalar $expr) void {
                     emit($cg, "strada_decref(__idx_sub); ");
                 }
                 emit($cg, "__idx_res; }))");
+            } elsif ($arg1->{"type"} == NODE_STR_LITERAL()) {
+                # Fast path: literal needle → strada_index_sv (no string extraction)
+                my str $needle_lit = $arg1->{"value"};
+                if ($arg0_needs_cleanup == 1) {
+                    emit($cg, "(({ StradaValue *__idx_str = ");
+                    gen_expression($cg, $arg0);
+                    emit($cg, "; StradaValue *__idx_res = strada_new_int(strada_index_sv(__idx_str, ");
+                    gen_str_literal_c($cg, $needle_lit);
+                    emit($cg, ")); strada_decref(__idx_str); __idx_res; }))");
+                } else {
+                    emit($cg, "strada_new_int(strada_index_sv(");
+                    gen_expression($cg, $arg0);
+                    emit($cg, ", ");
+                    gen_str_literal_c($cg, $needle_lit);
+                    emit($cg, "))");
+                }
             } else {
-                # 2-argument form: index(string, substring)
+                # General form: extract both strings
                 emit($cg, "(({ StradaValue *__idx_str = ");
                 gen_expression($cg, $arg0);
                 emit($cg, "; StradaValue *__idx_sub = ");
@@ -12295,6 +12324,16 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 if ($concat_left->{"type"} == NODE_VARIABLE() &&
                     $concat_left->{"name"} eq $target->{"name"}) {
                     my scalar $concat_right = $rhs->{"right"};
+                    if ($concat_right->{"type"} == NODE_STR_LITERAL()) {
+                        my str $cl = $concat_right->{"value"};
+                        gen_expression($cg, $target);
+                        emit($cg, " = strada_concat_inplace_cstr(");
+                        gen_expression($cg, $target);
+                        emit($cg, ", ");
+                        gen_str_literal_c($cg, $cl);
+                        emit($cg, ", " . length($cl) . ")");
+                        return;
+                    }
                     if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $concat_right) == 1) {
                         emit($cg, "({ StradaValue *__rhs_tmp = ");
                         gen_expression($cg, $concat_right);

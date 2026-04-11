@@ -549,6 +549,7 @@ StradaValue* strada_char_at(StradaValue *str, StradaValue *index);  /* Fast char
 StradaValue* strada_substr(StradaValue *str, int64_t offset, int64_t length);
 StradaValue* strada_substr_bytes(StradaValue *str, int64_t offset, int64_t length);
 int strada_index(const char *haystack, const char *needle);
+int64_t strada_index_sv(StradaValue *haystack_sv, const char *needle);
 int strada_index_offset(const char *haystack, const char *needle, int offset);
 int strada_rindex(const char *haystack, const char *needle);
 char* strada_upper(const char *str);

@@ -2740,6 +2740,17 @@ StradaValue* strada_concat_inplace(StradaValue *a, StradaValue *b) {
     if (a && !STRADA_IS_TAGGED_INT(a) && a->type == STRADA_STR && a->refcount == 1 && a->value.pv) {
         size_t len_a = STRADA_STR_BYTELEN(a);
         size_t new_len = len_a + len_b;
+        /* Compute ASCII flag incrementally: only scan the NEW bytes.
+         * If both the existing string and appended bytes are ASCII, result is ASCII.
+         * This avoids O(n) rescan of the entire string on every append. */
+        int was_ascii = STRADA_STR_IS_ASCII(a);
+        size_t new_flags;
+        if (was_ascii) {
+            size_t b_flags = _str_flags(str_b, len_b);
+            new_flags = (b_flags & STRADA_ASCII_FLAG) ? (new_len | STRADA_ASCII_FLAG) : new_len;
+        } else {
+            new_flags = new_len;
+        }
         StradaString *ss = SS_FROM_PV(a->value.pv);
 #ifdef __linux__
         /* Check if existing StradaString allocation has room */
@@ -2748,7 +2759,7 @@ StradaValue* strada_concat_inplace(StradaValue *a, StradaValue *b) {
             if (len_b > 0) memcpy(ss->data + len_a, str_b, len_b);
             ss->data[new_len] = '\0';
             ss->len = (uint32_t)new_len;
-            a->struct_size = _str_flags(a->value.pv, new_len);
+            a->struct_size = new_flags;
             return a;
         }
 #endif
@@ -2760,7 +2771,7 @@ StradaValue* strada_concat_inplace(StradaValue *a, StradaValue *b) {
         ss->data[new_len] = '\0';
         ss->len = (uint32_t)new_len;
         a->value.pv = ss->data;  /* update in case realloc moved */
-        a->struct_size = _str_flags(a->value.pv, new_len);
+        a->struct_size = new_flags;
         return a;
     }
 
@@ -2776,6 +2787,15 @@ StradaValue* strada_concat_inplace_cstr(StradaValue *a, const char *str_b, size_
     if (a && !STRADA_IS_TAGGED_INT(a) && a->type == STRADA_STR && a->refcount == 1 && a->value.pv) {
         size_t len_a = STRADA_STR_BYTELEN(a);
         size_t new_len = len_a + len_b;
+        /* Incremental ASCII flag — only scan appended bytes */
+        int was_ascii = STRADA_STR_IS_ASCII(a);
+        size_t new_flags;
+        if (was_ascii) {
+            size_t b_flags = _str_flags(str_b, len_b);
+            new_flags = (b_flags & STRADA_ASCII_FLAG) ? (new_len | STRADA_ASCII_FLAG) : new_len;
+        } else {
+            new_flags = new_len;
+        }
         StradaString *ss = SS_FROM_PV(a->value.pv);
 #ifdef __linux__
         size_t usable = malloc_usable_size(ss);
@@ -2783,7 +2803,7 @@ StradaValue* strada_concat_inplace_cstr(StradaValue *a, const char *str_b, size_
             memcpy(ss->data + len_a, str_b, len_b);
             ss->data[new_len] = '\0';
             ss->len = (uint32_t)new_len;
-            a->struct_size = _str_flags(a->value.pv, new_len);
+            a->struct_size = new_flags;
             return a;
         }
 #endif
@@ -2794,7 +2814,7 @@ StradaValue* strada_concat_inplace_cstr(StradaValue *a, const char *str_b, size_
         ss->data[new_len] = '\0';
         ss->len = (uint32_t)new_len;
         a->value.pv = ss->data;
-        a->struct_size = _str_flags(a->value.pv, new_len);
+        a->struct_size = new_flags;
         return a;
     }
     /* Slow path: create new string */
@@ -2985,6 +3005,20 @@ int strada_index(const char *haystack, const char *needle) {
         return (int)byte_to_char_offset(haystack, pos - haystack);
     }
     return -1;
+}
+
+/* StradaValue-native index: avoids strada_to_str extraction and skips
+ * byte-to-char conversion for ASCII strings (byte offset == char offset). */
+int64_t strada_index_sv(StradaValue *haystack_sv, const char *needle) {
+    if (!haystack_sv || STRADA_IS_TAGGED_INT(haystack_sv) || !needle) return -1;
+    if (haystack_sv->type != STRADA_STR || !haystack_sv->value.pv) return -1;
+    const char *haystack = haystack_sv->value.pv;
+    char *pos = strstr(haystack, needle);
+    if (!pos) return -1;
+    size_t byte_off = (size_t)(pos - haystack);
+    /* ASCII fast path: byte offset == character offset */
+    if (STRADA_STR_IS_ASCII(haystack_sv)) return (int64_t)byte_off;
+    return (int64_t)byte_to_char_offset(haystack, byte_off);
 }
 
 int strada_index_offset(const char *haystack, const char *needle, int offset) {
