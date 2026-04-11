@@ -1519,6 +1519,12 @@ static void gen_expression(CodeGen *cg, ASTNode *expr) {
                 emit(cg, " / ");
                 gen_as_num(cg, expr->data.binary_op.right);
                 emit(cg, ")");
+            } else if (strcmp(op, "%") == 0) {
+                emit(cg, "({ int64_t __ml = (int64_t)");
+                gen_as_num(cg, expr->data.binary_op.left);
+                emit(cg, "; int64_t __mr = (int64_t)");
+                gen_as_num(cg, expr->data.binary_op.right);
+                emit(cg, "; __mr != 0 ? STRADA_MAKE_TAGGED_INT(__ml % __mr) : strada_new_undef(); })");
             } else if (strcmp(op, ".") == 0) {
                 /* String concat with cleanup of owned operands */
                 int lo = expr_is_owned(expr->data.binary_op.left);

@@ -2296,7 +2296,7 @@ static size_t build_concat_key(
 }
 
 /* Hash get with pre-computed hash (avoids re-hashing) */
-static StradaValue* strada_hash_get_with_hash(StradaHash *hv, const char *key, unsigned int hash) {
+StradaValue* strada_hash_get_with_hash(StradaHash *hv, const char *key, unsigned int hash) {
     if (!hv || !key) return strada_undef_static();
 
     unsigned int bucket = hash & (hv->num_buckets - 1);
