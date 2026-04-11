@@ -8739,6 +8739,28 @@ func gen_expression(scalar $cg, scalar $expr) void {
         # replace - regex replace (no flags for function-based API)
         if ($name eq "replace") {
             my scalar $args = $expr->{"args"};
+            # Check if pattern is a string literal with no regex metacharacters
+            # If so, use fast strstr-based replace instead of PCRE2
+            my int $use_fast = 0;
+            my scalar $pat_arg = $args->[1];
+            if ($pat_arg->{"type"} == 17) {
+                # NODE_STR_LITERAL — check for regex metacharacters
+                my str $pval = $pat_arg->{"value"};
+                my int $has_meta = 0;
+                my int $pi = 0;
+                while ($pi < length($pval)) {
+                    my str $pc = substr($pval, $pi, 1);
+                    if ($pc eq "." || $pc eq "*" || $pc eq "+" || $pc eq "?" ||
+                        $pc eq "[" || $pc eq "]" || $pc eq "(" || $pc eq ")" ||
+                        $pc eq "{" || $pc eq "}" || $pc eq "|" || $pc eq "^" ||
+                        $pc eq "$" || $pc eq "\\") {
+                        $has_meta = 1;
+                        last;
+                    }
+                    $pi = $pi + 1;
+                }
+                if ($has_meta == 0) { $use_fast = 1; }
+            }
             my int $a0_temp = 0;
             my int $a1_temp = 0;
             my int $a2_temp = 0;
@@ -8757,28 +8779,46 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 gen_expression($cg, $args->[0]);
                 emit($cg, "); ");
             }
-            if ($a1_temp == 1) {
-                emit($cg, "StradaValue *__rp_a1 = ");
-                gen_expression($cg, $args->[1]);
-                emit($cg, "; char *__rp_p = strada_to_str_ss(__rp_a1); ");
+            if ($use_fast == 1) {
+                # Fast path: literal non-regex pattern — use strstr-based replace
+                my str $escaped_pat = $pat_arg->{"value"};
+                if ($a2_temp == 1) {
+                    emit($cg, "StradaValue *__rp_a2 = ");
+                    gen_expression($cg, $args->[2]);
+                    emit($cg, "; char *__rp_r = strada_to_str_ss(__rp_a2); ");
+                } else {
+                    emit($cg, "char *__rp_r = strada_to_str_ss(");
+                    gen_expression($cg, $args->[2]);
+                    emit($cg, "); ");
+                }
+                emit($cg, "char *__rp_res = strada_replace_first(__rp_s, \"" . $escaped_pat . "\", __rp_r); StradaValue *__rp_sv = strada_new_str(__rp_res); free(__rp_res); strada_cstr_free(__rp_r); strada_cstr_free(__rp_s); ");
+                if ($a0_temp == 1) { emit($cg, "strada_decref(__rp_a0); "); }
+                if ($a2_temp == 1) { emit($cg, "strada_decref(__rp_a2); "); }
             } else {
-                emit($cg, "char *__rp_p = strada_to_str_ss(");
-                gen_expression($cg, $args->[1]);
-                emit($cg, "); ");
+                # Regex path
+                if ($a1_temp == 1) {
+                    emit($cg, "StradaValue *__rp_a1 = ");
+                    gen_expression($cg, $args->[1]);
+                    emit($cg, "; char *__rp_p = strada_to_str_ss(__rp_a1); ");
+                } else {
+                    emit($cg, "char *__rp_p = strada_to_str_ss(");
+                    gen_expression($cg, $args->[1]);
+                    emit($cg, "); ");
+                }
+                if ($a2_temp == 1) {
+                    emit($cg, "StradaValue *__rp_a2 = ");
+                    gen_expression($cg, $args->[2]);
+                    emit($cg, "; char *__rp_r = strada_to_str_ss(__rp_a2); ");
+                } else {
+                    emit($cg, "char *__rp_r = strada_to_str_ss(");
+                    gen_expression($cg, $args->[2]);
+                    emit($cg, "); ");
+                }
+                emit($cg, "char *__rp_res = strada_regex_replace(__rp_s, __rp_p, __rp_r, NULL); StradaValue *__rp_sv = strada_new_str(__rp_res); free(__rp_res); strada_cstr_free(__rp_r); strada_cstr_free(__rp_p); strada_cstr_free(__rp_s); ");
+                if ($a0_temp == 1) { emit($cg, "strada_decref(__rp_a0); "); }
+                if ($a1_temp == 1) { emit($cg, "strada_decref(__rp_a1); "); }
+                if ($a2_temp == 1) { emit($cg, "strada_decref(__rp_a2); "); }
             }
-            if ($a2_temp == 1) {
-                emit($cg, "StradaValue *__rp_a2 = ");
-                gen_expression($cg, $args->[2]);
-                emit($cg, "; char *__rp_r = strada_to_str_ss(__rp_a2); ");
-            } else {
-                emit($cg, "char *__rp_r = strada_to_str_ss(");
-                gen_expression($cg, $args->[2]);
-                emit($cg, "); ");
-            }
-            emit($cg, "char *__rp_res = strada_regex_replace(__rp_s, __rp_p, __rp_r, NULL); StradaValue *__rp_sv = strada_new_str(__rp_res); free(__rp_res); strada_cstr_free(__rp_r); strada_cstr_free(__rp_p); strada_cstr_free(__rp_s); ");
-            if ($a0_temp == 1) { emit($cg, "strada_decref(__rp_a0); "); }
-            if ($a1_temp == 1) { emit($cg, "strada_decref(__rp_a1); "); }
-            if ($a2_temp == 1) { emit($cg, "strada_decref(__rp_a2); "); }
             emit($cg, "__rp_sv; })");
             return;
         }
