@@ -1519,12 +1519,6 @@ static void gen_expression(CodeGen *cg, ASTNode *expr) {
                 emit(cg, " / ");
                 gen_as_num(cg, expr->data.binary_op.right);
                 emit(cg, ")");
-            } else if (strcmp(op, "%") == 0) {
-                emit(cg, "strada_new_num((int64_t)");
-                gen_as_num(cg, expr->data.binary_op.left);
-                emit(cg, " % (int64_t)");
-                gen_as_num(cg, expr->data.binary_op.right);
-                emit(cg, ")");
             } else if (strcmp(op, ".") == 0) {
                 /* String concat with cleanup of owned operands */
                 int lo = expr_is_owned(expr->data.binary_op.left);

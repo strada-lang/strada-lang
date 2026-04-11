@@ -743,7 +743,7 @@ static ASTNode* parse_multiplicative(Parser *p) {
     ASTNode *left = parse_unary(p);
     
     while (p->current->type == TOK_MULT || p->current->type == TOK_DIV ||
-           p->current->type == TOK_MOD || p->current->type == TOK_PERCENT) {
+           p->current->type == TOK_MOD) {
         char *op = strdup(p->current->lexeme);
         advance(p);
         ASTNode *right = parse_unary(p);

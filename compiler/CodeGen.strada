@@ -93,8 +93,7 @@ func escape_c_keyword(str $name) str {
     return $name;
 }
 
-# Compute djb2 hash at compile time (matches strada_hash_string in runtime).
-# Uses 63-bit Strada ints with per-step modulo to stay in 32-bit range.
+# Compute djb2 hash at compile time (matches strada_hash_string in runtime)
 func djb2_hash(str $input_str) int {
     my int $h = 5381;
     my int $idx = 0;
@@ -102,15 +101,17 @@ func djb2_hash(str $input_str) int {
     while ($idx < $slen) {
         my int $ch = char_at($input_str, $idx);
         my int $shifted = $h * 32;
-        my int $raw = $shifted + $h + $ch;
-        $h = $raw % 4294967296;
+        $h = $shifted + $h + $ch;
         $idx = $idx + 1;
     }
     return $h;
 }
 
 func djb2_hash_32(str $input_str) int {
-    return djb2_hash($input_str);
+    my int $raw = djb2_hash($input_str);
+    # Truncate to 32 bits using bitwise AND with mask
+    # 0xFFFFFFFF = 4294967295
+    return $raw - (($raw / 4294967296) * 4294967296);
 }
 
 func codegen_new(str $filename, int $debug_info, int $enable_profiling, int $enable_stack_trace, int $full_profile) scalar {
@@ -189,8 +190,6 @@ func codegen_new(str $filename, int $debug_info, int $enable_profiling, int $ena
     # Track known blessed types for method devirtualization
     my hash %known_types = ();
     $cg{"known_types"} = \%known_types;
-    # Per-call-site polymorphic inline cache counter
-    $cg{"pic_counter"} = 0;
     # Operator overloading (set from program node in gen_program)
     $cg{"has_overloads"} = 0;
     my hash %empty_overloads = ();
@@ -1943,32 +1942,10 @@ func expr_is_int_typed(scalar $cg, scalar $expr) int {
         my int $arg_count = $expr->{"arg_count"};
         my str $method = $expr->{"method"};
 
-        # Check 1: Inline accessor calls — $self->x() or $known_obj->x() where x is has int
+        # Check 1: Inline accessor calls ($self->x() where x is has rw int $x)
         if ($arg_count == 0) {
-            # Determine the package to check: current package for $self, or known_types for other vars
-            my str $check_pkg_it = "";
-            my str $cur_pkg_it = $cg->{"current_fn_package"};
-            my scalar $mt_it = $expr->{"base_object"};
-            if (!$mt_it) { $mt_it = $expr->{"object"}; }
-            if ($mt_it && $mt_it->{"type"} == NODE_VARIABLE()) {
-                my str $recv_esc = escape_c_keyword($mt_it->{"name"});
-                # Path 1: $self in current package
-                if (length($cur_pkg_it) > 0 && $cur_pkg_it ne "main") {
-                    my int $fpc_it = $cg->{"func_param_count"} + 0;
-                    if ($fpc_it > 0 && $recv_esc eq $cg->{"func_param_names"}->[0]) {
-                        $check_pkg_it = $cur_pkg_it;
-                    }
-                }
-                # Path 2: known blessed type
-                if (length($check_pkg_it) == 0) {
-                    my scalar $kt_it = $cg->{"known_types"};
-                    if ($kt_it) {
-                        my str $kv_it = "" . $kt_it->{$recv_esc};
-                        if (length($kv_it) > 0) { $check_pkg_it = $kv_it; }
-                    }
-                }
-            }
-            if (length($check_pkg_it) > 0) {
+            my str $cur_pkg = $cg->{"current_fn_package"};
+            if (length($cur_pkg) > 0 && $cur_pkg ne "main") {
                 my scalar $ha_attrs = $cg->{"has_attrs"};
                 my int $ha_count = $cg->{"has_attr_count"};
                 my scalar $acc_lookup = $cg->{"accessor_lookup"};
@@ -1976,7 +1953,7 @@ func expr_is_int_typed(scalar $cg, scalar $expr) int {
                 while ($hai < $ha_count) {
                     my str $attr_name = $ha_attrs->[$hai]->{"name"};
                     my str $attr_pkg = $ha_attrs->[$hai]->{"package"};
-                    if ($attr_name eq $method && ($attr_pkg eq $check_pkg_it || exists($acc_lookup, $attr_pkg . "\t" . $method))) {
+                    if ($attr_name eq $method && ($attr_pkg eq $cur_pkg || exists($acc_lookup, $attr_pkg . "\t" . $method))) {
                         my int $at = $ha_attrs->[$hai]->{"attr_type"};
                         if ($at == TYPE_INT()) {
                             return 1;
@@ -5774,11 +5751,6 @@ func gen_expression(scalar $cg, scalar $expr) void {
             return;
         }
 
-        if ($name eq "sys::time_ms") {
-            emit($cg, "strada_time_ms()");
-            return;
-        }
-
         if ($name eq "sys::localtime") {
             my scalar $args = $expr->{"args"};
             my int $arg_count = $expr->{"arg_count"};
@@ -7759,12 +7731,6 @@ func gen_expression(scalar $cg, scalar $expr) void {
         # time - current timestamp
         if ($name eq "sys::time") {
             emit($cg, "strada_time()");
-            return;
-        }
-
-        # time_ms - monotonic milliseconds (for benchmarking)
-        if ($name eq "sys::time_ms") {
-            emit($cg, "strada_time_ms()");
             return;
         }
 
@@ -11015,7 +10981,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 my str $cn_suffix = substr($c_name, $cnl - 4, 4);
                 if ($cn_suffix eq "_new") { $is_ctor = 1; }
             }
-            # Check if this class has parents (used to collect inherited defaults)
+            # Only inline for classes without inheritance (simple case)
             my int $has_parents = 0;
             if ($is_ctor == 1) {
                 my str $ctor_pkg = substr($c_name, 0, $cnl - 4);
@@ -12890,82 +12856,38 @@ func gen_expression(scalar $cg, scalar $expr) void {
             my int $is_accessor = 0;
             my str $cur_pkg = $cg->{"current_fn_package"};
 
-            {
-                # Inline accessor: works for $self (first param) OR any variable with known blessed type
+            # Only inline inside package methods (not main)
+            if (length($cur_pkg) > 0 && $cur_pkg ne "main") {
+                # Check if receiver is the first function parameter
                 my scalar $meth_target = $expr->{"base_object"};
                 if (!$meth_target) {
                     $meth_target = $obj;
                 }
-                my str $check_pkg = "";
-
+                my int $receiver_is_self = 0;
                 if ($meth_target->{"type"} == NODE_VARIABLE()) {
                     my str $recv_name = $meth_target->{"name"};
-                    my str $recv_escaped = escape_c_keyword($recv_name);
-
-                    # Path 1: receiver is $self (first param) in a package method
-                    if (length($cur_pkg) > 0 && $cur_pkg ne "main") {
-                        my int $fpc = $cg->{"func_param_count"} + 0;
-                        if ($fpc > 0) {
-                            my scalar $fpn = $cg->{"func_param_names"};
-                            if ($recv_escaped eq $fpn->[0]) {
-                                $check_pkg = $cur_pkg;
-                            }
-                        }
-                    }
-
-                    # Path 2: receiver has a known blessed type from known_types
-                    if (length($check_pkg) == 0) {
-                        my scalar $kt = $cg->{"known_types"};
-                        if ($kt) {
-                            my str $kt_val = "" . $kt->{$recv_escaped};
-                            if (length($kt_val) > 0) {
-                                $check_pkg = $kt_val;
-                            }
+                    # Check if it's the first param of the current function
+                    my int $fpc = $cg->{"func_param_count"} + 0;
+                    if ($fpc > 0) {
+                        my scalar $fpn = $cg->{"func_param_names"};
+                        my str $first_param = $fpn->[0];
+                        my str $recv_escaped = escape_c_keyword($recv_name);
+                        if ($recv_escaped eq $first_param) {
+                            $receiver_is_self = 1;
                         }
                     }
                 }
 
-                if (length($check_pkg) > 0) {
-                    # Check if method matches a has-attr of the resolved package or its parents
+                if ($receiver_is_self == 1) {
+                    # Check if method matches a has-attr of this package or parents
                     my int $hai = 0;
                     while ($hai < $ha_count) {
                         my str $attr_name = $ha_attrs->[$hai]->{"name"};
                         my str $attr_pkg = $ha_attrs->[$hai]->{"package"};
-                        if ($attr_name eq $method && ($attr_pkg eq $check_pkg || exists($acc_lookup, $attr_pkg . "\t" . $method))) {
-                            # Also verify the accessor's package is in the known type's hierarchy
-                            if ($attr_pkg eq $check_pkg) {
-                                $is_accessor = 1;
-                            } else {
-                                # Check if check_pkg inherits from attr_pkg
-                                my scalar $inh_list_ia = $cg->{"inherits"};
-                                my int $inh_ct_ia = $cg->{"inherit_count"};
-                                my array @ia_chain = ();
-                                push(@ia_chain, $check_pkg);
-                                my int $ia_len = 1;
-                                my int $ia_ci = 0;
-                                while ($ia_ci < $ia_len) {
-                                    my str $ia_cpkg = $ia_chain[$ia_ci];
-                                    my int $ia_pi = 0;
-                                    while ($ia_pi < $inh_ct_ia) {
-                                        if ($inh_list_ia->[$ia_pi]->{"child"} eq $ia_cpkg) {
-                                            my str $ia_par = $inh_list_ia->[$ia_pi]->{"parent"};
-                                            if ($ia_par eq $attr_pkg) {
-                                                $is_accessor = 1;
-                                            }
-                                            push(@ia_chain, $ia_par);
-                                            $ia_len = $ia_len + 1;
-                                        }
-                                        $ia_pi = $ia_pi + 1;
-                                    }
-                                    $ia_ci = $ia_ci + 1;
-                                }
-                            }
+                        if ($attr_name eq $method && ($attr_pkg eq $cur_pkg || exists($acc_lookup, $attr_pkg . "\t" . $method))) {
+                            $is_accessor = 1;
                         }
                         $hai = $hai + 1;
-                    }
-                    # Check no method modifiers
-                    if ($is_accessor == 1 && has_method_modifier($cg, $method) == 1) {
-                        $is_accessor = 0;
                     }
                 }
             }
@@ -12975,16 +12897,15 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 if (!$meth_target) {
                     $meth_target = $obj;
                 }
-                my int $acc_hash = djb2_hash_32($method);
                 my int $obj_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $meth_target) == 1;
                 if ($obj_cleanup == 1) {
                     emit($cg, "({ StradaValue *__iao = ");
                     gen_expression($cg, $meth_target);
-                    emit($cg, "; StradaValue *__iar = strada_hv_fetch_owned_ph(__iao, \"" . $method . "\", " . $acc_hash . "u); strada_decref(__iao); __iar; })");
+                    emit($cg, "; StradaValue *__iar = strada_hv_fetch_owned(__iao, \"" . $method . "\"); strada_decref(__iao); __iar; })");
                 } else {
-                    emit($cg, "strada_hv_fetch_owned_ph(");
+                    emit($cg, "strada_hv_fetch_owned(");
                     gen_expression($cg, $meth_target);
-                    emit($cg, ", \"" . $method . "\", " . $acc_hash . "u)");
+                    emit($cg, ", \"" . $method . "\")");
                 }
                 return;
             }
@@ -13239,15 +13160,10 @@ func gen_expression(scalar $cg, scalar $expr) void {
                         }
                         $a = $a + 1;
                     }
-                    # Use arity-specialized pack for 1-3 args (avoids variadic overhead)
-                    if ($arg_count >= 1 && $arg_count <= 3) {
-                        emit($cg, "StradaValue *__meth_pa = strada_pack_args_" . $arg_count . "(");
-                    } else {
-                        emit($cg, "StradaValue *__meth_pa = strada_pack_args(" . $arg_count . ", ");
-                    }
+                    emit($cg, "StradaValue *__meth_pa = strada_pack_args(" . $arg_count);
                     my int $i = 0;
                     while ($i < $arg_count) {
-                        if ($i > 0) { emit($cg, ", "); }
+                        emit($cg, ", ");
                         if (needs_temp_cleanup($cg, $args->[$i]) == 1) {
                             emit($cg, "__meth_arg_" . $i);
                         } else {
@@ -13256,16 +13172,13 @@ func gen_expression(scalar $cg, scalar $expr) void {
                         $i = $i + 1;
                     }
                     emit($cg, "); ");
-                    my int $pic_id1 = $cg->{"pic_counter"};
-                    $cg->{"pic_counter"} = $pic_id1 + 1;
-                    emit($cg, "static StradaPIC __pic_" . $pic_id1 . " = {0}; ");
-                    emit($cg, "StradaValue *__meth_res = strada_method_call_pic(");
+                    emit($cg, "StradaValue *__meth_res = strada_method_call(");
                     if ($meth_obj_cleanup == 1) {
                         emit($cg, "__meth_obj");
                     } else {
                         gen_expression($cg, $meth_target);
                     }
-                    emit($cg, ", \"" . $method . "\", __meth_pa, &__pic_" . $pic_id1 . "); ");
+                    emit($cg, ", \"" . $method . "\", __meth_pa); ");
                     if ($meth_obj_cleanup == 1) {
                         emit($cg, "strada_decref(__meth_obj); ");
                     }
@@ -13281,31 +13194,28 @@ func gen_expression(scalar $cg, scalar $expr) void {
                     # Check for inline accessor optimization
                     my str $inline_attr = is_inline_accessor($cg, $method);
                     if (length($inline_attr) > 0) {
-                        # Emit strada_hv_fetch_owned_ph(target, "attr", hash) directly
-                        my int $ia_hash = djb2_hash_32($inline_attr);
+                        # Emit strada_hv_fetch_owned(target, "attr") directly
                         if ($meth_obj_cleanup == 1) {
                             emit($cg, "({ StradaValue *__acc_obj = ");
                             gen_expression($cg, $meth_target);
-                            emit($cg, "; StradaValue *__acc_res = strada_hv_fetch_owned_ph(__acc_obj, \"");
-                            emit($cg, $inline_attr . "\", " . $ia_hash . "u); strada_decref(__acc_obj); __acc_res; })");
+                            emit($cg, "; StradaValue *__acc_res = strada_hv_fetch_owned(__acc_obj, \"");
+                            emit($cg, $inline_attr . "\"); strada_decref(__acc_obj); __acc_res; })");
                         } else {
-                            emit($cg, "strada_hv_fetch_owned_ph(");
+                            emit($cg, "strada_hv_fetch_owned(");
                             gen_expression($cg, $meth_target);
-                            emit($cg, ", \"" . $inline_attr . "\", " . $ia_hash . "u)");
+                            emit($cg, ", \"" . $inline_attr . "\")");
                         }
                     } else {
                         # Zero args - pass NULL instead of allocating empty pack_args
-                        my int $pic_id2 = $cg->{"pic_counter"};
-                        $cg->{"pic_counter"} = $pic_id2 + 1;
                         if ($meth_obj_cleanup == 1) {
-                            emit($cg, "({ static StradaPIC __pic_" . $pic_id2 . " = {0}; StradaValue *__meth_obj = ");
+                            emit($cg, "({ StradaValue *__meth_obj = ");
                             gen_expression($cg, $meth_target);
-                            emit($cg, "; StradaValue *__meth_res = strada_method_call_pic(__meth_obj, \"" . $method . "\", NULL, &__pic_" . $pic_id2 . "); ");
+                            emit($cg, "; StradaValue *__meth_res = strada_method_call(__meth_obj, \"" . $method . "\", NULL); ");
                             emit($cg, "strada_decref(__meth_obj); __meth_res; })");
                         } else {
-                            emit($cg, "({ static StradaPIC __pic_" . $pic_id2 . " = {0}; strada_method_call_pic(");
+                            emit($cg, "strada_method_call(");
                             gen_expression($cg, $meth_target);
-                            emit($cg, ", \"" . $method . "\", NULL, &__pic_" . $pic_id2 . "); })");
+                            emit($cg, ", \"" . $method . "\", NULL)");
                         }
                     }
                 } else {
@@ -13316,29 +13226,20 @@ func gen_expression(scalar $cg, scalar $expr) void {
                         gen_expression($cg, $meth_target);
                         emit($cg, "; ");
                     }
-                    # Use arity-specialized pack for 1-3 args
-                    if ($arg_count >= 1 && $arg_count <= 3) {
-                        emit($cg, "StradaValue *__meth_pa = strada_pack_args_" . $arg_count . "(");
-                    } else {
-                        emit($cg, "StradaValue *__meth_pa = strada_pack_args(" . $arg_count . ", ");
-                    }
+                    emit($cg, "StradaValue *__meth_pa = strada_pack_args(" . $arg_count);
                     my int $i = 0;
                     while ($i < $arg_count) {
-                        if ($i > 0) { emit($cg, ", "); }
+                        emit($cg, ", ");
                         gen_expression($cg, $args->[$i]);
                         $i = $i + 1;
                     }
-                    emit($cg, "); ");
-                    my int $pic_id3 = $cg->{"pic_counter"};
-                    $cg->{"pic_counter"} = $pic_id3 + 1;
-                    emit($cg, "static StradaPIC __pic_" . $pic_id3 . " = {0}; ");
-                    emit($cg, "StradaValue *__meth_res = strada_method_call_pic(");
+                    emit($cg, "); StradaValue *__meth_res = strada_method_call(");
                     if ($meth_obj_cleanup == 1) {
                         emit($cg, "__meth_obj");
                     } else {
                         gen_expression($cg, $meth_target);
                     }
-                    emit($cg, ", \"" . $method . "\", __meth_pa, &__pic_" . $pic_id3 . "); ");
+                    emit($cg, ", \"" . $method . "\", __meth_pa); ");
                     if ($meth_obj_cleanup == 1) {
                         emit($cg, "strada_decref(__meth_obj); ");
                     }
