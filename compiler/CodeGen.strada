@@ -3257,6 +3257,19 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 }
             }
 
+            # Optimize: "literal" . $expr → strada_concat_cstr_sv(lit, len, expr)
+            # Only when the right side doesn't need temp cleanup (hash access returns owned refs)
+            if ($left->{"type"} == NODE_STR_LITERAL() && ($cg->{"cleanup_enabled"} == 0 || needs_temp_cleanup($cg, $right) == 0)) {
+                my str $lit = $left->{"value"};
+                my int $litlen = length($lit);
+                emit($cg, "strada_concat_cstr_sv(\"");
+                emit_escaped_string($cg, $lit);
+                emit($cg, "\", " . $litlen . ", ");
+                gen_expression($cg, $right);
+                emit($cg, ")");
+                return;
+            }
+
             # Fast concat directly on StradaValues - no intermediate copies
             # When cleanup enabled, properly handle temporary arguments
             my int $left_is_temp = 0;
