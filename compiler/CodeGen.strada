@@ -582,6 +582,70 @@ func is_inline_accessor(scalar $cg, str $method) str {
     return "";
 }
 
+# Check if a 1-arg method call is an inline setter: $self->set_X(val) where X is has rw.
+# Returns the attribute name if inlineable, empty string otherwise.
+func is_inline_setter(scalar $cg, str $method) str {
+    # Must start with "set_"
+    if (length($method) <= 4) { return ""; }
+    if (substr($method, 0, 4) ne "set_") { return ""; }
+    my str $attr_name = substr($method, 4, length($method) - 4);
+
+    my str $pkg = $cg->{"current_fn_package"};
+    if (length($pkg) == 0 || $pkg eq "main") { return ""; }
+
+    my scalar $ha_attrs = $cg->{"has_attrs"};
+    my int $ha_count = $cg->{"has_attr_count"};
+    my scalar $acc_lookup = $cg->{"accessor_lookup"};
+
+    # Check direct match in current package
+    my int $hi = 0;
+    while ($hi < $ha_count) {
+        my str $a_name = $ha_attrs->[$hi]->{"name"};
+        my str $a_pkg = $ha_attrs->[$hi]->{"package"};
+        my int $a_rw = $ha_attrs->[$hi]->{"rw"};
+        if ($a_name eq $attr_name && $a_rw == 1) {
+            if ($a_pkg eq $pkg || exists($acc_lookup, $a_pkg . "\t" . $attr_name)) {
+                # Check no method override for the setter
+                my str $override = $pkg . "_set_" . $attr_name;
+                my scalar $funcs = $cg->{"functions"};
+                # The auto-generated setter IS in functions, so check if there's a user override
+                # by verifying the setter comes from has-attr (not user-defined)
+                # Actually: we know it's auto-generated because it's in has_attrs with rw=1.
+                # Only skip if there are method modifiers on the setter.
+                if (has_method_modifier($cg, $method) == 0) {
+                    return $attr_name;
+                }
+            }
+        }
+        $hi = $hi + 1;
+    }
+
+    # Check inherited attrs
+    my scalar $inherits = $cg->{"inherits"};
+    my int $ic = $cg->{"inherit_count"};
+    my int $ii = 0;
+    while ($ii < $ic) {
+        if ($inherits->[$ii]->{"child"} eq $pkg) {
+            my str $parent = $inherits->[$ii]->{"parent"};
+            my int $pi = 0;
+            while ($pi < $ha_count) {
+                my str $pa_name = $ha_attrs->[$pi]->{"name"};
+                my str $pa_pkg = $ha_attrs->[$pi]->{"package"};
+                my int $pa_rw = $ha_attrs->[$pi]->{"rw"};
+                if ($pa_name eq $attr_name && $pa_rw == 1 && $pa_pkg eq $parent) {
+                    if (has_method_modifier($cg, $method) == 0) {
+                        return $attr_name;
+                    }
+                }
+                $pi = $pi + 1;
+            }
+        }
+        $ii = $ii + 1;
+    }
+
+    return "";
+}
+
 # Check if an expression is a string concatenation with a string literal on the left.
 # Pattern: NODE_BINARY_OP(op=".") with left=NODE_STR_LITERAL
 # Returns 1 if the pattern matches, 0 otherwise.
@@ -12908,6 +12972,84 @@ func gen_expression(scalar $cg, scalar $expr) void {
                     emit($cg, ", \"" . $method . "\")");
                 }
                 return;
+            }
+        }
+
+        # Inline setter optimization: for 1-arg calls to set_X where X is has rw,
+        # emit direct hash store instead of going through strada_method_call.
+        if ($arg_count == 1) {
+            my str $setter_attr = is_inline_setter($cg, $method);
+            if (length($setter_attr) > 0) {
+                my scalar $meth_target = $expr->{"base_object"};
+                if (!$meth_target) {
+                    $meth_target = $obj;
+                }
+                # Safety: receiver must be $self (first param) — same check as getter
+                my int $setter_receiver_ok = 0;
+                my str $cur_pkg2 = $cg->{"current_fn_package"};
+                if (length($cur_pkg2) > 0 && $cur_pkg2 ne "main") {
+                    if ($meth_target->{"type"} == NODE_VARIABLE()) {
+                        my str $recv_name2 = $meth_target->{"name"};
+                        my int $fpc2 = $cg->{"func_param_count"} + 0;
+                        if ($fpc2 > 0) {
+                            my str $recv_esc2 = escape_c_keyword($recv_name2);
+                            if ($recv_esc2 eq $cg->{"func_param_names"}->[0]) {
+                                $setter_receiver_ok = 1;
+                            }
+                        }
+                        # Also allow known-type variables
+                        if ($setter_receiver_ok == 0) {
+                            my scalar $kt_s = $cg->{"known_types"};
+                            if ($kt_s) {
+                                my str $recv_esc3 = escape_c_keyword($recv_name2);
+                                my str $kt_val_s = "" . $kt_s->{$recv_esc3};
+                                if (length($kt_val_s) > 0) {
+                                    $setter_receiver_ok = 1;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if ($setter_receiver_ok == 1) {
+                    my scalar $set_arg = $expr->{"args"}->[0];
+                    my int $obj_cleanup2 = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $meth_target) == 1;
+                    my int $arg_cleanup2 = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $set_arg) == 1;
+
+                    # Setter returns void — emit as statement expression returning NULL
+                    emit($cg, "({ ");
+                    if ($obj_cleanup2 == 1) {
+                        emit($cg, "StradaValue *__isv_obj = ");
+                        gen_expression($cg, $meth_target);
+                        emit($cg, "; ");
+                    }
+                    if ($arg_cleanup2 == 1) {
+                        emit($cg, "StradaValue *__isv_val = ");
+                        gen_expression($cg, $set_arg);
+                        emit($cg, "; ");
+                    }
+                    emit($cg, "strada_hv_store(");
+                    if ($obj_cleanup2 == 1) {
+                        emit($cg, "__isv_obj");
+                    } else {
+                        gen_expression($cg, $meth_target);
+                    }
+                    emit($cg, ", \"" . $setter_attr . "\", ");
+                    if ($arg_cleanup2 == 1) {
+                        emit($cg, "__isv_val");
+                    } else {
+                        gen_expression($cg, $set_arg);
+                    }
+                    emit($cg, "); ");
+                    if ($obj_cleanup2 == 1) {
+                        emit($cg, "strada_decref(__isv_obj); ");
+                    }
+                    if ($arg_cleanup2 == 1) {
+                        emit($cg, "strada_decref(__isv_val); ");
+                    }
+                    emit($cg, "(StradaValue*)NULL; })");
+                    return;
+                }
             }
         }
 
