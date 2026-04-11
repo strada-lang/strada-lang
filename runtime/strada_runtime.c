@@ -2042,6 +2042,24 @@ StradaValue* strada_hash_get(StradaHash *hv, const char *key) {
     return strada_undef_static();
 }
 
+/* Pre-hashed variant: caller provides DJB2 hash, avoiding re-computation
+ * for known constant keys (e.g., has-attribute accessor names). */
+StradaValue* strada_hash_get_ph(StradaHash *hv, const char *key, unsigned int hash) {
+    if (!hv || !key) return strada_undef_static();
+
+    unsigned int bucket = hash & (hv->num_buckets - 1);
+    uint32_t idx = hv->hash_index[bucket];
+    while (idx != HASH_EMPTY) {
+        StradaHashEntry *e = &hv->entries[idx];
+        if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
+            return e->value;
+        }
+        idx = e->next;
+    }
+
+    return strada_undef_static();
+}
+
 /* Autovivification: fetch a hash value, auto-creating an empty hash if key doesn't exist.
  * Used for intermediate accesses in nested assignments like $h{"a"}{"b"} = val.
  * Returns a borrowed reference to the value (which is always a hash). */
@@ -10495,16 +10513,40 @@ StradaValue* strada_new_array_from_av(StradaArray *av) {
 StradaValue* strada_pack_args(int count, ...) {
     /* Pack variable arguments into an array */
     StradaValue *array = strada_new_array();
-    
+
     va_list args;
     va_start(args, count);
-    
+
     for (int i = 0; i < count; i++) {
         StradaValue *arg = va_arg(args, StradaValue*);
         strada_array_push(array->value.av, arg);
     }
-    
+
     va_end(args);
+    return array;
+}
+
+/* Arity-specialized pack_args: avoid variadic overhead for 1-3 args.
+ * These are called from generated code where the arg count is known at compile time. */
+
+StradaValue* strada_pack_args_1(StradaValue *a0) {
+    StradaValue *array = strada_new_array();
+    strada_array_push(array->value.av, a0);
+    return array;
+}
+
+StradaValue* strada_pack_args_2(StradaValue *a0, StradaValue *a1) {
+    StradaValue *array = strada_new_array();
+    strada_array_push(array->value.av, a0);
+    strada_array_push(array->value.av, a1);
+    return array;
+}
+
+StradaValue* strada_pack_args_3(StradaValue *a0, StradaValue *a1, StradaValue *a2) {
+    StradaValue *array = strada_new_array();
+    strada_array_push(array->value.av, a0);
+    strada_array_push(array->value.av, a1);
+    strada_array_push(array->value.av, a2);
     return array;
 }
 
@@ -10584,6 +10626,13 @@ StradaValue* strada_rand(void) {
 
 StradaValue* strada_time(void) {
     return strada_new_int((int64_t)time(NULL));
+}
+
+/* time_ms - monotonic clock in milliseconds (for benchmarking) */
+StradaValue* strada_time_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return strada_new_int((int64_t)ts.tv_sec * 1000 + (int64_t)ts.tv_nsec / 1000000);
 }
 
 /* localtime - convert timestamp to local time hash */
@@ -11878,6 +11927,7 @@ StradaValue* strada_getproctitle(void) {
 
 typedef struct {
     char name[OOP_MAX_NAME_LEN];
+    const char *interned_name;  /* Interned pointer for fast comparison */
     StradaMethod func;
 } OopMethod;
 
@@ -11888,6 +11938,10 @@ typedef struct {
 
 #define OOP_MAX_OVERLOADS 32
 #define OOP_MAX_MODIFIERS 64
+
+/* Per-package method hash table size (must be power of 2) */
+#define OOP_METHOD_HASH_SIZE 64
+#define OOP_METHOD_HASH_MASK (OOP_METHOD_HASH_SIZE - 1)
 
 typedef struct {
     char method_name[OOP_MAX_NAME_LEN];
@@ -11901,10 +11955,14 @@ typedef struct {
     int parent_count;
     OopMethod methods[OOP_MAX_METHODS];
     int method_count;
+    /* Direct-mapped method hash: maps hash(method_name) → index into methods[].
+     * -1 means empty slot. On collision, falls back to linear scan. */
+    int8_t method_hash[OOP_METHOD_HASH_SIZE];
     OverloadEntry overloads[OOP_MAX_OVERLOADS];
     int overload_count;
     OopModifier modifiers[OOP_MAX_MODIFIERS];
     int modifier_count;
+    int has_modifiers;  /* Per-package modifier flag (0 = no modifiers registered) */
 } OopPackage;
 
 static OopPackage oop_packages[OOP_MAX_PACKAGES];
@@ -11938,8 +11996,8 @@ static unsigned int oop_hash_name(const char *name) {
 /* Direct-mapped cache for fast method lookups */
 #define METHOD_CACHE_SIZE 1024
 typedef struct {
-    const char *package;   /* pointer comparison (packages are static) */
-    char method[OOP_MAX_NAME_LEN];
+    const char *package;   /* pointer comparison (packages are static/interned) */
+    const char *method;    /* interned pointer for fast comparison */
     StradaMethod func;
 } MethodCacheEntry;
 static MethodCacheEntry method_cache[METHOD_CACHE_SIZE];
@@ -12039,6 +12097,8 @@ static OopPackage* oop_get_or_create_package(const char *name) {
     pkg->name[OOP_MAX_NAME_LEN - 1] = '\0';
     pkg->parent_count = 0;
     pkg->method_count = 0;
+    pkg->has_modifiers = 0;
+    memset(pkg->method_hash, -1, sizeof(pkg->method_hash));
 
     /* Register in package hash table */
     if (!oop_pkg_hash_initialized) oop_pkg_hash_init();
@@ -12157,10 +12217,16 @@ void strada_method_register(const char *package, const char *name, StradaMethod 
     }
 
     /* Add new method */
+    int new_idx = pkg->method_count;
     OopMethod *m = &pkg->methods[pkg->method_count++];
     strncpy(m->name, name, OOP_MAX_NAME_LEN - 1);
     m->name[OOP_MAX_NAME_LEN - 1] = '\0';
+    m->interned_name = strada_intern_str(name);
     m->func = func;
+
+    /* Update per-package method hash */
+    unsigned int mh = oop_hash_name(name) & OOP_METHOD_HASH_MASK;
+    pkg->method_hash[mh] = (int8_t)new_idx;  /* Last writer wins on collision */
 }
 
 /* Method modifier registration */
@@ -12182,7 +12248,23 @@ void strada_modifier_register(const char *package, const char *method,
     mod->type = type;
     mod->func = func;
 
+    pkg->has_modifiers = 1;
     oop_any_modifiers = 1;
+}
+
+/* ===== OPERATOR OVERLOAD CACHE ===== */
+/* Direct-mapped cache for fast operator overload lookups */
+#define OVERLOAD_CACHE_SIZE 256
+typedef struct {
+    const char *package;   /* pointer comparison (packages use interned blessed names) */
+    char op[16];
+    StradaMethod func;
+    int valid;
+} OverloadCacheEntry;
+static OverloadCacheEntry overload_cache[OVERLOAD_CACHE_SIZE];
+
+static void overload_cache_invalidate(void) {
+    memset(overload_cache, 0, sizeof(overload_cache));
 }
 
 /* Operator overloading */
@@ -12190,6 +12272,9 @@ void strada_modifier_register(const char *package, const char *method,
 void strada_overload_register(const char *package, const char *op, StradaMethod func) {
     if (!package || !op || !func) return;
     if (!oop_initialized) strada_oop_init();
+
+    /* Invalidate overload cache on any registration */
+    overload_cache_invalidate();
 
     OopPackage *pkg = oop_get_or_create_package(package);
 
@@ -12249,9 +12334,25 @@ static StradaMethod strada_overload_lookup(const char *package, const char *op) 
     if (!package || !op) return NULL;
     if (!oop_initialized) return NULL;
 
+    /* Check overload cache first */
+    unsigned int olh = (oop_hash_name(package) ^ oop_hash_name(op)) & (OVERLOAD_CACHE_SIZE - 1);
+    OverloadCacheEntry *oce = &overload_cache[olh];
+    if (oce->valid && oce->package == package && strcmp(oce->op, op) == 0) {
+        return oce->func;  /* May be NULL (cached miss) */
+    }
+
     const char *visited[64];
     int visited_count = 0;
-    return oop_overload_lookup_in(package, op, visited, &visited_count);
+    StradaMethod func = oop_overload_lookup_in(package, op, visited, &visited_count);
+
+    /* Cache the result (including misses — NULL func means no overload) */
+    oce->package = package;
+    strncpy(oce->op, op, sizeof(oce->op) - 1);
+    oce->op[sizeof(oce->op) - 1] = '\0';
+    oce->func = func;
+    oce->valid = 1;
+
+    return func;
 }
 
 StradaValue* strada_overload_binary(StradaValue *left, StradaValue *right, const char *op) {
@@ -12328,9 +12429,16 @@ static const char* oop_method_lookup_package_in(const char *package, const char 
     OopPackage *pkg = oop_find_package(package);
     if (!pkg) return NULL;
 
-    /* Check this package's methods */
+    /* Check this package's methods — try hash first for O(1) hit */
+    unsigned int mhp = oop_hash_name(method) & OOP_METHOD_HASH_MASK;
+    int8_t hip = pkg->method_hash[mhp];
+    if (hip >= 0 && hip < pkg->method_count && strcmp(pkg->methods[(int)hip].name, method) == 0) {
+        return package;  /* Hash hit */
+    }
+    /* Hash miss or collision — linear scan fallback */
     for (int i = 0; i < pkg->method_count; i++) {
         if (strcmp(pkg->methods[i].name, method) == 0) {
+            pkg->method_hash[mhp] = (int8_t)i;
             return package;
         }
     }
@@ -12371,9 +12479,17 @@ static StradaMethod oop_lookup_method_in(const char *package, const char *method
     OopPackage *pkg = oop_find_package(package);
     if (!pkg) return NULL;
 
-    /* Look for method in this package */
+    /* Look for method in this package — try hash first for O(1) hit */
+    unsigned int mh = oop_hash_name(method) & OOP_METHOD_HASH_MASK;
+    int8_t hi = pkg->method_hash[mh];
+    if (hi >= 0 && hi < pkg->method_count && strcmp(pkg->methods[(int)hi].name, method) == 0) {
+        return pkg->methods[(int)hi].func;  /* Hash hit */
+    }
+    /* Hash miss or collision — linear scan fallback */
     for (int i = 0; i < pkg->method_count; i++) {
         if (strcmp(pkg->methods[i].name, method) == 0) {
+            /* Update hash for next time */
+            pkg->method_hash[mh] = (int8_t)i;
             return pkg->methods[i].func;
         }
     }
@@ -12393,11 +12509,16 @@ static StradaMethod oop_lookup_method(const char *package, const char *method) {
     if (!package || !method) return NULL;
     if (!oop_initialized) return NULL;
 
-    /* Check method cache first */
+    /* Intern the method name for pointer comparison in caches.
+     * Method names from generated code are string literals (stable addresses),
+     * but dynamic dispatch may pass transient strings, so we intern here. */
+    const char *interned_method = strada_intern_str(method);
+
+    /* Check method cache first — both package and method use pointer comparison */
     if (!method_cache_initialized) method_cache_init();
     unsigned int h = (oop_hash_name(package) ^ oop_hash_name(method)) & (METHOD_CACHE_SIZE - 1);
     MethodCacheEntry *ce = &method_cache[h];
-    if (ce->func && ce->package == package && strcmp(ce->method, method) == 0) {
+    if (ce->func && ce->package == package && ce->method == interned_method) {
         return ce->func;
     }
 
@@ -12408,8 +12529,7 @@ static StradaMethod oop_lookup_method(const char *package, const char *method) {
     /* Cache the result (even NULL misses are not cached to avoid stale entries) */
     if (func) {
         ce->package = package;
-        strncpy(ce->method, method, OOP_MAX_NAME_LEN - 1);
-        ce->method[OOP_MAX_NAME_LEN - 1] = '\0';
+        ce->method = interned_method;
         ce->func = func;
     }
 
@@ -12475,26 +12595,25 @@ StradaValue* strada_method_call(StradaValue *obj, const char *method, StradaValu
 
     /* Method dispatch inline cache: avoid oop_lookup_method for repeated calls.
      * 8-entry direct-mapped cache keyed by (pkg_name_ptr XOR method_name_hash).
-     * Stores a copy of the method name to avoid use-after-free when method
-     * name strings come from dynamic dispatch (strada_to_str + free). */
+     * Uses interned method name pointers for fast comparison (== instead of strcmp). */
     #define MC_SIZE 8
     #define MC_MASK (MC_SIZE - 1)
-    static struct { const char *pkg; char method[64]; StradaMethod func; } mc_cache[MC_SIZE];
+    static struct { const char *pkg; const char *method; StradaMethod func; } mc_cache[MC_SIZE];
     static int mc_initialized = 0;
     if (!mc_initialized) { memset(mc_cache, 0, sizeof(mc_cache)); mc_initialized = 1; }
 
-    size_t method_len = strlen(method);
-    unsigned int method_hash = 5381;
-    for (size_t mi = 0; mi < method_len; mi++) method_hash = method_hash * 33 + (unsigned char)method[mi];
+    /* Intern method name once — used by both inline cache and oop_lookup_method */
+    const char *interned_method = strada_intern_str(method);
+    unsigned int method_hash = oop_hash_name(method);
     unsigned int mc_idx = (unsigned int)(((uintptr_t)pkg_name >> 3) ^ method_hash) & MC_MASK;
     StradaMethod func;
-    if (mc_cache[mc_idx].pkg == pkg_name && strcmp(mc_cache[mc_idx].method, method) == 0) {
-        func = mc_cache[mc_idx].func;  /* Cache hit */
+    if (mc_cache[mc_idx].pkg == pkg_name && mc_cache[mc_idx].method == interned_method) {
+        func = mc_cache[mc_idx].func;  /* Cache hit — pointer comparison only */
     } else {
         func = oop_lookup_method(pkg_name, method);
-        if (func && method_len < 64) {
+        if (func) {
             mc_cache[mc_idx].pkg = pkg_name;
-            memcpy(mc_cache[mc_idx].method, method, method_len + 1);
+            mc_cache[mc_idx].method = interned_method;
             mc_cache[mc_idx].func = func;
         }
     }
@@ -12520,9 +12639,10 @@ StradaValue* strada_method_call(StradaValue *obj, const char *method, StradaValu
         exit(1);
     }
 
-    /* Check for method modifiers (before/after/around) — skip entirely when none registered */
+    /* Check for method modifiers (before/after/around) — skip entirely when none registered.
+     * Two-level guard: global flag (fast reject) then per-package flag (precise check). */
     OopPackage *pkg = oop_any_modifiers ? oop_find_package(pkg_name) : NULL;
-    if (pkg && pkg->modifier_count > 0) {
+    if (pkg && pkg->has_modifiers && pkg->modifier_count > 0) {
         /* Run 'before' modifiers */
         for (int mi = 0; mi < pkg->modifier_count; mi++) {
             if (pkg->modifiers[mi].type == 1 && strcmp(pkg->modifiers[mi].method_name, method) == 0) {
@@ -12582,6 +12702,11 @@ StradaValue* strada_method_call(StradaValue *obj, const char *method, StradaValu
         strada_decref(args);
     }
     return result;
+}
+
+/* Export oop_lookup_method for PIC cache updates (called from inline header) */
+StradaMethod strada_oop_lookup_method_export(const char *pkg, const char *method) {
+    return oop_lookup_method(pkg, method);
 }
 
 /* Helper to get first parent package (for SUPER:: calls) */

@@ -523,6 +523,7 @@ void strada_hash_set_take(StradaHash *hv, const char *key, StradaValue *sv);
 void strada_hash_set_take_ph(StradaHash *hv, const char *key, unsigned int hash, StradaValue *sv);
 void strada_hash_set_ss_take(StradaHash *hv, StradaString *key_ss, StradaValue *sv);
 StradaValue* strada_hash_get(StradaHash *hv, const char *key);
+StradaValue* strada_hash_get_ph(StradaHash *hv, const char *key, unsigned int hash);
 StradaValue* strada_autoviv_hash(StradaValue *sv, const char *key);
 int strada_hash_exists(StradaHash *hv, const char *key);
 void strada_hash_delete(StradaHash *hv, const char *key);
@@ -772,6 +773,14 @@ StradaValue* strada_hash_to_flat_array(StradaValue *hash); /* Convert hash to fl
 
 /* OOP - Blessed references (like Perl's bless) */
 typedef StradaValue* (*StradaMethod)(StradaValue *self, StradaValue *args);
+
+/* Per-call-site polymorphic inline cache (PIC) slot.
+ * Declared as a static local at each method call site in generated code.
+ * The blessed_package pointer is interned, so pointer comparison is valid. */
+typedef struct {
+    const char *pkg;        /* Interned blessed package pointer */
+    StradaMethod func;      /* Cached method function pointer */
+} StradaPIC;
 StradaValue* strada_bless(StradaValue *ref, const char *package); /* Bless ref into package, returns ref */
 StradaValue* strada_blessed(StradaValue *ref);                  /* Get package name or undef */
 void strada_set_package(const char *package);                   /* Set current package context */
@@ -781,6 +790,35 @@ void strada_inherit_from(const char *parent);                   /* Inherit from 
 void strada_method_register(const char *package, const char *name, StradaMethod func);
 void strada_modifier_register(const char *package, const char *method, int type, StradaMethod func);
 StradaValue* strada_method_call(StradaValue *obj, const char *method, StradaValue *args);
+/* PIC-accelerated method call: checks per-call-site cache before full dispatch.
+ * The pic slot is a static local at each call site, updated on miss. */
+StradaMethod strada_oop_lookup_method_export(const char *pkg, const char *method);
+static inline StradaValue* strada_method_call_pic(StradaValue *obj, const char *method,
+                                                    StradaValue *args, StradaPIC *pic) {
+    /* Inline SV_BLESSED: (sv)->meta ? (sv)->meta->blessed_package : NULL */
+    if (__builtin_expect(obj != NULL && !STRADA_IS_TAGGED_INT(obj), 1)) {
+        const char *bp = obj->meta ? obj->meta->blessed_package : NULL;
+        if (__builtin_expect(bp != NULL && bp == pic->pkg && pic->func != NULL, 1)) {
+            /* PIC hit — direct call, skip full dispatch */
+            StradaValue *result = pic->func(obj, args);
+            if (args) strada_decref(args);
+            return result;
+        }
+    }
+    /* PIC miss — full dispatch, then update cache */
+    StradaValue *result = strada_method_call(obj, method, args);
+    /* Update PIC for next call */
+    if (obj && !STRADA_IS_TAGGED_INT(obj)) {
+        const char *bp2 = obj->meta ? obj->meta->blessed_package : NULL;
+        if (bp2) {
+            pic->pkg = bp2;
+            /* Re-lookup to get the func pointer for caching.
+             * oop_lookup_method is fast (hits method cache from the call above). */
+            pic->func = strada_oop_lookup_method_export(bp2, method);
+        }
+    }
+    return result;
+}
 const char* strada_method_lookup_package(const char *package, const char *method);
 const char* strada_get_parent_package(const char *package);     /* Get parent package */
 int strada_isa(StradaValue *obj, const char *package);          /* Check inheritance */
@@ -802,6 +840,10 @@ StradaValue* strada_overload_stringify(StradaValue *val);
 
 /* Variadic function support */
 StradaValue* strada_pack_args(int count, ...);        /* Pack args into array */
+
+StradaValue* strada_pack_args_1(StradaValue *a0);     /* Fast 1-arg pack (no variadic) */
+StradaValue* strada_pack_args_2(StradaValue *a0, StradaValue *a1);
+StradaValue* strada_pack_args_3(StradaValue *a0, StradaValue *a1, StradaValue *a2);
 
 /* Memory management */
 void strada_free(StradaValue *sv);  /* Explicitly free (decref) a value */
@@ -950,6 +992,7 @@ StradaValue* strada_abs(StradaValue *sv);              /* Absolute value */
 StradaValue* strada_sqrt(StradaValue *sv);             /* Square root */
 StradaValue* strada_rand(void);                        /* Random 0-1 */
 StradaValue* strada_time(void);                        /* Current timestamp */
+StradaValue* strada_time_ms(void);                     /* Monotonic clock in milliseconds */
 StradaValue* strada_localtime(StradaValue *timestamp); /* Local time hash */
 StradaValue* strada_gmtime(StradaValue *timestamp);    /* UTC time hash */
 StradaValue* strada_mktime(StradaValue *time_hash);    /* Hash to timestamp */
@@ -1465,6 +1508,14 @@ static inline StradaValue* strada_hv_fetch_owned(StradaValue *sv, const char *ke
     if (STRADA_IS_TAGGED_INT(sv)) return strada_undef_static();
     if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) return strada_tied_hash_fetch(sv, key);
     StradaValue *result = strada_hash_get(strada_deref_hash(sv), key);
+    strada_incref(result);
+    return result;
+}
+/* Pre-hashed variant: avoids re-computing DJB2 hash for known constant attribute names */
+static inline StradaValue* strada_hv_fetch_owned_ph(StradaValue *sv, const char *key, unsigned int hash) {
+    if (STRADA_IS_TAGGED_INT(sv)) return strada_undef_static();
+    if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) return strada_tied_hash_fetch(sv, key);
+    StradaValue *result = strada_hash_get_ph(strada_deref_hash(sv), key, hash);
     strada_incref(result);
     return result;
 }

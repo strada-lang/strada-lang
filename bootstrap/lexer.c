@@ -82,7 +82,7 @@ static Keyword keywords[] = {
     {"ptr", TOK_PTR},
     
     {"undef", TOK_UNDEF},
-    {"defined", TOK_DEFINED},
+    /* defined is treated as a regular identifier/function, not a keyword */
     {"dump", TOK_DUMP},
     {"dumper", TOK_DUMPER},
     {"clone", TOK_CLONE},

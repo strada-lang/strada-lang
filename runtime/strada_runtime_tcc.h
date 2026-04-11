@@ -379,6 +379,7 @@ StradaValue* strada_array_splice_sv(StradaValue *arr_sv, int64_t offset, int64_t
  * ============================================================ */
 StradaHash* strada_hash_new(void);
 StradaValue* strada_hash_get(StradaHash *hash, const char *key);
+StradaValue* strada_hash_get_ph(StradaHash *hash, const char *key, unsigned int hash_val);
 StradaValue* strada_autoviv_hash(StradaValue *sv, const char *key);
 void strada_hash_set(StradaHash *hash, const char *key, StradaValue *val);
 void strada_hash_set_take(StradaHash *hash, const char *key, StradaValue *val);
@@ -544,6 +545,28 @@ void strada_method_register(const char *package, const char *name, StradaMethod 
 void strada_register_method(const char *package, const char *name, void *func);
 void strada_modifier_register(const char *package, const char *method, int type, StradaMethod func);
 StradaValue* strada_method_call(StradaValue *obj, const char *method, StradaValue *args);
+typedef struct { const char *pkg; StradaMethod func; } StradaPIC;
+StradaMethod strada_oop_lookup_method_export(const char *pkg, const char *method);
+static inline StradaValue* strada_method_call_pic(StradaValue *obj, const char *method,
+                                                    StradaValue *args, StradaPIC *pic) {
+    if (__builtin_expect(obj != NULL && !STRADA_IS_TAGGED_INT(obj), 1)) {
+        const char *bp = obj->meta ? obj->meta->blessed_package : NULL;
+        if (__builtin_expect(bp != NULL && bp == pic->pkg && pic->func != NULL, 1)) {
+            StradaValue *result = pic->func(obj, args);
+            if (args) strada_decref(args);
+            return result;
+        }
+    }
+    StradaValue *result = strada_method_call(obj, method, args);
+    if (obj && !STRADA_IS_TAGGED_INT(obj)) {
+        const char *bp2 = obj->meta ? obj->meta->blessed_package : NULL;
+        if (bp2) {
+            pic->pkg = bp2;
+            pic->func = strada_oop_lookup_method_export(bp2, method);
+        }
+    }
+    return result;
+}
 const char* strada_method_lookup_package(const char *package, const char *method);
 const char* strada_get_parent_package(const char *package);
 int strada_isa(StradaValue *obj, const char *package);
@@ -573,6 +596,9 @@ StradaValue* strada_closure_call_method(StradaValue *closure, StradaValue *self,
 
 /* Variadic function support */
 StradaValue* strada_pack_args(int count, ...);
+StradaValue* strada_pack_args_1(StradaValue *a0);
+StradaValue* strada_pack_args_2(StradaValue *a0, StradaValue *a1);
+StradaValue* strada_pack_args_3(StradaValue *a0, StradaValue *a1, StradaValue *a2);
 
 /* ============================================================
  * Memory Management
@@ -1165,6 +1191,13 @@ static inline StradaValue* strada_hv_fetch_owned(StradaValue *sv, const char *ke
     if (STRADA_IS_TAGGED_INT(sv)) return strada_undef_static();
     if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) return strada_tied_hash_fetch(sv, key);
     StradaValue *result = strada_hash_get(strada_deref_hash(sv), key);
+    strada_incref(result);
+    return result;
+}
+static inline StradaValue* strada_hv_fetch_owned_ph(StradaValue *sv, const char *key, unsigned int hash) {
+    if (STRADA_IS_TAGGED_INT(sv)) return strada_undef_static();
+    if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) return strada_tied_hash_fetch(sv, key);
+    StradaValue *result = strada_hash_get_ph(strada_deref_hash(sv), key, hash);
     strada_incref(result);
     return result;
 }
