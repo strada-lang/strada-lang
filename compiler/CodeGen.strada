@@ -16890,7 +16890,8 @@ func gen_program(scalar $cg, scalar $program) void {
         emit($cg, "extern StradaValue *ARGC;\n");
         emit($cg, "extern StradaValue *v_STDIN;\n");
         emit($cg, "extern StradaValue *v_STDOUT;\n");
-        emit($cg, "extern StradaValue *v_STDERR;\n\n");
+        emit($cg, "extern StradaValue *v_STDERR;\n");
+        emit($cg, "extern StradaValue *__child_status;\n\n");
     }
 
     # Emit global variable declarations
