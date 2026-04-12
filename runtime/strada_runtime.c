@@ -13789,11 +13789,11 @@ StradaValue* strada_poll(StradaValue *fds, StradaValue *timeout) {
     if (arr->type == STRADA_REF) arr = arr->value.rv;
     if (arr->type != STRADA_ARRAY) return strada_new_int(-1);
 
-    int nfds = strada_array_length(arr->value.av);
+    nfds_t nfds = (nfds_t)strada_array_length(arr->value.av);
     struct pollfd *pfds = calloc(nfds, sizeof(struct pollfd));
     if (!pfds) return strada_new_int(-1);
 
-    for (int i = 0; i < nfds; i++) {
+    for (nfds_t i = 0; i < nfds; i++) {
         StradaValue *entry = strada_array_get(arr->value.av, i);
         if (entry && !STRADA_IS_TAGGED_INT(entry) && entry->type == STRADA_HASH) {
             StradaValue *fd_val = strada_hash_get(entry->value.hv, "fd");
@@ -13803,10 +13803,10 @@ StradaValue* strada_poll(StradaValue *fds, StradaValue *timeout) {
         }
     }
 
-    int result = poll(pfds, nfds, strada_to_int(timeout));
+    int result = poll(pfds, nfds, (int)strada_to_int(timeout));
 
     /* Update revents in original array */
-    for (int i = 0; i < nfds; i++) {
+    for (nfds_t i = 0; i < nfds; i++) {
         StradaValue *entry = strada_array_get(arr->value.av, i);
         if (entry && !STRADA_IS_TAGGED_INT(entry) && entry->type == STRADA_HASH) {
             strada_hash_set_take(entry->value.hv, "revents", strada_new_int(pfds[i].revents));
