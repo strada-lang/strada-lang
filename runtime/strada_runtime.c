@@ -159,11 +159,14 @@ static inline uint32_t hash_get_slot(StradaHash *hv) {
 
 static void hash_rebuild_index(StradaHash *hv) {
     memset(hv->hash_index, 0xFF, hv->num_buckets * sizeof(uint32_t));
+    hv->num_tombstones = 0;
     for (size_t i = 0; i < hv->next_slot; i++) {
         if (hv->entries[i].key) {
-            uint32_t bucket = hv->entries[i].key->hash & (hv->num_buckets - 1);
-            hv->entries[i].next = hv->hash_index[bucket];
-            hv->hash_index[bucket] = (uint32_t)i;
+            uint32_t pos = hv->entries[i].key->hash & (hv->num_buckets - 1);
+            while (hv->hash_index[pos] != HASH_EMPTY) {
+                pos = (pos + 1) & (hv->num_buckets - 1);
+            }
+            hv->hash_index[pos] = (uint32_t)i;
         }
     }
 }
@@ -788,18 +791,19 @@ static unsigned int strada_hash_string(const char *str);
 
 void strada_weaken_hv_entry(StradaHash *hv, const char *key) {
     if (!hv || !key) return;
-    /* Find the hash entry */
     unsigned int hash = strada_hash_string(key);
-    unsigned int bucket = hash & (hv->num_buckets - 1);
-    uint32_t idx = hv->hash_index[bucket];
-    while (idx != HASH_EMPTY) {
-        StradaHashEntry *e = &hv->entries[idx];
-        if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
-            /* Found the entry - weaken its value in place */
-            strada_weaken(&e->value);
-            return;
+    uint32_t pos = hash & (hv->num_buckets - 1);
+    while (1) {
+        uint32_t idx = hv->hash_index[pos];
+        if (idx == HASH_EMPTY) return;
+        if (idx != HASH_TOMBSTONE) {
+            StradaHashEntry *e = &hv->entries[idx];
+            if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
+                strada_weaken(&e->value);
+                return;
+            }
         }
-        idx = e->next;
+        pos = (pos + 1) & (hv->num_buckets - 1);
     }
 }
 
@@ -1821,6 +1825,7 @@ static void strada_hash_pool_cleanup(void) {
 static inline void strada_hash_init(StradaHash *hv, size_t nbuckets) {
     hv->num_buckets = nbuckets;
     hv->num_entries = 0;
+    hv->num_tombstones = 0;
     hv->entries = NULL;
     hv->capacity = 0;
     hv->next_slot = 0;
@@ -1853,7 +1858,12 @@ StradaHash* strada_hash_new(void) {
 
 StradaHash* strada_hash_new_presized(int capacity) {
     StradaHash *hv;
-    int nbuckets = capacity < 4 ? 4 : capacity;
+    /* With open addressing (50% load factor), need at least 2x capacity for buckets */
+    int min_buckets = capacity * 2;
+    if (min_buckets < 4) min_buckets = 4;
+    /* Round up to next power of 2 */
+    int nbuckets = 4;
+    while (nbuckets < min_buckets) nbuckets *= 2;
 
     if (nbuckets <= HASH_SMALL_BUCKETS && hash_pool_small_count > 0) {
         hv = hash_pool_small[--hash_pool_small_count];
@@ -1861,6 +1871,7 @@ StradaHash* strada_hash_new_presized(int capacity) {
         memset(hv->hash_index, 0xFF, nbuckets * sizeof(uint32_t));
         hv->num_buckets = nbuckets;
         hv->num_entries = 0;
+        hv->num_tombstones = 0;
         hv->next_slot = 0;
         hv->free_head = HASH_EMPTY;
         hv->refcount = 1;
@@ -1881,6 +1892,7 @@ StradaHash* strada_hash_new_presized(int capacity) {
         memset(hv->entries, 0, ent_size);
         hv->num_buckets = nbuckets;
         hv->num_entries = 0;
+        hv->num_tombstones = 0;
         hv->next_slot = 0;
         hv->free_head = HASH_EMPTY;
         hv->refcount = 1;
@@ -1898,33 +1910,40 @@ void strada_hash_set(StradaHash *hv, const char *key, StradaValue *sv) {
     if (!hv || !key) return;
 
     unsigned int hash = strada_hash_string(key);
-    unsigned int bucket = hash & (hv->num_buckets - 1);
+    uint32_t key_len = (uint32_t)strlen(key);
+    uint32_t pos = hash & (hv->num_buckets - 1);
+    uint32_t first_tombstone = HASH_EMPTY;
 
-    /* Check if key exists */
-    uint32_t idx = hv->hash_index[bucket];
-    while (idx != HASH_EMPTY) {
-        StradaHashEntry *e = &hv->entries[idx];
-        if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
-            /* IMPORTANT: incref new value BEFORE decref old value */
-            strada_incref(sv);
-            strada_decref(e->value);
-            e->value = sv;
-            return;
+    while (1) {
+        uint32_t idx = hv->hash_index[pos];
+        if (idx == HASH_EMPTY) break;
+        if (idx == HASH_TOMBSTONE) {
+            if (first_tombstone == HASH_EMPTY) first_tombstone = pos;
+        } else {
+            StradaHashEntry *e = &hv->entries[idx];
+            if (e->key->hash == hash && e->key->len == key_len && memcmp(e->key->data, key, key_len) == 0) {
+                strada_incref(sv);
+                strada_decref(e->value);
+                e->value = sv;
+                return;
+            }
         }
-        idx = e->next;
+        pos = (pos + 1) & (hv->num_buckets - 1);
     }
 
-    /* Add new entry */
+    /* Insert at first tombstone if found, else at empty slot */
+    uint32_t insert_pos = (first_tombstone != HASH_EMPTY) ? first_tombstone : pos;
+    if (first_tombstone != HASH_EMPTY) hv->num_tombstones--;
+
     uint32_t slot = hash_get_slot(hv);
     StradaHashEntry *e = &hv->entries[slot];
-    e->key = ss_new(key, strlen(key), hash);
+    e->key = ss_new(key, key_len, hash);
     e->value = sv;
     strada_incref(sv);
-    e->next = hv->hash_index[bucket];
-    hv->hash_index[bucket] = slot;
+    hv->hash_index[insert_pos] = slot;
     hv->num_entries++;
 
-    if (hv->num_entries * 4 > hv->num_buckets * 3) {
+    if ((hv->num_entries + hv->num_tombstones) * 2 > hv->num_buckets) {
         strada_hash_resize(hv);
     }
 }
@@ -1935,25 +1954,32 @@ void strada_hash_set(StradaHash *hv, const char *key, StradaValue *sv) {
 void strada_hash_set_take_ph(StradaHash *hv, const char *key, unsigned int hash, StradaValue *sv) {
     if (!hv || !key) return;
 
-    unsigned int bucket = hash & (hv->num_buckets - 1);
-    uint32_t idx = hv->hash_index[bucket];
-    while (idx != HASH_EMPTY) {
-        StradaHashEntry *e = &hv->entries[idx];
-        if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
-            strada_decref(e->value);
-            e->value = sv;
-            return;
+    uint32_t pos = hash & (hv->num_buckets - 1);
+    uint32_t first_tombstone = HASH_EMPTY;
+    while (1) {
+        uint32_t idx = hv->hash_index[pos];
+        if (idx == HASH_EMPTY) break;
+        if (idx == HASH_TOMBSTONE) {
+            if (first_tombstone == HASH_EMPTY) first_tombstone = pos;
+        } else {
+            StradaHashEntry *e = &hv->entries[idx];
+            if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
+                strada_decref(e->value);
+                e->value = sv;
+                return;
+            }
         }
-        idx = e->next;
+        pos = (pos + 1) & (hv->num_buckets - 1);
     }
+    uint32_t insert_pos = (first_tombstone != HASH_EMPTY) ? first_tombstone : pos;
+    if (first_tombstone != HASH_EMPTY) hv->num_tombstones--;
     uint32_t slot = hash_get_slot(hv);
     StradaHashEntry *e = &hv->entries[slot];
     e->key = ss_new(key, strlen(key), hash);
     e->value = sv;
-    e->next = hv->hash_index[bucket];
-    hv->hash_index[bucket] = slot;
+    hv->hash_index[insert_pos] = slot;
     hv->num_entries++;
-    if (hv->num_entries * 4 > hv->num_buckets * 3) {
+    if ((hv->num_entries + hv->num_tombstones) * 2 > hv->num_buckets) {
         strada_hash_resize(hv);
     }
 }
@@ -1962,30 +1988,35 @@ void strada_hash_set_take(StradaHash *hv, const char *key, StradaValue *sv) {
     if (!hv || !key) return;
 
     unsigned int hash = strada_hash_string(key);
-    unsigned int bucket = hash & (hv->num_buckets - 1);
+    uint32_t pos = hash & (hv->num_buckets - 1);
+    uint32_t first_tombstone = HASH_EMPTY;
 
-    /* Check if key exists */
-    uint32_t idx = hv->hash_index[bucket];
-    while (idx != HASH_EMPTY) {
-        StradaHashEntry *e = &hv->entries[idx];
-        if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
-            strada_decref(e->value);
-            e->value = sv;
-            return;
+    while (1) {
+        uint32_t idx = hv->hash_index[pos];
+        if (idx == HASH_EMPTY) break;
+        if (idx == HASH_TOMBSTONE) {
+            if (first_tombstone == HASH_EMPTY) first_tombstone = pos;
+        } else {
+            StradaHashEntry *e = &hv->entries[idx];
+            if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
+                strada_decref(e->value);
+                e->value = sv;
+                return;
+            }
         }
-        idx = e->next;
+        pos = (pos + 1) & (hv->num_buckets - 1);
     }
 
-    /* Add new entry - take ownership (no incref) */
+    uint32_t insert_pos = (first_tombstone != HASH_EMPTY) ? first_tombstone : pos;
+    if (first_tombstone != HASH_EMPTY) hv->num_tombstones--;
     uint32_t slot = hash_get_slot(hv);
     StradaHashEntry *e = &hv->entries[slot];
     e->key = ss_new(key, strlen(key), hash);
     e->value = sv;
-    e->next = hv->hash_index[bucket];
-    hv->hash_index[bucket] = slot;
+    hv->hash_index[insert_pos] = slot;
     hv->num_entries++;
 
-    if (hv->num_entries * 4 > hv->num_buckets * 3) {
+    if ((hv->num_entries + hv->num_tombstones) * 2 > hv->num_buckets) {
         strada_hash_resize(hv);
     }
 }
@@ -1995,31 +2026,35 @@ void strada_hash_set_take(StradaHash *hv, const char *key, StradaValue *sv) {
 void strada_hash_set_ss_take(StradaHash *hv, StradaString *key_ss, StradaValue *sv) {
     if (!hv || !key_ss) return;
 
-    unsigned int bucket = key_ss->hash & (hv->num_buckets - 1);
-
-    /* Check if key exists */
-    uint32_t idx = hv->hash_index[bucket];
-    while (idx != HASH_EMPTY) {
-        StradaHashEntry *e = &hv->entries[idx];
-        if (e->key == key_ss || (e->key->hash == key_ss->hash && strcmp(e->key->data, key_ss->data) == 0)) {
-            strada_decref(e->value);
-            e->value = sv;
-            return;
+    uint32_t pos = key_ss->hash & (hv->num_buckets - 1);
+    uint32_t first_tombstone = HASH_EMPTY;
+    while (1) {
+        uint32_t idx = hv->hash_index[pos];
+        if (idx == HASH_EMPTY) break;
+        if (idx == HASH_TOMBSTONE) {
+            if (first_tombstone == HASH_EMPTY) first_tombstone = pos;
+        } else {
+            StradaHashEntry *e = &hv->entries[idx];
+            if (e->key == key_ss || (e->key->hash == key_ss->hash && e->key->len == key_ss->len && memcmp(e->key->data, key_ss->data, key_ss->len) == 0)) {
+                strada_decref(e->value);
+                e->value = sv;
+                return;
+            }
         }
-        idx = e->next;
+        pos = (pos + 1) & (hv->num_buckets - 1);
     }
 
-    /* Add new entry — share the key (incref, no allocation) */
+    uint32_t insert_pos = (first_tombstone != HASH_EMPTY) ? first_tombstone : pos;
+    if (first_tombstone != HASH_EMPTY) hv->num_tombstones--;
     uint32_t slot = hash_get_slot(hv);
     StradaHashEntry *e = &hv->entries[slot];
     ss_incref(key_ss);
     e->key = key_ss;
     e->value = sv;
-    e->next = hv->hash_index[bucket];
-    hv->hash_index[bucket] = slot;
+    hv->hash_index[insert_pos] = slot;
     hv->num_entries++;
 
-    if (hv->num_entries * 4 > hv->num_buckets * 3) {
+    if ((hv->num_entries + hv->num_tombstones) * 2 > hv->num_buckets) {
         strada_hash_resize(hv);
     }
 }
@@ -2028,18 +2063,19 @@ StradaValue* strada_hash_get(StradaHash *hv, const char *key) {
     if (!hv || !key) return strada_undef_static();
 
     unsigned int hash = strada_hash_string(key);
-    unsigned int bucket = hash & (hv->num_buckets - 1);
+    uint32_t key_len = (uint32_t)strlen(key);
+    uint32_t pos = hash & (hv->num_buckets - 1);
 
-    uint32_t idx = hv->hash_index[bucket];
-    while (idx != HASH_EMPTY) {
-        StradaHashEntry *e = &hv->entries[idx];
-        if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
-            return e->value;
+    while (1) {
+        uint32_t idx = hv->hash_index[pos];
+        if (idx == HASH_EMPTY) return strada_undef_static();
+        if (idx != HASH_TOMBSTONE) {
+            StradaHashEntry *e = &hv->entries[idx];
+            if (e->key->hash == hash && e->key->len == key_len && memcmp(e->key->data, key, key_len) == 0)
+                return e->value;
         }
-        idx = e->next;
+        pos = (pos + 1) & (hv->num_buckets - 1);
     }
-
-    return strada_undef_static();
 }
 
 /* Autovivification: fetch a hash value, auto-creating an empty hash if key doesn't exist.
@@ -2051,29 +2087,29 @@ StradaValue* strada_autoviv_hash(StradaValue *sv, const char *key) {
     if (!hv || !key) return strada_new_hash();
 
     unsigned int hash = strada_hash_string(key);
-    unsigned int bucket = hash & (hv->num_buckets - 1);
+    uint32_t pos = hash & (hv->num_buckets - 1);
 
-    uint32_t idx = hv->hash_index[bucket];
-    while (idx != HASH_EMPTY) {
-        StradaHashEntry *e = &hv->entries[idx];
-        if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
-            StradaValue *val = e->value;
-            /* If existing value is undef or not a hash, replace with empty hash */
-            if (!val || STRADA_IS_TAGGED_INT(val) ||
-                (val->type != STRADA_HASH && val->type != STRADA_REF)) {
-                StradaValue *new_hash = strada_new_hash();
-                strada_hash_set_take(hv, key, new_hash);
-                return new_hash;
+    while (1) {
+        uint32_t idx = hv->hash_index[pos];
+        if (idx == HASH_EMPTY) break;
+        if (idx != HASH_TOMBSTONE) {
+            StradaHashEntry *e = &hv->entries[idx];
+            if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
+                StradaValue *val = e->value;
+                if (!val || STRADA_IS_TAGGED_INT(val) ||
+                    (val->type != STRADA_HASH && val->type != STRADA_REF)) {
+                    StradaValue *new_hash = strada_new_hash();
+                    strada_hash_set_take(hv, key, new_hash);
+                    return new_hash;
+                }
+                return val;
             }
-            return val;
         }
-        idx = e->next;
+        pos = (pos + 1) & (hv->num_buckets - 1);
     }
 
-    /* Key doesn't exist — create empty hash and store it */
     StradaValue *new_hash = strada_new_hash();
     strada_hash_set_take(hv, key, new_hash);
-    /* hash_set_take does NOT incref, so new_hash refcount stays 1, owned by parent */
     return new_hash;
 }
 
@@ -2081,15 +2117,19 @@ int strada_hash_exists(StradaHash *hv, const char *key) {
     if (!hv || !key) return 0;
 
     unsigned int hash = strada_hash_string(key);
-    unsigned int bucket = hash & (hv->num_buckets - 1);
+    uint32_t key_len = (uint32_t)strlen(key);
+    uint32_t pos = hash & (hv->num_buckets - 1);
 
-    uint32_t idx = hv->hash_index[bucket];
-    while (idx != HASH_EMPTY) {
-        StradaHashEntry *e = &hv->entries[idx];
-        if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
-            return 1;
+    while (1) {
+        uint32_t idx = hv->hash_index[pos];
+        if (idx == HASH_EMPTY) break;
+        if (idx != HASH_TOMBSTONE) {
+            StradaHashEntry *e = &hv->entries[idx];
+            if (e->key->hash == hash && e->key->len == key_len && memcmp(e->key->data, key, key_len) == 0) {
+                return 1;
+            }
         }
-        idx = e->next;
+        pos = (pos + 1) & (hv->num_buckets - 1);
     }
 
     return 0;
@@ -2099,24 +2139,26 @@ void strada_hash_delete(StradaHash *hv, const char *key) {
     if (!hv || !key) return;
 
     unsigned int hash = strada_hash_string(key);
-    unsigned int bucket = hash & (hv->num_buckets - 1);
+    uint32_t key_len = (uint32_t)strlen(key);
+    uint32_t pos = hash & (hv->num_buckets - 1);
 
-    uint32_t *prev = &hv->hash_index[bucket];
-    uint32_t idx = *prev;
-
-    while (idx != HASH_EMPTY) {
-        StradaHashEntry *e = &hv->entries[idx];
-        if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
-            *prev = e->next;
-            ss_decref(e->key);
-            strada_decref(e->value);
-            e->key = NULL; e->value = NULL;
-            e->next = hv->free_head; hv->free_head = idx;
-            hv->num_entries--;
-            return;
+    while (1) {
+        uint32_t idx = hv->hash_index[pos];
+        if (idx == HASH_EMPTY) return;
+        if (idx != HASH_TOMBSTONE) {
+            StradaHashEntry *e = &hv->entries[idx];
+            if (e->key->hash == hash && e->key->len == key_len && memcmp(e->key->data, key, key_len) == 0) {
+                hv->hash_index[pos] = HASH_TOMBSTONE;
+                ss_decref(e->key);
+                strada_decref(e->value);
+                e->key = NULL; e->value = NULL;
+                e->next = hv->free_head; hv->free_head = idx;
+                hv->num_entries--;
+                hv->num_tombstones++;
+                return;
+            }
         }
-        prev = &e->next;
-        idx = e->next;
+        pos = (pos + 1) & (hv->num_buckets - 1);
     }
 }
 
@@ -2140,32 +2182,39 @@ void strada_hash_set_sv(StradaHash *hv, StradaValue *key_sv, StradaValue *sv) {
     if (!key) { if (key_alloc) free(key_alloc); return; }
 
     unsigned int hash = strada_hash_string(key);
-    unsigned int bucket = hash & (hv->num_buckets - 1);
+    uint32_t key_len = (uint32_t)strlen(key);
+    uint32_t pos = hash & (hv->num_buckets - 1);
+    uint32_t first_tombstone = HASH_EMPTY;
 
-    uint32_t idx = hv->hash_index[bucket];
-    while (idx != HASH_EMPTY) {
-        StradaHashEntry *e = &hv->entries[idx];
-        if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
-            strada_incref(sv);
-            strada_decref(e->value);
-            e->value = sv;
-            if (key_alloc) free(key_alloc);
-            return;
+    while (1) {
+        uint32_t idx = hv->hash_index[pos];
+        if (idx == HASH_EMPTY) break;
+        if (idx == HASH_TOMBSTONE) {
+            if (first_tombstone == HASH_EMPTY) first_tombstone = pos;
+        } else {
+            StradaHashEntry *e = &hv->entries[idx];
+            if (e->key->hash == hash && e->key->len == key_len && memcmp(e->key->data, key, key_len) == 0) {
+                strada_incref(sv);
+                strada_decref(e->value);
+                e->value = sv;
+                if (key_alloc) free(key_alloc);
+                return;
+            }
         }
-        idx = e->next;
+        pos = (pos + 1) & (hv->num_buckets - 1);
     }
 
-    /* New entry */
+    uint32_t insert_pos = (first_tombstone != HASH_EMPTY) ? first_tombstone : pos;
+    if (first_tombstone != HASH_EMPTY) hv->num_tombstones--;
     uint32_t slot = hash_get_slot(hv);
     StradaHashEntry *e = &hv->entries[slot];
-    e->key = ss_new(key, strlen(key), hash);
+    e->key = ss_new(key, key_len, hash);
     e->value = sv;
     strada_incref(sv);
-    e->next = hv->hash_index[bucket];
-    hv->hash_index[bucket] = slot;
+    hv->hash_index[insert_pos] = slot;
     hv->num_entries++;
 
-    if (hv->num_entries * 4 > hv->num_buckets * 3) {
+    if ((hv->num_entries + hv->num_tombstones) * 2 > hv->num_buckets) {
         strada_hash_resize(hv);
     }
     if (key_alloc) free(key_alloc);
@@ -2178,16 +2227,20 @@ StradaValue* strada_hash_get_sv(StradaHash *hv, StradaValue *key_sv) {
     if (!key) { if (key_alloc) free(key_alloc); return strada_undef_static(); }
 
     unsigned int hash = strada_hash_string(key);
-    unsigned int bucket = hash & (hv->num_buckets - 1);
+    uint32_t key_len = (uint32_t)strlen(key);
+    uint32_t pos = hash & (hv->num_buckets - 1);
 
-    uint32_t idx = hv->hash_index[bucket];
-    while (idx != HASH_EMPTY) {
-        StradaHashEntry *e = &hv->entries[idx];
-        if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
-            if (key_alloc) free(key_alloc);
-            return e->value;
+    while (1) {
+        uint32_t idx = hv->hash_index[pos];
+        if (idx == HASH_EMPTY) break;
+        if (idx != HASH_TOMBSTONE) {
+            StradaHashEntry *e = &hv->entries[idx];
+            if (e->key->hash == hash && e->key->len == key_len && memcmp(e->key->data, key, key_len) == 0) {
+                if (key_alloc) free(key_alloc);
+                return e->value;
+            }
         }
-        idx = e->next;
+        pos = (pos + 1) & (hv->num_buckets - 1);
     }
 
     if (key_alloc) free(key_alloc);
@@ -2201,16 +2254,20 @@ int strada_hash_exists_sv(StradaHash *hv, StradaValue *key_sv) {
     if (!key) { if (key_alloc) free(key_alloc); return 0; }
 
     unsigned int hash = strada_hash_string(key);
-    unsigned int bucket = hash & (hv->num_buckets - 1);
+    uint32_t key_len = (uint32_t)strlen(key);
+    uint32_t pos = hash & (hv->num_buckets - 1);
 
-    uint32_t idx = hv->hash_index[bucket];
-    while (idx != HASH_EMPTY) {
-        StradaHashEntry *e = &hv->entries[idx];
-        if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
-            if (key_alloc) free(key_alloc);
-            return 1;
+    while (1) {
+        uint32_t idx = hv->hash_index[pos];
+        if (idx == HASH_EMPTY) break;
+        if (idx != HASH_TOMBSTONE) {
+            StradaHashEntry *e = &hv->entries[idx];
+            if (e->key->hash == hash && e->key->len == key_len && memcmp(e->key->data, key, key_len) == 0) {
+                if (key_alloc) free(key_alloc);
+                return 1;
+            }
         }
-        idx = e->next;
+        pos = (pos + 1) & (hv->num_buckets - 1);
     }
 
     if (key_alloc) free(key_alloc);
@@ -2224,25 +2281,27 @@ void strada_hash_delete_sv(StradaHash *hv, StradaValue *key_sv) {
     if (!key) { if (key_alloc) free(key_alloc); return; }
 
     unsigned int hash = strada_hash_string(key);
-    unsigned int bucket = hash & (hv->num_buckets - 1);
+    uint32_t key_len = (uint32_t)strlen(key);
+    uint32_t pos = hash & (hv->num_buckets - 1);
 
-    uint32_t *prev = &hv->hash_index[bucket];
-    uint32_t idx = *prev;
-
-    while (idx != HASH_EMPTY) {
-        StradaHashEntry *e = &hv->entries[idx];
-        if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
-            *prev = e->next;
-            ss_decref(e->key);
-            strada_decref(e->value);
-            e->key = NULL; e->value = NULL;
-            e->next = hv->free_head; hv->free_head = idx;
-            hv->num_entries--;
-            if (key_alloc) free(key_alloc);
-            return;
+    while (1) {
+        uint32_t idx = hv->hash_index[pos];
+        if (idx == HASH_EMPTY) break;
+        if (idx != HASH_TOMBSTONE) {
+            StradaHashEntry *e = &hv->entries[idx];
+            if (e->key->hash == hash && e->key->len == key_len && memcmp(e->key->data, key, key_len) == 0) {
+                hv->hash_index[pos] = HASH_TOMBSTONE;
+                ss_decref(e->key);
+                strada_decref(e->value);
+                e->key = NULL; e->value = NULL;
+                e->next = hv->free_head; hv->free_head = idx;
+                hv->num_entries--;
+                hv->num_tombstones++;
+                if (key_alloc) free(key_alloc);
+                return;
+            }
         }
-        prev = &e->next;
-        idx = e->next;
+        pos = (pos + 1) & (hv->num_buckets - 1);
     }
     if (key_alloc) free(key_alloc);
 }
@@ -2290,7 +2349,13 @@ static size_t build_concat_key(
 
     size_t total = prefix_len + suffix_len;
     buf[total] = '\0';
-    *out_hash = strada_hash_string(buf);
+
+    /* Compute hash incrementally — hash prefix, then continue over suffix */
+    unsigned int hash = 5381;
+    for (size_t i = 0; i < total; i++) {
+        hash = ((hash << 5) + hash) + (unsigned char)buf[i];
+    }
+    *out_hash = hash;
 
     return total;
 }
@@ -2299,15 +2364,59 @@ static size_t build_concat_key(
 StradaValue* strada_hash_get_with_hash(StradaHash *hv, const char *key, unsigned int hash) {
     if (!hv || !key) return strada_undef_static();
 
-    unsigned int bucket = hash & (hv->num_buckets - 1);
-    uint32_t idx = hv->hash_index[bucket];
-    while (idx != HASH_EMPTY) {
-        StradaHashEntry *e = &hv->entries[idx];
-        if (e->key->hash == hash && strcmp(e->key->data, key) == 0)
-            return e->value;
-        idx = e->next;
+    uint32_t pos = hash & (hv->num_buckets - 1);
+    while (1) {
+        uint32_t idx = hv->hash_index[pos];
+        if (idx == HASH_EMPTY) return strada_undef_static();
+        if (idx != HASH_TOMBSTONE) {
+            StradaHashEntry *e = &hv->entries[idx];
+            if (e->key->hash == hash && strcmp(e->key->data, key) == 0)
+                return e->value;
+        }
+        pos = (pos + 1) & (hv->num_buckets - 1);
     }
-    return strada_undef_static();
+}
+
+/* Length-aware get: uses length check + memcmp for faster rejection */
+static inline StradaValue* strada_hash_get_with_hash_len(StradaHash *hv, const char *key, uint32_t key_len, unsigned int hash) {
+    if (!hv || !key) return strada_undef_static();
+
+    uint32_t pos = hash & (hv->num_buckets - 1);
+    while (1) {
+        uint32_t idx = hv->hash_index[pos];
+        if (idx == HASH_EMPTY) return strada_undef_static();
+        if (idx != HASH_TOMBSTONE) {
+            StradaHashEntry *e = &hv->entries[idx];
+            if (e->key->hash == hash && e->key->len == key_len && memcmp(e->key->data, key, key_len) == 0)
+                return e->value;
+        }
+        pos = (pos + 1) & (hv->num_buckets - 1);
+    }
+}
+
+/* Length-aware delete */
+static void strada_hash_delete_with_hash_len(StradaHash *hv, const char *key, uint32_t key_len, unsigned int hash) {
+    if (!hv || !key) return;
+
+    uint32_t pos = hash & (hv->num_buckets - 1);
+    while (1) {
+        uint32_t idx = hv->hash_index[pos];
+        if (idx == HASH_EMPTY) return;
+        if (idx != HASH_TOMBSTONE) {
+            StradaHashEntry *e = &hv->entries[idx];
+            if (e->key->hash == hash && e->key->len == key_len && memcmp(e->key->data, key, key_len) == 0) {
+                hv->hash_index[pos] = HASH_TOMBSTONE;
+                ss_decref(e->key);
+                strada_decref(e->value);
+                e->key = NULL; e->value = NULL;
+                e->next = hv->free_head; hv->free_head = idx;
+                hv->num_entries--;
+                hv->num_tombstones++;
+                return;
+            }
+        }
+        pos = (pos + 1) & (hv->num_buckets - 1);
+    }
 }
 
 /* Hash set with pre-computed hash (avoids re-hashing).
@@ -2315,29 +2424,74 @@ StradaValue* strada_hash_get_with_hash(StradaHash *hv, const char *key, unsigned
 static void strada_hash_set_with_hash(StradaHash *hv, const char *key, unsigned int hash, StradaValue *sv) {
     if (!hv || !key) return;
 
-    unsigned int bucket = hash & (hv->num_buckets - 1);
-    uint32_t idx = hv->hash_index[bucket];
-    while (idx != HASH_EMPTY) {
-        StradaHashEntry *e = &hv->entries[idx];
-        if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
-            strada_incref(sv);
-            strada_decref(e->value);
-            e->value = sv;
-            return;
+    uint32_t pos = hash & (hv->num_buckets - 1);
+    uint32_t first_tombstone = HASH_EMPTY;
+    while (1) {
+        uint32_t idx = hv->hash_index[pos];
+        if (idx == HASH_EMPTY) break;
+        if (idx == HASH_TOMBSTONE) {
+            if (first_tombstone == HASH_EMPTY) first_tombstone = pos;
+        } else {
+            StradaHashEntry *e = &hv->entries[idx];
+            if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
+                strada_incref(sv);
+                strada_decref(e->value);
+                e->value = sv;
+                return;
+            }
         }
-        idx = e->next;
+        pos = (pos + 1) & (hv->num_buckets - 1);
     }
 
+    uint32_t insert_pos = (first_tombstone != HASH_EMPTY) ? first_tombstone : pos;
+    if (first_tombstone != HASH_EMPTY) hv->num_tombstones--;
     uint32_t slot = hash_get_slot(hv);
     StradaHashEntry *e = &hv->entries[slot];
     e->key = ss_new(key, strlen(key), hash);
     e->value = sv;
     strada_incref(sv);
-    e->next = hv->hash_index[bucket];
-    hv->hash_index[bucket] = slot;
+    hv->hash_index[insert_pos] = slot;
     hv->num_entries++;
 
-    if (hv->num_entries * 4 > hv->num_buckets * 3) {
+    if ((hv->num_entries + hv->num_tombstones) * 2 > hv->num_buckets) {
+        strada_hash_resize(hv);
+    }
+}
+
+/* Length-aware hash set: avoids strlen, uses memcmp with fast length reject */
+static void strada_hash_set_with_hash_len(StradaHash *hv, const char *key, uint32_t key_len, unsigned int hash, StradaValue *sv) {
+    if (!hv || !key) return;
+
+    uint32_t pos = hash & (hv->num_buckets - 1);
+    uint32_t first_tombstone = HASH_EMPTY;
+    while (1) {
+        uint32_t idx = hv->hash_index[pos];
+        if (idx == HASH_EMPTY) break;
+        if (idx == HASH_TOMBSTONE) {
+            if (first_tombstone == HASH_EMPTY) first_tombstone = pos;
+        } else {
+            StradaHashEntry *e = &hv->entries[idx];
+            if (e->key->hash == hash && e->key->len == key_len && memcmp(e->key->data, key, key_len) == 0) {
+                strada_incref(sv);
+                strada_decref(e->value);
+                e->value = sv;
+                return;
+            }
+        }
+        pos = (pos + 1) & (hv->num_buckets - 1);
+    }
+
+    uint32_t insert_pos = (first_tombstone != HASH_EMPTY) ? first_tombstone : pos;
+    if (first_tombstone != HASH_EMPTY) hv->num_tombstones--;
+    uint32_t slot = hash_get_slot(hv);
+    StradaHashEntry *e = &hv->entries[slot];
+    e->key = ss_new(key, key_len, hash);
+    e->value = sv;
+    strada_incref(sv);
+    hv->hash_index[insert_pos] = slot;
+    hv->num_entries++;
+
+    if ((hv->num_entries + hv->num_tombstones) * 2 > hv->num_buckets) {
         strada_hash_resize(hv);
     }
 }
@@ -2346,23 +2500,24 @@ static void strada_hash_set_with_hash(StradaHash *hv, const char *key, unsigned 
 static void strada_hash_delete_with_hash(StradaHash *hv, const char *key, unsigned int hash) {
     if (!hv || !key) return;
 
-    unsigned int bucket = hash & (hv->num_buckets - 1);
-    uint32_t *prev = &hv->hash_index[bucket];
-    uint32_t idx = *prev;
-
-    while (idx != HASH_EMPTY) {
-        StradaHashEntry *e = &hv->entries[idx];
-        if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
-            *prev = e->next;
-            ss_decref(e->key);
-            strada_decref(e->value);
-            e->key = NULL; e->value = NULL;
-            e->next = hv->free_head; hv->free_head = idx;
-            hv->num_entries--;
-            return;
+    uint32_t pos = hash & (hv->num_buckets - 1);
+    while (1) {
+        uint32_t idx = hv->hash_index[pos];
+        if (idx == HASH_EMPTY) return;
+        if (idx != HASH_TOMBSTONE) {
+            StradaHashEntry *e = &hv->entries[idx];
+            if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
+                hv->hash_index[pos] = HASH_TOMBSTONE;
+                ss_decref(e->key);
+                strada_decref(e->value);
+                e->key = NULL; e->value = NULL;
+                e->next = hv->free_head; hv->free_head = idx;
+                hv->num_entries--;
+                hv->num_tombstones++;
+                return;
+            }
         }
-        prev = &e->next;
-        idx = e->next;
+        pos = (pos + 1) & (hv->num_buckets - 1);
     }
 }
 
@@ -2371,12 +2526,12 @@ StradaValue* strada_hv_fetch_owned_concat(StradaValue *sv, const char *prefix, s
     if (STRADA_IS_TAGGED_INT(sv)) return strada_undef_static();
     char key_buf[256];
     unsigned int hash;
-    build_concat_key(prefix, prefix_len, suffix, key_buf, sizeof(key_buf), &hash);
+    size_t key_len = build_concat_key(prefix, prefix_len, suffix, key_buf, sizeof(key_buf), &hash);
 
     if (__builtin_expect(sv->meta && sv->meta->is_tied, 0))
         return strada_tied_hash_fetch(sv, key_buf);
 
-    StradaValue *result = strada_hash_get_with_hash(strada_deref_hash(sv), key_buf, hash);
+    StradaValue *result = strada_hash_get_with_hash_len(strada_deref_hash(sv), key_buf, (uint32_t)key_len, hash);
     strada_incref(result);
     return result;
 }
@@ -2385,28 +2540,28 @@ void strada_hv_store_concat(StradaValue *sv, const char *prefix, size_t prefix_l
     if (STRADA_IS_TAGGED_INT(sv)) return;
     char key_buf[256];
     unsigned int hash;
-    build_concat_key(prefix, prefix_len, suffix, key_buf, sizeof(key_buf), &hash);
+    size_t key_len = build_concat_key(prefix, prefix_len, suffix, key_buf, sizeof(key_buf), &hash);
 
     if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) {
         strada_tied_hash_store(sv, key_buf, value);
         return;
     }
 
-    strada_hash_set_with_hash(strada_deref_hash(sv), key_buf, hash, value);
+    strada_hash_set_with_hash_len(strada_deref_hash(sv), key_buf, (uint32_t)key_len, hash, value);
 }
 
 void strada_hv_delete_concat(StradaValue *sv, const char *prefix, size_t prefix_len, StradaValue *suffix) {
     if (STRADA_IS_TAGGED_INT(sv)) return;
     char key_buf[256];
     unsigned int hash;
-    build_concat_key(prefix, prefix_len, suffix, key_buf, sizeof(key_buf), &hash);
+    size_t key_len = build_concat_key(prefix, prefix_len, suffix, key_buf, sizeof(key_buf), &hash);
 
     if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) {
         strada_tied_hash_delete(sv, key_buf);
         return;
     }
 
-    strada_hash_delete_with_hash(strada_deref_hash(sv), key_buf, hash);
+    strada_hash_delete_with_hash_len(strada_deref_hash(sv), key_buf, (uint32_t)key_len, hash);
 }
 
 StradaArray* strada_hash_keys(StradaHash *hv) {

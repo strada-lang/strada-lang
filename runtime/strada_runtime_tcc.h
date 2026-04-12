@@ -137,23 +137,25 @@ void ss_incref(StradaString *ss);
 void ss_decref_slow(StradaString *ss);
 #define ss_decref(ss) do { if ((ss) && --(ss)->refcount == 0) ss_decref_slow(ss); } while(0)
 
-/* Packed hash table */
-#define HASH_EMPTY UINT32_MAX
+/* Open-addressing hash table */
+#define HASH_EMPTY     UINT32_MAX
+#define HASH_TOMBSTONE (UINT32_MAX - 1)
 
 struct StradaHashEntry {
     StradaString *key;          /* NULL = free/deleted slot */
     StradaValue *value;
-    uint32_t next;
+    uint32_t next;              /* free list link */
 };
 
 /* Hash structure - like Perl's HV */
 struct StradaHash {
-    StradaHashEntry *entries;   /* contiguous entry array */
-    uint32_t *hash_index;       /* bucket -> first entry index (HASH_EMPTY = empty) */
+    StradaHashEntry *entries;   /* contiguous entry array (insertion order) */
+    uint32_t *hash_index;       /* open-addressing table */
     size_t num_buckets;         /* hash_index size (power of 2) */
     size_t num_entries;         /* live entries */
     size_t capacity;            /* allocated entries array size */
     size_t next_slot;           /* next append position */
+    size_t num_tombstones;      /* tombstone count in hash_index */
     uint32_t free_head;         /* internal free list head (HASH_EMPTY = none) */
     int refcount;
     size_t iter_index;          /* for each() */
