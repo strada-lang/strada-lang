@@ -1,0 +1,19 @@
+# Strada::Eval - eval() function with backend selection
+# Uses the current eval backend (vm or tree-walk).
+# Set backend via Strada::Interpreter::set_eval_backend("vm"|"tree-walk").
+
+package Strada::Interpreter;
+
+# eval(code) — uses the configured backend (default: vm)
+func eval(str $code) scalar {
+    return eval_auto($code);
+}
+
+# eval_with(code, backend) — explicitly choose backend per call
+# backend: "vm" or "tree-walk"
+func eval_with(str $code, str $backend) scalar {
+    if ($backend eq "vm") {
+        return eval_string_vm($code);
+    }
+    return eval_string($code);
+}
