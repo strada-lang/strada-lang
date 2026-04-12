@@ -108,10 +108,15 @@ func djb2_hash(str $input_str) int {
 }
 
 func djb2_hash_32(str $input_str) int {
-    my int $raw = djb2_hash($input_str);
-    # Truncate to 32 bits using bitwise AND with mask
-    # 0xFFFFFFFF = 4294967295
-    return $raw - (($raw / 4294967296) * 4294967296);
+    my int $h = 5381;
+    my int $idx = 0;
+    my int $slen = length($input_str);
+    while ($idx < $slen) {
+        my int $ch = char_at($input_str, $idx);
+        $h = (($h * 33) + $ch) % 4294967296;
+        $idx = $idx + 1;
+    }
+    return $h;
 }
 
 func codegen_new(str $filename, int $debug_info, int $enable_profiling, int $enable_stack_trace, int $full_profile) scalar {
@@ -11105,6 +11110,29 @@ func gen_expression(scalar $cg, scalar $expr) void {
         }
         if ($func_info && $func_info->{"param_count"} > 1) {
             $ctor_is_user_defined = 1;
+        }
+        # Auto-generated has constructors are variadic but should still be inlined
+        # Check if the package has has_attrs — if so, the constructor is auto-generated
+        if ($ctor_is_user_defined == 1) {
+            my int $cnl2 = length($c_name);
+            if ($cnl2 > 4 && substr($c_name, $cnl2 - 4, 4) eq "_new") {
+                my str $check_pkg2 = substr($c_name, 0, $cnl2 - 4);
+                my scalar $ha2 = $cg->{"has_attrs"};
+                my int $hac2 = $cg->{"has_attr_count"};
+                my int $hai2 = 0;
+                while ($hai2 < $hac2) {
+                    my str $ha_pkg = $ha2->[$hai2]->{"package"};
+                    my int $hp_col = index($ha_pkg, "::");
+                    while ($hp_col >= 0) {
+                        $ha_pkg = substr($ha_pkg, 0, $hp_col) . "_" . substr($ha_pkg, $hp_col + 2, length($ha_pkg) - $hp_col - 2);
+                        $hp_col = index($ha_pkg, "::");
+                    }
+                    if ($ha_pkg eq $check_pkg2) {
+                        $ctor_is_user_defined = 0;
+                    }
+                    $hai2 = $hai2 + 1;
+                }
+            }
         }
         if ($ctor_is_user_defined == 0 && $has_spread == 0 && $arg_count >= 2) {
             # Check if this is a ::new call with alternating literal keys
