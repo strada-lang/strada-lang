@@ -2419,45 +2419,6 @@ static void strada_hash_delete_with_hash_len(StradaHash *hv, const char *key, ui
     }
 }
 
-/* Hash set with pre-computed hash (avoids re-hashing).
- * Uses ss_new for key storage. */
-static void strada_hash_set_with_hash(StradaHash *hv, const char *key, unsigned int hash, StradaValue *sv) {
-    if (!hv || !key) return;
-
-    uint32_t pos = hash & (hv->num_buckets - 1);
-    uint32_t first_tombstone = HASH_EMPTY;
-    while (1) {
-        uint32_t idx = hv->hash_index[pos];
-        if (idx == HASH_EMPTY) break;
-        if (idx == HASH_TOMBSTONE) {
-            if (first_tombstone == HASH_EMPTY) first_tombstone = pos;
-        } else {
-            StradaHashEntry *e = &hv->entries[idx];
-            if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
-                strada_incref(sv);
-                strada_decref(e->value);
-                e->value = sv;
-                return;
-            }
-        }
-        pos = (pos + 1) & (hv->num_buckets - 1);
-    }
-
-    uint32_t insert_pos = (first_tombstone != HASH_EMPTY) ? first_tombstone : pos;
-    if (first_tombstone != HASH_EMPTY) hv->num_tombstones--;
-    uint32_t slot = hash_get_slot(hv);
-    StradaHashEntry *e = &hv->entries[slot];
-    e->key = ss_new(key, strlen(key), hash);
-    e->value = sv;
-    strada_incref(sv);
-    hv->hash_index[insert_pos] = slot;
-    hv->num_entries++;
-
-    if ((hv->num_entries + hv->num_tombstones) * 2 > hv->num_buckets) {
-        strada_hash_resize(hv);
-    }
-}
-
 /* Length-aware hash set: avoids strlen, uses memcmp with fast length reject */
 static void strada_hash_set_with_hash_len(StradaHash *hv, const char *key, uint32_t key_len, unsigned int hash, StradaValue *sv) {
     if (!hv || !key) return;
@@ -2493,31 +2454,6 @@ static void strada_hash_set_with_hash_len(StradaHash *hv, const char *key, uint3
 
     if ((hv->num_entries + hv->num_tombstones) * 2 > hv->num_buckets) {
         strada_hash_resize(hv);
-    }
-}
-
-/* Hash delete with pre-computed hash */
-static void strada_hash_delete_with_hash(StradaHash *hv, const char *key, unsigned int hash) {
-    if (!hv || !key) return;
-
-    uint32_t pos = hash & (hv->num_buckets - 1);
-    while (1) {
-        uint32_t idx = hv->hash_index[pos];
-        if (idx == HASH_EMPTY) return;
-        if (idx != HASH_TOMBSTONE) {
-            StradaHashEntry *e = &hv->entries[idx];
-            if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
-                hv->hash_index[pos] = HASH_TOMBSTONE;
-                ss_decref(e->key);
-                strada_decref(e->value);
-                e->key = NULL; e->value = NULL;
-                e->next = hv->free_head; hv->free_head = idx;
-                hv->num_entries--;
-                hv->num_tombstones++;
-                return;
-            }
-        }
-        pos = (pos + 1) & (hv->num_buckets - 1);
     }
 }
 
