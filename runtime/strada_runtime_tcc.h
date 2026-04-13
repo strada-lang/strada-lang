@@ -1165,7 +1165,7 @@ static inline StradaValue* strada_hv_fetch(StradaValue *sv, const char *key) {
 }
 StradaValue* strada_hash_get_with_hash(StradaHash *hv, const char *key, unsigned int hash);
 static inline StradaValue* strada_hv_fetch_owned(StradaValue *sv, const char *key) {
-    if (STRADA_IS_TAGGED_INT(sv)) return strada_undef_static();
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return strada_undef_static();
     if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) return strada_tied_hash_fetch(sv, key);
     StradaValue *result = strada_hash_get(strada_deref_hash(sv), key);
     strada_incref(result);
@@ -1180,7 +1180,7 @@ static inline StradaValue* strada_hv_fetch_owned_ph(StradaValue *sv, const char 
     return result;
 }
 static inline void strada_hv_store(StradaValue *sv, const char *key, StradaValue *val) {
-    if (STRADA_IS_TAGGED_INT(sv)) return;
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return;
     if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) { strada_tied_hash_store(sv, key, val); return; }
     strada_hash_set(strada_deref_hash(sv), key, val);
 }
