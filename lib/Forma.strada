@@ -409,7 +409,7 @@ func load(str $name) str {
     my str $path = $g_forma_dir . "/" . $name;
 
     # Check if file exists
-    if (sys::is_file($path) == 0) {
+    if (core::is_file($path) == 0) {
         return "";
     }
 
@@ -3218,7 +3218,7 @@ func helper_date_format(str $args, scalar $vars) str {
     # Get timestamp
     my int $ts = 0;
     if ($ts_str eq "now") {
-        $ts = sys::time();
+        $ts = core::time();
     } elsif (Forma::looks_like_number($ts_str)) {
         $ts = $ts_str + 0;
     } else {
@@ -3242,7 +3242,7 @@ func zero_pad(int $n, int $width) str {
 # Format a Unix timestamp according to format string
 func format_timestamp(int $ts, str $format) str {
     # Get time components using localtime (returns hash)
-    my scalar $t = sys::localtime($ts);
+    my scalar $t = core::localtime($ts);
     my int $sec = $t->{"sec"} + 0;
     my int $min = $t->{"min"} + 0;
     my int $hour = $t->{"hour"} + 0;
@@ -3368,7 +3368,7 @@ func helper_time_ago(str $ts_str, scalar $vars) str {
         $ts = $resolved + 0;
     }
 
-    my int $now = sys::time();
+    my int $now = core::time();
     my int $diff = $now - $ts;
 
     if ($diff < 0) {

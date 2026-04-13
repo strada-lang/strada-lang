@@ -434,7 +434,7 @@ enum BI {
     HASH_SET = 91, HASH_GET = 92, HASH_DELETE = 93, CAPTURE = 94,
     # Misc (95-99)
     DIE = 95, THROW_FN = 96, SLURP = 97, SPEW = 98, STRADA_NEW_UNDEF = 99,
-    # sys::/core:: (100-260)
+    # core::/core:: (100-260)
     SYS_EXIT = 100, SYS_GETENV = 101, SYS_SETENV = 102,
     SYS_TIME = 103, SYS_SLEEP = 104, SYS_HIRES_TIME = 105,
     SYS_OPEN = 110, SYS_CLOSE = 111, SYS_READLINE = 112,
@@ -811,302 +811,302 @@ func init_builtins(scalar $interp) void {
     $b{"BigFloat::_bf_pad_right"} = BI::BIGFLOAT_PAD_RIGHT;
     $b{"BigFloat::_bf_normalize"} = BI::BIGFLOAT_NORMALIZE;
     $b{"BigFloat::new"} = BI::BIGFLOAT_NEW; $b{"BigFloat_new"} = BI::BIGFLOAT_NEW;
-    # sys::/core:: functions (both prefixes map to same BI value)
-    $b{"sys::exit"} = BI::SYS_EXIT; $b{"core::exit"} = BI::SYS_EXIT;
-    $b{"sys::getenv"} = BI::SYS_GETENV; $b{"core::getenv"} = BI::SYS_GETENV;
-    $b{"sys::setenv"} = BI::SYS_SETENV; $b{"core::setenv"} = BI::SYS_SETENV;
-    $b{"sys::time"} = BI::SYS_TIME; $b{"core::time"} = BI::SYS_TIME;
-    $b{"sys::sleep"} = BI::SYS_SLEEP; $b{"core::sleep"} = BI::SYS_SLEEP;
-    $b{"sys::hires_time"} = BI::SYS_HIRES_TIME; $b{"core::hires_time"} = BI::SYS_HIRES_TIME;
-    $b{"sys::open"} = BI::SYS_OPEN; $b{"core::open"} = BI::SYS_OPEN;
-    $b{"sys::close"} = BI::SYS_CLOSE; $b{"core::close"} = BI::SYS_CLOSE;
-    $b{"sys::readline"} = BI::SYS_READLINE; $b{"core::readline"} = BI::SYS_READLINE;
-    $b{"sys::eof"} = BI::SYS_EOF; $b{"core::eof"} = BI::SYS_EOF;
-    $b{"sys::flush"} = BI::SYS_FLUSH; $b{"core::flush"} = BI::SYS_FLUSH;
-    $b{"sys::popen"} = BI::SYS_POPEN; $b{"core::popen"} = BI::SYS_POPEN;
-    $b{"sys::qx"} = BI::SYS_QX; $b{"core::qx"} = BI::SYS_QX;
-    $b{"sys::system"} = BI::SYS_SYSTEM; $b{"core::system"} = BI::SYS_SYSTEM;
-    $b{"sys::stack_trace"} = BI::SYS_STACK_TRACE; $b{"core::stack_trace"} = BI::SYS_STACK_TRACE;
-    $b{"sys::fwrite"} = BI::SYS_FWRITE; $b{"core::fwrite"} = BI::SYS_FWRITE;
-    $b{"sys::fread"} = BI::SYS_FREAD; $b{"core::fread"} = BI::SYS_FREAD;
-    $b{"sys::fputs"} = BI::SYS_FPUTS; $b{"core::fputs"} = BI::SYS_FPUTS;
-    $b{"sys::fgets"} = BI::SYS_FGETS; $b{"core::fgets"} = BI::SYS_FGETS;
-    $b{"sys::pclose"} = BI::SYS_PCLOSE; $b{"core::pclose"} = BI::SYS_PCLOSE;
-    $b{"sys::truncate"} = BI::SYS_TRUNCATE; $b{"core::truncate"} = BI::SYS_TRUNCATE;
-    $b{"sys::open_str"} = BI::SYS_OPEN_STR; $b{"core::open_str"} = BI::SYS_OPEN_STR;
-    $b{"sys::str_from_fh"} = BI::SYS_STR_FROM_FH; $b{"core::str_from_fh"} = BI::SYS_STR_FROM_FH;
-    $b{"sys::slurp"} = BI::SYS_SLURP; $b{"core::slurp"} = BI::SYS_SLURP;
-    $b{"sys::spew"} = BI::SYS_SPEW; $b{"core::spew"} = BI::SYS_SPEW;
-    $b{"sys::unlink"} = BI::SYS_UNLINK; $b{"core::unlink"} = BI::SYS_UNLINK;
-    $b{"sys::rename"} = BI::SYS_RENAME; $b{"core::rename"} = BI::SYS_RENAME;
-    $b{"sys::mkdir"} = BI::SYS_MKDIR; $b{"core::mkdir"} = BI::SYS_MKDIR;
-    $b{"sys::rmdir"} = BI::SYS_RMDIR; $b{"core::rmdir"} = BI::SYS_RMDIR;
-    $b{"sys::chmod"} = BI::SYS_CHMOD; $b{"core::chmod"} = BI::SYS_CHMOD;
-    $b{"sys::link"} = BI::SYS_LINK; $b{"core::link"} = BI::SYS_LINK;
-    $b{"sys::symlink"} = BI::SYS_SYMLINK; $b{"core::symlink"} = BI::SYS_SYMLINK;
-    $b{"sys::readlink"} = BI::SYS_READLINK; $b{"core::readlink"} = BI::SYS_READLINK;
-    $b{"sys::stat"} = BI::SYS_STAT; $b{"core::stat"} = BI::SYS_STAT;
-    $b{"sys::lstat"} = BI::SYS_LSTAT; $b{"core::lstat"} = BI::SYS_LSTAT;
-    $b{"sys::access"} = BI::SYS_ACCESS; $b{"core::access"} = BI::SYS_ACCESS;
-    $b{"sys::is_file"} = BI::SYS_IS_FILE; $b{"core::is_file"} = BI::SYS_IS_FILE;
-    $b{"sys::is_dir"} = BI::SYS_IS_DIR; $b{"core::is_dir"} = BI::SYS_IS_DIR;
-    $b{"sys::file_exists"} = BI::SYS_FILE_EXISTS; $b{"core::file_exists"} = BI::SYS_FILE_EXISTS;
-    $b{"sys::is_readable"} = BI::SYS_IS_READABLE; $b{"core::is_readable"} = BI::SYS_IS_READABLE;
-    $b{"sys::is_writable"} = BI::SYS_IS_WRITABLE; $b{"core::is_writable"} = BI::SYS_IS_WRITABLE;
-    $b{"sys::is_executable"} = BI::SYS_IS_EXECUTABLE; $b{"core::is_executable"} = BI::SYS_IS_EXECUTABLE;
-    $b{"sys::is_zero_size"} = BI::SYS_IS_ZERO_SIZE; $b{"core::is_zero_size"} = BI::SYS_IS_ZERO_SIZE;
-    $b{"sys::is_symlink"} = BI::SYS_IS_SYMLINK; $b{"core::is_symlink"} = BI::SYS_IS_SYMLINK;
-    $b{"sys::file_size"} = BI::SYS_FILE_SIZE; $b{"core::file_size"} = BI::SYS_FILE_SIZE;
-    $b{"sys::caller"} = BI::SYS_CALLER_INFO; $b{"core::caller"} = BI::SYS_CALLER_INFO;
-    $b{"sys::readdir"} = BI::SYS_READDIR; $b{"core::readdir"} = BI::SYS_READDIR;
-    $b{"sys::readdir_full"} = BI::SYS_READDIR_FULL; $b{"core::readdir_full"} = BI::SYS_READDIR_FULL;
-    $b{"sys::glob"} = BI::SYS_GLOB; $b{"core::glob"} = BI::SYS_GLOB;
-    $b{"sys::fnmatch"} = BI::SYS_FNMATCH; $b{"core::fnmatch"} = BI::SYS_FNMATCH;
-    $b{"sys::dirname"} = BI::SYS_DIRNAME; $b{"core::dirname"} = BI::SYS_DIRNAME;
-    $b{"sys::basename"} = BI::SYS_BASENAME; $b{"core::basename"} = BI::SYS_BASENAME;
-    $b{"sys::file_ext"} = BI::SYS_FILE_EXT; $b{"core::file_ext"} = BI::SYS_FILE_EXT;
-    $b{"sys::realpath"} = BI::SYS_REALPATH; $b{"core::realpath"} = BI::SYS_REALPATH;
-    $b{"sys::getcwd"} = BI::SYS_GETCWD; $b{"core::getcwd"} = BI::SYS_GETCWD;
-    $b{"sys::path_join"} = BI::SYS_PATH_JOIN; $b{"core::path_join"} = BI::SYS_PATH_JOIN;
-    $b{"sys::getpid"} = BI::SYS_GETPID; $b{"core::getpid"} = BI::SYS_GETPID;
-    $b{"sys::getppid"} = BI::SYS_GETPPID; $b{"core::getppid"} = BI::SYS_GETPPID;
-    $b{"sys::fork"} = BI::SYS_FORK; $b{"core::fork"} = BI::SYS_FORK;
-    $b{"sys::wait"} = BI::SYS_WAIT; $b{"core::wait"} = BI::SYS_WAIT;
-    $b{"sys::usleep"} = BI::SYS_USLEEP; $b{"core::usleep"} = BI::SYS_USLEEP;
-    $b{"sys::getprocname"} = BI::SYS_GETPROCNAME; $b{"core::getprocname"} = BI::SYS_GETPROCNAME;
-    $b{"sys::setprocname"} = BI::SYS_SETPROCNAME; $b{"core::setprocname"} = BI::SYS_SETPROCNAME;
-    $b{"sys::getproctitle"} = BI::SYS_GETPROCTITLE; $b{"core::getproctitle"} = BI::SYS_GETPROCTITLE;
-    $b{"sys::setproctitle"} = BI::SYS_SETPROCTITLE; $b{"core::setproctitle"} = BI::SYS_SETPROCTITLE;
-    $b{"sys::unsetenv"} = BI::SYS_UNSETENV; $b{"core::unsetenv"} = BI::SYS_UNSETENV;
-    $b{"sys::getuid"} = BI::SYS_GETUID; $b{"core::getuid"} = BI::SYS_GETUID;
-    $b{"sys::getgid"} = BI::SYS_GETGID; $b{"core::getgid"} = BI::SYS_GETGID;
-    $b{"sys::geteuid"} = BI::SYS_GETEUID; $b{"core::geteuid"} = BI::SYS_GETEUID;
-    $b{"sys::getegid"} = BI::SYS_GETEGID; $b{"core::getegid"} = BI::SYS_GETEGID;
-    $b{"sys::getpwuid"} = BI::SYS_GETPWUID; $b{"core::getpwuid"} = BI::SYS_GETPWUID;
-    $b{"sys::getpwnam"} = BI::SYS_GETPWNAM; $b{"core::getpwnam"} = BI::SYS_GETPWNAM;
-    $b{"sys::getgrgid"} = BI::SYS_GETGRGID; $b{"core::getgrgid"} = BI::SYS_GETGRGID;
-    $b{"sys::getgroups"} = BI::SYS_GETGROUPS; $b{"core::getgroups"} = BI::SYS_GETGROUPS;
-    $b{"sys::isatty"} = BI::SYS_ISATTY; $b{"core::isatty"} = BI::SYS_ISATTY;
-    $b{"sys::strerror"} = BI::SYS_STRERROR; $b{"core::strerror"} = BI::SYS_STRERROR;
-    $b{"sys::errno"} = BI::SYS_ERRNO; $b{"core::errno"} = BI::SYS_ERRNO;
-    $b{"sys::umask"} = BI::SYS_UMASK; $b{"core::umask"} = BI::SYS_UMASK;
-    $b{"sys::utime"} = BI::SYS_UTIME; $b{"core::utime"} = BI::SYS_UTIME;
-    $b{"sys::free"} = BI::SYS_FREE; $b{"core::free"} = BI::SYS_FREE;
-    $b{"sys::release"} = BI::SYS_RELEASE; $b{"core::release"} = BI::SYS_RELEASE;
-    $b{"sys::gethostname"} = BI::SYS_GETHOSTNAME; $b{"core::gethostname"} = BI::SYS_GETHOSTNAME;
-    $b{"sys::gethostbyname"} = BI::SYS_GETHOSTBYNAME; $b{"core::gethostbyname"} = BI::SYS_GETHOSTBYNAME;
-    $b{"sys::gethostbyname_all"} = BI::SYS_GETHOSTBYNAME_ALL; $b{"core::gethostbyname_all"} = BI::SYS_GETHOSTBYNAME_ALL;
-    $b{"sys::getaddrinfo"} = BI::SYS_GETADDRINFO; $b{"core::getaddrinfo"} = BI::SYS_GETADDRINFO;
-    $b{"sys::inet_addr"} = BI::SYS_INET_ADDR; $b{"core::inet_addr"} = BI::SYS_INET_ADDR;
-    $b{"sys::inet_ntoa"} = BI::SYS_INET_NTOA; $b{"core::inet_ntoa"} = BI::SYS_INET_NTOA;
-    $b{"sys::htons"} = BI::SYS_HTONS; $b{"core::htons"} = BI::SYS_HTONS;
-    $b{"sys::ntohs"} = BI::SYS_NTOHS; $b{"core::ntohs"} = BI::SYS_NTOHS;
-    $b{"sys::htonl"} = BI::SYS_HTONL; $b{"core::htonl"} = BI::SYS_HTONL;
-    $b{"sys::ntohl"} = BI::SYS_NTOHL; $b{"core::ntohl"} = BI::SYS_NTOHL;
-    $b{"sys::inet_pton"} = BI::SYS_INET_PTON; $b{"core::inet_pton"} = BI::SYS_INET_PTON;
-    $b{"sys::inet_ntop"} = BI::SYS_INET_NTOP; $b{"core::inet_ntop"} = BI::SYS_INET_NTOP;
-    $b{"sys::socket_server"} = BI::SYS_SOCKET_SERVER; $b{"core::socket_server"} = BI::SYS_SOCKET_SERVER;
-    $b{"sys::socket_fd"} = BI::SYS_SOCKET_FD; $b{"core::socket_fd"} = BI::SYS_SOCKET_FD;
-    $b{"sys::socket_close"} = BI::SYS_SOCKET_CLOSE; $b{"core::socket_close"} = BI::SYS_SOCKET_CLOSE;
-    $b{"sys::socket_select"} = BI::SYS_SOCKET_SELECT; $b{"core::socket_select"} = BI::SYS_SOCKET_SELECT;
-    $b{"sys::dl_open"} = BI::SYS_DL_OPEN; $b{"core::dl_open"} = BI::SYS_DL_OPEN;
-    $b{"sys::dl_sym"} = BI::SYS_DL_SYM; $b{"core::dl_sym"} = BI::SYS_DL_SYM;
-    $b{"sys::dl_close"} = BI::SYS_DL_CLOSE; $b{"core::dl_close"} = BI::SYS_DL_CLOSE;
-    $b{"sys::dl_error"} = BI::SYS_DL_ERROR; $b{"core::dl_error"} = BI::SYS_DL_ERROR;
-    $b{"sys::dl_call_num"} = BI::SYS_DL_CALL_NUM; $b{"core::dl_call_num"} = BI::SYS_DL_CALL_NUM;
-    $b{"sys::dl_call_int"} = BI::SYS_DL_CALL_INT; $b{"core::dl_call_int"} = BI::SYS_DL_CALL_INT;
-    $b{"sys::int_ptr"} = BI::SYS_INT_PTR; $b{"core::int_ptr"} = BI::SYS_INT_PTR;
-    $b{"sys::num_ptr"} = BI::SYS_NUM_PTR; $b{"core::num_ptr"} = BI::SYS_NUM_PTR;
-    $b{"sys::ptr_deref_int"} = BI::SYS_PTR_DEREF_INT; $b{"core::ptr_deref_int"} = BI::SYS_PTR_DEREF_INT;
-    $b{"sys::ptr_deref_num"} = BI::SYS_PTR_DEREF_NUM; $b{"core::ptr_deref_num"} = BI::SYS_PTR_DEREF_NUM;
-    $b{"sys::ptr_set_int"} = BI::SYS_PTR_SET_INT; $b{"core::ptr_set_int"} = BI::SYS_PTR_SET_INT;
-    $b{"sys::ptr_set_num"} = BI::SYS_PTR_SET_NUM; $b{"core::ptr_set_num"} = BI::SYS_PTR_SET_NUM;
-    $b{"sys::getpgrp"} = BI::SYS_GETPGRP; $b{"core::getpgrp"} = BI::SYS_GETPGRP;
-    $b{"sys::getsid"} = BI::SYS_GETSID; $b{"core::getsid"} = BI::SYS_GETSID;
-    $b{"sys::getpgid"} = BI::SYS_GETPGID; $b{"core::getpgid"} = BI::SYS_GETPGID;
-    $b{"sys::nice"} = BI::SYS_NICE; $b{"core::nice"} = BI::SYS_NICE;
-    $b{"sys::getpriority"} = BI::SYS_GETPRIORITY; $b{"core::getpriority"} = BI::SYS_GETPRIORITY;
-    $b{"sys::getrusage"} = BI::SYS_GETRUSAGE; $b{"core::getrusage"} = BI::SYS_GETRUSAGE;
-    $b{"sys::getrlimit"} = BI::SYS_GETRLIMIT; $b{"core::getrlimit"} = BI::SYS_GETRLIMIT;
-    $b{"sys::times"} = BI::SYS_TIMES; $b{"core::times"} = BI::SYS_TIMES;
-    $b{"sys::clock"} = BI::SYS_CLOCK; $b{"core::clock"} = BI::SYS_CLOCK;
-    $b{"sys::mkstemp"} = BI::SYS_MKSTEMP; $b{"core::mkstemp"} = BI::SYS_MKSTEMP;
-    $b{"sys::mkdtemp"} = BI::SYS_MKDTEMP; $b{"core::mkdtemp"} = BI::SYS_MKDTEMP;
-    $b{"sys::statvfs"} = BI::SYS_STATVFS; $b{"core::statvfs"} = BI::SYS_STATVFS;
-    $b{"sys::atoi"} = BI::SYS_ATOI; $b{"core::atoi"} = BI::SYS_ATOI;
-    $b{"sys::atof"} = BI::SYS_ATOF; $b{"core::atof"} = BI::SYS_ATOF;
-    $b{"sys::strtol"} = BI::SYS_STRTOL; $b{"core::strtol"} = BI::SYS_STRTOL;
-    $b{"sys::difftime"} = BI::SYS_DIFFTIME; $b{"core::difftime"} = BI::SYS_DIFFTIME;
-    $b{"sys::srand"} = BI::SYS_SRAND; $b{"core::srand"} = BI::SYS_SRAND;
-    $b{"sys::rand"} = BI::SYS_RAND; $b{"core::rand"} = BI::SYS_RAND;
-    $b{"sys::srandom"} = BI::SYS_SRANDOM; $b{"core::srandom"} = BI::SYS_SRANDOM;
-    $b{"sys::random"} = BI::SYS_RANDOM; $b{"core::random"} = BI::SYS_RANDOM;
-    $b{"sys::seek"} = BI::SYS_SEEK; $b{"core::seek"} = BI::SYS_SEEK;
-    $b{"sys::tell"} = BI::SYS_TELL; $b{"core::tell"} = BI::SYS_TELL;
-    $b{"sys::rewind"} = BI::SYS_REWIND; $b{"core::rewind"} = BI::SYS_REWIND;
-    $b{"sys::weaken"} = BI::SYS_WEAKEN; $b{"core::weaken"} = BI::SYS_WEAKEN;
-    $b{"sys::isweak"} = BI::SYS_ISWEAK; $b{"core::isweak"} = BI::SYS_ISWEAK;
-    $b{"sys::wantscalar"} = BI::SYS_WANTSCALAR; $b{"core::wantscalar"} = BI::SYS_WANTSCALAR;
-    $b{"sys::wantarray"} = BI::SYS_WANTARRAY; $b{"core::wantarray"} = BI::SYS_WANTARRAY;
-    $b{"sys::wanthash"} = BI::SYS_WANTHASH; $b{"core::wanthash"} = BI::SYS_WANTHASH;
-    $b{"sys::global_set"} = BI::SYS_GLOBAL_SET; $b{"core::global_set"} = BI::SYS_GLOBAL_SET;
-    $b{"sys::global_get"} = BI::SYS_GLOBAL_GET; $b{"core::global_get"} = BI::SYS_GLOBAL_GET;
-    $b{"sys::global_exists"} = BI::SYS_GLOBAL_EXISTS; $b{"core::global_exists"} = BI::SYS_GLOBAL_EXISTS;
-    $b{"sys::global_delete"} = BI::SYS_GLOBAL_DELETE; $b{"core::global_delete"} = BI::SYS_GLOBAL_DELETE;
-    $b{"sys::global_keys"} = BI::SYS_GLOBAL_KEYS; $b{"core::global_keys"} = BI::SYS_GLOBAL_KEYS;
-    $b{"sys::_exit"} = BI::SYS_EXIT_NOCLEAN; $b{"core::_exit"} = BI::SYS_EXIT_NOCLEAN;
-    $b{"sys::signal"} = BI::SYS_SIGNAL; $b{"core::signal"} = BI::SYS_SIGNAL;
-    $b{"sys::get_recursion_limit"} = BI::SYS_GET_RECURSION_LIMIT; $b{"core::get_recursion_limit"} = BI::SYS_GET_RECURSION_LIMIT;
-    $b{"sys::set_recursion_limit"} = BI::SYS_SET_RECURSION_LIMIT; $b{"core::set_recursion_limit"} = BI::SYS_SET_RECURSION_LIMIT;
-    $b{"sys::pack"} = BI::SYS_PACK; $b{"core::pack"} = BI::SYS_PACK;
-    $b{"sys::unpack"} = BI::SYS_UNPACK; $b{"core::unpack"} = BI::SYS_UNPACK;
-    $b{"sys::ord_byte"} = BI::SYS_ORD_BYTE; $b{"core::ord_byte"} = BI::SYS_ORD_BYTE;
-    $b{"sys::get_byte"} = BI::SYS_GET_BYTE; $b{"core::get_byte"} = BI::SYS_GET_BYTE;
-    $b{"sys::byte_length"} = BI::SYS_BYTE_LENGTH; $b{"core::byte_length"} = BI::SYS_BYTE_LENGTH;
-    $b{"sys::base64_encode"} = BI::SYS_BASE64_ENCODE; $b{"core::base64_encode"} = BI::SYS_BASE64_ENCODE;
-    $b{"sys::base64_decode"} = BI::SYS_BASE64_DECODE; $b{"core::base64_decode"} = BI::SYS_BASE64_DECODE;
-    $b{"sys::hex_encode"} = BI::SYS_HEX_ENCODE; $b{"core::hex_encode"} = BI::SYS_HEX_ENCODE;
-    $b{"sys::hex_decode"} = BI::SYS_HEX_DECODE; $b{"core::hex_decode"} = BI::SYS_HEX_DECODE;
-    $b{"sys::chroot"} = BI::SYS_CHROOT; $b{"core::chroot"} = BI::SYS_CHROOT;
-    $b{"sys::setsid"} = BI::SYS_SETSID; $b{"core::setsid"} = BI::SYS_SETSID;
-    $b{"sys::setgid"} = BI::SYS_SETGID; $b{"core::setgid"} = BI::SYS_SETGID;
-    $b{"sys::setuid"} = BI::SYS_SETUID; $b{"core::setuid"} = BI::SYS_SETUID;
-    $b{"sys::pipe"} = BI::SYS_PIPE; $b{"core::pipe"} = BI::SYS_PIPE;
-    $b{"sys::dup2"} = BI::SYS_DUP2; $b{"core::dup2"} = BI::SYS_DUP2;
-    $b{"sys::select_fd"} = BI::SYS_SELECT_FD; $b{"core::select_fd"} = BI::SYS_SELECT_FD;
-    $b{"sys::hash_default_capacity"} = BI::SYS_HASH_DEFAULT_CAPACITY; $b{"core::hash_default_capacity"} = BI::SYS_HASH_DEFAULT_CAPACITY;
-    $b{"sys::array_reserve"} = BI::SYS_ARRAY_RESERVE; $b{"core::array_reserve"} = BI::SYS_ARRAY_RESERVE;
-    $b{"sys::chdir"} = BI::SYS_CHDIR; $b{"core::chdir"} = BI::SYS_CHDIR;
-    $b{"sys::chown"} = BI::SYS_CHOWN; $b{"core::chown"} = BI::SYS_CHOWN;
-    $b{"sys::localtime"} = BI::SYS_LOCALTIME; $b{"core::localtime"} = BI::SYS_LOCALTIME;
-    $b{"sys::gmtime"} = BI::SYS_GMTIME; $b{"core::gmtime"} = BI::SYS_GMTIME;
-    $b{"sys::strftime"} = BI::SYS_STRFTIME; $b{"core::strftime"} = BI::SYS_STRFTIME;
-    $b{"sys::kill"} = BI::SYS_KILL; $b{"core::kill"} = BI::SYS_KILL;
-    $b{"sys::exec"} = BI::SYS_EXEC; $b{"core::exec"} = BI::SYS_EXEC;
-    $b{"sys::waitpid"} = BI::SYS_WAITPID; $b{"core::waitpid"} = BI::SYS_WAITPID;
-    $b{"sys::alarm"} = BI::SYS_ALARM; $b{"core::alarm"} = BI::SYS_ALARM;
-    $b{"sys::hex"} = BI::HEX; $b{"core::hex"} = BI::HEX;
-    $b{"sys::byte_substr"} = BI::SYS_BYTE_SUBSTR; $b{"core::byte_substr"} = BI::SYS_BYTE_SUBSTR;
-    $b{"sys::calloc"} = BI::SYS_CALLOC; $b{"core::calloc"} = BI::SYS_CALLOC;
-    $b{"sys::cfgetispeed"} = BI::SYS_CFGETISPEED; $b{"core::cfgetispeed"} = BI::SYS_CFGETISPEED;
-    $b{"sys::cfgetospeed"} = BI::SYS_CFGETOSPEED; $b{"core::cfgetospeed"} = BI::SYS_CFGETOSPEED;
-    $b{"sys::cfsetispeed"} = BI::SYS_CFSETISPEED; $b{"core::cfsetispeed"} = BI::SYS_CFSETISPEED;
-    $b{"sys::cfsetospeed"} = BI::SYS_CFSETOSPEED; $b{"core::cfsetospeed"} = BI::SYS_CFSETOSPEED;
-    $b{"sys::clearerr"} = BI::SYS_CLEARERR; $b{"core::clearerr"} = BI::SYS_CLEARERR;
-    $b{"sys::clock_getres"} = BI::SYS_CLOCK_GETRES; $b{"core::clock_getres"} = BI::SYS_CLOCK_GETRES;
-    $b{"sys::clock_gettime"} = BI::SYS_CLOCK_GETTIME; $b{"core::clock_gettime"} = BI::SYS_CLOCK_GETTIME;
-    $b{"sys::close_fd"} = BI::SYS_CLOSE_FD; $b{"core::close_fd"} = BI::SYS_CLOSE_FD;
-    $b{"sys::closedir"} = BI::SYS_CLOSEDIR; $b{"core::closedir"} = BI::SYS_CLOSEDIR;
-    $b{"sys::cstruct_get_double"} = BI::SYS_CSTRUCT_GET_DOUBLE; $b{"core::cstruct_get_double"} = BI::SYS_CSTRUCT_GET_DOUBLE;
-    $b{"sys::cstruct_get_int"} = BI::SYS_CSTRUCT_GET_INT; $b{"core::cstruct_get_int"} = BI::SYS_CSTRUCT_GET_INT;
-    $b{"sys::cstruct_get_string"} = BI::SYS_CSTRUCT_GET_STRING; $b{"core::cstruct_get_string"} = BI::SYS_CSTRUCT_GET_STRING;
-    $b{"sys::cstruct_new"} = BI::SYS_CSTRUCT_NEW; $b{"core::cstruct_new"} = BI::SYS_CSTRUCT_NEW;
-    $b{"sys::cstruct_ptr"} = BI::SYS_CSTRUCT_PTR; $b{"core::cstruct_ptr"} = BI::SYS_CSTRUCT_PTR;
-    $b{"sys::cstruct_set_double"} = BI::SYS_CSTRUCT_SET_DOUBLE; $b{"core::cstruct_set_double"} = BI::SYS_CSTRUCT_SET_DOUBLE;
-    $b{"sys::cstruct_set_int"} = BI::SYS_CSTRUCT_SET_INT; $b{"core::cstruct_set_int"} = BI::SYS_CSTRUCT_SET_INT;
-    $b{"sys::cstruct_set_string"} = BI::SYS_CSTRUCT_SET_STRING; $b{"core::cstruct_set_string"} = BI::SYS_CSTRUCT_SET_STRING;
-    $b{"sys::ctime"} = BI::SYS_CTIME; $b{"core::ctime"} = BI::SYS_CTIME;
-    $b{"sys::dl_call_export_info"} = BI::SYS_DL_CALL_EXPORT_INFO; $b{"core::dl_call_export_info"} = BI::SYS_DL_CALL_EXPORT_INFO;
-    $b{"sys::dl_call_int_sv"} = BI::SYS_DL_CALL_INT_SV; $b{"core::dl_call_int_sv"} = BI::SYS_DL_CALL_INT_SV;
-    $b{"sys::dl_call_str"} = BI::SYS_DL_CALL_STR; $b{"core::dl_call_str"} = BI::SYS_DL_CALL_STR;
-    $b{"sys::dl_call_str_sv"} = BI::SYS_DL_CALL_STR_SV; $b{"core::dl_call_str_sv"} = BI::SYS_DL_CALL_STR_SV;
-    $b{"sys::dl_call_sv"} = BI::SYS_DL_CALL_SV; $b{"core::dl_call_sv"} = BI::SYS_DL_CALL_SV;
-    $b{"sys::dl_call_version"} = BI::SYS_DL_CALL_VERSION; $b{"core::dl_call_version"} = BI::SYS_DL_CALL_VERSION;
-    $b{"sys::dl_call_void"} = BI::SYS_DL_CALL_VOID; $b{"core::dl_call_void"} = BI::SYS_DL_CALL_VOID;
-    $b{"sys::dl_call_void_sv"} = BI::SYS_DL_CALL_VOID_SV; $b{"core::dl_call_void_sv"} = BI::SYS_DL_CALL_VOID_SV;
-    $b{"sys::dup"} = BI::SYS_DUP; $b{"core::dup"} = BI::SYS_DUP;
-    $b{"sys::exit_status"} = BI::SYS_EXIT_STATUS; $b{"core::exit_status"} = BI::SYS_EXIT_STATUS;
-    $b{"sys::fchmod"} = BI::SYS_FCHMOD; $b{"core::fchmod"} = BI::SYS_FCHMOD;
-    $b{"sys::fchown"} = BI::SYS_FCHOWN; $b{"core::fchown"} = BI::SYS_FCHOWN;
-    $b{"sys::fcntl"} = BI::SYS_FCNTL; $b{"core::fcntl"} = BI::SYS_FCNTL;
-    $b{"sys::ferror"} = BI::SYS_FERROR; $b{"core::ferror"} = BI::SYS_FERROR;
-    $b{"sys::fgetc"} = BI::SYS_FGETC; $b{"core::fgetc"} = BI::SYS_FGETC;
-    $b{"sys::fileno"} = BI::SYS_FILENO; $b{"core::fileno"} = BI::SYS_FILENO;
-    $b{"sys::flock"} = BI::SYS_FLOCK; $b{"core::flock"} = BI::SYS_FLOCK;
-    $b{"sys::fputc"} = BI::SYS_FPUTC; $b{"core::fputc"} = BI::SYS_FPUTC;
-    $b{"sys::fstatvfs"} = BI::SYS_FSTATVFS; $b{"core::fstatvfs"} = BI::SYS_FSTATVFS;
-    $b{"sys::ftruncate"} = BI::SYS_FTRUNCATE; $b{"core::ftruncate"} = BI::SYS_FTRUNCATE;
-    $b{"sys::full_profile_start"} = BI::SYS_FULL_PROFILE_START; $b{"core::full_profile_start"} = BI::SYS_FULL_PROFILE_START;
-    $b{"sys::full_profile_stop"} = BI::SYS_FULL_PROFILE_STOP; $b{"core::full_profile_stop"} = BI::SYS_FULL_PROFILE_STOP;
-    $b{"sys::getgrnam"} = BI::SYS_GETGRNAM; $b{"core::getgrnam"} = BI::SYS_GETGRNAM;
-    $b{"sys::getlogin"} = BI::SYS_GETLOGIN; $b{"core::getlogin"} = BI::SYS_GETLOGIN;
-    $b{"sys::getpeername"} = BI::SYS_GETPEERNAME; $b{"core::getpeername"} = BI::SYS_GETPEERNAME;
-    $b{"sys::getsockname"} = BI::SYS_GETSOCKNAME; $b{"core::getsockname"} = BI::SYS_GETSOCKNAME;
-    $b{"sys::getsockopt"} = BI::SYS_GETSOCKOPT; $b{"core::getsockopt"} = BI::SYS_GETSOCKOPT;
-    $b{"sys::gettimeofday"} = BI::SYS_GETTIMEOFDAY; $b{"core::gettimeofday"} = BI::SYS_GETTIMEOFDAY;
-    $b{"sys::ioctl"} = BI::SYS_IOCTL; $b{"core::ioctl"} = BI::SYS_IOCTL;
-    $b{"sys::killpg"} = BI::SYS_KILLPG; $b{"core::killpg"} = BI::SYS_KILLPG;
-    $b{"sys::lchown"} = BI::SYS_LCHOWN; $b{"core::lchown"} = BI::SYS_LCHOWN;
-    $b{"sys::memprof_disable"} = BI::SYS_MEMPROF_DISABLE; $b{"core::memprof_disable"} = BI::SYS_MEMPROF_DISABLE;
-    $b{"sys::memprof_enable"} = BI::SYS_MEMPROF_ENABLE; $b{"core::memprof_enable"} = BI::SYS_MEMPROF_ENABLE;
-    $b{"sys::memprof_report"} = BI::SYS_MEMPROF_REPORT; $b{"core::memprof_report"} = BI::SYS_MEMPROF_REPORT;
-    $b{"sys::memprof_reset"} = BI::SYS_MEMPROF_RESET; $b{"core::memprof_reset"} = BI::SYS_MEMPROF_RESET;
-    $b{"sys::mktime"} = BI::SYS_MKTIME; $b{"core::mktime"} = BI::SYS_MKTIME;
-    $b{"sys::mlock"} = BI::SYS_MLOCK; $b{"core::mlock"} = BI::SYS_MLOCK;
-    $b{"sys::mmap"} = BI::SYS_MMAP; $b{"core::mmap"} = BI::SYS_MMAP;
-    $b{"sys::munlock"} = BI::SYS_MUNLOCK; $b{"core::munlock"} = BI::SYS_MUNLOCK;
-    $b{"sys::munmap"} = BI::SYS_MUNMAP; $b{"core::munmap"} = BI::SYS_MUNMAP;
-    $b{"sys::nanosleep"} = BI::SYS_NANOSLEEP; $b{"core::nanosleep"} = BI::SYS_NANOSLEEP;
-    $b{"sys::open_fd"} = BI::SYS_OPEN_FD; $b{"core::open_fd"} = BI::SYS_OPEN_FD;
-    $b{"sys::opendir"} = BI::SYS_OPENDIR; $b{"core::opendir"} = BI::SYS_OPENDIR;
-    $b{"sys::pause"} = BI::SYS_PAUSE; $b{"core::pause"} = BI::SYS_PAUSE;
-    $b{"sys::poll"} = BI::SYS_POLL; $b{"core::poll"} = BI::SYS_POLL;
-    $b{"sys::ptr_deref_str"} = BI::SYS_PTR_DEREF_STR; $b{"core::ptr_deref_str"} = BI::SYS_PTR_DEREF_STR;
-    $b{"sys::quotemeta"} = BI::SYS_QUOTEMETA; $b{"core::quotemeta"} = BI::SYS_QUOTEMETA;
-    $b{"sys::raise"} = BI::SYS_RAISE; $b{"core::raise"} = BI::SYS_RAISE;
-    $b{"sys::random_bytes"} = BI::SYS_RANDOM_BYTES; $b{"core::random_bytes"} = BI::SYS_RANDOM_BYTES;
-    $b{"sys::random_bytes_hex"} = BI::SYS_RANDOM_BYTES_HEX; $b{"core::random_bytes_hex"} = BI::SYS_RANDOM_BYTES_HEX;
-    $b{"sys::read_all_fd"} = BI::SYS_READ_ALL_FD; $b{"core::read_all_fd"} = BI::SYS_READ_ALL_FD;
-    $b{"sys::read_byte"} = BI::SYS_READ_BYTE; $b{"core::read_byte"} = BI::SYS_READ_BYTE;
-    $b{"sys::read_fd"} = BI::SYS_READ_FD; $b{"core::read_fd"} = BI::SYS_READ_FD;
-    $b{"sys::readdir_next"} = BI::SYS_READDIR_NEXT; $b{"core::readdir_next"} = BI::SYS_READDIR_NEXT;
-    $b{"sys::realloc"} = BI::SYS_REALLOC; $b{"core::realloc"} = BI::SYS_REALLOC;
-    $b{"sys::select_fds"} = BI::SYS_SELECT_FDS; $b{"core::select_fds"} = BI::SYS_SELECT_FDS;
-    $b{"sys::serial_open"} = BI::SYS_SERIAL_OPEN; $b{"core::serial_open"} = BI::SYS_SERIAL_OPEN;
-    $b{"sys::set_byte"} = BI::SYS_SET_BYTE; $b{"core::set_byte"} = BI::SYS_SET_BYTE;
-    $b{"sys::setegid"} = BI::SYS_SETEGID; $b{"core::setegid"} = BI::SYS_SETEGID;
-    $b{"sys::seteuid"} = BI::SYS_SETEUID; $b{"core::seteuid"} = BI::SYS_SETEUID;
-    $b{"sys::setpgid"} = BI::SYS_SETPGID; $b{"core::setpgid"} = BI::SYS_SETPGID;
-    $b{"sys::setpgrp"} = BI::SYS_SETPGRP; $b{"core::setpgrp"} = BI::SYS_SETPGRP;
-    $b{"sys::setpriority"} = BI::SYS_SETPRIORITY; $b{"core::setpriority"} = BI::SYS_SETPRIORITY;
-    $b{"sys::setregid"} = BI::SYS_SETREGID; $b{"core::setregid"} = BI::SYS_SETREGID;
-    $b{"sys::setreuid"} = BI::SYS_SETREUID; $b{"core::setreuid"} = BI::SYS_SETREUID;
-    $b{"sys::setrlimit"} = BI::SYS_SETRLIMIT; $b{"core::setrlimit"} = BI::SYS_SETRLIMIT;
-    $b{"sys::setsockopt"} = BI::SYS_SETSOCKOPT; $b{"core::setsockopt"} = BI::SYS_SETSOCKOPT;
-    $b{"sys::shutdown"} = BI::SYS_SHUTDOWN; $b{"core::shutdown"} = BI::SYS_SHUTDOWN;
-    $b{"sys::sigprocmask"} = BI::SYS_SIGPROCMASK; $b{"core::sigprocmask"} = BI::SYS_SIGPROCMASK;
-    $b{"sys::slurp_fd"} = BI::SYS_SLURP_FD; $b{"core::slurp_fd"} = BI::SYS_SLURP_FD;
-    $b{"sys::slurp_fh"} = BI::SYS_SLURP_FH; $b{"core::slurp_fh"} = BI::SYS_SLURP_FH;
-    $b{"sys::socket_accept"} = BI::SYS_SOCKET_ACCEPT; $b{"core::socket_accept"} = BI::SYS_SOCKET_ACCEPT;
-    $b{"sys::socket_client"} = BI::SYS_SOCKET_CLIENT; $b{"core::socket_client"} = BI::SYS_SOCKET_CLIENT;
-    $b{"sys::socket_flush"} = BI::SYS_SOCKET_FLUSH; $b{"core::socket_flush"} = BI::SYS_SOCKET_FLUSH;
-    $b{"sys::socket_recv"} = BI::SYS_SOCKET_RECV; $b{"core::socket_recv"} = BI::SYS_SOCKET_RECV;
-    $b{"sys::socket_send"} = BI::SYS_SOCKET_SEND; $b{"core::socket_send"} = BI::SYS_SOCKET_SEND;
-    $b{"sys::socket_server_backlog"} = BI::SYS_SOCKET_SERVER_BACKLOG; $b{"core::socket_server_backlog"} = BI::SYS_SOCKET_SERVER_BACKLOG;
-    $b{"sys::socket_set_nonblocking"} = BI::SYS_SOCKET_SET_NONBLOCKING; $b{"core::socket_set_nonblocking"} = BI::SYS_SOCKET_SET_NONBLOCKING;
-    $b{"sys::spew_fd"} = BI::SYS_SPEW_FD; $b{"core::spew_fd"} = BI::SYS_SPEW_FD;
-    $b{"sys::spew_fh"} = BI::SYS_SPEW_FH; $b{"core::spew_fh"} = BI::SYS_SPEW_FH;
-    $b{"sys::str_ptr"} = BI::SYS_STR_PTR; $b{"core::str_ptr"} = BI::SYS_STR_PTR;
-    $b{"sys::strtod"} = BI::SYS_STRTOD; $b{"core::strtod"} = BI::SYS_STRTOD;
-    $b{"sys::system_argv"} = BI::SYS_SYSTEM_ARGV; $b{"core::system_argv"} = BI::SYS_SYSTEM_ARGV;
-    $b{"sys::tcdrain"} = BI::SYS_TCDRAIN; $b{"core::tcdrain"} = BI::SYS_TCDRAIN;
-    $b{"sys::tcflush"} = BI::SYS_TCFLUSH; $b{"core::tcflush"} = BI::SYS_TCFLUSH;
-    $b{"sys::tcgetattr"} = BI::SYS_TCGETATTR; $b{"core::tcgetattr"} = BI::SYS_TCGETATTR;
-    $b{"sys::tcsetattr"} = BI::SYS_TCSETATTR; $b{"core::tcsetattr"} = BI::SYS_TCSETATTR;
-    $b{"sys::term_cols"} = BI::SYS_TERM_COLS; $b{"core::term_cols"} = BI::SYS_TERM_COLS;
-    $b{"sys::term_disable_raw"} = BI::SYS_TERM_DISABLE_RAW; $b{"core::term_disable_raw"} = BI::SYS_TERM_DISABLE_RAW;
-    $b{"sys::term_enable_raw"} = BI::SYS_TERM_ENABLE_RAW; $b{"core::term_enable_raw"} = BI::SYS_TERM_ENABLE_RAW;
-    $b{"sys::term_rows"} = BI::SYS_TERM_ROWS; $b{"core::term_rows"} = BI::SYS_TERM_ROWS;
-    $b{"sys::tmpfile"} = BI::SYS_TMPFILE; $b{"core::tmpfile"} = BI::SYS_TMPFILE;
-    $b{"sys::ttyname"} = BI::SYS_TTYNAME; $b{"core::ttyname"} = BI::SYS_TTYNAME;
-    $b{"sys::tv_interval"} = BI::SYS_TV_INTERVAL; $b{"core::tv_interval"} = BI::SYS_TV_INTERVAL;
-    $b{"sys::udp_bind"} = BI::SYS_UDP_BIND; $b{"core::udp_bind"} = BI::SYS_UDP_BIND;
-    $b{"sys::udp_recvfrom"} = BI::SYS_UDP_RECVFROM; $b{"core::udp_recvfrom"} = BI::SYS_UDP_RECVFROM;
-    $b{"sys::udp_sendto"} = BI::SYS_UDP_SENDTO; $b{"core::udp_sendto"} = BI::SYS_UDP_SENDTO;
-    $b{"sys::udp_server"} = BI::SYS_UDP_SERVER; $b{"core::udp_server"} = BI::SYS_UDP_SERVER;
-    $b{"sys::udp_socket"} = BI::SYS_UDP_SOCKET; $b{"core::udp_socket"} = BI::SYS_UDP_SOCKET;
-    $b{"sys::utimes"} = BI::SYS_UTIMES; $b{"core::utimes"} = BI::SYS_UTIMES;
-    $b{"sys::write_fd"} = BI::SYS_WRITE_FD; $b{"core::write_fd"} = BI::SYS_WRITE_FD;
+    # core::/core:: functions (both prefixes map to same BI value)
+    $b{"core::exit"} = BI::SYS_EXIT; $b{"core::exit"} = BI::SYS_EXIT;
+    $b{"core::getenv"} = BI::SYS_GETENV; $b{"core::getenv"} = BI::SYS_GETENV;
+    $b{"core::setenv"} = BI::SYS_SETENV; $b{"core::setenv"} = BI::SYS_SETENV;
+    $b{"core::time"} = BI::SYS_TIME; $b{"core::time"} = BI::SYS_TIME;
+    $b{"core::sleep"} = BI::SYS_SLEEP; $b{"core::sleep"} = BI::SYS_SLEEP;
+    $b{"core::hires_time"} = BI::SYS_HIRES_TIME; $b{"core::hires_time"} = BI::SYS_HIRES_TIME;
+    $b{"core::open"} = BI::SYS_OPEN; $b{"core::open"} = BI::SYS_OPEN;
+    $b{"core::close"} = BI::SYS_CLOSE; $b{"core::close"} = BI::SYS_CLOSE;
+    $b{"core::readline"} = BI::SYS_READLINE; $b{"core::readline"} = BI::SYS_READLINE;
+    $b{"core::eof"} = BI::SYS_EOF; $b{"core::eof"} = BI::SYS_EOF;
+    $b{"core::flush"} = BI::SYS_FLUSH; $b{"core::flush"} = BI::SYS_FLUSH;
+    $b{"core::popen"} = BI::SYS_POPEN; $b{"core::popen"} = BI::SYS_POPEN;
+    $b{"core::qx"} = BI::SYS_QX; $b{"core::qx"} = BI::SYS_QX;
+    $b{"core::system"} = BI::SYS_SYSTEM; $b{"core::system"} = BI::SYS_SYSTEM;
+    $b{"core::stack_trace"} = BI::SYS_STACK_TRACE; $b{"core::stack_trace"} = BI::SYS_STACK_TRACE;
+    $b{"core::fwrite"} = BI::SYS_FWRITE; $b{"core::fwrite"} = BI::SYS_FWRITE;
+    $b{"core::fread"} = BI::SYS_FREAD; $b{"core::fread"} = BI::SYS_FREAD;
+    $b{"core::fputs"} = BI::SYS_FPUTS; $b{"core::fputs"} = BI::SYS_FPUTS;
+    $b{"core::fgets"} = BI::SYS_FGETS; $b{"core::fgets"} = BI::SYS_FGETS;
+    $b{"core::pclose"} = BI::SYS_PCLOSE; $b{"core::pclose"} = BI::SYS_PCLOSE;
+    $b{"core::truncate"} = BI::SYS_TRUNCATE; $b{"core::truncate"} = BI::SYS_TRUNCATE;
+    $b{"core::open_str"} = BI::SYS_OPEN_STR; $b{"core::open_str"} = BI::SYS_OPEN_STR;
+    $b{"core::str_from_fh"} = BI::SYS_STR_FROM_FH; $b{"core::str_from_fh"} = BI::SYS_STR_FROM_FH;
+    $b{"core::slurp"} = BI::SYS_SLURP; $b{"core::slurp"} = BI::SYS_SLURP;
+    $b{"core::spew"} = BI::SYS_SPEW; $b{"core::spew"} = BI::SYS_SPEW;
+    $b{"core::unlink"} = BI::SYS_UNLINK; $b{"core::unlink"} = BI::SYS_UNLINK;
+    $b{"core::rename"} = BI::SYS_RENAME; $b{"core::rename"} = BI::SYS_RENAME;
+    $b{"core::mkdir"} = BI::SYS_MKDIR; $b{"core::mkdir"} = BI::SYS_MKDIR;
+    $b{"core::rmdir"} = BI::SYS_RMDIR; $b{"core::rmdir"} = BI::SYS_RMDIR;
+    $b{"core::chmod"} = BI::SYS_CHMOD; $b{"core::chmod"} = BI::SYS_CHMOD;
+    $b{"core::link"} = BI::SYS_LINK; $b{"core::link"} = BI::SYS_LINK;
+    $b{"core::symlink"} = BI::SYS_SYMLINK; $b{"core::symlink"} = BI::SYS_SYMLINK;
+    $b{"core::readlink"} = BI::SYS_READLINK; $b{"core::readlink"} = BI::SYS_READLINK;
+    $b{"core::stat"} = BI::SYS_STAT; $b{"core::stat"} = BI::SYS_STAT;
+    $b{"core::lstat"} = BI::SYS_LSTAT; $b{"core::lstat"} = BI::SYS_LSTAT;
+    $b{"core::access"} = BI::SYS_ACCESS; $b{"core::access"} = BI::SYS_ACCESS;
+    $b{"core::is_file"} = BI::SYS_IS_FILE; $b{"core::is_file"} = BI::SYS_IS_FILE;
+    $b{"core::is_dir"} = BI::SYS_IS_DIR; $b{"core::is_dir"} = BI::SYS_IS_DIR;
+    $b{"core::file_exists"} = BI::SYS_FILE_EXISTS; $b{"core::file_exists"} = BI::SYS_FILE_EXISTS;
+    $b{"core::is_readable"} = BI::SYS_IS_READABLE; $b{"core::is_readable"} = BI::SYS_IS_READABLE;
+    $b{"core::is_writable"} = BI::SYS_IS_WRITABLE; $b{"core::is_writable"} = BI::SYS_IS_WRITABLE;
+    $b{"core::is_executable"} = BI::SYS_IS_EXECUTABLE; $b{"core::is_executable"} = BI::SYS_IS_EXECUTABLE;
+    $b{"core::is_zero_size"} = BI::SYS_IS_ZERO_SIZE; $b{"core::is_zero_size"} = BI::SYS_IS_ZERO_SIZE;
+    $b{"core::is_symlink"} = BI::SYS_IS_SYMLINK; $b{"core::is_symlink"} = BI::SYS_IS_SYMLINK;
+    $b{"core::file_size"} = BI::SYS_FILE_SIZE; $b{"core::file_size"} = BI::SYS_FILE_SIZE;
+    $b{"core::caller"} = BI::SYS_CALLER_INFO; $b{"core::caller"} = BI::SYS_CALLER_INFO;
+    $b{"core::readdir"} = BI::SYS_READDIR; $b{"core::readdir"} = BI::SYS_READDIR;
+    $b{"core::readdir_full"} = BI::SYS_READDIR_FULL; $b{"core::readdir_full"} = BI::SYS_READDIR_FULL;
+    $b{"core::glob"} = BI::SYS_GLOB; $b{"core::glob"} = BI::SYS_GLOB;
+    $b{"core::fnmatch"} = BI::SYS_FNMATCH; $b{"core::fnmatch"} = BI::SYS_FNMATCH;
+    $b{"core::dirname"} = BI::SYS_DIRNAME; $b{"core::dirname"} = BI::SYS_DIRNAME;
+    $b{"core::basename"} = BI::SYS_BASENAME; $b{"core::basename"} = BI::SYS_BASENAME;
+    $b{"core::file_ext"} = BI::SYS_FILE_EXT; $b{"core::file_ext"} = BI::SYS_FILE_EXT;
+    $b{"core::realpath"} = BI::SYS_REALPATH; $b{"core::realpath"} = BI::SYS_REALPATH;
+    $b{"core::getcwd"} = BI::SYS_GETCWD; $b{"core::getcwd"} = BI::SYS_GETCWD;
+    $b{"core::path_join"} = BI::SYS_PATH_JOIN; $b{"core::path_join"} = BI::SYS_PATH_JOIN;
+    $b{"core::getpid"} = BI::SYS_GETPID; $b{"core::getpid"} = BI::SYS_GETPID;
+    $b{"core::getppid"} = BI::SYS_GETPPID; $b{"core::getppid"} = BI::SYS_GETPPID;
+    $b{"core::fork"} = BI::SYS_FORK; $b{"core::fork"} = BI::SYS_FORK;
+    $b{"core::wait"} = BI::SYS_WAIT; $b{"core::wait"} = BI::SYS_WAIT;
+    $b{"core::usleep"} = BI::SYS_USLEEP; $b{"core::usleep"} = BI::SYS_USLEEP;
+    $b{"core::getprocname"} = BI::SYS_GETPROCNAME; $b{"core::getprocname"} = BI::SYS_GETPROCNAME;
+    $b{"core::setprocname"} = BI::SYS_SETPROCNAME; $b{"core::setprocname"} = BI::SYS_SETPROCNAME;
+    $b{"core::getproctitle"} = BI::SYS_GETPROCTITLE; $b{"core::getproctitle"} = BI::SYS_GETPROCTITLE;
+    $b{"core::setproctitle"} = BI::SYS_SETPROCTITLE; $b{"core::setproctitle"} = BI::SYS_SETPROCTITLE;
+    $b{"core::unsetenv"} = BI::SYS_UNSETENV; $b{"core::unsetenv"} = BI::SYS_UNSETENV;
+    $b{"core::getuid"} = BI::SYS_GETUID; $b{"core::getuid"} = BI::SYS_GETUID;
+    $b{"core::getgid"} = BI::SYS_GETGID; $b{"core::getgid"} = BI::SYS_GETGID;
+    $b{"core::geteuid"} = BI::SYS_GETEUID; $b{"core::geteuid"} = BI::SYS_GETEUID;
+    $b{"core::getegid"} = BI::SYS_GETEGID; $b{"core::getegid"} = BI::SYS_GETEGID;
+    $b{"core::getpwuid"} = BI::SYS_GETPWUID; $b{"core::getpwuid"} = BI::SYS_GETPWUID;
+    $b{"core::getpwnam"} = BI::SYS_GETPWNAM; $b{"core::getpwnam"} = BI::SYS_GETPWNAM;
+    $b{"core::getgrgid"} = BI::SYS_GETGRGID; $b{"core::getgrgid"} = BI::SYS_GETGRGID;
+    $b{"core::getgroups"} = BI::SYS_GETGROUPS; $b{"core::getgroups"} = BI::SYS_GETGROUPS;
+    $b{"core::isatty"} = BI::SYS_ISATTY; $b{"core::isatty"} = BI::SYS_ISATTY;
+    $b{"core::strerror"} = BI::SYS_STRERROR; $b{"core::strerror"} = BI::SYS_STRERROR;
+    $b{"core::errno"} = BI::SYS_ERRNO; $b{"core::errno"} = BI::SYS_ERRNO;
+    $b{"core::umask"} = BI::SYS_UMASK; $b{"core::umask"} = BI::SYS_UMASK;
+    $b{"core::utime"} = BI::SYS_UTIME; $b{"core::utime"} = BI::SYS_UTIME;
+    $b{"core::free"} = BI::SYS_FREE; $b{"core::free"} = BI::SYS_FREE;
+    $b{"core::release"} = BI::SYS_RELEASE; $b{"core::release"} = BI::SYS_RELEASE;
+    $b{"core::gethostname"} = BI::SYS_GETHOSTNAME; $b{"core::gethostname"} = BI::SYS_GETHOSTNAME;
+    $b{"core::gethostbyname"} = BI::SYS_GETHOSTBYNAME; $b{"core::gethostbyname"} = BI::SYS_GETHOSTBYNAME;
+    $b{"core::gethostbyname_all"} = BI::SYS_GETHOSTBYNAME_ALL; $b{"core::gethostbyname_all"} = BI::SYS_GETHOSTBYNAME_ALL;
+    $b{"core::getaddrinfo"} = BI::SYS_GETADDRINFO; $b{"core::getaddrinfo"} = BI::SYS_GETADDRINFO;
+    $b{"core::inet_addr"} = BI::SYS_INET_ADDR; $b{"core::inet_addr"} = BI::SYS_INET_ADDR;
+    $b{"core::inet_ntoa"} = BI::SYS_INET_NTOA; $b{"core::inet_ntoa"} = BI::SYS_INET_NTOA;
+    $b{"core::htons"} = BI::SYS_HTONS; $b{"core::htons"} = BI::SYS_HTONS;
+    $b{"core::ntohs"} = BI::SYS_NTOHS; $b{"core::ntohs"} = BI::SYS_NTOHS;
+    $b{"core::htonl"} = BI::SYS_HTONL; $b{"core::htonl"} = BI::SYS_HTONL;
+    $b{"core::ntohl"} = BI::SYS_NTOHL; $b{"core::ntohl"} = BI::SYS_NTOHL;
+    $b{"core::inet_pton"} = BI::SYS_INET_PTON; $b{"core::inet_pton"} = BI::SYS_INET_PTON;
+    $b{"core::inet_ntop"} = BI::SYS_INET_NTOP; $b{"core::inet_ntop"} = BI::SYS_INET_NTOP;
+    $b{"core::socket_server"} = BI::SYS_SOCKET_SERVER; $b{"core::socket_server"} = BI::SYS_SOCKET_SERVER;
+    $b{"core::socket_fd"} = BI::SYS_SOCKET_FD; $b{"core::socket_fd"} = BI::SYS_SOCKET_FD;
+    $b{"core::socket_close"} = BI::SYS_SOCKET_CLOSE; $b{"core::socket_close"} = BI::SYS_SOCKET_CLOSE;
+    $b{"core::socket_select"} = BI::SYS_SOCKET_SELECT; $b{"core::socket_select"} = BI::SYS_SOCKET_SELECT;
+    $b{"core::dl_open"} = BI::SYS_DL_OPEN; $b{"core::dl_open"} = BI::SYS_DL_OPEN;
+    $b{"core::dl_sym"} = BI::SYS_DL_SYM; $b{"core::dl_sym"} = BI::SYS_DL_SYM;
+    $b{"core::dl_close"} = BI::SYS_DL_CLOSE; $b{"core::dl_close"} = BI::SYS_DL_CLOSE;
+    $b{"core::dl_error"} = BI::SYS_DL_ERROR; $b{"core::dl_error"} = BI::SYS_DL_ERROR;
+    $b{"core::dl_call_num"} = BI::SYS_DL_CALL_NUM; $b{"core::dl_call_num"} = BI::SYS_DL_CALL_NUM;
+    $b{"core::dl_call_int"} = BI::SYS_DL_CALL_INT; $b{"core::dl_call_int"} = BI::SYS_DL_CALL_INT;
+    $b{"core::int_ptr"} = BI::SYS_INT_PTR; $b{"core::int_ptr"} = BI::SYS_INT_PTR;
+    $b{"core::num_ptr"} = BI::SYS_NUM_PTR; $b{"core::num_ptr"} = BI::SYS_NUM_PTR;
+    $b{"core::ptr_deref_int"} = BI::SYS_PTR_DEREF_INT; $b{"core::ptr_deref_int"} = BI::SYS_PTR_DEREF_INT;
+    $b{"core::ptr_deref_num"} = BI::SYS_PTR_DEREF_NUM; $b{"core::ptr_deref_num"} = BI::SYS_PTR_DEREF_NUM;
+    $b{"core::ptr_set_int"} = BI::SYS_PTR_SET_INT; $b{"core::ptr_set_int"} = BI::SYS_PTR_SET_INT;
+    $b{"core::ptr_set_num"} = BI::SYS_PTR_SET_NUM; $b{"core::ptr_set_num"} = BI::SYS_PTR_SET_NUM;
+    $b{"core::getpgrp"} = BI::SYS_GETPGRP; $b{"core::getpgrp"} = BI::SYS_GETPGRP;
+    $b{"core::getsid"} = BI::SYS_GETSID; $b{"core::getsid"} = BI::SYS_GETSID;
+    $b{"core::getpgid"} = BI::SYS_GETPGID; $b{"core::getpgid"} = BI::SYS_GETPGID;
+    $b{"core::nice"} = BI::SYS_NICE; $b{"core::nice"} = BI::SYS_NICE;
+    $b{"core::getpriority"} = BI::SYS_GETPRIORITY; $b{"core::getpriority"} = BI::SYS_GETPRIORITY;
+    $b{"core::getrusage"} = BI::SYS_GETRUSAGE; $b{"core::getrusage"} = BI::SYS_GETRUSAGE;
+    $b{"core::getrlimit"} = BI::SYS_GETRLIMIT; $b{"core::getrlimit"} = BI::SYS_GETRLIMIT;
+    $b{"core::times"} = BI::SYS_TIMES; $b{"core::times"} = BI::SYS_TIMES;
+    $b{"core::clock"} = BI::SYS_CLOCK; $b{"core::clock"} = BI::SYS_CLOCK;
+    $b{"core::mkstemp"} = BI::SYS_MKSTEMP; $b{"core::mkstemp"} = BI::SYS_MKSTEMP;
+    $b{"core::mkdtemp"} = BI::SYS_MKDTEMP; $b{"core::mkdtemp"} = BI::SYS_MKDTEMP;
+    $b{"core::statvfs"} = BI::SYS_STATVFS; $b{"core::statvfs"} = BI::SYS_STATVFS;
+    $b{"core::atoi"} = BI::SYS_ATOI; $b{"core::atoi"} = BI::SYS_ATOI;
+    $b{"core::atof"} = BI::SYS_ATOF; $b{"core::atof"} = BI::SYS_ATOF;
+    $b{"core::strtol"} = BI::SYS_STRTOL; $b{"core::strtol"} = BI::SYS_STRTOL;
+    $b{"core::difftime"} = BI::SYS_DIFFTIME; $b{"core::difftime"} = BI::SYS_DIFFTIME;
+    $b{"core::srand"} = BI::SYS_SRAND; $b{"core::srand"} = BI::SYS_SRAND;
+    $b{"core::rand"} = BI::SYS_RAND; $b{"core::rand"} = BI::SYS_RAND;
+    $b{"core::srandom"} = BI::SYS_SRANDOM; $b{"core::srandom"} = BI::SYS_SRANDOM;
+    $b{"core::random"} = BI::SYS_RANDOM; $b{"core::random"} = BI::SYS_RANDOM;
+    $b{"core::seek"} = BI::SYS_SEEK; $b{"core::seek"} = BI::SYS_SEEK;
+    $b{"core::tell"} = BI::SYS_TELL; $b{"core::tell"} = BI::SYS_TELL;
+    $b{"core::rewind"} = BI::SYS_REWIND; $b{"core::rewind"} = BI::SYS_REWIND;
+    $b{"core::weaken"} = BI::SYS_WEAKEN; $b{"core::weaken"} = BI::SYS_WEAKEN;
+    $b{"core::isweak"} = BI::SYS_ISWEAK; $b{"core::isweak"} = BI::SYS_ISWEAK;
+    $b{"core::wantscalar"} = BI::SYS_WANTSCALAR; $b{"core::wantscalar"} = BI::SYS_WANTSCALAR;
+    $b{"core::wantarray"} = BI::SYS_WANTARRAY; $b{"core::wantarray"} = BI::SYS_WANTARRAY;
+    $b{"core::wanthash"} = BI::SYS_WANTHASH; $b{"core::wanthash"} = BI::SYS_WANTHASH;
+    $b{"core::global_set"} = BI::SYS_GLOBAL_SET; $b{"core::global_set"} = BI::SYS_GLOBAL_SET;
+    $b{"core::global_get"} = BI::SYS_GLOBAL_GET; $b{"core::global_get"} = BI::SYS_GLOBAL_GET;
+    $b{"core::global_exists"} = BI::SYS_GLOBAL_EXISTS; $b{"core::global_exists"} = BI::SYS_GLOBAL_EXISTS;
+    $b{"core::global_delete"} = BI::SYS_GLOBAL_DELETE; $b{"core::global_delete"} = BI::SYS_GLOBAL_DELETE;
+    $b{"core::global_keys"} = BI::SYS_GLOBAL_KEYS; $b{"core::global_keys"} = BI::SYS_GLOBAL_KEYS;
+    $b{"core::_exit"} = BI::SYS_EXIT_NOCLEAN; $b{"core::_exit"} = BI::SYS_EXIT_NOCLEAN;
+    $b{"core::signal"} = BI::SYS_SIGNAL; $b{"core::signal"} = BI::SYS_SIGNAL;
+    $b{"core::get_recursion_limit"} = BI::SYS_GET_RECURSION_LIMIT; $b{"core::get_recursion_limit"} = BI::SYS_GET_RECURSION_LIMIT;
+    $b{"core::set_recursion_limit"} = BI::SYS_SET_RECURSION_LIMIT; $b{"core::set_recursion_limit"} = BI::SYS_SET_RECURSION_LIMIT;
+    $b{"core::pack"} = BI::SYS_PACK; $b{"core::pack"} = BI::SYS_PACK;
+    $b{"core::unpack"} = BI::SYS_UNPACK; $b{"core::unpack"} = BI::SYS_UNPACK;
+    $b{"core::ord_byte"} = BI::SYS_ORD_BYTE; $b{"core::ord_byte"} = BI::SYS_ORD_BYTE;
+    $b{"core::get_byte"} = BI::SYS_GET_BYTE; $b{"core::get_byte"} = BI::SYS_GET_BYTE;
+    $b{"core::byte_length"} = BI::SYS_BYTE_LENGTH; $b{"core::byte_length"} = BI::SYS_BYTE_LENGTH;
+    $b{"core::base64_encode"} = BI::SYS_BASE64_ENCODE; $b{"core::base64_encode"} = BI::SYS_BASE64_ENCODE;
+    $b{"core::base64_decode"} = BI::SYS_BASE64_DECODE; $b{"core::base64_decode"} = BI::SYS_BASE64_DECODE;
+    $b{"core::hex_encode"} = BI::SYS_HEX_ENCODE; $b{"core::hex_encode"} = BI::SYS_HEX_ENCODE;
+    $b{"core::hex_decode"} = BI::SYS_HEX_DECODE; $b{"core::hex_decode"} = BI::SYS_HEX_DECODE;
+    $b{"core::chroot"} = BI::SYS_CHROOT; $b{"core::chroot"} = BI::SYS_CHROOT;
+    $b{"core::setsid"} = BI::SYS_SETSID; $b{"core::setsid"} = BI::SYS_SETSID;
+    $b{"core::setgid"} = BI::SYS_SETGID; $b{"core::setgid"} = BI::SYS_SETGID;
+    $b{"core::setuid"} = BI::SYS_SETUID; $b{"core::setuid"} = BI::SYS_SETUID;
+    $b{"core::pipe"} = BI::SYS_PIPE; $b{"core::pipe"} = BI::SYS_PIPE;
+    $b{"core::dup2"} = BI::SYS_DUP2; $b{"core::dup2"} = BI::SYS_DUP2;
+    $b{"core::select_fd"} = BI::SYS_SELECT_FD; $b{"core::select_fd"} = BI::SYS_SELECT_FD;
+    $b{"core::hash_default_capacity"} = BI::SYS_HASH_DEFAULT_CAPACITY; $b{"core::hash_default_capacity"} = BI::SYS_HASH_DEFAULT_CAPACITY;
+    $b{"core::array_reserve"} = BI::SYS_ARRAY_RESERVE; $b{"core::array_reserve"} = BI::SYS_ARRAY_RESERVE;
+    $b{"core::chdir"} = BI::SYS_CHDIR; $b{"core::chdir"} = BI::SYS_CHDIR;
+    $b{"core::chown"} = BI::SYS_CHOWN; $b{"core::chown"} = BI::SYS_CHOWN;
+    $b{"core::localtime"} = BI::SYS_LOCALTIME; $b{"core::localtime"} = BI::SYS_LOCALTIME;
+    $b{"core::gmtime"} = BI::SYS_GMTIME; $b{"core::gmtime"} = BI::SYS_GMTIME;
+    $b{"core::strftime"} = BI::SYS_STRFTIME; $b{"core::strftime"} = BI::SYS_STRFTIME;
+    $b{"core::kill"} = BI::SYS_KILL; $b{"core::kill"} = BI::SYS_KILL;
+    $b{"core::exec"} = BI::SYS_EXEC; $b{"core::exec"} = BI::SYS_EXEC;
+    $b{"core::waitpid"} = BI::SYS_WAITPID; $b{"core::waitpid"} = BI::SYS_WAITPID;
+    $b{"core::alarm"} = BI::SYS_ALARM; $b{"core::alarm"} = BI::SYS_ALARM;
+    $b{"core::hex"} = BI::HEX; $b{"core::hex"} = BI::HEX;
+    $b{"core::byte_substr"} = BI::SYS_BYTE_SUBSTR; $b{"core::byte_substr"} = BI::SYS_BYTE_SUBSTR;
+    $b{"core::calloc"} = BI::SYS_CALLOC; $b{"core::calloc"} = BI::SYS_CALLOC;
+    $b{"core::cfgetispeed"} = BI::SYS_CFGETISPEED; $b{"core::cfgetispeed"} = BI::SYS_CFGETISPEED;
+    $b{"core::cfgetospeed"} = BI::SYS_CFGETOSPEED; $b{"core::cfgetospeed"} = BI::SYS_CFGETOSPEED;
+    $b{"core::cfsetispeed"} = BI::SYS_CFSETISPEED; $b{"core::cfsetispeed"} = BI::SYS_CFSETISPEED;
+    $b{"core::cfsetospeed"} = BI::SYS_CFSETOSPEED; $b{"core::cfsetospeed"} = BI::SYS_CFSETOSPEED;
+    $b{"core::clearerr"} = BI::SYS_CLEARERR; $b{"core::clearerr"} = BI::SYS_CLEARERR;
+    $b{"core::clock_getres"} = BI::SYS_CLOCK_GETRES; $b{"core::clock_getres"} = BI::SYS_CLOCK_GETRES;
+    $b{"core::clock_gettime"} = BI::SYS_CLOCK_GETTIME; $b{"core::clock_gettime"} = BI::SYS_CLOCK_GETTIME;
+    $b{"core::close_fd"} = BI::SYS_CLOSE_FD; $b{"core::close_fd"} = BI::SYS_CLOSE_FD;
+    $b{"core::closedir"} = BI::SYS_CLOSEDIR; $b{"core::closedir"} = BI::SYS_CLOSEDIR;
+    $b{"core::cstruct_get_double"} = BI::SYS_CSTRUCT_GET_DOUBLE; $b{"core::cstruct_get_double"} = BI::SYS_CSTRUCT_GET_DOUBLE;
+    $b{"core::cstruct_get_int"} = BI::SYS_CSTRUCT_GET_INT; $b{"core::cstruct_get_int"} = BI::SYS_CSTRUCT_GET_INT;
+    $b{"core::cstruct_get_string"} = BI::SYS_CSTRUCT_GET_STRING; $b{"core::cstruct_get_string"} = BI::SYS_CSTRUCT_GET_STRING;
+    $b{"core::cstruct_new"} = BI::SYS_CSTRUCT_NEW; $b{"core::cstruct_new"} = BI::SYS_CSTRUCT_NEW;
+    $b{"core::cstruct_ptr"} = BI::SYS_CSTRUCT_PTR; $b{"core::cstruct_ptr"} = BI::SYS_CSTRUCT_PTR;
+    $b{"core::cstruct_set_double"} = BI::SYS_CSTRUCT_SET_DOUBLE; $b{"core::cstruct_set_double"} = BI::SYS_CSTRUCT_SET_DOUBLE;
+    $b{"core::cstruct_set_int"} = BI::SYS_CSTRUCT_SET_INT; $b{"core::cstruct_set_int"} = BI::SYS_CSTRUCT_SET_INT;
+    $b{"core::cstruct_set_string"} = BI::SYS_CSTRUCT_SET_STRING; $b{"core::cstruct_set_string"} = BI::SYS_CSTRUCT_SET_STRING;
+    $b{"core::ctime"} = BI::SYS_CTIME; $b{"core::ctime"} = BI::SYS_CTIME;
+    $b{"core::dl_call_export_info"} = BI::SYS_DL_CALL_EXPORT_INFO; $b{"core::dl_call_export_info"} = BI::SYS_DL_CALL_EXPORT_INFO;
+    $b{"core::dl_call_int_sv"} = BI::SYS_DL_CALL_INT_SV; $b{"core::dl_call_int_sv"} = BI::SYS_DL_CALL_INT_SV;
+    $b{"core::dl_call_str"} = BI::SYS_DL_CALL_STR; $b{"core::dl_call_str"} = BI::SYS_DL_CALL_STR;
+    $b{"core::dl_call_str_sv"} = BI::SYS_DL_CALL_STR_SV; $b{"core::dl_call_str_sv"} = BI::SYS_DL_CALL_STR_SV;
+    $b{"core::dl_call_sv"} = BI::SYS_DL_CALL_SV; $b{"core::dl_call_sv"} = BI::SYS_DL_CALL_SV;
+    $b{"core::dl_call_version"} = BI::SYS_DL_CALL_VERSION; $b{"core::dl_call_version"} = BI::SYS_DL_CALL_VERSION;
+    $b{"core::dl_call_void"} = BI::SYS_DL_CALL_VOID; $b{"core::dl_call_void"} = BI::SYS_DL_CALL_VOID;
+    $b{"core::dl_call_void_sv"} = BI::SYS_DL_CALL_VOID_SV; $b{"core::dl_call_void_sv"} = BI::SYS_DL_CALL_VOID_SV;
+    $b{"core::dup"} = BI::SYS_DUP; $b{"core::dup"} = BI::SYS_DUP;
+    $b{"core::exit_status"} = BI::SYS_EXIT_STATUS; $b{"core::exit_status"} = BI::SYS_EXIT_STATUS;
+    $b{"core::fchmod"} = BI::SYS_FCHMOD; $b{"core::fchmod"} = BI::SYS_FCHMOD;
+    $b{"core::fchown"} = BI::SYS_FCHOWN; $b{"core::fchown"} = BI::SYS_FCHOWN;
+    $b{"core::fcntl"} = BI::SYS_FCNTL; $b{"core::fcntl"} = BI::SYS_FCNTL;
+    $b{"core::ferror"} = BI::SYS_FERROR; $b{"core::ferror"} = BI::SYS_FERROR;
+    $b{"core::fgetc"} = BI::SYS_FGETC; $b{"core::fgetc"} = BI::SYS_FGETC;
+    $b{"core::fileno"} = BI::SYS_FILENO; $b{"core::fileno"} = BI::SYS_FILENO;
+    $b{"core::flock"} = BI::SYS_FLOCK; $b{"core::flock"} = BI::SYS_FLOCK;
+    $b{"core::fputc"} = BI::SYS_FPUTC; $b{"core::fputc"} = BI::SYS_FPUTC;
+    $b{"core::fstatvfs"} = BI::SYS_FSTATVFS; $b{"core::fstatvfs"} = BI::SYS_FSTATVFS;
+    $b{"core::ftruncate"} = BI::SYS_FTRUNCATE; $b{"core::ftruncate"} = BI::SYS_FTRUNCATE;
+    $b{"core::full_profile_start"} = BI::SYS_FULL_PROFILE_START; $b{"core::full_profile_start"} = BI::SYS_FULL_PROFILE_START;
+    $b{"core::full_profile_stop"} = BI::SYS_FULL_PROFILE_STOP; $b{"core::full_profile_stop"} = BI::SYS_FULL_PROFILE_STOP;
+    $b{"core::getgrnam"} = BI::SYS_GETGRNAM; $b{"core::getgrnam"} = BI::SYS_GETGRNAM;
+    $b{"core::getlogin"} = BI::SYS_GETLOGIN; $b{"core::getlogin"} = BI::SYS_GETLOGIN;
+    $b{"core::getpeername"} = BI::SYS_GETPEERNAME; $b{"core::getpeername"} = BI::SYS_GETPEERNAME;
+    $b{"core::getsockname"} = BI::SYS_GETSOCKNAME; $b{"core::getsockname"} = BI::SYS_GETSOCKNAME;
+    $b{"core::getsockopt"} = BI::SYS_GETSOCKOPT; $b{"core::getsockopt"} = BI::SYS_GETSOCKOPT;
+    $b{"core::gettimeofday"} = BI::SYS_GETTIMEOFDAY; $b{"core::gettimeofday"} = BI::SYS_GETTIMEOFDAY;
+    $b{"core::ioctl"} = BI::SYS_IOCTL; $b{"core::ioctl"} = BI::SYS_IOCTL;
+    $b{"core::killpg"} = BI::SYS_KILLPG; $b{"core::killpg"} = BI::SYS_KILLPG;
+    $b{"core::lchown"} = BI::SYS_LCHOWN; $b{"core::lchown"} = BI::SYS_LCHOWN;
+    $b{"core::memprof_disable"} = BI::SYS_MEMPROF_DISABLE; $b{"core::memprof_disable"} = BI::SYS_MEMPROF_DISABLE;
+    $b{"core::memprof_enable"} = BI::SYS_MEMPROF_ENABLE; $b{"core::memprof_enable"} = BI::SYS_MEMPROF_ENABLE;
+    $b{"core::memprof_report"} = BI::SYS_MEMPROF_REPORT; $b{"core::memprof_report"} = BI::SYS_MEMPROF_REPORT;
+    $b{"core::memprof_reset"} = BI::SYS_MEMPROF_RESET; $b{"core::memprof_reset"} = BI::SYS_MEMPROF_RESET;
+    $b{"core::mktime"} = BI::SYS_MKTIME; $b{"core::mktime"} = BI::SYS_MKTIME;
+    $b{"core::mlock"} = BI::SYS_MLOCK; $b{"core::mlock"} = BI::SYS_MLOCK;
+    $b{"core::mmap"} = BI::SYS_MMAP; $b{"core::mmap"} = BI::SYS_MMAP;
+    $b{"core::munlock"} = BI::SYS_MUNLOCK; $b{"core::munlock"} = BI::SYS_MUNLOCK;
+    $b{"core::munmap"} = BI::SYS_MUNMAP; $b{"core::munmap"} = BI::SYS_MUNMAP;
+    $b{"core::nanosleep"} = BI::SYS_NANOSLEEP; $b{"core::nanosleep"} = BI::SYS_NANOSLEEP;
+    $b{"core::open_fd"} = BI::SYS_OPEN_FD; $b{"core::open_fd"} = BI::SYS_OPEN_FD;
+    $b{"core::opendir"} = BI::SYS_OPENDIR; $b{"core::opendir"} = BI::SYS_OPENDIR;
+    $b{"core::pause"} = BI::SYS_PAUSE; $b{"core::pause"} = BI::SYS_PAUSE;
+    $b{"core::poll"} = BI::SYS_POLL; $b{"core::poll"} = BI::SYS_POLL;
+    $b{"core::ptr_deref_str"} = BI::SYS_PTR_DEREF_STR; $b{"core::ptr_deref_str"} = BI::SYS_PTR_DEREF_STR;
+    $b{"core::quotemeta"} = BI::SYS_QUOTEMETA; $b{"core::quotemeta"} = BI::SYS_QUOTEMETA;
+    $b{"core::raise"} = BI::SYS_RAISE; $b{"core::raise"} = BI::SYS_RAISE;
+    $b{"core::random_bytes"} = BI::SYS_RANDOM_BYTES; $b{"core::random_bytes"} = BI::SYS_RANDOM_BYTES;
+    $b{"core::random_bytes_hex"} = BI::SYS_RANDOM_BYTES_HEX; $b{"core::random_bytes_hex"} = BI::SYS_RANDOM_BYTES_HEX;
+    $b{"core::read_all_fd"} = BI::SYS_READ_ALL_FD; $b{"core::read_all_fd"} = BI::SYS_READ_ALL_FD;
+    $b{"core::read_byte"} = BI::SYS_READ_BYTE; $b{"core::read_byte"} = BI::SYS_READ_BYTE;
+    $b{"core::read_fd"} = BI::SYS_READ_FD; $b{"core::read_fd"} = BI::SYS_READ_FD;
+    $b{"core::readdir_next"} = BI::SYS_READDIR_NEXT; $b{"core::readdir_next"} = BI::SYS_READDIR_NEXT;
+    $b{"core::realloc"} = BI::SYS_REALLOC; $b{"core::realloc"} = BI::SYS_REALLOC;
+    $b{"core::select_fds"} = BI::SYS_SELECT_FDS; $b{"core::select_fds"} = BI::SYS_SELECT_FDS;
+    $b{"core::serial_open"} = BI::SYS_SERIAL_OPEN; $b{"core::serial_open"} = BI::SYS_SERIAL_OPEN;
+    $b{"core::set_byte"} = BI::SYS_SET_BYTE; $b{"core::set_byte"} = BI::SYS_SET_BYTE;
+    $b{"core::setegid"} = BI::SYS_SETEGID; $b{"core::setegid"} = BI::SYS_SETEGID;
+    $b{"core::seteuid"} = BI::SYS_SETEUID; $b{"core::seteuid"} = BI::SYS_SETEUID;
+    $b{"core::setpgid"} = BI::SYS_SETPGID; $b{"core::setpgid"} = BI::SYS_SETPGID;
+    $b{"core::setpgrp"} = BI::SYS_SETPGRP; $b{"core::setpgrp"} = BI::SYS_SETPGRP;
+    $b{"core::setpriority"} = BI::SYS_SETPRIORITY; $b{"core::setpriority"} = BI::SYS_SETPRIORITY;
+    $b{"core::setregid"} = BI::SYS_SETREGID; $b{"core::setregid"} = BI::SYS_SETREGID;
+    $b{"core::setreuid"} = BI::SYS_SETREUID; $b{"core::setreuid"} = BI::SYS_SETREUID;
+    $b{"core::setrlimit"} = BI::SYS_SETRLIMIT; $b{"core::setrlimit"} = BI::SYS_SETRLIMIT;
+    $b{"core::setsockopt"} = BI::SYS_SETSOCKOPT; $b{"core::setsockopt"} = BI::SYS_SETSOCKOPT;
+    $b{"core::shutdown"} = BI::SYS_SHUTDOWN; $b{"core::shutdown"} = BI::SYS_SHUTDOWN;
+    $b{"core::sigprocmask"} = BI::SYS_SIGPROCMASK; $b{"core::sigprocmask"} = BI::SYS_SIGPROCMASK;
+    $b{"core::slurp_fd"} = BI::SYS_SLURP_FD; $b{"core::slurp_fd"} = BI::SYS_SLURP_FD;
+    $b{"core::slurp_fh"} = BI::SYS_SLURP_FH; $b{"core::slurp_fh"} = BI::SYS_SLURP_FH;
+    $b{"core::socket_accept"} = BI::SYS_SOCKET_ACCEPT; $b{"core::socket_accept"} = BI::SYS_SOCKET_ACCEPT;
+    $b{"core::socket_client"} = BI::SYS_SOCKET_CLIENT; $b{"core::socket_client"} = BI::SYS_SOCKET_CLIENT;
+    $b{"core::socket_flush"} = BI::SYS_SOCKET_FLUSH; $b{"core::socket_flush"} = BI::SYS_SOCKET_FLUSH;
+    $b{"core::socket_recv"} = BI::SYS_SOCKET_RECV; $b{"core::socket_recv"} = BI::SYS_SOCKET_RECV;
+    $b{"core::socket_send"} = BI::SYS_SOCKET_SEND; $b{"core::socket_send"} = BI::SYS_SOCKET_SEND;
+    $b{"core::socket_server_backlog"} = BI::SYS_SOCKET_SERVER_BACKLOG; $b{"core::socket_server_backlog"} = BI::SYS_SOCKET_SERVER_BACKLOG;
+    $b{"core::socket_set_nonblocking"} = BI::SYS_SOCKET_SET_NONBLOCKING; $b{"core::socket_set_nonblocking"} = BI::SYS_SOCKET_SET_NONBLOCKING;
+    $b{"core::spew_fd"} = BI::SYS_SPEW_FD; $b{"core::spew_fd"} = BI::SYS_SPEW_FD;
+    $b{"core::spew_fh"} = BI::SYS_SPEW_FH; $b{"core::spew_fh"} = BI::SYS_SPEW_FH;
+    $b{"core::str_ptr"} = BI::SYS_STR_PTR; $b{"core::str_ptr"} = BI::SYS_STR_PTR;
+    $b{"core::strtod"} = BI::SYS_STRTOD; $b{"core::strtod"} = BI::SYS_STRTOD;
+    $b{"core::system_argv"} = BI::SYS_SYSTEM_ARGV; $b{"core::system_argv"} = BI::SYS_SYSTEM_ARGV;
+    $b{"core::tcdrain"} = BI::SYS_TCDRAIN; $b{"core::tcdrain"} = BI::SYS_TCDRAIN;
+    $b{"core::tcflush"} = BI::SYS_TCFLUSH; $b{"core::tcflush"} = BI::SYS_TCFLUSH;
+    $b{"core::tcgetattr"} = BI::SYS_TCGETATTR; $b{"core::tcgetattr"} = BI::SYS_TCGETATTR;
+    $b{"core::tcsetattr"} = BI::SYS_TCSETATTR; $b{"core::tcsetattr"} = BI::SYS_TCSETATTR;
+    $b{"core::term_cols"} = BI::SYS_TERM_COLS; $b{"core::term_cols"} = BI::SYS_TERM_COLS;
+    $b{"core::term_disable_raw"} = BI::SYS_TERM_DISABLE_RAW; $b{"core::term_disable_raw"} = BI::SYS_TERM_DISABLE_RAW;
+    $b{"core::term_enable_raw"} = BI::SYS_TERM_ENABLE_RAW; $b{"core::term_enable_raw"} = BI::SYS_TERM_ENABLE_RAW;
+    $b{"core::term_rows"} = BI::SYS_TERM_ROWS; $b{"core::term_rows"} = BI::SYS_TERM_ROWS;
+    $b{"core::tmpfile"} = BI::SYS_TMPFILE; $b{"core::tmpfile"} = BI::SYS_TMPFILE;
+    $b{"core::ttyname"} = BI::SYS_TTYNAME; $b{"core::ttyname"} = BI::SYS_TTYNAME;
+    $b{"core::tv_interval"} = BI::SYS_TV_INTERVAL; $b{"core::tv_interval"} = BI::SYS_TV_INTERVAL;
+    $b{"core::udp_bind"} = BI::SYS_UDP_BIND; $b{"core::udp_bind"} = BI::SYS_UDP_BIND;
+    $b{"core::udp_recvfrom"} = BI::SYS_UDP_RECVFROM; $b{"core::udp_recvfrom"} = BI::SYS_UDP_RECVFROM;
+    $b{"core::udp_sendto"} = BI::SYS_UDP_SENDTO; $b{"core::udp_sendto"} = BI::SYS_UDP_SENDTO;
+    $b{"core::udp_server"} = BI::SYS_UDP_SERVER; $b{"core::udp_server"} = BI::SYS_UDP_SERVER;
+    $b{"core::udp_socket"} = BI::SYS_UDP_SOCKET; $b{"core::udp_socket"} = BI::SYS_UDP_SOCKET;
+    $b{"core::utimes"} = BI::SYS_UTIMES; $b{"core::utimes"} = BI::SYS_UTIMES;
+    $b{"core::write_fd"} = BI::SYS_WRITE_FD; $b{"core::write_fd"} = BI::SYS_WRITE_FD;
     # math:: functions
     $b{"math::sqrt"} = BI::MATH_SQRT; $b{"math::sin"} = BI::MATH_SIN;
     $b{"math::cos"} = BI::MATH_COS; $b{"math::pow"} = BI::MATH_POW;
@@ -2263,7 +2263,7 @@ func eval_binop(scalar $interp, scalar $node, scalar $env) scalar {
 func is_builtin(scalar $interp, str $name) int {
     if (exists($interp->{"builtin_ids"}, $name)) { return 1; }
     # Fallback: prefix matching for any unregistered namespace functions
-    if (index($name, "sys::") == 0 || index($name, "core::") == 0) { return 1; }
+    if (index($name, "core::") == 0 || index($name, "core::") == 0) { return 1; }
     if (index($name, "math::") == 0) { return 1; }
     if (index($name, "utf8::") == 0) { return 1; }
     if (index($name, "DateTime::") == 0) { return 1; }
@@ -2648,153 +2648,153 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
     }
     if ($bid == BI::SYS_CHDIR) {
         my str $dir = "" . $args->[0];
-        return sys::chdir($dir);
+        return core::chdir($dir);
     }
     if ($bid == BI::SYS_CHOWN) {
-        return sys::chown($args->[0], $args->[1], $args->[2]);
+        return core::chown($args->[0], $args->[1], $args->[2]);
     }
     if ($bid == BI::SYS_LOCALTIME) {
-        return sys::localtime($args->[0]);
+        return core::localtime($args->[0]);
     }
     if ($bid == BI::SYS_GMTIME) {
-        return sys::gmtime($args->[0]);
+        return core::gmtime($args->[0]);
     }
     if ($bid == BI::SYS_STRFTIME) {
-        return sys::strftime($args->[0], $args->[1]);
+        return core::strftime($args->[0], $args->[1]);
     }
     if ($bid == BI::SYS_KILL) {
-        return sys::kill($args->[0], $args->[1]);
+        return core::kill($args->[0], $args->[1]);
     }
     if ($bid == BI::SYS_EXEC) {
-        return sys::exec($args->[0]);
+        return core::exec($args->[0]);
     }
     if ($bid == BI::SYS_WAITPID) {
-        return sys::waitpid($args->[0], $args->[1]);
+        return core::waitpid($args->[0], $args->[1]);
     }
     if ($bid == BI::SYS_ALARM) {
-        return sys::alarm($args->[0]);
+        return core::alarm($args->[0]);
     }
-    # --- All remaining sys::/core:: builtins (auto-generated call-through) ---
-    if ($bid == BI::SYS_BYTE_SUBSTR) { return sys::byte_substr($args->[0], $args->[1], $args->[2]); }
-    if ($bid == BI::SYS_CALLOC) { return sys::calloc($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_CFGETISPEED) { return sys::cfgetispeed($args->[0]); }
-    if ($bid == BI::SYS_CFGETOSPEED) { return sys::cfgetospeed($args->[0]); }
-    if ($bid == BI::SYS_CFSETISPEED) { return sys::cfsetispeed($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_CFSETOSPEED) { return sys::cfsetospeed($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_CLEARERR) { return sys::clearerr($args->[0]); }
-    if ($bid == BI::SYS_CLOCK_GETRES) { return sys::clock_getres($args->[0]); }
-    if ($bid == BI::SYS_CLOCK_GETTIME) { return sys::clock_gettime($args->[0]); }
-    if ($bid == BI::SYS_CLOSE_FD) { return sys::close_fd($args->[0]); }
-    if ($bid == BI::SYS_CLOSEDIR) { return sys::closedir($args->[0]); }
-    if ($bid == BI::SYS_CSTRUCT_GET_DOUBLE) { return sys::cstruct_get_double($args->[0], $args->[1], $args->[2]); }
-    if ($bid == BI::SYS_CSTRUCT_GET_INT) { return sys::cstruct_get_int($args->[0], $args->[1], $args->[2]); }
-    if ($bid == BI::SYS_CSTRUCT_GET_STRING) { return sys::cstruct_get_string($args->[0], $args->[1], $args->[2]); }
-    if ($bid == BI::SYS_CSTRUCT_NEW) { return sys::cstruct_new($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_CSTRUCT_PTR) { return sys::cstruct_ptr($args->[0]); }
-    if ($bid == BI::SYS_CSTRUCT_SET_DOUBLE) { sys::cstruct_set_double($args->[0], $args->[1], $args->[2], $args->[3]); return undef; }
-    if ($bid == BI::SYS_CSTRUCT_SET_INT) { sys::cstruct_set_int($args->[0], $args->[1], $args->[2], $args->[3]); return undef; }
-    if ($bid == BI::SYS_CSTRUCT_SET_STRING) { sys::cstruct_set_string($args->[0], $args->[1], $args->[2], $args->[3]); return undef; }
-    if ($bid == BI::SYS_CTIME) { return sys::ctime($args->[0]); }
-    if ($bid == BI::SYS_DL_CALL_EXPORT_INFO) { return sys::dl_call_export_info($args->[0]); }
-    if ($bid == BI::SYS_DL_CALL_INT_SV) { return sys::dl_call_int_sv($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_DL_CALL_STR) { return sys::dl_call_str($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_DL_CALL_STR_SV) { return sys::dl_call_str_sv($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_DL_CALL_SV) { return sys::dl_call_sv($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_DL_CALL_VERSION) { return sys::dl_call_version($args->[0]); }
-    if ($bid == BI::SYS_DL_CALL_VOID) { return sys::dl_call_void($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_DL_CALL_VOID_SV) { return sys::dl_call_void_sv($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_DUP) { return sys::dup($args->[0]); }
-    if ($bid == BI::SYS_EXIT_STATUS) { return sys::exit_status($args->[0]); }
-    if ($bid == BI::SYS_FCHMOD) { return sys::fchmod($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_FCHOWN) { return sys::fchown($args->[0], $args->[1], $args->[2]); }
-    if ($bid == BI::SYS_FCNTL) { return sys::fcntl($args->[0], $args->[1], $args->[2]); }
-    if ($bid == BI::SYS_FERROR) { return sys::ferror($args->[0]); }
-    if ($bid == BI::SYS_FGETC) { return sys::fgetc($args->[0]); }
-    if ($bid == BI::SYS_FILENO) { return sys::fileno($args->[0]); }
-    if ($bid == BI::SYS_FLOCK) { return sys::flock($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_FPUTC) { return sys::fputc($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_FSTATVFS) { return sys::fstatvfs($args->[0]); }
-    if ($bid == BI::SYS_FTRUNCATE) { return sys::ftruncate($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_FULL_PROFILE_START) { sys::full_profile_start($args->[0]); return undef; }
-    if ($bid == BI::SYS_FULL_PROFILE_STOP) { sys::full_profile_stop(); return undef; }
-    if ($bid == BI::SYS_GETGRNAM) { return sys::getgrnam($args->[0]); }
-    if ($bid == BI::SYS_GETLOGIN) { return sys::getlogin(); }
-    if ($bid == BI::SYS_GETPEERNAME) { return sys::getpeername($args->[0]); }
-    if ($bid == BI::SYS_GETSOCKNAME) { return sys::getsockname($args->[0]); }
-    if ($bid == BI::SYS_GETSOCKOPT) { return sys::getsockopt($args->[0], $args->[1], $args->[2]); }
-    if ($bid == BI::SYS_GETTIMEOFDAY) { return sys::gettimeofday(); }
-    if ($bid == BI::SYS_IOCTL) { return sys::ioctl($args->[0], $args->[1], $args->[2]); }
-    if ($bid == BI::SYS_KILLPG) { return sys::killpg($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_LCHOWN) { return sys::lchown($args->[0], $args->[1], $args->[2]); }
-    if ($bid == BI::SYS_MEMPROF_DISABLE) { sys::memprof_disable(); return undef; }
-    if ($bid == BI::SYS_MEMPROF_ENABLE) { sys::memprof_enable(); return undef; }
-    if ($bid == BI::SYS_MEMPROF_REPORT) { sys::memprof_report(); return undef; }
-    if ($bid == BI::SYS_MEMPROF_RESET) { sys::memprof_reset(); return undef; }
-    if ($bid == BI::SYS_MKTIME) { return sys::mktime($args->[0]); }
-    if ($bid == BI::SYS_MLOCK) { return sys::mlock($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_MMAP) { return sys::mmap($args->[0], $args->[1], $args->[2], $args->[3], $args->[4], $args->[5]); }
-    if ($bid == BI::SYS_MUNLOCK) { return sys::munlock($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_MUNMAP) { return sys::munmap($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_OPEN_FD) { return sys::open_fd($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_OPENDIR) { return sys::opendir($args->[0]); }
-    if ($bid == BI::SYS_PAUSE) { return sys::pause(); }
-    if ($bid == BI::SYS_POLL) { return sys::poll($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_PTR_DEREF_STR) { return sys::ptr_deref_str($args->[0]); }
-    if ($bid == BI::SYS_QUOTEMETA) { return sys::quotemeta($args->[0]); }
-    if ($bid == BI::SYS_RAISE) { return sys::raise($args->[0]); }
-    if ($bid == BI::SYS_RANDOM_BYTES) { return sys::random_bytes($args->[0]); }
-    if ($bid == BI::SYS_RANDOM_BYTES_HEX) { return sys::random_bytes_hex($args->[0]); }
-    if ($bid == BI::SYS_READ_ALL_FD) { return sys::read_all_fd($args->[0]); }
-    if ($bid == BI::SYS_READ_BYTE) { return sys::read_byte($args->[0]); }
-    if ($bid == BI::SYS_READ_FD) { return sys::read_fd($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_READDIR_NEXT) { return sys::readdir_next($args->[0]); }
-    if ($bid == BI::SYS_REALLOC) { return sys::realloc($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_SELECT_FDS) { return sys::select_fds($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_SERIAL_OPEN) { return sys::serial_open($args->[0], $args->[1], $args->[2]); }
-    if ($bid == BI::SYS_SET_BYTE) { return sys::set_byte($args->[0], $args->[1], $args->[2]); }
-    if ($bid == BI::SYS_SETEGID) { return sys::setegid($args->[0]); }
-    if ($bid == BI::SYS_SETEUID) { return sys::seteuid($args->[0]); }
-    if ($bid == BI::SYS_SETPGID) { return sys::setpgid($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_SETPGRP) { return sys::setpgrp(); }
-    if ($bid == BI::SYS_SETPRIORITY) { return sys::setpriority($args->[0], $args->[1], $args->[2]); }
-    if ($bid == BI::SYS_SETREGID) { return sys::setregid($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_SETREUID) { return sys::setreuid($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_SETRLIMIT) { return sys::setrlimit($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_SETSOCKOPT) { return sys::setsockopt($args->[0], $args->[1], $args->[2], $args->[3]); }
-    if ($bid == BI::SYS_SHUTDOWN) { return sys::shutdown($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_SIGPROCMASK) { return sys::sigprocmask($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_SLURP_FD) { return sys::slurp_fd($args->[0]); }
-    if ($bid == BI::SYS_SLURP_FH) { return sys::slurp_fh($args->[0]); }
-    if ($bid == BI::SYS_SOCKET_ACCEPT) { return sys::socket_accept($args->[0]); }
-    if ($bid == BI::SYS_SOCKET_CLIENT) { return sys::socket_client($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_SOCKET_FLUSH) { sys::socket_flush($args->[0]); return undef; }
-    if ($bid == BI::SYS_SOCKET_RECV) { return sys::socket_recv($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_SOCKET_SEND) { return sys::socket_send($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_SOCKET_SERVER_BACKLOG) { return sys::socket_server_backlog($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_SOCKET_SET_NONBLOCKING) { return sys::socket_set_nonblocking($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_SPEW_FD) { sys::spew_fd($args->[0], $args->[1]); return undef; }
-    if ($bid == BI::SYS_SPEW_FH) { sys::spew_fh($args->[0], $args->[1]); return undef; }
-    if ($bid == BI::SYS_STR_PTR) { return sys::str_ptr($args->[0]); }
-    if ($bid == BI::SYS_STRTOD) { return sys::strtod($args->[0]); }
-    if ($bid == BI::SYS_SYSTEM_ARGV) { return sys::system_argv($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_TCDRAIN) { return sys::tcdrain($args->[0]); }
-    if ($bid == BI::SYS_TCFLUSH) { return sys::tcflush($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_TCGETATTR) { return sys::tcgetattr($args->[0]); }
-    if ($bid == BI::SYS_TCSETATTR) { return sys::tcsetattr($args->[0], $args->[1], $args->[2]); }
-    if ($bid == BI::SYS_TERM_COLS) { return sys::term_cols(); }
-    if ($bid == BI::SYS_TERM_DISABLE_RAW) { return sys::term_disable_raw(); }
-    if ($bid == BI::SYS_TERM_ENABLE_RAW) { return sys::term_enable_raw(); }
-    if ($bid == BI::SYS_TERM_ROWS) { return sys::term_rows(); }
-    if ($bid == BI::SYS_TMPFILE) { return sys::tmpfile(); }
-    if ($bid == BI::SYS_TTYNAME) { return sys::ttyname($args->[0]); }
-    if ($bid == BI::SYS_TV_INTERVAL) { return sys::tv_interval($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_UDP_BIND) { return sys::udp_bind($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_UDP_RECVFROM) { return sys::udp_recvfrom($args->[0], $args->[1]); }
-    if ($bid == BI::SYS_UDP_SENDTO) { return sys::udp_sendto($args->[0], $args->[1], $args->[2], $args->[3], $args->[4]); }
-    if ($bid == BI::SYS_UDP_SERVER) { return sys::udp_server($args->[0]); }
-    if ($bid == BI::SYS_UDP_SOCKET) { return sys::udp_socket(); }
-    if ($bid == BI::SYS_UTIMES) { return sys::utimes($args->[0], $args->[1], $args->[2]); }
-    if ($bid == BI::SYS_WRITE_FD) { return sys::write_fd($args->[0], $args->[1]); }
+    # --- All remaining core::/core:: builtins (auto-generated call-through) ---
+    if ($bid == BI::SYS_BYTE_SUBSTR) { return core::byte_substr($args->[0], $args->[1], $args->[2]); }
+    if ($bid == BI::SYS_CALLOC) { return core::calloc($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_CFGETISPEED) { return core::cfgetispeed($args->[0]); }
+    if ($bid == BI::SYS_CFGETOSPEED) { return core::cfgetospeed($args->[0]); }
+    if ($bid == BI::SYS_CFSETISPEED) { return core::cfsetispeed($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_CFSETOSPEED) { return core::cfsetospeed($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_CLEARERR) { return core::clearerr($args->[0]); }
+    if ($bid == BI::SYS_CLOCK_GETRES) { return core::clock_getres($args->[0]); }
+    if ($bid == BI::SYS_CLOCK_GETTIME) { return core::clock_gettime($args->[0]); }
+    if ($bid == BI::SYS_CLOSE_FD) { return core::close_fd($args->[0]); }
+    if ($bid == BI::SYS_CLOSEDIR) { return core::closedir($args->[0]); }
+    if ($bid == BI::SYS_CSTRUCT_GET_DOUBLE) { return core::cstruct_get_double($args->[0], $args->[1], $args->[2]); }
+    if ($bid == BI::SYS_CSTRUCT_GET_INT) { return core::cstruct_get_int($args->[0], $args->[1], $args->[2]); }
+    if ($bid == BI::SYS_CSTRUCT_GET_STRING) { return core::cstruct_get_string($args->[0], $args->[1], $args->[2]); }
+    if ($bid == BI::SYS_CSTRUCT_NEW) { return core::cstruct_new($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_CSTRUCT_PTR) { return core::cstruct_ptr($args->[0]); }
+    if ($bid == BI::SYS_CSTRUCT_SET_DOUBLE) { core::cstruct_set_double($args->[0], $args->[1], $args->[2], $args->[3]); return undef; }
+    if ($bid == BI::SYS_CSTRUCT_SET_INT) { core::cstruct_set_int($args->[0], $args->[1], $args->[2], $args->[3]); return undef; }
+    if ($bid == BI::SYS_CSTRUCT_SET_STRING) { core::cstruct_set_string($args->[0], $args->[1], $args->[2], $args->[3]); return undef; }
+    if ($bid == BI::SYS_CTIME) { return core::ctime($args->[0]); }
+    if ($bid == BI::SYS_DL_CALL_EXPORT_INFO) { return core::dl_call_export_info($args->[0]); }
+    if ($bid == BI::SYS_DL_CALL_INT_SV) { return core::dl_call_int_sv($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_DL_CALL_STR) { return core::dl_call_str($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_DL_CALL_STR_SV) { return core::dl_call_str_sv($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_DL_CALL_SV) { return core::dl_call_sv($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_DL_CALL_VERSION) { return core::dl_call_version($args->[0]); }
+    if ($bid == BI::SYS_DL_CALL_VOID) { return core::dl_call_void($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_DL_CALL_VOID_SV) { return core::dl_call_void_sv($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_DUP) { return core::dup($args->[0]); }
+    if ($bid == BI::SYS_EXIT_STATUS) { return core::exit_status($args->[0]); }
+    if ($bid == BI::SYS_FCHMOD) { return core::fchmod($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_FCHOWN) { return core::fchown($args->[0], $args->[1], $args->[2]); }
+    if ($bid == BI::SYS_FCNTL) { return core::fcntl($args->[0], $args->[1], $args->[2]); }
+    if ($bid == BI::SYS_FERROR) { return core::ferror($args->[0]); }
+    if ($bid == BI::SYS_FGETC) { return core::fgetc($args->[0]); }
+    if ($bid == BI::SYS_FILENO) { return core::fileno($args->[0]); }
+    if ($bid == BI::SYS_FLOCK) { return core::flock($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_FPUTC) { return core::fputc($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_FSTATVFS) { return core::fstatvfs($args->[0]); }
+    if ($bid == BI::SYS_FTRUNCATE) { return core::ftruncate($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_FULL_PROFILE_START) { core::full_profile_start($args->[0]); return undef; }
+    if ($bid == BI::SYS_FULL_PROFILE_STOP) { core::full_profile_stop(); return undef; }
+    if ($bid == BI::SYS_GETGRNAM) { return core::getgrnam($args->[0]); }
+    if ($bid == BI::SYS_GETLOGIN) { return core::getlogin(); }
+    if ($bid == BI::SYS_GETPEERNAME) { return core::getpeername($args->[0]); }
+    if ($bid == BI::SYS_GETSOCKNAME) { return core::getsockname($args->[0]); }
+    if ($bid == BI::SYS_GETSOCKOPT) { return core::getsockopt($args->[0], $args->[1], $args->[2]); }
+    if ($bid == BI::SYS_GETTIMEOFDAY) { return core::gettimeofday(); }
+    if ($bid == BI::SYS_IOCTL) { return core::ioctl($args->[0], $args->[1], $args->[2]); }
+    if ($bid == BI::SYS_KILLPG) { return core::killpg($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_LCHOWN) { return core::lchown($args->[0], $args->[1], $args->[2]); }
+    if ($bid == BI::SYS_MEMPROF_DISABLE) { core::memprof_disable(); return undef; }
+    if ($bid == BI::SYS_MEMPROF_ENABLE) { core::memprof_enable(); return undef; }
+    if ($bid == BI::SYS_MEMPROF_REPORT) { core::memprof_report(); return undef; }
+    if ($bid == BI::SYS_MEMPROF_RESET) { core::memprof_reset(); return undef; }
+    if ($bid == BI::SYS_MKTIME) { return core::mktime($args->[0]); }
+    if ($bid == BI::SYS_MLOCK) { return core::mlock($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_MMAP) { return core::mmap($args->[0], $args->[1], $args->[2], $args->[3], $args->[4], $args->[5]); }
+    if ($bid == BI::SYS_MUNLOCK) { return core::munlock($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_MUNMAP) { return core::munmap($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_OPEN_FD) { return core::open_fd($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_OPENDIR) { return core::opendir($args->[0]); }
+    if ($bid == BI::SYS_PAUSE) { return core::pause(); }
+    if ($bid == BI::SYS_POLL) { return core::poll($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_PTR_DEREF_STR) { return core::ptr_deref_str($args->[0]); }
+    if ($bid == BI::SYS_QUOTEMETA) { return core::quotemeta($args->[0]); }
+    if ($bid == BI::SYS_RAISE) { return core::raise($args->[0]); }
+    if ($bid == BI::SYS_RANDOM_BYTES) { return core::random_bytes($args->[0]); }
+    if ($bid == BI::SYS_RANDOM_BYTES_HEX) { return core::random_bytes_hex($args->[0]); }
+    if ($bid == BI::SYS_READ_ALL_FD) { return core::read_all_fd($args->[0]); }
+    if ($bid == BI::SYS_READ_BYTE) { return core::read_byte($args->[0]); }
+    if ($bid == BI::SYS_READ_FD) { return core::read_fd($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_READDIR_NEXT) { return core::readdir_next($args->[0]); }
+    if ($bid == BI::SYS_REALLOC) { return core::realloc($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_SELECT_FDS) { return core::select_fds($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_SERIAL_OPEN) { return core::serial_open($args->[0], $args->[1], $args->[2]); }
+    if ($bid == BI::SYS_SET_BYTE) { return core::set_byte($args->[0], $args->[1], $args->[2]); }
+    if ($bid == BI::SYS_SETEGID) { return core::setegid($args->[0]); }
+    if ($bid == BI::SYS_SETEUID) { return core::seteuid($args->[0]); }
+    if ($bid == BI::SYS_SETPGID) { return core::setpgid($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_SETPGRP) { return core::setpgrp(); }
+    if ($bid == BI::SYS_SETPRIORITY) { return core::setpriority($args->[0], $args->[1], $args->[2]); }
+    if ($bid == BI::SYS_SETREGID) { return core::setregid($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_SETREUID) { return core::setreuid($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_SETRLIMIT) { return core::setrlimit($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_SETSOCKOPT) { return core::setsockopt($args->[0], $args->[1], $args->[2], $args->[3]); }
+    if ($bid == BI::SYS_SHUTDOWN) { return core::shutdown($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_SIGPROCMASK) { return core::sigprocmask($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_SLURP_FD) { return core::slurp_fd($args->[0]); }
+    if ($bid == BI::SYS_SLURP_FH) { return core::slurp_fh($args->[0]); }
+    if ($bid == BI::SYS_SOCKET_ACCEPT) { return core::socket_accept($args->[0]); }
+    if ($bid == BI::SYS_SOCKET_CLIENT) { return core::socket_client($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_SOCKET_FLUSH) { core::socket_flush($args->[0]); return undef; }
+    if ($bid == BI::SYS_SOCKET_RECV) { return core::socket_recv($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_SOCKET_SEND) { return core::socket_send($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_SOCKET_SERVER_BACKLOG) { return core::socket_server_backlog($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_SOCKET_SET_NONBLOCKING) { return core::socket_set_nonblocking($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_SPEW_FD) { core::spew_fd($args->[0], $args->[1]); return undef; }
+    if ($bid == BI::SYS_SPEW_FH) { core::spew_fh($args->[0], $args->[1]); return undef; }
+    if ($bid == BI::SYS_STR_PTR) { return core::str_ptr($args->[0]); }
+    if ($bid == BI::SYS_STRTOD) { return core::strtod($args->[0]); }
+    if ($bid == BI::SYS_SYSTEM_ARGV) { return core::system_argv($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_TCDRAIN) { return core::tcdrain($args->[0]); }
+    if ($bid == BI::SYS_TCFLUSH) { return core::tcflush($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_TCGETATTR) { return core::tcgetattr($args->[0]); }
+    if ($bid == BI::SYS_TCSETATTR) { return core::tcsetattr($args->[0], $args->[1], $args->[2]); }
+    if ($bid == BI::SYS_TERM_COLS) { return core::term_cols(); }
+    if ($bid == BI::SYS_TERM_DISABLE_RAW) { return core::term_disable_raw(); }
+    if ($bid == BI::SYS_TERM_ENABLE_RAW) { return core::term_enable_raw(); }
+    if ($bid == BI::SYS_TERM_ROWS) { return core::term_rows(); }
+    if ($bid == BI::SYS_TMPFILE) { return core::tmpfile(); }
+    if ($bid == BI::SYS_TTYNAME) { return core::ttyname($args->[0]); }
+    if ($bid == BI::SYS_TV_INTERVAL) { return core::tv_interval($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_UDP_BIND) { return core::udp_bind($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_UDP_RECVFROM) { return core::udp_recvfrom($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_UDP_SENDTO) { return core::udp_sendto($args->[0], $args->[1], $args->[2], $args->[3], $args->[4]); }
+    if ($bid == BI::SYS_UDP_SERVER) { return core::udp_server($args->[0]); }
+    if ($bid == BI::SYS_UDP_SOCKET) { return core::udp_socket(); }
+    if ($bid == BI::SYS_UTIMES) { return core::utimes($args->[0], $args->[1], $args->[2]); }
+    if ($bid == BI::SYS_WRITE_FD) { return core::write_fd($args->[0], $args->[1]); }
     if ($bid == BI::SLURP || $bid == BI::SYS_SLURP) {
         return slurp($args->[0]);
     }
@@ -3041,165 +3041,165 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         return undef;
     }
     if ($bid == BI::READLINE_FN) {
-        return sys::readline($args->[0]);
+        return core::readline($args->[0]);
     }
 
-    # ---- core::/sys:: functions ----
+    # ---- core::/core:: functions ----
     if ($bid == BI::SYS_EXIT) {
-        sys::exit($args->[0]);
+        core::exit($args->[0]);
     }
     if ($bid == BI::SYS_GETENV) {
-        return sys::getenv($args->[0]);
+        return core::getenv($args->[0]);
     }
     if ($bid == BI::SYS_SETENV) {
-        sys::setenv($args->[0], $args->[1]);
+        core::setenv($args->[0], $args->[1]);
         return undef;
     }
     if ($bid == BI::SYS_TIME) {
-        return sys::time();
+        return core::time();
     }
     if ($bid == BI::SYS_SLEEP) {
-        sys::sleep($args->[0]);
+        core::sleep($args->[0]);
         return undef;
     }
     if ($bid == BI::SYS_HIRES_TIME) {
-        return sys::hires_time();
+        return core::hires_time();
     }
     if ($bid == BI::SYS_OPEN) {
-        return sys::open($args->[0], $args->[1]);
+        return core::open($args->[0], $args->[1]);
     }
     if ($bid == BI::SYS_CLOSE) {
-        sys::close($args->[0]);
+        core::close($args->[0]);
         return undef;
     }
     if ($bid == BI::SYS_READLINE) {
-        return sys::readline($args->[0]);
+        return core::readline($args->[0]);
     }
     if ($bid == BI::SYS_EOF) {
-        return sys::eof($args->[0]);
+        return core::eof($args->[0]);
     }
     if ($bid == BI::SYS_FLUSH) {
-        sys::flush($args->[0]);
+        core::flush($args->[0]);
         return undef;
     }
     if ($bid == BI::SYS_POPEN) {
-        return sys::popen($args->[0], $args->[1]);
+        return core::popen($args->[0], $args->[1]);
     }
     if ($bid == BI::SYS_QX) {
-        return sys::qx($args->[0]);
+        return core::qx($args->[0]);
     }
     if ($bid == BI::SYS_SYSTEM) {
-        return sys::system($args->[0]);
+        return core::system($args->[0]);
     }
     if ($bid == BI::SYS_STACK_TRACE) {
         return "(interpreter stack trace not available)";
     }
 
-    # ---- sys:: file I/O ----
+    # ---- core:: file I/O ----
     if ($bid == BI::SYS_FWRITE) {
-        sys::fwrite($args->[0], $args->[1]);
+        core::fwrite($args->[0], $args->[1]);
         return undef;
     }
     if ($bid == BI::SYS_FREAD) {
-        return sys::fread($args->[0], $args->[1]);
+        return core::fread($args->[0], $args->[1]);
     }
     if ($bid == BI::SYS_FPUTS) {
-        sys::fputs($args->[0], $args->[1]);
+        core::fputs($args->[0], $args->[1]);
         return undef;
     }
     if ($bid == BI::SYS_FGETS) {
-        return sys::fgets($args->[0], $args->[1]);
+        return core::fgets($args->[0], $args->[1]);
     }
     if ($bid == BI::SYS_PCLOSE) {
-        sys::close($args->[0]);
+        core::close($args->[0]);
         return undef;
     }
     if ($bid == BI::SYS_TRUNCATE) {
-        sys::truncate($args->[0], $args->[1]);
+        core::truncate($args->[0], $args->[1]);
         return undef;
     }
     if ($bid == BI::SYS_OPEN_STR) {
-        return sys::open_str($args->[0], $args->[1]);
+        return core::open_str($args->[0], $args->[1]);
     }
     if ($bid == BI::SYS_STR_FROM_FH) {
-        return sys::str_from_fh($args->[0]);
+        return core::str_from_fh($args->[0]);
     }
 
-    # ---- sys:: filesystem ----
+    # ---- core:: filesystem ----
     if ($bid == BI::SYS_UNLINK) {
-        sys::unlink($args->[0]);
+        core::unlink($args->[0]);
         return undef;
     }
     if ($bid == BI::SYS_RENAME) {
-        sys::rename($args->[0], $args->[1]);
+        core::rename($args->[0], $args->[1]);
         return undef;
     }
     if ($bid == BI::SYS_MKDIR) {
-        sys::mkdir($args->[0], $args->[1]);
+        core::mkdir($args->[0], $args->[1]);
         return undef;
     }
     if ($bid == BI::SYS_RMDIR) {
-        sys::rmdir($args->[0]);
+        core::rmdir($args->[0]);
         return undef;
     }
     if ($bid == BI::SYS_CHMOD) {
-        sys::chmod($args->[0], $args->[1]);
+        core::chmod($args->[0], $args->[1]);
         return undef;
     }
     if ($bid == BI::SYS_LINK) {
-        sys::link($args->[0], $args->[1]);
+        core::link($args->[0], $args->[1]);
         return undef;
     }
     if ($bid == BI::SYS_SYMLINK) {
-        sys::symlink($args->[0], $args->[1]);
+        core::symlink($args->[0], $args->[1]);
         return undef;
     }
     if ($bid == BI::SYS_READLINK) {
-        return sys::readlink($args->[0]);
+        return core::readlink($args->[0]);
     }
     if ($bid == BI::SYS_STAT) {
-        return sys::stat($args->[0]);
+        return core::stat($args->[0]);
     }
     if ($bid == BI::SYS_LSTAT) {
-        return sys::lstat($args->[0]);
+        return core::lstat($args->[0]);
     }
     if ($bid == BI::SYS_ACCESS) {
-        return sys::access($args->[0], $args->[1]);
+        return core::access($args->[0], $args->[1]);
     }
     if ($bid == BI::SYS_IS_FILE) {
-        return sys::is_file($args->[0]);
+        return core::is_file($args->[0]);
     }
     if ($bid == BI::SYS_IS_DIR) {
-        return sys::is_dir($args->[0]);
+        return core::is_dir($args->[0]);
     }
     if ($bid == BI::SYS_FILE_EXISTS) {
-        return sys::access($args->[0], 0) == 0 ? 1 : 0;
+        return core::access($args->[0], 0) == 0 ? 1 : 0;
     }
     if ($bid == BI::SYS_IS_READABLE) {
-        return sys::access($args->[0], 4) == 0 ? 1 : 0;
+        return core::access($args->[0], 4) == 0 ? 1 : 0;
     }
     if ($bid == BI::SYS_IS_WRITABLE) {
-        return sys::access($args->[0], 2) == 0 ? 1 : 0;
+        return core::access($args->[0], 2) == 0 ? 1 : 0;
     }
     if ($bid == BI::SYS_IS_EXECUTABLE) {
-        return sys::access($args->[0], 1) == 0 ? 1 : 0;
+        return core::access($args->[0], 1) == 0 ? 1 : 0;
     }
     if ($bid == BI::SYS_IS_ZERO_SIZE) {
-        my scalar $st = sys::stat($args->[0]);
+        my scalar $st = core::stat($args->[0]);
         if (defined($st)) {
             return $st->{"size"} == 0 ? 1 : 0;
         }
         return 0;
     }
     if ($bid == BI::SYS_IS_SYMLINK) {
-        my scalar $st = sys::lstat($args->[0]);
+        my scalar $st = core::lstat($args->[0]);
         if (defined($st)) {
             return $st->{"type"} eq "link" ? 1 : 0;
         }
         return 0;
     }
     if ($bid == BI::SYS_FILE_SIZE) {
-        my scalar $st = sys::stat($args->[0]);
+        my scalar $st = core::stat($args->[0]);
         if (defined($st)) {
             return $st->{"size"};
         }
@@ -3214,117 +3214,117 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         return \%info;
     }
     if ($bid == BI::SYS_READDIR) {
-        return sys::readdir($args->[0]);
+        return core::readdir($args->[0]);
     }
     if ($bid == BI::SYS_READDIR_FULL) {
-        return sys::readdir_full($args->[0]);
+        return core::readdir_full($args->[0]);
     }
     if ($bid == BI::SYS_GLOB) {
-        return sys::glob($args->[0]);
+        return core::glob($args->[0]);
     }
     if ($bid == BI::SYS_FNMATCH) {
-        return sys::fnmatch($args->[0], $args->[1]);
+        return core::fnmatch($args->[0], $args->[1]);
     }
 
-    # ---- sys:: path ----
+    # ---- core:: path ----
     if ($bid == BI::SYS_DIRNAME) {
-        return sys::dirname($args->[0]);
+        return core::dirname($args->[0]);
     }
     if ($bid == BI::SYS_BASENAME) {
-        return sys::basename($args->[0]);
+        return core::basename($args->[0]);
     }
     if ($bid == BI::SYS_FILE_EXT) {
-        return sys::file_ext($args->[0]);
+        return core::file_ext($args->[0]);
     }
     if ($bid == BI::SYS_REALPATH) {
-        return sys::realpath($args->[0]);
+        return core::realpath($args->[0]);
     }
     if ($bid == BI::SYS_GETCWD) {
-        return sys::getcwd();
+        return core::getcwd();
     }
     if ($bid == BI::SYS_PATH_JOIN) {
-        return sys::path_join($args->[0], $args->[1]);
+        return core::path_join($args->[0], $args->[1]);
     }
 
-    # ---- sys:: process ----
+    # ---- core:: process ----
     if ($bid == BI::SYS_GETPID) {
-        return sys::getpid();
+        return core::getpid();
     }
     if ($bid == BI::SYS_GETPPID) {
-        return sys::getppid();
+        return core::getppid();
     }
     if ($bid == BI::SYS_FORK) {
-        return sys::fork();
+        return core::fork();
     }
     if ($bid == BI::SYS_WAIT) {
-        return sys::wait();
+        return core::wait();
     }
     if ($bid == BI::SYS_USLEEP) {
-        sys::usleep($args->[0]);
+        core::usleep($args->[0]);
         return undef;
     }
     if ($bid == BI::SYS_GETPROCNAME) {
-        return sys::getprocname();
+        return core::getprocname();
     }
     if ($bid == BI::SYS_SETPROCNAME) {
-        sys::setprocname($args->[0]);
+        core::setprocname($args->[0]);
         return undef;
     }
     if ($bid == BI::SYS_GETPROCTITLE) {
-        return sys::getprocname();
+        return core::getprocname();
     }
     if ($bid == BI::SYS_SETPROCTITLE) {
-        sys::setprocname($args->[0]);
+        core::setprocname($args->[0]);
         return undef;
     }
 
-    # ---- sys:: environment ----
+    # ---- core:: environment ----
     if ($bid == BI::SYS_UNSETENV) {
-        sys::unsetenv($args->[0]);
+        core::unsetenv($args->[0]);
         return undef;
     }
 
-    # ---- sys:: user/group ----
+    # ---- core:: user/group ----
     if ($bid == BI::SYS_GETUID) {
-        return sys::getuid();
+        return core::getuid();
     }
     if ($bid == BI::SYS_GETGID) {
-        return sys::getgid();
+        return core::getgid();
     }
     if ($bid == BI::SYS_GETEUID) {
-        return sys::geteuid();
+        return core::geteuid();
     }
     if ($bid == BI::SYS_GETEGID) {
-        return sys::getegid();
+        return core::getegid();
     }
     if ($bid == BI::SYS_GETPWUID) {
-        return sys::getpwuid($args->[0]);
+        return core::getpwuid($args->[0]);
     }
     if ($bid == BI::SYS_GETPWNAM) {
-        return sys::getpwnam($args->[0]);
+        return core::getpwnam($args->[0]);
     }
     if ($bid == BI::SYS_GETGRGID) {
-        return sys::getgrgid($args->[0]);
+        return core::getgrgid($args->[0]);
     }
     if ($bid == BI::SYS_GETGROUPS) {
-        return sys::getgroups();
+        return core::getgroups();
     }
 
-    # ---- sys:: misc ----
+    # ---- core:: misc ----
     if ($bid == BI::SYS_ISATTY) {
-        return sys::isatty($args->[0]);
+        return core::isatty($args->[0]);
     }
     if ($bid == BI::SYS_STRERROR) {
-        return sys::strerror($args->[0]);
+        return core::strerror($args->[0]);
     }
     if ($bid == BI::SYS_ERRNO) {
-        return sys::errno();
+        return core::errno();
     }
     if ($bid == BI::SYS_UMASK) {
-        return sys::umask($args->[0]);
+        return core::umask($args->[0]);
     }
     if ($bid == BI::SYS_UTIME) {
-        sys::utime($args->[0], $args->[1], $args->[2]);
+        core::utime($args->[0], $args->[1], $args->[2]);
         return undef;
     }
     if ($bid == BI::SYS_FREE) {
@@ -3336,69 +3336,69 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         return undef;
     }
 
-    # ---- sys:: network ----
+    # ---- core:: network ----
     if ($bid == BI::SYS_GETHOSTNAME) {
-        return sys::gethostname();
+        return core::gethostname();
     }
     if ($bid == BI::SYS_GETHOSTBYNAME) {
-        return sys::gethostbyname($args->[0]);
+        return core::gethostbyname($args->[0]);
     }
     if ($bid == BI::SYS_GETHOSTBYNAME_ALL) {
-        return sys::gethostbyname_all($args->[0]);
+        return core::gethostbyname_all($args->[0]);
     }
     if ($bid == BI::SYS_GETADDRINFO) {
-        return sys::getaddrinfo($args->[0], $args->[1]);
+        return core::getaddrinfo($args->[0], $args->[1]);
     }
     if ($bid == BI::SYS_INET_ADDR) {
-        return sys::inet_addr($args->[0]);
+        return core::inet_addr($args->[0]);
     }
     if ($bid == BI::SYS_INET_NTOA) {
-        return sys::inet_ntoa($args->[0]);
+        return core::inet_ntoa($args->[0]);
     }
     if ($bid == BI::SYS_HTONS) {
-        return sys::htons($args->[0]);
+        return core::htons($args->[0]);
     }
     if ($bid == BI::SYS_NTOHS) {
-        return sys::ntohs($args->[0]);
+        return core::ntohs($args->[0]);
     }
     if ($bid == BI::SYS_HTONL) {
-        return sys::htonl($args->[0]);
+        return core::htonl($args->[0]);
     }
     if ($bid == BI::SYS_NTOHL) {
-        return sys::ntohl($args->[0]);
+        return core::ntohl($args->[0]);
     }
     if ($bid == BI::SYS_INET_PTON) {
-        return sys::inet_pton($args->[0], $args->[1]);
+        return core::inet_pton($args->[0], $args->[1]);
     }
     if ($bid == BI::SYS_INET_NTOP) {
-        return sys::inet_ntop($args->[0], $args->[1]);
+        return core::inet_ntop($args->[0], $args->[1]);
     }
     if ($bid == BI::SYS_SOCKET_SERVER) {
-        if ($argc >= 3) { return sys::socket_server($args->[0], $args->[1], $args->[2]); }
-        return sys::socket_server($args->[0]);
+        if ($argc >= 3) { return core::socket_server($args->[0], $args->[1], $args->[2]); }
+        return core::socket_server($args->[0]);
     }
     if ($bid == BI::SYS_SOCKET_FD) {
-        return sys::socket_fd($args->[0]);
+        return core::socket_fd($args->[0]);
     }
     if ($bid == BI::SYS_SOCKET_CLOSE) {
-        sys::socket_close($args->[0]);
+        core::socket_close($args->[0]);
         return undef;
     }
     if ($bid == BI::SYS_SOCKET_SELECT) {
-        return sys::socket_select($args->[0], $args->[1]);
+        return core::socket_select($args->[0], $args->[1]);
     }
     if ($bid == BI::SYS_DL_OPEN) {
-        return sys::dl_open($args->[0]);
+        return core::dl_open($args->[0]);
     }
     if ($bid == BI::SYS_DL_SYM) {
-        return sys::dl_sym($args->[0], $args->[1]);
+        return core::dl_sym($args->[0], $args->[1]);
     }
     if ($bid == BI::SYS_DL_CLOSE) {
-        sys::dl_close($args->[0]);
+        core::dl_close($args->[0]);
         return undef;
     }
     if ($bid == BI::SYS_DL_ERROR) {
-        return sys::dl_error();
+        return core::dl_error();
     }
     if ($bid == BI::SYS_DL_CALL_NUM) {
         my scalar $fn_ptr = $args->[0];
@@ -3480,56 +3480,56 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         return undef;
     }
 
-    # ---- sys:: extended process ----
+    # ---- core:: extended process ----
     if ($bid == BI::SYS_GETPGRP) {
-        return sys::getpgrp();
+        return core::getpgrp();
     }
     if ($bid == BI::SYS_GETSID) {
-        return sys::getsid($args->[0]);
+        return core::getsid($args->[0]);
     }
     if ($bid == BI::SYS_GETPGID) {
-        return sys::getpgid($args->[0]);
+        return core::getpgid($args->[0]);
     }
     if ($bid == BI::SYS_NICE) {
-        return sys::nice($args->[0]);
+        return core::nice($args->[0]);
     }
     if ($bid == BI::SYS_GETPRIORITY) {
-        return sys::getpriority($args->[0], $args->[1]);
+        return core::getpriority($args->[0], $args->[1]);
     }
     if ($bid == BI::SYS_GETRUSAGE) {
-        return sys::getrusage($args->[0]);
+        return core::getrusage($args->[0]);
     }
     if ($bid == BI::SYS_GETRLIMIT) {
-        return sys::getrlimit($args->[0]);
+        return core::getrlimit($args->[0]);
     }
     if ($bid == BI::SYS_TIMES) {
-        return sys::times();
+        return core::times();
     }
     if ($bid == BI::SYS_CLOCK) {
-        return sys::clock();
+        return core::clock();
     }
 
-    # ---- sys:: temp/misc ----
+    # ---- core:: temp/misc ----
     if ($bid == BI::SYS_MKSTEMP) {
-        return sys::mkstemp($args->[0]);
+        return core::mkstemp($args->[0]);
     }
     if ($bid == BI::SYS_MKDTEMP) {
-        return sys::mkdtemp($args->[0]);
+        return core::mkdtemp($args->[0]);
     }
     if ($bid == BI::SYS_STATVFS) {
-        return sys::statvfs($args->[0]);
+        return core::statvfs($args->[0]);
     }
     if ($bid == BI::SYS_ATOI) {
-        return sys::atoi($args->[0]);
+        return core::atoi($args->[0]);
     }
     if ($bid == BI::SYS_ATOF) {
-        return sys::atof($args->[0]);
+        return core::atof($args->[0]);
     }
     if ($bid == BI::SYS_STRTOL) {
-        return sys::strtol($args->[0], $args->[1]);
+        return core::strtol($args->[0], $args->[1]);
     }
     if ($bid == BI::SYS_DIFFTIME) {
-        return sys::difftime($args->[0], $args->[1]);
+        return core::difftime($args->[0], $args->[1]);
     }
     if ($bid == BI::SYS_SRAND) {
         __C__ {
@@ -3562,20 +3562,20 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         return $result;
     }
 
-    # ---- sys:: seek/tell ----
+    # ---- core:: seek/tell ----
     if ($bid == BI::SYS_SEEK) {
-        sys::seek($args->[0], $args->[1], $args->[2]);
+        core::seek($args->[0], $args->[1], $args->[2]);
         return undef;
     }
     if ($bid == BI::SYS_TELL) {
-        return sys::tell($args->[0]);
+        return core::tell($args->[0]);
     }
     if ($bid == BI::SYS_REWIND) {
-        sys::rewind($args->[0]);
+        core::rewind($args->[0]);
         return undef;
     }
 
-    # ---- sys:: weak references ----
+    # ---- core:: weak references ----
     if ($bid == BI::SYS_WEAKEN) {
         return undef;
     }
@@ -3583,7 +3583,7 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         return 0;
     }
 
-    # ---- sys:: global variable registry ----
+    # ---- core:: global variable registry ----
     if ($bid == BI::SYS_GLOBAL_SET) {
         env_set($interp->{"global_env"}, $args->[0], $args->[1]);
         return undef;
@@ -3605,15 +3605,15 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         return keys($interp->{"global_env"}->{"vars"});
     }
 
-    # ---- sys:: exit/signal ----
+    # ---- core:: exit/signal ----
     if ($bid == BI::SYS_EXIT_NOCLEAN) {
-        sys::exit($args->[0]);
+        core::exit($args->[0]);
     }
     if ($bid == BI::SYS_SIGNAL) {
         return undef;
     }
 
-    # ---- sys:: context functions ----
+    # ---- core:: context functions ----
     if ($bid == BI::SYS_WANTSCALAR) {
         return 1;
     }
@@ -4137,7 +4137,7 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         return bless(\%self, "BigFloat");
     }
 
-    # If we got here with a sys::/core::/math::/utf8:: prefix, it's genuinely undefined
+    # If we got here with a core::/core::/math::/utf8:: prefix, it's genuinely undefined
     die("Undefined function: " . $name);
 }
 
@@ -4823,7 +4823,7 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
         my str $varname = $node->{"varname"};
         my scalar $fh = env_get($env, $varname);
         if (defined($fh)) {
-            return sys::readline($fh);
+            return core::readline($fh);
         }
         return undef;
     }

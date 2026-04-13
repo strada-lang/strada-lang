@@ -112,14 +112,14 @@ func parse_func_def(str $line) str {
 func parse_source(str $filename) hash {
     my hash %funcs = ();
 
-    my scalar $fh = sys::open($filename, "r");
+    my scalar $fh = core::open($filename, "r");
     if (length($fh) == 0) {
         return %funcs;
     }
 
     my str $line = "";
-    while (!sys::eof($fh)) {
-        $line = sys::readline($fh);
+    while (!core::eof($fh)) {
+        $line = core::readline($fh);
         $line = chomp($line);
 
         my str $parsed = parse_func_def($line);
@@ -139,7 +139,7 @@ func parse_source(str $filename) hash {
         }
     }
 
-    sys::close($fh);
+    core::close($fh);
     return %funcs;
 }
 
@@ -161,14 +161,14 @@ func parse_export_info(str $info) hash {
                 # when @parts goes out of scope
                 my str $name = "" . $parts[1];
                 my str $ret = "" . $parts[2];
-                my int $param_count = sys::atoi($parts[3]);
+                my int $param_count = core::atoi($parts[3]);
                 my str $param_types = "";
                 if (scalar(@parts) > 4) {
                     $param_types = "" . $parts[4];
                 }
                 my int $variadic_idx = -1;
                 if (scalar(@parts) > 5) {
-                    $variadic_idx = sys::atoi($parts[5]);
+                    $variadic_idx = core::atoi($parts[5]);
                 }
 
                 my hash %info = ();
@@ -241,7 +241,7 @@ func generate_example(str $name, hash %info, str $lib_var) str {
     my str $code = "";
 
     # Get function pointer
-    $code = $code . "my int " . $dollar . $name . "_fn = sys::dl_sym(" . $lib_var . ", \"" . $name . "\");\n";
+    $code = $code . "my int " . $dollar . $name . "_fn = core::dl_sym(" . $lib_var . ", \"" . $name . "\");\n";
 
     # Build args array
     my str $args = "[]";
@@ -270,9 +270,9 @@ func generate_example(str $name, hash %info, str $lib_var) str {
 
     # Generate call
     if ($ret eq "void") {
-        $code = $code . "sys::dl_call_sv(" . $dollar . $name . "_fn, " . $args . ");\n";
+        $code = $code . "core::dl_call_sv(" . $dollar . $name . "_fn, " . $args . ");\n";
     } else {
-        $code = $code . "my " . $ret . " " . $dollar . "result = sys::dl_call_sv(" . $dollar . $name . "_fn, " . $args . ");\n";
+        $code = $code . "my " . $ret . " " . $dollar . "result = core::dl_call_sv(" . $dollar . $name . "_fn, " . $args . ");\n";
     }
 
     return $code;
@@ -287,7 +287,7 @@ func generate_example_from_export(str $name, hash %info, str $lib_var) str {
     my str $code = "";
 
     # Get function pointer
-    $code = $code . "my int " . $dollar . $name . "_fn = sys::dl_sym(" . $lib_var . ", \"" . $name . "\");\n";
+    $code = $code . "my int " . $dollar . $name . "_fn = core::dl_sym(" . $lib_var . ", \"" . $name . "\");\n";
 
     # Build args array
     my str $args = "[]";
@@ -310,9 +310,9 @@ func generate_example_from_export(str $name, hash %info, str $lib_var) str {
 
     # Generate call
     if ($ret eq "void") {
-        $code = $code . "sys::dl_call_sv(" . $dollar . $name . "_fn, " . $args . ");\n";
+        $code = $code . "core::dl_call_sv(" . $dollar . $name . "_fn, " . $args . ");\n";
     } else {
-        $code = $code . "my " . $ret . " " . $dollar . "result = sys::dl_call_sv(" . $dollar . $name . "_fn, " . $args . ");\n";
+        $code = $code . "my " . $ret . " " . $dollar . "result = core::dl_call_sv(" . $dollar . $name . "_fn, " . $args . ");\n";
     }
 
     return $code;
@@ -322,22 +322,22 @@ func generate_example_from_export(str $name, hash %info, str $lib_var) str {
 # Returns: export info string if Strada library, empty string otherwise
 func get_strada_export_info(str $so_file) str {
     # Load the library
-    my int $handle = sys::dl_open($so_file);
+    my int $handle = core::dl_open($so_file);
     if ($handle == 0) {
         return "";
     }
 
     # Look for __strada_export_info symbol
-    my int $fn_ptr = sys::dl_sym($handle, "__strada_export_info");
+    my int $fn_ptr = core::dl_sym($handle, "__strada_export_info");
     if ($fn_ptr == 0) {
-        sys::dl_close($handle);
+        core::dl_close($handle);
         return "";
     }
 
     # Call the export info function
-    my str $info = sys::dl_call_export_info($fn_ptr);
+    my str $info = core::dl_call_export_info($fn_ptr);
 
-    sys::dl_close($handle);
+    core::dl_close($handle);
     return $info;
 }
 
@@ -345,7 +345,7 @@ func get_strada_export_info(str $so_file) str {
 # The export info is embedded in .rodata as "func:name:ret:count:types:variadic"
 func get_export_info_from_binary(str $file) str {
     my str $cmd = "strings " . $file . " 2>/dev/null";
-    my str $output = sys::qx($cmd);
+    my str $output = core::qx($cmd);
 
     # Collect all lines that match the export info format
     my str $result = "";
@@ -377,22 +377,22 @@ func get_export_info_from_binary(str $file) str {
 # Get the version string from a Strada shared library
 # Returns: version string if available, empty string otherwise
 func get_strada_version(str $so_file) str {
-    my int $handle = sys::dl_open($so_file);
+    my int $handle = core::dl_open($so_file);
     if ($handle == 0) {
         return "";
     }
 
     # Look for __strada_version symbol
-    my int $fn_ptr = sys::dl_sym($handle, "__strada_version");
+    my int $fn_ptr = core::dl_sym($handle, "__strada_version");
     if ($fn_ptr == 0) {
-        sys::dl_close($handle);
+        core::dl_close($handle);
         return "";
     }
 
     # Call the version function
-    my str $ver = sys::dl_call_version($fn_ptr);
+    my str $ver = core::dl_call_version($fn_ptr);
 
-    sys::dl_close($handle);
+    core::dl_close($handle);
     return $ver;
 }
 
@@ -508,7 +508,7 @@ func main(int $argc, array @argv) int {
     }
 
     # Check if file exists
-    if (!sys::is_file($so_file)) {
+    if (!core::is_file($so_file)) {
         say("Error: File not found: " . $so_file);
         return 1;
     }
@@ -558,12 +558,12 @@ func main(int $argc, array @argv) int {
         if (length($source_file) == 0) {
             my str $base = $so_file;
             $base =~ s/\.(so|o|a)$/.strada/;
-            if (sys::is_file($base)) {
+            if (core::is_file($base)) {
                 $source_file = $base;
             }
         }
 
-        if (length($source_file) > 0 && sys::is_file($source_file)) {
+        if (length($source_file) > 0 && core::is_file($source_file)) {
             %source_funcs = parse_source($source_file);
         }
     }
@@ -575,7 +575,7 @@ func main(int $argc, array @argv) int {
         $nm_flags = "-D ";
     }
     my str $cmd = "nm " . $nm_flags . "--defined-only " . $so_file . " 2>/dev/null";
-    my str $nm_output = sys::qx($cmd);
+    my str $nm_output = core::qx($cmd);
 
     # Collect function names from nm output
     my array @nm_functions = ();
@@ -776,9 +776,9 @@ func main(int $argc, array @argv) int {
             say("# Dynamic loading (C library):");
         }
 
-        say("my int " . chr(36) . "lib = sys::dl_open(\"./" . $so_file . "\");");
+        say("my int " . chr(36) . "lib = core::dl_open(\"./" . $so_file . "\");");
         say("if (" . chr(36) . "lib == 0) {");
-        say("    say(\"Failed to load: \" . sys::dl_error());");
+        say("    say(\"Failed to load: \" . core::dl_error());");
         say("    return 1;");
         say("}");
         say("");
@@ -800,8 +800,8 @@ func main(int $argc, array @argv) int {
                 print($example);
             } else {
                 # Generic example without type info
-                say("my int " . chr(36) . $name . "_fn = sys::dl_sym(" . chr(36) . "lib, \"" . $name . "\");");
-                say("my scalar " . chr(36) . "result = sys::dl_call_sv(" . chr(36) . $name . "_fn, [arg1, arg2, ...]);");
+                say("my int " . chr(36) . $name . "_fn = core::dl_sym(" . chr(36) . "lib, \"" . $name . "\");");
+                say("my scalar " . chr(36) . "result = core::dl_call_sv(" . chr(36) . $name . "_fn, [arg1, arg2, ...]);");
             }
             say("");
 
@@ -810,7 +810,7 @@ func main(int $argc, array @argv) int {
 
         # Cleanup
         say("# Cleanup:");
-        say("sys::dl_close(" . chr(36) . "lib);");
+        say("core::dl_close(" . chr(36) . "lib);");
     }
 
     return 0;

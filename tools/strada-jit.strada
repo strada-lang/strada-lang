@@ -163,25 +163,25 @@ func display_error(str $error_msg) void {
 
 # Run a script file
 func run_script(str $filename) int {
-    if (sys::is_file($filename) == 0) {
+    if (core::is_file($filename) == 0) {
         say("Error: File not found: " . $filename);
         return 1;
     }
 
-    my scalar $fh = sys::open($filename, "r");
+    my scalar $fh = core::open($filename, "r");
     if (!defined($fh)) {
         say("Error: Could not open file: " . $filename);
         return 1;
     }
 
     my array @lines = ();
-    my scalar $line = sys::fgets($fh, 65536);
+    my scalar $line = core::fgets($fh, 65536);
     while (defined($line)) {
         $line =~ s/\n$//;
         push(@lines, $line);
-        $line = sys::fgets($fh, 65536);
+        $line = core::fgets($fh, 65536);
     }
-    sys::close($fh);
+    core::close($fh);
 
     my str $buffer = "";
     my int $continuation = 0;
@@ -243,11 +243,11 @@ func main(int $argc, array @argv) int {
 
     # Detect tools directory from argv[0]
     my str $self_path = $argv[0];
-    my str $real_path = sys::realpath($self_path);
+    my str $real_path = core::realpath($self_path);
     if ($real_path ne "") {
-        $g_repl_tools_dir = sys::dirname($real_path);
+        $g_repl_tools_dir = core::dirname($real_path);
     } else {
-        $g_repl_tools_dir = sys::dirname($self_path);
+        $g_repl_tools_dir = core::dirname($self_path);
     }
 
     # Initialize the REPL library
@@ -440,12 +440,12 @@ func main(int $argc, array @argv) int {
             $filename =~ s/^\.load\s+//;
             $filename =~ s/\s+$//;
 
-            if (sys::is_file($filename) == 0) {
+            if (core::is_file($filename) == 0) {
                 say("Error: File not found: " . $filename);
                 next;
             }
 
-            my scalar $lfh = sys::open($filename, "r");
+            my scalar $lfh = core::open($filename, "r");
             if (!defined($lfh)) {
                 say("Error: Could not open file: " . $filename);
                 next;
@@ -453,7 +453,7 @@ func main(int $argc, array @argv) int {
 
             say("Loading " . $filename . "...");
             my int $line_count = 0;
-            my scalar $file_line = sys::fgets($lfh, 65536);
+            my scalar $file_line = core::fgets($lfh, 65536);
             while (defined($file_line)) {
                 $file_line =~ s/\n$//;
                 $file_line =~ s/\r$//;
@@ -469,9 +469,9 @@ func main(int $argc, array @argv) int {
                     }
                 }
 
-                $file_line = sys::fgets($lfh, 65536);
+                $file_line = core::fgets($lfh, 65536);
             }
-            sys::close($lfh);
+            core::close($lfh);
             say("Loaded " . $line_count . " lines from " . $filename);
             next;
         }
@@ -482,18 +482,18 @@ func main(int $argc, array @argv) int {
             $filename =~ s/^\.soinfo\s+//;
             $filename =~ s/\s+$//;
 
-            if (sys::is_file($filename) == 0) {
+            if (core::is_file($filename) == 0) {
                 say("Error: File not found: " . $filename);
                 next;
             }
 
             my str $soinfo_path = "";
             my str $sibling_path = $g_repl_tools_dir . "/strada-soinfo";
-            if (sys::is_file($sibling_path) == 1) {
+            if (core::is_file($sibling_path) == 1) {
                 $soinfo_path = $sibling_path;
-            } elsif (sys::is_file("/usr/local/bin/strada-soinfo") == 1) {
+            } elsif (core::is_file("/usr/local/bin/strada-soinfo") == 1) {
                 $soinfo_path = "/usr/local/bin/strada-soinfo";
-            } elsif (sys::is_file("/usr/bin/strada-soinfo") == 1) {
+            } elsif (core::is_file("/usr/bin/strada-soinfo") == 1) {
                 $soinfo_path = "/usr/bin/strada-soinfo";
             }
 
@@ -503,7 +503,7 @@ func main(int $argc, array @argv) int {
             }
 
             my str $cmd = $soinfo_path . " " . $filename . " 2>&1";
-            my str $output = sys::qx($cmd);
+            my str $output = core::qx($cmd);
             print($output);
             next;
         }

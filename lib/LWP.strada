@@ -515,7 +515,7 @@ func read_response(scalar $sock) str {
     my int $reads = 0;
 
     while ($reads < $max_reads) {
-        my str $chunk = sys::socket_recv($sock, 8192);
+        my str $chunk = core::socket_recv($sock, 8192);
         if (!defined($chunk) || length($chunk) == 0) {
             break;
         }
@@ -617,16 +617,16 @@ func do_request(str $method, str $url, str $body, hash %options) hash {
     }
 
     # Plain HTTP
-    my scalar $sock = sys::socket_client($host, $port);
+    my scalar $sock = core::socket_client($host, $port);
     if (!defined($sock)) {
         $response{"error"} = "Connection failed to " . $host . ":" . $port;
         return %response;
     }
 
-    sys::socket_send($sock, $request);
+    core::socket_send($sock, $request);
 
     my str $raw_response = LWP::read_response($sock);
-    sys::socket_close($sock);
+    core::socket_close($sock);
 
     return LWP::parse_response($raw_response);
 }

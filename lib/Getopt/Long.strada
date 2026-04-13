@@ -1,7 +1,7 @@
 package Getopt::Long;
 version "1.0.0";
 
-# GetOptions - Parse command-line options from sys::argv()
+# GetOptions - Parse command-line options from core::argv()
 #
 # Usage:
 #   use lib "lib";
@@ -113,7 +113,7 @@ private func matches_spec(str $arg, str $primary, str $aliases) int {
 # %opts: hash to fill with parsed values (must be pre-populated with defaults)
 # Returns: 1 on success, 0 on error
 func GetOptions(array @specs, hash %opts) int {
-    my array @args = sys::argv();
+    my array @args = core::argv();
     my int $argc = scalar(@args);
     my int $i = 1;  # Skip program name
     @__remaining = ();

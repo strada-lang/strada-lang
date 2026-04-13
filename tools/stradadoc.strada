@@ -18,7 +18,7 @@
 # stradadoc - Display Strada documentation (like perldoc)
 #
 # Usage: stradadoc [topic]
-#        stradadoc sys              # Show sys:: functions
+#        stradadoc sys              # Show core:: functions
 #        stradadoc LANGUAGE         # Show language guide
 #        stradadoc Device::SerialPort  # Show module POD
 #
@@ -37,7 +37,7 @@ func usage() void {
     say("");
     say("Examples:");
     say("  stradadoc                   # List available docs");
-    say("  stradadoc sys               # Show sys:: functions");
+    say("  stradadoc sys               # Show core:: functions");
     say("  stradadoc LANGUAGE          # Show language guide");
     say("  stradadoc Device::SerialPort # Show module documentation");
     say("  stradadoc IPC::Open3        # Show module documentation");
@@ -46,17 +46,17 @@ func usage() void {
 # Get the docs directory path
 func get_docs_path() str {
     # Try common locations in order of preference
-    if (sys::is_dir("docs")) {
+    if (core::is_dir("docs")) {
         return "docs";
     }
-    if (sys::is_dir("../docs")) {
+    if (core::is_dir("../docs")) {
         return "../docs";
     }
     # Check installed location
-    if (sys::is_dir("/usr/local/share/doc/strada")) {
+    if (core::is_dir("/usr/local/share/doc/strada")) {
         return "/usr/local/share/doc/strada";
     }
-    if (sys::is_dir("/usr/share/doc/strada")) {
+    if (core::is_dir("/usr/share/doc/strada")) {
         return "/usr/share/doc/strada";
     }
     return "docs";
@@ -71,15 +71,15 @@ func trim(str $s) str {
 
 # Get terminal width (default 80)
 func get_term_width() int {
-    my int $pipe = sys::popen("tput cols 2>/dev/null", "r");
+    my int $pipe = core::popen("tput cols 2>/dev/null", "r");
     if ($pipe < 0) {
         return 80;
     }
-    my str $width_str = sys::readline($pipe);
-    sys::pclose($pipe);
+    my str $width_str = core::readline($pipe);
+    core::pclose($pipe);
     $width_str = trim($width_str);
     if (length($width_str) > 0) {
-        my int $w = sys::atoi($width_str);
+        my int $w = core::atoi($width_str);
         if ($w > 40) {
             return $w;
         }
@@ -153,20 +153,20 @@ func get_lib_paths() array {
     my array @paths = ();
 
     # Current directory lib
-    if (sys::is_dir("lib")) {
+    if (core::is_dir("lib")) {
         push(@paths, "lib");
     }
 
     # Parent directory lib
-    if (sys::is_dir("../lib")) {
+    if (core::is_dir("../lib")) {
         push(@paths, "../lib");
     }
 
     # Installed location
-    if (sys::is_dir("/usr/local/lib/strada/lib")) {
+    if (core::is_dir("/usr/local/lib/strada/lib")) {
         push(@paths, "/usr/local/lib/strada/lib");
     }
-    if (sys::is_dir("/usr/lib/strada/lib")) {
+    if (core::is_dir("/usr/lib/strada/lib")) {
         push(@paths, "/usr/lib/strada/lib");
     }
 
@@ -189,7 +189,7 @@ func find_module(str $module) str {
     my int $i = 0;
     while ($i < scalar(@lib_paths)) {
         my str $full_path = $lib_paths[$i] . "/" . $rel_path;
-        if (sys::is_file($full_path)) {
+        if (core::is_file($full_path)) {
             return $full_path;
         }
         $i = $i + 1;
@@ -209,7 +209,7 @@ func is_module_name(str $topic) int {
 # Extract POD from a .strada file
 # Returns the POD content as a string
 func extract_pod(str $filepath) str {
-    my scalar $fh = sys::open($filepath, "r");
+    my scalar $fh = core::open($filepath, "r");
     if (!defined($fh)) {
         return "";
     }
@@ -217,8 +217,8 @@ func extract_pod(str $filepath) str {
     my str $pod = "";
     my int $in_pod = 0;
 
-    while (!sys::eof($fh)) {
-        my str $line = sys::readline($fh);
+    while (!core::eof($fh)) {
+        my str $line = core::readline($fh);
         # Strip trailing newline/carriage return (we'll add newlines back when building)
         $line =~ s/\n$//;
         $line =~ s/\r$//;
@@ -240,7 +240,7 @@ func extract_pod(str $filepath) str {
         }
     }
 
-    sys::close($fh);
+    core::close($fh);
     return $pod;
 }
 
@@ -472,7 +472,7 @@ func list_modules_with_pod(array @lib_paths) void {
 
 # Recursively list modules in a directory
 func list_modules_recursive(str $base_path, str $current_path) void {
-    my array @entries = sys::readdir($current_path);
+    my array @entries = core::readdir($current_path);
 
     my int $i = 0;
     while ($i < scalar(@entries)) {
@@ -485,7 +485,7 @@ func list_modules_recursive(str $base_path, str $current_path) void {
 
         my str $full_path = $current_path . "/" . $entry;
 
-        if (sys::is_dir($full_path)) {
+        if (core::is_dir($full_path)) {
             list_modules_recursive($base_path, $full_path);
         } elsif ($entry =~ /\.strada$/) {
             # Check if it has POD
@@ -573,7 +573,7 @@ func format_inline(str $line) str {
 
 # Format markdown and return as string
 func format_markdown(str $filepath, int $raw_mode) str {
-    my scalar $fh = sys::open($filepath, "r");
+    my scalar $fh = core::open($filepath, "r");
     if (length($fh) == 0) {
         return "Error: Cannot open file: " . $filepath . "\n";
     }
@@ -584,8 +584,8 @@ func format_markdown(str $filepath, int $raw_mode) str {
     my int $in_list = 0;
     my str $line = "";
 
-    while (!sys::eof($fh)) {
-        $line = sys::readline($fh);
+    while (!core::eof($fh)) {
+        $line = core::readline($fh);
         $line =~ s/\n$//;
         $line =~ s/\r$//;
 
@@ -715,7 +715,7 @@ func format_markdown(str $filepath, int $raw_mode) str {
         $output = $output . $wrapped . "\n";
     }
 
-    sys::close($fh);
+    core::close($fh);
     $output = $output . "\n";
     return $output;
 }
@@ -730,7 +730,7 @@ func list_docs(str $docs_path) void {
     say("");
 
     # List main docs
-    my array @main_docs = sys::readdir($docs_path);
+    my array @main_docs = core::readdir($docs_path);
     my int $i = 0;
     while ($i < scalar(@main_docs)) {
         my str $name = $main_docs[$i];
@@ -747,11 +747,11 @@ func list_docs(str $docs_path) void {
 
     # List extended docs
     my str $extended_path = $docs_path . "/extended";
-    if (sys::is_dir($extended_path)) {
+    if (core::is_dir($extended_path)) {
         say(color_bold() . "Extended Documentation:" . color_reset());
         say("");
 
-        my array @ext_docs = sys::readdir($extended_path);
+        my array @ext_docs = core::readdir($extended_path);
         my int $j = 0;
         while ($j < scalar(@ext_docs)) {
             my str $name = $ext_docs[$j];
@@ -776,7 +776,7 @@ func list_docs(str $docs_path) void {
 
     say("Usage: stradadoc <topic>");
     say("Examples:");
-    say("  stradadoc sys               # Show sys:: functions");
+    say("  stradadoc sys               # Show core:: functions");
     say("  stradadoc Device::SerialPort # Show module POD");
 }
 
@@ -788,7 +788,7 @@ func find_doc(str $docs_path, str $topic) str {
 
     # Try exact match in main docs
     my str $path = $docs_path . "/" . $search . ".md";
-    if (sys::is_file($path)) {
+    if (core::is_file($path)) {
         return $path;
     }
 
@@ -806,25 +806,25 @@ func find_doc(str $docs_path, str $topic) str {
         $i = $i + 1;
     }
     $path = $docs_path . "/" . $upper . ".md";
-    if (sys::is_file($path)) {
+    if (core::is_file($path)) {
         return $path;
     }
 
     # Try with _GUIDE suffix
     $path = $docs_path . "/" . $upper . "_GUIDE.md";
-    if (sys::is_file($path)) {
+    if (core::is_file($path)) {
         return $path;
     }
 
     # Try with _REFERENCE suffix
     $path = $docs_path . "/" . $upper . "_REFERENCE.md";
-    if (sys::is_file($path)) {
+    if (core::is_file($path)) {
         return $path;
     }
 
     # Try in extended directory
     $path = $docs_path . "/extended/" . $search . ".md";
-    if (sys::is_file($path)) {
+    if (core::is_file($path)) {
         return $path;
     }
 
@@ -842,12 +842,12 @@ func find_doc(str $docs_path, str $topic) str {
         $i = $i + 1;
     }
     $path = $docs_path . "/extended/" . $lower . ".md";
-    if (sys::is_file($path)) {
+    if (core::is_file($path)) {
         return $path;
     }
 
     # Search for partial matches
-    my array @files = sys::readdir($docs_path);
+    my array @files = core::readdir($docs_path);
     my int $j = 0;
     while ($j < scalar(@files)) {
         my str $name = $files[$j];
@@ -875,8 +875,8 @@ func find_doc(str $docs_path, str $topic) str {
 
     # Search extended directory
     my str $ext_path = $docs_path . "/extended";
-    if (sys::is_dir($ext_path)) {
-        my array @ext_files = sys::readdir($ext_path);
+    if (core::is_dir($ext_path)) {
+        my array @ext_files = core::readdir($ext_path);
         my int $m = 0;
         while ($m < scalar(@ext_files)) {
             my str $name = $ext_files[$m];
@@ -973,16 +973,16 @@ func main(int $argc, array @argv) int {
 
     # Check if we should use pager
     my int $use_pager = 0;
-    if ($no_pager == 0 && sys::isatty(1) == 1) {
+    if ($no_pager == 0 && core::isatty(1) == 1) {
         $use_pager = 1;
     }
 
     if ($use_pager == 1) {
         # Pipe through less with color support
-        my scalar $pipe = sys::popen("less -R", "w");
+        my scalar $pipe = core::popen("less -R", "w");
         if (length($pipe) > 0) {
-            sys::fputs($content, $pipe);
-            sys::pclose($pipe);
+            core::fputs($content, $pipe);
+            core::pclose($pipe);
         } else {
             # Fallback to direct output
             print($content);

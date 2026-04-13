@@ -114,7 +114,7 @@ func history_save(str $path) void {
 
 # Get path to history file (~/.strada_interp_history)
 func get_history_path() str {
-    my str $home = sys::getenv("HOME");
+    my str $home = core::getenv("HOME");
     if (!defined($home)) { return ""; }
     if (length($home) == 0) { return ""; }
     return $home . "/.strada_interp_history";
@@ -463,7 +463,7 @@ func run_repl(scalar $interp) void {
         # .load FILE
         if (starts_with($input, ".load ")) {
             my str $filename = str_trim(substr($input, 6, length($input) - 6));
-            if (sys::is_file($filename) == 0) {
+            if (core::is_file($filename) == 0) {
                 say("Error: File not found: " . $filename);
                 next;
             }
@@ -556,9 +556,9 @@ func run_file(scalar $interp, str $filename, scalar $argv) int {
     push(@lib_paths, $source_dir);
 
     # Change to project root so relative use-lib paths resolve correctly
-    my str $saved_cwd = sys::getcwd();
+    my str $saved_cwd = core::getcwd();
     if (length($project_root) > 0) {
-        sys::chdir($project_root);
+        core::chdir($project_root);
     }
 
     # Tokenize and parse
@@ -569,7 +569,7 @@ func run_file(scalar $interp, str $filename, scalar $argv) int {
     my scalar $program = parse_program($parser, \@lib_paths, \@empty);
 
     # Restore original working directory
-    sys::chdir($saved_cwd);
+    core::chdir($saved_cwd);
 
     # Load program into interpreter (also runs BEGIN blocks)
     Strada::Interpreter::interp_load_program($interp, $program);

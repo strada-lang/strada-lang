@@ -96,11 +96,11 @@ Get parsed fields as array reference.
 
 Read and parse next line from filehandle. Returns array ref or undef at EOF.
 
-    my scalar $fh = sys::open("data.csv", "r");
+    my scalar $fh = core::open("data.csv", "r");
     while (my scalar $row = Text::CSV::getline($csv, $fh)) {
         say($row->[0]);
     }
-    sys::close($fh);
+    core::close($fh);
 
 =head2 error_diag($csv)
 
@@ -127,7 +127,7 @@ Get the combined CSV string.
 
     # Parse CSV file
     my scalar $csv = Text::CSV::new({ "sep_char" => "," });
-    my scalar $fh = sys::open("users.csv", "r");
+    my scalar $fh = core::open("users.csv", "r");
 
     # Skip header
     Text::CSV::getline($csv, $fh);
@@ -138,10 +138,10 @@ Get the combined CSV string.
         my str $email = $row->[1];
         say("Name: " . $name . ", Email: " . $email);
     }
-    sys::close($fh);
+    core::close($fh);
 
     # Write CSV
-    my scalar $out = sys::open("output.csv", "w");
+    my scalar $out = core::open("output.csv", "w");
     my scalar $writer = Text::CSV::new({ "always_quote" => 1 });
 
     Text::CSV::combine($writer, ["Name", "Email", "Score"]);
@@ -150,7 +150,7 @@ Get the combined CSV string.
     Text::CSV::combine($writer, ["Alice", "alice@example.com", "95"]);
     say($out, Text::CSV::string($writer));
 
-    sys::close($out);
+    core::close($out);
 
 =head1 SEE ALSO
 
@@ -329,7 +329,7 @@ func getline(scalar $self, scalar $fh) scalar {
     my int $appended = 0;
 
     while (1) {
-        my str $line = sys::readline($fh);
+        my str $line = core::readline($fh);
         if (!defined($line) || $line eq "") {
             if ($buf ne "") {
                 # EOF with partial record

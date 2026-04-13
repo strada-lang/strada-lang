@@ -63,7 +63,7 @@ B<Valid uses for MD5:>
 Compute raw MD5 digest. Returns a 16-byte binary string.
 
     my str $raw = Digest::MD5::md5("test");
-    my int $len = sys::byte_length($raw);  # 16
+    my int $len = core::byte_length($raw);  # 16
 
 =head2 md5_hex($data)
 
@@ -358,7 +358,7 @@ static char strada_md5_b64_result[23];
 #
 # Example:
 #   my str $raw = Digest::MD5::md5("test");
-#   my int $len = sys::byte_length($raw);  # Returns 16
+#   my int $len = core::byte_length($raw);  # Returns 16
 func md5(str $data) str {
     my str $result = "";
     __C__ {

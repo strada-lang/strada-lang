@@ -445,7 +445,7 @@ func read_http_response(scalar $sock) str {
     my str $response = "";
     my int $reads = 0;
     while ($reads < 1000) {
-        my str $chunk = sys::socket_recv($sock, 8192);
+        my str $chunk = core::socket_recv($sock, 8192);
         if (!defined($chunk) || length($chunk) == 0) {
             break;
         }
@@ -460,15 +460,15 @@ func do_http_request(str $host, int $port, str $request) hash {
     my hash %response = ();
     $response{"success"} = 0;
 
-    my scalar $sock = sys::socket_client($host, $port);
+    my scalar $sock = core::socket_client($host, $port);
     if (!defined($sock)) {
         $response{"error"} = "Connection failed to " . $host . ":" . $port;
         return %response;
     }
 
-    sys::socket_send($sock, $request);
+    core::socket_send($sock, $request);
     my str $raw_response = LWP_SSL::read_http_response($sock);
-    sys::socket_close($sock);
+    core::socket_close($sock);
 
     return LWP_SSL::parse_response($raw_response);
 }

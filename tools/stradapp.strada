@@ -33,7 +33,7 @@ func starts_with(str $s, str $prefix) int {
 }
 
 func file_exists(str $path) int {
-    my hash %stat = sys::stat($path);
+    my hash %stat = core::stat($path);
     return exists(%stat, "size");
 }
 
@@ -69,7 +69,7 @@ func preprocess(str $filename) str {
         die("stradapp: cannot read file: " . $filename);
     }
 
-    my str $file_dir = sys::dirname($filename);
+    my str $file_dir = core::dirname($filename);
     if ($file_dir eq "") {
         $file_dir = ".";
     }

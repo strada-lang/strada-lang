@@ -23,7 +23,7 @@ Device::SerialPort - Object-oriented serial port communication
 =head1 DESCRIPTION
 
 Device::SerialPort provides an object-oriented interface for serial port
-communication on Linux systems. It wraps the low-level C<sys::serial_open()>
+communication on Linux systems. It wraps the low-level C<core::serial_open()>
 and related functions into a convenient API similar to Perl's Device::SerialPort.
 
 The module supports configurable baud rates, data bits, parity, stop bits,
@@ -214,7 +214,7 @@ Check if the device responds to AT commands. Returns 1 if OK response received.
 
 =item B<fd()>
 
-Get the underlying file descriptor (for advanced use with C<sys::> functions).
+Get the underlying file descriptor (for advanced use with C<core::> functions).
 
 =item B<device()>
 
@@ -272,7 +272,7 @@ Then log out and back in for the change to take effect.
 
 =head1 SEE ALSO
 
-L<sys::serial_open>, L<sys::tcflush>, L<sys::tcdrain>
+L<core::serial_open>, L<core::tcflush>, L<core::tcdrain>
 
 =head1 VERSION
 
@@ -284,18 +284,18 @@ package SerialPort;
 version "1.0.0";
 
 # Baud rate constants
-func B300() int { return sys::B300(); }
-func B1200() int { return sys::B1200(); }
-func B2400() int { return sys::B2400(); }
-func B4800() int { return sys::B4800(); }
-func B9600() int { return sys::B9600(); }
-func B19200() int { return sys::B19200(); }
-func B38400() int { return sys::B38400(); }
-func B57600() int { return sys::B57600(); }
-func B115200() int { return sys::B115200(); }
-func B230400() int { return sys::B230400(); }
-func B460800() int { return sys::B460800(); }
-func B921600() int { return sys::B921600(); }
+func B300() int { return core::B300(); }
+func B1200() int { return core::B1200(); }
+func B2400() int { return core::B2400(); }
+func B4800() int { return core::B4800(); }
+func B9600() int { return core::B9600(); }
+func B19200() int { return core::B19200(); }
+func B38400() int { return core::B38400(); }
+func B57600() int { return core::B57600(); }
+func B115200() int { return core::B115200(); }
+func B230400() int { return core::B230400(); }
+func B460800() int { return core::B460800(); }
+func B921600() int { return core::B921600(); }
 
 # Create a new SerialPort object
 # Usage: my scalar $port = SerialPort::new("/dev/ttyUSB0");
@@ -337,7 +337,7 @@ func open(scalar $self) int {
     # Convert baud rate to system constant
     my int $baud_const = SerialPort::baud_to_const($baud);
 
-    my int $fd = sys::serial_open($device, $baud_const, $config);
+    my int $fd = core::serial_open($device, $baud_const, $config);
     if ($fd < 0) {
         return 0;
     }
@@ -349,26 +349,26 @@ func open(scalar $self) int {
 
 # Helper to convert numeric baud rate to system constant
 private func baud_to_const(int $baud) int {
-    if ($baud == 300) { return sys::B300(); }
-    if ($baud == 1200) { return sys::B1200(); }
-    if ($baud == 2400) { return sys::B2400(); }
-    if ($baud == 4800) { return sys::B4800(); }
-    if ($baud == 9600) { return sys::B9600(); }
-    if ($baud == 19200) { return sys::B19200(); }
-    if ($baud == 38400) { return sys::B38400(); }
-    if ($baud == 57600) { return sys::B57600(); }
-    if ($baud == 115200) { return sys::B115200(); }
-    if ($baud == 230400) { return sys::B230400(); }
-    if ($baud == 460800) { return sys::B460800(); }
-    if ($baud == 921600) { return sys::B921600(); }
+    if ($baud == 300) { return core::B300(); }
+    if ($baud == 1200) { return core::B1200(); }
+    if ($baud == 2400) { return core::B2400(); }
+    if ($baud == 4800) { return core::B4800(); }
+    if ($baud == 9600) { return core::B9600(); }
+    if ($baud == 19200) { return core::B19200(); }
+    if ($baud == 38400) { return core::B38400(); }
+    if ($baud == 57600) { return core::B57600(); }
+    if ($baud == 115200) { return core::B115200(); }
+    if ($baud == 230400) { return core::B230400(); }
+    if ($baud == 460800) { return core::B460800(); }
+    if ($baud == 921600) { return core::B921600(); }
     # Default to 9600
-    return sys::B9600();
+    return core::B9600();
 }
 
 # Close the serial port
 func close(scalar $self) void {
     if ($self->{"is_open"} == 1) {
-        sys::close_fd($self->{"fd"});
+        core::close_fd($self->{"fd"});
         $self->{"fd"} = -1;
         $self->{"is_open"} = 0;
     }
@@ -448,14 +448,14 @@ func write(scalar $self, str $data) int {
     if ($self->{"is_open"} == 0) {
         return -1;
     }
-    return sys::write_fd($self->{"fd"}, $data);
+    return core::write_fd($self->{"fd"}, $data);
 }
 
 # Write data and wait for transmission to complete
 func write_drain(scalar $self, str $data) int {
     my int $written = SerialPort::write($self, $data);
     if ($written > 0) {
-        sys::tcdrain($self->{"fd"});
+        core::tcdrain($self->{"fd"});
     }
     return $written;
 }
@@ -467,7 +467,7 @@ func read(scalar $self, int $max_bytes) str {
     if ($self->{"is_open"} == 0) {
         return "";
     }
-    return sys::read_fd($self->{"fd"}, $max_bytes);
+    return core::read_fd($self->{"fd"}, $max_bytes);
 }
 
 # Read a line (until newline or max_bytes)
@@ -480,7 +480,7 @@ func readline(scalar $self, int $max_bytes) str {
     my int $count = 0;
 
     while ($count < $max_bytes) {
-        my str $c = sys::read_fd($self->{"fd"}, 1);
+        my str $c = core::read_fd($self->{"fd"}, 1);
         if (length($c) == 0) {
             # Timeout or error
             last;
@@ -500,7 +500,7 @@ func purge_rx(scalar $self) int {
     if ($self->{"is_open"} == 0) {
         return -1;
     }
-    return sys::tcflush($self->{"fd"}, 0);  # TCIFLUSH
+    return core::tcflush($self->{"fd"}, 0);  # TCIFLUSH
 }
 
 # Flush output buffer
@@ -508,7 +508,7 @@ func purge_tx(scalar $self) int {
     if ($self->{"is_open"} == 0) {
         return -1;
     }
-    return sys::tcflush($self->{"fd"}, 1);  # TCOFLUSH
+    return core::tcflush($self->{"fd"}, 1);  # TCOFLUSH
 }
 
 # Flush both input and output
@@ -516,7 +516,7 @@ func purge_all(scalar $self) int {
     if ($self->{"is_open"} == 0) {
         return -1;
     }
-    return sys::tcflush($self->{"fd"}, 2);  # TCIOFLUSH
+    return core::tcflush($self->{"fd"}, 2);  # TCIOFLUSH
 }
 
 # Wait for output to drain (all data transmitted)
@@ -524,7 +524,7 @@ func drain(scalar $self) int {
     if ($self->{"is_open"} == 0) {
         return -1;
     }
-    return sys::tcdrain($self->{"fd"});
+    return core::tcdrain($self->{"fd"});
 }
 
 # Get the file descriptor (for advanced use)
@@ -549,7 +549,7 @@ func command(scalar $self, str $cmd, int $timeout_ms) str {
 
     # Small delay for device to respond
     if ($timeout_ms > 0) {
-        sys::usleep($timeout_ms * 1000);
+        core::usleep($timeout_ms * 1000);
     }
 
     # Read response

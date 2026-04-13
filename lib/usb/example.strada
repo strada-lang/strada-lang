@@ -24,10 +24,10 @@ func hexdump(str $data, int $max_bytes) void {
     my int $i = 0;
 
     while ($i < $len) {
-        my int $byte = sys::ord_byte(substr($data, $i, 1));
+        my int $byte = core::ord_byte(substr($data, $i, 1));
 
         # Hex part
-        my str $h = sys::sprintf("%02x ", $byte);
+        my str $h = core::sprintf("%02x ", $byte);
         $hex = $hex . $h;
 
         # ASCII part (printable or dot)
@@ -161,7 +161,7 @@ func list_devices() void {
 
 # Show detailed info for a specific device
 func show_device_info(int $vid, int $pid) void {
-    say("=== Device Details: " . sys::sprintf("%04x:%04x", $vid, $pid) . " ===");
+    say("=== Device Details: " . core::sprintf("%04x:%04x", $vid, $pid) . " ===");
     say("");
 
     my int $handle = usb::open_device($vid, $pid);
@@ -176,11 +176,11 @@ func show_device_info(int $vid, int $pid) void {
     my hash %desc = usb::get_device_descriptor($handle);
 
     say("Device Descriptor:");
-    say("  USB Version: " . sys::sprintf("0x%04x", $desc{"usb_version"} + 0));
+    say("  USB Version: " . core::sprintf("0x%04x", $desc{"usb_version"} + 0));
     say("  Device Class: " . class_name($desc{"device_class"} + 0));
-    say("  Vendor ID: " . sys::sprintf("0x%04x", $desc{"vendor_id"} + 0));
-    say("  Product ID: " . sys::sprintf("0x%04x", $desc{"product_id"} + 0));
-    say("  Device Version: " . sys::sprintf("0x%04x", $desc{"device_version"} + 0));
+    say("  Vendor ID: " . core::sprintf("0x%04x", $desc{"vendor_id"} + 0));
+    say("  Product ID: " . core::sprintf("0x%04x", $desc{"product_id"} + 0));
+    say("  Device Version: " . core::sprintf("0x%04x", $desc{"device_version"} + 0));
     say("  Max Packet Size: " . $desc{"max_packet_size"});
     say("  Configurations: " . $desc{"num_configurations"});
 
@@ -207,7 +207,7 @@ func show_device_info(int $vid, int $pid) void {
     say("Configuration 0:");
     say("  Interfaces: " . $config{"num_interfaces"});
     say("  Max Power: " . $config{"max_power"} . " mA");
-    say("  Attributes: " . sys::sprintf("0x%02x", $config{"attributes"} + 0));
+    say("  Attributes: " . core::sprintf("0x%02x", $config{"attributes"} + 0));
 
     # Show interfaces and endpoints
     my array @interfaces = $config{"interfaces"};
@@ -229,7 +229,7 @@ func show_device_info(int $vid, int $pid) void {
 
         while ($j < $num_eps) {
             my hash %ep = $endpoints[$j];
-            say("      Endpoint " . sys::sprintf("0x%02x", $ep{"address"} + 0) . ":");
+            say("      Endpoint " . core::sprintf("0x%02x", $ep{"address"} + 0) . ":");
             say("        Direction: " . $ep{"direction"});
             say("        Type: " . $ep{"type"});
             say("        Max Packet: " . $ep{"max_packet_size"});
@@ -249,7 +249,7 @@ func demo_control_transfer(int $vid, int $pid) void {
 
     my int $handle = usb::open_device($vid, $pid);
     if ($handle == 0) {
-        say("Error: Could not open device " . sys::sprintf("%04x:%04x", $vid, $pid));
+        say("Error: Could not open device " . core::sprintf("%04x:%04x", $vid, $pid));
         return;
     }
 
@@ -269,11 +269,11 @@ func demo_control_transfer(int $vid, int $pid) void {
     my scalar $result = usb::control_transfer($handle, $req_type, $request, 0, 0, 2, 1000);
 
     if (length($result) >= 2) {
-        my int $b0 = sys::ord_byte(substr($result, 0, 1));
-        my int $b1 = sys::ord_byte(substr($result, 1, 1));
+        my int $b0 = core::ord_byte(substr($result, 0, 1));
+        my int $b1 = core::ord_byte(substr($result, 1, 1));
         my int $status = $b0 + ($b1 * 256);
 
-        say("Device Status: " . sys::sprintf("0x%04x", $status));
+        say("Device Status: " . core::sprintf("0x%04x", $status));
         if ($status & 1) {
             say("  - Self Powered");
         } else {
@@ -338,8 +338,8 @@ func main() int {
             usb::exit();
             return 1;
         }
-        my int $vid = sys::strtol($args[1], 16);
-        my int $pid = sys::strtol($args[2], 16);
+        my int $vid = core::strtol($args[1], 16);
+        my int $pid = core::strtol($args[2], 16);
         show_device_info($vid, $pid);
     } else if ($cmd eq "status" || $cmd eq "-s") {
         if ($argc < 3) {
@@ -348,8 +348,8 @@ func main() int {
             usb::exit();
             return 1;
         }
-        my int $vid = sys::strtol($args[1], 16);
-        my int $pid = sys::strtol($args[2], 16);
+        my int $vid = core::strtol($args[1], 16);
+        my int $pid = core::strtol($args[2], 16);
         demo_control_transfer($vid, $pid);
     } else if ($cmd eq "help" || $cmd eq "-h" || $cmd eq "--help") {
         print_usage();

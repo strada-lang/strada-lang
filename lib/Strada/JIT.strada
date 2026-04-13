@@ -159,7 +159,7 @@ Each C<Strada::JIT::eval()> call performs these steps:
 
 =item 5. Load with dlopen, find the entry function with dlsym
 
-=item 6. Call the function via sys::dl_call_sv, passing the state hash
+=item 6. Call the function via core::dl_call_sv, passing the state hash
 
 =item 7. Clean up temp files
 
@@ -237,7 +237,7 @@ my array @g_constants = ();
 private func detect_stradac() str {
     my int $exists = 0;
 
-    if (sys::is_file("./stradac") == 1) {
+    if (core::is_file("./stradac") == 1) {
         return "./stradac";
     }
 
@@ -248,10 +248,10 @@ private func detect_stradac() str {
         return "stradac";
     }
 
-    if (sys::is_file("/usr/local/bin/stradac") == 1) {
+    if (core::is_file("/usr/local/bin/stradac") == 1) {
         return "/usr/local/bin/stradac";
     }
-    if (sys::is_file("/usr/bin/stradac") == 1) {
+    if (core::is_file("/usr/bin/stradac") == 1) {
         return "/usr/bin/stradac";
     }
 
@@ -260,22 +260,22 @@ private func detect_stradac() str {
 
 # Detect runtime path
 private func detect_runtime() str {
-    if (sys::is_file("./runtime/strada_runtime_tcc.h") == 1) {
+    if (core::is_file("./runtime/strada_runtime_tcc.h") == 1) {
         return "./runtime";
     }
 
     if ($g_stradac_path ne "" && $g_stradac_path ne "stradac") {
-        my str $stradac_dir = sys::dirname($g_stradac_path);
+        my str $stradac_dir = core::dirname($g_stradac_path);
         my str $relative_runtime = $stradac_dir . "/../lib/strada/runtime";
-        if (sys::is_file($relative_runtime . "/strada_runtime_tcc.h") == 1) {
+        if (core::is_file($relative_runtime . "/strada_runtime_tcc.h") == 1) {
             return $relative_runtime;
         }
     }
 
-    if (sys::is_file("/usr/local/lib/strada/runtime/strada_runtime_tcc.h") == 1) {
+    if (core::is_file("/usr/local/lib/strada/runtime/strada_runtime_tcc.h") == 1) {
         return "/usr/local/lib/strada/runtime";
     }
-    if (sys::is_file("/usr/lib/strada/runtime/strada_runtime_tcc.h") == 1) {
+    if (core::is_file("/usr/lib/strada/runtime/strada_runtime_tcc.h") == 1) {
         return "/usr/lib/strada/runtime";
     }
 
@@ -869,12 +869,12 @@ private func eval_one(str $input) scalar {
     }
 
     # Write source file
-    my scalar $fh = sys::open($src_file, "w");
+    my scalar $fh = core::open($src_file, "w");
     if (!defined($fh)) {
         throw "JIT: Could not create temp file: " . $src_file;
     }
-    sys::fwrite($fh, $strada_src);
-    sys::close($fh);
+    core::fwrite($fh, $strada_src);
+    core::close($fh);
 
     # Step 1: stradac → C
     my str $stradac_cmd = $g_stradac_path . " ";
@@ -882,20 +882,20 @@ private func eval_one(str $input) scalar {
         $stradac_cmd = $stradac_cmd . "-L " . $lp . " ";
     }
     $stradac_cmd = $stradac_cmd . $src_file . " " . $c_file . " 2>&1";
-    my scalar $pipe = sys::popen($stradac_cmd, "r");
+    my scalar $pipe = core::popen($stradac_cmd, "r");
     my str $compile_output = "";
     if (defined($pipe)) {
-        my scalar $line = sys::fgets($pipe, 4096);
+        my scalar $line = core::fgets($pipe, 4096);
         while (defined($line)) {
             $compile_output = $compile_output . $line;
-            $line = sys::fgets($pipe, 4096);
+            $line = core::fgets($pipe, 4096);
         }
-        sys::pclose($pipe);
+        core::pclose($pipe);
     }
 
-    if (sys::is_file($c_file) == 0) {
+    if (core::is_file($c_file) == 0) {
         # Clean up
-        sys::unlink($src_file);
+        core::unlink($src_file);
         # Extract useful error message
         my str $err_msg = $compile_output;
         $err_msg =~ s/^Strada Compiler[^\n]*\n//;
@@ -907,14 +907,14 @@ private func eval_one(str $input) scalar {
 
     if ($g_cdebug == 1) {
         say("[JIT CDEBUG] Generated C: " . $c_file);
-        my scalar $cfh = sys::open($c_file, "r");
+        my scalar $cfh = core::open($c_file, "r");
         if (defined($cfh)) {
             my str $cline = <$cfh>;
             while (defined($cline)) {
                 print($cline);
                 $cline = <$cfh>;
             }
-            sys::close($cfh);
+            core::close($cfh);
         }
     }
 
@@ -923,29 +923,29 @@ private func eval_one(str $input) scalar {
     # Step 2: C → .so
     if ($g_compiler eq "tcc") {
         if ($g_runtime_path eq "") {
-            sys::unlink($src_file);
-            sys::unlink($c_file);
+            core::unlink($src_file);
+            core::unlink($c_file);
             throw "JIT: Could not find Strada runtime files for tcc backend";
         }
 
         my str $sed_cmd = "sed -i 's/strada_runtime\\.h/strada_runtime_tcc.h/' " . $c_file;
-        sys::system($sed_cmd);
+        core::system($sed_cmd);
 
         my str $tcc_cmd = "tcc -shared -o " . $so_file . " " . $c_file . " -I" . $g_runtime_path . " -ldl -lm -lpthread 2>&1";
-        $pipe = sys::popen($tcc_cmd, "r");
+        $pipe = core::popen($tcc_cmd, "r");
         my str $tcc_output = "";
         if (defined($pipe)) {
-            my scalar $line = sys::fgets($pipe, 4096);
+            my scalar $line = core::fgets($pipe, 4096);
             while (defined($line)) {
                 $tcc_output = $tcc_output . $line;
-                $line = sys::fgets($pipe, 4096);
+                $line = core::fgets($pipe, 4096);
             }
-            sys::pclose($pipe);
+            core::pclose($pipe);
         }
 
-        if (sys::is_file($so_file) == 0) {
-            sys::unlink($src_file);
-            sys::unlink($c_file);
+        if (core::is_file($so_file) == 0) {
+            core::unlink($src_file);
+            core::unlink($c_file);
             throw "JIT C compile error (tcc): " . $tcc_output;
         }
     } else {
@@ -953,43 +953,43 @@ private func eval_one(str $input) scalar {
         my str $gcc_cmd = "./strada --shared " . $src_file . " -o " . $so_file . " 2>&1";
         # If stradac is not in ./, try using the strada wrapper from stradac's dir
         if ($g_stradac_path ne "./stradac" && $g_stradac_path ne "stradac") {
-            my str $stradac_dir = sys::dirname($g_stradac_path);
+            my str $stradac_dir = core::dirname($g_stradac_path);
             my str $strada_bin = $stradac_dir . "/strada";
-            if (sys::is_file($strada_bin) == 1) {
+            if (core::is_file($strada_bin) == 1) {
                 $gcc_cmd = $strada_bin . " --shared " . $src_file . " -o " . $so_file . " 2>&1";
             }
         }
-        $pipe = sys::popen($gcc_cmd, "r");
+        $pipe = core::popen($gcc_cmd, "r");
         my str $output = "";
         if (defined($pipe)) {
-            my scalar $line = sys::fgets($pipe, 4096);
+            my scalar $line = core::fgets($pipe, 4096);
             while (defined($line)) {
                 $output = $output . $line;
-                $line = sys::fgets($pipe, 4096);
+                $line = core::fgets($pipe, 4096);
             }
-            sys::pclose($pipe);
+            core::pclose($pipe);
         }
 
-        if (sys::is_file($so_file) == 0) {
-            sys::unlink($src_file);
+        if (core::is_file($so_file) == 0) {
+            core::unlink($src_file);
             throw "JIT C compile error (gcc): " . $output;
         }
     }
 
     # Step 3: Load and execute
-    my int $lib = sys::dl_open($so_file);
+    my int $lib = core::dl_open($so_file);
     if ($lib == 0) {
-        my str $dl_err = sys::dl_error();
-        sys::unlink($src_file);
-        sys::unlink($c_file);
-        sys::unlink($so_file);
+        my str $dl_err = core::dl_error();
+        core::unlink($src_file);
+        core::unlink($c_file);
+        core::unlink($so_file);
         throw "JIT: Could not load compiled library: " . $dl_err;
     }
 
-    my int $fn = sys::dl_sym($lib, "repl_eval");
+    my int $fn = core::dl_sym($lib, "repl_eval");
     if ($fn != 0) {
         my array @args = ();
-        $result = sys::dl_call_sv($fn, \@args);
+        $result = core::dl_call_sv($fn, \@args);
     }
 
     # Keep the library open - closures may reference code in it
@@ -997,9 +997,9 @@ private func eval_one(str $input) scalar {
     push(@g_so_files, $so_file);
 
     # Clean up temp files (keep .so since it's still loaded)
-    sys::unlink($src_file);
-    if (sys::is_file($c_file) == 1) {
-        sys::unlink($c_file);
+    core::unlink($src_file);
+    if (core::is_file($c_file) == 1) {
+        core::unlink($c_file);
     }
 
     return $result;
@@ -1165,7 +1165,7 @@ func reset() void {
 
     # Now delete globals using the saved key list
     while ($vi < $var_count) {
-        sys::global_delete("repl::" . $var_names[$vi]);
+        core::global_delete("repl::" . $var_names[$vi]);
         $vi = $vi + 1;
     }
 
@@ -1178,14 +1178,14 @@ func reset() void {
     my int $li = 0;
     my int $lib_count = scalar(@libs_to_close);
     while ($li < $lib_count) {
-        sys::dl_close($libs_to_close[$li]);
+        core::dl_close($libs_to_close[$li]);
         $li = $li + 1;
     }
     my int $fi = 0;
     my int $file_count = scalar(@files_to_delete);
     while ($fi < $file_count) {
-        if (sys::is_file($files_to_delete[$fi]) == 1) {
-            sys::unlink($files_to_delete[$fi]);
+        if (core::is_file($files_to_delete[$fi]) == 1) {
+            core::unlink($files_to_delete[$fi]);
         }
         $fi = $fi + 1;
     }
@@ -1244,7 +1244,7 @@ func state() hash {
     my int $scount = scalar(@var_names);
     while ($si < $scount) {
         my str $vname = $var_names[$si];
-        my scalar $val = sys::global_get("repl::" . $vname);
+        my scalar $val = core::global_get("repl::" . $vname);
         $result{$vname} = $val;
         $si = $si + 1;
     }

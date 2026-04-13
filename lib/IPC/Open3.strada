@@ -26,11 +26,11 @@ IPC::Open3 - Run a command with separate stdin, stdout, and stderr
 
     # Full control with open3
     my hash %h = IPC::Open3::open3("cat -n");
-    sys::write_fd($h{"stdin"}, "Hello\nWorld\n");
-    sys::close_fd($h{"stdin"});
-    my str $output = sys::slurp_fd($h{"stdout"});
-    my str $errors = sys::slurp_fd($h{"stderr"});
-    sys::waitpid($h{"pid"}, 0);
+    core::write_fd($h{"stdin"}, "Hello\nWorld\n");
+    core::close_fd($h{"stdin"});
+    my str $output = core::slurp_fd($h{"stdout"});
+    my str $errors = core::slurp_fd($h{"stderr"});
+    core::waitpid($h{"pid"}, 0);
 
     # Simple command output capture
     my str $result = IPC::Open3::cmd_output("ls -la");
@@ -78,10 +78,10 @@ Run a command with full I/O control. Returns a hash reference containing:
 Example:
 
     my hash %h = IPC::Open3::open3("grep pattern");
-    sys::write_fd($h{"stdin"}, "line1\npattern here\nline3\n");
-    sys::close_fd($h{"stdin"});
-    my str $matches = sys::slurp_fd($h{"stdout"});
-    sys::waitpid($h{"pid"}, 0);
+    core::write_fd($h{"stdin"}, "line1\npattern here\nline3\n");
+    core::close_fd($h{"stdin"});
+    my str $matches = core::slurp_fd($h{"stdout"});
+    core::waitpid($h{"pid"}, 0);
 
 B<Important:> Always close the stdin file descriptor when done writing,
 or the child process may hang waiting for more input.
@@ -104,8 +104,8 @@ Returns a hash with:
 Example:
 
     my hash %h = IPC::Open3::open2("make 2>&1");
-    sys::close_fd($h{"stdin"});
-    my str $output = sys::slurp_fd($h{"stdout"});
+    core::close_fd($h{"stdin"});
+    my str $output = core::slurp_fd($h{"stdout"});
 
 =head2 cmd_output($cmd)
 
@@ -135,14 +135,14 @@ Capture both stdout and stderr from a command:
     use IPC::Open3;
 
     my hash %h = IPC::Open3::open3("ls /tmp /nonexistent");
-    sys::close_fd($h{"stdin"});
+    core::close_fd($h{"stdin"});
 
-    my str $stdout = sys::slurp_fd($h{"stdout"});
-    my str $stderr = sys::slurp_fd($h{"stderr"});
+    my str $stdout = core::slurp_fd($h{"stdout"});
+    my str $stderr = core::slurp_fd($h{"stderr"});
 
-    sys::close_fd($h{"stdout"});
-    sys::close_fd($h{"stderr"});
-    sys::waitpid($h{"pid"}, 0);
+    core::close_fd($h{"stdout"});
+    core::close_fd($h{"stderr"});
+    core::waitpid($h{"pid"}, 0);
 
     say("STDOUT: " . $stdout);
     say("STDERR: " . $stderr);
@@ -151,15 +151,15 @@ Interactive communication with a subprocess:
 
     my hash %h = IPC::Open3::open3("bc");
 
-    sys::write_fd($h{"stdin"}, "2 + 2\n");
-    sys::write_fd($h{"stdin"}, "10 * 5\n");
-    sys::write_fd($h{"stdin"}, "quit\n");
-    sys::close_fd($h{"stdin"});
+    core::write_fd($h{"stdin"}, "2 + 2\n");
+    core::write_fd($h{"stdin"}, "10 * 5\n");
+    core::write_fd($h{"stdin"}, "quit\n");
+    core::close_fd($h{"stdin"});
 
-    my str $result = sys::slurp_fd($h{"stdout"});
+    my str $result = core::slurp_fd($h{"stdout"});
     say("Results: " . $result);
 
-    sys::waitpid($h{"pid"}, 0);
+    core::waitpid($h{"pid"}, 0);
 
 =head1 NOTES
 
@@ -177,7 +177,7 @@ Interactive communication with a subprocess:
 
 =head1 SEE ALSO
 
-L<sys::fork>, L<sys::pipe>, L<sys::exec>, L<sys::waitpid>
+L<core::fork>, L<core::pipe>, L<core::exec>, L<core::waitpid>
 
 =cut
 
@@ -194,9 +194,9 @@ func open3(str $cmd) hash {
     my hash %result = ();
 
     # Create pipes for stdin, stdout, stderr
-    my array @stdin_pipe = sys::pipe();
-    my array @stdout_pipe = sys::pipe();
-    my array @stderr_pipe = sys::pipe();
+    my array @stdin_pipe = core::pipe();
+    my array @stdout_pipe = core::pipe();
+    my array @stderr_pipe = core::pipe();
 
     if (scalar(@stdin_pipe) == 0 || scalar(@stdout_pipe) == 0 || scalar(@stderr_pipe) == 0) {
         $result{"error"} = "Failed to create pipes";
@@ -207,28 +207,28 @@ func open3(str $cmd) hash {
     # stdout_pipe: [0]=read (parent), [1]=write (child)
     # stderr_pipe: [0]=read (parent), [1]=write (child)
 
-    my int $pid = sys::fork();
+    my int $pid = core::fork();
 
     if ($pid == 0) {
         # Child process
 
         # Redirect stdin from pipe
-        sys::close_fd($stdin_pipe[1]);   # Close write end
-        sys::dup2($stdin_pipe[0], 0);
-        sys::close_fd($stdin_pipe[0]);
+        core::close_fd($stdin_pipe[1]);   # Close write end
+        core::dup2($stdin_pipe[0], 0);
+        core::close_fd($stdin_pipe[0]);
 
         # Redirect stdout to pipe
-        sys::close_fd($stdout_pipe[0]);  # Close read end
-        sys::dup2($stdout_pipe[1], 1);
-        sys::close_fd($stdout_pipe[1]);
+        core::close_fd($stdout_pipe[0]);  # Close read end
+        core::dup2($stdout_pipe[1], 1);
+        core::close_fd($stdout_pipe[1]);
 
         # Redirect stderr to pipe
-        sys::close_fd($stderr_pipe[0]);  # Close read end
-        sys::dup2($stderr_pipe[1], 2);
-        sys::close_fd($stderr_pipe[1]);
+        core::close_fd($stderr_pipe[0]);  # Close read end
+        core::dup2($stderr_pipe[1], 2);
+        core::close_fd($stderr_pipe[1]);
 
         # Execute the command via shell
-        sys::exec("/bin/sh -c '" . $cmd . "'");
+        core::exec("/bin/sh -c '" . $cmd . "'");
 
         # If exec returns, it failed
         exit(127);
@@ -236,9 +236,9 @@ func open3(str $cmd) hash {
         # Parent process
 
         # Close unused ends of pipes
-        sys::close_fd($stdin_pipe[0]);   # Close read end
-        sys::close_fd($stdout_pipe[1]);  # Close write end
-        sys::close_fd($stderr_pipe[1]);  # Close write end
+        core::close_fd($stdin_pipe[0]);   # Close read end
+        core::close_fd($stdout_pipe[1]);  # Close write end
+        core::close_fd($stderr_pipe[1]);  # Close write end
 
         $result{"pid"} = $pid;
         $result{"stdin"} = $stdin_pipe[1];
@@ -260,33 +260,33 @@ func open3(str $cmd) hash {
 func open2(str $cmd) hash {
     my hash %result = ();
 
-    my array @stdin_pipe = sys::pipe();
-    my array @stdout_pipe = sys::pipe();
+    my array @stdin_pipe = core::pipe();
+    my array @stdout_pipe = core::pipe();
 
     if (scalar(@stdin_pipe) == 0 || scalar(@stdout_pipe) == 0) {
         $result{"error"} = "Failed to create pipes";
         return %result;
     }
 
-    my int $pid = sys::fork();
+    my int $pid = core::fork();
 
     if ($pid == 0) {
         # Child process
-        sys::close_fd($stdin_pipe[1]);
-        sys::dup2($stdin_pipe[0], 0);
-        sys::close_fd($stdin_pipe[0]);
+        core::close_fd($stdin_pipe[1]);
+        core::dup2($stdin_pipe[0], 0);
+        core::close_fd($stdin_pipe[0]);
 
-        sys::close_fd($stdout_pipe[0]);
-        sys::dup2($stdout_pipe[1], 1);
-        sys::dup2($stdout_pipe[1], 2);  # stderr -> stdout
-        sys::close_fd($stdout_pipe[1]);
+        core::close_fd($stdout_pipe[0]);
+        core::dup2($stdout_pipe[1], 1);
+        core::dup2($stdout_pipe[1], 2);  # stderr -> stdout
+        core::close_fd($stdout_pipe[1]);
 
-        sys::exec("/bin/sh -c '" . $cmd . "'");
+        core::exec("/bin/sh -c '" . $cmd . "'");
         exit(127);
     } elsif ($pid > 0) {
         # Parent process
-        sys::close_fd($stdin_pipe[0]);
-        sys::close_fd($stdout_pipe[1]);
+        core::close_fd($stdin_pipe[0]);
+        core::close_fd($stdout_pipe[1]);
 
         $result{"pid"} = $pid;
         $result{"stdin"} = $stdin_pipe[1];
@@ -302,26 +302,26 @@ func open2(str $cmd) hash {
 # Runs command and returns its stdout
 #
 func cmd_output(str $cmd) str {
-    my array @pipe = sys::pipe();
+    my array @pipe = core::pipe();
     if (scalar(@pipe) == 0) {
         return "";
     }
 
-    my int $pid = sys::fork();
+    my int $pid = core::fork();
 
     if ($pid == 0) {
         # Child
-        sys::close_fd($pipe[0]);
-        sys::dup2($pipe[1], 1);
-        sys::close_fd($pipe[1]);
-        sys::exec("/bin/sh -c '" . $cmd . "'");
+        core::close_fd($pipe[0]);
+        core::dup2($pipe[1], 1);
+        core::close_fd($pipe[1]);
+        core::exec("/bin/sh -c '" . $cmd . "'");
         exit(127);
     } elsif ($pid > 0) {
         # Parent
-        sys::close_fd($pipe[1]);
-        my str $output = sys::slurp_fd($pipe[0]);
-        sys::close_fd($pipe[0]);
-        sys::wait();
+        core::close_fd($pipe[1]);
+        my str $output = core::slurp_fd($pipe[0]);
+        core::close_fd($pipe[0]);
+        core::wait();
         return $output;
     }
 
@@ -331,14 +331,14 @@ func cmd_output(str $cmd) str {
 # run - Run command and return exit status
 #
 func run(str $cmd) int {
-    my int $pid = sys::fork();
+    my int $pid = core::fork();
 
     if ($pid == 0) {
-        sys::exec("/bin/sh -c '" . $cmd . "'");
+        core::exec("/bin/sh -c '" . $cmd . "'");
         exit(127);
     } elsif ($pid > 0) {
-        my int $raw_status = sys::waitpid($pid, 0);
-        return sys::exit_status($raw_status);
+        my int $raw_status = core::waitpid($pid, 0);
+        return core::exit_status($raw_status);
     }
 
     return -1;

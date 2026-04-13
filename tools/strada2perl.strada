@@ -22,7 +22,7 @@
 # Converts Strada source code to equivalent Perl 5 code:
 #   - Strips type annotations (my int $x -> my $x)
 #   - func -> sub with return type removal
-#   - sys::/core::/math:: namespace calls -> Perl equivalents
+#   - core::/core::/math:: namespace calls -> Perl equivalents
 #   - try/catch/throw -> eval/die/if($@)
 #   - import_lib/import_object/import_archive -> use
 #   - __C__ blocks -> removed (with comment)
@@ -100,8 +100,8 @@ func moose_type(str $t) str {
 
 # ============================================================
 # Helper: replace a single-arg function call with a prefix+suffix wrapper
-# e.g. replace_func_1arg($line, "sys::getenv", "$ENV{", "}")
-#   sys::getenv("KEY") -> $ENV{"KEY"}
+# e.g. replace_func_1arg($line, "core::getenv", "$ENV{", "}")
+#   core::getenv("KEY") -> $ENV{"KEY"}
 # ============================================================
 func replace_func_1arg(str $line, str $fname, str $prefix, str $suffix) str {
     my str $result = $line;
@@ -126,8 +126,8 @@ func replace_func_1arg(str $line, str $fname, str $prefix, str $suffix) str {
 
 # ============================================================
 # Helper: replace a 2-arg function call with an assignment
-# e.g. replace_func_2arg_assign($line, "sys::setenv", "$ENV{", "} = ", "")
-#   sys::setenv("KEY", "val") -> $ENV{"KEY"} = "val"
+# e.g. replace_func_2arg_assign($line, "core::setenv", "$ENV{", "} = ", "")
+#   core::setenv("KEY", "val") -> $ENV{"KEY"} = "val"
 # ============================================================
 func replace_func_2arg_assign(str $line, str $fname, str $prefix, str $mid, str $suffix) str {
     my str $result = $line;
@@ -225,8 +225,8 @@ func convert_line(str $line) str {
         return $result;
     }
 
-    # --- Normalize core:: to sys:: for uniform handling ---
-    $result =~ s/\bcore::/sys::/g;
+    # --- Normalize core:: to core:: for uniform handling ---
+    $result =~ s/\bcore::/core::/g;
 
     # --- Package declarations: pass through ---
     if (match($trimmed, "^package\\s+")) {
@@ -326,75 +326,75 @@ func convert_line(str $line) str {
     # --- Spread operator: ...@ -> @ ---
     $result =~ s/\.\.\.@/@/g;
 
-    # --- sys:: simple renames (strip sys:: prefix) ---
-    $result =~ s/\bsys::exit\(/exit(/g;
-    $result =~ s/\bsys::system\(/system(/g;
-    $result =~ s/\bsys::exec\(/exec(/g;
-    $result =~ s/\bsys::kill\(/kill(/g;
-    $result =~ s/\bsys::alarm\(/alarm(/g;
-    $result =~ s/\bsys::sleep\(/sleep(/g;
-    $result =~ s/\bsys::chdir\(/chdir(/g;
-    $result =~ s/\bsys::mkdir\(/mkdir(/g;
-    $result =~ s/\bsys::rmdir\(/rmdir(/g;
-    $result =~ s/\bsys::unlink\(/unlink(/g;
-    $result =~ s/\bsys::rename\(/rename(/g;
-    $result =~ s/\bsys::chmod\(/chmod(/g;
-    $result =~ s/\bsys::close\(/close(/g;
-    $result =~ s/\bsys::glob\(/glob(/g;
-    $result =~ s/\bsys::seek\(/seek(/g;
-    $result =~ s/\bsys::tell\(/tell(/g;
-    $result =~ s/\bsys::eof\(/eof(/g;
-    $result =~ s/\bsys::srand\(/srand(/g;
-    $result =~ s/\bsys::time\(/time(/g;
-    $result =~ s/\bsys::waitpid\(/waitpid(/g;
-    $result =~ s/\bsys::fork\(/fork(/g;
-    $result =~ s/\bsys::open\(/strada_open(/g;
-    $result =~ s/\bsys::readline\(/strada_readline(/g;
+    # --- core:: simple renames (strip core:: prefix) ---
+    $result =~ s/\bcore::exit\(/exit(/g;
+    $result =~ s/\bcore::system\(/system(/g;
+    $result =~ s/\bcore::exec\(/exec(/g;
+    $result =~ s/\bcore::kill\(/kill(/g;
+    $result =~ s/\bcore::alarm\(/alarm(/g;
+    $result =~ s/\bcore::sleep\(/sleep(/g;
+    $result =~ s/\bcore::chdir\(/chdir(/g;
+    $result =~ s/\bcore::mkdir\(/mkdir(/g;
+    $result =~ s/\bcore::rmdir\(/rmdir(/g;
+    $result =~ s/\bcore::unlink\(/unlink(/g;
+    $result =~ s/\bcore::rename\(/rename(/g;
+    $result =~ s/\bcore::chmod\(/chmod(/g;
+    $result =~ s/\bcore::close\(/close(/g;
+    $result =~ s/\bcore::glob\(/glob(/g;
+    $result =~ s/\bcore::seek\(/seek(/g;
+    $result =~ s/\bcore::tell\(/tell(/g;
+    $result =~ s/\bcore::eof\(/eof(/g;
+    $result =~ s/\bcore::srand\(/srand(/g;
+    $result =~ s/\bcore::time\(/time(/g;
+    $result =~ s/\bcore::waitpid\(/waitpid(/g;
+    $result =~ s/\bcore::fork\(/fork(/g;
+    $result =~ s/\bcore::open\(/strada_open(/g;
+    $result =~ s/\bcore::readline\(/strada_readline(/g;
 
-    # sys::getpid() -> $$
-    $result = replace_all($result, "sys::getpid()", "$$");
+    # core::getpid() -> $$
+    $result = replace_all($result, "core::getpid()", "$$");
 
-    # sys::wantarray()/wantscalar()/wanthash()
-    $result =~ s/\bsys::wantarray\(\)/wantarray()/g;
-    $result =~ s/\bsys::wantscalar\(\)/!wantarray()/g;
-    $result =~ s/\bsys::wanthash\(\)/wantarray()/g;
+    # core::wantarray()/wantscalar()/wanthash()
+    $result =~ s/\bcore::wantarray\(\)/wantarray()/g;
+    $result =~ s/\bcore::wantscalar\(\)/!wantarray()/g;
+    $result =~ s/\bcore::wanthash\(\)/wantarray()/g;
 
-    # sys::getcwd/realpath -> Cwd::
-    $result =~ s/\bsys::getcwd\(/Cwd::getcwd(/g;
-    $result =~ s/\bsys::realpath\(/Cwd::realpath(/g;
+    # core::getcwd/realpath -> Cwd::
+    $result =~ s/\bcore::getcwd\(/Cwd::getcwd(/g;
+    $result =~ s/\bcore::realpath\(/Cwd::realpath(/g;
 
-    # sys::basename/dirname -> File::Basename::
-    $result =~ s/\bsys::basename\(/File::Basename::basename(/g;
-    $result =~ s/\bsys::dirname\(/File::Basename::dirname(/g;
+    # core::basename/dirname -> File::Basename::
+    $result =~ s/\bcore::basename\(/File::Basename::basename(/g;
+    $result =~ s/\bcore::dirname\(/File::Basename::dirname(/g;
 
-    # sys::_exit -> POSIX::_exit
-    $result =~ s/\bsys::_exit\(/POSIX::_exit(/g;
+    # core::_exit -> POSIX::_exit
+    $result =~ s/\bcore::_exit\(/POSIX::_exit(/g;
 
-    # sys::usleep -> Time::HiRes::usleep
-    $result =~ s/\bsys::usleep\(/Time::HiRes::usleep(/g;
+    # core::usleep -> Time::HiRes::usleep
+    $result =~ s/\bcore::usleep\(/Time::HiRes::usleep(/g;
 
-    # sys::stack_trace() -> Carp::longmess()
-    $result =~ s/\bsys::stack_trace\(\)/Carp::longmess()/g;
+    # core::stack_trace() -> Carp::longmess()
+    $result =~ s/\bcore::stack_trace\(\)/Carp::longmess()/g;
 
-    # sys::slurp/spew -> helper functions
-    $result =~ s/\bsys::slurp\(/strada_slurp(/g;
-    $result =~ s/\bsys::spew\(/strada_spew(/g;
+    # core::slurp/spew -> helper functions
+    $result =~ s/\bcore::slurp\(/strada_slurp(/g;
+    $result =~ s/\bcore::spew\(/strada_spew(/g;
 
-    # sys::backtick(cmd) -> qx(cmd)
-    $result =~ s/\bsys::backtick\(/qx(/g;
+    # core::backtick(cmd) -> qx(cmd)
+    $result =~ s/\bcore::backtick\(/qx(/g;
 
-    # sys::getenv("KEY") -> $ENV{"KEY"}
-    $result = replace_func_1arg($result, "sys::getenv", "$ENV{", "}");
+    # core::getenv("KEY") -> $ENV{"KEY"}
+    $result = replace_func_1arg($result, "core::getenv", "$ENV{", "}");
 
-    # sys::setenv("KEY", "val") -> $ENV{"KEY"} = "val"
-    $result = replace_func_2arg_assign($result, "sys::setenv", "$ENV{", "} = ", "");
+    # core::setenv("KEY", "val") -> $ENV{"KEY"} = "val"
+    $result = replace_func_2arg_assign($result, "core::setenv", "$ENV{", "} = ", "");
 
-    # sys::unsetenv("KEY") -> delete $ENV{"KEY"}
-    $result = replace_func_1arg($result, "sys::unsetenv", "delete $ENV{", "}");
+    # core::unsetenv("KEY") -> delete $ENV{"KEY"}
+    $result = replace_func_1arg($result, "core::unsetenv", "delete $ENV{", "}");
 
-    # sys::signal("SIG", handler) -> $SIG{SIG} = handler
-    if (match($result, "\\bsys::signal\\(")) {
-        $result = replace_func_2arg_assign($result, "sys::signal", "$SIG{", "} = ", "");
+    # core::signal("SIG", handler) -> $SIG{SIG} = handler
+    if (match($result, "\\bcore::signal\\(")) {
+        $result = replace_func_2arg_assign($result, "core::signal", "$SIG{", "} = ", "");
         # Strip quotes from signal name inside $SIG{"INT"} -> $SIG{INT}
         if (match($result, "[$]SIG\\{\"(\\w+)\"\\}")) {
             my array @c = captures();
@@ -403,21 +403,21 @@ func convert_line(str $line) str {
         }
     }
 
-    # sys::file_exists/is_file/is_dir/file_size -> file test operators
-    $result = replace_func_1arg($result, "sys::file_exists", "-e ", "");
-    $result = replace_func_1arg($result, "sys::is_file", "-f ", "");
-    $result = replace_func_1arg($result, "sys::is_dir", "-d ", "");
-    $result = replace_func_1arg($result, "sys::file_size", "-s ", "");
+    # core::file_exists/is_file/is_dir/file_size -> file test operators
+    $result = replace_func_1arg($result, "core::file_exists", "-e ", "");
+    $result = replace_func_1arg($result, "core::is_file", "-f ", "");
+    $result = replace_func_1arg($result, "core::is_dir", "-d ", "");
+    $result = replace_func_1arg($result, "core::file_size", "-s ", "");
 
-    # sys::readdir(path) -> strada_readdir(path)
-    $result =~ s/\bsys::readdir\(/strada_readdir(/g;
-    $result =~ s/\bsys::readdir_full\(/strada_readdir(/g;
+    # core::readdir(path) -> strada_readdir(path)
+    $result =~ s/\bcore::readdir\(/strada_readdir(/g;
+    $result =~ s/\bcore::readdir_full\(/strada_readdir(/g;
 
-    # Remaining sys:: -> strip prefix and add REVIEW
-    if (match($result, "\\bsys::\\w+\\(")) {
-        $result =~ s/\bsys:://g;
+    # Remaining core:: -> strip prefix and add REVIEW
+    if (match($result, "\\bcore::\\w+\\(")) {
+        $result =~ s/\bcore:://g;
         if (!match($result, "# REVIEW")) {
-            $result = $result . " # REVIEW: sys:: function";
+            $result = $result . " # REVIEW: core:: function";
         }
     }
 
@@ -749,7 +749,7 @@ func gen_header(str $source, int $needs_cwd, int $needs_fbase, int $needs_posix,
 # Main conversion function
 # ============================================================
 func convert_file(str $input_path, str $output_path) int {
-    my str $content = sys::slurp($input_path);
+    my str $content = core::slurp($input_path);
     if (length($content) == 0) {
         say("Error: Cannot read or empty file: " . $input_path);
         return 1;
@@ -766,19 +766,19 @@ func convert_file(str $input_path, str $output_path) int {
     my int $needs_carp = 0;
     my int $needs_moose = 0;
 
-    if (match($content, "sys::getcwd") || match($content, "sys::realpath") || match($content, "core::getcwd") || match($content, "core::realpath")) {
+    if (match($content, "core::getcwd") || match($content, "core::realpath") || match($content, "core::getcwd") || match($content, "core::realpath")) {
         $needs_cwd = 1;
     }
-    if (match($content, "sys::basename") || match($content, "sys::dirname") || match($content, "core::basename") || match($content, "core::dirname")) {
+    if (match($content, "core::basename") || match($content, "core::dirname") || match($content, "core::basename") || match($content, "core::dirname")) {
         $needs_fbase = 1;
     }
-    if (match($content, "sys::_exit") || match($content, "math::floor") || match($content, "math::ceil") || match($content, "math::pow") || match($content, "core::_exit")) {
+    if (match($content, "core::_exit") || match($content, "math::floor") || match($content, "math::ceil") || match($content, "math::pow") || match($content, "core::_exit")) {
         $needs_posix = 1;
     }
-    if (match($content, "sys::usleep") || match($content, "core::usleep")) {
+    if (match($content, "core::usleep") || match($content, "core::usleep")) {
         $needs_thr = 1;
     }
-    if (match($content, "sys::stack_trace") || match($content, "core::stack_trace")) {
+    if (match($content, "core::stack_trace") || match($content, "core::stack_trace")) {
         $needs_carp = 1;
     }
     if (match($content, "\\bhas\\s+(ro|rw)\\s+") || match($content, "\\bextends\\s+\\w") || match($content, "\\bwith\\s+\\w") || match($content, "\\bbefore\\s+\"") || match($content, "\\bafter\\s+\"") || match($content, "\\baround\\s+\"")) {
@@ -1142,7 +1142,7 @@ func convert_file(str $input_path, str $output_path) int {
     my str $header = gen_header($input_path, $needs_cwd, $needs_fbase, $needs_posix, $needs_thr, $needs_carp, $needs_moose);
     my str $output = $header . $body;
 
-    sys::spew($output_path, $output);
+    core::spew($output_path, $output);
     say("Converted: " . $input_path . " -> " . $output_path);
     return 0;
 }
@@ -1157,7 +1157,7 @@ func main(int $argc, array @argv) int {
         say("Features handled:");
         say("  - Type annotations stripped (my int $x -> my $x)");
         say("  - func -> sub with parameter extraction");
-        say("  - sys::/core:: -> Perl built-ins");
+        say("  - core::/core:: -> Perl built-ins");
         say("  - math:: -> Perl math functions");
         say("  - try/catch/throw -> eval/die/if($@)");
         say("  - import_lib/import_object/import_archive -> use");

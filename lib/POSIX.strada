@@ -30,7 +30,7 @@ POSIX - Perl-style POSIX interface for Strada
     }
 
     # Wait status macros
-    my int $status = sys::waitpid($pid, 0);
+    my int $status = core::waitpid($pid, 0);
     if (POSIX::WIFEXITED($status)) {
         say("Exit code: " . POSIX::WEXITSTATUS($status));
     }
@@ -186,12 +186,12 @@ Print error message to stderr (like C perror).
     }
 
     # Fork and wait
-    my int $pid = sys::fork();
+    my int $pid = core::fork();
     if ($pid == 0) {
         exit(42);
     }
 
-    my int $status = sys::waitpid($pid, 0);
+    my int $status = core::waitpid($pid, 0);
     if (POSIX::WIFEXITED($status)) {
         say("Child exited with code: " . POSIX::WEXITSTATUS($status));
     } elsif (POSIX::WIFSIGNALED($status)) {
@@ -365,7 +365,7 @@ func EWOULDBLOCK() int { return 11; }
 
 # Get environment variable with default value
 func getenv_default(str $name, str $fallback) str {
-    my scalar $val = sys::getenv($name);
+    my scalar $val = core::getenv($name);
     if (defined($val)) {
         return $val;
     }
@@ -374,27 +374,27 @@ func getenv_default(str $name, str $fallback) str {
 
 # Check if file exists
 func file_exists(str $path) int {
-    return sys::access($path, POSIX::F_OK()) == 0;
+    return core::access($path, POSIX::F_OK()) == 0;
 }
 
 # Check if file is readable
 func is_readable(str $path) int {
-    return sys::access($path, POSIX::R_OK()) == 0;
+    return core::access($path, POSIX::R_OK()) == 0;
 }
 
 # Check if file is writable
 func is_writable(str $path) int {
-    return sys::access($path, POSIX::W_OK()) == 0;
+    return core::access($path, POSIX::W_OK()) == 0;
 }
 
 # Check if file is executable
 func is_executable(str $path) int {
-    return sys::access($path, POSIX::X_OK()) == 0;
+    return core::access($path, POSIX::X_OK()) == 0;
 }
 
 # Check if path is a directory
 func is_directory(str $path) int {
-    my scalar $st = sys::stat($path);
+    my scalar $st = core::stat($path);
     if (!defined($st)) {
         return 0;
     }
@@ -403,7 +403,7 @@ func is_directory(str $path) int {
 
 # Check if path is a regular file
 func is_file(str $path) int {
-    my scalar $st = sys::stat($path);
+    my scalar $st = core::stat($path);
     if (!defined($st)) {
         return 0;
     }
@@ -412,7 +412,7 @@ func is_file(str $path) int {
 
 # Check if path is a symbolic link
 func is_symlink(str $path) int {
-    my scalar $st = sys::lstat($path);
+    my scalar $st = core::lstat($path);
     if (!defined($st)) {
         return 0;
     }
@@ -421,7 +421,7 @@ func is_symlink(str $path) int {
 
 # Get file size
 func file_size(str $path) int {
-    my scalar $st = sys::stat($path);
+    my scalar $st = core::stat($path);
     if (!defined($st)) {
         return -1;
     }
@@ -430,7 +430,7 @@ func file_size(str $path) int {
 
 # Get file modification time
 func file_mtime(str $path) int {
-    my scalar $st = sys::stat($path);
+    my scalar $st = core::stat($path);
     if (!defined($st)) {
         return -1;
     }
@@ -439,8 +439,8 @@ func file_mtime(str $path) int {
 
 # Get perror-style message
 func perror(str $prefix) void {
-    my int $err = sys::errno();
-    my str $msg = sys::strerror($err);
+    my int $err = core::errno();
+    my str $msg = core::strerror($err);
     if (length($prefix) > 0) {
         warn($prefix . ": " . $msg);
     } else {

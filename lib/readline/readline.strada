@@ -96,7 +96,7 @@ Set a readline variable (e.g., "editing-mode" to "vi" or "emacs").
     use lib "lib";
     import_lib "readline.so";
 
-    my str $histfile = sys::getenv("HOME") . "/.myrepl_history";
+    my str $histfile = core::getenv("HOME") . "/.myrepl_history";
 
     readline::init();
     readline::stifle_history(500);

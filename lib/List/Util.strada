@@ -589,7 +589,7 @@ func shuffle(array @list) array {
     # Fisher-Yates shuffle
     my int $i = $len - 1;
     while ($i > 0) {
-        my int $j = sys::rand() % ($i + 1);
+        my int $j = core::rand() % ($i + 1);
         my scalar $temp = $result[$i];
         $result[$i] = $result[$j];
         $result[$j] = $temp;

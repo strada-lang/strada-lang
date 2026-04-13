@@ -82,7 +82,7 @@ func path_dirname(str $path) str {
 # Recursively walk a directory, collecting files matching extension
 # Skips t/, blib/, inc/, .git/ directories
 func walk_dir(str $dir, str $ext, array @results) array {
-    my array @entries = sys::readdir($dir);
+    my array @entries = core::readdir($dir);
     my int $i = 0;
     my int $n = scalar(@entries);
     while ($i < $n) {
@@ -92,7 +92,7 @@ func walk_dir(str $dir, str $ext, array @results) array {
             next;
         }
         my str $full = $dir . "/" . $entry;
-        if (sys::is_dir($full)) {
+        if (core::is_dir($full)) {
             # Skip test, build, and VCS directories
             if ($entry eq "t" || $entry eq "blib" || $entry eq "inc" || $entry eq ".git" || $entry eq "eg" || $entry eq "example" || $entry eq "examples") {
                 $i++;
@@ -173,7 +173,7 @@ func xs_to_strada_name(str $xs_path, str $dist_dir) str {
 
 # Extract version from a .pm file by looking for $VERSION = ...
 func extract_version(str $pm_path) str {
-    my str $content = sys::slurp($pm_path);
+    my str $content = core::slurp($pm_path);
     if (length($content) == 0) {
         return "";
     }
@@ -561,14 +561,14 @@ func post_process(str $content) str {
             $line = replace($line, "\\s*# TODO: use die/warn instead of Carp.*$", "");
         }
 
-        # Convert hex() -> sys::hex() and strip the TODO
+        # Convert hex() -> core::hex() and strip the TODO
         if (match($line, "[^a-z_]hex[ (]") || match($trimmed, "^hex[ (]")) {
             # Use literal replace_all for common patterns
-            $line = replace_all($line, " hex(", " sys::hex(");
-            $line = replace_all($line, "(hex(", "(sys::hex(");
-            $line = replace_all($line, "=hex(", "=sys::hex(");
-            $line = replace_all($line, " hex (", " sys::hex(");
-            $line = replace_all($line, "(hex (", "(sys::hex(");
+            $line = replace_all($line, " hex(", " core::hex(");
+            $line = replace_all($line, "(hex(", "(core::hex(");
+            $line = replace_all($line, "=hex(", "=core::hex(");
+            $line = replace_all($line, " hex (", " core::hex(");
+            $line = replace_all($line, "(hex (", "(core::hex(");
             $line = replace($line, "\\s*# TODO: .*hex\\(\\) not in Strada", "");
         }
 
@@ -821,28 +821,28 @@ func sort_build_order(array @files) array {
 func find_tool(str $tool_name) str {
     # Check relative to the cpan2strada binary location
     # Try common locations
-    my str $self_dir = sys::getenv("STRADA_TOOL_DIR");
+    my str $self_dir = core::getenv("STRADA_TOOL_DIR");
     if (length($self_dir) > 0) {
         my str $path = $self_dir . "/" . $tool_name;
-        if (sys::file_exists($path)) {
+        if (core::file_exists($path)) {
             return $path;
         }
     }
 
     # Try ./tools/
-    if (sys::file_exists("tools/" . $tool_name)) {
+    if (core::file_exists("tools/" . $tool_name)) {
         return "tools/" . $tool_name;
     }
 
     # Try same directory as this tool would be in
-    if (sys::file_exists("./" . $tool_name)) {
+    if (core::file_exists("./" . $tool_name)) {
         return "./" . $tool_name;
     }
 
     # Try PATH via which
-    my str $which_result = sys::qx("which " . $tool_name . " 2>/dev/null");
+    my str $which_result = core::qx("which " . $tool_name . " 2>/dev/null");
     $which_result = trim_str($which_result);
-    if (length($which_result) > 0 && sys::file_exists($which_result)) {
+    if (length($which_result) > 0 && core::file_exists($which_result)) {
         return $which_result;
     }
 
@@ -881,7 +881,7 @@ func main(int $argc, array @argv) int {
         $dist_dir = substr($dist_dir, 0, length($dist_dir) - 1);
     }
 
-    if (!sys::file_exists($dist_dir) || !sys::is_dir($dist_dir)) {
+    if (!core::file_exists($dist_dir) || !core::is_dir($dist_dir)) {
         say("Error: directory not found: " . $dist_dir);
         return 1;
     }
@@ -952,8 +952,8 @@ func main(int $argc, array @argv) int {
     say("");
 
     # Create output directory
-    if (!sys::file_exists($out_dir)) {
-        sys::mkdir($out_dir, 493);
+    if (!core::file_exists($out_dir)) {
+        core::mkdir($out_dir, 493);
     }
 
     # Build a map of XS base names for merging
@@ -985,7 +985,7 @@ func main(int $argc, array @argv) int {
         # Run perl2strada to a temp file
         my str $tmp_pm = $out_dir . "/.tmp_pm.strada";
         my str $cmd = $perl2strada . " " . $pm_path . " " . $tmp_pm;
-        my int $rc = sys::system($cmd);
+        my int $rc = core::system($cmd);
         if ($rc != 0) {
             say("  WARNING: perl2strada failed (exit " . $rc . "), skipping");
             $fi++;
@@ -993,8 +993,8 @@ func main(int $argc, array @argv) int {
         }
 
         # Read converted content
-        my str $pm_content = sys::slurp($tmp_pm);
-        sys::unlink($tmp_pm);
+        my str $pm_content = core::slurp($tmp_pm);
+        core::unlink($tmp_pm);
 
         # Post-process
         $pm_content = post_process($pm_content);
@@ -1006,10 +1006,10 @@ func main(int $argc, array @argv) int {
 
             my str $tmp_xs = $out_dir . "/.tmp_xs.strada";
             my str $xs_cmd = $xs2strada . " " . $xs_path . " " . $tmp_xs;
-            my int $xs_rc = sys::system($xs_cmd);
+            my int $xs_rc = core::system($xs_cmd);
             if ($xs_rc == 0) {
-                my str $xs_content = sys::slurp($tmp_xs);
-                sys::unlink($tmp_xs);
+                my str $xs_content = core::slurp($tmp_xs);
+                core::unlink($tmp_xs);
                 $pm_content = merge_xs_pm($pm_content, $xs_content);
             } else {
                 say("  WARNING: xs2strada failed (exit " . $xs_rc . "), using PM only");
@@ -1020,7 +1020,7 @@ func main(int $argc, array @argv) int {
         }
 
         # Write output
-        sys::spew($out_path, $pm_content);
+        core::spew($out_path, $pm_content);
 
         # Count markers
         my array @counts = count_markers($pm_content);
@@ -1048,17 +1048,17 @@ func main(int $argc, array @argv) int {
 
         my str $tmp_xs = $out_dir . "/.tmp_xs.strada";
         my str $xs_cmd = $xs2strada . " " . $xs_path . " " . $tmp_xs;
-        my int $xs_rc = sys::system($xs_cmd);
+        my int $xs_rc = core::system($xs_cmd);
         if ($xs_rc != 0) {
             say("  WARNING: xs2strada failed (exit " . $xs_rc . "), skipping");
             $fi++;
             next;
         }
 
-        my str $xs_content = sys::slurp($tmp_xs);
-        sys::unlink($tmp_xs);
+        my str $xs_content = core::slurp($tmp_xs);
+        core::unlink($tmp_xs);
 
-        sys::spew($out_path, $xs_content);
+        core::spew($out_path, $xs_content);
 
         my array @counts = count_markers($xs_content);
         my int $review_count = $counts[0];
@@ -1101,8 +1101,8 @@ func main(int $argc, array @argv) int {
     $build_script = $build_script . "echo \"Done. Built " . scalar(@out_files) . " module(s).\"\n";
 
     my str $build_path = $out_dir . "/build.sh";
-    sys::spew($build_path, $build_script);
-    sys::system("chmod +x " . $build_path);
+    core::spew($build_path, $build_script);
+    core::system("chmod +x " . $build_path);
     say("Generated " . $build_path);
 
     # Generate REPORT.txt
@@ -1162,7 +1162,7 @@ func main(int $argc, array @argv) int {
     $report = $report . "\nTotal: " . $total_review . " REVIEW, " . $total_todo . " TODO\n";
 
     my str $report_path = $out_dir . "/REPORT.txt";
-    sys::spew($report_path, $report);
+    core::spew($report_path, $report);
     say("Generated " . $report_path);
 
     say("");

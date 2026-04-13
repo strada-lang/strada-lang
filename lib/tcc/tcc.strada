@@ -13,7 +13,7 @@ tcc - In-process C compilation using libtcc
     tcc::compile($state, $c_code);
     tcc::link($state);
     my int $fn = tcc::symbol($state, "my_function");
-    # Call $fn via sys::dl_call_*()
+    # Call $fn via core::dl_call_*()
     tcc::state_delete($state);
 
 =head1 DESCRIPTION
@@ -158,7 +158,7 @@ Returns array C<[fn_ptr, state]> or C<[0, 0]> on error.
     }
 
     # Call the function
-    my scalar $result = sys::dl_call_sv($fn, [21]);
+    my scalar $result = core::dl_call_sv($fn, [21]);
     say("Result: " . $result);  # 42
 
     tcc::state_delete($state);

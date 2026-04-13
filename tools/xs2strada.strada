@@ -286,15 +286,15 @@ func main(int $argc, array @argv) int {
     my str $input_file = $argv[1];
     my str $output_file = $argv[2];
 
-    if (!sys::file_exists($input_file)) {
+    if (!core::file_exists($input_file)) {
         say("Error: input file not found: " . $input_file);
         return 1;
     }
 
     # Read input
-    my scalar $fh = sys::open($input_file, "r");
+    my scalar $fh = core::open($input_file, "r");
     my array @lines = <$fh>;
-    sys::close($fh);
+    core::close($fh);
 
     my int $total_lines = scalar(@lines);
     say("Read " . $total_lines . " lines from " . $input_file);
@@ -637,7 +637,7 @@ func main(int $argc, array @argv) int {
     say("Found " . scalar(@functions) . " XS function(s)");
 
     # ---- Phase 4: Generate Strada output ----
-    my scalar $out = sys::open($output_file, "w");
+    my scalar $out = core::open($output_file, "w");
 
     # Header
     say($out, "# Converted from XS: " . $input_file);
@@ -962,7 +962,7 @@ func main(int $argc, array @argv) int {
         say($out, "");
     }
 
-    sys::close($out);
+    core::close($out);
 
     say("Converted: " . $input_file . " -> " . $output_file);
     say("Functions: " . scalar(@functions));

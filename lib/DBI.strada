@@ -277,7 +277,7 @@ Get column names from a prepared statement.
     # Insert
     my int $id = DBI::insert_get_id($dbh,
         "INSERT INTO posts (title, body, created_at) VALUES (?, ?, ?)",
-        ["Hello World", "My first post!", sys::time()]);
+        ["Hello World", "My first post!", core::time()]);
 
     say("Created post ID: " . $id);
 

@@ -199,7 +199,7 @@ func do_connect(scalar $self) int {
     my str $host = $self->{"host"};
     my int $port = $self->{"port"};
 
-    my int $sock = sys::socket_client($host, $port);
+    my int $sock = core::socket_client($host, $port);
     if ($sock <= 0) {
         return 0;
     }
@@ -209,7 +209,7 @@ func do_connect(scalar $self) int {
     # Read server greeting
     my str $response = SMTP::recv_response($self);
     if ($self->{"last_code"} != 220) {
-        sys::socket_close($sock);
+        core::socket_close($sock);
         $self->{"socket"} = 0;
         return 0;
     }
@@ -224,7 +224,7 @@ func send_cmd(scalar $self, str $cmd) int {
     }
 
     my str $data = $cmd . "\r\n";
-    sys::socket_send($self->{"socket"}, $data);
+    core::socket_send($self->{"socket"}, $data);
 
     return 1;
 }
@@ -237,7 +237,7 @@ func recv_response(scalar $self) str {
 
     # Read lines until we get a final response (no dash after code)
     while (1) {
-        $line = sys::socket_recv($self->{"socket"}, 1024);
+        $line = core::socket_recv($self->{"socket"}, 1024);
 
         if (!defined($line) || length($line) == 0) {
             last;
@@ -304,14 +304,14 @@ func auth(scalar $self, str $username, str $password) int {
     }
 
     # Send base64-encoded username
-    my str $user_b64 = sys::base64_encode($username);
+    my str $user_b64 = core::base64_encode($username);
     $code = SMTP::command($self, $user_b64);
     if ($code != 334) {
         return 0;
     }
 
     # Send base64-encoded password
-    my str $pass_b64 = sys::base64_encode($password);
+    my str $pass_b64 = core::base64_encode($password);
     $code = SMTP::command($self, $pass_b64);
 
     return ($code == 235);
@@ -321,7 +321,7 @@ func auth(scalar $self, str $username, str $password) int {
 func auth_plain(scalar $self, str $username, str $password) int {
     # PLAIN format: \0username\0password
     my str $auth_str = chr(0) . $username . chr(0) . $password;
-    my str $auth_b64 = sys::base64_encode($auth_str);
+    my str $auth_b64 = core::base64_encode($auth_str);
 
     my int $code = SMTP::command($self, "AUTH PLAIN " . $auth_b64);
     return ($code == 235);
@@ -387,7 +387,7 @@ func quit(scalar $self) int {
     my int $code = SMTP::command($self, "QUIT");
 
     if ($self->{"socket"} > 0) {
-        sys::socket_close($self->{"socket"});
+        core::socket_close($self->{"socket"});
         $self->{"socket"} = 0;
     }
 

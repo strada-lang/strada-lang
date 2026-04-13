@@ -125,7 +125,7 @@ enum BI {
     HASH_SET = 91, HASH_GET = 92, HASH_DELETE = 93, CAPTURE = 94,
     # Misc (95-99)
     DIE = 95, THROW_FN = 96, SLURP = 97, SPEW = 98, STRADA_NEW_UNDEF = 99,
-    # sys::/core:: (100-260)
+    # core::/core:: (100-260)
     SYS_EXIT = 100, SYS_GETENV = 101, SYS_SETENV = 102,
     SYS_TIME = 103, SYS_SLEEP = 104, SYS_HIRES_TIME = 105,
     SYS_OPEN = 110, SYS_CLOSE = 111, SYS_READLINE = 112,
@@ -263,163 +263,163 @@ func init_builtins(scalar $interp) void {
     # Additional
     $b{"select"} = BI::SELECT_FN; $b{"named_captures"} = BI::NAMED_CAPTURES;
     $b{"captures"} = BI::CAPTURES; $b{"throw"} = BI::THROW_FN;
-    # sys::/core:: functions (both prefixes map to same BI value)
-    $b{"sys::exit"} = BI::SYS_EXIT; $b{"core::exit"} = BI::SYS_EXIT;
-    $b{"sys::getenv"} = BI::SYS_GETENV; $b{"core::getenv"} = BI::SYS_GETENV;
-    $b{"sys::setenv"} = BI::SYS_SETENV; $b{"core::setenv"} = BI::SYS_SETENV;
-    $b{"sys::time"} = BI::SYS_TIME; $b{"core::time"} = BI::SYS_TIME;
-    $b{"sys::sleep"} = BI::SYS_SLEEP; $b{"core::sleep"} = BI::SYS_SLEEP;
-    $b{"sys::hires_time"} = BI::SYS_HIRES_TIME; $b{"core::hires_time"} = BI::SYS_HIRES_TIME;
-    $b{"sys::open"} = BI::SYS_OPEN; $b{"core::open"} = BI::SYS_OPEN;
-    $b{"sys::close"} = BI::SYS_CLOSE; $b{"core::close"} = BI::SYS_CLOSE;
-    $b{"sys::readline"} = BI::SYS_READLINE; $b{"core::readline"} = BI::SYS_READLINE;
-    $b{"sys::eof"} = BI::SYS_EOF; $b{"core::eof"} = BI::SYS_EOF;
-    $b{"sys::flush"} = BI::SYS_FLUSH; $b{"core::flush"} = BI::SYS_FLUSH;
-    $b{"sys::popen"} = BI::SYS_POPEN; $b{"core::popen"} = BI::SYS_POPEN;
-    $b{"sys::qx"} = BI::SYS_QX; $b{"core::qx"} = BI::SYS_QX;
-    $b{"sys::system"} = BI::SYS_SYSTEM; $b{"core::system"} = BI::SYS_SYSTEM;
-    $b{"sys::stack_trace"} = BI::SYS_STACK_TRACE; $b{"core::stack_trace"} = BI::SYS_STACK_TRACE;
-    $b{"sys::fwrite"} = BI::SYS_FWRITE; $b{"core::fwrite"} = BI::SYS_FWRITE;
-    $b{"sys::fread"} = BI::SYS_FREAD; $b{"core::fread"} = BI::SYS_FREAD;
-    $b{"sys::fputs"} = BI::SYS_FPUTS; $b{"core::fputs"} = BI::SYS_FPUTS;
-    $b{"sys::fgets"} = BI::SYS_FGETS; $b{"core::fgets"} = BI::SYS_FGETS;
-    $b{"sys::pclose"} = BI::SYS_PCLOSE; $b{"core::pclose"} = BI::SYS_PCLOSE;
-    $b{"sys::truncate"} = BI::SYS_TRUNCATE; $b{"core::truncate"} = BI::SYS_TRUNCATE;
-    $b{"sys::open_str"} = BI::SYS_OPEN_STR; $b{"core::open_str"} = BI::SYS_OPEN_STR;
-    $b{"sys::str_from_fh"} = BI::SYS_STR_FROM_FH; $b{"core::str_from_fh"} = BI::SYS_STR_FROM_FH;
-    $b{"sys::slurp"} = BI::SYS_SLURP; $b{"core::slurp"} = BI::SYS_SLURP;
-    $b{"sys::spew"} = BI::SYS_SPEW; $b{"core::spew"} = BI::SYS_SPEW;
-    $b{"sys::unlink"} = BI::SYS_UNLINK; $b{"core::unlink"} = BI::SYS_UNLINK;
-    $b{"sys::rename"} = BI::SYS_RENAME; $b{"core::rename"} = BI::SYS_RENAME;
-    $b{"sys::mkdir"} = BI::SYS_MKDIR; $b{"core::mkdir"} = BI::SYS_MKDIR;
-    $b{"sys::rmdir"} = BI::SYS_RMDIR; $b{"core::rmdir"} = BI::SYS_RMDIR;
-    $b{"sys::chmod"} = BI::SYS_CHMOD; $b{"core::chmod"} = BI::SYS_CHMOD;
-    $b{"sys::link"} = BI::SYS_LINK; $b{"core::link"} = BI::SYS_LINK;
-    $b{"sys::symlink"} = BI::SYS_SYMLINK; $b{"core::symlink"} = BI::SYS_SYMLINK;
-    $b{"sys::readlink"} = BI::SYS_READLINK; $b{"core::readlink"} = BI::SYS_READLINK;
-    $b{"sys::stat"} = BI::SYS_STAT; $b{"core::stat"} = BI::SYS_STAT;
-    $b{"sys::lstat"} = BI::SYS_LSTAT; $b{"core::lstat"} = BI::SYS_LSTAT;
-    $b{"sys::access"} = BI::SYS_ACCESS; $b{"core::access"} = BI::SYS_ACCESS;
-    $b{"sys::is_file"} = BI::SYS_IS_FILE; $b{"core::is_file"} = BI::SYS_IS_FILE;
-    $b{"sys::is_dir"} = BI::SYS_IS_DIR; $b{"core::is_dir"} = BI::SYS_IS_DIR;
-    $b{"sys::readdir"} = BI::SYS_READDIR; $b{"core::readdir"} = BI::SYS_READDIR;
-    $b{"sys::readdir_full"} = BI::SYS_READDIR_FULL; $b{"core::readdir_full"} = BI::SYS_READDIR_FULL;
-    $b{"sys::glob"} = BI::SYS_GLOB; $b{"core::glob"} = BI::SYS_GLOB;
-    $b{"sys::fnmatch"} = BI::SYS_FNMATCH; $b{"core::fnmatch"} = BI::SYS_FNMATCH;
-    $b{"sys::dirname"} = BI::SYS_DIRNAME; $b{"core::dirname"} = BI::SYS_DIRNAME;
-    $b{"sys::basename"} = BI::SYS_BASENAME; $b{"core::basename"} = BI::SYS_BASENAME;
-    $b{"sys::file_ext"} = BI::SYS_FILE_EXT; $b{"core::file_ext"} = BI::SYS_FILE_EXT;
-    $b{"sys::realpath"} = BI::SYS_REALPATH; $b{"core::realpath"} = BI::SYS_REALPATH;
-    $b{"sys::getcwd"} = BI::SYS_GETCWD; $b{"core::getcwd"} = BI::SYS_GETCWD;
-    $b{"sys::path_join"} = BI::SYS_PATH_JOIN; $b{"core::path_join"} = BI::SYS_PATH_JOIN;
-    $b{"sys::getpid"} = BI::SYS_GETPID; $b{"core::getpid"} = BI::SYS_GETPID;
-    $b{"sys::getppid"} = BI::SYS_GETPPID; $b{"core::getppid"} = BI::SYS_GETPPID;
-    $b{"sys::fork"} = BI::SYS_FORK; $b{"core::fork"} = BI::SYS_FORK;
-    $b{"sys::wait"} = BI::SYS_WAIT; $b{"core::wait"} = BI::SYS_WAIT;
-    $b{"sys::usleep"} = BI::SYS_USLEEP; $b{"core::usleep"} = BI::SYS_USLEEP;
-    $b{"sys::getprocname"} = BI::SYS_GETPROCNAME; $b{"core::getprocname"} = BI::SYS_GETPROCNAME;
-    $b{"sys::setprocname"} = BI::SYS_SETPROCNAME; $b{"core::setprocname"} = BI::SYS_SETPROCNAME;
-    $b{"sys::getproctitle"} = BI::SYS_GETPROCTITLE; $b{"core::getproctitle"} = BI::SYS_GETPROCTITLE;
-    $b{"sys::setproctitle"} = BI::SYS_SETPROCTITLE; $b{"core::setproctitle"} = BI::SYS_SETPROCTITLE;
-    $b{"sys::unsetenv"} = BI::SYS_UNSETENV; $b{"core::unsetenv"} = BI::SYS_UNSETENV;
-    $b{"sys::getuid"} = BI::SYS_GETUID; $b{"core::getuid"} = BI::SYS_GETUID;
-    $b{"sys::getgid"} = BI::SYS_GETGID; $b{"core::getgid"} = BI::SYS_GETGID;
-    $b{"sys::geteuid"} = BI::SYS_GETEUID; $b{"core::geteuid"} = BI::SYS_GETEUID;
-    $b{"sys::getegid"} = BI::SYS_GETEGID; $b{"core::getegid"} = BI::SYS_GETEGID;
-    $b{"sys::getpwuid"} = BI::SYS_GETPWUID; $b{"core::getpwuid"} = BI::SYS_GETPWUID;
-    $b{"sys::getpwnam"} = BI::SYS_GETPWNAM; $b{"core::getpwnam"} = BI::SYS_GETPWNAM;
-    $b{"sys::getgrgid"} = BI::SYS_GETGRGID; $b{"core::getgrgid"} = BI::SYS_GETGRGID;
-    $b{"sys::getgroups"} = BI::SYS_GETGROUPS; $b{"core::getgroups"} = BI::SYS_GETGROUPS;
-    $b{"sys::isatty"} = BI::SYS_ISATTY; $b{"core::isatty"} = BI::SYS_ISATTY;
-    $b{"sys::strerror"} = BI::SYS_STRERROR; $b{"core::strerror"} = BI::SYS_STRERROR;
-    $b{"sys::errno"} = BI::SYS_ERRNO; $b{"core::errno"} = BI::SYS_ERRNO;
-    $b{"sys::umask"} = BI::SYS_UMASK; $b{"core::umask"} = BI::SYS_UMASK;
-    $b{"sys::utime"} = BI::SYS_UTIME; $b{"core::utime"} = BI::SYS_UTIME;
-    $b{"sys::free"} = BI::SYS_FREE; $b{"core::free"} = BI::SYS_FREE;
-    $b{"sys::release"} = BI::SYS_RELEASE; $b{"core::release"} = BI::SYS_RELEASE;
-    $b{"sys::gethostname"} = BI::SYS_GETHOSTNAME; $b{"core::gethostname"} = BI::SYS_GETHOSTNAME;
-    $b{"sys::gethostbyname"} = BI::SYS_GETHOSTBYNAME; $b{"core::gethostbyname"} = BI::SYS_GETHOSTBYNAME;
-    $b{"sys::gethostbyname_all"} = BI::SYS_GETHOSTBYNAME_ALL; $b{"core::gethostbyname_all"} = BI::SYS_GETHOSTBYNAME_ALL;
-    $b{"sys::getaddrinfo"} = BI::SYS_GETADDRINFO; $b{"core::getaddrinfo"} = BI::SYS_GETADDRINFO;
-    $b{"sys::inet_addr"} = BI::SYS_INET_ADDR; $b{"core::inet_addr"} = BI::SYS_INET_ADDR;
-    $b{"sys::inet_ntoa"} = BI::SYS_INET_NTOA; $b{"core::inet_ntoa"} = BI::SYS_INET_NTOA;
-    $b{"sys::htons"} = BI::SYS_HTONS; $b{"core::htons"} = BI::SYS_HTONS;
-    $b{"sys::ntohs"} = BI::SYS_NTOHS; $b{"core::ntohs"} = BI::SYS_NTOHS;
-    $b{"sys::htonl"} = BI::SYS_HTONL; $b{"core::htonl"} = BI::SYS_HTONL;
-    $b{"sys::ntohl"} = BI::SYS_NTOHL; $b{"core::ntohl"} = BI::SYS_NTOHL;
-    $b{"sys::inet_pton"} = BI::SYS_INET_PTON; $b{"core::inet_pton"} = BI::SYS_INET_PTON;
-    $b{"sys::inet_ntop"} = BI::SYS_INET_NTOP; $b{"core::inet_ntop"} = BI::SYS_INET_NTOP;
-    $b{"sys::socket_server"} = BI::SYS_SOCKET_SERVER; $b{"core::socket_server"} = BI::SYS_SOCKET_SERVER;
-    $b{"sys::socket_fd"} = BI::SYS_SOCKET_FD; $b{"core::socket_fd"} = BI::SYS_SOCKET_FD;
-    $b{"sys::socket_close"} = BI::SYS_SOCKET_CLOSE; $b{"core::socket_close"} = BI::SYS_SOCKET_CLOSE;
-    $b{"sys::socket_select"} = BI::SYS_SOCKET_SELECT; $b{"core::socket_select"} = BI::SYS_SOCKET_SELECT;
-    $b{"sys::dl_open"} = BI::SYS_DL_OPEN; $b{"core::dl_open"} = BI::SYS_DL_OPEN;
-    $b{"sys::dl_sym"} = BI::SYS_DL_SYM; $b{"core::dl_sym"} = BI::SYS_DL_SYM;
-    $b{"sys::dl_close"} = BI::SYS_DL_CLOSE; $b{"core::dl_close"} = BI::SYS_DL_CLOSE;
-    $b{"sys::dl_error"} = BI::SYS_DL_ERROR; $b{"core::dl_error"} = BI::SYS_DL_ERROR;
-    $b{"sys::dl_call_num"} = BI::SYS_DL_CALL_NUM; $b{"core::dl_call_num"} = BI::SYS_DL_CALL_NUM;
-    $b{"sys::dl_call_int"} = BI::SYS_DL_CALL_INT; $b{"core::dl_call_int"} = BI::SYS_DL_CALL_INT;
-    $b{"sys::int_ptr"} = BI::SYS_INT_PTR; $b{"core::int_ptr"} = BI::SYS_INT_PTR;
-    $b{"sys::num_ptr"} = BI::SYS_NUM_PTR; $b{"core::num_ptr"} = BI::SYS_NUM_PTR;
-    $b{"sys::ptr_deref_int"} = BI::SYS_PTR_DEREF_INT; $b{"core::ptr_deref_int"} = BI::SYS_PTR_DEREF_INT;
-    $b{"sys::ptr_deref_num"} = BI::SYS_PTR_DEREF_NUM; $b{"core::ptr_deref_num"} = BI::SYS_PTR_DEREF_NUM;
-    $b{"sys::ptr_set_int"} = BI::SYS_PTR_SET_INT; $b{"core::ptr_set_int"} = BI::SYS_PTR_SET_INT;
-    $b{"sys::ptr_set_num"} = BI::SYS_PTR_SET_NUM; $b{"core::ptr_set_num"} = BI::SYS_PTR_SET_NUM;
-    $b{"sys::getpgrp"} = BI::SYS_GETPGRP; $b{"core::getpgrp"} = BI::SYS_GETPGRP;
-    $b{"sys::getsid"} = BI::SYS_GETSID; $b{"core::getsid"} = BI::SYS_GETSID;
-    $b{"sys::getpgid"} = BI::SYS_GETPGID; $b{"core::getpgid"} = BI::SYS_GETPGID;
-    $b{"sys::nice"} = BI::SYS_NICE; $b{"core::nice"} = BI::SYS_NICE;
-    $b{"sys::getpriority"} = BI::SYS_GETPRIORITY; $b{"core::getpriority"} = BI::SYS_GETPRIORITY;
-    $b{"sys::getrusage"} = BI::SYS_GETRUSAGE; $b{"core::getrusage"} = BI::SYS_GETRUSAGE;
-    $b{"sys::getrlimit"} = BI::SYS_GETRLIMIT; $b{"core::getrlimit"} = BI::SYS_GETRLIMIT;
-    $b{"sys::times"} = BI::SYS_TIMES; $b{"core::times"} = BI::SYS_TIMES;
-    $b{"sys::clock"} = BI::SYS_CLOCK; $b{"core::clock"} = BI::SYS_CLOCK;
-    $b{"sys::mkstemp"} = BI::SYS_MKSTEMP; $b{"core::mkstemp"} = BI::SYS_MKSTEMP;
-    $b{"sys::mkdtemp"} = BI::SYS_MKDTEMP; $b{"core::mkdtemp"} = BI::SYS_MKDTEMP;
-    $b{"sys::statvfs"} = BI::SYS_STATVFS; $b{"core::statvfs"} = BI::SYS_STATVFS;
-    $b{"sys::atoi"} = BI::SYS_ATOI; $b{"core::atoi"} = BI::SYS_ATOI;
-    $b{"sys::atof"} = BI::SYS_ATOF; $b{"core::atof"} = BI::SYS_ATOF;
-    $b{"sys::strtol"} = BI::SYS_STRTOL; $b{"core::strtol"} = BI::SYS_STRTOL;
-    $b{"sys::difftime"} = BI::SYS_DIFFTIME; $b{"core::difftime"} = BI::SYS_DIFFTIME;
-    $b{"sys::srand"} = BI::SYS_SRAND; $b{"core::srand"} = BI::SYS_SRAND;
-    $b{"sys::rand"} = BI::SYS_RAND; $b{"core::rand"} = BI::SYS_RAND;
-    $b{"sys::srandom"} = BI::SYS_SRANDOM; $b{"core::srandom"} = BI::SYS_SRANDOM;
-    $b{"sys::random"} = BI::SYS_RANDOM; $b{"core::random"} = BI::SYS_RANDOM;
-    $b{"sys::seek"} = BI::SYS_SEEK; $b{"core::seek"} = BI::SYS_SEEK;
-    $b{"sys::tell"} = BI::SYS_TELL; $b{"core::tell"} = BI::SYS_TELL;
-    $b{"sys::rewind"} = BI::SYS_REWIND; $b{"core::rewind"} = BI::SYS_REWIND;
-    $b{"sys::weaken"} = BI::SYS_WEAKEN; $b{"core::weaken"} = BI::SYS_WEAKEN;
-    $b{"sys::isweak"} = BI::SYS_ISWEAK; $b{"core::isweak"} = BI::SYS_ISWEAK;
-    $b{"sys::wantscalar"} = BI::SYS_WANTSCALAR; $b{"core::wantscalar"} = BI::SYS_WANTSCALAR;
-    $b{"sys::wantarray"} = BI::SYS_WANTARRAY; $b{"core::wantarray"} = BI::SYS_WANTARRAY;
-    $b{"sys::wanthash"} = BI::SYS_WANTHASH; $b{"core::wanthash"} = BI::SYS_WANTHASH;
-    $b{"sys::global_set"} = BI::SYS_GLOBAL_SET; $b{"core::global_set"} = BI::SYS_GLOBAL_SET;
-    $b{"sys::global_get"} = BI::SYS_GLOBAL_GET; $b{"core::global_get"} = BI::SYS_GLOBAL_GET;
-    $b{"sys::global_exists"} = BI::SYS_GLOBAL_EXISTS; $b{"core::global_exists"} = BI::SYS_GLOBAL_EXISTS;
-    $b{"sys::global_delete"} = BI::SYS_GLOBAL_DELETE; $b{"core::global_delete"} = BI::SYS_GLOBAL_DELETE;
-    $b{"sys::global_keys"} = BI::SYS_GLOBAL_KEYS; $b{"core::global_keys"} = BI::SYS_GLOBAL_KEYS;
-    $b{"sys::_exit"} = BI::SYS_EXIT_NOCLEAN; $b{"core::_exit"} = BI::SYS_EXIT_NOCLEAN;
-    $b{"sys::signal"} = BI::SYS_SIGNAL; $b{"core::signal"} = BI::SYS_SIGNAL;
-    $b{"sys::get_recursion_limit"} = BI::SYS_GET_RECURSION_LIMIT; $b{"core::get_recursion_limit"} = BI::SYS_GET_RECURSION_LIMIT;
-    $b{"sys::set_recursion_limit"} = BI::SYS_SET_RECURSION_LIMIT; $b{"core::set_recursion_limit"} = BI::SYS_SET_RECURSION_LIMIT;
-    $b{"sys::pack"} = BI::SYS_PACK; $b{"core::pack"} = BI::SYS_PACK;
-    $b{"sys::unpack"} = BI::SYS_UNPACK; $b{"core::unpack"} = BI::SYS_UNPACK;
-    $b{"sys::ord_byte"} = BI::SYS_ORD_BYTE; $b{"core::ord_byte"} = BI::SYS_ORD_BYTE;
-    $b{"sys::get_byte"} = BI::SYS_GET_BYTE; $b{"core::get_byte"} = BI::SYS_GET_BYTE;
-    $b{"sys::byte_length"} = BI::SYS_BYTE_LENGTH; $b{"core::byte_length"} = BI::SYS_BYTE_LENGTH;
-    $b{"sys::base64_encode"} = BI::SYS_BASE64_ENCODE; $b{"core::base64_encode"} = BI::SYS_BASE64_ENCODE;
-    $b{"sys::base64_decode"} = BI::SYS_BASE64_DECODE; $b{"core::base64_decode"} = BI::SYS_BASE64_DECODE;
-    $b{"sys::hex_encode"} = BI::SYS_HEX_ENCODE; $b{"core::hex_encode"} = BI::SYS_HEX_ENCODE;
-    $b{"sys::hex_decode"} = BI::SYS_HEX_DECODE; $b{"core::hex_decode"} = BI::SYS_HEX_DECODE;
-    $b{"sys::chroot"} = BI::SYS_CHROOT; $b{"core::chroot"} = BI::SYS_CHROOT;
-    $b{"sys::setsid"} = BI::SYS_SETSID; $b{"core::setsid"} = BI::SYS_SETSID;
-    $b{"sys::setgid"} = BI::SYS_SETGID; $b{"core::setgid"} = BI::SYS_SETGID;
-    $b{"sys::setuid"} = BI::SYS_SETUID; $b{"core::setuid"} = BI::SYS_SETUID;
-    $b{"sys::pipe"} = BI::SYS_PIPE; $b{"core::pipe"} = BI::SYS_PIPE;
-    $b{"sys::dup2"} = BI::SYS_DUP2; $b{"core::dup2"} = BI::SYS_DUP2;
-    $b{"sys::select_fd"} = BI::SYS_SELECT_FD; $b{"core::select_fd"} = BI::SYS_SELECT_FD;
-    $b{"sys::hash_default_capacity"} = BI::SYS_HASH_DEFAULT_CAPACITY; $b{"core::hash_default_capacity"} = BI::SYS_HASH_DEFAULT_CAPACITY;
-    $b{"sys::array_reserve"} = BI::SYS_ARRAY_RESERVE; $b{"core::array_reserve"} = BI::SYS_ARRAY_RESERVE;
+    # core::/core:: functions (both prefixes map to same BI value)
+    $b{"core::exit"} = BI::SYS_EXIT; $b{"core::exit"} = BI::SYS_EXIT;
+    $b{"core::getenv"} = BI::SYS_GETENV; $b{"core::getenv"} = BI::SYS_GETENV;
+    $b{"core::setenv"} = BI::SYS_SETENV; $b{"core::setenv"} = BI::SYS_SETENV;
+    $b{"core::time"} = BI::SYS_TIME; $b{"core::time"} = BI::SYS_TIME;
+    $b{"core::sleep"} = BI::SYS_SLEEP; $b{"core::sleep"} = BI::SYS_SLEEP;
+    $b{"core::hires_time"} = BI::SYS_HIRES_TIME; $b{"core::hires_time"} = BI::SYS_HIRES_TIME;
+    $b{"core::open"} = BI::SYS_OPEN; $b{"core::open"} = BI::SYS_OPEN;
+    $b{"core::close"} = BI::SYS_CLOSE; $b{"core::close"} = BI::SYS_CLOSE;
+    $b{"core::readline"} = BI::SYS_READLINE; $b{"core::readline"} = BI::SYS_READLINE;
+    $b{"core::eof"} = BI::SYS_EOF; $b{"core::eof"} = BI::SYS_EOF;
+    $b{"core::flush"} = BI::SYS_FLUSH; $b{"core::flush"} = BI::SYS_FLUSH;
+    $b{"core::popen"} = BI::SYS_POPEN; $b{"core::popen"} = BI::SYS_POPEN;
+    $b{"core::qx"} = BI::SYS_QX; $b{"core::qx"} = BI::SYS_QX;
+    $b{"core::system"} = BI::SYS_SYSTEM; $b{"core::system"} = BI::SYS_SYSTEM;
+    $b{"core::stack_trace"} = BI::SYS_STACK_TRACE; $b{"core::stack_trace"} = BI::SYS_STACK_TRACE;
+    $b{"core::fwrite"} = BI::SYS_FWRITE; $b{"core::fwrite"} = BI::SYS_FWRITE;
+    $b{"core::fread"} = BI::SYS_FREAD; $b{"core::fread"} = BI::SYS_FREAD;
+    $b{"core::fputs"} = BI::SYS_FPUTS; $b{"core::fputs"} = BI::SYS_FPUTS;
+    $b{"core::fgets"} = BI::SYS_FGETS; $b{"core::fgets"} = BI::SYS_FGETS;
+    $b{"core::pclose"} = BI::SYS_PCLOSE; $b{"core::pclose"} = BI::SYS_PCLOSE;
+    $b{"core::truncate"} = BI::SYS_TRUNCATE; $b{"core::truncate"} = BI::SYS_TRUNCATE;
+    $b{"core::open_str"} = BI::SYS_OPEN_STR; $b{"core::open_str"} = BI::SYS_OPEN_STR;
+    $b{"core::str_from_fh"} = BI::SYS_STR_FROM_FH; $b{"core::str_from_fh"} = BI::SYS_STR_FROM_FH;
+    $b{"core::slurp"} = BI::SYS_SLURP; $b{"core::slurp"} = BI::SYS_SLURP;
+    $b{"core::spew"} = BI::SYS_SPEW; $b{"core::spew"} = BI::SYS_SPEW;
+    $b{"core::unlink"} = BI::SYS_UNLINK; $b{"core::unlink"} = BI::SYS_UNLINK;
+    $b{"core::rename"} = BI::SYS_RENAME; $b{"core::rename"} = BI::SYS_RENAME;
+    $b{"core::mkdir"} = BI::SYS_MKDIR; $b{"core::mkdir"} = BI::SYS_MKDIR;
+    $b{"core::rmdir"} = BI::SYS_RMDIR; $b{"core::rmdir"} = BI::SYS_RMDIR;
+    $b{"core::chmod"} = BI::SYS_CHMOD; $b{"core::chmod"} = BI::SYS_CHMOD;
+    $b{"core::link"} = BI::SYS_LINK; $b{"core::link"} = BI::SYS_LINK;
+    $b{"core::symlink"} = BI::SYS_SYMLINK; $b{"core::symlink"} = BI::SYS_SYMLINK;
+    $b{"core::readlink"} = BI::SYS_READLINK; $b{"core::readlink"} = BI::SYS_READLINK;
+    $b{"core::stat"} = BI::SYS_STAT; $b{"core::stat"} = BI::SYS_STAT;
+    $b{"core::lstat"} = BI::SYS_LSTAT; $b{"core::lstat"} = BI::SYS_LSTAT;
+    $b{"core::access"} = BI::SYS_ACCESS; $b{"core::access"} = BI::SYS_ACCESS;
+    $b{"core::is_file"} = BI::SYS_IS_FILE; $b{"core::is_file"} = BI::SYS_IS_FILE;
+    $b{"core::is_dir"} = BI::SYS_IS_DIR; $b{"core::is_dir"} = BI::SYS_IS_DIR;
+    $b{"core::readdir"} = BI::SYS_READDIR; $b{"core::readdir"} = BI::SYS_READDIR;
+    $b{"core::readdir_full"} = BI::SYS_READDIR_FULL; $b{"core::readdir_full"} = BI::SYS_READDIR_FULL;
+    $b{"core::glob"} = BI::SYS_GLOB; $b{"core::glob"} = BI::SYS_GLOB;
+    $b{"core::fnmatch"} = BI::SYS_FNMATCH; $b{"core::fnmatch"} = BI::SYS_FNMATCH;
+    $b{"core::dirname"} = BI::SYS_DIRNAME; $b{"core::dirname"} = BI::SYS_DIRNAME;
+    $b{"core::basename"} = BI::SYS_BASENAME; $b{"core::basename"} = BI::SYS_BASENAME;
+    $b{"core::file_ext"} = BI::SYS_FILE_EXT; $b{"core::file_ext"} = BI::SYS_FILE_EXT;
+    $b{"core::realpath"} = BI::SYS_REALPATH; $b{"core::realpath"} = BI::SYS_REALPATH;
+    $b{"core::getcwd"} = BI::SYS_GETCWD; $b{"core::getcwd"} = BI::SYS_GETCWD;
+    $b{"core::path_join"} = BI::SYS_PATH_JOIN; $b{"core::path_join"} = BI::SYS_PATH_JOIN;
+    $b{"core::getpid"} = BI::SYS_GETPID; $b{"core::getpid"} = BI::SYS_GETPID;
+    $b{"core::getppid"} = BI::SYS_GETPPID; $b{"core::getppid"} = BI::SYS_GETPPID;
+    $b{"core::fork"} = BI::SYS_FORK; $b{"core::fork"} = BI::SYS_FORK;
+    $b{"core::wait"} = BI::SYS_WAIT; $b{"core::wait"} = BI::SYS_WAIT;
+    $b{"core::usleep"} = BI::SYS_USLEEP; $b{"core::usleep"} = BI::SYS_USLEEP;
+    $b{"core::getprocname"} = BI::SYS_GETPROCNAME; $b{"core::getprocname"} = BI::SYS_GETPROCNAME;
+    $b{"core::setprocname"} = BI::SYS_SETPROCNAME; $b{"core::setprocname"} = BI::SYS_SETPROCNAME;
+    $b{"core::getproctitle"} = BI::SYS_GETPROCTITLE; $b{"core::getproctitle"} = BI::SYS_GETPROCTITLE;
+    $b{"core::setproctitle"} = BI::SYS_SETPROCTITLE; $b{"core::setproctitle"} = BI::SYS_SETPROCTITLE;
+    $b{"core::unsetenv"} = BI::SYS_UNSETENV; $b{"core::unsetenv"} = BI::SYS_UNSETENV;
+    $b{"core::getuid"} = BI::SYS_GETUID; $b{"core::getuid"} = BI::SYS_GETUID;
+    $b{"core::getgid"} = BI::SYS_GETGID; $b{"core::getgid"} = BI::SYS_GETGID;
+    $b{"core::geteuid"} = BI::SYS_GETEUID; $b{"core::geteuid"} = BI::SYS_GETEUID;
+    $b{"core::getegid"} = BI::SYS_GETEGID; $b{"core::getegid"} = BI::SYS_GETEGID;
+    $b{"core::getpwuid"} = BI::SYS_GETPWUID; $b{"core::getpwuid"} = BI::SYS_GETPWUID;
+    $b{"core::getpwnam"} = BI::SYS_GETPWNAM; $b{"core::getpwnam"} = BI::SYS_GETPWNAM;
+    $b{"core::getgrgid"} = BI::SYS_GETGRGID; $b{"core::getgrgid"} = BI::SYS_GETGRGID;
+    $b{"core::getgroups"} = BI::SYS_GETGROUPS; $b{"core::getgroups"} = BI::SYS_GETGROUPS;
+    $b{"core::isatty"} = BI::SYS_ISATTY; $b{"core::isatty"} = BI::SYS_ISATTY;
+    $b{"core::strerror"} = BI::SYS_STRERROR; $b{"core::strerror"} = BI::SYS_STRERROR;
+    $b{"core::errno"} = BI::SYS_ERRNO; $b{"core::errno"} = BI::SYS_ERRNO;
+    $b{"core::umask"} = BI::SYS_UMASK; $b{"core::umask"} = BI::SYS_UMASK;
+    $b{"core::utime"} = BI::SYS_UTIME; $b{"core::utime"} = BI::SYS_UTIME;
+    $b{"core::free"} = BI::SYS_FREE; $b{"core::free"} = BI::SYS_FREE;
+    $b{"core::release"} = BI::SYS_RELEASE; $b{"core::release"} = BI::SYS_RELEASE;
+    $b{"core::gethostname"} = BI::SYS_GETHOSTNAME; $b{"core::gethostname"} = BI::SYS_GETHOSTNAME;
+    $b{"core::gethostbyname"} = BI::SYS_GETHOSTBYNAME; $b{"core::gethostbyname"} = BI::SYS_GETHOSTBYNAME;
+    $b{"core::gethostbyname_all"} = BI::SYS_GETHOSTBYNAME_ALL; $b{"core::gethostbyname_all"} = BI::SYS_GETHOSTBYNAME_ALL;
+    $b{"core::getaddrinfo"} = BI::SYS_GETADDRINFO; $b{"core::getaddrinfo"} = BI::SYS_GETADDRINFO;
+    $b{"core::inet_addr"} = BI::SYS_INET_ADDR; $b{"core::inet_addr"} = BI::SYS_INET_ADDR;
+    $b{"core::inet_ntoa"} = BI::SYS_INET_NTOA; $b{"core::inet_ntoa"} = BI::SYS_INET_NTOA;
+    $b{"core::htons"} = BI::SYS_HTONS; $b{"core::htons"} = BI::SYS_HTONS;
+    $b{"core::ntohs"} = BI::SYS_NTOHS; $b{"core::ntohs"} = BI::SYS_NTOHS;
+    $b{"core::htonl"} = BI::SYS_HTONL; $b{"core::htonl"} = BI::SYS_HTONL;
+    $b{"core::ntohl"} = BI::SYS_NTOHL; $b{"core::ntohl"} = BI::SYS_NTOHL;
+    $b{"core::inet_pton"} = BI::SYS_INET_PTON; $b{"core::inet_pton"} = BI::SYS_INET_PTON;
+    $b{"core::inet_ntop"} = BI::SYS_INET_NTOP; $b{"core::inet_ntop"} = BI::SYS_INET_NTOP;
+    $b{"core::socket_server"} = BI::SYS_SOCKET_SERVER; $b{"core::socket_server"} = BI::SYS_SOCKET_SERVER;
+    $b{"core::socket_fd"} = BI::SYS_SOCKET_FD; $b{"core::socket_fd"} = BI::SYS_SOCKET_FD;
+    $b{"core::socket_close"} = BI::SYS_SOCKET_CLOSE; $b{"core::socket_close"} = BI::SYS_SOCKET_CLOSE;
+    $b{"core::socket_select"} = BI::SYS_SOCKET_SELECT; $b{"core::socket_select"} = BI::SYS_SOCKET_SELECT;
+    $b{"core::dl_open"} = BI::SYS_DL_OPEN; $b{"core::dl_open"} = BI::SYS_DL_OPEN;
+    $b{"core::dl_sym"} = BI::SYS_DL_SYM; $b{"core::dl_sym"} = BI::SYS_DL_SYM;
+    $b{"core::dl_close"} = BI::SYS_DL_CLOSE; $b{"core::dl_close"} = BI::SYS_DL_CLOSE;
+    $b{"core::dl_error"} = BI::SYS_DL_ERROR; $b{"core::dl_error"} = BI::SYS_DL_ERROR;
+    $b{"core::dl_call_num"} = BI::SYS_DL_CALL_NUM; $b{"core::dl_call_num"} = BI::SYS_DL_CALL_NUM;
+    $b{"core::dl_call_int"} = BI::SYS_DL_CALL_INT; $b{"core::dl_call_int"} = BI::SYS_DL_CALL_INT;
+    $b{"core::int_ptr"} = BI::SYS_INT_PTR; $b{"core::int_ptr"} = BI::SYS_INT_PTR;
+    $b{"core::num_ptr"} = BI::SYS_NUM_PTR; $b{"core::num_ptr"} = BI::SYS_NUM_PTR;
+    $b{"core::ptr_deref_int"} = BI::SYS_PTR_DEREF_INT; $b{"core::ptr_deref_int"} = BI::SYS_PTR_DEREF_INT;
+    $b{"core::ptr_deref_num"} = BI::SYS_PTR_DEREF_NUM; $b{"core::ptr_deref_num"} = BI::SYS_PTR_DEREF_NUM;
+    $b{"core::ptr_set_int"} = BI::SYS_PTR_SET_INT; $b{"core::ptr_set_int"} = BI::SYS_PTR_SET_INT;
+    $b{"core::ptr_set_num"} = BI::SYS_PTR_SET_NUM; $b{"core::ptr_set_num"} = BI::SYS_PTR_SET_NUM;
+    $b{"core::getpgrp"} = BI::SYS_GETPGRP; $b{"core::getpgrp"} = BI::SYS_GETPGRP;
+    $b{"core::getsid"} = BI::SYS_GETSID; $b{"core::getsid"} = BI::SYS_GETSID;
+    $b{"core::getpgid"} = BI::SYS_GETPGID; $b{"core::getpgid"} = BI::SYS_GETPGID;
+    $b{"core::nice"} = BI::SYS_NICE; $b{"core::nice"} = BI::SYS_NICE;
+    $b{"core::getpriority"} = BI::SYS_GETPRIORITY; $b{"core::getpriority"} = BI::SYS_GETPRIORITY;
+    $b{"core::getrusage"} = BI::SYS_GETRUSAGE; $b{"core::getrusage"} = BI::SYS_GETRUSAGE;
+    $b{"core::getrlimit"} = BI::SYS_GETRLIMIT; $b{"core::getrlimit"} = BI::SYS_GETRLIMIT;
+    $b{"core::times"} = BI::SYS_TIMES; $b{"core::times"} = BI::SYS_TIMES;
+    $b{"core::clock"} = BI::SYS_CLOCK; $b{"core::clock"} = BI::SYS_CLOCK;
+    $b{"core::mkstemp"} = BI::SYS_MKSTEMP; $b{"core::mkstemp"} = BI::SYS_MKSTEMP;
+    $b{"core::mkdtemp"} = BI::SYS_MKDTEMP; $b{"core::mkdtemp"} = BI::SYS_MKDTEMP;
+    $b{"core::statvfs"} = BI::SYS_STATVFS; $b{"core::statvfs"} = BI::SYS_STATVFS;
+    $b{"core::atoi"} = BI::SYS_ATOI; $b{"core::atoi"} = BI::SYS_ATOI;
+    $b{"core::atof"} = BI::SYS_ATOF; $b{"core::atof"} = BI::SYS_ATOF;
+    $b{"core::strtol"} = BI::SYS_STRTOL; $b{"core::strtol"} = BI::SYS_STRTOL;
+    $b{"core::difftime"} = BI::SYS_DIFFTIME; $b{"core::difftime"} = BI::SYS_DIFFTIME;
+    $b{"core::srand"} = BI::SYS_SRAND; $b{"core::srand"} = BI::SYS_SRAND;
+    $b{"core::rand"} = BI::SYS_RAND; $b{"core::rand"} = BI::SYS_RAND;
+    $b{"core::srandom"} = BI::SYS_SRANDOM; $b{"core::srandom"} = BI::SYS_SRANDOM;
+    $b{"core::random"} = BI::SYS_RANDOM; $b{"core::random"} = BI::SYS_RANDOM;
+    $b{"core::seek"} = BI::SYS_SEEK; $b{"core::seek"} = BI::SYS_SEEK;
+    $b{"core::tell"} = BI::SYS_TELL; $b{"core::tell"} = BI::SYS_TELL;
+    $b{"core::rewind"} = BI::SYS_REWIND; $b{"core::rewind"} = BI::SYS_REWIND;
+    $b{"core::weaken"} = BI::SYS_WEAKEN; $b{"core::weaken"} = BI::SYS_WEAKEN;
+    $b{"core::isweak"} = BI::SYS_ISWEAK; $b{"core::isweak"} = BI::SYS_ISWEAK;
+    $b{"core::wantscalar"} = BI::SYS_WANTSCALAR; $b{"core::wantscalar"} = BI::SYS_WANTSCALAR;
+    $b{"core::wantarray"} = BI::SYS_WANTARRAY; $b{"core::wantarray"} = BI::SYS_WANTARRAY;
+    $b{"core::wanthash"} = BI::SYS_WANTHASH; $b{"core::wanthash"} = BI::SYS_WANTHASH;
+    $b{"core::global_set"} = BI::SYS_GLOBAL_SET; $b{"core::global_set"} = BI::SYS_GLOBAL_SET;
+    $b{"core::global_get"} = BI::SYS_GLOBAL_GET; $b{"core::global_get"} = BI::SYS_GLOBAL_GET;
+    $b{"core::global_exists"} = BI::SYS_GLOBAL_EXISTS; $b{"core::global_exists"} = BI::SYS_GLOBAL_EXISTS;
+    $b{"core::global_delete"} = BI::SYS_GLOBAL_DELETE; $b{"core::global_delete"} = BI::SYS_GLOBAL_DELETE;
+    $b{"core::global_keys"} = BI::SYS_GLOBAL_KEYS; $b{"core::global_keys"} = BI::SYS_GLOBAL_KEYS;
+    $b{"core::_exit"} = BI::SYS_EXIT_NOCLEAN; $b{"core::_exit"} = BI::SYS_EXIT_NOCLEAN;
+    $b{"core::signal"} = BI::SYS_SIGNAL; $b{"core::signal"} = BI::SYS_SIGNAL;
+    $b{"core::get_recursion_limit"} = BI::SYS_GET_RECURSION_LIMIT; $b{"core::get_recursion_limit"} = BI::SYS_GET_RECURSION_LIMIT;
+    $b{"core::set_recursion_limit"} = BI::SYS_SET_RECURSION_LIMIT; $b{"core::set_recursion_limit"} = BI::SYS_SET_RECURSION_LIMIT;
+    $b{"core::pack"} = BI::SYS_PACK; $b{"core::pack"} = BI::SYS_PACK;
+    $b{"core::unpack"} = BI::SYS_UNPACK; $b{"core::unpack"} = BI::SYS_UNPACK;
+    $b{"core::ord_byte"} = BI::SYS_ORD_BYTE; $b{"core::ord_byte"} = BI::SYS_ORD_BYTE;
+    $b{"core::get_byte"} = BI::SYS_GET_BYTE; $b{"core::get_byte"} = BI::SYS_GET_BYTE;
+    $b{"core::byte_length"} = BI::SYS_BYTE_LENGTH; $b{"core::byte_length"} = BI::SYS_BYTE_LENGTH;
+    $b{"core::base64_encode"} = BI::SYS_BASE64_ENCODE; $b{"core::base64_encode"} = BI::SYS_BASE64_ENCODE;
+    $b{"core::base64_decode"} = BI::SYS_BASE64_DECODE; $b{"core::base64_decode"} = BI::SYS_BASE64_DECODE;
+    $b{"core::hex_encode"} = BI::SYS_HEX_ENCODE; $b{"core::hex_encode"} = BI::SYS_HEX_ENCODE;
+    $b{"core::hex_decode"} = BI::SYS_HEX_DECODE; $b{"core::hex_decode"} = BI::SYS_HEX_DECODE;
+    $b{"core::chroot"} = BI::SYS_CHROOT; $b{"core::chroot"} = BI::SYS_CHROOT;
+    $b{"core::setsid"} = BI::SYS_SETSID; $b{"core::setsid"} = BI::SYS_SETSID;
+    $b{"core::setgid"} = BI::SYS_SETGID; $b{"core::setgid"} = BI::SYS_SETGID;
+    $b{"core::setuid"} = BI::SYS_SETUID; $b{"core::setuid"} = BI::SYS_SETUID;
+    $b{"core::pipe"} = BI::SYS_PIPE; $b{"core::pipe"} = BI::SYS_PIPE;
+    $b{"core::dup2"} = BI::SYS_DUP2; $b{"core::dup2"} = BI::SYS_DUP2;
+    $b{"core::select_fd"} = BI::SYS_SELECT_FD; $b{"core::select_fd"} = BI::SYS_SELECT_FD;
+    $b{"core::hash_default_capacity"} = BI::SYS_HASH_DEFAULT_CAPACITY; $b{"core::hash_default_capacity"} = BI::SYS_HASH_DEFAULT_CAPACITY;
+    $b{"core::array_reserve"} = BI::SYS_ARRAY_RESERVE; $b{"core::array_reserve"} = BI::SYS_ARRAY_RESERVE;
     # math:: functions
     $b{"math::sqrt"} = BI::MATH_SQRT; $b{"math::sin"} = BI::MATH_SIN;
     $b{"math::cos"} = BI::MATH_COS; $b{"math::pow"} = BI::MATH_POW;
@@ -1302,7 +1302,7 @@ func eval_binop(scalar $interp, scalar $node, scalar $env) scalar {
 func is_builtin(scalar $interp, str $name) int {
     if (exists($interp->{"builtin_ids"}, $name)) { return 1; }
     # Fallback: prefix matching for any unregistered namespace functions
-    if (index($name, "sys::") == 0 || index($name, "core::") == 0) { return 1; }
+    if (index($name, "core::") == 0 || index($name, "core::") == 0) { return 1; }
     if (index($name, "math::") == 0) { return 1; }
     if (index($name, "utf8::") == 0) { return 1; }
     if (index($name, "DateTime::") == 0) { return 1; }
@@ -1546,52 +1546,52 @@ func call_builtin(scalar $interp, str $name, int $bid, scalar $args, scalar $env
         return $v;
     }
 
-    # ---- core::/sys:: functions ----
+    # ---- core::/core:: functions ----
     if ($bid == BI::SYS_EXIT) {
-        sys::exit($args->[0]);
+        core::exit($args->[0]);
     }
     if ($bid == BI::SYS_GETENV) {
-        return sys::getenv($args->[0]);
+        return core::getenv($args->[0]);
     }
     if ($bid == BI::SYS_SETENV) {
-        sys::setenv($args->[0], $args->[1]);
+        core::setenv($args->[0], $args->[1]);
         return undef;
     }
     if ($bid == BI::SYS_TIME) {
-        return sys::time();
+        return core::time();
     }
     if ($bid == BI::SYS_SLEEP) {
-        sys::sleep($args->[0]);
+        core::sleep($args->[0]);
         return undef;
     }
     if ($bid == BI::SYS_HIRES_TIME) {
-        return sys::hires_time();
+        return core::hires_time();
     }
     if ($bid == BI::SYS_OPEN) {
-        return sys::open($args->[0], $args->[1]);
+        return core::open($args->[0], $args->[1]);
     }
     if ($bid == BI::SYS_CLOSE) {
-        sys::close($args->[0]);
+        core::close($args->[0]);
         return undef;
     }
     if ($bid == BI::SYS_READLINE) {
-        return sys::readline($args->[0]);
+        return core::readline($args->[0]);
     }
     if ($bid == BI::SYS_EOF) {
-        return sys::eof($args->[0]);
+        return core::eof($args->[0]);
     }
     if ($bid == BI::SYS_FLUSH) {
-        sys::flush($args->[0]);
+        core::flush($args->[0]);
         return undef;
     }
     if ($bid == BI::SYS_POPEN) {
-        return sys::popen($args->[0], $args->[1]);
+        return core::popen($args->[0], $args->[1]);
     }
     if ($bid == BI::SYS_QX) {
-        return sys::qx($args->[0]);
+        return core::qx($args->[0]);
     }
     if ($bid == BI::SYS_SYSTEM) {
-        return sys::system($args->[0]);
+        return core::system($args->[0]);
     }
     if ($bid == BI::SYS_STACK_TRACE) {
         return "(interpreter stack trace not available)";
@@ -1676,18 +1676,18 @@ func call_builtin(scalar $interp, str $name, int $bid, scalar $args, scalar $env
         return undef;
     }
     if ($bid == BI::SYS_SEEK) {
-        sys::seek($args->[0], $args->[1], $args->[2]);
+        core::seek($args->[0], $args->[1], $args->[2]);
         return undef;
     }
     if ($bid == BI::SYS_TELL) {
-        return sys::tell($args->[0]);
+        return core::tell($args->[0]);
     }
     if ($bid == BI::SYS_REWIND) {
-        sys::rewind($args->[0]);
+        core::rewind($args->[0]);
         return undef;
     }
     if ($bid == BI::SYS_EXIT_NOCLEAN) {
-        sys::exit($args->[0]);
+        core::exit($args->[0]);
     }
     if ($bid == BI::SYS_SIGNAL) {
         # Signals not supported in interpreter
@@ -2329,7 +2329,7 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
         my str $varname = $node->{"varname"};
         my scalar $fh = env_get($env, $varname);
         if (defined($fh)) {
-            return sys::readline($fh);
+            return core::readline($fh);
         }
         return undef;
     }
