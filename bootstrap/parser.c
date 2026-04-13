@@ -446,6 +446,7 @@ static ASTNode* parse_var_decl(Parser *p);
 static ASTNode* parse_if_stmt(Parser *p);
 static ASTNode* parse_while_stmt(Parser *p);
 static ASTNode* parse_for_stmt(Parser *p);
+static ASTNode* parse_foreach_stmt(Parser *p);
 static ASTNode* parse_return_stmt(Parser *p);
 
 static ASTNode* parse_statement(Parser *p) {
@@ -458,6 +459,8 @@ static ASTNode* parse_statement(Parser *p) {
             return parse_while_stmt(p);
         case TOK_FOR:
             return parse_for_stmt(p);
+        case TOK_FOREACH:
+            return parse_foreach_stmt(p);
         case TOK_RETURN:
             return parse_return_stmt(p);
         case TOK_LAST: {
@@ -621,6 +624,46 @@ static ASTNode* parse_for_stmt(Parser *p) {
     ASTNode *body = parse_block(p);
     
     return ast_new_for(init, cond, update, body);
+}
+
+static ASTNode* parse_foreach_stmt(Parser *p) {
+    parser_expect(p, TOK_FOREACH);
+
+    char *var_name = NULL;
+    DataType var_type = TYPE_SCALAR;
+
+    if (p->current->type == TOK_MY) {
+        // foreach my [type] $var (array) { ... }
+        advance(p);  // consume 'my'
+        var_type = parse_type(p);
+        parse_sigil(p);  // consume $
+        if (p->current->type != TOK_IDENT) {
+            parser_error(p, "Expected variable name in foreach");
+        }
+        var_name = strdup(p->current->lexeme);
+        advance(p);
+    } else if (p->current->type == TOK_DOLLAR) {
+        // foreach $var (array) { ... }
+        advance(p);  // consume $
+        if (p->current->type != TOK_IDENT) {
+            parser_error(p, "Expected variable name in foreach");
+        }
+        var_name = strdup(p->current->lexeme);
+        advance(p);
+    } else {
+        // foreach (array) { ... } — implicit $_
+        var_name = strdup("_");
+    }
+
+    parser_expect(p, TOK_LPAREN);
+    ASTNode *array = parse_expression(p);
+    parser_expect(p, TOK_RPAREN);
+
+    ASTNode *body = parse_block(p);
+
+    ASTNode *node = ast_new_foreach(var_name, var_type, array, body);
+    free(var_name);
+    return node;
 }
 
 static ASTNode* parse_return_stmt(Parser *p) {
@@ -1144,7 +1187,14 @@ static ASTNode* parse_primary(Parser *p) {
             free(first);
             return node;
         }
-        
+
+        case TOK_SCALAR: {
+            // scalar(@arr) - treat type keyword as function name when used in expression
+            advance(p);
+            ASTNode *node = ast_new_variable("scalar", '$');
+            return node;
+        }
+
         case TOK_LPAREN: {
             advance(p);
             // Check for empty () - creates empty hash/array depending on context

@@ -174,6 +174,7 @@ func get_builtins() scalar {
     $b{"length"} = 1;
     $b{"bytes"} = 1;
     $b{"char_at"} = 1;  # Fast char access by byte index
+    $b{"byte_at"} = 1;  # Preferred alias for char_at
     $b{"substr"} = 1;
     $b{"substr_bytes"} = 1;  # Byte-level substr
     $b{"index"} = 1;
@@ -250,6 +251,10 @@ func get_builtins() scalar {
     $b{"match"} = 1;
     $b{"replace"} = 1;
     $b{"replace_all"} = 1;
+    $b{"str_replace"} = 1;       # Plain string replace (all occurrences)
+    $b{"str_replace_first"} = 1; # Plain string replace (first only)
+    $b{"regex_replace"} = 1;     # Regex replace (first match)
+    $b{"regex_replace_all"} = 1; # Regex replace (all matches)
     $b{"capture"} = 1;
     $b{"captures"} = 1;
     $b{"named_captures"} = 1;
@@ -589,6 +594,7 @@ func get_builtins() scalar {
     $b{"sys::srandom"} = 1;
     $b{"sys::rand"} = 1;
     $b{"sys::random"} = 1;
+    $b{"sys::idiv"} = 1;  # Integer division (truncated)
 
     # sys:: Advanced signals
     $b{"sys::sigaction"} = 1;

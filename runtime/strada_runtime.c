@@ -406,6 +406,16 @@ StradaValue* strada_safe_mod(int64_t a, int64_t b) {
     return strada_new_int(a % b);
 }
 
+/* Integer division (truncated) - returns undef if divisor is zero */
+StradaValue* strada_idiv(StradaValue *a, StradaValue *b) {
+    int64_t bv = strada_to_int(b);
+    if (bv == 0) {
+        return strada_new_undef();
+    }
+    int64_t av = strada_to_int(a);
+    return STRADA_MAKE_TAGGED_INT(av / bv);
+}
+
 /* Check if a string is pure ASCII (no bytes >= 0x80) */
 static inline size_t _str_flags(const char *s, size_t len) {
     const unsigned char *p = (const unsigned char *)s;
@@ -2927,6 +2937,11 @@ StradaValue* strada_char_at(StradaValue *str, StradaValue *index) {
         return strada_new_int(0);
     }
     return strada_new_int((unsigned char)str->value.pv[idx]);
+}
+
+/* byte_at() - preferred alias for char_at(), returns byte code as int */
+StradaValue* strada_byte_at(StradaValue *str, StradaValue *index) {
+    return strada_char_at(str, index);
 }
 
 /* Returns length in UTF-8 codepoints (characters), not bytes */

@@ -549,6 +549,8 @@ size_t strada_length(const char *s);      /* Returns character count (UTF-8 code
 size_t strada_length_sv(StradaValue *sv); /* Binary-safe length using struct_size */
 size_t strada_bytes(const char *s);       /* Returns byte count */
 StradaValue* strada_char_at(StradaValue *str, StradaValue *index);  /* Fast char code by index */
+StradaValue* strada_byte_at(StradaValue *str, StradaValue *index);  /* Preferred alias for char_at */
+StradaValue* strada_idiv(StradaValue *a, StradaValue *b);           /* Integer division (truncated) */
 StradaValue* strada_substr(StradaValue *str, int64_t offset, int64_t length);
 StradaValue* strada_substr_bytes(StradaValue *str, int64_t offset, int64_t length);
 int strada_index(const char *haystack, const char *needle);

@@ -110,6 +110,15 @@ ASTNode* ast_new_for(ASTNode *init, ASTNode *cond, ASTNode *update, ASTNode *bod
     return node;
 }
 
+ASTNode* ast_new_foreach(const char *var, DataType type, ASTNode *array, ASTNode *body) {
+    ASTNode *node = ast_new_node(NODE_FOREACH_STMT);
+    node->data.foreach_stmt.var_name = strdup(var);
+    node->data.foreach_stmt.var_type = type;
+    node->data.foreach_stmt.array = array;
+    node->data.foreach_stmt.body = body;
+    return node;
+}
+
 ASTNode* ast_new_return(ASTNode *value) {
     ASTNode *node = ast_new_node(NODE_RETURN_STMT);
     node->data.return_stmt.value = value;
