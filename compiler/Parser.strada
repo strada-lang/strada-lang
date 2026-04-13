@@ -1108,8 +1108,8 @@ func parse_primary(scalar $parser) scalar {
         if (parser_check($parser, "NOT")) {
             # $! — errno string
             parser_advance($parser);
-            my scalar $errno_call = ast_new_call("sys::strerror");
-            my scalar $errno_arg = ast_new_call("sys::errno");
+            my scalar $errno_call = ast_new_call("core::strerror");
+            my scalar $errno_arg = ast_new_call("core::errno");
             ast_add_arg($errno_call, $errno_arg);
             ast_set_line($errno_call, $var_line);
             return $errno_call;
@@ -2094,15 +2094,15 @@ func parse_unary(scalar $parser) scalar {
                 parser_advance($parser);
                 my scalar $ft_arg = parse_unary($parser);
                 my str $ft_func = "";
-                if ($ft_name eq "e") { $ft_func = "sys::file_exists"; }
-                elsif ($ft_name eq "f") { $ft_func = "sys::is_file"; }
-                elsif ($ft_name eq "d") { $ft_func = "sys::is_dir"; }
-                elsif ($ft_name eq "r") { $ft_func = "sys::is_readable"; }
-                elsif ($ft_name eq "w") { $ft_func = "sys::is_writable"; }
-                elsif ($ft_name eq "x") { $ft_func = "sys::is_executable"; }
-                elsif ($ft_name eq "s") { $ft_func = "sys::file_size"; }
-                elsif ($ft_name eq "z") { $ft_func = "sys::is_zero_size"; }
-                elsif ($ft_name eq "l") { $ft_func = "sys::is_symlink"; }
+                if ($ft_name eq "e") { $ft_func = "core::file_exists"; }
+                elsif ($ft_name eq "f") { $ft_func = "core::is_file"; }
+                elsif ($ft_name eq "d") { $ft_func = "core::is_dir"; }
+                elsif ($ft_name eq "r") { $ft_func = "core::is_readable"; }
+                elsif ($ft_name eq "w") { $ft_func = "core::is_writable"; }
+                elsif ($ft_name eq "x") { $ft_func = "core::is_executable"; }
+                elsif ($ft_name eq "s") { $ft_func = "core::file_size"; }
+                elsif ($ft_name eq "z") { $ft_func = "core::is_zero_size"; }
+                elsif ($ft_name eq "l") { $ft_func = "core::is_symlink"; }
                 my scalar $ft_call = ast_new_call($ft_func);
                 ast_add_arg($ft_call, $ft_arg);
                 return $ft_call;
@@ -4651,7 +4651,7 @@ func find_so_file(scalar $program, str $lib_file) str {
         my str $lib_path = $lib_paths->[$i];
         my str $full_path = $lib_path . "/" . $lib_file;
         # Try to open the file to check if it exists
-        my int $fd = sys::open_fd($full_path, "r");
+        my int $fd = core::open_fd($full_path, "r");
         if ($fd > 0) {
             close_fd($fd);
             return $full_path;
@@ -4907,7 +4907,7 @@ func find_o_file(scalar $program, str $obj_file) str {
         my str $lib_path = $lib_paths->[$i];
         my str $full_path = $lib_path . "/" . $obj_file;
         # Try to open the file to check if it exists
-        my int $fd = sys::open_fd($full_path, "r");
+        my int $fd = core::open_fd($full_path, "r");
         if ($fd > 0) {
             close_fd($fd);
             return $full_path;
@@ -4923,7 +4923,7 @@ func find_o_file(scalar $program, str $obj_file) str {
 func extract_object_export_info(scalar $parser, str $obj_name, str $o_path) str {
     # Get the compiler directory from STRADA_DIR environment variable
     # (set by the 'strada' wrapper script) or fall back to current directory
-    my str $compiler_dir = sys::qx("echo -n \"\$STRADA_DIR\"");
+    my str $compiler_dir = core::qx("echo -n \"\$STRADA_DIR\"");
     if (length($compiler_dir) == 0) {
         # Fallback to current directory (works when running from repo root)
         $compiler_dir = ".";
@@ -4952,22 +4952,22 @@ func extract_object_export_info(scalar $parser, str $obj_name, str $o_path) str 
     $compile_cmd = $compile_cmd . " -ldl -lm -lpthread";
 
     # Run gcc and capture any error output, append exit code
-    my str $compile_output = sys::qx($compile_cmd . " 2>&1; echo __EXIT_CODE__$?");
+    my str $compile_output = core::qx($compile_cmd . " 2>&1; echo __EXIT_CODE__$?");
 
     # Check if compilation succeeded by looking for exit code 0
     my int $success = index($compile_output, "__EXIT_CODE__0");
     if ($success < 0) {
         # Clean up
-        sys::unlink($temp_c);
+        core::unlink($temp_c);
         parser_error($parser, "import_object: failed to extract metadata from " . $o_path . " (missing __strada_export_info?)");
     }
 
     # Run the temp program to get export info
-    my str $metadata = sys::qx($temp_exe);
+    my str $metadata = core::qx($temp_exe);
 
     # Clean up temp files
-    sys::unlink($temp_c);
-    sys::unlink($temp_exe);
+    core::unlink($temp_c);
+    core::unlink($temp_exe);
 
     if (length($metadata) == 0) {
         parser_error($parser, "import_object: " . $o_path . " has no export metadata (was it compiled with a recent strada compiler?)");
@@ -5049,7 +5049,7 @@ func find_a_file(scalar $program, str $arch_file) str {
         my str $lib_path = $lib_paths->[$i];
         my str $full_path = $lib_path . "/" . $arch_file;
         # Try to open the file to check if it exists
-        my int $fd = sys::open_fd($full_path, "r");
+        my int $fd = core::open_fd($full_path, "r");
         if ($fd > 0) {
             close_fd($fd);
             return $full_path;
@@ -5082,25 +5082,25 @@ func extract_archive_export_info(scalar $parser, str $arch_name, str $a_path) st
     $compile_cmd = $compile_cmd . " -ldl -lm -lpthread";
 
     # Add PCRE2 link flags if available (runtime may be compiled with PCRE2)
-    my str $pcre2_libs = sys::getenv("STRADA_PCRE2_LIBS");
+    my str $pcre2_libs = core::getenv("STRADA_PCRE2_LIBS");
     if (length($pcre2_libs) > 0) {
         $compile_cmd = $compile_cmd . " " . $pcre2_libs;
     }
 
-    my str $compile_output = sys::qx($compile_cmd . " 2>&1; echo __EXIT_CODE__$?");
+    my str $compile_output = core::qx($compile_cmd . " 2>&1; echo __EXIT_CODE__$?");
 
     my int $success = index($compile_output, "__EXIT_CODE__0");
     if ($success < 0) {
-        sys::unlink($temp_c);
+        core::unlink($temp_c);
         parser_error($parser, "import_archive: failed to extract metadata from " . $a_path . " (missing __strada_export_info?)");
     }
 
     # Run the temp program to get export info
-    my str $metadata = sys::qx($temp_exe);
+    my str $metadata = core::qx($temp_exe);
 
     # Clean up temp files
-    sys::unlink($temp_c);
-    sys::unlink($temp_exe);
+    core::unlink($temp_c);
+    core::unlink($temp_exe);
 
     if (length($metadata) == 0) {
         parser_error($parser, "import_archive: " . $a_path . " has no export metadata (was it compiled with a recent strada compiler?)");

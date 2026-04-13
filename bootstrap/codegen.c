@@ -1886,6 +1886,12 @@ static void gen_expression(CodeGen *cg, ASTNode *expr) {
         }
         
         case NODE_CALL: {
+            // Normalize core:: to sys:: (core:: is the preferred alias)
+            if (expr->data.call.package_name &&
+                strcmp(expr->data.call.package_name, "core") == 0) {
+                free(expr->data.call.package_name);
+                expr->data.call.package_name = strdup("sys");
+            }
             // Built-in functions
             if (strcmp(expr->data.call.name, "say") == 0) {
                 if (expr->data.call.arg_count > 0 && expr_is_owned(expr->data.call.args[0])) {

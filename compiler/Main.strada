@@ -23,33 +23,33 @@ func compile(str $source, str $filename, int $debug_info, int $show_timing, int 
     my num $t1 = 0.0;
 
     # Tokenize
-    $t0 = sys::hires_time();
+    $t0 = core::hires_time();
     my scalar $tokens = lex_tokenize($source);
-    $t1 = sys::hires_time();
+    $t1 = core::hires_time();
     if ($show_timing == 1) {
         say("  Lexer:    " . ($t1 - $t0) . " seconds");
     }
 
     # Parse (with optional library paths from -L and -LL flags)
-    $t0 = sys::hires_time();
+    $t0 = core::hires_time();
     my scalar $ast = parse_with_lib_paths($tokens, $filename, $lib_paths, $lib_paths_low);
-    $t1 = sys::hires_time();
+    $t1 = core::hires_time();
     if ($show_timing == 1) {
         say("  Parser:   " . ($t1 - $t0) . " seconds");
     }
 
     # Semantic analysis (validates symbols, types, etc.)
-    $t0 = sys::hires_time();
+    $t0 = core::hires_time();
     semantic_analyze($ast, $show_warnings);
-    $t1 = sys::hires_time();
+    $t1 = core::hires_time();
     if ($show_timing == 1) {
         say("  Semantic: " . ($t1 - $t0) . " seconds");
     }
 
     # Generate code (pass debug flag for #line directives, profiling flag, stack trace flag)
-    $t0 = sys::hires_time();
+    $t0 = core::hires_time();
     my str $code = generate($ast, $filename, $debug_info, $enable_profiling, $enable_stack_trace, $full_profile);
-    $t1 = sys::hires_time();
+    $t1 = core::hires_time();
     if ($show_timing == 1) {
         say("  CodeGen:  " . ($t1 - $t0) . " seconds");
     }
