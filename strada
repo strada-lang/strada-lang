@@ -535,6 +535,10 @@ fi
 if ! $CC --version 2>&1 | grep -q clang; then
     GCC_FLAGS="$GCC_FLAGS -Wno-unused-but-set-variable -Wno-clobbered"
 fi
+# macOS clang emits -Wunused-value noise on generated statement expressions.
+if [ "$(uname -s)" = "Darwin" ]; then
+    GCC_FLAGS="$GCC_FLAGS -Wno-unused-value"
+fi
 GCC_FLAGS="$GCC_FLAGS -O$OPT_LEVEL"
 # Enable link-time optimization at -O2 and above for cross-function inlining
 if [ "$OPT_LEVEL" = "2" ] || [ "$OPT_LEVEL" = "3" ] || [ "$OPT_LEVEL" = "fast" ]; then

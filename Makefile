@@ -42,6 +42,11 @@ CFLAGS_BASE = -Wall -Wextra -Wno-unused-variable -Wno-return-type -Wno-unused-re
 # Supported by both gcc (ELF) and clang (ELF + Mach-O).
 CFLAGS_SECTIONS = -ffunction-sections -fdata-sections
 CFLAGS_BASE += $(CFLAGS_SECTIONS)
+# macOS clang flags thousands of statement-expression trailing values emitted by
+# the Strada code generator as [-Wunused-value]. Silence on Darwin.
+ifeq ($(UNAME_S),Darwin)
+CFLAGS_BASE += -Wno-unused-value
+endif
 # GCC-specific flags (not available on clang/macOS)
 CFLAGS_GCC = -Wno-unused-but-set-variable
 # Detect compiler and set appropriate flags

@@ -10,7 +10,12 @@ RUNTIME_DIR = ../runtime
 COMPILER_DIR = ../compiler
 LIB_DIR = ../lib
 CC ?= gcc
+UNAME_S := $(shell uname -s)
 CFLAGS = -O2 -I$(RUNTIME_DIR)
+# macOS clang emits -Wunused-value noise on generated statement expressions.
+ifeq ($(UNAME_S),Darwin)
+CFLAGS += -Wno-unused-value
+endif
 LDFLAGS = -rdynamic -ldl -lm -lpthread
 
 ifeq ($(HAVE_PCRE2),1)
