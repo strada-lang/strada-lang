@@ -11559,6 +11559,10 @@ StradaValue* strada_chdir(StradaValue *path_val) {
     return strada_new_int(result);
 }
 
+/* chroot(2) is gated behind _DARWIN_C_SOURCE / _BSD_SOURCE on some systems.
+ * Declare it explicitly so we don't depend on feature-test macro ordering. */
+extern int chroot(const char *);
+
 StradaValue* strada_chroot(StradaValue *path_val) {
     /* Change root directory, returns 0 on success, -1 on error */
     char _tb[PATH_MAX];
