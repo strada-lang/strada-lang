@@ -33,8 +33,15 @@ STATIC_PCRE2 ?= 0
 PCRE2_STATIC_LIB ?=
 BUNDLED_PCRE2 ?= 0
 POINTER_SIZE ?= 8
+# Detect platform (Darwin/Linux/etc.) for platform-specific flags
+UNAME_S := $(shell uname -s)
+
 # Base warning flags (portable)
-CFLAGS_BASE = -Wall -Wextra -Wno-unused-variable -Wno-return-type -Wno-unused-result -Wno-comment -O2 -std=c99 -ffunction-sections -fdata-sections -DSTRADA_POINTER_SIZE=$(POINTER_SIZE)
+CFLAGS_BASE = -Wall -Wextra -Wno-unused-variable -Wno-return-type -Wno-unused-result -Wno-comment -O2 -std=c99 -DSTRADA_POINTER_SIZE=$(POINTER_SIZE)
+# Section-splitting flags: used with linker's garbage collection to drop unused code.
+# Supported by both gcc (ELF) and clang (ELF + Mach-O).
+CFLAGS_SECTIONS = -ffunction-sections -fdata-sections
+CFLAGS_BASE += $(CFLAGS_SECTIONS)
 # GCC-specific flags (not available on clang/macOS)
 CFLAGS_GCC = -Wno-unused-but-set-variable
 # Detect compiler and set appropriate flags
@@ -43,7 +50,15 @@ CFLAGS = $(CFLAGS_BASE)
 else
 CFLAGS = $(CFLAGS_BASE) $(CFLAGS_GCC)
 endif
+
+# Platform-specific LDFLAGS:
+#   Linux: -ldl for dlopen, --gc-sections to strip unused fns
+#   macOS: dlopen is in libc (no -ldl), linker uses -dead_strip instead of --gc-sections
+ifeq ($(UNAME_S),Darwin)
+LDFLAGS = -lm -lpthread -Wl,-dead_strip
+else
 LDFLAGS = -ldl -lm -lpthread -Wl,--gc-sections
+endif
 ifeq ($(HAVE_PCRE2),1)
 ifeq ($(STATIC_PCRE2),1)
 LDFLAGS += $(PCRE2_STATIC_LIB)
@@ -194,11 +209,11 @@ run-bootstrap: bootstrap $(RUNTIME_OBJ)
 examples: stradac $(RUNTIME_OBJ)
 	@echo "=== Building example programs with self-hosting compiler ==="
 	@for f in $(EXAMPLES_DIR)/*.strada; do \
-		name=$$(basename $$f .strada); \
-		echo "Compiling $$name..."; \
-		$(STRADAC) $$f $(EXAMPLES_DIR)/$$name.c 2>/dev/null && \
-		$(CC) $(CFLAGS) -o $(EXAMPLES_DIR)/$$name $(EXAMPLES_DIR)/$$name.c $(RUNTIME_OBJ) -I$(RUNTIME_DIR) $(LDFLAGS) 2>/dev/null || \
-		echo "  (skipped - compile error)"; \
+	    name=$$(basename $$f .strada); \
+	    echo "Compiling $$name..."; \
+	    $(STRADAC) $$f $(EXAMPLES_DIR)/$$name.c 2>/dev/null && \
+	    $(CC) $(CFLAGS) -o $(EXAMPLES_DIR)/$$name $(EXAMPLES_DIR)/$$name.c $(RUNTIME_OBJ) -I$(RUNTIME_DIR) $(LDFLAGS) 2>/dev/null || \
+	    echo "  (skipped - compile error)"; \
 	done
 	@echo "✓ Examples built"
 
@@ -210,32 +225,37 @@ test-selfhost: stradac
 	@echo "✓ Self-hosting compiler can compile its own modules"
 
 # Test all examples compile and link successfully
+# Use GNU timeout (gtimeout on macOS via coreutils); fall back to no timeout if absent.
 test-examples: stradac $(RUNTIME_OBJ)
 	@echo "=== Testing all examples ==="
-	@passed=0; failed=0; \
+	@TIMEOUT_CMD=""; \
+	if command -v timeout >/dev/null 2>&1; then TIMEOUT_CMD="timeout 5"; \
+	elif command -v gtimeout >/dev/null 2>&1; then TIMEOUT_CMD="gtimeout 5"; \
+	fi; \
+	passed=0; failed=0; \
 	for f in $(EXAMPLES_DIR)/*.strada; do \
-		name=$$(basename $$f .strada); \
-		printf "Testing $$name... "; \
-		if timeout 5 $(STRADAC) $$f /tmp/$$name.c >/dev/null 2>&1; then \
-			if $(CC) -o /tmp/$$name /tmp/$$name.c $(RUNTIME_OBJ) -I$(RUNTIME_DIR) $(LDFLAGS) 2>/dev/null; then \
-				echo "OK"; \
-				passed=$$((passed + 1)); \
-			else \
-				echo "COMPILE FAIL"; \
-				failed=$$((failed + 1)); \
-			fi; \
-		else \
-			echo "STRADA FAIL"; \
-			failed=$$((failed + 1)); \
-		fi; \
+	    name=$$(basename $$f .strada); \
+	    printf "Testing $$name... "; \
+	    if $$TIMEOUT_CMD $(STRADAC) $$f /tmp/$$name.c >/dev/null 2>&1; then \
+	        if $(CC) -o /tmp/$$name /tmp/$$name.c $(RUNTIME_OBJ) -I$(RUNTIME_DIR) $(LDFLAGS) 2>/dev/null; then \
+	            echo "OK"; \
+	            passed=$$((passed + 1)); \
+	        else \
+	            echo "COMPILE FAIL"; \
+	            failed=$$((failed + 1)); \
+	        fi; \
+	    else \
+	        echo "STRADA FAIL"; \
+	        failed=$$((failed + 1)); \
+	    fi; \
 	done; \
 	echo ""; \
 	echo "Results: $$passed passed, $$failed failed"; \
 	if [ $$failed -eq 0 ]; then \
-		echo "✓ All examples passed"; \
+	    echo "✓ All examples passed"; \
 	else \
-		echo "✗ Some examples failed"; \
-		exit 1; \
+	    echo "✗ Some examples failed"; \
+	    exit 1; \
 	fi
 
 # Full test suite: runtime + self-hosting + all examples
@@ -341,10 +361,10 @@ cpan2strada: tools/cpan2strada
 # Check if configure has been run
 configure-check:
 	@if [ ! -f config.mk ]; then \
-		echo ""; \
-		echo "Warning: config.mk not found. Run ./configure first for optimal builds."; \
-		echo "Using default settings (SQLite only for DBI)."; \
-		echo ""; \
+	    echo ""; \
+	    echo "Warning: config.mk not found. Run ./configure first for optimal builds."; \
+	    echo "Using default settings (SQLite only for DBI)."; \
+	    echo ""; \
 	fi
 
 # Build all libraries
@@ -356,10 +376,10 @@ libs: configure-check lib-dbi lib-crypt lib-ssl lib-readline lib-eval
 lib/DBI.so: lib/DBI.strada stradac configure-check
 	@echo "Building DBI library..."
 	@if [ "$(HAVE_MYSQL)" = "1" ] || [ "$(HAVE_POSTGRES)" = "1" ] || [ "$(HAVE_SQLITE)" = "1" ]; then \
-		./strada --shared $(DBI_DEFINES) lib/DBI.strada $(DBI_LIBS) -o lib/DBI.so; \
+	    ./strada --shared $(DBI_DEFINES) lib/DBI.strada $(DBI_LIBS) -o lib/DBI.so; \
 	else \
-		echo "  No database drivers detected. Run ./configure."; \
-		exit 1; \
+	    echo "  No database drivers detected. Run ./configure."; \
+	    exit 1; \
 	fi
 	@echo "  DBI drivers: MySQL=$(HAVE_MYSQL) SQLite=$(HAVE_SQLITE) PostgreSQL=$(HAVE_POSTGRES)"
 
@@ -437,7 +457,7 @@ install: stradac $(RUNTIME_OBJ)
 	@chmod 755 $(INSTALL_BIN)/strada
 	@# Install config.sh (generated by ./configure, needed for PCRE2 and other library flags)
 	@if [ -f config.sh ]; then \
-		install -m 644 config.sh $(INSTALL_LIB)/config.sh; \
+	    install -m 644 config.sh $(INSTALL_LIB)/config.sh; \
 	fi
 	@# Install runtime files
 	install -m 644 runtime/strada_runtime.c $(INSTALL_LIB)/runtime/
@@ -445,82 +465,82 @@ install: stradac $(RUNTIME_OBJ)
 	install -m 644 runtime/strada_runtime.o $(INSTALL_LIB)/runtime/
 	@# Install bundled PCRE2 (static library + header for runtime compilation)
 	@if [ -f vendor/pcre2/libpcre2-8.a ]; then \
-		echo "Installing bundled PCRE2..."; \
-		mkdir -p $(INSTALL_LIB)/vendor/pcre2/src; \
-		install -m 644 vendor/pcre2/libpcre2-8.a $(INSTALL_LIB)/vendor/pcre2/; \
-		install -m 644 vendor/pcre2/src/pcre2.h $(INSTALL_LIB)/vendor/pcre2/src/; \
+	    echo "Installing bundled PCRE2..."; \
+	    mkdir -p $(INSTALL_LIB)/vendor/pcre2/src; \
+	    install -m 644 vendor/pcre2/libpcre2-8.a $(INSTALL_LIB)/vendor/pcre2/; \
+	    install -m 644 vendor/pcre2/src/pcre2.h $(INSTALL_LIB)/vendor/pcre2/src/; \
 	fi
 	@# Install standard library (Strada modules and shared libraries)
 	@echo "Installing standard library..."
 	@if [ -d lib ]; then \
-		for ext in strada so c h; do \
-			find lib -name "*.$$ext" | while read f; do \
-				dir=$$(dirname "$$f" | sed 's|^lib|$(INSTALL_LIB)/lib|'); \
-				mkdir -p "$$dir"; \
-				if [ "$$ext" = "so" ]; then \
-					install -m 755 "$$f" "$$dir/"; \
-				else \
-					install -m 644 "$$f" "$$dir/"; \
-				fi; \
-			done; \
-		done; \
-		find lib -name "Makefile" | while read f; do \
-			dir=$$(dirname "$$f" | sed 's|^lib|$(INSTALL_LIB)/lib|'); \
-			mkdir -p "$$dir"; \
-			install -m 644 "$$f" "$$dir/"; \
-		done; \
+	    for ext in strada so c h; do \
+	        find lib -name "*.$$ext" | while read f; do \
+	            dir=$$(dirname "$$f" | sed 's|^lib|$(INSTALL_LIB)/lib|'); \
+	            mkdir -p "$$dir"; \
+	            if [ "$$ext" = "so" ]; then \
+	                install -m 755 "$$f" "$$dir/"; \
+	            else \
+	                install -m 644 "$$f" "$$dir/"; \
+	            fi; \
+	        done; \
+	    done; \
+	    find lib -name "Makefile" | while read f; do \
+	        dir=$$(dirname "$$f" | sed 's|^lib|$(INSTALL_LIB)/lib|'); \
+	        mkdir -p "$$dir"; \
+	        install -m 644 "$$f" "$$dir/"; \
+	    done; \
 	fi
 	@# Install documentation
 	@echo "Installing documentation..."
 	@if [ -d docs ]; then \
-		find docs -name "*.md" | while read f; do \
-			install -m 644 "$$f" $(INSTALL_DOC)/; \
-		done; \
+	    find docs -name "*.md" | while read f; do \
+	        install -m 644 "$$f" $(INSTALL_DOC)/; \
+	    done; \
 	fi
 	@# Build and install tools (converters excluded — use make install-perl2strada)
 	@echo "Installing tools..."
 	@for tool in stradadoc strada-soinfo strada-md2man strada-md2html strada-jit stradapp strada-proftext strada-profhtml; do \
-		if [ ! -x tools/$$tool ]; then \
-			echo "  Building $$tool..."; \
-			./strada tools/$$tool.strada -o tools/$$tool 2>/dev/null || true; \
-		fi; \
-		if [ -x tools/$$tool ]; then \
-			install -m 755 tools/$$tool $(INSTALL_BIN)/$$tool; \
-		fi; \
+	    if [ ! -x tools/$$tool ]; then \
+	        echo "  Building $$tool..."; \
+	        ./strada tools/$$tool.strada -o tools/$$tool 2>/dev/null || true; \
+	    fi; \
+	    if [ -x tools/$$tool ]; then \
+	        install -m 755 tools/$$tool $(INSTALL_BIN)/$$tool; \
+	    fi; \
 	done
 	@# Also install stradapp to lib dir (strada wrapper looks for it there)
 	@if [ -x tools/stradapp ]; then \
-		install -m 755 tools/stradapp $(INSTALL_LIB)/stradapp; \
+	    install -m 755 tools/stradapp $(INSTALL_LIB)/stradapp; \
 	fi
 	@# Build and install the interpreter
 	@echo "Installing interpreter..."
 	@if [ ! -x interpreter/strada-interp ]; then \
-		echo "  Building strada-interp..."; \
-		cd interpreter && $(MAKE) 2>/dev/null || true; \
-		cd ..; \
+	    echo "  Building strada-interp..."; \
+	    cd interpreter && $(MAKE) 2>/dev/null || true; \
+	    cd ..; \
 	fi
 	@if [ -x interpreter/strada-interp ]; then \
-		install -m 755 interpreter/strada-interp $(INSTALL_BIN)/strada-interp; \
+	    install -m 755 interpreter/strada-interp $(INSTALL_BIN)/strada-interp; \
 	fi
 	@# Install TCC runtime for REPL
 	@if [ -f $(RUNTIME_TCC_OBJ) ]; then \
-		install -m 644 $(RUNTIME_TCC_OBJ) $(INSTALL_LIB)/runtime/; \
+	    install -m 644 $(RUNTIME_TCC_OBJ) $(INSTALL_LIB)/runtime/; \
 	fi
 	@if [ -f $(RUNTIME_DIR)/strada_runtime_tcc.h ]; then \
-		install -m 644 $(RUNTIME_DIR)/strada_runtime_tcc.h $(INSTALL_LIB)/runtime/; \
+	    install -m 644 $(RUNTIME_DIR)/strada_runtime_tcc.h $(INSTALL_LIB)/runtime/; \
 	fi
 	@# Build and install man pages
 	@echo "Installing man pages..."
 	@if [ -x tools/strada-md2man ]; then \
-		for manmd in docs/stradac.1.md docs/strada.1.md; do \
-			if [ -f "$$manmd" ]; then \
-				name=$$(basename "$$manmd" .1.md); \
-				echo "  Generating $$name.1..."; \
-				./tools/strada-md2man --name "$$name" --section 1 --center "Strada Programming Language" "$$manmd" $(INSTALL_MAN)/$$name.1; \
-			fi; \
-		done; \
+	    for manmd in docs/stradac.1.md docs/strada.1.md; do \
+	        if [ -f "$$manmd" ]; then \
+	            name=$$(basename "$$manmd" .1.md); \
+	            echo "  Generating $$name.1..."; \
+	            ./tools/strada-md2man --name "$$name" --section 1 --center "Strada Programming Language" "$$manmd" $(INSTALL_MAN)/$$name.1; \
+	        fi; \
+	    done; \
 	else \
-		echo "  Warning: strada-md2man not available, skipping man pages"; \
+	    echo "  Warning: strada-md2man not available, skipping man pages"; \
 	fi
 	@echo ""
 	@echo "✓ Strada installed to $(PREFIX)"
@@ -579,7 +599,7 @@ clean:
 	rm -f stradac_stage1
 	rm -f $(EXAMPLES_DIR)/*.c $(EXAMPLES_DIR)/*.o
 	rm -f $(EXAMPLES_DIR)/test_simple $(EXAMPLES_DIR)/test_*[!.strada]
-	find $(EXAMPLES_DIR) -maxdepth 1 -type f -executable -delete
+	find $(EXAMPLES_DIR) -maxdepth 1 -type f -perm -u+x -delete
 	rm -rf build/*
 	rm -f stradac
 	rm -f $(TOOL_BINS) $(CONVERTER_BINS)

@@ -4923,7 +4923,9 @@ func find_o_file(scalar $program, str $obj_file) str {
 func extract_object_export_info(scalar $parser, str $obj_name, str $o_path) str {
     # Get the compiler directory from STRADA_DIR environment variable
     # (set by the 'strada' wrapper script) or fall back to current directory
-    my str $compiler_dir = core::qx("echo -n \"\$STRADA_DIR\"");
+    # Read STRADA_DIR directly; avoids /bin/sh's echo -n which is unportable
+    # (macOS /bin/sh prints "-n" literally).
+    my str $compiler_dir = sys::getenv("STRADA_DIR");
     if (length($compiler_dir) == 0) {
         # Fallback to current directory (works when running from repo root)
         $compiler_dir = ".";
@@ -4947,9 +4949,12 @@ func extract_object_export_info(scalar $parser, str $obj_name, str $o_path) str 
 
     # Compile the temp program with the object file
     # We need to link with the runtime for strada_* functions used in the object
-    my str $compile_cmd = "gcc -o " . $temp_exe . " " . $temp_c . " " . $o_path;
+    my str $cc = sys::getenv("CC");
+    if (length($cc) == 0) { $cc = "cc"; }
+    my str $dl_libs = sys::getenv("STRADA_DLOPEN_LIBS");
+    my str $compile_cmd = $cc . " -o " . $temp_exe . " " . $temp_c . " " . $o_path;
     $compile_cmd = $compile_cmd . " " . $runtime_path . " -I" . $runtime_dir;
-    $compile_cmd = $compile_cmd . " -ldl -lm -lpthread";
+    $compile_cmd = $compile_cmd . " " . $dl_libs . " -lm -lpthread";
 
     # Run gcc and capture any error output, append exit code
     my str $compile_output = core::qx($compile_cmd . " 2>&1; echo __EXIT_CODE__$?");
@@ -5078,8 +5083,11 @@ func extract_archive_export_info(scalar $parser, str $arch_name, str $a_path) st
 
     # Compile the temp program with the archive file
     # Note: The archive already includes the runtime (from --static-lib), so don't link it again
-    my str $compile_cmd = "gcc -o " . $temp_exe . " " . $temp_c . " " . $a_path;
-    $compile_cmd = $compile_cmd . " -ldl -lm -lpthread";
+    my str $cc = sys::getenv("CC");
+    if (length($cc) == 0) { $cc = "cc"; }
+    my str $dl_libs = sys::getenv("STRADA_DLOPEN_LIBS");
+    my str $compile_cmd = $cc . " -o " . $temp_exe . " " . $temp_c . " " . $a_path;
+    $compile_cmd = $compile_cmd . " " . $dl_libs . " -lm -lpthread";
 
     # Add PCRE2 link flags if available (runtime may be compiled with PCRE2)
     my str $pcre2_libs = core::getenv("STRADA_PCRE2_LIBS");
