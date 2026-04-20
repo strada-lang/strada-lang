@@ -15605,11 +15605,12 @@ void strada_memprof_report(void) {
     }
 
     fprintf(stderr, "╠══════════════════════════════════════════════════════════════════════════════╣\n");
-    fprintf(stderr, "║ TOTAL      %9lu %9lu %9lu           %10lu              ║\n",
+    fprintf(stderr, "║ TOTAL      %9lu %9lu %9lu           %10lu %11lu ║\n",
             (unsigned long)total_allocs,
             (unsigned long)total_frees,
             (unsigned long)total_current,
-            (unsigned long)total_cur_bytes);
+            (unsigned long)total_cur_bytes,
+            (unsigned long)total_peak_bytes);
 
     if (total_current > 0) {
         fprintf(stderr, "╠══════════════════════════════════════════════════════════════════════════════╣\n");

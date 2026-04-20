@@ -3276,7 +3276,9 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 emit_int_operand($cg, $expr->{"left"});
                 emit($cg, "; int64_t __mr = ");
                 emit_int_operand($cg, $expr->{"right"});
-                emit($cg, "; __mr != 0 ? STRADA_MAKE_TAGGED_INT(__ml % __mr) : strada_new_undef(); })");
+                # Note: no spaces around `%`. The frozen bootstrap's string handler
+                # corrupts the substring "% __" (eats 4 chars), producing "__ml mr".
+                emit($cg, "; __mr != 0 ? STRADA_MAKE_TAGGED_INT(__ml%__mr) : strada_new_undef(); })");
             } else {
                 # Runtime fast-path for tagged int modulo
                 emit($cg, "({ StradaValue *__al = ");
