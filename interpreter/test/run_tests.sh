@@ -136,12 +136,34 @@ test_run() {
 echo "=== Strada Interpreter Test Suite ==="
 echo ""
 
+# Build shared libraries needed by import_lib tests
+STRADA_ROOT="$(cd "$TEST_DIR/../.." && pwd)"
+if [ -x "$STRADA_ROOT/strada" ]; then
+    for lib_src in "$TEST_DIR"/lib/*.strada; do
+        [ -f "$lib_src" ] || continue
+        lib_so="${lib_src%.strada}.so"
+        if [ ! -f "$lib_so" ] || [ "$lib_src" -nt "$lib_so" ]; then
+            "$STRADA_ROOT/strada" --shared "$lib_src" -o "$lib_so" 2>/dev/null || true
+        fi
+    done
+fi
+
+# Known skip list (tests requiring features not yet available in the VM)
+SKIP_TESTS=""
+
 # Discover and run all test files
 for test_file in "$TEST_DIR"/test_*.strada; do
     [ -f "$test_file" ] || continue
     test_name=$(basename "$test_file" .strada)
 
     if [ -n "$PATTERN" ] && ! echo "$test_name" | grep -q "$PATTERN"; then
+        continue
+    fi
+
+    # Skip known failing tests
+    if echo "$SKIP_TESTS" | grep -qw "$test_name"; then
+        echo "  SKIP: $test_name (known: compiler slot optimization incompatible with VM)"
+        SKIP=$((SKIP + 1))
         continue
     fi
 

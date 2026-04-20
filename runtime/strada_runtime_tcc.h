@@ -205,6 +205,7 @@ StradaValue* strada_new_hash_presized(int capacity);
 StradaValue* strada_new_hash_with_capacity(size_t capacity);
 StradaValue* strada_new_filehandle(FILE *fh);
 StradaValue* strada_new_ref(StradaValue *target, char ref_type);
+StradaValue* strada_new_ref_take(StradaValue *target, char ref_type);
 
 /* Slot references — reference to a C local variable's storage (StradaValue**) */
 #define STRADA_SLOT_REF_MARKER ((size_t)0xDEAD5107ULL)
@@ -524,6 +525,7 @@ StradaValue* strada_named_captures(void);
 StradaValue* strada_regex_match_all(const char *str, const char *pattern);
 char* strada_regex_replace(const char *str, const char *pattern, const char *replacement, const char *flags);
 char* strada_regex_replace_all(const char *str, const char *pattern, const char *replacement, const char *flags);
+int strada_regex_replace_capture(const char *str, const char *pattern, const char *replacement, const char *flags, int global, char **result_out);
 StradaArray* strada_string_split(const char *str, const char *delim);
 StradaArray* strada_regex_split(const char *str, const char *pattern);
 StradaArray* strada_regex_capture(const char *str, const char *pattern);

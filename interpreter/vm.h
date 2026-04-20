@@ -187,6 +187,16 @@ typedef enum {
 
     OP_C_BLOCK,         /* u16 cblock_idx — JIT-compile and execute __C__ block */
 
+    /* Bitwise operations */
+    OP_BIT_AND,         /* pop 2, push a & b */
+    OP_BIT_OR,          /* pop 2, push a | b */
+    OP_BIT_XOR,         /* pop 2, push a ^ b */
+    OP_BIT_SHL,         /* pop 2, push a << b */
+    OP_BIT_SHR,         /* pop 2, push a >> b */
+    OP_BIT_NOT,         /* pop 1, push ~a */
+
+    OP_APPEND_CONST,    /* u16 str_idx, u16 local_slot — append string const to local (no alloc) */
+
     OP_OPCODE_COUNT     /* must be last */
 } StradaOpcode;
 
@@ -239,6 +249,249 @@ enum {
     BUILTIN_FILE_TEST_D,
     BUILTIN_FILE_TEST_F,
     BUILTIN_RANGE,
+    BUILTIN_MATH_TAN,
+    BUILTIN_MATH_ASIN,
+    BUILTIN_MATH_ACOS,
+    BUILTIN_MATH_ATAN,
+    BUILTIN_MATH_ATAN2,
+    BUILTIN_MATH_SINH,
+    BUILTIN_MATH_COSH,
+    BUILTIN_MATH_TANH,
+    BUILTIN_MATH_LOG,
+    BUILTIN_MATH_LOG10,
+    BUILTIN_MATH_EXP,
+    BUILTIN_MATH_ROUND,
+    BUILTIN_MATH_FMOD,
+    BUILTIN_MATH_FABS,
+    BUILTIN_MATH_RAND,
+    BUILTIN_MATH_SRAND,
+    BUILTIN_MATH_HYPOT,
+    BUILTIN_MATH_CBRT,
+    BUILTIN_MATH_ISNAN,
+    BUILTIN_MATH_ISINF,
+    BUILTIN_MATH_ISFINITE,
+    BUILTIN_STR_RINDEX,
+    BUILTIN_STR_LTRIM,
+    BUILTIN_STR_RTRIM,
+    BUILTIN_STR_CHOP,
+    BUILTIN_STR_REVERSE,
+    BUILTIN_HASH_VALUES,
+    BUILTIN_ARRAY_SPLICE,
+    BUILTIN_HASH_EACH,
+    BUILTIN_CORE_EXIT,
+    BUILTIN_CORE_SLEEP,
+    BUILTIN_CORE_USLEEP,
+    BUILTIN_CORE_GETPID,
+    BUILTIN_CORE_CHDIR,
+    BUILTIN_CORE_GETCWD,
+    BUILTIN_CORE_MKDIR,
+    BUILTIN_CORE_RMDIR,
+    BUILTIN_CORE_RENAME,
+    BUILTIN_CORE_DIRNAME,
+    BUILTIN_CORE_BASENAME,
+    BUILTIN_CORE_STAT,
+    BUILTIN_CORE_CHMOD,
+    BUILTIN_CORE_READDIR,
+    BUILTIN_CORE_PCLOSE,
+    BUILTIN_CORE_ERRNO,
+    BUILTIN_CORE_STRERROR,
+    BUILTIN_CORE_ISATTY,
+    BUILTIN_CORE_ARGV,
+    BUILTIN_CORE_REALPATH,
+    BUILTIN_CORE_LINK,
+    BUILTIN_CORE_SYMLINK,
+    BUILTIN_CORE_READLINK,
+    BUILTIN_CORE_FORK,
+    BUILTIN_CORE_WAIT,
+    BUILTIN_CORE_WAITPID,
+    BUILTIN_CORE_KILL,
+    BUILTIN_CORE_SIGNAL,
+    BUILTIN_CORE_ALARM,
+    BUILTIN_CORE_PIPE,
+    BUILTIN_CORE_DUP2,
+    BUILTIN_CORE_ORD_BYTE,
+    BUILTIN_CORE_GET_BYTE,
+    BUILTIN_CORE_BYTE_LENGTH,
+    BUILTIN_CORE_CALLER,
+    BUILTIN_CORE_STACK_TRACE,
+    BUILTIN_CORE_PACK,
+    BUILTIN_CORE_UNPACK,
+    BUILTIN_CORE_BASE64_ENCODE,
+    BUILTIN_CORE_BASE64_DECODE,
+    BUILTIN_CORE_QUOTEMETA,
+    BUILTIN_CORE_FNMATCH,
+    BUILTIN_CORE_FILE_EXT,
+    BUILTIN_CORE_PATH_JOIN,
+    BUILTIN_CORE_GETPPID,
+    BUILTIN_CORE_LSTAT,
+    BUILTIN_CORE_GLOB,
+    BUILTIN_CORE_GETUID,
+    BUILTIN_CORE_GETEUID,
+    BUILTIN_CORE_GETGID,
+    BUILTIN_CORE_GETEGID,
+    BUILTIN_CORE_UMASK,
+    BUILTIN_CORE_EXEC,
+    BUILTIN_CORE_SRAND,
+    BUILTIN_CORE_RAND,
+    BUILTIN_CORE_TRUNCATE,
+    BUILTIN_CORE_NANOSLEEP,
+    BUILTIN_CORE_GETHOSTNAME,
+    BUILTIN_CORE_ACCESS,
+
+    /* Socket/networking */
+    BUILTIN_CORE_SOCKET_CLIENT,
+    BUILTIN_CORE_SOCKET_SERVER,
+    BUILTIN_CORE_SOCKET_SERVER_BACKLOG,
+    BUILTIN_CORE_SOCKET_ACCEPT,
+    BUILTIN_CORE_SOCKET_RECV,
+    BUILTIN_CORE_SOCKET_SEND,
+    BUILTIN_CORE_SOCKET_CLOSE,
+    BUILTIN_CORE_SOCKET_FLUSH,
+    BUILTIN_CORE_SOCKET_SELECT,
+    BUILTIN_CORE_SOCKET_FD,
+    BUILTIN_CORE_SOCKET_SET_NONBLOCKING,
+    BUILTIN_CORE_UDP_SOCKET,
+    BUILTIN_CORE_UDP_BIND,
+    BUILTIN_CORE_UDP_SERVER,
+    BUILTIN_CORE_UDP_RECVFROM,
+    BUILTIN_CORE_UDP_SENDTO,
+
+    /* C interop */
+    BUILTIN_C_STR_TO_PTR,
+    BUILTIN_C_PTR_TO_STR,
+    BUILTIN_C_PTR_TO_STR_N,
+    BUILTIN_C_ALLOC,
+    BUILTIN_C_FREE,
+    BUILTIN_C_REALLOC,
+    BUILTIN_C_NULL,
+    BUILTIN_C_IS_NULL,
+    BUILTIN_C_PTR_ADD,
+    BUILTIN_C_READ_INT8,
+    BUILTIN_C_READ_INT16,
+    BUILTIN_C_READ_INT32,
+    BUILTIN_C_READ_INT64,
+    BUILTIN_C_READ_PTR,
+    BUILTIN_C_READ_FLOAT,
+    BUILTIN_C_READ_DOUBLE,
+    BUILTIN_C_WRITE_INT8,
+    BUILTIN_C_WRITE_INT16,
+    BUILTIN_C_WRITE_INT32,
+    BUILTIN_C_WRITE_INT64,
+    BUILTIN_C_WRITE_PTR,
+    BUILTIN_C_WRITE_FLOAT,
+    BUILTIN_C_WRITE_DOUBLE,
+    BUILTIN_C_SIZEOF_INT,
+    BUILTIN_C_SIZEOF_LONG,
+    BUILTIN_C_SIZEOF_PTR,
+    BUILTIN_C_SIZEOF_SIZE_T,
+    BUILTIN_C_MEMCPY,
+    BUILTIN_C_MEMSET,
+
+    /* Terminal I/O */
+    BUILTIN_CORE_TERM_ENABLE_RAW,
+    BUILTIN_CORE_TERM_DISABLE_RAW,
+    BUILTIN_CORE_TERM_ROWS,
+    BUILTIN_CORE_TERM_COLS,
+    BUILTIN_CORE_READ_BYTE,
+    BUILTIN_CORE_TTYNAME,
+
+    /* Async/threading */
+    BUILTIN_THREAD_CREATE,
+    BUILTIN_THREAD_JOIN,
+    BUILTIN_THREAD_DETACH,
+    BUILTIN_THREAD_SELF,
+    BUILTIN_ASYNC_CHANNEL,
+    BUILTIN_ASYNC_SEND,
+    BUILTIN_ASYNC_RECV,
+    BUILTIN_ASYNC_TRY_SEND,
+    BUILTIN_ASYNC_TRY_RECV,
+    BUILTIN_ASYNC_CLOSE,
+    BUILTIN_ASYNC_IS_CLOSED,
+    BUILTIN_ASYNC_LEN,
+    BUILTIN_ASYNC_MUTEX,
+    BUILTIN_ASYNC_LOCK,
+    BUILTIN_ASYNC_UNLOCK,
+    BUILTIN_ASYNC_TRY_LOCK,
+    BUILTIN_ASYNC_MUTEX_DESTROY,
+    BUILTIN_ASYNC_ATOMIC,
+    BUILTIN_ASYNC_ATOMIC_LOAD,
+    BUILTIN_ASYNC_ATOMIC_STORE,
+    BUILTIN_ASYNC_ATOMIC_ADD,
+    BUILTIN_ASYNC_ATOMIC_SUB,
+    BUILTIN_ASYNC_ATOMIC_INC,
+    BUILTIN_ASYNC_ATOMIC_DEC,
+    BUILTIN_ASYNC_ATOMIC_CAS,
+
+    /* Advanced OOP */
+    BUILTIN_CORE_WEAKEN,
+    BUILTIN_CORE_ISWEAK,
+    BUILTIN_TIE,
+    BUILTIN_UNTIE,
+    BUILTIN_TIED,
+
+    /* String operations */
+    BUILTIN_STR_REPLACE_PLAIN,
+    BUILTIN_STR_REPLACE_FIRST,
+    BUILTIN_REGEX_REPLACE,
+    BUILTIN_REGEX_REPLACE_ALL,
+
+    /* StringBuilder */
+    BUILTIN_SB_NEW,
+    BUILTIN_SB_NEW_CAP,
+    BUILTIN_SB_APPEND,
+    BUILTIN_SB_TO_STRING,
+    BUILTIN_SB_LENGTH,
+    BUILTIN_SB_CLEAR,
+    BUILTIN_SB_FREE,
+
+    /* Dynamic loading */
+    BUILTIN_CORE_DL_OPEN,
+    BUILTIN_CORE_DL_SYM,
+    BUILTIN_CORE_DL_CLOSE,
+    BUILTIN_CORE_DL_ERROR,
+    BUILTIN_CORE_DL_CALL_INT,
+    BUILTIN_CORE_DL_CALL_STR,
+    BUILTIN_CORE_DL_CALL_VOID,
+    BUILTIN_CORE_DL_CALL_INT_SV,
+    BUILTIN_CORE_DL_CALL_STR_SV,
+    BUILTIN_CORE_DL_CALL_VOID_SV,
+
+    /* CStruct */
+    BUILTIN_CORE_CSTRUCT_NEW,
+    BUILTIN_CORE_CSTRUCT_PTR,
+    BUILTIN_CORE_CSTRUCT_SET_INT,
+    BUILTIN_CORE_CSTRUCT_GET_INT,
+    BUILTIN_CORE_CSTRUCT_SET_STRING,
+    BUILTIN_CORE_CSTRUCT_GET_STRING,
+    BUILTIN_CORE_CSTRUCT_SET_DOUBLE,
+    BUILTIN_CORE_CSTRUCT_GET_DOUBLE,
+
+    /* UTF-8 */
+    BUILTIN_UTF8_IS_UTF8,
+    BUILTIN_UTF8_VALID,
+    BUILTIN_UTF8_ENCODE,
+    BUILTIN_UTF8_DECODE,
+    BUILTIN_UTF8_DOWNGRADE,
+    BUILTIN_UTF8_UPGRADE,
+    BUILTIN_UTF8_UNICODE_TO_NATIVE,
+
+    /* Misc core */
+    BUILTIN_CORE_WANTARRAY,
+    BUILTIN_CORE_SELECT_FDS,
+    BUILTIN_CORE_SET_BYTE,
+    BUILTIN_CORE_BYTE_SUBSTR,
+
+    /* Common bare functions */
+    BUILTIN_DIE,
+    BUILTIN_WARN,
+    BUILTIN_BLESSED,
+    BUILTIN_REFCOUNT,
+    BUILTIN_TYPEOF,
+    BUILTIN_DUMPER_STR,
+    BUILTIN_NSORT,
+    BUILTIN_CAST_INT,
+    BUILTIN_CAST_NUM,
+    BUILTIN_CAST_STR,
 };
 
 /* Heap object type tag */
@@ -250,6 +503,7 @@ enum VMObjType {
     VM_OBJ_CLOSURE = 8,
     VM_OBJ_FILEHANDLE = 10,
     VM_OBJ_CELL = 12,     /* shared mutable cell for closure capture-by-reference */
+    VM_OBJ_NATIVE_SV = 14, /* opaque StradaValue* from native library (passed through as-is) */
 };
 typedef struct { enum VMObjType obj_type; } VMObjHeader;
 
@@ -348,6 +602,8 @@ struct VMArray {
 typedef struct {
     char *key;
     VMValue value;
+    uint32_t hash;       /* cached hash value */
+    uint16_t keylen;     /* cached key length */
     uint8_t occupied;
 } VMHashEntry;
 
@@ -357,6 +613,7 @@ struct VMHash {
     int capacity;
     int size;
     char *class_name;
+    int iter_pos;       /* iteration position for each() */
 };
 
 /* Closure */
@@ -372,7 +629,14 @@ typedef struct {
     VMObjHeader hdr;
     void *fp;  /* FILE* */
     int is_pipe;
+    int is_popen;
 } VMFileHandle;
+
+/* Opaque wrapper for native StradaValue* objects (e.g., from import_lib OOP) */
+typedef struct {
+    VMObjHeader hdr;
+    struct StradaValue *sv;  /* owned StradaValue* — passed directly to native calls */
+} VMNativeSV;
 
 /* Bytecode chunk — compiled function */
 typedef struct {
@@ -524,6 +788,14 @@ typedef struct {
     int global_save_cap;
     /* Default output filehandle */
     VMValue default_fh;
+    /* Command-line arguments */
+    VMArray *argv;
+    /* Inline method cache for OOP dispatch */
+    struct {
+        const char *class_name;  /* pointer compare (interned) */
+        const char *method;      /* pointer compare (str_consts) */
+        int func_idx;
+    } method_cache[32];
 } VM;
 
 /* Program API */

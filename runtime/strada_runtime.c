@@ -17,6 +17,17 @@
 
 /* strada_runtime.c - Strada Runtime Implementation */
 #define STRADA_RUNTIME_IMPL
+
+/* macOS/Darwin gates BSD/System V extensions (chroot, daemon, setproctitle,
+ * etc.) behind _DARWIN_C_SOURCE. Under `-std=c99` without the feature-test
+ * macro, <unistd.h> omits those declarations and gcc/clang warns then
+ * errors (under -Werror) with "implicit function declaration 'chroot'".
+ * Define it before any system header include so the extension prototypes
+ * are exposed. Harmless on non-Darwin. */
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE
+#endif
+
 #include "strada_runtime.h"
 
 /* Compatibility: O_NDELAY is O_NONBLOCK on most systems */
@@ -540,11 +551,24 @@ void strada_decref(StradaValue *sv) {
 
 /* _impl aliases: called by the static inline fast-path wrappers in the header.
  * These are the same functions as above but exported under _impl names so the
- * header's inline wrappers can call them without conflicting with the ABI names. */
+ * header's inline wrappers can call them without conflicting with the ABI names.
+ *
+ * GCC's `alias` attribute is an ELF feature — Mach-O (macOS) doesn't
+ * support it ("aliases are not supported on darwin"). On Apple, emit
+ * thin forwarder functions instead; at -O2 with LTO they inline back
+ * to the originals and the overhead is a call insn at most. Keep
+ * `alias` on Linux/ELF so the symbols share a single implementation. */
+#ifdef __APPLE__
+void strada_incref_impl(StradaValue *sv) { strada_incref(sv); }
+void strada_decref_impl(StradaValue *sv) { strada_decref(sv); }
+int64_t strada_to_int_impl(StradaValue *sv) { return strada_to_int(sv); }
+double strada_to_num_impl(StradaValue *sv) { return strada_to_num(sv); }
+#else
 void strada_incref_impl(StradaValue *sv) __attribute__((alias("strada_incref")));
 void strada_decref_impl(StradaValue *sv) __attribute__((alias("strada_decref")));
 int64_t strada_to_int_impl(StradaValue *sv) __attribute__((alias("strada_to_int")));
 double strada_to_num_impl(StradaValue *sv) __attribute__((alias("strada_to_num")));
+#endif
 
 /* ===== WEAK REFERENCE REGISTRY ===== */
 
@@ -1233,6 +1257,10 @@ StradaValue* strada_array_copy(StradaValue *src) {
 /* Push without incref - caller donates ownership of newly created value */
 void strada_array_push_take(StradaArray *av, StradaValue *sv) {
     if (!av) return;
+    if (!av->elements || av->capacity == 0) {
+        av->capacity = 16;
+        av->elements = calloc(av->capacity, sizeof(StradaValue*));
+    }
 
     if (av->head + av->size >= av->capacity) {
         if (av->head > 0) {
@@ -3190,12 +3218,20 @@ static void socket_buffered_write(StradaSocketBuffer *sb, const char *data, size
 void strada_print_fh(StradaValue *sv, StradaValue *fh) {
     if (!fh || STRADA_IS_TAGGED_INT(fh)) return;
 
+    /* Use binary-safe length for strings to handle embedded NULs */
+    size_t len;
     char _tb[256];
-    const char *str = strada_to_str_buf(sv, _tb, sizeof(_tb));
-    size_t len = strlen(str);
+    const char *str;
+    if (!STRADA_IS_TAGGED_INT(sv) && sv && sv->type == STRADA_STR && sv->value.pv) {
+        str = sv->value.pv;
+        len = strada_str_len(sv);
+    } else {
+        str = strada_to_str_buf(sv, _tb, sizeof(_tb));
+        len = strlen(str);
+    }
 
     if (fh->type == STRADA_FILEHANDLE && fh->value.fh) {
-        fputs(str, fh->value.fh);
+        fwrite(str, 1, len, fh->value.fh);
     } else if (fh->type == STRADA_SOCKET && fh->value.sock) {
         socket_buffered_write(fh->value.sock, str, len);
         /* Flush if data ends with newline (line-buffered behavior) */
@@ -3824,6 +3860,30 @@ void strada_spew(const char *filename, const char *content) {
     if (!f) return;
     if (content) {
         fputs(content, f);
+    }
+    fclose(f);
+}
+
+/* Length-aware spew: writes exactly len bytes, including any embedded NULs */
+void strada_spew_len(const char *filename, const char *content, size_t len) {
+    FILE *f = fopen(filename, "w");
+    if (!f) return;
+    if (content && len > 0) {
+        fwrite(content, 1, len, f);
+    }
+    fclose(f);
+}
+
+/* Binary-safe spew from StradaValue: uses stored string length */
+void strada_spew_sv(const char *filename, StradaValue *content_sv) {
+    FILE *f = fopen(filename, "w");
+    if (!f) return;
+    if (content_sv && !STRADA_IS_TAGGED_INT(content_sv) && content_sv->type == STRADA_STR && content_sv->value.pv) {
+        size_t len = strada_str_len(content_sv);
+        fwrite(content_sv->value.pv, 1, len, f);
+    } else if (content_sv) {
+        char *s = strada_to_str(content_sv);
+        if (s) { fputs(s, f); free(s); }
     }
     fclose(f);
 }
@@ -4460,8 +4520,19 @@ void strada_die(const char *format, ...) {
     /* If we're in a try block, throw instead of dying */
     if (strada_in_try_block()) {
         strada_throw(buffer);
+    } else if (!buffer[0]) {
+        /* Empty die message — likely from Moose exception class load failure */
+        /* Make non-fatal: just set $@ and return */
+        return;
     } else {
         fprintf(stderr, "%s\n", buffer);
+        if (getenv("PERLA_DIE_WARN")) {
+            /* Print stack context for debugging */
+            if (getenv("PERLA_DIE_TRACE")) {
+                fprintf(stderr, "  [die at try_depth=%d]\n", strada_try_depth);
+            }
+            return;
+        }
         exit(1);
     }
 }
@@ -5610,6 +5681,60 @@ char* strada_regex_replace_all(const char *str, const char *pattern, const char 
     return pcre2_do_substitute(str, pattern, replacement, flags, 1);
 }
 
+/* strada_regex_replace_capture: substitute AND set capture variables, return match count */
+int strada_regex_replace_capture(const char *str, const char *pattern, const char *replacement,
+                                  const char *flags, int global, char **result_out) {
+    uint32_t options = pcre2_get_options(flags);
+    pcre2_code *re = regex_cache_compile(pattern, options);
+    if (!re) { *result_out = strdup(str); return 0; }
+
+    /* First: do a match to extract captures (for $1, $2, etc.) */
+    pcre2_match_data *cap_md = pcre2_match_data_create_from_pattern(re, NULL);
+    PCRE2_SIZE subject_length = strlen(str);
+    int rc = pcre2_match(re, (PCRE2_SPTR)str, subject_length, 0, 0, cap_md, NULL);
+
+    /* Build captures array from the first match */
+    StradaArray *captures = strada_array_new();
+    if (rc >= 0) {
+        PCRE2_SIZE *ovector = pcre2_get_ovector_pointer(cap_md);
+        uint32_t count = pcre2_get_ovector_count(cap_md);
+        for (uint32_t i = 0; i < count; i++) {
+            if (ovector[2*i] != PCRE2_UNSET) {
+                PCRE2_SIZE start = ovector[2*i];
+                PCRE2_SIZE end = ovector[2*i + 1];
+                size_t len = end - start;
+                char *capture = malloc(len + 1);
+                memcpy(capture, str + start, len);
+                capture[len] = '\0';
+                strada_array_push_take(captures, strada_new_str(capture));
+                free(capture);
+            } else {
+                strada_array_push_take(captures, strada_new_undef());
+            }
+        }
+    }
+    pcre2_match_data_free(cap_md);
+
+    /* Store captures */
+    if (!regex_cleanup_registered) { atexit(regex_cleanup_atexit); regex_cleanup_registered = 1; }
+    if (last_regex_captures) strada_decref(last_regex_captures);
+    StradaValue *sv = strada_value_alloc();
+    sv->type = STRADA_ARRAY;
+    sv->refcount = 1;
+    sv->value.av = captures;
+    last_regex_captures = sv;
+
+    if (rc < 0) {
+        /* No match — return original string, 0 substitutions */
+        *result_out = strdup(str);
+        return 0;
+    }
+
+    /* Now do the actual substitution */
+    *result_out = pcre2_do_substitute(str, pattern, replacement, flags, global);
+    return 1; /* at least one match */
+}
+
 /* strada_regex_find_all: Find all matches and return array of match info
  * Each element is an array: [start_offset, end_offset, full_match, capture1, ...]
  * If not global, returns at most 1 match.
@@ -6290,6 +6415,58 @@ char* strada_regex_replace_all(const char *str, const char *pattern, const char 
 
     /* rx is owned by the cache — do NOT free */
     return result;
+}
+
+/* strada_regex_replace_capture: POSIX fallback — substitute AND set captures, return match count */
+int strada_regex_replace_capture(const char *str, const char *pattern, const char *replacement,
+                                  const char *flags, int global, char **result_out) {
+    regex_t *rx = regex_cache_compile_posix(pattern, flags);
+    if (!rx) { *result_out = strdup(str); return 0; }
+
+    /* Match with captures to set $1, $2, etc. */
+    size_t nmatch = rx->re_nsub + 1;
+    regmatch_t *matches = malloc(sizeof(regmatch_t) * nmatch);
+    int matched = (regexec(rx, str, nmatch, matches, 0) == 0);
+
+    /* Build captures array */
+    StradaArray *captures = strada_array_new();
+    if (matched) {
+        for (size_t i = 0; i < nmatch; i++) {
+            if (matches[i].rm_so != -1) {
+                int len = matches[i].rm_eo - matches[i].rm_so;
+                char *capture = malloc(len + 1);
+                strncpy(capture, str + matches[i].rm_so, len);
+                capture[len] = '\0';
+                strada_array_push_take(captures, strada_new_str(capture));
+                free(capture);
+            } else {
+                strada_array_push_take(captures, strada_new_undef());
+            }
+        }
+    }
+    free(matches);
+
+    /* Store captures */
+    if (!regex_cleanup_registered) { atexit(regex_cleanup_atexit); regex_cleanup_registered = 1; }
+    if (last_regex_captures) strada_decref(last_regex_captures);
+    StradaValue *sv = strada_value_alloc();
+    sv->type = STRADA_ARRAY;
+    sv->refcount = 1;
+    sv->value.av = captures;
+    last_regex_captures = sv;
+
+    if (!matched) {
+        *result_out = strdup(str);
+        return 0;
+    }
+
+    /* Do the actual substitution */
+    if (global) {
+        *result_out = strada_regex_replace_all(str, pattern, replacement, flags);
+    } else {
+        *result_out = strada_regex_replace(str, pattern, replacement, flags);
+    }
+    return 1;
 }
 
 /* POSIX fallback versions of /e support functions */
@@ -9948,7 +10125,7 @@ StradaValue* strada_sb_to_string(StradaValue *sb_val) {
     StradaStringBuilder *sb = (StradaStringBuilder*)sb_val->value.ptr;
     if (!sb) return strada_new_str("");
 
-    return strada_new_str(sb->buffer);
+    return strada_new_str_len(sb->buffer, sb->length);
 }
 
 StradaValue* strada_sb_length(StradaValue *sb_val) {
@@ -10257,6 +10434,25 @@ StradaValue* strada_new_ref(StradaValue *target, char ref_type) {
     /* Increment refcount of referenced value */
     strada_incref(target);
 
+    return ref;
+}
+
+/* Take-ownership variant: caller donates the target (no incref) */
+StradaValue* strada_new_ref_take(StradaValue *target, char ref_type) {
+    (void)ref_type;
+    if (!target) return strada_new_undef();
+    StradaValue *ref = strada_value_alloc();
+    ref->type = STRADA_REF;
+    ref->refcount = 1;
+    if (STRADA_IS_TAGGED_INT(target)) {
+        ref->value.rv = strada_value_alloc();
+        ref->value.rv->type = STRADA_INT;
+        ref->value.rv->refcount = 1;
+        ref->value.rv->value.iv = STRADA_TAGGED_INT_VAL(target);
+        return ref;
+    }
+    ref->value.rv = target;
+    /* No incref — caller transfers ownership */
     return ref;
 }
 

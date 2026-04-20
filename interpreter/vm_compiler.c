@@ -81,6 +81,7 @@ enum {
     OP_AST_STR_EQ = 20, OP_AST_STR_NE, OP_AST_STR_LT, OP_AST_STR_GT, OP_AST_STR_LE, OP_AST_STR_GE,
     OP_AST_LOG_AND = 30, OP_AST_LOG_OR, OP_AST_DEFOR,
     OP_AST_SPACESHIP = 40,
+    OP_AST_BIT_AND = 50, OP_AST_BIT_OR, OP_AST_BIT_XOR, OP_AST_BIT_SHL, OP_AST_BIT_SHR,
 };
 
 /* ===== AST helpers ===== */
@@ -143,6 +144,11 @@ static int ast_op_code(StradaValue *node) {
         if (strcmp(s, "le") == 0) return OP_AST_STR_LE;
         if (strcmp(s, "ge") == 0) return OP_AST_STR_GE;
         if (strcmp(s, "<=>") == 0) return OP_AST_SPACESHIP;
+        if (s[0] == '&' && s[1] == '\0') return OP_AST_BIT_AND;
+        if (s[0] == '|' && s[1] == '\0') return OP_AST_BIT_OR;
+        if (s[0] == '^' && s[1] == '\0') return OP_AST_BIT_XOR;
+        if (strcmp(s, "<<") == 0) return OP_AST_BIT_SHL;
+        if (strcmp(s, ">>") == 0) return OP_AST_BIT_SHR;
         /* Don't print error for unsupported ops — just return -1 */
         return -1;
     }
@@ -449,6 +455,11 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         case OP_AST_STR_LE: vm_chunk_emit(ctx->chunk, OP_STR_LE); break;
         case OP_AST_STR_GE: vm_chunk_emit(ctx->chunk, OP_STR_GE); break;
         case OP_AST_SPACESHIP: vm_chunk_emit(ctx->chunk, OP_SPACESHIP); break;
+        case OP_AST_BIT_AND: vm_chunk_emit(ctx->chunk, OP_BIT_AND); break;
+        case OP_AST_BIT_OR:  vm_chunk_emit(ctx->chunk, OP_BIT_OR); break;
+        case OP_AST_BIT_XOR: vm_chunk_emit(ctx->chunk, OP_BIT_XOR); break;
+        case OP_AST_BIT_SHL: vm_chunk_emit(ctx->chunk, OP_BIT_SHL); break;
+        case OP_AST_BIT_SHR: vm_chunk_emit(ctx->chunk, OP_BIT_SHR); break;
         default:
             vm_chunk_emit(ctx->chunk, OP_POP);
             vm_chunk_emit(ctx->chunk, OP_POP);
@@ -463,6 +474,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         compile_expr(ctx, ast_get(node, "operand"));
         if (strcmp(op, "-") == 0) vm_chunk_emit(ctx->chunk, OP_NEGATE);
         else if (strcmp(op, "!") == 0 || strcmp(op, "not") == 0) vm_chunk_emit(ctx->chunk, OP_NOT);
+        else if (strcmp(op, "~") == 0) vm_chunk_emit(ctx->chunk, OP_BIT_NOT);
         else if (strcmp(op, "\\") == 0) vm_chunk_emit(ctx->chunk, OP_HASH_REF); /* ref operator */
         break;
     }
@@ -1132,6 +1144,79 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             break;
         }
 
+        /* Built-in: rindex() */
+        if (strcmp(name, "rindex") == 0 && argc >= 2) {
+            for (int i = 0; i < argc; i++) compile_expr(ctx, ast_arr_get(args, i));
+            vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+            vm_chunk_emit_u16(ctx->chunk, BUILTIN_STR_RINDEX);
+            vm_chunk_emit(ctx->chunk, (uint8_t)argc);
+            break;
+        }
+
+        /* Built-in: ltrim() */
+        if (strcmp(name, "ltrim") == 0 && argc == 1) {
+            compile_expr(ctx, ast_arr_get(args, 0));
+            vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+            vm_chunk_emit_u16(ctx->chunk, BUILTIN_STR_LTRIM);
+            vm_chunk_emit(ctx->chunk, 1);
+            break;
+        }
+
+        /* Built-in: rtrim() */
+        if (strcmp(name, "rtrim") == 0 && argc == 1) {
+            compile_expr(ctx, ast_arr_get(args, 0));
+            vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+            vm_chunk_emit_u16(ctx->chunk, BUILTIN_STR_RTRIM);
+            vm_chunk_emit(ctx->chunk, 1);
+            break;
+        }
+
+        /* Built-in: chop() */
+        if (strcmp(name, "chop") == 0 && argc == 1) {
+            compile_expr(ctx, ast_arr_get(args, 0));
+            vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+            vm_chunk_emit_u16(ctx->chunk, BUILTIN_STR_CHOP);
+            vm_chunk_emit(ctx->chunk, 1);
+            break;
+        }
+
+        /* Built-in: reverse() — string reverse */
+        if (strcmp(name, "reverse") == 0 && argc == 1) {
+            /* Check if arg is array — use ARRAY_REVERSE, else string reverse */
+            compile_expr(ctx, ast_arr_get(args, 0));
+            vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+            vm_chunk_emit_u16(ctx->chunk, BUILTIN_STR_REVERSE);
+            vm_chunk_emit(ctx->chunk, 1);
+            break;
+        }
+
+        /* Built-in: values() */
+        if (strcmp(name, "values") == 0 && argc == 1) {
+            compile_expr(ctx, ast_arr_get(args, 0));
+            vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+            vm_chunk_emit_u16(ctx->chunk, BUILTIN_HASH_VALUES);
+            vm_chunk_emit(ctx->chunk, 1);
+            break;
+        }
+
+        /* Built-in: splice() */
+        if (strcmp(name, "splice") == 0 && argc >= 2) {
+            for (int i = 0; i < argc; i++) compile_expr(ctx, ast_arr_get(args, i));
+            vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+            vm_chunk_emit_u16(ctx->chunk, BUILTIN_ARRAY_SPLICE);
+            vm_chunk_emit(ctx->chunk, (uint8_t)argc);
+            break;
+        }
+
+        /* Built-in: each() */
+        if (strcmp(name, "each") == 0 && argc == 1) {
+            compile_expr(ctx, ast_arr_get(args, 0));
+            vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+            vm_chunk_emit_u16(ctx->chunk, BUILTIN_HASH_EACH);
+            vm_chunk_emit(ctx->chunk, 1);
+            break;
+        }
+
         /* Built-in: sprintf() */
         if (strcmp(name, "sprintf") == 0) {
             for (int i = 0; i < argc; i++) {
@@ -1211,6 +1296,118 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             else if (strcmp(fn, "is_dir") == 0) bid = BUILTIN_FILE_TEST_D;
             else if (strcmp(fn, "is_file") == 0) bid = BUILTIN_FILE_TEST_F;
             else if (strcmp(fn, "unlink") == 0) bid = BUILTIN_CORE_UNLINK;
+            else if (strcmp(fn, "exit") == 0) bid = BUILTIN_CORE_EXIT;
+            else if (strcmp(fn, "sleep") == 0) bid = BUILTIN_CORE_SLEEP;
+            else if (strcmp(fn, "usleep") == 0) bid = BUILTIN_CORE_USLEEP;
+            else if (strcmp(fn, "getpid") == 0) bid = BUILTIN_CORE_GETPID;
+            else if (strcmp(fn, "getppid") == 0) bid = BUILTIN_CORE_GETPPID;
+            else if (strcmp(fn, "chdir") == 0) bid = BUILTIN_CORE_CHDIR;
+            else if (strcmp(fn, "getcwd") == 0) bid = BUILTIN_CORE_GETCWD;
+            else if (strcmp(fn, "mkdir") == 0) bid = BUILTIN_CORE_MKDIR;
+            else if (strcmp(fn, "rmdir") == 0) bid = BUILTIN_CORE_RMDIR;
+            else if (strcmp(fn, "rename") == 0) bid = BUILTIN_CORE_RENAME;
+            else if (strcmp(fn, "dirname") == 0) bid = BUILTIN_CORE_DIRNAME;
+            else if (strcmp(fn, "basename") == 0) bid = BUILTIN_CORE_BASENAME;
+            else if (strcmp(fn, "stat") == 0) bid = BUILTIN_CORE_STAT;
+            else if (strcmp(fn, "lstat") == 0) bid = BUILTIN_CORE_LSTAT;
+            else if (strcmp(fn, "chmod") == 0) bid = BUILTIN_CORE_CHMOD;
+            else if (strcmp(fn, "readdir") == 0) bid = BUILTIN_CORE_READDIR;
+            else if (strcmp(fn, "popen") == 0) bid = BUILTIN_CORE_POPEN;
+            else if (strcmp(fn, "pclose") == 0) bid = BUILTIN_CORE_PCLOSE;
+            else if (strcmp(fn, "errno") == 0) bid = BUILTIN_CORE_ERRNO;
+            else if (strcmp(fn, "strerror") == 0) bid = BUILTIN_CORE_STRERROR;
+            else if (strcmp(fn, "isatty") == 0) bid = BUILTIN_CORE_ISATTY;
+            else if (strcmp(fn, "argv") == 0) bid = BUILTIN_CORE_ARGV;
+            else if (strcmp(fn, "realpath") == 0) bid = BUILTIN_CORE_REALPATH;
+            else if (strcmp(fn, "link") == 0) bid = BUILTIN_CORE_LINK;
+            else if (strcmp(fn, "symlink") == 0) bid = BUILTIN_CORE_SYMLINK;
+            else if (strcmp(fn, "readlink") == 0) bid = BUILTIN_CORE_READLINK;
+            else if (strcmp(fn, "fork") == 0) bid = BUILTIN_CORE_FORK;
+            else if (strcmp(fn, "wait") == 0) bid = BUILTIN_CORE_WAIT;
+            else if (strcmp(fn, "waitpid") == 0) bid = BUILTIN_CORE_WAITPID;
+            else if (strcmp(fn, "kill") == 0) bid = BUILTIN_CORE_KILL;
+            else if (strcmp(fn, "signal") == 0) bid = BUILTIN_CORE_SIGNAL;
+            else if (strcmp(fn, "alarm") == 0) bid = BUILTIN_CORE_ALARM;
+            else if (strcmp(fn, "pipe") == 0) bid = BUILTIN_CORE_PIPE;
+            else if (strcmp(fn, "dup2") == 0) bid = BUILTIN_CORE_DUP2;
+            else if (strcmp(fn, "ord_byte") == 0) bid = BUILTIN_CORE_ORD_BYTE;
+            else if (strcmp(fn, "get_byte") == 0) bid = BUILTIN_CORE_GET_BYTE;
+            else if (strcmp(fn, "byte_length") == 0) bid = BUILTIN_CORE_BYTE_LENGTH;
+            else if (strcmp(fn, "caller") == 0) bid = BUILTIN_CORE_CALLER;
+            else if (strcmp(fn, "stack_trace") == 0) bid = BUILTIN_CORE_STACK_TRACE;
+            else if (strcmp(fn, "pack") == 0) bid = BUILTIN_CORE_PACK;
+            else if (strcmp(fn, "unpack") == 0) bid = BUILTIN_CORE_UNPACK;
+            else if (strcmp(fn, "base64_encode") == 0) bid = BUILTIN_CORE_BASE64_ENCODE;
+            else if (strcmp(fn, "base64_decode") == 0) bid = BUILTIN_CORE_BASE64_DECODE;
+            else if (strcmp(fn, "quotemeta") == 0) bid = BUILTIN_CORE_QUOTEMETA;
+            else if (strcmp(fn, "fnmatch") == 0) bid = BUILTIN_CORE_FNMATCH;
+            else if (strcmp(fn, "file_ext") == 0) bid = BUILTIN_CORE_FILE_EXT;
+            else if (strcmp(fn, "path_join") == 0) bid = BUILTIN_CORE_PATH_JOIN;
+            else if (strcmp(fn, "getuid") == 0) bid = BUILTIN_CORE_GETUID;
+            else if (strcmp(fn, "geteuid") == 0) bid = BUILTIN_CORE_GETEUID;
+            else if (strcmp(fn, "getgid") == 0) bid = BUILTIN_CORE_GETGID;
+            else if (strcmp(fn, "getegid") == 0) bid = BUILTIN_CORE_GETEGID;
+            else if (strcmp(fn, "umask") == 0) bid = BUILTIN_CORE_UMASK;
+            else if (strcmp(fn, "exec") == 0) bid = BUILTIN_CORE_EXEC;
+            else if (strcmp(fn, "srand") == 0) bid = BUILTIN_CORE_SRAND;
+            else if (strcmp(fn, "rand") == 0) bid = BUILTIN_CORE_RAND;
+            else if (strcmp(fn, "truncate") == 0) bid = BUILTIN_CORE_TRUNCATE;
+            else if (strcmp(fn, "nanosleep") == 0) bid = BUILTIN_CORE_NANOSLEEP;
+            else if (strcmp(fn, "gethostname") == 0) bid = BUILTIN_CORE_GETHOSTNAME;
+            else if (strcmp(fn, "access") == 0) bid = BUILTIN_CORE_ACCESS;
+            else if (strcmp(fn, "glob") == 0) bid = BUILTIN_CORE_GLOB;
+            /* Socket */
+            else if (strcmp(fn, "socket_client") == 0) bid = BUILTIN_CORE_SOCKET_CLIENT;
+            else if (strcmp(fn, "socket_server") == 0) bid = BUILTIN_CORE_SOCKET_SERVER;
+            else if (strcmp(fn, "socket_server_backlog") == 0) bid = BUILTIN_CORE_SOCKET_SERVER_BACKLOG;
+            else if (strcmp(fn, "socket_accept") == 0) bid = BUILTIN_CORE_SOCKET_ACCEPT;
+            else if (strcmp(fn, "socket_recv") == 0) bid = BUILTIN_CORE_SOCKET_RECV;
+            else if (strcmp(fn, "socket_send") == 0) bid = BUILTIN_CORE_SOCKET_SEND;
+            else if (strcmp(fn, "socket_close") == 0) bid = BUILTIN_CORE_SOCKET_CLOSE;
+            else if (strcmp(fn, "socket_flush") == 0) bid = BUILTIN_CORE_SOCKET_FLUSH;
+            else if (strcmp(fn, "socket_select") == 0) bid = BUILTIN_CORE_SOCKET_SELECT;
+            else if (strcmp(fn, "socket_fd") == 0) bid = BUILTIN_CORE_SOCKET_FD;
+            else if (strcmp(fn, "socket_set_nonblocking") == 0) bid = BUILTIN_CORE_SOCKET_SET_NONBLOCKING;
+            else if (strcmp(fn, "udp_socket") == 0) bid = BUILTIN_CORE_UDP_SOCKET;
+            else if (strcmp(fn, "udp_bind") == 0) bid = BUILTIN_CORE_UDP_BIND;
+            else if (strcmp(fn, "udp_server") == 0) bid = BUILTIN_CORE_UDP_SERVER;
+            else if (strcmp(fn, "udp_recvfrom") == 0) bid = BUILTIN_CORE_UDP_RECVFROM;
+            else if (strcmp(fn, "udp_sendto") == 0) bid = BUILTIN_CORE_UDP_SENDTO;
+            /* Terminal */
+            else if (strcmp(fn, "term_enable_raw") == 0) bid = BUILTIN_CORE_TERM_ENABLE_RAW;
+            else if (strcmp(fn, "term_disable_raw") == 0) bid = BUILTIN_CORE_TERM_DISABLE_RAW;
+            else if (strcmp(fn, "term_rows") == 0) bid = BUILTIN_CORE_TERM_ROWS;
+            else if (strcmp(fn, "term_cols") == 0) bid = BUILTIN_CORE_TERM_COLS;
+            else if (strcmp(fn, "read_byte") == 0) bid = BUILTIN_CORE_READ_BYTE;
+            else if (strcmp(fn, "ttyname") == 0) bid = BUILTIN_CORE_TTYNAME;
+            /* Dynamic loading */
+            else if (strcmp(fn, "dl_open") == 0) bid = BUILTIN_CORE_DL_OPEN;
+            else if (strcmp(fn, "dl_sym") == 0) bid = BUILTIN_CORE_DL_SYM;
+            else if (strcmp(fn, "dl_close") == 0) bid = BUILTIN_CORE_DL_CLOSE;
+            else if (strcmp(fn, "dl_error") == 0) bid = BUILTIN_CORE_DL_ERROR;
+            else if (strcmp(fn, "dl_call_int") == 0) bid = BUILTIN_CORE_DL_CALL_INT;
+            else if (strcmp(fn, "dl_call_str") == 0) bid = BUILTIN_CORE_DL_CALL_STR;
+            else if (strcmp(fn, "dl_call_void") == 0) bid = BUILTIN_CORE_DL_CALL_VOID;
+            else if (strcmp(fn, "dl_call_int_sv") == 0) bid = BUILTIN_CORE_DL_CALL_INT_SV;
+            else if (strcmp(fn, "dl_call_str_sv") == 0) bid = BUILTIN_CORE_DL_CALL_STR_SV;
+            else if (strcmp(fn, "dl_call_void_sv") == 0) bid = BUILTIN_CORE_DL_CALL_VOID_SV;
+            /* CStruct */
+            else if (strcmp(fn, "cstruct_new") == 0) bid = BUILTIN_CORE_CSTRUCT_NEW;
+            else if (strcmp(fn, "cstruct_ptr") == 0) bid = BUILTIN_CORE_CSTRUCT_PTR;
+            else if (strcmp(fn, "cstruct_set_int") == 0) bid = BUILTIN_CORE_CSTRUCT_SET_INT;
+            else if (strcmp(fn, "cstruct_get_int") == 0) bid = BUILTIN_CORE_CSTRUCT_GET_INT;
+            else if (strcmp(fn, "cstruct_set_string") == 0) bid = BUILTIN_CORE_CSTRUCT_SET_STRING;
+            else if (strcmp(fn, "cstruct_get_string") == 0) bid = BUILTIN_CORE_CSTRUCT_GET_STRING;
+            else if (strcmp(fn, "cstruct_set_double") == 0) bid = BUILTIN_CORE_CSTRUCT_SET_DOUBLE;
+            else if (strcmp(fn, "cstruct_get_double") == 0) bid = BUILTIN_CORE_CSTRUCT_GET_DOUBLE;
+            /* OOP */
+            else if (strcmp(fn, "weaken") == 0) bid = BUILTIN_CORE_WEAKEN;
+            else if (strcmp(fn, "isweak") == 0) bid = BUILTIN_CORE_ISWEAK;
+            /* Misc */
+            else if (strcmp(fn, "wantarray") == 0) bid = BUILTIN_CORE_WANTARRAY;
+            else if (strcmp(fn, "select_fds") == 0) bid = BUILTIN_CORE_SELECT_FDS;
+            else if (strcmp(fn, "set_byte") == 0) bid = BUILTIN_CORE_SET_BYTE;
+            else if (strcmp(fn, "byte_substr") == 0) bid = BUILTIN_CORE_BYTE_SUBSTR;
 
             if (bid >= 0) {
                 for (int i = 0; i < argc; i++) {
@@ -1232,6 +1429,29 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             else if (strcmp(fn, "ceil") == 0) bid = BUILTIN_MATH_CEIL;
             else if (strcmp(fn, "pow") == 0) bid = BUILTIN_MATH_POW;
             else if (strcmp(fn, "abs") == 0) bid = BUILTIN_MATH_ABS;
+            else if (strcmp(fn, "sin") == 0) bid = BUILTIN_MATH_SIN;
+            else if (strcmp(fn, "cos") == 0) bid = BUILTIN_MATH_COS;
+            else if (strcmp(fn, "tan") == 0) bid = BUILTIN_MATH_TAN;
+            else if (strcmp(fn, "asin") == 0) bid = BUILTIN_MATH_ASIN;
+            else if (strcmp(fn, "acos") == 0) bid = BUILTIN_MATH_ACOS;
+            else if (strcmp(fn, "atan") == 0) bid = BUILTIN_MATH_ATAN;
+            else if (strcmp(fn, "atan2") == 0) bid = BUILTIN_MATH_ATAN2;
+            else if (strcmp(fn, "sinh") == 0) bid = BUILTIN_MATH_SINH;
+            else if (strcmp(fn, "cosh") == 0) bid = BUILTIN_MATH_COSH;
+            else if (strcmp(fn, "tanh") == 0) bid = BUILTIN_MATH_TANH;
+            else if (strcmp(fn, "log") == 0) bid = BUILTIN_MATH_LOG;
+            else if (strcmp(fn, "log10") == 0) bid = BUILTIN_MATH_LOG10;
+            else if (strcmp(fn, "exp") == 0) bid = BUILTIN_MATH_EXP;
+            else if (strcmp(fn, "round") == 0) bid = BUILTIN_MATH_ROUND;
+            else if (strcmp(fn, "fmod") == 0) bid = BUILTIN_MATH_FMOD;
+            else if (strcmp(fn, "fabs") == 0) bid = BUILTIN_MATH_FABS;
+            else if (strcmp(fn, "rand") == 0) bid = BUILTIN_MATH_RAND;
+            else if (strcmp(fn, "srand") == 0) bid = BUILTIN_MATH_SRAND;
+            else if (strcmp(fn, "hypot") == 0) bid = BUILTIN_MATH_HYPOT;
+            else if (strcmp(fn, "cbrt") == 0) bid = BUILTIN_MATH_CBRT;
+            else if (strcmp(fn, "isnan") == 0) bid = BUILTIN_MATH_ISNAN;
+            else if (strcmp(fn, "isinf") == 0) bid = BUILTIN_MATH_ISINF;
+            else if (strcmp(fn, "isfinite") == 0) bid = BUILTIN_MATH_ISFINITE;
 
             if (bid >= 0) {
                 for (int i = 0; i < argc; i++) {
@@ -1243,6 +1463,145 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                 break;
             }
         }
+
+        /* c:: builtins */
+        if (strncmp(name, "c::", 3) == 0) {
+            const char *fn = name + 3;
+            int bid = -1;
+            if (strcmp(fn, "str_to_ptr") == 0) bid = BUILTIN_C_STR_TO_PTR;
+            else if (strcmp(fn, "ptr_to_str") == 0) bid = BUILTIN_C_PTR_TO_STR;
+            else if (strcmp(fn, "ptr_to_str_n") == 0) bid = BUILTIN_C_PTR_TO_STR_N;
+            else if (strcmp(fn, "alloc") == 0) bid = BUILTIN_C_ALLOC;
+            else if (strcmp(fn, "free") == 0) bid = BUILTIN_C_FREE;
+            else if (strcmp(fn, "realloc") == 0) bid = BUILTIN_C_REALLOC;
+            else if (strcmp(fn, "null") == 0) bid = BUILTIN_C_NULL;
+            else if (strcmp(fn, "is_null") == 0) bid = BUILTIN_C_IS_NULL;
+            else if (strcmp(fn, "ptr_add") == 0) bid = BUILTIN_C_PTR_ADD;
+            else if (strcmp(fn, "read_int8") == 0) bid = BUILTIN_C_READ_INT8;
+            else if (strcmp(fn, "read_int16") == 0) bid = BUILTIN_C_READ_INT16;
+            else if (strcmp(fn, "read_int32") == 0) bid = BUILTIN_C_READ_INT32;
+            else if (strcmp(fn, "read_int64") == 0) bid = BUILTIN_C_READ_INT64;
+            else if (strcmp(fn, "read_ptr") == 0) bid = BUILTIN_C_READ_PTR;
+            else if (strcmp(fn, "read_float") == 0) bid = BUILTIN_C_READ_FLOAT;
+            else if (strcmp(fn, "read_double") == 0) bid = BUILTIN_C_READ_DOUBLE;
+            else if (strcmp(fn, "write_int8") == 0) bid = BUILTIN_C_WRITE_INT8;
+            else if (strcmp(fn, "write_int16") == 0) bid = BUILTIN_C_WRITE_INT16;
+            else if (strcmp(fn, "write_int32") == 0) bid = BUILTIN_C_WRITE_INT32;
+            else if (strcmp(fn, "write_int64") == 0) bid = BUILTIN_C_WRITE_INT64;
+            else if (strcmp(fn, "write_ptr") == 0) bid = BUILTIN_C_WRITE_PTR;
+            else if (strcmp(fn, "write_float") == 0) bid = BUILTIN_C_WRITE_FLOAT;
+            else if (strcmp(fn, "write_double") == 0) bid = BUILTIN_C_WRITE_DOUBLE;
+            else if (strcmp(fn, "sizeof_int") == 0) bid = BUILTIN_C_SIZEOF_INT;
+            else if (strcmp(fn, "sizeof_long") == 0) bid = BUILTIN_C_SIZEOF_LONG;
+            else if (strcmp(fn, "sizeof_ptr") == 0) bid = BUILTIN_C_SIZEOF_PTR;
+            else if (strcmp(fn, "sizeof_size_t") == 0) bid = BUILTIN_C_SIZEOF_SIZE_T;
+            else if (strcmp(fn, "memcpy") == 0) bid = BUILTIN_C_MEMCPY;
+            else if (strcmp(fn, "memset") == 0) bid = BUILTIN_C_MEMSET;
+            if (bid >= 0) {
+                for (int i = 0; i < argc; i++) compile_expr(ctx, ast_arr_get(args, i));
+                vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+                vm_chunk_emit_u16(ctx->chunk, (uint16_t)bid);
+                vm_chunk_emit(ctx->chunk, (uint8_t)argc);
+                break;
+            }
+        }
+
+        /* async:: builtins */
+        if (strncmp(name, "async::", 7) == 0) {
+            const char *fn = name + 7;
+            int bid = -1;
+            if (strcmp(fn, "channel") == 0) bid = BUILTIN_ASYNC_CHANNEL;
+            else if (strcmp(fn, "send") == 0) bid = BUILTIN_ASYNC_SEND;
+            else if (strcmp(fn, "recv") == 0) bid = BUILTIN_ASYNC_RECV;
+            else if (strcmp(fn, "try_send") == 0) bid = BUILTIN_ASYNC_TRY_SEND;
+            else if (strcmp(fn, "try_recv") == 0) bid = BUILTIN_ASYNC_TRY_RECV;
+            else if (strcmp(fn, "close") == 0) bid = BUILTIN_ASYNC_CLOSE;
+            else if (strcmp(fn, "is_closed") == 0) bid = BUILTIN_ASYNC_IS_CLOSED;
+            else if (strcmp(fn, "len") == 0) bid = BUILTIN_ASYNC_LEN;
+            else if (strcmp(fn, "mutex") == 0) bid = BUILTIN_ASYNC_MUTEX;
+            else if (strcmp(fn, "lock") == 0) bid = BUILTIN_ASYNC_LOCK;
+            else if (strcmp(fn, "unlock") == 0) bid = BUILTIN_ASYNC_UNLOCK;
+            else if (strcmp(fn, "try_lock") == 0) bid = BUILTIN_ASYNC_TRY_LOCK;
+            else if (strcmp(fn, "mutex_destroy") == 0) bid = BUILTIN_ASYNC_MUTEX_DESTROY;
+            else if (strcmp(fn, "atomic") == 0) bid = BUILTIN_ASYNC_ATOMIC;
+            else if (strcmp(fn, "atomic_load") == 0) bid = BUILTIN_ASYNC_ATOMIC_LOAD;
+            else if (strcmp(fn, "atomic_store") == 0) bid = BUILTIN_ASYNC_ATOMIC_STORE;
+            else if (strcmp(fn, "atomic_add") == 0) bid = BUILTIN_ASYNC_ATOMIC_ADD;
+            else if (strcmp(fn, "atomic_sub") == 0) bid = BUILTIN_ASYNC_ATOMIC_SUB;
+            else if (strcmp(fn, "atomic_inc") == 0) bid = BUILTIN_ASYNC_ATOMIC_INC;
+            else if (strcmp(fn, "atomic_dec") == 0) bid = BUILTIN_ASYNC_ATOMIC_DEC;
+            else if (strcmp(fn, "atomic_cas") == 0) bid = BUILTIN_ASYNC_ATOMIC_CAS;
+            if (bid >= 0) {
+                for (int i = 0; i < argc; i++) compile_expr(ctx, ast_arr_get(args, i));
+                vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+                vm_chunk_emit_u16(ctx->chunk, (uint16_t)bid);
+                vm_chunk_emit(ctx->chunk, (uint8_t)argc);
+                break;
+            }
+        }
+
+        /* thread:: builtins */
+        if (strncmp(name, "thread::", 8) == 0) {
+            const char *fn = name + 8;
+            int bid = -1;
+            if (strcmp(fn, "create") == 0) bid = BUILTIN_THREAD_CREATE;
+            else if (strcmp(fn, "join") == 0) bid = BUILTIN_THREAD_JOIN;
+            else if (strcmp(fn, "detach") == 0) bid = BUILTIN_THREAD_DETACH;
+            else if (strcmp(fn, "self") == 0) bid = BUILTIN_THREAD_SELF;
+            if (bid >= 0) {
+                for (int i = 0; i < argc; i++) compile_expr(ctx, ast_arr_get(args, i));
+                vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+                vm_chunk_emit_u16(ctx->chunk, (uint16_t)bid);
+                vm_chunk_emit(ctx->chunk, (uint8_t)argc);
+                break;
+            }
+        }
+
+        /* utf8:: builtins */
+        if (strncmp(name, "utf8::", 6) == 0) {
+            const char *fn = name + 6;
+            int bid = -1;
+            if (strcmp(fn, "is_utf8") == 0) bid = BUILTIN_UTF8_IS_UTF8;
+            else if (strcmp(fn, "valid") == 0) bid = BUILTIN_UTF8_VALID;
+            else if (strcmp(fn, "encode") == 0) bid = BUILTIN_UTF8_ENCODE;
+            else if (strcmp(fn, "decode") == 0) bid = BUILTIN_UTF8_DECODE;
+            else if (strcmp(fn, "downgrade") == 0) bid = BUILTIN_UTF8_DOWNGRADE;
+            else if (strcmp(fn, "upgrade") == 0) bid = BUILTIN_UTF8_UPGRADE;
+            else if (strcmp(fn, "unicode_to_native") == 0) bid = BUILTIN_UTF8_UNICODE_TO_NATIVE;
+            if (bid >= 0) {
+                for (int i = 0; i < argc; i++) compile_expr(ctx, ast_arr_get(args, i));
+                vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+                vm_chunk_emit_u16(ctx->chunk, (uint16_t)bid);
+                vm_chunk_emit(ctx->chunk, (uint8_t)argc);
+                break;
+            }
+        }
+
+        /* Bare function builtins: sb_*, str_replace, regex_replace, tie/untie/tied */
+        if (strcmp(name, "sb_new") == 0) { vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_SB_NEW); vm_chunk_emit(ctx->chunk, 0); break; }
+        if (strcmp(name, "sb_new_cap") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_SB_NEW_CAP); vm_chunk_emit(ctx->chunk, 1); break; }
+        if (strcmp(name, "sb_append") == 0 && argc == 2) { compile_expr(ctx, ast_arr_get(args, 0)); compile_expr(ctx, ast_arr_get(args, 1)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_SB_APPEND); vm_chunk_emit(ctx->chunk, 2); break; }
+        if (strcmp(name, "sb_to_string") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_SB_TO_STRING); vm_chunk_emit(ctx->chunk, 1); break; }
+        if (strcmp(name, "sb_length") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_SB_LENGTH); vm_chunk_emit(ctx->chunk, 1); break; }
+        if (strcmp(name, "sb_clear") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_SB_CLEAR); vm_chunk_emit(ctx->chunk, 1); break; }
+        if (strcmp(name, "sb_free") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_SB_FREE); vm_chunk_emit(ctx->chunk, 1); break; }
+        if (strcmp(name, "str_replace") == 0 && argc == 3) { for (int i = 0; i < 3; i++) compile_expr(ctx, ast_arr_get(args, i)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_STR_REPLACE_PLAIN); vm_chunk_emit(ctx->chunk, 3); break; }
+        if (strcmp(name, "str_replace_first") == 0 && argc == 3) { for (int i = 0; i < 3; i++) compile_expr(ctx, ast_arr_get(args, i)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_STR_REPLACE_FIRST); vm_chunk_emit(ctx->chunk, 3); break; }
+        if (strcmp(name, "regex_replace") == 0 && argc == 3) { for (int i = 0; i < 3; i++) compile_expr(ctx, ast_arr_get(args, i)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_REGEX_REPLACE); vm_chunk_emit(ctx->chunk, 3); break; }
+        if (strcmp(name, "regex_replace_all") == 0 && argc == 3) { for (int i = 0; i < 3; i++) compile_expr(ctx, ast_arr_get(args, i)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_REGEX_REPLACE_ALL); vm_chunk_emit(ctx->chunk, 3); break; }
+        if (strcmp(name, "die") == 0) { for (int i = 0; i < argc; i++) compile_expr(ctx, ast_arr_get(args, i)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_DIE); vm_chunk_emit(ctx->chunk, (uint8_t)argc); break; }
+        if (strcmp(name, "warn") == 0) { for (int i = 0; i < argc; i++) compile_expr(ctx, ast_arr_get(args, i)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_WARN); vm_chunk_emit(ctx->chunk, (uint8_t)argc); break; }
+        if (strcmp(name, "blessed") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_BLESSED); vm_chunk_emit(ctx->chunk, 1); break; }
+        if (strcmp(name, "refcount") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_REFCOUNT); vm_chunk_emit(ctx->chunk, 1); break; }
+        if (strcmp(name, "typeof") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_TYPEOF); vm_chunk_emit(ctx->chunk, 1); break; }
+        if (strcmp(name, "dumper_str") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_DUMPER_STR); vm_chunk_emit(ctx->chunk, 1); break; }
+        if (strcmp(name, "nsort") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_NSORT); vm_chunk_emit(ctx->chunk, 1); break; }
+        if (strcmp(name, "cast_int") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_CAST_INT); vm_chunk_emit(ctx->chunk, 1); break; }
+        if (strcmp(name, "cast_num") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_CAST_NUM); vm_chunk_emit(ctx->chunk, 1); break; }
+        if (strcmp(name, "cast_str") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_CAST_STR); vm_chunk_emit(ctx->chunk, 1); break; }
+        if (strcmp(name, "tie") == 0 && argc >= 2) { for (int i = 0; i < argc; i++) compile_expr(ctx, ast_arr_get(args, i)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_TIE); vm_chunk_emit(ctx->chunk, (uint8_t)argc); break; }
+        if (strcmp(name, "untie") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_UNTIE); vm_chunk_emit(ctx->chunk, 1); break; }
+        if (strcmp(name, "tied") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_TIED); vm_chunk_emit(ctx->chunk, 1); break; }
 
         /* User function call */
         int fidx = vm_program_find_func(ctx->prog, name);
@@ -1416,9 +1775,20 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                 compile_expr(ctx, value);
                 vm_chunk_emit(ctx->chunk, OP_MUL);
             } else if (strcmp(op, ".=") == 0) {
-                compile_expr(ctx, value);
-                vm_chunk_emit(ctx->chunk, OP_APPEND_LOCAL);
-                vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
+                /* Optimization: if RHS is a string literal, use OP_APPEND_CONST (no alloc) */
+                StradaValue *val_node = ast_deref(value);
+                if (val_node && !STRADA_IS_TAGGED_INT(val_node) &&
+                    (int)ast_int(val_node, "type") == NI_STR_LITERAL) {
+                    const char *sval = ast_str(val_node, "value");
+                    size_t si = vm_chunk_add_str_const(ctx->chunk, sval);
+                    vm_chunk_emit(ctx->chunk, OP_APPEND_CONST);
+                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)si);
+                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
+                } else {
+                    compile_expr(ctx, value);
+                    vm_chunk_emit(ctx->chunk, OP_APPEND_LOCAL);
+                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
+                }
                 vm_chunk_emit(ctx->chunk, OP_PUSH_UNDEF);
                 break;
             } else {

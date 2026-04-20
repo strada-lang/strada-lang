@@ -7439,12 +7439,13 @@ func gen_expression(scalar $cg, scalar $expr) void {
             my scalar $args = $expr->{"args"};
             my scalar $arg0 = $args->[0];
             my scalar $arg1 = $args->[1];
+            # Use binary-safe strada_spew_sv for content to handle embedded NULs
             emit($cg, "({ StradaValue *__sp_v0 = ");
             gen_expression($cg, $arg0);
             emit($cg, "; StradaValue *__sp_v1 = ");
             gen_expression($cg, $arg1);
-            emit($cg, "; char *__sp_s0 = strada_to_str_ss(__sp_v0); char *__sp_s1 = strada_to_str_ss(__sp_v1); ");
-            emit($cg, "strada_spew(__sp_s0, __sp_s1); strada_cstr_free(__sp_s0); strada_cstr_free(__sp_s1); ");
+            emit($cg, "; char *__sp_s0 = strada_to_str_ss(__sp_v0); ");
+            emit($cg, "strada_spew_sv(__sp_s0, __sp_v1); strada_cstr_free(__sp_s0); ");
             if (needs_temp_cleanup($cg, $arg0) == 1) {
                 emit($cg, "strada_decref(__sp_v0); ");
             }

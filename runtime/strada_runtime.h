@@ -625,6 +625,8 @@ StradaValue* strada_slurp(const char *filename);  /* Read entire file */
 StradaValue* strada_slurp_fh(StradaValue *fh_sv);  /* Read from FILE handle to end */
 StradaValue* strada_slurp_fd(StradaValue *fd_sv);  /* Read from file descriptor to end */
 void strada_spew(const char *filename, const char *content);  /* Write entire file */
+void strada_spew_sv(const char *filename, StradaValue *content_sv);  /* Binary-safe write from StradaValue */
+void strada_spew_len(const char *filename, const char *content, size_t len);  /* Length-aware write */
 void strada_spew_fh(StradaValue *fh_sv, StradaValue *content_sv);  /* Write to FILE handle */
 void strada_spew_fd(StradaValue *fd_sv, StradaValue *content_sv);  /* Write to file descriptor */
 
@@ -752,6 +754,7 @@ StradaValue* strada_ref_hash(StradaHash **ptr);       /* Reference to hash */
 
 /* New Perl-style reference functions */
 StradaValue* strada_new_ref(StradaValue *target, char ref_type);  /* \$var, \@arr, \%hash */
+StradaValue* strada_new_ref_take(StradaValue *target, char ref_type);  /* takes ownership — no incref */
 
 /* Slot references — reference to a C local variable's storage (StradaValue**).
  * Allows $$ref and $$ref = val to read/write the original variable.
@@ -910,6 +913,7 @@ StradaValue* strada_capture_var(int n);
 StradaValue* strada_regex_match_all(const char *str, const char *pattern);
 char* strada_regex_replace(const char *str, const char *pattern, const char *replacement, const char *flags);
 char* strada_regex_replace_all(const char *str, const char *pattern, const char *replacement, const char *flags);
+int strada_regex_replace_capture(const char *str, const char *pattern, const char *replacement, const char *flags, int global, char **result_out);
 StradaArray* strada_string_split(const char *str, const char *delim);
 StradaArray* strada_regex_split(const char *str, const char *pattern);
 StradaArray* strada_regex_capture(const char *str, const char *pattern);
@@ -1487,6 +1491,12 @@ static inline void strada_hv_store(StradaValue *sv, const char *key, StradaValue
     if (!sv || STRADA_IS_TAGGED_INT(sv)) return;
     if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) { strada_tied_hash_store(sv, key, val); return; }
     strada_hash_set(strada_deref_hash(sv), key, val);
+}
+/* _take variant: caller donates ownership of val (no incref) */
+static inline void strada_hv_store_take(StradaValue *sv, const char *key, StradaValue *val) {
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return;
+    if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) { strada_tied_hash_store(sv, key, val); return; }
+    strada_hash_set_take(strada_deref_hash(sv), key, val);
 }
 static inline int strada_hv_exists(StradaValue *sv, const char *key) {
     if (STRADA_IS_TAGGED_INT(sv)) return 0;
