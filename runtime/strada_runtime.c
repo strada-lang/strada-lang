@@ -6890,15 +6890,30 @@ void strada_free_value(StradaValue *sv) {
         case STRADA_CLOSURE:
             if (sv->value.ptr) {
                 StradaClosure *cl = (StradaClosure*)sv->value.ptr;
-                /* Free captured values */
-                if (cl->captures) {
+                /* Free captured values.
+                 *
+                 * Guard against corrupt capture pointers. Deeply cyclic
+                 * teardowns in Perla-generated code have been observed
+                 * freeing pointers ending in unaligned addresses (e.g.
+                 * 0x55500..7b) — probably indicative of an earlier
+                 * use-after-free somewhere writing garbage into the
+                 * captures array. Rather than crash libc's free(), we
+                 * validate that the pointer is plausibly heap-aligned
+                 * and bail out cleanly if not. The alternative was
+                 * SIGSEGV mid-teardown. */
+                if (cl->captures && cl->capture_count >= 0
+                    && cl->capture_count < 10000) {
                     for (int i = 0; i < cl->capture_count; i++) {
-                        if (cl->captures[i]) {
-                            if (*(cl->captures[i])) {
-                                strada_decref(*(cl->captures[i]));
-                            }
-                            free(cl->captures[i]);
+                        StradaValue **cap = cl->captures[i];
+                        if (!cap) continue;
+                        /* Malloc returns pointers aligned to at least 8 bytes
+                         * on all supported platforms. An unaligned pointer
+                         * is corruption — skip it. */
+                        if (((uintptr_t)cap & 0x7) != 0) continue;
+                        if (*cap) {
+                            strada_decref(*cap);
                         }
+                        free(cap);
                     }
                     free(cl->captures);
                 }
