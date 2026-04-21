@@ -535,6 +535,31 @@ void strada_incref(StradaValue *sv) {
         sv->refcount++;
 }
 
+/* Iterative decref queue: avoids unbounded C stack recursion when
+ * freeing deep / cyclic data structures. A recursive strada_free_value
+ * stack-overflows on long closure chains or Perl-style object cycles
+ * (blessed hash containing a closure that captures the blessed hash).
+ * We bound recursion with a shallow depth counter; once exceeded,
+ * strada_decref appends to a pending list that the outermost caller
+ * drains in a loop. Single-threaded only (matches the rest of the
+ * decref fast path — threading-active takes the atomic branch). */
+#define STRADA_FREE_MAX_DEPTH 256
+static __thread int strada_free_depth = 0;
+static __thread StradaValue **strada_free_queue = NULL;
+static __thread size_t strada_free_queue_len = 0;
+static __thread size_t strada_free_queue_cap = 0;
+
+static void strada_free_queue_push(StradaValue *sv) {
+    if (strada_free_queue_len == strada_free_queue_cap) {
+        size_t ncap = strada_free_queue_cap ? strada_free_queue_cap * 2 : 64;
+        StradaValue **q = (StradaValue**)realloc(strada_free_queue, ncap * sizeof(StradaValue*));
+        if (!q) return; /* leak rather than crash on OOM */
+        strada_free_queue = q;
+        strada_free_queue_cap = ncap;
+    }
+    strada_free_queue[strada_free_queue_len++] = sv;
+}
+
 void strada_decref(StradaValue *sv) {
     if (!sv || STRADA_IS_TAGGED_INT(sv)) return;
     /* Skip immortal/static values to prevent freeing non-heap memory */
@@ -545,7 +570,29 @@ void strada_decref(StradaValue *sv) {
     else
         new_rc = --sv->refcount;
     if (new_rc <= 0) {
+        if (strada_threading_active) {
+            /* Threaded path: preserve original recursive behavior. Per-thread
+             * queue logic would need extra locking; deep teardowns under
+             * threads are rarer than the single-threaded host case. */
+            strada_free_value(sv);
+            return;
+        }
+        if (strada_free_depth >= STRADA_FREE_MAX_DEPTH) {
+            strada_free_queue_push(sv);
+            return;
+        }
+        strada_free_depth++;
         strada_free_value(sv);
+        strada_free_depth--;
+        /* When unwinding back to depth 0, drain any deferred values. */
+        if (strada_free_depth == 0) {
+            while (strada_free_queue_len > 0) {
+                StradaValue *pending = strada_free_queue[--strada_free_queue_len];
+                strada_free_depth++;
+                strada_free_value(pending);
+                strada_free_depth--;
+            }
+        }
     }
 }
 
