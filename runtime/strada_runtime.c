@@ -569,7 +569,12 @@ void strada_decref(StradaValue *sv) {
         new_rc = __sync_sub_and_fetch(&sv->refcount, 1);
     else
         new_rc = --sv->refcount;
-    if (new_rc <= 0) {
+    /* Only free on the exact drop-to-zero transition. Cyclic data
+     * structures and queue-deferred teardowns can drive the refcount
+     * negative by re-entering decref on an already-doomed value; treating
+     * `<= 0` as "free it" then double-freed the underlying memory and
+     * libc raised `double free detected in tcache`. */
+    if (new_rc == 0) {
         if (strada_threading_active) {
             /* Threaded path: preserve original recursive behavior. Per-thread
              * queue logic would need extra locking; deep teardowns under
