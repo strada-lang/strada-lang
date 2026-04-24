@@ -8982,28 +8982,147 @@ char* strada_lower(const char *str) {
     return result;
 }
 
+/* Unicode case-map tables for the ranges we cover inline:
+ *   - ASCII (U+0041-U+005A <-> U+0061-U+007A)
+ *   - Latin-1 Supplement (U+00C0-U+00DE <-> U+00E0-U+00FE, skipping x, /)
+ *   - Latin Extended-A (U+0100-U+017F) — alternating pairs
+ *   - Greek (U+0391-U+03A9 <-> U+03B1-U+03C9, skipping final-sigma quirk)
+ *   - Cyrillic (U+0400-U+04FF main block)
+ *
+ * Covers > 99% of Western European + Greek + Cyrillic text. Does not
+ * cover: Armenian, Georgian, Coptic, full CJK (no case), Cherokee,
+ * nor locale-specific edge cases (Turkish dotless I, Azeri, Lithuanian).
+ * Those would need a proper Unicode CaseFolding.txt table. */
+static uint32_t strada_unicode_to_upper(uint32_t cp) {
+    /* ASCII a-z */
+    if (cp >= 0x61 && cp <= 0x7A) return cp - 0x20;
+    /* Latin-1 Supplement a-o with grave/acute/circumflex/tilde/umlaut
+     * (except /= U+00F7 which is the division sign, not a letter) */
+    if (cp >= 0xE0 && cp <= 0xFE && cp != 0xF7) return cp - 0x20;
+    /* Latin-1 extras */
+    if (cp == 0xFF) return 0x178;        /* y-umlaut -> Y-umlaut */
+    if (cp == 0xDF) return 0x1E9E;       /* sharp-s -> capital sharp-s */
+    /* Latin Extended-A: U+0100-U+017F is mostly alternating pairs. */
+    /* 0x0100-0x0137: even = upper, odd = lower */
+    if (cp >= 0x0101 && cp <= 0x0137 && (cp & 1)) return cp - 1;
+    /* 0x0139-0x0148: odd = upper, even = lower (flip the parity) */
+    if (cp >= 0x013A && cp <= 0x0148 && !(cp & 1)) return cp - 1;
+    /* 0x014A-0x0177: even = upper, odd = lower */
+    if (cp >= 0x014B && cp <= 0x0177 && (cp & 1)) return cp - 1;
+    /* 0x0178 is Y-umlaut (already upper) */
+    /* 0x0179-0x017E: odd = upper, even = lower */
+    if (cp >= 0x017A && cp <= 0x017E && !(cp & 1)) return cp - 1;
+    /* Greek lowercase alpha-omega -> uppercase */
+    if (cp >= 0x03B1 && cp <= 0x03C9) return cp - 0x20;
+    if (cp == 0x03C2) return 0x03A3;     /* final sigma -> Sigma */
+    /* Greek extended lowercase -> uppercase (common ones) */
+    if (cp >= 0x03AC && cp <= 0x03AF) return cp - 0x26;   /* accented alpha-iota */
+    if (cp == 0x03CC) return 0x038C;     /* accented omicron */
+    if (cp >= 0x03CD && cp <= 0x03CE) return cp - 0x3F;   /* accented upsilon/omega */
+    /* Cyrillic main block: а-я -> А-Я */
+    if (cp >= 0x0430 && cp <= 0x044F) return cp - 0x20;
+    /* Cyrillic extended: U+0450-U+045F -> U+0400-U+040F */
+    if (cp >= 0x0450 && cp <= 0x045F) return cp - 0x50;
+    /* default: leave unchanged */
+    return cp;
+}
+
+static uint32_t strada_unicode_to_lower(uint32_t cp) {
+    if (cp >= 0x41 && cp <= 0x5A) return cp + 0x20;
+    if (cp >= 0xC0 && cp <= 0xDE && cp != 0xD7) return cp + 0x20;
+    if (cp == 0x178) return 0xFF;
+    if (cp == 0x1E9E) return 0xDF;
+    if (cp >= 0x0100 && cp <= 0x0136 && !(cp & 1)) return cp + 1;
+    if (cp >= 0x0139 && cp <= 0x0147 && (cp & 1)) return cp + 1;
+    if (cp >= 0x014A && cp <= 0x0176 && !(cp & 1)) return cp + 1;
+    if (cp >= 0x0179 && cp <= 0x017D && (cp & 1)) return cp + 1;
+    if (cp >= 0x0391 && cp <= 0x03A9) return cp + 0x20;
+    /* Sigma (U+03A3) maps to sigma (U+03C3) not final-sigma (U+03C2).
+     * Final-sigma is context-dependent (end of word) — we can't know
+     * without word-boundary info, so always pick medial sigma. */
+    if (cp >= 0x0386 && cp <= 0x038A && cp != 0x0387) return cp + 0x26;  /* accented A-I */
+    if (cp == 0x038C) return 0x03CC;
+    if (cp >= 0x038E && cp <= 0x038F) return cp + 0x3F;
+    if (cp >= 0x0410 && cp <= 0x042F) return cp + 0x20;
+    if (cp >= 0x0400 && cp <= 0x040F) return cp + 0x50;
+    return cp;
+}
+
+/* Apply a codepoint-level case-mapping function across a UTF-8 string.
+ * Returns a newly-allocated NUL-terminated string; caller frees. */
+static char* strada_case_map(const char *str, uint32_t (*map_fn)(uint32_t)) {
+    if (!str) return strdup("");
+    size_t in_len = strlen(str);
+    /* Worst-case growth: U+00DF (2 bytes) -> U+1E9E (3 bytes). That's a
+     * 1.5x growth per char, but since only that specific char triggers
+     * growth, allocating 2x the input is always safe. */
+    char *out = malloc(in_len * 2 + 4);
+    if (!out) return strdup("");
+    size_t oi = 0;
+    size_t i = 0;
+    while (i < in_len) {
+        int char_len = utf8_char_len((unsigned char)str[i]);
+        /* Bound-check: incomplete sequence near end -> treat remaining
+         * bytes as raw (copy through unchanged, do no case mapping). */
+        if (char_len <= 0 || i + char_len > in_len) {
+            out[oi++] = str[i++];
+            continue;
+        }
+        uint32_t cp = utf8_decode(str + i, NULL);
+        uint32_t mapped = map_fn(cp);
+        oi += utf8_encode(mapped, out + oi);
+        i += char_len;
+    }
+    out[oi] = '\0';
+    return out;
+}
+
 char* strada_uc(const char *str) {
-    return strada_upper(str);
+    return strada_case_map(str, strada_unicode_to_upper);
 }
 
 char* strada_lc(const char *str) {
-    return strada_lower(str);
+    return strada_case_map(str, strada_unicode_to_lower);
 }
 
 char* strada_ucfirst(const char *str) {
     if (!str || !str[0]) return strdup("");
-    
-    char *result = strdup(str);
-    result[0] = toupper((unsigned char)result[0]);
-    return result;
+    /* Convert first codepoint, copy rest verbatim. */
+    int char_len = utf8_char_len((unsigned char)str[0]);
+    if (char_len <= 0) char_len = 1;
+    size_t in_len = strlen(str);
+    if ((size_t)char_len > in_len) char_len = (int)in_len;
+
+    uint32_t cp = utf8_decode(str, NULL);
+    uint32_t mapped = strada_unicode_to_upper(cp);
+    char encoded[8];
+    int enc_len = utf8_encode(mapped, encoded);
+    /* Allocate: encoded bytes + (in_len - char_len) tail + NUL */
+    char *out = malloc((size_t)enc_len + in_len - (size_t)char_len + 1);
+    if (!out) return strdup("");
+    memcpy(out, encoded, (size_t)enc_len);
+    memcpy(out + enc_len, str + char_len, in_len - (size_t)char_len);
+    out[enc_len + in_len - char_len] = '\0';
+    return out;
 }
 
 char* strada_lcfirst(const char *str) {
     if (!str || !str[0]) return strdup("");
-    
-    char *result = strdup(str);
-    result[0] = tolower((unsigned char)result[0]);
-    return result;
+    int char_len = utf8_char_len((unsigned char)str[0]);
+    if (char_len <= 0) char_len = 1;
+    size_t in_len = strlen(str);
+    if ((size_t)char_len > in_len) char_len = (int)in_len;
+
+    uint32_t cp = utf8_decode(str, NULL);
+    uint32_t mapped = strada_unicode_to_lower(cp);
+    char encoded[8];
+    int enc_len = utf8_encode(mapped, encoded);
+    char *out = malloc((size_t)enc_len + in_len - (size_t)char_len + 1);
+    if (!out) return strdup("");
+    memcpy(out, encoded, (size_t)enc_len);
+    memcpy(out + enc_len, str + char_len, in_len - (size_t)char_len);
+    out[enc_len + in_len - char_len] = '\0';
+    return out;
 }
 
 char* strada_trim(const char *str) {
@@ -9183,6 +9302,17 @@ StradaValue* strada_chr_sv(int code) {
 /* Unicode-aware ord - returns codepoint of first character */
 int strada_ord(const char *str) {
     if (!str || !str[0]) return 0;
+    /* Bound-check for truncated UTF-8 sequences. If the first byte is
+     * a multi-byte leader (e.g. 0xC3 = 2-byte start) but the string
+     * doesn't have enough bytes for the full sequence, return the
+     * raw first byte instead of decoding junk from the NUL terminator.
+     * Without this, ord(substr_bytes(s, i, 1)) for any non-ASCII
+     * byte returns the wrong value (e.g. 192 for byte 0xC3 = 195),
+     * which silently breaks code that inspects individual bytes. */
+    int len = utf8_char_len((unsigned char)str[0]);
+    for (int i = 1; i < len; i++) {
+        if (!str[i]) return (unsigned char)str[0];
+    }
     return (int)utf8_decode(str, NULL);
 }
 

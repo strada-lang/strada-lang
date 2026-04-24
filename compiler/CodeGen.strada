@@ -1477,14 +1477,31 @@ func gen_str_literal_c(scalar $cg, str $val) void {
         } elsif ($byte >= 32 && $byte < 127) {
             emit($cg, $ch);
         } else {
-            my int $o1 = $byte / 64;
-            my int $tmp = $byte / 8;
-            my int $o2 = $tmp - ($o1 * 8);
-            my int $o3 = $byte - ($tmp * 8);
+            # Non-printable or high-bit byte - emit as \ooo (3-digit
+            # octal). Previously used integer division (`$byte / 64`)
+            # but Strada's `/` returns float and `my int` does not
+            # truncate, so emit($cg, $o1) got a float like 3.53125
+            # and emitted "3.531252.640625" etc., wrecking multi-byte
+            # UTF-8 in string literals. Decompose by subtraction
+            # instead - safe integer math, no division.
+            my int $b2 = $byte;
+            my int $o1 = 0;
+            if ($b2 >= 192) { $o1 = 3; $b2 = $b2 - 192; }
+            elsif ($b2 >= 128) { $o1 = 2; $b2 = $b2 - 128; }
+            elsif ($b2 >= 64)  { $o1 = 1; $b2 = $b2 - 64; }
+            my int $o2 = 0;
+            if ($b2 >= 56) { $o2 = 7; $b2 = $b2 - 56; }
+            elsif ($b2 >= 48) { $o2 = 6; $b2 = $b2 - 48; }
+            elsif ($b2 >= 40) { $o2 = 5; $b2 = $b2 - 40; }
+            elsif ($b2 >= 32) { $o2 = 4; $b2 = $b2 - 32; }
+            elsif ($b2 >= 24) { $o2 = 3; $b2 = $b2 - 24; }
+            elsif ($b2 >= 16) { $o2 = 2; $b2 = $b2 - 16; }
+            elsif ($b2 >= 8)  { $o2 = 1; $b2 = $b2 - 8; }
+            # $b2 is now 0-7 (the low octal digit)
             emit($cg, $bs);
-            emit($cg, $o1);
-            emit($cg, $o2);
-            emit($cg, $o3);
+            emit($cg, chr(48 + $o1));
+            emit($cg, chr(48 + $o2));
+            emit($cg, chr(48 + $b2));
         }
         $i = $i + 1;
     }
