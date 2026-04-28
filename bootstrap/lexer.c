@@ -18,9 +18,26 @@
 /* lexer.c - Strada Bootstrap Compiler Lexer */
 #define _POSIX_C_SOURCE 200809L
 #include "lexer.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+
+/* Append one byte to a heap-allocated, NUL-terminated buffer. */
+static void lex_sb_putc(char **buf, size_t *len, size_t *cap, char c) {
+    if (*len + 2 > *cap) {
+        size_t new_cap = (*cap == 0) ? 64 : *cap * 2;
+        char *nb = realloc(*buf, new_cap);
+        if (!nb) {
+            fprintf(stderr, "lexer: out of memory\n");
+            exit(1);
+        }
+        *buf = nb;
+        *cap = new_cap;
+    }
+    (*buf)[(*len)++] = c;
+    (*buf)[*len] = '\0';
+}
 
 typedef struct {
     const char *keyword;
@@ -249,44 +266,45 @@ static Token* read_string(Lexer *lex) {
     int start_col = lex->column;
     char quote = lexer_current(lex);
     lexer_advance(lex); // Skip opening quote
-    
-    char buffer[4096];
-    size_t buf_pos = 0;
-    
+
+    char *buffer = NULL;
+    size_t buf_len = 0, buf_cap = 0;
+
     while (lexer_current(lex) && lexer_current(lex) != quote) {
         if (lexer_current(lex) == '\\') {
             lexer_advance(lex);
             char next = lexer_current(lex);
-            
+            char out;
             switch (next) {
-                case 'n': buffer[buf_pos++] = '\n'; break;
-                case 't': buffer[buf_pos++] = '\t'; break;
-                case 'r': buffer[buf_pos++] = '\r'; break;
-                case '\\': buffer[buf_pos++] = '\\'; break;
-                case '\"': buffer[buf_pos++] = '\"'; break;
-                case '\'': buffer[buf_pos++] = '\''; break;
-                default: buffer[buf_pos++] = next; break;
+                case 'n':  out = '\n'; break;
+                case 't':  out = '\t'; break;
+                case 'r':  out = '\r'; break;
+                case '\\': out = '\\'; break;
+                case '\"': out = '\"'; break;
+                case '\'': out = '\''; break;
+                default:   out = next; break;
             }
+            lex_sb_putc(&buffer, &buf_len, &buf_cap, out);
             lexer_advance(lex);
         } else {
-            buffer[buf_pos++] = lexer_current(lex);
+            lex_sb_putc(&buffer, &buf_len, &buf_cap, lexer_current(lex));
             lexer_advance(lex);
         }
-        
-        if (buf_pos >= sizeof(buffer) - 1) {
-            break; // Buffer full
-        }
     }
-    
-    buffer[buf_pos] = '\0';
-    
+
+    if (!buffer) {
+        // empty string literal
+        buffer = malloc(1);
+        if (!buffer) { fprintf(stderr, "lexer: out of memory\n"); exit(1); }
+        buffer[0] = '\0';
+    }
+
     if (lexer_current(lex) == quote) {
         lexer_advance(lex); // Skip closing quote
     }
-    
+
     Token *tok = make_token(TOK_STR_LITERAL, buffer, start_line, start_col);
-    tok->value.str_val = strdup(buffer);
-    
+    tok->value.str_val = buffer;  // ownership transferred
     return tok;
 }
 

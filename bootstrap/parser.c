@@ -24,6 +24,26 @@
 
 static void advance(Parser *p);
 
+/* Append `s` to a heap-allocated, NUL-terminated buffer described by *buf,
+ * *len, *cap. Grows geometrically. Aborts on allocation failure. */
+static void sb_append(char **buf, size_t *len, size_t *cap, const char *s) {
+    size_t add = strlen(s);
+    if (*len + add + 1 > *cap) {
+        size_t new_cap = (*cap == 0) ? 64 : *cap * 2;
+        while (new_cap < *len + add + 1) new_cap *= 2;
+        char *nb = realloc(*buf, new_cap);
+        if (!nb) {
+            fprintf(stderr, "parser: out of memory\n");
+            exit(1);
+        }
+        *buf = nb;
+        *cap = new_cap;
+    }
+    memcpy(*buf + *len, s, add);
+    *len += add;
+    (*buf)[*len] = '\0';
+}
+
 typedef struct {
     DataType type;
     char *struct_name;  // NULL for non-struct types
@@ -198,23 +218,25 @@ static char* parse_package_name(Parser *p) {
     }
     
     // Start with first identifier
-    char buffer[512];
-    strcpy(buffer, p->current->lexeme);
+    char *buffer = NULL;
+    size_t blen = 0, bcap = 0;
+    sb_append(&buffer, &blen, &bcap, p->current->lexeme);
     advance(p);
-    
+
     // Append ::Name parts
     while (p->current->type == TOK_COLONCOLON) {
         advance(p);  // skip ::
         if (p->current->type != TOK_IDENT) {
             parser_error(p, "Expected identifier after ::");
+            free(buffer);
             return NULL;
         }
-        strcat(buffer, "::");
-        strcat(buffer, p->current->lexeme);
+        sb_append(&buffer, &blen, &bcap, "::");
+        sb_append(&buffer, &blen, &bcap, p->current->lexeme);
         advance(p);
     }
-    
-    return strdup(buffer);
+
+    return buffer;  // already heap-allocated, NUL-terminated
 }
 
 ASTNode* parser_parse(Parser *p) {
@@ -1154,33 +1176,36 @@ static ASTNode* parse_primary(Parser *p) {
             // Check for :: (qualified name)
             if (p->current->type == TOK_COLONCOLON) {
                 // Build package path: Name::Space::func
-                char package_path[512];
-                strcpy(package_path, first);
-                
+                char *package_path = NULL;
+                size_t pp_len = 0, pp_cap = 0;
+                sb_append(&package_path, &pp_len, &pp_cap, first);
+
                 while (p->current->type == TOK_COLONCOLON) {
                     advance(p);  // skip ::
                     if (p->current->type != TOK_IDENT) {
                         parser_error(p, "Expected identifier after ::");
                     }
-                    
+
                     // Check if this is the last part (function name)
                     if (p->peek->type != TOK_COLONCOLON) {
                         // This is the function name
                         char *func_name = strdup(p->current->lexeme);
                         advance(p);
-                        
+
                         // Create qualified call node
                         ASTNode *node = ast_new_qualified_call(package_path, func_name);
+                        free(package_path);
                         free(first);
                         free(func_name);
                         return node;
                     }
-                    
+
                     // More package path
-                    strcat(package_path, "::");
-                    strcat(package_path, p->current->lexeme);
+                    sb_append(&package_path, &pp_len, &pp_cap, "::");
+                    sb_append(&package_path, &pp_len, &pp_cap, p->current->lexeme);
                     advance(p);
                 }
+                free(package_path);
             }
             
             ASTNode *node = ast_new_variable(first, '$'); // Default to scalar

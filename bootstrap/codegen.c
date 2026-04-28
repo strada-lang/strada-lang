@@ -665,8 +665,10 @@ static void gen_struct_clone_function(CodeGen *cg, ASTNode *struct_def) {
         
         emit_indent(cg);
         if (field_type == TYPE_STR) {
-            // String fields need strcpy
-            emit(cg, "strcpy(dst->%s, src->%s);\n", field_name, field_name);
+            // Fixed-size char[N] field: copy the entire array (memcpy is bounded
+            // by sizeof, no reliance on src being NUL-terminated within bounds).
+            emit(cg, "memcpy(dst->%s, src->%s, sizeof(dst->%s));\n",
+                 field_name, field_name, field_name);
         } else {
             // All other fields: direct assignment
             emit(cg, "dst->%s = src->%s;\n", field_name, field_name);
@@ -1690,14 +1692,25 @@ static void gen_expression(CodeGen *cg, ASTNode *expr) {
                 if (strcmp(expr->data.assign.op, "=") == 0) {
                     // Generate appropriate assignment based on field type
                     switch (field_type) {
-                        case TYPE_STR:
-                            // For string fields, use strcpy (capture strada_to_str result and free)
+                        case TYPE_STR: {
+                            // String fields are fixed-size char[N] (currently char[64]).
+                            // Bound the copy with sizeof to prevent overflowing the field.
+                            // Object is a NODE_VARIABLE here (struct_type lookup requires it),
+                            // so re-evaluation has no side effects.
+                            const char *fname = ma->data.member_access.field_name;
                             emit(cg, "({ char *__s = strada_to_str(");
                             gen_expression(cg, expr->data.assign.value);
-                            emit(cg, "); strcpy(");
+                            emit(cg, "); strncpy(");
                             gen_expression(cg, ma->data.member_access.object);
-                            emit(cg, "->%s, __s); free(__s); })");
+                            emit(cg, "->%s, __s, sizeof(", fname);
+                            gen_expression(cg, ma->data.member_access.object);
+                            emit(cg, "->%s) - 1); ", fname);
+                            gen_expression(cg, ma->data.member_access.object);
+                            emit(cg, "->%s[sizeof(", fname);
+                            gen_expression(cg, ma->data.member_access.object);
+                            emit(cg, "->%s) - 1] = '\\0'; free(__s); })", fname);
                             break;
+                        }
                         case TYPE_NUM:
                         case TYPE_FLOAT:
                             // For floating point fields

@@ -30,15 +30,29 @@ static char* read_file(const char *filename) {
         fprintf(stderr, "Error: Cannot open file '%s'\n", filename);
         return NULL;
     }
-    
-    fseek(f, 0, SEEK_END);
+
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fprintf(stderr, "Error: Cannot seek '%s'\n", filename);
+        fclose(f);
+        return NULL;
+    }
     long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    
-    char *content = malloc(size + 1);
-    fread(content, 1, size, f);
-    content[size] = '\0';
-    
+    if (size < 0) {
+        fprintf(stderr, "Error: Cannot determine size of '%s'\n", filename);
+        fclose(f);
+        return NULL;
+    }
+    rewind(f);
+
+    char *content = malloc((size_t)size + 1);
+    if (!content) {
+        fprintf(stderr, "Error: Out of memory reading '%s'\n", filename);
+        fclose(f);
+        return NULL;
+    }
+    size_t got = fread(content, 1, (size_t)size, f);
+    content[got] = '\0';
+
     fclose(f);
     return content;
 }
