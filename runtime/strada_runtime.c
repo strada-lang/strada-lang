@@ -3334,7 +3334,30 @@ StradaValue* strada_readline(void) {
     return strada_new_undef();
 }
 
+/* Reject format strings containing %n — the only directive that writes
+ * through the format string. Bare %, %%, %s/%d/etc are scanned but allowed.
+ * This is defense-in-depth: codegen normally emits a literal format from
+ * source, but printf($user) would otherwise pass attacker data to vprintf. */
+static int _strada_format_safe(const char *format) {
+    if (!format) return 0;
+    for (const char *p = format; *p; p++) {
+        if (*p != '%') continue;
+        p++;
+        if (*p == '\0') break;
+        if (*p == '%') continue;  /* %% literal */
+        /* Skip flags, width, precision, length modifiers until conversion */
+        while (*p && !((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z'))) p++;
+        if (*p == 'n' || *p == 'N') return 0;
+        if (*p == '\0') break;
+    }
+    return 1;
+}
+
 void strada_printf(const char *format, ...) {
+    if (!_strada_format_safe(format)) {
+        fprintf(stderr, "strada_printf: rejected format string containing %%n\n");
+        return;
+    }
     va_list args;
     va_start(args, format);
     vprintf(format, args);
@@ -3342,6 +3365,10 @@ void strada_printf(const char *format, ...) {
 }
 
 StradaValue* strada_sprintf(const char *format, ...) {
+    if (!_strada_format_safe(format)) {
+        fprintf(stderr, "strada_sprintf: rejected format string containing %%n\n");
+        return strada_new_str("");
+    }
     char buffer[4096];
     va_list args;
     va_start(args, format);
@@ -6417,12 +6444,24 @@ char* strada_regex_replace(const char *str, const char *pattern, const char *rep
     size_t after_len = strlen(str) - after_start;
     size_t repl_len = strlen(replacement);
 
-    char *result = malloc(before_len + repl_len + after_len + 1);
+    /* Overflow check before malloc */
+    if (before_len > SIZE_MAX - repl_len ||
+        before_len + repl_len > SIZE_MAX - after_len ||
+        before_len + repl_len + after_len > SIZE_MAX - 1) {
+        return strdup(str);
+    }
 
-    // Copy parts
-    strncpy(result, str, before_len);
-    strcpy(result + before_len, replacement);
-    strcpy(result + before_len + repl_len, str + after_start);
+    size_t total = before_len + repl_len + after_len + 1;
+    char *result = malloc(total);
+    if (!result) return strdup(str);
+
+    /* Use memcpy with explicit lengths to avoid any reliance on terminators
+     * inside intermediate slices, and so this stays correct if the source
+     * string ever contains embedded NULs. */
+    memcpy(result, str, before_len);
+    memcpy(result + before_len, replacement, repl_len);
+    memcpy(result + before_len + repl_len, str + after_start, after_len);
+    result[before_len + repl_len + after_len] = '\0';
 
     /* rx is owned by the cache — do NOT free */
     return result;
@@ -6432,38 +6471,67 @@ char* strada_regex_replace_all(const char *str, const char *pattern, const char 
     regex_t *rx = regex_cache_compile_posix(pattern, flags);
     if (!rx) return strdup(str);
 
-    size_t result_size = strlen(str) * 2 + 1;
-    char *result = malloc(result_size);
+    size_t str_len = strlen(str);
+    size_t repl_len = strlen(replacement);
+
+    /* Initial guess: 2x input. Overflow-safe. */
+    size_t result_cap = (str_len > SIZE_MAX / 2 - 1) ? str_len + 1 : str_len * 2 + 1;
+    char *result = malloc(result_cap);
+    if (!result) return strdup(str);
+    size_t result_len = 0;
     result[0] = '\0';
 
     const char *p = str;
     regmatch_t match;
-    size_t offset = 0;
 
     while (regexec(rx, p, 1, &match, 0) == 0) {
-        // Ensure buffer is large enough
-        size_t needed = offset + match.rm_so + strlen(replacement) + strlen(p + match.rm_eo) + 1;
-        if (needed > result_size) {
-            result_size = needed * 2;
-            char *new_result = realloc(result, result_size);
+        size_t before = (size_t)match.rm_so;
+        const char *tail = p + match.rm_eo;
+        size_t tail_len = strlen(tail);
+
+        /* Ensure capacity for: current + before + repl + tail + NUL.
+         * Overflow-checked. */
+        if (result_len > SIZE_MAX - before ||
+            result_len + before > SIZE_MAX - repl_len ||
+            result_len + before + repl_len > SIZE_MAX - tail_len ||
+            result_len + before + repl_len + tail_len > SIZE_MAX - 1) {
+            free(result);
+            return strdup(str);
+        }
+        size_t needed = result_len + before + repl_len + tail_len + 1;
+        if (needed > result_cap) {
+            size_t new_cap = result_cap;
+            while (new_cap < needed) {
+                if (new_cap > SIZE_MAX / 2) { new_cap = needed; break; }
+                new_cap *= 2;
+            }
+            char *new_result = realloc(result, new_cap);
             if (!new_result) { free(result); return strdup(str); }
             result = new_result;
+            result_cap = new_cap;
         }
 
-        // Copy before match
-        strncat(result, p, match.rm_so);
-        offset += match.rm_so;
+        memcpy(result + result_len, p, before);
+        result_len += before;
+        memcpy(result + result_len, replacement, repl_len);
+        result_len += repl_len;
+        result[result_len] = '\0';
 
-        // Copy replacement
-        strcat(result, replacement);
-        offset += strlen(replacement);
-
-        p += match.rm_eo;
-        if (match.rm_eo == 0) break; // Prevent infinite loop
+        p = tail;
+        if (match.rm_eo == 0) break;  // Prevent infinite loop on empty matches
     }
 
-    // Copy remaining
-    strcat(result, p);
+    /* Copy remaining tail */
+    size_t tail_len = strlen(p);
+    if (result_len > SIZE_MAX - tail_len - 1) { free(result); return strdup(str); }
+    if (result_len + tail_len + 1 > result_cap) {
+        char *new_result = realloc(result, result_len + tail_len + 1);
+        if (!new_result) { free(result); return strdup(str); }
+        result = new_result;
+    }
+    memcpy(result + result_len, p, tail_len);
+    result_len += tail_len;
+    result[result_len] = '\0';
 
     /* rx is owned by the cache — do NOT free */
     return result;
@@ -7675,12 +7743,12 @@ char* strada_stacktrace_str(void) {
     size = backtrace(array, 20);
     strings = backtrace_symbols(array, size);
 
-    /* Calculate total size needed */
-    size_t total_len = 0;
+    /* Calculate total size needed. The "#N  " prefix is at most ~24 chars
+     * (decimal of size_t is at most 20 digits), plus '#' + 2 spaces + '\n'. */
+    size_t total_len = 32; /* header */
     for (size_t i = 0; i < size; i++) {
-        total_len += strlen(strings[i]) + 16; /* room for "#N  " and newline */
+        total_len += strlen(strings[i]) + 32;
     }
-    total_len += 32; /* header */
 
     char *result = malloc(total_len + 1);
     if (!result) {
@@ -7689,11 +7757,18 @@ char* strada_stacktrace_str(void) {
     }
 
     char *p = result;
-    p += sprintf(p, "Stack trace:\n");
+    char *end = result + total_len;
+    int n = snprintf(p, (size_t)(end - p), "Stack trace:\n");
+    if (n < 0 || n >= end - p) { free(strings); free(result); return strdup(""); }
+    p += n;
 
     for (size_t i = 0; i < size; i++) {
-        p += sprintf(p, "#%zu  %s\n", i, strings[i]);
+        n = snprintf(p, (size_t)(end - p), "#%zu  %s\n", i, strings[i]);
+        if (n < 0) break;
+        if (n >= end - p) { p += (end - p); break; }
+        p += n;
     }
+    *p = '\0';
 
     free(strings);
     return result;
@@ -9055,7 +9130,9 @@ static char* strada_case_map(const char *str, uint32_t (*map_fn)(uint32_t)) {
     size_t in_len = strlen(str);
     /* Worst-case growth: U+00DF (2 bytes) -> U+1E9E (3 bytes). That's a
      * 1.5x growth per char, but since only that specific char triggers
-     * growth, allocating 2x the input is always safe. */
+     * growth, allocating 2x the input is always safe.
+     * Overflow guard: in_len * 2 + 4 must not exceed SIZE_MAX. */
+    if (in_len > (SIZE_MAX - 4) / 2) return strdup("");
     char *out = malloc(in_len * 2 + 4);
     if (!out) return strdup("");
     size_t oi = 0;
@@ -11487,15 +11564,34 @@ char* strada_replace_all(const char *str, const char *find, const char *replace)
         p += find_len;
     }
     
-    /* Allocate result */
-    size_t result_len = strlen(str) + count * (replace_len - find_len);
+    /* Allocate result. Compute result_len with overflow checks because
+     * count * (replace_len - find_len) is a signed-ish expression on size_t
+     * and can wrap when replace_len < find_len OR when growth is huge. */
+    size_t str_len = strlen(str);
+    size_t result_len;
+    if (replace_len >= find_len) {
+        size_t per = replace_len - find_len;
+        if (per != 0 && (size_t)count > SIZE_MAX / per) return strdup(str);
+        size_t growth = (size_t)count * per;
+        if (str_len > SIZE_MAX - growth - 1) return strdup(str);
+        result_len = str_len + growth;
+    } else {
+        size_t per = find_len - replace_len;
+        size_t shrink = (size_t)count * per;
+        /* shrink can't exceed str_len because each match contributes find_len
+         * to str_len. Be defensive anyway. */
+        if (shrink > str_len) return strdup(str);
+        result_len = str_len - shrink;
+    }
+
     char *result = malloc(result_len + 1);
+    if (!result) return strdup(str);
     char *dest = result;
-    
+
     p = str;
     while (*p) {
         if (strncmp(p, find, find_len) == 0) {
-            strcpy(dest, replace);
+            memcpy(dest, replace, replace_len);
             dest += replace_len;
             p += find_len;
         } else {
@@ -13712,24 +13808,45 @@ StradaValue* strada_path_join(StradaValue *parts_val) {
 
     /* Pre-convert all strings and calculate total length */
     char **strs = malloc(len * sizeof(char*));
+    size_t *slens = malloc(len * sizeof(size_t));
+    if (!strs || !slens) {
+        free(strs); free(slens);
+        return strada_new_str("");
+    }
     size_t total = 0;
     for (size_t i = 0; i < len; i++) {
         StradaValue *part = strada_array_get(av, i);
         strs[i] = strada_to_str(part);
-        total += strlen(strs[i]) + 1;  /* +1 for '/' */
+        slens[i] = strlen(strs[i]);
+        if (total > SIZE_MAX - slens[i] - 1) {
+            for (size_t j = 0; j <= i; j++) free(strs[j]);
+            free(strs); free(slens);
+            return strada_new_str("");
+        }
+        total += slens[i] + 1;  /* +1 for possible '/' */
     }
 
     char *result = malloc(total + 1);
+    if (!result) {
+        for (size_t i = 0; i < len; i++) free(strs[i]);
+        free(strs); free(slens);
+        return strada_new_str("");
+    }
+    size_t result_len = 0;
     result[0] = '\0';
 
     for (size_t i = 0; i < len; i++) {
-        if (i > 0 && result[strlen(result)-1] != '/') {
-            strcat(result, "/");
+        /* Add '/' if we already have content and it doesn't end in '/' */
+        if (result_len > 0 && result[result_len - 1] != '/') {
+            result[result_len++] = '/';
         }
-        strcat(result, strs[i]);
+        memcpy(result + result_len, strs[i], slens[i]);
+        result_len += slens[i];
         free(strs[i]);
     }
+    result[result_len] = '\0';
     free(strs);
+    free(slens);
 
     StradaValue *ret = strada_new_str(result);
     free(result);
@@ -13763,10 +13880,14 @@ StradaValue* strada_fgets(StradaValue *fh, StradaValue *size) {
     if (!fh || STRADA_IS_TAGGED_INT(fh) || fh->type != STRADA_FILEHANDLE || !fh->value.fh) {
         return strada_new_undef();
     }
-    int sz = (int)strada_to_int(size);
-    if (sz <= 0) sz = 1024;
+    /* Use int64_t to avoid silent truncation when caller passes a value
+     * outside int range (e.g. 0x100000001 → 1 with the old (int) cast). */
+    int64_t sz64 = strada_to_int(size);
+    if (sz64 <= 0) sz64 = 1024;
+    if (sz64 > INT_MAX) sz64 = INT_MAX;  /* fgets takes int */
+    int sz = (int)sz64;
 
-    char *buf = malloc(sz);
+    char *buf = malloc((size_t)sz);
     if (!buf) return strada_new_undef();
 
     char *result = fgets(buf, sz, fh->value.fh);
@@ -14285,8 +14406,10 @@ StradaValue* strada_random_bytes_hex(StradaValue *num_bytes_sv) {
         return strada_new_str("");
     }
 
+    static const char hexchars[] = "0123456789abcdef";
     for (int i = 0; i < num_bytes; i++) {
-        sprintf(&hex[i*2], "%02x", buffer[i]);
+        hex[i*2]     = hexchars[(buffer[i] >> 4) & 0xF];
+        hex[i*2 + 1] = hexchars[buffer[i] & 0xF];
     }
     hex[num_bytes * 2] = '\0';
 
