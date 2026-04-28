@@ -2616,11 +2616,12 @@ StradaArray* strada_hash_values(StradaHash *hv) {
     return av;
 }
 
-/* Reserve capacity for hash (pre-allocate buckets and entries) */
-void strada_hash_reserve(StradaHash *hv, size_t num_buckets) {
-    /* Round up to power of 2 for bitmask indexing */
-    num_buckets = strada_next_pow2(num_buckets);
-    if (!hv || num_buckets <= hv->num_buckets) return;
+/* Reserve capacity for hash entries, keeping the runtime's 50% max load. */
+void strada_hash_reserve(StradaHash *hv, size_t capacity) {
+    if (!hv || capacity == 0) return;
+
+    size_t num_buckets = strada_next_pow2(capacity * 2);
+    if (num_buckets <= hv->num_buckets) return;
 
     hv->num_buckets = num_buckets;
     hv->hash_index = realloc(hv->hash_index, num_buckets * sizeof(uint32_t));
@@ -16787,4 +16788,3 @@ StradaValue* strada_tied(StradaValue *ref) {
     }
     return strada_new_undef();
 }
-

@@ -395,7 +395,7 @@ void strada_hash_delete_sv(StradaHash *hv, StradaValue *key_sv);
 StradaArray* strada_hash_keys(StradaHash *hash);
 StradaArray* strada_hash_values(StradaHash *hash);
 int64_t strada_hash_size(StradaHash *hash);
-void strada_hash_reserve(StradaHash *hv, size_t num_buckets);
+void strada_hash_reserve(StradaHash *hv, size_t capacity);
 void strada_hash_reserve_sv(StradaValue *sv, int64_t capacity);
 int64_t strada_get_hash_default_capacity(void);
 void strada_set_hash_default_capacity(int64_t capacity);

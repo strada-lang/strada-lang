@@ -7770,6 +7770,20 @@ func gen_expression(scalar $cg, scalar $expr) void {
         if ($name eq "scalar") {
             my scalar $args = $expr->{"args"};
             my scalar $arg = $args->[0];
+            if ($arg->{"type"} == NODE_CALL() && $arg->{"name"} eq "keys" && $arg->{"arg_count"} == 1) {
+                my scalar $keys_args = $arg->{"args"};
+                my scalar $hash_arg = $keys_args->[0];
+                if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $hash_arg) == 1) {
+                    emit($cg, "({ StradaValue *__sc_hash_tmp = ");
+                    gen_expression($cg, $hash_arg);
+                    emit($cg, "; int64_t __sc_res = strada_size(__sc_hash_tmp); strada_decref(__sc_hash_tmp); strada_new_int(__sc_res); })");
+                } else {
+                    emit($cg, "strada_new_int(strada_size(");
+                    gen_expression($cg, $hash_arg);
+                    emit($cg, "))");
+                }
+                return;
+            }
             if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $arg) == 1) {
                 emit($cg, "({ StradaValue *__sc_tmp = ");
                 gen_expression($cg, $arg);
@@ -12872,7 +12886,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
             # Check for int arithmetic path (zero-alloc tagged ints)
             my int $use_int = 0;
             if ($cg->{"has_overloads"} == 0 && $target_type == NODE_VARIABLE()) {
-                if (expr_is_int_typed($cg, $target) == 1 && expr_is_int_typed($cg, $expr->{"value"}) == 1) {
+                if (expr_is_int_typed($cg, $target) == 1) {
                     $use_int = 1;
                 }
             }
@@ -12907,7 +12921,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
             } elsif ($op eq "-=") {
             my int $use_int2 = 0;
             if ($cg->{"has_overloads"} == 0 && $target_type == NODE_VARIABLE()) {
-                if (expr_is_int_typed($cg, $target) == 1 && expr_is_int_typed($cg, $expr->{"value"}) == 1) {
+                if (expr_is_int_typed($cg, $target) == 1) {
                     $use_int2 = 1;
                 }
             }

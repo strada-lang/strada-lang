@@ -536,7 +536,7 @@ int strada_hash_exists_sv(StradaHash *hv, StradaValue *key_sv);
 void strada_hash_delete_sv(StradaHash *hv, StradaValue *key_sv);
 StradaArray* strada_hash_keys(StradaHash *hv);
 StradaArray* strada_hash_values(StradaHash *hv);
-void strada_hash_reserve(StradaHash *hv, size_t num_buckets);
+void strada_hash_reserve(StradaHash *hv, size_t capacity);
 void strada_hash_reserve_sv(StradaValue *sv, int64_t capacity);
 
 /* String operations (UTF-8 aware) */
