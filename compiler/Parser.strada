@@ -3008,6 +3008,17 @@ func parse_for_array_style(scalar $parser, str $label, int $fas_line) scalar {
 
     parser_expect($parser, "LPAREN");
     my scalar $array_expr = parse_expression($parser);
+    if (parser_check($parser, "COMMA")) {
+        my scalar $arr = ast_new_anon_array();
+        ast_add_array_elem($arr, $array_expr);
+        while (parser_check($parser, "COMMA")) {
+            parser_advance($parser);
+            if (parser_check($parser, "RPAREN")) { last; }
+            my scalar $elem = parse_expression($parser);
+            ast_add_array_elem($arr, $elem);
+        }
+        $array_expr = $arr;
+    }
     parser_expect($parser, "RPAREN");
 
     my scalar $body = parse_block($parser);
@@ -3118,6 +3129,17 @@ func parse_foreach_stmt(scalar $parser, str $label) scalar {
 
     parser_expect($parser, "LPAREN");
     my scalar $array_expr = parse_expression($parser);
+    if (parser_check($parser, "COMMA")) {
+        my scalar $arr = ast_new_anon_array();
+        ast_add_array_elem($arr, $array_expr);
+        while (parser_check($parser, "COMMA")) {
+            parser_advance($parser);
+            if (parser_check($parser, "RPAREN")) { last; }
+            my scalar $elem = parse_expression($parser);
+            ast_add_array_elem($arr, $elem);
+        }
+        $array_expr = $arr;
+    }
     parser_expect($parser, "RPAREN");
 
     my scalar $body = parse_block($parser);
