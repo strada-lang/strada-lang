@@ -114,6 +114,35 @@ void ss_decref_slow(StradaString *ss) {
     }
 }
 
+/* ===== Interned StradaString singletons for hash keys =====
+ * Attribute names ("x", "y", etc.) used by inline constructors are repeated
+ * across millions of objects. Caching a single StradaString per name and using
+ * strada_hash_set_ss_take avoids the per-construction ss_new + memcpy + strlen.
+ * Returned StradaStrings have an artificially high refcount so they survive
+ * incref/decref churn without being freed. */
+#define ATTR_SS_TABLE_SIZE 256  /* power of 2; ample for typical projects */
+typedef struct AttrSSEntry { const char *key; uint32_t key_len; StradaString *ss; struct AttrSSEntry *next; } AttrSSEntry;
+static AttrSSEntry *attr_ss_table[ATTR_SS_TABLE_SIZE];
+StradaString *strada_intern_attr_ss(const char *key, unsigned int hash) {
+    uint32_t bkt = hash & (ATTR_SS_TABLE_SIZE - 1);
+    uint32_t key_len = (uint32_t)strlen(key);
+    for (AttrSSEntry *e = attr_ss_table[bkt]; e; e = e->next) {
+        if (e->key_len == key_len && e->ss->hash == hash && memcmp(e->key, key, key_len) == 0) {
+            return e->ss;
+        }
+    }
+    /* New singleton: high refcount makes it effectively immortal. */
+    StradaString *ss = ss_new(key, key_len, hash);
+    ss->refcount = (1u << 30);  /* immortal-ish; survives incref/decref churn */
+    AttrSSEntry *e = (AttrSSEntry*)malloc(sizeof(AttrSSEntry));
+    e->key = key;
+    e->key_len = key_len;
+    e->ss = ss;
+    e->next = attr_ss_table[bkt];
+    attr_ss_table[bkt] = e;
+    return ss;
+}
+
 /* ===== StradaString implementation ===== */
 StradaString *ss_new(const char *s, uint32_t len, uint32_t hash) {
     StradaString *ss;
@@ -218,6 +247,12 @@ static int strada_threading_active;
 /* Forward declaration — used by strada_to_str for tagged ints */
 static inline int strada_fast_itoa(int64_t val, char *buf);
 
+/* Forward declaration — used by strada_to_str / strada_to_str_buf to
+ * dispatch the '""' (stringify) overload when a blessed ref defines one. */
+static StradaMethod strada_overload_lookup(const char *package, const char *op);
+StradaValue* strada_pack_args(int count, ...);
+static int oop_any_stringify_overloads;
+
 /* ===== STRADAVALUE FREE-LIST POOL ===== */
 /* Recycles freed StradaValue structs to avoid malloc/free overhead */
 #define SV_POOL_MAX 16384
@@ -287,9 +322,15 @@ static void strada_check_debug_bless(void) {
     }
 }
 
-/* Validate that a string pointer looks valid (basic sanity check) */
+/* Validate that a string pointer looks valid (basic sanity check).
+ * Defensive — guards against use-after-free / heap corruption in the OOP path.
+ * The full check is enabled via STRADA_DEBUG_BLESS=1; in normal builds we only
+ * reject NULL, since callers already pass through strada_intern_str pointers
+ * which are guaranteed valid. The defensive walk costs ~4% of OOP-heavy bench
+ * time and only catches bugs that already corrupted memory elsewhere. */
 static int strada_validate_blessed_package(const char *pkg) {
     if (!pkg) return 0;
+    if (__builtin_expect(strada_debug_bless == 0, 1)) return 1;
 
     /* Check if pointer value looks like a valid heap address */
     /* Invalid pointers often have suspicious values like small integers, */
@@ -907,6 +948,12 @@ int64_t strada_to_int(StradaValue *sv) {
             return sv->value.pv ? atoll(sv->value.pv) : 0;
         case STRADA_ARRAY:
             return strada_array_length(sv->value.av);
+        case STRADA_REF:
+            if (strada_overload_numeric_hook) {
+                double d = 0.0;
+                if (strada_overload_numeric_hook(sv, &d)) return (int64_t)d;
+            }
+            return 0;
         case STRADA_UNDEF:
         default:
             return 0;
@@ -928,6 +975,10 @@ double strada_to_num(StradaValue *sv) {
         case STRADA_HASH:
             return sv->value.hv ? 1.0 : 0.0;  /* Hash is truthy if non-null */
         case STRADA_REF:
+            if (strada_overload_numeric_hook) {
+                double d = 0.0;
+                if (strada_overload_numeric_hook(sv, &d)) return d;
+            }
             return sv->value.rv ? 1.0 : 0.0;  /* Ref is truthy if non-null */
         case STRADA_UNDEF:
         default:
@@ -951,6 +1002,40 @@ char* strada_to_str(StradaValue *sv) {
     }
     if (!sv) return strdup("");
 
+    /* Dispatch '""' overload for blessed refs. */
+    if (sv->type == STRADA_REF && __builtin_expect(oop_any_stringify_overloads, 0)) {
+        const char *bp = SV_BLESSED(sv);
+        if (bp) {
+            StradaMethod fn = strada_overload_lookup(bp, "\"\"");
+            if (fn) {
+                StradaValue *args = strada_pack_args(0);
+                StradaValue *result = fn(sv, args);
+                if (args) strada_decref(args);
+                char *out = NULL;
+                if (result) {
+                    if (STRADA_IS_TAGGED_INT(result)) {
+                        strada_fast_itoa(STRADA_TAGGED_INT_VAL(result), buf);
+                        out = strdup(buf);
+                    } else if (result->type == STRADA_STR) {
+                        out = strdup(result->value.pv ? result->value.pv : "");
+                    } else if (result->type == STRADA_INT) {
+                        strada_fast_itoa(result->value.iv, buf);
+                        out = strdup(buf);
+                    } else if (result->type == STRADA_NUM) {
+                        snprintf(buf, sizeof(buf), "%g", result->value.nv);
+                        out = strdup(buf);
+                    } else {
+                        out = strdup("");
+                    }
+                    strada_decref(result);
+                } else {
+                    out = strdup("");
+                }
+                return out;
+            }
+        }
+    }
+
     switch (sv->type) {
         case STRADA_INT:
             snprintf(buf, sizeof(buf), "%lld", (long long)sv->value.iv);
@@ -961,19 +1046,20 @@ char* strada_to_str(StradaValue *sv) {
         case STRADA_STR:
             return sv->value.pv ? strdup(sv->value.pv) : strdup("");
         case STRADA_ARRAY:
-            snprintf(buf, sizeof(buf), "ARRAY(0x%p)", (void*)sv->value.av);
+            /* `%p` already prepends `0x` on glibc; using `0x%p` produced `0x0x…`. */
+            snprintf(buf, sizeof(buf), "ARRAY(%p)", (void*)sv->value.av);
             return strdup(buf);
         case STRADA_HASH:
-            snprintf(buf, sizeof(buf), "HASH(0x%p)", (void*)sv->value.hv);
+            snprintf(buf, sizeof(buf), "HASH(%p)", (void*)sv->value.hv);
             return strdup(buf);
         case STRADA_FILEHANDLE:
-            snprintf(buf, sizeof(buf), "FILEHANDLE(0x%p)", (void*)sv->value.fh);
+            snprintf(buf, sizeof(buf), "FILEHANDLE(%p)", (void*)sv->value.fh);
             return strdup(buf);
         case STRADA_REGEX:
 #ifdef HAVE_PCRE2
-            snprintf(buf, sizeof(buf), "REGEX(0x%p)", (void*)sv->value.pcre2_rx);
+            snprintf(buf, sizeof(buf), "REGEX(%p)", (void*)sv->value.pcre2_rx);
 #else
-            snprintf(buf, sizeof(buf), "REGEX(0x%p)", (void*)sv->value.rx);
+            snprintf(buf, sizeof(buf), "REGEX(%p)", (void*)sv->value.rx);
 #endif
             return strdup(buf);
         case STRADA_SOCKET:
@@ -982,18 +1068,51 @@ char* strada_to_str(StradaValue *sv) {
         case STRADA_CSTRUCT: {
             const char *sn = SV_STRUCT_NAME(sv);
             if (sn) {
-                snprintf(buf, sizeof(buf), "CSTRUCT(%s,0x%p)", sn, sv->value.ptr);
+                snprintf(buf, sizeof(buf), "CSTRUCT(%s,%p)", sn, sv->value.ptr);
             } else {
-                snprintf(buf, sizeof(buf), "CSTRUCT(0x%p)", sv->value.ptr);
+                snprintf(buf, sizeof(buf), "CSTRUCT(%p)", sv->value.ptr);
             }
             return strdup(buf);
         }
         case STRADA_CPOINTER:
-            snprintf(buf, sizeof(buf), "CPOINTER(0x%p)", sv->value.ptr);
+            snprintf(buf, sizeof(buf), "CPOINTER(%p)", sv->value.ptr);
             return strdup(buf);
         case STRADA_REF:
+            /* If perla has registered a stringification overload hook,
+             * give it a chance. `use overload '""' => sub { ... }` installs
+             * a sub via the hook; this is what makes DBIx::Class::Exception,
+             * Mojolicious::Date, etc. stringify to something readable
+             * rather than "REF(0x...)". The hook returns a strdup'd string
+             * (or NULL for "no overload"). */
+            if (strada_overload_stringify_hook) {
+                char *r = strada_overload_stringify_hook(sv);
+                if (r) return r;
+            }
             if (sv->value.rv) {
-                snprintf(buf, sizeof(buf), "REF(0x%p)", (void*)sv->value.rv);
+                /* Perl-format: blessed → "Pkg=KIND(0x...)";
+                 * unblessed → "KIND(0x...)" where KIND is HASH/ARRAY/CODE/REF/SCALAR. */
+                StradaValue *target = sv->value.rv;
+                const char *bp = (sv->meta && sv->meta->blessed_package) ? sv->meta->blessed_package : NULL;
+                const char *kind = "REF";
+                if (!STRADA_IS_TAGGED_INT(target)) {
+                    switch (target->type) {
+                        case STRADA_HASH:    kind = "HASH"; break;
+                        case STRADA_ARRAY:   kind = "ARRAY"; break;
+                        case STRADA_CLOSURE: kind = "CODE"; break;
+                        case STRADA_CPOINTER:kind = "CODE"; break;
+                        case STRADA_INT:
+                        case STRADA_NUM:
+                        case STRADA_STR:     kind = "SCALAR"; break;
+                        case STRADA_REF:     kind = "REF"; break;
+                        default: break;
+                    }
+                }
+                /* %p already emits "0x" — don't double-prefix. */
+                if (bp) {
+                    snprintf(buf, sizeof(buf), "%s=%s(%p)", bp, kind, (void*)target);
+                } else {
+                    snprintf(buf, sizeof(buf), "%s(%p)", kind, (void*)target);
+                }
                 return strdup(buf);
             }
             return strdup("");
@@ -1070,6 +1189,42 @@ const char *strada_to_str_buf(StradaValue *sv, char *buf, size_t buflen) {
         return buf;
     }
     if (!sv) return "";
+    /* Dispatch '""' overload for blessed refs. Gated on a global flag so this
+     * adds nothing when no class has registered a stringify overload. */
+    if (sv->type == STRADA_REF && __builtin_expect(oop_any_stringify_overloads, 0)) {
+        const char *bp = SV_BLESSED(sv);
+        if (bp) {
+            StradaMethod fn = strada_overload_lookup(bp, "\"\"");
+            if (fn) {
+                StradaValue *args = strada_pack_args(0);
+                StradaValue *result = fn(sv, args);
+                if (args) strada_decref(args);
+                /* Copy the result's text into our caller's buffer, since we'll
+                 * decref the result before returning. Avoid re-dispatching the
+                 * overload on result by handling its type inline. */
+                if (result) {
+                    if (STRADA_IS_TAGGED_INT(result)) {
+                        strada_fast_itoa(STRADA_TAGGED_INT_VAL(result), buf);
+                    } else if (result->type == STRADA_STR && result->value.pv) {
+                        size_t n = strlen(result->value.pv);
+                        if (n >= buflen) n = buflen - 1;
+                        memcpy(buf, result->value.pv, n);
+                        buf[n] = '\0';
+                    } else if (result->type == STRADA_INT) {
+                        strada_fast_itoa(result->value.iv, buf);
+                    } else if (result->type == STRADA_NUM) {
+                        snprintf(buf, buflen, "%g", result->value.nv);
+                    } else {
+                        buf[0] = '\0';
+                    }
+                    strada_decref(result);
+                } else {
+                    buf[0] = '\0';
+                }
+                return buf;
+            }
+        }
+    }
     switch (sv->type) {
         case STRADA_INT:
             strada_fast_itoa(sv->value.iv, buf);
@@ -1103,6 +1258,11 @@ int strada_to_bool(StradaValue *sv) {
         case STRADA_HASH:
             return sv->value.hv && sv->value.hv->num_entries > 0;
         case STRADA_REF:
+            /* Honor `bool` overload first if installed. */
+            if (strada_overload_bool_hook) {
+                int b = strada_overload_bool_hook(sv);
+                if (b >= 0) return b;
+            }
             /* Dereference and check the target value */
             if (sv->value.rv) {
                 return strada_to_bool(sv->value.rv);
@@ -1816,14 +1976,10 @@ static void strada_intern_release(char *s) {
     InternEntry **pp = &intern_table_buckets[h];
     while (*pp) {
         if ((*pp)->str == s) {  /* Pointer comparison — fast */
+            /* Keep entry alive even at refcount 0 — class names and other
+             * interned identifiers are a bounded set, and freeing+reinterning
+             * the same string in a tight loop dominates allocator traffic. */
             (*pp)->refcount--;
-            if ((*pp)->refcount <= 0) {
-                InternEntry *old = *pp;
-                *pp = old->next;
-                free(old->str);
-                free(old);
-                intern_table_count--;
-            }
             return;
         }
         pp = &(*pp)->next;
@@ -1903,7 +2059,7 @@ static void strada_hash_resize(StradaHash *hv) {
 
 /* Hash free list: recycle StradaHash structs for common sizes */
 #define HASH_POOL_MAX 256
-#define HASH_SMALL_BUCKETS 4  /* For objects with <=3 attributes */
+#define HASH_SMALL_BUCKETS 8  /* For objects with <=3 attributes (50% load factor) */
 static StradaHash *hash_pool_small[HASH_POOL_MAX];  /* Pool for small hashes */
 static int hash_pool_small_count = 0;
 
@@ -1969,16 +2125,18 @@ StradaHash* strada_hash_new_presized(int capacity) {
         return hv;
     }
 
-    /* Single allocation: StradaHash + index[nbuckets] + entries[COMPACT_ENTRIES] */
+    /* Single allocation: StradaHash + index[HASH_SMALL_BUCKETS] + entries[COMPACT_ENTRIES].
+     * Always allocate at the max compact size so any pooled block is reusable
+     * for any request <= HASH_SMALL_BUCKETS — pop-shape-mismatch is impossible. */
     if (nbuckets <= HASH_SMALL_BUCKETS) {
-        size_t idx_size = nbuckets * sizeof(uint32_t);
+        size_t idx_size = HASH_SMALL_BUCKETS * sizeof(uint32_t);
         size_t ent_size = HASH_COMPACT_ENTRIES * sizeof(StradaHashEntry);
         char *block = malloc(sizeof(StradaHash) + idx_size + ent_size);
         hv = (StradaHash*)block;
         hv->hash_index = (uint32_t*)(block + sizeof(StradaHash));
         hv->entries = (StradaHashEntry*)(block + sizeof(StradaHash) + idx_size);
         hv->capacity = HASH_COMPACT_ENTRIES;
-        memset(hv->hash_index, 0xFF, idx_size);
+        memset(hv->hash_index, 0xFF, nbuckets * sizeof(uint32_t));
         memset(hv->entries, 0, ent_size);
         hv->num_buckets = nbuckets;
         hv->num_entries = 0;
@@ -2794,6 +2952,7 @@ StradaValue* strada_concat_sv(StradaValue *a, StradaValue *b) {
     const char *str_b = "";
     size_t len_b = 0;
     char buf_b[32];
+    char *heap_b = NULL;  /* allocated by overload hook, freed at end */
 
     if (STRADA_IS_TAGGED_INT(b)) {
         len_b = strada_fast_itoa(STRADA_TAGGED_INT_VAL(b), buf_b);
@@ -2809,8 +2968,13 @@ StradaValue* strada_concat_sv(StradaValue *a, StradaValue *b) {
             len_b = snprintf(buf_b, sizeof(buf_b), "%g", b->value.nv);
             str_b = buf_b;
         } else if (b->type == STRADA_REF && b->value.rv) {
-            len_b = snprintf(buf_b, sizeof(buf_b), "REF(0x%p)", (void*)b->value.rv);
-            str_b = buf_b;
+            /* Both overload-stringify and the default Pkg=HASH(0x…) format
+             * come from strada_to_str — single source of truth. */
+            heap_b = strada_to_str(b);
+            if (heap_b) {
+                str_b = heap_b;
+                len_b = strlen(heap_b);
+            }
         }
     }
 
@@ -2818,6 +2982,7 @@ StradaValue* strada_concat_sv(StradaValue *a, StradaValue *b) {
     const char *str_a = "";
     size_t len_a = 0;
     char buf_a[32];
+    char *heap_a = NULL;
 
     if (STRADA_IS_TAGGED_INT(a)) {
         len_a = strada_fast_itoa(STRADA_TAGGED_INT_VAL(a), buf_a);
@@ -2833,8 +2998,11 @@ StradaValue* strada_concat_sv(StradaValue *a, StradaValue *b) {
             len_a = snprintf(buf_a, sizeof(buf_a), "%g", a->value.nv);
             str_a = buf_a;
         } else if (a->type == STRADA_REF && a->value.rv) {
-            len_a = snprintf(buf_a, sizeof(buf_a), "REF(0x%p)", (void*)a->value.rv);
-            str_a = buf_a;
+            heap_a = strada_to_str(a);
+            if (heap_a) {
+                str_a = heap_a;
+                len_a = strlen(heap_a);
+            }
         }
     }
 
@@ -2851,6 +3019,8 @@ StradaValue* strada_concat_sv(StradaValue *a, StradaValue *b) {
     sv->value.pv = ss_alloc_pv(result, len_a + len_b);
     sv->struct_size = len_a + len_b;
     free(result);
+    if (heap_a) free(heap_a);
+    if (heap_b) free(heap_b);
 
     return sv;
 }
@@ -2860,6 +3030,7 @@ StradaValue* strada_concat_cstr_sv(const char *prefix, size_t prefix_len, Strada
     const char *str_b = "";
     size_t len_b = 0;
     char buf_b[32];
+    char *heap_b = NULL;
 
     if (STRADA_IS_TAGGED_INT(b)) {
         len_b = strada_fast_itoa(STRADA_TAGGED_INT_VAL(b), buf_b);
@@ -2874,6 +3045,9 @@ StradaValue* strada_concat_cstr_sv(const char *prefix, size_t prefix_len, Strada
         } else if (b->type == STRADA_NUM) {
             len_b = snprintf(buf_b, sizeof(buf_b), "%g", b->value.nv);
             str_b = buf_b;
+        } else if (b->type == STRADA_REF && b->value.rv) {
+            heap_b = strada_to_str(b);
+            if (heap_b) { str_b = heap_b; len_b = strlen(heap_b); }
         }
     }
 
@@ -2889,6 +3063,7 @@ StradaValue* strada_concat_cstr_sv(const char *prefix, size_t prefix_len, Strada
     sv->refcount = 1;
     sv->value.pv = ss->data;
     sv->struct_size = total;
+    if (heap_b) free(heap_b);
     return sv;
 }
 
@@ -2901,6 +3076,7 @@ StradaValue* strada_concat_inplace(StradaValue *a, StradaValue *b) {
     const char *str_b = "";
     size_t len_b = 0;
     char buf_b[32];
+    char *heap_b = NULL;
 
     if (STRADA_IS_TAGGED_INT(b)) {
         len_b = strada_fast_itoa(STRADA_TAGGED_INT_VAL(b), buf_b);
@@ -2915,6 +3091,9 @@ StradaValue* strada_concat_inplace(StradaValue *a, StradaValue *b) {
         } else if (b->type == STRADA_NUM) {
             len_b = snprintf(buf_b, sizeof(buf_b), "%g", b->value.nv);
             str_b = buf_b;
+        } else if (b->type == STRADA_REF && b->value.rv) {
+            heap_b = strada_to_str(b);
+            if (heap_b) { str_b = heap_b; len_b = strlen(heap_b); }
         }
     }
 
@@ -2942,6 +3121,7 @@ StradaValue* strada_concat_inplace(StradaValue *a, StradaValue *b) {
             ss->data[new_len] = '\0';
             ss->len = (uint32_t)new_len;
             a->struct_size = new_flags;
+            if (heap_b) free(heap_b);
             return a;
         }
 #endif
@@ -2954,10 +3134,12 @@ StradaValue* strada_concat_inplace(StradaValue *a, StradaValue *b) {
         ss->len = (uint32_t)new_len;
         a->value.pv = ss->data;  /* update in case realloc moved */
         a->struct_size = new_flags;
+        if (heap_b) free(heap_b);
         return a;
     }
 
     /* Slow path: create new string, decref a */
+    if (heap_b) free(heap_b);  /* concat_sv re-runs the hook itself */
     StradaValue *result = strada_concat_sv(a, b);
     strada_decref(a);
     return result;
@@ -3232,6 +3414,13 @@ void strada_print(StradaValue *sv) {
         strada_print_fh(sv, strada_default_output);
         return;
     }
+    /* Refs: route through strada_to_str so the overload hook fires. */
+    if (sv && !STRADA_IS_TAGGED_INT(sv) && sv->type == STRADA_REF) {
+        char *s = strada_to_str(sv);
+        if (s) { fputs(s, stdout); free(s); }
+        fflush(stdout);
+        return;
+    }
     char _tb[256];
     const char *str = strada_to_str_buf(sv, _tb, sizeof(_tb));
     printf("%s", str);
@@ -3241,6 +3430,13 @@ void strada_print(StradaValue *sv) {
 void strada_say(StradaValue *sv) {
     if (__builtin_expect(strada_default_output != NULL, 0)) {
         strada_say_fh(sv, strada_default_output);
+        return;
+    }
+    if (sv && !STRADA_IS_TAGGED_INT(sv) && sv->type == STRADA_REF) {
+        char *s = strada_to_str(sv);
+        if (s) { fputs(s, stdout); free(s); }
+        putchar('\n');
+        fflush(stdout);
         return;
     }
     char _tb[256];
@@ -4319,6 +4515,16 @@ int strada_try_depth = 0;
 char *strada_exception_msg = NULL;
 StradaValue *strada_exception_value = NULL;  /* Typed exception support */
 
+/* Optional overload-stringify hook. Set by perla_init when the perla runtime
+ * is linked in. NULL by default — pure-strada code has no overload concept. */
+char *(*strada_overload_stringify_hook)(StradaValue *sv) = NULL;
+
+/* Optional numeric/boolean overload hooks. Same pattern.
+ * Numeric returns a double via out-param (0 = no overload, 1 = overload fired).
+ * Bool returns -1 (no overload), 0 (false), 1 (true). */
+int (*strada_overload_numeric_hook)(StradaValue *sv, double *out) = NULL;
+int (*strada_overload_bool_hook)(StradaValue *sv) = NULL;
+
 /* Call stack for stack traces */
 StradaStackFrame strada_call_stack[STRADA_MAX_CALL_DEPTH];
 int strada_call_depth = 0;
@@ -4568,6 +4774,25 @@ void strada_clear_exception(void) {
 }
 
 void strada_die_sv(StradaValue *msg) {
+    /* If $msg is a reference (typically a blessed exception object), preserve
+     * the value so typed catches and `ref($@) eq 'Some::Class'` work. Real
+     * Perl propagates the actual SV through `die` — strada used to stringify
+     * here, which broke DBIx::Class::Exception->throw, Try::Tiny pattern
+     * matching, and any code that does `if (ref $@) { ... }`. */
+    if (msg && !STRADA_IS_TAGGED_INT(msg) && msg->type == STRADA_REF) {
+        if (strada_in_try_block()) {
+            strada_incref(msg);
+            strada_throw_value(msg);  /* takes ownership */
+        } else {
+            char *s = strada_to_str(msg);
+            fprintf(stderr, "%s\n", s ? s : "(unknown)");
+            if (s) free(s);
+            if (getenv("PERLA_DIE_WARN")) return;
+            exit(1);
+        }
+        return;
+    }
+
     char buffer[1024];
     char _tb[256];
     const char *str = strada_to_str_buf(msg, _tb, sizeof(_tb));
@@ -4575,8 +4800,14 @@ void strada_die_sv(StradaValue *msg) {
 
     if (strada_in_try_block()) {
         strada_throw(buffer);
+    } else if (!buffer[0]) {
+        return;  /* empty message — non-fatal */
     } else {
         fprintf(stderr, "%s\n", buffer);
+        if (getenv("PERLA_DIE_TRACE")) {
+            fprintf(stderr, "  [die at try_depth=%d msg=\"%s\"]\n", strada_try_depth, buffer);
+        }
+        if (getenv("PERLA_DIE_WARN")) return;
         exit(1);
     }
 }
@@ -6876,8 +7107,14 @@ void strada_free_value(StradaValue *sv) {
             sv->meta->blessed_package = NULL;  /* Clear to prevent crash */
         } else {
             strada_call_destroy(sv);
-            strada_intern_release(sv->meta->blessed_package);
+            /* Skip intern_release for cached/immortal package names — the
+             * entry is sticky and the refcount is meaningless after we cache
+             * the pointer at the call site. Saves a hash bucket walk per free. */
+            if (!sv->meta->blessed_immortal) {
+                strada_intern_release(sv->meta->blessed_package);
+            }
             sv->meta->blessed_package = NULL;
+            sv->meta->blessed_immortal = 0;
         }
     }
 
@@ -12545,6 +12782,7 @@ static OopPackage oop_packages[OOP_MAX_PACKAGES];
 static int oop_package_count = 0;
 static int oop_initialized = 0;
 static int oop_any_modifiers = 0;  /* Set to 1 when any modifier is registered */
+static int oop_any_stringify_overloads = 0;  /* Set to 1 when any "" overload is registered */
 static char oop_current_package[OOP_MAX_NAME_LEN] = "";
 static char oop_current_method_package[OOP_MAX_NAME_LEN] = "";  /* For SUPER:: */
 static int oop_destroying = 0;  /* Prevent recursive DESTROY */
@@ -12680,6 +12918,27 @@ static OopPackage* oop_get_or_create_package(const char *name) {
     oop_pkg_hash[h] = idx;
 
     return pkg;
+}
+
+/* Public wrapper around the static intern table — codegen uses this once per
+ * call site to obtain a stable interned pointer for class names. */
+char *strada_intern_pkg_name(const char *s) {
+    return strada_intern_str(s);
+}
+
+/* Fast bless variant: caller has pre-cached the interned package name string
+ * (from strada_intern_pkg_name) at the call site, so we skip the table lookup
+ * that dominates strada_bless. The cached interned pointer is treated as
+ * immortal — we skip intern_release on free since the entry is sticky. */
+StradaValue* strada_bless_cached(StradaValue *ref, char *interned_pkg_name) {
+    if (!ref || STRADA_IS_TAGGED_INT(ref) || !interned_pkg_name) return ref;
+    StradaMetadata *meta = strada_ensure_meta(ref);
+    if (meta->blessed_package && !meta->blessed_immortal) {
+        strada_intern_release(meta->blessed_package);
+    }
+    meta->blessed_package = interned_pkg_name;
+    meta->blessed_immortal = 1;
+    return ref;
 }
 
 StradaValue* strada_bless(StradaValue *ref, const char *package) {
@@ -12844,6 +13103,11 @@ void strada_overload_register(const char *package, const char *op, StradaMethod 
     OverloadEntry *e = &pkg->overloads[pkg->overload_count++];
     strncpy(e->op, op, sizeof(e->op) - 1);
     e->op[sizeof(e->op) - 1] = '\0';
+    /* Track stringify overloads globally so strada_to_str_buf can skip the
+     * lookup entirely when no class has registered one. */
+    if (op[0] == '"' && op[1] == '"' && op[2] == '\0') {
+        oop_any_stringify_overloads = 1;
+    }
     e->func = func;
 }
 

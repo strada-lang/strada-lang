@@ -310,6 +310,7 @@ typedef struct StradaMetadata {
     StradaValue *tied_obj;   /* Implementation object (NULL when !is_tied) */
     uint8_t is_tied;         /* 0 = normal, 1 = tied */
     uint8_t is_weak;         /* 0 = strong reference, 1 = weak reference */
+    uint8_t blessed_immortal;/* 1 = blessed_package was set via cached path (skip intern_release) */
 } StradaMetadata;
 
 /* Main value structure - like Perl's SV (32 bytes) */
@@ -381,6 +382,8 @@ typedef struct StradaString {
 
 /* StradaString operations */
 StradaString *ss_new(const char *s, uint32_t len, uint32_t hash);
+StradaString *strada_intern_attr_ss(const char *key, unsigned int hash);
+char *strada_intern_pkg_name(const char *s);
 void ss_decref_slow(StradaString *ss);  /* handles pool return or free */
 static inline void ss_incref(StradaString *ss) { if (ss) ss->refcount++; }
 static inline void ss_decref(StradaString *ss) { if (ss && --ss->refcount == 0) ss_decref_slow(ss); }
@@ -657,6 +660,16 @@ typedef struct {
 extern StradaTryContext strada_try_stack[STRADA_MAX_TRY_DEPTH];
 extern int strada_try_depth;
 extern char *strada_exception_msg;
+extern StradaValue *strada_exception_value;
+/* Hook for `use overload '""' => sub { ... }`. Perla sets this in perla_init.
+ * Returns a strdup'd string when an overload sub is installed for `sv`'s
+ * blessed package, or NULL to fall through to the default REF(0x…) format. */
+extern char *(*strada_overload_stringify_hook)(StradaValue *sv);
+/* Hooks for `0+` (numeric) and `bool` overloads.
+ * numeric: returns 1 + sets *out if overload fired, else 0.
+ * bool:    returns -1 (no overload), 0 (false), 1 (true). */
+extern int (*strada_overload_numeric_hook)(StradaValue *sv, double *out);
+extern int (*strada_overload_bool_hook)(StradaValue *sv);
 
 __attribute__((noreturn)) void strada_throw(const char *msg);
 __attribute__((noreturn)) void strada_throw_value(StradaValue *sv);
@@ -665,7 +678,7 @@ void strada_clear_exception(void);
 int strada_in_try_block(void);
 
 /* Pending cleanup for function call args and local vars in try blocks */
-#define STRADA_MAX_PENDING_CLEANUP 64
+#define STRADA_MAX_PENDING_CLEANUP 4096
 extern StradaValue *strada_pending_cleanup[STRADA_MAX_PENDING_CLEANUP];
 extern int strada_pending_cleanup_count;
 static inline void strada_cleanup_push(StradaValue *sv) {
@@ -782,6 +795,7 @@ StradaValue* strada_hash_to_flat_array(StradaValue *hash); /* Convert hash to fl
 /* OOP - Blessed references (like Perl's bless) */
 typedef StradaValue* (*StradaMethod)(StradaValue *self, StradaValue *args);
 StradaValue* strada_bless(StradaValue *ref, const char *package); /* Bless ref into package, returns ref */
+StradaValue* strada_bless_cached(StradaValue *ref, char *interned_pkg_name);
 StradaValue* strada_blessed(StradaValue *ref);                  /* Get package name or undef */
 void strada_set_package(const char *package);                   /* Set current package context */
 const char* strada_current_package(void);                       /* Get current package */
@@ -1486,6 +1500,20 @@ static inline StradaValue* strada_hv_fetch_owned_ph(StradaValue *sv, const char 
     StradaValue *result = strada_hash_get_with_hash(strada_deref_hash(sv), key, hash);
     strada_incref(result);
     return result;
+}
+/* Pre-hashed int fetch: returns int64_t directly, skipping StradaValue temp +
+ * incref/decref. Used by inline int accessors (e.g. $self->x()) where the
+ * accessor's has-attr is declared int. Returns 0 for missing/undef keys. */
+static inline int64_t strada_hv_fetch_int_ph(StradaValue *sv, const char *key, unsigned int hash) {
+    if (STRADA_IS_TAGGED_INT(sv)) return 0;
+    if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) {
+        StradaValue *r = strada_tied_hash_fetch(sv, key);
+        int64_t v = strada_to_int(r);
+        strada_decref(r);
+        return v;
+    }
+    StradaValue *v = strada_hash_get_with_hash(strada_deref_hash(sv), key, hash);
+    return strada_to_int(v);
 }
 static inline void strada_hv_store(StradaValue *sv, const char *key, StradaValue *val) {
     if (!sv || STRADA_IS_TAGGED_INT(sv)) return;

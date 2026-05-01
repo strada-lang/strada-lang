@@ -537,6 +537,57 @@ func has_method_modifier(scalar $cg, str $method) int {
     return 0;
 }
 
+# Compile-time class-hierarchy walk: is $child_pkg a subclass of (or equal to)
+# $target_pkg? UNIVERSAL is the implicit root (matches anything blessed).
+# Used to constant-fold $obj->isa("X") when $obj's class is known statically.
+func is_subclass_compile_time(scalar $cg, str $child_pkg, str $target_pkg, int $depth) int {
+    if ($child_pkg eq $target_pkg) { return 1; }
+    if ($target_pkg eq "UNIVERSAL") { return 1; }
+    if ($depth > 32) { return 0; }
+    my scalar $inh = $cg->{"inherits"};
+    my int $ic = $cg->{"inherit_count"};
+    my int $i = 0;
+    while ($i < $ic) {
+        my str $c = $inh->[$i]->{"child"};
+        if ($c eq $child_pkg) {
+            my str $p = $inh->[$i]->{"parent"};
+            if (is_subclass_compile_time($cg, $p, $target_pkg, $depth + 1) == 1) {
+                return 1;
+            }
+        }
+        $i = $i + 1;
+    }
+    return 0;
+}
+
+# Two zero-arg accessor calls structurally equal? Compares method name and a
+# NODE_VARIABLE receiver by name. Used by the CSE peephole — within a single
+# expression there's no intervening write, so two reads of the same accessor on
+# the same receiver variable must yield the same value.
+func accessor_call_eq(scalar $a, scalar $b) int {
+    if (!$a || !$b) { return 0; }
+    if ($a->{"type"} != NODE_METHOD_CALL() || $b->{"type"} != NODE_METHOD_CALL()) { return 0; }
+    if ($a->{"arg_count"} != 0 || $b->{"arg_count"} != 0) { return 0; }
+    if ($a->{"method"} ne $b->{"method"}) { return 0; }
+    my scalar $ar = $a->{"base_object"};
+    if (!$ar) { $ar = $a->{"object"}; }
+    my scalar $br = $b->{"base_object"};
+    if (!$br) { $br = $b->{"object"}; }
+    if (!$ar || !$br) { return 0; }
+    if ($ar->{"type"} != NODE_VARIABLE() || $br->{"type"} != NODE_VARIABLE()) { return 0; }
+    if ($ar->{"name"} ne $br->{"name"}) { return 0; }
+    return 1;
+}
+
+# Is this expression a zero-arg call to an inline int-typed has accessor?
+func is_inline_int_accessor_call(scalar $cg, scalar $expr) int {
+    if (!$expr) { return 0; }
+    if ($expr->{"type"} != NODE_METHOD_CALL()) { return 0; }
+    if ($expr->{"arg_count"} != 0) { return 0; }
+    if (length(is_inline_accessor($cg, $expr->{"method"})) == 0) { return 0; }
+    return expr_is_int_typed($cg, $expr);
+}
+
 # Check if a zero-arg method call can be inlined as a direct hash access.
 # Returns the attribute name if inlineable, empty string otherwise.
 func is_inline_accessor(scalar $cg, str $method) str {
@@ -1949,11 +2000,20 @@ func emit_int_operand(scalar $cg, scalar $expr) void {
         # skipping intermediate StradaValue creation
         my str $op = $expr->{"op"};
         if ($op eq "+" || $op eq "-" || $op eq "*") {
-            emit($cg, "(");
-            emit_int_operand($cg, $expr->{"left"});
-            emit($cg, " " . $op . " ");
-            emit_int_operand($cg, $expr->{"right"});
-            emit($cg, ")");
+            # CSE peephole: same inline int accessor on both sides — fetch once.
+            if (is_inline_int_accessor_call($cg, $expr->{"left"}) == 1 && accessor_call_eq($expr->{"left"}, $expr->{"right"}) == 1) {
+                my int $cseid = $cg->{"tmp_counter"} + 0;
+                $cg->{"tmp_counter"} = $cseid + 1;
+                emit($cg, "({ int64_t __cse" . $cseid . " = ");
+                emit_int_operand($cg, $expr->{"left"});
+                emit($cg, "; __cse" . $cseid . " " . $op . " __cse" . $cseid . "; })");
+            } else {
+                emit($cg, "(");
+                emit_int_operand($cg, $expr->{"left"});
+                emit($cg, " " . $op . " ");
+                emit_int_operand($cg, $expr->{"right"});
+                emit($cg, ")");
+            }
         } else {
             # Non-inlineable op: fall through to generic handler
             if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $expr) == 1) {
@@ -1970,6 +2030,23 @@ func emit_int_operand(scalar $cg, scalar $expr) void {
         emit($cg, "strada_to_int(");
         gen_expression($cg, $expr);
         emit($cg, ")");
+    } elsif ($type == NODE_METHOD_CALL() && $expr->{"arg_count"} == 0 && length(is_inline_accessor($cg, $expr->{"method"})) > 0 && expr_is_int_typed($cg, $expr) == 1) {
+        # Inline int accessor in int context: emit strada_hv_fetch_int_ph directly,
+        # returning int64_t with no StradaValue temp / incref / decref.
+        my str $imethod = $expr->{"method"};
+        my int $ihash = djb2_hash_32($imethod);
+        my scalar $itarget = $expr->{"base_object"};
+        if (!$itarget) { $itarget = $expr->{"object"}; }
+        my int $itarget_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $itarget) == 1;
+        if ($itarget_cleanup == 1) {
+            emit($cg, "({ StradaValue *__iao = ");
+            gen_expression($cg, $itarget);
+            emit($cg, "; int64_t __iar = strada_hv_fetch_int_ph(__iao, \"" . $imethod . "\", " . $ihash . "u); strada_decref(__iao); __iar; })");
+        } else {
+            emit($cg, "strada_hv_fetch_int_ph(");
+            gen_expression($cg, $itarget);
+            emit($cg, ", \"" . $imethod . "\", " . $ihash . "u)");
+        }
     } else {
         # Check if expression is a function call returning int — these are guaranteed
         # to produce tagged ints (codegen uses STRADA_MAKE_TAGGED_INT for int returns).
@@ -3204,11 +3281,19 @@ func gen_expression(scalar $cg, scalar $expr) void {
 
         if ($op eq "+") {
             if ($cg->{"has_overloads"} == 0 && expr_is_int_typed($cg, $expr->{"left"}) == 1 && expr_is_int_typed($cg, $expr->{"right"}) == 1) {
-                emit($cg, "STRADA_MAKE_TAGGED_INT(");
-                emit_int_operand($cg, $expr->{"left"});
-                emit($cg, " + ");
-                emit_int_operand($cg, $expr->{"right"});
-                emit($cg, ")");
+                if (is_inline_int_accessor_call($cg, $expr->{"left"}) == 1 && accessor_call_eq($expr->{"left"}, $expr->{"right"}) == 1) {
+                    my int $cseid = $cg->{"tmp_counter"} + 0;
+                    $cg->{"tmp_counter"} = $cseid + 1;
+                    emit($cg, "STRADA_MAKE_TAGGED_INT(({ int64_t __cse" . $cseid . " = ");
+                    emit_int_operand($cg, $expr->{"left"});
+                    emit($cg, "; __cse" . $cseid . " + __cse" . $cseid . "; }))");
+                } else {
+                    emit($cg, "STRADA_MAKE_TAGGED_INT(");
+                    emit_int_operand($cg, $expr->{"left"});
+                    emit($cg, " + ");
+                    emit_int_operand($cg, $expr->{"right"});
+                    emit($cg, ")");
+                }
             } else {
                 # Runtime tagged int fast-path for scalar + scalar
                 my int $uid = $cg->{"tmp_counter"} + 0;
@@ -3228,11 +3313,20 @@ func gen_expression(scalar $cg, scalar $expr) void {
             }
         } elsif ($op eq "-") {
             if ($cg->{"has_overloads"} == 0 && expr_is_int_typed($cg, $expr->{"left"}) == 1 && expr_is_int_typed($cg, $expr->{"right"}) == 1) {
-                emit($cg, "STRADA_MAKE_TAGGED_INT(");
-                emit_int_operand($cg, $expr->{"left"});
-                emit($cg, " - ");
-                emit_int_operand($cg, $expr->{"right"});
-                emit($cg, ")");
+                if (is_inline_int_accessor_call($cg, $expr->{"left"}) == 1 && accessor_call_eq($expr->{"left"}, $expr->{"right"}) == 1) {
+                    # x - x = 0 (still emit, in case user wants typed result)
+                    my int $cseid = $cg->{"tmp_counter"} + 0;
+                    $cg->{"tmp_counter"} = $cseid + 1;
+                    emit($cg, "STRADA_MAKE_TAGGED_INT(({ int64_t __cse" . $cseid . " = ");
+                    emit_int_operand($cg, $expr->{"left"});
+                    emit($cg, "; __cse" . $cseid . " - __cse" . $cseid . "; }))");
+                } else {
+                    emit($cg, "STRADA_MAKE_TAGGED_INT(");
+                    emit_int_operand($cg, $expr->{"left"});
+                    emit($cg, " - ");
+                    emit_int_operand($cg, $expr->{"right"});
+                    emit($cg, ")");
+                }
             } else {
                 my int $uid = $cg->{"tmp_counter"} + 0;
                 $cg->{"tmp_counter"} = $uid + 1;
@@ -3251,11 +3345,19 @@ func gen_expression(scalar $cg, scalar $expr) void {
             }
         } elsif ($op eq "*") {
             if ($cg->{"has_overloads"} == 0 && expr_is_int_typed($cg, $expr->{"left"}) == 1 && expr_is_int_typed($cg, $expr->{"right"}) == 1) {
-                emit($cg, "STRADA_MAKE_TAGGED_INT(");
-                emit_int_operand($cg, $expr->{"left"});
-                emit($cg, " * ");
-                emit_int_operand($cg, $expr->{"right"});
-                emit($cg, ")");
+                if (is_inline_int_accessor_call($cg, $expr->{"left"}) == 1 && accessor_call_eq($expr->{"left"}, $expr->{"right"}) == 1) {
+                    my int $cseid = $cg->{"tmp_counter"} + 0;
+                    $cg->{"tmp_counter"} = $cseid + 1;
+                    emit($cg, "STRADA_MAKE_TAGGED_INT(({ int64_t __cse" . $cseid . " = ");
+                    emit_int_operand($cg, $expr->{"left"});
+                    emit($cg, "; __cse" . $cseid . " * __cse" . $cseid . "; }))");
+                } else {
+                    emit($cg, "STRADA_MAKE_TAGGED_INT(");
+                    emit_int_operand($cg, $expr->{"left"});
+                    emit($cg, " * ");
+                    emit_int_operand($cg, $expr->{"right"});
+                    emit($cg, ")");
+                }
             } else {
                 my int $uid = $cg->{"tmp_counter"} + 0;
                 $cg->{"tmp_counter"} = $uid + 1;
@@ -11561,14 +11663,25 @@ func gen_expression(scalar $cg, scalar $expr) void {
                     }
                     emit($cg, "({ StradaValue *__ct_h = strada_new_hash_presized(" . $total_attrs . "); ");
                     emit($cg, "StradaValue *__ct_ref = strada_ref_create(__ct_h); strada_decref(__ct_h); ");
-                    emit($cg, "strada_bless(__ct_ref, \"" . $pkg_name . "\"); ");
+                    # Cache the interned package-name pointer at the call site —
+                    # skips strada_intern_str's bucket walk and oop_find_package
+                    # on every construction.
+                    my int $bn_uid = $cg->{"tmp_counter"} + 0;
+                    $cg->{"tmp_counter"} = $bn_uid + 1;
+                    emit($cg, "{ static char *__pkg_n" . $bn_uid . " = NULL; if (__builtin_expect(!__pkg_n" . $bn_uid . ", 0)) __pkg_n" . $bn_uid . " = strada_intern_pkg_name(\"" . $pkg_name . "\"); strada_bless_cached(__ct_ref, __pkg_n" . $bn_uid . "); } ");
                     my int $ci = 0;
                     while ($ci < $arg_count) {
                         my str $key_val = $args->[$ci]->{"value"};
                         my int $key_hash = djb2_hash_32($key_val);
-                        emit($cg, "strada_hash_set_take_ph(__ct_ref->value.rv->value.hv, \"" . $key_val . "\", " . $key_hash . "u, ");
+                        # Use a per-call-site cached interned StradaString singleton
+                        # to skip per-construction ss_new/strlen/memcpy overhead.
+                        my int $cs_uid = $cg->{"tmp_counter"} + 0;
+                        $cg->{"tmp_counter"} = $cs_uid + 1;
+                        emit($cg, "({ static StradaString *__attr_ss" . $cs_uid . " = NULL; ");
+                        emit($cg, "if (__builtin_expect(!__attr_ss" . $cs_uid . ", 0)) __attr_ss" . $cs_uid . " = strada_intern_attr_ss(\"" . $key_val . "\", " . $key_hash . "u); ");
+                        emit($cg, "strada_hash_set_ss_take(__ct_ref->value.rv->value.hv, __attr_ss" . $cs_uid . ", ");
                         gen_expression($cg, $args->[$ci + 1]);
-                        emit($cg, "); ");
+                        emit($cg, "); }); ");
                         $ci = $ci + 2;
                     }
                     # Apply defaults from has_attrs (own + parent packages)
@@ -13339,6 +13452,31 @@ func gen_expression(scalar $cg, scalar $expr) void {
         my str $method = $expr->{"method"};
         my scalar $obj = $expr->{"object"};
 
+        # Compile-time isa() folding: when receiver's class is statically known
+        # (via known_types) and the target package is a string literal, walk the
+        # inheritance chain at codegen time and emit a constant.
+        if ($method eq "isa" && $arg_count == 1) {
+            my scalar $isa_args = $expr->{"args"};
+            my scalar $isa_target_arg = $isa_args->[0];
+            if ($isa_target_arg && $isa_target_arg->{"type"} == NODE_STR_LITERAL()) {
+                my scalar $isa_recv = $expr->{"base_object"};
+                if (!$isa_recv) { $isa_recv = $obj; }
+                if ($isa_recv && $isa_recv->{"type"} == NODE_VARIABLE()) {
+                    my str $isa_recv_name = escape_c_keyword($isa_recv->{"name"});
+                    my scalar $isa_kt = $cg->{"known_types"};
+                    if ($isa_kt) {
+                        my str $isa_known_pkg = "" . $isa_kt->{$isa_recv_name};
+                        if (length($isa_known_pkg) > 0) {
+                            my str $isa_target_pkg = $isa_target_arg->{"value"};
+                            my int $isa_result = is_subclass_compile_time($cg, $isa_known_pkg, $isa_target_pkg, 0);
+                            emit($cg, "strada_new_int(" . $isa_result . ")");
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
         # Inline accessor optimization: for zero-arg calls to has-attribute getters,
         # emit direct hash access instead of going through strada_method_call.
         # SAFETY: Only inline when inside a same-package method calling $self->accessor()
@@ -13399,14 +13537,17 @@ func gen_expression(scalar $cg, scalar $expr) void {
                     $meth_target = $obj;
                 }
                 my int $obj_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $meth_target) == 1;
+                # Compile-time djb2 hash so accessors skip per-call string hashing,
+                # matching the constructor's strada_hash_set_take_ph scheme.
+                my int $self_acc_hash = djb2_hash_32($method);
                 if ($obj_cleanup == 1) {
                     emit($cg, "({ StradaValue *__iao = ");
                     gen_expression($cg, $meth_target);
-                    emit($cg, "; StradaValue *__iar = strada_hv_fetch_owned(__iao, \"" . $method . "\"); strada_decref(__iao); __iar; })");
+                    emit($cg, "; StradaValue *__iar = strada_hv_fetch_owned_ph(__iao, \"" . $method . "\", " . $self_acc_hash . "u); strada_decref(__iao); __iar; })");
                 } else {
-                    emit($cg, "strada_hv_fetch_owned(");
+                    emit($cg, "strada_hv_fetch_owned_ph(");
                     gen_expression($cg, $meth_target);
-                    emit($cg, ", \"" . $method . "\")");
+                    emit($cg, ", \"" . $method . "\", " . $self_acc_hash . "u)");
                 }
                 return;
             }
@@ -13773,16 +13914,19 @@ func gen_expression(scalar $cg, scalar $expr) void {
                     # Check for inline accessor optimization
                     my str $inline_attr = is_inline_accessor($cg, $method);
                     if (length($inline_attr) > 0) {
-                        # Emit strada_hv_fetch_owned(target, "attr") directly
+                        # Emit strada_hv_fetch_owned_ph with compile-time djb2 hash —
+                        # same scheme used by inline constructors, so OOP accessor
+                        # calls skip per-call string hashing.
+                        my int $acc_hash = djb2_hash_32($inline_attr);
                         if ($meth_obj_cleanup == 1) {
                             emit($cg, "({ StradaValue *__acc_obj = ");
                             gen_expression($cg, $meth_target);
-                            emit($cg, "; StradaValue *__acc_res = strada_hv_fetch_owned(__acc_obj, \"");
-                            emit($cg, $inline_attr . "\"); strada_decref(__acc_obj); __acc_res; })");
+                            emit($cg, "; StradaValue *__acc_res = strada_hv_fetch_owned_ph(__acc_obj, \"");
+                            emit($cg, $inline_attr . "\", " . $acc_hash . "u); strada_decref(__acc_obj); __acc_res; })");
                         } else {
-                            emit($cg, "strada_hv_fetch_owned(");
+                            emit($cg, "strada_hv_fetch_owned_ph(");
                             gen_expression($cg, $meth_target);
-                            emit($cg, ", \"" . $inline_attr . "\")");
+                            emit($cg, ", \"" . $inline_attr . "\", " . $acc_hash . "u)");
                         }
                     } else {
                         # Zero args - pass NULL instead of allocating empty pack_args

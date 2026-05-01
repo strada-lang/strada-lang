@@ -181,6 +181,10 @@ typedef struct {
 extern StradaTryContext strada_try_stack[STRADA_MAX_TRY_DEPTH];
 extern int strada_try_depth;
 extern char *strada_exception_msg;
+extern StradaValue *strada_exception_value;
+extern char *(*strada_overload_stringify_hook)(StradaValue *sv);
+extern int (*strada_overload_numeric_hook)(StradaValue *sv, double *out);
+extern int (*strada_overload_bool_hook)(StradaValue *sv);
 
 #define STRADA_TRY_PUSH() (strada_try_depth < STRADA_MAX_TRY_DEPTH ? \
     (strada_try_stack[strada_try_depth].active = 1, &strada_try_stack[strada_try_depth++].buf) : NULL)
@@ -202,6 +206,7 @@ StradaValue* strada_new_array(void);
 StradaValue* strada_new_array_with_capacity(size_t capacity);
 StradaValue* strada_new_hash(void);
 StradaValue* strada_new_hash_presized(int capacity);
+StradaString *strada_intern_attr_ss(const char *key, unsigned int hash);
 StradaValue* strada_new_hash_with_capacity(size_t capacity);
 StradaValue* strada_new_filehandle(FILE *fh);
 StradaValue* strada_new_ref(StradaValue *target, char ref_type);
@@ -539,6 +544,8 @@ StradaValue* strada_tr(StradaValue *sv, const char *search, const char *replace,
  * ============================================================ */
 typedef StradaValue* (*StradaMethod)(StradaValue *self, StradaValue *args);
 StradaValue* strada_bless(StradaValue *ref, const char *package);
+StradaValue* strada_bless_cached(StradaValue *ref, char *interned_pkg_name);
+char *strada_intern_pkg_name(const char *s);
 StradaValue* strada_blessed(StradaValue *ref);
 void strada_set_package(const char *package);
 const char* strada_current_package(void);
@@ -1180,6 +1187,19 @@ static inline StradaValue* strada_hv_fetch_owned_ph(StradaValue *sv, const char 
     StradaValue *result = strada_hash_get_with_hash(strada_deref_hash(sv), key, hash);
     strada_incref(result);
     return result;
+}
+/* Pre-hashed int fetch: returns int64_t directly, skipping StradaValue temp +
+ * incref/decref. Used by inline int accessors. Returns 0 for missing keys. */
+static inline int64_t strada_hv_fetch_int_ph(StradaValue *sv, const char *key, unsigned int hash) {
+    if (STRADA_IS_TAGGED_INT(sv)) return 0;
+    if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) {
+        StradaValue *r = strada_tied_hash_fetch(sv, key);
+        int64_t v = strada_to_int(r);
+        strada_decref(r);
+        return v;
+    }
+    StradaValue *v = strada_hash_get_with_hash(strada_deref_hash(sv), key, hash);
+    return strada_to_int(v);
 }
 static inline void strada_hv_store(StradaValue *sv, const char *key, StradaValue *val) {
     if (!sv || STRADA_IS_TAGGED_INT(sv)) return;

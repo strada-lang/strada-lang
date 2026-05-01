@@ -42,6 +42,16 @@ func lex_current_code(scalar $lexer) int {
     return char_at($lexer->{"source"}, $pos);
 }
 
+# Peek at a future char's code without advancing.
+func lex_peek_code(scalar $lexer, int $offset) int {
+    my int $pos = $lexer->{"pos"} + $offset;
+    my int $len = $lexer->{"length"};
+    if ($pos >= $len) {
+        return 0;
+    }
+    return char_at($lexer->{"source"}, $pos);
+}
+
 # Returns current char as string (for compatibility)
 func lex_current_char(scalar $lexer) str {
     my int $code = lex_current_code($lexer);
