@@ -526,6 +526,7 @@ int strada_regex_match(const char *str, const char *pattern);
 int strada_regex_match_with_capture(const char *str, const char *pattern, const char *flags);
 StradaValue* strada_captures(void);
 StradaValue* strada_capture_var(int n);
+StradaValue* strada_regex_match_list(const char *str, const char *pattern, const char *flags);
 StradaValue* strada_named_captures(void);
 StradaValue* strada_regex_match_all(const char *str, const char *pattern);
 char* strada_regex_replace(const char *str, const char *pattern, const char *replacement, const char *flags);

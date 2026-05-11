@@ -611,6 +611,7 @@ StradaValue* strada_readline(void);
 void strada_printf(const char *format, ...);
 StradaValue* strada_sprintf(const char *format, ...);
 StradaValue* strada_sprintf_sv(StradaValue *format_sv, int arg_count, ...);
+StradaValue* strada_sprintf_sv_arr(StradaValue *format_sv, StradaValue *args_sv);
 void strada_warn(const char *format, ...);
 
 /* File I/O functions */
@@ -758,6 +759,7 @@ int strada_scalar(StradaValue *sv);          /* Scalar context evaluation */
 /* Reference system */
 StradaValue* strada_ref_create(StradaValue *sv);      /* Create reference (shared ownership) */
 StradaValue* strada_ref_create_take(StradaValue *sv); /* Create reference (take ownership) */
+void strada_overwrite_in_place(StradaValue *dst, StradaValue *src);
 StradaValue* strada_ref_deref(StradaValue *ref);      /* Dereference */
 int strada_is_ref(StradaValue *sv);                   /* Check if reference */
 const char* strada_reftype(StradaValue *ref);         /* Get type of referent */
@@ -924,6 +926,11 @@ int strada_regex_match(const char *str, const char *pattern);
 int strada_regex_match_with_capture(const char *str, const char *pattern, const char *flags);
 StradaValue* strada_captures(void);
 StradaValue* strada_capture_var(int n);
+/* List-context match: returns an array.
+ * Match with capture groups → array of capture strings ($1, $2, ...).
+ * Match without capture groups → array containing just integer 1.
+ * No match → empty array. */
+StradaValue* strada_regex_match_list(const char *str, const char *pattern, const char *flags);
 StradaValue* strada_regex_match_all(const char *str, const char *pattern);
 char* strada_regex_replace(const char *str, const char *pattern, const char *replacement, const char *flags);
 char* strada_regex_replace_all(const char *str, const char *pattern, const char *replacement, const char *flags);

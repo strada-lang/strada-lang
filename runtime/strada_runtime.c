@@ -3844,7 +3844,10 @@ StradaValue* strada_sprintf(const char *format, ...) {
 
 /* sprintf_sv - sprintf with StradaValue* arguments
  * Parses format string and converts each arg based on format specifier */
-StradaValue* strada_sprintf_sv(StradaValue *format_sv, int arg_count, ...) {
+/* Internal: format using a pre-collected arg array. */
+static StradaValue* strada_sprintf_sv_args(StradaValue *format_sv,
+                                           StradaValue **arg_arr,
+                                           int collected) {
     char _tb[256];
     const char *format = format_sv ? strada_to_str_buf(format_sv, _tb, sizeof(_tb)) : NULL;
     if (!format) return strada_new_str("");
@@ -3854,8 +3857,7 @@ StradaValue* strada_sprintf_sv(StradaValue *format_sv, int arg_count, ...) {
     char *end = buffer + sizeof(buffer) - 1;
     const char *p = format;
 
-    va_list args;
-    va_start(args, arg_count);
+    int next_seq = 0;  /* index of next sequential (non-positional) arg */
 
     while (*p && out < end) {
         if (*p != '%') {
@@ -3872,6 +3874,23 @@ StradaValue* strada_sprintf_sv(StradaValue *format_sv, int arg_count, ...) {
             *out++ = '%';
             p++;
             continue;
+        }
+
+        /* Optional positional spec: %N$<rest>. POSIX/Perl extension. */
+        int positional = 0;
+        int pos_idx = -1;
+        const char *pos_check = p;
+        if (*pos_check >= '0' && *pos_check <= '9') {
+            int n = 0;
+            while (*pos_check >= '0' && *pos_check <= '9') {
+                n = n * 10 + (*pos_check - '0');
+                pos_check++;
+            }
+            if (*pos_check == '$') {
+                positional = 1;
+                pos_idx = n - 1;  /* 1-indexed in source */
+                p = pos_check + 1;  /* skip "N$" */
+            }
         }
 
         /* Skip flags: -, +, space, #, 0 */
@@ -3904,17 +3923,37 @@ StradaValue* strada_sprintf_sv(StradaValue *format_sv, int arg_count, ...) {
         if (!spec) break;
         p++;
 
-        /* Get next argument if we have one */
+        /* Pick the argument: positional uses pos_idx; otherwise sequential. */
         StradaValue *arg = NULL;
-        if (arg_count > 0) {
-            arg = va_arg(args, StradaValue*);
-            arg_count--;
+        if (positional) {
+            if (pos_idx >= 0 && pos_idx < collected) arg = arg_arr[pos_idx];
+        } else {
+            if (next_seq < collected) arg = arg_arr[next_seq++];
         }
 
-        /* Copy format specifier to temp buffer */
-        size_t spec_len = p - spec_start;
+        /* Build the spec buffer. For positional specs, strip "N$" so we can
+         * pass a single-arg snprintf with the value of `arg` directly. */
         char spec_buf[64];
-        if (spec_len < sizeof(spec_buf)) {
+        size_t spec_len = p - spec_start;
+        if (positional) {
+            /* "%" + remaining spec after "N$" */
+            const char *after_dollar = strchr(spec_start, '$');
+            if (after_dollar && after_dollar < p) {
+                size_t pre = 1; /* the leading '%' */
+                size_t rest = (size_t)(p - (after_dollar + 1));
+                if (pre + rest < sizeof(spec_buf)) {
+                    spec_buf[0] = '%';
+                    memcpy(spec_buf + 1, after_dollar + 1, rest);
+                    spec_buf[1 + rest] = '\0';
+                } else {
+                    strcpy(spec_buf, "%s");
+                    spec = 's';
+                }
+            } else {
+                strcpy(spec_buf, "%s");
+                spec = 's';
+            }
+        } else if (spec_len < sizeof(spec_buf)) {
             memcpy(spec_buf, spec_start, spec_len);
             spec_buf[spec_len] = '\0';
         } else {
@@ -3943,30 +3982,21 @@ StradaValue* strada_sprintf_sv(StradaValue *format_sv, int arg_count, ...) {
             case 'x':
             case 'X': {
                 int64_t val = arg ? strada_to_int(arg) : 0;
-                /* Build format string preserving flags/width but using lld */
-                char int_fmt[64] = "%";
-                char *fp = int_fmt + 1;
-                const char *sp = spec_start + 1;  /* skip % */
-                /* Copy flags */
-                while (*sp == '-' || *sp == '+' || *sp == ' ' || *sp == '#' || *sp == '0') {
-                    *fp++ = *sp++;
+                /* spec_buf already contains "%<flags><width><.precision><spec>".
+                 * Insert "ll" before the trailing spec character so we pass a
+                 * (long long). Works for both positional-stripped and direct
+                 * specs since spec_buf is a single-arg snprintf format. */
+                char int_fmt[80];
+                size_t sl = strlen(spec_buf);
+                if (sl + 2 < sizeof(int_fmt) && sl > 0) {
+                    memcpy(int_fmt, spec_buf, sl - 1);
+                    int_fmt[sl - 1] = 'l';
+                    int_fmt[sl    ] = 'l';
+                    int_fmt[sl + 1] = spec_buf[sl - 1];
+                    int_fmt[sl + 2] = '\0';
+                } else {
+                    snprintf(int_fmt, sizeof(int_fmt), "%%ll%c", spec);
                 }
-                /* Copy width */
-                while (*sp >= '0' && *sp <= '9') {
-                    *fp++ = *sp++;
-                }
-                /* Copy precision */
-                if (*sp == '.') {
-                    *fp++ = *sp++;
-                    while (*sp >= '0' && *sp <= '9') {
-                        *fp++ = *sp++;
-                    }
-                }
-                /* Add ll modifier and specifier */
-                *fp++ = 'l';
-                *fp++ = 'l';
-                *fp++ = spec;
-                *fp = '\0';
                 snprintf(temp, sizeof(temp), int_fmt, (long long)val);
                 break;
             }
@@ -3990,7 +4020,23 @@ StradaValue* strada_sprintf_sv(StradaValue *format_sv, int arg_count, ...) {
             case 's': {
                 char _tb2[256];
                 const char *s = arg ? strada_to_str_buf(arg, _tb2, sizeof(_tb2)) : NULL;
-                snprintf(temp, sizeof(temp), spec_buf, s ? s : "");
+                if (!s) s = "";
+                /* Fast path: if there's no width/precision and no flags
+                 * (spec_buf == "%s"), emit `s` directly to the output buffer
+                 * without going through the 1024-byte `temp` staging area.
+                 * Required for DBIC-sized assemblers that build 2k+ char
+                 * parser sources via sprintf with many %s args. */
+                if (spec_buf[0] == '%' && spec_buf[1] == 's' && spec_buf[2] == '\0') {
+                    size_t slen = strlen(s);
+                    if (out + slen < end) { memcpy(out, s, slen); out += slen; }
+                    else if (out < end) {
+                        size_t avail = (size_t)(end - out);
+                        memcpy(out, s, avail);
+                        out += avail;
+                    }
+                    continue;  /* skip the temp[]→out copy below */
+                }
+                snprintf(temp, sizeof(temp), spec_buf, s);
                 break;
             }
             case 'p': {
@@ -4013,9 +4059,47 @@ StradaValue* strada_sprintf_sv(StradaValue *format_sv, int arg_count, ...) {
     }
 
     *out = '\0';
-    va_end(args);
 
     return strada_new_str(buffer);
+}
+
+/* Public varargs wrapper. */
+StradaValue* strada_sprintf_sv(StradaValue *format_sv, int arg_count, ...) {
+    StradaValue *arg_arr[64];
+    int collected = 0;
+    {
+        va_list collect;
+        va_start(collect, arg_count);
+        while (collected < arg_count && collected < (int)(sizeof(arg_arr)/sizeof(arg_arr[0]))) {
+            arg_arr[collected++] = va_arg(collect, StradaValue*);
+        }
+        va_end(collect);
+    }
+    return strada_sprintf_sv_args(format_sv, arg_arr, collected);
+}
+
+/* Public flat-array wrapper — flattens any STRADA_ARRAY entries into the
+ * arg list before formatting. Used for sprintf with `(LIST) x N` args. */
+StradaValue* strada_sprintf_sv_arr(StradaValue *format_sv, StradaValue *args_sv) {
+    StradaValue *arg_arr[256];
+    int collected = 0;
+    if (args_sv && !STRADA_IS_TAGGED_INT(args_sv) && args_sv->type == STRADA_ARRAY) {
+        StradaArray *av = args_sv->value.av;
+        int n = av ? (int)strada_array_length(av) : 0;
+        for (int i = 0; i < n && collected < (int)(sizeof(arg_arr)/sizeof(arg_arr[0])); i++) {
+            StradaValue *e = strada_array_get(av, i);
+            if (e && !STRADA_IS_TAGGED_INT(e) && e->type == STRADA_ARRAY) {
+                StradaArray *iav = e->value.av;
+                int m = iav ? (int)strada_array_length(iav) : 0;
+                for (int j = 0; j < m && collected < (int)(sizeof(arg_arr)/sizeof(arg_arr[0])); j++) {
+                    arg_arr[collected++] = strada_array_get(iav, j);
+                }
+            } else {
+                arg_arr[collected++] = e;
+            }
+        }
+    }
+    return strada_sprintf_sv_args(format_sv, arg_arr, collected);
 }
 
 /* ===== FILE I/O FUNCTIONS ===== */
@@ -4981,6 +5065,22 @@ void strada_throw(const char *msg) {
     }
 
     if (strada_in_try_block()) {
+        if (getenv("PERLA_DIE_TRACE")) {
+            fprintf(stderr, "  [throw msg=\"%s\" try_depth=%d]\n", strada_exception_msg ? strada_exception_msg : "(null)", strada_try_depth);
+            typedef struct { const char *package; const char *subname; const char *file; int line; } _PerlaCF;
+            extern int perla_call_depth __attribute__((weak));
+            extern _PerlaCF perla_call_stack[] __attribute__((weak));
+            int *__pcd = &perla_call_depth;
+            if (__pcd && perla_call_stack) {
+                int n = perla_call_depth;
+                int from = 0;
+                for (int i = n - 1; i >= from; i--) {
+                    fprintf(stderr, "    perla[%d] %s::%s\n", i,
+                            perla_call_stack[i].package ? perla_call_stack[i].package : "?",
+                            perla_call_stack[i].subname ? perla_call_stack[i].subname : "?");
+                }
+            }
+        }
         /* Jump to the nearest catch block */
         longjmp(strada_try_stack[strada_try_depth - 1].buf, 1);
     } else {
@@ -5114,14 +5214,16 @@ void strada_die(const char *format, ...) {
 
     /* "Can't locate Foo.pm in @INC" — Perl wraps `require` in
      * `eval { require Foo; }` to make missing-module loads recoverable.
-     * perla's module-init context sometimes isn't seen as in-try by
-     * the runtime even though the Perl-level code IS in an eval, so
-     * the require's strada_die exits the program. Treat this specific
-     * error as recoverable (set $@ via perla_eval_error which we already
-     * filled in the require path, and just return) — mirrors Perl's
-     * eval-catchable behavior. */
+     * If we're inside a real try block, throw normally so eval{} catches
+     * the failure and $@ holds the real "Can't locate..." message.
+     * If we're NOT in any try block (module-init context, code that
+     * legitimately can't recover), don't exit(1) — silently return and
+     * leave perla_eval_error in place for an outer Perl eval to find. */
     if (buffer[0] && strncmp(buffer, "Can't locate ", 13) == 0
         && strstr(buffer, " in @INC")) {
+        if (strada_in_try_block()) {
+            strada_throw(buffer);  /* longjmp to the catch */
+        }
         return;
     }
 
@@ -6113,6 +6215,33 @@ StradaValue* strada_capture_var(int n) {
     return strada_new_undef();
 }
 
+/* List-context match: returns the captures excluding $0.
+ * - Match with capture groups → ($1, $2, ...)
+ * - Match without capture groups → (1)
+ * - No match → ()
+ * (See perlop "Matching in List Context".) */
+StradaValue* strada_regex_match_list(const char *str, const char *pattern, const char *flags) {
+    int matched = strada_regex_match_with_capture(str, pattern, flags);
+    StradaValue *out = strada_new_array();
+    if (!matched) return out;
+    if (last_regex_captures && last_regex_captures->type == STRADA_ARRAY) {
+        StradaArray *src = last_regex_captures->value.av;
+        StradaArray *dst = out->value.av;
+        /* src has [$0, $1, $2, ...]. Skip $0. */
+        if (src && src->size > 1) {
+            for (size_t i = 1; i < src->size; i++) {
+                StradaValue *v = src->elements[src->head + i];
+                if (v) strada_incref(v);
+                strada_array_push_take(dst, v ? v : strada_new_undef());
+            }
+            return out;
+        }
+    }
+    /* No capture groups in pattern → return (1) on match. */
+    strada_array_push_take(out->value.av, strada_new_int(1));
+    return out;
+}
+
 StradaValue* strada_named_captures(void) {
     if (last_named_captures) {
         strada_incref(last_named_captures);
@@ -6916,6 +7045,27 @@ StradaValue* strada_capture_var(int n) {
         }
     }
     return strada_new_undef();
+}
+
+/* POSIX fallback: same semantics as PCRE2 path. */
+StradaValue* strada_regex_match_list(const char *str, const char *pattern, const char *flags) {
+    int matched = strada_regex_match_with_capture(str, pattern, flags);
+    StradaValue *out = strada_new_array();
+    if (!matched) return out;
+    if (last_regex_captures && last_regex_captures->type == STRADA_ARRAY) {
+        StradaArray *src = last_regex_captures->value.av;
+        StradaArray *dst = out->value.av;
+        if (src && src->size > 1) {
+            for (size_t i = 1; i < src->size; i++) {
+                StradaValue *v = src->elements[src->head + i];
+                if (v) strada_incref(v);
+                strada_array_push_take(dst, v ? v : strada_new_undef());
+            }
+            return out;
+        }
+    }
+    strada_array_push_take(out->value.av, strada_new_int(1));
+    return out;
 }
 
 StradaValue* strada_regex_match_all(const char *str, const char *pattern) {
@@ -11095,6 +11245,87 @@ StradaValue* strada_ref_create_take(StradaValue *sv) {
 
     /* No incref - caller donates their refcount */
     return ref;
+}
+
+/* In-place overwrite: replace `dst`'s type/value with src's, releasing
+ * dst's old internals. dst remains the same StradaValue pointer, so all
+ * existing aliases (other StradaValue* slots that point to dst, refs
+ * with rv==dst) see the new value too. This is the semantics Perl
+ * needs for `$$ref = X`: the underlying scalar has new content, and
+ * both `$val` and `$$ref` (which share storage) see it.
+ *
+ * Refcount: we don't change dst's refcount. We incref src so dst's new
+ * data participates in src's lifetime, then any callers' decref of src
+ * is the caller's concern. */
+void strada_overwrite_in_place(StradaValue *dst, StradaValue *src) {
+    if (!dst || STRADA_IS_TAGGED_INT(dst)) return;
+
+    /* Release dst's existing type-specific internals. */
+    if (dst->type == STRADA_STR && dst->value.pv) {
+        ss_free_pv(dst->value.pv);
+        dst->value.pv = NULL;
+    } else if (dst->type == STRADA_REF && dst->value.rv) {
+        strada_decref(dst->value.rv);
+        dst->value.rv = NULL;
+    }
+    /* For ARRAY/HASH the StradaValue contained a pointer to the av/hv
+     * struct; we don't own it exclusively when stored via aliasing,
+     * so we just clear the pointer rather than freeing. */
+
+    /* Copy src's contents into dst. Tagged int case: store the unboxed
+     * int as STRADA_INT on dst (since dst is a heap value, not a tagged
+     * pointer). */
+    if (STRADA_IS_TAGGED_INT(src)) {
+        dst->type = STRADA_INT;
+        dst->value.iv = STRADA_TAGGED_INT_VAL(src);
+        return;
+    }
+    if (!src) {
+        dst->type = STRADA_UNDEF;
+        return;
+    }
+    dst->type = src->type;
+    switch (src->type) {
+        case STRADA_INT:
+            dst->value.iv = src->value.iv;
+            break;
+        case STRADA_NUM:
+            dst->value.nv = src->value.nv;
+            break;
+        case STRADA_STR:
+            if (src->value.pv) {
+                /* Take an independent copy so dst owns its string. */
+                dst->value.pv = ss_alloc_pv(src->value.pv, STRADA_STR_BYTELEN(src));
+                dst->struct_size = STRADA_STR_BYTELEN(src);
+            } else {
+                dst->value.pv = NULL;
+                dst->struct_size = 0;
+            }
+            break;
+        case STRADA_REF:
+            if (src->value.rv) {
+                strada_incref(src->value.rv);
+                dst->value.rv = src->value.rv;
+            } else {
+                dst->value.rv = NULL;
+            }
+            break;
+        case STRADA_ARRAY:
+        case STRADA_HASH:
+        case STRADA_CLOSURE:
+        case STRADA_CPOINTER:
+        case STRADA_FILEHANDLE:
+        case STRADA_REGEX:
+            /* For composite types, the src owns the underlying object.
+             * We share the pointer (alias semantics). The caller is
+             * responsible for src's refcount. We can't safely deep-copy
+             * these; aliasing is the standard Perl behavior anyway. */
+            dst->value = src->value;
+            break;
+        default:
+            dst->value = src->value;
+            break;
+    }
 }
 
 StradaValue* strada_ref_deref(StradaValue *ref) {
