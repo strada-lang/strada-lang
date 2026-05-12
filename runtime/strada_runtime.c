@@ -998,7 +998,11 @@ double strada_to_num(StradaValue *sv) {
                 double d = 0.0;
                 if (strada_overload_numeric_hook(sv, &d)) return d;
             }
-            return sv->value.rv ? 1.0 : 0.0;  /* Ref is truthy if non-null */
+            /* Refs in numeric context: return the address (as a double).
+             * Perl semantics — `$h1 == $h2` compares addresses, so two
+             * distinct hashrefs must compare unequal. Previously returning
+             * 1.0 meant ALL refs compared equal numerically. */
+            return sv->value.rv ? (double)(intptr_t)sv->value.rv : 0.0;
         case STRADA_UNDEF:
         default:
             return 0.0;
@@ -3689,6 +3693,27 @@ void strada_print(StradaValue *sv) {
         fflush(stdout);
         return;
     }
+    /* Arrays: flatten — print each element separated by $, (default "").
+     * Without this, `print reverse(@a)` printed empty (the array
+     * stringified to ""); reference Perl flattens print's list args. */
+    if (sv && !STRADA_IS_TAGGED_INT(sv) && sv->type == STRADA_ARRAY) {
+        StradaArray *av = sv->value.av;
+        if (av) {
+            for (size_t i = 0; i < av->size; i++) {
+                StradaValue *e = av->elements[av->head + i];
+                if (e && !STRADA_IS_TAGGED_INT(e) && e->type == STRADA_REF) {
+                    char *es = strada_to_str(e);
+                    if (es) { fputs(es, stdout); free(es); }
+                } else {
+                    char _tb[256];
+                    const char *es = strada_to_str_buf(e, _tb, sizeof(_tb));
+                    fputs(es, stdout);
+                }
+            }
+        }
+        fflush(stdout);
+        return;
+    }
     char _tb[256];
     const char *str = strada_to_str_buf(sv, _tb, sizeof(_tb));
     printf("%s", str);
@@ -6221,13 +6246,44 @@ StradaValue* strada_capture_var(int n) {
  * - No match → ()
  * (See perlop "Matching in List Context".) */
 StradaValue* strada_regex_match_list(const char *str, const char *pattern, const char *flags) {
-    int matched = strada_regex_match_with_capture(str, pattern, flags);
     StradaValue *out = strada_new_array();
+    StradaArray *dst = out->value.av;
+    /* In list context, /g returns ALL captures across ALL matches
+     * concatenated. Without /g, returns one match's captures (Perl
+     * semantics: "m// in list context"). */
+    int is_global = (flags && strchr(flags, 'g')) ? 1 : 0;
+    if (is_global) {
+        size_t pos = 0;
+        int any = 0;
+        while (strada_regex_match_global(str, pattern, flags, &pos)) {
+            any = 1;
+            if (last_regex_captures && last_regex_captures->type == STRADA_ARRAY) {
+                StradaArray *src = last_regex_captures->value.av;
+                /* src has [$0, $1, ...]. If there are capture groups
+                 * (size > 1), append captures. If no groups, append $0. */
+                if (src && src->size > 1) {
+                    for (size_t i = 1; i < src->size; i++) {
+                        StradaValue *v = src->elements[src->head + i];
+                        if (v) strada_incref(v);
+                        strada_array_push_take(dst, v ? v : strada_new_undef());
+                    }
+                } else if (src && src->size == 1) {
+                    StradaValue *v = src->elements[src->head];
+                    if (v) strada_incref(v);
+                    strada_array_push_take(dst, v ? v : strada_new_undef());
+                }
+            }
+        }
+        if (!any) {
+            /* No match — return empty list. */
+        }
+        return out;
+    }
+    /* Non-global: single match's captures. */
+    int matched = strada_regex_match_with_capture(str, pattern, flags);
     if (!matched) return out;
     if (last_regex_captures && last_regex_captures->type == STRADA_ARRAY) {
         StradaArray *src = last_regex_captures->value.av;
-        StradaArray *dst = out->value.av;
-        /* src has [$0, $1, $2, ...]. Skip $0. */
         if (src && src->size > 1) {
             for (size_t i = 1; i < src->size; i++) {
                 StradaValue *v = src->elements[src->head + i];
@@ -6238,7 +6294,7 @@ StradaValue* strada_regex_match_list(const char *str, const char *pattern, const
         }
     }
     /* No capture groups in pattern → return (1) on match. */
-    strada_array_push_take(out->value.av, strada_new_int(1));
+    strada_array_push_take(dst, strada_new_int(1));
     return out;
 }
 
@@ -9993,18 +10049,25 @@ StradaValue* strada_reverse_sv(StradaValue *sv) {
         return result;
     }
 
-    /* Handle array references */
+    /* Arrays: build a NEW reversed array. `reverse @a` in Perl does NOT
+     * mutate @a — it returns a new list. The previous in-place reverse
+     * also corrupted callers' @a out from under them. */
+    StradaArray *src = NULL;
     if (sv->type == STRADA_REF && sv->value.rv && sv->value.rv->type == STRADA_ARRAY) {
-        strada_array_reverse(sv->value.rv->value.av);
-        strada_incref(sv);
-        return sv;
+        src = sv->value.rv->value.av;
+    } else if (sv->type == STRADA_ARRAY) {
+        src = sv->value.av;
     }
-
-    /* Handle arrays directly */
-    if (sv->type == STRADA_ARRAY) {
-        strada_array_reverse(sv->value.av);
-        strada_incref(sv);
-        return sv;
+    if (src) {
+        StradaValue *out = strada_new_array();
+        StradaArray *dst = out->value.av;
+        size_t n = src->size;
+        for (size_t i = 0; i < n; i++) {
+            StradaValue *e = src->elements[src->head + (n - 1 - i)];
+            if (e) strada_incref(e);
+            strada_array_push_take(dst, e ? e : strada_new_undef());
+        }
+        return out;
     }
 
     /* For strings and other types, reverse as string */
