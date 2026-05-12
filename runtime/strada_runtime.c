@@ -3529,7 +3529,14 @@ StradaValue* strada_substr(StradaValue *str, int64_t offset, int64_t length) {
         if (offset < 0) offset = (int64_t)slen + offset;
         if (offset < 0) offset = 0;
         if (offset >= (int64_t)slen) return strada_new_str("");
-        if (length < 0 || offset + length > (int64_t)slen) length = slen - offset;
+        /* Perl: a negative length means "leave that many chars at the
+         * end", so length = (slen - offset) + length (length<0 here). */
+        if (length < 0) {
+            int64_t adj = (int64_t)slen - offset + length;
+            length = adj < 0 ? 0 : adj;
+        } else if (offset + length > (int64_t)slen) {
+            length = slen - offset;
+        }
         return strada_new_str_len(s + offset, (size_t)length);
     }
 
@@ -3551,8 +3558,11 @@ StradaValue* strada_substr(StradaValue *str, int64_t offset, int64_t length) {
         return strada_new_str("");
     }
 
-    /* Handle length */
-    if (length < 0 || offset + length > (int64_t)char_len) {
+    /* Handle length: negative length = "leave that many chars at end". */
+    if (length < 0) {
+        int64_t adj = (int64_t)char_len - offset + length;
+        length = adj < 0 ? 0 : adj;
+    } else if (offset + length > (int64_t)char_len) {
         length = char_len - offset;
     }
 
@@ -4090,13 +4100,26 @@ static StradaValue* strada_sprintf_sv_args(StradaValue *format_sv,
 
 /* Public varargs wrapper. */
 StradaValue* strada_sprintf_sv(StradaValue *format_sv, int arg_count, ...) {
-    StradaValue *arg_arr[64];
+    StradaValue *arg_arr[256];
     int collected = 0;
     {
         va_list collect;
         va_start(collect, arg_count);
-        while (collected < arg_count && collected < (int)(sizeof(arg_arr)/sizeof(arg_arr[0]))) {
-            arg_arr[collected++] = va_arg(collect, StradaValue*);
+        for (int i = 0; i < arg_count && collected < (int)(sizeof(arg_arr)/sizeof(arg_arr[0])); i++) {
+            StradaValue *a = va_arg(collect, StradaValue*);
+            /* Flatten any STRADA_ARRAY arg into individual elements.
+             * Perl: sprintf("%d %d %d", @a) expands @a in list context.
+             * Without this, @a was passed as one arg (the whole array)
+             * and printed as nothing or the array's bogus string. */
+            if (a && !STRADA_IS_TAGGED_INT(a) && a->type == STRADA_ARRAY) {
+                StradaArray *av = a->value.av;
+                int n = av ? (int)strada_array_length(av) : 0;
+                for (int j = 0; j < n && collected < (int)(sizeof(arg_arr)/sizeof(arg_arr[0])); j++) {
+                    arg_arr[collected++] = strada_array_get(av, j);
+                }
+            } else {
+                arg_arr[collected++] = a;
+            }
         }
         va_end(collect);
     }
