@@ -5600,6 +5600,10 @@ int (*strada_overload_numeric_hook)(StradaValue *sv, double *out) = NULL;
 int (*strada_destroy_hook)(StradaValue *obj) = NULL;
 int (*strada_overload_bool_hook)(StradaValue *sv) = NULL;
 
+/* Die-path hooks for embedders. NULL by default. See strada_runtime.h. */
+void (*strada_die_trace_hook)(const char *msg, int try_depth) = NULL;
+int (*strada_die_continue_hook)(void) = NULL;
+
 /* Call stack for stack traces */
 StradaStackFrame strada_call_stack[STRADA_MAX_CALL_DEPTH];
 int strada_call_depth = 0;
@@ -5788,21 +5792,8 @@ void strada_throw(const char *msg) {
     }
 
     if (strada_in_try_block()) {
-        if (getenv("PERLA_DIE_TRACE")) {
-            fprintf(stderr, "  [throw msg=\"%s\" try_depth=%d]\n", strada_exception_msg ? strada_exception_msg : "(null)", strada_try_depth);
-            typedef struct { const char *package; const char *subname; const char *file; int line; } _PerlaCF;
-            extern int perla_call_depth __attribute__((weak));
-            extern _PerlaCF perla_call_stack[] __attribute__((weak));
-            int *__pcd = &perla_call_depth;
-            if (__pcd && perla_call_stack) {
-                int n = perla_call_depth;
-                int from = 0;
-                for (int i = n - 1; i >= from; i--) {
-                    fprintf(stderr, "    perla[%d] %s::%s\n", i,
-                            perla_call_stack[i].package ? perla_call_stack[i].package : "?",
-                            perla_call_stack[i].subname ? perla_call_stack[i].subname : "?");
-                }
-            }
+        if (strada_die_trace_hook) {
+            strada_die_trace_hook(strada_exception_msg, strada_try_depth);
         }
         /* Jump to the nearest catch block */
         longjmp(strada_try_stack[strada_try_depth - 1].buf, 1);
@@ -5878,7 +5869,7 @@ void strada_die_sv(StradaValue *msg) {
             char *s = strada_to_str(msg);
             fprintf(stderr, "%s\n", s ? s : "(unknown)");
             if (s) free(s);
-            if (getenv("PERLA_DIE_WARN")) return;
+            if (strada_die_continue_hook && strada_die_continue_hook()) return;
             exit(1);
         }
         return;
@@ -5895,10 +5886,8 @@ void strada_die_sv(StradaValue *msg) {
         return;  /* empty message — non-fatal */
     } else {
         fprintf(stderr, "%s\n", buffer);
-        if (getenv("PERLA_DIE_TRACE")) {
-            fprintf(stderr, "  [die at try_depth=%d msg=\"%s\"]\n", strada_try_depth, buffer);
-        }
-        if (getenv("PERLA_DIE_WARN")) return;
+        if (strada_die_trace_hook) strada_die_trace_hook(buffer, strada_try_depth);
+        if (strada_die_continue_hook && strada_die_continue_hook()) return;
         exit(1);
     }
 }
@@ -5959,10 +5948,8 @@ void strada_die(const char *format, ...) {
         return;
     } else {
         fprintf(stderr, "%s\n", buffer);
-        if (getenv("PERLA_DIE_TRACE")) {
-            fprintf(stderr, "  [die at try_depth=%d msg=\"%s\"]\n", strada_try_depth, buffer);
-        }
-        if (getenv("PERLA_DIE_WARN")) {
+        if (strada_die_trace_hook) strada_die_trace_hook(buffer, strada_try_depth);
+        if (strada_die_continue_hook && strada_die_continue_hook()) {
             return;
         }
         exit(1);

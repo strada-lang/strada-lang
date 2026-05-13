@@ -697,6 +697,20 @@ extern int (*strada_overload_bool_hook)(StradaValue *sv);
  * handled the call (skip default path), 0 if not. */
 extern int (*strada_destroy_hook)(StradaValue *obj);
 
+/* Optional die-path hooks for embedders. Both default to NULL.
+ *
+ *  strada_die_trace_hook(msg, try_depth) — called on every throw/die
+ *  before unwind. Embedder uses this to log a diagnostic with its own
+ *  call-stack info (e.g. Perla checks $ENV{PERLA_DIE_TRACE} and dumps
+ *  perla_call_stack). The hook does NOT abort or alter control flow.
+ *
+ *  strada_die_continue_hook() — consulted ONLY when a die is fatal
+ *  (no enclosing try block). Returns 1 to suppress exit(1) and warn-
+ *  and-continue instead. Embedder uses this for "limp along to see
+ *  what dies next" debugging (e.g. PERLA_DIE_WARN). */
+extern void (*strada_die_trace_hook)(const char *msg, int try_depth);
+extern int (*strada_die_continue_hook)(void);
+
 __attribute__((noreturn)) void strada_throw(const char *msg);
 __attribute__((noreturn)) void strada_throw_value(StradaValue *sv);
 StradaValue* strada_get_exception(void);
