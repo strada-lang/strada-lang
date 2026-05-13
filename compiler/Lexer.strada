@@ -446,6 +446,60 @@ func lex_read_dq_string(scalar $lexer, int $token_line) scalar {
                 sb_append($sb, chr(11));
             } elsif ($next_code == 101) {
                 sb_append($sb, chr(27));
+            } elsif ($next_code == 120) {
+                # \xHH or \x{HEX} hex byte escape — Perl-compatible
+                lex_advance($lexer);  # consume the 'x'
+                my int $pk_code = lex_current_code($lexer);
+                if ($pk_code == 123) {
+                    # \x{HEX} — multi-digit hex codepoint
+                    lex_advance($lexer);  # consume '{'
+                    my int $hv = 0;
+                    while (!lex_at_end($lexer)) {
+                        my int $hcc = lex_current_code($lexer);
+                        if ($hcc == 125) { last; }
+                        my int $hd = -1;
+                        if ($hcc >= 48 && $hcc <= 57) { $hd = $hcc - 48; }
+                        elsif ($hcc >= 97 && $hcc <= 102) { $hd = $hcc - 87; }
+                        elsif ($hcc >= 65 && $hcc <= 70) { $hd = $hcc - 55; }
+                        else { last; }
+                        $hv = $hv * 16 + $hd;
+                        lex_advance($lexer);
+                    }
+                    if (lex_current_code($lexer) == 125) { lex_advance($lexer); }
+                    if ($hv < 128) {
+                        sb_append($sb, chr($hv));
+                    } elsif ($hv < 2048) {
+                        sb_append($sb, chr(192 + ($hv / 64)));
+                        sb_append($sb, chr(128 + ($hv % 64)));
+                    } elsif ($hv < 65536) {
+                        sb_append($sb, chr(224 + ($hv / 4096)));
+                        sb_append($sb, chr(128 + (($hv / 64) % 64)));
+                        sb_append($sb, chr(128 + ($hv % 64)));
+                    } else {
+                        sb_append($sb, chr(240 + ($hv / 262144)));
+                        sb_append($sb, chr(128 + (($hv / 4096) % 64)));
+                        sb_append($sb, chr(128 + (($hv / 64) % 64)));
+                        sb_append($sb, chr(128 + ($hv % 64)));
+                    }
+                    next;
+                } else {
+                    # \xHH — up to 2 hex digits, single byte
+                    my int $hv = 0;
+                    my int $hi = 0;
+                    while ($hi < 2 && !lex_at_end($lexer)) {
+                        my int $hcc = lex_current_code($lexer);
+                        my int $hd = -1;
+                        if ($hcc >= 48 && $hcc <= 57) { $hd = $hcc - 48; }
+                        elsif ($hcc >= 97 && $hcc <= 102) { $hd = $hcc - 87; }
+                        elsif ($hcc >= 65 && $hcc <= 70) { $hd = $hcc - 55; }
+                        else { last; }
+                        $hv = $hv * 16 + $hd;
+                        lex_advance($lexer);
+                        $hi = $hi + 1;
+                    }
+                    sb_append($sb, chr($hv));
+                    next;
+                }
             } elsif ($next_code == 92) {
                 sb_append($sb, "\\");
             } elsif ($next_code == 34) {
@@ -553,6 +607,59 @@ func lex_read_string(scalar $lexer) str {
             } elsif ($nextch eq "e") {
                 # Escape character
                 $result = $result . chr(27);
+            } elsif ($nextch eq "x") {
+                # \xHH or \x{HEX} hex byte escape — Perl-compatible
+                lex_advance($lexer);  # consume the 'x'
+                my str $pk = lex_current_char($lexer);
+                if ($pk eq "{") {
+                    lex_advance($lexer);  # consume '{'
+                    my int $hv = 0;
+                    while (!lex_at_end($lexer)) {
+                        my str $hc = lex_current_char($lexer);
+                        if ($hc eq "}") { last; }
+                        my int $hd = -1;
+                        if ($hc ge "0" && $hc le "9") { $hd = char_at($hc, 0) - 48; }
+                        elsif ($hc ge "a" && $hc le "f") { $hd = char_at($hc, 0) - 87; }
+                        elsif ($hc ge "A" && $hc le "F") { $hd = char_at($hc, 0) - 55; }
+                        else { last; }
+                        $hv = $hv * 16 + $hd;
+                        lex_advance($lexer);
+                    }
+                    if (lex_current_char($lexer) eq "}") { lex_advance($lexer); }
+                    if ($hv < 128) {
+                        $result = $result . chr($hv);
+                    } elsif ($hv < 2048) {
+                        $result = $result . chr(192 + ($hv / 64));
+                        $result = $result . chr(128 + ($hv % 64));
+                    } elsif ($hv < 65536) {
+                        $result = $result . chr(224 + ($hv / 4096));
+                        $result = $result . chr(128 + (($hv / 64) % 64));
+                        $result = $result . chr(128 + ($hv % 64));
+                    } else {
+                        $result = $result . chr(240 + ($hv / 262144));
+                        $result = $result . chr(128 + (($hv / 4096) % 64));
+                        $result = $result . chr(128 + (($hv / 64) % 64));
+                        $result = $result . chr(128 + ($hv % 64));
+                    }
+                    next;
+                } else {
+                    # Up to 2 hex digits — single byte
+                    my int $hv = 0;
+                    my int $hi = 0;
+                    while ($hi < 2 && !lex_at_end($lexer)) {
+                        my str $hc = lex_current_char($lexer);
+                        my int $hd = -1;
+                        if ($hc ge "0" && $hc le "9") { $hd = char_at($hc, 0) - 48; }
+                        elsif ($hc ge "a" && $hc le "f") { $hd = char_at($hc, 0) - 87; }
+                        elsif ($hc ge "A" && $hc le "F") { $hd = char_at($hc, 0) - 55; }
+                        else { last; }
+                        $hv = $hv * 16 + $hd;
+                        lex_advance($lexer);
+                        $hi = $hi + 1;
+                    }
+                    $result = $result . chr($hv);
+                    next;
+                }
             } elsif ($nextch eq "\\") {
                 $result = $result . "\\";
             } elsif ($nextch eq $quote) {

@@ -1837,7 +1837,8 @@ func gen_regex_interpolated_pattern(scalar $cg, str $pattern) void {
         if ($p->{"type"} eq "var") {
             emit($cg, $p->{"value"});
         } else {
-            emit($cg, "strada_new_str(\"");
+            # STRADA_NEW_STR_LIT preserves embedded NUL bytes (sizeof(LIT)-1)
+            emit($cg, "STRADA_NEW_STR_LIT(\"");
             emit_escaped_string($cg, $p->{"value"});
             emit($cg, "\")");
         }
@@ -1855,7 +1856,7 @@ func gen_regex_interpolated_pattern(scalar $cg, str $pattern) void {
         if ($p->{"type"} eq "var") {
             emit($cg, $p->{"value"});
         } else {
-            emit($cg, "strada_new_str(\"");
+            emit($cg, "STRADA_NEW_STR_LIT(\"");
             emit_escaped_string($cg, $p->{"value"});
             emit($cg, "\")");
         }
@@ -1884,19 +1885,29 @@ func gen_regex_interpolated_pattern(scalar $cg, str $pattern) void {
 # Helper to emit an escaped C string
 func emit_escaped_string(scalar $cg, str $s) void {
     my int $i = 0;
-    my int $len = length($s);
+    my int $len = bytes($s);
     while ($i < $len) {
-        my str $ch = substr($s, $i, 1);
-        if ($ch eq "\\") {
+        my int $code = char_at($s, $i);
+        if ($code == 92) {
             emit($cg, "\\\\");
-        } elsif ($ch eq "\"") {
+        } elsif ($code == 34) {
             emit($cg, "\\\"");
-        } elsif ($ch eq "\n") {
+        } elsif ($code == 10) {
             emit($cg, "\\n");
-        } elsif ($ch eq "\t") {
+        } elsif ($code == 9) {
             emit($cg, "\\t");
+        } elsif ($code == 13) {
+            emit($cg, "\\r");
+        } elsif ($code == 0) {
+            # 3-digit octal so a following digit isn't merged into the escape
+            emit($cg, "\\000");
+        } elsif ($code < 32 || $code == 127) {
+            my int $o2 = $code / 64;
+            my int $o1 = ($code / 8) % 8;
+            my int $o0 = $code % 8;
+            emit($cg, "\\" . chr(48 + $o2) . chr(48 + $o1) . chr(48 + $o0));
         } else {
-            emit($cg, $ch);
+            emit($cg, substr_bytes($s, $i, 1));
         }
         $i = $i + 1;
     }
@@ -3087,11 +3098,13 @@ func gen_expression(scalar $cg, scalar $expr) void {
     
     # String literal - use byte-level operations for proper UTF-8 handling
     if ($type == NODE_STR_LITERAL()) {
-        # In extern mode, emit raw C string literal
+        # In extern mode, emit raw C string literal; otherwise wrap in
+        # STRADA_NEW_STR_LIT so embedded NUL bytes survive the constructor
+        # (strada_new_str's strlen would truncate at the first NUL).
         if ($in_extern) {
             emit($cg, "\"");
         } else {
-            emit($cg, "strada_new_str(\"");
+            emit($cg, "STRADA_NEW_STR_LIT(\"");
         }
         my str $val = $expr->{"value"};
         my int $i = 0;
@@ -3105,7 +3118,8 @@ func gen_expression(scalar $cg, scalar $expr) void {
             } elsif ($code == 13) {
                 emit($cg, "\\r");
             } elsif ($code == 0) {
-                emit($cg, "\\0");
+                # 3-digit octal so a following digit isn't merged into the escape
+                emit($cg, "\\000");
             } elsif ($code == 7) {
                 emit($cg, "\\a");
             } elsif ($code == 8) {
@@ -4380,13 +4394,14 @@ func gen_expression(scalar $cg, scalar $expr) void {
         }
         
         if ($name eq "length") {
-            # UTF-8 character count
-            # strada_to_str_ss() returns a strdup'd string that MUST be freed
+            # Binary-safe UTF-8 character count — walks the full byte length
+            # so embedded NUL bytes are counted as chars rather than ending
+            # the string (which strlen-based path did).
             my scalar $args = $expr->{"args"};
             my scalar $arg = $args->[0];
             emit($cg, "({ StradaValue *__len_tmp = ");
             gen_expression($cg, $arg);
-            emit($cg, "; char *__len_str = strada_to_str_ss(__len_tmp); int64_t __len_res = strada_length(__len_str); strada_cstr_free(__len_str); ");
+            emit($cg, "; int64_t __len_res = strada_length_chars_sv(__len_tmp); ");
             if (needs_temp_cleanup($cg, $arg) == 1) {
                 emit($cg, "strada_decref(__len_tmp); ");
             }

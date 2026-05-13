@@ -266,6 +266,28 @@ static int strada_threading_active;
 /* Forward declaration — used by strada_to_str for tagged ints */
 static inline int strada_fast_itoa(int64_t val, char *buf);
 
+/* Format a double using Perl's stringification conventions:
+ *   - +inf  → "Inf"
+ *   - -inf  → "-Inf"
+ *   - nan   → "NaN"
+ *   - else  → "%.15g"
+ * Returns chars written (snprintf-compatible). */
+static int strada_format_double(double nv, char *buf, size_t buflen) {
+    if (isnan(nv)) {
+        return snprintf(buf, buflen, "NaN");
+    }
+    if (isinf(nv)) {
+        return snprintf(buf, buflen, nv < 0 ? "-Inf" : "Inf");
+    }
+    /* Strip the sign from -0.0 — Perl prints negative zero as "0", and
+     * leaving the "-" makes round-trip comparisons (\$z eq "0") fail in
+     * code that wasn't expecting IEEE-754's signed zero. */
+    if (nv == 0.0) {
+        return snprintf(buf, buflen, "0");
+    }
+    return snprintf(buf, buflen, "%.15g", nv);
+}
+
 /* Forward declaration — used by strada_to_str / strada_to_str_buf to
  * dispatch the '""' (stringify) overload when a blessed ref defines one. */
 static StradaMethod strada_overload_lookup(const char *package, const char *op);
@@ -979,6 +1001,82 @@ int64_t strada_to_int(StradaValue *sv) {
     }
 }
 
+/* Perl-compatible looks_like_number(string).
+ * Matches the same numbers as Perl's looks_like_number():
+ *   - optional leading whitespace
+ *   - optional sign
+ *   - integer or fractional digits
+ *   - optional exponent (e/E + optional sign + digits)
+ *   - trailing whitespace OK
+ *   - words "inf", "infinity", "nan" (case-insensitive, optional sign)
+ * Rejects "0x"/"0b"/"0o" prefixes and empty / non-numeric strings. */
+int perl_looks_like_number_c(const char *s) {
+    if (!s) return 0;
+    const char *p = s;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == '\v' || *p == '\f') p++;
+    const char *start = p;
+    if (*p == '+' || *p == '-') p++;
+    if (!*p) return 0;
+    /* Reject hex / binary / explicit-octal prefixes. */
+    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X' ||
+                        p[1] == 'b' || p[1] == 'B' ||
+                        p[1] == 'o' || p[1] == 'O')) {
+        return 0;
+    }
+    /* Word forms: inf, infinity, nan (case-insensitive). */
+    if ((p[0] == 'i' || p[0] == 'I') && (p[1] == 'n' || p[1] == 'N') && (p[2] == 'f' || p[2] == 'F')) {
+        const char *q = p + 3;
+        if ((q[0] == 'i' || q[0] == 'I') && (q[1] == 'n' || q[1] == 'N') && (q[2] == 'i' || q[2] == 'I')
+            && (q[3] == 't' || q[3] == 'T') && (q[4] == 'y' || q[4] == 'Y')) {
+            q += 5;
+        }
+        while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r' || *q == '\v' || *q == '\f') q++;
+        return *q == '\0' ? 1 : 0;
+    }
+    if ((p[0] == 'n' || p[0] == 'N') && (p[1] == 'a' || p[1] == 'A') && (p[2] == 'n' || p[2] == 'N')) {
+        const char *q = p + 3;
+        while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r' || *q == '\v' || *q == '\f') q++;
+        return *q == '\0' ? 1 : 0;
+    }
+    /* Standard numeric form. */
+    int saw_digit = 0;
+    while (*p >= '0' && *p <= '9') { saw_digit = 1; p++; }
+    if (*p == '.') {
+        p++;
+        while (*p >= '0' && *p <= '9') { saw_digit = 1; p++; }
+    }
+    if (!saw_digit) return 0;
+    if (*p == 'e' || *p == 'E') {
+        p++;
+        if (*p == '+' || *p == '-') p++;
+        int saw_exp = 0;
+        while (*p >= '0' && *p <= '9') { saw_exp = 1; p++; }
+        if (!saw_exp) return 0;
+    }
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == '\v' || *p == '\f') p++;
+    if (*p != '\0') return 0;
+    (void)start;
+    return 1;
+}
+
+/* Perl-compatible string→number conversion. Unlike atof/strtod, this does
+ * NOT parse hex literals (`"0x5"` → 0, not 5) or hex floats. It DOES still
+ * accept `inf`/`nan` words (strtod handles those, and Perl returns the
+ * corresponding double for them). */
+static double perl_atof(const char *s) {
+    if (!s) return 0.0;
+    const char *p = s;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == '\v' || *p == '\f') p++;
+    /* Reject hex/hex-float prefix — Perl treats "0x..." as 0 */
+    const char *after_sign = p;
+    if (*after_sign == '+' || *after_sign == '-') after_sign++;
+    if ((after_sign[0] == '0') && (after_sign[1] == 'x' || after_sign[1] == 'X')) {
+        return 0.0;
+    }
+    /* Let strtod handle decimals, exponents, "inf", "infinity", "nan" */
+    return strtod(s, NULL);
+}
+
 double strada_to_num(StradaValue *sv) {
     if (STRADA_IS_TAGGED_INT(sv)) return (double)STRADA_TAGGED_INT_VAL(sv);
     if (!sv) return 0.0;
@@ -988,7 +1086,7 @@ double strada_to_num(StradaValue *sv) {
         case STRADA_NUM:
             return sv->value.nv;
         case STRADA_STR:
-            return sv->value.pv ? atof(sv->value.pv) : 0.0;
+            return sv->value.pv ? perl_atof(sv->value.pv) : 0.0;
         case STRADA_ARRAY:
             return (double)strada_array_length(sv->value.av);
         case STRADA_HASH:
@@ -1045,7 +1143,7 @@ char* strada_to_str(StradaValue *sv) {
                         strada_fast_itoa(result->value.iv, buf);
                         out = strdup(buf);
                     } else if (result->type == STRADA_NUM) {
-                        snprintf(buf, sizeof(buf), "%g", result->value.nv);
+                        strada_format_double(result->value.nv, buf, sizeof(buf));
                         out = strdup(buf);
                     } else {
                         out = strdup("");
@@ -1064,7 +1162,7 @@ char* strada_to_str(StradaValue *sv) {
             snprintf(buf, sizeof(buf), "%lld", (long long)sv->value.iv);
             return strdup(buf);
         case STRADA_NUM:
-            snprintf(buf, sizeof(buf), "%g", sv->value.nv);
+            strada_format_double(sv->value.nv, buf, sizeof(buf));
             return strdup(buf);
         case STRADA_STR:
             return sv->value.pv ? strdup(sv->value.pv) : strdup("");
@@ -1098,7 +1196,21 @@ char* strada_to_str(StradaValue *sv) {
             return strdup(buf);
         }
         case STRADA_CPOINTER:
-            snprintf(buf, sizeof(buf), "CPOINTER(%p)", sv->value.ptr);
+            /* perla stores `sub { ... }` and `\&main::foo` as STRADA_CPOINTER.
+             * Perl prints those as `CODE(0x...)`. Map CPOINTER→CODE here so
+             * `print sub { 1 }` doesn't emit empty (previously fell to the
+             * CPOINTER label; matches Perl ref() which already returns "CODE"
+             * for these values). Without this `print sub { 1 }` emitted
+             * nothing. */
+            snprintf(buf, sizeof(buf), "CODE(%p)", sv->value.ptr);
+            return strdup(buf);
+        case STRADA_CLOSURE:
+            /* Perl prints code refs as `CODE(0x...)`. Without this case,
+             * `print sub {1}` and `print \&main::foo` emitted nothing
+             * because strada_to_str fell through to strdup("") for
+             * STRADA_CLOSURE values (perla returns closures directly,
+             * not wrapped in STRADA_REF). */
+            snprintf(buf, sizeof(buf), "CODE(%p)", (void*)sv);
             return strdup(buf);
         case STRADA_REF:
             /* If perla has registered a stringification overload hook,
@@ -1236,7 +1348,7 @@ const char *strada_to_str_buf(StradaValue *sv, char *buf, size_t buflen) {
                     } else if (result->type == STRADA_INT) {
                         strada_fast_itoa(result->value.iv, buf);
                     } else if (result->type == STRADA_NUM) {
-                        snprintf(buf, buflen, "%g", result->value.nv);
+                        strada_format_double(result->value.nv, buf, buflen);
                     } else {
                         buf[0] = '\0';
                     }
@@ -1253,10 +1365,34 @@ const char *strada_to_str_buf(StradaValue *sv, char *buf, size_t buflen) {
             strada_fast_itoa(sv->value.iv, buf);
             return buf;
         case STRADA_NUM:
-            snprintf(buf, buflen, "%g", sv->value.nv);
+            strada_format_double(sv->value.nv, buf, buflen);
             return buf;
         case STRADA_STR:
             return sv->value.pv ? sv->value.pv : "";
+        case STRADA_REF: {
+            /* Fall back to malloc'd strada_to_str (with blessed_package
+             * and KIND awareness) for refs. The previous default-empty
+             * meant `printf "%s", $ref` emitted nothing, while
+             * `print $ref` worked because it went via strada_to_str. */
+            char *m = strada_to_str(sv);
+            if (m) {
+                size_t n = strlen(m);
+                if (n >= buflen) n = buflen - 1;
+                memcpy(buf, m, n);
+                buf[n] = '\0';
+                free(m);
+                return buf;
+            }
+            buf[0] = '\0';
+            return buf;
+        }
+        case STRADA_CLOSURE:
+            snprintf(buf, buflen, "CODE(%p)", (void*)sv);
+            return buf;
+        case STRADA_CPOINTER:
+            /* See strada_to_str: perla stores Perl code refs as CPOINTER. */
+            snprintf(buf, buflen, "CODE(%p)", sv->value.ptr);
+            return buf;
         case STRADA_UNDEF:
         default:
             return "";
@@ -1753,13 +1889,52 @@ StradaValue* strada_sort(StradaValue *arr) {
 
     /* Handle array references */
     StradaArray *av = NULL;
+    StradaValue *flat_owner = NULL;
     if (arr->type == STRADA_REF && arr->value.rv && arr->value.rv->type == STRADA_ARRAY) {
         av = arr->value.rv->value.av;
     } else if (arr->type == STRADA_ARRAY) {
         av = arr->value.av;
+    } else if (arr->type == STRADA_HASH && arr->value.hv) {
+        /* `sort %h` — flatten hash to (k1,v1,k2,v2,...) list then sort. */
+        flat_owner = strada_new_array();
+        StradaArray *fav = flat_owner->value.av;
+        StradaArray *keys = strada_hash_keys(arr->value.hv);
+        if (keys) {
+            for (size_t i = 0; i < keys->size; i++) {
+                StradaValue *k = keys->elements[keys->head + i];
+                char *ks = strada_to_str(k);
+                StradaValue *v = strada_hash_get(arr->value.hv, ks);
+                free(ks);
+                if (k) strada_incref(k);
+                strada_array_push(fav, k);
+                if (v) strada_incref(v);
+                strada_array_push(fav, v);
+            }
+            strada_free_array(keys);
+        }
+        av = fav;
+    } else if (arr->type == STRADA_REF && arr->value.rv && arr->value.rv->type == STRADA_HASH) {
+        flat_owner = strada_new_array();
+        StradaArray *fav = flat_owner->value.av;
+        StradaArray *keys = strada_hash_keys(arr->value.rv->value.hv);
+        if (keys) {
+            for (size_t i = 0; i < keys->size; i++) {
+                StradaValue *k = keys->elements[keys->head + i];
+                char *ks = strada_to_str(k);
+                StradaValue *v = strada_hash_get(arr->value.rv->value.hv, ks);
+                free(ks);
+                if (k) strada_incref(k);
+                strada_array_push(fav, k);
+                if (v) strada_incref(v);
+                strada_array_push(fav, v);
+            }
+            strada_free_array(keys);
+        }
+        av = fav;
     }
 
     if (!av || av->size == 0) {
+        if (flat_owner) strada_decref(flat_owner);
         return strada_new_array();
     }
 
@@ -1775,6 +1950,7 @@ StradaValue* strada_sort(StradaValue *arr) {
     /* Sort in place */
     qsort(result_av->elements + result_av->head, result_av->size, sizeof(StradaValue*), strada_sort_cmp_str);
 
+    if (flat_owner) strada_decref(flat_owner);
     return result;
 }
 
@@ -2803,7 +2979,7 @@ static size_t build_concat_key(
             suffix_len = STRADA_STR_BYTELEN(suffix);
             suffix_str = suffix->value.pv;
         } else if (suffix->type == STRADA_NUM) {
-            suffix_len = snprintf(itoa_buf, sizeof(itoa_buf), "%g", suffix->value.nv);
+            suffix_len = strada_format_double(suffix->value.nv, itoa_buf, sizeof(itoa_buf));
             suffix_str = itoa_buf;
         }
     }
@@ -3237,7 +3413,7 @@ StradaValue* strada_concat_sv(StradaValue *a, StradaValue *b) {
             len_b = strada_fast_itoa(b->value.iv, buf_b);
             str_b = buf_b;
         } else if (b->type == STRADA_NUM) {
-            len_b = snprintf(buf_b, sizeof(buf_b), "%g", b->value.nv);
+            len_b = strada_format_double(b->value.nv, buf_b, sizeof(buf_b));
             str_b = buf_b;
         } else if (b->type == STRADA_REF && b->value.rv) {
             /* Both overload-stringify and the default Pkg=HASH(0x…) format
@@ -3247,6 +3423,11 @@ StradaValue* strada_concat_sv(StradaValue *a, StradaValue *b) {
                 str_b = heap_b;
                 len_b = strlen(heap_b);
             }
+        } else if (b->type == STRADA_ARRAY) {
+            /* Array in scalar context (concat is scalar context) = count. */
+            int64_t n = b->value.av ? (int64_t)strada_array_length(b->value.av) : 0;
+            len_b = strada_fast_itoa(n, buf_b);
+            str_b = buf_b;
         }
     }
 
@@ -3267,7 +3448,7 @@ StradaValue* strada_concat_sv(StradaValue *a, StradaValue *b) {
             len_a = strada_fast_itoa(a->value.iv, buf_a);
             str_a = buf_a;
         } else if (a->type == STRADA_NUM) {
-            len_a = snprintf(buf_a, sizeof(buf_a), "%g", a->value.nv);
+            len_a = strada_format_double(a->value.nv, buf_a, sizeof(buf_a));
             str_a = buf_a;
         } else if (a->type == STRADA_REF && a->value.rv) {
             heap_a = strada_to_str(a);
@@ -3275,6 +3456,10 @@ StradaValue* strada_concat_sv(StradaValue *a, StradaValue *b) {
                 str_a = heap_a;
                 len_a = strlen(heap_a);
             }
+        } else if (a->type == STRADA_ARRAY) {
+            int64_t n = a->value.av ? (int64_t)strada_array_length(a->value.av) : 0;
+            len_a = strada_fast_itoa(n, buf_a);
+            str_a = buf_a;
         }
     }
 
@@ -3315,7 +3500,7 @@ StradaValue* strada_concat_cstr_sv(const char *prefix, size_t prefix_len, Strada
             len_b = strada_fast_itoa(b->value.iv, buf_b);
             str_b = buf_b;
         } else if (b->type == STRADA_NUM) {
-            len_b = snprintf(buf_b, sizeof(buf_b), "%g", b->value.nv);
+            len_b = strada_format_double(b->value.nv, buf_b, sizeof(buf_b));
             str_b = buf_b;
         } else if (b->type == STRADA_REF && b->value.rv) {
             heap_b = strada_to_str(b);
@@ -3361,7 +3546,7 @@ StradaValue* strada_concat_inplace(StradaValue *a, StradaValue *b) {
             len_b = strada_fast_itoa(b->value.iv, buf_b);
             str_b = buf_b;
         } else if (b->type == STRADA_NUM) {
-            len_b = snprintf(buf_b, sizeof(buf_b), "%g", b->value.nv);
+            len_b = strada_format_double(b->value.nv, buf_b, sizeof(buf_b));
             str_b = buf_b;
         } else if (b->type == STRADA_REF && b->value.rv) {
             heap_b = strada_to_str(b);
@@ -3481,6 +3666,29 @@ StradaValue* strada_byte_at(StradaValue *str, StradaValue *index) {
 
 /* Returns length in UTF-8 codepoints (characters), not bytes */
 size_t strada_length(const char *s) {
+    return utf8_strlen(s);
+}
+
+/* Binary-safe UTF-8 character count: counts continuation bytes (0x80-0xBF)
+ * over the full binary length so embedded NUL bytes are counted as chars
+ * rather than terminating the string. */
+size_t strada_length_chars_sv(StradaValue *sv) {
+    if (!sv) return 0;
+    if (STRADA_IS_TAGGED_INT(sv)) {
+        char buf[24];
+        return strada_fast_itoa(STRADA_TAGGED_INT_VAL(sv), buf);
+    }
+    if (sv->type == STRADA_STR && sv->value.pv) {
+        const unsigned char *p = (const unsigned char *)sv->value.pv;
+        size_t n = STRADA_STR_BYTELEN(sv);
+        size_t chars = 0;
+        for (size_t i = 0; i < n; i++) {
+            if ((p[i] & 0xC0) != 0x80) chars++;
+        }
+        return chars;
+    }
+    char _tb[256];
+    const char *s = strada_to_str_buf(sv, _tb, sizeof(_tb));
     return utf8_strlen(s);
 }
 
@@ -3705,11 +3913,23 @@ void strada_print(StradaValue *sv) {
     }
     /* Arrays: flatten — print each element separated by $, (default "").
      * Without this, `print reverse(@a)` printed empty (the array
-     * stringified to ""); reference Perl flattens print's list args. */
+     * stringified to ""); reference Perl flattens print's list args.
+     * Between elements, emit perla_ofs ($, output field separator) —
+     * weak-linked so stradac (which doesn't define perla_ofs) still
+     * links. */
     if (sv && !STRADA_IS_TAGGED_INT(sv) && sv->type == STRADA_ARRAY) {
         StradaArray *av = sv->value.av;
+        extern StradaValue *perla_ofs __attribute__((weak));
+        const char *sep = NULL;
+        size_t sep_len = 0;
+        if (&perla_ofs && perla_ofs && !STRADA_IS_TAGGED_INT(perla_ofs)
+            && perla_ofs->type == STRADA_STR && perla_ofs->value.pv && perla_ofs->value.pv[0]) {
+            sep = perla_ofs->value.pv;
+            sep_len = strlen(sep);
+        }
         if (av) {
             for (size_t i = 0; i < av->size; i++) {
+                if (i > 0 && sep_len > 0) { fwrite(sep, 1, sep_len, stdout); }
                 StradaValue *e = av->elements[av->head + i];
                 if (e && !STRADA_IS_TAGGED_INT(e) && e->type == STRADA_REF) {
                     char *es = strada_to_str(e);
@@ -3721,6 +3941,14 @@ void strada_print(StradaValue *sv) {
                 }
             }
         }
+        fflush(stdout);
+        return;
+    }
+    /* Binary-safe: use strada_str_len for STRADA_STR so embedded NULs
+     * (e.g. chr(0), "\x00abc", binary buffers) survive print. printf
+     * %s stops at the first NUL, which silently truncated those. */
+    if (sv && !STRADA_IS_TAGGED_INT(sv) && sv->type == STRADA_STR && sv->value.pv) {
+        fwrite(sv->value.pv, 1, strada_str_len(sv), stdout);
         fflush(stdout);
         return;
     }
@@ -3928,21 +4156,63 @@ static StradaValue* strada_sprintf_sv_args(StradaValue *format_sv,
             }
         }
 
+        /* Vector flag (Perl extension): `%v<spec>` formats each byte of the
+         * string argument with <spec> and joins the results with `.`.
+         * The `v` flag may come right after `%` or after `%N$`; it can also
+         * be `%*v` to consume the join separator from an argument. */
+        int vec_flag = 0;
+        char vec_sep = '.';
+        const char *vec_sep_str = NULL;
+        size_t vec_sep_len = 1;
+        if (*p == 'v') {
+            vec_flag = 1;
+            p++;
+        } else if (*p == '*' && *(p+1) == 'v') {
+            vec_flag = 1;
+            p += 2;
+            /* Consume the separator arg (must be a STRADA_STR) */
+            StradaValue *sa = NULL;
+            if (next_seq < collected) sa = arg_arr[next_seq++];
+            if (sa && !STRADA_IS_TAGGED_INT(sa) && sa->type == STRADA_STR && sa->value.pv) {
+                vec_sep_str = sa->value.pv;
+                vec_sep_len = strada_str_len(sa);
+            }
+        }
+
         /* Skip flags: -, +, space, #, 0 */
         while (*p == '-' || *p == '+' || *p == ' ' || *p == '#' || *p == '0') {
             p++;
         }
 
-        /* Skip width */
-        while (*p >= '0' && *p <= '9') {
+        /* Width: integer or `*` (consume arg). */
+        int width_star = 0;
+        int width_star_val = 0;
+        if (*p == '*') {
+            width_star = 1;
             p++;
+            StradaValue *war = NULL;
+            if (positional) {
+                /* %N$*N$x is uncommon — fall back to sequential */
+            }
+            if (next_seq < collected) war = arg_arr[next_seq++];
+            width_star_val = war ? (int)strada_to_int(war) : 0;
+        } else {
+            while (*p >= '0' && *p <= '9') p++;
         }
 
-        /* Skip precision */
+        /* Precision: .integer or .* (consume arg). */
+        int prec_star = 0;
+        int prec_star_val = 0;
         if (*p == '.') {
             p++;
-            while (*p >= '0' && *p <= '9') {
+            if (*p == '*') {
+                prec_star = 1;
                 p++;
+                StradaValue *par = NULL;
+                if (next_seq < collected) par = arg_arr[next_seq++];
+                prec_star_val = par ? (int)strada_to_int(par) : 0;
+            } else {
+                while (*p >= '0' && *p <= '9') p++;
             }
         }
 
@@ -3996,18 +4266,157 @@ static StradaValue* strada_sprintf_sv_args(StradaValue *format_sv,
             spec = 's';
         }
 
+        /* Substitute `*` width/precision with their resolved integer values.
+         * spec_buf still has the literal `*` from the source format string;
+         * we already consumed the int arg(s) into width_star_val / prec_star_val.
+         * Rebuild spec_buf scanning for `*` and replacing each with its value. */
+        if (width_star || prec_star) {
+            char rebuilt[80];
+            size_t ri = 0;
+            int seen_dot = 0;
+            for (size_t si = 0; si < strlen(spec_buf) && ri + 16 < sizeof(rebuilt); si++) {
+                char c = spec_buf[si];
+                if (c == '.') seen_dot = 1;
+                if (c == '*') {
+                    int val = seen_dot ? prec_star_val : width_star_val;
+                    int n = snprintf(rebuilt + ri, sizeof(rebuilt) - ri, "%d", val);
+                    if (n > 0) ri += (size_t)n;
+                } else {
+                    rebuilt[ri++] = c;
+                }
+            }
+            rebuilt[ri] = '\0';
+            strncpy(spec_buf, rebuilt, sizeof(spec_buf) - 1);
+            spec_buf[sizeof(spec_buf) - 1] = '\0';
+        }
+
+        /* Vector mode: arg is a string; format each byte with `spec` and
+         * join with vec_sep. Build per_byte_spec by stripping the literal
+         * 'v' from spec_buf (we consumed `v` from `p` but spec_buf was built
+         * from spec_start through p, so it still contains the `v`). */
+        if (vec_flag) {
+            const char *vs;
+            size_t vlen;
+            char _vt[256];
+            if (arg && !STRADA_IS_TAGGED_INT(arg) && arg->type == STRADA_STR && arg->value.pv) {
+                vs = arg->value.pv;
+                vlen = strada_str_len(arg);
+            } else {
+                vs = arg ? strada_to_str_buf(arg, _vt, sizeof(_vt)) : "";
+                vlen = strlen(vs);
+            }
+            /* Remove the first 'v' from spec_buf so the per-byte snprintf
+             * doesn't pass it through as a literal char. */
+            char per_byte_spec[80];
+            {
+                size_t pi = 0;
+                int dropped = 0;
+                for (size_t si = 0; si < strlen(spec_buf) && pi + 1 < sizeof(per_byte_spec); si++) {
+                    if (!dropped && spec_buf[si] == 'v') { dropped = 1; continue; }
+                    per_byte_spec[pi++] = spec_buf[si];
+                }
+                per_byte_spec[pi] = '\0';
+            }
+            char vtmp[1024];
+            for (size_t bi = 0; bi < vlen; bi++) {
+                unsigned int byte_val = (unsigned char)vs[bi];
+                switch (spec) {
+                    case 'd': case 'i': case 'o': case 'u': case 'x': case 'X': {
+                        char int_fmt[80];
+                        size_t sl = strlen(per_byte_spec);
+                        if (sl + 2 < sizeof(int_fmt) && sl > 0) {
+                            memcpy(int_fmt, per_byte_spec, sl - 1);
+                            int_fmt[sl - 1] = 'l';
+                            int_fmt[sl    ] = 'l';
+                            int_fmt[sl + 1] = per_byte_spec[sl - 1];
+                            int_fmt[sl + 2] = '\0';
+                        } else {
+                            snprintf(int_fmt, sizeof(int_fmt), "%%ll%c", spec);
+                        }
+                        snprintf(vtmp, sizeof(vtmp), int_fmt, (long long)byte_val);
+                        break;
+                    }
+                    case 'b': {
+                        char bin_buf[33]; int bii = 32; bin_buf[bii] = '\0';
+                        unsigned int v = byte_val;
+                        if (v == 0) { bin_buf[--bii] = '0'; }
+                        else { while (v > 0) { bin_buf[--bii] = (v & 1) ? '1' : '0'; v >>= 1; } }
+                        snprintf(vtmp, sizeof(vtmp), "%s", bin_buf + bii);
+                        break;
+                    }
+                    default:
+                        snprintf(vtmp, sizeof(vtmp), "%u", byte_val);
+                        break;
+                }
+                size_t vt_len = strlen(vtmp);
+                if (out + vt_len < end) { memcpy(out, vtmp, vt_len); out += vt_len; }
+                if (bi + 1 < vlen) {
+                    if (vec_sep_str) {
+                        size_t avail = (size_t)(end - out);
+                        size_t take = vec_sep_len < avail ? vec_sep_len : avail;
+                        memcpy(out, vec_sep_str, take); out += take;
+                    } else {
+                        if (out < end) *out++ = vec_sep;
+                    }
+                }
+            }
+            continue;
+        }
+
         /* Format based on specifier */
         char temp[1024];
         switch (spec) {
             case 'b': {
-                /* Binary format — Perl extension, not in C printf */
+                /* Binary format — Perl extension, not in C printf. The `#`
+                 * flag prepends "0b" (Perl-specific; C uses 0 for octal). */
                 uint64_t val = arg ? (uint64_t)strada_to_int(arg) : 0;
                 char bin_buf[65];
                 int bi = 64;
                 bin_buf[bi] = '\0';
                 if (val == 0) { bin_buf[--bi] = '0'; }
                 else { while (val > 0) { bin_buf[--bi] = (val & 1) ? '1' : '0'; val >>= 1; } }
-                snprintf(temp, sizeof(temp), "%s", bin_buf + bi);
+                const char *digits = bin_buf + bi;
+                int has_hash = (strchr(spec_buf, '#') != NULL);
+                /* Parse flags + width from spec_buf for alignment. */
+                const char *fp = spec_buf;
+                if (*fp == '%') fp++;
+                int zero_pad = 0;
+                int left_align = 0;
+                while (*fp == '0' || *fp == '-' || *fp == '+' || *fp == ' ' || *fp == '#') {
+                    if (*fp == '0') zero_pad = 1;
+                    if (*fp == '-') left_align = 1;
+                    fp++;
+                }
+                int width = 0;
+                while (*fp >= '0' && *fp <= '9') { width = width * 10 + (*fp - '0'); fp++; }
+                if (left_align) zero_pad = 0;
+                size_t dlen = strlen(digits);
+                /* total chars BEFORE any external padding */
+                size_t prefix_len = has_hash ? 2 : 0;
+                size_t total = prefix_len + dlen;
+                size_t ti = 0;
+                if (width > 0 && total < (size_t)width) {
+                    size_t pad = (size_t)width - total;
+                    if (left_align) {
+                        if (has_hash) { temp[ti++] = '0'; temp[ti++] = 'b'; }
+                        memcpy(temp + ti, digits, dlen); ti += dlen;
+                        for (size_t p = 0; p < pad && ti < sizeof(temp) - 1; p++) temp[ti++] = ' ';
+                    } else if (zero_pad) {
+                        /* Prefix sits at the start; zeros fill between prefix and digits. */
+                        if (has_hash) { temp[ti++] = '0'; temp[ti++] = 'b'; }
+                        for (size_t p = 0; p < pad && ti < sizeof(temp) - 1; p++) temp[ti++] = '0';
+                        memcpy(temp + ti, digits, dlen); ti += dlen;
+                    } else {
+                        /* Space-pad on the left, prefix + digits on the right. */
+                        for (size_t p = 0; p < pad && ti < sizeof(temp) - 1; p++) temp[ti++] = ' ';
+                        if (has_hash) { temp[ti++] = '0'; temp[ti++] = 'b'; }
+                        memcpy(temp + ti, digits, dlen); ti += dlen;
+                    }
+                } else {
+                    if (has_hash) { temp[ti++] = '0'; temp[ti++] = 'b'; }
+                    memcpy(temp + ti, digits, dlen); ti += dlen;
+                }
+                temp[ti] = 0;
                 break;
             }
             case 'd':
@@ -4044,12 +4453,48 @@ static StradaValue* strada_sprintf_sv_args(StradaValue *format_sv,
             case 'a':
             case 'A': {
                 double val = arg ? strada_to_num(arg) : 0.0;
-                snprintf(temp, sizeof(temp), spec_buf, val);
+                /* Perl formats infinity / NaN as "Inf" / "-Inf" / "NaN"
+                 * (capitalized, no NaN sign). C's printf uses "inf" /
+                 * "-inf" / "nan" / "-nan", which round-trips to a
+                 * different string than Perl scripts expect. */
+                if (isnan(val)) {
+                    snprintf(temp, sizeof(temp), "NaN");
+                } else if (isinf(val)) {
+                    snprintf(temp, sizeof(temp), val < 0 ? "-Inf" : "Inf");
+                } else {
+                    snprintf(temp, sizeof(temp), spec_buf, val);
+                }
                 break;
             }
             case 'c': {
+                /* Perl's `%c` treats the value as a Unicode codepoint and
+                 * emits UTF-8 bytes for codepoints ≥ 128. C's `%c` would
+                 * truncate to (unsigned char) — `%c % 0x263A` came out as
+                 * `:` (0x3A) instead of `☺`. */
                 int val = arg ? (int)strada_to_int(arg) : 0;
-                snprintf(temp, sizeof(temp), "%c", val);
+                char ub[8];
+                int ulen = 0;
+                if (val < 0x80) {
+                    ub[ulen++] = (char)val;
+                } else if (val < 0x800) {
+                    ub[ulen++] = (char)(0xC0 | (val >> 6));
+                    ub[ulen++] = (char)(0x80 | (val & 0x3F));
+                } else if (val < 0x10000) {
+                    ub[ulen++] = (char)(0xE0 | (val >> 12));
+                    ub[ulen++] = (char)(0x80 | ((val >> 6) & 0x3F));
+                    ub[ulen++] = (char)(0x80 | (val & 0x3F));
+                } else {
+                    ub[ulen++] = (char)(0xF0 | (val >> 18));
+                    ub[ulen++] = (char)(0x80 | ((val >> 12) & 0x3F));
+                    ub[ulen++] = (char)(0x80 | ((val >> 6) & 0x3F));
+                    ub[ulen++] = (char)(0x80 | (val & 0x3F));
+                }
+                if (ulen < (int)sizeof(temp)) {
+                    memcpy(temp, ub, ulen);
+                    temp[ulen] = '\0';
+                } else {
+                    temp[0] = '\0';
+                }
                 break;
             }
             case 's': {
@@ -4070,6 +4515,38 @@ static StradaValue* strada_sprintf_sv_args(StradaValue *format_sv,
                         out += avail;
                     }
                     continue;  /* skip the temp[]→out copy below */
+                }
+                /* Perl extension: `0` flag on `%s` zero-pads to width. C's
+                 * `0` flag is "undefined" for %s (glibc space-pads), so do
+                 * the padding manually. Only applies when there's no `-`
+                 * (left-align) flag — `-` takes priority and Perl uses space. */
+                {
+                    const char *p_zf = spec_buf + 1;
+                    int has_zero = 0, has_minus = 0;
+                    while (*p_zf == '-' || *p_zf == '+' || *p_zf == ' ' || *p_zf == '#' || *p_zf == '0') {
+                        if (*p_zf == '0') has_zero = 1;
+                        if (*p_zf == '-') has_minus = 1;
+                        p_zf++;
+                    }
+                    if (has_zero && !has_minus && *p_zf >= '0' && *p_zf <= '9') {
+                        int width = 0;
+                        while (*p_zf >= '0' && *p_zf <= '9') { width = width * 10 + (*p_zf - '0'); p_zf++; }
+                        int prec = -1;
+                        if (*p_zf == '.') {
+                            p_zf++;
+                            prec = 0;
+                            while (*p_zf >= '0' && *p_zf <= '9') { prec = prec * 10 + (*p_zf - '0'); p_zf++; }
+                        }
+                        size_t slen = strlen(s);
+                        if (prec >= 0 && (size_t)prec < slen) slen = (size_t)prec;
+                        int padn = width - (int)slen;
+                        if (padn < 0) padn = 0;
+                        size_t ti = 0;
+                        for (int p = 0; p < padn && ti < sizeof(temp) - 1; p++) temp[ti++] = '0';
+                        if (ti + slen < sizeof(temp)) { memcpy(temp + ti, s, slen); ti += slen; }
+                        temp[ti] = '\0';
+                        break;
+                    }
                 }
                 snprintf(temp, sizeof(temp), spec_buf, s);
                 break;
@@ -4302,6 +4779,42 @@ StradaValue* strada_read_line(StradaValue *fh) {
 
     /* Handle filehandle (FILE*) */
     if (fh->type == STRADA_FILEHANDLE && fh->value.fh) {
+        /* Honor perla_irs ($/) when it's a non-default string. Default
+         * "\n" → keep existing fgets+strip behavior (Strada convention).
+         * Custom delimiter → read up to and including the delimiter, do
+         * not strip (Perl convention for custom $/). */
+        extern StradaValue *perla_irs __attribute__((weak));
+        const char *irs = NULL;
+        size_t irs_len = 0;
+        if (&perla_irs && perla_irs && !STRADA_IS_TAGGED_INT(perla_irs)
+            && perla_irs->type == STRADA_STR && perla_irs->value.pv) {
+            irs = perla_irs->value.pv;
+            irs_len = strlen(irs);
+        }
+        if (irs && irs_len > 0 && !(irs_len == 1 && irs[0] == '\n')) {
+            /* Custom record separator: read byte-by-byte until tail matches. */
+            size_t cap = 4096;
+            size_t len = 0;
+            char *buf = (char*)malloc(cap);
+            if (!buf) return strada_new_undef();
+            int c;
+            while ((c = fgetc(fh->value.fh)) != EOF) {
+                if (len + 1 >= cap) {
+                    cap *= 2;
+                    char *nb = (char*)realloc(buf, cap);
+                    if (!nb) { free(buf); return strada_new_undef(); }
+                    buf = nb;
+                }
+                buf[len++] = (char)c;
+                if (len >= irs_len && memcmp(buf + len - irs_len, irs, irs_len) == 0) {
+                    break;
+                }
+            }
+            if (len == 0) { free(buf); return strada_new_undef(); }
+            StradaValue *r = strada_new_str_len(buf, len);
+            free(buf);
+            return r;
+        }
         char buffer[4096];
         if (fgets(buffer, sizeof(buffer), fh->value.fh)) {
             /* Remove trailing newline */
@@ -4360,9 +4873,72 @@ StradaValue* strada_read_all_lines(StradaValue *fh) {
 
     /* Handle filehandle (FILE*) */
     if (fh->type == STRADA_FILEHANDLE && fh->value.fh) {
+        /* Honor perla_irs ($/) for custom record separator and slurp mode.
+         * Without this, `<$fh>` in list context always split on '\n' and
+         * stripped it, ignoring any `local $/ = "..."` in the caller. */
+        extern StradaValue *perla_irs __attribute__((weak));
+        const char *irs = NULL;
+        size_t irs_len = 0;
+        int slurp = 0;
+        if (&perla_irs && perla_irs && !STRADA_IS_TAGGED_INT(perla_irs)) {
+            if (perla_irs->type == STRADA_UNDEF) {
+                slurp = 1;
+            } else if (perla_irs->type == STRADA_STR && perla_irs->value.pv) {
+                irs = perla_irs->value.pv;
+                irs_len = strlen(irs);
+            }
+        }
+        if (slurp) {
+            /* Slurp the entire stream into one element */
+            size_t cap = 4096;
+            size_t len = 0;
+            char *buf = (char*)malloc(cap);
+            if (!buf) return arr;
+            int c;
+            while ((c = fgetc(fh->value.fh)) != EOF) {
+                if (len + 1 >= cap) {
+                    cap *= 2;
+                    char *nb = (char*)realloc(buf, cap);
+                    if (!nb) { free(buf); return arr; }
+                    buf = nb;
+                }
+                buf[len++] = (char)c;
+            }
+            if (len > 0) {
+                strada_array_push_take(arr->value.av, strada_new_str_len(buf, len));
+            }
+            free(buf);
+            return arr;
+        }
+        if (irs && irs_len > 0 && !(irs_len == 1 && irs[0] == '\n')) {
+            /* Custom multi-char separator: read until tail matches, repeat */
+            size_t cap = 4096;
+            size_t len = 0;
+            char *buf = (char*)malloc(cap);
+            if (!buf) return arr;
+            int c;
+            while ((c = fgetc(fh->value.fh)) != EOF) {
+                if (len + 1 >= cap) {
+                    cap *= 2;
+                    char *nb = (char*)realloc(buf, cap);
+                    if (!nb) { free(buf); return arr; }
+                    buf = nb;
+                }
+                buf[len++] = (char)c;
+                if (len >= irs_len && memcmp(buf + len - irs_len, irs, irs_len) == 0) {
+                    strada_array_push_take(arr->value.av, strada_new_str_len(buf, len));
+                    len = 0;
+                }
+            }
+            if (len > 0) {
+                strada_array_push_take(arr->value.av, strada_new_str_len(buf, len));
+            }
+            free(buf);
+            return arr;
+        }
+        /* Default newline-separated, strip trailing \n */
         char buffer[4096];
         while (fgets(buffer, sizeof(buffer), fh->value.fh)) {
-            /* Remove trailing newline */
             size_t len = strlen(buffer);
             if (len > 0 && buffer[len-1] == '\n') {
                 buffer[len-1] = '\0';
@@ -4923,6 +5499,10 @@ char *(*strada_overload_stringify_hook)(StradaValue *sv) = NULL;
  * Numeric returns a double via out-param (0 = no overload, 1 = overload fired).
  * Bool returns -1 (no overload), 0 (false), 1 (true). */
 int (*strada_overload_numeric_hook)(StradaValue *sv, double *out) = NULL;
+
+/* DESTROY hook — set by perla_init when perla runtime is linked. NULL by
+ * default. See strada_runtime.h for semantics. */
+int (*strada_destroy_hook)(StradaValue *obj) = NULL;
 int (*strada_overload_bool_hook)(StradaValue *sv) = NULL;
 
 /* Call stack for stack traces */
@@ -5933,7 +6513,29 @@ static uint32_t pcre2_get_options(const char *flags) {
 static StradaValue *last_regex_captures = NULL;
 /* Global storage for last named captures (PCRE2 only) */
 static StradaValue *last_named_captures = NULL;
+/* Global storage for $` (prematch) and $' (postmatch) */
+static StradaValue *last_prematch_sv = NULL;
+static StradaValue *last_postmatch_sv = NULL;
 static int regex_cleanup_registered = 0;
+
+/* Set $` and $' from subject and ovector[0..1]. Called after each successful match. */
+static void strada_set_match_pre_post(const char *str, size_t mstart, size_t mend) {
+    if (last_prematch_sv) strada_decref(last_prematch_sv);
+    last_prematch_sv = strada_new_str_len(str, mstart);
+    if (last_postmatch_sv) strada_decref(last_postmatch_sv);
+    size_t total = strlen(str);
+    last_postmatch_sv = strada_new_str_len(str + mend, total - mend);
+}
+
+StradaValue* strada_prematch(void) {
+    if (last_prematch_sv) { strada_incref(last_prematch_sv); return last_prematch_sv; }
+    return strada_new_str("");
+}
+
+StradaValue* strada_postmatch(void) {
+    if (last_postmatch_sv) { strada_incref(last_postmatch_sv); return last_postmatch_sv; }
+    return strada_new_str("");
+}
 
 /* ===== REGEX COMPILATION CACHE (PCRE2) ===== */
 /* Direct-mapped cache keyed by DJB2 hash of (pattern + options).
@@ -6026,6 +6628,8 @@ static void regex_cache_cleanup(void) {
 static void regex_cleanup_atexit(void) {
     if (last_regex_captures) { strada_decref(last_regex_captures); last_regex_captures = NULL; }
     if (last_named_captures) { strada_decref(last_named_captures); last_named_captures = NULL; }
+    if (last_prematch_sv) { strada_decref(last_prematch_sv); last_prematch_sv = NULL; }
+    if (last_postmatch_sv) { strada_decref(last_postmatch_sv); last_postmatch_sv = NULL; }
     regex_cache_cleanup();
 }
 
@@ -6085,6 +6689,9 @@ int strada_regex_match_global(const char *str, const char *pattern, const char *
         /* Update position past this match */
         *pos = ovector[1];
         if (ovector[0] == ovector[1]) (*pos)++; /* zero-length match: advance */
+
+        /* Set $` (prematch) and $' (postmatch) */
+        strada_set_match_pre_post(str, ovector[0], ovector[1]);
 
         /* Store captures */
         StradaArray *captures = strada_array_new();
@@ -6171,6 +6778,9 @@ int strada_regex_match_with_capture(const char *str, const char *pattern, const 
     if (rc >= 0) {
         PCRE2_SIZE *ovector = pcre2_get_ovector_pointer(match_data);
         uint32_t count = pcre2_get_ovector_count(match_data);
+
+        /* Set $` (prematch) and $' (postmatch) */
+        strada_set_match_pre_post(str, ovector[0], ovector[1]);
 
         for (uint32_t i = 0; i < count; i++) {
             if (ovector[2*i] != PCRE2_UNSET) {
@@ -6390,10 +7000,18 @@ static char* pcre2_preprocess_replacement(const char *replacement) {
 
     for (size_t i = 0; i < len; i++) {
         if (replacement[i] == '\\' && i + 1 < len && replacement[i+1] >= '1' && replacement[i+1] <= '9') {
-            /* Convert \1 to $1 */
+            /* Convert \1 to $1 (Perl backref alt-syntax) */
             out[j++] = '$';
             i++;
             out[j++] = replacement[i];
+        } else if (replacement[i] == '\\' && i + 1 < len && replacement[i+1] == '$') {
+            /* `\$` in Perl s/// replacement: literal `$`. PCRE2's
+             * substitute escape for literal $ is `$$`. Without this,
+             * `\$1` reached PCRE2 as a `\` literal followed by a `$1`
+             * backref, producing `\<capture>` instead of `$1`. */
+            out[j++] = '$';
+            out[j++] = '$';
+            i++;
         } else if (replacement[i] == '$') {
             if (i + 1 < len && replacement[i+1] >= '0' && replacement[i+1] <= '9') {
                 /* $0-$9: backreference, pass through */
@@ -6401,6 +7019,12 @@ static char* pcre2_preprocess_replacement(const char *replacement) {
             } else if (i + 1 < len && replacement[i+1] == '{') {
                 /* ${...}: named backreference, pass through */
                 out[j++] = '$';
+            } else if (i + 2 < len && replacement[i+1] == '+' && replacement[i+2] == '{') {
+                /* $+{NAME}: Perl's named-capture hash form. PCRE2's
+                 * substitute uses ${NAME} for the same thing — drop
+                 * the `+`. */
+                out[j++] = '$';
+                i++;  /* skip the `+`; next iter handles `{NAME}` after $ */
             } else if (i + 1 < len && replacement[i+1] == '$') {
                 /* $$: already escaped literal $, pass through both */
                 out[j++] = '$';
@@ -6434,7 +7058,10 @@ static char* pcre2_do_substitute(const char *str, const char *pattern, const cha
     pcre2_match_data *match_data = pcre2_match_data_create_from_pattern(re, NULL);
     PCRE2_SIZE subject_length = strlen(str);
 
-    uint32_t sub_options = PCRE2_SUBSTITUTE_OVERFLOW_LENGTH;
+    /* SUBSTITUTE_EXTENDED enables \U..\E, \L..\E, \u, \l in the
+     * replacement — matches Perl. Without it, `s/(\w+)/\U$1/g` left
+     * the literal `\U` in the output. */
+    uint32_t sub_options = PCRE2_SUBSTITUTE_OVERFLOW_LENGTH | PCRE2_SUBSTITUTE_EXTENDED;
     if (global) sub_options |= PCRE2_SUBSTITUTE_GLOBAL;
 
     /* First call: determine output size */
@@ -6545,9 +7172,48 @@ int strada_regex_replace_capture(const char *str, const char *pattern, const cha
         return 0;
     }
 
-    /* Now do the actual substitution */
-    *result_out = pcre2_do_substitute(str, pattern, replacement, flags, global);
-    return 1; /* at least one match */
+    /* Now do the actual substitution. Re-run pcre2_substitute here so we
+     * can capture the substitution count it returns — pcre2_do_substitute
+     * discards it. Perl's `$count = ($s =~ s/PAT/REPL/g)` needs the actual
+     * count, not just "matched at least once". */
+    {
+        char *processed_repl = pcre2_preprocess_replacement(replacement);
+        pcre2_match_data *md = pcre2_match_data_create_from_pattern(re, NULL);
+        uint32_t sub_options = PCRE2_SUBSTITUTE_OVERFLOW_LENGTH | PCRE2_SUBSTITUTE_EXTENDED;
+        if (global) sub_options |= PCRE2_SUBSTITUTE_GLOBAL;
+        PCRE2_SIZE outlength = 0;
+        int rcs = pcre2_substitute(re, (PCRE2_SPTR)str, subject_length, 0,
+                                    sub_options, md, NULL,
+                                    (PCRE2_SPTR)processed_repl, PCRE2_ZERO_TERMINATED,
+                                    NULL, &outlength);
+        if (rcs == PCRE2_ERROR_NOMEMORY) {
+            outlength += 1;
+            PCRE2_UCHAR *output = malloc(outlength);
+            sub_options &= ~PCRE2_SUBSTITUTE_OVERFLOW_LENGTH;
+            rcs = pcre2_substitute(re, (PCRE2_SPTR)str, subject_length, 0,
+                                    sub_options, md, NULL,
+                                    (PCRE2_SPTR)processed_repl, PCRE2_ZERO_TERMINATED,
+                                    output, &outlength);
+            if (rcs >= 0) {
+                char *r = malloc(outlength + 1);
+                memcpy(r, output, outlength);
+                r[outlength] = '\0';
+                *result_out = r;
+            } else {
+                *result_out = strdup(str);
+            }
+            free(output);
+        } else if (rcs < 0) {
+            *result_out = strdup(str);
+            rcs = 0;
+        } else {
+            /* Shouldn't reach here without OVERFLOW_LENGTH but fall back */
+            *result_out = pcre2_do_substitute(str, pattern, replacement, flags, global);
+        }
+        pcre2_match_data_free(md);
+        free(processed_repl);
+        return rcs > 0 ? rcs : 0;
+    }
 }
 
 /* strada_regex_find_all: Find all matches and return array of match info
@@ -6759,6 +7425,26 @@ StradaArray* strada_regex_split(const char *str, const char *pattern) {
         part[part_len] = '\0';
         strada_array_push_take(parts, strada_new_str(part));
         free(part);
+
+        /* Perl semantics: if the split pattern has capture groups, insert
+         * the captured substrings between split parts. `split /(\s+)/,
+         * "a b c"` yields ("a"," ","b"," ","c"). Without this the captures
+         * are silently dropped. */
+        uint32_t cap_count = pcre2_get_ovector_count(match_data);
+        for (uint32_t ci = 1; ci < cap_count; ci++) {
+            PCRE2_SIZE cs = ovector[2 * ci];
+            PCRE2_SIZE ce = ovector[2 * ci + 1];
+            if (cs == PCRE2_UNSET) {
+                strada_array_push_take(parts, strada_new_undef());
+            } else {
+                size_t cl = ce - cs;
+                char *cpart = malloc(cl + 1);
+                memcpy(cpart, str + cs, cl);
+                cpart[cl] = '\0';
+                strada_array_push_take(parts, strada_new_str(cpart));
+                free(cpart);
+            }
+        }
 
         /* Handle zero-length match */
         if (match_end == match_start) {
@@ -10093,6 +10779,35 @@ StradaValue* strada_reverse_sv(StradaValue *sv) {
         return out;
     }
 
+    /* Hash: flatten to (k1,v1,k2,v2,...) then reverse to (vN,kN,...,v1,k1).
+     * Perl's `reverse %h` returns the flattened-then-reversed list. Without
+     * this, `my %inv = reverse %h` (the value→key swap idiom) silently
+     * built a hash from a single reversed string. */
+    StradaHash *hsrc = NULL;
+    if (sv->type == STRADA_HASH) hsrc = sv->value.hv;
+    else if (sv->type == STRADA_REF && sv->value.rv && sv->value.rv->type == STRADA_HASH) hsrc = sv->value.rv->value.hv;
+    if (hsrc) {
+        StradaArray *keys = strada_hash_keys(hsrc);
+        StradaValue *out = strada_new_array();
+        StradaArray *dst = out->value.av;
+        if (keys) {
+            /* Walk keys in REVERSE order; for each key push (val, key)
+             * — that yields the same sequence as flatten-then-reverse. */
+            for (size_t i = keys->size; i-- > 0; ) {
+                StradaValue *k = keys->elements[keys->head + i];
+                char *ks = strada_to_str(k);
+                StradaValue *v = ks ? strada_hash_get(hsrc, ks) : NULL;
+                if (ks) free(ks);
+                if (v) strada_incref(v);
+                strada_array_push_take(dst, v ? v : strada_new_undef());
+                if (k) strada_incref(k);
+                strada_array_push_take(dst, k ? k : strada_new_undef());
+            }
+            strada_free_array(keys);
+        }
+        return out;
+    }
+
     /* For strings and other types, reverse as string */
     char _tb[256];
     const char *str = strada_to_str_buf(sv, _tb, sizeof(_tb));
@@ -10539,6 +11254,35 @@ StradaValue* strada_pack(const char *fmt, StradaValue *args) {
                     buf[buf_pos + i] = pad_char;
                 }
                 buf_pos += pad_len;
+                break;
+            }
+
+            case 'Z': {  /* NUL-terminated string, NUL-padded.
+                          * With explicit length N: copy up to N-1 chars,
+                          * then NUL-pad to N. With `*` or no count: copy
+                          * the whole string + a trailing NUL. */
+                char _tb_s[256];
+                const char *str = GET_ARG_STR(_tb_s);
+                size_t str_len = strlen(str);
+                if (count < 0) {
+                    /* No length: copy string + NUL */
+                    ENSURE_SPACE(str_len + 1);
+                    memcpy(buf + buf_pos, str, str_len);
+                    buf[buf_pos + str_len] = '\0';
+                    buf_pos += str_len + 1;
+                } else {
+                    size_t pad_len = (size_t)count;
+                    ENSURE_SPACE(pad_len);
+                    /* Copy up to pad_len-1 chars, then NUL-fill the rest.
+                     * Perl semantics: the last byte is always NUL when N>0. */
+                    size_t copy_len = str_len < pad_len ? str_len : (pad_len > 0 ? pad_len - 1 : 0);
+                    if (pad_len > 0 && copy_len > pad_len - 1) copy_len = pad_len - 1;
+                    memcpy(buf + buf_pos, str, copy_len);
+                    for (size_t i = copy_len; i < pad_len; i++) {
+                        buf[buf_pos + i] = '\0';
+                    }
+                    buf_pos += pad_len;
+                }
                 break;
             }
 
@@ -11086,6 +11830,89 @@ char* strada_join(const char *sep, StradaArray *arr) {
     return result;
 }
 
+/* Binary-safe join: separator passed as StradaValue* so embedded NULs are
+ * preserved. Returns a StradaValue* with the byte-accurate length set. */
+StradaValue* strada_join_sv(StradaValue *sep_sv, StradaArray *arr) {
+    if (!arr || arr->size == 0) return strada_new_str_len("", 0);
+
+    const char *sep = "";
+    size_t sep_len = 0;
+    if (sep_sv && !STRADA_IS_TAGGED_INT(sep_sv) && sep_sv->type == STRADA_STR && sep_sv->value.pv) {
+        sep = sep_sv->value.pv;
+        sep_len = strada_str_len(sep_sv);
+    } else if (sep_sv) {
+        /* int / num / undef → fall back to stringified form (no NUL inside) */
+        sep = strada_to_str(sep_sv);
+        sep_len = sep ? strlen(sep) : 0;
+        /* allocated buffer freed below; mark for free with a flag */
+        size_t total_len = 0;
+        for (size_t i = 0; i < arr->size; i++) {
+            StradaValue *el = arr->elements[arr->head + i];
+            if (el && !STRADA_IS_TAGGED_INT(el) && el->type == STRADA_STR && el->value.pv) {
+                total_len += strada_str_len(el);
+            } else {
+                char *s = strada_to_str(el);
+                total_len += s ? strlen(s) : 0;
+                if (s) free(s);
+            }
+            if (i < arr->size - 1) total_len += sep_len;
+        }
+        char *out = malloc(total_len + 1);
+        char *p = out;
+        for (size_t i = 0; i < arr->size; i++) {
+            StradaValue *el = arr->elements[arr->head + i];
+            if (el && !STRADA_IS_TAGGED_INT(el) && el->type == STRADA_STR && el->value.pv) {
+                size_t el_len = strada_str_len(el);
+                memcpy(p, el->value.pv, el_len);
+                p += el_len;
+            } else {
+                char *s = strada_to_str(el);
+                if (s) { size_t sl = strlen(s); memcpy(p, s, sl); p += sl; free(s); }
+            }
+            if (i < arr->size - 1) { memcpy(p, sep, sep_len); p += sep_len; }
+        }
+        *p = '\0';
+        StradaValue *rv = strada_new_str_len(out, total_len);
+        free(out);
+        if (sep_sv && (STRADA_IS_TAGGED_INT(sep_sv) || sep_sv->type != STRADA_STR)) {
+            free((void *)sep);
+        }
+        return rv;
+    }
+
+    /* Sep is a STRADA_STR — preserve binary safety throughout */
+    size_t total_len = 0;
+    for (size_t i = 0; i < arr->size; i++) {
+        StradaValue *el = arr->elements[arr->head + i];
+        if (el && !STRADA_IS_TAGGED_INT(el) && el->type == STRADA_STR && el->value.pv) {
+            total_len += strada_str_len(el);
+        } else {
+            char *s = strada_to_str(el);
+            total_len += s ? strlen(s) : 0;
+            if (s) free(s);
+        }
+        if (i < arr->size - 1) total_len += sep_len;
+    }
+    char *out = malloc(total_len + 1);
+    char *p = out;
+    for (size_t i = 0; i < arr->size; i++) {
+        StradaValue *el = arr->elements[arr->head + i];
+        if (el && !STRADA_IS_TAGGED_INT(el) && el->type == STRADA_STR && el->value.pv) {
+            size_t el_len = strada_str_len(el);
+            memcpy(p, el->value.pv, el_len);
+            p += el_len;
+        } else {
+            char *s = strada_to_str(el);
+            if (s) { size_t sl = strlen(s); memcpy(p, s, sl); p += sl; free(s); }
+        }
+        if (i < arr->size - 1) { memcpy(p, sep, sep_len); p += sep_len; }
+    }
+    *p = '\0';
+    StradaValue *rv = strada_new_str_len(out, total_len);
+    free(out);
+    return rv;
+}
+
 /* ===== STRING BUILDER ===== */
 /* Efficient string building with O(1) amortized append */
 
@@ -11131,9 +11958,19 @@ void strada_sb_append(StradaValue *sb_val, StradaValue *str_val) {
     StradaStringBuilder *sb = (StradaStringBuilder*)sb_val->value.ptr;
     if (!sb) return;
 
+    /* For STRADA_STR, use the binary-safe length so embedded NUL bytes are
+     * preserved (strada_to_str_buf returns the pv pointer but strlen would
+     * stop at the first NUL). Other types stringify with no NULs by nature. */
+    const char *str;
+    size_t len;
     char _tb[256];
-    const char *str = strada_to_str_buf(str_val, _tb, sizeof(_tb));
-    size_t len = strlen(str);
+    if (str_val && !STRADA_IS_TAGGED_INT(str_val) && str_val->type == STRADA_STR && str_val->value.pv) {
+        str = str_val->value.pv;
+        len = strada_str_len(str_val);
+    } else {
+        str = strada_to_str_buf(str_val, _tb, sizeof(_tb));
+        len = strlen(str);
+    }
 
     /* Grow buffer if needed (double capacity) */
     while (sb->length + len + 1 > sb->capacity) {
@@ -12605,7 +13442,7 @@ char* strada_int_to_cstr(int64_t n) {
 /* Convert double to C string, returns newly allocated string (caller must free) */
 char* strada_num_to_cstr(double n) {
     char buf[64];
-    snprintf(buf, sizeof(buf), "%g", n);
+    strada_format_double(n, buf, sizeof(buf));
     return strdup(buf);
 }
 
@@ -13088,12 +13925,12 @@ StradaValue* strada_system(StradaValue *cmd_val) {
     int status;
     waitpid(pid, &status, 0);
 
-    if (WIFEXITED(status)) {
-        return strada_new_int(WEXITSTATUS(status));
-    } else if (WIFSIGNALED(status)) {
-        return strada_new_int(128 + WTERMSIG(status));
-    }
-    return strada_new_int(-1);
+    /* Return the raw waitpid status so callers can use Perl's idiom:
+     *   `$rc >> 8` to extract exit code
+     *   `$rc & 0xff` for signal/core info
+     * Previously we returned WEXITSTATUS directly, so `system("false") >> 8`
+     * gave 0 instead of 1 — broke `$rc >> 8` patterns in real Perl code. */
+    return strada_new_int(status);
 }
 
 StradaValue* strada_system_argv(StradaValue *program, StradaValue *args_arr) {
@@ -14252,6 +15089,16 @@ static int has_no_destroy_cached(const char *pkg) {
 void strada_call_destroy(StradaValue *obj) {
     const char *bp = SV_BLESSED(obj);
     if (!obj || !bp || oop_destroying) return;
+
+    /* Try the perla hook first — Perl-style packages register DESTROY
+     * via perla_code_set, which doesn't show up in strada's OOP table. */
+    if (strada_destroy_hook) {
+        oop_destroying = 1;
+        int handled = strada_destroy_hook(obj);
+        oop_destroying = 0;
+        if (handled) return;
+    }
+
     if (!oop_initialized) return;
 
     /* Fast path: skip if package is known to have no DESTROY */
@@ -14627,22 +15474,35 @@ StradaValue* strada_basename(StradaValue *path_val) {
 StradaValue* strada_glob(StradaValue *pattern_val) {
     char _tb[PATH_MAX];
     const char *pattern = strada_to_str_buf(pattern_val, _tb, sizeof(_tb));
-    glob_t globbuf;
-
-    int flags = GLOB_TILDE | GLOB_BRACE;
-    int result = glob(pattern, flags, NULL, &globbuf);
-
-    if (result != 0) {
-        globfree(&globbuf);
-        return strada_new_array();  /* Return empty array on no match or error */
-    }
-
     StradaValue *arr = strada_new_array();
-    for (size_t i = 0; i < globbuf.gl_pathc; i++) {
-        strada_array_push_take(arr->value.av, strada_new_str(globbuf.gl_pathv[i]));
-    }
 
-    globfree(&globbuf);
+    /* Perl's glob splits on whitespace into multiple patterns and unions
+     * the results. POSIX glob() takes a single pattern; iterate per
+     * whitespace-separated chunk and accumulate. */
+    const char *p = pattern;
+    int flags = GLOB_TILDE | GLOB_BRACE;
+    while (*p) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+        const char *start = p;
+        while (*p && *p != ' ' && *p != '\t') p++;
+        size_t len = (size_t)(p - start);
+        if (len == 0) continue;
+        char one[PATH_MAX];
+        if (len >= sizeof(one)) len = sizeof(one) - 1;
+        memcpy(one, start, len);
+        one[len] = 0;
+
+        glob_t gb;
+        memset(&gb, 0, sizeof(gb));
+        int rc = glob(one, flags, NULL, &gb);
+        if (rc == 0) {
+            for (size_t i = 0; i < gb.gl_pathc; i++) {
+                strada_array_push_take(arr->value.av, strada_new_str(gb.gl_pathv[i]));
+            }
+        }
+        globfree(&gb);
+    }
     return arr;
 }
 

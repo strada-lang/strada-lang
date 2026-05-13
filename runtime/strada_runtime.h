@@ -439,6 +439,13 @@ StradaValue* strada_safe_mod(int64_t a, int64_t b);    /* Returns undef if b==0 
 StradaValue* strada_new_str(const char *s);
 StradaValue* strada_new_str_take(char *s);  /* Take ownership of string */
 StradaValue* strada_new_str_len(const char *s, size_t len);  /* Binary-safe string */
+
+/* Build a STRADA_STR from a C string literal, preserving embedded NUL bytes.
+ * sizeof on a string literal is computed at translation time and reflects
+ * the actual byte width (adjacent literals like "\x00""ABC" concatenate
+ * before sizeof, so the length count is accurate). */
+#define STRADA_NEW_STR_LIT(LIT) strada_new_str_len((LIT), sizeof(LIT) - 1)
+
 size_t strada_str_len(StradaValue *sv);  /* Get string length (binary-safe) */
 StradaValue* strada_new_array(void);
 StradaValue* strada_new_hash(void);
@@ -549,6 +556,7 @@ StradaValue* strada_concat_sv(StradaValue *a, StradaValue *b);  /* Fast concat o
 StradaValue* strada_concat_inplace(StradaValue *a, StradaValue *b);  /* In-place concat: consumes a, borrows b */
 StradaValue* strada_concat_inplace_cstr(StradaValue *a, const char *str_b, size_t len_b);  /* In-place concat with C string literal */
 size_t strada_length(const char *s);      /* Returns character count (UTF-8 codepoints) */
+size_t strada_length_chars_sv(StradaValue *sv);  /* Binary-safe UTF-8 char count */
 size_t strada_length_sv(StradaValue *sv); /* Binary-safe length using struct_size */
 size_t strada_bytes(const char *s);       /* Returns byte count */
 StradaValue* strada_char_at(StradaValue *str, StradaValue *index);  /* Fast char code by index */
@@ -591,6 +599,7 @@ char* strada_chop(const char *str);
 int strada_strcmp(const char *s1, const char *s2);
 int strada_strncmp(const char *s1, const char *s2, int n);
 char* strada_join(const char *sep, StradaArray *arr);
+StradaValue* strada_join_sv(StradaValue *sep_sv, StradaArray *arr);
 
 /* StringBuilder functions for efficient string building */
 StradaValue* strada_sb_new(void);                              /* Create new StringBuilder */
@@ -671,6 +680,11 @@ extern char *(*strada_overload_stringify_hook)(StradaValue *sv);
  * bool:    returns -1 (no overload), 0 (false), 1 (true). */
 extern int (*strada_overload_numeric_hook)(StradaValue *sv, double *out);
 extern int (*strada_overload_bool_hook)(StradaValue *sv);
+/* DESTROY hook — Perl-style packages register DESTROY via perla_code_set,
+ * not the strada OOP table that strada_call_destroy walks. If set,
+ * strada_call_destroy calls this BEFORE its own lookup. Returns 1 if it
+ * handled the call (skip default path), 0 if not. */
+extern int (*strada_destroy_hook)(StradaValue *obj);
 
 __attribute__((noreturn)) void strada_throw(const char *msg);
 __attribute__((noreturn)) void strada_throw_value(StradaValue *sv);
@@ -926,6 +940,9 @@ int strada_regex_match(const char *str, const char *pattern);
 int strada_regex_match_with_capture(const char *str, const char *pattern, const char *flags);
 StradaValue* strada_captures(void);
 StradaValue* strada_capture_var(int n);
+StradaValue* strada_prematch(void);
+StradaValue* strada_postmatch(void);
+int perl_looks_like_number_c(const char *s);
 /* List-context match: returns an array.
  * Match with capture groups → array of capture strings ($1, $2, ...).
  * Match without capture groups → array containing just integer 1.
