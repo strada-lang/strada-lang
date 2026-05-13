@@ -297,6 +297,20 @@ L<SQLite documentation|https://sqlite.org/lang.html>
 
 package DBI;
 
+# Extern-C library deps that the final binary needs at link time. These
+# track DBI_DEFINES from the Makefile: when a driver is configured in,
+# the corresponding -l flag is recorded so consumers of DBI.o (via
+# `use DBI;` auto-detect) get the right gcc -l<name> arguments.
+#ifdef HAVE_SQLITE3
+link_lib "sqlite3";
+#endif
+#ifdef HAVE_MYSQL
+link_lib "mysqlclient";
+#endif
+#ifdef HAVE_POSTGRES
+link_lib "pq";
+#endif
+
 # DBI C implementation
 __C__ {
 #include <stdio.h>

@@ -23,6 +23,24 @@
 # ============================================================
 
 # Sanitize function names for C (replace :: with _)
+# Module-only codegen filter (--object / -M).
+# Returns 1 if the item should be SKIPPED because it was inlined from a
+# `use`d module (and therefore lives in some other module's .o, not ours).
+# Returns 0 in all other cases (full-program mode, or the item came from
+# the file we're compiling).
+#
+# Items are tagged at parse time: load_module sets $item->{"from_use"} = 1
+# on everything it transfers into the main program; top-level parse leaves
+# this unset/0 on the file's own functions, globals, BEGIN/END blocks, and
+# top-level __C__ blocks. So the filter is just a boolean check.
+#
+# Accepts either a program or codegen context (both carry module_only_mode).
+func cg_skip_for_module(scalar $ctx, int $from_use) int {
+    if ($ctx->{"module_only_mode"} != 1) { return 0; }
+    if ($from_use == 1) { return 1; }
+    return 0;
+}
+
 func sanitize_name(str $name) str {
     my str $result = "";
     my int $i = 0;
@@ -126,6 +144,10 @@ func codegen_new(str $filename, int $debug_info, int $enable_profiling, int $ena
     $cg{"preamble_content"} = "";  # Saved preamble when doing multi-phase
     $cg{"funcs_content"} = "";     # Saved funcs when doing multi-phase
     $cg{"oop_fwd_decls"} = "";     # OOP init forward declarations (generated after methods tracked)
+    # Module-only codegen mode (copied from program in generate() so the cg_skip_for_module
+    # helper works equivalently whether called with the program or the cg context).
+    $cg{"module_only_mode"} = 0;
+    $cg{"module_target"} = "";
     $cg{"indent"} = 0;
     $cg{"debug_info"} = $debug_info;  # Emit #line directives for debugging
     $cg{"enable_profiling"} = $enable_profiling;  # Emit function profiling code
@@ -2600,7 +2622,7 @@ func needs_temp_cleanup(scalar $cg, scalar $expr) int {
             $name eq "captures" || $name eq "named_captures" ||
             $name eq "sys::quotemeta" ||
             $name eq "bytes" || $name eq "hash_new" ||
-            $name eq "sys::file_exists" ||
+            $name eq "sys::file_exists" || $name eq "sys::file_mtime" ||
             $name eq "sys::open" || $name eq "sys::open_str" || $name eq "sys::str_from_fh" ||
             $name eq "sys::slurp" || $name eq "slurp" ||
             $name eq "sys::mkdir" || $name eq "sys::seek" || $name eq "sys::waitpid" ||
@@ -4552,6 +4574,10 @@ func gen_expression(scalar $cg, scalar $expr) void {
 
         if ($name eq "substr") {
             my scalar $args = $expr->{"args"};
+            # 2-arg substr($s, $offset) means "to end of string". Passing
+            # -1 here would be re-interpreted by strada_substr() as Perl's
+            # negative-length "leave N chars at end" semantics, dropping
+            # one char. Use INT64_MAX so the runtime clamps to (slen-offset).
             if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $args->[0]) == 1) {
                 emit($cg, "({ StradaValue *__sub_v = ");
                 gen_expression($cg, $args->[0]);
@@ -4561,7 +4587,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 if ($expr->{"arg_count"} > 2) {
                     emit_int_operand($cg, $args->[2]);
                 } else {
-                    emit($cg, "-1");
+                    emit($cg, "INT64_MAX");
                 }
                 emit($cg, "); strada_decref(__sub_v); __sub_r; })");
             } else {
@@ -4573,7 +4599,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 if ($expr->{"arg_count"} > 2) {
                     emit_int_operand($cg, $args->[2]);
                 } else {
-                    emit($cg, "-1");
+                    emit($cg, "INT64_MAX");
                 }
                 emit($cg, ")");
             }
@@ -6859,6 +6885,16 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 emit($cg, "strada_decref(__fe_v); ");
             }
             emit($cg, "strada_new_int(__fe_i); })");
+            return;
+        }
+
+        if ($name eq "sys::file_mtime") {
+            # core::file_mtime(path) -> int (seconds since epoch, -1 on stat
+            # failure). Cheap stat() wrapper used by the parser to decide
+            # whether a pre-compiled .o/.so artifact is fresher than its
+            # .strada source.
+            my scalar $args = $expr->{"args"};
+            gen_call_with_arg_cleanup($cg, "strada_file_mtime", $args, 1);
             return;
         }
 
@@ -16838,6 +16874,12 @@ func gen_function(scalar $cg, scalar $fn) void {
                 my str $name = $gvar->{"name"};
                 my scalar $init = $gvar->{"init"};
 
+                # Module-only: skip globals from other modules.
+                if (cg_skip_for_module($cg, $gvar->{"from_use"}) == 1) {
+                    $g = $g + 1;
+                    next;
+                }
+
                 # Handle our declarations - use global registry
                 if ($gvar_type == NODE_OUR_DECL()) {
                     if ($init) {
@@ -17329,13 +17371,24 @@ func gen_program(scalar $cg, scalar $program) void {
         emit($cg, "static int __fp_file_id = 0;\n\n");
     }
 
-    # Emit top-level C blocks (includes, typedefs, etc.)
+    # Emit top-level C blocks (includes, typedefs, etc.). In module-only
+    # mode, skip blocks contributed by other modules — they'd duplicate
+    # definitions that already live in those modules' .o files.
     my int $c_block_count = $program->{"c_block_count"};
     if ($c_block_count > 0) {
         emit($cg, "/* Top-level C code blocks */\n");
         my scalar $c_blocks = $program->{"c_blocks"};
+        my scalar $cb_from_use = $program->{"c_block_from_use"};
         my int $cb = 0;
         while ($cb < $c_block_count) {
+            my int $cb_fu = 0;
+            if ($cb < size($cb_from_use)) {
+                $cb_fu = $cb_from_use->[$cb];
+            }
+            if (cg_skip_for_module($program, $cb_fu) == 1) {
+                $cb = $cb + 1;
+                next;
+            }
             emit($cg, $c_blocks->[$cb]);
             emit($cg, "\n");
             $cb = $cb + 1;
@@ -17383,7 +17436,8 @@ func gen_program(scalar $cg, scalar $program) void {
         emit($cg, "extern StradaValue *__child_status;\n\n");
     }
 
-    # Emit global variable declarations
+    # Emit global variable declarations. In module-only mode, skip globals
+    # tagged as coming from other modules — they live in those modules' .o.
     my int $global_count = $program->{"global_count"};
     if ($global_count > 0) {
         my scalar $globals = $program->{"globals"};
@@ -17394,6 +17448,11 @@ func gen_program(scalar $cg, scalar $program) void {
             my int $gvar_type = $gvar->{"type"};
             my int $var_type = $gvar->{"var_type"};
             my str $name = $gvar->{"name"};
+
+            if (cg_skip_for_module($program, $gvar->{"from_use"}) == 1) {
+                $g = $g + 1;
+                next;
+            }
 
             # Our declarations don't need C global variables (use registry)
             if ($gvar_type == NODE_OUR_DECL()) {
@@ -17434,11 +17493,44 @@ func gen_program(scalar $cg, scalar $program) void {
         }
     }
 
-    # Store BEGIN/END blocks and import calls in codegen context
-    $cg->{"begin_blocks"} = $program->{"begin_blocks"};
-    $cg->{"begin_block_count"} = $program->{"begin_block_count"};
-    $cg->{"end_blocks"} = $program->{"end_blocks"};
-    $cg->{"end_block_count"} = $program->{"end_block_count"};
+    # Store BEGIN/END blocks and import calls in codegen context. In
+    # module-only mode, filter out blocks contributed by other modules so the
+    # generated function indices stay consecutive and don't reference bodies
+    # we never emit.
+    if ($cg->{"module_only_mode"} == 1) {
+        my array @begin_keep = ();
+        my scalar $bbs = $program->{"begin_blocks"};
+        my int $bbc = $program->{"begin_block_count"};
+        my int $bbi = 0;
+        while ($bbi < $bbc) {
+            my scalar $bb = $bbs->[$bbi];
+            if (cg_skip_for_module($cg, $bb->{"from_use"}) == 0) {
+                push(@begin_keep, $bb);
+            }
+            $bbi = $bbi + 1;
+        }
+        $cg->{"begin_blocks"} = \@begin_keep;
+        $cg->{"begin_block_count"} = size(@begin_keep);
+
+        my array @end_keep = ();
+        my scalar $ebs = $program->{"end_blocks"};
+        my int $ebc = $program->{"end_block_count"};
+        my int $ebi = 0;
+        while ($ebi < $ebc) {
+            my scalar $eb = $ebs->[$ebi];
+            if (cg_skip_for_module($cg, $eb->{"from_use"}) == 0) {
+                push(@end_keep, $eb);
+            }
+            $ebi = $ebi + 1;
+        }
+        $cg->{"end_blocks"} = \@end_keep;
+        $cg->{"end_block_count"} = size(@end_keep);
+    } else {
+        $cg->{"begin_blocks"} = $program->{"begin_blocks"};
+        $cg->{"begin_block_count"} = $program->{"begin_block_count"};
+        $cg->{"end_blocks"} = $program->{"end_blocks"};
+        $cg->{"end_block_count"} = $program->{"end_block_count"};
+    }
     $cg->{"import_calls"} = $program->{"import_calls"};
     $cg->{"import_call_count"} = $program->{"import_call_count"};
 
@@ -17731,6 +17823,15 @@ func gen_program(scalar $cg, scalar $program) void {
         my scalar $fn = $funcs->[$i];
         my str $name = sanitize_name($fn->{"name"});
         my int $fn_type = $fn->{"type"};
+        my str $fn_pkg = $fn->{"package"};
+
+        # In module-only mode, skip forward decls for private functions in
+        # other modules — they'd require `static` without a body, which won't
+        # compile. Non-private decls are kept so cross-module calls link.
+        if ($fn->{"is_private"} == 1 && cg_skip_for_module($program, $fn->{"from_use"}) == 1) {
+            $i = $i + 1;
+            next;
+        }
 
         # Skip extern functions (they're declared elsewhere)
         if ($fn_type == NODE_EXTERN_FUNC()) {
@@ -17799,11 +17900,20 @@ func gen_program(scalar $cg, scalar $program) void {
     $cg->{"preamble_content"} = sb_to_string($cg->{"output_sb"});
     sb_clear($cg->{"output_sb"});
 
-    # Function definitions (skip extern declarations without bodies)
+    # Function definitions (skip extern declarations without bodies).
+    # In module-only mode, skip bodies that belong to other packages — their
+    # forward declarations were already emitted, and their definitions live in
+    # the other module's .o.
     $i = 0;
     while ($i < $program->{"function_count"}) {
         my scalar $fn = $funcs->[$i];
         my int $fn_type = $fn->{"type"};
+        my str $fn_pkg = $fn->{"package"};
+
+        if (cg_skip_for_module($program, $fn->{"from_use"}) == 1) {
+            $i = $i + 1;
+            next;
+        }
 
         if ($fn_type == NODE_EXTERN_FUNC()) {
             # Extern with body - generate the function
@@ -17818,7 +17928,6 @@ func gen_program(scalar $cg, scalar $program) void {
 
         # Track method for OOP registration using the function's stored package
         # (check package string directly - parser always sets it)
-        my str $fn_pkg = $fn->{"package"};
         if (length($fn_pkg) > 0 && $fn_pkg ne "main") {
             codegen_track_method($cg, $fn, $fn_pkg);
         }
@@ -18006,6 +18115,22 @@ func gen_program(scalar $cg, scalar $program) void {
         emit($cg, " */\n\n");
     }
 
+    # Emit extern-C link deps (`link_lib`) as a comment for the strada
+    # driver / test harness to pick up and add to the final gcc link.
+    my scalar $ll_arr = $program->{"link_libs"};
+    my int $ll_count = 0;
+    if (defined($ll_arr)) { $ll_count = size($ll_arr); }
+    if ($ll_count > 0) {
+        emit($cg, "\n/* link_lib: extern-C libraries the final binary needs\n");
+        emit($cg, " * __STRADA_LINK_LIBS__:");
+        my int $ll_idx = 0;
+        while ($ll_idx < $ll_count) {
+            emit($cg, " " . $ll_arr->[$ll_idx]);
+            $ll_idx = $ll_idx + 1;
+        }
+        emit($cg, "\n */\n\n");
+    }
+
     # Generate BEGIN/END block function bodies (only if they exist)
     if ($begin_block_count > 0 || $end_block_count > 0) {
         emit($cg, "\n/* BEGIN/END block implementations */\n");
@@ -18148,6 +18273,13 @@ func gen_export_info(scalar $cg, scalar $program, int $has_main) void {
     my str $static_prefix = "";
     if ($has_main == 1) {
         $static_prefix = "static ";
+    } elsif ($cg->{"module_only_mode"} == 1) {
+        # Module-only .o: emit as weak so multiple modules can be linked into
+        # the same executable without multiple-definition errors. The metadata
+        # is only read at compile time by the probe (which links one .o at a
+        # time), so the runtime never actually calls these — duplicate-weak
+        # behaviour (linker picks one) is fine.
+        $static_prefix = "__attribute__((weak)) ";
     }
     emit($cg, "\n/* Strada export metadata for import_lib */\n");
     emit($cg, $static_prefix . "const char* __strada_export_info(void) {\n");
@@ -18161,6 +18293,12 @@ func gen_export_info(scalar $cg, scalar $program, int $has_main) void {
         my scalar $fn = $funcs->[$i];
         my str $name = $fn->{"name"};
         my int $fn_type = $fn->{"type"};
+
+        # Module-only: only export the target module's own functions.
+        if (cg_skip_for_module($program, $fn->{"from_use"}) == 1) {
+            $i = $i + 1;
+            next;
+        }
 
         # Skip main function, extern functions, and private functions
         my int $is_private = $fn->{"is_private"};
@@ -18200,6 +18338,18 @@ func gen_export_info(scalar $cg, scalar $program, int $has_main) void {
         $i = $i + 1;
     }
 
+    # Emit `link:NAME` entries so consumers of this .o/.so/.a can pick up
+    # the extern-C library deps via the metadata probe.
+    my scalar $ll_arr2 = $program->{"link_libs"};
+    if (defined($ll_arr2)) {
+        my int $ll2 = 0;
+        my int $ll2_count = size($ll_arr2);
+        while ($ll2 < $ll2_count) {
+            emit($cg, "link:" . $ll_arr2->[$ll2] . "\\n");
+            $ll2 = $ll2 + 1;
+        }
+    }
+
     emit($cg, "\";\n");
     emit($cg, "}\n");
 
@@ -18212,6 +18362,10 @@ func gen_version_info(scalar $cg, scalar $program, int $has_main) void {
     my str $static_prefix = "";
     if ($has_main == 1) {
         $static_prefix = "static ";
+    } elsif ($cg->{"module_only_mode"} == 1) {
+        # Same rationale as __strada_export_info — weak avoids multi-def
+        # when several module-only .o files are linked into one binary.
+        $static_prefix = "__attribute__((weak)) ";
     }
     my str $version = "";
     if ($program->{"version"} ne "") {
@@ -18266,6 +18420,13 @@ func gen_global_constructor(scalar $cg) void {
             my str $sigil = $gvar->{"sigil"};
             my str $name = $gvar->{"name"};
             my scalar $init = $gvar->{"init"};
+
+            # Module-only: skip globals from other modules; they're initialised
+            # by their own constructor.
+            if (cg_skip_for_module($cg, $gvar->{"from_use"}) == 1) {
+                $g = $g + 1;
+                next;
+            }
 
             # Handle our declarations - use global registry
             if ($gvar_type == NODE_OUR_DECL()) {
@@ -18482,6 +18643,10 @@ func type_to_c_raw(int $type) str {
 
 func generate(scalar $ast, str $filename, int $debug_info, int $enable_profiling, int $enable_stack_trace, int $full_profile) str {
     my scalar $cg = codegen_new($filename, $debug_info, $enable_profiling, $enable_stack_trace, $full_profile);
+    # Propagate module-only settings from program to cg so helpers that only
+    # have $cg in scope can still filter (e.g., gen_global_constructor).
+    $cg->{"module_only_mode"} = $ast->{"module_only_mode"};
+    $cg->{"module_target"} = $ast->{"module_target"};
     gen_program($cg, $ast);
     return get_output($cg);  # Join array into final string
 }

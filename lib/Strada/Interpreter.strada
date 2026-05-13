@@ -6115,7 +6115,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
                 my scalar $repl_tokens = lex_tokenize($repl_code);
                 my scalar $repl_parser = parser_new($repl_tokens);
                 my array @re = ();
-                my scalar $repl_prog = parse_program($repl_parser, \@re, \@re);
+                my scalar $repl_prog = parse_program($repl_parser, \@re, \@re, \@re, \@re);
                 $parsed_repl_fn = $repl_prog->{"functions"}->[0];
             }
 
@@ -6319,7 +6319,7 @@ func eval_string(str $code) scalar {
     my scalar $parser = parser_new($tokens);
     parser_set_filename($parser, "<eval>");
     my array @empty = ();
-    my scalar $program = parse_program($parser, \@empty, \@empty);
+    my scalar $program = parse_program($parser, \@empty, \@empty, \@empty, \@empty);
 
     # Register functions and find __eval__
     my scalar $funcs = $program->{"functions"};
@@ -6397,7 +6397,7 @@ func reset() void {
 # Eval backend selection: "vm" (default) or "tree-walk"
 # ============================================================
 
-my str $g_eval_backend = "vm";
+my str $g_eval_backend = "tree-walk";  # was "vm"; default now tree-walk since the VM backend requires -DHAVE_VM in the runtime, which only the strada-interp binary defines
 
 # Set the eval backend: "vm" or "tree-walk"
 func set_eval_backend(str $backend) void {
@@ -6451,7 +6451,7 @@ func eval_string_vm(str $code) scalar {
     my scalar $parser = parser_new($tokens);
     parser_set_filename($parser, "<eval-vm>");
     my array @empty = ();
-    my scalar $program = parse_program($parser, \@empty, \@empty);
+    my scalar $program = parse_program($parser, \@empty, \@empty, \@empty, \@empty);
 
     # Compile to bytecode and execute
     my int $vm_result = 0;

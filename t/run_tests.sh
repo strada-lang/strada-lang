@@ -173,9 +173,25 @@ compile_strada() {
         return 1
     fi
 
+    # Pick up import_object/import_archive sibling files so `use Foo;`
+    # auto-detected libs link cleanly (mirrors the strada driver's logic).
+    local extra_link=""
+    if grep -q '__STRADA_OBJECT_FILES__:' "$c_file" 2>/dev/null; then
+        extra_link="$extra_link $(grep '__STRADA_OBJECT_FILES__:' "$c_file" | sed 's/.*__STRADA_OBJECT_FILES__: *//' | sed 's/ *\*\///')"
+    fi
+    if grep -q '__STRADA_ARCHIVE_FILES__:' "$c_file" 2>/dev/null; then
+        extra_link="$extra_link $(grep '__STRADA_ARCHIVE_FILES__:' "$c_file" | sed 's/.*__STRADA_ARCHIVE_FILES__: *//' | sed 's/ *\*\///')"
+    fi
+    # And extern-C library deps the source advertised via link_lib.
+    if grep -q '__STRADA_LINK_LIBS__:' "$c_file" 2>/dev/null; then
+        for lib in $(grep '__STRADA_LINK_LIBS__:' "$c_file" | sed 's/.*__STRADA_LINK_LIBS__: *//' | sed 's/ *\*\///'); do
+            extra_link="$extra_link -l$lib"
+        done
+    fi
+
     # Compile C to executable
     # Note: -rdynamic exports symbols so shared libraries can use the executable's runtime
-    if ! gcc -rdynamic -o "$exe_file" "$c_file" "$RUNTIME" -I"$RUNTIME_H" -ldl -lm ${EXTRA_LDFLAGS:-} > "$BUILD_DIR/${name}_gcc.log" 2>&1; then
+    if ! gcc -fno-lto -rdynamic -o "$exe_file" "$c_file" $extra_link "$RUNTIME" -I"$RUNTIME_H" -ldl -lm ${EXTRA_LDFLAGS:-} > "$BUILD_DIR/${name}_gcc.log" 2>&1; then
         return 2
     fi
 
@@ -526,7 +542,7 @@ test_import_object() {
     fi
 
     # Compile C to executable - INCLUDE the .o file
-    if ! gcc -o "$exe_file" "$c_file" "$lib_o" "$RUNTIME" -I"$RUNTIME_H" -ldl -lm ${EXTRA_LDFLAGS:-} > "$BUILD_DIR/${name}_gcc.log" 2>&1; then
+    if ! gcc -fno-lto -o "$exe_file" "$c_file" "$lib_o" "$RUNTIME" -I"$RUNTIME_H" -ldl -lm ${EXTRA_LDFLAGS:-} > "$BUILD_DIR/${name}_gcc.log" 2>&1; then
         FAILED=$((FAILED + 1))
         local err=$(cat "$BUILD_DIR/${name}_gcc.log" 2>/dev/null | head -1)
         log_fail "run: $desc" "GCC compile failed: $err"
@@ -606,7 +622,7 @@ test_import_archive() {
     fi
 
     # Compile C to executable - archive includes runtime, so skip separate runtime
-    if ! gcc -rdynamic -o "$exe_file" "$c_file" "$lib_a" -I"$RUNTIME_H" -ldl -lm -lpthread ${EXTRA_LDFLAGS:-} > "$BUILD_DIR/${name}_gcc.log" 2>&1; then
+    if ! gcc -fno-lto -rdynamic -o "$exe_file" "$c_file" "$lib_a" -I"$RUNTIME_H" -ldl -lm -lpthread ${EXTRA_LDFLAGS:-} > "$BUILD_DIR/${name}_gcc.log" 2>&1; then
         FAILED=$((FAILED + 1))
         local err=$(cat "$BUILD_DIR/${name}_gcc.log" 2>/dev/null | head -1)
         log_fail "run: $desc" "GCC compile failed: $err"

@@ -2,7 +2,7 @@
 #
 # strada - Compile Strada programs to native executables or shared libraries
 #
-# Usage: strada [options] input.strada [extra.c ...] [extra.o ...]
+# Usage: strada [options] input.strada [extra.c ...] [extra.o ...] [extra.a ...]
 #
 # Options:
 #   -c          Keep the generated C file
@@ -111,19 +111,26 @@ OUTPUT_FILE=""
 SHARED_LIB=0
 STATIC_LIB=0
 OBJECT_ONLY=0
+OBJECT_FULL=0      # 1 if --object-full was passed (include deps, old behavior)
+MODULE_ONLY_MODE=0 # 1 if -M was passed (precompile a module / a tree of modules)
 STATIC_LINK=0
 SHOW_WARNINGS=0
 ENABLE_PROFILING=0
 FULL_PROFILE=0
 NO_STACK_TRACE=0
+NO_LTO=0           # -fno-lto: skip link-time optimization for faster gcc
 REPL_MODE=0
 SCRIPT_FILE=""
 DOC_MODE=0
 DOC_TOPIC=""
 LIB_PATHS=()
 LIB_PATHS_LOW=()
+JIT_PASSTHROUGH=()  # --compiler=... collected here, forwarded to strada-jit
 EXTRA_C_FILES=()
 EXTRA_O_FILES=()
+EXTRA_A_FILES=()
+IMPLICIT_IMPORT_OBJS=()
+IMPLICIT_IMPORT_ARCHS=()
 LINK_LIBS=()
 INCLUDE_PATHS=()
 PP_DEFINES=()
@@ -167,21 +174,34 @@ Options:
   -p, --profile  Enable function profiling (timing and call counts)
   --full-profile  Enable line-level profiling (writes strada-prof.out)
   --no-stack-trace  Disable stack traces for better performance
+  -fno-lto      Skip link-time optimization (faster gcc, slightly larger
+                output). Useful for test/dev builds; production should keep
+                LTO on (default at -O2+).
   --c-debug   Debug with C source only (DWARF symbols, no #line directives)
-  --shared      Compile as shared library (.so)
+  --shared      Compile as shared library (.so, includes inlined dep code)
   --static      Compile as fully static binary (no dynamic linking)
   --static-lib  Compile as static library (.a)
-  --object      Compile to object file only (.o)
-  --repl        Start interactive REPL
-  --script FILE Run a REPL script file
+  --object      Compile to object file only (.o). By default the .o contains
+                only the input file's own symbols (deps come from their own .o).
+  --object-full Compile to .o that also bundles all transitively-used module code
+                (legacy behaviour pre-separate-compilation).
+  -M [TARGET]   Precompile module(s). With a FILE: produce a sibling .o limited
+                to that file's own symbols. With a DIR: recursive walk producing
+                a sibling .o for each .strada file beneath.
+  --repl        Start interactive REPL (via strada-jit; auto-detects tcc/gcc)
+  --script FILE Run a script via strada-jit (gcc by default; --compiler=tcc
+                to override).
   --doc TOPIC   Show documentation (module POD or guide)
   -w            Show compiler warnings (unused variables, etc.)
   -v          Verbose output
   -h, --help  Show this help
 
 Extra Files:
-  You can include additional .c and .o files after the .strada file.
-  These are compiled/linked into the final executable, useful for extern "C".
+  You can include additional .c, .o, and .a files after the .strada file.
+  Plain C files/objects are linked in (useful for extern "C" libraries).
+  Strada module .o/.a files (those compiled with --object/--static-lib) are
+  detected automatically and behave like an implicit import_object/import_archive,
+  so the main source does not need to declare them.
 
 Examples:
   strada hello.strada              # Creates ./hello
@@ -198,6 +218,10 @@ Examples:
   strada --static-lib mylib.strada # Creates ./mylib.a (static library)
   strada --object mylib.strada     # Creates ./mylib.o (object file)
   strada --static hello.strada     # Creates portable static binary
+
+  # Implicit import examples (no import_object/import_archive in source):
+  strada -o foo foo.strada MyLib.o      # MyLib.o auto-imported
+  strada app.strada MyLib.a             # MyLib.a auto-imported
 
   # Extern "C" examples:
   strada app.strada lib/ssl/strada_ssl.c -l ssl -l crypto
@@ -286,6 +310,19 @@ while [[ $# -gt 0 ]]; do
             OBJECT_ONLY=1
             shift
             ;;
+        --object-full)
+            # Old behavior: produce an .o that bundles every `use`d module's
+            # compiled code. Useful when you want one stand-alone object.
+            OBJECT_ONLY=1
+            OBJECT_FULL=1
+            shift
+            ;;
+        -M)
+            # Precompile module(s). With a file: produce a sibling .o limited
+            # to that file's own symbols. With a directory: walk recursively.
+            MODULE_ONLY_MODE=1
+            shift
+            ;;
         -w|--warnings)
             SHOW_WARNINGS=1
             shift
@@ -296,6 +333,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --full-profile)
             FULL_PROFILE=1
+            shift
+            ;;
+        -fno-lto|--no-lto)
+            NO_LTO=1
             shift
             ;;
         --no-stack-trace)
@@ -357,6 +398,13 @@ while [[ $# -gt 0 ]]; do
             SCRIPT_FILE="$2"
             shift 2
             ;;
+        --compiler=*|--chunked)
+            # Forwarded to strada-jit in --repl/--script modes; the driver
+            # itself only swallows them so the unknown-option guard below
+            # doesn't reject them.
+            JIT_PASSTHROUGH+=("$1")
+            shift
+            ;;
         --doc)
             DOC_MODE=1
             DOC_TOPIC="$2"
@@ -375,46 +423,55 @@ done
 # Restore positional parameters
 set -- "${POSITIONAL[@]}"
 
-# Handle REPL mode
+# Locate strada-jit (dev tree vs installed). Used for both --repl and --script.
+find_jit_bin() {
+    if [ -x "$REPL_DIR/strada-jit" ]; then
+        echo "$REPL_DIR/strada-jit"
+        return 0
+    fi
+    if [ -x "$SCRIPT_DIR/strada-jit" ]; then
+        echo "$SCRIPT_DIR/strada-jit"
+        return 0
+    fi
+    local installed
+    installed="$(dirname "$(dirname "$SCRIPT_DIR")")/bin/strada-jit"
+    if [ -x "$installed" ]; then
+        echo "$installed"
+        return 0
+    fi
+    return 1
+}
+
+# Handle REPL mode — runs via strada-jit with auto-detected backend
+# (prefers tcc for snappier per-line latency, falls back to gcc when tcc
+# isn't installed). Pass `--compiler=gcc` to force gcc if you need
+# try/catch, const, or enum at the REPL (these require gcc per JIT.strada).
 if [ "$REPL_MODE" -eq 1 ]; then
-    # Try strada-interp (interpreter), fall back to strada-jit (JIT REPL)
-    INTERP_BIN="$SCRIPT_DIR/interpreter/strada-interp"
-    if [ -x "$INTERP_BIN" ]; then
-        exec "$INTERP_BIN" "$@"
-    fi
-    # Check installed location
-    INTERP_BIN="$(dirname "$(dirname "$SCRIPT_DIR")")/bin/strada-interp"
-    if [ -x "$INTERP_BIN" ]; then
-        exec "$INTERP_BIN" "$@"
-    fi
-    # Fall back to strada-jit
-    REPL_BIN="$REPL_DIR/strada-jit"
-    if [ -x "$REPL_BIN" ]; then
-        exec "$REPL_BIN" "$@"
-    fi
-    error "Interpreter not found. Run 'make interpreter' to build it."
+    JIT_BIN="$(find_jit_bin)" || error "strada-jit not found. Run 'make tools' to build it."
+    exec "$JIT_BIN" "${JIT_PASSTHROUGH[@]}" "$@"
 fi
 
-# Handle script mode
+# Handle script mode — runs via strada-jit with gcc forced (the latency hit
+# is amortized over the full script, and gcc gives full feature support:
+# try/catch, const, enum, etc.). The user can override with --compiler=tcc.
 if [ -n "$SCRIPT_FILE" ]; then
     if [ ! -f "$SCRIPT_FILE" ]; then
         error "Script file not found: $SCRIPT_FILE"
     fi
-    # Try strada-interp first
-    INTERP_BIN="$SCRIPT_DIR/interpreter/strada-interp"
-    if [ -x "$INTERP_BIN" ]; then
-        exec "$INTERP_BIN" "$SCRIPT_FILE" "$@"
+    JIT_BIN="$(find_jit_bin)" || error "strada-jit not found. Run 'make tools' to build it."
+    # Force gcc unless the user has explicitly chosen a compiler — other
+    # passthrough flags (e.g. --chunked) shouldn't disable the gcc default.
+    user_picked_compiler=0
+    for f in "${JIT_PASSTHROUGH[@]}"; do
+        case "$f" in
+            --compiler=*) user_picked_compiler=1 ;;
+        esac
+    done
+    if [ "$user_picked_compiler" -eq 1 ]; then
+        exec "$JIT_BIN" "${JIT_PASSTHROUGH[@]}" "$SCRIPT_FILE" "$@"
+    else
+        exec "$JIT_BIN" --compiler=gcc "${JIT_PASSTHROUGH[@]}" "$SCRIPT_FILE" "$@"
     fi
-    INTERP_BIN="$(dirname "$(dirname "$SCRIPT_DIR")")/bin/strada-interp"
-    if [ -x "$INTERP_BIN" ]; then
-        exec "$INTERP_BIN" "$SCRIPT_FILE" "$@"
-    fi
-    # Fall back to strada-jit
-    REPL_BIN="$REPL_DIR/strada-jit"
-    if [ -x "$REPL_BIN" ]; then
-        exec "$REPL_BIN" "$SCRIPT_FILE" "$@"
-    fi
-    error "Interpreter not found. Run 'make interpreter' to build it."
 fi
 
 # Handle doc mode
@@ -442,6 +499,31 @@ fi
 INPUT_FILE="$1"
 shift
 
+# -M with a directory: walk recursively and produce a sibling .o for each
+# .strada file. Each file is precompiled in module-only mode (only that
+# file's own symbols end up in its .o).
+if [ "$MODULE_ONLY_MODE" -eq 1 ] && [ -d "$INPUT_FILE" ]; then
+    SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+    count=0
+    fail_count=0
+    while IFS= read -r -d '' f; do
+        sibling_o="${f%.strada}.o"
+        info "-M: compiling $f -> $sibling_o"
+        if "$SCRIPT_PATH" -M --object -o "$sibling_o" "$f"; then
+            count=$((count + 1))
+        else
+            fail_count=$((fail_count + 1))
+        fi
+    done < <(find "$INPUT_FILE" -type f -name '*.strada' -print0)
+    if [ "$VERBOSE" -eq 1 ] || [ "$fail_count" -gt 0 ]; then
+        echo "-M: compiled $count file(s), $fail_count failure(s)"
+    fi
+    if [ "$fail_count" -gt 0 ]; then
+        exit 1
+    fi
+    exit 0
+fi
+
 # Check input file exists
 if [ ! -f "$INPUT_FILE" ]; then
     error "Input file not found: $INPUT_FILE"
@@ -452,7 +534,25 @@ if [[ "$INPUT_FILE" != *.strada ]]; then
     warn "Input file does not have .strada extension"
 fi
 
-# Process remaining positional arguments - could be extra .c/.o files or output name
+# -M with a single file: precompile to a SIBLING .o (next to the source).
+# Sets OBJECT_ONLY so the rest of the driver picks the .o output path; the
+# stradac invocation later in this script adds the -M flag for module-only
+# codegen because MODULE_ONLY_MODE is set.
+if [ "$MODULE_ONLY_MODE" -eq 1 ] && [ -z "$OUTPUT_FILE" ]; then
+    OUTPUT_FILE="${INPUT_FILE%.strada}.o"
+    OBJECT_ONLY=1
+fi
+
+# Check whether an object file or archive is a Strada module (has the
+# __strada_export_info symbol). If it does, we forward it to stradac as an
+# implicit import_object/import_archive so the compiler can resolve namespace
+# calls into it; otherwise it's a plain extern C blob and we just link it in.
+is_strada_module() {
+    local file="$1"
+    nm "$file" 2>/dev/null | grep -q __strada_export_info
+}
+
+# Process remaining positional arguments - could be extra .c/.o/.a files or output name
 for arg in "$@"; do
     if [[ "$arg" == *.c ]]; then
         if [ ! -f "$arg" ]; then
@@ -463,9 +563,26 @@ for arg in "$@"; do
         if [ ! -f "$arg" ]; then
             error "Object file not found: $arg"
         fi
-        EXTRA_O_FILES+=("$arg")
+        if is_strada_module "$arg"; then
+            # Strada module: stradac will pick up metadata and add it to
+            # __STRADA_OBJECT_FILES__ for linking — don't double-link.
+            IMPLICIT_IMPORT_OBJS+=("$arg")
+        else
+            EXTRA_O_FILES+=("$arg")
+        fi
+    elif [[ "$arg" == *.a ]]; then
+        if [ ! -f "$arg" ]; then
+            error "Archive file not found: $arg"
+        fi
+        if is_strada_module "$arg"; then
+            # Strada module archive: stradac picks up metadata and adds it to
+            # __STRADA_ARCHIVE_FILES__ for linking.
+            IMPLICIT_IMPORT_ARCHS+=("$arg")
+        else
+            EXTRA_A_FILES+=("$arg")
+        fi
     elif [ -z "$OUTPUT_FILE" ]; then
-        # First non-.c/.o argument becomes output file name
+        # First non-.c/.o/.a argument becomes output file name
         OUTPUT_FILE="$arg"
     else
         warn "Ignoring extra argument: $arg"
@@ -513,7 +630,11 @@ build_runtime() {
     if [ "${STRADA_HAVE_PCRE2:-0}" = "1" ]; then
         PCRE2_DEF="-DHAVE_PCRE2 $STRADA_PCRE2_CFLAGS"
     fi
-    if ! run_cmd $CC -O2 -flto=auto -std=c99 -ffunction-sections -fdata-sections $PCRE2_DEF -c "$RUNTIME_SRC" -I"$RUNTIME_DIR" -o "$RUNTIME_OBJ"; then
+    # -ffat-lto-objects keeps native code in the .o alongside the LTO
+    # bitcode, so test/dev builds that pass -fno-lto can link against
+    # this same runtime.o without rebuilding it. Production builds at
+    # -O2+ still get cross-function LTO benefits.
+    if ! run_cmd $CC -O2 -flto=auto -ffat-lto-objects -std=c99 -ffunction-sections -fdata-sections $PCRE2_DEF -c "$RUNTIME_SRC" -I"$RUNTIME_DIR" -o "$RUNTIME_OBJ"; then
         error "Failed to compile runtime"
     fi
 }
@@ -540,8 +661,11 @@ if [ "$(uname -s)" = "Darwin" ]; then
     GCC_FLAGS="$GCC_FLAGS -Wno-unused-value"
 fi
 GCC_FLAGS="$GCC_FLAGS -O$OPT_LEVEL"
-# Enable link-time optimization at -O2 and above for cross-function inlining
-if [ "$OPT_LEVEL" = "2" ] || [ "$OPT_LEVEL" = "3" ] || [ "$OPT_LEVEL" = "fast" ]; then
+# Enable link-time optimization at -O2 and above for cross-function inlining,
+# unless the user explicitly disabled it with -fno-lto.
+if [ "$NO_LTO" -eq 1 ]; then
+    GCC_FLAGS="$GCC_FLAGS -fno-lto"
+elif [ "$OPT_LEVEL" = "2" ] || [ "$OPT_LEVEL" = "3" ] || [ "$OPT_LEVEL" = "fast" ]; then
     GCC_FLAGS="$GCC_FLAGS -flto=auto"
 fi
 # Enable native CPU tuning at -O3 and -Ofast (not portable)
@@ -574,7 +698,9 @@ if [ "${STRADA_HAVE_PCRE2:-0}" = "1" ]; then
     LINK_FLAGS="$LINK_FLAGS $STRADA_PCRE2_LIBS"
 fi
 
-# Build extra source/object file lists
+# Build extra source/object file lists (plain extern C files — Strada module
+# .o/.a files are forwarded to stradac via --import-object/--import-archive
+# and appear in __STRADA_OBJECT_FILES__/__STRADA_ARCHIVE_FILES__ instead).
 EXTRA_FILES=""
 for f in "${EXTRA_C_FILES[@]}"; do
     EXTRA_FILES="$EXTRA_FILES $f"
@@ -582,10 +708,16 @@ done
 for f in "${EXTRA_O_FILES[@]}"; do
     EXTRA_FILES="$EXTRA_FILES $f"
 done
+for f in "${EXTRA_A_FILES[@]}"; do
+    EXTRA_FILES="$EXTRA_FILES $f"
+done
 
 # Show info about extra files
-if [ ${#EXTRA_C_FILES[@]} -gt 0 ] || [ ${#EXTRA_O_FILES[@]} -gt 0 ]; then
-    info "Extra files: ${EXTRA_C_FILES[*]} ${EXTRA_O_FILES[*]}"
+if [ ${#EXTRA_C_FILES[@]} -gt 0 ] || [ ${#EXTRA_O_FILES[@]} -gt 0 ] || [ ${#EXTRA_A_FILES[@]} -gt 0 ]; then
+    info "Extra files: ${EXTRA_C_FILES[*]} ${EXTRA_O_FILES[*]} ${EXTRA_A_FILES[*]}"
+fi
+if [ ${#IMPLICIT_IMPORT_OBJS[@]} -gt 0 ] || [ ${#IMPLICIT_IMPORT_ARCHS[@]} -gt 0 ]; then
+    info "Implicit imports: ${IMPLICIT_IMPORT_OBJS[*]} ${IMPLICIT_IMPORT_ARCHS[*]}"
 fi
 if [ ${#LINK_LIBS[@]} -gt 0 ]; then
     info "Extra libraries: ${LINK_LIBS[*]}"
@@ -654,6 +786,28 @@ done
 for path in "${LIB_PATHS_LOW[@]}"; do
     STRADAC_FLAGS="$STRADAC_FLAGS -LL $path"
 done
+# Forward CLI-passed Strada module objects/archives as implicit imports
+for f in "${IMPLICIT_IMPORT_OBJS[@]}"; do
+    STRADAC_FLAGS="$STRADAC_FLAGS --import-object $f"
+done
+for f in "${IMPLICIT_IMPORT_ARCHS[@]}"; do
+    STRADAC_FLAGS="$STRADAC_FLAGS --import-archive $f"
+done
+
+# Module-only mode. Active when:
+#   - explicit -M was passed, OR
+#   - --object was passed and --object-full was NOT (new default behaviour).
+# Disabled for --shared and --static-lib, which keep the old "include
+# everything" semantics.
+WANT_MODULE_ONLY=0
+if [ "$MODULE_ONLY_MODE" -eq 1 ]; then
+    WANT_MODULE_ONLY=1
+elif [ "$OBJECT_ONLY" -eq 1 ] && [ "$OBJECT_FULL" -ne 1 ]; then
+    WANT_MODULE_ONLY=1
+fi
+if [ "$WANT_MODULE_ONLY" -eq 1 ]; then
+    STRADAC_FLAGS="$STRADAC_FLAGS -M"
+fi
 
 info "Compiling $ACTUAL_INPUT -> $C_FILE"
 if [ "$VERBOSE" -eq 1 ]; then
@@ -711,6 +865,18 @@ if grep -q '__STRADA_ARCHIVE_FILES__:' "$C_FILE" 2>/dev/null; then
     fi
 fi
 
+# Pick up extern-C link deps from `link_lib` declarations (in the source or
+# inherited from used .o/.so/.a metadata) and add them to LINK_FLAGS.
+if grep -q '__STRADA_LINK_LIBS__:' "$C_FILE" 2>/dev/null; then
+    IMPORT_LINK_LIBS=$(grep '__STRADA_LINK_LIBS__:' "$C_FILE" | sed 's/.*__STRADA_LINK_LIBS__: *//' | sed 's/ *\*\///')
+    if [ -n "$IMPORT_LINK_LIBS" ]; then
+        info "link_libs: $IMPORT_LINK_LIBS"
+        for lib in $IMPORT_LINK_LIBS; do
+            LINK_FLAGS="$LINK_FLAGS -l$lib"
+        done
+    fi
+fi
+
 # Step 2: Compile C to executable or library
 if [ "$SHARED_LIB" -eq 1 ]; then
     # Shared library: -shared -fPIC, link against runtime source (not object)
@@ -738,8 +904,15 @@ elif [ "$OBJECT_ONLY" -eq 1 ]; then
     if [ "$STATIC_LINK" -eq 1 ]; then
         error "Cannot use --object and --static together"
     fi
+    # -ffat-lto-objects keeps native code alongside the LTO bitcode (when
+    # LTO is on), so consumers that link with -fno-lto can still resolve
+    # symbols. Adds a bit of .o size but makes test/dev links work.
+    OBJECT_EXTRA=""
+    if echo "$GCC_FLAGS" | grep -q -- "-flto"; then
+        OBJECT_EXTRA="-ffat-lto-objects"
+    fi
     info "Compiling $C_FILE -> $OUTPUT (object file)"
-    if ! run_cmd $CC -c $GCC_FLAGS -o "$OUTPUT" "$C_FILE" -I"$RUNTIME_DIR" $INCLUDE_FLAGS; then
+    if ! run_cmd $CC -c $GCC_FLAGS $OBJECT_EXTRA -o "$OUTPUT" "$C_FILE" -I"$RUNTIME_DIR" $INCLUDE_FLAGS; then
         error "C compilation failed"
     fi
 elif [ "$STATIC_LIB" -eq 1 ]; then

@@ -29,6 +29,7 @@ my int $g_repl_cdebug = 0;
 my str $g_repl_tools_dir = "";
 my int $g_repl_memprof = 0;
 my str $g_repl_script = "";
+my int $g_repl_chunked = 0;  # --chunked: opt into the line-by-line REPL eval path for --script
 my str $g_repl_compiler = "";
 
 # ANSI color codes
@@ -107,6 +108,8 @@ func print_usage() void {
     say("Options:");
     say("  -L PATH             Add library search path");
     say("  --compiler=BACKEND  Use specific compiler (tcc, gcc)");
+    say("  --chunked           For --script: feed the file to eval() line-by-line");
+    say("                      (REPL semantics, but slow). Default is whole-file mode.");
     say("  --debug             Enable debug mode");
     say("  --help, -h          Show this help");
     say("");
@@ -139,6 +142,8 @@ func parse_args(array @args) int {
         } elsif ($arg =~ /^--compiler=/) {
             $g_repl_compiler = $arg;
             $g_repl_compiler =~ s/^--compiler=//;
+        } elsif ($arg eq "--chunked") {
+            $g_repl_chunked = 1;
         } elsif ($arg eq "--debug") {
             $g_repl_debug = 1;
         } elsif ($arg =~ /^-/) {
@@ -161,8 +166,30 @@ func display_error(str $error_msg) void {
     say("");
 }
 
-# Run a script file
+# Run a script file. Defaults to whole-file mode (one compile + exec)
+# because per-statement chunking burns a full gcc invocation per snippet;
+# for any non-trivial script, slurping the whole file and handing it to
+# stradac in one shot is dramatically faster. The chunked REPL eval path
+# still exists for genuine REPL use; pass --chunked to opt into it for a
+# script (rarely useful — only when the script is a sequence of free-form
+# snippets without a main).
 func run_script(str $filename) int {
+    if (core::is_file($filename) == 0) {
+        say("Error: File not found: " . $filename);
+        return 1;
+    }
+    try {
+        return Strada::JIT::run_file($filename);
+    } catch ($e) {
+        say("Error: " . $e);
+        return 1;
+    }
+}
+
+# Old chunked-mode script runner — kept for `--chunked` opt-in. Reads the
+# file line by line and feeds balanced chunks to Strada::JIT::eval, the
+# same path the REPL uses. Slow for non-trivial scripts.
+func run_script_chunked(str $filename) int {
     if (core::is_file($filename) == 0) {
         say("Error: File not found: " . $filename);
         return 1;
@@ -268,6 +295,9 @@ func main(int $argc, array @argv) int {
 
     # If a script file was provided, run it and exit
     if ($g_repl_script ne "") {
+        if ($g_repl_chunked == 1) {
+            return run_script_chunked($g_repl_script);
+        }
         return run_script($g_repl_script);
     }
 

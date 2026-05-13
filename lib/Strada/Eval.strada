@@ -4,7 +4,9 @@
 
 package Strada::Interpreter;
 
-# eval(code) — uses the configured backend (default: vm)
+# eval(code) — uses the configured backend (default: tree-walk; the VM
+# backend requires the runtime to be built with -DHAVE_VM, which is only
+# the case for the strada-interp binary).
 func eval(str $code) scalar {
     return eval_auto($code);
 }

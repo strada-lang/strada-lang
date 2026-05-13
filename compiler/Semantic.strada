@@ -491,6 +491,7 @@ func get_builtins() scalar {
     $b{"sys::cstruct_set_ptr"} = 1;
     $b{"sys::cstruct_set_double"} = 1;
     $b{"sys::cstruct_set_string"} = 1;
+    $b{"sys::file_mtime"} = 1;
 
     # sys:: Dynamic loading (FFI)
     $b{"sys::dl_open"} = 1;
@@ -897,7 +898,7 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
         if ($colon_idx >= 0) {
             # Try Package_func format first (for local package functions)
             my str $prefix = substr($name, 0, $colon_idx);
-            my str $suffix = substr($name, $colon_idx + 2, -1);
+            my str $suffix = substr($name, $colon_idx + 2, length($name) - $colon_idx - 2);
             my str $underscore_name = $prefix . "_" . $suffix;
             my scalar $fn_info_us = $ctx->{"functions"}->{$underscore_name};
             if ($fn_info_us->{"is_registered"} == 1) {
@@ -913,7 +914,7 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
             my int $us_idx = index($name, "_");
             while ($us_idx > 0 && $found_colon == 0) {
                 my str $pkg_part = substr($name, 0, $us_idx);
-                my str $func_part = substr($name, $us_idx + 1, -1);
+                my str $func_part = substr($name, $us_idx + 1, length($name) - $us_idx - 1);
                 if (length($pkg_part) > 0 && length($func_part) > 0) {
                     my str $colon_name = $pkg_part . "::" . $func_part;
                     my scalar $fn_info_colon = $ctx->{"functions"}->{$colon_name};
@@ -924,7 +925,7 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
                 }
                 if ($found_colon == 0) {
                     # Try next underscore position
-                    my int $next_idx = index(substr($name, $us_idx + 1, -1), "_");
+                    my int $next_idx = index(substr($name, $us_idx + 1, length($name) - $us_idx - 1), "_");
                     if ($next_idx >= 0) {
                         $us_idx = $us_idx + 1 + $next_idx;
                     } else {

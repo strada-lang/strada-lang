@@ -184,10 +184,25 @@ func ast_new_program() scalar {
     my array @import_archives = ();
     $node->{"import_archives"} = \@import_archives;
     $node->{"import_archive_count"} = 0;
+    # link_lib: extern-C library names (e.g. "mysqlclient", "sqlite3") that
+    # the final binary needs at link time. Declared via `link_lib "name";`
+    # in source, or inherited from a `use`d module's __strada_export_info.
+    # The strada driver and test harness pick these up from the
+    # __STRADA_LINK_LIBS__ comment in the generated C and add -l<name> to gcc.
+    my array @link_libs = ();
+    $node->{"link_libs"} = \@link_libs;
     # Top-level C blocks - array of raw C code strings
     my array @c_blocks = ();
     $node->{"c_blocks"} = \@c_blocks;
     $node->{"c_block_count"} = 0;
+    # Parallel array of source module names (one per c_block), used for
+    # diagnostics. Module-only codegen filters via the c_block_from_use
+    # parallel array below — 1 if the block came from a `use`d file, 0
+    # if it's part of the file currently being compiled.
+    my array @c_block_modules = ();
+    $node->{"c_block_modules"} = \@c_block_modules;
+    my array @c_block_from_use = ();
+    $node->{"c_block_from_use"} = \@c_block_from_use;
     # BEGIN/END blocks - arrays of block AST nodes (statement lists)
     my array @begin_blocks = ();
     $node->{"begin_blocks"} = \@begin_blocks;
@@ -199,6 +214,13 @@ func ast_new_program() scalar {
     my array @import_calls = ();
     $node->{"import_calls"} = \@import_calls;
     $node->{"import_call_count"} = 0;
+    # Module-only codegen mode (--object / -M): when set, only items whose
+    # source_module matches module_target produce function bodies, globals,
+    # BEGIN/END blocks, top-level __C__ blocks, and OOP method registrations.
+    # Forward declarations and extern_lib refs are still emitted so the
+    # resulting .o can be linked with the final binary.
+    $node->{"module_only_mode"} = 0;
+    $node->{"module_target"} = "";
     # Operator overloading: overloads->{package}->{op} = method_name
     my hash %overloads = ();
     $node->{"overloads"} = \%overloads;

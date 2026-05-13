@@ -159,6 +159,7 @@ struct StradaHash {
     uint32_t free_head;         /* internal free list head (HASH_EMPTY = none) */
     int refcount;
     size_t iter_index;          /* for each() */
+    uint8_t index_dirty;        /* see strada_runtime.h: skip linear self-heal when 0 */
 };
 
 /* Socket buffer size */

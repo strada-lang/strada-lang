@@ -209,6 +209,8 @@ static void hash_rebuild_index(StradaHash *hv) {
             hv->hash_index[pos] = (uint32_t)i;
         }
     }
+    /* Index now mirrors entries[] exactly. */
+    hv->index_dirty = 0;
 }
 
 /* Linear-scan fallback for hash_index corruption (same mode self-healed
@@ -219,6 +221,11 @@ static void hash_rebuild_index(StradaHash *hv) {
  * get when the open-addressed index is out of sync with the entries. */
 static int32_t hash_linear_find(StradaHash *hv, const char *key, uint32_t key_len, unsigned int hash) {
     if (!hv || hv->next_slot == 0) return -1;
+    /* Clean hashes never need a full scan — the probe sequence is canonical.
+     * The scan is purely a recovery mechanism for cross-boundary dispatch
+     * corruption (hash_index gets desynced from entries[]); skipping it
+     * here is what keeps hash_set on large hashes from going quadratic. */
+    if (!hv->index_dirty) return -1;
     for (size_t i = 0; i < hv->next_slot; i++) {
         StradaHashEntry *e = &hv->entries[i];
         if (e->key && e->key->hash == hash && e->key->len == key_len &&
@@ -227,7 +234,14 @@ static int32_t hash_linear_find(StradaHash *hv, const char *key, uint32_t key_le
             return (int32_t)i;
         }
     }
+    /* Linear scan came up empty — index wasn't corrupt for this key, but
+     * we leave the flag set in case other keys are affected. The next
+     * hash_rebuild_index call will clear it. */
     return -1;
+}
+
+void strada_hash_mark_index_dirty(StradaHash *hv) {
+    if (hv) hv->index_dirty = 1;
 }
 
 /* ===== VALUE CREATION ===== */
@@ -558,10 +572,35 @@ StradaValue* strada_new_str_len(const char *s, size_t len) {
 
 /* Get string length (binary-safe - uses stored length if available) */
 size_t strada_str_len(StradaValue *sv) {
-    if (!sv || STRADA_IS_TAGGED_INT(sv) || sv->type != STRADA_STR) return 0;
-    size_t len = sv->struct_size & ~((size_t)1 << 63); /* mask off ASCII flag */
-    if (len > 0) return len;
-    return sv->value.pv ? strlen(sv->value.pv) : 0;
+    if (!sv) return 0;
+    /* Tagged ints: return the decimal-representation length. Perl's
+     * `length($int_var)` stringifies the value first, so length(42) → 2. */
+    if (STRADA_IS_TAGGED_INT(sv)) {
+        int64_t v = STRADA_TAGGED_INT_VAL(sv);
+        char buf[32];
+        return (size_t)snprintf(buf, sizeof(buf), "%lld", (long long)v);
+    }
+    if (sv->type == STRADA_STR) {
+        size_t len = sv->struct_size & ~((size_t)1 << 63); /* mask off ASCII flag */
+        if (len > 0) return len;
+        return sv->value.pv ? strlen(sv->value.pv) : 0;
+    }
+    /* For other types (INT heap, NUM, ARRAY-stringified, REF, etc.),
+     * stringify and measure. */
+    if (sv->type == STRADA_INT) {
+        char buf[32];
+        return (size_t)snprintf(buf, sizeof(buf), "%lld", (long long)sv->value.iv);
+    }
+    if (sv->type == STRADA_NUM) {
+        char buf[64];
+        return (size_t)snprintf(buf, sizeof(buf), "%.15g", sv->value.nv);
+    }
+    /* Fallback: stringify and measure. Costs an allocation but rare path. */
+    char *s = strada_to_str(sv);
+    if (!s) return 0;
+    size_t len = strlen(s);
+    free(s);
+    return len;
 }
 
 StradaValue* strada_new_array(void) {
@@ -2279,6 +2318,7 @@ static inline void strada_hash_init(StradaHash *hv, size_t nbuckets) {
     memset(hv->hash_index, 0xFF, nbuckets * sizeof(uint32_t));
     hv->refcount = 1;
     hv->iter_index = 0;
+    hv->index_dirty = 0;
 }
 
 StradaHash* strada_hash_new(void) {
@@ -2321,6 +2361,7 @@ StradaHash* strada_hash_new_presized(int capacity) {
         hv->free_head = HASH_EMPTY;
         hv->refcount = 1;
         hv->iter_index = 0;
+        hv->index_dirty = 0;
         return hv;
     }
 
@@ -2344,6 +2385,7 @@ StradaHash* strada_hash_new_presized(int capacity) {
         hv->free_head = HASH_EMPTY;
         hv->refcount = 1;
         hv->iter_index = 0;
+        hv->index_dirty = 0;
         return hv;
     }
 
@@ -3742,7 +3784,10 @@ StradaValue* strada_substr(StradaValue *str, int64_t offset, int64_t length) {
         if (length < 0) {
             int64_t adj = (int64_t)slen - offset + length;
             length = adj < 0 ? 0 : adj;
-        } else if (offset + length > (int64_t)slen) {
+        } else if (length > (int64_t)slen - offset) {
+            /* Compare without `offset + length` to avoid signed overflow
+             * when callers pass INT64_MAX as a "to-end-of-string" sentinel
+             * (the codegen does this for the 2-arg form of substr). */
             length = slen - offset;
         }
         return strada_new_str_len(s + offset, (size_t)length);
@@ -3770,7 +3815,8 @@ StradaValue* strada_substr(StradaValue *str, int64_t offset, int64_t length) {
     if (length < 0) {
         int64_t adj = (int64_t)char_len - offset + length;
         length = adj < 0 ? 0 : adj;
-    } else if (offset + length > (int64_t)char_len) {
+    } else if (length > (int64_t)char_len - offset) {
+        /* Avoid signed overflow when callers pass INT64_MAX (sentinel). */
         length = char_len - offset;
     }
 
@@ -5013,6 +5059,31 @@ int strada_file_exists(const char *filename) {
         return 1;
     }
     return 0;
+}
+
+/* Return mtime (seconds since epoch) of `path_sv` as a tagged-int
+   StradaValue, or a tagged-int -1 if stat fails. Used by the parser to
+   compare a .strada source against its sibling .o/.so artifacts, and
+   exposed to user code as core::file_mtime. */
+StradaValue* strada_file_mtime(StradaValue *path_sv) {
+    char *path = strada_to_str(path_sv);
+    int64_t mt = -1;
+    if (path) {
+        struct stat st;
+        if (stat(path, &st) == 0) {
+            mt = (int64_t)st.st_mtime;
+        }
+        free(path);
+    }
+    return strada_new_int(mt);
+}
+
+/* Alias for the bootstrap codegen path. The frozen bootstrap normalises
+   core::file_mtime -> sys::file_mtime and emits a literal `sys_file_mtime(...)`
+   call (it has no explicit mapping for this builtin). Provide the symbol so
+   stage1 links cleanly; stage2's CodeGen emits strada_file_mtime directly. */
+StradaValue* sys_file_mtime(StradaValue *path_sv) {
+    return strada_file_mtime(path_sv);
 }
 
 StradaValue* strada_slurp(const char *filename) {
@@ -7408,23 +7479,33 @@ StradaArray* strada_regex_split(const char *str, const char *pattern) {
 
     pcre2_match_data *match_data = pcre2_match_data_create_from_pattern(re, NULL);
     PCRE2_SIZE subject_length = strlen(str);
-    PCRE2_SIZE offset = 0;
+    PCRE2_SIZE offset = 0;       /* chunk-start position */
+    PCRE2_SIZE search_off = 0;   /* next search-start (= offset, +1 after zero-width) */
+    int first_iter = 1;
 
-    while (offset < subject_length) {
-        int rc = pcre2_match(re, (PCRE2_SPTR)str, subject_length, offset, 0, match_data, NULL);
+    while (search_off <= subject_length) {
+        int rc = pcre2_match(re, (PCRE2_SPTR)str, subject_length, search_off, 0, match_data, NULL);
         if (rc < 0) break;
 
         PCRE2_SIZE *ovector = pcre2_get_ovector_pointer(match_data);
         PCRE2_SIZE match_start = ovector[0];
         PCRE2_SIZE match_end = ovector[1];
 
-        /* Add part before match */
-        size_t part_len = match_start - offset;
-        char *part = malloc(part_len + 1);
-        memcpy(part, str + offset, part_len);
-        part[part_len] = '\0';
-        strada_array_push_take(parts, strada_new_str(part));
-        free(part);
+        /* Skip a leading empty element produced by a zero-width match
+         * at position 0 (Perl semantics: `split /^/m, "a\nb"` does NOT
+         * include a leading "" — only "a\n", "b"). */
+        int skip_part = (first_iter && match_start == 0 && match_end == match_start);
+        first_iter = 0;
+
+        if (!skip_part) {
+            /* Add part before match (chunk from current chunk-start to match) */
+            size_t part_len = match_start - offset;
+            char *part = malloc(part_len + 1);
+            memcpy(part, str + offset, part_len);
+            part[part_len] = '\0';
+            strada_array_push_take(parts, strada_new_str(part));
+            free(part);
+        }
 
         /* Perl semantics: if the split pattern has capture groups, insert
          * the captured substrings between split parts. `split /(\s+)/,
@@ -7446,11 +7527,16 @@ StradaArray* strada_regex_split(const char *str, const char *pattern) {
             }
         }
 
-        /* Handle zero-length match */
+        /* Handle zero-length match: the next chunk starts AT match_end,
+         * but we advance the search by one to avoid infinite-loop on the
+         * same zero-width position. Without splitting these, `split /^/m`
+         * ate the first char of each line. */
         if (match_end == match_start) {
-            offset = match_end + 1;
+            offset = match_end;
+            search_off = match_end + 1;
         } else {
             offset = match_end;
+            search_off = match_end;
         }
     }
 
@@ -11837,79 +11923,58 @@ StradaValue* strada_join_sv(StradaValue *sep_sv, StradaArray *arr) {
 
     const char *sep = "";
     size_t sep_len = 0;
+    int sep_owned = 0;  /* sep was alloc'd via strada_to_str and needs free */
     if (sep_sv && !STRADA_IS_TAGGED_INT(sep_sv) && sep_sv->type == STRADA_STR && sep_sv->value.pv) {
         sep = sep_sv->value.pv;
         sep_len = strada_str_len(sep_sv);
     } else if (sep_sv) {
-        /* int / num / undef → fall back to stringified form (no NUL inside) */
+        /* int / num / undef → fall back to stringified form */
         sep = strada_to_str(sep_sv);
         sep_len = sep ? strlen(sep) : 0;
-        /* allocated buffer freed below; mark for free with a flag */
-        size_t total_len = 0;
-        for (size_t i = 0; i < arr->size; i++) {
-            StradaValue *el = arr->elements[arr->head + i];
-            if (el && !STRADA_IS_TAGGED_INT(el) && el->type == STRADA_STR && el->value.pv) {
-                total_len += strada_str_len(el);
-            } else {
-                char *s = strada_to_str(el);
-                total_len += s ? strlen(s) : 0;
-                if (s) free(s);
-            }
-            if (i < arr->size - 1) total_len += sep_len;
-        }
-        char *out = malloc(total_len + 1);
-        char *p = out;
-        for (size_t i = 0; i < arr->size; i++) {
-            StradaValue *el = arr->elements[arr->head + i];
-            if (el && !STRADA_IS_TAGGED_INT(el) && el->type == STRADA_STR && el->value.pv) {
-                size_t el_len = strada_str_len(el);
-                memcpy(p, el->value.pv, el_len);
-                p += el_len;
-            } else {
-                char *s = strada_to_str(el);
-                if (s) { size_t sl = strlen(s); memcpy(p, s, sl); p += sl; free(s); }
-            }
-            if (i < arr->size - 1) { memcpy(p, sep, sep_len); p += sep_len; }
-        }
-        *p = '\0';
-        StradaValue *rv = strada_new_str_len(out, total_len);
-        free(out);
-        if (sep_sv && (STRADA_IS_TAGGED_INT(sep_sv) || sep_sv->type != STRADA_STR)) {
-            free((void *)sep);
-        }
-        return rv;
+        sep_owned = 1;
     }
 
-    /* Sep is a STRADA_STR — preserve binary safety throughout */
+    /* Cache strada_to_str() results from the sizing pass so the build pass
+       doesn't re-stringify (and re-alloc) every non-STR element. NULL slots
+       mean "element is a STRADA_STR, copy directly from el->value.pv". */
+    char **cached = calloc(arr->size, sizeof(char *));
+    size_t *cached_len = calloc(arr->size, sizeof(size_t));
+
     size_t total_len = 0;
     for (size_t i = 0; i < arr->size; i++) {
         StradaValue *el = arr->elements[arr->head + i];
         if (el && !STRADA_IS_TAGGED_INT(el) && el->type == STRADA_STR && el->value.pv) {
-            total_len += strada_str_len(el);
+            cached_len[i] = strada_str_len(el);
         } else {
             char *s = strada_to_str(el);
-            total_len += s ? strlen(s) : 0;
-            if (s) free(s);
+            cached[i] = s;
+            cached_len[i] = s ? strlen(s) : 0;
         }
+        total_len += cached_len[i];
         if (i < arr->size - 1) total_len += sep_len;
     }
+
     char *out = malloc(total_len + 1);
     char *p = out;
     for (size_t i = 0; i < arr->size; i++) {
         StradaValue *el = arr->elements[arr->head + i];
-        if (el && !STRADA_IS_TAGGED_INT(el) && el->type == STRADA_STR && el->value.pv) {
-            size_t el_len = strada_str_len(el);
-            memcpy(p, el->value.pv, el_len);
-            p += el_len;
-        } else {
-            char *s = strada_to_str(el);
-            if (s) { size_t sl = strlen(s); memcpy(p, s, sl); p += sl; free(s); }
+        if (cached[i]) {
+            memcpy(p, cached[i], cached_len[i]);
+            p += cached_len[i];
+            free(cached[i]);
+        } else if (cached_len[i] > 0) {
+            /* el is STRADA_STR — copy direct, binary-safe */
+            memcpy(p, el->value.pv, cached_len[i]);
+            p += cached_len[i];
         }
         if (i < arr->size - 1) { memcpy(p, sep, sep_len); p += sep_len; }
     }
     *p = '\0';
     StradaValue *rv = strada_new_str_len(out, total_len);
     free(out);
+    free(cached);
+    free(cached_len);
+    if (sep_owned) free((void *)sep);
     return rv;
 }
 

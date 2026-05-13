@@ -129,6 +129,12 @@ func parser_advance(scalar $parser) void {
 func parser_expect(scalar $parser, str $expected_type) void {
     my scalar $tok = parser_current($parser);
     if ($tok->{"type"} ne $expected_type) {
+        # Common stumble: using a type keyword (int, num, double, str, ...) as
+        # an identifier. Give a targeted hint instead of the generic message.
+        if ($expected_type eq "IDENT" && index($tok->{"type"}, "TYPE_") == 0) {
+            my str $tn = $tok->{"value"};
+            parser_error($parser, "'" . $tn . "' is a reserved type name and cannot be used as an identifier here; rename it (e.g. '" . $tn . "d' or 'as_" . $tn . "')");
+        }
         parser_error($parser, "expected " . friendly_expected($expected_type) . ", got " . friendly_token($tok->{"type"}, $tok->{"value"}));
     }
     parser_advance($parser);
@@ -146,6 +152,13 @@ func parser_expect_ident_like(scalar $parser) void {
     if ($tok->{"is_word"} != 0) {
         parser_advance($parser);
         return;
+    }
+    # Special-case type keywords: they're a common stumble (e.g. naming a
+    # function `double`). Give a clearer message that points to the conflict.
+    my str $ttype = $tok->{"type"};
+    if (index($ttype, "TYPE_") == 0) {
+        my str $tname = $tok->{"value"};
+        parser_error($parser, "'" . $tname . "' is a reserved type name and cannot be used as an identifier here; rename it (e.g. '" . $tname . "d' or 'as_" . $tname . "')");
     }
     parser_error($parser, "expected an identifier, got " . friendly_token($tok->{"type"}, $tok->{"value"}));
 }
@@ -426,6 +439,10 @@ func parse_var_name(scalar $parser) str {
     if ($type_str eq "IMPORT_OBJECT") {
         parser_advance($parser);
         return "import_object";
+    }
+    if ($type_str eq "LINK_LIB") {
+        parser_advance($parser);
+        return "link_lib";
     }
     if ($type_str eq "INHERIT") {
         parser_advance($parser);
@@ -4157,6 +4174,19 @@ func module_to_path(str $mod_name) str {
     return $path . ".strada";
 }
 
+# Returns 1 if $artifact exists and its mtime is >= $source's mtime, i.e.
+# the artifact is fresh; 0 otherwise. Treats a missing source as "trust the
+# artifact" (installed-only library case). Used by parse_use's auto-detect
+# of pre-compiled .o/.so siblings.
+func artifact_is_fresh(str $artifact, str $source) int {
+    my int $art_mtime = core::file_mtime($artifact);
+    if ($art_mtime < 0) { return 0; }
+    my int $src_mtime = core::file_mtime($source);
+    if ($src_mtime < 0) { return 1; }
+    if ($art_mtime >= $src_mtime) { return 1; }
+    return 0;
+}
+
 # Find module file in lib paths
 func find_module_file(scalar $program, str $mod_name) str {
     my str $rel_path = module_to_path($mod_name);
@@ -4219,6 +4249,8 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
         } elsif (parser_check($mod_parser, "IMPORT_ARCHIVE")) {
             # Handle nested import_archive statements
             parse_import_archive($mod_parser, $mod_program);
+        } elsif (parser_check($mod_parser, "LINK_LIB")) {
+            parse_link_lib($mod_parser, $mod_program);
         } elsif (parser_check_func($mod_parser)) {
             my scalar $fn = parse_function($mod_parser);
             ast_add_function($mod_program, $fn);
@@ -4289,13 +4321,27 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
         }
     }
 
-    # Transfer C blocks from module to main program
+    # Get the module's own package name for tagging (used to filter in
+    # module-only codegen mode). Fall back to the module's `use` name if no
+    # explicit `package` statement was found.
+    my str $src_module = $mod_program->{"package"};
+    if (length($src_module) == 0) {
+        $src_module = $mod_name;
+    }
+
+    # Transfer C blocks from module to main program. The parallel
+    # c_block_from_use array marks each block as inlined via `use` so
+    # module-only codegen can filter it out.
     my int $mod_c_block_count = $mod_program->{"c_block_count"};
     if ($mod_c_block_count > 0) {
         my scalar $mod_c_blocks = $mod_program->{"c_blocks"};
+        my scalar $cb_modules = $program->{"c_block_modules"};
+        my scalar $cb_from_use = $program->{"c_block_from_use"};
         my int $cb = 0;
         while ($cb < $mod_c_block_count) {
             ast_add_c_block($program, $mod_c_blocks->[$cb]);
+            push($cb_modules, $src_module);
+            push($cb_from_use, 1);
             $cb = $cb + 1;
         }
     }
@@ -4306,7 +4352,10 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
         my scalar $mod_begins = $mod_program->{"begin_blocks"};
         my int $bb = 0;
         while ($bb < $mod_begin_count) {
-            ast_add_begin_block($program, $mod_begins->[$bb]);
+            my scalar $bblock = $mod_begins->[$bb];
+            $bblock->{"source_module"} = $src_module;
+            $bblock->{"from_use"} = 1;
+            ast_add_begin_block($program, $bblock);
             $bb = $bb + 1;
         }
     }
@@ -4317,7 +4366,10 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
         my scalar $mod_ends = $mod_program->{"end_blocks"};
         my int $eb = 0;
         while ($eb < $mod_end_count) {
-            ast_add_end_block($program, $mod_ends->[$eb]);
+            my scalar $eblock = $mod_ends->[$eb];
+            $eblock->{"source_module"} = $src_module;
+            $eblock->{"from_use"} = 1;
+            ast_add_end_block($program, $eblock);
             $eb = $eb + 1;
         }
     }
@@ -4346,9 +4398,11 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
             next;
         }
 
-        # Store original name and package
+        # Store original name and package, and mark as inlined via use so
+        # module-only codegen filters it out of the .o we're building.
         $fn->{"original_name"} = $fn_name;
         $fn->{"package"} = $pkg_name;
+        $fn->{"from_use"} = 1;
 
         # extern "C" functions keep their exact C symbol name (no package prefix)
         if ($fn->{"is_c_extern"} == 1) {
@@ -4375,12 +4429,15 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
         $i = $i + 1;
     }
 
-    # Merge global variables from module
+    # Merge global variables from module (tagged with from_use=1 so
+    # module-only codegen can skip globals that came in via `use`).
     my scalar $mod_globals = $mod_program->{"globals"};
     $i = 0;
     $count = $mod_program->{"global_count"};
     while ($i < $count) {
         my scalar $gvar = $mod_globals->[$i];
+        $gvar->{"source_module"} = $src_module;
+        $gvar->{"from_use"} = 1;
         ast_add_global($program, $gvar);
         $i = $i + 1;
     }
@@ -4411,6 +4468,9 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
         ast_add_import_archive($program, $mod_import_archives->[$i]);
         $i = $i + 1;
     }
+
+    # Merge link_libs (extern-C library names) from module
+    merge_link_libs($program, $mod_program->{"link_libs"});
 
     # Check if module defines an import() function
     # Look for a function named "pkg_name::import" or "pkg_name_import" in merged functions
@@ -4576,9 +4636,38 @@ func parse_use(scalar $parser, scalar $program) void {
         return;
     }
 
-    # Try to find and load the module
+    # Try to find and load the module. Before inlining the .strada source,
+    # check whether a sibling .o / .so artifact exists in the same lib path
+    # and is at least as fresh as the source. If so, treat the use as an
+    # implicit import_object / import_lib — the precompiled artifact is
+    # linked in instead of re-parsing the source. This is what makes
+    # separate compilation (`strada -M Foo.strada` then later `use Foo;`)
+    # actually skip recompilation.
     my str $file_path = find_module_file($program, $mod_name);
     if (length($file_path) > 0) {
+        # Derive sibling artifact paths: foo/Bar.strada -> foo/Bar.o, foo/Bar.so
+        my str $base = $file_path;
+        my int $blen = length($base);
+        if ($blen > 7 && substr($base, $blen - 7, 7) eq ".strada") {
+            $base = substr($base, 0, $blen - 7);
+        }
+        my str $o_path = $base . ".o";
+        my str $so_path = $base . ".so";
+
+        if (artifact_is_fresh($o_path, $file_path) == 1) {
+            ast_mark_module_loaded($program, $mod_name);
+            # Use the module name as obj_name so symbol mangling matches.
+            do_import_object_at($parser, $program, $mod_name . ".o", $o_path);
+            ast_add_use($program, $mod_name);
+            return;
+        }
+        if (artifact_is_fresh($so_path, $file_path) == 1) {
+            ast_mark_module_loaded($program, $mod_name);
+            do_import_lib_at($parser, $program, $mod_name, $so_path);
+            ast_add_use($program, $mod_name);
+            return;
+        }
+
         ast_mark_module_loaded($program, $mod_name);
         load_module($program, $mod_name, $file_path);
     }
@@ -4588,29 +4677,17 @@ func parse_use(scalar $parser, scalar $program) void {
 
 # Parse import_lib statement - import shared library as module
 # import_lib "libname.so";  -> loads libname.so and reads metadata from __strada_export_info()
-func parse_import_lib(scalar $parser, scalar $program) void {
-    parser_expect($parser, "IMPORT_LIB");
-
-    # Get the library filename (must be a string, e.g., "MyLib.so")
-    my scalar $tok = parser_current($parser);
-    if ($tok->{"type"} ne "STR_LITERAL") {
-        parser_error($parser, "import_lib requires a string library filename (e.g., \"MyLib.so\")");
-    }
-    my str $lib_file = $tok->{"value"};
-    parser_advance($parser);
-
-    parser_expect($parser, "SEMI");
-
-    # Find the .so file in lib paths
-    my str $so_path = find_so_file($program, $lib_file);
-    if (length($so_path) == 0) {
-        parser_error($parser, "cannot find shared library: " . $lib_file);
-    }
-
-    # Extract package name by stripping .so extension
-    my str $lib_name = $lib_file;
-    if (length($lib_file) > 3 && substr($lib_file, length($lib_file) - 3, 3) eq ".so") {
-        $lib_name = substr($lib_file, 0, length($lib_file) - 3);
+# Shared body for import_lib: given a resolved $so_path and the originating
+# $lib_name (e.g., "MyLib"), load metadata via dlopen+__strada_export_info
+# and register with the program. Returns 1 if added, 0 if skipped (duplicate).
+func do_import_lib_at(scalar $parser, scalar $program, str $lib_name, str $so_path) int {
+    # Skip if a lib with this name is already imported
+    my scalar $libs = $program->{"import_libs"};
+    my int $lc = $program->{"import_lib_count"};
+    my int $li = 0;
+    while ($li < $lc) {
+        if ($libs->[$li]->{"lib_name"} eq $lib_name) { return 0; }
+        $li = $li + 1;
     }
 
     # Load the .so file and get metadata using runtime functions
@@ -4642,6 +4719,9 @@ func parse_import_lib(scalar $parser, scalar $program) void {
     # Add to program
     ast_add_import_lib($program, $lib_info);
 
+    # Pull in any extern-C link deps the library advertised via link_lib.
+    merge_link_libs($program, $lib_info->{"link_libs"});
+
     # Check if library defines an import() function
     my str $import_fn_name = sanitize_name($lib_name) . "_import";
     my scalar $lib_funcs = $lib_info->{"functions"};
@@ -4659,6 +4739,35 @@ func parse_import_lib(scalar $parser, scalar $program) void {
         }
         $lfi = $lfi + 1;
     }
+    return 1;
+}
+
+func parse_import_lib(scalar $parser, scalar $program) void {
+    parser_expect($parser, "IMPORT_LIB");
+
+    # Get the library filename (must be a string, e.g., "MyLib.so")
+    my scalar $tok = parser_current($parser);
+    if ($tok->{"type"} ne "STR_LITERAL") {
+        parser_error($parser, "import_lib requires a string library filename (e.g., \"MyLib.so\")");
+    }
+    my str $lib_file = $tok->{"value"};
+    parser_advance($parser);
+
+    parser_expect($parser, "SEMI");
+
+    # Find the .so file in lib paths
+    my str $so_path = find_so_file($program, $lib_file);
+    if (length($so_path) == 0) {
+        parser_error($parser, "cannot find shared library: " . $lib_file);
+    }
+
+    # Extract package name by stripping .so extension
+    my str $lib_name = $lib_file;
+    if (length($lib_file) > 3 && substr($lib_file, length($lib_file) - 3, 3) eq ".so") {
+        $lib_name = substr($lib_file, 0, length($lib_file) - 3);
+    }
+
+    do_import_lib_at($parser, $program, $lib_name, $so_path);
 }
 
 # Find .so file in lib paths (lib_file is the full filename, e.g., "MyLib.so")
@@ -4699,6 +4808,9 @@ func parse_export_metadata(str $lib_name, str $so_path, str $metadata) scalar {
     # Track unique package names for OOP init functions
     my hash %packages = ();
 
+    # Collected `link:NAME` entries from the metadata (extern-C deps).
+    my array @link_libs_local = ();
+
     # Parse metadata line by line manually (bootstrap doesn't support split well)
     my int $meta_len = length($metadata);
     my int $pos = 0;
@@ -4733,12 +4845,16 @@ func parse_export_metadata(str $lib_name, str $so_path, str $metadata) scalar {
                         $packages{$pkg} = 1;
                     }
                 }
+            } elsif (length($line) > 5 && substr($line, 0, 5) eq "link:") {
+                # link:NAME → record an extern-C library this module needs.
+                push(@link_libs_local, substr($line, 5, length($line) - 5));
             }
         }
     }
 
     $lib_info{"functions"} = \@functions;
     $lib_info{"function_count"} = $fn_count;
+    $lib_info{"link_libs"} = \@link_libs_local;
 
     # Build list of OOP init function names
     my array @oop_inits = ();
@@ -4969,14 +5085,29 @@ func extract_object_export_info(scalar $parser, str $obj_name, str $o_path) str 
 
     spew($temp_c, $c_code);
 
-    # Compile the temp program with the object file
-    # We need to link with the runtime for strada_* functions used in the object
+    # Compile the temp program with the object file. We use
+    # --unresolved-symbols=ignore-all so a module-only .o that references
+    # cross-module symbols (e.g. Util_doubled when probing Big.o) still
+    # produces a runnable probe binary — we only need __strada_export_info
+    # to be callable, not the rest of the module's API.
     my str $cc = core::getenv("CC");
     if (length($cc) == 0) { $cc = "cc"; }
     my str $dl_libs = core::getenv("STRADA_DLOPEN_LIBS");
-    my str $compile_cmd = $cc . " -o " . $temp_exe . " " . $temp_c . " " . $o_path;
-    $compile_cmd = $compile_cmd . " " . $runtime_path . " -I" . $runtime_dir;
+    # Prefer the pre-built runtime.o over recompiling the runtime source for
+    # every probe. With fat-LTO objects, also pass -fno-lto so the link
+    # doesn't run a full LTO pass — the probe just needs __strada_export_info
+    # to be callable, not optimized code.
+    my str $runtime_link = $runtime_dir . "/strada_runtime.o";
+    my int $rt_fd = core::open_fd($runtime_link, "r");
+    if ($rt_fd > 0) {
+        close_fd($rt_fd);
+    } else {
+        $runtime_link = $runtime_path;
+    }
+    my str $compile_cmd = $cc . " -fno-lto -o " . $temp_exe . " " . $temp_c . " " . $o_path;
+    $compile_cmd = $compile_cmd . " " . $runtime_link . " -I" . $runtime_dir;
     $compile_cmd = $compile_cmd . " " . $dl_libs . " -lm -lpthread";
+    $compile_cmd = $compile_cmd . " -Wl,--unresolved-symbols=ignore-all";
 
     # Run gcc and capture any error output, append exit code
     my str $compile_output = core::qx($compile_cmd . " 2>&1; echo __EXIT_CODE__$?");
@@ -5003,6 +5134,97 @@ func extract_object_export_info(scalar $parser, str $obj_name, str $o_path) str 
     return $metadata;
 }
 
+# Return basename of a path: "/abs/path/Foo.o" -> "Foo.o", "Foo.o" -> "Foo.o"
+func path_basename(str $path) str {
+    my int $i = length($path) - 1;
+    while ($i >= 0) {
+        my str $ch = substr($path, $i, 1);
+        if ($ch eq "/" || $ch eq "\\") {
+            return substr($path, $i + 1, length($path) - $i - 1);
+        }
+        $i = $i - 1;
+    }
+    return $path;
+}
+
+# Check whether the program already has an import_object with the given obj_name.
+func program_has_import_object(scalar $program, str $obj_name) int {
+    my scalar $objs = $program->{"import_objects"};
+    my int $count = $program->{"import_object_count"};
+    my int $i = 0;
+    while ($i < $count) {
+        my scalar $info = $objs->[$i];
+        if ($info->{"obj_name"} eq $obj_name) { return 1; }
+        $i = $i + 1;
+    }
+    return 0;
+}
+
+# Check whether the program already has an import_archive with the given arch_name.
+func program_has_import_archive(scalar $program, str $arch_name) int {
+    my scalar $archs = $program->{"import_archives"};
+    my int $count = $program->{"import_archive_count"};
+    my int $i = 0;
+    while ($i < $count) {
+        my scalar $info = $archs->[$i];
+        if ($info->{"arch_name"} eq $arch_name) { return 1; }
+        $i = $i + 1;
+    }
+    return 0;
+}
+
+# Shared body for import_object: given a resolved $o_path and the originating
+# $obj_file (e.g., "MyLib.o"), extract metadata and register with the program.
+# Returns 1 if added, 0 if skipped (duplicate).
+func do_import_object_at(scalar $parser, scalar $program, str $obj_file, str $o_path) int {
+    # Extract package name by stripping .o extension
+    my str $obj_name = $obj_file;
+    if (length($obj_file) > 2 && substr($obj_file, length($obj_file) - 2, 2) eq ".o") {
+        $obj_name = substr($obj_file, 0, length($obj_file) - 2);
+    }
+
+    # Skip if already imported (e.g., both source-level and CLI-implicit)
+    if (program_has_import_object($program, $obj_name) == 1) {
+        return 0;
+    }
+
+    # Extract export metadata from the object file (like import_lib does with .so)
+    my str $metadata = extract_object_export_info($parser, $obj_name, $o_path);
+
+    # Parse the metadata using the same function as import_lib
+    my scalar $obj_info = parse_export_metadata($obj_name, $o_path, $metadata);
+
+    # Add o_path to the result (parse_export_metadata sets so_path, but we need o_path)
+    $obj_info->{"o_path"} = $o_path;
+    $obj_info->{"obj_name"} = $obj_name;
+
+    # Add to program
+    ast_add_import_object($program, $obj_info);
+
+    # Pull in any extern-C link deps the .o advertised via link_lib.
+    merge_link_libs($program, $obj_info->{"link_libs"});
+
+    # Check if object defines an import() function
+    my str $obj_import_fn = sanitize_name($obj_name) . "_import";
+    my scalar $obj_funcs = $obj_info->{"functions"};
+    my int $ofi = 0;
+    my int $of_count = $obj_info->{"function_count"};
+    while ($ofi < $of_count) {
+        my scalar $of = $obj_funcs->[$ofi];
+        if (sanitize_name($of->{"name"}) eq $obj_import_fn) {
+            my hash %call_info = ();
+            $call_info{"func_name"} = $obj_import_fn;
+            $call_info{"pkg_name"} = $obj_name;
+            $call_info{"is_import_lib"} = 0;
+            ast_add_import_call($program, \%call_info);
+            last;
+        }
+        $ofi = $ofi + 1;
+    }
+
+    return 1;
+}
+
 # Parse import_object statement - import object file for static linking
 # import_object "objname.o";  -> links objname.o and reads metadata from __strada_export_info()
 func parse_import_object(scalar $parser, scalar $program) void {
@@ -5024,41 +5246,68 @@ func parse_import_object(scalar $parser, scalar $program) void {
         parser_error($parser, "cannot find object file: " . $obj_file);
     }
 
-    # Extract package name by stripping .o extension
-    my str $obj_name = $obj_file;
-    if (length($obj_file) > 2 && substr($obj_file, length($obj_file) - 2, 2) eq ".o") {
-        $obj_name = substr($obj_file, 0, length($obj_file) - 2);
-    }
+    do_import_object_at($parser, $program, $obj_file, $o_path);
+}
 
-    # Extract export metadata from the object file (like import_lib does with .so)
-    my str $metadata = extract_object_export_info($parser, $obj_name, $o_path);
+# Register an implicit import_object from a full path (e.g., passed on the
+# `strada` command line). Returns 1 if added, 0 if skipped (already imported
+# by source-level import_object with the same name).
+func parse_implicit_import_object(scalar $parser, scalar $program, str $o_path) int {
+    my str $obj_file = path_basename($o_path);
+    return do_import_object_at($parser, $program, $obj_file, $o_path);
+}
 
-    # Parse the metadata using the same function as import_lib
-    # Note: parse_export_metadata expects so_path, but we pass o_path - works the same
-    my scalar $obj_info = parse_export_metadata($obj_name, $o_path, $metadata);
-
-    # Add o_path to the result (parse_export_metadata sets so_path, but we need o_path)
-    $obj_info->{"o_path"} = $o_path;
-
-    # Add to program
-    ast_add_import_object($program, $obj_info);
-
-    # Check if object defines an import() function
-    my str $obj_import_fn = sanitize_name($obj_name) . "_import";
-    my scalar $obj_funcs = $obj_info->{"functions"};
-    my int $ofi = 0;
-    my int $of_count = $obj_info->{"function_count"};
-    while ($ofi < $of_count) {
-        my scalar $of = $obj_funcs->[$ofi];
-        if (sanitize_name($of->{"name"}) eq $obj_import_fn) {
-            my hash %call_info = ();
-            $call_info{"func_name"} = $obj_import_fn;
-            $call_info{"pkg_name"} = $obj_name;
-            $call_info{"is_import_lib"} = 0;
-            ast_add_import_call($program, \%call_info);
+# Parse `link_lib "name";` (and the comma-separated form
+# `link_lib "a", "b", "c";`). Records the C library names so consumers of
+# this module's .o can pass -l<name> at final link time.
+func parse_link_lib(scalar $parser, scalar $program) void {
+    parser_expect($parser, "LINK_LIB");
+    while (1) {
+        my scalar $tok = parser_current($parser);
+        if ($tok->{"type"} ne "STR_LITERAL") {
+            parser_error($parser, "link_lib requires a string library name (e.g., \"mysqlclient\")");
+        }
+        my str $name = $tok->{"value"};
+        parser_advance($parser);
+        # Dedup before adding
+        my scalar $libs = $program->{"link_libs"};
+        my int $found = 0;
+        my int $li = 0;
+        while ($li < size($libs)) {
+            if ($libs->[$li] eq $name) { $found = 1; last; }
+            $li = $li + 1;
+        }
+        if ($found == 0) {
+            push($libs, $name);
+        }
+        if (parser_check($parser, "COMMA")) {
+            parser_advance($parser);
+        } else {
             last;
         }
-        $ofi = $ofi + 1;
+    }
+    parser_expect($parser, "SEMI");
+}
+
+# Merge link_libs from a parsed module (or extracted from a .o/.so's
+# __strada_export_info) into the main program's link_libs list, deduping.
+func merge_link_libs(scalar $program, scalar $source_libs) void {
+    if (!defined($source_libs)) { return; }
+    my scalar $dst = $program->{"link_libs"};
+    my int $i = 0;
+    my int $n = size($source_libs);
+    while ($i < $n) {
+        my str $name = $source_libs->[$i];
+        my int $found = 0;
+        my int $di = 0;
+        while ($di < size($dst)) {
+            if ($dst->[$di] eq $name) { $found = 1; last; }
+            $di = $di + 1;
+        }
+        if ($found == 0) {
+            push($dst, $name);
+        }
+        $i = $i + 1;
     }
 }
 
@@ -5139,6 +5388,58 @@ func extract_archive_export_info(scalar $parser, str $arch_name, str $a_path) st
     return $metadata;
 }
 
+# Shared body for import_archive: given a resolved $a_path and the originating
+# $arch_file (e.g., "MyLib.a"), extract metadata and register with the program.
+# Returns 1 if added, 0 if skipped (duplicate).
+func do_import_archive_at(scalar $parser, scalar $program, str $arch_file, str $a_path) int {
+    # Extract package name by stripping .a extension
+    my str $arch_name = $arch_file;
+    if (length($arch_file) > 2 && substr($arch_file, length($arch_file) - 2, 2) eq ".a") {
+        $arch_name = substr($arch_file, 0, length($arch_file) - 2);
+    }
+
+    # Skip if already imported (e.g., both source-level and CLI-implicit)
+    if (program_has_import_archive($program, $arch_name) == 1) {
+        return 0;
+    }
+
+    # Extract export metadata from the archive file
+    my str $metadata = extract_archive_export_info($parser, $arch_name, $a_path);
+
+    # Parse the metadata using the same function as import_lib/import_object
+    my scalar $arch_info = parse_export_metadata($arch_name, $a_path, $metadata);
+
+    # Add a_path to the result
+    $arch_info->{"a_path"} = $a_path;
+    $arch_info->{"arch_name"} = $arch_name;
+
+    # Add to program
+    ast_add_import_archive($program, $arch_info);
+
+    # Pull in any extern-C link deps the .a advertised via link_lib.
+    merge_link_libs($program, $arch_info->{"link_libs"});
+
+    # Check if archive defines an import() function
+    my str $arch_import_fn = sanitize_name($arch_name) . "_import";
+    my scalar $arch_funcs = $arch_info->{"functions"};
+    my int $afi = 0;
+    my int $af_count = $arch_info->{"function_count"};
+    while ($afi < $af_count) {
+        my scalar $af = $arch_funcs->[$afi];
+        if (sanitize_name($af->{"name"}) eq $arch_import_fn) {
+            my hash %call_info = ();
+            $call_info{"func_name"} = $arch_import_fn;
+            $call_info{"pkg_name"} = $arch_name;
+            $call_info{"is_import_lib"} = 0;
+            ast_add_import_call($program, \%call_info);
+            last;
+        }
+        $afi = $afi + 1;
+    }
+
+    return 1;
+}
+
 # Parse import_archive statement - import archive file for static linking
 # import_archive "archname.a";  -> links archname.a and reads metadata from __strada_export_info()
 func parse_import_archive(scalar $parser, scalar $program) void {
@@ -5160,41 +5461,15 @@ func parse_import_archive(scalar $parser, scalar $program) void {
         parser_error($parser, "cannot find archive file: " . $arch_file);
     }
 
-    # Extract package name by stripping .a extension
-    my str $arch_name = $arch_file;
-    if (length($arch_file) > 2 && substr($arch_file, length($arch_file) - 2, 2) eq ".a") {
-        $arch_name = substr($arch_file, 0, length($arch_file) - 2);
-    }
+    do_import_archive_at($parser, $program, $arch_file, $a_path);
+}
 
-    # Extract export metadata from the archive file
-    my str $metadata = extract_archive_export_info($parser, $arch_name, $a_path);
-
-    # Parse the metadata using the same function as import_lib/import_object
-    my scalar $arch_info = parse_export_metadata($arch_name, $a_path, $metadata);
-
-    # Add a_path to the result
-    $arch_info->{"a_path"} = $a_path;
-
-    # Add to program
-    ast_add_import_archive($program, $arch_info);
-
-    # Check if archive defines an import() function
-    my str $arch_import_fn = sanitize_name($arch_name) . "_import";
-    my scalar $arch_funcs = $arch_info->{"functions"};
-    my int $afi = 0;
-    my int $af_count = $arch_info->{"function_count"};
-    while ($afi < $af_count) {
-        my scalar $af = $arch_funcs->[$afi];
-        if (sanitize_name($af->{"name"}) eq $arch_import_fn) {
-            my hash %call_info = ();
-            $call_info{"func_name"} = $arch_import_fn;
-            $call_info{"pkg_name"} = $arch_name;
-            $call_info{"is_import_lib"} = 0;
-            ast_add_import_call($program, \%call_info);
-            last;
-        }
-        $afi = $afi + 1;
-    }
+# Register an implicit import_archive from a full path (e.g., passed on the
+# `strada` command line). Returns 1 if added, 0 if skipped (already imported
+# by source-level import_archive with the same name).
+func parse_implicit_import_archive(scalar $parser, scalar $program, str $a_path) int {
+    my str $arch_file = path_basename($a_path);
+    return do_import_archive_at($parser, $program, $arch_file, $a_path);
 }
 
 # ============================================================
@@ -5656,7 +5931,7 @@ func parse_method_modifier(scalar $parser, scalar $program, str $mod_type) void 
     $program->{"method_modifier_count"} = $program->{"method_modifier_count"} + 1;
 }
 
-func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low) scalar {
+func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low, scalar $implicit_objs, scalar $implicit_archs) scalar {
     my scalar $program = ast_new_program();
 
     # Add command-line library paths first (high priority - before any use statements)
@@ -5756,15 +6031,26 @@ func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low) sca
             parse_import_object($parser, $program);
         } elsif (parser_check($parser, "IMPORT_ARCHIVE")) {
             parse_import_archive($parser, $program);
+        } elsif (parser_check($parser, "LINK_LIB")) {
+            parse_link_lib($parser, $program);
         } elsif (parser_check($parser, "MY")) {
             my scalar $var = parse_var_decl($parser);
+            my str $main_mod = $program->{"package"};
+            if (length($main_mod) == 0) { $main_mod = "main"; }
+            $var->{"source_module"} = $main_mod;
             ast_add_global($program, $var);
         } elsif (parser_check($parser, "CONST")) {
             my scalar $const_decl = parse_const_decl($parser);
+            my str $main_mod = $program->{"package"};
+            if (length($main_mod) == 0) { $main_mod = "main"; }
+            $const_decl->{"source_module"} = $main_mod;
             ast_add_global($program, $const_decl);
         } elsif (parser_check($parser, "OUR")) {
             my scalar $our_decl = parse_our_decl($parser);
             $our_decl->{"package"} = $program->{"package"};
+            my str $main_mod = $program->{"package"};
+            if (length($main_mod) == 0) { $main_mod = "main"; }
+            $our_decl->{"source_module"} = $main_mod;
             ast_add_global($program, $our_decl);
         } elsif (parser_check($parser, "C_BLOCK")) {
             # Top-level __C__ { ... } block
@@ -5772,15 +6058,27 @@ func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low) sca
             my str $c_code = $tok->{"value"};
             parser_advance($parser);
             ast_add_c_block($program, $c_code);
+            # Tag with the current package for diagnostics, and mark as
+            # NOT-from-use so module-only codegen keeps it.
+            my str $cb_pkg = $program->{"package"};
+            if (length($cb_pkg) == 0) { $cb_pkg = "main"; }
+            push($program->{"c_block_modules"}, $cb_pkg);
+            push($program->{"c_block_from_use"}, 0);
         } elsif (parser_check($parser, "BEGIN_BLOCK")) {
             # BEGIN { ... } block - runs before main body
             parser_advance($parser);
             my scalar $block = parse_block($parser);
+            my str $bb_mod = $program->{"package"};
+            if (length($bb_mod) == 0) { $bb_mod = "main"; }
+            $block->{"source_module"} = $bb_mod;
             ast_add_begin_block($program, $block);
         } elsif (parser_check($parser, "END_BLOCK")) {
             # END { ... } block - runs after main returns (via atexit)
             parser_advance($parser);
             my scalar $block = parse_block($parser);
+            my str $eb_mod = $program->{"package"};
+            if (length($eb_mod) == 0) { $eb_mod = "main"; }
+            $block->{"source_module"} = $eb_mod;
             ast_add_end_block($program, $block);
         } elsif (parser_check($parser, "HAS")) {
             parse_has_declaration($parser, $program);
@@ -5812,6 +6110,26 @@ func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low) sca
         $path_i = $path_i + 1;
     }
 
+    # Process CLI-implicit import_object paths (e.g. `strada main.strada foo.o`).
+    # Source-level import_object statements are already registered, so duplicates
+    # for the same module name are skipped silently.
+    my int $imp_obj_count = size($implicit_objs);
+    my int $imp_i = 0;
+    while ($imp_i < $imp_obj_count) {
+        my str $o_path = $implicit_objs->[$imp_i];
+        parse_implicit_import_object($parser, $program, $o_path);
+        $imp_i = $imp_i + 1;
+    }
+
+    # Process CLI-implicit import_archive paths (e.g. `strada main.strada foo.a`).
+    my int $imp_arch_count = size($implicit_archs);
+    $imp_i = 0;
+    while ($imp_i < $imp_arch_count) {
+        my str $a_path = $implicit_archs->[$imp_i];
+        parse_implicit_import_archive($parser, $program, $a_path);
+        $imp_i = $imp_i + 1;
+    }
+
     return $program;
 }
 
@@ -5824,12 +6142,25 @@ func parse(scalar $tokens, str $filename) scalar {
     parser_set_filename($parser, $filename);
     my array @empty_paths = ();
     my array @empty_paths_low = ();
-    return parse_program($parser, \@empty_paths, \@empty_paths_low);
+    my array @empty_objs = ();
+    my array @empty_archs = ();
+    return parse_program($parser, \@empty_paths, \@empty_paths_low, \@empty_objs, \@empty_archs);
 }
 
 # Parse with pre-configured library paths (from -L and -LL command line options)
 func parse_with_lib_paths(scalar $tokens, str $filename, scalar $lib_paths, scalar $lib_paths_low) scalar {
     my scalar $parser = parser_new($tokens);
     parser_set_filename($parser, $filename);
-    return parse_program($parser, $lib_paths, $lib_paths_low);
+    my array @empty_objs = ();
+    my array @empty_archs = ();
+    return parse_program($parser, $lib_paths, $lib_paths_low, \@empty_objs, \@empty_archs);
+}
+
+# Parse with pre-configured library paths and CLI-implicit import paths (full
+# paths to .o/.a files passed on the `strada` command line that should be
+# treated as if they were source-level import_object/import_archive).
+func parse_with_implicit_imports(scalar $tokens, str $filename, scalar $lib_paths, scalar $lib_paths_low, scalar $implicit_objs, scalar $implicit_archs) scalar {
+    my scalar $parser = parser_new($tokens);
+    parser_set_filename($parser, $filename);
+    return parse_program($parser, $lib_paths, $lib_paths_low, $implicit_objs, $implicit_archs);
 }

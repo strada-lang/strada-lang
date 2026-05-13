@@ -18,7 +18,7 @@
 # Main.strada - Entry point for self-hosting Strada compiler
 # This is the main compiler executable
 
-func compile(str $source, str $filename, int $debug_info, int $show_timing, int $show_warnings, int $enable_profiling, int $enable_stack_trace, int $full_profile, scalar $lib_paths, scalar $lib_paths_low) str {
+func compile(str $source, str $filename, int $debug_info, int $show_timing, int $show_warnings, int $enable_profiling, int $enable_stack_trace, int $full_profile, scalar $lib_paths, scalar $lib_paths_low, scalar $implicit_objs, scalar $implicit_archs, int $module_only_mode, str $module_target) str {
     my num $t0 = 0.0;
     my num $t1 = 0.0;
 
@@ -30,9 +30,12 @@ func compile(str $source, str $filename, int $debug_info, int $show_timing, int 
         say("  Lexer:    " . ($t1 - $t0) . " seconds");
     }
 
-    # Parse (with optional library paths from -L and -LL flags)
+    # Parse (with optional library paths from -L and -LL flags, plus any
+    # implicit imports from CLI-passed .o/.a files)
     $t0 = core::hires_time();
-    my scalar $ast = parse_with_lib_paths($tokens, $filename, $lib_paths, $lib_paths_low);
+    my scalar $ast = parse_with_implicit_imports($tokens, $filename, $lib_paths, $lib_paths_low, $implicit_objs, $implicit_archs);
+    $ast->{"module_only_mode"} = $module_only_mode;
+    $ast->{"module_target"} = $module_target;
     $t1 = core::hires_time();
     if ($show_timing == 1) {
         say("  Parser:   " . ($t1 - $t0) . " seconds");
@@ -64,6 +67,11 @@ func print_usage() void {
     say("Options:");
     say("  -L <path>       Add library search path (high priority, searched first)");
     say("  -LL <path>      Add library search path (low priority, searched last)");
+    say("  --import-object <path>   Treat <path> as implicit import_object (full path)");
+    say("  --import-archive <path>  Treat <path> as implicit import_archive (full path)");
+    say("  -M [TARGET]    Module-only codegen: only emit bodies/globals/blocks");
+    say("                 for TARGET (default: derived from input filename).");
+    say("                 Use after compiling Foo.strada to produce Foo.o.");
     say("  -g, --debug     Emit #line directives for source-level debugging");
     say("  -p, --profile   Enable function profiling (timing and call counts)");
     say("  --full-profile  Enable line-level profiling (writes strada-prof.out)");
@@ -93,6 +101,10 @@ func main() int {
     my str $output_file = "";
     my array @lib_paths = ();
     my array @lib_paths_low = ();
+    my array @implicit_objs = ();
+    my array @implicit_archs = ();
+    my int $module_only_mode = 0;
+    my str $module_target = "";
     # Start from 0 — @ARGV excludes program name (Perl-style)
     # For bootstrap compatibility, also skip if ARGV[0] looks like program name
     my int $i = 0;
@@ -146,6 +158,40 @@ func main() int {
             # -L<path> (no space) - add library search path
             my str $path = substr($arg, 2, length($arg) - 2);
             push(@lib_paths, $path);
+        } elsif ($arg eq "--import-object") {
+            # --import-object <path> - treat path as implicit import_object
+            $i = $i + 1;
+            if ($i < $arg_count) {
+                push(@implicit_objs, $ARGV[$i]);
+            } else {
+                say("Error: --import-object requires a path argument");
+                return 1;
+            }
+        } elsif ($arg eq "-M") {
+            # -M [TARGET] - module-only codegen. TARGET is optional; if the
+            # next arg starts with '-' or is missing, derive from input file.
+            $module_only_mode = 1;
+            if ($i + 1 < $arg_count) {
+                my str $next_arg = $ARGV[$i + 1];
+                if (length($next_arg) > 0 && substr($next_arg, 0, 1) ne "-") {
+                    # Next arg looks like a target name (NOT a flag). Consume
+                    # it only if it doesn't look like a filename — namely, if
+                    # it has no extension and no '/' in it.
+                    if (index($next_arg, "/") < 0 && index($next_arg, ".") < 0) {
+                        $module_target = $next_arg;
+                        $i = $i + 1;
+                    }
+                }
+            }
+        } elsif ($arg eq "--import-archive") {
+            # --import-archive <path> - treat path as implicit import_archive
+            $i = $i + 1;
+            if ($i < $arg_count) {
+                push(@implicit_archs, $ARGV[$i]);
+            } else {
+                say("Error: --import-archive requires a path argument");
+                return 1;
+            }
         } elsif ($arg eq "-h" || $arg eq "--help") {
             print_usage();
             return 0;
@@ -197,8 +243,34 @@ func main() int {
         }
     }
 
-    # Compile (pass lib paths)
-    my str $code = compile($source, $input_file, $debug_info, $show_timing, $show_warnings, $enable_profiling, $enable_stack_trace, $full_profile, \@lib_paths, \@lib_paths_low);
+    # Derive module target from input filename when -M was given without
+    # an explicit target: "path/Foo.strada" -> "Foo".
+    if ($module_only_mode == 1 && length($module_target) == 0) {
+        my str $base = $input_file;
+        my int $slash = -1;
+        my int $idx = length($base) - 1;
+        while ($idx >= 0) {
+            my str $ch = substr($base, $idx, 1);
+            if ($ch eq "/" || $ch eq "\\") { $slash = $idx; last; }
+            $idx = $idx - 1;
+        }
+        if ($slash >= 0) {
+            $base = substr($base, $slash + 1, length($base) - $slash - 1);
+        }
+        # Strip .strada extension
+        my int $blen = length($base);
+        if ($blen > 7 && substr($base, $blen - 7, 7) eq ".strada") {
+            $base = substr($base, 0, $blen - 7);
+        }
+        $module_target = $base;
+    }
+
+    if ($verbose == 1 && $module_only_mode == 1) {
+        say("Module-only mode: target = " . $module_target);
+    }
+
+    # Compile (pass lib paths, CLI-implicit imports, and module-only settings)
+    my str $code = compile($source, $input_file, $debug_info, $show_timing, $show_warnings, $enable_profiling, $enable_stack_trace, $full_profile, \@lib_paths, \@lib_paths_low, \@implicit_objs, \@implicit_archs, $module_only_mode, $module_target);
 
     # Write output
     spew($output_file, $code);

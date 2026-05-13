@@ -399,8 +399,11 @@ func generate_file_page(str $outdir, str $filename, scalar $lines, int $total_ti
     $html = $html . "<title>" . html_escape($filename) . " - Profile</title>\n";
     $html = $html . css_style();
     $html = $html . "</head>\n<body>\n";
+    # Show this file's total time and what fraction of the whole program
+    # that represents (uses $total_time_ns, the program-wide total).
+    my str $file_pct = format_pct_str($file_total_ns, $total_time_ns);
     $html = $html . "<header><h1>" . html_escape($filename) . "</h1>";
-    $html = $html . "<p>Total: " . format_time($file_total_ns) . "s</p></header>\n";
+    $html = $html . "<p>Total: " . format_time($file_total_ns) . "s (" . $file_pct . "% of program)</p></header>\n";
     $html = $html . "<div class=\"container\">\n";
     $html = $html . "<a class=\"back\" href=\"index.html\">&larr; Back to index</a>\n";
 

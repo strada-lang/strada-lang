@@ -1338,6 +1338,7 @@ func lex_keyword_or_ident(str $text) str {
     if ($text eq "import_lib") { return "IMPORT_LIB"; }
     if ($text eq "import_object") { return "IMPORT_OBJECT"; }
     if ($text eq "import_archive") { return "IMPORT_ARCHIVE"; }
+    if ($text eq "link_lib") { return "LINK_LIB"; }
     if ($text eq "inherit") { return "INHERIT"; }
     if ($text eq "try") { return "TRY"; }
     if ($text eq "catch") { return "CATCH"; }

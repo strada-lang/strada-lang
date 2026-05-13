@@ -427,7 +427,16 @@ struct StradaHash {
     uint32_t free_head;         /* internal free list head (HASH_EMPTY = none) */
     int refcount;
     size_t iter_index;          /* for each() */
+    uint8_t index_dirty;        /* set when cross-boundary dispatch may have desynced
+                                 * hash_index from entries[]; when 0, hash_linear_find
+                                 * short-circuits (clean hashes never need a full scan). */
 };
+
+/* Mark a hash's index as possibly out-of-sync with entries[]. Subsequent
+ * probes will fall back to a linear scan + rebuild. Call this at the point
+ * where dispatch crosses a dlopen boundary or wherever the index may have
+ * been corrupted. Self-clears after the next rebuild. */
+void strada_hash_mark_index_dirty(StradaHash *hv);
 
 /* Value creation functions */
 StradaValue* strada_new_undef(void);
@@ -634,6 +643,8 @@ StradaValue* strada_read_line(StradaValue *fh);
 StradaValue* strada_read_all_lines(StradaValue *fh);
 void strada_write_file(StradaValue *fh, const char *content);
 int strada_file_exists(const char *filename);
+StradaValue* strada_file_mtime(StradaValue *path);  /* mtime as int sv, -1 on failure */
+StradaValue* sys_file_mtime(StradaValue *path);     /* alias used by bootstrap codegen */
 StradaValue* strada_slurp(const char *filename);  /* Read entire file */
 StradaValue* strada_slurp_fh(StradaValue *fh_sv);  /* Read from FILE handle to end */
 StradaValue* strada_slurp_fd(StradaValue *fd_sv);  /* Read from file descriptor to end */

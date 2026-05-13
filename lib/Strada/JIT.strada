@@ -1120,6 +1120,55 @@ func eval(str $code) scalar {
     return eval_one($input);
 }
 
+# Compile a script file as a complete program in one shot and exec it.
+# Returns the script's exit code (the rc from the compiled binary, or a
+# non-zero compile-error code if stradac/cc fails).
+#
+# This is the whole-file counterpart to eval(): it avoids the per-statement
+# compile overhead of the REPL-style chunked path by handing the whole file
+# to stradac at once, then exec'ing the resulting executable. Intended for
+# the `strada --script FILE` entry point.
+#
+# Reuses the `strada` driver script for the compile (so it benefits from
+# PCRE2 / runtime path / optimization handling without duplicating logic).
+func run_file(str $filename) int {
+    if ($g_initialized == 0) {
+        throw "Strada::JIT::run_file: Not initialized. Call init() first.";
+    }
+    if (core::is_file($filename) == 0) {
+        throw "Strada::JIT::run_file: File not found: " . $filename;
+    }
+
+    # Locate the strada driver next to the stradac we already found.
+    my str $strada_bin = "";
+    if ($g_stradac_path ne "" && $g_stradac_path ne "stradac") {
+        my str $cand = core::dirname($g_stradac_path) . "/strada";
+        if (core::is_file($cand) == 1) {
+            $strada_bin = $cand;
+        }
+    }
+    if ($strada_bin eq "") {
+        $strada_bin = "strada";  # fall back to PATH
+    }
+
+    my int $pid = core::getpid();
+    my str $exe_file = $g_tmpdir . "/strada_script_" . $pid;
+
+    # Compile via the driver — quote the input path defensively in case it
+    # contains spaces. The redirection captures any compile-time errors.
+    my str $compile_cmd = $strada_bin . " -o " . $exe_file . " " . $filename;
+    my int $rc = core::system($compile_cmd);
+    if ($rc != 0 || core::is_file($exe_file) == 0) {
+        if ($rc == 0) { $rc = 1; }
+        return $rc;
+    }
+
+    # Exec and propagate the script's exit code.
+    $rc = core::system($exe_file);
+    core::unlink($exe_file);
+    return $rc;
+}
+
 # Get a variable value from the persistent state (global registry)
 func get(str $name) scalar {
     my str $key = "repl::" . $name;

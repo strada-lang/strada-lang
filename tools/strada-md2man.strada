@@ -149,7 +149,7 @@ func extract_name(str $path) str {
 # Convert markdown file to man page
 func convert_md_to_man(str $input_file, str $name, str $section, str $date, str $center) str {
     my scalar $fh = core::open($input_file, "r");
-    if (length($fh) == 0) {
+    if (!defined($fh)) {
         die("Cannot open file: " . $input_file);
     }
 

@@ -184,10 +184,25 @@ func ast_new_program() scalar {
     my array @import_archives = ();
     $node->{"import_archives"} = \@import_archives;
     $node->{"import_archive_count"} = 0;
+    # link_lib: extern-C library names (e.g. "mysqlclient", "sqlite3") that
+    # the final binary needs at link time. Declared via `link_lib "name";`
+    # in source, or inherited from a `use`d module's __strada_export_info.
+    # The strada driver and test harness pick these up from the
+    # __STRADA_LINK_LIBS__ comment in the generated C and add -l<name> to gcc.
+    my array @link_libs = ();
+    $node->{"link_libs"} = \@link_libs;
     # Top-level C blocks - array of raw C code strings
     my array @c_blocks = ();
     $node->{"c_blocks"} = \@c_blocks;
     $node->{"c_block_count"} = 0;
+    # Parallel array of source module names (one per c_block), used for
+    # diagnostics. Module-only codegen filters via the c_block_from_use
+    # parallel array below — 1 if the block came from a `use`d file, 0
+    # if it's part of the file currently being compiled.
+    my array @c_block_modules = ();
+    $node->{"c_block_modules"} = \@c_block_modules;
+    my array @c_block_from_use = ();
+    $node->{"c_block_from_use"} = \@c_block_from_use;
     # BEGIN/END blocks - arrays of block AST nodes (statement lists)
     my array @begin_blocks = ();
     $node->{"begin_blocks"} = \@begin_blocks;
@@ -199,6 +214,13 @@ func ast_new_program() scalar {
     my array @import_calls = ();
     $node->{"import_calls"} = \@import_calls;
     $node->{"import_call_count"} = 0;
+    # Module-only codegen mode (--object / -M): when set, only items whose
+    # source_module matches module_target produce function bodies, globals,
+    # BEGIN/END blocks, top-level __C__ blocks, and OOP method registrations.
+    # Forward declarations and extern_lib refs are still emitted so the
+    # resulting .o can be linked with the final binary.
+    $node->{"module_only_mode"} = 0;
+    $node->{"module_target"} = "";
     # Operator overloading: overloads->{package}->{op} = method_name
     my hash %overloads = ();
     $node->{"overloads"} = \%overloads;
@@ -1163,6 +1185,16 @@ func lex_current_code(scalar $lexer) int {
     return char_at($lexer->{"source"}, $pos);
 }
 
+# Peek at a future char's code without advancing.
+func lex_peek_code(scalar $lexer, int $offset) int {
+    my int $pos = $lexer->{"pos"} + $offset;
+    my int $len = $lexer->{"length"};
+    if ($pos >= $len) {
+        return 0;
+    }
+    return char_at($lexer->{"source"}, $pos);
+}
+
 # Returns current char as string (for compatibility)
 func lex_current_char(scalar $lexer) str {
     my int $code = lex_current_code($lexer);
@@ -1557,6 +1589,60 @@ func lex_read_dq_string(scalar $lexer, int $token_line) scalar {
                 sb_append($sb, chr(11));
             } elsif ($next_code == 101) {
                 sb_append($sb, chr(27));
+            } elsif ($next_code == 120) {
+                # \xHH or \x{HEX} hex byte escape — Perl-compatible
+                lex_advance($lexer);  # consume the 'x'
+                my int $pk_code = lex_current_code($lexer);
+                if ($pk_code == 123) {
+                    # \x{HEX} — multi-digit hex codepoint
+                    lex_advance($lexer);  # consume '{'
+                    my int $hv = 0;
+                    while (!lex_at_end($lexer)) {
+                        my int $hcc = lex_current_code($lexer);
+                        if ($hcc == 125) { last; }
+                        my int $hd = -1;
+                        if ($hcc >= 48 && $hcc <= 57) { $hd = $hcc - 48; }
+                        elsif ($hcc >= 97 && $hcc <= 102) { $hd = $hcc - 87; }
+                        elsif ($hcc >= 65 && $hcc <= 70) { $hd = $hcc - 55; }
+                        else { last; }
+                        $hv = $hv * 16 + $hd;
+                        lex_advance($lexer);
+                    }
+                    if (lex_current_code($lexer) == 125) { lex_advance($lexer); }
+                    if ($hv < 128) {
+                        sb_append($sb, chr($hv));
+                    } elsif ($hv < 2048) {
+                        sb_append($sb, chr(192 + ($hv / 64)));
+                        sb_append($sb, chr(128 + ($hv % 64)));
+                    } elsif ($hv < 65536) {
+                        sb_append($sb, chr(224 + ($hv / 4096)));
+                        sb_append($sb, chr(128 + (($hv / 64) % 64)));
+                        sb_append($sb, chr(128 + ($hv % 64)));
+                    } else {
+                        sb_append($sb, chr(240 + ($hv / 262144)));
+                        sb_append($sb, chr(128 + (($hv / 4096) % 64)));
+                        sb_append($sb, chr(128 + (($hv / 64) % 64)));
+                        sb_append($sb, chr(128 + ($hv % 64)));
+                    }
+                    next;
+                } else {
+                    # \xHH — up to 2 hex digits, single byte
+                    my int $hv = 0;
+                    my int $hi = 0;
+                    while ($hi < 2 && !lex_at_end($lexer)) {
+                        my int $hcc = lex_current_code($lexer);
+                        my int $hd = -1;
+                        if ($hcc >= 48 && $hcc <= 57) { $hd = $hcc - 48; }
+                        elsif ($hcc >= 97 && $hcc <= 102) { $hd = $hcc - 87; }
+                        elsif ($hcc >= 65 && $hcc <= 70) { $hd = $hcc - 55; }
+                        else { last; }
+                        $hv = $hv * 16 + $hd;
+                        lex_advance($lexer);
+                        $hi = $hi + 1;
+                    }
+                    sb_append($sb, chr($hv));
+                    next;
+                }
             } elsif ($next_code == 92) {
                 sb_append($sb, "\\");
             } elsif ($next_code == 34) {
@@ -1664,6 +1750,59 @@ func lex_read_string(scalar $lexer) str {
             } elsif ($nextch eq "e") {
                 # Escape character
                 $result = $result . chr(27);
+            } elsif ($nextch eq "x") {
+                # \xHH or \x{HEX} hex byte escape — Perl-compatible
+                lex_advance($lexer);  # consume the 'x'
+                my str $pk = lex_current_char($lexer);
+                if ($pk eq "{") {
+                    lex_advance($lexer);  # consume '{'
+                    my int $hv = 0;
+                    while (!lex_at_end($lexer)) {
+                        my str $hc = lex_current_char($lexer);
+                        if ($hc eq "}") { last; }
+                        my int $hd = -1;
+                        if ($hc ge "0" && $hc le "9") { $hd = char_at($hc, 0) - 48; }
+                        elsif ($hc ge "a" && $hc le "f") { $hd = char_at($hc, 0) - 87; }
+                        elsif ($hc ge "A" && $hc le "F") { $hd = char_at($hc, 0) - 55; }
+                        else { last; }
+                        $hv = $hv * 16 + $hd;
+                        lex_advance($lexer);
+                    }
+                    if (lex_current_char($lexer) eq "}") { lex_advance($lexer); }
+                    if ($hv < 128) {
+                        $result = $result . chr($hv);
+                    } elsif ($hv < 2048) {
+                        $result = $result . chr(192 + ($hv / 64));
+                        $result = $result . chr(128 + ($hv % 64));
+                    } elsif ($hv < 65536) {
+                        $result = $result . chr(224 + ($hv / 4096));
+                        $result = $result . chr(128 + (($hv / 64) % 64));
+                        $result = $result . chr(128 + ($hv % 64));
+                    } else {
+                        $result = $result . chr(240 + ($hv / 262144));
+                        $result = $result . chr(128 + (($hv / 4096) % 64));
+                        $result = $result . chr(128 + (($hv / 64) % 64));
+                        $result = $result . chr(128 + ($hv % 64));
+                    }
+                    next;
+                } else {
+                    # Up to 2 hex digits — single byte
+                    my int $hv = 0;
+                    my int $hi = 0;
+                    while ($hi < 2 && !lex_at_end($lexer)) {
+                        my str $hc = lex_current_char($lexer);
+                        my int $hd = -1;
+                        if ($hc ge "0" && $hc le "9") { $hd = char_at($hc, 0) - 48; }
+                        elsif ($hc ge "a" && $hc le "f") { $hd = char_at($hc, 0) - 87; }
+                        elsif ($hc ge "A" && $hc le "F") { $hd = char_at($hc, 0) - 55; }
+                        else { last; }
+                        $hv = $hv * 16 + $hd;
+                        lex_advance($lexer);
+                        $hi = $hi + 1;
+                    }
+                    $result = $result . chr($hv);
+                    next;
+                }
             } elsif ($nextch eq "\\") {
                 $result = $result . "\\";
             } elsif ($nextch eq $quote) {
@@ -2342,6 +2481,7 @@ func lex_keyword_or_ident(str $text) str {
     if ($text eq "import_lib") { return "IMPORT_LIB"; }
     if ($text eq "import_object") { return "IMPORT_OBJECT"; }
     if ($text eq "import_archive") { return "IMPORT_ARCHIVE"; }
+    if ($text eq "link_lib") { return "LINK_LIB"; }
     if ($text eq "inherit") { return "INHERIT"; }
     if ($text eq "try") { return "TRY"; }
     if ($text eq "catch") { return "CATCH"; }
@@ -3003,14 +3143,14 @@ func lex_next_token(scalar $lexer) scalar {
     # (=40, )=41, {=123, }=125, [=91, ]=93, ;=59, ,=44, :=58
     # $=36, @=64, %=37, +=43, -=45, *=42, /=47, .=46, ==61
     # <=60, >=62, !=33, \=92, &=38, |=124, ^=94, ~=126, ?=63
-    if ($code == 40) { $token{"type"} = "LPAREN"; return \%token; }
+    if ($code == 40) { $token{"type"} = "LPAREN"; $lexer->{"expect_regex"} = 1; return \%token; }
     if ($code == 41) { $token{"type"} = "RPAREN"; return \%token; }
-    if ($code == 123) { $token{"type"} = "LBRACE"; return \%token; }
+    if ($code == 123) { $token{"type"} = "LBRACE"; $lexer->{"expect_regex"} = 1; return \%token; }
     if ($code == 125) { $token{"type"} = "RBRACE"; return \%token; }
     if ($code == 91) { $token{"type"} = "LBRACKET"; return \%token; }
     if ($code == 93) { $token{"type"} = "RBRACKET"; return \%token; }
-    if ($code == 59) { $token{"type"} = "SEMI"; return \%token; }
-    if ($code == 44) { $token{"type"} = "COMMA"; return \%token; }
+    if ($code == 59) { $token{"type"} = "SEMI"; $lexer->{"expect_regex"} = 1; return \%token; }
+    if ($code == 44) { $token{"type"} = "COMMA"; $lexer->{"expect_regex"} = 1; return \%token; }
     if ($code == 58) { $token{"type"} = "COLON"; return \%token; }
     if ($code == 36) { $token{"type"} = "DOLLAR"; $lexer->{"after_sigil"} = 1; return \%token; }
     if ($code == 64) { $token{"type"} = "AT"; $lexer->{"after_sigil"} = 1; return \%token; }
@@ -3236,6 +3376,12 @@ func parser_advance(scalar $parser) void {
 func parser_expect(scalar $parser, str $expected_type) void {
     my scalar $tok = parser_current($parser);
     if ($tok->{"type"} ne $expected_type) {
+        # Common stumble: using a type keyword (int, num, double, str, ...) as
+        # an identifier. Give a targeted hint instead of the generic message.
+        if ($expected_type eq "IDENT" && index($tok->{"type"}, "TYPE_") == 0) {
+            my str $tn = $tok->{"value"};
+            parser_error($parser, "'" . $tn . "' is a reserved type name and cannot be used as an identifier here; rename it (e.g. '" . $tn . "d' or 'as_" . $tn . "')");
+        }
         parser_error($parser, "expected " . friendly_expected($expected_type) . ", got " . friendly_token($tok->{"type"}, $tok->{"value"}));
     }
     parser_advance($parser);
@@ -3253,6 +3399,13 @@ func parser_expect_ident_like(scalar $parser) void {
     if ($tok->{"is_word"} != 0) {
         parser_advance($parser);
         return;
+    }
+    # Special-case type keywords: they're a common stumble (e.g. naming a
+    # function `double`). Give a clearer message that points to the conflict.
+    my str $ttype = $tok->{"type"};
+    if (index($ttype, "TYPE_") == 0) {
+        my str $tname = $tok->{"value"};
+        parser_error($parser, "'" . $tname . "' is a reserved type name and cannot be used as an identifier here; rename it (e.g. '" . $tname . "d' or 'as_" . $tname . "')");
     }
     parser_error($parser, "expected an identifier, got " . friendly_token($tok->{"type"}, $tok->{"value"}));
 }
@@ -3533,6 +3686,10 @@ func parse_var_name(scalar $parser) str {
     if ($type_str eq "IMPORT_OBJECT") {
         parser_advance($parser);
         return "import_object";
+    }
+    if ($type_str eq "LINK_LIB") {
+        parser_advance($parser);
+        return "link_lib";
     }
     if ($type_str eq "INHERIT") {
         parser_advance($parser);
@@ -3894,6 +4051,15 @@ func parse_primary(scalar $parser) scalar {
     if ($type eq "STR_LITERAL") {
         parser_advance($parser);
         return ast_new_str_literal($tok->{"value"});
+    }
+
+    # Regex literal /pattern/flags — as primary expression (e.g., in split(/,/, $str))
+    if ($type eq "REGEX_LITERAL") {
+        parser_advance($parser);
+        my scalar $regex = ast_new_str_literal($tok->{"pattern"});
+        $regex->{"is_regex"} = 1;
+        $regex->{"regex_flags"} = $tok->{"flags"};
+        return $regex;
     }
 
     # Interpolated string - build concatenation chain
@@ -4407,7 +4573,7 @@ func parse_primary(scalar $parser) scalar {
                 $key_expr = parse_primary($parser);
             } else {
                 my scalar $hk_tok = parser_current($parser);
-                parser_error($parser, "expected hash key (string, identifier, or $variable), got " . friendly_token($hk_tok->{"type"}, $hk_tok->{"value"}));
+                parser_error($parser, "expected hash key (string, identifier, or \$variable), got " . friendly_token($hk_tok->{"type"}, $hk_tok->{"value"}));
             }
 
             parser_expect($parser, "FAT_ARROW");
@@ -4564,6 +4730,19 @@ func parse_primary(scalar $parser) scalar {
         parser_error($parser, "unexpected 'fn' in expression context");
     }
 
+    # int() as a function call (Perl's truncate-toward-zero)
+    if ($type eq "TYPE_INT" && parser_peek($parser)->{"type"} eq "LPAREN") {
+        parser_advance($parser);  # consume TYPE_INT
+        parser_advance($parser);  # consume LPAREN
+        my scalar $call = ast_new_call("int");
+        if (!parser_check($parser, "RPAREN")) {
+            my scalar $arg = parse_expression($parser);
+            ast_add_arg($call, $arg);
+        }
+        parser_expect($parser, "RPAREN");
+        return $call;
+    }
+
     # Function call (bareword)
     if ($type eq "IDENT") {
         my str $name = $tok->{"value"};
@@ -4613,6 +4792,10 @@ func parse_primary(scalar $parser) scalar {
                     $name eq "lcfirst" || $name eq "trim" || $name eq "defined" || $name eq "ref" ||
                     $name eq "chr" || $name eq "ord" || $name eq "chomp") {
                     ast_add_arg($call, ast_new_variable("_", "$"));
+                }
+                # shift()/pop() with empty parens default to @_
+                if ($name eq "shift" || $name eq "pop") {
+                    ast_add_arg($call, ast_new_variable("_", "@"));
                 }
             }
 
@@ -4928,19 +5111,40 @@ func parse_postfix(scalar $parser, scalar $left) scalar {
                 my array @args = ();
                 my int $arg_count = 0;
 
-                # Parse arguments
+                # Parse arguments (with spread operator support)
+                my int $has_closure_spread = 0;
                 if (!parser_check($parser, "RPAREN")) {
-                    push(@args, parse_expression($parser));
+                    if (parser_check($parser, "ELLIPSIS")) {
+                        parser_advance($parser);
+                        my scalar $spread_target = parse_expression($parser);
+                        my scalar $spread = ast_new_spread($spread_target);
+                        push(@args, $spread);
+                        $has_closure_spread = 1;
+                    } else {
+                        push(@args, parse_expression($parser));
+                    }
                     $arg_count = $arg_count + 1;
 
                     while (parser_check($parser, "COMMA")) {
                         parser_advance($parser);
-                        push(@args, parse_expression($parser));
+                        if (parser_check($parser, "ELLIPSIS")) {
+                            parser_advance($parser);
+                            my scalar $spread_target = parse_expression($parser);
+                            my scalar $spread = ast_new_spread($spread_target);
+                            push(@args, $spread);
+                            $has_closure_spread = 1;
+                        } else {
+                            push(@args, parse_expression($parser));
+                        }
                         $arg_count = $arg_count + 1;
                     }
                 }
                 parser_expect($parser, "RPAREN");
-                $left = ast_new_closure_call($left, \@args, $arg_count);
+                my scalar $ccall = ast_new_closure_call($left, \@args, $arg_count);
+                if ($has_closure_spread == 1) {
+                    $ccall->{"has_spread"} = 1;
+                }
+                $left = $ccall;
             }
             # Hash dereference ->{key}
             elsif (parser_check($parser, "LBRACE")) {
@@ -5043,7 +5247,7 @@ func parse_postfix(scalar $parser, scalar $left) scalar {
                 }
             }
             else {
-                parser_error($parser, "expected {, [, $variable, or field name after ->");
+                parser_error($parser, "expected {, [, \$variable, or field name after ->");
             }
         }
         elsif (parser_check($parser, "LBRACE")) {
@@ -5051,7 +5255,7 @@ func parse_postfix(scalar $parser, scalar $left) scalar {
             if ($left->{"type"} == NODE_VARIABLE()) {
                 my str $sigil = $left->{"sigil"};
                 if ($sigil eq "%") {
-                    parser_error($parser, "use $hash{key} for hash element access (hash sigil not allowed here)");
+                    parser_error($parser, "use \$hash{key} for hash element access (hash sigil not allowed here)");
                 }
             }
             # Hash slice: @hash{"a", "b"} or @{$ref}{"a", "b"}
@@ -6068,6 +6272,17 @@ func parse_for_array_style(scalar $parser, str $label, int $fas_line) scalar {
 
     parser_expect($parser, "LPAREN");
     my scalar $array_expr = parse_expression($parser);
+    if (parser_check($parser, "COMMA")) {
+        my scalar $arr = ast_new_anon_array();
+        ast_add_array_elem($arr, $array_expr);
+        while (parser_check($parser, "COMMA")) {
+            parser_advance($parser);
+            if (parser_check($parser, "RPAREN")) { last; }
+            my scalar $elem = parse_expression($parser);
+            ast_add_array_elem($arr, $elem);
+        }
+        $array_expr = $arr;
+    }
     parser_expect($parser, "RPAREN");
 
     my scalar $body = parse_block($parser);
@@ -6178,6 +6393,17 @@ func parse_foreach_stmt(scalar $parser, str $label) scalar {
 
     parser_expect($parser, "LPAREN");
     my scalar $array_expr = parse_expression($parser);
+    if (parser_check($parser, "COMMA")) {
+        my scalar $arr = ast_new_anon_array();
+        ast_add_array_elem($arr, $array_expr);
+        while (parser_check($parser, "COMMA")) {
+            parser_advance($parser);
+            if (parser_check($parser, "RPAREN")) { last; }
+            my scalar $elem = parse_expression($parser);
+            ast_add_array_elem($arr, $elem);
+        }
+        $array_expr = $arr;
+    }
     parser_expect($parser, "RPAREN");
 
     my scalar $body = parse_block($parser);
@@ -7195,6 +7421,19 @@ func module_to_path(str $mod_name) str {
     return $path . ".strada";
 }
 
+# Returns 1 if $artifact exists and its mtime is >= $source's mtime, i.e.
+# the artifact is fresh; 0 otherwise. Treats a missing source as "trust the
+# artifact" (installed-only library case). Used by parse_use's auto-detect
+# of pre-compiled .o/.so siblings.
+func artifact_is_fresh(str $artifact, str $source) int {
+    my int $art_mtime = core::file_mtime($artifact);
+    if ($art_mtime < 0) { return 0; }
+    my int $src_mtime = core::file_mtime($source);
+    if ($src_mtime < 0) { return 1; }
+    if ($art_mtime >= $src_mtime) { return 1; }
+    return 0;
+}
+
 # Find module file in lib paths
 func find_module_file(scalar $program, str $mod_name) str {
     my str $rel_path = module_to_path($mod_name);
@@ -7257,6 +7496,8 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
         } elsif (parser_check($mod_parser, "IMPORT_ARCHIVE")) {
             # Handle nested import_archive statements
             parse_import_archive($mod_parser, $mod_program);
+        } elsif (parser_check($mod_parser, "LINK_LIB")) {
+            parse_link_lib($mod_parser, $mod_program);
         } elsif (parser_check_func($mod_parser)) {
             my scalar $fn = parse_function($mod_parser);
             ast_add_function($mod_program, $fn);
@@ -7327,13 +7568,27 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
         }
     }
 
-    # Transfer C blocks from module to main program
+    # Get the module's own package name for tagging (used to filter in
+    # module-only codegen mode). Fall back to the module's `use` name if no
+    # explicit `package` statement was found.
+    my str $src_module = $mod_program->{"package"};
+    if (length($src_module) == 0) {
+        $src_module = $mod_name;
+    }
+
+    # Transfer C blocks from module to main program. The parallel
+    # c_block_from_use array marks each block as inlined via `use` so
+    # module-only codegen can filter it out.
     my int $mod_c_block_count = $mod_program->{"c_block_count"};
     if ($mod_c_block_count > 0) {
         my scalar $mod_c_blocks = $mod_program->{"c_blocks"};
+        my scalar $cb_modules = $program->{"c_block_modules"};
+        my scalar $cb_from_use = $program->{"c_block_from_use"};
         my int $cb = 0;
         while ($cb < $mod_c_block_count) {
             ast_add_c_block($program, $mod_c_blocks->[$cb]);
+            push($cb_modules, $src_module);
+            push($cb_from_use, 1);
             $cb = $cb + 1;
         }
     }
@@ -7344,7 +7599,10 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
         my scalar $mod_begins = $mod_program->{"begin_blocks"};
         my int $bb = 0;
         while ($bb < $mod_begin_count) {
-            ast_add_begin_block($program, $mod_begins->[$bb]);
+            my scalar $bblock = $mod_begins->[$bb];
+            $bblock->{"source_module"} = $src_module;
+            $bblock->{"from_use"} = 1;
+            ast_add_begin_block($program, $bblock);
             $bb = $bb + 1;
         }
     }
@@ -7355,7 +7613,10 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
         my scalar $mod_ends = $mod_program->{"end_blocks"};
         my int $eb = 0;
         while ($eb < $mod_end_count) {
-            ast_add_end_block($program, $mod_ends->[$eb]);
+            my scalar $eblock = $mod_ends->[$eb];
+            $eblock->{"source_module"} = $src_module;
+            $eblock->{"from_use"} = 1;
+            ast_add_end_block($program, $eblock);
             $eb = $eb + 1;
         }
     }
@@ -7384,9 +7645,11 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
             next;
         }
 
-        # Store original name and package
+        # Store original name and package, and mark as inlined via use so
+        # module-only codegen filters it out of the .o we're building.
         $fn->{"original_name"} = $fn_name;
         $fn->{"package"} = $pkg_name;
+        $fn->{"from_use"} = 1;
 
         # extern "C" functions keep their exact C symbol name (no package prefix)
         if ($fn->{"is_c_extern"} == 1) {
@@ -7413,12 +7676,15 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
         $i = $i + 1;
     }
 
-    # Merge global variables from module
+    # Merge global variables from module (tagged with from_use=1 so
+    # module-only codegen can skip globals that came in via `use`).
     my scalar $mod_globals = $mod_program->{"globals"};
     $i = 0;
     $count = $mod_program->{"global_count"};
     while ($i < $count) {
         my scalar $gvar = $mod_globals->[$i];
+        $gvar->{"source_module"} = $src_module;
+        $gvar->{"from_use"} = 1;
         ast_add_global($program, $gvar);
         $i = $i + 1;
     }
@@ -7449,6 +7715,9 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
         ast_add_import_archive($program, $mod_import_archives->[$i]);
         $i = $i + 1;
     }
+
+    # Merge link_libs (extern-C library names) from module
+    merge_link_libs($program, $mod_program->{"link_libs"});
 
     # Check if module defines an import() function
     # Look for a function named "pkg_name::import" or "pkg_name_import" in merged functions
@@ -7614,9 +7883,38 @@ func parse_use(scalar $parser, scalar $program) void {
         return;
     }
 
-    # Try to find and load the module
+    # Try to find and load the module. Before inlining the .strada source,
+    # check whether a sibling .o / .so artifact exists in the same lib path
+    # and is at least as fresh as the source. If so, treat the use as an
+    # implicit import_object / import_lib — the precompiled artifact is
+    # linked in instead of re-parsing the source. This is what makes
+    # separate compilation (`strada -M Foo.strada` then later `use Foo;`)
+    # actually skip recompilation.
     my str $file_path = find_module_file($program, $mod_name);
     if (length($file_path) > 0) {
+        # Derive sibling artifact paths: foo/Bar.strada -> foo/Bar.o, foo/Bar.so
+        my str $base = $file_path;
+        my int $blen = length($base);
+        if ($blen > 7 && substr($base, $blen - 7, 7) eq ".strada") {
+            $base = substr($base, 0, $blen - 7);
+        }
+        my str $o_path = $base . ".o";
+        my str $so_path = $base . ".so";
+
+        if (artifact_is_fresh($o_path, $file_path) == 1) {
+            ast_mark_module_loaded($program, $mod_name);
+            # Use the module name as obj_name so symbol mangling matches.
+            do_import_object_at($parser, $program, $mod_name . ".o", $o_path);
+            ast_add_use($program, $mod_name);
+            return;
+        }
+        if (artifact_is_fresh($so_path, $file_path) == 1) {
+            ast_mark_module_loaded($program, $mod_name);
+            do_import_lib_at($parser, $program, $mod_name, $so_path);
+            ast_add_use($program, $mod_name);
+            return;
+        }
+
         ast_mark_module_loaded($program, $mod_name);
         load_module($program, $mod_name, $file_path);
     }
@@ -7626,29 +7924,17 @@ func parse_use(scalar $parser, scalar $program) void {
 
 # Parse import_lib statement - import shared library as module
 # import_lib "libname.so";  -> loads libname.so and reads metadata from __strada_export_info()
-func parse_import_lib(scalar $parser, scalar $program) void {
-    parser_expect($parser, "IMPORT_LIB");
-
-    # Get the library filename (must be a string, e.g., "MyLib.so")
-    my scalar $tok = parser_current($parser);
-    if ($tok->{"type"} ne "STR_LITERAL") {
-        parser_error($parser, "import_lib requires a string library filename (e.g., \"MyLib.so\")");
-    }
-    my str $lib_file = $tok->{"value"};
-    parser_advance($parser);
-
-    parser_expect($parser, "SEMI");
-
-    # Find the .so file in lib paths
-    my str $so_path = find_so_file($program, $lib_file);
-    if (length($so_path) == 0) {
-        parser_error($parser, "cannot find shared library: " . $lib_file);
-    }
-
-    # Extract package name by stripping .so extension
-    my str $lib_name = $lib_file;
-    if (length($lib_file) > 3 && substr($lib_file, length($lib_file) - 3, 3) eq ".so") {
-        $lib_name = substr($lib_file, 0, length($lib_file) - 3);
+# Shared body for import_lib: given a resolved $so_path and the originating
+# $lib_name (e.g., "MyLib"), load metadata via dlopen+__strada_export_info
+# and register with the program. Returns 1 if added, 0 if skipped (duplicate).
+func do_import_lib_at(scalar $parser, scalar $program, str $lib_name, str $so_path) int {
+    # Skip if a lib with this name is already imported
+    my scalar $libs = $program->{"import_libs"};
+    my int $lc = $program->{"import_lib_count"};
+    my int $li = 0;
+    while ($li < $lc) {
+        if ($libs->[$li]->{"lib_name"} eq $lib_name) { return 0; }
+        $li = $li + 1;
     }
 
     # Load the .so file and get metadata using runtime functions
@@ -7680,6 +7966,9 @@ func parse_import_lib(scalar $parser, scalar $program) void {
     # Add to program
     ast_add_import_lib($program, $lib_info);
 
+    # Pull in any extern-C link deps the library advertised via link_lib.
+    merge_link_libs($program, $lib_info->{"link_libs"});
+
     # Check if library defines an import() function
     my str $import_fn_name = sanitize_name($lib_name) . "_import";
     my scalar $lib_funcs = $lib_info->{"functions"};
@@ -7697,6 +7986,35 @@ func parse_import_lib(scalar $parser, scalar $program) void {
         }
         $lfi = $lfi + 1;
     }
+    return 1;
+}
+
+func parse_import_lib(scalar $parser, scalar $program) void {
+    parser_expect($parser, "IMPORT_LIB");
+
+    # Get the library filename (must be a string, e.g., "MyLib.so")
+    my scalar $tok = parser_current($parser);
+    if ($tok->{"type"} ne "STR_LITERAL") {
+        parser_error($parser, "import_lib requires a string library filename (e.g., \"MyLib.so\")");
+    }
+    my str $lib_file = $tok->{"value"};
+    parser_advance($parser);
+
+    parser_expect($parser, "SEMI");
+
+    # Find the .so file in lib paths
+    my str $so_path = find_so_file($program, $lib_file);
+    if (length($so_path) == 0) {
+        parser_error($parser, "cannot find shared library: " . $lib_file);
+    }
+
+    # Extract package name by stripping .so extension
+    my str $lib_name = $lib_file;
+    if (length($lib_file) > 3 && substr($lib_file, length($lib_file) - 3, 3) eq ".so") {
+        $lib_name = substr($lib_file, 0, length($lib_file) - 3);
+    }
+
+    do_import_lib_at($parser, $program, $lib_name, $so_path);
 }
 
 # Find .so file in lib paths (lib_file is the full filename, e.g., "MyLib.so")
@@ -7737,6 +8055,9 @@ func parse_export_metadata(str $lib_name, str $so_path, str $metadata) scalar {
     # Track unique package names for OOP init functions
     my hash %packages = ();
 
+    # Collected `link:NAME` entries from the metadata (extern-C deps).
+    my array @link_libs_local = ();
+
     # Parse metadata line by line manually (bootstrap doesn't support split well)
     my int $meta_len = length($metadata);
     my int $pos = 0;
@@ -7771,12 +8092,16 @@ func parse_export_metadata(str $lib_name, str $so_path, str $metadata) scalar {
                         $packages{$pkg} = 1;
                     }
                 }
+            } elsif (length($line) > 5 && substr($line, 0, 5) eq "link:") {
+                # link:NAME → record an extern-C library this module needs.
+                push(@link_libs_local, substr($line, 5, length($line) - 5));
             }
         }
     }
 
     $lib_info{"functions"} = \@functions;
     $lib_info{"function_count"} = $fn_count;
+    $lib_info{"link_libs"} = \@link_libs_local;
 
     # Build list of OOP init function names
     my array @oop_inits = ();
@@ -7983,7 +8308,9 @@ func find_o_file(scalar $program, str $obj_file) str {
 func extract_object_export_info(scalar $parser, str $obj_name, str $o_path) str {
     # Get the compiler directory from STRADA_DIR environment variable
     # (set by the 'strada' wrapper script) or fall back to current directory
-    my str $compiler_dir = core::qx("echo -n \"$STRADA_DIR\"");
+    # Read STRADA_DIR directly; avoids /bin/sh's echo -n which is unportable
+    # (macOS /bin/sh prints "-n" literally).
+    my str $compiler_dir = core::getenv("STRADA_DIR");
     if (length($compiler_dir) == 0) {
         # Fallback to current directory (works when running from repo root)
         $compiler_dir = ".";
@@ -8005,11 +8332,29 @@ func extract_object_export_info(scalar $parser, str $obj_name, str $o_path) str 
 
     spew($temp_c, $c_code);
 
-    # Compile the temp program with the object file
-    # We need to link with the runtime for strada_* functions used in the object
-    my str $compile_cmd = "gcc -o " . $temp_exe . " " . $temp_c . " " . $o_path;
-    $compile_cmd = $compile_cmd . " " . $runtime_path . " -I" . $runtime_dir;
-    $compile_cmd = $compile_cmd . " -ldl -lm -lpthread";
+    # Compile the temp program with the object file. We use
+    # --unresolved-symbols=ignore-all so a module-only .o that references
+    # cross-module symbols (e.g. Util_doubled when probing Big.o) still
+    # produces a runnable probe binary — we only need __strada_export_info
+    # to be callable, not the rest of the module's API.
+    my str $cc = core::getenv("CC");
+    if (length($cc) == 0) { $cc = "cc"; }
+    my str $dl_libs = core::getenv("STRADA_DLOPEN_LIBS");
+    # Prefer the pre-built runtime.o over recompiling the runtime source for
+    # every probe. With fat-LTO objects, also pass -fno-lto so the link
+    # doesn't run a full LTO pass — the probe just needs __strada_export_info
+    # to be callable, not optimized code.
+    my str $runtime_link = $runtime_dir . "/strada_runtime.o";
+    my int $rt_fd = core::open_fd($runtime_link, "r");
+    if ($rt_fd > 0) {
+        close_fd($rt_fd);
+    } else {
+        $runtime_link = $runtime_path;
+    }
+    my str $compile_cmd = $cc . " -fno-lto -o " . $temp_exe . " " . $temp_c . " " . $o_path;
+    $compile_cmd = $compile_cmd . " " . $runtime_link . " -I" . $runtime_dir;
+    $compile_cmd = $compile_cmd . " " . $dl_libs . " -lm -lpthread";
+    $compile_cmd = $compile_cmd . " -Wl,--unresolved-symbols=ignore-all";
 
     # Run gcc and capture any error output, append exit code
     my str $compile_output = core::qx($compile_cmd . " 2>&1; echo __EXIT_CODE__$?");
@@ -8036,6 +8381,97 @@ func extract_object_export_info(scalar $parser, str $obj_name, str $o_path) str 
     return $metadata;
 }
 
+# Return basename of a path: "/abs/path/Foo.o" -> "Foo.o", "Foo.o" -> "Foo.o"
+func path_basename(str $path) str {
+    my int $i = length($path) - 1;
+    while ($i >= 0) {
+        my str $ch = substr($path, $i, 1);
+        if ($ch eq "/" || $ch eq "\\") {
+            return substr($path, $i + 1, length($path) - $i - 1);
+        }
+        $i = $i - 1;
+    }
+    return $path;
+}
+
+# Check whether the program already has an import_object with the given obj_name.
+func program_has_import_object(scalar $program, str $obj_name) int {
+    my scalar $objs = $program->{"import_objects"};
+    my int $count = $program->{"import_object_count"};
+    my int $i = 0;
+    while ($i < $count) {
+        my scalar $info = $objs->[$i];
+        if ($info->{"obj_name"} eq $obj_name) { return 1; }
+        $i = $i + 1;
+    }
+    return 0;
+}
+
+# Check whether the program already has an import_archive with the given arch_name.
+func program_has_import_archive(scalar $program, str $arch_name) int {
+    my scalar $archs = $program->{"import_archives"};
+    my int $count = $program->{"import_archive_count"};
+    my int $i = 0;
+    while ($i < $count) {
+        my scalar $info = $archs->[$i];
+        if ($info->{"arch_name"} eq $arch_name) { return 1; }
+        $i = $i + 1;
+    }
+    return 0;
+}
+
+# Shared body for import_object: given a resolved $o_path and the originating
+# $obj_file (e.g., "MyLib.o"), extract metadata and register with the program.
+# Returns 1 if added, 0 if skipped (duplicate).
+func do_import_object_at(scalar $parser, scalar $program, str $obj_file, str $o_path) int {
+    # Extract package name by stripping .o extension
+    my str $obj_name = $obj_file;
+    if (length($obj_file) > 2 && substr($obj_file, length($obj_file) - 2, 2) eq ".o") {
+        $obj_name = substr($obj_file, 0, length($obj_file) - 2);
+    }
+
+    # Skip if already imported (e.g., both source-level and CLI-implicit)
+    if (program_has_import_object($program, $obj_name) == 1) {
+        return 0;
+    }
+
+    # Extract export metadata from the object file (like import_lib does with .so)
+    my str $metadata = extract_object_export_info($parser, $obj_name, $o_path);
+
+    # Parse the metadata using the same function as import_lib
+    my scalar $obj_info = parse_export_metadata($obj_name, $o_path, $metadata);
+
+    # Add o_path to the result (parse_export_metadata sets so_path, but we need o_path)
+    $obj_info->{"o_path"} = $o_path;
+    $obj_info->{"obj_name"} = $obj_name;
+
+    # Add to program
+    ast_add_import_object($program, $obj_info);
+
+    # Pull in any extern-C link deps the .o advertised via link_lib.
+    merge_link_libs($program, $obj_info->{"link_libs"});
+
+    # Check if object defines an import() function
+    my str $obj_import_fn = sanitize_name($obj_name) . "_import";
+    my scalar $obj_funcs = $obj_info->{"functions"};
+    my int $ofi = 0;
+    my int $of_count = $obj_info->{"function_count"};
+    while ($ofi < $of_count) {
+        my scalar $of = $obj_funcs->[$ofi];
+        if (sanitize_name($of->{"name"}) eq $obj_import_fn) {
+            my hash %call_info = ();
+            $call_info{"func_name"} = $obj_import_fn;
+            $call_info{"pkg_name"} = $obj_name;
+            $call_info{"is_import_lib"} = 0;
+            ast_add_import_call($program, \%call_info);
+            last;
+        }
+        $ofi = $ofi + 1;
+    }
+
+    return 1;
+}
+
 # Parse import_object statement - import object file for static linking
 # import_object "objname.o";  -> links objname.o and reads metadata from __strada_export_info()
 func parse_import_object(scalar $parser, scalar $program) void {
@@ -8057,41 +8493,68 @@ func parse_import_object(scalar $parser, scalar $program) void {
         parser_error($parser, "cannot find object file: " . $obj_file);
     }
 
-    # Extract package name by stripping .o extension
-    my str $obj_name = $obj_file;
-    if (length($obj_file) > 2 && substr($obj_file, length($obj_file) - 2, 2) eq ".o") {
-        $obj_name = substr($obj_file, 0, length($obj_file) - 2);
-    }
+    do_import_object_at($parser, $program, $obj_file, $o_path);
+}
 
-    # Extract export metadata from the object file (like import_lib does with .so)
-    my str $metadata = extract_object_export_info($parser, $obj_name, $o_path);
+# Register an implicit import_object from a full path (e.g., passed on the
+# `strada` command line). Returns 1 if added, 0 if skipped (already imported
+# by source-level import_object with the same name).
+func parse_implicit_import_object(scalar $parser, scalar $program, str $o_path) int {
+    my str $obj_file = path_basename($o_path);
+    return do_import_object_at($parser, $program, $obj_file, $o_path);
+}
 
-    # Parse the metadata using the same function as import_lib
-    # Note: parse_export_metadata expects so_path, but we pass o_path - works the same
-    my scalar $obj_info = parse_export_metadata($obj_name, $o_path, $metadata);
-
-    # Add o_path to the result (parse_export_metadata sets so_path, but we need o_path)
-    $obj_info->{"o_path"} = $o_path;
-
-    # Add to program
-    ast_add_import_object($program, $obj_info);
-
-    # Check if object defines an import() function
-    my str $obj_import_fn = sanitize_name($obj_name) . "_import";
-    my scalar $obj_funcs = $obj_info->{"functions"};
-    my int $ofi = 0;
-    my int $of_count = $obj_info->{"function_count"};
-    while ($ofi < $of_count) {
-        my scalar $of = $obj_funcs->[$ofi];
-        if (sanitize_name($of->{"name"}) eq $obj_import_fn) {
-            my hash %call_info = ();
-            $call_info{"func_name"} = $obj_import_fn;
-            $call_info{"pkg_name"} = $obj_name;
-            $call_info{"is_import_lib"} = 0;
-            ast_add_import_call($program, \%call_info);
+# Parse `link_lib "name";` (and the comma-separated form
+# `link_lib "a", "b", "c";`). Records the C library names so consumers of
+# this module's .o can pass -l<name> at final link time.
+func parse_link_lib(scalar $parser, scalar $program) void {
+    parser_expect($parser, "LINK_LIB");
+    while (1) {
+        my scalar $tok = parser_current($parser);
+        if ($tok->{"type"} ne "STR_LITERAL") {
+            parser_error($parser, "link_lib requires a string library name (e.g., \"mysqlclient\")");
+        }
+        my str $name = $tok->{"value"};
+        parser_advance($parser);
+        # Dedup before adding
+        my scalar $libs = $program->{"link_libs"};
+        my int $found = 0;
+        my int $li = 0;
+        while ($li < size($libs)) {
+            if ($libs->[$li] eq $name) { $found = 1; last; }
+            $li = $li + 1;
+        }
+        if ($found == 0) {
+            push($libs, $name);
+        }
+        if (parser_check($parser, "COMMA")) {
+            parser_advance($parser);
+        } else {
             last;
         }
-        $ofi = $ofi + 1;
+    }
+    parser_expect($parser, "SEMI");
+}
+
+# Merge link_libs from a parsed module (or extracted from a .o/.so's
+# __strada_export_info) into the main program's link_libs list, deduping.
+func merge_link_libs(scalar $program, scalar $source_libs) void {
+    if (!defined($source_libs)) { return; }
+    my scalar $dst = $program->{"link_libs"};
+    my int $i = 0;
+    my int $n = size($source_libs);
+    while ($i < $n) {
+        my str $name = $source_libs->[$i];
+        my int $found = 0;
+        my int $di = 0;
+        while ($di < size($dst)) {
+            if ($dst->[$di] eq $name) { $found = 1; last; }
+            $di = $di + 1;
+        }
+        if ($found == 0) {
+            push($dst, $name);
+        }
+        $i = $i + 1;
     }
 }
 
@@ -8138,8 +8601,11 @@ func extract_archive_export_info(scalar $parser, str $arch_name, str $a_path) st
 
     # Compile the temp program with the archive file
     # Note: The archive already includes the runtime (from --static-lib), so don't link it again
-    my str $compile_cmd = "gcc -o " . $temp_exe . " " . $temp_c . " " . $a_path;
-    $compile_cmd = $compile_cmd . " -ldl -lm -lpthread";
+    my str $cc = core::getenv("CC");
+    if (length($cc) == 0) { $cc = "cc"; }
+    my str $dl_libs = core::getenv("STRADA_DLOPEN_LIBS");
+    my str $compile_cmd = $cc . " -o " . $temp_exe . " " . $temp_c . " " . $a_path;
+    $compile_cmd = $compile_cmd . " " . $dl_libs . " -lm -lpthread";
 
     # Add PCRE2 link flags if available (runtime may be compiled with PCRE2)
     my str $pcre2_libs = core::getenv("STRADA_PCRE2_LIBS");
@@ -8169,6 +8635,58 @@ func extract_archive_export_info(scalar $parser, str $arch_name, str $a_path) st
     return $metadata;
 }
 
+# Shared body for import_archive: given a resolved $a_path and the originating
+# $arch_file (e.g., "MyLib.a"), extract metadata and register with the program.
+# Returns 1 if added, 0 if skipped (duplicate).
+func do_import_archive_at(scalar $parser, scalar $program, str $arch_file, str $a_path) int {
+    # Extract package name by stripping .a extension
+    my str $arch_name = $arch_file;
+    if (length($arch_file) > 2 && substr($arch_file, length($arch_file) - 2, 2) eq ".a") {
+        $arch_name = substr($arch_file, 0, length($arch_file) - 2);
+    }
+
+    # Skip if already imported (e.g., both source-level and CLI-implicit)
+    if (program_has_import_archive($program, $arch_name) == 1) {
+        return 0;
+    }
+
+    # Extract export metadata from the archive file
+    my str $metadata = extract_archive_export_info($parser, $arch_name, $a_path);
+
+    # Parse the metadata using the same function as import_lib/import_object
+    my scalar $arch_info = parse_export_metadata($arch_name, $a_path, $metadata);
+
+    # Add a_path to the result
+    $arch_info->{"a_path"} = $a_path;
+    $arch_info->{"arch_name"} = $arch_name;
+
+    # Add to program
+    ast_add_import_archive($program, $arch_info);
+
+    # Pull in any extern-C link deps the .a advertised via link_lib.
+    merge_link_libs($program, $arch_info->{"link_libs"});
+
+    # Check if archive defines an import() function
+    my str $arch_import_fn = sanitize_name($arch_name) . "_import";
+    my scalar $arch_funcs = $arch_info->{"functions"};
+    my int $afi = 0;
+    my int $af_count = $arch_info->{"function_count"};
+    while ($afi < $af_count) {
+        my scalar $af = $arch_funcs->[$afi];
+        if (sanitize_name($af->{"name"}) eq $arch_import_fn) {
+            my hash %call_info = ();
+            $call_info{"func_name"} = $arch_import_fn;
+            $call_info{"pkg_name"} = $arch_name;
+            $call_info{"is_import_lib"} = 0;
+            ast_add_import_call($program, \%call_info);
+            last;
+        }
+        $afi = $afi + 1;
+    }
+
+    return 1;
+}
+
 # Parse import_archive statement - import archive file for static linking
 # import_archive "archname.a";  -> links archname.a and reads metadata from __strada_export_info()
 func parse_import_archive(scalar $parser, scalar $program) void {
@@ -8190,41 +8708,15 @@ func parse_import_archive(scalar $parser, scalar $program) void {
         parser_error($parser, "cannot find archive file: " . $arch_file);
     }
 
-    # Extract package name by stripping .a extension
-    my str $arch_name = $arch_file;
-    if (length($arch_file) > 2 && substr($arch_file, length($arch_file) - 2, 2) eq ".a") {
-        $arch_name = substr($arch_file, 0, length($arch_file) - 2);
-    }
+    do_import_archive_at($parser, $program, $arch_file, $a_path);
+}
 
-    # Extract export metadata from the archive file
-    my str $metadata = extract_archive_export_info($parser, $arch_name, $a_path);
-
-    # Parse the metadata using the same function as import_lib/import_object
-    my scalar $arch_info = parse_export_metadata($arch_name, $a_path, $metadata);
-
-    # Add a_path to the result
-    $arch_info->{"a_path"} = $a_path;
-
-    # Add to program
-    ast_add_import_archive($program, $arch_info);
-
-    # Check if archive defines an import() function
-    my str $arch_import_fn = sanitize_name($arch_name) . "_import";
-    my scalar $arch_funcs = $arch_info->{"functions"};
-    my int $afi = 0;
-    my int $af_count = $arch_info->{"function_count"};
-    while ($afi < $af_count) {
-        my scalar $af = $arch_funcs->[$afi];
-        if (sanitize_name($af->{"name"}) eq $arch_import_fn) {
-            my hash %call_info = ();
-            $call_info{"func_name"} = $arch_import_fn;
-            $call_info{"pkg_name"} = $arch_name;
-            $call_info{"is_import_lib"} = 0;
-            ast_add_import_call($program, \%call_info);
-            last;
-        }
-        $afi = $afi + 1;
-    }
+# Register an implicit import_archive from a full path (e.g., passed on the
+# `strada` command line). Returns 1 if added, 0 if skipped (already imported
+# by source-level import_archive with the same name).
+func parse_implicit_import_archive(scalar $parser, scalar $program, str $a_path) int {
+    my str $arch_file = path_basename($a_path);
+    return do_import_archive_at($parser, $program, $arch_file, $a_path);
 }
 
 # ============================================================
@@ -8686,7 +9178,7 @@ func parse_method_modifier(scalar $parser, scalar $program, str $mod_type) void 
     $program->{"method_modifier_count"} = $program->{"method_modifier_count"} + 1;
 }
 
-func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low) scalar {
+func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low, scalar $implicit_objs, scalar $implicit_archs) scalar {
     my scalar $program = ast_new_program();
 
     # Add command-line library paths first (high priority - before any use statements)
@@ -8786,15 +9278,26 @@ func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low) sca
             parse_import_object($parser, $program);
         } elsif (parser_check($parser, "IMPORT_ARCHIVE")) {
             parse_import_archive($parser, $program);
+        } elsif (parser_check($parser, "LINK_LIB")) {
+            parse_link_lib($parser, $program);
         } elsif (parser_check($parser, "MY")) {
             my scalar $var = parse_var_decl($parser);
+            my str $main_mod = $program->{"package"};
+            if (length($main_mod) == 0) { $main_mod = "main"; }
+            $var->{"source_module"} = $main_mod;
             ast_add_global($program, $var);
         } elsif (parser_check($parser, "CONST")) {
             my scalar $const_decl = parse_const_decl($parser);
+            my str $main_mod = $program->{"package"};
+            if (length($main_mod) == 0) { $main_mod = "main"; }
+            $const_decl->{"source_module"} = $main_mod;
             ast_add_global($program, $const_decl);
         } elsif (parser_check($parser, "OUR")) {
             my scalar $our_decl = parse_our_decl($parser);
             $our_decl->{"package"} = $program->{"package"};
+            my str $main_mod = $program->{"package"};
+            if (length($main_mod) == 0) { $main_mod = "main"; }
+            $our_decl->{"source_module"} = $main_mod;
             ast_add_global($program, $our_decl);
         } elsif (parser_check($parser, "C_BLOCK")) {
             # Top-level __C__ { ... } block
@@ -8802,15 +9305,27 @@ func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low) sca
             my str $c_code = $tok->{"value"};
             parser_advance($parser);
             ast_add_c_block($program, $c_code);
+            # Tag with the current package for diagnostics, and mark as
+            # NOT-from-use so module-only codegen keeps it.
+            my str $cb_pkg = $program->{"package"};
+            if (length($cb_pkg) == 0) { $cb_pkg = "main"; }
+            push($program->{"c_block_modules"}, $cb_pkg);
+            push($program->{"c_block_from_use"}, 0);
         } elsif (parser_check($parser, "BEGIN_BLOCK")) {
             # BEGIN { ... } block - runs before main body
             parser_advance($parser);
             my scalar $block = parse_block($parser);
+            my str $bb_mod = $program->{"package"};
+            if (length($bb_mod) == 0) { $bb_mod = "main"; }
+            $block->{"source_module"} = $bb_mod;
             ast_add_begin_block($program, $block);
         } elsif (parser_check($parser, "END_BLOCK")) {
             # END { ... } block - runs after main returns (via atexit)
             parser_advance($parser);
             my scalar $block = parse_block($parser);
+            my str $eb_mod = $program->{"package"};
+            if (length($eb_mod) == 0) { $eb_mod = "main"; }
+            $block->{"source_module"} = $eb_mod;
             ast_add_end_block($program, $block);
         } elsif (parser_check($parser, "HAS")) {
             parse_has_declaration($parser, $program);
@@ -8842,6 +9357,26 @@ func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low) sca
         $path_i = $path_i + 1;
     }
 
+    # Process CLI-implicit import_object paths (e.g. `strada main.strada foo.o`).
+    # Source-level import_object statements are already registered, so duplicates
+    # for the same module name are skipped silently.
+    my int $imp_obj_count = size($implicit_objs);
+    my int $imp_i = 0;
+    while ($imp_i < $imp_obj_count) {
+        my str $o_path = $implicit_objs->[$imp_i];
+        parse_implicit_import_object($parser, $program, $o_path);
+        $imp_i = $imp_i + 1;
+    }
+
+    # Process CLI-implicit import_archive paths (e.g. `strada main.strada foo.a`).
+    my int $imp_arch_count = size($implicit_archs);
+    $imp_i = 0;
+    while ($imp_i < $imp_arch_count) {
+        my str $a_path = $implicit_archs->[$imp_i];
+        parse_implicit_import_archive($parser, $program, $a_path);
+        $imp_i = $imp_i + 1;
+    }
+
     return $program;
 }
 
@@ -8854,14 +9389,27 @@ func parse(scalar $tokens, str $filename) scalar {
     parser_set_filename($parser, $filename);
     my array @empty_paths = ();
     my array @empty_paths_low = ();
-    return parse_program($parser, \@empty_paths, \@empty_paths_low);
+    my array @empty_objs = ();
+    my array @empty_archs = ();
+    return parse_program($parser, \@empty_paths, \@empty_paths_low, \@empty_objs, \@empty_archs);
 }
 
 # Parse with pre-configured library paths (from -L and -LL command line options)
 func parse_with_lib_paths(scalar $tokens, str $filename, scalar $lib_paths, scalar $lib_paths_low) scalar {
     my scalar $parser = parser_new($tokens);
     parser_set_filename($parser, $filename);
-    return parse_program($parser, $lib_paths, $lib_paths_low);
+    my array @empty_objs = ();
+    my array @empty_archs = ();
+    return parse_program($parser, $lib_paths, $lib_paths_low, \@empty_objs, \@empty_archs);
+}
+
+# Parse with pre-configured library paths and CLI-implicit import paths (full
+# paths to .o/.a files passed on the `strada` command line that should be
+# treated as if they were source-level import_object/import_archive).
+func parse_with_implicit_imports(scalar $tokens, str $filename, scalar $lib_paths, scalar $lib_paths_low, scalar $implicit_objs, scalar $implicit_archs) scalar {
+    my scalar $parser = parser_new($tokens);
+    parser_set_filename($parser, $filename);
+    return parse_program($parser, $lib_paths, $lib_paths_low, $implicit_objs, $implicit_archs);
 }
 
 package Strada::Interpreter;
@@ -9024,6 +9572,63 @@ enum BI {
     SYS_FILE_EXISTS = 500, SYS_IS_READABLE = 501, SYS_IS_WRITABLE = 502,
     SYS_IS_EXECUTABLE = 503, SYS_IS_ZERO_SIZE = 504, SYS_IS_SYMLINK = 505,
     SYS_FILE_SIZE = 506, SYS_CALLER_INFO = 507,
+    # Additional builtins (600+)
+    WARN = 600, HEX = 601, OCT = 602,
+    SYS_CHDIR = 610, SYS_CHOWN = 611,
+    SYS_LOCALTIME = 612, SYS_GMTIME = 613, SYS_STRFTIME = 614,
+    SYS_KILL = 615, SYS_EXEC = 616, SYS_WAITPID = 617, SYS_ALARM = 618,
+    SYS_BYTE_SUBSTR = 620, SYS_CALLOC = 621,
+    SYS_CFGETISPEED = 622, SYS_CFGETOSPEED = 623,
+    SYS_CFSETISPEED = 624, SYS_CFSETOSPEED = 625,
+    SYS_CLEARERR = 626, SYS_CLOCK_GETRES = 627, SYS_CLOCK_GETTIME = 628,
+    SYS_CLOSE_FD = 629, SYS_CLOSEDIR = 630,
+    SYS_CSTRUCT_GET_DOUBLE = 631, SYS_CSTRUCT_GET_INT = 632,
+    SYS_CSTRUCT_GET_STRING = 633, SYS_CSTRUCT_NEW = 634,
+    SYS_CSTRUCT_PTR = 635, SYS_CSTRUCT_SET_DOUBLE = 636,
+    SYS_CSTRUCT_SET_INT = 637, SYS_CSTRUCT_SET_STRING = 638,
+    SYS_CTIME = 639,
+    SYS_DL_CALL_EXPORT_INFO = 640, SYS_DL_CALL_INT_SV = 641,
+    SYS_DL_CALL_STR = 642, SYS_DL_CALL_STR_SV = 643,
+    SYS_DL_CALL_SV = 644, SYS_DL_CALL_VERSION = 645,
+    SYS_DL_CALL_VOID = 646, SYS_DL_CALL_VOID_SV = 647,
+    SYS_DUP = 648, SYS_EXIT_STATUS = 649,
+    SYS_FCHMOD = 650, SYS_FCHOWN = 651, SYS_FCNTL = 652,
+    SYS_FERROR = 653, SYS_FGETC = 654, SYS_FILENO = 655,
+    SYS_FLOCK = 656, SYS_FPUTC = 657,
+    SYS_FSTATVFS = 658, SYS_FTRUNCATE = 659,
+    SYS_FULL_PROFILE_START = 660, SYS_FULL_PROFILE_STOP = 661,
+    SYS_GETGRNAM = 662, SYS_GETLOGIN = 663,
+    SYS_GETPEERNAME = 664, SYS_GETSOCKNAME = 665,
+    SYS_GETSOCKOPT = 666, SYS_GETTIMEOFDAY = 667,
+    SYS_IOCTL = 668, SYS_KILLPG = 669, SYS_LCHOWN = 670,
+    SYS_MEMPROF_DISABLE = 671, SYS_MEMPROF_ENABLE = 672,
+    SYS_MEMPROF_REPORT = 673, SYS_MEMPROF_RESET = 674,
+    SYS_MKTIME = 675, SYS_MLOCK = 676, SYS_MMAP = 677,
+    SYS_MUNLOCK = 678, SYS_MUNMAP = 679, SYS_NANOSLEEP = 680,
+    SYS_OPEN_FD = 681, SYS_OPENDIR = 682, SYS_PAUSE = 683,
+    SYS_POLL = 684, SYS_PTR_DEREF_STR = 685, SYS_QUOTEMETA = 686,
+    SYS_RAISE = 687, SYS_RANDOM_BYTES = 688, SYS_RANDOM_BYTES_HEX = 689,
+    SYS_READ_ALL_FD = 690, SYS_READ_BYTE = 691, SYS_READ_FD = 692,
+    SYS_READDIR_NEXT = 693, SYS_REALLOC = 694,
+    SYS_SELECT_FDS = 695, SYS_SERIAL_OPEN = 696, SYS_SET_BYTE = 697,
+    SYS_SETEGID = 698, SYS_SETEUID = 699, SYS_SETPGID = 700,
+    SYS_SETPGRP = 701, SYS_SETPRIORITY = 702,
+    SYS_SETREGID = 703, SYS_SETREUID = 704, SYS_SETRLIMIT = 705,
+    SYS_SETSOCKOPT = 706, SYS_SHUTDOWN = 707, SYS_SIGPROCMASK = 708,
+    SYS_SLURP_FD = 709, SYS_SLURP_FH = 710,
+    SYS_SOCKET_ACCEPT = 711, SYS_SOCKET_CLIENT = 712,
+    SYS_SOCKET_FLUSH = 713, SYS_SOCKET_RECV = 714,
+    SYS_SOCKET_SEND = 715, SYS_SOCKET_SERVER_BACKLOG = 716,
+    SYS_SOCKET_SET_NONBLOCKING = 717,
+    SYS_SPEW_FD = 718, SYS_SPEW_FH = 719,
+    SYS_STR_PTR = 720, SYS_STRTOD = 721, SYS_SYSTEM_ARGV = 722,
+    SYS_TCDRAIN = 723, SYS_TCFLUSH = 724, SYS_TCGETATTR = 725,
+    SYS_TCSETATTR = 726, SYS_TERM_COLS = 727,
+    SYS_TERM_DISABLE_RAW = 728, SYS_TERM_ENABLE_RAW = 729,
+    SYS_TERM_ROWS = 730, SYS_TMPFILE = 731, SYS_TTYNAME = 732,
+    SYS_TV_INTERVAL = 733, SYS_UDP_BIND = 734, SYS_UDP_RECVFROM = 735,
+    SYS_UDP_SENDTO = 736, SYS_UDP_SERVER = 737, SYS_UDP_SOCKET = 738,
+    SYS_UTIMES = 739, SYS_WRITE_FD = 740,
     PLACEHOLDER_END = 999
 }
 
@@ -9033,6 +9638,12 @@ __C__ {
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+
+/* VM bytecode backend for eval (linked from vm.c + vm_compiler.c) */
+#ifdef HAVE_VM
+#include "vm.h"
+#include "vm_compiler.h"
+#endif
 
 /* ---- BigInt C helpers ---- */
 static int _bi_cmp(const char *a, const char *b) {
@@ -9220,8 +9831,9 @@ func init_builtins(scalar $interp) void {
     # Type functions
     $b{"defined"} = BI::DEFINED; $b{"ref"} = BI::REF_FN; $b{"int"} = BI::INT_FN;
     # Misc
-    $b{"die"} = BI::DIE; $b{"slurp"} = BI::SLURP; $b{"spew"} = BI::SPEW;
-    $b{"abs"} = BI::ABS;
+    $b{"die"} = BI::DIE; $b{"warn"} = BI::WARN; $b{"exit"} = BI::SYS_EXIT;
+    $b{"slurp"} = BI::SLURP; $b{"spew"} = BI::SPEW;
+    $b{"abs"} = BI::ABS; $b{"hex"} = BI::HEX; $b{"oct"} = BI::OCT;
     $b{"dumper_str"} = BI::DUMPER_STR; $b{"strada_new_undef"} = BI::STRADA_NEW_UNDEF;
     # Ref/memory functions
     $b{"refto"} = BI::REFTO; $b{"refcount"} = BI::REFCOUNT;
@@ -9414,6 +10026,137 @@ func init_builtins(scalar $interp) void {
     $b{"core::select_fd"} = BI::SYS_SELECT_FD; $b{"core::select_fd"} = BI::SYS_SELECT_FD;
     $b{"core::hash_default_capacity"} = BI::SYS_HASH_DEFAULT_CAPACITY; $b{"core::hash_default_capacity"} = BI::SYS_HASH_DEFAULT_CAPACITY;
     $b{"core::array_reserve"} = BI::SYS_ARRAY_RESERVE; $b{"core::array_reserve"} = BI::SYS_ARRAY_RESERVE;
+    $b{"core::chdir"} = BI::SYS_CHDIR; $b{"core::chdir"} = BI::SYS_CHDIR;
+    $b{"core::chown"} = BI::SYS_CHOWN; $b{"core::chown"} = BI::SYS_CHOWN;
+    $b{"core::localtime"} = BI::SYS_LOCALTIME; $b{"core::localtime"} = BI::SYS_LOCALTIME;
+    $b{"core::gmtime"} = BI::SYS_GMTIME; $b{"core::gmtime"} = BI::SYS_GMTIME;
+    $b{"core::strftime"} = BI::SYS_STRFTIME; $b{"core::strftime"} = BI::SYS_STRFTIME;
+    $b{"core::kill"} = BI::SYS_KILL; $b{"core::kill"} = BI::SYS_KILL;
+    $b{"core::exec"} = BI::SYS_EXEC; $b{"core::exec"} = BI::SYS_EXEC;
+    $b{"core::waitpid"} = BI::SYS_WAITPID; $b{"core::waitpid"} = BI::SYS_WAITPID;
+    $b{"core::alarm"} = BI::SYS_ALARM; $b{"core::alarm"} = BI::SYS_ALARM;
+    $b{"core::hex"} = BI::HEX; $b{"core::hex"} = BI::HEX;
+    $b{"core::byte_substr"} = BI::SYS_BYTE_SUBSTR; $b{"core::byte_substr"} = BI::SYS_BYTE_SUBSTR;
+    $b{"core::calloc"} = BI::SYS_CALLOC; $b{"core::calloc"} = BI::SYS_CALLOC;
+    $b{"core::cfgetispeed"} = BI::SYS_CFGETISPEED; $b{"core::cfgetispeed"} = BI::SYS_CFGETISPEED;
+    $b{"core::cfgetospeed"} = BI::SYS_CFGETOSPEED; $b{"core::cfgetospeed"} = BI::SYS_CFGETOSPEED;
+    $b{"core::cfsetispeed"} = BI::SYS_CFSETISPEED; $b{"core::cfsetispeed"} = BI::SYS_CFSETISPEED;
+    $b{"core::cfsetospeed"} = BI::SYS_CFSETOSPEED; $b{"core::cfsetospeed"} = BI::SYS_CFSETOSPEED;
+    $b{"core::clearerr"} = BI::SYS_CLEARERR; $b{"core::clearerr"} = BI::SYS_CLEARERR;
+    $b{"core::clock_getres"} = BI::SYS_CLOCK_GETRES; $b{"core::clock_getres"} = BI::SYS_CLOCK_GETRES;
+    $b{"core::clock_gettime"} = BI::SYS_CLOCK_GETTIME; $b{"core::clock_gettime"} = BI::SYS_CLOCK_GETTIME;
+    $b{"core::close_fd"} = BI::SYS_CLOSE_FD; $b{"core::close_fd"} = BI::SYS_CLOSE_FD;
+    $b{"core::closedir"} = BI::SYS_CLOSEDIR; $b{"core::closedir"} = BI::SYS_CLOSEDIR;
+    $b{"core::cstruct_get_double"} = BI::SYS_CSTRUCT_GET_DOUBLE; $b{"core::cstruct_get_double"} = BI::SYS_CSTRUCT_GET_DOUBLE;
+    $b{"core::cstruct_get_int"} = BI::SYS_CSTRUCT_GET_INT; $b{"core::cstruct_get_int"} = BI::SYS_CSTRUCT_GET_INT;
+    $b{"core::cstruct_get_string"} = BI::SYS_CSTRUCT_GET_STRING; $b{"core::cstruct_get_string"} = BI::SYS_CSTRUCT_GET_STRING;
+    $b{"core::cstruct_new"} = BI::SYS_CSTRUCT_NEW; $b{"core::cstruct_new"} = BI::SYS_CSTRUCT_NEW;
+    $b{"core::cstruct_ptr"} = BI::SYS_CSTRUCT_PTR; $b{"core::cstruct_ptr"} = BI::SYS_CSTRUCT_PTR;
+    $b{"core::cstruct_set_double"} = BI::SYS_CSTRUCT_SET_DOUBLE; $b{"core::cstruct_set_double"} = BI::SYS_CSTRUCT_SET_DOUBLE;
+    $b{"core::cstruct_set_int"} = BI::SYS_CSTRUCT_SET_INT; $b{"core::cstruct_set_int"} = BI::SYS_CSTRUCT_SET_INT;
+    $b{"core::cstruct_set_string"} = BI::SYS_CSTRUCT_SET_STRING; $b{"core::cstruct_set_string"} = BI::SYS_CSTRUCT_SET_STRING;
+    $b{"core::ctime"} = BI::SYS_CTIME; $b{"core::ctime"} = BI::SYS_CTIME;
+    $b{"core::dl_call_export_info"} = BI::SYS_DL_CALL_EXPORT_INFO; $b{"core::dl_call_export_info"} = BI::SYS_DL_CALL_EXPORT_INFO;
+    $b{"core::dl_call_int_sv"} = BI::SYS_DL_CALL_INT_SV; $b{"core::dl_call_int_sv"} = BI::SYS_DL_CALL_INT_SV;
+    $b{"core::dl_call_str"} = BI::SYS_DL_CALL_STR; $b{"core::dl_call_str"} = BI::SYS_DL_CALL_STR;
+    $b{"core::dl_call_str_sv"} = BI::SYS_DL_CALL_STR_SV; $b{"core::dl_call_str_sv"} = BI::SYS_DL_CALL_STR_SV;
+    $b{"core::dl_call_sv"} = BI::SYS_DL_CALL_SV; $b{"core::dl_call_sv"} = BI::SYS_DL_CALL_SV;
+    $b{"core::dl_call_version"} = BI::SYS_DL_CALL_VERSION; $b{"core::dl_call_version"} = BI::SYS_DL_CALL_VERSION;
+    $b{"core::dl_call_void"} = BI::SYS_DL_CALL_VOID; $b{"core::dl_call_void"} = BI::SYS_DL_CALL_VOID;
+    $b{"core::dl_call_void_sv"} = BI::SYS_DL_CALL_VOID_SV; $b{"core::dl_call_void_sv"} = BI::SYS_DL_CALL_VOID_SV;
+    $b{"core::dup"} = BI::SYS_DUP; $b{"core::dup"} = BI::SYS_DUP;
+    $b{"core::exit_status"} = BI::SYS_EXIT_STATUS; $b{"core::exit_status"} = BI::SYS_EXIT_STATUS;
+    $b{"core::fchmod"} = BI::SYS_FCHMOD; $b{"core::fchmod"} = BI::SYS_FCHMOD;
+    $b{"core::fchown"} = BI::SYS_FCHOWN; $b{"core::fchown"} = BI::SYS_FCHOWN;
+    $b{"core::fcntl"} = BI::SYS_FCNTL; $b{"core::fcntl"} = BI::SYS_FCNTL;
+    $b{"core::ferror"} = BI::SYS_FERROR; $b{"core::ferror"} = BI::SYS_FERROR;
+    $b{"core::fgetc"} = BI::SYS_FGETC; $b{"core::fgetc"} = BI::SYS_FGETC;
+    $b{"core::fileno"} = BI::SYS_FILENO; $b{"core::fileno"} = BI::SYS_FILENO;
+    $b{"core::flock"} = BI::SYS_FLOCK; $b{"core::flock"} = BI::SYS_FLOCK;
+    $b{"core::fputc"} = BI::SYS_FPUTC; $b{"core::fputc"} = BI::SYS_FPUTC;
+    $b{"core::fstatvfs"} = BI::SYS_FSTATVFS; $b{"core::fstatvfs"} = BI::SYS_FSTATVFS;
+    $b{"core::ftruncate"} = BI::SYS_FTRUNCATE; $b{"core::ftruncate"} = BI::SYS_FTRUNCATE;
+    $b{"core::full_profile_start"} = BI::SYS_FULL_PROFILE_START; $b{"core::full_profile_start"} = BI::SYS_FULL_PROFILE_START;
+    $b{"core::full_profile_stop"} = BI::SYS_FULL_PROFILE_STOP; $b{"core::full_profile_stop"} = BI::SYS_FULL_PROFILE_STOP;
+    $b{"core::getgrnam"} = BI::SYS_GETGRNAM; $b{"core::getgrnam"} = BI::SYS_GETGRNAM;
+    $b{"core::getlogin"} = BI::SYS_GETLOGIN; $b{"core::getlogin"} = BI::SYS_GETLOGIN;
+    $b{"core::getpeername"} = BI::SYS_GETPEERNAME; $b{"core::getpeername"} = BI::SYS_GETPEERNAME;
+    $b{"core::getsockname"} = BI::SYS_GETSOCKNAME; $b{"core::getsockname"} = BI::SYS_GETSOCKNAME;
+    $b{"core::getsockopt"} = BI::SYS_GETSOCKOPT; $b{"core::getsockopt"} = BI::SYS_GETSOCKOPT;
+    $b{"core::gettimeofday"} = BI::SYS_GETTIMEOFDAY; $b{"core::gettimeofday"} = BI::SYS_GETTIMEOFDAY;
+    $b{"core::ioctl"} = BI::SYS_IOCTL; $b{"core::ioctl"} = BI::SYS_IOCTL;
+    $b{"core::killpg"} = BI::SYS_KILLPG; $b{"core::killpg"} = BI::SYS_KILLPG;
+    $b{"core::lchown"} = BI::SYS_LCHOWN; $b{"core::lchown"} = BI::SYS_LCHOWN;
+    $b{"core::memprof_disable"} = BI::SYS_MEMPROF_DISABLE; $b{"core::memprof_disable"} = BI::SYS_MEMPROF_DISABLE;
+    $b{"core::memprof_enable"} = BI::SYS_MEMPROF_ENABLE; $b{"core::memprof_enable"} = BI::SYS_MEMPROF_ENABLE;
+    $b{"core::memprof_report"} = BI::SYS_MEMPROF_REPORT; $b{"core::memprof_report"} = BI::SYS_MEMPROF_REPORT;
+    $b{"core::memprof_reset"} = BI::SYS_MEMPROF_RESET; $b{"core::memprof_reset"} = BI::SYS_MEMPROF_RESET;
+    $b{"core::mktime"} = BI::SYS_MKTIME; $b{"core::mktime"} = BI::SYS_MKTIME;
+    $b{"core::mlock"} = BI::SYS_MLOCK; $b{"core::mlock"} = BI::SYS_MLOCK;
+    $b{"core::mmap"} = BI::SYS_MMAP; $b{"core::mmap"} = BI::SYS_MMAP;
+    $b{"core::munlock"} = BI::SYS_MUNLOCK; $b{"core::munlock"} = BI::SYS_MUNLOCK;
+    $b{"core::munmap"} = BI::SYS_MUNMAP; $b{"core::munmap"} = BI::SYS_MUNMAP;
+    $b{"core::nanosleep"} = BI::SYS_NANOSLEEP; $b{"core::nanosleep"} = BI::SYS_NANOSLEEP;
+    $b{"core::open_fd"} = BI::SYS_OPEN_FD; $b{"core::open_fd"} = BI::SYS_OPEN_FD;
+    $b{"core::opendir"} = BI::SYS_OPENDIR; $b{"core::opendir"} = BI::SYS_OPENDIR;
+    $b{"core::pause"} = BI::SYS_PAUSE; $b{"core::pause"} = BI::SYS_PAUSE;
+    $b{"core::poll"} = BI::SYS_POLL; $b{"core::poll"} = BI::SYS_POLL;
+    $b{"core::ptr_deref_str"} = BI::SYS_PTR_DEREF_STR; $b{"core::ptr_deref_str"} = BI::SYS_PTR_DEREF_STR;
+    $b{"core::quotemeta"} = BI::SYS_QUOTEMETA; $b{"core::quotemeta"} = BI::SYS_QUOTEMETA;
+    $b{"core::raise"} = BI::SYS_RAISE; $b{"core::raise"} = BI::SYS_RAISE;
+    $b{"core::random_bytes"} = BI::SYS_RANDOM_BYTES; $b{"core::random_bytes"} = BI::SYS_RANDOM_BYTES;
+    $b{"core::random_bytes_hex"} = BI::SYS_RANDOM_BYTES_HEX; $b{"core::random_bytes_hex"} = BI::SYS_RANDOM_BYTES_HEX;
+    $b{"core::read_all_fd"} = BI::SYS_READ_ALL_FD; $b{"core::read_all_fd"} = BI::SYS_READ_ALL_FD;
+    $b{"core::read_byte"} = BI::SYS_READ_BYTE; $b{"core::read_byte"} = BI::SYS_READ_BYTE;
+    $b{"core::read_fd"} = BI::SYS_READ_FD; $b{"core::read_fd"} = BI::SYS_READ_FD;
+    $b{"core::readdir_next"} = BI::SYS_READDIR_NEXT; $b{"core::readdir_next"} = BI::SYS_READDIR_NEXT;
+    $b{"core::realloc"} = BI::SYS_REALLOC; $b{"core::realloc"} = BI::SYS_REALLOC;
+    $b{"core::select_fds"} = BI::SYS_SELECT_FDS; $b{"core::select_fds"} = BI::SYS_SELECT_FDS;
+    $b{"core::serial_open"} = BI::SYS_SERIAL_OPEN; $b{"core::serial_open"} = BI::SYS_SERIAL_OPEN;
+    $b{"core::set_byte"} = BI::SYS_SET_BYTE; $b{"core::set_byte"} = BI::SYS_SET_BYTE;
+    $b{"core::setegid"} = BI::SYS_SETEGID; $b{"core::setegid"} = BI::SYS_SETEGID;
+    $b{"core::seteuid"} = BI::SYS_SETEUID; $b{"core::seteuid"} = BI::SYS_SETEUID;
+    $b{"core::setpgid"} = BI::SYS_SETPGID; $b{"core::setpgid"} = BI::SYS_SETPGID;
+    $b{"core::setpgrp"} = BI::SYS_SETPGRP; $b{"core::setpgrp"} = BI::SYS_SETPGRP;
+    $b{"core::setpriority"} = BI::SYS_SETPRIORITY; $b{"core::setpriority"} = BI::SYS_SETPRIORITY;
+    $b{"core::setregid"} = BI::SYS_SETREGID; $b{"core::setregid"} = BI::SYS_SETREGID;
+    $b{"core::setreuid"} = BI::SYS_SETREUID; $b{"core::setreuid"} = BI::SYS_SETREUID;
+    $b{"core::setrlimit"} = BI::SYS_SETRLIMIT; $b{"core::setrlimit"} = BI::SYS_SETRLIMIT;
+    $b{"core::setsockopt"} = BI::SYS_SETSOCKOPT; $b{"core::setsockopt"} = BI::SYS_SETSOCKOPT;
+    $b{"core::shutdown"} = BI::SYS_SHUTDOWN; $b{"core::shutdown"} = BI::SYS_SHUTDOWN;
+    $b{"core::sigprocmask"} = BI::SYS_SIGPROCMASK; $b{"core::sigprocmask"} = BI::SYS_SIGPROCMASK;
+    $b{"core::slurp_fd"} = BI::SYS_SLURP_FD; $b{"core::slurp_fd"} = BI::SYS_SLURP_FD;
+    $b{"core::slurp_fh"} = BI::SYS_SLURP_FH; $b{"core::slurp_fh"} = BI::SYS_SLURP_FH;
+    $b{"core::socket_accept"} = BI::SYS_SOCKET_ACCEPT; $b{"core::socket_accept"} = BI::SYS_SOCKET_ACCEPT;
+    $b{"core::socket_client"} = BI::SYS_SOCKET_CLIENT; $b{"core::socket_client"} = BI::SYS_SOCKET_CLIENT;
+    $b{"core::socket_flush"} = BI::SYS_SOCKET_FLUSH; $b{"core::socket_flush"} = BI::SYS_SOCKET_FLUSH;
+    $b{"core::socket_recv"} = BI::SYS_SOCKET_RECV; $b{"core::socket_recv"} = BI::SYS_SOCKET_RECV;
+    $b{"core::socket_send"} = BI::SYS_SOCKET_SEND; $b{"core::socket_send"} = BI::SYS_SOCKET_SEND;
+    $b{"core::socket_server_backlog"} = BI::SYS_SOCKET_SERVER_BACKLOG; $b{"core::socket_server_backlog"} = BI::SYS_SOCKET_SERVER_BACKLOG;
+    $b{"core::socket_set_nonblocking"} = BI::SYS_SOCKET_SET_NONBLOCKING; $b{"core::socket_set_nonblocking"} = BI::SYS_SOCKET_SET_NONBLOCKING;
+    $b{"core::spew_fd"} = BI::SYS_SPEW_FD; $b{"core::spew_fd"} = BI::SYS_SPEW_FD;
+    $b{"core::spew_fh"} = BI::SYS_SPEW_FH; $b{"core::spew_fh"} = BI::SYS_SPEW_FH;
+    $b{"core::str_ptr"} = BI::SYS_STR_PTR; $b{"core::str_ptr"} = BI::SYS_STR_PTR;
+    $b{"core::strtod"} = BI::SYS_STRTOD; $b{"core::strtod"} = BI::SYS_STRTOD;
+    $b{"core::system_argv"} = BI::SYS_SYSTEM_ARGV; $b{"core::system_argv"} = BI::SYS_SYSTEM_ARGV;
+    $b{"core::tcdrain"} = BI::SYS_TCDRAIN; $b{"core::tcdrain"} = BI::SYS_TCDRAIN;
+    $b{"core::tcflush"} = BI::SYS_TCFLUSH; $b{"core::tcflush"} = BI::SYS_TCFLUSH;
+    $b{"core::tcgetattr"} = BI::SYS_TCGETATTR; $b{"core::tcgetattr"} = BI::SYS_TCGETATTR;
+    $b{"core::tcsetattr"} = BI::SYS_TCSETATTR; $b{"core::tcsetattr"} = BI::SYS_TCSETATTR;
+    $b{"core::term_cols"} = BI::SYS_TERM_COLS; $b{"core::term_cols"} = BI::SYS_TERM_COLS;
+    $b{"core::term_disable_raw"} = BI::SYS_TERM_DISABLE_RAW; $b{"core::term_disable_raw"} = BI::SYS_TERM_DISABLE_RAW;
+    $b{"core::term_enable_raw"} = BI::SYS_TERM_ENABLE_RAW; $b{"core::term_enable_raw"} = BI::SYS_TERM_ENABLE_RAW;
+    $b{"core::term_rows"} = BI::SYS_TERM_ROWS; $b{"core::term_rows"} = BI::SYS_TERM_ROWS;
+    $b{"core::tmpfile"} = BI::SYS_TMPFILE; $b{"core::tmpfile"} = BI::SYS_TMPFILE;
+    $b{"core::ttyname"} = BI::SYS_TTYNAME; $b{"core::ttyname"} = BI::SYS_TTYNAME;
+    $b{"core::tv_interval"} = BI::SYS_TV_INTERVAL; $b{"core::tv_interval"} = BI::SYS_TV_INTERVAL;
+    $b{"core::udp_bind"} = BI::SYS_UDP_BIND; $b{"core::udp_bind"} = BI::SYS_UDP_BIND;
+    $b{"core::udp_recvfrom"} = BI::SYS_UDP_RECVFROM; $b{"core::udp_recvfrom"} = BI::SYS_UDP_RECVFROM;
+    $b{"core::udp_sendto"} = BI::SYS_UDP_SENDTO; $b{"core::udp_sendto"} = BI::SYS_UDP_SENDTO;
+    $b{"core::udp_server"} = BI::SYS_UDP_SERVER; $b{"core::udp_server"} = BI::SYS_UDP_SERVER;
+    $b{"core::udp_socket"} = BI::SYS_UDP_SOCKET; $b{"core::udp_socket"} = BI::SYS_UDP_SOCKET;
+    $b{"core::utimes"} = BI::SYS_UTIMES; $b{"core::utimes"} = BI::SYS_UTIMES;
+    $b{"core::write_fd"} = BI::SYS_WRITE_FD; $b{"core::write_fd"} = BI::SYS_WRITE_FD;
     # math:: functions
     $b{"math::sqrt"} = BI::MATH_SQRT; $b{"math::sin"} = BI::MATH_SIN;
     $b{"math::cos"} = BI::MATH_COS; $b{"math::pow"} = BI::MATH_POW;
@@ -10190,7 +10933,9 @@ func assign_to(scalar $interp, scalar $target, scalar $value, scalar $env) void 
     if ($ttype == NI::VARIABLE) {
         my str $name = $target->{"name"};
         if (!env_update($env, $name, $value)) {
-            env_set($env, $name, $value);
+            my str $sigil = $target->{"sigil"};
+            my int $line = $target->{"line"};
+            throw("Undeclared variable '" . $sigil . $name . "' at line " . $line . " (use 'my' to declare)");
         }
         return;
     }
@@ -10637,7 +11382,7 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
     }
     if ($bid == BI::DUMPER) {
         if ($argc >= 1) {
-            dumper($args->[0]);
+            return dumper($args->[0]);
         }
         return undef;
     }
@@ -10885,6 +11630,221 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         }
         die("Died");
     }
+    if ($bid == BI::WARN) {
+        if ($argc >= 1) {
+            my str $msg = "" . $args->[0];
+            if (length($msg) == 0 || substr($msg, length($msg) - 1, 1) ne "\n") {
+                $msg = $msg . "\n";
+            }
+            print(STDERR, $msg);
+        } else {
+            print(STDERR, "Warning: something's wrong\n");
+        }
+        return undef;
+    }
+    if ($bid == BI::HEX) {
+        my str $s = "" . $args->[0];
+        $s =~ s/^0[xX]//;
+        my int $result = 0;
+        my int $hi = 0;
+        while ($hi < length($s)) {
+            my int $c = char_at($s, $hi);
+            $result = $result * 16;
+            if ($c >= 48 && $c <= 57) { $result = $result + ($c - 48); }
+            elsif ($c >= 97 && $c <= 102) { $result = $result + ($c - 87); }
+            elsif ($c >= 65 && $c <= 70) { $result = $result + ($c - 55); }
+            $hi = $hi + 1;
+        }
+        return $result;
+    }
+    if ($bid == BI::OCT) {
+        my str $s = "" . $args->[0];
+        if (index($s, "0x") == 0 || index($s, "0X") == 0) {
+            # Hex
+            $s = substr($s, 2, length($s) - 2);
+            my int $result = 0;
+            my int $oi = 0;
+            while ($oi < length($s)) {
+                my int $c = char_at($s, $oi);
+                $result = $result * 16;
+                if ($c >= 48 && $c <= 57) { $result = $result + ($c - 48); }
+                elsif ($c >= 97 && $c <= 102) { $result = $result + ($c - 87); }
+                elsif ($c >= 65 && $c <= 70) { $result = $result + ($c - 55); }
+                $oi = $oi + 1;
+            }
+            return $result;
+        }
+        if (index($s, "0b") == 0 || index($s, "0B") == 0) {
+            # Binary
+            $s = substr($s, 2, length($s) - 2);
+            my int $result = 0;
+            my int $oi = 0;
+            while ($oi < length($s)) {
+                $result = $result * 2 + (char_at($s, $oi) - 48);
+                $oi = $oi + 1;
+            }
+            return $result;
+        }
+        # Octal
+        $s =~ s/^0+//;
+        if (length($s) == 0) { return 0; }
+        my int $result = 0;
+        my int $oi = 0;
+        while ($oi < length($s)) {
+            $result = $result * 8 + (char_at($s, $oi) - 48);
+            $oi = $oi + 1;
+        }
+        return $result;
+    }
+    if ($bid == BI::SYS_CHDIR) {
+        my str $dir = "" . $args->[0];
+        return core::chdir($dir);
+    }
+    if ($bid == BI::SYS_CHOWN) {
+        return core::chown($args->[0], $args->[1], $args->[2]);
+    }
+    if ($bid == BI::SYS_LOCALTIME) {
+        return core::localtime($args->[0]);
+    }
+    if ($bid == BI::SYS_GMTIME) {
+        return core::gmtime($args->[0]);
+    }
+    if ($bid == BI::SYS_STRFTIME) {
+        return core::strftime($args->[0], $args->[1]);
+    }
+    if ($bid == BI::SYS_KILL) {
+        return core::kill($args->[0], $args->[1]);
+    }
+    if ($bid == BI::SYS_EXEC) {
+        return core::exec($args->[0]);
+    }
+    if ($bid == BI::SYS_WAITPID) {
+        return core::waitpid($args->[0], $args->[1]);
+    }
+    if ($bid == BI::SYS_ALARM) {
+        return core::alarm($args->[0]);
+    }
+    # --- All remaining core::/core:: builtins (auto-generated call-through) ---
+    if ($bid == BI::SYS_BYTE_SUBSTR) { return core::byte_substr($args->[0], $args->[1], $args->[2]); }
+    if ($bid == BI::SYS_CALLOC) { return core::calloc($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_CFGETISPEED) { return core::cfgetispeed($args->[0]); }
+    if ($bid == BI::SYS_CFGETOSPEED) { return core::cfgetospeed($args->[0]); }
+    if ($bid == BI::SYS_CFSETISPEED) { return core::cfsetispeed($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_CFSETOSPEED) { return core::cfsetospeed($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_CLEARERR) { return core::clearerr($args->[0]); }
+    if ($bid == BI::SYS_CLOCK_GETRES) { return core::clock_getres($args->[0]); }
+    if ($bid == BI::SYS_CLOCK_GETTIME) { return core::clock_gettime($args->[0]); }
+    if ($bid == BI::SYS_CLOSE_FD) { return core::close_fd($args->[0]); }
+    if ($bid == BI::SYS_CLOSEDIR) { return core::closedir($args->[0]); }
+    if ($bid == BI::SYS_CSTRUCT_GET_DOUBLE) { return core::cstruct_get_double($args->[0], $args->[1], $args->[2]); }
+    if ($bid == BI::SYS_CSTRUCT_GET_INT) { return core::cstruct_get_int($args->[0], $args->[1], $args->[2]); }
+    if ($bid == BI::SYS_CSTRUCT_GET_STRING) { return core::cstruct_get_string($args->[0], $args->[1], $args->[2]); }
+    if ($bid == BI::SYS_CSTRUCT_NEW) { return core::cstruct_new($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_CSTRUCT_PTR) { return core::cstruct_ptr($args->[0]); }
+    if ($bid == BI::SYS_CSTRUCT_SET_DOUBLE) { core::cstruct_set_double($args->[0], $args->[1], $args->[2], $args->[3]); return undef; }
+    if ($bid == BI::SYS_CSTRUCT_SET_INT) { core::cstruct_set_int($args->[0], $args->[1], $args->[2], $args->[3]); return undef; }
+    if ($bid == BI::SYS_CSTRUCT_SET_STRING) { core::cstruct_set_string($args->[0], $args->[1], $args->[2], $args->[3]); return undef; }
+    if ($bid == BI::SYS_CTIME) { return core::ctime($args->[0]); }
+    if ($bid == BI::SYS_DL_CALL_EXPORT_INFO) { return core::dl_call_export_info($args->[0]); }
+    if ($bid == BI::SYS_DL_CALL_INT_SV) { return core::dl_call_int_sv($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_DL_CALL_STR) { return core::dl_call_str($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_DL_CALL_STR_SV) { return core::dl_call_str_sv($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_DL_CALL_SV) { return core::dl_call_sv($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_DL_CALL_VERSION) { return core::dl_call_version($args->[0]); }
+    if ($bid == BI::SYS_DL_CALL_VOID) { return core::dl_call_void($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_DL_CALL_VOID_SV) { return core::dl_call_void_sv($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_DUP) { return core::dup($args->[0]); }
+    if ($bid == BI::SYS_EXIT_STATUS) { return core::exit_status($args->[0]); }
+    if ($bid == BI::SYS_FCHMOD) { return core::fchmod($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_FCHOWN) { return core::fchown($args->[0], $args->[1], $args->[2]); }
+    if ($bid == BI::SYS_FCNTL) { return core::fcntl($args->[0], $args->[1], $args->[2]); }
+    if ($bid == BI::SYS_FERROR) { return core::ferror($args->[0]); }
+    if ($bid == BI::SYS_FGETC) { return core::fgetc($args->[0]); }
+    if ($bid == BI::SYS_FILENO) { return core::fileno($args->[0]); }
+    if ($bid == BI::SYS_FLOCK) { return core::flock($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_FPUTC) { return core::fputc($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_FSTATVFS) { return core::fstatvfs($args->[0]); }
+    if ($bid == BI::SYS_FTRUNCATE) { return core::ftruncate($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_FULL_PROFILE_START) { core::full_profile_start($args->[0]); return undef; }
+    if ($bid == BI::SYS_FULL_PROFILE_STOP) { core::full_profile_stop(); return undef; }
+    if ($bid == BI::SYS_GETGRNAM) { return core::getgrnam($args->[0]); }
+    if ($bid == BI::SYS_GETLOGIN) { return core::getlogin(); }
+    if ($bid == BI::SYS_GETPEERNAME) { return core::getpeername($args->[0]); }
+    if ($bid == BI::SYS_GETSOCKNAME) { return core::getsockname($args->[0]); }
+    if ($bid == BI::SYS_GETSOCKOPT) { return core::getsockopt($args->[0], $args->[1], $args->[2]); }
+    if ($bid == BI::SYS_GETTIMEOFDAY) { return core::gettimeofday(); }
+    if ($bid == BI::SYS_IOCTL) { return core::ioctl($args->[0], $args->[1], $args->[2]); }
+    if ($bid == BI::SYS_KILLPG) { return core::killpg($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_LCHOWN) { return core::lchown($args->[0], $args->[1], $args->[2]); }
+    if ($bid == BI::SYS_MEMPROF_DISABLE) { core::memprof_disable(); return undef; }
+    if ($bid == BI::SYS_MEMPROF_ENABLE) { core::memprof_enable(); return undef; }
+    if ($bid == BI::SYS_MEMPROF_REPORT) { core::memprof_report(); return undef; }
+    if ($bid == BI::SYS_MEMPROF_RESET) { core::memprof_reset(); return undef; }
+    if ($bid == BI::SYS_MKTIME) { return core::mktime($args->[0]); }
+    if ($bid == BI::SYS_MLOCK) { return core::mlock($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_MMAP) { return core::mmap($args->[0], $args->[1], $args->[2], $args->[3], $args->[4], $args->[5]); }
+    if ($bid == BI::SYS_MUNLOCK) { return core::munlock($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_MUNMAP) { return core::munmap($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_OPEN_FD) { return core::open_fd($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_OPENDIR) { return core::opendir($args->[0]); }
+    if ($bid == BI::SYS_PAUSE) { return core::pause(); }
+    if ($bid == BI::SYS_POLL) { return core::poll($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_PTR_DEREF_STR) { return core::ptr_deref_str($args->[0]); }
+    if ($bid == BI::SYS_QUOTEMETA) { return core::quotemeta($args->[0]); }
+    if ($bid == BI::SYS_RAISE) { return core::raise($args->[0]); }
+    if ($bid == BI::SYS_RANDOM_BYTES) { return core::random_bytes($args->[0]); }
+    if ($bid == BI::SYS_RANDOM_BYTES_HEX) { return core::random_bytes_hex($args->[0]); }
+    if ($bid == BI::SYS_READ_ALL_FD) { return core::read_all_fd($args->[0]); }
+    if ($bid == BI::SYS_READ_BYTE) { return core::read_byte($args->[0]); }
+    if ($bid == BI::SYS_READ_FD) { return core::read_fd($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_READDIR_NEXT) { return core::readdir_next($args->[0]); }
+    if ($bid == BI::SYS_REALLOC) { return core::realloc($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_SELECT_FDS) { return core::select_fds($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_SERIAL_OPEN) { return core::serial_open($args->[0], $args->[1], $args->[2]); }
+    if ($bid == BI::SYS_SET_BYTE) { return core::set_byte($args->[0], $args->[1], $args->[2]); }
+    if ($bid == BI::SYS_SETEGID) { return core::setegid($args->[0]); }
+    if ($bid == BI::SYS_SETEUID) { return core::seteuid($args->[0]); }
+    if ($bid == BI::SYS_SETPGID) { return core::setpgid($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_SETPGRP) { return core::setpgrp(); }
+    if ($bid == BI::SYS_SETPRIORITY) { return core::setpriority($args->[0], $args->[1], $args->[2]); }
+    if ($bid == BI::SYS_SETREGID) { return core::setregid($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_SETREUID) { return core::setreuid($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_SETRLIMIT) { return core::setrlimit($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_SETSOCKOPT) { return core::setsockopt($args->[0], $args->[1], $args->[2], $args->[3]); }
+    if ($bid == BI::SYS_SHUTDOWN) { return core::shutdown($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_SIGPROCMASK) { return core::sigprocmask($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_SLURP_FD) { return core::slurp_fd($args->[0]); }
+    if ($bid == BI::SYS_SLURP_FH) { return core::slurp_fh($args->[0]); }
+    if ($bid == BI::SYS_SOCKET_ACCEPT) { return core::socket_accept($args->[0]); }
+    if ($bid == BI::SYS_SOCKET_CLIENT) { return core::socket_client($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_SOCKET_FLUSH) { core::socket_flush($args->[0]); return undef; }
+    if ($bid == BI::SYS_SOCKET_RECV) { return core::socket_recv($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_SOCKET_SEND) { return core::socket_send($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_SOCKET_SERVER_BACKLOG) { return core::socket_server_backlog($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_SOCKET_SET_NONBLOCKING) { return core::socket_set_nonblocking($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_SPEW_FD) { core::spew_fd($args->[0], $args->[1]); return undef; }
+    if ($bid == BI::SYS_SPEW_FH) { core::spew_fh($args->[0], $args->[1]); return undef; }
+    if ($bid == BI::SYS_STR_PTR) { return core::str_ptr($args->[0]); }
+    if ($bid == BI::SYS_STRTOD) { return core::strtod($args->[0]); }
+    if ($bid == BI::SYS_SYSTEM_ARGV) { return core::system_argv($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_TCDRAIN) { return core::tcdrain($args->[0]); }
+    if ($bid == BI::SYS_TCFLUSH) { return core::tcflush($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_TCGETATTR) { return core::tcgetattr($args->[0]); }
+    if ($bid == BI::SYS_TCSETATTR) { return core::tcsetattr($args->[0], $args->[1], $args->[2]); }
+    if ($bid == BI::SYS_TERM_COLS) { return core::term_cols(); }
+    if ($bid == BI::SYS_TERM_DISABLE_RAW) { return core::term_disable_raw(); }
+    if ($bid == BI::SYS_TERM_ENABLE_RAW) { return core::term_enable_raw(); }
+    if ($bid == BI::SYS_TERM_ROWS) { return core::term_rows(); }
+    if ($bid == BI::SYS_TMPFILE) { return core::tmpfile(); }
+    if ($bid == BI::SYS_TTYNAME) { return core::ttyname($args->[0]); }
+    if ($bid == BI::SYS_TV_INTERVAL) { return core::tv_interval($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_UDP_BIND) { return core::udp_bind($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_UDP_RECVFROM) { return core::udp_recvfrom($args->[0], $args->[1]); }
+    if ($bid == BI::SYS_UDP_SENDTO) { return core::udp_sendto($args->[0], $args->[1], $args->[2], $args->[3], $args->[4]); }
+    if ($bid == BI::SYS_UDP_SERVER) { return core::udp_server($args->[0]); }
+    if ($bid == BI::SYS_UDP_SOCKET) { return core::udp_socket(); }
+    if ($bid == BI::SYS_UTIMES) { return core::utimes($args->[0], $args->[1], $args->[2]); }
+    if ($bid == BI::SYS_WRITE_FD) { return core::write_fd($args->[0], $args->[1]); }
     if ($bid == BI::SLURP || $bid == BI::SYS_SLURP) {
         return slurp($args->[0]);
     }
@@ -13167,7 +14127,10 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
                     $vpar = $vpar->{"parent"};
                 }
             }
-            return undef;
+            # Variable not found in any scope
+            my str $sigil = $node->{"sigil"};
+            my int $line = $node->{"line"};
+            throw("Undeclared variable '" . $sigil . $vname . "' at line " . $line . " (use 'my' to declare)");
         }
         if ($vk == 1) {
             return $interp->{"constants"}->{$node->{"name"}};
@@ -13186,6 +14149,11 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
             return $interp->{"enums"}->{$name};
         }
         $node->{"__vk"} = 3;
+        if (!env_exists($env, $name)) {
+            my str $sigil = $node->{"sigil"};
+            my int $line = $node->{"line"};
+            throw("Undeclared variable '" . $sigil . $name . "' at line " . $line . " (use 'my' to declare)");
+        }
         return env_get($env, $name);
     }
 
@@ -14197,7 +15165,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
                 my scalar $repl_tokens = lex_tokenize($repl_code);
                 my scalar $repl_parser = parser_new($repl_tokens);
                 my array @re = ();
-                my scalar $repl_prog = parse_program($repl_parser, \@re, \@re);
+                my scalar $repl_prog = parse_program($repl_parser, \@re, \@re, \@re, \@re);
                 $parsed_repl_fn = $repl_prog->{"functions"}->[0];
             }
 
@@ -14401,7 +15369,7 @@ func eval_string(str $code) scalar {
     my scalar $parser = parser_new($tokens);
     parser_set_filename($parser, "<eval>");
     my array @empty = ();
-    my scalar $program = parse_program($parser, \@empty, \@empty);
+    my scalar $program = parse_program($parser, \@empty, \@empty, \@empty, \@empty);
 
     # Register functions and find __eval__
     my scalar $funcs = $program->{"functions"};
@@ -14474,11 +15442,118 @@ func eval_string(str $code) scalar {
 func reset() void {
     $g_eval_interp = interp_new();
 }
-# Strada::Eval - convenience eval() function
-# Defined in the Strada::Interpreter package to avoid cross-package resolution issues.
+
+# ============================================================
+# Eval backend selection: "vm" (default) or "tree-walk"
+# ============================================================
+
+my str $g_eval_backend = "tree-walk";  # was "vm"; default now tree-walk since the VM backend requires -DHAVE_VM in the runtime, which only the strada-interp binary defines
+
+# Set the eval backend: "vm" or "tree-walk"
+func set_eval_backend(str $backend) void {
+    if ($backend eq "vm" || $backend eq "tree-walk") {
+        $g_eval_backend = $backend;
+    } else {
+        say("Warning: unknown eval backend '" . $backend . "', using 'vm'");
+        $g_eval_backend = "vm";
+    }
+}
+
+# Get the current eval backend
+func get_eval_backend() str {
+    return $g_eval_backend;
+}
+
+# Evaluate code using the bytecode VM backend.
+# Parses the code, compiles to bytecode, executes, returns int result.
+# Note: VM eval is stateless — no persistent variables between calls.
+func eval_string_vm(str $code) scalar {
+    my str $trimmed = $code;
+    $trimmed =~ s/^\s+//;
+    $trimmed =~ s/\s+$//;
+
+    if (length($trimmed) == 0) {
+        return undef;
+    }
+
+    # Auto-append semicolon if needed
+    my int $tlen = length($trimmed);
+    my str $last_char = substr($trimmed, $tlen - 1, 1);
+    if ($last_char ne ";" && $last_char ne "}") {
+        $trimmed = $trimmed . ";";
+    }
+
+    # Check if input is a top-level construct
+    my int $is_top = 0;
+    if (index($trimmed, "func ") == 0 || index($trimmed, "fn ") == 0) { $is_top = 1; }
+    if (index($trimmed, "package ") == 0) { $is_top = 1; }
+
+    my str $source = "";
+    if ($is_top == 1) {
+        $source = $trimmed . "\nfunc __eval__() scalar { return undef; }\n";
+    } else {
+        # Wrap in main() for the VM (VM looks for main or __eval__)
+        $source = "func main() int {\n" . $trimmed . "\nreturn 0;\n}\n";
+    }
+
+    # Parse
+    my scalar $tokens = lex_tokenize($source);
+    my scalar $parser = parser_new($tokens);
+    parser_set_filename($parser, "<eval-vm>");
+    my array @empty = ();
+    my scalar $program = parse_program($parser, \@empty, \@empty, \@empty, \@empty);
+
+    # Compile to bytecode and execute
+    my int $vm_result = 0;
+    __C__ {
+#ifdef HAVE_VM
+        VMProgram *vprog = vm_compile_program(program);
+        if (vprog) {
+            const char *entry = "main";
+            if (vm_program_find_func(vprog, "main") < 0) {
+                entry = "__eval__";
+                if (vm_program_find_func(vprog, "__eval__") < 0) entry = NULL;
+            }
+            if (entry) {
+                VM *vvm = vm_new(vprog);
+                VMValue vres = vm_execute(vvm, entry);
+                int64_t rc = VM_IS_INT(vres) ? VM_INT_VAL(vres) : 0;
+                strada_decref(vm_result);
+                vm_result = STRADA_MAKE_TAGGED_INT(rc);
+                vm_free(vvm);
+            }
+            vm_program_free(vprog);
+        }
+#endif
+    }
+    return $vm_result;
+}
+
+# Smart eval: dispatches to vm or tree-walk based on current backend setting
+func eval_auto(str $code) scalar {
+    if ($g_eval_backend eq "vm") {
+        return eval_string_vm($code);
+    }
+    return eval_string($code);
+}
+# Strada::Eval - eval() function with backend selection
+# Uses the current eval backend (vm or tree-walk).
+# Set backend via Strada::Interpreter::set_eval_backend("vm"|"tree-walk").
 
 package Strada::Interpreter;
 
+# eval(code) — uses the configured backend (default: tree-walk; the VM
+# backend requires the runtime to be built with -DHAVE_VM, which is only
+# the case for the strada-interp binary).
 func eval(str $code) scalar {
+    return eval_auto($code);
+}
+
+# eval_with(code, backend) — explicitly choose backend per call
+# backend: "vm" or "tree-walk"
+func eval_with(str $code, str $backend) scalar {
+    if ($backend eq "vm") {
+        return eval_string_vm($code);
+    }
     return eval_string($code);
 }

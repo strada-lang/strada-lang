@@ -89,8 +89,10 @@ RUNTIME_TCC_OBJ = $(RUNTIME_DIR)/strada_runtime_tcc.o
 
 .PHONY: all clean test test-all test-examples test-selfhost test-suite runtime bootstrap compiler examples run run-bootstrap help info selfhost install uninstall tools libs lib-dbi lib-crypt lib-ssl lib-readline configure-check stage1 interpreter test-interp perl2strada xs2strada cpan2strada install-perl2strada install-cpan2strada update-bootstrap
 
-# Default: build everything including self-hosting compiler and tools
-all: stradac $(RUNTIME_OBJ) tools interpreter
+# Default: build the self-hosting compiler and tools. The tree-walking
+# interpreter / bytecode VM is no longer built by default — `make interpreter`
+# still builds it explicitly.
+all: stradac $(RUNTIME_OBJ) tools
 	@echo ""
 	@echo "✓ Build complete!"
 	@echo "  Compiler: ./stradac"
@@ -372,23 +374,29 @@ configure-check:
 	    echo ""; \
 	fi
 
-# Build all libraries
+# Build all libraries.
+# Libraries are now compiled as module-only object files (.o) via `strada -M`
+# rather than shared libraries (.so). Programs that `use` one of these libs
+# auto-detect the sibling .o and statically link it. Note: extern-C link
+# dependencies (e.g. -lmysqlclient for DBI, -lreadline for readline) are
+# NOT recorded in the .o — the using program must pass them via -l at its
+# own final link.
 libs: configure-check lib-dbi lib-crypt lib-ssl lib-readline lib-eval
 	@echo ""
-	@echo "✓ Libraries built in lib/"
+	@echo "✓ Libraries built in lib/ (as .o; programs that say 'use Foo;' auto-detect the sibling .o)"
 
 # DBI library (database interface)
-lib/DBI.so: lib/DBI.strada stradac configure-check
+lib/DBI.o: lib/DBI.strada stradac configure-check
 	@echo "Building DBI library..."
 	@if [ "$(HAVE_MYSQL)" = "1" ] || [ "$(HAVE_POSTGRES)" = "1" ] || [ "$(HAVE_SQLITE)" = "1" ]; then \
-	    ./strada --shared $(DBI_DEFINES) lib/DBI.strada $(DBI_LIBS) -o lib/DBI.so; \
+	    ./strada -M $(DBI_DEFINES) lib/DBI.strada; \
 	else \
 	    echo "  No database drivers detected. Run ./configure."; \
 	    exit 1; \
 	fi
 	@echo "  DBI drivers: MySQL=$(HAVE_MYSQL) SQLite=$(HAVE_SQLITE) PostgreSQL=$(HAVE_POSTGRES)"
 
-lib-dbi: lib/DBI.so
+lib-dbi: lib/DBI.o
 
 # Crypt library (password hashing)
 CRYPT_DEFINES =
@@ -396,39 +404,36 @@ ifeq ($(HAVE_CRYPT_R),1)
 CRYPT_DEFINES = -DHAVE_CRYPT_R
 endif
 
-lib/crypt.so: lib/crypt.strada stradac
+lib/crypt.o: lib/crypt.strada stradac
 	@echo "Building crypt library..."
-	./strada --shared lib/crypt.strada $(CRYPT_LIBS) $(CRYPT_DEFINES) -o lib/crypt.so
+	./strada -M $(CRYPT_DEFINES) lib/crypt.strada
 
-lib-crypt: lib/crypt.so
+lib-crypt: lib/crypt.o
 
 # Eval library (string eval via tree-walking interpreter)
 lib/Eval.strada: compiler/AST.strada compiler/Lexer.strada interpreter/Stubs.strada compiler/Parser.strada lib/Strada/Interpreter.strada lib/Strada/Eval.strada
 	@echo "Generating Eval module (use Eval)..."
 	@cat compiler/AST.strada compiler/Lexer.strada interpreter/Stubs.strada compiler/Parser.strada lib/Strada/Interpreter.strada lib/Strada/Eval.strada | sed '/^=head/,/^=cut/d' > lib/Eval.strada
 
-lib/Eval.so.strada: lib/Eval.strada
-	@cp lib/Eval.strada lib/Eval.so.strada
-
-lib/Eval.so: lib/Eval.so.strada stradac
+lib/Eval.o: lib/Eval.strada stradac
 	@echo "Building Eval library (string eval)..."
-	./strada --shared lib/Eval.so.strada -o lib/Eval.so
+	./strada -M lib/Eval.strada
 
-lib-eval: lib/Eval.so
+lib-eval: lib/Eval.o
 
 # SSL library
-lib/ssl.so: lib/ssl.strada stradac
+lib/ssl.o: lib/ssl.strada stradac
 	@echo "Building SSL library..."
-	./strada --shared lib/ssl.strada $(SSL_LIBS) -o lib/ssl.so
+	./strada -M lib/ssl.strada
 
-lib-ssl: lib/ssl.so
+lib-ssl: lib/ssl.o
 
 # Readline library
-lib/readline/readline.so: lib/readline/readline.strada stradac
+lib/readline/readline.o: lib/readline/readline.strada stradac
 	@echo "Building readline library..."
-	./strada --shared lib/readline/readline.strada $(READLINE_LIBS) -o lib/readline/readline.so
+	./strada -M lib/readline/readline.strada
 
-lib-readline: lib/readline/readline.so
+lib-readline: lib/readline/readline.o
 
 # =============================================================================
 # Installation
@@ -443,7 +448,7 @@ INSTALL_LIB = $(PREFIX_ABS)/lib/strada
 INSTALL_DOC = $(PREFIX_ABS)/share/doc/strada
 INSTALL_MAN = $(PREFIX_ABS)/share/man/man1
 
-install: stradac $(RUNTIME_OBJ)
+install: stradac $(RUNTIME_OBJ) libs
 	@echo "=== Installing Strada to $(PREFIX) ==="
 	@mkdir -p $(INSTALL_BIN)
 	@mkdir -p $(INSTALL_LIB)/runtime
@@ -478,7 +483,7 @@ install: stradac $(RUNTIME_OBJ)
 	@# Install standard library (Strada modules and shared libraries)
 	@echo "Installing standard library..."
 	@if [ -d lib ]; then \
-	    for ext in strada so c h; do \
+	    for ext in strada so o a c h; do \
 	        find lib -name "*.$$ext" | while read f; do \
 	            dir=$$(dirname "$$f" | sed 's|^lib|$(INSTALL_LIB)/lib|'); \
 	            mkdir -p "$$dir"; \
@@ -517,14 +522,11 @@ install: stradac $(RUNTIME_OBJ)
 	@if [ -x tools/stradapp ]; then \
 	    install -m 755 tools/stradapp $(INSTALL_LIB)/stradapp; \
 	fi
-	@# Build and install the interpreter
-	@echo "Installing interpreter..."
-	@if [ ! -x interpreter/strada-interp ]; then \
-	    echo "  Building strada-interp..."; \
-	    cd interpreter && $(MAKE) 2>/dev/null || true; \
-	    cd ..; \
-	fi
+	@# Install the interpreter only if it's already built (no longer built
+	@# by default — run `make interpreter` to opt in). strada --repl and
+	@# strada --script now go through strada-jit.
 	@if [ -x interpreter/strada-interp ]; then \
+	    echo "Installing interpreter (strada-interp)..."; \
 	    install -m 755 interpreter/strada-interp $(INSTALL_BIN)/strada-interp; \
 	fi
 	@# Install TCC runtime for REPL
@@ -551,8 +553,10 @@ install: stradac $(RUNTIME_OBJ)
 	@echo "✓ Strada installed to $(PREFIX)"
 	@echo "  Compiler: $(INSTALL_BIN)/stradac"
 	@echo "  Wrapper:  $(INSTALL_BIN)/strada"
-	@echo "  Interp:   $(INSTALL_BIN)/strada-interp"
-	@echo "  Tools:    $(INSTALL_BIN)/stradadoc, strada-soinfo, strada-md2man, strada-md2html"
+	@if [ -x interpreter/strada-interp ]; then \
+	    echo "  Interp:   $(INSTALL_BIN)/strada-interp (built explicitly via 'make interpreter')"; \
+	fi
+	@echo "  Tools:    $(INSTALL_BIN)/stradadoc, strada-soinfo, strada-md2man, strada-md2html, strada-jit"
 	@echo "  Runtime:  $(INSTALL_LIB)/runtime/"
 	@echo "  Library:  $(INSTALL_LIB)/lib/"
 	@echo "  Docs:     $(INSTALL_DOC)/"
@@ -608,7 +612,10 @@ clean:
 	rm -rf build/*
 	rm -f stradac
 	rm -f $(TOOL_BINS) $(CONVERTER_BINS)
-	rm -f lib/readline.so
+	rm -f lib/readline.so lib/readline/readline.o
+	rm -f lib/DBI.o lib/DBI.so lib/crypt.o lib/crypt.so
+	rm -f lib/ssl.o lib/ssl.so
+	rm -f lib/Eval.o lib/Eval.so lib/Eval.strada lib/Eval.so.strada
 	@if [ -f vendor/pcre2/Makefile ]; then $(MAKE) -C vendor/pcre2 clean; fi
 	@echo "✓ Cleaned"
 
