@@ -145,6 +145,7 @@ test_output_contains "$EXAMPLES_DIR/test_math_libc.strada" "test_math_libc" "All
 test_output_contains "$EXAMPLES_DIR/test_process_libc.strada" "test_process_libc" "All process libc tests passed" "Extended process functions"
 test_output_contains "$EXAMPLES_DIR/test_user_libc.strada" "test_user_libc" "All user libc tests passed" "User/group functions"
 test_output_contains "$EXAMPLES_DIR/test_fileio_libc.strada" "test_fileio_libc" "All file I/O libc tests passed" "File I/O functions"
+test_output_contains "$EXAMPLES_DIR/test_in_memory_io.strada" "test_in_memory_io" "All in-memory I/O tests passed" "In-memory I/O (open \$scalar)"
 test_output_contains "$EXAMPLES_DIR/test_socket_libc.strada" "test_socket_libc" "All socket libc tests passed" "Socket functions"
 test_output_contains "$EXAMPLES_DIR/test_misc_libc.strada" "test_misc_libc" "All misc libc tests passed" "Misc libc functions"
 

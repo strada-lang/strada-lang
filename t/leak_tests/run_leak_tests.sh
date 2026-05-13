@@ -85,6 +85,7 @@ TESTS=(
     "test_oop_fast_accessor"
     "test_compound_assign"
     "test_concat_hash_keys"
+    "test_in_memory_io"
 )
 
 # Tests with known leaks (for future work):
