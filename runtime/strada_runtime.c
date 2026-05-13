@@ -14497,9 +14497,14 @@ StradaValue* strada_bless(StradaValue *ref, const char *package) {
 }
 
 StradaValue* strada_blessed(StradaValue *ref) {
-    /* Return the package name this ref is blessed into, or undef */
+    /* Return the package name this ref is blessed into, or undef.
+     * Guard against tagged ints — they're pointer-encoded with no meta
+     * slot, so SV_BLESSED would dereference a bogus pointer. */
+    if (!ref || STRADA_IS_TAGGED_INT(ref)) {
+        return strada_new_undef();
+    }
     const char *bp = SV_BLESSED(ref);
-    if (!ref || !bp) {
+    if (!bp) {
         return strada_new_undef();
     }
     return strada_new_str(bp);
