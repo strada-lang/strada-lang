@@ -2638,8 +2638,61 @@ project/
 ├── main.strada
 └── lib/
     └── Math/
-        └── Utils.sm
+        └── Utils.strada
 ```
+
+### Separate Compilation
+
+`use Foo;` is more than a source-level inclusion — it auto-detects a sibling
+`Foo.o` (or `Foo.so`) next to `Foo.strada` and skips re-parsing the source when
+the artifact is fresh (mtime ≥ source). This is the foundation for `make`-style
+incremental builds.
+
+```bash
+# Precompile a module to a sibling .o
+strada -M lib/Math/Utils.strada
+# -> lib/Math/Utils.o
+
+# Recursively precompile a tree
+strada -M lib/
+
+# main.strada uses `use Math::Utils;` — it picks up Utils.o automatically;
+# the source is not re-inlined, saving compile time for large projects.
+strada -r main.strada
+```
+
+`-M` produces a *module-only* `.o`: it contains only that file's own
+functions/globals/blocks. Anything brought in by `use` lives in *that*
+module's `.o`. The flip side: every transitively-used module must also
+have a `.o` (or be re-inlined from source).
+
+For a self-contained `.o` that embeds every `use`d module's code (the
+legacy bundle behavior), pass `--object-full` instead. `--shared` keeps
+the same legacy semantics for `.so` outputs.
+
+### Declaring Extern-C Link Dependencies
+
+Modules that wrap C libraries advertise their `-l<name>` deps with
+`link_lib` so consumers of the precompiled `.o` get them at link time:
+
+```strada
+package DBI;
+
+#ifdef HAVE_SQLITE3
+link_lib "sqlite3";
+#endif
+#ifdef HAVE_MYSQL
+link_lib "mysqlclient";
+#endif
+
+# ... rest of DBI ...
+```
+
+The `link_lib` strings flow through `__strada_export_info` into the `.o`'s
+metadata. When another program says `use DBI;` (and `DBI.o` is auto-detected),
+the strada driver emits `-lsqlite3 -lmysqlclient` to the final gcc link.
+You can declare as many `link_lib` lines as needed; they accumulate and
+dedupe automatically.
 
 ### Object-Oriented Programming
 

@@ -27,7 +27,6 @@ Welcome to the Strada programming language documentation. Strada is a strongly-t
 | [FFI Guide](FFI_GUIDE.md) | C integration and foreign functions |
 | [Perl Integration](PERL_INTEGRATION.md) | Calling Perl from Strada and vice versa |
 | [Runtime API](RUNTIME_API.md) | C runtime library reference |
-| [Interpreter](INTERPRETER.md) | Bytecode VM interpreter, REPL, and Perla VM mode |
 | [Compiler Architecture](COMPILER_ARCHITECTURE.md) | How the compiler works |
 | [Perl Integration](PERL_INTEGRATION.md) | Perl interop, Perla compiler, and conversion tools |
 
@@ -82,13 +81,10 @@ Compile and run:
 - **FFI** for calling C libraries
 - **Regex** with inline `/pattern/` syntax
 
-### Interpreter
-- Bytecode VM interpreter (default), 4-5x faster than Perl 5.38
-- Tree-walking backend available via `--tree-walk`
-- REPL with readline support
-- `__C__` blocks JIT-compiled and cached in VM mode
-- Embedded eval via `Strada::Interpreter::eval_string()`
-- No C compiler needed at runtime (except for `__C__` blocks)
+### REPL and Scripting
+- `strada --repl` routes through `strada-jit` (real native compilation via tcc/gcc + dlopen), so the REPL supports the full language — closures, try/catch, OOP, the lot. tcc is auto-detected for snappier per-line latency; falls back to gcc.
+- `strada --script FILE` runs in **whole-file mode** by default (`gcc` slurps the whole file once and exec's the binary). Pass `--chunked` for line-by-line REPL semantics.
+- Bytecode VM and tree-walking interpreter still exist under `interpreter/strada-interp` (opt-in via `make interpreter`). Embedded `Strada::Interpreter::eval()` defaults to the tree-walking backend so it works out of the box without `-DHAVE_VM` in the runtime.
 
 ### Performance
 - Compiles to C, then native code
@@ -124,4 +120,4 @@ Archived historical documentation is in `docs/archive/`.
 
 ## Version
 
-This documentation covers Strada as of April 2026.
+This documentation covers Strada as of May 2026.

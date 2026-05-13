@@ -114,10 +114,11 @@ make libs
 ```
 
 This builds:
-- `lib/DBI.so` - Database interface (MySQL/SQLite/PostgreSQL based on configure)
-- `lib/crypt.so` - Password hashing
-- `lib/ssl.so` - SSL/TLS support
-- `lib/readline/readline.so` - Line editing for REPL
+- `lib/DBI.o` - Database interface (MySQL/SQLite/PostgreSQL based on configure)
+- `lib/crypt.o` - Password hashing
+- `lib/ssl.o` - SSL/TLS support
+- `lib/readline/readline.o` - Line editing for REPL
+- `lib/Eval.o` - Runtime string eval (`Strada::Interpreter::eval`)
 
 Individual library targets:
 ```bash
@@ -169,20 +170,20 @@ export STRADA_HOME="/usr/local/lib/strada"
 | Target | Description |
 |--------|-------------|
 | `./configure` | Detect system dependencies |
-| `make` | Build the self-hosting compiler |
-| `make libs` | Build all shared libraries (DBI, crypt, ssl, readline) |
-| `make lib-dbi` | Build DBI library with detected database drivers |
-| `make lib-crypt` | Build crypt library |
-| `make lib-ssl` | Build SSL library |
-| `make lib-readline` | Build readline library |
-| `make interpreter` | Build the interpreter (`strada-interp`) with bytecode VM |
-| `make tools` | Build tools (stradadoc, strada-soinfo, strada-proftext, strada-profhtml, etc.) |
+| `make` | Build the self-hosting compiler and tools. **Does not** build `strada-interp` (tree-walking interpreter / bytecode VM) — run `make interpreter` explicitly if you need it. |
+| `make libs` | Build all standard libraries as **module-only `.o`** files (DBI, crypt, ssl, readline, Eval). Programs that `use Foo;` auto-detect the sibling `.o`. No `.so` is built by default. |
+| `make lib-dbi` | Build DBI as `.o` with detected database drivers (`link_lib` propagates `-lmysqlclient`/`-lsqlite3`/`-lpq` to the final link). |
+| `make lib-crypt` | Build crypt library as `.o`. |
+| `make lib-ssl` | Build SSL library as `.o`. |
+| `make lib-readline` | Build readline library as `.o`. |
+| `make interpreter` | Build the tree-walking interpreter / bytecode VM (`strada-interp`). Opt-in — `strada --repl` and `strada --script` go through `strada-jit` instead by default. |
+| `make tools` | Build tools (stradadoc, strada-soinfo, strada-proftext, strada-profhtml, strada-jit, etc.) |
 | `make run PROG=name` | Compile and run `examples/name.strada` |
 | `make test` | Run runtime tests |
 | `make test-selfhost` | Verify compiler can compile itself |
-| `make test-suite` | Run comprehensive test suite |
+| `make test-suite` | Run comprehensive test suite (~90s) |
 | `make examples` | Build all example programs |
-| `make install` | Install to system (default: /usr/local) |
+| `make install` | Install to system (default: /usr/local). Builds libs first so the precompiled `.o`s ship with the install. |
 | `make clean` | Remove all build artifacts |
 | `make help` | Show all available targets |
 

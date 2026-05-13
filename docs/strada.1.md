@@ -4,11 +4,13 @@ Compile and run Strada programs
 
 ## SYNOPSIS
 
-**strada** [*options*] *input.strada* [*extra.c* ...] [*extra.o* ...]
+**strada** [*options*] *input.strada* [*extra.c* ...] [*extra.o* ...] [*extra.a* ...]
 
 **strada** **--shared** *library.strada*
 
 **strada** **--static** *program.strada*
+
+**strada** **-M** *file_or_dir*
 
 **strada** **--repl**
 
@@ -33,6 +35,9 @@ Strada is a strongly-typed programming language inspired by Perl. It features Pe
 
 - **-O** *level*
   Set gcc optimization level (0, 1, 2, 3, s, fast). Default is 2. At -O2 and above, -flto (link-time optimization) is automatically enabled for cross-function inlining. At -O3 and -Ofast, -march=native is also added.
+
+- **-fno-lto**, **--no-lto**
+  Skip link-time optimization. Useful for test/dev builds — gcc finishes in a fraction of the time, at the cost of some cross-module inlining in the final binary. The pre-built runtime is compiled with `-ffat-lto-objects`, so this flag lets you link against it without paying for an LTO pass.
 
 - **-L** *path*
   Add a library search path with high priority. These paths are searched first when resolving `use`, `import_lib`, `import_object`, and `import_archive` statements.
@@ -68,7 +73,13 @@ Strada is a strongly-typed programming language inspired by Perl. It features Pe
   Compile as a static library archive (.a) that includes the Strada runtime. Use `import_archive` to link against it.
 
 - **--object**
-  Compile to an object file (.o) only, without linking. Use `import_object` to link against it.
+  Compile to an object file (.o). By default the .o contains only the input file's own symbols — anything brought in by `use` lives in *that* module's `.o`, not yours. Combine with `--object-full` to bundle every transitively-used module's compiled code into one self-contained `.o`.
+
+- **--object-full**
+  Compile to a `.o` that bundles all `use`d module code as well (the legacy pre-separate-compilation behaviour). Use this when you want a single drop-in `.o` for distribution.
+
+- **-M** *file_or_dir*
+  Precompile module(s). With a `.strada` file, produces a sibling `.o` containing only that file's own symbols. With a directory, walks recursively and produces a sibling `.o` for each `.strada` underneath. The resulting `.o`s are picked up automatically by `use Foo;` when sitting next to `Foo.strada` (mtime-fresh).
 
 - **-w**
   Show compiler warnings (unused variables, etc.).
@@ -80,14 +91,23 @@ Strada is a strongly-typed programming language inspired by Perl. It features Pe
   Display help message and exit.
 
 - **--repl**
-  Start the interactive REPL (Read-Eval-Print Loop). Allows experimenting with Strada code without creating files. Supports defining variables and functions that persist across evaluations.
+  Start the interactive REPL (Read-Eval-Print Loop), routed through **strada-jit**. The JIT compiles each balanced chunk to a `.so` and dlopens it, so the REPL supports the full Strada language (closures, try/catch, OOP, etc.). Compiler backend is auto-detected: **tcc** when installed (snappier per-line latency), **gcc** otherwise. Override with `--compiler=tcc` or `--compiler=gcc`.
 
 - **--script** *file*
-  Run a Strada script file through the REPL interpreter. Scripts don't require a `main()` function - top-level code executes directly. Useful for quick tasks and automation.
+  Compile and run a Strada script via **strada-jit** in whole-file mode: the entire file is handed to `stradac` once and the resulting binary is exec'd. Defaults to `gcc` (the latency cost is amortised over the whole script and gcc enables `try/catch`, `const`, `enum`). Pass `--compiler=tcc` for fast TCC compilation, or `--chunked` to fall back to per-statement REPL semantics.
 
 ## EXTRA FILES
 
-You can include additional C source files (.c) and object files (.o) after the Strada source file. These are compiled and linked into the final executable, which is useful for C interop via `extern` functions.
+You can include additional C source files (.c), object files (.o), and static archives (.a) after the Strada source file.
+
+C source files are compiled and linked into the final executable — useful for C interop via `extern` functions.
+
+`.o` and `.a` files are detected automatically:
+
+- **Strada module objects** (recognised by an `__strada_export_info` symbol via `nm`) behave like an implicit `import_object` / `import_archive`. The compiler picks up the package metadata; you can call its functions by their namespace without declaring `import_object` in source.
+- **Plain extern-C objects/archives** are simply linked in.
+
+Extern-C link dependencies declared in source via `link_lib "name";` (e.g. DBI declaring `"mysqlclient"`) propagate through the precompiled `.o` and are added to the final gcc link automatically as `-l<name>`.
 
 ## EXAMPLES
 
@@ -116,10 +136,37 @@ Create a static archive (includes runtime):
 strada --static-lib mylib.strada
 ```
 
-Create an object file:
+Create a module-only object file (Foo.o contains only Foo's own symbols):
 
 ```
-strada --object mylib.strada
+strada --object MyLib.strada
+```
+
+Precompile a single module to a sibling `.o`:
+
+```
+strada -M lib/MyLib.strada
+# -> lib/MyLib.o
+```
+
+Precompile every `.strada` in a tree:
+
+```
+strada -M src/
+# -> sibling .o next to each .strada under src/
+```
+
+Use a precompiled module via `use Foo;` (auto-detect):
+
+```
+# Given lib/MyLib.strada + lib/MyLib.o (mtime-fresh):
+strada main.strada                 # use MyLib; picks up MyLib.o; no re-inlining
+```
+
+Bundle all transitively-used modules into one `.o` (legacy):
+
+```
+strada --object-full mylib.strada
 ```
 
 Compile with SSL support:

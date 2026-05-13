@@ -22,6 +22,15 @@ The compiler is self-hosting - it is written in Strada itself.
 - **-LL** *path*
   Add a library search path with low priority. These paths are searched last.
 
+- **--import-object** *path*
+  Treat *path* as an implicit `import_object` — extract its `__strada_export_info` metadata so calls to that module's namespace resolve, and emit it into `__STRADA_OBJECT_FILES__` so the linker picks it up. Used by the **strada** driver to forward CLI-passed Strada module objects.
+
+- **--import-archive** *path*
+  Same as `--import-object` but for static archives (`.a`).
+
+- **-M** [*target*]
+  Module-only codegen. Only the input file's own functions, globals, BEGIN/END blocks, and top-level `__C__` blocks produce bodies in the output; anything brought in by `use` gets a forward declaration but no body. *target* is normally derived from the input filename (`Foo.strada` → target `Foo`) and is used purely for naming. The actual filter looks at each AST item's `from_use` tag (set by `load_module`), so files declaring multiple packages — e.g. `Eval.strada` which declares `package Strada::Interpreter` and `package Strada::Eval` — still emit their own content correctly.
+
 - **-g**, **--debug**
   Emit `#line` directives in the generated C code. This enables source-level debugging where the debugger shows Strada source lines instead of generated C code.
 
@@ -63,6 +72,18 @@ Compile with custom library paths:
 
 ```
 stradac -L ./mylibs -L /opt/strada/lib app.strada app.c
+```
+
+Module-only compile (produces a `.c` whose `.o` only carries this file's own symbols — anything from `use` is left to the consumer to link):
+
+```
+stradac -M Foo.strada Foo.c
+```
+
+Forward a CLI-passed Strada module as an implicit import:
+
+```
+stradac --import-object /path/to/MyLib.o app.strada app.c
 ```
 
 ## FILES

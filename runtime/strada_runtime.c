@@ -974,16 +974,31 @@ static void strada_close_fh_meta(FILE *fh) {
             break;
         case FH_MEMWRITE_REF: {
             fflush(fh);
-            /* Copy buffer contents to the target StradaValue */
-            StradaValue *target = meta->target_ref->value.rv;
-            if (target && target->type == STRADA_STR) {
-                ss_free_pv(target->value.pv);
-                target->value.pv = ss_alloc_pv(meta->mem_buf, meta->mem_size);
-                target->struct_size = meta->mem_size;
+            /* Copy buffer contents back to the target scalar. Slot refs
+             * hold StradaValue** in value.ptr; regular refs hold the
+             * target in value.rv. For slot refs we may have to replace
+             * the slot's value entirely (the underlying variable may be
+             * undef or non-string). */
+            StradaValue *ref = meta->target_ref;
+            if (ref && strada_is_slot_ref(ref)) {
+                StradaValue **slot = (StradaValue**)ref->value.ptr;
+                if (slot) {
+                    StradaValue *new_str = strada_new_str_len(meta->mem_buf, meta->mem_size);
+                    StradaValue *old = *slot;
+                    *slot = new_str;
+                    if (old) strada_decref(old);
+                }
+            } else if (ref) {
+                StradaValue *target = ref->value.rv;
+                if (target && target->type == STRADA_STR) {
+                    ss_free_pv(target->value.pv);
+                    target->value.pv = ss_alloc_pv(meta->mem_buf, meta->mem_size);
+                    target->struct_size = meta->mem_size;
+                }
             }
             fclose(fh);
             free(meta->mem_buf);
-            strada_decref(meta->target_ref);
+            if (ref) strada_decref(ref);
             break;
         }
         default:
@@ -4729,15 +4744,24 @@ StradaValue* strada_open_sv(StradaValue *first_arg, StradaValue *mode_arg) {
     if (!first_arg || !mode_arg || STRADA_IS_TAGGED_INT(first_arg) || STRADA_IS_TAGGED_INT(mode_arg)) return strada_new_undef();
 
     if (first_arg->type == STRADA_REF) {
-        /* Reference-style open: core::open(\$var, "r"/"w"/"a") */
-        StradaValue *referent = first_arg->value.rv;
+        /* Reference-style open: core::open(\$var, "r"/"w"/"a").
+         * Slot refs store the variable address in value.ptr (StradaValue**);
+         * regular refs store the target StradaValue* in value.rv. Pick the
+         * right field via strada_is_slot_ref so writes propagate back. */
+        StradaValue *referent;
+        if (strada_is_slot_ref(first_arg)) {
+            StradaValue **slot = (StradaValue**)first_arg->value.ptr;
+            referent = slot ? *slot : NULL;
+        } else {
+            referent = first_arg->value.rv;
+        }
         char _tb[16];
         const char *mode = strada_to_str_buf(mode_arg, _tb, sizeof(_tb));
 
         if (mode[0] == 'r') {
             /* Read from referenced string */
             char _tb2[256];
-            const char *content = strada_to_str_buf(referent, _tb2, sizeof(_tb2));
+            const char *content = referent ? strada_to_str_buf(referent, _tb2, sizeof(_tb2)) : "";
             size_t len = strlen(content);
             char *buf = malloc(len + 1);
             memcpy(buf, content, len);
@@ -4755,7 +4779,7 @@ StradaValue* strada_open_sv(StradaValue *first_arg, StradaValue *mode_arg) {
             meta->fh = fh;
             meta->target_ref = first_arg;
             strada_incref(first_arg);  /* Keep ref alive until close */
-            if (mode[0] == 'a') {
+            if (mode[0] == 'a' && referent) {
                 /* Append: pre-write existing content */
                 char _tb3[256];
                 const char *existing = strada_to_str_buf(referent, _tb3, sizeof(_tb3));

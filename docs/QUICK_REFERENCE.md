@@ -655,6 +655,7 @@ printf("%s: %d", $name, $val);
 my str $line = core::readline();               # Read from stdin
 my str $content = core::slurp("file.txt");     # Read entire file
 core::spew("file.txt", $data);                 # Write entire file
+my int $m = core::file_mtime("file.txt");      # mtime in epoch seconds, -1 if stat fails
 
 # File handle operations
 my scalar $fh = core::open("file.txt", "r");
@@ -767,24 +768,70 @@ func add(int $a, int $b) int {
 # Library Import Options
 use lib "lib";
 
-# Shared library (runtime loading via dlopen)
-import_lib "JSON.so";              # Loads lib/JSON.so at runtime
-my str $json = JSON::encode(\%data);
+# Plain `use` (most common): finds Foo.strada in lib paths. If a fresh
+# sibling Foo.o or Foo.so exists (mtime ≥ source), uses that as an
+# implicit import_object / import_lib — no source re-inlining. Stale
+# artifacts fall back to source compilation automatically.
+use JSON;
 
-# Object file (static linking)
-import_object "MathLib.o";         # Links lib/MathLib.o into executable
+# Explicit forms (still supported; useful when no .strada is shipped):
+import_lib "JSON.so";              # Loads lib/JSON.so at runtime via dlopen
+import_object "MathLib.o";         # Statically links lib/MathLib.o
+import_archive "FullLib.a";        # Statically links lib/FullLib.a (bundled runtime)
 
-# Archive file (static linking, includes runtime)
-import_archive "FullLib.a";        # Links lib/FullLib.a into executable
+# Implicit imports from the strada CLI: pass .o or .a directly. The
+# driver runs nm to tell Strada modules apart from plain extern-C blobs
+# and forwards Strada modules to stradac as implicit import_object/archive.
+#   strada main.strada MathLib.o sqlite_helper.o
 ```
 
 **Library Import Comparison:**
 
 | Statement | File | Linking | Use Case |
 |-----------|------|---------|----------|
+| `use Foo` | auto | Compile time (.o/.so detected) or source inlining | Default for Strada modules — fast `make`-style separate compilation |
 | `import_lib "X.so"` | .so | Runtime (dlopen) | Plugins, optional features |
 | `import_object "X.o"` | .o | Compile time | Single-file static linking |
 | `import_archive "X.a"` | .a | Compile time | Multi-file archives with bundled runtime |
+
+**Producing reusable artifacts:**
+
+```bash
+# Module-only .o (recommended for libraries; just this file's symbols).
+# Programs that `use Foo;` auto-detect Foo.o sitting next to Foo.strada.
+strada -M lib/Foo.strada           # -> lib/Foo.o
+
+# Recursive: precompile every .strada under a tree.
+strada -M src/
+
+# Bundled .o that also embeds all transitively `use`d module code (legacy).
+strada --object-full lib/Foo.strada -o Foo.o
+
+# Shared library (runtime dlopen target). The .so embeds its extern-C deps.
+strada --shared lib/Foo.strada -o Foo.so
+```
+
+**Declaring extern-C link dependencies:**
+
+A module that calls into C libraries (e.g. `libmysqlclient`) advertises them with
+`link_lib` so consumers of the precompiled `.o` get the right `-l<name>` automatically:
+
+```strada
+package DBI;
+
+#ifdef HAVE_SQLITE3
+link_lib "sqlite3";
+#endif
+#ifdef HAVE_MYSQL
+link_lib "mysqlclient";
+#endif
+
+# ... rest of the module
+```
+
+`link_lib` declarations are embedded in `__strada_export_info`, so when another
+program says `use DBI;` and the compiler auto-detects `DBI.o`, the linker
+arguments propagate to the final binary without the user passing `-l` flags.
 
 ## Object-Oriented Programming
 
@@ -1016,7 +1063,7 @@ Named arguments: keys and values alternate in the argument list. Child construct
 
 All `core::` functions can also be called via the `core::` prefix (preferred). For example, `core::open()` and `core::open()` are identical.
 
-**Files:** `core::open`, `core::open_str`, `core::str_from_fh`, `core::close`, `core::readline`, `core::slurp`, `core::spew`, `core::seek`, `core::tell`
+**Files:** `core::open`, `core::open_str`, `core::str_from_fh`, `core::close`, `core::readline`, `core::slurp`, `core::spew`, `core::seek`, `core::tell`, `core::file_exists`, `core::file_mtime`, `core::stat`
 
 **Process:** `core::sleep`, `core::usleep`, `core::fork`, `core::wait`, `core::waitpid`, `core::getpid`, `core::getppid`, `core::system`, `core::exec`, `core::signal`, `core::exit`
 
