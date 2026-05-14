@@ -5640,6 +5640,8 @@ int strada_wanthash(void) {
     return strada_call_context == 2;
 }
 
+int strada_pending_call_line = 0;  /* compat — no longer consumed by push */
+
 void strada_stack_push(const char *func_name, const char *file_name) {
     /* Check recursion limit before pushing */
     if (strada_recursion_limit > 0 && strada_call_depth >= strada_recursion_limit) {

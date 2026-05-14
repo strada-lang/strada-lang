@@ -11859,6 +11859,16 @@ func gen_expression(scalar $cg, scalar $expr) void {
             if ($is_dynamic_call == 1) {
                 emit($cg, "strada_set_call_context(" . $dyn_ctx . "); ");
             }
+            # Stash this call site's line so the callee's stack_push
+            # records it as the new frame's `line` — that's what
+            # caller(0) inside the callee reads. Without this, every
+            # frame has line=0.
+            if ($cg->{"enable_stack_trace"} == 1) {
+                my int $__cl_line = $expr->{"line"} + 0;
+                if ($__cl_line > 0) {
+                    emit($cg, "strada_stack_set_line(" . $__cl_line . "); ");
+                }
+            }
             if ($returns_void == 0) {
                 emit($cg, "StradaValue *__va_result = ");
             }
@@ -11966,6 +11976,13 @@ func gen_expression(scalar $cg, scalar $expr) void {
             if ($is_dynamic_call == 1) {
                 emit($cg, "strada_set_call_context(" . $dyn_ctx . "); ");
             }
+            # Stash call-site line for caller() — see comment above.
+            if ($cg->{"enable_stack_trace"} == 1) {
+                my int $__cl_line2 = $expr->{"line"} + 0;
+                if ($__cl_line2 > 0) {
+                    emit($cg, "strada_stack_set_line(" . $__cl_line2 . "); ");
+                }
+            }
             if ($returns_void == 0) {
                 emit($cg, "StradaValue *__call_result = ");
             }
@@ -12054,6 +12071,17 @@ func gen_expression(scalar $cg, scalar $expr) void {
             if ($is_dynamic_call == 1) {
                 emit($cg, "({ strada_set_call_context(" . $dyn_ctx . "); StradaValue *__dyn_r = ");
             }
+            # Stash call-site line for caller() — see comment above.
+            # Wrap the call in a comma expression so this stays an
+            # expression at any nesting level (statement, my-init,
+            # sort key, etc.). strada_stack_set_line returns void so
+            # use comma operator with sequenced cast to (void).
+            if ($cg->{"enable_stack_trace"} == 1) {
+                my int $__cl_line3 = $expr->{"line"} + 0;
+                if ($__cl_line3 > 0) {
+                    emit($cg, "(strada_stack_set_line(" . $__cl_line3 . "), ");
+                }
+            }
             emit($cg, $c_name . "(");
             if ($func_info) {
                 my int $param_count = $func_info->{"param_count"};
@@ -12090,10 +12118,17 @@ func gen_expression(scalar $cg, scalar $expr) void {
             } else {
                 emit($cg, ")");
             }
+            # Close the comma-expression wrapper from the call-line set.
+            if ($cg->{"enable_stack_trace"} == 1) {
+                my int $__cl_line3c = $expr->{"line"} + 0;
+                if ($__cl_line3c > 0) {
+                    emit($cg, ")");
+                }
+            }
         }
         return;
     }
-    
+
     # Assignment
     if ($type == NODE_ASSIGN()) {
         my str $op = $expr->{"op"};

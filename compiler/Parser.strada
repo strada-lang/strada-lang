@@ -5160,6 +5160,28 @@ func program_has_import_object(scalar $program, str $obj_name) int {
     return 0;
 }
 
+# Same as program_has_import_object but matches by the resolved .o file path.
+# Catches the case where the same .o file is registered under two different
+# obj_names — e.g., `use Top::Sub;` auto-detects sibling Top/Sub.o under
+# obj_name="Top::Sub" while CLI-passed `Top/Sub.o` would otherwise register
+# it again under obj_name="Sub" (basename only), bypassing name-based dedup
+# and producing multiple-definition errors at link time.
+func program_has_import_object_path(scalar $program, str $o_path) int {
+    my scalar $objs = $program->{"import_objects"};
+    my int $count = $program->{"import_object_count"};
+    my int $i = 0;
+    while ($i < $count) {
+        my scalar $info = $objs->[$i];
+        my str $existing = "";
+        if (defined($info->{"o_path"})) {
+            $existing = $info->{"o_path"};
+        }
+        if (length($existing) > 0 && $existing eq $o_path) { return 1; }
+        $i = $i + 1;
+    }
+    return 0;
+}
+
 # Check whether the program already has an import_archive with the given arch_name.
 func program_has_import_archive(scalar $program, str $arch_name) int {
     my scalar $archs = $program->{"import_archives"};
@@ -5183,8 +5205,15 @@ func do_import_object_at(scalar $parser, scalar $program, str $obj_file, str $o_
         $obj_name = substr($obj_file, 0, length($obj_file) - 2);
     }
 
-    # Skip if already imported (e.g., both source-level and CLI-implicit)
+    # Skip if already imported (e.g., both source-level and CLI-implicit).
+    # Check both obj_name and o_path: when `use Top::Sub;` auto-detects a
+    # sibling .o, it registers obj_name="Top::Sub"; a CLI-passed Top/Sub.o
+    # would otherwise register the same file under obj_name="Sub" (just the
+    # basename), evading name-based dedup. Path-based dedup catches that.
     if (program_has_import_object($program, $obj_name) == 1) {
+        return 0;
+    }
+    if (program_has_import_object_path($program, $o_path) == 1) {
         return 0;
     }
 

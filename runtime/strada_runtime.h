@@ -750,6 +750,7 @@ typedef struct {
 extern StradaStackFrame strada_call_stack[STRADA_MAX_CALL_DEPTH];
 extern int strada_call_depth;
 extern int strada_recursion_limit;  /* Configurable limit (default 1000, 0 = disabled) */
+extern int strada_pending_call_line;  /* set by codegen at each call site; strada_stack_push consumes */
 
 void strada_stack_push(const char *func_name, const char *file_name);
 void strada_stack_pop(void);

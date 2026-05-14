@@ -186,6 +186,30 @@ extern StradaValue *strada_exception_value;
 extern char *(*strada_overload_stringify_hook)(StradaValue *sv);
 extern int (*strada_overload_numeric_hook)(StradaValue *sv, double *out);
 extern int (*strada_overload_bool_hook)(StradaValue *sv);
+/* DESTROY hook — Perl-style packages register DESTROY via perla_code_set,
+ * not the strada OOP table that strada_call_destroy walks. If set,
+ * strada_call_destroy calls this BEFORE its own lookup. Returns 1 if it
+ * handled the call (skip default path), 0 if not. */
+extern int (*strada_destroy_hook)(StradaValue *obj);
+
+/* Optional die-path hooks for embedders. Both default to NULL.
+ *
+ *  strada_die_trace_hook(msg, try_depth) — called on every throw/die
+ *  before unwind. Embedder uses this to log a diagnostic with its own
+ *  call-stack info (e.g. Perla checks $ENV{PERLA_DIE_TRACE} and dumps
+ *  perla_call_stack). The hook does NOT abort or alter control flow.
+ *
+ *  strada_die_continue_hook() — consulted ONLY when a die is fatal
+ *  (no enclosing try block). Returns 1 to suppress exit(1) and warn-
+ *  and-continue instead. Embedder uses this for "limp along to see
+ *  what dies next" debugging (e.g. PERLA_DIE_WARN). */
+extern void (*strada_die_trace_hook)(const char *msg, int try_depth);
+extern int (*strada_die_continue_hook)(void);
+
+/* Pending cleanup for function call args and local vars in try blocks */
+#define STRADA_MAX_PENDING_CLEANUP 4096
+extern StradaValue *strada_pending_cleanup[STRADA_MAX_PENDING_CLEANUP];
+extern int strada_pending_cleanup_count;
 
 #define STRADA_TRY_PUSH() (strada_try_depth < STRADA_MAX_TRY_DEPTH ? \
     (strada_try_stack[strada_try_depth].active = 1, &strada_try_stack[strada_try_depth++].buf) : NULL)
@@ -626,6 +650,17 @@ void strada_cleanup_drain_to(int mark);
 /* ============================================================
  * Stack Trace Management
  * ============================================================ */
+typedef struct {
+    const char *func_name;   /* Function name */
+    const char *file_name;   /* Source file name */
+    int line;                /* Current line number */
+} StradaStackFrame;
+
+extern StradaStackFrame strada_call_stack[STRADA_MAX_CALL_DEPTH];
+extern int strada_call_depth;
+extern int strada_recursion_limit;  /* Configurable limit (default 1000, 0 = disabled) */
+extern int strada_pending_call_line;  /* set by codegen at each call site; strada_stack_push consumes */
+
 void strada_stack_push(const char *func_name, const char *file_name);
 void strada_stack_pop(void);
 void strada_stack_set_line(int line);
