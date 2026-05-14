@@ -16875,6 +16875,24 @@ func gen_function(scalar $cg, scalar $fn) void {
             emit($cg, "\n");
         }
 
+        # Also call OOP init for each imported .o file's package. The weak
+        # forward decl above lets these resolve to NULL when the .o has no
+        # methods; main() guards each call with a NULL check.
+        my int $impo_count = $cg->{"import_object_count"};
+        if ($impo_count > 0) {
+            my scalar $impo_objs = $cg->{"import_objects"};
+            emit($cg, "    /* OOP init for imported .o modules (weak) */\n");
+            my int $impo_i = 0;
+            while ($impo_i < $impo_count) {
+                my scalar $impo = $impo_objs->[$impo_i];
+                my str $impo_name = $impo->{"obj_name"};
+                my str $c_impo = sanitize_name($impo_name);
+                emit($cg, "    if (__" . $c_impo . "_oop_init) __" . $c_impo . "_oop_init();\n");
+                $impo_i = $impo_i + 1;
+            }
+            emit($cg, "\n");
+        }
+
         # If main has parameters, bind argc/argv from raw C values (includes program name)
         my scalar $params = $fn->{"params"};
         my int $param_count = $fn->{"param_count"};
@@ -17334,6 +17352,13 @@ func gen_program(scalar $cg, scalar $program) void {
     $cg->{"inherits"} = $program->{"inherits"};
     $cg->{"inherit_count"} = $program->{"inherit_count"};
 
+    # Store import_objects so gen_function (which doesn't get $program) and
+    # gen_global_constructor can emit weak OOP-init calls for them — needed
+    # because an auto-imported .o module may contain OOP method registrations
+    # whose __<pkg>_oop_init() must be called at process start.
+    $cg->{"import_objects"} = $program->{"import_objects"};
+    $cg->{"import_object_count"} = $program->{"import_object_count"};
+
     # Store overload info
     $cg->{"has_overloads"} = $program->{"has_overloads"};
     $cg->{"overloads"} = $program->{"overloads"};
@@ -17788,6 +17813,26 @@ func gen_program(scalar $cg, scalar $program) void {
             }
 
             $obj_idx = $obj_idx + 1;
+        }
+        emit($cg, "\n");
+
+        # Imported .o modules may contain OOP method registrations whose
+        # __<pkg>_oop_init() needs to be called from main() to populate the
+        # runtime's method-dispatch table. Locally-defined packages already
+        # get oop_init calls via the pkg_list path; for imported .o we don't
+        # know at parse-time whether the module has methods, so emit a weak
+        # forward declaration and let main() call it iff defined. Without
+        # this, calls through OOP method dispatch on imported types
+        # silently no-op or segfault, because the method table never got
+        # populated.
+        emit($cg, "/* import_object: weak OOP init forward declarations */\n");
+        my int $oop_obj_idx = 0;
+        while ($oop_obj_idx < $import_object_count) {
+            my scalar $obj_info_o = $import_objects->[$oop_obj_idx];
+            my str $obj_name_o = $obj_info_o->{"obj_name"};
+            my str $c_oop_obj = sanitize_name($obj_name_o);
+            emit($cg, "__attribute__((weak)) void __" . $c_oop_obj . "_oop_init(void);\n");
+            $oop_obj_idx = $oop_obj_idx + 1;
         }
         emit($cg, "\n");
     }
@@ -18440,6 +18485,25 @@ func gen_global_constructor(scalar $cg) void {
             my str $c_oop_pkg = sanitize_name($oop_pkg);
             emit($cg, "    __" . $c_oop_pkg . "_oop_init();\n");
             $oop_i = $oop_i + 1;
+        }
+        emit($cg, "\n");
+    }
+
+    # Also call OOP init for imported .o modules (weak — guarded by NULL check
+    # in case the .o has no OOP methods and didn't emit an init). Same fix as
+    # in main() — without this, shared-library builds whose `use`d modules
+    # have methods won't have those methods registered at dlopen time.
+    my int $impo_count = $cg->{"import_object_count"};
+    if ($impo_count > 0) {
+        my scalar $impo_objs = $cg->{"import_objects"};
+        emit($cg, "    /* OOP init for imported .o modules (weak) */\n");
+        my int $impo_i = 0;
+        while ($impo_i < $impo_count) {
+            my scalar $impo = $impo_objs->[$impo_i];
+            my str $impo_name = $impo->{"obj_name"};
+            my str $c_impo = sanitize_name($impo_name);
+            emit($cg, "    if (__" . $c_impo . "_oop_init) __" . $c_impo . "_oop_init();\n");
+            $impo_i = $impo_i + 1;
         }
         emit($cg, "\n");
     }
