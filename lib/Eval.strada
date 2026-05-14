@@ -7434,6 +7434,30 @@ func artifact_is_fresh(str $artifact, str $source) int {
     return 0;
 }
 
+# Returns 1 if the artifact is at least as fresh as the running stradac
+# binary, 0 otherwise (or if stradac mtime can't be determined).
+#
+# Why: stradac's codegen ABI changes occasionally — a .o produced by an
+# older stradac may reference runtime symbols or use struct layouts that
+# don't match what current stradac emits, producing segfaults at runtime
+# with no compile-time warning. Treat any .o older than the running
+# stradac as stale, force a re-parse of the source instead.
+#
+# If STRADA_DIR isn't set (eval invocations, third-party embedders), we
+# can't locate stradac and so don't enforce — return 1 to keep the old
+# behaviour for those paths.
+func artifact_newer_than_compiler(str $artifact) int {
+    my str $strada_dir = core::getenv("STRADA_DIR");
+    if (length($strada_dir) == 0) { return 1; }
+    my str $stradac_path = $strada_dir . "/stradac";
+    my int $cc_mtime = core::file_mtime($stradac_path);
+    if ($cc_mtime < 0) { return 1; }
+    my int $art_mtime = core::file_mtime($artifact);
+    if ($art_mtime < 0) { return 0; }
+    if ($art_mtime >= $cc_mtime) { return 1; }
+    return 0;
+}
+
 # Find module file in lib paths
 func find_module_file(scalar $program, str $mod_name) str {
     my str $rel_path = module_to_path($mod_name);
@@ -7901,14 +7925,22 @@ func parse_use(scalar $parser, scalar $program) void {
         my str $o_path = $base . ".o";
         my str $so_path = $base . ".so";
 
-        if (artifact_is_fresh($o_path, $file_path) == 1) {
+        # Two freshness gates: (1) artifact newer than source, (2) artifact
+        # newer than the running stradac binary. Gate 2 catches the ABI
+        # mismatch case where a .o was produced by a previous stradac with
+        # different codegen — linking that .o into a binary compiled by
+        # current stradac silently segfaults at runtime. Failing either
+        # check makes us re-parse the source and inline it.
+        if (artifact_is_fresh($o_path, $file_path) == 1
+            && artifact_newer_than_compiler($o_path) == 1) {
             ast_mark_module_loaded($program, $mod_name);
             # Use the module name as obj_name so symbol mangling matches.
             do_import_object_at($parser, $program, $mod_name . ".o", $o_path);
             ast_add_use($program, $mod_name);
             return;
         }
-        if (artifact_is_fresh($so_path, $file_path) == 1) {
+        if (artifact_is_fresh($so_path, $file_path) == 1
+            && artifact_newer_than_compiler($so_path) == 1) {
             ast_mark_module_loaded($program, $mod_name);
             do_import_lib_at($parser, $program, $mod_name, $so_path);
             ast_add_use($program, $mod_name);
@@ -8407,6 +8439,28 @@ func program_has_import_object(scalar $program, str $obj_name) int {
     return 0;
 }
 
+# Same as program_has_import_object but matches by the resolved .o file path.
+# Catches the case where the same .o file is registered under two different
+# obj_names — e.g., `use Top::Sub;` auto-detects sibling Top/Sub.o under
+# obj_name="Top::Sub" while CLI-passed `Top/Sub.o` would otherwise register
+# it again under obj_name="Sub" (basename only), bypassing name-based dedup
+# and producing multiple-definition errors at link time.
+func program_has_import_object_path(scalar $program, str $o_path) int {
+    my scalar $objs = $program->{"import_objects"};
+    my int $count = $program->{"import_object_count"};
+    my int $i = 0;
+    while ($i < $count) {
+        my scalar $info = $objs->[$i];
+        my str $existing = "";
+        if (defined($info->{"o_path"})) {
+            $existing = $info->{"o_path"};
+        }
+        if (length($existing) > 0 && $existing eq $o_path) { return 1; }
+        $i = $i + 1;
+    }
+    return 0;
+}
+
 # Check whether the program already has an import_archive with the given arch_name.
 func program_has_import_archive(scalar $program, str $arch_name) int {
     my scalar $archs = $program->{"import_archives"};
@@ -8430,8 +8484,15 @@ func do_import_object_at(scalar $parser, scalar $program, str $obj_file, str $o_
         $obj_name = substr($obj_file, 0, length($obj_file) - 2);
     }
 
-    # Skip if already imported (e.g., both source-level and CLI-implicit)
+    # Skip if already imported (e.g., both source-level and CLI-implicit).
+    # Check both obj_name and o_path: when `use Top::Sub;` auto-detects a
+    # sibling .o, it registers obj_name="Top::Sub"; a CLI-passed Top/Sub.o
+    # would otherwise register the same file under obj_name="Sub" (just the
+    # basename), evading name-based dedup. Path-based dedup catches that.
     if (program_has_import_object($program, $obj_name) == 1) {
+        return 0;
+    }
+    if (program_has_import_object_path($program, $o_path) == 1) {
         return 0;
     }
 
