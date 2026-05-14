@@ -150,6 +150,84 @@ else
     fail "reserved-type identifier produces targeted error" "got: $err"
 fi
 
+# --- Test 8: -M auto-deduces lib root from package + filename ------------
+# A sub-module compiled via `strada -M` whose own `use` statements need to
+# resolve to sibling .strada files in a nested namespace. Without auto-
+# deduction, `use Other::Mod;` from `Test/Chain.strada` can't find
+# Other/Mod.strada (lib_paths is empty by default), so stradac emits the
+# qualified call site with no extern decl. C falls back to implicit
+# `int Other_Mod_sum_array()` -- ABI mismatch with the real signature
+# (StradaValue *func(StradaValue *)) -- and the call segfaults at runtime
+# whenever the function returns or accepts a non-int value.
+#
+# The fix: in -M mode, compile() reads the source's `package X::Y;`
+# directive and the input file path, strips the package's relative
+# subpath from the file path, and adds the resulting lib root to
+# lib_paths automatically. Then `use Other::Mod;` resolves and the
+# extern is emitted with the right signature.
+mkdir -p "$WORK/xmod/Other" "$WORK/xmod/Test"
+cat > "$WORK/xmod/Other/Source.strada" <<'EOF'
+package Other::Source;
+func make_array(int $n) array {
+    my array @a = ();
+    my int $i = 0;
+    while ($i < $n) { push(@a, $i * 10); $i = $i + 1; }
+    return @a;
+}
+EOF
+cat > "$WORK/xmod/Other/Mod.strada" <<'EOF'
+package Other::Mod;
+func sum_array(array @arr) int {
+    my int $sum = 0;
+    my int $i = 0;
+    while ($i < scalar(@arr)) { $sum = $sum + $arr[$i]; $i = $i + 1; }
+    return $sum;
+}
+EOF
+cat > "$WORK/xmod/Test/Chain.strada" <<'EOF'
+package Test::Chain;
+use Other::Source;
+use Other::Mod;
+# Chained cross-module call: receive an array from one module, pass it to
+# another. Triggers the StradaValue *-vs-int implicit-decl ABI mismatch
+# if the auto-deduce is broken.
+func test_chain(int $n) int {
+    my array @items = Other::Source::make_array($n);
+    return Other::Mod::sum_array(@items);
+}
+EOF
+cat > "$WORK/xmod/main.strada" <<'EOF'
+use lib ".";
+use Test::Chain;
+func main() int {
+    my int $r = Test::Chain::test_chain(4);
+    if ($r != 60) { say("got " . $r); return 1; }
+    say("OK");
+    return 0;
+}
+EOF
+cd "$WORK/xmod"
+# Build each .o via -M, then link main without explicit -L.
+"$STRADA" -M Other/Source.strada >"$WORK/t8a.log" 2>&1
+"$STRADA" -M Other/Mod.strada    >"$WORK/t8b.log" 2>&1
+"$STRADA" -M Test/Chain.strada   >"$WORK/t8c.log" 2>&1
+# main has `use lib ".";` so it can auto-detect Test/Chain.o; Chain.o
+# in turn needs Other/Source.o and Other/Mod.o resolved at link, which
+# main2's own use chain pulls in only if `use lib` reaches them. To keep
+# the test focused on the auto-deduce fix (not on transitive .o linking)
+# we pass the helper .o's explicitly.
+if "$STRADA" -o app main.strada Other/Source.o Other/Mod.o >"$WORK/t8d.log" 2>&1 && [ -x app ]; then
+    out="$(./app)"
+    if [ "$out" = "OK" ]; then
+        pass "-M auto-deduces lib root for cross-module use"
+    else
+        fail "-M auto-deduces lib root for cross-module use" "output was: $out (expected OK from 0+10+20+30=60)"
+    fi
+else
+    fail "-M auto-deduces lib root for cross-module use" "build failed: $(cat "$WORK/t8d.log")"
+fi
+cd "$WORK/proj"
+
 # --- Summary --------------------------------------------------------------
 echo
 echo "===== $((PASS + FAIL)) tests, $PASS passed, $FAIL failed ====="

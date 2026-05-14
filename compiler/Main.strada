@@ -27,51 +27,36 @@
 # Used in -M mode so submodules don't need explicit -L to resolve their
 # `use` statements.
 func _deduce_lib_root_from_source(str $source, str $filename) str {
-    # Find the first `package X::Y;` line. Scan source linearly (avoid the
-    # full lexer cost — this runs before lex_tokenize). We accept any
-    # whitespace before `package` and require a `;` to terminate.
+    # Locate the first start-of-line `package ` via index() — char-by-char
+    # scanning was O(N) per character and timed out on large concatenated
+    # .strada files (e.g. lib/Eval.strada is 15K lines, package is at line
+    # 9K — would scan ~470K chars × per-char substr() allocations).
     my int $slen = length($source);
-    my int $i = 0;
+    # Special-case: file starts with `package ` (no leading newline).
+    my int $pkg_decl_start = -1;
+    if ($slen >= 8 && substr($source, 0, 8) eq "package ") {
+        $pkg_decl_start = 0;
+    } else {
+        my int $nl_idx = index($source, "\npackage ");
+        if ($nl_idx >= 0) { $pkg_decl_start = $nl_idx + 1; }
+    }
+    if ($pkg_decl_start < 0) { return ""; }
+    # Skip past "package " and any extra whitespace.
+    my int $j = $pkg_decl_start + 8;
+    while ($j < $slen && (substr($source, $j, 1) eq " " || substr($source, $j, 1) eq "\t")) {
+        $j = $j + 1;
+    }
+    my int $pstart = $j;
+    while ($j < $slen) {
+        my str $ch = substr($source, $j, 1);
+        if (($ch ge "a" && $ch le "z") || ($ch ge "A" && $ch le "Z")
+            || ($ch ge "0" && $ch le "9") || $ch eq "_" || $ch eq ":") {
+            $j = $j + 1;
+        } else { last; }
+    }
     my str $pkg_name = "";
-    while ($i + 8 <= $slen) {
-        # Skip comments (lines starting with #).
-        if (substr($source, $i, 1) eq "#") {
-            while ($i < $slen && substr($source, $i, 1) ne "\n") {
-                $i = $i + 1;
-            }
-            if ($i < $slen) { $i = $i + 1; }
-            next;
-        }
-        # Skip leading whitespace at line start.
-        if (substr($source, $i, 1) eq " " || substr($source, $i, 1) eq "\t"
-            || substr($source, $i, 1) eq "\n") {
-            $i = $i + 1;
-            next;
-        }
-        if (substr($source, $i, 8) eq "package ") {
-            my int $j = $i + 8;
-            # Skip extra whitespace after `package`.
-            while ($j < $slen && (substr($source, $j, 1) eq " " || substr($source, $j, 1) eq "\t")) {
-                $j = $j + 1;
-            }
-            my int $pstart = $j;
-            while ($j < $slen) {
-                my str $ch = substr($source, $j, 1);
-                if (($ch ge "a" && $ch le "z") || ($ch ge "A" && $ch le "Z")
-                    || ($ch ge "0" && $ch le "9") || $ch eq "_" || $ch eq ":") {
-                    $j = $j + 1;
-                } else { last; }
-            }
-            if ($j > $pstart) {
-                $pkg_name = substr($source, $pstart, $j - $pstart);
-            }
-            last;
-        }
-        # Skip the rest of this non-`package` line.
-        while ($i < $slen && substr($source, $i, 1) ne "\n") {
-            $i = $i + 1;
-        }
-        if ($i < $slen) { $i = $i + 1; }
+    if ($j > $pstart) {
+        $pkg_name = substr($source, $pstart, $j - $pstart);
     }
     if (length($pkg_name) == 0) { return ""; }
     # Convert `X::Y::Z` to relative path `X/Y/Z.strada`.
