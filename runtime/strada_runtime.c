@@ -12803,7 +12803,43 @@ StradaValue* strada_hash_from_flat_array(StradaValue *arr) {
                 } else if (elem && elem->type == STRADA_REF && elem->value.rv && elem->value.rv->type == STRADA_ARRAY) {
                     pair_av = elem->value.rv->value.av;
                 }
-                if (pair_av && pair_av->size >= 2) {
+                /* If this element is itself a *list of pairs* (e.g. produced by a
+                 * ternary or function call inside a `(k=>v, EXPR, k=>v)` literal
+                 * where EXPR returns several key/value pairs), splat those pairs
+                 * into the outer hash rather than treating the whole list as one
+                 * key/value with a stringified-array key. Detection: pair_av's
+                 * first element is itself a 2+-elem array (ref or direct). */
+                int is_nested_pair_list = 0;
+                if (pair_av && pair_av->size > 0) {
+                    StradaValue *inner_first = pair_av->elements[pair_av->head];
+                    StradaArray *inner_first_av = NULL;
+                    if (inner_first && inner_first->type == STRADA_ARRAY) {
+                        inner_first_av = inner_first->value.av;
+                    } else if (inner_first && inner_first->type == STRADA_REF
+                            && inner_first->value.rv && inner_first->value.rv->type == STRADA_ARRAY) {
+                        inner_first_av = inner_first->value.rv->value.av;
+                    }
+                    if (inner_first_av && inner_first_av->size >= 2) {
+                        is_nested_pair_list = 1;
+                    }
+                }
+                if (is_nested_pair_list) {
+                    for (size_t j = 0; j < pair_av->size; j++) {
+                        StradaValue *sub = pair_av->elements[pair_av->head + j];
+                        StradaArray *sub_av = NULL;
+                        if (sub && sub->type == STRADA_ARRAY) {
+                            sub_av = sub->value.av;
+                        } else if (sub && sub->type == STRADA_REF
+                                && sub->value.rv && sub->value.rv->type == STRADA_ARRAY) {
+                            sub_av = sub->value.rv->value.av;
+                        }
+                        if (sub_av && sub_av->size >= 2) {
+                            char _tb[256];
+                            const char *key_str = strada_to_str_buf(sub_av->elements[sub_av->head], _tb, sizeof(_tb));
+                            strada_hash_set(result->value.hv, key_str, sub_av->elements[sub_av->head + 1]);
+                        }
+                    }
+                } else if (pair_av && pair_av->size >= 2) {
                     char _tb[256];
                     const char *key_str = strada_to_str_buf(pair_av->elements[pair_av->head], _tb, sizeof(_tb));
                     strada_hash_set(result->value.hv, key_str, pair_av->elements[pair_av->head + 1]);
