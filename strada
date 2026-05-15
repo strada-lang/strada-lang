@@ -661,6 +661,15 @@ if [ "$(uname -s)" = "Darwin" ]; then
     GCC_FLAGS="$GCC_FLAGS -Wno-unused-value"
 fi
 GCC_FLAGS="$GCC_FLAGS -O$OPT_LEVEL"
+# At -O0 (the default for the JIT/REPL and most dev iteration), skip
+# work gcc spends on debug info, stack canaries, and variable tracking
+# — useless for an -O0 build without -g, and var-tracking dominates
+# gcc wall time on large generated .c files. -pipe avoids temp files
+# between gcc passes. Skipped automatically when -g/--c-debug is set
+# so debugger info stays usable.
+if [ "$OPT_LEVEL" = "0" ] && [ "$DEBUG_SYMBOLS" -ne 1 ] && [ "$C_DEBUG_SYMBOLS" -ne 1 ]; then
+    GCC_FLAGS="$GCC_FLAGS -pipe -fno-var-tracking -fno-var-tracking-assignments -fno-stack-protector -fno-asynchronous-unwind-tables"
+fi
 # Enable link-time optimization at -O2 and above for cross-function inlining,
 # unless the user explicitly disabled it with -fno-lto.
 if [ "$NO_LTO" -eq 1 ]; then

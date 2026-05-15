@@ -282,7 +282,11 @@ private func detect_runtime() str {
     return "";
 }
 
-# Detect available C compiler (tcc or gcc)
+# Detect available C compiler. Prefers gcc — tcc is faster but has
+# known correctness gaps (see project_perla_tcc_dclone_bug in memory):
+# tcc-compiled output can silently misbehave on edge cases that gcc
+# handles correctly. With strada's -O0 speed flags, gcc is fast enough
+# for JIT use without giving up correctness.
 private func detect_compiler() str {
     my int $has_tcc = 0;
     my int $has_gcc = 0;
@@ -292,11 +296,11 @@ private func detect_compiler() str {
         has_gcc = strada_new_int(repl_command_exists("gcc"));
     }
 
-    if ($has_tcc == 1) {
-        return "tcc";
-    }
     if ($has_gcc == 1) {
         return "gcc";
+    }
+    if ($has_tcc == 1) {
+        return "tcc";
     }
     return "";
 }
@@ -949,14 +953,17 @@ private func eval_one(str $input) scalar {
             throw "JIT C compile error (tcc): " . $tcc_output;
         }
     } else {
-        # gcc via the strada wrapper
-        my str $gcc_cmd = "./strada --shared " . $src_file . " -o " . $so_file . " 2>&1";
+        # gcc via the strada wrapper.
+        # -O0 explicitly: snippets are one-shot (dlopen'd, executed, discarded),
+        # so any -O2 + LTO time is pure overhead. -O0 also triggers strada's
+        # speed flags (-pipe, -fno-var-tracking, etc).
+        my str $gcc_cmd = "./strada -O0 --shared " . $src_file . " -o " . $so_file . " 2>&1";
         # If stradac is not in ./, try using the strada wrapper from stradac's dir
         if ($g_stradac_path ne "./stradac" && $g_stradac_path ne "stradac") {
             my str $stradac_dir = core::dirname($g_stradac_path);
             my str $strada_bin = $stradac_dir . "/strada";
             if (core::is_file($strada_bin) == 1) {
-                $gcc_cmd = $strada_bin . " --shared " . $src_file . " -o " . $so_file . " 2>&1";
+                $gcc_cmd = $strada_bin . " -O0 --shared " . $src_file . " -o " . $so_file . " 2>&1";
             }
         }
         $pipe = core::popen($gcc_cmd, "r");

@@ -189,9 +189,15 @@ compile_strada() {
         done
     fi
 
-    # Compile C to executable
-    # Note: -rdynamic exports symbols so shared libraries can use the executable's runtime
-    if ! gcc -fno-lto -rdynamic -o "$exe_file" "$c_file" $extra_link "$RUNTIME" -I"$RUNTIME_H" -ldl -lm ${EXTRA_LDFLAGS:-} > "$BUILD_DIR/${name}_gcc.log" 2>&1; then
+    # Compile C to executable.
+    # -rdynamic: exports symbols so shared libraries can use the executable's runtime.
+    # Speed flags (safe at gcc-default -O0 with no -g):
+    #   -pipe                              pipes between gcc passes (no temp files)
+    #   -fno-var-tracking{,-assignments}   skip debug variable tracking
+    #   -fno-stack-protector               skip stack canary instrumentation
+    #   -fno-asynchronous-unwind-tables    skip C++ unwind info
+    # Cuts ~30-60s off the full 148-test suite vs the pre-flags default.
+    if ! gcc -fno-lto -pipe -fno-var-tracking -fno-var-tracking-assignments -fno-stack-protector -fno-asynchronous-unwind-tables -rdynamic -o "$exe_file" "$c_file" $extra_link "$RUNTIME" -I"$RUNTIME_H" -ldl -lm ${EXTRA_LDFLAGS:-} > "$BUILD_DIR/${name}_gcc.log" 2>&1; then
         return 2
     fi
 
@@ -462,7 +468,8 @@ test_import_lib() {
 
     # Compile library C to .so
     # Note: Don't include runtime source - the library uses the executable's runtime symbols
-    if ! gcc -shared -fPIC "$lib_c" -o "$lib_so" -I"$RUNTIME_H" -ldl -lm > "$BUILD_DIR/${lib_name}_gcc.log" 2>&1; then
+    # Speed flags (same as the main compile above) — safe at gcc-default -O0 / no -g.
+    if ! gcc -shared -fPIC -pipe -fno-var-tracking -fno-var-tracking-assignments -fno-stack-protector -fno-asynchronous-unwind-tables "$lib_c" -o "$lib_so" -I"$RUNTIME_H" -ldl -lm > "$BUILD_DIR/${lib_name}_gcc.log" 2>&1; then
         FAILED=$((FAILED + 1))
         local err=$(cat "$BUILD_DIR/${lib_name}_gcc.log" 2>/dev/null | head -1)
         log_fail "run: $desc" "Library .so compile failed: $err"
