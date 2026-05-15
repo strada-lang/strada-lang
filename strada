@@ -61,6 +61,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #   macOS: dlopen lives in libc (no -ldl), linker uses -Wl,-dead_strip
 # Allow $CC override; default to cc (which is clang on macOS, gcc on Linux).
 CC="${CC:-cc}"
+# Auto-prepend ccache if installed — caches gcc outputs by input+flags
+# hash, so repeated builds of the same .c file (a common iteration
+# pattern for .pm.so/.pm.o rebuilds) skip gcc entirely. No effect if
+# the user already set CC to include ccache, or set CCACHE_DISABLE=1.
+if [ -z "${CCACHE_DISABLE:-}" ] && ! echo "$CC" | grep -q ccache && command -v ccache >/dev/null 2>&1; then
+    CC="ccache $CC"
+fi
 UNAME_S="$(uname -s)"
 if [ "$UNAME_S" = "Darwin" ]; then
     DLOPEN_LIBS=""

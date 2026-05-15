@@ -1711,6 +1711,17 @@ StradaValue* strada_array_pop(StradaArray *av) {
 
 StradaValue* strada_array_shift(StradaArray *av) {
     if (!av || av->size == 0) return strada_new_undef();
+    /* Defensive: detect use-after-free corruption (capacity smaller than
+     * size, or elements pointer NULL, or size implausibly huge). The
+     * canonical victim is Drogo::Guts::format_error called from the
+     * $SIG{__DIE__} handler chain — when perla cleans up the outer
+     * anon-sub's @_ before format_error reads it, the StradaArray
+     * memory has been reused with random bytes that pass the size>0
+     * check but crash on elements[head] deref. Return undef instead
+     * of segfaulting. */
+    if (!av->elements || av->size > av->capacity || av->head >= av->capacity) {
+        return strada_new_undef();
+    }
 
     StradaValue *result = av->elements[av->head];
     av->head++;

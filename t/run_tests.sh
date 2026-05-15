@@ -28,6 +28,14 @@ RUNTIME_H="$PROJECT_DIR/runtime"
 EXAMPLES_DIR="$PROJECT_DIR/examples"
 BUILD_DIR="/tmp/strada_tests_$$"
 
+# Use ccache if installed (caches gcc output by input+flags hash, so
+# repeated identical compiles return the cached .o instantly). Falls
+# back to plain gcc if ccache isn't on PATH or CCACHE_DISABLE=1 is set.
+GCC="gcc"
+if [ -z "${CCACHE_DISABLE:-}" ] && command -v ccache >/dev/null 2>&1; then
+    GCC="ccache gcc"
+fi
+
 # Source config.sh for optional dependency flags (PCRE2, etc.)
 if [ -f "$PROJECT_DIR/config.sh" ]; then
     . "$PROJECT_DIR/config.sh"
@@ -197,7 +205,7 @@ compile_strada() {
     #   -fno-stack-protector               skip stack canary instrumentation
     #   -fno-asynchronous-unwind-tables    skip C++ unwind info
     # Cuts ~30-60s off the full 148-test suite vs the pre-flags default.
-    if ! gcc -fno-lto -pipe -fno-var-tracking -fno-var-tracking-assignments -fno-stack-protector -fno-asynchronous-unwind-tables -rdynamic -o "$exe_file" "$c_file" $extra_link "$RUNTIME" -I"$RUNTIME_H" -ldl -lm ${EXTRA_LDFLAGS:-} > "$BUILD_DIR/${name}_gcc.log" 2>&1; then
+    if ! $GCC -fno-lto -pipe -fno-var-tracking -fno-var-tracking-assignments -fno-stack-protector -fno-asynchronous-unwind-tables -rdynamic -o "$exe_file" "$c_file" $extra_link "$RUNTIME" -I"$RUNTIME_H" -ldl -lm ${EXTRA_LDFLAGS:-} > "$BUILD_DIR/${name}_gcc.log" 2>&1; then
         return 2
     fi
 
@@ -469,7 +477,7 @@ test_import_lib() {
     # Compile library C to .so
     # Note: Don't include runtime source - the library uses the executable's runtime symbols
     # Speed flags (same as the main compile above) — safe at gcc-default -O0 / no -g.
-    if ! gcc -shared -fPIC -pipe -fno-var-tracking -fno-var-tracking-assignments -fno-stack-protector -fno-asynchronous-unwind-tables "$lib_c" -o "$lib_so" -I"$RUNTIME_H" -ldl -lm > "$BUILD_DIR/${lib_name}_gcc.log" 2>&1; then
+    if ! $GCC -shared -fPIC -pipe -fno-var-tracking -fno-var-tracking-assignments -fno-stack-protector -fno-asynchronous-unwind-tables "$lib_c" -o "$lib_so" -I"$RUNTIME_H" -ldl -lm > "$BUILD_DIR/${lib_name}_gcc.log" 2>&1; then
         FAILED=$((FAILED + 1))
         local err=$(cat "$BUILD_DIR/${lib_name}_gcc.log" 2>/dev/null | head -1)
         log_fail "run: $desc" "Library .so compile failed: $err"
