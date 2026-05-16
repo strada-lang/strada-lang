@@ -8533,9 +8533,16 @@ void strada_free_value(StradaValue *sv) {
                         if (*cap) {
                             strada_decref(*cap);
                         }
+                        /* Captures flagged as static point at file-scope C
+                         * statics (e.g. &v_file_scope_my) rather than malloc'd
+                         * heap cells. Calling free() on those addresses is
+                         * undefined behavior (typically "free(): invalid
+                         * pointer"). Skip the free for those cells. */
+                        if (cl->capture_is_static && cl->capture_is_static[i]) continue;
                         free(cap);
                     }
                     free(cl->captures);
+                    if (cl->capture_is_static) free(cl->capture_is_static);
                 }
                 free(cl);
             }
@@ -9482,6 +9489,7 @@ StradaValue* strada_closure_new(void *func, int params, int captures, StradaValu
     cl->func_ptr = func;
     cl->param_count = params;
     cl->capture_count = captures;
+    cl->capture_is_static = NULL; /* deep-copy path always heap-allocates */
 
     /* Make a deep copy of captures to ensure thread safety.
      * The original cap_array contains pointers to stack variables which may

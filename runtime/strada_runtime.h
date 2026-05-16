@@ -112,6 +112,7 @@ typedef struct StradaClosure {
     int param_count;          /* Number of parameters */
     int capture_count;        /* Number of captured variables */
     StradaValue ***captures;  /* Array of pointers to pointers (capture-by-reference) */
+    unsigned char *capture_is_static; /* NULL or array of capture_count bytes; 1 = cell points to a static slot, do not free(cap) */
 } StradaClosure;
 
 /* Thread types - store pthread handles as opaque pointers */
