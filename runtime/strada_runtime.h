@@ -969,6 +969,10 @@ StradaValue* strada_captures(void);
 StradaValue* strada_capture_var(int n);
 StradaValue* strada_prematch(void);
 StradaValue* strada_postmatch(void);
+/* @- and @+ — match start/end offset arrays (index 0 = whole match,
+ * index N = N-th capture group). Borrowed references; caller increfs. */
+StradaValue* strada_match_starts(void);
+StradaValue* strada_match_ends(void);
 int perl_looks_like_number_c(const char *s);
 /* List-context match: returns an array.
  * Match with capture groups → array of capture strings ($1, $2, ...).

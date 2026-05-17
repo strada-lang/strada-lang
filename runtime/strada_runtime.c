@@ -6612,6 +6612,12 @@ static StradaValue *last_named_captures = NULL;
 /* Global storage for $` (prematch) and $' (postmatch) */
 static StradaValue *last_prematch_sv = NULL;
 static StradaValue *last_postmatch_sv = NULL;
+/* Global storage for @- (match start offsets) and @+ (match end offsets).
+ * Index 0 = whole-match offset; index N (N>0) = N-th capture group offset.
+ * On match failure, both are empty arrays (Perl: @-/@+ stay set to previous,
+ * but we follow the simpler "cleared on failure" semantics). */
+static StradaValue *last_match_starts = NULL;
+static StradaValue *last_match_ends = NULL;
 static int regex_cleanup_registered = 0;
 
 /* Set $` and $' from subject and ovector[0..1]. Called after each successful match. */
@@ -6871,6 +6877,10 @@ int strada_regex_match_with_capture(const char *str, const char *pattern, const 
     /* Create named captures hash */
     StradaHash *named_hash = strada_hash_new();
 
+    /* Per-call accumulators for @- / @+ offset arrays */
+    StradaArray *match_starts_arr = strada_array_new();
+    StradaArray *match_ends_arr = strada_array_new();
+
     if (rc >= 0) {
         PCRE2_SIZE *ovector = pcre2_get_ovector_pointer(match_data);
         uint32_t count = pcre2_get_ovector_count(match_data);
@@ -6888,8 +6898,12 @@ int strada_regex_match_with_capture(const char *str, const char *pattern, const 
                 capture[len] = '\0';
                 strada_array_push_take(captures, strada_new_str(capture));
                 free(capture);
+                strada_array_push_take(match_starts_arr, STRADA_MAKE_TAGGED_INT((int64_t)start));
+                strada_array_push_take(match_ends_arr, STRADA_MAKE_TAGGED_INT((int64_t)end));
             } else {
                 strada_array_push_take(captures, strada_new_undef());
+                strada_array_push_take(match_starts_arr, strada_new_undef());
+                strada_array_push_take(match_ends_arr, strada_new_undef());
             }
         }
 
@@ -6944,10 +6958,35 @@ int strada_regex_match_with_capture(const char *str, const char *pattern, const 
     nh->value.hv = named_hash;
     last_named_captures = nh;
 
+    /* Store @- (match starts) and @+ (match ends) */
+    if (last_match_starts) strada_decref(last_match_starts);
+    StradaValue *ms = strada_value_alloc();
+    ms->type = STRADA_ARRAY;
+    ms->refcount = 1;
+    ms->value.av = match_starts_arr;
+    last_match_starts = ms;
+
+    if (last_match_ends) strada_decref(last_match_ends);
+    StradaValue *me = strada_value_alloc();
+    me->type = STRADA_ARRAY;
+    me->refcount = 1;
+    me->value.av = match_ends_arr;
+    last_match_ends = me;
+
     pcre2_match_data_free(match_data);
     /* re is owned by the cache — do NOT free */
 
     return (rc >= 0) ? 1 : 0;
+}
+
+/* Public accessors for @- and @+ — return borrowed references */
+StradaValue* strada_match_starts(void) {
+    if (last_match_starts) { strada_incref(last_match_starts); return last_match_starts; }
+    return strada_new_array();
+}
+StradaValue* strada_match_ends(void) {
+    if (last_match_ends) { strada_incref(last_match_ends); return last_match_ends; }
+    return strada_new_array();
 }
 
 StradaValue* strada_captures(void) {
