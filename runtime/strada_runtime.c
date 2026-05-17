@@ -7563,6 +7563,93 @@ StradaArray* strada_regex_split(const char *str, const char *pattern) {
     return parts;
 }
 
+/* split with limit: stops splitting after producing `limit` parts; the last
+ * part contains the unsplit remainder of the input (including any matched
+ * separators). limit <= 0 behaves like the unlimited form. */
+StradaArray* strada_regex_split_limit(const char *str, const char *pattern, int limit) {
+    if (limit <= 0) return strada_regex_split(str, pattern);
+    StradaArray *parts = strada_array_new();
+    if (limit == 1) {
+        strada_array_push_take(parts, strada_new_str(str));
+        return parts;
+    }
+
+    pcre2_code *re = regex_cache_compile(pattern, 0);
+    if (!re) {
+        strada_array_push_take(parts, strada_new_str(str));
+        return parts;
+    }
+
+    pcre2_match_data *match_data = pcre2_match_data_create_from_pattern(re, NULL);
+    PCRE2_SIZE subject_length = strlen(str);
+    PCRE2_SIZE offset = 0;
+    PCRE2_SIZE search_off = 0;
+    int first_iter = 1;
+    int chunks = 0;  /* count of non-capture chunks already pushed; LIMIT is
+                      * a cap on chunks, captures fill in between freely
+                      * (Perl semantics). */
+
+    while (search_off <= subject_length && chunks < limit - 1) {
+        int rc = pcre2_match(re, (PCRE2_SPTR)str, subject_length, search_off, 0, match_data, NULL);
+        if (rc < 0) break;
+        PCRE2_SIZE *ovector = pcre2_get_ovector_pointer(match_data);
+        PCRE2_SIZE match_start = ovector[0];
+        PCRE2_SIZE match_end = ovector[1];
+        int skip_part = (first_iter && match_start == 0 && match_end == match_start);
+        first_iter = 0;
+        if (!skip_part) {
+            size_t part_len = match_start - offset;
+            char *part = malloc(part_len + 1);
+            memcpy(part, str + offset, part_len);
+            part[part_len] = '\0';
+            strada_array_push_take(parts, strada_new_str(part));
+            free(part);
+            chunks++;
+        }
+        /* Captures are inserted between adjacent chunks but do NOT count
+         * toward LIMIT. Push them here so they appear between the chunk
+         * we just pushed and either the next chunk or the final tail. */
+        uint32_t cap_count = pcre2_get_ovector_count(match_data);
+        for (uint32_t ci = 1; ci < cap_count; ci++) {
+            PCRE2_SIZE cs = ovector[2 * ci];
+            PCRE2_SIZE ce = ovector[2 * ci + 1];
+            if (cs == PCRE2_UNSET) {
+                strada_array_push_take(parts, strada_new_undef());
+            } else {
+                size_t cl = ce - cs;
+                char *cpart = malloc(cl + 1);
+                memcpy(cpart, str + cs, cl);
+                cpart[cl] = '\0';
+                strada_array_push_take(parts, strada_new_str(cpart));
+                free(cpart);
+            }
+        }
+        if (match_end == match_start) {
+            offset = match_end;
+            search_off = match_end + 1;
+        } else {
+            offset = match_end;
+            search_off = match_end;
+        }
+        if (chunks >= limit - 1) {
+            /* Final chunk = remainder starting at match_end. The captures
+             * for this match were already pushed (between previous chunk
+             * and tail). */
+            break;
+        }
+    }
+
+    /* push the remainder as one element (may be empty) */
+    if (offset <= subject_length) {
+        strada_array_push_take(parts, strada_new_str(str + offset));
+    } else {
+        strada_array_push_take(parts, strada_new_str(""));
+    }
+
+    pcre2_match_data_free(match_data);
+    return parts;
+}
+
 StradaArray* strada_regex_capture(const char *str, const char *pattern) {
     StradaArray *captures = strada_array_new();
 
@@ -8276,6 +8363,35 @@ StradaArray* strada_regex_split(const char *str, const char *pattern) {
     }
 
     /* rx is owned by the cache — do NOT free */
+    return parts;
+}
+
+StradaArray* strada_regex_split_limit(const char *str, const char *pattern, int limit) {
+    if (limit <= 0) return strada_regex_split(str, pattern);
+    StradaArray *parts = strada_array_new();
+    if (limit == 1) {
+        strada_array_push_take(parts, strada_new_str(str));
+        return parts;
+    }
+    regex_t *rx = regex_cache_compile_posix(pattern, NULL);
+    if (!rx) {
+        strada_array_push_take(parts, strada_new_str(str));
+        return parts;
+    }
+    const char *p = str;
+    regmatch_t match;
+    int produced = 0;
+    while (produced < limit - 1 && regexec(rx, p, 1, &match, 0) == 0) {
+        char *part = malloc(match.rm_so + 1);
+        strncpy(part, p, match.rm_so);
+        part[match.rm_so] = '\0';
+        strada_array_push_take(parts, strada_new_str(part));
+        free(part);
+        produced++;
+        p += match.rm_eo;
+        if (match.rm_eo == 0) break;
+    }
+    strada_array_push_take(parts, strada_new_str(p));
     return parts;
 }
 
@@ -11216,6 +11332,7 @@ StradaValue* strada_pack(const char *fmt, StradaValue *args) {
     const char *p = fmt;
     while (*p) {
         int count = 1;
+        int star = 0;  /* `*` form — repeat count comes from args/string */
         char c = *p++;
 
         /* Parse repeat count */
@@ -11226,8 +11343,23 @@ StradaValue* strada_pack(const char *fmt, StradaValue *args) {
                 p++;
             }
         } else if (*p == '*') {
-            count = -1;  /* Use remaining string length */
+            star = 1;
+            count = -1;  /* Resolved per-format: numeric formats consume
+                          * all remaining args; string formats use the
+                          * full input string length. */
             p++;
+        }
+
+        /* Resolve `*` for numeric formats — repeat for each remaining arg.
+         * String formats (a/A/Z/H/h) interpret `*` differently and handle
+         * the -1 marker inside their own case. */
+        if (star && (c == 'c' || c == 'C' || c == 's' || c == 'S' ||
+                     c == 'n' || c == 'v' || c == 'l' || c == 'L' ||
+                     c == 'N' || c == 'V' || c == 'q' || c == 'Q' ||
+                     c == 'i' || c == 'I' || c == 'j' || c == 'J' ||
+                     c == 'd' || c == 'f')) {
+            count = arg_count - arg_idx;
+            if (count < 0) count = 0;
         }
 
         switch (c) {
@@ -11338,6 +11470,30 @@ StradaValue* strada_pack(const char *fmt, StradaValue *args) {
                 for (int i = 0; i < count; i++) {
                     ENSURE_SPACE(8);
                     uint64_t val = (uint64_t)GET_ARG_INT();
+                    memcpy(buf + buf_pos, &val, 8);
+                    buf_pos += 8;
+                }
+                break;
+            }
+
+            case 'f': {  /* Single-precision float, native */
+                for (int i = 0; i < count; i++) {
+                    ENSURE_SPACE(4);
+                    float val = (float)(arg_idx < arg_count
+                                        ? strada_to_num(strada_array_get(av, arg_idx++))
+                                        : 0.0);
+                    memcpy(buf + buf_pos, &val, 4);
+                    buf_pos += 4;
+                }
+                break;
+            }
+
+            case 'd': {  /* Double-precision float, native */
+                for (int i = 0; i < count; i++) {
+                    ENSURE_SPACE(8);
+                    double val = arg_idx < arg_count
+                                ? strada_to_num(strada_array_get(av, arg_idx++))
+                                : 0.0;
                     memcpy(buf + buf_pos, &val, 8);
                     buf_pos += 8;
                 }
@@ -11612,6 +11768,28 @@ StradaValue* strada_unpack(const char *fmt, StradaValue *data_sv) {
                     memcpy(&val, data + pos, 8);
                     pos += 8;
                     strada_array_push_take(result->value.av, strada_new_int((int64_t)val));
+                }
+                break;
+            }
+
+            case 'f': {  /* Single-precision float, native */
+                int actual = (count < 0) ? (int)((data_len - pos) / 4) : count;
+                for (int i = 0; i < actual && pos + 4 <= data_len; i++) {
+                    float val;
+                    memcpy(&val, data + pos, 4);
+                    pos += 4;
+                    strada_array_push_take(result->value.av, strada_new_num((double)val));
+                }
+                break;
+            }
+
+            case 'd': {  /* Double-precision float, native */
+                int actual = (count < 0) ? (int)((data_len - pos) / 8) : count;
+                for (int i = 0; i < actual && pos + 8 <= data_len; i++) {
+                    double val;
+                    memcpy(&val, data + pos, 8);
+                    pos += 8;
+                    strada_array_push_take(result->value.av, strada_new_num(val));
                 }
                 break;
             }
