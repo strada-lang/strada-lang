@@ -15689,7 +15689,17 @@ StradaValue* strada_eof(StradaValue *fh) {
     if (!fh || STRADA_IS_TAGGED_INT(fh) || fh->type != STRADA_FILEHANDLE || !fh->value.fh) {
         return strada_new_int(1);
     }
-    return strada_new_int(feof(fh->value.fh) ? 1 : 0);
+    FILE *fp = fh->value.fh;
+    /* feof() only flips after a read fails, not when the position is at
+     * end-of-file. Perl's eof() peeks a byte to find out. Without this,
+     * slurping all content with `do { local $/; <$fh> }` left feof
+     * still false and `eof($fh)` returned 0 even though every reader
+     * idiom would say we're done. Mirror Perl by peeking + ungetc. */
+    if (feof(fp)) return strada_new_int(1);
+    int c = fgetc(fp);
+    if (c == EOF) return strada_new_int(1);
+    ungetc(c, fp);
+    return strada_new_int(0);
 }
 
 StradaValue* strada_flush(StradaValue *fh) {
