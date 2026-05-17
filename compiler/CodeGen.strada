@@ -4967,16 +4967,25 @@ func gen_expression(scalar $cg, scalar $expr) void {
         }
 
         if ($name eq "split") {
-            # split(pattern, string) - like Perl
+            # split(pattern, string[, limit]) - like Perl
             my scalar $args = $expr->{"args"};
             my scalar $pattern_arg = $args->[0];
             my scalar $string_arg = $args->[1];
             my int $pattern_needs_cleanup = needs_temp_cleanup($cg, $pattern_arg);
             my int $string_needs_cleanup = needs_temp_cleanup($cg, $string_arg);
+            my int $argc_sp = 0;
+            if (defined($args)) { $argc_sp = size(@{$args}); }
+            my int $has_limit = 0;
+            my scalar $limit_arg = $args->[0];
+            if ($argc_sp >= 3) {
+                $has_limit = 1;
+                $limit_arg = $args->[2];
+            }
 
             # Fast path: literal pattern with no regex metacharacters uses plain string split
+            # (only when no LIMIT — the limit path goes through regex_split_limit).
             my int $is_literal_pat = 0;
-            if ($pattern_arg->{"type"} == NODE_STR_LITERAL()) {
+            if ($has_limit == 0 && $pattern_arg->{"type"} == NODE_STR_LITERAL()) {
                 my str $pat_val = $pattern_arg->{"value"};
                 # Check for regex metacharacters — if none, safe for plain string split
                 my int $has_meta = 0;
@@ -5007,14 +5016,21 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 gen_str_literal_c($cg, $pattern_arg->{"value"});
                 emit($cg, ")); strada_cstr_free(__str_cstr); ");
             } else {
-                # Dynamic pattern — use regex split
+                # Dynamic pattern — use regex split (with optional LIMIT)
                 emit($cg, "StradaValue *__split_pat = ");
                 gen_expression($cg, $pattern_arg);
                 emit($cg, "; StradaValue *__split_str = ");
                 gen_expression($cg, $string_arg);
                 emit($cg, "; char *__pat_cstr = strada_to_str_ss(__split_pat); ");
                 emit($cg, "char *__str_cstr = strada_to_str_ss(__split_str); ");
-                emit($cg, "StradaValue *__sv = strada_new_array_from_av(strada_regex_split(__str_cstr, __pat_cstr)); ");
+                if ($has_limit == 1) {
+                    emit($cg, "int __split_lim = (int)strada_to_int(");
+                    gen_expression($cg, $limit_arg);
+                    emit($cg, "); ");
+                    emit($cg, "StradaValue *__sv = strada_new_array_from_av(strada_regex_split_limit(__str_cstr, __pat_cstr, __split_lim)); ");
+                } else {
+                    emit($cg, "StradaValue *__sv = strada_new_array_from_av(strada_regex_split(__str_cstr, __pat_cstr)); ");
+                }
                 emit($cg, "strada_cstr_free(__pat_cstr); strada_cstr_free(__str_cstr); ");
                 if ($pattern_needs_cleanup == 1) {
                     emit($cg, "strada_decref(__split_pat); ");

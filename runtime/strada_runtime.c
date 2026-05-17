@@ -5153,12 +5153,25 @@ StradaValue* strada_slurp_fh(StradaValue *fh_sv) {
     if (size < 0) {
         return strada_new_undef();
     }
+    /* Reading past EOF must yield undef to match Perl's diamond-op
+     * semantics. Returning an empty string instead made
+     * `while (<$fh>) {...}` and `STMT while <$fh>` loop forever when
+     * $/ was localized to undef (slurp mode) — the first call read
+     * the whole file, every subsequent call returned "" which is
+     * defined() and truthy. */
+    if (size == 0) {
+        return strada_new_undef();
+    }
 
     char *content = malloc(size + 1);
     size_t read_size = fread(content, 1, size, f);
     content[read_size] = '\0';
 
-    StradaValue *result = strada_new_str(content);
+    /* Binary-safe: pass read_size explicitly so embedded NULs are
+     * preserved. strada_new_str uses strlen() which truncates at the
+     * first NUL — `local $/; <$fh>` on a file with binary content
+     * came back with only the prefix. */
+    StradaValue *result = strada_new_str_len(content, read_size);
     free(content);
 
     return result;
@@ -10686,6 +10699,14 @@ int64_t strada_atomic_dec(StradaValue *atomic) {
 int strada_rindex(const char *haystack, const char *needle) {
     if (!haystack || !needle) return -1;
 
+    /* Empty needle: Perl semantics — index/rindex return strlen(haystack)
+     * for the rindex case (the matching empty string is past the end).
+     * Without bailing out, strstr(haystack, "") returns haystack on
+     * every iteration and the loop never terminates. */
+    if (needle[0] == '\0') {
+        return (int)strlen(haystack);
+    }
+
     const char *last_pos = NULL;
     const char *pos = haystack;
 
@@ -16047,11 +16068,17 @@ StradaValue* strada_pclose(StradaValue *fh) {
 }
 
 /* Run command and capture stdout (like Perl's qx// or backticks) */
+/* Wait status from the most recent strada_qx call. perla reads this
+ * into $? after qx — pclose's return value mirrors what wait(2) would
+ * have produced for the child, so Perl's `\$? >> 8` works on it. */
+int strada_last_qx_status = 0;
+
 StradaValue* strada_qx(StradaValue *cmd) {
     char _tb[256];
     const char *c = strada_to_str_buf(cmd, _tb, sizeof(_tb));
     FILE *fp = popen(c, "r");
     if (!fp) {
+        strada_last_qx_status = -1;
         return strada_new_str("");
     }
 
@@ -16061,6 +16088,7 @@ StradaValue* strada_qx(StradaValue *cmd) {
     char *buf = malloc(capacity);
     if (!buf) {
         pclose(fp);
+        strada_last_qx_status = -1;
         return strada_new_str("");
     }
 
@@ -16073,6 +16101,7 @@ StradaValue* strada_qx(StradaValue *cmd) {
             if (!newbuf) {
                 free(buf);
                 pclose(fp);
+                strada_last_qx_status = -1;
                 return strada_new_str("");
             }
             buf = newbuf;
@@ -16082,7 +16111,7 @@ StradaValue* strada_qx(StradaValue *cmd) {
     }
     buf[len] = '\0';
 
-    pclose(fp);
+    strada_last_qx_status = pclose(fp);
 
     StradaValue *result = strada_new_str(buf);
     free(buf);

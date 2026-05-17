@@ -1215,6 +1215,7 @@ StradaValue* strada_mkdtemp(StradaValue *template);
 StradaValue* strada_popen(StradaValue *cmd, StradaValue *mode);
 StradaValue* strada_pclose(StradaValue *fh);
 StradaValue* strada_qx(StradaValue *cmd);  /* Backtick/qx - run command and capture output */
+extern int strada_last_qx_status;  /* wait status from most recent strada_qx (pclose return) */
 
 /* Aliases for bootstrap compiler compatibility (sys::foo -> sys_foo) */
 StradaValue* sys_system(StradaValue *cmd);
