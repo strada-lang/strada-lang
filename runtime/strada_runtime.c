@@ -1936,7 +1936,15 @@ static int strada_sort_cmp_num(const void *a, const void *b) {
 
 /* Sort array alphabetically (by string comparison) */
 StradaValue* strada_sort(StradaValue *arr) {
-    if (!arr || STRADA_IS_TAGGED_INT(arr)) {
+    /* `sort $scalar` in Perl is a list-context call on a 1-element list:
+     * returns the scalar wrapped in a 1-elem array. Tagged ints fall here
+     * too (a single int is "a 1-element list of one int"). */
+    if (STRADA_IS_TAGGED_INT(arr)) {
+        StradaValue *one = strada_new_array();
+        strada_array_push(one->value.av, arr);
+        return one;
+    }
+    if (!arr) {
         return strada_new_array();
     }
 
@@ -1986,6 +1994,14 @@ StradaValue* strada_sort(StradaValue *arr) {
         av = fav;
     }
 
+    /* `sort $scalar` heap path: wrap as 1-element list. */
+    if (!av && arr->type != STRADA_HASH) {
+        StradaValue *one = strada_new_array();
+        strada_incref(arr);
+        strada_array_push(one->value.av, arr);
+        if (flat_owner) strada_decref(flat_owner);
+        return one;
+    }
     if (!av || av->size == 0) {
         if (flat_owner) strada_decref(flat_owner);
         return strada_new_array();
@@ -6942,21 +6958,66 @@ int strada_regex_match_with_capture(const char *str, const char *pattern, const 
     /* Register cleanup handler on first use */
     if (!regex_cleanup_registered) { atexit(regex_cleanup_atexit); regex_cleanup_registered = 1; }
 
-    /* Store numbered captures (free old first) */
-    if (last_regex_captures) strada_decref(last_regex_captures);
-    StradaValue *sv = strada_value_alloc();
-    sv->type = STRADA_ARRAY;
-    sv->refcount = 1;
-    sv->value.av = captures;
-    last_regex_captures = sv;
+    /* Perl: $1..$9 (user capture groups) are preserved when the regex
+     * has no user capture groups (just whole-match) — only matches WITH
+     * user capture groups reset them. But $& (whole match, index 0)
+     * MUST always update on a successful match. The PCRE2 test relies
+     * on captures()[0] returning the current whole match even when the
+     * regex has no $1..$9. Failed matches preserve everything.
+     *
+     * Strategy when has_user_captures==0 but rc>=0:
+     *   - Splice the new whole-match (captures[0]) into the existing
+     *     last_regex_captures[0]. Keep the rest of last_regex_captures.
+     *   - If no last_regex_captures yet, install the new (size-1) array. */
+    int has_user_captures = (rc >= 0 && captures->size > 1);
+    int success_no_user = (rc >= 0 && captures->size == 1);
 
-    /* Store named captures (free old first) */
-    if (last_named_captures) strada_decref(last_named_captures);
-    StradaValue *nh = strada_value_alloc();
-    nh->type = STRADA_HASH;
-    nh->refcount = 1;
-    nh->value.hv = named_hash;
-    last_named_captures = nh;
+    if (has_user_captures) {
+        if (last_regex_captures) strada_decref(last_regex_captures);
+        StradaValue *sv = strada_value_alloc();
+        sv->type = STRADA_ARRAY;
+        sv->refcount = 1;
+        sv->value.av = captures;
+        last_regex_captures = sv;
+    } else if (success_no_user) {
+        if (last_regex_captures && last_regex_captures->type == STRADA_ARRAY && last_regex_captures->value.av) {
+            /* Update element 0 ($&) in place, preserve elements 1+. */
+            StradaArray *old_av = last_regex_captures->value.av;
+            StradaValue *new_zero = captures->elements[captures->head + 0];
+            if (old_av->size > 0) {
+                StradaValue *old_zero = old_av->elements[old_av->head + 0];
+                strada_incref(new_zero);
+                old_av->elements[old_av->head + 0] = new_zero;
+                strada_decref(old_zero);
+            } else {
+                strada_incref(new_zero);
+                strada_array_push(old_av, new_zero);
+            }
+            strada_free_array(captures);
+        } else {
+            /* No prior captures — install the new size-1 array. */
+            StradaValue *sv = strada_value_alloc();
+            sv->type = STRADA_ARRAY;
+            sv->refcount = 1;
+            sv->value.av = captures;
+            last_regex_captures = sv;
+        }
+    } else {
+        /* Failed match — preserve everything. */
+        strada_free_array(captures);
+    }
+
+    /* Store named captures (free old first). Same preservation rule. */
+    if (has_user_captures) {
+        if (last_named_captures) strada_decref(last_named_captures);
+        StradaValue *nh = strada_value_alloc();
+        nh->type = STRADA_HASH;
+        nh->refcount = 1;
+        nh->value.hv = named_hash;
+        last_named_captures = nh;
+    } else {
+        strada_free_hash(named_hash);
+    }
 
     /* Store @- (match starts) and @+ (match ends) */
     if (last_match_starts) strada_decref(last_match_starts);
@@ -7292,14 +7353,50 @@ int strada_regex_replace_capture(const char *str, const char *pattern, const cha
     }
     pcre2_match_data_free(cap_md);
 
-    /* Store captures */
+    /* Store captures with the same preservation rule as
+     * strada_regex_match_with_capture: failed match preserves $1..$9;
+     * success without user captures updates $& (index 0) only; success
+     * with user captures fully replaces. Without this, `s/(no captures)//`
+     * after `=~ /(captures)/` cleared $1..$9 even though Perl preserves
+     * them on failed/no-capture matches.
+     * NOTE: On full re-substitution failure (e.g. pattern compiles but
+     * yields no result), rc may still indicate match success here — we
+     * use the size of `captures` (built from the cap_md) as the marker. */
     if (!regex_cleanup_registered) { atexit(regex_cleanup_atexit); regex_cleanup_registered = 1; }
-    if (last_regex_captures) strada_decref(last_regex_captures);
-    StradaValue *sv = strada_value_alloc();
-    sv->type = STRADA_ARRAY;
-    sv->refcount = 1;
-    sv->value.av = captures;
-    last_regex_captures = sv;
+    int sub_has_user = (rc >= 0 && captures->size > 1);
+    int sub_no_user = (rc >= 0 && captures->size == 1);
+    if (sub_has_user) {
+        if (last_regex_captures) strada_decref(last_regex_captures);
+        StradaValue *sv = strada_value_alloc();
+        sv->type = STRADA_ARRAY;
+        sv->refcount = 1;
+        sv->value.av = captures;
+        last_regex_captures = sv;
+    } else if (sub_no_user) {
+        if (last_regex_captures && last_regex_captures->type == STRADA_ARRAY && last_regex_captures->value.av) {
+            StradaArray *old_av = last_regex_captures->value.av;
+            StradaValue *new_zero = captures->elements[captures->head + 0];
+            if (old_av->size > 0) {
+                StradaValue *old_zero = old_av->elements[old_av->head + 0];
+                strada_incref(new_zero);
+                old_av->elements[old_av->head + 0] = new_zero;
+                strada_decref(old_zero);
+            } else {
+                strada_incref(new_zero);
+                strada_array_push(old_av, new_zero);
+            }
+            strada_free_array(captures);
+        } else {
+            StradaValue *sv = strada_value_alloc();
+            sv->type = STRADA_ARRAY;
+            sv->refcount = 1;
+            sv->value.av = captures;
+            last_regex_captures = sv;
+        }
+    } else {
+        /* Failed match — preserve everything. */
+        strada_free_array(captures);
+    }
 
     if (rc < 0) {
         /* No match — return original string, 0 substitutions */
@@ -13171,41 +13268,54 @@ StradaValue* strada_clone(StradaValue *sv) {
     if (STRADA_IS_TAGGED_INT(sv)) return sv;  /* tagged ints are immutable, no clone needed */
     if (!sv) return strada_new_undef();
 
+    /* Capture blessing first — if sv is a blessed hash/array we want the
+     * clone to share the same package. Without this, dclone(Foo->new(...))
+     * returned a plain HASH/ARRAY and lost the OOP identity. */
+    const char *bp = (sv->meta && sv->meta->blessed_package) ? sv->meta->blessed_package : NULL;
+
+    StradaValue *out = NULL;
     switch (sv->type) {
         case STRADA_UNDEF:
-            return strada_new_undef();
+            out = strada_new_undef();
+            break;
         case STRADA_INT:
-            return strada_new_int(sv->value.iv);
+            out = strada_new_int(sv->value.iv);
+            break;
         case STRADA_NUM:
-            return strada_new_num(sv->value.nv);
+            out = strada_new_num(sv->value.nv);
+            break;
         case STRADA_STR:
-            return strada_new_str(sv->value.pv ? sv->value.pv : "");
+            out = strada_new_str(sv->value.pv ? sv->value.pv : "");
+            break;
         case STRADA_ARRAY: {
-            StradaValue *new_arr = strada_new_array();
+            out = strada_new_array();
             if (sv->value.av) {
                 for (size_t i = 0; i < sv->value.av->size; i++) {
-                    strada_array_push_take(new_arr->value.av, strada_clone(sv->value.av->elements[sv->value.av->head + i]));
+                    strada_array_push_take(out->value.av, strada_clone(sv->value.av->elements[sv->value.av->head + i]));
                 }
             }
-            return new_arr;
+            break;
         }
         case STRADA_HASH: {
-            StradaValue *new_hash = strada_new_hash();
+            out = strada_new_hash();
             if (sv->value.hv) {
                 StradaHash *hv = sv->value.hv;
                 for (size_t i = 0; i < hv->next_slot; i++) {
                     if (hv->entries[i].key) {
-                        strada_hash_set_take(new_hash->value.hv, hv->entries[i].key->data, strada_clone(hv->entries[i].value));
+                        strada_hash_set_take(out->value.hv, hv->entries[i].key->data, strada_clone(hv->entries[i].value));
                     }
                 }
             }
-            return new_hash;
+            break;
         }
         case STRADA_REF:
-            return strada_ref_create_take(strada_clone(sv->value.rv));
+            out = strada_ref_create_take(strada_clone(sv->value.rv));
+            break;
         default:
             return strada_new_undef();
     }
+    if (bp && out) strada_bless(out, bp);
+    return out;
 }
 
 StradaValue* strada_abs(StradaValue *sv) {
