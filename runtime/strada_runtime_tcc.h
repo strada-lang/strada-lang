@@ -622,6 +622,7 @@ void strada_method_register(const char *package, const char *name, StradaMethod 
 void strada_register_method(const char *package, const char *name, void *func);
 void strada_modifier_register(const char *package, const char *method, int type, StradaMethod func);
 StradaValue* strada_method_call(StradaValue *obj, const char *method, StradaValue *args);
+StradaValue* strada_method_call_ph(StradaValue *obj, const char *method, StradaValue *args, unsigned int method_hash);
 const char* strada_method_lookup_package(const char *package, const char *method);
 const char* strada_get_parent_package(const char *package);
 int strada_isa(StradaValue *obj, const char *package);

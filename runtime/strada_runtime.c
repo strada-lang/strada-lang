@@ -19935,8 +19935,17 @@ static void method_cache_init(void) {
     method_cache_initialized = 1;
 }
 
+/* Generation counter for the strada_method_call inline cache (mc_cache,
+ * defined near strada_method_call). Bumped whenever method resolution or
+ * modifier presence can change: method registration, inheritance edits,
+ * and modifier registration. Entries stamped with an older generation are
+ * treated as empty, so a full flush is never needed. Starts at 1 so the
+ * zero-initialized cache is stale by construction. */
+static uint32_t mc_cache_gen = 1;
+
 static void method_cache_invalidate(void) {
     memset(method_cache, 0, sizeof(method_cache));
+    mc_cache_gen++;
 }
 
 /* ===== ISA RESULT CACHE ===== */
@@ -20252,6 +20261,9 @@ void strada_modifier_register(const char *package, const char *method,
     mod->func = func;
 
     oop_any_modifiers = 1;
+    /* Invalidate cached has_modifiers verdicts in the dispatch inline cache —
+     * a method previously dispatched with "no modifiers" may now have one. */
+    mc_cache_gen++;
 }
 
 /* Operator overloading */
@@ -20562,7 +20574,48 @@ static int oop_collect_mro(const char *package, OopPackage **out, int max) {
     return n;
 }
 
+/* Method dispatch inline cache: avoid oop_lookup_method (and the modifier
+ * MRO walk) for repeated calls. Direct-mapped, keyed by
+ * (pkg_name_ptr XOR method_name_hash). Stores a copy of the method name to
+ * avoid use-after-free when method name strings come from dynamic dispatch
+ * (strada_to_str + free), plus the method's "has before/after/around in the
+ * MRO" verdict so the no-modifier fast path is one flag test. Entries are
+ * validated against mc_cache_gen (bumped on method/inherit/modifier
+ * registration), so stale resolutions are never served. */
+#define MC_SIZE 64
+#define MC_MASK (MC_SIZE - 1)
+typedef struct {
+    const char *pkg;   /* identity compare (interned blessed-package name) */
+    char method[64];
+    StradaMethod func;
+    int8_t has_mod;    /* -1 = unknown, 0/1 = modifier presence for this method */
+    uint32_t gen;      /* mc_cache_gen stamp; 0 (zero-init) is always stale */
+} McEntry;
+static McEntry mc_cache[MC_SIZE];
+
+static StradaValue* method_call_impl(StradaValue *obj, const char *method,
+                                     StradaValue *args, unsigned int method_hash);
+
 StradaValue* strada_method_call(StradaValue *obj, const char *method, StradaValue *args) {
+    /* djb2 over unsigned bytes — must stay in sync with
+     * strada_method_call_ph callers (djb2_hash_32 in CodeGen.strada). */
+    unsigned int h = 5381;
+    if (method) {
+        for (const unsigned char *p = (const unsigned char *)method; *p; p++)
+            h = h * 33 + *p;
+    }
+    return method_call_impl(obj, method, args, h);
+}
+
+/* Codegen entry point for literal method names: the name hash is computed
+ * at compile time, skipping the per-call strlen + hash loop. */
+StradaValue* strada_method_call_ph(StradaValue *obj, const char *method,
+                                   StradaValue *args, unsigned int method_hash) {
+    return method_call_impl(obj, method, args, method_hash);
+}
+
+static StradaValue* method_call_impl(StradaValue *obj, const char *method,
+                                     StradaValue *args, unsigned int method_hash) {
     /* Call a method on a blessed reference */
     if (!obj || STRADA_IS_TAGGED_INT(obj) || !method) {
         fprintf(stderr, "Error: Cannot call method '%s' on undefined value\n",
@@ -20631,29 +20684,25 @@ StradaValue* strada_method_call(StradaValue *obj, const char *method, StradaValu
         return result;
     }
 
-    /* Method dispatch inline cache: avoid oop_lookup_method for repeated calls.
-     * 8-entry direct-mapped cache keyed by (pkg_name_ptr XOR method_name_hash).
-     * Stores a copy of the method name to avoid use-after-free when method
-     * name strings come from dynamic dispatch (strada_to_str + free). */
-    #define MC_SIZE 8
-    #define MC_MASK (MC_SIZE - 1)
-    static struct { const char *pkg; char method[64]; StradaMethod func; } mc_cache[MC_SIZE];
-    static int mc_initialized = 0;
-    if (!mc_initialized) { memset(mc_cache, 0, sizeof(mc_cache)); mc_initialized = 1; }
-
-    size_t method_len = strlen(method);
-    unsigned int method_hash = 5381;
-    for (size_t mi = 0; mi < method_len; mi++) method_hash = method_hash * 33 + (unsigned char)method[mi];
     unsigned int mc_idx = (unsigned int)(((uintptr_t)pkg_name >> 3) ^ method_hash) & MC_MASK;
+    McEntry *mce = &mc_cache[mc_idx];
+    int mce_match = 0;  /* entry currently describes (pkg_name, method) */
     StradaMethod func;
-    if (mc_cache[mc_idx].pkg == pkg_name && strcmp(mc_cache[mc_idx].method, method) == 0) {
-        func = mc_cache[mc_idx].func;  /* Cache hit */
+    if (mce->gen == mc_cache_gen && mce->pkg == pkg_name && strcmp(mce->method, method) == 0) {
+        func = mce->func;  /* Cache hit */
+        mce_match = 1;
     } else {
         func = oop_lookup_method(pkg_name, method);
-        if (func && method_len < 64) {
-            mc_cache[mc_idx].pkg = pkg_name;
-            memcpy(mc_cache[mc_idx].method, method, method_len + 1);
-            mc_cache[mc_idx].func = func;
+        if (func) {
+            size_t method_len = strlen(method);
+            if (method_len < sizeof(mce->method)) {
+                mce->pkg = pkg_name;
+                memcpy(mce->method, method, method_len + 1);
+                mce->func = func;
+                mce->has_mod = -1;  /* computed lazily on first modifier check */
+                mce->gen = mc_cache_gen;
+                mce_match = 1;
+            }
         }
     }
     if (!func) {
@@ -20684,17 +20733,28 @@ StradaValue* strada_method_call(StradaValue *obj, const char *method, StradaValu
 
     /* Check for method modifiers (before/after/around) — skip entirely when none registered */
     /* Modifiers (before/after/around) are collected across the MRO so a
-     * modifier declared on a parent class also fires for a subclass. */
+     * modifier declared on a parent class also fires for a subclass.
+     * The verdict is cached per (pkg, method) in the dispatch inline cache:
+     * once any modifier exists anywhere (oop_any_modifiers), methods WITHOUT
+     * modifiers would otherwise pay the full MRO walk + scan on every call. */
     if (oop_any_modifiers) {
         OopPackage *mro[64];
-        int mro_n = oop_collect_mro(pkg_name, mro, 64);
-        int has_mod = 0;
-        for (int k = 0; k < mro_n && !has_mod; k++) {
-            for (int mi = 0; mi < mro[k]->modifier_count; mi++) {
-                if (strcmp(mro[k]->modifiers[mi].method_name, method) == 0) { has_mod = 1; break; }
+        int mro_n = -1;
+        int has_mod;
+        if (mce_match && mce->has_mod >= 0) {
+            has_mod = mce->has_mod;
+        } else {
+            mro_n = oop_collect_mro(pkg_name, mro, 64);
+            has_mod = 0;
+            for (int k = 0; k < mro_n && !has_mod; k++) {
+                for (int mi = 0; mi < mro[k]->modifier_count; mi++) {
+                    if (strcmp(mro[k]->modifiers[mi].method_name, method) == 0) { has_mod = 1; break; }
+                }
             }
+            if (mce_match) mce->has_mod = (int8_t)has_mod;
         }
         if (has_mod) {
+            if (mro_n < 0) mro_n = oop_collect_mro(pkg_name, mro, 64);
             /* 'before' modifiers — across the MRO, most-derived first. They
              * receive the SAME args as the wrapped method (Moose semantics).
              * `args` is already on the cleanup stack (pushed at method entry). */
