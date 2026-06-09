@@ -999,6 +999,114 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         my int $foreach_id = $cg->{"foreach_counter"};
         $cg->{"foreach_counter"} = $foreach_id + 1;
 
+        # Fast path: foreach over an int-typed range (e.g. 0..$n) compiles to
+        # a native C for loop — no strada_range array materialization, no
+        # per-iteration array_get. Bounds are evaluated once up front and
+        # `5..1` iterates zero times, matching strada_range (Perl ranges only
+        # count upward). The loop variable is rebuilt from the C counter each
+        # iteration via strada_new_int (tagged int for the entire practical
+        # range, so no allocation), and the body treats it as borrowed —
+        # exactly like the array_get path. emit_int_operand handles
+        # owned-temp cleanup for the bound expressions itself.
+        if ($array_expr->{"type"} == NODE_RANGE()
+            && expr_is_int_typed($cg, $array_expr->{"start"}) == 1
+            && expr_is_int_typed($cg, $array_expr->{"end"}) == 1) {
+            emit_indent($cg);
+            emit($cg, "{\n");
+            indent($cg);
+            scope_push($cg);
+
+            emit_indent($cg);
+            emit($cg, "int64_t __fr_start_" . $foreach_id . " = ");
+            emit_int_operand($cg, $array_expr->{"start"});
+            emit($cg, ";\n");
+            emit_indent($cg);
+            emit($cg, "int64_t __fr_end_" . $foreach_id . " = ");
+            emit_int_operand($cg, $array_expr->{"end"});
+            emit($cg, ";\n");
+
+            # For pre-existing loop variables, release the old value before the loop
+            if (!$var_decl) {
+                emit_indent($cg);
+                emit($cg, "strada_decref(" . $var_name . "); " . $var_name . " = NULL;\n");
+            } else {
+                emit_indent($cg);
+                emit($cg, "StradaValue *" . $var_name . " = NULL;\n");
+            }
+
+            # The loop variable always holds an int here; register it as
+            # int-typed for the body (scoped: restored after the loop) so
+            # int fast paths (tagged arithmetic, int conditions) apply.
+            my str $fr_prev_iv = "";
+            if ($var_decl) {
+                $fr_prev_iv = "" . $cg->{"int_vars"}->{$var_name};
+                $cg->{"int_vars"}->{$var_name} = 1;
+            }
+
+            emit_indent($cg);
+            emit($cg, "for (int64_t __fr_i_" . $foreach_id . " = __fr_start_" . $foreach_id . "; __fr_i_" . $foreach_id . " <= __fr_end_" . $foreach_id . "; __fr_i_" . $foreach_id . "++) {\n");
+            indent($cg);
+            scope_push($cg);
+
+            emit_indent($cg);
+            emit($cg, $var_name . " = strada_new_int(__fr_i_" . $foreach_id . ");\n");
+
+            # Emit redo label after variable assignment
+            emit_indent($cg);
+            emit($cg, $redo_label . ": __attribute__((unused));\n");
+
+            # Per-iter local() restore.
+            my int $fr_body_has_local = stmt_has_local($body);
+            my int $fr_local_id = 0;
+            if ($fr_body_has_local == 1) {
+                $fr_local_id = $cg->{"tmp_counter"} + 0;
+                $cg->{"tmp_counter"} = $fr_local_id + 1;
+                emit_indent($cg);
+                emit($cg, "int __local_iter_mark_" . $fr_local_id . " = strada_local_depth_get();\n");
+            }
+
+            # Generate body statements
+            my scalar $fr_stmts = $body->{"statements"};
+            my int $fr_i = 0;
+            while ($fr_i < $body->{"statement_count"}) {
+                gen_statement($cg, $fr_stmts->[$fr_i]);
+                $fr_i = $fr_i + 1;
+            }
+
+            if (length($label) > 0) {
+                emit_indent($cg);
+                emit($cg, $label);
+                emit($cg, "_continue: ;\n");
+            }
+            if ($fr_body_has_local == 1) {
+                emit_indent($cg);
+                emit($cg, "strada_local_restore_to(__local_iter_mark_" . $fr_local_id . ");\n");
+            }
+            scope_pop($cg);
+            dedent($cg);
+            emit_indent($cg);
+            emit($cg, "}\n");
+
+            if ($var_decl) {
+                $cg->{"int_vars"}->{$var_name} = $fr_prev_iv;
+            }
+
+            scope_pop($cg);
+            dedent($cg);
+            emit_indent($cg);
+            emit($cg, "}\n");
+
+            if (length($label) > 0) {
+                emit_indent($cg);
+                emit($cg, $label);
+                emit($cg, "_break: ;\n");
+            }
+            $cg->{"loop_break_depth"} = $saved_loop_break_depth;
+            $cg->{"loop_try_depth"} = $saved_loop_try_depth;
+            $cg->{"current_redo_label"} = $saved_redo;
+            return;
+        }
+
         # Open a block scope
         emit_indent($cg);
         emit($cg, "{\n");
