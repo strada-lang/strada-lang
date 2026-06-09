@@ -3904,6 +3904,130 @@ StradaValue* strada_hash_get_sv(StradaHash *hv, StradaValue *key_sv) {
     }
 }
 
+/* ===== SINGLE-LOOKUP HASH-ELEMENT COMPOUND ASSIGNMENT ===== */
+/* $h{k} op= rhs used to compile to fetch_owned + store: two full probe
+ * sequences (the key hashed twice) plus an incref/decref pair on the old
+ * value. These helpers find the entry's value slot once and update it in
+ * place. Hot for the hash-counter idiom ($count{$k} += 1 in a loop). */
+
+/* Find the value slot for `key`, or NULL if the key is absent. The pointer
+ * is valid only until the next structural modification (insert/delete/
+ * resize) — callers must not call back into hash mutation while holding it.
+ * Probe logic mirrors strada_hash_get_sv, including the linear-scan
+ * fallback for a dirty index. */
+static StradaValue** hash_lvalue_slot(StradaHash *hv, const char *key,
+                                      uint32_t key_len, unsigned int hash) {
+    if (!hv) return NULL;
+    uint32_t pos = hash & (hv->num_buckets - 1);
+    int iters = 0;
+    while (1) {
+        uint32_t idx = hv->hash_index[pos];
+        if (idx == HASH_EMPTY) {
+            int32_t slot = hash_linear_find(hv, key, key_len, hash);
+            return (slot >= 0) ? &hv->entries[slot].value : NULL;
+        }
+        if (idx != HASH_TOMBSTONE) {
+            StradaHashEntry *e = &hv->entries[idx];
+            if (e->key && e->key->hash == hash && e->key->len == key_len
+                && memcmp(e->key->data, key, key_len) == 0) {
+                return &e->value;
+            }
+        }
+        pos = (pos + 1) & (hv->num_buckets - 1);
+        iters++;
+        if (iters > (int)hv->num_buckets) {
+            int32_t slot = hash_linear_find(hv, key, key_len, hash);
+            return (slot >= 0) ? &hv->entries[slot].value : NULL;
+        }
+    }
+}
+
+/* Compute old OP rhs as an owned value. `old` may be NULL or undef
+ * (missing key): arithmetic treats it as int 0 — staying a tagged int
+ * when rhs is one, unlike the old fetch/store codegen which boxed a
+ * heap double for the first += on a fresh key — and concat treats it
+ * as "". op is '+', '-', '*' or '/'; concat ('.') is handled by the
+ * callers directly so it can append in place. */
+static StradaValue* hv_compound_combine(StradaValue *old, StradaValue *rhs, int op) {
+    int old_undef = (!old || (!STRADA_IS_TAGGED_INT(old) && old->type == STRADA_UNDEF));
+    if (op != '/' && rhs && STRADA_IS_TAGGED_INT(rhs)
+        && (old_undef || STRADA_IS_TAGGED_INT(old))) {
+        int64_t a = old_undef ? 0 : STRADA_TAGGED_INT_VAL(old);
+        int64_t b = STRADA_TAGGED_INT_VAL(rhs);
+        int64_t r = (op == '+') ? a + b : (op == '-') ? a - b : a * b;
+        return strada_new_int(r);
+    }
+    double a = old_undef ? 0.0 : strada_to_num(old);
+    double b = rhs ? strada_to_num(rhs) : 0.0;
+    double r = (op == '+') ? a + b : (op == '-') ? a - b
+             : (op == '*') ? a * b : a / b;
+    return strada_new_num(r);
+}
+
+/* Generic fetch/compute/store path for tied or key-locked hashes, so
+ * FETCH/STORE handlers and Hash::Util lock checks still fire. */
+static void hv_compound_fallback(StradaValue *sv, const char *key,
+                                 StradaValue *rhs, int op) {
+    StradaValue *old = strada_hv_fetch_owned(sv, key);
+    StradaValue *nv;
+    if (op == '.') {
+        nv = strada_concat_sv(old, rhs);
+    } else {
+        nv = hv_compound_combine(old, rhs, op);
+    }
+    strada_hv_store(sv, key, nv);
+    strada_decref(nv);
+    strada_decref(old);
+}
+
+/* op is '+', '-', '*', '/' or '.'. rhs is BORROWED. hash must equal
+ * strada_hash_string(key) (codegen passes a compile-time djb2 for
+ * ASCII literal keys). */
+void strada_hv_compound_ph(StradaValue *sv, const char *key, unsigned int hash,
+                           StradaValue *rhs, int op) {
+    if (!sv || STRADA_IS_TAGGED_INT(sv) || !key) return;
+    if (__builtin_expect(sv->meta && (sv->meta->is_tied || sv->meta->is_hash_locked), 0)) {
+        hv_compound_fallback(sv, key, rhs, op);
+        return;
+    }
+    StradaHash *hv = strada_deref_hash(sv);
+    if (!hv) return;  /* non-hash: matches the old fetch(undef)/store no-op */
+    uint32_t key_len = (uint32_t)strlen(key);
+    StradaValue **slot = hash_lvalue_slot(hv, key, key_len, hash);
+    if (!slot) {
+        /* Missing key: combine against undef, insert once (reusing the
+         * already-computed hash for the probe). */
+        StradaValue *nv = (op == '.') ? strada_concat_sv(NULL, rhs)
+                                      : hv_compound_combine(NULL, rhs, op);
+        strada_hash_set_take_ph(hv, key, hash, nv);
+        return;
+    }
+    StradaValue *old = *slot;
+    if (op == '.') {
+        /* The hash is the sole owner of `old` in the common case
+         * (refcount 1), so concat_inplace appends without copying the
+         * accumulated string; it consumes `old` either way. */
+        *slot = strada_concat_inplace(old, rhs);
+        return;
+    }
+    StradaValue *nv = hv_compound_combine(old, rhs, op);
+    *slot = nv;          /* hash takes ownership of nv (created refcount 1) */
+    strada_decref(old);  /* the slot's reference */
+}
+
+void strada_hv_compound(StradaValue *sv, const char *key, StradaValue *rhs, int op) {
+    if (!key) return;
+    strada_hv_compound_ph(sv, key, strada_hash_string(key), rhs, op);
+}
+
+void strada_hv_compound_sv(StradaValue *sv, StradaValue *key_sv, StradaValue *rhs, int op) {
+    char *key_alloc;
+    const char *key = sv_key_extract(key_sv, &key_alloc);
+    if (!key) { if (key_alloc) free(key_alloc); return; }
+    strada_hv_compound_ph(sv, key, strada_hash_string(key), rhs, op);
+    if (key_alloc) free(key_alloc);
+}
+
 int strada_hash_exists_sv(StradaHash *hv, StradaValue *key_sv) {
     if (!hv) return 0;
     char *key_alloc;

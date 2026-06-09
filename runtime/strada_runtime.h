@@ -2070,4 +2070,13 @@ StradaValue* strada_hv_fetch_owned_concat(StradaValue *sv, const char *prefix, s
 void strada_hv_store_concat(StradaValue *sv, const char *prefix, size_t prefix_len, StradaValue *suffix, StradaValue *value);
 void strada_hv_delete_concat(StradaValue *sv, const char *prefix, size_t prefix_len, StradaValue *suffix);
 
+/* Single-lookup hash-element compound assignment: $h{k} op= rhs.
+ * op is '+', '-', '*', '/' or '.'; rhs is borrowed. One probe instead of
+ * the fetch_owned + store pair; tied/locked hashes fall back to
+ * FETCH/compute/STORE. _ph takes a precomputed strada_hash_string hash
+ * (compile-time djb2 for ASCII literal keys). */
+void strada_hv_compound_ph(StradaValue *sv, const char *key, unsigned int hash, StradaValue *rhs, int op);
+void strada_hv_compound(StradaValue *sv, const char *key, StradaValue *rhs, int op);
+void strada_hv_compound_sv(StradaValue *sv, StradaValue *key_sv, StradaValue *rhs, int op);
+
 #endif /* STRADA_RUNTIME_H */

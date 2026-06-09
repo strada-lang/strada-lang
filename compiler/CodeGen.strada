@@ -3507,6 +3507,51 @@ func gen_hash_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op) 
     # so the next read of $k is a use-after-free (segfault). Literal keys go
     # through the inline gen_str_literal_c path and never bind __hca_k.
     my int $key_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $key_expr) == 1;
+
+    # Single-lookup fast path: the supported ops compile to one
+    # strada_hv_compound* call — one hash probe and an in-place slot update
+    # instead of fetch_owned + store (two probes, key hashed twice, plus an
+    # incref/decref pair on the old value). The runtime falls back to
+    # FETCH/compute/STORE for tied/locked hashes. ASCII literal keys also
+    # get a compile-time djb2 hash (_ph variant), like fetch_owned_ph.
+    my str $hca_opch = "";
+    if ($op eq "+=") { $hca_opch = "'+'"; }
+    elsif ($op eq "-=") { $hca_opch = "'-'"; }
+    elsif ($op eq "*=") { $hca_opch = "'*'"; }
+    elsif ($op eq "/=") { $hca_opch = "'/'"; }
+    elsif ($op eq ".=") { $hca_opch = "'.'"; }
+    if (length($hca_opch) > 0) {
+        emit($cg, "({ StradaValue *__hca_h = ");
+        gen_expression($cg, $hash_expr);
+        emit($cg, "; ");
+        if ($key_is_lit == 0) {
+            emit($cg, "StradaValue *__hca_k = ");
+            gen_expression($cg, $key_expr);
+            emit($cg, "; ");
+        }
+        emit($cg, "StradaValue *__hca_rhs = ");
+        gen_expression($cg, $rhs);
+        emit($cg, "; ");
+        if ($key_is_lit == 1) {
+            if (key_is_hashable_ascii($key_expr->{"value"}) == 1) {
+                emit($cg, "strada_hv_compound_ph(__hca_h, ");
+                gen_str_literal_c($cg, $key_expr->{"value"});
+                emit($cg, ", " . djb2_hash_32($key_expr->{"value"}) . "u, __hca_rhs, " . $hca_opch . "); ");
+            } else {
+                emit($cg, "strada_hv_compound(__hca_h, ");
+                gen_str_literal_c($cg, $key_expr->{"value"});
+                emit($cg, ", __hca_rhs, " . $hca_opch . "); ");
+            }
+        } else {
+            emit($cg, "strada_hv_compound_sv(__hca_h, __hca_k, __hca_rhs, " . $hca_opch . "); ");
+        }
+        if ($rhs_cleanup == 1) { emit($cg, "strada_decref(__hca_rhs); "); }
+        if ($key_is_lit == 0 && $key_cleanup == 1) { emit($cg, "strada_decref(__hca_k); "); }
+        if ($hash_cleanup == 1) { emit($cg, "strada_decref(__hca_h); "); }
+        emit($cg, "(StradaValue*)NULL; })");
+        return;
+    }
+
     # Generate: ({ hash_ref; key; old = fetch; new = old OP rhs; store(hash, key, new); decref... })
     emit($cg, "({ StradaValue *__hca_h = ");
     gen_expression($cg, $hash_expr);
