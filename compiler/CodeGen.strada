@@ -3185,6 +3185,10 @@ func needs_temp_cleanup(scalar $cg, scalar $expr) int {
             $name eq "async::recv" || $name eq "async::try_recv" ||
             $name eq "async::all" || $name eq "async::race" ||
             $name eq "async::timeout" ||
+            # thread::create returns an owned handle (cpointer); thread::join
+            # returns the thread's owned result. Both leak as temp args (e.g.
+            # push(@t, thread::create(...))) without cleanup.
+            $name eq "thread::create" || $name eq "thread::join" ||
             # Signals (advanced)
             $name eq "sys::sigprocmask" || $name eq "sys::raise" || $name eq "sys::killpg" ||
             # User/group database

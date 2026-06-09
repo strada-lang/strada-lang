@@ -2401,10 +2401,20 @@ func gen_builtin_g3(scalar $cg, scalar $expr, str $name) int {
 
         # Thread functions
         if ($name eq "thread::create") {
-            emit($cg, "strada_thread_create(");
+            # The closure is an owned temp and strada_thread_create increfs it
+            # (st->closure); without decref'ing the temp here it leaks (refcount
+            # stays 1 after thread_join's decref). Wrap with cleanup.
             my scalar $args = $expr->{"args"};
-            gen_expression($cg, $args->[0]);
-            emit($cg, ")");
+            my scalar $tc_arg = $args->[0];
+            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $tc_arg) == 1) {
+                emit($cg, "({ StradaValue *__tc_cl = ");
+                gen_expression($cg, $tc_arg);
+                emit($cg, "; StradaValue *__tc_r = strada_thread_create(__tc_cl); strada_decref(__tc_cl); __tc_r; })");
+            } else {
+                emit($cg, "strada_thread_create(");
+                gen_expression($cg, $tc_arg);
+                emit($cg, ")");
+            }
             return 1;
         }
 

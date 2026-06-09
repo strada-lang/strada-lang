@@ -1104,6 +1104,32 @@ static unsigned long cc_collections_count = 0;
 static unsigned long cc_freed_count = 0;
 static void cc_possible_root(StradaValue *sv);
 static void cc_forget(StradaValue *sv);
+/* Stop-the-world support. Under threading the collector pauses every OTHER
+ * mutator thread at a safepoint before running the (non-atomic) trial-deletion
+ * pass — otherwise a concurrent refcount/structural mutation corrupts it.
+ * cc_stw_active is polled lock-free on the threaded decref path; when a collect
+ * is requested, mutators park in cc_safepoint_slow. Blocked threads (sleep/recv/
+ * await/join/pool-idle) mark themselves safe via cc_blocking_enter/leave so the
+ * collector needn't wait for them. */
+static int cc_stw_active = 0;
+/* Set while THIS thread is running a collection. The collector frees nodes
+ * (which can decref tied objects etc.), so it must NOT poll its own safepoint
+ * or re-take cc_stw_mutex during the pass — that would self-deadlock. */
+static __thread int cc_self_collecting = 0;
+static void cc_safepoint_slow(void);
+static inline void cc_safepoint(void) {
+    if (!cc_self_collecting && __atomic_load_n(&cc_stw_active, __ATOMIC_RELAXED)) cc_safepoint_slow();
+}
+static void cc_thread_register(void);    /* a mutator thread begins Strada execution */
+static void cc_thread_unregister(void);  /* ...and ends for good */
+static void cc_blocking_enter(void);     /* about to block in a syscall -> count as safe */
+static void cc_blocking_leave(void);     /* returned from a block -> re-park if GC active */
+#else
+/* No-op stubs so the thread/blocking call sites compile with the collector off. */
+static inline void cc_thread_register(void)   {}
+static inline void cc_thread_unregister(void) {}
+static inline void cc_blocking_enter(void)    {}
+static inline void cc_blocking_leave(void)    {}
 #endif
 
 void strada_decref(StradaValue *sv) {
@@ -1150,9 +1176,14 @@ void strada_decref(StradaValue *sv) {
      * candidate root of a cycle. Buffer it for the collector. Buffered roots
      * are pinned (incref'd) inside cc_possible_root, so they can never reach
      * the drop-to-zero branch above while buffered — no dangling-pointer race. */
-    else if (new_rc > 0 && cc_enabled && !strada_threading_active && !cc_collecting) {
+    else if (new_rc > 0 && cc_enabled && !__atomic_load_n(&cc_collecting, __ATOMIC_RELAXED)) {
         cc_possible_root(sv);
     }
+    /* Safepoint poll AFTER buffering, never before it: parking between the
+     * decrement and cc_possible_root would let the collector free sv (a now-
+     * unreferenced cycle member) during the park, and cc_possible_root would
+     * then read freed memory. By here we are done touching sv. */
+    if (strada_threading_active) cc_safepoint();
 #endif
 }
 
@@ -11143,7 +11174,7 @@ void strada_free_value(StradaValue *sv) {
      * enabled can be freed after GC is disabled; without forgetting it here, the
      * stale cc_roots[] pointer becomes a use-after-free if GC is re-enabled and a
      * collection runs. cc_forget is a cheap no-op when sv isn't buffered. */
-    if (!cc_collecting
+    if (!__atomic_load_n(&cc_collecting, __ATOMIC_RELAXED)
         && (sv->type == STRADA_ARRAY || sv->type == STRADA_HASH || sv->type == STRADA_REF))
         cc_forget(sv);
 #endif
@@ -11605,14 +11636,26 @@ typedef void (*cc_visit)(StradaValue *child);
  * collectable (heap, non-tagged, non-immortal) children only. The set yielded
  * is identical across all phases, which keeps the trial-deletion RC arithmetic
  * balanced. Tied containers / weak & slot REFs are treated as leaves. */
+/* During CollectWhite a child may ALREADY be freed (a node shared between two
+ * garbage containers, collected via the first parent). cc_collectable() would
+ * dereference it (use-after-free). In that phase, filter children by the
+ * side-table colour instead — cc_color_get is keyed on the pointer value and
+ * never dereferences the object; only WHITE nodes are still alive & pending
+ * free. Other phases run before any free, so cc_collectable() is safe there. */
+static inline int cc_child_visit(StradaValue *c, int collectwhite) {
+    if (!c || STRADA_IS_TAGGED_INT(c)) return 0;
+    if (collectwhite) return cc_color_get(c) == CC_WHITE;
+    return c->refcount <= 1000000000 && !ARENA_OWNS(c);
+}
 static void cc_each_child(StradaValue *sv, cc_visit fn) {
     if (sv->meta && sv->meta->is_tied) return;
+    int cw = (fn == cc_collectwhite);   /* free phase: children may be freed */
     switch (sv->type) {
         case STRADA_ARRAY: {
             StradaArray *av = sv->value.av;
             if (av) for (size_t i = 0; i < av->size; i++) {
                 StradaValue *c = av->elements[av->head + i];
-                if (cc_collectable(c)) fn(c);
+                if (cc_child_visit(c, cw)) fn(c);
             }
             break;
         }
@@ -11621,7 +11664,7 @@ static void cc_each_child(StradaValue *sv, cc_visit fn) {
             if (hv) for (size_t i = 0; i < hv->next_slot; i++) {
                 if (hv->entries[i].key) {
                     StradaValue *c = hv->entries[i].value;
-                    if (cc_collectable(c)) fn(c);
+                    if (cc_child_visit(c, cw)) fn(c);
                 }
             }
             break;
@@ -11629,7 +11672,7 @@ static void cc_each_child(StradaValue *sv, cc_visit fn) {
         case STRADA_REF: {
             if (SV_IS_WEAK(sv) || strada_is_slot_ref(sv)) break;
             StradaValue *c = sv->value.rv;
-            if (cc_collectable(c)) fn(c);
+            if (cc_child_visit(c, cw)) fn(c);
             break;
         }
         default: break;
@@ -11722,38 +11765,120 @@ static void cc_collectwhite(StradaValue *s) {
     }
 }
 
-static void cc_collect(void) {
-    /* Single-threaded scope: skip if threading became active (e.g., async pool
-     * was initialised). The collector uses raw refcount manipulation during
-     * MarkGray/ScanBlack which would race with atomic refcounts elsewhere. */
-    if (cc_collecting || cc_roots_len == 0 || strada_threading_active) return;
-    cc_collecting = 1;
+/* ---- Stop-the-world coordination (threaded collection) ----
+ * The trial-deletion pass mutates refcounts non-atomically and walks containers,
+ * so it needs the object graph stable. Under threading we therefore pause every
+ * OTHER registered mutator at a safepoint before collecting. Mutators poll
+ * cc_stw_active on the threaded decref path (cc_safepoint); threads blocked in a
+ * syscall mark themselves safe via cc_blocking_enter/leave so the collector need
+ * not wait for them. A timeout on the wait means a thread that can't reach a
+ * safepoint just causes a skipped collection, never a hang. */
+static pthread_mutex_t cc_stw_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  cc_stw_cond  = PTHREAD_COND_INITIALIZER;
+static int cc_nthreads = 0;   /* registered mutator threads (under cc_stw_mutex)        */
+static int cc_nsafe    = 0;   /* of those, how many are at a safepoint (blocked/parked) */
+static __thread int cc_self_registered = 0;
 
-    /* MarkRoots */
-    for (size_t i = 0; i < cc_roots_len; i++) {
+static void cc_thread_register(void) {
+    if (cc_self_registered) return;
+    cc_self_registered = 1;
+    pthread_mutex_lock(&cc_stw_mutex);
+    cc_nthreads++;
+    pthread_mutex_unlock(&cc_stw_mutex);
+}
+static void cc_thread_unregister(void) {
+    if (!cc_self_registered) return;
+    cc_self_registered = 0;
+    pthread_mutex_lock(&cc_stw_mutex);
+    cc_nthreads--;
+    pthread_cond_broadcast(&cc_stw_cond);   /* a waiting collector may now hit its target */
+    pthread_mutex_unlock(&cc_stw_mutex);
+}
+/* Slow path of inline cc_safepoint: a collect was requested while we ran Strada
+ * code. Park (counted safe) until it finishes. */
+static void cc_safepoint_slow(void) {
+    pthread_mutex_lock(&cc_stw_mutex);
+    while (cc_stw_active) {
+        cc_nsafe++;
+        pthread_cond_broadcast(&cc_stw_cond);
+        while (cc_stw_active) pthread_cond_wait(&cc_stw_cond, &cc_stw_mutex);
+        cc_nsafe--;
+    }
+    pthread_mutex_unlock(&cc_stw_mutex);
+}
+/* Call immediately before a blocking syscall (no heap access in between): we
+ * won't touch the graph until we return, so count as safe now. */
+static void cc_blocking_enter(void) {
+    if (!cc_self_registered) return;
+    pthread_mutex_lock(&cc_stw_mutex);
+    cc_nsafe++;
+    pthread_cond_broadcast(&cc_stw_cond);
+    pthread_mutex_unlock(&cc_stw_mutex);
+}
+/* Call immediately after returning from the blocking syscall: stop counting as
+ * safe, but if a collect is in progress, park instead of resuming mutation. */
+static void cc_blocking_leave(void) {
+    if (!cc_self_registered) return;
+    pthread_mutex_lock(&cc_stw_mutex);
+    cc_nsafe--;
+    while (cc_stw_active) {
+        cc_nsafe++;
+        pthread_cond_broadcast(&cc_stw_cond);
+        while (cc_stw_active) pthread_cond_wait(&cc_stw_cond, &cc_stw_mutex);
+        cc_nsafe--;
+    }
+    pthread_mutex_unlock(&cc_stw_mutex);
+}
+
+/* The trial-deletion pass itself — assumes exclusive access to the graph
+ * (single-threaded, or every other mutator parked/blocked at a safepoint). */
+static void cc_collect_phases(void) {
+    cc_self_collecting = 1;   /* our own decrefs (freeing nodes) must not park/relock */
+    for (size_t i = 0; i < cc_roots_len; i++) {                       /* MarkRoots */
         StradaValue *s = cc_roots[i];
         if (cc_color_get(s) == CC_PURPLE) cc_markgray(s);
     }
-    /* ScanRoots */
-    for (size_t i = 0; i < cc_roots_len; i++) cc_scan(cc_roots[i]);
-    /* CollectRoots: free the white (garbage) roots; black survivors and FREED
-     * (already normally-freed) entries need no action. */
-    for (size_t i = 0; i < cc_roots_len; i++) {
+    for (size_t i = 0; i < cc_roots_len; i++) cc_scan(cc_roots[i]);   /* ScanRoots */
+    for (size_t i = 0; i < cc_roots_len; i++) {                       /* CollectRoots */
         StradaValue *s = cc_roots[i];
         CCEnt *e = cc_tab_slot(s, 0);
-        if (e && e->color == CC_WHITE) {
-            e->buffered = 0;                  /* unbuffer so CollectWhite frees it */
-            cc_collectwhite(s);
-        }
+        if (e && e->color == CC_WHITE) { e->buffered = 0; cc_collectwhite(s); }
     }
     cc_roots_len = 0;
-
-    /* Reset side table wholesale for the next round (survivors are black & the
-     * table holds only transient colours; bounded by the last collection). */
     if (cc_tab_cap) memset(cc_tab, 0, cc_tab_cap * sizeof(CCEnt));
     cc_tab_used = 0;
     cc_collections_count++;
-    cc_collecting = 0;
+    cc_self_collecting = 0;
+}
+
+static void cc_collect(void) {
+    if (!strada_threading_active) {
+        if (__atomic_load_n(&cc_collecting, __ATOMIC_RELAXED) || cc_roots_len == 0) return;   /* no other mutator exists */
+        __atomic_store_n(&cc_collecting, 1, __ATOMIC_RELAXED);
+        cc_collect_phases();
+        __atomic_store_n(&cc_collecting, 0, __ATOMIC_RELAXED);
+        return;
+    }
+    /* Threaded: stop the world, then collect with the graph stable. */
+    pthread_mutex_lock(&cc_stw_mutex);
+    /* Claim collector status BEFORE the wait so other threads that also hit the
+     * threshold bail here and park instead of all becoming collectors (livelock). */
+    if (__atomic_load_n(&cc_collecting, __ATOMIC_RELAXED) || cc_roots_len == 0) { pthread_mutex_unlock(&cc_stw_mutex); return; }
+    __atomic_store_n(&cc_collecting, 1, __ATOMIC_RELAXED);
+    __atomic_store_n(&cc_stw_active, 1, __ATOMIC_SEQ_CST);
+    struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl);
+    dl.tv_nsec += 200000000L;
+    if (dl.tv_nsec >= 1000000000L) { dl.tv_sec++; dl.tv_nsec -= 1000000000L; }
+    int stopped = 1;
+    while (cc_nsafe < cc_nthreads - 1) {
+        if (pthread_cond_timedwait(&cc_stw_cond, &cc_stw_mutex, &dl) == ETIMEDOUT
+            && cc_nsafe < cc_nthreads - 1) { stopped = 0; break; }
+    }
+    if (stopped) cc_collect_phases();        /* exclusive: all others parked/blocked */
+    __atomic_store_n(&cc_collecting, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&cc_stw_active, 0, __ATOMIC_SEQ_CST);
+    pthread_cond_broadcast(&cc_stw_cond);    /* release parked threads */
+    pthread_mutex_unlock(&cc_stw_mutex);
 }
 
 static void cc_atexit(void) {
@@ -11770,17 +11895,21 @@ static void cc_possible_root(StradaValue *sv) {
     if (!cc_is_cyclic_type(sv->type)) return;
     if (sv->type == STRADA_REF && strada_is_slot_ref(sv)) return;  /* C-stack-backed */
     if (sv->meta && sv->meta->is_tied) return;         /* conservative: skip tied */
+    int lk = strada_threading_active && !cc_self_collecting;
+    if (lk) pthread_mutex_lock(&cc_stw_mutex);
     CCEnt *e = cc_tab_slot(sv, 1);
-    if (!e) return;
-    /* Re-mark as a live candidate (resets a stale FREED entry if this slot's
-     * address was recycled by the pools). */
-    e->color = CC_PURPLE;
-    if (!e->buffered) {
-        e->buffered = 1;
-        cc_roots_push(sv);
-        if (!cc_atexit_registered) { cc_atexit_registered = 1; atexit(cc_atexit); }
-        if (cc_roots_len >= cc_threshold) cc_collect();
+    int do_collect = 0;
+    if (e) {
+        e->color = CC_PURPLE;          /* (re)mark as a live candidate */
+        if (!e->buffered) {
+            e->buffered = 1;
+            cc_roots_push(sv);
+            if (!cc_atexit_registered) { cc_atexit_registered = 1; atexit(cc_atexit); }
+            do_collect = (cc_roots_len >= cc_threshold);
+        }
     }
+    if (lk) pthread_mutex_unlock(&cc_stw_mutex);
+    if (do_collect) cc_collect();      /* outside the lock — cc_collect re-takes it */
 }
 
 /* Called from strada_free_value when a buffered candidate is freed by the NORMAL
@@ -11789,12 +11918,15 @@ static void cc_possible_root(StradaValue *sv) {
  * is matched by pointer value only — never dereferenced — so this is safe even
  * though the object is being freed. */
 static void cc_forget(StradaValue *sv) {
+    int lk = strada_threading_active && !cc_self_collecting;
+    if (lk) pthread_mutex_lock(&cc_stw_mutex);
     CCEnt *e = cc_tab_slot(sv, 0);
     if (e) { e->color = CC_FREED; e->buffered = 0; }
+    if (lk) pthread_mutex_unlock(&cc_stw_mutex);
 }
 
 /* ---- Public API ---- */
-void strada_gc_collect(void)            { if (!strada_threading_active) cc_collect(); }
+void strada_gc_collect(void)            { cc_collect(); }   /* threaded: stop-the-world */
 void strada_gc_set_enabled(int on)      { cc_enabled = on ? 1 : 0; }
 void strada_gc_set_threshold(long n)    { if (n > 0) cc_threshold = (size_t)n; }
 unsigned long strada_gc_collections(void)   { return cc_collections_count; }
@@ -13068,6 +13200,7 @@ StradaValue* strada_closure_call_array(StradaValue *closure, StradaValue *args_s
 /* Thread wrapper that calls Strada closure */
 static void* strada_thread_wrapper(void *arg) {
     StradaThread *st = (StradaThread *)arg;
+    cc_thread_register();   /* count this thread for stop-the-world before it mutates */
     /* Call the closure with 0 arguments */
     st->result = strada_closure_call(st->closure, 0);
     /* If detached, clean up our own resources since no one will join us */
@@ -13075,8 +13208,10 @@ static void* strada_thread_wrapper(void *arg) {
         if (st->result) strada_decref(st->result);
         strada_decref(st->closure);
         free(st);
+        cc_thread_unregister();   /* after all heap ops */
         return NULL;
     }
+    cc_thread_unregister();
     return NULL;
 }
 
@@ -13095,6 +13230,7 @@ StradaValue* strada_thread_create(StradaValue *closure) {
      * Conditional so the write happens exactly once (by the first creator,
      * before any worker runs) rather than racing readers on later spawns. */
     if (!strada_threading_active) strada_threading_active = 1;
+    cc_thread_register();   /* register the caller (e.g. main) as a mutator thread */
 
     StradaThread *st = malloc(sizeof(StradaThread));
     st->closure = closure;
@@ -13121,7 +13257,9 @@ StradaValue* strada_thread_join(StradaValue *thread_val) {
     StradaThread *st = (StradaThread *)thread_val->value.ptr;
     if (!st) return strada_new_undef();
 
+    cc_blocking_enter();              /* counts as safe while blocked in join */
     int rc = pthread_join(st->thread, NULL);
+    cc_blocking_leave();
     if (rc != 0) {
         return strada_new_undef();
     }
@@ -13270,6 +13408,7 @@ StradaThreadPool *strada_thread_pool = NULL;
 /* Worker thread function */
 static void* strada_pool_worker(void *arg) {
     StradaThreadPool *pool = (StradaThreadPool *)arg;
+    cc_thread_register();   /* count this worker for stop-the-world */
 
     while (1) {
         StradaTask *task = NULL;
@@ -13277,11 +13416,16 @@ static void* strada_pool_worker(void *arg) {
         /* Get next task from queue */
         pthread_mutex_lock(&pool->queue_mutex);
         while (pool->running && pool->queue_head == NULL) {
+            /* Idle: not touching the heap, so count as safe while we wait so the
+             * collector needn't wait for us. */
+            cc_blocking_enter();
             pthread_cond_wait(&pool->queue_cond, &pool->queue_mutex);
+            cc_blocking_leave();
         }
 
         if (!pool->running && pool->queue_head == NULL) {
             pthread_mutex_unlock(&pool->queue_mutex);
+            cc_thread_unregister();
             break;  /* Shutdown */
         }
 
@@ -13362,6 +13506,7 @@ void strada_pool_init(int num_workers) {
 
     /* Enable atomic refcounting now that we're multi-threaded */
     if (!strada_threading_active) strada_threading_active = 1;
+    cc_thread_register();   /* register the caller (e.g. main) as a mutator thread */
 
     if (num_workers <= 0) {
         num_workers = STRADA_DEFAULT_POOL_SIZE;
@@ -13492,7 +13637,9 @@ StradaValue* strada_future_await(StradaValue *future) {
 
     pthread_mutex_lock(&f->mutex);
     while (f->state == FUTURE_PENDING || f->state == FUTURE_RUNNING) {
+        cc_blocking_enter();          /* safe while awaiting */
         pthread_cond_wait(&f->cond, &f->mutex);
+        cc_blocking_leave();
     }
 
     StradaFutureState state = f->state;
@@ -13796,7 +13943,9 @@ StradaValue* strada_channel_recv(StradaValue *channel) {
 
     /* Wait while channel is empty and not closed */
     while (ch->head == NULL && !ch->closed) {
+        cc_blocking_enter();          /* safe while blocked on recv */
         pthread_cond_wait(&ch->not_empty, &ch->mutex);
+        cc_blocking_leave();
     }
 
     /* If closed and empty, return undef */
@@ -18406,7 +18555,9 @@ StradaValue* strada_ctime(StradaValue *timestamp) {
 StradaValue* strada_sleep(StradaValue *seconds) {
     if (!seconds) return strada_new_int(0);
     unsigned int secs = (unsigned int)strada_to_int(seconds);
+    cc_blocking_enter();              /* safe while sleeping (a worker can be collected) */
     unsigned int remaining = sleep(secs);
+    cc_blocking_leave();
     return strada_new_int(remaining);
 }
 
@@ -18414,7 +18565,9 @@ StradaValue* strada_sleep(StradaValue *seconds) {
 StradaValue* strada_usleep(StradaValue *usecs) {
     if (!usecs) return strada_new_int(0);
     useconds_t us = (useconds_t)strada_to_int(usecs);
+    cc_blocking_enter();
     int result = usleep(us);
+    cc_blocking_leave();
     return strada_new_int(result);
 }
 

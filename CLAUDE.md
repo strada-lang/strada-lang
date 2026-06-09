@@ -235,7 +235,8 @@ valgrind --leak-check=full ./my_program 2>&1 | grep -A5 "LEAK SUMMARY"
 A Bacon–Rajan synchronous trial-deletion collector that automatically reclaims **indirect** reference cycles (`A→B→A`) which plain refcounting leaks — so `core::weaken()` is no longer required for the common hashref/arrayref/object-graph cycle. Implemented entirely in `runtime/strada_runtime.c` under `#ifdef STRADA_CYCLE_GC` using side tables (no `StradaValue` ABI change). Key properties:
 
 - **Hook**: only the survive path (`new_rc > 0`) of `strada_decref` buffers a candidate root; drop-to-zero is unchanged. Buffered roots are **pinned** (incref'd) so they can't be freed underneath the collector.
-- **Scope**: single-threaded only (`!strada_threading_active`); covers `ARRAY`/`HASH`/`REF` roots. Closure-capture cycles, futures/channels, and tied containers fall back to `core::weaken()`.
+- **Scope**: covers `ARRAY`/`HASH`/`REF` roots. Closure-capture cycles, futures/channels, and tied containers fall back to `core::weaken()`.
+- **Threading**: works under threads via a **stop-the-world** pause. Mutators poll a safepoint in the threaded `strada_decref` path (after buffering, never before — parking before the buffer read would let the collector free the candidate underneath it); threads blocked in a syscall (sleep/recv/await/join/pool-idle) mark themselves safe via `cc_blocking_enter/leave` so the collector needn't wait for them. The collector requests a stop, waits (bounded by a 200ms timeout → a thread that can't reach a safepoint just causes a *skipped* collection, never a hang) for every other registered mutator to park/block, then runs the trial-deletion with the graph stable. Single-threaded keeps the original lock-free fast path. The candidate buffer + side table are mutex-protected only while threading is active.
 - **Triggers**: automatically at a candidate-count threshold (default 10000) and a final sweep at exit; or explicitly via the API below.
 - **Caveat**: a cyclic *blessed* object reclaimed by the collector does **not** run `DESTROY` (parallels Perl global destruction).
 - Build `./configure --without-cycle-gc` to compile it out.
@@ -363,7 +364,7 @@ When adding **inline codegen** for a new built-in function in `compiler/CodeGen.
 
 ### Leak Test Suite
 
-Run leak tests with: `./t/leak_tests/run_leak_tests.sh` (75 tests)
+Run leak tests with: `./t/leak_tests/run_leak_tests.sh` (117 tests, incl. `test_threads_cycles` — multithreaded cycle collection)
 
 ## IMPORTANT: Documentation Updates
 
