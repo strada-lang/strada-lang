@@ -4768,10 +4768,20 @@ StradaValue* strada_concat_sv(StradaValue *a, StradaValue *b) {
     sv->type = STRADA_STR;
     sv->refcount = 1;
     sv->value.pv = ss_alloc_pv(result, len_a + len_b);
-    /* Compute ASCII flag (bit 63) so subsequent ops can fast-path
-     * pure-ASCII strings — otherwise a concat of two ASCII operands
-     * was marked as potentially-multibyte. */
-    sv->struct_size = _str_flags(result, len_a + len_b);
+    /* Compute ASCII flag (bit 63) from the operands instead of rescanning
+     * the combined buffer: STR operands already carry the flag, numeric
+     * conversions are always ASCII, and only strada_to_str results
+     * (overloaded stringify et al.) need a scan — of their own bytes only.
+     * The flag is conservative (unset = "maybe multibyte"), so AND-ing
+     * operand flags can only under-claim ASCII, never mis-claim it. */
+    int a_ascii = (a && !STRADA_IS_TAGGED_INT(a) && a->type == STRADA_STR && a->value.pv)
+                      ? STRADA_STR_IS_ASCII(a)
+                      : (heap_a ? ((_str_flags(str_a, len_a) & STRADA_ASCII_FLAG) != 0) : 1);
+    int b_ascii = (b && !STRADA_IS_TAGGED_INT(b) && b->type == STRADA_STR && b->value.pv)
+                      ? STRADA_STR_IS_ASCII(b)
+                      : (heap_b ? ((_str_flags(str_b, len_b) & STRADA_ASCII_FLAG) != 0) : 1);
+    sv->struct_size = (a_ascii && b_ascii) ? ((len_a + len_b) | STRADA_ASCII_FLAG)
+                                           : (len_a + len_b);
     /* Propagate SVf_UTF8: if either operand was char-oriented (UTF-8
      * flagged), the result is also char-oriented. Mirrors Perl's
      * "UTF8 contagion" so `decode(...) . "byte"` keeps char semantics
@@ -4862,8 +4872,16 @@ StradaValue* strada_concat_cstr_sv(const char *prefix, size_t prefix_len, Strada
     sv->type = STRADA_STR;
     sv->refcount = 1;
     sv->value.pv = ss->data;
-    /* Compute ASCII flag — same reasoning as strada_concat_sv. */
-    sv->struct_size = _str_flags(ss->data, total);
+    /* ASCII flag: scan only the (short, literal) prefix; the RHS either
+     * already carries the flag (STR), is a numeric conversion (always
+     * ASCII), or is a strada_to_str result needing its own scan. Avoids
+     * rescanning a potentially large RHS on every literal-prefix concat. */
+    int b_ascii = (b && !STRADA_IS_TAGGED_INT(b) && b->type == STRADA_STR && b->value.pv)
+                      ? STRADA_STR_IS_ASCII(b)
+                      : (heap_b ? ((_str_flags(str_b, len_b) & STRADA_ASCII_FLAG) != 0) : 1);
+    int prefix_ascii = (_str_flags(prefix, prefix_len) & STRADA_ASCII_FLAG) != 0;
+    sv->struct_size = (prefix_ascii && b_ascii) ? ((size_t)total | STRADA_ASCII_FLAG)
+                                                : (size_t)total;
     /* SVf_UTF8 contagion: if the RHS was char-oriented, the result is too —
      * `"prefix" . $utf8` keeps character semantics so length()/substr()
      * count codepoints, not bytes. (This literal-LHS fast path previously
