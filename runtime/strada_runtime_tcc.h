@@ -242,10 +242,11 @@ extern int (*strada_destroy_hook)(StradaValue *obj);
 extern void (*strada_die_trace_hook)(const char *msg, int try_depth);
 extern int (*strada_die_continue_hook)(void);
 
-/* Pending cleanup for function call args and local vars in try blocks */
+/* Pending cleanup for function-call args / temps in try blocks. Thread-local +
+ * internal to the runtime now; push/pop are functions (declared below) so a
+ * tcc-built program calls into the gcc runtime instead of touching the __thread
+ * storage directly (tcc can't express __thread). */
 #define STRADA_MAX_PENDING_CLEANUP 4096
-extern StradaValue *strada_pending_cleanup[STRADA_MAX_PENDING_CLEANUP];
-extern int strada_pending_cleanup_count;
 
 #define STRADA_TRY_PUSH() (strada_try_depth < STRADA_MAX_TRY_DEPTH ? \
     (strada_try_stack[strada_try_depth].active = 1, &strada_try_stack[strada_try_depth++].buf) : NULL)
@@ -679,17 +680,10 @@ StradaValue* strada_get_exception(void);
 void strada_clear_exception(void);
 int strada_in_try_block(void);
 
-/* Cleanup stack (temp value tracking). push/pop are static-inline in
- * strada_runtime.h (no exported symbol), so they must be inlined here too;
- * the backing array/count are extern (declared above). */
-static inline void strada_cleanup_push(StradaValue *sv) {
-    if (strada_pending_cleanup_count < STRADA_MAX_PENDING_CLEANUP)
-        strada_pending_cleanup[strada_pending_cleanup_count++] = sv;
-}
-static inline void strada_cleanup_pop(void) {
-    if (strada_pending_cleanup_count > 0)
-        strada_pending_cleanup_count--;
-}
+/* Cleanup stack (temp value tracking) — real functions in the runtime now, with
+ * thread-local internal storage; a tcc program calls into the gcc runtime. */
+void strada_cleanup_push(StradaValue *sv);
+void strada_cleanup_pop(void);
 void strada_cleanup_drain(void);
 int strada_cleanup_mark(void);
 void strada_cleanup_restore(int mark);

@@ -915,18 +915,14 @@ StradaValue* strada_get_exception(void);
 void strada_clear_exception(void);
 int strada_in_try_block(void);
 
-/* Pending cleanup for function call args and local vars in try blocks */
+/* Pending cleanup for function call args and local vars in try blocks.
+ * Thread-local + internal to strada_runtime.c (see there): push/pop are real
+ * functions, not inline, so the per-thread storage never crosses the ABI
+ * boundary (a tcc-built program linking the gcc runtime calls these rather than
+ * touching the __thread variable, which tcc cannot express). */
 #define STRADA_MAX_PENDING_CLEANUP 4096
-extern StradaValue *strada_pending_cleanup[STRADA_MAX_PENDING_CLEANUP];
-extern int strada_pending_cleanup_count;
-static inline void strada_cleanup_push(StradaValue *sv) {
-    if (strada_pending_cleanup_count < STRADA_MAX_PENDING_CLEANUP)
-        strada_pending_cleanup[strada_pending_cleanup_count++] = sv;
-}
-static inline void strada_cleanup_pop(void) {
-    if (strada_pending_cleanup_count > 0)
-        strada_pending_cleanup_count--;
-}
+void strada_cleanup_push(StradaValue *sv);
+void strada_cleanup_pop(void);
 void strada_cleanup_drain(void);
 int strada_cleanup_mark(void);         /* Get current depth */
 void strada_cleanup_restore(int mark); /* Restore to depth (no decref) */

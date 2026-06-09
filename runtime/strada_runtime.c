@@ -113,6 +113,10 @@ static inline size_t strada_next_pow2(size_t n) {
 #define SS_POOL_DATA_MAX 32  /* max string length for pooled StradaStrings */
 /* Pooled StradaStrings are allocated at fixed size: sizeof(StradaString) + SS_POOL_DATA_MAX + 1 */
 #define SS_POOL_ALLOC_SIZE (sizeof(StradaString) + SS_POOL_DATA_MAX + 1)
+/* The StradaString free-list (like the sv/instance pools) is single-threaded
+ * only — it has no lock, so concurrent push/pop corrupt the stack (double-free
+ * at exit). Bypassed when threads are active. Forward decl; defined later. */
+static int strada_threading_active;
 static StradaString *ss_pool_stack[SS_POOL_MAX];
 static int ss_pool_count = 0;
 
@@ -123,8 +127,9 @@ static void ss_pool_cleanup(void) {
 }
 
 void ss_decref_slow(StradaString *ss) {
-    /* Return short strings to pool instead of freeing */
-    if (ss->len <= SS_POOL_DATA_MAX && ss_pool_count < SS_POOL_MAX) {
+    /* Return short strings to pool instead of freeing (single-threaded only —
+     * the pool has no lock). */
+    if (!strada_threading_active && ss->len <= SS_POOL_DATA_MAX && ss_pool_count < SS_POOL_MAX) {
         ss_pool_stack[ss_pool_count++] = ss;
     } else {
         free(ss);
@@ -163,7 +168,7 @@ StradaString *strada_intern_attr_ss(const char *key, unsigned int hash) {
 /* ===== StradaString implementation ===== */
 StradaString *ss_new(const char *s, uint32_t len, uint32_t hash) {
     StradaString *ss;
-    if (len <= SS_POOL_DATA_MAX && ss_pool_count > 0) {
+    if (!strada_threading_active && len <= SS_POOL_DATA_MAX && ss_pool_count > 0) {
         ss = ss_pool_stack[--ss_pool_count];
     } else {
         ss = malloc(len <= SS_POOL_DATA_MAX ? SS_POOL_ALLOC_SIZE : sizeof(StradaString) + len + 1);
@@ -179,7 +184,7 @@ StradaString *ss_new(const char *s, uint32_t len, uint32_t hash) {
 /* Allocate an uninitialized StradaString buffer — caller fills in data[] */
 static inline StradaString *ss_new_uninit(uint32_t len) {
     StradaString *ss;
-    if (len <= SS_POOL_DATA_MAX && ss_pool_count > 0) {
+    if (!strada_threading_active && len <= SS_POOL_DATA_MAX && ss_pool_count > 0) {
         ss = ss_pool_stack[--ss_pool_count];
     } else {
         ss = malloc(len <= SS_POOL_DATA_MAX ? SS_POOL_ALLOC_SIZE : sizeof(StradaString) + len + 1);
@@ -7611,10 +7616,29 @@ char* strada_capture_stack_trace(void) {
     return buf;
 }
 
-/* Pending cleanup for function call args in try blocks */
-/* Cleanup array defined here, declared extern in header for inlining */
-StradaValue *strada_pending_cleanup[STRADA_MAX_PENDING_CLEANUP];
-int strada_pending_cleanup_count = 0;
+/* Per-thread pending-cleanup stack for function-call args / temps in try blocks.
+ * MUST be thread-local: it tracks the CURRENT execution context's owned temps,
+ * so a shared stack let one thread pop another thread's temp (corruption / wrong
+ * cleanup). Kept static and accessed only through the functions below so the
+ * thread-local storage never crosses the ABI boundary — a tcc-compiled program
+ * linking the gcc-built runtime calls these functions rather than touching the
+ * __thread variable directly (tcc can't do __thread). */
+#ifdef STRADA_NO_TLS
+#define STRADA_CLEANUP_TLS
+#else
+#define STRADA_CLEANUP_TLS __thread
+#endif
+static STRADA_CLEANUP_TLS StradaValue *strada_pending_cleanup[STRADA_MAX_PENDING_CLEANUP];
+static STRADA_CLEANUP_TLS int strada_pending_cleanup_count = 0;
+
+void strada_cleanup_push(StradaValue *sv) {
+    if (strada_pending_cleanup_count < STRADA_MAX_PENDING_CLEANUP)
+        strada_pending_cleanup[strada_pending_cleanup_count++] = sv;
+}
+void strada_cleanup_pop(void) {
+    if (strada_pending_cleanup_count > 0)
+        strada_pending_cleanup_count--;
+}
 
 /* Non-inline versions kept for dlsym/dynamic linking compatibility */
 
@@ -13061,6 +13085,17 @@ StradaValue* strada_thread_create(StradaValue *closure) {
         return strada_new_int(-1);
     }
 
+    /* Switch the runtime into thread-safe mode BEFORE spawning or touching any
+     * refcount: atomic incref/decref, the locked global registry, and disabling
+     * the single-threaded-only sv/instance pools + cycle collector + arena.
+     * Raw thread::create previously left strada_threading_active=0 (only the
+     * async pool set it), so every shared StradaValue's refcount raced -> heap
+     * corruption (realloc invalid size / segfault). The flag is monotonic and
+     * set before pthread_create, i.e. before any concurrent access exists.
+     * Conditional so the write happens exactly once (by the first creator,
+     * before any worker runs) rather than racing readers on later spawns. */
+    if (!strada_threading_active) strada_threading_active = 1;
+
     StradaThread *st = malloc(sizeof(StradaThread));
     st->closure = closure;
     st->result = NULL;
@@ -13326,7 +13361,7 @@ void strada_pool_init(int num_workers) {
     if (strada_thread_pool != NULL) return;  /* Already initialized */
 
     /* Enable atomic refcounting now that we're multi-threaded */
-    strada_threading_active = 1;
+    if (!strada_threading_active) strada_threading_active = 1;
 
     if (num_workers <= 0) {
         num_workers = STRADA_DEFAULT_POOL_SIZE;
@@ -23461,18 +23496,36 @@ static void strada_global_registry_cleanup(void) {
     }
 }
 
+/* Serializes access to the process-wide global/`our` registry across threads.
+ * Gated on strada_threading_active (monotonic 0->1, set before any worker runs)
+ * so single-threaded programs pay nothing — matching the cycle-GC/arena
+ * fast-path pattern. Without this, `our` state touched from multiple threads
+ * raced on the shared hash (structural corruption). global_get increfs the
+ * value UNDER this lock so a concurrent set/delete can't free it between the
+ * fetch and the incref. _lk is captured once per call so lock/unlock stay
+ * balanced regardless of the flag. */
+static pthread_mutex_t strada_global_registry_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static pthread_once_t strada_global_once = PTHREAD_ONCE_INIT;
+static void strada_global_do_init(void) {
+    strada_global_registry = strada_hash_new();
+    atexit(strada_global_registry_cleanup);
+}
 static void strada_global_init(void) {
-    if (!strada_global_registry) {
-        strada_global_registry = strada_hash_new();
-        atexit(strada_global_registry_cleanup);
-    }
+    /* pthread_once so the lazy init runs exactly once even when several threads
+     * first-touch a global concurrently (the plain `if (!registry)` raced —
+     * two threads both built a registry, one leaked, and the hash corrupted). */
+    pthread_once(&strada_global_once, strada_global_do_init);
 }
 
 void strada_global_set(StradaValue *name_sv, StradaValue *val) {
     strada_global_init();
     char _tb[256];
     const char *name = strada_to_str_buf(name_sv, _tb, sizeof(_tb));
+    int _lk = strada_threading_active;
+    if (_lk) pthread_mutex_lock(&strada_global_registry_mutex);
     strada_hash_set(strada_global_registry, name, val);
+    if (_lk) pthread_mutex_unlock(&strada_global_registry_mutex);
     strada_decref(name_sv);  /* Consume name temp */
     strada_decref(val);      /* hash_set increfs; release caller's ref */
 }
@@ -23484,7 +23537,10 @@ void strada_global_set(StradaValue *name_sv, StradaValue *val) {
  * (an `our` scalar written in a tight loop was ~58x slower than a local). */
 void strada_global_set_cstr(const char *name, StradaValue *val) {
     strada_global_init();
+    int _lk = strada_threading_active;
+    if (_lk) pthread_mutex_lock(&strada_global_registry_mutex);
     strada_hash_set(strada_global_registry, name, val);
+    if (_lk) pthread_mutex_unlock(&strada_global_registry_mutex);
     strada_decref(val);      /* hash_set increfs; release caller's ref */
 }
 
@@ -23492,13 +23548,26 @@ StradaValue* strada_global_get(StradaValue *name_sv) {
     strada_global_init();
     char _tb[256];
     const char *name = strada_to_str_buf(name_sv, _tb, sizeof(_tb));
+    int _lk = strada_threading_active;
+    if (_lk) pthread_mutex_lock(&strada_global_registry_mutex);
     StradaValue *val = strada_hash_get(strada_global_registry, name);
+    /* Inspect AND incref under the lock: reading val->type or increfing after
+     * unlock would race a concurrent set/delete that frees val. Tagged ints are
+     * immortal (returned without incref). */
+    StradaValue *result;
+    if (!val) {
+        result = strada_undef_static();
+    } else if (STRADA_IS_TAGGED_INT(val)) {
+        result = val;
+    } else if (val->type == STRADA_UNDEF) {
+        result = strada_undef_static();
+    } else {
+        strada_incref(val);  /* owned reference - caller must decref */
+        result = val;
+    }
+    if (_lk) pthread_mutex_unlock(&strada_global_registry_mutex);
     strada_decref(name_sv);  /* Consume name temp */
-    if (!val) return strada_undef_static();
-    if (STRADA_IS_TAGGED_INT(val)) return val;  /* tagged ints are immortal */
-    if (val->type == STRADA_UNDEF) return strada_undef_static();
-    strada_incref(val);  /* Return owned reference - caller must decref */
-    return val;
+    return result;
 }
 
 int strada_global_exists(StradaValue *name_sv) {
@@ -23508,7 +23577,10 @@ int strada_global_exists(StradaValue *name_sv) {
     }
     char _tb[256];
     const char *name = strada_to_str_buf(name_sv, _tb, sizeof(_tb));
+    int _lk = strada_threading_active;
+    if (_lk) pthread_mutex_lock(&strada_global_registry_mutex);
     int result = strada_hash_exists(strada_global_registry, name);
+    if (_lk) pthread_mutex_unlock(&strada_global_registry_mutex);
     strada_decref(name_sv);  /* Consume name temp */
     return result;
 }
@@ -23520,14 +23592,20 @@ void strada_global_delete(StradaValue *name_sv) {
     }
     char _tb[256];
     const char *name = strada_to_str_buf(name_sv, _tb, sizeof(_tb));
+    int _lk = strada_threading_active;
+    if (_lk) pthread_mutex_lock(&strada_global_registry_mutex);
     strada_hash_delete(strada_global_registry, name);
+    if (_lk) pthread_mutex_unlock(&strada_global_registry_mutex);
     strada_decref(name_sv);  /* Consume name temp */
 }
 
 StradaValue* strada_global_keys(void) {
     StradaValue *result = strada_new_array();
     if (!strada_global_registry) return result;
+    int _lk = strada_threading_active;
+    if (_lk) pthread_mutex_lock(&strada_global_registry_mutex);
     StradaArray *keys = strada_hash_keys(strada_global_registry);
+    if (_lk) pthread_mutex_unlock(&strada_global_registry_mutex);
     for (size_t i = 0; i < keys->size; i++) {
         /* Elements have refcount 1 from hash_keys (push_take).
          * Use push_take to transfer ownership without extra incref. */
