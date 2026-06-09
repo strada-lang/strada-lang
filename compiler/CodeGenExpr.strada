@@ -2026,11 +2026,28 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
             # Only printable-ASCII names hash identically at compile time
             # (same gating as the pre-hashed literal hash keys); anything
             # else falls back to runtime hashing via strada_method_call.
+            #
+            # On top of that, ordinary method names get a per-call-site
+            # monomorphic cache: $mc_decl declares a function-scope static
+            # StradaCallSite that strada_method_call_cs fills on first
+            # dispatch and then hits with two compares + an indirect call.
+            # "isa"/"can" are excluded — they're UNIVERSAL methods that
+            # method_call_impl intercepts before lookup, so a site cache
+            # would never be filled for them.
             my str $mc_fn = "strada_method_call(";
             my str $mc_extra = "";
+            my str $mc_decl = "";
             if (key_is_hashable_ascii($method) == 1) {
-                $mc_fn = "strada_method_call_ph(";
-                $mc_extra = ", " . djb2_hash_32($method) . "u";
+                if ($method ne "isa" && $method ne "can") {
+                    my int $mc_cs_id = $cg->{"tmp_counter"} + 0;
+                    $cg->{"tmp_counter"} = $mc_cs_id + 1;
+                    $mc_decl = "static StradaCallSite __mcs_" . $mc_cs_id . "; ";
+                    $mc_fn = "strada_method_call_cs(";
+                    $mc_extra = ", " . djb2_hash_32($method) . "u, &__mcs_" . $mc_cs_id;
+                } else {
+                    $mc_fn = "strada_method_call_ph(";
+                    $mc_extra = ", " . djb2_hash_32($method) . "u";
+                }
             }
 
             # Check if any argument has spread operator
@@ -2286,7 +2303,7 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
                     $a = $a + 1;
                 }
 
-                emit($cg, "StradaValue *__meth_res = " . $mc_fn);
+                emit($cg, $mc_decl . "StradaValue *__meth_res = " . $mc_fn);
                 if ($meth_obj_cleanup == 1) {
                     emit($cg, "__meth_obj");
                 } else {
@@ -2345,7 +2362,7 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
                         $i = $i + 1;
                     }
                     emit($cg, "); ");
-                    emit($cg, "StradaValue *__meth_res = " . $mc_fn);
+                    emit($cg, $mc_decl . "StradaValue *__meth_res = " . $mc_fn);
                     if ($meth_obj_cleanup == 1) {
                         emit($cg, "__meth_obj");
                     } else {
@@ -2386,8 +2403,14 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
                         if ($meth_obj_cleanup == 1) {
                             emit($cg, "({ StradaValue *__meth_obj = ");
                             gen_expression($cg, $meth_target);
-                            emit($cg, "; strada_cleanup_push(__meth_obj); StradaValue *__meth_res = " . $mc_fn . "__meth_obj, \"" . $method . "\", NULL" . $mc_extra . "); ");
+                            emit($cg, "; strada_cleanup_push(__meth_obj); " . $mc_decl . "StradaValue *__meth_res = " . $mc_fn . "__meth_obj, \"" . $method . "\", NULL" . $mc_extra . "); ");
                             emit($cg, "strada_cleanup_pop(); strada_decref(__meth_obj); __meth_res; })");
+                        } elsif (length($mc_decl) > 0) {
+                            # The call-site static needs a block to live in —
+                            # wrap the bare call in a statement expression.
+                            emit($cg, "({ " . $mc_decl . $mc_fn);
+                            gen_expression($cg, $meth_target);
+                            emit($cg, ", \"" . $method . "\", NULL" . $mc_extra . "); })");
                         } else {
                             emit($cg, $mc_fn);
                             gen_expression($cg, $meth_target);
@@ -2414,7 +2437,7 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
                         gen_expression($cg, $args->[$i]);
                         $i = $i + 1;
                     }
-                    emit($cg, "); StradaValue *__meth_res = " . $mc_fn);
+                    emit($cg, "); " . $mc_decl . "StradaValue *__meth_res = " . $mc_fn);
                     if ($meth_obj_cleanup == 1) {
                         emit($cg, "__meth_obj");
                     } else {

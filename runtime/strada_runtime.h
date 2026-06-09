@@ -1082,6 +1082,20 @@ void strada_method_register(const char *package, const char *name, StradaMethod 
 void strada_modifier_register(const char *package, const char *method, int type, StradaMethod func);
 StradaValue* strada_method_call(StradaValue *obj, const char *method, StradaValue *args);
 StradaValue* strada_method_call_ph(StradaValue *obj, const char *method, StradaValue *args, unsigned int method_hash);
+/* Per-call-site monomorphic inline cache for method dispatch. Codegen emits
+ * one `static StradaCallSite` per literal-name call site; the common case
+ * (same receiver class as last time, no before/after/around modifiers on
+ * the method) dispatches with two compares and an indirect call. Entries
+ * are validated by a generation stamp bumped on method/inherit/modifier
+ * registration, so they never serve stale resolutions. Zero-initialized
+ * statics start stale (gen 0 never matches). */
+typedef struct StradaCallSite {
+    const char *pkg;   /* blessed-package pointer last dispatched (identity) */
+    StradaMethod fn;
+    uint32_t gen;      /* generation stamp; 0 = never filled */
+    int8_t has_mod;    /* 1 = method has modifiers in its MRO (skip fast path) */
+} StradaCallSite;
+StradaValue* strada_method_call_cs(StradaValue *obj, const char *method, StradaValue *args, unsigned int method_hash, StradaCallSite *cs);
 const char* strada_method_lookup_package(const char *package, const char *method);
 const char* strada_get_parent_package(const char *package);     /* Get parent package */
 int strada_isa(StradaValue *obj, const char *package);          /* Check inheritance */

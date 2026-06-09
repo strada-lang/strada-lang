@@ -20718,7 +20718,8 @@ typedef struct {
 static McEntry mc_cache[MC_SIZE];
 
 static StradaValue* method_call_impl(StradaValue *obj, const char *method,
-                                     StradaValue *args, unsigned int method_hash);
+                                     StradaValue *args, unsigned int method_hash,
+                                     StradaCallSite *cs);
 
 StradaValue* strada_method_call(StradaValue *obj, const char *method, StradaValue *args) {
     /* djb2 over unsigned bytes — must stay in sync with
@@ -20728,18 +20729,47 @@ StradaValue* strada_method_call(StradaValue *obj, const char *method, StradaValu
         for (const unsigned char *p = (const unsigned char *)method; *p; p++)
             h = h * 33 + *p;
     }
-    return method_call_impl(obj, method, args, h);
+    return method_call_impl(obj, method, args, h, NULL);
 }
 
 /* Codegen entry point for literal method names: the name hash is computed
  * at compile time, skipping the per-call strlen + hash loop. */
 StradaValue* strada_method_call_ph(StradaValue *obj, const char *method,
                                    StradaValue *args, unsigned int method_hash) {
-    return method_call_impl(obj, method, args, method_hash);
+    return method_call_impl(obj, method, args, method_hash, NULL);
+}
+
+/* Per-call-site monomorphic cache entry point (codegen emits one static
+ * StradaCallSite per literal-name call site). The fast path — same blessed
+ * class as the last dispatch from this site, generation still current, no
+ * modifiers on the method — is two compares and an indirect call, skipping
+ * the global cache probe, the name strcmp, and the modifier gate. Misses
+ * (first call, polymorphic site, stale generation, string-class statics)
+ * fall into method_call_impl, which refills the site. The cache is filled
+ * only from blessed receivers: blessed-package pointers are interned, so
+ * pointer identity is a sound class check; a string class name's buffer is
+ * transient and could alias a freed pointer. */
+StradaValue* strada_method_call_cs(StradaValue *obj, const char *method,
+                                   StradaValue *args, unsigned int method_hash,
+                                   StradaCallSite *cs) {
+    if (__builtin_expect(obj != NULL && !STRADA_IS_TAGGED_INT(obj), 1)) {
+        const char *bp = SV_BLESSED(obj);
+        if (__builtin_expect(bp != NULL && cs->gen == mc_cache_gen
+                             && cs->pkg == bp && cs->has_mod == 0, 1)) {
+            /* Push args for exception safety — pairs with the pop below,
+             * mirroring method_call_impl's contract (args consumed). */
+            if (args) strada_cleanup_push(args);
+            StradaValue *result = cs->fn(obj, args);
+            if (args) { strada_cleanup_pop(); strada_decref(args); }
+            return result;
+        }
+    }
+    return method_call_impl(obj, method, args, method_hash, cs);
 }
 
 static StradaValue* method_call_impl(StradaValue *obj, const char *method,
-                                     StradaValue *args, unsigned int method_hash) {
+                                     StradaValue *args, unsigned int method_hash,
+                                     StradaCallSite *cs) {
     /* Call a method on a blessed reference */
     if (!obj || STRADA_IS_TAGGED_INT(obj) || !method) {
         fprintf(stderr, "Error: Cannot call method '%s' on undefined value\n",
@@ -20878,6 +20908,16 @@ static StradaValue* method_call_impl(StradaValue *obj, const char *method,
             if (mce_match) mce->has_mod = (int8_t)has_mod;
         }
         if (has_mod) {
+            /* Park the call site on the slow path: has_mod=1 entries never
+             * match the strada_method_call_cs fast-path check, so modifier
+             * application below always runs. Write gen last so a racing
+             * reader can't see a current-generation entry with stale fields. */
+            if (cs && bp) {
+                cs->fn = func;
+                cs->has_mod = 1;
+                cs->pkg = pkg_name;
+                cs->gen = mc_cache_gen;
+            }
             if (mro_n < 0) mro_n = oop_collect_mro(pkg_name, mro, 64);
             /* 'before' modifiers — across the MRO, most-derived first. They
              * receive the SAME args as the wrapped method (Moose semantics).
@@ -20941,6 +20981,18 @@ static StradaValue* method_call_impl(StradaValue *obj, const char *method,
         }
     }
 
+    /* Fill the per-call-site cache. Reaching here means either no modifiers
+     * are registered anywhere (and strada_modifier_register bumps
+     * mc_cache_gen, invalidating this entry if that changes) or this method
+     * has none in its MRO — both make has_mod=0 correct. Only blessed
+     * receivers are cached (interned pkg pointer); write gen last so a
+     * racing reader can't see a current-generation entry with stale fields. */
+    if (cs && bp) {
+        cs->fn = func;
+        cs->has_mod = 0;
+        cs->pkg = pkg_name;
+        cs->gen = mc_cache_gen;
+    }
     StradaValue *result = func(obj, args);
     /* Pair with strada_cleanup_push at top of method_call. */
     if (args) {
