@@ -3562,6 +3562,41 @@ func gen_expression(scalar $cg, scalar $expr) void {
     if ($type == NODE_DEREF_HASH()) {
         my scalar $key_expr = $expr->{"key"};
         my int $key_is_literal = $key_expr->{"type"} == NODE_STR_LITERAL();
+
+        # Autovivification: when this deref access is an intermediate in an
+        # assignment-target chain ($r->{"a"}{"b"} = v, $r->{"a"}{"b"} += v),
+        # create the missing intermediate hash instead of fetching undef.
+        # Mirrors the NODE_HASH_ACCESS consumer above; strada_autoviv_hash
+        # derefs REF/HASH parents itself and returns a BORROWED ref (owned
+        # by the parent hash), so no cleanup of the result. Previously this
+        # branch ignored the flag, so ref-rooted nested assignment targets
+        # silently fetched undef and the store was lost.
+        if ($cg->{"autoviv"} == 1) {
+            $cg->{"autoviv"} = 0;
+            my scalar $ref_sub = $expr->{"ref"};
+            if ($ref_sub->{"type"} == NODE_HASH_ACCESS() || $ref_sub->{"type"} == NODE_DEREF_HASH()) {
+                $cg->{"autoviv"} = 1;
+            }
+            if ($key_is_literal == 1) {
+                emit($cg, "strada_autoviv_hash(");
+                gen_expression($cg, $expr->{"ref"});
+                emit($cg, ", ");
+                gen_str_literal_c($cg, $key_expr->{"value"});
+                emit($cg, ")");
+            } else {
+                emit($cg, "({ StradaValue *__av_k = ");
+                gen_expression($cg, $key_expr);
+                emit($cg, "; char *__av_ks = strada_to_str_ss(__av_k); StradaValue *__av_r = strada_autoviv_hash(");
+                gen_expression($cg, $expr->{"ref"});
+                emit($cg, ", __av_ks); strada_cstr_free(__av_ks); ");
+                if (needs_temp_cleanup($cg, $key_expr) == 1) {
+                    emit($cg, "strada_decref(__av_k); ");
+                }
+                emit($cg, "__av_r; })");
+            }
+            return;
+        }
+
         my int $key_is_concat = is_concat_str_literal_left($key_expr);
         my int $ref_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $expr->{"ref"}) == 1;
         if ($key_is_literal == 1) {

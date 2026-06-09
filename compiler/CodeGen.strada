@@ -3501,6 +3501,17 @@ func gen_hash_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op) 
     }
     my int $key_is_lit = $key_expr->{"type"} == NODE_STR_LITERAL();
     my int $hash_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $hash_expr) == 1;
+    # Autovivify intermediate hash levels of the target chain, exactly like
+    # plain assignment does: $deep{"a"}{"b"} += 2 must create $deep{"a"}
+    # rather than fetch undef and lose the store. The autoviv flag makes the
+    # hash sub-expression emit strada_autoviv_hash, which returns a BORROWED
+    # ref (owned by the parent hash) — so the owned-temp decref of __hca_h
+    # must be suppressed in that case.
+    my int $hca_autoviv = 0;
+    if ($hash_expr->{"type"} == NODE_HASH_ACCESS() || $hash_expr->{"type"} == NODE_DEREF_HASH()) {
+        $hca_autoviv = 1;
+        $hash_cleanup = 0;
+    }
     # __hca_k must be decref'd ONLY when the key expression yields an owned
     # temp (a concat, a call, …). A borrowed key — e.g. a bare scalar var
     # `$h{$k}` — must NOT be decref'd: that frees the variable's own value,
@@ -3520,6 +3531,11 @@ func gen_hash_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op) 
     elsif ($op eq "*=") { $hca_opch = "'*'"; }
     elsif ($op eq "/=") { $hca_opch = "'/'"; }
     elsif ($op eq ".=") { $hca_opch = "'.'"; }
+    # Both emission paths below generate __hca_h (the hash sub-expression)
+    # first, which consumes the autoviv flag.
+    if ($hca_autoviv == 1) {
+        $cg->{"autoviv"} = 1;
+    }
     if (length($hca_opch) > 0) {
         emit($cg, "({ StradaValue *__hca_h = ");
         gen_expression($cg, $hash_expr);
