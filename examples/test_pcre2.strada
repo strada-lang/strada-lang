@@ -1,0 +1,165 @@
+# test_pcre2.strada - Test PCRE2 regex features
+# Tests features that work with PCRE2 (and basic features that also work with POSIX)
+
+my int $pass = 0;
+my int $fail = 0;
+
+func ok(int $cond, str $name) void {
+    if ($cond) {
+        say("ok - " . $name);
+        $pass++;
+    } else {
+        say("NOT ok - " . $name);
+        $fail++;
+    }
+}
+
+func main() int {
+    # ===== Basic regex (works with both POSIX and PCRE2) =====
+
+    # Simple match
+    ok("hello world" =~ /hello/, "simple match");
+    ok(!("hello world" =~ /xyz/), "simple non-match");
+
+    # Case insensitive
+    ok("Hello" =~ /hello/i, "case insensitive match");
+
+    # Character classes
+    ok("abc123" =~ /\d+/, "\\d digit class");
+    ok("hello" =~ /\w+/, "\\w word class");
+    ok("hello world" =~ /\s/, "\\s whitespace class");
+
+    # Captures
+    if ("hello world" =~ /(hello) (world)/) {
+        my array @caps = captures();
+        ok($caps[1] eq "hello", "capture group 1");
+        ok($caps[2] eq "world", "capture group 2");
+    } else {
+        ok(0, "capture group 1");
+        ok(0, "capture group 2");
+    }
+
+    # Replace
+    my str $r1 = replace("hello world", "world", "there");
+    ok($r1 eq "hello there", "simple replace");
+
+    # Replace all
+    my str $r2 = replace_all("aaa", "a", "bb");
+    ok($r2 eq "bbbbbb", "replace all");
+
+    # Split
+    my array @parts = split(",", "a,b,c");
+    ok(scalar(@parts) == 3, "split count");
+    ok($parts[0] eq "a", "split first");
+    ok($parts[2] eq "c", "split last");
+
+    # ===== PCRE2-specific features =====
+
+    # Non-greedy quantifiers
+    my str $html = "<b>bold</b> and <i>italic</i>";
+    if ($html =~ /<(.+?)>/) {
+        my array @c1 = captures();
+        ok($c1[1] eq "b", "non-greedy +?");
+    } else {
+        ok(0, "non-greedy +?");
+    }
+
+    # Non-greedy *?
+    if ("aXbXc" =~ /a(.*?)X/) {
+        my array @c2 = captures();
+        ok($c2[1] eq "", "non-greedy *? (empty match)");
+    } else {
+        ok(0, "non-greedy *? (empty match)");
+    }
+
+    # Word boundary \b
+    ok("hello world" =~ /\bhello\b/, "word boundary match");
+    ok(!("helloworld" =~ /\bhello\b/), "word boundary no match");
+
+    # Named captures
+    if ("2024-01-15" =~ /(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})/) {
+        my hash %nc = named_captures();
+        ok($nc{"year"} eq "2024", "named capture year");
+        ok($nc{"month"} eq "01", "named capture month");
+        ok($nc{"day"} eq "15", "named capture day");
+    } else {
+        ok(0, "named capture year");
+        ok(0, "named capture month");
+        ok(0, "named capture day");
+    }
+
+    # Backreferences in replacement ($1)
+    my str $r3 = replace("hello world", "(\\w+) (\\w+)", "$2 $1");
+    ok($r3 eq "world hello", "backreference $1/$2 in replace");
+
+    # Backreferences in s///g (regex replace-all)
+    my str $r4 = "foo123bar456";
+    $r4 =~ s/(\d+)/[$1]/g;
+    ok($r4 eq "foo[123]bar[456]", "backreference in s///g");
+
+    # Lookahead
+    if ("foobar" =~ /foo(?=bar)/) {
+        my array @c3 = captures();
+        ok($c3[0] eq "foo", "positive lookahead");
+    } else {
+        ok(0, "positive lookahead");
+    }
+
+    # Negative lookahead
+    ok(!("foobar" =~ /foo(?!bar)/), "negative lookahead (no match)");
+    ok("foobaz" =~ /foo(?!bar)/, "negative lookahead (match)");
+
+    # Lookbehind
+    if ("foobar" =~ /(?<=foo)bar/) {
+        my array @c4 = captures();
+        ok($c4[0] eq "bar", "positive lookbehind");
+    } else {
+        ok(0, "positive lookbehind");
+    }
+
+    # Non-capturing group
+    if ("foobar" =~ /(?:foo)(bar)/) {
+        my array @c5 = captures();
+        ok($c5[1] eq "bar", "non-capturing group");
+    } else {
+        ok(0, "non-capturing group");
+    }
+
+    # Dotall /s flag (. matches newline)
+    my str $multiline = "hello\nworld";
+    ok($multiline =~ /hello.world/s, "dotall /s flag");
+    ok(!($multiline =~ /hello.world/), "without dotall, . doesn't match newline");
+
+    # Extended /x flag (ignore whitespace in pattern)
+    ok("hello" =~ /hel lo/x, "extended /x flag");
+
+    # Alternation inside groups
+    if ("cat" =~ /(cat|dog)/) {
+        my array @c6 = captures();
+        ok($c6[1] eq "cat", "alternation group");
+    } else {
+        ok(0, "alternation group");
+    }
+
+    # $ anchor at end of string
+    ok("hello" =~ /hello$/, "$ anchor matches end");
+    ok(!("hello world" =~ /hello$/), "$ anchor doesn't match middle");
+
+    # Named captures with Perl (?P<name>) syntax
+    if ("John Smith" =~ /(?P<first>\w+)\s+(?P<last>\w+)/) {
+        my hash %nc2 = named_captures();
+        ok($nc2{"first"} eq "John", "named capture first");
+        ok($nc2{"last"} eq "Smith", "named capture last");
+    } else {
+        ok(0, "named capture first");
+        ok(0, "named capture last");
+    }
+
+    # Summary
+    say("");
+    say("Results: " . $pass . " passed, " . $fail . " failed");
+    if ($fail == 0) {
+        say("All PCRE2 tests passed");
+    }
+    return $fail;
+}

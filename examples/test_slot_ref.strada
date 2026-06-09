@@ -1,0 +1,65 @@
+# Test: slot references for pass-by-reference pattern
+# \$var should create a reference that aliases the original variable
+
+func advance(scalar $ref) void {
+    $$ref = $$ref + 1;
+}
+
+func set_value(scalar $ref, int $val) void {
+    $$ref = $val;
+}
+
+func main() int {
+    # Test 1: basic pass-by-reference with int
+    my int $pos = 0;
+    advance(\$pos);
+    if ($pos != 1) {
+        say("FAIL: test 1 - expected pos=1, got " . $pos);
+        return 1;
+    }
+    say("PASS: test 1 - int pass-by-reference");
+
+    # Test 2: multiple advances
+    advance(\$pos);
+    advance(\$pos);
+    if ($pos != 3) {
+        say("FAIL: test 2 - expected pos=3, got " . $pos);
+        return 1;
+    }
+    say("PASS: test 2 - multiple advances");
+
+    # Test 3: set_value
+    set_value(\$pos, 42);
+    if ($pos != 42) {
+        say("FAIL: test 3 - expected pos=42, got " . $pos);
+        return 1;
+    }
+    say("PASS: test 3 - set_value");
+
+    # Test 4: pass-by-reference with string
+    my str $name = "hello";
+    my scalar $ref = \$name;
+    $$ref = "world";
+    if ($name ne "world") {
+        say("FAIL: test 4 - expected name=world, got " . $name);
+        return 1;
+    }
+    say("PASS: test 4 - string pass-by-reference");
+
+    # Test 5: read through reference
+    my int $x = 99;
+    my scalar $r = \$x;
+    if ($$r != 99) {
+        say("FAIL: test 5 - expected $$r=99, got " . $$r);
+        return 1;
+    }
+    $x = 200;
+    if ($$r != 200) {
+        say("FAIL: test 5b - expected $$r=200 after reassign, got " . $$r);
+        return 1;
+    }
+    say("PASS: test 5 - read through reference tracks variable");
+
+    say("All tests passed!");
+    return 0;
+}

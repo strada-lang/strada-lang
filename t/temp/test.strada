@@ -1,0 +1,24 @@
+import_object "pp.o";
+
+func main () int
+{
+   my scalar $fh = sys::open("mexican.coke", "w");
+   sys::fwrite($fh, "Mexican coke!\n");
+   sys::close($fh);
+
+   my int $line_num = 1;
+   my scalar $fh2 = sys::open("mexican.coke", "r");
+    my str $line = sys::readline($fh2);
+    while (length($line) > 0) {
+        say("   Line " . $line_num . ": " . $line);
+        $line_num++;
+        $line = sys::readline($fh2);
+    }
+   sys::close($fh2);
+
+
+   Nun::exec();
+   
+   return 1;
+}
+

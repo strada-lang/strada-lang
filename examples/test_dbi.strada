@@ -1,0 +1,466 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_dbi.strada - Comprehensive DBI Module Test
+#
+# Tests all DBI functionality with SQLite
+# Run: ./strada examples/test_dbi.strada
+
+use lib "lib";
+use DBI;
+
+func test_basic_operations() int {
+    say("=== Test 1: Basic Operations ===");
+
+    # Connect to in-memory SQLite database
+    my scalar $dbh = DBI::connect("dbi:SQLite::memory:", "", "");
+    if (!defined($dbh)) {
+        say("FAIL: Could not connect to database");
+        return 0;
+    }
+    say("OK: Connected to SQLite");
+
+    # Check ping
+    if (DBI::ping($dbh) == 1) {
+        say("OK: Ping successful");
+    } else {
+        say("FAIL: Ping failed");
+    }
+
+    # Create table
+    my int $result = DBI::do_sql($dbh, "CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)");
+    if ($result >= 0) {
+        say("OK: Created table");
+    } else {
+        say("FAIL: Could not create table - " . DBI::errstr($dbh));
+    }
+
+    # Insert data
+    $result = DBI::do($dbh, "INSERT INTO test (value) VALUES (?)", ["hello"]);
+    if ($result >= 0) {
+        say("OK: Inserted row");
+    } else {
+        say("FAIL: Could not insert - " . DBI::errstr($dbh));
+    }
+
+    # Get last insert ID
+    my int $id = DBI::last_insert_id($dbh);
+    if ($id == 1) {
+        say("OK: Last insert ID = " . $id);
+    } else {
+        say("FAIL: Expected ID 1, got " . $id);
+    }
+
+    # Select data
+    my scalar $sth = DBI::prepare($dbh, "SELECT id, value FROM test WHERE id = ?");
+    DBI::execute($sth, [1]);
+
+    my scalar $row = DBI::fetchrow_hashref($sth);
+    if (defined($row) && $row->{"value"} eq "hello") {
+        say("OK: Retrieved data correctly");
+    } else {
+        say("FAIL: Data mismatch");
+    }
+
+    DBI::finish($sth);
+    DBI::disconnect($dbh);
+    say("OK: Disconnected\n");
+    return 1;
+}
+
+func test_multiple_rows() int {
+    say("=== Test 2: Multiple Rows ===");
+
+    my scalar $dbh = DBI::connect("dbi:SQLite::memory:", "", "");
+    if (!defined($dbh)) {
+        say("FAIL: Could not connect");
+        return 0;
+    }
+
+    # Create table
+    DBI::do_sql($dbh, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)");
+
+    # Insert multiple rows
+    DBI::do($dbh, "INSERT INTO users (name, age) VALUES (?, ?)", ["Alice", 30]);
+    DBI::do($dbh, "INSERT INTO users (name, age) VALUES (?, ?)", ["Bob", 25]);
+    DBI::do($dbh, "INSERT INTO users (name, age) VALUES (?, ?)", ["Charlie", 35]);
+
+    # Fetch all rows
+    my scalar $sth = DBI::prepare($dbh, "SELECT name, age FROM users ORDER BY age");
+    DBI::execute($sth, []);
+
+    my int $count = 0;
+    my scalar $row = DBI::fetchrow_hashref($sth);
+    while (defined($row)) {
+        say("  Row: " . $row->{"name"} . " (age " . $row->{"age"} . ")");
+        $count = $count + 1;
+        $row = DBI::fetchrow_hashref($sth);
+    }
+
+    if ($count == 3) {
+        say("OK: Retrieved all 3 rows");
+    } else {
+        say("FAIL: Expected 3 rows, got " . $count);
+    }
+
+    DBI::finish($sth);
+
+    # Test fetchall_arrayref
+    $sth = DBI::prepare($dbh, "SELECT name FROM users");
+    DBI::execute($sth, []);
+    my scalar $all = DBI::fetchall_arrayref($sth);
+
+    if (size($all) == 3) {
+        say("OK: fetchall_arrayref returned 3 rows");
+    } else {
+        say("FAIL: fetchall_arrayref count mismatch");
+    }
+
+    DBI::disconnect($dbh);
+    say("");
+    return 1;
+}
+
+func test_transactions() int {
+    say("=== Test 3: Transactions ===");
+
+    my scalar $dbh = DBI::connect("dbi:SQLite::memory:", "", "");
+    if (!defined($dbh)) {
+        say("FAIL: Could not connect");
+        return 0;
+    }
+
+    DBI::do_sql($dbh, "CREATE TABLE accounts (id INTEGER PRIMARY KEY, balance INTEGER)");
+    DBI::do($dbh, "INSERT INTO accounts (balance) VALUES (?)", [100]);
+
+    # Test rollback
+    DBI::begin_work($dbh);
+    DBI::do($dbh, "UPDATE accounts SET balance = ? WHERE id = ?", [0, 1]);
+    DBI::rollback($dbh);
+
+    my scalar $row = DBI::selectrow_hashref($dbh, "SELECT balance FROM accounts WHERE id = ?", [1]);
+    if (defined($row) && $row->{"balance"} == 100) {
+        say("OK: Rollback worked - balance still 100");
+    } else {
+        say("FAIL: Rollback did not work");
+    }
+
+    # Test commit
+    DBI::begin_work($dbh);
+    DBI::do($dbh, "UPDATE accounts SET balance = ? WHERE id = ?", [50, 1]);
+    DBI::commit($dbh);
+
+    $row = DBI::selectrow_hashref($dbh, "SELECT balance FROM accounts WHERE id = ?", [1]);
+    if (defined($row) && $row->{"balance"} == 50) {
+        say("OK: Commit worked - balance is 50");
+    } else {
+        say("FAIL: Commit did not work");
+    }
+
+    DBI::disconnect($dbh);
+    say("");
+    return 1;
+}
+
+func test_quote() int {
+    say("=== Test 4: Quote Function ===");
+
+    my scalar $dbh = DBI::connect("dbi:SQLite::memory:", "", "");
+    if (!defined($dbh)) {
+        say("FAIL: Could not connect");
+        return 0;
+    }
+
+    my str $dangerous = "O'Reilly";
+    my str $quoted = DBI::quote($dbh, $dangerous);
+    say("  Original: " . $dangerous);
+    say("  Quoted: " . $quoted);
+
+    if (match($quoted, "''")) {
+        say("OK: Single quote escaped");
+    } else {
+        say("FAIL: Quote not escaped properly");
+    }
+
+    DBI::disconnect($dbh);
+    say("");
+    return 1;
+}
+
+func test_convenience_functions() int {
+    say("=== Test 5: Convenience Functions ===");
+
+    my scalar $dbh = DBI::connect("dbi:SQLite::memory:", "", "");
+    if (!defined($dbh)) {
+        say("FAIL: Could not connect");
+        return 0;
+    }
+
+    DBI::do_sql($dbh, "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT, price REAL)");
+    DBI::do($dbh, "INSERT INTO items (name, price) VALUES (?, ?)", ["Apple", 1.50]);
+    DBI::do($dbh, "INSERT INTO items (name, price) VALUES (?, ?)", ["Banana", 0.75]);
+    DBI::do($dbh, "INSERT INTO items (name, price) VALUES (?, ?)", ["Cherry", 2.00]);
+
+    # Test selectall_hashref
+    my scalar $items = DBI::selectall_hashref($dbh, "SELECT * FROM items ORDER BY price", []);
+    if (size($items) == 3) {
+        say("OK: selectall_hashref returned 3 items");
+        say("  First item: " . $items->[0]->{"name"} . " ($" . $items->[0]->{"price"} . ")");
+    } else {
+        say("FAIL: selectall_hashref count wrong");
+    }
+
+    # Test selectrow_hashref
+    my scalar $item = DBI::selectrow_hashref($dbh, "SELECT * FROM items WHERE name = ?", ["Banana"]);
+    if (defined($item) && $item->{"price"} == 0.75) {
+        say("OK: selectrow_hashref found Banana");
+    } else {
+        say("FAIL: selectrow_hashref failed");
+    }
+
+    # Test selectcol
+    my scalar $count = DBI::selectcol($dbh, "SELECT COUNT(*) FROM items", []);
+    if ($count == 3) {
+        say("OK: selectcol returned count = 3");
+    } else {
+        say("FAIL: selectcol returned wrong count");
+    }
+
+    # Test insert_get_id
+    my int $new_id = DBI::insert_get_id($dbh, "INSERT INTO items (name, price) VALUES (?, ?)", ["Date", 3.00]);
+    if ($new_id == 4) {
+        say("OK: insert_get_id returned ID 4");
+    } else {
+        say("FAIL: insert_get_id returned wrong ID");
+    }
+
+    DBI::disconnect($dbh);
+    say("");
+    return 1;
+}
+
+func test_column_names() int {
+    say("=== Test 6: Column Names ===");
+
+    my scalar $dbh = DBI::connect("dbi:SQLite::memory:", "", "");
+    if (!defined($dbh)) {
+        say("FAIL: Could not connect");
+        return 0;
+    }
+
+    DBI::do_sql($dbh, "CREATE TABLE products (product_id INTEGER, product_name TEXT, product_price REAL)");
+    DBI::do($dbh, "INSERT INTO products VALUES (?, ?, ?)", [1, "Widget", 9.99]);
+
+    my scalar $sth = DBI::prepare($dbh, "SELECT product_id, product_name, product_price FROM products");
+    DBI::execute($sth, []);
+
+    my scalar $cols = DBI::column_names($sth);
+    say("  Columns: " . join(", ", $cols));
+
+    if (size($cols) == 3) {
+        say("OK: Got 3 column names");
+    } else {
+        say("FAIL: Wrong number of columns");
+    }
+
+    DBI::finish($sth);
+    DBI::disconnect($dbh);
+    say("");
+    return 1;
+}
+
+func test_update_delete() int {
+    say("=== Test 7: UPDATE and DELETE ===");
+
+    my scalar $dbh = DBI::connect("dbi:SQLite::memory:", "", "");
+    if (!defined($dbh)) {
+        say("FAIL: Could not connect");
+        return 0;
+    }
+
+    DBI::do_sql($dbh, "CREATE TABLE numbers (id INTEGER PRIMARY KEY, value INTEGER)");
+    DBI::do($dbh, "INSERT INTO numbers (value) VALUES (?)", [10]);
+    DBI::do($dbh, "INSERT INTO numbers (value) VALUES (?)", [20]);
+    DBI::do($dbh, "INSERT INTO numbers (value) VALUES (?)", [30]);
+
+    # Test UPDATE
+    my int $updated = DBI::do($dbh, "UPDATE numbers SET value = ? WHERE value < ?", [15, 25]);
+    say("  Updated " . $updated . " rows");
+
+    # Verify
+    my scalar $sum = DBI::selectcol($dbh, "SELECT SUM(value) FROM numbers", []);
+    if ($sum == 60) {
+        # 15 + 15 + 30 = 60
+        say("OK: UPDATE worked correctly");
+    } else {
+        say("FAIL: UPDATE result wrong (sum=" . $sum . ")");
+    }
+
+    # Test DELETE
+    my int $deleted = DBI::do($dbh, "DELETE FROM numbers WHERE value = ?", [15]);
+    say("  Deleted " . $deleted . " rows");
+
+    my scalar $count = DBI::selectcol($dbh, "SELECT COUNT(*) FROM numbers", []);
+    if ($count == 1) {
+        say("OK: DELETE worked correctly");
+    } else {
+        say("FAIL: DELETE result wrong");
+    }
+
+    DBI::disconnect($dbh);
+    say("");
+    return 1;
+}
+
+func test_null_values() int {
+    say("=== Test 8: NULL Values ===");
+
+    my scalar $dbh = DBI::connect("dbi:SQLite::memory:", "", "");
+    if (!defined($dbh)) {
+        say("FAIL: Could not connect");
+        return 0;
+    }
+
+    DBI::do_sql($dbh, "CREATE TABLE nullable (id INTEGER PRIMARY KEY, optional_value TEXT)");
+    DBI::do($dbh, "INSERT INTO nullable (optional_value) VALUES (?)", ["has value"]);
+    DBI::do($dbh, "INSERT INTO nullable (optional_value) VALUES (?)", [undef]);
+
+    my scalar $rows = DBI::selectall_hashref($dbh, "SELECT * FROM nullable ORDER BY id", []);
+
+    my scalar $row1 = $rows->[0];
+    my scalar $row2 = $rows->[1];
+
+    if (defined($row1->{"optional_value"}) && $row1->{"optional_value"} eq "has value") {
+        say("OK: Row 1 has value");
+    } else {
+        say("FAIL: Row 1 value wrong");
+    }
+
+    if (!defined($row2->{"optional_value"})) {
+        say("OK: Row 2 is NULL");
+    } else {
+        say("FAIL: Row 2 should be NULL");
+    }
+
+    DBI::disconnect($dbh);
+    say("");
+    return 1;
+}
+
+func test_file_database() int {
+    say("=== Test 9: File Database ===");
+
+    my str $db_file = "/tmp/test_strada_dbi.db";
+
+    # Remove existing file
+    sys::system("rm -f " . $db_file);
+
+    # Create database with file
+    my scalar $dbh = DBI::connect("dbi:SQLite:" . $db_file, "", "");
+    if (!defined($dbh)) {
+        say("FAIL: Could not create file database");
+        return 0;
+    }
+
+    DBI::do_sql($dbh, "CREATE TABLE persistent (id INTEGER PRIMARY KEY, data TEXT)");
+    DBI::do($dbh, "INSERT INTO persistent (data) VALUES (?)", ["saved data"]);
+    DBI::disconnect($dbh);
+    say("OK: Created and wrote to file database");
+
+    # Reopen and verify
+    $dbh = DBI::connect("dbi:SQLite:" . $db_file, "", "");
+    if (!defined($dbh)) {
+        say("FAIL: Could not reopen file database");
+        return 0;
+    }
+
+    my scalar $row = DBI::selectrow_hashref($dbh, "SELECT data FROM persistent", []);
+    if (defined($row) && $row->{"data"} eq "saved data") {
+        say("OK: Data persisted correctly");
+    } else {
+        say("FAIL: Data not persisted");
+    }
+
+    DBI::disconnect($dbh);
+
+    # Cleanup
+    sys::system("rm -f " . $db_file);
+    say("");
+    return 1;
+}
+
+func test_error_handling() int {
+    say("=== Test 10: Error Handling ===");
+
+    my scalar $dbh = DBI::connect("dbi:SQLite::memory:", "", "");
+    if (!defined($dbh)) {
+        say("FAIL: Could not connect");
+        return 0;
+    }
+
+    # Try to query non-existent table
+    my int $result = DBI::do_sql($dbh, "SELECT * FROM nonexistent");
+
+    if ($result < 0) {
+        my str $err = DBI::errstr($dbh);
+        say("OK: Got expected error: " . $err);
+    } else {
+        say("FAIL: Should have gotten an error");
+    }
+
+    # Try invalid SQL
+    $result = DBI::do_sql($dbh, "THIS IS NOT SQL");
+    if ($result < 0) {
+        say("OK: Got error for invalid SQL");
+    } else {
+        say("FAIL: Should have gotten an error");
+    }
+
+    DBI::disconnect($dbh);
+    say("");
+    return 1;
+}
+
+func main(int $argc, array @argv) int {
+    say("DBI Module Test Suite");
+    say("=====================\n");
+
+    my int $passed = 0;
+    my int $total = 10;
+
+    $passed = $passed + test_basic_operations();
+    $passed = $passed + test_multiple_rows();
+    $passed = $passed + test_transactions();
+    $passed = $passed + test_quote();
+    $passed = $passed + test_convenience_functions();
+    $passed = $passed + test_column_names();
+    $passed = $passed + test_update_delete();
+    $passed = $passed + test_null_values();
+    $passed = $passed + test_file_database();
+    $passed = $passed + test_error_handling();
+
+    say("=====================");
+    say("Results: " . $passed . "/" . $total . " tests passed");
+
+    if ($passed == $total) {
+        say("All tests passed!");
+        return 0;
+    } else {
+        say("Some tests failed.");
+        return 1;
+    }
+}

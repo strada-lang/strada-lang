@@ -1,0 +1,108 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# Test core::vec_get / core::vec_set — perl-style bit-vector access.
+# vec_set(SV, OFFSET, BITS, VALUE) writes VALUE as a BITS-wide field
+#   at position OFFSET (counted in BITS-wide units, not bytes).
+# vec_get(SV, OFFSET, BITS) reads the same.
+# BITS must be a power of 2: 1, 2, 4, 8, 16, 32, 64.
+# Sub-byte fields are LSB-first within each byte (matches perl vec()).
+# Multi-byte fields are big-endian.
+
+func test(int $passed, int $total, str $desc, int $got, int $want) int {
+    if ($got == $want) {
+        say("OK: " . $desc);
+        return $passed + 1;
+    } else {
+        say("FAIL: " . $desc . " got=" . $got . " want=" . $want);
+        return $passed;
+    }
+}
+
+func test_str(int $passed, int $total, str $desc, str $got, str $want) int {
+    if ($got eq $want) {
+        say("OK: " . $desc);
+        return $passed + 1;
+    } else {
+        say("FAIL: " . $desc . " got='" . $got . "' want='" . $want . "'");
+        return $passed;
+    }
+}
+
+func main() int {
+    my int $passed = 0;
+    my int $total = 0;
+
+    # 8-bit fields (byte access)
+    my str $bytes = "";
+    core::vec_set($bytes, 0, 8, 65);
+    core::vec_set($bytes, 1, 8, 66);
+    core::vec_set($bytes, 2, 8, 67);
+    $total = $total + 1; $passed = test_str($passed, $total, "8-bit set forms 'ABC'", $bytes, "ABC");
+    $total = $total + 1; $passed = test($passed, $total, "8-bit get [0]=65", core::vec_get($bytes, 0, 8), 65);
+    $total = $total + 1; $passed = test($passed, $total, "8-bit get [2]=67", core::vec_get($bytes, 2, 8), 67);
+
+    # 16-bit fields (big-endian)
+    my str $w = "";
+    core::vec_set($w, 0, 16, 0x4142);
+    core::vec_set($w, 1, 16, 0x4344);
+    $total = $total + 1; $passed = test($passed, $total, "16-bit byte[0]=0x41", core::ord_byte($w), 0x41);
+    $total = $total + 1; $passed = test($passed, $total, "16-bit get [0]", core::vec_get($w, 0, 16), 0x4142);
+    $total = $total + 1; $passed = test($passed, $total, "16-bit get [1]", core::vec_get($w, 1, 16), 0x4344);
+
+    # 1-bit fields (LSB-first within byte)
+    my str $b = "";
+    core::vec_set($b, 0, 1, 1);
+    core::vec_set($b, 3, 1, 1);
+    core::vec_set($b, 7, 1, 1);
+    $total = $total + 1; $passed = test($passed, $total, "1-bit packed 0,3,7 = 0x89", core::ord_byte($b), 0x89);
+    $total = $total + 1; $passed = test($passed, $total, "1-bit get [0]=1", core::vec_get($b, 0, 1), 1);
+    $total = $total + 1; $passed = test($passed, $total, "1-bit get [3]=1", core::vec_get($b, 3, 1), 1);
+    $total = $total + 1; $passed = test($passed, $total, "1-bit get [1]=0", core::vec_get($b, 1, 1), 0);
+
+    # 4-bit fields (nibbles, LSB-first)
+    my str $n = "";
+    core::vec_set($n, 0, 4, 0xA);  # low nibble = A
+    core::vec_set($n, 1, 4, 0xB);  # high nibble = B
+    $total = $total + 1; $passed = test($passed, $total, "4-bit packed 0xBA", core::ord_byte($n), 0xBA);
+    $total = $total + 1; $passed = test($passed, $total, "4-bit get [0]=0xA", core::vec_get($n, 0, 4), 0xA);
+    $total = $total + 1; $passed = test($passed, $total, "4-bit get [1]=0xB", core::vec_get($n, 1, 4), 0xB);
+
+    # Auto-extension
+    my str $g = "";
+    core::vec_set($g, 5, 8, 99);  # writes byte 5, extends with zeros
+    $total = $total + 1; $passed = test($passed, $total, "auto-extend len=6", length($g), 6);
+    $total = $total + 1; $passed = test($passed, $total, "auto-extend [0]=0", core::vec_get($g, 0, 8), 0);
+    $total = $total + 1; $passed = test($passed, $total, "auto-extend [5]=99", core::vec_get($g, 5, 8), 99);
+
+    # 32-bit
+    my str $l = "";
+    core::vec_set($l, 0, 32, 0x12345678);
+    $total = $total + 1; $passed = test($passed, $total, "32-bit get", core::vec_get($l, 0, 32), 0x12345678);
+    $total = $total + 1; $passed = test($passed, $total, "32-bit byte[0]=0x12", core::ord_byte($l), 0x12);
+
+    say("");
+    say("=== Results ===");
+    say("Passed: " . $passed . "/" . $total);
+    if ($passed == $total) {
+        say("All vec tests passed");
+        return 0;
+    } else {
+        say("Some tests failed");
+        return 1;
+    }
+}

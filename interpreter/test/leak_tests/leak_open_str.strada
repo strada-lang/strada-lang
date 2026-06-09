@@ -1,0 +1,17 @@
+func main() int {
+    my int $i = 0;
+    while ($i < 100) {
+        my scalar $rfh = core::open_str("line1\nline2\n", "r");
+        my str $l1 = core::readline($rfh);
+        my str $l2 = core::readline($rfh);
+        core::close($rfh);
+
+        my scalar $wfh = core::open_str("", "w");
+        say($wfh, "hello " . $i);
+        my str $result = core::str_from_fh($wfh);
+        core::close($wfh);
+        $i = $i + 1;
+    }
+    say("done");
+    return 0;
+}

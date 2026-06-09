@@ -1,0 +1,129 @@
+#!/usr/bin/env strada
+# Round 10 leak regressions — exception-paths leaking allocations
+# that the catch's cleanup_drain didn't know about.
+#
+# Covers:
+# - map/grep/sort block-body throw (accumulator + source)
+# - AUTOLOAD body throw (new_args array)
+# - local $var = ... then throw (local save-stack restore)
+# - concat chain "a" . throwing_fn() . "b" (left temp)
+# - method receiver / args (already in test_method_throw_leak.strada)
+#
+# Run: valgrind --leak-check=full ./test_throw_paths_round10
+
+package Dyn;
+
+func new() scalar {
+    my hash %self = ();
+    return bless(\%self, "Dyn");
+}
+
+func AUTOLOAD(scalar $self, scalar @args) void {
+    throw "autoload fail";
+}
+
+package main;
+
+func boom_int() int {
+    throw "mid-throw";
+    return 0;
+}
+
+func boom_str() str {
+    throw "mid-throw";
+    return "";
+}
+
+func test_map_throw() void {
+    my int $iter = 100;
+    my int $i = 0;
+    while ($i < $iter) {
+        try {
+            my array @arr = (1, 2, 3, 4, 5);
+            my array @r = map { boom_int() } @arr;
+        } catch ($e) { }
+        $i = $i + 1;
+    }
+    say("test_map_throw: PASS");
+}
+
+func test_grep_throw() void {
+    my int $iter = 100;
+    my int $i = 0;
+    while ($i < $iter) {
+        try {
+            my array @arr = (1, 2, 3, 4, 5);
+            my array @r = grep { boom_int() } @arr;
+        } catch ($e) { }
+        $i = $i + 1;
+    }
+    say("test_grep_throw: PASS");
+}
+
+func test_sort_throw() void {
+    my int $iter = 100;
+    my int $i = 0;
+    while ($i < $iter) {
+        try {
+            my array @arr = (3, 1, 2);
+            my scalar $r = sort { boom_int(); } @arr;
+        } catch ($e) { }
+        $i = $i + 1;
+    }
+    say("test_sort_throw: PASS");
+}
+
+func test_autoload_throw() void {
+    my scalar $d = Dyn::new();
+    my int $iter = 100;
+    my int $i = 0;
+    while ($i < $iter) {
+        try {
+            $d->some_method(1, 2, 3);
+        } catch ($e) { }
+        $i = $i + 1;
+    }
+    say("test_autoload_throw: PASS");
+}
+
+our str $g_var = "original";
+
+func test_local_throw() void {
+    my int $iter = 100;
+    my int $i = 0;
+    while ($i < $iter) {
+        try {
+            local $g_var = "modified-" . $i;
+            throw "local-fail";
+        } catch ($e) { }
+        $i = $i + 1;
+    }
+    # After all throws, $g_var should still be "original"
+    if ($g_var ne "original") {
+        say("FAIL: g_var not restored: " . $g_var);
+        return;
+    }
+    say("test_local_throw: PASS");
+}
+
+func test_concat_throw() void {
+    my int $iter = 100;
+    my int $i = 0;
+    while ($i < $iter) {
+        try {
+            my str $s = "prefix-aaaa" . boom_str() . "-suffix";
+        } catch ($e) { }
+        $i = $i + 1;
+    }
+    say("test_concat_throw: PASS");
+}
+
+func main() int {
+    test_map_throw();
+    test_grep_throw();
+    test_sort_throw();
+    test_autoload_throw();
+    test_local_throw();
+    test_concat_throw();
+    return 0;
+}

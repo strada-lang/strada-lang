@@ -1,0 +1,88 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_refs_working.strada - Reference demo that works
+
+func main() int {
+    say("=== Strada References Demo ===");
+    say("");
+    
+    # SCALAR REFERENCES
+    say("--- Scalar References ---");
+    
+    my int $number = 42;
+    my str $text = "Hello";
+    my num $pi = 3.14159;
+    
+    # Create references using refto()
+    my scalar $num_ref = refto($number);
+    my scalar $str_ref = refto($text);
+    my scalar $pi_ref = refto($pi);
+    
+    say("Original: number = " . $number);
+    say("Original: text = " . $text);
+    say("Original: pi = " . $pi);
+    
+    # Check if they're references
+    say("");
+    say("is_ref(number) = " . is_ref($number));
+    say("is_ref(num_ref) = " . is_ref($num_ref));
+    
+    # Dereference to get values back
+    say("");
+    say("deref(num_ref) = " . deref($num_ref));
+    say("deref(str_ref) = " . deref($str_ref));
+    say("deref(pi_ref) = " . deref($pi_ref));
+    
+    # Get the type of referenced value
+    say("");
+    say("reftype(num_ref) = " . reftype($num_ref));
+    say("reftype(str_ref) = " . reftype($str_ref));
+    say("reftype(pi_ref) = " . reftype($pi_ref));
+    
+    # ARRAY REFERENCES  
+    say("");
+    say("--- Array References ---");
+    
+    # Arrays are stored in scalars
+    my scalar $nums = split("10,20,30", ",");
+    
+    # Create reference to array
+    my scalar $arr_ref = refto($nums);
+    
+    say("Array size = " . size($nums));
+    say("is_ref(arr_ref) = " . is_ref($arr_ref));
+    say("reftype(arr_ref) = " . reftype($arr_ref));
+    
+    # PASS BY REFERENCE
+    say("");
+    say("--- Pass by Reference ---");
+    
+    my int $value = 100;
+    say("Before: value = " . $value);
+    show_ref(refto($value));
+    
+    say("");
+    say("=== Done! ===");
+    
+    return 0;
+}
+
+func show_ref(scalar $myref) void {
+    say("Received ref, is_ref = " . is_ref($myref));
+    say("Dereferenced value = " . deref($myref));
+}

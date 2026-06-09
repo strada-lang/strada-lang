@@ -1,0 +1,204 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_try_catch.strada - Demonstrates try/catch/throw exception handling
+#
+# Strada supports Perl-style exception handling:
+#   try { ... } catch ($e) { ... }
+#   throw "error message";
+#
+# die() now also throws exceptions when inside a try block
+
+# Exception class for typed catches
+package DivisionError;
+
+func new(str $message, int $dividend, int $divisor) scalar {
+    my hash %self = ();
+    $self{"message"} = $message;
+    $self{"dividend"} = $dividend;
+    $self{"divisor"} = $divisor;
+    return bless(\%self, "DivisionError");
+}
+
+package ValueError;
+
+func new(str $message) scalar {
+    my hash %self = ();
+    $self{"message"} = $message;
+    return bless(\%self, "ValueError");
+}
+
+package main;
+
+func divide(int $a, int $b) int {
+    if ($b == 0) {
+        throw "Division by zero";
+    }
+    return $a / $b;
+}
+
+func divide_typed(int $a, int $b) int {
+    if ($b == 0) {
+        throw DivisionError::new("Division by zero", $a, $b);
+    }
+    return $a / $b;
+}
+
+func risky_operation(int $value) int {
+    if ($value < 0) {
+        die("Negative value not allowed: " . $value);
+    }
+    if ($value > 100) {
+        throw "Value too large: " . $value;
+    }
+    return $value * 2;
+}
+
+func main() int {
+    say("=== Try/Catch Exception Handling ===\n");
+
+    # Test 1: Basic try/catch with throw
+    say("Test 1: Basic throw and catch");
+    try {
+        say("  About to throw an exception...");
+        throw "This is a test exception";
+        say("  This line should NOT be printed");
+    } catch ($e) {
+        say("  Caught exception: " . $e);
+    }
+    say("  Execution continues after catch\n");
+
+    # Test 2: Division by zero
+    say("Test 2: Division by zero");
+    try {
+        my int $result = divide(10, 0);
+        say("  Result: " . $result);
+    } catch ($e) {
+        say("  Caught: " . $e);
+    }
+
+    say("");
+
+    # Test 3: Successful operation (no exception)
+    say("Test 3: Successful operation");
+    try {
+        my int $result = divide(20, 4);
+        say("  20 / 4 = " . $result);
+    } catch ($e) {
+        say("  Should not see this: " . $e);
+    }
+
+    say("");
+
+    # Test 4: die() inside try block throws
+    say("Test 4: die() throws inside try block");
+    try {
+        my int $result = risky_operation(-5);
+        say("  Result: " . $result);
+    } catch ($e) {
+        say("  Caught from die(): " . $e);
+    }
+
+    say("");
+
+    # Test 5: Nested try/catch
+    say("Test 5: Nested try/catch");
+    try {
+        say("  Outer try block");
+        try {
+            say("    Inner try block");
+            throw "Inner exception";
+        } catch ($inner_e) {
+            say("    Caught inner: " . $inner_e);
+            throw "Re-throwing from inner catch";
+        }
+        say("  This should NOT be printed");
+    } catch ($outer_e) {
+        say("  Caught outer: " . $outer_e);
+    }
+
+    say("");
+
+    # Test 6: Multiple operations in try block
+    say("Test 6: Multiple operations");
+    try {
+        my int $a = divide(100, 5);
+        say("  100 / 5 = " . $a);
+        my int $b = divide(50, 2);
+        say("  50 / 2 = " . $b);
+        my int $c = divide($b, 0);  # This will throw
+        say("  Should not see this");
+    } catch ($e) {
+        say("  Caught: " . $e);
+    }
+
+    # Test 7: Typed exception - basic
+    say("Test 7: Typed exception catch");
+    try {
+        my int $result = divide_typed(10, 0);
+        say("  Result: " . $result);
+    } catch (DivisionError $e) {
+        say("  Caught DivisionError: " . $e->{"message"});
+        say("    Dividend: " . $e->{"dividend"} . ", Divisor: " . $e->{"divisor"});
+    } catch ($e) {
+        say("  Should not reach catch-all");
+    }
+
+    say("");
+
+    # Test 8: Typed exception - falls through to catch-all
+    say("Test 8: String exception with typed catches");
+    try {
+        throw "plain string error";
+    } catch (DivisionError $e) {
+        say("  Should not match DivisionError");
+    } catch ($e) {
+        say("  Caught in catch-all: " . $e);
+    }
+
+    say("");
+
+    # Test 9: Multiple typed catches
+    say("Test 9: Multiple typed catches");
+    try {
+        throw ValueError::new("invalid input");
+    } catch (DivisionError $e) {
+        say("  Should not match DivisionError");
+    } catch (ValueError $e) {
+        say("  Caught ValueError: " . $e->{"message"});
+    } catch ($e) {
+        say("  Should not reach catch-all");
+    }
+
+    say("");
+
+    # Test 10: Re-throw unmatched typed exception
+    say("Test 10: Re-throw unmatched typed exception");
+    try {
+        try {
+            throw ValueError::new("inner error");
+        } catch (DivisionError $e) {
+            say("  Inner: Should not match DivisionError");
+        }
+        # No catch-all, so ValueError gets re-thrown
+    } catch (ValueError $e) {
+        say("  Outer caught re-thrown ValueError: " . $e->{"message"});
+    }
+
+    say("\n=== All tests completed! ===");
+    return 0;
+}

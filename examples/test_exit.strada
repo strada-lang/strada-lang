@@ -1,0 +1,55 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_exit.strada - Test exit codes and early returns
+
+func main() int {
+    say("=== Exit Code Examples ===");
+    say("");
+    
+    # Example 1: Success
+    say("Case 1: Success");
+    my int $success = 1;
+    if ($success == 1) {
+        say("Operation successful");
+        say("Exiting with code 0");
+        return 0;
+    }
+    
+    # Example 2: Error - file not found
+    say("Case 2: File not found error");
+    my int $file_exists = 0;
+    if ($file_exists == 0) {
+        say("Error: File not found");
+        say("Exiting with code 1");
+        return 1;
+    }
+    
+    # Example 3: Validation error
+    say("Case 3: Validation error");
+    my int $valid = 0;
+    if ($valid == 0) {
+        say("Error: Invalid input");
+        say("Exiting with code 2");
+        return 2;
+    }
+    
+    # This won't be reached
+    say("This line won't execute");
+    return 99;
+}
+

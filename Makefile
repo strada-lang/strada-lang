@@ -1,0 +1,794 @@
+# Makefile for Strada Language
+#
+# Build order:
+#   1. Run ./configure to detect dependencies (optional but recommended)
+#   2. Bootstrap compiler (C) - builds bootstrap/stradac
+#   3. Stage 1: Bootstrap compiles self-hosting compiler -> stradac_stage1
+#   4. Stage 2: stradac_stage1 recompiles itself -> ./stradac (with proper cleanup)
+#   5. Examples use self-hosting compiler (./stradac)
+#
+
+# Include generated config if it exists (run ./configure to generate)
+-include config.mk
+
+# Default values if config.mk doesn't exist
+CC ?= gcc
+PREFIX ?= /usr/local
+HAVE_MYSQL ?= 0
+HAVE_SQLITE ?= 1
+HAVE_POSTGRES ?= 0
+HAVE_CRYPT ?= 0
+HAVE_CRYPT_R ?= 0
+HAVE_READLINE ?= 0
+HAVE_SSL ?= 0
+DBI_DEFINES ?=
+DBI_LIBS ?= -lsqlite3
+CRYPT_LIBS ?= -lcrypt
+READLINE_LIBS ?= -lreadline
+SSL_LIBS ?= -lssl -lcrypto
+HAVE_PCRE2 ?= 0
+PCRE2_CFLAGS ?=
+PCRE2_LIBS ?= -lpcre2-8
+STATIC_PCRE2 ?= 0
+PCRE2_STATIC_LIB ?=
+BUNDLED_PCRE2 ?= 0
+# Runtime memory-management features (compile-time, default ON). Set to 0 via
+# ./configure --without-cycle-gc / --without-arena, or `make HAVE_CYCLE_GC=0`.
+HAVE_CYCLE_GC ?= 1
+HAVE_ARENA ?= 1
+# Combined define list folded into the runtime compile (and only the runtime —
+# the StradaValue ABI is unchanged, so user programs need no define).
+MM_DEFINES = $(if $(filter 1,$(HAVE_CYCLE_GC)),-DSTRADA_CYCLE_GC) $(if $(filter 1,$(HAVE_ARENA)),-DSTRADA_ARENA)
+# DEV=1 builds the compiler and runtime at -O0 with no LTO. Trades a slower
+# stradac binary for dramatically faster gcc compile times on the generated
+# Combined.c (~4MB / 60k lines). Default off — production builds at -O2+LTO.
+# Usage:  make DEV=1
+DEV ?= 0
+# Detect platform (Darwin/Linux/etc.) for platform-specific flags
+UNAME_S := $(shell uname -s)
+
+# Optimization flags. DEV=1 switches to -O0 and disables LTO on the runtime.
+ifeq ($(DEV),1)
+OPT_FLAGS = -O0
+RUNTIME_LTO_FLAGS =
+$(info === DEV=1: building at -O0, no LTO (fast compile, slower binaries) ===)
+else
+OPT_FLAGS = -O2
+RUNTIME_LTO_FLAGS = -flto=auto -ffat-lto-objects
+endif
+
+# In-tree make builds (libs, examples, `make run`, the test suite) trust their
+# own precompiled sibling .o/.so, so opt in to `use Foo;` auto-detecting them.
+# End users invoking `strada` directly get the secure default (off) — see
+# --use-artifacts. (The bootstrap compiles single-file Combined.strada, so this
+# has no effect there.)
+export STRADA_USE_ARTIFACTS = 1
+
+# Base warning flags (portable)
+CFLAGS_BASE = -Wall -Wextra -Wno-unused-variable -Wno-return-type -Wno-unused-result -Wno-comment $(OPT_FLAGS) -std=c99
+# Section-splitting flags: used with linker's garbage collection to drop unused code.
+# Supported by both gcc (ELF) and clang (ELF + Mach-O).
+CFLAGS_SECTIONS = -ffunction-sections -fdata-sections
+CFLAGS_BASE += $(CFLAGS_SECTIONS)
+# macOS clang flags thousands of statement-expression trailing values emitted by
+# the Strada code generator as [-Wunused-value]. Silence on Darwin.
+ifeq ($(UNAME_S),Darwin)
+CFLAGS_BASE += -Wno-unused-value
+endif
+# GCC-specific flags (not available on clang/macOS)
+CFLAGS_GCC = -Wno-unused-but-set-variable
+# Detect compiler and set appropriate flags
+ifeq ($(shell $(CC) --version 2>&1 | grep -q clang && echo clang),clang)
+CFLAGS = $(CFLAGS_BASE)
+else
+CFLAGS = $(CFLAGS_BASE) $(CFLAGS_GCC)
+endif
+
+# Optimization override for throwaway / iteration builds. The stage-1 compiler
+# (stradac_stage1) is disposable — its only job is to regenerate Combined.c — so
+# it never needs optimization. The `quick` target uses this too. Forcing -O0 here
+# turns the ~3.5min -O2 gcc pass on the 60k-line monolith into ~35s, regardless of
+# whether DEV=1 is set. Strips any -O level already in CFLAGS, then appends -O0.
+FAST_CFLAGS = $(filter-out -O0 -O1 -O2 -O3 -Ofast,$(CFLAGS)) -O0
+
+# Optimization level for the FINAL self-hosting compiler (stage 2 / ./stradac).
+# The 4.6MB generated Combined.c contains one ~1.3MB dispatch function
+# (gen_expression/gen_statement) on which gcc -O2 is pathological: that single
+# function alone is ~86s of the ~149s -O2 build. The compiler is allocation/IO-
+# bound, not a tight-loop workload, so -O2 buys little here — -O1 cuts the final
+# gcc pass to ~60s (~2.5x) with negligible effect on stradac's own throughput.
+# Only the compiler binary is affected: the runtime (strada_runtime.o) and all
+# user programs still build at $(CFLAGS)/-O2. DEV=1 keeps -O0 (fastest).
+STRADAC_CFLAGS = $(filter-out -O0 -O1 -O2 -O3 -Ofast,$(CFLAGS)) $(if $(filter -O0,$(OPT_FLAGS)),-O0,-O1)
+
+# Platform-specific LDFLAGS:
+#   Linux: -ldl for dlopen, --gc-sections to strip unused fns
+#   macOS: dlopen is in libc (no -ldl), linker uses -dead_strip instead of --gc-sections
+ifeq ($(UNAME_S),Darwin)
+LDFLAGS = -lm -lpthread -Wl,-dead_strip
+else
+LDFLAGS = -ldl -lm -lpthread -Wl,--gc-sections
+endif
+ifeq ($(HAVE_PCRE2),1)
+ifeq ($(STATIC_PCRE2),1)
+LDFLAGS += $(PCRE2_STATIC_LIB)
+else
+LDFLAGS += $(PCRE2_LIBS)
+endif
+endif
+RUNTIME_DIR = runtime
+BOOTSTRAP_DIR = bootstrap
+COMPILER_DIR = compiler
+EXAMPLES_DIR = examples
+
+# Bootstrap compiler (C version)
+BOOTSTRAP_STRADAC = $(BOOTSTRAP_DIR)/stradac
+
+# Self-hosting compiler (Strada version) - this is the primary compiler
+STRADAC = ./stradac
+
+RUNTIME_SRC = $(RUNTIME_DIR)/strada_runtime.c
+RUNTIME_HDR = $(RUNTIME_DIR)/strada_runtime.h
+RUNTIME_OBJ = $(RUNTIME_DIR)/strada_runtime.o
+RUNTIME_TCC_OBJ = $(RUNTIME_DIR)/strada_runtime_tcc.o
+
+.PHONY: all clean test test-all test-examples test-selfhost test-suite runtime bootstrap compiler examples run run-bootstrap help info selfhost install uninstall tools libs lib-dbi lib-crypt lib-ssl lib-readline configure-check stage1 quick interpreter test-interp perl2strada xs2strada cpan2strada install-perl2strada install-cpan2strada update-bootstrap
+
+# Default: build the self-hosting compiler, tools, and libraries. The
+# tree-walking interpreter / bytecode VM is no longer built by default —
+# `make interpreter` still builds it explicitly. `libs` is included so
+# the test-suite's String-eval and Nesso ORM tests work out of the box
+# (they need lib-eval and lib-dbi respectively).
+ifeq ($(DEV),1)
+all: stradac $(RUNTIME_OBJ) tools
+else
+all: stradac $(RUNTIME_OBJ) tools libs
+endif
+	@echo ""
+	@echo "✓ Build complete!"
+	@echo "  Compiler: ./stradac"
+	@echo "  Tools:    tools/stradadoc, tools/strada-soinfo, tools/strada-md2man, tools/strada-md2html, tools/strada-jit"
+	@echo ""
+	@echo "Usage: ./strada -r hello.strada"
+	@echo "   or: make run PROG=test_simple"
+	@echo "   or: tools/strada-jit"
+	@echo ""
+	@echo "Run 'make install' to install to /usr/local (or PREFIX=/path make install)"
+
+# Bundled PCRE2 static library
+VENDOR_PCRE2_DIR = vendor/pcre2
+VENDOR_PCRE2_LIB = $(VENDOR_PCRE2_DIR)/libpcre2-8.a
+
+$(VENDOR_PCRE2_LIB):
+	@echo "=== Building bundled PCRE2 ==="
+	$(MAKE) -C $(VENDOR_PCRE2_DIR) CC="$(CC)"
+
+# Pre-compiled runtime object (for faster program compilation)
+# Built with -ffunction-sections so -Wl,--gc-sections can strip unused functions.
+# Built with -flto=auto + -ffat-lto-objects: the .o contains BOTH regular
+# code AND LTO bytecode. Plain links (test runner, ad-hoc gcc) consume the
+# regular code; LTO-enabled user links (./strada -O2) consume the bytecode
+# and can inline hot runtime helpers (hash get/set, refcount, tagged-int
+# conversion) into the user's hot loops.
+$(RUNTIME_OBJ): $(RUNTIME_SRC) $(RUNTIME_HDR) $(if $(filter 1,$(BUNDLED_PCRE2)),$(VENDOR_PCRE2_LIB))
+	@echo "=== Building pre-compiled runtime ==="
+	$(CC) $(CFLAGS) $(RUNTIME_LTO_FLAGS) $(MM_DEFINES) $(if $(filter 1,$(HAVE_PCRE2)),-DHAVE_PCRE2 $(PCRE2_CFLAGS)) -c $(RUNTIME_SRC) -I$(RUNTIME_DIR) -o $(RUNTIME_OBJ)
+
+# TCC-compatible runtime object (for REPL with TCC backend)
+# -Wa,-mrelax-relocations=no avoids R_X86_64_REX_GOTPCRELX relocations that TCC can't handle
+# Some assemblers don't support this flag, so try with it first, fall back without
+$(RUNTIME_TCC_OBJ): $(RUNTIME_SRC) $(RUNTIME_HDR) $(RUNTIME_DIR)/strada_runtime_tcc.h
+	@echo "=== Building TCC runtime ==="
+	$(CC) $(CFLAGS) -fPIC -DSTRADA_NO_TLS -Wa,-mrelax-relocations=no -c $(RUNTIME_SRC) -I$(RUNTIME_DIR) -o $(RUNTIME_TCC_OBJ) 2>/dev/null || \
+	$(CC) $(CFLAGS) -fPIC -DSTRADA_NO_TLS -c $(RUNTIME_SRC) -I$(RUNTIME_DIR) -o $(RUNTIME_TCC_OBJ)
+
+# Build the runtime test
+runtime: $(RUNTIME_DIR)/test_runtime
+
+$(RUNTIME_DIR)/test_runtime: $(RUNTIME_DIR)/test_runtime.c $(RUNTIME_SRC) $(RUNTIME_HDR)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_DIR)/test_runtime.c $(RUNTIME_SRC) $(LDFLAGS)
+
+# Test the runtime
+test: runtime
+	@echo "=== Testing Strada Runtime ==="
+	./$(RUNTIME_DIR)/test_runtime
+	@echo ""
+	@echo "✓ Runtime tests passed"
+
+# Build bootstrap compiler (C version)
+bootstrap:
+	$(MAKE) -C $(BOOTSTRAP_DIR)
+
+# Create combined source for self-hosting compiler
+$(COMPILER_DIR)/Combined.strada: $(COMPILER_DIR)/AST.strada $(COMPILER_DIR)/Lexer.strada $(COMPILER_DIR)/Parser.strada $(COMPILER_DIR)/Semantic.strada $(COMPILER_DIR)/CodeGen.strada $(COMPILER_DIR)/CodeGenBuiltins.strada $(COMPILER_DIR)/CodeGenExpr.strada $(COMPILER_DIR)/CodeGenStmt.strada $(COMPILER_DIR)/Main.strada
+	@echo "=== Creating combined compiler source ==="
+	cat $(COMPILER_DIR)/AST.strada $(COMPILER_DIR)/Lexer.strada $(COMPILER_DIR)/Parser.strada $(COMPILER_DIR)/Semantic.strada $(COMPILER_DIR)/CodeGen.strada $(COMPILER_DIR)/CodeGenBuiltins.strada $(COMPILER_DIR)/CodeGenExpr.strada $(COMPILER_DIR)/CodeGenStmt.strada $(COMPILER_DIR)/Main.strada > $(COMPILER_DIR)/Combined.strada
+
+# Stage 1: Compile combined source to C using bootstrap compiler
+$(COMPILER_DIR)/Combined_stage1.c: $(COMPILER_DIR)/Combined.strada $(BOOTSTRAP_STRADAC)
+	@echo "=== Stage 1: Compiling self-hosting compiler (bootstrap -> C) ==="
+	$(BOOTSTRAP_STRADAC) $(COMPILER_DIR)/Combined.strada $(COMPILER_DIR)/Combined_stage1.c
+
+# Build bootstrap compiler if it doesn't exist
+$(BOOTSTRAP_STRADAC):
+	$(MAKE) -C $(BOOTSTRAP_DIR)
+
+# Build the stage 1 compiler executable
+# Note: -rdynamic exports symbols so that shared libraries loaded at compile time
+# (via import_lib) can access runtime functions
+stradac_stage1: $(COMPILER_DIR)/Combined_stage1.c $(RUNTIME_OBJ)
+	@echo "=== Building stage 1 compiler (-O0: throwaway, only regenerates Combined.c) ==="
+	$(CC) $(FAST_CFLAGS) -rdynamic -o stradac_stage1 $(COMPILER_DIR)/Combined_stage1.c $(RUNTIME_OBJ) -I$(RUNTIME_DIR) $(LDFLAGS)
+
+stage1: stradac_stage1
+
+# Stage 2: Self-hosting compiler recompiles itself (with proper cleanup)
+$(COMPILER_DIR)/Combined.c: $(COMPILER_DIR)/Combined.strada stradac_stage1
+	@echo "=== Stage 2: Self-hosting compiler recompiles itself ==="
+	./stradac_stage1 $(COMPILER_DIR)/Combined.strada $(COMPILER_DIR)/Combined.c
+
+# Build the final self-hosting compiler executable
+stradac: $(COMPILER_DIR)/Combined.c $(RUNTIME_OBJ)
+	@echo "=== Building self-hosting compiler executable ==="
+	$(CC) $(STRADAC_CFLAGS) -Wno-unused-function -rdynamic -o stradac $(COMPILER_DIR)/Combined.c $(RUNTIME_OBJ) -I$(RUNTIME_DIR) $(LDFLAGS)
+	@echo "✓ Self-hosting compiler built: ./stradac (stage 2, $(if $(filter -O0,$(OPT_FLAGS)),-O0,-O1))"
+
+# Fast iteration target: use the EXISTING ./stradac to recompile the compiler in
+# place, skipping the bootstrap -> stage1 path entirely (one gcc pass at -O0
+# instead of two at -O2). Requires a working ./stradac already on disk.
+#
+# This is the day-to-day edit/test loop while hacking on compiler/*.strada.
+# It does NOT exercise the frozen bootstrap chain or verify the self-host
+# fixpoint -- run `make` (clean bootstrap build) and `make test-selfhost`
+# before committing.
+quick: $(COMPILER_DIR)/Combined.strada $(RUNTIME_OBJ)
+	@if [ ! -x ./stradac ]; then \
+	    echo "No ./stradac yet -- run 'make' once to bootstrap, then use 'make quick'."; \
+	    exit 1; \
+	fi
+	@echo "=== quick: regenerating Combined.c with existing ./stradac ==="
+	./stradac $(COMPILER_DIR)/Combined.strada $(COMPILER_DIR)/Combined.c
+	@echo "=== quick: linking ./stradac at -O0 ==="
+	$(CC) $(FAST_CFLAGS) -Wno-unused-function -rdynamic -o stradac $(COMPILER_DIR)/Combined.c $(RUNTIME_OBJ) -I$(RUNTIME_DIR) $(LDFLAGS)
+	@echo "✓ quick rebuild done (./stradac, -O0; not bootstrap-verified)"
+
+# Aliases
+compiler: stradac
+selfhost: stradac
+
+# Update the bootstrap with the current self-hosting compiler output
+# Run this after making changes to the compiler and verifying they work
+update-bootstrap: stradac
+	@echo "=== Updating bootstrap with current stage 2 output ==="
+	cp $(COMPILER_DIR)/Combined.c $(BOOTSTRAP_DIR)/Combined.c
+	@cd $(BOOTSTRAP_DIR) && bash ../scripts/split-bootstrap.sh
+	@echo "✓ Bootstrap updated"
+
+# Compile and run an example using SELF-HOSTING compiler
+# Usage: make run PROG=test_simple
+run: stradac $(RUNTIME_OBJ)
+	@if [ -z "$(PROG)" ]; then echo "Usage: make run PROG=example_name"; exit 1; fi
+	@echo "=== Compiling $(PROG) with self-hosting compiler ==="
+	$(STRADAC) $(EXAMPLES_DIR)/$(PROG).strada $(EXAMPLES_DIR)/$(PROG).c
+	$(CC) $(CFLAGS) -o $(EXAMPLES_DIR)/$(PROG) $(EXAMPLES_DIR)/$(PROG).c $(RUNTIME_OBJ) -I$(RUNTIME_DIR) $(LDFLAGS)
+	@echo ""
+	@echo "=== Running $(PROG) ==="
+	./$(EXAMPLES_DIR)/$(PROG)
+
+# Compile and run using BOOTSTRAP compiler (for comparison)
+# Usage: make run-bootstrap PROG=test_simple
+run-bootstrap: bootstrap $(RUNTIME_OBJ)
+	@if [ -z "$(PROG)" ]; then echo "Usage: make run-bootstrap PROG=example_name"; exit 1; fi
+	@echo "=== Compiling $(PROG) with bootstrap compiler ==="
+	$(BOOTSTRAP_STRADAC) $(EXAMPLES_DIR)/$(PROG).strada $(EXAMPLES_DIR)/$(PROG).c
+	$(CC) $(CFLAGS) -o $(EXAMPLES_DIR)/$(PROG) $(EXAMPLES_DIR)/$(PROG).c $(RUNTIME_OBJ) -I$(RUNTIME_DIR) $(LDFLAGS)
+	@echo ""
+	@echo "=== Running $(PROG) ==="
+	./$(EXAMPLES_DIR)/$(PROG)
+
+# Build all example programs using self-hosting compiler
+examples: stradac $(RUNTIME_OBJ)
+	@echo "=== Building example programs with self-hosting compiler ==="
+	@for f in $(EXAMPLES_DIR)/*.strada; do \
+	    name=$$(basename $$f .strada); \
+	    echo "Compiling $$name..."; \
+	    $(STRADAC) $$f $(EXAMPLES_DIR)/$$name.c 2>/dev/null && \
+	    $(CC) $(CFLAGS) -o $(EXAMPLES_DIR)/$$name $(EXAMPLES_DIR)/$$name.c $(RUNTIME_OBJ) -I$(RUNTIME_DIR) $(LDFLAGS) 2>/dev/null || \
+	    echo "  (skipped - compile error)"; \
+	done
+	@echo "✓ Examples built"
+
+# Test that self-hosting compiler can compile itself (stage 2)
+test-selfhost: stradac
+	@echo "=== Testing self-hosting compiler (stage 2) ==="
+	@echo "Compiling Lexer.strada with self-hosting compiler..."
+	$(STRADAC) $(COMPILER_DIR)/Lexer.strada /tmp/Lexer_stage2.c
+	@echo "✓ Self-hosting compiler can compile its own modules"
+
+# Test all examples compile and link successfully
+# Use GNU timeout (gtimeout on macOS via coreutils); fall back to no timeout if absent.
+test-examples: stradac $(RUNTIME_OBJ)
+	@echo "=== Testing all examples ==="
+	@TIMEOUT_CMD=""; \
+	if command -v timeout >/dev/null 2>&1; then TIMEOUT_CMD="timeout 5"; \
+	elif command -v gtimeout >/dev/null 2>&1; then TIMEOUT_CMD="gtimeout 5"; \
+	fi; \
+	passed=0; failed=0; \
+	for f in $(EXAMPLES_DIR)/*.strada; do \
+	    name=$$(basename $$f .strada); \
+	    printf "Testing $$name... "; \
+	    if $$TIMEOUT_CMD $(STRADAC) $$f /tmp/$$name.c >/dev/null 2>&1; then \
+	        if $(CC) -o /tmp/$$name /tmp/$$name.c $(RUNTIME_OBJ) -I$(RUNTIME_DIR) $(LDFLAGS) 2>/dev/null; then \
+	            echo "OK"; \
+	            passed=$$((passed + 1)); \
+	        else \
+	            echo "COMPILE FAIL"; \
+	            failed=$$((failed + 1)); \
+	        fi; \
+	    else \
+	        echo "STRADA FAIL"; \
+	        failed=$$((failed + 1)); \
+	    fi; \
+	done; \
+	echo ""; \
+	echo "Results: $$passed passed, $$failed failed"; \
+	if [ $$failed -eq 0 ]; then \
+	    echo "✓ All examples passed"; \
+	else \
+	    echo "✗ Some examples failed"; \
+	    exit 1; \
+	fi
+
+# Full test suite: runtime + self-hosting + all examples
+test-all: test test-selfhost test-examples
+	@echo ""
+	@echo "════════════════════════════════════"
+	@echo "✓ All tests passed!"
+	@echo "════════════════════════════════════"
+
+# Build the tree-walking interpreter
+interpreter: stradac
+	@cd interpreter && $(MAKE)
+
+# Run interpreter compatibility tests against compiler test suite
+test-interp: interpreter
+	@cd interpreter && $(MAKE) test-compiler-compat
+
+# Comprehensive test suite with output verification
+# Usage: make test-suite          - Run all tests
+#        make test-suite V=1      - Verbose output
+#        make test-suite TAP=1    - TAP format for CI/CD
+#        make test-suite FILTER=x - Run only tests matching pattern
+test-suite: stradac $(RUNTIME_OBJ)
+	@echo "=== Running Strada Test Suite ==="
+	@OPTS=""; \
+	if [ "$(V)" = "1" ]; then OPTS="$$OPTS -v"; fi; \
+	if [ "$(TAP)" = "1" ]; then OPTS="$$OPTS -t"; fi; \
+	if [ -n "$(FILTER)" ]; then OPTS="$$OPTS $(FILTER)"; fi; \
+	./t/run_tests.sh $$OPTS
+
+# Build tools (stradadoc, strada-soinfo, strada-md2man, strada-md2html, strada-jit, stradapp).
+# DEV=1 skips the profile-report tools (strada-proftext, strada-profhtml) since
+# they're slow to build and rarely needed during iterative development.
+ifeq ($(DEV),1)
+TOOL_BINS = tools/stradadoc tools/strada-soinfo tools/strada-md2man tools/strada-md2html tools/strada-jit tools/stradapp
+else
+TOOL_BINS = tools/stradadoc tools/strada-soinfo tools/strada-md2man tools/strada-md2html tools/strada-jit tools/stradapp tools/strada-proftext tools/strada-profhtml
+endif
+
+# Converter tools (built separately via make perl2strada / make cpan2strada)
+CONVERTER_BINS = perl2strada tools/xs2strada tools/cpan2strada
+
+tools: $(TOOL_BINS)
+	@echo ""
+	@echo "✓ Tools built in tools/"
+
+tools/stradadoc: tools/stradadoc.strada stradac
+	@echo "Building stradadoc..."
+	@./strada tools/stradadoc.strada -o tools/stradadoc
+
+tools/strada-soinfo: tools/strada-soinfo.strada stradac
+	@echo "Building strada-soinfo..."
+	@./strada tools/strada-soinfo.strada -o tools/strada-soinfo
+
+tools/strada-md2man: tools/strada-md2man.strada stradac
+	@echo "Building strada-md2man..."
+	@./strada tools/strada-md2man.strada -o tools/strada-md2man
+
+tools/strada-md2html: tools/strada-md2html.strada stradac
+	@echo "Building strada-md2html..."
+	@./strada tools/strada-md2html.strada -o tools/strada-md2html
+
+tools/strada-jit: tools/strada-jit.strada stradac $(RUNTIME_TCC_OBJ)
+	@echo "Building strada-jit..."
+	@./strada tools/strada-jit.strada -o tools/strada-jit -l readline
+
+tools/stradapp: tools/stradapp.strada stradac
+	@echo "Building stradapp (preprocessor)..."
+	@./strada tools/stradapp.strada -o tools/stradapp
+
+P2S_DIR = tools/perl2strada
+P2S_SRCS = $(P2S_DIR)/Helpers.strada $(P2S_DIR)/XS.strada $(P2S_DIR)/Pass1.strada $(P2S_DIR)/Pass2.strada $(P2S_DIR)/Pass2b.strada $(P2S_DIR)/Pass2c.strada $(P2S_DIR)/Pass2d.strada $(P2S_DIR)/StringConvert.strada $(P2S_DIR)/Pass2e.strada $(P2S_DIR)/ConvertLine.strada $(P2S_DIR)/Main.strada
+
+$(P2S_DIR)/Combined.strada: $(P2S_SRCS)
+	@cat $(P2S_DIR)/Helpers.strada $(P2S_DIR)/XS.strada $(P2S_DIR)/Pass1.strada $(P2S_DIR)/Pass2.strada $(P2S_DIR)/Pass2b.strada $(P2S_DIR)/Pass2c.strada $(P2S_DIR)/Pass2d.strada $(P2S_DIR)/StringConvert.strada $(P2S_DIR)/Pass2e.strada $(P2S_DIR)/ConvertLine.strada > $(P2S_DIR)/Combined.strada
+	@grep -v '^use lib\|^use Helpers\|^use XS\|^use Pass\|^use String\|^use Convert' $(P2S_DIR)/Main.strada >> $(P2S_DIR)/Combined.strada
+
+perl2strada: $(P2S_DIR)/Combined.strada stradac
+	@echo "Building perl2strada (Perl to Strada converter)..."
+	@./strada $(P2S_DIR)/Combined.strada -o perl2strada
+
+tools/xs2strada: tools/xs2strada.strada stradac
+	@echo "Building xs2strada (XS to Strada converter)..."
+	@./strada tools/xs2strada.strada -o tools/xs2strada
+
+tools/strada-proftext: tools/strada-proftext.strada stradac
+	@echo "Building strada-proftext (profile text report)..."
+	@./strada tools/strada-proftext.strada -o tools/strada-proftext
+
+tools/strada-profhtml: tools/strada-profhtml.strada stradac
+	@echo "Building strada-profhtml (profile HTML report)..."
+	@./strada tools/strada-profhtml.strada -o tools/strada-profhtml
+
+tools/cpan2strada: tools/cpan2strada.strada stradac perl2strada tools/xs2strada
+	@echo "Building cpan2strada (CPAN dist to Strada converter)..."
+	@./strada tools/cpan2strada.strada -o tools/cpan2strada
+
+# Converter tools (not built by default)
+perl2strada: tools/perl2strada
+xs2strada: tools/xs2strada
+cpan2strada: tools/cpan2strada
+
+# =============================================================================
+# Library Targets
+# =============================================================================
+# Build shared libraries with detected dependencies from ./configure
+# Run ./configure first to generate config.mk with proper flags
+
+# Check if configure has been run
+configure-check:
+	@if [ ! -f config.mk ]; then \
+	    echo ""; \
+	    echo "Warning: config.mk not found. Run ./configure first for optimal builds."; \
+	    echo "Using default settings (SQLite only for DBI)."; \
+	    echo ""; \
+	fi
+
+# Build all libraries.
+# Libraries are now compiled as module-only object files (.o) via `strada -M`
+# rather than shared libraries (.so). Programs that `use` one of these libs
+# auto-detect the sibling .o and statically link it. Note: extern-C link
+# dependencies (e.g. -lmysqlclient for DBI, -lreadline for readline) are
+# NOT recorded in the .o — the using program must pass them via -l at its
+# own final link.
+libs: configure-check lib-dbi lib-crypt lib-ssl lib-readline lib-eval
+	@echo ""
+	@echo "✓ Libraries built in lib/ (as .o; programs that say 'use Foo;' auto-detect the sibling .o)"
+
+# DBI library (database interface)
+lib/DBI.o: lib/DBI.strada stradac configure-check
+	@echo "Building DBI library..."
+	@if [ "$(HAVE_MYSQL)" = "1" ] || [ "$(HAVE_POSTGRES)" = "1" ] || [ "$(HAVE_SQLITE)" = "1" ]; then \
+	    ./strada -M $(DBI_DEFINES) lib/DBI.strada; \
+	else \
+	    echo "  No database drivers detected. Run ./configure."; \
+	    exit 1; \
+	fi
+	@echo "  DBI drivers: MySQL=$(HAVE_MYSQL) SQLite=$(HAVE_SQLITE) PostgreSQL=$(HAVE_POSTGRES)"
+
+lib-dbi: lib/DBI.o
+
+# Crypt library (password hashing)
+CRYPT_DEFINES =
+ifeq ($(HAVE_CRYPT_R),1)
+CRYPT_DEFINES = -DHAVE_CRYPT_R
+endif
+
+lib/crypt.o: lib/crypt.strada stradac
+	@echo "Building crypt library..."
+	./strada -M $(CRYPT_DEFINES) lib/crypt.strada
+
+lib-crypt: lib/crypt.o
+
+# Eval library (string eval via tree-walking interpreter)
+lib/Eval.strada: compiler/AST.strada compiler/Lexer.strada interpreter/Stubs.strada compiler/Parser.strada lib/Strada/Interpreter.strada lib/Strada/Eval.strada
+	@echo "Generating Eval module (use Eval)..."
+	@cat compiler/AST.strada compiler/Lexer.strada interpreter/Stubs.strada compiler/Parser.strada lib/Strada/Interpreter.strada lib/Strada/Eval.strada | sed '/^=head/,/^=cut/d' > lib/Eval.strada
+
+lib/Eval.o: lib/Eval.strada stradac
+	@echo "Building Eval library (string eval)..."
+	./strada -M lib/Eval.strada
+
+lib-eval: lib/Eval.o
+
+# SSL library
+lib/ssl.o: lib/ssl.strada stradac
+	@echo "Building SSL library..."
+	./strada -M lib/ssl.strada
+
+lib-ssl: lib/ssl.o
+
+# Readline library
+lib/readline/readline.o: lib/readline/readline.strada stradac
+	@echo "Building readline library..."
+	./strada -M lib/readline/readline.strada
+
+lib-readline: lib/readline/readline.o
+
+# =============================================================================
+# Installation
+# =============================================================================
+
+# Install to a directory (default: /usr/local)
+# Usage: make install PREFIX=/path/to/install
+# Expand ~ to $(HOME) so paths work in installed scripts
+PREFIX_ABS = $(subst ~,$(HOME),$(PREFIX))
+INSTALL_BIN = $(PREFIX_ABS)/bin
+INSTALL_LIB = $(PREFIX_ABS)/lib/strada
+INSTALL_DOC = $(PREFIX_ABS)/share/doc/strada
+INSTALL_MAN = $(PREFIX_ABS)/share/man/man1
+
+install: stradac $(RUNTIME_OBJ) libs
+	@echo "=== Installing Strada to $(PREFIX) ==="
+	@mkdir -p $(INSTALL_BIN)
+	@mkdir -p $(INSTALL_LIB)/runtime
+	@mkdir -p $(INSTALL_LIB)/lib
+	@mkdir -p $(INSTALL_DOC)
+	@mkdir -p $(INSTALL_MAN)
+	@# Install the compiler
+	install -m 755 stradac $(INSTALL_BIN)/stradac
+	@# Install the wrapper script (modified for installed paths)
+	@# Use LIB_PATHS_LOW so installed libs have lowest precedence (project libs can override)
+	@sed -e 's|SCRIPT_DIR=.*|SCRIPT_DIR="$(INSTALL_LIB)"|' \
+	     -e 's|STRADAC=.*|STRADAC="$(INSTALL_BIN)/stradac"|' \
+	     -e 's|REPL_DIR=.*|REPL_DIR="$(INSTALL_BIN)"|' \
+	     -e 's|LIB_PATHS_LOW=()|LIB_PATHS_LOW=("$(INSTALL_LIB)/lib")|' \
+	     strada > $(INSTALL_BIN)/strada
+	@chmod 755 $(INSTALL_BIN)/strada
+	@# Install config.sh (generated by ./configure, needed for PCRE2 and other library flags)
+	@if [ -f config.sh ]; then \
+	    install -m 644 config.sh $(INSTALL_LIB)/config.sh; \
+	fi
+	@# Install runtime files
+	install -m 644 runtime/strada_runtime.c $(INSTALL_LIB)/runtime/
+	install -m 644 runtime/strada_runtime.h $(INSTALL_LIB)/runtime/
+	install -m 644 runtime/strada_runtime.o $(INSTALL_LIB)/runtime/
+	@# Auxiliary headers #include'd by strada_runtime.c — required to compile
+	@# strada_runtime.c from the install (e.g. by perla's runtime archive / TCC path).
+	@for h in runtime/*.h; do install -m 644 "$$h" $(INSTALL_LIB)/runtime/; done
+	@# Install bundled PCRE2 (static library + header for runtime compilation)
+	@if [ -f vendor/pcre2/libpcre2-8.a ]; then \
+	    echo "Installing bundled PCRE2..."; \
+	    mkdir -p $(INSTALL_LIB)/vendor/pcre2/src; \
+	    install -m 644 vendor/pcre2/libpcre2-8.a $(INSTALL_LIB)/vendor/pcre2/; \
+	    install -m 644 vendor/pcre2/src/pcre2.h $(INSTALL_LIB)/vendor/pcre2/src/; \
+	fi
+	@# Install standard library (Strada modules and shared libraries)
+	@echo "Installing standard library..."
+	@if [ -d lib ]; then \
+	    for ext in strada so o a c h; do \
+	        find lib -name "*.$$ext" | while read f; do \
+	            dir=$$(dirname "$$f" | sed 's|^lib|$(INSTALL_LIB)/lib|'); \
+	            mkdir -p "$$dir"; \
+	            if [ "$$ext" = "so" ]; then \
+	                install -m 755 "$$f" "$$dir/"; \
+	            else \
+	                install -m 644 "$$f" "$$dir/"; \
+	            fi; \
+	        done; \
+	    done; \
+	    find lib -name "Makefile" | while read f; do \
+	        dir=$$(dirname "$$f" | sed 's|^lib|$(INSTALL_LIB)/lib|'); \
+	        mkdir -p "$$dir"; \
+	        install -m 644 "$$f" "$$dir/"; \
+	    done; \
+	fi
+	@# Install documentation
+	@echo "Installing documentation..."
+	@if [ -d docs ]; then \
+	    find docs -name "*.md" | while read f; do \
+	        install -m 644 "$$f" $(INSTALL_DOC)/; \
+	    done; \
+	fi
+	@# Build and install tools (converters excluded — use make install-perl2strada)
+	@echo "Installing tools..."
+	@for tool in stradadoc strada-soinfo strada-md2man strada-md2html strada-jit stradapp strada-proftext strada-profhtml; do \
+	    if [ ! -x tools/$$tool ]; then \
+	        echo "  Building $$tool..."; \
+	        ./strada tools/$$tool.strada -o tools/$$tool 2>/dev/null || true; \
+	    fi; \
+	    if [ -x tools/$$tool ]; then \
+	        install -m 755 tools/$$tool $(INSTALL_BIN)/$$tool; \
+	    fi; \
+	done
+	@# Also install stradapp to lib dir (strada wrapper looks for it there)
+	@if [ -x tools/stradapp ]; then \
+	    install -m 755 tools/stradapp $(INSTALL_LIB)/stradapp; \
+	fi
+	@# Install the interpreter only if it's already built (no longer built
+	@# by default — run `make interpreter` to opt in). strada --repl and
+	@# strada --script now go through strada-jit.
+	@if [ -x interpreter/strada-interp ]; then \
+	    echo "Installing interpreter (strada-interp)..."; \
+	    install -m 755 interpreter/strada-interp $(INSTALL_BIN)/strada-interp; \
+	fi
+	@# Install TCC runtime for REPL
+	@if [ -f $(RUNTIME_TCC_OBJ) ]; then \
+	    install -m 644 $(RUNTIME_TCC_OBJ) $(INSTALL_LIB)/runtime/; \
+	fi
+	@if [ -f $(RUNTIME_DIR)/strada_runtime_tcc.h ]; then \
+	    install -m 644 $(RUNTIME_DIR)/strada_runtime_tcc.h $(INSTALL_LIB)/runtime/; \
+	fi
+	@# Build and install man pages
+	@echo "Installing man pages..."
+	@if [ -x tools/strada-md2man ]; then \
+	    for manmd in docs/stradac.1.md docs/strada.1.md; do \
+	        if [ -f "$$manmd" ]; then \
+	            name=$$(basename "$$manmd" .1.md); \
+	            echo "  Generating $$name.1..."; \
+	            ./tools/strada-md2man --name "$$name" --section 1 --center "Strada Programming Language" "$$manmd" $(INSTALL_MAN)/$$name.1; \
+	        fi; \
+	    done; \
+	else \
+	    echo "  Warning: strada-md2man not available, skipping man pages"; \
+	fi
+	@echo ""
+	@echo "✓ Strada installed to $(PREFIX)"
+	@echo "  Compiler: $(INSTALL_BIN)/stradac"
+	@echo "  Wrapper:  $(INSTALL_BIN)/strada"
+	@if [ -x interpreter/strada-interp ]; then \
+	    echo "  Interp:   $(INSTALL_BIN)/strada-interp (built explicitly via 'make interpreter')"; \
+	fi
+	@echo "  Tools:    $(INSTALL_BIN)/stradadoc, strada-soinfo, strada-md2man, strada-md2html, strada-jit"
+	@echo "  Runtime:  $(INSTALL_LIB)/runtime/"
+	@echo "  Library:  $(INSTALL_LIB)/lib/"
+	@echo "  Docs:     $(INSTALL_DOC)/"
+	@echo "  Man:      $(INSTALL_MAN)/"
+	@echo ""
+	@echo "Make sure $(INSTALL_BIN) is in your PATH"
+
+install-perl2strada: tools/perl2strada
+	@echo "Installing perl2strada..."
+	@mkdir -p $(INSTALL_BIN)
+	install -m 755 perl2strada $(INSTALL_BIN)/perl2strada
+	@echo "✓ perl2strada installed to $(INSTALL_BIN)/perl2strada"
+
+install-cpan2strada: tools/cpan2strada
+	@echo "Installing cpan2strada..."
+	@mkdir -p $(INSTALL_BIN)
+	install -m 755 tools/cpan2strada $(INSTALL_BIN)/cpan2strada
+	@echo "✓ cpan2strada installed to $(INSTALL_BIN)/cpan2strada"
+
+uninstall:
+	@echo "=== Uninstalling Strada from $(PREFIX) ==="
+	rm -f $(INSTALL_BIN)/stradac
+	rm -f $(INSTALL_BIN)/strada
+	rm -f $(INSTALL_BIN)/stradadoc
+	rm -f $(INSTALL_BIN)/strada-soinfo
+	rm -f $(INSTALL_BIN)/strada-md2man
+	rm -f $(INSTALL_BIN)/strada-md2html
+	rm -f $(INSTALL_BIN)/strada-jit
+	rm -f $(INSTALL_BIN)/strada-proftext
+	rm -f $(INSTALL_BIN)/strada-profhtml
+	rm -f $(INSTALL_BIN)/strada-interp
+	rm -f $(INSTALL_BIN)/perl2strada
+	rm -f $(INSTALL_BIN)/cpan2strada
+	rm -rf $(INSTALL_LIB)
+	rm -rf $(INSTALL_DOC)
+	rm -f $(INSTALL_MAN)/stradac.1
+	rm -f $(INSTALL_MAN)/strada.1
+	@echo "✓ Strada uninstalled"
+
+# Clean build artifacts
+clean:
+	rm -f $(RUNTIME_DIR)/test_runtime
+	rm -f $(RUNTIME_OBJ)
+	rm -f $(RUNTIME_DIR)/_rt_base.o
+	rm -f $(RUNTIME_TCC_OBJ)
+	rm -f $(BOOTSTRAP_DIR)/*.o $(BOOTSTRAP_DIR)/stradac
+	rm -f $(COMPILER_DIR)/Combined.strada $(COMPILER_DIR)/Combined.c $(COMPILER_DIR)/Combined_stage1.c
+	rm -f $(COMPILER_DIR)/*.o
+	rm -f stradac_stage1
+	rm -f $(EXAMPLES_DIR)/*.c $(EXAMPLES_DIR)/*.o
+	rm -f $(EXAMPLES_DIR)/test_simple $(EXAMPLES_DIR)/test_*[!.strada]
+	find $(EXAMPLES_DIR) -maxdepth 1 -type f -perm -u+x -delete
+	rm -rf build/*
+	rm -f stradac
+	rm -f $(TOOL_BINS) $(CONVERTER_BINS)
+	rm -f lib/readline.so lib/readline/readline.o
+	rm -f lib/DBI.o lib/DBI.so lib/crypt.o lib/crypt.so
+	rm -f lib/ssl.o lib/ssl.so
+	rm -f lib/Eval.o lib/Eval.so lib/Eval.strada lib/Eval.so.strada
+	@if [ -f vendor/pcre2/Makefile ]; then $(MAKE) -C vendor/pcre2 clean; fi
+	@echo "✓ Cleaned"
+
+# Help target
+help:
+	@echo "Strada Language Build System"
+	@echo ""
+	@echo "Quick Start:"
+	@echo "  ./configure   - Detect dependencies (MySQL, PostgreSQL, SSL, etc.)"
+	@echo "  make          - Build compiler and tools"
+	@echo "  make libs     - Build shared libraries (DBI, crypt, ssl, readline)"
+	@echo "  make install  - Install to system"
+	@echo ""
+	@echo "Primary Targets:"
+	@echo "  all           - Build self-hosting compiler (default)"
+	@echo "  tools         - Build tools (stradadoc, strada-soinfo, etc.)"
+	@echo "  libs          - Build all shared libraries"
+	@echo "  install       - Install to system (default: /usr/local)"
+	@echo "  uninstall     - Remove installed files"
+	@echo "  run PROG=x    - Compile and run example with self-hosting compiler"
+	@echo "  examples      - Build all examples with self-hosting compiler"
+	@echo "  test          - Test the runtime system"
+	@echo "  test-all      - Run full test suite (runtime + selfhost + examples)"
+	@echo "  clean         - Remove all build artifacts"
+	@echo ""
+	@echo "Library Targets (run ./configure first):"
+	@echo "  libs          - Build all libraries"
+	@echo "  lib-dbi       - Build DBI library (MySQL/SQLite/PostgreSQL)"
+	@echo "  lib-crypt     - Build crypt library (password hashing)"
+	@echo "  lib-ssl       - Build SSL library (TLS support)"
+	@echo "  lib-readline  - Build readline library (line editing)"
+	@echo ""
+	@echo "Installation:"
+	@echo "  make install                    # Install to /usr/local"
+	@echo "  make install PREFIX=/opt/strada # Install to custom directory"
+	@echo "  make install PREFIX=~/.local    # Install to home directory"
+	@echo "  sudo make uninstall             # Remove installation"
+	@echo ""
+	@echo "Testing Targets:"
+	@echo "  test          - Test the runtime system"
+	@echo "  test-selfhost - Test self-compilation (stage 2)"
+	@echo "  test-examples - Test all examples compile and link"
+	@echo "  test-all      - Run all tests (runtime + selfhost + examples)"
+	@echo "  test-suite    - Run comprehensive test suite (82+ tests)"
+	@echo "                  Options: V=1 (verbose), TAP=1 (TAP format), FILTER=pattern"
+	@echo "  test-interp   - Run interpreter compatibility tests against compiler test suite"
+	@echo ""
+	@echo "Interpreter:"
+	@echo "  interpreter   - Build the tree-walking interpreter (interpreter/strada-interp)"
+	@echo ""
+	@echo "Development Targets:"
+	@echo "  bootstrap     - Build C bootstrap compiler"
+	@echo "  run-bootstrap - Compile example with bootstrap compiler"
+	@echo "  compiler      - Build self-hosting compiler"
+	@echo "  make DEV=1    - Fast-compile build at -O0, no LTO (slower binaries)"
+	@echo ""
+	@echo "Quick Start:"
+	@echo "  make                       # Build everything"
+	@echo "  ./strada -r hello.strada   # Compile and run a program"
+	@echo "  make run PROG=test_simple  # Compile and run an example"
+	@echo ""
+	@echo "Tools (after 'make tools'):"
+	@echo "  ./strada               - One-step compiler (strada -> executable)"
+	@echo "  ./stradac              - Strada to C compiler"
+	@echo "  tools/stradadoc        - View Strada documentation"
+	@echo "  tools/strada-soinfo    - Inspect Strada shared libraries"
+	@echo "  tools/strada-md2man    - Convert Markdown to man pages"
+	@echo "  tools/strada-md2html   - Convert Markdown to HTML"
+	@echo "  tools/strada-jit      - Interactive REPL (Read-Eval-Print Loop)"
+
+# Additional info
+info:
+	@echo "Strada Language - A Strongly-Typed, Self-Hosting Language"
+	@echo ""
+	@echo "Architecture:"
+	@echo "  1. Bootstrap Compiler (C)         -> bootstrap/stradac"
+	@echo "  2. Self-Hosting Compiler (Strada) -> ./stradac"
+	@echo ""
+	@echo "The self-hosting compiler is the PRIMARY compiler."
+	@echo "The bootstrap compiler is frozen and only used to build the self-hosting compiler."
+	@echo ""
+	@echo "Self-Hosting Compiler Source:"
+	@echo "  compiler/AST.strada     - AST node definitions"
+	@echo "  compiler/Lexer.strada   - Tokenizer"
+	@echo "  compiler/Parser.strada  - Parser"
+	@echo "  compiler/CodeGen.strada - C code generator"
+	@echo "  compiler/Main.strada    - Entry point"
+	@echo ""
+	@echo "Documentation:"
+	@echo "  docs/LANGUAGE_GUIDE.md        - Complete language tutorial"
+	@echo "  docs/QUICK_REFERENCE.md       - Syntax cheat sheet"
+	@echo "  docs/COMPILER_ARCHITECTURE.md - How the compiler works"
+	@echo "  docs/RUNTIME_API.md           - Runtime library reference"

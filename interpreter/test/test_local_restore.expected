@@ -1,0 +1,4 @@
+before x=10
+inner x=99
+outer x=99
+after x=10

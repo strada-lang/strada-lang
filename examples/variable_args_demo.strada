@@ -1,0 +1,172 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# variable_args_demo.strada - Demonstrate variable argument approaches
+
+# ===== Approach 1: Optional Parameters =====
+
+func log_message(str $msg, str $level = "INFO", str $module = "main") void {
+    say("[" . upper($level) . "] [" . $module . "] " . $msg);
+}
+
+func format_text(str $text, str $prefix = "", str $suffix = "!") str {
+    my str $result = $text;
+    
+    if ($prefix != "") {
+        $result = $prefix . " " . $result;
+    }
+    
+    $result = $result . $suffix;
+    
+    return $result;
+}
+
+func demo_optional() void {
+    say("=== Optional Parameters ===");
+    
+    # All parameters provided
+    log_message("Server started", "INFO", "server");
+    log_message("Warning detected", "WARN", "security");
+    
+    # Using defaults (pass strada_new_undef())
+    log_message("Processing", "DEBUG", strada_new_undef());
+    log_message("Complete", strada_new_undef(), strada_new_undef());
+    
+    say("");
+    say("Text formatting:");
+    say(format_text("Hello", ">>>", "<<<"));
+    say(format_text("World", strada_new_undef(), strada_new_undef()));
+    
+    say("");
+}
+
+# ===== Approach 2: Array-Based Variadic =====
+
+func process_list(scalar $items) void {
+    my int $count = size($items);
+    say("Processing " . $count . " items");
+}
+
+func count_args(scalar $args) int {
+    return size($args);
+}
+
+func demo_array_based() void {
+    say("=== Array-Based Variadic ===");
+    
+    # Different numbers of arguments via arrays
+    my scalar $small = split("a,b,c", ",");
+    my scalar $medium = split("1,2,3,4,5", ",");
+    my scalar $large = split("x,y,z,w,a,b,c,d,e,f", ",");
+    
+    process_list($small);
+    process_list($medium);
+    process_list($large);
+    
+    say("");
+    say("Argument counts:");
+    say("  Small: " . count_args($small) . " args");
+    say("  Medium: " . count_args($medium) . " args");
+    say("  Large: " . count_args($large) . " args");
+    
+    say("");
+}
+
+# ===== Approach 3: Configuration Hash =====
+
+func configure(str $name, scalar $options) void {
+    say("Configuration: " . $name);
+    
+    my str $host = hash_get($options, "host");
+    my str $port = hash_get($options, "port");
+    my str $mode = hash_get($options, "mode");
+    
+    if ($host != "") {
+        say("  Host: " . $host);
+    }
+    
+    if ($port != "") {
+        say("  Port: " . $port);
+    }
+    
+    if ($mode != "") {
+        say("  Mode: " . $mode);
+    }
+}
+
+func demo_hash_config() void {
+    say("=== Hash Configuration (Unlimited Named Args) ===");
+    
+    # Minimal configuration
+    my scalar $cfg1 = hash_new();
+    hash_set($cfg1, "host", "localhost");
+    hash_set($cfg1, "port", "8080");
+    configure("Service1", $cfg1);
+    
+    say("");
+    
+    # Full configuration
+    my scalar $cfg2 = hash_new();
+    hash_set($cfg2, "host", "api.example.com");
+    hash_set($cfg2, "port", "443");
+    hash_set($cfg2, "mode", "production");
+    hash_set($cfg2, "timeout", "60");
+    hash_set($cfg2, "retry", "3");
+    configure("Service2", $cfg2);
+    
+    say("");
+}
+
+# ===== Built-in Variadics =====
+
+func demo_builtin_variadics() void {
+    say("=== Built-in Variadic Functions ===");
+    
+    printf("Simple: %s\n", "Hello");
+    printf("Multiple: %s is %s\n", "Alice", "here");
+    
+    my str $msg1 = sprintf("Name: %s", "Bob");
+    my str $msg2 = sprintf("Score: %s points", "100");
+    
+    say("Sprintf results:");
+    say("  " . $msg1);
+    say("  " . $msg2);
+    
+    say("");
+}
+
+func main() int {
+    say("╔════════════════════════════════════════════╗");
+    say("║  Variable Arguments Demo                  ║");
+    say("╚════════════════════════════════════════════╝");
+    say("");
+    
+    demo_optional();
+    demo_array_based();
+    demo_hash_config();
+    demo_builtin_variadics();
+    
+    say("Summary:");
+    say("  1. Optional params - Fixed count with defaults");
+    say("  2. Array-based - Unlimited homogeneous args");
+    say("  3. Hash config - Unlimited named args");
+    say("  4. Built-in variadics - printf, sprintf, warn");
+    say("");
+    say("✓ All approaches demonstrated!");
+    
+    return 0;
+}

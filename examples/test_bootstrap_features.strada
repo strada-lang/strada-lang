@@ -1,0 +1,42 @@
+func main() int {
+    # === foreach ===
+    my array @nums = ();
+    push(@nums, 10);
+    push(@nums, 20);
+    push(@nums, 30);
+    my int $sum = 0;
+    foreach my scalar $n (@nums) {
+        $sum = $sum + $n;
+    }
+    if ($sum == 60) {
+        say("PASS: foreach");
+    } else {
+        say("FAIL: foreach sum = " . $sum);
+    }
+
+    # === scalar() ===
+    my int $len = scalar(@nums);
+    if ($len == 3) {
+        say("PASS: scalar(@arr) = 3");
+    } else {
+        say("FAIL: scalar(@arr) = " . $len);
+    }
+
+    # === exists() on deref hash ===
+    my hash %h = ();
+    $h{"name"} = "strada";
+    my scalar $ref = \%h;
+    if (exists($ref->{"name"})) {
+        say("PASS: exists on deref hash");
+    } else {
+        say("FAIL: exists on deref hash");
+    }
+    if (!exists($ref->{"missing"})) {
+        say("PASS: exists missing on deref hash");
+    } else {
+        say("FAIL: exists missing on deref hash");
+    }
+
+    say("Done.");
+    return 0;
+}

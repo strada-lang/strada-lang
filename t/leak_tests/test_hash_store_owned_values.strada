@@ -1,0 +1,86 @@
+# Regression test: storing an OWNED value into a persistent hash/hashref must
+# release the value's extra ref after the store (strada_hv_store* increfs for
+# shared ownership). The hash-store codegen decides this via the owned-value
+# predicate, which is now unified with needs_temp_cleanup. A previous
+# hand-maintained node-type list omitted several owned cases — our-variable
+# getters (strada_global_get increfs), scalar derefs ($$ref), and regex
+# captures — each of which leaked the store's extra ref. This guards the whole
+# class. Must run valgrind-clean.
+
+our str $g_str = "global string value";
+our int $g_int = 12345;
+
+package main;
+
+# our-variable into a hash (strada_global_get returns an owned ref).
+func test_our_var_into_hash() void {
+    my hash %h;
+    my int $i = 0;
+    while ($i < 500) {
+        $h{"s" . $i} = $g_str;
+        $h{"i" . $i} = $g_int;
+        $i++;
+    }
+    say("test_our_var_into_hash: PASS (size=" . scalar(keys(%h)) . ")");
+}
+
+# our-variable into a hashref.
+func test_our_var_into_hashref() void {
+    my scalar $ref = {};
+    my int $i = 0;
+    while ($i < 500) {
+        $ref->{"k" . $i} = $g_str;
+        $i++;
+    }
+    say("test_our_var_into_hashref: PASS (size=" . scalar(keys(%{$ref})) . ")");
+}
+
+# scalar deref ($$ref) into a hash (strada_deref increfs the target).
+func test_deref_scalar_into_hash() void {
+    my hash %h;
+    my int $i = 0;
+    while ($i < 500) {
+        my str $v = "val" . $i;
+        my scalar $r = \$v;
+        $h{"d" . $i} = $$r;
+        $i++;
+    }
+    say("test_deref_scalar_into_hash: PASS (size=" . scalar(keys(%h)) . ")");
+}
+
+# ternary (owned from either branch) into a hash.
+func test_ternary_into_hash() void {
+    my hash %h;
+    my int $i = 0;
+    while ($i < 500) {
+        $h{"t" . $i} = ($i % 2 == 0) ? ("even" . $i) : ("odd" . $i);
+        $i++;
+    }
+    say("test_ternary_into_hash: PASS (size=" . scalar(keys(%h)) . ")");
+}
+
+# Plain local variable into a hash must STILL be borrowed (no double-free):
+# guards against the unification over-decref'ing a borrowed value.
+func test_local_var_into_hash() void {
+    my hash %h;
+    my int $i = 0;
+    while ($i < 500) {
+        my str $local = "x" . $i;
+        $h{"L" . $i} = $local;   # $local still owns it; hash shares
+        $i++;
+    }
+    say("test_local_var_into_hash: PASS (size=" . scalar(keys(%h)) . ")");
+}
+
+func main() int {
+    my int $iter = 0;
+    while ($iter < 5) {
+        test_our_var_into_hash();
+        test_our_var_into_hashref();
+        test_deref_scalar_into_hash();
+        test_ternary_into_hash();
+        test_local_var_into_hash();
+        $iter++;
+    }
+    return 0;
+}

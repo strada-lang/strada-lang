@@ -1,0 +1,944 @@
+package DateTime;
+
+=head1 NAME
+
+DateTime - Date and time handling for Strada
+
+=head1 SYNOPSIS
+
+    use lib "lib";
+    use DateTime;
+
+    # Get current time
+    my scalar $now = DateTime::now();
+    say(DateTime::format($now, "%Y-%m-%d %H:%M:%S"));
+
+    # Parse a date string
+    my scalar $dt = DateTime::parse("2024-01-15 14:30:00", "%Y-%m-%d %H:%M:%S");
+
+    # Get components
+    say("Year: " . DateTime::year($dt));
+    say("Month: " . DateTime::month($dt));
+    say("Day: " . DateTime::day($dt));
+
+    # Date arithmetic
+    my scalar $tomorrow = DateTime::add_days($now, 1);
+    my scalar $next_week = DateTime::add_days($now, 7);
+    my scalar $next_hour = DateTime::add_hours($now, 1);
+
+    # Compare dates
+    if (DateTime::compare($dt1, $dt2) < 0) {
+        say("dt1 is before dt2");
+    }
+
+    # Get Unix timestamp
+    my int $epoch = DateTime::epoch($now);
+
+    # Create from Unix timestamp
+    my scalar $from_epoch = DateTime::from_epoch(1704067200);
+
+=head1 DESCRIPTION
+
+DateTime provides comprehensive date and time handling for Strada programs.
+Dates are represented as hash references containing year, month, day, hour,
+minute, second, and epoch fields.
+
+=head1 FUNCTIONS
+
+=head2 now()
+
+Returns the current local date/time.
+
+=head2 now_utc()
+
+Returns the current UTC date/time.
+
+=head2 from_epoch($timestamp)
+
+Creates a DateTime from a Unix timestamp.
+
+=head2 from_epoch_utc($timestamp)
+
+Creates a DateTime from a Unix timestamp in UTC.
+
+=head2 parse($string, $format)
+
+Parses a date string using strptime format.
+
+=head2 format($dt, $format)
+
+Formats a DateTime using strftime format.
+
+=head2 epoch($dt)
+
+Returns the Unix timestamp for a DateTime.
+
+=head2 year($dt), month($dt), day($dt), hour($dt), minute($dt), second($dt)
+
+Get individual components.
+
+=head2 day_of_week($dt)
+
+Returns day of week (0=Sunday, 6=Saturday).
+
+=head2 day_of_year($dt)
+
+Returns day of year (1-366).
+
+=head2 is_leap_year($year)
+
+Returns 1 if the year is a leap year.
+
+=head2 days_in_month($year, $month)
+
+Returns number of days in the given month.
+
+=head2 add_seconds($dt, $n), add_minutes($dt, $n), add_hours($dt, $n)
+
+Add time to a DateTime.
+
+=head2 add_days($dt, $n), add_weeks($dt, $n), add_months($dt, $n), add_years($dt, $n)
+
+Add calendar units to a DateTime.
+
+=head2 subtract_seconds($dt, $n), subtract_minutes($dt, $n), etc.
+
+Subtract time from a DateTime.
+
+=head2 diff_seconds($dt1, $dt2)
+
+Returns the difference in seconds between two DateTimes.
+
+=head2 diff_days($dt1, $dt2)
+
+Returns the difference in days between two DateTimes.
+
+=head2 compare($dt1, $dt2)
+
+Returns -1 if dt1 < dt2, 0 if equal, 1 if dt1 > dt2.
+
+=head2 is_before($dt1, $dt2), is_after($dt1, $dt2), is_equal($dt1, $dt2)
+
+Boolean comparison functions.
+
+=head2 start_of_day($dt), end_of_day($dt)
+
+Returns DateTime at start/end of day.
+
+=head2 start_of_month($dt), end_of_month($dt)
+
+Returns DateTime at start/end of month.
+
+=head2 iso8601($dt)
+
+Returns ISO 8601 formatted string.
+
+=head2 rfc2822($dt)
+
+Returns RFC 2822 formatted string (for email).
+
+=head2 relative($dt)
+
+Returns human-readable relative time (e.g., "2 hours ago").
+
+=cut
+
+__C__ {
+#include <time.h>
+#include <string.h>
+#include <stdlib.h>
+}
+
+# Create a DateTime hash from components
+func make(int $year, int $month, int $day, int $hour, int $minute, int $second) scalar {
+    my hash %dt = ();
+    $dt{"year"} = $year;
+    $dt{"month"} = $month;
+    $dt{"day"} = $day;
+    $dt{"hour"} = $hour;
+    $dt{"minute"} = $minute;
+    $dt{"second"} = $second;
+
+    # Calculate epoch
+    my int $epoch = 0;
+    __C__ {
+        struct tm tm_val = {0};
+        tm_val.tm_year = strada_to_int(year) - 1900;
+        tm_val.tm_mon = strada_to_int(month) - 1;
+        tm_val.tm_mday = strada_to_int(day);
+        tm_val.tm_hour = strada_to_int(hour);
+        tm_val.tm_min = strada_to_int(minute);
+        tm_val.tm_sec = strada_to_int(second);
+        tm_val.tm_isdst = -1;
+        time_t t = mktime(&tm_val);
+        strada_decref(epoch);
+        epoch = strada_new_int((int64_t)t);
+    }
+    $dt{"epoch"} = $epoch;
+
+    return \%dt;
+}
+
+# Get current local time
+func now() scalar {
+    my int $epoch = 0;
+    my int $year = 0;
+    my int $month = 0;
+    my int $day = 0;
+    my int $hour = 0;
+    my int $minute = 0;
+    my int $second = 0;
+
+    __C__ {
+        time_t t = time(NULL);
+        struct tm *tm_val = localtime(&t);
+
+        strada_decref(epoch);
+        epoch = strada_new_int((int64_t)t);
+        strada_decref(year);
+        year = strada_new_int(tm_val->tm_year + 1900);
+        strada_decref(month);
+        month = strada_new_int(tm_val->tm_mon + 1);
+        strada_decref(day);
+        day = strada_new_int(tm_val->tm_mday);
+        strada_decref(hour);
+        hour = strada_new_int(tm_val->tm_hour);
+        strada_decref(minute);
+        minute = strada_new_int(tm_val->tm_min);
+        strada_decref(second);
+        second = strada_new_int(tm_val->tm_sec);
+    }
+
+    my hash %dt = ();
+    $dt{"year"} = $year;
+    $dt{"month"} = $month;
+    $dt{"day"} = $day;
+    $dt{"hour"} = $hour;
+    $dt{"minute"} = $minute;
+    $dt{"second"} = $second;
+    $dt{"epoch"} = $epoch;
+
+    return \%dt;
+}
+
+# Get current UTC time
+func now_utc() scalar {
+    my int $epoch = 0;
+    my int $year = 0;
+    my int $month = 0;
+    my int $day = 0;
+    my int $hour = 0;
+    my int $minute = 0;
+    my int $second = 0;
+
+    __C__ {
+        time_t t = time(NULL);
+        struct tm *tm_val = gmtime(&t);
+
+        strada_decref(epoch);
+        epoch = strada_new_int((int64_t)t);
+        strada_decref(year);
+        year = strada_new_int(tm_val->tm_year + 1900);
+        strada_decref(month);
+        month = strada_new_int(tm_val->tm_mon + 1);
+        strada_decref(day);
+        day = strada_new_int(tm_val->tm_mday);
+        strada_decref(hour);
+        hour = strada_new_int(tm_val->tm_hour);
+        strada_decref(minute);
+        minute = strada_new_int(tm_val->tm_min);
+        strada_decref(second);
+        second = strada_new_int(tm_val->tm_sec);
+    }
+
+    my hash %dt = ();
+    $dt{"year"} = $year;
+    $dt{"month"} = $month;
+    $dt{"day"} = $day;
+    $dt{"hour"} = $hour;
+    $dt{"minute"} = $minute;
+    $dt{"second"} = $second;
+    $dt{"epoch"} = $epoch;
+    $dt{"utc"} = 1;
+
+    return \%dt;
+}
+
+# Create from Unix timestamp (local time)
+func from_epoch(int $timestamp) scalar {
+    my int $year = 0;
+    my int $month = 0;
+    my int $day = 0;
+    my int $hour = 0;
+    my int $minute = 0;
+    my int $second = 0;
+
+    __C__ {
+        time_t t = (time_t)strada_to_int(timestamp);
+        struct tm *tm_val = localtime(&t);
+
+        strada_decref(year);
+        year = strada_new_int(tm_val->tm_year + 1900);
+        strada_decref(month);
+        month = strada_new_int(tm_val->tm_mon + 1);
+        strada_decref(day);
+        day = strada_new_int(tm_val->tm_mday);
+        strada_decref(hour);
+        hour = strada_new_int(tm_val->tm_hour);
+        strada_decref(minute);
+        minute = strada_new_int(tm_val->tm_min);
+        strada_decref(second);
+        second = strada_new_int(tm_val->tm_sec);
+    }
+
+    my hash %dt = ();
+    $dt{"year"} = $year;
+    $dt{"month"} = $month;
+    $dt{"day"} = $day;
+    $dt{"hour"} = $hour;
+    $dt{"minute"} = $minute;
+    $dt{"second"} = $second;
+    $dt{"epoch"} = $timestamp;
+
+    return \%dt;
+}
+
+# Create from Unix timestamp (UTC)
+func from_epoch_utc(int $timestamp) scalar {
+    my int $year = 0;
+    my int $month = 0;
+    my int $day = 0;
+    my int $hour = 0;
+    my int $minute = 0;
+    my int $second = 0;
+
+    __C__ {
+        time_t t = (time_t)strada_to_int(timestamp);
+        struct tm *tm_val = gmtime(&t);
+
+        strada_decref(year);
+        year = strada_new_int(tm_val->tm_year + 1900);
+        strada_decref(month);
+        month = strada_new_int(tm_val->tm_mon + 1);
+        strada_decref(day);
+        day = strada_new_int(tm_val->tm_mday);
+        strada_decref(hour);
+        hour = strada_new_int(tm_val->tm_hour);
+        strada_decref(minute);
+        minute = strada_new_int(tm_val->tm_min);
+        strada_decref(second);
+        second = strada_new_int(tm_val->tm_sec);
+    }
+
+    my hash %dt = ();
+    $dt{"year"} = $year;
+    $dt{"month"} = $month;
+    $dt{"day"} = $day;
+    $dt{"hour"} = $hour;
+    $dt{"minute"} = $minute;
+    $dt{"second"} = $second;
+    $dt{"epoch"} = $timestamp;
+    $dt{"utc"} = 1;
+
+    return \%dt;
+}
+
+# Parse a date string
+func parse(str $input, str $fmt) scalar {
+    my int $year = 0;
+    my int $month = 0;
+    my int $day = 0;
+    my int $hour = 0;
+    my int $minute = 0;
+    my int $second = 0;
+    my int $success = 0;
+
+    __C__ {
+        char *input_str = strada_to_str(input);
+        char *fmt_str = strada_to_str(fmt);
+
+        struct tm tm_val = {0};
+        char *result = strptime(input_str, fmt_str, &tm_val);
+
+        if (result != NULL) {
+            strada_decref(success);
+            success = strada_new_int(1);
+            strada_decref(year);
+            year = strada_new_int(tm_val.tm_year + 1900);
+            strada_decref(month);
+            month = strada_new_int(tm_val.tm_mon + 1);
+            strada_decref(day);
+            day = strada_new_int(tm_val.tm_mday);
+            strada_decref(hour);
+            hour = strada_new_int(tm_val.tm_hour);
+            strada_decref(minute);
+            minute = strada_new_int(tm_val.tm_min);
+            strada_decref(second);
+            second = strada_new_int(tm_val.tm_sec);
+        }
+
+        free(input_str);
+        free(fmt_str);
+    }
+
+    if ($success == 0) {
+        return undef;
+    }
+
+    return DateTime::make($year, $month, $day, $hour, $minute, $second);
+}
+
+# Format a DateTime using strftime
+func format(scalar $dt, str $fmt) str {
+    if (!defined($dt)) {
+        return "";
+    }
+
+    my int $year = $dt->{"year"};
+    my int $month = $dt->{"month"};
+    my int $day = $dt->{"day"};
+    my int $hour = $dt->{"hour"};
+    my int $minute = $dt->{"minute"};
+    my int $second = $dt->{"second"};
+    my str $result = "";
+
+    __C__ {
+        char *fmt_str = strada_to_str(fmt);
+
+        struct tm tm_val = {0};
+        tm_val.tm_year = strada_to_int(year) - 1900;
+        tm_val.tm_mon = strada_to_int(month) - 1;
+        tm_val.tm_mday = strada_to_int(day);
+        tm_val.tm_hour = strada_to_int(hour);
+        tm_val.tm_min = strada_to_int(minute);
+        tm_val.tm_sec = strada_to_int(second);
+        tm_val.tm_isdst = -1;
+        mktime(&tm_val);  // Normalize and fill in wday, yday
+
+        char buf[256];
+        size_t len = strftime(buf, sizeof(buf), fmt_str, &tm_val);
+
+        strada_decref(result);
+        if (len > 0) {
+            result = strada_new_str(buf);
+        } else {
+            result = strada_new_str("");
+        }
+
+        free(fmt_str);
+    }
+
+    return $result;
+}
+
+# Get Unix timestamp
+func epoch(scalar $dt) int {
+    if (!defined($dt)) {
+        return 0;
+    }
+    return $dt->{"epoch"};
+}
+
+# Component accessors
+func year(scalar $dt) int {
+    if (!defined($dt)) { return 0; }
+    return $dt->{"year"};
+}
+
+func month(scalar $dt) int {
+    if (!defined($dt)) { return 0; }
+    return $dt->{"month"};
+}
+
+func day(scalar $dt) int {
+    if (!defined($dt)) { return 0; }
+    return $dt->{"day"};
+}
+
+func hour(scalar $dt) int {
+    if (!defined($dt)) { return 0; }
+    return $dt->{"hour"};
+}
+
+func minute(scalar $dt) int {
+    if (!defined($dt)) { return 0; }
+    return $dt->{"minute"};
+}
+
+func second(scalar $dt) int {
+    if (!defined($dt)) { return 0; }
+    return $dt->{"second"};
+}
+
+# Day of week (0=Sunday, 6=Saturday)
+func day_of_week(scalar $dt) int {
+    if (!defined($dt)) { return 0; }
+
+    my int $year = $dt->{"year"};
+    my int $month = $dt->{"month"};
+    my int $day = $dt->{"day"};
+    my int $wday = 0;
+
+    __C__ {
+        struct tm tm_val = {0};
+        tm_val.tm_year = strada_to_int(year) - 1900;
+        tm_val.tm_mon = strada_to_int(month) - 1;
+        tm_val.tm_mday = strada_to_int(day);
+        tm_val.tm_isdst = -1;
+        mktime(&tm_val);
+
+        strada_decref(wday);
+        wday = strada_new_int(tm_val.tm_wday);
+    }
+
+    return $wday;
+}
+
+# Day of year (1-366)
+func day_of_year(scalar $dt) int {
+    if (!defined($dt)) { return 0; }
+
+    my int $year = $dt->{"year"};
+    my int $month = $dt->{"month"};
+    my int $day = $dt->{"day"};
+    my int $yday = 0;
+
+    __C__ {
+        struct tm tm_val = {0};
+        tm_val.tm_year = strada_to_int(year) - 1900;
+        tm_val.tm_mon = strada_to_int(month) - 1;
+        tm_val.tm_mday = strada_to_int(day);
+        tm_val.tm_isdst = -1;
+        mktime(&tm_val);
+
+        strada_decref(yday);
+        yday = strada_new_int(tm_val.tm_yday + 1);
+    }
+
+    return $yday;
+}
+
+# Week of year (ISO week number)
+func week_of_year(scalar $dt) int {
+    if (!defined($dt)) { return 0; }
+    return (DateTime::day_of_year($dt) - 1) / 7 + 1;
+}
+
+# Check if leap year
+func is_leap_year(int $year) int {
+    if ($year % 400 == 0) {
+        return 1;
+    }
+    if ($year % 100 == 0) {
+        return 0;
+    }
+    if ($year % 4 == 0) {
+        return 1;
+    }
+    return 0;
+}
+
+# Days in month
+func days_in_month(int $year, int $month) int {
+    if ($month == 2) {
+        if (DateTime::is_leap_year($year) == 1) {
+            return 29;
+        }
+        return 28;
+    }
+    if ($month == 4 || $month == 6 || $month == 9 || $month == 11) {
+        return 30;
+    }
+    return 31;
+}
+
+# Add seconds
+func add_seconds(scalar $dt, int $n) scalar {
+    if (!defined($dt)) { return undef; }
+    my int $new_epoch = $dt->{"epoch"} + $n;
+    return DateTime::from_epoch($new_epoch);
+}
+
+# Subtract seconds
+func subtract_seconds(scalar $dt, int $n) scalar {
+    return DateTime::add_seconds($dt, 0 - $n);
+}
+
+# Add minutes
+func add_minutes(scalar $dt, int $n) scalar {
+    return DateTime::add_seconds($dt, $n * 60);
+}
+
+# Subtract minutes
+func subtract_minutes(scalar $dt, int $n) scalar {
+    return DateTime::add_minutes($dt, 0 - $n);
+}
+
+# Add hours
+func add_hours(scalar $dt, int $n) scalar {
+    return DateTime::add_seconds($dt, $n * 3600);
+}
+
+# Subtract hours
+func subtract_hours(scalar $dt, int $n) scalar {
+    return DateTime::add_hours($dt, 0 - $n);
+}
+
+# Add days
+func add_days(scalar $dt, int $n) scalar {
+    return DateTime::add_seconds($dt, $n * 86400);
+}
+
+# Subtract days
+func subtract_days(scalar $dt, int $n) scalar {
+    return DateTime::add_days($dt, 0 - $n);
+}
+
+# Add weeks
+func add_weeks(scalar $dt, int $n) scalar {
+    return DateTime::add_days($dt, $n * 7);
+}
+
+# Subtract weeks
+func subtract_weeks(scalar $dt, int $n) scalar {
+    return DateTime::add_weeks($dt, 0 - $n);
+}
+
+# Add months (handles variable month lengths)
+func add_months(scalar $dt, int $n) scalar {
+    if (!defined($dt)) { return undef; }
+
+    my int $year = $dt->{"year"};
+    my int $month = $dt->{"month"} + $n;
+    my int $day = $dt->{"day"};
+    my int $hour = $dt->{"hour"};
+    my int $minute = $dt->{"minute"};
+    my int $second = $dt->{"second"};
+
+    # Handle month overflow/underflow
+    while ($month > 12) {
+        $month = $month - 12;
+        $year = $year + 1;
+    }
+    while ($month < 1) {
+        $month = $month + 12;
+        $year = $year - 1;
+    }
+
+    # Clamp day to valid range for new month
+    my int $max_day = DateTime::days_in_month($year, $month);
+    if ($day > $max_day) {
+        $day = $max_day;
+    }
+
+    return DateTime::make($year, $month, $day, $hour, $minute, $second);
+}
+
+# Subtract months
+func subtract_months(scalar $dt, int $n) scalar {
+    return DateTime::add_months($dt, 0 - $n);
+}
+
+# Add years
+func add_years(scalar $dt, int $n) scalar {
+    if (!defined($dt)) { return undef; }
+
+    my int $year = $dt->{"year"} + $n;
+    my int $month = $dt->{"month"};
+    my int $day = $dt->{"day"};
+    my int $hour = $dt->{"hour"};
+    my int $minute = $dt->{"minute"};
+    my int $second = $dt->{"second"};
+
+    # Handle Feb 29 -> Feb 28 for non-leap years
+    if ($month == 2 && $day == 29) {
+        if (DateTime::is_leap_year($year) == 0) {
+            $day = 28;
+        }
+    }
+
+    return DateTime::make($year, $month, $day, $hour, $minute, $second);
+}
+
+# Subtract years
+func subtract_years(scalar $dt, int $n) scalar {
+    return DateTime::add_years($dt, 0 - $n);
+}
+
+# Difference in seconds
+func diff_seconds(scalar $dt1, scalar $dt2) int {
+    if (!defined($dt1) || !defined($dt2)) { return 0; }
+    return $dt1->{"epoch"} - $dt2->{"epoch"};
+}
+
+# Difference in days (rounded down)
+func diff_days(scalar $dt1, scalar $dt2) int {
+    my int $secs = DateTime::diff_seconds($dt1, $dt2);
+    if ($secs < 0) {
+        $secs = 0 - $secs;
+    }
+    return $secs / 86400;
+}
+
+# Compare two DateTimes: -1 if dt1 < dt2, 0 if equal, 1 if dt1 > dt2
+func compare(scalar $dt1, scalar $dt2) int {
+    if (!defined($dt1) || !defined($dt2)) { return 0; }
+
+    my int $e1 = $dt1->{"epoch"};
+    my int $e2 = $dt2->{"epoch"};
+
+    if ($e1 < $e2) { return -1; }
+    if ($e1 > $e2) { return 1; }
+    return 0;
+}
+
+# Boolean comparisons
+func is_before(scalar $dt1, scalar $dt2) int {
+    return DateTime::compare($dt1, $dt2) < 0;
+}
+
+func is_after(scalar $dt1, scalar $dt2) int {
+    return DateTime::compare($dt1, $dt2) > 0;
+}
+
+func is_equal(scalar $dt1, scalar $dt2) int {
+    return DateTime::compare($dt1, $dt2) == 0;
+}
+
+# Start of day (midnight)
+func start_of_day(scalar $dt) scalar {
+    if (!defined($dt)) { return undef; }
+    return DateTime::make($dt->{"year"}, $dt->{"month"}, $dt->{"day"}, 0, 0, 0);
+}
+
+# End of day (23:59:59)
+func end_of_day(scalar $dt) scalar {
+    if (!defined($dt)) { return undef; }
+    return DateTime::make($dt->{"year"}, $dt->{"month"}, $dt->{"day"}, 23, 59, 59);
+}
+
+# Start of month
+func start_of_month(scalar $dt) scalar {
+    if (!defined($dt)) { return undef; }
+    return DateTime::make($dt->{"year"}, $dt->{"month"}, 1, 0, 0, 0);
+}
+
+# End of month
+func end_of_month(scalar $dt) scalar {
+    if (!defined($dt)) { return undef; }
+    my int $last_day = DateTime::days_in_month($dt->{"year"}, $dt->{"month"});
+    return DateTime::make($dt->{"year"}, $dt->{"month"}, $last_day, 23, 59, 59);
+}
+
+# Start of year
+func start_of_year(scalar $dt) scalar {
+    if (!defined($dt)) { return undef; }
+    return DateTime::make($dt->{"year"}, 1, 1, 0, 0, 0);
+}
+
+# End of year
+func end_of_year(scalar $dt) scalar {
+    if (!defined($dt)) { return undef; }
+    return DateTime::make($dt->{"year"}, 12, 31, 23, 59, 59);
+}
+
+# ISO 8601 format (2024-01-15T14:30:00)
+func iso8601(scalar $dt) str {
+    return DateTime::format($dt, "%Y-%m-%dT%H:%M:%S");
+}
+
+# RFC 2822 format (Mon, 15 Jan 2024 14:30:00 +0000)
+func rfc2822(scalar $dt) str {
+    return DateTime::format($dt, "%a, %d %b %Y %H:%M:%S %z");
+}
+
+# SQL datetime format
+func sql(scalar $dt) str {
+    return DateTime::format($dt, "%Y-%m-%d %H:%M:%S");
+}
+
+# Date only (2024-01-15)
+func date_only(scalar $dt) str {
+    return DateTime::format($dt, "%Y-%m-%d");
+}
+
+# Time only (14:30:00)
+func time_only(scalar $dt) str {
+    return DateTime::format($dt, "%H:%M:%S");
+}
+
+# Human-readable relative time
+func relative(scalar $dt) str {
+    if (!defined($dt)) { return ""; }
+
+    my scalar $now = DateTime::now();
+    my int $diff = DateTime::diff_seconds($now, $dt);
+    my int $abs_diff = $diff;
+    if ($abs_diff < 0) {
+        $abs_diff = 0 - $abs_diff;
+    }
+
+    my str $suffix = " ago";
+    if ($diff < 0) {
+        $suffix = " from now";
+    }
+
+    # Less than a minute
+    if ($abs_diff < 60) {
+        if ($abs_diff == 1) {
+            return "1 second" . $suffix;
+        }
+        return $abs_diff . " seconds" . $suffix;
+    }
+
+    # Less than an hour
+    if ($abs_diff < 3600) {
+        my int $mins = $abs_diff / 60;
+        if ($mins == 1) {
+            return "1 minute" . $suffix;
+        }
+        return $mins . " minutes" . $suffix;
+    }
+
+    # Less than a day
+    if ($abs_diff < 86400) {
+        my int $hours = $abs_diff / 3600;
+        if ($hours == 1) {
+            return "1 hour" . $suffix;
+        }
+        return $hours . " hours" . $suffix;
+    }
+
+    # Less than a week
+    if ($abs_diff < 604800) {
+        my int $days = $abs_diff / 86400;
+        if ($days == 1) {
+            return "1 day" . $suffix;
+        }
+        return $days . " days" . $suffix;
+    }
+
+    # Less than a month (approx)
+    if ($abs_diff < 2592000) {
+        my int $weeks = $abs_diff / 604800;
+        if ($weeks == 1) {
+            return "1 week" . $suffix;
+        }
+        return $weeks . " weeks" . $suffix;
+    }
+
+    # Less than a year (approx)
+    if ($abs_diff < 31536000) {
+        my int $months = $abs_diff / 2592000;
+        if ($months == 1) {
+            return "1 month" . $suffix;
+        }
+        return $months . " months" . $suffix;
+    }
+
+    # Years
+    my int $years = $abs_diff / 31536000;
+    if ($years == 1) {
+        return "1 year" . $suffix;
+    }
+    return $years . " years" . $suffix;
+}
+
+# Day name (Monday, Tuesday, etc.)
+func day_name(scalar $dt) str {
+    return DateTime::format($dt, "%A");
+}
+
+# Short day name (Mon, Tue, etc.)
+func day_name_short(scalar $dt) str {
+    return DateTime::format($dt, "%a");
+}
+
+# Month name (January, February, etc.)
+func month_name(scalar $dt) str {
+    return DateTime::format($dt, "%B");
+}
+
+# Short month name (Jan, Feb, etc.)
+func month_name_short(scalar $dt) str {
+    return DateTime::format($dt, "%b");
+}
+
+# Check if a date is today
+func is_today(scalar $dt) int {
+    if (!defined($dt)) { return 0; }
+    my scalar $today = DateTime::now();
+    return $dt->{"year"} == $today->{"year"} &&
+           $dt->{"month"} == $today->{"month"} &&
+           $dt->{"day"} == $today->{"day"};
+}
+
+# Check if a date is tomorrow
+func is_tomorrow(scalar $dt) int {
+    if (!defined($dt)) { return 0; }
+    my scalar $tomorrow = DateTime::add_days(DateTime::now(), 1);
+    return $dt->{"year"} == $tomorrow->{"year"} &&
+           $dt->{"month"} == $tomorrow->{"month"} &&
+           $dt->{"day"} == $tomorrow->{"day"};
+}
+
+# Check if a date is yesterday
+func is_yesterday(scalar $dt) int {
+    if (!defined($dt)) { return 0; }
+    my scalar $yesterday = DateTime::subtract_days(DateTime::now(), 1);
+    return $dt->{"year"} == $yesterday->{"year"} &&
+           $dt->{"month"} == $yesterday->{"month"} &&
+           $dt->{"day"} == $yesterday->{"day"};
+}
+
+# Check if a date falls on a weekend
+func is_weekend(scalar $dt) int {
+    my int $dow = DateTime::day_of_week($dt);
+    return $dow == 0 || $dow == 6;
+}
+
+# Check if a date falls on a weekday
+func is_weekday(scalar $dt) int {
+    return DateTime::is_weekend($dt) == 0;
+}
+
+# Get timezone offset in seconds
+func timezone_offset() int {
+    my int $offset = 0;
+    __C__ {
+        time_t t = time(NULL);
+        struct tm *local_tm = localtime(&t);
+        time_t local_t = mktime(local_tm);
+        struct tm *gm_tm = gmtime(&t);
+        time_t gm_t = mktime(gm_tm);
+        strada_decref(offset);
+        offset = strada_new_int((int64_t)(local_t - gm_t));
+    }
+    return $offset;
+}
+
+# Get timezone name
+func timezone_name() str {
+    my str $name = "";
+    __C__ {
+        time_t t = time(NULL);
+        struct tm *tm_val = localtime(&t);
+        char buf[64];
+        strftime(buf, sizeof(buf), "%Z", tm_val);
+        strada_decref(name);
+        name = strada_new_str(buf);
+    }
+    return $name;
+}
+
+# Convert to string (default format)
+func to_string(scalar $dt) str {
+    return DateTime::format($dt, "%Y-%m-%d %H:%M:%S");
+}
+
+# Clone a DateTime
+func clone(scalar $dt) scalar {
+    if (!defined($dt)) { return undef; }
+    return DateTime::make($dt->{"year"}, $dt->{"month"}, $dt->{"day"},
+                          $dt->{"hour"}, $dt->{"minute"}, $dt->{"second"});
+}

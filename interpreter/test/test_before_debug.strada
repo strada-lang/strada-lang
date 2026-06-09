@@ -1,0 +1,18 @@
+package Greeter;
+has ro str $name (required);
+
+func greet(scalar $self) str {
+    return "Hello, " . $self->name();
+}
+
+before "greet" func(scalar $self) void {
+    say("before greet!");
+}
+
+package main;
+func main() int {
+    my scalar $g = Greeter::new("name", "World");
+    my str $r = $g->greet();
+    say($r);
+    return 0;
+}

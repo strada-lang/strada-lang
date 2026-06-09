@@ -1,0 +1,100 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_deref_syntax.strada - Test @{$ref} and %{$ref} syntax
+
+func main() int {
+    say("╔══════════════════════════════════════╗");
+    say("║  Dereference Syntax Test             ║");
+    say("╚══════════════════════════════════════╝");
+    say("");
+    
+    # ===== Array Reference to Array =====
+    say("=== @{} Array Dereference ===");
+    
+    my scalar $arr_ref = [10, 20, 30, 40, 50];
+    say("Created array reference");
+    say("is_ref: " . is_ref($arr_ref));
+    
+    # Convert to array using @{$ref} syntax
+    my scalar $arr = @{$arr_ref};
+    
+    say("After @{}: is_ref = " . is_ref($arr));
+    say("Size: " . size($arr));
+    
+    say("Elements:");
+    my int $i = 0;
+    while ($i < size($arr)) {
+        say("  [" . $i . "] = " . $arr[$i]);
+        $i = $i + 1;
+    }
+    
+    # ===== Hash Reference to Hash =====
+    say("");
+    say("=== %{} Hash Dereference ===");
+    
+    my scalar $hash_ref = { name => "Alice", age => 30, city => "Boston" };
+    say("Created hash reference");
+    say("is_ref: " . is_ref($hash_ref));
+    
+    # Convert to hash using %{$ref} syntax
+    my hash %data = %{$hash_ref};
+    
+    say("After %{}: is_ref = " . is_ref(%data));
+    
+    say("Values:");
+    say("  name = " . $data{name});
+    say("  age = " . $data{age});
+    say("  city = " . $data{city});
+    
+    # ===== Verify it's a copy =====
+    say("");
+    say("=== Verify Copy Semantics ===");
+    
+    # Modify the copy
+    $data{age} = 99;
+    say("After modifying copy:");
+    say("  Copy age = " . $data{age});
+    say("  Original age = " . $hash_ref->{age});
+    
+    # ===== From existing hash reference =====
+    say("");
+    say("=== Reference to Existing Hash ===");
+    
+    my hash %original;
+    $original{foo} = "bar";
+    $original{count} = 42;
+    
+    my scalar $ref = \%original;
+    my hash %copy = %{$ref};
+    
+    say("Original: foo = " . $original{foo});
+    say("Copy: foo = " . $copy{foo});
+    
+    # Modify copy
+    $copy{foo} = "modified";
+    say("After modifying copy:");
+    say("  Original foo = " . $original{foo});
+    say("  Copy foo = " . $copy{foo});
+    
+    say("");
+    say("╔══════════════════════════════════════╗");
+    say("║  ✓ Dereference syntax works!         ║");
+    say("╚══════════════════════════════════════╝");
+    
+    return 0;
+}

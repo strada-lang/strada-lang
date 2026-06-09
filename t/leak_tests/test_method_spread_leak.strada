@@ -1,0 +1,97 @@
+#!/usr/bin/env strada
+# Leak regression: method-call spread paths leak.
+#
+# Two bugs in the same codegen path:
+# 1. Spread elements double-incref'd (strada_array_push + explicit
+#    strada_incref) — strada_array_push already increfs. Each spread
+#    element leaks one ref per call.
+# 2. Owned-temp non-spread args mixed with spread aren't captured /
+#    decref'd. `$obj->m(...@a, $h{"k"})` or `$obj->m(...@a, Foo::new(...))`
+#    leak the second arg per call.
+#
+# Same bugs exist in both NODE_METHOD_CALL and NODE_DYN_METHOD_CALL.
+#
+# Run: valgrind --leak-check=full ./test_method_spread_leak
+
+package Counter;
+
+func new(int $start) scalar {
+    my hash %self = ();
+    $self{"n"} = $start;
+    return bless(\%self, "Counter");
+}
+
+func bump(scalar $self) int {
+    $self->{"n"} = $self->{"n"} + 1;
+    return $self->{"n"};
+}
+
+func add_many(scalar $self, scalar $a, scalar $b, scalar $c) int {
+    $self->{"n"} = $self->{"n"} + $a + $b + $c;
+    return $self->{"n"};
+}
+
+package main;
+
+func test_method_spread_only() void {
+    my int $iter = 200;
+    my int $i = 0;
+    while ($i < $iter) {
+        my scalar $c = Counter::new(0);
+        my array @args = ("hello", "world", "test");
+        # Pure spread — exercises the double-incref bug.
+        $c->add_many(...@args);
+        $i = $i + 1;
+    }
+    say("test_method_spread_only: PASS");
+}
+
+func test_method_spread_with_owned_temp() void {
+    my int $iter = 200;
+    my int $i = 0;
+    while ($i < $iter) {
+        my scalar $c = Counter::new(0);
+        my array @args = ("a", "b");
+        my hash %h = ("extra" => "tail");
+        # Spread + owned-temp non-spread — exercises both bugs.
+        $c->add_many(...@args, $h{"extra"});
+        $i = $i + 1;
+    }
+    say("test_method_spread_with_owned_temp: PASS");
+}
+
+func test_dyn_method_spread() void {
+    my int $iter = 200;
+    my int $i = 0;
+    while ($i < $iter) {
+        my scalar $c = Counter::new(0);
+        my str $mname = "add_many";
+        my array @args = ("x", "y", "z");
+        # Dynamic method dispatch with spread — same bugs apply.
+        $c->$mname(...@args);
+        $i = $i + 1;
+    }
+    say("test_dyn_method_spread: PASS");
+}
+
+func test_dyn_method_spread_with_temp() void {
+    my int $iter = 200;
+    my int $i = 0;
+    while ($i < $iter) {
+        my scalar $c = Counter::new(0);
+        my str $mname = "add_many";
+        my array @args = ("first", "second");
+        my hash %h = ("k" => "third");
+        $c->$mname(...@args, $h{"k"});
+        $i = $i + 1;
+    }
+    say("test_dyn_method_spread_with_temp: PASS");
+}
+
+func main() int {
+    test_method_spread_only();
+    test_method_spread_with_owned_temp();
+    test_dyn_method_spread();
+    test_dyn_method_spread_with_temp();
+    return 0;
+}

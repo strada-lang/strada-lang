@@ -1,0 +1,105 @@
+#!/usr/bin/env strada
+# Leak regression for delete($h{KEY}) used in statement context.
+#
+# Background: commit e3629260 made `delete` return the deleted value
+# (matching Perl). The runtime helper strada_hv_delete_take_sv adopts
+# the entry's existing refcount and yields ownership to the caller.
+# But CodeGen.strada did not list `delete` in needs_temp_cleanup, so
+# when `delete($h{k})` appeared as a void statement, the returned
+# owned StradaValue* was discarded without decref — leaking every call.
+#
+# This test exercises all the dispatch flavors:
+#   - delete($h{k}) on a regular hash, void context
+#   - delete($h{k}) on a hashref via ->
+#   - delete($a[i]) on an array element, void context
+#   - delete($h{k}) in expression context (must NOT double-free)
+#   - delete($a[i]) in expression context
+#
+# Run: valgrind --leak-check=full ./test_delete_returns_value
+
+package main;
+
+func test_hash_delete_void() void {
+    my int $iters = 500;
+    my int $i = 0;
+    while ($i < $iters) {
+        my hash %h = ();
+        $h{"a"} = "alpha";
+        $h{"b"} = "bravo";
+        $h{"c"} = "charlie";
+        delete($h{"a"});       # void context, value discarded
+        delete($h{"b"});
+        delete($h{"c"});
+        $i = $i + 1;
+    }
+    say("test_hash_delete_void: PASS");
+}
+
+func test_hashref_delete_void() void {
+    my int $iters = 500;
+    my int $i = 0;
+    while ($i < $iters) {
+        my scalar $h = { "x" => "ex", "y" => "why", "z" => "zee" };
+        delete($h->{"x"});
+        delete($h->{"y"});
+        delete($h->{"z"});
+        $i = $i + 1;
+    }
+    say("test_hashref_delete_void: PASS");
+}
+
+func test_array_delete_void() void {
+    my int $iters = 500;
+    my int $i = 0;
+    while ($i < $iters) {
+        my array @a = ("aa", "bb", "cc", "dd");
+        delete($a[1]);         # void context — value discarded
+        delete($a[3]);         # tail element
+        $i = $i + 1;
+    }
+    say("test_array_delete_void: PASS");
+}
+
+func test_delete_in_expr_context() void {
+    my int $iters = 500;
+    my int $i = 0;
+    my int $sum = 0;
+    while ($i < $iters) {
+        my hash %h = ();
+        $h{"n"} = 42;
+        my int $v = delete($h{"n"});
+        $sum = $sum + $v;
+        $i = $i + 1;
+    }
+    if ($sum != $iters * 42) {
+        say("FAIL: delete-in-expr sum mismatch: " . $sum);
+        return;
+    }
+    say("test_delete_in_expr_context: PASS");
+}
+
+func test_array_delete_in_expr_context() void {
+    my int $iters = 500;
+    my int $i = 0;
+    my int $sum = 0;
+    while ($i < $iters) {
+        my array @a = (10, 20, 30);
+        my int $v = delete($a[1]);
+        $sum = $sum + $v;
+        $i = $i + 1;
+    }
+    if ($sum != $iters * 20) {
+        say("FAIL: array-delete-in-expr sum mismatch: " . $sum);
+        return;
+    }
+    say("test_array_delete_in_expr_context: PASS");
+}
+
+func main() int {
+    test_hash_delete_void();
+    test_hashref_delete_void();
+    test_array_delete_void();
+    test_delete_in_expr_context();
+    test_array_delete_in_expr_context();
+    return 0;
+}

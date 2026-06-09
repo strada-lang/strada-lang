@@ -1,0 +1,51 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# optional_simple.strada - Simple optional parameter test
+
+func greet(str $name, str $greeting = "Hello") void {
+    say($greeting . ", " . $name . "!");
+}
+
+func add_numbers(int $a, int $b = 10) int {
+    return $a + $b;
+}
+
+func main() int {
+    say("=== Optional Parameters - Manual Testing ===");
+    say("");
+    
+    say("--- Full Parameters (both provided) ---");
+    greet("Alice", "Hi");
+    greet("Bob", "Welcome");
+    
+    say("");
+    say("--- Using Default (passing undef) ---");
+    # When we pass strada_new_undef(), the default kicks in
+    greet("Carol", strada_new_undef());
+    
+    say("");
+    say("--- Number Addition ---");
+    say("5 + 20 = " . add_numbers(5, 20));
+    say("5 + 10 (default) = " . add_numbers(5, strada_new_undef()));
+    
+    say("");
+    say("✓ Optional parameters working with explicit undef!");
+    say("✓ Defaults: greeting='Hello', b=10");
+    
+    return 0;
+}

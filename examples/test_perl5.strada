@@ -1,0 +1,140 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_perl5.strada - Test Perl 5 embedding module
+#
+# Build the library first:
+#   cd lib/perl5 && make
+#
+# Then run:
+#   ./strada examples/test_perl5.strada
+
+use lib "lib";
+use perl5;
+
+func main() int {
+    say("=== Strada Perl 5 Integration Test ===\n");
+
+    # Initialize Perl interpreter
+    say("1. Initializing Perl interpreter...");
+    my int $ok = perl5::init();
+    if ($ok == 0) {
+        say("   FAILED: Could not initialize Perl");
+        return 1;
+    }
+    say("   OK: Perl initialized\n");
+
+    # Simple evaluation
+    say("2. Testing eval (arithmetic)...");
+    my str $result = perl5::eval("2 + 2");
+    say("   perl5::eval('2 + 2') = " . $result);
+    if ($result eq "4") {
+        say("   OK\n");
+    } else {
+        say("   FAILED: expected '4'\n");
+    }
+
+    # String operations
+    say("3. Testing eval (string)...");
+    $result = perl5::eval("'Hello' . ' ' . 'World'");
+    say("   perl5::eval(\"'Hello' . ' ' . 'World'\") = " . $result);
+    if ($result eq "Hello World") {
+        say("   OK\n");
+    } else {
+        say("   FAILED: expected 'Hello World'\n");
+    }
+
+    # Define and call a subroutine
+    say("4. Testing subroutine definition and call...");
+    perl5::run("sub greet { my $name = shift; return \"Hello, $name!\"; }");
+    my array @args = ("Strada");
+    $result = perl5::call("greet", \@args);
+    say("   perl5::call('greet', ['Strada']) = " . $result);
+    if ($result eq "Hello, Strada!") {
+        say("   OK\n");
+    } else {
+        say("   FAILED: expected 'Hello, Strada!'\n");
+    }
+
+    # Set and get variables
+    say("5. Testing variable set/get...");
+    perl5::set_var("$test_var", "test value 123");
+    my str $val = perl5::get_var("$test_var");
+    say("   Set $test_var = 'test value 123'");
+    say("   Get $test_var = '" . $val . "'");
+    if ($val eq "test value 123") {
+        say("   OK\n");
+    } else {
+        say("   FAILED\n");
+    }
+
+    # Array operations in Perl
+    say("6. Testing array operations...");
+    perl5::run("@colors = qw(red green blue);");
+    $result = perl5::eval("scalar(@colors)");
+    say("   @colors = qw(red green blue)");
+    say("   scalar(@colors) = " . $result);
+    if ($result eq "3") {
+        say("   OK\n");
+    } else {
+        say("   FAILED: expected '3'\n");
+    }
+
+    # Hash operations in Perl
+    say("7. Testing hash operations...");
+    perl5::run("%person = (name => 'Alice', age => 30);");
+    $result = perl5::eval("$person{name}");
+    say("   %person = (name => 'Alice', age => 30)");
+    say("   $person{name} = " . $result);
+    if ($result eq "Alice") {
+        say("   OK\n");
+    } else {
+        say("   FAILED: expected 'Alice'\n");
+    }
+
+    # Test using a core module (requires LD_PRELOAD for XS modules)
+    say("8. Testing core module (POSIX)...");
+    $ok = perl5::use_module("POSIX");
+    if ($ok == 1) {
+        $result = perl5::eval("POSIX::floor(3.7)");
+        say("   POSIX::floor(3.7) = " . $result);
+        $result = perl5::eval("POSIX::ceil(3.2)");
+        say("   POSIX::ceil(3.2) = " . $result);
+        say("   OK\n");
+    } else {
+        say("   SKIPPED: XS modules need LD_PRELOAD=/lib/x86_64-linux-gnu/libperl.so.5.38\n");
+    }
+
+    # Test error handling
+    say("9. Testing error handling...");
+    $result = perl5::eval("this is not valid perl syntax");
+    my str $error = perl5::get_error();
+    if (length($error) > 0) {
+        say("   Invalid syntax error captured: yes");
+    } else {
+        say("   Invalid syntax error captured: no");
+    }
+    say("   OK\n");
+
+    # Cleanup
+    say("10. Shutting down Perl interpreter...");
+    perl5::shutdown();
+    say("    OK\n");
+
+    say("=== All Perl 5 tests complete! ===");
+    return 0;
+}

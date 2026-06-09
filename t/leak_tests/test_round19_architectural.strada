@@ -1,0 +1,91 @@
+#!/usr/bin/env strada
+# Round 19 — the two "architectural" leaks the user / stop-hook
+# flagged as not-yet-fixed after round 18:
+#
+# 1. Function-local indirect throw: locals in a function whose
+#    callee throws used to leak (longjmp skipped the function's
+#    tail decref). Now every NODE_VAR_DECL pushes the local to
+#    the runtime cleanup stack at declaration; the catch's
+#    strada_cleanup_drain_to walks the stack down to the try-
+#    entry mark and decref's everything above it.
+#
+# 2. Direct reference-cycle leaks (`$h{self} = \%h;` or
+#    `push(@a, \@a);`): refcount can never break self-reference.
+#    Now the scope-exit cleanup walks every local FIRST with
+#    strada_break_self_cycle (clears any STRADA_REF that points
+#    back to the variable itself, decreffing the cleared ref so
+#    the cycle's refcount drops). The two-pass design (break
+#    every var, THEN decref every var) avoids accessing freed
+#    memory when locals share storage (e.g. `my $arr =
+#    deref_array($ref)`).
+#
+# Run: valgrind --leak-check=full ./test_round19_architectural
+
+package main;
+
+func inner_throws() void { throw "boom"; }
+
+func with_locals() void {
+    my str $a = "AAAAAAAAAAAAAAAAAAAAAA";
+    my str $b = "BBBBBBBBBBBBBBBBBBBBBB";
+    inner_throws();
+}
+
+func make_hash_cycle() void {
+    my hash %h = ("k" => 1);
+    $h{"self"} = \%h;
+}
+
+func make_arr_cycle() void {
+    my array @a = (1, 2, 3);
+    push(@a, \@a);
+}
+
+func test_indirect_throw() void {
+    my int $iter = 500;
+    my int $i = 0;
+    while ($i < $iter) {
+        try { with_locals(); } catch ($e) { }
+        $i = $i + 1;
+    }
+    say("test_indirect_throw: PASS");
+}
+
+func test_hash_cycle_in_func() void {
+    my int $iter = 200;
+    my int $i = 0;
+    while ($i < $iter) {
+        make_hash_cycle();
+        $i = $i + 1;
+    }
+    say("test_hash_cycle_in_func: PASS");
+}
+
+func test_array_cycle_in_func() void {
+    my int $iter = 200;
+    my int $i = 0;
+    while ($i < $iter) {
+        make_arr_cycle();
+        $i = $i + 1;
+    }
+    say("test_array_cycle_in_func: PASS");
+}
+
+func test_cycle_in_loop_scope() void {
+    my int $iter = 200;
+    my int $i = 0;
+    while ($i < $iter) {
+        my hash %h = ("k" => 1);
+        $h{"self"} = \%h;
+        $i = $i + 1;
+    }
+    say("test_cycle_in_loop_scope: PASS");
+}
+
+func main() int {
+    test_indirect_throw();
+    test_hash_cycle_in_func();
+    test_array_cycle_in_func();
+    test_cycle_in_loop_scope();
+    return 0;
+}

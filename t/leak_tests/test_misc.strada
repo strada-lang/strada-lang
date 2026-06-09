@@ -1,0 +1,99 @@
+#!/usr/bin/env strada
+# Test miscellaneous built-in functions for memory leaks
+# Run: valgrind --leak-check=full ./test_misc
+
+func main() int {
+    say("Testing miscellaneous functions for memory leaks...");
+    my int $iterations = 100;
+
+    # Test quotemeta
+    say("  quotemeta...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my str $input = "hello.world+foo*bar";
+        my str $quoted = core::quotemeta($input);
+        if (length($quoted) < length($input)) {
+            say("    FAIL: quotemeta too short");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test dumper_str
+    say("  dumper_str...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $data = {"name" => "Alice", "age" => 30};
+        my str $dump = dumper_str($data);
+        if (length($dump) < 10) {
+            say("    FAIL: dumper_str too short");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test dumper_str with arrays
+    say("  dumper_str arrays...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @arr = (1, "two", 3, "four");
+        my str $dump = dumper_str(\@arr);
+        if (length($dump) < 5) {
+            say("    FAIL: dumper_str array");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test dumper_str with nested structures
+    say("  dumper_str nested...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $nested = {
+            "list" => [1, 2, 3],
+            "child" => {"key" => "value"}
+        };
+        my str $dump = dumper_str($nested);
+        if (length($dump) < 10) {
+            say("    FAIL: dumper_str nested");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test quotemeta with special chars
+    say("  quotemeta special chars...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $special = "a$b@c%d&e";
+        my str $q = core::quotemeta($special);
+        if (length($q) < length($special)) {
+            say("    FAIL: quotemeta special");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test dumper_str with scalars
+    say("  dumper_str scalars...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $d1 = dumper_str("hello");
+        my str $d2 = dumper_str(42);
+        my str $d3 = dumper_str(undef);
+        if (length($d1) < 1) {
+            say("    FAIL: dumper_str string");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All miscellaneous tests passed!");
+    return 0;
+}

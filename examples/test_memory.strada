@@ -1,0 +1,63 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_memory.strada - Test memory management
+
+func main() int {
+    say("=== Memory Management Test ===");
+    say("");
+    
+    say("1. Automatic Memory Management:");
+    my str $text = "Hello, World!";
+    say("Created string: " . $text);
+    say("(Memory automatically managed via reference counting)");
+    say("");
+    
+    say("2. Reference Counting:");
+    my str $data = "Important data";
+    my int $refs = refcount($data);
+    say("String: " . $data);
+    say("Reference count: " . $refs);
+    say("");
+    
+    say("3. Large Data Example:");
+    my str $large = "This is a large string that we might want to free early";
+    say("Created: " . $large);
+    say("Before free - refcount: " . refcount($large));
+    
+    say("");
+    say("4. Memory is freed automatically when variables go out of scope");
+    say("or when you explicitly call free()");
+    say("");
+    
+    say("5. Arrays and Hashes:");
+    my scalar $arr = split("a,b,c,d,e,f,g,h", ",");
+    say("Created array with split()");
+    say("Reference count: " . refcount($arr));
+    say("(Array will be freed automatically at end of function)");
+    say("");
+    
+    say("✓ Memory management working!");
+    say("");
+    say("Key points:");
+    say("- Memory is automatically freed when refcount hits 0");
+    say("- Variables are freed when they go out of scope");
+    say("- You can check refcount with refcount()");
+    say("- Strada uses reference counting like Perl");
+    
+    return 0;
+}

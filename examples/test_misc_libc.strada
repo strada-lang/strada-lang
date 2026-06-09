@@ -1,0 +1,143 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+func test_srand() int {
+    sys::srand(12345);
+    my int $r1 = sys::rand();
+    sys::srand(12345);
+    my int $r2 = sys::rand();
+    if ($r1 != $r2) {
+        say("FAIL: srand/rand not reproducible");
+        return 1;
+    }
+    return 0;
+}
+
+func test_srandom() int {
+    sys::srandom(12345);
+    my int $r1 = sys::random();
+    sys::srandom(12345);
+    my int $r2 = sys::random();
+    if ($r1 != $r2) {
+        say("FAIL: srandom/random not reproducible");
+        return 1;
+    }
+    return 0;
+}
+
+func test_isatty() int {
+    my int $r = sys::isatty(0);
+    return 0;
+}
+
+func test_umask() int {
+    my int $old = sys::umask(0022);
+    my int $new = sys::umask($old);
+    if ($new != 0022) {
+        say("FAIL: umask returned " . $new . ", expected 18");
+        return 1;
+    }
+    return 0;
+}
+
+func test_link_symlink() int {
+    my str $base = "/tmp/strada_link_test.txt";
+    my str $hard = "/tmp/strada_hardlink.txt";
+    my str $sym = "/tmp/strada_symlink.txt";
+
+    sys::spew($base, "test content");
+
+    my int $r1 = sys::link($base, $hard);
+    if ($r1 != 0) {
+        say("FAIL: link() returned " . $r1);
+        sys::unlink($base);
+        return 1;
+    }
+
+    my int $r2 = sys::symlink($base, $sym);
+    if ($r2 != 0) {
+        say("FAIL: symlink() returned " . $r2);
+        sys::unlink($base);
+        sys::unlink($hard);
+        return 1;
+    }
+
+    sys::unlink($sym);
+    sys::unlink($hard);
+    sys::unlink($base);
+    return 0;
+}
+
+func test_utime() int {
+    my str $path = "/tmp/strada_utime_test.txt";
+    sys::spew($path, "test");
+
+    my int $r = sys::utime($path, 1000000000, 1000000000);
+    if ($r != 0) {
+        say("FAIL: utime() returned " . $r);
+        sys::unlink($path);
+        return 1;
+    }
+
+    sys::unlink($path);
+    return 0;
+}
+
+func test_getenv_setenv() int {
+    my int $r = sys::setenv("STRADA_TEST_VAR", "test_value", 1);
+    if ($r != 0) {
+        say("FAIL: setenv() returned " . $r);
+        return 1;
+    }
+    my str $val = sys::getenv("STRADA_TEST_VAR");
+    if ($val ne "test_value") {
+        say("FAIL: getenv returned '" . $val . "'");
+        return 1;
+    }
+    sys::unsetenv("STRADA_TEST_VAR");
+    return 0;
+}
+
+func test_gethostname() int {
+    my str $h = sys::gethostname();
+    if (length($h) == 0) {
+        say("FAIL: gethostname returned empty string");
+        return 1;
+    }
+    return 0;
+}
+
+func main() int {
+    my int $failed = 0;
+
+    $failed = $failed + test_srand();
+    $failed = $failed + test_srandom();
+    $failed = $failed + test_isatty();
+    $failed = $failed + test_umask();
+    $failed = $failed + test_link_symlink();
+    $failed = $failed + test_utime();
+    $failed = $failed + test_getenv_setenv();
+    $failed = $failed + test_gethostname();
+
+    if ($failed == 0) {
+        say("All misc libc tests passed");
+    } else {
+        say("Failed: " . $failed . " tests");
+    }
+
+    return $failed;
+}

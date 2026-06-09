@@ -1,0 +1,159 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# web_server.strada - A minimal HTTP web server in Strada
+#
+# Usage: ./web_server
+# Then open http://localhost:8080 in your browser
+# Or test with: curl http://localhost:8080/hello
+
+func get_request_path(str $request) str {
+    # Parse first line: "GET /path HTTP/1.1"
+    my int $space1 = index($request, " ");
+    if ($space1 < 0) {
+        return "/";
+    }
+    my str $after_method = substr($request, $space1 + 1, length($request) - $space1 - 1);
+    my int $space2 = index($after_method, " ");
+    if ($space2 < 0) {
+        return "/";
+    }
+    return substr($after_method, 0, $space2);
+}
+
+func get_request_method(str $request) str {
+    my int $space = index($request, " ");
+    if ($space < 0) {
+        return "GET";
+    }
+    return substr($request, 0, $space);
+}
+
+func html_page(str $title, str $body) str {
+    return "<!DOCTYPE html>\n<html>\n<head><title>" . $title . "</title></head>\n<body>\n" . $body . "\n</body>\n</html>\n";
+}
+
+func http_response(int $status, str $status_text, str $content_type, str $body) str {
+    my str $response = "HTTP/1.1 " . $status . " " . $status_text . "\r\n";
+    $response = $response . "Content-Type: " . $content_type . "\r\n";
+    $response = $response . "Content-Length: " . length($body) . "\r\n";
+    $response = $response . "Connection: close\r\n";
+    $response = $response . "\r\n";
+    $response = $response . $body;
+    return $response;
+}
+
+func handle_request(str $path) str {
+    if ($path eq "/") {
+        my str $body = html_page("Strada Web Server",
+            "<h1>Welcome to Strada Web Server!</h1>\n" .
+            "<p>This server is written entirely in Strada.</p>\n" .
+            "<h2>Try these links:</h2>\n" .
+            "<ul>\n" .
+            "  <li><a href=\"/hello\">Hello World</a></li>\n" .
+            "  <li><a href=\"/time\">Current Time</a></li>\n" .
+            "  <li><a href=\"/about\">About</a></li>\n" .
+            "  <li><a href=\"/json\">JSON Example</a></li>\n" .
+            "</ul>");
+        return http_response(200, "OK", "text/html", $body);
+    }
+
+    if ($path eq "/hello") {
+        my str $body = html_page("Hello", "<h1>Hello, World!</h1>\n<p><a href=\"/\">Back to home</a></p>");
+        return http_response(200, "OK", "text/html", $body);
+    }
+
+    if ($path eq "/time") {
+        my int $t = sys::time();
+        my str $body = html_page("Time",
+            "<h1>Current Unix Timestamp</h1>\n" .
+            "<p style=\"font-size: 2em;\">" . $t . "</p>\n" .
+            "<p><a href=\"/\">Back to home</a></p>");
+        return http_response(200, "OK", "text/html", $body);
+    }
+
+    if ($path eq "/about") {
+        my str $body = html_page("About",
+            "<h1>About Strada Web Server</h1>\n" .
+            "<p>This is a minimal HTTP/1.1 web server written in Strada.</p>\n" .
+            "<p>Strada is a strongly-typed language inspired by Perl that compiles to C.</p>\n" .
+            "<h2>Features:</h2>\n" .
+            "<ul>\n" .
+            "  <li>Sequential request handling</li>\n" .
+            "  <li>Basic HTTP/1.1 support</li>\n" .
+            "  <li>HTML and JSON responses</li>\n" .
+            "</ul>\n" .
+            "<p><a href=\"/\">Back to home</a></p>");
+        return http_response(200, "OK", "text/html", $body);
+    }
+
+    if ($path eq "/json") {
+        my str $json = "{\"message\": \"Hello from Strada!\", \"status\": \"ok\", \"timestamp\": " . sys::time() . "}";
+        return http_response(200, "OK", "application/json", $json);
+    }
+
+    # 404 Not Found
+    my str $body = html_page("404 Not Found",
+        "<h1>404 - Page Not Found</h1>\n" .
+        "<p>The path <code>" . $path . "</code> was not found.</p>\n" .
+        "<p><a href=\"/\">Go to home page</a></p>");
+    return http_response(404, "Not Found", "text/html", $body);
+}
+
+func main() int {
+    my int $port = 8080;
+
+    say("Starting Strada Web Server...");
+    say("Listening on http://localhost:" . $port);
+    say("Press Ctrl+C to stop");
+    say("");
+
+    my scalar $server = sys::socket_server($port);
+
+    if (!defined($server)) {
+        say("Error: Could not create server socket on port " . $port);
+        return 1;
+    }
+
+    # Main server loop
+    while (1) {
+        my scalar $client = sys::socket_accept($server);
+
+        if (!defined($client)) {
+            say("Warning: Failed to accept connection");
+        } else {
+            # Read the HTTP request
+            my str $request = sys::socket_recv($client, 4096);
+
+            if (length($request) > 0) {
+                my str $method = get_request_method($request);
+                my str $path = get_request_path($request);
+
+                say($method . " " . $path);
+
+                # Generate and send response
+                my str $response = handle_request($path);
+                sys::socket_send($client, $response);
+            }
+
+            sys::socket_close($client);
+        }
+    }
+
+    sys::socket_close($server);
+    return 0;
+}

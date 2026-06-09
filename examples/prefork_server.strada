@@ -1,0 +1,133 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# prefork_server.strada - Preforking HTTP server
+#
+# Creates multiple worker processes at startup, each handling requests
+# independently. This is a classic Unix server architecture.
+#
+# Usage: ./prefork_server
+# Then visit http://localhost:8080 in your browser
+
+func http_response(str $body) str {
+    return "HTTP/1.1 200 OK\r\n" .
+           "Content-Type: text/html\r\n" .
+           "Content-Length: " . length($body) . "\r\n" .
+           "Connection: close\r\n" .
+           "\r\n" .
+           $body;
+}
+
+func get_path(str $request) str {
+    my int $space1 = index($request, " ");
+    if ($space1 < 0) {
+        return "/";
+    }
+    my str $rest = substr($request, $space1 + 1, 100);
+    my int $space2 = index($rest, " ");
+    if ($space2 < 0) {
+        return "/";
+    }
+    return substr($rest, 0, $space2);
+}
+
+func worker_loop(scalar $server, int $worker_id) void {
+    my int $requests = 0;
+
+    while (1) {
+        # Wait for a connection
+        my scalar $client = sys::socket_accept($server);
+
+        if (defined($client)) {
+            $requests = $requests + 1;
+
+            # Read request
+            my str $request = sys::socket_recv($client, 4096);
+
+            if (length($request) > 0) {
+                my str $path = get_path($request);
+                my int $pid = sys::getpid();
+
+                # Build response
+                my str $html = "<html><body>" .
+                    "<h1>Prefork Server</h1>" .
+                    "<p>Path: " . $path . "</p>" .
+                    "<p>Worker ID: " . $worker_id . "</p>" .
+                    "<p>Worker PID: " . $pid . "</p>" .
+                    "<p>Requests handled by this worker: " . $requests . "</p>" .
+                    "<hr>" .
+                    "<p><em>Refresh to see different workers handle requests</em></p>" .
+                    "</body></html>";
+
+                sys::socket_send($client, http_response($html));
+            }
+
+            sys::socket_close($client);
+        }
+    }
+}
+
+func main() int {
+    my int $port = 8080;
+    my int $num_workers = 4;
+
+    say("=== Prefork Web Server ===");
+    say("Starting " . $num_workers . " worker processes...");
+
+    # Create server socket before forking
+    my scalar $server = sys::socket_server($port);
+    if (!defined($server)) {
+        say("Error: Could not bind to port " . $port);
+        return 1;
+    }
+
+    # Fork worker processes
+    my int $i = 0;
+    while ($i < $num_workers) {
+        my int $pid = sys::fork();
+
+        if ($pid == 0) {
+            # Child process - become a worker
+            worker_loop($server, $i);
+            exit(0);  # Never reached, but good practice
+        } elsif ($pid > 0) {
+            # Parent - record the child
+            say("  Worker " . $i . " started (PID " . $pid . ")");
+        } else {
+            say("  Error forking worker " . $i);
+        }
+
+        $i = $i + 1;
+    }
+
+    say("");
+    say("Server ready on http://localhost:" . $port);
+    say("Press Ctrl+C to stop");
+    say("");
+
+    # Parent waits for children
+    # In a real server, we'd monitor and restart dead workers
+    while (1) {
+        my int $dead_pid = sys::wait();
+        if ($dead_pid > 0) {
+            say("Worker PID " . $dead_pid . " exited");
+        }
+        sys::sleep(1);
+    }
+
+    return 0;
+}

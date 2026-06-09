@@ -1,0 +1,145 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_multi_inherit.strada - Test multiple inheritance
+
+package Flyable;
+
+func Flyable_fly(scalar $self) str {
+    return "Flying at " . $self->{"altitude"} . " feet";
+}
+
+package Swimmable;
+
+func Swimmable_swim(scalar $self) str {
+    return "Swimming at " . $self->{"depth"} . " meters";
+}
+
+package Animal;
+
+func Animal_speak(scalar $self) str {
+    return "Animal speaks";
+}
+
+package Duck;
+# Duck inherits from Animal, Flyable, and Swimmable
+
+func Duck_init() void {
+    inherit("Duck", "Animal");
+    inherit("Duck", "Flyable");
+    inherit("Duck", "Swimmable");
+}
+
+func Duck_new(str $name) scalar {
+    my hash %self = ();
+    $self{"name"} = $name;
+    $self{"altitude"} = 1000;
+    $self{"depth"} = 5;
+    return bless(\%self, "Duck");
+}
+
+func Duck_quack(scalar $self) str {
+    return "Quack!";
+}
+
+func Duck_speak(scalar $self) str {
+    return $self->{"name"} . " says: " . Duck_quack($self);
+}
+
+package main;
+
+func main() int {
+    say("=== Multiple Inheritance Tests ===\n");
+
+    # Initialize class hierarchy
+    Duck_init();
+
+    say("1. Create Duck with multiple inheritance:");
+    my scalar $duck = Duck_new("Donald");
+    say("   Created: " . $duck->{"name"});
+
+    say("\n2. isa() checks for multiple inheritance:");
+
+    if (isa($duck, "Duck")) {
+        say("   Duck isa Duck: PASS");
+    } else {
+        say("   Duck isa Duck: FAIL");
+        return 1;
+    }
+
+    if (isa($duck, "Animal")) {
+        say("   Duck isa Animal: PASS");
+    } else {
+        say("   Duck isa Animal: FAIL");
+        return 1;
+    }
+
+    if (isa($duck, "Flyable")) {
+        say("   Duck isa Flyable: PASS");
+    } else {
+        say("   Duck isa Flyable: FAIL");
+        return 1;
+    }
+
+    if (isa($duck, "Swimmable")) {
+        say("   Duck isa Swimmable: PASS");
+    } else {
+        say("   Duck isa Swimmable: FAIL");
+        return 1;
+    }
+
+    say("\n3. Methods from different parents:");
+    my str $fly = Flyable_fly($duck);
+    say("   fly(): " . $fly);
+    if ($fly ne "Flying at 1000 feet") {
+        say("   FAIL");
+        return 1;
+    }
+
+    my str $swim = Swimmable_swim($duck);
+    say("   swim(): " . $swim);
+    if ($swim ne "Swimming at 5 meters") {
+        say("   FAIL");
+        return 1;
+    }
+
+    my str $quack = Duck_quack($duck);
+    say("   quack(): " . $quack);
+    if ($quack ne "Quack!") {
+        say("   FAIL");
+        return 1;
+    }
+
+    say("\n4. Overridden method:");
+    my str $speak = Duck_speak($duck);
+    say("   speak(): " . $speak);
+    if ($speak ne "Donald says: Quack!") {
+        say("   FAIL");
+        return 1;
+    }
+
+    say("\n5. blessed() returns correct package:");
+    my scalar $pkg = blessed($duck);
+    say("   blessed(): " . $pkg);
+    if ($pkg ne "Duck") {
+        say("   FAIL");
+        return 1;
+    }
+
+    say("\n=== All multiple inheritance tests passed! ===");
+    return 0;
+}

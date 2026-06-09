@@ -1,0 +1,82 @@
+#!/usr/bin/env strada
+# Test file handle support with diamond operator and print to filehandle
+
+func main() int {
+    say("=== File Handle Test Suite ===\n");
+
+    # Test 1: Write to a file using say with filehandle
+    say("Test 1: Writing to file with say()");
+    my scalar $fh = sys::open("/tmp/strada_fh_test.txt", "w");
+    if (defined($fh)) {
+        say($fh, "Line 1: Hello from Strada!");
+        say($fh, "Line 2: Testing filehandle output");
+        say($fh, "Line 3: This is the last line");
+        sys::close($fh);
+        say("  Written 3 lines to file");
+    } else {
+        say("  ERROR: Could not open file for writing");
+        return 1;
+    }
+
+    # Test 2: Read lines using diamond operator <$fh>
+    say("\nTest 2: Reading lines with diamond operator <\$fh>");
+    my scalar $fh2 = sys::open("/tmp/strada_fh_test.txt", "r");
+    if (defined($fh2)) {
+        my int $line_num = 0;
+        my str $line = <$fh2>;
+        while (defined($line)) {
+            $line_num = $line_num + 1;
+            say("  Read line " . $line_num . ": " . $line);
+            $line = <$fh2>;
+        }
+        sys::close($fh2);
+        say("  Total lines read: " . $line_num);
+    } else {
+        say("  ERROR: Could not open file for reading");
+        return 1;
+    }
+
+    # Test 3: Write with print (no newline)
+    say("\nTest 3: Writing with print() to filehandle");
+    my scalar $fh3 = sys::open("/tmp/strada_fh_test2.txt", "w");
+    if (defined($fh3)) {
+        print($fh3, "Part 1 ");
+        print($fh3, "Part 2 ");
+        print($fh3, "Part 3");
+        say($fh3, "");  # Just newline
+        say($fh3, "Second line");
+        sys::close($fh3);
+        say("  Written with print() - no automatic newlines");
+    } else {
+        say("  ERROR: Could not open file for writing");
+        return 1;
+    }
+
+    # Verify the content
+    my str $content = slurp("/tmp/strada_fh_test2.txt");
+    say("  File content: [" . $content . "]");
+
+    # Test 4: Read entire file line by line
+    say("\nTest 4: Read entire file into array");
+    my scalar $fh4 = sys::open("/tmp/strada_fh_test.txt", "r");
+    my array @lines = ();
+    if (defined($fh4)) {
+        my str $l = <$fh4>;
+        while (defined($l)) {
+            push(@lines, $l);
+            $l = <$fh4>;
+        }
+        sys::close($fh4);
+        say("  Got " . scalar(@lines) . " lines");
+        foreach my str $line (@lines) {
+            say("    -> " . $line);
+        }
+    }
+
+    # Cleanup
+    sys::unlink("/tmp/strada_fh_test.txt");
+    sys::unlink("/tmp/strada_fh_test2.txt");
+
+    say("\n=== All tests passed! ===");
+    return 0;
+}

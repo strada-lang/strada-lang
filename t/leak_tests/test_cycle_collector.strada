@@ -1,0 +1,119 @@
+#!/usr/bin/env strada
+# Cycle collector leak test.
+#
+# Builds INDIRECT reference cycles (A<->B, A->B->C->A, array-mediated) with NO
+# core::weaken(). Plain refcounting leaks these; the cycle collector must reclaim
+# them. With the collector compiled in (default), valgrind must report 0 leaks.
+# Built --without-cycle-gc, this same program leaks (that's the control proof).
+#
+# Collections are forced explicitly via the runtime API so the test exercises the
+# mid-run collector, not just the atexit sweep. A live structure is kept across a
+# collection and re-read to prove the collector does NOT reclaim reachable data.
+
+package main;
+
+func main() int {
+    say("Cycle collector test...");
+
+    # Lower the auto-collect threshold so the loop triggers real collections.
+    __C__ {
+        strada_gc_set_threshold(64);
+    }
+
+    my int $iterations = 500;
+
+    # --- 2-node cycle A <-> B (no weaken) ---
+    say("  2-node cycles...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my scalar $a = {"name" => "alpha"};
+        my scalar $b = {"name" => "beta"};
+        $a->{"partner"} = $b;
+        $b->{"partner"} = $a;
+        $i = $i + 1;
+    }
+    say("    done");
+
+    # --- 3-node cycle A -> B -> C -> A (no weaken) ---
+    say("  3-node cycles...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $a = {"n" => "a"};
+        my scalar $b = {"n" => "b"};
+        my scalar $c = {"n" => "c"};
+        $a->{"next"} = $b;
+        $b->{"next"} = $c;
+        $c->{"next"} = $a;
+        $i = $i + 1;
+    }
+    say("    done");
+
+    # --- array-mediated cycle: parent holds children, children point back ---
+    say("  array-mediated cycles...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $parent = {"name" => "parent", "children" => []};
+        my scalar $child1 = {"name" => "child1", "parent" => $parent};
+        my scalar $child2 = {"name" => "child2", "parent" => $parent};
+        push($parent->{"children"}, $child1);
+        push($parent->{"children"}, $child2);
+        $i = $i + 1;
+    }
+    say("    done");
+
+    # --- blessed object cycle (DESTROY-less): the common Perl-OO leak ---
+    say("  blessed cycles...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $n1 = bless({"name" => "first"}, "Node");
+        my scalar $n2 = bless({"name" => "second"}, "Node");
+        $n1->{"link"} = $n2;
+        $n2->{"link"} = $n1;
+        $i = $i + 1;
+    }
+    say("    done");
+
+    # --- correctness: garbage cycles that REFERENCE a live object must not
+    #     corrupt or free that object (the white->black edge case). ---
+    say("  live object referenced by garbage cycles survives...");
+    my scalar $shared = {"id" => "survivor", "count" => 0};
+    $i = 0;
+    while ($i < $iterations) {
+        # $a and $b form a garbage cycle; both hold a reference to $shared.
+        my scalar $a = {"s" => $shared};
+        my scalar $b = {"s" => $shared, "peer" => $a};
+        $a->{"peer"} = $b;
+        $i = $i + 1;
+    }
+    __C__ {
+        strada_gc_collect();
+    }
+    # If the collector over-decref'd $shared it would be freed (crash/garbage);
+    # if it under-accounted, $shared leaks. Reading it back proves it's intact.
+    if ($shared->{"id"} ne "survivor") {
+        say("    FAIL: live object corrupted or wrongly collected");
+        return 1;
+    }
+    say("    PASS");
+
+    # Final forced sweep of anything still buffered.
+    __C__ {
+        strada_gc_collect();
+    }
+
+    my int $collections = 0;
+    my int $freed = 0;
+    __C__ {
+        collections = strada_new_int((int64_t)strada_gc_collections());
+        freed = strada_new_int((int64_t)strada_gc_objects_freed());
+    }
+    say("  collections run: " . $collections);
+    say("  cyclic objects freed: " . $freed);
+    if ($freed < 1) {
+        say("    FAIL: collector freed nothing (is STRADA_CYCLE_GC enabled?)");
+        return 1;
+    }
+
+    say("All cycle collector tests passed!");
+    return 0;
+}

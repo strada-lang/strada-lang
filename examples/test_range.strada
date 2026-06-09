@@ -1,0 +1,165 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_range.strada - Test range operator
+#
+# Run: ./strada examples/test_range.strada
+
+func main() int {
+    say("=== Range Operator Tests ===\n");
+
+    # Test 1: Basic ascending range
+    say("1. Ascending range (1..5):");
+    my array @nums = 1..5;
+    my str $result = "";
+    my int $i = 0;
+    while ($i < scalar(@nums)) {
+        $result = $result . $nums[$i] . " ";
+        $i = $i + 1;
+    }
+    say("   " . $result);
+    if (scalar(@nums) != 5) {
+        say("FAIL: expected 5 elements, got " . scalar(@nums));
+        return 1;
+    }
+
+    # Test 2: Descending range — Perl's `..` only counts upward, so 5..1 is the
+    # empty list () (use reverse(1..5) for a descending list).
+    say("\n2. Descending range (5..1):");
+    @nums = 5..1;
+    $result = "";
+    $i = 0;
+    while ($i < scalar(@nums)) {
+        $result = $result . $nums[$i] . " ";
+        $i = $i + 1;
+    }
+    say("   " . $result);
+    if (scalar(@nums) != 0) {
+        say("FAIL: descending range should be empty, got " . scalar(@nums));
+        return 1;
+    }
+
+    # Test 3: Single element range
+    say("\n3. Single element range (3..3):");
+    @nums = 3..3;
+    say("   Length: " . scalar(@nums) . ", Value: " . $nums[0]);
+    if (scalar(@nums) != 1) {
+        say("FAIL: expected 1 element");
+        return 1;
+    }
+    if ($nums[0] != 3) {
+        say("FAIL: expected value 3");
+        return 1;
+    }
+
+    # Test 4: Range with variables
+    say("\n4. Range with variables:");
+    my int $start = 2;
+    my int $end = 7;
+    @nums = $start..$end;
+    $result = "";
+    $i = 0;
+    while ($i < scalar(@nums)) {
+        $result = $result . $nums[$i] . " ";
+        $i = $i + 1;
+    }
+    say("   " . $start . ".." . $end . " = " . $result);
+    if (scalar(@nums) != 6) {
+        say("FAIL: expected 6 elements");
+        return 1;
+    }
+
+    # Test 5: Range in foreach
+    say("\n5. Range in foreach:");
+    $result = "";
+    foreach my int $n (1..4) {
+        $result = $result . $n . " ";
+    }
+    say("   foreach 1..4: " . $result);
+    if ($result ne "1 2 3 4 ") {
+        say("FAIL: expected '1 2 3 4 '");
+        return 1;
+    }
+
+    # Test 6: Sum using range
+    say("\n6. Sum of 1..10:");
+    my int $sum = 0;
+    foreach my int $n (1..10) {
+        $sum = $sum + $n;
+    }
+    say("   Sum = " . $sum);
+    if ($sum != 55) {
+        say("FAIL: expected 55");
+        return 1;
+    }
+
+    # Test 7: Range starting from 0
+    say("\n7. Range starting from 0 (0..4):");
+    @nums = 0..4;
+    $result = "";
+    $i = 0;
+    while ($i < scalar(@nums)) {
+        $result = $result . $nums[$i] . " ";
+        $i = $i + 1;
+    }
+    say("   " . $result);
+    if (scalar(@nums) != 5) {
+        say("FAIL: expected 5 elements");
+        return 1;
+    }
+
+    # Test 8: Negative range
+    say("\n8. Negative range (-3..2):");
+    @nums = -3..2;
+    $result = "";
+    $i = 0;
+    while ($i < scalar(@nums)) {
+        $result = $result . $nums[$i] . " ";
+        $i = $i + 1;
+    }
+    say("   " . $result);
+    if (scalar(@nums) != 6) {
+        say("FAIL: expected 6 elements");
+        return 1;
+    }
+
+    # Test 9: Range length calculation
+    say("\n9. Range as loop counter:");
+    my int $count = 0;
+    foreach my int $n (1..100) {
+        $count = $count + 1;
+    }
+    say("   Counted 1..100: " . $count . " iterations");
+    if ($count != 100) {
+        say("FAIL: expected 100 iterations");
+        return 1;
+    }
+
+    # Test 10: Nested loops with ranges
+    say("\n10. Nested ranges (multiplication table 1-3):");
+    foreach my int $x (1..3) {
+        $result = "";
+        foreach my int $y (1..3) {
+            my int $prod = $x * $y;
+            $result = $result . $prod . " ";
+        }
+        say("    " . $x . ": " . $result);
+    }
+
+    say("\n=== All range tests passed! ===");
+    return 0;
+}

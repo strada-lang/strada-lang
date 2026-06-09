@@ -1,0 +1,57 @@
+#!/usr/bin/env strada
+# Test signal handling for memory leaks
+# Run: valgrind --leak-check=full ./test_signals
+
+func my_handler(int $sig) void {
+    # Simple handler that does nothing (avoids our variable leak)
+}
+
+func main() int {
+    say("Testing signal handling for memory leaks...");
+    my int $iterations = 100;
+
+    # Test signal set/restore cycle
+    say("  signal set/restore...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        core::signal("USR1", \&my_handler);
+        core::signal("USR1", "DEFAULT");
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test signal IGNORE
+    say("  signal ignore...");
+    $i = 0;
+    while ($i < $iterations) {
+        core::signal("USR2", "IGNORE");
+        core::signal("USR2", "DEFAULT");
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test signal handler replacement
+    say("  signal handler replacement...");
+    $i = 0;
+    while ($i < $iterations) {
+        core::signal("USR1", \&my_handler);
+        core::signal("USR1", \&my_handler);
+        core::signal("USR1", "IGNORE");
+        core::signal("USR1", "DEFAULT");
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test PIPE ignore (common pattern)
+    say("  SIGPIPE ignore...");
+    $i = 0;
+    while ($i < $iterations) {
+        core::signal("PIPE", "IGNORE");
+        core::signal("PIPE", "DEFAULT");
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All signal tests passed!");
+    return 0;
+}

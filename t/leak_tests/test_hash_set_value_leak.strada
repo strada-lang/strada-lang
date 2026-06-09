@@ -1,0 +1,60 @@
+#!/usr/bin/env strada
+# Regression test for two temp-cleanup leaks in the code generator.
+#
+# 1) hash_set($h, KEY, VALUE) value leak.
+#    The hash_set inline codegen passed VALUE straight to strada_hv_store,
+#    which INCREFS it (it is the non-_take store variant), but only the KEY
+#    temp was ever decref'd afterward -- the VALUE temp was not. So whenever
+#    VALUE was an owned temporary (a literal, or the result of repeat() /
+#    split() / keys() / a concat), hash_set leaked exactly one ref per call.
+#    Found in examples/test_array_hash.strada (`hash_set($h, "name", "Alice")`),
+#    where every populated hash entry leaked its value string.
+#    Fix: capture VALUE into a temp and decref it when needs_temp_cleanup is
+#    true, mirroring the existing KEY handling.
+#
+# 2) repeat() / typeof() / cast_str() / cast_num() temp leak.
+#    These builtins each allocate an owned StradaValue* but were missing from
+#    needs_temp_cleanup(), so when used as a temp argument -- e.g.
+#    say("x: " . repeat("*", 3)) -- the owned result was dropped without a
+#    decref. (cast_int is intentionally NOT covered: it yields an immortal
+#    tagged int that needs no cleanup.)
+#    Found in examples/test_strings.strada.
+#
+# Both forms are looped so any surviving per-call leak shows up large under
+# valgrind. The idiomatic `$h{k} = ...` / `push(@a, ...)` forms were already
+# clean; only the hash_set() builtin and these four builtins tripped the bug.
+
+func build_hash(int $seed) scalar {
+    my scalar $h = hash_new();
+    # VALUE is an owned temp in each call below.
+    hash_set($h, "lit", "literal");                  # string-literal value
+    hash_set($h, "rep", repeat("x", 3));             # repeat() result value
+    hash_set($h, "cat", "row" . $seed);              # concat result value
+    hash_set($h, "cast", cast_str($seed));           # cast_str() result value
+    my scalar $parts = split("a,b,c", ",");
+    hash_set($h, "first", $parts);                   # owned array as value
+    return $h;
+}
+
+func builtin_temps(int $seed) str {
+    # Each builtin result used as a concat/say temp must be cleaned up.
+    my str $a = "rep:" . repeat("*", 2);
+    my str $b = "type:" . typeof($seed);
+    my str $c = "s:" . cast_str($seed);
+    my str $d = "n:" . cast_num(1);
+    return $a . $b . $c . $d;
+}
+
+func main() int {
+    my int $i = 0;
+    my int $checksum = 0;
+    while ($i < 2000) {
+        my scalar $h = build_hash($i);
+        $checksum = $checksum + size(keys($h));
+        my str $s = builtin_temps($i);
+        $checksum = $checksum + length($s);
+        $i = $i + 1;
+    }
+    say("checksum=" . $checksum);
+    return 0;
+}

@@ -1,0 +1,112 @@
+#!/usr/bin/env strada
+# Test regex compilation cache for memory leaks
+# Compiled regexes are cached and reused across calls
+# Run: valgrind --leak-check=full ./test_regex_cache
+
+func main() int {
+    say("Testing regex cache for memory leaks...");
+    my int $iterations = 100;
+
+    # Test basic match with same pattern (should cache)
+    say("  Repeated regex match (cache hit)...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my str $text = "Hello World 123";
+        if ($text =~ /(\w+)\s+(\w+)/) {
+            if ($1 ne "Hello") {
+                say("    FAIL: capture mismatch");
+                return 1;
+            }
+        } else {
+            say("    FAIL: match failed");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test match with different patterns (tests cache eviction)
+    say("  Different regex patterns...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $text = "abc123def456";
+        if ($text =~ /(\d+)/) {
+            if ($1 ne "123") {
+                say("    FAIL: digit capture mismatch");
+                return 1;
+            }
+        }
+        if ($text =~ /([a-z]+)/) {
+            if ($1 ne "abc") {
+                say("    FAIL: alpha capture mismatch");
+                return 1;
+            }
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test regex substitution with cached pattern
+    say("  Regex substitution (cached pattern)...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $text = "foo bar baz";
+        $text =~ s/bar/qux/;
+        if ($text ne "foo qux baz") {
+            say("    FAIL: substitution result: " . $text);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test global substitution
+    say("  Global substitution...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $text = "aaa bbb ccc";
+        $text =~ s/[a-z]+/X/g;
+        if ($text ne "X X X") {
+            say("    FAIL: global sub result: " . $text);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test split with regex
+    say("  Regex split...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $text = "one:two:three";
+        my array @parts = split(":", $text);
+        if (size(@parts) != 3) {
+            say("    FAIL: split size");
+            return 1;
+        }
+        if ($parts[0] ne "one" || $parts[2] ne "three") {
+            say("    FAIL: split values");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test case-insensitive match
+    say("  Case-insensitive match...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $text = "Hello World";
+        if ($text =~ /hello/i) {
+            # pass - matched case-insensitive
+        } else {
+            say("    FAIL: case-insensitive match");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All regex cache tests passed!");
+    return 0;
+}

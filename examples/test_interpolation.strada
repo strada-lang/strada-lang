@@ -1,0 +1,127 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_interpolation.strada - Test string interpolation
+#
+# Run: ./strada examples/test_interpolation.strada
+
+func main() int {
+    say("=== String Interpolation Tests ===\n");
+
+    # Test 1: Basic interpolation
+    say("1. Basic interpolation:");
+    my str $name = "Alice";
+    my str $greeting = "Hello, ${name}!";
+    say("   " . $greeting);
+    if ($greeting ne "Hello, Alice!") {
+        say("FAIL: expected 'Hello, Alice!'");
+        return 1;
+    }
+
+    # Test 2: Multiple variables
+    say("\n2. Multiple variables:");
+    my str $fname = "John";
+    my str $lname = "Doe";
+    my str $full = "${fname} ${lname}";
+    say("   " . $full);
+    if ($full ne "John Doe") {
+        say("FAIL: expected 'John Doe'");
+        return 1;
+    }
+
+    # Test 3: Integer interpolation
+    say("\n3. Integer interpolation:");
+    my int $age = 30;
+    my str $msg = "Age: ${age} years";
+    say("   " . $msg);
+    if ($msg ne "Age: 30 years") {
+        say("FAIL: expected 'Age: 30 years'");
+        return 1;
+    }
+
+    # Test 4: Escaped dollar sign
+    say("\n4. Escaped dollar sign:");
+    my str $price = "Price: \$100";
+    say("   " . $price);
+    if ($price ne "Price: $100") {
+        say("FAIL: expected 'Price: \$100'");
+        return 1;
+    }
+
+    # Test 5: Dollar without braces (literal)
+    say("\n5. Dollar without braces (literal):");
+    my str $literal = "Cost is $50";
+    say("   " . $literal);
+    if ($literal ne "Cost is $50") {
+        say("FAIL: expected 'Cost is \$50'");
+        return 1;
+    }
+
+    # Test 6: Single quotes (no interpolation)
+    say("\n6. Single quotes (no interpolation):");
+    my str $sq = 'Hello, ${name}!';
+    say("   " . $sq);
+    if ($sq ne "Hello, \${name}!") {
+        say("FAIL: expected literal '\${name}'");
+        return 1;
+    }
+
+    # Test 7: Empty parts
+    say("\n7. Variable at start:");
+    my str $word = "World";
+    my str $hw = "${word} is great";
+    say("   " . $hw);
+    if ($hw ne "World is great") {
+        say("FAIL: expected 'World is great'");
+        return 1;
+    }
+
+    # Test 8: Variable at end
+    say("\n8. Variable at end:");
+    my str $end = "Hello ${word}";
+    say("   " . $end);
+    if ($end ne "Hello World") {
+        say("FAIL: expected 'Hello World'");
+        return 1;
+    }
+
+    # Test 9: Multiple adjacent variables
+    say("\n9. Adjacent variables:");
+    my str $a = "A";
+    my str $b = "B";
+    my str $c = "C";
+    my str $abc = "${a}${b}${c}";
+    say("   " . $abc);
+    if ($abc ne "ABC") {
+        say("FAIL: expected 'ABC'");
+        return 1;
+    }
+
+    # Test 10: Complex expression with interpolation
+    say("\n10. In function call:");
+    my str $item = "apple";
+    my int $count = 5;
+    say("   I have ${count} ${item}s");
+
+    # Test 11: Interpolation with newlines
+    say("\n11. With escape sequences:");
+    my str $nl = "Line1\n${name}\nLine3";
+    say("   (contains newlines)");
+
+    say("\n=== All interpolation tests passed! ===");
+    return 0;
+}

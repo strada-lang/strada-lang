@@ -1,0 +1,6 @@
+dir_exists=1
+content=hello world
+file_exists=1
+l1=line one
+l2=line two
+eof=1

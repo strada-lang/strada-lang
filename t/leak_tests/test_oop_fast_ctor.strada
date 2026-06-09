@@ -1,0 +1,159 @@
+#!/usr/bin/env strada
+# Test OOP fast constructor (no intermediate hash) and zero-arg accessors
+# Run: valgrind --leak-check=full ./test_oop_fast_ctor
+
+package Point;
+has ro int $x = 0;
+has ro int $y = 0;
+
+func distance_sq(scalar $self, scalar $other) int {
+    my int $dx = $self->x() - $other->x();
+    my int $dy = $self->y() - $other->y();
+    return $dx * $dx + $dy * $dy;
+}
+
+package Point3D;
+extends Point;
+has ro int $z = 0;
+
+func distance_sq_3d(scalar $self, scalar $other) int {
+    my int $dx = $self->x() - $other->x();
+    my int $dy = $self->y() - $other->y();
+    my int $dz = $self->z() - $other->z();
+    return $dx * $dx + $dy * $dy + $dz * $dz;
+}
+
+package Animal;
+has ro str $species (required);
+has rw int $energy = 100;
+
+package Dog;
+extends Animal;
+has ro str $name (required);
+
+package main;
+
+func main() int {
+    say("Testing OOP fast constructor and zero-arg accessors...");
+    my int $iterations = 200;
+
+    # Test basic has-based constructor with defaults
+    say("  Constructor with defaults...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my scalar $p = Point::new("x", 3, "y", 4);
+        if ($p->x() != 3) {
+            say("    FAIL: x() returned " . $p->x());
+            return 1;
+        }
+        if ($p->y() != 4) {
+            say("    FAIL: y() returned " . $p->y());
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test constructor using default values (no args passed for those attrs)
+    say("  Constructor default values...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $p = Point::new();
+        if ($p->x() != 0) {
+            say("    FAIL: default x() returned " . $p->x());
+            return 1;
+        }
+        if ($p->y() != 0) {
+            say("    FAIL: default y() returned " . $p->y());
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test zero-arg accessor calls in tight loop (no pack_args allocation)
+    say("  Zero-arg accessor calls...");
+    my scalar $pt = Point::new("x", 10, "y", 20);
+    $i = 0;
+    my int $sum = 0;
+    while ($i < $iterations * 10) {
+        $sum = $sum + $pt->x() + $pt->y();
+        $i = $i + 1;
+    }
+    if ($sum != $iterations * 10 * 30) {
+        say("    FAIL: sum = " . $sum);
+        return 1;
+    }
+    say("    PASS");
+
+    # Test distance_sq (multiple zero-arg accessor calls per invocation)
+    say("  Method with accessor calls...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $a = Point::new("x", 1, "y", 2);
+        my scalar $b = Point::new("x", 4, "y", 6);
+        my int $d = $a->distance_sq($b);
+        if ($d != 25) {
+            say("    FAIL: distance_sq = " . $d);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test inherited constructor (Point3D extends Point)
+    say("  Inherited constructor...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $p = Point3D::new("x", 1, "y", 2, "z", 3);
+        if ($p->x() != 1 || $p->y() != 2 || $p->z() != 3) {
+            say("    FAIL: Point3D accessors");
+            return 1;
+        }
+        my int $d = $p->distance_sq_3d(Point3D::new("x", 4, "y", 6, "z", 6));
+        if ($d != 34) {
+            say("    FAIL: distance_sq_3d = " . $d);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test required attrs with inherited defaults
+    say("  Required + default attrs...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $d = Dog::new("name", "Rex", "species", "canine");
+        if ($d->name() ne "Rex") {
+            say("    FAIL: name = " . $d->name());
+            return 1;
+        }
+        if ($d->species() ne "canine") {
+            say("    FAIL: species = " . $d->species());
+            return 1;
+        }
+        if ($d->energy() != 100) {
+            say("    FAIL: energy = " . $d->energy());
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test rw setter
+    say("  RW setter...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $a = Animal::new("species", "cat");
+        $a->set_energy(50);
+        if ($a->energy() != 50) {
+            say("    FAIL: set_energy");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All OOP fast constructor tests passed!");
+    return 0;
+}

@@ -1,0 +1,61 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_files.strada - Test file I/O capabilities
+
+func write_test() void {
+    my str $content = "Hello from Strada!\nThis is line 2.\nThis is line 3.\n";
+    sys::spew("test_output.txt", $content);
+    say("Wrote to test_output.txt");
+}
+
+func read_test() void {
+    my str $content = slurp("test_output.txt");
+    say("Read from file:");
+    say($content);
+}
+
+func read_line_test() void {
+    my scalar $fh = sys::open("test_output.txt", "r");
+    
+    say("Reading line by line:");
+    my str $line1 = readline($fh);
+    say($line1);
+    
+    my str $line2 = readline($fh);
+    say($line2);
+    
+    my str $line3 = readline($fh);
+    say($line3);
+    
+    sys::close($fh);
+}
+
+func main() int {
+    say("=== File I/O Test ===");
+    say("");
+    
+    write_test();
+    say("");
+    
+    read_test();
+    say("");
+    
+    read_line_test();
+    
+    return 0;
+}

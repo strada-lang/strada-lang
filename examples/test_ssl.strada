@@ -1,0 +1,105 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# Test SSL/TLS socket module
+#
+# Build the SSL library first:
+#   cd lib/ssl && make
+#
+# Then run this test:
+#   ./stradac examples/test_ssl.strada build/test_ssl.c
+#   gcc -o build/test_ssl build/test_ssl.c runtime/strada_runtime.c -Iruntime -ldl -lm -lpthread
+#   ./build/test_ssl
+
+use lib "lib";
+use ssl;
+
+func main() int {
+    say("=== SSL Socket Test ===");
+    say("");
+
+    # Test 1: Connect to example.com over HTTPS
+    say("Test 1: Connecting to example.com:443...");
+    my int $conn = ssl::connect("example.com", 443);
+
+    if ($conn == 0) {
+        say("  FAIL: Could not connect");
+        say("  Error: " . ssl::error());
+        return 1;
+    }
+    say("  Connected!");
+
+    # Show connection info
+    say("  SSL Version: " . ssl::version($conn));
+    say("  Cipher: " . ssl::cipher($conn));
+    say("  Peer Cert: " . ssl::peer_cert($conn));
+
+    # Send HTTP request
+    say("");
+    say("Test 2: Sending HTTP request...");
+    my str $request = "GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n";
+    my int $written = ssl::write($conn, $request);
+    say("  Sent " . $written . " bytes");
+
+    # Read response
+    say("");
+    say("Test 3: Reading response...");
+    my str $response = "";
+    my str $chunk = ssl::read($conn, 4096);
+    while (length($chunk) > 0) {
+        $response = $response . $chunk;
+        $chunk = ssl::read($conn, 4096);
+    }
+
+    say("  Received " . length($response) . " bytes");
+
+    # Show first few lines of response
+    my int $newlines = 0;
+    my int $i = 0;
+    say("");
+    say("Response (first 10 lines):");
+    say("---");
+    while ($i < length($response) && $newlines < 10) {
+        my str $c = substr($response, $i, 1);
+        print($c);
+        if ($c eq "\n") {
+            $newlines = $newlines + 1;
+        }
+        $i = $i + 1;
+    }
+    say("---");
+
+    # Close connection
+    ssl::close($conn);
+    say("");
+    say("Connection closed.");
+
+    # Test 4: Convenience HTTP GET function
+    say("");
+    say("Test 4: Using http_get convenience function...");
+    my str $page = ssl::http_get("httpbin.org", 443, "/get");
+    if (length($page) > 0) {
+        say("  Got " . length($page) . " bytes from httpbin.org");
+        say("  PASS");
+    } else {
+        say("  FAIL: Empty response");
+    }
+
+    say("");
+    say("=== All SSL tests complete ===");
+    return 0;
+}

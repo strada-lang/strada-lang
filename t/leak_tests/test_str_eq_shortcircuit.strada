@@ -1,0 +1,118 @@
+#!/usr/bin/env strada
+# Test string equality length short-circuit (Phase 5)
+# strada_str_eq_lit now checks lengths before memcmp.
+# Run: valgrind --leak-check=full ./test_str_eq_shortcircuit
+
+func main() int {
+    say("Testing string equality short-circuit...");
+    my int $iterations = 100;
+
+    # Test 1: Equal strings (same length, memcmp path)
+    say("  Equal strings...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my str $s = "hello";
+        if ($s ne "hello") {
+            say("    FAIL: equal strings");
+            return 1;
+        }
+        if (!($s eq "hello")) {
+            say("    FAIL: eq operator");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 2: Different lengths (short-circuit path)
+    say("  Different length strings (short-circuit)...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $short = "hi";
+        my str $long = "hello world this is a much longer string";
+        if ($short eq "hello") {
+            say("    FAIL: short vs long");
+            return 1;
+        }
+        if ($long eq "hi") {
+            say("    FAIL: long vs short");
+            return 1;
+        }
+        if ($short eq $long) {
+            say("    FAIL: mismatch eq");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 3: Same length, different content
+    say("  Same length, different content...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $a = "abcde";
+        my str $b = "abcdf";
+        if ($a eq "abcdf") {
+            say("    FAIL: same len diff content");
+            return 1;
+        }
+        if ($b eq "abcde") {
+            say("    FAIL: same len diff content 2");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 4: Empty strings
+    say("  Empty string comparisons...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $empty = "";
+        if ($empty ne "") {
+            say("    FAIL: empty eq empty");
+            return 1;
+        }
+        if ($empty eq "x") {
+            say("    FAIL: empty eq non-empty");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 5: Integer/number comparisons via eq (goes through to_str_buf)
+    say("  Numeric to string eq...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $n = 42;
+        my num $f = 3.14;
+        # These convert int/num to string via to_str_buf then compare
+        if ("" . $n ne "42") {
+            say("    FAIL: int to str eq");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 6: String comparisons in hash key matching
+    say("  Hash key matching (uses str_eq internally)...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ("alpha" => 1, "beta" => 2, "gamma" => 3, "delta" => 4);
+        if ($h{"alpha"} != 1 || $h{"delta"} != 4) {
+            say("    FAIL: hash key eq");
+            return 1;
+        }
+        if (exists($h{"nonexistent"})) {
+            say("    FAIL: hash key ne");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All string equality short-circuit tests passed!");
+    return 0;
+}

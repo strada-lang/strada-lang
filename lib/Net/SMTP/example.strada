@@ -1,0 +1,230 @@
+# Net::SMTP Example
+#
+# Demonstrates how to use the SMTP library to send emails
+#
+# Build:
+#   cd /path/to/strada
+#   ./strada lib/Net/SMTP/example.strada
+#
+# Usage:
+#   ./example send <host> <port> <from> <to> <subject> <body>
+#   ./example send-auth <host> <port> <user> <pass> <from> <to> <subject> <body>
+#   ./example test <host> <port>
+
+use lib "lib";
+use Net::SMTP;
+
+func print_usage() void {
+    say("Net::SMTP Example");
+    say("");
+    say("Usage:");
+    say("  ./example test <host> <port>");
+    say("      Test connection to SMTP server");
+    say("");
+    say("  ./example send <host> <port> <from> <to> <subject> <body>");
+    say("      Send email without authentication");
+    say("");
+    say("  ./example send-auth <host> <port> <user> <pass> <from> <to> <subject> <body>");
+    say("      Send email with AUTH LOGIN");
+    say("");
+    say("Examples:");
+    say("  ./example test localhost 25");
+    say("  ./example send localhost 25 sender@local recipient@local \"Test\" \"Hello World\"");
+    say("  ./example send-auth smtp.example.com 587 user@example.com password sender@example.com to@example.com \"Subject\" \"Body\"");
+}
+
+func cmd_test(str $host, int $port) int {
+    say("Connecting to " . $host . ":" . $port . "...");
+
+    my scalar $smtp = SMTP::new($host, $port);
+    if (!defined($smtp)) {
+        say("ERROR: Failed to connect to " . $host . ":" . $port);
+        return 1;
+    }
+
+    say("Connected! Server greeting received.");
+    say("Response: " . trim($smtp->message()));
+
+    # Try EHLO
+    say("");
+    say("Sending EHLO...");
+    $smtp->debug(1);
+
+    if ($smtp->ehlo("localhost")) {
+        say("EHLO successful!");
+        say("Server capabilities:");
+        say($smtp->message());
+    } else {
+        say("EHLO failed, trying HELO...");
+        if ($smtp->helo("localhost")) {
+            say("HELO successful!");
+        } else {
+            say("HELO failed!");
+        }
+    }
+
+    say("");
+    say("Sending QUIT...");
+    $smtp->quit();
+
+    say("");
+    say("Test complete!");
+    return 0;
+}
+
+func cmd_send(str $host, int $port, str $from, str $to, str $subject, str $body) int {
+    say("Connecting to " . $host . ":" . $port . "...");
+
+    my scalar $smtp = SMTP::new($host, $port);
+    if (!defined($smtp)) {
+        say("ERROR: Failed to connect");
+        return 1;
+    }
+
+    say("Connected!");
+
+    # Enable debug to see conversation
+    $smtp->debug(1);
+
+    # EHLO/HELO
+    if (!$smtp->ehlo("localhost")) {
+        if (!$smtp->helo("localhost")) {
+            say("ERROR: HELO failed");
+            $smtp->quit();
+            return 1;
+        }
+    }
+
+    # Send email using convenience method
+    my array @recipients = ();
+    push(@recipients, $to);
+
+    say("");
+    say("Sending email...");
+
+    if ($smtp->send_mail($from, \@recipients, $subject, $body)) {
+        say("Email sent successfully!");
+    } else {
+        say("ERROR: Failed to send email");
+        say("Last response: " . $smtp->message());
+        $smtp->quit();
+        return 1;
+    }
+
+    $smtp->quit();
+    return 0;
+}
+
+func cmd_send_auth(str $host, int $port, str $user, str $pass, str $from, str $to, str $subject, str $body) int {
+    say("Connecting to " . $host . ":" . $port . "...");
+
+    my scalar $smtp = SMTP::new($host, $port);
+    if (!defined($smtp)) {
+        say("ERROR: Failed to connect");
+        return 1;
+    }
+
+    say("Connected!");
+    $smtp->debug(1);
+
+    # EHLO
+    if (!$smtp->ehlo("localhost")) {
+        say("ERROR: EHLO failed");
+        $smtp->quit();
+        return 1;
+    }
+
+    # Check if server supports STARTTLS and use it
+    my str $caps = $smtp->message();
+    if (index($caps, "STARTTLS") >= 0) {
+        say("");
+        say("Note: Server supports STARTTLS.");
+        say("For production, consider using a secure connection.");
+    }
+
+    # Authenticate
+    say("");
+    say("Authenticating...");
+    if (!$smtp->auth($user, $pass)) {
+        say("ERROR: Authentication failed");
+        say("Response: " . $smtp->message());
+        $smtp->quit();
+        return 1;
+    }
+
+    say("Authentication successful!");
+
+    # Send email
+    my array @recipients = ();
+    push(@recipients, $to);
+
+    say("");
+    say("Sending email...");
+
+    if ($smtp->send_mail($from, \@recipients, $subject, $body)) {
+        say("Email sent successfully!");
+    } else {
+        say("ERROR: Failed to send email");
+        say("Response: " . $smtp->message());
+        $smtp->quit();
+        return 1;
+    }
+
+    $smtp->quit();
+    return 0;
+}
+
+func main() int {
+    my array @args = @ARGV;
+    my int $argc = size(@args);
+
+    if ($argc < 1) {
+        print_usage();
+        return 1;
+    }
+
+    my str $cmd = $args[0];
+
+    if ($cmd eq "test") {
+        if ($argc < 3) {
+            say("Usage: ./example test <host> <port>");
+            return 1;
+        }
+        my str $host = $args[1];
+        my int $port = cast_int($args[2]);
+        return cmd_test($host, $port);
+    }
+
+    if ($cmd eq "send") {
+        if ($argc < 7) {
+            say("Usage: ./example send <host> <port> <from> <to> <subject> <body>");
+            return 1;
+        }
+        my str $host = $args[1];
+        my int $port = cast_int($args[2]);
+        my str $from = $args[3];
+        my str $to = $args[4];
+        my str $subject = $args[5];
+        my str $body = $args[6];
+        return cmd_send($host, $port, $from, $to, $subject, $body);
+    }
+
+    if ($cmd eq "send-auth") {
+        if ($argc < 9) {
+            say("Usage: ./example send-auth <host> <port> <user> <pass> <from> <to> <subject> <body>");
+            return 1;
+        }
+        my str $host = $args[1];
+        my int $port = cast_int($args[2]);
+        my str $user = $args[3];
+        my str $pass = $args[4];
+        my str $from = $args[5];
+        my str $to = $args[6];
+        my str $subject = $args[7];
+        my str $body = $args[8];
+        return cmd_send_auth($host, $port, $user, $pass, $from, $to, $subject, $body);
+    }
+
+    print_usage();
+    return 1;
+}

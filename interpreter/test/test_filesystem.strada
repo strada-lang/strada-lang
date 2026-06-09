@@ -1,0 +1,46 @@
+func main() int {
+    # Use core::system and core::qx for filesystem operations
+    # since the interpreter delegates to the host Strada runtime
+
+    # Create a temp directory
+    core::system("mkdir -p /tmp/test_interp_fs_dir");
+
+    # Check directory exists via qx
+    my str $exists = chomp(core::qx("test -d /tmp/test_interp_fs_dir && echo 1 || echo 0"));
+    say("dir_exists=" . $exists);
+
+    # Write a file using core::spew
+    core::spew("/tmp/test_interp_fs_dir/test.txt", "hello world");
+
+    # Read it back with core::slurp
+    my str $content = core::slurp("/tmp/test_interp_fs_dir/test.txt");
+    say("content=" . chomp($content));
+
+    # Check file exists
+    my str $fexists = chomp(core::qx("test -f /tmp/test_interp_fs_dir/test.txt && echo 1 || echo 0"));
+    say("file_exists=" . $fexists);
+
+    # Write and read via file handle
+    my scalar $fh = core::open("/tmp/test_interp_fs_dir/test2.txt", "w");
+    say($fh, "line one");
+    say($fh, "line two");
+    core::close($fh);
+
+    my scalar $rfh = core::open("/tmp/test_interp_fs_dir/test2.txt", "r");
+    my str $l1 = core::readline($rfh);
+    my str $l2 = core::readline($rfh);
+    core::close($rfh);
+    say("l1=" . $l1);
+    say("l2=" . $l2);
+
+    # EOF check
+    my scalar $efh = core::open("/tmp/test_interp_fs_dir/test.txt", "r");
+    my str $all = core::readline($efh);
+    my int $at_eof = core::eof($efh);
+    core::close($efh);
+    say("eof=" . $at_eof);
+
+    # Cleanup
+    core::system("rm -rf /tmp/test_interp_fs_dir");
+    return 0;
+}

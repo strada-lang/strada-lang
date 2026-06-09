@@ -1,0 +1,82 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# Demonstrates how dumper shows blessed objects
+# Blessed references display as: bless({...}, 'ClassName')
+
+package Animal;
+
+func Animal_new(str $name, str $species) scalar {
+    my hash %self = ();
+    $self{"name"} = $name;
+    $self{"species"} = $species;
+    return bless(\%self, "Animal");
+}
+
+package Dog;
+
+func Dog_new(str $name) scalar {
+    my hash %self = ();
+    $self{"name"} = $name;
+    $self{"species"} = "Canis familiaris";
+    $self{"tricks"} = 0;
+    return bless(\%self, "Dog");
+}
+
+package main;
+
+func main() void {
+    say("=== Dumper with Blessed Objects ===");
+    say("");
+
+    # Unblessed hash reference
+    my hash %plain = ();
+    $plain{"key"} = "value";
+    $plain{"count"} = 42;
+    say("Unblessed hash ref:");
+    dumper(\%plain);
+    say("");
+
+    # Blessed as Animal
+    my scalar $cat = Animal_new("Whiskers", "Felis catus");
+    say("Blessed as Animal:");
+    dumper($cat);
+    say("");
+
+    # Blessed as Dog
+    my scalar $dog = Dog_new("Rex");
+    say("Blessed as Dog:");
+    dumper($dog);
+    say("");
+
+    # Array of blessed objects
+    my array @pets = ();
+    push(@pets, $cat);
+    push(@pets, $dog);
+    push(@pets, Animal_new("Polly", "Psittacus erithacus"));
+    say("Array of blessed objects:");
+    dumper(\@pets);
+    say("");
+
+    # Using dumper_str() for string output
+    say("dumper_str() returns: " . dumper_str($dog));
+    say("");
+
+    # Check blessing with blessed()
+    say("blessed(\$cat) = " . blessed($cat));
+    say("blessed(\$dog) = " . blessed($dog));
+}

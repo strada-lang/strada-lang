@@ -1,0 +1,96 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# Demonstrates $${expr} syntax for dereferencing expressions
+# Use $${expr} when you have a reference stored in a hash, array, or returned from a function
+
+func get_ref(scalar $ref) scalar {
+    return $ref;
+}
+
+func main() int {
+    say("=== Dereference Expression Syntax: \$\${expr} ===");
+    say("");
+
+    # Reference stored in a hash
+    say("--- Reference in a hash ---");
+    my int $counter = 0;
+    my scalar $state = {
+        name => "counter_state",
+        value_ref => \$counter
+    };
+    
+    say("counter: " . $counter);
+    $${$state->{"value_ref"}} = 10;
+    say("after \$\${\$state->{\"value_ref\"}} = 10: " . $counter);
+    $${$state->{"value_ref"}} = $${$state->{"value_ref"}} + 5;
+    say("after increment: " . $counter);
+    say("");
+
+    # Reference stored in an array
+    say("--- Reference in an array ---");
+    my int $a = 100;
+    my int $b = 200;
+    my scalar $refs = [\$a, \$b];
+    
+    say("a=" . $a . ", b=" . $b);
+    $${$refs->[0]} = 111;
+    $${$refs->[1]} = 222;
+    say("after setting via array: a=" . $a . ", b=" . $b);
+    say("");
+
+    # Reference returned from a function
+    say("--- Reference from a function ---");
+    my str $message = "Hello";
+    say("message: " . $message);
+    $${get_ref(\$message)} = "Goodbye";
+    say("after \$\${get_ref(\\$message)} = \"Goodbye\": " . $message);
+    say("");
+
+    # Nested hash with reference
+    say("--- Nested structure ---");
+    my int $score = 0;
+    my scalar $game = {
+        player => {
+            name => "Alice",
+            score_ref => \$score
+        }
+    };
+    
+    say("score: " . $score);
+    $${$game->{"player"}->{"score_ref"}} = 100;
+    say("after update: " . $score);
+    say("");
+
+    # Compare $$var vs $${expr}
+    say("--- Comparison: \$\$var vs \$\${expr} ---");
+    my int $x = 42;
+    my scalar $ref = \$x;
+    my scalar $holder = { r => \$x };
+    
+    # Both read the same value
+    say("\$\$ref = " . $$ref);
+    say("\$\${\$holder->{\"r\"}} = " . $${$holder->{"r"}});
+    
+    # Both can write
+    $$ref = 50;
+    say("after \$\$ref = 50: x=" . $x);
+    $${$holder->{"r"}} = 60;
+    say("after \$\${\$holder->{\"r\"}} = 60: x=" . $x);
+
+    return 0;
+}

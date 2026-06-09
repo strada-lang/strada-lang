@@ -1,0 +1,120 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_references_demo.strada - Demonstrating references in Strada
+
+func main() int {
+    say("╔══════════════════════════════════════╗");
+    say("║  Strada References Demo              ║");
+    say("╚══════════════════════════════════════╝");
+    say("");
+    
+    # ═══════════════════════════════════════
+    # SCALAR REFERENCES
+    # ═══════════════════════════════════════
+    say("=== Scalar References ===");
+    
+    my int $number = 42;
+    my str $text = "Hello";
+    my num $pi = 3.14159;
+    
+    # Create references using refto()
+    my scalar $num_ref = refto($number);
+    my scalar $str_ref = refto($text);
+    my scalar $pi_ref = refto($pi);
+    
+    say("Original values:");
+    say("  $number = " . $number);
+    say("  $text = " . $text);
+    say("  $pi = " . $pi);
+    
+    # Check if they're references
+    say("");
+    say("Are these references?");
+    say("  is_ref($number) = " . is_ref($number));
+    say("  is_ref($num_ref) = " . is_ref($num_ref));
+    
+    # Dereference to get values back
+    say("");
+    say("Dereferenced values:");
+    say("  deref($num_ref) = " . deref($num_ref));
+    say("  deref($str_ref) = " . deref($str_ref));
+    say("  deref($pi_ref) = " . deref($pi_ref));
+    
+    # Get the type of referenced value
+    say("");
+    say("Reference types:");
+    say("  reftype($num_ref) = " . reftype($num_ref));
+    say("  reftype($str_ref) = " . reftype($str_ref));
+    say("  reftype($pi_ref) = " . reftype($pi_ref));
+    
+    # ═══════════════════════════════════════
+    # ARRAY REFERENCES  
+    # ═══════════════════════════════════════
+    say("");
+    say("=== Array References ===");
+    
+    my array @numbers;
+    push(@numbers, 10);
+    push(@numbers, 20);
+    push(@numbers, 30);
+    
+    my array @names;
+    push(@names, "Alice");
+    push(@names, "Bob");
+    push(@names, "Charlie");
+    
+    # Create references to arrays
+    my scalar $arr_ref = refto(@numbers);
+    my scalar $names_ref = refto(@names);
+    
+    say("Original arrays:");
+    say("  numbers array has " . size(@numbers) . " elements");
+    say("  names array has " . size(@names) . " elements");
+    
+    say("");
+    say("Array reference types:");
+    say("  is_ref($arr_ref) = " . is_ref($arr_ref));
+    say("  reftype($arr_ref) = " . reftype($arr_ref));
+    say("  reftype($names_ref) = " . reftype($names_ref));
+    
+    # ═══════════════════════════════════════
+    # PASS BY REFERENCE
+    # ═══════════════════════════════════════
+    say("");
+    say("=== Pass by Reference ===");
+    
+    my int $value = 100;
+    say("Before modify_value: $value = " . $value);
+    modify_value(refto($value));
+    say("After modify_value: $value = " . $value);
+    
+    say("");
+    say("╔══════════════════════════════════════╗");
+    say("║  ✓ References working!               ║");
+    say("╚══════════════════════════════════════╝");
+    
+    return 0;
+}
+
+# Function that modifies a value through a reference
+func modify_value(scalar $ref) void {
+    # In a full implementation, you'd use refset() to modify
+    # For now, we demonstrate the reference was received
+    say("  Received reference, is_ref = " . is_ref($ref));
+    say("  Referenced value = " . deref($ref));
+}

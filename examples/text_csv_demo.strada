@@ -1,0 +1,67 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# text_csv_demo.strada - Example usage of Text::CSV
+#
+# Run: ./strada examples/text_csv_demo.strada
+
+use lib "lib";
+use Text::CSV;
+
+func main() int {
+    my scalar $csv = Text::CSV::new({});
+
+    my str $line = "a,\"b\",c";
+    if (!Text::CSV::parse($csv, $line)) {
+        say("parse error: " . Text::CSV::error_diag($csv));
+        return 1;
+    }
+
+    my scalar $fields = Text::CSV::fields($csv);
+    say("Parsed fields:");
+    say("  0: " . $fields->[0]);
+    say("  1: " . $fields->[1]);
+    say("  2: " . $fields->[2]);
+
+    my scalar $out_fields = ["x", "y,z", "q\"u"];
+    if (!Text::CSV::combine($csv, $out_fields)) {
+        say("combine error: " . Text::CSV::error_diag($csv));
+        return 1;
+    }
+
+    say("Combined: " . Text::CSV::string($csv));
+
+    # Multi-line demo via getline
+    my scalar $fh = sys::open("/tmp/text_csv_demo.csv", "w");
+    sys::fwrite($fh, "a,\"multi\nline\",c\n");
+    sys::close($fh);
+
+    $fh = sys::open("/tmp/text_csv_demo.csv", "r");
+    my scalar $row = Text::CSV::getline($csv, $fh);
+    sys::close($fh);
+
+    if (defined($row)) {
+        say("Multiline row:");
+        say("  0: " . $row->[0]);
+        say("  1: " . $row->[1]);
+        say("  2: " . $row->[2]);
+    } else {
+        say("getline error: " . Text::CSV::error_diag($csv));
+    }
+
+    return 0;
+}

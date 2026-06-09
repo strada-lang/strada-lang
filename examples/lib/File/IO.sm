@@ -1,0 +1,12 @@
+# File/IO.sm - File I/O utilities
+package File::IO;
+
+func greet(str $name) void {
+    say("Hello, " . $name . "!");
+}
+
+func banner(str $text) void {
+    say("===================");
+    say($text);
+    say("===================");
+}

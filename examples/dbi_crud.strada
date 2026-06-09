@@ -1,0 +1,217 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# dbi_crud.strada - Complete CRUD Operations Example
+#
+# Demonstrates Create, Read, Update, Delete operations
+# with a task management system
+# Run: ./strada examples/dbi_crud.strada
+
+use lib "lib";
+use DBI;
+
+# Global database handle
+my scalar $db = undef;
+
+# Initialize database
+func init_db() int {
+    $db = DBI::connect("dbi:SQLite::memory:", "", "");
+    if (!defined($db)) {
+        return 0;
+    }
+
+    # Create tasks table
+    DBI::do_sql($db, "
+        CREATE TABLE tasks (
+            id INTEGER PRIMARY KEY,
+            title TEXT NOT NULL,
+            description TEXT,
+            priority INTEGER DEFAULT 1,
+            completed INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    ");
+
+    return 1;
+}
+
+# CREATE - Add a new task
+func add_task(str $title, str $description, int $priority) int {
+    my int $id = DBI::insert_get_id($db,
+        "INSERT INTO tasks (title, description, priority) VALUES (?, ?, ?)",
+        [$title, $description, $priority]);
+    return $id;
+}
+
+# READ - Get all tasks
+func get_all_tasks() scalar {
+    return DBI::selectall_hashref($db,
+        "SELECT id, title, priority, completed FROM tasks ORDER BY priority DESC, id",
+        []);
+}
+
+# READ - Get single task by ID
+func get_task(int $id) scalar {
+    return DBI::selectrow_hashref($db, "SELECT * FROM tasks WHERE id = ?", [$id]);
+}
+
+# READ - Get pending tasks only
+func get_pending_tasks() scalar {
+    return DBI::selectall_hashref($db,
+        "SELECT * FROM tasks WHERE completed = 0 ORDER BY priority DESC",
+        []);
+}
+
+# UPDATE - Mark task as completed
+func complete_task(int $id) int {
+    return DBI::do($db, "UPDATE tasks SET completed = 1 WHERE id = ?", [$id]);
+}
+
+# UPDATE - Change task priority
+func set_priority(int $id, int $priority) int {
+    return DBI::do($db, "UPDATE tasks SET priority = ? WHERE id = ?", [$priority, $id]);
+}
+
+# UPDATE - Edit task title
+func edit_title(int $id, str $new_title) int {
+    return DBI::do($db, "UPDATE tasks SET title = ? WHERE id = ?", [$new_title, $id]);
+}
+
+# DELETE - Remove a task
+func delete_task(int $id) int {
+    return DBI::do($db, "DELETE FROM tasks WHERE id = ?", [$id]);
+}
+
+# DELETE - Remove all completed tasks
+func clear_completed() int {
+    return DBI::do_sql($db, "DELETE FROM tasks WHERE completed = 1");
+}
+
+# Display tasks
+func display_tasks(scalar $tasks, str $header) void {
+    say("\n" . $header);
+    say("-" . "---" . "---" . "---" . "---" . "---" . "---" . "---" . "---");
+
+    if (size($tasks) == 0) {
+        say("  (no tasks)");
+        return;
+    }
+
+    my int $i = 0;
+    while ($i < size($tasks)) {
+        my scalar $task = $tasks->[$i];
+        my str $status = "[_]";
+        if ($task->{"completed"} == 1) {
+            $status = "[X]";
+        }
+        my str $pri = "";
+        if ($task->{"priority"} >= 3) {
+            $pri = " !!!";
+        } elsif ($task->{"priority"} == 2) {
+            $pri = " !";
+        }
+        say("  " . $status . " #" . $task->{"id"} . ": " . $task->{"title"} . $pri);
+        $i = $i + 1;
+    }
+}
+
+# Get stats
+func show_stats() void {
+    my scalar $total = DBI::selectcol($db, "SELECT COUNT(*) FROM tasks", []);
+    my scalar $completed = DBI::selectcol($db, "SELECT COUNT(*) FROM tasks WHERE completed = 1", []);
+    my scalar $pending = DBI::selectcol($db, "SELECT COUNT(*) FROM tasks WHERE completed = 0", []);
+    my scalar $high_pri = DBI::selectcol($db, "SELECT COUNT(*) FROM tasks WHERE priority >= 3 AND completed = 0", []);
+
+    say("\n=== Task Statistics ===");
+    say("  Total tasks: " . $total);
+    say("  Completed: " . $completed);
+    say("  Pending: " . $pending);
+    say("  High priority pending: " . $high_pri);
+}
+
+func main(int $argc, array @argv) int {
+    say("=== Task Manager - CRUD Example ===");
+
+    if (!init_db()) {
+        say("Error: Could not initialize database");
+        return 1;
+    }
+
+    # CREATE - Add some tasks
+    say("\n>>> Creating tasks...");
+    add_task("Buy groceries", "Milk, bread, eggs", 2);
+    add_task("Fix bug in login", "Users can't reset password", 3);
+    add_task("Write documentation", "API docs for new feature", 1);
+    add_task("Call mom", "Birthday reminder", 2);
+    add_task("Deploy to production", "Version 2.0 release", 3);
+
+    # READ - Show all tasks
+    display_tasks(get_all_tasks(), "All Tasks:");
+
+    # UPDATE - Complete some tasks
+    say("\n>>> Completing task #1...");
+    complete_task(1);
+
+    say(">>> Completing task #4...");
+    complete_task(4);
+
+    # READ - Show pending only
+    display_tasks(get_pending_tasks(), "Pending Tasks:");
+
+    # UPDATE - Change priority
+    say("\n>>> Increasing priority of task #3...");
+    set_priority(3, 3);
+
+    # UPDATE - Edit title
+    say(">>> Updating task #2 title...");
+    edit_title(2, "URGENT: Fix login bug");
+
+    # Show updated list
+    display_tasks(get_all_tasks(), "Updated Task List:");
+
+    # Show stats
+    show_stats();
+
+    # DELETE - Remove a task
+    say("\n>>> Deleting task #5...");
+    delete_task(5);
+
+    # DELETE - Clear completed
+    say(">>> Clearing completed tasks...");
+    my int $cleared = clear_completed();
+    say("   Removed " . $cleared . " completed tasks");
+
+    # Final state
+    display_tasks(get_all_tasks(), "Final Task List:");
+    show_stats();
+
+    # Get specific task details
+    say("\n>>> Getting details for task #2:");
+    my scalar $task = get_task(2);
+    if (defined($task)) {
+        say("  ID: " . $task->{"id"});
+        say("  Title: " . $task->{"title"});
+        say("  Description: " . $task->{"description"});
+        say("  Priority: " . $task->{"priority"});
+        say("  Completed: " . $task->{"completed"});
+    }
+
+    DBI::disconnect($db);
+    say("\nDone!");
+
+    return 0;
+}

@@ -1,0 +1,69 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_hash_barekeys.strada - Test native hash with bare key syntax like Perl
+
+func main() int {
+    say("=== Hash Bare Key Test ===");
+    say("");
+    
+    # Declare hash
+    my hash %user;
+    
+    # Set with bare keys (no quotes needed!)
+    $user{name} = "Peter";
+    $user{age} = 30;
+    $user{city} = "New York";
+    
+    # Read with bare keys
+    say("Name: " . $user{name});
+    say("Age: " . $user{age});
+    say("City: " . $user{city});
+    
+    # Can also use quoted keys (same thing)
+    say("");
+    say("Using quoted key: " . $user{"name"});
+    
+    # Dynamic key access
+    say("");
+    my str $key = "city";
+    say("Dynamic key ($key): " . $user{$key});
+    
+    # Test exists with bare key
+    say("");
+    say("exists(name): " . exists($user{name}));
+    say("exists(phone): " . exists($user{phone}));
+    
+    # Test delete with bare key
+    delete($user{city});
+    say("After delete(city), exists: " . exists($user{city}));
+    
+    # Keys and values
+    say("");
+    say("Keys: ");
+    my scalar $keys = keys(%user);
+    my int $i = 0;
+    while ($i < size($keys)) {
+        say("  " . $keys[$i]);
+        $i = $i + 1;
+    }
+    
+    say("");
+    say("=== Test Complete ===");
+    
+    return 0;
+}

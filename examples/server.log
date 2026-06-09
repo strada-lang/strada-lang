@@ -1,0 +1,6 @@
+Starting echo server on port 8080...
+Server listening. Connect with: nc localhost 8080
+Waiting for client...
+Client connected!
+Received: Hello from Strada client!
+Server done!

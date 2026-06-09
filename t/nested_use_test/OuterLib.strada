@@ -1,0 +1,22 @@
+# OuterLib - A library that uses InnerLib (nested use test)
+package OuterLib;
+
+use InnerLib;
+
+func quadruple(int $n) int {
+    # Uses InnerLib::twice twice
+    my int $doubled = InnerLib::twice($n);
+    return InnerLib::twice($doubled);
+}
+
+func fancy_greet(str $name) str {
+    # Uses InnerLib::greet and adds extra formatting
+    my str $greeting = InnerLib::greet($name);
+    return "*** " . $greeting . " ***";
+}
+
+func combined_magic(int $multiplier) int {
+    # Combines OuterLib and InnerLib functions
+    my int $magic = InnerLib::get_magic();
+    return quadruple($magic) * $multiplier;
+}

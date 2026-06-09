@@ -1,0 +1,31 @@
+func main() int {
+    # chr - character from code point
+    say("chr65=" . chr(65));
+    say("chr97=" . chr(97));
+    say("chr48=" . chr(48));
+
+    # ord - code point from character
+    say("ordA=" . ord("A"));
+    say("orda=" . ord("a"));
+    say("ord0=" . ord("0"));
+
+    # char_at - character at position
+    my str $s = "hello";
+    say("ch0=" . char_at($s, 0));
+    say("ch4=" . char_at($s, 4));
+
+    # bytes - byte length
+    say("bytes=" . bytes("hello"));
+    say("bytes_empty=" . bytes(""));
+
+    # Combine chr and ord for round-trip
+    my int $code = ord("Z");
+    my str $ch = chr($code);
+    say("roundtrip=" . $ch);
+
+    # Build string from char codes
+    my str $built = chr(72) . chr(105) . chr(33);
+    say("built=" . $built);
+
+    return 0;
+}

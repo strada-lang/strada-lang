@@ -1,0 +1,81 @@
+#!/usr/bin/env strada
+# Round 17 leak regressions:
+#
+# 1. `local $g = ...` inside a while/for/foreach/do-while body
+#    accumulated save-stack entries every iteration and crashed at
+#    STRADA_LOCAL_STACK_MAX=256 with "local() stack overflow". Now
+#    each loop body emits a per-iter save/restore that resets the
+#    stack at the bottom of each iteration.
+# 2. core::weaken(\$h{"key"}) emitted strada_deref_hash() with no
+#    args (compile error). Used the wrong AST attribute name
+#    (`object` instead of `hash`) for the NODE_HASH_ACCESS branch.
+# 3. strada_global_registry now has an atexit cleanup so
+#    `our` variables don't show as 40+ MB still-reachable on
+#    long-running programs that build dynamic `our` keys.
+# 4. strada_full_profile_init now frees prior per-file line buffers
+#    before memset, so toggling the profiler doesn't leak ~MB per
+#    restart.
+#
+# Run: valgrind --leak-check=full ./test_round17_local_loop_profile
+
+package main;
+our str $g = "init";
+
+func test_while_local() void {
+    my int $iter = 1000;  # pre-fix: crashed at iter 256
+    my int $i = 0;
+    while ($i < $iter) {
+        local $g = "loop";
+        $i = $i + 1;
+    }
+    if ($g ne "init") {
+        say("FAIL: g not restored: " . $g);
+        return;
+    }
+    say("test_while_local: PASS");
+}
+
+func test_for_local() void {
+    my int $iter = 1000;
+    for (my int $i = 0; $i < $iter; $i = $i + 1) {
+        local $g = "for-loop";
+    }
+    if ($g ne "init") {
+        say("FAIL: g not restored: " . $g);
+        return;
+    }
+    say("test_for_local: PASS");
+}
+
+func test_foreach_local() void {
+    my array @nums = ();
+    my int $j = 0;
+    while ($j < 1000) {
+        push(@nums, $j);
+        $j = $j + 1;
+    }
+    foreach my int $n (@nums) {
+        local $g = "fe-loop";
+    }
+    if ($g ne "init") {
+        say("FAIL");
+        return;
+    }
+    say("test_foreach_local: PASS");
+}
+
+func test_weaken_hash() void {
+    my hash %h = ("k" => 1);
+    my scalar $r = \%h;
+    $h{"self"} = $r;
+    core::weaken($h{"self"});
+    say("test_weaken_hash: PASS");
+}
+
+func main() int {
+    test_while_local();
+    test_for_local();
+    test_foreach_local();
+    test_weaken_hash();
+    return 0;
+}

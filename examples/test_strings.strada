@@ -1,0 +1,144 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_strings.strada - Test comprehensive string functions
+
+func test_case_functions() void {
+    say("=== Case Functions ===");
+    
+    my str $text = "Hello World";
+    say("Original: " . $text);
+    say("Upper: " . upper($text));
+    say("Lower: " . lower($text));
+    say("UC: " . uc($text));
+    say("LC: " . lc($text));
+    say("UCFirst: " . ucfirst("hello"));
+    say("LCFirst: " . lcfirst("HELLO"));
+    say("");
+}
+
+func test_trim_functions() void {
+    say("=== Trim Functions ===");
+    
+    my str $text = "  hello world  ";
+    say("Original: '" . $text . "'");
+    say("Trim: '" . trim($text) . "'");
+    say("LTrim: '" . ltrim($text) . "'");
+    say("RTrim: '" . rtrim($text) . "'");
+    say("");
+}
+
+func test_string_operations() void {
+    say("=== String Operations ===");
+    
+    my str $text = "Hello World";
+    say("Original: " . $text);
+    say("Reverse: " . reverse($text));
+    say("Repeat 3x: " . repeat("*", 3));
+    
+    my str $sub = substr($text, 0, 5);
+    say("Substr(0,5): " . $sub);
+    
+    my int $pos = index($text, "World");
+    say("Index of 'World': " . $pos);
+    
+    my int $rpos = rindex("test test test", "test");
+    say("RIndex of 'test': " . $rpos);
+    
+    say("");
+}
+
+func test_character_functions() void {
+    say("=== Character Functions ===");
+    
+    my str $ch = chr(65);
+    say("Chr(65): " . $ch);
+    
+    my int $code = ord("A");
+    say("Ord('A'): " . $code);
+    
+    my str $with_newline = "Hello\n";
+    say("With newline: '" . $with_newline . "'");
+    say("Chomp: '" . chomp($with_newline) . "'");
+    
+    my str $text = "Hello";
+    say("Chop 'Hello': '" . chop($text) . "'");
+    
+    say("");
+}
+
+func test_type_introspection() void {
+    say("=== Type Introspection ===");
+    
+    my int $i = 42;
+    my num $n = 3.14;
+    my str $s = "hello";
+    
+    say("Type of int: " . typeof($i));
+    say("Type of num: " . typeof($n));
+    say("Type of str: " . typeof($s));
+    
+    say("");
+}
+
+func test_type_casting() void {
+    say("=== Type Casting ===");
+    
+    my str $numstr = "42";
+    my int $converted = cast_int($numstr);
+    say("String '42' to int: " . $converted);
+    say("Type: " . typeof($converted));
+    
+    my str $floatstr = "3.14";
+    my num $fnum = cast_num($floatstr);
+    say("String '3.14' to num: " . $fnum);
+    say("Type: " . typeof($fnum));
+    
+    my int $val = 100;
+    my str $strval = cast_str($val);
+    say("Int 100 to str: '" . $strval . "'");
+    say("Type: " . typeof($strval));
+    
+    say("");
+}
+
+func test_join() void {
+    say("=== Join Function ===");
+    
+    my scalar $arr = split("apple,banana,cherry", ",");
+    my str $joined = join(", ", $arr);
+    say("Joined: " . $joined);
+    
+    say("");
+}
+
+func main() int {
+    say("=== Comprehensive String & Type Functions Test ===");
+    say("");
+    
+    test_case_functions();
+    test_trim_functions();
+    test_string_operations();
+    test_character_functions();
+    test_type_introspection();
+    test_type_casting();
+    test_join();
+    
+    say("✓ All tests passed!");
+    
+    return 0;
+}

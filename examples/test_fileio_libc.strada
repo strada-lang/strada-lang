@@ -1,0 +1,177 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+func test_popen_pclose() int {
+    my scalar $fh = sys::popen("echo 'Hello World'", "r");
+    if (!defined($fh)) {
+        say("FAIL: popen() failed");
+        return 1;
+    }
+    my scalar $line = sys::fgets($fh, 1024);
+    if (!defined($line)) {
+        say("FAIL: fgets() failed");
+        sys::pclose($fh);
+        return 1;
+    }
+    my str $content = chomp($line);
+    if ($content ne "Hello World") {
+        say("FAIL: popen read '" . $content . "', expected 'Hello World'");
+        sys::pclose($fh);
+        return 1;
+    }
+    my int $status = sys::pclose($fh);
+    return 0;
+}
+
+func test_mkstemp() int {
+    my scalar $result = sys::mkstemp("/tmp/strada_test_XXXXXX");
+    if (!defined($result)) {
+        say("FAIL: mkstemp() failed");
+        return 1;
+    }
+    my int $fd = $result->[0];
+    my str $path = $result->[1];
+    if ($fd < 0) {
+        say("FAIL: mkstemp returned bad fd");
+        return 1;
+    }
+    if (length($path) == 0) {
+        say("FAIL: mkstemp returned empty path");
+        sys::close($fd);
+        return 1;
+    }
+    sys::close($fd);
+    sys::unlink($path);
+    return 0;
+}
+
+func test_mkdtemp() int {
+    my scalar $path = sys::mkdtemp("/tmp/strada_testdir_XXXXXX");
+    if (!defined($path)) {
+        say("FAIL: mkdtemp() failed");
+        return 1;
+    }
+    if (length($path) == 0) {
+        say("FAIL: mkdtemp returned empty path");
+        return 1;
+    }
+    sys::rmdir($path);
+    return 0;
+}
+
+func test_truncate() int {
+    my str $path = "/tmp/strada_truncate_test.txt";
+    sys::spew($path, "Hello World 123456789");
+    my int $r = sys::truncate($path, 5);
+    if ($r != 0) {
+        say("FAIL: truncate() returned " . $r);
+        sys::unlink($path);
+        return 1;
+    }
+    my str $content = sys::slurp($path);
+    if (length($content) != 5) {
+        say("FAIL: truncate length = " . length($content));
+        sys::unlink($path);
+        return 1;
+    }
+    sys::unlink($path);
+    return 0;
+}
+
+func test_statvfs() int {
+    my scalar $vfs = sys::statvfs("/tmp");
+    if (!defined($vfs)) {
+        say("FAIL: statvfs() failed");
+        return 1;
+    }
+    my int $bsize = $vfs->{"bsize"};
+    if ($bsize <= 0) {
+        say("FAIL: statvfs bsize = " . $bsize);
+        return 1;
+    }
+    my int $blocks = $vfs->{"blocks"};
+    if ($blocks <= 0) {
+        say("FAIL: statvfs blocks = " . $blocks);
+        return 1;
+    }
+    return 0;
+}
+
+func test_atoi_atof() int {
+    my int $i = sys::atoi("12345");
+    if ($i != 12345) {
+        say("FAIL: atoi('12345') = " . $i);
+        return 1;
+    }
+    my num $f = sys::atof("3.14159");
+    if ($f < 3.14 || $f > 3.15) {
+        say("FAIL: atof('3.14159') = " . $f);
+        return 1;
+    }
+    return 0;
+}
+
+func test_strtol() int {
+    my scalar $r = sys::strtol("42abc", 10);
+    if (!defined($r)) {
+        say("FAIL: strtol() failed");
+        return 1;
+    }
+    my int $val = $r->[0];
+    my int $pos = $r->[1];
+    if ($val != 42) {
+        say("FAIL: strtol value = " . $val);
+        return 1;
+    }
+    if ($pos != 2) {
+        say("FAIL: strtol pos = " . $pos);
+        return 1;
+    }
+    return 0;
+}
+
+func test_difftime() int {
+    my int $t1 = sys::time();
+    my int $t2 = $t1 + 100;
+    my num $d = sys::difftime($t2, $t1);
+    if ($d != 100.0) {
+        say("FAIL: difftime = " . $d);
+        return 1;
+    }
+    return 0;
+}
+
+func main() int {
+    my int $failed = 0;
+
+    $failed = $failed + test_popen_pclose();
+    $failed = $failed + test_mkstemp();
+    $failed = $failed + test_mkdtemp();
+    $failed = $failed + test_truncate();
+    $failed = $failed + test_statvfs();
+    $failed = $failed + test_atoi_atof();
+    $failed = $failed + test_strtol();
+    $failed = $failed + test_difftime();
+
+    if ($failed == 0) {
+        say("All file I/O libc tests passed");
+    } else {
+        say("Failed: " . $failed . " tests");
+    }
+
+    return $failed;
+}

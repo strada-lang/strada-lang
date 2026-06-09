@@ -1,0 +1,58 @@
+# Test extended C types for extern functions
+
+# Test that new types are recognized in variable declarations
+func main() int {
+    # Test all new type keywords (these become StradaValue* internally)
+    my int8 $i8 = 127;
+    my int16 $i16 = 32767;
+    my uint8 $u8 = 255;
+    my byte $b = 200;
+    my uint16 $u16 = 65535;
+    my uint32 $u32 = 4294967295;
+    my uint64 $u64 = 9223372036854775807;
+    my size_t $sz = 1024;
+    my char $c = 65;
+
+    # Test floating-point types
+    my float $f = 3.14;
+    my double $d = 3.14159265358979;
+    my long_double $ld = 3.14159265358979323846;
+
+    # Verify values
+    say("int8: " . $i8);
+    say("int16: " . $i16);
+    say("uint8: " . $u8);
+    say("byte: " . $b);
+    say("uint16: " . $u16);
+    say("uint32: " . $u32);
+    say("uint64: " . $u64);
+    say("size_t: " . $sz);
+    say("char: " . $c);
+    say("float: " . $f);
+    say("double: " . $d);
+    say("long_double: " . $ld);
+
+    # Test in function parameters
+    my int $result = test_int8(42);
+    say("test_int8 result: " . $result);
+
+    $result = test_uint32(100);
+    say("test_uint32 result: " . $result);
+
+    my num $fres = test_float(2.5);
+    say("test_float result: " . $fres);
+
+    return 0;
+}
+
+func test_int8(int8 $val) int {
+    return $val * 2;
+}
+
+func test_uint32(uint32 $val) int {
+    return $val + 50;
+}
+
+func test_float(float $val) num {
+    return $val * 2.0;
+}

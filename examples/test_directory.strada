@@ -1,0 +1,70 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_directory.strada - Test directory functions
+
+func main() int {
+    say("=== Directory Functions Test ===");
+    say("");
+
+    # Test readdir
+    say("=== Reading /tmp ===");
+    my scalar $files = sys::readdir("/tmp");
+    if (defined($files)) {
+        my int $count = size($files);
+        say("Found " . $count . " entries in /tmp");
+        if ($count > 0) {
+            say("First few entries:");
+            my int $i = 0;
+            while ($i < $count && $i < 5) {
+                say("  " . $files->[$i]);
+                $i = $i + 1;
+            }
+        }
+    } else {
+        say("Could not read /tmp");
+    }
+    say("");
+
+    # Test is_dir and is_file
+    say("=== Path Type Checks ===");
+    say("/tmp is_dir: " . sys::is_dir("/tmp"));
+    say("/tmp is_file: " . sys::is_file("/tmp"));
+    say("/etc/passwd is_dir: " . sys::is_dir("/etc/passwd"));
+    say("/etc/passwd is_file: " . sys::is_file("/etc/passwd"));
+    say("");
+
+    # Test readdir_full
+    say("=== Reading current directory with full paths ===");
+    my scalar $full_paths = sys::readdir_full(".");
+    if (defined($full_paths)) {
+        my int $count = size($full_paths);
+        say("Found " . $count . " entries");
+        if ($count > 0) {
+            say("First few full paths:");
+            my int $i = 0;
+            while ($i < $count && $i < 3) {
+                say("  " . $full_paths->[$i]);
+                $i = $i + 1;
+            }
+        }
+    }
+    say("");
+
+    say("Directory tests completed!");
+    return 0;
+}

@@ -1,0 +1,143 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# simple_select_server.strada - A minimal HTTP server using select()
+#
+# Demonstrates I/O multiplexing to handle multiple clients concurrently.
+# Usage: ./simple_select_server
+# Then visit http://localhost:8080 in your browser
+
+func http_response(str $body) str {
+    return "HTTP/1.1 200 OK\r\n" .
+           "Content-Type: text/html\r\n" .
+           "Content-Length: " . length($body) . "\r\n" .
+           "Connection: close\r\n" .
+           "\r\n" .
+           $body;
+}
+
+# Find socket index by fd (socket must still be open)
+func find_client_index(scalar $clients, int $target_fd) int {
+    my int $i = 0;
+    my int $len = scalar($clients);
+    while ($i < $len) {
+        if (sys::socket_fd($clients->[$i]) == $target_fd) {
+            return $i;
+        }
+        $i = $i + 1;
+    }
+    return -1;
+}
+
+# Remove element at index from array
+func remove_at_index(scalar $arr, int $idx) void {
+    my int $len = scalar($arr);
+    while ($idx < $len - 1) {
+        $arr->[$idx] = $arr->[$idx + 1];
+        $idx = $idx + 1;
+    }
+    pop($arr);
+}
+
+func main() int {
+    my int $port = 8080;
+
+    say("Simple Select Server on http://localhost:" . $port);
+    say("Press Ctrl+C to stop");
+
+    my scalar $server = sys::socket_server($port);
+    if (!defined($server)) {
+        say("Error: Could not bind to port " . $port);
+        return 1;
+    }
+
+    my array @clients = ();
+    my int $request_count = 0;
+
+    while (1) {
+        # Build watch list: server + all clients
+        my array @watch = ();
+        push(@watch, $server);
+
+        my int $i = 0;
+        while ($i < scalar(\@clients)) {
+            push(@watch, $clients[$i]);
+            $i = $i + 1;
+        }
+
+        # Wait for activity (100ms timeout)
+        my scalar $ready = sys::socket_select(\@watch, 100);
+        my int $ready_count = scalar($ready);
+
+        my int $j = 0;
+        while ($j < $ready_count) {
+            my scalar $sock = $ready->[$j];
+            my int $fd = sys::socket_fd($sock);
+
+            if ($fd == sys::socket_fd($server)) {
+                # New connection
+                my scalar $client = sys::socket_accept($server);
+                if (defined($client)) {
+                    push(@clients, $client);
+                    say("+ Client connected (fd=" . sys::socket_fd($client) . ")");
+                }
+            } else {
+                # Client has data - read request
+                my str $request = sys::socket_recv($sock, 4096);
+
+                if (length($request) > 0) {
+                    $request_count = $request_count + 1;
+
+                    # Extract path from "GET /path HTTP/1.1"
+                    my int $space = index($request, " ");
+                    my str $rest = substr($request, $space + 1, 100);
+                    my int $space2 = index($rest, " ");
+                    my str $path = substr($rest, 0, $space2);
+
+                    say("  Request #" . $request_count . ": " . $path);
+
+                    my str $html = "<html><body>" .
+                        "<h1>Hello from Strada!</h1>" .
+                        "<p>Path: " . $path . "</p>" .
+                        "<p>Request #" . $request_count . "</p>" .
+                        "<p>Active clients: " . scalar(\@clients) . "</p>" .
+                        "</body></html>";
+
+                    sys::socket_send($sock, http_response($html));
+                }
+
+                # Find index BEFORE closing (socket still valid)
+                my int $idx = find_client_index(\@clients, $fd);
+
+                # Now close
+                sys::socket_close($sock);
+
+                # Remove from array
+                if ($idx >= 0) {
+                    remove_at_index(\@clients, $idx);
+                }
+
+                say("- Client disconnected (fd=" . $fd . ")");
+            }
+
+            $j = $j + 1;
+        }
+    }
+
+    sys::socket_close($server);
+    return 0;
+}

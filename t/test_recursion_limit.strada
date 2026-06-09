@@ -1,0 +1,42 @@
+func factorial(int $n) int {
+    if ($n <= 1) {
+        return 1;
+    }
+    return $n * factorial($n - 1);
+}
+
+func main() int {
+    # Test getting default limit
+    my int $limit = sys::get_recursion_limit();
+    if ($limit != 1000) {
+        say("FAIL: default limit should be 1000, got " . $limit);
+        return 1;
+    }
+    say("Default limit: " . $limit);
+
+    # Test setting limit
+    sys::set_recursion_limit(500);
+    if (sys::get_recursion_limit() != 500) {
+        say("FAIL: limit should be 500");
+        return 1;
+    }
+    say("Set limit to: " . sys::get_recursion_limit());
+
+    # Test valid recursion within limit
+    my int $result = factorial(100);
+    say("factorial(100) = " . $result);
+
+    # Test disabling limit
+    sys::set_recursion_limit(0);
+    if (sys::get_recursion_limit() != 0) {
+        say("FAIL: limit should be 0 (disabled)");
+        return 1;
+    }
+    say("Limit disabled: " . sys::get_recursion_limit());
+
+    # Restore default
+    sys::set_recursion_limit(1000);
+
+    say("All recursion limit tests passed!");
+    return 0;
+}

@@ -1,0 +1,128 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_goto.strada - Demonstrates goto and labels
+#
+# Strada supports C-style goto and labels:
+#   LABEL_NAME:
+#   goto LABEL_NAME;
+#
+# This can be useful for breaking out of nested loops,
+# implementing state machines, or other control flow patterns.
+
+func main() int {
+    say("=== Goto and Label Test ===\n");
+
+    # Test 1: Simple goto
+    say("Test 1: Simple forward goto");
+    my int $x = 1;
+    if ($x == 1) {
+        goto skip_print;
+    }
+    say("  This should NOT be printed");
+    skip_print:
+    say("  Jumped to skip_print label\n");
+
+    # Test 2: Backward goto (simple loop)
+    say("Test 2: Backward goto (counting)");
+    my int $count = 0;
+    loop_start:
+    if ($count < 5) {
+        say("  count = " . $count);
+        $count += 1;
+        goto loop_start;
+    }
+    say("");
+
+    # Test 3: Breaking out of nested loops
+    say("Test 3: Breaking out of nested loops");
+    my int $found = 0;
+    my int $i = 0;
+    while ($i < 10) {
+        my int $j = 0;
+        while ($j < 10) {
+            if ($i == 3 && $j == 5) {
+                $found = 1;
+                say("  Found at i=" . $i . ", j=" . $j);
+                goto exit_loops;
+            }
+            $j += 1;
+        }
+        $i += 1;
+    }
+    exit_loops:
+    if ($found) {
+        say("  Exited both loops successfully\n");
+    }
+
+    # Test 4: Simple state machine
+    say("Test 4: Simple state machine");
+    my int $state = 0;
+    my int $transitions = 0;
+
+    state_init:
+    if ($state == 0) {
+        say("  State: INIT");
+        $state = 1;
+        $transitions += 1;
+        goto state_running;
+    }
+
+    state_running:
+    if ($state == 1) {
+        say("  State: RUNNING");
+        $transitions += 1;
+        if ($transitions < 4) {
+            goto state_running;
+        }
+        $state = 2;
+        goto state_done;
+    }
+
+    state_done:
+    if ($state == 2) {
+        say("  State: DONE");
+        say("  Total transitions: " . $transitions . "\n");
+    }
+
+    # Test 5: Multiple labels in sequence
+    say("Test 5: Multiple labels in sequence");
+    my int $step = 0;
+
+    step1:
+    if ($step == 0) {
+        say("  Step 1");
+        $step = 1;
+        goto step2;
+    }
+
+    step2:
+    if ($step == 1) {
+        say("  Step 2");
+        $step = 2;
+        goto step3;
+    }
+
+    step3:
+    if ($step == 2) {
+        say("  Step 3");
+        say("  All steps completed!\n");
+    }
+
+    say("=== All tests completed! ===");
+    return 0;
+}

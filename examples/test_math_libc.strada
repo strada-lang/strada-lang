@@ -1,0 +1,182 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+func test_hypot() int {
+    my num $h = math::hypot(3.0, 4.0);
+    if ($h != 5.0) {
+        say("FAIL: hypot(3,4) = " . $h . ", expected 5");
+        return 1;
+    }
+    return 0;
+}
+
+func test_cbrt() int {
+    my num $c = math::cbrt(27.0);
+    my num $diff = $c - 3.0;
+    if ($diff < 0.0) {
+        $diff = 0.0 - $diff;
+    }
+    if ($diff > 0.0001) {
+        say("FAIL: cbrt(27) = " . $c . ", expected 3");
+        return 1;
+    }
+    return 0;
+}
+
+func test_trunc() int {
+    my num $t1 = math::trunc(3.7);
+    my num $t2 = math::trunc(-3.7);
+    if ($t1 != 3.0) {
+        say("FAIL: trunc(3.7) = " . $t1 . ", expected 3");
+        return 1;
+    }
+    if ($t2 != -3.0) {
+        say("FAIL: trunc(-3.7) = " . $t2 . ", expected -3");
+        return 1;
+    }
+    return 0;
+}
+
+func test_isnan() int {
+    my int $n1 = math::isnan(1.0);
+    if ($n1 != 0) {
+        say("FAIL: isnan(1.0) = " . $n1 . ", expected 0");
+        return 1;
+    }
+    return 0;
+}
+
+func test_isinf() int {
+    my int $i1 = math::isinf(1.0);
+    if ($i1 != 0) {
+        say("FAIL: isinf(1.0) = " . $i1 . ", expected 0");
+        return 1;
+    }
+    return 0;
+}
+
+func test_isfinite() int {
+    my int $f1 = math::isfinite(1.0);
+    if ($f1 != 1) {
+        say("FAIL: isfinite(1.0) = " . $f1 . ", expected 1");
+        return 1;
+    }
+    return 0;
+}
+
+func test_fmax_fmin() int {
+    my num $mx = math::fmax(5.0, 10.0);
+    my num $mn = math::fmin(5.0, 10.0);
+    if ($mx != 10.0) {
+        say("FAIL: fmax(5,10) = " . $mx . ", expected 10");
+        return 1;
+    }
+    if ($mn != 5.0) {
+        say("FAIL: fmin(5,10) = " . $mn . ", expected 5");
+        return 1;
+    }
+    return 0;
+}
+
+func test_copysign() int {
+    my num $c1 = math::copysign(5.0, -1.0);
+    my num $c2 = math::copysign(-5.0, 1.0);
+    if ($c1 != -5.0) {
+        say("FAIL: copysign(5,-1) = " . $c1 . ", expected -5");
+        return 1;
+    }
+    if ($c2 != 5.0) {
+        say("FAIL: copysign(-5,1) = " . $c2 . ", expected 5");
+        return 1;
+    }
+    return 0;
+}
+
+func test_remainder() int {
+    my num $r = math::remainder(10.0, 3.0);
+    if ($r != 1.0) {
+        say("FAIL: remainder(10,3) = " . $r . ", expected 1");
+        return 1;
+    }
+    return 0;
+}
+
+func test_ldexp() int {
+    my num $l = math::ldexp(1.0, 4);
+    if ($l != 16.0) {
+        say("FAIL: ldexp(1,4) = " . $l . ", expected 16");
+        return 1;
+    }
+    return 0;
+}
+
+func test_frexp() int {
+    my scalar $r = math::frexp(16.0);
+    my num $frac = $r->[0];
+    my int $exp = $r->[1];
+    if ($exp != 5) {
+        say("FAIL: frexp(16) exp = " . $exp . ", expected 5");
+        return 1;
+    }
+    return 0;
+}
+
+func test_modf() int {
+    my scalar $r = math::modf(3.14);
+    my num $frac = $r->[0];
+    my num $intpart = $r->[1];
+    if ($intpart != 3.0) {
+        say("FAIL: modf(3.14) int = " . $intpart . ", expected 3");
+        return 1;
+    }
+    return 0;
+}
+
+func test_scalbn() int {
+    my num $s = math::scalbn(1.0, 4);
+    if ($s != 16.0) {
+        say("FAIL: scalbn(1,4) = " . $s . ", expected 16");
+        return 1;
+    }
+    return 0;
+}
+
+func main() int {
+    my int $failed = 0;
+
+    $failed = $failed + test_hypot();
+    $failed = $failed + test_cbrt();
+    $failed = $failed + test_trunc();
+    $failed = $failed + test_isnan();
+    $failed = $failed + test_isinf();
+    $failed = $failed + test_isfinite();
+    $failed = $failed + test_fmax_fmin();
+    $failed = $failed + test_copysign();
+    $failed = $failed + test_remainder();
+    $failed = $failed + test_ldexp();
+    $failed = $failed + test_frexp();
+    $failed = $failed + test_modf();
+    $failed = $failed + test_scalbn();
+
+    if ($failed == 0) {
+        say("All math libc tests passed");
+    } else {
+        say("Failed: " . $failed . " tests");
+    }
+
+    return $failed;
+}

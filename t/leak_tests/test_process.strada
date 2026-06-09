@@ -1,0 +1,130 @@
+#!/usr/bin/env strada
+# Test process/environment functions for memory leaks
+# Run: valgrind --leak-check=full ./test_process
+
+func main() int {
+    say("Testing process/environment functions for memory leaks...");
+    my int $iterations = 100;
+
+    # Test getenv
+    say("  getenv...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my str $home = core::getenv("HOME");
+        if (length($home) < 1) {
+            say("    FAIL: HOME empty");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test getenv nonexistent
+    say("  getenv nonexistent...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $val = core::getenv("NONEXISTENT_VAR_XYZ_" . $i);
+        if (defined($val)) {
+            say("    FAIL: should be undef");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test setenv/getenv roundtrip
+    say("  setenv/getenv roundtrip...");
+    $i = 0;
+    while ($i < $iterations) {
+        core::setenv("STRADA_TEST_VAR", "value_" . $i);
+        my str $val = core::getenv("STRADA_TEST_VAR");
+        if ($val ne "value_" . $i) {
+            say("    FAIL: setenv roundtrip");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test strerror
+    say("  strerror...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $msg = core::strerror(2);  # ENOENT
+        if (length($msg) < 1) {
+            say("    FAIL: strerror empty");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test popen/close
+    say("  popen/close...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $fh = core::popen("echo test_popen", "r");
+        if (!defined($fh)) {
+            say("    FAIL: popen failed");
+            return 1;
+        }
+        my str $line = <$fh>;
+        if ($line ne "test_popen") {
+            say("    FAIL: popen read = " . $line);
+            return 1;
+        }
+        core::pclose($fh);
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test tmpfile
+    say("  tmpfile...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $fh = core::tmpfile();
+        if (!defined($fh)) {
+            say("    FAIL: tmpfile");
+            return 1;
+        }
+        say($fh, "temp data");
+        core::close($fh);
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test mkstemp
+    say("  mkstemp...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @result = core::mkstemp("/tmp/strada_test_XXXXXX");
+        if (size(@result) < 2) {
+            say("    FAIL: mkstemp result");
+            return 1;
+        }
+        my str $path = $result[1];
+        core::unlink($path);
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test mkdtemp
+    say("  mkdtemp...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $dir = core::mkdtemp("/tmp/strada_dir_XXXXXX");
+        if (length($dir) < 1) {
+            say("    FAIL: mkdtemp");
+            return 1;
+        }
+        core::rmdir($dir);
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Cleanup
+    core::unsetenv("STRADA_TEST_VAR");
+
+    say("All process/environment tests passed!");
+    return 0;
+}

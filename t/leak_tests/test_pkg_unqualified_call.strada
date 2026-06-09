@@ -1,0 +1,73 @@
+#!/usr/bin/env strada
+# Regression test for the needs_temp_cleanup package-prefix-fallback bug
+# (commit b5f48978). When a function defined in a non-main package is called
+# UNQUALIFIED from inside its own package (`fn(...)` rather than `Pkg::fn(...)`),
+# the call emitter falls back to the package-prefixed C name to find the symbol,
+# but historically needs_temp_cleanup did NOT replicate that fallback. The
+# predicate returned 0 (no cleanup needed) for the call, so any caller that
+# gated its temp-cleanup wrapper on needs_temp_cleanup -- most importantly
+# `push(@arr, fn(...))` -- emitted the call WITHOUT capturing the owned return
+# into __push_v / decref'ing it after strada_array_push had incref'd. The
+# owned-return refcount stayed at 2 and the value leaked every call.
+#
+# Symptom in the wild: each `_tok(...)` call inside Perla::Lexer leaked ~74
+# blocks per Perl statement compiled by perla.
+#
+# Existing OOP leak tests don't trip this -- they call cross-package methods
+# fully qualified (Person::new, $obj->method) which take the emitter's
+# qualified path directly. Only the unqualified-same-package form exercises
+# the fallback. This test pins that form.
+
+package Tok;
+
+func make(str $type, str $value, int $line) scalar {
+    my hash %t = ();
+    $t{"type"} = $type;
+    $t{"value"} = $value;
+    $t{"line"} = $line;
+    return \%t;
+}
+
+# In-package consumer that calls make() UNQUALIFIED. This is the leak-prone
+# pattern: needs_temp_cleanup must recognise `make` as owning despite the
+# lookup-name mismatch with the C symbol `Tok_make`.
+func collect(int $n) array {
+    my array @tokens = ();
+    my int $i = 0;
+    while ($i < $n) {
+        push(@tokens, make("INT", "" . $i, $i));        # leak site #1: push + unqualified call
+        my scalar $extra = make("KW", "kw" . $i, $i);   # leak site #2: assignment + unqualified call
+        push(@tokens, $extra);
+        $i = $i + 1;
+    }
+    return @tokens;
+}
+
+# Nested-namespace flavour to confirm the `::` -> `_` mangling stays correct.
+package Outer::Inner;
+
+func helper(int $n) scalar {
+    my hash %h = ();
+    $h{"n"} = $n;
+    $h{"label"} = "row" . $n;
+    return \%h;
+}
+
+func batch(int $n) array {
+    my array @out = ();
+    my int $i = 0;
+    while ($i < $n) {
+        push(@out, helper($i));                          # nested package + unqualified
+        $i = $i + 1;
+    }
+    return @out;
+}
+
+package main;
+
+func main() int {
+    my array @t1 = Tok::collect(200);
+    my array @t2 = Outer::Inner::batch(200);
+    say("tok=" . scalar(@t1) . " batch=" . scalar(@t2));
+    return 0;
+}

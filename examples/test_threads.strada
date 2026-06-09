@@ -1,0 +1,97 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+func main() int {
+    say("=== Thread Test ===");
+
+    # Test 1: Basic thread creation and join
+    say("Test 1: Basic thread create/join");
+    my scalar $t1 = thread::create(func () {
+        say("  Hello from thread!");
+    });
+    thread::join($t1);
+    say("  PASS");
+
+    # Test 2: Multiple threads with mutex
+    say("Test 2: Multiple threads with mutex");
+    my int $counter = 0;
+    my scalar $mutex = thread::mutex_new();
+
+    # Thread increments counter 100 times
+    my scalar $t2 = thread::create(func () {
+        my int $count = 0;
+        while ($count < 100) {
+            thread::mutex_lock($mutex);
+            $counter = $counter + 1;
+            thread::mutex_unlock($mutex);
+            $count = $count + 1;
+        }
+    });
+
+    # Another thread increments counter 100 times
+    my scalar $t3 = thread::create(func () {
+        my int $count = 0;
+        while ($count < 100) {
+            thread::mutex_lock($mutex);
+            $counter = $counter + 1;
+            thread::mutex_unlock($mutex);
+            $count = $count + 1;
+        }
+    });
+
+    thread::join($t2);
+    thread::join($t3);
+    thread::mutex_destroy($mutex);
+
+    say("  Final counter: " . $counter);
+    if ($counter == 200) {
+        say("  PASS");
+    } else {
+        say("  FAIL (expected 200)");
+    }
+
+    # Test 3: Condition variable
+    say("Test 3: Condition variable");
+    my int $ready = 0;
+    my scalar $m = thread::mutex_new();
+    my scalar $cv = thread::cond_new();
+
+    my scalar $waiter = thread::create(func () {
+        thread::mutex_lock($m);
+        while ($ready == 0) {
+            thread::cond_wait($cv, $m);
+        }
+        thread::mutex_unlock($m);
+        say("  Waiter: got signal!");
+    });
+
+    # Give waiter time to start waiting
+    sys::usleep(10000);
+
+    thread::mutex_lock($m);
+    $ready = 1;
+    thread::cond_signal($cv);
+    thread::mutex_unlock($m);
+
+    thread::join($waiter);
+    thread::cond_destroy($cv);
+    thread::mutex_destroy($m);
+    say("  PASS");
+
+    say("=== All thread tests complete ===");
+    return 0;
+}

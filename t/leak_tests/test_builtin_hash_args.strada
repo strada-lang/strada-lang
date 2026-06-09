@@ -1,0 +1,221 @@
+#!/usr/bin/env strada
+# Test builtin functions with hash access arguments for memory leaks
+# Exercises owned ref cleanup when hash access results flow through
+# grep, map, sort(block), keys, values, dumper_str, bytes, substr_bytes,
+# blessed, reserve, capture, unpack.
+# Run: valgrind --leak-check=full ./test_builtin_hash_args
+
+package Animal;
+
+func new(str $name) scalar {
+    my hash %self = ();
+    $self{"name"} = $name;
+    $self{"type"} = "Animal";
+    return bless(\%self, "Animal");
+}
+
+package main;
+
+func main() int {
+    say("Testing builtin functions with hash access args for leaks...");
+    my int $iterations = 50;
+
+    # Test 1: grep with hash access array
+    say("  grep with hash access array...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my hash %d = ();
+        $d{"nums"} = [1, 2, 3, 4, 5, 6, 7, 8];
+        my scalar $evens = grep { $_ % 2 == 0 } @{$d{"nums"}};
+        if (size($evens) != 4) {
+            say("    FAIL: grep count = " . size($evens));
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 2: map with hash access array
+    say("  map with hash access array...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %d = ();
+        $d{"vals"} = [1, 2, 3, 4];
+        my scalar $doubled = map { $_ * 2 } @{$d{"vals"}};
+        if (size($doubled) != 4) {
+            say("    FAIL: map count = " . size($doubled));
+            return 1;
+        }
+        if ($doubled->[0] != 2 || $doubled->[3] != 8) {
+            say("    FAIL: map values");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 3: sort (no block) with hash access array
+    say("  sort with hash access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %d = ();
+        $d{"data"} = [5, 3, 1, 4, 2];
+        my scalar $sorted = sort($d{"data"});
+        if ($sorted->[0] != 1 || $sorted->[4] != 5) {
+            say("    FAIL: sort");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 4: keys with hash access
+    say("  keys with hash access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %d = ();
+        $d{"map"} = {"a" => 1, "b" => 2, "c" => 3};
+        my array @k = keys($d{"map"});
+        if (scalar(@k) != 3) {
+            say("    FAIL: keys count = " . scalar(@k));
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 5: values with hash access
+    say("  values with hash access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %d = ();
+        $d{"map"} = {"x" => 10, "y" => 20};
+        my array @v = values($d{"map"});
+        if (scalar(@v) != 2) {
+            say("    FAIL: values count = " . scalar(@v));
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 6: dumper_str with hash access
+    say("  dumper_str with hash access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %d = ();
+        $d{"obj"} = {"name" => "test", "val" => 42};
+        my str $s = dumper_str($d{"obj"});
+        if (length($s) < 5) {
+            say("    FAIL: dumper_str too short");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 7: bytes with hash access
+    say("  bytes with hash access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %d = ();
+        $d{"text"} = "hello world";
+        my int $b = bytes($d{"text"});
+        if ($b != 11) {
+            say("    FAIL: bytes = " . $b);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 8: substr_bytes with hash access
+    say("  substr_bytes with hash access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %d = ();
+        $d{"data"} = "Hello, World!";
+        my str $sub = substr_bytes($d{"data"}, 0, 5);
+        if ($sub ne "Hello") {
+            say("    FAIL: substr_bytes = '" . $sub . "'");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 9: blessed with hash access
+    say("  blessed with hash access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %d = ();
+        $d{"obj"} = Animal::new("Fido");
+        my scalar $pkg = blessed($d{"obj"});
+        if ($pkg ne "Animal") {
+            say("    FAIL: blessed = '" . $pkg . "'");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 10: reserve with hash access array
+    say("  reserve with hash access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %d = ();
+        $d{"arr"} = [1, 2, 3];
+        reserve($d{"arr"}, 100);
+        push($d{"arr"}, 4);
+        my scalar $a = $d{"arr"};
+        if (size($a) != 4) {
+            say("    FAIL: reserve+push size");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 11: capture with hash access args
+    say("  capture with hash access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %d = ();
+        $d{"text"} = "foo123bar";
+        $d{"pat"} = "([0-9]+)";
+        my array @caps = capture($d{"text"}, $d{"pat"});
+        if (scalar(@caps) < 1) {
+            say("    FAIL: capture empty");
+            return 1;
+        }
+        if ($caps[0] ne "123") {
+            say("    FAIL: capture = '" . $caps[0] . "'");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 12: unpack with hash access data arg
+    say("  unpack with hash access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %d = ();
+        $d{"fmt"} = "CC";
+        $d{"data"} = core::pack("CC", 65, 66);
+        my array @vals = core::unpack($d{"fmt"}, $d{"data"});
+        if (scalar(@vals) != 2) {
+            say("    FAIL: unpack count");
+            return 1;
+        }
+        if ($vals[0] != 65 || $vals[1] != 66) {
+            say("    FAIL: unpack values");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All builtin hash arg tests passed!");
+    return 0;
+}

@@ -1,0 +1,30 @@
+package main;
+
+func fib(int $n) int {
+    if ($n < 2) {
+        return $n;
+    }
+    return fib($n - 1) + fib($n - 2);
+}
+
+func main() int {
+    # Sum integers 1 to 50,000,000
+    my int $sum = 0;
+    my int $i = 1;
+    while ($i <= 50000000) {
+        $sum += $i;
+        $i++;
+    }
+    say("sum: " . $sum);
+
+    # Recursive fibonacci(35), run 30 times
+    my int $fib_result = 0;
+    my int $j = 0;
+    while ($j < 30) {
+        $fib_result = fib(35);
+        $j++;
+    }
+    say("fib(35): " . $fib_result);
+
+    return 0;
+}

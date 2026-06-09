@@ -1,0 +1,116 @@
+#!/usr/bin/env strada
+# Test crypt library for memory leaks
+# Run: valgrind --leak-check=full ./test_crypt
+
+use lib "lib";
+use crypt;
+
+func main() int {
+    say("Testing crypt library for memory leaks...");
+
+    # Test gen_salt - 50 iterations
+    say("  gen_salt()...");
+    my int $i = 0;
+    while ($i < 50) {
+        my str $salt = crypt::gen_salt("sha512");
+        if (length($salt) == 0) {
+            say("    FAIL: empty salt generated");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test gen_salt_rounds - 50 iterations
+    say("  gen_salt_rounds()...");
+    $i = 0;
+    while ($i < 50) {
+        my str $salt = crypt::gen_salt_rounds("sha512", 5000);
+        if (length($salt) == 0) {
+            say("    FAIL: empty salt generated");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test hashpw - 50 iterations
+    say("  hashpw()...");
+    my str $test_salt = crypt::gen_salt("sha512");
+    $i = 0;
+    while ($i < 50) {
+        my str $hash = crypt::hashpw("password" . $i, $test_salt);
+        if (length($hash) == 0) {
+            say("    FAIL: empty hash returned");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test verify - 50 iterations
+    say("  verify()...");
+    my str $known_hash = crypt::hashpw("testpassword", $test_salt);
+    $i = 0;
+    while ($i < 50) {
+        my int $valid = crypt::verify("testpassword", $known_hash);
+        if ($valid != 1) {
+            say("    FAIL: verify returned " . $valid . " expected 1");
+            return 1;
+        }
+        my int $invalid = crypt::verify("wrongpassword", $known_hash);
+        if ($invalid != 0) {
+            say("    FAIL: verify returned " . $invalid . " expected 0");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test get_algorithm - 50 iterations
+    say("  get_algorithm()...");
+    $i = 0;
+    while ($i < 50) {
+        my str $algo = crypt::get_algorithm($known_hash);
+        if ($algo ne "sha512") {
+            say("    FAIL: expected sha512, got " . $algo);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test is_supported - 50 iterations
+    say("  is_supported()...");
+    $i = 0;
+    while ($i < 50) {
+        my int $sup = crypt::is_supported("sha512");
+        if ($sup != 1) {
+            say("    FAIL: sha512 should be supported");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test hash_password convenience function - 20 iterations
+    say("  hash_password()...");
+    $i = 0;
+    while ($i < 20) {
+        my str $hash = crypt::hash_password("mypassword" . $i);
+        if (length($hash) == 0) {
+            say("    FAIL: empty hash returned");
+            return 1;
+        }
+        my int $valid = crypt::verify("mypassword" . $i, $hash);
+        if ($valid != 1) {
+            say("    FAIL: hash_password result doesn't verify");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All crypt tests passed!");
+    return 0;
+}

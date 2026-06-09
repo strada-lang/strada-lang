@@ -1,0 +1,132 @@
+#!/usr/bin/env strada
+# Round 12 leak regressions:
+#
+# 1. $h{k}++ / $h{k}-- / ++$h{k} / --$h{k} leaked __ih_new
+#    (strada_hv_store increfs, refcount stayed at 2; orphan +1 leaked).
+# 2. $h{k}++ also leaked the key SV (STRADA_NEW_STR_LIT passed inline
+#    to strada_to_str_ss with no decref of the source SV).
+# 3. $ref->{k}++ / $h{a}->{b}++ failed to compile — no
+#    NODE_DEREF_HASH branch in gen_expression's NODE_INCREMENT.
+# 4. around/before/after method modifiers leaked args on throw.
+# 5. Binary/unary/stringify operator overloads leaked args on throw.
+#
+# Run: valgrind --leak-check=full ./test_round12_hashinc_overload_hooks
+
+package OL;
+func new() scalar {
+    my hash %self = ();
+    return bless(\%self, "OL");
+}
+func add(scalar $self, scalar $other, int $reversed) scalar {
+    throw "ovl-add-fail";
+}
+func neg(scalar $self) scalar {
+    throw "ovl-neg-fail";
+}
+func to_str(scalar $self) str {
+    throw "ovl-str-fail";
+}
+use overload "+" => "add", "neg" => "neg", '""' => "to_str";
+
+package Hook;
+func new() scalar {
+    my hash %self = ();
+    return bless(\%self, "Hook");
+}
+func work(scalar $self) void {
+    throw "work-fail";
+}
+before "work" func(scalar $self) void {
+    throw "before-fail";
+}
+
+package main;
+
+func test_hash_inc_postfix() void {
+    my int $iter = 200;
+    my int $i = 0;
+    while ($i < $iter) {
+        my hash %h = ("c" => 0);
+        my int $j = 0;
+        while ($j < 5) {
+            $h{"c"}++;
+            $j = $j + 1;
+        }
+        $i = $i + 1;
+    }
+    say("test_hash_inc_postfix: PASS");
+}
+
+func test_hash_inc_prefix() void {
+    my int $iter = 200;
+    my int $i = 0;
+    while ($i < $iter) {
+        my hash %h = ("c" => 0);
+        ++$h{"c"};
+        --$h{"c"};
+        $i = $i + 1;
+    }
+    say("test_hash_inc_prefix: PASS");
+}
+
+func test_derefhash_inc() void {
+    my int $iter = 200;
+    my int $i = 0;
+    while ($i < $iter) {
+        my scalar $h = { "k" => 0 };
+        $h->{"k"}++;
+        ++$h->{"k"};
+        $i = $i + 1;
+    }
+    say("test_derefhash_inc: PASS");
+}
+
+func test_overload_binary_throw() void {
+    my scalar $a = OL::new();
+    my scalar $b = OL::new();
+    my int $iter = 100;
+    my int $i = 0;
+    while ($i < $iter) {
+        try {
+            my scalar $r = $a + $b;
+        } catch ($e) { }
+        $i = $i + 1;
+    }
+    say("test_overload_binary_throw: PASS");
+}
+
+func test_overload_stringify_throw() void {
+    my scalar $a = OL::new();
+    my int $iter = 100;
+    my int $i = 0;
+    while ($i < $iter) {
+        try {
+            my str $s = "" . $a;
+        } catch ($e) { }
+        $i = $i + 1;
+    }
+    say("test_overload_stringify_throw: PASS");
+}
+
+func test_before_hook_throw() void {
+    my scalar $h = Hook::new();
+    my int $iter = 100;
+    my int $i = 0;
+    while ($i < $iter) {
+        try {
+            $h->work();
+        } catch ($e) { }
+        $i = $i + 1;
+    }
+    say("test_before_hook_throw: PASS");
+}
+
+func main() int {
+    test_hash_inc_postfix();
+    test_hash_inc_prefix();
+    test_derefhash_inc();
+    test_overload_binary_throw();
+    test_overload_stringify_throw();
+    test_before_hook_throw();
+    return 0;
+}

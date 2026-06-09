@@ -1,0 +1,165 @@
+#!/usr/bin/env strada
+# Test tie/untie/tied for memory leaks
+# Run: valgrind --leak-check=full ./test_tie
+
+package CountHash;
+
+func TIEHASH(scalar ...@args) scalar {
+    my hash %self = ();
+    my hash %data = ();
+    $self{"data"} = \%data;
+    $self{"access_count"} = 0;
+    return bless(\%self, "CountHash");
+}
+
+func FETCH(scalar $self, str $key) scalar {
+    $self->{"access_count"} = $self->{"access_count"} + 1;
+    my scalar $data = $self->{"data"};
+    return $data->{$key};
+}
+
+func STORE(scalar $self, str $key, scalar $val) void {
+    $self->{"access_count"} = $self->{"access_count"} + 1;
+    my scalar $data = $self->{"data"};
+    $data->{$key} = $val;
+}
+
+func EXISTS(scalar $self, str $key) int {
+    my scalar $data = $self->{"data"};
+    return exists($data->{$key});
+}
+
+func DELETE(scalar $self, str $key) void {
+    my scalar $data = $self->{"data"};
+    delete($data->{$key});
+}
+
+func get_count(scalar $self) int {
+    return $self->{"access_count"};
+}
+
+package main;
+
+func main() int {
+    say("Testing tie/untie for memory leaks...");
+    my int $iterations = 100;
+
+    # Test basic tie/untie cycle (STORE only, no FETCH)
+    say("  tie/untie store cycle...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        tie(%h, "CountHash");
+        $h{"key"} = "value";
+        $h{"key2"} = "value2";
+        untie(%h);
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test exists/delete through tie
+    say("  exists/delete tied...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        tie(%h, "CountHash");
+        $h{"x"} = "val";
+        my int $ex = exists($h{"x"});
+        if (!$ex) {
+            say("    FAIL: exists");
+            return 1;
+        }
+        delete($h{"x"});
+        my int $ex2 = exists($h{"x"});
+        if ($ex2) {
+            say("    FAIL: delete");
+            return 1;
+        }
+        untie(%h);
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test tied() and untied check
+    say("  tied/untied check...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        tie(%h, "CountHash");
+        $h{"test"} = "data";
+        my scalar $obj = tied(%h);
+        if (!defined($obj)) {
+            say("    FAIL: tied undef");
+            return 1;
+        }
+        untie(%h);
+        my scalar $obj2 = tied(%h);
+        if (defined($obj2)) {
+            say("    FAIL: should be untied");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test FETCH through tie (previously leaked due to owned vs borrowed mismatch)
+    say("  tied FETCH...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        tie(%h, "CountHash");
+        $h{"foo"} = "bar";
+        my scalar $val = $h{"foo"};
+        if ($val ne "bar") {
+            say("    FAIL: FETCH returned wrong value");
+            return 1;
+        }
+        untie(%h);
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test tied() with FETCH
+    say("  tied with FETCH...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        tie(%h, "CountHash");
+        $h{"a"} = "1";
+        $h{"b"} = "2";
+        my scalar $v1 = $h{"a"};
+        my scalar $v2 = $h{"b"};
+        my scalar $obj3 = tied(%h);
+        if (!defined($obj3)) {
+            say("    FAIL: tied undef after FETCH");
+            return 1;
+        }
+        untie(%h);
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test multiple store/fetch cycles
+    say("  multi store/fetch...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        tie(%h, "CountHash");
+        $h{"k1"} = "v1";
+        $h{"k2"} = "v2";
+        $h{"k3"} = "v3";
+        my scalar $r1 = $h{"k1"};
+        my scalar $r2 = $h{"k2"};
+        my scalar $r3 = $h{"k3"};
+        if ($r1 ne "v1" || $r2 ne "v2" || $r3 ne "v3") {
+            say("    FAIL: multi fetch mismatch");
+            return 1;
+        }
+        untie(%h);
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All tie tests passed!");
+    return 0;
+}

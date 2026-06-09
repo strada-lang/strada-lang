@@ -1,0 +1,18 @@
+env=test_value
+global=my_value
+exists=1
+not_exists=0
+has_keys=1
+deleted=1
+limit_set=1
+sprintf=1 + 2 = 3
+sprintf_f=3.14
+abs_pos=42
+abs_neg=7
+def_undef=0
+def_val=1
+ref_arr=ARRAY
+sqrt=4
+floor=3
+ceil=4
+pow=1024

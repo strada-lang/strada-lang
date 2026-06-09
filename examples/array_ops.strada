@@ -1,0 +1,160 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# array_ops.strada - Test push, pop, shift, unshift
+
+func demo_push_pop() void {
+    say("=== Push and Pop ===");
+    
+    my scalar $arr = split("a,b,c", ",");
+    say("Initial: size = " . size($arr));
+    
+    # Push items to end
+    push($arr, "d");
+    say("After push('d'): size = " . size($arr));
+    
+    push($arr, "e");
+    say("After push('e'): size = " . size($arr));
+    
+    # Pop items from end
+    my scalar $item1 = pop($arr);
+    say("Popped: (size now " . size($arr) . ")");
+    
+    my scalar $item2 = pop($arr);
+    say("Popped: (size now " . size($arr) . ")");
+    
+    say("");
+}
+
+func demo_shift_unshift() void {
+    say("=== Shift and Unshift ===");
+    
+    my scalar $arr = split("x,y,z", ",");
+    say("Initial: size = " . size($arr));
+    
+    # Unshift items to beginning
+    unshift($arr, "w");
+    say("After unshift('w'): size = " . size($arr));
+    
+    unshift($arr, "v");
+    say("After unshift('v'): size = " . size($arr));
+    
+    # Shift items from beginning
+    my scalar $first1 = shift($arr);
+    say("Shifted: (size now " . size($arr) . ")");
+    
+    my scalar $first2 = shift($arr);
+    say("Shifted: (size now " . size($arr) . ")");
+    
+    say("");
+}
+
+func demo_queue() void {
+    say("=== Queue Pattern (push + shift) ===");
+    
+    my scalar $queue = split("", ",");  # Empty array
+    say("Created empty queue");
+    
+    # Add to queue (push to end)
+    push($queue, "task1");
+    say("Enqueued task1, size: " . size($queue));
+    
+    push($queue, "task2");
+    say("Enqueued task2, size: " . size($queue));
+    
+    push($queue, "task3");
+    say("Enqueued task3, size: " . size($queue));
+    
+    # Process queue (shift from beginning)
+    my scalar $task1 = shift($queue);
+    say("Dequeued, size: " . size($queue));
+    
+    my scalar $task2 = shift($queue);
+    say("Dequeued, size: " . size($queue));
+    
+    say("");
+}
+
+func demo_stack() void {
+    say("=== Stack Pattern (push + pop) ===");
+    
+    my scalar $stack = split("", ",");  # Empty array
+    say("Created empty stack");
+    
+    # Push onto stack
+    push($stack, "A");
+    say("Pushed A, size: " . size($stack));
+    
+    push($stack, "B");
+    say("Pushed B, size: " . size($stack));
+    
+    push($stack, "C");
+    say("Pushed C, size: " . size($stack));
+    
+    # Pop from stack (LIFO)
+    my scalar $top1 = pop($stack);
+    say("Popped, size: " . size($stack));
+    
+    my scalar $top2 = pop($stack);
+    say("Popped, size: " . size($stack));
+    
+    say("");
+}
+
+func demo_combined() void {
+    say("=== Combined Operations ===");
+    
+    my scalar $arr = split("2,3,4", ",");
+    say("Start: size = " . size($arr));
+    
+    unshift($arr, "1");  # Add to beginning
+    say("After unshift('1'): size = " . size($arr));
+    
+    push($arr, "5");     # Add to end
+    say("After push('5'): size = " . size($arr));
+    
+    my scalar $first = shift($arr);  # Remove from beginning
+    say("After shift: size = " . size($arr));
+    
+    my scalar $lastval = pop($arr);     # Remove from end
+    say("After pop: size = " . size($arr));
+    
+    say("");
+}
+
+func main() int {
+    say("╔════════════════════════════════════════╗");
+    say("║  Array Manipulation Functions         ║");
+    say("╚════════════════════════════════════════╝");
+    say("");
+    
+    demo_push_pop();
+    demo_shift_unshift();
+    demo_queue();
+    demo_stack();
+    demo_combined();
+    
+    say("Summary:");
+    say("  push($arr, $val)   - Add to end");
+    say("  pop($arr)          - Remove from end");
+    say("  unshift($arr, $val) - Add to beginning");
+    say("  shift($arr)        - Remove from beginning");
+    say("");
+    say("✓ All array operations working!");
+    
+    return 0;
+}

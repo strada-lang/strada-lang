@@ -1,0 +1,4 @@
+initial=0
+after increment=1
+after add(9)=10
+oop import_lib OK

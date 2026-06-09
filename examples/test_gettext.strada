@@ -1,0 +1,43 @@
+# test_gettext.strada - Test the Gettext module using extern "C"
+
+use lib "lib";
+use Gettext;
+
+func main() int {
+    say("=== Testing Gettext module (extern C) ===");
+
+    # Check if gettext is available
+    my int $has_gt = Gettext::has_gettext();
+    say("gettext available: " . $has_gt);
+
+    # Initialize gettext (even without .mo files, functions should work)
+    Gettext::init("test", "./locale");
+    say("Initialized with domain 'test'");
+
+    # Test basic translation (returns original if no .mo file)
+    my str $hello = Gettext::_("Hello, world!");
+    say("Translated: " . $hello);
+
+    # Test plural forms
+    my str $file1 = Gettext::n("%d file", "%d files", 1);
+    my str $file5 = Gettext::n("%d file", "%d files", 5);
+    say("Plural (n=1): " . $file1);
+    say("Plural (n=5): " . $file5);
+
+    # Test formatting helpers
+    my str $formatted = Gettext::f1("Count: %d", 42);
+    say("Formatted: " . $formatted);
+
+    my str $nf = Gettext::nf1("%d item", "%d items", 3, 3);
+    say("Plural formatted: " . $nf);
+
+    # Test domain functions
+    say("Current domain: " . Gettext::get_domain());
+
+    # Test N() marker (no-op, just returns the string)
+    my str $marked = Gettext::N("This is marked for translation");
+    say("Marked string: " . $marked);
+
+    say("=== All Gettext tests passed! ===");
+    return 0;
+}

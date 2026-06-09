@@ -1,0 +1,95 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_hash_complete.strada - Complete hash functionality test
+
+func main() int {
+    say("╔══════════════════════════════════════╗");
+    say("║  Complete Hash Test                  ║");
+    say("╚══════════════════════════════════════╝");
+    say("");
+    
+    # Declare hash with % prefix
+    my hash %person;
+    
+    # Set values using bare keys (Perl style)
+    $person{name} = "Alice";
+    $person{age} = 28;
+    $person{occupation} = "Engineer";
+    $person{salary} = 95000;
+    
+    say("Person record:");
+    say("  name: " . $person{name});
+    say("  age: " . $person{age});
+    say("  occupation: " . $person{occupation});
+    say("  salary: " . $person{salary});
+    
+    # Iterate over keys
+    say("");
+    say("Iterating with keys():");
+    my scalar $k = keys(%person);
+    my int $i = 0;
+    while ($i < size($k)) {
+        my str $key = $k[$i];
+        say("  " . $key . " => " . $person{$key});
+        $i = $i + 1;
+    }
+    
+    # Test hash as function parameter
+    say("");
+    say("Function parameter test:");
+    print_hash(%person);
+    
+    # Check existence
+    say("");
+    say("exists(name): " . exists($person{name}));
+    say("exists(email): " . exists($person{email}));
+    
+    # Delete a key
+    say("");
+    say("Deleting occupation...");
+    delete($person{occupation});
+    say("exists(occupation): " . exists($person{occupation}));
+    
+    # Show final keys
+    say("");
+    say("Final keys:");
+    $k = keys(%person);
+    $i = 0;
+    while ($i < size($k)) {
+        say("  " . $k[$i]);
+        $i = $i + 1;
+    }
+    
+    say("");
+    say("╔══════════════════════════════════════╗");
+    say("║  ✓ Hash test complete!               ║");
+    say("╚══════════════════════════════════════╝");
+    
+    return 0;
+}
+
+func print_hash(hash %h) void {
+    say("  Hash contents via function:");
+    my scalar $keys = keys(%h);
+    my int $i = 0;
+    while ($i < size($keys)) {
+        my str $k = $keys[$i];
+        say("    " . $k . " = " . $h{$k});
+        $i = $i + 1;
+    }
+}

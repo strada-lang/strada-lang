@@ -1,0 +1,94 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_universal_can.strada - Demonstrates UNIVERSAL::can() for method checking
+#
+# UNIVERSAL::can($obj, "method") checks if an object can perform a method.
+# It's equivalent to can($obj, "method") but uses the UNIVERSAL:: namespace.
+#
+# Note: For can() to return true, methods must be registered in the OOP
+# method table. This example shows the syntax and behavior of UNIVERSAL::can().
+
+package Animal;
+
+func Animal_new(str $name) scalar {
+    my hash %self = ();
+    $self{"name"} = $name;
+    return bless(\%self, "Animal");
+}
+
+func Animal_speak(scalar $self) void {
+    say($self->{"name"} . " speaks");
+}
+
+package Dog;
+inherit Animal;
+
+func Dog_new(str $name) scalar {
+    my hash %self = ();
+    $self{"name"} = $name;
+    return bless(\%self, "Dog");
+}
+
+func Dog_bark(scalar $self) void {
+    say($self->{"name"} . " barks!");
+}
+
+func main() int {
+    say("=== UNIVERSAL::can() Example ===\n");
+
+    my scalar $dog = Dog_new("Rex");
+    my scalar $animal = Animal_new("Generic");
+
+    say("Created objects:");
+    say("  \$dog = Dog blessed object");
+    say("  \$animal = Animal blessed object\n");
+
+    # Demonstrate UNIVERSAL::can() syntax
+    # (Method lookup depends on OOP registry configuration)
+    say("Checking methods with UNIVERSAL::can():");
+
+    my int $dog_can_bark = UNIVERSAL::can($dog, "Dog_bark");
+    my int $dog_can_fly = UNIVERSAL::can($dog, "fly");
+    my int $animal_can_speak = UNIVERSAL::can($animal, "Animal_speak");
+
+    say("  UNIVERSAL::can(\$dog, 'Dog_bark') = " . $dog_can_bark);
+    say("  UNIVERSAL::can(\$dog, 'fly') = " . $dog_can_fly);
+    say("  UNIVERSAL::can(\$animal, 'Animal_speak') = " . $animal_can_speak);
+
+    # Show equivalence with can()
+    say("\n--- Equivalence with can() ---");
+    my int $can_result = can($dog, "Dog_bark");
+    my int $universal_result = UNIVERSAL::can($dog, "Dog_bark");
+
+    say("can(\$dog, 'Dog_bark') = " . $can_result);
+    say("UNIVERSAL::can(\$dog, 'Dog_bark') = " . $universal_result);
+
+    if ($can_result == $universal_result) {
+        say("\nBoth functions return the same result!");
+    }
+
+    # Practical pattern: check before calling
+    say("\n--- Practical Pattern ---");
+    say("Use can() or UNIVERSAL::can() to check before calling methods:");
+    say("  if (UNIVERSAL::can(\$obj, 'method')) {");
+    say("      # Safe to call the method");
+    say("  }");
+
+    say("\n=== Example Complete ===");
+    return 0;
+}

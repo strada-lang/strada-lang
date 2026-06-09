@@ -1,0 +1,56 @@
+#!/usr/bin/env strada
+# Leak regression: every `async func` call leaked the closure + captures
+# because strada_future_new called strada_incref on the passed-in
+# closure (leaving it at refcount 2), while the codegen wrapper didn't
+# decref the local __closure handle. Future destruction only decref'd
+# once → closure stuck at refcount 1 → permanent leak per async call.
+#
+# Fix: strada_future_new now takes ownership without incref.
+#
+# Run: valgrind --leak-check=full ./test_async_basic_leak
+
+package main;
+
+async func compute_int(int $n) int {
+    return $n * 3;
+}
+
+async func compute_str(int $n) str {
+    return "v:" . $n;
+}
+
+func test_int_await() void {
+    my int $iter = 100;
+    my int $i = 0;
+    while ($i < $iter) {
+        my scalar $f = compute_int($i);
+        my int $r = await $f;
+        if ($r != $i * 3) {
+            say("FAIL int await: i=" . $i . " r=" . $r);
+            return;
+        }
+        $i = $i + 1;
+    }
+    say("test_int_await: PASS");
+}
+
+func test_str_await() void {
+    my int $iter = 50;
+    my int $i = 0;
+    while ($i < $iter) {
+        my scalar $f = compute_str($i);
+        my str $r = await $f;
+        if ($r ne "v:" . $i) {
+            say("FAIL str await: i=" . $i . " r=" . $r);
+            return;
+        }
+        $i = $i + 1;
+    }
+    say("test_str_await: PASS");
+}
+
+func main() int {
+    test_int_await();
+    test_str_await();
+    return 0;
+}

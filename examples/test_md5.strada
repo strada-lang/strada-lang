@@ -1,0 +1,95 @@
+# Test Digest::MD5 library
+
+use lib "lib";
+use Digest::MD5;
+
+func main() int {
+    say("=== Digest::MD5 Tests ===");
+    say("");
+
+    # Test 1: Empty string
+    my str $empty_hex = Digest::MD5::md5_hex("");
+    say("MD5 of empty string: " . $empty_hex);
+    if ($empty_hex eq "d41d8cd98f00b204e9800998ecf8427e") {
+        say("  PASS");
+    } else {
+        say("  FAIL - expected d41d8cd98f00b204e9800998ecf8427e");
+        return 1;
+    }
+
+    # Test 2: "Hello, World!"
+    my str $hello_hex = Digest::MD5::md5_hex("Hello, World!");
+    say("");
+    say("MD5 of 'Hello, World!': " . $hello_hex);
+    if ($hello_hex eq "65a8e27d8879283831b664bd8b7f0ad4") {
+        say("  PASS");
+    } else {
+        say("  FAIL - expected 65a8e27d8879283831b664bd8b7f0ad4");
+        return 1;
+    }
+
+    # Test 3: "abc" (classic MD5 test vector from RFC 1321)
+    my str $abc_hex = Digest::MD5::md5_hex("abc");
+    say("");
+    say("MD5 of 'abc': " . $abc_hex);
+    if ($abc_hex eq "900150983cd24fb0d6963f7d28e17f72") {
+        say("  PASS");
+    } else {
+        say("  FAIL - expected 900150983cd24fb0d6963f7d28e17f72");
+        return 1;
+    }
+
+    # Test 4: "message digest" (RFC 1321 test vector)
+    my str $msg_hex = Digest::MD5::md5_hex("message digest");
+    say("");
+    say("MD5 of 'message digest': " . $msg_hex);
+    if ($msg_hex eq "f96b697d7cb7938d525a2f31aaf161d0") {
+        say("  PASS");
+    } else {
+        say("  FAIL - expected f96b697d7cb7938d525a2f31aaf161d0");
+        return 1;
+    }
+
+    # Test 5: md5_base64 function
+    my str $hello_b64 = Digest::MD5::md5_base64("Hello, World!");
+    say("");
+    say("MD5 base64 of 'Hello, World!': " . $hello_b64);
+    # Expected: ZajifYh5KDgxtmS9i38K1A (22 chars, no padding)
+    if ($hello_b64 eq "ZajifYh5KDgxtmS9i38K1A") {
+        say("  PASS");
+    } else {
+        say("  FAIL - expected ZajifYh5KDgxtmS9i38K1A");
+        return 1;
+    }
+
+    # Test 6: raw md5 function
+    my str $raw = Digest::MD5::md5("abc");
+    my int $raw_len = sys::byte_length($raw);
+    say("");
+    say("MD5 raw length: " . $raw_len . " bytes");
+    if ($raw_len == 16) {
+        say("  PASS");
+    } else {
+        say("  FAIL - expected 16 bytes");
+        return 1;
+    }
+
+    # Verify first few bytes of raw digest match expected values
+    # MD5("abc") = 90 01 50 98 3c d2 4f b0 d6 96 3f 7d 28 e1 7f 72
+    my int $b0 = sys::get_byte($raw, 0);
+    my int $b1 = sys::get_byte($raw, 1);
+    my int $b15 = sys::get_byte($raw, 15);
+    say("First byte: " . $b0 . " (expected 144/0x90)");
+    say("Second byte: " . $b1 . " (expected 1/0x01)");
+    say("Last byte: " . $b15 . " (expected 114/0x72)");
+    if ($b0 == 144 && $b1 == 1 && $b15 == 114) {
+        say("  PASS");
+    } else {
+        say("  FAIL");
+        return 1;
+    }
+
+    say("");
+    say("=== All tests passed! ===");
+    return 0;
+}

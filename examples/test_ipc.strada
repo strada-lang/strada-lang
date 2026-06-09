@@ -1,0 +1,125 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_ipc.strada - Test IPC::Open3 module
+
+func main() int {
+    say("=== IPC::Open3 Test ===");
+    say("");
+
+    # Test 1: Basic pipe test
+    say("--- Test 1: Basic pipe ---");
+    my scalar $p = sys::pipe();
+    if (defined($p)) {
+        say("Created pipe: read_fd=" . $p->[0] . " write_fd=" . $p->[1]);
+        sys::write_fd($p->[1], "Hello through pipe!");
+        sys::close_fd($p->[1]);
+        my str $data = sys::read_all_fd($p->[0]);
+        sys::close_fd($p->[0]);
+        say("Read from pipe: " . $data);
+    } else {
+        say("ERROR: Failed to create pipe");
+    }
+
+    say("");
+
+    # Test 2: Capture command output (like backticks)
+    say("--- Test 2: Capture output ---");
+    my scalar $out_pipe = sys::pipe();
+
+    my int $pid = sys::fork();
+    if ($pid == 0) {
+        # Child - redirect stdout to pipe and run command
+        sys::close_fd($out_pipe->[0]);
+        sys::dup2($out_pipe->[1], 1);  # stdout = 1
+        sys::close_fd($out_pipe->[1]);
+        sys::exec("echo 'Hello from subprocess!'");
+        exit(1);
+    } else {
+        # Parent - read from pipe
+        sys::close_fd($out_pipe->[1]);
+        my str $output = sys::read_all_fd($out_pipe->[0]);
+        sys::close_fd($out_pipe->[0]);
+        sys::wait();
+        say("Captured: " . $output);
+    }
+
+    say("");
+
+    # Test 3: Full open3-style with stdin/stdout
+    say("--- Test 3: Bidirectional communication ---");
+
+    my scalar $stdin_pipe = sys::pipe();
+    my scalar $stdout_pipe = sys::pipe();
+
+    my int $pid2 = sys::fork();
+
+    if ($pid2 == 0) {
+        # Child process
+        sys::close_fd($stdin_pipe->[1]);
+        sys::dup2($stdin_pipe->[0], 0);  # stdin = 0
+        sys::close_fd($stdin_pipe->[0]);
+
+        sys::close_fd($stdout_pipe->[0]);
+        sys::dup2($stdout_pipe->[1], 1);  # stdout = 1
+        sys::close_fd($stdout_pipe->[1]);
+
+        sys::exec("cat");  # cat just echoes stdin to stdout
+        exit(1);
+    } else {
+        # Parent process
+        sys::close_fd($stdin_pipe->[0]);
+        sys::close_fd($stdout_pipe->[1]);
+
+        # Write to child's stdin
+        sys::write_fd($stdin_pipe->[1], "Message to child process\n");
+        sys::close_fd($stdin_pipe->[1]);
+
+        # Read from child's stdout
+        my str $response = sys::read_all_fd($stdout_pipe->[0]);
+        sys::close_fd($stdout_pipe->[0]);
+
+        sys::wait();
+        say("Child echoed: " . $response);
+    }
+
+    say("");
+
+    # Test 4: Using the simple capture helper
+    say("--- Test 4: Capture with processing ---");
+
+    my scalar $p2 = sys::pipe();
+    my int $pid3 = sys::fork();
+
+    if ($pid3 == 0) {
+        sys::close_fd($p2->[0]);
+        sys::dup2($p2->[1], 1);
+        sys::close_fd($p2->[1]);
+        sys::exec("ls -la / | head -5");
+        exit(1);
+    } else {
+        sys::close_fd($p2->[1]);
+        my str $listing = sys::read_all_fd($p2->[0]);
+        sys::close_fd($p2->[0]);
+        sys::wait();
+        say("Directory listing:");
+        say($listing);
+    }
+
+    say("=== Test Complete ===");
+    return 0;
+}

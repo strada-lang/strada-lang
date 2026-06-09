@@ -1,0 +1,33 @@
+#!/usr/bin/env strada
+# Regression test for the Cannoli compile crash:
+# `\$ws->{"_client"}->socket_close()` and `core::socket_close(\$h{"k"})`
+# previously emitted
+#   StradaValue *__call_result = strada_socket_close(...);
+# inside a statement-expression. strada_socket_close was declared
+# `void`, so this didn't compile. Same applied to socket_flush.
+# Both are now StradaValue*-returning (return undef).
+#
+# We don't actually open a socket here — just exercise the codegen
+# pattern that previously failed at gcc time. The test passes if
+# it compiles and runs cleanly.
+
+package main;
+
+func test_socket_close_via_hash_access() void {
+    my hash %ws = ();
+    # NOTE: only the codegen shape matters. We don't actually open
+    # a socket; we just need the AST node to dispatch through
+    # gen_call_with_arg_cleanup with an owned-temp arg.
+    # We never actually open a real socket; just thread a NULL/undef
+    # through the wrapper. strada_socket_close NOOPs on non-sockets.
+    my scalar $sock;  # undef
+    $ws{"_client"} = $sock;
+    core::socket_close($ws{"_client"});
+    core::socket_flush($ws{"_client"});
+    say("test_socket_close_via_hash_access: PASS");
+}
+
+func main() int {
+    test_socket_close_via_hash_access();
+    return 0;
+}

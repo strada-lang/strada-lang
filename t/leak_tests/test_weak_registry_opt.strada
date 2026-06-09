@@ -1,0 +1,73 @@
+#!/usr/bin/env strada
+# Test weak registry optimization (Phase 3)
+# When no weak refs exist, strada_free_value skips the mutex lock entirely.
+# This test verifies no leaks with and without weak refs.
+# Run: valgrind --leak-check=full ./test_weak_registry_opt
+
+func main() int {
+    say("Testing weak registry optimization...");
+    my int $iterations = 50;
+
+    # Test 1: No weak refs at all (fast path — no mutex)
+    say("  Values freed without weak refs...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my scalar $parent = { "name" => "parent_" . $i };
+        my scalar $child = { "name" => "child_" . $i, "data" => [1, 2, 3] };
+        $parent->{"child"} = $child;
+        # No circular ref, no weak ref — both freed normally
+        if ($parent->{"child"}->{"name"} ne "child_" . $i) {
+            say("    FAIL: no-weak path");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 2: Weak refs present (slow path — mutex used)
+    say("  Weak reference cycle breaking...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $parent = { "name" => "p" };
+        my scalar $child = { "name" => "c" };
+        $parent->{"child"} = $child;
+        $child->{"parent"} = $parent;
+        # Break cycle
+        core::weaken($child->{"parent"});
+        if (!core::isweak($child->{"parent"})) {
+            say("    FAIL: weaken didn't work");
+            return 1;
+        }
+        if ($child->{"parent"}->{"name"} ne "p") {
+            say("    FAIL: weak ref deref");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 3: Mix of weak and non-weak in same loop
+    say("  Mixed weak/non-weak...");
+    $i = 0;
+    while ($i < $iterations) {
+        # Non-weak path
+        my hash %plain = ("key" => "value_" . $i);
+        my int $len = length($plain{"key"});
+
+        # Weak path
+        my scalar $a = { "id" => $i };
+        my scalar $b = { "ref" => $a };
+        $a->{"back"} = $b;
+        core::weaken($a->{"back"});
+
+        if ($len < 6) {
+            say("    FAIL: mixed");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All weak registry optimization tests passed!");
+    return 0;
+}

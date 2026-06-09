@@ -1,0 +1,134 @@
+#!/usr/bin/env strada
+# Test array/hash slices for memory leaks
+# Run: valgrind --leak-check=full ./test_slices
+
+func main() int {
+    say("Testing slices for memory leaks...");
+    my int $iterations = 100;
+
+    # Test array slice with indices
+    say("  array slice indices...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my array @data = (10, 20, 30, 40, 50);
+        my array @slice = @data[0, 2, 4];
+        if (size(@slice) != 3) {
+            say("    FAIL: slice size");
+            return 1;
+        }
+        if ($slice[0] != 10 || $slice[1] != 30 || $slice[2] != 50) {
+            say("    FAIL: slice values");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test array slice with range
+    say("  array slice range...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @data = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+        my array @slice = @data[0..4];
+        if (size(@slice) != 5) {
+            say("    FAIL: range slice size");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test hash slice
+    say("  hash slice...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        $h{"name"} = "Alice";
+        $h{"age"} = "30";
+        $h{"city"} = "NYC";
+        my array @vals = @h{"name", "city"};
+        if (size(@vals) != 2) {
+            say("    FAIL: hash slice size");
+            return 1;
+        }
+        if ($vals[0] ne "Alice" || $vals[1] ne "NYC") {
+            say("    FAIL: hash slice values");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test nested array access
+    say("  nested array access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $nested = [[1, 2], [3, 4], [5, 6]];
+        my scalar $inner = $nested->[1];
+        my int $val = $inner->[0];
+        if ($val != 3) {
+            say("    FAIL: nested = " . $val);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test nested hash access
+    say("  nested hash access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $data = {
+            "user" => {"name" => "Bob", "age" => 25},
+            "meta" => {"active" => 1}
+        };
+        my str $name = $data->{"user"}->{"name"};
+        if ($name ne "Bob") {
+            say("    FAIL: nested hash = " . $name);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test delete on hash
+    say("  hash delete...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        $h{"a"} = "alpha";
+        $h{"b"} = "beta";
+        $h{"c"} = "gamma";
+        delete($h{"b"});
+        if (exists($h{"b"})) {
+            say("    FAIL: delete");
+            return 1;
+        }
+        if (size(keys(%h)) != 2) {
+            say("    FAIL: delete size");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test exists on nested
+    say("  exists on nested...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        $h{"a"} = "1";
+        $h{"b"} = "2";
+        my int $e1 = exists($h{"a"});
+        my int $e2 = exists($h{"z"});
+        if (!$e1 || $e2) {
+            say("    FAIL: exists");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All slice tests passed!");
+    return 0;
+}

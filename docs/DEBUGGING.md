@@ -1,0 +1,592 @@
+# Debugging Strada Programs with GDB
+
+This guide explains how to use GDB to debug Strada programs.
+
+## Quick Start
+
+```bash
+# Compile with debug symbols
+./strada -g -O0 program.strada
+
+# Start GDB
+gdb ./program
+
+# Basic commands
+(gdb) break main
+(gdb) run
+(gdb) next
+(gdb) print x
+```
+
+## Compilation Options
+
+### Strada-Level Debugging (Recommended)
+
+```bash
+./strada -g program.strada
+```
+
+This emits `#line` directives so GDB shows your `.strada` source code. When you step through code or hit breakpoints, you'll see Strada lines, not generated C.
+
+### C-Level Debugging
+
+```bash
+./strada -c --c-debug program.strada
+```
+
+This keeps the generated `.c` file and includes debug symbols, but GDB shows the C code instead of Strada source. Useful for debugging code generation issues.
+
+### Disable Optimizations
+
+For best debugging experience, disable optimizations:
+
+```bash
+./strada -g -O0 program.strada
+```
+
+With `-O2` (default), variables may be optimized away or reordered.
+
+## Variable Name Mapping
+
+Strada variables are renamed in the generated C code:
+
+| Strada | C Variable |
+|--------|------------|
+| `$x` | `x` |
+| `@arr` | `arr` |
+| `%hash` | `hash` |
+| `$my_var` | `my_var` |
+
+### Examples
+
+```bash
+# Strada: my int $count = 10;
+(gdb) print count
+
+# Strada: my str $name = "hello";
+(gdb) print name
+
+# Strada: my array @items = [1, 2, 3];
+(gdb) print items
+```
+
+## Inspecting StradaValue Structures
+
+All Strada values are `StradaValue*` pointers. To inspect them:
+
+### Tagged Integers
+
+**Important**: Integer values use tagged pointers -- the low bit of the pointer is set, and the integer value is stored in the upper 63 bits. Before dereferencing a `StradaValue*` in GDB, check if it is a tagged integer:
+
+```bash
+(gdb) print (uintptr_t)x & 1
+# If result is 1, it's a tagged integer. Extract the value:
+(gdb) print (int64_t)((uintptr_t)x >> 1)
+# Shows: 42
+
+# If result is 0, it's a heap-allocated StradaValue — safe to dereference:
+(gdb) print *x
+```
+
+Attempting to dereference a tagged integer pointer as a struct will cause a segfault or show garbage values in GDB.
+
+### Basic Inspection (Heap-Allocated Values)
+
+```bash
+(gdb) print *x
+# Shows: {type = 1, refcount = 1, value = {iv = 42, ...}}
+# NOTE: Only valid for non-tagged (heap-allocated) values!
+```
+
+### Type Values
+
+| Type ID | Strada Type |
+|---------|-------------|
+| 0 | UNDEF |
+| 1 | INT |
+| 2 | NUM (float) |
+| 3 | STR |
+| 4 | ARRAY |
+| 5 | HASH |
+| 6 | REF |
+| 7 | FILEHANDLE |
+| 8 | REGEX |
+| 9 | SOCKET |
+| 10 | CSTRUCT |
+| 11 | CPOINTER |
+| 12 | CLOSURE |
+| 13 | FUTURE |
+| 14 | CHANNEL |
+| 15 | ATOMIC |
+
+### Inspecting Strings
+
+```bash
+(gdb) print name->value.pv
+# Shows: 0x55555555a2c0 "hello"
+```
+
+### Inspecting Integers
+
+```bash
+# Most integers are tagged pointers — use this:
+(gdb) print (int64_t)((uintptr_t)count >> 1)
+# Shows: 42
+
+# For heap-allocated integers (rare), you can also use:
+(gdb) print count->value.iv
+```
+
+### Inspecting Floats
+
+```bash
+(gdb) print price->value.nv
+# Shows: 19.989999999999998
+```
+
+### Inspecting Arrays
+
+```bash
+# Array length
+(gdb) print items->value.av->size
+# Shows: 3
+
+# First element
+(gdb) print *items->value.av->elements[0]
+
+# First element's integer value
+(gdb) print items->value.av->elements[0]->value.iv
+```
+
+### Inspecting Hashes
+
+```bash
+# Hash size
+(gdb) print hash->value.hv.size
+
+# Hash internals (more complex, uses buckets)
+(gdb) print hash->value.hv
+```
+
+## Setting Breakpoints
+
+### By Function Name
+
+```bash
+# Break at main
+(gdb) break main
+
+# Break at a Strada function (use generated C name)
+(gdb) break my_function
+
+# Break at a class method
+(gdb) break MyClass_method
+```
+
+### By Line Number
+
+With `-g` flag, you can break at Strada source lines:
+
+```bash
+(gdb) break program.strada:42
+```
+
+### Conditional Breakpoints
+
+```bash
+# Break when $i equals 5
+(gdb) break program.strada:10 if i->value.iv == 5
+```
+
+## Stepping Through Code
+
+```bash
+(gdb) next          # Step over (next Strada line)
+(gdb) step          # Step into function calls
+(gdb) finish        # Run until current function returns
+(gdb) continue      # Continue to next breakpoint
+```
+
+## Examining the Call Stack
+
+```bash
+(gdb) backtrace     # Show call stack
+(gdb) frame 2       # Switch to frame 2
+(gdb) info locals   # Show local variables in current frame
+```
+
+## Watchpoints
+
+Watch for variable changes:
+
+```bash
+# Watch when integer value changes
+(gdb) watch x->value.iv
+
+# Watch when variable pointer changes
+(gdb) watch x
+```
+
+## Useful GDB Commands
+
+```bash
+# Show source around current line
+(gdb) list
+
+# Show source of specific function
+(gdb) list my_function
+
+# Print expression
+(gdb) print x->value.iv + 10
+
+# Print in hex
+(gdb) print/x x
+
+# Examine memory
+(gdb) x/10xw arr->value.av->elements
+
+# Show all breakpoints
+(gdb) info breakpoints
+
+# Delete breakpoint
+(gdb) delete 1
+
+# Disable/enable breakpoint
+(gdb) disable 1
+(gdb) enable 1
+```
+
+## Debugging Segfaults
+
+When a program crashes:
+
+```bash
+$ gdb ./program
+(gdb) run
+# ... program crashes ...
+(gdb) backtrace          # See where it crashed
+(gdb) frame 0            # Go to crash location
+(gdb) list               # See source code
+(gdb) info locals        # Check local variables
+```
+
+### Common Causes
+
+1. **Null pointer dereference**: Check if `x` is NULL before accessing `x->value`
+2. **Array out of bounds**: Check array size vs index
+3. **Use after free**: Variable was freed but still accessed
+
+## Debugging with Core Dumps
+
+Enable core dumps:
+
+```bash
+ulimit -c unlimited
+./program              # Crashes, creates core file
+gdb ./program core     # Analyze the crash
+(gdb) backtrace
+```
+
+## GDB Init File
+
+Create `~/.gdbinit` for convenience:
+
+```
+# Pretty print StradaValue
+define pval
+  if $arg0 == 0
+    printf "NULL\n"
+  else
+    # Small ints are tagged directly in the pointer (odd address) and are NOT
+    # heap structs — must be checked before dereferencing.
+    if ((unsigned long)$arg0 & 1)
+      printf "INT (tagged): %ld\n", ((long)$arg0 >> 1)
+    else
+      if $arg0->type == 0
+        printf "UNDEF\n"
+      end
+      if $arg0->type == 1
+        printf "INT: %ld\n", $arg0->value.iv
+      end
+      if $arg0->type == 2
+        printf "NUM: %f\n", $arg0->value.nv
+      end
+      if $arg0->type == 3
+        printf "STR: %s\n", $arg0->value.pv
+      end
+      if $arg0->type == 4
+        printf "ARRAY[%d]\n", $arg0->value.av->size
+      end
+      if $arg0->type == 5
+        printf "HASH[%d]\n", $arg0->value.hv->num_entries
+      end
+      if $arg0->type == 6
+        printf "REF -> %p\n", $arg0->value.rv
+      end
+    end
+  end
+end
+document pval
+  Print a StradaValue in human-readable format
+  Usage: pval name
+end
+```
+
+Then use:
+
+```bash
+(gdb) pval x
+INT: 42
+
+(gdb) pval name
+STR: hello
+```
+
+## Example Debugging Session
+
+Given this Strada program (`debug_example.strada`):
+
+```strada
+func factorial(int $n) int {
+    if ($n <= 1) {
+        return 1;
+    }
+    return $n * factorial($n - 1);
+}
+
+func main() int {
+    my int $result = factorial(5);
+    say("Result: " . $result);
+    return 0;
+}
+```
+
+Debug session:
+
+```bash
+$ ./strada -g -O0 debug_example.strada
+$ gdb ./debug_example
+
+(gdb) break factorial
+Breakpoint 1 at 0x...: file debug_example.strada, line 2.
+
+(gdb) run
+Starting program: ./debug_example
+Breakpoint 1, factorial (n=0x...) at debug_example.strada:2
+
+(gdb) print n->value.iv
+$1 = 5
+
+(gdb) continue
+Breakpoint 1, factorial (n=0x...) at debug_example.strada:2
+
+(gdb) print n->value.iv
+$2 = 4
+
+(gdb) backtrace
+#0  factorial (n=0x...) at debug_example.strada:2
+#1  0x... in factorial (n=0x...) at debug_example.strada:5
+#2  0x... in main () at debug_example.strada:9
+
+(gdb) continue
+...
+Result: 120
+[Inferior 1 exited normally]
+```
+
+## Stack Traces
+
+Strada provides built-in stack trace support for debugging.
+
+### Automatic Stack Traces on Exceptions
+
+When an exception goes uncaught, Strada automatically prints a stack trace:
+
+```
+Uncaught exception: division by zero
+Stack trace:
+  at divide (calculator.strada)
+  at compute (calculator.strada)
+  at main (calculator.strada)
+```
+
+This shows the call chain from innermost function (where the error occurred) to outermost (main).
+
+### Manual Stack Traces
+
+Use `core::stack_trace()` to get the current call stack as a string at any point:
+
+```strada
+func debug_location() void {
+    my str $trace = core::stack_trace();
+    say("Current location:\n" . $trace);
+}
+
+func process_data() void {
+    debug_location();  # Prints where we are
+    # ... rest of processing
+}
+```
+
+This is useful for:
+- Debugging complex call chains
+- Logging entry/exit points
+- Error reporting in catch blocks
+
+### Captured Stack Traces
+
+You can capture a stack trace for later use:
+
+```strada
+func risky_operation() void {
+    try {
+        do_something_dangerous();
+    } catch ($e) {
+        my str $trace = core::stack_trace();
+        log_error("Error: " . $e . "\nStack:\n" . $trace);
+    }
+}
+```
+
+## Deep Recursion Protection
+
+Strada automatically detects excessive recursion and exits gracefully with a stack trace, instead of crashing with a stack overflow.
+
+### Default Behavior
+
+The default recursion limit is 1000 calls. When exceeded:
+
+```
+Error: Maximum recursion depth exceeded (1000)
+Stack trace:
+  at infinite_recurse (broken.strada)
+  at infinite_recurse (broken.strada)
+  ...
+  at main (broken.strada)
+  -> infinite_recurse (broken.strada)
+
+Hint: Use core::set_recursion_limit(n) to increase the limit, or 0 to disable.
+```
+
+### Configuring the Limit
+
+```strada
+# Increase for deeply recursive algorithms
+core::set_recursion_limit(5000);
+
+# Disable the check (not recommended)
+core::set_recursion_limit(0);
+
+# Check current limit
+my int $limit = core::get_recursion_limit();
+```
+
+### When to Adjust
+
+- **Increase limit**: For legitimate deep recursion (tree traversal, parsing, etc.)
+- **Disable (0)**: Only when you're certain your recursion is bounded and need maximum performance
+- **Lower limit**: To catch runaway recursion earlier during development
+
+## Troubleshooting
+
+### "No symbol table"
+
+Compile with `-g`:
+```bash
+./strada -g program.strada
+```
+
+### Variables optimized out
+
+Compile with `-O0`:
+```bash
+./strada -g -O0 program.strada
+```
+
+### GDB shows C code instead of Strada
+
+Make sure you used `-g` (not `--c-debug`):
+```bash
+./strada -g program.strada    # Shows Strada source
+./strada --c-debug program.strada  # Shows C source
+```
+
+### Can't find source file
+
+GDB needs access to the original `.strada` file. Either:
+- Debug from the same directory where you compiled
+- Use `(gdb) directory /path/to/source`
+
+### Breakpoint not hit
+
+Function names in C are prefixed with ``:
+```bash
+(gdb) break my_function   # Correct
+(gdb) break my_function        # Won't work
+```
+
+## Line-Level Profiling (Full Profile)
+
+Strada includes a comprehensive line-level profiler (similar to Perl's Devel::NYTProf) for detailed performance analysis.
+
+### Quick Start
+
+```bash
+# Compile with full profiling instrumentation
+./strada --full-profile myprogram.strada
+
+# Run the program (writes strada-prof.out on exit)
+./myprogram
+
+# Generate a text report
+strada-proftext strada-prof.out
+
+# Generate an HTML report with sortable tables and heat-colored source
+strada-profhtml strada-prof.out profhtml/
+open profhtml/index.html
+```
+
+### How It Works
+
+The `--full-profile` flag instruments every line of your program with timing and execution count tracking. It implies `-g` (debug/line info) so that profile data can be mapped back to source lines. When the program exits, it writes a binary `strada-prof.out` file containing all collected data.
+
+### Difference from `-p` / `--profile`
+
+| Flag | Granularity | Output | Use Case |
+|------|-------------|--------|----------|
+| `-p`, `--profile` | Function-level | Printed to stderr at exit | Quick overview of hot functions |
+| `--full-profile` | Line-level | Binary file (`strada-prof.out`) | Detailed analysis with report tools |
+
+### Report Tools
+
+**strada-proftext** generates a text report to stdout:
+
+```bash
+strada-proftext strada-prof.out           # Full report (functions + lines)
+strada-proftext -f strada-prof.out        # Functions only
+strada-proftext -l strada-prof.out        # Lines only
+strada-proftext --top 20 strada-prof.out  # Show top 20 entries
+```
+
+**strada-profhtml** generates an HTML report directory with sortable tables and heat-colored source views:
+
+```bash
+strada-profhtml strada-prof.out              # Output to profhtml/ (default)
+strada-profhtml strada-prof.out my-report/   # Custom output directory
+```
+
+### Programmatic API
+
+You can enable and disable profiling at runtime for targeted analysis:
+
+```strada
+# Start profiling mid-program with a custom output file
+core::full_profile_start("hotpath.prof");
+
+# ... code to profile ...
+
+# Stop profiling and flush data
+core::full_profile_stop();
+```
+
+This is useful for profiling specific sections of long-running programs (e.g., servers) without the overhead of profiling startup and shutdown code.

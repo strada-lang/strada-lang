@@ -1,0 +1,63 @@
+# Regression test: NODE_SWITCH must be analyzed by the semantic pass
+# AND case/default bodies must push a codegen scope so `my` decls
+# inside them get decref'd at end of case (not at function epilogue,
+# where the C variable is already out of scope).
+#
+# This test exercises:
+#   - non-trivial scrutinee expression
+#   - non-literal case expressions
+#   - `my` declarations inside case bodies (previously broken)
+#   - `my` declarations inside default block (previously broken)
+#
+# Expected output:
+#   All tests passed
+
+func classify(int $n) str {
+    my int $boundary = 10;
+    my str $tag = "?";
+    switch ($n) {
+        case 0 {
+            my str $local_zero = "zero";   # inner scope
+            $tag = $local_zero;
+        }
+        case $boundary {                    # case expression uses outer-scope var
+            my str $local_ten = "ten";      # inner scope
+            $tag = $local_ten;
+        }
+        default {
+            my int $magnitude = $n;         # inner scope
+            if ($magnitude < 0) { $magnitude = 0 - $magnitude; }
+            my str $prefix = "other";       # second inner-scope decl
+            $tag = $prefix . ":" . $magnitude;
+        }
+    }
+    return $tag;
+}
+
+func main() int {
+    my int $fail = 0;
+
+    my str $a = classify(0);
+    if ($a ne "zero") {
+        say("FAIL a: expected zero got " . $a);
+        $fail++;
+    }
+
+    my str $b = classify(10);
+    if ($b ne "ten") {
+        say("FAIL b: expected ten got " . $b);
+        $fail++;
+    }
+
+    my str $c = classify(-5);
+    if ($c ne "other:5") {
+        say("FAIL c: expected other:5 got " . $c);
+        $fail++;
+    }
+
+    if ($fail == 0) {
+        say("All tests passed");
+        return 0;
+    }
+    return 1;
+}

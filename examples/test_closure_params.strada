@@ -1,0 +1,134 @@
+package main;
+
+# Test that closures work correctly with parameter handling
+# This verifies that:
+# 1. Closure parameters don't interfere with outer function parameters
+# 2. Return statements in closures don't try to decref outer variables
+# 3. Captured variables work correctly
+
+func test_basic_closure() int {
+    my int $multiplier = 10;
+
+    # Create a closure that captures $multiplier
+    my scalar $mul = func (int $n) int {
+        return $n * $multiplier;
+    };
+
+    my int $result = $mul->(5);
+    if ($result != 50) {
+        say("FAIL: basic closure expected 50, got " . $result);
+        return 1;
+    }
+    return 0;
+}
+
+func test_closure_with_outer_params(str $prefix, int $count) int {
+    # This tests that closure return doesn't try to decref $prefix and $count
+    my array @results = ();
+
+    my scalar $formatter = func (int $i) str {
+        return $prefix . "_" . $i;
+    };
+
+    my int $i = 0;
+    while ($i < $count) {
+        push(@results, $formatter->($i));
+        $i = $i + 1;
+    }
+
+    if (scalar(@results) != $count) {
+        say("FAIL: expected " . $count . " results, got " . scalar(@results));
+        return 1;
+    }
+
+    # Verify first and last
+    if ($results[0] ne $prefix . "_0") {
+        say("FAIL: first result wrong: " . $results[0]);
+        return 1;
+    }
+
+    return 0;
+}
+
+func test_closure_return_early() int {
+    # Test that early return in closure doesn't crash
+    my int $limit = 5;
+
+    my scalar $check = func (int $n) int {
+        if ($n > $limit) {
+            return 1;  # Early return
+        }
+        return 0;
+    };
+
+    if ($check->(3) != 0) {
+        say("FAIL: check(3) should be 0");
+        return 1;
+    }
+    if ($check->(10) != 1) {
+        say("FAIL: check(10) should be 1");
+        return 1;
+    }
+
+    return 0;
+}
+
+func test_closure_modifying_capture() int {
+    my int $counter = 0;
+
+    my scalar $increment = func () void {
+        $counter = $counter + 1;
+    };
+
+    $increment->();
+    $increment->();
+    $increment->();
+
+    # Note: closures capture by value in current implementation
+    # so $counter in outer scope may or may not be modified
+    # This test just verifies no crash occurs
+
+    return 0;
+}
+
+func test_multiple_closures_same_scope(str $tag) int {
+    my int $value = 100;
+
+    my scalar $getter = func () int {
+        return $value;
+    };
+
+    my scalar $describe = func () str {
+        return $tag . "=" . $value;
+    };
+
+    my int $got = $getter->();
+    if ($got != 100) {
+        say("FAIL: getter returned " . $got);
+        return 1;
+    }
+
+    my str $desc = $describe->();
+    if ($desc ne $tag . "=100") {
+        say("FAIL: describe returned '" . $desc . "'");
+        return 1;
+    }
+
+    return 0;
+}
+
+func main() int {
+    my int $failed = 0;
+
+    if (test_basic_closure() != 0) { $failed = 1; }
+    if (test_closure_with_outer_params("item", 5) != 0) { $failed = 1; }
+    if (test_closure_return_early() != 0) { $failed = 1; }
+    if (test_closure_modifying_capture() != 0) { $failed = 1; }
+    if (test_multiple_closures_same_scope("test") != 0) { $failed = 1; }
+
+    if ($failed == 0) {
+        say("All closure parameter tests passed");
+    }
+
+    return $failed;
+}

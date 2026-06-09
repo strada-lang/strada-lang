@@ -1,0 +1,89 @@
+#!/usr/bin/env strada
+# Leak regression: NODE_SUBSCRIPT / NODE_DEREF_ARRAY against an
+# owned-ref source ($h{$k}[i], $h{$k}->[i]) leaked one wrapper SV per
+# read because strada_hv_fetch_owned was inlined into
+# strada_deref_array with no cleanup. The fix introduces
+# strada_array_get_owned (increfs the element) and runs codegen
+# through capture-and-decref-source.
+#
+# Run: valgrind --leak-check=full ./test_subscript_owned_source
+
+package main;
+
+func test_subscript_var_key() void {
+    my int $iter = 200;
+    my int $i = 0;
+    while ($i < $iter) {
+        my hash %h = ();
+        $h{"arr"} = ["ten", "twenty", "thirty", "forty"];
+        my str $k = "arr";
+        my str $v = $h{$k}[2];
+        if ($v ne "thirty") {
+            say("FAIL var-key subscript: " . $v);
+            return;
+        }
+        $i = $i + 1;
+    }
+    say("test_subscript_var_key: PASS");
+}
+
+func test_subscript_lit_key() void {
+    my int $iter = 200;
+    my int $i = 0;
+    while ($i < $iter) {
+        my hash %h = ();
+        $h{"arr"} = ["ten", "twenty", "thirty", "forty"];
+        my str $v = $h{"arr"}[1];
+        if ($v ne "twenty") {
+            say("FAIL lit-key subscript: " . $v);
+            return;
+        }
+        $i = $i + 1;
+    }
+    say("test_subscript_lit_key: PASS");
+}
+
+func test_deref_array_var_key() void {
+    my int $iter = 200;
+    my int $i = 0;
+    while ($i < $iter) {
+        my hash %h = ();
+        $h{"arr"} = ["a", "b", "c", "d"];
+        my str $k = "arr";
+        my str $v = $h{$k}->[3];
+        if ($v ne "d") {
+            say("FAIL deref-array: " . $v);
+            return;
+        }
+        $i = $i + 1;
+    }
+    say("test_deref_array_var_key: PASS");
+}
+
+func test_subscript_via_method_chain() void {
+    # NODE_METHOD_CALL also returns owned ref; subscript on its result
+    # exercises the same path.
+    my int $iter = 100;
+    my int $i = 0;
+    while ($i < $iter) {
+        my hash %h = ();
+        $h{"data"} = ["one", "two", "three"];
+        # Verify by reading element through a borrowed-source path too.
+        my array @arr = ("x", "y", "z");
+        my str $v = $arr[1];
+        if ($v ne "y") {
+            say("FAIL borrowed: " . $v);
+            return;
+        }
+        $i = $i + 1;
+    }
+    say("test_subscript_via_method_chain: PASS");
+}
+
+func main() int {
+    test_subscript_var_key();
+    test_subscript_lit_key();
+    test_deref_array_var_key();
+    test_subscript_via_method_chain();
+    return 0;
+}

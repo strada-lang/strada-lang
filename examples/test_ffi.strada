@@ -1,0 +1,224 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+#!/usr/bin/env strada
+# Test dynamic library loading (FFI) using standard system libraries
+
+func main() void {
+    say("=== Strada FFI Test ===");
+    my int $passed = 0;
+    my int $failed = 0;
+
+    # Test 1: Load libm (math library)
+    say("");
+    say("Test 1: Load libm");
+    my int $libm = sys::dl_open("libm.so.6");
+    if ($libm == 0) {
+        # Try alternative name
+        $libm = sys::dl_open("libm.so");
+    }
+    if ($libm == 0) {
+        say("SKIP: Could not load libm");
+    } else {
+        say("Loaded libm: " . $libm);
+        $passed = $passed + 1;
+
+        # Test 2: Call sqrt(16.0) = 4.0
+        say("");
+        say("Test 2: sqrt(16.0)");
+        my int $sqrt_fn = sys::dl_sym($libm, "sqrt");
+        if ($sqrt_fn != 0) {
+            my num $result = sys::dl_call_num($sqrt_fn, [16.0]);
+            say("Result: " . $result);
+            if ($result > 3.99 && $result < 4.01) {
+                say("PASS");
+                $passed = $passed + 1;
+            } else {
+                say("FAIL: expected 4.0");
+                $failed = $failed + 1;
+            }
+        } else {
+            say("SKIP: sqrt not found");
+        }
+
+        # Test 3: Call pow(2.0, 10.0) = 1024.0
+        say("");
+        say("Test 3: pow(2.0, 10.0)");
+        my int $pow_fn = sys::dl_sym($libm, "pow");
+        if ($pow_fn != 0) {
+            my num $result = sys::dl_call_num($pow_fn, [2.0, 10.0]);
+            say("Result: " . $result);
+            if ($result > 1023.0 && $result < 1025.0) {
+                say("PASS");
+                $passed = $passed + 1;
+            } else {
+                say("FAIL: expected 1024.0");
+                $failed = $failed + 1;
+            }
+        } else {
+            say("SKIP: pow not found");
+        }
+
+        # Test 4: Call floor(3.7) = 3.0
+        say("");
+        say("Test 4: floor(3.7)");
+        my int $floor_fn = sys::dl_sym($libm, "floor");
+        if ($floor_fn != 0) {
+            my num $result = sys::dl_call_num($floor_fn, [3.7]);
+            say("Result: " . $result);
+            if ($result > 2.99 && $result < 3.01) {
+                say("PASS");
+                $passed = $passed + 1;
+            } else {
+                say("FAIL: expected 3.0");
+                $failed = $failed + 1;
+            }
+        } else {
+            say("SKIP: floor not found");
+        }
+
+        # Test 5: Call ceil(3.2) = 4.0
+        say("");
+        say("Test 5: ceil(3.2)");
+        my int $ceil_fn = sys::dl_sym($libm, "ceil");
+        if ($ceil_fn != 0) {
+            my num $result = sys::dl_call_num($ceil_fn, [3.2]);
+            say("Result: " . $result);
+            if ($result > 3.99 && $result < 4.01) {
+                say("PASS");
+                $passed = $passed + 1;
+            } else {
+                say("FAIL: expected 4.0");
+                $failed = $failed + 1;
+            }
+        } else {
+            say("SKIP: ceil not found");
+        }
+
+        sys::dl_close($libm);
+    }
+
+    # Test 6: Load libc and test abs
+    say("");
+    say("Test 6: Load libc, call abs(-42)");
+    my int $libc = sys::dl_open("libc.so.6");
+    if ($libc == 0) {
+        $libc = sys::dl_open("libc.so");
+    }
+    if ($libc == 0) {
+        say("SKIP: Could not load libc");
+    } else {
+        my int $abs_fn = sys::dl_sym($libc, "abs");
+        if ($abs_fn != 0) {
+            my int $result = sys::dl_call_int($abs_fn, [-42]);
+            say("Result: " . $result);
+            if ($result == 42) {
+                say("PASS");
+                $passed = $passed + 1;
+            } else {
+                say("FAIL: expected 42");
+                $failed = $failed + 1;
+            }
+        } else {
+            say("SKIP: abs not found");
+        }
+        sys::dl_close($libc);
+    }
+
+    # Test 7: Test dl_error on invalid library
+    say("");
+    say("Test 7: dl_error on invalid library");
+    my int $bad = sys::dl_open("libnonexistent12345.so");
+    if ($bad == 0) {
+        my str $err = sys::dl_error();
+        if (length($err) > 0) {
+            say("Got error: " . substr($err, 0, 50) . "...");
+            say("PASS");
+            $passed = $passed + 1;
+        } else {
+            say("FAIL: no error message");
+            $failed = $failed + 1;
+        }
+    } else {
+        say("FAIL: should not have loaded nonexistent library");
+        $failed = $failed + 1;
+    }
+
+    # Test 8: Pointer access functions (using local variables)
+    say("");
+    say("Test 8: int_ptr and ptr_set_int");
+    my int $val = 42;
+    my int $ptr = sys::int_ptr(\$val);
+    if ($ptr != 0) {
+        # Read value through pointer
+        my int $read = sys::ptr_deref_int($ptr);
+        if ($read == 42) {
+            say("Read via pointer: " . $read);
+            # Write value through pointer
+            sys::ptr_set_int($ptr, 100);
+            if ($val == 100) {
+                say("Write via pointer: " . $val);
+                say("PASS");
+                $passed = $passed + 1;
+            } else {
+                say("FAIL: ptr_set_int didn't update variable");
+                $failed = $failed + 1;
+            }
+        } else {
+            say("FAIL: ptr_deref_int returned wrong value");
+            $failed = $failed + 1;
+        }
+    } else {
+        say("SKIP: int_ptr returned 0");
+    }
+
+    # Test 9: num_ptr
+    say("");
+    say("Test 9: num_ptr and ptr_set_num");
+    my num $nval = 3.14;
+    my int $nptr = sys::num_ptr(\$nval);
+    if ($nptr != 0) {
+        my num $nread = sys::ptr_deref_num($nptr);
+        if ($nread > 3.13 && $nread < 3.15) {
+            say("Read via pointer: " . $nread);
+            sys::ptr_set_num($nptr, 2.718);
+            if ($nval > 2.71 && $nval < 2.72) {
+                say("Write via pointer: " . $nval);
+                say("PASS");
+                $passed = $passed + 1;
+            } else {
+                say("FAIL: ptr_set_num didn't update variable");
+                $failed = $failed + 1;
+            }
+        } else {
+            say("FAIL: ptr_deref_num returned wrong value");
+            $failed = $failed + 1;
+        }
+    } else {
+        say("SKIP: num_ptr returned 0");
+    }
+
+    # Summary
+    say("");
+    say("=== Results ===");
+    say("Passed: " . $passed);
+    say("Failed: " . $failed);
+
+    if ($failed == 0) {
+        say("All FFI tests passed!");
+    }
+}

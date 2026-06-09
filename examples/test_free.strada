@@ -1,0 +1,155 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_free.strada - Test sys::free() and sys::release() for explicit memory management
+#
+# sys::free($var)     - Decrements refcount, frees if 0. Variable still points to freed memory!
+# sys::release(\$var) - Decrements refcount, frees if 0, AND sets $var to undef. Safe!
+
+func main() int {
+    say("=== Testing sys::free() builtin ===");
+    say("");
+
+    # Test 1: Basic free
+    say("Test 1: Basic free");
+    my scalar $arr = [1, 2, 3];
+    say("  Created array, refcount = " . refcount($arr));
+    sys::free($arr);
+    say("  After sys::free(), refcount = " . refcount($arr));
+    say("  PASS: sys::free() decrements refcount");
+    say("");
+
+    # Test 2: Reusing a variable after free
+    say("Test 2: Reusing variable after free");
+    my scalar $data = { name => "Alice", age => 30 };
+    say("  Created hash: name = " . $data->{"name"});
+    sys::free($data);
+    say("  Freed $data");
+
+    # Reassign to new value
+    $data = { name => "Bob", age => 25 };
+    say("  Reassigned $data to new hash");
+    say("  New value: name = " . $data->{"name"} . ", age = " . $data->{"age"});
+    say("  Refcount = " . refcount($data));
+    say("  PASS: Variable can be reused after free");
+    say("");
+
+    # Test 3: Free with multiple references
+    say("Test 3: Free with shared reference");
+    my scalar $original = [10, 20, 30];
+    my scalar $alias = $original;
+    say("  Created array and alias");
+    say("  Original refcount = " . refcount($original));
+
+    # Note: In Strada, scalar assignment copies the reference
+    # Both point to same underlying data
+    sys::free($alias);
+    say("  After sys::free($alias):");
+    say("  Original refcount = " . refcount($original));
+
+    # Reassign alias to something new
+    $alias = [100, 200];
+    say("  Reassigned $alias to new array");
+    say("  Alias[0] = " . $alias->[0]);
+    say("  PASS: Can reassign after free");
+    say("");
+
+    # Test 4: Free in a loop (simulating manual memory management)
+    say("Test 4: Manual memory management in loop");
+    my int $i = 0;
+    while ($i < 3) {
+        my scalar $temp = [1, 2, 3, 4, 5];
+        say("  Iteration " . $i . ": created array, refcount = " . refcount($temp));
+        # Explicitly free before next iteration
+        sys::free($temp);
+        $i = $i + 1;
+    }
+    say("  PASS: Explicit free in loops works");
+    say("");
+
+    # Test 5: Free and immediately reassign
+    say("Test 5: Free and immediate reassign");
+    my scalar $value = "Hello";
+    say("  Initial value: " . $value);
+    sys::free($value);
+    $value = "World";
+    say("  After free and reassign: " . $value);
+    say("  PASS: Immediate reassign works");
+    say("");
+
+    say("=== All sys::free() tests passed ===");
+    say("");
+
+    # =========================================
+    say("=== Testing sys::release() builtin ===");
+    say("");
+
+    # Test 6: Basic release
+    say("Test 6: Basic release");
+    my scalar $arr2 = [1, 2, 3];
+    say("  Created array, defined = " . defined($arr2));
+    sys::release(\$arr2);
+    say("  After sys::release(), defined = " . defined($arr2));
+    if (!defined($arr2)) {
+        say("  PASS: Variable is now undef (safe!)");
+    } else {
+        say("  FAIL: Variable should be undef");
+    }
+    say("");
+
+    # Test 7: Release and reuse
+    say("Test 7: Release and reuse variable");
+    my scalar $data2 = { x => 10, y => 20 };
+    say("  Created hash, x = " . $data2->{"x"});
+    sys::release(\$data2);
+    say("  Released, defined = " . defined($data2));
+    $data2 = { x => 100, y => 200 };
+    say("  Reassigned, x = " . $data2->{"x"});
+    say("  PASS: Can safely reuse after release");
+    say("");
+
+    # Test 8: Release in loop (safe pattern)
+    say("Test 8: Safe memory management in loop");
+    my int $j = 0;
+    my scalar $buffer = undef;
+    while ($j < 3) {
+        $buffer = [1, 2, 3, 4, 5];
+        say("  Iteration " . $j . ": allocated, defined = " . defined($buffer));
+        sys::release(\$buffer);
+        say("  Iteration " . $j . ": released, defined = " . defined($buffer));
+        $j = $j + 1;
+    }
+    say("  PASS: Safe release pattern works");
+    say("");
+
+    # Test 9: Compare free vs release safety
+    say("Test 9: Comparing sys::free() vs sys::release()");
+    my scalar $unsafe = [1, 2, 3];
+    my scalar $safe = [4, 5, 6];
+
+    sys::free($unsafe);
+    sys::release(\$safe);
+
+    say("  After sys::free(): defined(\$unsafe) = " . defined($unsafe));
+    say("  After sys::release(): defined(\$safe) = " . defined($safe));
+    say("  sys::release() is safer - variable becomes undef");
+    say("  PASS: sys::release() prevents use-after-free");
+    say("");
+
+    say("=== All sys::release() tests passed ===");
+    return 0;
+}

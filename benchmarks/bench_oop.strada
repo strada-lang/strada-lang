@@ -1,0 +1,53 @@
+package Point;
+has rw int $x = 0;
+has rw int $y = 0;
+
+func distance_sq(scalar $self) int {
+    return $self->x() * $self->x() + $self->y() * $self->y();
+}
+
+package Point3D;
+extends Point;
+has rw int $z = 0;
+
+func distance_sq(scalar $self) int {
+    return $self->x() * $self->x() + $self->y() * $self->y() + $self->z() * $self->z();
+}
+
+package main;
+
+func main() int {
+    # Create 500,000 Point objects, call method on each
+    my int $sum = 0;
+    my int $i = 0;
+    while ($i < 500000) {
+        my scalar $p = Point::new("x", $i % 100, "y", ($i + 1) % 100);
+        $sum += $p->distance_sq();
+        $i++;
+    }
+    say("point sum: " . $sum);
+
+    # Create 500,000 Point3D objects (inherited), call overridden method
+    my int $sum3d = 0;
+    my int $j = 0;
+    while ($j < 500000) {
+        my scalar $p = Point3D::new("x", $j % 100, "y", ($j + 1) % 100, "z", ($j + 2) % 100);
+        $sum3d += $p->distance_sq();
+        $j++;
+    }
+    say("point3d sum: " . $sum3d);
+
+    # isa() checks on 200,000 objects
+    my int $isa_count = 0;
+    my int $k = 0;
+    while ($k < 200000) {
+        my scalar $p = Point3D::new("x", 1, "y", 2, "z", 3);
+        if ($p->isa("Point")) {
+            $isa_count++;
+        }
+        $k++;
+    }
+    say("isa checks: " . $isa_count);
+
+    return 0;
+}

@@ -1,0 +1,65 @@
+# Test: OOP methods with import_archive
+# This tests that OOP method dispatch works correctly when classes
+# are loaded via import_archive from static library files (.a).
+
+use lib "examples";
+import_archive "OOPLib.a";
+
+func main() int {
+    my int $passed = 0;
+    my int $failed = 0;
+
+    # Test 1: Create counter via import_archive
+    my scalar $counter = Counter::new(10);
+    my int $val = $counter->get();
+    if ($val == 10) {
+        say("PASS: Counter created with initial value 10");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: Counter initial value = " . $val . ", expected 10");
+        $failed = $failed + 1;
+    }
+
+    # Test 2: Call increment method
+    $counter->increment();
+    $val = $counter->get();
+    if ($val == 11) {
+        say("PASS: increment() works, value = 11");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: After increment, value = " . $val . ", expected 11");
+        $failed = $failed + 1;
+    }
+
+    # Test 3: Call add method with argument
+    $counter->add(5);
+    $val = $counter->get();
+    if ($val == 16) {
+        say("PASS: add(5) works, value = 16");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: After add(5), value = " . $val . ", expected 16");
+        $failed = $failed + 1;
+    }
+
+    # Test 4: Reset method
+    $counter->reset();
+    $val = $counter->get();
+    if ($val == 0) {
+        say("PASS: reset() works, value = 0");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: After reset, value = " . $val . ", expected 0");
+        $failed = $failed + 1;
+    }
+
+    # Summary
+    say("");
+    if ($failed == 0) {
+        say("All import_archive OOP tests passed (" . $passed . "/" . $passed . ")");
+        return 0;
+    } else {
+        say("FAILED: " . $failed . " tests failed");
+        return 1;
+    }
+}

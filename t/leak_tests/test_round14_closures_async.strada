@@ -1,0 +1,120 @@
+#!/usr/bin/env strada
+# Round 14 leak regressions:
+#
+# 1. Closure body locals + capture bindings leaked unconditionally
+#    every call (no scope_pop in anon_func codegen).
+# 2. last/next inside try body leaked the try frame; after 64
+#    accumulations setjmp(*NULL) → SEGV. Also a per-iter leak of
+#    the cleanup-stack slot.
+# 3. "ab" x throwing_int() leaked the LHS.
+# 4. async::send($ch, owned_temp) leaked the value arg.
+# 5. async::all([futures]) leaked the arrayref temp.
+# 6. split(/pat/, $s, NEG) leaked the unary-minus result that
+#    became __split_lim's source.
+#
+# Run: valgrind --leak-check=full ./test_round14_closures_async
+
+package main;
+
+func boom_int() int { throw "rhs-fail"; return 0; }
+
+func test_closure_body_locals() void {
+    my int $iter = 500;
+    my int $i = 0;
+    while ($i < $iter) {
+        my scalar $c = func () {
+            my str $x = "AAAAAAAAAAAAAAAAAAAAAA";
+            my str $y = "BBBBBBBBBBBBBBBBBBBBBB";
+        };
+        $c->();
+        $i = $i + 1;
+    }
+    say("test_closure_body_locals: PASS");
+}
+
+func test_closure_capture_binding() void {
+    my str $captured = "captured-string-payload";
+    my int $iter = 500;
+    my int $i = 0;
+    while ($i < $iter) {
+        my scalar $c = func () {
+            my str $loc = $captured;
+        };
+        $c->();
+        $i = $i + 1;
+    }
+    say("test_closure_capture_binding: PASS");
+}
+
+func test_last_in_try() void {
+    # Pre-fix this segfaulted around iter 64 (STRADA_MAX_TRY_DEPTH).
+    my int $iter = 300;
+    my int $i = 0;
+    while ($i < $iter) {
+        try {
+            if ($i == 200) { last; }
+        } catch ($e) { }
+        $i = $i + 1;
+    }
+    say("test_last_in_try: PASS");
+}
+
+func test_next_in_try() void {
+    my int $iter = 300;
+    my int $i = 0;
+    my int $count = 0;
+    while ($i < $iter) {
+        $i = $i + 1;
+        try {
+            if ($i % 2 == 0) { next; }
+            $count = $count + 1;
+        } catch ($e) { }
+    }
+    say("test_next_in_try: PASS");
+}
+
+func test_x_throw_rhs() void {
+    my int $iter = 200;
+    my int $i = 0;
+    while ($i < $iter) {
+        try {
+            my str $s = "ab" x boom_int();
+        } catch ($e) { }
+        $i = $i + 1;
+    }
+    say("test_x_throw_rhs: PASS");
+}
+
+func test_async_send_owned() void {
+    # Send + recv each iter so the channel capacity never fills.
+    my scalar $ch = async::channel(4);
+    my int $iter = 100;
+    my int $i = 0;
+    while ($i < $iter) {
+        async::send($ch, "literal");
+        async::recv($ch);
+        $i = $i + 1;
+    }
+    say("test_async_send_owned: PASS");
+}
+
+func test_split_neg_limit() void {
+    my int $iter = 500;
+    my int $i = 0;
+    while ($i < $iter) {
+        my array @r = split(",", "a,b,c", -1);
+        $i = $i + 1;
+    }
+    say("test_split_neg_limit: PASS");
+}
+
+func main() int {
+    test_closure_body_locals();
+    test_closure_capture_binding();
+    test_last_in_try();
+    test_next_in_try();
+    test_x_throw_rhs();
+    test_async_send_owned();
+    test_split_neg_limit();
+    return 0;
+}

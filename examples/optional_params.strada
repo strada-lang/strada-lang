@@ -1,0 +1,63 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# optional_params.strada - Test optional/default parameters
+
+func greet(str $name, str $greeting = "Hello") void {
+    say($greeting . ", " . $name . "!");
+}
+
+func add_numbers(int $a, int $b = 10, int $c = 5) int {
+    return $a + $b + $c;
+}
+
+func format_message(str $text, str $prefix = "[INFO]", str $suffix = "") str {
+    my str $result = $prefix . " " . $text;
+    
+    if ($suffix != "") {
+        $result = $result . " " . $suffix;
+    }
+    
+    return $result;
+}
+
+func main() int {
+    say("=== Optional Parameters Test ===");
+    say("");
+    
+    say("--- Greetings ---");
+    greet("Alice", "Hi");           # Both provided
+    greet("Bob", "Welcome");        # Both provided
+    greet("Carol");                 # Use default greeting
+    
+    say("");
+    say("--- Number Addition ---");
+    say("5 + 10 + 5 = " . add_numbers(5, 10, 5));    # All provided
+    say("5 + 10 + 5 = " . add_numbers(5, 10));       # Use default c
+    say("5 + 10 + 5 = " . add_numbers(5));           # Use default b and c
+    
+    say("");
+    say("--- Message Formatting ---");
+    say(format_message("System started", "[INFO]", "OK"));
+    say(format_message("Warning detected", "[WARN]"));
+    say(format_message("Simple message"));
+    
+    say("");
+    say("✓ Optional parameters working!");
+    
+    return 0;
+}

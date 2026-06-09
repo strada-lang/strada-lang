@@ -1,0 +1,398 @@
+#!/usr/bin/env strada
+# Test hash access as arguments to built-in functions for memory leaks
+# Exercises owned ref cleanup when hash access results flow through
+# various codegen paths: arithmetic, string ops, array ops, control flow.
+# Run: valgrind --leak-check=full ./test_hash_arg_patterns
+
+package Counter;
+
+func new(str $label) scalar {
+    my hash %self = ();
+    $self{"label"} = $label;
+    $self{"count"} = 0;
+    return bless(\%self, "Counter");
+}
+
+func increment(scalar $self) void {
+    $self->{"count"} = $self->{"count"} + 1;
+}
+
+func get_label(scalar $self) str {
+    return $self->{"label"};
+}
+
+package main;
+
+func main() int {
+    say("Testing hash access argument patterns for memory leaks...");
+    my int $iterations = 100;
+
+    # Test 1: Arithmetic with hash access operands
+    say("  arithmetic with hash access...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my hash %nums = ();
+        $nums{"a"} = 10;
+        $nums{"b"} = 20;
+        $nums{"c"} = 3;
+        my int $sum = $nums{"a"} + $nums{"b"};
+        my int $diff = $nums{"b"} - $nums{"a"};
+        my int $prod = $nums{"a"} * $nums{"c"};
+        my int $quot = $nums{"b"} / $nums{"a"};
+        my int $mod = $nums{"b"} % $nums{"c"};
+        if ($sum != 30 || $diff != 10 || $prod != 30 || $quot != 2 || $mod != 2) {
+            say("    FAIL: arithmetic");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 2: Numeric comparisons with hash access
+    say("  numeric comparisons...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %v = ();
+        $v{"x"} = 5;
+        $v{"y"} = 10;
+        $v{"z"} = 5;
+        if (!($v{"x"} < $v{"y"})) {
+            say("    FAIL: < comparison");
+            return 1;
+        }
+        if (!($v{"y"} > $v{"x"})) {
+            say("    FAIL: > comparison");
+            return 1;
+        }
+        if (!($v{"x"} <= $v{"z"})) {
+            say("    FAIL: <= comparison");
+            return 1;
+        }
+        if (!($v{"y"} >= $v{"x"})) {
+            say("    FAIL: >= comparison");
+            return 1;
+        }
+        if ($v{"x"} != $v{"z"}) {
+            say("    FAIL: == comparison");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 3: String comparisons with hash access
+    say("  string comparisons...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %s = ();
+        $s{"a"} = "apple";
+        $s{"b"} = "banana";
+        $s{"c"} = "apple";
+        if ($s{"a"} ne $s{"c"}) {
+            say("    FAIL: ne comparison");
+            return 1;
+        }
+        if (!($s{"a"} eq $s{"c"})) {
+            say("    FAIL: eq comparison");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 4: substr with hash access
+    say("  substr with hash access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %data = ();
+        $data{"text"} = "Hello, World!";
+        my str $sub = substr($data{"text"}, 0, 5);
+        if ($sub ne "Hello") {
+            say("    FAIL: substr = '" . $sub . "'");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 5: split/join with hash access
+    say("  split/join with hash access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %p = ();
+        $p{"csv"} = "a,b,c,d";
+        $p{"sep"} = ",";
+        my array @parts = split($p{"sep"}, $p{"csv"});
+        if (scalar(@parts) != 4) {
+            say("    FAIL: split count = " . scalar(@parts));
+            return 1;
+        }
+        my str $joined = join("-", @parts);
+        if ($joined ne "a-b-c-d") {
+            say("    FAIL: join = '" . $joined . "'");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 6: index/rindex with hash access
+    say("  index/rindex with hash access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %t = ();
+        $t{"hay"} = "hello world hello";
+        $t{"needle"} = "hello";
+        my int $pos = index($t{"hay"}, $t{"needle"});
+        if ($pos != 0) {
+            say("    FAIL: index = " . $pos);
+            return 1;
+        }
+        my int $rpos = rindex($t{"hay"}, $t{"needle"});
+        if ($rpos != 12) {
+            say("    FAIL: rindex = " . $rpos);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 7: shift/pop/unshift on hash access arrays
+    say("  shift/pop/unshift via hash...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %c = ();
+        $c{"arr"} = [1, 2, 3, 4, 5];
+        unshift($c{"arr"}, 0);
+        my scalar $first = shift($c{"arr"});
+        my scalar $last = pop($c{"arr"});
+        if ($first != 0 || $last != 5) {
+            say("    FAIL: shift/pop");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 8: splice via hash access
+    say("  splice via hash...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %d = ();
+        $d{"list"} = [10, 20, 30, 40, 50];
+        splice($d{"list"}, 1, 2);
+        my scalar $arr = $d{"list"};
+        if (size($arr) != 3) {
+            say("    FAIL: splice length");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 9: sort via hash access (tests cleanup of owned ref arg)
+    say("  sort via hash...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %e = ();
+        $e{"data"} = [3, 1, 4, 1, 5, 9, 2, 6];
+        my scalar $sorted = sort($e{"data"});
+        if ($sorted->[0] != 1 || $sorted->[7] != 9) {
+            say("    FAIL: sort");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 10: reverse via hash access (tests cleanup of owned ref arg)
+    say("  reverse via hash...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %f = ();
+        $f{"arr"} = [1, 2, 3];
+        my scalar $rev = reverse($f{"arr"});
+        if ($rev->[0] != 3 || $rev->[2] != 1) {
+            say("    FAIL: reverse");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 11: sprintf with hash access args
+    say("  sprintf with hash access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %g = ();
+        $g{"name"} = "Alice";
+        $g{"age"} = 30;
+        my str $msg = sprintf("Name: %s, Age: %d", $g{"name"}, $g{"age"});
+        if (length($msg) < 10) {
+            say("    FAIL: sprintf");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 12: Method call on hash access object
+    say("  method call on hash object...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %store = ();
+        $store{"counter"} = Counter::new("test");
+        $store{"counter"}->increment();
+        $store{"counter"}->increment();
+        my str $lbl = $store{"counter"}->get_label();
+        if ($lbl ne "test") {
+            say("    FAIL: method call label");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 13: Hash access in while condition
+    say("  hash access in while condition...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %ctr = ();
+        $ctr{"n"} = 0;
+        while ($ctr{"n"} < 5) {
+            $ctr{"n"} = $ctr{"n"} + 1;
+        }
+        if ($ctr{"n"} != 5) {
+            say("    FAIL: while condition");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 14: Hash access in ternary
+    say("  hash access in ternary...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        $h{"flag"} = 1;
+        $h{"val_a"} = "yes";
+        $h{"val_b"} = "no";
+        my str $result = $h{"flag"} == 1 ? $h{"val_a"} : $h{"val_b"};
+        if ($result ne "yes") {
+            say("    FAIL: ternary = '" . $result . "'");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 15: ref() on hash access
+    say("  ref() on hash access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %r = ();
+        $r{"aref"} = [1, 2, 3];
+        $r{"href"} = {"a" => 1};
+        my str $rt1 = ref($r{"aref"});
+        my str $rt2 = ref($r{"href"});
+        if ($rt1 ne "ARRAY") {
+            say("    FAIL: ref array = '" . $rt1 . "'");
+            return 1;
+        }
+        if ($rt2 ne "HASH") {
+            say("    FAIL: ref hash = '" . $rt2 . "'");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 16: clone() on hash access
+    say("  clone() on hash access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %orig = ();
+        $orig{"data"} = {"x" => 1, "y" => 2};
+        my scalar $copy = clone($orig{"data"});
+        $copy->{"x"} = 99;
+        # Original should be unchanged
+        my scalar $od = $orig{"data"};
+        if ($od->{"x"} != 1) {
+            say("    FAIL: clone independence");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 17: Deref hash chain arithmetic
+    say("  deref chain arithmetic...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %outer = ();
+        $outer{"inner"} = {"val" => 42, "mul" => 2};
+        my int $r = $outer{"inner"}->{"val"} * $outer{"inner"}->{"mul"};
+        if ($r != 84) {
+            say("    FAIL: chain arith = " . $r);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 18: Hash access concatenation chains
+    say("  hash concat chains...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %w = ();
+        $w{"first"} = "Hello";
+        $w{"mid"} = " ";
+        $w{"last"} = "World";
+        my str $full = $w{"first"} . $w{"mid"} . $w{"last"};
+        if ($full ne "Hello World") {
+            say("    FAIL: concat = '" . $full . "'");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 19: foreach over deref array from hash
+    say("  foreach over hash array...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %bag = ();
+        $bag{"items"} = [10, 20, 30];
+        my int $total = 0;
+        my scalar $items = $bag{"items"};
+        foreach my scalar $item (@{$items}) {
+            $total = $total + $item;
+        }
+        if ($total != 60) {
+            say("    FAIL: foreach total = " . $total);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 20: Chained method call on hash deref object
+    say("  method on deref hash object...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %registry = ();
+        $registry{"obj"} = {"ctr" => Counter::new("reg")};
+        $registry{"obj"}->{"ctr"}->increment();
+        my str $name = $registry{"obj"}->{"ctr"}->get_label();
+        if ($name ne "reg") {
+            say("    FAIL: chained method");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All hash argument pattern tests passed!");
+    return 0;
+}

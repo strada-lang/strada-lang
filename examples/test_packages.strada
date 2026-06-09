@@ -1,0 +1,47 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_packages.strada - Test package/module support
+
+use lib "lib";
+use Math::Utils;
+use File::IO;
+
+func main() int {
+    say("╔══════════════════════════════════════╗");
+    say("║  Package/Module Test                 ║");
+    say("╚══════════════════════════════════════╝");
+    say("");
+    
+    # For now, just test that the syntax parses correctly
+    say("Package syntax parsed successfully!");
+    say("");
+    
+    # Test that regular functions still work
+    my int $x = 5;
+    my int $y = 3;
+    say("x = " . $x);
+    say("y = " . $y);
+    say("x + y = " . ($x + $y));
+    
+    say("");
+    say("╔══════════════════════════════════════╗");
+    say("║  ✓ Package test complete!            ║");
+    say("╚══════════════════════════════════════╝");
+    
+    return 0;
+}

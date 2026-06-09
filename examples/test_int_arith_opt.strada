@@ -1,0 +1,88 @@
+package Point;
+has rw int $x = 0;
+has rw int $y = 0;
+
+func distance_sq(scalar $self) int {
+    return $self->x() * $self->x() + $self->y() * $self->y();
+}
+
+package Point3D;
+extends Point;
+has rw int $z = 0;
+
+func distance_sq(scalar $self) int {
+    return $self->x() * $self->x() + $self->y() * $self->y() + $self->z() * $self->z();
+}
+
+package main;
+
+func main() int {
+    # Test 1: Basic int arithmetic (should use tagged ints, no heap alloc)
+    my int $a = 10;
+    my int $b = 20;
+    my int $c = $a + $b;
+    say("add: " . $c);
+
+    my int $d = $a * $b;
+    say("mul: " . $d);
+
+    my int $e = $b - $a;
+    say("sub: " . $e);
+
+    # Test 2: Nested int arithmetic
+    my int $f = $a * $a + $b * $b;
+    say("nested: " . $f);
+
+    # Test 3: Int compound assignment
+    my int $sum = 0;
+    my int $i = 0;
+    while ($i < 100) {
+        $sum += $i;
+        $i++;
+    }
+    say("sum: " . $sum);
+
+    # Test 4: Inline constructor (no inheritance)
+    my scalar $p = Point::new("x", 3, "y", 4);
+    say("point dist_sq: " . $p->distance_sq());
+
+    # Test 5: Inline constructor WITH inheritance
+    my scalar $p3 = Point3D::new("x", 3, "y", 4, "z", 5);
+    say("point3d dist_sq: " . $p3->distance_sq());
+
+    # Test 6: Inherited class defaults
+    my scalar $p4 = Point3D::new("z", 10);
+    say("default x: " . $p4->x());
+    say("default y: " . $p4->y());
+    say("explicit z: " . $p4->z());
+
+    # Test 7: Int accessor in arithmetic inside method
+    my scalar $p5 = Point::new("x", 7, "y", 24);
+    say("7^2+24^2: " . $p5->distance_sq());
+
+    # Test 8: Large values (still within tagged int range)
+    my int $big = 1000000;
+    my int $big2 = $big * $big;
+    say("big: " . $big2);
+
+    # Test 9: isa still works with inline constructed objects
+    my scalar $p6 = Point3D::new("x", 1, "y", 2, "z", 3);
+    if ($p6->isa("Point")) {
+        say("isa Point: 1");
+    }
+    if ($p6->isa("Point3D")) {
+        say("isa Point3D: 1");
+    }
+
+    # Test 10: Int comparison in condition
+    my int $count = 0;
+    my int $j = 0;
+    while ($j < 10) {
+        $count += 1;
+        $j++;
+    }
+    say("count: " . $count);
+
+    say("all tests passed");
+    return 0;
+}

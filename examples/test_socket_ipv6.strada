@@ -1,0 +1,52 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+
+# test_socket_ipv6.strada - IPv6 (and dual-stack) socket round trip.
+#
+# strada's socket layer resolves addresses with getaddrinfo (AF_UNSPEC), so
+# sys::socket_client() connects over IPv4 or IPv6 transparently, and
+# sys::socket_server() binds the IPv6 wildcard (::) with IPV6_V6ONLY off — a
+# dual-stack listener that accepts both IPv4 and IPv6 clients.
+
+func main() int {
+    my int $port = 19696;
+    my scalar $server = sys::socket_server($port);
+    if (!$server) { say("FAIL: could not bind server"); return 1; }
+
+    my int $pid = sys::fork();
+    if ($pid == 0) {
+        # Child: connect over IPv6 loopback.
+        my scalar $sock = sys::socket_client("::1", $port);
+        if (!$sock) { say("FAIL: could not connect over ::1"); core::exit(1); }
+        sys::socket_send($sock, "ping");
+        my str $reply = sys::socket_recv($sock, 1024);
+        say("client received: " . $reply);
+        sys::socket_close($sock);
+        core::exit(0);
+    }
+
+    # Parent: accept the IPv6 connection, echo back.
+    my scalar $client = sys::socket_accept($server);
+    my str $data = sys::socket_recv($client, 1024);
+    say("server received: " . $data);
+    sys::socket_send($client, "pong:" . $data);
+    sys::socket_close($client);
+    sys::socket_close($server);
+    sys::wait();
+    return 0;
+}

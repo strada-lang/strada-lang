@@ -1,0 +1,94 @@
+#!/usr/bin/env strada
+# Test small integer pool for memory leaks
+# Pool covers -1 to 255, these are immortal (never freed)
+# Run: valgrind --leak-check=full ./test_small_int_pool
+
+func main() int {
+    say("Testing small integer pool for memory leaks...");
+    my int $iterations = 100;
+
+    # Test pooled integers (should reuse cached values)
+    say("  Pooled integers (-1 to 255)...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my int $a = 0;
+        my int $b = 1;
+        my int $c = -1;
+        my int $d = 100;
+        my int $e = 255;
+        my int $f = 42;
+        if ($a != 0 || $b != 1 || $c != -1 || $d != 100 || $e != 255 || $f != 42) {
+            say("    FAIL: pooled integer value mismatch");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test non-pooled integers (should be heap-allocated)
+    say("  Non-pooled integers (outside -1..255)...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $a = 256;
+        my int $b = 1000;
+        my int $c = -2;
+        my int $d = -100;
+        my int $e = 999999;
+        if ($a != 256 || $b != 1000 || $c != -2 || $d != -100 || $e != 999999) {
+            say("    FAIL: non-pooled integer value mismatch");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test integer arithmetic producing pooled values
+    say("  Arithmetic producing pooled values...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $a = 100 + 50;
+        my int $b = 200 - 100;
+        my int $c = 10 * 10;
+        my int $d = 250 + 5;
+        if ($a != 150 || $b != 100 || $c != 100 || $d != 255) {
+            say("    FAIL: arithmetic result mismatch");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test integers in arrays
+    say("  Pooled integers in arrays...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @arr = (0, 1, 2, 3, 4, 5);
+        my int $sum = 0;
+        foreach my int $n (@arr) {
+            $sum = $sum + $n;
+        }
+        if ($sum != 15) {
+            say("    FAIL: array sum mismatch");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test integers in hashes
+    say("  Pooled integers in hashes...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ("a" => 1, "b" => 2, "c" => 3);
+        my int $v = $h{"a"} + $h{"b"} + $h{"c"};
+        if ($v != 6) {
+            say("    FAIL: hash value sum mismatch");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All small integer pool tests passed!");
+    return 0;
+}

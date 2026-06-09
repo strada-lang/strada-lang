@@ -1,0 +1,60 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_modules.strada - Test module-style organization (self-contained)
+# Note: Full multi-file module compilation requires linking .c files together.
+# This example demonstrates the module pattern with inline definitions.
+
+package Math::Utils;
+
+# Module functions
+func add(int $a, int $b) int {
+    return $a + $b;
+}
+
+func multiply(int $a, int $b) int {
+    return $a * $b;
+}
+
+func square(int $x) int {
+    return $x * $x;
+}
+
+# Main program
+func main() int {
+    say("Cross-Module Function Calls Test");
+    say("=================================");
+    say("");
+
+    my int $x = 5;
+    my int $y = 3;
+
+    say("Variables:");
+    say("  x = " . $x);
+    say("  y = " . $y);
+
+    say("");
+    say("Function calls:");
+    say("  add(x, y) = " . add($x, $y));
+    say("  multiply(x, y) = " . multiply($x, $y));
+    say("  square(x) = " . square($x));
+
+    say("");
+    say("Module test complete!");
+
+    return 0;
+}

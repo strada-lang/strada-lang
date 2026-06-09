@@ -1,0 +1,111 @@
+func main() int {
+    my int $pass = 0;
+    my int $fail = 0;
+
+    # Test 1: utf8::is_utf8 with valid ASCII
+    my str $ascii = "Hello, world!";
+    if (utf8::is_utf8($ascii) == 1) {
+        say("ok 1 - ascii is valid utf8");
+        $pass++;
+    } else {
+        say("FAIL 1 - ascii should be valid utf8");
+        $fail++;
+    }
+
+    # Test 2: utf8::is_utf8 with valid multibyte UTF-8
+    # chr(8364) = Euro sign U+20AC, which is >= 256 so gets UTF-8 encoded (3 bytes)
+    my str $euro_str = "price: " . chr(8364) . "100";
+    if (utf8::is_utf8($euro_str) == 1) {
+        say("ok 2 - multibyte utf8 is valid");
+        $pass++;
+    } else {
+        say("FAIL 2 - multibyte utf8 should be valid");
+        $fail++;
+    }
+
+    # Test 3: utf8::valid (alias for is_utf8)
+    if (utf8::valid($ascii) == 1) {
+        say("ok 3 - valid() alias works");
+        $pass++;
+    } else {
+        say("FAIL 3 - valid() alias should work");
+        $fail++;
+    }
+
+    # Test 4: utf8::encode (no-op for Strada, returns same string)
+    my str $encoded = utf8::encode($ascii);
+    if ($encoded eq "Hello, world!") {
+        say("ok 4 - encode returns same string");
+        $pass++;
+    } else {
+        say("FAIL 4 - encode should return same string");
+        $fail++;
+    }
+
+    # Test 5: utf8::decode with valid UTF-8
+    my scalar $decoded = utf8::decode($ascii);
+    if ($decoded == 1) {
+        say("ok 5 - decode valid utf8 returns 1");
+        $pass++;
+    } else {
+        say("FAIL 5 - decode valid utf8 should return 1");
+        $fail++;
+    }
+
+    # Test 6: utf8::upgrade (no-op for Strada)
+    my str $upgraded = utf8::upgrade($ascii);
+    if ($upgraded eq "Hello, world!") {
+        say("ok 6 - upgrade returns same string");
+        $pass++;
+    } else {
+        say("FAIL 6 - upgrade should return same string");
+        $fail++;
+    }
+
+    # Test 7: utf8::downgrade with pure ASCII (should succeed)
+    my scalar $downgraded = utf8::downgrade($ascii);
+    if ($downgraded eq "Hello, world!") {
+        say("ok 7 - downgrade ascii returns same string");
+        $pass++;
+    } else {
+        say("FAIL 7 - downgrade ascii should return same string");
+        $fail++;
+    }
+
+    # Test 8: utf8::downgrade with non-ASCII and fail_ok=1
+    my scalar $down_result = utf8::downgrade($euro_str, 1);
+    if (defined($down_result) == 0) {
+        say("ok 8 - downgrade non-ascii with fail_ok returns undef");
+        $pass++;
+    } else {
+        say("FAIL 8 - downgrade non-ascii with fail_ok should return undef");
+        $fail++;
+    }
+
+    # Test 9: utf8::unicode_to_native (identity on modern systems)
+    my scalar $native = utf8::unicode_to_native(65);
+    if ($native == 65) {
+        say("ok 9 - unicode_to_native(65) == 65");
+        $pass++;
+    } else {
+        say("FAIL 9 - unicode_to_native should be identity");
+        $fail++;
+    }
+
+    # Test 10: utf8::is_utf8 with literal string (tests temp cleanup)
+    if (utf8::is_utf8("test string") == 1) {
+        say("ok 10 - is_utf8 with literal string");
+        $pass++;
+    } else {
+        say("FAIL 10 - is_utf8 with literal should be 1");
+        $fail++;
+    }
+
+    say("");
+    say("Results: " . $pass . " passed, " . $fail . " failed");
+
+    if ($fail > 0) {
+        return 1;
+    }
+    return 0;
+}

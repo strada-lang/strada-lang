@@ -1,0 +1,137 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_references.strada - Test reference system
+
+func test_scalar_refto() void {
+    say("=== Scalar References ===");
+    
+    my int $value = 42;
+    say("Original value: " . $value);
+    
+    # Create reference
+    my scalar $ref = refto($value);
+    say("Created reference");
+    say("Is reference: " . is_refto($ref));
+    say("Reference type: " . reftype($ref));
+    
+    # Dereference
+    my int $derefed = derefto($ref);
+    say("Dereferenced value: " . $derefed);
+    
+    say("");
+}
+
+func test_string_refto() void {
+    say("=== String References ===");
+    
+    my str $name = "Alice";
+    say("Original: " . $name);
+    
+    my scalar $name_ref = refto($name);
+    say("Is reference: " . is_refto($name_ref));
+    say("Type of referent: " . reftype($name_ref));
+    
+    my str $deref_name = derefto($name_ref);
+    say("Dereferenced: " . $deref_name);
+    
+    say("");
+}
+
+func modify_via_refto(scalar $ref) void {
+    # In a real implementation with full reference support,
+    # we could modify the original value through the reference
+    say("Received reference of type: " . reftype($ref));
+}
+
+func test_passing_refs() void {
+    say("=== Passing References ===");
+    
+    my int $num = 100;
+    my scalar $num_ref = refto($num);
+    
+    modify_via_refto($num_ref);
+    
+    say("Original value still: " . $num);
+    
+    say("");
+}
+
+func test_ref_detection() void {
+    say("=== Reference Detection ===");
+    
+    my int $regular = 42;
+    my scalar $reference = refto($regular);
+    
+    say("Regular variable is_ref: " . is_refto($regular));
+    say("Reference is_ref: " . is_refto($reference));
+    
+    say("");
+}
+
+func test_different_types() void {
+    say("=== References to Different Types ===");
+    
+    my int $i = 10;
+    my num $n = 3.14;
+    my str $s = "hello";
+    
+    my scalar $i_ref = refto($i);
+    my scalar $n_ref = refto($n);
+    my scalar $s_ref = refto($s);
+    
+    say("Int reference type: " . reftype($i_ref));
+    say("Num reference type: " . reftype($n_ref));
+    say("Str reference type: " . reftype($s_ref));
+    
+    say("Deref int: " . derefto($i_ref));
+    say("Deref num: " . derefto($n_ref));
+    say("Deref str: " . derefto($s_ref));
+    
+    say("");
+}
+
+func return_refto(int $value) scalar {
+    # Return a reference
+    return refto($value);
+}
+
+func test_return_refto() void {
+    say("=== Returning References ===");
+    
+    my scalar $ref = return_refto(999);
+    say("Returned reference type: " . reftype($ref));
+    say("Dereferenced value: " . derefto($ref));
+    
+    say("");
+}
+
+func main() int {
+    say("=== Reference System Test ===");
+    say("");
+    
+    test_scalar_refto();
+    test_string_refto();
+    test_passing_refs();
+    test_ref_detection();
+    test_different_types();
+    test_return_refto();
+    
+    say("✓ All reference tests passed!");
+    
+    return 0;
+}

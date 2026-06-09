@@ -1,0 +1,58 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# Test __FILE__ and __LINE__ magic constants, plus hex literals
+
+func show_location() void {
+    say("Called from: " . __FILE__ . " at line " . __LINE__);
+}
+
+func main() int {
+    say("=== Magic Constants and Hex Literals Demo ===");
+    say("");
+
+    # __FILE__ returns the current source file name
+    say("Current file: " . __FILE__);
+
+    # __LINE__ returns the current line number
+    say("Current line: " . __LINE__);
+
+    say("");
+    say("Calling a function that prints its location:");
+    show_location();
+
+    say("");
+    say("=== Hexadecimal Literals ===");
+
+    # Hex literals (0x prefix)
+    my int $a = 0x10;      # 16 in decimal
+    my int $b = 0xFF;      # 255 in decimal
+    my int $c = 0xCAFE;    # 51966 in decimal
+    my int $d = 0xDEADBEEF; # 3735928559 in decimal
+
+    say("0x10 = " . $a);
+    say("0xFF = " . $b);
+    say("0xCAFE = " . $c);
+    say("0xDEADBEEF = " . $d);
+
+    say("");
+    say("Hex in expressions:");
+    say("0x10 + 0x20 = " . (0x10 + 0x20));  # 16 + 32 = 48
+    say("0xFF & 0x0F = " . (0xFF & 0x0F));  # Bitwise AND = 15
+
+    return 0;
+}

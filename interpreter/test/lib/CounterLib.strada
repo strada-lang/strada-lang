@@ -1,0 +1,17 @@
+package CounterLib;
+
+has rw int $value = 0;
+
+func increment(scalar $self) void {
+    my int $v = $self->value();
+    $self->set_value($v + 1);
+}
+
+func add(scalar $self, int $n) void {
+    my int $v = $self->value();
+    $self->set_value($v + $n);
+}
+
+func get(scalar $self) int {
+    return $self->value();
+}

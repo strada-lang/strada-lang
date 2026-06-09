@@ -1,0 +1,99 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+func test_inet_addr() int {
+    my int $addr = sys::inet_addr("127.0.0.1");
+    if ($addr == -1) {
+        say("FAIL: inet_addr('127.0.0.1') failed");
+        return 1;
+    }
+    return 0;
+}
+
+func test_inet_ntoa() int {
+    my int $addr = sys::inet_addr("192.168.1.1");
+    my str $str = sys::inet_ntoa($addr);
+    if ($str ne "192.168.1.1") {
+        say("FAIL: inet_ntoa returned '" . $str . "'");
+        return 1;
+    }
+    return 0;
+}
+
+func test_htons_ntohs() int {
+    my int $host = 8080;
+    my int $net = sys::htons($host);
+    my int $back = sys::ntohs($net);
+    if ($back != $host) {
+        say("FAIL: ntohs(htons(8080)) = " . $back);
+        return 1;
+    }
+    return 0;
+}
+
+func test_htonl_ntohl() int {
+    my int $host = 305419896;
+    my int $net = sys::htonl($host);
+    my int $back = sys::ntohl($net);
+    if ($back != $host) {
+        say("FAIL: ntohl(htonl) = " . $back);
+        return 1;
+    }
+    return 0;
+}
+
+func test_inet_pton() int {
+    my int $addr = sys::inet_pton(2, "10.0.0.1");
+    if ($addr == -1) {
+        say("FAIL: inet_pton() failed");
+        return 1;
+    }
+    return 0;
+}
+
+func test_inet_ntop() int {
+    my int $addr = sys::inet_addr("172.16.0.1");
+    my str $str = sys::inet_ntop(2, $addr);
+    if (!defined($str)) {
+        say("FAIL: inet_ntop() failed");
+        return 1;
+    }
+    if ($str ne "172.16.0.1") {
+        say("FAIL: inet_ntop returned '" . $str . "'");
+        return 1;
+    }
+    return 0;
+}
+
+func main() int {
+    my int $failed = 0;
+
+    $failed = $failed + test_inet_addr();
+    $failed = $failed + test_inet_ntoa();
+    $failed = $failed + test_htons_ntohs();
+    $failed = $failed + test_htonl_ntohl();
+    $failed = $failed + test_inet_pton();
+    $failed = $failed + test_inet_ntop();
+
+    if ($failed == 0) {
+        say("All socket libc tests passed");
+    } else {
+        say("Failed: " . $failed . " tests");
+    }
+
+    return $failed;
+}

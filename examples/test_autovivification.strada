@@ -1,0 +1,35 @@
+func main() int {
+    my int $pass = 0;
+    my int $fail = 0;
+
+    # Test 1: Basic autovivification
+    my %h = ();
+    $h{"a"}{"b"} = 42;
+    if ($h{"a"}{"b"} == 42) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 1"); }
+
+    # Test 2: Multiple keys at same level
+    my %config = ();
+    $config{"db"}{"host"} = "localhost";
+    $config{"db"}{"port"} = 5432;
+    if ($config{"db"}{"host"} eq "localhost") { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 2a"); }
+    if ($config{"db"}{"port"} == 5432) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 2b"); }
+
+    # Test 3: Three levels deep
+    my %deep = ();
+    $deep{"x"}{"y"}{"z"} = "deep";
+    if ($deep{"x"}{"y"}{"z"} eq "deep") { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 3"); }
+
+    # Test 4: Multiple branches
+    my %tree = ();
+    $tree{"a"}{"x"} = 1;
+    $tree{"a"}{"y"} = 2;
+    $tree{"b"}{"x"} = 3;
+    if ($tree{"a"}{"x"} == 1 && $tree{"a"}{"y"} == 2 && $tree{"b"}{"x"} == 3) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 4"); }
+
+    if ($fail == 0) {
+        say("All autovivification tests passed (" . $pass . " checks)");
+    } else {
+        say("FAILED: " . $fail . " of " . ($pass + $fail));
+    }
+    return $fail;
+}

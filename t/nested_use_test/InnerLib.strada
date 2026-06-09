@@ -1,0 +1,14 @@
+# InnerLib - A simple library to be used by OuterLib
+package InnerLib;
+
+func twice(int $n) int {
+    return $n * 2;
+}
+
+func greet(str $name) str {
+    return "Hello, " . $name . "!";
+}
+
+func get_magic() int {
+    return 42;
+}

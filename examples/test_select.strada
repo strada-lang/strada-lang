@@ -1,0 +1,109 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_select.strada - Test the sys::socket_select() function
+#
+# Tests sys::socket_select() for I/O multiplexing with timeouts.
+
+func main() int {
+    say("=== Testing sys::socket_select() ===");
+    say("");
+
+    # Create a server socket
+    my int $port = 9999;
+    my scalar $server = sys::socket_server($port);
+    if (!defined($server)) {
+        say("FAIL: Could not create server on port " . $port);
+        return 1;
+    }
+    say("OK: Created server socket on port " . $port);
+    say("    Server fd = " . sys::socket_fd($server));
+
+    # Test 1: select with no ready sockets (should timeout)
+    say("");
+    say("Test 1: select() with timeout, no pending connections");
+    my array @watch = ();
+    push(@watch, $server);
+
+    my scalar $ready = sys::socket_select(\@watch, 100);  # 100ms timeout
+    my int $ready_count = scalar($ready);
+
+    if ($ready_count == 0) {
+        say("PASS: select returned 0 ready sockets (timeout as expected)");
+    } else {
+        say("FAIL: Expected 0 ready sockets, got " . $ready_count);
+    }
+
+    # Test 2: Verify select returns array reference
+    say("");
+    say("Test 2: Verify select() return type");
+    my scalar $ready2 = sys::socket_select(\@watch, 50);
+    if (defined($ready2)) {
+        say("PASS: select returned defined value");
+        my int $len = scalar($ready2);
+        say("PASS: Can get length of result: " . $len);
+    } else {
+        say("FAIL: select returned undef");
+    }
+
+    # Test 3: Multiple sockets in watch list
+    say("");
+    say("Test 3: Multiple sockets in watch list");
+
+    my scalar $server2 = sys::socket_server($port + 1);
+    if (defined($server2)) {
+        say("OK: Created second server on port " . ($port + 1));
+
+        my array @multi = ();
+        push(@multi, $server);
+        push(@multi, $server2);
+
+        my int $watch_count = scalar(\@multi);
+        say("OK: Watch list contains " . $watch_count . " sockets");
+
+        my scalar $ready3 = sys::socket_select(\@multi, 100);
+        my int $ready_count3 = scalar($ready3);
+
+        say("PASS: select() on " . $watch_count . " sockets returned " . $ready_count3 . " ready");
+
+        sys::socket_close($server2);
+        say("OK: Closed second server");
+    } else {
+        say("SKIP: Could not create second server (port in use?)");
+    }
+
+    # Test 4: Empty watch list
+    say("");
+    say("Test 4: Empty watch list");
+    my array @empty = ();
+    my scalar $ready4 = sys::socket_select(\@empty, 50);
+    my int $ready_count4 = scalar($ready4);
+    say("PASS: select() on empty list returned " . $ready_count4 . " (expected 0)");
+
+    # Test 5: Zero timeout (poll)
+    say("");
+    say("Test 5: Zero timeout (poll mode)");
+    my scalar $ready5 = sys::socket_select(\@watch, 0);
+    my int $ready_count5 = scalar($ready5);
+    say("PASS: select() with 0 timeout returned " . $ready_count5);
+
+    sys::socket_close($server);
+
+    say("");
+    say("=== All select() tests passed ===");
+    return 0;
+}

@@ -1,0 +1,104 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_system.strada - Test sys::system(), sys::exec(), and process name functions
+
+func main() int {
+    say("=== System and Process Functions Test ===");
+    say("");
+
+    # Test 1: sys::system() - run command and get exit status
+    say("--- Test 1: sys::system() ---");
+    my int $status = sys::system("echo 'Hello from sys::system()'");
+    say("Exit status: " . $status);
+
+    $status = sys::system("ls /nonexistent 2>/dev/null");
+    say("Exit status for failed command: " . $status);
+
+    say("");
+
+    # Test 2: getprocname/setprocname
+    say("--- Test 2: Process name ---");
+    my str $orig_name = sys::getprocname();
+    say("Original process name: " . $orig_name);
+
+    sys::setprocname("strada-test");
+    my str $new_name = sys::getprocname();
+    say("New process name: " . $new_name);
+
+    # Restore original name
+    sys::setprocname($orig_name);
+
+    say("");
+
+    # Test 3: setproctitle/getproctitle - change what appears in ps
+    say("--- Test 3: Process title ---");
+    my str $orig_title = sys::getproctitle();
+    say("Original title: " . $orig_title);
+
+    sys::setproctitle("strada: running test");
+    my str $new_title = sys::getproctitle();
+    say("New title: " . $new_title);
+
+    # Show current process in ps
+    say("Current process entry:");
+    sys::system("ps -p " . sys::getpid() . " -o pid,comm,args 2>/dev/null | tail -1");
+
+    say("");
+
+    # Test 4: system with complex command
+    say("--- Test 4: Complex sys::system() command ---");
+    $status = sys::system("echo 'line 1' && echo 'line 2' && echo 'line 3'");
+    say("Multi-command exit status: " . $status);
+
+    say("");
+
+    # Test 5: system_argv - run with explicit arguments
+    say("--- Test 5: system_argv() ---");
+    my array @args = ("ls", "-la", "/tmp");
+    # Note: system_argv takes program name and args array
+    # For now let's use system with the command
+    $status = sys::system("ls -la /tmp 2>/dev/null | head -3");
+    say("Exit status: " . $status);
+
+    say("");
+
+    # Test 6: Demonstrate fork + exec pattern
+    say("--- Test 6: fork + exec ---");
+    my int $pid = sys::fork();
+
+    if ($pid == 0) {
+        # Child process
+        sys::setprocname("child-proc");
+        say("  Child: About to exec 'echo'");
+        sys::exec("echo '  Child: Hello from exec!'");
+        # If we get here, exec failed
+        say("  Child: exec failed!");
+        exit(1);
+    } elsif ($pid > 0) {
+        # Parent
+        say("  Parent: Waiting for child " . $pid);
+        sys::wait();
+        say("  Parent: Child finished");
+    } else {
+        say("  Fork failed!");
+    }
+
+    say("");
+    say("=== All Tests Complete ===");
+    return 0;
+}

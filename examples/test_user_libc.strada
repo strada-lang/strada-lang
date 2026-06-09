@@ -1,0 +1,97 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+func test_getpwuid() int {
+    my int $uid = sys::getuid();
+    my scalar $pw = sys::getpwuid($uid);
+    if (!defined($pw)) {
+        say("FAIL: getpwuid(" . $uid . ") failed");
+        return 1;
+    }
+    my str $name = $pw->{"name"};
+    if (length($name) == 0) {
+        say("FAIL: getpwuid returned empty name");
+        return 1;
+    }
+    my str $dir = $pw->{"dir"};
+    if (length($dir) == 0) {
+        say("FAIL: getpwuid returned empty dir");
+        return 1;
+    }
+    return 0;
+}
+
+func test_getpwnam() int {
+    my int $uid = sys::getuid();
+    my scalar $pw1 = sys::getpwuid($uid);
+    if (!defined($pw1)) {
+        return 0;
+    }
+    my str $name = $pw1->{"name"};
+    my scalar $pw2 = sys::getpwnam($name);
+    if (!defined($pw2)) {
+        say("FAIL: getpwnam(" . $name . ") failed");
+        return 1;
+    }
+    my int $uid2 = $pw2->{"uid"};
+    if ($uid != $uid2) {
+        say("FAIL: getpwnam returned wrong uid");
+        return 1;
+    }
+    return 0;
+}
+
+func test_getgrgid() int {
+    my int $gid = sys::getgid();
+    my scalar $gr = sys::getgrgid($gid);
+    if (!defined($gr)) {
+        say("FAIL: getgrgid(" . $gid . ") failed");
+        return 1;
+    }
+    my str $name = $gr->{"name"};
+    if (length($name) == 0) {
+        say("FAIL: getgrgid returned empty name");
+        return 1;
+    }
+    return 0;
+}
+
+func test_getgroups() int {
+    my scalar $groups = sys::getgroups();
+    if (!defined($groups)) {
+        say("FAIL: getgroups() failed");
+        return 1;
+    }
+    return 0;
+}
+
+func main() int {
+    my int $failed = 0;
+
+    $failed = $failed + test_getpwuid();
+    $failed = $failed + test_getpwnam();
+    $failed = $failed + test_getgrgid();
+    $failed = $failed + test_getgroups();
+
+    if ($failed == 0) {
+        say("All user libc tests passed");
+    } else {
+        say("Failed: " . $failed . " tests");
+    }
+
+    return $failed;
+}

@@ -1,0 +1,119 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_json.strada - JSON encoding and decoding example
+
+use lib "lib";
+use JSON;
+
+func main() int {
+    say("=== JSON Package Demo ===");
+    say("");
+
+    # Encoding simple values
+    say("--- Encoding Simple Values ---");
+    say("String:  " . JSON::encode("hello world"));
+    say("Integer: " . JSON::encode(42));
+    say("Float:   " . JSON::encode(3.14159));
+    say("Null:    " . JSON::encode(undef));
+
+    say("");
+
+    # Encoding arrays
+    say("--- Encoding Arrays ---");
+    my array @numbers = (1, 2, 3, 4, 5);
+    say("Numbers: " . JSON::encode(@numbers));
+
+    my array @mixed = ("apple", 42, 3.14, "banana");
+    say("Mixed:   " . JSON::encode(@mixed));
+
+    say("");
+
+    # Encoding hashes
+    say("--- Encoding Hashes ---");
+    my scalar $person = {
+        "name" => "Alice",
+        "age" => 30,
+        "email" => "alice@example.com"
+    };
+    say("Person:  " . JSON::encode($person));
+
+    # Canonical mode (sorted keys)
+    say("");
+    say("--- Canonical Mode (Sorted Keys) ---");
+    my scalar $config = {
+        "zebra" => 1,
+        "alpha" => 2,
+        "beta" => 3
+    };
+    say("Normal:    " . JSON::encode($config));
+    say("Canonical: " . JSON::encode_opts($config, { "canonical" => 1 }));
+
+    say("");
+
+    # Nested structures
+    say("--- Nested Structures ---");
+    my scalar $data = {
+        "users" => [
+            { "name" => "Alice", "role" => "admin" },
+            { "name" => "Bob", "role" => "user" }
+        ],
+        "settings" => {
+            "theme" => "dark",
+            "notifications" => 1
+        }
+    };
+    say("Nested: " . JSON::encode($data));
+
+    say("");
+
+    # Decoding
+    say("--- Decoding JSON ---");
+    my str $json_str = "{\"name\":\"Bob\",\"score\":95,\"tags\":[\"a\",\"b\",\"c\"]}";
+    say("Input: " . $json_str);
+
+    my scalar $decoded = JSON::decode($json_str);
+    say("Decoded name: " . $decoded->{"name"});
+    say("Decoded score: " . $decoded->{"score"});
+    say("Decoded tags: " . JSON::encode($decoded->{"tags"}));
+
+    say("");
+
+    # Round-trip demonstration
+    say("--- Round-Trip Demo ---");
+    my scalar $original = {
+        "title" => "Test",
+        "values" => [10, 20, 30]
+    };
+    my str $encoded = JSON::encode_opts($original, { "canonical" => 1 });
+    my scalar $round_trip = JSON::decode($encoded);
+    my str $re_encoded = JSON::encode_opts($round_trip, { "canonical" => 1 });
+
+    say("Original: " . $encoded);
+    say("Round-trip: " . $re_encoded);
+
+    if ($encoded eq $re_encoded) {
+        say("Round-trip: PASS");
+    } else {
+        say("Round-trip: FAIL");
+    }
+
+    say("");
+    say("Done!");
+
+    return 0;
+}

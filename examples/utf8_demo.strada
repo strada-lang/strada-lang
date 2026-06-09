@@ -1,0 +1,65 @@
+# UTF-8 demo — Strada strings are UTF-8 character oriented.
+# length(), substr(), index(), reverse() count Unicode codepoints.
+# core::byte_length() and core::byte_substr() expose raw bytes.
+
+func main() int {
+    # Basic UTF-8 string handling
+    my str $s = "café au lait";
+    say("len=" . length($s));                          # 12 chars
+    say("bytes=" . core::byte_length($s));             # 13 bytes
+    say("substr=" . substr($s, 0, 4));                 # café
+
+    # Higher Unicode planes (BMP and astral)
+    my str $jp = "日本語";
+    my str $emoji = "🎉🎊";
+    say("jp len=" . length($jp));                      # 3 chars
+    say("jp bytes=" . core::byte_length($jp));         # 9 bytes
+    say("emoji len=" . length($emoji));                # 2 chars
+    say("emoji bytes=" . core::byte_length($emoji));   # 8 bytes (4+4)
+
+    # Reverse is codepoint-aware
+    say("rev=" . reverse("café"));                     # éfac
+    say("jp rev=" . reverse($jp));                     # 語本日
+
+    # uc/lc handle Latin-1 range
+    say("uc=" . uc("café"));                           # CAFÉ
+    say("lc=" . lc("CAFÉ"));                           # café
+
+    # chr/ord roundtrip across all ranges. Note: chr(N) for 0-255
+    # returns a single raw byte (Latin-1 byte) — for codepoints in
+    # 128-255 that's not a valid standalone UTF-8 character, so the
+    # output may display as a replacement char under :utf8 stdout.
+    # For codepoints >255, chr() always emits multi-byte UTF-8.
+    say("chr(65)=" . chr(65));                         # A
+    say("chr(0x263A)=" . chr(0x263A));                 # ☺
+    say("chr(0x1F389)=" . chr(0x1F389));               # 🎉
+    say("ord(é)=" . ord("é"));                         # 233
+
+    # index() returns char position, not byte
+    my str $tx = "hello café";
+    say("index café=" . index($tx, "café"));           # 6
+
+    # split + join are char-safe
+    my array @parts = split(/,/, "a,é,日,🎉");
+    say("split count=" . size(@parts));                 # 4
+    say("split[2]=" . $parts[2]);                       # 日
+    say("join=" . join("·", "a", "b", "c"));           # a·b·c
+
+    # Regex with UTF-8 literals
+    if ("café" =~ /é/) {
+        say("regex matched é");
+    }
+
+    # Equality compares bytes (deterministic for normalized UTF-8)
+    say("eq=" . ("café" eq "café" ? "y" : "n"));       # y
+
+    # Byte-level access via core::*
+    say("byte0=" . core::ord_byte($s));                # 99 ('c')
+    say("get_byte(4)=" . core::get_byte($s, 4));       # 0xA9 (continuation of é)
+
+    # Encode/decode (utf8::* helpers)
+    say("is_utf8=" . utf8::is_utf8("café"));           # 1
+    say("valid=" . utf8::valid("café"));               # 1
+
+    return 0;
+}

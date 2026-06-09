@@ -1,0 +1,91 @@
+#!/usr/bin/env strada
+# Leak regression: $ref->[idx] = val didn't decref the ref sub-expr;
+# goto LABEL and unlabeled redo skipped scope cleanup; local-in-try
+# emitted __local_saved_depth in a nested C scope.
+#
+# Run: valgrind --leak-check=full ./test_assign_goto_redo_leaks
+
+package main;
+
+func get_arr_ref() scalar {
+    return [10, 20, 30, 40];
+}
+
+func test_call_ref_arr_assign() void {
+    # get_arr_ref()->[i] = v — the call result is owned and previously
+    # leaked because the assign codegen didn't decref the ref source.
+    my int $iter = 200;
+    my int $i = 0;
+    while ($i < $iter) {
+        get_arr_ref()->[1] = 999;
+        $i = $i + 1;
+    }
+    say("test_call_ref_arr_assign: PASS");
+}
+
+func test_hash_arr_assign() void {
+    my int $iter = 200;
+    my int $i = 0;
+    while ($i < $iter) {
+        my hash %h = ();
+        $h{"arr"} = [1, 2, 3];
+        $h{"arr"}->[1] = 42;
+        $i = $i + 1;
+    }
+    say("test_hash_arr_assign: PASS");
+}
+
+func test_goto_with_inner_scope() void {
+    # Backward goto exiting an inner if-scope each iteration.
+    my int $i = 0;
+    START:
+    if ($i < 100) {
+        my hash %h = ();
+        $h{"k"} = "value-" . $i;
+        $i = $i + 1;
+        goto START;
+    }
+    say("test_goto_with_inner_scope: PASS");
+}
+
+func test_redo_unlabeled() void {
+    my int $i = 0;
+    my int $retries = 0;
+    while ($i < 50) {
+        my hash %h = ();
+        $h{"k"} = "v" . $i;
+        if ($i == 2 && $retries == 0) {
+            $retries = 1;
+            $i = 3;
+            redo;
+        }
+        $i = $i + 1;
+    }
+    say("test_redo_unlabeled: PASS");
+}
+
+our str $count = "initial";
+
+func test_local_in_try() void {
+    my int $iter = 50;
+    my int $i = 0;
+    while ($i < $iter) {
+        try {
+            local $count = "temp";
+            throw "boom";
+        } catch ($e) {
+            # Caught
+        }
+        $i = $i + 1;
+    }
+    say("test_local_in_try: PASS");
+}
+
+func main() int {
+    test_call_ref_arr_assign();
+    test_hash_arr_assign();
+    test_goto_with_inner_scope();
+    test_redo_unlabeled();
+    test_local_in_try();
+    return 0;
+}

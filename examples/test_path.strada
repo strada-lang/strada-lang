@@ -1,0 +1,91 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_path.strada - Test path manipulation functions
+
+func main() int {
+    say("=== Path Functions Test ===");
+    say("");
+
+    # Test dirname and basename
+    say("=== dirname/basename ===");
+    my str $path = "/home/user/documents/file.txt";
+    say("Path: " . $path);
+    say("dirname: " . sys::dirname($path));
+    say("basename: " . sys::basename($path));
+    say("file_ext: " . sys::file_ext($path));
+    say("");
+
+    say("Path: /var/log/syslog");
+    say("dirname: " . sys::dirname("/var/log/syslog"));
+    say("basename: " . sys::basename("/var/log/syslog"));
+    say("file_ext: " . sys::file_ext("/var/log/syslog"));
+    say("");
+
+    # Test realpath
+    say("=== realpath ===");
+    my scalar $real = sys::realpath(".");
+    if (defined($real)) {
+        say("realpath('.'): " . $real);
+    } else {
+        say("realpath('.') failed");
+    }
+
+    my scalar $real2 = sys::realpath("/tmp");
+    if (defined($real2)) {
+        say("realpath('/tmp'): " . $real2);
+    }
+    say("");
+
+    # Test glob
+    say("=== glob ===");
+    my scalar $matches = sys::glob("*.strada");
+    if (size($matches) > 0) {
+        say("Found " . size($matches) . " .strada files in current dir");
+    }
+
+    my scalar $examples = sys::glob("examples/*.strada");
+    say("Found " . size($examples) . " .strada files in examples/");
+    if (size($examples) > 0) {
+        say("First few:");
+        my int $i = 0;
+        while ($i < size($examples) && $i < 5) {
+            say("  " . $examples->[$i]);
+            $i = $i + 1;
+        }
+    }
+    say("");
+
+    # Test fnmatch
+    say("=== fnmatch ===");
+    say("fnmatch('*.txt', 'file.txt'): " . sys::fnmatch("*.txt", "file.txt"));
+    say("fnmatch('*.txt', 'file.doc'): " . sys::fnmatch("*.txt", "file.doc"));
+    say("fnmatch('test_*', 'test_math.strada'): " . sys::fnmatch("test_*", "test_math.strada"));
+    say("");
+
+    # Test path_join
+    say("=== path_join ===");
+    my array @parts;
+    push(\@parts, "home");
+    push(\@parts, "user");
+    push(\@parts, "docs");
+    say("path_join(['home', 'user', 'docs']): " . sys::path_join(\@parts));
+    say("");
+
+    say("Path tests completed!");
+    return 0;
+}

@@ -1,0 +1,143 @@
+#!/usr/bin/env strada
+# Test advanced closure patterns for memory leaks
+# Run: valgrind --leak-check=full ./test_closures_advanced
+
+func make_counter(int $start) scalar {
+    my int $count = $start;
+    return func () int {
+        $count = $count + 1;
+        return $count;
+    };
+}
+
+func make_pair() array {
+    my int $val = 0;
+    my scalar $getter = func () int {
+        return $val;
+    };
+    my scalar $setter = func (int $n) void {
+        $val = $n;
+    };
+    my array @pair = ($getter, $setter);
+    return @pair;
+}
+
+func apply(scalar $fn, int $x) int {
+    return $fn->($x);
+}
+
+func main() int {
+    say("Testing advanced closures for memory leaks...");
+    my int $iterations = 100;
+
+    # Test closure creation and call in loop
+    say("  closure create/call loop...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my scalar $counter = make_counter(0);
+        my int $v1 = $counter->();
+        my int $v2 = $counter->();
+        my int $v3 = $counter->();
+        if ($v3 != 3) {
+            say("    FAIL: counter = " . $v3);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test closures capturing loop variable
+    say("  closures capturing loop var...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @funcs = ();
+        my int $j = 0;
+        while ($j < 5) {
+            my int $captured = $j;
+            push(@funcs, func () int { return $captured; });
+            $j = $j + 1;
+        }
+        # Each closure should return its captured value
+        my int $sum = 0;
+        $j = 0;
+        while ($j < 5) {
+            my scalar $fn = $funcs[$j];
+            $sum = $sum + $fn->();
+            $j = $j + 1;
+        }
+        if ($sum != 10) {
+            say("    FAIL: captured sum = " . $sum);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test closure stored in hash
+    say("  closure in hash...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %dispatch = ();
+        $dispatch{"double"} = func (int $n) int { return $n * 2; };
+        $dispatch{"triple"} = func (int $n) int { return $n * 3; };
+        my scalar $f1 = $dispatch{"double"};
+        my scalar $f2 = $dispatch{"triple"};
+        my int $r1 = $f1->(5);
+        my int $r2 = $f2->(5);
+        if ($r1 != 10 || $r2 != 15) {
+            say("    FAIL: dispatch");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test closure returning closure (single-level capture)
+    say("  closure returning closure...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $f = make_counter($i);
+        my int $v1 = $f->();
+        my int $v2 = $f->();
+        if ($v2 != $i + 2) {
+            say("    FAIL: nested = " . $v2);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test closure reassignment
+    say("  closure reassignment...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $fn = func (int $n) int { return $n + 1; };
+        my int $r1 = $fn->(10);
+        $fn = func (int $n) int { return $n * 2; };
+        my int $r2 = $fn->(10);
+        if ($r1 != 11 || $r2 != 20) {
+            say("    FAIL: reassign");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test closure as function argument
+    say("  closure as argument...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $multiplier = $i + 1;
+        my scalar $fn = func (int $x) int { return $x * $multiplier; };
+        my int $result = apply($fn, 5);
+        if ($result != 5 * ($i + 1)) {
+            say("    FAIL: arg closure");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All advanced closure tests passed!");
+    return 0;
+}

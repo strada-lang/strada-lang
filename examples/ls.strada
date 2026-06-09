@@ -1,0 +1,454 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# ls - list directory contents
+# A Strada implementation of the Unix ls command
+
+func format_size(int $size) str {
+    if ($size < 1024) {
+        return $size . "";
+    } elsif ($size < 1024 * 1024) {
+        my num $kb = $size / 1024.0;
+        return sprintf("%.1fK", $kb);
+    } elsif ($size < 1024 * 1024 * 1024) {
+        my num $mb = $size / (1024.0 * 1024.0);
+        return sprintf("%.1fM", $mb);
+    } else {
+        my num $gb = $size / (1024.0 * 1024.0 * 1024.0);
+        return sprintf("%.1fG", $gb);
+    }
+}
+
+func format_mode(int $mode) str {
+    my str $result = "";
+
+    # File type
+    if (($mode / 16384) % 2 == 1) {
+        $result = "d";
+    } elsif (($mode / 8192) % 2 == 1) {
+        $result = "l";
+    } else {
+        $result = "-";
+    }
+
+    # Owner permissions
+    if (($mode / 256) % 2 == 1) { $result = $result . "r"; } else { $result = $result . "-"; }
+    if (($mode / 128) % 2 == 1) { $result = $result . "w"; } else { $result = $result . "-"; }
+    if (($mode / 64) % 2 == 1) { $result = $result . "x"; } else { $result = $result . "-"; }
+
+    # Group permissions
+    if (($mode / 32) % 2 == 1) { $result = $result . "r"; } else { $result = $result . "-"; }
+    if (($mode / 16) % 2 == 1) { $result = $result . "w"; } else { $result = $result . "-"; }
+    if (($mode / 8) % 2 == 1) { $result = $result . "x"; } else { $result = $result . "-"; }
+
+    # Other permissions
+    if (($mode / 4) % 2 == 1) { $result = $result . "r"; } else { $result = $result . "-"; }
+    if (($mode / 2) % 2 == 1) { $result = $result . "w"; } else { $result = $result . "-"; }
+    if ($mode % 2 == 1) { $result = $result . "x"; } else { $result = $result . "-"; }
+
+    return $result;
+}
+
+func format_time(int $mtime) str {
+    # Simple time formatting - shows as epoch timestamp
+    # In a full implementation, we'd convert to human-readable format
+    my scalar $tm = sys::localtime($mtime);
+    if (!defined($tm)) {
+        return $mtime . "";
+    }
+
+    my int $mon = $tm->{"mon"} + 1;
+    my int $mday = $tm->{"mday"};
+    my int $hour = $tm->{"hour"};
+    my int $min = $tm->{"min"};
+
+    my str $mon_str = "";
+    if ($mon == 1) { $mon_str = "Jan"; }
+    elsif ($mon == 2) { $mon_str = "Feb"; }
+    elsif ($mon == 3) { $mon_str = "Mar"; }
+    elsif ($mon == 4) { $mon_str = "Apr"; }
+    elsif ($mon == 5) { $mon_str = "May"; }
+    elsif ($mon == 6) { $mon_str = "Jun"; }
+    elsif ($mon == 7) { $mon_str = "Jul"; }
+    elsif ($mon == 8) { $mon_str = "Aug"; }
+    elsif ($mon == 9) { $mon_str = "Sep"; }
+    elsif ($mon == 10) { $mon_str = "Oct"; }
+    elsif ($mon == 11) { $mon_str = "Nov"; }
+    elsif ($mon == 12) { $mon_str = "Dec"; }
+
+    my str $mday_str = "";
+    if ($mday < 10) { $mday_str = " " . $mday; }
+    else { $mday_str = $mday . ""; }
+
+    my str $hour_str = "";
+    if ($hour < 10) { $hour_str = "0" . $hour; }
+    else { $hour_str = $hour . ""; }
+
+    my str $min_str = "";
+    if ($min < 10) { $min_str = "0" . $min; }
+    else { $min_str = $min . ""; }
+
+    return $mon_str . " " . $mday_str . " " . $hour_str . ":" . $min_str;
+}
+
+# Cache for uid -> username mappings
+my hash %uid_cache = ();
+my int $passwd_loaded = 0;
+
+func load_passwd() void {
+    if ($passwd_loaded) {
+        return;
+    }
+    $passwd_loaded = 1;
+
+    my scalar $fh = sys::open("/etc/passwd", "r");
+    if (!defined($fh)) {
+        return;
+    }
+
+    my str $line = sys::fgets($fh, 1024);
+    while (defined($line) && length($line) > 0) {
+        # Remove trailing newline
+        if (length($line) > 0 && substr($line, length($line) - 1, 1) eq "\n") {
+            $line = substr($line, 0, length($line) - 1);
+        }
+        my array @parts = split(":", $line);
+        if (scalar(@parts) >= 3) {
+            my str $username = $parts[0];
+            my str $uid_str = $parts[2];
+            $uid_cache{$uid_str} = $username;
+        }
+        $line = sys::fgets($fh, 1024);
+    }
+    sys::close($fh);
+}
+
+func uid_to_user(int $uid) str {
+    load_passwd();
+    my str $uid_str = $uid . "";
+    if (defined($uid_cache{$uid_str})) {
+        return $uid_cache{$uid_str};
+    }
+    return $uid_str;
+}
+
+# Cache for gid -> groupname mappings
+my hash %gid_cache = ();
+my int $group_loaded = 0;
+
+func load_group() void {
+    if ($group_loaded) {
+        return;
+    }
+    $group_loaded = 1;
+
+    my scalar $fh = sys::open("/etc/group", "r");
+    if (!defined($fh)) {
+        return;
+    }
+
+    my str $line = sys::fgets($fh, 1024);
+    while (defined($line) && length($line) > 0) {
+        # Remove trailing newline
+        if (length($line) > 0 && substr($line, length($line) - 1, 1) eq "\n") {
+            $line = substr($line, 0, length($line) - 1);
+        }
+        my array @parts = split(":", $line);
+        if (scalar(@parts) >= 3) {
+            my str $groupname = $parts[0];
+            my str $gid_str = $parts[2];
+            $gid_cache{$gid_str} = $groupname;
+        }
+        $line = sys::fgets($fh, 1024);
+    }
+    sys::close($fh);
+}
+
+func gid_to_group(int $gid) str {
+    load_group();
+    my str $gid_str = $gid . "";
+    if (defined($gid_cache{$gid_str})) {
+        return $gid_cache{$gid_str};
+    }
+    return $gid_str;
+}
+
+func pad_right(str $s, int $width) str {
+    my int $len = length($s);
+    while ($len < $width) {
+        $s = $s . " ";
+        $len = $len + 1;
+    }
+    return $s;
+}
+
+func pad_left(str $s, int $width) str {
+    my int $len = length($s);
+    while ($len < $width) {
+        $s = " " . $s;
+        $len = $len + 1;
+    }
+    return $s;
+}
+
+func print_usage() void {
+    say("Usage: ls [OPTIONS] [DIRECTORY]");
+    say("List directory contents.");
+    say("");
+    say("Options:");
+    say("  -a, --all       show hidden files (starting with .)");
+    say("  -l              use long listing format");
+    say("  -h, --human     with -l, print human readable sizes");
+    say("  -1              list one file per line");
+    say("  --color         colorize the output");
+    say("  --help          display this help and exit");
+}
+
+func sort_strings(array @arr) array {
+    # Simple bubble sort for strings
+    my int $n = scalar(@arr);
+    my int $i = 0;
+    while ($i < $n - 1) {
+        my int $j = 0;
+        while ($j < $n - $i - 1) {
+            if ($arr[$j] gt $arr[$j + 1]) {
+                my str $tmp = $arr[$j];
+                $arr[$j] = $arr[$j + 1];
+                $arr[$j + 1] = $tmp;
+            }
+            $j = $j + 1;
+        }
+        $i = $i + 1;
+    }
+    return @arr;
+}
+
+func main() int {
+    my int $show_all = 0;
+    my int $long_format = 0;
+    my int $human_readable = 0;
+    my int $one_per_line = 0;
+    my int $use_color = 0;
+    my str $target_dir = ".";
+
+    # Parse arguments
+    my int $i = 0;
+    while ($i < scalar(@ARGV)) {
+        my str $arg = $ARGV[$i];
+
+        if ($arg eq "-a" || $arg eq "--all") {
+            $show_all = 1;
+        } elsif ($arg eq "-l") {
+            $long_format = 1;
+        } elsif ($arg eq "-h" || $arg eq "--human") {
+            $human_readable = 1;
+        } elsif ($arg eq "-1") {
+            $one_per_line = 1;
+        } elsif ($arg eq "--color") {
+            $use_color = 1;
+        } elsif ($arg eq "-la" || $arg eq "-al") {
+            $long_format = 1;
+            $show_all = 1;
+        } elsif ($arg eq "-lh" || $arg eq "-hl") {
+            $long_format = 1;
+            $human_readable = 1;
+        } elsif ($arg eq "-lah" || $arg eq "-lha" || $arg eq "-alh" || $arg eq "-ahl" || $arg eq "-hal" || $arg eq "-hla") {
+            $long_format = 1;
+            $show_all = 1;
+            $human_readable = 1;
+        } elsif ($arg eq "--help") {
+            print_usage();
+            return 0;
+        } elsif (substr($arg, 0, 1) ne "-") {
+            $target_dir = $arg;
+        }
+
+        $i = $i + 1;
+    }
+
+    # Check if directory exists
+    if (!sys::is_dir($target_dir)) {
+        if (sys::is_file($target_dir)) {
+            # It's a file, just show it
+            if ($long_format) {
+                my scalar $st = sys::stat($target_dir);
+                if (defined($st)) {
+                    my str $mode_str = format_mode($st->{"mode"});
+                    my str $size_str = "";
+                    if ($human_readable) {
+                        $size_str = pad_left(format_size($st->{"size"}), 6);
+                    } else {
+                        $size_str = pad_left($st->{"size"} . "", 10);
+                    }
+                    my str $time_str = format_time($st->{"mtime"});
+                    my str $user = uid_to_user($st->{"uid"});
+                    my str $group = gid_to_group($st->{"gid"});
+                    say($mode_str . " " . pad_left($st->{"nlink"} . "", 3) . " " .
+                        pad_right($user, 8) . " " . pad_right($group, 8) . " " .
+                        $size_str . " " . $time_str . " " . $target_dir);
+                }
+            } else {
+                say($target_dir);
+            }
+            return 0;
+        }
+        say("ls: cannot access '" . $target_dir . "': No such file or directory");
+        return 1;
+    }
+
+    # Read directory
+    my scalar $entries = sys::readdir($target_dir);
+    if (!defined($entries)) {
+        say("ls: cannot open directory '" . $target_dir . "'");
+        return 1;
+    }
+
+    # Filter and sort entries
+    my array @filtered = ();
+    $i = 0;
+    while ($i < scalar($entries)) {
+        my str $name = $entries->[$i];
+        if ($show_all || substr($name, 0, 1) ne ".") {
+            push(@filtered, $name);
+        }
+        $i = $i + 1;
+    }
+
+    @filtered = sort_strings(@filtered);
+
+    # ANSI color codes
+    my str $COLOR_DIR = "";
+    my str $COLOR_EXEC = "";
+    my str $COLOR_LINK = "";
+    my str $COLOR_RESET = "";
+    if ($use_color) {
+        $COLOR_DIR = chr(27) . "[1;34m";    # Bold blue
+        $COLOR_EXEC = chr(27) . "[1;32m";   # Bold green
+        $COLOR_LINK = chr(27) . "[1;36m";   # Bold cyan
+        $COLOR_RESET = chr(27) . "[0m";
+    }
+
+    # Print entries
+    if ($long_format) {
+        my int $total = 0;
+        $i = 0;
+        while ($i < scalar(@filtered)) {
+            my str $name = $filtered[$i];
+            my str $full_path = $target_dir . "/" . $name;
+            my scalar $st = sys::stat($full_path);
+            if (defined($st)) {
+                $total = $total + ($st->{"blocks"} / 2);
+            }
+            $i = $i + 1;
+        }
+        say("total " . $total);
+
+        $i = 0;
+        while ($i < scalar(@filtered)) {
+            my str $name = $filtered[$i];
+            my str $full_path = $target_dir . "/" . $name;
+            my scalar $st = sys::stat($full_path);
+
+            if (defined($st)) {
+                my str $mode_str = format_mode($st->{"mode"});
+                my int $is_directory = sys::is_dir($full_path);
+                my int $is_exec = ($st->{"mode"} % 2 == 1) || (($st->{"mode"} / 8) % 2 == 1) || (($st->{"mode"} / 64) % 2 == 1);
+
+                my str $size_str = "";
+                if ($human_readable) {
+                    $size_str = pad_left(format_size($st->{"size"}), 6);
+                } else {
+                    $size_str = pad_left($st->{"size"} . "", 10);
+                }
+
+                my str $time_str = format_time($st->{"mtime"});
+
+                my str $display_name = $name;
+                if ($use_color) {
+                    if ($is_directory) {
+                        $display_name = $COLOR_DIR . $name . $COLOR_RESET;
+                    } elsif ($is_exec) {
+                        $display_name = $COLOR_EXEC . $name . $COLOR_RESET;
+                    }
+                }
+
+                my str $user = uid_to_user($st->{"uid"});
+                my str $group = gid_to_group($st->{"gid"});
+                say($mode_str . " " . pad_left($st->{"nlink"} . "", 3) . " " .
+                    pad_right($user, 8) . " " . pad_right($group, 8) . " " .
+                    $size_str . " " . $time_str . " " . $display_name);
+            } else {
+                say("? " . $name);
+            }
+
+            $i = $i + 1;
+        }
+    } else {
+        # Simple format - either one per line or columns
+        if ($one_per_line) {
+            $i = 0;
+            while ($i < scalar(@filtered)) {
+                my str $name = $filtered[$i];
+                my str $full_path = $target_dir . "/" . $name;
+                my int $is_directory = sys::is_dir($full_path);
+
+                if ($use_color && $is_directory) {
+                    say($COLOR_DIR . $name . $COLOR_RESET);
+                } else {
+                    say($name);
+                }
+                $i = $i + 1;
+            }
+        } else {
+            # Simple multi-column output
+            my str $line = "";
+            my int $col = 0;
+            $i = 0;
+            while ($i < scalar(@filtered)) {
+                my str $name = $filtered[$i];
+                my str $full_path = $target_dir . "/" . $name;
+                my int $is_directory = sys::is_dir($full_path);
+
+                my str $display_name = $name;
+                if ($use_color && $is_directory) {
+                    $display_name = $COLOR_DIR . $name . $COLOR_RESET;
+                }
+
+                if ($col > 0) {
+                    $line = $line . "  ";
+                }
+                $line = $line . $display_name;
+                $col = $col + 1;
+
+                # Rough column management - print after ~4 items or if line is long
+                if ($col >= 4 || length($line) > 60) {
+                    say($line);
+                    $line = "";
+                    $col = 0;
+                }
+
+                $i = $i + 1;
+            }
+
+            if (length($line) > 0) {
+                say($line);
+            }
+        }
+    }
+
+    return 0;
+}

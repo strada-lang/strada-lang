@@ -1,0 +1,83 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# Demonstrates modifying variables through references using $$ref = value
+
+func swap(scalar $a_ref, scalar $b_ref) void {
+    # Use clone() to get a copy, since $$ref returns a pointer
+    my scalar $temp = clone($$a_ref);
+    $$a_ref = $$b_ref;
+    $$b_ref = $temp;
+}
+
+func increment(scalar $ref) void {
+    $$ref = $$ref + 1;
+}
+
+func append_greeting(scalar $ref) void {
+    $$ref = "Hello, " . $$ref . "!";
+}
+
+func main() int {
+    say("=== Modifying Variables Through References ===");
+    say("");
+
+    # Basic $$ref assignment
+    say("--- Basic $$ref assignment ---");
+    my scalar $value = "original";
+    my scalar $ref = \$value;
+    say("before: " . $value);
+    $$ref = "modified";
+    say("after:  " . $value);
+    say("");
+
+    # Swap two variables using clone()
+    say("--- Swap via references ---");
+    my int $x = 10;
+    my int $y = 20;
+    say("before: x=" . $x . ", y=" . $y);
+    swap(\$x, \$y);
+    say("after:  x=" . $x . ", y=" . $y);
+    say("");
+
+    # Increment via reference
+    say("--- Increment via reference ---");
+    my int $counter = 0;
+    say("counter: " . $counter);
+    increment(\$counter);
+    say("counter: " . $counter);
+    increment(\$counter);
+    say("counter: " . $counter);
+    say("");
+
+    # String modification
+    say("--- String modification ---");
+    my str $name = "World";
+    say("before: " . $name);
+    append_greeting(\$name);
+    say("after:  " . $name);
+    say("");
+
+    # Using deref_set() function
+    say("--- Using deref_set() ---");
+    my scalar $val = "using deref";
+    my scalar $r = \$val;
+    deref_set($r, "using deref_set()");
+    say($val);
+
+    return 0;
+}

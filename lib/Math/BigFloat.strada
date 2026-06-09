@@ -1,0 +1,807 @@
+/*
+ Math::BigFloat - Arbitrary-precision floating-point arithmetic for Strada
+
+ SYNOPSIS
+
+    use lib "lib";
+    use Math::BigFloat;
+
+    my scalar $a = BigFloat::new("123.456");
+    my scalar $b = BigFloat::new("0.001");
+    my scalar $c = $a->add($b);
+    say($c->to_str());  # 123.457
+
+    my scalar $d = BigFloat::new("1");
+    my scalar $e = BigFloat::new("3");
+    say($d->div($e)->to_str());  # 0.33333333333333333333
+
+ REPRESENTATION
+
+    value = sign * mantissa * 10^(-scale)
+    e.g., 123.456 => sign=1, mantissa="123456", scale=3
+*/
+
+package BigFloat;
+
+__C__ {
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+
+/* Compare two digit strings (absolute values). Returns -1, 0, or 1. */
+static int _bf_cmp(const char *a, const char *b) {
+    size_t la = strlen(a);
+    size_t lb = strlen(b);
+    if (la != lb) return (la > lb) ? 1 : -1;
+    return strcmp(a, b);
+}
+
+/* Strip leading zeros from digit string. Caller must free result. */
+static char *_bf_strip_leading(const char *s) {
+    while (*s == '0' && *(s + 1) != '\0') s++;
+    return strdup(s);
+}
+
+/* Add two digit strings (absolute values). Caller must free result. */
+static char *_bf_add(const char *a, const char *b) {
+    size_t la = strlen(a);
+    size_t lb = strlen(b);
+    size_t max = (la > lb) ? la : lb;
+    char *result = (char *)malloc(max + 2);
+    int carry = 0;
+    size_t ri = 0;
+    size_t ia = la;
+    size_t ib = lb;
+
+    while (ia > 0 || ib > 0 || carry) {
+        int da = 0, db = 0;
+        if (ia > 0) { ia--; da = a[ia] - '0'; }
+        if (ib > 0) { ib--; db = b[ib] - '0'; }
+        int sum = da + db + carry;
+        carry = sum / 10;
+        result[ri++] = '0' + (sum % 10);
+    }
+    for (size_t i = 0; i < ri / 2; i++) {
+        char tmp = result[i];
+        result[i] = result[ri - 1 - i];
+        result[ri - 1 - i] = tmp;
+    }
+    result[ri] = '\0';
+    return result;
+}
+
+/* Subtract b from a (assumes a >= b). Caller must free result. */
+static char *_bf_sub(const char *a, const char *b) {
+    size_t la = strlen(a);
+    size_t lb = strlen(b);
+    char *result = (char *)malloc(la + 1);
+    int borrow = 0;
+    size_t ri = 0;
+    size_t ia = la;
+    size_t ib = lb;
+
+    while (ia > 0) {
+        ia--;
+        int da = a[ia] - '0' - borrow;
+        int db = 0;
+        if (ib > 0) { ib--; db = b[ib] - '0'; }
+        if (da < db) { da += 10; borrow = 1; } else { borrow = 0; }
+        result[ri++] = '0' + (da - db);
+    }
+    for (size_t i = 0; i < ri / 2; i++) {
+        char tmp = result[i];
+        result[i] = result[ri - 1 - i];
+        result[ri - 1 - i] = tmp;
+    }
+    result[ri] = '\0';
+    char *stripped = _bf_strip_leading(result);
+    free(result);
+    return stripped;
+}
+
+/* Multiply two digit strings. Caller must free result. */
+static char *_bf_mul(const char *a, const char *b) {
+    size_t la = strlen(a);
+    size_t lb = strlen(b);
+    size_t rlen = la + lb;
+    int *digits = (int *)calloc(rlen, sizeof(int));
+
+    for (size_t i = 0; i < la; i++) {
+        for (size_t j = 0; j < lb; j++) {
+            int da = a[la - 1 - i] - '0';
+            int db = b[lb - 1 - j] - '0';
+            digits[i + j] += da * db;
+        }
+    }
+    for (size_t i = 0; i < rlen - 1; i++) {
+        digits[i + 1] += digits[i] / 10;
+        digits[i] %= 10;
+    }
+    size_t top = rlen - 1;
+    while (top > 0 && digits[top] == 0) top--;
+
+    char *result = (char *)malloc(top + 2);
+    for (size_t i = 0; i <= top; i++) {
+        result[i] = '0' + digits[top - i];
+    }
+    result[top + 1] = '\0';
+    free(digits);
+    return result;
+}
+
+/* Divide a by b. Returns quotient. If rem is non-NULL, sets *rem to remainder.
+   Caller must free quotient and *rem. */
+static char *_bf_divmod(const char *a, const char *b, char **rem) {
+    if (_bf_cmp(a, b) < 0) {
+        if (rem) *rem = strdup(a);
+        return strdup("0");
+    }
+    if (strcmp(b, "0") == 0) {
+        if (rem) *rem = strdup("0");
+        return strdup("0");
+    }
+
+    size_t la = strlen(a);
+    char *quotient = (char *)malloc(la + 1);
+    size_t qi = 0;
+    char *current = strdup("0");
+
+    for (size_t i = 0; i < la; i++) {
+        size_t cl = strlen(current);
+        char *next = (char *)malloc(cl + 2);
+        memcpy(next, current, cl);
+        next[cl] = a[i];
+        next[cl + 1] = '\0';
+        free(current);
+        current = _bf_strip_leading(next);
+        free(next);
+
+        int count = 0;
+        while (_bf_cmp(current, b) >= 0) {
+            char *tmp = _bf_sub(current, b);
+            free(current);
+            current = tmp;
+            count++;
+        }
+        quotient[qi++] = '0' + count;
+    }
+    quotient[qi] = '\0';
+
+    char *stripped_q = _bf_strip_leading(quotient);
+    free(quotient);
+
+    if (rem) {
+        *rem = current;
+    } else {
+        free(current);
+    }
+    return stripped_q;
+}
+
+/* Pad a digit string with trailing zeros. Caller must free result. */
+static char *_bf_pad_right(const char *s, size_t n) {
+    size_t l = strlen(s);
+    char *result = (char *)malloc(l + n + 1);
+    memcpy(result, s, l);
+    for (size_t i = 0; i < n; i++) result[l + i] = '0';
+    result[l + n] = '\0';
+    return result;
+}
+
+/* Strip trailing zeros from mantissa. Returns new mantissa (caller frees).
+   Adjusts *scale accordingly. */
+static char *_bf_normalize(const char *m, int64_t *scale) {
+    size_t l = strlen(m);
+    if (l == 0 || strcmp(m, "0") == 0) {
+        *scale = 0;
+        return strdup("0");
+    }
+    size_t end = l;
+    while (end > 1 && m[end - 1] == '0' && *scale > 0) {
+        end--;
+        (*scale)--;
+    }
+    char *result = (char *)malloc(end + 1);
+    memcpy(result, m, end);
+    result[end] = '\0';
+    return result;
+}
+}
+
+func new(str $val) scalar {
+    my hash %self = ();
+    my int $sign = 1;
+    my str $input = $val;
+
+    # Handle sign
+    if (length($input) > 0 && substr($input, 0, 1) eq "-") {
+        $sign = -1;
+        $input = substr($input, 1, length($input) - 1);
+    } elsif (length($input) > 0 && substr($input, 0, 1) eq "+") {
+        $input = substr($input, 1, length($input) - 1);
+    }
+
+    # Find decimal point
+    my int $dot_pos = index($input, ".");
+    my str $mantissa = "";
+    my int $scale = 0;
+
+    if ($dot_pos >= 0) {
+        my str $int_part = substr($input, 0, $dot_pos);
+        my str $frac_part = substr($input, $dot_pos + 1, length($input) - $dot_pos - 1);
+        $mantissa = $int_part . $frac_part;
+        $scale = length($frac_part);
+    } else {
+        $mantissa = $input;
+        $scale = 0;
+    }
+
+    # Strip leading zeros from mantissa
+    while (length($mantissa) > 1 && substr($mantissa, 0, 1) eq "0") {
+        $mantissa = substr($mantissa, 1, length($mantissa) - 1);
+    }
+
+    # Normalize: strip trailing zeros, adjust scale
+    my str $norm_m = "";
+    my int $norm_e = $scale;
+    __C__ {
+        char *m_str = strada_to_str(mantissa);
+        int64_t e_val = strada_to_int(norm_e);
+        char *nm = _bf_normalize(m_str, &e_val);
+        free(m_str);
+        strada_decref(norm_m);
+        norm_m = strada_new_str(nm);
+        free(nm);
+        strada_decref(norm_e);
+        norm_e = strada_new_int(e_val);
+    }
+
+    # Zero is always positive
+    if ($norm_m eq "0") {
+        $sign = 1;
+    }
+
+    $self{"s"} = $sign;
+    $self{"m"} = $norm_m;
+    $self{"e"} = $norm_e;
+    return bless(\%self, "BigFloat");
+}
+
+func from_int(int $val) scalar {
+    return BigFloat::new("" . $val);
+}
+
+func from_bigint(scalar $bi) scalar {
+    return BigFloat::new($bi->to_str());
+}
+
+func clone(scalar $self) scalar {
+    my hash %c = ();
+    $c{"s"} = $self->{"s"};
+    $c{"m"} = "" . $self->{"m"};
+    $c{"e"} = $self->{"e"};
+    return bless(\%c, "BigFloat");
+}
+
+func to_str(scalar $self) str {
+    my str $m = $self->{"m"};
+    my int $scale = $self->{"e"};
+    my int $sign = $self->{"s"};
+    my str $result = "";
+
+    if ($m eq "0") {
+        return "0";
+    }
+
+    if ($scale <= 0) {
+        # No decimal point needed
+        $result = $m;
+        # Append zeros if scale < 0 (shouldn't normally happen after normalize)
+    } else {
+        my int $mlen = length($m);
+        if ($mlen <= $scale) {
+            # Need leading zeros after decimal: 0.00123
+            my str $zeros = "";
+            my int $pad = $scale - $mlen;
+            my int $i = 0;
+            while ($i < $pad) {
+                $zeros = $zeros . "0";
+                $i++;
+            }
+            my str $prefix = "0." . $zeros;
+            $result = $prefix . $m;
+        } else {
+            # Insert decimal point
+            my str $int_part = substr($m, 0, $mlen - $scale);
+            my str $frac_part = substr($m, $mlen - $scale, $scale);
+            my str $with_dot = $int_part . ".";
+            $result = $with_dot . $frac_part;
+        }
+    }
+
+    if ($sign < 0) {
+        $result = "-" . $result;
+    }
+    return $result;
+}
+
+func to_int(scalar $self) int {
+    # Truncate to integer
+    my str $m = $self->{"m"};
+    my int $scale = $self->{"e"};
+    my int $mlen = length($m);
+
+    if ($mlen <= $scale) {
+        return 0;
+    }
+
+    my str $int_part = substr($m, 0, $mlen - $scale);
+    my int $val = cast_int($int_part);
+    if ($self->{"s"} < 0) {
+        $val = 0 - $val;
+    }
+    return $val;
+}
+
+func is_zero(scalar $self) int {
+    return $self->{"m"} eq "0" ? 1 : 0;
+}
+
+func sign(scalar $self) int {
+    if ($self->{"m"} eq "0") {
+        return 0;
+    }
+    return $self->{"s"};
+}
+
+func abs(scalar $self) scalar {
+    my hash %r = ();
+    $r{"s"} = 1;
+    $r{"m"} = "" . $self->{"m"};
+    $r{"e"} = $self->{"e"};
+    return bless(\%r, "BigFloat");
+}
+
+func neg(scalar $self) scalar {
+    my hash %r = ();
+    if ($self->{"m"} eq "0") {
+        $r{"s"} = 1;
+    } else {
+        $r{"s"} = 0 - $self->{"s"};
+    }
+    $r{"m"} = "" . $self->{"m"};
+    $r{"e"} = $self->{"e"};
+    return bless(\%r, "BigFloat");
+}
+
+func compare(scalar $self, scalar $other) int {
+    my int $sa = $self->{"s"};
+    my int $sb = $other->{"s"};
+
+    if ($self->{"m"} eq "0" && $other->{"m"} eq "0") {
+        return 0;
+    }
+    if ($sa > 0 && $sb < 0) {
+        return 1;
+    }
+    if ($sa < 0 && $sb > 0) {
+        return -1;
+    }
+
+    # Same sign: align mantissas to same scale, then compare
+    my str $ma = $self->{"m"};
+    my str $mb = $other->{"m"};
+    my int $ea = $self->{"e"};
+    my int $eb = $other->{"e"};
+    my int $mag_cmp = 0;
+
+    __C__ {
+        char *a_str = strada_to_str(ma);
+        char *b_str = strada_to_str(mb);
+        int64_t a_scale = strada_to_int(ea);
+        int64_t b_scale = strada_to_int(eb);
+
+        /* Align to same scale */
+        char *aa = a_str;
+        char *bb = b_str;
+        int aa_alloc = 0, bb_alloc = 0;
+        if (a_scale < b_scale) {
+            aa = _bf_pad_right(a_str, (size_t)(b_scale - a_scale));
+            aa_alloc = 1;
+        } else if (b_scale < a_scale) {
+            bb = _bf_pad_right(b_str, (size_t)(a_scale - b_scale));
+            bb_alloc = 1;
+        }
+
+        int c = _bf_cmp(aa, bb);
+        free(a_str);
+        free(b_str);
+        if (aa_alloc) free(aa);
+        if (bb_alloc) free(bb);
+        strada_decref(mag_cmp);
+        mag_cmp = strada_new_int((int64_t)c);
+    }
+
+    if ($sa > 0) {
+        return $mag_cmp;
+    }
+    return 0 - $mag_cmp;
+}
+
+func is_eq(scalar $self, scalar $other) int {
+    return $self->compare($other) == 0 ? 1 : 0;
+}
+
+func is_ne(scalar $self, scalar $other) int {
+    return $self->compare($other) != 0 ? 1 : 0;
+}
+
+func is_lt(scalar $self, scalar $other) int {
+    return $self->compare($other) < 0 ? 1 : 0;
+}
+
+func is_le(scalar $self, scalar $other) int {
+    return $self->compare($other) <= 0 ? 1 : 0;
+}
+
+func is_gt(scalar $self, scalar $other) int {
+    return $self->compare($other) > 0 ? 1 : 0;
+}
+
+func is_ge(scalar $self, scalar $other) int {
+    return $self->compare($other) >= 0 ? 1 : 0;
+}
+
+func add(scalar $self, scalar $other) scalar {
+    my int $sa = $self->{"s"};
+    my int $sb = $other->{"s"};
+    my str $ma = $self->{"m"};
+    my str $mb = $other->{"m"};
+    my int $ea = $self->{"e"};
+    my int $eb = $other->{"e"};
+
+    my str $result_m = "";
+    my int $result_e = 0;
+    my int $result_s = 1;
+
+    # Align mantissas to same scale
+    my str $aligned_a = "";
+    my str $aligned_b = "";
+    my int $max_scale = $ea;
+    if ($eb > $max_scale) {
+        $max_scale = $eb;
+    }
+
+    __C__ {
+        char *a_str = strada_to_str(ma);
+        char *b_str = strada_to_str(mb);
+        int64_t a_scale = strada_to_int(ea);
+        int64_t b_scale = strada_to_int(eb);
+        int64_t ms = (a_scale > b_scale) ? a_scale : b_scale;
+
+        char *aa = a_str;
+        char *bb = b_str;
+        int aa_alloc = 0, bb_alloc = 0;
+        if (a_scale < ms) {
+            aa = _bf_pad_right(a_str, (size_t)(ms - a_scale));
+            aa_alloc = 1;
+        }
+        if (b_scale < ms) {
+            bb = _bf_pad_right(b_str, (size_t)(ms - b_scale));
+            bb_alloc = 1;
+        }
+
+        strada_decref(aligned_a);
+        aligned_a = strada_new_str(aa);
+        strada_decref(aligned_b);
+        aligned_b = strada_new_str(bb);
+
+        free(a_str);
+        free(b_str);
+        if (aa_alloc) free(aa);
+        if (bb_alloc) free(bb);
+    }
+
+    if ($sa == $sb) {
+        __C__ {
+            char *a_str = strada_to_str(aligned_a);
+            char *b_str = strada_to_str(aligned_b);
+            char *sum = _bf_add(a_str, b_str);
+            free(a_str);
+            free(b_str);
+            strada_decref(result_m);
+            result_m = strada_new_str(sum);
+            free(sum);
+        }
+        $result_s = $sa;
+    } else {
+        my int $mag_cmp = 0;
+        __C__ {
+            char *a_str = strada_to_str(aligned_a);
+            char *b_str = strada_to_str(aligned_b);
+            int c = _bf_cmp(a_str, b_str);
+            free(a_str);
+            free(b_str);
+            strada_decref(mag_cmp);
+            mag_cmp = strada_new_int((int64_t)c);
+        }
+        if ($mag_cmp == 0) {
+            $result_s = 1;
+            $result_m = "0";
+            $result_e = 0;
+            my hash %r = ();
+            $r{"s"} = $result_s;
+            $r{"m"} = $result_m;
+            $r{"e"} = $result_e;
+            return bless(\%r, "BigFloat");
+        } elsif ($mag_cmp > 0) {
+            __C__ {
+                char *a_str = strada_to_str(aligned_a);
+                char *b_str = strada_to_str(aligned_b);
+                char *diff = _bf_sub(a_str, b_str);
+                free(a_str);
+                free(b_str);
+                strada_decref(result_m);
+                result_m = strada_new_str(diff);
+                free(diff);
+            }
+            $result_s = $sa;
+        } else {
+            __C__ {
+                char *a_str = strada_to_str(aligned_a);
+                char *b_str = strada_to_str(aligned_b);
+                char *diff = _bf_sub(b_str, a_str);
+                free(a_str);
+                free(b_str);
+                strada_decref(result_m);
+                result_m = strada_new_str(diff);
+                free(diff);
+            }
+            $result_s = $sb;
+        }
+    }
+    $result_e = $max_scale;
+
+    # Normalize
+    __C__ {
+        char *m_str = strada_to_str(result_m);
+        int64_t e_val = strada_to_int(result_e);
+        char *nm = _bf_normalize(m_str, &e_val);
+        free(m_str);
+        strada_decref(result_m);
+        result_m = strada_new_str(nm);
+        free(nm);
+        strada_decref(result_e);
+        result_e = strada_new_int(e_val);
+    }
+
+    if ($result_m eq "0") {
+        $result_s = 1;
+    }
+
+    my hash %r = ();
+    $r{"s"} = $result_s;
+    $r{"m"} = $result_m;
+    $r{"e"} = $result_e;
+    return bless(\%r, "BigFloat");
+}
+
+func sub(scalar $self, scalar $other) scalar {
+    my scalar $neg_other = $other->neg();
+    return $self->add($neg_other);
+}
+
+func mul(scalar $self, scalar $other) scalar {
+    my str $ma = $self->{"m"};
+    my str $mb = $other->{"m"};
+
+    if ($ma eq "0" || $mb eq "0") {
+        my hash %r = ();
+        $r{"s"} = 1;
+        $r{"m"} = "0";
+        $r{"e"} = 0;
+        return bless(\%r, "BigFloat");
+    }
+
+    my str $result_m = "";
+    __C__ {
+        char *a_str = strada_to_str(ma);
+        char *b_str = strada_to_str(mb);
+        char *prod = _bf_mul(a_str, b_str);
+        free(a_str);
+        free(b_str);
+        strada_decref(result_m);
+        result_m = strada_new_str(prod);
+        free(prod);
+    }
+
+    my int $result_e = $self->{"e"} + $other->{"e"};
+    my int $result_s = 1;
+    if ($self->{"s"} != $other->{"s"}) {
+        $result_s = -1;
+    }
+
+    # Normalize
+    __C__ {
+        char *m_str = strada_to_str(result_m);
+        int64_t e_val = strada_to_int(result_e);
+        char *nm = _bf_normalize(m_str, &e_val);
+        free(m_str);
+        strada_decref(result_m);
+        result_m = strada_new_str(nm);
+        free(nm);
+        strada_decref(result_e);
+        result_e = strada_new_int(e_val);
+    }
+
+    my hash %r = ();
+    $r{"s"} = $result_s;
+    $r{"m"} = $result_m;
+    $r{"e"} = $result_e;
+    return bless(\%r, "BigFloat");
+}
+
+func div(scalar $self, scalar $other) scalar {
+    return $self->div_precision($other, 20);
+}
+
+func div_precision(scalar $self, scalar $other, int $prec) scalar {
+    my str $ma = $self->{"m"};
+    my str $mb = $other->{"m"};
+
+    if ($mb eq "0") {
+        die("BigFloat: division by zero");
+    }
+    if ($ma eq "0") {
+        my hash %r = ();
+        $r{"s"} = 1;
+        $r{"m"} = "0";
+        $r{"e"} = 0;
+        return bless(\%r, "BigFloat");
+    }
+
+    # We divide mantissa_a * 10^prec by mantissa_b
+    # Result scale = self.scale - other.scale + prec
+    my int $ea = $self->{"e"};
+    my int $eb = $other->{"e"};
+
+    my str $result_m = "";
+    __C__ {
+        char *a_str = strada_to_str(ma);
+        char *b_str = strada_to_str(mb);
+        int64_t precision = strada_to_int(prec);
+
+        /* Extend a with zeros for precision */
+        char *extended = _bf_pad_right(a_str, (size_t)precision);
+        char *q = _bf_divmod(extended, b_str, NULL);
+
+        free(a_str);
+        free(b_str);
+        free(extended);
+        strada_decref(result_m);
+        result_m = strada_new_str(q);
+        free(q);
+    }
+
+    my int $result_e = $ea - $eb + $prec;
+    my int $result_s = 1;
+    if ($self->{"s"} != $other->{"s"} && $result_m ne "0") {
+        $result_s = -1;
+    }
+
+    # Normalize
+    __C__ {
+        char *m_str = strada_to_str(result_m);
+        int64_t e_val = strada_to_int(result_e);
+        char *nm = _bf_normalize(m_str, &e_val);
+        free(m_str);
+        strada_decref(result_m);
+        result_m = strada_new_str(nm);
+        free(nm);
+        strada_decref(result_e);
+        result_e = strada_new_int(e_val);
+    }
+
+    if ($result_m eq "0") {
+        $result_s = 1;
+    }
+
+    my hash %r = ();
+    $r{"s"} = $result_s;
+    $r{"m"} = $result_m;
+    $r{"e"} = $result_e;
+    return bless(\%r, "BigFloat");
+}
+
+func round(scalar $self, int $places) scalar {
+    my str $m = $self->{"m"};
+    my int $scale = $self->{"e"};
+
+    if ($scale <= $places) {
+        return $self->clone();
+    }
+
+    # We need to trim (scale - places) digits from the right of the mantissa
+    my int $trim = $scale - $places;
+    my int $mlen = length($m);
+
+    if ($trim >= $mlen) {
+        # Rounding away all digits
+        return BigFloat::new("0");
+    }
+
+    my str $kept = substr($m, 0, $mlen - $trim);
+    my str $digit_str = substr($m, $mlen - $trim, 1);
+    my int $round_digit = cast_int($digit_str);
+
+    if ($round_digit >= 5) {
+        # Round up: add 1 to kept
+        my str $rounded = "";
+        __C__ {
+            char *k_str = strada_to_str(kept);
+            char *one = "1";
+            char *sum = _bf_add(k_str, one);
+            free(k_str);
+            strada_decref(rounded);
+            rounded = strada_new_str(sum);
+            free(sum);
+        }
+        $kept = $rounded;
+    }
+
+    # Normalize
+    my int $new_scale = $places;
+    my str $norm_m = "";
+    __C__ {
+        char *m_str = strada_to_str(kept);
+        int64_t e_val = strada_to_int(new_scale);
+        char *nm = _bf_normalize(m_str, &e_val);
+        free(m_str);
+        strada_decref(norm_m);
+        norm_m = strada_new_str(nm);
+        free(nm);
+        strada_decref(new_scale);
+        new_scale = strada_new_int(e_val);
+    }
+
+    my hash %r = ();
+    $r{"s"} = $self->{"s"};
+    $r{"m"} = $norm_m;
+    $r{"e"} = $new_scale;
+    if ($norm_m eq "0") {
+        $r{"s"} = 1;
+    }
+    return bless(\%r, "BigFloat");
+}
+
+func floor(scalar $self) scalar {
+    my int $int_val = $self->to_int();
+    # If negative and has fractional part, subtract 1
+    if ($self->{"s"} < 0) {
+        my scalar $check = BigFloat::from_int($int_val);
+        if ($check->is_eq($self) == 0) {
+            $int_val = $int_val - 1;
+        }
+    }
+    return BigFloat::from_int($int_val);
+}
+
+func ceil(scalar $self) scalar {
+    my int $int_val = $self->to_int();
+    # If positive and has fractional part, add 1
+    if ($self->{"s"} > 0 && $self->{"m"} ne "0") {
+        my scalar $check = BigFloat::from_int($int_val);
+        if ($check->is_eq($self) == 0) {
+            $int_val = $int_val + 1;
+        }
+    }
+    return BigFloat::from_int($int_val);
+}
+
+func truncate(scalar $self) scalar {
+    return BigFloat::from_int($self->to_int());
+}
+
+func to_bigint_str(scalar $self) str {
+    return "" . $self->to_int();
+}

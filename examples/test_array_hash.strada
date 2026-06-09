@@ -1,0 +1,115 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_array_hash.strada - Test array size, hash keys/values
+
+func test_array_size() void {
+    say("=== Array Size Test ===");
+    
+    my scalar $arr = split("apple,banana,cherry,date,elderberry", ",");
+    my int $len = size($arr);
+    
+    say("Array has " . $len . " elements");
+    say("");
+}
+
+func test_hash_keys() void {
+    say("=== Hash Keys Test ===");
+    
+    # Create a hash
+    my scalar $person = hash_new();
+    hash_set($person, "name", "Alice");
+    hash_set($person, "age", "30");
+    hash_set($person, "city", "NYC");
+    
+    # Get keys
+    my scalar $key_list = keys($person);
+    my int $key_count = size($key_list);
+    
+    say("Hash has " . $key_count . " keys");
+    say("");
+}
+
+func test_hash_values() void {
+    say("=== Hash Values Test ===");
+    
+    # Create a hash
+    my scalar $config = hash_new();
+    hash_set($config, "host", "localhost");
+    hash_set($config, "port", "8080");
+    hash_set($config, "debug", "true");
+    
+    # Get values
+    my scalar $value_list = values($config);
+    my int $value_count = size($value_list);
+    
+    say("Hash has " . $value_count . " values");
+    say("");
+}
+
+func test_combined() void {
+    say("=== Combined Test ===");
+    
+    # Create hash with data
+    my scalar $inventory = hash_new();
+    hash_set($inventory, "apples", "100");
+    hash_set($inventory, "bananas", "75");
+    hash_set($inventory, "oranges", "50");
+    hash_set($inventory, "grapes", "200");
+    
+    # Get keys and show count
+    my scalar $items = keys($inventory);
+    say("Inventory items: " . size($items));
+    
+    # Get values
+    my scalar $quantities = values($inventory);
+    say("Total entries: " . size($quantities));
+    
+    say("");
+}
+
+func test_empty_structures() void {
+    say("=== Empty Structure Test ===");
+    
+    # Empty array
+    my scalar $empty_arr = split("", ",");
+    say("Empty array size: " . size($empty_arr));
+    
+    # Empty hash
+    my scalar $empty_hash = hash_new();
+    my scalar $empty_keys = keys($empty_hash);
+    say("Empty hash keys: " . size($empty_keys));
+    
+    say("");
+}
+
+func main() int {
+    say("╔════════════════════════════════════════╗");
+    say("║  Array & Hash Functions Test          ║");
+    say("╚════════════════════════════════════════╝");
+    say("");
+    
+    test_array_size();
+    test_hash_keys();
+    test_hash_values();
+    test_combined();
+    test_empty_structures();
+    
+    say("✓ All array and hash tests passed!");
+    
+    return 0;
+}

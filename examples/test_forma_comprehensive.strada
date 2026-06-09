@@ -1,0 +1,83 @@
+use lib "lib";
+use Forma;
+
+func main() int {
+    my hash %vars = ();
+    $vars{"name"} = "alice";
+    $vars{"count"} = 5;
+    $vars{"items"} = ["apple", "banana", "cherry"];
+    $vars{"price"} = 1234567;
+    $vars{"pi"} = 3.14159;
+
+    my hash %user = ();
+    $user{"name"} = "Bob";
+    $user{"age"} = 30;
+    $vars{"user"} = \%user;
+
+    say("=== Forma Comprehensive Test ===");
+    say("");
+
+    # String helpers
+    say("STRING HELPERS:");
+    say("  upper: " . Forma::render_string("{{upper name}}", \%vars));
+    say("  lower: " . Forma::render_string("{{lower name}}", \%vars));
+    say("  capitalize: " . Forma::render_string("{{capitalize name}}", \%vars));
+    say("  truncate: " . Forma::render_string("{{truncate name 3}}", \%vars));
+    say("");
+
+    # Array helpers
+    say("ARRAY HELPERS:");
+    say("  length: " . Forma::render_string("{{length items}}", \%vars));
+    say("  first: " . Forma::render_string("{{first items}}", \%vars));
+    say("  last: " . Forma::render_string("{{last items}}", \%vars));
+    say("  join: " . Forma::render_string("{{join items \", \"}}", \%vars));
+    say("");
+
+    # Number helpers
+    say("NUMBER HELPERS:");
+    say("  commas: " . Forma::render_string("{{commas price}}", \%vars));
+    say("  format_number: " . Forma::render_string("{{format_number pi 2}}", \%vars));
+    say("  plural (1): " . Forma::render_string("{{#set n = 1}}{{plural n \"item\" \"items\"}}", \%vars));
+    say("  plural (5): " . Forma::render_string("{{plural count \"item\" \"items\"}}", \%vars));
+    say("");
+
+    # Pipe syntax with default
+    say("PIPE SYNTAX:");
+    say("  default (missing): " . Forma::render_string("{{missing | default \"N/A\"}}", \%vars));
+    say("  default (exists): " . Forma::render_string("{{name | default \"N/A\"}}", \%vars));
+    say("  upper filter: " . Forma::render_string("{{name | upper}}", \%vars));
+    say("  capitalize filter: " . Forma::render_string("{{name | capitalize}}", \%vars));
+    say("");
+
+    # Range loops
+    say("RANGE LOOPS:");
+    say("  range 1-3: " . Forma::render_string("{{#range 1 3}}[{{.}}]{{/range}}", \%vars));
+    say("");
+
+    # Comparison helpers
+    say("COMPARISON HELPERS:");
+    say("  if_eq (match): " . Forma::render_string("{{#if_eq name \"alice\"}}YES{{else}}NO{{/if_eq}}", \%vars));
+    say("  if_eq (no match): " . Forma::render_string("{{#if_eq name \"bob\"}}YES{{else}}NO{{/if_eq}}", \%vars));
+    say("  if_gt (5 > 3): " . Forma::render_string("{{#if_gt count 3}}YES{{else}}NO{{/if_gt}}", \%vars));
+    say("  if_lt (5 < 10): " . Forma::render_string("{{#if_lt count 10}}YES{{else}}NO{{/if_lt}}", \%vars));
+    say("");
+
+    # Comments
+    say("COMMENTS:");
+    say("  comment stripped: [" . Forma::render_string("before{{!-- hidden --}}after", \%vars) . "]");
+    say("");
+
+    # JSON output
+    say("JSON OUTPUT:");
+    say("  json: " . Forma::render_string("{{json user}}", \%vars));
+    say("");
+
+    # Unless (inverse if)
+    say("UNLESS:");
+    say("  unless (truthy): " . Forma::render_string("{{#unless name}}SHOW{{else}}HIDE{{/unless}}", \%vars));
+    say("  unless (falsy): " . Forma::render_string("{{#unless missing}}SHOW{{else}}HIDE{{/unless}}", \%vars));
+    say("");
+
+    say("=== All Tests Complete ===");
+    return 0;
+}

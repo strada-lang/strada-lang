@@ -1,0 +1,26 @@
+func fibonacci(int $n) int {
+    if ($n <= 1) {
+        return $n;
+    }
+    return fibonacci($n - 1) + fibonacci($n - 2);
+}
+
+func compute_sum(int $n) int {
+    my int $total = 0;
+    my int $i = 0;
+    while ($i < $n) {
+        $total = $total + $i;
+        $i = $i + 1;
+    }
+    return $total;
+}
+
+func main() int {
+    my int $fib = fibonacci(20);
+    say("fib(20) = " . $fib);
+
+    my int $sum = compute_sum(10000);
+    say("sum(10000) = " . $sum);
+
+    return 0;
+}

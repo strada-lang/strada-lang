@@ -1,0 +1,39 @@
+# Unicode normalization (utf8::nfc / nfd / nfkc / nfkd / normalize).
+# Backed by the full UCD 15.0.0 tables in strada_norm_tables.h.
+
+func main() int {
+    my int $pass = 0;
+    my int $fail = 0;
+
+    # NFD: é (U+00E9) decomposes to e + combining acute (U+0065 U+0301)
+    my str $orig = chr(99) . chr(97) . chr(102) . chr(233);  # café
+    my str $nfd  = utf8::nfd($orig);
+    if (length($nfd) == 5) { $pass = $pass + 1; }
+    else { $fail = $fail + 1; say("FAIL: NFD expected 5, got " . length($nfd)); }
+
+    # NFC: round-trip through decompose + recompose
+    my str $nfc = utf8::nfc($nfd);
+    if (length($nfc) == 4 && $nfc eq $orig) { $pass = $pass + 1; }
+    else { $fail = $fail + 1; say("FAIL: NFC round-trip"); }
+
+    # NFKC ligature fold: ﬁ (U+FB01) → fi
+    my str $lig = chr(0xFB01);
+    my str $folded = utf8::nfkc($lig);
+    if ($folded eq "fi") { $pass = $pass + 1; }
+    else { $fail = $fail + 1; say("FAIL: NFKC ligature → '" . $folded . "'"); }
+
+    # Canonical reordering: dot-below (ccc 220) sorts before diaeresis (ccc 230)
+    my str $unordered = chr(97) . chr(0x308) . chr(0x323);
+    my str $reordered = utf8::nfd($unordered);
+    if (ord(substr($reordered, 1, 1)) == 0x323
+        && ord(substr($reordered, 2, 1)) == 0x308) { $pass = $pass + 1; }
+    else { $fail = $fail + 1; say("FAIL: canonical reorder"); }
+
+    # utf8::normalize($s, $form) with form string
+    my str $by_form = utf8::normalize($orig, "NFD");
+    if (length($by_form) == 5) { $pass = $pass + 1; }
+    else { $fail = $fail + 1; say("FAIL: normalize(NFD) len " . length($by_form)); }
+
+    say("normalize: " . $pass . " passed, " . $fail . " failed");
+    return $fail;
+}

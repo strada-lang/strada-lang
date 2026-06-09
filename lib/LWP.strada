@@ -1,0 +1,780 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+=head1 NAME
+
+LWP - Library for WWW access in Strada
+
+=head1 SYNOPSIS
+
+    use lib "lib";
+    use LWP;
+
+    # Simple GET request
+    my hash %response = LWP::get("http://example.com");
+    if ($response{"success"}) {
+        say($response{"content"});
+    }
+
+    # POST request
+    my hash %response = LWP::post("http://example.com/api", "data=value");
+
+    # Just get the content
+    my str $html = LWP::get_content("http://example.com");
+
+=head1 DESCRIPTION
+
+LWP provides functions for making HTTP requests, similar to Perl's
+LWP::UserAgent module. It supports GET, POST, PUT, DELETE, and HEAD requests.
+
+B<Note:> For HTTPS support, use L<LWP_SSL> or the L<ssl> module.
+
+=head1 RESPONSE HASH
+
+All request functions return a hash with:
+
+=over 4
+
+=item B<success> - 1 if status is 2xx, 0 otherwise
+
+=item B<status> - HTTP status code (200, 404, etc.)
+
+=item B<reason> - HTTP reason phrase ("OK", "Not Found", etc.)
+
+=item B<content> - Response body
+
+=item B<headers> - Hash reference of response headers (lowercase keys)
+
+=item B<error> - Error message if request failed
+
+=back
+
+=head1 REQUEST FUNCTIONS
+
+=head2 get($url)
+
+Make a GET request.
+
+    my hash %resp = LWP::get("http://api.example.com/users");
+    if ($resp{"success"}) {
+        my scalar $data = JSON::decode($resp{"content"});
+    }
+
+=head2 get_with_options($url, %options)
+
+GET request with custom options (headers, user agent).
+
+    my hash %opts = ();
+    $opts{"user_agent"} = "MyApp/1.0";
+    $opts{"headers"} = { "Authorization" => "Bearer token123" };
+    my hash %resp = LWP::get_with_options($url, %opts);
+
+=head2 post($url, $data)
+
+Make a POST request with form data.
+
+    my hash %resp = LWP::post("http://api.example.com/login",
+        "username=alice&password=secret");
+
+=head2 post_with_options($url, $data, %options)
+
+POST with custom options.
+
+=head2 post_form($url, %form_data)
+
+POST form data from a hash (automatically URL-encoded).
+
+    my hash %form = ();
+    $form{"username"} = "alice";
+    $form{"password"} = "secret";
+    my hash %resp = LWP::post_form("http://example.com/login", %form);
+
+=head2 put($url, $data)
+
+Make a PUT request.
+
+=head2 put_with_options($url, $data, %options)
+
+PUT with custom options.
+
+=head2 patch($url, $data)
+
+Make a PATCH request (partial update).
+
+=head2 patch_with_options($url, $data, %options)
+
+PATCH with custom options.
+
+=head2 delete_req($url)
+
+Make a DELETE request.
+
+=head2 delete_with_options($url, %options)
+
+DELETE with custom options.
+
+=head2 head($url)
+
+Make a HEAD request (get headers only).
+
+=head2 head_with_options($url, %options)
+
+HEAD with custom options.
+
+=head2 options($url)
+
+Make an OPTIONS request (get supported methods).
+
+=head2 options_with_options($url, %options)
+
+OPTIONS with custom options.
+
+=head1 LOW-LEVEL REQUEST
+
+=head2 do_request($method, $url, $body, %options)
+
+Make an HTTP request with full control over method, body, and options.
+All other request functions are wrappers around this.
+
+B<Parameters:>
+
+=over 4
+
+=item B<$method> - HTTP method string ("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", or any custom method)
+
+=item B<$url> - Full URL including scheme, host, port, path, and query
+
+=item B<$body> - Request body (empty string for no body)
+
+=item B<%options> - Hash with optional keys:
+
+=over 4
+
+=item B<user_agent> - Custom User-Agent string (default: "Strada-LWP/1.0")
+
+=item B<headers> - Hash reference of custom headers
+
+=back
+
+=back
+
+Returns a response hash (see RESPONSE HASH above).
+
+    # Custom method
+    my hash %opts = ();
+    $opts{"headers"} = { "Content-Type" => "application/json" };
+    my hash %resp = LWP::do_request("PATCH", "http://api.example.com/item/1",
+        JSON::encode({ "status" => "active" }), %opts);
+
+    # WebDAV methods
+    my hash %resp = LWP::do_request("PROPFIND", "http://dav.example.com/files/", "", %opts);
+
+=head1 CONVENIENCE FUNCTIONS
+
+=head2 get_content($url)
+
+Fetch URL and return just the content (empty string on error).
+
+    my str $html = LWP::get_content("http://example.com");
+
+=head2 is_reachable($url)
+
+Check if a URL is reachable (HEAD request).
+
+    if (LWP::is_reachable("http://api.example.com")) {
+        say("API is up!");
+    }
+
+=head2 get_header(%response, $name)
+
+Get a response header value (case-insensitive).
+
+    my str $type = LWP::get_header(%resp, "Content-Type");
+
+=head1 URL FUNCTIONS
+
+=head2 parse_url($url)
+
+Parse a URL into components (scheme, host, port, path, query).
+
+    my hash %parts = LWP::parse_url("http://example.com:8080/path?q=test");
+    # $parts{"host"} = "example.com"
+    # $parts{"port"} = 8080
+    # $parts{"path"} = "/path"
+    # $parts{"query"} = "q=test"
+
+=head2 url_encode($string)
+
+URL-encode a string.
+
+    my str $safe = LWP::url_encode("hello world!");
+    # "hello%20world%21"
+
+=head2 url_decode($string)
+
+URL-decode a string.
+
+=head2 build_query(%params)
+
+Build a query string from a hash.
+
+    my hash %p = ();
+    $p{"name"} = "Alice";
+    $p{"city"} = "New York";
+    my str $qs = LWP::build_query(%p);
+    # "name=Alice&city=New%20York"
+
+=head1 USERAGENT CLASS
+
+For more control, use the UserAgent functions:
+
+    my hash %ua = LWP::UserAgent_new();
+    LWP::UserAgent_set_agent(%ua, "MyApp/2.0");
+    LWP::UserAgent_set_header(%ua, "Accept", "application/json");
+
+    my hash %resp = LWP::UserAgent_get(%ua, $url);
+    my hash %resp = LWP::UserAgent_post(%ua, $url, $data);
+
+=head1 EXAMPLE
+
+    use lib "lib";
+    use LWP;
+    use JSON;
+
+    # Fetch JSON API
+    my hash %resp = LWP::get("http://api.example.com/users");
+    if ($resp{"success"}) {
+        my scalar $users = JSON::decode($resp{"content"});
+        foreach my scalar $user (@{$users}) {
+            say($user->{"name"});
+        }
+    } else {
+        say("Error: " . $resp{"error"});
+    }
+
+    # POST JSON data
+    my hash %opts = ();
+    $opts{"headers"} = { "Content-Type" => "application/json" };
+    my str $json = JSON::encode({ "name" => "Bob" });
+    my hash %resp = LWP::post_with_options($url, $json, %opts);
+
+=head1 SEE ALSO
+
+L<LWP_SSL>, L<ssl>, L<JSON>
+
+=cut
+
+package LWP;
+
+# Parse a URL into components
+# Returns hash with: scheme, host, port, path, query
+func parse_url(str $url) hash {
+    my hash %result = ();
+
+    # Default values
+    $result{"scheme"} = "http";
+    $result{"host"} = "";
+    $result{"port"} = 80;
+    $result{"path"} = "/";
+    $result{"query"} = "";
+
+    my str $remaining = $url;
+
+    # Extract scheme
+    my int $scheme_end = index($remaining, "://");
+    if ($scheme_end > 0) {
+        $result{"scheme"} = substr($remaining, 0, $scheme_end);
+        $remaining = substr($remaining, $scheme_end + 3, length($remaining) - $scheme_end - 3);
+
+        if ($result{"scheme"} eq "https") {
+            $result{"port"} = 443;
+        }
+    }
+
+    # Extract host and port
+    my int $path_start = index($remaining, "/");
+    my str $host_part = "";
+    if ($path_start < 0) {
+        $host_part = $remaining;
+        $remaining = "/";
+    } else {
+        $host_part = substr($remaining, 0, $path_start);
+        $remaining = substr($remaining, $path_start, length($remaining) - $path_start);
+    }
+
+    # Check for port in host
+    my int $port_sep = index($host_part, ":");
+    if ($port_sep > 0) {
+        $result{"host"} = substr($host_part, 0, $port_sep);
+        my str $port_str = substr($host_part, $port_sep + 1, length($host_part) - $port_sep - 1);
+        $result{"port"} = cast_int($port_str);
+    } else {
+        $result{"host"} = $host_part;
+    }
+
+    # Extract path and query
+    my int $query_start = index($remaining, "?");
+    if ($query_start >= 0) {
+        $result{"path"} = substr($remaining, 0, $query_start);
+        $result{"query"} = substr($remaining, $query_start + 1, length($remaining) - $query_start - 1);
+    } else {
+        $result{"path"} = $remaining;
+    }
+
+    if (length($result{"path"}) == 0) {
+        $result{"path"} = "/";
+    }
+
+    return %result;
+}
+
+# URL encode a string
+func url_encode(str $s) str {
+    my str $result = "";
+    my int $i = 0;
+    while ($i < length($s)) {
+        my str $c = substr($s, $i, 1);
+        my int $code = ord($c);
+
+        # Unreserved characters (RFC 3986)
+        if (($code >= 65 && $code <= 90) ||   # A-Z
+            ($code >= 97 && $code <= 122) ||  # a-z
+            ($code >= 48 && $code <= 57) ||   # 0-9
+            $c eq "-" || $c eq "_" || $c eq "." || $c eq "~") {
+            $result = $result . $c;
+        } else {
+            # Percent encode
+            my int $hi = cast_int($code / 16);
+            my int $lo = $code % 16;
+            my str $hex = "%";
+            if ($hi < 10) { $hex = $hex . chr(48 + $hi); }
+            else { $hex = $hex . chr(55 + $hi); }
+            if ($lo < 10) { $hex = $hex . chr(48 + $lo); }
+            else { $hex = $hex . chr(55 + $lo); }
+            $result = $result . $hex;
+        }
+        $i = $i + 1;
+    }
+    return $result;
+}
+
+# URL decode a string
+func url_decode(str $s) str {
+    my str $result = "";
+    my int $i = 0;
+    while ($i < length($s)) {
+        my str $c = substr($s, $i, 1);
+        if ($c eq "%" && $i + 2 < length($s)) {
+            my str $hex = substr($s, $i + 1, 2);
+            my int $val = 0;
+            my int $j = 0;
+            while ($j < 2) {
+                my str $h = substr($hex, $j, 1);
+                my int $hc = ord($h);
+                $val = $val * 16;
+                if ($hc >= 48 && $hc <= 57) { $val = $val + ($hc - 48); }
+                elsif ($hc >= 65 && $hc <= 70) { $val = $val + ($hc - 55); }
+                elsif ($hc >= 97 && $hc <= 102) { $val = $val + ($hc - 87); }
+                $j = $j + 1;
+            }
+            $result = $result . chr($val);
+            $i = $i + 3;
+        } elsif ($c eq "+") {
+            $result = $result . " ";
+            $i = $i + 1;
+        } else {
+            $result = $result . $c;
+            $i = $i + 1;
+        }
+    }
+    return $result;
+}
+
+# Build query string from hash
+func build_query(hash %params) str {
+    my str $result = "";
+    my array @keys = keys(%params);
+    my int $i = 0;
+    while ($i < scalar(@keys)) {
+        my str $key = $keys[$i];
+        if ($i > 0) {
+            $result = $result . "&";
+        }
+        $result = $result . LWP::url_encode($key) . "=" . LWP::url_encode($params{$key});
+        $i = $i + 1;
+    }
+    return $result;
+}
+
+# Parse response headers
+func parse_headers(str $header_block) hash {
+    my hash %headers = ();
+    my array @lines = split("\r\n", $header_block);
+
+    my int $i = 0;
+    while ($i < scalar(@lines)) {
+        my str $line = $lines[$i];
+        my int $colon = index($line, ":");
+        if ($colon > 0) {
+            my str $name = substr($line, 0, $colon);
+            my str $value = substr($line, $colon + 1, length($line) - $colon - 1);
+            # Trim leading space from value
+            while (length($value) > 0 && substr($value, 0, 1) eq " ") {
+                $value = substr($value, 1, length($value) - 1);
+            }
+            # Store lowercase header name for easy lookup
+            $headers{lc($name)} = $value;
+        }
+        $i = $i + 1;
+    }
+
+    return %headers;
+}
+
+# Parse HTTP response
+func parse_response(str $raw) hash {
+    my hash %response = ();
+    $response{"success"} = 0;
+    $response{"status"} = 0;
+    $response{"reason"} = "";
+    $response{"content"} = "";
+
+    # Find header/body separator
+    my int $sep = index($raw, "\r\n\r\n");
+    if ($sep < 0) {
+        $response{"error"} = "Invalid HTTP response: no header separator";
+        return %response;
+    }
+
+    my str $header_section = substr($raw, 0, $sep);
+    my str $body = substr($raw, $sep + 4, length($raw) - $sep - 4);
+
+    # Parse status line
+    my int $first_line_end = index($header_section, "\r\n");
+    my str $status_line = "";
+    my str $headers_text = "";
+    if ($first_line_end > 0) {
+        $status_line = substr($header_section, 0, $first_line_end);
+        $headers_text = substr($header_section, $first_line_end + 2, length($header_section) - $first_line_end - 2);
+    } else {
+        $status_line = $header_section;
+    }
+
+    # Parse "HTTP/1.1 200 OK"
+    my array @status_parts = split(" ", $status_line);
+    if (scalar(@status_parts) >= 2) {
+        $response{"protocol"} = $status_parts[0];
+        $response{"status"} = cast_int($status_parts[1]);
+        if (scalar(@status_parts) >= 3) {
+            # Join remaining parts for reason phrase
+            my str $reason = "";
+            my int $i = 2;
+            while ($i < scalar(@status_parts)) {
+                if ($i > 2) { $reason = $reason . " "; }
+                $reason = $reason . $status_parts[$i];
+                $i = $i + 1;
+            }
+            $response{"reason"} = $reason;
+        }
+    }
+
+    # Parse headers
+    my hash %hdrs = LWP::parse_headers($headers_text);
+    $response{"headers"} = \%hdrs;
+
+    # Set content
+    $response{"content"} = $body;
+
+    # Determine success (2xx status codes)
+    my int $status = $response{"status"};
+    if ($status >= 200 && $status < 300) {
+        $response{"success"} = 1;
+    }
+
+    return %response;
+}
+
+# Internal: read HTTP response from socket
+func read_response(scalar $sock) str {
+    my str $response = "";
+    my int $max_reads = 1000;
+    my int $reads = 0;
+
+    while ($reads < $max_reads) {
+        my str $chunk = core::socket_recv($sock, 8192);
+        if (!defined($chunk) || length($chunk) == 0) {
+            break;
+        }
+        $response = $response . $chunk;
+        $reads = $reads + 1;
+
+        # Check if we have complete response
+        # For now, simple heuristic - if we got headers and some content
+        my int $header_end = index($response, "\r\n\r\n");
+        if ($header_end > 0) {
+            # Check Content-Length if present
+            my str $headers_part = substr($response, 0, $header_end);
+            my str $headers_lower = lc($headers_part);
+            my int $cl_pos = index($headers_lower, "content-length:");
+            if ($cl_pos >= 0) {
+                my int $cl_end = index($headers_part, "\r\n", $cl_pos);
+                if ($cl_end < 0) { $cl_end = length($headers_part); }
+                my str $cl_line = substr($headers_part, $cl_pos + 15, $cl_end - $cl_pos - 15);
+                # Trim spaces
+                while (length($cl_line) > 0 && substr($cl_line, 0, 1) eq " ") {
+                    $cl_line = substr($cl_line, 1, length($cl_line) - 1);
+                }
+                my int $content_length = cast_int($cl_line);
+                my int $body_start = $header_end + 4;
+                my int $body_len = length($response) - $body_start;
+                if ($body_len >= $content_length) {
+                    break;
+                }
+            }
+        }
+    }
+
+    return $response;
+}
+
+# Internal: Make HTTP request
+func do_request(str $method, str $url, str $body, hash %options) hash {
+    my hash %url_parts = LWP::parse_url($url);
+
+    my str $host = $url_parts{"host"};
+    my int $port = $url_parts{"port"};
+    my str $path = $url_parts{"path"};
+    my str $query = $url_parts{"query"};
+    my str $scheme = $url_parts{"scheme"};
+
+    if (length($query) > 0) {
+        $path = $path . "?" . $query;
+    }
+
+    # Build request
+    my str $request = $method . " " . $path . " HTTP/1.1\r\n";
+    $request = $request . "Host: " . $host . "\r\n";
+
+    # User-Agent
+    my str $ua = "Strada-LWP/1.0";
+    if (defined($options{"user_agent"})) {
+        $ua = $options{"user_agent"};
+    }
+    $request = $request . "User-Agent: " . $ua . "\r\n";
+
+    # Connection
+    $request = $request . "Connection: close\r\n";
+
+    # Custom headers
+    if (defined($options{"headers"})) {
+        my scalar $custom_headers = $options{"headers"};
+        my array @hkeys = keys($custom_headers);
+        my int $i = 0;
+        while ($i < scalar(@hkeys)) {
+            my str $hname = $hkeys[$i];
+            $request = $request . $hname . ": " . $custom_headers->{$hname} . "\r\n";
+            $i = $i + 1;
+        }
+    }
+
+    # Body for POST/PUT
+    if (length($body) > 0) {
+        if (!defined($options{"headers"}) || !defined($options{"headers"}->{"Content-Type"})) {
+            $request = $request . "Content-Type: application/x-www-form-urlencoded\r\n";
+        }
+        $request = $request . "Content-Length: " . length($body) . "\r\n";
+    }
+
+    $request = $request . "\r\n";
+
+    if (length($body) > 0) {
+        $request = $request . $body;
+    }
+
+    # Connect and send
+    my hash %response = ();
+    $response{"success"} = 0;
+
+    if ($scheme eq "https") {
+        # HTTPS requires the SSL library to be linked
+        # Use: use lib "lib/ssl"; use SSL; and compile with -lssl -lcrypto
+        $response{"error"} = "HTTPS not supported - use HTTP or link SSL library";
+        return %response;
+    }
+
+    # Plain HTTP
+    my scalar $sock = core::socket_client($host, $port);
+    if (!defined($sock)) {
+        $response{"error"} = "Connection failed to " . $host . ":" . $port;
+        return %response;
+    }
+
+    core::socket_send($sock, $request);
+
+    my str $raw_response = LWP::read_response($sock);
+    core::socket_close($sock);
+
+    return LWP::parse_response($raw_response);
+}
+
+# GET request
+func get(str $url) hash {
+    my hash %empty = ();
+    return LWP::do_request("GET", $url, "", %empty);
+}
+
+# GET request with options
+func get_with_options(str $url, hash %options) hash {
+    return LWP::do_request("GET", $url, "", %options);
+}
+
+# POST request
+func post(str $url, str $data) hash {
+    my hash %empty = ();
+    return LWP::do_request("POST", $url, $data, %empty);
+}
+
+# POST request with options
+func post_with_options(str $url, str $data, hash %options) hash {
+    return LWP::do_request("POST", $url, $data, %options);
+}
+
+# POST form data (from hash)
+func post_form(str $url, hash %form_data) hash {
+    my str $body = LWP::build_query(%form_data);
+    my hash %empty = ();
+    return LWP::do_request("POST", $url, $body, %empty);
+}
+
+# PUT request
+func put(str $url, str $data) hash {
+    my hash %empty = ();
+    return LWP::do_request("PUT", $url, $data, %empty);
+}
+
+# PUT request with options
+func put_with_options(str $url, str $data, hash %options) hash {
+    return LWP::do_request("PUT", $url, $data, %options);
+}
+
+# DELETE request
+func delete_req(str $url) hash {
+    my hash %empty = ();
+    return LWP::do_request("DELETE", $url, "", %empty);
+}
+
+# DELETE request with options
+func delete_with_options(str $url, hash %options) hash {
+    return LWP::do_request("DELETE", $url, "", %options);
+}
+
+# PATCH request
+func patch(str $url, str $data) hash {
+    my hash %empty = ();
+    return LWP::do_request("PATCH", $url, $data, %empty);
+}
+
+# PATCH request with options
+func patch_with_options(str $url, str $data, hash %options) hash {
+    return LWP::do_request("PATCH", $url, $data, %options);
+}
+
+# OPTIONS request
+func options(str $url) hash {
+    my hash %empty = ();
+    return LWP::do_request("OPTIONS", $url, "", %empty);
+}
+
+# OPTIONS request with options
+func options_with_options(str $url, hash %options) hash {
+    return LWP::do_request("OPTIONS", $url, "", %options);
+}
+
+# HEAD request (get headers only)
+func head(str $url) hash {
+    my hash %empty = ();
+    return LWP::do_request("HEAD", $url, "", %empty);
+}
+
+# HEAD request with options
+func head_with_options(str $url, hash %options) hash {
+    return LWP::do_request("HEAD", $url, "", %options);
+}
+
+# Simple content fetch (returns just the content string or empty on error)
+func get_content(str $url) str {
+    my hash %resp = LWP::get($url);
+    if ($resp{"success"}) {
+        return $resp{"content"};
+    }
+    return "";
+}
+
+# Check if URL is reachable
+func is_reachable(str $url) int {
+    my hash %resp = LWP::head($url);
+    return $resp{"success"};
+}
+
+# Get response header value
+func get_header(hash %response, str $name) str {
+    if (!defined($response{"headers"})) {
+        return "";
+    }
+    my scalar $headers = $response{"headers"};
+    my str $lc_name = lc($name);
+    if (defined($headers->{$lc_name})) {
+        return $headers->{$lc_name};
+    }
+    return "";
+}
+
+# UserAgent class for more complex usage
+func UserAgent_new() hash {
+    my hash %ua = ();
+    $ua{"user_agent"} = "Strada-LWP/1.0";
+    $ua{"timeout"} = 30;
+    $ua{"default_headers"} = {};
+    return %ua;
+}
+
+func UserAgent_set_agent(hash %ua, str $agent) void {
+    $ua{"user_agent"} = $agent;
+}
+
+func UserAgent_set_timeout(hash %ua, int $timeout) void {
+    $ua{"timeout"} = $timeout;
+}
+
+func UserAgent_set_header(hash %ua, str $name, str $value) void {
+    my scalar $headers = $ua{"default_headers"};
+    $headers->{$name} = $value;
+}
+
+func UserAgent_get(hash %ua, str $url) hash {
+    my hash %options = ();
+    $options{"user_agent"} = $ua{"user_agent"};
+    $options{"headers"} = $ua{"default_headers"};
+    return LWP::do_request("GET", $url, "", %options);
+}
+
+func UserAgent_post(hash %ua, str $url, str $data) hash {
+    my hash %options = ();
+    $options{"user_agent"} = $ua{"user_agent"};
+    $options{"headers"} = $ua{"default_headers"};
+    return LWP::do_request("POST", $url, $data, %options);
+}

@@ -1,0 +1,36 @@
+/* Test regex literal as function argument (split, grep, etc.) */
+
+func main() int {
+    my int $pass = 0;
+    my int $fail = 0;
+
+    # split with regex pattern
+    my array @f1 = split(/,/, "a,b,c");
+    if (join("|", @f1) eq "a|b|c") { $pass += 1; } else { $fail += 1; say("FAIL: split /,/"); }
+
+    # split with regex pattern containing special chars
+    my array @f2 = split(/\s+/, "hello   world   foo");
+    if (scalar(@f2) == 3) { $pass += 1; } else { $fail += 1; say("FAIL: split /\\s+/ count"); }
+    if ($f2[0] eq "hello") { $pass += 1; } else { $fail += 1; say("FAIL: split /\\s+/ first"); }
+    if ($f2[2] eq "foo") { $pass += 1; } else { $fail += 1; say("FAIL: split /\\s+/ last"); }
+
+    # split with simple string (still works)
+    my array @f3 = split(",", "x,y,z");
+    if (join("|", @f3) eq "x|y|z") { $pass += 1; } else { $fail += 1; say("FAIL: split string"); }
+
+    # split with regex pipe
+    my array @f4 = split(/[;,]/, "a,b;c,d");
+    if (scalar(@f4) == 4) { $pass += 1; } else { $fail += 1; say("FAIL: split /[;,]/ count"); }
+    if ($f4[2] eq "c") { $pass += 1; } else { $fail += 1; say("FAIL: split /[;,]/ third"); }
+
+    # regex in other contexts (if it compiles, it works)
+    my str $text = "hello world";
+    if ($text =~ /world/) { $pass += 1; } else { $fail += 1; say("FAIL: regex match"); }
+
+    say("Passed: " . $pass);
+    say("Failed: " . $fail);
+    if ($fail == 0) {
+        say("All regex split tests passed!");
+    }
+    return $fail;
+}

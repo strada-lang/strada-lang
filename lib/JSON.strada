@@ -1,0 +1,557 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+=head1 NAME
+
+JSON - JSON encoding and decoding for Strada
+
+=head1 SYNOPSIS
+
+    use lib "lib";
+    use JSON;
+
+    # Encode Strada data to JSON
+    my str $json = JSON::encode(\%data);
+
+    # Encode with sorted keys (canonical)
+    my str $json_sorted = JSON::encode_opts(\%data, { "canonical" => 1 });
+
+    # Decode JSON to Strada data structure
+    my scalar $data = JSON::decode($json);
+
+=head1 DESCRIPTION
+
+JSON provides functions for encoding Strada data structures (hashes, arrays,
+scalars) to JSON strings and decoding JSON strings back to Strada data.
+
+The encoder handles:
+
+=over 4
+
+=item * Hash references -> JSON objects
+
+=item * Array references -> JSON arrays
+
+=item * Strings -> JSON strings (with proper escaping)
+
+=item * Numbers -> JSON numbers
+
+=item * C<undef> -> JSON null
+
+=back
+
+=head1 FUNCTIONS
+
+=head2 encode($data)
+
+Encode a Strada data structure to a JSON string.
+
+    my hash %user = ();
+    $user{"name"} = "Alice";
+    $user{"age"} = 30;
+    my str $json = JSON::encode(\%user);
+    # {"name":"Alice","age":30}
+
+=head2 encode_opts($data, $options)
+
+Encode with options. Currently supports:
+
+=over 4
+
+=item B<canonical> - Sort hash keys alphabetically for deterministic output
+
+=back
+
+    my str $json = JSON::encode_opts(\%data, { "canonical" => 1 });
+
+=head2 decode($json)
+
+Decode a JSON string to a Strada data structure.
+
+    my str $json = '{"name":"Bob","scores":[85,90,78]}';
+    my scalar $data = JSON::decode($json);
+    say($data->{"name"});           # Bob
+    say($data->{"scores"}->[0]);    # 85
+
+Returns C<undef> for invalid JSON.
+
+=head1 HELPER FUNCTIONS
+
+=head2 escape_str($s)
+
+Escape a string for JSON output (handles quotes, backslashes, newlines, etc.)
+
+=head2 looks_like_num($s)
+
+Check if a string looks like a number.
+
+=head1 EXAMPLE
+
+    use lib "lib";
+    use JSON;
+
+    # Build a complex structure
+    my hash %config = ();
+    $config{"debug"} = 1;
+    $config{"servers"} = ["web1", "web2", "web3"];
+    $config{"database"} = { "host" => "localhost", "port" => 5432 };
+
+    # Encode to JSON
+    my str $json = JSON::encode(\%config);
+    say($json);
+
+    # Decode back
+    my scalar $parsed = JSON::decode($json);
+    say($parsed->{"database"}->{"host"});  # localhost
+
+=head1 SEE ALSO
+
+L<YAML>
+
+=cut
+
+package JSON;
+version "1.0.0";
+
+# ============================================================
+# JSON Encoding
+# ============================================================
+
+# Escape a string for JSON output
+func escape_str(str $s) str {
+    my str $result = "";
+    my int $len = length($s);
+    my int $i = 0;
+
+    while ($i < $len) {
+        my str $ch = substr($s, $i, 1);
+        my int $code = ord($ch);
+
+        if ($ch eq "\"") {
+            $result = $result . "\\\"";
+        } elsif ($ch eq "\\") {
+            $result = $result . "\\\\";
+        } elsif ($code == ord("\n")) {
+            $result = $result . "\\n";
+        } elsif ($code == ord("\r")) {
+            $result = $result . "\\r";
+        } elsif ($code == ord("\t")) {
+            $result = $result . "\\t";
+        } else {
+            $result = $result . $ch;
+        }
+
+        $i = $i + 1;
+    }
+
+    return $result;
+}
+
+# Check if a string looks like a number
+func looks_like_num(str $s) int {
+    my int $len = length($s);
+    if ($len == 0) {
+        return 0;
+    }
+    my int $i = 0;
+    my str $ch = substr($s, 0, 1);
+    if ($ch eq "-") {
+        $i = 1;
+        if ($len == 1) {
+            return 0;
+        }
+    }
+    my int $has_dot = 0;
+    my int $has_digit = 0;
+    while ($i < $len) {
+        $ch = substr($s, $i, 1);
+        if ($ch ge "0" && $ch le "9") {
+            $has_digit = 1;
+        } elsif ($ch eq "." && !$has_dot) {
+            $has_dot = 1;
+        } elsif ($ch eq "e" || $ch eq "E") {
+            # Allow exponent notation
+            $i = $i + 1;
+            if ($i < $len) {
+                $ch = substr($s, $i, 1);
+                if ($ch eq "+" || $ch eq "-") {
+                    $i = $i + 1;
+                }
+            }
+        } else {
+            return 0;
+        }
+        $i = $i + 1;
+    }
+    return $has_digit;
+}
+
+# Encode any value to JSON
+func do_encode(scalar $value, int $canonical, int $depth) str {
+    # Prevent infinite recursion
+    if ($depth > 100) {
+        return "null";
+    }
+
+    # Handle undef -> null
+    if (!defined($value)) {
+        return "null";
+    }
+
+    # Check what type of reference it is
+    my str $rtype = ref($value);
+
+    if ($rtype eq "HASH") {
+        # Hash reference
+        my str $result = "{";
+        my array @k = keys($value);
+        my int $len = size(@k);
+
+        if ($canonical) {
+            @k = sort(@k);
+        }
+
+        my int $i = 0;
+        while ($i < $len) {
+            if ($i > 0) {
+                $result = $result . ",";
+            }
+            my str $key = $k[$i];
+            $result = $result . "\"" . JSON::escape_str($key) . "\":";
+            $result = $result . JSON::do_encode($value->{$key}, $canonical, $depth + 1);
+            $i = $i + 1;
+        }
+        return $result . "}";
+    }
+
+    if ($rtype eq "ARRAY") {
+        # Array reference
+        my str $result = "[";
+        my int $len = size($value);
+        my int $i = 0;
+
+        while ($i < $len) {
+            if ($i > 0) {
+                $result = $result . ",";
+            }
+            $result = $result . JSON::do_encode($value->[$i], $canonical, $depth + 1);
+            $i = $i + 1;
+        }
+        return $result . "]";
+    }
+
+    if ($rtype eq "REF") {
+        # Scalar reference - dereference and encode
+        return JSON::do_encode(deref($value), $canonical, $depth + 1);
+    }
+
+    # Non-reference: could be int, num, or str
+    # Convert to string and check if it looks like a number
+    my str $str_val = "" . $value;
+
+    # Check if it looks like a number
+    if (JSON::looks_like_num($str_val)) {
+        return $str_val;
+    }
+
+    # It's a string - escape and quote
+    return "\"" . JSON::escape_str($str_val) . "\"";
+}
+
+# Public encode function - simple version
+func encode(scalar $value) str {
+    return JSON::do_encode($value, 0, 0);
+}
+
+# Public encode function with options
+func encode_opts(scalar $value, scalar $options) str {
+    my int $canonical = 0;
+
+    if (defined($options)) {
+        if (defined($options->{"canonical"})) {
+            $canonical = $options->{"canonical"};
+        }
+    }
+
+    return JSON::do_encode($value, $canonical, 0);
+}
+
+# ============================================================
+# JSON Decoding
+# ============================================================
+
+# Parser state
+func make_parser(str $json) scalar {
+    return {
+        "json" => $json,
+        "pos" => 0,
+        "len" => length($json)
+    };
+}
+
+# Get current character without advancing
+func peek(scalar $p) str {
+    if ($p->{"pos"} >= $p->{"len"}) {
+        return "";
+    }
+    return substr($p->{"json"}, $p->{"pos"}, 1);
+}
+
+# Get current character and advance
+func advance(scalar $p) str {
+    if ($p->{"pos"} >= $p->{"len"}) {
+        return "";
+    }
+    my str $ch = substr($p->{"json"}, $p->{"pos"}, 1);
+    $p->{"pos"} = $p->{"pos"} + 1;
+    return $ch;
+}
+
+# Skip whitespace
+func skip_ws(scalar $p) void {
+    while ($p->{"pos"} < $p->{"len"}) {
+        my str $ch = JSON::peek($p);
+        if ($ch eq " " || $ch eq "\t" || $ch eq "\n" || $ch eq "\r") {
+            JSON::advance($p);
+        } else {
+            return;
+        }
+    }
+}
+
+# Parse a JSON string
+func parse_str(scalar $p) str {
+    my str $result = "";
+
+    # Skip opening quote
+    JSON::advance($p);
+
+    while ($p->{"pos"} < $p->{"len"}) {
+        my str $ch = JSON::advance($p);
+
+        if ($ch eq "\"") {
+            return $result;
+        }
+
+        if ($ch eq "\\") {
+            my str $escaped = JSON::advance($p);
+            if ($escaped eq "\"") {
+                $result = $result . "\"";
+            } elsif ($escaped eq "\\") {
+                $result = $result . "\\";
+            } elsif ($escaped eq "/") {
+                $result = $result . "/";
+            } elsif ($escaped eq "n") {
+                $result = $result . "\n";
+            } elsif ($escaped eq "r") {
+                $result = $result . "\r";
+            } elsif ($escaped eq "t") {
+                $result = $result . "\t";
+            } else {
+                $result = $result . $escaped;
+            }
+        } else {
+            $result = $result . $ch;
+        }
+    }
+
+    return $result;
+}
+
+# Check if character is a digit
+func is_digit(str $ch) int {
+    return ($ch ge "0" && $ch le "9");
+}
+
+# Parse a JSON number
+func parse_num(scalar $p) scalar {
+    my str $num_str = "";
+
+    # Handle negative
+    if (JSON::peek($p) eq "-") {
+        $num_str = $num_str . JSON::advance($p);
+    }
+
+    # Integer part
+    while ($p->{"pos"} < $p->{"len"} && JSON::is_digit(JSON::peek($p))) {
+        $num_str = $num_str . JSON::advance($p);
+    }
+
+    # Decimal part
+    if (JSON::peek($p) eq ".") {
+        $num_str = $num_str . JSON::advance($p);
+        while ($p->{"pos"} < $p->{"len"} && JSON::is_digit(JSON::peek($p))) {
+            $num_str = $num_str . JSON::advance($p);
+        }
+    }
+
+    # Exponent part
+    my str $ch = JSON::peek($p);
+    if ($ch eq "e" || $ch eq "E") {
+        $num_str = $num_str . JSON::advance($p);
+        $ch = JSON::peek($p);
+        if ($ch eq "+" || $ch eq "-") {
+            $num_str = $num_str . JSON::advance($p);
+        }
+        while ($p->{"pos"} < $p->{"len"} && JSON::is_digit(JSON::peek($p))) {
+            $num_str = $num_str . JSON::advance($p);
+        }
+    }
+
+    return $num_str + 0;
+}
+
+# Check if string matches keyword at current position
+func match_kw(scalar $p, str $keyword) int {
+    my int $klen = length($keyword);
+    my int $pos = $p->{"pos"};
+
+    if ($pos + $klen > $p->{"len"}) {
+        return 0;
+    }
+
+    my str $sub = substr($p->{"json"}, $pos, $klen);
+    if ($sub eq $keyword) {
+        $p->{"pos"} = $pos + $klen;
+        return 1;
+    }
+
+    return 0;
+}
+
+# Parse any JSON value (recursive)
+func do_parse(scalar $p, int $depth) scalar {
+    if ($depth > 100) {
+        return undef;
+    }
+
+    JSON::skip_ws($p);
+
+    my str $ch = JSON::peek($p);
+
+    # String
+    if ($ch eq "\"") {
+        return JSON::parse_str($p);
+    }
+
+    # Array - return as array reference
+    if ($ch eq "[") {
+        JSON::advance($p);
+        JSON::skip_ws($p);
+
+        my scalar $result = [];
+
+        if (JSON::peek($p) eq "]") {
+            JSON::advance($p);
+            return $result;
+        }
+
+        while (1) {
+            JSON::skip_ws($p);
+            my scalar $val = JSON::do_parse($p, $depth + 1);
+            push($result, $val);
+
+            JSON::skip_ws($p);
+            $ch = JSON::peek($p);
+
+            if ($ch eq "]") {
+                JSON::advance($p);
+                return $result;
+            }
+
+            if ($ch eq ",") {
+                JSON::advance($p);
+            } else {
+                return $result;
+            }
+        }
+    }
+
+    # Object - return as hash reference
+    if ($ch eq "{") {
+        JSON::advance($p);
+        JSON::skip_ws($p);
+
+        my scalar $result = {};
+
+        if (JSON::peek($p) eq "}") {
+            JSON::advance($p);
+            return $result;
+        }
+
+        while (1) {
+            JSON::skip_ws($p);
+
+            if (JSON::peek($p) ne "\"") {
+                return $result;
+            }
+            my str $key = JSON::parse_str($p);
+
+            JSON::skip_ws($p);
+
+            if (JSON::peek($p) ne ":") {
+                return $result;
+            }
+            JSON::advance($p);
+
+            JSON::skip_ws($p);
+
+            my scalar $val = JSON::do_parse($p, $depth + 1);
+            $result->{$key} = $val;
+
+            JSON::skip_ws($p);
+            $ch = JSON::peek($p);
+
+            if ($ch eq "}") {
+                JSON::advance($p);
+                return $result;
+            }
+
+            if ($ch eq ",") {
+                JSON::advance($p);
+            } else {
+                return $result;
+            }
+        }
+    }
+
+    # Number
+    if ($ch eq "-" || JSON::is_digit($ch)) {
+        return JSON::parse_num($p);
+    }
+
+    # Keywords
+    if (JSON::match_kw($p, "true")) {
+        return 1;
+    }
+
+    if (JSON::match_kw($p, "false")) {
+        return 0;
+    }
+
+    if (JSON::match_kw($p, "null")) {
+        return undef;
+    }
+
+    return undef;
+}
+
+# Public decode function
+func decode(str $json) scalar {
+    my scalar $p = JSON::make_parser($json);
+    return JSON::do_parse($p, 0);
+}

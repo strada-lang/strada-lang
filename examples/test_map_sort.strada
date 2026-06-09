@@ -1,0 +1,62 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# Test map, sort, and grep functionality
+
+func main() void {
+    # Test map: double each element
+    my array @nums = (1, 2, 3, 4, 5);
+    my scalar $doubled = map { $_ * 2; } @nums;
+
+    say("Map test - doubled:");
+    my int $i = 0;
+    while ($i < size($doubled)) {
+        say($doubled->[$i]);
+        $i = $i + 1;
+    }
+
+    # Test grep: filter numbers greater than 2
+    my scalar $filtered = grep { $_ > 2; } @nums;
+
+    say("Grep test - greater than 2:");
+    $i = 0;
+    while ($i < size($filtered)) {
+        say($filtered->[$i]);
+        $i = $i + 1;
+    }
+
+    # Test sort with custom comparator (numeric ascending)
+    my array @unsorted = (5, 2, 8, 1, 9, 3);
+    my scalar $sorted = sort { $a <=> $b; } @unsorted;
+
+    say("Sort test - ascending:");
+    $i = 0;
+    while ($i < size($sorted)) {
+        say($sorted->[$i]);
+        $i = $i + 1;
+    }
+
+    # Test sort descending
+    my scalar $sorted_desc = sort { $b <=> $a; } @unsorted;
+
+    say("Sort test - descending:");
+    $i = 0;
+    while ($i < size($sorted_desc)) {
+        say($sorted_desc->[$i]);
+        $i = $i + 1;
+    }
+}

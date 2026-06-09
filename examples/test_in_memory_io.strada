@@ -1,0 +1,70 @@
+## In-memory file I/O via \$scalar refs.
+##
+## core::open(\$buf, "w") opens a write handle backed by an internal
+## open_memstream; on close the buffer contents are written back into
+## $buf. Read mode wraps the scalar's current contents in fmemopen.
+##
+## Slot refs (the StradaValue** form created by `\$var` for plain
+## locals) MUST work — that's what the codegen emits.
+
+func ok(int $cond, str $msg) void {
+    if ($cond == 1) { say("ok - " . $msg); }
+    else { die("not ok - " . $msg); }
+}
+
+func main() int {
+    # Write to in-memory buffer
+    my str $buf = "";
+    my scalar $fh = core::open(\$buf, "w");
+    say($fh, "first");
+    say($fh, "second");
+    say($fh, "third");
+    core::close($fh);
+
+    ok(length($buf) == 19, "writeback length matches (got " . length($buf) . ")");
+    ok($buf eq "first\nsecond\nthird\n", "writeback content matches");
+
+    # Read back
+    my scalar $rh = core::open(\$buf, "r");
+    my str $l1 = <$rh>;
+    my str $l2 = <$rh>;
+    my str $l3 = <$rh>;
+    core::close($rh);
+    ok($l1 eq "first", "read line 1");
+    ok($l2 eq "second", "read line 2");
+    ok($l3 eq "third", "read line 3");
+
+    # Append mode preserves existing content
+    my scalar $ah = core::open(\$buf, "a");
+    say($ah, "fourth");
+    core::close($ah);
+    ok($buf eq "first\nsecond\nthird\nfourth\n", "append preserves prefix");
+
+    # Write to a previously-undef scalar
+    my str $empty = "";
+    my scalar $eh = core::open(\$empty, "w");
+    say($eh, "fresh");
+    core::close($eh);
+    ok($empty eq "fresh\n", "write to empty scalar");
+
+    # Overwrite — opening in "w" again starts fresh
+    my scalar $oh = core::open(\$empty, "w");
+    say($oh, "overwritten");
+    core::close($oh);
+    ok($empty eq "overwritten\n", "open w overwrites");
+
+    # Multi-line read all the way to EOF
+    my str $multi = "alpha\nbeta\ngamma\n";
+    my scalar $mh = core::open(\$multi, "r");
+    my int $count = 0;
+    my str $line = <$mh>;
+    while ($line ne "") {
+        $count = $count + 1;
+        $line = <$mh>;
+    }
+    core::close($mh);
+    ok($count == 3, "read all lines (got " . $count . ")");
+
+    say("All in-memory I/O tests passed");
+    return 0;
+}

@@ -1,0 +1,27 @@
+# `local $h{key}` with dynamic key expressions — regression for the
+# anon-array leak when the key was an owned-temp expression.
+# Without the capture-and-decref fix, each loop iter leaked the
+# key-expr's owned StradaValue.
+our hash %g = ("a"=>1, "b"=>2, "c"=>3);
+func get_key(int $i) str {
+    my str $r = "a";
+    if ($i % 2 == 0) { $r = "b"; }
+    return $r;
+}
+func main() int {
+    my int $i = 0;
+    while ($i < 100) {
+        # Dynamic key expression (call returns owned StradaValue)
+        local $g{get_key($i)} = 999;
+        my int $sum = $g{"a"} + $g{"b"} + $g{"c"};
+        $i = $i + 1;
+    }
+    # Concat-key dynamic expr
+    my int $j = 0;
+    while ($j < 100) {
+        my str $base = "a";
+        local $g{$base . ""} = 42;
+        $j = $j + 1;
+    }
+    return 0;
+}

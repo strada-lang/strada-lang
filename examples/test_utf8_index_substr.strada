@@ -1,0 +1,84 @@
+# Regression test: index() and substr() must agree on offset units.
+#
+# Bug: index() char-counted any non-ASCII string regardless of the UTF-8
+# flag, while substr() is flag-governed (it treats a non-UTF-8-flagged
+# string as bytes). So substr($s, index($s, $needle), $n) mis-sliced on a
+# non-flagged byte string whose bytes happen to form valid UTF-8 — the two
+# builtins disagreed on whether the offset was a byte or a character index.
+#
+# The fix makes index() use substr()'s exact char-vs-byte predicate, so the
+# round-trip substr($s, index($s, $needle), length($needle)) == $needle holds
+# for every string, and genuinely char-oriented (UTF-8-flagged, valid-UTF-8)
+# strings still get character offsets.
+
+package main;
+
+my int $failures = 0;
+
+func check(str $label, str $got, str $want) void {
+    if ($got eq $want) {
+        say("  ok   " . $label);
+    } else {
+        say("  FAIL " . $label . ": got [" . $got . "] want [" . $want . "]");
+        $failures = $failures + 1;
+    }
+}
+
+func check_int(str $label, int $got, int $want) void {
+    if ($got == $want) {
+        say("  ok   " . $label);
+    } else {
+        say("  FAIL " . $label . ": got " . $got . " want " . $want);
+        $failures = $failures + 1;
+    }
+}
+
+func main() int {
+    say("UTF-8 index/substr round-trip tests");
+
+    # --- Non-flagged byte string holding raw UTF-8 bytes (é = 0xC3 0xA9) ---
+    # "héllo v_SIG zz": the multi-byte é before the needle is what used to
+    # shift the slice. v_SIG sits at byte offset 7, char offset 6.
+    my str $b = "héllo v_SIG zz";
+    my str $needle = "v_SIG";
+
+    # Shape A: literal needle, no offset  (strada_index_sv)
+    check("A byte/literal round-trip", substr($b, index($b, "v_SIG"), 5), "v_SIG");
+    # Shape B: variable needle           (general form -> strada_index_sv2)
+    check("B byte/var-needle round-trip", substr($b, index($b, $needle), 5), "v_SIG");
+    # Shape C: 3-arg with offset          (strada_index_offset -> strada_index_sv2)
+    check("C byte/3-arg round-trip", substr($b, index($b, "v_SIG", 0), 5), "v_SIG");
+    # 3-arg with a starting offset past an earlier copy of the needle
+    my str $b2 = "v_SIG héllo v_SIG zz";
+    check("C byte/3-arg with offset finds 2nd", substr($b2, index($b2, "v_SIG", 3), 5), "v_SIG");
+    # length() must agree: a non-flagged byte string's length is its BYTE
+    # count (é is 2 bytes, so "héllo v_SIG zz" is 15 bytes / 14 chars), so
+    # substr($b, 0, length($b)) reproduces the whole string.
+    check_int("C byte/length is byte count", length($b), 15);
+    check("C byte/substr(0,length) is whole", substr($b, 0, length($b)), $b);
+
+    # --- Char-oriented string: UTF-8-flagged + valid UTF-8 (built via chr()).
+    # 中 = U+4E2D, 文 = U+6587 (3 bytes each). Here index MUST return a
+    # CHARACTER offset and substr must read characters. ---
+    my str $u = chr(0x4e2d) . chr(0x6587) . "v_SIG end";  # 中文v_SIG end
+    check_int("D char/index is char offset", index($u, "v_SIG"), 2);
+    check("D char/round-trip", substr($u, index($u, "v_SIG"), 5), "v_SIG");
+    check("D char/round-trip end", substr($u, index($u, "end"), 3), "end");
+    check_int("D char/length is char count", length($u), 11);
+
+    # --- ASCII baseline (byte == char) ---
+    my str $a = "hello v_SIG zz";
+    check("E ascii round-trip", substr($a, index($a, "v_SIG"), 5), "v_SIG");
+    check_int("E ascii index", index($a, "v_SIG"), 6);
+
+    # --- Edge cases ---
+    check_int("F not found returns -1", index($b, "ZZZZ"), -1);
+    check_int("F empty needle returns 0", index($b, ""), 0);
+
+    if ($failures == 0) {
+        say("All UTF-8 index/substr tests passed");
+        return 0;
+    }
+    say($failures . " UTF-8 index/substr tests FAILED");
+    return 1;
+}

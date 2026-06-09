@@ -1,0 +1,201 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_oop_better.strada - Demonstrates Perl-style OOP with blessed references
+#
+# Strada supports Perl-style object-oriented programming:
+# - bless() to associate a hash reference with a package
+# - blessed() to get the package name
+# - inherit to set up inheritance chains
+# - isa() to check type (follows inheritance)
+# - __PACKAGE__ to get current package name
+
+package Animal;
+
+# ============================================================
+# Animal - Base class
+# ============================================================
+
+func Animal_new(str $name, str $species) scalar {
+    my hash %self = ();
+    $self{"name"} = $name;
+    $self{"species"} = $species;
+    return bless(\%self, "Animal");
+}
+
+func Animal_speak(scalar $self) void {
+    say($self->{"name"} . " the " . $self->{"species"} . " makes a sound");
+}
+
+func Animal_get_name(scalar $self) str {
+    return $self->{"name"};
+}
+
+package Dog;
+# For multi-package files, use inherit() function call
+
+func Dog_init() void {
+    inherit("Dog", "Animal");
+}
+
+# ============================================================
+# Dog - Inherits from Animal
+# ============================================================
+
+func Dog_new(str $name) scalar {
+    my hash %self = ();
+    $self{"name"} = $name;
+    $self{"species"} = "dog";
+    $self{"tricks"} = 0;
+    return bless(\%self, "Dog");
+}
+
+func Dog_speak(scalar $self) void {
+    say($self->{"name"} . " says: Woof!");
+}
+
+func Dog_learn_trick(scalar $self) void {
+    $self->{"tricks"} = $self->{"tricks"} + 1;
+    say($self->{"name"} . " learned a new trick! Total: " . $self->{"tricks"});
+}
+
+# ============================================================
+# Cat - Inherits from Animal
+# ============================================================
+package Cat;
+
+func Cat_init() void {
+    inherit("Cat", "Animal");
+}
+
+func Cat_new(str $name) scalar {
+    my hash %self = ();
+    $self{"name"} = $name;
+    $self{"species"} = "cat";
+    $self{"lives"} = 9;
+    return bless(\%self, "Cat");
+}
+
+func Cat_speak(scalar $self) void {
+    say($self->{"name"} . " says: Meow!");
+}
+
+# ============================================================
+# GermanShepherd - Inherits from Dog (multi-level inheritance)
+# ============================================================
+package GermanShepherd;
+
+func GermanShepherd_init() void {
+    inherit("GermanShepherd", "Dog");
+}
+
+func GermanShepherd_new(str $name) scalar {
+
+
+
+    my hash %self = ();
+    $self{"name"} = $name;
+    $self{"species"} = "dog";
+    $self{"breed"} = "German Shepherd";
+    $self{"tricks"} = 0;
+    return bless(\%self, "GermanShepherd");
+}
+
+func GermanShepherd_guard(scalar $self) void {
+    say($self->{"name"} . " is guarding the house!");
+}
+
+# ============================================================
+# Main - Demonstrate OOP features
+# ============================================================
+
+func main() void {
+    say("=== Strada OOP Demo ===");
+    say("");
+
+    # Initialize class hierarchy
+    Dog_init();
+    Cat_init();
+    GermanShepherd_init();
+
+    # Create objects
+    say("Creating objects...");
+    my scalar $animal = Animal_new("Generic", "creature");
+    my scalar $dog = Dog_new("Rex");
+    my scalar $cat = Cat_new("Whiskers");
+    my scalar $shepherd = GermanShepherd_new("Max");
+
+    say("");
+
+    # Show blessed packages
+    say("Blessed packages:");
+    say("  animal: " . blessed($animal));
+    say("  dog: " . blessed($dog));
+    say("  cat: " . blessed($cat));
+    say("  shepherd: " . blessed($shepherd));
+
+    say("");
+
+    # Demonstrate isa() with inheritance
+    say("Testing isa() with inheritance:");
+
+    if (isa($dog, "Dog")) {
+        say("  Rex isa Dog: YES");
+    }
+    if (isa($dog, "Animal")) {
+        say("  Rex isa Animal: YES (inherited)");
+    }
+    if (!isa($dog, "Cat")) {
+        say("  Rex isa Cat: NO");
+    }
+
+    say("");
+
+    # Multi-level inheritance
+    say("Multi-level inheritance (GermanShepherd -> Dog -> Animal):");
+    if (isa($shepherd, "GermanShepherd")) {
+        say("  Max isa GermanShepherd: YES");
+    }
+    if (isa($shepherd, "Dog")) {
+        say("  Max isa Dog: YES (inherited)");
+    }
+    if (isa($shepherd, "Animal")) {
+        say("  Max isa Animal: YES (inherited from Dog)");
+    }
+
+    say("");
+
+    # Call methods
+    say("Calling methods:");
+    Animal_speak($animal);
+    Dog_speak($dog);
+    Cat_speak($cat);
+    Dog_speak($shepherd);
+    GermanShepherd_guard($shepherd);
+
+    dumper($dog);
+
+    say("");
+
+    # Demonstrate __PACKAGE__
+    say("Using __PACKAGE__:");
+    set_package("MyApp");
+    say("  Current package: " . __PACKAGE__);
+
+    say("");
+    say("=== Demo Complete ===");
+}

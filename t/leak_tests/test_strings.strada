@@ -1,0 +1,197 @@
+#!/usr/bin/env strada
+# Test string operations for memory leaks
+# Run: valgrind --leak-check=full ./test_strings
+
+func main() int {
+    say("Testing string operations for memory leaks...");
+    my int $iterations = 100;
+
+    # Test substr
+    say("  substr()...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my str $s = "Hello, World! This is a test string.";
+        my str $sub1 = substr($s, 0, 5);
+        my str $sub2 = substr($s, 7, 5);
+        my str $sub3 = substr($s, -7);
+        if ($sub1 ne "Hello") {
+            say("    FAIL: substr(0,5)");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test length
+    say("  length()...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = "Test string " . $i;
+        my int $len = length($s);
+        if ($len < 12) {
+            say("    FAIL: length too short");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test index
+    say("  index()...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = "Hello, World!";
+        my int $pos = index($s, "World");
+        if ($pos != 7) {
+            say("    FAIL: index returned " . $pos);
+            return 1;
+        }
+        my int $notfound = index($s, "xyz");
+        if ($notfound != -1) {
+            say("    FAIL: index should return -1");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test split
+    say("  split()...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = "one,two,three,four,five";
+        my array @parts = split(",", $s);
+        if (size(@parts) != 5) {
+            say("    FAIL: split returned " . size(@parts) . " parts");
+            return 1;
+        }
+        if ($parts[0] ne "one" || $parts[4] ne "five") {
+            say("    FAIL: split values wrong");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test join
+    say("  join()...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @parts = ("a", "b", "c", "d", "e");
+        my str $joined = join("-", @parts);
+        if ($joined ne "a-b-c-d-e") {
+            say("    FAIL: join returned " . $joined);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test uc/lc
+    say("  uc()/lc()...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = "Hello World";
+        my str $upper = uc($s);
+        my str $lower = lc($s);
+        if ($upper ne "HELLO WORLD") {
+            say("    FAIL: uc returned " . $upper);
+            return 1;
+        }
+        if ($lower ne "hello world") {
+            say("    FAIL: lc returned " . $lower);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test ucfirst/lcfirst
+    say("  ucfirst()/lcfirst()...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s1 = "hello";
+        my str $s2 = "HELLO";
+        my str $uf = ucfirst($s1);
+        my str $lf = lcfirst($s2);
+        if ($uf ne "Hello") {
+            say("    FAIL: ucfirst");
+            return 1;
+        }
+        if ($lf ne "hELLO") {
+            say("    FAIL: lcfirst");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test chr/ord
+    say("  chr()/ord()...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $c = chr(65);
+        my int $o = ord("A");
+        if ($c ne "A") {
+            say("    FAIL: chr(65) returned " . $c);
+            return 1;
+        }
+        if ($o != 65) {
+            say("    FAIL: ord(A) returned " . $o);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test string concatenation
+    say("  String concatenation...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $a = "Hello";
+        my str $b = "World";
+        my str $c = $a . ", " . $b . "!";
+        if ($c ne "Hello, World!") {
+            say("    FAIL: concat");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test sprintf
+    say("  sprintf()...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = sprintf("Name: %s, Age: %d, Value: %.2f", "Alice", 30, 3.14159);
+        if (index($s, "Alice") < 0) {
+            say("    FAIL: sprintf missing name");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test chomp/chop
+    say("  chomp()/chop()...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s1 = "Hello\n";
+        my str $s2 = "World";
+        my str $chomped = chomp($s1);
+        my str $chopped = chop($s2);
+        if ($chomped ne "Hello") {
+            say("    FAIL: chomp");
+            return 1;
+        }
+        if ($chopped ne "Worl") {
+            say("    FAIL: chop");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All string tests passed!");
+    return 0;
+}

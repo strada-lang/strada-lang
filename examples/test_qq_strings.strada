@@ -1,0 +1,120 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_qq_strings.strada - Demonstrates qq() string quoting
+#
+# qq() is a Perl-style quoting mechanism that works like double quotes
+# but allows you to choose your own delimiters. This is useful when
+# your string contains many quote characters.
+#
+# Supported escape sequences in qq():
+#   \n  - newline
+#   \t  - tab
+#   \r  - carriage return
+#   \0  - null character
+#   \a  - bell/alert
+#   \b  - backspace
+#   \f  - form feed
+#   \v  - vertical tab
+#   \e  - escape character
+#   \\  - literal backslash
+#   \)  - literal delimiter (when using parentheses)
+
+func main() int {
+    say("=== qq() String Quoting Example ===\n");
+
+    # Basic qq() with parentheses
+    say("--- Basic Usage ---");
+    my str $hello = qq(Hello, World!);
+    say("qq(Hello, World!) = '" . $hello . "'");
+
+    # qq() with escape sequences
+    say("\n--- Escape Sequences ---");
+
+    my str $with_tab = qq(Column1\tColumn2\tColumn3);
+    say("qq(Column1\\tColumn2\\tColumn3):");
+    say("  '" . $with_tab . "'");
+
+    my str $with_newline = qq(Line 1\nLine 2\nLine 3);
+    say("\nqq(Line 1\\nLine 2\\nLine 3):");
+    say($with_newline);
+
+    my str $with_return = qq(Before\rAfter);
+    say("\nqq(Before\\rAfter) = '" . $with_return . "'");
+
+    # Different delimiters
+    say("\n--- Different Delimiters ---");
+
+    my str $braces = qq{Use braces for JSON-like strings};
+    say("qq{...} = '" . $braces . "'");
+
+    my str $brackets = qq[Square brackets work too];
+    say("qq[...] = '" . $brackets . "'");
+
+    my str $angles = qq<Angle brackets>;
+    say("qq<...> = '" . $angles . "'");
+
+    my str $slashes = qq/Forward slashes for paths/;
+    say("qq/.../ = '" . $slashes . "'");
+
+    my str $pipes = qq|Pipes as delimiters|;
+    say("qq|...| = '" . $pipes . "'");
+
+    my str $bangs = qq!Exclamation marks!;
+    say("qq!...! = '" . $bangs . "'");
+
+    # Escaping the delimiter
+    say("\n--- Escaping Delimiters ---");
+    my str $escaped_paren = qq(Contains \) parenthesis);
+    say("qq(Contains \\) parenthesis) = '" . $escaped_paren . "'");
+
+    my str $escaped_brace = qq{Contains \} brace};
+    say("qq{Contains \\} brace} = '" . $escaped_brace . "'");
+
+    # Nested delimiters (paired delimiters nest naturally)
+    say("\n--- Nested Delimiters ---");
+    my str $nested = qq(outer (inner) outer);
+    say("qq(outer (inner) outer) = '" . $nested . "'");
+
+    my str $nested_braces = qq{outer {inner} outer};
+    say("qq{outer {inner} outer} = '" . $nested_braces . "'");
+
+    # Comparison with q() - no escape expansion
+    say("\n--- Comparison: qq() vs q() ---");
+    my str $qq_test = qq(Tab:\there Newline:\nhere);
+    my str $q_test = q(Tab:\there Newline:\nhere);
+
+    say("qq(Tab:\\there Newline:\\nhere):");
+    say($qq_test);
+
+    say("\nq(Tab:\\there Newline:\\nhere):");
+    say("  '" . $q_test . "'");
+    say("  (Note: q() keeps backslashes literal)");
+
+    # Practical example: multi-line string
+    say("\n--- Practical Example: Formatted Output ---");
+    my str $report = qq(
+=== Sales Report ===
+Date:\t2024-01-15
+Total:\t$1,234.56
+Status:\tComplete
+);
+    say($report);
+
+    say("=== Example Complete ===");
+    return 0;
+}

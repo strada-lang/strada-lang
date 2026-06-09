@@ -1,0 +1,95 @@
+#!/usr/bin/env strada
+# Round 15 leak regressions:
+#
+# 1. Inline grep/map results leaked: join(",", grep {...} @a),
+#    foreach my $x (grep {...} @a), size(grep {...} @a), etc.
+#    NODE_MAP/NODE_GREP were missing from needs_temp_cleanup.
+# 2. async::all([futures]) leaked the results array if one future
+#    threw (strada_future_all's allocation skipped by longjmp).
+# 3. async::mutex() / async::cond() leaked the strdup'd struct_name
+#    ("Mutex"/"Cond"/"DIR"/"StringBuilder") because the CPOINTER
+#    destructor branch never freed meta->struct_name.
+#
+# Run: valgrind --leak-check=full ./test_round15_grep_async_mutex
+
+package main;
+
+func test_grep_join() void {
+    my array @a = (1, 2, 3, 4, 5);
+    my int $iter = 300;
+    my int $i = 0;
+    while ($i < $iter) {
+        my str $s = join(",", grep { $_ > 2 } @a);
+        $i = $i + 1;
+    }
+    say("test_grep_join: PASS");
+}
+
+func test_map_concat() void {
+    my array @a = (1, 2, 3);
+    my int $iter = 300;
+    my int $i = 0;
+    while ($i < $iter) {
+        my str $s = "X:" . join(",", map { $_ * 2 } @a);
+        $i = $i + 1;
+    }
+    say("test_map_concat: PASS");
+}
+
+func test_foreach_inline_grep() void {
+    my array @a = (1, 2, 3, 4, 5);
+    my int $iter = 300;
+    my int $i = 0;
+    my int $sum = 0;
+    while ($i < $iter) {
+        foreach my int $x (grep { $_ > 2 } @a) {
+            $sum = $sum + $x;
+        }
+        $i = $i + 1;
+    }
+    say("test_foreach_inline_grep: PASS");
+}
+
+func test_grep_in_if() void {
+    my array @a = (1, 2, 3, 4, 5);
+    my int $iter = 300;
+    my int $i = 0;
+    while ($i < $iter) {
+        if (size(grep { $_ > 2 } @a) > 0) {
+            # do nothing
+        }
+        $i = $i + 1;
+    }
+    say("test_grep_in_if: PASS");
+}
+
+func test_grep_discard() void {
+    my array @a = (1, 2, 3);
+    my int $iter = 300;
+    my int $i = 0;
+    while ($i < $iter) {
+        grep { $_ > 1 } @a;
+        $i = $i + 1;
+    }
+    say("test_grep_discard: PASS");
+}
+
+func test_mutex_create() void {
+    my int $iter = 200;
+    my int $i = 0;
+    while ($i < $iter) {
+        my scalar $m = async::mutex();
+        $i = $i + 1;
+    }
+    say("test_mutex_create: PASS");
+}
+
+func main() int {
+    test_grep_join();
+    test_map_concat();
+    test_foreach_inline_grep();
+    test_grep_in_if();
+    test_grep_discard();
+    test_mutex_create();
+    return 0;
+}

@@ -1,0 +1,57 @@
+# ── Build artifacts ──
+*.o
+*.so
+*.a
+
+# Self-hosting compiler (generated/built)
+compiler/Combined.c
+compiler/Combined.strada
+compiler/Combined_stage1.c
+stradac
+stradac_stage1
+stradac_stage1_debug
+bootstrap/stradac
+
+# Interpreter (generated/built)
+interpreter/Combined.c
+interpreter/Combined.strada
+interpreter/strada-interp
+interpreter/strada-interp-dbg
+interpreter/vm_run
+
+# Generated example C files + built example binaries
+examples/*.c
+
+# Built tools
+tools/stradadoc
+tools/strada-soinfo
+tools/strada-md2man
+tools/strada-md2html
+tools/strada-repl
+tools/strada-jit
+tools/stradapp
+tools/xs2strada
+tools/cpan2strada
+/perl2strada
+
+# Generated leak-test C
+t/leak_tests/*.c
+
+# ── configure output ──
+config.mk
+config.sh
+
+# ── editor autosaves / backups ──
+*~
+\#*\#
+.\#*
+
+# ── local tooling ──
+.claude/
+
+# ── misc outputs ──
+output_demo.txt
+tools/strada-profhtml
+tools/strada-proftext
+tools/strada-repl.c
+/test_nesso

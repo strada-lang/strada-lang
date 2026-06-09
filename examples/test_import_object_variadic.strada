@@ -1,0 +1,149 @@
+# test_import_object_variadic.strada - Test import_object with variadic functions
+
+use lib "examples";
+import_object "VariadicObjLib.o";
+
+func main() int {
+    say("=== Testing import_object with Variadic Functions ===");
+    say("");
+
+    # Test sum_all - basic variadic call
+    say("--- sum_all ---");
+    my int $sum1 = VariadicObjLib::sum_all(1, 2, 3, 4, 5);
+    say("sum_all(1, 2, 3, 4, 5) = " . $sum1);
+    if ($sum1 != 15) {
+        say("FAIL: expected 15");
+        return 1;
+    }
+
+    # Test sum_all with spread
+    my array @nums = (10, 20, 30);
+    my int $sum2 = VariadicObjLib::sum_all(...@nums);
+    say("sum_all(...@nums) with @nums = (10, 20, 30) = " . $sum2);
+    if ($sum2 != 60) {
+        say("FAIL: expected 60");
+        return 1;
+    }
+
+    # Test sum_all with mixed args and spread
+    my int $sum3 = VariadicObjLib::sum_all(1, ...@nums, 100);
+    say("sum_all(1, ...@nums, 100) = " . $sum3);
+    if ($sum3 != 161) {
+        say("FAIL: expected 161");
+        return 1;
+    }
+
+    # Test with empty variadic
+    my int $sum4 = VariadicObjLib::sum_all();
+    say("sum_all() = " . $sum4);
+    if ($sum4 != 0) {
+        say("FAIL: expected 0");
+        return 1;
+    }
+
+    say("");
+
+    # Test format_nums - fixed params + variadic
+    say("--- format_nums ---");
+    my str $fmt1 = VariadicObjLib::format_nums("Numbers: ", ", ", 1, 2, 3);
+    say("format_nums(\"Numbers: \", \", \", 1, 2, 3) = \"" . $fmt1 . "\"");
+    if ($fmt1 ne "Numbers: 1, 2, 3") {
+        say("FAIL: expected \"Numbers: 1, 2, 3\"");
+        return 1;
+    }
+
+    my str $fmt2 = VariadicObjLib::format_nums("Values: ", " | ", ...@nums);
+    say("format_nums(\"Values: \", \" | \", ...@nums) = \"" . $fmt2 . "\"");
+    if ($fmt2 ne "Values: 10 | 20 | 30") {
+        say("FAIL: expected \"Values: 10 | 20 | 30\"");
+        return 1;
+    }
+
+    say("");
+
+    # Test join_with
+    say("--- join_with ---");
+    my str $joined1 = VariadicObjLib::join_with("-", "a", "b", "c");
+    say("join_with(\"-\", \"a\", \"b\", \"c\") = \"" . $joined1 . "\"");
+    if ($joined1 ne "a-b-c") {
+        say("FAIL: expected \"a-b-c\"");
+        return 1;
+    }
+
+    my array @words = ("hello", "world");
+    my str $joined2 = VariadicObjLib::join_with(" ", ...@words, "!");
+    say("join_with(\" \", ...@words, \"!\") = \"" . $joined2 . "\"");
+    if ($joined2 ne "hello world !") {
+        say("FAIL: expected \"hello world !\"");
+        return 1;
+    }
+
+    say("");
+
+    # Test min_val and max_val
+    say("--- min_val / max_val ---");
+    my int $min = VariadicObjLib::min_val(5, 3, 9, 1, 7);
+    my int $max = VariadicObjLib::max_val(5, 3, 9, 1, 7);
+    say("min_val(5, 3, 9, 1, 7) = " . $min);
+    say("max_val(5, 3, 9, 1, 7) = " . $max);
+    if ($min != 1) {
+        say("FAIL: min expected 1");
+        return 1;
+    }
+    if ($max != 9) {
+        say("FAIL: max expected 9");
+        return 1;
+    }
+
+    my array @vals = (100, 50, 200, 25);
+    my int $min2 = VariadicObjLib::min_val(...@vals);
+    my int $max2 = VariadicObjLib::max_val(...@vals);
+    say("min_val(...@vals) with @vals = (100, 50, 200, 25) = " . $min2);
+    say("max_val(...@vals) = " . $max2);
+    if ($min2 != 25) {
+        say("FAIL: min expected 25");
+        return 1;
+    }
+    if ($max2 != 200) {
+        say("FAIL: max expected 200");
+        return 1;
+    }
+
+    say("");
+
+    # Test count_args
+    say("--- count_args ---");
+    my int $c1 = VariadicObjLib::count_args(1, 2, 3);
+    say("count_args(1, 2, 3) = " . $c1);
+    if ($c1 != 3) {
+        say("FAIL: expected 3");
+        return 1;
+    }
+
+    my int $c2 = VariadicObjLib::count_args(...@vals);
+    say("count_args(...@vals) = " . $c2);
+    if ($c2 != 4) {
+        say("FAIL: expected 4");
+        return 1;
+    }
+
+    my int $c3 = VariadicObjLib::count_args();
+    say("count_args() = " . $c3);
+    if ($c3 != 0) {
+        say("FAIL: expected 0");
+        return 1;
+    }
+
+    # Multiple spreads
+    my array @more = (1, 2);
+    my int $c4 = VariadicObjLib::count_args(...@vals, ...@more);
+    say("count_args(...@vals, ...@more) = " . $c4);
+    if ($c4 != 6) {
+        say("FAIL: expected 6");
+        return 1;
+    }
+
+    say("");
+    say("=== All import_object variadic tests passed! ===");
+    return 0;
+}

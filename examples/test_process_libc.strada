@@ -1,0 +1,124 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+func test_getpgrp() int {
+    my int $pgrp = sys::getpgrp();
+    if ($pgrp <= 0) {
+        say("FAIL: getpgrp() returned " . $pgrp);
+        return 1;
+    }
+    return 0;
+}
+
+func test_getsid() int {
+    my int $sid = sys::getsid(0);
+    if ($sid <= 0) {
+        say("FAIL: getsid(0) returned " . $sid);
+        return 1;
+    }
+    return 0;
+}
+
+func test_getpgid() int {
+    my int $pgid = sys::getpgid(0);
+    if ($pgid <= 0) {
+        say("FAIL: getpgid(0) returned " . $pgid);
+        return 1;
+    }
+    return 0;
+}
+
+func test_nice() int {
+    my int $n = sys::nice(0);
+    if ($n < -20) {
+        say("FAIL: nice(0) returned invalid value " . $n);
+        return 1;
+    }
+    return 0;
+}
+
+func test_getpriority() int {
+    my int $prio = sys::getpriority(0, 0);
+    if (!defined($prio)) {
+        say("FAIL: getpriority(0,0) failed");
+        return 1;
+    }
+    return 0;
+}
+
+func test_getrusage() int {
+    my scalar $usage = sys::getrusage(0);
+    if (!defined($usage)) {
+        say("FAIL: getrusage(0) failed");
+        return 1;
+    }
+    my int $maxrss = $usage->{"maxrss"};
+    if ($maxrss <= 0) {
+        say("FAIL: getrusage maxrss = " . $maxrss);
+        return 1;
+    }
+    return 0;
+}
+
+func test_getrlimit() int {
+    my scalar $rlim = sys::getrlimit(7);
+    if (!defined($rlim)) {
+        say("FAIL: getrlimit(7) failed");
+        return 1;
+    }
+    return 0;
+}
+
+func test_times() int {
+    my scalar $t = sys::times();
+    if (!defined($t)) {
+        say("FAIL: times() failed");
+        return 1;
+    }
+    return 0;
+}
+
+func test_clock() int {
+    my int $c = sys::clock();
+    if ($c < 0) {
+        say("FAIL: clock() returned " . $c);
+        return 1;
+    }
+    return 0;
+}
+
+func main() int {
+    my int $failed = 0;
+
+    $failed = $failed + test_getpgrp();
+    $failed = $failed + test_getsid();
+    $failed = $failed + test_getpgid();
+    $failed = $failed + test_nice();
+    $failed = $failed + test_getpriority();
+    $failed = $failed + test_getrusage();
+    $failed = $failed + test_getrlimit();
+    $failed = $failed + test_times();
+    $failed = $failed + test_clock();
+
+    if ($failed == 0) {
+        say("All process libc tests passed");
+    } else {
+        say("Failed: " . $failed . " tests");
+    }
+
+    return $failed;
+}
