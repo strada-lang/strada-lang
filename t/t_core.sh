@@ -334,6 +334,9 @@ test_output_contains "$EXAMPLES_DIR/test_implicit_underscore.strada" "test_impli
 # Test: Autovivification ($h{"a"}{"b"} = val auto-creates intermediate hashes)
 test_output_contains "$EXAMPLES_DIR/test_autovivification.strada" "test_autovivification" "All autovivification tests passed" "Autovivification"
 
+# Test: *= and /= compound assignment (regression: previously didn't lex)
+test_output_contains "$EXAMPLES_DIR/test_muldiv_assign.strada" "test_muldiv_assign" "All muldiv assign tests passed" "Mul/div compound assign"
+
 # Test: Perl compatibility (chomp, bare shift, heredocs, unless-elsif)
 test_output_contains "$EXAMPLES_DIR/test_perl_compat.strada" "test_perl_compat" "All Perl compat tests passed" "Perl compat"
 

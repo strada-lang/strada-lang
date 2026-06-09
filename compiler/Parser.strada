@@ -2479,8 +2479,9 @@ func parse_assignment(scalar $parser) scalar {
     my scalar $tok = parser_current($parser);
     my str $type = $tok->{"type"};
     
-    if ($type eq "ASSIGN" || $type eq "PLUS_ASSIGN" || 
-        $type eq "MINUS_ASSIGN" || $type eq "DOT_ASSIGN") {
+    if ($type eq "ASSIGN" || $type eq "PLUS_ASSIGN" ||
+        $type eq "MINUS_ASSIGN" || $type eq "DOT_ASSIGN" ||
+        $type eq "STAR_ASSIGN" || $type eq "SLASH_ASSIGN") {
         my str $op = $tok->{"value"};
         parser_advance($parser);
         my scalar $right = parse_assignment($parser);

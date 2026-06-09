@@ -1949,6 +1949,30 @@ func lex_next_token(scalar $lexer) scalar {
         return \%token;
     }
 
+    # *=  (*42, =61) — checked after ** (42,42), so **= still lexes as POWER + ASSIGN
+    if ($code == 42 && $code2 == 61) {
+        lex_advance($lexer);
+        lex_advance($lexer);
+        my hash %token = ();
+        $token{"type"} = "STAR_ASSIGN";
+        $token{"value"} = "*=";
+        $token{"line"} = $token_line;
+        return \%token;
+    }
+
+    # /=  (/47, =61) — safe w.r.t. regex literals: a / in regex position is
+    # consumed by the expect_regex branch above before this scan runs, and
+    # // (47,47) is a different second char so defined-or is unaffected
+    if ($code == 47 && $code2 == 61) {
+        lex_advance($lexer);
+        lex_advance($lexer);
+        my hash %token = ();
+        $token{"type"} = "SLASH_ASSIGN";
+        $token{"value"} = "/=";
+        $token{"line"} = $token_line;
+        return \%token;
+    }
+
     # .=  (.46, =61)
     if ($code == 46 && $code2 == 61) {
         lex_advance($lexer);

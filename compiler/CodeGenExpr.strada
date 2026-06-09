@@ -1010,7 +1010,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 emit($cg, " = ");
                 gen_expression($cg, $rhs);
             }
-        } elsif ($op eq "+=" || $op eq "-=" || $op eq ".=") {
+        } elsif ($op eq "+=" || $op eq "-=" || $op eq ".=" || $op eq "*=" || $op eq "/=") {
             # Check for 'our' variable compound assignment
             if ($target_type == NODE_VARIABLE()) {
                 my str $our_ca_name = escape_c_keyword($target->{"name"});
@@ -1028,6 +1028,12 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                         emit($cg, "strada_decref(__our_rhs); ");
                     } elsif ($op eq "+=") {
                         emit($cg, "StradaValue *__our_new = strada_new_num(strada_to_num(__our_old) + strada_to_num(__our_rhs)); ");
+                        emit($cg, "strada_decref(__our_rhs); strada_decref(__our_old); ");
+                    } elsif ($op eq "*=") {
+                        emit($cg, "StradaValue *__our_new = strada_new_num(strada_to_num(__our_old) * strada_to_num(__our_rhs)); ");
+                        emit($cg, "strada_decref(__our_rhs); strada_decref(__our_old); ");
+                    } elsif ($op eq "/=") {
+                        emit($cg, "StradaValue *__our_new = strada_new_num(strada_to_num(__our_old) / strada_to_num(__our_rhs)); ");
                         emit($cg, "strada_decref(__our_rhs); strada_decref(__our_old); ");
                     } else {
                         emit($cg, "StradaValue *__our_new = strada_new_num(strada_to_num(__our_old) - strada_to_num(__our_rhs)); ");
@@ -1060,6 +1066,10 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                     $base_op = "-";
                 } elsif ($op eq ".=") {
                     $base_op = ".";
+                } elsif ($op eq "*=") {
+                    $base_op = "*";
+                } elsif ($op eq "/=") {
+                    $base_op = "/";
                 }
                 my scalar $ol_ops = $cg->{"overloaded_ops"};
                 my int $base_op_overloaded = 0;
@@ -1103,6 +1113,10 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                         emit($cg, "strada_overload_binary(__ca_old, __ca_rhs, \"" . $base_op . "\"); ");
                         if ($op eq "+=") {
                             emit($cg, "if (!__ca_res) __ca_res = strada_new_num(strada_to_num(__ca_old) + strada_to_num(__ca_rhs)); ");
+                        } elsif ($op eq "*=") {
+                            emit($cg, "if (!__ca_res) __ca_res = strada_new_num(strada_to_num(__ca_old) * strada_to_num(__ca_rhs)); ");
+                        } elsif ($op eq "/=") {
+                            emit($cg, "if (!__ca_res) __ca_res = strada_new_num(strada_to_num(__ca_old) / strada_to_num(__ca_rhs)); ");
                         } else {
                             emit($cg, "if (!__ca_res) __ca_res = strada_new_num(strada_to_num(__ca_old) - strada_to_num(__ca_rhs)); ");
                         }
@@ -1185,6 +1199,62 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 emit($cg, " = strada_new_num(strada_to_num(");
                 gen_expression($cg, $target);
                 emit($cg, ") - ");
+                emit_num_operand($cg, $expr->{"value"});
+                emit($cg, ")");
+            }
+            } elsif ($op eq "*=") {
+            # Mirrors -=: int fast path keeps tagged ints, else boxed num
+            my int $use_int3 = 0;
+            if ($cg->{"has_overloads"} == 0 && $target_type == NODE_VARIABLE()) {
+                if (expr_is_int_typed($cg, $target) == 1) {
+                    $use_int3 = 1;
+                }
+            }
+            if ($use_int3 == 1 && $cg->{"cleanup_enabled"} == 1) {
+                emit($cg, "({ StradaValue *__old = ");
+                gen_expression($cg, $target);
+                emit($cg, "; ");
+                gen_expression($cg, $target);
+                emit($cg, " = STRADA_MAKE_TAGGED_INT(strada_to_int(__old) * ");
+                emit_int_operand($cg, $expr->{"value"});
+                emit($cg, "); strada_decref(__old); ");
+                gen_expression($cg, $target);
+                emit($cg, "; })");
+            } elsif ($target_type == NODE_VARIABLE() && $cg->{"cleanup_enabled"} == 1) {
+                emit($cg, "({ StradaValue *__old = ");
+                gen_expression($cg, $target);
+                emit($cg, "; ");
+                gen_expression($cg, $target);
+                emit($cg, " = strada_new_num(strada_to_num(__old) * ");
+                emit_num_operand($cg, $expr->{"value"});
+                emit($cg, "); strada_decref(__old); ");
+                gen_expression($cg, $target);
+                emit($cg, "; })");
+            } else {
+                gen_expression($cg, $target);
+                emit($cg, " = strada_new_num(strada_to_num(");
+                gen_expression($cg, $target);
+                emit($cg, ") * ");
+                emit_num_operand($cg, $expr->{"value"});
+                emit($cg, ")");
+            }
+            } elsif ($op eq "/=") {
+            # Always the num path — int/int division isn't int (Perl semantics)
+            if ($target_type == NODE_VARIABLE() && $cg->{"cleanup_enabled"} == 1) {
+                emit($cg, "({ StradaValue *__old = ");
+                gen_expression($cg, $target);
+                emit($cg, "; ");
+                gen_expression($cg, $target);
+                emit($cg, " = strada_new_num(strada_to_num(__old) / ");
+                emit_num_operand($cg, $expr->{"value"});
+                emit($cg, "); strada_decref(__old); ");
+                gen_expression($cg, $target);
+                emit($cg, "; })");
+            } else {
+                gen_expression($cg, $target);
+                emit($cg, " = strada_new_num(strada_to_num(");
+                gen_expression($cg, $target);
+                emit($cg, ") / ");
                 emit_num_operand($cg, $expr->{"value"});
                 emit($cg, ")");
             }
