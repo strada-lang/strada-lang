@@ -1116,7 +1116,16 @@ void strada_break_self_cycle_impl(StradaValue *sv) {
  * after strada_free_hash() so it can reuse the pools and free helpers. The decref
  * hot path only needs the forward declaration + the gating flags here. */
 static int           cc_enabled    = 1;       /* automatic collection on by default */
-static size_t        cc_threshold  = 10000;   /* candidate roots that trigger a collect */
+/* Adaptive trigger: cc_threshold starts at the base and DOUBLES every time a
+ * collection frees nothing (a cycle-free program converges to near-zero
+ * collection work — profiling stradac showed ~18% of the whole compile spent
+ * in collector phases that never freed a single cycle). The first collection
+ * that does free cycles resets the trigger to the base. Capped so the
+ * candidate buffer + side table stay bounded (~1M entries). User-set
+ * thresholds (core::gc_threshold) set the BASE and reset the current value. */
+static size_t        cc_threshold  = 10000;   /* current (adaptive) trigger */
+static size_t        cc_threshold_base = 10000;
+#define CC_THRESHOLD_MAX ((size_t)1 << 20)
 static int           cc_collecting = 0;        /* reentrancy guard while collecting */
 static unsigned long cc_collections_count = 0;
 static unsigned long cc_freed_count = 0;
@@ -12370,6 +12379,7 @@ static void cc_blocking_leave(void) {
  * (single-threaded, or every other mutator parked/blocked at a safepoint). */
 static void cc_collect_phases(void) {
     cc_self_collecting = 1;   /* our own decrefs (freeing nodes) must not park/relock */
+    unsigned long freed_before = cc_freed_count;
     for (size_t i = 0; i < cc_roots_len; i++) {                       /* MarkRoots */
         StradaValue *s = cc_roots[i];
         if (cc_color_get(s) == CC_PURPLE) cc_markgray(s);
@@ -12384,6 +12394,13 @@ static void cc_collect_phases(void) {
     if (cc_tab_cap) memset(cc_tab, 0, cc_tab_cap * sizeof(CCEnt));
     cc_tab_used = 0;
     cc_collections_count++;
+    /* Adaptive trigger (see cc_threshold): fruitless collections back off
+     * exponentially; a fruitful one snaps back to the base. */
+    if (cc_freed_count == freed_before) {
+        if (cc_threshold < CC_THRESHOLD_MAX) cc_threshold *= 2;
+    } else {
+        cc_threshold = cc_threshold_base;
+    }
     cc_self_collecting = 0;
 }
 
@@ -12464,7 +12481,7 @@ static void cc_forget(StradaValue *sv) {
 /* ---- Public API ---- */
 void strada_gc_collect(void)            { cc_collect(); }   /* threaded: stop-the-world */
 void strada_gc_set_enabled(int on)      { cc_enabled = on ? 1 : 0; }
-void strada_gc_set_threshold(long n)    { if (n > 0) cc_threshold = (size_t)n; }
+void strada_gc_set_threshold(long n)    { if (n > 0) { cc_threshold_base = (size_t)n; cc_threshold = (size_t)n; } }
 unsigned long strada_gc_collections(void)   { return cc_collections_count; }
 unsigned long strada_gc_objects_freed(void) { return cc_freed_count; }
 

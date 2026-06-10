@@ -67,6 +67,24 @@ new = post-round-5 tree, both at `-O2`, interleaved best-of-5 on a quiet box:
 | cse      | while ($c{"k"} > 0 && $c{"k"} < 10M) — 10M iterations | 0.167s | 0.139s | 1.2x | condition-level CSE: one probe per evaluation instead of two |
 | sprintf  | 1M small "%d:%s:%05d" formats | 0.235s | 0.207s | 1.1x | 4KB stack buffer + lazy heap growth (also: wide formats no longer truncate) |
 
+## Round 6: adaptive cycle-collector trigger (2026-06-10)
+
+Callgrind on `./stradac compiler/Lexer.strada` (a cycle-free, allocation-heavy
+real workload, stage-2 stradac at -O1, runtime -O2):
+
+| | pre | post |
+|---|---|---|
+| total instructions | 1,101.6M | 975.1M (**−11.5%**) |
+| cc_tab_slot (side-table probes) | 142.7M (13.0%) | 76.3M (7.8%) |
+| cc_each_child + mark/scan edges | ~48M (4.4%) | ~10M (1.0%) |
+
+A collection that frees no cycles now doubles the trigger threshold
+(default 10000 → cap ~1M); a fruitful collection resets it to the base.
+The residual 7.8% in cc_tab_slot is the per-decref candidate-buffering
+probe, which fires regardless of threshold — closing that needs the
+buffered-flag-in-the-value idea (a bit test instead of a hash probe),
+which is the natural follow-up.
+
 ## Investigated and closed: foreach-over-keys codegen fast path
 
 Considered alongside the zero-copy keys work: a dedicated codegen path for

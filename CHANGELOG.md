@@ -37,6 +37,15 @@
   doesn't leak it.
 - Test suite 165 → 166 (`test_perf_round5` covers all six changes incl.
   the keys-COW and wide-sprintf edges).
+- **Cycle collector: adaptive trigger (−11.5% whole-program instructions
+  on cycle-free workloads)**: a collection that frees nothing doubles the
+  candidate threshold (cap ~1M); one that frees cycles resets it to the
+  base (default 10000, settable via `core::gc_threshold`). Profiling
+  stradac compiling Lexer.strada showed ~18% of all instructions in
+  collector phases that never freed a cycle; after: collection phases are
+  ~1%, total Ir 1,101.6M → 975.1M. Cycle reclamation behavior is
+  unchanged for programs that do create cycles (first fruitful collection
+  snaps the trigger back).
 
 ### Performance (rounds 1–4, 2026-06-09/10)
 - **Method dispatch ~2x** (type-opaque call sites): compile-time method-name
