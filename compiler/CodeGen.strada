@@ -249,6 +249,7 @@ func codegen_new(str $filename, int $debug_info, int $enable_profiling, int $ena
     $cg{"anon_capture_count"} = 0; # Number of captures
     $cg{"current_func_name"} = ""; # Current function name for profiling
     $cg{"ret_is_int"} = 0;         # 1 while generating an int-returning function body
+    $cg{"ret_is_num"} = 0;         # 1 while generating a num-returning function body
     $cg{"global_count"} = 0;       # Number of global variables
     my array @empty_globals = ();
     $cg{"globals"} = \@empty_globals;  # Array of global variable declarations
@@ -295,6 +296,8 @@ func codegen_new(str $filename, int $debug_info, int $enable_profiling, int $ena
     # Track int-typed variables for integer arithmetic optimization
     my hash %int_vars = ();
     $cg{"int_vars"} = \%int_vars;
+    my hash %num_vars = ();
+    $cg{"num_vars"} = \%num_vars;
     # Track known blessed types for method devirtualization
     my hash %known_types = ();
     $cg{"known_types"} = \%known_types;
@@ -2506,6 +2509,62 @@ func emit_int_operand(scalar $cg, scalar $expr) void {
 
 # Helper: determine if an expression is guaranteed to produce an integer value
 # Used to select STRADA_MAKE_TAGGED_INT() (zero-alloc) vs strada_new_num() (heap-alloc)
+# True when an expression's value is statically known to be NUMERIC —
+# a tagged int, heap INT, or heap NUM — i.e. canonical storage for a
+# num-declared variable. Strings/refs/unknowns return 0 and get coerced
+# at num boundaries (see the num coercion in declarations/assignment/
+# return). Arithmetic ops always produce numeric values regardless of
+# operand types, so they pass without recursion.
+func expr_is_numeric(scalar $cg, scalar $expr) int {
+    my int $t = $expr->{"type"};
+    if ($t == NODE_NUM_LITERAL() || $t == NODE_INT_LITERAL()) {
+        return 1;
+    }
+    if ($t == NODE_VARIABLE()) {
+        my str $vname = escape_c_keyword($expr->{"name"});
+        if (length("" . $cg->{"num_vars"}->{$vname}) > 0) {
+            return 1;
+        }
+        # int-declared vars are numeric too
+        if (length("" . $cg->{"int_vars"}->{$vname}) > 0) {
+            return 1;
+        }
+        return 0;
+    }
+    if ($t == NODE_BINARY_OP()) {
+        my str $op = $expr->{"op"};
+        if ($op eq "+" || $op eq "-" || $op eq "*" || $op eq "/"
+            || $op eq "%" || $op eq "**") {
+            return 1;
+        }
+        return 0;
+    }
+    if ($t == NODE_UNARY_OP()) {
+        if ($expr->{"op"} eq "-") {
+            return 1;
+        }
+        return 0;
+    }
+    if ($t == NODE_CALL()) {
+        # math:: builtins and the timing calls return owned numerics
+        my str $name = $expr->{"name"};
+        if (length($name) > 6 && substr($name, 0, 6) eq "math::") {
+            return 1;
+        }
+        if (length($name) > 6 && substr($name, 0, 6) eq "core::") {
+            $name = "sys::" . substr($name, 6, length($name) - 6);
+        }
+        if ($name eq "sys::hires_time" || $name eq "sys::time") {
+            return 1;
+        }
+    }
+    # int-typed exprs (incl. int-returning user calls) are numeric
+    if (expr_is_int_typed($cg, $expr) == 1) {
+        return 1;
+    }
+    return 0;
+}
+
 func expr_is_int_typed(scalar $cg, scalar $expr) int {
     my int $type = $expr->{"type"};
     if ($type == NODE_INT_LITERAL()) {

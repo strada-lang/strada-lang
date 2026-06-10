@@ -25,6 +25,16 @@ func gen_block(scalar $cg, scalar $block) void {
 # the value was coerced — the result is then a fresh OWNED value and the
 # caller must skip its return_needs_incref logic.
 func gen_return_value(scalar $cg, scalar $value) int {
+    if ($cg->{"ret_is_num"} == 1 && expr_is_numeric($cg, $value) == 0) {
+        emit($cg, "({ StradaValue *__rcv = ");
+        gen_expression($cg, $value);
+        emit($cg, "; StradaValue *__rcr = strada_new_num(strada_to_num(__rcv)); ");
+        if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $value) == 1) {
+            emit($cg, "strada_decref(__rcv); ");
+        }
+        emit($cg, "__rcr; })");
+        return 1;
+    }
     if ($cg->{"ret_is_int"} == 1 && expr_is_int_typed($cg, $value) == 0) {
         emit($cg, "({ StradaValue *__rcv = ");
         gen_expression($cg, $value);
@@ -77,6 +87,10 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         # Track int-typed variables for arithmetic optimization
         if ($var_type == TYPE_INT()) {
             $cg->{"int_vars"}->{$c_name} = 1;
+        }
+        # Track num-typed variables for the numeric-coercion predicate
+        if ($var_type == TYPE_NUM()) {
+            $cg->{"num_vars"}->{$c_name} = 1;
         }
 
         if ($sigil eq "%" || $var_type == TYPE_HASH()) {
@@ -193,6 +207,16 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     emit($cg, " = STRADA_MAKE_TAGGED_INT((int64_t)strada_size(");
                     gen_expression($cg, $init);
                     emit($cg, "))");
+                } elsif ($var_type == TYPE_NUM() && expr_is_numeric($cg, $init) == 0) {
+                    # num-declared variables hold canonical numerics; coerce
+                    # strings/refs/unknowns (mirrors the int coercion below).
+                    emit($cg, " = ({ StradaValue *__ncv = ");
+                    gen_expression($cg, $init);
+                    emit($cg, "; StradaValue *__ncr = strada_new_num(strada_to_num(__ncv)); ");
+                    if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $init) == 1) {
+                        emit($cg, "strada_decref(__ncv); ");
+                    }
+                    emit($cg, "__ncr; })");
                 } elsif ($var_type == TYPE_INT() && expr_is_int_typed($cg, $init) == 0) {
                     # Int-declared variables hold canonical ints. Previously
                     # `my int $x = $str_scalar` aliased the string pointer
@@ -2006,6 +2030,7 @@ func gen_function(scalar $cg, scalar $fn) void {
         $cg->{"in_main"} = 1;
         $cg->{"has_local"} = 0;
         $cg->{"int_vars"} = {};
+        $cg->{"num_vars"} = {};
         # Store main's package for function call resolution
         $cg->{"current_fn_package"} = $fn->{"package"};
         # Note: previously emitted `__attribute__((flatten))` here for
@@ -2336,6 +2361,10 @@ func gen_function(scalar $cg, scalar $fn) void {
         if ($ret_type_id == TYPE_INT()) {
             $cg->{"ret_is_int"} = 1;
         }
+        $cg->{"ret_is_num"} = 0;
+        if ($ret_type_id == TYPE_NUM()) {
+            $cg->{"ret_is_num"} = 1;
+        }
 
         # Reset local() tracking for this function
         $cg->{"has_local"} = 0;
@@ -2360,6 +2389,7 @@ func gen_function(scalar $cg, scalar $fn) void {
         $cg->{"func_param_skip_wrap"} = [];
         # Reset int_vars tracking for this function (prevents cross-function leaks)
         $cg->{"int_vars"} = {};
+        $cg->{"num_vars"} = {};
         # Detect "leaf-safe" function bodies: bodies that contain only
         # inline-able operations (arithmetic, comparisons, inline accessor
         # calls, literals, ternary) and can never throw or escape the
@@ -2384,6 +2414,10 @@ func gen_function(scalar $cg, scalar $fn) void {
                 if ($param->{"param_type"} == TYPE_INT()) {
                     $cg->{"int_vars"}->{$c_param_name} = 1;
                     $is_int_param = 1;
+                }
+                # Track num-typed params for the numeric-coercion predicate
+                if ($param->{"param_type"} == TYPE_NUM()) {
+                    $cg->{"num_vars"}->{$c_param_name} = 1;
                 }
                 $cg->{"func_param_is_int"}->[$pc] = $is_int_param;
                 # Skip wrap when param is int (tagged-int immortal) OR when
@@ -2481,6 +2515,7 @@ func gen_function(scalar $cg, scalar $fn) void {
 
         $cg->{"current_func_name"} = "";
         $cg->{"ret_is_int"} = 0;
+        $cg->{"ret_is_num"} = 0;
         $cg->{"current_fn_package"} = "";
 
         # Clear func_params

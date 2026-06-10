@@ -1016,12 +1016,36 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
             if ($rhs_type == NODE_TERNARY()) {
                 $needs_incref = return_needs_incref($cg, $rhs);
             }
+            # num-declared targets coerce non-numeric RHS values (mirrors
+            # the int coercion below; numeric = tagged int / heap INT / NUM)
+            my int $tgt_is_num = 0;
+            if ($target_type == NODE_VARIABLE()) {
+                my str $tgt_vname = escape_c_keyword($target->{"name"});
+                if (length("" . $cg->{"num_vars"}->{$tgt_vname}) > 0) {
+                    $tgt_is_num = 1;
+                }
+            }
+            if ($tgt_is_num == 1 && $cg->{"cleanup_enabled"} == 1
+                && expr_is_numeric($cg, $rhs) == 0) {
+                emit($cg, "({ StradaValue *__old = ");
+                gen_expression($cg, $target);
+                emit($cg, "; StradaValue *__ncv = ");
+                gen_expression($cg, $rhs);
+                emit($cg, "; ");
+                gen_expression($cg, $target);
+                emit($cg, " = strada_new_num(strada_to_num(__ncv)); ");
+                if (needs_temp_cleanup($cg, $rhs) == 1) {
+                    emit($cg, "strada_decref(__ncv); ");
+                }
+                emit($cg, "strada_decref(__old); ");
+                gen_expression($cg, $target);
+                emit($cg, "; })");
             # Int-declared targets coerce non-int RHS values to canonical
             # ints — previously `$intvar = $str_scalar` stored the shared
             # string pointer into the "int" variable (type confusion: the
             # variable then printed as the string, and int fast paths read
             # garbage from it).
-            if ($target_type == NODE_VARIABLE() && $cg->{"cleanup_enabled"} == 1
+            } elsif ($target_type == NODE_VARIABLE() && $cg->{"cleanup_enabled"} == 1
                 && expr_is_int_typed($cg, $target) == 1 && expr_is_int_typed($cg, $rhs) == 0) {
                 emit($cg, "({ StradaValue *__old = ");
                 gen_expression($cg, $target);
@@ -4738,6 +4762,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
         my str $saved_capture_str = $cg->{"anon_capture_str"};
         my int $saved_capture_count = $cg->{"anon_capture_count"};
         my int $saved_ret_is_int = $cg->{"ret_is_int"};
+        my int $saved_ret_is_num = $cg->{"ret_is_num"};
 
         # Set up capture context for this closure
         $cg->{"in_anon_func"} = 1;
@@ -4749,6 +4774,10 @@ func gen_expression(scalar $cg, scalar $expr) void {
         $cg->{"ret_is_int"} = 0;
         if ($expr->{"return_type"} == TYPE_INT()) {
             $cg->{"ret_is_int"} = 1;
+        }
+        $cg->{"ret_is_num"} = 0;
+        if ($expr->{"return_type"} == TYPE_NUM()) {
+            $cg->{"ret_is_num"} = 1;
         }
 
         # Build param string from parameters
@@ -4880,6 +4909,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
         $cg->{"anon_capture_str"} = $saved_capture_str;
         $cg->{"anon_capture_count"} = $saved_capture_count;
         $cg->{"ret_is_int"} = $saved_ret_is_int;
+        $cg->{"ret_is_num"} = $saved_ret_is_num;
 
         # Restore func_has_try
         $cg->{"func_has_try"} = $saved_func_has_try;
