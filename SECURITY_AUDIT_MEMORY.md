@@ -15,6 +15,17 @@ _Generated 2026-06-04 via multi-agent review + adversarial verification (26 regi
 
 ## CRITICAL
 
+> **STATUS 2026-06-10 — RESOLVED (already guarded in tree).** The line
+> numbers below predate later edits; the function is now
+> `strada_base64_decode` at ~`runtime/strada_runtime.c:16988`, which already
+> computes `size_t groups = len/4; size_t out_len = groups*3; if (out_len >=
+> pad) out_len -= pad; else out_len = 0;` — exactly the prescribed underflow
+> guard. Every named trigger (`"="`, `"=="`, `"A="`, `"AB="`, and junk that
+> filters to them) was re-run under ASan+UBSan with no out-of-bounds write,
+> and is now a permanent regression test (`examples/test_base64_malformed.strada`,
+> wired into `t/t_core.sh`). No code change was needed; the audit was run
+> against an earlier working tree.
+
 ### 1. Integer underflow in base64 decode output-length computation → undersized alloc + wild OOB write
 - **Location:** `runtime/strada_runtime.c:16326`  (fn `strada_base64_decode`)
 - **Category:** integer-overflow  |  **Attacker-controllable:** yes

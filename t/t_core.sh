@@ -344,6 +344,10 @@ test_output_contains "$EXAMPLES_DIR/test_muldiv_assign.strada" "test_muldiv_assi
 # Test: %=, **=, //=, x= compound assignment (regression: didn't lex/parse)
 test_output_contains "$EXAMPLES_DIR/test_compound_ops.strada" "test_compound_ops" "All compound op tests passed" "Compound op family"
 
+# Test: malformed base64 input must not corrupt memory (SECURITY_AUDIT
+# finding #1 — integer underflow → OOB heap write; guarded in runtime)
+test_output_contains "$EXAMPLES_DIR/test_base64_malformed.strada" "test_base64_malformed" "All malformed-base64 safety tests passed" "Base64 malformed-input safety"
+
 # Test: int-declared storage holds canonical ints (regression: string/NUM
 # values were stored as-is, confusing the int fast paths)
 test_output_contains "$EXAMPLES_DIR/test_int_coercion.strada" "test_int_coercion" "All int coercion tests passed" "Int variable coercion"
