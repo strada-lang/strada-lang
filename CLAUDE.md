@@ -384,6 +384,20 @@ Run leak tests with: `./t/leak_tests/run_leak_tests.sh` (117 tests, incl. `test_
 - `docs/COMPILER_ARCHITECTURE.md` - Compiler internals
 - `docs/RUNTIME_API.md` - Runtime library reference
 
+## Standard Library Additions (2026-06)
+
+- **`lib/Test.strada`** — TAP-emitting test framework: `Test::ok/nok/is/isnt/is_num/like/unlike/pass/fail/skip/diag/plan`, `Test::done_testing()` returns the exit code. Runs under any TAP harness (`prove`).
+- **`lib/List.strada`** — List::Util-style helpers: `reduce/any/all/none/first/sum/product/min/max/minstr/maxstr/uniq/zip/pairs`.
+- **`lib/Exception.strada`** — chainable exceptions (see Error chaining above).
+- **`lib/Async/Scope.strada`**, **`lib/Async/Actor.strada`** — structured concurrency + actors (see Async/Await).
+
+## Standard Library Additions (2026-06)
+
+- **`lib/Test.strada`** — TAP-emitting test framework: `Test::ok/nok/is/isnt/is_num/like/unlike/pass/fail/skip/diag/plan`, `Test::done_testing()` returns the exit code. Runs under any TAP harness (`prove`).
+- **`lib/List.strada`** — List::Util-style helpers: `reduce/any/all/none/first/sum/product/min/max/minstr/maxstr/uniq/zip/pairs`.
+- **`lib/Exception.strada`** — chainable exceptions (see Error chaining above).
+- **`lib/Async/Scope.strada`**, **`lib/Async/Actor.strada`** — structured concurrency + actors (see Async/Await).
+
 ## Conversion Tools
 
 - **perl2strada** — Converts Perl scripts/modules to Strada source. `./perl2strada input.pl output.strada`. Test suite: 266 tests. For running Perl directly, use Perla instead.
@@ -611,8 +625,14 @@ try {
     say($e->{"message"});
 } catch ($e) {                 # Catch-all (must be last)
     say("Unknown: " . $e);
+} finally {                    # Always runs: normal, caught, rethrow,
+    cleanup();                 # catch-throws, return/next/last crossing
 }
 ```
+
+`finally` notes: runs after the try (or catch) completes, before an unmatched/re-thrown exception propagates, and before `return`/`next`/`last` leave the construct (return value is captured first, Java-style). `try { } finally { }` without catch is allowed. Labeled `next`/`last` jumping out of a try/finally skip the finally (documented limitation, mirrors their existing try-frame gap).
+
+**Error chaining**: `core::exception_trace()` returns the Strada call stack captured at the most recent `throw` in this thread (works for plain thrown values, readable inside `catch`). `lib/Exception.strada` provides structured exceptions: `Exception::new($msg)` (captures construction trace), `Exception::wrap($msg, $cause)` (chains any caught value), `->message/->cause/->trace/->describe()` (renders the whole chain).
 
 ### `fn` Shorthand
 

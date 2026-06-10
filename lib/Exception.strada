@@ -1,0 +1,88 @@
+=head1 NAME
+
+Exception - chainable exception objects with captured backtraces
+
+=head1 SYNOPSIS
+
+    use lib "lib";
+    use Exception;
+
+    try {
+        try {
+            throw Exception::new("disk full");
+        } catch ($e) {
+            # wrap and rethrow with context, preserving the cause chain
+            throw Exception::wrap("saving config failed", $e);
+        }
+    } catch ($e) {
+        say($e->message());          # "saving config failed"
+        say($e->cause()->message()); # "disk full"
+        say($e->trace());            # Strada stack trace at construction
+        say($e->describe());         # full chain, outermost first
+    }
+
+=head1 DESCRIPTION
+
+Exceptions in Strada can be any value; Exception provides a structured
+one: a message, an optional C<cause> (the previous error — any value,
+not just Exception objects), and the Strada call stack captured where
+the object was CONSTRUCTED. For non-Exception caught values,
+C<core::exception_trace()> independently returns the stack captured at
+the most recent C<throw>.
+
+Typed catches work as usual: C<catch (Exception $e)>.
+
+=head1 FUNCTIONS / METHODS
+
+Exception::new($message) — new exception, captures the current stack.
+Exception::wrap($message, $cause) — new exception chaining a caught one.
+$e->message() / $e->cause() / $e->trace()
+$e->describe() — multi-line rendering of the whole cause chain.
+
+=cut
+
+package Exception;
+version "1.0.0";
+
+func new(str $message) scalar {
+    my hash %self;
+    $self{"message"} = $message;
+    $self{"trace"} = core::stack_trace();
+    return bless(\%self, "Exception");
+}
+
+func wrap(str $message, scalar $cause) scalar {
+    my scalar $e = new($message);
+    $e->{"cause"} = $cause;
+    return $e;
+}
+
+func message(scalar $self) str {
+    return $self->{"message"};
+}
+
+func cause(scalar $self) scalar {
+    return $self->{"cause"};
+}
+
+func trace(scalar $self) str {
+    return $self->{"trace"};
+}
+
+func describe(scalar $self) str {
+    my str $out = "Exception: " . $self->{"message"} . "\n" . $self->{"trace"};
+    my scalar $c = $self->{"cause"};
+    my int $depth = 0;
+    while (defined($c) && $depth < 16) {
+        if (ref($c) eq "Exception" || isa($c, "Exception")) {
+            $out = $out . "Caused by: " . $c->{"message"} . "\n" . $c->{"trace"};
+            $c = $c->{"cause"};
+        } else {
+            $out = $out . "Caused by: " . $c . "\n";
+            my scalar $u;
+            $c = $u;
+        }
+        $depth = $depth + 1;
+    }
+    return $out;
+}

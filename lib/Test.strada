@@ -1,0 +1,212 @@
+=head1 NAME
+
+Test - TAP-emitting unit-test framework for Strada
+
+=head1 SYNOPSIS
+
+    use lib "lib";
+    use Test;
+
+    Test::plan(4);                       # optional; or rely on done_testing
+    ok(1 + 1 == 2, "arithmetic works");
+    is(uc("hi"), "HI", "uc");
+    like("hello world", "wor\\w+", "regex match");
+    isnt("a", "b", "different");
+    return Test::done_testing();         # exit code: 0 = all passed
+
+=head1 DESCRIPTION
+
+Test::More-style assertions with TAP (Test Anything Protocol) output, so
+suites run under any TAP harness (`prove`, CI parsers) as well as bare.
+Counter and failure state are module-internal — no object to thread
+through. `done_testing()` prints the plan (if `plan()` wasn't called),
+a summary diagnostic on failure, and returns the exit code for `main`.
+
+=head1 FUNCTIONS
+
+ok($cond, $name) / nok($cond, $name) — truthy / falsy assertion.
+is($got, $expected, $name) — string equality (eq), undef-safe.
+isnt($got, $unexpected, $name) — string inequality.
+is_num($got, $expected, $name) — numeric equality (==).
+like($str, $pattern, $name) / unlike(...) — dynamic regex match.
+pass($name) / fail($name) — unconditional results.
+diag($msg) — TAP comment ("# ...") to stderr-safe stdout.
+plan($n) — declare the expected test count up front.
+skip($reason, $name) — report a skipped test (counts as ok).
+done_testing() — emit plan/summary; returns 0 if all passed, 1 otherwise.
+
+=cut
+
+package Test;
+version "1.0.0";
+
+# Counter state lives in C statics (module-level `our` registration is
+# not wired for use-included modules; the __C__ pattern is the
+# established alternative and is faster anyway).
+__C__ {
+static int64_t __test_count = 0;
+static int64_t __test_fails = 0;
+static int64_t __test_planned = 0;
+static int __test_plan_emitted = 0;
+}
+
+private func _next() int {
+    my int $n = 0;
+    __C__ {
+        strada_decref(n);
+        n = strada_new_int(++__test_count);
+    }
+    return $n;
+}
+
+private func _count() int {
+    my int $n = 0;
+    __C__ { strada_decref(n); n = strada_new_int(__test_count); }
+    return $n;
+}
+
+private func _failed() int {
+    my int $n = 0;
+    __C__ { strada_decref(n); n = strada_new_int(__test_fails); }
+    return $n;
+}
+
+private func _mark_fail() void {
+    __C__ { __test_fails++; }
+}
+
+private func _set_plan(int $n) void {
+    __C__ {
+        __test_planned = strada_to_int(n);
+        __test_plan_emitted = 1;
+    }
+}
+
+private func _planned() int {
+    my int $n = 0;
+    __C__ { strada_decref(n); n = strada_new_int(__test_planned); }
+    return $n;
+}
+
+private func _plan_emitted() int {
+    my int $n = 0;
+    __C__ { strada_decref(n); n = strada_new_int(__test_plan_emitted); }
+    return $n;
+}
+
+func plan(int $n) void {
+    _set_plan($n);
+    say("1.." . $n);
+}
+
+func diag(str $msg) void {
+    say("# " . $msg);
+}
+
+func pass(str $name) int {
+    say("ok " . _next() . " - " . $name);
+    return 1;
+}
+
+func fail(str $name) int {
+    _mark_fail();
+    say("not ok " . _next() . " - " . $name);
+    return 0;
+}
+
+func ok(scalar $cond, str $name) int {
+    if ($cond) {
+        return pass($name);
+    }
+    return fail($name);
+}
+
+func nok(scalar $cond, str $name) int {
+    if ($cond) {
+        return fail($name);
+    }
+    return pass($name);
+}
+
+func is(scalar $got, scalar $expected, str $name) int {
+    my int $both_undef = 0;
+    if (!defined($got) && !defined($expected)) { $both_undef = 1; }
+    if ($both_undef == 1 || (defined($got) && defined($expected) && ("" . $got) eq ("" . $expected))) {
+        return pass($name);
+    }
+    fail($name);
+    diag("  got:      " . (defined($got) ? "'" . $got . "'" : "undef"));
+    diag("  expected: " . (defined($expected) ? "'" . $expected . "'" : "undef"));
+    return 0;
+}
+
+func isnt(scalar $got, scalar $unexpected, str $name) int {
+    if (defined($got) != defined($unexpected)) {
+        return pass($name);
+    }
+    if (!defined($got)) {
+        fail($name);
+        diag("  both undef");
+        return 0;
+    }
+    if (("" . $got) ne ("" . $unexpected)) {
+        return pass($name);
+    }
+    fail($name);
+    diag("  got unwanted: '" . $got . "'");
+    return 0;
+}
+
+func is_num(scalar $got, scalar $expected, str $name) int {
+    if (defined($got) && ($got + 0) == ($expected + 0)) {
+        return pass($name);
+    }
+    fail($name);
+    diag("  got:      " . (defined($got) ? "" . $got : "undef"));
+    diag("  expected: " . $expected);
+    return 0;
+}
+
+func like(scalar $s, str $pattern, str $name) int {
+    my str $str = "" . $s;
+    if ($str =~ /$pattern/) {
+        return pass($name);
+    }
+    fail($name);
+    diag("  '" . $str . "' does not match /" . $pattern . "/");
+    return 0;
+}
+
+func unlike(scalar $s, str $pattern, str $name) int {
+    my str $str = "" . $s;
+    if ($str =~ /$pattern/) {
+        fail($name);
+        diag("  '" . $str . "' unexpectedly matches /" . $pattern . "/");
+        return 0;
+    }
+    return pass($name);
+}
+
+func skip(str $reason, str $name) int {
+    say("ok " . _next() . " - " . $name . " # SKIP " . $reason);
+    return 1;
+}
+
+func done_testing() int {
+    my int $count = _count();
+    my int $fails = _failed();
+    if (_plan_emitted() == 0) {
+        say("1.." . $count);
+    } else {
+        my int $want = _planned();
+        if ($want != $count) {
+            say("# Looks like you planned " . $want . " tests but ran " . $count . ".");
+            $fails = $fails + 1;
+        }
+    }
+    if ($fails > 0) {
+        say("# FAILED " . $fails . " of " . $count . " tests");
+        return 1;
+    }
+    return 0;
+}

@@ -45,8 +45,9 @@ exception is the type system.
    thread-pool parallelism, not M:N cooperative concurrency.
 4. **No Language Server / IDE integration.** No completion, go-to-def, hover, or
    diagnostics — likely the biggest adoption blocker after types.
-5. **No in-language unit-test framework.** Testing is shell-driven (compile +
-   match stdout). No `ok`/`is`/`like`, no TAP/Test::More, no mocking.
+5. ~~No in-language unit-test framework~~ ✅ shipped 2026-06-10:
+   `lib/Test.strada` (TAP output, Test::More-style assertions,
+   `done_testing` exit codes). Mocking still absent.
 
 ## The rest, by theme
 
@@ -67,11 +68,14 @@ exception is the type system.
   reflection (can't enumerate a class's methods/attrs — the `has` schema isn't
   retained at runtime), no runtime monkey-patching (can't register a Strada
   closure as a method), `BEGIN` runs at `main()` startup not compile time.
-- **Control-flow / errors:** no Result/Option or `?` operator, **no `finally`**,
-  no error chaining/cause/backtrace on *caught* errors, `switch`/`case` is
+- **Control-flow / errors:** no Result/Option or `?` operator, ~~no
+  `finally`~~ ✅ (full semantics incl. catch-throws and return/next/last
+  crossing, 2026-06-10), ~~no error chaining~~ ✅ (`core::exception_trace`
+  + `lib/Exception.strada` cause chains, 2026-06-10), `switch`/`case` is
   `strcmp`-only (not an expression, no binding/exhaustiveness), no
-  comprehensions, ranges are eager (`1..1e6` materializes), no value-producing
-  `do {}` block, no `reduce`/`any`/`all` builtins.
+  comprehensions, ranges are eager outside foreach (`1..1e6`
+  materializes), no value-producing `do {}` block, ~~no
+  `reduce`/`any`/`all`~~ ✅ (`lib/List.strada`, 2026-06-10).
 - **FFI / low-level:** ~~no closure→C-callback trampoline~~ ✅ shipped
   2026-06-10 (`c::callback` via libffi — qsort/libcurl/GTK callbacks work);
   still missing: structs/unions by value, compiler-known struct layout

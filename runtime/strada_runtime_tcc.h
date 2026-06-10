@@ -222,6 +222,7 @@ typedef struct {
  * go through the exported helpers (tcc TLS support is unreliable). */
 jmp_buf *strada_try_push_slot(void);
 int strada_try_pop_slot(void);
+StradaValue* strada_exception_trace_get(void);  /* core::exception_trace */
 /* The exception slots are thread-local in the runtime and never referenced
  * directly by generated code (it goes through strada_get_exception /
  * strada_throw*) — no declarations here, since tcc can't parse __thread. */

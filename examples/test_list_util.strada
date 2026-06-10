@@ -1,0 +1,49 @@
+# List:: helpers — and a dogfood of the new Test framework (TAP output).
+
+use lib "lib";
+use Test;
+use List;
+
+func main() int {
+    my array @nums = (3, 1, 4, 1, 5, 9, 2, 6);
+    my array @empty = ();
+
+    Test::is(List::reduce(fn (scalar $a, scalar $x) scalar { return $a + $x; }, \@nums, 0),
+             31, "reduce sum");
+    Test::is(List::reduce(fn (scalar $a, scalar $x) scalar { return $a . $x; }, \@nums, ""),
+             "31415926", "reduce concat");
+    Test::is(List::reduce(fn (scalar $a, scalar $x) scalar { return $a + $x; }, \@empty, 7),
+             7, "reduce empty -> initial");
+
+    Test::ok(List::any(fn (scalar $x) int { return $x > 8; }, \@nums), "any matches");
+    Test::nok(List::any(fn (scalar $x) int { return $x > 100; }, \@nums), "any no match");
+    Test::ok(List::all(fn (scalar $x) int { return $x < 10; }, \@nums), "all under 10");
+    Test::nok(List::all(fn (scalar $x) int { return $x < 9; }, \@nums), "all fails on 9");
+    Test::ok(List::all(fn (scalar $x) int { return 0; }, \@empty), "all vacuous on empty");
+    Test::ok(List::none(fn (scalar $x) int { return $x < 0; }, \@nums), "none negative");
+
+    Test::is(List::first(fn (scalar $x) int { return $x % 2 == 0; }, \@nums), 4, "first even");
+    my scalar $nf = List::first(fn (scalar $x) int { return $x > 100; }, \@nums);
+    Test::nok(defined($nf), "first miss -> undef");
+
+    Test::is(List::sum(\@nums), 31, "sum");
+    Test::is(List::sum(\@empty), 0, "sum empty");
+    Test::is(List::product([2, 3, 4]), 24, "product");
+    Test::is(List::min(\@nums), 1, "min");
+    Test::is(List::max(\@nums), 9, "max");
+    Test::nok(defined(List::min(\@empty)), "min empty -> undef");
+    Test::is(List::minstr(["pear", "apple", "fig"]), "apple", "minstr");
+    Test::is(List::maxstr(["pear", "apple", "fig"]), "pear", "maxstr");
+
+    my array @u = List::uniq([1, 1, 2, 3, 2, "a", "a"]);
+    Test::is(join(",", @u), "1,2,3,a", "uniq order");
+
+    my array @z = List::zip([1, 2, 3], ["a", "b"]);
+    Test::is(size(@z), 2, "zip shorter length");
+    Test::is($z[0]->[0] . $z[0]->[1] . $z[1]->[0] . $z[1]->[1], "1a2b", "zip pairs");
+
+    my array @p = List::pairs(["k1", "v1", "k2", "v2"]);
+    Test::is($p[1]->[0] . "=" . $p[1]->[1], "k2=v2", "pairs");
+
+    return Test::done_testing();
+}

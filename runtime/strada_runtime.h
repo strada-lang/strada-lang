@@ -927,6 +927,7 @@ extern __thread int strada_try_depth;
 #endif
 jmp_buf *strada_try_push_slot(void);   /* tcc-callable macro twins */
 int strada_try_pop_slot(void);
+StradaValue* strada_exception_trace_get(void);  /* core::exception_trace */
 #ifdef STRADA_NO_TLS
 extern char *strada_exception_msg;
 extern StradaValue *strada_exception_value;

@@ -2640,6 +2640,13 @@ func gen_builtin_g3(scalar $cg, scalar $expr, str $name) int {
         # strada_future_new TAKES OWNERSHIP of the closure: owned temps
         # (anon fns) pass straight through; borrowed variables get an
         # incref so the future's teardown doesn't steal the variable's ref.
+        # core::exception_trace() — the call stack captured at the most
+        # recent throw in this thread (readable inside catch blocks).
+        if ($name eq "sys::exception_trace") {
+            emit($cg, "strada_exception_trace_get()");
+            return 1;
+        }
+
         if ($name eq "async::spawn") {
             my scalar $spargs = $expr->{"args"};
             if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $spargs->[0]) == 1) {

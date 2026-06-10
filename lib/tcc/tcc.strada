@@ -238,6 +238,7 @@ static void libtcc_add_runtime_symbols(TCCState *s) {
     ADD_SYM(strada_tls_get);
     ADD_SYM(strada_tls_exists);
     ADD_SYM(strada_tls_delete);
+    ADD_SYM(strada_exception_trace_get);
     ADD_SYM(strada_split);
     ADD_SYM(strada_char_at);
     ADD_SYM(strada_array_push);

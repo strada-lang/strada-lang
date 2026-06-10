@@ -8160,12 +8160,22 @@ StradaTryContext strada_try_stack[STRADA_MAX_TRY_DEPTH];
 int strada_try_depth = 0;
 char *strada_exception_msg = NULL;
 StradaValue *strada_exception_value = NULL;  /* Typed exception support */
+static char *strada_exception_trace = NULL;  /* call stack at last throw */
 #else
 __thread StradaTryContext strada_try_stack[STRADA_MAX_TRY_DEPTH];
 __thread int strada_try_depth = 0;
 __thread char *strada_exception_msg = NULL;
 __thread StradaValue *strada_exception_value = NULL;  /* Typed exception support */
+static __thread char *strada_exception_trace = NULL;  /* call stack at last throw */
 #endif
+
+/* core::exception_trace() — the Strada call stack captured at the moment
+ * of the most recent throw in THIS thread (empty string when stack
+ * tracing is disabled or nothing has thrown). Survives the catch, so an
+ * error handler can log where a caught error came from. */
+StradaValue* strada_exception_trace_get(void) {
+    return strada_new_str(strada_exception_trace ? strada_exception_trace : "");
+}
 
 /* tcc-callable twins of the STRADA_TRY_PUSH/POP macros (the macros index
  * the TLS arrays directly, which tcc can't reliably compile). setjmp
@@ -8406,6 +8416,9 @@ int strada_in_try_block(void) {
 }
 
 void strada_throw(const char *msg) {
+    /* Capture where this throw happened (see strada_throw_value). */
+    if (strada_exception_trace) free(strada_exception_trace);
+    strada_exception_trace = strada_capture_stack_trace();
     /* Free previous exception message if any */
     if (strada_exception_msg) {
         free(strada_exception_msg);
@@ -8433,6 +8446,10 @@ void strada_throw(const char *msg) {
 }
 
 void strada_throw_value(StradaValue *sv) {
+    /* Capture where this throw happened (per-thread; readable in the
+     * catch via core::exception_trace). Cheap: throws are exceptional. */
+    if (strada_exception_trace) free(strada_exception_trace);
+    strada_exception_trace = strada_capture_stack_trace();
     /* Store the actual exception value for typed catches */
     /* Take ownership of sv directly - caller transfers ownership */
     if (strada_exception_value) {
@@ -14067,6 +14084,7 @@ static void strada_thread_state_cleanup(void) {
      * UNCONSUMED exception value — in its TLS at exit. */
     if (strada_exception_msg) { free(strada_exception_msg); strada_exception_msg = NULL; }
     if (strada_exception_value) { strada_decref(strada_exception_value); strada_exception_value = NULL; }
+    if (strada_exception_trace) { free(strada_exception_trace); strada_exception_trace = NULL; }
 }
 
 static void* strada_thread_wrapper(void *arg) {

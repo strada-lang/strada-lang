@@ -708,6 +708,10 @@ if [ $TOTAL -eq 0 ]; then
                 test_skip "$name" "Server program (runs indefinitely)"
                 continue
                 ;;
+            test_test_framework_fails|test_exit_error)
+                test_skip "$name" "Intentionally exits nonzero (covered by registered exit-code tests)"
+                continue
+                ;;
         esac
 
         if [ $COMPILE_ONLY -eq 1 ]; then

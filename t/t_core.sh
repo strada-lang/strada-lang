@@ -374,6 +374,20 @@ test_output_contains "$EXAMPLES_DIR/test_perf_round5.strada" "test_perf_round5" 
 # Test: flattened multi-part concat (strada_concat_multi — interpolation chains)
 test_output_contains "$EXAMPLES_DIR/test_concat_multi.strada" "test_concat_multi" "All concat-multi tests passed" "Multi-part concat flattening"
 
+# Test: the in-language Test framework (TAP output, exit codes)
+test_output_contains "$EXAMPLES_DIR/test_test_framework.strada" "test_test_framework" "1..10" "Test framework (TAP)"
+test_exit_code "$EXAMPLES_DIR/test_test_framework_fails.strada" "test_test_framework_fails" 1 "Test framework failure exit"
+
+# Test: error chaining (Exception objects, core::exception_trace)
+test_output_contains "$EXAMPLES_DIR/test_exception_chain.strada" "test_exception_chain" "1..12" "Error chaining"
+
+# Test: List:: helpers (reduce/any/all/first/sum/min/max/uniq/zip/pairs)
+test_output_contains "$EXAMPLES_DIR/test_list_util.strada" "test_list_util" "1..23" "List utilities"
+
+# Test: try/catch/finally semantics (normal, caught, unmatched-rethrow,
+# catch-throws, no-catch, return-crossing, loop next/last)
+test_output_contains "$EXAMPLES_DIR/test_finally.strada" "test_finally" "All finally tests passed" "try/finally"
+
 # Test: concurrency ergonomics (async::select/spawn/sleep/map,
 # thread::tls_*, Async::Scope nursery, Async::Actor)
 test_output_contains "$EXAMPLES_DIR/test_async_ergonomics.strada" "test_async_ergonomics" "All async ergonomics tests passed" "Concurrency ergonomics" 30

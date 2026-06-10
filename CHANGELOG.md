@@ -2,6 +2,28 @@
 
 ## Unreleased (since `0da0455`, 2026-06-09 → 2026-06-10)
 
+### Language & stdlib (2026-06-10)
+- **`finally`** — full semantics: runs on normal completion, after catch,
+  before unmatched/re-thrown exceptions propagate (guard-frame around the
+  catch dispatch, so a THROWING catch body runs it too), and before
+  `return`/`next`/`last` leave the construct (return value captured
+  first). `try {} finally {}` without catch supported. Contextual
+  keyword — `finally` remains a valid identifier elsewhere. Known
+  limitation: labeled next/last crossing try/finally skip it (mirrors
+  their pre-existing try-frame gap).
+- **`lib/Test.strada`** — TAP test framework (ok/is/isnt/is_num/like/
+  unlike/pass/fail/skip/diag/plan/done_testing); failure sets the exit
+  code; runs under `prove`.
+- **`lib/List.strada`** — reduce/any/all/none/first/sum/product/min/max/
+  minstr/maxstr/uniq/zip/pairs.
+- **Error chaining** — `core::exception_trace()` returns the call stack
+  captured at the most recent throw (plain values included);
+  `lib/Exception.strada` adds structured exceptions with `wrap`-style
+  cause chains and `describe()` rendering.
+- Fixed in passing: closure capture analysis (catch/foreach vars in anon
+  fns — see thread round) had already landed; the test-suite fallback
+  runner now skips intentionally-failing fixtures. Suite 172 → 177.
+
 ### Concurrency ergonomics (2026-06-10)
 Closes the ROADMAP Tier-2 list:
 
