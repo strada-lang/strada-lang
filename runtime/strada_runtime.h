@@ -469,8 +469,38 @@ StradaString *ss_new(const char *s, uint32_t len, uint32_t hash);
 StradaString *strada_intern_attr_ss(const char *key, unsigned int hash);
 char *strada_intern_pkg_name(const char *s);
 void ss_decref_slow(StradaString *ss);  /* handles pool return or free */
-static inline void ss_incref(StradaString *ss) { if (ss) ss->refcount++; }
-static inline void ss_decref(StradaString *ss) { if (ss && --ss->refcount == 0) ss_decref_slow(ss); }
+/* Set once when the first thread is created (defined in the runtime).
+ * Gates the atomic branch in refcount ops — single-threaded programs
+ * keep the plain increment. */
+extern int strada_threading_active;
+/* SS refcounts must be atomic under threading, same as StradaValue
+ * refcounts: strings cross threads both directly and via zero-copy
+ * shares (keys()/each() hand out SVs sharing hash-key StradaStrings,
+ * strada_to_str_ss hands out borrowed data pointers). A plain ++/--
+ * raced and could double-free or leak the string backbone.
+ * Same shape as strada_incref/strada_decref: the runtime exports real
+ * functions (for tcc-compiled code and .so ABI); other TUs get the
+ * static-inline fast path. */
+#ifdef STRADA_RUNTIME_IMPL
+void ss_incref(StradaString *ss);
+void ss_decref(StradaString *ss);
+#else
+static inline void ss_incref(StradaString *ss) {
+    if (!ss) return;
+    if (strada_threading_active)
+        __sync_add_and_fetch(&ss->refcount, 1);
+    else
+        ss->refcount++;
+}
+static inline void ss_decref(StradaString *ss) {
+    if (!ss) return;
+    if (strada_threading_active) {
+        if (__sync_sub_and_fetch(&ss->refcount, 1) == 0) ss_decref_slow(ss);
+    } else {
+        if (--ss->refcount == 0) ss_decref_slow(ss);
+    }
+}
+#endif
 
 /* Recover StradaString header from a data pointer (value.pv points to ss->data).
  * sizeof(StradaString) equals the offset of data[] for flexible array members. */
@@ -947,9 +977,17 @@ typedef struct {
 
 /* Slot 0 is a permanent sentinel frame; live frames occupy 1..depth. This
  * lets the per-call-site line store (strada_stack_line_il) be a single
- * unconditional write — depth 0 harmlessly hits the sentinel. */
+ * unconditional write — depth 0 harmlessly hits the sentinel.
+ * THREAD-LOCAL: each thread tracks its own frames — a shared stack
+ * interleaved pushes/pops across threads (garbled traces, and a racy
+ * depth check could write one slot past the array). */
+#ifdef STRADA_NO_TLS
 extern StradaStackFrame strada_call_stack[STRADA_MAX_CALL_DEPTH + 1];
 extern int strada_call_depth;
+#else
+extern __thread StradaStackFrame strada_call_stack[STRADA_MAX_CALL_DEPTH + 1];
+extern __thread int strada_call_depth;
+#endif
 extern int strada_recursion_limit;  /* Configurable limit (default 1000, 0 = disabled) */
 extern int strada_pending_call_line;  /* set by codegen at each call site; strada_stack_push consumes */
 

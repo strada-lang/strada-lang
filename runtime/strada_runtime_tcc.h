@@ -167,9 +167,12 @@ typedef struct StradaString {
     char data[];
 } StradaString;
 StradaString *ss_new(const char *s, uint32_t len, uint32_t hash);
+/* Exported runtime functions (threading-safe: atomic refcounts when
+ * threads are active). tcc code must NOT inline these — tcc's __sync
+ * builtin support is unreliable, so always call the runtime symbols. */
 void ss_incref(StradaString *ss);
+void ss_decref(StradaString *ss);
 void ss_decref_slow(StradaString *ss);
-#define ss_decref(ss) do { if ((ss) && --(ss)->refcount == 0) ss_decref_slow(ss); } while(0)
 /* Recover the StradaString header from a value.pv (= &ss->data). */
 #define SS_FROM_PV(pv) ((StradaString*)((char*)(pv) - sizeof(StradaString)))
 
@@ -713,9 +716,10 @@ typedef struct {
 } StradaStackFrame;
 
 /* Slot 0 is a permanent sentinel frame; live frames occupy 1..depth
- * (must match strada_runtime.h). */
-extern StradaStackFrame strada_call_stack[STRADA_MAX_CALL_DEPTH + 1];
-extern int strada_call_depth;
+ * (must match strada_runtime.h). The arrays are THREAD-LOCAL in the
+ * runtime; tcc-compiled code must not reference them directly (tcc TLS
+ * support varies) — the _il fast-path names are mapped to the exported
+ * runtime functions below instead. */
 extern int strada_recursion_limit;  /* Configurable limit (default 1000, 0 = disabled) */
 extern int strada_pending_call_line;  /* set by codegen at each call site; strada_stack_push consumes */
 
@@ -723,27 +727,12 @@ void strada_stack_push(const char *func_name, const char *file_name);
 void strada_stack_pop(void);
 void strada_stack_set_line(int line);
 
-/* Inline fast paths (codegen-emitted) — see strada_runtime.h. No
- * __builtin_expect here: keep the stripped header tcc-friendly. */
-static inline void strada_stack_push_il(const char *func_name, const char *file_name) {
-    int d = strada_call_depth;
-    if (d >= STRADA_MAX_CALL_DEPTH
-        || (strada_recursion_limit > 0 && d >= strada_recursion_limit)) {
-        strada_stack_push(func_name, file_name);  /* limit/overflow handling */
-        return;
-    }
-    strada_call_depth = d + 1;
-    StradaStackFrame *f = &strada_call_stack[d + 1];
-    f->func_name = func_name;
-    f->file_name = file_name;
-    f->line = 0;
-}
-static inline void strada_stack_pop_il(void) {
-    if (strada_call_depth > 0) strada_call_depth--;
-}
-static inline void strada_stack_line_il(int line) {
-    strada_call_stack[strada_call_depth].line = line;
-}
+/* The gcc header inlines these against the thread-local stack; for tcc
+ * (whose TLS support is unreliable) route the codegen-emitted _il names
+ * to the exported runtime functions — same semantics, one call. */
+#define strada_stack_push_il strada_stack_push
+#define strada_stack_pop_il  strada_stack_pop
+#define strada_stack_line_il strada_stack_set_line
 void strada_print_stack_trace(void);
 char* strada_capture_stack_trace(void);
 void strada_set_recursion_limit(int limit);

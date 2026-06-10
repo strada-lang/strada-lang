@@ -667,6 +667,8 @@ $str =~ tr/a-z/A-Z/;                # Transliteration (tr///, y///)
 
 PCRE2 features: `*?`, `+?`, `\b`, `(?=...)`, `(?<=...)`, `(?:...)`, `(?P<name>...)`, `/s`, `/x`, `$1`-`$9` backreferences.
 
+**Threading**: match state (`$1`/`captures()`/`$&`/pre-postmatch) and the compiled-pattern cache are **thread-local** — one thread's match never bleeds into another's view (Perl semantics). Worker threads free their regex TLS on exit.
+
 ### File Test Operators
 
 ```strada

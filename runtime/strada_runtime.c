@@ -118,8 +118,10 @@ static inline size_t strada_next_pow2(size_t n) {
 #define SS_POOL_ALLOC_SIZE (sizeof(StradaString) + SS_POOL_DATA_MAX + 1)
 /* The StradaString free-list (like the sv/instance pools) is single-threaded
  * only — it has no lock, so concurrent push/pop corrupt the stack (double-free
- * at exit). Bypassed when threads are active. Forward decl; defined later. */
-static int strada_threading_active;
+ * at exit). Bypassed when threads are active. Forward decl; defined later.
+ * NON-static: the header-inline ss_incref/ss_decref gate their atomic
+ * branch on it from user TUs (mirrors strada_incref's gate). */
+extern int strada_threading_active;
 static StradaString *ss_pool_stack[SS_POOL_MAX];
 static int ss_pool_count = 0;
 
@@ -169,6 +171,26 @@ StradaString *strada_intern_attr_ss(const char *key, unsigned int hash) {
 }
 
 /* ===== StradaString implementation ===== */
+
+/* Exported SS refcount ops (STRADA_RUNTIME_IMPL branch of the header):
+ * tcc-compiled code and pre-built .so modules call these symbols; gcc
+ * TUs use the header's static-inline twins. Keep the bodies in sync. */
+void ss_incref(StradaString *ss) {
+    if (!ss) return;
+    if (strada_threading_active)
+        __sync_add_and_fetch(&ss->refcount, 1);
+    else
+        ss->refcount++;
+}
+void ss_decref(StradaString *ss) {
+    if (!ss) return;
+    if (strada_threading_active) {
+        if (__sync_sub_and_fetch(&ss->refcount, 1) == 0) ss_decref_slow(ss);
+    } else {
+        if (--ss->refcount == 0) ss_decref_slow(ss);
+    }
+}
+
 StradaString *ss_new(const char *s, uint32_t len, uint32_t hash) {
     StradaString *ss;
     if (!strada_threading_active && len <= SS_POOL_DATA_MAX && ss_pool_count > 0) {
@@ -308,7 +330,7 @@ static void strada_meta_pool_cleanup(void) {
 #define SV_TIED_OBJ(sv) ((sv)->meta ? (sv)->meta->tied_obj : NULL)
 
 /* Forward declaration — defined in async section below */
-static int strada_threading_active;
+extern int strada_threading_active;
 
 /* Forward declaration — used by strada_to_str for tagged ints */
 static inline int strada_fast_itoa(int64_t val, char *buf);
@@ -1006,7 +1028,7 @@ StradaValue* strada_new_filehandle(FILE *fh) {
 /* ===== REFERENCE COUNTING ===== */
 
 /* When threading is inactive, skip expensive atomic operations */
-static int strada_threading_active = 0;
+int strada_threading_active = 0;
 
 void strada_incref(StradaValue *sv) {
     if (!sv || STRADA_IS_TAGGED_INT(sv)) return;
@@ -1812,7 +1834,11 @@ void strada_cstr_free(char *s) {
 /* strada_to_str — returns strdup'd char* for backward compatibility.
  * Caller MUST free() the result. Used by __C__ blocks and bootstrap. */
 char* strada_to_str(StradaValue *sv) {
-    static char buf[128];
+    /* Stack scratch, NOT static: the buffer is formatted then strdup'd, and
+     * a shared static raced under threads (two threads stringifying ints
+     * concurrently interleaved in the buffer before the copy — silently
+     * garbled values). */
+    char buf[128];
     if (STRADA_IS_TAGGED_INT(sv)) {
         strada_fast_itoa(STRADA_TAGGED_INT_VAL(sv), buf);
         return strdup(buf);
@@ -8150,9 +8176,15 @@ int (*strada_die_continue_hook)(void) = NULL;
 /* Call stack for stack traces */
 /* Slot 0 is a permanent sentinel ({NULL,NULL,0} from zero-init); live
  * frames occupy 1..depth. See the inline fast paths in strada_runtime.h —
- * the sentinel makes strada_stack_line_il a single unconditional store. */
+ * the sentinel makes strada_stack_line_il a single unconditional store.
+ * Thread-local: per-thread traces (see header comment). */
+#ifdef STRADA_NO_TLS
 StradaStackFrame strada_call_stack[STRADA_MAX_CALL_DEPTH + 1];
 int strada_call_depth = 0;
+#else
+__thread StradaStackFrame strada_call_stack[STRADA_MAX_CALL_DEPTH + 1];
+__thread int strada_call_depth = 0;
+#endif
 int strada_recursion_limit = 1000;  /* Default limit; 0 = disabled */
 
 void strada_set_recursion_limit(int limit) {
@@ -9585,18 +9617,18 @@ static char *pcre2_expand_xbrace(const char *pattern) {
 }
 
 /* Global storage for last regex captures */
-static StradaValue *last_regex_captures = NULL;
+static __thread StradaValue *last_regex_captures = NULL;
 /* Global storage for last named captures (PCRE2 only) */
-static StradaValue *last_named_captures = NULL;
+static __thread StradaValue *last_named_captures = NULL;
 /* Global storage for $` (prematch) and $' (postmatch) */
-static StradaValue *last_prematch_sv = NULL;
-static StradaValue *last_postmatch_sv = NULL;
+static __thread StradaValue *last_prematch_sv = NULL;
+static __thread StradaValue *last_postmatch_sv = NULL;
 /* Global storage for @- (match start offsets) and @+ (match end offsets).
  * Index 0 = whole-match offset; index N (N>0) = N-th capture group offset.
  * On match failure, both are empty arrays (Perl: @-/@+ stay set to previous,
  * but we follow the simpler "cleared on failure" semantics). */
-static StradaValue *last_match_starts = NULL;
-static StradaValue *last_match_ends = NULL;
+static __thread StradaValue *last_match_starts = NULL;
+static __thread StradaValue *last_match_ends = NULL;
 static int regex_cleanup_registered = 0;
 
 /* ---- Lazy capture materialization ------------------------------------
@@ -9611,7 +9643,9 @@ static int regex_cleanup_registered = 0;
  * globals directly — it makes the materializers no-ops so those paths keep
  * their existing behavior. */
 #define PM_OVEC_INLINE 33   /* whole match + 32 groups, inline (no malloc) */
-static struct {
+/* THREAD-LOCAL: a thread's match must not publish $&/captures state into
+ * another thread's view, and the reusable subject buffer raced. */
+static __thread struct {
     uint64_t gen;            /* 0 = no lazy match yet; bumped on each success */
     int      external;       /* globals owned by an eager setter; skip lazy build */
     char    *subject;        /* reusable buffer holding the matched subject bytes */
@@ -9772,10 +9806,15 @@ typedef struct {
     uint64_t last_used;
 } RegexCacheEntry;
 
-static RegexCacheEntry regex_cache[REGEX_CACHE_SIZE];
-static int regex_cache_count = 0;
-static uint64_t regex_cache_counter = 0;
-static int regex_cache_initialized = 0;
+/* THREAD-LOCAL: a shared cache raced on eviction (one thread frees a
+ * compiled pattern while another is mid-match on it). Per-thread caches
+ * cost at most REGEX_CACHE_SIZE compiles per thread; worker threads'
+ * caches are reclaimed by the OS at thread exit (the atexit sweep only
+ * walks the main thread's). */
+static __thread RegexCacheEntry regex_cache[REGEX_CACHE_SIZE];
+static __thread int regex_cache_count = 0;
+static __thread uint64_t regex_cache_counter = 0;
+static __thread int regex_cache_initialized = 0;
 
 static void regex_cache_init(void) {
     memset(regex_cache, 0, sizeof(regex_cache));
@@ -9933,7 +9972,12 @@ static uint32_t strada_md_valid_pairs(const pcre2_code *re, pcre2_match_data *md
     return (cc + 1 < cap) ? cc + 1 : cap;
 }
 
-static void regex_cleanup_atexit(void) {
+/* Free THIS thread's regex state: capture SVs, the lazy-$& buffers, the
+ * reusable match data, and the compiled-pattern cache — all thread-local,
+ * so worker threads must run this on exit (strada_thread_wrapper /
+ * strada_pool_worker) or every exited thread leaks its set. The atexit
+ * path reuses it for the main thread. */
+static void strada_regex_thread_cleanup(void) {
     if (last_regex_captures) { strada_decref(last_regex_captures); last_regex_captures = NULL; }
     if (last_named_captures) { strada_decref(last_named_captures); last_named_captures = NULL; }
     if (last_prematch_sv) { strada_decref(last_prematch_sv); last_prematch_sv = NULL; }
@@ -9948,6 +9992,10 @@ static void regex_cleanup_atexit(void) {
         strada_md_cache_ovec = 0;
     }
     regex_cache_cleanup();
+}
+
+static void regex_cleanup_atexit(void) {
+    strada_regex_thread_cleanup();
 }
 
 StradaValue* strada_regex_compile(const char *pattern, const char *flags) {
@@ -11190,10 +11238,15 @@ typedef struct {
     int valid;
 } RegexCacheEntry;
 
-static RegexCacheEntry regex_cache[REGEX_CACHE_SIZE];
-static int regex_cache_count = 0;
-static uint64_t regex_cache_counter = 0;
-static int regex_cache_initialized = 0;
+/* THREAD-LOCAL: a shared cache raced on eviction (one thread frees a
+ * compiled pattern while another is mid-match on it). Per-thread caches
+ * cost at most REGEX_CACHE_SIZE compiles per thread; worker threads'
+ * caches are reclaimed by the OS at thread exit (the atexit sweep only
+ * walks the main thread's). */
+static __thread RegexCacheEntry regex_cache[REGEX_CACHE_SIZE];
+static __thread int regex_cache_count = 0;
+static __thread uint64_t regex_cache_counter = 0;
+static __thread int regex_cache_initialized = 0;
 
 static void regex_cache_init(void) {
     memset(regex_cache, 0, sizeof(regex_cache));
@@ -11302,12 +11355,17 @@ int strada_regex_match(const char *str, const char *pattern) {
 }
 
 /* Global storage for last regex captures */
-static StradaValue *last_regex_captures = NULL;
+static __thread StradaValue *last_regex_captures = NULL;
 static int regex_cleanup_registered = 0;
 
-static void regex_cleanup_atexit(void) {
+/* Per-thread regex state cleanup (see the PCRE2 twin). */
+static void strada_regex_thread_cleanup(void) {
     if (last_regex_captures) { strada_decref(last_regex_captures); last_regex_captures = NULL; }
     regex_cache_cleanup();
+}
+
+static void regex_cleanup_atexit(void) {
+    strada_regex_thread_cleanup();
 }
 
 int strada_regex_match_with_capture(const char *str, const char *pattern, const char *flags) {
@@ -13539,7 +13597,13 @@ const char* strada_caller(int level) {
     
     if (level >= 0 && (size_t)level < size) {
         strings = backtrace_symbols(array, size);
+        /* Returned to the caller, so it can't be stack — thread-local
+         * keeps concurrent callers from clobbering each other. */
+#ifdef STRADA_NO_TLS
         static char result[256];
+#else
+        static __thread char result[256];
+#endif
         snprintf(result, sizeof(result), "%s", strings[level]);
         free(strings);
         return result;
@@ -13966,6 +14030,10 @@ static void* strada_thread_wrapper(void *arg) {
     cc_thread_register();   /* count this thread for stop-the-world before it mutates */
     /* Call the closure with 0 arguments */
     st->result = strada_closure_call(st->closure, 0);
+    /* Free this thread's regex TLS (capture SVs, pattern cache, lazy-$&
+     * buffers) — heap blocks pointed to by TLS leak at thread exit
+     * otherwise, unboundedly for create/join loops. */
+    strada_regex_thread_cleanup();
     /* If detached, clean up our own resources since no one will join us */
     if (st->detached) {
         if (st->result) strada_decref(st->result);
@@ -14188,6 +14256,9 @@ static void* strada_pool_worker(void *arg) {
 
         if (!pool->running && pool->queue_head == NULL) {
             pthread_mutex_unlock(&pool->queue_mutex);
+            /* Free this worker's regex TLS before exiting (see
+             * strada_thread_wrapper). */
+            strada_regex_thread_cleanup();
             cc_thread_unregister();
             break;  /* Shutdown */
         }
@@ -25004,6 +25075,9 @@ typedef struct StradaFFICallback {
 
 static StradaFFICallback *strada_ffi_registry = NULL;
 static int strada_ffi_atexit_registered = 0;
+/* Registry mutation is cold (callback create/free) — always lock, no
+ * threading-active gate needed. */
+static pthread_mutex_t strada_ffi_registry_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static void strada_ffi_free_cb(StradaFFICallback *cb) {
     if (cb->strada_closure) strada_decref(cb->strada_closure);
@@ -25167,27 +25241,32 @@ StradaValue* strada_ffi_callback_new(StradaValue *closure, StradaValue *ret_sv, 
 
     strada_incref(closure);
     cb->strada_closure = closure;
+    pthread_mutex_lock(&strada_ffi_registry_mutex);
     cb->next = strada_ffi_registry;
     strada_ffi_registry = cb;
     if (!strada_ffi_atexit_registered) {
         strada_ffi_atexit_registered = 1;
         atexit(strada_ffi_atexit);
     }
+    pthread_mutex_unlock(&strada_ffi_registry_mutex);
     return strada_new_int((int64_t)(intptr_t)cb->code_ptr);
 }
 
 StradaValue* strada_ffi_callback_free(StradaValue *cb_sv) {
     void *code = (void *)(intptr_t)strada_to_int(cb_sv);
+    pthread_mutex_lock(&strada_ffi_registry_mutex);
     StradaFFICallback **link = &strada_ffi_registry;
     while (*link) {
         if ((*link)->code_ptr == code) {
             StradaFFICallback *cb = *link;
             *link = cb->next;
+            pthread_mutex_unlock(&strada_ffi_registry_mutex);
             strada_ffi_free_cb(cb);
             return strada_new_int(1);
         }
         link = &(*link)->next;
     }
+    pthread_mutex_unlock(&strada_ffi_registry_mutex);
     return strada_new_int(0);
 }
 

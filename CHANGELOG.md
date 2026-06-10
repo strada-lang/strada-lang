@@ -2,6 +2,38 @@
 
 ## Unreleased (since `0da0455`, 2026-06-09 → 2026-06-10)
 
+### Thread safety (round 2, 2026-06-10)
+The `7b8c8f0`/`0da0455` hardening made the object graph thread-safe
+(atomic SV refcounts, locked registry, stop-the-world collector) but
+stopped at the string layer, scratch state, and diagnostics. This round
+closes the holes found while reading those paths during the perf work:
+
+- **StradaString refcounts are atomic under threading** — strings cross
+  threads directly and via zero-copy shares (`keys()`/`each()`,
+  `strada_to_str_ss` borrows); the plain `++`/`--` raced (double-free or
+  leak of the string backbone). Same threading-active gate as SV
+  refcounts; the runtime now also EXPORTS `ss_incref`/`ss_decref` (real
+  symbols for tcc-compiled code and .so ABI; gcc TUs keep the inline).
+- **`strada_to_str` integer scratch is per-call** — it was a shared
+  `static char[128]`: two threads stringifying integers concurrently
+  silently garbled each other's digits before the strdup.
+- **Regex state is thread-local** — `$1`/`captures()`/`$&`/prematch/
+  postmatch, the lazy-`$&` machinery, the reusable match data, and both
+  compiled-pattern caches (a shared cache raced on eviction: one thread
+  frees a pcre2_code mid-match in another). Worker threads free their
+  regex TLS on exit (`strada_thread_wrapper` / pool workers) so
+  create/join loops don't leak per thread.
+- **The call stack is thread-local** — traces and `core::caller()` are
+  per-thread (a shared stack interleaved frames across threads and had a
+  racy bounds check). tcc-compiled code maps the `_il` fast-path names to
+  the exported functions (tcc TLS support varies); gcc keeps the inlines.
+- **The FFI callback registry is mutex-guarded** (`c::callback` from
+  multiple threads raced the list).
+- New `test_thread_state` regression: 4 concurrent contexts hammer
+  per-thread regex captures, integer stringification, zero-copy keys()
+  of a shared hash, and caller() coherence; valgrind-clean including
+  thread exits. Suite 170 → 171.
+
 ### Performance (round 5, 2026-06-10)
 - **`keys()`/`each()` zero-copy (~3x on keys-iteration)**: key result SVs
   share the hash key's `StradaString` instead of copying every key's bytes.

@@ -18,6 +18,11 @@ exception is the type system.
   under threading, locked global registry, pool/cleanup-stack fixes.
 - **Cycle collector under threading** (`0da0455`): a stop-the-world pause so
   threaded programs no longer leak reference cycles. This was Tier-1 #2 below.
+- **Thread-safety round 2** (2026-06-10): atomic StradaString refcounts,
+  per-call to_str scratch, thread-local regex state ($1/captures/$&/
+  pattern caches) with worker-exit cleanup, thread-local call stacks,
+  mutex-guarded FFI callback registry. The remaining concurrency work in
+  Tier-2 below is ergonomics, not safety.
 - **Type-system Stage 0** (2026-06-10): `--strict-types` warning layer —
   `stage0_expr_type`/`stage0_types_compatible` in Semantic.strada wired into
   decl-init, assignment, call args, and return. Bivariant scalar/dynamic,

@@ -1,0 +1,130 @@
+# Regression tests for the 2026-06 thread-safety round:
+#   - StradaString refcounts are atomic under threading (strings shared
+#     across threads via zero-copy keys()/to_str_ss borrows)
+#   - strada_to_str's int-format scratch is per-call (was a shared static
+#     that silently garbled concurrent integer stringification)
+#   - regex match state ($1/captures/$&) and the compiled-pattern cache
+#     are thread-local (one thread's match can't bleed into another's)
+#   - the call stack is thread-local (core::caller() coherent per thread)
+#
+# Each worker validates ITS OWN results inside the loop and returns a
+# failure count; main sums them. Failures under the old shared-state
+# runtime were probabilistic — the loops are sized to make cross-thread
+# bleed overwhelmingly likely while keeping the test fast.
+
+func worker_regex(int $id) int {
+    my int $bad = 0;
+    my str $tag = "tag" . $id;
+    my int $i = 0;
+    while ($i < 2000) {
+        my str $subject = "pre-" . $tag . "-post";
+        if ($subject =~ /pre-(tag\d+)-post/) {
+            my array @c = captures();
+            if ($c[1] ne $tag) { $bad = $bad + 1; }
+        } else {
+            $bad = $bad + 1;
+        }
+        $i = $i + 1;
+    }
+    return $bad;
+}
+
+func worker_tostr(int $id) int {
+    # Distinct per-thread numeric ranges: a shared scratch buffer made
+    # concurrent stringifications bleed digits between threads.
+    my int $bad = 0;
+    my int $base = $id * 1000000;
+    my int $i = 0;
+    while ($i < 5000) {
+        my int $n = $base + $i;
+        my str $s = "" . $n;
+        if ($s ne ("" . $base + $i)) { }   # keep both paths hot
+        my int $rt = $s + 0;
+        if ($rt != $n) { $bad = $bad + 1; }
+        $i = $i + 1;
+    }
+    return $bad;
+}
+
+func worker_keys(scalar $href, int $id) int {
+    # Hammer zero-copy keys() of a SHARED hash from several threads:
+    # key SVs share the hash keys' StradaStrings, so every iteration
+    # increfs/decrefs shared SS refcounts (atomic now; raced before).
+    my int $bad = 0;
+    my int $i = 0;
+    while ($i < 1500) {
+        my int $seen = 0;
+        foreach my $k (keys(%{$href})) {
+            if (length($k) > 0) { $seen = $seen + 1; }
+        }
+        if ($seen != 20) { $bad = $bad + 1; }
+        $i = $i + 1;
+    }
+    return $bad;
+}
+
+func trace_inner(int $id) str {
+    my scalar $info = core::caller();
+    return $info->{"function"};
+}
+
+func worker_trace(int $id) int {
+    # Per-thread call stacks: caller() must see THIS thread's frames.
+    my int $bad = 0;
+    my int $i = 0;
+    while ($i < 2000) {
+        my str $fn = trace_inner($id);
+        if ($fn ne "worker_trace") { $bad = $bad + 1; }
+        $i = $i + 1;
+    }
+    return $bad;
+}
+
+func main() int {
+    my int $fails = 0;
+
+    # Shared hash for the keys() workers
+    my hash %shared;
+    foreach my $i (0..19) {
+        $shared{"shared_key_number_" . $i} = $i;
+    }
+
+    # Thread failures must FAIL the test: captures are by-reference, so
+    # workers add into a mutex-guarded shared counter.
+    my int $thread_bad = 0;
+    my scalar $mtx = thread::mutex_new();
+    my array @threads = ();
+    foreach my $id (1..3) {
+        my int $tid = $id;
+        push(@threads, thread::create(func () {
+            my int $b = worker_regex($tid);
+            $b = $b + worker_tostr($tid);
+            $b = $b + worker_keys(\%shared, $tid);
+            $b = $b + worker_trace($tid);
+            if ($b > 0) {
+                say("thread " . $tid . " bad=" . $b);
+                thread::mutex_lock($mtx);
+                $thread_bad = $thread_bad + $b;
+                thread::mutex_unlock($mtx);
+            }
+        }));
+    }
+    # Main thread participates too (4 concurrent contexts)
+    my int $main_bad = worker_regex(9);
+    $main_bad = $main_bad + worker_tostr(9);
+    $main_bad = $main_bad + worker_keys(\%shared, 9);
+    $main_bad = $main_bad + worker_trace(9);
+    if ($main_bad > 0) { say("main bad=" . $main_bad); $fails = $fails + 1; }
+
+    foreach my $t (@threads) {
+        thread::join($t);
+    }
+    if ($thread_bad > 0) { $fails = $fails + 1; }
+
+    if ($fails == 0) {
+        say("All thread-state tests passed");
+    } else {
+        say($fails . " thread-state tests FAILED");
+    }
+    return 0;
+}
