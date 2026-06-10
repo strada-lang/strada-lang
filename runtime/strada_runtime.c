@@ -24914,6 +24914,60 @@ StradaValue* strada_c_alloc(StradaValue *size_sv) {
  * is undefined, same as every other runtime entry point. */
 #ifdef HAVE_LIBFFI
 
+/* libffi is loaded LAZILY via dlopen at the first c::callback call, so
+ * binaries carry no -lffi link dependency (ffi.h is only needed at BUILD
+ * time, for the struct layouts and prototypes below). Function AND data
+ * symbols (the ffi_type_* descriptors) resolve via dlsym. */
+static void *strada_ffi_dl = NULL;
+static int strada_ffi_load_failed = 0;
+static ffi_status (*p_ffi_prep_cif)(ffi_cif *, ffi_abi, unsigned, ffi_type *, ffi_type **);
+static void *(*p_ffi_closure_alloc)(size_t, void **);
+static ffi_status (*p_ffi_prep_closure_loc)(ffi_closure *, ffi_cif *,
+                                            void (*)(ffi_cif *, void *, void **, void *),
+                                            void *, void *);
+static void (*p_ffi_closure_free)(void *);
+static ffi_type *p_ffi_type_void;
+static ffi_type *p_ffi_type_sint32;
+static ffi_type *p_ffi_type_sint64;
+static ffi_type *p_ffi_type_double;
+static ffi_type *p_ffi_type_pointer;
+
+static int strada_ffi_load(void) {
+    if (strada_ffi_dl) return 1;
+    if (strada_ffi_load_failed) return 0;
+    static const char *names[] = {
+#ifdef __APPLE__
+        "libffi.8.dylib", "libffi.dylib",
+#else
+        "libffi.so.8", "libffi.so.7", "libffi.so.6", "libffi.so",
+#endif
+        NULL
+    };
+    for (int i = 0; names[i]; i++) {
+        strada_ffi_dl = dlopen(names[i], RTLD_NOW | RTLD_LOCAL);
+        if (strada_ffi_dl) break;
+    }
+    if (!strada_ffi_dl) { strada_ffi_load_failed = 1; return 0; }
+    p_ffi_prep_cif         = (ffi_status (*)(ffi_cif *, ffi_abi, unsigned, ffi_type *, ffi_type **))dlsym(strada_ffi_dl, "ffi_prep_cif");
+    p_ffi_closure_alloc    = (void *(*)(size_t, void **))dlsym(strada_ffi_dl, "ffi_closure_alloc");
+    p_ffi_prep_closure_loc = (ffi_status (*)(ffi_closure *, ffi_cif *, void (*)(ffi_cif *, void *, void **, void *), void *, void *))dlsym(strada_ffi_dl, "ffi_prep_closure_loc");
+    p_ffi_closure_free     = (void (*)(void *))dlsym(strada_ffi_dl, "ffi_closure_free");
+    p_ffi_type_void    = (ffi_type *)dlsym(strada_ffi_dl, "ffi_type_void");
+    p_ffi_type_sint32  = (ffi_type *)dlsym(strada_ffi_dl, "ffi_type_sint32");
+    p_ffi_type_sint64  = (ffi_type *)dlsym(strada_ffi_dl, "ffi_type_sint64");
+    p_ffi_type_double  = (ffi_type *)dlsym(strada_ffi_dl, "ffi_type_double");
+    p_ffi_type_pointer = (ffi_type *)dlsym(strada_ffi_dl, "ffi_type_pointer");
+    if (!p_ffi_prep_cif || !p_ffi_closure_alloc || !p_ffi_prep_closure_loc
+        || !p_ffi_closure_free || !p_ffi_type_void || !p_ffi_type_sint32
+        || !p_ffi_type_sint64 || !p_ffi_type_double || !p_ffi_type_pointer) {
+        dlclose(strada_ffi_dl);
+        strada_ffi_dl = NULL;
+        strada_ffi_load_failed = 1;
+        return 0;
+    }
+    return 1;
+}
+
 #define STRADA_FFI_MAX_ARGS 8
 
 typedef struct StradaFFICallback {
@@ -24933,7 +24987,7 @@ static int strada_ffi_atexit_registered = 0;
 
 static void strada_ffi_free_cb(StradaFFICallback *cb) {
     if (cb->strada_closure) strada_decref(cb->strada_closure);
-    if (cb->closure_mem) ffi_closure_free(cb->closure_mem);
+    if (cb->closure_mem) p_ffi_closure_free(cb->closure_mem);
     free(cb);
 }
 
@@ -24961,12 +25015,12 @@ static char strada_ffi_typecode(const char *name, size_t len) {
 
 static ffi_type *strada_ffi_type_for(char code) {
     switch (code) {
-        case 'i': return &ffi_type_sint64;
-        case '3': return &ffi_type_sint32;
-        case 'd': return &ffi_type_double;
-        case 'p': return &ffi_type_pointer;
-        case 's': return &ffi_type_pointer;
-        case 'v': return &ffi_type_void;
+        case 'i': return p_ffi_type_sint64;
+        case '3': return p_ffi_type_sint32;
+        case 'd': return p_ffi_type_double;
+        case 'p': return p_ffi_type_pointer;
+        case 's': return p_ffi_type_pointer;
+        case 'v': return p_ffi_type_void;
     }
     return NULL;
 }
@@ -25021,6 +25075,10 @@ StradaValue* strada_ffi_callback_new(StradaValue *closure, StradaValue *ret_sv, 
         strada_die("c::callback: first argument must be a closure or function reference");
         return strada_new_int(0);
     }
+    if (!strada_ffi_load()) {
+        strada_die("c::callback: libffi.so could not be loaded at runtime (install libffi, e.g. libffi8)");
+        return strada_new_int(0);
+    }
     char rbuf[32];
     const char *rname = strada_to_str_buf(ret_sv, rbuf, sizeof(rbuf));
     char retcode = strada_ffi_typecode(rname, strlen(rname));
@@ -25068,20 +25126,20 @@ StradaValue* strada_ffi_callback_new(StradaValue *closure, StradaValue *ret_sv, 
         if (*p == ',') p++;
     }
 
-    if (ffi_prep_cif(&cb->cif, FFI_DEFAULT_ABI, (unsigned)cb->nargs,
-                     strada_ffi_type_for(cb->retsig), cb->atypes) != FFI_OK) {
+    if (p_ffi_prep_cif(&cb->cif, FFI_DEFAULT_ABI, (unsigned)cb->nargs,
+                       strada_ffi_type_for(cb->retsig), cb->atypes) != FFI_OK) {
         free(cb);
         strada_die("c::callback: ffi_prep_cif failed");
         return strada_new_int(0);
     }
-    cb->closure_mem = ffi_closure_alloc(sizeof(ffi_closure), &cb->code_ptr);
+    cb->closure_mem = p_ffi_closure_alloc(sizeof(ffi_closure), &cb->code_ptr);
     if (!cb->closure_mem) {
         free(cb);
         strada_die("c::callback: ffi_closure_alloc failed");
         return strada_new_int(0);
     }
-    if (ffi_prep_closure_loc(cb->closure_mem, &cb->cif, strada_ffi_handler, cb, cb->code_ptr) != FFI_OK) {
-        ffi_closure_free(cb->closure_mem);
+    if (p_ffi_prep_closure_loc(cb->closure_mem, &cb->cif, strada_ffi_handler, cb, cb->code_ptr) != FFI_OK) {
+        p_ffi_closure_free(cb->closure_mem);
         free(cb);
         strada_die("c::callback: ffi_prep_closure_loc failed");
         return strada_new_int(0);

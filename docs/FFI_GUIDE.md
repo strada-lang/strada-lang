@@ -361,8 +361,12 @@ c::free($buf);
 - Only invoke the pointer from threads the Strada runtime knows about —
   a foreign thread (e.g. a curl multi worker thread) calling into the
   runtime is undefined behavior, the same as any other runtime entry.
-- Requires libffi at build time (`./configure` auto-detects it). Built
-  without libffi, `c::callback` dies at runtime with a clear message.
+- **No link dependency**: binaries never link `-lffi`. `ffi.h` is needed
+  at build time only (`./configure` auto-detects it; `--without-libffi`
+  opts out); `libffi.so` is dlopen'd lazily at the first `c::callback`
+  call. If it isn't installed on the deploy box, `c::callback` dies with
+  a clear message naming the library — programs that never mint a
+  callback have no libffi requirement at all.
 
 ---
 

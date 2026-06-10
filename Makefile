@@ -116,9 +116,6 @@ else
 LDFLAGS += $(PCRE2_LIBS)
 endif
 endif
-ifeq ($(HAVE_LIBFFI),1)
-LDFLAGS += $(FFI_LIBS)
-endif
 RUNTIME_DIR = runtime
 BOOTSTRAP_DIR = bootstrap
 COMPILER_DIR = compiler

@@ -140,7 +140,7 @@ are based on POSIX threads underneath.
 | `c::write_float(ptr, val)` | `scalar, num → void` | Write a float at ptr. |
 | `c::write_double(ptr, val)` | `scalar, num → void` | Write a double at ptr. |
 | `c::write_ptr(ptr, val)` | `scalar, scalar → void` | Write a pointer at ptr. |
-| `c::callback(fn, ret, args)` | `scalar, str, str → scalar` | Mint a C function pointer (libffi trampoline) that invokes the Strada closure. `ret`: `void`/`int`/`int32`/`num`/`ptr`; `args`: comma list of `int`/`int32`/`num`/`ptr`/`str` (max 8). Returns the pointer as an int address. Requires libffi at build time. |
+| `c::callback(fn, ret, args)` | `scalar, str, str → scalar` | Mint a C function pointer (libffi trampoline) that invokes the Strada closure. `ret`: `void`/`int`/`int32`/`num`/`ptr`; `args`: comma list of `int`/`int32`/`num`/`ptr`/`str` (max 8). Returns the pointer as an int address. No link dep: libffi.so loads lazily at first use. |
 | `c::callback_free(cb)` | `scalar → int` | Release a `c::callback` trampoline (1 = freed, 0 = unknown). Unfreed trampolines are reclaimed at exit. |
 | `c::sizeof_int()` | `→ int` | sizeof(int) on this platform (usually 4). |
 | `c::sizeof_long()` | `→ int` | sizeof(long) (8 on 64-bit Linux/macOS). |

@@ -52,9 +52,6 @@ EXTRA_LDFLAGS=""
 if [ "${STRADA_HAVE_PCRE2:-0}" = "1" ]; then
     EXTRA_LDFLAGS="$EXTRA_LDFLAGS $STRADA_PCRE2_LIBS"
 fi
-if [ "${STRADA_HAVE_LIBFFI:-0}" = "1" ]; then
-    EXTRA_LDFLAGS="$EXTRA_LDFLAGS $STRADA_FFI_LIBS"
-fi
 
 # Memory limit for compiler processes (in KB). Prevents runaway memory from
 # killing the system. 2 GB should be more than enough for any test program.

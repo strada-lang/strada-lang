@@ -749,10 +749,8 @@ if [ "${STRADA_HAVE_PCRE2:-0}" = "1" ]; then
     LINK_FLAGS="$LINK_FLAGS $STRADA_PCRE2_LIBS"
 fi
 
-# Add libffi if available (c::callback trampolines live in the runtime)
-if [ "${STRADA_HAVE_LIBFFI:-0}" = "1" ]; then
-    LINK_FLAGS="$LINK_FLAGS $STRADA_FFI_LIBS"
-fi
+# NOTE: no -lffi here — c::callback dlopens libffi lazily at first use,
+# so binaries carry no libffi link dependency.
 
 # Build extra source/object file lists (plain extern C files — Strada module
 # .o/.a files are forwarded to stradac via --import-object/--import-archive

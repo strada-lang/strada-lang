@@ -573,7 +573,7 @@ c::callback_free($cmp);        # optional; an exit-time registry sweep frees sur
 - Signature strings: return = `void`/`int` (int64)/`int32`/`num`/`ptr`; args = comma list of `int`/`int32`/`num`/`ptr`/`str` (max 8). `str` args arrive as Strada strings (NULL → undef); `str` returns are not supported (no safe ownership). `ptr` values travel as int addresses (pair with `c::read_*`/`c::write_*`).
 - Argument/return marshaling and closure invocation go through `strada_ffi_callback_new` → libffi `ffi_prep_closure_loc` → `strada_closure_call`. Captures and `our` globals work inside the callback.
 - The trampoline holds an incref on the closure until `c::callback_free` or process exit. Only invoke from threads the Strada runtime knows about.
-- Requires libffi at build time (`./configure` auto-detects; without it, `c::callback` dies with a clear message at runtime).
+- Requires `ffi.h` at build time only (`./configure` auto-detects; `--without-libffi` opts out). **No link dependency**: binaries never link `-lffi` — `libffi.so` is dlopen'd lazily at the first `c::callback` call, and a clear runtime error names the missing library if it isn't installed.
 
 ### Module System
 
