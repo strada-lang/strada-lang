@@ -11,7 +11,7 @@ RUBY=${RUBY:-ruby}
 NODE=${NODE:-node}
 PHP=${PHP:-php}
 
-ALL_BENCHMARKS="bench_compute bench_strings bench_array_hash bench_functions bench_oop"
+ALL_BENCHMARKS="bench_compute bench_strings bench_array_hash bench_functions bench_oop bench_hotpaths"
 
 usage() {
     echo "Usage: $0 [OPTIONS] [BENCHMARK ...]"
@@ -25,6 +25,9 @@ usage() {
     echo ""
     echo "Options:"
     echo "  -r, --runs N    Number of runs per benchmark (default: 3)"
+    echo "  -a, --all       Run all languages (default: strada, node, php —"
+    echo "                  perl/python/ruby are slow and skipped by default)"
+    echo "      --langs L   Comma-separated language list (e.g. --langs perl,node)"
     echo "  -l, --list      List available benchmarks and exit"
     echo "  -h, --help      Show this help message"
     echo ""
@@ -34,6 +37,10 @@ usage() {
     echo "  $0 bench_oop bench_strings  # Run two benchmarks"
     echo "  $0 -r 5 bench_compute      # Run bench_compute with 5 runs"
 }
+
+# Default comparison set: perl/python/ruby take much longer than the rest,
+# so they only run with -a/--all or an explicit --langs list.
+LANGS="strada node php"
 
 SELECTED=()
 while [[ $# -gt 0 ]]; do
@@ -45,6 +52,14 @@ while [[ $# -gt 0 ]]; do
         -l|--list)
             for b in $ALL_BENCHMARKS; do echo "$b"; done
             exit 0
+            ;;
+        -a|--all)
+            LANGS="strada perl python ruby node php"
+            shift
+            ;;
+        --langs)
+            LANGS="strada $(echo "$2" | tr ',' ' ')"
+            shift 2
             ;;
         -r|--runs)
             RUNS="$2"
@@ -113,6 +128,14 @@ for bench in $BENCHMARKS; do
 done
 echo ""
 
+# Is a language in the active comparison set?
+lang_enabled() {
+    case " $LANGS " in
+        *" $1 "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # Time a command, return seconds as a decimal string
 # Usage: best_time <runs> <command...>
 best_time() {
@@ -164,7 +187,7 @@ for bench in $BENCHMARKS; do
     RESULTS["$bench,strada"]="$st"
 
     # Perl
-    if command -v $PERL &>/dev/null && [ -f "${bench}.pl" ]; then
+    if lang_enabled perl && command -v $PERL &>/dev/null && [ -f "${bench}.pl" ]; then
         pl=$(best_time $RUNS $PERL "${bench}.pl")
         printf " %9ss" "$pl"
     else
@@ -174,7 +197,7 @@ for bench in $BENCHMARKS; do
     RESULTS["$bench,perl"]="$pl"
 
     # Python
-    if command -v $PYTHON &>/dev/null && [ -f "${bench}.py" ]; then
+    if lang_enabled python && command -v $PYTHON &>/dev/null && [ -f "${bench}.py" ]; then
         py=$(best_time $RUNS $PYTHON "${bench}.py")
         printf " %9ss" "$py"
     else
@@ -184,7 +207,7 @@ for bench in $BENCHMARKS; do
     RESULTS["$bench,python"]="$py"
 
     # Ruby
-    if command -v $RUBY &>/dev/null && [ -f "${bench}.rb" ]; then
+    if lang_enabled ruby && command -v $RUBY &>/dev/null && [ -f "${bench}.rb" ]; then
         rb=$(best_time $RUNS $RUBY "${bench}.rb")
         printf " %9ss" "$rb"
     else
@@ -194,7 +217,7 @@ for bench in $BENCHMARKS; do
     RESULTS["$bench,ruby"]="$rb"
 
     # Node
-    if command -v $NODE &>/dev/null && [ -f "${bench}.js" ]; then
+    if lang_enabled node && command -v $NODE &>/dev/null && [ -f "${bench}.js" ]; then
         js=$(best_time $RUNS $NODE "${bench}.js")
         printf " %9ss" "$js"
     else
@@ -204,7 +227,7 @@ for bench in $BENCHMARKS; do
     RESULTS["$bench,node"]="$js"
 
     # PHP
-    if command -v $PHP &>/dev/null && [ -f "${bench}.php" ]; then
+    if lang_enabled php && command -v $PHP &>/dev/null && [ -f "${bench}.php" ]; then
         ph=$(best_time $RUNS $PHP "${bench}.php")
         printf " %9ss" "$ph"
     else

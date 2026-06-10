@@ -55,3 +55,35 @@ tools/strada-profhtml
 tools/strada-proftext
 tools/strada-repl.c
 /test_nesso
+
+# ── repo-root whitelist ──
+# Ad-hoc test binaries (t1, verify_foo, repro, …) constantly land in the
+# repo root during development; there were ~400 of them. Ignore everything
+# at top level except the known project files and directories — a new
+# tracked root entry needs a !/name line here.
+/*
+!/.gitignore
+!/CLAUDE.md
+!/CLAUDE_DEEP_DIVE.md
+!/FEATURES.md
+!/LICENSE
+!/Makefile
+!/README.md
+!/configure
+!/strada
+!/benchmarks/
+!/bootstrap/
+!/compiler/
+!/docs/
+!/examples/
+!/interpreter/
+!/lib/
+!/perl/
+!/runtime/
+!/t/
+!/tools/
+!/vendor/
+
+# Compiled benchmark binaries (extensionless siblings of bench_*.strada)
+benchmarks/bench_*
+!benchmarks/bench_*.*

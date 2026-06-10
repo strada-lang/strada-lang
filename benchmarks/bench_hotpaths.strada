@@ -1,0 +1,94 @@
+# Hot-path microbenchmarks targeting the runtime/codegen paths that the
+# 2026-06 optimization rounds changed. The general suite (bench_oop etc.)
+# is blind to most of these: bench_oop's method calls devirtualize (the
+# codegen knows the receiver type from the constructor), and bench_strings
+# uses .= which was already an in-place append. This file defeats those
+# fast paths on purpose:
+#
+#   dispatch — receiver fetched from an array, so the type is opaque and
+#              calls go through strada_method_call_cs (the inline caches);
+#              a modifier registered on an unrelated class keeps the
+#              modifier gate honest
+#   hash     — counter idiom with computed keys (strada_hv_compound)
+#   range    — foreach over an int range (native C loop emission)
+#   concat   — $a . $b on large strings (strada_concat_sv flag handling)
+#   objects  — constructor + accessor (inline-constructor path; a control:
+#              none of the optimization rounds targeted it)
+#
+# Reference numbers (this box, -O2): benchmarks/BASELINE.md
+
+package Greeter;
+has rw int $n = 0;
+func bump(scalar $self) int { return $self->n() + 1; }
+
+package Other;
+func poke(scalar $self) int { return 1; }
+before "poke" func(scalar $self) void { }
+
+package main;
+
+func main() int {
+    my num $t0 = core::hires_time();
+
+    # 1. dynamic dispatch: receiver type opaque to the codegen
+    my array @objs;
+    push(@objs, Greeter::new("n", 5));
+    my int $sum = 0;
+    my int $i = 0;
+    while ($i < 5000000) {
+        my scalar $p = $objs[0];
+        $sum += $p->bump();
+        $i++;
+    }
+    my num $t1 = core::hires_time();
+    say("dispatch: " . $sum . " " . ($t1 - $t0));
+
+    # 2. hash counter loop with computed keys
+    my hash %c;
+    my int $j = 0;
+    while ($j < 10000000) {
+        my int $k = $j % 100;
+        $c{"key" . $k} += 1;
+        $j++;
+    }
+    my num $t2 = core::hires_time();
+    say("hash: " . $c{"key0"} . " " . ($t2 - $t1));
+
+    # 3. range foreach
+    my int $rsum = 0;
+    foreach my int $r (0..20000000) {
+        $rsum += $r;
+    }
+    my num $t3 = core::hires_time();
+    say("range: " . $rsum . " " . ($t3 - $t2));
+
+    # 4. concat_sv on large strings. The tail alternates per iteration and
+    # a mid-string byte is read so a JIT can neither hoist the concat out
+    # of the loop as loop-invariant nor leave the result as an
+    # unmaterialized cons-string — every language pays the copy.
+    my str $big = "y" x 100000;
+    my array @tails;
+    push(@tails, "z" x 1000);
+    push(@tails, "w" x 1000);
+    my int $clen = 0;
+    my int $m = 0;
+    while ($m < 20000) {
+        my str $t = $big . $tails[$m % 2];
+        $clen += length($t) + core::get_byte($t, 50000);
+        $m++;
+    }
+    my num $t4 = core::hires_time();
+    say("concat: " . $clen . " " . ($t4 - $t3));
+
+    # 5. object construction + accessor
+    my int $obj = 0;
+    my int $o = 0;
+    while ($o < 2000000) {
+        my scalar $p = Greeter::new("n", $o % 100);
+        $obj += $p->n();
+        $o++;
+    }
+    my num $t5 = core::hires_time();
+    say("objects: " . $obj . " " . ($t5 - $t4));
+    return 0;
+}
