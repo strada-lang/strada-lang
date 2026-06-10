@@ -3651,6 +3651,34 @@ func gen_array_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op)
         $aca_autoviv = 1;
         $arr_cleanup = 0;
     }
+
+    # Single-pass fast path: the supported ops compile to one
+    # strada_array_compound call — one deref + one bounds check + an
+    # in-place slot update instead of array_get + compute + array_set.
+    # Mirrors the strada_hv_compound emission in gen_hash_compound_assign.
+    my str $aca_opch = "";
+    if ($op eq "+=") { $aca_opch = "'+'"; }
+    elsif ($op eq "-=") { $aca_opch = "'-'"; }
+    elsif ($op eq "*=") { $aca_opch = "'*'"; }
+    elsif ($op eq "/=") { $aca_opch = "'/'"; }
+    elsif ($op eq ".=") { $aca_opch = "'.'"; }
+    if (length($aca_opch) > 0) {
+        emit($cg, "({ StradaValue *__aca_arr = ");
+        if ($aca_autoviv == 1) {
+            $cg->{"autoviv"} = 2;
+        }
+        gen_expression($cg, $arr_expr);
+        emit($cg, "; StradaValue *__aca_rhs = ");
+        gen_expression($cg, $rhs);
+        emit($cg, "; strada_array_compound(__aca_arr, ");
+        emit_int_operand($cg, $idx_expr);
+        emit($cg, ", __aca_rhs, " . $aca_opch . "); ");
+        if ($rhs_cleanup == 1) { emit($cg, "strada_decref(__aca_rhs); "); }
+        if ($arr_cleanup == 1) { emit($cg, "strada_decref(__aca_arr); "); }
+        emit($cg, "(StradaValue*)NULL; })");
+        return;
+    }
+
     emit($cg, "({ StradaValue *__aca_arr = ");
     if ($aca_autoviv == 1) {
         $cg->{"autoviv"} = 2;

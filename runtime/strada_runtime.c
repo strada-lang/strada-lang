@@ -4135,6 +4135,44 @@ void strada_hv_compound_sv(StradaValue *sv, StradaValue *key_sv, StradaValue *rh
     if (key_alloc) free(key_alloc);
 }
 
+/* Single-pass array-element compound assignment: $a[i] op= rhs.
+ * Replaces the array_get + compute + array_set emission (two derefs, two
+ * negative-index resolutions, two bounds checks, plus the boxed store
+ * path) with one deref and an in-place slot update. op is '+', '-', '*',
+ * '/' or '.'; rhs is BORROWED. Semantics match the old emission: OOB
+ * negative indices silently no-op (as strada_array_set did), a missing /
+ * hole / past-end element combines against undef, and the store extends
+ * the array. Like the hash version, a fresh element's first += stays a
+ * tagged int and .= appends in place via strada_concat_inplace. */
+void strada_array_compound(StradaValue *arr_sv, int64_t idx, StradaValue *rhs, int op) {
+    if (!arr_sv || STRADA_IS_TAGGED_INT(arr_sv)) return;
+    StradaArray *av = strada_deref_array(arr_sv);
+    if (!av) return;
+    if (idx < 0) idx += (int64_t)av->size;
+    if (idx < 0) return;
+    if ((size_t)idx >= av->size) {
+        /* Past the end: combine against undef, store once (set extends
+         * and fills the gap with NULL holes). */
+        StradaValue *nv = (op == '.') ? strada_concat_sv(NULL, rhs)
+                                      : hv_compound_combine(NULL, rhs, op);
+        strada_array_set(av, idx, nv);  /* increfs nv */
+        strada_decref(nv);
+        return;
+    }
+    StradaValue **slot = &av->elements[av->head + (size_t)idx];
+    StradaValue *old = *slot;  /* may be NULL (hole) — treated as undef */
+    if (op == '.') {
+        /* concat_inplace consumes old (NULL-safe: falls through to
+         * concat_sv) and appends without copying when the array is the
+         * sole owner. */
+        *slot = strada_concat_inplace(old, rhs);
+        return;
+    }
+    StradaValue *nv = hv_compound_combine(old, rhs, op);
+    *slot = nv;                 /* array takes ownership (refcount 1) */
+    if (old) strada_decref(old);
+}
+
 int strada_hash_exists_sv(StradaHash *hv, StradaValue *key_sv) {
     if (!hv) return 0;
     char key_buf[SV_KEYBUF_LEN];

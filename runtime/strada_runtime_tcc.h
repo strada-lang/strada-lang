@@ -1352,6 +1352,8 @@ void strada_hv_delete_concat(StradaValue *sv, const char *prefix, size_t prefix_
 void strada_hv_compound_ph(StradaValue *sv, const char *key, unsigned int hash, StradaValue *rhs, int op);
 void strada_hv_compound(StradaValue *sv, const char *key, StradaValue *rhs, int op);
 void strada_hv_compound_sv(StradaValue *sv, StradaValue *key_sv, StradaValue *rhs, int op);
+/* Single-pass array-element compound assignment ($a[i] op= rhs); rhs borrowed. */
+void strada_array_compound(StradaValue *arr_sv, int64_t idx, StradaValue *rhs, int op);
 
 /* Process title */
 void strada_init_proctitle(int argc, char **argv);
