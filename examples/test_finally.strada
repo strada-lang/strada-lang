@@ -1,0 +1,66 @@
+our str $log = "";
+func note(str $s) void { $log = $log . $s . ";"; }
+
+func normal_path() void {
+    try { note("try"); } catch ($e) { note("catch"); } finally { note("fin"); }
+}
+func caught_path() void {
+    try { throw "x"; } catch ($e) { note("catch:" . $e); } finally { note("fin"); }
+}
+func rethrow_path() void {
+    try {
+        try { throw "deep"; } catch (TypedOnly $e) { note("wrong"); } finally { note("fin-inner"); }
+    } catch ($e) { note("outer:" . $e); }
+}
+func catch_throws() void {
+    try {
+        try { throw "a"; } catch ($e) { note("c1"); throw "b"; } finally { note("fin2"); }
+    } catch ($e2) { note("outer2:" . $e2); }
+}
+func no_catch() void {
+    try {
+        try { throw "nc"; } finally { note("fin3"); }
+    } catch ($e) { note("outer3:" . $e); }
+}
+func return_path() str {
+    try { note("before-ret"); return "rv"; } finally { note("fin-ret"); }
+    return "unreached";
+}
+func loop_path() void {
+    foreach my $i (1..4) {
+        try {
+            if ($i == 2) { next; }
+            if ($i == 3) { last; }
+            note("body" . $i);
+        } finally { note("fin" . $i); }
+    }
+}
+func check(str $name, str $got, str $want, scalar $fails) int {
+    if ($got ne $want) {
+        say("FAIL " . $name . ": got [" . $got . "] want [" . $want . "]");
+        return 1;
+    }
+    return 0;
+}
+
+func main() int {
+    my int $fails = 0;
+    normal_path();
+    $fails = $fails + check("normal", $log, "try;fin;", 0); $log = "";
+    caught_path();
+    $fails = $fails + check("caught", $log, "catch:x;fin;", 0); $log = "";
+    rethrow_path();
+    $fails = $fails + check("rethrow", $log, "fin-inner;outer:deep;", 0); $log = "";
+    catch_throws();
+    $fails = $fails + check("cthrow", $log, "c1;fin2;outer2:b;", 0); $log = "";
+    no_catch();
+    $fails = $fails + check("nocatch", $log, "fin3;outer3:nc;", 0); $log = "";
+    my str $rv = return_path();
+    $fails = $fails + check("return", $log . "rv=" . $rv, "before-ret;fin-ret;rv=rv", 0); $log = "";
+    loop_path();
+    $fails = $fails + check("loop", $log, "body1;fin1;fin2;fin3;", 0);
+
+    if ($fails == 0) { say("All finally tests passed"); }
+    else { say($fails . " finally tests FAILED"); }
+    return 0;
+}

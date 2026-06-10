@@ -3541,11 +3541,25 @@ func parse_statement(scalar $parser) scalar {
             push(@catch_clauses, $clause);
         }
 
-        if (size(@catch_clauses) == 0) {
-            parser_error($parser, "try block requires at least one catch clause");
+        # Optional finally clause (contextual keyword — `finally` stays a
+        # valid identifier everywhere else).
+        my scalar $finally_block = 0;
+        if (parser_check($parser, "IDENT")) {
+            my scalar $fin_tok = parser_current($parser);
+            if ($fin_tok->{"value"} eq "finally") {
+                parser_advance($parser);
+                $finally_block = parse_block($parser);
+            }
+        }
+
+        if (size(@catch_clauses) == 0 && !$finally_block) {
+            parser_error($parser, "try block requires at least one catch clause (or a finally block)");
         }
 
         my scalar $try_stmt = ast_new_try_catch($try_block, \@catch_clauses);
+        if ($finally_block) {
+            $try_stmt->{"finally_block"} = $finally_block;
+        }
         ast_set_line($try_stmt, $stmt_line);
         return $try_stmt;
     }

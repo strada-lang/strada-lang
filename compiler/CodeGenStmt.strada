@@ -682,6 +682,8 @@ func gen_statement(scalar $cg, scalar $stmt) void {
 
         # Track loop body scope depth for unlabeled last/next cleanup
         my int $saved_loop_break_depth = $cg->{"loop_break_depth"};
+        my int $saved_loop_finally_mark = $cg->{"loop_finally_mark"};
+        $cg->{"loop_finally_mark"} = $cg->{"finally_count"};
         $cg->{"loop_break_depth"} = $cg->{"scope_depth"};
         my int $saved_loop_try_depth = $cg->{"loop_try_depth"};
         $cg->{"loop_try_depth"} = $cg->{"try_depth"};
@@ -781,6 +783,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             emit($cg, "}\n");
         }
         $cg->{"loop_break_depth"} = $saved_loop_break_depth;
+        $cg->{"loop_finally_mark"} = $saved_loop_finally_mark;
         $cg->{"loop_try_depth"} = $saved_loop_try_depth;
         $cg->{"current_redo_label"} = $saved_redo;
         return;
@@ -809,6 +812,8 @@ func gen_statement(scalar $cg, scalar $stmt) void {
 
         # Track loop body scope depth for unlabeled last/next cleanup
         my int $saved_loop_break_depth = $cg->{"loop_break_depth"};
+        my int $saved_loop_finally_mark = $cg->{"loop_finally_mark"};
+        $cg->{"loop_finally_mark"} = $cg->{"finally_count"};
         $cg->{"loop_break_depth"} = $cg->{"scope_depth"};
         my int $saved_loop_try_depth = $cg->{"loop_try_depth"};
         $cg->{"loop_try_depth"} = $cg->{"try_depth"};
@@ -864,6 +869,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             emit($cg, "_break: ;\n");
         }
         $cg->{"loop_break_depth"} = $saved_loop_break_depth;
+        $cg->{"loop_finally_mark"} = $saved_loop_finally_mark;
         $cg->{"loop_try_depth"} = $saved_loop_try_depth;
         $cg->{"current_redo_label"} = $saved_redo;
         return;
@@ -880,6 +886,8 @@ func gen_statement(scalar $cg, scalar $stmt) void {
 
         # Track loop body scope depth for unlabeled last/next cleanup
         my int $saved_loop_break_depth = $cg->{"loop_break_depth"};
+        my int $saved_loop_finally_mark = $cg->{"loop_finally_mark"};
+        $cg->{"loop_finally_mark"} = $cg->{"finally_count"};
         $cg->{"loop_break_depth"} = $cg->{"scope_depth"};
         my int $saved_loop_try_depth = $cg->{"loop_try_depth"};
         $cg->{"loop_try_depth"} = $cg->{"try_depth"};
@@ -1021,6 +1029,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             emit($cg, "_break: ;\n");
         }
         $cg->{"loop_break_depth"} = $saved_loop_break_depth;
+        $cg->{"loop_finally_mark"} = $saved_loop_finally_mark;
         $cg->{"loop_try_depth"} = $saved_loop_try_depth;
         $cg->{"current_redo_label"} = $saved_redo;
         return;
@@ -1037,6 +1046,8 @@ func gen_statement(scalar $cg, scalar $stmt) void {
 
         # Track loop body scope depth for unlabeled last/next cleanup
         my int $saved_loop_break_depth = $cg->{"loop_break_depth"};
+        my int $saved_loop_finally_mark = $cg->{"loop_finally_mark"};
+        $cg->{"loop_finally_mark"} = $cg->{"finally_count"};
         $cg->{"loop_break_depth"} = $cg->{"scope_depth"};
         my int $saved_loop_try_depth = $cg->{"loop_try_depth"};
         $cg->{"loop_try_depth"} = $cg->{"try_depth"};
@@ -1172,6 +1183,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 emit($cg, "_break: ;\n");
             }
             $cg->{"loop_break_depth"} = $saved_loop_break_depth;
+        $cg->{"loop_finally_mark"} = $saved_loop_finally_mark;
             $cg->{"loop_try_depth"} = $saved_loop_try_depth;
             $cg->{"current_redo_label"} = $saved_redo;
             return;
@@ -1299,6 +1311,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             emit($cg, "_break: ;\n");
         }
         $cg->{"loop_break_depth"} = $saved_loop_break_depth;
+        $cg->{"loop_finally_mark"} = $saved_loop_finally_mark;
         $cg->{"loop_try_depth"} = $saved_loop_try_depth;
         $cg->{"current_redo_label"} = $saved_redo;
         return;
@@ -1336,6 +1349,9 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 if ($stmt->{"value"}->{"type"} == NODE_INT_LITERAL()) {
                     # Simple literal - can emit directly after cleanup
                     if ($cleanup_enabled == 1) {
+                        # finally blocks run AFTER the return value is captured and
+                        # BEFORE scope cleanup decrefs the locals they may reference.
+                        if ($cg->{"finally_count"} > 0) { gen_finally_upto($cg, 0); }
                         scope_emit_all_cleanup($cg);
                     }
                     # Restore the local() save stack so strdup'd names
@@ -1357,6 +1373,9 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     emit($cg, ");\n");
                     indent($cg);
                     if ($cleanup_enabled == 1) {
+                        # finally blocks run AFTER the return value is captured and
+                        # BEFORE scope cleanup decrefs the locals they may reference.
+                        if ($cg->{"finally_count"} > 0) { gen_finally_upto($cg, 0); }
                         scope_emit_all_cleanup($cg);
                     }
                     if ($cg->{"has_local"} == 1) {
@@ -1372,6 +1391,9 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             } else {
                 # No return value - cleanup then return
                 if ($cleanup_enabled == 1) {
+                    # finally blocks run AFTER the return value is captured and
+                    # BEFORE scope cleanup decrefs the locals they may reference.
+                    if ($cg->{"finally_count"} > 0) { gen_finally_upto($cg, 0); }
                     scope_emit_all_cleanup($cg);
                 }
                 if ($cg->{"has_local"} == 1) {
@@ -1438,6 +1460,9 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 emit_indent($cg);
                 emit($cg, "strada_incref(__retval);\n");
             }
+            # finally blocks run AFTER the return value is captured and
+            # BEFORE scope cleanup decrefs the locals they may reference.
+            if ($cg->{"finally_count"} > 0) { gen_finally_upto($cg, 0); }
             scope_emit_all_cleanup($cg);
             # Restore local() variables AFTER return value is captured
             if ($cg->{"has_local"} == 1) {
@@ -1462,6 +1487,9 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             dedent($cg);
         } else {
             # Void return - cleanup then return
+            # finally blocks run AFTER the return value is captured and
+            # BEFORE scope cleanup decrefs the locals they may reference.
+            if ($cg->{"finally_count"} > 0) { gen_finally_upto($cg, 0); }
             scope_emit_all_cleanup($cg);
             if ($cg->{"has_local"} == 1) {
                 emit_indent($cg);
@@ -1518,7 +1546,12 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             emit($cg, $label);
             emit($cg, "_break;\n");
         } else {
-            # Unlabeled last: cleanup loop body scope vars before break
+            # Unlabeled last: run finallys of try/finally constructs inside
+            # the loop first (their code may use loop-scope vars), then
+            # clean up loop body scope vars before break.
+            if ($cg->{"finally_count"} > $cg->{"loop_finally_mark"}) {
+                gen_finally_upto($cg, $cg->{"loop_finally_mark"});
+            }
             scope_emit_cleanup_to_depth($cg, $cg->{"loop_break_depth"});
             # If we're inside one or more `try` blocks within the loop,
             # we must STRADA_TRY_POP each of them — otherwise each pass
@@ -1552,7 +1585,10 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             emit($cg, $label);
             emit($cg, "_continue;\n");
         } else {
-            # Unlabeled next: cleanup loop body scope vars before continue
+            # Unlabeled next: finallys first (see `last` above), then cleanup.
+            if ($cg->{"finally_count"} > $cg->{"loop_finally_mark"}) {
+                gen_finally_upto($cg, $cg->{"loop_finally_mark"});
+            }
             scope_emit_cleanup_to_depth($cg, $cg->{"loop_break_depth"});
             my int $td_now = $cg->{"try_depth"} + 0;
             my int $td_loop = $cg->{"loop_try_depth"} + 0;
@@ -1597,6 +1633,17 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         # Save cleanup stack depth BEFORE the try block so it's accessible in catch
         my int $cleanup_var_id = $cg->{"try_cleanup_counter"} + 0;
         $cg->{"try_cleanup_counter"} = $cleanup_var_id + 1;
+
+        # finally support: register the block so return/last/next emitted
+        # INSIDE this construct run it on the way out (gen_finally_upto).
+        my scalar $finally_block = $stmt->{"finally_block"};
+        my int $has_finally = 0;
+        my int $fin_idx = $cg->{"finally_count"};
+        if ($finally_block) {
+            $has_finally = 1;
+            $cg->{"finally_blocks"}->[$fin_idx] = $finally_block;
+            $cg->{"finally_count"} = $fin_idx + 1;
+        }
         emit_indent($cg);
         emit($cg, "int __cleanup_mark_" . $cleanup_var_id . " = strada_cleanup_mark();\n");
         # Save local() save-stack depth too — if the try body uses
@@ -1638,6 +1685,14 @@ func gen_statement(scalar $cg, scalar $stmt) void {
 
         emit_indent($cg);
         emit($cg, "STRADA_TRY_POP();\n");
+        if ($has_finally == 1) {
+            # Normal completion path. Hide this entry while emitting its
+            # own block (control flow inside finally sees only OUTER ones).
+            $cg->{"finally_count"} = $fin_idx;
+            gen_block($cg, $finally_block);
+            emit($cg, "\n");
+            $cg->{"finally_count"} = $fin_idx + 1;
+        }
         scope_pop($cg);
         dedent($cg);
         emit_indent($cg);
@@ -1662,6 +1717,16 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         # Get the exception into a temporary variable
         emit_indent($cg);
         emit($cg, "StradaValue *__strada_exc = strada_get_exception();\n");
+
+        # With finally: a guard frame around the catch dispatch, so a
+        # throwing catch body AND the unmatched-rethrow both run the
+        # finally block before propagating.
+        if ($has_finally == 1) {
+            emit_indent($cg);
+            emit($cg, "if (setjmp(*STRADA_TRY_PUSH()) == 0) {\n");
+            indent($cg);
+            $cg->{"try_depth"} = $cg->{"try_depth"} + 1;
+        }
 
         # Generate catch clauses
         my scalar $catch_clauses = $stmt->{"catch_clauses"};
@@ -1743,7 +1808,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         }
 
         # If no catch-all, add a re-throw for unmatched exceptions
-        if ($has_catchall == 0) {
+        if ($has_catchall == 0 && $catch_count > 0) {
             emit_indent($cg);
             emit($cg, "} else {\n");
             indent($cg);
@@ -1752,13 +1817,56 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             dedent($cg);
         }
 
-        emit_indent($cg);
-        emit($cg, "}\n");
+        if ($catch_count > 0) {
+            emit_indent($cg);
+            emit($cg, "}\n");
+        } else {
+            # try { } finally { } with no catch: nothing handled the
+            # exception here — rethrow (after finally, via the guard).
+            emit_indent($cg);
+            emit($cg, "strada_throw_value(__strada_exc);\n");
+        }
+
+        if ($has_finally == 1) {
+            $cg->{"try_depth"} = $cg->{"try_depth"} - 1;
+            emit_indent($cg);
+            emit($cg, "STRADA_TRY_POP();\n");
+            # Catch completed normally -> run finally.
+            $cg->{"finally_count"} = $fin_idx;
+            gen_block($cg, $finally_block);
+            emit($cg, "\n");
+            emit_indent($cg);
+            emit($cg, "} else {\n");
+            indent($cg);
+            emit_indent($cg);
+            emit($cg, "STRADA_TRY_POP();\n");
+            emit_indent($cg);
+            emit($cg, "strada_local_restore_to(__local_mark_" . $cleanup_var_id . ");\n");
+            emit_indent($cg);
+            emit($cg, "strada_cleanup_drain_to(__cleanup_mark_" . $cleanup_var_id . ");\n");
+            emit_indent($cg);
+            emit($cg, "StradaValue *__fin_exc_" . $cleanup_var_id . " = strada_get_exception();\n");
+            # Catch threw (or no catch matched / no catch at all): run
+            # finally, then propagate the pending exception.
+            gen_block($cg, $finally_block);
+            emit($cg, "\n");
+            $cg->{"finally_count"} = $fin_idx + 1;
+            emit_indent($cg);
+            emit($cg, "strada_throw_value(__fin_exc_" . $cleanup_var_id . ");\n");
+            dedent($cg);
+            emit_indent($cg);
+            emit($cg, "}\n");
+        }
 
         scope_pop($cg);
         dedent($cg);
         emit_indent($cg);
         emit($cg, "}\n");
+
+        # Unregister this construct's finally entry.
+        if ($has_finally == 1) {
+            $cg->{"finally_count"} = $fin_idx;
+        }
         return;
     }
 

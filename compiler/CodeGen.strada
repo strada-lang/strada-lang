@@ -307,6 +307,13 @@ func codegen_new(str $filename, int $debug_info, int $enable_profiling, int $ena
     $cg{"overloads"} = \%empty_overloads;
     my hash %empty_overloaded_ops = ();
     $cg{"overloaded_ops"} = \%empty_overloaded_ops;
+    # finally-block stack: blocks of enclosing try/finally statements,
+    # emitted before return/last/next leaves them (see gen_finally_upto).
+    my array @finally_blocks = ();
+    $cg{"finally_blocks"} = \@finally_blocks;
+    $cg{"finally_count"} = 0;
+    $cg{"loop_finally_mark"} = 0;
+
     # Condition-level hash-fetch CSE state (see emit_condition_cse).
     # uses_tie is set from the program node in gen_program.
     $cg{"uses_tie"} = 0;
@@ -707,6 +714,24 @@ func scope_emit_cleanup_to_depth(scalar $cg, int $target_depth) void {
 }
 
 # Emit STRADA_TRY_POP() for each active try block (for early returns in try blocks)
+# Emit the finally blocks of enclosing try statements, innermost first,
+# down to (and excluding) stack index $upto. While a finally is being
+# emitted, the visible stack is truncated below it, so control flow
+# INSIDE a finally only triggers OUTER finallys (no self-recursion).
+func gen_finally_upto(scalar $cg, int $upto) void {
+    my int $n = $cg->{"finally_count"};
+    my scalar $blocks = $cg->{"finally_blocks"};
+    my int $i = $n - 1;
+    while ($i >= $upto) {
+        my scalar $fb = $blocks->[$i];
+        $cg->{"finally_count"} = $i;     # hide this + inner entries
+        gen_block($cg, $fb);
+        emit($cg, "\n");
+        $cg->{"finally_count"} = $n;     # restore
+        $i = $i - 1;
+    }
+}
+
 func emit_try_cleanup(scalar $cg) void {
     my int $try_depth = $cg->{"try_depth"};
     while ($try_depth > 0) {
@@ -3329,7 +3354,7 @@ func needs_temp_cleanup(scalar $cg, scalar $expr) int {
             $name eq "sys::array_default_capacity" || $name eq "sys::hash_default_capacity" ||
             $name eq "sys::cstruct_new" || $name eq "sys::cstruct_get_int" ||
             $name eq "sys::cstruct_get_double" || $name eq "sys::cstruct_get_string" ||
-            $name eq "sys::idiv" ||
+            $name eq "sys::idiv" || $name eq "sys::exception_trace" ||
             # Concurrency ergonomics (2026-06): all return owned SVs
             $name eq "async::select" || $name eq "async::sleep" ||
             $name eq "async::cancelled" || $name eq "async::spawn" ||
