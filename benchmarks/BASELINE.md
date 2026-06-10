@@ -8,7 +8,10 @@ the valgrind leak suite skew results ~2x — benchmark on a quiet box only.**
 
 - "pre-opt" = commit `0da0455` (before any optimization work), rebuilt from
   scratch in a worktree and measured side by side on 2026-06-09/10.
-- "post-opt" = commit `57f5e53` (per-call-site dispatch cache + all rounds).
+- "post-opt" = commit `57f5e53` (per-call-site dispatch cache; rounds 1–2).
+- "round 3" = commit `f9bfbaa` (method index/MRO cache, stack-buffer hash
+  keys, single-pass array compound), measured 2026-06-10 against the
+  immediately preceding commit for each change.
 
 ## Hot-path microbenchmarks (`bench_hotpaths.strada`)
 
@@ -21,6 +24,19 @@ Per-section wall times printed by the benchmark itself:
 | range    | 0.141s  | 0.018s   | 7.8x    | foreach over int ranges emits a native C for loop (no array materialization) |
 | concat   | 1.12s   | 0.52s    | 2.2x    | ASCII flag propagated from operands instead of rescanning the result |
 | objects  | 0.077s  | 0.081s   | —       | control; not targeted by any round |
+
+## Round 3 microbenchmarks (2026-06-10)
+
+Not covered by `bench_hotpaths` sections; each measured before/after its own
+change on a quiet box (3 runs, median). Workload sources are described so
+they can be reconstructed:
+
+| change | workload | before | after | speedup |
+|--------|----------|--------|-------|---------|
+| per-package method index + flattened MRO cache | 1M `$obj->can("not_there")` — a miss never caches, so each call pays full resolution; 5-level inheritance chain, 20-method base class | 0.193s | 0.064s | 3.0x |
+| (same, cached-hit control) | 1M `$obj->can("m19")` resolving 5 levels up — absorbed by the global cache | 0.036s | 0.038s | — |
+| stack-buffer non-string hash keys (`sv_key_extract_buf`) | `$c{$j % 1000} += 1`, 5M iterations (integer keys previously paid itoa + strdup + free per access) | 0.31s | 0.20s | 1.5x |
+| single-pass array compound assign (`strada_array_compound`) | `$acc[$i % 100] += 1`, 10M iterations | 0.168s | 0.061s | 2.7x |
 
 ## Standard suite, pre-opt vs post-opt (best of 5, interleaved)
 
