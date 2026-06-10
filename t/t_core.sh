@@ -243,6 +243,10 @@ test_output_contains "$SCRIPT_DIR/test_nested_oop.strada" "test_nested_oop" "All
 # Test: OOP with import_lib
 test_import_lib "$SCRIPT_DIR/test_import_lib_oop.strada" "test_import_lib_oop" "$SCRIPT_DIR/nested_use_test/OOPLib.strada" "OOPLib" "import_lib OOP"
 
+# Test: lazily-loaded .so registering a modifier on a HOST class invalidates
+# warmed dispatch caches (generation-counter invalidation across the boundary)
+test_import_lib "$SCRIPT_DIR/test_import_lib_hooks.strada" "test_import_lib_hooks" "$SCRIPT_DIR/nested_use_test/HookLib.strada" "HookLib" "import_lib hook invalidation"
+
 # Test: OOP with import_object
 test_import_object "$SCRIPT_DIR/test_import_object_oop.strada" "test_import_object_oop" "$SCRIPT_DIR/nested_use_test/OOPLib.strada" "OOPLib" "import_object OOP"
 

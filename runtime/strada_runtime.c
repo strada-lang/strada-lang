@@ -20055,7 +20055,7 @@ typedef struct {
     StradaMethod func;
 } OopModifier;
 
-typedef struct {
+typedef struct OopPackage {
     char name[OOP_MAX_NAME_LEN];
     char **parents;                    /* dynamic: parent_count strings */
     int parent_count;
@@ -20069,6 +20069,20 @@ typedef struct {
     OopModifier *modifiers;            /* dynamic */
     int modifier_count;
     int modifier_cap;
+    /* Open-addressed hash over methods[] (slot -> index, -1 = empty),
+     * rebuilt on method registration so resolution misses don't pay an
+     * O(method_count) strcmp scan per package. cap is a power of two;
+     * 0 = not built (fall back to the linear scan). */
+    int32_t *method_index;
+    uint32_t method_index_cap;
+    /* Lazily-built flattened MRO (this package first, depth-first
+     * left-to-right, deduped) so lookups and modifier collection don't
+     * re-walk the parent graph. Valid while mro_cache_gen == mc_cache_gen
+     * (bumped on method/inherit/modifier registration). Package pointers
+     * are stable (individually allocated, never freed). */
+    struct OopPackage **mro_cache;
+    int mro_cache_n;
+    uint32_t mro_cache_gen;
 } OopPackage;
 
 static OopPackage **oop_packages = NULL;  /* dynamic array of pointers */
@@ -20204,6 +20218,8 @@ static void strada_oop_cleanup(void) {
         if (pkg->methods) free(pkg->methods);
         if (pkg->overloads) free(pkg->overloads);
         if (pkg->modifiers) free(pkg->modifiers);
+        if (pkg->method_index) free(pkg->method_index);
+        if (pkg->mro_cache) free(pkg->mro_cache);
         free(pkg);
     }
     if (oop_packages) {
@@ -20394,6 +20410,35 @@ void strada_inherit_from(const char *parent) {
     strada_inherit(child, parent);
 }
 
+/* djb2 over unsigned bytes — same function the dispatch caches use. */
+static unsigned int oop_method_hash(const char *s) {
+    unsigned int h = 5381;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) h = h * 33 + *p;
+    return h;
+}
+
+/* (Re)build a package's open-addressed method index: slot -> methods[]
+ * position, -1 = empty. Sized at >= 2x method_count (power of two) so
+ * probes stay short. On allocation failure the index is dropped and
+ * lookups fall back to the linear scan — never fatal. */
+static void oop_method_index_rebuild(OopPackage *pkg) {
+    uint32_t want = 16;
+    while (want < (uint32_t)pkg->method_count * 2) want <<= 1;
+    if (pkg->method_index_cap < want) {
+        free(pkg->method_index);
+        pkg->method_index = (int32_t *)malloc((size_t)want * sizeof(int32_t));
+        if (!pkg->method_index) { pkg->method_index_cap = 0; return; }
+        pkg->method_index_cap = want;
+    }
+    memset(pkg->method_index, 0xFF, (size_t)pkg->method_index_cap * sizeof(int32_t));
+    uint32_t mask = pkg->method_index_cap - 1;
+    for (int i = 0; i < pkg->method_count; i++) {
+        uint32_t pos = oop_method_hash(pkg->methods[i].name) & mask;
+        while (pkg->method_index[pos] >= 0) pos = (pos + 1) & mask;
+        pkg->method_index[pos] = (int32_t)i;
+    }
+}
+
 void strada_method_register(const char *package, const char *name, StradaMethod func) {
     /* Register a method for a package */
     if (!package || !name || !func) return;
@@ -20431,6 +20476,10 @@ void strada_method_register(const char *package, const char *name, StradaMethod 
     strncpy(m->name, name, OOP_MAX_NAME_LEN - 1);
     m->name[OOP_MAX_NAME_LEN - 1] = '\0';
     m->func = func;
+
+    /* Keep the per-package method hash index current. Registration is
+     * rare (startup + import_lib loads), so a full rebuild is fine. */
+    oop_method_index_rebuild(pkg);
 }
 
 /* Method modifier registration */
@@ -20499,45 +20548,27 @@ void strada_overload_register(const char *package, const char *op, StradaMethod 
     e->func = func;
 }
 
-static StradaMethod oop_overload_lookup_in(const char *package, const char *op,
-                                            const char *visited[], int *visited_count) {
-    if (!package || !op || !package[0]) return NULL;
-
-    /* Check if already visited */
-    for (int i = 0; i < *visited_count; i++) {
-        if (strcmp(visited[i], package) == 0) return NULL;
-    }
-    if (*visited_count < 64) {
-        visited[(*visited_count)++] = package;
-    }
-
-    OopPackage *pkg = oop_find_package(package);
-    if (!pkg) return NULL;
-
-    /* Look for overload in this package */
-    for (int i = 0; i < pkg->overload_count; i++) {
-        if (strcmp(pkg->overloads[i].op, op) == 0) {
-            return pkg->overloads[i].func;
-        }
-    }
-
-    /* Search parents */
-    for (int i = 0; i < pkg->parent_count; i++) {
-        StradaMethod func = oop_overload_lookup_in(pkg->parents[i], op,
-                                                    visited, visited_count);
-        if (func) return func;
-    }
-
-    return NULL;
-}
+static int oop_collect_mro(const char *package, OopPackage **out, int max);
 
 static StradaMethod strada_overload_lookup(const char *package, const char *op) {
     if (!package || !op) return NULL;
     if (!oop_initialized) return NULL;
 
-    const char *visited[64];
-    int visited_count = 0;
-    return oop_overload_lookup_in(package, op, visited, &visited_count);
+    /* Walk the flattened (cached) MRO instead of recursing through the
+     * parent graph per operation. Overload tables are small (a handful of
+     * ops), so the per-package linear scan is fine; the win is not
+     * re-walking inheritance on every overloaded `+`/`==`/stringify. */
+    OopPackage *mro[64];
+    int n = oop_collect_mro(package, mro, 64);
+    for (int k = 0; k < n; k++) {
+        OopPackage *pkg = mro[k];
+        for (int i = 0; i < pkg->overload_count; i++) {
+            if (strcmp(pkg->overloads[i].op, op) == 0) {
+                return pkg->overloads[i].func;
+            }
+        }
+    }
+    return NULL;
 }
 
 StradaValue* strada_overload_binary(StradaValue *left, StradaValue *right, const char *op) {
@@ -20682,71 +20713,27 @@ const char* strada_method_lookup_package(const char *package, const char *method
     return oop_method_lookup_package_in(package, method, visited, &visited_count);
 }
 
-static StradaMethod oop_lookup_method_in(const char *package, const char *method,
-                                         const char *visited[], int *visited_count) {
-    /* Recursive depth-first search through inheritance hierarchy */
-    if (!package || !method || !package[0]) return NULL;
-
-    /* Check if already visited (prevent infinite loops) */
-    for (int i = 0; i < *visited_count; i++) {
-        if (strcmp(visited[i], package) == 0) return NULL;
-    }
-    if (*visited_count < 64) {
-        visited[(*visited_count)++] = package;
-    }
-
-    OopPackage *pkg = oop_find_package(package);
-    if (!pkg) return NULL;
-
-    /* Look for method in this package */
-    for (int i = 0; i < pkg->method_count; i++) {
-        if (strcmp(pkg->methods[i].name, method) == 0) {
-            return pkg->methods[i].func;
+/* Find a method in ONE package via its hash index (or the linear scan when
+ * no index has been built). mh = oop_method_hash(method), computed once by
+ * the caller and reused across the MRO. */
+static StradaMethod pkg_method_find(OopPackage *pkg, const char *method, unsigned int mh) {
+    if (pkg->method_index_cap) {
+        uint32_t mask = pkg->method_index_cap - 1;
+        for (uint32_t pos = mh & mask; ; pos = (pos + 1) & mask) {
+            int32_t mi = pkg->method_index[pos];
+            if (mi < 0) return NULL;
+            if (strcmp(pkg->methods[mi].name, method) == 0) return pkg->methods[mi].func;
         }
     }
-
-    /* Search all parents (depth-first, left-to-right) */
-    for (int i = 0; i < pkg->parent_count; i++) {
-        StradaMethod func = oop_lookup_method_in(pkg->parents[i], method,
-                                                  visited, visited_count);
-        if (func) return func;
+    for (int i = 0; i < pkg->method_count; i++) {
+        if (strcmp(pkg->methods[i].name, method) == 0) return pkg->methods[i].func;
     }
-
     return NULL;
 }
 
-static StradaMethod oop_lookup_method(const char *package, const char *method) {
-    /* Find method function pointer, following inheritance chain */
-    if (!package || !method) return NULL;
-    if (!oop_initialized) return NULL;
-
-    /* Check method cache first */
-    if (!method_cache_initialized) method_cache_init();
-    unsigned int h = (oop_hash_name(package) ^ oop_hash_name(method)) & (METHOD_CACHE_SIZE - 1);
-    MethodCacheEntry *ce = &method_cache[h];
-    if (ce->func && ce->package == package && strcmp(ce->method, method) == 0) {
-        return ce->func;
-    }
-
-    const char *visited[64];
-    int visited_count = 0;
-    StradaMethod func = oop_lookup_method_in(package, method, visited, &visited_count);
-
-    /* Cache the result (even NULL misses are not cached to avoid stale entries) */
-    if (func) {
-        ce->package = package;
-        strncpy(ce->method, method, OOP_MAX_NAME_LEN - 1);
-        ce->method[OOP_MAX_NAME_LEN - 1] = '\0';
-        ce->func = func;
-    }
-
-    return func;
-}
-
 /* Collect the MRO (this package + ancestors, depth-first left-to-right) into
- * out[], most-derived first, deduped via the same visited[64] cycle-guard used
- * by oop_lookup_method_in. Used to apply before/after/around modifiers across
- * the inheritance chain so a parent's modifier fires for a subclass. */
+ * out[], most-derived first, deduped via a visited[64] cycle-guard. Used by
+ * method resolution, overload lookup, and modifier collection. */
 static void oop_collect_mro_in(const char *package, OopPackage **out, int max, int *n,
                                const char *visited[], int *vc) {
     if (!package || !package[0]) return;
@@ -20763,11 +20750,65 @@ static void oop_collect_mro_in(const char *package, OopPackage **out, int max, i
 }
 
 static int oop_collect_mro(const char *package, OopPackage **out, int max) {
+    /* Serve the flattened MRO from the package's cache when current. */
+    OopPackage *self = oop_find_package(package);
+    if (self && self->mro_cache && self->mro_cache_gen == mc_cache_gen) {
+        int n = self->mro_cache_n;
+        if (n > max) n = max;
+        memcpy(out, self->mro_cache, (size_t)n * sizeof(OopPackage *));
+        return n;
+    }
     const char *visited[64];
     int vc = 0;
     int n = 0;
     oop_collect_mro_in(package, out, max, &n, visited, &vc);
+    /* Cache the walk (only when it wasn't truncated by max). */
+    if (self && n < max) {
+        OopPackage **mc2 = (OopPackage **)realloc(self->mro_cache,
+                               (n > 0 ? (size_t)n : 1) * sizeof(OopPackage *));
+        if (mc2) {
+            memcpy(mc2, out, (size_t)n * sizeof(OopPackage *));
+            self->mro_cache = mc2;
+            self->mro_cache_n = n;
+            self->mro_cache_gen = mc_cache_gen;
+        }
+    }
     return n;
+}
+
+static StradaMethod oop_lookup_method(const char *package, const char *method) {
+    /* Find method function pointer, following inheritance chain */
+    if (!package || !method) return NULL;
+    if (!oop_initialized) return NULL;
+
+    /* Check method cache first */
+    if (!method_cache_initialized) method_cache_init();
+    unsigned int h = (oop_hash_name(package) ^ oop_hash_name(method)) & (METHOD_CACHE_SIZE - 1);
+    MethodCacheEntry *ce = &method_cache[h];
+    if (ce->func && ce->package == package && strcmp(ce->method, method) == 0) {
+        return ce->func;
+    }
+
+    /* Walk the flattened MRO with one hash probe per package — same
+     * resolution order as the old recursive depth-first scan, without
+     * O(method_count) strcmp per package per miss. */
+    OopPackage *mro[64];
+    int n = oop_collect_mro(package, mro, 64);
+    unsigned int mh = oop_method_hash(method);
+    StradaMethod func = NULL;
+    for (int k = 0; k < n && !func; k++) {
+        func = pkg_method_find(mro[k], method, mh);
+    }
+
+    /* Cache the result (even NULL misses are not cached to avoid stale entries) */
+    if (func) {
+        ce->package = package;
+        strncpy(ce->method, method, OOP_MAX_NAME_LEN - 1);
+        ce->method[OOP_MAX_NAME_LEN - 1] = '\0';
+        ce->func = func;
+    }
+
+    return func;
 }
 
 /* Method dispatch inline cache: avoid oop_lookup_method (and the modifier
