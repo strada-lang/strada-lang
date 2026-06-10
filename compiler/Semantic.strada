@@ -730,22 +730,45 @@ func register_functions(scalar $ctx, scalar $ast) void {
         my str $name = $fn->{"name"};
         my int $line = ast_get_line($fn);
 
-        # Check for duplicate function
+        # Check for duplicate function. Body-less extern declarations
+        # (`extern func Pkg::name(...) ret;`) follow C semantics: a
+        # declaration never conflicts with anything, a definition replaces
+        # an earlier declaration, and only two *definitions* collide. This
+        # matters for use-cycles broken via externs — several sibling
+        # modules each declare the same `extern func Perla::CodeGen::emit`,
+        # and `use`-inlining surfaces those duplicate declarations in one
+        # compile unit (e.g. perla's CodeGen submodules).
+        my int $new_is_decl = 0;
+        if ($fn->{"is_extern"} == 1 && $fn->{"has_body"} != 1) { $new_is_decl = 1; }
         my scalar $existing_fn = $ctx->{"functions"}->{$name};
+        my int $skip_register = 0;
         if ($existing_fn != 0) {
-            semantic_error("function '" . $name . "' already defined", $line);
+            if ($new_is_decl == 1) {
+                # Duplicate declaration: keep whatever is registered (a
+                # definition stays a definition; a prior decl is equivalent).
+                $skip_register = 1;
+            } elsif ($existing_fn->{"is_decl_only"} == 1) {
+                # Definition arriving after a forward declaration: replace
+                # the decl's info with the definition's (fall through).
+                $skip_register = 0;
+            } else {
+                semantic_error("function '" . $name . "' already defined", $line);
+            }
         }
 
-        # Register function
-        my hash %info = ();
-        $info{"is_registered"} = 1;  # Marker to distinguish from unfound
-        $info{"return_type"} = $fn->{"return_type"};
-        $info{"param_count"} = $fn->{"param_count"};
-        $info{"params"} = $fn->{"params"};
-        $info{"is_extern"} = $fn->{"is_extern"};
-        $info{"is_variadic"} = $fn->{"is_variadic"};
-        $info{"line"} = $line;
-        $ctx->{"functions"}->{$name} = \%info;
+        if ($skip_register == 0) {
+            # Register function
+            my hash %info = ();
+            $info{"is_registered"} = 1;  # Marker to distinguish from unfound
+            $info{"return_type"} = $fn->{"return_type"};
+            $info{"param_count"} = $fn->{"param_count"};
+            $info{"params"} = $fn->{"params"};
+            $info{"is_extern"} = $fn->{"is_extern"};
+            $info{"is_variadic"} = $fn->{"is_variadic"};
+            $info{"is_decl_only"} = $new_is_decl;
+            $info{"line"} = $line;
+            $ctx->{"functions"}->{$name} = \%info;
+        }
     }
 }
 

@@ -11,6 +11,12 @@ test_output_contains "$EXAMPLES_DIR/test_eq_regex_prec.strada" "test_eq_regex_pr
 # case blocks, default block) — previously skipped.
 test_output_contains "$EXAMPLES_DIR/test_switch_semantic.strada" "test_switch_semantic" "All tests passed" "Switch statement semantic analysis"
 
+# Test: duplicate body-less extern declarations follow C semantics (decl
+# never conflicts, definition replaces decl, only two definitions error).
+# Regression: the extern cycle-break pattern used by multi-module projects
+# (e.g. perla's CodeGen submodules) hard-errored "already defined".
+test_output_contains "$EXAMPLES_DIR/test_dup_extern_decl.strada" "test_dup_extern_decl" "All tests passed" "Duplicate extern declarations tolerated"
+
 # Test: Deref syntax variations
 test_run "$EXAMPLES_DIR/test_deref_array.strada" "test_deref_array" "Deref array"
 test_run "$EXAMPLES_DIR/test_deref_syntax.strada" "test_deref_syntax" "Deref syntax"

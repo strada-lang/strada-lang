@@ -3229,6 +3229,28 @@ func gen_program(scalar $cg, scalar $program) void {
     }
 
     # Forward declarations
+    #
+    # Pre-scan: collect the sanitized names of every function DEFINED in
+    # this unit (anything that isn't a body-less extern declaration). A
+    # body-less `extern func Pkg::name(...) ret;` whose definition is also
+    # in this unit must NOT emit its `extern` line — the definition's own
+    # forward decl (often `static inline`) covers it, and emitting both
+    # is a C storage-class conflict ("static declaration follows
+    # non-static declaration"). Duplicate decls with no in-unit definition
+    # are fine: identical `extern` lines are legal C.
+    my hash %__defined_in_unit = ();
+    $i = 0;
+    while ($i < $program->{"function_count"}) {
+        my scalar $dfn = $funcs->[$i];
+        my int $dfn_is_decl = 0;
+        if ($dfn->{"type"} == NODE_EXTERN_FUNC() && $dfn->{"has_body"} != 1) {
+            $dfn_is_decl = 1;
+        }
+        if ($dfn_is_decl == 0) {
+            $__defined_in_unit{sanitize_name($dfn->{"name"})} = 1;
+        }
+        $i = $i + 1;
+    }
     $i = 0;
     while ($i < $program->{"function_count"}) {
         my scalar $fn = $funcs->[$i];
@@ -3256,6 +3278,13 @@ func gen_program(scalar $cg, scalar $program) void {
             # site uses the ordinary Strada calling convention (no conversion).
             if ($fn->{"is_strada_extern_decl"} == 1) {
                 my str $sname = sanitize_name($fn->{"name"});
+                # The declared function is also DEFINED in this unit: skip
+                # the extern line (see pre-scan above) — the definition's
+                # own forward decl covers it and the storage classes clash.
+                if ($__defined_in_unit{$sname} == 1) {
+                    $i = $i + 1;
+                    next;
+                }
                 emit($cg, "extern " . type_to_c($fn->{"return_type"}) . " " . $sname . "(");
                 my scalar $eparams = $fn->{"params"};
                 my int $ej = 0;
