@@ -337,6 +337,10 @@ test_output_contains "$EXAMPLES_DIR/test_autovivification.strada" "test_autovivi
 # Test: *= and /= compound assignment (regression: previously didn't lex)
 test_output_contains "$EXAMPLES_DIR/test_muldiv_assign.strada" "test_muldiv_assign" "All muldiv assign tests passed" "Mul/div compound assign"
 
+# Test: around hooks receive ($orig, $self, @args) per Moose convention
+# (regression: $orig/$self were swapped, so $self->accessor() read empty)
+test_output_contains "$EXAMPLES_DIR/test_around_hooks.strada" "test_around_hooks" "All around hook tests passed" "Around method modifiers"
+
 # Test: Perl compatibility (chomp, bare shift, heredocs, unless-elsif)
 test_output_contains "$EXAMPLES_DIR/test_perl_compat.strada" "test_perl_compat" "All Perl compat tests passed" "Perl compat"
 

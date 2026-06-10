@@ -21018,20 +21018,31 @@ static StradaValue* method_call_impl(StradaValue *obj, const char *method,
 
             StradaValue *result;
             if (around_func) {
-                /* around_args = [$orig, ...original_args]. $orig is a CALLABLE
-                 * bound to the original method (strada_bound_method_new) so the
-                 * around body can invoke it as $orig->($self, ...) — previously
-                 * it was a non-callable integer-cast pointer. */
+                /* Hook calling convention: the hook's SELF position receives
+                 * $orig — a CALLABLE bound to the original method
+                 * (strada_bound_method_new) — and the args array is
+                 * [$self, ...original_args]. The generated wrapper maps a
+                 * hook's first Strada param from the self position and the
+                 * rest from args, so the Moose-style signature
+                 * func($orig, $self, @args) lines up, and @_-style hooks see
+                 * ($orig, $self, @args) too. Previously the runtime passed
+                 * (obj, [orig, ...args]), swapping $orig and $self inside the
+                 * hook: $self was the bound callable, so $self->accessor()
+                 * dispatched against the closure and read empty attributes. */
+                StradaValue *around_orig = strada_bound_method_new(func);
                 StradaValue *around_args = strada_new_array();
-                strada_array_push_take(around_args->value.av, strada_bound_method_new(func));
+                strada_array_push(around_args->value.av, obj);
                 if (args && args->type == STRADA_ARRAY && args->value.av) {
                     for (size_t ai = 0; ai < args->value.av->size; ai++) {
                         strada_array_push(around_args->value.av, args->value.av->elements[args->value.av->head + ai]);
                     }
                 }
                 strada_cleanup_push(around_args);
-                result = around_func(obj, around_args);
+                strada_cleanup_push(around_orig);
+                result = around_func(around_orig, around_args);
                 strada_cleanup_pop();
+                strada_cleanup_pop();
+                strada_decref(around_orig);
                 strada_decref(around_args);
             } else {
                 result = func(obj, args);

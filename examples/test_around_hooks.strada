@@ -1,0 +1,44 @@
+# Test around method modifiers — Moose convention: hook receives
+# ($orig, $self, @args) where $orig is a callable bound to the original
+# method, invoked as $orig->($self, @args). Regression test: the runtime
+# previously passed ($self, [$orig, @args]), swapping $orig and $self in
+# the hook body, so $self->accessor() dispatched against the bound
+# callable and silently read empty attributes.
+package Animal;
+has ro str $species (required);
+has rw int $energy = 100;
+func speak(scalar $self) str { return "generic " . $self->species(); }
+func feed(scalar $self, int $amount) int { return $self->energy() + $amount; }
+
+package Dog;
+extends Animal;
+before "speak" func(scalar $self) void { say("before:" . $self->species()); }
+around "speak" func(scalar $orig, scalar $self) str {
+    return "<<" . $self->species() . ">>";
+}
+around "feed" func(scalar $orig, scalar $self, int $amount) int {
+    my int $base = $orig->($self, $amount);
+    return $base * 2;
+}
+after "speak" func(scalar $self) void { say("after:" . $self->species()); }
+
+package Cat;
+extends Animal;
+around "speak" func(scalar $orig, scalar $self) str {
+    my str $inner = $orig->($self);
+    return "[" . $inner . " says " . $self->species() . "]";
+}
+
+package main;
+func main() int {
+    my int $fail = 0;
+    my scalar $d = Dog::new("species", "dog");
+    if ($d->speak() ne "<<dog>>") { $fail++; say("FAIL 1: " . $d->speak()); }
+    if ($d->feed(10) != 220) { $fail++; say("FAIL 2: " . $d->feed(10)); }
+    my scalar $c = Cat::new("species", "cat");
+    if ($c->speak() ne "[generic cat says cat]") { $fail++; say("FAIL 3: " . $c->speak()); }
+    if ($fail == 0) {
+        say("All around hook tests passed");
+    }
+    return $fail;
+}
