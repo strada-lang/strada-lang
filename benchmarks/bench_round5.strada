@@ -1,0 +1,89 @@
+# Microbenchmarks for the round-5 optimizations:
+#   keys     — foreach over keys(%h) (zero-copy key SVs)
+#   sortkeys — sort(keys(%h)) idiom
+#   join     — join over an array of plain strings (borrow, direct-build)
+#   sortmix  — default string sort over ints (decorate-sort-undecorate)
+#   rxg      — while (=~ /g) loop (match_data reuse)
+#   cse      — while condition with two literal-key fetches of the same key
+#   sprintf  — small sprintf throughput (heap-buffer regression check)
+
+func main() int {
+    my num $t0 = 0.0;
+
+    # keys: 200-key hash, 20k sweeps (4M key visits)
+    my hash %h;
+    foreach my $i (0..199) {
+        $h{"key_" . $i} = $i;
+    }
+    $t0 = core::hires_time();
+    my int $kc = 0;
+    foreach my $r (0..19999) {
+        foreach my $k (keys(%h)) {
+            $kc = $kc + 1;
+        }
+    }
+    say("keys:     " . (core::hires_time() - $t0) . "  (" . $kc . ")");
+
+    # sort keys: 20k sweeps of sort(keys(%h))
+    $t0 = core::hires_time();
+    my int $sk = 0;
+    foreach my $r (0..19999) {
+        my array @sorted = sort(keys(%h));
+        $sk = $sk + size(@sorted);
+    }
+    say("sortkeys: " . (core::hires_time() - $t0) . "  (" . $sk . ")");
+
+    # join: 1000 strings, 20k joins
+    my array @parts;
+    foreach my $i (0..999) {
+        push(@parts, "part" . $i);
+    }
+    $t0 = core::hires_time();
+    my int $jl = 0;
+    foreach my $r (0..19999) {
+        my str $j = join(",", @parts);
+        $jl = $jl + length($j);
+    }
+    say("join:     " . (core::hires_time() - $t0) . "  (" . $jl . ")");
+
+    # sort mixed: 50k ints (tagged — old comparator stringified per compare)
+    my array @nums;
+    foreach my $i (0..49999) {
+        push(@nums, ($i * 7919) % 100000);
+    }
+    $t0 = core::hires_time();
+    my array @ns = sort(@nums);
+    say("sortmix:  " . (core::hires_time() - $t0) . "  (" . $ns[0] . ")");
+
+    # regex /g: 200k matches
+    my str $line = "aa 11 bb 22 cc 33 dd 44 ee 55 ff 66 gg 77 hh 88 ii 99 jj 10";
+    $t0 = core::hires_time();
+    my int $hits = 0;
+    foreach my $r (0..19999) {
+        while ($line =~ /(\d+)/g) {
+            $hits = $hits + 1;
+        }
+    }
+    say("rxg:      " . (core::hires_time() - $t0) . "  (" . $hits . ")");
+
+    # cse: 10M condition evaluations, two fetches of the same key
+    my hash %c = ("k" => 1, "lim" => 20000000);
+    $t0 = core::hires_time();
+    my int $loops = 0;
+    while ($c{"k"} > 0 && $c{"k"} < 10000000) {
+        $c{"k"} = $c{"k"} + 1;
+        $loops = $loops + 1;
+    }
+    say("cse:      " . (core::hires_time() - $t0) . "  (" . $loops . ")");
+
+    # sprintf: 1M small formats
+    $t0 = core::hires_time();
+    my int $sl = 0;
+    foreach my $r (0..999999) {
+        my str $s = core::sprintf("%d:%s:%05d", $r, "x", $r % 1000);
+        $sl = $sl + length($s);
+    }
+    say("sprintf:  " . (core::hires_time() - $t0) . "  (" . $sl . ")");
+
+    return 0;
+}

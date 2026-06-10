@@ -807,23 +807,27 @@ func gen_builtin_g1(scalar $cg, scalar $expr, str $name) int {
             my scalar $sep_arg = $args->[0];
             my int $sep_needs_cleanup = needs_temp_cleanup($cg, $sep_arg);
 
+            # Call strada_join_sv directly: it borrows plain-STR elements
+            # (no per-element copy), builds straight into the result
+            # StradaString, and takes the separator as an SV (no
+            # stringify/copy of the separator). The old path went through
+            # the char* strada_join + strada_new_str, copying the joined
+            # result twice and every element once.
             emit($cg, "(({ ");
             emit($cg, "StradaValue *__join_sep = ");
             gen_expression($cg, $sep_arg);
-            emit($cg, "; char *__sep_cstr = strada_to_str_ss(__join_sep); ");
+            emit($cg, "; ");
             if ($argc == 2) {
                 my int $arr_needs_cleanup = needs_temp_cleanup($cg, $args->[1]);
                 if ($arr_needs_cleanup == 1) {
                     emit($cg, "StradaValue *__join_arr = ");
                     gen_expression($cg, $args->[1]);
-                    emit($cg, "; char *__joined = strada_join(__sep_cstr, strada_deref_array(__join_arr)); ");
+                    emit($cg, "; StradaValue *__join_res = strada_join_sv(__join_sep, strada_deref_array(__join_arr)); ");
                 } else {
-                    emit($cg, "char *__joined = strada_join(__sep_cstr, strada_deref_array(");
+                    emit($cg, "StradaValue *__join_res = strada_join_sv(__join_sep, strada_deref_array(");
                     gen_expression($cg, $args->[1]);
                     emit($cg, ")); ");
                 }
-                emit($cg, "StradaValue *__join_res = strada_new_str(__joined); ");
-                emit($cg, "free(__joined); strada_cstr_free(__sep_cstr); ");
                 if ($sep_needs_cleanup == 1) {
                     emit($cg, "strada_decref(__join_sep); ");
                 }
@@ -847,9 +851,7 @@ func gen_builtin_g1(scalar $cg, scalar $expr, str $name) int {
                     }
                     $ji = $ji + 1;
                 }
-                emit($cg, "char *__joined = strada_join(__sep_cstr, __join_av); ");
-                emit($cg, "StradaValue *__join_res = strada_new_str(__joined); ");
-                emit($cg, "free(__joined); strada_cstr_free(__sep_cstr); ");
+                emit($cg, "StradaValue *__join_res = strada_join_sv(__join_sep, __join_av); ");
                 emit($cg, "strada_decref(__join_arr); ");
                 if ($sep_needs_cleanup == 1) {
                     emit($cg, "strada_decref(__join_sep); ");

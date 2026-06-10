@@ -1953,9 +1953,21 @@ The `needs_temp_cleanup($cg, $expr)` function in CodeGen.strada determines wheth
 
 - **Node types**: `NODE_CALL` (most calls), `NODE_ANON_ARRAY`, `NODE_ANON_HASH`, `NODE_TERNARY`, `NODE_METHOD_CALL`, `NODE_DYN_METHOD_CALL`, `NODE_CLOSURE_CALL`, `NODE_ANON_FUNC`, `NODE_REGEX_MATCH`, `NODE_CAPTURE_VAR`, `NODE_TR`, `NODE_READLINE`, `NODE_DESTRUCTURE`, `NODE_ARRAY_SLICE`, `NODE_HASH_SLICE`, `NODE_OUR_DECL` (reads)
 - **Built-in functions returning owned values**: `match`, `replace`, `replace_all`, `captures`, `named_captures`, `substr`, `join`, `split`, `chr`, `sprintf`, `uc`, `lc`, `ucfirst`, `lcfirst`, `trim`, `ltrim`, `rtrim`, `chomp`, `chop`, `typeof`, `ref`, `reftype`, `reverse`, `dumper_str`, `core::random_bytes`, `core::random_bytes_hex`, all `math::` functions, `bytes`, `hash_new`, `core::file_exists`, `core::open`, `core::slurp`, `slurp`, `core::mkdir`, `core::seek`, `core::waitpid`, `core::getaddrinfo`, `core::socket_fd`, `core::socket_send`, `core::socket_set_nonblocking`, `core::udp_bind`, `core::udp_sendto`, `core::array_default_capacity`, `core::hash_default_capacity`, `core::cstruct_new`, `core::cstruct_get_int`, `core::cstruct_get_double`, `core::cstruct_get_string`, `core::isweak`
-- **Node types that do NOT need cleanup**: `NODE_VARIABLE` (unless it is an `our` variable), `NODE_HASH_ACCESS`, `NODE_DEREF_HASH`, `NODE_DEREF_ARRAY`, `NODE_SUBSCRIPT`, `NODE_INT_LITERAL`, `NODE_NUM_LITERAL`, `NODE_STR_LITERAL` (handled inline)
+- **Node types that do NOT need cleanup**: `NODE_VARIABLE` (unless it is an `our` variable), `NODE_DEREF_ARRAY`, `NODE_SUBSCRIPT`, `NODE_INT_LITERAL`, `NODE_NUM_LITERAL`, `NODE_STR_LITERAL` (handled inline). **Note**: `NODE_HASH_ACCESS` and `NODE_DEREF_HASH` DO need cleanup (they fetch via `strada_hv_fetch_owned*` — owned refs), with one exception: a hash-access node carrying a non-empty `cse_temp` field returns 0 — it emits a borrowed condition-CSE temp whose single decref is owned by the `emit_condition_cse` wrapper.
 
 When adding new expression types or built-in functions that return owned `StradaValue*`, they must be added to `needs_temp_cleanup()` to prevent memory leaks. Function names in the list use `sys::` prefix since `core::` is normalized to `sys::` before the check.
+
+#### Condition-level hash-fetch CSE (`emit_condition_cse`)
+
+Statement conditions (if/elsif/while/until/do-while/for — NOT expression-position ternaries) go through `emit_condition_cse` in CodeGen.strada. When the condition tree is **pure** (`cond_cse_pure`: only variables, literals, binary/unary ops, ternaries, and hash accesses — any call/assignment/increment/regex node disqualifies the whole tree) and the program never calls `tie` (Semantic sets `uses_tie` on the program node; copied to `$cg->{"uses_tie"}` in gen_program), duplicated literal-key fetches on simple hash variables are hoisted:
+
+```c
+if ((({ StradaValue *__cse_0 = strada_hv_fetch_owned_ph(h, "k", 177680u);
+        int __cse_c = (strada_to_num(__cse_0) > 0 && strada_to_num(__cse_0) < 100);
+        strada_decref(__cse_0); __cse_c; }))) ...
+```
+
+Mechanism: `cond_cse_collect` gathers (hash-var, literal-key) sites into `$cg->{"cse_ids"}`/`{"cse_nodes"}`; duplicated sites get tagged with `$node->{"cse_temp"} = "__cse_N"`. The `NODE_HASH_ACCESS` generator in CodeGenExpr.strada emits the temp name for tagged nodes, and `needs_temp_cleanup` returns 0 for them (borrowed). Tags are cleared after the condition is emitted. The hoisted fetch executes even when `&&` short-circuits — fine for untied hashes (reads are side-effect-free and don't autovivify), which is exactly why `tie` anywhere disables the pass.
 
 #### Name resolution MUST match the call emitter (fixed in `b5f48978`)
 
@@ -2127,6 +2139,18 @@ Tests: 82  Passed: 82  Failed: 0  Skipped: 0
 ---
 
 ## Performance Optimizations
+
+### Zero-Copy keys()/each() + StradaString COW Contract (2026-06-10)
+
+`strada_hash_keys`, `strada_hash_each`, and `sort %h` flattening hand out key SVs that **share** the hash key's `StradaString` (`strada_new_str_share_ss`: ss_incref + point `value.pv` at the same data) instead of copying the bytes. This makes every `keys %h` / `each %h` / `sort keys %h` O(1) per key instead of one strdup per key, and makes binary keys round-trip byte-accurately (length from `ss->len`, not strlen).
+
+**The COW contract this creates:** a `StradaString` reachable from more than one place (`ss->refcount > 1`) must NEVER be mutated or realloc'd in place — it may be a live hash key. Any runtime function that writes string bytes through an existing SS (instead of swapping in a fresh one via `ss_alloc_pv`/`ss_new_uninit`) must check `SS_FROM_PV(pv)->refcount == 1` first and clone when shared. Exactly three functions write in place, and all three carry the guard:
+
+- `strada_concat_inplace` (fast path now requires SV refcount == 1 **and** SS refcount == 1)
+- `strada_concat_inplace_cstr` (same)
+- `strada_vec_set` (clones the SS before writing when shared)
+
+Everything else (`tr///`, `strada_subst_sv`, `overwrite_in_place`, `set_byte`, chomp/chop/uc/lc) already builds a fresh SS and swaps `value.pv`, which is safe under sharing. If you add a new in-place string mutator, add the SS-refcount guard or you will corrupt hash keys in a way that only shows up after a `keys()`/`each()` call.
 
 ### Tagged Integer Pointer Encoding (2026-03-02)
 

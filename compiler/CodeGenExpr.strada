@@ -3571,6 +3571,14 @@ func gen_expression(scalar $cg, scalar $expr) void {
     
     # Hash access - use strada_hv_fetch_owned to return owned ref (fixes tied hash leak)
     if ($type == NODE_HASH_ACCESS()) {
+        # CSE: this fetch was hoisted into a condition-level temp — emit
+        # the temp name instead of re-probing (see emit_condition_cse).
+        my str $cse_tmp = "" . $expr->{"cse_temp"};
+        if (length($cse_tmp) > 0) {
+            emit($cg, $cse_tmp);
+            return;
+        }
+
         my scalar $key_expr = $expr->{"key"};
         my int $key_is_literal = $key_expr->{"type"} == NODE_STR_LITERAL();
 

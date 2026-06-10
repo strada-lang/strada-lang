@@ -226,6 +226,7 @@ static void libtcc_add_runtime_symbols(TCCState *s) {
     ADD_SYM(strada_ord);
     ADD_SYM(strada_sprintf);
     ADD_SYM(strada_join);
+    ADD_SYM(strada_join_sv);
     ADD_SYM(strada_split);
     ADD_SYM(strada_char_at);
     ADD_SYM(strada_array_push);

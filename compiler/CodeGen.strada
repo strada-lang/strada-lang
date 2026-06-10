@@ -307,6 +307,14 @@ func codegen_new(str $filename, int $debug_info, int $enable_profiling, int $ena
     $cg{"overloads"} = \%empty_overloads;
     my hash %empty_overloaded_ops = ();
     $cg{"overloaded_ops"} = \%empty_overloaded_ops;
+    # Condition-level hash-fetch CSE state (see emit_condition_cse).
+    # uses_tie is set from the program node in gen_program.
+    $cg{"uses_tie"} = 0;
+    $cg{"cse_n"} = 0;
+    my array @cse_ids = ();
+    $cg{"cse_ids"} = \@cse_ids;
+    my array @cse_nodes = ();
+    $cg{"cse_nodes"} = \@cse_nodes;
     return \%cg;
 }
 
@@ -2775,6 +2783,162 @@ func emit_regex_g_condition(scalar $cg, scalar $expr, str $pos_var) void {
     emit($cg, "\", \"" . $flags . "\", &" . $pos_var . "); free(__re_str); __re_res; })");
 }
 
+# ===== Condition-level CSE for repeated literal-key hash fetches =====
+# `if ($h{"k"} > 0 && $h{"k"} < 100)` probes the hash twice. When the
+# condition tree is PURE (no calls, assignments, increments, regex ops —
+# nothing that could mutate %h or depend on evaluation order) and the
+# program never uses tie (a tied FETCH is observable per-mention), each
+# duplicated fetch is hoisted into a temp evaluated once per condition
+# evaluation. Short-circuit note: the hoisted fetch runs even when the
+# `&&` left side is false — safe for untied hashes (plain reads have no
+# side effects and do not autovivify).
+
+# Is the expression tree pure enough to hoist hash fetches across?
+# Strict whitelist: anything unrecognized (calls, method calls, regex
+# matches, assignments, ++/--) disables CSE for the whole condition.
+func cond_cse_pure(scalar $expr) int {
+    my int $t = $expr->{"type"};
+    if ($t == NODE_VARIABLE() || $t == NODE_INT_LITERAL() || $t == NODE_NUM_LITERAL()
+        || $t == NODE_STR_LITERAL() || $t == NODE_UNDEF()) {
+        return 1;
+    }
+    if ($t == NODE_BINARY_OP()) {
+        if (cond_cse_pure($expr->{"left"}) == 0) { return 0; }
+        return cond_cse_pure($expr->{"right"});
+    }
+    if ($t == NODE_UNARY_OP()) {
+        return cond_cse_pure($expr->{"operand"});
+    }
+    if ($t == NODE_TERNARY()) {
+        if (cond_cse_pure($expr->{"condition"}) == 0) { return 0; }
+        if (cond_cse_pure($expr->{"true_expr"}) == 0) { return 0; }
+        return cond_cse_pure($expr->{"false_expr"});
+    }
+    if ($t == NODE_HASH_ACCESS()) {
+        if (cond_cse_pure($expr->{"hash"}) == 0) { return 0; }
+        return cond_cse_pure($expr->{"key"});
+    }
+    return 0;
+}
+
+# Collect CSE candidates (literal-key accesses on simple hash variables)
+# into $cg->{"cse_ids"} / $cg->{"cse_nodes"} parallel arrays.
+func cond_cse_collect(scalar $cg, scalar $expr) void {
+    my int $t = $expr->{"type"};
+    if ($t == NODE_HASH_ACCESS()) {
+        my scalar $h = $expr->{"hash"};
+        my scalar $k = $expr->{"key"};
+        if ($h->{"type"} == NODE_VARIABLE() && $k->{"type"} == NODE_STR_LITERAL()) {
+            my int $n = $cg->{"cse_n"};
+            $cg->{"cse_ids"}->[$n] = $h->{"name"} . chr(31) . $k->{"value"};
+            $cg->{"cse_nodes"}->[$n] = $expr;
+            $cg->{"cse_n"} = $n + 1;
+        } else {
+            cond_cse_collect($cg, $h);
+            cond_cse_collect($cg, $k);
+        }
+        return;
+    }
+    if ($t == NODE_BINARY_OP()) {
+        cond_cse_collect($cg, $expr->{"left"});
+        cond_cse_collect($cg, $expr->{"right"});
+        return;
+    }
+    if ($t == NODE_UNARY_OP()) {
+        cond_cse_collect($cg, $expr->{"operand"});
+        return;
+    }
+    if ($t == NODE_TERNARY()) {
+        cond_cse_collect($cg, $expr->{"condition"});
+        cond_cse_collect($cg, $expr->{"true_expr"});
+        cond_cse_collect($cg, $expr->{"false_expr"});
+        return;
+    }
+}
+
+# Statement-position condition emitter (if/elsif/while/until/do-while/for).
+# Applies the hash-fetch CSE when safe, else delegates to emit_condition.
+# Expression-position conditions (ternaries) keep plain emit_condition.
+func emit_condition_cse(scalar $cg, scalar $expr) void {
+    if ($cg->{"uses_tie"} == 1 || $cg->{"cleanup_enabled"} != 1) {
+        emit_condition($cg, $expr);
+        return;
+    }
+    if (cond_cse_pure($expr) == 0) {
+        emit_condition($cg, $expr);
+        return;
+    }
+    $cg->{"cse_n"} = 0;
+    cond_cse_collect($cg, $expr);
+    my int $n = $cg->{"cse_n"};
+    if ($n < 2) {
+        emit_condition($cg, $expr);
+        return;
+    }
+    my scalar $ids = $cg->{"cse_ids"};
+    my scalar $nodes = $cg->{"cse_nodes"};
+    # Count occurrences of each id.
+    my hash %count = ();
+    my int $i = 0;
+    while ($i < $n) {
+        my str $cid = $ids->[$i];
+        $count{$cid} = $count{$cid} + 1;
+        $i = $i + 1;
+    }
+    # Tag nodes of duplicated ids with a shared temp; emit each temp's
+    # init (the real fetch) once, from the first — still untagged — node.
+    my hash %temp_for = ();
+    my array @temps = ();
+    my int $temp_count = 0;
+    my int $opened = 0;
+    $i = 0;
+    while ($i < $n) {
+        my str $cid = $ids->[$i];
+        if ($count{$cid} >= 2) {
+            my str $tmp = "" . $temp_for{$cid};
+            if (length($tmp) == 0) {
+                my int $tc = $cg->{"tmp_counter"};
+                $cg->{"tmp_counter"} = $tc + 1;
+                $tmp = "__cse_" . $tc;
+                if ($opened == 0) {
+                    emit($cg, "(({ ");
+                    $opened = 1;
+                }
+                emit($cg, "StradaValue *" . $tmp . " = ");
+                gen_expression($cg, $nodes->[$i]);
+                emit($cg, "; ");
+                $temp_for{$cid} = $tmp;
+                $temps[$temp_count] = $tmp;
+                $temp_count = $temp_count + 1;
+            }
+            my scalar $nd = $nodes->[$i];
+            $nd->{"cse_temp"} = $tmp;
+        }
+        $i = $i + 1;
+    }
+    if ($opened == 0) {
+        emit_condition($cg, $expr);
+        return;
+    }
+    emit($cg, "int __cse_c = ");
+    emit_condition($cg, $expr);
+    emit($cg, "; ");
+    $i = 0;
+    while ($i < $temp_count) {
+        emit($cg, "strada_decref(" . $temps[$i] . "); ");
+        $i = $i + 1;
+    }
+    emit($cg, "__cse_c; }))");
+    # Clear tags: the same AST may be consulted again (e.g. needs_temp_cleanup
+    # from an outer context) and must regenerate real fetches elsewhere.
+    $i = 0;
+    while ($i < $n) {
+        my scalar $nd = $nodes->[$i];
+        $nd->{"cse_temp"} = "";
+        $i = $i + 1;
+    }
+}
+
 # Helper: emit a condition as raw C boolean (avoids strada_new_int allocation)
 # Used for while/for/if conditions to prevent memory leaks
 func emit_condition(scalar $cg, scalar $expr) void {
@@ -2902,6 +3066,14 @@ func is_variable_expr(scalar $expr) int {
 # Returns 0 for unknown types (function calls, etc.) to be safe
 func needs_temp_cleanup(scalar $cg, scalar $expr) int {
     my int $type = $expr->{"type"};
+
+    # A CSE-tagged hash fetch emits a borrowed, already-evaluated temp
+    # (see emit_condition_cse) — the wrapper owns the single decref.
+    if ($type == NODE_HASH_ACCESS()) {
+        if (length("" . $expr->{"cse_temp"}) > 0) {
+            return 0;
+        }
+    }
 
     # bless($ref, "Class") returns its first argument unchanged — no incref —
     # so the cleanup-ness of the bless RESULT must mirror the first arg's. A

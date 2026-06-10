@@ -2,7 +2,43 @@
 
 ## Unreleased (since `0da0455`, 2026-06-09 → 2026-06-10)
 
-### Performance
+### Performance (round 5, 2026-06-10)
+- **`keys()`/`each()` zero-copy (~3x on keys-iteration)**: key result SVs
+  share the hash key's `StradaString` instead of copying every key's bytes.
+  The three in-place string mutators gained copy-on-write guards
+  (`SS_FROM_PV(pv)->refcount == 1`) so mutating a `keys()` result can never
+  corrupt a live hash key. Also fixes binary keys: shared keys carry their
+  byte-accurate length instead of strlen-truncating at the first NUL.
+- **`join()` ~6x on string arrays**: codegen now calls `strada_join_sv`
+  directly — separator passed as an SV (no stringify/copy), plain-STR
+  elements borrowed (no per-element malloc+copy), result built directly
+  into the final `StradaString` (the old path assembled in a scratch
+  buffer, then copied the whole result again). ASCII/UTF-8 flags propagate
+  from the parts instead of rescanning.
+- **Mixed-type default sort ~2.7x**: decorate-sort-undecorate — non-STR
+  elements stringify once (O(n)) instead of inside the qsort comparator
+  (O(n log n)); all-STR arrays skip decoration. `sort %h` walks hash
+  entries directly (old path: materialize keys array, then re-stringify
+  and re-probe the hash per key).
+- **Regex match-data reuse (~1.2x on `/g` loops)**: one-slot thread-local
+  `pcre2_match_data` cache sized to the largest ovector seen, replacing
+  per-match create/free at all 26 call sites; nested matches (regex inside
+  an `s///e` callback) fall back to fresh allocation via a busy flag.
+- **Condition-level hash-fetch CSE (~1.2x on fetch-heavy conditions)**:
+  `if ($h{"k"} > 0 && $h{"k"} < 100)` emits one probe, not two. Gated on:
+  pure condition trees (no calls/assignments/increments/regex), and the
+  program never calling `tie` (tied FETCH is observable per-mention;
+  Semantic publishes `uses_tie` on the program node).
+- **`sprintf` ~1.2x** and no longer silently truncates: output builds in a
+  4KB stack buffer that switches to a growable heap buffer on demand
+  (`%99999d`, 70k-wide `%s`/`%b`, >64KB results all format exactly now —
+  the old fixed 64KB stack buffer truncated silently). The heap buffer is
+  registered on the cleanup stack so a throwing `""` overload mid-format
+  doesn't leak it.
+- Test suite 165 → 166 (`test_perf_round5` covers all six changes incl.
+  the keys-COW and wide-sprintf edges).
+
+### Performance (rounds 1–4, 2026-06-09/10)
 - **Method dispatch ~2x** (type-opaque call sites): compile-time method-name
   hashing, a 64-entry generation-invalidated global cache with cached
   modifier-presence verdicts, and per-call-site monomorphic inline caches

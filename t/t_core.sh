@@ -366,3 +366,7 @@ test_output_contains "$EXAMPLES_DIR/test_perl_compat.strada" "test_perl_compat" 
 # Test: String eval (use Eval)
 test_output_contains "$EXAMPLES_DIR/test_eval.strada" "test_eval" "All eval tests passed" "String eval"
 test_output_contains "$EXAMPLES_DIR/test_unicode_normalize.strada" "test_unicode_normalize" "normalize: 5 passed, 0 failed" "Unicode normalization (NFC/NFD/NFKC/NFKD)"
+
+# Test: round-5 perf work (zero-copy keys COW, join_sv, decorated sort,
+# match-data reuse, condition CSE, growable sprintf)
+test_output_contains "$EXAMPLES_DIR/test_perf_round5.strada" "test_perf_round5" "All round5 perf tests passed" "Round-5 perf regressions"

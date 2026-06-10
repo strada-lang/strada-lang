@@ -633,7 +633,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
     if ($type == NODE_IF_STMT()) {
         emit_indent($cg);
         emit($cg, "if (");
-        emit_condition($cg, $stmt->{"condition"});
+        emit_condition_cse($cg, $stmt->{"condition"});
         emit($cg, ") ");
         gen_block($cg, $stmt->{"then_block"});
 
@@ -643,7 +643,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         my int $i = 0;
         while ($i < $stmt->{"elsif_count"}) {
             emit($cg, " else if (");
-            emit_condition($cg, $elsif_conds->[$i]);
+            emit_condition_cse($cg, $elsif_conds->[$i]);
             emit($cg, ") ");
             gen_block($cg, $elsif_blocks->[$i]);
             $i = $i + 1;
@@ -718,7 +718,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             emit($cg, ") {\n");
         } else {
             emit($cg, "while (");
-            emit_condition($cg, $while_cond);
+            emit_condition_cse($cg, $while_cond);
             emit($cg, ") {\n");
         }
         indent($cg);
@@ -854,7 +854,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         dedent($cg);
         emit_indent($cg);
         emit($cg, "} while (");
-        emit_condition($cg, $stmt->{"condition"});
+        emit_condition_cse($cg, $stmt->{"condition"});
         emit($cg, ");\n");
 
         # Add break label after loop if labeled
@@ -948,7 +948,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         emit($cg, "; ");
 
         if ($stmt->{"condition"}) {
-            emit_condition($cg, $stmt->{"condition"});
+            emit_condition_cse($cg, $stmt->{"condition"});
         }
         emit($cg, "; ");
 
@@ -2667,6 +2667,11 @@ func gen_program(scalar $cg, scalar $program) void {
     $cg->{"has_overloads"} = $program->{"has_overloads"};
     $cg->{"overloads"} = $program->{"overloads"};
     $cg->{"overloaded_ops"} = $program->{"overloaded_ops"};
+
+    # Condition-level hash-fetch CSE is sound only when the program never
+    # ties a variable (tied FETCH is observable per-mention). Semantic
+    # sets uses_tie on the program node.
+    $cg->{"uses_tie"} = $program->{"uses_tie"};
 
     # Store method modifiers
     $cg->{"method_modifiers"} = $program->{"method_modifiers"};

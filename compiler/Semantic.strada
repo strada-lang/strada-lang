@@ -904,6 +904,13 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
         my scalar $args = $expr->{"args"};
         my int $arg_count = $expr->{"arg_count"};
 
+        # Record tie usage on the context: the codegen's condition-level
+        # hash-fetch CSE is only sound when no hash in the program can be
+        # tied (a tied FETCH is observable per-mention).
+        if ($name eq "tie" || $name eq "core::tie" || $name eq "sys::tie") {
+            $ctx->{"uses_tie"} = 1;
+        }
+
         # Check if builtin (builtins hash stores 1 for each builtin)
         my int $is_builtin = $ctx->{"builtins"}->{$name};
         if ($is_builtin == 1) {
@@ -1500,5 +1507,11 @@ func semantic_analyze(scalar $ast, int $show_warnings) void {
             next;
         }
         analyze_function($ctx, $fn);
+    }
+
+    # Publish program-wide facts the codegen reads (mirrors has_overloads,
+    # which the parser sets directly). uses_tie gates condition-level CSE.
+    if ($ctx->{"uses_tie"} == 1) {
+        $ast->{"uses_tie"} = 1;
     }
 }

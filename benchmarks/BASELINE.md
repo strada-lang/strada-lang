@@ -51,6 +51,35 @@ values still fresh-box, so aliasing semantics are unchanged.
 | `$sum = $sum + 0.5`, 50M iterations | 0.74s (15ns/iter) | 0.114s (2.3ns/iter) | 6.5x |
 | int accumulator control (same box) | 0.028s (0.56ns/iter) | unchanged | — |
 
+## Round 5 microbenchmarks (2026-06-10)
+
+Measured with a dedicated harness (keys/sortkeys/join/sortmix/rxg/cse/sprintf
+sections; workloads described below), old = clean worktree build of `6238511`,
+new = post-round-5 tree, both at `-O2`, interleaved best-of-5 on a quiet box:
+
+| section  | workload | old | new | speedup | what changed |
+|----------|----------|-----|-----|---------|--------------|
+| keys     | foreach over keys() of a 200-key hash, 20k sweeps (4M visits) | 0.074s | 0.050s | 1.5x | zero-copy key SVs (shared StradaString, no strdup per key) |
+| sortkeys | sort(keys %h), same hash, 20k sweeps | 0.217s | 0.191s | 1.1x | same (sort dominates) |
+| join     | join(",", @1000_strings), 20k joins | 0.689s | 0.164s | 4.2x | strada_join_sv from codegen: borrowed STR elements, direct-build into result SS (old path copied each element + whole result twice) |
+| sortmix  | default sort of 50k tagged ints | 0.032s | 0.011s | 2.9x | decorate-sort-undecorate (stringify once, not per comparison) |
+| rxg      | while (=~ /(\d+)/g), 200k matches | 0.058s | 0.050s | 1.2x | one-slot reusable pcre2 match data |
+| cse      | while ($c{"k"} > 0 && $c{"k"} < 10M) — 10M iterations | 0.167s | 0.139s | 1.2x | condition-level CSE: one probe per evaluation instead of two |
+| sprintf  | 1M small "%d:%s:%05d" formats | 0.235s | 0.207s | 1.1x | 4KB stack buffer + lazy heap growth (also: wide formats no longer truncate) |
+
+## Investigated and closed: foreach-over-keys codegen fast path
+
+Considered alongside the zero-copy keys work: a dedicated codegen path for
+`foreach my $k (keys %h)` that iterates hash slots directly instead of
+materializing the keys array. Closed after the zero-copy change because the
+remaining materialization cost per key is one pooled SV alloc + one
+array-push — and a sound fast path must still snapshot the key list (Perl
+semantics allow `delete` during iteration; the keys list is a snapshot) and
+must still build one SV per iteration for the loop variable. So the fast
+path saves only the array backbone + push per key (a minor slice of the
+measured 12ns/key), at the cost of a new specialized foreach emission path.
+Revisit only if a profiled workload shows keys-loop overhead dominating.
+
 ## Investigated and closed: full tagged/NaN-boxed doubles
 
 Assessed 2026-06-10 after the in-place fix above. The remaining ~4x gap to
