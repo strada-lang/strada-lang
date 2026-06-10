@@ -1,0 +1,51 @@
+# Test %=, **=, //=, x= compound assignment (regression: these did not
+# lex/parse at all). Implemented as parser desugar to `target = target OP
+# rhs`, so they work on every target shape the ordinary assignment
+# supports, including hash/array elements with autovivification.
+func main() int {
+    my int $pass = 0;
+    my int $fail = 0;
+
+    my int $a = 17;
+    $a %= 5;
+    if ($a == 2) { $pass++; } else { $fail++; say("FAIL 1"); }
+
+    my num $p = 2;
+    $p **= 10;
+    if ($p == 1024) { $pass++; } else { $fail++; say("FAIL 2"); }
+
+    my $u;
+    $u //= "default";
+    $u //= "second";
+    if ($u eq "default") { $pass++; } else { $fail++; say("FAIL 3"); }
+
+    my str $s = "ab";
+    $s x= 3;
+    if ($s eq "ababab") { $pass++; } else { $fail++; say("FAIL 4"); }
+
+    my hash %h = ("n" => 17);
+    $h{"n"} %= 5;
+    if ($h{"n"} == 2) { $pass++; } else { $fail++; say("FAIL 5"); }
+
+    my array @arr = (2);
+    $arr[0] **= 8;
+    if ($arr[0] == 256) { $pass++; } else { $fail++; say("FAIL 6"); }
+
+    my hash %d;
+    $d{"k"} //= "filled";
+    $d{"k"} //= "no";
+    if ($d{"k"} eq "filled") { $pass++; } else { $fail++; say("FAIL 7"); }
+
+    # Lexer regression guards: binary %, **, //, x and %hash syntax
+    if (17 % 5 == 2 && 2 ** 8 == 256) { $pass++; } else { $fail++; say("FAIL 8"); }
+    my $w = $u // "z";
+    if ($w eq "default" && ("xy" x 2) eq "xyxy") { $pass++; } else { $fail++; say("FAIL 9"); }
+    my hash %g = ("a" => 1);
+    my int $x = 9;
+    if ($g{"a"} == 1 && $x == 9) { $pass++; } else { $fail++; say("FAIL 10"); }
+
+    if ($fail == 0) {
+        say("All compound op tests passed (" . $pass . " checks)");
+    }
+    return $fail;
+}

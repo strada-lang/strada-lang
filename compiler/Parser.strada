@@ -2198,8 +2198,10 @@ func parse_multiplicative(scalar $parser) scalar {
             parser_advance($parser);
             my scalar $right = parse_power($parser);
             $left = ast_new_binary_op($op, $left, $right);
-        } elsif ($type eq "IDENT" && $tok->{"value"} eq "x") {
-            # String repetition: "ab" x 3
+        } elsif ($type eq "IDENT" && $tok->{"value"} eq "x"
+                 && parser_peek($parser)->{"type"} ne "ASSIGN") {
+            # String repetition: "ab" x 3. (x followed by '=' is the x=
+            # repeat-assign operator, handled in parse_assignment.)
             parser_advance($parser);
             my scalar $right = parse_power($parser);
             $left = ast_new_binary_op("x", $left, $right);
@@ -2486,6 +2488,30 @@ func parse_assignment(scalar $parser) scalar {
         parser_advance($parser);
         my scalar $right = parse_assignment($parser);
         return ast_new_assign($op, $left, $right);
+    }
+
+    # %=, **=, //=, x= — desugar to `target = target OP rhs`, which reuses
+    # the ordinary assignment paths (including hash/array element targets,
+    # autovivification, and int/num coercion) with no codegen changes.
+    # Note the target node is shared between the assignment LHS and the
+    # binary's left operand — codegen treats AST nodes as read-only.
+    if ($type eq "MOD_ASSIGN" || $type eq "POWER_ASSIGN" || $type eq "DOR_ASSIGN") {
+        my str $bop = "%";
+        if ($type eq "POWER_ASSIGN") { $bop = "**"; }
+        if ($type eq "DOR_ASSIGN") { $bop = "//"; }
+        parser_advance($parser);
+        my scalar $right = parse_assignment($parser);
+        return ast_new_assign("=", $left, ast_new_binary_op($bop, $left, $right));
+    }
+
+    # x= string-repeat assign: lexed as IDENT "x" + ASSIGN since x is an
+    # identifier character (parse_multiplicative skips this pair so it
+    # reaches us intact)
+    if ($type eq "IDENT" && $tok->{"value"} eq "x" && parser_peek($parser)->{"type"} eq "ASSIGN") {
+        parser_advance($parser);
+        parser_advance($parser);
+        my scalar $right = parse_assignment($parser);
+        return ast_new_assign("=", $left, ast_new_binary_op("x", $left, $right));
     }
     
     return $left;

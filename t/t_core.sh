@@ -341,6 +341,9 @@ test_output_contains "$EXAMPLES_DIR/test_autovivification.strada" "test_autovivi
 # Test: *= and /= compound assignment (regression: previously didn't lex)
 test_output_contains "$EXAMPLES_DIR/test_muldiv_assign.strada" "test_muldiv_assign" "All muldiv assign tests passed" "Mul/div compound assign"
 
+# Test: %=, **=, //=, x= compound assignment (regression: didn't lex/parse)
+test_output_contains "$EXAMPLES_DIR/test_compound_ops.strada" "test_compound_ops" "All compound op tests passed" "Compound op family"
+
 # Test: int-declared storage holds canonical ints (regression: string/NUM
 # values were stored as-is, confusing the int fast paths)
 test_output_contains "$EXAMPLES_DIR/test_int_coercion.strada" "test_int_coercion" "All int coercion tests passed" "Int variable coercion"

@@ -1743,6 +1743,18 @@ func lex_next_token(scalar $lexer) scalar {
         return \%token;
     }
 
+    # //=  (/47, /47, =61) - defined-or-assign (checked before //)
+    if ($code == 47 && $code2 == 47 && char_at($lexer->{"source"}, $lexer->{"pos"} + 2) == 61) {
+        lex_advance($lexer);
+        lex_advance($lexer);
+        lex_advance($lexer);
+        my hash %token = ();
+        $token{"type"} = "DOR_ASSIGN";
+        $token{"value"} = "//=";
+        $token{"line"} = $token_line;
+        return \%token;
+    }
+
     # //  (/47, /47) - defined-or operator
     if ($code == 47 && $code2 == 47) {
         lex_advance($lexer);
@@ -1938,6 +1950,18 @@ func lex_next_token(scalar $lexer) scalar {
         return \%token;
     }
 
+    # **=  (*42, *42, =61) - power-assign (checked before **)
+    if ($code == 42 && $code2 == 42 && char_at($lexer->{"source"}, $lexer->{"pos"} + 2) == 61) {
+        lex_advance($lexer);
+        lex_advance($lexer);
+        lex_advance($lexer);
+        my hash %token = ();
+        $token{"type"} = "POWER_ASSIGN";
+        $token{"value"} = "**=";
+        $token{"line"} = $token_line;
+        return \%token;
+    }
+
     # **  (*42, *42) - exponentiation
     if ($code == 42 && $code2 == 42) {
         lex_advance($lexer);
@@ -1949,7 +1973,19 @@ func lex_next_token(scalar $lexer) scalar {
         return \%token;
     }
 
-    # *=  (*42, =61) — checked after ** (42,42), so **= still lexes as POWER + ASSIGN
+    # %=  (%37, =61) - mod-assign. A real hash sigil is always followed by
+    # an identifier/sigil char, never '=', so this can't shadow %hash syntax.
+    if ($code == 37 && $code2 == 61) {
+        lex_advance($lexer);
+        lex_advance($lexer);
+        my hash %token = ();
+        $token{"type"} = "MOD_ASSIGN";
+        $token{"value"} = "%=";
+        $token{"line"} = $token_line;
+        return \%token;
+    }
+
+    # *=  (*42, =61) — checked after **/**= so those lex first
     if ($code == 42 && $code2 == 61) {
         lex_advance($lexer);
         lex_advance($lexer);

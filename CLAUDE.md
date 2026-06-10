@@ -672,7 +672,7 @@ print(STDERR, "debug info");
 - **String**: `.` (concat), `x` (repeat: `"ab" x 3`), `cmp` (comparison)
 - **Logical**: `&&`, `||` (returns value, not bool), `//` (defined-or), `!`
 - **Comparison**: `==`, `!=`, `<`, `>`, `<=`, `>=`, `<=>`, `eq`, `ne`, `lt`, `gt`
-- **Assignment**: `=`, `+=`, `-=`, `*=`, `/=`, `.=`, `//=` (`$n = @arr` gives array count)
+- **Assignment**: `=`, `+=`, `-=`, `*=`, `/=`, `.=`, `%=`, `**=`, `//=`, `x=` (`$n = @arr` gives array count)
 
 `||` vs `//`: `||` treats `0` and `""` as falsy; `//` only treats `undef` as falsy.
 
