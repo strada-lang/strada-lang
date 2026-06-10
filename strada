@@ -124,6 +124,7 @@ OBJECT_FULL=0      # 1 if --object-full was passed (include deps, old behavior)
 MODULE_ONLY_MODE=0 # 1 if -M was passed (precompile a module / a tree of modules)
 STATIC_LINK=0
 SHOW_WARNINGS=0
+STRICT_TYPES=0
 ENABLE_PROFILING=0
 FULL_PROFILE=0
 NO_STACK_TRACE=0
@@ -210,6 +211,7 @@ Options:
                 to override).
   --doc TOPIC   Show documentation (module POD or guide)
   -w            Show compiler warnings (unused variables, etc.)
+  --strict-types  Warn on declared-type mismatches (gradual; untyped code never warns)
   -v          Verbose output
   -h, --help  Show this help
 
@@ -346,6 +348,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -w|--warnings)
             SHOW_WARNINGS=1
+            shift
+            ;;
+        --strict-types)
+            STRICT_TYPES=1
             shift
             ;;
         -p|--profile)
@@ -810,6 +816,9 @@ if [ "$DEBUG_SYMBOLS" -eq 1 ]; then
 fi
 if [ "$SHOW_WARNINGS" -eq 1 ]; then
     STRADAC_FLAGS="$STRADAC_FLAGS -w"
+fi
+if [ "$STRICT_TYPES" -eq 1 ]; then
+    STRADAC_FLAGS="$STRADAC_FLAGS --strict-types"
 fi
 if [ "$ENABLE_PROFILING" -eq 1 ]; then
     STRADAC_FLAGS="$STRADAC_FLAGS -p"

@@ -18,6 +18,12 @@ exception is the type system.
   under threading, locked global registry, pool/cleanup-stack fixes.
 - **Cycle collector under threading** (`0da0455`): a stop-the-world pause so
   threaded programs no longer leak reference cycles. This was Tier-1 #2 below.
+- **Type-system Stage 0** (2026-06-10): `--strict-types` warning layer —
+  `stage0_expr_type`/`stage0_types_compatible` in Semantic.strada wired into
+  decl-init, assignment, call args, and return. Bivariant scalar/dynamic,
+  silent int/num family. Dogfooded over the compiler + stdlib (one true
+  positive, zero false). Tier-1 #1 below is now *started*; Stages 1–3
+  (structured type nodes, `array<int>`, nullable `int?`) remain.
 
 ## ⭐ Highest-impact gaps
 
@@ -82,17 +88,17 @@ don't monomorphize/specialize the runtime (keep everything boxed
 `StradaValue*` — generics are a compile-time check, not a representation
 change); don't chase soundness (the runtime is the backstop).
 
-**Stage 0 — make the annotations mean something (days; ships the headline).**
-Generalize `expr_is_int_typed` into `expr_type($sem, $expr) → type` and add
-`types_compatible(declared, actual)` where `dynamic`/`scalar`/unannotated is
-bivariant-compatible with everything. Wire it into the four sites the symbol
-table already feeds: `my T $x = …`, assignment, call args vs declared params,
-and `return` vs declared return type. Emit **warnings behind `--strict-types`
-(or `-w`) first** — the self-hosting compiler and stdlib almost certainly have
-latent mismatches, so don't make them hard errors on day one. Retires the
-"aspirational" critique; bootstrap-safe (uses the existing flat int tags).
-Bonus: a real `expr_type` makes codegen *better* — more provably-int
-expressions → more tagged-int fast paths.
+**Stage 0 — make the annotations mean something. ✅ SHIPPED 2026-06-10.**
+`stage0_expr_type($ctx, $expr) → type` and `stage0_types_compatible` live in
+Semantic.strada, wired into the four sites (`my T $x = …`, assignment, call
+args, return) behind `--strict-types`. Bivariant `dynamic`/`scalar`/
+unannotated; the numeric family (int/num/C-interop kinds) interconverts
+silently. The predicted "latent mismatches" in the compiler/stdlib turned out
+not to exist — the dogfood sweep found exactly one warning, a deliberate
+mismatch in the int-coercion test. Still to harvest from Stage 0: feeding
+`expr_type` into the CODEGEN (more provably-int expressions → more tagged-int
+fast paths) — today the codegen still uses its own narrower
+`expr_is_int_typed`.
 
 **Stage 1 — structured type representation (the one real refactor).**
 Replace the flat `int` tag with a small structured type node:

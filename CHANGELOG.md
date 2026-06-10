@@ -104,6 +104,16 @@
   (refcount elision for accumulators; full tagged/NaN-boxed doubles).
 
 ### Language
+- **`--strict-types` — stage-0 gradual type checking (warning-only)**:
+  declared types are now compared against a best-effort static expression
+  type at var-decl initializers, plain assignments, call arguments, and
+  returns. `scalar`/`dynamic`/unannotated are bivariant (untyped code
+  never warns); int/num interconvert silently. `my int $n = "hi"` finally
+  says something. Dogfood result: zero warnings across the 30k-line
+  self-hosting compiler and the examples+stdlib sweep, except one
+  deliberate mismatch in the int-coercion test — high signal, no noise.
+  This is Stage 0 of the ROADMAP type-system plan (Semantic.strada only;
+  no runtime/ABI/codegen changes).
 - `*=`, `/=`, `%=`, `**=`, `//=`, and `x=` compound assignment operators —
   previously documented but unimplemented (didn't lex/parse). Work on all
   target shapes including hash/array elements.

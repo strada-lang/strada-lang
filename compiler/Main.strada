@@ -90,7 +90,7 @@ func _deduce_lib_root_from_source(str $source, str $filename) str {
     return substr($filename, 0, $suffix_start - 1);
 }
 
-func compile(str $source, str $filename, int $debug_info, int $show_timing, int $show_warnings, int $enable_profiling, int $enable_stack_trace, int $full_profile, scalar $lib_paths, scalar $lib_paths_low, scalar $implicit_objs, scalar $implicit_archs, int $module_only_mode, str $module_target) str {
+func compile(str $source, str $filename, int $debug_info, int $show_timing, int $show_warnings, int $strict_types, int $enable_profiling, int $enable_stack_trace, int $full_profile, scalar $lib_paths, scalar $lib_paths_low, scalar $implicit_objs, scalar $implicit_archs, int $module_only_mode, str $module_target) str {
     my num $t0 = 0.0;
     my num $t1 = 0.0;
 
@@ -144,7 +144,7 @@ func compile(str $source, str $filename, int $debug_info, int $show_timing, int 
 
     # Semantic analysis (validates symbols, types, etc.)
     $t0 = core::hires_time();
-    semantic_analyze($ast, $show_warnings);
+    semantic_analyze($ast, $show_warnings, $strict_types);
     $t1 = core::hires_time();
     if ($show_timing == 1) {
         say("  Semantic: " . ($t1 - $t0) . " seconds");
@@ -194,6 +194,7 @@ func main() int {
     my int $debug_info = 0;
     my int $show_timing = 0;
     my int $show_warnings = 0;
+    my int $strict_types = 0;
     my int $enable_profiling = 0;
     my int $full_profile = 0;
     my int $enable_stack_trace = -1;  # Auto-detect by default
@@ -224,6 +225,8 @@ func main() int {
             $show_timing = 1;
         } elsif ($arg eq "-w" || $arg eq "--warnings") {
             $show_warnings = 1;
+        } elsif ($arg eq "--strict-types") {
+            $strict_types = 1;
         } elsif ($arg eq "--full-profile") {
             $full_profile = 1;
             $debug_info = 1;  # Full profiling implies debug (needs line info)
@@ -371,7 +374,7 @@ func main() int {
     }
 
     # Compile (pass lib paths, CLI-implicit imports, and module-only settings)
-    my str $code = compile($source, $input_file, $debug_info, $show_timing, $show_warnings, $enable_profiling, $enable_stack_trace, $full_profile, \@lib_paths, \@lib_paths_low, \@implicit_objs, \@implicit_archs, $module_only_mode, $module_target);
+    my str $code = compile($source, $input_file, $debug_info, $show_timing, $show_warnings, $strict_types, $enable_profiling, $enable_stack_trace, $full_profile, \@lib_paths, \@lib_paths_low, \@implicit_objs, \@implicit_archs, $module_only_mode, $module_target);
 
     # Write output
     spew($output_file, $code);

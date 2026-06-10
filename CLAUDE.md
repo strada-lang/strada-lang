@@ -140,6 +140,7 @@ These files are concatenated into `Combined.strada` during build, compiled to `C
 - C interop: `int8`, `int16`, `uint8`/`byte`, `uint16`, `uint32`, `uint64`, `size_t`, `char`, `float`, `double`
 - `int`-declared variables hold canonical integers: initializing or assigning a value the compiler can't prove int-typed coerces it (`strada_to_int` semantics — `my int $x = "12abc"` makes $x the integer 12), and `int`-returning functions coerce non-int return values the same way. Parameters are the exception (borrowed values, coercion would cost every call; they convert at use sites instead).
 - Type annotations are optional in `my`/`our` declarations and function signatures. The sigil determines the default: `$` → `scalar`, `@` → `array`, `%` → `hash`. Return types default to `scalar` if omitted.
+- **`--strict-types`** (stage-0 gradual checking, warning-only): compares declared types against a best-effort static expression type (`stage0_expr_type` in Semantic.strada) at four sites — `my T $x = …` initializers, plain `=` assignments to declared scalars, call arguments vs declared params, and `return` vs declared return type. `scalar`/`dynamic`/unannotated are **bivariant** (compatible with everything, both directions) so untyped code never warns; the int/num/C-interop numeric family interconverts silently (documented coercions). Warnings, never errors — the runtime remains the soundness backstop. A `void` result used as a value warns even for untyped targets (it's a hard C error downstream).
 
 ### Sigils
 
@@ -832,6 +833,7 @@ core::array_reserve(@arr, $n);
 
 ```bash
 ./strada -w input.strada        # Enable warnings (unused variables)
+./strada --strict-types input.strada  # Stage-0 type warnings (see below)
 ./stradac -t input.strada out.c # Show compilation phase timing
 ./strada -p input.strada        # Function-level profiling (timing to stderr)
 ./strada --full-profile input.strada  # Line-level profiling (writes strada-prof.out)

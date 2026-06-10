@@ -373,3 +373,19 @@ test_output_contains "$EXAMPLES_DIR/test_perf_round5.strada" "test_perf_round5" 
 
 # Test: flattened multi-part concat (strada_concat_multi — interpolation chains)
 test_output_contains "$EXAMPLES_DIR/test_concat_multi.strada" "test_concat_multi" "All concat-multi tests passed" "Multi-part concat flattening"
+
+# Test: --strict-types stage-0 type warnings (warning-only, gradual).
+# Expects exactly 5 warnings from the fixture's flagged lines, zero
+# without the flag, and successful compilation either way.
+TOTAL=$((TOTAL + 1))
+STRICT_OUT=$("$STRADAC" --strict-types "$EXAMPLES_DIR/test_strict_types.strada" "$BUILD_DIR/test_strict_types.c" 2>&1)
+STRICT_RC=$?
+STRICT_WARNS=$(echo "$STRICT_OUT" | grep -c "^warning:")
+NOFLAG_WARNS=$("$STRADAC" "$EXAMPLES_DIR/test_strict_types.strada" "$BUILD_DIR/test_strict_types.c" 2>&1 | grep -c "^warning:")
+if [ "$STRICT_RC" -eq 0 ] && [ "$STRICT_WARNS" -eq 5 ] && [ "$NOFLAG_WARNS" -eq 0 ]; then
+    log_pass "compile: --strict-types warnings (5 expected, 0 without flag)"
+    PASSED=$((PASSED + 1))
+else
+    log_fail "compile: --strict-types warnings" "rc=$STRICT_RC warns=$STRICT_WARNS noflag=$NOFLAG_WARNS"
+    FAILED=$((FAILED + 1))
+fi

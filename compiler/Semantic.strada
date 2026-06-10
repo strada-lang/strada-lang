@@ -881,6 +881,125 @@ func register_globals(scalar $ctx, scalar $ast) void {
 # Validation Pass (Second Pass)
 # ============================================================
 
+# ============================================================
+# Stage-0 type checking (gradual, warning-only, --strict-types)
+# ============================================================
+# Computes a best-effort static type for an expression and compares it
+# against declarations at the four sites where both sides are already in
+# hand: var-decl initializers, plain assignments, call arguments, and
+# returns. `scalar`/`dynamic`/unknown are BIVARIANT — compatible with
+# everything in both directions — so untyped code never warns (the
+# gradual escape hatch; the runtime's StradaValue checks remain the
+# soundness backstop). int/num (and the C-interop numeric kinds)
+# interconvert silently by design: flagging `my int $i = $x / 2`
+# (/ returns num) would bury the real findings under documented-coercion
+# noise. Name-resolution note: call return types use the plain registry
+# lookup; an unqualified same-package call in a non-main package may
+# miss and degrade to `scalar` — that can only SUPPRESS a warning, never
+# fabricate one (unlike needs_temp_cleanup, where divergence leaked).
+
+func stage0_is_numeric(int $t) int {
+    if ($t == TYPE_INT() || $t == TYPE_NUM() || $t == TYPE_BOOL() || $t == TYPE_ENUM()
+        || $t == TYPE_INT8() || $t == TYPE_INT16() || $t == TYPE_INT32() || $t == TYPE_INT64()
+        || $t == TYPE_UINT8() || $t == TYPE_UINT16() || $t == TYPE_UINT32() || $t == TYPE_UINT64()
+        || $t == TYPE_SIZE_T() || $t == TYPE_CHAR()
+        || $t == TYPE_FLOAT32() || $t == TYPE_FLOAT64() || $t == TYPE_LONG_DOUBLE()) {
+        return 1;
+    }
+    return 0;
+}
+
+func stage0_types_compatible(int $expected, int $actual) int {
+    if ($expected == $actual) { return 1; }
+    # A void result is never a usable value — flag even for untyped targets.
+    if ($actual == TYPE_VOID()) { return 0; }
+    # Bivariant: scalar/dynamic/unknown on either side accepts everything.
+    if ($expected == TYPE_SCALAR() || $expected == TYPE_DYNAMIC() || $expected <= 0) { return 1; }
+    if ($actual == TYPE_SCALAR() || $actual == TYPE_DYNAMIC() || $actual <= 0) { return 1; }
+    # The numeric family interconverts silently (documented coercions).
+    if (stage0_is_numeric($expected) == 1 && stage0_is_numeric($actual) == 1) { return 1; }
+    return 0;
+}
+
+# Best-effort static type of an expression; TYPE_SCALAR when unknown.
+func stage0_expr_type(scalar $ctx, scalar $expr) int {
+    if (is_valid_node($expr) == 0) { return TYPE_SCALAR(); }
+    my int $t = $expr->{"type"};
+    if ($t == NODE_INT_LITERAL()) { return TYPE_INT(); }
+    if ($t == NODE_NUM_LITERAL()) { return TYPE_NUM(); }
+    if ($t == NODE_STR_LITERAL()) { return TYPE_STR(); }
+    if ($t == NODE_VARIABLE()) {
+        my str $sigil = $expr->{"sigil"};
+        if ($sigil eq "@") { return TYPE_ARRAY(); }
+        if ($sigil eq "%") { return TYPE_HASH(); }
+        my scalar $lk = scope_lookup_var($ctx->{"scope"}, $expr->{"name"});
+        if ($lk->{"found"} == 1) {
+            my scalar $info = $lk->{"info"};
+            if ($info->{"sigil"} eq "$") {
+                return $info->{"type"};
+            }
+        }
+        return TYPE_SCALAR();
+    }
+    if ($t == NODE_BINARY_OP()) {
+        my str $op = $expr->{"op"};
+        if ($op eq "." || $op eq "x") { return TYPE_STR(); }
+        if ($op eq "==" || $op eq "!=" || $op eq "<" || $op eq ">" || $op eq "<=" || $op eq ">="
+            || $op eq "eq" || $op eq "ne" || $op eq "lt" || $op eq "gt" || $op eq "le" || $op eq "ge"
+            || $op eq "<=>" || $op eq "cmp") { return TYPE_INT(); }
+        if ($op eq "&" || $op eq "|" || $op eq "^" || $op eq "<<" || $op eq ">>") { return TYPE_INT(); }
+        if ($op eq "/") { return TYPE_NUM(); }
+        if ($op eq "+" || $op eq "-" || $op eq "*" || $op eq "%" || $op eq "**") {
+            my int $ltype = stage0_expr_type($ctx, $expr->{"left"});
+            my int $rtype_op = stage0_expr_type($ctx, $expr->{"right"});
+            if ($ltype == TYPE_INT() && $rtype_op == TYPE_INT()) { return TYPE_INT(); }
+            if (stage0_is_numeric($ltype) == 1 && stage0_is_numeric($rtype_op) == 1) { return TYPE_NUM(); }
+            # Strings/unknowns in numeric context coerce — stay permissive.
+            return TYPE_SCALAR();
+        }
+        if ($op eq "&&" || $op eq "||" || $op eq "//") {
+            # Value-returning logicals: only typed when both sides agree.
+            my int $ltype = stage0_expr_type($ctx, $expr->{"left"});
+            my int $rtype_op = stage0_expr_type($ctx, $expr->{"right"});
+            if ($ltype == $rtype_op) { return $ltype; }
+            return TYPE_SCALAR();
+        }
+        return TYPE_SCALAR();
+    }
+    if ($t == NODE_UNARY_OP()) {
+        my str $op = $expr->{"op"};
+        if ($op eq "!" || $op eq "not" || $op eq "~") { return TYPE_INT(); }
+        if ($op eq "-") {
+            my int $ot = stage0_expr_type($ctx, $expr->{"operand"});
+            if (stage0_is_numeric($ot) == 1) { return $ot; }
+            return TYPE_SCALAR();
+        }
+        return TYPE_SCALAR();
+    }
+    if ($t == NODE_TERNARY()) {
+        my int $tt = stage0_expr_type($ctx, $expr->{"true_expr"});
+        my int $ft = stage0_expr_type($ctx, $expr->{"false_expr"});
+        if ($tt == $ft) { return $tt; }
+        return TYPE_SCALAR();
+    }
+    if ($t == NODE_CALL()) {
+        my str $name = $expr->{"name"};
+        # High-signal builtins; everything else stays unknown.
+        if ($name eq "length" || $name eq "size" || $name eq "index" || $name eq "rindex"
+            || $name eq "ord" || $name eq "bytes" || $name eq "int"
+            || $name eq "exists" || $name eq "defined") { return TYPE_INT(); }
+        if ($name eq "substr" || $name eq "join" || $name eq "uc" || $name eq "lc"
+            || $name eq "ucfirst" || $name eq "lcfirst" || $name eq "trim"
+            || $name eq "chr" || $name eq "sprintf") { return TYPE_STR(); }
+        my scalar $fn_info = $ctx->{"functions"}->{$name};
+        if ($fn_info->{"is_registered"} == 1) {
+            return $fn_info->{"return_type"};
+        }
+        return TYPE_SCALAR();
+    }
+    return TYPE_SCALAR();
+}
+
 func analyze_expression(scalar $ctx, scalar $expr) void {
     my int $node_type = $expr->{"type"};
     my int $line = ast_get_line($expr);
@@ -1065,6 +1184,25 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
         # Analyze arguments (args is already declared above)
         for (my int $i = 0; $i < $actual; $i = $i + 1) {
             analyze_expression($ctx, $args->[$i]);
+            # Stage-0 type check: scalar parameters with a declared type.
+            # Parameters are exempt from runtime coercion (borrowed values),
+            # so a mismatch here is the highest-signal site of the four.
+            if ($ctx->{"strict_types"} == 1 && $has_spread == 0 && $i < $expected) {
+                my scalar $cparam = $fn_info->{"params"}->[$i];
+                if ($cparam->{"is_variadic"} != 1) {
+                    my str $psigil = $cparam->{"sigil"};
+                    if ($psigil eq "$") {
+                        my int $ptype = $cparam->{"param_type"};
+                        my int $atype = stage0_expr_type($ctx, $args->[$i]);
+                        if (stage0_types_compatible($ptype, $atype) == 0) {
+                            my int $argno = $i + 1;
+                            semantic_warn("argument " . $argno . " to '" . $name
+                                . "': expected " . ast_data_type_name($ptype)
+                                . ", got " . ast_data_type_name($atype), $line);
+                        }
+                    }
+                }
+            }
         }
         return;
     }
@@ -1086,6 +1224,31 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
     if ($node_type == NODE_ASSIGN()) {
         analyze_expression($ctx, $expr->{"target"});
         analyze_expression($ctx, $expr->{"value"});
+        # Stage-0 type check: plain `=` to a declared scalar variable.
+        # Compound ops (+=, .=, ...) keep their own operand semantics.
+        if ($ctx->{"strict_types"} == 1 && $expr->{"op"} eq "=") {
+            my scalar $tgt = $expr->{"target"};
+            if ($tgt->{"type"} == NODE_VARIABLE()) {
+                my str $tsigil = $tgt->{"sigil"};
+                if ($tsigil eq "$") {
+                    my scalar $lk = scope_lookup_var($ctx->{"scope"}, $tgt->{"name"});
+                    if ($lk->{"found"} == 1) {
+                        my int $dtype = $lk->{"info"}->{"type"};
+                        my int $atype = stage0_expr_type($ctx, $expr->{"value"});
+                        if (stage0_types_compatible($dtype, $atype) == 0) {
+                            # Assign nodes don't always carry a line — fall
+                            # back to the target, then the value expression.
+                            my int $aline = ast_get_line($expr);
+                            if ($aline == 0) { $aline = ast_get_line($tgt); }
+                            if ($aline == 0) { $aline = ast_get_line($expr->{"value"}); }
+                            semantic_warn("assigning a " . ast_data_type_name($atype)
+                                . " value to '$" . $tgt->{"name"} . "' (declared "
+                                . ast_data_type_name($dtype) . ")", $aline);
+                        }
+                    }
+                }
+            }
+        }
         return;
     }
 
@@ -1229,6 +1392,16 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         my scalar $init_expr = $stmt->{"init"};
         if (is_valid_node($init_expr) == 1) {
             analyze_expression($ctx, $init_expr);
+            # Stage-0 type check (scalar declarations only — array/hash
+            # initializers are flattening lists with their own semantics).
+            if ($ctx->{"strict_types"} == 1 && $sigil eq "$") {
+                my int $atype = stage0_expr_type($ctx, $init_expr);
+                if (stage0_types_compatible($var_type, $atype) == 0) {
+                    semantic_warn("initializing '" . $sigil . $name . "' (declared "
+                        . ast_data_type_name($var_type) . ") with a "
+                        . ast_data_type_name($atype) . " value", $line);
+                }
+            }
         }
         return;
     }
@@ -1325,6 +1498,21 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         my scalar $ret_val = $stmt->{"value"};
         if (is_valid_node($ret_val) == 1) {
             analyze_expression($ctx, $ret_val);
+            # Stage-0 type check: returned value vs declared return type.
+            if ($ctx->{"strict_types"} == 1) {
+                my scalar $cur = $ctx->{"current_func"};
+                if ($cur) {
+                    my int $rtype = $cur->{"return_type"};
+                    if ($rtype != TYPE_DYNAMIC()) {
+                        my int $atype = stage0_expr_type($ctx, $ret_val);
+                        if (stage0_types_compatible($rtype, $atype) == 0) {
+                            semantic_warn("returning a " . ast_data_type_name($atype)
+                                . " value from '" . $cur->{"name"} . "' (declared to return "
+                                . ast_data_type_name($rtype) . ")", $line);
+                        }
+                    }
+                }
+            }
         }
         return;
     }
@@ -1485,9 +1673,10 @@ func analyze_function(scalar $ctx, scalar $fn) void {
 # Main Entry Point
 # ============================================================
 
-func semantic_analyze(scalar $ast, int $show_warnings) void {
+func semantic_analyze(scalar $ast, int $show_warnings, int $strict_types) void {
     my scalar $ctx = ctx_new();
     $ctx->{"show_warnings"} = $show_warnings;
+    $ctx->{"strict_types"} = $strict_types;
 
     # First pass: register all functions and globals
     register_functions($ctx, $ast);

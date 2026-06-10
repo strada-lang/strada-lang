@@ -1,0 +1,32 @@
+# Fixture for the --strict-types regression test (t_core.sh): each
+# mismatch below must produce a warning under --strict-types, and the
+# program must still compile and run (warnings, not errors). The ok-cases
+# document what must stay SILENT (bivariant scalar/dynamic, numeric
+# family interconversion).
+
+func takes_int(int $n) int { return $n + 1; }
+func bad_return() int { return "not an int"; }   # warn: str from int fn
+func voidfn() void { }
+
+func main() int {
+    my int $n = "hi";                  # warn: str init to int
+    my str $s = 42;                    # warn: int init to str
+    $s = 99;                           # warn: int assign to str var
+    takes_int("oops");                 # warn: str arg to int param
+    # (void-as-value also warns, but is a hard C error downstream —
+    # the warning makes that failure legible; not exercised here since
+    # this fixture must compile and run.)
+    voidfn();
+
+    # Must stay silent:
+    my int $coerce = 2.5;              # numeric family
+    my $untyped = "anything";          # bivariant scalar
+    my int $from_untyped = $untyped;   # bivariant scalar
+    my int $len = length($s);          # builtin -> int
+    my str $j = join(",", 1, 2);       # builtin -> str
+    $n = bad_return();                 # fn returns int (declared)
+
+    say("ran: " . $n . " " . $s . " " . $coerce . " " . $from_untyped
+        . " " . $len . " " . $j . " " . $untyped);
+    return 0;
+}
