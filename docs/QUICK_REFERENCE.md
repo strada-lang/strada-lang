@@ -1085,7 +1085,7 @@ All `core::` functions can also be called via the `core::` prefix (preferred). F
 
 **Conversion:** `core::atoi`, `core::atof`
 
-**Binary/Bytes:** `core::ord_byte`, `core::get_byte`, `core::set_byte`, `core::byte_length`, `core::byte_substr`, `core::pack`, `core::unpack`
+**Binary/Bytes:** `core::byte` (single raw byte — byte-oriented `chr`), `core::ord_byte`, `core::get_byte`, `core::set_byte`, `core::byte_length`, `core::byte_substr`, `core::pack`, `core::unpack`
 
 **Introspection:** `core::caller`, `core::stack_trace`
 

@@ -779,6 +779,7 @@ StradaValue* strada_reverse_sv(StradaValue *sv);  /* Generic reverse for strings
 char* strada_repeat(const char *str, int count);
 char* strada_chr(int code);
 StradaValue* strada_chr_sv(int code);  /* Binary-safe version that handles NUL bytes */
+StradaValue* strada_byte_chr(int code); /* core::byte(n): single raw byte, never UTF-8 */
 int strada_ord(const char *str);
 int strada_ord_byte(StradaValue *sv);  /* Binary-safe: returns raw byte value 0-255 */
 int strada_get_byte(StradaValue *sv, int pos);  /* Get byte at position, returns 0-255 or -1 */

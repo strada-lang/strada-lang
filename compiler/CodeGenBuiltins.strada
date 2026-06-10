@@ -3222,6 +3222,17 @@ func gen_builtin_g4(scalar $cg, scalar $expr, str $name) int {
             emit($cg, ")");
             return 1;
         }
+
+        # core::byte(n) — single raw byte (n & 0xFF), never UTF-8 encoded.
+        # The byte-oriented counterpart to chr() for building binary data
+        # that must round-trip through base64/pack/sockets/files.
+        if ($name eq "sys::byte") {
+            emit($cg, "strada_byte_chr(");
+            my scalar $args = $expr->{"args"};
+            emit_int_operand($cg, $args->[0]);
+            emit($cg, ")");
+            return 1;
+        }
         
         if ($name eq "ord") {
             my scalar $args = $expr->{"args"};

@@ -15045,6 +15045,17 @@ StradaValue* strada_chr_sv(int code) {
     return strada_new_str_len(buf, (size_t)len);
 }
 
+/* core::byte(n) — produce a single RAW byte (n & 0xFF), never UTF-8
+ * encoded. This is the byte-oriented counterpart to the codepoint-oriented
+ * chr(): chr(255) is the 2-byte UTF-8 char U+00FF, whereas byte(255) is the
+ * single byte 0xFF. Use this to build binary data that must round-trip
+ * through base64/pack/sockets/files. get_byte/ord read it back. The result
+ * is a 1-byte, non-UTF-8 string (byte_length 1). */
+StradaValue* strada_byte_chr(int code) {
+    char b = (char)(unsigned char)(code & 0xFF);
+    return strada_new_str_len(&b, 1);
+}
+
 /* Unicode-aware ord - returns codepoint of first character */
 int strada_ord(const char *str) {
     if (!str || !str[0]) return 0;

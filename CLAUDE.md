@@ -788,7 +788,16 @@ my str $packed = core::pack("NnC", 0x12345678, 80, 255);
 my array @parts = core::unpack("NnC", $packed);
 core::ord_byte($str);  core::get_byte($str, $pos);  core::byte_length($str);
 my str $b64 = core::base64_encode($data);
+my str $raw = core::byte(255);   # single raw byte 0xFF (length 1)
 ```
+
+**`chr()` vs `core::byte()`**: `chr(n)` is **codepoint-oriented** — `chr(255)`
+is the character U+00FF, which is 2 bytes in UTF-8 (`0xC3 0xBF`), and `chr(256+)`
+is a wide character. `core::byte(n)` is **byte-oriented** — the single raw byte
+`n & 0xFF`, never UTF-8 encoded. Build binary data (for base64 / pack / sockets
+/ files) from `core::byte()`, not `chr()`; otherwise high bytes expand to
+multi-byte UTF-8 before the binary sink sees them. `get_byte`/`ord` read either
+back.
 
 ### Performance Hints
 

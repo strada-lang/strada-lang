@@ -3081,7 +3081,7 @@ func needs_temp_cleanup(scalar $cg, scalar $expr) int {
             $name = "sys::" . substr($name, 6, length($name) - 6);
         }
         # Built-in functions that return owned StradaValue*
-        if ($name eq "chr" || $name eq "ord" ||
+        if ($name eq "chr" || $name eq "ord" || $name eq "sys::byte" ||
             $name eq "sys::base64_encode" || $name eq "sys::base64_decode" ||
             $name eq "sys::pack" || $name eq "sys::unpack" ||
             $name eq "sys::hex" ||

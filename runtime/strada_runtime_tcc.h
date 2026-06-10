@@ -382,6 +382,7 @@ StradaValue* strada_reverse_sv(StradaValue *sv);
 char* strada_repeat(const char *str, int count);
 char* strada_chr(int code);
 StradaValue* strada_chr_sv(int code);
+StradaValue* strada_byte_chr(int code); /* core::byte(n): single raw byte, never UTF-8 */
 int strada_ord(const char *str);
 int strada_ord_byte(StradaValue *sv);
 int strada_get_byte(StradaValue *sv, int pos);

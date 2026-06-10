@@ -29,8 +29,9 @@ func main() int {
     say("  base64 with binary data...");
     $i = 0;
     while ($i < $iterations) {
-        # Create binary data with null bytes
-        my str $binary = chr(0) . chr(255) . chr(128) . chr(64) . chr(0) . chr(1);
+        # Create binary data with null bytes. core::byte(n) gives single raw
+        # bytes; chr(n) is codepoint-oriented (chr(255) = 2-byte UTF-8 char).
+        my str $binary = sys::byte(0) . sys::byte(255) . sys::byte(128) . sys::byte(64) . sys::byte(0) . sys::byte(1);
         my str $encoded = sys::base64_encode($binary);
         my str $decoded = sys::base64_decode($encoded);
 

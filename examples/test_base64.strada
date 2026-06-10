@@ -50,9 +50,12 @@ func main() int {
     say("Authorization: Basic " . $basic_auth);
     say("");
 
-    # Binary data with NUL bytes
+    # Binary data with NUL bytes. Use core::byte(n) — single raw bytes —
+    # NOT chr(n), which is codepoint-oriented (chr(255) is the 2-byte UTF-8
+    # char U+00FF). base64 round-trips bytes, so binary data must be built
+    # from bytes.
     say("=== Binary Data Handling ===");
-    my str $binary = chr(0) . chr(255) . chr(128) . "ABC";
+    my str $binary = sys::byte(0) . sys::byte(255) . sys::byte(128) . "ABC";
     my str $bin_b64 = sys::base64_encode($binary);
     say("Binary (6 bytes including NUL): " . $bin_b64);
 
