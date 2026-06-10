@@ -1,0 +1,287 @@
+# perl2strada - Pass2
+# Pass 2: Convert function signatures
+
+# ============================================================
+# Pass 2: Convert function signatures
+# ============================================================
+
+# Convert sub declarations to func with typed parameters
+# Uses signatures extracted by pass1_prescan when available
+# Also removes @_ unpacking lines that were absorbed into the signature
+func pass2_signatures(array @lines, hash %sub_info) array {
+    my array @out = ();
+    my int $i = 0;
+    my int $num_lines = scalar(@lines);
+    my str $current_sub = "";
+    my str $current_pkg = "main";
+    my int $in_sub = 0;
+    my int $skip_unpacking = 0;
+
+    while ($i < $num_lines) {
+        my str $line = $lines[$i];
+        my str $trimmed = trim_str($line);
+        my str $indent = get_indent($line);
+
+        # Track package declarations
+        if (match($trimmed, "^package\\s+")) {
+            my array @pkg_cap = capture($trimmed, "^package\\s+([A-Za-z_:][A-Za-z0-9_:]*)");
+            if (scalar(@pkg_cap) > 1) {
+                $current_pkg = $pkg_cap[1];
+            }
+        }
+
+        # Skip @_ unpacking lines when signature was extracted
+        if ($skip_unpacking == 1) {
+            # Skip: my ($a, $b) = @_;  or  my $x = shift;  or  my $x = shift @_;  or  my $x = shift(@_);
+            if (match($trimmed, "^my\\s*\\([^)]+\\)\\s*=\\s*@_") || match($trimmed, "^my\\s+\\$[A-Za-z_][A-Za-z0-9_]*\\s*=\\s*shift")) {
+                $i++;
+                next;
+            }
+            # Skip blank lines between func header and unpacking
+            if ($trimmed eq "") {
+                push(@out, $line);
+                $i++;
+                next;
+            }
+            # First non-blank, non-unpacking line: stop skipping
+            $skip_unpacking = 0;
+        }
+
+        # Convert sub declaration
+        # Forward declarations: sub name; or sub name(@); (no body) -> comment out
+        if (match($trimmed, "^sub\\s+[A-Za-z_][A-Za-z0-9_]*\\s*;\\s*$") || match($trimmed, "^sub\\s+[A-Za-z_][A-Za-z0-9_]*\\s*\\([^)]*\\)\\s*;\\s*$")) {
+            push(@out, $indent . "# " . $trimmed . "  # Forward declaration (not needed in Strada)");
+            $i++;
+            next;
+        }
+        if (match($trimmed, "^sub\\s+[A-Za-z_]")) {
+            # Check for parens after sub name: could be prototype OR native signature
+            my str $native_sig = "";
+            my array @native_unpack = ();
+            if (match($trimmed, "^sub\\s+[A-Za-z_][A-Za-z0-9_]*\\s*\\([^)]*\\)\\s*\\{")) {
+                # Extract paren content to distinguish signature from prototype
+                my array @paren_cap = capture($trimmed, "^sub\\s+[A-Za-z_][A-Za-z0-9_]*\\s*\\(([^)]*)\\)");
+                my str $paren_content = "";
+                if (scalar(@paren_cap) > 1) {
+                    $paren_content = $paren_cap[1];
+                }
+                if (match($paren_content, "\\$[a-zA-Z_]") || match($paren_content, "@[a-zA-Z_]") || match($paren_content, "%[a-zA-Z_]")) {
+                    # Native Perl signature: sub foo ($self, $name, $age = 0, @rest)
+                    # Build @_ unpacking lines and Strada typed signature (for wantarray)
+                    my array @sig_parts = split(",", $paren_content);
+                    my str $strada_sig = "";
+                    my int $spi = 0;
+                    while ($spi < scalar(@sig_parts)) {
+                        my str $sp = trim_str($sig_parts[$spi]);
+                        if (length($sp) > 0) {
+                            # Strip default value
+                            my str $sp_name = $sp;
+                            my str $sp_default = "";
+                            if (match($sp, "=")) {
+                                my array @sp_parts = capture($sp, "^([^=]+)=(.+)$");
+                                if (scalar(@sp_parts) > 2) {
+                                    $sp_name = trim_str($sp_parts[1]);
+                                    $sp_default = trim_str($sp_parts[2]);
+                                }
+                            }
+                            # Generate unpacking line: my $x = shift; or my $x = shift // default;
+                            if (match($sp_name, "^@")) {
+                                push(@native_unpack, "    my array " . $sp_name . " = @_;");
+                            } elsif (match($sp_name, "^%")) {
+                                push(@native_unpack, "    my hash " . $sp_name . " = @_;");
+                            } else {
+                                if (length($sp_default) > 0) {
+                                    push(@native_unpack, "    my scalar " . $sp_name . " = shift // " . $sp_default . ";");
+                                } else {
+                                    push(@native_unpack, "    my scalar " . $sp_name . " = shift;");
+                                }
+                            }
+                            # Also build typed sig string for wantarray functions
+                            if (length($strada_sig) > 0) {
+                                $strada_sig = $strada_sig . ", ";
+                            }
+                            if (match($sp_name, "^@")) {
+                                $strada_sig = $strada_sig . "array " . $sp_name;
+                            } elsif (match($sp_name, "^%")) {
+                                $strada_sig = $strada_sig . "hash " . $sp_name;
+                            } else {
+                                $strada_sig = $strada_sig . "scalar " . $sp_name;
+                            }
+                        }
+                        $spi++;
+                    }
+                    $native_sig = $strada_sig;
+                    # Strip the signature parens from the line: "sub name (...) {" -> "sub name {"
+                    my array @sig_name_cap = capture($trimmed, "^sub\\s+([A-Za-z_][A-Za-z0-9_]*)");
+                    if (scalar(@sig_name_cap) > 1) {
+                        $trimmed = "sub " . $sig_name_cap[1] . " {";
+                        $line = $indent . $trimmed;
+                    }
+                } else {
+                    # Prototype: sub foo (&@) or sub foo ($$$) - strip it
+                    $trimmed = replace($trimmed, "(^sub\\s+[A-Za-z_][A-Za-z0-9_]*)\\s*\\([^)]*\\)", "$1");
+                    $line = $indent . $trimmed;
+                }
+            }
+            # Check for :lvalue attribute and strip it, adding TODO
+            my int $is_lvalue = 0;
+            if (match($trimmed, ":\\s*lvalue")) {
+                $is_lvalue = 1;
+                $trimmed = replace($trimmed, "\\s*:\\s*lvalue\\b", "");
+                $line = $indent . $trimmed;
+            }
+
+            my array @scap = capture($trimmed, "^sub\\s+([A-Za-z_][A-Za-z0-9_]*)");
+            if (scalar(@scap) > 1) {
+                my str $sub_name = $scap[1];
+                $current_sub = $sub_name;
+                $in_sub = 1;
+
+                # Try to find Pass 1 signature: qualified name first, then bare
+                my str $qualified = $current_pkg . "::" . $sub_name;
+                my str $sig = "";
+                my str $ret = "";
+
+                # Try qualified lookup
+                my str $sig_key_q = "sig:" . $qualified;
+                my str $ret_key_q = "ret:" . $qualified;
+                my str $sig_key_b = "sig:" . $sub_name;
+                my str $ret_key_b = "ret:" . $sub_name;
+
+                if (length("" . $sub_info{$sig_key_q}) > 0) {
+                    $sig = "" . $sub_info{$sig_key_q};
+                    $ret = "" . $sub_info{$ret_key_q};
+                } elsif (length("" . $sub_info{$sig_key_b}) > 0) {
+                    $sig = "" . $sub_info{$sig_key_b};
+                    $ret = "" . $sub_info{$ret_key_b};
+                }
+
+                if (length($ret) == 0) {
+                    $ret = "scalar";
+                }
+
+                my str $new_line = "";
+                # Special subs with known Strada signatures
+                if ($sub_name eq "import") {
+                    $new_line = $indent . "func import(str $pkg, array @list) void {";
+                    $skip_unpacking = 1;
+                } elsif ($ret eq "dynamic") {
+                    # Wantarray functions need typed params for context dispatch
+                    if (length($native_sig) > 0) {
+                        $new_line = $indent . "func " . $sub_name . "(" . $native_sig . ") dynamic {";
+                        $skip_unpacking = 1;
+                    } elsif (length($sig) > 0) {
+                        $new_line = $indent . "func " . $sub_name . "(" . $sig . ") dynamic {";
+                        $skip_unpacking = 1;
+                    } else {
+                        $new_line = $indent . "func " . $sub_name . " {";
+                    }
+                } else {
+                    # All other subs: use no-parens form with implicit @_
+                    $new_line = $indent . "func " . $sub_name . " {";
+                    $skip_unpacking = 0;
+                }
+
+                # Check if original line is a single-line sub: sub name { body; }
+                # If so, extract body and emit on same or next line
+                my str $body_after = "";
+                my int $brace_pos = index($trimmed, "{");
+                if ($brace_pos >= 0) {
+                    my str $after_brace = substr($trimmed, $brace_pos + 1, length($trimmed) - $brace_pos - 1);
+                    # Check if there's a closing brace (single-line body)
+                    my int $last_close = -1;
+                    my int $body_depth = 1;
+                    my int $bci = 0;
+                    my int $ablen = length($after_brace);
+                    while ($bci < $ablen) {
+                        my str $bcc = substr($after_brace, $bci, 1);
+                        if ($bcc eq "{") { $body_depth++; }
+                        if ($bcc eq "}") {
+                            $body_depth--;
+                            if ($body_depth == 0) {
+                                $last_close = $bci;
+                            }
+                        }
+                        $bci++;
+                    }
+                    if ($last_close >= 0) {
+                        # Single-line sub - extract body content
+                        $body_after = trim_str(substr($after_brace, 0, $last_close));
+                        if (length($body_after) > 0) {
+                            # Check if body uses $_[0] (OOP self pattern)
+                            my str $dol_bracket0 = "$" . "_[0]";
+                            my str $dol_bracket1 = "$" . "_[1]";
+                            if (index($body_after, $dol_bracket0) >= 0) {
+                                my int $has_arg1 = 0;
+                                if (index($body_after, $dol_bracket1) >= 0) { $has_arg1 = 1; }
+                                # Replace $_[0] -> $self, $_[1] -> $value in body
+                                $body_after = replace_all($body_after, $dol_bracket0, "$" . "self");
+                                if ($has_arg1 == 1) {
+                                    $body_after = replace_all($body_after, $dol_bracket1, "$" . "value");
+                                }
+                                # Update the signature in $new_line
+                                my str $self_sig = "scalar $" . "self";
+                                my str $self_ret = "scalar";
+                                if ($has_arg1 == 1) {
+                                    $self_sig = "scalar $" . "self, scalar $" . "value";
+                                    $self_ret = "void";
+                                }
+                                # Replace (scalar ...@_) dynamic with proper sig
+                                $new_line = replace_all($new_line, "(scalar ...@_) dynamic {", "(" . $self_sig . ") " . $self_ret . " {");
+                            }
+                            # Emit: func name(...) type { body; }
+                            $new_line = $new_line . " " . $body_after . " }";
+                            $in_sub = 0;
+                        }
+                    }
+                }
+
+                if ($is_lvalue == 1) {
+                    $new_line = $new_line . "  # REVIEW: lvalue sub — Strada has no lvalue function support; refactor callers to use setter methods";
+                }
+                push(@out, $new_line);
+                # Emit @_ unpacking lines for native Perl signatures converted to no-parens form
+                if (scalar(@native_unpack) > 0 && !match($new_line, "\\(")) {
+                    my int $ui = 0;
+                    while ($ui < scalar(@native_unpack)) {
+                        push(@out, $indent . $native_unpack[$ui]);
+                        $ui++;
+                    }
+                }
+                # Skip redundant standalone { on next line (Perl style: sub name\n{ )
+                if ($i + 1 < $num_lines) {
+                    my str $next_peek = trim_str($lines[$i + 1]);
+                    if ($next_peek eq "{") {
+                        $i++;
+                    } elsif (starts_with($next_peek, "{ ") || starts_with($next_peek, "{#")) {
+                        # K&R style: sub name\n  { body — strip the leading { from next line
+                        # since func header already has opening {
+                        my int $brace_idx = index($lines[$i + 1], "{");
+                        if ($brace_idx >= 0) {
+                            my str $before = substr($lines[$i + 1], 0, $brace_idx);
+                            my str $after = substr($lines[$i + 1], $brace_idx + 1, length($lines[$i + 1]) - $brace_idx - 1);
+                            # Strip optional space after the removed {
+                            if (length($after) > 0 && substr($after, 0, 1) eq " ") {
+                                $after = substr($after, 1, length($after) - 1);
+                            }
+                            $lines[$i + 1] = $before . $after;
+                        }
+                    }
+                }
+                $i++;
+                next;
+            }
+        }
+
+        push(@out, $line);
+        $i++;
+    }
+
+    return @out;
+}
+
+
+# ============================================================
+# Pass 2b: Multi-line block conversions (eval -> try/catch)
+# ============================================================
+

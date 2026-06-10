@@ -1,0 +1,469 @@
+# perl2strada - Pass2d
+# Pass 2d: Join continuation lines
+
+# Pass 2d: Join continuation lines (multiline postfix if/unless, multiline statements)
+# Perl allows statements like:
+#   return $x
+#       if $cond;
+# or:
+#   push @arr,
+#       { key => value };
+# We join these back into single lines for Pass 3 to handle correctly.
+func pass2d_join_continuations(array @lines) array {
+    my array @out = ();
+    my int $i = 0;
+    my int $num = scalar(@lines);
+
+    while ($i < $num) {
+        my str $line = $lines[$i];
+        my str $trimmed = trim_str($line);
+
+        # Join multi-line use constant { ... }; into one line
+        if (match($trimmed, "^use\\s+constant\\s*\\{") && !match($trimmed, "\\}\\s*;")) {
+            my str $joined = $trimmed;
+            $i++;
+            my int $uc_done = 0;
+            while ($i < $num && $uc_done == 0) {
+                my str $jt = trim_str($lines[$i]);
+                $joined = $joined . " " . $jt;
+                $i++;
+                if (match($jt, "\\}\\s*;")) {
+                    $uc_done = 1;
+                }
+            }
+            push(@out, $joined);
+            next;
+        }
+
+        # Join multi-line use constant NAME => value; (non-hashref form)
+        # e.g.: use constant FOO =>\n  "bar" . "baz"\n  . "qux";
+        # Skip if line ends with comment containing ; (e.g., "use constant FOO => 1; # comment")
+        if (match($trimmed, "^use\\s+constant\\s+[A-Za-z_]") && !match($trimmed, ";\\s*$") && !match($trimmed, ";\\s*#")) {
+            my str $joined2 = $trimmed;
+            $i++;
+            my int $uc2_done = 0;
+            my int $uc2_safety = 0;
+            while ($i < $num && $uc2_done == 0 && $uc2_safety < 50) {
+                my str $jt2 = trim_str($lines[$i]);
+                $joined2 = $joined2 . " " . $jt2;
+                $i++;
+                if (match($jt2, ";\\s*$")) {
+                    $uc2_done = 1;
+                }
+                $uc2_safety++;
+            }
+            push(@out, $joined2);
+            next;
+        }
+
+        # Check if next line starts with postfix if/unless/while/until/for/foreach
+        if ($i + 1 < $num) {
+            my str $next_trimmed = trim_str($lines[$i + 1]);
+
+            # do { ... } while (cond); - join closing } with while
+            if (match($trimmed, "\\}\\s*$") && match($next_trimmed, "^while\\s*\\(") && match($next_trimmed, ";\\s*$")) {
+                # Check if this is part of a do { } while pattern
+                # Look backwards for a "do {" line
+                my int $bk = scalar(@out) - 1;
+                my int $bd = 1;
+                my int $found_do = 0;
+                while ($bk >= 0 && $bd > 0) {
+                    my str $bkt = trim_str($out[$bk]);
+                    my int $bki = 0;
+                    my int $bklen = length($bkt);
+                    while ($bki < $bklen) {
+                        if (substr($bkt, $bki, 1) eq "{") { $bd++; }
+                        if (substr($bkt, $bki, 1) eq "}") { $bd--; }
+                        $bki++;
+                    }
+                    if (match($bkt, "\\bdo\\s*\\{")) {
+                        $found_do = 1;
+                    }
+                    $bk--;
+                }
+                if ($found_do == 1) {
+                    my str $joined = $line . " " . $next_trimmed;
+                    push(@out, $joined);
+                    $i = $i + 2;
+                    next;
+                }
+            }
+
+            # Multiline postfix: statement\n    if/unless/while/until/for/foreach cond;
+            if (match($next_trimmed, "^(if|unless|while|until|for|foreach)\\s+") && !match($next_trimmed, "^(if|unless|while|until|for|foreach)\\s*\\(.*\\)\\s*\\{")) {
+                # Make sure current line doesn't end with ; (would mean it's a complete statement)
+                if (!match($trimmed, ";\\s*$") && !match($trimmed, "\\{\\s*$") && !match($trimmed, "\\}\\s*$") && $trimmed ne "" && !starts_with($trimmed, "#")) {
+                    # Join the lines
+                    my str $joined = $line . " " . $next_trimmed;
+                    push(@out, $joined);
+                    $i = $i + 2;
+                    next;
+                }
+            }
+        }
+
+        # use overload without semicolon: join continuation lines until closing ;
+        # e.g. use overload\n    "+" => \&add,\n    "-" => \&sub;\n
+        if (match($trimmed, "^use\\s+overload") && !match($trimmed, ";\\s*$")) {
+            my str $joined = $line;
+            $i++;
+            my int $uo_safety = 0;
+            while ($i < $num && $uo_safety < 50 && length($joined) <= 800) {
+                my str $next = trim_str($lines[$i]);
+                $joined = $joined . " " . $next;
+                $i++;
+                $uo_safety++;
+                if (match($next, ";\\s*$") || match($next, "\\)\\s*;\\s*$")) {
+                    last;
+                }
+            }
+            push(@out, $joined);
+            next;
+        }
+
+        # Multi-line qw(): detect qw( without closing delimiter on same line, join until found
+        if (match($trimmed, "\\bqw\\s*[({/\\[]") && !match($trimmed, "\\bqw\\s*\\([^)]*\\)") && !match($trimmed, "\\bqw\\s*\\{[^}]*\\}") && !match($trimmed, "\\bqw\\s*\\[[^]]*\\]") && !match($trimmed, "\\bqw\\s*/[^/]*/")) {
+            my str $joined = $line;
+            $i++;
+            my int $qw_safety = 0;
+            while ($i < $num && $qw_safety < 50 && length($joined) <= 800) {
+                my str $qw_next = trim_str($lines[$i]);
+                $joined = $joined . " " . $qw_next;
+                $i++;
+                $qw_safety++;
+                # Check for closing delimiter: ), }, ], /
+                if (match($qw_next, "[)\\}\\]/]") || match($qw_next, ";\\s*$")) {
+                    last;
+                }
+            }
+            push(@out, $joined);
+            next;
+        }
+
+        # Moose/Moo has 'attr' => ( multiline: join until closing );
+        if (match($trimmed, "^has\\s+['\"][a-z_]") && !match($trimmed, "\\)\\s*;\\s*$")) {
+            my str $joined = $line;
+            $i++;
+            my int $has_safety = 0;
+            while ($i < $num && $has_safety < 50 && length($joined) <= 800) {
+                my str $next = trim_str($lines[$i]);
+                $joined = $joined . " " . $next;
+                $i++;
+                $has_safety++;
+                if (match($next, "\\)\\s*;\\s*$")) {
+                    last;
+                }
+            }
+            push(@out, $joined);
+            next;
+        }
+
+        # GetOptions( multiline: join until closing );
+        if (match($trimmed, "\\bGetOptions\\s*\\(") && !match($trimmed, "\\)\\s*;?\\s*$")) {
+            my str $joined = $line;
+            $i++;
+            my int $go_safety = 0;
+            while ($i < $num && $go_safety < 50 && length($joined) <= 800) {
+                my str $next = trim_str($lines[$i]);
+                $joined = $joined . " " . $next;
+                $i++;
+                $go_safety++;
+                if (match($next, "\\)\\s*;?\\s*$")) {
+                    last;
+                }
+            }
+            push(@out, $joined);
+            next;
+        }
+
+        # Check if current line ends with a comma or operator suggesting continuation
+        # e.g. push @arr,\n    value;
+        if ($i + 1 < $num && match($trimmed, ",$") && !match($trimmed, ";\\s*$")) {
+            my str $next_trimmed2 = trim_str($lines[$i + 1]);
+            # Only join if next line doesn't start a new statement
+            if (!match($next_trimmed2, "^(my|our|local|sub|func|if|unless|while|for|foreach|return|#)") && $next_trimmed2 ne "" && !starts_with($next_trimmed2, "#")) {
+                # Could be multi-line, keep joining
+                my str $joined = $line . " " . $next_trimmed2;
+                $i = $i + 2;
+                my int $join7_safety = 0;
+                # Continue joining if still ends with comma
+                while ($i < $num && match(trim_str($joined), ",$") && !match(trim_str($joined), ";\\s*$") && $join7_safety < 20 && length($joined) <= 500) {
+                    my str $next_cont = trim_str($lines[$i]);
+                    if (match($next_cont, "^(my|our|local|sub|func|if|unless|while|for|foreach|return|#)") || $next_cont eq "" || starts_with($next_cont, "#")) {
+                        push(@out, $joined);
+                        push(@out, $lines[$i]);
+                        $i++;
+                        $joined = "";
+                        next;
+                    }
+                    $joined = $joined . " " . $next_cont;
+                    $i++;
+                    $join7_safety++;
+                }
+                if ($joined ne "") {
+                    push(@out, $joined);
+                }
+                next;
+            }
+        }
+
+        # Join method chain continuations: current line + next starts with ->
+        if ($i + 1 < $num && !match($trimmed, ";\\s*$") && !match($trimmed, "\\{\\s*$") && !match($trimmed, "\\}\\s*$") && $trimmed ne "" && !starts_with($trimmed, "#")) {
+            my str $next_trimmed3 = trim_str($lines[$i + 1]);
+            if (starts_with($next_trimmed3, "->")) {
+                my str $joined = $line . " " . $next_trimmed3;
+                $i = $i + 2;
+                my int $join8_safety = 0;
+                # Continue joining while subsequent lines also start with ->
+                while ($i < $num && $join8_safety < 20 && length($joined) <= 500) {
+                    my str $more = trim_str($lines[$i]);
+                    if (starts_with($more, "->")) {
+                        $joined = $joined . " " . $more;
+                        $i++;
+                        $join8_safety++;
+                    } else {
+                        last;
+                    }
+                }
+                push(@out, $joined);
+                next;
+            }
+        }
+
+        # Join lines ending with concatenation operator (.) but not range (..)
+        if ($i + 1 < $num && match($trimmed, "\\.\\s*$") && !match($trimmed, "\\.\\.\\s*$") && !match($trimmed, ";\\s*$") && !match($trimmed, "\\{\\s*$") && !match($trimmed, "\\}\\s*$") && $trimmed ne "" && !starts_with($trimmed, "#")) {
+            my str $next_trimmed4 = trim_str($lines[$i + 1]);
+            if (!match($next_trimmed4, "^(my|our|local|sub|func|if|unless|while|for|foreach|return|#)") && $next_trimmed4 ne "" && !starts_with($next_trimmed4, "#")) {
+                my str $joined = $line . " " . $next_trimmed4;
+                $i = $i + 2;
+                my int $join9_safety = 0;
+                # Continue joining while the line still ends with .
+                while ($i < $num && match(trim_str($joined), "\\.\\s*$") && !match(trim_str($joined), "\\.\\.\\s*$") && !match(trim_str($joined), ";\\s*$") && $join9_safety < 20 && length($joined) <= 500) {
+                    my str $more_dot = trim_str($lines[$i]);
+                    if (match($more_dot, "^(my|our|local|sub|func|if|unless|while|for|foreach|return|#)") || $more_dot eq "" || starts_with($more_dot, "#")) {
+                        last;
+                    }
+                    $joined = $joined . " " . $more_dot;
+                    $i++;
+                    $join9_safety++;
+                }
+                push(@out, $joined);
+                next;
+            }
+        }
+
+        # Join when next line starts with . (concat), ? (ternary), : (ternary), and, or, or binary op
+        if ($i + 1 < $num && !match($trimmed, ";\\s*$") && !match($trimmed, "\\{\\s*$") && !match($trimmed, "\\}\\s*$") && $trimmed ne "" && !starts_with($trimmed, "#")) {
+            my str $next_trimmed6 = trim_str($lines[$i + 1]);
+            if (starts_with($next_trimmed6, ". ") || starts_with($next_trimmed6, ".\"") || starts_with($next_trimmed6, ".$") || starts_with($next_trimmed6, "? ") || starts_with($next_trimmed6, ": ") || starts_with($next_trimmed6, "and ") || starts_with($next_trimmed6, "or ")) {
+                my str $joined = $line . " " . $next_trimmed6;
+                $i = $i + 2;
+                my int $join10_safety = 0;
+                # Continue joining while subsequent lines also start with these operators
+                while ($i < $num && !match(trim_str($joined), ";\\s*$") && $join10_safety < 20 && length($joined) <= 500) {
+                    my str $more_op = trim_str($lines[$i]);
+                    if (starts_with($more_op, ". ") || starts_with($more_op, ".\"") || starts_with($more_op, ".$") || starts_with($more_op, "? ") || starts_with($more_op, ": ") || starts_with($more_op, "and ") || starts_with($more_op, "or ")) {
+                        $joined = $joined . " " . $more_op;
+                        $i++;
+                        $join10_safety++;
+                    } else {
+                        last;
+                    }
+                }
+                push(@out, $joined);
+                next;
+            }
+        }
+
+        # Join lines ending with binary operators (&&, ||, //, ?, :, +, -, *, /, ==, !=, =~, and, or)
+        if ($i + 1 < $num && !match($trimmed, ";\\s*$") && !match($trimmed, "\\{\\s*$") && !match($trimmed, "\\}\\s*$") && $trimmed ne "" && !starts_with($trimmed, "#")) {
+            if (match($trimmed, "(&&|\\|\\||//|\\?|==|!=|=~|<=|>=)\\s*$") || match($trimmed, "[+\\-\\*/:]\\s*$") || match($trimmed, "\\b(and|or)\\s*$")) {
+                my str $next_trimmed5 = trim_str($lines[$i + 1]);
+                if (!match($next_trimmed5, "^(my|our|local|sub|func|if|unless|while|for|foreach|return|#)") && $next_trimmed5 ne "" && !starts_with($next_trimmed5, "#")) {
+                    my str $joined = $line . " " . $next_trimmed5;
+                    $i = $i + 2;
+                    my int $join11_safety = 0;
+                    # Continue joining while line still ends with a binary operator
+                    while ($i < $num && !match(trim_str($joined), ";\\s*$") && $join11_safety < 20 && length($joined) <= 500) {
+                        my str $more_bin = trim_str($lines[$i]);
+                        if (match(trim_str($joined), "(&&|\\|\\||//|\\?|==|!=|=~|<=|>=)\\s*$") || match(trim_str($joined), "[+\\-\\*/:]\\s*$") || match(trim_str($joined), "\\b(and|or)\\s*$")) {
+                            if (!match($more_bin, "^(my|our|local|sub|func|if|unless|while|for|foreach|return|#)") && $more_bin ne "" && !starts_with($more_bin, "#")) {
+                                $joined = $joined . " " . $more_bin;
+                                $i++;
+                                $join11_safety++;
+                            } else {
+                                last;
+                            }
+                        } else {
+                            last;
+                        }
+                    }
+                    push(@out, $joined);
+                    next;
+                }
+            }
+        }
+
+        # ---- Multi-line paren-balanced constructs ----
+        # my %hash = (...), my @arr = (...), func_call(...), my ($a, $b) = @_
+        # Detect unbalanced open paren at end of line and join until balanced
+        # Skip lines with tr/// or y/// — parens inside operands are not real parens
+        if ($i + 1 < $num && !match($trimmed, ";\\s*$") && $trimmed ne "" && !starts_with($trimmed, "#") && !match($trimmed, "\\b(tr|y)\\s*/") && !match($trimmed, "=~\\s*(tr|y)\\s*[/\\{\\[\\(]")) {
+            # Count parens on the current line (skip chars inside strings)
+            my int $ml_opens = 0;
+            my int $ml_closes = 0;
+            my int $mli = 0;
+            my int $ml_len = length($trimmed);
+            my int $ml_in_str = 0;
+            my int $ml_in_sq = 0;
+            while ($mli < $ml_len) {
+                my str $mlc = substr($trimmed, $mli, 1);
+                if ($mlc eq "\"" && $ml_in_sq == 0 && ($mli == 0 || substr($trimmed, $mli - 1, 1) ne "\\")) { $ml_in_str = 1 - $ml_in_str; }
+                if ($mlc eq "'" && $ml_in_str == 0 && ($mli == 0 || substr($trimmed, $mli - 1, 1) ne "\\")) { $ml_in_sq = 1 - $ml_in_sq; }
+                if ($ml_in_str == 0 && $ml_in_sq == 0) {
+                    if ($mlc eq "(") { $ml_opens++; }
+                    if ($mlc eq ")") { $ml_closes++; }
+                }
+                $mli++;
+            }
+            # If more opens than closes, join lines until balanced
+            if ($ml_opens > $ml_closes && $ml_opens > 0) {
+                my int $ml_depth = $ml_opens - $ml_closes;
+                my str $joined = $line;
+                $i++;
+                my int $ml_safety = 0;
+                while ($i < $num && $ml_depth > 0 && $ml_safety < 50 && length($joined) <= 500) {
+                    my str $ml_next = trim_str($lines[$i]);
+                    $joined = $joined . " " . $ml_next;
+                    # Count parens in the next line (skip chars inside strings)
+                    my int $mlni = 0;
+                    my int $mlnlen = length($ml_next);
+                    my int $mln_in_str = 0;
+                    my int $mln_in_sq = 0;
+                    while ($mlni < $mlnlen) {
+                        my str $mlnc = substr($ml_next, $mlni, 1);
+                        if ($mlnc eq "\"" && $mln_in_sq == 0 && ($mlni == 0 || substr($ml_next, $mlni - 1, 1) ne "\\")) { $mln_in_str = 1 - $mln_in_str; }
+                        if ($mlnc eq "'" && $mln_in_str == 0 && ($mlni == 0 || substr($ml_next, $mlni - 1, 1) ne "\\")) { $mln_in_sq = 1 - $mln_in_sq; }
+                        if ($mln_in_str == 0 && $mln_in_sq == 0) {
+                            if ($mlnc eq "(") { $ml_depth++; }
+                            if ($mlnc eq ")") { $ml_depth--; }
+                        }
+                        $mlni++;
+                    }
+                    $i++;
+                    $ml_safety++;
+                }
+                push(@out, $joined);
+                next;
+            }
+        }
+
+        # ---- Multi-line brace-balanced constructs (hash/array refs) ----
+        # my $config = { ... }, my $list = [ ... ]
+        if ($i + 1 < $num && !match($trimmed, ";\\s*$") && $trimmed ne "" && !starts_with($trimmed, "#")) {
+            # Check for unbalanced square brackets (skip chars inside strings)
+            my int $sq_opens = 0;
+            my int $sq_closes = 0;
+            my int $sqi = 0;
+            my int $sq_len = length($trimmed);
+            my int $sq_in_str = 0;
+            my int $sq_in_sq = 0;
+            while ($sqi < $sq_len) {
+                my str $sqc = substr($trimmed, $sqi, 1);
+                if ($sqc eq "\"" && $sq_in_sq == 0 && ($sqi == 0 || substr($trimmed, $sqi - 1, 1) ne "\\")) { $sq_in_str = 1 - $sq_in_str; }
+                if ($sqc eq "'" && $sq_in_str == 0 && ($sqi == 0 || substr($trimmed, $sqi - 1, 1) ne "\\")) { $sq_in_sq = 1 - $sq_in_sq; }
+                if ($sq_in_str == 0 && $sq_in_sq == 0) {
+                    if ($sqc eq "[") { $sq_opens++; }
+                    if ($sqc eq "]") { $sq_closes++; }
+                }
+                $sqi++;
+            }
+            if ($sq_opens > $sq_closes && $sq_opens > 0 && match($trimmed, "=\\s*\\[")) {
+                my int $sq_depth = $sq_opens - $sq_closes;
+                my str $joined = $line;
+                $i++;
+                my int $sq_safety = 0;
+                while ($i < $num && $sq_depth > 0 && $sq_safety < 50 && length($joined) <= 500) {
+                    my str $sq_next = trim_str($lines[$i]);
+                    $joined = $joined . " " . $sq_next;
+                    my int $sqni = 0;
+                    my int $sqnlen = length($sq_next);
+                    my int $sqn_in_str = 0;
+                    my int $sqn_in_sq = 0;
+                    while ($sqni < $sqnlen) {
+                        my str $sqnc = substr($sq_next, $sqni, 1);
+                        if ($sqnc eq "\"" && $sqn_in_sq == 0 && ($sqni == 0 || substr($sq_next, $sqni - 1, 1) ne "\\")) { $sqn_in_str = 1 - $sqn_in_str; }
+                        if ($sqnc eq "'" && $sqn_in_str == 0 && ($sqni == 0 || substr($sq_next, $sqni - 1, 1) ne "\\")) { $sqn_in_sq = 1 - $sqn_in_sq; }
+                        if ($sqn_in_str == 0 && $sqn_in_sq == 0) {
+                            if ($sqnc eq "[") { $sq_depth++; }
+                            if ($sqnc eq "]") { $sq_depth--; }
+                        }
+                        $sqni++;
+                    }
+                    $i++;
+                    $sq_safety++;
+                }
+                push(@out, $joined);
+                next;
+            }
+
+            # Check for unbalanced curly braces in hash ref assignments: my $x = { ... }
+            if (match($trimmed, "=\\s*\\{") && !match($trimmed, "\\}") && !match($trimmed, "\\bsub\\s") && !match($trimmed, "\\bfunc\\s") && !match($trimmed, "\\bif\\s") && !match($trimmed, "\\bwhile\\s") && !match($trimmed, "\\bfor\\s") && !match($trimmed, "\\bforeach\\s")) {
+                my int $br_opens = 0;
+                my int $br_closes = 0;
+                my int $bri = 0;
+                my int $br_len = length($trimmed);
+                my int $br_in_str = 0;
+                my int $br_in_sq = 0;
+                while ($bri < $br_len) {
+                    my str $brc = substr($trimmed, $bri, 1);
+                    if ($brc eq "\"" && $br_in_sq == 0 && ($bri == 0 || substr($trimmed, $bri - 1, 1) ne "\\")) { $br_in_str = 1 - $br_in_str; }
+                    if ($brc eq "'" && $br_in_str == 0 && ($bri == 0 || substr($trimmed, $bri - 1, 1) ne "\\")) { $br_in_sq = 1 - $br_in_sq; }
+                    if ($br_in_str == 0 && $br_in_sq == 0) {
+                        if ($brc eq "{") { $br_opens++; }
+                        if ($brc eq "}") { $br_closes++; }
+                    }
+                    $bri++;
+                }
+                if ($br_opens > $br_closes) {
+                    my int $br_depth = $br_opens - $br_closes;
+                    my str $joined = $line;
+                    $i++;
+                    my int $br_safety = 0;
+                    while ($i < $num && $br_depth > 0 && $br_safety < 50 && length($joined) <= 500) {
+                        my str $br_next = trim_str($lines[$i]);
+                        $joined = $joined . " " . $br_next;
+                        my int $brni = 0;
+                        my int $brnlen = length($br_next);
+                        my int $brn_in_str = 0;
+                        my int $brn_in_sq = 0;
+                        while ($brni < $brnlen) {
+                            my str $brnc = substr($br_next, $brni, 1);
+                            if ($brnc eq "\"" && $brn_in_sq == 0 && ($brni == 0 || substr($br_next, $brni - 1, 1) ne "\\")) { $brn_in_str = 1 - $brn_in_str; }
+                            if ($brnc eq "'" && $brn_in_str == 0 && ($brni == 0 || substr($br_next, $brni - 1, 1) ne "\\")) { $brn_in_sq = 1 - $brn_in_sq; }
+                            if ($brn_in_str == 0 && $brn_in_sq == 0) {
+                                if ($brnc eq "{") { $br_depth++; }
+                                if ($brnc eq "}") { $br_depth--; }
+                            }
+                            $brni++;
+                        }
+                        $i++;
+                        $br_safety++;
+                    }
+                    push(@out, $joined);
+                    next;
+                }
+            }
+        }
+
+        push(@out, $line);
+        $i++;
+    }
+
+    return @out;
+}
+
+# ============================================================
+# Pass 3: Line-by-line syntax conversion
+# ============================================================
+

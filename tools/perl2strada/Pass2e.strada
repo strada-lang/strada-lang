@@ -1,0 +1,413 @@
+# perl2strada - Pass2e
+# Pass 2e: Expand typeglob method-generation loops
+
+
+# ============================================================
+# Pass 2e: Expand typeglob method-generation loops
+# ============================================================
+# Detects patterns like:
+#   for my $attr (qw(name age email)) {
+#       no strict 'refs';
+#       *{$attr} = sub { return $_[0]->{$attr} };
+#       *{"set_$attr"} = sub { $_[0]->{$attr} = $_[1] };
+#   }
+# and expands to explicit func declarations for each attribute.
+# Also handles single-line *{name} = sub { ... } outside loops.
+func pass2e_typeglob_methods(array @lines) array {
+    my array @out = ();
+    my int $i = 0;
+    my int $num_lines = scalar(@lines);
+    my str $tge_star = "*";
+
+    while ($i < $num_lines) {
+        my str $line = $lines[$i];
+        my str $trimmed = trim_str($line);
+        my str $indent = get_indent($line);
+
+        # Function alias: *alias = \&original -> wrapper function
+        if (match($trimmed, "^\\*[A-Za-z_][A-Za-z0-9_:]*\\s*=\\s*\\\\&[A-Za-z_]")) {
+            my array @fa2_cap = capture($trimmed, "^\\*([A-Za-z_][A-Za-z0-9_:]*)\\s*=\\s*\\\\&([A-Za-z_][A-Za-z0-9_:]*)");
+            if (scalar(@fa2_cap) > 2) {
+                my str $fa2_alias = $fa2_cap[1];
+                my str $fa2_orig = $fa2_cap[2];
+                push(@out, $indent . "func " . $fa2_alias . "(scalar ...@_) dynamic { return " . $fa2_orig . "(@_); }");
+                $i++;
+                next;
+            }
+        }
+
+        # Detect: for/foreach my $var (qw(...)) { containing *{...} = sub
+        if (match($trimmed, "^(for|foreach)\\s+my\\s+\\$[a-zA-Z_][a-zA-Z0-9_]*\\s*\\(\\s*qw")) {
+            # Extract loop variable name
+            my array @lv_cap = capture($trimmed, "^(?:for|foreach)\\s+my\\s+\\$([a-zA-Z_][a-zA-Z0-9_]*)");
+            # Extract qw list
+            my array @qw_cap = capture($trimmed, "qw[\\(\\[]\\s*([^)\\]]+)\\s*[)\\]]");
+            if (scalar(@lv_cap) > 1 && scalar(@qw_cap) > 1) {
+                my str $loop_var = $lv_cap[1];
+                my str $qw_str = trim_str($qw_cap[1]);
+                my array @qw_items = split("\\s+", $qw_str);
+
+                # Collect the loop body lines (track braces)
+                my int $tge_depth = 0;
+                my int $ci2 = 0;
+                my int $clen2 = length($trimmed);
+                while ($ci2 < $clen2) {
+                    my str $tge_ch = substr($trimmed, $ci2, 1);
+                    if ($tge_ch eq "{") { $tge_depth++; }
+                    if ($tge_ch eq "}") { $tge_depth--; }
+                    $ci2++;
+                }
+                my array @loop_body = ();
+                my int $j2 = $i + 1;
+                while ($j2 < $num_lines && $tge_depth > 0) {
+                    my str $bline = $lines[$j2];
+                    my str $btrim = trim_str($bline);
+                    my int $bi2 = 0;
+                    my int $blen2 = length($btrim);
+                    while ($bi2 < $blen2) {
+                        my str $bch2 = substr($btrim, $bi2, 1);
+                        if ($bch2 eq "{") { $tge_depth++; }
+                        if ($bch2 eq "}") { $tge_depth--; }
+                        $bi2++;
+                    }
+                    if ($tge_depth > 0) {
+                        push(@loop_body, $btrim);
+                    }
+                    $j2++;
+                }
+
+                # Check if the body contains typeglob assignments
+                my int $has_typeglob = 0;
+                my int $lb = 0;
+                while ($lb < scalar(@loop_body)) {
+                    if (match($loop_body[$lb], "\\*\\{") && match($loop_body[$lb], "=\\s*sub\\s*\\{")) {
+                        $has_typeglob = 1;
+                    }
+                    $lb++;
+                }
+
+                if ($has_typeglob == 1) {
+                    # Expand: for each qw item, generate func declarations
+                    push(@out, $indent . "# Expanded from: " . $trimmed);
+                    my int $qi = 0;
+                    while ($qi < scalar(@qw_items)) {
+                        my str $attr = trim_str($qw_items[$qi]);
+                        if (length($attr) > 0) {
+                            # Process each body line, substituting the loop variable
+                            my int $lb2 = 0;
+                            while ($lb2 < scalar(@loop_body)) {
+                                my str $bl = $loop_body[$lb2];
+                                # Skip "no strict 'refs'" lines
+                                if (match($bl, "^no\\s+strict")) {
+                                    $lb2++;
+                                    next;
+                                }
+                                # Detect getter: *{$var} = sub { return $_[0]->{$var} };
+                                # or *{$var} = sub { $_[0]->{$var} };
+                                if (match($bl, "\\*\\{\\$" . $loop_var . "\\}\\s*=\\s*sub")) {
+                                    # Extract the sub body between { and }
+                                    my array @sb_cap = capture($bl, "sub\\s*\\{(.+)\\}\\s*;");
+                                    if (scalar(@sb_cap) > 1) {
+                                        my str $sbody = trim_str($sb_cap[1]);
+                                        # Replace $_[0] with $self, $_[1] with $value, $var references with attr name
+                                        $sbody = replace_all($sbody, "$" . "_[0]", "$" . "self");
+                                        $sbody = replace_all($sbody, "$" . "_[1]", "$" . "value");
+                                        # Replace {$var} hash access with {attr}
+                                        $sbody = replace_all($sbody, "{$" . $loop_var . "}", "{\"" . $attr . "\"}");
+                                        $sbody = replace_all($sbody, "$" . $loop_var, "\"" . $attr . "\"");
+                                        push(@out, $indent . "func " . $attr . "(scalar $" . "self) scalar { " . $sbody . " }");
+                                    }
+                                }
+                                # Detect setter: *{"set_$var"} = sub { ... }
+                                # or *{$prefix . $var} = sub { ... }
+                                elsif (match($bl, "\\*\\{[\"']set_") && match($bl, "=\\s*sub")) {
+                                    my array @sb2_cap = capture($bl, "sub\\s*\\{(.+)\\}\\s*;");
+                                    if (scalar(@sb2_cap) > 1) {
+                                        my str $sbody2 = trim_str($sb2_cap[1]);
+                                        $sbody2 = replace_all($sbody2, "$" . "_[0]", "$" . "self");
+                                        $sbody2 = replace_all($sbody2, "$" . "_[1]", "$" . "value");
+                                        $sbody2 = replace_all($sbody2, "{$" . $loop_var . "}", "{\"" . $attr . "\"}");
+                                        $sbody2 = replace_all($sbody2, "$" . $loop_var, "\"" . $attr . "\"");
+                                        push(@out, $indent . "func set_" . $attr . "(scalar $" . "self, scalar $" . "value) void { " . $sbody2 . " }");
+                                    }
+                                }
+                                # Other typeglob with prefix: *{"prefix_$var"} = sub { ... }
+                                elsif (match($bl, "\\*\\{[\"']") && match($bl, "=\\s*sub")) {
+                                    my array @pfx_cap = capture($bl, "\\*\\{[\"']([a-z_]+)\\$" . $loop_var . "[\"']\\}");
+                                    my array @sb3_cap = capture($bl, "sub\\s*\\{(.+)\\}\\s*;");
+                                    if (scalar(@pfx_cap) > 1 && scalar(@sb3_cap) > 1) {
+                                        my str $prefix = $pfx_cap[1];
+                                        my str $sbody3 = trim_str($sb3_cap[1]);
+                                        $sbody3 = replace_all($sbody3, "$" . "_[0]", "$" . "self");
+                                        $sbody3 = replace_all($sbody3, "$" . "_[1]", "$" . "value");
+                                        $sbody3 = replace_all($sbody3, "{$" . $loop_var . "}", "{\"" . $attr . "\"}");
+                                        $sbody3 = replace_all($sbody3, "$" . $loop_var, "\"" . $attr . "\"");
+                                        push(@out, $indent . "func " . $prefix . $attr . "(scalar $" . "self, scalar $" . "value) void { " . $sbody3 . " }");
+                                    }
+                                }
+                                $lb2++;
+                            }
+                        }
+                        $qi++;
+                    }
+                    $i = $j2;
+                    next;
+                }
+            }
+        }
+
+        # Typeglob constant: *NAME = sub () { VALUE }; -> const TYPE NAME = VALUE;
+        # This is the Perl idiom for compile-time constants (used by constant.pm)
+        if (match($trimmed, "^\\*[A-Za-z_][A-Za-z0-9_:]*\\s*=\\s*sub\\s*\\(\\s*\\)\\s*\\{")) {
+            my array @tc_cap = capture($trimmed, "^\\*([A-Za-z_][A-Za-z0-9_:]*)\\s*=\\s*sub\\s*\\(\\s*\\)\\s*\\{\\s*(.+?)\\s*;?\\s*\\}\\s*;");
+            if (scalar(@tc_cap) > 2) {
+                my str $tc_name = $tc_cap[1];
+                my str $tc_value = trim_str($tc_cap[2]);
+                # Determine type from value
+                my str $tc_type = "scalar";
+                if (match($tc_value, "^-?[0-9]+$")) {
+                    $tc_type = "int";
+                } elsif (match($tc_value, "^-?[0-9]*\\.[0-9]+$")) {
+                    $tc_type = "num";
+                } elsif (match($tc_value, "^[\"']") || match($tc_value, "^qq")) {
+                    $tc_type = "str";
+                }
+                push(@out, $indent . "const " . $tc_type . " " . $tc_name . " = " . $tc_value . ";");
+                $i++;
+                next;
+            }
+        }
+
+        # Single-line typeglob method: *func_name = sub { body };
+        # Outside of a for loop — emit as a standalone function
+        if (match($trimmed, "^\\*[A-Za-z_][A-Za-z0-9_]*\\s*=\\s*sub\\s*\\{")) {
+            my array @stg_cap = capture($trimmed, "^\\*([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*sub\\s*\\{(.+)\\}\\s*;");
+            if (scalar(@stg_cap) > 2) {
+                my str $stg_name = $stg_cap[1];
+                my str $stg_body = trim_str($stg_cap[2]);
+                my int $stg_has_arg1 = 0;
+                if (match($stg_body, "\\$_\\[1\\]")) { $stg_has_arg1 = 1; }
+                $stg_body = replace_all($stg_body, "$" . "_[0]", "$" . "self");
+                $stg_body = replace_all($stg_body, "$" . "_[1]", "$" . "value");
+                my str $stg_sig = "scalar $" . "self";
+                my str $stg_ret = "scalar";
+                if ($stg_has_arg1 == 1) {
+                    $stg_sig = "scalar $" . "self, scalar $" . "value";
+                    $stg_ret = "void";
+                }
+                push(@out, $indent . "func " . $stg_name . "(" . $stg_sig . ") " . $stg_ret . " { " . $stg_body . " }");
+                $i++;
+                next;
+            }
+        }
+
+        # Single-line: *{"func_name"} = sub { body };
+        if (match($trimmed, "^\\*\\{[\"'][A-Za-z_][A-Za-z0-9_]*[\"']\\}\\s*=\\s*sub\\s*\\{")) {
+            my array @stg2_cap = capture($trimmed, "^\\*\\{[\"']([A-Za-z_][A-Za-z0-9_]*)[\"']\\}\\s*=\\s*sub\\s*\\{(.+)\\}\\s*;");
+            if (scalar(@stg2_cap) > 2) {
+                my str $stg2_name = $stg2_cap[1];
+                my str $stg2_body = trim_str($stg2_cap[2]);
+                my int $stg2_has_arg1 = 0;
+                if (match($stg2_body, "\\$_\\[1\\]")) { $stg2_has_arg1 = 1; }
+                $stg2_body = replace_all($stg2_body, "$" . "_[0]", "$" . "self");
+                $stg2_body = replace_all($stg2_body, "$" . "_[1]", "$" . "value");
+                my str $stg2_sig = "scalar $" . "self";
+                my str $stg2_ret = "scalar";
+                if ($stg2_has_arg1 == 1) {
+                    $stg2_sig = "scalar $" . "self, scalar $" . "value";
+                    $stg2_ret = "void";
+                }
+                push(@out, $indent . "func " . $stg2_name . "(" . $stg2_sig . ") " . $stg2_ret . " { " . $stg2_body . " }");
+                $i++;
+                next;
+            }
+        }
+
+        # Dynamic typeglob: *{$var} = sub { ... }; (not in a for loop)
+        # Generate an AUTOLOAD dispatch table entry
+        if (match($trimmed, "^\\*\\{\\$[a-zA-Z_]") && match($trimmed, "=\\s*sub\\s*\\{")) {
+            my array @dtg_cap = capture($trimmed, "^\\*\\{\\$([a-zA-Z_][a-zA-Z0-9_]*)\\}\\s*=\\s*sub\\s*\\{(.+)\\}\\s*;");
+            if (scalar(@dtg_cap) > 2) {
+                my str $dtg_var = $dtg_cap[1];
+                my str $dtg_body = trim_str($dtg_cap[2]);
+                $dtg_body = replace_all($dtg_body, "$" . "_[0]", "$" . "self");
+                $dtg_body = replace_all($dtg_body, "$" . "_[1]", "$" . "value");
+                push(@out, $indent . "# Dynamic method: " . $tge_star . "{$" . $dtg_var . "} installed at runtime");
+                push(@out, $indent . "# AUTOLOAD will dispatch based on $" . $dtg_var . " value");
+                push(@out, $indent . "$" . "__dispatch{$" . $dtg_var . "} = func (scalar $" . "self) scalar { " . $dtg_body . " };");
+                $i++;
+                next;
+            }
+        }
+
+        push(@out, $line);
+        $i++;
+    }
+
+    return @out;
+}
+
+
+# Helper: generate full Strada has declaration + extra methods for one attribute
+# Given an attribute name and Moose options string, produces the same output
+# as the single-attribute handler (lines 4615+).
+func generate_has_decl(str $attr_name, str $attr_opts, str $indent) str {
+    my str $is_mode = "ro";
+    my str $isa_type = "scalar";
+    my str $default_val = "";
+    my int $is_required = 0;
+    my int $is_lazy = 0;
+    my str $builder = "";
+
+    if (match($attr_opts, "is\\s*=>\\s*['\"]rw['\"]")) { $is_mode = "rw"; }
+    if (match($attr_opts, "isa\\s*=>\\s*['\"]Str['\"]")) { $isa_type = "str"; }
+    if (match($attr_opts, "isa\\s*=>\\s*['\"]Int['\"]")) { $isa_type = "int"; }
+    if (match($attr_opts, "isa\\s*=>\\s*['\"]Num['\"]")) { $isa_type = "num"; }
+    if (match($attr_opts, "isa\\s*=>\\s*['\"]Bool['\"]")) { $isa_type = "int"; }
+    if (match($attr_opts, "isa\\s*=>\\s*['\"]ArrayRef")) { $isa_type = "scalar"; }
+    if (match($attr_opts, "isa\\s*=>\\s*['\"]HashRef")) { $isa_type = "scalar"; }
+    if (match($attr_opts, "isa\\s*=>\\s*['\"]CodeRef['\"]")) { $isa_type = "scalar"; }
+    if (match($attr_opts, "isa\\s*=>\\s*['\"]ClassName['\"]")) { $isa_type = "str"; }
+    if (match($attr_opts, "isa\\s*=>\\s*['\"]Object['\"]")) { $isa_type = "scalar"; }
+    if (match($attr_opts, "isa\\s*=>\\s*['\"]Maybe\\[")) { $isa_type = "scalar"; }
+    if (match($attr_opts, "required\\s*=>\\s*1")) { $is_required = 1; }
+    if (match($attr_opts, "lazy\\s*=>\\s*1")) { $is_lazy = 1; }
+
+    # Extract default value
+    my array @gdef_cap = capture($attr_opts, "default\\s*=>\\s*([^,)]+)");
+    if (scalar(@gdef_cap) > 1) {
+        $default_val = trim_str($gdef_cap[1]);
+        if (match($default_val, "^sub\\s*\\{")) {
+            if (match($attr_opts, "default\\s*=>\\s*sub\\s*\\{\\s*\\[\\]\\s*\\}")) {
+                $default_val = "[]";
+            } elsif (match($attr_opts, "default\\s*=>\\s*sub\\s*\\{\\s*\\{\\}\\s*\\}")) {
+                $default_val = "{}";
+            } elsif (match($attr_opts, "default\\s*=>\\s*sub\\s*\\{\\s*['\"]([^'\"]*)['\"]\\s*\\}")) {
+                my array @gsdef_cap = capture($attr_opts, "default\\s*=>\\s*sub\\s*\\{\\s*['\"]([^'\"]*)['\"]\\s*\\}");
+                if (scalar(@gsdef_cap) > 1) {
+                    $default_val = "\"" . $gsdef_cap[1] . "\"";
+                } else {
+                    $default_val = "";
+                }
+            } elsif (match($attr_opts, "default\\s*=>\\s*sub\\s*\\{\\s*(-?[0-9]+\\.?[0-9]*)\\s*\\}")) {
+                my array @gndef_cap = capture($attr_opts, "default\\s*=>\\s*sub\\s*\\{\\s*(-?[0-9]+\\.?[0-9]*)\\s*\\}");
+                if (scalar(@gndef_cap) > 1) {
+                    $default_val = $gndef_cap[1];
+                } else {
+                    $default_val = "";
+                }
+            } else {
+                $default_val = "";
+            }
+        }
+    }
+
+    # Extract builder
+    my array @gbld_cap = capture($attr_opts, "builder\\s*=>\\s*['\"]([^'\"]+)['\"]");
+    if (scalar(@gbld_cap) > 1) {
+        $builder = $gbld_cap[1];
+    }
+
+    # Build the has declaration
+    my str $has_decl = $indent . "has " . $is_mode . " " . $isa_type . " $" . $attr_name;
+    if (length($default_val) > 0) {
+        $has_decl = $has_decl . " = " . $default_val;
+    }
+    if ($is_required == 1) {
+        $has_decl = $has_decl . " (required)";
+    } elsif ($is_lazy == 1) {
+        if (length($builder) > 0) {
+            $has_decl = $has_decl . " (lazy, builder => \"" . $builder . "\")";
+        } else {
+            $has_decl = $has_decl . " (lazy)";
+        }
+    } elsif (length($builder) > 0) {
+        $has_decl = $has_decl . " (builder => \"" . $builder . "\")";
+    }
+    $has_decl = $has_decl . ";";
+
+    # Generate extra methods for options
+    my str $extra_methods = "";
+
+    if (match($attr_opts, "\\btrigger\\b")) {
+        my str $trigger_body = "# trigger callback body";
+        my array @gtrig_cap = capture($attr_opts, "trigger\\s*=>\\s*sub\\s*\\{([^}]*)\\}");
+        if (scalar(@gtrig_cap) > 1) {
+            $trigger_body = trim_str($gtrig_cap[1]);
+            $trigger_body = replace($trigger_body, "^my\\s*\\([^)]*\\)\\s*=\\s*@_;?\\s*", "");
+            if (length($trigger_body) == 0) {
+                $trigger_body = "# trigger callback was empty";
+            }
+        }
+        $extra_methods = $extra_methods . "\n" . $indent . "after \"set_" . $attr_name . "\" func(scalar $self) void { " . $trigger_body . " }";
+    }
+    if (match($attr_opts, "\\bcoerce\\b")) {
+        $has_decl = $has_decl . "  # Note: had coerce => 1 — Strada handles basic type coercion natively";
+    }
+    if (match($attr_opts, "\\bhandles\\b")) {
+        my array @ghdl_cap = capture($attr_opts, "handles\\s*=>\\s*\\[([^\\]]+)\\]");
+        if (scalar(@ghdl_cap) > 1) {
+            my str $ghdl_list = $ghdl_cap[1];
+            if (match($ghdl_list, "^qw")) {
+                $ghdl_list = replace($ghdl_list, "^qw[\\(\\[]\\s*", "");
+                $ghdl_list = replace($ghdl_list, "\\s*[)\\]]\\s*$", "");
+            }
+            $ghdl_list = replace_all($ghdl_list, "'", "");
+            $ghdl_list = replace_all($ghdl_list, "\"", "");
+            $ghdl_list = replace_all($ghdl_list, ",", " ");
+            my array @ghdl_methods = split("\\s+", trim_str($ghdl_list));
+            my int $ghmi = 0;
+            while ($ghmi < scalar(@ghdl_methods)) {
+                my str $ghm_name = trim_str($ghdl_methods[$ghmi]);
+                if (length($ghm_name) > 0) {
+                    $extra_methods = $extra_methods . "\n" . $indent . "func " . $ghm_name . "(scalar $self, scalar ...@_) dynamic { return $self->" . $attr_name . "()->" . $ghm_name . "(@_); }";
+                }
+                $ghmi++;
+            }
+            $has_decl = $has_decl . "  # handles delegation via " . $attr_name;
+        } else {
+            my array @ghdl_hash_cap = capture($attr_opts, "handles\\s*=>\\s*\\{([^}]+)\\}");
+            if (scalar(@ghdl_hash_cap) > 1) {
+                my str $ghdl_hash_body = $ghdl_hash_cap[1];
+                my array @ghdl_pairs = split(",", $ghdl_hash_body);
+                my int $ghpi = 0;
+                while ($ghpi < scalar(@ghdl_pairs)) {
+                    my str $ghp = trim_str($ghdl_pairs[$ghpi]);
+                    if (length($ghp) > 0) {
+                        my array @ghp_cap = capture($ghp, "([A-Za-z_][A-Za-z0-9_]*)\\s*=>\\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?");
+                        if (scalar(@ghp_cap) > 2) {
+                            my str $ghp_alias = $ghp_cap[1];
+                            my str $ghp_method = $ghp_cap[2];
+                            $extra_methods = $extra_methods . "\n" . $indent . "func " . $ghp_alias . "(scalar $self, scalar ...@_) dynamic { return $self->" . $attr_name . "()->" . $ghp_method . "(@_); }";
+                        }
+                    }
+                    $ghpi++;
+                }
+                $has_decl = $has_decl . "  # handles delegation (aliased) via " . $attr_name;
+            } else {
+                $has_decl = $has_decl . "  # REVIEW: had delegation via handles — implement wrapper methods";
+            }
+        }
+    }
+    if (match($attr_opts, "\\bclearer\\b")) {
+        my array @gclr_cap = capture($attr_opts, "clearer\\s*=>\\s*['\"]([^'\"]+)['\"]");
+        my str $gclr_name = "clear_" . $attr_name;
+        if (scalar(@gclr_cap) > 1) {
+            $gclr_name = $gclr_cap[1];
+        }
+        $extra_methods = $extra_methods . "\n" . $indent . "func " . $gclr_name . "(scalar $self) void { $self->{\"" . $attr_name . "\"} = undef; }";
+    }
+    if (match($attr_opts, "\\bpredicate\\b")) {
+        my array @gpred_cap = capture($attr_opts, "predicate\\s*=>\\s*['\"]([^'\"]+)['\"]");
+        my str $gpred_name = "has_" . $attr_name;
+        if (scalar(@gpred_cap) > 1) {
+            $gpred_name = $gpred_cap[1];
+        }
+        $extra_methods = $extra_methods . "\n" . $indent . "func " . $gpred_name . "(scalar $self) int { return defined($self->{\"" . $attr_name . "\"}); }";
+    }
+    if (match($attr_opts, "\\bweak_ref\\b")) {
+        $extra_methods = $extra_methods . "\n" . $indent . "after \"new\" func(scalar $self) void { if (defined($self->{\"" . $attr_name . "\"})) { core::weaken($self->{\"" . $attr_name . "\"}); } }";
+    }
+    return $has_decl . $extra_methods;
+}
+

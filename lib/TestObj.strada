@@ -1,0 +1,38 @@
+=head1 NAME
+
+TestObj - Test library for import_object feature
+
+=head1 DESCRIPTION
+
+TestObj is a minimal test library used to verify the C<import_object>
+feature. It provides simple arithmetic and string functions.
+
+=head1 FUNCTIONS
+
+=head2 add($a, $b)
+
+Returns the sum of two integers.
+
+=head2 multiply($x, $y)
+
+Returns the product of two integers.
+
+=head2 greet($name)
+
+Returns a greeting string.
+
+=cut
+
+package TestObj;
+
+func add(int $a, int $b) int {
+    return $a + $b;
+}
+
+func greet(str $name) str {
+    return "Hello, " . $name . "!";
+}
+
+func multiply(int $x, int $y) int {
+    return $x * $y;
+}

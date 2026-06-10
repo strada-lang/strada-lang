@@ -1,0 +1,17 @@
+package main;
+func run() void {
+    my array @arr = ();
+    my int $i = 0;
+    while ($i < 50000) {
+        push(@arr, $i);
+        $i++;
+    }
+    say("array size: " . scalar(@arr));
+    my hash %h = ();
+    my int $k = 0;
+    while ($k < 10000) {
+        $h{"key" . $k} = $k;
+        $k++;
+    }
+    say("hash size: " . scalar(keys(%h)));
+}

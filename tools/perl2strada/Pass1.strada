@@ -1,0 +1,279 @@
+# perl2strada - Pass1
+# Pass 1: Pre-scan for sub signatures and package context
+
+# ============================================================
+
+# Scan for sub definitions and extract parameter info from @_ unpacking
+# Returns a hash mapping sub_name -> param info string (e.g. "scalar $self, str $name")
+func pass1_prescan(array @lines) hash {
+    my hash %subs = ();
+    my hash %sub_returns = ();
+    my str $current_package = "main";
+    my int $i = 0;
+    my int $num_lines = scalar(@lines);
+
+    while ($i < $num_lines) {
+        my str $line = $lines[$i];
+        my str $trimmed = trim_str($line);
+
+        # Track package declarations
+        if (match($trimmed, "^package\\s+")) {
+            my array @pcap = capture($trimmed, "^package\\s+([A-Za-z_:][A-Za-z0-9_:]*)");
+            if (scalar(@pcap) > 1) {
+                $current_package = $pcap[1];
+            }
+        }
+
+        # Find sub declarations
+        if (match($trimmed, "^sub\\s+[A-Za-z_]")) {
+            my array @scap = capture($trimmed, "^sub\\s+([A-Za-z_][A-Za-z0-9_]*)");
+            if (scalar(@scap) > 1) {
+                my str $sub_name = $scap[1];
+                my array @params = ();
+                my int $has_return = 0;
+                my int $has_wantarray = 0;
+
+                # Scan inside the sub body for @_ unpacking, return, and wantarray
+                my int $brace_depth = 0;
+                # Count braces on the sub line itself
+                my int $ci = 0;
+                my int $clen = length($trimmed);
+                while ($ci < $clen) {
+                    my str $ch = substr($trimmed, $ci, 1);
+                    if ($ch eq "{") { $brace_depth++; }
+                    if ($ch eq "}") { $brace_depth--; }
+                    $ci++;
+                }
+
+                my int $j = $i + 1;
+                while ($j < $num_lines && $brace_depth > 0) {
+                    my str $body_line = trim_str($lines[$j]);
+
+                    # Count braces (simplified - ignoring strings/comments)
+                    my int $bi = 0;
+                    my int $blen = length($body_line);
+                    while ($bi < $blen) {
+                        my str $bch = substr($body_line, $bi, 1);
+                        if ($bch eq "{") { $brace_depth++; }
+                        if ($bch eq "}") { $brace_depth--; }
+                        $bi++;
+                    }
+
+                    # Check for return statements
+                    if (match($body_line, "\\breturn\\b")) {
+                        # Check if it returns a value (not just bare "return;")
+                        if (match($body_line, "\\breturn\\s+[^;]")) {
+                            $has_return = 1;
+                        }
+                    }
+
+                    # Check for wantarray (context-sensitive function call)
+                    # Match bare wantarray or wantarray() but not just $wantarray as a variable
+                    if (match($body_line, "\\bwantarray\\b")) {
+                        # Has wantarray — check if it's a function call (bare or with parens)
+                        # Even if $wantarray var exists on same line, the function is context-sensitive
+                        $has_wantarray = 1;
+                    }
+
+                    # Pattern: my ($a, $b, $c) = @_;
+                    if (match($body_line, "my\\s*\\([^)]+\\)\\s*=\\s*@_")) {
+                        my array @pcap2 = capture($body_line, "my\\s*\\(([^)]+)\\)\\s*=\\s*@_");
+                        if (scalar(@pcap2) > 1) {
+                            my str $param_str = $pcap2[1];
+                            my array @raw_params = split(",", $param_str);
+                            my int $pi = 0;
+                            while ($pi < scalar(@raw_params)) {
+                                my str $p = trim_str($raw_params[$pi]);
+                                # Remove leading sigil ($ or % or @) or my + sigil
+                                $p =~ s/^my\s+//;
+                                my str $sigil = "$";
+                                if (match($p, "^%")) {
+                                    $sigil = "%";
+                                }
+                                if (match($p, "^@")) {
+                                    $sigil = "@";
+                                }
+                                $p =~ s/^[\$%@]//;
+                                if ($p ne "") {
+                                    push(@params, $sigil . $p);
+                                }
+                                $pi++;
+                            }
+                        }
+                    }
+
+                    # Pattern: my $x = shift;  or  my $x = shift @_;  or  my $x = shift(@_);
+                    if (match($body_line, "my\\s+\\$[A-Za-z_][A-Za-z0-9_]*\\s*=\\s*shift")) {
+                        my array @scap2 = capture($body_line, "my\\s+\\$([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*shift");
+                        if (scalar(@scap2) > 1) {
+                            push(@params, $scap2[1]);
+                        }
+                    }
+
+                    # Pattern: my ($self) = @_;  or  my $self = shift;  (already handled above)
+
+                    $j++;
+                }
+
+                # Build parameter type string
+                my str $param_sig = "";
+                my int $pi2 = 0;
+                while ($pi2 < scalar(@params)) {
+                    if ($pi2 > 0) { $param_sig = $param_sig . ", "; }
+                    my str $praw = $params[$pi2];
+                    # Check if it has a sigil prefix from our extraction
+                    my str $psigil = substr($praw, 0, 1);
+                    my str $pname = $praw;
+                    if ($psigil eq "%" || $psigil eq "@" || $psigil eq "$") {
+                        $pname = substr($praw, 1, length($praw) - 1);
+                    } else {
+                        $psigil = "$";
+                    }
+                    # Infer type based on sigil and name
+                    if ($psigil eq "%") {
+                        $param_sig = $param_sig . "hash %" . $pname;
+                    } elsif ($psigil eq "@") {
+                        # If this is the last param, make it variadic with ...
+                        if ($pi2 == scalar(@params) - 1) {
+                            $param_sig = $param_sig . "scalar ...@" . $pname;
+                        } else {
+                            $param_sig = $param_sig . "array @" . $pname;
+                        }
+                    } elsif ($pname eq "self") {
+                        $param_sig = $param_sig . "scalar $" . $pname;
+                    } else {
+                        $param_sig = $param_sig . "scalar $" . $pname;
+                    }
+                    $pi2++;
+                }
+
+                # Use package-qualified name to avoid collisions
+                my str $qualified_name = $current_package . "::" . $sub_name;
+                $subs{$qualified_name} = $param_sig;
+                # Also store under bare name for fallback lookup
+                $subs{$sub_name} = $param_sig;
+
+                # Store return type info
+                # Perl subs always return a value (last expression), so default to scalar.
+                # If wantarray is used, the function is context-sensitive -> dynamic.
+                if ($has_wantarray == 1) {
+                    $sub_returns{$qualified_name} = "dynamic";
+                    $sub_returns{$sub_name} = "dynamic";
+                } else {
+                    $sub_returns{$qualified_name} = "scalar";
+                    $sub_returns{$sub_name} = "scalar";
+                }
+            }
+        }
+
+        # Track use Module qw(func1 func2) imports
+        if (match($trimmed, "^use\\s+[A-Z]") && match($trimmed, "qw")) {
+            my array @imp_cap = capture($trimmed, "^use\\s+([A-Za-z_:][A-Za-z0-9_:]*)\\s+qw[\\(\\[]\\s*([^)\\]]+)\\s*[)\\]]");
+            if (scalar(@imp_cap) > 2) {
+                my str $imp_mod = $imp_cap[1];
+                my array @imp_funcs = split("\\s+", trim_str($imp_cap[2]));
+                my int $ifi = 0;
+                while ($ifi < scalar(@imp_funcs)) {
+                    my str $imp_fn = trim_str($imp_funcs[$ifi]);
+                    if (length($imp_fn) > 0) {
+                        $subs{"import:" . $imp_fn} = $imp_mod;
+                    }
+                    $ifi++;
+                }
+                $subs{"module:" . $imp_mod} = "1";
+            }
+        }
+        # Also track use Module 'func' or use Module "func" (single import)
+        if (match($trimmed, "^use\\s+[A-Z]") && !match($trimmed, "qw") && match($trimmed, "['\"][a-z_]")) {
+            my array @simp_cap = capture($trimmed, "^use\\s+([A-Za-z_:][A-Za-z0-9_:]*)\\s+['\"]([a-z_][a-z0-9_]*)['\"]");
+            if (scalar(@simp_cap) > 2) {
+                my str $simp_mod = $simp_cap[1];
+                my str $simp_fn = $simp_cap[2];
+                $subs{"import:" . $simp_fn} = $simp_mod;
+                $subs{"module:" . $simp_mod} = "1";
+            }
+        }
+
+        # Track typeglob variable aliases: *alias = \$original, *alias = \@original, *alias = \%original
+        my str $tg_star = "*";
+        if (match($trimmed, "^\\*[A-Za-z_][A-Za-z0-9_:]*\\s*=\\s*\\\\[\\$@%]")) {
+            my array @tg_cap = capture($trimmed, "^\\*([A-Za-z_][A-Za-z0-9_:]*)\\s*=\\s*\\\\([\\$@%])([A-Za-z_][A-Za-z0-9_:]*)");
+            if (scalar(@tg_cap) > 3) {
+                my str $tg_alias = $tg_cap[1];
+                my str $tg_sigil = $tg_cap[2];
+                my str $tg_orig = $tg_cap[3];
+                # Store as varalias:sigil:alias = original
+                $subs{"varalias:" . $tg_sigil . ":" . $tg_alias} = $tg_orig;
+            }
+        }
+
+        # Track bareword filehandles from open() calls
+        # open(LOG, ">", "file") or open(FH, "<file")
+        if (match($trimmed, "^open\\s*\\(\\s*[A-Z][A-Z0-9_]*\\s*,")) {
+            my array @bfh_cap = capture($trimmed, "^open\\s*\\(\\s*([A-Z][A-Z0-9_]*)\\s*,");
+            if (scalar(@bfh_cap) > 1) {
+                my str $bfh_name = $bfh_cap[1];
+                # Skip STDIN/STDOUT/STDERR - those are special
+                if ($bfh_name ne "STDIN" && $bfh_name ne "STDOUT" && $bfh_name ne "STDERR") {
+                    my str $bfh_var = lc($bfh_name);
+                    $subs{"bareword_fh:" . $bfh_name} = $bfh_var;
+                }
+            }
+        }
+
+        # Track @EXPORT and @EXPORT_OK lists for import() generation
+        if (match($trimmed, "@EXPORT_OK") && match($trimmed, "qw")) {
+            my array @eok_cap = capture($trimmed, "qw[\\(\\[]\\s*([^)\\]]+)\\s*[)\\]]");
+            if (scalar(@eok_cap) > 1) {
+                my str $prev_ok = "";
+                if (length("" . $subs{"export_ok:" . $current_package}) > 0) {
+                    $prev_ok = "" . $subs{"export_ok:" . $current_package} . " ";
+                }
+                $subs{"export_ok:" . $current_package} = $prev_ok . trim_str($eok_cap[1]);
+            }
+        } elsif (match($trimmed, "@EXPORT\\b") && match($trimmed, "qw")) {
+            my array @exp_cap = capture($trimmed, "qw[\\(\\[]\\s*([^)\\]]+)\\s*[)\\]]");
+            if (scalar(@exp_cap) > 1) {
+                my str $prev_ex = "";
+                if (length("" . $subs{"export:" . $current_package}) > 0) {
+                    $prev_ex = "" . $subs{"export:" . $current_package} . " ";
+                }
+                $subs{"export:" . $current_package} = $prev_ex . trim_str($exp_cap[1]);
+            }
+        }
+        # Track if module uses Exporter
+        if (match($trimmed, "\\bExporter\\b") || match($trimmed, "@EXPORT")) {
+            $subs{"uses_exporter:" . $current_package} = "1";
+        }
+
+        $i++;
+    }
+
+    # Combine subs and returns into one hash using prefixed keys
+    my hash %result = ();
+    my array @sub_names = keys(%subs);
+    my int $si = 0;
+    while ($si < scalar(@sub_names)) {
+        my str $name = $sub_names[$si];
+        # Pass through keys that already have their own prefix
+        if (starts_with($name, "varalias:") || starts_with($name, "bareword_fh:") || starts_with($name, "import:") || starts_with($name, "module:") || starts_with($name, "export:") || starts_with($name, "export_ok:") || starts_with($name, "uses_exporter:")) {
+            $result{$name} = $subs{$name};
+        } else {
+            $result{"sig:" . $name} = $subs{$name};
+        }
+        $si++;
+    }
+    my array @ret_names = keys(%sub_returns);
+    my int $ri = 0;
+    while ($ri < scalar(@ret_names)) {
+        my str $name = $ret_names[$ri];
+        $result{"ret:" . $name} = $sub_returns{$name};
+        $ri++;
+    }
+
+    return %result;
+}
+
+# ============================================================
+# Pass 2: Convert function signatures
+# ============================================================

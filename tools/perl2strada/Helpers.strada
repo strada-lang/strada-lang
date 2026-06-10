@@ -1,0 +1,593 @@
+# perl2strada - Helpers
+# Utility functions used across all passes
+
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# ============================================================
+# Configuration
+# ============================================================
+
+# Eval backend: "interpreter" (default) or "jit"
+# Controls what library is used for Perl eval() conversion.
+# - "interpreter": uses Strada::Interpreter::eval_string() (tree-walking, no C compiler needed at runtime)
+# - "jit": uses Strada::JIT::eval() (compiles to C at runtime, needs tcc or gcc)
+our str $g_eval_backend = "interpreter";
+
+# ============================================================
+# Helper functions
+# ============================================================
+
+# Check if a character is a word character (a-z, A-Z, 0-9, _)
+func is_word_char(str $c) int {
+    if ($c eq "") { return 0; }
+    if (match($c, "^[A-Za-z0-9_]$")) { return 1; }
+    return 0;
+}
+
+# Get leading whitespace from a line
+func get_indent(str $line) str {
+    my str $indent = "";
+    my int $i = 0;
+    my int $len = length($line);
+    while ($i < $len) {
+        my str $c = substr($line, $i, 1);
+        if ($c eq " " || $c eq "\t") {
+            $indent = $indent . $c;
+        } else {
+            return $indent;
+        }
+        $i++;
+    }
+    return $indent;
+}
+
+# Trim leading and trailing whitespace
+func trim_str(str $s) str {
+    my str $r = $s;
+    $r =~ s/^\s+//;
+    $r =~ s/\s+$//;
+    return $r;
+}
+
+# Replace a keyword outside of string literals (single and double quoted)
+# Walks the string character by character, tracking quote context
+func replace_keyword_outside_strings(str $s, str $find, str $repl) str {
+    my str $out = "";
+    my int $i = 0;
+    my int $len = length($s);
+    my int $find_len = length($find);
+
+    while ($i < $len) {
+        my str $ch = substr($s, $i, 1);
+
+        # Skip over double-quoted strings
+        if ($ch eq "\"") {
+            $out = $out . $ch;
+            $i++;
+            while ($i < $len) {
+                my str $qch = substr($s, $i, 1);
+                $out = $out . $qch;
+                if ($qch eq "\\" && $i + 1 < $len) {
+                    $i++;
+                    $out = $out . substr($s, $i, 1);
+                } elsif ($qch eq "\"") {
+                    $i++;
+                    last;
+                }
+                $i++;
+            }
+            next;
+        }
+        # Skip over single-quoted strings
+        if ($ch eq "'") {
+            $out = $out . $ch;
+            $i++;
+            while ($i < $len) {
+                my str $qch2 = substr($s, $i, 1);
+                $out = $out . $qch2;
+                if ($qch2 eq "\\" && $i + 1 < $len) {
+                    $i++;
+                    $out = $out . substr($s, $i, 1);
+                } elsif ($qch2 eq "'") {
+                    $i++;
+                    last;
+                }
+                $i++;
+            }
+            next;
+        }
+
+        # Check if we match the find string at this position
+        if ($i + $find_len <= $len && substr($s, $i, $find_len) eq $find) {
+            $out = $out . $repl;
+            $i = $i + $find_len;
+            next;
+        }
+
+        $out = $out . $ch;
+        $i++;
+    }
+    return $out;
+}
+
+# Check if line is inside a string (very basic - checks if odd number of quotes before position)
+# This is a heuristic, not perfect
+func starts_with(str $s, str $prefix) int {
+    if (length($s) < length($prefix)) { return 0; }
+    if (substr($s, 0, length($prefix)) eq $prefix) { return 1; }
+    return 0;
+}
+
+# Insert a closing paren before the first semicolon in the line
+# "say(foo;" -> "say(foo);"   "say(foo; }" -> "say(foo); }"
+func add_close_paren(str $s) str {
+    my int $semi_pos = index($s, ";");
+    if ($semi_pos < 0) {
+        # No semicolon found, append )
+        return $s . ")";
+    }
+    return substr($s, 0, $semi_pos) . ")" . substr($s, $semi_pos, length($s) - $semi_pos);
+}
+
+# Insert closing paren after the argument span of a bare builtin call.
+# Handles single-arg builtins like "core::unlink($file" inside conditions:
+# "while (core::unlink($to) { 1; }" -> need ) after $to, not before first ;
+# Finds the func( we just inserted, then scans forward tracking parens/brackets
+# to find where the argument(s) end, and inserts ) there.
+func add_close_paren_smart(str $s, str $func_prefix) str {
+    my int $fp = index($s, $func_prefix . "(");
+    if ($fp < 0) { return add_close_paren($s); }
+    my int $start = $fp + length($func_prefix) + 1;
+    my int $len = length($s);
+    my int $depth = 1;
+    my int $pos = $start;
+    my int $in_str = 0;  # 34=", 39='
+    while ($pos < $len && $depth > 0) {
+        my int $ch = char_at($s, $pos);
+        if ($in_str > 0) {
+            if ($ch == $in_str) { $in_str = 0; }
+        } else {
+            if ($ch == 34 || $ch == 39) { $in_str = $ch; }
+            elsif ($ch == 40) { $depth++; }
+            elsif ($ch == 41) { $depth--; }
+            elsif ($ch == 91) { $depth++; }  # [
+            elsif ($ch == 93) { $depth--; }  # ]
+            elsif ($ch == 123) { $depth++; }  # {
+            elsif ($ch == 125) { $depth--; }  # }
+        }
+        if ($depth > 0) { $pos++; }
+    }
+    if ($depth == 0) {
+        # Found matching close - already has a ), don't add another
+        return $s;
+    }
+    # Depth never reached 0 - need to find where to insert )
+    # Scan from start to find end of argument: stop before ) ; { that's at depth 0
+    $pos = $start;
+    $depth = 0;
+    my int $insert_pos = -1;
+    while ($pos < $len) {
+        my int $ch = char_at($s, $pos);
+        if ($in_str > 0) {
+            if ($ch == $in_str) { $in_str = 0; }
+            $pos++;
+            next;
+        }
+        if ($ch == 34 || $ch == 39) { $in_str = $ch; $pos++; next; }
+        if ($ch == 40) { $depth++; }
+        elsif ($ch == 41) {
+            if ($depth > 0) { $depth--; }
+            else {
+                # Unmatched ) - this closes an outer paren, insert before it
+                $insert_pos = $pos;
+                last;
+            }
+        }
+        elsif ($ch == 91) { $depth++; }  # [
+        elsif ($ch == 93) { if ($depth > 0) { $depth--; } }  # ]
+        elsif ($ch == 123) { $depth++; }  # { (hash literal or block — track as nesting)
+        elsif ($ch == 125) { if ($depth > 0) { $depth--; } }  # }
+        elsif ($ch == 59 && $depth == 0) { $insert_pos = $pos; last; }  # ;
+        $pos++;
+    }
+    if ($insert_pos < 0) { $insert_pos = $len; }
+    return substr($s, 0, $insert_pos) . ")" . substr($s, $insert_pos, $len - $insert_pos);
+}
+
+# Smarter close paren insertion for single-argument builtins like keys, values,
+# ref, length, scalar.  Finds the end of the first argument (a sigiled variable
+# optionally followed by {key} or [idx]) and inserts ) right after it.
+# $func_name is the builtin name (e.g. "keys") so we find the right ( in nested calls.
+# e.g. "scalar(keys(%seen) . "\n")" -> "scalar(keys(%seen)) . "\n""
+# Falls back to add_close_paren if no argument pattern is found.
+func add_close_paren_after_arg(str $s, str $func_name) str {
+    # Find the opening ( belonging to $func_name
+    my int $open = index($s, $func_name . "(");
+    if ($open < 0) { return add_close_paren($s); }
+    $open = $open + length($func_name);
+
+    my int $i = $open + 1;
+    my int $len = length($s);
+
+    # Skip whitespace after (
+    while ($i < $len && (substr($s, $i, 1) eq " " || substr($s, $i, 1) eq "\t")) {
+        $i++;
+    }
+
+    if ($i >= $len) { return add_close_paren($s); }
+
+    my str $c = substr($s, $i, 1);
+
+    # Expect a sigiled variable: $var, @arr, %hash, or \%hash, \@arr, \$var
+    if ($c eq "\\" && $i + 1 < $len) {
+        $i++;  # skip backslash
+        $c = substr($s, $i, 1);
+    }
+
+    if ($c ne "$" && $c ne "@" && $c ne "%") {
+        # Not a simple variable argument - fall back
+        return add_close_paren($s);
+    }
+
+    $i++;  # skip sigil
+
+    # Handle $$ref (scalar deref) - skip second sigil
+    if ($i < $len && $c eq "$" && substr($s, $i, 1) eq "$") {
+        $i++;
+    }
+
+    # Read the variable name
+    while ($i < $len && is_word_char(substr($s, $i, 1))) {
+        $i++;
+    }
+
+    # Optionally consume hash access {key}, array access [idx], and arrow chains ->member->{key}
+    my int $keep_consuming = 1;
+    while ($keep_consuming == 1 && $i < $len) {
+        $keep_consuming = 0;
+        if ($i < $len && substr($s, $i, 1) eq "{") {
+            my int $depth = 1;
+            $i++;
+            while ($i < $len && $depth > 0) {
+                my str $bc = substr($s, $i, 1);
+                if ($bc eq "{") { $depth++; }
+                if ($bc eq "}") { $depth--; }
+                $i++;
+            }
+            $keep_consuming = 1;
+        }
+        if ($i < $len && substr($s, $i, 1) eq "[") {
+            my int $depth2 = 1;
+            $i++;
+            while ($i < $len && $depth2 > 0) {
+                my str $bc2 = substr($s, $i, 1);
+                if ($bc2 eq "[") { $depth2++; }
+                if ($bc2 eq "]") { $depth2--; }
+                $i++;
+            }
+            $keep_consuming = 1;
+        }
+        # Arrow -> member or ->{key} or ->[idx] or ->method()
+        if ($i + 1 < $len && substr($s, $i, 2) eq "->") {
+            $i = $i + 2;
+            # Read member name
+            while ($i < $len && is_word_char(substr($s, $i, 1))) {
+                $i++;
+            }
+            # Consume () if method call
+            if ($i < $len && substr($s, $i, 1) eq "(") {
+                my int $depth3 = 1;
+                $i++;
+                while ($i < $len && $depth3 > 0) {
+                    my str $bc3 = substr($s, $i, 1);
+                    if ($bc3 eq "(") { $depth3++; }
+                    if ($bc3 eq ")") { $depth3--; }
+                    $i++;
+                }
+            }
+            $keep_consuming = 1;
+        }
+    }
+
+    # Insert ) at position $i
+    return substr($s, 0, $i) . ")" . substr($s, $i, $len - $i);
+}
+
+func ends_with(str $s, str $suffix) int {
+    if (length($s) < length($suffix)) { return 0; }
+    my int $start = length($s) - length($suffix);
+    if (substr($s, $start, length($suffix)) eq $suffix) { return 1; }
+    return 0;
+}
+
+# Quote a bare hash key if needed: key -> "key"
+# Returns the key with quotes if it's a bareword, unchanged if already quoted or is a variable
+# Replace all occurrences of $@ with $e in a string
+# Can't use regex for this because $ is always an anchor in POSIX regex
+func replace_dollar_at(str $s) str {
+    my str $result = $s;
+    my str $target = "$@";
+    my str $repl = "$e";
+    my int $pos = index($result, $target);
+    while ($pos >= 0) {
+        $result = substr($result, 0, $pos) . $repl . substr($result, $pos + 2, length($result) - $pos - 2);
+        $pos = index($result, $target);
+    }
+    return $result;
+}
+
+# Map Perl overload operator to wrapper method name
+func op_name_for_overload(str $op) str {
+    if ($op eq "0+" || $op eq "0+") { return "op_numify"; }
+    if ($op eq "++") { return "op_increment"; }
+    if ($op eq "--") { return "op_decrement"; }
+    if ($op eq "+") { return "op_add"; }
+    if ($op eq "-") { return "op_subtract"; }
+    if ($op eq "*") { return "op_multiply"; }
+    if ($op eq "/") { return "op_divide"; }
+    if ($op eq "%") { return "op_modulo"; }
+    if ($op eq "**") { return "op_pow"; }
+    if ($op eq "==") { return "op_num_eq"; }
+    if ($op eq "!=") { return "op_num_ne"; }
+    if ($op eq "<") { return "op_num_lt"; }
+    if ($op eq ">") { return "op_num_gt"; }
+    if ($op eq "<=") { return "op_num_le"; }
+    if ($op eq ">=") { return "op_num_ge"; }
+    if ($op eq "<=>") { return "op_num_cmp"; }
+    if ($op eq "eq") { return "op_str_eq"; }
+    if ($op eq "ne") { return "op_str_ne"; }
+    if ($op eq "lt") { return "op_str_lt"; }
+    if ($op eq "gt") { return "op_str_gt"; }
+    if ($op eq "le") { return "op_str_le"; }
+    if ($op eq "ge") { return "op_str_ge"; }
+    if ($op eq "cmp") { return "op_str_cmp"; }
+    if ($op eq "bool") { return "op_bool"; }
+    if ($op eq "!") { return "op_not"; }
+    if ($op eq "neg") { return "op_negate"; }
+    if ($op eq "abs") { return "op_abs"; }
+    if ($op eq "&") { return "op_bitand"; }
+    if ($op eq "|") { return "op_bitor"; }
+    if ($op eq "^") { return "op_bitxor"; }
+    if ($op eq "~") { return "op_bitnot"; }
+    if ($op eq "<<") { return "op_lshift"; }
+    if ($op eq ">>") { return "op_rshift"; }
+    if ($op eq ".") { return "op_concat"; }
+    if ($op eq "x") { return "op_repeat"; }
+    # String conversion (two double-quotes in Perl: '""')
+    if ($op eq "\"\"") { return "op_stringify"; }
+    return "op_" . $op;
+}
+
+# Check if a Perl overload operator is unary (takes only $self)
+func is_unary_overload(str $op) int {
+    if ($op eq "++" || $op eq "--" || $op eq "0+" || $op eq "bool") { return 1; }
+    if ($op eq "!" || $op eq "neg" || $op eq "abs" || $op eq "~") { return 1; }
+    if ($op eq "\"\"") { return 1; }
+    return 0;
+}
+
+# Parse overload::import() line and generate wrapper method definitions
+# Input: the full single-line overload::import(...) call
+# Returns: array of wrapper method definition lines
+func generate_overload_wrappers(str $line) array {
+    my array @methods = ();
+
+    # Extract the arguments portion: everything between 'overload', and closing );
+    # Pattern: overload::import('overload', "op" => sub/func ..., ... );
+    # or: use overload ("op" => sub ..., ...);
+    my str $args = $line;
+
+    # Strip everything before the first operator mapping
+    # Look for first "quoted_op" => pattern
+    my int $first_op_pos = -1;
+    my int $scan_pos = 0;
+    my int $line_len = length($args);
+    while ($scan_pos < $line_len) {
+        my int $ch = char_at($args, $scan_pos);
+        # Check for double-quoted or single-quoted operator name followed by =>
+        if ($ch == 34 || $ch == 39) {
+            my str $qchar_str = substr($args, $scan_pos, 1);
+            my int $close_q = index($args, $qchar_str, $scan_pos + 1);
+            if ($close_q > $scan_pos) {
+                my str $after_q = substr($args, $close_q + 1, $line_len - $close_q - 1);
+                $after_q = replace($after_q, "^\\s+", "");
+                if (starts_with($after_q, "=>")) {
+                    $first_op_pos = $scan_pos;
+                    $scan_pos = $line_len;
+                }
+            }
+        }
+        $scan_pos++;
+    }
+
+    if ($first_op_pos < 0) {
+        return @methods;
+    }
+
+    # Now parse operator => handler pairs
+    # We look for patterns like: "op" => sub { body }, or "op" => func () void { body },
+    my str $remainder = substr($args, $first_op_pos, $line_len - $first_op_pos);
+
+    # Split on the pattern: "op" =>
+    # We process sequentially
+    my int $pos = 0;
+    my int $rem_len = length($remainder);
+
+    while ($pos < $rem_len) {
+        # Skip whitespace
+        while ($pos < $rem_len && (char_at($remainder, $pos) == 32 || char_at($remainder, $pos) == 9 || char_at($remainder, $pos) == 44)) {
+            $pos++;
+        }
+        if ($pos >= $rem_len) { last; }
+
+        # Check for closing ); or )
+        if (char_at($remainder, $pos) == 41) { last; }
+
+        # Check for "op" or 'op'
+        my int $qchar = char_at($remainder, $pos);
+        if ($qchar == 34 || $qchar == 39) {
+            # Find closing quote
+            my int $close = index($remainder, substr($remainder, $pos, 1), $pos + 1);
+            if ($close < 0) { last; }
+            my str $op = substr($remainder, $pos + 1, $close - $pos - 1);
+            $pos = $close + 1;
+
+            # Skip whitespace and =>
+            while ($pos < $rem_len && (char_at($remainder, $pos) == 32 || char_at($remainder, $pos) == 9)) {
+                $pos++;
+            }
+            if ($pos + 1 < $rem_len && substr($remainder, $pos, 2) eq "=>") {
+                $pos = $pos + 2;
+            }
+            # Skip whitespace
+            while ($pos < $rem_len && (char_at($remainder, $pos) == 32 || char_at($remainder, $pos) == 9)) {
+                $pos++;
+            }
+
+            # Now read the handler: sub { ... } or func () void { ... } or a bare value
+            if ($pos < $rem_len) {
+                my int $hch = char_at($remainder, $pos);
+
+                # Check for sub/func keyword
+                my int $is_sub = 0;
+                if ($pos + 3 < $rem_len && substr($remainder, $pos, 4) eq "sub ") {
+                    $is_sub = 1;
+                }
+                if ($pos + 4 < $rem_len && substr($remainder, $pos, 5) eq "func ") {
+                    $is_sub = 1;
+                }
+
+                if ($is_sub == 1) {
+                    # Find opening { and matching closing }
+                    my int $open_b = index($remainder, "{", $pos);
+                    if ($open_b >= 0) {
+                        my int $depth = 1;
+                        my int $bi = $open_b + 1;
+                        while ($bi < $rem_len && $depth > 0) {
+                            my int $bc = char_at($remainder, $bi);
+                            if ($bc == 123) { $depth++; }
+                            if ($bc == 125) { $depth--; }
+                            if ($bc == 34) {
+                                # Skip string
+                                $bi++;
+                                while ($bi < $rem_len && char_at($remainder, $bi) != 34) {
+                                    if (char_at($remainder, $bi) == 92) { $bi++; }
+                                    $bi++;
+                                }
+                            }
+                            $bi++;
+                        }
+                        my str $body = substr($remainder, $open_b + 1, $bi - $open_b - 2);
+                        $body = replace($body, "^\\s+", "");
+                        $body = replace($body, "\\s+$", "");
+                        $pos = $bi;
+
+                        # Skip fallback
+                        if ($op eq "fallback") { next; }
+
+                        # Generate wrapper method
+                        my str $method_name = op_name_for_overload($op);
+                        my str $method = "";
+
+                        if (is_unary_overload($op) == 1) {
+                            $method = "func " . $method_name . "(scalar $self) scalar {  # REVIEW: overload \"" . $op . "\" wrapper - original body: " . $body;
+                            # Generate return with body hint
+                            $method = $method . "\n    return $$self;  # REVIEW: adapt from Perl body";
+                            $method = $method . "\n}";
+                        } else {
+                            $method = "func " . $method_name . "(scalar $self, scalar $other) scalar {  # REVIEW: overload \"" . $op . "\" wrapper - original body: " . $body;
+                            $method = $method . "\n    return $$self;  # REVIEW: adapt from Perl body";
+                            $method = $method . "\n}";
+                        }
+                        push(@methods, $method);
+                    } else {
+                        # No opening brace - skip to next comma
+                        my int $next_comma = index($remainder, ",", $pos);
+                        if ($next_comma >= 0) { $pos = $next_comma + 1; } else { last; }
+                    }
+                } else {
+                    # Not a sub - skip to next comma (e.g. fallback => 1)
+                    if ($op ne "fallback") {
+                        # Could be a code ref like \&method_name
+                        my str $val_end = "";
+                        my int $next_comma = index($remainder, ",", $pos);
+                        if ($next_comma >= 0) {
+                            $val_end = substr($remainder, $pos, $next_comma - $pos);
+                            $pos = $next_comma + 1;
+                        } else {
+                            my int $next_paren = index($remainder, ")", $pos);
+                            if ($next_paren >= 0) {
+                                $val_end = substr($remainder, $pos, $next_paren - $pos);
+                                $pos = $next_paren;
+                            } else {
+                                last;
+                            }
+                        }
+                        $val_end = replace($val_end, "^\\s+", "");
+                        $val_end = replace($val_end, "\\s+$", "");
+                        # Generate stub if it references a method
+                        if (starts_with($val_end, "\\&")) {
+                            my str $ref_name = substr($val_end, 2, length($val_end) - 2);
+                            my str $method_name = op_name_for_overload($op);
+                            push(@methods, "# " . $method_name . " -> delegates to " . $ref_name . "()  # REVIEW: overload \"" . $op . "\"");
+                        }
+                    } else {
+                        # Skip fallback value
+                        my int $next_comma = index($remainder, ",", $pos);
+                        if ($next_comma >= 0) { $pos = $next_comma + 1; } else { last; }
+                    }
+                }
+            }
+        } else {
+            # Bare word like "fallback" without quotes
+            my int $word_start = $pos;
+            while ($pos < $rem_len && char_at($remainder, $pos) != 32 && char_at($remainder, $pos) != 9 && char_at($remainder, $pos) != 44 && char_at($remainder, $pos) != 61) {
+                $pos++;
+            }
+            my str $bareword = substr($remainder, $word_start, $pos - $word_start);
+            # Skip => and value
+            while ($pos < $rem_len && (char_at($remainder, $pos) == 32 || char_at($remainder, $pos) == 9)) { $pos++; }
+            if ($pos + 1 < $rem_len && substr($remainder, $pos, 2) eq "=>") { $pos = $pos + 2; }
+            # Skip value until next comma or closing paren
+            my int $next_comma = index($remainder, ",", $pos);
+            if ($next_comma >= 0) { $pos = $next_comma + 1; } else { last; }
+        }
+    }
+
+    return @methods;
+}
+
+func quote_bare_key(str $key) str {
+    my str $k = trim_str($key);
+    if ($k eq "") { return $key; }
+    # Already quoted
+    if (starts_with($k, "\"") || starts_with($k, "'")) { return $key; }
+    # Variable reference - leave alone
+    if (starts_with($k, "$")) { return $key; }
+    # Number - leave alone
+    if (match($k, "^-?[0-9]")) { return $key; }
+    # Bareword - quote it
+    if (match($k, "^[A-Za-z_][A-Za-z0-9_]*$")) {
+        return "\"" . $k . "\"";
+    }
+    return $key;
+}
+
+# ============================================================
+# XS Conversion Support
+# ============================================================

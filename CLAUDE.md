@@ -372,12 +372,11 @@ Run leak tests with: `./t/leak_tests/run_leak_tests.sh` (117 tests, incl. `test_
 **When making changes to Strada, ALWAYS update these documentation files:**
 
 1. **`CLAUDE.md`** (this file)
-2. **`CLAUDE_REFERENCE.md`** - Syntax, built-ins, gotchas
-3. **`CLAUDE_DEEP_DIVE.md`** - AST nodes, code gen patterns
+2. **`CLAUDE_DEEP_DIVE.md`** - AST nodes, code gen patterns
 
 ## Key Documentation
 
-- **`CLAUDE_REFERENCE.md`** - Comprehensive reference (read this first!)
+- **`CLAUDE_DEEP_DIVE.md`** - AST nodes, codegen patterns, runtime internals (read this first!)
 - `docs/LANGUAGE_GUIDE.md` - Language tutorial
 - `docs/QUICK_REFERENCE.md` - Syntax cheat sheet
 - `docs/DEBUGGING.md` - Using GDB with Strada programs
@@ -387,14 +386,14 @@ Run leak tests with: `./t/leak_tests/run_leak_tests.sh` (117 tests, incl. `test_
 ## Conversion Tools
 
 - **perl2strada** — Converts Perl scripts/modules to Strada source. `./perl2strada input.pl output.strada`. Test suite: 266 tests. For running Perl directly, use Perla instead.
-- **xs2strada** — Converts Perl XS modules to Strada `__C__` blocks. `./xs2strada input.xs output.strada`
+- **xs2strada** — Converts Perl XS modules to Strada `__C__` blocks. (Not currently in this tree.)
 - **strada2perl** — Converts Strada to Perl 5. `./strada2perl input.strada output.pl`
 
 Build tools with: `make tools` or `./strada tools/<tool>.strada`
 
 ## Perla (Perl 5 Compiler)
 
-Perla is a full Perl 5 compiler built on Strada. It converts Perl 5 source to native executables (via C) or runs it through the Strada VM. Located in `perla/`.
+Perla is a full Perl 5 compiler built on Strada. It converts Perl 5 source to native executables (via C) or runs it through the Strada VM. **Note: Perla lives in a separate repository — the `perla/` directory described below is NOT in this tree** (only its runtime support stubs `runtime/perla_dbi.c` / `runtime/perla_stash.c` exist here, untracked). The section is kept as architecture reference.
 
 ```bash
 # Build Perla
@@ -578,7 +577,7 @@ extern func Other::emit(scalar $cg, str $s) void;
 extern func Other::make_str(int $n) str;
 ```
 
-These register in the codegen symbol table under the mangled C symbol (`Other_emit`, `Other_make_str`) so `needs_temp_cleanup` recognizes owned returns and call sites use the ordinary Strada calling convention (no raw-C-type conversion). Use this instead of `__C__ extern` for cross-module Strada calls. See `CLAUDE_REFERENCE.md` for full rules.
+These register in the codegen symbol table under the mangled C symbol (`Other_emit`, `Other_make_str`) so `needs_temp_cleanup` recognizes owned returns and call sites use the ordinary Strada calling convention (no raw-C-type conversion). Use this instead of `__C__ extern` for cross-module Strada calls.
 
 ### Exception Handling
 
@@ -715,7 +714,7 @@ my array @range = @data[0..5];
 
 ### File I/O
 
-File handles are reference-counted `scalar` values, auto-closed on scope exit. See `CLAUDE_REFERENCE.md` for full details.
+File handles are reference-counted `scalar` values, auto-closed on scope exit. See `docs/QUICK_REFERENCE.md` for full details.
 
 ```strada
 my scalar $fh = core::open("file.txt", "r");  # Modes: "r","w","a","rb","<",">",">>"
@@ -727,7 +726,7 @@ my str $content = core::slurp("file.txt");     # Read entire file
 core::spew("file.txt", $content);              # Write entire file
 my str $output = core::qx("ls -la");           # Capture command output
 
-# In-memory I/O, seek/tell/eof/flush, select(), pipe I/O — see CLAUDE_REFERENCE.md
+# In-memory I/O, seek/tell/eof/flush, select(), pipe I/O — see docs/QUICK_REFERENCE.md
 # core::autoflush($fh, 1)   — unbuffered writes on $fh (perl `$|=1` equivalent)
 ```
 

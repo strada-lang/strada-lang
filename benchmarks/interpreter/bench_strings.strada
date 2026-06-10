@@ -1,0 +1,18 @@
+package main;
+func run() void {
+    my str $s = "";
+    my int $i = 0;
+    while ($i < 10000) {
+        $s .= "hello";
+        $i++;
+    }
+    say("concat len: " . length($s));
+    my int $total_parts = 0;
+    my int $j = 0;
+    while ($j < 1000) {
+        my array @parts = split(",", "a,b,c,d,e,f,g,h");
+        $total_parts += scalar(@parts);
+        $j++;
+    }
+    say("split parts: " . $total_parts);
+}

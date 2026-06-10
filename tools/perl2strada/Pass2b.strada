@@ -1,0 +1,591 @@
+# perl2strada - Pass2b
+# Pass 2b: Multi-line block conversions (eval -> try/catch)
+
+# ============================================================
+# Pass 2b: Multi-line block conversions (eval -> try/catch)
+# ============================================================
+
+# Convert eval { ... }; if ($@) { ... } patterns to try/catch
+# Also handles: eval { ... }; $@ and ... or die patterns
+func pass2b_eval_to_try(array @lines) array {
+    my array @out = ();
+    my int $i = 0;
+    my int $num_lines = scalar(@lines);
+
+    while ($i < $num_lines) {
+        my str $line = $lines[$i];
+        my str $trimmed = trim_str($line);
+        my str $indent = get_indent($line);
+
+        # Detect "eval {" opening
+        if (match($trimmed, "^eval\\s*\\{") || match($trimmed, "=\\s*eval\\s*\\{")) {
+            # Check if this is eval { ... } on a single line
+            if (match($trimmed, "eval\\s*\\{.*\\}")) {
+                # Detect eval-as-expression: my $var = eval { ... };
+                my str $sl_assign_var = "";
+                my str $sl_assign_prefix = "";
+                if (match($trimmed, "=\\s*eval\\s*\\{")) {
+                    my array @sla_cap = capture($trimmed, "^((?:my\\s+(?:scalar\\s+)?)?\\$[A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*eval");
+                    if (scalar(@sla_cap) > 1) {
+                        $sl_assign_prefix = $sla_cap[1];
+                        # Extract just the variable name
+                        my array @slv_cap = capture($sl_assign_prefix, "(\\$[A-Za-z_][A-Za-z0-9_]*)$");
+                        if (scalar(@slv_cap) > 1) {
+                            $sl_assign_var = $slv_cap[1];
+                        }
+                    }
+                }
+                # Single-line eval { ... };
+                # Use brace counting to find matching } for eval {
+                my int $ev_pos = index($trimmed, "eval");
+                # Find the opening { after eval
+                my int $ev_open = index($trimmed, "{", $ev_pos + 4);
+                my str $eval_body = "";
+                my str $eval_after = "";
+                if ($ev_open >= 0) {
+                    my int $ev_depth = 1;
+                    my int $ev_ci = $ev_open + 1;
+                    my int $ev_len = length($trimmed);
+                    while ($ev_ci < $ev_len && $ev_depth > 0) {
+                        my str $ev_ch = substr($trimmed, $ev_ci, 1);
+                        if ($ev_ch eq "{") { $ev_depth++; }
+                        if ($ev_ch eq "}") { $ev_depth--; }
+                        $ev_ci++;
+                    }
+                    # ev_ci is now just past the matching }
+                    $eval_body = trim_str(substr($trimmed, $ev_open + 1, $ev_ci - $ev_open - 2));
+                    $eval_after = trim_str(substr($trimmed, $ev_ci));
+                } else {
+                    $eval_body = $trimmed;
+                    $eval_body =~ s/^.*eval\s*\{//;
+                }
+
+                # Check for ternary: eval { } ? true : false -> try/catch with flag
+                if (match($eval_after, "^\\?")) {
+                    my array @tern_cap = capture($eval_after, "^\\?\\s*(.+)\\s*:\\s*(.+)$");
+                    if (scalar(@tern_cap) > 2) {
+                        my str $tern_true = trim_str($tern_cap[1]);
+                        my str $tern_false = trim_str($tern_cap[2]);
+                        # Remove trailing semicolon from false branch
+                        if (ends_with($tern_false, ";")) {
+                            $tern_false = substr($tern_false, 0, length($tern_false) - 1);
+                        }
+                        # Check if there's an assignment prefix: my $var = eval { ... } ? ...
+                        my array @tern_asgn = capture($trimmed, "^(my\\s+(?:scalar\\s+)?)?(.+?)\\s*=\\s*eval\\s*\\{");
+                        if (scalar(@tern_asgn) > 2 && length(trim_str($tern_asgn[2])) > 0) {
+                            my str $tern_decl = "";
+                            if (scalar(@tern_asgn) > 1 && length(trim_str($tern_asgn[1])) > 0) {
+                                $tern_decl = trim_str($tern_asgn[1]) . " ";
+                            }
+                            my str $tern_var = trim_str($tern_asgn[2]);
+                            push(@out, $indent . "my int $_eval_ok = 0;");
+                            push(@out, $indent . "try { " . $eval_body . " $_eval_ok = 1; } catch ($e) { }");
+                            push(@out, $indent . $tern_decl . $tern_var . " = ($_eval_ok) ? " . $tern_true . " : " . $tern_false . ";");
+                        } else {
+                            push(@out, $indent . "my int $_eval_ok = 0;");
+                            push(@out, $indent . "try { " . $eval_body . " $_eval_ok = 1; } catch ($e) { }");
+                            push(@out, $indent . "if ($_eval_ok) { " . $tern_true . " } else { " . $tern_false . " }");
+                        }
+                    } else {
+                        push(@out, $indent . $trimmed . "  # REVIEW: eval {} ternary — convert to try/catch with success flag");
+                    }
+                    $i++;
+                    next;
+                }
+
+                # Handle "eval { ... } or do { ... }" pattern
+                if (match($eval_after, "^or\\s+do\\s*\\{")) {
+                    my array @ordo_cap = capture($eval_after, "^or\\s+do\\s*\\{(.*)\\}\\s*;?\\s*$");
+                    if (scalar(@ordo_cap) > 1) {
+                        # Remove trailing "1;" from eval body (common pattern)
+                        $eval_body =~ s/\s*1\s*;\s*$//;
+                        $eval_body = trim_str($eval_body);
+                        my str $or_do_body = trim_str($ordo_cap[1]);
+                        $or_do_body = replace_dollar_at($or_do_body);
+                        push(@out, $indent . "try {");
+                        if ($eval_body ne "") {
+                            push(@out, $indent . "    " . $eval_body);
+                        }
+                        push(@out, $indent . "} catch ($e) {");
+                        if ($or_do_body ne "") {
+                            push(@out, $indent . "    " . $or_do_body);
+                        }
+                        push(@out, $indent . "}");
+                        $i++;
+                        next;
+                    }
+                }
+                # Also handle "eval { ... } or die ..." pattern
+                if (match($eval_after, "^or\\s+die")) {
+                    my str $die_msg = $eval_after;
+                    $die_msg = replace($die_msg, "^or\\s+die\\s*", "");
+                    $die_msg =~ s/;\s*$//;
+                    $die_msg = trim_str($die_msg);
+                    # Remove trailing "1;" from eval body
+                    $eval_body =~ s/\s*1\s*;\s*$//;
+                    $eval_body = trim_str($eval_body);
+                    push(@out, $indent . "try {");
+                    if ($eval_body ne "") {
+                        push(@out, $indent . "    " . $eval_body);
+                    }
+                    push(@out, $indent . "} catch ($e) {");
+                    if ($die_msg ne "") {
+                        push(@out, $indent . "    die(" . $die_msg . ");");
+                    } else {
+                        push(@out, $indent . "    die($e);");
+                    }
+                    push(@out, $indent . "}");
+                    $i++;
+                    next;
+                }
+                # Strip trailing semicolon from eval body
+                $eval_body =~ s/;\s*$//;
+                $eval_body = trim_str($eval_body);
+
+                # Check next line(s) for if ($@)
+                my int $peek_sl = $i + 1;
+                while ($peek_sl < $num_lines && trim_str($lines[$peek_sl]) eq "") {
+                    $peek_sl++;
+                }
+                if ($peek_sl < $num_lines && match(trim_str($lines[$peek_sl]), "^if\\s*\\(\\$@")) {
+                    my str $if_line = trim_str($lines[$peek_sl]);
+                    push(@out, $indent . "try {");
+                    if ($eval_body ne "") {
+                        push(@out, $indent . "    " . $eval_body);
+                    }
+
+                    # Check if single-line: if ($@) { body }
+                    if (match($if_line, "\\{.*\\}\\s*$")) {
+                        my str $cb = $if_line;
+                        $cb = replace($cb, "^if\\s*\\(\\$@\\)\\s*\\{", "");
+                        $cb =~ s/\}\s*$//;
+                        $cb = trim_str($cb);
+                        $cb = replace_dollar_at($cb);
+                        push(@out, $indent . "} catch ($e) {");
+                        if ($cb ne "") {
+                            push(@out, $indent . "    " . $cb);
+                        }
+                        push(@out, $indent . "}");
+                        $i = $peek_sl + 1;
+                    } else {
+                        # Multi-line if ($@) { ... }
+                        push(@out, $indent . "} catch ($e) {");
+                        $i = $peek_sl + 1;
+                        my int $cd = 0;
+                        my int $cli = 0;
+                        my int $cll = length($if_line);
+                        while ($cli < $cll) {
+                            my str $cc = substr($if_line, $cli, 1);
+                            if ($cc eq "{") { $cd++; }
+                            if ($cc eq "}") { $cd--; }
+                            $cli++;
+                        }
+                        while ($i < $num_lines && $cd > 0) {
+                            my str $cbl = $lines[$i];
+                            my str $cbt = trim_str($cbl);
+                            my int $cbi = 0;
+                            my int $cblen = length($cbt);
+                            while ($cbi < $cblen) {
+                                my str $cbc = substr($cbt, $cbi, 1);
+                                if ($cbc eq "{") { $cd++; }
+                                if ($cbc eq "}") { $cd--; }
+                                $cbi++;
+                            }
+                            $cbl = replace_dollar_at($cbl);
+                            push(@out, $cbl);
+                            $i++;
+                        }
+                    }
+                    next;
+                }
+
+                # Check for: my $err = $@; if ($err) { ... } pattern
+                if ($peek_sl < $num_lines && match(trim_str($lines[$peek_sl]), "^my\\s+.*=\\s*\\$@")) {
+                    my str $err_line = trim_str($lines[$peek_sl]);
+                    # Extract error variable name
+                    my array @err_cap = capture($err_line, "my\\s+\\S*\\s*\\$([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*\\$@");
+                    if (scalar(@err_cap) > 1) {
+                        my str $err_var = $err_cap[1];
+                        # Look for if ($err_var) on next non-empty line
+                        my int $peek_if = $peek_sl + 1;
+                        while ($peek_if < $num_lines && trim_str($lines[$peek_if]) eq "") {
+                            $peek_if++;
+                        }
+                        if ($peek_if < $num_lines && match(trim_str($lines[$peek_if]), "^if\\s*\\(\\$" . $err_var . "\\b")) {
+                            my str $if_line2 = trim_str($lines[$peek_if]);
+                            push(@out, $indent . "try {");
+                            if ($eval_body ne "") {
+                                push(@out, $indent . "    " . $eval_body);
+                            }
+                            push(@out, $indent . "} catch ($" . $err_var . ") {");
+                            # Check if single-line
+                            if (match($if_line2, "\\{.*\\}\\s*$")) {
+                                my str $cb2 = $if_line2;
+                                $cb2 = replace($cb2, "^if\\s*\\(\\$" . $err_var . "\\)\\s*\\{", "");
+                                $cb2 =~ s/\}\s*$//;
+                                $cb2 = trim_str($cb2);
+                                push(@out, $indent . "    " . $cb2);
+                                push(@out, $indent . "}");
+                                $i = $peek_if + 1;
+                            } else {
+                                # Multi-line if block
+                                $i = $peek_if + 1;
+                                my int $cd2 = 0;
+                                my int $cli2 = 0;
+                                my int $cll2 = length($if_line2);
+                                while ($cli2 < $cll2) {
+                                    my str $cc2 = substr($if_line2, $cli2, 1);
+                                    if ($cc2 eq "{") { $cd2++; }
+                                    if ($cc2 eq "}") { $cd2--; }
+                                    $cli2++;
+                                }
+                                while ($i < $num_lines && $cd2 > 0) {
+                                    my str $cbl2 = $lines[$i];
+                                    my str $cbt2 = trim_str($cbl2);
+                                    my int $cbi2 = 0;
+                                    my int $cblen2 = length($cbt2);
+                                    while ($cbi2 < $cblen2) {
+                                        my str $cbc2 = substr($cbt2, $cbi2, 1);
+                                        if ($cbc2 eq "{") { $cd2++; }
+                                        if ($cbc2 eq "}") { $cd2--; }
+                                        $cbi2++;
+                                    }
+                                    push(@out, $cbl2);
+                                    $i++;
+                                }
+                            }
+                            next;
+                        }
+                    }
+                }
+
+                # No if ($@) follows - just wrap in try with empty catch
+                if (length($sl_assign_var) > 0) {
+                    # eval-as-expression: my $x = eval { body };
+                    # Emit: my scalar $x = undef; try { $x = body; } catch ($e) { }
+                    if (match($sl_assign_prefix, "^my\\s+")) {
+                        push(@out, $indent . "my scalar " . $sl_assign_var . " = undef;");
+                    }
+                    push(@out, $indent . "try {");
+                    if ($eval_body ne "") {
+                        push(@out, $indent . "    " . $sl_assign_var . " = " . $eval_body);
+                    }
+                    push(@out, $indent . "} catch ($e) {");
+                    push(@out, $indent . "    # eval failed - " . $sl_assign_var . " remains undef");
+                    push(@out, $indent . "}");
+                } else {
+                    push(@out, $indent . "try {");
+                    if ($eval_body ne "") {
+                        push(@out, $indent . "    " . $eval_body);
+                    }
+                    push(@out, $indent . "} catch ($e) {");
+                    push(@out, $indent . "    # eval failed");
+                    push(@out, $indent . "}");
+                }
+                $i++;
+                next;
+            }
+
+            # Multi-line eval { ... }
+            # Collect lines until closing }; at proper depth
+            my array @eval_lines = ();
+            my int $brace_depth = 0;
+            my int $is_assignment = 0;
+            my str $assign_var = "";
+
+            # Check for $result = eval { pattern
+            my str $ml_assign_prefix = "";
+            if (match($trimmed, "=\\s*eval\\s*\\{")) {
+                $is_assignment = 1;
+                my array @acap = capture($trimmed, "^((?:my\\s+(?:scalar\\s+)?)?\\$[A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*eval");
+                if (scalar(@acap) > 1) {
+                    $ml_assign_prefix = $acap[1];
+                    my array @acap2 = capture($ml_assign_prefix, "(\\$[A-Za-z_][A-Za-z0-9_]*)$");
+                    if (scalar(@acap2) > 1) {
+                        $assign_var = $acap2[1];
+                    }
+                }
+            }
+
+            # Count braces on the eval line
+            my int $ci = 0;
+            my int $clen = length($trimmed);
+            while ($ci < $clen) {
+                my str $ch = substr($trimmed, $ci, 1);
+                if ($ch eq "{") { $brace_depth++; }
+                if ($ch eq "}") { $brace_depth--; }
+                $ci++;
+            }
+
+            # For eval-as-expression, emit variable declaration before try
+            if ($is_assignment == 1 && length($assign_var) > 0) {
+                if (match($ml_assign_prefix, "^my\\s+")) {
+                    push(@out, $indent . "my scalar " . $assign_var . " = undef;");
+                }
+            }
+            push(@out, $indent . "try {");
+            $i++;
+
+            # Collect body lines
+            while ($i < $num_lines && $brace_depth > 0) {
+                my str $bl = $lines[$i];
+                my str $bt = trim_str($bl);
+
+                my int $bi2 = 0;
+                my int $blen2 = length($bt);
+                my int $eval_hit_zero = 0;
+                while ($bi2 < $blen2) {
+                    my str $bch = substr($bt, $bi2, 1);
+                    if ($bch eq "{") { $brace_depth++; }
+                    if ($bch eq "}") { $brace_depth--; }
+                    if ($brace_depth == 0 && $eval_hit_zero == 0) { $eval_hit_zero = 1; }
+                    $bi2++;
+                }
+
+                if ($eval_hit_zero == 1) {
+                    # This is the closing }; line - don't add it
+                    # But look ahead for if ($@) pattern
+                    $i++;
+
+                    # Skip blank lines between eval close and if ($@)
+                    my int $peek = $i;
+                    while ($peek < $num_lines && trim_str($lines[$peek]) eq "") {
+                        $peek++;
+                    }
+
+                    # Check for "} or do {" on the closing brace line itself
+                    if (match($bt, "\\}\\s+or\\s+do\\s*\\{")) {
+                        push(@out, $indent . "} catch ($e) {");
+                        # The close brace line had "} or do {" - the do block is now open at depth 1
+                        my int $do_depth = 1;
+                        while ($i < $num_lines && $do_depth > 0) {
+                            my str $dbl = $lines[$i];
+                            my str $dbt = trim_str($dbl);
+                            my int $dbi = 0;
+                            my int $dblen = length($dbt);
+                            while ($dbi < $dblen) {
+                                my str $dbc = substr($dbt, $dbi, 1);
+                                if ($dbc eq "{") { $do_depth++; }
+                                if ($dbc eq "}") { $do_depth--; }
+                                $dbi++;
+                            }
+                            if ($do_depth > 0) {
+                                $dbl = replace_dollar_at($dbl);
+                                push(@out, $dbl);
+                            }
+                            $i++;
+                        }
+                        push(@out, $indent . "}");
+                        $brace_depth = 0;
+                        next;
+                    }
+                    # Check for "or die" on the closing brace line
+                    if (match($bt, "\\}\\s+or\\s+die")) {
+                        my array @mldie = capture($bt, "\\}\\s+or\\s+die\\s*(.*)$");
+                        my str $die_arg = "";
+                        if (scalar(@mldie) > 1) { $die_arg = trim_str($mldie[1]); }
+                        $die_arg =~ s/;\s*$//;
+                        $die_arg = replace_dollar_at($die_arg);
+                        push(@out, $indent . "} catch ($e) {");
+                        if (length($die_arg) > 0) {
+                            push(@out, $indent . "    die(" . $die_arg . ");");
+                        } else {
+                            push(@out, $indent . "    die($e);");
+                        }
+                        push(@out, $indent . "}");
+                        $brace_depth = 0;
+                        next;
+                    }
+                    if ($peek < $num_lines && match(trim_str($lines[$peek]), "^or\\s+do\\s*\\{")) {
+                        # "or do {" on next line after eval close
+                        push(@out, $indent . "} catch ($e) {");
+                        $i = $peek + 1;
+                        my int $ordo_depth = 1;
+                        while ($i < $num_lines && $ordo_depth > 0) {
+                            my str $odl = $lines[$i];
+                            my str $odt = trim_str($odl);
+                            my int $odi = 0;
+                            my int $odlen = length($odt);
+                            while ($odi < $odlen) {
+                                my str $odc = substr($odt, $odi, 1);
+                                if ($odc eq "{") { $ordo_depth++; }
+                                if ($odc eq "}") { $ordo_depth--; }
+                                $odi++;
+                            }
+                            if ($ordo_depth > 0) {
+                                $odl = replace_dollar_at($odl);
+                                push(@out, $odl);
+                            }
+                            $i++;
+                        }
+                        push(@out, $indent . "}");
+                        next;
+                    }
+                    if ($peek < $num_lines && match(trim_str($lines[$peek]), "^or\\s+die")) {
+                        my str $ordie_line = trim_str($lines[$peek]);
+                        my array @mldie2 = capture($ordie_line, "^or\\s+die\\s*(.*)$");
+                        my str $die_a2 = "";
+                        if (scalar(@mldie2) > 1) { $die_a2 = trim_str($mldie2[1]); }
+                        $die_a2 =~ s/;\s*$//;
+                        $die_a2 = replace_dollar_at($die_a2);
+                        push(@out, $indent . "} catch ($e) {");
+                        if (length($die_a2) > 0) {
+                            push(@out, $indent . "    die(" . $die_a2 . ");");
+                        } else {
+                            push(@out, $indent . "    die($e);");
+                        }
+                        push(@out, $indent . "}");
+                        $i = $peek + 1;
+                        next;
+                    }
+                    if ($peek < $num_lines && match(trim_str($lines[$peek]), "^if\\s*\\(\\$@")) {
+                        # Found if ($@) - start catch block
+                        my str $catch_trimmed = trim_str($lines[$peek]);
+
+                        # Extract body or just emit the catch header
+                        if (match($catch_trimmed, "\\{.*\\}")) {
+                            # Single-line if ($@) { ... }
+                            my str $catch_body = $catch_trimmed;
+                            $catch_body =~ s/^if\s*\(\$@\)\s*\{//;
+                            $catch_body =~ s/\}\s*$//;
+                            $catch_body = trim_str($catch_body);
+                            push(@out, $indent . "} catch ($e) {");
+                            # Replace $@ references with $e in the body
+                            $catch_body = replace_dollar_at($catch_body);
+                            push(@out, $indent . "    " . $catch_body);
+                            push(@out, $indent . "}");
+                            $i = $peek + 1;
+                        } else {
+                            # Multi-line catch block
+                            push(@out, $indent . "} catch ($e) {  # was: if ($@)");
+                            $i = $peek + 1;
+
+                            # Collect catch body
+                            my int $catch_depth = 0;
+                            my int $ci2 = 0;
+                            my int $ct_len = length($catch_trimmed);
+                            while ($ci2 < $ct_len) {
+                                my str $cch = substr($catch_trimmed, $ci2, 1);
+                                if ($cch eq "{") { $catch_depth++; }
+                                if ($cch eq "}") { $catch_depth--; }
+                                $ci2++;
+                            }
+
+                            while ($i < $num_lines && $catch_depth > 0) {
+                                my str $cl = $lines[$i];
+                                my str $ct2 = trim_str($cl);
+
+                                my int $ci3 = 0;
+                                my int $ct2_len = length($ct2);
+                                while ($ci3 < $ct2_len) {
+                                    my str $cch2 = substr($ct2, $ci3, 1);
+                                    if ($cch2 eq "{") { $catch_depth++; }
+                                    if ($cch2 eq "}") { $catch_depth--; }
+                                    $ci3++;
+                                }
+
+                                # Replace $@ with $e in catch body
+                                $cl = replace_dollar_at($cl);
+                                push(@out, $cl);
+                                $i++;
+                            }
+                        }
+                    } else {
+                        # No if ($@) - add empty catch
+                        push(@out, $indent . "} catch ($e) {");
+                        if ($is_assignment == 1 && length($assign_var) > 0) {
+                            push(@out, $indent . "    # eval failed - " . $assign_var . " remains undef");
+                        } else {
+                            push(@out, $indent . "    # eval error in $e");
+                        }
+                        push(@out, $indent . "}");
+                    }
+                } else {
+                    push(@out, $bl);
+                    $i++;
+                }
+            }
+            next;
+        }
+
+        push(@out, $line);
+        $i++;
+    }
+
+    # Post-process: inside catch ($e) { } blocks, replace bare $_ with $e
+    # This handles Try::Tiny style where $_ is the exception variable
+    my array @out2 = ();
+    my int $in_catch = 0;
+    my int $catch_depth = 0;
+    my str $catch_var = "$" . "e";
+    my int $j = 0;
+    my int $out_len = scalar(@out);
+    while ($j < $out_len) {
+        my str $oline = $out[$j];
+        my str $otrim = trim_str($oline);
+        if (match($otrim, "catch\\s*\\(\\$[A-Za-z_][A-Za-z0-9_]*\\)\\s*\\{") || match($otrim, "\\}\\s*catch\\s*\\{") || match($otrim, "^\\s*catch\\s*\\{")) {
+            # Extract catch variable name if present
+            if (match($otrim, "catch\\s*\\(\\$[A-Za-z_]")) {
+                my array @cv_cap = capture($otrim, "catch\\s*\\(\\$([A-Za-z_][A-Za-z0-9_]*)\\)\\s*\\{");
+                if (scalar(@cv_cap) > 1) {
+                    $catch_var = "$" . $cv_cap[1];
+                }
+            } else {
+                # Try::Tiny bare catch { } - will use $e
+                $catch_var = "$" . "e";
+            }
+            $in_catch = 1;
+            $catch_depth = 1;
+            push(@out2, $oline);
+            $j++;
+            next;
+        }
+        if ($in_catch == 1) {
+            my int $ck = 0;
+            my int $olen = length($otrim);
+            while ($ck < $olen) {
+                my str $och = substr($otrim, $ck, 1);
+                if ($och eq "{") { $catch_depth++; }
+                if ($och eq "}") { $catch_depth--; }
+                $ck++;
+            }
+            if ($catch_depth <= 0) {
+                $in_catch = 0;
+            } else {
+                # Replace bare $_ with catch var (but not $_[0], $_{key}, $_->)
+                my str $dol_us = "$" . "_";
+                if (index($oline, $dol_us) >= 0) {
+                    # Check it's bare $_ (not $_[, $_{, $_->)
+                    my int $dpos = index($oline, $dol_us);
+                    while ($dpos >= 0) {
+                        my int $after_pos = $dpos + 2;
+                        my int $is_bare = 1;
+                        if ($after_pos < length($oline)) {
+                            my str $next_ch = substr($oline, $after_pos, 1);
+                            if ($next_ch eq "[" || $next_ch eq "{" || $next_ch eq "-") {
+                                $is_bare = 0;
+                            }
+                            if (match($next_ch, "[A-Za-z0-9_]")) {
+                                $is_bare = 0;
+                            }
+                        }
+                        if ($is_bare == 1) {
+                            $oline = substr($oline, 0, $dpos) . $catch_var . substr($oline, $after_pos, length($oline) - $after_pos);
+                            $dpos = index($oline, $dol_us, $dpos + length($catch_var));
+                        } else {
+                            $dpos = index($oline, $dol_us, $dpos + 2);
+                        }
+                    }
+                }
+            }
+        }
+        push(@out2, $oline);
+        $j++;
+    }
+
+    return @out2;
+}
+
+# ============================================================
+# Pass 2c: Remove POD blocks and handle DESTROY/AUTOLOAD/SUPER
+# ============================================================

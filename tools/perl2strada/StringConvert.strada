@@ -1,0 +1,487 @@
+# perl2strada - StringConvert
+# String conversion utilities: interpolation, qw, postfix conditionals, hash key quoting
+
+# ============================================================
+# Pass 3: Line-by-line syntax conversion
+# ============================================================
+
+# Convert Perl string interpolation to Strada concatenation
+# "Hello $name, you are $age years old" -> "Hello " . $name . ", you are " . $age . " years old"
+func convert_interpolation(str $s) str {
+    # Only process double-quoted strings
+    # Find double-quoted regions and convert variables within them
+    my str $result = "";
+    my int $i = 0;
+    my int $len = length($s);
+    my int $in_dquote = 0;
+    my str $current = "";
+
+    while ($i < $len) {
+        my str $c = substr($s, $i, 1);
+
+        if ($c eq "\\" && $i + 1 < $len) {
+            # Escaped character - pass through
+            $current = $current . $c . substr($s, $i + 1, 1);
+            $i = $i + 2;
+            next;
+        }
+
+        if ($c eq "\"" && $in_dquote == 0) {
+            $result = $result . $current;
+            $current = "\"";
+            $in_dquote = 1;
+            $i++;
+            next;
+        }
+
+        if ($c eq "\"" && $in_dquote == 1) {
+            $current = $current . "\"";
+            # Now process the quoted string for interpolation
+            my str $processed = convert_interp_in_dquote($current);
+            $result = $result . $processed;
+            $current = "";
+            $in_dquote = 0;
+            $i++;
+            next;
+        }
+
+        $current = $current . $c;
+        $i++;
+    }
+
+    $result = $result . $current;
+    return $result;
+}
+
+# Process interpolation within a double-quoted string (including the quotes)
+func convert_interp_in_dquote(str $quoted) str {
+    # Strip quotes
+    my int $len = length($quoted);
+    if ($len < 2) { return $quoted; }
+    my str $inner = substr($quoted, 1, $len - 2);
+
+    # Check if there are any variables to interpolate
+    if (!match($inner, "\\$[A-Za-z_0-9{]") && !match($inner, "@[A-Za-z_{]")) {
+        return $quoted;
+    }
+
+    # Build concatenation expression
+    my array @parts = ();
+    my str $text = "";
+    my int $i = 0;
+    my int $ilen = length($inner);
+
+    while ($i < $ilen) {
+        my str $c = substr($inner, $i, 1);
+
+        if ($c eq "\\" && $i + 1 < $ilen) {
+            $text = $text . $c . substr($inner, $i + 1, 1);
+            $i = $i + 2;
+            next;
+        }
+
+        # Variable interpolation: $name or $hash{key} or $ref->{key}
+        if ($c eq "$" && $i + 1 < $ilen && is_word_char(substr($inner, $i + 1, 1))) {
+            # Flush accumulated text
+            if ($text ne "") {
+                push(@parts, "\"" . $text . "\"");
+                $text = "";
+            }
+            # Extract variable name
+            my str $var = "$";
+            $i++;
+            while ($i < $ilen && is_word_char(substr($inner, $i, 1))) {
+                $var = $var . substr($inner, $i, 1);
+                $i++;
+            }
+            # Check for array access: $var[idx]
+            if ($i < $ilen && substr($inner, $i, 1) eq "[") {
+                my str $idx_str = "";
+                $i++;  # skip [
+                while ($i < $ilen && substr($inner, $i, 1) ne "]") {
+                    $idx_str = $idx_str . substr($inner, $i, 1);
+                    $i++;
+                }
+                if ($i < $ilen) { $i++; }  # skip ]
+                push(@parts, $var . "[" . $idx_str . "]");
+            }
+            # Check for hash access: $var{key}
+            elsif ($i < $ilen && substr($inner, $i, 1) eq "{") {
+                my str $key = "";
+                $i++;  # skip {
+                while ($i < $ilen && substr($inner, $i, 1) ne "}") {
+                    $key = $key . substr($inner, $i, 1);
+                    $i++;
+                }
+                if ($i < $ilen) { $i++; }  # skip }
+                push(@parts, $var . "{" . quote_bare_key($key) . "}");
+            }
+            # Check for arrow access: $var->{key} or $var->[idx] (with chaining)
+            elsif ($i + 1 < $ilen && substr($inner, $i, 1) eq "-" && substr($inner, $i + 1, 1) eq ">") {
+                my str $chain = $var;
+                # Loop to handle chained access: $var->{a}->{b}->[0]
+                while ($i + 1 < $ilen && substr($inner, $i, 1) eq "-" && substr($inner, $i + 1, 1) eq ">") {
+                    $i = $i + 2;  # skip ->
+                    if ($i < $ilen && substr($inner, $i, 1) eq "{") {
+                        my str $key = "";
+                        $i++;
+                        while ($i < $ilen && substr($inner, $i, 1) ne "}") {
+                            $key = $key . substr($inner, $i, 1);
+                            $i++;
+                        }
+                        if ($i < $ilen) { $i++; }
+                        $chain = $chain . "->{" . quote_bare_key($key) . "}";
+                    }
+                    elsif ($i < $ilen && substr($inner, $i, 1) eq "[") {
+                        my str $aidx = "";
+                        $i++;
+                        while ($i < $ilen && substr($inner, $i, 1) ne "]") {
+                            $aidx = $aidx . substr($inner, $i, 1);
+                            $i++;
+                        }
+                        if ($i < $ilen) { $i++; }
+                        $chain = $chain . "->[" . $aidx . "]";
+                    } else {
+                        last;
+                    }
+                }
+                push(@parts, $chain);
+            } else {
+                push(@parts, $var);
+            }
+            next;
+        }
+
+        # @{[expr]} interpolation: evaluate expression inline
+        if ($c eq "@" && $i + 1 < $ilen && substr($inner, $i + 1, 1) eq "{" && $i + 2 < $ilen && substr($inner, $i + 2, 1) eq "[") {
+            # Flush accumulated text
+            if ($text ne "") {
+                push(@parts, "\"" . $text . "\"");
+                $text = "";
+            }
+            # Skip @{[
+            $i = $i + 3;
+            my str $expr = "";
+            my int $bracket_d = 1;
+            while ($i < $ilen && $bracket_d > 0) {
+                my str $ec = substr($inner, $i, 1);
+                if ($ec eq "[") { $bracket_d++; }
+                if ($ec eq "]") { $bracket_d--; }
+                if ($bracket_d > 0) {
+                    $expr = $expr . $ec;
+                }
+                $i++;
+            }
+            # Skip closing }
+            if ($i < $ilen && substr($inner, $i, 1) eq "}") { $i++; }
+            push(@parts, "(" . trim_str($expr) . ")");
+            next;
+        }
+
+        # ${\(expr)} interpolation: scalar dereference of expression
+        if ($c eq "$" && $i + 1 < $ilen && substr($inner, $i + 1, 1) eq "{" && $i + 2 < $ilen && substr($inner, $i + 2, 1) eq "\\") {
+            # Flush accumulated text
+            if ($text ne "") {
+                push(@parts, "\"" . $text . "\"");
+                $text = "";
+            }
+            # Skip ${\
+            $i = $i + 3;
+            my str $sexpr = "";
+            my int $sbrace_d = 1;
+            while ($i < $ilen && $sbrace_d > 0) {
+                my str $sc = substr($inner, $i, 1);
+                if ($sc eq "{") { $sbrace_d++; }
+                if ($sc eq "}") { $sbrace_d--; }
+                if ($sbrace_d > 0) {
+                    $sexpr = $sexpr . $sc;
+                }
+                $i++;
+            }
+            # Remove surrounding parens if present
+            $sexpr = trim_str($sexpr);
+            if (starts_with($sexpr, "(") && match($sexpr, "\\)$")) {
+                $sexpr = substr($sexpr, 1, length($sexpr) - 2);
+            }
+            push(@parts, "(" . trim_str($sexpr) . ")");
+            next;
+        }
+
+        # @array interpolation: @name -> join(" ", @name)
+        if ($c eq "@" && $i + 1 < $ilen && is_word_char(substr($inner, $i + 1, 1))) {
+            # Flush accumulated text
+            if ($text ne "") {
+                push(@parts, "\"" . $text . "\"");
+                $text = "";
+            }
+            # Extract array name
+            my str $arr_name = "@";
+            $i++;
+            while ($i < $ilen && is_word_char(substr($inner, $i, 1))) {
+                $arr_name = $arr_name . substr($inner, $i, 1);
+                $i++;
+            }
+            push(@parts, "join(\" \", " . $arr_name . ")");
+            next;
+        }
+
+        $text = $text . $c;
+        $i++;
+    }
+
+    # Flush remaining text
+    if ($text ne "") {
+        push(@parts, "\"" . $text . "\"");
+    }
+
+    if (scalar(@parts) == 0) { return "\"\""; }
+    if (scalar(@parts) == 1) { return $parts[0]; }
+
+    return join(" . ", @parts);
+}
+
+
+# Convert qw(a b c) to ("a", "b", "c")
+# Handles qw(), qw//, qw[], qw{}, qw!!
+func convert_qw(str $line) str {
+    if (!match($line, "\\bqw\\s*[\\(/\\[\\{!<]")) { return $line; }
+
+    my str $result = $line;
+    my int $qw_safety = 0;
+    while (match($result, "\\bqw\\s*[\\(/\\[\\{!<]") && $qw_safety < 10) {
+        # Find qw position
+        my int $qw_pos = index($result, "qw");
+        if ($qw_pos < 0) { last; }
+        # Skip to delimiter
+        my int $di = $qw_pos + 2;
+        while ($di < length($result) && substr($result, $di, 1) eq " ") { $di++; }
+        if ($di >= length($result)) { last; }
+        my str $open_ch = substr($result, $di, 1);
+        my str $close_ch = ")";
+        if ($open_ch eq "(") { $close_ch = ")"; }
+        elsif ($open_ch eq "[") { $close_ch = "]"; }
+        elsif ($open_ch eq "{") { $close_ch = "}"; }
+        elsif ($open_ch eq "<") { $close_ch = ">"; }
+        else { $close_ch = $open_ch; }
+        # Find closing delimiter
+        my int $end = index($result, $close_ch, $di + 1);
+        if ($end < 0) { last; }
+        # Extract words
+        my str $words_str = substr($result, $di + 1, $end - $di - 1);
+        my array @words = split("\\s+", trim_str($words_str));
+        my str $replacement = "(";
+        my int $wi = 0;
+        while ($wi < scalar(@words)) {
+            if (length($words[$wi]) > 0) {
+                if ($wi > 0) { $replacement = $replacement . ", "; }
+                $replacement = $replacement . "\"" . $words[$wi] . "\"";
+            }
+            $wi++;
+        }
+        $replacement = $replacement . ")";
+        # Replace: everything from qw_pos through end (inclusive)
+        my str $before = substr($result, 0, $qw_pos);
+        my str $after = substr($result, $end + 1, length($result) - $end - 1);
+        $result = $before . $replacement . $after;
+        $qw_safety++;
+    }
+    return $result;
+}
+
+# Convert postfix if/unless: "expr if cond;" -> "if (cond) { expr; }"
+func convert_postfix_conditional(str $line) str {
+    my str $trimmed = trim_str($line);
+    my str $indent = get_indent($line);
+
+    # Postfix if: "statement if condition;"
+    # But NOT: lines that start with if/unless/elsif (those are normal conditionals)
+    if (starts_with($trimmed, "if ") || starts_with($trimmed, "if(")) { return $line; }
+    if (starts_with($trimmed, "unless ") || starts_with($trimmed, "unless(")) { return $line; }
+    if (starts_with($trimmed, "elsif")) { return $line; }
+
+    # Check for postfix if
+    if (match($trimmed, "\\s+if\\s+") && !starts_with($trimmed, "#")) {
+        my array @cap = capture($trimmed, "^(.+?)\\s+if\\s+(.+);\\s*$");
+        if (scalar(@cap) > 2) {
+            my str $expr = $cap[1];
+            my str $cond = $cap[2];
+            # Only strip wrapping parens if the whole condition is parenthesized
+            # e.g. "(x > 0)" -> "x > 0" but NOT "defined($result)" -> "defined$result)"
+            if (match($cond, "^\\(") && match($cond, "\\)$")) {
+                # Count parens to make sure they're balanced wrapping parens
+                my int $pd = 0;
+                my int $pk = 0;
+                my int $plen = length($cond);
+                my int $strip_ok = 1;
+                while ($pk < $plen - 1) {
+                    my int $pc = char_at($cond, $pk);
+                    if ($pc == 40) { $pd++; }
+                    if ($pc == 41) { $pd--; }
+                    if ($pd == 0 && $pk > 0) { $strip_ok = 0; }
+                    $pk++;
+                }
+                if ($strip_ok == 1) {
+                    $cond = substr($cond, 1, length($cond) - 2);
+                }
+            }
+            return $indent . "if (" . $cond . ") { " . $expr . "; }";
+        }
+    }
+
+    # Check for postfix unless
+    if (match($trimmed, "\\s+unless\\s+") && !starts_with($trimmed, "#")) {
+        my array @cap2 = capture($trimmed, "^(.+?)\\s+unless\\s+(.+);\\s*$");
+        if (scalar(@cap2) > 2) {
+            my str $expr = $cap2[1];
+            my str $cond = $cap2[2];
+            # Only strip wrapping parens if balanced
+            if (match($cond, "^\\(") && match($cond, "\\)$")) {
+                my int $pd2 = 0;
+                my int $pk2 = 0;
+                my int $plen2 = length($cond);
+                my int $strip_ok2 = 1;
+                while ($pk2 < $plen2 - 1) {
+                    my int $pc2 = char_at($cond, $pk2);
+                    if ($pc2 == 40) { $pd2++; }
+                    if ($pc2 == 41) { $pd2--; }
+                    if ($pd2 == 0 && $pk2 > 0) { $strip_ok2 = 0; }
+                    $pk2++;
+                }
+                if ($strip_ok2 == 1) {
+                    $cond = substr($cond, 1, length($cond) - 2);
+                }
+            }
+            return $indent . "if (!(" . $cond . ")) { " . $expr . "; }";
+        }
+    }
+
+    # Check for postfix while: "expr while cond;" (but NOT "} while (cond);" which is do-while)
+    if (match($trimmed, "\\s+while\\s+") && !starts_with($trimmed, "#") && !starts_with($trimmed, "while") && !match($trimmed, "^\\}\\s*while\\s*\\(")) {
+        my array @cap3 = capture($trimmed, "^(.+?)\\s+while\\s+(.+);\\s*$");
+        if (scalar(@cap3) > 2) {
+            my str $expr = $cap3[1];
+            my str $cond = $cap3[2];
+            # Skip if the keyword is inside a quoted string (odd number of quotes in expr)
+            my int $qcount = 0;
+            my int $qi = 0;
+            while ($qi < length($expr)) {
+                if (substr($expr, $qi, 1) eq "\"") { $qcount++; }
+                $qi++;
+            }
+            if ($qcount % 2 == 0) {
+                if (match($cond, "^\\(") && match($cond, "\\)$")) {
+                    my int $pd3 = 0;
+                    my int $pk3 = 0;
+                    my int $plen3 = length($cond);
+                    my int $strip_ok3 = 1;
+                    while ($pk3 < $plen3 - 1) {
+                        my int $pc3 = char_at($cond, $pk3);
+                        if ($pc3 == 40) { $pd3++; }
+                        if ($pc3 == 41) { $pd3--; }
+                        if ($pd3 == 0 && $pk3 > 0) { $strip_ok3 = 0; }
+                        $pk3++;
+                    }
+                    if ($strip_ok3 == 1) {
+                        $cond = substr($cond, 1, length($cond) - 2);
+                    }
+                }
+                return $indent . "while (" . $cond . ") { " . $expr . "; }";
+            }
+        }
+    }
+
+    # Check for postfix for: "expr for @arr;" or "expr for 1..10;"
+    if (match($trimmed, "\\s+for\\s+") && !starts_with($trimmed, "#") && !starts_with($trimmed, "for")) {
+        my array @cap4 = capture($trimmed, "^(.+?)\\s+for\\s+(.+);\\s*$");
+        if (scalar(@cap4) > 2) {
+            my str $expr = $cap4[1];
+            my str $list = $cap4[2];
+            # Skip if the keyword is inside a quoted string
+            my int $qcount2 = 0;
+            my int $qi2 = 0;
+            while ($qi2 < length($expr)) {
+                if (substr($expr, $qi2, 1) eq "\"") { $qcount2++; }
+                $qi2++;
+            }
+            if ($qcount2 % 2 == 0) {
+                return $indent . "foreach my scalar $_ (" . $list . ") { " . $expr . "; }";
+            }
+        }
+    }
+
+    # Check for postfix foreach: "expr foreach @arr;" or "expr foreach (LIST);"
+    if (match($trimmed, "\\s+foreach\\s+") && !starts_with($trimmed, "#") && !starts_with($trimmed, "foreach")) {
+        my array @cap5 = capture($trimmed, "^(.+?)\\s+foreach\\s+(.+);\\s*$");
+        if (scalar(@cap5) > 2) {
+            my str $expr5 = $cap5[1];
+            my str $list5 = $cap5[2];
+            my int $qcount5 = 0;
+            my int $qi5 = 0;
+            while ($qi5 < length($expr5)) {
+                if (substr($expr5, $qi5, 1) eq "\"") { $qcount5++; }
+                $qi5++;
+            }
+            if ($qcount5 % 2 == 0) {
+                return $indent . "foreach my scalar $_ (" . $list5 . ") { " . $expr5 . "; }";
+            }
+        }
+    }
+
+    return $line;
+}
+
+# Quote bare hash keys in a line: $h{key} -> $h{"key"}
+func quote_hash_keys(str $line) str {
+    my str $result = "";
+    my int $i = 0;
+    my int $len = length($line);
+
+    while ($i < $len) {
+        my str $c = substr($line, $i, 1);
+
+        # Look for { after $ variable or ->
+        if ($c eq "{") {
+            # Check if preceded by a variable access pattern ($ followed by word chars, then {)
+            # or -> pattern
+            my int $is_hash_access = 0;
+            if ($i > 0) {
+                my str $prev = substr($line, $i - 1, 1);
+                if (is_word_char($prev) || $prev eq "}" || $prev eq ">") {
+                    $is_hash_access = 1;
+                }
+            }
+
+            if ($is_hash_access == 1) {
+                $result = $result . "{";
+                $i++;
+                # Extract the key
+                my str $key = "";
+                while ($i < $len && substr($line, $i, 1) ne "}") {
+                    $key = $key . substr($line, $i, 1);
+                    $i++;
+                }
+                $result = $result . quote_bare_key($key);
+                if ($i < $len) {
+                    $result = $result . "}";
+                    $i++;
+                }
+                next;
+            }
+        }
+
+        $result = $result . $c;
+        $i++;
+    }
+
+    return $result;
+}
+
+
+# ============================================================
+# Pass 2e: Expand typeglob method-generation loops
+# ============================================================
+# Detects patterns like:
+#   for my $attr (qw(name age email)) {
+#       no strict 'refs';
+#       *{$attr} = sub { return $_[0]->{$attr} };
+#       *{"set_$attr"} = sub { $_[0]->{$attr} = $_[1] };

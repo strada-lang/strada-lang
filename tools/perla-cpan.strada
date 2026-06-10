@@ -1,0 +1,575 @@
+/*
+ * perla-cpan — CPAN module installer for Perla
+ *
+ * Installs Perl modules from CPAN for use with Perla.
+ * Pure Perl modules are extracted directly.
+ * XS modules are compiled against perla_perl.h.
+ *
+ * Usage:
+ *   perla-cpan install Module::Name     Install a module
+ *   perla-cpan install Module::Name -v  Verbose
+ *   perla-cpan list                     List installed modules
+ *   perla-cpan info Module::Name        Show module info from CPAN
+ *   perla-cpan --lib /path              Set install directory
+ */
+
+use lib "lib";
+
+func main() int {
+    my int $argc = size(@ARGV);
+    if ($argc < 1) {
+        _usage();
+        return 1;
+    }
+
+    # Default install dir
+    my str $lib_dir = core::getenv("PERLA_LIB");
+    if (length($lib_dir) == 0) {
+        my str $home = core::getenv("HOME");
+        $lib_dir = $home . "/perla-lib/lib/perl5";
+    }
+
+    my int $verbose = 0;
+    my str $command = $ARGV[0];
+    my array @args = ();
+    my int $i = 1;
+    while ($i < $argc) {
+        if ($ARGV[$i] eq "-v" || $ARGV[$i] eq "--verbose") {
+            $verbose = 1;
+        } elsif ($ARGV[$i] eq "--lib") {
+            $i++;
+            if ($i < $argc) { $lib_dir = $ARGV[$i]; }
+        } else {
+            push(@args, $ARGV[$i]);
+        }
+        $i++;
+    }
+
+    if ($command eq "install") {
+        if (size(@args) == 0) {
+            say("Usage: perla-cpan install Module::Name");
+            return 1;
+        }
+        my int $ai = 0;
+        while ($ai < size(@args)) {
+            my int $ok = _install_module($args[$ai], $lib_dir, $verbose);
+            if ($ok == 0) {
+                say("FAILED: " . $args[$ai]);
+                return 1;
+            }
+            $ai++;
+        }
+        return 0;
+    }
+
+    if ($command eq "info") {
+        if (size(@args) == 0) {
+            say("Usage: perla-cpan info Module::Name");
+            return 1;
+        }
+        _show_info($args[0]);
+        return 0;
+    }
+
+    if ($command eq "list") {
+        _list_installed($lib_dir);
+        return 0;
+    }
+
+    _usage();
+    return 1;
+}
+
+func _usage() void {
+    say("perla-cpan — CPAN module installer for Perla");
+    say("");
+    say("Usage:");
+    say("  perla-cpan install Module::Name     Install a module and dependencies");
+    say("  perla-cpan install Module -v         Verbose output");
+    say("  perla-cpan info Module::Name         Show module info from CPAN");
+    say("  perla-cpan list                      List installed modules");
+    say("  perla-cpan --lib /path install Mod   Install to specific directory");
+    say("");
+    say("Environment:");
+    say("  PERLA_LIB    Install directory (default: ~/perla-lib/lib/perl5)");
+}
+
+# ============================================================
+# MetaCPAN API
+# ============================================================
+
+func _metacpan_release(str $module) scalar {
+    # Module::Name → Module-Name for release lookup
+    my str $dist = replace_all($module, "::", "-");
+    my str $url = "https://fastapi.metacpan.org/v1/release/" . $dist;
+    my str $result = core::qx("curl -sL '" . $url . "' 2>/dev/null | python3 -c \"import json,sys; d=json.load(sys.stdin); print(d.get('download_url','')); print(d.get('name','')); print(d.get('version',''))\" 2>/dev/null");
+    my array @lines = split("\n", $result);
+    if (size(@lines) < 3 || length($lines[0]) == 0) {
+        # Dist name didn't match — look up the module to find its distribution
+        my str $mod_url = "https://fastapi.metacpan.org/v1/module/" . $module;
+        $result = core::qx("curl -sL '" . $mod_url . "' 2>/dev/null | python3 -c \"import json,sys; d=json.load(sys.stdin); print(d.get('distribution',''))\" 2>/dev/null");
+        my str $real_dist = trim($result);
+        if (length($real_dist) > 0 && $real_dist ne $dist) {
+            $url = "https://fastapi.metacpan.org/v1/release/" . $real_dist;
+            $result = core::qx("curl -sL '" . $url . "' 2>/dev/null | python3 -c \"import json,sys; d=json.load(sys.stdin); print(d.get('download_url','')); print(d.get('name','')); print(d.get('version',''))\" 2>/dev/null");
+            @lines = split("\n", $result);
+        }
+        if (size(@lines) < 3 || length($lines[0]) == 0) { return undef; }
+    }
+    my hash %data = ();
+    $data{"download_url"} = $lines[0];
+    $data{"name"} = $lines[1];
+    $data{"version"} = $lines[2];
+    return \%data;
+}
+
+func _metacpan_module(str $module) scalar {
+    my str $url = "https://fastapi.metacpan.org/v1/module/" . $module;
+    my str $json_str = _http_get($url);
+    if (length($json_str) == 0) { return undef; }
+    return json_decode($json_str);
+}
+
+func _http_get(str $url) str {
+    my str $result = core::qx("curl -sL '" . $url . "' 2>/dev/null");
+    return $result;
+}
+
+# ============================================================
+# JSON decoder (minimal — handles CPAN API responses)
+# ============================================================
+
+func json_decode(str $s) scalar {
+    # Use Strada's built-in JSON if available, otherwise shell out to python
+    my str $result = core::qx("echo '" . replace_all($s, "'", "'\\''") . "' | python3 -c \"import json,sys; print(json.dumps(json.load(sys.stdin)))\" 2>/dev/null");
+    if (length($result) == 0) { return undef; }
+    # For now, parse key fields manually from the JSON string
+    my hash %data = ();
+    # Extract download_url
+    my int $dl_idx = index($result, "\"download_url\"");
+    if ($dl_idx >= 0) {
+        my int $colon = index(substr($result, $dl_idx, 200), ":");
+        my int $quote1 = index(substr($result, $dl_idx + $colon, 200), "\"");
+        my int $quote2 = index(substr($result, $dl_idx + $colon + $quote1 + 1, 200), "\"");
+        if ($quote1 >= 0 && $quote2 >= 0) {
+            $data{"download_url"} = substr($result, $dl_idx + $colon + $quote1 + 1, $quote2);
+        }
+    }
+    # Extract name
+    my int $name_idx = index($result, "\"name\"");
+    if ($name_idx >= 0) {
+        my int $colon = index(substr($result, $name_idx, 100), ":");
+        my int $q1 = index(substr($result, $name_idx + $colon, 100), "\"");
+        my int $q2 = index(substr($result, $name_idx + $colon + $q1 + 1, 100), "\"");
+        if ($q1 >= 0 && $q2 >= 0) {
+            $data{"name"} = substr($result, $name_idx + $colon + $q1 + 1, $q2);
+        }
+    }
+    # Extract version
+    my int $ver_idx = index($result, "\"version\"");
+    if ($ver_idx >= 0) {
+        my int $colon = index(substr($result, $ver_idx, 100), ":");
+        my int $q1 = index(substr($result, $ver_idx + $colon, 100), "\"");
+        my int $q2 = index(substr($result, $ver_idx + $colon + $q1 + 1, 100), "\"");
+        if ($q1 >= 0 && $q2 >= 0) {
+            $data{"version"} = substr($result, $ver_idx + $colon + $q1 + 1, $q2);
+        }
+    }
+    return \%data;
+}
+
+# ============================================================
+# Module installation
+# ============================================================
+
+func _install_module(str $module, str $lib_dir, int $verbose) int {
+    say("Installing " . $module . " ...");
+
+    # Check if already installed
+    my str $pm_path = $lib_dir . "/" . replace_all($module, "::", "/") . ".pm";
+    if (core::file_exists($pm_path) == 1) {
+        say("  Already installed: " . $pm_path);
+        return 1;
+    }
+
+    # Look up on MetaCPAN
+    my scalar $release = _metacpan_release($module);
+    if (!defined($release)) {
+        say("  Not found on CPAN: " . $module);
+        return 0;
+    }
+
+    my str $download_url = "" . $release->{"download_url"};
+    my str $name = "" . $release->{"name"};
+    my str $version = "" . $release->{"version"};
+
+    if (length($download_url) == 0) {
+        say("  No download URL for " . $module);
+        return 0;
+    }
+
+    say("  Found: " . $name . " v" . $version);
+    if ($verbose == 1) { say("  URL: " . $download_url); }
+
+    # Download
+    my str $tmp_dir = "/tmp/perla-cpan-" . core::getpid();
+    core::system("mkdir -p " . $tmp_dir);
+
+    my str $tarball = $tmp_dir . "/" . $name . ".tar.gz";
+    say("  Downloading...");
+    my int $dl_ok = core::system("curl -sL '" . $download_url . "' -o '" . $tarball . "'");
+    if ($dl_ok != 0) {
+        say("  Download failed");
+        core::system("rm -rf " . $tmp_dir);
+        return 0;
+    }
+
+    # Extract
+    say("  Extracting...");
+    core::system("cd " . $tmp_dir . " && tar xzf *.tar.gz 2>/dev/null");
+
+    # Find the extracted directory
+    my str $extract_dir = core::qx("ls -d " . $tmp_dir . "/*/ 2>/dev/null | head -1");
+    $extract_dir = trim($extract_dir);
+    if (length($extract_dir) == 0) {
+        say("  Extract failed");
+        core::system("rm -rf " . $tmp_dir);
+        return 0;
+    }
+    if ($verbose == 1) { say("  Extracted to: " . $extract_dir); }
+
+    # Check if this is an XS module (has .xs files)
+    my str $xs_files = core::qx("find '" . $extract_dir . "' -name '*.xs' 2>/dev/null");
+    my int $is_xs = length(trim($xs_files)) > 0;
+
+    if ($is_xs == 1) {
+        say("  XS module detected — compiling against perla_perl.h");
+        my int $ok = _install_xs_module($extract_dir, $lib_dir, $verbose);
+        core::system("rm -rf " . $tmp_dir);
+        return $ok;
+    }
+
+    # Pure Perl — find and copy .pm files
+    say("  Pure Perl module — installing .pm files");
+    my int $ok = _install_pure_perl($extract_dir, $lib_dir, $verbose);
+
+    # Install runtime dependencies
+    if ($ok == 1) {
+        _install_deps($module, $lib_dir, $verbose);
+    }
+
+    # Cleanup
+    core::system("rm -rf " . $tmp_dir);
+
+    if ($ok == 1) {
+        say("  Installed " . $module . " to " . $lib_dir);
+    }
+    return $ok;
+}
+
+func _install_pure_perl(str $extract_dir, str $lib_dir, int $verbose) int {
+    # Find lib/ directory in the distribution
+    my str $lib_src = "";
+    if (core::is_dir($extract_dir . "lib") == 1) {
+        $lib_src = $extract_dir . "lib";
+    } elsif (core::is_dir($extract_dir . "/lib") == 1) {
+        $lib_src = $extract_dir . "/lib";
+    } else {
+        # Some modules put .pm files directly in the dist root
+        $lib_src = $extract_dir;
+    }
+
+    # Copy all .pm files preserving directory structure
+    my str $find_result = core::qx("find '" . $lib_src . "' -name '*.pm' 2>/dev/null");
+    my array @pm_files = split("\n", trim($find_result));
+    my int $count = 0;
+    my int $fi = 0;
+    while ($fi < size(@pm_files)) {
+        my str $pm = $pm_files[$fi];
+        if (length($pm) == 0) { $fi++; next; }
+
+        # Get relative path from lib_src
+        my str $rel = $pm;
+        if (index($rel, $lib_src) == 0) {
+            $rel = substr($rel, length($lib_src), length($rel) - length($lib_src));
+            if (substr($rel, 0, 1) eq "/") { $rel = substr($rel, 1, length($rel) - 1); }
+        }
+
+        my str $dest = $lib_dir . "/" . $rel;
+
+        # Create parent directory
+        my int $last_slash = -1;
+        my int $si = 0;
+        while ($si < length($dest)) {
+            if (substr($dest, $si, 1) eq "/") { $last_slash = $si; }
+            $si++;
+        }
+        if ($last_slash > 0) {
+            my str $parent = substr($dest, 0, $last_slash);
+            core::system("mkdir -p '" . $parent . "'");
+        }
+
+        # Copy file
+        core::system("cp '" . $pm . "' '" . $dest . "'");
+        if ($verbose == 1) { say("    " . $rel); }
+        $count++;
+        $fi++;
+    }
+
+    say("  Installed " . $count . " files");
+    return $count > 0 ? 1 : 0;
+}
+
+func _install_xs_module(str $extract_dir, str $lib_dir, int $verbose) int {
+    # Detect Strada/Perla root from our own binary location
+    my str $strada_dir = "";
+    __C__ {
+        char buf[1024];
+        ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+        if (len > 0) {
+            buf[len] = '\0';
+            /* Binary is at <strada>/tools/perla-cpan — go up two levels */
+            char *sl = strrchr(buf, '/');
+            if (sl) { *sl = '\0'; sl = strrchr(buf, '/'); if (sl) *sl = '\0'; }
+            strada_decref(strada_dir);
+            strada_dir = strada_new_str(buf);
+        }
+    }
+    if (length($strada_dir) == 0) {
+        $strada_dir = ".";
+    }
+
+    my str $perla_runtime = $strada_dir . "/perla/runtime";
+    my str $runtime_dir = $strada_dir . "/runtime";
+    my str $pcre2_dir = $strada_dir . "/vendor/pcre2/src";
+    my str $xsubpp = core::qx("which xsubpp 2>/dev/null");
+    $xsubpp = trim($xsubpp);
+    if (length($xsubpp) == 0) {
+        say(STDERR, "  Error: xsubpp not found (install perl-ExtUtils-ParseXS)");
+        return _install_pure_perl($extract_dir, $lib_dir, $verbose);
+    }
+
+    my str $typemap = "/usr/share/perl/5.38/ExtUtils/typemap";
+    if (core::file_exists($typemap) != 1) {
+        # Try to find typemap
+        my str $found = trim(core::qx("find /usr/share/perl -name typemap -path '*/ExtUtils/*' 2>/dev/null | head -1"));
+        if (length($found) > 0) { $typemap = $found; }
+    }
+
+    # Find all .xs files
+    my str $xs_list = core::qx("find '" . $extract_dir . "' -name '*.xs' 2>/dev/null");
+    my array @xs_files = split("\n", trim($xs_list));
+
+    # Find all .c files that aren't xsubpp output (helper C files like mop.c)
+    my str $c_list = core::qx("find '" . $extract_dir . "' -maxdepth 2 -name '*.c' ! -name '*.xs.c' 2>/dev/null");
+    my array @c_files = split("\n", trim($c_list));
+
+    # Detect module name from directory
+    my str $mod_name = "";
+    my str $dist_base = $extract_dir;
+    # Strip trailing /
+    if (substr($dist_base, length($dist_base) - 1, 1) eq "/") {
+        $dist_base = substr($dist_base, 0, length($dist_base) - 1);
+    }
+    my int $sl_pos = -1;
+    my int $si = length($dist_base) - 1;
+    while ($si >= 0) {
+        if (substr($dist_base, $si, 1) eq "/") { $sl_pos = $si; last; }
+        $si--;
+    }
+    if ($sl_pos >= 0) {
+        $mod_name = substr($dist_base, $sl_pos + 1, length($dist_base) - $sl_pos - 1);
+        # Strip version: Module-Name-1.23 → Module-Name
+        $mod_name = replace($mod_name, "-[0-9].*$", "");
+    }
+
+    say("  Compiling XS module: " . $mod_name . " (" . size(@xs_files) . " .xs, " . size(@c_files) . " .c files)");
+
+    # Compile each .xs file: xsubpp → .c → .o
+    my array @obj_files = ();
+    my int $xi = 0;
+    while ($xi < size(@xs_files)) {
+        my str $xs = trim($xs_files[$xi]);
+        if (length($xs) == 0) { $xi++; next; }
+        my str $base = $xs;
+        $base = replace($base, "\\.xs$", "");
+        my str $c_file = $base . ".xs.c";
+        my str $o_file = $base . ".xs.o";
+
+        if ($verbose == 1) { say("    xsubpp: " . $xs); }
+
+        # Run xsubpp
+        my str $xspp_cmd = $xsubpp . " -typemap " . $typemap . " " . $xs . " > " . $c_file . " 2>/dev/null";
+        core::system($xspp_cmd);
+
+        if (core::file_exists($c_file) != 1) {
+            say(STDERR, "    Warning: xsubpp failed for " . $xs);
+            $xi++;
+            next;
+        }
+
+        # Patch includes: replace ppport.h, mop.h etc. with our shims
+        my str $c_src = core::slurp($c_file);
+        $c_src = replace_all($c_src, "#include \"ppport.h\"", "/* ppport.h — using Perla compat */");
+        # Replace module-specific headers with Perla-patched versions
+        # mop.h: strip ppport.h include
+        my str $mop_h = $extract_dir . "/mop.h";
+        if (core::file_exists($mop_h) == 1) {
+            my str $mop_src = core::slurp($mop_h);
+            $mop_src = replace_all($mop_src, "#include \"ppport.h\"", "/* ppport.h skipped */");
+            my str $patched = $extract_dir . "/mop_perla.h";
+            core::spew($patched, $mop_src);
+            $c_src = replace_all($c_src, "#include \"mop.h\"", "#include \"mop_perla.h\"");
+        }
+        core::spew($c_file, $c_src);
+
+        # Compile
+        my str $pcre2_flags = "";
+        if (core::file_exists($pcre2_dir . "/pcre2.h") == 1) {
+            $pcre2_flags = " -DHAVE_PCRE2 -DPCRE2_STATIC -I" . $pcre2_dir;
+        }
+        my str $gcc_cmd = "gcc -c -w -fPIC -O2 -I" . $perla_runtime . " -I" . $runtime_dir . " -I" . $extract_dir . $pcre2_flags . " -o " . $o_file . " " . $c_file . " 2>&1";
+        if ($verbose == 1) { say("    gcc: " . $c_file); }
+        my str $gcc_out = core::qx($gcc_cmd);
+        if (length($gcc_out) > 0 && $verbose == 1) {
+            say("    " . $gcc_out);
+        }
+        if (core::file_exists($o_file) == 1) {
+            push(@obj_files, $o_file);
+        } else {
+            say(STDERR, "    Warning: compilation failed for " . $c_file);
+        }
+        $xi++;
+    }
+
+    # Compile helper .c files (e.g., mop.c)
+    my int $ci = 0;
+    while ($ci < size(@c_files)) {
+        my str $c_file = trim($c_files[$ci]);
+        if (length($c_file) == 0) { $ci++; next; }
+        my str $o_file = replace($c_file, "\\.c$", ".o");
+
+        # Patch includes
+        my str $c_src = core::slurp($c_file);
+        my int $patched = 0;
+        if (index($c_src, "#include \"ppport.h\"") >= 0) {
+            $c_src = replace_all($c_src, "#include \"ppport.h\"", "/* ppport.h skipped */");
+            $patched = 1;
+        }
+        if (index($c_src, "#include \"mop.h\"") >= 0) {
+            $c_src = replace_all($c_src, "#include \"mop.h\"", "#include \"mop_perla.h\"");
+            $patched = 1;
+        }
+        if ($patched == 1) {
+            core::spew($c_file, $c_src);
+        }
+
+        my str $pcre2_flags = "";
+        if (core::file_exists($pcre2_dir . "/pcre2.h") == 1) {
+            $pcre2_flags = " -DHAVE_PCRE2 -DPCRE2_STATIC -I" . $pcre2_dir;
+        }
+        my str $gcc_cmd = "gcc -c -w -fPIC -O2 -I" . $perla_runtime . " -I" . $runtime_dir . " -I" . $extract_dir . $pcre2_flags . " -o " . $o_file . " " . $c_file . " 2>&1";
+        if ($verbose == 1) { say("    gcc: " . $c_file); }
+        my str $gcc_out = core::qx($gcc_cmd);
+        if (core::file_exists($o_file) == 1) {
+            push(@obj_files, $o_file);
+        }
+        $ci++;
+    }
+
+    if (size(@obj_files) == 0) {
+        say(STDERR, "  No object files produced — falling back to pure Perl install");
+        return _install_pure_perl($extract_dir, $lib_dir, $verbose);
+    }
+
+    # Create static library
+    my str $lib_name = replace_all($mod_name, "-", "_");
+    my str $a_file = $lib_dir . "/" . $lib_name . ".xs.a";
+    core::system("mkdir -p " . $lib_dir);
+    my str $ar_cmd = "ar rcs " . $a_file . " " . join(" ", @obj_files);
+    core::system($ar_cmd);
+
+    if (core::file_exists($a_file) == 1) {
+        say("  XS library: " . $a_file . " (" . size(@obj_files) . " objects)");
+    }
+
+    # Also install .pm files (XS modules have Perl wrappers)
+    my int $ok = _install_pure_perl($extract_dir, $lib_dir, $verbose);
+
+    if ($ok == 1) {
+        say("  Installed " . $mod_name . " (XS + Perl) to " . $lib_dir);
+    }
+    return $ok;
+}
+
+func _install_deps(str $module, str $lib_dir, int $verbose) void {
+    # Get runtime dependencies from MetaCPAN
+    my str $dist = replace_all($module, "::", "-");
+    my str $json = _http_get("https://fastapi.metacpan.org/v1/release/" . $dist);
+    if (length($json) == 0) { return; }
+
+    # Extract runtime requires using python
+    my str $deps_str = core::qx("echo '" . replace_all($json, "'", "'\\''") . "' | python3 -c \"
+import json, sys
+d = json.load(sys.stdin)
+for dep in d.get('dependency', []):
+    if dep.get('phase') == 'runtime' and dep.get('relationship') == 'requires':
+        m = dep['module']
+        if m not in ('perl', 'strict', 'warnings', 'base', 'Carp', 'Exporter', 'overload', 'integer', 'constant', 'vars', 'File::Spec', 'Scalar::Util', 'List::Util', 'Encode', 'utf8', 'POSIX', 'Storable', 'IO::Handle', 'IO::File'):
+            print(m)
+\" 2>/dev/null");
+
+    my array @deps = split("\n", trim($deps_str));
+    my int $di = 0;
+    while ($di < size(@deps)) {
+        my str $dep = trim($deps[$di]);
+        if (length($dep) > 0) {
+            if ($verbose == 1) { say("  Dependency: " . $dep); }
+            _install_module($dep, $lib_dir, $verbose);
+        }
+        $di++;
+    }
+}
+
+# ============================================================
+# Info / List commands
+# ============================================================
+
+func _show_info(str $module) void {
+    say("Module: " . $module);
+    my scalar $release = _metacpan_release($module);
+    if (defined($release)) {
+        say("Name: " . $release->{"name"});
+        say("Version: " . $release->{"version"});
+        say("Download: " . $release->{"download_url"});
+    } else {
+        say("Not found on CPAN");
+    }
+}
+
+func _list_installed(str $lib_dir) void {
+    if (core::is_dir($lib_dir) != 1) {
+        say("No modules installed (directory not found: " . $lib_dir . ")");
+        return;
+    }
+    say("Installed modules in " . $lib_dir . ":");
+    my str $files = core::qx("find '" . $lib_dir . "' -name '*.pm' 2>/dev/null | sort");
+    my array @lines = split("\n", trim($files));
+    my int $i = 0;
+    while ($i < size(@lines)) {
+        my str $pm = $lines[$i];
+        if (length($pm) > 0) {
+            # Convert path to module name
+            my str $rel = $pm;
+            if (index($rel, $lib_dir) == 0) {
+                $rel = substr($rel, length($lib_dir) + 1, length($rel) - length($lib_dir) - 1);
+            }
+            if (index($rel, ".pm") >= 0) {
+                $rel = substr($rel, 0, length($rel) - 3);
+            }
+            my str $mod = replace_all($rel, "/", "::");
+            say("  " . $mod);
+        }
+        $i++;
+    }
+}

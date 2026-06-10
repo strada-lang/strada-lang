@@ -1,0 +1,512 @@
+# perl2strada - Pass2c
+# Pass 2c: Remove POD blocks and handle DESTROY/AUTOLOAD/SUPER
+
+# ============================================================
+# Pass 2c: Remove POD blocks and handle DESTROY/AUTOLOAD/SUPER
+# ============================================================
+
+func pass2c_pod_and_special(array @lines) array {
+    my array @out = ();
+    my int $i = 0;
+    my int $num_lines = scalar(@lines);
+    my int $in_pod = 0;
+    my str $current_pkg = "main";
+    my hash %parent_map = ();
+
+    # Pre-scan for inheritance declarations to resolve SUPER::
+    my int $ps = 0;
+    my str $ps_pkg = "main";
+    while ($ps < $num_lines) {
+        my str $ps_line = trim_str($lines[$ps]);
+        if (match($ps_line, "^package\\s+")) {
+            my array @ps_cap = capture($ps_line, "^package\\s+([A-Za-z_:][A-Za-z0-9_:]*)");
+            if (scalar(@ps_cap) > 1) {
+                $ps_pkg = $ps_cap[1];
+            }
+        }
+        # extends Parent;
+        if (match($ps_line, "^extends\\s+")) {
+            my array @ps_ext = capture($ps_line, "^extends\\s+([A-Za-z_:][A-Za-z0-9_:]*)");
+            if (scalar(@ps_ext) > 1) {
+                $parent_map{$ps_pkg} = $ps_ext[1];
+            }
+        }
+        # use parent 'Parent' / use parent "Parent" / use parent -norequire, 'Parent'
+        if (match($ps_line, "^use\\s+parent\\b") || match($ps_line, "^use\\s+base\\b")) {
+            my array @ps_par = capture($ps_line, "['\"]([A-Za-z_:][A-Za-z0-9_:]*)['\"]");
+            if (scalar(@ps_par) > 1) {
+                my str $ps_parent = $ps_par[1];
+                if ($ps_parent ne "Exporter") {
+                    $parent_map{$ps_pkg} = $ps_parent;
+                }
+            }
+        }
+        # @ISA = ('Parent') or @ISA = ("Parent")
+        if (match($ps_line, "@ISA") && match($ps_line, "=")) {
+            my array @ps_isa = capture($ps_line, "['\"]([A-Za-z_:][A-Za-z0-9_:]*)['\"]");
+            if (scalar(@ps_isa) > 1) {
+                my str $ps_parent = $ps_isa[1];
+                if ($ps_parent ne "Exporter") {
+                    $parent_map{$ps_pkg} = $ps_parent;
+                }
+            }
+        }
+        $ps++;
+    }
+
+    while ($i < $num_lines) {
+        my str $line = $lines[$i];
+        my str $trimmed = trim_str($line);
+        my str $indent = get_indent($line);
+
+        # Track current package
+        if (match($trimmed, "^package\\s+")) {
+            my array @pkg_cap = capture($trimmed, "^package\\s+([A-Za-z_:][A-Za-z0-9_:]*)");
+            if (scalar(@pkg_cap) > 1) {
+                $current_pkg = $pkg_cap[1];
+            }
+        }
+
+        # Detect POD start: =pod, =head1, =head2, =over, =item, =begin, =for, =encoding
+        if (match($trimmed, "^=(pod|head[1-4]|over|item|begin|for|encoding)\\b")) {
+            $in_pod = 1;
+            push(@out, $indent . "# " . $trimmed . "  # POD documentation");
+            $i++;
+            next;
+        }
+
+        # Detect POD end: =cut
+        if ($trimmed eq "=cut") {
+            $in_pod = 0;
+            push(@out, $indent . "# " . $trimmed);
+            $i++;
+            next;
+        }
+
+        if ($in_pod == 1) {
+            # Comment out POD content
+            if ($trimmed eq "") {
+                push(@out, "");
+            } else {
+                push(@out, $indent . "# " . $trimmed);
+            }
+            $i++;
+            next;
+        }
+
+        # Detect DESTROY sub - Strada supports DESTROY (called when refcount reaches 0)
+        # Just pass through - the normal sub→func conversion will handle it
+        # sub DESTROY { ... } → func DESTROY(scalar $self) void { ... }
+        if (match($trimmed, "^sub\\s+DESTROY\\b")) {
+            # Don't add the misleading TODO comment - Strada fully supports DESTROY
+            push(@out, $line);
+            $i++;
+            next;
+        }
+
+        # Detect BUILDARGS sub - convert to around "new" hook
+        if (match($trimmed, "^sub\\s+BUILDARGS\\b") || match($trimmed, "^func\\s+BUILDARGS\\b")) {
+            push(@out, $indent . "around \"new\" func(scalar $self, scalar $orig, scalar ...@args) scalar {");
+            push(@out, $indent . "    # REVIEW: BUILDARGS — verify argument transformation");
+            $i++;
+            # Consume and transform the function body
+            my int $ba_depth = 1;
+            while ($i < $num_lines && $ba_depth > 0) {
+                my str $ba_l = $lines[$i];
+                my str $ba_t = trim_str($ba_l);
+                my str $ba_i = get_indent($ba_l);
+                # Track braces
+                my int $ba_j = 0;
+                my int $ba_len = length($ba_t);
+                while ($ba_j < $ba_len) {
+                    my int $ba_ch = char_at($ba_t, $ba_j);
+                    if ($ba_ch == 123) { $ba_depth++; }
+                    if ($ba_ch == 125) { $ba_depth--; }
+                    $ba_j++;
+                }
+                if ($ba_depth == 0) {
+                    push(@out, $ba_i . "}");
+                    $i++;
+                    next;
+                }
+                # Skip Perl boilerplate: my ($class, ...) = @_;  my $class = shift;
+                if (match($ba_t, "^my.*class.*@_") || match($ba_t, "^my.*class.*shift") || match($ba_t, "^my.*self.*@_") || match($ba_t, "^my.*self.*shift")) {
+                    $i++;
+                    next;
+                }
+                # Convert $class->SUPER::new(%args) -> $orig->(%args)
+                if (match($ba_l, "SUPER::new")) {
+                    $ba_l = replace($ba_l, "\\$[A-Za-z_][A-Za-z0-9_]*->SUPER::new\\(", "$orig->(");
+                }
+                # Replace @_ with @args
+                if (match($ba_l, "@_")) {
+                    $ba_l = replace_all($ba_l, "@_", "@args");
+                }
+                push(@out, $ba_l);
+                $i++;
+            }
+            next;
+        }
+
+        # Detect BUILD sub - convert to after "new" hook
+        if (match($trimmed, "^sub\\s+BUILD\\b") || match($trimmed, "^func\\s+BUILD\\b")) {
+            push(@out, $indent . "after \"new\" func(scalar $self) void {");
+            $i++;
+            # Consume and transform the function body
+            my int $bd_depth = 1;
+            while ($i < $num_lines && $bd_depth > 0) {
+                my str $bd_l = $lines[$i];
+                my str $bd_t = trim_str($bd_l);
+                my str $bd_i = get_indent($bd_l);
+                # Track braces
+                my int $bd_j = 0;
+                my int $bd_len = length($bd_t);
+                while ($bd_j < $bd_len) {
+                    my int $bd_ch = char_at($bd_t, $bd_j);
+                    if ($bd_ch == 123) { $bd_depth++; }
+                    if ($bd_ch == 125) { $bd_depth--; }
+                    $bd_j++;
+                }
+                if ($bd_depth == 0) {
+                    push(@out, $bd_i . "}");
+                    $i++;
+                    next;
+                }
+                # Skip Perl boilerplate: my ($self) = @_;  my $self = shift;
+                if (match($bd_t, "^my.*self.*@_") || match($bd_t, "^my.*self.*shift")) {
+                    $i++;
+                    next;
+                }
+                push(@out, $bd_l);
+                $i++;
+            }
+            next;
+        }
+
+        # Detect INIT/CHECK/UNITCHECK blocks -> convert to BEGIN
+        if (match($trimmed, "^INIT\\s*\\{") || match($trimmed, "^CHECK\\s*\\{") || match($trimmed, "^UNITCHECK\\s*\\{")) {
+            # Determine block type for comment
+            my str $ic_type = "INIT";
+            if (match($trimmed, "^CHECK")) { $ic_type = "CHECK"; }
+            if (match($trimmed, "^UNITCHECK")) { $ic_type = "UNITCHECK"; }
+            # Replace block name with BEGIN
+            my str $ic_converted = replace($trimmed, "^(INIT|CHECK|UNITCHECK)", "BEGIN");
+            push(@out, $indent . $ic_converted . "  # was " . $ic_type);
+            # Consume the block body (pass through unchanged)
+            my int $ic_depth = 0;
+            my int $ici = 0;
+            my int $iclen = length($trimmed);
+            while ($ici < $iclen) {
+                my int $icch = char_at($trimmed, $ici);
+                if ($icch == 123) { $ic_depth++; }
+                if ($icch == 125) { $ic_depth--; }
+                $ici++;
+            }
+            $i++;
+            while ($i < $num_lines && $ic_depth > 0) {
+                my str $icline = $lines[$i];
+                my str $ict = trim_str($icline);
+                my int $icj = 0;
+                my int $ictlen = length($ict);
+                while ($icj < $ictlen) {
+                    my int $icch2 = char_at($ict, $icj);
+                    if ($icch2 == 123) { $ic_depth++; }
+                    if ($icch2 == 125) { $ic_depth--; }
+                    $icj++;
+                }
+                push(@out, $icline);
+                $i++;
+            }
+            next;
+        }
+
+        # Detect AUTOLOAD sub - convert to Strada AUTOLOAD
+        if (match($trimmed, "^sub\\s+AUTOLOAD\\b") || match($trimmed, "^func\\s+AUTOLOAD\\b")) {
+            # Emit the Strada-native AUTOLOAD signature
+            push(@out, $indent . "func AUTOLOAD(scalar $self, str $method, scalar ...@args) scalar {");
+            $i++;
+
+            # Consume and transform the function body
+            my int $brace_depth = 1;
+            while ($i < $num_lines && $brace_depth > 0) {
+                my str $bl = $lines[$i];
+                my str $bt = trim_str($bl);
+                my str $bi = get_indent($bl);
+
+                # Track braces
+                my int $bj = 0;
+                my int $blen = length($bt);
+                while ($bj < $blen) {
+                    my int $bch = char_at($bt, $bj);
+                    if ($bch == 123) { $brace_depth++; }
+                    if ($bch == 125) { $brace_depth--; }
+                    $bj++;
+                }
+
+                if ($brace_depth == 0) {
+                    # Closing brace of the function
+                    push(@out, $bl);
+                    $i++;
+                    next;
+                }
+
+                # Skip Perl AUTOLOAD boilerplate lines:
+                # - my ($self) = @_;  or  my $self = shift;
+                if (match($bt, "^my.*self.*@_") || match($bt, "^my.*self.*shift")) {
+                    $i++;
+                    next;
+                }
+                # - our $AUTOLOAD;
+                if (match($bt, "^our.*AUTOLOAD")) {
+                    $i++;
+                    next;
+                }
+                # - my $method = $AUTOLOAD;  or  (my $method = $AUTOLOAD)
+                if (match($bt, "method.*=.*AUTOLOAD")) {
+                    $i++;
+                    next;
+                }
+                # - $method =~ s/.*:://;  (strip package prefix - not needed in Strada)
+                if (match($bt, "method.*=~.*s/\\.\\*:://")) {
+                    $i++;
+                    next;
+                }
+                # - return if $method eq 'DESTROY';  or  return if $method =~ /DESTROY/
+                if (match($bt, "return.*method.*DESTROY")) {
+                    $i++;
+                    next;
+                }
+
+                # Replace @_ with @args in remaining lines
+                if (match($bl, "@_")) {
+                    $bl = replace_all($bl, "@_", "@args");
+                }
+
+                # Convert $self->$method(@args) dynamic dispatch within AUTOLOAD
+                # In Strada's AUTOLOAD, $method is already a parameter, so this dispatch
+                # is handled natively by the AUTOLOAD mechanism itself
+                if (match($bt, "->\\$method") || match($bt, "->\\$AUTOLOAD")) {
+                    # $self->$method(@args) is the dispatch line — Strada AUTOLOAD handles this
+                    $bl = $bi . "# " . $bt . "  # Strada AUTOLOAD dispatches automatically via $method parameter";
+                }
+
+                push(@out, $bl);
+                $i++;
+            }
+            next;
+        }
+
+        # Detect SUPER:: calls - convert to parent package call
+        if (match($line, "SUPER::")) {
+            # Check if we know the parent class for the current package
+            my str $parent_class = "" . $parent_map{$current_pkg};
+            if (length($parent_class) > 0) {
+                # Handle $self->SUPER::method(args) -> Parent::method($self, args)
+                if (match($line, "\\$[A-Za-z_][A-Za-z0-9_]*->SUPER::")) {
+                    my array @sup_cap = capture($line, "(\\$[A-Za-z_][A-Za-z0-9_]*)->SUPER::([A-Za-z_][A-Za-z0-9_]*)\\(([^)]*)\\)");
+                    if (scalar(@sup_cap) > 3) {
+                        my str $sup_self = $sup_cap[1];
+                        my str $sup_method = $sup_cap[2];
+                        my str $sup_args = trim_str($sup_cap[3]);
+                        if (length($sup_args) > 0) {
+                            $line = replace($line, "\\$[A-Za-z_][A-Za-z0-9_]*->SUPER::" . $sup_method . "\\([^)]*\\)", $parent_class . "::" . $sup_method . "(" . $sup_self . ", " . $sup_args . ")");
+                        } else {
+                            $line = replace($line, "\\$[A-Za-z_][A-Za-z0-9_]*->SUPER::" . $sup_method . "\\([^)]*\\)", $parent_class . "::" . $sup_method . "(" . $sup_self . ")");
+                        }
+                    } else {
+                        # Simpler pattern: just replace SUPER:: with parent class
+                        $line = replace_all($line, "SUPER::", $parent_class . "::");
+                    }
+                } else {
+                    # Non-method SUPER:: call: SUPER::func(...) -> Parent::func($self, ...)
+                    # Add $self as first arg if inside a method body
+                    my array @sup_bare = capture($line, "SUPER::([A-Za-z_][A-Za-z0-9_]*)\\(([^)]*)\\)");
+                    if (scalar(@sup_bare) > 2) {
+                        my str $sb_method = $sup_bare[1];
+                        my str $sb_args = trim_str($sup_bare[2]);
+                        my str $sb_self = "$" . "self";
+                        if (length($sb_args) > 0) {
+                            $line = replace($line, "SUPER::" . $sb_method . "\\([^)]*\\)", $parent_class . "::" . $sb_method . "(" . $sb_self . ", " . $sb_args . ")");
+                        } else {
+                            $line = replace($line, "SUPER::" . $sb_method . "\\([^)]*\\)", $parent_class . "::" . $sb_method . "(" . $sb_self . ")");
+                        }
+                    } else {
+                        $line = replace_all($line, "SUPER::", $parent_class . "::");
+                    }
+                }
+            } else {
+                # Parent unknown - use SUPER_ placeholder with REVIEW
+                $line = replace_all($line, "SUPER::", "SUPER_");
+                $line = $line . "  # REVIEW: SUPER:: — call parent method directly (e.g., Parent::method($self, ...))";
+            }
+        }
+
+        # Detect heredocs: <<EOF, <<"EOF", <<'EOF', <<~EOF, <<\EOF
+        if (match($trimmed, "<<[~\\\\]?\\s*['\"]?[A-Za-z_][A-Za-z0-9_]*['\"]?") && !match($trimmed, "^#")) {
+            # Extract the terminator
+            my array @hd_cap = capture($trimmed, "<<[~\\\\]?\\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?");
+            if (scalar(@hd_cap) > 1) {
+                my str $hd_term = $hd_cap[1];
+                my int $hd_indented = 0;
+                if (match($trimmed, "<<~")) {
+                    $hd_indented = 1;
+                }
+                my int $hd_interp = 1;
+                # <<'EOF' or <<\EOF = non-interpolating
+                if (match($trimmed, "<<[~]?\\s*'") || match($trimmed, "<<\\\\")) {
+                    $hd_interp = 0;
+                }
+
+                # Get the trailing part after <<TERM (e.g., ". $suffix;" or ",")
+                my str $hd_suffix = "";
+                my int $hd_marker_pos = index($trimmed, "<<");
+                if ($hd_marker_pos >= 0) {
+                    # Find end of heredoc marker (after terminator and optional quotes/semicolons)
+                    my int $hd_after = $hd_marker_pos + 2;
+                    # Skip ~, \, whitespace
+                    while ($hd_after < length($trimmed) && match(substr($trimmed, $hd_after, 1), "[~\\\\\\s]")) {
+                        $hd_after++;
+                    }
+                    # Skip quotes and terminator
+                    if ($hd_after < length($trimmed) && match(substr($trimmed, $hd_after, 1), "['\"]")) {
+                        $hd_after++;
+                    }
+                    $hd_after = $hd_after + length($hd_term);
+                    if ($hd_after < length($trimmed) && match(substr($trimmed, $hd_after, 1), "['\"]")) {
+                        $hd_after++;
+                    }
+                    my str $hd_trail = trim_str(substr($trimmed, $hd_after, length($trimmed) - $hd_after));
+                    # Remove trailing semicolon (we'll add our own)
+                    if (ends_with($hd_trail, ";")) {
+                        $hd_trail = substr($hd_trail, 0, length($hd_trail) - 1);
+                        $hd_trail = trim_str($hd_trail);
+                    }
+                    # Remove leading comma if it was a function arg separator
+                    if (starts_with($hd_trail, ",") || starts_with($hd_trail, ")")) {
+                        $hd_suffix = $hd_trail;
+                    } elsif (length($hd_trail) > 0) {
+                        # Trailing expression like . " suffix" or . $var
+                        $hd_suffix = " " . $hd_trail;
+                    }
+                }
+
+                # Collect heredoc body lines
+                my str $hd_body = "";
+                $i++;
+                while ($i < $num_lines) {
+                    my str $hd_line = $lines[$i];
+                    my str $hd_trimmed = trim_str($hd_line);
+                    if ($hd_trimmed eq $hd_term) {
+                        $i++;
+                        last;
+                    }
+                    # Escape: do a single pass — escape backslashes and double quotes together
+                    my str $hd_escaped = $hd_line;
+                    if ($hd_indented == 1) {
+                        $hd_escaped = trim_str($hd_escaped);
+                    }
+                    # Single-pass escaping: iterate character by character
+                    my str $hd_esc_out = "";
+                    my int $hd_ei = 0;
+                    my int $hd_elen = length($hd_escaped);
+                    while ($hd_ei < $hd_elen) {
+                        my str $hd_ech = substr($hd_escaped, $hd_ei, 1);
+                        if ($hd_ech eq "\\") {
+                            $hd_esc_out = $hd_esc_out . "\\\\";
+                        } elsif ($hd_ech eq "\"") {
+                            $hd_esc_out = $hd_esc_out . "\\\"";
+                        } else {
+                            $hd_esc_out = $hd_esc_out . $hd_ech;
+                        }
+                        $hd_ei++;
+                    }
+                    $hd_escaped = $hd_esc_out;
+                    if (length($hd_body) > 0) {
+                        $hd_body = $hd_body . "\\n";
+                    }
+                    $hd_body = $hd_body . $hd_escaped;
+                    $i++;
+                }
+
+                # Replace the heredoc syntax with a string literal
+                my str $hd_prefix = "";
+                # Get everything before <<TERM on the assignment line
+                my int $hd_arrow_pos = index($trimmed, "<<");
+                if ($hd_arrow_pos >= 0) {
+                    $hd_prefix = substr($trimmed, 0, $hd_arrow_pos);
+                }
+
+                my str $hd_new_line = "";
+                if ($hd_interp == 1 && match($hd_body, "\\$")) {
+                    # Interpolating heredoc: expand $var references
+                    # Body already has backslashes and double-quotes escaped from single-pass above
+                    # Wrap in quotes so convert_interp_in_dquote can process it
+                    my str $hd_interp_result = convert_interp_in_dquote("\"" . $hd_body . "\\n\"");
+                    $hd_new_line = $indent . $hd_prefix . $hd_interp_result . $hd_suffix;
+                } else {
+                    # Non-interpolating heredoc or no variables: just use string literal
+                    if ($hd_interp == 0) {
+                        # Use single quotes to prevent Strada from interpolating $vars
+                        my str $hd_sq_escaped = replace_all($hd_body, "'", "\\'");
+                        $hd_new_line = $indent . $hd_prefix . "'" . $hd_sq_escaped . "\\n'" . $hd_suffix;
+                    } else {
+                        $hd_new_line = $indent . $hd_prefix . "\"" . $hd_body . "\\n\"" . $hd_suffix;
+                    }
+                }
+                # Add semicolon if the original had one after the terminator
+                if (!match($hd_new_line, ";\\s*$")) {
+                    $hd_new_line = $hd_new_line . ";";
+                }
+                push(@out, $hd_new_line);
+                next;
+            }
+        }
+
+        # Detect Perl format blocks: format NAME = ... .
+        # Convert to commented-out block with sprintf() equivalent guidance
+        if (match($trimmed, "^format\\s+") && !match($trimmed, "#")) {
+            # Extract format name for reference
+            my array @fmt_cap = capture($trimmed, "^format\\s+(\\S+)\\s*=");
+            my str $fmt_name = "STDOUT";
+            if (scalar(@fmt_cap) > 1) {
+                $fmt_name = $fmt_cap[1];
+            }
+            push(@out, $indent . "# " . $trimmed . "  # Perl format block (" . $fmt_name . ") — use sprintf() for formatted output");
+            $i++;
+            # Collect format fields to generate sprintf() hint
+            my str $fmt_fields = "";
+            my int $fmt_field_count = 0;
+            while ($i < $num_lines) {
+                my str $fmt_line = trim_str($lines[$i]);
+                if ($fmt_line eq ".") {
+                    push(@out, $indent . "# .  # end of format block");
+                    $i++;
+                    last;
+                }
+                push(@out, $indent . "# " . $fmt_line);
+                # Count @<<< / @>>> / @||| fields (Perl format picture lines)
+                if (match($fmt_line, "@[<>|#]+")) {
+                    $fmt_field_count++;
+                }
+                $i++;
+            }
+            if ($fmt_field_count > 0) {
+                push(@out, $indent . "# Hint: replace write() calls with: say(sprintf(\"%-20s %10s\", $field1, $field2));");
+            }
+            next;
+        }
+
+        push(@out, $line);
+        $i++;
+    }
+
+    return @out;
+}
+
+# Pass 2d: Join continuation lines (multiline postfix if/unless, multiline statements)
+# Perl allows statements like:
+#   return $x
+#       if $cond;
+# or:
+#   push @arr,
+#       { key => value };
