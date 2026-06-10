@@ -370,3 +370,6 @@ test_output_contains "$EXAMPLES_DIR/test_unicode_normalize.strada" "test_unicode
 # Test: round-5 perf work (zero-copy keys COW, join_sv, decorated sort,
 # match-data reuse, condition CSE, growable sprintf)
 test_output_contains "$EXAMPLES_DIR/test_perf_round5.strada" "test_perf_round5" "All round5 perf tests passed" "Round-5 perf regressions"
+
+# Test: flattened multi-part concat (strada_concat_multi — interpolation chains)
+test_output_contains "$EXAMPLES_DIR/test_concat_multi.strada" "test_concat_multi" "All concat-multi tests passed" "Multi-part concat flattening"

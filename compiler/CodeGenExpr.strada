@@ -1,3 +1,135 @@
+# ===== Multi-part concat flattening =====
+# String interpolation desugars (in the parser) to left-deep `.` chains:
+# "a $x b $y" => ((("a " . $x) . " b ") . $y). The pairwise emitter costs
+# one concat call per part plus growth reallocs on the accumulator. For
+# chains of >= 3 leaf parts, flatten the tree and emit ONE
+# strada_concat_multi(...) call: the runtime sizes every part, allocates
+# the result StradaString exactly once, and memcpys the parts in.
+
+# Count the leaf parts of a `.` chain.
+func concat_chain_count(scalar $node) int {
+    if ($node->{"type"} == NODE_BINARY_OP() && $node->{"op"} eq ".") {
+        return concat_chain_count($node->{"left"}) + concat_chain_count($node->{"right"});
+    }
+    return 1;
+}
+
+# Collect leaf parts left-to-right into $st->{"nodes"} / $st->{"n"}.
+func concat_chain_collect(scalar $node, scalar $st) void {
+    if ($node->{"type"} == NODE_BINARY_OP() && $node->{"op"} eq ".") {
+        concat_chain_collect($node->{"left"}, $st);
+        concat_chain_collect($node->{"right"}, $st);
+        return;
+    }
+    my int $n = $st->{"n"};
+    $st->{"nodes"}->[$n] = $node;
+    $st->{"n"} = $n + 1;
+}
+
+# Emit a flattened multi-part concat. Returns 1 if emitted, 0 to fall back
+# to the pairwise paths (overload concern or oversized chain).
+#
+# Owned parts (calls, hash accesses, nested temps) are captured into temps
+# IN PART ORDER with cleanup_push between captures, so a later part's
+# throwing evaluation can't leak an earlier one — same discipline as the
+# pairwise emitter. Borrowed parts (plain variables, array subscripts) are
+# passed inline in the varargs call; their relative C evaluation order is
+# unspecified, which is only observable for tied containers with
+# order-dependent FETCH side effects (accepted, matches the risk profile
+# of the rest of the codegen's inline-arg emission).
+func gen_concat_multi(scalar $cg, scalar $expr) int {
+    my hash %st = ();
+    $st{"n"} = 0;
+    my array @nodes = ();
+    $st{"nodes"} = \@nodes;
+    concat_chain_collect($expr, \%st);
+    my int $n = $st{"n"};
+    if ($n < 3 || $n > 64) {
+        return 0;
+    }
+
+    # Mirror the pairwise emitter's overload gate: when a `.` or '""'
+    # overload is registered anywhere, any possibly-blessed part must take
+    # the overload-dispatching pairwise path.
+    if ($cg->{"has_overloads"} == 1) {
+        my scalar $ol_ops = $cg->{"overloaded_ops"};
+        my int $ol_concern = 0;
+        if (length("" . $ol_ops->{"."}) > 0) { $ol_concern = 1; }
+        if (length("" . $ol_ops->{"\"\""}) > 0) { $ol_concern = 1; }
+        if ($ol_concern == 1) {
+            my int $oi = 0;
+            while ($oi < $n) {
+                my scalar $opart = $nodes[$oi];
+                if ($opart->{"type"} != NODE_STR_LITERAL() && could_be_blessed($opart) == 1) {
+                    return 0;
+                }
+                $oi = $oi + 1;
+            }
+        }
+    }
+
+    my int $cm_id = $cg->{"tmp_counter"};
+    $cg->{"tmp_counter"} = $cm_id + 1;
+    my int $cleanup_on = $cg->{"cleanup_enabled"};
+
+    emit($cg, "(({ ");
+    # Capture owned parts into temps, push each for throw safety.
+    my int $i = 0;
+    my int $owned_count = 0;
+    while ($i < $n) {
+        my scalar $part = $nodes[$i];
+        if ($part->{"type"} != NODE_STR_LITERAL()
+            && $cleanup_on == 1 && needs_temp_cleanup($cg, $part) == 1) {
+            $st{"owned_" . $i} = 1;
+            emit($cg, "StradaValue *__cm" . $cm_id . "_" . $i . " = ");
+            gen_expression($cg, $part);
+            emit($cg, "; strada_cleanup_push(__cm" . $cm_id . "_" . $i . "); ");
+            $owned_count = $owned_count + 1;
+        }
+        $i = $i + 1;
+    }
+    $i = 0;
+    while ($i < $owned_count) {
+        emit($cg, "strada_cleanup_pop(); ");
+        $i = $i + 1;
+    }
+    emit($cg, "StradaValue *__cmr" . $cm_id . " = strada_concat_multi(" . $n);
+    $i = 0;
+    while ($i < $n) {
+        my scalar $part = $nodes[$i];
+        if ($part->{"type"} == NODE_STR_LITERAL()) {
+            my str $lit = $part->{"value"};
+            my int $litlen = bytes($lit);
+            # ASCII-ness known at compile time: kind 0 = ASCII, 2 = non-ASCII.
+            my int $kind = 0;
+            my int $bi = 0;
+            while ($bi < $litlen) {
+                if (ord(substr_bytes($lit, $bi, 1)) >= 128) { $kind = 2; last; }
+                $bi = $bi + 1;
+            }
+            emit($cg, ", " . $kind . ", ");
+            gen_str_literal_c($cg, $lit);
+            emit($cg, ", (size_t)" . $litlen);
+        } elsif (length("" . $st{"owned_" . $i}) > 0) {
+            emit($cg, ", 1, __cm" . $cm_id . "_" . $i);
+        } else {
+            emit($cg, ", 1, ");
+            gen_expression($cg, $part);
+        }
+        $i = $i + 1;
+    }
+    emit($cg, "); ");
+    $i = 0;
+    while ($i < $n) {
+        if (length("" . $st{"owned_" . $i}) > 0) {
+            emit($cg, "strada_decref(__cm" . $cm_id . "_" . $i . "); ");
+        }
+        $i = $i + 1;
+    }
+    emit($cg, "__cmr" . $cm_id . "; }))");
+    return 1;
+}
+
 # True when an assignment-target sub-expression is itself an element access
 # (hash or array, direct or deref) — i.e. an intermediate chain link that
 # must be autovivified rather than rvalue-fetched. Callers set
@@ -1684,6 +1816,15 @@ func gen_binop_node(scalar $cg, scalar $expr) void {
                         # Only stringify overload - stringify both sides then concat
                         gen_overloaded_concat($cg, $left, $right);
                     }
+                    return;
+                }
+            }
+
+            # Multi-part chains (string interpolation desugars to these):
+            # flatten to one strada_concat_multi call — single exactly-sized
+            # allocation instead of a concat call per part.
+            if (concat_chain_count($expr) >= 3) {
+                if (gen_concat_multi($cg, $expr) == 1) {
                     return;
                 }
             }

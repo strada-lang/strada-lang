@@ -1361,6 +1361,10 @@ void strada_substr_assign(StradaValue **sv_ptr, int64_t offset, int64_t length, 
 int strada_regex_match_global(const char *str, const char *pattern, const char *flags, size_t *pos);
 StradaValue* strada_sv_replace_all(StradaValue *sv, const char *find, const char *replace);
 StradaValue* strada_concat_cstr_sv(const char *prefix, size_t prefix_len, StradaValue *b);
+/* Multi-part concat (codegen-emitted for `.` chains / string interpolation).
+ * Varargs groups of (int kind, payload): 0 = ASCII literal (const char*,
+ * size_t), 2 = non-ASCII literal (same), 1 = StradaValue*. */
+StradaValue* strada_concat_multi(int nparts, ...);
 void strada_cstruct_set_string(StradaValue *sv, const char *field, size_t offset, const char *value);
 void strada_cstruct_set_double(StradaValue *sv, const char *field, size_t offset, double value);
 char* strada_cstruct_get_string(StradaValue *sv, const char *field, size_t offset);

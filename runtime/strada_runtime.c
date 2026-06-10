@@ -5431,6 +5431,135 @@ StradaValue* strada_concat_inplace_cstr(StradaValue *a, const char *str_b, size_
     return result;
 }
 
+/* Multi-part concat: build the result in ONE exactly-sized StradaString.
+ * Emitted by the codegen for `.` chains of >= 3 parts (string interpolation
+ * desugars to such chains in the parser), replacing N-1 concat calls plus
+ * their growth reallocs with a sizing pass + single allocation + memcpys.
+ *
+ * Varargs: nparts groups, each `int kind` followed by its payload:
+ *   kind 0: ASCII literal      (const char *s, size_t len)
+ *   kind 2: non-ASCII literal  (const char *s, size_t len)
+ *   kind 1: StradaValue *sv
+ *
+ * SV parts stringify EXACTLY like strada_concat_sv operands (single source
+ * of semantics — keep the two in sync): tied FETCH dispatched first; tagged/
+ * INT (incl. UV)/NUM formatted into a per-part buffer; STR borrowed with
+ * cached byte length; ARRAY contributes its element count (scalar context);
+ * REF (incl. '""' overload via strada_to_str), FILEHANDLE, CLOSURE and
+ * CPOINTER stringify through strada_to_str; everything else (UNDEF, HASH,
+ * ...) contributes the empty string, as in strada_concat_sv.
+ *
+ * Result flags mirror concat: ASCII iff every part is ASCII (overload-
+ * stringified parts are scanned, their own bytes only); SVf_UTF8 if any STR
+ * part carries it. */
+StradaValue* strada_concat_multi(int nparts, ...) {
+    typedef struct {
+        const char *p;
+        size_t len;
+        char *heap;            /* strada_to_str result — freed after the copy */
+        StradaValue *fetched;  /* tied FETCH result — decref'd after the copy */
+        int ascii;
+        int utf8;
+        char buf[40];
+    } CMPart;
+    CMPart stackparts[12];
+    CMPart *parts = stackparts;
+    if (nparts > 12) parts = sr_xmalloc((size_t)nparts * sizeof(CMPart));
+
+    va_list ap;
+    va_start(ap, nparts);
+    size_t total = 0;
+    int all_ascii = 1;
+    int any_utf8 = 0;
+    for (int i = 0; i < nparts; i++) {
+        CMPart *pt = &parts[i];
+        pt->heap = NULL;
+        pt->fetched = NULL;
+        pt->ascii = 1;
+        pt->utf8 = 0;
+        pt->p = "";
+        pt->len = 0;
+        int kind = va_arg(ap, int);
+        if (kind != 1) {
+            pt->p = va_arg(ap, const char *);
+            pt->len = va_arg(ap, size_t);
+            if (kind == 2) pt->ascii = 0;
+        } else {
+            StradaValue *v = va_arg(ap, StradaValue *);
+            if (v && !STRADA_IS_TAGGED_INT(v) && v->meta && v->meta->is_tied && v->meta->tied_obj) {
+                pt->fetched = strada_tied_scalar_fetch(v);
+                v = pt->fetched;
+            }
+            if (STRADA_IS_TAGGED_INT(v)) {
+                pt->len = strada_fast_itoa(STRADA_TAGGED_INT_VAL(v), pt->buf);
+                pt->p = pt->buf;
+            } else if (v) {
+                if (v->type == STRADA_STR && v->value.pv) {
+                    pt->p = v->value.pv;
+                    pt->len = STRADA_STR_BYTELEN(v);
+                    pt->ascii = STRADA_STR_IS_ASCII(v) ? 1 : 0;
+                    pt->utf8 = STRADA_STR_IS_UTF8(v) ? 1 : 0;
+                } else if (v->type == STRADA_INT) {
+                    if (v->struct_size & STRADA_UV_FLAG)
+                        pt->len = (size_t)snprintf(pt->buf, sizeof(pt->buf), "%llu", (unsigned long long)(uint64_t)v->value.iv);
+                    else
+                        pt->len = strada_fast_itoa(v->value.iv, pt->buf);
+                    pt->p = pt->buf;
+                } else if (v->type == STRADA_NUM) {
+                    pt->len = strada_format_double(v->value.nv, pt->buf, sizeof(pt->buf));
+                    pt->p = pt->buf;
+                } else if (v->type == STRADA_ARRAY) {
+                    int64_t n = v->value.av ? (int64_t)strada_array_length(v->value.av) : 0;
+                    pt->len = strada_fast_itoa(n, pt->buf);
+                    pt->p = pt->buf;
+                } else if ((v->type == STRADA_REF && v->value.rv)
+                           || v->type == STRADA_FILEHANDLE
+                           || v->type == STRADA_CLOSURE
+                           || v->type == STRADA_CPOINTER) {
+                    pt->heap = strada_to_str(v);
+                    if (pt->heap) {
+                        pt->p = pt->heap;
+                        pt->len = strlen(pt->heap);
+                        pt->ascii = (_str_flags(pt->p, pt->len) & STRADA_ASCII_FLAG) ? 1 : 0;
+                    }
+                }
+                /* UNDEF / HASH / anything else: empty (matches concat_sv) */
+            }
+        }
+        if (!pt->ascii) all_ascii = 0;
+        if (pt->utf8) any_utf8 = 1;
+        total += pt->len;
+    }
+    va_end(ap);
+
+    /* StradaString.len is uint32_t — abort cleanly rather than truncate
+     * (mirrors the concat/join 4GB guards). */
+    if (total > UINT32_MAX) {
+        fprintf(stderr, "strada: string concat exceeds 4GB limit (%zu bytes)\n", total);
+        abort();
+    }
+
+    StradaString *oss = ss_new_uninit((uint32_t)total);
+    char *w = oss->data;
+    for (int i = 0; i < nparts; i++) {
+        CMPart *pt = &parts[i];
+        if (pt->len > 0) { memcpy(w, pt->p, pt->len); w += pt->len; }
+        if (pt->heap) free(pt->heap);
+        if (pt->fetched) strada_decref(pt->fetched);
+    }
+    *w = '\0';
+
+    StradaValue *rv = strada_value_alloc();
+    rv->type = STRADA_STR;
+    rv->refcount = 1;
+    rv->value.pv = oss->data;
+    rv->struct_size = total
+                    | (all_ascii ? STRADA_ASCII_FLAG : 0)
+                    | (any_utf8 ? STRADA_UTF8_FLAG : 0);
+    if (parts != stackparts) free(parts);
+    return rv;
+}
+
 /* Fast character access by byte index - returns char code, no allocation */
 StradaValue* strada_char_at(StradaValue *str, StradaValue *index) {
     if (!str || STRADA_IS_TAGGED_INT(str) || str->type != STRADA_STR || !str->value.pv) {

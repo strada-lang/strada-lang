@@ -1,0 +1,37 @@
+# Interpolation / multi-part concat microbenchmark (round 7).
+#   interp6  — 6-part interpolation (lit/var alternating), 5M iterations
+#   chain10  — 10-part explicit `.` chain with int parts, 2M iterations
+#   concat2  — 2-part concat control (pairwise path, should be unchanged)
+
+func main() int {
+    my str $s1 = "alpha";
+    my str $s2 = "beta";
+    my int $n = 42;
+    my num $t0 = 0.0;
+
+    $t0 = core::hires_time();
+    my int $acc = 0;
+    foreach my $i (0..4999999) {
+        my str $r = "a: ${s1}, b: ${s2}, n: ${n}!";
+        $acc = $acc + length($r);
+    }
+    say("interp6:  " . (core::hires_time() - $t0) . "  (" . $acc . ")");
+
+    $t0 = core::hires_time();
+    my int $acc2 = 0;
+    foreach my $i (0..1999999) {
+        my str $r = "x" . $i . "y" . $n . "z" . $s1 . "w" . $i . "v" . $s2;
+        $acc2 = $acc2 + length($r);
+    }
+    say("chain10:  " . (core::hires_time() - $t0) . "  (" . $acc2 . ")");
+
+    $t0 = core::hires_time();
+    my int $acc3 = 0;
+    foreach my $i (0..4999999) {
+        my str $r = "pre-" . $s1;
+        $acc3 = $acc3 + length($r);
+    }
+    say("concat2:  " . (core::hires_time() - $t0) . "  (" . $acc3 . ")");
+
+    return 0;
+}

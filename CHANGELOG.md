@@ -50,6 +50,19 @@
   total Ir went 1,101.6M → 923.6M and cc_tab_slot 142.7M → 31.6M. Cycle
   reclamation is unchanged for programs that do create cycles.
 
+### Performance (round 7, 2026-06-10)
+- **String interpolation / concat chains ~1.5x**: `.` chains of >= 3 leaf
+  parts (interpolation desugars to these) compile to one
+  `strada_concat_multi` call — sizing pass + single exactly-sized
+  allocation — instead of a concat call per part with growth reallocs.
+  Owned parts keep the pairwise emitter's cleanup-push discipline
+  (throwing part evaluation leaks nothing); `.`/`""` overload programs
+  fall back to the dispatching path for possibly-blessed parts; part
+  stringification mirrors `strada_concat_sv` exactly (tied FETCH, UV ints,
+  array counts, ref/coderef formats, ASCII/UTF-8 flag propagation).
+  Whole-benchmark instructions −23% (callgrind); suite 166 → 167
+  (`test_concat_multi`).
+
 ### Performance (rounds 1–4, 2026-06-09/10)
 - **Method dispatch ~2x** (type-opaque call sites): compile-time method-name
   hashing, a 64-entry generation-invalidated global cache with cached

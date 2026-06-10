@@ -1391,6 +1391,7 @@ void strada_pool_shutdown(void);
 StradaValue* strada_sv_replace_first(StradaValue *sv, const char *find, const char *replace);
 StradaValue* strada_sv_replace_all(StradaValue *sv, const char *find, const char *replace);
 StradaValue* strada_concat_cstr_sv(const char *prefix, size_t prefix_len, StradaValue *b);
+StradaValue* strada_concat_multi(int nparts, ...);
 int strada_regex_match_global(const char *str, const char *pattern, const char *flags, size_t *pos);
 
 /* Stack-allocated 1-element array for fast method calls */

@@ -99,6 +99,27 @@ constraint rules out, and the bit already removed the per-decref cost).
 Type-morph sites (overwrite_in_place, vec_set's STR conversion) retire a
 buffered candidate via cc_forget before clobbering type/struct_size.
 
+## Round 7: multi-part concat flattening (2026-06-10)
+
+`.` chains of >= 3 leaf parts (string interpolation desugars to these in
+the parser) now compile to one `strada_concat_multi` call — a sizing pass
+plus a single exactly-sized StradaString — instead of one concat call per
+part with growth reallocs on the accumulator. Harness
+`benchmarks/bench_interp.strada`, old = worktree build of `5d80c67`,
+interleaved best-of-5 on a quiet box:
+
+| section | workload | old | new | speedup |
+|---------|----------|-----|-----|---------|
+| interp6 | 6-part interpolation, 5M iters | 0.428s | 0.279s | 1.54x |
+| chain10 | 10-part explicit chain (mixed int/str parts), 2M iters | 0.254s | 0.177s | 1.43x |
+| concat2 | 2-part control (pairwise path unchanged) | 0.112s | 0.081s | (layout noise — see below) |
+
+The 2-part control's wall-clock delta is code-layout/alignment variance
+under LTO, not a real change (its emission is byte-identical). Callgrind
+(layout-insensitive) on the whole three-section benchmark: 11.06B → 8.51B
+instructions (−23.1%), with the control section diluting the figure — the
+flattened sections shrank substantially more than wall-clock suggests.
+
 ## Investigated and closed: foreach-over-keys codegen fast path
 
 Considered alongside the zero-copy keys work: a dedicated codegen path for
