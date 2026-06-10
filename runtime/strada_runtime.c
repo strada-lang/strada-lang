@@ -9913,6 +9913,26 @@ static void strada_md_release(pcre2_match_data *md) {
     pcre2_match_data_free(md);
 }
 
+/* Number of ovector pairs that are VALID for this pattern: its capture
+ * count + 1 (the whole-match pair). pcre2_get_ovector_count returns the
+ * match data's CAPACITY, and pooled match data (strada_md_acquire) can be
+ * oversized for the current pattern — pairs beyond the pattern's groups
+ * then hold STALE offsets from an earlier match against a different
+ * (possibly longer) subject. They are NOT PCRE2_UNSET, so capture
+ * extraction read past the current subject (valgrind: invalid read after
+ * block; corrupted later substitutions). Verified against PCRE2: after a
+ * successful match, IN-pattern non-participating groups ARE set to
+ * PCRE2_UNSET (so trailing optional groups keep their positional undef in
+ * captures()/split), while pairs beyond the pattern are never touched —
+ * which is also why clamping to rc would be subtly wrong: rc stops at the
+ * highest PARTICIPATING group and would drop those trailing undefs. */
+static uint32_t strada_md_valid_pairs(const pcre2_code *re, pcre2_match_data *md) {
+    uint32_t cc = 0;
+    pcre2_pattern_info(re, PCRE2_INFO_CAPTURECOUNT, &cc);
+    uint32_t cap = pcre2_get_ovector_count(md);
+    return (cc + 1 < cap) ? cc + 1 : cap;
+}
+
 static void regex_cleanup_atexit(void) {
     if (last_regex_captures) { strada_decref(last_regex_captures); last_regex_captures = NULL; }
     if (last_named_captures) { strada_decref(last_named_captures); last_named_captures = NULL; }
@@ -9990,7 +10010,7 @@ int strada_regex_match_global(const char *str, const char *pattern, const char *
 
     if (rc >= 0) {
         PCRE2_SIZE *ovector = pcre2_get_ovector_pointer(match_data);
-        uint32_t count = pcre2_get_ovector_count(match_data);
+        uint32_t count = strada_md_valid_pairs(re, match_data);
 
         /* Update position past this match */
         *pos = ovector[1];
@@ -10099,7 +10119,7 @@ int strada_regex_match_with_capture(const char *str, const char *pattern, const 
      * previously-built structures rebuild on next access. */
     if (rc >= 0) {
         PCRE2_SIZE *ovector = pcre2_get_ovector_pointer(match_data);
-        uint32_t count = pcre2_get_ovector_count(match_data);
+        uint32_t count = strada_md_valid_pairs(re, match_data);
         pm_record(str, subject_length, strada_regex_subject_utf8, ovector, count);
 
         /* Named captures are built eagerly ONLY when the pattern actually has
@@ -10544,7 +10564,7 @@ int strada_regex_replace_capture(const char *str, const char *pattern, const cha
     StradaArray *captures = strada_array_new();
     if (rc >= 0) {
         PCRE2_SIZE *ovector = pcre2_get_ovector_pointer(cap_md);
-        uint32_t count = pcre2_get_ovector_count(cap_md);
+        uint32_t count = strada_md_valid_pairs(re, cap_md);
         for (uint32_t i = 0; i < count; i++) {
             if (ovector[2*i] != PCRE2_UNSET) {
                 PCRE2_SIZE start = ovector[2*i];
@@ -10889,7 +10909,7 @@ StradaArray* strada_regex_split(const char *str, const char *pattern) {
          * the captured substrings between split parts. `split /(\s+)/,
          * "a b c"` yields ("a"," ","b"," ","c"). Without this the captures
          * are silently dropped. */
-        uint32_t cap_count = pcre2_get_ovector_count(match_data);
+        uint32_t cap_count = strada_md_valid_pairs(re, match_data);
         for (uint32_t ci = 1; ci < cap_count; ci++) {
             PCRE2_SIZE cs = ovector[2 * ci];
             PCRE2_SIZE ce = ovector[2 * ci + 1];
@@ -10975,7 +10995,7 @@ StradaArray* strada_regex_split_limit(const char *str, const char *pattern, int 
         /* Captures are inserted between adjacent chunks but do NOT count
          * toward LIMIT. Push them here so they appear between the chunk
          * we just pushed and either the next chunk or the final tail. */
-        uint32_t cap_count = pcre2_get_ovector_count(match_data);
+        uint32_t cap_count = strada_md_valid_pairs(re, match_data);
         for (uint32_t ci = 1; ci < cap_count; ci++) {
             PCRE2_SIZE cs = ovector[2 * ci];
             PCRE2_SIZE ce = ovector[2 * ci + 1];
@@ -11028,7 +11048,7 @@ StradaArray* strada_regex_capture(const char *str, const char *pattern) {
 
     if (rc >= 0) {
         PCRE2_SIZE *ovector = pcre2_get_ovector_pointer(match_data);
-        uint32_t count = pcre2_get_ovector_count(match_data);
+        uint32_t count = strada_md_valid_pairs(re, match_data);
 
         for (uint32_t i = 0; i < count; i++) {
             if (ovector[2*i] != PCRE2_UNSET) {

@@ -1,0 +1,40 @@
+func main() int {
+    my int $fails = 0;
+
+    # Poison the pooled match data: many capture groups, long subject.
+    my str $long = "................xyzwv-this-is-a-deliberately-long-subject........";
+    if ($long =~ /(x)(y)(z)(w)(v)/) { }
+
+    # Now a small pattern on a SHORT subject using the same pooled data.
+    # Stale high slots must not leak into captures.
+    my str $short = "a";
+    if ($short =~ /(a)(b)?/) {
+        my array @c = captures();
+        say("ncaps=" . size(@c));
+        say("c0=[" . $c[0] . "]");
+        say("c1=[" . $c[1] . "]");
+        say("c2-defined=" . defined($c[2]));
+        if (size(@c) != 3) { say("FAIL arity"); $fails = $fails + 1; }
+        if ($c[1] ne "a") { say("FAIL g1"); $fails = $fails + 1; }
+        if (defined($c[2])) { say("FAIL g2-should-be-undef"); $fails = $fails + 1; }
+    } else {
+        say("FAIL nomatch"); $fails = $fails + 1;
+    }
+
+    # split with trailing optional capture keeps its undef placeholder
+    if ("q5rs" =~ /(p)(q)(r)(s)(t)/) { }   # re-poison
+    my array @parts = split(/(\d)(X)?/, "a5b");
+    say("split=" . size(@parts) . " [" . $parts[0] . "][" . $parts[1] . "]");
+
+    # /g loop with poisoned pool: captures stay sane per iteration
+    if ("mnopqr" =~ /(m)(n)(o)(p)(q)(r)/) { }
+    my str $subj = "a1 b2";
+    my int $n = 0;
+    while ($subj =~ /([a-z])(\d)/g) {
+        $n = $n + 1;
+    }
+    if ($n != 2) { say("FAIL gloop n=" . $n); $fails = $fails + 1; }
+
+    if ($fails == 0) { say("All pool-capture tests passed"); }
+    return 0;
+}

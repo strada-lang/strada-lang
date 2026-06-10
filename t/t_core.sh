@@ -374,6 +374,10 @@ test_output_contains "$EXAMPLES_DIR/test_perf_round5.strada" "test_perf_round5" 
 # Test: flattened multi-part concat (strada_concat_multi — interpolation chains)
 test_output_contains "$EXAMPLES_DIR/test_concat_multi.strada" "test_concat_multi" "All concat-multi tests passed" "Multi-part concat flattening"
 
+# Test: pooled match-data capture clamping (stale ovector slots from an
+# earlier bigger match must not leak; trailing optional groups keep undef)
+test_output_contains "$EXAMPLES_DIR/test_regex_pool_captures.strada" "test_regex_pool_captures" "All pool-capture tests passed" "Pooled regex capture clamping"
+
 # Test: c::callback libffi trampolines (qsort comparator, marshaling, free).
 # Requires libffi at build time — skip cleanly when configured out.
 if grep -q "^export STRADA_HAVE_LIBFFI=1" "$PROJECT_DIR/config.sh" 2>/dev/null; then
