@@ -4779,8 +4779,25 @@ func gen_expression(scalar $cg, scalar $expr) void {
         $cg->{"map_counter"} = $map_id + 1;
 
         my int $map_arr_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $array_expr) == 1;
+        # Lazy-range fast path: map over an int-typed range iterates a
+        # native C loop — no strada_range array materialization (mirrors
+        # the foreach range path; `map {...} (1..1e6)` no longer builds a
+        # million-element input). $_ is a tagged int per iteration.
+        my int $map_is_range = 0;
+        if ($array_expr->{"type"} == NODE_RANGE()
+            && expr_is_int_typed($cg, $array_expr->{"start"}) == 1
+            && expr_is_int_typed($cg, $array_expr->{"end"}) == 1) {
+            $map_is_range = 1;
+            $map_arr_cleanup = 0;
+        }
         emit($cg, "({ ");
-        if ($map_arr_cleanup == 1) {
+        if ($map_is_range == 1) {
+            emit($cg, "int64_t __map_rs_" . $map_id . " = ");
+            emit_int_operand($cg, $array_expr->{"start"});
+            emit($cg, "; int64_t __map_re_" . $map_id . " = ");
+            emit_int_operand($cg, $array_expr->{"end"});
+            emit($cg, "; ");
+        } elsif ($map_arr_cleanup == 1) {
             emit($cg, "StradaValue *__map_sv_" . $map_id . " = ");
             gen_expression($cg, $array_expr);
             # Push so a throwing block body lets the catch's drain
@@ -4792,9 +4809,16 @@ func gen_expression(scalar $cg, scalar $expr) void {
             emit($cg, "); ");
         }
         emit($cg, "StradaValue *__map_result_" . $map_id . " = strada_new_array(); strada_cleanup_push(__map_result_" . $map_id . "); ");
-        emit($cg, "int __map_len_" . $map_id . " = strada_array_length(__map_input_" . $map_id . "); ");
-        emit($cg, "for (int __map_i_" . $map_id . " = 0; __map_i_" . $map_id . " < __map_len_" . $map_id . "; __map_i_" . $map_id . "++) { ");
-        emit($cg, "StradaValue *__elem_ = strada_array_get(__map_input_" . $map_id . ", __map_i_" . $map_id . "); ");
+        if ($map_is_range == 1) {
+            emit($cg, "for (int64_t __map_i_" . $map_id . " = __map_rs_" . $map_id . "; __map_i_" . $map_id . " <= __map_re_" . $map_id . "; __map_i_" . $map_id . "++) { ");
+            # Tagged for the practical range -> immortal, safe to treat as
+            # borrowed exactly like the array path's array_get result.
+            emit($cg, "StradaValue *__elem_ = strada_new_int(__map_i_" . $map_id . "); ");
+        } else {
+            emit($cg, "int __map_len_" . $map_id . " = strada_array_length(__map_input_" . $map_id . "); ");
+            emit($cg, "for (int __map_i_" . $map_id . " = 0; __map_i_" . $map_id . " < __map_len_" . $map_id . "; __map_i_" . $map_id . "++) { ");
+            emit($cg, "StradaValue *__elem_ = strada_array_get(__map_input_" . $map_id . ", __map_i_" . $map_id . "); ");
+        }
 
         # Set flag to enable $_ magic variable
         $cg->{"in_map_block"} = 1;
@@ -4947,8 +4971,23 @@ func gen_expression(scalar $cg, scalar $expr) void {
         $cg->{"grep_counter"} = $grep_id + 1;
 
         my int $grep_arr_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $array_expr) == 1;
+        # Lazy-range fast path (mirrors map): grep over an int-typed range
+        # iterates natively — no input array materialization.
+        my int $grep_is_range = 0;
+        if ($array_expr->{"type"} == NODE_RANGE()
+            && expr_is_int_typed($cg, $array_expr->{"start"}) == 1
+            && expr_is_int_typed($cg, $array_expr->{"end"}) == 1) {
+            $grep_is_range = 1;
+            $grep_arr_cleanup = 0;
+        }
         emit($cg, "({ ");
-        if ($grep_arr_cleanup == 1) {
+        if ($grep_is_range == 1) {
+            emit($cg, "int64_t __grep_rs_" . $grep_id . " = ");
+            emit_int_operand($cg, $array_expr->{"start"});
+            emit($cg, "; int64_t __grep_re_" . $grep_id . " = ");
+            emit_int_operand($cg, $array_expr->{"end"});
+            emit($cg, "; ");
+        } elsif ($grep_arr_cleanup == 1) {
             emit($cg, "StradaValue *__grep_sv_" . $grep_id . " = ");
             gen_expression($cg, $array_expr);
             emit($cg, "; strada_cleanup_push(__grep_sv_" . $grep_id . "); StradaArray *__grep_input_" . $grep_id . " = strada_deref_array(__grep_sv_" . $grep_id . "); ");
@@ -4958,9 +4997,14 @@ func gen_expression(scalar $cg, scalar $expr) void {
             emit($cg, "); ");
         }
         emit($cg, "StradaValue *__grep_result_" . $grep_id . " = strada_new_array(); strada_cleanup_push(__grep_result_" . $grep_id . "); ");
-        emit($cg, "int __grep_len_" . $grep_id . " = strada_array_length(__grep_input_" . $grep_id . "); ");
-        emit($cg, "for (int __grep_i_" . $grep_id . " = 0; __grep_i_" . $grep_id . " < __grep_len_" . $grep_id . "; __grep_i_" . $grep_id . "++) { ");
-        emit($cg, "StradaValue *__elem_ = strada_array_get(__grep_input_" . $grep_id . ", __grep_i_" . $grep_id . "); ");
+        if ($grep_is_range == 1) {
+            emit($cg, "for (int64_t __grep_i_" . $grep_id . " = __grep_rs_" . $grep_id . "; __grep_i_" . $grep_id . " <= __grep_re_" . $grep_id . "; __grep_i_" . $grep_id . "++) { ");
+            emit($cg, "StradaValue *__elem_ = strada_new_int(__grep_i_" . $grep_id . "); ");
+        } else {
+            emit($cg, "int __grep_len_" . $grep_id . " = strada_array_length(__grep_input_" . $grep_id . "); ");
+            emit($cg, "for (int __grep_i_" . $grep_id . " = 0; __grep_i_" . $grep_id . " < __grep_len_" . $grep_id . "; __grep_i_" . $grep_id . "++) { ");
+            emit($cg, "StradaValue *__elem_ = strada_array_get(__grep_input_" . $grep_id . ", __grep_i_" . $grep_id . "); ");
+        }
 
         # Set flag to enable $_ magic variable
         $cg->{"in_grep_block"} = 1;

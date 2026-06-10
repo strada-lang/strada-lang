@@ -73,8 +73,9 @@ exception is the type system.
   crossing, 2026-06-10), ~~no error chaining~~ ✅ (`core::exception_trace`
   + `lib/Exception.strada` cause chains, 2026-06-10), `switch`/`case` is
   `strcmp`-only (not an expression, no binding/exhaustiveness), no
-  comprehensions, ranges are eager outside foreach (`1..1e6`
-  materializes), ~~no value-producing `do {}` block~~ ✅ (2026-06-10;
+  comprehensions, ranges are eager only in materializing contexts now (foreach/map/grep
+  over int ranges iterate natively, 2026-06-10; list assignment & args
+  materialize by design), ~~no value-producing `do {}` block~~ ✅ (2026-06-10;
   last-expression-statement value, ternary for conditional tails), ~~no
   `reduce`/`any`/`all`~~ ✅ (`lib/List.strada`, 2026-06-10).
 - **FFI / low-level:** ~~no closure→C-callback trampoline~~ ✅ shipped

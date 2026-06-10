@@ -19415,7 +19415,11 @@ StradaValue* strada_hash_from_flat_array(StradaValue *arr) {
     if (src->size > 0 && src->elements[src->head]) {
         StradaValue *first = src->elements[src->head];
         StradaArray *first_av = NULL;
-        if (first->type == STRADA_ARRAY) {
+        /* Tagged-int guard: range-produced keys (map { $_ => 1 } (1..N))
+         * are tagged pointers — dereferencing ->type segfaulted. */
+        if (STRADA_IS_TAGGED_INT(first)) {
+            first_av = NULL;
+        } else if (first->type == STRADA_ARRAY) {
             first_av = first->value.av;
         } else if (first->type == STRADA_REF && first->value.rv && first->value.rv->type == STRADA_ARRAY) {
             first_av = first->value.rv->value.av;
@@ -19424,9 +19428,9 @@ StradaValue* strada_hash_from_flat_array(StradaValue *arr) {
             for (size_t i = 0; i < src->size; i++) {
                 StradaValue *elem = src->elements[src->head + i];
                 StradaArray *pair_av = NULL;
-                if (elem && elem->type == STRADA_ARRAY) {
+                if (elem && !STRADA_IS_TAGGED_INT(elem) && elem->type == STRADA_ARRAY) {
                     pair_av = elem->value.av;
-                } else if (elem && elem->type == STRADA_REF && elem->value.rv && elem->value.rv->type == STRADA_ARRAY) {
+                } else if (elem && !STRADA_IS_TAGGED_INT(elem) && elem->type == STRADA_REF && elem->value.rv && elem->value.rv->type == STRADA_ARRAY) {
                     pair_av = elem->value.rv->value.av;
                 }
                 /* If this element is itself a *list of pairs* (e.g. produced by a
@@ -19439,9 +19443,9 @@ StradaValue* strada_hash_from_flat_array(StradaValue *arr) {
                 if (pair_av && pair_av->size > 0) {
                     StradaValue *inner_first = pair_av->elements[pair_av->head];
                     StradaArray *inner_first_av = NULL;
-                    if (inner_first && inner_first->type == STRADA_ARRAY) {
+                    if (inner_first && !STRADA_IS_TAGGED_INT(inner_first) && inner_first->type == STRADA_ARRAY) {
                         inner_first_av = inner_first->value.av;
-                    } else if (inner_first && inner_first->type == STRADA_REF
+                    } else if (inner_first && !STRADA_IS_TAGGED_INT(inner_first) && inner_first->type == STRADA_REF
                             && inner_first->value.rv && inner_first->value.rv->type == STRADA_ARRAY) {
                         inner_first_av = inner_first->value.rv->value.av;
                     }
@@ -19453,9 +19457,9 @@ StradaValue* strada_hash_from_flat_array(StradaValue *arr) {
                     for (size_t j = 0; j < pair_av->size; j++) {
                         StradaValue *sub = pair_av->elements[pair_av->head + j];
                         StradaArray *sub_av = NULL;
-                        if (sub && sub->type == STRADA_ARRAY) {
+                        if (sub && !STRADA_IS_TAGGED_INT(sub) && sub->type == STRADA_ARRAY) {
                             sub_av = sub->value.av;
-                        } else if (sub && sub->type == STRADA_REF
+                        } else if (sub && !STRADA_IS_TAGGED_INT(sub) && sub->type == STRADA_REF
                                 && sub->value.rv && sub->value.rv->type == STRADA_ARRAY) {
                             sub_av = sub->value.rv->value.av;
                         }

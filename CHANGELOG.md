@@ -3,6 +3,12 @@
 ## Unreleased (since `0da0455`, 2026-06-09 → 2026-06-10)
 
 ### Language & stdlib (2026-06-10)
+- **Lazy ranges in map/grep** — `map {...} (1..1e6)` / `grep {...}`
+  over int-typed ranges iterate a native C loop (no input array;
+  mirrors the foreach range fast path). Fixed in passing: a missing
+  tagged-int guard in `strada_hash_from_flat_array` crashed
+  `my hash %h = map { $_ => 1 } <ints>` whenever the keys were tagged
+  integers (pre-existing; range keys made it common). Suite 178 → 179.
 - **Value-producing `do {}`** — `my $x = do { ...; expr; };`: the last
   EXPRESSION statement is the value (undef for non-expression tails);
   block-locals clean up before the value is yielded. Documented edges:
