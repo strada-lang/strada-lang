@@ -644,6 +644,14 @@ my str $result = await $future;
 
 Thread pool backend (default 4 workers). Functions: `async::all()`, `async::race()`, `async::timeout()`, `async::cancel()`. Channels: `async::channel()`, `async::send()`, `async::recv()`. Mutexes: `async::mutex()`, `async::lock()`, `async::unlock()`. Atomics: `async::atomic()`, `async::atomic_add()`, `async::atomic_cas()`.
 
+**Concurrency ergonomics (2026-06):**
+- `async::spawn($fn)` — run any closure as a pool future (the function form of `async func`).
+- `async::select(\@channels [, $timeout_ms])` — block until one channel has a value; atomically dequeues. Returns `[index, value]`; index `-1` = timeout, `-2` = all channels closed and drained.
+- `async::sleep($ms)` — cancellation-aware: wakes early (returns 0) if this task's future is cancelled; returns 1 after a full sleep. `async::cancelled()` — has THIS task been asked to cancel (cooperative loops poll it).
+- `async::map($fn, \@items [, $workers])` — data-parallel map, results in input order; work-shared via an atomic index; the first exception cancels remaining work and rethrows in the caller.
+- `thread::tls_set/tls_get/tls_exists/tls_delete($name, ...)` — per-thread named values, freed at thread exit.
+- **`Async::Scope`** (lib) — structured concurrency: `$scope->spawn($fn)` / `$scope->wait()` joins all, and a failure cancels the remaining siblings and rethrows. **`Async::Actor`** (lib) — message-driven actors: `tell` (fire-and-forget), `ask` (round-trip), strictly ordered handling, `stop` drains.
+
 ### Variadic Functions and Spread
 
 ```strada

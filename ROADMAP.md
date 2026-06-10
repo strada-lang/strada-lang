@@ -53,10 +53,11 @@ exception is the type system.
 - **Type system:** no sum types / `match`-expression, no nullable/optional
   types, no type aliases/newtypes, roles are literally `extends` (no
   required-method contracts), inference is sigil-defaulting only.
-- **Concurrency:** no `select` over channels, no structured concurrency /
-  nursery scope construct, no `async::sleep`/`yield` (a sleeping task blocks a
-  pool thread), no work-stealing / data-parallel map, no actors, no
-  language-level thread-local.
+- **Concurrency:** ✅ closed 2026-06-10 — `async::select`, `Async::Scope`
+  (nursery), cancellation-aware `async::sleep` + `async::cancelled`,
+  `async::map` (data-parallel), `Async::Actor`, `thread::tls_*`. Still
+  thread-pool parallelism (a sleeping task holds a pool thread; true M:N
+  parking needs coroutines — see generators in Tier-1).
 - **Std lib:** no binary serialization (MessagePack/CBOR), no rich collections
   (Set/Deque/heap/ordered-map — only a LinkedList), no standalone URI module,
   DateTime has no IANA timezones / DST-aware math, no logging framework (only
@@ -148,16 +149,14 @@ field added in Stage 1.
 
 ---
 
-## Concurrency follow-ups (Tier-2 ergonomics)
+## Concurrency follow-ups (Tier-2 ergonomics) — ✅ SHIPPED 2026-06-10
 
-With thread-safety and threaded cycle collection now shipped, the remaining
-concurrency work is ergonomics, not correctness:
-
-- `select` over multiple channels.
-- Structured concurrency / nursery scope (scoped task groups with propagated
-  cancellation and failure).
-- `async::sleep`/`yield` that parks cooperatively instead of blocking a pool
-  thread; cancellation-aware blocking primitives.
-- Work-stealing / data-parallel `map`.
-- Actor model.
-- Language-level thread-local declaration (today only via the global registry).
+All six items landed: `async::select` (global-cond wakeups, atomic dequeue,
+timeout/all-closed results), `Async::Scope` nursery (failure cancels
+siblings, first error rethrown), cancellation-aware `async::sleep` +
+`async::cancelled` (a cancelled task's sleep wakes immediately),
+`async::map` (atomic-index work sharing, ordered results, error
+propagation), `Async::Actor` (channel-inbox actors with tell/ask/stop),
+and `thread::tls_*`. The one deliberate non-goal: sleeps still occupy a
+pool thread — cooperative M:N parking requires coroutines (the
+generators item in Tier-1).

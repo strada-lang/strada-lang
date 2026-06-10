@@ -1,0 +1,139 @@
+# Regression tests for the 2026-06 concurrency-ergonomics round:
+#   async::select (value / timeout / all-closed), async::spawn,
+#   cancellation-aware async::sleep + async::cancelled, async::map
+#   (order, parallelism contract, error propagation), thread::tls_*,
+#   Async::Scope (nursery: results + failure cancels siblings),
+#   Async::Actor (tell/ask ordering, stop) — plus, implicitly, the
+#   per-thread try stacks (map error propagation requires them).
+
+use lib "lib";
+use Async::Scope;
+use Async::Actor;
+
+func main() int {
+    my int $fails = 0;
+
+    # --- async::select ---
+    my scalar $ch1 = async::channel(4);
+    my scalar $ch2 = async::channel(4);
+    async::send($ch2, "two");
+    my array @sel = async::select([$ch1, $ch2]);
+    if ($sel[0] != 1 || $sel[1] ne "two") { say("FAIL select: " . $sel[0]); $fails = $fails + 1; }
+    my array @to = async::select([$ch1], 50);
+    if ($to[0] != -1) { say("FAIL select-timeout: " . $to[0]); $fails = $fails + 1; }
+    async::close($ch1);
+    async::close($ch2);
+    my array @cl = async::select([$ch1, $ch2], 50);
+    if ($cl[0] != -2) { say("FAIL select-closed: " . $cl[0]); $fails = $fails + 1; }
+
+    # --- spawn + cancellation-aware sleep ---
+    my scalar $done = async::channel(1);
+    my num $t0 = core::hires_time();
+    my scalar $f = async::spawn(fn () scalar {
+        my int $full = async::sleep(8000);
+        async::send($done, $full);
+        return 0;
+    });
+    core::usleep(50000);
+    async::cancel($f);
+    my scalar $woke = async::recv($done);
+    my num $elapsed = core::hires_time() - $t0;
+    if ($woke != 0) { say("FAIL sleep-not-early: " . $woke); $fails = $fails + 1; }
+    if ($elapsed > 4.0) { say("FAIL sleep-slow: " . $elapsed); $fails = $fails + 1; }
+    my int $threw = 0;
+    try { my scalar $r = await $f; } catch ($e) { $threw = 1; }
+    if ($threw != 1) { say("FAIL await-cancelled"); $fails = $fails + 1; }
+
+    # --- async::map ---
+    my array @items;
+    foreach my $i (0..199) { push(@items, $i); }
+    my array @sq = async::map(fn (int $x) int { return $x * $x; }, \@items, 4);
+    if (size(@sq) != 200) { say("FAIL map-size"); $fails = $fails + 1; }
+    my int $order_ok = 1;
+    foreach my $i (0..199) {
+        if ($sq[$i] != $i * $i) { $order_ok = 0; }
+    }
+    if ($order_ok != 1) { say("FAIL map-order"); $fails = $fails + 1; }
+    # error propagation (also proves per-thread try stacks)
+    my int $caught = 0;
+    try {
+        my array @bad = async::map(fn (int $x) int {
+            if ($x == 13) { throw "unlucky " . $x; }
+            return $x;
+        }, \@items, 4);
+    } catch ($e) {
+        $caught = 1;
+        if (index("" . $e, "unlucky") < 0) { say("FAIL map-error-value: " . $e); $fails = $fails + 1; }
+    }
+    if ($caught != 1) { say("FAIL map-error-uncaught"); $fails = $fails + 1; }
+
+    # --- thread::tls_* ---
+    thread::tls_set("who", "main");
+    my scalar $tls_seen = async::channel(1);
+    my scalar $tw = thread::create(func () {
+        thread::tls_set("who", "worker");
+        async::send($tls_seen, thread::tls_get("who"));
+    });
+    thread::join($tw);
+    my scalar $worker_who = async::recv($tls_seen);
+    if ($worker_who ne "worker") { say("FAIL tls-worker"); $fails = $fails + 1; }
+    if (thread::tls_get("who") ne "main") { say("FAIL tls-isolation"); $fails = $fails + 1; }
+    if (thread::tls_exists("who") != 1) { say("FAIL tls-exists"); $fails = $fails + 1; }
+    if (thread::tls_delete("who") != 1) { say("FAIL tls-delete"); $fails = $fails + 1; }
+    if (thread::tls_exists("who") != 0) { say("FAIL tls-gone"); $fails = $fails + 1; }
+
+    # --- Async::Scope (nursery) ---
+    my scalar $scope = Async::Scope::new();
+    $scope->spawn(fn () scalar { return "alpha"; });
+    $scope->spawn(fn () scalar { async::sleep(20); return "beta"; });
+    $scope->spawn(fn () scalar { return "gamma"; });
+    my array @sres = $scope->wait();
+    if (size(@sres) != 3 || $sres[0] ne "alpha" || $sres[1] ne "beta" || $sres[2] ne "gamma") {
+        say("FAIL scope-results: " . join(",", @sres)); $fails = $fails + 1;
+    }
+    # failure cancels siblings: the long sleeper must wake early
+    my scalar $sibling_woke = async::channel(1);
+    my scalar $scope2 = Async::Scope::new();
+    $scope2->spawn(fn () scalar {
+        async::sleep(30);
+        throw "scope boom";
+    });
+    $scope2->spawn(fn () scalar {
+        my int $full = async::sleep(8000);   # cancelled by the failure
+        async::send($sibling_woke, $full);
+        return 0;
+    });
+    my num $st0 = core::hires_time();
+    my int $scope_threw = 0;
+    try { my array @ignored = $scope2->wait(); } catch ($e) {
+        $scope_threw = 1;
+        if (index("" . $e, "scope boom") < 0) { say("FAIL scope-error: " . $e); $fails = $fails + 1; }
+    }
+    my scalar $sib = async::recv($sibling_woke);
+    my num $st_elapsed = core::hires_time() - $st0;
+    if ($scope_threw != 1) { say("FAIL scope-no-throw"); $fails = $fails + 1; }
+    if ($sib != 0) { say("FAIL scope-sibling-not-cancelled"); $fails = $fails + 1; }
+    if ($st_elapsed > 4.0) { say("FAIL scope-slow: " . $st_elapsed); $fails = $fails + 1; }
+
+    # --- Async::Actor ---
+    my hash %state;
+    $state{"n"} = 0;
+    my scalar $counter = Async::Actor::new(fn (scalar $msg, scalar $st) scalar {
+        if ($msg eq "inc") { $st->{"n"} = $st->{"n"} + 1; }
+        return $st->{"n"};
+    }, \%state);
+    $counter->tell("inc");
+    $counter->tell("inc");
+    my scalar $n = $counter->ask("inc");
+    if ($n != 3) { say("FAIL actor-ask: " . $n); $fails = $fails + 1; }
+    my scalar $n2 = $counter->ask("peek");
+    if ($n2 != 3) { say("FAIL actor-peek: " . $n2); $fails = $fails + 1; }
+    $counter->stop();
+
+    if ($fails == 0) {
+        say("All async ergonomics tests passed");
+    } else {
+        say($fails . " async ergonomics tests FAILED");
+    }
+    return 0;
+}

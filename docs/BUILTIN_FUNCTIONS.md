@@ -80,6 +80,10 @@ are based on POSIX threads underneath.
 | `async::is_done(future)` | `scalar → int` | 1 if future has completed (success or failure). |
 | `async::pool_init(n)` | `int → void` | Initialize the thread pool with n workers. |
 | `async::pool_shutdown()` | `→ void` | Drain pending work and shut down the pool. |
+| `async::spawn(fn)` | `scalar → scalar` | Run a closure as a pool future (function form of `async func`). |
+| `async::sleep(ms)` | `int → int` | Cancellation-aware sleep: 1 = slept fully, 0 = woken early by `async::cancel` on this task. |
+| `async::cancelled()` | `→ int` | 1 if THIS task's future has been asked to cancel (poll in cooperative loops). |
+| `async::map(fn, \@items, workers?)` | `scalar, array, int → array` | Data-parallel map; results in input order; first exception rethrows in the caller. |
 
 ### Channels
 
@@ -93,6 +97,7 @@ are based on POSIX threads underneath.
 | `async::close(ch)` | `scalar → void` | Close channel; subsequent recv returns undef. |
 | `async::is_closed(ch)` | `scalar → int` | 1 if closed. |
 | `async::len(ch)` | `scalar → int` | Number of items currently in the channel. |
+| `async::select(\@chs, timeout_ms?)` | `array, int → array` | Block until any channel has a value; atomically dequeues. Returns `[index, value]`; index −1 = timeout, −2 = all closed and drained. |
 
 ### Mutexes
 
@@ -103,6 +108,15 @@ are based on POSIX threads underneath.
 | `async::try_lock(mtx)` | `scalar → int` | Non-blocking lock; returns 1 if acquired, 0 otherwise. |
 | `async::unlock(mtx)` | `scalar → void` | Release the mutex. |
 | `async::mutex_destroy(mtx)` | `scalar → void` | Free mutex resources. |
+
+### Per-thread values (thread::)
+
+| Function | Signature | Description |
+|---|---|---|
+| `thread::tls_set(name, val)` | `str, any → void` | Set a per-thread named value (isolated between threads; freed at thread exit). |
+| `thread::tls_get(name)` | `str → any` | Get this thread's value (undef if unset). |
+| `thread::tls_exists(name)` | `str → int` | 1 if set in this thread. |
+| `thread::tls_delete(name)` | `str → int` | Delete; returns 1 if it existed. |
 
 ### Atomics
 

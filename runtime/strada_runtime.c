@@ -8150,10 +8150,37 @@ StradaValue* strada_ref(StradaValue *sv) {
 /* ===== UTILITY FUNCTIONS ===== */
 
 /* Exception handling globals */
+/* THREAD-LOCAL: the try stack and exception slots are per-thread — a
+ * shared stack let concurrent threads (pool tasks, async::map workers,
+ * raw thread::create bodies all TRY_PUSH) corrupt each other's frames
+ * and longjmp across threads. Exported helpers below serve tcc-compiled
+ * code, whose TLS support is unreliable. */
+#ifdef STRADA_NO_TLS
 StradaTryContext strada_try_stack[STRADA_MAX_TRY_DEPTH];
 int strada_try_depth = 0;
 char *strada_exception_msg = NULL;
 StradaValue *strada_exception_value = NULL;  /* Typed exception support */
+#else
+__thread StradaTryContext strada_try_stack[STRADA_MAX_TRY_DEPTH];
+__thread int strada_try_depth = 0;
+__thread char *strada_exception_msg = NULL;
+__thread StradaValue *strada_exception_value = NULL;  /* Typed exception support */
+#endif
+
+/* tcc-callable twins of the STRADA_TRY_PUSH/POP macros (the macros index
+ * the TLS arrays directly, which tcc can't reliably compile). setjmp
+ * happens in the CALLER on the returned buf — valid, the buf lives in
+ * this thread's try stack. */
+jmp_buf *strada_try_push_slot(void) {
+    if (strada_try_depth >= STRADA_MAX_TRY_DEPTH) return NULL;
+    strada_try_stack[strada_try_depth].active = 1;
+    return &strada_try_stack[strada_try_depth++].buf;
+}
+int strada_try_pop_slot(void) {
+    if (strada_try_depth <= 0) return 0;
+    strada_try_stack[--strada_try_depth].active = 0;
+    return 1;
+}
 
 /* Optional overload-stringify hook. Set by perla_init when the perla runtime
  * is linked in. NULL by default — pure-strada code has no overload concept. */
@@ -14025,15 +14052,32 @@ StradaValue* strada_closure_call_array(StradaValue *closure, StradaValue *args_s
 /* ===== THREAD SUPPORT ===== */
 
 /* Thread wrapper that calls Strada closure */
+/* Per-thread state cleanup at thread exit: regex TLS + thread::tls_*
+ * store (both defined later in this file). */
+static void strada_tls_thread_cleanup(void);
+
+/* Set by the pool worker around each task so a running task can reach
+ * its own future (async::sleep early-wake, async::cancelled). */
+static __thread StradaFuture *strada_current_future = NULL;
+static void strada_thread_state_cleanup(void) {
+    strada_regex_thread_cleanup();
+    strada_tls_thread_cleanup();
+    /* The exception slots are thread-local: a worker that threw (and had
+     * the exception consumed) still holds the strdup'd message — and any
+     * UNCONSUMED exception value — in its TLS at exit. */
+    if (strada_exception_msg) { free(strada_exception_msg); strada_exception_msg = NULL; }
+    if (strada_exception_value) { strada_decref(strada_exception_value); strada_exception_value = NULL; }
+}
+
 static void* strada_thread_wrapper(void *arg) {
     StradaThread *st = (StradaThread *)arg;
     cc_thread_register();   /* count this thread for stop-the-world before it mutates */
     /* Call the closure with 0 arguments */
     st->result = strada_closure_call(st->closure, 0);
-    /* Free this thread's regex TLS (capture SVs, pattern cache, lazy-$&
-     * buffers) — heap blocks pointed to by TLS leak at thread exit
-     * otherwise, unboundedly for create/join loops. */
-    strada_regex_thread_cleanup();
+    /* Free this thread's TLS (regex state + thread::tls_* store) — heap
+     * blocks pointed to by TLS leak at thread exit otherwise, unboundedly
+     * for create/join loops. */
+    strada_thread_state_cleanup();
     /* If detached, clean up our own resources since no one will join us */
     if (st->detached) {
         if (st->result) strada_decref(st->result);
@@ -14256,9 +14300,9 @@ static void* strada_pool_worker(void *arg) {
 
         if (!pool->running && pool->queue_head == NULL) {
             pthread_mutex_unlock(&pool->queue_mutex);
-            /* Free this worker's regex TLS before exiting (see
+            /* Free this worker's TLS before exiting (see
              * strada_thread_wrapper). */
-            strada_regex_thread_cleanup();
+            strada_thread_state_cleanup();
             cc_thread_unregister();
             break;  /* Shutdown */
         }
@@ -14294,6 +14338,7 @@ static void* strada_pool_worker(void *arg) {
             StradaValue * volatile result = NULL;
             StradaValue * volatile error = NULL;
 
+            strada_current_future = f;   /* async::sleep / async::cancelled */
             if (setjmp(*STRADA_TRY_PUSH()) == 0) {
                 result = strada_closure_call(f->closure, 0);
                 STRADA_TRY_POP();
@@ -14301,6 +14346,7 @@ static void* strada_pool_worker(void *arg) {
                 STRADA_TRY_POP();
                 error = strada_get_exception();
             }
+            strada_current_future = NULL;
 
             /* Store result */
             pthread_mutex_lock(&f->mutex);
@@ -14602,8 +14648,10 @@ void strada_future_cancel(StradaValue *future) {
     /* If still pending, mark as cancelled immediately */
     if (f->state == FUTURE_PENDING) {
         f->state = FUTURE_CANCELLED;
-        pthread_cond_broadcast(&f->cond);
     }
+    /* ALWAYS broadcast: a RUNNING task may be parked in async::sleep on
+     * this cond — the broadcast is its early wake. */
+    pthread_cond_broadcast(&f->cond);
     pthread_mutex_unlock(&f->mutex);
 }
 
@@ -14714,6 +14762,26 @@ StradaValue* strada_channel_new(int capacity) {
 }
 
 /* Send a value to the channel (blocks if full, throws if closed) */
+/* ===== async::select support =====
+ * One global condvar shared by every in-flight select: enqueue/close on
+ * ANY channel broadcasts it when selects are waiting. Selects re-scan
+ * their channel set on each wakeup (thundering herd is acceptable —
+ * selects are rare and the scan is try_recv per channel). Lock order:
+ * select_mutex OUTER, channel mutex INNER (selects scan while holding
+ * select_mutex); senders touch select_mutex only AFTER releasing the
+ * channel mutex, so the order never inverts. */
+static pthread_mutex_t strada_select_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t strada_select_cond = PTHREAD_COND_INITIALIZER;
+static volatile int strada_select_waiters = 0;
+
+static void strada_select_wake(void) {
+    if (strada_select_waiters > 0) {
+        pthread_mutex_lock(&strada_select_mutex);
+        pthread_cond_broadcast(&strada_select_cond);
+        pthread_mutex_unlock(&strada_select_mutex);
+    }
+}
+
 void strada_channel_send(StradaValue *channel, StradaValue *value) {
     if (!channel || channel->type != STRADA_CHANNEL) {
         strada_throw("channel::send: invalid channel");
@@ -14762,6 +14830,7 @@ void strada_channel_send(StradaValue *channel, StradaValue *value) {
     /* Signal waiting receivers */
     pthread_cond_signal(&ch->not_empty);
     pthread_mutex_unlock(&ch->mutex);
+    strada_select_wake();   /* after releasing ch->mutex (lock order) */
 }
 
 /* Receive a value from the channel (blocks if empty, returns undef if closed and empty) */
@@ -14847,6 +14916,7 @@ int strada_channel_try_send(StradaValue *channel, StradaValue *value) {
     /* Signal waiting receivers */
     pthread_cond_signal(&ch->not_empty);
     pthread_mutex_unlock(&ch->mutex);
+    strada_select_wake();   /* after releasing ch->mutex (lock order) */
 
     return 1;
 }
@@ -14899,6 +14969,7 @@ void strada_channel_close(StradaValue *channel) {
     pthread_cond_broadcast(&ch->not_empty);
     pthread_cond_broadcast(&ch->not_full);
     pthread_mutex_unlock(&ch->mutex);
+    strada_select_wake();   /* selects must notice closure */
 }
 
 /* Check if channel is closed */
@@ -14930,6 +15001,322 @@ int strada_channel_len(StradaValue *channel) {
 
     return size;
 }
+
+/* ===== async::select — wait on multiple channels ===== */
+
+/* Atomically dequeue from one channel if it has data. Returns the value
+ * (owned) or NULL when empty — distinct from a real undef VALUE in the
+ * channel, which try_recv can't distinguish. */
+static StradaValue *strada_channel_poll_one(StradaValue *chv, int *closed_empty) {
+    *closed_empty = 0;
+    if (!chv || STRADA_IS_TAGGED_INT(chv) || chv->type != STRADA_CHANNEL) {
+        *closed_empty = 1;  /* treat junk entries as never-ready */
+        return NULL;
+    }
+    StradaChannel *ch = (StradaChannel *)chv->value.ptr;
+    pthread_mutex_lock(&ch->mutex);
+    if (ch->head != NULL) {
+        StradaChannelNode *node = ch->head;
+        ch->head = node->next;
+        if (ch->head == NULL) ch->tail = NULL;
+        ch->size--;
+        pthread_cond_signal(&ch->not_full);
+        pthread_mutex_unlock(&ch->mutex);
+        StradaValue *v = node->value;   /* queue's ref transfers to caller */
+        free(node);
+        return v;
+    }
+    if (ch->closed) *closed_empty = 1;
+    pthread_mutex_unlock(&ch->mutex);
+    return NULL;
+}
+
+/* async::select(\@channels [, $timeout_ms]) — block until one of the
+ * channels has a value; atomically dequeue it. Returns a 2-element array
+ * [index, value]. index -1 = timeout; index -2 = every channel is closed
+ * and drained (value undef in both cases). Fairness: scan order is array
+ * order each wakeup (a busy low-index channel wins ties — documented). */
+StradaValue* strada_channel_select(StradaValue *channels_ref, StradaValue *timeout_ms_sv) {
+    StradaValue *out = strada_new_array();
+    StradaArray *chans = strada_deref_array(channels_ref);
+    if (!chans || chans->size == 0) {
+        strada_array_push_take(out->value.av, strada_new_int(-2));
+        strada_array_push_take(out->value.av, strada_new_undef());
+        return out;
+    }
+    int64_t timeout_ms = -1;
+    if (timeout_ms_sv && !(STRADA_IS_TAGGED_INT(timeout_ms_sv) == 0
+                           && timeout_ms_sv->type == STRADA_UNDEF)) {
+        timeout_ms = strada_to_int(timeout_ms_sv);
+    }
+    struct timespec deadline;
+    if (timeout_ms >= 0) {
+        clock_gettime(CLOCK_REALTIME, &deadline);
+        deadline.tv_sec += timeout_ms / 1000;
+        deadline.tv_nsec += (timeout_ms % 1000) * 1000000L;
+        if (deadline.tv_nsec >= 1000000000L) { deadline.tv_sec++; deadline.tv_nsec -= 1000000000L; }
+    }
+
+    pthread_mutex_lock(&strada_select_mutex);
+    strada_select_waiters++;
+    for (;;) {
+        int all_closed = 1;
+        for (size_t i = 0; i < chans->size; i++) {
+            int closed_empty = 0;
+            StradaValue *v = strada_channel_poll_one(chans->elements[chans->head + i], &closed_empty);
+            if (v) {
+                strada_select_waiters--;
+                pthread_mutex_unlock(&strada_select_mutex);
+                strada_array_push_take(out->value.av, strada_new_int((int64_t)i));
+                strada_array_push_take(out->value.av, v);
+                return out;
+            }
+            if (!closed_empty) all_closed = 0;
+        }
+        if (all_closed) {
+            strada_select_waiters--;
+            pthread_mutex_unlock(&strada_select_mutex);
+            strada_array_push_take(out->value.av, strada_new_int(-2));
+            strada_array_push_take(out->value.av, strada_new_undef());
+            return out;
+        }
+        /* Wait for any enqueue/close. Heartbeat cap bounds the window of
+         * any wakeup edge case; GC may stop-the-world while we block. */
+        struct timespec wake;
+        clock_gettime(CLOCK_REALTIME, &wake);
+        wake.tv_nsec += 100000000L;  /* 100ms heartbeat */
+        if (wake.tv_nsec >= 1000000000L) { wake.tv_sec++; wake.tv_nsec -= 1000000000L; }
+        if (timeout_ms >= 0 && (deadline.tv_sec < wake.tv_sec
+            || (deadline.tv_sec == wake.tv_sec && deadline.tv_nsec < wake.tv_nsec))) {
+            wake = deadline;
+        }
+        cc_blocking_enter();
+        int rc = pthread_cond_timedwait(&strada_select_cond, &strada_select_mutex, &wake);
+        cc_blocking_leave();
+        if (rc == ETIMEDOUT && timeout_ms >= 0) {
+            struct timespec now;
+            clock_gettime(CLOCK_REALTIME, &now);
+            if (now.tv_sec > deadline.tv_sec
+                || (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)) {
+                strada_select_waiters--;
+                pthread_mutex_unlock(&strada_select_mutex);
+                strada_array_push_take(out->value.av, strada_new_int(-1));
+                strada_array_push_take(out->value.av, strada_new_undef());
+                return out;
+            }
+        }
+    }
+}
+
+/* ===== Cancellation-aware sleep + current-task introspection ===== */
+
+/* (strada_current_future is defined up by the pool worker.) */
+
+/* async::sleep($ms): sleeps, but wakes early if THIS task is cancelled
+ * (async::cancel on its future broadcasts the future's cond). Returns 1
+ * after a full sleep, 0 when woken by cancellation. Outside a pool task
+ * it is a plain sleep. GC-safe while blocked. */
+StradaValue* strada_async_sleep(StradaValue *ms_sv) {
+    int64_t ms = strada_to_int(ms_sv);
+    if (ms <= 0) return strada_new_int(1);
+    StradaFuture *f = strada_current_future;
+    if (!f) {
+        struct timespec req = { ms / 1000, (ms % 1000) * 1000000L };
+        cc_blocking_enter();
+        nanosleep(&req, NULL);
+        cc_blocking_leave();
+        return strada_new_int(1);
+    }
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += ms / 1000;
+    deadline.tv_nsec += (ms % 1000) * 1000000L;
+    if (deadline.tv_nsec >= 1000000000L) { deadline.tv_sec++; deadline.tv_nsec -= 1000000000L; }
+    pthread_mutex_lock(&f->mutex);
+    while (!f->cancel_requested) {
+        cc_blocking_enter();
+        int rc = pthread_cond_timedwait(&f->cond, &f->mutex, &deadline);
+        cc_blocking_leave();
+        if (rc == ETIMEDOUT) {
+            pthread_mutex_unlock(&f->mutex);
+            return strada_new_int(1);
+        }
+    }
+    pthread_mutex_unlock(&f->mutex);
+    return strada_new_int(0);
+}
+
+/* async::cancelled() — has THIS task's future been asked to cancel?
+ * (Cooperative loops poll this.) Always 0 outside a pool task. */
+StradaValue* strada_async_cancelled(void) {
+    StradaFuture *f = strada_current_future;
+    return strada_new_int(f ? f->cancel_requested : 0);
+}
+
+/* ===== async::map — data-parallel map over an array ===== */
+
+typedef struct {
+    StradaValue *fn;
+    StradaArray *items;
+    StradaValue **results;        /* one slot per item, written once */
+    volatile int64_t next;        /* shared work index */
+    volatile int abort;           /* set on first error */
+    StradaValue *error;           /* first error (mutex-guarded) */
+    pthread_mutex_t err_mutex;
+} StradaMapJob;
+
+static void *strada_map_worker(void *arg) {
+    StradaMapJob *job = (StradaMapJob *)arg;
+    cc_thread_register();
+    for (;;) {
+        if (job->abort) break;
+        int64_t i = __sync_fetch_and_add(&job->next, 1);
+        if (i >= (int64_t)job->items->size) break;
+        StradaValue * volatile result = NULL;
+        if (setjmp(*STRADA_TRY_PUSH()) == 0) {
+            result = strada_closure_call(job->fn, 1, job->items->elements[job->items->head + i]);
+            STRADA_TRY_POP();
+            job->results[i] = (StradaValue *)result;
+        } else {
+            STRADA_TRY_POP();
+            StradaValue *err = strada_get_exception();
+            pthread_mutex_lock(&job->err_mutex);
+            if (!job->error) {
+                job->error = err;     /* keep first error (owned) */
+                err = NULL;
+            }
+            pthread_mutex_unlock(&job->err_mutex);
+            if (err) strada_decref(err);
+            job->abort = 1;
+            break;
+        }
+    }
+    strada_thread_state_cleanup();
+    cc_thread_unregister();
+    return NULL;
+}
+
+/* async::map($fn, \@items [, $workers]) — apply $fn to every element in
+ * parallel; returns results in input order. Work-sharing via a shared
+ * atomic index (long items don't stall short ones). The first exception
+ * aborts remaining work (in-flight items finish) and rethrows in the
+ * caller. The input array must not be mutated during the call. */
+StradaValue* strada_async_map(StradaValue *fn, StradaValue *items_ref, StradaValue *workers_sv) {
+    StradaArray *items = strada_deref_array(items_ref);
+    if (!items || items->size == 0) return strada_new_array();
+    if (!fn || STRADA_IS_TAGGED_INT(fn)
+        || (fn->type != STRADA_CLOSURE && fn->type != STRADA_CPOINTER)) {
+        strada_throw("async::map: first argument must be a function");
+        return strada_new_array();
+    }
+    int64_t nworkers = workers_sv ? strada_to_int(workers_sv) : 0;
+    if (nworkers <= 0) nworkers = 4;
+    if (nworkers > (int64_t)items->size) nworkers = (int64_t)items->size;
+    if (nworkers > 64) nworkers = 64;
+
+    /* Same switch as thread::create: atomic refcounts etc. BEFORE spawn. */
+    if (!strada_threading_active) strada_threading_active = 1;
+    cc_thread_register();   /* count the caller as a mutator */
+
+    StradaMapJob job;
+    job.fn = fn;
+    job.items = items;
+    job.results = calloc(items->size, sizeof(StradaValue *));
+    job.next = 0;
+    job.abort = 0;
+    job.error = NULL;
+    pthread_mutex_init(&job.err_mutex, NULL);
+
+    pthread_t tids[64];
+    int64_t spawned = 0;
+    for (int64_t w = 0; w < nworkers; w++) {
+        if (pthread_create(&tids[w], NULL, strada_map_worker, &job) != 0) break;
+        spawned++;
+    }
+    if (spawned == 0) {
+        /* Couldn't spawn at all — run inline. */
+        strada_map_worker(&job);
+    }
+    for (int64_t w = 0; w < spawned; w++) pthread_join(tids[w], NULL);
+    cc_thread_unregister();
+    pthread_mutex_destroy(&job.err_mutex);
+
+    if (job.error) {
+        for (size_t i = 0; i < items->size; i++)
+            if (job.results[i]) strada_decref(job.results[i]);
+        free(job.results);
+        /* Rethrow the first worker error in the caller (value-preserving).
+         * strada_throw_value takes ownership semantics of the exception slot;
+         * job.error's ref transfers. */
+        strada_throw_value(job.error);
+        return strada_new_array();   /* unreachable */
+    }
+    StradaValue *out = strada_new_array();
+    for (size_t i = 0; i < items->size; i++) {
+        if (job.results[i]) strada_array_push_take(out->value.av, job.results[i]);
+        else strada_array_push_take(out->value.av, strada_new_undef());
+    }
+    free(job.results);
+    return out;
+}
+
+/* ===== thread::tls_* — per-thread named values ===== */
+
+/* Lazily-created per-thread hash. Freed on thread exit alongside the
+ * regex TLS (see strada_thread_wrapper / pool workers); the main
+ * thread's is freed at exit via the same path. */
+static __thread StradaValue *strada_tls_store = NULL;
+
+static void strada_tls_thread_cleanup(void) {
+    if (strada_tls_store) {
+        strada_decref(strada_tls_store);
+        strada_tls_store = NULL;
+    }
+}
+
+static int strada_tls_atexit_registered = 0;
+static void strada_tls_atexit(void) { strada_tls_thread_cleanup(); }
+
+StradaValue* strada_tls_set(StradaValue *name_sv, StradaValue *val) {
+    if (!strada_tls_store) {
+        strada_tls_store = strada_new_hash();
+        if (!strada_tls_atexit_registered) {
+            strada_tls_atexit_registered = 1;   /* main thread's store */
+            atexit(strada_tls_atexit);
+        }
+    }
+    char buf[128];
+    const char *name = strada_to_str_buf(name_sv, buf, sizeof(buf));
+    strada_hash_set(strada_tls_store->value.hv, name, val);
+    return strada_undef_static();
+}
+
+StradaValue* strada_tls_get(StradaValue *name_sv) {
+    if (!strada_tls_store) return strada_new_undef();
+    char buf[128];
+    const char *name = strada_to_str_buf(name_sv, buf, sizeof(buf));
+    StradaValue *v = strada_hash_get(strada_tls_store->value.hv, name);
+    if (!v) return strada_new_undef();
+    strada_incref(v);
+    return v;
+}
+
+StradaValue* strada_tls_exists(StradaValue *name_sv) {
+    if (!strada_tls_store) return strada_new_int(0);
+    char buf[128];
+    const char *name = strada_to_str_buf(name_sv, buf, sizeof(buf));
+    return strada_new_int(strada_hash_exists(strada_tls_store->value.hv, name));
+}
+
+StradaValue* strada_tls_delete(StradaValue *name_sv) {
+    if (!strada_tls_store) return strada_new_int(0);
+    char buf[128];
+    const char *name = strada_to_str_buf(name_sv, buf, sizeof(buf));
+    int had = strada_hash_exists(strada_tls_store->value.hv, name);
+    if (had) strada_hash_delete(strada_tls_store->value.hv, name);
+    return strada_new_int(had);
+}
+
 
 /* ============================================================
  * Atomic Implementation - Lock-free Integer Operations

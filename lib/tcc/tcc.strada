@@ -230,6 +230,14 @@ static void libtcc_add_runtime_symbols(TCCState *s) {
     ADD_SYM(strada_concat_multi);
     ADD_SYM(strada_ffi_callback_new);
     ADD_SYM(strada_ffi_callback_free);
+    ADD_SYM(strada_channel_select);
+    ADD_SYM(strada_async_sleep);
+    ADD_SYM(strada_async_cancelled);
+    ADD_SYM(strada_async_map);
+    ADD_SYM(strada_tls_set);
+    ADD_SYM(strada_tls_get);
+    ADD_SYM(strada_tls_exists);
+    ADD_SYM(strada_tls_delete);
     ADD_SYM(strada_split);
     ADD_SYM(strada_char_at);
     ADD_SYM(strada_array_push);

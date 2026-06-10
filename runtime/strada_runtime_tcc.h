@@ -218,10 +218,13 @@ typedef struct {
     int active;
 } StradaTryContext;
 
-extern StradaTryContext strada_try_stack[STRADA_MAX_TRY_DEPTH];
-extern int strada_try_depth;
-extern char *strada_exception_msg;
-extern StradaValue *strada_exception_value;
+/* The try stack is thread-local in the runtime; tcc-compiled code must
+ * go through the exported helpers (tcc TLS support is unreliable). */
+jmp_buf *strada_try_push_slot(void);
+int strada_try_pop_slot(void);
+/* The exception slots are thread-local in the runtime and never referenced
+ * directly by generated code (it goes through strada_get_exception /
+ * strada_throw*) — no declarations here, since tcc can't parse __thread. */
 extern char *(*strada_overload_stringify_hook)(StradaValue *sv);
 extern int (*strada_overload_numeric_hook)(StradaValue *sv, double *out);
 extern int (*strada_overload_bool_hook)(StradaValue *sv);
@@ -251,9 +254,8 @@ extern int (*strada_die_continue_hook)(void);
  * storage directly (tcc can't express __thread). */
 #define STRADA_MAX_PENDING_CLEANUP 4096
 
-#define STRADA_TRY_PUSH() (strada_try_depth < STRADA_MAX_TRY_DEPTH ? \
-    (strada_try_stack[strada_try_depth].active = 1, &strada_try_stack[strada_try_depth++].buf) : NULL)
-#define STRADA_TRY_POP() (strada_try_depth > 0 ? (strada_try_stack[--strada_try_depth].active = 0, 1) : 0)
+#define STRADA_TRY_PUSH() strada_try_push_slot()
+#define STRADA_TRY_POP()   strada_try_pop_slot()
 
 /* ============================================================
  * Value Creation
@@ -1207,6 +1209,17 @@ StradaValue* strada_channel_try_recv(StradaValue *channel);
 void strada_channel_close(StradaValue *channel);
 int strada_channel_is_closed(StradaValue *channel);
 int strada_channel_len(StradaValue *channel);
+/* async::select / sleep / cancelled / map (concurrency ergonomics) */
+StradaValue* strada_channel_select(StradaValue *channels_ref, StradaValue *timeout_ms_sv);
+StradaValue* strada_async_sleep(StradaValue *ms_sv);
+StradaValue* strada_async_cancelled(void);
+StradaValue* strada_async_map(StradaValue *fn, StradaValue *items_ref, StradaValue *workers_sv);
+/* thread::tls_* — per-thread named values (freed at thread exit) */
+StradaValue* strada_tls_set(StradaValue *name_sv, StradaValue *val);
+StradaValue* strada_tls_get(StradaValue *name_sv);
+StradaValue* strada_tls_exists(StradaValue *name_sv);
+StradaValue* strada_tls_delete(StradaValue *name_sv);
+
 
 /* Atomics */
 StradaValue* strada_atomic_new(int64_t initial);

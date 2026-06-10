@@ -127,6 +127,7 @@ TESTS=(
     "test_pkg_unqualified_call"
     "test_strada_extern_decl"
     "test_hash_set_value_leak"
+    "test_async_ergonomics"
 )
 
 # c::callback needs libffi at build time — include only when configured in

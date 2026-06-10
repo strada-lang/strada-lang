@@ -1094,6 +1094,14 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             } else {
                 emit_indent($cg);
                 emit($cg, "StradaValue *" . $var_name . " = NULL;\n");
+                # Loop var is a LOCAL of an enclosing anon fn (else it gets
+                # misclassified as an outer-scope capture — see the catch-var
+                # note in the try/catch emitter).
+                if ($cg->{"in_anon_func"}) {
+                    my str $fr_locals = $cg->{"anon_local_str"};
+                    if ($fr_locals eq "") { $cg->{"anon_local_str"} = $var_name; }
+                    else { $cg->{"anon_local_str"} = $fr_locals . "," . $var_name; }
+                }
             }
 
             # The loop variable always holds an int here; register it as
@@ -1221,6 +1229,12 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         if ($var_decl) {
             # New variable declaration
             emit($cg, "StradaValue *" . $var_name . " = strada_array_get(__foreach_av_" . $foreach_id . ", __foreach_i_" . $foreach_id . ");\n");
+            # Anon-fn local registration (see range path above).
+            if ($cg->{"in_anon_func"}) {
+                my str $fe_locals = $cg->{"anon_local_str"};
+                if ($fe_locals eq "") { $cg->{"anon_local_str"} = $var_name; }
+                else { $cg->{"anon_local_str"} = $fe_locals . "," . $var_name; }
+            }
         } else {
             # Existing variable - assign to it (borrowed ref from array_get, no decref needed)
             emit($cg, $var_name . " = strada_array_get(__foreach_av_" . $foreach_id . ", __foreach_i_" . $foreach_id . ");\n");
@@ -1691,6 +1705,19 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             emit($cg, $catch_var);
             emit($cg, " = __strada_exc;\n");
             scope_track_var($cg, $catch_var);
+            # Register the catch variable as a LOCAL of any enclosing
+            # anonymous function — without this, references to it inside a
+            # closure body were classified as outer-scope CAPTURES, emitting
+            # `&e` for a variable that doesn't exist outside ("'e'
+            # undeclared" C errors for any try/catch inside an anon fn).
+            if ($cg->{"in_anon_func"}) {
+                my str $cv_locals = $cg->{"anon_local_str"};
+                if ($cv_locals eq "") {
+                    $cg->{"anon_local_str"} = $catch_var;
+                } else {
+                    $cg->{"anon_local_str"} = $cv_locals . "," . $catch_var;
+                }
+            }
             # Push to cleanup stack in case we throw from inside this catch block
             emit_indent($cg);
             emit($cg, "strada_cleanup_push(" . $catch_var . ");\n");

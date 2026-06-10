@@ -2441,6 +2441,44 @@ func gen_builtin_g3(scalar $cg, scalar $expr, str $name) int {
             return 1;
         }
 
+        # thread::tls_set($name, $val) — per-thread named value. The store
+        # increfs the value (hash_set semantics), so owned temps need the
+        # decref wrapper (same discipline as async::send).
+        if ($name eq "thread::tls_set") {
+            # BOTH args can be owned temps (string-literal names allocate!)
+            # — capture and decref each (checklist #1).
+            my scalar $tlsargs = $expr->{"args"};
+            my int $tls_n_owned = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $tlsargs->[0]) == 1;
+            my int $tls_v_owned = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $tlsargs->[1]) == 1;
+            emit($cg, "({ StradaValue *__tls_n = ");
+            gen_expression($cg, $tlsargs->[0]);
+            emit($cg, "; StradaValue *__tls_v = ");
+            gen_expression($cg, $tlsargs->[1]);
+            emit($cg, "; strada_tls_set(__tls_n, __tls_v); ");
+            if ($tls_n_owned == 1) { emit($cg, "strada_decref(__tls_n); "); }
+            if ($tls_v_owned == 1) { emit($cg, "strada_decref(__tls_v); "); }
+            emit($cg, "strada_undef_static(); })");
+            return 1;
+        }
+
+        if ($name eq "thread::tls_get" || $name eq "thread::tls_exists"
+            || $name eq "thread::tls_delete") {
+            my str $tls_fn = "strada_tls_get";
+            if ($name eq "thread::tls_exists") { $tls_fn = "strada_tls_exists"; }
+            if ($name eq "thread::tls_delete") { $tls_fn = "strada_tls_delete"; }
+            my scalar $tlsgargs = $expr->{"args"};
+            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $tlsgargs->[0]) == 1) {
+                emit($cg, "({ StradaValue *__tls_n = ");
+                gen_expression($cg, $tlsgargs->[0]);
+                emit($cg, "; StradaValue *__tls_r = " . $tls_fn . "(__tls_n); strada_decref(__tls_n); __tls_r; })");
+            } else {
+                emit($cg, $tls_fn . "(");
+                gen_expression($cg, $tlsgargs->[0]);
+                emit($cg, ")");
+            }
+            return 1;
+        }
+
         if ($name eq "thread::mutex_new") {
             emit($cg, "strada_mutex_new()");
             return 1;
@@ -2595,6 +2633,86 @@ func gen_builtin_g3(scalar $cg, scalar $expr, str $name) int {
 
         if ($name eq "async::pool_shutdown") {
             emit($cg, "(strada_pool_shutdown(), strada_undef_static())");
+            return 1;
+        }
+
+        # async::spawn($closure) — run a closure as a pool future.
+        # strada_future_new TAKES OWNERSHIP of the closure: owned temps
+        # (anon fns) pass straight through; borrowed variables get an
+        # incref so the future's teardown doesn't steal the variable's ref.
+        if ($name eq "async::spawn") {
+            my scalar $spargs = $expr->{"args"};
+            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $spargs->[0]) == 1) {
+                emit($cg, "strada_future_new(");
+                gen_expression($cg, $spargs->[0]);
+                emit($cg, ")");
+            } else {
+                emit($cg, "({ StradaValue *__sp_cl = ");
+                gen_expression($cg, $spargs->[0]);
+                emit($cg, "; strada_incref(__sp_cl); strada_future_new(__sp_cl); })");
+            }
+            return 1;
+        }
+
+        # async::select(\@channels [, $timeout_ms]) → [index, value]
+        if ($name eq "async::select") {
+            my scalar $selargs = $expr->{"args"};
+            my int $sel_argc = $expr->{"arg_count"};
+            my int $sel_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $selargs->[0]) == 1;
+            if ($sel_cleanup == 1) {
+                emit($cg, "({ StradaValue *__sel_c = ");
+                gen_expression($cg, $selargs->[0]);
+                emit($cg, "; StradaValue *__sel_r = strada_channel_select(__sel_c, ");
+                if ($sel_argc > 1) { gen_expression($cg, $selargs->[1]); } else { emit($cg, "NULL"); }
+                emit($cg, "); strada_decref(__sel_c); __sel_r; })");
+            } else {
+                emit($cg, "strada_channel_select(");
+                gen_expression($cg, $selargs->[0]);
+                emit($cg, ", ");
+                if ($sel_argc > 1) { gen_expression($cg, $selargs->[1]); } else { emit($cg, "NULL"); }
+                emit($cg, ")");
+            }
+            return 1;
+        }
+
+        # async::sleep($ms) — cancellation-aware sleep (1 = full sleep,
+        # 0 = woken early by async::cancel on this task's future)
+        if ($name eq "async::sleep") {
+            my scalar $slargs = $expr->{"args"};
+            emit($cg, "strada_async_sleep(");
+            gen_expression($cg, $slargs->[0]);
+            emit($cg, ")");
+            return 1;
+        }
+
+        # async::cancelled() — was THIS task asked to cancel?
+        if ($name eq "async::cancelled") {
+            emit($cg, "strada_async_cancelled()");
+            return 1;
+        }
+
+        # async::map($fn, \@items [, $workers]) — data-parallel map.
+        # Can rethrow a worker error: owned args ride the cleanup stack
+        # so the catch drain reclaims them on throw.
+        if ($name eq "async::map") {
+            my scalar $mpargs = $expr->{"args"};
+            my int $mp_argc = $expr->{"arg_count"};
+            my int $mp_fn_owned = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $mpargs->[0]) == 1;
+            my int $mp_it_owned = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $mpargs->[1]) == 1;
+            emit($cg, "({ StradaValue *__mp_fn = ");
+            gen_expression($cg, $mpargs->[0]);
+            emit($cg, "; ");
+            if ($mp_fn_owned == 1) { emit($cg, "strada_cleanup_push(__mp_fn); "); }
+            emit($cg, "StradaValue *__mp_it = ");
+            gen_expression($cg, $mpargs->[1]);
+            emit($cg, "; ");
+            if ($mp_it_owned == 1) { emit($cg, "strada_cleanup_push(__mp_it); "); }
+            emit($cg, "StradaValue *__mp_r = strada_async_map(__mp_fn, __mp_it, ");
+            if ($mp_argc > 2) { gen_expression($cg, $mpargs->[2]); } else { emit($cg, "NULL"); }
+            emit($cg, "); ");
+            if ($mp_it_owned == 1) { emit($cg, "strada_cleanup_pop(); strada_decref(__mp_it); "); }
+            if ($mp_fn_owned == 1) { emit($cg, "strada_cleanup_pop(); strada_decref(__mp_fn); "); }
+            emit($cg, "__mp_r; })");
             return 1;
         }
 

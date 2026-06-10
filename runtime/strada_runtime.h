@@ -285,6 +285,17 @@ StradaValue* strada_channel_try_recv(StradaValue *channel);
 void strada_channel_close(StradaValue *channel);
 int strada_channel_is_closed(StradaValue *channel);
 int strada_channel_len(StradaValue *channel);
+/* async::select / sleep / cancelled / map (concurrency ergonomics) */
+StradaValue* strada_channel_select(StradaValue *channels_ref, StradaValue *timeout_ms_sv);
+StradaValue* strada_async_sleep(StradaValue *ms_sv);
+StradaValue* strada_async_cancelled(void);
+StradaValue* strada_async_map(StradaValue *fn, StradaValue *items_ref, StradaValue *workers_sv);
+/* thread::tls_* — per-thread named values (freed at thread exit) */
+StradaValue* strada_tls_set(StradaValue *name_sv, StradaValue *val);
+StradaValue* strada_tls_get(StradaValue *name_sv);
+StradaValue* strada_tls_exists(StradaValue *name_sv);
+StradaValue* strada_tls_delete(StradaValue *name_sv);
+
 
 /* ============================================================
  * Atomic - Lock-free Integer Operations
@@ -906,10 +917,23 @@ typedef struct {
     int active;
 } StradaTryContext;
 
+/* THREAD-LOCAL (see runtime): per-thread try frames + exception slots. */
+#ifdef STRADA_NO_TLS
 extern StradaTryContext strada_try_stack[STRADA_MAX_TRY_DEPTH];
 extern int strada_try_depth;
+#else
+extern __thread StradaTryContext strada_try_stack[STRADA_MAX_TRY_DEPTH];
+extern __thread int strada_try_depth;
+#endif
+jmp_buf *strada_try_push_slot(void);   /* tcc-callable macro twins */
+int strada_try_pop_slot(void);
+#ifdef STRADA_NO_TLS
 extern char *strada_exception_msg;
 extern StradaValue *strada_exception_value;
+#else
+extern __thread char *strada_exception_msg;
+extern __thread StradaValue *strada_exception_value;
+#endif
 /* Hook for `use overload '""' => sub { ... }`. Perla sets this in perla_init.
  * Returns a strdup'd string when an overload sub is installed for `sv`'s
  * blessed package, or NULL to fall through to the default REF(0x…) format. */

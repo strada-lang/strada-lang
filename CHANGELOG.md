@@ -2,6 +2,41 @@
 
 ## Unreleased (since `0da0455`, 2026-06-09 → 2026-06-10)
 
+### Concurrency ergonomics (2026-06-10)
+Closes the ROADMAP Tier-2 list:
+
+- **`async::select(\@channels [, $timeout_ms])`** — block on multiple
+  channels, atomically dequeue the first value; `[index, value]` result
+  (−1 timeout, −2 all-closed). One global wake condvar; senders signal it
+  only when selects are waiting.
+- **`async::spawn($fn)`** — closure → pool future (the function form of
+  `async func`; future_new's ownership transfer handled per arg kind).
+- **Cancellation-aware `async::sleep($ms)`** + **`async::cancelled()`** —
+  the pool worker publishes the current future in TLS; cancel broadcasts
+  the future's cond, so a sleeping task wakes immediately (returns 0).
+- **`async::map($fn, \@items [, $workers])`** — data-parallel map:
+  atomic-index work sharing, results in input order, first exception
+  cancels remaining work and rethrows in the caller.
+- **`thread::tls_set/get/exists/delete`** — per-thread named values
+  (per-thread hash, freed on thread exit).
+- **`Async::Scope`** (lib) — nursery-style structured concurrency: all
+  results in spawn order; a failure cancels remaining siblings, drains
+  them, rethrows the first error. **`Async::Actor`** (lib) — strict-order
+  message actors over a channel inbox (tell/ask/stop, poison-message
+  stop).
+- **Found & fixed along the way**: the try/catch stack and exception
+  slots were GLOBAL — concurrent throwers (pool tasks, map workers)
+  corrupted each other's frames and could longjmp across threads; now
+  thread-local, with tcc-compiled code routed through exported
+  `strada_try_push_slot/pop_slot` helpers. Worker threads free their
+  exception TLS on exit. Plus a closure-capture codegen bug: `catch ($e)`
+  variables and `foreach my $x` loop variables declared INSIDE an
+  anonymous function were misclassified as outer-scope captures
+  (C-compile errors for any try/catch or foreach in a closure).
+- New `test_async_ergonomics` (also in the leak suite): all six features
+  plus scope-failure sibling cancellation and actor ordering;
+  valgrind-clean. Suite 171 → 172.
+
 ### Thread safety (round 2, 2026-06-10)
 The `7b8c8f0`/`0da0455` hardening made the object graph thread-safe
 (atomic SV refcounts, locked registry, stop-the-world collector) but

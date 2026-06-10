@@ -1,0 +1,106 @@
+=head1 NAME
+
+Async::Actor - message-driven actors over channels and pool tasks
+
+=head1 SYNOPSIS
+
+    use lib "lib";
+    use Async::Actor;
+
+    # Handler receives each message; its return value answers ask().
+    my scalar $counter = Async::Actor::new(fn (scalar $msg, scalar $state) scalar {
+        if ($msg eq "inc") { $state->{"n"} = $state->{"n"} + 1; }
+        return $state->{"n"};
+    }, { n => 0 });
+
+    $counter->tell("inc");                 # fire and forget
+    my scalar $n = $counter->ask("inc");   # round-trip: 2
+    $counter->stop();                      # drain inbox, end the task
+
+=head1 DESCRIPTION
+
+An actor is a pool task looping over a private inbox channel. Messages are
+processed strictly in order, one at a time — the handler never runs
+concurrently with itself, so C<$state> needs no locking. C<tell> enqueues
+and returns immediately; C<ask> enqueues and blocks for the handler's
+return value (via a per-call reply channel). C<stop> closes the inbox; the
+actor drains remaining messages and exits.
+
+A handler exception answers the pending C<ask> with undef and stops the
+actor (poison-message semantics — inspect via C<$actor-E<gt>error()>).
+
+=cut
+
+package Async::Actor;
+version "1.0.0";
+
+func new(scalar $handler, scalar $state) scalar {
+    my hash %self;
+    my scalar $inbox = async::channel(0);
+    $self{"inbox"} = $inbox;
+    $self{"stopped"} = 0;
+    my scalar $selfref = bless(\%self, "Async::Actor");
+
+    my scalar $future = async::spawn(fn () scalar {
+        while (1) {
+            my scalar $envelope = async::recv($inbox);
+            if (!defined($envelope)) {
+                last;   # inbox closed and drained
+            }
+            my scalar $reply_ch = $envelope->{"reply"};
+            my scalar $result;
+            my int $had_error = 0;
+            try {
+                $result = $handler->($envelope->{"msg"}, $state);
+            } catch ($e) {
+                $had_error = 1;
+                $selfref->{"error"} = $e;
+            }
+            if (defined($reply_ch)) {
+                async::send($reply_ch, $result);
+            }
+            if ($had_error == 1) {
+                last;   # poison message: stop processing
+            }
+        }
+        return 0;
+    });
+    $self{"future"} = $future;
+    return $selfref;
+}
+
+func tell(scalar $self, scalar $msg) void {
+    if ($self->{"stopped"} == 1) {
+        throw "Async::Actor: tell after stop";
+    }
+    my hash %env;
+    $env{"msg"} = $msg;
+    async::send($self->{"inbox"}, \%env);
+}
+
+func ask(scalar $self, scalar $msg) scalar {
+    if ($self->{"stopped"} == 1) {
+        throw "Async::Actor: ask after stop";
+    }
+    my scalar $reply = async::channel(1);
+    my hash %env;
+    $env{"msg"} = $msg;
+    $env{"reply"} = $reply;
+    async::send($self->{"inbox"}, \%env);
+    return async::recv($reply);
+}
+
+func error(scalar $self) scalar {
+    return $self->{"error"};
+}
+
+func stop(scalar $self) void {
+    if ($self->{"stopped"} == 1) {
+        return;
+    }
+    $self->{"stopped"} = 1;
+    async::close($self->{"inbox"});
+    try {
+        my scalar $ignored = await $self->{"future"};
+    } catch ($e) { }
+}
