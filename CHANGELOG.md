@@ -37,15 +37,18 @@
   doesn't leak it.
 - Test suite 165 → 166 (`test_perf_round5` covers all six changes incl.
   the keys-COW and wide-sprintf edges).
-- **Cycle collector: adaptive trigger (−11.5% whole-program instructions
-  on cycle-free workloads)**: a collection that frees nothing doubles the
-  candidate threshold (cap ~1M); one that frees cycles resets it to the
-  base (default 10000, settable via `core::gc_threshold`). Profiling
-  stradac compiling Lexer.strada showed ~18% of all instructions in
-  collector phases that never freed a cycle; after: collection phases are
-  ~1%, total Ir 1,101.6M → 975.1M. Cycle reclamation behavior is
-  unchanged for programs that do create cycles (first fruitful collection
-  snaps the trigger back).
+- **Cycle collector: adaptive trigger + buffered-flag bit (−16.2%
+  whole-program instructions on cycle-free workloads)**: (1) a collection
+  that frees nothing doubles the candidate threshold (cap ~1M); one that
+  frees cycles resets it to the base (default 10000, settable via
+  `core::gc_threshold`). (2) the per-decref "already buffered?" check is
+  a bit test on the value (`STRADA_CC_BUFFERED`, struct_size bit 60 —
+  unused on containers) instead of a side-table hash probe; type-morphing
+  sites (overwrite_in_place, vec_set conversion) retire candidates first.
+  Profiling stradac compiling Lexer.strada: ~18% of all instructions were
+  collector bookkeeping that never freed a cycle; after both changes
+  total Ir went 1,101.6M → 923.6M and cc_tab_slot 142.7M → 31.6M. Cycle
+  reclamation is unchanged for programs that do create cycles.
 
 ### Performance (rounds 1–4, 2026-06-09/10)
 - **Method dispatch ~2x** (type-opaque call sites): compile-time method-name

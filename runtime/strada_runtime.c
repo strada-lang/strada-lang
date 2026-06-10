@@ -1126,6 +1126,19 @@ static int           cc_enabled    = 1;       /* automatic collection on by defa
 static size_t        cc_threshold  = 10000;   /* current (adaptive) trigger */
 static size_t        cc_threshold_base = 10000;
 #define CC_THRESHOLD_MAX ((size_t)1 << 20)
+/* Buffered-candidate flag, kept in the VALUE so the per-decref "already
+ * buffered?" check is a bit test instead of a side-table hash probe
+ * (profiling showed the probe alone at ~8% of a container-heavy program).
+ * Lives in struct_size bit 60 — only ever set on ARRAY/HASH/REF values,
+ * which never use struct_size (63=ASCII, 62=UTF8, 61=UV are STR/INT-only).
+ * Invariant: bit set ⇔ the value sits in cc_roots with a live PURPLE
+ * side-table entry. The bit is set when buffering (under the mutex),
+ * cleared by cc_forget (normal free of a candidate), by the pre-mark pass
+ * of a collection (world stopped), and implicitly by strada_value_alloc's
+ * struct_size reset on pool reuse. Code that MORPHS a container value's
+ * type in place (overwrite_in_place, vec_set conversion) must cc_forget
+ * it first — see those sites. */
+#define STRADA_CC_BUFFERED ((size_t)1 << 60)
 static int           cc_collecting = 0;        /* reentrancy guard while collecting */
 static unsigned long cc_collections_count = 0;
 static unsigned long cc_freed_count = 0;
@@ -12380,6 +12393,16 @@ static void cc_blocking_leave(void) {
 static void cc_collect_phases(void) {
     cc_self_collecting = 1;   /* our own decrefs (freeing nodes) must not park/relock */
     unsigned long freed_before = cc_freed_count;
+    /* Clear the buffered bit on every still-live root BEFORE anything can
+     * be freed (mark/scan free nothing; CollectRoots does). The table is
+     * wiped below, so without this pass surviving candidates would carry a
+     * stale bit and never re-buffer. Must not run later: a root freed by
+     * an earlier cc_collectwhite in the same pass is a dangling pointer.
+     * FREED entries are already-freed objects — never dereferenced. */
+    for (size_t i = 0; i < cc_roots_len; i++) {
+        CCEnt *e = cc_tab_slot(cc_roots[i], 0);
+        if (e && e->color != CC_FREED) cc_roots[i]->struct_size &= ~STRADA_CC_BUFFERED;
+    }
     for (size_t i = 0; i < cc_roots_len; i++) {                       /* MarkRoots */
         StradaValue *s = cc_roots[i];
         if (cc_color_get(s) == CC_PURPLE) cc_markgray(s);
@@ -12448,6 +12471,12 @@ static void cc_possible_root(StradaValue *sv) {
     if (!cc_is_cyclic_type(sv->type)) return;
     if (sv->type == STRADA_REF && strada_is_slot_ref(sv)) return;  /* C-stack-backed */
     if (sv->meta && sv->meta->is_tied) return;         /* conservative: skip tied */
+    /* Fast exit: already a buffered candidate — its entry is PURPLE (the
+     * only live color between collections), so there is nothing to update.
+     * This bit test replaces a side-table hash probe on every surviving
+     * container decref. Unlocked read is benign: a racing set just sends
+     * us down the locked slow path, which handles "already buffered". */
+    if (sv->struct_size & STRADA_CC_BUFFERED) return;
     int lk = strada_threading_active && !cc_self_collecting;
     if (lk) pthread_mutex_lock(&cc_stw_mutex);
     CCEnt *e = cc_tab_slot(sv, 1);
@@ -12456,6 +12485,7 @@ static void cc_possible_root(StradaValue *sv) {
         e->color = CC_PURPLE;          /* (re)mark as a live candidate */
         if (!e->buffered) {
             e->buffered = 1;
+            sv->struct_size |= STRADA_CC_BUFFERED;
             cc_roots_push(sv);
             if (!cc_atexit_registered) { cc_atexit_registered = 1; atexit(cc_atexit); }
             do_collect = (cc_roots_len >= cc_threshold);
@@ -12471,8 +12501,14 @@ static void cc_possible_root(StradaValue *sv) {
  * is matched by pointer value only — never dereferenced — so this is safe even
  * though the object is being freed. */
 static void cc_forget(StradaValue *sv) {
+    /* Never-buffered values (the common case for container frees) skip the
+     * side-table probe entirely — the bit is authoritative (see invariant
+     * at STRADA_CC_BUFFERED). A stale FREED entry from a previous pool life
+     * of this address needs no update: FREED is already skipped. */
+    if (!(sv->struct_size & STRADA_CC_BUFFERED)) return;
     int lk = strada_threading_active && !cc_self_collecting;
     if (lk) pthread_mutex_lock(&cc_stw_mutex);
+    sv->struct_size &= ~STRADA_CC_BUFFERED;
     CCEnt *e = cc_tab_slot(sv, 0);
     if (e) { e->color = CC_FREED; e->buffered = 0; }
     if (lk) pthread_mutex_unlock(&cc_stw_mutex);
@@ -15932,6 +15968,13 @@ void strada_vec_set(StradaValue *sv, int64_t offset, int bits, int64_t value) {
         cur_pv = sv->value.pv;
     }
     if (cur_len < needed_bytes) {
+#ifdef STRADA_CYCLE_GC
+        /* vec() on a non-STR value converts it to STRADA_STR in place below,
+         * overwriting type and struct_size. Retire a buffered cycle
+         * candidate first (see overwrite_in_place for the rationale). */
+        if (sv->type == STRADA_ARRAY || sv->type == STRADA_HASH || sv->type == STRADA_REF)
+            cc_forget(sv);
+#endif
         /* Re-allocate the StradaString to hold needed_bytes (+ NUL).
          * Allocate a fresh ss; copy existing bytes; zero-fill new tail. */
         StradaString *ss = ss_new_uninit((uint32_t)needed_bytes);
@@ -18126,6 +18169,17 @@ StradaValue* strada_new_blessed_3attr_hv_take(
  * is the caller's concern. */
 void strada_overwrite_in_place(StradaValue *dst, StradaValue *src) {
     if (!dst || STRADA_IS_TAGGED_INT(dst)) return;
+
+#ifdef STRADA_CYCLE_GC
+    /* dst's type (and struct_size, in the STR branch) are about to be
+     * overwritten in place. If dst is a buffered cycle candidate, retire it
+     * from the candidate set first — otherwise the STRADA_CC_BUFFERED bit
+     * is clobbered while its cc_roots entry stays live, and a later
+     * collection would walk a value whose type changed under it. It simply
+     * re-buffers on a future decref if it's still a container. */
+    if (dst->type == STRADA_ARRAY || dst->type == STRADA_HASH || dst->type == STRADA_REF)
+        cc_forget(dst);
+#endif
 
     /* Release dst's existing type-specific internals. */
     if (dst->type == STRADA_STR && dst->value.pv) {

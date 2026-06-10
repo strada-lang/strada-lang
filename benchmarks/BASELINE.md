@@ -80,10 +80,24 @@ real workload, stage-2 stradac at -O1, runtime -O2):
 
 A collection that frees no cycles now doubles the trigger threshold
 (default 10000 → cap ~1M); a fruitful collection resets it to the base.
-The residual 7.8% in cc_tab_slot is the per-decref candidate-buffering
-probe, which fires regardless of threshold — closing that needs the
-buffered-flag-in-the-value idea (a bit test instead of a hash probe),
-which is the natural follow-up.
+
+**Follow-up, same day — buffered-flag bit:** the residual cc_tab_slot
+cost was the per-decref "already buffered?" side-table probe. That check
+is now a bit test on the value itself (`STRADA_CC_BUFFERED`, struct_size
+bit 60 — containers never use struct_size). Same workload after both
+changes:
+
+| | pre-round-6 | adaptive only | + flag bit |
+|---|---|---|---|
+| total instructions | 1,101.6M | 975.1M | 923.6M (**−16.2%**) |
+| cc_tab_slot | 142.7M | 76.3M | 31.6M |
+
+The remaining cc_tab_slot traffic is first-time buffering inserts and
+cc_forget probes for values that were genuinely buffered — irreducible
+without dropping the side table entirely (which the no-ABI-change
+constraint rules out, and the bit already removed the per-decref cost).
+Type-morph sites (overwrite_in_place, vec_set's STR conversion) retire a
+buffered candidate via cc_forget before clobbering type/struct_size.
 
 ## Investigated and closed: foreach-over-keys codegen fast path
 
