@@ -634,6 +634,15 @@ try {
 
 **Error chaining**: `core::exception_trace()` returns the Strada call stack captured at the most recent `throw` in this thread (works for plain thrown values, readable inside `catch`). `lib/Exception.strada` provides structured exceptions: `Exception::new($msg)` (captures construction trace), `Exception::wrap($msg, $cause)` (chains any caught value), `->message/->cause/->trace/->describe()` (renders the whole chain).
 
+### Value-Producing `do {}` Blocks
+
+```strada
+my int $x = do { my int $a = 40; $a + 2; };   # 42 — last EXPRESSION statement is the value
+my scalar $u = do { my int $tmp = 5; };       # undef — non-expression tail
+```
+
+Block-local variables are cleaned up before the value is yielded (the result is safely owned even when it references block-locals). Restrictions: only a last *expression* statement yields a value (an `if`/`else` tail is a statement — use a ternary); a statement starting with bare `do {` parses as `do/while`, so parenthesize do-exprs in statement-head position; control-flow exits (`return`/`next`/`last`) inside a value-do are unsupported (GNU C statement-expression limitation).
+
 ### `fn` Shorthand
 
 `fn` is an alias for `func` and can be used anywhere `func` is used: function definitions, closures, `extern`, `async`, `private`, `before`/`after` hooks, etc.

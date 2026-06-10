@@ -3,6 +3,12 @@
 ## Unreleased (since `0da0455`, 2026-06-09 → 2026-06-10)
 
 ### Language & stdlib (2026-06-10)
+- **Value-producing `do {}`** — `my $x = do { ...; expr; };`: the last
+  EXPRESSION statement is the value (undef for non-expression tails);
+  block-locals clean up before the value is yielded. Documented edges:
+  ternary for conditional tails, parenthesize in statement-head position
+  (bare `do {` is do/while), no control-flow exits inside (GNU C
+  statement-expression limit). Suite 177 → 178.
 - **`finally`** — full semantics: runs on normal completion, after catch,
   before unmatched/re-thrown exceptions propagate (guard-frame around the
   catch dispatch, so a THROWING catch body runs it too), and before

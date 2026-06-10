@@ -1,0 +1,57 @@
+# Value-producing do { } blocks.
+
+use lib "lib";
+use Test;
+
+func main() int {
+    # basic value
+    my int $x = do { 40 + 2; };
+    Test::is($x, 42, "basic value");
+
+    # locals inside; result references a local (incref-before-cleanup)
+    my str $s = do {
+        my str $a = "hel";
+        my str $b = "lo";
+        $a . $b;
+    };
+    Test::is($s, "hello", "locals + concat result");
+
+    # result IS a local (borrowed -> incref path)
+    my scalar $r = do {
+        my hash %h = ("k" => "v");
+        \%h;
+    };
+    Test::is($r->{"k"}, "v", "result referencing block-local data");
+
+    # Only a last EXPRESSION statement yields the value — an if/else tail
+    # is a statement (yields undef); use a ternary for conditional values.
+    my int $n = 7;
+    my scalar $iftail = do {
+        if ($n % 2 == 0) { my int $unused1 = 1; } else { my int $unused2 = 2; }
+    };
+    Test::nok(defined($iftail), "if-tail yields undef (documented)");
+    my str $kind = do {
+        my str $k = ($n % 2 == 0) ? "even" : "odd";
+        $k;
+    };
+    Test::is($kind, "odd", "ternary for conditional values");
+
+    # block ending in non-expression -> undef
+    my scalar $u = do { my int $tmp = 5; };
+    Test::nok(defined($u), "non-expression tail yields undef");
+
+    # nested do (parenthesized: a statement starting with bare `do` is
+    # parsed as do/while, so wrap inner do-exprs in parens)
+    my int $nested = do { (do { 10; }) + (do { 32; }); };
+    Test::is($nested, 42, "nested do blocks");
+
+    # do-expr in call arguments
+    Test::is(length(do { "abc" . "de"; }), 5, "do as argument");
+
+    # statement-level do/while still works
+    my int $count = 0;
+    do { $count = $count + 1; } while ($count < 3);
+    Test::is($count, 3, "do-while unaffected");
+
+    return Test::done_testing();
+}

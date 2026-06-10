@@ -863,6 +863,28 @@ func parse_primary(scalar $parser) scalar {
         return ast_new_undef();
     }
 
+    # Value-producing do { } block: the block's last expression statement
+    # is the value (undef if the block ends with a non-expression).
+    # Statement-level `do { } while (...)` is parsed by the statement
+    # parser and never reaches here.
+    if ($type eq "DO") {
+        parser_advance($parser);
+        my scalar $do_block = parse_block($parser);
+        my scalar $do_node = ast_new_do_expr($do_block);
+        return $do_node;
+    }
+
+    # Value-producing do { } block: the block's last expression statement
+    # is the value (undef if the block ends with a non-expression).
+    # Statement-level `do { } while (...)` is parsed by the statement
+    # parser and never reaches here.
+    if ($type eq "DO") {
+        parser_advance($parser);
+        my scalar $do_block = parse_block($parser);
+        my scalar $do_node = ast_new_do_expr($do_block);
+        return $do_node;
+    }
+
     # Diamond operator <$fh> - reads line from filehandle
     if ($type eq "DIAMOND") {
         parser_advance($parser);

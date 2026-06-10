@@ -378,6 +378,9 @@ test_output_contains "$EXAMPLES_DIR/test_concat_multi.strada" "test_concat_multi
 test_output_contains "$EXAMPLES_DIR/test_test_framework.strada" "test_test_framework" "1..10" "Test framework (TAP)"
 test_exit_code "$EXAMPLES_DIR/test_test_framework_fails.strada" "test_test_framework_fails" 1 "Test framework failure exit"
 
+# Test: value-producing do {} blocks
+test_output_contains "$EXAMPLES_DIR/test_do_expr.strada" "test_do_expr" "1..9" "Value-producing do blocks"
+
 # Test: error chaining (Exception objects, core::exception_trace)
 test_output_contains "$EXAMPLES_DIR/test_exception_chain.strada" "test_exception_chain" "1..12" "Error chaining"
 

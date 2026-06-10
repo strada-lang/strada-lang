@@ -2889,6 +2889,51 @@ func gen_expression(scalar $cg, scalar $expr) void {
         return;
     }
 
+    # Value-producing do { } block: GNU statement expression. The last
+    # EXPRESSION statement's value is the result (owned: incref'd when
+    # borrowed, before the block's scope cleanup runs); a block ending in
+    # a non-expression yields undef. Control-flow exits (return/next/
+    # last) inside a value-do are unsupported (gcc forbids jumping out
+    # of statement expressions) — documented.
+    if ($type == NODE_DO_EXPR()) {
+        my int $do_id = $cg->{"tmp_counter"};
+        $cg->{"tmp_counter"} = $do_id + 1;
+        my scalar $do_block = $expr->{"block"};
+        my scalar $do_stmts = $do_block->{"statements"};
+        my int $do_n = $do_block->{"statement_count"};
+        emit($cg, "({ StradaValue *__do_res_" . $do_id . " = NULL; {\n");
+        indent($cg);
+        scope_push($cg);
+        my int $di = 0;
+        while ($di < $do_n) {
+            my scalar $dstmt = $do_stmts->[$di];
+            if ($di == $do_n - 1 && $dstmt->{"type"} == NODE_EXPR_STMT()) {
+                # Last expression statement: capture as the result.
+                my scalar $dval = $dstmt->{"expr"};
+                emit_indent($cg);
+                emit($cg, "__do_res_" . $do_id . " = ");
+                if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $dval) == 0) {
+                    emit($cg, "({ StradaValue *__do_b = ");
+                    gen_expression($cg, $dval);
+                    emit($cg, "; strada_incref(__do_b); __do_b; })");
+                } else {
+                    gen_expression($cg, $dval);
+                }
+                emit($cg, ";\n");
+            } else {
+                gen_statement($cg, $dstmt);
+            }
+            $di = $di + 1;
+        }
+        # Scope cleanup (local decrefs) BEFORE yielding — the result is
+        # already owned/incref'd so it survives.
+        scope_pop($cg);
+        dedent($cg);
+        emit_indent($cg);
+        emit($cg, "} __do_res_" . $do_id . " ? __do_res_" . $do_id . " : strada_new_undef(); })");
+        return;
+    }
+
     # Variable
     if ($type == NODE_VARIABLE()) {
         my str $var_name = $expr->{"name"};

@@ -93,6 +93,7 @@ func NODE_TR() int { return 134; }
 func NODE_LOCAL_DECL() int { return 135; }
 func NODE_CAPTURE_VAR() int { return 136; }
 func NODE_DYN_METHOD_CALL() int { return 137; }
+func NODE_DO_EXPR() int { return 138; }         # value-producing do { } block
 
 # Type constants
 func TYPE_INT() int { return 1; }
@@ -914,6 +915,13 @@ func ast_new_try_catch(scalar $try_block, scalar $catch_clauses) scalar {
     return $node;
 }
 
+# Create value-producing do-block expression
+func ast_new_do_expr(scalar $block) scalar {
+    my scalar $node = ast_new_node(NODE_DO_EXPR());
+    $node->{"block"} = $block;
+    return $node;
+}
+
 # Create throw node
 func ast_new_throw(scalar $expr) scalar {
     my scalar $node = ast_new_node(NODE_THROW());
@@ -1127,6 +1135,7 @@ func ast_type_name(int $type) str {
     if ($type == NODE_LOCAL_DECL()) { return "LOCAL_DECL"; }
     if ($type == NODE_CAPTURE_VAR()) { return "CAPTURE_VAR"; }
     if ($type == NODE_DYN_METHOD_CALL()) { return "DYN_METHOD_CALL"; }
+    if ($type == NODE_DO_EXPR()) { return "DO_EXPR"; }
     return "UNKNOWN";
 }
 

@@ -3122,6 +3122,12 @@ func needs_temp_cleanup(scalar $cg, scalar $expr) int {
         return 1;
     }
 
+    # Value-producing do{} yields an owned value (result is incref'd /
+    # freshly created before the block scope cleans up).
+    if ($type == NODE_DO_EXPR()) {
+        return 1;
+    }
+
     # Binary ops that produce StradaValue*
     if ($type == NODE_BINARY_OP()) {
         my str $op = $expr->{"op"};

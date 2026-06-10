@@ -1017,6 +1017,16 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
         return;
     }
 
+    # Value-producing do-block: analyze its statements in a nested scope
+    if ($node_type == NODE_DO_EXPR()) {
+        my scalar $outer_scope = $ctx->{"scope"};
+        $ctx->{"scope"} = scope_new($outer_scope);
+        analyze_block($ctx, $expr->{"block"});
+        scope_check_unused($ctx, $ctx->{"scope"});
+        $ctx->{"scope"} = $outer_scope;
+        return;
+    }
+
     # Function call
     if ($node_type == NODE_CALL()) {
         my str $name = $expr->{"name"};
