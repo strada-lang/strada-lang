@@ -718,6 +718,9 @@ StradaValue **strada_hv_fetch_lvalue_sv_key(StradaValue *sv, StradaValue *key_sv
 void strada_hash_set_ss_take(StradaHash *hv, StradaString *key_ss, StradaValue *sv);
 StradaValue* strada_hash_get(StradaHash *hv, const char *key);
 StradaValue* strada_autoviv_hash(StradaValue *sv, const char *key);
+StradaValue* strada_autoviv_array(StradaValue *sv, const char *key);
+StradaValue* strada_autoviv_elem_hash(StradaValue *arr_sv, int64_t idx);
+StradaValue* strada_autoviv_elem_array(StradaValue *arr_sv, int64_t idx);
 int strada_hash_exists(StradaHash *hv, const char *key);
 void strada_hash_delete(StradaHash *hv, const char *key);
 /* _sv variants: accept StradaValue* key directly (avoids strada_to_str/strdup) */

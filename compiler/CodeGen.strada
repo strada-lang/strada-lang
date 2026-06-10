@@ -3508,7 +3508,7 @@ func gen_hash_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op) 
     # ref (owned by the parent hash) — so the owned-temp decref of __hca_h
     # must be suppressed in that case.
     my int $hca_autoviv = 0;
-    if ($hash_expr->{"type"} == NODE_HASH_ACCESS() || $hash_expr->{"type"} == NODE_DEREF_HASH()) {
+    if (autoviv_link_type($hash_expr) == 1) {
         $hca_autoviv = 1;
         $hash_cleanup = 0;
     }
@@ -3643,7 +3643,18 @@ func gen_array_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op)
     # the captured __aca_arr must be decref'd at the end. Sister function
     # gen_hash_compound_assign already does this for __hca_h.
     my int $arr_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $arr_expr) == 1;
+    # Autovivify intermediate levels: $h{"a"}[0] += 1 must create $h{"a"}
+    # as an array. The autovivified intermediate is BORROWED (owned by the
+    # parent container), so the owned-temp decref must be suppressed.
+    my int $aca_autoviv = 0;
+    if (autoviv_link_type($arr_expr) == 1) {
+        $aca_autoviv = 1;
+        $arr_cleanup = 0;
+    }
     emit($cg, "({ StradaValue *__aca_arr = ");
+    if ($aca_autoviv == 1) {
+        $cg->{"autoviv"} = 2;
+    }
     gen_expression($cg, $arr_expr);
     emit($cg, "; int __aca_idx = ");
     emit_int_operand($cg, $idx_expr);

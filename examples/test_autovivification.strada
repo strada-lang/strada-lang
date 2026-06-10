@@ -55,6 +55,36 @@ func main() int {
     $keep{"a"}{"y"} += 2;
     if ($keep{"a"}{"x"} == 1 && $keep{"a"}{"y"} == 2) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 7"); }
 
+    # Test 8: Array intermediates (regression: there was no array
+    # autovivification at all — $h{"a"}[0] = 7 was a silent no-op)
+    my %av = ();
+    $av{"a"}[0] = 7;
+    if ($av{"a"}[0] == 7) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 8a"); }
+    $av{"a"}[1] += 5;
+    if ($av{"a"}[1] == 5) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 8b"); }
+    my array @aoa = ();
+    $aoa[1][2] = 9;
+    if ($aoa[1][2] == 9) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 8c"); }
+    my array @ah = ();
+    $ah[2]{"k"} = 5;
+    if ($ah[2]{"k"} == 5) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 8d"); }
+
+    # Test 9: Ref-rooted array chains and deep mixed chains
+    my scalar $rl = {};
+    $rl->{"list"}[0] = "x";
+    if ($rl->{"list"}[0] eq "x") { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 9a"); }
+    my scalar $ar = [];
+    $ar->[0]{"n"} = 11;
+    if ($ar->[0]{"n"} == 11) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 9b"); }
+    my %mx = ();
+    $mx{"a"}[0]{"b"}[1] = "deep";
+    if ($mx{"a"}[0]{"b"}[1] eq "deep") { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 9c"); }
+
+    # Test 10: rvalue reads must NOT autovivify
+    my %ro = ();
+    my $rv = $ro{"nope"}[5];
+    if (!exists($ro{"nope"})) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 10"); }
+
     if ($fail == 0) {
         say("All autovivification tests passed (" . $pass . " checks)");
     } else {

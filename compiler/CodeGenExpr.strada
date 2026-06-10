@@ -1,3 +1,29 @@
+# True when an assignment-target sub-expression is itself an element access
+# (hash or array, direct or deref) — i.e. an intermediate chain link that
+# must be autovivified rather than rvalue-fetched. Callers set
+# $cg->{"autoviv"} (1 = viv as hash, 2 = viv as array) immediately before
+# generating that sub-expression, never earlier, so accesses inside key,
+# index, or value expressions can't consume the flag by mistake.
+func autoviv_link_type(scalar $node) int {
+    my int $t = $node->{"type"};
+    if ($t == NODE_HASH_ACCESS() || $t == NODE_DEREF_HASH()
+        || $t == NODE_SUBSCRIPT() || $t == NODE_DEREF_ARRAY()) {
+        return 1;
+    }
+    return 0;
+}
+
+# Generate the container sub-expression of an assignment target,
+# autovivifying intermediate access links. $want: 1 = this level must
+# hold a hash, 2 = an array. The flag is set immediately before the
+# generation (the access-node consumers in gen_expression clear it).
+func gen_assign_container(scalar $cg, scalar $node, int $want) void {
+    if (autoviv_link_type($node) == 1) {
+        $cg->{"autoviv"} = $want;
+    }
+    gen_expression($cg, $node);
+}
+
 func gen_assign_hash_access(scalar $cg, scalar $expr, scalar $target) void {
     my int $type = $expr->{"type"};
     my int $in_extern = $cg->{"in_extern"};
@@ -26,13 +52,9 @@ func gen_assign_hash_access(scalar $cg, scalar $expr, scalar $target) void {
                     emit($cg, "; ");
                     if ($key_is_literal == 1) {
                         # Literal key - use directly without allocation
-                        # Enable autovivification for intermediate hash accesses
-                        my scalar $hash_sub = $target->{"hash"};
-                        if ($hash_sub->{"type"} == NODE_HASH_ACCESS() || $hash_sub->{"type"} == NODE_DEREF_HASH()) {
-                            $cg->{"autoviv"} = 1;
-                        }
+                        # (intermediate autoviv handled by gen_assign_container)
                         emit($cg, "strada_hv_store(");
-                        gen_expression($cg, $target->{"hash"});
+                        gen_assign_container($cg, $target->{"hash"}, 1);
                         emit($cg, ", ");
                         gen_str_literal_c($cg, $key_expr->{"value"});
                         emit($cg, ", __hset_v); strada_decref(__hset_v); })");
@@ -46,13 +68,13 @@ func gen_assign_hash_access(scalar $cg, scalar $expr, scalar $target) void {
                             emit($cg, "StradaValue *__ck_r = ");
                             gen_expression($cg, $concat_right);
                             emit($cg, "; strada_hv_store_concat(");
-                            gen_expression($cg, $target->{"hash"});
+                            gen_assign_container($cg, $target->{"hash"}, 1);
                             emit($cg, ", ");
                             gen_str_literal_c($cg, $prefix_val);
                             emit($cg, ", " . $prefix_len . ", __ck_r, __hset_v); strada_decref(__ck_r); ");
                         } else {
                             emit($cg, "strada_hv_store_concat(");
-                            gen_expression($cg, $target->{"hash"});
+                            gen_assign_container($cg, $target->{"hash"}, 1);
                             emit($cg, ", ");
                             gen_str_literal_c($cg, $prefix_val);
                             emit($cg, ", " . $prefix_len . ", ");
@@ -66,7 +88,7 @@ func gen_assign_hash_access(scalar $cg, scalar $expr, scalar $target) void {
                         emit($cg, "StradaValue *__hset_k = ");
                         gen_expression($cg, $key_expr);
                         emit($cg, "; strada_hv_store_sv(");
-                        gen_expression($cg, $target->{"hash"});
+                        gen_assign_container($cg, $target->{"hash"}, 1);
                         emit($cg, ", __hset_k, __hset_v); ");
                         if ($key_needs_cleanup == 1) {
                             emit($cg, "strada_decref(__hset_k); ");
@@ -77,13 +99,9 @@ func gen_assign_hash_access(scalar $cg, scalar $expr, scalar $target) void {
                     # Borrowed value: just pass to hash_set which handles incref
                     if ($key_is_literal == 1) {
                         # Literal key - use directly without allocation
-                        # Enable autovivification for intermediate hash accesses
-                        my scalar $hash_sub2 = $target->{"hash"};
-                        if ($hash_sub2->{"type"} == NODE_HASH_ACCESS() || $hash_sub2->{"type"} == NODE_DEREF_HASH()) {
-                            $cg->{"autoviv"} = 1;
-                        }
+                        # (intermediate autoviv handled by gen_assign_container)
                         emit($cg, "strada_hv_store(");
-                        gen_expression($cg, $target->{"hash"});
+                        gen_assign_container($cg, $target->{"hash"}, 1);
                         emit($cg, ", ");
                         gen_str_literal_c($cg, $key_expr->{"value"});
                         emit($cg, ", ");
@@ -99,7 +117,7 @@ func gen_assign_hash_access(scalar $cg, scalar $expr, scalar $target) void {
                             emit($cg, "({ StradaValue *__ck_r = ");
                             gen_expression($cg, $concat_right);
                             emit($cg, "; strada_hv_store_concat(");
-                            gen_expression($cg, $target->{"hash"});
+                            gen_assign_container($cg, $target->{"hash"}, 1);
                             emit($cg, ", ");
                             gen_str_literal_c($cg, $prefix_val);
                             emit($cg, ", " . $prefix_len . ", __ck_r, ");
@@ -107,7 +125,7 @@ func gen_assign_hash_access(scalar $cg, scalar $expr, scalar $target) void {
                             emit($cg, "); strada_decref(__ck_r); })");
                         } else {
                             emit($cg, "strada_hv_store_concat(");
-                            gen_expression($cg, $target->{"hash"});
+                            gen_assign_container($cg, $target->{"hash"}, 1);
                             emit($cg, ", ");
                             gen_str_literal_c($cg, $prefix_val);
                             emit($cg, ", " . $prefix_len . ", ");
@@ -122,7 +140,7 @@ func gen_assign_hash_access(scalar $cg, scalar $expr, scalar $target) void {
                         emit($cg, "({ StradaValue *__hset_k = ");
                         gen_expression($cg, $key_expr);
                         emit($cg, "; strada_hv_store_sv(");
-                        gen_expression($cg, $target->{"hash"});
+                        gen_assign_container($cg, $target->{"hash"}, 1);
                         emit($cg, ", __hset_k, ");
                         gen_expression($cg, $val);
                         emit($cg, "); ");
@@ -152,6 +170,11 @@ func gen_assign_deref_hash(scalar $cg, scalar $expr, scalar $target) void {
                 my int $key_is_literal = $key_expr->{"type"} == NODE_STR_LITERAL();
                 my int $key_is_concat = is_concat_str_literal_left($key_expr);
                 my int $hst_ref_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $target->{"ref"}) == 1;
+                # An autovivified intermediate is BORROWED (owned by its
+                # parent container) — must not be decref'd as an owned temp.
+                if (autoviv_link_type($target->{"ref"}) == 1) {
+                    $hst_ref_cleanup = 0;
+                }
                 if ($is_anonymous == 1) {
                     # Anonymous value: store in temp, hash_set takes shared ownership, then release our copy
                     emit($cg, "({ StradaValue *__hset_v = ");
@@ -159,7 +182,7 @@ func gen_assign_deref_hash(scalar $cg, scalar $expr, scalar $target) void {
                     emit($cg, "; ");
                     if ($hst_ref_cleanup == 1) {
                         emit($cg, "StradaValue *__hst_ref = ");
-                        gen_expression($cg, $target->{"ref"});
+                        gen_assign_container($cg, $target->{"ref"}, 1);
                         emit($cg, "; ");
                     }
                     if ($key_is_literal == 1) {
@@ -168,7 +191,7 @@ func gen_assign_deref_hash(scalar $cg, scalar $expr, scalar $target) void {
                         if ($hst_ref_cleanup == 1) {
                             emit($cg, "__hst_ref");
                         } else {
-                            gen_expression($cg, $target->{"ref"});
+                            gen_assign_container($cg, $target->{"ref"}, 1);
                         }
                         emit($cg, ", ");
                         gen_str_literal_c($cg, $key_expr->{"value"});
@@ -192,7 +215,7 @@ func gen_assign_deref_hash(scalar $cg, scalar $expr, scalar $target) void {
                         if ($hst_ref_cleanup == 1) {
                             emit($cg, "__hst_ref");
                         } else {
-                            gen_expression($cg, $target->{"ref"});
+                            gen_assign_container($cg, $target->{"ref"}, 1);
                         }
                         emit($cg, ", ");
                         gen_str_literal_c($cg, $prefix_val);
@@ -219,7 +242,7 @@ func gen_assign_deref_hash(scalar $cg, scalar $expr, scalar $target) void {
                         if ($hst_ref_cleanup == 1) {
                             emit($cg, "__hst_ref");
                         } else {
-                            gen_expression($cg, $target->{"ref"});
+                            gen_assign_container($cg, $target->{"ref"}, 1);
                         }
                         emit($cg, ", __hset_k, __hset_v); ");
                         if ($key_needs_cleanup == 1) {
@@ -236,7 +259,7 @@ func gen_assign_deref_hash(scalar $cg, scalar $expr, scalar $target) void {
                         # Literal key - use directly without allocation
                         if ($hst_ref_cleanup == 1) {
                             emit($cg, "({ StradaValue *__hst_ref = ");
-                            gen_expression($cg, $target->{"ref"});
+                            gen_assign_container($cg, $target->{"ref"}, 1);
                             emit($cg, "; strada_hv_store(__hst_ref, ");
                             gen_str_literal_c($cg, $key_expr->{"value"});
                             emit($cg, ", ");
@@ -244,7 +267,7 @@ func gen_assign_deref_hash(scalar $cg, scalar $expr, scalar $target) void {
                             emit($cg, "); strada_decref(__hst_ref); })");
                         } else {
                             emit($cg, "strada_hv_store(");
-                            gen_expression($cg, $target->{"ref"});
+                            gen_assign_container($cg, $target->{"ref"}, 1);
                             emit($cg, ", ");
                             gen_str_literal_c($cg, $key_expr->{"value"});
                             emit($cg, ", ");
@@ -260,7 +283,7 @@ func gen_assign_deref_hash(scalar $cg, scalar $expr, scalar $target) void {
                         emit($cg, "({ ");
                         if ($hst_ref_cleanup == 1) {
                             emit($cg, "StradaValue *__hst_ref = ");
-                            gen_expression($cg, $target->{"ref"});
+                            gen_assign_container($cg, $target->{"ref"}, 1);
                             emit($cg, "; ");
                         }
                         if ($right_cleanup == 1) {
@@ -272,7 +295,7 @@ func gen_assign_deref_hash(scalar $cg, scalar $expr, scalar $target) void {
                         if ($hst_ref_cleanup == 1) {
                             emit($cg, "__hst_ref");
                         } else {
-                            gen_expression($cg, $target->{"ref"});
+                            gen_assign_container($cg, $target->{"ref"}, 1);
                         }
                         emit($cg, ", ");
                         gen_str_literal_c($cg, $prefix_val);
@@ -298,7 +321,7 @@ func gen_assign_deref_hash(scalar $cg, scalar $expr, scalar $target) void {
                         emit($cg, "({ ");
                         if ($hst_ref_cleanup == 1) {
                             emit($cg, "StradaValue *__hst_ref = ");
-                            gen_expression($cg, $target->{"ref"});
+                            gen_assign_container($cg, $target->{"ref"}, 1);
                             emit($cg, "; ");
                         }
                         emit($cg, "StradaValue *__hset_k = ");
@@ -307,7 +330,7 @@ func gen_assign_deref_hash(scalar $cg, scalar $expr, scalar $target) void {
                         if ($hst_ref_cleanup == 1) {
                             emit($cg, "__hst_ref");
                         } else {
-                            gen_expression($cg, $target->{"ref"});
+                            gen_assign_container($cg, $target->{"ref"}, 1);
                         }
                         emit($cg, ", __hset_k, ");
                         gen_expression($cg, $val);
@@ -346,7 +369,7 @@ func gen_assign_subscript(scalar $cg, scalar $expr, scalar $target) void {
                         emit($cg, "; ");
                     }
                     emit($cg, "strada_array_set(strada_deref_array(");
-                    gen_expression($cg, $target->{"array"});
+                    gen_assign_container($cg, $target->{"array"}, 2);
                     emit($cg, "), strada_to_int(");
                     if ($idx_needs_cleanup == 1) {
                         emit($cg, "__idx_tmp");
@@ -369,7 +392,7 @@ func gen_assign_subscript(scalar $cg, scalar $expr, scalar $target) void {
                     emit($cg, "})");
                 } else {
                     emit($cg, "strada_array_set(strada_deref_array(");
-                    gen_expression($cg, $target->{"array"});
+                    gen_assign_container($cg, $target->{"array"}, 2);
                     emit($cg, "), strada_to_int(");
                     gen_expression($cg, $idx_expr);
                     emit($cg, "), ");
@@ -395,12 +418,17 @@ func gen_assign_deref_array(scalar $cg, scalar $expr, scalar $target) void {
                 # on every assignment. Sister NODE_DEREF_HASH branch
                 # handles this correctly.
                 my int $ref_needs_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $ref_expr) == 1;
+                # An autovivified intermediate is BORROWED (owned by its
+                # parent container) — must not be decref'd as an owned temp.
+                if (autoviv_link_type($ref_expr) == 1) {
+                    $ref_needs_cleanup = 0;
+                }
 
                 if ($idx_needs_cleanup == 1 || $val_needs_cleanup == 1 || $ref_needs_cleanup == 1) {
                     emit($cg, "({ ");
                     if ($ref_needs_cleanup == 1) {
                         emit($cg, "StradaValue *__ast_ref = ");
-                        gen_expression($cg, $ref_expr);
+                        gen_assign_container($cg, $ref_expr, 2);
                         emit($cg, "; ");
                     }
                     if ($idx_needs_cleanup == 1) {
@@ -417,7 +445,7 @@ func gen_assign_deref_array(scalar $cg, scalar $expr, scalar $target) void {
                     if ($ref_needs_cleanup == 1) {
                         emit($cg, "__ast_ref");
                     } else {
-                        gen_expression($cg, $ref_expr);
+                        gen_assign_container($cg, $ref_expr, 2);
                     }
                     emit($cg, "), strada_to_int(");
                     if ($idx_needs_cleanup == 1) {
@@ -444,7 +472,7 @@ func gen_assign_deref_array(scalar $cg, scalar $expr, scalar $target) void {
                     emit($cg, "})");
                 } else {
                     emit($cg, "strada_array_set(strada_deref_array(");
-                    gen_expression($cg, $ref_expr);
+                    gen_assign_container($cg, $ref_expr, 2);
                     emit($cg, "), strada_to_int(");
                     gen_expression($cg, $idx_expr);
                     emit($cg, "), ");
@@ -3367,6 +3395,32 @@ func gen_expression(scalar $cg, scalar $expr) void {
     # Array subscript - use strada_deref_array to handle both direct arrays and refs
     if ($type == NODE_SUBSCRIPT()) {
         my scalar $arr_expr = $expr->{"array"};
+
+        # Autovivification: intermediate subscript in an assignment-target
+        # chain ($aoa[0][1] = v, $a[0]{"k"} = v). Flag values: 1 = the
+        # parent accessor needs a HASH in this element, 2 = an ARRAY.
+        # strada_autoviv_elem_* return a BORROWED ref (owned by the array).
+        if ($cg->{"autoviv"} >= 1) {
+            my int $sub_av = $cg->{"autoviv"};
+            $cg->{"autoviv"} = 0;
+            my str $sub_av_fn = "strada_autoviv_elem_hash";
+            if ($sub_av == 2) {
+                $sub_av_fn = "strada_autoviv_elem_array";
+            }
+            emit($cg, $sub_av_fn . "(");
+            # The array sub-expression itself needs autoviv (as an ARRAY,
+            # since this node indexes it) if it's another access node
+            if ($arr_expr->{"type"} == NODE_HASH_ACCESS() || $arr_expr->{"type"} == NODE_DEREF_HASH()
+                || $arr_expr->{"type"} == NODE_SUBSCRIPT() || $arr_expr->{"type"} == NODE_DEREF_ARRAY()) {
+                $cg->{"autoviv"} = 2;
+            }
+            gen_expression($cg, $arr_expr);
+            emit($cg, ", ");
+            emit_int_operand($cg, $expr->{"index"});
+            emit($cg, ")");
+            return;
+        }
+
         my int $arr_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $arr_expr) == 1;
         if ($arr_cleanup == 1) {
             # Owned-ref source (e.g. $h{$k}[i]): capture the source,
@@ -3398,17 +3452,30 @@ func gen_expression(scalar $cg, scalar $expr) void {
 
         # Autovivification: when this hash access is an intermediate in an
         # assignment target chain ($h{"a"}{"b"} = val), use autoviv to
-        # auto-create missing intermediate hashes
+        # auto-create missing intermediate containers. Flag values:
+        # 1 = the parent accessor needs a HASH here, 2 = needs an ARRAY
+        # ($h{"a"}[0] = val). Both runtime fns return a BORROWED ref.
         my int $autoviv = $cg->{"autoviv"};
-        if ($autoviv == 1) {
+        if ($autoviv >= 1) {
             $cg->{"autoviv"} = 0;
-            # The hash sub-expression also needs autoviv if it's another hash access
+            my str $av_fn = "strada_autoviv_hash";
+            if ($autoviv == 2) {
+                $av_fn = "strada_autoviv_array";
+            }
+            # The hash sub-expression also needs autoviv (as a HASH, since
+            # this node subscripts it with a key) if it's another access
+            # node. Set the flag immediately before generating the hash
+            # sub-expression — NOT earlier — so a hash access inside the
+            # key expression can't consume it by mistake.
             my scalar $hash_sub = $expr->{"hash"};
-            if ($hash_sub->{"type"} == NODE_HASH_ACCESS() || $hash_sub->{"type"} == NODE_DEREF_HASH()) {
-                $cg->{"autoviv"} = 1;
+            my int $av_propagate = 0;
+            if ($hash_sub->{"type"} == NODE_HASH_ACCESS() || $hash_sub->{"type"} == NODE_DEREF_HASH()
+                || $hash_sub->{"type"} == NODE_SUBSCRIPT() || $hash_sub->{"type"} == NODE_DEREF_ARRAY()) {
+                $av_propagate = 1;
             }
             if ($key_is_literal == 1) {
-                emit($cg, "strada_autoviv_hash(");
+                emit($cg, $av_fn . "(");
+                if ($av_propagate == 1) { $cg->{"autoviv"} = 1; }
                 gen_expression($cg, $expr->{"hash"});
                 emit($cg, ", ");
                 gen_str_literal_c($cg, $key_expr->{"value"});
@@ -3416,7 +3483,8 @@ func gen_expression(scalar $cg, scalar $expr) void {
             } else {
                 emit($cg, "({ StradaValue *__av_k = ");
                 gen_expression($cg, $key_expr);
-                emit($cg, "; char *__av_ks = strada_to_str_ss(__av_k); StradaValue *__av_r = strada_autoviv_hash(");
+                emit($cg, "; char *__av_ks = strada_to_str_ss(__av_k); StradaValue *__av_r = " . $av_fn . "(");
+                if ($av_propagate == 1) { $cg->{"autoviv"} = 1; }
                 gen_expression($cg, $expr->{"hash"});
                 emit($cg, ", __av_ks); strada_cstr_free(__av_ks); ");
                 if (needs_temp_cleanup($cg, $key_expr) == 1) {
@@ -3641,14 +3709,24 @@ func gen_expression(scalar $cg, scalar $expr) void {
         # by the parent hash), so no cleanup of the result. Previously this
         # branch ignored the flag, so ref-rooted nested assignment targets
         # silently fetched undef and the store was lost.
-        if ($cg->{"autoviv"} == 1) {
+        if ($cg->{"autoviv"} >= 1) {
+            my int $dh_av = $cg->{"autoviv"};
             $cg->{"autoviv"} = 0;
+            my str $dh_av_fn = "strada_autoviv_hash";
+            if ($dh_av == 2) {
+                $dh_av_fn = "strada_autoviv_array";
+            }
+            # Propagate (as HASH) right before generating the ref
+            # sub-expression so key-expression accesses can't consume it
             my scalar $ref_sub = $expr->{"ref"};
-            if ($ref_sub->{"type"} == NODE_HASH_ACCESS() || $ref_sub->{"type"} == NODE_DEREF_HASH()) {
-                $cg->{"autoviv"} = 1;
+            my int $dh_propagate = 0;
+            if ($ref_sub->{"type"} == NODE_HASH_ACCESS() || $ref_sub->{"type"} == NODE_DEREF_HASH()
+                || $ref_sub->{"type"} == NODE_SUBSCRIPT() || $ref_sub->{"type"} == NODE_DEREF_ARRAY()) {
+                $dh_propagate = 1;
             }
             if ($key_is_literal == 1) {
-                emit($cg, "strada_autoviv_hash(");
+                emit($cg, $dh_av_fn . "(");
+                if ($dh_propagate == 1) { $cg->{"autoviv"} = 1; }
                 gen_expression($cg, $expr->{"ref"});
                 emit($cg, ", ");
                 gen_str_literal_c($cg, $key_expr->{"value"});
@@ -3656,7 +3734,8 @@ func gen_expression(scalar $cg, scalar $expr) void {
             } else {
                 emit($cg, "({ StradaValue *__av_k = ");
                 gen_expression($cg, $key_expr);
-                emit($cg, "; char *__av_ks = strada_to_str_ss(__av_k); StradaValue *__av_r = strada_autoviv_hash(");
+                emit($cg, "; char *__av_ks = strada_to_str_ss(__av_k); StradaValue *__av_r = " . $dh_av_fn . "(");
+                if ($dh_propagate == 1) { $cg->{"autoviv"} = 1; }
                 gen_expression($cg, $expr->{"ref"});
                 emit($cg, ", __av_ks); strada_cstr_free(__av_ks); ");
                 if (needs_temp_cleanup($cg, $key_expr) == 1) {
@@ -3741,6 +3820,28 @@ func gen_expression(scalar $cg, scalar $expr) void {
     # Array dereference
     if ($type == NODE_DEREF_ARRAY()) {
         my scalar $ref_expr = $expr->{"ref"};
+
+        # Autovivification: intermediate deref-subscript in an assignment-
+        # target chain ($r->[0]{"k"} = v). Mirrors NODE_SUBSCRIPT above.
+        if ($cg->{"autoviv"} >= 1) {
+            my int $da_av = $cg->{"autoviv"};
+            $cg->{"autoviv"} = 0;
+            my str $da_av_fn = "strada_autoviv_elem_hash";
+            if ($da_av == 2) {
+                $da_av_fn = "strada_autoviv_elem_array";
+            }
+            emit($cg, $da_av_fn . "(");
+            if ($ref_expr->{"type"} == NODE_HASH_ACCESS() || $ref_expr->{"type"} == NODE_DEREF_HASH()
+                || $ref_expr->{"type"} == NODE_SUBSCRIPT() || $ref_expr->{"type"} == NODE_DEREF_ARRAY()) {
+                $cg->{"autoviv"} = 2;
+            }
+            gen_expression($cg, $ref_expr);
+            emit($cg, ", ");
+            emit_int_operand($cg, $expr->{"index"});
+            emit($cg, ")");
+            return;
+        }
+
         my int $ref_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $ref_expr) == 1;
         if ($ref_cleanup == 1) {
             # Owned-ref source (e.g. $h{$k}->[i]) — see NODE_SUBSCRIPT

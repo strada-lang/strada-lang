@@ -3697,6 +3697,78 @@ StradaValue* strada_autoviv_hash(StradaValue *sv, const char *key) {
     return new_hash;
 }
 
+/* Array-valued autovivification: like strada_autoviv_hash but the
+ * intermediate being created is an ARRAY — for chains like
+ * $h{"a"}[0] = v, where the hash key must come to hold an array.
+ * Returns a borrowed reference (owned by the parent hash). */
+StradaValue* strada_autoviv_array(StradaValue *sv, const char *key) {
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return strada_new_array();
+    StradaHash *hv = strada_deref_hash(sv);
+    if (!hv || !key) return strada_new_array();
+
+    unsigned int hash = strada_hash_string(key);
+    uint32_t pos = hash & (hv->num_buckets - 1);
+
+    while (1) {
+        uint32_t idx = hv->hash_index[pos];
+        if (idx == HASH_EMPTY) break;
+        if (idx != HASH_TOMBSTONE) {
+            StradaHashEntry *e = &hv->entries[idx];
+            if (e->key->hash == hash && strcmp(e->key->data, key) == 0) {
+                StradaValue *val = e->value;
+                if (!val || STRADA_IS_TAGGED_INT(val) ||
+                    (val->type != STRADA_ARRAY && val->type != STRADA_REF)) {
+                    StradaValue *new_arr = strada_new_array();
+                    strada_hash_set_take(hv, key, new_arr);
+                    return new_arr;
+                }
+                return val;
+            }
+        }
+        pos = (pos + 1) & (hv->num_buckets - 1);
+    }
+
+    StradaValue *new_arr = strada_new_array();
+    strada_hash_set_take(hv, key, new_arr);
+    return new_arr;
+}
+
+/* Element autovivification: fetch array element idx, auto-creating an
+ * empty hash (want_array=0) or array (want_array=1) when the slot is
+ * missing, a hole, undef, or a non-container. For intermediate
+ * subscripts in nested assignments: $a[0]{"k"} = v / $aoa[0][1] = v.
+ * Returns a borrowed reference (owned by the array). */
+static StradaValue* autoviv_elem(StradaValue *arr_sv, int64_t idx, int want_array) {
+    StradaArray *av = (arr_sv && !STRADA_IS_TAGGED_INT(arr_sv))
+                          ? strada_deref_array(arr_sv) : NULL;
+    if (!av) return want_array ? strada_new_array() : strada_new_hash();
+    /* Resolve negative indices here: an out-of-range negative index makes
+     * strada_array_set silently drop the store, which would leave the
+     * fresh container with refcount 0 after the decref below. */
+    if (idx < 0) idx += (int64_t)av->size;
+    if (idx < 0) return want_array ? strada_new_array() : strada_new_hash();
+
+    StradaValue *val = strada_array_get(av, idx);
+    if (val && !STRADA_IS_TAGGED_INT(val) &&
+        ((want_array && val->type == STRADA_ARRAY) ||
+         (!want_array && val->type == STRADA_HASH) ||
+         val->type == STRADA_REF)) {
+        return val;
+    }
+    StradaValue *nv = want_array ? strada_new_array() : strada_new_hash();
+    strada_array_set(av, idx, nv);  /* increfs nv (refcount 2) */
+    strada_decref(nv);              /* array is now the sole owner */
+    return nv;
+}
+
+StradaValue* strada_autoviv_elem_hash(StradaValue *arr_sv, int64_t idx) {
+    return autoviv_elem(arr_sv, idx, 0);
+}
+
+StradaValue* strada_autoviv_elem_array(StradaValue *arr_sv, int64_t idx) {
+    return autoviv_elem(arr_sv, idx, 1);
+}
+
 int strada_hash_exists(StradaHash *hv, const char *key) {
     if (!hv || !key) return 0;
 

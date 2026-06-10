@@ -454,6 +454,9 @@ StradaValue* strada_array_splice_sv(StradaValue *arr_sv, int64_t offset, int64_t
 StradaHash* strada_hash_new(void);
 StradaValue* strada_hash_get(StradaHash *hash, const char *key);
 StradaValue* strada_autoviv_hash(StradaValue *sv, const char *key);
+StradaValue* strada_autoviv_array(StradaValue *sv, const char *key);
+StradaValue* strada_autoviv_elem_hash(StradaValue *arr_sv, int64_t idx);
+StradaValue* strada_autoviv_elem_array(StradaValue *arr_sv, int64_t idx);
 void strada_hash_set(StradaHash *hash, const char *key, StradaValue *val);
 void strada_hash_set_take(StradaHash *hash, const char *key, StradaValue *val);
 int strada_hash_exists(StradaHash *hash, const char *key);
