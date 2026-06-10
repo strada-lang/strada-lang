@@ -8,8 +8,8 @@ This guide covers integrating Strada with C code through the Foreign Function In
 2. [Calling C from Strada](#calling-c-from-strada)
 3. [Writing C Libraries for Strada](#writing-c-libraries-for-strada)
 4. [Calling Strada from C](#calling-strada-from-c)
-5. [Extern Functions](#extern-functions)
-6. [Native Structs](#native-structs)
+5. [C Callbacks (`c::callback`)](#c-callbacks-ccallback)
+6. [`__C__` Blocks](#__c__-blocks)
 7. [Advanced Topics](#advanced-topics)
 8. [Best Practices](#best-practices)
 
@@ -307,6 +307,62 @@ gcc -o myprogram main.c mylib.c runtime/strada_runtime.c \
 gcc -shared -fPIC -rdynamic -o libmylib.so mylib.c \
     runtime/strada_runtime.c -Iruntime -ldl -lm
 ```
+
+---
+
+## C Callbacks (`c::callback`)
+
+The reverse direction of FFI: hand a **Strada closure to C code that
+expects a function pointer** — qsort comparators, libcurl write
+callbacks, GTK signal handlers. `c::callback` mints a fresh C function
+pointer (a libffi trampoline) that unmarshals its C arguments, invokes
+your closure, and marshals the return value back.
+
+```strada
+# Sort a C int64 array with a Strada comparator
+my scalar $buf = c::alloc(8 * 4);
+c::write_int64($buf,      42);
+c::write_int64($buf + 8,   7);
+c::write_int64($buf + 16, 99);
+c::write_int64($buf + 24, -5);
+
+my scalar $cmp = c::callback(fn (scalar $pa, scalar $pb) int {
+    my int $a = c::read_int64($pa);
+    my int $b = c::read_int64($pb);
+    return $a <=> $b;
+}, "int", "ptr,ptr");
+
+__C__ {
+    typedef int (*qsort_cmp_t)(const void *, const void *);
+    qsort((void *)(intptr_t)strada_to_int(buf), 4, 8,
+          (qsort_cmp_t)(intptr_t)strada_to_int(cmp));
+}
+
+c::callback_free($cmp);   # optional — exit-time sweep frees survivors
+c::free($buf);
+```
+
+### Signature strings
+
+- **Return**: `void`, `int` (int64), `int32`, `num` (double), `ptr`
+- **Arguments** (comma-separated, max 8): `int`, `int32`, `num`, `ptr`, `str`
+- `ptr` values travel as int addresses — pair them with `c::read_*` /
+  `c::write_*` / `c::ptr_to_str`.
+- `str` arguments arrive as Strada strings (a NULL `char*` becomes
+  undef). `str` **returns** are not supported — there is no safe
+  ownership story for handing a C caller an allocated string.
+
+### Semantics and lifetime
+
+- Closure captures and `our` globals work inside the callback.
+- The trampoline holds a reference on the closure until
+  `c::callback_free($cb)` or process exit (an exit-time registry sweep
+  frees stragglers, so valgrind stays clean either way).
+- Only invoke the pointer from threads the Strada runtime knows about —
+  a foreign thread (e.g. a curl multi worker thread) calling into the
+  runtime is undefined behavior, the same as any other runtime entry.
+- Requires libffi at build time (`./configure` auto-detects it). Built
+  without libffi, `c::callback` dies at runtime with a clear message.
 
 ---
 

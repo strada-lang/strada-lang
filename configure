@@ -97,6 +97,9 @@ while [ $# -gt 0 ]; do
         --without-arena)
             HAVE_ARENA=0
             ;;
+        --without-libffi)
+            SKIP_LIBFFI=1
+            ;;
         --bundled-pcre2)
             BUNDLED_PCRE2=1
             FORCE_PCRE2=1
@@ -135,6 +138,7 @@ while [ $# -gt 0 ]; do
             echo "  --without-cycle-gc  Disable the cycle GC (manual core::weaken only)"
             echo "  --with-arena        Enable the request arena allocator (default)"
             echo "  --without-arena     Disable the request arena allocator"
+            echo "  --without-libffi    Disable c::callback trampolines (drops the -lffi link dep)"
             echo "  --help, -h          Show this help"
             exit 0
             ;;
@@ -310,7 +314,9 @@ fi
 
 # Check libffi (closure -> C callback trampolines: c::callback)
 printf "  Checking for libffi... "
-if [ "$HAS_PKGCONFIG" = "1" ] && check_pkg libffi; then
+if [ "$SKIP_LIBFFI" = "1" ]; then
+    echo -e "${YELLOW}disabled${NC}"
+elif [ "$HAS_PKGCONFIG" = "1" ] && check_pkg libffi; then
     HAVE_LIBFFI=1
     FFI_CFLAGS="$(pkg-config --cflags libffi)"
     FFI_LIBS="$(pkg-config --libs libffi)"

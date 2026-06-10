@@ -37,6 +37,7 @@ Built-in functions are organized into namespaces:
 | `math::` | Math functions | `math::sin()`, `math::sqrt()` |
 | `thread::` | Multithreading | `thread::create()`, `thread::mutex_new()` |
 | `async::` | Async, channels, mutex, atomics | `async::all()`, `async::channel()`, `async::mutex()` |
+| `c::` | Low-level memory & C callbacks | `c::alloc()`, `c::read_int64()`, `c::callback()` |
 | *(none)* | Core language | `say()`, `push()`, `keys()` |
 
 **Note:** `core::` is the preferred way to call system functions. `sys::` is a legacy alias for `core::` — both are normalized at compile time with zero runtime overhead. `core::getpid()` and `sys::getpid()` generate identical code.
