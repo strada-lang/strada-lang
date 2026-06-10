@@ -99,6 +99,22 @@ constraint rules out, and the bit already removed the per-decref cost).
 Type-morph sites (overwrite_in_place, vec_set's STR conversion) retire a
 buffered candidate via cc_forget before clobbering type/struct_size.
 
+## Round 8: inline stack-trace tracking (2026-06-10)
+
+`strada_stack_push`/`_pop`/`_set_line` were out-of-line calls at every
+function entry/exit and call site. Codegen now emits `static inline`
+variants (both runtime headers); the call stack keeps a sentinel frame at
+slot 0 (live frames 1..depth) so the per-call-site line store is one
+unconditional write. Old externs remain for bootstrap/.so compat and as
+the push slow path. Same callgrind workload (stradac on Lexer.strada):
+
+| | round 7 base | round 8 |
+|---|---|---|
+| total instructions | 923.6M | 895.5M (−3.0%) |
+| stack push/pop/set_line | ~44M (4.5%) | absent from profile (inlined) |
+
+Cumulative rounds 6–8: 1,101.6M → 895.5M (**−18.7%**).
+
 ## Round 7: multi-part concat flattening (2026-06-10)
 
 `.` chains of >= 3 leaf parts (string interpolation desugars to these in

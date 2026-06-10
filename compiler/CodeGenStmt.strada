@@ -2045,7 +2045,7 @@ func gen_function(scalar $cg, scalar $fn) void {
         # Push stack frame for stack traces (if enabled)
         my str $src_file = $cg->{"filename"};
         if ($cg->{"enable_stack_trace"} == 1) {
-            emit($cg, "    strada_stack_push(\"main\", \"" . $src_file . "\");\n\n");
+            emit($cg, "    strada_stack_push_il(\"main\", \"" . $src_file . "\");\n\n");
         }
 
         # Initialize profiling if enabled
@@ -2338,7 +2338,7 @@ func gen_function(scalar $cg, scalar $fn) void {
         # Push stack frame for stack traces (if enabled)
         my str $src_file = $cg->{"filename"};
         if ($cg->{"enable_stack_trace"} == 1) {
-            emit($cg, "strada_stack_push(\"" . $name . "\", \"" . $src_file . "\");\n");
+            emit($cg, "strada_stack_push_il(\"" . $name . "\", \"" . $src_file . "\");\n");
         }
 
         # Add profiling entry if enabled
@@ -2489,7 +2489,7 @@ func gen_function(scalar $cg, scalar $fn) void {
         }
         # Pop stack frame for void functions falling through
         if ($ret_type_id == TYPE_VOID() && $cg->{"enable_stack_trace"} == 1) {
-            emit($cg, "strada_stack_pop();\n");
+            emit($cg, "strada_stack_pop_il();\n");
         }
         # Implicit return undef for non-void functions that fall through without return
         if ($ret_type_id != TYPE_VOID()) {
@@ -2507,7 +2507,7 @@ func gen_function(scalar $cg, scalar $fn) void {
                 }
             }
             if ($cg->{"enable_stack_trace"} == 1) {
-                emit($cg, "strada_stack_pop();\n");
+                emit($cg, "strada_stack_pop_il();\n");
             }
             emit($cg, "return strada_new_undef();\n");
         }

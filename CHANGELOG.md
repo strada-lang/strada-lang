@@ -63,6 +63,20 @@
   Whole-benchmark instructions −23% (callgrind); suite 166 → 167
   (`test_concat_multi`).
 
+### Performance (round 8, 2026-06-10)
+- **Stack-trace frame tracking inlined (−3% whole-program instructions)**:
+  the per-function-entry/exit push/pop and per-call-site line store were
+  out-of-line runtime calls (~4.5% of a call-heavy profile). Now
+  `static inline` fast paths in both runtime headers
+  (`strada_stack_push_il`/`_pop_il`/`_line_il`), with the call stack
+  re-indexed to keep a sentinel frame at slot 0 (live frames at
+  1..depth) so the line store is a single unconditional write. The old
+  extern symbols remain as the compat ABI (bootstrap-generated C,
+  previously compiled .so modules) and as the push slow path (recursion
+  limit / overflow). Traces, `core::caller()`, and the recursion-limit
+  error are unchanged. stradac self-compile: 923.6M → 895.5M instructions
+  (−18.7% cumulative across rounds 6–8).
+
 ### Performance (rounds 1–4, 2026-06-09/10)
 - **Method dispatch ~2x** (type-opaque call sites): compile-time method-name
   hashing, a 64-entry generation-invalidated global cache with cached

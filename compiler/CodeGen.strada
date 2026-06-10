@@ -1976,14 +1976,14 @@ func emit_indent(scalar $cg) void {
 func emit_stack_pop(scalar $cg) void {
     if ($cg->{"enable_stack_trace"} == 1) {
         emit_indent($cg);
-        emit($cg, "strada_stack_pop();\n");
+        emit($cg, "strada_stack_pop_il();\n");
     }
 }
 
 # Emit inline stack_pop (no indent, for use in single-line statements)
 func emit_stack_pop_inline(scalar $cg) str {
     if ($cg->{"enable_stack_trace"} == 1) {
-        return " strada_stack_pop();";
+        return " strada_stack_pop_il();";
     }
     return "";
 }

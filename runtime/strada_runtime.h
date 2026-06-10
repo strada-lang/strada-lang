@@ -945,7 +945,10 @@ typedef struct {
     int line;                /* Current line number */
 } StradaStackFrame;
 
-extern StradaStackFrame strada_call_stack[STRADA_MAX_CALL_DEPTH];
+/* Slot 0 is a permanent sentinel frame; live frames occupy 1..depth. This
+ * lets the per-call-site line store (strada_stack_line_il) be a single
+ * unconditional write — depth 0 harmlessly hits the sentinel. */
+extern StradaStackFrame strada_call_stack[STRADA_MAX_CALL_DEPTH + 1];
 extern int strada_call_depth;
 extern int strada_recursion_limit;  /* Configurable limit (default 1000, 0 = disabled) */
 extern int strada_pending_call_line;  /* set by codegen at each call site; strada_stack_push consumes */
@@ -953,6 +956,31 @@ extern int strada_pending_call_line;  /* set by codegen at each call site; strad
 void strada_stack_push(const char *func_name, const char *file_name);
 void strada_stack_pop(void);
 void strada_stack_set_line(int line);
+
+/* Inline fast paths — emitted by the codegen at every function entry/exit
+ * and call site, so they must not be out-of-line calls (profiled at ~4.5%
+ * of a call-heavy workload). The out-of-line versions above remain the
+ * compat ABI for bootstrap-generated C and previously compiled .so
+ * modules, and serve as the slow path (recursion limit / overflow). */
+static inline void strada_stack_push_il(const char *func_name, const char *file_name) {
+    int d = strada_call_depth;
+    if (__builtin_expect(d >= STRADA_MAX_CALL_DEPTH
+                         || (strada_recursion_limit > 0 && d >= strada_recursion_limit), 0)) {
+        strada_stack_push(func_name, file_name);  /* limit/overflow handling */
+        return;
+    }
+    strada_call_depth = d + 1;
+    StradaStackFrame *f = &strada_call_stack[d + 1];
+    f->func_name = func_name;
+    f->file_name = file_name;
+    f->line = 0;
+}
+static inline void strada_stack_pop_il(void) {
+    if (strada_call_depth > 0) strada_call_depth--;
+}
+static inline void strada_stack_line_il(int line) {
+    strada_call_stack[strada_call_depth].line = line;
+}
 StradaValue* strada_caller_info(StradaValue *level);
 void strada_print_stack_trace(FILE *out);
 char* strada_capture_stack_trace(void);

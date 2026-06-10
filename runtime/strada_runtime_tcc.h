@@ -712,7 +712,9 @@ typedef struct {
     int line;                /* Current line number */
 } StradaStackFrame;
 
-extern StradaStackFrame strada_call_stack[STRADA_MAX_CALL_DEPTH];
+/* Slot 0 is a permanent sentinel frame; live frames occupy 1..depth
+ * (must match strada_runtime.h). */
+extern StradaStackFrame strada_call_stack[STRADA_MAX_CALL_DEPTH + 1];
 extern int strada_call_depth;
 extern int strada_recursion_limit;  /* Configurable limit (default 1000, 0 = disabled) */
 extern int strada_pending_call_line;  /* set by codegen at each call site; strada_stack_push consumes */
@@ -720,6 +722,28 @@ extern int strada_pending_call_line;  /* set by codegen at each call site; strad
 void strada_stack_push(const char *func_name, const char *file_name);
 void strada_stack_pop(void);
 void strada_stack_set_line(int line);
+
+/* Inline fast paths (codegen-emitted) — see strada_runtime.h. No
+ * __builtin_expect here: keep the stripped header tcc-friendly. */
+static inline void strada_stack_push_il(const char *func_name, const char *file_name) {
+    int d = strada_call_depth;
+    if (d >= STRADA_MAX_CALL_DEPTH
+        || (strada_recursion_limit > 0 && d >= strada_recursion_limit)) {
+        strada_stack_push(func_name, file_name);  /* limit/overflow handling */
+        return;
+    }
+    strada_call_depth = d + 1;
+    StradaStackFrame *f = &strada_call_stack[d + 1];
+    f->func_name = func_name;
+    f->file_name = file_name;
+    f->line = 0;
+}
+static inline void strada_stack_pop_il(void) {
+    if (strada_call_depth > 0) strada_call_depth--;
+}
+static inline void strada_stack_line_il(int line) {
+    strada_call_stack[strada_call_depth].line = line;
+}
 void strada_print_stack_trace(void);
 char* strada_capture_stack_trace(void);
 void strada_set_recursion_limit(int limit);

@@ -8145,7 +8145,10 @@ void (*strada_die_trace_hook)(const char *msg, int try_depth) = NULL;
 int (*strada_die_continue_hook)(void) = NULL;
 
 /* Call stack for stack traces */
-StradaStackFrame strada_call_stack[STRADA_MAX_CALL_DEPTH];
+/* Slot 0 is a permanent sentinel ({NULL,NULL,0} from zero-init); live
+ * frames occupy 1..depth. See the inline fast paths in strada_runtime.h —
+ * the sentinel makes strada_stack_line_il a single unconditional store. */
+StradaStackFrame strada_call_stack[STRADA_MAX_CALL_DEPTH + 1];
 int strada_call_depth = 0;
 int strada_recursion_limit = 1000;  /* Default limit; 0 = disabled */
 
@@ -8193,10 +8196,10 @@ void strada_stack_push(const char *func_name, const char *file_name) {
     }
 
     if (strada_call_depth < STRADA_MAX_CALL_DEPTH) {
+        strada_call_depth++;
         strada_call_stack[strada_call_depth].func_name = func_name;
         strada_call_stack[strada_call_depth].file_name = file_name;
         strada_call_stack[strada_call_depth].line = 0;
-        strada_call_depth++;
     }
 }
 
@@ -8207,9 +8210,8 @@ void strada_stack_pop(void) {
 }
 
 void strada_stack_set_line(int line) {
-    if (strada_call_depth > 0) {
-        strada_call_stack[strada_call_depth - 1].line = line;
-    }
+    /* Frames live at 1..depth; depth 0 writes the sentinel slot (no-op). */
+    strada_call_stack[strada_call_depth].line = line;
 }
 
 /* caller() - returns hash with function, file, line of the calling frame.
@@ -8217,9 +8219,11 @@ void strada_stack_set_line(int line) {
 StradaValue* strada_caller_info(StradaValue *level_sv) {
     int level = STRADA_IS_TAGGED_INT(level_sv) ? (int)STRADA_TAGGED_INT_VAL(level_sv) :
                 (level_sv ? (int)strada_to_int(level_sv) : 0);
-    /* +2: skip caller() itself and the function that called caller() */
-    int frame_idx = strada_call_depth - 2 - level;
-    if (frame_idx < 0 || frame_idx >= strada_call_depth) {
+    /* Frames live at 1..depth (slot 0 is the sentinel). Top frame is the
+     * function that called caller(); its caller is one below — so level 0
+     * is depth-1, preserving the old "skip caller() itself" semantics. */
+    int frame_idx = strada_call_depth - 1 - level;
+    if (frame_idx < 1 || frame_idx > strada_call_depth) {
         return strada_new_undef();
     }
     StradaStackFrame *frame = &strada_call_stack[frame_idx];
@@ -8238,7 +8242,7 @@ void strada_print_stack_trace(FILE *out) {
         return;
     }
     fprintf(out, "Stack trace:\n");
-    for (int i = strada_call_depth - 1; i >= 0; i--) {
+    for (int i = strada_call_depth; i >= 1; i--) {
         StradaStackFrame *frame = &strada_call_stack[i];
         if (frame->line > 0) {
             fprintf(out, "  at %s (%s:%d)\n",
@@ -8264,7 +8268,7 @@ char* strada_capture_stack_trace(void) {
     buf[0] = '\0';
     size_t pos = 0;
 
-    for (int i = strada_call_depth - 1; i >= 0 && pos < bufsize - 1; i--) {
+    for (int i = strada_call_depth; i >= 1 && pos < bufsize - 1; i--) {
         StradaStackFrame *frame = &strada_call_stack[i];
         int written;
         if (frame->line > 0) {

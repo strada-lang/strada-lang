@@ -8366,7 +8366,7 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
             if ($cg->{"enable_stack_trace"} == 1) {
                 my int $__cl_line = $expr->{"line"} + 0;
                 if ($__cl_line > 0) {
-                    emit($cg, "strada_stack_set_line(" . $__cl_line . "); ");
+                    emit($cg, "strada_stack_line_il(" . $__cl_line . "); ");
                 }
             }
             if ($returns_void == 0) {
@@ -8480,7 +8480,7 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
             if ($cg->{"enable_stack_trace"} == 1) {
                 my int $__cl_line2 = $expr->{"line"} + 0;
                 if ($__cl_line2 > 0) {
-                    emit($cg, "strada_stack_set_line(" . $__cl_line2 . "); ");
+                    emit($cg, "strada_stack_line_il(" . $__cl_line2 . "); ");
                 }
             }
             if ($returns_void == 0) {
@@ -8579,7 +8579,7 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
             if ($cg->{"enable_stack_trace"} == 1) {
                 my int $__cl_line3 = $expr->{"line"} + 0;
                 if ($__cl_line3 > 0) {
-                    emit($cg, "(strada_stack_set_line(" . $__cl_line3 . "), ");
+                    emit($cg, "(strada_stack_line_il(" . $__cl_line3 . "), ");
                 }
             }
             emit($cg, $c_name . "(");
