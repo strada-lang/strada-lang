@@ -39,6 +39,9 @@
 #include <stdint.h>
 #include <time.h>
 #include <math.h>
+#ifdef HAVE_LIBFFI
+#include <ffi.h>
+#endif
 #include <unistd.h>
 #include <errno.h>
 #include <limits.h>
@@ -10346,6 +10349,24 @@ static char* pcre2_preprocess_replacement(const char *replacement) {
             case_open = 0;
             out[j++] = '\\';
             out[j++] = 'E';
+            i++;
+            continue;
+        }
+        if (replacement[i] == '\\' && i + 1 < len && replacement[i+1] == '\\') {
+            /* `\\` — a literal backslash. Must be consumed as a UNIT
+             * before the other backslash rules: in `s/(x)/\\$1/g` the
+             * template is literal-backslash + $1 backref, but without
+             * this case the second `\` paired with the following `$`
+             * and hit the `\$`-literal rule below — the output got a
+             * literal `$` instead of `\` (Date::Manip's _qe_quote
+             * produced `a$.b$+c` instead of `a\.b\+c`), and the
+             * mangled template made PCRE2's substitute parsing read
+             * past the subject buffer (valgrind: invalid read 2 bytes
+             * after block; downstream heap corruption crashed later
+             * unrelated substitutions). PCRE2's extended-substitute
+             * escape for a literal backslash is `\\` — pass through. */
+            out[j++] = '\\';
+            out[j++] = '\\';
             i++;
             continue;
         }
@@ -24856,10 +24877,10 @@ StradaValue* strada_c_ptr_to_str_n(StradaValue *ptr_sv, StradaValue *len_sv) {
 
 /* c::free - Free memory allocated by C (e.g., from c::str_to_ptr) */
 StradaValue* strada_c_free(StradaValue *ptr_sv) {
-    if (!ptr_sv) return strada_new_undef();
+    if (!ptr_sv) return strada_undef_static();  /* immortal: statement-form calls discard the result */
     void *p = (void*)strada_to_int(ptr_sv);
     if (p) free(p);
-    return strada_new_undef();
+    return strada_undef_static();  /* immortal: statement-form calls discard the result */
 }
 
 /* c::alloc - Allocate memory (malloc wrapper) */
@@ -24869,6 +24890,243 @@ StradaValue* strada_c_alloc(StradaValue *size_sv) {
     void *p = malloc(size);
     return strada_new_int((int64_t)p);
 }
+
+/* ===== libffi closure -> C callback trampolines (c::callback) =====
+ *
+ * c::callback($closure, "ret", "arg,arg,...") mints a fresh C function
+ * pointer (returned as an int address, consistent with the rest of the
+ * c:: API) that, when called BY C CODE, unmarshals its arguments per the
+ * declared signature, invokes the Strada closure, and marshals the return
+ * value back. This is what lets a Strada closure serve as a qsort
+ * comparator or a libcurl/GTK callback.
+ *
+ * Signature type names: "void" (return only), "int" (int64), "int32",
+ * "num"/"double" (double), "ptr" (pointer, surfaced to the closure as an
+ * int address — pair with c::read_*), "str" (const char* -> Strada str;
+ * arguments only — returning an owned C string has no safe ownership
+ * story). Up to 8 arguments.
+ *
+ * Lifetime: the trampoline (ffi_closure memory + an incref on the Strada
+ * closure) lives until c::callback_free($cb) or process exit (a registry
+ * frees outstanding trampolines at exit, keeping valgrind clean). The
+ * callback must only be invoked from threads known to the Strada runtime
+ * — a foreign thread (e.g. a curl multi worker) calling into the runtime
+ * is undefined, same as every other runtime entry point. */
+#ifdef HAVE_LIBFFI
+
+#define STRADA_FFI_MAX_ARGS 8
+
+typedef struct StradaFFICallback {
+    ffi_cif cif;
+    ffi_closure *closure_mem;
+    void *code_ptr;
+    ffi_type *atypes[STRADA_FFI_MAX_ARGS];
+    char argsig[STRADA_FFI_MAX_ARGS];  /* one code per arg: i 3 d p s */
+    int nargs;
+    char retsig;                       /* v i 3 d p */
+    StradaValue *strada_closure;       /* incref'd */
+    struct StradaFFICallback *next;
+} StradaFFICallback;
+
+static StradaFFICallback *strada_ffi_registry = NULL;
+static int strada_ffi_atexit_registered = 0;
+
+static void strada_ffi_free_cb(StradaFFICallback *cb) {
+    if (cb->strada_closure) strada_decref(cb->strada_closure);
+    if (cb->closure_mem) ffi_closure_free(cb->closure_mem);
+    free(cb);
+}
+
+static void strada_ffi_atexit(void) {
+    StradaFFICallback *cb = strada_ffi_registry;
+    while (cb) {
+        StradaFFICallback *next = cb->next;
+        strada_ffi_free_cb(cb);
+        cb = next;
+    }
+    strada_ffi_registry = NULL;
+}
+
+/* "int" -> 'i', etc. Returns 0 on unknown name. */
+static char strada_ffi_typecode(const char *name, size_t len) {
+    if (len == 3 && memcmp(name, "int", 3) == 0) return 'i';
+    if (len == 5 && memcmp(name, "int32", 5) == 0) return '3';
+    if (len == 3 && memcmp(name, "num", 3) == 0) return 'd';
+    if (len == 6 && memcmp(name, "double", 6) == 0) return 'd';
+    if (len == 3 && memcmp(name, "ptr", 3) == 0) return 'p';
+    if (len == 3 && memcmp(name, "str", 3) == 0) return 's';
+    if (len == 4 && memcmp(name, "void", 4) == 0) return 'v';
+    return 0;
+}
+
+static ffi_type *strada_ffi_type_for(char code) {
+    switch (code) {
+        case 'i': return &ffi_type_sint64;
+        case '3': return &ffi_type_sint32;
+        case 'd': return &ffi_type_double;
+        case 'p': return &ffi_type_pointer;
+        case 's': return &ffi_type_pointer;
+        case 'v': return &ffi_type_void;
+    }
+    return NULL;
+}
+
+/* The generic handler every trampoline bounces through. */
+static void strada_ffi_handler(ffi_cif *cif, void *ret, void **args, void *user_data) {
+    (void)cif;
+    StradaFFICallback *cb = (StradaFFICallback *)user_data;
+    StradaValue *argv[STRADA_FFI_MAX_ARGS];
+    for (int i = 0; i < cb->nargs; i++) {
+        switch (cb->argsig[i]) {
+            case 'i': argv[i] = strada_new_int(*(int64_t *)args[i]); break;
+            case '3': argv[i] = strada_new_int((int64_t)*(int32_t *)args[i]); break;
+            case 'd': argv[i] = strada_new_num(*(double *)args[i]); break;
+            case 'p': argv[i] = strada_new_int((int64_t)(intptr_t)*(void **)args[i]); break;
+            case 's': {
+                const char *s = *(const char **)args[i];
+                argv[i] = s ? strada_new_str(s) : strada_new_undef();
+                break;
+            }
+            default:  argv[i] = strada_new_undef(); break;
+        }
+    }
+    StradaValue *result = NULL;
+    switch (cb->nargs) {
+        case 0: result = strada_closure_call(cb->strada_closure, 0); break;
+        case 1: result = strada_closure_call(cb->strada_closure, 1, argv[0]); break;
+        case 2: result = strada_closure_call(cb->strada_closure, 2, argv[0], argv[1]); break;
+        case 3: result = strada_closure_call(cb->strada_closure, 3, argv[0], argv[1], argv[2]); break;
+        case 4: result = strada_closure_call(cb->strada_closure, 4, argv[0], argv[1], argv[2], argv[3]); break;
+        case 5: result = strada_closure_call(cb->strada_closure, 5, argv[0], argv[1], argv[2], argv[3], argv[4]); break;
+        case 6: result = strada_closure_call(cb->strada_closure, 6, argv[0], argv[1], argv[2], argv[3], argv[4], argv[5]); break;
+        case 7: result = strada_closure_call(cb->strada_closure, 7, argv[0], argv[1], argv[2], argv[3], argv[4], argv[5], argv[6]); break;
+        default: result = strada_closure_call(cb->strada_closure, 8, argv[0], argv[1], argv[2], argv[3], argv[4], argv[5], argv[6], argv[7]); break;
+    }
+    for (int i = 0; i < cb->nargs; i++) strada_decref(argv[i]);
+    switch (cb->retsig) {
+        case 'i': *(int64_t *)ret = strada_to_int(result); break;
+        /* Integral returns narrower than ffi_arg must be written widened
+         * (libffi contract). */
+        case '3': *(ffi_arg *)ret = (ffi_arg)(int32_t)strada_to_int(result); break;
+        case 'd': *(double *)ret = strada_to_num(result); break;
+        case 'p': *(void **)ret = (void *)(intptr_t)strada_to_int(result); break;
+        case 'v': default: break;
+    }
+    if (result) strada_decref(result);
+}
+
+StradaValue* strada_ffi_callback_new(StradaValue *closure, StradaValue *ret_sv, StradaValue *args_sv) {
+    if (!closure || STRADA_IS_TAGGED_INT(closure)
+        || (closure->type != STRADA_CLOSURE && closure->type != STRADA_CPOINTER)) {
+        strada_die("c::callback: first argument must be a closure or function reference");
+        return strada_new_int(0);
+    }
+    char rbuf[32];
+    const char *rname = strada_to_str_buf(ret_sv, rbuf, sizeof(rbuf));
+    char retcode = strada_ffi_typecode(rname, strlen(rname));
+    if (retcode == 0 || retcode == 's') {
+        char emsg[128];
+        snprintf(emsg, sizeof(emsg),
+                 "c::callback: unsupported return type '%s' (use void/int/int32/num/ptr)", rname);
+        strada_die("%s", emsg);
+        return strada_new_int(0);
+    }
+
+    StradaFFICallback *cb = sr_xmalloc(sizeof(StradaFFICallback));
+    memset(cb, 0, sizeof(*cb));
+    cb->retsig = retcode;
+
+    /* Parse "type,type,..." (empty or "void" = no args). */
+    char abuf[128];
+    const char *asig = strada_to_str_buf(args_sv, abuf, sizeof(abuf));
+    const char *p = asig;
+    while (*p) {
+        const char *start = p;
+        while (*p && *p != ',') p++;
+        size_t len = (size_t)(p - start);
+        /* Trim spaces */
+        while (len > 0 && start[0] == ' ') { start++; len--; }
+        while (len > 0 && start[len - 1] == ' ') len--;
+        if (len > 0 && !(len == 4 && memcmp(start, "void", 4) == 0)) {
+            if (cb->nargs >= STRADA_FFI_MAX_ARGS) {
+                free(cb);
+                strada_die("c::callback: too many arguments (max 8)");
+                return strada_new_int(0);
+            }
+            char code = strada_ffi_typecode(start, len);
+            if (code == 0 || code == 'v') {
+                char emsg[192];
+                snprintf(emsg, sizeof(emsg), "c::callback: unsupported argument type in '%s'", asig);
+                free(cb);
+                strada_die("%s", emsg);
+                return strada_new_int(0);
+            }
+            cb->argsig[cb->nargs] = code;
+            cb->atypes[cb->nargs] = strada_ffi_type_for(code);
+            cb->nargs++;
+        }
+        if (*p == ',') p++;
+    }
+
+    if (ffi_prep_cif(&cb->cif, FFI_DEFAULT_ABI, (unsigned)cb->nargs,
+                     strada_ffi_type_for(cb->retsig), cb->atypes) != FFI_OK) {
+        free(cb);
+        strada_die("c::callback: ffi_prep_cif failed");
+        return strada_new_int(0);
+    }
+    cb->closure_mem = ffi_closure_alloc(sizeof(ffi_closure), &cb->code_ptr);
+    if (!cb->closure_mem) {
+        free(cb);
+        strada_die("c::callback: ffi_closure_alloc failed");
+        return strada_new_int(0);
+    }
+    if (ffi_prep_closure_loc(cb->closure_mem, &cb->cif, strada_ffi_handler, cb, cb->code_ptr) != FFI_OK) {
+        ffi_closure_free(cb->closure_mem);
+        free(cb);
+        strada_die("c::callback: ffi_prep_closure_loc failed");
+        return strada_new_int(0);
+    }
+
+    strada_incref(closure);
+    cb->strada_closure = closure;
+    cb->next = strada_ffi_registry;
+    strada_ffi_registry = cb;
+    if (!strada_ffi_atexit_registered) {
+        strada_ffi_atexit_registered = 1;
+        atexit(strada_ffi_atexit);
+    }
+    return strada_new_int((int64_t)(intptr_t)cb->code_ptr);
+}
+
+StradaValue* strada_ffi_callback_free(StradaValue *cb_sv) {
+    void *code = (void *)(intptr_t)strada_to_int(cb_sv);
+    StradaFFICallback **link = &strada_ffi_registry;
+    while (*link) {
+        if ((*link)->code_ptr == code) {
+            StradaFFICallback *cb = *link;
+            *link = cb->next;
+            strada_ffi_free_cb(cb);
+            return strada_new_int(1);
+        }
+        link = &(*link)->next;
+    }
+    return strada_new_int(0);
+}
+
+#else  /* !HAVE_LIBFFI — clear runtime error instead of a link failure */
+
+StradaValue* strada_ffi_callback_new(StradaValue *closure, StradaValue *ret_sv, StradaValue *args_sv) {
+    (void)closure; (void)ret_sv; (void)args_sv;
+    strada_die("c::callback requires libffi (rebuild after installing libffi-dev; ./configure detects it)");
+    return strada_new_int(0);
+}
+
+StradaValue* strada_ffi_callback_free(StradaValue *cb_sv) {
+    (void)cb_sv;
+    return strada_new_int(0);
+}
+
+#endif /* HAVE_LIBFFI */
 
 /* c::realloc - Reallocate memory */
 StradaValue* strada_c_realloc(StradaValue *ptr_sv, StradaValue *size_sv) {
@@ -24957,65 +25215,65 @@ StradaValue* strada_c_read_double(StradaValue *ptr_sv) {
 
 /* c::write_int8 - Write int8_t at pointer */
 StradaValue* strada_c_write_int8(StradaValue *ptr_sv, StradaValue *val_sv) {
-    if (!ptr_sv || !val_sv) return strada_new_undef();
+    if (!ptr_sv || !val_sv) return strada_undef_static();  /* immortal: statement-form calls discard the result */
     int8_t *p = (int8_t*)strada_to_int(ptr_sv);
-    if (!p) return strada_new_undef();
+    if (!p) return strada_undef_static();  /* immortal: statement-form calls discard the result */
     *p = (int8_t)strada_to_int(val_sv);
-    return strada_new_undef();
+    return strada_undef_static();  /* immortal: statement-form calls discard the result */
 }
 
 /* c::write_int16 - Write int16_t at pointer */
 StradaValue* strada_c_write_int16(StradaValue *ptr_sv, StradaValue *val_sv) {
-    if (!ptr_sv || !val_sv) return strada_new_undef();
+    if (!ptr_sv || !val_sv) return strada_undef_static();  /* immortal: statement-form calls discard the result */
     int16_t *p = (int16_t*)strada_to_int(ptr_sv);
-    if (!p) return strada_new_undef();
+    if (!p) return strada_undef_static();  /* immortal: statement-form calls discard the result */
     *p = (int16_t)strada_to_int(val_sv);
-    return strada_new_undef();
+    return strada_undef_static();  /* immortal: statement-form calls discard the result */
 }
 
 /* c::write_int32 - Write int32_t at pointer */
 StradaValue* strada_c_write_int32(StradaValue *ptr_sv, StradaValue *val_sv) {
-    if (!ptr_sv || !val_sv) return strada_new_undef();
+    if (!ptr_sv || !val_sv) return strada_undef_static();  /* immortal: statement-form calls discard the result */
     int32_t *p = (int32_t*)strada_to_int(ptr_sv);
-    if (!p) return strada_new_undef();
+    if (!p) return strada_undef_static();  /* immortal: statement-form calls discard the result */
     *p = (int32_t)strada_to_int(val_sv);
-    return strada_new_undef();
+    return strada_undef_static();  /* immortal: statement-form calls discard the result */
 }
 
 /* c::write_int64 - Write int64_t at pointer */
 StradaValue* strada_c_write_int64(StradaValue *ptr_sv, StradaValue *val_sv) {
-    if (!ptr_sv || !val_sv) return strada_new_undef();
+    if (!ptr_sv || !val_sv) return strada_undef_static();  /* immortal: statement-form calls discard the result */
     int64_t *p = (int64_t*)strada_to_int(ptr_sv);
-    if (!p) return strada_new_undef();
+    if (!p) return strada_undef_static();  /* immortal: statement-form calls discard the result */
     *p = strada_to_int(val_sv);
-    return strada_new_undef();
+    return strada_undef_static();  /* immortal: statement-form calls discard the result */
 }
 
 /* c::write_ptr - Write pointer at pointer (void**) */
 StradaValue* strada_c_write_ptr(StradaValue *ptr_sv, StradaValue *val_sv) {
-    if (!ptr_sv || !val_sv) return strada_new_undef();
+    if (!ptr_sv || !val_sv) return strada_undef_static();  /* immortal: statement-form calls discard the result */
     void **p = (void**)strada_to_int(ptr_sv);
-    if (!p) return strada_new_undef();
+    if (!p) return strada_undef_static();  /* immortal: statement-form calls discard the result */
     *p = (void*)strada_to_int(val_sv);
-    return strada_new_undef();
+    return strada_undef_static();  /* immortal: statement-form calls discard the result */
 }
 
 /* c::write_float - Write float at pointer */
 StradaValue* strada_c_write_float(StradaValue *ptr_sv, StradaValue *val_sv) {
-    if (!ptr_sv || !val_sv) return strada_new_undef();
+    if (!ptr_sv || !val_sv) return strada_undef_static();  /* immortal: statement-form calls discard the result */
     float *p = (float*)strada_to_int(ptr_sv);
-    if (!p) return strada_new_undef();
+    if (!p) return strada_undef_static();  /* immortal: statement-form calls discard the result */
     *p = (float)strada_to_num(val_sv);
-    return strada_new_undef();
+    return strada_undef_static();  /* immortal: statement-form calls discard the result */
 }
 
 /* c::write_double - Write double at pointer */
 StradaValue* strada_c_write_double(StradaValue *ptr_sv, StradaValue *val_sv) {
-    if (!ptr_sv || !val_sv) return strada_new_undef();
+    if (!ptr_sv || !val_sv) return strada_undef_static();  /* immortal: statement-form calls discard the result */
     double *p = (double*)strada_to_int(ptr_sv);
-    if (!p) return strada_new_undef();
+    if (!p) return strada_undef_static();  /* immortal: statement-form calls discard the result */
     *p = strada_to_num(val_sv);
-    return strada_new_undef();
+    return strada_undef_static();  /* immortal: statement-form calls discard the result */
 }
 
 /* c::sizeof_int - Return sizeof(int) */

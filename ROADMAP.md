@@ -66,9 +66,10 @@ exception is the type system.
   `strcmp`-only (not an expression, no binding/exhaustiveness), no
   comprehensions, ranges are eager (`1..1e6` materializes), no value-producing
   `do {}` block, no `reduce`/`any`/`all` builtins.
-- **FFI / low-level:** **no closure→C-callback trampoline** (no libffi — blocks
-  `qsort`/libcurl/GTK callbacks), no structs/unions by value, no compiler-known
-  struct layout (hand-coded offsets today).
+- **FFI / low-level:** ~~no closure→C-callback trampoline~~ ✅ shipped
+  2026-06-10 (`c::callback` via libffi — qsort/libcurl/GTK callbacks work);
+  still missing: structs/unions by value, compiler-known struct layout
+  (hand-coded offsets today).
 
 ---
 

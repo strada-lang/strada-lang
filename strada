@@ -673,6 +673,9 @@ build_runtime() {
     if [ "${STRADA_HAVE_ARENA:-1}" = "1" ]; then
         MM_DEF="$MM_DEF -DSTRADA_ARENA"
     fi
+    if [ "${STRADA_HAVE_LIBFFI:-0}" = "1" ]; then
+        MM_DEF="$MM_DEF -DHAVE_LIBFFI $STRADA_FFI_CFLAGS"
+    fi
     # -ffat-lto-objects keeps native code in the .o alongside the LTO
     # bitcode, so test/dev builds that pass -fno-lto can link against
     # this same runtime.o without rebuilding it. Production builds at
@@ -744,6 +747,11 @@ done
 # Add PCRE2 libraries if available
 if [ "${STRADA_HAVE_PCRE2:-0}" = "1" ]; then
     LINK_FLAGS="$LINK_FLAGS $STRADA_PCRE2_LIBS"
+fi
+
+# Add libffi if available (c::callback trampolines live in the runtime)
+if [ "${STRADA_HAVE_LIBFFI:-0}" = "1" ]; then
+    LINK_FLAGS="$LINK_FLAGS $STRADA_FFI_LIBS"
 fi
 
 # Build extra source/object file lists (plain extern C files — Strada module
@@ -923,7 +931,20 @@ if grep -q '__STRADA_LINK_LIBS__:' "$C_FILE" 2>/dev/null; then
     if [ -n "$IMPORT_LINK_LIBS" ]; then
         info "link_libs: $IMPORT_LINK_LIBS"
         for lib in $IMPORT_LINK_LIBS; do
-            LINK_FLAGS="$LINK_FLAGS -l$lib"
+            # Availability filter: link_lib declarations come from PARSING a
+            # used module's source, where `#ifdef HAVE_X` guards are inert
+            # comments — so a multi-driver module like DBI declares ALL its
+            # backends (sqlite3, mysqlclient, pq) even when only some are
+            # installed. Probe each auto-collected lib and skip+warn when the
+            # linker can't find it; a driver that's genuinely needed but
+            # missing still fails later with unresolved symbols, now with a
+            # warning that names the culprit. User-passed -l flags are NOT
+            # filtered (they arrive via LINK_LIBS, added separately).
+            if echo 'int main(void){return 0;}' | $CC -x c - -l"$lib" -o /dev/null 2>/dev/null; then
+                LINK_FLAGS="$LINK_FLAGS -l$lib"
+            else
+                echo "Warning: skipping -l$lib (declared via link_lib by a used module, but not installed)" >&2
+            fi
         done
     fi
 fi
@@ -1014,6 +1035,15 @@ else
     if grep -qE 'dlopen|strada_dl_open|strada_tie_hash' "$C_FILE" 2>/dev/null; then
         RDYNAMIC_FLAG="-rdynamic"
         info "FFI/import_lib detected, using -rdynamic"
+        # A dlopen host must export the ENTIRE runtime: Strada .so modules
+        # don't bundle it, and a library built by a NEWER compiler may
+        # reference runtime functions this host's own code never calls
+        # (e.g. strada_cleanup_push from a host that predates throw-safe
+        # codegen patterns). --gc-sections discards those sections BEFORE
+        # -rdynamic exports, producing "undefined symbol" at dlopen time —
+        # so section GC must be off for dlopen hosts.
+        GC_SECTIONS_FLAG=""
+        info "dlopen host: disabling --gc-sections (full runtime export)"
     fi
     info "Compiling $C_FILE -> $OUTPUT"
     if [ "$TCC_MODE" -eq 1 ]; then

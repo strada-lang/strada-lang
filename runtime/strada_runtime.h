@@ -1723,6 +1723,12 @@ StradaValue* strada_c_ptr_to_str(StradaValue *ptr_sv);       /* c::ptr_to_str - 
 StradaValue* strada_c_ptr_to_str_n(StradaValue *ptr_sv, StradaValue *len_sv); /* c::ptr_to_str_n - with length */
 StradaValue* strada_c_free(StradaValue *ptr_sv);             /* c::free - Free C-allocated memory */
 StradaValue* strada_c_alloc(StradaValue *size_sv);           /* c::alloc - Allocate memory (malloc) */
+/* c::callback — libffi trampoline minting a C function pointer (returned as
+ * an int address) that invokes a Strada closure. Signature strings:
+ * ret = void/int/int32/num/ptr; args = comma list of int/int32/num/ptr/str.
+ * Dies at runtime when built without libffi. */
+StradaValue* strada_ffi_callback_new(StradaValue *closure, StradaValue *ret_sv, StradaValue *args_sv);
+StradaValue* strada_ffi_callback_free(StradaValue *cb_sv);
 StradaValue* strada_c_realloc(StradaValue *ptr_sv, StradaValue *size_sv); /* c::realloc */
 StradaValue* strada_c_null(void);                            /* c::null - Return NULL pointer */
 StradaValue* strada_c_is_null(StradaValue *ptr_sv);          /* c::is_null - Check if NULL */

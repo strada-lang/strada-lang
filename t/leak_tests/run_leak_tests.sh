@@ -129,6 +129,12 @@ TESTS=(
     "test_hash_set_value_leak"
 )
 
+# c::callback needs libffi at build time — include only when configured in
+# (the exit-time trampoline registry sweep is what keeps this leak-free).
+if grep -q "^export STRADA_HAVE_LIBFFI=1" "$STRADA_DIR/config.sh" 2>/dev/null; then
+    TESTS+=("test_c_callback")
+fi
+
 # Tests with known leaks (for future work):
 # - test_encoding: JSON library has leaks
 

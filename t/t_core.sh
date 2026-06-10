@@ -374,6 +374,14 @@ test_output_contains "$EXAMPLES_DIR/test_perf_round5.strada" "test_perf_round5" 
 # Test: flattened multi-part concat (strada_concat_multi — interpolation chains)
 test_output_contains "$EXAMPLES_DIR/test_concat_multi.strada" "test_concat_multi" "All concat-multi tests passed" "Multi-part concat flattening"
 
+# Test: c::callback libffi trampolines (qsort comparator, marshaling, free).
+# Requires libffi at build time — skip cleanly when configured out.
+if grep -q "^export STRADA_HAVE_LIBFFI=1" "$PROJECT_DIR/config.sh" 2>/dev/null; then
+    test_output_contains "$EXAMPLES_DIR/test_c_callback.strada" "test_c_callback" "All c::callback tests passed" "c::callback (libffi trampolines)"
+else
+    test_skip "c::callback (libffi trampolines)" "built without libffi"
+fi
+
 # Test: --strict-types stage-0 type warnings (warning-only, gradual).
 # Expects exactly 5 warnings from the fixture's flagged lines, zero
 # without the flag, and successful compilation either way.

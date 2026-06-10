@@ -1075,6 +1075,8 @@ StradaValue* strada_c_ptr_to_str(StradaValue *ptr_sv);
 StradaValue* strada_c_ptr_to_str_n(StradaValue *ptr_sv, StradaValue *len_sv);
 StradaValue* strada_c_free(StradaValue *ptr_sv);
 StradaValue* strada_c_alloc(StradaValue *size_sv);
+StradaValue* strada_ffi_callback_new(StradaValue *closure, StradaValue *ret_sv, StradaValue *args_sv);
+StradaValue* strada_ffi_callback_free(StradaValue *cb_sv);
 StradaValue* strada_c_realloc(StradaValue *ptr_sv, StradaValue *size_sv);
 StradaValue* strada_c_null(void);
 StradaValue* strada_c_is_null(StradaValue *ptr_sv);

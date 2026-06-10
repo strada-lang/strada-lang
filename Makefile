@@ -116,6 +116,9 @@ else
 LDFLAGS += $(PCRE2_LIBS)
 endif
 endif
+ifeq ($(HAVE_LIBFFI),1)
+LDFLAGS += $(FFI_LIBS)
+endif
 RUNTIME_DIR = runtime
 BOOTSTRAP_DIR = bootstrap
 COMPILER_DIR = compiler
@@ -172,7 +175,7 @@ $(VENDOR_PCRE2_LIB):
 # conversion) into the user's hot loops.
 $(RUNTIME_OBJ): $(RUNTIME_SRC) $(RUNTIME_HDR) $(if $(filter 1,$(BUNDLED_PCRE2)),$(VENDOR_PCRE2_LIB))
 	@echo "=== Building pre-compiled runtime ==="
-	$(CC) $(CFLAGS) $(RUNTIME_LTO_FLAGS) $(MM_DEFINES) $(if $(filter 1,$(HAVE_PCRE2)),-DHAVE_PCRE2 $(PCRE2_CFLAGS)) -c $(RUNTIME_SRC) -I$(RUNTIME_DIR) -o $(RUNTIME_OBJ)
+	$(CC) $(CFLAGS) $(RUNTIME_LTO_FLAGS) $(MM_DEFINES) $(if $(filter 1,$(HAVE_PCRE2)),-DHAVE_PCRE2 $(PCRE2_CFLAGS)) $(if $(filter 1,$(HAVE_LIBFFI)),-DHAVE_LIBFFI $(FFI_CFLAGS)) -c $(RUNTIME_SRC) -I$(RUNTIME_DIR) -o $(RUNTIME_OBJ)
 
 # TCC-compatible runtime object (for REPL with TCC backend)
 # -Wa,-mrelax-relocations=no avoids R_X86_64_REX_GOTPCRELX relocations that TCC can't handle

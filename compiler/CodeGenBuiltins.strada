@@ -4730,6 +4730,51 @@ func gen_builtin_g5(scalar $cg, scalar $expr, str $name) int {
             return 1;
         }
 
+        # c::callback - mint a C function pointer (libffi trampoline) that
+        # invokes a Strada closure: c::callback($fn, "ret", "arg,arg").
+        # The closure argument is typically an owned temp (anon fn) — the
+        # runtime increfs it internally, so the temp decref here is safe.
+        if ($name eq "c::callback") {
+            # All three args can be owned temps (the closure is typically an
+            # anon fn, the signatures are string LITERALS — which allocate).
+            # Capture each owned arg and decref after the call (checklist #1).
+            my scalar $cbargs = $expr->{"args"};
+            if ($cg->{"cleanup_enabled"} == 1) {
+                my int $own0 = needs_temp_cleanup($cg, $cbargs->[0]);
+                my int $own1 = needs_temp_cleanup($cg, $cbargs->[1]);
+                my int $own2 = needs_temp_cleanup($cg, $cbargs->[2]);
+                emit($cg, "({ StradaValue *__ffi_cl = ");
+                gen_expression($cg, $cbargs->[0]);
+                emit($cg, "; StradaValue *__ffi_rs = ");
+                gen_expression($cg, $cbargs->[1]);
+                emit($cg, "; StradaValue *__ffi_as = ");
+                gen_expression($cg, $cbargs->[2]);
+                emit($cg, "; StradaValue *__ffi_r = strada_ffi_callback_new(__ffi_cl, __ffi_rs, __ffi_as); ");
+                if ($own0 == 1) { emit($cg, "strada_decref(__ffi_cl); "); }
+                if ($own1 == 1) { emit($cg, "strada_decref(__ffi_rs); "); }
+                if ($own2 == 1) { emit($cg, "strada_decref(__ffi_as); "); }
+                emit($cg, "__ffi_r; })");
+            } else {
+                emit($cg, "strada_ffi_callback_new(");
+                gen_expression($cg, $cbargs->[0]);
+                emit($cg, ", ");
+                gen_expression($cg, $cbargs->[1]);
+                emit($cg, ", ");
+                gen_expression($cg, $cbargs->[2]);
+                emit($cg, ")");
+            }
+            return 1;
+        }
+
+        # c::callback_free - release a c::callback trampoline
+        if ($name eq "c::callback_free") {
+            my scalar $cbfargs = $expr->{"args"};
+            emit($cg, "strada_ffi_callback_free(");
+            gen_expression($cg, $cbfargs->[0]);
+            emit($cg, ")");
+            return 1;
+        }
+
         # c::free - Free C-allocated memory
         if ($name eq "c::free") {
             emit($cg, "strada_c_free(");

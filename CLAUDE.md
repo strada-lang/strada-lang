@@ -471,7 +471,7 @@ make interpreter
 - **`sys::`** - Legacy alias for `core::` (both work, `core::` normalized to `sys::` at compile time)
 - **`math::`** - Math functions: `math::sin()`, `math::sqrt()`, `math::pow()`, etc.
 - **`async::`** - Async/threading: `async::all()`, `async::channel()`, `async::mutex()`, etc.
-- **`c::`** - Low-level memory: `c::alloc()`, `c::free()`, `c::is_null()`, etc.
+- **`c::`** - Low-level memory: `c::alloc()`, `c::free()`, `c::is_null()`, etc. Plus **`c::callback($closure, "ret", "args")`** (libffi trampolines — see below)
 - **`utf8::`** - UTF-8 validation: `utf8::is_utf8()`, `utf8::valid()`, `utf8::downgrade()`, etc.
 - **`usb::`** - USB device access (requires libusb): `usb::open_device()`, `usb::bulk_transfer()`, etc.
 - **`ssl::`** - TLS/SSL sockets: `ssl::connect()`, `ssl::read()`, `ssl::write()`, etc.
@@ -554,6 +554,26 @@ func process(str $data) int {
 ```
 
 Variables are `StradaValue*` pointers. Use `strada_to_int/str/num()` to extract, `strada_new_int/str/num()` to create. Always `strada_decref()` before reassigning, `free()` after `strada_to_str()`.
+
+### C Callbacks (`c::callback`, libffi trampolines)
+
+Pass a Strada closure to C code expecting a function pointer (qsort comparators, libcurl/GTK callbacks):
+
+```strada
+my scalar $cmp = c::callback(fn (scalar $pa, scalar $pb) int {
+    return c::read_int64($pa) <=> c::read_int64($pb);
+}, "int", "ptr,ptr");          # returns the C function pointer as an int address
+
+__C__ {
+    qsort(buf, n, 8, (int(*)(const void*,const void*))(intptr_t)strada_to_int(cmp));
+}
+c::callback_free($cmp);        # optional; an exit-time registry sweep frees survivors
+```
+
+- Signature strings: return = `void`/`int` (int64)/`int32`/`num`/`ptr`; args = comma list of `int`/`int32`/`num`/`ptr`/`str` (max 8). `str` args arrive as Strada strings (NULL → undef); `str` returns are not supported (no safe ownership). `ptr` values travel as int addresses (pair with `c::read_*`/`c::write_*`).
+- Argument/return marshaling and closure invocation go through `strada_ffi_callback_new` → libffi `ffi_prep_closure_loc` → `strada_closure_call`. Captures and `our` globals work inside the callback.
+- The trampoline holds an incref on the closure until `c::callback_free` or process exit. Only invoke from threads the Strada runtime knows about.
+- Requires libffi at build time (`./configure` auto-detects; without it, `c::callback` dies with a clear message at runtime).
 
 ### Module System
 

@@ -22,6 +22,9 @@ HAVE_SQLITE=0
 HAVE_POSTGRES=0
 HAVE_CRYPT=0
 HAVE_READLINE=0
+HAVE_LIBFFI=0
+FFI_CFLAGS=""
+FFI_LIBS=""
 HAVE_SSL=0
 HAVE_ZLIB=0
 HAVE_LIBUSB=0
@@ -305,6 +308,21 @@ else
     echo -e "${RED}no${NC}"
 fi
 
+# Check libffi (closure -> C callback trampolines: c::callback)
+printf "  Checking for libffi... "
+if [ "$HAS_PKGCONFIG" = "1" ] && check_pkg libffi; then
+    HAVE_LIBFFI=1
+    FFI_CFLAGS="$(pkg-config --cflags libffi)"
+    FFI_LIBS="$(pkg-config --libs libffi)"
+    echo -e "${GREEN}yes${NC} (pkg-config)"
+elif check_lib "libffi" "ffi.h" "ffi" "ffi_prep_cif"; then
+    HAVE_LIBFFI=1
+    FFI_LIBS="-lffi"
+    echo -e "${GREEN}yes${NC}"
+else
+    echo -e "${RED}no${NC}"
+fi
+
 # Check readline
 printf "  Checking for readline... "
 if [ "$HAS_PKGCONFIG" = "1" ] && check_pkg readline; then
@@ -491,6 +509,7 @@ HAVE_POSTGRES = $HAVE_POSTGRES
 HAVE_CRYPT = $HAVE_CRYPT
 HAVE_CRYPT_R = $HAVE_CRYPT_R
 HAVE_READLINE = $HAVE_READLINE
+HAVE_LIBFFI = $HAVE_LIBFFI
 HAVE_SSL = $HAVE_SSL
 HAVE_ZLIB = $HAVE_ZLIB
 HAVE_LIBUSB = $HAVE_LIBUSB
@@ -518,6 +537,10 @@ CRYPT_LIBS = $CRYPT_LIBS
 # readline
 READLINE_CFLAGS = $READLINE_CFLAGS
 READLINE_LIBS = $READLINE_LIBS
+
+# libffi (c::callback trampolines)
+FFI_CFLAGS = $FFI_CFLAGS
+FFI_LIBS = $FFI_LIBS
 
 # OpenSSL
 SSL_CFLAGS = $SSL_CFLAGS
@@ -575,6 +598,7 @@ export STRADA_HAVE_POSTGRES=$HAVE_POSTGRES
 export STRADA_HAVE_CRYPT=$HAVE_CRYPT
 export STRADA_HAVE_CRYPT_R=$HAVE_CRYPT_R
 export STRADA_HAVE_READLINE=$HAVE_READLINE
+export STRADA_HAVE_LIBFFI=$HAVE_LIBFFI
 export STRADA_HAVE_SSL=$HAVE_SSL
 export STRADA_HAVE_ZLIB=$HAVE_ZLIB
 export STRADA_HAVE_LIBUSB=$HAVE_LIBUSB
@@ -590,6 +614,8 @@ export STRADA_POSTGRES_LIBS="$POSTGRES_LIBS"
 export STRADA_CRYPT_LIBS="$CRYPT_LIBS"
 export STRADA_READLINE_CFLAGS="$READLINE_CFLAGS"
 export STRADA_READLINE_LIBS="$READLINE_LIBS"
+export STRADA_FFI_CFLAGS="$FFI_CFLAGS"
+export STRADA_FFI_LIBS="$FFI_LIBS"
 export STRADA_SSL_CFLAGS="$SSL_CFLAGS"
 export STRADA_SSL_LIBS="$SSL_LIBS"
 export STRADA_ZLIB_LIBS="$ZLIB_LIBS"

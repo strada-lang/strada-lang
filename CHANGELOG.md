@@ -104,6 +104,24 @@
   (refcount elision for accumulators; full tagged/NaN-boxed doubles).
 
 ### Language
+- **`c::callback` — closure→C-callback trampolines (libffi)**: a Strada
+  closure becomes a real C function pointer, so qsort comparators and
+  libcurl/GTK-style callbacks can be written in Strada.
+  `c::callback($fn, "int", "ptr,ptr")` returns the pointer as an int
+  address; marshals int/int32/num/ptr/str args and int/int32/num/ptr
+  returns (max 8 args); captures and `our` globals work inside the
+  callback. `c::callback_free($cb)` releases early; an exit-time registry
+  sweep frees survivors (valgrind-clean). `./configure` auto-detects
+  libffi; built without it, `c::callback` dies with a clear message.
+  Closes the ROADMAP FFI-trampoline gap. Also fixed in passing: the
+  statement-form `c::write_*`/`c::free` builtins leaked one heap undef SV
+  per call (now return the immortal undef singleton); auto-collected
+  `link_lib` deps from used modules are availability-probed at link time
+  (a module declaring all DB backends no longer breaks linking on boxes
+  missing one — `-lpq`); dlopen hosts (`import_lib` users) no longer
+  strip runtime sections (`--gc-sections` off when `-rdynamic` — a .so
+  built by a newer compiler can need runtime symbols the host's own code
+  never referenced, e.g. `strada_cleanup_push`).
 - **`--strict-types` — stage-0 gradual type checking (warning-only)**:
   declared types are now compared against a best-effort static expression
   type at var-decl initializers, plain assignments, call arguments, and
