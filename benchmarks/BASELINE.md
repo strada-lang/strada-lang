@@ -38,6 +38,22 @@ they can be reconstructed:
 | stack-buffer non-string hash keys (`sv_key_extract_buf`) | `$c{$j % 1000} += 1`, 5M iterations (integer keys previously paid itoa + strdup + free per access) | 0.31s | 0.20s | 1.5x |
 | single-pass array compound assign (`strada_array_compound`) | `$acc[$i % 100] += 1`, 10M iterations | 0.168s | 0.061s | 2.7x |
 
+## Investigated and closed: refcount elision for loop accumulators
+
+Proposed by the original 2026-06 audit; measured moot on 2026-06-10. Eliding
+the `__old` capture + `strada_decref` from int accumulator statements by hand
+(`$sum = $sum + $i`, 200M iterations) changed nothing — 0.165s either way —
+because `strada_decref` is an always-inline tagged-int branch and gcc at
+`-O2`+LTO already proves the operands tagged and deletes the dead refcount
+ops. Callgrind shows bench_compute spends 97% of instructions in fully
+inlined native arithmetic with no surviving runtime calls. The remaining real
+cost in this family is FLOAT accumulators, which box a heap double per
+iteration (`strada_new_num`) — that decref does real work and is not
+elidable; fixing it would mean tagged/NaN-boxed doubles (an ABI project).
+Also note: int-declared variables are NOT guaranteed to hold tagged ints
+(`my int $x = f()` can store an owned heap NUM, `my int $x = $str_scalar`
+stores a shared pointer), so unconditional elision would be unsound anyway.
+
 ## Standard suite, pre-opt vs post-opt (best of 5, interleaved)
 
 Flat by design — the standard suite avoids the slow paths the rounds fixed
