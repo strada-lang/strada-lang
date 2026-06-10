@@ -341,6 +341,10 @@ test_output_contains "$EXAMPLES_DIR/test_autovivification.strada" "test_autovivi
 # Test: *= and /= compound assignment (regression: previously didn't lex)
 test_output_contains "$EXAMPLES_DIR/test_muldiv_assign.strada" "test_muldiv_assign" "All muldiv assign tests passed" "Mul/div compound assign"
 
+# Test: int-declared storage holds canonical ints (regression: string/NUM
+# values were stored as-is, confusing the int fast paths)
+test_output_contains "$EXAMPLES_DIR/test_int_coercion.strada" "test_int_coercion" "All int coercion tests passed" "Int variable coercion"
+
 # Test: around hooks receive ($orig, $self, @args) per Moose convention
 # (regression: $orig/$self were swapped, so $self->accessor() read empty)
 test_output_contains "$EXAMPLES_DIR/test_around_hooks.strada" "test_around_hooks" "All around hook tests passed" "Around method modifiers"

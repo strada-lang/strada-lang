@@ -248,6 +248,7 @@ func codegen_new(str $filename, int $debug_info, int $enable_profiling, int $ena
     $cg{"anon_capture_str"} = "";  # Comma-separated capture names
     $cg{"anon_capture_count"} = 0; # Number of captures
     $cg{"current_func_name"} = ""; # Current function name for profiling
+    $cg{"ret_is_int"} = 0;         # 1 while generating an int-returning function body
     $cg{"global_count"} = 0;       # Number of global variables
     my array @empty_globals = ();
     $cg{"globals"} = \@empty_globals;  # Array of global variable declarations
@@ -3078,6 +3079,7 @@ func needs_temp_cleanup(scalar $cg, scalar $expr) int {
             $name eq "math::sqrt" || $name eq "math::pow" || $name eq "math::log" ||
             $name eq "math::exp" || $name eq "math::floor" || $name eq "math::ceil" ||
             $name eq "math::abs" || $name eq "math::round" ||
+            $name eq "math::rand" ||
             $name eq "match" || $name eq "replace" || $name eq "replace_all" ||
             $name eq "captures" || $name eq "named_captures" ||
             $name eq "sys::quotemeta" ||

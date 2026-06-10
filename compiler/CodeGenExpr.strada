@@ -1016,7 +1016,27 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
             if ($rhs_type == NODE_TERNARY()) {
                 $needs_incref = return_needs_incref($cg, $rhs);
             }
-            if ($target_type == NODE_VARIABLE() && $cg->{"cleanup_enabled"} == 1) {
+            # Int-declared targets coerce non-int RHS values to canonical
+            # ints — previously `$intvar = $str_scalar` stored the shared
+            # string pointer into the "int" variable (type confusion: the
+            # variable then printed as the string, and int fast paths read
+            # garbage from it).
+            if ($target_type == NODE_VARIABLE() && $cg->{"cleanup_enabled"} == 1
+                && expr_is_int_typed($cg, $target) == 1 && expr_is_int_typed($cg, $rhs) == 0) {
+                emit($cg, "({ StradaValue *__old = ");
+                gen_expression($cg, $target);
+                emit($cg, "; StradaValue *__icv = ");
+                gen_expression($cg, $rhs);
+                emit($cg, "; ");
+                gen_expression($cg, $target);
+                emit($cg, " = strada_new_int(strada_to_int(__icv)); ");
+                if (needs_temp_cleanup($cg, $rhs) == 1) {
+                    emit($cg, "strada_decref(__icv); ");
+                }
+                emit($cg, "strada_decref(__old); ");
+                gen_expression($cg, $target);
+                emit($cg, "; })");
+            } elsif ($target_type == NODE_VARIABLE() && $cg->{"cleanup_enabled"} == 1) {
                 emit($cg, "({ StradaValue *__old = ");
                 gen_expression($cg, $target);
                 emit($cg, "; ");
@@ -3115,7 +3135,21 @@ func gen_expression(scalar $cg, scalar $expr) void {
         }
 
         if ($op eq "-") {
-            if ($needs_cleanup == 1) {
+            # Int-typed operand: negate as an int. strada_new_int keeps the
+            # result canonical (tagged, heap-boxed only beyond 2^62);
+            # previously -$int boxed a heap NUM, so an int function with
+            # `return -1;` returned a heap double.
+            if (expr_is_int_typed($cg, $operand) == 1) {
+                if ($needs_cleanup == 1) {
+                    emit($cg, "({ StradaValue *__unary_tmp = ");
+                    gen_expression($cg, $operand);
+                    emit($cg, "; StradaValue *__unary_res = strada_new_int(-strada_to_int(__unary_tmp)); strada_decref(__unary_tmp); __unary_res; })");
+                } else {
+                    emit($cg, "strada_new_int(-strada_to_int(");
+                    gen_expression($cg, $operand);
+                    emit($cg, "))");
+                }
+            } elsif ($needs_cleanup == 1) {
                 emit($cg, "({ StradaValue *__unary_tmp = ");
                 gen_expression($cg, $operand);
                 emit($cg, "; StradaValue *__unary_res = strada_new_num(-strada_to_num(__unary_tmp)); strada_decref(__unary_tmp); __unary_res; })");
@@ -4703,12 +4737,19 @@ func gen_expression(scalar $cg, scalar $expr) void {
         my str $saved_local_str = $cg->{"anon_local_str"};
         my str $saved_capture_str = $cg->{"anon_capture_str"};
         my int $saved_capture_count = $cg->{"anon_capture_count"};
+        my int $saved_ret_is_int = $cg->{"ret_is_int"};
 
         # Set up capture context for this closure
         $cg->{"in_anon_func"} = 1;
         $cg->{"anon_local_str"} = "";
         $cg->{"anon_capture_str"} = "";
         $cg->{"anon_capture_count"} = 0;
+        # The closure body's returns coerce by ITS return type, not the
+        # enclosing function's (see gen_return_value)
+        $cg->{"ret_is_int"} = 0;
+        if ($expr->{"return_type"} == TYPE_INT()) {
+            $cg->{"ret_is_int"} = 1;
+        }
 
         # Build param string from parameters
         my str $param_str = "";
@@ -4838,6 +4879,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
         $cg->{"anon_local_str"} = $saved_local_str;
         $cg->{"anon_capture_str"} = $saved_capture_str;
         $cg->{"anon_capture_count"} = $saved_capture_count;
+        $cg->{"ret_is_int"} = $saved_ret_is_int;
 
         # Restore func_has_try
         $cg->{"func_has_try"} = $saved_func_has_try;

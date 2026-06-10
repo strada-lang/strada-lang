@@ -16,6 +16,29 @@ func gen_block(scalar $cg, scalar $block) void {
     emit($cg, "}");
 }
 
+# Emit the return-value expression. Int-returning functions coerce values
+# the codegen can't prove int-typed into canonical ints
+# (strada_new_int(strada_to_int(...))): int-declared storage and the
+# int-call fast paths (emit_int_operand's STRADA_TAGGED_INT_VAL extraction)
+# assume canonical int results, but e.g. `return $str_param;` from an int
+# function previously returned the shared string pointer. Returns 1 when
+# the value was coerced — the result is then a fresh OWNED value and the
+# caller must skip its return_needs_incref logic.
+func gen_return_value(scalar $cg, scalar $value) int {
+    if ($cg->{"ret_is_int"} == 1 && expr_is_int_typed($cg, $value) == 0) {
+        emit($cg, "({ StradaValue *__rcv = ");
+        gen_expression($cg, $value);
+        emit($cg, "; StradaValue *__rcr = strada_new_int(strada_to_int(__rcv)); ");
+        if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $value) == 1) {
+            emit($cg, "strada_decref(__rcv); ");
+        }
+        emit($cg, "__rcr; })");
+        return 1;
+    }
+    gen_expression($cg, $value);
+    return 0;
+}
+
 func gen_statement(scalar $cg, scalar $stmt) void {
     # Emit #line directive for source-level debugging
     emit_line_for_stmt($cg, $stmt);
@@ -170,6 +193,21 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     emit($cg, " = STRADA_MAKE_TAGGED_INT((int64_t)strada_size(");
                     gen_expression($cg, $init);
                     emit($cg, "))");
+                } elsif ($var_type == TYPE_INT() && expr_is_int_typed($cg, $init) == 0) {
+                    # Int-declared variables hold canonical ints. Previously
+                    # `my int $x = $str_scalar` aliased the string pointer
+                    # (incref'd) into the "int" variable, and
+                    # `my int $x = f()` could store a heap NUM — type
+                    # confusion that broke the int fast paths' assumptions.
+                    # strada_new_int returns an owned canonical int, so no
+                    # incref; owned init temps are released here.
+                    emit($cg, " = ({ StradaValue *__icv = ");
+                    gen_expression($cg, $init);
+                    emit($cg, "; StradaValue *__icr = strada_new_int(strada_to_int(__icv)); ");
+                    if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $init) == 1) {
+                        emit($cg, "strada_decref(__icv); ");
+                    }
+                    emit($cg, "__icr; })");
                 } else {
                 emit($cg, " = ");
                 gen_expression($cg, $init);
@@ -1317,7 +1355,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     # Save return value, call profile_exit, then return
                     emit_indent($cg);
                     emit($cg, "{ StradaValue *__retval = ");
-                    gen_expression($cg, $stmt->{"value"});
+                    gen_return_value($cg, $stmt->{"value"});
                     emit($cg, "; ");
                     if ($profiling == 1) {
                         emit($cg, "strada_profile_exit(\"" . $func_name . "\"); ");
@@ -1345,7 +1383,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 emit($cg, "return");
                 if ($stmt->{"value"}) {
                     emit($cg, " ");
-                    gen_expression($cg, $stmt->{"value"});
+                    gen_return_value($cg, $stmt->{"value"});
                 }
                 emit($cg, ";\n");
             }
@@ -1353,11 +1391,12 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             # Non-main function with return value - save, cleanup, return
             emit_indent($cg);
             emit($cg, "{ StradaValue *__retval = ");
-            gen_expression($cg, $stmt->{"value"});
+            my int $ret_coerced = gen_return_value($cg, $stmt->{"value"});
             emit($cg, ";\n");
             indent($cg);
-            # Only incref if returning a variable/borrowed ref (not for new values)
-            if (return_needs_incref($cg, $stmt->{"value"}) == 1) {
+            # Only incref if returning a variable/borrowed ref (not for new
+            # values; a coerced int return is fresh and owned)
+            if ($ret_coerced == 0 && return_needs_incref($cg, $stmt->{"value"}) == 1) {
                 emit_indent($cg);
                 emit($cg, "strada_incref(__retval);\n");
             }
@@ -2290,6 +2329,14 @@ func gen_function(scalar $cg, scalar $fn) void {
         # Store current function name for profiling exit in return statements
         $cg->{"current_func_name"} = $name;
 
+        # Int-returning functions coerce non-int return values to canonical
+        # ints (see gen_return_value) — the int-call fast paths and
+        # int-declared storage assume canonical int results.
+        $cg->{"ret_is_int"} = 0;
+        if ($ret_type_id == TYPE_INT()) {
+            $cg->{"ret_is_int"} = 1;
+        }
+
         # Reset local() tracking for this function
         $cg->{"has_local"} = 0;
 
@@ -2433,6 +2480,7 @@ func gen_function(scalar $cg, scalar $fn) void {
         emit($cg, "}\n");
 
         $cg->{"current_func_name"} = "";
+        $cg->{"ret_is_int"} = 0;
         $cg->{"current_fn_package"} = "";
 
         # Clear func_params

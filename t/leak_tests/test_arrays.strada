@@ -136,7 +136,7 @@ func main() int {
     $i = 0;
     while ($i < $iterations) {
         my array @arr = (1, 2, 3, 4, 5);
-        reverse(@arr);
+        @arr = reverse(@arr);
         if ($arr[0] != 5 || $arr[4] != 1) {
             say("    FAIL: reverse");
             return 1;

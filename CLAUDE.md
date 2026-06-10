@@ -138,6 +138,7 @@ These files are concatenated into `Combined.strada` during build, compiled to `C
 - Composite types: `array`, `hash`
 - Special: `void`, `undef`, `dynamic` (context-sensitive return)
 - C interop: `int8`, `int16`, `uint8`/`byte`, `uint16`, `uint32`, `uint64`, `size_t`, `char`, `float`, `double`
+- `int`-declared variables hold canonical integers: initializing or assigning a value the compiler can't prove int-typed coerces it (`strada_to_int` semantics — `my int $x = "12abc"` makes $x the integer 12), and `int`-returning functions coerce non-int return values the same way. Parameters are the exception (borrowed values, coercion would cost every call; they convert at use sites instead).
 - Type annotations are optional in `my`/`our` declarations and function signatures. The sigil determines the default: `$` → `scalar`, `@` → `array`, `%` → `hash`. Return types default to `scalar` if omitted.
 
 ### Sigils
