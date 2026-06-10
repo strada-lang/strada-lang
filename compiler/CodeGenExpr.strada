@@ -1025,7 +1025,21 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                     $tgt_is_num = 1;
                 }
             }
+            # In-place num accumulate: $numvar = <numeric expr> writes the
+            # double into the existing heap NUM when solely owned, skipping
+            # the per-iteration box/unbox pair (float accumulators measured
+            # ~26x slower than int before this).
             if ($tgt_is_num == 1 && $cg->{"cleanup_enabled"} == 1
+                && $cg->{"has_overloads"} == 0
+                && expr_is_numeric($cg, $rhs) == 1) {
+                emit($cg, "(");
+                gen_expression($cg, $target);
+                emit($cg, " = strada_num_set_inplace(");
+                gen_expression($cg, $target);
+                emit($cg, ", ");
+                emit_num_operand($cg, $rhs);
+                emit($cg, "))");
+            } elsif ($tgt_is_num == 1 && $cg->{"cleanup_enabled"} == 1
                 && expr_is_numeric($cg, $rhs) == 0) {
                 emit($cg, "({ StradaValue *__old = ");
                 gen_expression($cg, $target);
@@ -1221,6 +1235,19 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 emit($cg, "); strada_decref(__old); ");
                 gen_expression($cg, $target);
                 emit($cg, "; })");
+            } elsif ($target_type == NODE_VARIABLE() && $cg->{"cleanup_enabled"} == 1
+                && $cg->{"has_overloads"} == 0
+                && length("" . $cg->{"num_vars"}->{escape_c_keyword($target->{"name"})}) > 0) {
+                # num-declared target: in-place store (see strada_num_set_inplace)
+                emit($cg, "(");
+                gen_expression($cg, $target);
+                emit($cg, " = strada_num_set_inplace(");
+                gen_expression($cg, $target);
+                emit($cg, ", strada_to_num(");
+                gen_expression($cg, $target);
+                emit($cg, ") + ");
+                emit_num_operand($cg, $expr->{"value"});
+                emit($cg, "))");
             } elsif ($target_type == NODE_VARIABLE() && $cg->{"cleanup_enabled"} == 1) {
                 emit($cg, "({ StradaValue *__old = ");
                 gen_expression($cg, $target);
@@ -1256,6 +1283,19 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 emit($cg, "); strada_decref(__old); ");
                 gen_expression($cg, $target);
                 emit($cg, "; })");
+            } elsif ($target_type == NODE_VARIABLE() && $cg->{"cleanup_enabled"} == 1
+                && $cg->{"has_overloads"} == 0
+                && length("" . $cg->{"num_vars"}->{escape_c_keyword($target->{"name"})}) > 0) {
+                # num-declared target: in-place store (see strada_num_set_inplace)
+                emit($cg, "(");
+                gen_expression($cg, $target);
+                emit($cg, " = strada_num_set_inplace(");
+                gen_expression($cg, $target);
+                emit($cg, ", strada_to_num(");
+                gen_expression($cg, $target);
+                emit($cg, ") - ");
+                emit_num_operand($cg, $expr->{"value"});
+                emit($cg, "))");
             } elsif ($target_type == NODE_VARIABLE() && $cg->{"cleanup_enabled"} == 1) {
                 emit($cg, "({ StradaValue *__old = ");
                 gen_expression($cg, $target);
@@ -1292,6 +1332,19 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 emit($cg, "); strada_decref(__old); ");
                 gen_expression($cg, $target);
                 emit($cg, "; })");
+            } elsif ($target_type == NODE_VARIABLE() && $cg->{"cleanup_enabled"} == 1
+                && $cg->{"has_overloads"} == 0
+                && length("" . $cg->{"num_vars"}->{escape_c_keyword($target->{"name"})}) > 0) {
+                # num-declared target: in-place store (see strada_num_set_inplace)
+                emit($cg, "(");
+                gen_expression($cg, $target);
+                emit($cg, " = strada_num_set_inplace(");
+                gen_expression($cg, $target);
+                emit($cg, ", strada_to_num(");
+                gen_expression($cg, $target);
+                emit($cg, ") * ");
+                emit_num_operand($cg, $expr->{"value"});
+                emit($cg, "))");
             } elsif ($target_type == NODE_VARIABLE() && $cg->{"cleanup_enabled"} == 1) {
                 emit($cg, "({ StradaValue *__old = ");
                 gen_expression($cg, $target);
@@ -1312,7 +1365,20 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
             }
             } elsif ($op eq "/=") {
             # Always the num path — int/int division isn't int (Perl semantics)
-            if ($target_type == NODE_VARIABLE() && $cg->{"cleanup_enabled"} == 1) {
+            if ($target_type == NODE_VARIABLE() && $cg->{"cleanup_enabled"} == 1
+                && $cg->{"has_overloads"} == 0
+                && length("" . $cg->{"num_vars"}->{escape_c_keyword($target->{"name"})}) > 0) {
+                # num-declared target: in-place store (see strada_num_set_inplace)
+                emit($cg, "(");
+                gen_expression($cg, $target);
+                emit($cg, " = strada_num_set_inplace(");
+                gen_expression($cg, $target);
+                emit($cg, ", strada_to_num(");
+                gen_expression($cg, $target);
+                emit($cg, ") / ");
+                emit_num_operand($cg, $expr->{"value"});
+                emit($cg, "))");
+            } elsif ($target_type == NODE_VARIABLE() && $cg->{"cleanup_enabled"} == 1) {
                 emit($cg, "({ StradaValue *__old = ");
                 gen_expression($cg, $target);
                 emit($cg, "; ");

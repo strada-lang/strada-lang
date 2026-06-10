@@ -38,6 +38,32 @@ they can be reconstructed:
 | stack-buffer non-string hash keys (`sv_key_extract_buf`) | `$c{$j % 1000} += 1`, 5M iterations (integer keys previously paid itoa + strdup + free per access) | 0.31s | 0.20s | 1.5x |
 | single-pass array compound assign (`strada_array_compound`) | `$acc[$i % 100] += 1`, 10M iterations | 0.168s | 0.061s | 2.7x |
 
+## Round 4: in-place num accumulate (2026-06-10)
+
+`$numvar = <numeric>` and `$numvar += n` previously boxed a fresh heap NUM
+and released the old one every iteration (pool pop/push + refcount
+dispatch). `strada_num_set_inplace` writes the double into the existing box
+when the variable is the sole owner (refcount 1, no meta); shared/tied/weak
+values still fresh-box, so aliasing semantics are unchanged.
+
+| workload | before | after | speedup |
+|----------|--------|-------|---------|
+| `$sum = $sum + 0.5`, 50M iterations | 0.74s (15ns/iter) | 0.114s (2.3ns/iter) | 6.5x |
+| int accumulator control (same box) | 0.028s (0.56ns/iter) | unchanged | — |
+
+## Investigated and closed: full tagged/NaN-boxed doubles
+
+Assessed 2026-06-10 after the in-place fix above. The remaining ~4x gap to
+int speed would require encoding doubles in the StradaValue* pointer
+representation. Audit surface measured: 276 STRADA_IS_TAGGED_INT guard
+sites in the runtime, ~400 direct `sv->type` accesses, both runtime
+headers, codegen emission sites — and it would break every user `__C__`
+block that reads `sv->type` / `value.nv` on NUM values, which CLAUDE.md
+documents as the normal C-interop pattern. Verdict: not worth the ABI
+break and audit risk for the residual gap; the in-place store captures the
+bulk of the win. Revisit only if a profiled workload shows float boxing
+still dominating.
+
 ## Investigated and closed: refcount elision for loop accumulators
 
 Proposed by the original 2026-06 audit; measured moot on 2026-06-10. Eliding

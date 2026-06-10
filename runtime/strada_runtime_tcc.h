@@ -1314,6 +1314,23 @@ static inline void strada_hv_store_sv(StradaValue *sv, StradaValue *key, StradaV
     if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) { char *ks = strada_to_str(key); strada_tied_hash_store(sv, ks, val); free(ks); return; }
     strada_hash_set_sv(strada_deref_hash(sv), key, val);
 }
+
+/* In-place num store for accumulator assignments ($numvar = <numeric> /
+ * $numvar += n). When a is the sole owner of a plain heap NUM, write the
+ * double into it — no pool traffic, no refcount dispatch; otherwise
+ * release a and box fresh. Returns the value to store back into the
+ * variable. Shared/tied/weak values (refcount > 1 or meta set) take the
+ * fresh-box path, so observable semantics are unchanged. */
+static inline StradaValue* strada_num_set_inplace(StradaValue *a, double v) {
+    if (a && !STRADA_IS_TAGGED_INT(a) && a->type == STRADA_NUM
+        && a->refcount == 1 && !a->meta) {
+        a->value.nv = v;
+        return a;
+    }
+    strada_decref(a);
+    return strada_new_num(v);
+}
+
 static inline StradaValue* strada_hv_fetch_owned_sv(StradaValue *sv, StradaValue *key) {
     if (STRADA_IS_TAGGED_INT(sv)) return strada_undef_static();
     if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) { char *ks = strada_to_str(key); StradaValue *r = strada_tied_hash_fetch(sv, ks); free(ks); return r; }

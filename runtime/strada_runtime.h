@@ -2006,6 +2006,23 @@ static inline int strada_hv_check_lock(StradaValue *sv, const char *key) {
     strada_die(msg);
     return 0;
 }
+
+/* In-place num store for accumulator assignments ($numvar = <numeric> /
+ * $numvar += n). When a is the sole owner of a plain heap NUM, write the
+ * double into it — no pool traffic, no refcount dispatch; otherwise
+ * release a and box fresh. Returns the value to store back into the
+ * variable. Shared/tied/weak values (refcount > 1 or meta set) take the
+ * fresh-box path, so observable semantics are unchanged. */
+static inline StradaValue* strada_num_set_inplace(StradaValue *a, double v) {
+    if (a && !STRADA_IS_TAGGED_INT(a) && a->type == STRADA_NUM
+        && a->refcount == 1 && !a->meta) {
+        a->value.nv = v;
+        return a;
+    }
+    strada_decref(a);
+    return strada_new_num(v);
+}
+
 static inline void strada_hv_store(StradaValue *sv, const char *key, StradaValue *val) {
     if (!sv || STRADA_IS_TAGGED_INT(sv)) return;
     if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) { strada_tied_hash_store(sv, key, val); return; }
