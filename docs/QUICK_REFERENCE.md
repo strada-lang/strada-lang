@@ -756,6 +756,30 @@ my array @parts = split(",", $csv);
 # regex_replace, ...) still work as aliases.
 ```
 
+## Event Loop and Green Tasks (Async::Loop)
+
+```strada
+use Async::Loop;
+use Async::Task;
+
+my scalar $loop = Async::Loop::new();      # epoll (Linux) / poll (elsewhere)
+$loop->spawn(fn () {                        # green task: blocking-looking code
+    my scalar $conn = Async::Task::accept($listener);
+    my str $line = Async::Task::readline($conn, 5000);   # 5s timeout
+    Async::Task::send($conn, "ok\n");
+    core::socket_close($conn);
+});
+$loop->watch($fd, "r", fn (int $fd, str $mask) { ... }); # callback style
+$loop->timer_after(250, fn () { ... });
+$loop->run();
+
+# TLS over tasks; try/catch works inside tasks (incl. across suspensions)
+use Async::TaskSSL;
+my scalar $h = Async::TaskSSL::connect("example.com", 443);
+```
+
+See `docs/EVENT_LOOP.md` for the full API, task rules, and caveats.
+
 ## Modules
 
 ```strada

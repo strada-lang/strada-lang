@@ -552,6 +552,23 @@ A count suffix (`N`) or `*` (consume all remaining) follows each code. Endiannes
 | `core::hash_default_capacity(n)` | `int → int` | Set hash preallocation default. |
 | `core::array_default_capacity(n)` | `int → int` | Set array preallocation default. |
 
+### Event loop (Async::Loop support — see EVENT_LOOP.md)
+
+| Function | Description |
+|---|---|
+| `core::epoll_create()` | Readiness set (epoll on Linux, poll(2) elsewhere). |
+| `core::epoll_add/mod(set, fd, "r"/"w"/"rw")` | Register/update interest. |
+| `core::epoll_del(set, fd)` | Remove. |
+| `core::epoll_wait(set, timeout_ms)` | → array of `[fd, mask]` pairs. |
+| `core::eventfd()` / `eventfd_signal(fd)` / `eventfd_drain(fd)` | Wakeup channel (eventfd or pipe). |
+| `core::socket_try_recv/try_send/try_accept` | Non-blocking socket ops with explicit would-block results. |
+| `core::socket_try_connect(host, port)` / `socket_connect_check(sock)` | Non-blocking TCP handshake. |
+| `core::socket_try_readline(sock)` | Buffered non-blocking readline. |
+| `core::coro_*` | Stackful coroutine primitives (compiled-only; used by `$loop->spawn`). |
+| `core::mono_ms()` | Monotonic milliseconds. |
+| `async::io_wait(fd, "r"/"w", timeout_ms)` | Future completed by the poller thread. |
+| `async::resolve(host)` | Future resolving a hostname to its numeric address off-thread. |
+
 ### Tuning capacity hints
 
 | Function | Signature | Description |
