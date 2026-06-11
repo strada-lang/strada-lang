@@ -194,6 +194,9 @@ Options:
   --tcc         Compile the program with tcc (much faster than gcc, unoptimized
                 output) and link with the C compiler. Full runtime features;
                 great for fast edit/run iteration. Requires tcc in PATH.
+                Works for executables and --shared; ignored (with a warning)
+                for --object/--static-lib/--static, which compile with the
+                C compiler.
   --object      Compile to object file only (.o). By default the .o contains
                 only the input file's own symbols (deps come from their own .o).
   --object-full Compile to .o that also bundles all transitively-used module code
@@ -278,6 +281,31 @@ run_cmd() {
 show_cmd() {
     if [ "$VERBOSE" -eq 1 ]; then
         echo -e "${CYAN}\$${NC} $*"
+    fi
+}
+
+# --tcc helper: compile the generated C file with tcc into an object,
+# leaving its path in $TCC_OBJ. Swaps the runtime header for the stripped
+# tcc-parsable one (tcc can't digest the system headers strada_runtime.h
+# pulls in), and re-weakens symbols tcc drops (__attribute__((weak)) on
+# optional import_object __Pkg_oop_init hooks) so they resolve to NULL at
+# link instead of failing as undefined references. Extra tcc flags (e.g.
+# -fPIC for shared libraries) may follow the C file argument.
+tcc_compile_obj() {
+    local cfile="$1"; shift
+    if ! command -v tcc >/dev/null 2>&1; then
+        error "--tcc requires the 'tcc' compiler, which was not found in PATH"
+    fi
+    sed 's/strada_runtime\.h/strada_runtime_tcc.h/' "$cfile" > "${cfile}.tcc" && mv "${cfile}.tcc" "$cfile"
+    TCC_OBJ="$(mktemp_suffix .o)"
+    if ! run_cmd tcc -c "$cfile" "$@" -I"$RUNTIME_DIR" $INCLUDE_FLAGS -o "$TCC_OBJ"; then
+        rm -f "$TCC_OBJ"
+        error "tcc compilation failed"
+    fi
+    if command -v objcopy >/dev/null 2>&1; then
+        for __ws in $(grep '__attribute__((weak))' "$cfile" 2>/dev/null | grep -oE '[A-Za-z_][A-Za-z0-9_]*\(' | tr -d '(' | grep -v '^__attribute__$' | sort -u); do
+            objcopy --weaken-symbol="$__ws" "$TCC_OBJ" 2>/dev/null || true
+        done
     fi
 }
 
@@ -816,7 +844,11 @@ fi
 # Export STRADA_DIR so stradac knows where the runtime is
 export STRADA_DIR="$SCRIPT_DIR"
 # Build stradac flags
-STRADAC_FLAGS=""
+# The bundled standard library (lib/Async/*, lib/Test.strada, ...) is always
+# available as a LOW-priority search path, so external projects can
+# `use Async::Loop;` etc. without a hardcoded `use lib`. Project-local lib
+# paths still win (low priority = consulted last).
+STRADAC_FLAGS="-LL $SCRIPT_DIR/lib"
 if [ "$DEBUG_SYMBOLS" -eq 1 ]; then
     STRADAC_FLAGS="$STRADAC_FLAGS -g"
 fi
@@ -963,7 +995,17 @@ if [ "$SHARED_LIB" -eq 1 ]; then
     # Note: We do NOT link the runtime into shared libraries.
     # The runtime symbols are provided by the main program (compiled with -rdynamic).
     # This avoids duplicate globals when the .so is loaded.
-    if ! run_cmd $CC -shared -fPIC $GCC_FLAGS $SHARED_UNDEFINED_FLAG -o "$OUTPUT" "$C_FILE" $EXTRA_FILES -I"$RUNTIME_DIR" $INCLUDE_FLAGS $DLOPEN_LIBS -lm -lpthread $LINK_FLAGS; then
+    if [ "$TCC_MODE" -eq 1 ]; then
+        # --tcc --shared: tcc compiles a PIC object, $CC links the .so
+        # (same split as the executable path; tcc objects lack the
+        # GNU-stack note, hence -Wl,-z,noexecstack).
+        info "TCC mode: tcc compiles, $CC links"
+        tcc_compile_obj "$C_FILE" -fPIC
+        if ! run_cmd $CC -shared -fPIC -Wl,-z,noexecstack $SHARED_UNDEFINED_FLAG -o "$OUTPUT" "$TCC_OBJ" $EXTRA_FILES -I"$RUNTIME_DIR" $INCLUDE_FLAGS $DLOPEN_LIBS -lm -lpthread $LINK_FLAGS; then
+            rm -f "$TCC_OBJ"; error "link failed"
+        fi
+        rm -f "$TCC_OBJ"
+    elif ! run_cmd $CC -shared -fPIC $GCC_FLAGS $SHARED_UNDEFINED_FLAG -o "$OUTPUT" "$C_FILE" $EXTRA_FILES -I"$RUNTIME_DIR" $INCLUDE_FLAGS $DLOPEN_LIBS -lm -lpthread $LINK_FLAGS; then
         error "C compilation failed"
     fi
 elif [ "$OBJECT_ONLY" -eq 1 ]; then
@@ -981,6 +1023,9 @@ elif [ "$OBJECT_ONLY" -eq 1 ]; then
     if echo "$GCC_FLAGS" | grep -q -- "-flto"; then
         OBJECT_EXTRA="-ffat-lto-objects"
     fi
+    if [ "$TCC_MODE" -eq 1 ]; then
+        warn "--tcc is not supported with --object (objects must match the gcc-built runtime ABI exactly); compiling with $CC"
+    fi
     info "Compiling $C_FILE -> $OUTPUT (object file)"
     if ! run_cmd $CC -c $GCC_FLAGS $OBJECT_EXTRA -o "$OUTPUT" "$C_FILE" -I"$RUNTIME_DIR" $INCLUDE_FLAGS; then
         error "C compilation failed"
@@ -989,6 +1034,9 @@ elif [ "$STATIC_LIB" -eq 1 ]; then
     # Static library: compile to .o then archive with ar
     if [ "$STATIC_LINK" -eq 1 ]; then
         error "Cannot use --static-lib and --static together"
+    fi
+    if [ "$TCC_MODE" -eq 1 ]; then
+        warn "--tcc is not supported with --static-lib; compiling with $CC"
     fi
     OBJ_FILE="${OUTPUT%.a}.o"
     RUNTIME_OBJ_STATIC="${OUTPUT%.a}_runtime.o"
@@ -1019,6 +1067,9 @@ elif [ "$STATIC_LIB" -eq 1 ]; then
 elif [ "$STATIC_LINK" -eq 1 ]; then
     # Static binary: no dynamic linking, fully portable
     # Note: -ldl removed (no dynamic loading), -lpthread needs special handling
+    if [ "$TCC_MODE" -eq 1 ]; then
+        warn "--tcc is not supported with --static (the runtime is compiled from source here); compiling with $CC"
+    fi
     info "Compiling $C_FILE -> $OUTPUT (static binary)"
     warn "Static binaries cannot use FFI/dynamic library loading (sys::dl_open, import_lib)"
     if ! run_cmd $CC -static $GCC_FLAGS $GC_SECTIONS_FLAG -o "$OUTPUT" "$C_FILE" $EXTRA_FILES "$RUNTIME_SRC" -I"$RUNTIME_DIR" $INCLUDE_FLAGS -lm -lpthread $LINK_FLAGS; then
@@ -1052,23 +1103,8 @@ else
         # relocate the gcc-built runtime object (GOT relocations) — so $CC links
         # the tcc-produced object against the full runtime. Full runtime features
         # are preserved (the runtime is still the gcc build).
-        if ! command -v tcc >/dev/null 2>&1; then
-            error "--tcc requires the 'tcc' compiler, which was not found in PATH"
-        fi
         info "TCC mode: tcc compiles, $CC links"
-        sed 's/strada_runtime\.h/strada_runtime_tcc.h/' "$C_FILE" > "${C_FILE}.tcc" && mv "${C_FILE}.tcc" "$C_FILE"
-        TCC_OBJ="$(mktemp_suffix .o)"
-        if ! run_cmd tcc -c "$C_FILE" -I"$RUNTIME_DIR" $INCLUDE_FLAGS -o "$TCC_OBJ"; then
-            rm -f "$TCC_OBJ"; error "tcc compilation failed"
-        fi
-        # tcc drops __attribute__((weak)); re-weaken the symbols the source
-        # declared weak (e.g. optional import_object __Pkg_oop_init hooks) so
-        # they resolve to NULL at link instead of failing as undefined references.
-        if command -v objcopy >/dev/null 2>&1; then
-            for __ws in $(grep '__attribute__((weak))' "$C_FILE" 2>/dev/null | grep -oE '[A-Za-z_][A-Za-z0-9_]*\(' | tr -d '(' | grep -v '^__attribute__$' | sort -u); do
-                objcopy --weaken-symbol="$__ws" "$TCC_OBJ" 2>/dev/null || true
-            done
-        fi
+        tcc_compile_obj "$C_FILE"
         TCC_RT="$RUNTIME_OBJ"; [ "$SKIP_RUNTIME" -eq 1 ] && TCC_RT=""
         # -Wl,-z,noexecstack: tcc objects lack the GNU-stack note, which ld warns about.
         if ! run_cmd $CC $RDYNAMIC_FLAG -Wl,-z,noexecstack -o "$OUTPUT" "$TCC_OBJ" $EXTRA_FILES $TCC_RT -I"$RUNTIME_DIR" $INCLUDE_FLAGS $DLOPEN_LIBS -lm -lpthread $LINK_FLAGS; then

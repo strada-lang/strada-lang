@@ -4344,6 +4344,25 @@ func find_module_file(scalar $program, str $mod_name) str {
         $i = $i + 1;
     }
 
+    # Fallback: low-priority search paths (-LL). The strada wrapper passes
+    # its bundled lib/ here so external projects can `use Async::Loop;`
+    # etc. without a hardcoded `use lib` — while any project-local path
+    # still wins above.
+    my scalar $fallback = $program->{"lib_paths_fallback"};
+    if (defined($fallback)) {
+        my int $fcount = size(@{$fallback});
+        my int $fi = 0;
+        while ($fi < $fcount) {
+            my str $fb_path = $fallback->[$fi];
+            my str $fb_full = $fb_path . "/" . $rel_path;
+            my str $fb_content = slurp($fb_full);
+            if (length($fb_content) > 0) {
+                return $fb_full;
+            }
+            $fi = $fi + 1;
+        }
+    }
+
     return "";
 }
 
@@ -4373,6 +4392,8 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
 
     # Share loaded_modules with parent to prevent infinite recursion
     $mod_program->{"loaded_modules"} = $program->{"loaded_modules"};
+    # Propagate fallback search paths (bundled stdlib) for nested `use`
+    $mod_program->{"lib_paths_fallback"} = $program->{"lib_paths_fallback"};
 
     # Parse the module's contents
     while (!parser_check($mod_parser, "EOF")) {
@@ -6173,6 +6194,11 @@ func parse_method_modifier(scalar $parser, scalar $program, str $mod_type) void 
 
 func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low, scalar $implicit_objs, scalar $implicit_archs) scalar {
     my scalar $program = ast_new_program();
+
+    # Low-priority paths are consulted as a FALLBACK by find_module_file
+    # during parsing (they are also appended to lib_paths after the parse,
+    # below, for later resolution stages).
+    $program->{"lib_paths_fallback"} = $lib_paths_low;
 
     # Add command-line library paths first (high priority - before any use statements)
     my int $path_count = size($lib_paths);
