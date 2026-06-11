@@ -693,7 +693,7 @@ elif [ "$RUNTIME_SRC" -nt "$RUNTIME_OBJ" ]; then
 fi
 
 # Build gcc flags (portable flags only - GCC-specific flags added conditionally)
-GCC_FLAGS="-Wall -Wextra -Wno-unused-variable -Wno-unused-function -Wno-return-type -Wno-unused-result -Wno-comment -std=c99 -ffunction-sections -fdata-sections"
+GCC_FLAGS="-Wall -Wextra -Wno-unused-variable -Wno-unused-function -Wno-unused-parameter -Wno-return-type -Wno-unused-result -Wno-comment -std=c99 -ffunction-sections -fdata-sections"
 # Add GCC-specific flags if not using clang
 if ! $CC --version 2>&1 | grep -q clang; then
     GCC_FLAGS="$GCC_FLAGS -Wno-unused-but-set-variable -Wno-clobbered"
