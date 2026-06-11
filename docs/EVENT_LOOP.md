@@ -54,21 +54,56 @@ $loop->run();   # until stop() or nothing left to wait for
 
 ## Callback API
 
-- `$loop->watch($sock_or_fd, "r"|"w"|"rw", fn (int $fd, str $mask) {...})`
-- `$loop->unwatch($sock_or_fd)`
+- `$loop->watch($sock_or_fd, "r"|"w"|"rw", fn (int $fd, str $mask) {...})` → subscription id.
+  Multiple subscriptions may share one fd (several accept-tasks on one
+  listener work); the epoll registration carries the union mask.
+- `$loop->unwatch_sub($sock_or_fd, $id)` — remove one subscription.
+- `$loop->unwatch($sock_or_fd)` — remove all subscriptions on the fd.
 - `$loop->timer_after($ms, $cb)` → id; `$loop->timer_cancel($id)`
 - `$loop->stop()`; `$loop->run()` returns when stopped or drained.
+- `$loop->{"on_task_error"} = fn (scalar $err) {...}` — uncaught task
+  exceptions are contained at the task boundary and reported here
+  (default: `warn`). One dead task never kills the loop or its siblings.
 
-## Green-task rules (v1)
+## Task API (`Async::Task`)
 
-- **No suspending inside `try{}`** — `Async::Task::*` throws
-  `"cannot suspend inside try{}"` (runtime-enforced). The per-thread exception
-  stacks cannot yet be swapped safely across context switches.
+- `recv($sock, $max [, $timeout_ms])` → data; `""` = EOF; undef = timeout
+- `readline($sock [, $timeout_ms])` → line (newline stripped); undef = EOF/timeout
+- `send($sock, $data)` → bytes sent (handles partial writes); -1 = error
+- `accept($listener [, $timeout_ms])` → socket; undef = timeout
+- `connect($host, $port [, $timeout_ms])` → socket; undef = failure/timeout.
+  Non-blocking TCP handshake; **name resolution (getaddrinfo) is still
+  synchronous** — resolve-heavy workloads will stall the loop on DNS.
+- `sleep($ms)`
+
+Sockets accepted/connected through the task API get `TCP_NODELAY` (an
+event loop ping-ponging small messages is Nagle's worst case).
+
+## Green-task rules
+
+- **try/catch works inside tasks, including across suspensions** — the
+  runtime swaps the per-context try/cleanup/call-trace stacks at every
+  switch (the jmp_bufs target frames on the persistent coro stack, so they
+  stay valid while parked).
 - **Capture regex results before suspending** — `$1`/`captures()` are
   per-OS-thread and another task may match in between.
-- Tasks belong to the OS thread that created them.
-- The runtime swaps the pending-cleanup and call-trace stacks at every
-  switch, so temporaries and `core::stack_trace()` behave per-task.
+- **One loop, one OS thread.** Tasks belong to the thread that created
+  them, and calling `watch`/`timer_after`/`spawn` from another thread is
+  unsupported (no locking; no wakeup of a loop parked in `epoll_wait`).
+- **Closure capture is one level deep** (pre-existing compiler limitation):
+  a handler closure nested inside another closure cannot capture variables
+  from *outside* the enclosing closure (capture-of-capture). Route shared
+  state through `our` globals or the inner closure's own locals/params —
+  see `test_spawn_from_task_readline` in examples/test_event_loop.strada.
+
+## Performance
+
+`examples/bench_event_loop.strada` (one thread, loopback, -O2): ~34k echo
+round-trips/s across 50 concurrent task connections, vs ~125k/s for a
+single sequential blocking connection and ~81k raw park/wake cycles/s.
+Each round-trip costs two parks (client recv + handler recv), so the loop
+runs near its switching ceiling; the win is the 50-way concurrency on one
+thread, not single-stream latency.
 
 ## Known issues (v1)
 

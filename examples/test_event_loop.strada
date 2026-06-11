@@ -6,6 +6,8 @@ use Async::Loop;
 use Async::Task;
 
 our array @order = ();
+our int $g_served = 0;
+our str $g_replies = "";
 
 func test_timers() void {
     my scalar $loop = Async::Loop::new();
@@ -107,18 +109,157 @@ func test_task_echo_server() void {
     Test::ok(1, "echo round-trip completed");
 }
 
-func test_try_restriction() void {
+func test_try_across_suspension() void {
+    # try/catch works inside tasks, including across parks: the runtime
+    # swaps the per-context try stacks at every switch.
     my scalar $loop = Async::Loop::new();
-    my scalar $caught = { "msg" => "" };
+    my scalar $r = { "caught" => "", "after" => 0 };
     $loop->spawn(fn () {
         try {
             Async::Task::sleep(5);
+            throw "boom after suspension";
         } catch ($e) {
-            $caught->{"msg"} = "" . $e;
+            $r->{"caught"} = "" . $e;
+        }
+        Async::Task::sleep(5);
+        $r->{"after"} = 1;
+    });
+    $loop->run();
+    Test::like($r->{"caught"}, "boom after suspension", "try/catch across a suspension");
+    Test::is($r->{"after"}, 1, "task continues (and re-suspends) after catch");
+}
+
+func test_task_isolation() void {
+    # An uncaught throw kills only ITS task; the loop and other tasks live.
+    my scalar $loop = Async::Loop::new();
+    my scalar $r = { "errs" => 0, "msg" => "", "other" => 0 };
+    $loop->{"on_task_error"} = fn (scalar $err) {
+        $r->{"errs"} = $r->{"errs"} + 1;
+        $r->{"msg"} = "" . $err;
+    };
+    $loop->spawn(fn () {
+        Async::Task::sleep(5);
+        throw "task exploded";
+    });
+    $loop->spawn(fn () {
+        Async::Task::sleep(20);
+        $r->{"other"} = 1;
+    });
+    $loop->run();
+    Test::is($r->{"errs"}, 1, "task error reported once");
+    Test::like($r->{"msg"}, "task exploded", "error payload delivered");
+    Test::is($r->{"other"}, 1, "sibling task survived the dead task");
+}
+
+func test_multi_accept() void {
+    # Several accept-tasks may wait on ONE listener (per-fd subscriptions).
+    my scalar $loop = Async::Loop::new();
+    my int $port = 38957;
+    my scalar $listener = core::socket_server($port);
+    if (!defined($listener)) {
+        Test::skip("could not bind test port", 3);
+        return;
+    }
+    my scalar $r = { "a" => 0, "b" => 0 };
+    $loop->spawn(fn () {
+        my scalar $c = Async::Task::accept($listener);
+        $r->{"a"} = 1;
+        core::socket_close($c);
+    });
+    $loop->spawn(fn () {
+        my scalar $c = Async::Task::accept($listener);
+        $r->{"b"} = 1;
+        core::socket_close($c);
+    });
+    $loop->spawn(fn () {
+        my scalar $c1 = Async::Task::connect("127.0.0.1", $port);
+        my scalar $c2 = Async::Task::connect("127.0.0.1", $port);
+        Async::Task::sleep(20);
+        core::socket_close($c1);
+        core::socket_close($c2);
+    });
+    $loop->run();
+    core::socket_close($listener);
+    Test::is($r->{"a"}, 1, "first accept-task got a connection");
+    Test::is($r->{"b"}, 1, "second accept-task got a connection");
+    Test::ok(1, "two waiters coexisted on one listener fd");
+}
+
+func test_spawn_from_task_readline() void {
+    # The docs example shape: an accept-task spawning per-connection
+    # handler tasks, line-based protocol via Task::readline/connect.
+    my scalar $loop = Async::Loop::new();
+    my int $port = 38958;
+    my scalar $listener = core::socket_server($port);
+    if (!defined($listener)) {
+        Test::skip("could not bind test port", 3);
+        return;
+    }
+    # Shared state via `our` globals: the handler closure is nested
+    # inside the accept-task closure, and transitive capture
+    # (capture-of-capture) is a known compiler limitation.
+    $g_served = 0;
+    $g_replies = "";
+    $loop->spawn(fn () {
+        my int $n = 0;
+        while ($n < 2) {
+            my scalar $conn = Async::Task::accept($listener);
+            $loop->spawn(fn () {
+                my str $line = Async::Task::readline($conn);
+                Async::Task::send($conn, "got:" . $line . "\n");
+                core::socket_close($conn);
+                $g_served = $g_served + 1;
+            });
+            $n = $n + 1;
+        }
+    });
+    $loop->spawn(fn () {
+        my int $k = 0;
+        while ($k < 2) {
+            my scalar $c = Async::Task::connect("127.0.0.1", $port);
+            Async::Task::send($c, "hello" . $k . "\n");
+            my str $reply = Async::Task::readline($c);
+            $g_replies = $g_replies . $reply . ";";
+            core::socket_close($c);
+            $k = $k + 1;
         }
     });
     $loop->run();
-    Test::like($caught->{"msg"}, "cannot suspend", "suspending inside try{} is refused");
+    core::socket_close($listener);
+    Test::is($g_served, 2, "handler tasks spawned from accept-task served both");
+    Test::is($g_replies, "got:hello0;got:hello1;", "line protocol round-trips");
+    Test::ok(1, "spawn-from-task works");
+}
+
+func test_io_timeouts() void {
+    my scalar $loop = Async::Loop::new();
+    my int $port = 38959;
+    my scalar $listener = core::socket_server($port);
+    my scalar $r = { "recv" => "?", "accept" => "?", "took" => 0 };
+    $loop->spawn(fn () {
+        my scalar $c = Async::Task::connect("127.0.0.1", $port);
+        my int $t0 = core::mono_ms();
+        my scalar $got = Async::Task::recv($c, 64, 40);   # nobody writes
+        $r->{"took"} = core::mono_ms() - $t0;
+        $r->{"recv"} = defined($got) ? "data" : "timeout";
+        core::socket_close($c);
+    });
+    $loop->run();
+    core::socket_close($listener);
+    Test::is($r->{"recv"}, "timeout", "recv honors timeout (undef)");
+    Test::ok($r->{"took"} >= 30 && $r->{"took"} < 2000, "recv timeout fired near deadline");
+
+    my scalar $loop2 = Async::Loop::new();
+    my int $port2 = 38960;
+    my scalar $listener2 = core::socket_server($port2);
+    my scalar $r2 = { "v" => "?" };
+    $loop2->spawn(fn () {
+        my scalar $conn = Async::Task::accept($listener2, 40);  # nobody connects
+        $r2->{"v"} = defined($conn) ? "conn" : "timeout";
+    });
+    $loop2->run();
+    core::socket_close($listener2);
+    Test::is($r2->{"v"}, "timeout", "accept honors timeout (undef)");
 }
 
 func test_io_wait_future() void {
@@ -147,7 +288,11 @@ func main() int {
     test_stop();
     test_task_sleep_ordering();
     test_task_echo_server();
-    test_try_restriction();
+    test_try_across_suspension();
+    test_task_isolation();
+    test_multi_accept();
+    test_spawn_from_task_readline();
+    test_io_timeouts();
     test_io_wait_future();
 
     return Test::done_testing();

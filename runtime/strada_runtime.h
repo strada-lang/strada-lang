@@ -2249,8 +2249,12 @@ StradaValue* strada_coro_state(StradaValue *handle);
 StradaValue* strada_coro_wait_fd(StradaValue *handle);
 StradaValue* strada_coro_wait_mask(StradaValue *handle);
 StradaValue* strada_coro_wait_timeout(StradaValue *handle);
+StradaValue* strada_coro_error(StradaValue *handle);
 StradaValue* strada_coro_result(StradaValue *handle);
 StradaValue* strada_coro_free(StradaValue *handle);
 StradaValue* strada_mono_ms(void);
+StradaValue* strada_socket_try_connect(StradaValue *host, StradaValue *port);
+StradaValue* strada_socket_connect_check(StradaValue *sock);
+StradaValue* strada_socket_try_readline(StradaValue *sock);
 
 #endif /* STRADA_RUNTIME_H */

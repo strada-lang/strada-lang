@@ -6963,6 +6963,30 @@ func gen_builtin_g7(scalar $cg, scalar $expr, str $name) int {
             return 1;
         }
 
+        if ($name eq "sys::coro_error") {
+            my scalar $args = $expr->{"args"};
+            gen_call_with_arg_cleanup($cg, "strada_coro_error", $args, 1);
+            return 1;
+        }
+
+        if ($name eq "sys::socket_try_connect") {
+            my scalar $args = $expr->{"args"};
+            gen_call_with_arg_cleanup($cg, "strada_socket_try_connect", $args, 2);
+            return 1;
+        }
+
+        if ($name eq "sys::socket_connect_check") {
+            my scalar $args = $expr->{"args"};
+            gen_call_with_arg_cleanup($cg, "strada_socket_connect_check", $args, 1);
+            return 1;
+        }
+
+        if ($name eq "sys::socket_try_readline") {
+            my scalar $args = $expr->{"args"};
+            gen_call_with_arg_cleanup($cg, "strada_socket_try_readline", $args, 1);
+            return 1;
+        }
+
         if ($name eq "sys::truncate") {
             my scalar $args = $expr->{"args"};
             gen_call_with_arg_cleanup($cg, "strada_truncate", $args, 2);

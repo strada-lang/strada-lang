@@ -4,11 +4,11 @@
 #
 #   my scalar $loop = Async::Loop::new();
 #
-#   # Callback style (Phase 1):
+#   # Callback style:
 #   $loop->watch($sock, "r", fn (int $fd, str $mask) { ... });
 #   $loop->timer_after(250, fn () { say("tick"); });
 #
-#   # Green tasks (Phase 3): straight-line code, suspended on I/O.
+#   # Green tasks: straight-line code, suspended on I/O.
 #   $loop->spawn(fn () {
 #       my scalar $conn = Async::Task::accept($listener);
 #       my str $req = Async::Task::recv($conn, 4096);
@@ -17,14 +17,29 @@
 #
 #   $loop->run();   # until stop() or nothing left to wait for
 #
+# Multiple watchers may wait on the SAME fd (e.g. several accept-tasks on
+# one listener): watch() returns a subscription id, the epoll registration
+# carries the union of subscribed masks, and each event dispatches to every
+# subscription whose mask matches. unwatch_sub() removes one subscription;
+# unwatch() removes them all.
+#
+# Tasks that die from an uncaught exception do NOT kill the loop: the
+# runtime catches at the task boundary and the loop reports the error via
+# warn() (override with $loop->{"on_task_error"} = fn (scalar $err) {...}).
+# try/catch inside tasks works fully, including across suspensions (the
+# runtime swaps the per-context try/cleanup/trace stacks at every switch).
+#
+# THREADING: a loop and its tasks belong to ONE OS thread. Calling watch/
+# timer_after/spawn from another thread is unsupported (no locking, and no
+# wakeup of a loop blocked in epoll_wait).
+#
+# Remaining task caveat: capture regex results before suspending — match
+# state ($1/captures()) is per-OS-thread and another task may match in
+# between.
+#
 # Scheduling policy lives entirely here; the runtime only provides epoll
 # wrappers and ucontext switching. Linux-only (epoll); Async::Loop::new()
 # throws elsewhere.
-#
-# v1 task restrictions (runtime-enforced where possible):
-#   - a task may not suspend while inside try{} (throws)
-#   - capture regex results before suspending (match state is per-OS-thread)
-#   - tasks belong to the thread that created them
 
 package Async::Loop;
 
@@ -35,27 +50,66 @@ func new() scalar {
     }
     my hash %self = ();
     $self{"epfd"} = $epfd;
-    $self{"watchers"} = {};      # fd -> { mask, cb }
+    $self{"watchers"} = {};      # fd -> { mask, subs => [ {mask, cb, id} ... ] }
     $self{"timers"} = [];        # [ { at, cb, id, dead } ... ]
     $self{"next_id"} = 1;
     $self{"running"} = 0;
     $self{"ntasks"} = 0;
+    $self{"on_task_error"} = undef;
     return bless(\%self, "Async::Loop");
 }
 
-# Watch an fd (or socket) for readiness. $cb->($fd, $mask) on each event.
+# Subscribe to fd readiness. $cb->($fd, $mask) per event. Returns a
+# subscription id for unwatch_sub().
 func watch(scalar $self, scalar $sock_or_fd, str $mask, scalar $cb) int {
     my int $fd = resolve_fd($sock_or_fd);
     my scalar $watchers = $self->{"watchers"};
-    if (defined($watchers->{$fd})) {
-        core::epoll_mod($self->{"epfd"}, $fd, $mask);
+    my int $id = $self->{"next_id"};
+    $self->{"next_id"} = $id + 1;
+
+    my scalar $w = $watchers->{$fd};
+    if (defined($w)) {
+        push(@{$w->{"subs"}}, { "mask" => $mask, "cb" => $cb, "id" => $id });
+        my str $union = union_mask($w);
+        if ($union ne $w->{"mask"}) {
+            core::epoll_mod($self->{"epfd"}, $fd, $union);
+            $w->{"mask"} = $union;
+        }
     } else {
+        my array @subs = ();
+        push(@subs, { "mask" => $mask, "cb" => $cb, "id" => $id });
+        $watchers->{$fd} = { "mask" => $mask, "subs" => \@subs };
         core::epoll_add($self->{"epfd"}, $fd, $mask);
     }
-    $watchers->{$fd} = { "mask" => $mask, "cb" => $cb, "sock" => $sock_or_fd };
-    return $fd;
+    return $id;
 }
 
+# Remove ONE subscription from an fd.
+func unwatch_sub(scalar $self, scalar $sock_or_fd, int $id) void {
+    my int $fd = resolve_fd($sock_or_fd);
+    my scalar $watchers = $self->{"watchers"};
+    my scalar $w = $watchers->{$fd};
+    if (!defined($w)) { return; }
+    my array @keep = ();
+    foreach my scalar $sub (@{$w->{"subs"}}) {
+        if ($sub->{"id"} != $id) {
+            push(@keep, $sub);
+        }
+    }
+    if (size(@keep) == 0) {
+        core::epoll_del($self->{"epfd"}, $fd);
+        delete($watchers->{$fd});
+        return;
+    }
+    $w->{"subs"} = \@keep;
+    my str $union = union_mask($w);
+    if ($union ne $w->{"mask"}) {
+        core::epoll_mod($self->{"epfd"}, $fd, $union);
+        $w->{"mask"} = $union;
+    }
+}
+
+# Remove ALL subscriptions from an fd.
 func unwatch(scalar $self, scalar $sock_or_fd) void {
     my int $fd = resolve_fd($sock_or_fd);
     my scalar $watchers = $self->{"watchers"};
@@ -88,7 +142,8 @@ func stop(scalar $self) void {
 }
 
 # Spawn a green task: runs immediately until its first suspension; after
-# that the loop resumes it on fd readiness / timer expiry.
+# that the loop resumes it on fd readiness / timer expiry. An uncaught
+# exception in the task is contained at the task boundary and reported.
 func spawn(scalar $self, scalar $closure) void {
     my int $coro = core::coro_create($closure);
     $self->{"ntasks"} = $self->{"ntasks"} + 1;
@@ -99,6 +154,15 @@ func spawn(scalar $self, scalar $closure) void {
 private func advance_task(scalar $self, int $coro) void {
     my int $state = core::coro_resume($coro);
     if ($state == 3) {
+        my scalar $err = core::coro_error($coro);
+        if (defined($err)) {
+            my scalar $handler = $self->{"on_task_error"};
+            if (defined($handler)) {
+                $handler->($err);
+            } else {
+                warn("[Async::Loop] task died: " . $err . "\n");
+            }
+        }
         core::coro_free($coro);
         $self->{"ntasks"} = $self->{"ntasks"} - 1;
         return;
@@ -108,24 +172,23 @@ private func advance_task(scalar $self, int $coro) void {
     my str $wmask = core::coro_wait_mask($coro);
     my int $wtimeout = core::coro_wait_timeout($coro);
 
-    my scalar $woken = { "done" => 0 };
-    my scalar $timer_id = { "id" => 0 };
+    my scalar $woken = { "done" => 0, "sub" => 0, "timer" => 0 };
 
     if ($wfd >= 0) {
-        watch($self, $wfd, $wmask, fn (int $fd, str $mask) {
+        $woken->{"sub"} = watch($self, $wfd, $wmask, fn (int $fd, str $mask) {
             if ($woken->{"done"} == 1) { return; }
             $woken->{"done"} = 1;
-            unwatch($self, $fd);
-            if ($timer_id->{"id"} > 0) { timer_cancel($self, $timer_id->{"id"}); }
+            unwatch_sub($self, $fd, $woken->{"sub"});
+            if ($woken->{"timer"} > 0) { timer_cancel($self, $woken->{"timer"}); }
             advance_task($self, $coro);
         });
     }
     if ($wtimeout > 0 || $wfd < 0) {
         my int $ms = $wtimeout > 0 ? $wtimeout : 0;
-        $timer_id->{"id"} = timer_after($self, $ms, fn () {
+        $woken->{"timer"} = timer_after($self, $ms, fn () {
             if ($woken->{"done"} == 1) { return; }
             $woken->{"done"} = 1;
-            if ($wfd >= 0) { unwatch($self, $wfd); }
+            if ($wfd >= 0) { unwatch_sub($self, $wfd, $woken->{"sub"}); }
             advance_task($self, $coro);
         });
     }
@@ -135,7 +198,6 @@ func run(scalar $self) void {
     $self->{"running"} = 1;
     while ($self->{"running"} == 1) {
         my scalar $watchers = $self->{"watchers"};
-        my scalar $timers = $self->{"timers"};
         my int $nwatch = size(keys(%{$watchers}));
         my int $ntimer = live_timer_count($self);
         if ($nwatch == 0 && $ntimer == 0) {
@@ -155,14 +217,48 @@ func run(scalar $self) void {
             my str $mask = $ev->[1];
             my scalar $w = $self->{"watchers"}->{$fd};
             if (defined($w)) {
-                my scalar $cb = $w->{"cb"};
-                $cb->($fd, $mask);
+                # Copy the subscription list: callbacks may watch/unwatch.
+                my array @snapshot = ();
+                foreach my scalar $sub (@{$w->{"subs"}}) {
+                    push(@snapshot, $sub);
+                }
+                foreach my scalar $sub (@snapshot) {
+                    if (mask_match($sub->{"mask"}, $mask)) {
+                        my scalar $cb = $sub->{"cb"};
+                        $cb->($fd, $mask);
+                    }
+                }
             }
         }
 
         fire_due_timers($self);
     }
     $self->{"running"} = 0;
+}
+
+# Does a subscription mask care about this event mask? Errors/hangups
+# ("e") wake everyone so readers can observe EOF.
+private func mask_match(str $want, str $got) int {
+    if (index($got, "e") >= 0) { return 1; }
+    my int $i = 0;
+    while ($i < length($want)) {
+        if (index($got, substr($want, $i, 1)) >= 0) { return 1; }
+        $i = $i + 1;
+    }
+    return 0;
+}
+
+private func union_mask(scalar $w) str {
+    my int $has_r = 0;
+    my int $has_w = 0;
+    foreach my scalar $sub (@{$w->{"subs"}}) {
+        if (index($sub->{"mask"}, "r") >= 0) { $has_r = 1; }
+        if (index($sub->{"mask"}, "w") >= 0) { $has_w = 1; }
+    }
+    my str $u = "";
+    if ($has_r == 1) { $u = $u . "r"; }
+    if ($has_w == 1) { $u = $u . "w"; }
+    return $u;
 }
 
 private func live_timer_count(scalar $self) int {

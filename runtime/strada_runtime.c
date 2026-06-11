@@ -26808,6 +26808,7 @@ void strada_rc_trace(StradaValue *sv, const char *op, void *ra) {
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #endif
+#include <netinet/tcp.h>
 #include <ucontext.h>
 
 /* ---- mask helpers: "r", "w", "rw" <-> EPOLLIN/EPOLLOUT ---- */
@@ -27003,6 +27004,10 @@ StradaValue* strada_socket_try_accept(StradaValue *sock) {
     int cfd = accept(sock->value.sock->fd, (struct sockaddr *)&addr, &alen);
 #endif
     if (cfd < 0) return strada_new_undef();
+    /* Event-loop connections ping-pong small messages; Nagle's algorithm
+     * turns that into ~1ms/op on loopback. Disable it. */
+    int __nd = 1;
+    setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, &__nd, sizeof(__nd));
     StradaSocketBuffer *buf = malloc(sizeof(StradaSocketBuffer));
     buf->fd = cfd;
     buf->read_pos = 0;
@@ -27229,6 +27234,10 @@ typedef struct StradaCoro {
     StradaStackFrame *frames_save;
     int frames_saved;
     int frames_save_cap;
+    StradaTryContext *try_save;     /* per-coro try frames (lazily sized) */
+    int try_saved;
+    int try_save_cap;
+    StradaValue *error;             /* set when the task body threw */
 } StradaCoro;
 
 /* Swap helpers: stash the live TLS segment and install another context's. */
@@ -27239,6 +27248,14 @@ static void coro_ctx_install(StradaCoro *c) {
     memcpy(strada_call_stack, c->frames_save,
            (size_t)c->frames_saved * sizeof(StradaStackFrame));
     strada_call_depth = c->frames_saved;
+    /* try frames too: the jmp_bufs target frames on the (persistent) coro
+     * stack, so they stay valid across suspensions; what is NOT safe is two
+     * contexts sharing the same TLS slots — hence the swap. This is what
+     * makes try{} (and suspension inside it) safe inside tasks. */
+    if (c->try_saved > 0)
+        memcpy(strada_try_stack, c->try_save,
+               (size_t)c->try_saved * sizeof(StradaTryContext));
+    strada_try_depth = c->try_saved;
 }
 
 static void coro_ctx_stash(StradaCoro *c) {
@@ -27258,13 +27275,33 @@ static void coro_ctx_stash(StradaCoro *c) {
     memcpy(c->frames_save, strada_call_stack,
            (size_t)strada_call_depth * sizeof(StradaStackFrame));
     c->frames_saved = strada_call_depth;
+    if (strada_try_depth > c->try_save_cap) {
+        c->try_save_cap = strada_try_depth;
+        c->try_save = realloc(c->try_save,
+                              (size_t)c->try_save_cap * sizeof(StradaTryContext));
+    }
+    if (strada_try_depth > 0)
+        memcpy(c->try_save, strada_try_stack,
+               (size_t)strada_try_depth * sizeof(StradaTryContext));
+    c->try_saved = strada_try_depth;
 }
 
 static __thread StradaCoro *strada_current_coro = NULL;
 
 static void strada_coro_tramp(void) {
     StradaCoro *c = strada_current_coro;
-    c->result = strada_closure_call(c->closure, 0);
+    /* Task isolation: an uncaught throw inside a task must not unwind into
+     * the loop (or kill the process) — catch it here at the task boundary.
+     * The try frame lives on the coro's own (swapped) try stack. */
+    jmp_buf *__tb = STRADA_TRY_PUSH();
+    if (__tb && setjmp(*__tb) == 0) {
+        c->result = strada_closure_call(c->closure, 0);
+        STRADA_TRY_POP();
+    } else {
+        c->error = strada_exception_value ? strada_exception_value
+                                          : strada_new_str(strada_exception_msg ? strada_exception_msg : "task died");
+        strada_exception_value = NULL;
+    }
     c->state = 3;
     /* uc_link returns control to the resumer */
 }
@@ -27305,6 +27342,9 @@ StradaValue* strada_coro_resume(StradaValue *handle) {
     int host_cd = strada_call_depth;
     StradaStackFrame *host_fstash = host_cd > 0 ? malloc((size_t)host_cd * sizeof(StradaStackFrame)) : NULL;
     if (host_fstash) memcpy(host_fstash, strada_call_stack, (size_t)host_cd * sizeof(StradaStackFrame));
+    int host_td = strada_try_depth;
+    StradaTryContext *host_tstash = host_td > 0 ? malloc((size_t)host_td * sizeof(StradaTryContext)) : NULL;
+    if (host_tstash) memcpy(host_tstash, strada_try_stack, (size_t)host_td * sizeof(StradaTryContext));
     coro_ctx_install(c);
 
     swapcontext(&c->ret_ctx, &c->ctx);
@@ -27321,6 +27361,9 @@ StradaValue* strada_coro_resume(StradaValue *handle) {
     if (host_fstash) memcpy(strada_call_stack, host_fstash, (size_t)host_cd * sizeof(StradaStackFrame));
     strada_call_depth = host_cd;
     free(host_fstash);
+    if (host_tstash) memcpy(strada_try_stack, host_tstash, (size_t)host_td * sizeof(StradaTryContext));
+    strada_try_depth = host_td;
+    free(host_tstash);
 
     strada_current_coro = prev;
     return strada_new_int(c->state);
@@ -27332,7 +27375,8 @@ StradaValue* strada_coro_resume(StradaValue *handle) {
 StradaValue* strada_coro_yield_io(StradaValue *fd, StradaValue *mask, StradaValue *timeout_ms) {
     StradaCoro *c = strada_current_coro;
     if (!c || c->state != 1) return strada_new_int(0);
-    if (strada_try_depth != c->entry_try_depth) return strada_new_int(-1);
+    /* (Suspending inside try{} is safe: the try stack is per-coro and the
+     * jmp_bufs target live coro-stack frames — see coro_ctx_install.) */
     c->wait_fd = fd ? ev_resolve_fd(fd) : -1;
     char *ms = mask ? strada_to_str(mask) : NULL;
     snprintf(c->wait_mask, sizeof(c->wait_mask), "%s", ms ? ms : "r");
@@ -27367,6 +27411,15 @@ StradaValue* strada_coro_wait_timeout(StradaValue *handle) {
 }
 
 /* Transfer the coroutine's return value (once) */
+/* Did the task body throw? Returns (and transfers) the thrown value. */
+StradaValue* strada_coro_error(StradaValue *handle) {
+    StradaCoro *c = (StradaCoro *)(intptr_t)strada_to_int(handle);
+    if (!c || !c->error) return strada_new_undef();
+    StradaValue *e = c->error;
+    c->error = NULL;
+    return e;
+}
+
 StradaValue* strada_coro_result(StradaValue *handle) {
     StradaCoro *c = (StradaCoro *)(intptr_t)strada_to_int(handle);
     if (!c || !c->result) return strada_new_undef();
@@ -27380,8 +27433,10 @@ StradaValue* strada_coro_free(StradaValue *handle) {
     if (c) {
         if (c->closure) strada_decref(c->closure);
         if (c->result) strada_decref(c->result);
+        if (c->error) strada_decref(c->error);
         free(c->cleanup_save);
         free(c->frames_save);
+        free(c->try_save);
         free(c->stack);
         free(c);
     }
@@ -27393,4 +27448,124 @@ StradaValue* strada_mono_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return strada_new_int((int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+}
+
+/* ---- Non-blocking connect + buffered non-blocking readline ----------
+ * (Async::Task::connect / Async::Task::readline support.) */
+
+/* Begin a non-blocking connect. Returns a socket whose TCP handshake may
+ * still be in progress — wait for "w" readiness, then call
+ * strada_socket_connect_check. Note: name resolution (getaddrinfo) is
+ * still synchronous; only the handshake is non-blocking. Returns undef
+ * when resolution fails. v1 uses the first resolved address. */
+StradaValue* strada_socket_try_connect(StradaValue *host, StradaValue *port) {
+    char hbuf[256];
+    char *hs = strada_to_str(host);
+    snprintf(hbuf, sizeof(hbuf), "%s", hs ? hs : "");
+    free(hs);
+    char portstr[16];
+    snprintf(portstr, sizeof(portstr), "%lld", (long long)strada_to_int(port));
+
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(hbuf, portstr, &hints, &res) != 0 || !res) {
+        if (res) freeaddrinfo(res);
+        return strada_new_undef();
+    }
+    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (fd < 0) { freeaddrinfo(res); return strada_new_undef(); }
+    int fl = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+    int rc = connect(fd, res->ai_addr, res->ai_addrlen);
+    freeaddrinfo(res);
+    if (rc < 0 && errno != EINPROGRESS) { close(fd); return strada_new_undef(); }
+    int __nd = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &__nd, sizeof(__nd));
+
+    StradaSocketBuffer *buf = malloc(sizeof(StradaSocketBuffer));
+    buf->fd = fd;
+    buf->read_pos = 0;
+    buf->read_len = 0;
+    buf->write_len = 0;
+    StradaValue *sv = strada_value_alloc();
+    sv->type = STRADA_SOCKET;
+    sv->refcount = 1;
+    sv->value.sock = buf;
+    return sv;
+}
+
+/* 0 = connected (socket switched back to blocking mode for normal use),
+ * 1 = still in progress, -1 = connect failed. */
+StradaValue* strada_socket_connect_check(StradaValue *sock) {
+    if (!sock || STRADA_IS_TAGGED_INT(sock) || sock->type != STRADA_SOCKET || !sock->value.sock)
+        return strada_new_int(-1);
+    int fd = sock->value.sock->fd;
+    int err = 0;
+    socklen_t len = sizeof(err);
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0) return strada_new_int(-1);
+    if (err == EINPROGRESS || err == EALREADY) return strada_new_int(1);
+    if (err != 0) return strada_new_int(-1);
+    /* Probe: a not-yet-finished handshake reports SO_ERROR==0 too; use a
+     * zero-length write readiness check via connect-again semantics. */
+    struct sockaddr_storage ss;
+    socklen_t sl = sizeof(ss);
+    if (getpeername(fd, (struct sockaddr *)&ss, &sl) < 0) {
+        if (errno == ENOTCONN) return strada_new_int(1);
+        return strada_new_int(-1);
+    }
+    int fl = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);
+    return strada_new_int(0);
+}
+
+/* Buffered non-blocking readline. Returns the line INCLUDING its trailing
+ * newline ("" = EOF with nothing buffered; undef = would block). A buffer
+ * that fills without a newline is returned as-is (degenerate long line). */
+StradaValue* strada_socket_try_readline(StradaValue *sock) {
+    if (!sock || STRADA_IS_TAGGED_INT(sock) || sock->type != STRADA_SOCKET || !sock->value.sock)
+        return strada_new_undef();
+    StradaSocketBuffer *sb = sock->value.sock;
+
+    for (;;) {
+        /* Scan buffered bytes for a newline */
+        for (size_t i = sb->read_pos; i < sb->read_len; i++) {
+            if (sb->read_buf[i] == '\n') {
+                size_t n = i + 1 - sb->read_pos;
+                StradaValue *line = strada_new_str_len(sb->read_buf + sb->read_pos, n);
+                sb->read_pos += n;
+                return line;
+            }
+        }
+        /* Compact, then top up */
+        if (sb->read_pos > 0 && sb->read_len > sb->read_pos) {
+            memmove(sb->read_buf, sb->read_buf + sb->read_pos, sb->read_len - sb->read_pos);
+        }
+        sb->read_len -= sb->read_pos;
+        sb->read_pos = 0;
+        if (sb->read_len >= sizeof(sb->read_buf)) {
+            /* No newline within a full buffer: hand it over whole */
+            StradaValue *line = strada_new_str_len(sb->read_buf, sb->read_len);
+            sb->read_len = 0;
+            return line;
+        }
+        ssize_t n = recv(sb->fd, sb->read_buf + sb->read_len,
+                         sizeof(sb->read_buf) - sb->read_len, MSG_DONTWAIT);
+        if (n > 0) {
+            sb->read_len += (size_t)n;
+            continue;
+        }
+        if (n == 0) {
+            /* EOF: drain any partial line, else "" */
+            if (sb->read_len > 0) {
+                StradaValue *line = strada_new_str_len(sb->read_buf, sb->read_len);
+                sb->read_len = 0;
+                return line;
+            }
+            return strada_new_str("");
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) return strada_new_undef();
+        return strada_new_str("");
+    }
 }

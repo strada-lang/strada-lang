@@ -398,6 +398,10 @@ func get_builtins() scalar {
     $b{"sys::coro_free"} = 1;
     $b{"sys::mono_ms"} = 1;
 
+    $b{"sys::coro_error"} = 1;
+    $b{"sys::socket_try_connect"} = 1;
+    $b{"sys::socket_connect_check"} = 1;
+    $b{"sys::socket_try_readline"} = 1;
     $b{"sys::fork"} = 1;
     $b{"sys::exec"} = 1;
     $b{"sys::system"} = 1;
