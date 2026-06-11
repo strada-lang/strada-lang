@@ -117,6 +117,7 @@ TESTS=(
     "test_round16_local_method_hash"
     "test_round17_local_loop_profile"
     "test_socket_close_inline"
+    "test_socket_lifecycle"
     "test_round18_runtime_internals"
     "test_round19_architectural"
     "test_cycle_collector"

@@ -8917,8 +8917,11 @@ StradaValue* strada_socket_flush(StradaValue *sock) {
  * called \$ws->{"_client"}->socket_close() inline. */
 StradaValue* strada_socket_close(StradaValue *sock) {
     if (sock && sock->type == STRADA_SOCKET && sock->value.sock) {
-        /* Flush any pending write data */
-        strada_socket_flush(sock);
+        /* Flush any pending write data. strada_socket_flush returns an
+         * owned undef SV (it is also a user-facing builtin) — discarding
+         * it leaked one StradaValue per socket close. */
+        StradaValue *__flush_r = strada_socket_flush(sock);
+        strada_decref(__flush_r);
         close(sock->value.sock->fd);
         sock->value.sock->fd = -1;
     }

@@ -72,17 +72,17 @@ $loop->run();   # until stop() or nothing left to wait for
 
 ## Known issues (v1)
 
-- **Small per-suspension leak (~32 bytes/park).** Each task suspension
-  registers a watcher entry whose final reference is not released — an
-  interaction between the closure-call cleanup protocol and coroutine context
-  switches that is still being chased (the identical callback-only code path
-  leaks nothing; see the `STRADA_RC_TRACE` hook in `strada_runtime.h`, built
-  with `-DSTRADA_RC_TRACE`, which exists precisely to finish this hunt). A
-  server doing 1M request-parks leaks ~64 MB, so fix before production use;
-  callback-style (`watch`/`timer_after`) has no such leak.
 - SSL sockets are not yet loop-aware (blocking handshake/IO).
 - The VM/interpreter gets the epoll primitives via the generic bridge, but
   coroutines (and therefore green tasks) are compiled-only.
+
+(The "~32 bytes per task suspension" leak originally reported here turned out
+to be a pre-existing runtime bug — `strada_socket_close` discarded the owned
+undef returned by `strada_socket_flush`, one StradaValue per connection close,
+misattributed by valgrind to watcher entries because the SV allocator recycles
+freed values. Fixed on this branch; the loop, tasks, and a 100-connection echo
+stress are valgrind-clean. The `STRADA_RC_TRACE` hook added during the hunt
+remains available for future refcount debugging.)
 
 ## Design notes
 
