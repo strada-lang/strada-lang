@@ -3,12 +3,29 @@ func gen_block(scalar $cg, scalar $block) void {
     indent($cg);
     scope_push($cg);
 
+    # Block-scope the int/num type registries. They are keyed by C name, so
+    # without save/restore a nested block's `my int $result` would leak onto
+    # a sibling/outer `my str $result` (same C name, different binding) and
+    # poison later assignments with int coercion — strada_to_int("text") = 0.
+    # (Root cause of the tree-walk s/// handler returning "0".)
+    my hash %saved_int_vars = ();
+    my hash %saved_num_vars = ();
+    foreach my str $iv_k (keys(%{$cg->{"int_vars"}})) {
+        $saved_int_vars{$iv_k} = $cg->{"int_vars"}->{$iv_k};
+    }
+    foreach my str $nv_k (keys(%{$cg->{"num_vars"}})) {
+        $saved_num_vars{$nv_k} = $cg->{"num_vars"}->{$nv_k};
+    }
+
     my scalar $stmts = $block->{"statements"};
     my int $i = 0;
     while ($i < $block->{"statement_count"}) {
         gen_statement($cg, $stmts->[$i]);
         $i = $i + 1;
     }
+
+    $cg->{"int_vars"} = \%saved_int_vars;
+    $cg->{"num_vars"} = \%saved_num_vars;
 
     scope_pop($cg);
     dedent($cg);

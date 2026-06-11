@@ -619,6 +619,31 @@ func run_file_vm(str $filename) int {
             strada_decref(result);
             result = STRADA_MAKE_TAGGED_INT(1);
         } else {
+            /* Locate the runtime headers for __C__ block JIT compilation:
+             * try <bindir>/../runtime then <bindir>/runtime relative to the
+             * strada-interp binary (vm_run.c's compile-time RUNTIME_DIR is
+             * not linked into this driver). */
+            {
+                char __exe[1024];
+                ssize_t __n = readlink("/proc/self/exe", __exe, sizeof(__exe) - 1);
+                if (__n > 0) {
+                    __exe[__n] = 0;
+                    char *__sl = strrchr(__exe, '/');
+                    if (__sl) {
+                        *__sl = 0;
+                        char __rt[1200];
+                        snprintf(__rt, sizeof(__rt), "%s/../runtime", __exe);
+                        char __hdr[1400];
+                        snprintf(__hdr, sizeof(__hdr), "%s/strada_runtime.h", __rt);
+                        if (access(__hdr, R_OK) != 0) {
+                            snprintf(__rt, sizeof(__rt), "%s/runtime", __exe);
+                            snprintf(__hdr, sizeof(__hdr), "%s/strada_runtime.h", __rt);
+                        }
+                        if (access(__hdr, R_OK) == 0)
+                            vprog->runtime_include_path = strdup(__rt);
+                    }
+                }
+            }
             const char *entry = "main";
             if (vm_program_find_func(vprog, "main") < 0) {
                 if (vm_program_find_func(vprog, "run") >= 0) entry = "run";
@@ -627,6 +652,10 @@ func run_file_vm(str $filename) int {
             if (entry) {
                 VM *vvm = vm_new(vprog);
                 VMValue vresult = vm_execute(vvm, entry);
+                /* Run END blocks (LIFO order, mirroring the compiled backend) */
+                for (int ei = vprog->end_count - 1; ei >= 0; ei--) {
+                    vm_execute(vvm, vprog->func_names[vprog->end_blocks[ei]]);
+                }
                 int64_t rc = VM_IS_INT(vresult) ? VM_INT_VAL(vresult) : 0;
                 strada_decref(result);
                 result = STRADA_MAKE_TAGGED_INT(rc);

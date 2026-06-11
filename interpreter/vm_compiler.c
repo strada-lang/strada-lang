@@ -193,6 +193,26 @@ static int is_our_var(const char *name) {
     return 0;
 }
 
+/* const declarations: parsed references are plain $NAME variables, and the
+ * decls land in the program's globals list (compiled in __globals_init), so
+ * they behave exactly like our-globals — registered here, stored/loaded via
+ * OP_STORE_GLOBAL/OP_LOAD_GLOBAL. */
+static char *g_const_vars[256];
+static int g_const_count = 0;
+
+static void register_const_var(const char *name) {
+    for (int i = 0; i < g_const_count; i++)
+        if (strcmp(g_const_vars[i], name) == 0) return;
+    if (g_const_count < 256)
+        g_const_vars[g_const_count++] = strdup(name);
+}
+
+static int is_const_var(const char *name) {
+    for (int i = 0; i < g_const_count; i++)
+        if (strcmp(g_const_vars[i], name) == 0) return 1;
+    return 0;
+}
+
 typedef struct {
     VMChunk *chunk;
     VMProgram *prog;
@@ -200,6 +220,7 @@ typedef struct {
     char local_sigils[256];
     int local_count;
     const char *func_name;
+    const char *cur_package;  /* enclosing package for unqualified-call fallback */
     int errors;
     LoopCtx *loop_ctx;
     /* Closure support */
@@ -275,6 +296,8 @@ static void patch_u16(CompCtx *ctx, size_t off, uint16_t val) {
 
 /* Forward declarations */
 static void compile_expr(CompCtx *ctx, StradaValue *node);
+static void compile_tr(CompCtx *ctx, StradaValue *node);
+static size_t add_pattern_const(CompCtx *ctx, const char *pattern, const char *flags);
 static void compile_stmt(CompCtx *ctx, StradaValue *node);
 static void compile_block(CompCtx *ctx, StradaValue *block);
 static void compile_map_expr(CompCtx *ctx, StradaValue *node);
@@ -296,6 +319,135 @@ static int is_concat_key(StradaValue *key_node, const char **prefix, StradaValue
 }
 
 /* ===== Expression compilation ===== */
+
+
+/* Compile tr/// — pushes the result value (count, or the modified copy when
+ * the /r flag is used). The subject variable is updated in place via the
+ * OP_TR store_slot operand. */
+static void compile_tr(CompCtx *ctx, StradaValue *node) {
+    StradaValue *target = ast_get(node, "target");
+    target = ast_deref(target);
+    const char *from = ast_str(node, "search");
+    const char *to = ast_str(node, "replace");
+    const char *tr_flags = ast_str(node, "flags");
+    if (!tr_flags) tr_flags = "";
+
+    int slot = -1;
+    if (target && !STRADA_IS_TAGGED_INT(target) &&
+        (int)ast_int(target, "type") == NI_VARIABLE) {
+        slot = ctx_find_local(ctx, ast_str(target, "name"));
+    }
+    if (slot >= 0) {
+        vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
+    } else {
+        compile_expr(ctx, target);
+    }
+    size_t from_idx = vm_chunk_add_str_const(ctx->chunk, from);
+    size_t to_idx = vm_chunk_add_str_const(ctx->chunk, to);
+    size_t flags_idx = vm_chunk_add_str_const(ctx->chunk, tr_flags);
+    vm_chunk_emit(ctx->chunk, OP_TR);
+    vm_chunk_emit_u16(ctx->chunk, (uint16_t)from_idx);
+    vm_chunk_emit_u16(ctx->chunk, (uint16_t)to_idx);
+    vm_chunk_emit_u16(ctx->chunk, (uint16_t)flags_idx);
+    vm_chunk_emit_u16(ctx->chunk, slot >= 0 ? (uint16_t)slot : (uint16_t)0xFFFF);
+}
+
+
+/* Compile s/PAT/EXPR/e[g]: an inline find/eval/append loop. The parser has
+ * already parsed the replacement source into node->{eval_expr}; each match
+ * sets the VM capture state, then the expression is evaluated inline and
+ * appended. Pushes the rebuilt string AND stores it back into the target
+ * variable slot/global. Value left on stack = the new string. */
+static int compile_regex_subst_e(CompCtx *ctx, StradaValue *node) {
+    StradaValue *target = ast_get(node, "target");
+    target = ast_deref(target);
+    StradaValue *eval_expr = ast_get(node, "eval_expr");
+    if (!eval_expr || STRADA_IS_TAGGED_INT(eval_expr)) return 0;
+    const char *pattern = ast_str(node, "pattern");
+    const char *flags = ast_str(node, "flags");
+    int is_global = flags && strchr(flags, 'g') != NULL;
+
+    if (!target || STRADA_IS_TAGGED_INT(target) ||
+        (int)ast_int(target, "type") != NI_VARIABLE) return 0;
+    const char *vname = ast_str(target, "name");
+    int slot = ctx_find_local(ctx, vname);
+    int use_global = (slot < 0 && is_our_var(vname)) ? 1 : 0;
+    if (slot < 0 && !use_global) return 0;
+
+    size_t pat_idx = add_pattern_const(ctx, pattern, flags);
+    int w = ctx_add_local(ctx, "__se_w", '$');   /* subject */
+    int o = ctx_add_local(ctx, "__se_o", '$');   /* output */
+    int pp = ctx_add_local(ctx, "__se_p", '$');  /* position */
+    int ms = ctx_add_local(ctx, "__se_s", '$');  /* match start */
+    int me = ctx_add_local(ctx, "__se_e", '$');  /* match end */
+
+#define E8(op)   vm_chunk_emit(ctx->chunk, (op))
+#define E16(v)   vm_chunk_emit_u16(ctx->chunk, (uint16_t)(v))
+#define LD(sl)   do { E8(OP_LOAD_LOCAL); E16(sl); } while (0)
+#define ST(sl)   do { E8(OP_STORE_LOCAL); E16(sl); } while (0)
+
+    /* W = target; O = ""; P = 0 */
+    if (slot >= 0) LD(slot);
+    else { size_t gk = vm_chunk_add_str_const(ctx->chunk, vname); E8(OP_LOAD_GLOBAL); E16(gk); }
+    ST(w);
+    size_t empty_idx = vm_chunk_add_str_const(ctx->chunk, "");
+    E8(OP_PUSH_STR); E16(empty_idx); ST(o);
+    E8(OP_PUSH_INT); vm_chunk_emit_i64(ctx->chunk, 0); ST(pp);
+
+    size_t loop_top = ctx->chunk->code_len;
+    /* (S, E) = find(W, P) */
+    LD(w); LD(pp); E8(OP_REGEX_FIND); E16(pat_idx);
+    ST(me); ST(ms);
+    /* if S < 0 goto done */
+    LD(ms); E8(OP_PUSH_INT); vm_chunk_emit_i64(ctx->chunk, 0); E8(OP_LT);
+    E8(OP_JMP_IF_TRUE); size_t done_patch = emit_patch_u16(ctx);
+    /* O = O . substr(W, P, S-P) */
+    LD(o); LD(w); LD(pp); LD(ms); LD(pp); E8(OP_SUB); E8(OP_SUBSTR); E8(OP_CONCAT); ST(o);
+    /* O = O . <eval_expr> (captures are live) */
+    LD(o); compile_expr(ctx, eval_expr); E8(OP_CONCAT); ST(o);
+    /* P = (E == S) ? E + 1 with copied char? — zero-width guard: P = E > S ? E : E+1 */
+    LD(me); ST(pp);
+    if (is_global) {
+        E8(OP_JMP); size_t back_patch = emit_patch_u16(ctx);
+        patch_u16(ctx, back_patch, (uint16_t)loop_top);
+    }
+    patch_u16(ctx, done_patch, (uint16_t)ctx->chunk->code_len);
+    /* O = O . substr(W, P, len(W)-P) */
+    LD(o); LD(w); LD(pp); LD(w); E8(OP_STR_LEN); LD(pp); E8(OP_SUB); E8(OP_SUBSTR); E8(OP_CONCAT); ST(o);
+    /* store back + leave value */
+    LD(o);
+    if (slot >= 0) { ST(slot); LD(slot); }
+    else { size_t gk = vm_chunk_add_str_const(ctx->chunk, vname); E8(OP_DUP); E8(OP_STORE_GLOBAL); E16(gk); }
+    return 1;
+
+#undef E8
+#undef E16
+#undef LD
+#undef ST
+}
+
+
+/* Add a regex pattern string constant, folding Perl match flags (i/s/m/x)
+ * into an inline (?...) prefix so the runtime needs no per-match options. */
+static size_t add_pattern_const(CompCtx *ctx, const char *pattern, const char *flags) {
+    char mods[8];
+    int mi = 0;
+    if (flags) {
+        if (strchr(flags, 'i')) mods[mi++] = 'i';
+        if (strchr(flags, 's')) mods[mi++] = 's';
+        if (strchr(flags, 'm')) mods[mi++] = 'm';
+        if (strchr(flags, 'x')) mods[mi++] = 'x';
+    }
+    if (mi == 0) return vm_chunk_add_str_const(ctx->chunk, pattern);
+    mods[mi] = 0;
+    size_t plen = strlen(pattern) + mi + 8;
+    char *buf = malloc(plen);
+    snprintf(buf, plen, "(?%s)%s", mods, pattern);
+    size_t idx = vm_chunk_add_str_const(ctx->chunk, buf);
+    free(buf);
+    return idx;
+}
 
 static void compile_expr(CompCtx *ctx, StradaValue *node) {
     if (!node || STRADA_IS_TAGGED_INT(node)) {
@@ -390,8 +542,8 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                         cap = ctx_add_capture(ctx, name, -1);
                         vm_chunk_emit(ctx->chunk, OP_LOAD_CAPTURE);
                         vm_chunk_emit_u16(ctx->chunk, (uint16_t)cap);
-                    } else if (is_our_var(name)) {
-                        /* our variable inside closure */
+                    } else if (is_our_var(name) || is_const_var(name)) {
+                        /* our variable or const inside closure */
                         size_t key_idx = vm_chunk_add_str_const(ctx->chunk, name);
                         vm_chunk_emit(ctx->chunk, OP_LOAD_GLOBAL);
                         vm_chunk_emit_u16(ctx->chunk, (uint16_t)key_idx);
@@ -399,8 +551,8 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                         vm_chunk_emit(ctx->chunk, OP_PUSH_UNDEF);
                     }
                 }
-            } else if (is_our_var(name)) {
-                /* our variable — load from global registry */
+            } else if (is_our_var(name) || is_const_var(name)) {
+                /* our variable or const — load from global registry */
                 size_t key_idx = vm_chunk_add_str_const(ctx->chunk, name);
                 vm_chunk_emit(ctx->chunk, OP_LOAD_GLOBAL);
                 vm_chunk_emit_u16(ctx->chunk, (uint16_t)key_idx);
@@ -785,9 +937,10 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
     case NI_REGEX_MATCH: {
         const char *pattern = ast_str(node, "pattern");
         const char *op = ast_str(node, "op");
+        const char *mflags = ast_str(node, "flags");
         int negated = (strcmp(op, "!~") == 0);
         compile_expr(ctx, ast_get(node, "target"));
-        size_t pidx = vm_chunk_add_str_const(ctx->chunk, pattern);
+        size_t pidx = add_pattern_const(ctx, pattern, mflags);
         vm_chunk_emit(ctx->chunk, negated ? OP_REGEX_NOT_MATCH : OP_REGEX_MATCH);
         vm_chunk_emit_u16(ctx->chunk, (uint16_t)pidx);
         vm_chunk_emit(ctx->chunk, 0); /* flags */
@@ -1319,6 +1472,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             else if (strcmp(fn, "global_delete") == 0) bid = BUILTIN_CORE_GLOBAL_DELETE;
             else if (strcmp(fn, "global_keys") == 0) bid = BUILTIN_CORE_GLOBAL_KEYS;
             else if (strcmp(fn, "set_recursion_limit") == 0) bid = BUILTIN_CORE_SET_RECURSION_LIMIT;
+            else if (strcmp(fn, "get_recursion_limit") == 0) bid = BUILTIN_CORE_GET_RECURSION_LIMIT;
             else if (strcmp(fn, "file_exists") == 0) bid = BUILTIN_CORE_FILE_EXISTS;
             else if (strcmp(fn, "is_dir") == 0) bid = BUILTIN_FILE_TEST_D;
             else if (strcmp(fn, "is_file") == 0) bid = BUILTIN_FILE_TEST_F;
@@ -1346,8 +1500,10 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             else if (strcmp(fn, "isatty") == 0) bid = BUILTIN_CORE_ISATTY;
             else if (strcmp(fn, "argv") == 0) bid = BUILTIN_CORE_ARGV;
             else if (strcmp(fn, "realpath") == 0) bid = BUILTIN_CORE_REALPATH;
-            else if (strcmp(fn, "link") == 0) bid = BUILTIN_CORE_LINK;
-            else if (strcmp(fn, "symlink") == 0) bid = BUILTIN_CORE_SYMLINK;
+            /* link: handled by the generic runtime bridge (raw syscall return,
+             * matching compiled semantics — the old BUILTIN_CORE_LINK used 1/0) */
+            /* symlink: handled by the generic runtime bridge (raw syscall return,
+             * matching compiled semantics — the old BUILTIN_CORE_SYMLINK used 1/0) */
             else if (strcmp(fn, "readlink") == 0) bid = BUILTIN_CORE_READLINK;
             else if (strcmp(fn, "fork") == 0) bid = BUILTIN_CORE_FORK;
             else if (strcmp(fn, "wait") == 0) bid = BUILTIN_CORE_WAIT;
@@ -1378,7 +1534,8 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             else if (strcmp(fn, "exec") == 0) bid = BUILTIN_CORE_EXEC;
             else if (strcmp(fn, "srand") == 0) bid = BUILTIN_CORE_SRAND;
             else if (strcmp(fn, "rand") == 0) bid = BUILTIN_CORE_RAND;
-            else if (strcmp(fn, "truncate") == 0) bid = BUILTIN_CORE_TRUNCATE;
+            /* truncate: handled by the generic runtime bridge (raw syscall return,
+             * matching compiled semantics — the old BUILTIN_CORE_TRUNCATE used 1/0) */
             else if (strcmp(fn, "nanosleep") == 0) bid = BUILTIN_CORE_NANOSLEEP;
             else if (strcmp(fn, "gethostname") == 0) bid = BUILTIN_CORE_GETHOSTNAME;
             else if (strcmp(fn, "access") == 0) bid = BUILTIN_CORE_ACCESS;
@@ -1618,6 +1775,9 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         if (strcmp(name, "regex_replace_all") == 0 && argc == 3) { for (int i = 0; i < 3; i++) compile_expr(ctx, ast_arr_get(args, i)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_REGEX_REPLACE_ALL); vm_chunk_emit(ctx->chunk, 3); break; }
         if (strcmp(name, "die") == 0) { for (int i = 0; i < argc; i++) compile_expr(ctx, ast_arr_get(args, i)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_DIE); vm_chunk_emit(ctx->chunk, (uint8_t)argc); break; }
         if (strcmp(name, "warn") == 0) { for (int i = 0; i < argc; i++) compile_expr(ctx, ast_arr_get(args, i)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_WARN); vm_chunk_emit(ctx->chunk, (uint8_t)argc); break; }
+        if (strcmp(name, "named_captures") == 0 && argc == 0) { vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_NAMED_CAPTURES); vm_chunk_emit(ctx->chunk, 0); break; }
+        if (strcmp(name, "captures") == 0 && argc == 0) { vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_CAPTURES); vm_chunk_emit(ctx->chunk, 0); break; }
+        if (strcmp(name, "inherit") == 0 && argc == 2) { compile_expr(ctx, ast_arr_get(args, 0)); compile_expr(ctx, ast_arr_get(args, 1)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_INHERIT); vm_chunk_emit(ctx->chunk, 2); break; }
         if (strcmp(name, "blessed") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_BLESSED); vm_chunk_emit(ctx->chunk, 1); break; }
         if (strcmp(name, "refcount") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_REFCOUNT); vm_chunk_emit(ctx->chunk, 1); break; }
         if (strcmp(name, "typeof") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_TYPEOF); vm_chunk_emit(ctx->chunk, 1); break; }
@@ -1630,8 +1790,59 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         if (strcmp(name, "untie") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_UNTIE); vm_chunk_emit(ctx->chunk, 1); break; }
         if (strcmp(name, "tied") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_TIED); vm_chunk_emit(ctx->chunk, 1); break; }
 
+        /* Function-form isa()/can() — same opcodes as the method forms */
+        if ((strcmp(name, "isa") == 0 || strcmp(name, "UNIVERSAL::isa") == 0) && argc == 2) {
+            compile_expr(ctx, ast_arr_get(args, 0));
+            compile_expr(ctx, ast_arr_get(args, 1));
+            vm_chunk_emit(ctx->chunk, OP_ISA);
+            break;
+        }
+        if ((strcmp(name, "can") == 0 || strcmp(name, "UNIVERSAL::can") == 0) && argc == 2) {
+            compile_expr(ctx, ast_arr_get(args, 0));
+            compile_expr(ctx, ast_arr_get(args, 1));
+            vm_chunk_emit(ctx->chunk, OP_CAN);
+            break;
+        }
+
+        /* Generic runtime-bridged builtins: any sys::/math:: name not handled
+         * by a dedicated opcode above falls through to the harvested table
+         * (vm_generic_builtins.inc) and calls the Strada runtime directly.
+         * Same precedence as the compiler: builtin namespaces win over user
+         * functions. Arity must match the runtime prototype exactly. */
+        if (strchr(name, ':')) {
+            char gbuf[256];
+            const char *gname = name;
+            if (strncmp(name, "core::", 6) == 0) {
+                snprintf(gbuf, sizeof(gbuf), "sys::%s", name + 6);
+                gname = gbuf;
+            }
+            int gidx = vm_generic_builtin_find(gname, argc);
+            if (gidx >= 0) {
+                for (int i = 0; i < argc; i++) {
+                    compile_expr(ctx, ast_arr_get(args, i));
+                }
+                vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+                vm_chunk_emit_u16(ctx->chunk, (uint16_t)(VM_GENERIC_BID_BASE + gidx));
+                vm_chunk_emit(ctx->chunk, (uint8_t)argc);
+                break;
+            }
+        }
+
         /* User function call */
         int fidx = vm_program_find_func(ctx->prog, name);
+        /* Unqualified call inside a non-main package: try <pkg>_<name> and
+         * <pkg>::<name> — same fallback the compiled backend's gen_call uses
+         * (see the name-resolution unification rule in CLAUDE.md). */
+        if (fidx < 0 && !strchr(name, ':') && ctx->cur_package && ctx->cur_package[0] &&
+            strcmp(ctx->cur_package, "main") != 0) {
+            char pkgname[256];
+            snprintf(pkgname, sizeof(pkgname), "%s_%s", ctx->cur_package, name);
+            fidx = vm_program_find_func(ctx->prog, pkgname);
+            if (fidx < 0) {
+                snprintf(pkgname, sizeof(pkgname), "%s::%s", ctx->cur_package, name);
+                fidx = vm_program_find_func(ctx->prog, pkgname);
+            }
+        }
         char normalized[256];
         if (fidx < 0 && strchr(name, ':')) {
             size_t j = 0;
@@ -1888,6 +2099,12 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         break;
     }
 
+    case NI_TR: {
+        /* expression form: value = count (or modified copy with /r) */
+        compile_tr(ctx, node);
+        break;
+    }
+
     case NI_REGEX_SUBST: {
         StradaValue *target = ast_get(node, "target");
         const char *pattern = ast_str(node, "pattern");
@@ -1895,6 +2112,9 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         const char *flags = ast_str(node, "flags");
         if (!flags) flags = "";
         int is_global = (strchr(flags, 'g') != NULL);
+
+        /* s///e: evaluated replacement (parser supplies eval_expr) */
+        if (strchr(flags, 'e') && compile_regex_subst_e(ctx, node)) break;
 
         if (target && !STRADA_IS_TAGGED_INT(target) &&
             (int)ast_int(target, "type") == NI_VARIABLE) {
@@ -1913,7 +2133,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                     vm_chunk_emit_u16(ctx->chunk, (uint16_t)gk);
                 }
 
-                size_t pat_idx = vm_chunk_add_str_const(ctx->chunk, pattern);
+                size_t pat_idx = add_pattern_const(ctx, pattern, flags);
                 vm_chunk_emit(ctx->chunk, OP_PUSH_STR);
                 vm_chunk_emit_u16(ctx->chunk, (uint16_t)pat_idx);
 
@@ -2109,13 +2329,22 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         vm_chunk_emit_u16(ctx->chunk, (uint16_t)res_slot2);
 
         for (int i = 0; i < count; i++) {
+            StradaValue *idx_expr = ast_arr_get(indices, i);
+            int idx_type = (idx_expr && !STRADA_IS_TAGGED_INT(idx_expr))
+                               ? (int)ast_int(idx_expr, "type") : 0;
             vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
             vm_chunk_emit_u16(ctx->chunk, (uint16_t)res_slot2);
             vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
             vm_chunk_emit_u16(ctx->chunk, (uint16_t)src_slot);
-            compile_expr(ctx, ast_arr_get(indices, i));
-            vm_chunk_emit(ctx->chunk, OP_ARRAY_GET);
-            vm_chunk_emit(ctx->chunk, OP_ARRAY_PUSH);
+            if (idx_type == NI_RANGE) {
+                /* @arr[A..B] — the range evaluates to an index array */
+                compile_expr(ctx, idx_expr);
+                vm_chunk_emit(ctx->chunk, OP_SLICE_IDXS);
+            } else {
+                compile_expr(ctx, idx_expr);
+                vm_chunk_emit(ctx->chunk, OP_ARRAY_GET);
+                vm_chunk_emit(ctx->chunk, OP_ARRAY_PUSH);
+            }
         }
         vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
         vm_chunk_emit_u16(ctx->chunk, (uint16_t)res_slot2);
@@ -2610,19 +2839,23 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
     }
 
     case NI_CONST_DECL: {
-        /* const — compile like var_decl */
+        /* const — a program-wide named value. The decl is compiled inside
+         * __globals_init (consts live in the program's globals list) while
+         * references compile inside other functions as plain $NAME variables,
+         * so a local slot is invisible to them: store to the global registry
+         * and register the name for the variable-load fallback. */
         const char *name = ast_str(node, "name");
-        int slot = ctx_add_local(ctx, name, '$');
-        StradaValue *init = ast_get(node, "value");
-        if (!init) init = ast_get(node, "init");
+        register_const_var(name);
+        StradaValue *init = ast_get(node, "init");
         if (init && !STRADA_IS_TAGGED_INT(init)) {
             compile_expr(ctx, init);
         } else {
             vm_chunk_emit(ctx->chunk, OP_PUSH_INT);
             vm_chunk_emit_i64(ctx->chunk, 0);
         }
-        vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
-        vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
+        size_t key_idx = vm_chunk_add_str_const(ctx->chunk, name);
+        vm_chunk_emit(ctx->chunk, OP_STORE_GLOBAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)key_idx);
         break;
     }
 
@@ -2994,14 +3227,19 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         int case_count = (int)ast_int(node, "case_count");
         StradaValue *default_block = ast_get(node, "default_block");
 
-        size_t end_patches[32];
+        size_t *end_patches = malloc((size_t)(case_count + 1) * sizeof(size_t));
         int end_count = 0;
 
-        for (int i = 0; i < case_count && i < 30; i++) {
+        for (int i = 0; i < case_count; i++) {
             vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
             vm_chunk_emit_u16(ctx->chunk, (uint16_t)val_slot);
-            compile_expr(ctx, ast_arr_get(cases, i));
-            vm_chunk_emit(ctx->chunk, OP_EQ);
+            StradaValue *case_expr = ast_arr_get(cases, i);
+            compile_expr(ctx, case_expr);
+            /* String cases must compare as strings — OP_EQ is numeric and
+             * matches any two non-numeric strings (both convert to 0). */
+            int case_type = (case_expr && !STRADA_IS_TAGGED_INT(case_expr))
+                                ? (int)ast_int(case_expr, "type") : 0;
+            vm_chunk_emit(ctx->chunk, case_type == NI_STR_LITERAL ? OP_STR_EQ : OP_EQ);
             vm_chunk_emit(ctx->chunk, OP_JMP_IF_FALSE);
             size_t next_case = emit_patch_u16(ctx);
 
@@ -3020,6 +3258,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         for (int i = 0; i < end_count; i++) {
             patch_u16(ctx, end_patches[i], (uint16_t)ctx->chunk->code_len);
         }
+        free(end_patches);
         break;
     }
 
@@ -3103,31 +3342,9 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
     }
 
     case NI_TR: {
-        /* $var =~ tr/search/replace/ */
-        StradaValue *target = ast_get(node, "target");
-        target = ast_deref(target);
-        const char *from = ast_str(node, "search");
-        const char *to = ast_str(node, "replace");
-
-        if (target && !STRADA_IS_TAGGED_INT(target) &&
-            (int)ast_int(target, "type") == NI_VARIABLE) {
-            const char *vname = ast_str(target, "name");
-            int slot = ctx_find_local(ctx, vname);
-            if (slot >= 0) {
-                vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
-                vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
-
-                size_t from_idx = vm_chunk_add_str_const(ctx->chunk, from);
-                size_t to_idx = vm_chunk_add_str_const(ctx->chunk, to);
-
-                vm_chunk_emit(ctx->chunk, OP_TR);
-                vm_chunk_emit_u16(ctx->chunk, (uint16_t)from_idx);
-                vm_chunk_emit_u16(ctx->chunk, (uint16_t)to_idx);
-
-                vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
-                vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
-            }
-        }
+        /* $var =~ tr/search/replace/flags — statement form: discard count */
+        compile_tr(ctx, node);
+        vm_chunk_emit(ctx->chunk, OP_POP);
         break;
     }
 
@@ -3167,6 +3384,12 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         const char *flags = ast_str(node, "flags");
         int is_global_flag = (flags && strchr(flags, 'g'));
 
+        /* s///e: evaluated replacement (statement form — discard value) */
+        if (flags && strchr(flags, 'e') && compile_regex_subst_e(ctx, node)) {
+            vm_chunk_emit(ctx->chunk, OP_POP);
+            break;
+        }
+
         if (target && !STRADA_IS_TAGGED_INT(target) &&
             (int)ast_int(target, "type") == NI_VARIABLE) {
             const char *vname = ast_str(target, "name");
@@ -3184,7 +3407,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
                     vm_chunk_emit_u16(ctx->chunk, (uint16_t)gk);
                 }
 
-                size_t pat_idx = vm_chunk_add_str_const(ctx->chunk, pattern);
+                size_t pat_idx = add_pattern_const(ctx, pattern, flags);
                 vm_chunk_emit(ctx->chunk, OP_PUSH_STR);
                 vm_chunk_emit_u16(ctx->chunk, (uint16_t)pat_idx);
 
@@ -3269,13 +3492,22 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
             }
             int idx = prog->cblock_count++;
             prog->cblocks[idx].code = strdup(code);
-            prog->cblocks[idx].var_count = ctx->local_count;
             prog->cblocks[idx].var_names = calloc(ctx->local_count, sizeof(char*));
             prog->cblocks[idx].var_slots = calloc(ctx->local_count, sizeof(int));
+            /* Dedupe by name (last slot wins — innermost shadowing decl):
+             * the JIT wrapper declares one C variable per entry, so two
+             * locals sharing a name would be a C redefinition error. */
+            int vc = 0;
             for (int vi = 0; vi < ctx->local_count; vi++) {
-                prog->cblocks[idx].var_names[vi] = strdup(ctx->local_names[vi]);
-                prog->cblocks[idx].var_slots[vi] = vi;
+                int later = 0;
+                for (int vj = vi + 1; vj < ctx->local_count; vj++)
+                    if (strcmp(ctx->local_names[vi], ctx->local_names[vj]) == 0) { later = 1; break; }
+                if (later) continue;
+                prog->cblocks[idx].var_names[vc] = strdup(ctx->local_names[vi]);
+                prog->cblocks[idx].var_slots[vc] = vi;
+                vc++;
             }
+            prog->cblocks[idx].var_count = vc;
             prog->cblocks[idx].dl_handle = NULL;
             prog->cblocks[idx].fn = NULL;
 
@@ -3323,6 +3555,7 @@ static int compile_function(VMProgram *prog, StradaValue *func_node) {
     ctx.chunk = chunk;
     ctx.prog = prog;
     ctx.func_name = name;
+    ctx.cur_package = ast_str(func_node, "package");
 
     /* Add parameters as locals, detect variadic */
     StradaValue *params = ast_get(func_node, "params");
@@ -3550,6 +3783,78 @@ static VMNativeEntry *vm_find_native(VMProgram *prog, const char *name) {
 
 /* ===== Program compilation ===== */
 
+
+/* Synthesize before/after modifier wrappers. The dispatch loop cannot run a
+ * hook function to completion mid-opcode (vm_execute is not re-entrant), so
+ * instead each (class, method) with before/after modifiers gets a wrapper
+ * chunk under the method's dispatch name: it calls every before-hook with
+ * $self, then the (renamed) original with all args, then every after-hook,
+ * and returns the original's result. `around` keeps its existing
+ * closure-based dispatch path. Variadic originals are skipped. */
+static void synthesize_modifier_wrappers(VMProgram *prog) {
+    int mod_total = prog->modifier_count;
+    for (int m = 0; m < mod_total; m++) {
+        VMModifier *mod = &prog->modifiers[m];
+        if (mod->kind == 2) continue; /* around: handled at dispatch */
+
+        char orig_name[256];
+        snprintf(orig_name, sizeof(orig_name), "%s_%s", mod->class_name, mod->method);
+        int orig = vm_program_find_func(prog, orig_name);
+        if (orig < 0) continue;
+        /* Already wrapped for this (class, method)? (first modifier wins
+         * the wrapping; the wrapper emits ALL kind-0/1 modifiers) */
+        char hidden_name[280];
+        snprintf(hidden_name, sizeof(hidden_name), "%s__premod", orig_name);
+        if (vm_program_find_func(prog, hidden_name) >= 0) continue;
+        if (prog->funcs[orig].has_variadic) continue;
+
+        int nparams = prog->funcs[orig].fixed_param_count;
+        if (nparams <= 0) nparams = 1; /* methods always receive $self */
+
+        /* Rename the original out of the dispatch name */
+        free(prog->func_names[orig]);
+        prog->func_names[orig] = strdup(hidden_name);
+
+        VMChunk *w = vm_program_add_func(prog, orig_name);
+        w->fixed_param_count = nparams;
+        w->local_count = nparams + 1; /* + result slot */
+
+        /* before hooks (registration order) */
+        for (int k = 0; k < mod_total; k++) {
+            VMModifier *bm = &prog->modifiers[k];
+            if (bm->kind != 0 || strcmp(bm->method, mod->method) != 0 ||
+                strcmp(bm->class_name, mod->class_name) != 0) continue;
+            int bidx = vm_program_find_func(prog, bm->modifier_func);
+            if (bidx < 0) continue;
+            vm_chunk_emit(w, OP_LOAD_LOCAL); vm_chunk_emit_u16(w, 0);
+            vm_chunk_emit(w, OP_CALL); vm_chunk_emit_u16(w, (uint16_t)bidx); vm_chunk_emit(w, 1);
+            vm_chunk_emit(w, OP_POP);
+        }
+
+        /* original */
+        for (int a = 0; a < nparams; a++) {
+            vm_chunk_emit(w, OP_LOAD_LOCAL); vm_chunk_emit_u16(w, (uint16_t)a);
+        }
+        vm_chunk_emit(w, OP_CALL); vm_chunk_emit_u16(w, (uint16_t)orig); vm_chunk_emit(w, (uint8_t)nparams);
+        vm_chunk_emit(w, OP_STORE_LOCAL); vm_chunk_emit_u16(w, (uint16_t)nparams);
+
+        /* after hooks (registration order) */
+        for (int k = 0; k < mod_total; k++) {
+            VMModifier *am = &prog->modifiers[k];
+            if (am->kind != 1 || strcmp(am->method, mod->method) != 0 ||
+                strcmp(am->class_name, mod->class_name) != 0) continue;
+            int aidx = vm_program_find_func(prog, am->modifier_func);
+            if (aidx < 0) continue;
+            vm_chunk_emit(w, OP_LOAD_LOCAL); vm_chunk_emit_u16(w, 0);
+            vm_chunk_emit(w, OP_CALL); vm_chunk_emit_u16(w, (uint16_t)aidx); vm_chunk_emit(w, 1);
+            vm_chunk_emit(w, OP_POP);
+        }
+
+        vm_chunk_emit(w, OP_LOAD_LOCAL); vm_chunk_emit_u16(w, (uint16_t)nparams);
+        vm_chunk_emit(w, OP_RETURN);
+    }
+}
+
 VMProgram *vm_compile_program(StradaValue *ast) {
     VMProgram *prog = vm_program_new();
 
@@ -3577,6 +3882,16 @@ VMProgram *vm_compile_program(StradaValue *ast) {
         ictx.func_name = iname;
         for (int i = 0; i < global_count; i++) {
             StradaValue *gdecl = ast_arr_get(globals, i);
+            /* File-scope `my` decls share the our-global machinery in the
+             * VM: BEGIN/END blocks and functions compile as separate chunks
+             * and can only reach them through the global registry (compiled
+             * C hoists these to file-scope statics). Retag as our-decl. */
+            StradaValue *gnode = ast_deref(gdecl);
+            if (gnode && !STRADA_IS_TAGGED_INT(gnode) && gnode->type == STRADA_HASH &&
+                (int)ast_int(gnode, "type") == NI_VAR_DECL) {
+                strada_hash_set_take(gnode->value.hv, "type",
+                                     strada_new_int(NI_OUR_DECL));
+            }
             compile_stmt(&ictx, gdecl);
         }
         ichunk = ictx.chunk; /* refresh after potential realloc */
@@ -3696,7 +4011,63 @@ VMProgram *vm_compile_program(StradaValue *ast) {
     }
 
     /* Process OOP declarations */
+    /* Program-level __C__ blocks: in compiled mode these are emitted at C
+     * file scope (static helpers, #includes) visible to every function-level
+     * block. The JIT compiles blocks as separate .so units, so collect them
+     * into a prelude prepended to each unit. */
+    {
+        StradaValue *pcb = ast_get(ast, "c_blocks");
+        if (pcb) pcb = ast_deref(pcb);
+        if (pcb && !STRADA_IS_TAGGED_INT(pcb) && pcb->type == STRADA_ARRAY) {
+            size_t total = 0;
+            int n = (int)pcb->value.av->size;
+            for (int i = 0; i < n; i++) {
+                StradaValue *cb = ast_deref(strada_array_get(pcb->value.av, i));
+                if (cb && !STRADA_IS_TAGGED_INT(cb) && cb->type == STRADA_STR && cb->value.pv)
+                    total += strlen(cb->value.pv) + 2;
+            }
+            if (total > 0) {
+                char *prelude = malloc(total + 1);
+                size_t off = 0;
+                for (int i = 0; i < n; i++) {
+                    StradaValue *cb = ast_deref(strada_array_get(pcb->value.av, i));
+                    if (cb && !STRADA_IS_TAGGED_INT(cb) && cb->type == STRADA_STR && cb->value.pv) {
+                        size_t l = strlen(cb->value.pv);
+                        memcpy(prelude + off, cb->value.pv, l); off += l;
+                        prelude[off++] = '\n';
+                    }
+                }
+                prelude[off] = 0;
+                prog->cblock_prelude = prelude;
+            }
+        }
+    }
+
     process_oop_decls(prog, ast);
+
+    /* Program-level method modifiers: `before "m" func(...)` parses into
+     * $program->{method_modifiers} (mod_type/method_name/func_name/package),
+     * NOT the per-package "modifiers" list process_oop_decls reads. */
+    {
+        StradaValue *pmods = ast_get(ast, "method_modifiers");
+        if (pmods) pmods = ast_deref(pmods);
+        if (pmods && !STRADA_IS_TAGGED_INT(pmods) && pmods->type == STRADA_ARRAY) {
+            int pm_count = (int)pmods->value.av->size;
+            for (int m = 0; m < pm_count; m++) {
+                StradaValue *mod = ast_deref(strada_array_get(pmods->value.av, m));
+                if (!mod || STRADA_IS_TAGGED_INT(mod) || mod->type != STRADA_HASH) continue;
+                const char *mod_type = ast_str(mod, "mod_type");
+                const char *method = ast_str(mod, "method_name");
+                const char *mod_func = ast_str(mod, "func_name");
+                const char *mpkg = ast_str(mod, "package");
+                int kind = strcmp(mod_type, "after") == 0 ? 1
+                         : strcmp(mod_type, "around") == 0 ? 2 : 0;
+                vm_program_add_modifier(prog, mpkg, method, mod_func, kind);
+            }
+        }
+    }
+
+    synthesize_modifier_wrappers(prog);
 
     /* Process program-level overloads */
     StradaValue *prog_overloads = ast_get(ast, "overloads");

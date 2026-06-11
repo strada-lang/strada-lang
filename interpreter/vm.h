@@ -198,6 +198,9 @@ typedef enum {
 
     OP_APPEND_CONST,    /* u16 str_idx, u16 local_slot — append string const to local (no alloc) */
 
+    OP_SLICE_IDXS,      /* pop idx_array, src_array, res_array — append src[i] for each i */
+    OP_REGEX_FIND,      /* u16 pat_idx — pop start_pos, subject; push match_start, match_end (-1,-1 if none); sets captures */
+
     OP_OPCODE_COUNT     /* must be last */
 } StradaOpcode;
 
@@ -493,6 +496,10 @@ enum {
     BUILTIN_CAST_INT,
     BUILTIN_CAST_NUM,
     BUILTIN_CAST_STR,
+    BUILTIN_CORE_GET_RECURSION_LIMIT,
+    BUILTIN_INHERIT,
+    BUILTIN_CAPTURES,
+    BUILTIN_NAMED_CAPTURES,
 };
 
 /* Heap object type tag */
@@ -615,6 +622,7 @@ struct VMHash {
     int size;
     char *class_name;
     int iter_pos;       /* iteration position for each() */
+    VMValue tied_obj;   /* tie(): implementation object (0/undef = untied) */
 };
 
 /* Closure */
@@ -754,6 +762,9 @@ typedef struct {
     int cblock_count;
     int cblock_cap;
     char *runtime_include_path; /* path to strada_runtime.h for gcc -I */
+    char *cblock_prelude;       /* program-level __C__ blocks (file-scope
+                                 * helpers/includes), prepended to every
+                                 * function-level block's JIT unit */
 } VMProgram;
 
 /* Call frame */
@@ -773,9 +784,13 @@ typedef struct {
     VMFrame *frames;
     size_t frame_count;
     size_t frame_cap;
+    int recursion_limit;     /* core::set/get_recursion_limit; 0 = unlimited */
+    size_t exec_base;        /* frame watermark: vm_execute_call returns when
+                              * frame_count pops back to this (re-entrancy) */
     VMProgram *program;
     /* Regex captures */
     char *regex_captures[10]; /* $1-$9 (index 0 = $0/full match) */
+    char *regex_capture_names[10]; /* named-group name per group number (or NULL) */
     /* Exception handling */
     VMExcHandler *exc_stack;
     int exc_top;
@@ -839,5 +854,20 @@ int vm_hash_exists(VMHash *h, const char *key);
 void vm_program_add_overload(VMProgram *prog, const char *cls, const char *op, const char *method);
 void vm_program_add_modifier(VMProgram *prog, const char *cls, const char *method, const char *mod_func, int kind);
 void vm_program_add_attr(VMProgram *prog, const char *cls, const char *name, const char *type, int is_rw, int is_required, VMValue default_val);
+
+/* Generic runtime-bridged builtins (vm_generic_builtins.inc): OP_BUILTIN ids
+ * at VM_GENERIC_BID_BASE+idx call the Strada runtime's StradaValue* functions
+ * through the vm_to_sv/sv_to_vm bridge. Lookup is by normalized name
+ * (core:: -> sys::) with exact arity match; returns table index or -1. */
+#define VM_GENERIC_BID_BASE 20000
+int vm_generic_builtin_find(const char *name, int argc);
+
+/* MI-aware isa walk over the inherits table */
+int vm_class_isa(VMProgram *p, const char *cls, const char *target, int depth);
+
+/* Re-entrant nested call: runs funcs[func_idx] with cargs to completion.
+ * Safe to call from inside opcode handlers (sync stack_top/frame->ip first;
+ * refresh cached stack/frame pointers after — both arrays may realloc). */
+VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc);
 
 #endif

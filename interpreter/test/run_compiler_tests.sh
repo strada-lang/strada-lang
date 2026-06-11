@@ -39,7 +39,9 @@ run_test() {
 
     # Run through interpreter with timeout
     local output
-    output=$(timeout "$timeout_secs" "$INTERP" "$src" 2>&1)
+    # Run from the project root: several tests use repo-relative `use lib`
+    # paths (t/nested_use_test, ...), matching how the compiled suite runs.
+    output=$(cd "$PROJECT_DIR" && timeout "$timeout_secs" "$INTERP" "$src" 2>&1)
     local exit_code=$?
 
     case "$mode" in
