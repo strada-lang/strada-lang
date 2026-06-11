@@ -59,6 +59,7 @@ which roughly halves a clean `make` with no effect on the final compiler.
 ./configure --prefix=/opt      # Set installation prefix
 ./configure --without-cycle-gc # Compile out the automatic cycle collector (default on)
 ./configure --without-arena    # Compile out the request arena (default on)
+./configure --without-epoll    # Disable the epoll event loop (Async::Loop; Linux-only, auto-detected)
 ```
 
 Detected libraries: MySQL, SQLite, PostgreSQL, libcrypt, OpenSSL, PCRE2, readline, zlib, libusb
@@ -693,6 +694,8 @@ Thread pool backend (default 4 workers). Functions: `async::all()`, `async::race
 - `async::map($fn, \@items [, $workers])` — data-parallel map, results in input order; work-shared via an atomic index; the first exception cancels remaining work and rethrows in the caller.
 - `thread::tls_set/tls_get/tls_exists/tls_delete($name, ...)` — per-thread named values, freed at thread exit.
 - **`Async::Scope`** (lib) — structured concurrency: `$scope->spawn($fn)` / `$scope->wait()` joins all, and a failure cancels the remaining siblings and rethrows. **`Async::Actor`** (lib) — message-driven actors: `tell` (fire-and-forget), `ask` (round-trip), strictly ordered handling, `stop` drains.
+
+**Event loop + green tasks (2026-06, EXPERIMENTAL — branch `async-eventloop`):** `Async::Loop` (epoll reactor: `watch`/`unwatch`/`timer_after`/`run`/`stop`) + `Async::Task` (green tasks via `$loop->spawn`: `Async::Task::recv/send/accept/sleep` look blocking but park stackful ucontext coroutines; outside a task they fall back to blocking). `async::io_wait($fd, "r"/"w", $ms)` returns a future completed by a dedicated poller thread. Runtime primitives: `core::epoll_*`, `core::eventfd*`, `core::socket_try_recv/try_send/try_accept`, `core::mono_ms`, `core::coro_*` (compiled-only). Linux-only, configure-gated (`--without-epoll`); see **docs/EVENT_LOOP.md** — including the v1 known issues (≈32B leak per task suspension under investigation via the `STRADA_RC_TRACE` hook, no-suspend-inside-try restriction, regex-state caveat). Coroutine context switches swap the per-thread pending-cleanup and call-trace stacks (`coro_ctx_install/stash` in the runtime).
 
 ### Variadic Functions and Spread
 

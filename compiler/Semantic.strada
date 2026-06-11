@@ -374,6 +374,30 @@ func get_builtins() scalar {
     $b{"sb_free"} = 1;
 
     # sys:: Process
+    # Event loop support (epoll/eventfd/non-blocking sockets/coroutines)
+    $b{"sys::epoll_create"} = 1;
+    $b{"sys::epoll_add"} = 1;
+    $b{"sys::epoll_mod"} = 1;
+    $b{"sys::epoll_del"} = 1;
+    $b{"sys::epoll_wait"} = 1;
+    $b{"sys::eventfd"} = 1;
+    $b{"sys::eventfd_signal"} = 1;
+    $b{"sys::eventfd_drain"} = 1;
+    $b{"sys::socket_try_recv"} = 1;
+    $b{"sys::socket_try_send"} = 1;
+    $b{"sys::socket_try_accept"} = 1;
+    $b{"async::io_wait"} = 1;
+    $b{"sys::coro_create"} = 1;
+    $b{"sys::coro_resume"} = 1;
+    $b{"sys::coro_yield_io"} = 1;
+    $b{"sys::coro_state"} = 1;
+    $b{"sys::coro_wait_fd"} = 1;
+    $b{"sys::coro_wait_mask"} = 1;
+    $b{"sys::coro_wait_timeout"} = 1;
+    $b{"sys::coro_result"} = 1;
+    $b{"sys::coro_free"} = 1;
+    $b{"sys::mono_ms"} = 1;
+
     $b{"sys::fork"} = 1;
     $b{"sys::exec"} = 1;
     $b{"sys::system"} = 1;

@@ -1,0 +1,219 @@
+# Async::Loop — epoll-based event loop (reactor) with green tasks.
+#
+#   use Async::Loop;
+#
+#   my scalar $loop = Async::Loop::new();
+#
+#   # Callback style (Phase 1):
+#   $loop->watch($sock, "r", fn (int $fd, str $mask) { ... });
+#   $loop->timer_after(250, fn () { say("tick"); });
+#
+#   # Green tasks (Phase 3): straight-line code, suspended on I/O.
+#   $loop->spawn(fn () {
+#       my scalar $conn = Async::Task::accept($listener);
+#       my str $req = Async::Task::recv($conn, 4096);
+#       Async::Task::send($conn, "HTTP/1.0 200 OK\r\n\r\nhi");
+#   });
+#
+#   $loop->run();   # until stop() or nothing left to wait for
+#
+# Scheduling policy lives entirely here; the runtime only provides epoll
+# wrappers and ucontext switching. Linux-only (epoll); Async::Loop::new()
+# throws elsewhere.
+#
+# v1 task restrictions (runtime-enforced where possible):
+#   - a task may not suspend while inside try{} (throws)
+#   - capture regex results before suspending (match state is per-OS-thread)
+#   - tasks belong to the thread that created them
+
+package Async::Loop;
+
+func new() scalar {
+    my int $epfd = core::epoll_create();
+    if ($epfd < 0) {
+        throw "Async::Loop requires epoll (Linux)";
+    }
+    my hash %self = ();
+    $self{"epfd"} = $epfd;
+    $self{"watchers"} = {};      # fd -> { mask, cb }
+    $self{"timers"} = [];        # [ { at, cb, id, dead } ... ]
+    $self{"next_id"} = 1;
+    $self{"running"} = 0;
+    $self{"ntasks"} = 0;
+    return bless(\%self, "Async::Loop");
+}
+
+# Watch an fd (or socket) for readiness. $cb->($fd, $mask) on each event.
+func watch(scalar $self, scalar $sock_or_fd, str $mask, scalar $cb) int {
+    my int $fd = resolve_fd($sock_or_fd);
+    my scalar $watchers = $self->{"watchers"};
+    if (defined($watchers->{$fd})) {
+        core::epoll_mod($self->{"epfd"}, $fd, $mask);
+    } else {
+        core::epoll_add($self->{"epfd"}, $fd, $mask);
+    }
+    $watchers->{$fd} = { "mask" => $mask, "cb" => $cb, "sock" => $sock_or_fd };
+    return $fd;
+}
+
+func unwatch(scalar $self, scalar $sock_or_fd) void {
+    my int $fd = resolve_fd($sock_or_fd);
+    my scalar $watchers = $self->{"watchers"};
+    if (defined($watchers->{$fd})) {
+        core::epoll_del($self->{"epfd"}, $fd);
+        delete($watchers->{$fd});
+    }
+}
+
+# One-shot timer; returns an id usable with timer_cancel().
+func timer_after(scalar $self, int $ms, scalar $cb) int {
+    my int $id = $self->{"next_id"};
+    $self->{"next_id"} = $id + 1;
+    my scalar $timers = $self->{"timers"};
+    push(@{$timers}, { "at" => core::mono_ms() + $ms, "cb" => $cb, "id" => $id, "dead" => 0 });
+    return $id;
+}
+
+func timer_cancel(scalar $self, int $id) void {
+    my scalar $timers = $self->{"timers"};
+    foreach my scalar $t (@{$timers}) {
+        if ($t->{"id"} == $id) {
+            $t->{"dead"} = 1;
+        }
+    }
+}
+
+func stop(scalar $self) void {
+    $self->{"running"} = 0;
+}
+
+# Spawn a green task: runs immediately until its first suspension; after
+# that the loop resumes it on fd readiness / timer expiry.
+func spawn(scalar $self, scalar $closure) void {
+    my int $coro = core::coro_create($closure);
+    $self->{"ntasks"} = $self->{"ntasks"} + 1;
+    advance_task($self, $coro);
+}
+
+# Resume a task and (re)schedule its next wait. Private.
+private func advance_task(scalar $self, int $coro) void {
+    my int $state = core::coro_resume($coro);
+    if ($state == 3) {
+        core::coro_free($coro);
+        $self->{"ntasks"} = $self->{"ntasks"} - 1;
+        return;
+    }
+    # Suspended: wire up its wake-up sources.
+    my int $wfd = core::coro_wait_fd($coro);
+    my str $wmask = core::coro_wait_mask($coro);
+    my int $wtimeout = core::coro_wait_timeout($coro);
+
+    my scalar $woken = { "done" => 0 };
+    my scalar $timer_id = { "id" => 0 };
+
+    if ($wfd >= 0) {
+        watch($self, $wfd, $wmask, fn (int $fd, str $mask) {
+            if ($woken->{"done"} == 1) { return; }
+            $woken->{"done"} = 1;
+            unwatch($self, $fd);
+            if ($timer_id->{"id"} > 0) { timer_cancel($self, $timer_id->{"id"}); }
+            advance_task($self, $coro);
+        });
+    }
+    if ($wtimeout > 0 || $wfd < 0) {
+        my int $ms = $wtimeout > 0 ? $wtimeout : 0;
+        $timer_id->{"id"} = timer_after($self, $ms, fn () {
+            if ($woken->{"done"} == 1) { return; }
+            $woken->{"done"} = 1;
+            if ($wfd >= 0) { unwatch($self, $wfd); }
+            advance_task($self, $coro);
+        });
+    }
+}
+
+func run(scalar $self) void {
+    $self->{"running"} = 1;
+    while ($self->{"running"} == 1) {
+        my scalar $watchers = $self->{"watchers"};
+        my scalar $timers = $self->{"timers"};
+        my int $nwatch = size(keys(%{$watchers}));
+        my int $ntimer = live_timer_count($self);
+        if ($nwatch == 0 && $ntimer == 0) {
+            # Drained. Drop watcher/timer storage explicitly: wake callbacks
+            # capture $self, and the cycle collector does not trace closure
+            # captures, so a self-referential entry would outlive the loop.
+            $self->{"watchers"} = {};
+            $self->{"timers"} = [];
+            last;
+        }
+
+        my int $timeout = next_timeout($self);
+        my scalar $evs = core::epoll_wait($self->{"epfd"}, $timeout);
+
+        foreach my scalar $ev (@{$evs}) {
+            my int $fd = $ev->[0];
+            my str $mask = $ev->[1];
+            my scalar $w = $self->{"watchers"}->{$fd};
+            if (defined($w)) {
+                my scalar $cb = $w->{"cb"};
+                $cb->($fd, $mask);
+            }
+        }
+
+        fire_due_timers($self);
+    }
+    $self->{"running"} = 0;
+}
+
+private func live_timer_count(scalar $self) int {
+    my int $n = 0;
+    my scalar $timers = $self->{"timers"};
+    foreach my scalar $t (@{$timers}) {
+        if ($t->{"dead"} == 0) { $n = $n + 1; }
+    }
+    return $n;
+}
+
+# Milliseconds until the nearest live timer; -1 = wait indefinitely.
+private func next_timeout(scalar $self) int {
+    my int $best = 0 - 1;
+    my int $now = core::mono_ms();
+    my scalar $timers = $self->{"timers"};
+    foreach my scalar $t (@{$timers}) {
+        if ($t->{"dead"} == 0) {
+            my int $left = $t->{"at"} - $now;
+            if ($left < 0) { $left = 0; }
+            if ($best < 0 || $left < $best) { $best = $left; }
+        }
+    }
+    return $best;
+}
+
+private func fire_due_timers(scalar $self) void {
+    my int $now = core::mono_ms();
+    my scalar $timers = $self->{"timers"};
+    my array @due = ();
+    my array @keep = ();
+    foreach my scalar $t (@{$timers}) {
+        if ($t->{"dead"} == 1) {
+            next;
+        } elsif ($t->{"at"} <= $now) {
+            push(@due, $t);
+        } else {
+            push(@keep, $t);
+        }
+    }
+    $self->{"timers"} = \@keep;
+    foreach my scalar $t (@due) {
+        my scalar $cb = $t->{"cb"};
+        $cb->();
+    }
+}
+
+private func resolve_fd(scalar $sock_or_fd) int {
+    my str $kind = typeof($sock_or_fd);
+    if ($kind eq "socket") {
+        return core::socket_fd($sock_or_fd);
+    }
+    return $sock_or_fd + 0;
+}

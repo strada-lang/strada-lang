@@ -1,0 +1,83 @@
+# Async::Task — blocking-looking I/O inside green tasks (Async::Loop).
+#
+# Each call tries the non-blocking operation; on would-block it parks the
+# current task until the loop reports readiness. Called outside a task,
+# every function falls back to plain blocking behavior, so the same code
+# runs in both worlds.
+#
+#   use Async::Task;
+#   my str  $req  = Async::Task::recv($conn, 4096);
+#   my int  $sent = Async::Task::send($conn, $bytes);
+#   my scalar $c  = Async::Task::accept($listener);
+#   Async::Task::sleep(250);
+
+package Async::Task;
+
+# Park the current task. Throws on illegal suspension (inside try{}).
+private func park(scalar $sock_or_fd, str $mask, int $timeout_ms) int {
+    my int $r = core::coro_yield_io($sock_or_fd, $mask, $timeout_ms);
+    if ($r < 0) {
+        throw "Async::Task: cannot suspend inside try{} (v1 restriction)";
+    }
+    return $r;   # 1 = parked+resumed, 0 = not inside a task
+}
+
+# Receive up to $max bytes. Returns "" on EOF.
+func recv(scalar $sock, int $max) str {
+    while (1) {
+        my scalar $data = core::socket_try_recv($sock, $max);
+        if (defined($data)) {
+            return $data;
+        }
+        if (park($sock, "r", 0) == 0) {
+            return core::socket_recv($sock, $max);   # not in a task: block
+        }
+    }
+}
+
+# Send all of $data (handles partial writes). Returns bytes sent, -1 error.
+func send(scalar $sock, str $data) int {
+    my int $total = length($data);
+    my str $rest = $data;
+    while (length($rest) > 0) {
+        my int $n = core::socket_try_send($sock, $rest);
+        if ($n < 0) { return 0 - 1; }
+        if ($n == length($rest)) { return $total; }
+        if ($n > 0) {
+            $rest = substr($rest, $n, length($rest) - $n);
+            next;
+        }
+        if (park($sock, "w", 0) == 0) {
+            core::socket_send($sock, $rest);          # not in a task: block
+            return $total;
+        }
+    }
+    return $total;
+}
+
+# Accept one connection. The listener is switched to non-blocking once
+# (recv/send use per-call MSG_DONTWAIT; accept has no such flag).
+func accept(scalar $listener) scalar {
+    core::socket_set_nonblocking($listener, 1);
+    while (1) {
+        my scalar $conn = core::socket_try_accept($listener);
+        if (defined($conn)) {
+            return $conn;
+        }
+        if (park($listener, "r", 0) == 0) {
+            return core::socket_accept($listener);    # not in a task: block
+        }
+    }
+}
+
+# Sleep without blocking the loop.
+func sleep(int $ms) void {
+    my int $minus_one = 0 - 1;
+    my int $r = core::coro_yield_io($minus_one, "", $ms);
+    if ($r < 0) {
+        throw "Async::Task: cannot suspend inside try{} (v1 restriction)";
+    }
+    if ($r == 0) {
+        core::usleep($ms * 1000);                     # not in a task: block
+    }
+}

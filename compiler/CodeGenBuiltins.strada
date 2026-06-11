@@ -6831,6 +6831,138 @@ func gen_builtin_g7(scalar $cg, scalar $expr, str $name) int {
         }
 
         # Additional file system
+        # Event loop support (Async::Loop): epoll, eventfd, non-blocking
+        # socket ops, IO-wait futures, coroutines. Uniform StradaValue*
+        # signatures (the VM generic-builtin harvest picks these up).
+        if ($name eq "sys::epoll_create") {
+            emit($cg, "strada_epoll_create()");
+            return 1;
+        }
+
+        if ($name eq "sys::epoll_add") {
+            my scalar $args = $expr->{"args"};
+            gen_call_with_arg_cleanup($cg, "strada_epoll_add", $args, 3);
+            return 1;
+        }
+
+        if ($name eq "sys::epoll_mod") {
+            my scalar $args = $expr->{"args"};
+            gen_call_with_arg_cleanup($cg, "strada_epoll_mod", $args, 3);
+            return 1;
+        }
+
+        if ($name eq "sys::epoll_del") {
+            my scalar $args = $expr->{"args"};
+            gen_call_with_arg_cleanup($cg, "strada_epoll_del", $args, 2);
+            return 1;
+        }
+
+        if ($name eq "sys::epoll_wait") {
+            my scalar $args = $expr->{"args"};
+            gen_call_with_arg_cleanup($cg, "strada_epoll_wait", $args, 2);
+            return 1;
+        }
+
+        if ($name eq "sys::eventfd") {
+            emit($cg, "strada_eventfd_new()");
+            return 1;
+        }
+
+        if ($name eq "sys::eventfd_signal") {
+            my scalar $args = $expr->{"args"};
+            gen_call_with_arg_cleanup($cg, "strada_eventfd_signal", $args, 1);
+            return 1;
+        }
+
+        if ($name eq "sys::eventfd_drain") {
+            my scalar $args = $expr->{"args"};
+            gen_call_with_arg_cleanup($cg, "strada_eventfd_drain", $args, 1);
+            return 1;
+        }
+
+        if ($name eq "sys::socket_try_recv") {
+            my scalar $args = $expr->{"args"};
+            gen_call_with_arg_cleanup($cg, "strada_socket_try_recv", $args, 2);
+            return 1;
+        }
+
+        if ($name eq "sys::socket_try_send") {
+            my scalar $args = $expr->{"args"};
+            gen_call_with_arg_cleanup($cg, "strada_socket_try_send", $args, 2);
+            return 1;
+        }
+
+        if ($name eq "sys::socket_try_accept") {
+            my scalar $args = $expr->{"args"};
+            gen_call_with_arg_cleanup($cg, "strada_socket_try_accept", $args, 1);
+            return 1;
+        }
+
+        if ($name eq "async::io_wait") {
+            my scalar $args = $expr->{"args"};
+            gen_call_with_arg_cleanup($cg, "strada_io_wait_async", $args, 3);
+            return 1;
+        }
+
+        if ($name eq "sys::coro_create") {
+            my scalar $args = $expr->{"args"};
+            gen_call_with_arg_cleanup($cg, "strada_coro_create", $args, 1);
+            return 1;
+        }
+
+        if ($name eq "sys::coro_resume") {
+            my scalar $args = $expr->{"args"};
+            gen_call_with_arg_cleanup($cg, "strada_coro_resume", $args, 1);
+            return 1;
+        }
+
+        if ($name eq "sys::coro_yield_io") {
+            my scalar $args = $expr->{"args"};
+            gen_call_with_arg_cleanup($cg, "strada_coro_yield_io", $args, 3);
+            return 1;
+        }
+
+        if ($name eq "sys::coro_state") {
+            my scalar $args = $expr->{"args"};
+            gen_call_with_arg_cleanup($cg, "strada_coro_state", $args, 1);
+            return 1;
+        }
+
+        if ($name eq "sys::coro_wait_fd") {
+            my scalar $args = $expr->{"args"};
+            gen_call_with_arg_cleanup($cg, "strada_coro_wait_fd", $args, 1);
+            return 1;
+        }
+
+        if ($name eq "sys::coro_wait_mask") {
+            my scalar $args = $expr->{"args"};
+            gen_call_with_arg_cleanup($cg, "strada_coro_wait_mask", $args, 1);
+            return 1;
+        }
+
+        if ($name eq "sys::coro_wait_timeout") {
+            my scalar $args = $expr->{"args"};
+            gen_call_with_arg_cleanup($cg, "strada_coro_wait_timeout", $args, 1);
+            return 1;
+        }
+
+        if ($name eq "sys::coro_result") {
+            my scalar $args = $expr->{"args"};
+            gen_call_with_arg_cleanup($cg, "strada_coro_result", $args, 1);
+            return 1;
+        }
+
+        if ($name eq "sys::coro_free") {
+            my scalar $args = $expr->{"args"};
+            gen_call_with_arg_cleanup($cg, "strada_coro_free", $args, 1);
+            return 1;
+        }
+
+        if ($name eq "sys::mono_ms") {
+            emit($cg, "strada_mono_ms()");
+            return 1;
+        }
+
         if ($name eq "sys::truncate") {
             my scalar $args = $expr->{"args"};
             gen_call_with_arg_cleanup($cg, "strada_truncate", $args, 2);

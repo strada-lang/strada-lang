@@ -38,7 +38,7 @@ HAVE_CYCLE_GC ?= 1
 HAVE_ARENA ?= 1
 # Combined define list folded into the runtime compile (and only the runtime —
 # the StradaValue ABI is unchanged, so user programs need no define).
-MM_DEFINES = $(if $(filter 1,$(HAVE_CYCLE_GC)),-DSTRADA_CYCLE_GC) $(if $(filter 1,$(HAVE_ARENA)),-DSTRADA_ARENA)
+MM_DEFINES = $(if $(filter 1,$(HAVE_CYCLE_GC)),-DSTRADA_CYCLE_GC) $(if $(filter 1,$(HAVE_ARENA)),-DSTRADA_ARENA) $(if $(filter 1,$(HAVE_EPOLL)),-DSTRADA_HAVE_EPOLL) $(if $(filter 0,$(HAVE_EPOLL)),-DSTRADA_NO_EPOLL)
 # DEV=1 builds the compiler and runtime at -O0 with no LTO. Trades a slower
 # stradac binary for dramatically faster gcc compile times on the generated
 # Combined.c (~4MB / 60k lines). Default off — production builds at -O2+LTO.

@@ -1674,4 +1674,30 @@ extern int (*strada_method_can_hook)(StradaValue *obj, const char *method);
    under TCC just call the real runtime function (defined in the tcc runtime). */
 #define strada_break_self_cycle strada_break_self_cycle_impl
 
+
+/* ---- Event loop support (Async::Loop): epoll/eventfd primitives,
+ * non-blocking socket ops, IO-wait futures, stackful coroutines ---- */
+StradaValue* strada_epoll_create(void);
+StradaValue* strada_epoll_add(StradaValue *epfd, StradaValue *fd, StradaValue *mask);
+StradaValue* strada_epoll_mod(StradaValue *epfd, StradaValue *fd, StradaValue *mask);
+StradaValue* strada_epoll_del(StradaValue *epfd, StradaValue *fd);
+StradaValue* strada_epoll_wait(StradaValue *epfd, StradaValue *timeout_ms);
+StradaValue* strada_eventfd_new(void);
+StradaValue* strada_eventfd_signal(StradaValue *fd);
+StradaValue* strada_eventfd_drain(StradaValue *fd);
+StradaValue* strada_socket_try_recv(StradaValue *sock, StradaValue *maxlen);
+StradaValue* strada_socket_try_send(StradaValue *sock, StradaValue *data);
+StradaValue* strada_socket_try_accept(StradaValue *sock);
+StradaValue* strada_io_wait_async(StradaValue *fd, StradaValue *mask, StradaValue *timeout_ms);
+StradaValue* strada_coro_create(StradaValue *closure);
+StradaValue* strada_coro_resume(StradaValue *handle);
+StradaValue* strada_coro_yield_io(StradaValue *fd, StradaValue *mask, StradaValue *timeout_ms);
+StradaValue* strada_coro_state(StradaValue *handle);
+StradaValue* strada_coro_wait_fd(StradaValue *handle);
+StradaValue* strada_coro_wait_mask(StradaValue *handle);
+StradaValue* strada_coro_wait_timeout(StradaValue *handle);
+StradaValue* strada_coro_result(StradaValue *handle);
+StradaValue* strada_coro_free(StradaValue *handle);
+StradaValue* strada_mono_ms(void);
+
 #endif /* STRADA_RUNTIME_TCC_H */

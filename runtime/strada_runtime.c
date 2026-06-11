@@ -26768,3 +26768,626 @@ StradaValue* strada_tied(StradaValue *ref) {
     }
     return strada_new_undef();
 }
+
+#ifdef STRADA_RC_TRACE
+#include <execinfo.h>
+StradaValue *strada_trace_sv = NULL;
+void strada_rc_trace(StradaValue *sv, const char *op, void *ra) {
+    void *bt[6];
+    int n = backtrace(bt, 6);
+    char **syms = backtrace_symbols(bt, n);
+    fprintf(stderr, "[rc] %s rc_now=%d ra=%p :: %s | %s | %s\n", op, sv->refcount, ra,
+            n > 2 ? syms[2] : "?", n > 3 ? syms[3] : "?", n > 4 ? syms[4] : "?");
+    free(syms);
+}
+#endif
+
+/* ============================================================
+ * Event loop support: epoll/eventfd primitives, non-blocking
+ * socket ops, IO-wait futures (poller thread), and stackful
+ * coroutines (green tasks) for Async::Loop.
+ *
+ * Linux-only for the epoll/eventfd pieces (#ifdef STRADA_EPOLL_ENABLED);
+ * on other platforms they return undef/-1 and Async::Loop
+ * raises a clear error. Coroutines use POSIX ucontext.
+ * ============================================================ */
+
+/* epoll availability: configure detects it (-DSTRADA_HAVE_EPOLL, or
+ * -DSTRADA_NO_EPOLL for --without-epoll). Builds that skip configure
+ * (e.g. make quick's prebuilt runtime path) default to on for Linux.
+ * Everywhere else the strada_epoll/io_wait functions compile as stubs
+ * returning -1/undef and Async::Loop::new() throws a clear error. */
+#if !defined(STRADA_NO_EPOLL) && (defined(STRADA_HAVE_EPOLL) || defined(__linux__))
+#define STRADA_EPOLL_ENABLED 1
+#endif
+
+#ifdef STRADA_EPOLL_ENABLED
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
+#endif
+#include <ucontext.h>
+
+/* ---- mask helpers: "r", "w", "rw" <-> EPOLLIN/EPOLLOUT ---- */
+#ifdef STRADA_EPOLL_ENABLED
+static uint32_t ev_mask_from_str(const char *s) {
+    uint32_t ev = 0;
+    if (s) {
+        if (strchr(s, 'r')) ev |= EPOLLIN;
+        if (strchr(s, 'w')) ev |= EPOLLOUT;
+    }
+    return ev;
+}
+static void ev_mask_to_str(uint32_t ev, char *out) {
+    int i = 0;
+    if (ev & (EPOLLIN | EPOLLHUP)) out[i++] = 'r';
+    if (ev & EPOLLOUT) out[i++] = 'w';
+    if (ev & EPOLLERR) out[i++] = 'e';
+    out[i] = 0;
+}
+#endif
+
+/* Resolve a SOCKET sv or integer fd sv to a raw fd (-1 on failure) */
+static int ev_resolve_fd(StradaValue *v) {
+    if (!v) return -1;
+    if (!STRADA_IS_TAGGED_INT(v) && v->type == STRADA_SOCKET && v->value.sock)
+        return v->value.sock->fd;
+    return (int)strada_to_int(v);
+}
+
+StradaValue* strada_epoll_create(void) {
+#ifdef STRADA_EPOLL_ENABLED
+    return strada_new_int(epoll_create1(EPOLL_CLOEXEC));
+#else
+    return strada_new_int(-1);
+#endif
+}
+
+#ifdef STRADA_EPOLL_ENABLED
+static StradaValue* ev_epoll_ctl(StradaValue *epfd, int op, StradaValue *fd, StradaValue *mask) {
+    char mb[8];
+    char *ms = NULL;
+    uint32_t events = 0;
+    if (mask) { ms = strada_to_str(mask); events = ev_mask_from_str(ms); free(ms); }
+    (void)mb;
+    struct epoll_event ev;
+    memset(&ev, 0, sizeof(ev));
+    int rfd = ev_resolve_fd(fd);
+    ev.events = events;
+    ev.data.fd = rfd;
+    return strada_new_int(epoll_ctl((int)strada_to_int(epfd), op, rfd, &ev));
+}
+#endif
+
+StradaValue* strada_epoll_add(StradaValue *epfd, StradaValue *fd, StradaValue *mask) {
+#ifdef STRADA_EPOLL_ENABLED
+    return ev_epoll_ctl(epfd, EPOLL_CTL_ADD, fd, mask);
+#else
+    (void)epfd; (void)fd; (void)mask; return strada_new_int(-1);
+#endif
+}
+
+StradaValue* strada_epoll_mod(StradaValue *epfd, StradaValue *fd, StradaValue *mask) {
+#ifdef STRADA_EPOLL_ENABLED
+    return ev_epoll_ctl(epfd, EPOLL_CTL_MOD, fd, mask);
+#else
+    (void)epfd; (void)fd; (void)mask; return strada_new_int(-1);
+#endif
+}
+
+StradaValue* strada_epoll_del(StradaValue *epfd, StradaValue *fd) {
+#ifdef STRADA_EPOLL_ENABLED
+    struct epoll_event ev;             /* needed for kernels < 2.6.9 */
+    memset(&ev, 0, sizeof(ev));
+    return strada_new_int(epoll_ctl((int)strada_to_int(epfd), EPOLL_CTL_DEL,
+                                    ev_resolve_fd(fd), &ev));
+#else
+    (void)epfd; (void)fd; return strada_new_int(-1);
+#endif
+}
+
+/* epoll_wait(epfd, timeout_ms) -> array of [fd, "r"/"w"/"rw"/"e"] pairs.
+ * Blocks with the cycle collector notified (counts as a safepoint). */
+StradaValue* strada_epoll_wait(StradaValue *epfd, StradaValue *timeout_ms) {
+#ifdef STRADA_EPOLL_ENABLED
+    struct epoll_event evs[64];
+    int t = (int)strada_to_int(timeout_ms);
+    cc_blocking_enter();
+    int n = epoll_wait((int)strada_to_int(epfd), evs, 64, t);
+    cc_blocking_leave();
+    StradaValue *out = strada_new_array();
+    for (int i = 0; i < n; i++) {
+        char ms[8];
+        ev_mask_to_str(evs[i].events, ms);
+        StradaValue *pair = strada_new_array();
+        strada_array_push_take(pair->value.av, strada_new_int(evs[i].data.fd));
+        strada_array_push_take(pair->value.av, strada_new_str(ms));
+        StradaValue *pref = strada_ref_create(pair);
+        strada_decref(pair);
+        strada_array_push_take(out->value.av, pref);
+    }
+    return out;
+#else
+    (void)epfd; (void)timeout_ms;
+    return strada_new_array();
+#endif
+}
+
+StradaValue* strada_eventfd_new(void) {
+#ifdef STRADA_EPOLL_ENABLED
+    return strada_new_int(eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC));
+#else
+    return strada_new_int(-1);
+#endif
+}
+
+StradaValue* strada_eventfd_signal(StradaValue *fd) {
+#ifdef STRADA_EPOLL_ENABLED
+    uint64_t one = 1;
+    ssize_t r = write((int)strada_to_int(fd), &one, sizeof(one));
+    return strada_new_int(r == sizeof(one) ? 0 : -1);
+#else
+    (void)fd; return strada_new_int(-1);
+#endif
+}
+
+StradaValue* strada_eventfd_drain(StradaValue *fd) {
+#ifdef STRADA_EPOLL_ENABLED
+    uint64_t v = 0;
+    ssize_t r = read((int)strada_to_int(fd), &v, sizeof(v));
+    return strada_new_int(r == sizeof(v) ? (int64_t)v : 0);
+#else
+    (void)fd; return strada_new_int(0);
+#endif
+}
+
+/* ---- non-blocking socket ops -------------------------------------
+ * Conventions (documented in docs/EVENT_LOOP.md):
+ *   try_recv  -> string data; "" = EOF; undef = would-block
+ *   try_send  -> bytes written (0 = would-block); -1 = error
+ *   try_accept-> client socket; undef = would-block/none
+ * try_recv consults the socket's buffered-read data first so it
+ * composes with the buffered readline/recv API. */
+StradaValue* strada_socket_try_recv(StradaValue *sock, StradaValue *maxlen) {
+    if (!sock || STRADA_IS_TAGGED_INT(sock) || sock->type != STRADA_SOCKET || !sock->value.sock)
+        return strada_new_undef();
+    StradaSocketBuffer *sb = sock->value.sock;
+    int64_t want = strada_to_int(maxlen);
+    if (want <= 0) return strada_new_str("");
+
+    /* Buffered bytes first */
+    if (sb->read_len > sb->read_pos) {
+        size_t avail = sb->read_len - sb->read_pos;
+        size_t take = (size_t)want < avail ? (size_t)want : avail;
+        StradaValue *s = strada_new_str_len(sb->read_buf + sb->read_pos, take);
+        sb->read_pos += take;
+        return s;
+    }
+
+    char *buf = malloc((size_t)want);
+    if (!buf) return strada_new_undef();
+    ssize_t n = recv(sb->fd, buf, (size_t)want, MSG_DONTWAIT);
+    if (n > 0) {
+        StradaValue *s = strada_new_str_len(buf, (size_t)n);
+        free(buf);
+        return s;
+    }
+    free(buf);
+    if (n == 0) return strada_new_str("");           /* EOF */
+    if (errno == EAGAIN || errno == EWOULDBLOCK) return strada_new_undef();
+    return strada_new_str("");                       /* hard error == EOF for readers */
+}
+
+StradaValue* strada_socket_try_send(StradaValue *sock, StradaValue *data) {
+    if (!sock || STRADA_IS_TAGGED_INT(sock) || sock->type != STRADA_SOCKET || !sock->value.sock)
+        return strada_new_int(-1);
+    size_t len = strada_str_len(data);
+    char *bytes = strada_to_str(data);
+    ssize_t n = send(sock->value.sock->fd, bytes, len, MSG_DONTWAIT | MSG_NOSIGNAL);
+    free(bytes);
+    if (n >= 0) return strada_new_int(n);
+    if (errno == EAGAIN || errno == EWOULDBLOCK) return strada_new_int(0);
+    return strada_new_int(-1);
+}
+
+StradaValue* strada_socket_try_accept(StradaValue *sock) {
+    if (!sock || STRADA_IS_TAGGED_INT(sock) || sock->type != STRADA_SOCKET || !sock->value.sock)
+        return strada_new_undef();
+    struct sockaddr_storage addr;
+    socklen_t alen = sizeof(addr);
+#ifdef STRADA_EPOLL_ENABLED
+    int cfd = accept4(sock->value.sock->fd, (struct sockaddr *)&addr, &alen, SOCK_CLOEXEC);
+#else
+    int cfd = accept(sock->value.sock->fd, (struct sockaddr *)&addr, &alen);
+#endif
+    if (cfd < 0) return strada_new_undef();
+    StradaSocketBuffer *buf = malloc(sizeof(StradaSocketBuffer));
+    buf->fd = cfd;
+    buf->read_pos = 0;
+    buf->read_len = 0;
+    buf->write_len = 0;
+    StradaValue *client = strada_value_alloc();
+    client->type = STRADA_SOCKET;
+    client->refcount = 1;
+    client->value.sock = buf;
+    return client;
+}
+
+/* ---- Phase 2: IO-wait futures (single poller thread) ------------- */
+#ifdef STRADA_EPOLL_ENABLED
+typedef struct StradaIoWait {
+    int fd;
+    uint32_t events;
+    int64_t deadline_ms;        /* monotonic ms; 0 = none */
+    StradaValue *future_sv;     /* poller-owned ref */
+    struct StradaIoWait *next;
+} StradaIoWait;
+
+static pthread_mutex_t io_poller_mu = PTHREAD_MUTEX_INITIALIZER;
+static StradaIoWait *io_poller_incoming = NULL;
+static int io_poller_epfd = -1;
+static int io_poller_evfd = -1;
+static pthread_t io_poller_tid;
+static int io_poller_started = 0;
+
+static int64_t ev_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void io_wait_complete(StradaIoWait *w, const char *what) {
+    StradaFuture *f = (StradaFuture *)w->future_sv->value.ptr;
+    pthread_mutex_lock(&f->mutex);
+    if (f->state == FUTURE_PENDING || f->state == FUTURE_RUNNING) {
+        f->result = strada_new_str(what);
+        f->state = FUTURE_COMPLETED;
+        pthread_cond_broadcast(&f->cond);
+    }
+    pthread_mutex_unlock(&f->mutex);
+    strada_decref(w->future_sv);
+    free(w);
+}
+
+static void *io_poller_main(void *arg) {
+    (void)arg;
+    cc_thread_register();
+    StradaIoWait *active = NULL;
+    for (;;) {
+        /* Pull in new requests */
+        pthread_mutex_lock(&io_poller_mu);
+        StradaIoWait *in = io_poller_incoming;
+        io_poller_incoming = NULL;
+        pthread_mutex_unlock(&io_poller_mu);
+        while (in) {
+            StradaIoWait *next = in->next;
+            struct epoll_event ev;
+            memset(&ev, 0, sizeof(ev));
+            ev.events = in->events | EPOLLONESHOT;
+            ev.data.fd = in->fd;
+            if (epoll_ctl(io_poller_epfd, EPOLL_CTL_ADD, in->fd, &ev) < 0 &&
+                (errno != EEXIST || epoll_ctl(io_poller_epfd, EPOLL_CTL_MOD, in->fd, &ev) < 0)) {
+                io_wait_complete(in, "error");
+            } else {
+                in->next = active;
+                active = in;
+            }
+            in = next;
+        }
+
+        /* Compute wait timeout from nearest deadline */
+        int timeout = -1;
+        int64_t now = ev_now_ms();
+        for (StradaIoWait *w = active; w; w = w->next) {
+            if (w->deadline_ms > 0) {
+                int64_t left = w->deadline_ms - now;
+                if (left < 0) left = 0;
+                if (timeout < 0 || left < timeout) timeout = (int)left;
+            }
+        }
+
+        struct epoll_event evs[64];
+        cc_blocking_enter();
+        int n = epoll_wait(io_poller_epfd, evs, 64, timeout);
+        cc_blocking_leave();
+
+        now = ev_now_ms();
+        for (int i = 0; i < n; i++) {
+            int fd = evs[i].data.fd;
+            if (fd == io_poller_evfd) {
+                uint64_t junk;
+                while (read(io_poller_evfd, &junk, sizeof(junk)) > 0) {}
+                /* re-arm the (oneshot) eventfd */
+                struct epoll_event ev;
+                memset(&ev, 0, sizeof(ev));
+                ev.events = EPOLLIN | EPOLLONESHOT;
+                ev.data.fd = io_poller_evfd;
+                epoll_ctl(io_poller_epfd, EPOLL_CTL_MOD, io_poller_evfd, &ev);
+                continue;
+            }
+            char ms[8];
+            ev_mask_to_str(evs[i].events, ms);
+            StradaIoWait **pp = &active;
+            while (*pp) {
+                if ((*pp)->fd == fd) {
+                    StradaIoWait *w = *pp;
+                    *pp = w->next;
+                    epoll_ctl(io_poller_epfd, EPOLL_CTL_DEL, fd, NULL);
+                    io_wait_complete(w, ms);
+                } else {
+                    pp = &(*pp)->next;
+                }
+            }
+        }
+
+        /* Expire deadlines */
+        StradaIoWait **pp = &active;
+        while (*pp) {
+            StradaIoWait *w = *pp;
+            if (w->deadline_ms > 0 && now >= w->deadline_ms) {
+                *pp = w->next;
+                epoll_ctl(io_poller_epfd, EPOLL_CTL_DEL, w->fd, NULL);
+                io_wait_complete(w, "timeout");
+            } else {
+                pp = &w->next;
+            }
+        }
+    }
+    return NULL;
+}
+
+static void io_poller_ensure(void) {
+    pthread_mutex_lock(&io_poller_mu);
+    if (!io_poller_started) {
+        io_poller_epfd = epoll_create1(EPOLL_CLOEXEC);
+        io_poller_evfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+        struct epoll_event ev;
+        memset(&ev, 0, sizeof(ev));
+        ev.events = EPOLLIN | EPOLLONESHOT;
+        ev.data.fd = io_poller_evfd;
+        epoll_ctl(io_poller_epfd, EPOLL_CTL_ADD, io_poller_evfd, &ev);
+        pthread_create(&io_poller_tid, NULL, io_poller_main, NULL);
+        pthread_detach(io_poller_tid);
+        io_poller_started = 1;
+    }
+    pthread_mutex_unlock(&io_poller_mu);
+}
+#endif /* STRADA_EPOLL_ENABLED */
+
+/* async::io_wait(fd_or_sock, "r"/"w"/"rw" [, timeout_ms]) -> future.
+ * The future resolves to the ready mask ("r"/"w"/...), "timeout", or
+ * "error". Completion happens on a dedicated poller thread; pool worker
+ * threads never block on socket readiness. */
+StradaValue* strada_io_wait_async(StradaValue *fd, StradaValue *mask, StradaValue *timeout_ms) {
+#ifdef STRADA_EPOLL_ENABLED
+    io_poller_ensure();
+
+    StradaFuture *f = malloc(sizeof(StradaFuture));
+    memset(f, 0, sizeof(*f));
+    f->state = FUTURE_PENDING;
+    pthread_mutex_init(&f->mutex, NULL);
+    pthread_cond_init(&f->cond, NULL);
+    StradaValue *sv = strada_value_alloc();
+    sv->type = STRADA_FUTURE;
+    sv->refcount = 2;                     /* caller + poller */
+    sv->value.ptr = f;
+
+    StradaIoWait *w = malloc(sizeof(StradaIoWait));
+    char *ms = strada_to_str(mask);
+    w->fd = ev_resolve_fd(fd);
+    w->events = ev_mask_from_str(ms);
+    free(ms);
+    int64_t t = strada_to_int(timeout_ms);
+    w->deadline_ms = t > 0 ? ev_now_ms() + t : 0;
+    w->future_sv = sv;
+
+    pthread_mutex_lock(&io_poller_mu);
+    w->next = io_poller_incoming;
+    io_poller_incoming = w;
+    pthread_mutex_unlock(&io_poller_mu);
+
+    uint64_t one = 1;
+    if (write(io_poller_evfd, &one, sizeof(one)) != sizeof(one)) { /* poller wakes on next tick */ }
+    return sv;
+#else
+    (void)fd; (void)mask; (void)timeout_ms;
+    return strada_new_undef();
+#endif
+}
+
+/* ---- Phase 3: stackful coroutines (green tasks) -------------------
+ * Minimal primitives; ALL scheduling policy lives in lib/Async/Loop.strada.
+ * Handles travel as integer addresses (same convention as c:: pointers).
+ * v1 restriction: suspending while inside try{} is refused (yield returns
+ * -1 and the library throws) — the try/cleanup stacks are per-OS-thread.
+ * Coroutines must be resumed only on the thread that created them. */
+#define STRADA_CORO_STACK_SIZE (256 * 1024)
+
+typedef struct StradaCoro {
+    ucontext_t ctx;
+    ucontext_t ret_ctx;
+    char *stack;
+    StradaValue *closure;
+    StradaValue *result;
+    int state;                  /* 0=ready 1=running 2=suspended 3=done */
+    int wait_fd;                /* -1 = timer-only */
+    char wait_mask[4];
+    int64_t wait_timeout_ms;
+    int entry_try_depth;
+    /* Per-context snapshots of per-OS-thread runtime stacks. Generated code
+     * captures ABSOLUTE marks into the pending-cleanup stack and pushes
+     * trace frames onto the call stack; interleaving two logical execution
+     * contexts on one TLS stack corrupts both (the watch-entry leak: a
+     * coro-side drain_to() ran against a count the host had since moved).
+     * On every switch the full active segment is swapped so each context
+     * always sees its own stack, based at zero for coroutines. */
+    StradaValue **cleanup_save;
+    int cleanup_saved;
+    int cleanup_save_cap;
+    StradaStackFrame *frames_save;
+    int frames_saved;
+    int frames_save_cap;
+} StradaCoro;
+
+/* Swap helpers: stash the live TLS segment and install another context's. */
+static void coro_ctx_install(StradaCoro *c) {
+    memcpy(strada_pending_cleanup, c->cleanup_save,
+           (size_t)c->cleanup_saved * sizeof(StradaValue *));
+    strada_pending_cleanup_count = c->cleanup_saved;
+    memcpy(strada_call_stack, c->frames_save,
+           (size_t)c->frames_saved * sizeof(StradaStackFrame));
+    strada_call_depth = c->frames_saved;
+}
+
+static void coro_ctx_stash(StradaCoro *c) {
+    if (strada_pending_cleanup_count > c->cleanup_save_cap) {
+        c->cleanup_save_cap = strada_pending_cleanup_count;
+        c->cleanup_save = realloc(c->cleanup_save,
+                                  (size_t)c->cleanup_save_cap * sizeof(StradaValue *));
+    }
+    memcpy(c->cleanup_save, strada_pending_cleanup,
+           (size_t)strada_pending_cleanup_count * sizeof(StradaValue *));
+    c->cleanup_saved = strada_pending_cleanup_count;
+    if (strada_call_depth > c->frames_save_cap) {
+        c->frames_save_cap = strada_call_depth;
+        c->frames_save = realloc(c->frames_save,
+                                 (size_t)c->frames_save_cap * sizeof(StradaStackFrame));
+    }
+    memcpy(c->frames_save, strada_call_stack,
+           (size_t)strada_call_depth * sizeof(StradaStackFrame));
+    c->frames_saved = strada_call_depth;
+}
+
+static __thread StradaCoro *strada_current_coro = NULL;
+
+static void strada_coro_tramp(void) {
+    StradaCoro *c = strada_current_coro;
+    c->result = strada_closure_call(c->closure, 0);
+    c->state = 3;
+    /* uc_link returns control to the resumer */
+}
+
+StradaValue* strada_coro_create(StradaValue *closure) {
+    StradaCoro *c = calloc(1, sizeof(StradaCoro));
+    c->cleanup_save_cap = 16;
+    c->cleanup_save = malloc(16 * sizeof(StradaValue *));
+    c->frames_save_cap = 16;
+    c->frames_save = malloc(16 * sizeof(StradaStackFrame));
+    c->stack = malloc(STRADA_CORO_STACK_SIZE);
+    c->closure = closure;
+    strada_incref(closure);
+    c->state = 0;
+    c->wait_fd = -1;
+    getcontext(&c->ctx);
+    c->ctx.uc_stack.ss_sp = c->stack;
+    c->ctx.uc_stack.ss_size = STRADA_CORO_STACK_SIZE;
+    c->ctx.uc_link = &c->ret_ctx;
+    makecontext(&c->ctx, strada_coro_tramp, 0);
+    return strada_new_int((int64_t)(intptr_t)c);
+}
+
+/* Resume; returns the coro state afterward (2=suspended, 3=done) */
+StradaValue* strada_coro_resume(StradaValue *handle) {
+    StradaCoro *c = (StradaCoro *)(intptr_t)strada_to_int(handle);
+    if (!c || c->state == 3) return strada_new_int(3);
+    StradaCoro *prev = strada_current_coro;
+    strada_current_coro = c;
+    c->state = 1;
+    c->entry_try_depth = strada_try_depth;
+
+    /* Stash the host's cleanup/call stacks, install the coro's (nested
+     * resumes stash into stack-locals, so resume-inside-coro is safe). */
+    int host_cc = strada_pending_cleanup_count;
+    StradaValue **host_cstash = host_cc > 0 ? malloc((size_t)host_cc * sizeof(StradaValue *)) : NULL;
+    if (host_cstash) memcpy(host_cstash, strada_pending_cleanup, (size_t)host_cc * sizeof(StradaValue *));
+    int host_cd = strada_call_depth;
+    StradaStackFrame *host_fstash = host_cd > 0 ? malloc((size_t)host_cd * sizeof(StradaStackFrame)) : NULL;
+    if (host_fstash) memcpy(host_fstash, strada_call_stack, (size_t)host_cd * sizeof(StradaStackFrame));
+    coro_ctx_install(c);
+
+    swapcontext(&c->ret_ctx, &c->ctx);
+
+    if (c->state == 3) {
+        /* finished: release anything the task left pending */
+        strada_cleanup_drain();
+    } else {
+        coro_ctx_stash(c);
+    }
+    if (host_cstash) memcpy(strada_pending_cleanup, host_cstash, (size_t)host_cc * sizeof(StradaValue *));
+    strada_pending_cleanup_count = host_cc;
+    free(host_cstash);
+    if (host_fstash) memcpy(strada_call_stack, host_fstash, (size_t)host_cd * sizeof(StradaStackFrame));
+    strada_call_depth = host_cd;
+    free(host_fstash);
+
+    strada_current_coro = prev;
+    return strada_new_int(c->state);
+}
+
+/* Called from inside a coroutine: park until fd readiness/timeout.
+ * Returns 1 after being resumed; 0 when not inside a coroutine (callers
+ * fall back to blocking I/O); -1 when suspension is illegal here. */
+StradaValue* strada_coro_yield_io(StradaValue *fd, StradaValue *mask, StradaValue *timeout_ms) {
+    StradaCoro *c = strada_current_coro;
+    if (!c || c->state != 1) return strada_new_int(0);
+    if (strada_try_depth != c->entry_try_depth) return strada_new_int(-1);
+    c->wait_fd = fd ? ev_resolve_fd(fd) : -1;
+    char *ms = mask ? strada_to_str(mask) : NULL;
+    snprintf(c->wait_mask, sizeof(c->wait_mask), "%s", ms ? ms : "r");
+    if (ms) free(ms);
+    c->wait_timeout_ms = strada_to_int(timeout_ms);
+    c->state = 2;
+    swapcontext(&c->ctx, &c->ret_ctx);
+    /* resumed */
+    c->state = 1;
+    c->entry_try_depth = strada_try_depth;
+    return strada_new_int(1);
+}
+
+StradaValue* strada_coro_state(StradaValue *handle) {
+    StradaCoro *c = (StradaCoro *)(intptr_t)strada_to_int(handle);
+    return strada_new_int(c ? c->state : 3);
+}
+
+StradaValue* strada_coro_wait_fd(StradaValue *handle) {
+    StradaCoro *c = (StradaCoro *)(intptr_t)strada_to_int(handle);
+    return strada_new_int(c ? c->wait_fd : -1);
+}
+
+StradaValue* strada_coro_wait_mask(StradaValue *handle) {
+    StradaCoro *c = (StradaCoro *)(intptr_t)strada_to_int(handle);
+    return strada_new_str(c ? c->wait_mask : "");
+}
+
+StradaValue* strada_coro_wait_timeout(StradaValue *handle) {
+    StradaCoro *c = (StradaCoro *)(intptr_t)strada_to_int(handle);
+    return strada_new_int(c ? c->wait_timeout_ms : 0);
+}
+
+/* Transfer the coroutine's return value (once) */
+StradaValue* strada_coro_result(StradaValue *handle) {
+    StradaCoro *c = (StradaCoro *)(intptr_t)strada_to_int(handle);
+    if (!c || !c->result) return strada_new_undef();
+    StradaValue *r = c->result;
+    c->result = NULL;
+    return r;
+}
+
+StradaValue* strada_coro_free(StradaValue *handle) {
+    StradaCoro *c = (StradaCoro *)(intptr_t)strada_to_int(handle);
+    if (c) {
+        if (c->closure) strada_decref(c->closure);
+        if (c->result) strada_decref(c->result);
+        free(c->cleanup_save);
+        free(c->frames_save);
+        free(c->stack);
+        free(c);
+    }
+    return strada_new_int(0);
+}
+
+/* Monotonic clock for the loop's timer heap */
+StradaValue* strada_mono_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return strada_new_int((int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+}

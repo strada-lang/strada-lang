@@ -636,11 +636,21 @@ double strada_to_num_impl(StradaValue *sv);
  * folds the tagged-int branch into the surrounding code and lets the
  * impl call disappear when the surrounding code already proves the
  * pointer is non-NULL / not a tagged int. */
+#ifdef STRADA_RC_TRACE
+extern StradaValue *strada_trace_sv;
+void strada_rc_trace(StradaValue *sv, const char *op, void *ra);
+#define STRADA_RC_HOOK(sv, op) do { if ((sv) == strada_trace_sv && strada_trace_sv) strada_rc_trace((sv), (op), __builtin_return_address(0)); } while (0)
+#else
+#define STRADA_RC_HOOK(sv, op) do {} while (0)
+#endif
+
 static inline __attribute__((always_inline)) void strada_incref(StradaValue *sv) {
+    STRADA_RC_HOOK(sv, "incref");
     if (!sv || STRADA_IS_TAGGED_INT(sv)) return;
     strada_incref_impl(sv);
 }
 static inline __attribute__((always_inline)) void strada_decref(StradaValue *sv) {
+    STRADA_RC_HOOK(sv, "decref");
     if (!sv || STRADA_IS_TAGGED_INT(sv)) return;
     strada_decref_impl(sv);
 }
@@ -2216,5 +2226,31 @@ void strada_hv_compound(StradaValue *sv, const char *key, StradaValue *rhs, int 
 void strada_hv_compound_sv(StradaValue *sv, StradaValue *key_sv, StradaValue *rhs, int op);
 /* Single-pass array-element compound assignment ($a[i] op= rhs); rhs borrowed. */
 void strada_array_compound(StradaValue *arr_sv, int64_t idx, StradaValue *rhs, int op);
+
+
+/* ---- Event loop support (Async::Loop): epoll/eventfd primitives,
+ * non-blocking socket ops, IO-wait futures, stackful coroutines ---- */
+StradaValue* strada_epoll_create(void);
+StradaValue* strada_epoll_add(StradaValue *epfd, StradaValue *fd, StradaValue *mask);
+StradaValue* strada_epoll_mod(StradaValue *epfd, StradaValue *fd, StradaValue *mask);
+StradaValue* strada_epoll_del(StradaValue *epfd, StradaValue *fd);
+StradaValue* strada_epoll_wait(StradaValue *epfd, StradaValue *timeout_ms);
+StradaValue* strada_eventfd_new(void);
+StradaValue* strada_eventfd_signal(StradaValue *fd);
+StradaValue* strada_eventfd_drain(StradaValue *fd);
+StradaValue* strada_socket_try_recv(StradaValue *sock, StradaValue *maxlen);
+StradaValue* strada_socket_try_send(StradaValue *sock, StradaValue *data);
+StradaValue* strada_socket_try_accept(StradaValue *sock);
+StradaValue* strada_io_wait_async(StradaValue *fd, StradaValue *mask, StradaValue *timeout_ms);
+StradaValue* strada_coro_create(StradaValue *closure);
+StradaValue* strada_coro_resume(StradaValue *handle);
+StradaValue* strada_coro_yield_io(StradaValue *fd, StradaValue *mask, StradaValue *timeout_ms);
+StradaValue* strada_coro_state(StradaValue *handle);
+StradaValue* strada_coro_wait_fd(StradaValue *handle);
+StradaValue* strada_coro_wait_mask(StradaValue *handle);
+StradaValue* strada_coro_wait_timeout(StradaValue *handle);
+StradaValue* strada_coro_result(StradaValue *handle);
+StradaValue* strada_coro_free(StradaValue *handle);
+StradaValue* strada_mono_ms(void);
 
 #endif /* STRADA_RUNTIME_H */

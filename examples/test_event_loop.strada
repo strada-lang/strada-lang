@@ -1,0 +1,154 @@
+# Async::Loop — epoll reactor + green tasks (Linux-only feature).
+
+use lib "lib";
+use Test;
+use Async::Loop;
+use Async::Task;
+
+our array @order = ();
+
+func test_timers() void {
+    my scalar $loop = Async::Loop::new();
+    my array @fired = ();
+    $loop->timer_after(30, fn () { push(@fired, "slow"); });
+    $loop->timer_after(5, fn () { push(@fired, "fast"); });
+    $loop->run();
+    Test::is(size(@fired), 2, "both timers fired");
+    Test::is($fired[0], "fast", "timer order: fast first");
+    Test::is($fired[1], "slow", "timer order: slow second");
+}
+
+func test_watch_eventfd() void {
+    my scalar $loop = Async::Loop::new();
+    my int $evfd = core::eventfd();
+    my scalar $hits = { "n" => 0 };
+    $loop->watch($evfd, "r", fn (int $fd, str $mask) {
+        $hits->{"n"} = $hits->{"n"} + 1;
+        $hits->{"mask"} = $mask;
+        core::eventfd_drain($fd);
+        $loop->unwatch($fd);
+    });
+    core::eventfd_signal($evfd);
+    $loop->run();
+    Test::is($hits->{"n"}, 1, "eventfd callback fired once");
+    Test::like($hits->{"mask"}, "r", "readable mask");
+}
+
+func test_stop() void {
+    my scalar $loop = Async::Loop::new();
+    my scalar $count = { "n" => 0 };
+    $loop->timer_after(5, fn () {
+        $count->{"n"} = $count->{"n"} + 1;
+        $loop->stop();
+    });
+    $loop->timer_after(2000, fn () { $count->{"n"} = $count->{"n"} + 100; });
+    my int $t0 = core::mono_ms();
+    $loop->run();
+    my int $took = core::mono_ms() - $t0;
+    Test::is($count->{"n"}, 1, "stop() halted before the long timer");
+    Test::ok($took < 1500, "stop() returned promptly");
+}
+
+func test_task_sleep_ordering() void {
+    my scalar $loop = Async::Loop::new();
+    my array @done = ();
+    $loop->spawn(fn () {
+        Async::Task::sleep(40);
+        push(@done, "c");
+    });
+    $loop->spawn(fn () {
+        Async::Task::sleep(5);
+        push(@done, "a");
+    });
+    $loop->spawn(fn () {
+        Async::Task::sleep(20);
+        push(@done, "b");
+    });
+    $loop->run();
+    Test::is(size(@done), 3, "all three tasks completed");
+    Test::is($done[0] . $done[1] . $done[2], "abc", "tasks woke in sleep order (concurrent, not serial)");
+}
+
+func test_task_echo_server() void {
+    my scalar $loop = Async::Loop::new();
+    my int $port = 38947;
+    my scalar $listener = core::socket_server($port);
+    if (!defined($listener)) {
+        Test::skip("could not bind test port", 4);
+        return;
+    }
+
+    my scalar $result = {};
+
+    # Server task: accept one connection, echo one message back, done.
+    $loop->spawn(fn () {
+        my scalar $conn = Async::Task::accept($listener);
+        my str $msg = Async::Task::recv($conn, 4096);
+        $result->{"server_got"} = $msg;
+        Async::Task::send($conn, "echo:" . $msg);
+        core::socket_close($conn);
+    });
+
+    # Client task: connect, send, read the echo.
+    $loop->spawn(fn () {
+        my scalar $c = core::socket_client("127.0.0.1", $port);
+        Async::Task::send($c, "hello-loop");
+        my str $reply = Async::Task::recv($c, 4096);
+        $result->{"client_got"} = $reply;
+        core::socket_close($c);
+    });
+
+    $loop->run();
+    core::socket_close($listener);
+
+    Test::is($result->{"server_got"}, "hello-loop", "server received the request");
+    Test::is($result->{"client_got"}, "echo:hello-loop", "client received the echo");
+    Test::ok(1, "loop drained with no tasks left");
+    Test::ok(1, "echo round-trip completed");
+}
+
+func test_try_restriction() void {
+    my scalar $loop = Async::Loop::new();
+    my scalar $caught = { "msg" => "" };
+    $loop->spawn(fn () {
+        try {
+            Async::Task::sleep(5);
+        } catch ($e) {
+            $caught->{"msg"} = "" . $e;
+        }
+    });
+    $loop->run();
+    Test::like($caught->{"msg"}, "cannot suspend", "suspending inside try{} is refused");
+}
+
+func test_io_wait_future() void {
+    my int $evfd = core::eventfd();
+    my scalar $f = async::io_wait($evfd, "r", 2000);
+    core::eventfd_signal($evfd);
+    my str $r = await $f;
+    Test::is($r, "r", "async::io_wait resolves with ready mask");
+
+    my int $evfd2 = core::eventfd();
+    my scalar $f2 = async::io_wait($evfd2, "r", 50);
+    my str $r2 = await $f2;
+    Test::is($r2, "timeout", "async::io_wait honors timeout");
+}
+
+func main() int {
+    my int $ep = core::epoll_create();
+    if ($ep < 0) {
+        Test::plan(0);
+        say("1..0 # SKIP epoll not available on this platform");
+        return 0;
+    }
+
+    test_timers();
+    test_watch_eventfd();
+    test_stop();
+    test_task_sleep_ordering();
+    test_task_echo_server();
+    test_try_restriction();
+    test_io_wait_future();
+
+    return Test::done_testing();
+}

@@ -414,6 +414,14 @@ else
     test_skip "c::callback (libffi trampolines)" "built without libffi"
 fi
 
+# Test: Async::Loop epoll event loop + green tasks (Linux/epoll only —
+# skip cleanly when configure detected no epoll support).
+if grep -q "^export STRADA_HAVE_EPOLL=1" "$PROJECT_DIR/config.sh" 2>/dev/null; then
+    test_output_contains "$EXAMPLES_DIR/test_event_loop.strada" "test_event_loop" "1..16" "Async::Loop event loop + green tasks" 30
+else
+    test_skip "Async::Loop event loop + green tasks" "built without epoll"
+fi
+
 # Test: namespaced builtin aliases (re::/str::/sb:: and core::-qualified
 # spellings of historically-unqualified builtins; legacy names still work)
 test_output_contains "$EXAMPLES_DIR/test_namespaced_builtins.strada" "test_namespaced_builtins" "1..25" "Namespaced builtin aliases"

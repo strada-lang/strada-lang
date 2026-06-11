@@ -67,8 +67,13 @@ def main():
     harvest(open("compiler/CodeGenBuiltins.strada").read())
     protos = uniform_protos(open("runtime/strada_runtime.h").read())
 
+    # coroutines need VM-native closures (a closure cannot cross the
+    # vm_to_sv bridge), so they stay compiled-only like thread::/async::
+    EXCLUDE_PREFIXES = ("sys::coro_",)
+
     ents = sorted((n, c, a) for n, (c, a) in ENTRIES.items()
                   if (n.startswith("sys::") or n.startswith("math::"))
+                  and not n.startswith(EXCLUDE_PREFIXES)
                   and a <= 4 and protos.get(c) == a)
 
     out = []

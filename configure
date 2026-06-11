@@ -23,6 +23,8 @@ HAVE_POSTGRES=0
 HAVE_CRYPT=0
 HAVE_READLINE=0
 HAVE_LIBFFI=0
+HAVE_EPOLL=0
+SKIP_EPOLL=0
 FFI_CFLAGS=""
 FFI_LIBS=""
 HAVE_SSL=0
@@ -97,6 +99,12 @@ while [ $# -gt 0 ]; do
         --without-arena)
             HAVE_ARENA=0
             ;;
+        --without-epoll)
+            SKIP_EPOLL=1
+            ;;
+        --with-epoll)
+            HAVE_EPOLL=1
+            ;;
         --without-libffi)
             SKIP_LIBFFI=1
             ;;
@@ -136,6 +144,7 @@ while [ $# -gt 0 ]; do
             echo "  --static-pcre2=PATH Same, with explicit path to libpcre2-8.a"
             echo "  --with-cycle-gc     Enable the cycle garbage collector (default)"
             echo "  --without-cycle-gc  Disable the cycle GC (manual core::weaken only)"
+            echo "  --without-epoll     Disable the epoll event loop (Async::Loop)"
             echo "  --with-arena        Enable the request arena allocator (default)"
             echo "  --without-arena     Disable the request arena allocator"
             echo "  --without-libffi    Disable c::callback trampolines (drops the -lffi link dep)"
@@ -329,6 +338,27 @@ else
     echo -e "${RED}no${NC}"
 fi
 
+printf "  Checking for epoll (event loop)... "
+if [ "$SKIP_EPOLL" = "1" ]; then
+    HAVE_EPOLL=0
+    echo -e "${YELLOW}disabled${NC}"
+else
+    ep_src=$(mktemp).c
+    cat > "$ep_src" << 'EPEOF'
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
+int main() { return epoll_create1(0) >= 0 ? 0 : 0; }
+EPEOF
+    if $CC -o "${ep_src%.c}" "$ep_src" 2>/dev/null; then
+        HAVE_EPOLL=1
+        echo -e "${GREEN}yes${NC}"
+    else
+        HAVE_EPOLL=0
+        echo -e "${RED}no${NC} (Async::Loop unavailable; Linux-only)"
+    fi
+    rm -f "$ep_src" "${ep_src%.c}"
+fi
+
 # Check readline
 printf "  Checking for readline... "
 if [ "$HAS_PKGCONFIG" = "1" ] && check_pkg readline; then
@@ -516,6 +546,7 @@ HAVE_CRYPT = $HAVE_CRYPT
 HAVE_CRYPT_R = $HAVE_CRYPT_R
 HAVE_READLINE = $HAVE_READLINE
 HAVE_LIBFFI = $HAVE_LIBFFI
+HAVE_EPOLL = $HAVE_EPOLL
 HAVE_SSL = $HAVE_SSL
 HAVE_ZLIB = $HAVE_ZLIB
 HAVE_LIBUSB = $HAVE_LIBUSB
@@ -605,6 +636,7 @@ export STRADA_HAVE_CRYPT=$HAVE_CRYPT
 export STRADA_HAVE_CRYPT_R=$HAVE_CRYPT_R
 export STRADA_HAVE_READLINE=$HAVE_READLINE
 export STRADA_HAVE_LIBFFI=$HAVE_LIBFFI
+export STRADA_HAVE_EPOLL=$HAVE_EPOLL
 export STRADA_HAVE_SSL=$HAVE_SSL
 export STRADA_HAVE_ZLIB=$HAVE_ZLIB
 export STRADA_HAVE_LIBUSB=$HAVE_LIBUSB
