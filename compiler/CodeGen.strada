@@ -3311,6 +3311,7 @@ func needs_temp_cleanup(scalar $cg, scalar $expr) int {
             $name eq "sys::coro_wait_timeout" || $name eq "sys::coro_result" ||
             $name eq "sys::coro_free" || $name eq "sys::mono_ms" ||
             $name eq "sys::coro_error" || $name eq "sys::socket_try_connect" ||
+            $name eq "async::resolve" ||
             $name eq "sys::socket_connect_check" || $name eq "sys::socket_try_readline" ||
             $name eq "sys::wantarray" || $name eq "sys::wantscalar" || $name eq "sys::wanthash" ||
             $name eq "utf8::is_utf8" || $name eq "utf8::valid" ||

@@ -26811,24 +26811,250 @@ void strada_rc_trace(StradaValue *sv, const char *op, void *ra) {
 #include <netinet/tcp.h>
 #include <ucontext.h>
 
-/* ---- mask helpers: "r", "w", "rw" <-> EPOLLIN/EPOLLOUT ---- */
-#ifdef STRADA_EPOLL_ENABLED
-static uint32_t ev_mask_from_str(const char *s) {
-    uint32_t ev = 0;
+/* ---- Backend abstraction (evb_*) -----------------------------------
+ * Two readiness backends behind one internal API:
+ *   - epoll (Linux; STRADA_EPOLL_ENABLED)
+ *   - poll(2) fallback (any POSIX system) — a table of pollsets
+ * Both the user-facing core::epoll_* builtins and the io_wait poller sit
+ * on evb_*, so every platform gets a WORKING Async::Loop; epoll is the
+ * fast path. (A kqueue backend can be added here later.)
+ * Masks are "r"/"w" strings end to end. */
+
+#define EVB_R 1
+#define EVB_W 2
+#define EVB_E 4
+
+static int evb_mask_from_str(const char *s) {
+    int m = 0;
     if (s) {
-        if (strchr(s, 'r')) ev |= EPOLLIN;
-        if (strchr(s, 'w')) ev |= EPOLLOUT;
+        if (strchr(s, 'r')) m |= EVB_R;
+        if (strchr(s, 'w')) m |= EVB_W;
     }
-    return ev;
+    return m;
 }
-static void ev_mask_to_str(uint32_t ev, char *out) {
+static void evb_mask_to_str(int m, char *out) {
     int i = 0;
-    if (ev & (EPOLLIN | EPOLLHUP)) out[i++] = 'r';
-    if (ev & EPOLLOUT) out[i++] = 'w';
-    if (ev & EPOLLERR) out[i++] = 'e';
+    if (m & EVB_R) out[i++] = 'r';
+    if (m & EVB_W) out[i++] = 'w';
+    if (m & EVB_E) out[i++] = 'e';
     out[i] = 0;
 }
+
+typedef struct { int fd; int mask; } EvbEvent;
+
+#ifdef STRADA_EPOLL_ENABLED
+/* ----- epoll backend ----- */
+
+static int evb_create(void) { return epoll_create1(EPOLL_CLOEXEC); }
+
+static uint32_t evb_to_ep(int m) {
+    uint32_t ev = 0;
+    if (m & EVB_R) ev |= EPOLLIN;
+    if (m & EVB_W) ev |= EPOLLOUT;
+    return ev;
+}
+
+static int evb_ctl(int set, int op_add, int fd, int mask) {
+    struct epoll_event ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.events = evb_to_ep(mask);
+    ev.data.fd = fd;
+    int rc = epoll_ctl(set, op_add ? EPOLL_CTL_ADD : EPOLL_CTL_MOD, fd, &ev);
+    if (rc < 0 && op_add && errno == EEXIST)
+        rc = epoll_ctl(set, EPOLL_CTL_MOD, fd, &ev);
+    return rc;
+}
+
+static int evb_del(int set, int fd) {
+    struct epoll_event ev;
+    memset(&ev, 0, sizeof(ev));
+    return epoll_ctl(set, EPOLL_CTL_DEL, fd, &ev);
+}
+
+static int evb_wait(int set, EvbEvent *out, int max, int timeout_ms) {
+    struct epoll_event evs[64];
+    if (max > 64) max = 64;
+    cc_blocking_enter();
+    int n = epoll_wait(set, evs, max, timeout_ms);
+    cc_blocking_leave();
+    for (int i = 0; i < n; i++) {
+        out[i].fd = evs[i].data.fd;
+        int m = 0;
+        if (evs[i].events & (EPOLLIN | EPOLLHUP)) m |= EVB_R;
+        if (evs[i].events & EPOLLOUT) m |= EVB_W;
+        if (evs[i].events & EPOLLERR) m |= EVB_E;
+        out[i].mask = m;
+    }
+    return n;
+}
+
+static void evb_close(int set) { close(set); }
+
+#else  /* ----- poll(2) fallback backend (any POSIX) ----- */
+
+#include <poll.h>
+
+typedef struct {
+    struct pollfd *fds;
+    int n;
+    int cap;
+    int used;            /* slot in use */
+} EvbPollset;
+
+#define EVB_MAX_SETS 64
+static EvbPollset evb_sets[EVB_MAX_SETS];
+static pthread_mutex_t evb_sets_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static int evb_create(void) {
+    pthread_mutex_lock(&evb_sets_mu);
+    for (int i = 0; i < EVB_MAX_SETS; i++) {
+        if (!evb_sets[i].used) {
+            evb_sets[i].used = 1;
+            evb_sets[i].n = 0;
+            evb_sets[i].cap = 16;
+            evb_sets[i].fds = malloc(16 * sizeof(struct pollfd));
+            pthread_mutex_unlock(&evb_sets_mu);
+            return i;
+        }
+    }
+    pthread_mutex_unlock(&evb_sets_mu);
+    return -1;
+}
+
+static short evb_to_poll(int m) {
+    short ev = 0;
+    if (m & EVB_R) ev |= POLLIN;
+    if (m & EVB_W) ev |= POLLOUT;
+    return ev;
+}
+
+static int evb_ctl(int set, int op_add, int fd, int mask) {
+    (void)op_add;
+    if (set < 0 || set >= EVB_MAX_SETS || !evb_sets[set].used) return -1;
+    EvbPollset *ps = &evb_sets[set];
+    for (int i = 0; i < ps->n; i++) {
+        if (ps->fds[i].fd == fd) {           /* mod */
+            ps->fds[i].events = evb_to_poll(mask);
+            return 0;
+        }
+    }
+    if (ps->n >= ps->cap) {                  /* add */
+        ps->cap *= 2;
+        ps->fds = realloc(ps->fds, (size_t)ps->cap * sizeof(struct pollfd));
+    }
+    ps->fds[ps->n].fd = fd;
+    ps->fds[ps->n].events = evb_to_poll(mask);
+    ps->fds[ps->n].revents = 0;
+    ps->n++;
+    return 0;
+}
+
+static int evb_del(int set, int fd) {
+    if (set < 0 || set >= EVB_MAX_SETS || !evb_sets[set].used) return -1;
+    EvbPollset *ps = &evb_sets[set];
+    for (int i = 0; i < ps->n; i++) {
+        if (ps->fds[i].fd == fd) {
+            ps->fds[i] = ps->fds[ps->n - 1];
+            ps->n--;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static int evb_wait(int set, EvbEvent *out, int max, int timeout_ms) {
+    if (set < 0 || set >= EVB_MAX_SETS || !evb_sets[set].used) return -1;
+    EvbPollset *ps = &evb_sets[set];
+    cc_blocking_enter();
+    int rc = poll(ps->fds, (nfds_t)ps->n, timeout_ms);
+    cc_blocking_leave();
+    if (rc <= 0) return rc;
+    int n = 0;
+    for (int i = 0; i < ps->n && n < max; i++) {
+        short re = ps->fds[i].revents;
+        if (!re) continue;
+        int m = 0;
+        if (re & (POLLIN | POLLHUP)) m |= EVB_R;
+        if (re & POLLOUT) m |= EVB_W;
+        if (re & (POLLERR | POLLNVAL)) m |= EVB_E;
+        out[n].fd = ps->fds[i].fd;
+        out[n].mask = m;
+        n++;
+    }
+    return n;
+}
+
+static void evb_close(int set) {
+    if (set < 0 || set >= EVB_MAX_SETS || !evb_sets[set].used) return;
+    free(evb_sets[set].fds);
+    evb_sets[set].fds = NULL;
+    evb_sets[set].used = 0;
+}
+
+#endif /* backend select */
+
+/* ---- wakeup channel: eventfd on Linux, pipe elsewhere --------------
+ * User-facing handle is the READABLE fd; a small table maps it to the
+ * write end for signal(). */
+typedef struct { int rfd; int wfd; } EvbWake;
+#define EVB_MAX_WAKES 128
+static EvbWake evb_wakes[EVB_MAX_WAKES];
+static int evb_wake_count = 0;
+static pthread_mutex_t evb_wakes_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static int evb_wake_new(void) {
+    int rfd = -1, wfd = -1;
+#ifdef STRADA_EPOLL_ENABLED
+    rfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    wfd = rfd;
+#else
+    int p[2];
+    if (pipe(p) == 0) {
+        int fl = fcntl(p[0], F_GETFL, 0);
+        fcntl(p[0], F_SETFL, fl | O_NONBLOCK);
+        fl = fcntl(p[1], F_GETFL, 0);
+        fcntl(p[1], F_SETFL, fl | O_NONBLOCK);
+        rfd = p[0];
+        wfd = p[1];
+    }
 #endif
+    if (rfd >= 0) {
+        pthread_mutex_lock(&evb_wakes_mu);
+        if (evb_wake_count < EVB_MAX_WAKES) {
+            evb_wakes[evb_wake_count].rfd = rfd;
+            evb_wakes[evb_wake_count].wfd = wfd;
+            evb_wake_count++;
+        }
+        pthread_mutex_unlock(&evb_wakes_mu);
+    }
+    return rfd;
+}
+
+static int evb_wake_wfd(int rfd) {
+    pthread_mutex_lock(&evb_wakes_mu);
+    for (int i = 0; i < evb_wake_count; i++) {
+        if (evb_wakes[i].rfd == rfd) {
+            int w = evb_wakes[i].wfd;
+            pthread_mutex_unlock(&evb_wakes_mu);
+            return w;
+        }
+    }
+    pthread_mutex_unlock(&evb_wakes_mu);
+    return rfd;   /* unknown: assume eventfd-style dual-direction fd */
+}
+
+static int evb_wake_signal(int rfd) {
+    uint64_t one = 1;
+    return write(evb_wake_wfd(rfd), &one, sizeof(one)) > 0 ? 0 : -1;
+}
+
+static int64_t evb_wake_drain(int rfd) {
+    uint64_t total = 0;
+    uint64_t v;
+    ssize_t n;
+    while ((n = read(rfd, &v, sizeof(v))) > 0) total += 1;
+    return (int64_t)total;
+}
 
 /* Resolve a SOCKET sv or integer fd sv to a raw fd (-1 on failure) */
 static int ev_resolve_fd(StradaValue *v) {
@@ -26838,110 +27064,60 @@ static int ev_resolve_fd(StradaValue *v) {
     return (int)strada_to_int(v);
 }
 
-StradaValue* strada_epoll_create(void) {
-#ifdef STRADA_EPOLL_ENABLED
-    return strada_new_int(epoll_create1(EPOLL_CLOEXEC));
-#else
-    return strada_new_int(-1);
-#endif
-}
+/* ---- user-facing builtins (core::epoll_* — the historical names; on
+ * non-epoll systems they run on the poll fallback transparently) ---- */
 
-#ifdef STRADA_EPOLL_ENABLED
-static StradaValue* ev_epoll_ctl(StradaValue *epfd, int op, StradaValue *fd, StradaValue *mask) {
-    char mb[8];
-    char *ms = NULL;
-    uint32_t events = 0;
-    if (mask) { ms = strada_to_str(mask); events = ev_mask_from_str(ms); free(ms); }
-    (void)mb;
-    struct epoll_event ev;
-    memset(&ev, 0, sizeof(ev));
-    int rfd = ev_resolve_fd(fd);
-    ev.events = events;
-    ev.data.fd = rfd;
-    return strada_new_int(epoll_ctl((int)strada_to_int(epfd), op, rfd, &ev));
+StradaValue* strada_epoll_create(void) {
+    return strada_new_int(evb_create());
 }
-#endif
 
 StradaValue* strada_epoll_add(StradaValue *epfd, StradaValue *fd, StradaValue *mask) {
-#ifdef STRADA_EPOLL_ENABLED
-    return ev_epoll_ctl(epfd, EPOLL_CTL_ADD, fd, mask);
-#else
-    (void)epfd; (void)fd; (void)mask; return strada_new_int(-1);
-#endif
+    char *ms = strada_to_str(mask);
+    int rc = evb_ctl((int)strada_to_int(epfd), 1, ev_resolve_fd(fd), evb_mask_from_str(ms));
+    free(ms);
+    return strada_new_int(rc);
 }
 
 StradaValue* strada_epoll_mod(StradaValue *epfd, StradaValue *fd, StradaValue *mask) {
-#ifdef STRADA_EPOLL_ENABLED
-    return ev_epoll_ctl(epfd, EPOLL_CTL_MOD, fd, mask);
-#else
-    (void)epfd; (void)fd; (void)mask; return strada_new_int(-1);
-#endif
+    char *ms = strada_to_str(mask);
+    int rc = evb_ctl((int)strada_to_int(epfd), 0, ev_resolve_fd(fd), evb_mask_from_str(ms));
+    free(ms);
+    return strada_new_int(rc);
 }
 
 StradaValue* strada_epoll_del(StradaValue *epfd, StradaValue *fd) {
-#ifdef STRADA_EPOLL_ENABLED
-    struct epoll_event ev;             /* needed for kernels < 2.6.9 */
-    memset(&ev, 0, sizeof(ev));
-    return strada_new_int(epoll_ctl((int)strada_to_int(epfd), EPOLL_CTL_DEL,
-                                    ev_resolve_fd(fd), &ev));
-#else
-    (void)epfd; (void)fd; return strada_new_int(-1);
-#endif
+    return strada_new_int(evb_del((int)strada_to_int(epfd), ev_resolve_fd(fd)));
 }
 
 /* epoll_wait(epfd, timeout_ms) -> array of [fd, "r"/"w"/"rw"/"e"] pairs.
  * Blocks with the cycle collector notified (counts as a safepoint). */
 StradaValue* strada_epoll_wait(StradaValue *epfd, StradaValue *timeout_ms) {
-#ifdef STRADA_EPOLL_ENABLED
-    struct epoll_event evs[64];
-    int t = (int)strada_to_int(timeout_ms);
-    cc_blocking_enter();
-    int n = epoll_wait((int)strada_to_int(epfd), evs, 64, t);
-    cc_blocking_leave();
+    EvbEvent evs[64];
+    int n = evb_wait((int)strada_to_int(epfd), evs, 64, (int)strada_to_int(timeout_ms));
     StradaValue *out = strada_new_array();
     for (int i = 0; i < n; i++) {
         char ms[8];
-        ev_mask_to_str(evs[i].events, ms);
+        evb_mask_to_str(evs[i].mask, ms);
         StradaValue *pair = strada_new_array();
-        strada_array_push_take(pair->value.av, strada_new_int(evs[i].data.fd));
+        strada_array_push_take(pair->value.av, strada_new_int(evs[i].fd));
         strada_array_push_take(pair->value.av, strada_new_str(ms));
         StradaValue *pref = strada_ref_create(pair);
         strada_decref(pair);
         strada_array_push_take(out->value.av, pref);
     }
     return out;
-#else
-    (void)epfd; (void)timeout_ms;
-    return strada_new_array();
-#endif
 }
 
 StradaValue* strada_eventfd_new(void) {
-#ifdef STRADA_EPOLL_ENABLED
-    return strada_new_int(eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC));
-#else
-    return strada_new_int(-1);
-#endif
+    return strada_new_int(evb_wake_new());
 }
 
 StradaValue* strada_eventfd_signal(StradaValue *fd) {
-#ifdef STRADA_EPOLL_ENABLED
-    uint64_t one = 1;
-    ssize_t r = write((int)strada_to_int(fd), &one, sizeof(one));
-    return strada_new_int(r == sizeof(one) ? 0 : -1);
-#else
-    (void)fd; return strada_new_int(-1);
-#endif
+    return strada_new_int(evb_wake_signal((int)strada_to_int(fd)));
 }
 
 StradaValue* strada_eventfd_drain(StradaValue *fd) {
-#ifdef STRADA_EPOLL_ENABLED
-    uint64_t v = 0;
-    ssize_t r = read((int)strada_to_int(fd), &v, sizeof(v));
-    return strada_new_int(r == sizeof(v) ? (int64_t)v : 0);
-#else
-    (void)fd; return strada_new_int(0);
-#endif
+    return strada_new_int(evb_wake_drain((int)strada_to_int(fd)));
 }
 
 /* ---- non-blocking socket ops -------------------------------------
@@ -27020,11 +27196,10 @@ StradaValue* strada_socket_try_accept(StradaValue *sock) {
     return client;
 }
 
-/* ---- Phase 2: IO-wait futures (single poller thread) ------------- */
-#ifdef STRADA_EPOLL_ENABLED
+/* ---- IO-wait futures (single poller thread on evb_*) ------------- */
 typedef struct StradaIoWait {
     int fd;
-    uint32_t events;
+    int mask;
     int64_t deadline_ms;        /* monotonic ms; 0 = none */
     StradaValue *future_sv;     /* poller-owned ref */
     struct StradaIoWait *next;
@@ -27032,8 +27207,8 @@ typedef struct StradaIoWait {
 
 static pthread_mutex_t io_poller_mu = PTHREAD_MUTEX_INITIALIZER;
 static StradaIoWait *io_poller_incoming = NULL;
-static int io_poller_epfd = -1;
-static int io_poller_evfd = -1;
+static int io_poller_set = -1;
+static int io_poller_wake = -1;
 static pthread_t io_poller_tid;
 static int io_poller_started = 0;
 
@@ -27068,12 +27243,11 @@ static void *io_poller_main(void *arg) {
         pthread_mutex_unlock(&io_poller_mu);
         while (in) {
             StradaIoWait *next = in->next;
-            struct epoll_event ev;
-            memset(&ev, 0, sizeof(ev));
-            ev.events = in->events | EPOLLONESHOT;
-            ev.data.fd = in->fd;
-            if (epoll_ctl(io_poller_epfd, EPOLL_CTL_ADD, in->fd, &ev) < 0 &&
-                (errno != EEXIST || epoll_ctl(io_poller_epfd, EPOLL_CTL_MOD, in->fd, &ev) < 0)) {
+            /* Merge masks for duplicate fds: register the union */
+            int mask = in->mask;
+            for (StradaIoWait *w = active; w; w = w->next)
+                if (w->fd == in->fd) mask |= w->mask;
+            if (evb_ctl(io_poller_set, 1, in->fd, mask) < 0) {
                 io_wait_complete(in, "error");
             } else {
                 in->next = active;
@@ -27093,38 +27267,34 @@ static void *io_poller_main(void *arg) {
             }
         }
 
-        struct epoll_event evs[64];
-        cc_blocking_enter();
-        int n = epoll_wait(io_poller_epfd, evs, 64, timeout);
-        cc_blocking_leave();
+        EvbEvent evs[64];
+        int n = evb_wait(io_poller_set, evs, 64, timeout);
 
         now = ev_now_ms();
         for (int i = 0; i < n; i++) {
-            int fd = evs[i].data.fd;
-            if (fd == io_poller_evfd) {
-                uint64_t junk;
-                while (read(io_poller_evfd, &junk, sizeof(junk)) > 0) {}
-                /* re-arm the (oneshot) eventfd */
-                struct epoll_event ev;
-                memset(&ev, 0, sizeof(ev));
-                ev.events = EPOLLIN | EPOLLONESHOT;
-                ev.data.fd = io_poller_evfd;
-                epoll_ctl(io_poller_epfd, EPOLL_CTL_MOD, io_poller_evfd, &ev);
+            int fd = evs[i].fd;
+            if (fd == io_poller_wake) {
+                evb_wake_drain(io_poller_wake);
                 continue;
             }
             char ms[8];
-            ev_mask_to_str(evs[i].events, ms);
+            evb_mask_to_str(evs[i].mask, ms);
+            int remaining_mask = 0;
             StradaIoWait **pp = &active;
             while (*pp) {
-                if ((*pp)->fd == fd) {
+                if ((*pp)->fd == fd && ((*pp)->mask & evs[i].mask)) {
                     StradaIoWait *w = *pp;
                     *pp = w->next;
-                    epoll_ctl(io_poller_epfd, EPOLL_CTL_DEL, fd, NULL);
                     io_wait_complete(w, ms);
                 } else {
+                    if ((*pp)->fd == fd) remaining_mask |= (*pp)->mask;
                     pp = &(*pp)->next;
                 }
             }
+            if (remaining_mask)
+                evb_ctl(io_poller_set, 0, fd, remaining_mask);
+            else
+                evb_del(io_poller_set, fd);
         }
 
         /* Expire deadlines */
@@ -27133,7 +27303,13 @@ static void *io_poller_main(void *arg) {
             StradaIoWait *w = *pp;
             if (w->deadline_ms > 0 && now >= w->deadline_ms) {
                 *pp = w->next;
-                epoll_ctl(io_poller_epfd, EPOLL_CTL_DEL, w->fd, NULL);
+                int remaining_mask = 0;
+                for (StradaIoWait *o = active; o; o = o->next)
+                    if (o->fd == w->fd) remaining_mask |= o->mask;
+                if (remaining_mask)
+                    evb_ctl(io_poller_set, 0, w->fd, remaining_mask);
+                else
+                    evb_del(io_poller_set, w->fd);
                 io_wait_complete(w, "timeout");
             } else {
                 pp = &w->next;
@@ -27146,27 +27322,21 @@ static void *io_poller_main(void *arg) {
 static void io_poller_ensure(void) {
     pthread_mutex_lock(&io_poller_mu);
     if (!io_poller_started) {
-        io_poller_epfd = epoll_create1(EPOLL_CLOEXEC);
-        io_poller_evfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-        struct epoll_event ev;
-        memset(&ev, 0, sizeof(ev));
-        ev.events = EPOLLIN | EPOLLONESHOT;
-        ev.data.fd = io_poller_evfd;
-        epoll_ctl(io_poller_epfd, EPOLL_CTL_ADD, io_poller_evfd, &ev);
+        io_poller_set = evb_create();
+        io_poller_wake = evb_wake_new();
+        evb_ctl(io_poller_set, 1, io_poller_wake, EVB_R);
         pthread_create(&io_poller_tid, NULL, io_poller_main, NULL);
         pthread_detach(io_poller_tid);
         io_poller_started = 1;
     }
     pthread_mutex_unlock(&io_poller_mu);
 }
-#endif /* STRADA_EPOLL_ENABLED */
 
 /* async::io_wait(fd_or_sock, "r"/"w"/"rw" [, timeout_ms]) -> future.
  * The future resolves to the ready mask ("r"/"w"/...), "timeout", or
  * "error". Completion happens on a dedicated poller thread; pool worker
  * threads never block on socket readiness. */
 StradaValue* strada_io_wait_async(StradaValue *fd, StradaValue *mask, StradaValue *timeout_ms) {
-#ifdef STRADA_EPOLL_ENABLED
     io_poller_ensure();
 
     StradaFuture *f = malloc(sizeof(StradaFuture));
@@ -27182,7 +27352,7 @@ StradaValue* strada_io_wait_async(StradaValue *fd, StradaValue *mask, StradaValu
     StradaIoWait *w = malloc(sizeof(StradaIoWait));
     char *ms = strada_to_str(mask);
     w->fd = ev_resolve_fd(fd);
-    w->events = ev_mask_from_str(ms);
+    w->mask = evb_mask_from_str(ms);
     free(ms);
     int64_t t = strada_to_int(timeout_ms);
     w->deadline_ms = t > 0 ? ev_now_ms() + t : 0;
@@ -27193,13 +27363,8 @@ StradaValue* strada_io_wait_async(StradaValue *fd, StradaValue *mask, StradaValu
     io_poller_incoming = w;
     pthread_mutex_unlock(&io_poller_mu);
 
-    uint64_t one = 1;
-    if (write(io_poller_evfd, &one, sizeof(one)) != sizeof(one)) { /* poller wakes on next tick */ }
+    evb_wake_signal(io_poller_wake);
     return sv;
-#else
-    (void)fd; (void)mask; (void)timeout_ms;
-    return strada_new_undef();
-#endif
 }
 
 /* ---- Phase 3: stackful coroutines (green tasks) -------------------
@@ -27568,4 +27733,72 @@ StradaValue* strada_socket_try_readline(StradaValue *sock) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) return strada_new_undef();
         return strada_new_str("");
     }
+}
+
+/* ---- async DNS resolution (Async::Task::connect support) ------------
+ * getaddrinfo on a detached thread; the future completes with the first
+ * resolved address in numeric form (or undef). Numeric input resolves
+ * instantly, but callers should fast-path it themselves. */
+typedef struct {
+    StradaValue *future_sv;
+    char *host;
+} StradaResolveJob;
+
+static void *resolve_main(void *arg) {
+    StradaResolveJob *job = (StradaResolveJob *)arg;
+    cc_thread_register();
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    char ip[NI_MAXHOST];
+    int ok = 0;
+    if (getaddrinfo(job->host, NULL, &hints, &res) == 0 && res) {
+        if (getnameinfo(res->ai_addr, res->ai_addrlen, ip, sizeof(ip),
+                        NULL, 0, NI_NUMERICHOST) == 0)
+            ok = 1;
+        freeaddrinfo(res);
+    }
+    StradaFuture *f = (StradaFuture *)job->future_sv->value.ptr;
+    pthread_mutex_lock(&f->mutex);
+    if (f->state == FUTURE_PENDING || f->state == FUTURE_RUNNING) {
+        f->result = ok ? strada_new_str(ip) : strada_new_undef();
+        f->state = FUTURE_COMPLETED;
+        pthread_cond_broadcast(&f->cond);
+    }
+    pthread_mutex_unlock(&f->mutex);
+    strada_decref(job->future_sv);
+    free(job->host);
+    free(job);
+    return NULL;
+}
+
+StradaValue* strada_resolve_async(StradaValue *host) {
+    StradaFuture *f = malloc(sizeof(StradaFuture));
+    memset(f, 0, sizeof(*f));
+    f->state = FUTURE_PENDING;
+    pthread_mutex_init(&f->mutex, NULL);
+    pthread_cond_init(&f->cond, NULL);
+    StradaValue *sv = strada_value_alloc();
+    sv->type = STRADA_FUTURE;
+    sv->refcount = 2;                  /* caller + resolver thread */
+    sv->value.ptr = f;
+
+    StradaResolveJob *job = malloc(sizeof(StradaResolveJob));
+    job->future_sv = sv;
+    job->host = strada_to_str(host);
+
+    pthread_t tid;
+    if (pthread_create(&tid, NULL, resolve_main, job) != 0) {
+        pthread_mutex_lock(&f->mutex);
+        f->result = strada_new_undef();
+        f->state = FUTURE_COMPLETED;
+        pthread_mutex_unlock(&f->mutex);
+        strada_decref(sv);
+        free(job->host);
+        free(job);
+        return sv;
+    }
+    pthread_detach(tid);
+    return sv;
 }

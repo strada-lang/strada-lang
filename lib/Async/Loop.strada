@@ -38,15 +38,15 @@
 # between.
 #
 # Scheduling policy lives entirely here; the runtime only provides epoll
-# wrappers and ucontext switching. Linux-only (epoll); Async::Loop::new()
-# throws elsewhere.
+# wrappers and ucontext switching. Backend: epoll on Linux, poll(2)
+# everywhere else (same API, transparently).
 
 package Async::Loop;
 
 func new() scalar {
     my int $epfd = core::epoll_create();
     if ($epfd < 0) {
-        throw "Async::Loop requires epoll (Linux)";
+        throw "Async::Loop: no readiness backend available";
     }
     my hash %self = ();
     $self{"epfd"} = $epfd;

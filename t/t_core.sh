@@ -422,6 +422,17 @@ else
     test_skip "Async::Loop event loop + green tasks" "built without epoll"
 fi
 
+# Test: transitive closure capture (capture-of-capture through nested closures)
+test_output_contains "$EXAMPLES_DIR/test_nested_closures.strada" "test_nested_closures" "1..5" "Nested closure capture"
+
+# Test: TLS over green tasks (self-skips without the openssl CLI; gated on
+# OpenSSL being available at build time)
+if grep -q '^export STRADA_SSL_LIBS=..*-lssl' "$PROJECT_DIR/config.sh" 2>/dev/null; then
+    test_output_contains "$EXAMPLES_DIR/test_event_loop_ssl.strada" "test_event_loop_ssl" "1.." "TLS over green tasks" 30
+else
+    test_skip "TLS over green tasks" "built without OpenSSL"
+fi
+
 # Test: namespaced builtin aliases (re::/str::/sb:: and core::-qualified
 # spellings of historically-unqualified builtins; legacy names still work)
 test_output_contains "$EXAMPLES_DIR/test_namespaced_builtins.strada" "test_namespaced_builtins" "1..25" "Namespaced builtin aliases"

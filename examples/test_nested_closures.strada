@@ -1,0 +1,58 @@
+# Transitive closure capture (capture-of-capture): a closure nested inside
+# another closure can capture variables from any enclosing scope — each
+# level passes its StradaValue** capture slot through, so the chain shares
+# one cell (same semantics as one-level capture).
+
+use lib "lib";
+use Test;
+
+func main() int {
+    my int $x = 10;
+    my scalar $h = { "n" => 0 };
+
+    # Two levels
+    my scalar $outer = fn () int {
+        my int $y = 5;
+        my scalar $inner = fn () int { return $x + $y; };
+        return $inner->();
+    };
+    Test::is($outer->(), 15, "two-level capture");
+
+    # Three levels
+    my scalar $l3 = fn () scalar {
+        my scalar $mid = fn () scalar {
+            my scalar $deep = fn () int { return $x * 2; };
+            return $deep->();
+        };
+        return $mid->();
+    };
+    Test::is($l3->(), 20, "three-level capture");
+
+    # Mutation through a captured container is visible at every level
+    my scalar $bump = fn () scalar {
+        my scalar $inner = fn () void { $h->{"n"} = $h->{"n"} + 1; };
+        $inner->();
+        return undef;
+    };
+    $bump->();
+    $bump->();
+    Test::is($h->{"n"}, 2, "container mutation through nested capture");
+
+    # Inner closure mixing levels: own param, enclosing local, outer capture
+    my scalar $mix = fn (int $a) int {
+        my int $b = 100;
+        my scalar $inner = fn (int $c) int { return $a + $b + $c + $x; };
+        return $inner->(1);
+    };
+    Test::is($mix->(1000), 1111, "mixed param/local/transitive capture");
+
+    # Closure returned upward still works after the middle frame is gone
+    my scalar $make = fn () scalar {
+        my scalar $mk_inner = fn () int { return $x + 1; };
+        return $mk_inner;
+    };
+    my scalar $kept = $make->();
+    Test::is($kept->(), 11, "escaped nested closure remains callable");
+
+    return Test::done_testing();
+}

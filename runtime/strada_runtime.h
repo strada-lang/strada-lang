@@ -2256,5 +2256,6 @@ StradaValue* strada_mono_ms(void);
 StradaValue* strada_socket_try_connect(StradaValue *host, StradaValue *port);
 StradaValue* strada_socket_connect_check(StradaValue *sock);
 StradaValue* strada_socket_try_readline(StradaValue *sock);
+StradaValue* strada_resolve_async(StradaValue *host);
 
 #endif /* STRADA_RUNTIME_H */

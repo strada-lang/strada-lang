@@ -6,8 +6,6 @@ use Async::Loop;
 use Async::Task;
 
 our array @order = ();
-our int $g_served = 0;
-our str $g_replies = "";
 
 func test_timers() void {
     my scalar $loop = Async::Loop::new();
@@ -195,11 +193,9 @@ func test_spawn_from_task_readline() void {
         Test::skip("could not bind test port", 3);
         return;
     }
-    # Shared state via `our` globals: the handler closure is nested
-    # inside the accept-task closure, and transitive capture
-    # (capture-of-capture) is a known compiler limitation.
-    $g_served = 0;
-    $g_replies = "";
+    # Handler closures capture $r straight through the enclosing
+    # accept-task closure (transitive capture-of-capture).
+    my scalar $r = { "served" => 0, "replies" => "" };
     $loop->spawn(fn () {
         my int $n = 0;
         while ($n < 2) {
@@ -208,7 +204,7 @@ func test_spawn_from_task_readline() void {
                 my str $line = Async::Task::readline($conn);
                 Async::Task::send($conn, "got:" . $line . "\n");
                 core::socket_close($conn);
-                $g_served = $g_served + 1;
+                $r->{"served"} = $r->{"served"} + 1;
             });
             $n = $n + 1;
         }
@@ -219,15 +215,15 @@ func test_spawn_from_task_readline() void {
             my scalar $c = Async::Task::connect("127.0.0.1", $port);
             Async::Task::send($c, "hello" . $k . "\n");
             my str $reply = Async::Task::readline($c);
-            $g_replies = $g_replies . $reply . ";";
+            $r->{"replies"} = $r->{"replies"} . $reply . ";";
             core::socket_close($c);
             $k = $k + 1;
         }
     });
     $loop->run();
     core::socket_close($listener);
-    Test::is($g_served, 2, "handler tasks spawned from accept-task served both");
-    Test::is($g_replies, "got:hello0;got:hello1;", "line protocol round-trips");
+    Test::is($r->{"served"}, 2, "handler tasks spawned from accept-task served both");
+    Test::is($r->{"replies"}, "got:hello0;got:hello1;", "line protocol round-trips");
     Test::ok(1, "spawn-from-task works");
 }
 

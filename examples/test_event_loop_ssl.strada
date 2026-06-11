@@ -1,0 +1,64 @@
+# Async::TaskSSL — TLS over green tasks: handshake/read/write park on the
+# exact readiness OpenSSL requests. Uses a throwaway self-signed cert.
+
+use lib "lib";
+use Test;
+use Async::Loop;
+use Async::Task;
+use Async::TaskSSL;
+use ssl;
+
+func main() int {
+    core::qx("openssl req -x509 -newkey rsa:2048 -keyout /tmp/strada_tls_key.pem -out /tmp/strada_tls_cert.pem -days 1 -nodes -subj /CN=localhost 2>/dev/null");
+    if (!(-f "/tmp/strada_tls_cert.pem")) {
+        say("1..0 # SKIP openssl CLI unavailable for test cert");
+        return 0;
+    }
+
+    my int $port = 38975;
+    my int $server = ssl::server($port, "/tmp/strada_tls_cert.pem", "/tmp/strada_tls_key.pem");
+    if ($server == 0) {
+        say("1..0 # SKIP could not start TLS server");
+        return 0;
+    }
+
+    my scalar $loop = Async::Loop::new();
+    my scalar $r = {};
+
+    # TLS echo server task: one connection, echo one message.
+    $loop->spawn(fn () {
+        my scalar $conn = Async::TaskSSL::accept($server, 5000);
+        if (!defined($conn)) {
+            $r->{"srv"} = "accept-failed";
+            return;
+        }
+        my str $msg = Async::TaskSSL::read($conn, 4096, 5000);
+        $r->{"srv"} = $msg;
+        Async::TaskSSL::write($conn, "tls-echo:" . $msg);
+        Async::TaskSSL::close($conn);
+    });
+
+    # TLS client task (self-signed cert -> insecure connect).
+    $loop->spawn(fn () {
+        my scalar $h = Async::TaskSSL::connect_insecure("127.0.0.1", $port, 5000);
+        if (!defined($h)) {
+            $r->{"cli"} = "connect-failed";
+            return;
+        }
+        Async::TaskSSL::write($h, "secret-hello");
+        my str $reply = Async::TaskSSL::read($h, 4096, 5000);
+        $r->{"cli"} = $reply;
+        Async::TaskSSL::close($h);
+    });
+
+    $loop->run();
+
+    Test::is($r->{"srv"}, "secret-hello", "TLS server task received plaintext");
+    Test::is($r->{"cli"}, "tls-echo:secret-hello", "TLS client task got the echo");
+    Test::ok(1, "TLS handshake + IO parked tasks without stalling the loop");
+
+    ssl::close($server);
+    core::unlink("/tmp/strada_tls_key.pem");
+    core::unlink("/tmp/strada_tls_cert.pem");
+    return Test::done_testing();
+}

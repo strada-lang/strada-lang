@@ -22,7 +22,8 @@
 #
 # try/catch works inside tasks, including across suspensions. Note: name
 # resolution in connect() (getaddrinfo) is still synchronous; only the TCP
-# handshake is non-blocking.
+# handshake is non-blocking, and hostname resolution runs on a background
+# thread (the task parks in 1ms slices while waiting).
 
 package Async::Task;
 
@@ -122,6 +123,17 @@ func accept(scalar $listener, int $timeout_ms = 0) scalar {
 # connected socket, or undef on failure/timeout. (getaddrinfo name
 # resolution is still synchronous.)
 func connect(str $host, int $port, int $timeout_ms = 0) scalar {
+    # Hostnames resolve on a background thread so a slow DNS lookup never
+    # stalls the loop; numeric addresses skip the round-trip entirely.
+    if ($host !~ /^[0-9.:a-fA-F\[\]]+$/ || $host !~ /[0-9]/) {
+        my scalar $rf = async::resolve($host);
+        while (async::is_done($rf) == 0) {
+            sleep(1);   # parks in a task; 1ms blocking poll outside one
+        }
+        my scalar $ip = await $rf;
+        if (!defined($ip)) { return undef; }
+        $host = "" . $ip;
+    }
     my scalar $sock = core::socket_try_connect($host, $port);
     if (!defined($sock)) { return undef; }
     my int $deadline = $timeout_ms > 0 ? core::mono_ms() + $timeout_ms : 0;

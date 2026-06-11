@@ -1,9 +1,10 @@
 # Async::Loop — epoll Event Loop and Green Tasks
 
-Status: **experimental** (branch feature). Linux-only — requires epoll, detected
-by `./configure` ("Checking for epoll (event loop)"); `--without-epoll` disables
-it. On platforms without epoll the runtime primitives compile as stubs and
-`Async::Loop::new()` throws `"Async::Loop requires epoll (Linux)"`.
+Status: **experimental** (branch feature). Works on any POSIX system: the
+readiness backend is **epoll** on Linux (detected by `./configure`;
+`--without-epoll` forces the fallback) and **poll(2)** everywhere else,
+behind one internal API (`evb_*` in the runtime — a kqueue backend can be
+added there later). The full test suite passes on both backends.
 
 ## Why
 
@@ -72,8 +73,9 @@ $loop->run();   # until stop() or nothing left to wait for
 - `send($sock, $data)` → bytes sent (handles partial writes); -1 = error
 - `accept($listener [, $timeout_ms])` → socket; undef = timeout
 - `connect($host, $port [, $timeout_ms])` → socket; undef = failure/timeout.
-  Non-blocking TCP handshake; **name resolution (getaddrinfo) is still
-  synchronous** — resolve-heavy workloads will stall the loop on DNS.
+  Non-blocking TCP handshake; hostnames resolve on a background thread
+  (`async::resolve`) with the task parking in 1ms slices, so slow DNS no
+  longer stalls the loop (numeric addresses skip resolution entirely).
 - `sleep($ms)`
 
 Sockets accepted/connected through the task API get `TCP_NODELAY` (an
@@ -90,11 +92,10 @@ event loop ping-ponging small messages is Nagle's worst case).
 - **One loop, one OS thread.** Tasks belong to the thread that created
   them, and calling `watch`/`timer_after`/`spawn` from another thread is
   unsupported (no locking; no wakeup of a loop parked in `epoll_wait`).
-- **Closure capture is one level deep** (pre-existing compiler limitation):
-  a handler closure nested inside another closure cannot capture variables
-  from *outside* the enclosing closure (capture-of-capture). Route shared
-  state through `our` globals or the inner closure's own locals/params —
-  see `test_spawn_from_task_readline` in examples/test_event_loop.strada.
+- **Transitive closure capture works**: a handler closure nested inside
+  another closure captures outer variables through the enclosing closure's
+  capture slots (fixed in the compiler on this branch; see
+  examples/test_nested_closures.strada).
 
 ## Performance
 
@@ -105,11 +106,33 @@ Each round-trip costs two parks (client recv + handler recv), so the loop
 runs near its switching ceiling; the win is the 50-way concurrency on one
 thread, not single-stream latency.
 
+## TLS (`Async::TaskSSL`)
+
+TLS handshake/read/write park the task on exactly the readiness OpenSSL
+reports (WANT_READ/WANT_WRITE):
+
+```strada
+use Async::TaskSSL;
+my scalar $h = Async::TaskSSL::connect("example.com", 443);   # verifies cert
+Async::TaskSSL::write($h, "GET / HTTP/1.0\r\n\r\n");
+my str $body = Async::TaskSSL::read($h, 65536, 10000);
+Async::TaskSSL::close($h);
+
+# Server side: ssl::server($port, $cert, $key) then, inside a task,
+# Async::TaskSSL::accept($server) — accept + handshake without blocking.
+```
+
+`connect_insecure` skips certificate verification (test certs). Handles are
+hashrefs holding the SSL session and the underlying TCP socket. The new
+non-blocking primitives live in `lib/ssl.strada` (`attach_fd`,
+`attach_server_fd`, `handshake_step`, `try_read`, `try_write`,
+`try_accept_fd`, `want`), and `lib/ssl.strada` now declares
+`link_lib "ssl"/"crypto"` so programs link OpenSSL automatically.
+
 ## Known issues (v1)
 
-- SSL sockets are not yet loop-aware (blocking handshake/IO).
-- The VM/interpreter gets the epoll primitives via the generic bridge, but
-  coroutines (and therefore green tasks) are compiled-only.
+- The VM/interpreter gets the fd/socket primitives via the generic bridge,
+  but coroutines (and therefore green tasks) are compiled-only.
 
 (The "~32 bytes per task suspension" leak originally reported here turned out
 to be a pre-existing runtime bug — `strada_socket_close` discarded the owned

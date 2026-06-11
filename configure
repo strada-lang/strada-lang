@@ -144,7 +144,7 @@ while [ $# -gt 0 ]; do
             echo "  --static-pcre2=PATH Same, with explicit path to libpcre2-8.a"
             echo "  --with-cycle-gc     Enable the cycle garbage collector (default)"
             echo "  --without-cycle-gc  Disable the cycle GC (manual core::weaken only)"
-            echo "  --without-epoll     Disable the epoll event loop (Async::Loop)"
+            echo "  --without-epoll     Use the poll(2) event-loop backend instead of epoll"
             echo "  --with-arena        Enable the request arena allocator (default)"
             echo "  --without-arena     Disable the request arena allocator"
             echo "  --without-libffi    Disable c::callback trampolines (drops the -lffi link dep)"
@@ -354,7 +354,7 @@ EPEOF
         echo -e "${GREEN}yes${NC}"
     else
         HAVE_EPOLL=0
-        echo -e "${RED}no${NC} (Async::Loop unavailable; Linux-only)"
+        echo -e "${YELLOW}no${NC} (event loop falls back to poll(2))"
     fi
     rm -f "$ep_src" "${ep_src%.c}"
 fi

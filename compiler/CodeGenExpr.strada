@@ -5238,7 +5238,36 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 if ($ch eq "," || $i == $len) {
                     if ($cap_idx > 0) { emit($cg, ", "); }
                     my str $cap_name = substr($capture_str, $start, $i - $start);
-                    emit($cg, "&" . $cap_name);
+                    # Transitive capture (capture-of-capture): when this
+                    # closure literal sits inside ANOTHER closure's body and
+                    # the captured name is not one of the enclosing closure's
+                    # params/locals, there is no C identifier `cap_name` here
+                    # — the value lives in the enclosing closure's __captures.
+                    # Pass that StradaValue** slot straight through (capture-
+                    # by-reference chains across nesting levels), forcing the
+                    # enclosing closure to capture the name itself if its own
+                    # body never referenced it.
+                    my int $pass_idx = 0 - 1;
+                    if ($cg->{"in_anon_func"} == 1) {
+                        if (get_capture_index($cg->{"anon_param_str"}, $cap_name) < 0 &&
+                            get_capture_index($cg->{"anon_local_str"}, $cap_name) < 0) {
+                            $pass_idx = get_capture_index($cg->{"anon_capture_str"}, $cap_name);
+                            if ($pass_idx < 0) {
+                                if ($cg->{"anon_capture_str"} eq "") {
+                                    $cg->{"anon_capture_str"} = $cap_name;
+                                } else {
+                                    $cg->{"anon_capture_str"} = $cg->{"anon_capture_str"} . "," . $cap_name;
+                                }
+                                $pass_idx = $cg->{"anon_capture_count"};
+                                $cg->{"anon_capture_count"} = $pass_idx + 1;
+                            }
+                        }
+                    }
+                    if ($pass_idx >= 0) {
+                        emit($cg, "__captures[" . $pass_idx . "]");
+                    } else {
+                        emit($cg, "&" . $cap_name);
+                    }
                     $cap_idx = $cap_idx + 1;
                     $start = $i + 1;
                 }

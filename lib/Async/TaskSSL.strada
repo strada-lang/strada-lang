@@ -1,0 +1,161 @@
+# Async::TaskSSL — TLS over green tasks (Async::Loop).
+#
+# TLS handshake, read, and write park the current task on exactly the
+# readiness OpenSSL asks for (WANT_READ/WANT_WRITE), so one slow TLS peer
+# never stalls the loop. Outside a task, operations fall back to a brief
+# sleep-poll (correct, not efficient).
+#
+#   use Async::TaskSSL;
+#
+#   # Client
+#   my scalar $h = Async::TaskSSL::connect("example.com", 443);
+#   Async::TaskSSL::write($h, "GET / HTTP/1.0\r\nHost: example.com\r\n\r\n");
+#   my str $body = Async::TaskSSL::read($h, 65536);
+#   Async::TaskSSL::close($h);
+#
+#   # Server (cert handling via ssl::server)
+#   my int $srv = ssl::server($port, "cert.pem", "key.pem");
+#   my scalar $conn = Async::TaskSSL::accept($srv);     # in a task
+#
+# Handles are hashrefs: { "ssl" => <ssl conn>, "sock" => <socket or undef> }.
+# The TCP socket SV (when present) is kept inside the handle so its fd
+# stays open for the SSL session's lifetime.
+#
+# connect() verifies peer certificates by default; connect_insecure()
+# skips verification (self-signed test certs).
+
+use lib "lib";
+use ssl;
+use Async::Task;
+
+package Async::TaskSSL;
+
+# Park helper (same protocol as Async::Task): 1 = parked+resumed,
+# 0 = not inside a task (callers briefly sleep-poll instead).
+private func park_fd(int $fd, str $mask, int $timeout_ms) int {
+    my int $r = core::coro_yield_io($fd, $mask, $timeout_ms);
+    if ($r < 0) {
+        throw "Async::TaskSSL: illegal suspension";
+    }
+    if ($r == 0) {
+        core::usleep(1000);
+    }
+    return $r;
+}
+
+private func want_mask(int $conn) str {
+    return ssl::want($conn) == 2 ? "w" : "r";
+}
+
+# Drive a handshake to completion, parking as directed. 1 = ok, 0 = failed.
+private func drive_handshake(int $conn, int $fd, int $deadline) int {
+    while (1) {
+        my int $st = ssl::handshake_step($conn);
+        if ($st == 0) { return 1; }
+        if ($st < 0) { return 0; }
+        my int $left = 0;
+        if ($deadline > 0) {
+            $left = $deadline - core::mono_ms();
+            if ($left <= 0) { return 0; }
+        }
+        park_fd($fd, $st == 2 ? "w" : "r", $left);
+    }
+    return 0;
+}
+
+private func connect_with_verify(str $host, int $port, int $verify, int $timeout_ms) scalar {
+    my scalar $tcp = Async::Task::connect($host, $port, $timeout_ms);
+    if (!defined($tcp)) { return undef; }
+    my int $fd = core::socket_fd($tcp);
+    my int $conn = ssl::attach_fd($fd, $verify, $host);
+    if ($conn == 0) {
+        core::socket_close($tcp);
+        return undef;
+    }
+    my int $deadline = $timeout_ms > 0 ? core::mono_ms() + $timeout_ms : 0;
+    if (drive_handshake($conn, $fd, $deadline) == 0) {
+        ssl::close($conn);
+        core::socket_close($tcp);
+        return undef;
+    }
+    return { "ssl" => $conn, "sock" => $tcp, "fd" => $fd };
+}
+
+# TLS client connection (verifies the peer certificate).
+func connect(str $host, int $port, int $timeout_ms = 0) scalar {
+    return connect_with_verify($host, $port, 1, $timeout_ms);
+}
+
+# TLS client connection without certificate verification (test certs).
+func connect_insecure(str $host, int $port, int $timeout_ms = 0) scalar {
+    return connect_with_verify($host, $port, 0, $timeout_ms);
+}
+
+# Accept + handshake one TLS connection on an ssl::server handle.
+# Returns a handle, or undef on timeout/handshake failure.
+func accept(int $server, int $timeout_ms = 0) scalar {
+    my int $deadline = $timeout_ms > 0 ? core::mono_ms() + $timeout_ms : 0;
+    my int $srv_fd = ssl::fd($server);
+    my int $cfd = 0 - 1;
+    while (1) {
+        $cfd = ssl::try_accept_fd($server);
+        if ($cfd >= 0) { last; }
+        my int $left = 0;
+        if ($deadline > 0) {
+            $left = $deadline - core::mono_ms();
+            if ($left <= 0) { return undef; }
+        }
+        park_fd($srv_fd, "r", $left);
+    }
+    my int $conn = ssl::attach_server_fd($server, $cfd);
+    if ($conn == 0) { return undef; }
+    if (drive_handshake($conn, $cfd, $deadline) == 0) {
+        ssl::close($conn);
+        return undef;
+    }
+    return { "ssl" => $conn, "sock" => undef, "fd" => $cfd };
+}
+
+# Read up to $max bytes. "" = closed; undef = timeout.
+func read(scalar $h, int $max, int $timeout_ms = 0) str {
+    my int $conn = $h->{"ssl"};
+    my int $fd = $h->{"fd"};
+    my int $deadline = $timeout_ms > 0 ? core::mono_ms() + $timeout_ms : 0;
+    while (1) {
+        my scalar $data = ssl::try_read($conn, $max);
+        if (defined($data)) { return $data; }
+        my int $left = 0;
+        if ($deadline > 0) {
+            $left = $deadline - core::mono_ms();
+            if ($left <= 0) { return undef; }
+        }
+        park_fd($fd, want_mask($conn), $left);
+    }
+}
+
+# Write all of $data. Returns bytes written, -1 on error.
+func write(scalar $h, str $data) int {
+    my int $conn = $h->{"ssl"};
+    my int $fd = $h->{"fd"};
+    my int $total = length($data);
+    my str $rest = $data;
+    while (length($rest) > 0) {
+        my int $n = ssl::try_write($conn, $rest);
+        if ($n < 0) { return 0 - 1; }
+        if ($n == length($rest)) { return $total; }
+        if ($n > 0) {
+            $rest = substr($rest, $n, length($rest) - $n);
+            next;
+        }
+        park_fd($fd, want_mask($conn), 0);
+    }
+    return $total;
+}
+
+func close(scalar $h) void {
+    ssl::close($h->{"ssl"});
+    my scalar $tcp = $h->{"sock"};
+    if (defined($tcp)) {
+        core::socket_close($tcp);
+    }
+}

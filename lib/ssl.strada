@@ -181,6 +181,10 @@ L<LWP_SSL>, L<LWP>
 
 package ssl;
 
+# Auto-link OpenSSL for any program that `use`s this module
+link_lib "ssl";
+link_lib "crypto";
+
 # C includes and type definitions
 __C__ {
 #include <stdio.h>
@@ -200,6 +204,8 @@ typedef struct {
     SSL *ssl;
     SSL_CTX *ctx;
     int is_server;
+    int last_want;   /* after a would-block: 1 = want-read, 2 = want-write */
+    int borrowed_fd; /* fd owned by a Strada socket SV — do not close here */
 } SSLConnection;
 
 static int ssl_initialized = 0;
@@ -335,8 +341,8 @@ func server(int $port, str $cert_file, str $key_file) int {
         }
 
         int port_val = (int)strada_to_int(port);
-        const char *cert_str = strada_to_str(cert_file);
-        const char *key_str = strada_to_str(key_file);
+        char *cert_str = strada_to_str(cert_file);
+        char *key_str = strada_to_str(key_file);
 
         SSLConnection *conn = malloc(sizeof(SSLConnection));
         if (!conn) {
@@ -394,6 +400,8 @@ func server(int $port, str $cert_file, str $key_file) int {
                 }
             }
         }
+        free(cert_str);
+        free(key_str);
     }
     return $result;
 }
@@ -576,10 +584,15 @@ func close(int $conn) void {
                 SSL_shutdown(c->ssl);
                 SSL_free(c->ssl);
             }
-            if (c->socket_fd >= 0) {
+            if (c->socket_fd >= 0 && !c->borrowed_fd) {
                 close(c->socket_fd);
             }
-            if (c->is_server && c->ctx) {
+            /* Free the ctx whenever this connection owns one. (Client
+             * connections own theirs too — the old is_server-only check
+             * leaked an SSL_CTX per ssl::connect/attach_fd.) Connections
+             * from attach_server_fd share the server handle's ctx and
+             * carry ctx == NULL. */
+            if (c->ctx) {
                 SSL_CTX_free(c->ctx);
             }
             free(c);
@@ -704,4 +717,205 @@ func http_get(str $host, int $port, str $path) str {
 
     ssl::close($conn);
     return $response;
+}
+
+# ============================================================
+# Non-blocking primitives (Async::TaskSSL support).
+# A handshake/read/write that cannot progress reports WHICH readiness
+# it needs (ssl::want: 1 = read, 2 = write) so an event loop can park
+# the task on the right mask. All handles are the same SSLConnection
+# int-pointers as the blocking API.
+# ============================================================
+
+# Wrap an already-connected TCP fd in a CLIENT session (no handshake yet).
+# Sets the fd non-blocking. Returns conn handle or 0.
+func attach_fd(int $fd, int $verify, str $host) int {
+    init();
+    my int $result = 0;
+    __C__ {
+        int raw_fd = (int)strada_to_int(fd);
+        SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
+        if (ctx) {
+            if (strada_to_int(verify)) {
+                SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
+                SSL_CTX_set_default_verify_paths(ctx);
+            }
+            SSL *ssl = SSL_new(ctx);
+            if (ssl) {
+                char *hname = strada_to_str(host);
+                if (hname && hname[0]) {
+                    SSL_set_tlsext_host_name(ssl, hname);
+                    SSL_set1_host(ssl, hname);
+                }
+                free(hname);
+                SSL_set_fd(ssl, raw_fd);
+                SSL_set_connect_state(ssl);
+                int fl = fcntl(raw_fd, F_GETFL, 0);
+                fcntl(raw_fd, F_SETFL, fl | O_NONBLOCK);
+                SSLConnection *c = calloc(1, sizeof(SSLConnection));
+                c->socket_fd = raw_fd;
+                c->ssl = ssl;
+                c->ctx = ctx;
+                c->is_server = 0;
+                c->borrowed_fd = 1;   /* owned by the Strada socket SV */
+                strada_decref(result);
+                result = strada_new_int((int64_t)(intptr_t)c);
+            } else {
+                SSL_CTX_free(ctx);
+            }
+        }
+    }
+    return $result;
+}
+
+# Wrap an accepted TCP fd in a SERVER session using a listening server
+# handle's certificate context. Returns conn handle or 0.
+func attach_server_fd(int $server, int $fd) int {
+    my int $result = 0;
+    __C__ {
+        SSLConnection *srv = (SSLConnection*)(intptr_t)strada_to_int(server);
+        int raw_fd = (int)strada_to_int(fd);
+        if (srv && srv->ctx) {
+            SSL *ssl = SSL_new(srv->ctx);
+            if (ssl) {
+                SSL_set_fd(ssl, raw_fd);
+                SSL_set_accept_state(ssl);
+                int fl = fcntl(raw_fd, F_GETFL, 0);
+                fcntl(raw_fd, F_SETFL, fl | O_NONBLOCK);
+                SSLConnection *c = calloc(1, sizeof(SSLConnection));
+                c->socket_fd = raw_fd;
+                c->ssl = ssl;
+                c->ctx = NULL;   /* owned by the server handle */
+                c->is_server = 1;
+                strada_decref(result);
+                result = strada_new_int((int64_t)(intptr_t)c);
+            }
+        }
+    }
+    return $result;
+}
+
+# Drive the handshake one step: 0 = done, 1 = want-read, 2 = want-write,
+# -1 = failed.
+func handshake_step(int $conn) int {
+    my int $result = 0 - 1;
+    __C__ {
+        SSLConnection *c = (SSLConnection*)(intptr_t)strada_to_int(conn);
+        if (c && c->ssl) {
+            int r = SSL_do_handshake(c->ssl);
+            int code = -1;
+            if (r == 1) {
+                code = 0;
+            } else {
+                int err = SSL_get_error(c->ssl, r);
+                if (err == SSL_ERROR_WANT_READ) code = 1;
+                else if (err == SSL_ERROR_WANT_WRITE) code = 2;
+            }
+            c->last_want = code > 0 ? code : 0;
+            strada_decref(result);
+            result = strada_new_int(code);
+        }
+    }
+    return $result;
+}
+
+# Which readiness unblocked-IO last asked for: 1 = read, 2 = write.
+func want(int $conn) int {
+    my int $result = 1;
+    __C__ {
+        SSLConnection *c = (SSLConnection*)(intptr_t)strada_to_int(conn);
+        if (c && c->last_want == 2) {
+            strada_decref(result);
+            result = strada_new_int(2);
+        }
+    }
+    return $result;
+}
+
+# Non-blocking read: data; "" = closed/EOF; undef = would-block (consult
+# ssl::want for the direction — renegotiation can want WRITE).
+func try_read(int $conn, int $max_len) str {
+    my scalar $result = undef;
+    __C__ {
+        SSLConnection *c = (SSLConnection*)(intptr_t)strada_to_int(conn);
+        int max = (int)strada_to_int(max_len);
+        if (!c || !c->ssl || max <= 0) {
+            strada_decref(result);
+            result = strada_new_str("");
+        } else {
+            char *buffer = malloc((size_t)max);
+            if (!buffer) {
+                strada_decref(result);
+                result = strada_new_str("");
+            } else {
+                int n = SSL_read(c->ssl, buffer, max);
+                if (n > 0) {
+                    strada_decref(result);
+                    result = strada_new_str_len(buffer, (size_t)n);
+                } else {
+                    int err = SSL_get_error(c->ssl, n);
+                    if (err == SSL_ERROR_WANT_READ) {
+                        c->last_want = 1;          /* stays undef */
+                    } else if (err == SSL_ERROR_WANT_WRITE) {
+                        c->last_want = 2;          /* stays undef */
+                    } else {
+                        strada_decref(result);
+                        result = strada_new_str("");   /* closed/error */
+                    }
+                }
+                free(buffer);
+            }
+        }
+    }
+    return $result;
+}
+
+# Non-blocking write: bytes written; 0 = would-block (ssl::want says
+# which direction); -1 = error.
+func try_write(int $conn, str $data) int {
+    my int $result = 0 - 1;
+    __C__ {
+        SSLConnection *c = (SSLConnection*)(intptr_t)strada_to_int(conn);
+        if (c && c->ssl) {
+            size_t len = strada_str_len(data);
+            char *bytes = strada_to_str(data);
+            int n = SSL_write(c->ssl, bytes, (int)len);
+            free(bytes);
+            if (n > 0) {
+                strada_decref(result);
+                result = strada_new_int(n);
+            } else {
+                int err = SSL_get_error(c->ssl, n);
+                if (err == SSL_ERROR_WANT_READ) {
+                    c->last_want = 1;
+                    strada_decref(result);
+                    result = strada_new_int(0);
+                } else if (err == SSL_ERROR_WANT_WRITE) {
+                    c->last_want = 2;
+                    strada_decref(result);
+                    result = strada_new_int(0);
+                }
+            }
+        }
+    }
+    return $result;
+}
+
+# Accept a pending TCP connection on a listening server handle without
+# blocking. Returns the raw client fd, or -1 when none is pending.
+func try_accept_fd(int $server) int {
+    my int $result = 0 - 1;
+    __C__ {
+        SSLConnection *srv = (SSLConnection*)(intptr_t)strada_to_int(server);
+        if (srv) {
+            int fl = fcntl(srv->socket_fd, F_GETFL, 0);
+            if (!(fl & O_NONBLOCK)) fcntl(srv->socket_fd, F_SETFL, fl | O_NONBLOCK);
+            int cfd = accept(srv->socket_fd, NULL, NULL);
+            if (cfd >= 0) {
+                strada_decref(result);
+                result = strada_new_int(cfd);
+            }
+        }
+    }
+    return $result;
 }
