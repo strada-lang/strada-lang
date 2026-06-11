@@ -619,6 +619,40 @@ MyLib::function(args);        # Namespace call syntax
 - `version "1.0.0";` - Module versioning
 - `func import(str $pkg, array @list) void` - Auto-called on load
 
+### Module Caching (`--module-cache`, 2026-06)
+
+`strada --module-cache prog.strada` makes `use Foo;` link Foo's precompiled
+module artifact instead of re-lexing/re-parsing its source on every build —
+Go-package-archive-style separate compilation, fully automatic:
+
+- **Cache**: `$STRADA_MODULE_CACHE_DIR` (default `~/.cache/strada/modules`),
+  keyed by the module source's absolute path (works for read-only lib dirs
+  like `/usr/local/lib/strada/lib`). A fresh **sibling** `Foo.o` (from
+  `strada -M`) still takes priority. Freshness gates: artifact ≥ source
+  mtime AND artifact ≥ stradac mtime (compiler upgrades invalidate).
+- **Warming**: after a build, any module that had to be inlined from source
+  is precompiled into the cache (leaves first), so the first build after a
+  change pays a one-time warm-up and later builds skip unchanged modules.
+  Measured on sysync-web (13k lines, 12 modules): warm full build 0.47s vs
+  1.7s uncached (stradac phase 0.36s vs 1.95s).
+- **`.smeta` sidecars**: `-M` writes `Foo.o.smeta` (the text
+  `__strada_export_info()` returns) next to each artifact; consumers read
+  it directly instead of compiling-and-running a metadata probe binary per
+  module per build (~150ms each — the probe made artifacts SLOWER than
+  source) — and no artifact code executes at compile time on this path.
+  Missing/stale sidecar falls back to the probe.
+- **Transitive deps**: export metadata now records `use:Module` lines;
+  importing an artifact resolves its deps automatically (artifact
+  preferred, source fallback) — main no longer needs to `use` everything
+  its modules use. Object paths are realpath-canonicalized for dedup so an
+  explicit CLI `.o` plus a metadata-resolved one don't double-link.
+- **Artifact codegen**: `-M` objects are built `-fno-lto` (LTO bitcode made
+  every consumer link re-run a ~25s LTO pass) and `-fPIC` (same artifact
+  links into executables and `--shared` libraries).
+- Implies `--use-artifacts` (artifact use stays opt-in by default).
+- Tests: `t/separate_compile_test/run.sh` (16 scenarios, incl. sidecars,
+  transitive deps, cache dir, cold/warm).
+
 **Cross-module forward declarations** (use-cycle workaround): when two modules `use` each other in a cycle, declare callees from the other side with a body-less qualified `extern func`:
 
 ```strada

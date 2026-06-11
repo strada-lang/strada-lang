@@ -122,6 +122,7 @@ TCC_MODE=0         # --tcc: compile the program with tcc (fast), link with $CC
 OBJECT_ONLY=0
 OBJECT_FULL=0      # 1 if --object-full was passed (include deps, old behavior)
 MODULE_ONLY_MODE=0 # 1 if -M was passed (precompile a module / a tree of modules)
+MODULE_CACHE=0     # --module-cache: use + auto-warm precompiled module artifacts
 STATIC_LINK=0
 SHOW_WARNINGS=0
 STRICT_TYPES=0
@@ -206,6 +207,15 @@ Options:
                 artifact's native code at compile time). Off by default: `use`
                 recompiles from source. Explicit import_object/import_lib/
                 import_archive are unaffected.
+  --module-cache  Module caching: `use Foo;` links Foo's precompiled artifact
+                (sibling or from the cache directory) instead of recompiling
+                its source, and any module that had to be compiled from
+                source is precompiled into the cache after the build — so
+                the FIRST build pays a one-time warm-up and every later
+                build skips unchanged modules entirely. Cache location:
+                \$STRADA_MODULE_CACHE_DIR (default ~/.cache/strada/modules),
+                keyed by source path, invalidated by source mtime and by
+                compiler upgrades. Implies --use-artifacts.
   -M [TARGET]   Precompile module(s). With a FILE: produce a sibling .o limited
                 to that file's own symbols. With a DIR: recursive walk producing
                 a sibling .o for each .strada file beneath.
@@ -309,6 +319,33 @@ tcc_compile_obj() {
     fi
 }
 
+# -M helper: write a metadata sidecar (<obj>.smeta) next to a freshly built
+# module .o. Consumers (`use Foo;` with artifacts enabled, import_object)
+# read the sidecar directly instead of compiling AND RUNNING a probe binary
+# per module per compile — which both cost ~150ms of cc each and executed
+# artifact code at compile time. The sidecar is just the text
+# __strada_export_info() returns; we obtain it here with the same probe,
+# paid once at precompile time.
+write_smeta_sidecar() {
+    local obj="$1"
+    local probe_c probe_exe
+    probe_c="$(mktemp_suffix .c)"
+    probe_exe="$(mktemp_suffix .exe)"
+    cat > "$probe_c" <<'EOF'
+#include <stdio.h>
+extern const char* __strada_export_info(void);
+int main(void) { const char *i = __strada_export_info(); if (i) printf("%s", i); return 0; }
+EOF
+    if $CC -fno-lto -o "$probe_exe" "$probe_c" "$obj" "$RUNTIME_OBJ" -I"$RUNTIME_DIR" $DLOPEN_LIBS -lm -lpthread -Wl,--unresolved-symbols=ignore-all 2>/dev/null \
+        && "$probe_exe" > "$obj.smeta" 2>/dev/null && [ -s "$obj.smeta" ]; then
+        info "wrote metadata sidecar $obj.smeta"
+    else
+        rm -f "$obj.smeta"
+        warn "could not write metadata sidecar for $obj; consumers will fall back to probing at compile time"
+    fi
+    rm -f "$probe_c" "$probe_exe"
+}
+
 # Parse command line arguments
 POSITIONAL=()
 while [[ $# -gt 0 ]]; do
@@ -372,6 +409,14 @@ while [[ $# -gt 0 ]]; do
             # Precompile module(s). With a file: produce a sibling .o limited
             # to that file's own symbols. With a directory: walk recursively.
             MODULE_ONLY_MODE=1
+            shift
+            ;;
+        --module-cache)
+            # Use precompiled module artifacts (implies --use-artifacts) and,
+            # after the build, precompile any modules that had to be inlined
+            # from source into the cache directory so the NEXT build is fast.
+            MODULE_CACHE=1
+            export STRADA_USE_ARTIFACTS=1
             shift
             ;;
         -w|--warnings)
@@ -898,6 +943,18 @@ if [ "$WANT_MODULE_ONLY" -eq 1 ]; then
     STRADAC_FLAGS="$STRADAC_FLAGS -M"
 fi
 
+if [ "$MODULE_CACHE" -eq 1 ]; then
+    # Cache dir mirrors each module source's absolute path (so read-only
+    # lib dirs like /usr/local/lib/strada/lib cache per-user). The parser
+    # consults STRADA_MODULE_CACHE_DIR when no fresh sibling artifact
+    # exists; STRADA_DEPS_OUT makes it record every resolved module source
+    # for the post-build warmer below.
+    MODULE_CACHE_DIR="${STRADA_MODULE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/strada/modules}"
+    export STRADA_MODULE_CACHE_DIR="$MODULE_CACHE_DIR"
+    DEPS_OUT_FILE="$(mktemp_suffix .deps)"
+    export STRADA_DEPS_OUT="$DEPS_OUT_FILE"
+fi
+
 info "Compiling $ACTUAL_INPUT -> $C_FILE"
 if [ "$VERBOSE" -eq 1 ]; then
     STRADAC_FLAGS="$STRADAC_FLAGS -v"
@@ -1026,12 +1083,26 @@ elif [ "$OBJECT_ONLY" -eq 1 ]; then
     if echo "$GCC_FLAGS" | grep -q -- "-flto"; then
         OBJECT_EXTRA="-ffat-lto-objects"
     fi
+    if [ "$MODULE_ONLY_MODE" -eq 1 ]; then
+        # Module artifacts (-M / module cache) are linked into every consumer
+        # build. Two constraints follow: (1) no LTO bitcode — it makes EACH
+        # consumer link re-run a full LTO pass (measured ~25s for a dozen
+        # modules), defeating the caching; (2) -fPIC — the same artifact must
+        # link into both executables and --shared libraries (non-PIC objects
+        # fail shared links with R_X86_64_PC32 relocation errors).
+        OBJECT_EXTRA="-fno-lto -fPIC"
+    fi
     if [ "$TCC_MODE" -eq 1 ]; then
         warn "--tcc is not supported with --object (objects must match the gcc-built runtime ABI exactly); compiling with $CC"
     fi
     info "Compiling $C_FILE -> $OUTPUT (object file)"
     if ! run_cmd $CC -c $GCC_FLAGS $OBJECT_EXTRA -o "$OUTPUT" "$C_FILE" -I"$RUNTIME_DIR" $INCLUDE_FLAGS; then
         error "C compilation failed"
+    fi
+    # Module precompiles (-M) also get a metadata sidecar so consumers can
+    # skip the per-compile metadata probe entirely.
+    if [ "$MODULE_ONLY_MODE" -eq 1 ]; then
+        write_smeta_sidecar "$OUTPUT"
     fi
 elif [ "$STATIC_LIB" -eq 1 ]; then
     # Static library: compile to .o then archive with ar
@@ -1128,6 +1199,47 @@ fi
 
 if [ "$VERBOSE" -eq 1 ]; then
     echo -e "${GREEN}Created:${NC} $OUTPUT"
+fi
+
+# --module-cache post-build warmer: precompile (into the cache dir) every
+# module that had to be inlined from source this build, so the NEXT build
+# imports its artifact instead of re-parsing it. Leaves first (reverse
+# resolution order) so a parent module's warm build can use its deps'
+# fresh artifacts. STRADA_DEPS_OUT is cleared for sub-builds so they don't
+# clobber our deps list.
+if [ "$MODULE_CACHE" -eq 1 ] && [ -f "$DEPS_OUT_FILE" ]; then
+    SCRIPT_PATH_MC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+    warmed=0
+    warm_failed=0
+    while IFS= read -r dep; do
+        [ -f "$dep" ] || continue
+        real_dep="$(realpath "$dep" 2>/dev/null)" || continue
+        sib_o="${dep%.strada}.o"
+        cache_o="$MODULE_CACHE_DIR$real_dep.o"
+        # Skip when a fresh artifact already exists (sibling or cached),
+        # using the same gates the parser applies: at least as new as the
+        # source AND not older than the compiler.
+        if [ -f "$sib_o" ] && ! [ "$dep" -nt "$sib_o" ] && ! [ "$STRADAC" -nt "$sib_o" ]; then
+            continue
+        fi
+        if [ -f "$cache_o" ] && ! [ "$dep" -nt "$cache_o" ] && ! [ "$STRADAC" -nt "$cache_o" ]; then
+            continue
+        fi
+        mkdir -p "$(dirname "$cache_o")"
+        info "module cache: precompiling $dep"
+        if STRADA_DEPS_OUT= "$SCRIPT_PATH_MC" -M --object -o "$cache_o" "$dep" >/dev/null 2>&1; then
+            warmed=$((warmed + 1))
+        else
+            warm_failed=$((warm_failed + 1))
+            rm -f "$cache_o" "$cache_o.smeta"
+        fi
+    done < <(tac "$DEPS_OUT_FILE")
+    if [ "$warmed" -gt 0 ] || [ "$warm_failed" -gt 0 ]; then
+        msg="module cache: warmed $warmed module(s)"
+        [ "$warm_failed" -gt 0 ] && msg="$msg ($warm_failed failed; those keep compiling from source)"
+        echo "$msg" >&2
+    fi
+    rm -f "$DEPS_OUT_FILE"
 fi
 
 # Step 3: Run if requested

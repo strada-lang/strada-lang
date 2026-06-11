@@ -117,3 +117,4 @@ tools/tt/
 # Out-of-tree Perla runtime support (Perla itself is not in this repo yet)
 runtime/perla_dbi.c
 runtime/perla_stash.c
+*.smeta
