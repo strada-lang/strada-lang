@@ -223,6 +223,7 @@ func codegen_new(str $filename, int $debug_info, int $enable_profiling, int $ena
     $cg{"full_profile"} = $full_profile;  # Emit line-level profiling code
     $cg{"last_line"} = 0;  # Track last emitted line to avoid duplicates
     $cg{"functions"} = {};  # Map function name -> function info
+    $cg{"owned_call_builtins"} = build_owned_call_builtins();  # owned-return builtin set (see build_owned_call_builtins)
     $cg{"in_extern"} = 0;   # Track if we're inside an extern function
     $cg{"extern_params"} = {};  # Map param name -> type for extern functions
     $cg{"in_main"} = 0;     # Track if we're inside main function
@@ -3089,6 +3090,368 @@ func is_variable_expr(scalar $expr) int {
 # Helper: check if expression produces an owned StradaValue* that needs cleanup
 # Returns 1 for expressions we KNOW produce owned pointers (literals, concat, arithmetic)
 # Returns 0 for unknown types (function calls, etc.) to be safe
+# Set of builtin call names whose results are owned StradaValue* (the
+# caller must decref temps). Built ONCE into a hash at codegen_new time and
+# probed with a single hash lookup in needs_temp_cleanup -- this used to be
+# a ~300-arm `$name eq` chain evaluated on every call-argument check (7.5%
+# of compile time on real programs). To register a new owned-return
+# builtin, add its (sys::-normalized) name to this list.
+func build_owned_call_builtins() scalar {
+    my hash %owned_set = ();
+    # One store per name: the frozen bootstrap compiler cannot parse
+    # multi-line array literals, so no list-plus-loop here.
+    $owned_set{"chr"} = 1;
+    $owned_set{"ord"} = 1;
+    $owned_set{"sys::byte"} = 1;
+    $owned_set{"sys::base64_encode"} = 1;
+    $owned_set{"sys::base64_decode"} = 1;
+    $owned_set{"sys::pack"} = 1;
+    $owned_set{"sys::unpack"} = 1;
+    $owned_set{"sys::hex"} = 1;
+    $owned_set{"sys::ord_byte"} = 1;
+    $owned_set{"sys::get_byte"} = 1;
+    $owned_set{"sys::vec_get"} = 1;
+    $owned_set{"sys::vec_set"} = 1;
+    $owned_set{"sys::byte_length"} = 1;
+    $owned_set{"sys::byte_substr"} = 1;
+    $owned_set{"sys::set_byte"} = 1;
+    $owned_set{"sys::random_bytes"} = 1;
+    $owned_set{"sys::random_bytes_hex"} = 1;
+    $owned_set{"sys::global_get"} = 1;
+    $owned_set{"sys::global_exists"} = 1;
+    $owned_set{"sys::global_keys"} = 1;
+    $owned_set{"sys::stack_trace"} = 1;
+    $owned_set{"sys::caller"} = 1;
+    $owned_set{"sys::full_profile_start"} = 1;
+    $owned_set{"sys::full_profile_stop"} = 1;
+    $owned_set{"sys::gc_collections"} = 1;
+    $owned_set{"sys::gc_freed"} = 1;
+    $owned_set{"sys::arena_active"} = 1;
+    $owned_set{"sys::set_recursion_limit"} = 1;
+    $owned_set{"sys::get_recursion_limit"} = 1;
+    $owned_set{"sys::epoll_create"} = 1;
+    $owned_set{"sys::epoll_add"} = 1;
+    $owned_set{"sys::epoll_mod"} = 1;
+    $owned_set{"sys::epoll_del"} = 1;
+    $owned_set{"sys::epoll_wait"} = 1;
+    $owned_set{"sys::eventfd"} = 1;
+    $owned_set{"sys::eventfd_signal"} = 1;
+    $owned_set{"sys::eventfd_drain"} = 1;
+    $owned_set{"sys::socket_try_recv"} = 1;
+    $owned_set{"sys::socket_try_send"} = 1;
+    $owned_set{"sys::socket_try_accept"} = 1;
+    $owned_set{"async::io_wait"} = 1;
+    $owned_set{"sys::coro_create"} = 1;
+    $owned_set{"sys::coro_resume"} = 1;
+    $owned_set{"sys::coro_yield_io"} = 1;
+    $owned_set{"sys::coro_state"} = 1;
+    $owned_set{"sys::coro_wait_fd"} = 1;
+    $owned_set{"sys::coro_wait_mask"} = 1;
+    $owned_set{"sys::coro_wait_timeout"} = 1;
+    $owned_set{"sys::coro_result"} = 1;
+    $owned_set{"sys::coro_free"} = 1;
+    $owned_set{"sys::mono_ms"} = 1;
+    $owned_set{"sys::coro_error"} = 1;
+    $owned_set{"sys::socket_try_connect"} = 1;
+    $owned_set{"async::resolve"} = 1;
+    $owned_set{"sys::socket_connect_check"} = 1;
+    $owned_set{"sys::socket_try_readline"} = 1;
+    $owned_set{"sys::wantarray"} = 1;
+    $owned_set{"sys::wantscalar"} = 1;
+    $owned_set{"sys::wanthash"} = 1;
+    $owned_set{"utf8::is_utf8"} = 1;
+    $owned_set{"utf8::valid"} = 1;
+    $owned_set{"utf8::encode"} = 1;
+    $owned_set{"utf8::decode"} = 1;
+    $owned_set{"utf8::downgrade"} = 1;
+    $owned_set{"utf8::upgrade"} = 1;
+    $owned_set{"utf8::unicode_to_native"} = 1;
+    $owned_set{"utf8::normalize"} = 1;
+    $owned_set{"utf8::nfc"} = 1;
+    $owned_set{"utf8::nfd"} = 1;
+    $owned_set{"utf8::nfkc"} = 1;
+    $owned_set{"utf8::nfkd"} = 1;
+    $owned_set{"substr"} = 1;
+    $owned_set{"length"} = 1;
+    $owned_set{"index"} = 1;
+    $owned_set{"rindex"} = 1;
+    $owned_set{"uc"} = 1;
+    $owned_set{"upper"} = 1;
+    $owned_set{"lc"} = 1;
+    $owned_set{"lower"} = 1;
+    $owned_set{"ucfirst"} = 1;
+    $owned_set{"lcfirst"} = 1;
+    $owned_set{"trim"} = 1;
+    $owned_set{"ltrim"} = 1;
+    $owned_set{"rtrim"} = 1;
+    $owned_set{"chomp"} = 1;
+    $owned_set{"chop"} = 1;
+    $owned_set{"repeat"} = 1;
+    $owned_set{"typeof"} = 1;
+    $owned_set{"cast_str"} = 1;
+    $owned_set{"cast_num"} = 1;
+    $owned_set{"sprintf"} = 1;
+    $owned_set{"sys::sprintf"} = 1;
+    $owned_set{"join"} = 1;
+    $owned_set{"reverse"} = 1;
+    $owned_set{"split"} = 1;
+    $owned_set{"keys"} = 1;
+    $owned_set{"values"} = 1;
+    $owned_set{"defined"} = 1;
+    $owned_set{"exists"} = 1;
+    $owned_set{"delete"} = 1;
+    $owned_set{"ref"} = 1;
+    $owned_set{"reftype"} = 1;
+    $owned_set{"is_ref"} = 1;
+    $owned_set{"is_refto"} = 1;
+    $owned_set{"deref"} = 1;
+    $owned_set{"derefto"} = 1;
+    $owned_set{"deref_array"} = 1;
+    $owned_set{"deref_hash"} = 1;
+    $owned_set{"blessed"} = 1;
+    $owned_set{"isa"} = 1;
+    $owned_set{"can"} = 1;
+    $owned_set{"UNIVERSAL::isa"} = 1;
+    $owned_set{"UNIVERSAL::can"} = 1;
+    $owned_set{"size"} = 1;
+    $owned_set{"scalar"} = 1;
+    $owned_set{"push"} = 1;
+    $owned_set{"pop"} = 1;
+    $owned_set{"shift"} = 1;
+    $owned_set{"unshift"} = 1;
+    $owned_set{"sort"} = 1;
+    $owned_set{"nsort"} = 1;
+    $owned_set{"splice"} = 1;
+    $owned_set{"each"} = 1;
+    $owned_set{"select"} = 1;
+    $owned_set{"tied"} = 1;
+    $owned_set{"tie"} = 1;
+    $owned_set{"abs"} = 1;
+    $owned_set{"int"} = 1;
+    $owned_set{"rand"} = 1;
+    $owned_set{"srand"} = 1;
+    $owned_set{"refcount"} = 1;
+    $owned_set{"sys::isweak"} = 1;
+    $owned_set{"time"} = 1;
+    $owned_set{"localtime"} = 1;
+    $owned_set{"gmtime"} = 1;
+    $owned_set{"math::sin"} = 1;
+    $owned_set{"math::cos"} = 1;
+    $owned_set{"math::tan"} = 1;
+    $owned_set{"math::sqrt"} = 1;
+    $owned_set{"math::pow"} = 1;
+    $owned_set{"math::log"} = 1;
+    $owned_set{"math::exp"} = 1;
+    $owned_set{"math::floor"} = 1;
+    $owned_set{"math::ceil"} = 1;
+    $owned_set{"math::abs"} = 1;
+    $owned_set{"math::round"} = 1;
+    $owned_set{"math::rand"} = 1;
+    $owned_set{"match"} = 1;
+    $owned_set{"replace"} = 1;
+    $owned_set{"replace_all"} = 1;
+    $owned_set{"captures"} = 1;
+    $owned_set{"named_captures"} = 1;
+    $owned_set{"sys::quotemeta"} = 1;
+    $owned_set{"bytes"} = 1;
+    $owned_set{"hash_new"} = 1;
+    $owned_set{"sys::file_exists"} = 1;
+    $owned_set{"sys::file_mtime"} = 1;
+    $owned_set{"sys::open"} = 1;
+    $owned_set{"sys::open_str"} = 1;
+    $owned_set{"sys::str_from_fh"} = 1;
+    $owned_set{"sys::slurp"} = 1;
+    $owned_set{"slurp"} = 1;
+    $owned_set{"sys::mkdir"} = 1;
+    $owned_set{"sys::seek"} = 1;
+    $owned_set{"sys::waitpid"} = 1;
+    $owned_set{"sys::getaddrinfo"} = 1;
+    $owned_set{"sys::socket_fd"} = 1;
+    $owned_set{"sys::socket_send"} = 1;
+    $owned_set{"sys::socket_set_nonblocking"} = 1;
+    $owned_set{"sys::socket_close"} = 1;
+    $owned_set{"sys::socket_flush"} = 1;
+    $owned_set{"sys::udp_bind"} = 1;
+    $owned_set{"sys::udp_sendto"} = 1;
+    $owned_set{"sys::array_default_capacity"} = 1;
+    $owned_set{"sys::hash_default_capacity"} = 1;
+    $owned_set{"sys::cstruct_new"} = 1;
+    $owned_set{"sys::cstruct_get_int"} = 1;
+    $owned_set{"sys::cstruct_get_double"} = 1;
+    $owned_set{"sys::cstruct_get_string"} = 1;
+    $owned_set{"sys::idiv"} = 1;
+    $owned_set{"sys::exception_trace"} = 1;
+    $owned_set{"async::select"} = 1;
+    $owned_set{"async::sleep"} = 1;
+    $owned_set{"async::cancelled"} = 1;
+    $owned_set{"async::spawn"} = 1;
+    $owned_set{"async::map"} = 1;
+    $owned_set{"thread::tls_get"} = 1;
+    $owned_set{"thread::tls_exists"} = 1;
+    $owned_set{"thread::tls_delete"} = 1;
+    $owned_set{"substr_bytes"} = 1;
+    $owned_set{"char_at"} = 1;
+    $owned_set{"byte_at"} = 1;
+    $owned_set{"sb_new"} = 1;
+    $owned_set{"sb_to_string"} = 1;
+    $owned_set{"sb_length"} = 1;
+    $owned_set{"sys::chdir"} = 1;
+    $owned_set{"sys::chroot"} = 1;
+    $owned_set{"sys::rmdir"} = 1;
+    $owned_set{"sys::unlink"} = 1;
+    $owned_set{"sys::link"} = 1;
+    $owned_set{"sys::symlink"} = 1;
+    $owned_set{"sys::readlink"} = 1;
+    $owned_set{"sys::rename"} = 1;
+    $owned_set{"sys::chmod"} = 1;
+    $owned_set{"sys::access"} = 1;
+    $owned_set{"sys::umask"} = 1;
+    $owned_set{"sys::getuid"} = 1;
+    $owned_set{"sys::geteuid"} = 1;
+    $owned_set{"sys::getgid"} = 1;
+    $owned_set{"sys::getegid"} = 1;
+    $owned_set{"sys::kill"} = 1;
+    $owned_set{"sys::signal"} = 1;
+    $owned_set{"sys::alarm"} = 1;
+    $owned_set{"sys::stat"} = 1;
+    $owned_set{"sys::lstat"} = 1;
+    $owned_set{"sys::isatty"} = 1;
+    $owned_set{"sys::is_dir"} = 1;
+    $owned_set{"sys::is_file"} = 1;
+    $owned_set{"sys::dir_exists"} = 1;
+    $owned_set{"sys::file_size"} = 1;
+    $owned_set{"sys::strerror"} = 1;
+    $owned_set{"sys::errno"} = 1;
+    $owned_set{"sys::mktime"} = 1;
+    $owned_set{"sys::strftime"} = 1;
+    $owned_set{"sys::ctime"} = 1;
+    $owned_set{"sys::gettimeofday"} = 1;
+    $owned_set{"sys::hires_time"} = 1;
+    $owned_set{"sys::tv_interval"} = 1;
+    $owned_set{"sys::nanosleep"} = 1;
+    $owned_set{"sys::clock_gettime"} = 1;
+    $owned_set{"sys::clock_getres"} = 1;
+    $owned_set{"sys::dl_open"} = 1;
+    $owned_set{"sys::dl_sym"} = 1;
+    $owned_set{"sys::dl_error"} = 1;
+    $owned_set{"sys::dl_call_export_info"} = 1;
+    $owned_set{"sys::dl_call_version"} = 1;
+    $owned_set{"sys::int_ptr"} = 1;
+    $owned_set{"sys::num_ptr"} = 1;
+    $owned_set{"sys::str_ptr"} = 1;
+    $owned_set{"sys::ptr_deref_int"} = 1;
+    $owned_set{"sys::ptr_deref_num"} = 1;
+    $owned_set{"sys::ptr_deref_str"} = 1;
+    $owned_set{"sys::readdir"} = 1;
+    $owned_set{"sys::readdir_full"} = 1;
+    $owned_set{"sys::realpath"} = 1;
+    $owned_set{"sys::dirname"} = 1;
+    $owned_set{"sys::basename"} = 1;
+    $owned_set{"sys::glob"} = 1;
+    $owned_set{"sys::fnmatch"} = 1;
+    $owned_set{"sys::file_ext"} = 1;
+    $owned_set{"sys::path_join"} = 1;
+    $owned_set{"sys::tell"} = 1;
+    $owned_set{"sys::rewind"} = 1;
+    $owned_set{"sys::eof"} = 1;
+    $owned_set{"sys::flush"} = 1;
+    $owned_set{"sys::readline"} = 1;
+    $owned_set{"sys::open_fd"} = 1;
+    $owned_set{"sys::gethostbyname"} = 1;
+    $owned_set{"sys::gethostbyname_all"} = 1;
+    $owned_set{"sys::gethostname"} = 1;
+    $owned_set{"math::atan2"} = 1;
+    $owned_set{"math::fabs"} = 1;
+    $owned_set{"math::fmod"} = 1;
+    $owned_set{"math::asin"} = 1;
+    $owned_set{"math::acos"} = 1;
+    $owned_set{"math::atan"} = 1;
+    $owned_set{"math::sinh"} = 1;
+    $owned_set{"math::cosh"} = 1;
+    $owned_set{"math::tanh"} = 1;
+    $owned_set{"math::log10"} = 1;
+    $owned_set{"math::hypot"} = 1;
+    $owned_set{"math::cbrt"} = 1;
+    $owned_set{"math::isnan"} = 1;
+    $owned_set{"math::isinf"} = 1;
+    $owned_set{"math::isfinite"} = 1;
+    $owned_set{"math::fmax"} = 1;
+    $owned_set{"math::fmin"} = 1;
+    $owned_set{"math::copysign"} = 1;
+    $owned_set{"math::remainder"} = 1;
+    $owned_set{"math::trunc"} = 1;
+    $owned_set{"math::ldexp"} = 1;
+    $owned_set{"math::frexp"} = 1;
+    $owned_set{"math::modf"} = 1;
+    $owned_set{"math::scalbn"} = 1;
+    $owned_set{"sys::getenv"} = 1;
+    $owned_set{"sys::setenv"} = 1;
+    $owned_set{"sys::unsetenv"} = 1;
+    $owned_set{"sys::popen"} = 1;
+    $owned_set{"sys::pclose"} = 1;
+    $owned_set{"sys::mkstemp"} = 1;
+    $owned_set{"sys::mkdtemp"} = 1;
+    $owned_set{"sys::tmpfile"} = 1;
+    $owned_set{"sys::sleep"} = 1;
+    $owned_set{"sys::usleep"} = 1;
+    $owned_set{"sys::qx"} = 1;
+    $owned_set{"sys::truncate"} = 1;
+    $owned_set{"sys::ftruncate"} = 1;
+    $owned_set{"sys::statvfs"} = 1;
+    $owned_set{"sys::fstatvfs"} = 1;
+    $owned_set{"sys::dup"} = 1;
+    $owned_set{"dumper"} = 1;
+    $owned_set{"dumper_str"} = 1;
+    $owned_set{"sys::atoi"} = 1;
+    $owned_set{"sys::atof"} = 1;
+    $owned_set{"sys::strtol"} = 1;
+    $owned_set{"sys::strtod"} = 1;
+    $owned_set{"sys::ttyname"} = 1;
+    $owned_set{"sys::tcgetattr"} = 1;
+    $owned_set{"sys::tcsetattr"} = 1;
+    $owned_set{"sys::cfgetospeed"} = 1;
+    $owned_set{"sys::cfsetospeed"} = 1;
+    $owned_set{"sys::cfgetispeed"} = 1;
+    $owned_set{"sys::cfsetispeed"} = 1;
+    $owned_set{"sys::tcflush"} = 1;
+    $owned_set{"sys::tcdrain"} = 1;
+    $owned_set{"sys::term_enable_raw"} = 1;
+    $owned_set{"sys::term_disable_raw"} = 1;
+    $owned_set{"sys::term_rows"} = 1;
+    $owned_set{"sys::term_cols"} = 1;
+    $owned_set{"sys::read_byte"} = 1;
+    $owned_set{"sys::opendir"} = 1;
+    $owned_set{"sys::readdir_next"} = 1;
+    $owned_set{"sys::closedir"} = 1;
+    $owned_set{"sys::ioctl"} = 1;
+    $owned_set{"sys::fcntl"} = 1;
+    $owned_set{"sys::flock"} = 1;
+    $owned_set{"async::channel"} = 1;
+    $owned_set{"async::mutex"} = 1;
+    $owned_set{"async::atomic"} = 1;
+    $owned_set{"async::recv"} = 1;
+    $owned_set{"async::try_recv"} = 1;
+    $owned_set{"async::all"} = 1;
+    $owned_set{"async::race"} = 1;
+    $owned_set{"async::timeout"} = 1;
+    $owned_set{"thread::create"} = 1;
+    $owned_set{"thread::join"} = 1;
+    $owned_set{"sys::sigprocmask"} = 1;
+    $owned_set{"sys::raise"} = 1;
+    $owned_set{"sys::killpg"} = 1;
+    $owned_set{"sys::getpwnam"} = 1;
+    $owned_set{"sys::getpwuid"} = 1;
+    $owned_set{"sys::getgrnam"} = 1;
+    $owned_set{"sys::getgrgid"} = 1;
+    $owned_set{"sys::nice"} = 1;
+    $owned_set{"sys::getpriority"} = 1;
+    $owned_set{"sys::setpriority"} = 1;
+    $owned_set{"sys::getrusage"} = 1;
+    $owned_set{"sys::getrlimit"} = 1;
+    $owned_set{"sys::setrlimit"} = 1;
+    return \%owned_set;
+}
+
 func needs_temp_cleanup(scalar $cg, scalar $expr) int {
     my int $type = $expr->{"type"};
 
@@ -3283,205 +3646,14 @@ func needs_temp_cleanup(scalar $cg, scalar $expr) int {
         if (length($name) > 6 && substr($name, 0, 6) eq "core::") {
             $name = "sys::" . substr($name, 6, length($name) - 6);
         }
-        # Built-in functions that return owned StradaValue*
-        if ($name eq "chr" || $name eq "ord" || $name eq "sys::byte" ||
-            $name eq "sys::base64_encode" || $name eq "sys::base64_decode" ||
-            $name eq "sys::pack" || $name eq "sys::unpack" ||
-            $name eq "sys::hex" ||
-            $name eq "sys::ord_byte" || $name eq "sys::get_byte" ||
-            $name eq "sys::vec_get" || $name eq "sys::vec_set" ||
-            $name eq "sys::byte_length" || $name eq "sys::byte_substr" ||
-            $name eq "sys::set_byte" ||
-            $name eq "sys::random_bytes" || $name eq "sys::random_bytes_hex" ||
-            $name eq "sys::global_get" || $name eq "sys::global_exists" || $name eq "sys::global_keys" ||
-            $name eq "sys::stack_trace" ||
-            $name eq "sys::caller" ||
-            $name eq "sys::full_profile_start" || $name eq "sys::full_profile_stop" ||
-            $name eq "sys::gc_collections" || $name eq "sys::gc_freed" || $name eq "sys::arena_active" ||
-            $name eq "sys::set_recursion_limit" || $name eq "sys::get_recursion_limit" ||
-            $name eq "sys::epoll_create" || $name eq "sys::epoll_add" ||
-            $name eq "sys::epoll_mod" || $name eq "sys::epoll_del" ||
-            $name eq "sys::epoll_wait" || $name eq "sys::eventfd" ||
-            $name eq "sys::eventfd_signal" || $name eq "sys::eventfd_drain" ||
-            $name eq "sys::socket_try_recv" || $name eq "sys::socket_try_send" ||
-            $name eq "sys::socket_try_accept" || $name eq "async::io_wait" ||
-            $name eq "sys::coro_create" || $name eq "sys::coro_resume" ||
-            $name eq "sys::coro_yield_io" || $name eq "sys::coro_state" ||
-            $name eq "sys::coro_wait_fd" || $name eq "sys::coro_wait_mask" ||
-            $name eq "sys::coro_wait_timeout" || $name eq "sys::coro_result" ||
-            $name eq "sys::coro_free" || $name eq "sys::mono_ms" ||
-            $name eq "sys::coro_error" || $name eq "sys::socket_try_connect" ||
-            $name eq "async::resolve" ||
-            $name eq "sys::socket_connect_check" || $name eq "sys::socket_try_readline" ||
-            $name eq "sys::wantarray" || $name eq "sys::wantscalar" || $name eq "sys::wanthash" ||
-            $name eq "utf8::is_utf8" || $name eq "utf8::valid" ||
-            $name eq "utf8::encode" || $name eq "utf8::decode" ||
-            $name eq "utf8::downgrade" || $name eq "utf8::upgrade" ||
-            $name eq "utf8::unicode_to_native" ||
-            $name eq "utf8::normalize" || $name eq "utf8::nfc" ||
-            $name eq "utf8::nfd" || $name eq "utf8::nfkc" || $name eq "utf8::nfkd" ||
-            $name eq "substr" || $name eq "length" || $name eq "index" || $name eq "rindex" ||
-            $name eq "uc" || $name eq "upper" || $name eq "lc" || $name eq "lower" || $name eq "ucfirst" || $name eq "lcfirst" ||
-            $name eq "trim" || $name eq "ltrim" || $name eq "rtrim" ||
-            $name eq "chomp" || $name eq "chop" ||
-            # String-repeat builtin + type/cast conversions: each allocates an
-            # owned StradaValue* (str for repeat/typeof/cast_str, heap num for
-            # cast_num). Were missing here, so they leaked when used as a temp
-            # argument (e.g. say("x: " . repeat("*",3)) / concat operands).
-            # cast_int is intentionally NOT listed — it yields an immortal
-            # tagged int that needs no cleanup.
-            $name eq "repeat" || $name eq "typeof" ||
-            $name eq "cast_str" || $name eq "cast_num" ||
-            $name eq "sprintf" || $name eq "sys::sprintf" || $name eq "join" || $name eq "reverse" ||
-            $name eq "split" || $name eq "keys" || $name eq "values" ||
-            $name eq "defined" || $name eq "exists" || $name eq "delete" ||
-            $name eq "ref" || $name eq "reftype" || $name eq "is_ref" || $name eq "is_refto" ||
-            $name eq "deref" || $name eq "derefto" ||
-            # deref_array / deref_hash builtins call the _owned runtime
-            # variant — caller must decref the returned StradaValue*.
-            $name eq "deref_array" || $name eq "deref_hash" ||
-            # bless is handled earlier — its cleanup-ness mirrors its first arg.
-            $name eq "blessed" ||
-            $name eq "isa" || $name eq "can" ||
-            $name eq "UNIVERSAL::isa" || $name eq "UNIVERSAL::can" ||
-            $name eq "size" || $name eq "scalar" ||
-            $name eq "push" || $name eq "pop" || $name eq "shift" || $name eq "unshift" ||
-            $name eq "sort" || $name eq "nsort" ||
-            $name eq "splice" || $name eq "each" || $name eq "select" || $name eq "tied" || $name eq "tie" ||
-            $name eq "abs" || $name eq "int" || $name eq "rand" || $name eq "srand" ||
-            $name eq "refcount" || $name eq "sys::isweak" ||
-            $name eq "time" || $name eq "localtime" || $name eq "gmtime" ||
-            $name eq "math::sin" || $name eq "math::cos" || $name eq "math::tan" ||
-            $name eq "math::sqrt" || $name eq "math::pow" || $name eq "math::log" ||
-            $name eq "math::exp" || $name eq "math::floor" || $name eq "math::ceil" ||
-            $name eq "math::abs" || $name eq "math::round" ||
-            $name eq "math::rand" ||
-            $name eq "match" || $name eq "replace" || $name eq "replace_all" ||
-            $name eq "captures" || $name eq "named_captures" ||
-            $name eq "sys::quotemeta" ||
-            $name eq "bytes" || $name eq "hash_new" ||
-            $name eq "sys::file_exists" || $name eq "sys::file_mtime" ||
-            $name eq "sys::open" || $name eq "sys::open_str" || $name eq "sys::str_from_fh" ||
-            $name eq "sys::slurp" || $name eq "slurp" ||
-            $name eq "sys::mkdir" || $name eq "sys::seek" || $name eq "sys::waitpid" ||
-            $name eq "sys::getaddrinfo" ||
-            $name eq "sys::socket_fd" || $name eq "sys::socket_send" ||
-            $name eq "sys::socket_set_nonblocking" ||
-            # socket_close and socket_flush now return undef (StradaValue*)
-            # so callers must decref the discarded result.
-            $name eq "sys::socket_close" || $name eq "sys::socket_flush" ||
-            $name eq "sys::udp_bind" || $name eq "sys::udp_sendto" ||
-            $name eq "sys::array_default_capacity" || $name eq "sys::hash_default_capacity" ||
-            $name eq "sys::cstruct_new" || $name eq "sys::cstruct_get_int" ||
-            $name eq "sys::cstruct_get_double" || $name eq "sys::cstruct_get_string" ||
-            $name eq "sys::idiv" || $name eq "sys::exception_trace" ||
-            # Concurrency ergonomics (2026-06): all return owned SVs
-            $name eq "async::select" || $name eq "async::sleep" ||
-            $name eq "async::cancelled" || $name eq "async::spawn" ||
-            $name eq "async::map" ||
-            $name eq "thread::tls_get" || $name eq "thread::tls_exists" ||
-            $name eq "thread::tls_delete" ||
-            # Inline codegen builtins that return owned StradaValue*
-            $name eq "substr_bytes" || $name eq "char_at" || $name eq "byte_at" ||
-            $name eq "sb_new" || $name eq "sb_to_string" || $name eq "sb_length" ||
-            # File system ops
-            $name eq "sys::chdir" || $name eq "sys::chroot" ||
-            $name eq "sys::rmdir" || $name eq "sys::unlink" ||
-            $name eq "sys::link" || $name eq "sys::symlink" || $name eq "sys::readlink" ||
-            $name eq "sys::rename" || $name eq "sys::chmod" || $name eq "sys::access" ||
-            $name eq "sys::umask" ||
-            # User/group/process
-            $name eq "sys::getuid" || $name eq "sys::geteuid" ||
-            $name eq "sys::getgid" || $name eq "sys::getegid" ||
-            $name eq "sys::kill" || $name eq "sys::signal" || $name eq "sys::alarm" ||
-            # File stat/test
-            $name eq "sys::stat" || $name eq "sys::lstat" || $name eq "sys::isatty" ||
-            $name eq "sys::is_dir" || $name eq "sys::is_file" ||
-            $name eq "sys::dir_exists" || $name eq "sys::file_size" ||
-            # Error/errno
-            $name eq "sys::strerror" || $name eq "sys::errno" ||
-            # Time functions
-            $name eq "sys::mktime" || $name eq "sys::strftime" || $name eq "sys::ctime" ||
-            $name eq "sys::gettimeofday" || $name eq "sys::hires_time" ||
-            $name eq "sys::tv_interval" || $name eq "sys::nanosleep" ||
-            $name eq "sys::clock_gettime" || $name eq "sys::clock_getres" ||
-            # Dynamic loading
-            $name eq "sys::dl_open" || $name eq "sys::dl_sym" || $name eq "sys::dl_error" ||
-            $name eq "sys::dl_call_export_info" || $name eq "sys::dl_call_version" ||
-            # Pointer conversion
-            $name eq "sys::int_ptr" || $name eq "sys::num_ptr" || $name eq "sys::str_ptr" ||
-            $name eq "sys::ptr_deref_int" || $name eq "sys::ptr_deref_num" || $name eq "sys::ptr_deref_str" ||
-            # Directory/path
-            $name eq "sys::readdir" || $name eq "sys::readdir_full" ||
-            $name eq "sys::realpath" || $name eq "sys::dirname" || $name eq "sys::basename" ||
-            $name eq "sys::glob" || $name eq "sys::fnmatch" ||
-            $name eq "sys::file_ext" || $name eq "sys::path_join" ||
-            # File I/O
-            $name eq "sys::tell" || $name eq "sys::rewind" || $name eq "sys::eof" ||
-            $name eq "sys::flush" || $name eq "sys::readline" ||
-            $name eq "sys::open_fd" ||
-            # Network
-            $name eq "sys::gethostbyname" || $name eq "sys::gethostbyname_all" ||
-            $name eq "sys::gethostname" ||
-            # Math two-arg
-            $name eq "math::atan2" || $name eq "math::fabs" || $name eq "math::fmod" ||
-            # Math one-arg (trig/hyperbolic)
-            $name eq "math::asin" || $name eq "math::acos" || $name eq "math::atan" ||
-            $name eq "math::sinh" || $name eq "math::cosh" || $name eq "math::tanh" ||
-            $name eq "math::log10" ||
-            # Math additional
-            $name eq "math::hypot" || $name eq "math::cbrt" ||
-            $name eq "math::isnan" || $name eq "math::isinf" || $name eq "math::isfinite" ||
-            $name eq "math::fmax" || $name eq "math::fmin" ||
-            $name eq "math::copysign" || $name eq "math::remainder" ||
-            $name eq "math::trunc" || $name eq "math::ldexp" ||
-            $name eq "math::frexp" || $name eq "math::modf" || $name eq "math::scalbn" ||
-            # Environment/process
-            $name eq "sys::getenv" || $name eq "sys::setenv" || $name eq "sys::unsetenv" ||
-            $name eq "sys::popen" || $name eq "sys::pclose" ||
-            $name eq "sys::mkstemp" || $name eq "sys::mkdtemp" || $name eq "sys::tmpfile" ||
-            $name eq "sys::sleep" || $name eq "sys::usleep" ||
-            $name eq "sys::qx" ||
-            # File system additional
-            $name eq "sys::truncate" || $name eq "sys::ftruncate" ||
-            $name eq "sys::statvfs" || $name eq "sys::fstatvfs" ||
-            $name eq "sys::dup" ||
-            # Misc
-            $name eq "dumper" || $name eq "dumper_str" ||
-            # String conversion
-            $name eq "sys::atoi" || $name eq "sys::atof" ||
-            $name eq "sys::strtol" || $name eq "sys::strtod" ||
-            # Terminal/TTY
-            $name eq "sys::ttyname" ||
-            $name eq "sys::tcgetattr" || $name eq "sys::tcsetattr" ||
-            $name eq "sys::cfgetospeed" || $name eq "sys::cfsetospeed" ||
-            $name eq "sys::cfgetispeed" || $name eq "sys::cfsetispeed" ||
-            $name eq "sys::tcflush" || $name eq "sys::tcdrain" ||
-            $name eq "sys::term_enable_raw" || $name eq "sys::term_disable_raw" ||
-            $name eq "sys::term_rows" || $name eq "sys::term_cols" ||
-            $name eq "sys::read_byte" ||
-            # Directory iteration
-            $name eq "sys::opendir" || $name eq "sys::readdir_next" || $name eq "sys::closedir" ||
-            # Advanced I/O
-            $name eq "sys::ioctl" || $name eq "sys::fcntl" || $name eq "sys::flock" ||
-            # Async/threading
-            $name eq "async::channel" || $name eq "async::mutex" || $name eq "async::atomic" ||
-            $name eq "async::recv" || $name eq "async::try_recv" ||
-            $name eq "async::all" || $name eq "async::race" ||
-            $name eq "async::timeout" ||
-            # thread::create returns an owned handle (cpointer); thread::join
-            # returns the thread's owned result. Both leak as temp args (e.g.
-            # push(@t, thread::create(...))) without cleanup.
-            $name eq "thread::create" || $name eq "thread::join" ||
-            # Signals (advanced)
-            $name eq "sys::sigprocmask" || $name eq "sys::raise" || $name eq "sys::killpg" ||
-            # User/group database
-            $name eq "sys::getpwnam" || $name eq "sys::getpwuid" ||
-            $name eq "sys::getgrnam" || $name eq "sys::getgrgid" ||
-            # Resource/priority
-            $name eq "sys::nice" || $name eq "sys::getpriority" || $name eq "sys::setpriority" ||
-            $name eq "sys::getrusage" || $name eq "sys::getrlimit" || $name eq "sys::setrlimit") {
-            return 1;
+        # Built-in functions that return owned StradaValue*: single hash
+        # probe against the set built by build_owned_call_builtins().
+        my scalar $owned_set = $cg->{"owned_call_builtins"};
+        if ($owned_set != 0) {
+            my scalar $owned_hit = $owned_set->{$name};
+            if ($owned_hit != 0) {
+                return 1;
+            }
         }
         # For user-defined functions, look up return type in $cg->{"functions"}
         my str $c_name = sanitize_name($name);

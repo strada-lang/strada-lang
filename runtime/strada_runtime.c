@@ -21060,6 +21060,23 @@ void strada_init_proctitle(int argc, char **argv) {
             if (end > strada_argv_end) strada_argv_end = end;
         }
     }
+
+    /* STRADA_GC=off (or 0) disables the cycle collector for this process.
+     * Every generated main() calls this function first, so it doubles as
+     * process-startup init. One-shot batch programs free everything via
+     * refcounting + exit, making candidate buffering and periodic
+     * collections pure overhead — the strada wrapper sets this for stradac
+     * itself (~6% of compile time went to cc_tab_slot/cc_each_child).
+     * Placed here rather than as a compiler-emitted gc_disable() call
+     * because the frozen bootstrap can't compile new builtins in stage 1. */
+#ifdef STRADA_CYCLE_GC
+    {
+        const char *gc_env = getenv("STRADA_GC");
+        if (gc_env && (strcmp(gc_env, "off") == 0 || strcmp(gc_env, "0") == 0)) {
+            cc_enabled = 0;
+        }
+    }
+#endif
 }
 
 StradaValue* strada_setproctitle(StradaValue *title_val) {

@@ -902,12 +902,15 @@ info "Compiling $ACTUAL_INPUT -> $C_FILE"
 if [ "$VERBOSE" -eq 1 ]; then
     STRADAC_FLAGS="$STRADAC_FLAGS -v"
 fi
+# STRADA_GC=off: stradac is a one-shot batch process — disabling the cycle
+# collector (runtime env check in strada_init_proctitle) cuts ~15% off
+# compile time. Has no effect on the PROGRAM being compiled.
 if [ -n "$STRADAC_FLAGS" ]; then
-    if ! run_cmd "$STRADAC" $STRADAC_FLAGS "$ACTUAL_INPUT" "$C_FILE"; then
+    if ! run_cmd env STRADA_GC=off "$STRADAC" $STRADAC_FLAGS "$ACTUAL_INPUT" "$C_FILE"; then
         error "Strada compilation failed"
     fi
 else
-    if ! run_cmd "$STRADAC" "$ACTUAL_INPUT" "$C_FILE"; then
+    if ! run_cmd env STRADA_GC=off "$STRADAC" "$ACTUAL_INPUT" "$C_FILE"; then
         error "Strada compilation failed"
     fi
 fi

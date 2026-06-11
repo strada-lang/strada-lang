@@ -207,7 +207,7 @@ $(COMPILER_DIR)/Combined.strada: $(COMPILER_DIR)/AST.strada $(COMPILER_DIR)/Lexe
 # Stage 1: Compile combined source to C using bootstrap compiler
 $(COMPILER_DIR)/Combined_stage1.c: $(COMPILER_DIR)/Combined.strada $(BOOTSTRAP_STRADAC)
 	@echo "=== Stage 1: Compiling self-hosting compiler (bootstrap -> C) ==="
-	$(BOOTSTRAP_STRADAC) $(COMPILER_DIR)/Combined.strada $(COMPILER_DIR)/Combined_stage1.c
+	STRADA_GC=off $(BOOTSTRAP_STRADAC) $(COMPILER_DIR)/Combined.strada $(COMPILER_DIR)/Combined_stage1.c
 
 # Build bootstrap compiler if it doesn't exist
 $(BOOTSTRAP_STRADAC):
@@ -225,7 +225,7 @@ stage1: stradac_stage1
 # Stage 2: Self-hosting compiler recompiles itself (with proper cleanup)
 $(COMPILER_DIR)/Combined.c: $(COMPILER_DIR)/Combined.strada stradac_stage1
 	@echo "=== Stage 2: Self-hosting compiler recompiles itself ==="
-	./stradac_stage1 $(COMPILER_DIR)/Combined.strada $(COMPILER_DIR)/Combined.c
+	STRADA_GC=off ./stradac_stage1 $(COMPILER_DIR)/Combined.strada $(COMPILER_DIR)/Combined.c
 
 # Build the final self-hosting compiler executable
 stradac: $(COMPILER_DIR)/Combined.c $(RUNTIME_OBJ)
@@ -247,7 +247,7 @@ quick: $(COMPILER_DIR)/Combined.strada $(RUNTIME_OBJ)
 	    exit 1; \
 	fi
 	@echo "=== quick: regenerating Combined.c with existing ./stradac ==="
-	./stradac $(COMPILER_DIR)/Combined.strada $(COMPILER_DIR)/Combined.c
+	STRADA_GC=off ./stradac $(COMPILER_DIR)/Combined.strada $(COMPILER_DIR)/Combined.c
 	@echo "=== quick: linking ./stradac at -O0 ==="
 	$(CC) $(FAST_CFLAGS) -Wno-unused-function -rdynamic -o stradac $(COMPILER_DIR)/Combined.c $(RUNTIME_OBJ) -I$(RUNTIME_DIR) $(LDFLAGS)
 	@echo "✓ quick rebuild done (./stradac, -O0; not bootstrap-verified)"

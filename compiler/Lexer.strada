@@ -74,39 +74,56 @@ func lex_advance(scalar $lexer) void {
     $lexer->{"pos"} = $lexer->{"pos"} + 1;
 }
 
+# Hot path: scan with locals (source/pos cached once) instead of going
+# through lex_current_code/lex_advance, which re-probe the lexer hash
+# several times per character.
 func lex_skip_whitespace(scalar $lexer) void {
-    while (1) {
-        my int $code = lex_current_code($lexer);
+    my scalar $ws_source = $lexer->{"source"};
+    my int $ws_pos = $lexer->{"pos"};
+    my int $ws_len = $lexer->{"length"};
+    my int $ws_start = $ws_pos;
+    my int $ws_line = $lexer->{"line"};
+    my int $ws_column = $lexer->{"column"};
 
-        if ($code == 0) {
-            return;
-        }
+    while ($ws_pos < $ws_len) {
+        my int $code = char_at($ws_source, $ws_pos);
 
         # Space=32, Tab=9, LF=10, CR=13
-        if ($code == 32 || $code == 9 || $code == 10 || $code == 13) {
-            lex_advance($lexer);
+        if ($code == 10) {
+            $ws_line = $ws_line + 1;
+            $ws_column = 1;
+            $ws_pos = $ws_pos + 1;
+        } elsif ($code == 32 || $code == 9 || $code == 13) {
+            $ws_column = $ws_column + 1;
+            $ws_pos = $ws_pos + 1;
         } else {
-            return;
+            last;
         }
+    }
+
+    if ($ws_pos != $ws_start) {
+        $lexer->{"pos"} = $ws_pos;
+        $lexer->{"line"} = $ws_line;
+        $lexer->{"column"} = $ws_column;
     }
 }
 
 func lex_skip_comment(scalar $lexer) void {
-    my int $code = lex_current_code($lexer);
-
-    if ($code != 35) {  # '#'
+    if (lex_current_code($lexer) != 35) {  # '#'
         return;
     }
 
-    # Skip until end of line
-    while (1) {
-        lex_advance($lexer);
-        $code = lex_current_code($lexer);
-
-        if ($code == 0 || $code == 10) {  # EOF or '\n'
-            return;
-        }
+    # Skip until end of line (locals-cached scan; stops AT the newline,
+    # matching the old per-char loop). Comments contain no newlines, so
+    # line stays put and column just moves by the consumed count.
+    my scalar $cm_source = $lexer->{"source"};
+    my int $cm_pos = $lexer->{"pos"} + 1;
+    my int $cm_len = $lexer->{"length"};
+    while ($cm_pos < $cm_len && char_at($cm_source, $cm_pos) != 10) {
+        $cm_pos = $cm_pos + 1;
     }
+    $lexer->{"column"} = $lexer->{"column"} + ($cm_pos - $lexer->{"pos"});
+    $lexer->{"pos"} = $cm_pos;
 }
 
 func lex_skip_block_comment(scalar $lexer) void {
@@ -234,23 +251,28 @@ func lex_is_ident_char(int $code) int {
     return 0;
 }
 
+# Hot path: scan to the end of the identifier with locals, then take ONE
+# byte-substring — the old loop allocated a string per character (chr +
+# sb_append) and re-probed the lexer hash per character. Identifiers
+# contain no newlines, so line is unchanged and column moves by the
+# consumed count.
 func lex_read_identifier(scalar $lexer) str {
-    my scalar $sb = sb_new();
+    my scalar $id_source = $lexer->{"source"};
+    my int $id_pos = $lexer->{"pos"};
+    my int $id_len = $lexer->{"length"};
+    my int $id_start = $id_pos;
 
-    while (1) {
-        my int $code = lex_current_code($lexer);
-
-        if ($code == 0) {
-            return sb_to_string($sb);
-        }
-
-        if (lex_is_ident_char($code) == 1) {
-            sb_append($sb, chr($code));
-            lex_advance($lexer);
+    while ($id_pos < $id_len) {
+        if (lex_is_ident_char(char_at($id_source, $id_pos)) == 1) {
+            $id_pos = $id_pos + 1;
         } else {
-            return sb_to_string($sb);
+            last;
         }
     }
+
+    $lexer->{"column"} = $lexer->{"column"} + ($id_pos - $id_start);
+    $lexer->{"pos"} = $id_pos;
+    return substr_bytes($id_source, $id_start, $id_pos - $id_start);
 }
 
 func lex_is_hex_digit_code(int $code) int {

@@ -188,6 +188,12 @@ func print_usage() void {
 }
 
 func main() int {
+    # NOTE: the strada wrapper invokes stradac with STRADA_GC=off — the
+    # compiler is a one-shot batch process (everything freed by refcount +
+    # exit), so cycle-collector candidate buffering was ~6% of compile
+    # time. The switch lives in the runtime's strada_init_proctitle (env
+    # check) because the frozen bootstrap can't compile new builtins like
+    # core::gc_disable() into stage 1.
     my int $arg_count = size(@ARGV);
 
     # Parse command-line arguments
