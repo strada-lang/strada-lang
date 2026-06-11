@@ -350,6 +350,8 @@ All tokens recognized by the lexer:
 
 All functions registered in `Semantic.strada` `get_builtins()`:
 
+**Namespaced aliases**: `re::`/`str::`/`sb::` and `core::`-qualified spellings of Strada-specific bare builtins (regex functions, StringBuilder, `hash_new/get/set`, `deref*`/`refto*`/`is_ref`/`refcount`, `dumper*`, `stacktrace*`, `set_package`/`inherit`/`blessed`) are normalized to the canonical bare names at parse time by `ast_normalize_call_name()` (`AST.strada`, called from `ast_new_call()`). Nothing downstream — Semantic, CodeGen, `needs_temp_cleanup` — ever sees the alias spellings; extend that one map to add aliases, never per-name checks in CodeGen. Supporting lexer rule: a word immediately followed by `::` always lexes as `IDENT` (never a keyword), which is what lets the `str` type keyword double as the `str::` namespace.
+
 ### I/O Functions
 `say`, `print`, `printf`, `sprintf`, `warn`, `die`, `throw`, `readline`
 

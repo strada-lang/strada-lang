@@ -489,6 +489,15 @@ make interpreter
 - **`utf8::`** - UTF-8 validation: `utf8::is_utf8()`, `utf8::valid()`, `utf8::downgrade()`, etc.
 - **`usb::`** - USB device access (requires libusb): `usb::open_device()`, `usb::bulk_transfer()`, etc.
 - **`ssl::`** - TLS/SSL sockets: `ssl::connect()`, `ssl::read()`, `ssl::write()`, etc.
+- **`re::`** - Regex function forms (preferred): `re::match()`, `re::replace()` (regex, **first** match), `re::replace_all()`, `re::capture()`, `re::captures()`, `re::named_captures()`
+- **`str::`** - Literal (non-regex) string replace (preferred): `str::replace()` (**all** occurrences), `str::replace_first()`
+- **`sb::`** - StringBuilder (preferred): `sb::new()`, `sb::append()`, `sb::to_string()`, `sb::length()`, `sb::clear()`, `sb::free()`
+
+#### Namespaced builtin aliases (2026-06)
+
+Strada-specific builtins that historically lived in the bare namespace now have preferred namespaced spellings; the bare names remain as legacy aliases. Besides `re::`/`str::`/`sb::` above, these bare builtins gained `core::`-qualified forms: `hash_new/hash_get/hash_set`, `deref/deref_array/deref_hash/deref_set`, `refto/is_refto/derefto/is_ref`, `refcount`, `dumper/dumper_str`, `stacktrace/stacktrace_str`, `set_package/inherit/blessed`. Perl-heritage builtins (`say`, `push`, `substr`, ...) stay unqualified.
+
+**Mechanism** (keep it this way): all aliases normalize to the canonical bare names in ONE place — `ast_normalize_call_name()` in `compiler/AST.strada`, called from `ast_new_call()` at parse time. Semantic, CodeGen, and every codegen predicate (`needs_temp_cleanup` etc.) only ever see the canonical spelling, so there is nothing to keep in sync downstream (see the name-resolution unification rule in the CodeGen checklist). To add a new alias, extend that map — do NOT add per-name alias checks in CodeGen. One lexer assist makes `str::` possible: a word immediately followed by `::` is always lexed as IDENT, never as a keyword (so the `str` type keyword can name the namespace). `re`, `str`, and `sb` are effectively reserved package names for `pkg::func()` calls. Test: `examples/test_namespaced_builtins.strada` (registered in `t/t_core.sh`).
 
 ### OOP System
 

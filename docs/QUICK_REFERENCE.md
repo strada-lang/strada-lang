@@ -744,11 +744,16 @@ $str =~ tr/ / /s;               # Squeeze repeated spaces (s flag)
 $str =~ tr/a-z/A-Z/r;          # Return copy, don't modify original (r flag)
 $str =~ y/abc/xyz/;             # y/// is alias for tr///
 
-# Function-based alternatives
-if (match($str, "pattern")) { ... }
-my str $new = replace($str, "old", "new");
-my str $new = replace_all($str, "old", "new");
+# Function-based alternatives (re:: = regex, str:: = literal string)
+if (re::match($str, "pattern")) { ... }
+my array @caps = re::captures();                       # last match's groups
+my str $new = re::replace($str, "\\d+", "N");          # regex, first match
+my str $new = re::replace_all($str, "\\d+", "N");      # regex, all matches
+my str $new = str::replace($str, "old", "new");        # literal, all occurrences
+my str $new = str::replace_first($str, "old", "new");  # literal, first only
 my array @parts = split(",", $csv);
+# Legacy bare spellings (match, replace, replace_all, str_replace,
+# regex_replace, ...) still work as aliases.
 ```
 
 ## Modules
@@ -902,7 +907,7 @@ if ($dog->isa("Animal")) { ... }  # Same as isa($dog, "Animal")
 if ($dog->can("speak")) { ... }   # Check if method exists
 
 # Get blessed package
-my str $pkg = blessed($dog);      # "Dog"
+my str $pkg = core::blessed($dog);  # "Dog" (bare blessed() is a legacy alias)
 
 # Current package
 say(__PACKAGE__);                 # Returns current package name at runtime
@@ -914,8 +919,8 @@ __PACKAGE__::helper("arg");       # Explicit form
 # All three resolve to PackageName_helper("arg") at compile time
 
 # Runtime package control (for multi-package files)
-inherit("Dog", "Animal");         # Explicit child and parent
-inherit("Duck", "Flyable");       # Multiple inheritance
+core::inherit("Dog", "Animal");   # Explicit child and parent
+core::inherit("Duck", "Flyable"); # Multiple inheritance
 
 # Operator overloading
 package Vector;
@@ -937,7 +942,7 @@ use overload
 | Function | Description |
 |----------|-------------|
 | `bless(\%h, "Pkg")` | Associate hash ref with package |
-| `blessed($obj)` | Get package name (or empty) |
+| `core::blessed($obj)` | Get package name (or empty) |
 | `isa($obj, "Pkg")` | Check type (follows inheritance) |
 | `$obj->isa("Pkg")` | Method-style type check (UNIVERSAL) |
 | `can($obj, "method")` | Check if method exists |
@@ -1028,7 +1033,7 @@ Named arguments: keys and values alternate in the argument list. Child construct
 | `print($x)` | Print without newline |
 | `defined($x)` | Check if defined |
 | `typeof($x)` | Get type name |
-| `dumper($x)` | Debug dump |
+| `core::dumper($x)` | Debug dump (bare `dumper` is a legacy alias) |
 | `die($msg)` | Exit with error |
 | `exit($code)` | Exit program |
 
@@ -1046,11 +1051,15 @@ Named arguments: keys and values alternate in the argument list. Child construct
 
 **`$_` default:** `chomp`, `uc`, `lc`, `length`, `ucfirst`, `lcfirst`, `trim`, `defined`, `ref`, `chr`, `ord`, `say`, `print`, `chop` all default to `$_` when called with no arguments.
 
-**Regex:** `match`, `replace`, `replace_all`, `capture`
+**Regex:** `re::match`, `re::replace`, `re::replace_all`, `re::capture`, `re::captures`, `re::named_captures` (bare `match`/`replace`/... still work as legacy aliases)
 
-**Refs:** `is_ref`, `reftype`
+**Literal string replace:** `str::replace` (all occurrences), `str::replace_first`
 
-**OOP:** `bless`, `blessed`, `isa`, `can`, `inherit`, `set_package`
+**StringBuilder:** `sb::new`, `sb::append`, `sb::to_string`, `sb::length`, `sb::clear`, `sb::free`
+
+**Refs:** `reftype`, `core::is_ref`, `core::refto`, `core::deref`, `core::refcount` (bare spellings are legacy aliases)
+
+**OOP:** `bless`, `isa`, `can`, `core::blessed`, `core::inherit`, `core::set_package`
 
 **Types:** `defined`, `typeof`, `cast_int`, `cast_num`, `cast_str`
 

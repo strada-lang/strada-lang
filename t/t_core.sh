@@ -414,6 +414,10 @@ else
     test_skip "c::callback (libffi trampolines)" "built without libffi"
 fi
 
+# Test: namespaced builtin aliases (re::/str::/sb:: and core::-qualified
+# spellings of historically-unqualified builtins; legacy names still work)
+test_output_contains "$EXAMPLES_DIR/test_namespaced_builtins.strada" "test_namespaced_builtins" "1..25" "Namespaced builtin aliases"
+
 # Test: --strict-types stage-0 type warnings (warning-only, gradual).
 # Expects exactly 5 warnings from the fixture's flagged lines, zero
 # without the flag, and successful compilation either way.

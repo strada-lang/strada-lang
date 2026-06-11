@@ -607,11 +607,76 @@ func ast_new_increment(str $op, scalar $operand, int $is_prefix) scalar {
     return $node;
 }
 
+# Namespaced builtin aliases. re::/str::/sb:: and core::-qualified spellings
+# of historically-unqualified builtins normalize HERE, at call-node creation,
+# to their canonical (unqualified) names — so Semantic, CodeGen, and every
+# codegen predicate (needs_temp_cleanup etc.) only ever see one spelling.
+# Do NOT add per-name alias checks downstream; extend this map instead.
+func ast_normalize_call_name(str $name) str {
+    my int $sep = index($name, "::");
+    if ($sep < 0) { return $name; }
+    my str $prefix = substr($name, 0, $sep);
+    my str $rest = substr($name, $sep + 2, length($name) - $sep - 2);
+    if ($prefix eq "re") {
+        # Regex builtins: re::replace is regex-replace-first,
+        # re::replace_all is regex-replace-all.
+        if ($rest eq "match") { return "match"; }
+        if ($rest eq "replace") { return "regex_replace"; }
+        if ($rest eq "replace_all") { return "regex_replace_all"; }
+        if ($rest eq "capture") { return "capture"; }
+        if ($rest eq "captures") { return "captures"; }
+        if ($rest eq "named_captures") { return "named_captures"; }
+        return $name;
+    }
+    if ($prefix eq "str") {
+        # Plain-string (non-regex) replace: str::replace replaces ALL
+        # occurrences, str::replace_first only the first.
+        if ($rest eq "replace") { return "str_replace"; }
+        if ($rest eq "replace_first") { return "str_replace_first"; }
+        return $name;
+    }
+    if ($prefix eq "sb") {
+        # StringBuilder family (canonical names keep the sb_ prefix).
+        if ($rest eq "new") { return "sb_new"; }
+        if ($rest eq "append") { return "sb_append"; }
+        if ($rest eq "to_string") { return "sb_to_string"; }
+        if ($rest eq "length") { return "sb_length"; }
+        if ($rest eq "clear") { return "sb_clear"; }
+        if ($rest eq "free") { return "sb_free"; }
+        return $name;
+    }
+    if ($prefix eq "core" || $prefix eq "sys") {
+        # core::-qualified spellings of unqualified builtins (runtime
+        # plumbing, reference machinery, debug/introspection, OOP plumbing).
+        if ($rest eq "hash_new") { return "hash_new"; }
+        if ($rest eq "hash_get") { return "hash_get"; }
+        if ($rest eq "hash_set") { return "hash_set"; }
+        if ($rest eq "deref") { return "deref"; }
+        if ($rest eq "deref_array") { return "deref_array"; }
+        if ($rest eq "deref_hash") { return "deref_hash"; }
+        if ($rest eq "deref_set") { return "deref_set"; }
+        if ($rest eq "refto") { return "refto"; }
+        if ($rest eq "is_refto") { return "is_refto"; }
+        if ($rest eq "derefto") { return "derefto"; }
+        if ($rest eq "is_ref") { return "is_ref"; }
+        if ($rest eq "refcount") { return "refcount"; }
+        if ($rest eq "dumper") { return "dumper"; }
+        if ($rest eq "dumper_str") { return "dumper_str"; }
+        if ($rest eq "set_package") { return "set_package"; }
+        if ($rest eq "inherit") { return "inherit"; }
+        if ($rest eq "blessed") { return "blessed"; }
+        if ($rest eq "stacktrace") { return "stacktrace"; }
+        if ($rest eq "stacktrace_str") { return "stacktrace_str"; }
+        return $name;
+    }
+    return $name;
+}
+
 # Create function call
 func ast_new_call(str $name) scalar {
     my scalar $node = ast_new_node(NODE_CALL());
     my array @args = ();
-    $node->{"name"} = $name;
+    $node->{"name"} = ast_normalize_call_name($name);
     $node->{"args"} = \@args;
     $node->{"arg_count"} = 0;
     return $node;

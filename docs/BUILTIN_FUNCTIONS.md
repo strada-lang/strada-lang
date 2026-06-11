@@ -608,6 +608,53 @@ Normalization runs the full UAX#15 pipeline (recursive decomposition → canonic
 
 These match Perl built-ins one-to-one in most cases.
 
+### Namespaced aliases (preferred for non-Perl built-ins)
+
+Bare built-ins with Perl heritage (`say`, `push`, `substr`, ...) stay
+unqualified. Strada-specific built-ins that historically lived in the bare
+namespace now have **preferred namespaced spellings** — the bare names keep
+working as legacy aliases, but new code should use the qualified forms:
+
+| Preferred | Legacy bare name | Notes |
+|---|---|---|
+| `re::match(s, pat)` | `match` | Regex match (returns truth; sets `captures()` state). |
+| `re::replace(s, pat, repl)` | `regex_replace`, `replace` | Regex replace, **first** match only. |
+| `re::replace_all(s, pat, repl)` | `regex_replace_all` | Regex replace, all matches. |
+| `re::capture(s, pat)` | `capture` | Match and return capture-group array. |
+| `re::captures()` | `captures` | Capture groups of the last match. |
+| `re::named_captures()` | `named_captures` | Named groups of the last match. |
+| `str::replace(s, from, to)` | `str_replace`, `replace_all` | **Literal** (non-regex) replace, all occurrences. |
+| `str::replace_first(s, from, to)` | `str_replace_first` | Literal replace, first occurrence only. |
+| `sb::new()` | `sb_new` | StringBuilder constructor. |
+| `sb::append(sb, s)` | `sb_append` | Append to builder. |
+| `sb::to_string(sb)` | `sb_to_string` | Builder → string. |
+| `sb::length(sb)` | `sb_length` | Builder length. |
+| `sb::clear(sb)` | `sb_clear` | Reset builder. |
+| `sb::free(sb)` | `sb_free` | Free builder. |
+| `core::hash_new/hash_get/hash_set` | `hash_new`, `hash_get`, `hash_set` | Direct hash accessors (native `%h` syntax preferred over both). |
+| `core::deref(ref)` | `deref` | Dereference (language syntax `$$ref` preferred). |
+| `core::deref_array/deref_hash` | `deref_array`, `deref_hash` | Typed deref helpers. |
+| `core::deref_set(ref, v)` | `deref_set` | Set through a scalar ref. |
+| `core::refto(v)`, `core::is_refto(v, t)`, `core::derefto(ref, t)` | `refto`, `is_refto`, `derefto` | Reference helpers. |
+| `core::is_ref(v)` | `is_ref` | Bool ref check. |
+| `core::refcount(v)` | `refcount` | Refcount introspection (debugging). |
+| `core::dumper(v)`, `core::dumper_str(v)` | `dumper`, `dumper_str` | Debug dump. |
+| `core::stacktrace()`, `core::stacktrace_str()` | `stacktrace`, `stacktrace_str` | Manual stack traces. |
+| `core::blessed(v)` | `blessed` | Package name or undef. |
+| `core::set_package(ref, "Pkg")` | `set_package` | OOP plumbing. |
+| `core::inherit("Parent")` | `inherit` | OOP plumbing (prefer `extends`). |
+
+Beware the legacy naming trap the aliases fix: bare `replace` is
+**regex**-based (first match) while bare `replace_all` is **literal**
+string replace — `re::replace`/`re::replace_all` vs `str::replace` make
+the regex/literal split explicit.
+
+The mapping is applied at parse time (`ast_normalize_call_name` in
+`compiler/AST.strada`), so both spellings compile to identical code in the
+compiler, the interpreter/VM, and `Strada::Eval`. `re`, `str`, and `sb`
+are reserved namespace prefixes — user packages with those names can't be
+called via `pkg::func()` syntax.
+
 ### Strings
 
 Strada strings are **UTF-8 character oriented** — `length`, `substr`,

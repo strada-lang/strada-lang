@@ -1580,6 +1580,13 @@ func lex_next_token(scalar $lexer) scalar {
 
         my str $type = lex_keyword_or_ident($text);
 
+        # A word immediately followed by '::' is a namespace qualifier
+        # (e.g. str::replace), never a keyword — demote to IDENT so type
+        # keywords like 'str' can name builtin namespaces.
+        if (lex_current_code($lexer) == 58 && lex_peek_code($lexer, 1) == 58) {
+            $type = "IDENT";
+        }
+
         my hash %token = ();
         $token{"type"} = $type;
         $token{"value"} = $text;

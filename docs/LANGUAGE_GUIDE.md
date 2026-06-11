@@ -3714,7 +3714,7 @@ See `docs/PERL_INTEGRATION.md` for comprehensive documentation on:
 
 | Function | Description |
 |----------|-------------|
-| `dumper($val)` | Debug dump value |
+| `core::dumper($val)` | Debug dump value (bare `dumper` is a legacy alias) |
 | `clone($val)` | Deep copy |
 | `exit($code)` | Exit program |
 

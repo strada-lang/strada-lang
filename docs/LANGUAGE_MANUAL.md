@@ -2003,7 +2003,7 @@ my int $result = core::dl_call_int_sv($func, [$sv1, $sv2]);
 - `reftype($ref)` - Get reference type
 
 **Debugging:**
-- `dumper($val)` - Data::Dumper-style output
+- `core::dumper($val)` - Data::Dumper-style output (bare `dumper` is a legacy alias)
 
 ### 20.2 core:: / sys:: Namespace
 
