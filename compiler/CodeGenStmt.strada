@@ -3986,6 +3986,28 @@ func gen_export_info(scalar $cg, scalar $program, int $has_main) void {
         }
     }
 
+    # Emit `use:Module` entries: the Strada modules this unit was compiled
+    # against. A module-only .o contains ONLY its own code, so a consumer
+    # importing the artifact must also import (or inline) these deps for
+    # the link to resolve — even when the consumer never uses them
+    # directly. parse_export_metadata resolves them transitively.
+    # "lib"/"overload" are pseudo-uses, not modules.
+    my scalar $use_arr = $program->{"uses"};
+    if (defined($use_arr)) {
+        my hash %use_seen = ();
+        my int $ui = 0;
+        my int $ui_count = size($use_arr);
+        while ($ui < $ui_count) {
+            my str $use_name = $use_arr->[$ui];
+            my scalar $use_hit = $use_seen{$use_name};
+            if ($use_name ne "lib" && $use_name ne "overload" && $use_hit == 0) {
+                $use_seen{$use_name} = 1;
+                emit($cg, "use:" . $use_name . "\\n");
+            }
+            $ui = $ui + 1;
+        }
+    }
+
     emit($cg, "\";\n");
     emit($cg, "}\n");
 

@@ -4394,6 +4394,8 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
     $mod_program->{"loaded_modules"} = $program->{"loaded_modules"};
     # Propagate fallback search paths (bundled stdlib) for nested `use`
     $mod_program->{"lib_paths_fallback"} = $program->{"lib_paths_fallback"};
+    # Share the resolved-deps list so nested modules land in STRADA_DEPS_OUT
+    $mod_program->{"dep_files"} = $program->{"dep_files"};
 
     # Parse the module's contents
     while (!parser_check($mod_parser, "EOF")) {
@@ -4796,6 +4798,21 @@ func parse_use(scalar $parser, scalar $program) void {
         return;
     }
 
+    resolve_use_module($parser, $program, $mod_name);
+    ast_add_use($program, $mod_name);
+}
+
+# Resolve a module by name exactly as `use NAME;` does: prefer a fresh
+# precompiled artifact (under --use-artifacts), else inline the source.
+# Shared by parse_use and by transitive `use:` metadata entries from
+# imported artifacts. Missing modules are a silent no-op here — parse_use
+# always behaved that way, and for metadata-driven deps the layout may
+# legitimately differ (a truly-needed dep then fails at link time).
+func resolve_use_module(scalar $parser, scalar $program, str $mod_name) void {
+    if (ast_is_module_loaded($program, $mod_name)) {
+        return;
+    }
+
     # Try to find and load the module. Before inlining the .strada source,
     # check whether a sibling .o / .so artifact exists in the same lib path
     # and is at least as fresh as the source. If so, treat the use as an
@@ -4805,6 +4822,13 @@ func parse_use(scalar $parser, scalar $program) void {
     # actually skip recompilation.
     my str $file_path = find_module_file($program, $mod_name);
     if (length($file_path) > 0) {
+        # Record every resolved module source path (once each — the
+        # already-loaded check above guarantees that) for STRADA_DEPS_OUT,
+        # which the wrapper's --module-cache warmer consumes.
+        my scalar $dep_files = $program->{"dep_files"};
+        if (defined($dep_files)) {
+            push(@{$dep_files}, $file_path);
+        }
         # Derive sibling artifact paths: foo/Bar.strada -> foo/Bar.o, foo/Bar.so
         my str $base = $file_path;
         my int $blen = length($base);
@@ -4834,23 +4858,38 @@ func parse_use(scalar $parser, scalar $program) void {
                 ast_mark_module_loaded($program, $mod_name);
                 # Use the module name as obj_name so symbol mangling matches.
                 do_import_object_at($parser, $program, $mod_name . ".o", $o_path);
-                ast_add_use($program, $mod_name);
                 return;
             }
             if (artifact_is_fresh($so_path, $file_path) == 1
                 && artifact_newer_than_compiler($so_path) == 1) {
                 ast_mark_module_loaded($program, $mod_name);
                 do_import_lib_at($parser, $program, $mod_name, $so_path);
-                ast_add_use($program, $mod_name);
                 return;
+            }
+
+            # No fresh sibling artifact. Try the module cache directory
+            # (STRADA_MODULE_CACHE_DIR): artifacts stored OUTSIDE the lib
+            # tree, mirrored by the source's absolute path — this is what
+            # lets read-only lib dirs (e.g. /usr/local/lib/strada/lib) be
+            # cached per-user. Same freshness gates as siblings.
+            my str $cache_dir = core::getenv("STRADA_MODULE_CACHE_DIR");
+            if (length($cache_dir) > 0) {
+                my str $real_src = core::realpath($file_path);
+                if (length($real_src) > 0) {
+                    my str $cache_o = $cache_dir . $real_src . ".o";
+                    if (artifact_is_fresh($cache_o, $file_path) == 1
+                        && artifact_newer_than_compiler($cache_o) == 1) {
+                        ast_mark_module_loaded($program, $mod_name);
+                        do_import_object_at($parser, $program, $mod_name . ".o", $cache_o);
+                        return;
+                    }
+                }
             }
         }
 
         ast_mark_module_loaded($program, $mod_name);
         load_module($program, $mod_name, $file_path);
     }
-
-    ast_add_use($program, $mod_name);
 }
 
 # Parse import_lib statement - import shared library as module
@@ -4989,6 +5028,10 @@ func parse_export_metadata(str $lib_name, str $so_path, str $metadata) scalar {
     # Collected `link:NAME` entries from the metadata (extern-C deps).
     my array @link_libs_local = ();
 
+    # Collected `use:Module` entries (Strada module deps of the artifact —
+    # resolved transitively by do_import_object_at).
+    my array @use_deps_local = ();
+
     # Parse metadata line by line manually (bootstrap doesn't support split well)
     my int $meta_len = length($metadata);
     my int $pos = 0;
@@ -5026,6 +5069,10 @@ func parse_export_metadata(str $lib_name, str $so_path, str $metadata) scalar {
             } elsif (length($line) > 5 && substr($line, 0, 5) eq "link:") {
                 # link:NAME → record an extern-C library this module needs.
                 push(@link_libs_local, substr($line, 5, length($line) - 5));
+            } elsif (length($line) > 4 && substr($line, 0, 4) eq "use:") {
+                # use:Module → a Strada module this artifact was compiled
+                # against (its code is NOT in the artifact).
+                push(@use_deps_local, substr($line, 4, length($line) - 4));
             }
         }
     }
@@ -5033,6 +5080,7 @@ func parse_export_metadata(str $lib_name, str $so_path, str $metadata) scalar {
     $lib_info{"functions"} = \@functions;
     $lib_info{"function_count"} = $fn_count;
     $lib_info{"link_libs"} = \@link_libs_local;
+    $lib_info{"use_deps"} = \@use_deps_local;
 
     # Build list of OOP init function names
     my array @oop_inits = ();
@@ -5273,6 +5321,21 @@ func secure_create_temp(scalar $parser, str $path, str $what) void {
 # Extract export metadata from object file by compiling and running a temp program
 # This allows import_object to work like import_lib - metadata comes from the .o file
 func extract_object_export_info(scalar $parser, str $obj_name, str $o_path) str {
+    # Sidecar fast path: <o_path>.smeta holds the exact metadata text the
+    # probe would print (the strada wrapper's -M writes it right after
+    # building the .o). Reading it skips the compile-and-run probe
+    # (~150ms of cc per module, which made artifact-based `use` SLOWER
+    # than source inlining) and — unlike the probe — executes no artifact
+    # code at compile time. Must be at least as fresh as the .o itself;
+    # a stale or missing sidecar falls through to the probe.
+    my str $smeta_path = $o_path . ".smeta";
+    if (artifact_is_fresh($smeta_path, $o_path) == 1) {
+        my str $smeta_text = slurp($smeta_path);
+        if (length($smeta_text) > 0) {
+            return $smeta_text;
+        }
+    }
+
     # Get the compiler directory from STRADA_DIR environment variable
     # (set by the 'strada' wrapper script) or fall back to current directory
     # Read STRADA_DIR directly; avoids /bin/sh's echo -n which is unportable
@@ -5426,6 +5489,16 @@ func program_has_import_archive(scalar $program, str $arch_name) int {
 # $obj_file (e.g., "MyLib.o"), extract metadata and register with the program.
 # Returns 1 if added, 0 if skipped (duplicate).
 func do_import_object_at(scalar $parser, scalar $program, str $obj_file, str $o_path) int {
+    # Canonicalize the object path: the same .o can arrive both explicitly
+    # (CLI / import_object, often relative) and implicitly (a use: metadata
+    # dep resolving to the sibling artifact, absolute) — textual path dedup
+    # would miss the match and the file would be linked twice (multiple
+    # definition errors).
+    my str $real_o_path = core::realpath($o_path);
+    if (length($real_o_path) > 0) {
+        $o_path = $real_o_path;
+    }
+
     # Extract package name by stripping .o extension
     my str $obj_name = $obj_file;
     if (length($obj_file) > 2 && substr($obj_file, length($obj_file) - 2, 2) eq ".o") {
@@ -5459,6 +5532,22 @@ func do_import_object_at(scalar $parser, scalar $program, str $obj_file, str $o_
 
     # Pull in any extern-C link deps the .o advertised via link_lib.
     merge_link_libs($program, $obj_info->{"link_libs"});
+
+    # Resolve the artifact's Strada module deps (use: metadata lines).
+    # A module-only .o contains none of its deps' code, so each dep must
+    # be imported (preferring its own artifact) or inlined from source —
+    # even when the consuming program never uses it directly. Cycle-safe:
+    # the caller marks this module loaded before invoking us, and
+    # resolve_use_module no-ops on already-loaded modules.
+    my scalar $use_deps = $obj_info->{"use_deps"};
+    if (defined($use_deps)) {
+        my int $udi = 0;
+        my int $ud_count = size(@{$use_deps});
+        while ($udi < $ud_count) {
+            resolve_use_module($parser, $program, $use_deps->[$udi]);
+            $udi = $udi + 1;
+        }
+    }
 
     # Check if object defines an import() function
     my str $obj_import_fn = sanitize_name($obj_name) . "_import";
@@ -6200,6 +6289,11 @@ func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low, sca
     # below, for later resolution stages).
     $program->{"lib_paths_fallback"} = $lib_paths_low;
 
+    # Resolved module source paths, filled by resolve_use_module and
+    # written out at the end of the parse when STRADA_DEPS_OUT is set
+    # (consumed by the strada wrapper's --module-cache warmer).
+    $program->{"dep_files"} = [];
+
     # Add command-line library paths first (high priority - before any use statements)
     my int $path_count = size($lib_paths);
     my int $path_i = 0;
@@ -6394,6 +6488,23 @@ func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low, sca
         my str $a_path = $implicit_archs->[$imp_i];
         parse_implicit_import_archive($parser, $program, $a_path);
         $imp_i = $imp_i + 1;
+    }
+
+    # STRADA_DEPS_OUT: write every resolved module source path, one per
+    # line, in resolution order (parents before their nested deps). The
+    # wrapper's --module-cache warmer uses this to precompile stale
+    # modules after the build.
+    my str $deps_out = core::getenv("STRADA_DEPS_OUT");
+    if (length($deps_out) > 0) {
+        my scalar $dep_list = $program->{"dep_files"};
+        my str $deps_text = "";
+        my int $dep_i = 0;
+        my int $dep_n = size(@{$dep_list});
+        while ($dep_i < $dep_n) {
+            $deps_text = $deps_text . $dep_list->[$dep_i] . "\n";
+            $dep_i = $dep_i + 1;
+        }
+        spew($deps_out, $deps_text);
     }
 
     return $program;

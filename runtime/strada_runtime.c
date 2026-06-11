@@ -22879,6 +22879,15 @@ StradaValue* strada_realpath(StradaValue *path_val) {
     return strada_new_undef();
 }
 
+/* Alias for the FROZEN bootstrap compiler: its builtin table accepts
+ * core::/sys::realpath (so Semantic passes) but it predates the codegen
+ * mapping to strada_realpath, so it emits a literal sys_realpath() call.
+ * Without this alias, any compiler-source use of core::realpath fails the
+ * stage-1 link with "undefined reference to sys_realpath". */
+StradaValue* sys_realpath(StradaValue *path_val) {
+    return strada_realpath(path_val);
+}
+
 StradaValue* strada_dirname(StradaValue *path_val) {
     char *path = strada_to_str(path_val);
     char *dir = dirname(path);

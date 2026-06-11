@@ -233,6 +233,100 @@ else
 fi
 cd "$WORK/proj"
 
+# --- Test 9: -M writes a metadata sidecar; probe is the fallback ---------
+rm -f Util.o Util.o.smeta Big.o Big.o.smeta app9
+"$STRADA" -M Util.strada >"$WORK/t9a.log" 2>&1
+if [ -s Util.o.smeta ] && grep -q '^func:Util_doubled:' Util.o.smeta; then
+    pass "-M writes metadata sidecar (.smeta)"
+else
+    fail "-M writes metadata sidecar (.smeta)" "missing or wrong $PWD/Util.o.smeta"
+fi
+cat > app9.strada <<'EOF'
+use lib ".";
+use Util;
+func main() int {
+    if (Util::doubled(4) != 8) { return 1; }
+    say("OK");
+    return 0;
+}
+EOF
+if "$STRADA" -o app9 app9.strada >"$WORK/t9b.log" 2>&1 && [ "$(./app9)" = "OK" ]; then
+    pass "use with .smeta sidecar compiles and runs"
+else
+    fail "use with .smeta sidecar compiles and runs" "$(cat "$WORK/t9b.log")"
+fi
+rm -f Util.o.smeta app9
+if "$STRADA" -o app9 app9.strada >"$WORK/t9c.log" 2>&1 && [ "$(./app9)" = "OK" ]; then
+    pass "missing sidecar falls back to metadata probe"
+else
+    fail "missing sidecar falls back to metadata probe" "$(cat "$WORK/t9c.log")"
+fi
+
+# --- Test 10: transitive use: deps from artifact metadata ----------------
+# main uses ONLY Big; Big's artifact metadata records `use:Util`, so Util
+# must be resolved (and its artifact linked) without main ever naming it.
+# Before use:-metadata this failed at link with undefined Util_* symbols.
+rm -f Util.o Util.o.smeta Big.o Big.o.smeta app10
+"$STRADA" -M Util.strada >"$WORK/t10a.log" 2>&1
+"$STRADA" -M Big.strada  >"$WORK/t10b.log" 2>&1
+if ! grep -q '^use:Util$' Big.o.smeta 2>/dev/null; then
+    fail "artifact metadata records use: deps" "no use:Util line in Big.o.smeta"
+else
+    pass "artifact metadata records use: deps"
+fi
+cat > app10.strada <<'EOF'
+use lib ".";
+use Big;
+func main() int {
+    if (Big::compute(5) != 25) { return 1; }
+    say("OK");
+    return 0;
+}
+EOF
+if "$STRADA" -o app10 app10.strada >"$WORK/t10c.log" 2>&1 && [ "$(./app10)" = "OK" ]; then
+    pass "transitive artifact dep resolved via use: metadata"
+else
+    fail "transitive artifact dep resolved via use: metadata" "$(cat "$WORK/t10c.log")"
+fi
+
+# --- Test 11: module cache directory (no sibling artifacts) --------------
+# Artifacts live ONLY under STRADA_MODULE_CACHE_DIR, mirrored by absolute
+# source path -- the layout used for read-only lib dirs.
+rm -f Util.o Util.o.smeta Big.o Big.o.smeta app11
+MC_DIR="$WORK/mcache11"
+rm -rf "$MC_DIR"
+cache_util="$MC_DIR$(realpath Util.strada).o"
+cache_big="$MC_DIR$(realpath Big.strada).o"
+mkdir -p "$(dirname "$cache_util")"
+"$STRADA" -M --object -o "$cache_util" Util.strada >"$WORK/t11a.log" 2>&1
+"$STRADA" -M --object -o "$cache_big"  Big.strada  >"$WORK/t11b.log" 2>&1
+v_out="$(STRADA_MODULE_CACHE_DIR="$MC_DIR" "$STRADA" -v -o app11 app10.strada 2>&1)"
+if [ -x app11 ] && [ "$(./app11)" = "OK" ] && echo "$v_out" | grep -q "import_object files:.*$MC_DIR"; then
+    pass "module cache directory resolves artifacts (no siblings)"
+else
+    fail "module cache directory resolves artifacts (no siblings)" "$v_out"
+fi
+
+# --- Test 12: --module-cache cold warm-up + warm reuse -------------------
+rm -f Util.o Util.o.smeta Big.o Big.o.smeta app12
+MC2_DIR="$WORK/mcache12"
+rm -rf "$MC2_DIR"
+cold_out="$(STRADA_MODULE_CACHE_DIR="$MC2_DIR" "$STRADA" --module-cache -o app12 app10.strada 2>&1)"
+if [ -x app12 ] && [ "$(./app12)" = "OK" ] && echo "$cold_out" | grep -q "module cache: warmed"; then
+    pass "--module-cache cold build warms the cache"
+else
+    fail "--module-cache cold build warms the cache" "$cold_out"
+fi
+rm -f app12
+warm_out="$(STRADA_MODULE_CACHE_DIR="$MC2_DIR" "$STRADA" --module-cache -v -o app12 app10.strada 2>&1)"
+if [ -x app12 ] && [ "$(./app12)" = "OK" ] \
+    && echo "$warm_out" | grep -q "import_object files:.*$MC2_DIR" \
+    && ! echo "$warm_out" | grep -q "module cache: warmed"; then
+    pass "--module-cache warm build reuses cached artifacts"
+else
+    fail "--module-cache warm build reuses cached artifacts" "$warm_out"
+fi
+
 # --- Summary --------------------------------------------------------------
 echo
 echo "===== $((PASS + FAIL)) tests, $PASS passed, $FAIL failed ====="
