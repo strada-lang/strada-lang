@@ -237,3 +237,20 @@ baseline run: pipeline map-range/grep-range benefit from lazy ranges (no
 input materialization); bench_gc's arena section runs the same workload
 ~25% faster than its arena-off control; bench_async moves 500k channel
 messages in ~86ms.
+
+### Language-feature round 2 (2026-06-12, later the same day)
+
+Five more: UTF-8/Unicode, binary data, closures, sprintf, and the classic
+binary-trees allocator stress. Same conventions.
+
+| benchmark          | Strada | Perl   | Node   | notes |
+|--------------------|--------|--------|--------|-------|
+| bench_utf8         | 1.422s | 2.600s | 0.700s | case/valid/chr-build/concat/NFC. Models differ: Strada = UTF-8 bytes, Perl = decoded codepoints, JS = UTF-16; equivalent user-visible work |
+| bench_binary       | 0.175s | 0.291s | 0.339s | pack/unpack/base64/byte-walk/frame-build; JS uses Buffer idioms |
+| bench_closures     | 0.100s | 1.304s | 0.077s | create/invoke/capture-rw/table/transitive — 13x over Perl |
+| bench_sprintf      | 2.133s | 1.687s | 0.748s | JS uses template-literal equivalents (no sprintf). Strada LOSES to Perl here — sprintf is an optimization lead |
+| bench_binary_trees | 3.158s | 2.490s | 0.154s | depth-16; V8's generational GC owns this shape. Strada's per-node hashref overhead (refcount + open-addressed hash) is the cost — a known trade |
+
+Optimization leads recorded by this round: sprintf (~1.3x behind Perl)
+and allocation-heavy deep structures (binary-trees ~1.3x behind Perl,
+far behind V8). Closures, binary data, and UTF-8 case ops are strong.

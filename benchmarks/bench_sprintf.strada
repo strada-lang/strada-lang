@@ -1,0 +1,62 @@
+# Formatting benchmarks — sprintf-heavy workloads (log lines, reports,
+# fixed-width tables). Extremely common in real code; previously
+# unmeasured.
+#
+# Sections:
+#   mixed      — 500k sprintf("%s ... %d ... %.2f") log lines
+#   numeric    — 1M int/hex/octal conversions
+#   float      — 500k float formats (%.6f / %e / %g)
+#   width      — 500k fixed-width/padded table rows
+#
+# Reference numbers: benchmarks/BASELINE.md
+
+package main;
+
+func main() int {
+    my num $t0 = core::hires_time();
+
+    # 1. mixed log lines
+    my int $mlen = 0;
+    my int $i = 0;
+    while ($i < 500000) {
+        my str $line = sprintf("[%s] user=%s req=%d bytes=%d t=%.2fms", "INFO", "u" . ($i % 1000), $i, ($i * 37) % 100000, ($i % 500) / 7.0);
+        $mlen += length($line);
+        $i++;
+    }
+    my num $t1 = core::hires_time();
+    say("mixed: " . $mlen . " " . ($t1 - $t0));
+
+    # 2. numeric conversions
+    my int $nlen = 0;
+    $i = 0;
+    while ($i < 1000000) {
+        $nlen += length(sprintf("%d %x %o", $i, $i, $i));
+        $i++;
+    }
+    my num $t2 = core::hires_time();
+    say("numeric: " . $nlen . " " . ($t2 - $t1));
+
+    # 3. float formats
+    my int $flen = 0;
+    $i = 0;
+    while ($i < 500000) {
+        my num $v = $i / 3.0;
+        $flen += length(sprintf("%.6f %e %g", $v, $v, $v));
+        $i++;
+    }
+    my num $t3 = core::hires_time();
+    say("float: " . $flen . " " . ($t3 - $t2));
+
+    # 4. fixed-width table rows
+    my int $wlen = 0;
+    $i = 0;
+    while ($i < 500000) {
+        $wlen += length(sprintf("%-20s|%10d|%08d|%6.1f%%", "row_" . ($i % 100), $i, $i % 1000, ($i % 1000) / 10.0));
+        $i++;
+    }
+    my num $t4 = core::hires_time();
+    say("width: " . $wlen . " " . ($t4 - $t3));
+
+    say("total: " . ($t4 - $t0));
+    return 0;
+}

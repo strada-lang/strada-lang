@@ -11,7 +11,7 @@ RUBY=${RUBY:-ruby}
 NODE=${NODE:-node}
 PHP=${PHP:-php}
 
-ALL_BENCHMARKS="bench_compute bench_strings bench_array_hash bench_functions bench_oop bench_hotpaths bench_sort bench_regex bench_pipeline bench_exceptions bench_async bench_gc bench_json bench_data bench_startup"
+ALL_BENCHMARKS="bench_compute bench_strings bench_array_hash bench_functions bench_oop bench_hotpaths bench_sort bench_regex bench_pipeline bench_exceptions bench_async bench_gc bench_json bench_data bench_startup bench_utf8 bench_binary bench_closures bench_sprintf bench_binary_trees"
 
 usage() {
     echo "Usage: $0 [OPTIONS] [BENCHMARK ...]"
