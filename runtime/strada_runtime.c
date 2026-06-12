@@ -221,6 +221,22 @@ static inline StradaString *ss_new_uninit(uint32_t len) {
 }
 
 /* Packed hash table helpers */
+#define HASH_SMALL_BUCKETS 8   /* For objects with <=3 attributes (50% load factor) */
+#define HASH_COMPACT_ENTRIES 4 /* pre-allocated entry slots for small hashes */
+
+/* Positional in-block proofs for compact single-block hashes. A separate
+ * malloc can never coincide with these interior addresses (heap chunk
+ * headers sit between allocations), so pointer equality is a reliable
+ * "still lives in the compact block" test even after the other member
+ * has been reallocated out. */
+static inline int hv_idx_in_block(StradaHash *hv) {
+    return hv->hash_index == (uint32_t*)((char*)hv + sizeof(StradaHash));
+}
+static inline int hv_ent_in_block(StradaHash *hv) {
+    return hv->entries == (StradaHashEntry*)((char*)hv + sizeof(StradaHash)
+                                             + HASH_SMALL_BUCKETS * sizeof(uint32_t));
+}
+
 static inline uint32_t hash_get_slot(StradaHash *hv) {
     if (hv->free_head != HASH_EMPTY) {
         uint32_t slot = hv->free_head;
@@ -229,10 +245,13 @@ static inline uint32_t hash_get_slot(StradaHash *hv) {
     }
     if (hv->next_slot >= hv->capacity) {
         size_t new_cap = hv->capacity < 8 ? 8 : hv->capacity * 2;
-        /* Check if entries is part of a compact block (can't realloc) */
-        int is_compact = (hv->hash_index == (uint32_t*)((char*)hv + sizeof(StradaHash)));
-        if (is_compact && hv->entries == (StradaHashEntry*)((char*)hv->hash_index + hv->num_buckets * sizeof(uint32_t))) {
-            /* Entries is inside compact block — must allocate separately */
+        /* Entries inside the compact block can't be realloc'd (interior
+         * pointer). NOTE: this must be the ENTRIES position test, not the
+         * index one — after the index resizes out of the block the entries
+         * still live in it (the old combined test raw-realloc'd them), and
+         * the block lays entries at the fixed HASH_SMALL_BUCKETS offset
+         * regardless of the hash's current num_buckets. */
+        if (hv_ent_in_block(hv)) {
             StradaHashEntry *new_entries = malloc(new_cap * sizeof(StradaHashEntry));
             if (hv->capacity > 0) memcpy(new_entries, hv->entries, hv->capacity * sizeof(StradaHashEntry));
             hv->entries = new_entries;
@@ -3315,7 +3334,7 @@ static void strada_hash_resize(StradaHash *hv) {
 
 /* Hash free list: recycle StradaHash structs for common sizes */
 #define HASH_POOL_MAX 256
-#define HASH_SMALL_BUCKETS 8  /* For objects with <=3 attributes (50% load factor) */
+
 static StradaHash *hash_pool_small[HASH_POOL_MAX];  /* Pool for small hashes */
 static int hash_pool_small_count = 0;
 
@@ -3378,7 +3397,27 @@ StradaHash* strada_hash_new(void) {
 /* Presized hash for inline constructors */
 /* Single-allocation hash for small objects: struct + index + entries in one block.
  * Eliminates 2 extra mallocs per object creation (index array + entries realloc). */
-#define HASH_COMPACT_ENTRIES 4  /* pre-allocated entry slots for small hashes */
+/* Release a hash's index/entries storage and the struct itself, pooling
+ * compact blocks when provable. Handles every outgrowth combination:
+ * index out / entries in-block (and vice versa) previously freed interior
+ * pointers — the crash class exposed when anon hashes joined the presized
+ * path. Pooling requires idx_in (positional proof the struct is a block);
+ * an outgrown-entries block is restored to compact invariants first. */
+static void hv_release_storage_and_struct(StradaHash *hv) {
+    int idx_in = hv_idx_in_block(hv);
+    int ent_in = hv_ent_in_block(hv);
+    if (hv->entries && !ent_in) free(hv->entries);
+    if (hv->hash_index && !idx_in) free(hv->hash_index);
+    if (idx_in && hash_pool_small_count < HASH_POOL_MAX) {
+        hv->entries = (StradaHashEntry*)((char*)hv + sizeof(StradaHash)
+                                         + HASH_SMALL_BUCKETS * sizeof(uint32_t));
+        hv->capacity = HASH_COMPACT_ENTRIES;
+        hash_pool_small[hash_pool_small_count++] = hv;
+    } else {
+        free(hv);
+    }
+}
+
 
 StradaHash* strada_hash_new_presized(int capacity) {
     StradaHash *hv;
@@ -3391,7 +3430,13 @@ StradaHash* strada_hash_new_presized(int capacity) {
 
     if (nbuckets <= HASH_SMALL_BUCKETS && hash_pool_small_count > 0) {
         hv = hash_pool_small[--hash_pool_small_count];
-        /* Pooled hashes already have their compact block — just reinit */
+        /* Pooled hashes already have their compact block — just reinit.
+         * Defensively re-derive the in-block pointers (free_hash restores
+         * them when entries had been realloc'd out; keep both sides safe). */
+        hv->hash_index = (uint32_t*)((char*)hv + sizeof(StradaHash));
+        hv->entries = (StradaHashEntry*)((char*)hv + sizeof(StradaHash)
+                                         + HASH_SMALL_BUCKETS * sizeof(uint32_t));
+        hv->capacity = HASH_COMPACT_ENTRIES;
         memset(hv->hash_index, 0xFF, nbuckets * sizeof(uint32_t));
         hv->num_buckets = nbuckets;
         hv->num_entries = 0;
@@ -4835,11 +4880,23 @@ void strada_hash_reserve(StradaHash *hv, size_t capacity) {
     if (num_buckets <= hv->num_buckets) return;
 
     hv->num_buckets = num_buckets;
-    hv->hash_index = sr_xrealloc(hv->hash_index, num_buckets * sizeof(uint32_t));
+    if (hv_idx_in_block(hv)) {
+        /* index lives in the compact block — can't realloc an interior
+         * pointer; contents are rebuilt below anyway */
+        hv->hash_index = malloc(num_buckets * sizeof(uint32_t));
+    } else {
+        hv->hash_index = sr_xrealloc(hv->hash_index, num_buckets * sizeof(uint32_t));
+    }
 
     /* Also reserve entry capacity */
     if (num_buckets > hv->capacity) {
-        hv->entries = sr_xrealloc(hv->entries, num_buckets * sizeof(StradaHashEntry));
+        if (hv_ent_in_block(hv)) {
+            StradaHashEntry *ne = malloc(num_buckets * sizeof(StradaHashEntry));
+            if (hv->capacity > 0) memcpy(ne, hv->entries, hv->capacity * sizeof(StradaHashEntry));
+            hv->entries = ne;
+        } else {
+            hv->entries = sr_xrealloc(hv->entries, num_buckets * sizeof(StradaHashEntry));
+        }
         hv->capacity = num_buckets;
     }
 
@@ -12985,24 +13042,7 @@ void strada_free_hash(StradaHash *hv) {
         }
     }
 
-    /* Check if this is a compact hash (index+entries in same block as struct) */
-    int is_compact = (hv->hash_index == (uint32_t*)((char*)hv + sizeof(StradaHash)));
-
-    if (!is_compact) {
-        /* Entries may have been realloc'd away from compact block */
-        if (hv->entries) free(hv->entries);
-        free(hv->hash_index);
-    } else if (hv->capacity > HASH_COMPACT_ENTRIES && hv->entries) {
-        /* Compact hash but entries outgrew the block — entries was realloc'd */
-        free(hv->entries);
-    }
-
-    /* Return small hash structs to pool (keeps the compact block for reuse) */
-    if (is_compact && hash_pool_small_count < HASH_POOL_MAX) {
-        hash_pool_small[hash_pool_small_count++] = hv;
-    } else {
-        free(hv);
-    }
+    hv_release_storage_and_struct(hv);
 }
 
 /* ============================================================
@@ -13201,11 +13241,7 @@ static void cc_free_shell(StradaValue *sv) {
             if (hv) {
                 for (size_t i = 0; i < hv->next_slot; i++)
                     if (hv->entries[i].key) ss_decref(hv->entries[i].key);  /* keys yes, values no */
-                int is_compact = (hv->hash_index == (uint32_t*)((char*)hv + sizeof(StradaHash)));
-                if (!is_compact) { if (hv->entries) free(hv->entries); free(hv->hash_index); }
-                else if (hv->capacity > HASH_COMPACT_ENTRIES && hv->entries) free(hv->entries);
-                if (is_compact && hash_pool_small_count < HASH_POOL_MAX) hash_pool_small[hash_pool_small_count++] = hv;
-                else free(hv);
+                hv_release_storage_and_struct(hv);
             }
             break;
         }
@@ -13483,10 +13519,13 @@ static void arena_release_backbone(StradaValue *sv) {
                 if (hv->refcount <= 0) {
                     for (size_t i = 0; i < hv->next_slot; i++)
                         if (hv->entries[i].key) ss_decref(hv->entries[i].key);  /* keys, not values */
-                    int is_compact = (hv->hash_index == (uint32_t*)((char*)hv + sizeof(StradaHash)));
-                    if (!is_compact) { if (hv->entries) free(hv->entries); free(hv->hash_index); }
-                    else if (hv->capacity > HASH_COMPACT_ENTRIES && hv->entries) free(hv->entries);
-                    free(hv);
+                    {
+                        int idx_in = hv_idx_in_block(hv);
+                        int ent_in = hv_ent_in_block(hv);
+                        if (hv->entries && !ent_in) free(hv->entries);
+                        if (hv->hash_index && !idx_in) free(hv->hash_index);
+                        free(hv);
+                    }
                 }
             }
             break;
@@ -19933,8 +19972,23 @@ StradaValue* strada_deref_hash_value_owned(StradaValue *ref) {
     return r;
 }
 
+/* NOTE (2026-06-12): routing anon hashes through the presized pooled
+ * compact-hash path (strada_new_hash_presized) is a measured ~1.9x win on
+ * record-heavy code (benchmarks/bench_binary_trees) but is REVERTED here:
+ * with the cycle collector enabled, examples/oop_stress_test.strada then
+ * fails ("Cannot call method on unblessed reference" — a live object's
+ * hash loses its entries). STRADA_GC=off makes it pass, so the compact/
+ * pooled representation interacts with the collector's trial-deletion in
+ * a way that mis-collects live data. The same hazard latently applies to
+ * the inline OOP constructors that already use the presized path. Needs a
+ * dedicated hunt with -DSTRADA_RC_TRACE before re-enabling.
+ */
 StradaValue* strada_anon_hash(int count, ...) {
-    /* Create anonymous hash: { key => val, ... } */
+    /* Create anonymous hash: { key => val, ... }
+     * Presized: small literals ({ "l" => ..., "r" => ... } records) hit the
+     * pooled single-block compact hash instead of a default-capacity hash
+     * with separate index/entry allocations — anon hashrefs are the hottest
+     * allocation in record-heavy code (binary-trees style). */
     StradaValue *sv = strada_new_hash();
 
     va_list args;
