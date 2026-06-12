@@ -4456,6 +4456,63 @@ func gen_expression(scalar $cg, scalar $expr) void {
             $check_i = $check_i + 1;
         }
 
+        # Fast record path: literal ASCII keys, no nested anon containers.
+        # Emits strada_anon_hash_take_ph with compile-time djb2 key hashes
+        # and OWNERSHIP TRANSFER: owned values pass straight through (no
+        # incref-then-decref round trip); borrowed values get one explicit
+        # incref. Values are cleanup-pushed between evaluations so a
+        # throwing later value cannot leak earlier ones.
+        my int $take_ok = 0;
+        if ($has_expr_keys == 0 && $pair_count > 0) {
+            $take_ok = 1;
+            my int $tk = 0;
+            while ($tk < $pair_count) {
+                if (key_is_hashable_ascii($keys->[$tk]) == 0) {
+                    $take_ok = 0;
+                }
+                my int $vt = $values->[$tk]->{"type"};
+                if ($vt == NODE_ANON_ARRAY() || $vt == NODE_ANON_HASH()) {
+                    $take_ok = 0;
+                }
+                $tk = $tk + 1;
+            }
+        }
+        if ($take_ok == 1) {
+            my int $push_cleanup = $cg->{"cleanup_enabled"};
+            emit($cg, "({ ");
+            my int $t = 0;
+            while ($t < $pair_count) {
+                emit($cg, "StradaValue *__ahx_v" . $t . " = ");
+                gen_expression($cg, $values->[$t]);
+                emit($cg, "; ");
+                if (needs_temp_cleanup($cg, $values->[$t]) == 0) {
+                    # borrowed -> make it owned for the take constructor
+                    emit($cg, "strada_incref(__ahx_v" . $t . "); ");
+                }
+                if ($push_cleanup == 1) {
+                    emit($cg, "strada_cleanup_push(__ahx_v" . $t . "); ");
+                }
+                $t = $t + 1;
+            }
+            if ($push_cleanup == 1) {
+                my int $u = 0;
+                while ($u < $pair_count) {
+                    emit($cg, "strada_cleanup_pop(); ");
+                    $u = $u + 1;
+                }
+            }
+            emit($cg, "strada_anon_hash_take_ph(" . $pair_count);
+            my int $a = 0;
+            while ($a < $pair_count) {
+                emit($cg, ", ");
+                gen_str_literal_c($cg, $keys->[$a]);
+                emit($cg, ", " . djb2_hash_32($keys->[$a]) . "u, __ahx_v" . $a);
+                $a = $a + 1;
+            }
+            emit($cg, "); })");
+            return;
+        }
+
         if ($has_expr_keys == 1) {
             # Has expression keys - build hash manually
             emit($cg, "({ StradaValue *__ah_hash = strada_new_hash(); ");

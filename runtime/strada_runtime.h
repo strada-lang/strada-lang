@@ -601,6 +601,11 @@ size_t strada_str_len(StradaValue *sv);  /* Get string length (binary-safe) */
 StradaValue* strada_new_array(void);
 StradaValue* strada_new_hash(void);
 StradaValue* strada_new_hash_presized(int capacity);
+/* Literal-keyed record constructors: (key, djb2 hash, value) triples.
+ * _take_ph takes ownership of every value (caller pre-increfs borrowed
+ * ones); _ph increfs like the classic strada_anon_hash. */
+StradaValue* strada_anon_hash_ph(int count, ...);
+StradaValue* strada_anon_hash_take_ph(int count, ...);
 StradaValue* strada_new_filehandle(FILE *fh);
 
 /* Reference counting and type conversion.

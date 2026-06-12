@@ -274,6 +274,11 @@ StradaValue* strada_new_array(void);
 StradaValue* strada_new_array_with_capacity(size_t capacity);
 StradaValue* strada_new_hash(void);
 StradaValue* strada_new_hash_presized(int capacity);
+/* Literal-keyed record constructors: (key, djb2 hash, value) triples.
+ * _take_ph takes ownership of every value (caller pre-increfs borrowed
+ * ones); _ph increfs like the classic strada_anon_hash. */
+StradaValue* strada_anon_hash_ph(int count, ...);
+StradaValue* strada_anon_hash_take_ph(int count, ...);
 StradaString *strada_intern_attr_ss(const char *key, unsigned int hash);
 StradaValue* strada_new_hash_with_capacity(size_t capacity);
 StradaValue* strada_new_filehandle(FILE *fh);

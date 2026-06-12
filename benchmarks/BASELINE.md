@@ -249,7 +249,7 @@ binary-trees allocator stress. Same conventions.
 | bench_binary       | 0.175s | 0.291s | 0.339s | pack/unpack/base64/byte-walk/frame-build; JS uses Buffer idioms |
 | bench_closures     | 0.100s | 1.304s | 0.077s | create/invoke/capture-rw/table/transitive — 13x over Perl |
 | bench_sprintf      | 2.133s | 1.687s | 0.748s | JS uses template-literal equivalents (no sprintf). Strada LOSES to Perl here — sprintf is an optimization lead. **UPDATED 2026-06-12 (same evening): 0.64s** after the sprintf fast paths + plan cache (see below) — now 2.7x faster than Perl; Node gap narrowed from 2.9x to ~1.5x (0.62-0.64 vs 0.42-0.45 interleaved) |
-| bench_binary_trees | 3.158s | 2.490s | 0.154s | depth-16; V8's generational GC owns this shape. Strada's per-node hashref overhead (refcount + open-addressed hash) is the cost — a known trade |
+| bench_binary_trees | 3.158s | 2.490s | 0.154s | depth-16; V8's generational GC owns this shape. Strada's per-node hashref overhead (refcount + open-addressed hash) is the cost — a known trade. **UPDATED 2026-06-12 (same evening): 1.27s** (2.5x) — anon hashes now build through the pooled single-block compact-hash path with take-ownership constructors (compile-time djb2 keys); landing this required fixing a critical pre-existing dispatch bug (interned class-name recycling silently calling the WRONG class's method — see the sticky-intern commit) plus four compact-pool corruption bugs. Now 2.0x faster than Perl; V8's gap remains structural |
 
 Optimization leads recorded by this round: sprintf (~1.3x behind Perl)
 and allocation-heavy deep structures (binary-trees ~1.3x behind Perl,

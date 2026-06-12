@@ -3085,6 +3085,7 @@ typedef struct InternEntry {
     char *str;
     int refcount;
     unsigned int hash;  /* Cached full hash for fast resize */
+    int sticky;         /* never freed: class names (see strada_intern_str_sticky) */
     struct InternEntry *next;
 } InternEntry;
 
@@ -3145,6 +3146,7 @@ static char *strada_intern_str(const char *s) {
     e->str = strdup(s);
     e->refcount = 1;
     e->hash = full_h;
+    e->sticky = 0;
     e->next = intern_table_buckets[h];
     intern_table_buckets[h] = e;
     intern_table_count++;
@@ -3155,6 +3157,29 @@ static char *strada_intern_str(const char *s) {
     }
 
     return e->str;
+}
+
+/* Sticky intern for CLASS NAMES (blessed_package). Multiple subsystems key
+ * caches on the blessed-package POINTER IDENTITY — the per-call-site
+ * monomorphic dispatch cache, the global method cache, has_no_destroy_cached,
+ * the class instance pools. When intern entries were made freeable at
+ * refcount 0 (to stop table growth from dynamically built names), a class
+ * whose last instance died could be re-interned — or a DIFFERENT class could
+ * land on the recycled address — and a stale pointer-keyed cache then
+ * dispatched the WRONG CLASS's method (observed: a Graph object running
+ * Node_touch in examples/oop_stress_test once allocation order shifted).
+ * Class names must therefore be immortal; growth is bounded by the number
+ * of distinct class names ever blessed, which pointer-keyed dispatch needs
+ * to be a closed set anyway. */
+static char *strada_intern_str_sticky(const char *s) {
+    char *p = strada_intern_str(s);
+    if (p && intern_table_initialized && strlen(p) <= INTERN_MAX_LEN) {
+        unsigned int h = intern_hash_full(p) & (intern_table_size - 1);
+        for (InternEntry *e = intern_table_buckets[h]; e; e = e->next) {
+            if (e->str == p) { e->sticky = 1; break; }
+        }
+    }
+    return p;
 }
 
 /* strada_intern_str_with_hash - intern string with pre-computed hash */
@@ -3182,6 +3207,7 @@ static char __attribute__((unused)) *strada_intern_str_with_hash(const char *s, 
     e->str = strdup(s);
     e->refcount = 1;
     e->hash = full_h;
+    e->sticky = 0;
     e->next = intern_table_buckets[h];
     intern_table_buckets[h] = e;
     intern_table_count++;
@@ -3248,7 +3274,7 @@ static void strada_intern_release(char *s) {
              * for programs that dynamically build class / package
              * names. The sister function strada_intern_release_with_hash
              * already had the freeing logic — make both consistent. */
-            if ((*pp)->refcount <= 0) {
+            if ((*pp)->refcount <= 0 && !(*pp)->sticky) {
                 InternEntry *old = *pp;
                 *pp = old->next;
                 free(old->str);
@@ -3274,7 +3300,7 @@ static void __attribute__((unused)) strada_intern_release_with_hash(char *s, uns
     while (*pp) {
         if ((*pp)->str == s) {
             (*pp)->refcount--;
-            if ((*pp)->refcount <= 0) {
+            if ((*pp)->refcount <= 0 && !(*pp)->sticky) {
                 InternEntry *old = *pp;
                 *pp = old->next;
                 free(old->str);
@@ -3412,6 +3438,18 @@ static void hv_release_storage_and_struct(StradaHash *hv) {
         hv->entries = (StradaHashEntry*)((char*)hv + sizeof(StradaHash)
                                          + HASH_SMALL_BUCKETS * sizeof(uint32_t));
         hv->capacity = HASH_COMPACT_ENTRIES;
+#ifdef STRADA_POOL_POISON
+        /* CC-HUNT: poison everything EXCEPT the fields reuse re-derives, so
+         * any reader of a pool-resident struct sees garbage immediately. */
+        hv->num_buckets = 0xDDDDDDDD;
+        hv->num_entries = 0xDDDDDDDD;
+        hv->next_slot = 0xDDDDDDDD;
+        hv->num_tombstones = 0xDDDDDDDD;
+        hv->free_head = 0xDDDDDDDD;
+        hv->iter_index = 0xDDDDDDDD;
+        memset(hv->hash_index, 0xDD, HASH_SMALL_BUCKETS * sizeof(uint32_t));
+        memset(hv->entries, 0xDD, HASH_COMPACT_ENTRIES * sizeof(StradaHashEntry));
+#endif
         hash_pool_small[hash_pool_small_count++] = hv;
     } else {
         free(hv);
@@ -19972,24 +20010,51 @@ StradaValue* strada_deref_hash_value_owned(StradaValue *ref) {
     return r;
 }
 
-/* NOTE (2026-06-12): routing anon hashes through the presized pooled
- * compact-hash path (strada_new_hash_presized) is a measured ~1.9x win on
- * record-heavy code (benchmarks/bench_binary_trees) but is REVERTED here:
- * with the cycle collector enabled, examples/oop_stress_test.strada then
- * fails ("Cannot call method on unblessed reference" — a live object's
- * hash loses its entries). STRADA_GC=off makes it pass, so the compact/
- * pooled representation interacts with the collector's trial-deletion in
- * a way that mis-collects live data. The same hazard latently applies to
- * the inline OOP constructors that already use the presized path. Needs a
- * dedicated hunt with -DSTRADA_RC_TRACE before re-enabling.
- */
+/* Fast anon-hash constructors for literal-keyed records. The codegen
+ * passes (key, precomputed djb2 hash, value) triples for ASCII literal
+ * keys, so construction skips per-key hashing; the _take variant also
+ * takes OWNERSHIP of every value (codegen pre-increfs borrowed ones),
+ * skipping the incref-here / decref-at-call-site round trip per pair.
+ * Both build through the presized pooled compact-hash path. */
+static StradaValue* strada_anon_hash_core_ph(int count, va_list args, int take) {
+    StradaValue *sv = strada_new_hash_presized(count > 0 ? count : 1);
+    StradaHash *hv = sv->value.hv;
+    for (int i = 0; i < count; i++) {
+        const char *key = va_arg(args, const char*);
+        unsigned int kh = va_arg(args, unsigned int);
+        StradaValue *val = va_arg(args, StradaValue*);
+        if (!take && val) strada_incref(val);
+        /* set_take_ph stores without an extra incref (we own val here
+         * either by transfer or by the incref above) and uses the
+         * precomputed key hash. */
+        strada_hash_set_take_ph(hv, key, kh, val);
+    }
+    return strada_ref_create_take(sv);
+}
+
+StradaValue* strada_anon_hash_ph(int count, ...) {
+    va_list args;
+    va_start(args, count);
+    StradaValue *r = strada_anon_hash_core_ph(count, args, 0);
+    va_end(args);
+    return r;
+}
+
+StradaValue* strada_anon_hash_take_ph(int count, ...) {
+    va_list args;
+    va_start(args, count);
+    StradaValue *r = strada_anon_hash_core_ph(count, args, 1);
+    va_end(args);
+    return r;
+}
+
 StradaValue* strada_anon_hash(int count, ...) {
     /* Create anonymous hash: { key => val, ... }
      * Presized: small literals ({ "l" => ..., "r" => ... } records) hit the
      * pooled single-block compact hash instead of a default-capacity hash
      * with separate index/entry allocations — anon hashrefs are the hottest
      * allocation in record-heavy code (binary-trees style). */
-    StradaValue *sv = strada_new_hash();
+    StradaValue *sv = strada_new_hash_presized(count > 0 ? count : 1);
 
     va_list args;
     va_start(args, count);
@@ -22094,7 +22159,7 @@ static OopPackage* oop_get_or_create_package(const char *name) {
 /* Public wrapper around the static intern table — codegen uses this once per
  * call site to obtain a stable interned pointer for class names. */
 char *strada_intern_pkg_name(const char *s) {
-    return strada_intern_str(s);
+    return strada_intern_str_sticky(s);
 }
 
 /* Fast bless variant: caller has pre-cached the interned package name string
@@ -22133,9 +22198,10 @@ StradaValue* strada_bless(StradaValue *ref, const char *package) {
         strada_intern_release(ref->meta->blessed_package);
     }
 
-    /* Set the blessed package — interned since package names are a small fixed set */
+    /* Set the blessed package — interned STICKY: pointer-identity-keyed
+     * dispatch caches require class-name pointers to be stable forever. */
     StradaMetadata *meta = strada_ensure_meta(ref);
-    meta->blessed_package = strada_intern_str(package);
+    meta->blessed_package = strada_intern_str_sticky(package);
 
     return ref;
 }
