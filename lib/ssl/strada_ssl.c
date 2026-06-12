@@ -30,6 +30,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -50,6 +51,8 @@ typedef struct {
 
 /* Global initialization flag */
 static int ssl_initialized = 0;
+
+static void strada_ssl_wait_want(SSLConnection *conn, int err);
 
 /* Initialize OpenSSL library */
 int strada_ssl_init(void) {
@@ -353,8 +356,15 @@ char* strada_ssl_read_str(SSLConnection *conn, int max_len) {
     char *buffer = malloc(max_len + 1);
     if (!buffer) return strdup("");
 
-    int n = SSL_read(conn->ssl, buffer, max_len);
-    if (n <= 0) {
+    int n;
+    for (;;) {
+        n = SSL_read(conn->ssl, buffer, max_len);
+        if (n > 0) break;
+        int err = SSL_get_error(conn->ssl, n);
+        if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+            strada_ssl_wait_want(conn, err);   /* non-blocking fd: retry */
+            continue;
+        }
         free(buffer);
         return strdup("");
     }
@@ -422,10 +432,31 @@ int strada_ssl_write(SSLConnection *conn, const char *data, int len) {
 
 /* Write string to SSL connection
  * Takes raw C types for extern "C" */
+/* Wait for the readiness direction OpenSSL asked for. Used by the
+ * blocking-style wrappers so they stay correct when the underlying fd is
+ * O_NONBLOCK (event-loop servers accept with non-blocking fds but reuse
+ * these wrappers for cold paths like chunked responses). */
+static void strada_ssl_wait_want(SSLConnection *conn, int err) {
+    struct pollfd p;
+    p.fd = conn->socket_fd;
+    p.events = (err == SSL_ERROR_WANT_WRITE) ? POLLOUT : POLLIN;
+    p.revents = 0;
+    poll(&p, 1, 1000);
+}
+
 int strada_ssl_write_str(SSLConnection *conn, const char *data, int len) {
     if (!conn || !conn->ssl || !data) return -1;
     if (len < 0) len = strlen(data);
-    return SSL_write(conn->ssl, data, len);
+    for (;;) {
+        int n = SSL_write(conn->ssl, data, len);
+        if (n > 0) return n;
+        int err = SSL_get_error(conn->ssl, n);
+        if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+            strada_ssl_wait_want(conn, err);   /* non-blocking fd: retry */
+            continue;
+        }
+        return n;
+    }
 }
 
 /* Close SSL connection
@@ -616,5 +647,117 @@ void strada_ssl_close_sv(StradaValue *conn_sv) {
 int64_t strada_ssl_fd_sv(StradaValue *conn_sv) {
     SSLConnection *conn = (SSLConnection*)(intptr_t)strada_to_int(conn_sv);
     return (int64_t)strada_ssl_fd(conn);
+}
+
+/* =============================================================================
+ * Non-blocking StradaValue wrappers for event-loop (green-task) servers.
+ *
+ * Protocol: an operation that cannot progress returns its WANT marker; the
+ * caller asks strada_ssl_want_sv() for the direction, parks the green task
+ * on the connection fd (core::coro_yield_io), and retries. All handles are
+ * SSLConnection pointers passed as ints, same as the blocking wrappers.
+ * =============================================================================
+ */
+
+/* Accept ONE pending TCP connection without blocking and attach an SSL
+ * object in accept state (the handshake is NOT performed here -- drive it
+ * with strada_ssl_handshake_step_sv). The listener and the accepted fd are
+ * both set O_NONBLOCK. Returns a conn handle, or undef when no connection
+ * is pending (or on error). */
+StradaValue* strada_ssl_try_accept_sv(StradaValue *server_sv) {
+    SSLConnection *server = (SSLConnection*)(intptr_t)strada_to_int(server_sv);
+    if (!server || !server->is_server) return strada_new_undef();
+
+    /* Idempotent; shared across forked workers, which is fine because a
+     * cannoli-style server runs ALL workers in the same (loop) mode. */
+    int sflags = fcntl(server->socket_fd, F_GETFL, 0);
+    if (sflags >= 0 && !(sflags & O_NONBLOCK)) {
+        fcntl(server->socket_fd, F_SETFL, sflags | O_NONBLOCK);
+    }
+
+    struct sockaddr_storage client_addr;
+    socklen_t addr_len = sizeof(client_addr);
+    int client_fd = accept(server->socket_fd, (struct sockaddr*)&client_addr, &addr_len);
+    if (client_fd < 0) return strada_new_undef();
+
+    int cflags = fcntl(client_fd, F_GETFL, 0);
+    if (cflags >= 0) fcntl(client_fd, F_SETFL, cflags | O_NONBLOCK);
+
+    SSLConnection *conn = malloc(sizeof(SSLConnection));
+    if (!conn) { close(client_fd); return strada_new_undef(); }
+    memset(conn, 0, sizeof(SSLConnection));
+    conn->socket_fd = client_fd;
+    conn->ctx = server->ctx;   /* shared with the server; not freed on close */
+    conn->is_server = 0;
+
+    conn->ssl = SSL_new(server->ctx);
+    if (!conn->ssl) { close(client_fd); free(conn); return strada_new_undef(); }
+    SSL_set_fd(conn->ssl, client_fd);
+    SSL_set_accept_state(conn->ssl);
+
+    return strada_new_int((int64_t)(intptr_t)conn);
+}
+
+/* One handshake step. Returns 0 = complete, 1 = want-read, 2 = want-write,
+ * -1 = handshake failed (caller should close). */
+int64_t strada_ssl_handshake_step_sv(StradaValue *conn_sv) {
+    SSLConnection *conn = (SSLConnection*)(intptr_t)strada_to_int(conn_sv);
+    if (!conn || !conn->ssl) return -1;
+    int r = SSL_do_handshake(conn->ssl);
+    if (r == 1) return 0;
+    int err = SSL_get_error(conn->ssl, r);
+    if (err == SSL_ERROR_WANT_READ)  return 1;
+    if (err == SSL_ERROR_WANT_WRITE) return 2;
+    return -1;
+}
+
+/* Non-blocking read. Returns the data read (str), "" when the peer closed
+ * (or on a fatal error), or undef when the operation must be retried after
+ * readiness (park per strada_ssl_want_sv). */
+StradaValue* strada_ssl_try_read_sv(StradaValue *conn_sv, StradaValue *max_len_sv) {
+    SSLConnection *conn = (SSLConnection*)(intptr_t)strada_to_int(conn_sv);
+    int max_len = strada_to_int(max_len_sv);
+    if (!conn || !conn->ssl || max_len <= 0) return strada_new_str("");
+
+    char *buffer = malloc(max_len);
+    if (!buffer) return strada_new_str("");
+    int n = SSL_read(conn->ssl, buffer, max_len);
+    if (n > 0) {
+        StradaValue *out = strada_new_str_len(buffer, n);
+        free(buffer);
+        return out;
+    }
+    free(buffer);
+    int err = SSL_get_error(conn->ssl, n);
+    if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+        return strada_new_undef();
+    }
+    return strada_new_str("");   /* closed or fatal */
+}
+
+/* Non-blocking write. Returns bytes written (> 0; OpenSSL default mode is
+ * all-or-nothing per call), 0 when the operation must be retried after
+ * readiness, or -1 on a fatal error. */
+int64_t strada_ssl_try_write_sv(StradaValue *conn_sv, StradaValue *data_sv) {
+    SSLConnection *conn = (SSLConnection*)(intptr_t)strada_to_int(conn_sv);
+    if (!conn || !conn->ssl) return -1;
+    char *data = strada_to_str(data_sv);
+    int len = strlen(data);
+    if (len == 0) { free(data); return 0; }
+    int n = SSL_write(conn->ssl, data, len);
+    free(data);
+    if (n > 0) return (int64_t)n;
+    int err = SSL_get_error(conn->ssl, n);
+    if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) return 0;
+    return -1;
+}
+
+/* Direction the last WANT came from: 1 = read, 2 = write. Defaults to
+ * read when OpenSSL reports no pending want. */
+int64_t strada_ssl_want_sv(StradaValue *conn_sv) {
+    SSLConnection *conn = (SSLConnection*)(intptr_t)strada_to_int(conn_sv);
+    if (!conn || !conn->ssl) return 1;
+    if (SSL_want_write(conn->ssl)) return 2;
+    return 1;
 }
 
