@@ -650,6 +650,13 @@ Go-package-archive-style separate compilation, fully automatic:
   every consumer link re-run a ~25s LTO pass) and `-fPIC` (same artifact
   links into executables and `--shared` libraries).
 - Implies `--use-artifacts` (artifact use stays opt-in by default).
+- `strada --clear-module-cache` wipes the cache directory (always safe —
+  the next `--module-cache` build regenerates it).
+- Artifacts are deliberately **not LTO-participating** (`-fno-lto`): fat-LTO
+  objects made every consumer link re-run a full LTO pass (~25s). Cached
+  module code is gcc-optimized within the module but doesn't cross-inline
+  with the consumer; for maximum-performance release builds, compile
+  without `--module-cache` (source inlining + LTO).
 - Tests: `t/separate_compile_test/run.sh` (16 scenarios, incl. sidecars,
   transitive deps, cache dir, cold/warm).
 

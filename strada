@@ -123,6 +123,7 @@ OBJECT_ONLY=0
 OBJECT_FULL=0      # 1 if --object-full was passed (include deps, old behavior)
 MODULE_ONLY_MODE=0 # 1 if -M was passed (precompile a module / a tree of modules)
 MODULE_CACHE=0     # --module-cache: use + auto-warm precompiled module artifacts
+CLEAR_MODULE_CACHE=0 # --clear-module-cache: wipe the module cache and exit
 STATIC_LINK=0
 SHOW_WARNINGS=0
 STRICT_TYPES=0
@@ -216,6 +217,8 @@ Options:
                 \$STRADA_MODULE_CACHE_DIR (default ~/.cache/strada/modules),
                 keyed by source path, invalidated by source mtime and by
                 compiler upgrades. Implies --use-artifacts.
+  --clear-module-cache  Wipe the module cache directory and exit. Always
+                safe: the next --module-cache build regenerates it.
   -M [TARGET]   Precompile module(s). With a FILE: produce a sibling .o limited
                 to that file's own symbols. With a DIR: recursive walk producing
                 a sibling .o for each .strada file beneath.
@@ -419,6 +422,10 @@ while [[ $# -gt 0 ]]; do
             export STRADA_USE_ARTIFACTS=1
             shift
             ;;
+        --clear-module-cache)
+            CLEAR_MODULE_CACHE=1
+            shift
+            ;;
         -w|--warnings)
             SHOW_WARNINGS=1
             shift
@@ -548,6 +555,27 @@ find_jit_bin() {
     fi
     return 1
 }
+
+# Handle --clear-module-cache: wipe the module cache directory and exit.
+# The cache is fully regenerable (the next --module-cache build re-warms
+# it), so this is always safe — but refuse obviously wrong paths in case
+# STRADA_MODULE_CACHE_DIR is set to something dangerous.
+if [ "$CLEAR_MODULE_CACHE" -eq 1 ]; then
+    mc_dir="${STRADA_MODULE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/strada/modules}"
+    case "$mc_dir" in
+        ""|/|/home|/usr|/usr/local|"$HOME")
+            error "refusing to remove suspicious module cache path: '$mc_dir'"
+            ;;
+    esac
+    if [ -d "$mc_dir" ]; then
+        mc_size="$(du -sh "$mc_dir" 2>/dev/null | cut -f1)"
+        rm -rf "$mc_dir"
+        echo "module cache cleared: $mc_dir (${mc_size:-empty})"
+    else
+        echo "module cache already empty: $mc_dir"
+    fi
+    exit 0
+fi
 
 # Handle REPL mode — runs via strada-jit with auto-detected backend
 # (prefers tcc for snappier per-line latency, falls back to gcc when tcc
