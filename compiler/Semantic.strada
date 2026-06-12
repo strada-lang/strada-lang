@@ -1062,6 +1062,27 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
         my scalar $args = $expr->{"args"};
         my int $arg_count = $expr->{"arg_count"};
 
+        # Constant-fold ord("literal"): rewrite the call node in place into
+        # an int literal, so character-code comparisons can be WRITTEN as
+        # `$code == ord("#")` (readable) yet compile to a plain integer
+        # compare with every int-literal optimization (tagged ints, int
+        # conditions). ASCII first byte only -- for multi-byte UTF-8 the
+        # runtime ord() decodes the codepoint, so leave those to runtime.
+        if ($name eq "ord" && $arg_count == 1) {
+            my scalar $ord_arg = $args->[0];
+            if ($ord_arg->{"type"} == NODE_STR_LITERAL()) {
+                my str $ord_sval = $ord_arg->{"value"};
+                if (length($ord_sval) > 0) {
+                    my int $ord_code = char_at($ord_sval, 0);
+                    if ($ord_code > 0 && $ord_code < 128) {
+                        $expr->{"type"} = NODE_INT_LITERAL();
+                        $expr->{"value"} = $ord_code;
+                        return;
+                    }
+                }
+            }
+        }
+
         # Record tie usage on the context: the codegen's condition-level
         # hash-fetch CSE is only sound when no hash in the program can be
         # tied (a tied FETCH is observable per-mention).

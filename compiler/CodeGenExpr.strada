@@ -2842,11 +2842,11 @@ func gen_expression(scalar $cg, scalar $expr) void {
         my int $len = bytes($val);
         while ($i < $len) {
             my int $code = char_at($val, $i);
-            if ($code == 10) {
+            if ($code == ord("\n")) {
                 emit($cg, "\\n");
-            } elsif ($code == 9) {
+            } elsif ($code == ord("\t")) {
                 emit($cg, "\\t");
-            } elsif ($code == 13) {
+            } elsif ($code == ord("\r")) {
                 emit($cg, "\\r");
             } elsif ($code == 0) {
                 # 3-digit octal so a following digit isn't merged into the escape
@@ -2861,11 +2861,11 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 emit($cg, "\\v");
             } elsif ($code == 27) {
                 emit($cg, "\\033");
-            } elsif ($code == 34) {
+            } elsif ($code == ord("\"")) {
                 emit($cg, "\\\"");
-            } elsif ($code == 92) {
+            } elsif ($code == ord("\\")) {
                 emit($cg, "\\\\");
-            } elsif ($code >= 32 && $code <= 126) {
+            } elsif ($code >= ord(" ") && $code <= ord("~")) {
                 # Printable ASCII - output as-is
                 emit($cg, chr($code));
             } else {

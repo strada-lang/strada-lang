@@ -60,7 +60,7 @@ func sanitize_name(str $name) str {
             # this a crafted name (e.g. an import name containing ';', '(', or a
             # space) would inject raw tokens into the generated C symbol.
             my int $code = char_at($name, $i);
-            if (($code >= 48 && $code <= 57) || ($code >= 65 && $code <= 90) || ($code >= 97 && $code <= 122) || $code == 95) {
+            if (($code >= ord("0") && $code <= ord("9")) || ($code >= ord("A") && $code <= ord("Z")) || ($code >= ord("a") && $code <= ord("z")) || $code == ord("_")) {
                 $result = $result . $ch;
             } else {
                 $result = $result . "_";
@@ -1899,22 +1899,22 @@ func gen_str_literal_c(scalar $cg, str $val) void {
     while ($i < $len) {
         my str $ch = substr_bytes($val, $i, 1);
         my int $byte = ord($ch);
-        if ($byte == 92) {
+        if ($byte == ord("\\")) {
             emit($cg, $bs);
             emit($cg, $bs);
-        } elsif ($byte == 34) {
+        } elsif ($byte == ord("\"")) {
             emit($cg, $bs);
             emit($cg, chr(34));
-        } elsif ($byte == 10) {
+        } elsif ($byte == ord("\n")) {
             emit($cg, $bs);
             emit($cg, "n");
-        } elsif ($byte == 13) {
+        } elsif ($byte == ord("\r")) {
             emit($cg, $bs);
             emit($cg, "r");
-        } elsif ($byte == 9) {
+        } elsif ($byte == ord("\t")) {
             emit($cg, $bs);
             emit($cg, "t");
-        } elsif ($byte >= 32 && $byte < 127) {
+        } elsif ($byte >= ord(" ") && $byte < 127) {
             emit($cg, $ch);
         } else {
             # Non-printable or high-bit byte - emit as \ooo (3-digit
@@ -2340,20 +2340,20 @@ func emit_escaped_string(scalar $cg, str $s) void {
     my int $len = bytes($s);
     while ($i < $len) {
         my int $code = char_at($s, $i);
-        if ($code == 92) {
+        if ($code == ord("\\")) {
             emit($cg, "\\\\");
-        } elsif ($code == 34) {
+        } elsif ($code == ord("\"")) {
             emit($cg, "\\\"");
-        } elsif ($code == 10) {
+        } elsif ($code == ord("\n")) {
             emit($cg, "\\n");
-        } elsif ($code == 9) {
+        } elsif ($code == ord("\t")) {
             emit($cg, "\\t");
-        } elsif ($code == 13) {
+        } elsif ($code == ord("\r")) {
             emit($cg, "\\r");
         } elsif ($code == 0) {
             # 3-digit octal so a following digit isn't merged into the escape
             emit($cg, "\\000");
-        } elsif ($code < 32 || $code == 127) {
+        } elsif ($code < ord(" ") || $code == 127) {
             my int $o2 = $code / 64;
             my int $o1 = ($code / 8) % 8;
             my int $o0 = $code % 8;
