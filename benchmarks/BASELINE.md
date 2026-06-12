@@ -248,9 +248,33 @@ binary-trees allocator stress. Same conventions.
 | bench_utf8         | 1.422s | 2.600s | 0.700s | case/valid/chr-build/concat/NFC. Models differ: Strada = UTF-8 bytes, Perl = decoded codepoints, JS = UTF-16; equivalent user-visible work |
 | bench_binary       | 0.175s | 0.291s | 0.339s | pack/unpack/base64/byte-walk/frame-build; JS uses Buffer idioms |
 | bench_closures     | 0.100s | 1.304s | 0.077s | create/invoke/capture-rw/table/transitive — 13x over Perl |
-| bench_sprintf      | 2.133s | 1.687s | 0.748s | JS uses template-literal equivalents (no sprintf). Strada LOSES to Perl here — sprintf is an optimization lead |
+| bench_sprintf      | 2.133s | 1.687s | 0.748s | JS uses template-literal equivalents (no sprintf). Strada LOSES to Perl here — sprintf is an optimization lead. **UPDATED 2026-06-12 (same evening): 0.64s** after the sprintf fast paths + plan cache (see below) — now 2.7x faster than Perl; Node gap narrowed from 2.9x to ~1.5x (0.62-0.64 vs 0.42-0.45 interleaved) |
 | bench_binary_trees | 3.158s | 2.490s | 0.154s | depth-16; V8's generational GC owns this shape. Strada's per-node hashref overhead (refcount + open-addressed hash) is the cost — a known trade |
 
 Optimization leads recorded by this round: sprintf (~1.3x behind Perl)
 and allocation-heavy deep structures (binary-trees ~1.3x behind Perl,
 far behind V8). Closures, binary data, and UTF-8 case ops are strong.
+
+
+### sprintf optimization (2026-06-12 evening)
+
+bench_sprintf: 1.337s -> 0.643s (quiet-box; interleaved best-of runs
+0.62-0.63 vs Node 0.42-0.45). Three runtime changes, all output-preserving:
+
+- guarded fast formatters for simple %d/%u/%x/%X/%o, %f/%.Nf (N<=9), and
+  %e/%E/%g/%G (prec<=16) with -/0 flags + width: hand conversion with an
+  AMBIGUITY GUARD — any close rounding call (ties, boundary exponents)
+  falls back to snprintf, so output is bit-identical to glibc. Fuzzed
+  against glibc: 52M + 12M cases across all three families, zero
+  mismatches.
+- sprintf plan cache: per-thread, content-keyed (capped djb2 + memcmp
+  verify) cache of pre-parsed format plans; simple formats execute
+  decoded ops straight into the output buffer (no per-call scanning).
+  Non-simple formats (positional, vector, '+'/' '/'#', %c/%b/...) use the
+  legacy loop unchanged.
+- converge uses fast-path lengths (no strlen), literal runs single-memcpy.
+
+Remaining Node gap (~1.5x) is per-call structure: varargs entry, arg SV
+handling, result SV lifecycle. The identified fix is compile-time
+lowering of literal-format sprintf calls in the codegen (emit the op
+sequence directly); not yet attempted.

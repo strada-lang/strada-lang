@@ -6377,6 +6377,533 @@ StradaValue* strada_sprintf(const char *format, ...) {
 /* sprintf_sv - sprintf with StradaValue* arguments
  * Parses format string and converts each arg based on format specifier */
 /* Internal: format using a pre-collected arg array. */
+/* Fast formatter for the overwhelmingly common SIMPLE integer specs:
+ * "%d" / "%u" / "%x" / "%X" / "%o" / "%i", optionally with '-' and/or '0'
+ * flags and a small width ("%5d", "%05d", "%-8x"). Digit generation is
+ * plain base conversion — bit-identical to snprintf for these specs —
+ * but skips glibc's printf machinery (~3x faster). Returns the number of
+ * chars written to dst (NUL-terminated), or -1 when the spec uses
+ * anything else ('+', ' ', '#', precision, length modifiers, huge
+ * widths) so the caller falls back to snprintf.
+ * dst must hold at least STRADA_SPF_FASTINT_MAX bytes. */
+#define STRADA_SPF_FASTINT_MAXW 256
+#define STRADA_SPF_FASTINT_MAX  (STRADA_SPF_FASTINT_MAXW + 24)
+static int strada_spf_fast_int_core(char conv, int left, int zero, int width,
+                                    int64_t val, char *dst) {
+    static const char two_digits[] =
+        "00010203040506070809101112131415161718192021222324"
+        "25262728293031323334353637383940414243444546474849"
+        "50515253545556575859606162636465666768697071727374"
+        "75767778798081828384858687888990919293949596979899";
+    char digits[24];
+    int dlen = 0;
+    int neg = 0;
+    if (conv == 'd' || conv == 'i') {
+        uint64_t u;
+        if (val < 0) { neg = 1; u = (uint64_t)(-(val + 1)) + 1; }
+        else u = (uint64_t)val;
+        char *dp = digits + sizeof(digits);
+        while (u >= 100) {
+            unsigned r = (unsigned)(u % 100);
+            u /= 100;
+            dp -= 2;
+            dp[0] = two_digits[r * 2];
+            dp[1] = two_digits[r * 2 + 1];
+        }
+        if (u >= 10) {
+            dp -= 2;
+            dp[0] = two_digits[u * 2];
+            dp[1] = two_digits[u * 2 + 1];
+        } else {
+            *--dp = (char)('0' + u);
+        }
+        dlen = (int)(digits + sizeof(digits) - dp);
+        memmove(digits, dp, (size_t)dlen);
+    } else if (conv == 'u') {
+        uint64_t u = (uint64_t)val;
+        char *dp = digits + sizeof(digits);
+        do { *--dp = (char)('0' + (u % 10)); u /= 10; } while (u);
+        dlen = (int)(digits + sizeof(digits) - dp);
+        memmove(digits, dp, (size_t)dlen);
+    } else if (conv == 'x' || conv == 'X') {
+        const char *hex = (conv == 'x') ? "0123456789abcdef" : "0123456789ABCDEF";
+        uint64_t u = (uint64_t)val;
+        char *dp = digits + sizeof(digits);
+        do { *--dp = hex[u & 15]; u >>= 4; } while (u);
+        dlen = (int)(digits + sizeof(digits) - dp);
+        memmove(digits, dp, (size_t)dlen);
+    } else if (conv == 'o') {
+        uint64_t u = (uint64_t)val;
+        char *dp = digits + sizeof(digits);
+        do { *--dp = (char)('0' + (u & 7)); u >>= 3; } while (u);
+        dlen = (int)(digits + sizeof(digits) - dp);
+        memmove(digits, dp, (size_t)dlen);
+    } else {
+        return -1;
+    }
+
+    int body = dlen + neg;
+    int pad = width > body ? width - body : 0;
+    char *o = dst;
+    if (left) {                       /* "-" wins over "0" (C semantics) */
+        if (neg) *o++ = '-';
+        memcpy(o, digits, (size_t)dlen); o += dlen;
+        while (pad--) *o++ = ' ';
+    } else if (zero) {
+        if (neg) *o++ = '-';
+        while (pad--) *o++ = '0';
+        memcpy(o, digits, (size_t)dlen); o += dlen;
+    } else {
+        while (pad--) *o++ = ' ';
+        if (neg) *o++ = '-';
+        memcpy(o, digits, (size_t)dlen); o += dlen;
+    }
+    *o = '\0';
+    return (int)(o - dst);
+}
+
+static int strada_spf_fast_int(const char *spec_buf, int64_t val, char *dst) {
+    const char *p = spec_buf;
+    if (*p++ != '%') return -1;
+    int left = 0, zero = 0;
+    for (;;) {
+        if (*p == '-') { left = 1; p++; }
+        else if (*p == '0') { zero = 1; p++; }
+        else if (*p == '+' || *p == ' ' || *p == '#') return -1;
+        else break;
+    }
+    int width = 0;
+    while (*p >= '0' && *p <= '9') {
+        width = width * 10 + (*p - '0');
+        if (width > STRADA_SPF_FASTINT_MAXW) return -1;
+        p++;
+    }
+    char conv = *p++;
+    if (*p != '\0') return -1;   /* precision / length modifiers / junk */
+    if (conv != 'd' && conv != 'i' && conv != 'u' && conv != 'x' && conv != 'X' && conv != 'o')
+        return -1;
+    return strada_spf_fast_int_core(conv, left, zero, width, val, dst);
+}
+
+/* Fast formatter for simple fixed-point float specs: "%f", "%.Nf"
+ * (N <= 9), optional '-'/'0' flags and small width. Conversion is a
+ * scaled long-double with an AMBIGUITY GUARD: the multiply a*10^N incurs
+ * one long-double rounding (rel err <= 2^-64), so when the fractional
+ * part of the scaled value lies within a conservative margin of the .5
+ * rounding boundary — including exact ties, which glibc rounds
+ * half-to-even — we return -1 and the caller uses snprintf. Where the
+ * fast path fires, the rounding decision provably matches correctly-
+ * rounded output, so results are bit-identical to glibc. Returns chars
+ * written or -1 (fallback). dst must hold STRADA_SPF_FASTINT_MAX bytes. */
+static int strada_spf_fast_fixed(const char *spec_buf, double v, char *dst) {
+    static const long double p10l[10] = {
+        1e0L, 1e1L, 1e2L, 1e3L, 1e4L, 1e5L, 1e6L, 1e7L, 1e8L, 1e9L
+    };
+    static const uint64_t p10u[10] = {
+        1ULL, 10ULL, 100ULL, 1000ULL, 10000ULL, 100000ULL,
+        1000000ULL, 10000000ULL, 100000000ULL, 1000000000ULL
+    };
+    const char *p = spec_buf;
+    if (*p++ != '%') return -1;
+    int left = 0, zero = 0;
+    for (;;) {
+        if (*p == '-') { left = 1; p++; }
+        else if (*p == '0') { zero = 1; p++; }
+        else if (*p == '+' || *p == ' ' || *p == '#') return -1;
+        else break;
+    }
+    int width = 0;
+    while (*p >= '0' && *p <= '9') {
+        width = width * 10 + (*p - '0');
+        if (width > STRADA_SPF_FASTINT_MAXW) return -1;
+        p++;
+    }
+    int prec = 6;                      /* %f default */
+    if (*p == '.') {
+        p++;
+        prec = 0;
+        while (*p >= '0' && *p <= '9') { prec = prec * 10 + (*p - '0'); p++; }
+        if (prec > 9) return -1;
+    }
+    char conv = *p++;
+    if ((conv != 'f' && conv != 'F') || *p != '\0') return -1;
+
+    int neg = signbit(v) ? 1 : 0;      /* -0.0 prints "-0..." like glibc */
+    double a = fabs(v);
+    /* The scaled value must fit a uint64 with headroom, and stay in the
+     * range where the margin analysis holds. */
+    if (!(a < 9.0e17 / (double)p10u[prec])) return -1;
+
+    long double scaled = (long double)a * p10l[prec];
+    long double fl = floorl(scaled);
+    long double frac = scaled - fl;
+    /* Ambiguity margin: one ld rounding (2^-64 rel) on the multiply,
+     * widened by 16x for safety -> 2^-60. Ties land here too. */
+    long double margin = scaled * 0x1p-60L + 0x1p-60L;
+    long double dist = frac > 0.5L ? frac - 0.5L : 0.5L - frac;
+    if (dist <= margin) return -1;
+
+    uint64_t total = (uint64_t)fl + (frac > 0.5L ? 1 : 0);
+    uint64_t ip = total / p10u[prec];
+    uint64_t fp_part = total % p10u[prec];
+
+    /* digits of the integer part */
+    char ibuf[24];
+    char *id = ibuf + sizeof(ibuf);
+    do { *--id = (char)('0' + (ip % 10)); ip /= 10; } while (ip);
+    int ilen = (int)(ibuf + sizeof(ibuf) - id);
+
+    int body = neg + ilen + (prec > 0 ? 1 + prec : 0);
+    int pad = width > body ? width - body : 0;
+    char *o = dst;
+
+#define SPF_EMIT_NUM() do { \
+        if (neg) *o++ = '-'; \
+        memcpy(o, id, (size_t)ilen); o += ilen; \
+        if (prec > 0) { \
+            *o++ = '.'; \
+            uint64_t f = fp_part; \
+            for (int k = prec - 1; k >= 0; k--) { o[k] = (char)('0' + (f % 10)); f /= 10; } \
+            o += prec; \
+        } \
+    } while (0)
+
+    if (left) {
+        SPF_EMIT_NUM();
+        while (pad--) *o++ = ' ';
+    } else if (zero) {
+        if (neg) { *o++ = '-'; neg = 0; while (pad--) *o++ = '0';
+                   memcpy(o, id, (size_t)ilen); o += ilen;
+                   if (prec > 0) { *o++ = '.';
+                       uint64_t f = fp_part;
+                       for (int k = prec - 1; k >= 0; k--) { o[k] = (char)('0' + (f % 10)); f /= 10; }
+                       o += prec; } }
+        else { while (pad--) *o++ = '0'; SPF_EMIT_NUM(); }
+    } else {
+        while (pad--) *o++ = ' ';
+        SPF_EMIT_NUM();
+    }
+#undef SPF_EMIT_NUM
+    *o = '\0';
+    return (int)(o - dst);
+}
+
+/* Fast formatter for simple %e/%E/%g/%G specs (optional '-'/'0' flags,
+ * width, precision <= 16). Same ambiguity-guard discipline as
+ * strada_spf_fast_fixed: long-double scaling with margins wide enough to
+ * cover powl/divide rounding; any close call (rounding ties, exponent-
+ * boundary values) returns -1 and the caller uses snprintf, so emitted
+ * output is bit-identical to glibc. */
+static int strada_spf_fast_efg(const char *spec_buf, double v, char *dst) {
+    const char *p = spec_buf;
+    if (*p++ != '%') return -1;
+    int left = 0, zero = 0;
+    for (;;) {
+        if (*p == '-') { left = 1; p++; }
+        else if (*p == '0') { zero = 1; p++; }
+        else if (*p == '+' || *p == ' ' || *p == '#') return -1;
+        else break;
+    }
+    int width = 0;
+    while (*p >= '0' && *p <= '9') {
+        width = width * 10 + (*p - '0');
+        if (width > STRADA_SPF_FASTINT_MAXW) return -1;
+        p++;
+    }
+    int prec = 6;
+    if (*p == '.') {
+        p++;
+        prec = 0;
+        while (*p >= '0' && *p <= '9') { prec = prec * 10 + (*p - '0'); p++; }
+        if (prec > 16) return -1;
+    }
+    char conv = *p++;
+    if (*p != '\0') return -1;
+    int is_g = (conv == 'g' || conv == 'G');
+    int upper = (conv == 'E' || conv == 'G');
+    if (!is_g && conv != 'e' && conv != 'E') return -1;
+
+    int gprec = prec;                /* %g: precision = significant digits */
+    if (is_g && gprec == 0) gprec = 1;
+    int mdigits = is_g ? gprec - 1 : prec;   /* digits after the point in e-form */
+
+    int neg = signbit(v) ? 1 : 0;
+    double a = fabs(v);
+    if (a == 0.0) return -1;         /* zero has its own formatting rules; rare — snprintf */
+    if (a < 1e-290 || a > 1e290) return -1;   /* keep the error analysis honest */
+
+    /* decimal exponent estimate + correction */
+    int e10 = (int)floor(log10(a));
+    long double scaled = 0.0L;
+    uint64_t lo = 0, hi = 0;
+    for (int tries = 0; tries < 3; tries++) {
+        long double factor = powl(10.0L, mdigits - e10);
+        scaled = (long double)a * factor;
+        lo = 1; for (int k = 0; k < mdigits; k++) lo *= 10;       /* 10^mdigits */
+        hi = lo * 10;
+        if (scaled < (long double)lo) { e10--; continue; }
+        if (scaled >= (long double)hi) { e10++; continue; }
+        break;
+    }
+    if (scaled < (long double)lo || scaled >= (long double)hi) return -1;
+    /* boundary guard: if scaled sits within margin of lo or hi, the
+     * exponent itself is ambiguous — decline */
+    long double bmargin = scaled * 0x1p-56L;
+    if (scaled - (long double)lo < bmargin || (long double)hi - scaled < bmargin) return -1;
+
+    long double fl = floorl(scaled);
+    long double frac = scaled - fl;
+    long double dist = frac > 0.5L ? frac - 0.5L : 0.5L - frac;
+    if (dist <= scaled * 0x1p-56L + 0x1p-56L) return -1;
+    uint64_t r = (uint64_t)fl + (frac > 0.5L ? 1 : 0);
+    if (r >= hi) { /* rounding carried into a new digit */
+        if (r % 10 != 0) return -1;   /* shouldn't happen; be safe */
+        r /= 10; e10++;
+    }
+
+    /* r has exactly mdigits+1 digits: d.ddd... with exponent e10 */
+    char digs[20] = {0};
+    int nd = mdigits + 1;
+    {
+        uint64_t u = r;
+        for (int k = nd - 1; k >= 0; k--) { digs[k] = (char)('0' + (u % 10)); u /= 10; }
+    }
+
+    char body[STRADA_SPF_FASTINT_MAX];
+    char *o = body;
+    if (is_g) {
+        /* choose %f-style or %e-style per C rules: e-style when
+         * e10 < -4 or e10 >= gprec; strip trailing zeros (no '#'). */
+        int lastnz = nd - 1;
+        while (lastnz > 0 && digs[lastnz] == '0') lastnz--;
+        if (e10 < -4 || e10 >= gprec) {
+            *o++ = digs[0];
+            if (lastnz >= 1) {
+                *o++ = '.';
+                for (int k = 1; k <= lastnz; k++) *o++ = digs[k];
+            }
+            *o++ = upper ? 'E' : 'e';
+            int ae = e10 < 0 ? -e10 : e10;
+            *o++ = e10 < 0 ? '-' : '+';
+            if (ae >= 100) { *o++ = (char)('0' + ae / 100); ae %= 100; *o++ = (char)('0' + ae / 10); *o++ = (char)('0' + ae % 10); }
+            else { *o++ = (char)('0' + ae / 10); *o++ = (char)('0' + ae % 10); }
+        } else if (e10 >= 0) {
+            for (int k = 0; k <= e10; k++) *o++ = k < nd ? digs[k] : '0';
+            if (lastnz > e10) {
+                *o++ = '.';
+                for (int k = e10 + 1; k <= lastnz; k++) *o++ = digs[k];
+            }
+        } else {
+            *o++ = '0'; *o++ = '.';
+            for (int k = 0; k < -e10 - 1; k++) *o++ = '0';
+            for (int k = 0; k <= lastnz; k++) *o++ = digs[k];
+        }
+    } else {
+        *o++ = digs[0];
+        if (mdigits > 0) {
+            *o++ = '.';
+            for (int k = 1; k < nd; k++) *o++ = digs[k];
+        }
+        *o++ = upper ? 'E' : 'e';
+        int ae = e10 < 0 ? -e10 : e10;
+        *o++ = e10 < 0 ? '-' : '+';
+        if (ae >= 100) { *o++ = (char)('0' + ae / 100); ae %= 100; *o++ = (char)('0' + ae / 10); *o++ = (char)('0' + ae % 10); }
+        else { *o++ = (char)('0' + ae / 10); *o++ = (char)('0' + ae % 10); }
+    }
+    int blen = (int)(o - body);
+
+    int total = blen + neg;
+    int pad = width > total ? width - total : 0;
+    char *d = dst;
+    if (left) {
+        if (neg) *d++ = '-';
+        memcpy(d, body, (size_t)blen); d += blen;
+        while (pad--) *d++ = ' ';
+    } else if (zero) {
+        if (neg) *d++ = '-';
+        while (pad--) *d++ = '0';
+        memcpy(d, body, (size_t)blen); d += blen;
+    } else {
+        while (pad--) *d++ = ' ';
+        if (neg) *d++ = '-';
+        memcpy(d, body, (size_t)blen); d += blen;
+    }
+    *d = '\0';
+    return (int)(d - dst);
+}
+
+/* ---------------------------------------------------------------------
+ * sprintf PLAN CACHE
+ *
+ * Real programs call sprintf with a handful of distinct literal formats
+ * in hot loops. Parsing the format per call (scanning, spec_buf copies,
+ * flag/width/precision decoding) dominated profiles once the conversions
+ * themselves were fast. A plan parses a format ONCE into decoded ops:
+ *
+ *   SPF_OP_LIT    memcpy a literal run from the plan's format copy
+ *   SPF_OP_INT    %d/%i/%u/%x/%X/%o with only -/0 flags + width
+ *   SPF_OP_FIXED  %f / %.Nf  (N <= 9), -/0 flags + width
+ *   SPF_OP_EFG    %e/%E/%g/%G (prec <= 16), -/0 flags + width
+ *   SPF_OP_STR    plain %s
+ *
+ * Formats containing anything else (positional %N$, vector %v, '*',
+ * '+'/' '/'#' flags, %c/%b/%n/%p, etc.) mark the plan NOT simple and the
+ * legacy parse loop runs — output is identical either way, since the op
+ * emitters are the same guarded fast formatters the legacy loop uses
+ * (which themselves fall back to snprintf on any close rounding call).
+ *
+ * Cache: per-thread, direct-mapped by djb2(format), verified by length +
+ * memcmp. Replacement frees the evicted plan. Thread-local => no locks.
+ * ------------------------------------------------------------------- */
+enum {
+    SPF_OP_LIT = 0, SPF_OP_INT, SPF_OP_FIXED, SPF_OP_EFG, SPF_OP_STR
+};
+typedef struct {
+    uint8_t kind;
+    uint8_t conv;        /* original conversion char */
+    uint8_t left, zero;  /* flags */
+    int16_t width;
+    int16_t prec;        /* -1 = unspecified */
+    int32_t lit_off, lit_len;
+} SpfOp;
+typedef struct SpfPlan {
+    uint32_t hash;
+    uint32_t len;
+    char *fmt;           /* private copy of the format bytes */
+    SpfOp *ops;
+    int nops;
+    int simple;          /* 0: fall back to the legacy loop */
+} SpfPlan;
+
+#define SPF_PLAN_SLOTS 16
+static __thread SpfPlan *spf_plan_tab[SPF_PLAN_SLOTS];
+
+static void spf_plan_free(SpfPlan *pl) {
+    if (!pl) return;
+    free(pl->fmt);
+    free(pl->ops);
+    free(pl);
+}
+
+/* Parse `fmt` into a plan. Always returns a plan (simple=0 when the
+ * format uses features the op executor doesn't cover). */
+static SpfPlan* spf_plan_build(const char *fmt, uint32_t len, uint32_t hash) {
+    SpfPlan *pl = (SpfPlan*)calloc(1, sizeof(SpfPlan));
+    if (!pl) return NULL;
+    pl->hash = hash; pl->len = len;
+    pl->fmt = (char*)malloc(len + 1);
+    if (!pl->fmt) { free(pl); return NULL; }
+    memcpy(pl->fmt, fmt, len); pl->fmt[len] = '\0';
+    int cap = 8;
+    pl->ops = (SpfOp*)malloc(sizeof(SpfOp) * cap);
+    if (!pl->ops) { free(pl->fmt); free(pl); return NULL; }
+    pl->simple = 1;
+
+    const char *p = pl->fmt;
+    const char *fend = pl->fmt + len;
+    while (p < fend) {
+        if (pl->nops == cap) {
+            cap *= 2;
+            SpfOp *no = (SpfOp*)realloc(pl->ops, sizeof(SpfOp) * cap);
+            if (!no) { pl->simple = 0; return pl; }
+            pl->ops = no;
+        }
+        SpfOp *op = &pl->ops[pl->nops];
+        memset(op, 0, sizeof(*op));
+        if (*p != '%') {
+            const char *run = p;
+            while (p < fend && *p != '%') p++;
+            op->kind = SPF_OP_LIT;
+            op->lit_off = (int32_t)(run - pl->fmt);
+            op->lit_len = (int32_t)(p - run);
+            pl->nops++;
+            continue;
+        }
+        /* directive */
+        const char *d = p + 1;
+        if (*d == '%') {   /* %% -> literal '%' */
+            op->kind = SPF_OP_LIT;
+            op->lit_off = (int32_t)(d - pl->fmt);
+            op->lit_len = 1;
+            pl->nops++;
+            p = d + 1;
+            continue;
+        }
+        int left = 0, zero = 0;
+        for (;;) {
+            if (*d == '-') { left = 1; d++; }
+            else if (*d == '0') { zero = 1; d++; }
+            else if (*d == '+' || *d == ' ' || *d == '#') { pl->simple = 0; return pl; }
+            else break;
+        }
+        int width = 0;
+        while (*d >= '0' && *d <= '9') {
+            width = width * 10 + (*d - '0');
+            if (width > STRADA_SPF_FASTINT_MAXW) { pl->simple = 0; return pl; }
+            d++;
+        }
+        int prec = -1;
+        if (*d == '.') {
+            d++;
+            prec = 0;
+            while (*d >= '0' && *d <= '9') { prec = prec * 10 + (*d - '0'); d++; }
+        }
+        char conv = *d;
+        if (d >= fend) { pl->simple = 0; return pl; }
+        op->conv = (uint8_t)conv;
+        op->left = (uint8_t)left; op->zero = (uint8_t)zero;
+        op->width = (int16_t)width; op->prec = (int16_t)prec;
+        switch (conv) {
+            case 'd': case 'i': case 'u': case 'x': case 'X': case 'o':
+                if (prec != -1) { pl->simple = 0; return pl; }
+                op->kind = SPF_OP_INT;
+                break;
+            case 'f': case 'F':
+                if (prec > 9) { pl->simple = 0; return pl; }
+                op->kind = SPF_OP_FIXED;
+                break;
+            case 'e': case 'E': case 'g': case 'G':
+                if (prec > 16) { pl->simple = 0; return pl; }
+                op->kind = SPF_OP_EFG;
+                break;
+            case 's':
+                if (width != 0 || prec != -1 || left || zero) { pl->simple = 0; return pl; }
+                op->kind = SPF_OP_STR;
+                break;
+            default:
+                pl->simple = 0;
+                return pl;
+        }
+        pl->nops++;
+        p = d + 1;
+    }
+    return pl;
+}
+
+/* Re-render a decoded simple op as its spec string (for the guarded fast
+ * formatters, which parse specs; cheap — specs are tiny). */
+static void spf_op_spec(const SpfOp *op, char *spec) {
+    char *o = spec;
+    *o++ = '%';
+    if (op->left) *o++ = '-';
+    if (op->zero) *o++ = '0';
+    if (op->width > 0) {
+        int w = op->width;
+        char wb[8]; int wi = 0;
+        do { wb[wi++] = (char)('0' + w % 10); w /= 10; } while (w);
+        while (wi) *o++ = wb[--wi];
+    }
+    if (op->prec >= 0) {
+        *o++ = '.';
+        int pr = op->prec;
+        char pb[8]; int pi = 0;
+        do { pb[pi++] = (char)('0' + pr % 10); pr /= 10; } while (pr);
+        while (pi) *o++ = pb[--pi];
+    }
+    *o++ = (char)op->conv;
+    *o = '\0';
+}
+
 static StradaValue* strada_sprintf_sv_args(StradaValue *format_sv,
                                            StradaValue **arg_arr,
                                            int collected) {
@@ -6446,6 +6973,100 @@ static StradaValue* strada_sprintf_sv_args(StradaValue *format_sv,
      * any_utf8 at the return. */
     int emitted_wide_char = 0;
     int next_seq = 0;  /* index of next sequential (non-positional) arg */
+
+    /* ---- plan-cache fast path -------------------------------------
+     * Plain STR formats hit a per-thread cache of pre-parsed plans and
+     * execute decoded ops directly. Any op the fast emitters decline
+     * (rounding ties etc.) resets the buffer and falls through to the
+     * legacy loop below, so output is always identical. */
+    if (format_sv && !STRADA_IS_TAGGED_INT(format_sv) && format_sv->type == STRADA_STR
+        && format_sv->value.pv) {
+        const char *f = format_sv->value.pv;
+        uint32_t flen = (uint32_t)STRADA_STR_BYTELEN(format_sv);
+        if (flen == 0 && f[0]) flen = (uint32_t)strlen(f);
+        uint32_t h = 5381 ^ flen;
+        uint32_t hn = flen < 32 ? flen : 32;   /* memcmp verifies the rest */
+        for (uint32_t fi = 0; fi < hn; fi++) h = ((h << 5) + h) ^ (uint8_t)f[fi];
+        SpfPlan **slot = &spf_plan_tab[h & (SPF_PLAN_SLOTS - 1)];
+        SpfPlan *pl = *slot;
+        if (!pl || pl->hash != h || pl->len != flen || memcmp(pl->fmt, f, flen) != 0) {
+            SpfPlan *np = spf_plan_build(f, flen, h);
+            if (np) { spf_plan_free(pl); *slot = np; pl = np; }
+            else pl = NULL;
+        }
+        if (pl && pl->simple) {
+            int declined = 0;
+            for (int oi = 0; oi < pl->nops && !declined; oi++) {
+                const SpfOp *op = &pl->ops[oi];
+                switch (op->kind) {
+                    case SPF_OP_LIT: {
+                        SPRINTF_GROW((size_t)op->lit_len);
+                        memcpy(out, pl->fmt + op->lit_off, (size_t)op->lit_len);
+                        out += op->lit_len;
+                        break;
+                    }
+                    case SPF_OP_STR: {
+                        StradaValue *a = next_seq < collected ? arg_arr[next_seq++] : NULL;
+                        char _tb3[256];
+                        const char *sa = a ? strada_to_str_buf(a, _tb3, sizeof(_tb3)) : "";
+                        if (!sa) sa = "";
+                        size_t sl;
+                        if (a && !STRADA_IS_TAGGED_INT(a) && a->type == STRADA_STR && sa == a->value.pv) {
+                            sl = STRADA_STR_BYTELEN(a);
+                            if (sl == 0) sl = strlen(sa);
+                        } else {
+                            sl = strlen(sa);
+                        }
+                        SPRINTF_GROW(sl);
+                        memcpy(out, sa, sl);
+                        out += sl;
+                        break;
+                    }
+                    case SPF_OP_INT: {
+                        StradaValue *a = next_seq < collected ? arg_arr[next_seq++] : NULL;
+                        int64_t v = a ? strada_to_int(a) : 0;
+                        SPRINTF_GROW(STRADA_SPF_FASTINT_MAX);
+                        int n = strada_spf_fast_int_core((char)op->conv, op->left, op->zero,
+                                                         op->width, v, out);
+                        if (n < 0) { declined = 1; next_seq--; break; }
+                        out += n;
+                        break;
+                    }
+                    case SPF_OP_FIXED: {
+                        StradaValue *a = next_seq < collected ? arg_arr[next_seq++] : NULL;
+                        double v = a ? strada_to_num(a) : 0.0;
+                        if (isnan(v) || isinf(v)) { declined = 1; next_seq--; break; }
+                        char spec[24];
+                        spf_op_spec(op, spec);
+                        SPRINTF_GROW(STRADA_SPF_FASTINT_MAX);
+                        int n = strada_spf_fast_fixed(spec, v, out);
+                        if (n < 0) { declined = 1; next_seq--; break; }
+                        out += n;
+                        break;
+                    }
+                    case SPF_OP_EFG: {
+                        StradaValue *a = next_seq < collected ? arg_arr[next_seq++] : NULL;
+                        double v = a ? strada_to_num(a) : 0.0;
+                        if (isnan(v) || isinf(v)) { declined = 1; next_seq--; break; }
+                        char spec[24];
+                        spf_op_spec(op, spec);
+                        SPRINTF_GROW(STRADA_SPF_FASTINT_MAX);
+                        int n = strada_spf_fast_efg(spec, v, out);
+                        if (n < 0) { declined = 1; next_seq--; break; }
+                        out += n;
+                        break;
+                    }
+                }
+            }
+            if (!declined) {
+                goto spf_finalize;
+            }
+            /* an op declined: rerun the whole call through the legacy
+             * loop (rare — ties, NaN/Inf, huge values) */
+            out = buffer;
+            next_seq = 0;
+        }
+    }
 
     while (*p) {
         if (*p != '%') {
@@ -6771,6 +7392,7 @@ static StradaValue* strada_sprintf_sv_args(StradaValue *format_sv,
          * ~16K chars per specifier — `sprintf("%2000d", ...)` no longer
          * truncates at 1023. */
         char temp[16384];
+        int fast_len = -1;   /* >= 0: a fast path wrote temp and knows its length */
         switch (spec) {
             case 'b': {
                 /* Binary format — Perl extension, not in C printf. The `#`
@@ -6849,6 +7471,12 @@ static StradaValue* strada_sprintf_sv_args(StradaValue *format_sv,
             case 'x':
             case 'X': {
                 int64_t val = arg ? strada_to_int(arg) : 0;
+                /* Fast path for simple specs (no '+', ' ', '#', precision,
+                 * length modifiers): hand conversion, bit-identical output. */
+                fast_len = strada_spf_fast_int(spec_buf, val, temp);
+                if (fast_len >= 0) {
+                    break;
+                }
                 /* spec_buf already contains "%<flags><width><.precision>[length]<spec>".
                  * Strip any user-supplied length modifier (h, hh, l, ll, L, z,
                  * j, t) so we can re-attach exactly "ll" and pass a long long
@@ -6901,6 +7529,12 @@ static StradaValue* strada_sprintf_sv_args(StradaValue *format_sv,
                     snprintf(temp, sizeof(temp), "NaN");
                 } else if (isinf(val)) {
                     snprintf(temp, sizeof(temp), val < 0 ? "-Inf" : "Inf");
+                } else if ((fast_len = strada_spf_fast_fixed(spec_buf, val, temp)) >= 0) {
+                    /* simple %.Nf handled bit-identically above */
+                    break;
+                } else if ((fast_len = strada_spf_fast_efg(spec_buf, val, temp)) >= 0) {
+                    /* simple %e/%g handled bit-identically above */
+                    break;
                 } else {
                     int need = snprintf(temp, sizeof(temp), spec_buf, val);
                     if (need >= (int)sizeof(temp)) {
@@ -7113,7 +7747,7 @@ static StradaValue* strada_sprintf_sv_args(StradaValue *format_sv,
          * specifier's result exceeded temp[] and was heap-formatted. */
         {
             const char *res = spec_res ? spec_res : temp;
-            size_t len = strlen(res);
+            size_t len = (fast_len >= 0 && !spec_res) ? (size_t)fast_len : strlen(res);
             SPRINTF_GROW(len);
             memcpy(out, res, len);
             out += len;
@@ -7121,6 +7755,7 @@ static StradaValue* strada_sprintf_sv_args(StradaValue *format_sv,
         }
     }
 
+spf_finalize:
     *out = '\0';
 
     /* Propagate SVf_UTF8: if the format string or any STRADA_STR arg
