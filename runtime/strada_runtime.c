@@ -25401,6 +25401,36 @@ StradaValue* strada_dl_call_export_info(StradaValue *fn_ptr_sv) {
     return strada_new_str(result);
 }
 
+/* 32-bit additive djb2 over an export-metadata string. Used by
+ * import_lib's guarded devirtualization: the compiler hashes the
+ * metadata it devirtualized against (export_meta_hash32 in
+ * Parser.strada — pure Strada, must stay algorithm-identical) and the
+ * generated per-lib ensure() compares it with the loaded .so's current
+ * metadata — a mismatch (the .so was swapped since the host was
+ * compiled) disables direct calls, so every devirtualized site falls
+ * back to runtime method dispatch with full hook/override semantics.
+ * Additive variant (h*33 + c, mod 2^32) so the Strada side needs no
+ * bitwise ops; 32-bit so the value is always tagged-int-representable. */
+int64_t strada_export_meta_hash_cstr(const char *s) {
+    uint32_t h = 5381;
+    if (s) {
+        while (*s) {
+            h = h * 33u + (unsigned char)*s;
+            s++;
+        }
+    }
+    return (int64_t)h;
+}
+
+/* Blessed class name of sv, or NULL for tagged ints / non-refs /
+ * unblessed refs. Cheap (no allocation) — generated import_lib method
+ * wrappers use it to decide whether the dynamic-dispatch fallback path
+ * has a valid invocant. */
+const char* strada_blessed_name_cstr(StradaValue *sv) {
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return NULL;
+    return SV_BLESSED(sv);
+}
+
 /* strada_dl_call_version - call __strada_version function and return string */
 StradaValue* strada_dl_call_version(StradaValue *fn_ptr_sv) {
     if (!fn_ptr_sv) return strada_new_str("");

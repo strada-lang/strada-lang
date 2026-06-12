@@ -299,3 +299,16 @@ compile-time devirtualization (the codegen knows the receiver type from
 the constructor and calls the function directly) while .so classes always
 dispatch through the runtime method registry. Constructors are
 comparable. The runner builds bench_oop_so_lib.so automatically.
+
+### Guarded cross-.so devirtualization (2026-06-12 night)
+
+bench_oop_so after extending devirtualization to import_lib classes
+(method calls on known-class .so receivers now compile to direct calls
+through the static host wrapper; a metadata fingerprint checked at
+dlopen guards against swapped .so files — mismatch falls back to
+dynamic dispatch with full hook semantics). Best of 5 on a LOADED box
+(load ~3-4): so-mixed gap shrank from ~1.6-2x to ~1.2x of local-mixed
+(0.059 vs 0.048); so-call ~1.25x local (0.082 vs 0.065); constructors
+~1.1x. The residual is the wrapper hop + no cross-.so inlining
+(physics, not dispatch). Swap-the-.so safety is regression-tested by
+t/import_lib_devirt_test (incl. new hooks firing through the fallback).

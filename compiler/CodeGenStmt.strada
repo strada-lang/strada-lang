@@ -2897,6 +2897,55 @@ func gen_program(scalar $cg, scalar $program) void {
         }
         $fni = $fni + 1;
     }
+
+    # Cross-.so devirtualization: import_lib methods join the lookup so a
+    # method call on a receiver whose class lives in a .so compiles to a
+    # direct call to the (already native-convention) import wrapper —
+    # same as a local class. Eligibility: the library's metadata carries
+    # modifier info (modinfo:1 — older .so files never devirtualize), the
+    # function's original name was package-qualified (method-shaped), it
+    # is non-variadic, and it takes at least one parameter (the invocant).
+    # Safety against swapping the .so after the host is compiled lives in
+    # the generated wrapper, not here: the per-lib ensure() compares a
+    # metadata fingerprint and a mismatch routes every wrapper call
+    # through dynamic dispatch (see the import_lib wrapper emission).
+    # `mod:`-listed method names are blocked via lib_modified_methods in
+    # has_method_modifier — the same name-keyed rule as host modifiers.
+    my hash %lib_modified_methods;
+    my int $dvl_count = $program->{"import_lib_count"};
+    if ($dvl_count > 0) {
+        my scalar $dvl_libs = $program->{"import_libs"};
+        my int $dvli = 0;
+        while ($dvli < $dvl_count) {
+            my scalar $dvl_info = $dvl_libs->[$dvli];
+            if ($dvl_info->{"has_mod_info"} == 1) {
+                my scalar $dvl_funcs = $dvl_info->{"functions"};
+                my int $dvl_fc = $dvl_info->{"function_count"};
+                my int $dvlf = 0;
+                while ($dvlf < $dvl_fc) {
+                    my scalar $dvl_fn = $dvl_funcs->[$dvlf];
+                    my str $dvl_method = "" . $dvl_fn->{"orig_method"};
+                    if (length($dvl_method) > 0 && $dvl_fn->{"is_variadic"} != 1 && $dvl_fn->{"param_count"} >= 1) {
+                        my str $dvl_name = sanitize_name($dvl_fn->{"name"});
+                        my str $dvl_existing = "" . $all_func_names{$dvl_name};
+                        if (length($dvl_existing) == 0) {
+                            $all_func_names{$dvl_name} = $dvl_fn->{"return_type"};
+                        }
+                    }
+                    $dvlf = $dvlf + 1;
+                }
+                my scalar $dvl_mods = $dvl_info->{"modified_methods"};
+                my int $dvl_mc = size($dvl_mods);
+                my int $dvlm = 0;
+                while ($dvlm < $dvl_mc) {
+                    $lib_modified_methods{$dvl_mods->[$dvlm]} = 1;
+                    $dvlm = $dvlm + 1;
+                }
+            }
+            $dvli = $dvli + 1;
+        }
+    }
+    $cg->{"lib_modified_methods"} = \%lib_modified_methods;
     $cg->{"all_func_names"} = \%all_func_names;
 
     # Header
@@ -3175,6 +3224,11 @@ func gen_program(scalar $cg, scalar $program) void {
 
             # Static handle for the library
             emit($cg, "static void *__import_lib_" . $safe_lib . "_handle = NULL;\n");
+            # Set by __import_lib_<lib>_ensure() when the loaded .so's
+            # metadata fingerprint matches what we compiled against;
+            # gates devirtualized direct calls in the method wrappers.
+            emit($cg, "static int __import_lib_" . $safe_lib . "_devirt_ok = 0;\n");
+            emit($cg, "static void __import_lib_" . $safe_lib . "_ensure(void);\n");
 
             # Static function pointers for each function
             my scalar $lib_funcs = $lib_info->{"functions"};
@@ -3207,7 +3261,14 @@ func gen_program(scalar $cg, scalar $program) void {
                 my int $param_count = $fn_info->{"param_count"};
                 my scalar $params = $fn_info->{"params"};
 
-                emit($cg, type_to_c($ret_type) . " " . $fn_name . "(");
+                # static: the wrapper must NOT be a global symbol. The .so
+                # defines the same-named real function, and its internal
+                # calls (e.g. its registered dispatch wrappers) would
+                # interpose to OUR wrapper under -rdynamic — harmless
+                # extra hop before, infinite recursion now that the
+                # wrapper can re-enter dynamic dispatch on a fingerprint
+                # mismatch. Wrappers are only called from this TU.
+                emit($cg, "static " . type_to_c($ret_type) . " " . $fn_name . "(");
 
                 my int $p = 0;
                 while ($p < $param_count) {
@@ -3609,6 +3670,49 @@ func gen_program(scalar $cg, scalar $program) void {
             my int $fn_idx = 0;
             my int $fn_count = $lib_info->{"function_count"};
 
+            # Shared lazy-load: dlopen + OOP inits, factored out of the
+            # wrappers (it used to be duplicated in every one), plus the
+            # devirtualization fingerprint check — the loaded .so's
+            # metadata is rehashed and compared with what we compiled
+            # against. Match → wrappers may call symbols directly.
+            # Mismatch (the .so was swapped) → method wrappers fall back
+            # to dynamic dispatch, which late-binds with full
+            # hook/override semantics.
+            emit($cg, "static void __import_lib_" . $safe_lib . "_ensure(void) {\n");
+            emit($cg, "    if (__import_lib_" . $safe_lib . "_handle != NULL) return;\n");
+            emit($cg, "    __import_lib_" . $safe_lib . "_handle = dlopen(\"");
+            emit_escaped_string($cg, $so_path);
+            emit($cg, "\", RTLD_LAZY);\n");
+            emit($cg, "    if (__import_lib_" . $safe_lib . "_handle == NULL) {\n");
+            # Path goes through %s (NOT the format literal) and is escaped, so
+            # a path containing % or " can't trigger a format-string bug or
+            # break out of the C string literal.
+            emit($cg, "        fprintf(stderr, \"import_lib: failed to load %s: %s\\n\", \"");
+            emit_escaped_string($cg, $so_path);
+            emit($cg, "\", dlerror());\n");
+            emit($cg, "        exit(1);\n");
+            emit($cg, "    }\n");
+            # Call OOP init functions for any packages in this library
+            my scalar $ens_oop_inits = $lib_info->{"oop_init_funcs"};
+            if ($ens_oop_inits) {
+                my int $ens_oop_count = size($ens_oop_inits);
+                my int $ens_oi = 0;
+                while ($ens_oi < $ens_oop_count) {
+                    my str $ens_oop_fn = $ens_oop_inits->[$ens_oi];
+                    emit($cg, "    { void (*__oop_init)(void) = (void (*)(void))dlsym(__import_lib_" . $safe_lib . "_handle, \"" . $ens_oop_fn . "\"); if (__oop_init) __oop_init(); }\n");
+                    $ens_oi = $ens_oi + 1;
+                }
+            }
+            my int $ens_meta_hash = $lib_info->{"meta_hash"} + 0;
+            emit($cg, "    {\n");
+            emit($cg, "        const char* (*__ei)(void) = (const char* (*)(void))dlsym(__import_lib_" . $safe_lib . "_handle, \"__strada_export_info\");\n");
+            emit($cg, "        if (__ei) {\n");
+            emit($cg, "            const char *__meta = __ei();\n");
+            emit($cg, "            if (__meta && strada_export_meta_hash_cstr(__meta) == " . $ens_meta_hash . "LL) __import_lib_" . $safe_lib . "_devirt_ok = 1;\n");
+            emit($cg, "        }\n");
+            emit($cg, "    }\n");
+            emit($cg, "}\n\n");
+
             while ($fn_idx < $fn_count) {
                 my scalar $fn_info = $lib_funcs->[$fn_idx];
                 my str $fn_name = sanitize_name($fn_info->{"name"});
@@ -3616,8 +3720,9 @@ func gen_program(scalar $cg, scalar $program) void {
                 my int $param_count = $fn_info->{"param_count"};
                 my scalar $params = $fn_info->{"params"};
 
-                # Function signature
-                emit($cg, type_to_c($ret_type) . " " . $fn_name . "(");
+                # Function signature (static — see the forward-decl note
+                # on symbol interposition)
+                emit($cg, "static " . type_to_c($ret_type) . " " . $fn_name . "(");
 
                 my int $p = 0;
                 while ($p < $param_count) {
@@ -3636,32 +3741,40 @@ func gen_program(scalar $cg, scalar $program) void {
 
                 emit($cg, ") {\n");
 
-                # Lazy load the library
-                emit($cg, "    if (__import_lib_" . $safe_lib . "_handle == NULL) {\n");
-                emit($cg, "        __import_lib_" . $safe_lib . "_handle = dlopen(\"");
-                emit_escaped_string($cg, $so_path);
-                emit($cg, "\", RTLD_LAZY);\n");
-                emit($cg, "        if (__import_lib_" . $safe_lib . "_handle == NULL) {\n");
-                # Path goes through %s (NOT the format literal) and is escaped, so
-                # a path containing % or " can't trigger a format-string bug or
-                # break out of the C string literal.
-                emit($cg, "            fprintf(stderr, \"import_lib: failed to load %s: %s\\n\", \"");
-                emit_escaped_string($cg, $so_path);
-                emit($cg, "\", dlerror());\n");
-                emit($cg, "            exit(1);\n");
-                emit($cg, "        }\n");
-                # Call OOP init functions for any packages in this library
-                my scalar $oop_inits = $lib_info->{"oop_init_funcs"};
-                if ($oop_inits) {
-                    my int $oop_count = size($oop_inits);
-                    my int $oi = 0;
-                    while ($oi < $oop_count) {
-                        my str $oop_fn = $oop_inits->[$oi];
-                        emit($cg, "        { void (*__oop_init)(void) = (void (*)(void))dlsym(__import_lib_" . $safe_lib . "_handle, \"" . $oop_fn . "\"); if (__oop_init) __oop_init(); }\n");
-                        $oi = $oi + 1;
+                # Lazy load via the shared per-lib ensure()
+                emit($cg, "    __import_lib_" . $safe_lib . "_ensure();\n");
+
+                # Guarded-devirtualization fallback for method-shaped
+                # functions: when the loaded .so's metadata fingerprint
+                # didn't match (swapped after the host was compiled) and
+                # the invocant is actually blessed, re-dispatch by name
+                # through the runtime registry — late-bound, hooks and
+                # overrides included — instead of calling a possibly
+                # stale symbol directly. Unblessed first arg (a static
+                # helper-style call) falls through to the direct call,
+                # i.e. exactly the pre-devirt behavior.
+                my str $fb_method = "" . $fn_info->{"orig_method"};
+                if (length($fb_method) > 0 && $fn_info->{"is_variadic"} != 1 && $param_count >= 1 && key_is_hashable_ascii($fb_method) == 1) {
+                    my scalar $fb_p0 = $params->[0];
+                    my str $fb_inv = escape_c_keyword($fb_p0->{"name"});
+                    my int $fb_argc = $param_count - 1;
+                    emit($cg, "    if (!__import_lib_" . $safe_lib . "_devirt_ok && strada_blessed_name_cstr(" . $fb_inv . ") != NULL) {\n");
+                    emit($cg, "        StradaValue *__fb_args = strada_pack_args(" . $fb_argc);
+                    my int $fbp = 1;
+                    while ($fbp < $param_count) {
+                        emit($cg, ", " . escape_c_keyword($params->[$fbp]->{"name"}));
+                        $fbp = $fbp + 1;
                     }
+                    emit($cg, ");\n");
+                    if ($ret_type == TYPE_VOID()) {
+                        emit($cg, "        StradaValue *__fb_r = strada_method_call_ph(" . $fb_inv . ", \"" . $fb_method . "\", __fb_args, " . djb2_hash_32($fb_method) . "u);\n");
+                        emit($cg, "        if (__fb_r) strada_decref(__fb_r);\n");
+                        emit($cg, "        return;\n");
+                    } else {
+                        emit($cg, "        return strada_method_call_ph(" . $fb_inv . ", \"" . $fb_method . "\", __fb_args, " . djb2_hash_32($fb_method) . "u);\n");
+                    }
+                    emit($cg, "    }\n");
                 }
-                emit($cg, "    }\n");
 
                 # Lazy lookup the function pointer
                 emit($cg, "    if (__import_lib_" . $safe_lib . "_fn_" . $fn_name . " == NULL) {\n");
@@ -3969,9 +4082,55 @@ func gen_export_info(scalar $cg, scalar $program, int $has_main) void {
             }
             emit($cg, ":" . $variadic_idx);
 
+            # Field 6: original (unsanitized) Strada name, with "::"
+            # encoded as "." so it stays one colon-delimited field
+            # (identifiers can't contain dots). Consumers use it to
+            # recover the package/method split for cross-.so method
+            # devirtualization; old consumers ignore extra fields.
+            # Package-parsed functions pre-mangle their name at parse
+            # time (Pkg_method) — for those, rebuild the qualified form
+            # from the recorded package + bare method name.
+            my str $orig_dotted = $name;
+            my str $oef_bare = "" . $fn->{"bare_name"};
+            my str $oef_pkg = "" . $fn->{"package"};
+            if (length($oef_bare) > 0 && length($oef_pkg) > 0 && $oef_pkg ne "main") {
+                $orig_dotted = $oef_pkg . "::" . $oef_bare;
+            }
+            my int $odi = index($orig_dotted, "::");
+            while ($odi >= 0) {
+                $orig_dotted = substr($orig_dotted, 0, $odi) . "." . substr($orig_dotted, $odi + 2, length($orig_dotted) - $odi - 2);
+                $odi = index($orig_dotted, "::");
+            }
+            emit($cg, ":" . $orig_dotted);
+
             emit($cg, "\\n");
         }
         $i = $i + 1;
+    }
+
+    # Emit modifier info for cross-.so devirtualization. `modinfo:1` marks
+    # the metadata as carrying modifier knowledge — consumers only ever
+    # devirtualize methods from libraries with this marker (an old .so
+    # without it might have before/after/around hooks the metadata doesn't
+    # mention, and a devirtualized call would silently skip them). One
+    # `mod:NAME` line per modified method name; the consumer blocks
+    # devirtualization of that method name globally (same conservative
+    # name-keyed rule as has_method_modifier on the host side).
+    emit($cg, "modinfo:1\\n");
+    my scalar $mm_arr = $program->{"method_modifiers"};
+    my int $mm_count = $program->{"method_modifier_count"};
+    if ($mm_count > 0) {
+        my hash %mm_seen = ();
+        my int $mmi = 0;
+        while ($mmi < $mm_count) {
+            my str $mm_name = $mm_arr->[$mmi]->{"method_name"};
+            my scalar $mm_hit = $mm_seen{$mm_name};
+            if ($mm_hit == 0) {
+                $mm_seen{$mm_name} = 1;
+                emit($cg, "mod:" . $mm_name . "\\n");
+            }
+            $mmi = $mmi + 1;
+        }
     }
 
     # Emit `link:NAME` entries so consumers of this .o/.so/.a can pick up

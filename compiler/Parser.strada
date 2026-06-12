@@ -5019,6 +5019,26 @@ func find_so_file(scalar $program, str $lib_file) str {
     return "";
 }
 
+# 32-bit additive djb2 (h*33 + c, mod 2^32) over an export-metadata
+# string. MUST stay algorithm-identical to the runtime's
+# strada_export_meta_hash_cstr — the generated per-lib ensure() compares
+# this compile-time value against a runtime rehash of the loaded .so's
+# metadata to decide whether devirtualized direct calls are safe.
+# Pure Strada (no bitwise ops, value stays far below the tagged-int
+# limit) so the frozen bootstrap can compile it. Metadata is ASCII
+# (identifiers, type names, digits, punctuation), so per-character ord
+# matches the runtime's per-byte walk.
+func export_meta_hash32(str $metadata) int {
+    my int $hash_acc = 5381;
+    my int $hi = 0;
+    my int $hash_len = length($metadata);
+    while ($hi < $hash_len) {
+        $hash_acc = ($hash_acc * 33 + ord(substr($metadata, $hi, 1))) % 4294967296;
+        $hi = $hi + 1;
+    }
+    return $hash_acc;
+}
+
 # Parse export metadata string into lib_info structure
 # Format: "func:name:return_type:param_count:param_types\n" for each function
 # Note: Bootstrap compiler doesn't support scalar(@array), so we parse manually
@@ -5027,6 +5047,19 @@ func parse_export_metadata(str $lib_name, str $so_path, str $metadata) scalar {
     $lib_info{"lib_name"} = $lib_name;
     $lib_info{"pkg_name"} = $lib_name;
     $lib_info{"so_path"} = $so_path;
+
+    # Fingerprint of the exact metadata we are compiling against. The
+    # generated per-lib ensure() rehashes the loaded .so's metadata at
+    # runtime and only enables devirtualized direct calls on a match —
+    # a swapped .so falls back to dynamic dispatch instead of breaking.
+    my int $meta_hash = export_meta_hash32($metadata);
+    $lib_info{"meta_hash"} = $meta_hash;
+
+    # modinfo:1 marks metadata that carries modifier knowledge (mod:
+    # lines). Without it (an older .so), devirtualization is disabled
+    # for the whole library.
+    my int $has_mod_info = 0;
+    my array @modified_methods = ();
 
     my array @functions = ();
     my int $fn_count = 0;
@@ -5082,6 +5115,12 @@ func parse_export_metadata(str $lib_name, str $so_path, str $metadata) scalar {
                 # use:Module → a Strada module this artifact was compiled
                 # against (its code is NOT in the artifact).
                 push(@use_deps_local, substr($line, 4, length($line) - 4));
+            } elsif (length($line) >= 9 && substr($line, 0, 8) eq "modinfo:") {
+                $has_mod_info = 1;
+            } elsif (length($line) > 4 && substr($line, 0, 4) eq "mod:") {
+                # mod:NAME → a method name with before/after/around hooks
+                # in this library; never devirtualize it.
+                push(@modified_methods, substr($line, 4, length($line) - 4));
             }
         }
     }
@@ -5090,6 +5129,8 @@ func parse_export_metadata(str $lib_name, str $so_path, str $metadata) scalar {
     $lib_info{"function_count"} = $fn_count;
     $lib_info{"link_libs"} = \@link_libs_local;
     $lib_info{"use_deps"} = \@use_deps_local;
+    $lib_info{"has_mod_info"} = $has_mod_info;
+    $lib_info{"modified_methods"} = \@modified_methods;
 
     # Build list of OOP init function names
     my array @oop_inits = ();
@@ -5119,6 +5160,7 @@ func parse_export_line(str $line) scalar {
     my str $param_count_str = "";
     my str $param_types_str = "";
     my str $variadic_idx_str = "";
+    my str $orig_dotted = "";
 
     my str $current = "";
     while ($pos <= $len) {
@@ -5139,6 +5181,11 @@ func parse_export_line(str $line) scalar {
                 $param_types_str = $current;
             } elsif ($field_num == 5) {
                 $variadic_idx_str = $current;
+            } elsif ($field_num == 6) {
+                # Original Strada name with "::" encoded as "." (added
+                # 2026-06 for cross-.so devirtualization; absent in
+                # metadata from older compilers).
+                $orig_dotted = $current;
             }
             $current = "";
             $field_num = $field_num + 1;
@@ -5172,6 +5219,28 @@ func parse_export_line(str $line) scalar {
     my hash %fn_info = ();
     $fn_info{"name"} = $fn_name;
     $fn_info{"original_name"} = $fn_name;
+
+    # Split the original dotted name into package and method. A function
+    # is method-shaped (devirtualization candidate) only when the
+    # original name was package-qualified.
+    my str $orig_pkg = "";
+    my str $orig_method = "";
+    if (length($orig_dotted) > 0) {
+        my int $last_dot = rindex($orig_dotted, ".");
+        if ($last_dot > 0) {
+            $orig_method = substr($orig_dotted, $last_dot + 1, length($orig_dotted) - $last_dot - 1);
+            my str $pkg_part = $orig_dotted;
+            $pkg_part = substr($pkg_part, 0, $last_dot);
+            my int $pdi = index($pkg_part, ".");
+            while ($pdi >= 0) {
+                $pkg_part = substr($pkg_part, 0, $pdi) . "::" . substr($pkg_part, $pdi + 1, length($pkg_part) - $pdi - 1);
+                $pdi = index($pkg_part, ".");
+            }
+            $orig_pkg = $pkg_part;
+        }
+    }
+    $fn_info{"orig_pkg"} = $orig_pkg;
+    $fn_info{"orig_method"} = $orig_method;
     my int $ret_type = export_str_to_type($ret_str);
     $fn_info{"return_type"} = $ret_type;
     $fn_info{"param_count"} = $param_count;
@@ -6361,6 +6430,11 @@ func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low, sca
                 if (length($fn_name) < $prefix_len || substr($fn_name, 0, $prefix_len) ne $prefix) {
                     # Always prefix functions in a package
                     $fn->{"name"} = $c_pkg . "_" . $fn_name;
+                    # Keep the unprefixed method name: the C-mangled name
+                    # is ambiguous (package underscores vs the separator),
+                    # and gen_export_info needs the real package/method
+                    # split for cross-.so devirtualization metadata.
+                    $fn->{"bare_name"} = $fn_name;
                 }
             }
             ast_add_function($program, $fn);

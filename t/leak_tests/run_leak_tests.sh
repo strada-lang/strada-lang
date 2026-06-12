@@ -129,6 +129,7 @@ TESTS=(
     "test_strada_extern_decl"
     "test_hash_set_value_leak"
     "test_async_ergonomics"
+    "test_import_lib_devirt"
 )
 
 # c::callback needs libffi at build time — include only when configured in
@@ -158,6 +159,15 @@ for test in "${TESTS[@]}"; do
     case "$test" in
         test_crypt|test_combined)
             EXTRA_FLAGS="-lcrypt"
+            ;;
+        test_import_lib_devirt)
+            # Pre-build the companion shared library the host imports
+            if ! ./strada --shared "t/leak_tests/test_import_lib_devirt_lib.strada" \
+                    -o "t/leak_tests/test_import_lib_devirt_lib.so" 2>&1; then
+                echo "FAIL: companion .so build failed for $test"
+                FAILED=$((FAILED + 1))
+                continue
+            fi
             ;;
     esac
 

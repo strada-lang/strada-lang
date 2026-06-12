@@ -1130,6 +1130,10 @@ StradaValue* strada_dl_close_raw(StradaValue *handle_sv);
 StradaValue* strada_dl_call_export_info(StradaValue *fn_ptr_sv);
 StradaValue* strada_dl_call_version(StradaValue *fn_ptr_sv);
 
+/* import_lib guarded devirtualization (metadata fingerprint + fallback) */
+int64_t strada_export_meta_hash_cstr(const char *s);
+const char* strada_blessed_name_cstr(StradaValue *sv);
+
 /* Pointer access for FFI */
 StradaValue* strada_int_ptr(StradaValue *ref);
 StradaValue* strada_num_ptr(StradaValue *ref);

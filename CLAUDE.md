@@ -619,6 +619,51 @@ MyLib::function(args);        # Namespace call syntax
 - `version "1.0.0";` - Module versioning
 - `func import(str $pkg, array @list) void` - Auto-called on load
 
+### Guarded Cross-.so Devirtualization (import_lib, 2026-06)
+
+Method calls on receivers whose class lives in an `import_lib` .so now
+devirtualize to **direct calls through the host's import wrapper** — same
+mechanism as local-class devirtualization (`known_types` from the
+constructor + `all_func_names` lookup), closing most of the former
+~1.6–2x dispatch gap on method-diverse cross-.so code. How it stays safe:
+
+- **Metadata** (`__strada_export_info`): `func:` lines gained field 6 —
+  the original qualified name, `::` encoded as `.` (e.g. `SoCounter.bump`)
+  so the consumer recovers the real package/method split (the C-mangled
+  name is ambiguous). New lines: `modinfo:1` (marker: this metadata
+  carries modifier info — **libraries without it never devirtualize**)
+  and `mod:NAME` per hook-bearing method name (`has_method_modifier`
+  checks these via `$cg->{"lib_modified_methods"}`, blocking devirt and
+  accessor inlining for that name).
+- **Fingerprint guard against swapping the .so after the host is built**:
+  the compiler hashes the metadata it compiled against (`export_meta_hash32`
+  in Parser.strada — additive djb2 mod 2^32, pure Strada; MUST stay
+  algorithm-identical to the runtime's `strada_export_meta_hash_cstr`).
+  The generated per-lib `__import_lib_<lib>_ensure()` (dlopen + OOP inits,
+  factored out of the wrappers) rehashes the loaded .so's metadata; a
+  match sets `__import_lib_<lib>_devirt_ok`.
+- **Fallback in the wrapper**: on mismatch, method-shaped wrappers
+  (original name package-qualified, ≥1 param, non-variadic) re-dispatch
+  by name via `strada_method_call_ph` when the first arg is blessed
+  (`strada_blessed_name_cstr`) — late-bound, hooks/overrides included. So
+  a swapped .so runs correctly at dynamic-dispatch speed instead of
+  calling stale symbols. Unblessed first arg falls through to the direct
+  call (pre-devirt behavior).
+- **Wrappers are now `static`**: the .so defines the same-named global
+  symbol, and its internal calls would interpose to the host's wrapper
+  under `-rdynamic` — previously a harmless extra hop, but infinite
+  recursion once the wrapper can re-enter dynamic dispatch. Do not make
+  them global again.
+- Devirt eligibility (consumer side, `all_func_names` build in
+  CodeGenStmt): lib has `modinfo:1` + function is method-shaped + method
+  name not `mod:`-listed (and not host-modified). Old .so / old metadata
+  → no devirt, zero behavior change. `import_object`/`import_archive`
+  are not yet devirtualized (follow-up).
+- Tests: `t/import_lib_devirt_test/run.sh` (direct-call shape, `mod:`
+  gating, swap fallback incl. new-hook firing);
+  `t/leak_tests/test_import_lib_devirt.strada` (valgrind, with companion
+  .so pre-built by the leak runner).
+
 ### Module Caching (`--module-cache`, 2026-06)
 
 `strada --module-cache prog.strada` makes `use Foo;` link Foo's precompiled

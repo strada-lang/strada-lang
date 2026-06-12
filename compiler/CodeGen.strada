@@ -795,8 +795,17 @@ func codegen_register_function(scalar $cg, scalar $fn) void {
     $cg->{"functions"}->{$name} = \%info;
 }
 
-# Check if a method has any before/after/around modifiers
+# Check if a method has any before/after/around modifiers.
+# Covers host-side modifiers AND modifier names advertised by import_lib
+# metadata (mod: lines) — a .so registers its hooks at dlopen, after the
+# host was compiled, so without this check devirtualization (and accessor
+# inlining) would silently skip them.
 func has_method_modifier(scalar $cg, str $method) int {
+    my scalar $libmods = $cg->{"lib_modified_methods"};
+    if ($libmods) {
+        my int $lm_hit = $libmods->{$method} + 0;
+        if ($lm_hit == 1) { return 1; }
+    }
     my int $mc = $cg->{"method_modifier_count"};
     if ($mc == 0) { return 0; }
     my scalar $mods = $cg->{"method_modifiers"};
