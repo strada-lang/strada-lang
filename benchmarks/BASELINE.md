@@ -204,3 +204,36 @@ Flat by design — the standard suite avoids the slow paths the rounds fixed
 \* These two finish in tens of milliseconds, where Node's ~30ms process
 startup inflates its ratio; bench_compute and bench_array_hash are the
 meaningful steady-state comparisons.
+
+## New benchmarks (2026-06-12)
+
+Nine benchmarks added covering previously-unmeasured subsystems: sort,
+regex, list pipelines, exceptions, async/concurrency, GC/arena, JSON,
+data processing (CSV analytics), and process startup — plus
+`bench_compiler.sh` for stradac itself. Perl/Node counterparts where the
+comparison is meaningful (async and gc are Strada-only runtime features).
+Same box and conventions as above; Strada at default `-O2` + LTO, best of
+3, quiet machine, Perl 5.x / Node v24.
+
+| benchmark        | Strada | Perl   | Node   | notes |
+|------------------|--------|--------|--------|-------|
+| bench_sort       | 0.878s | 1.822s | 1.185s | int/str/comparator/hash-key sorts |
+| bench_regex      | 0.607s | 0.620s | 0.474s | match/captures/named/s///g/s///e/tr |
+| bench_pipeline   | 0.347s | 0.722s | 0.376s | lazy-range map/grep, chain, join/split |
+| bench_exceptions | 0.478s | 0.292s | 1.447s | Perl's eval is cheaper; Node 3x slower |
+| bench_async      | 0.298s | —      | —      | futures/channels/async::map/atomics/mutex |
+| bench_gc         | 1.069s | —      | —      | churn/cycles/weaken/arena vs no-arena |
+| bench_json       | 2.474s | 4.474s | 0.101s | pure-Strada JSON vs pure-Perl JSON::PP; Node's JSON is native C++ (not comparable) |
+| bench_data       | 0.253s | 0.368s | 0.832s | generate+stream+aggregate+report a 25MB CSV |
+| bench_startup    | 0.001s | 0.001s | 0.020s | process spawn-to-exit; sub-ms values are at timer resolution |
+
+Compiler speed (`bench_compiler.sh`, not in the table — Strada-only):
+best 1.76s to translate compiler/Combined.strada (35,105 lines) to C,
+~20k lines/sec, with STRADA_GC=off (as the strada driver invokes it).
+
+Per-section numbers are printed by each benchmark itself; rerun any of
+them directly for the breakdown. Notable per-section results from this
+baseline run: pipeline map-range/grep-range benefit from lazy ranges (no
+input materialization); bench_gc's arena section runs the same workload
+~25% faster than its arena-off control; bench_async moves 500k channel
+messages in ~86ms.

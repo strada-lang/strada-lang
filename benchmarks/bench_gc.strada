@@ -1,0 +1,102 @@
+# Memory-machinery benchmarks — refcount churn, the cycle collector's
+# candidate buffering + collections, weaken, and the request arena.
+# Strada-only (these measure runtime features, not language-comparable
+# workloads).
+#
+# Sections:
+#   churn        — 1M short-lived hashref/arrayref allocations (refcount
+#                  + collector candidate buffering on the survive path)
+#   cycles       — 100k A<->B reference cycles reclaimed by the collector
+#                  (gc_collect forced every 10k)
+#   weaken       — 200k cycles broken manually with core::weaken instead
+#   arena        — 200 simulated requests, each building 2k values inside
+#                  core::arena_begin/arena_end
+#   arena-off    — the same workload without the arena (malloc/free)
+#
+# Reference numbers: benchmarks/BASELINE.md
+
+package main;
+
+func build_request_state(int $n) int {
+    my hash %req;
+    my int $j = 0;
+    while ($j < $n) {
+        my scalar $row = { "id" => $j, "name" => "user" . $j, "tags" => ["a", "b"] };
+        $req{"row" . $j} = $row;
+        $j++;
+    }
+    return scalar(keys(%req));
+}
+
+func main() int {
+    my num $t0 = core::hires_time();
+
+    # 1. short-lived allocation churn
+    my int $alive = 0;
+    my int $i = 0;
+    while ($i < 1000000) {
+        my scalar $h = { "a" => $i, "b" => [$i, $i + 1] };
+        $alive += $h->{"a"} % 2;
+        $i++;
+    }
+    my num $t1 = core::hires_time();
+    say("churn: " . $alive . " " . ($t1 - $t0));
+
+    # 2. true cycles for the collector
+    my int $made = 0;
+    $i = 0;
+    while ($i < 100000) {
+        my scalar $a = { "name" => "a" };
+        my scalar $b = { "name" => "b" };
+        $a->{"peer"} = $b;
+        $b->{"peer"} = $a;
+        $made++;
+        if ($i % 10000 == 9999) {
+            core::gc_collect();
+        }
+        $i++;
+    }
+    core::gc_collect();
+    my num $t2 = core::hires_time();
+    say("cycles: " . $made . " freed=" . core::gc_freed() . " " . ($t2 - $t1));
+
+    # 3. cycles broken with weaken (no collector involvement)
+    my int $weak_made = 0;
+    $i = 0;
+    while ($i < 200000) {
+        my scalar $a = { "name" => "a" };
+        my scalar $b = { "name" => "b" };
+        $a->{"peer"} = $b;
+        $b->{"peer"} = $a;
+        core::weaken($b->{"peer"});
+        $weak_made++;
+        $i++;
+    }
+    my num $t3 = core::hires_time();
+    say("weaken: " . $weak_made . " " . ($t3 - $t2));
+
+    # 4. request arena
+    my int $arena_keys = 0;
+    my int $r = 0;
+    while ($r < 200) {
+        core::arena_begin();
+        $arena_keys += build_request_state(2000);
+        core::arena_end();
+        $r++;
+    }
+    my num $t4 = core::hires_time();
+    say("arena: " . $arena_keys . " " . ($t4 - $t3));
+
+    # 5. same workload, no arena
+    my int $plain_keys = 0;
+    $r = 0;
+    while ($r < 200) {
+        $plain_keys += build_request_state(2000);
+        $r++;
+    }
+    my num $t5 = core::hires_time();
+    say("arena-off: " . $plain_keys . " " . ($t5 - $t4));
+
+    say("total: " . ($t5 - $t0));
+    return 0;
+}

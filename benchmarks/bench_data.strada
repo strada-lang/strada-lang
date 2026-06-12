@@ -1,0 +1,79 @@
+# Data-processing benchmark — an end-to-end "log analytics" job over a
+# generated CSV dataset: write it to disk, stream it back line by line,
+# parse fields, aggregate into hashes, compute top-N, and emit a small
+# report. This is the closest thing in the suite to a real batch job:
+# it mixes file I/O, split, hash counters, sort, and string building
+# in the proportions data work actually has.
+#
+# Sections:
+#   generate   — build + spew a 500k-row CSV (~25MB)
+#   aggregate  — stream the file, parse, count by user and by action,
+#                sum bytes per user
+#   report     — sort aggregates, build a top-20 report string
+#
+# Reference numbers: benchmarks/BASELINE.md
+
+package main;
+
+func main() int {
+    my str $path = "/tmp/strada_bench_data.csv";
+    my int $rows = 500000;
+
+    my num $t0 = core::hires_time();
+
+    # 1. generate the dataset (deterministic LCG)
+    my int $seed = 42;
+    my scalar $sb = sb::new();
+    my int $i = 0;
+    while ($i < $rows) {
+        $seed = ($seed * 1103515245 + 12345) % 2147483648;
+        my int $user = $seed % 5000;
+        my int $action = ($seed / 7) % 6;
+        my int $bytes = $seed % 50000;
+        sb::append($sb, "2026-06-12T01:00:00,user" . $user . ",action" . $action . "," . $bytes . ",ok\n");
+        $i++;
+    }
+    core::spew($path, sb::to_string($sb));
+    sb::free($sb);
+    my num $t1 = core::hires_time();
+    say("generate: " . $rows . " " . ($t1 - $t0));
+
+    # 2. stream + aggregate
+    my hash %by_user;
+    my hash %by_action;
+    my hash %bytes_by_user;
+    my scalar $fh = core::open($path, "r");
+    my int $parsed = 0;
+    while (1) {
+        my str $line = <$fh>;
+        if (!defined($line)) { last; }
+        my array @f = split(",", $line);
+        if (scalar(@f) < 5) { next; }
+        $by_user{$f[1]} += 1;
+        $by_action{$f[2]} += 1;
+        $bytes_by_user{$f[1]} += $f[3];
+        $parsed++;
+    }
+    core::close($fh);
+    my num $t2 = core::hires_time();
+    say("aggregate: " . $parsed . " users=" . scalar(keys(%by_user)) . " " . ($t2 - $t1));
+
+    # 3. report: top 20 users by bytes
+    my array @users = keys(%bytes_by_user);
+    my array @ranked = sort { $bytes_by_user{$b} <=> $bytes_by_user{$a}; } @users;
+    my scalar $rep = sb::new();
+    $i = 0;
+    while ($i < 20) {
+        my str $u = $ranked[$i];
+        sb::append($rep, $u . " events=" . $by_user{$u} . " bytes=" . $bytes_by_user{$u} . "\n");
+        $i++;
+    }
+    my str $report = sb::to_string($rep);
+    sb::free($rep);
+    my num $t3 = core::hires_time();
+    say("report: " . length($report) . " " . ($t3 - $t2));
+
+    core::unlink($path);
+    say("total: " . ($t3 - $t0));
+    return 0;
+}

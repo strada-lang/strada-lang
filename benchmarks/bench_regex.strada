@@ -1,0 +1,106 @@
+# Regex benchmarks (PCRE2). Exercises the compiled-pattern cache, the
+# reusable thread-local match data, capture extraction, s///g and s///e
+# substitution, named captures, and tr/// — the general suite barely
+# touches the regex engine.
+#
+# Sections:
+#   match      — boolean match over 200k log lines
+#   captures   — 3-group capture extraction over 200k lines
+#   named      — (?P<name>...) named captures over 100k lines
+#   subst      — s///g over 100k lines
+#   subst-e    — s///e with computed replacement over 50k lines
+#   tr         — tr/// transliteration over 100k lines
+#
+# Reference numbers: benchmarks/BASELINE.md
+
+package main;
+
+func main() int {
+    # Build a deterministic synthetic access log
+    my array @lines;
+    my int $i = 0;
+    while ($i < 200000) {
+        my int $ip4 = $i % 256;
+        my int $code = 200 + (($i * 7) % 4) * 100;
+        my int $bytes = ($i * 37) % 100000;
+        push(@lines, "10.0." . (($i / 256) % 256) . "." . $ip4 . " - - [12/Jun/2026:01:0" . ($i % 10) . ":00] \"GET /page/" . ($i % 1000) . " HTTP/1.1\" " . $code . " " . $bytes);
+        $i++;
+    }
+
+    my num $t0 = core::hires_time();
+
+    # 1. boolean match
+    my int $hits = 0;
+    $i = 0;
+    while ($i < 200000) {
+        if ($lines[$i] =~ /" (4|5)\d\d /) {
+            $hits++;
+        }
+        $i++;
+    }
+    my num $t1 = core::hires_time();
+    say("match: " . $hits . " " . ($t1 - $t0));
+
+    # 2. capture groups
+    my int $bytes_total = 0;
+    $i = 0;
+    while ($i < 200000) {
+        if ($lines[$i] =~ /^(\S+) .* "(\w+) [^"]*" (\d+) (\d+)$/) {
+            $bytes_total += $4;
+        }
+        $i++;
+    }
+    my num $t2 = core::hires_time();
+    say("captures: " . $bytes_total . " " . ($t2 - $t1));
+
+    # 3. named captures
+    my int $code_sum = 0;
+    $i = 0;
+    while ($i < 100000) {
+        if ($lines[$i] =~ /" (?P<code>\d+) (?P<bytes>\d+)$/) {
+            my hash %nc = named_captures();
+            $code_sum += $nc{"code"};
+        }
+        $i++;
+    }
+    my num $t3 = core::hires_time();
+    say("named: " . $code_sum . " " . ($t3 - $t2));
+
+    # 4. s///g substitution
+    my int $sub_len = 0;
+    $i = 0;
+    while ($i < 100000) {
+        my str $line = $lines[$i];
+        $line =~ s/\d+/N/g;
+        $sub_len += length($line);
+        $i++;
+    }
+    my num $t4 = core::hires_time();
+    say("subst: " . $sub_len . " " . ($t4 - $t3));
+
+    # 5. s///e computed replacement
+    my int $sube_len = 0;
+    $i = 0;
+    while ($i < 50000) {
+        my str $line = $lines[$i];
+        $line =~ s/(\d+)/length($1)/eg;
+        $sube_len += length($line);
+        $i++;
+    }
+    my num $t5 = core::hires_time();
+    say("subst-e: " . $sube_len . " " . ($t5 - $t4));
+
+    # 6. tr/// transliteration
+    my int $tr_count = 0;
+    $i = 0;
+    while ($i < 100000) {
+        my str $line = $lines[$i];
+        $tr_count += ($line =~ tr/a-z/A-Z/);
+        $i++;
+    }
+    my num $t6 = core::hires_time();
+    say("tr: " . $tr_count . " " . ($t6 - $t5));
+
+    say("total: " . ($t6 - $t0));
+    return 0;
+}

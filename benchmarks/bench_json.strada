@@ -1,0 +1,82 @@
+# JSON benchmarks (lib/JSON.strada — pure-Strada encoder/decoder).
+# The classic cross-language comparison workload: a realistic nested
+# document (users with profiles and tag arrays) encoded and decoded
+# repeatedly, plus a decode of one large document.
+#
+# Sections:
+#   encode       — 2k-user document encoded x20
+#   decode       — the same document decoded x20
+#   roundtrip    — encode+decode of a small per-request payload x20k
+#
+# Reference numbers: benchmarks/BASELINE.md
+
+use lib "../lib";
+use JSON;
+
+package main;
+
+func build_doc(int $users) scalar {
+    my array @list;
+    my int $i = 0;
+    while ($i < $users) {
+        push(@list, {
+            "id" => $i,
+            "name" => "user_" . $i,
+            "email" => "user" . $i . "\@example.com",
+            "active" => ($i % 3) == 0 ? 1 : 0,
+            "score" => $i * 1.5,
+            "tags" => ["alpha", "beta", "tag" . ($i % 50)],
+            "profile" => {
+                "city" => "city" . ($i % 100),
+                "zip" => 10000 + ($i % 90000),
+                "langs" => ["en", "de"]
+            }
+        });
+        $i++;
+    }
+    return { "count" => $users, "users" => \@list };
+}
+
+func main() int {
+    my scalar $doc = build_doc(2000);
+
+    my num $t0 = core::hires_time();
+
+    # 1. encode
+    my int $enc_len = 0;
+    my int $r = 0;
+    my str $json = "";
+    while ($r < 20) {
+        $json = JSON::encode($doc);
+        $enc_len += length($json);
+        $r++;
+    }
+    my num $t1 = core::hires_time();
+    say("encode: " . $enc_len . " " . ($t1 - $t0));
+
+    # 2. decode
+    my int $dec_users = 0;
+    $r = 0;
+    while ($r < 20) {
+        my scalar $parsed = JSON::decode($json);
+        $dec_users += $parsed->{"count"};
+        $r++;
+    }
+    my num $t2 = core::hires_time();
+    say("decode: " . $dec_users . " " . ($t2 - $t1));
+
+    # 3. small-payload round trips (API-request shaped)
+    my int $rt = 0;
+    my int $i = 0;
+    while ($i < 20000) {
+        my str $small = JSON::encode({ "op" => "get", "id" => $i, "args" => [1, 2, 3] });
+        my scalar $back = JSON::decode($small);
+        $rt += $back->{"id"} % 2;
+        $i++;
+    }
+    my num $t3 = core::hires_time();
+    say("roundtrip: " . $rt . " " . ($t3 - $t2));
+
+    say("total: " . ($t3 - $t0));
+    return 0;
+}

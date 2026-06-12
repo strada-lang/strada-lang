@@ -1,0 +1,114 @@
+# Exception benchmarks — try/catch/finally and the throw path (cleanup
+# stacks, trace capture, typed catch dispatch). New machinery from the
+# 2026-06 try/finally work; previously unbenchmarked.
+#
+# Sections:
+#   try-nothrow  — try/catch entered 2M times, never throws (frame cost)
+#   throw-catch  — 200k throw->catch round trips (plain string throw)
+#   typed        — 200k typed-catch dispatches (class miss then match)
+#   deep-unwind  — 20k throws unwinding 50 frames each
+#   finally      — 1M try/finally without exceptions
+#
+# Reference numbers: benchmarks/BASELINE.md
+
+package MiscErr;
+func new() scalar {
+    my hash %self;
+    return bless(\%self, "MiscErr");
+}
+
+package WantedErr;
+func new() scalar {
+    my hash %self;
+    return bless(\%self, "WantedErr");
+}
+
+package main;
+
+func deep(int $n) int {
+    if ($n <= 0) {
+        throw "bottom";
+    }
+    return deep($n - 1) + 1;
+}
+
+func main() int {
+    my num $t0 = core::hires_time();
+
+    # 1. try/catch never throwing
+    my int $ok = 0;
+    my int $i = 0;
+    while ($i < 2000000) {
+        try {
+            $ok++;
+        } catch ($e) {
+            $ok--;
+        }
+        $i++;
+    }
+    my num $t1 = core::hires_time();
+    say("try-nothrow: " . $ok . " " . ($t1 - $t0));
+
+    # 2. throw + catch round trips
+    my int $caught = 0;
+    $i = 0;
+    while ($i < 200000) {
+        try {
+            throw "boom " . $i;
+        } catch ($e) {
+            $caught++;
+        }
+        $i++;
+    }
+    my num $t2 = core::hires_time();
+    say("throw-catch: " . $caught . " " . ($t2 - $t1));
+
+    # 3. typed catch: first clause misses, second matches
+    my int $typed = 0;
+    $i = 0;
+    while ($i < 200000) {
+        try {
+            throw WantedErr::new();
+        } catch (MiscErr $e) {
+            $typed--;
+        } catch (WantedErr $e) {
+            $typed++;
+        } catch ($e) {
+            $typed--;
+        }
+        $i++;
+    }
+    my num $t3 = core::hires_time();
+    say("typed: " . $typed . " " . ($t3 - $t2));
+
+    # 4. deep unwind: throw across 50 frames
+    my int $deep_caught = 0;
+    $i = 0;
+    while ($i < 20000) {
+        try {
+            deep(50);
+        } catch ($e) {
+            $deep_caught++;
+        }
+        $i++;
+    }
+    my num $t4 = core::hires_time();
+    say("deep-unwind: " . $deep_caught . " " . ($t4 - $t3));
+
+    # 5. try/finally without exceptions
+    my int $fin = 0;
+    $i = 0;
+    while ($i < 1000000) {
+        try {
+            $fin++;
+        } finally {
+            $fin++;
+        }
+        $i++;
+    }
+    my num $t5 = core::hires_time();
+    say("finally: " . $fin . " " . ($t5 - $t4));
+
+    say("total: " . ($t5 - $t0));
+    return 0;
+}
