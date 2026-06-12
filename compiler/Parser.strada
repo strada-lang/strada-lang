@@ -4876,7 +4876,16 @@ func resolve_use_module(scalar $parser, scalar $program, str $mod_name) void {
             if (length($cache_dir) > 0) {
                 my str $real_src = core::realpath($file_path);
                 if (length($real_src) > 0) {
+                    # STRADA_MODULE_CACHE_KEY namespaces the cache by the
+                    # build's -D define set: modules with stradapp or __C__
+                    # #ifdef conditionals (e.g. DBI's HAVE_MYSQL driver)
+                    # produce DIFFERENT artifacts per define set, so builds
+                    # with different defines must never share them.
+                    my str $cache_key = core::getenv("STRADA_MODULE_CACHE_KEY");
                     my str $cache_o = $cache_dir . $real_src . ".o";
+                    if (length($cache_key) > 0) {
+                        $cache_o = $cache_dir . "/" . $cache_key . $real_src . ".o";
+                    }
                     if (artifact_is_fresh($cache_o, $file_path) == 1
                         && artifact_newer_than_compiler($cache_o) == 1) {
                         ast_mark_module_loaded($program, $mod_name);

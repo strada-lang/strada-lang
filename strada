@@ -979,6 +979,16 @@ if [ "$MODULE_CACHE" -eq 1 ]; then
     # for the post-build warmer below.
     MODULE_CACHE_DIR="${STRADA_MODULE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/strada/modules}"
     export STRADA_MODULE_CACHE_DIR="$MODULE_CACHE_DIR"
+    # -D defines change module artifacts (stradapp conditionals AND #ifdef
+    # in __C__ blocks — e.g. DBI's MySQL driver exists only when compiled
+    # with -DHAVE_MYSQL). Key the cache by a fingerprint of the sorted
+    # define set so builds with different defines never share artifacts.
+    if [ ${#PP_DEFINES[@]} -gt 0 ]; then
+        MODULE_CACHE_KEY="$(printf '%s\n' "${PP_DEFINES[@]}" | sort | md5sum | cut -c1-12)"
+    else
+        MODULE_CACHE_KEY=""
+    fi
+    export STRADA_MODULE_CACHE_KEY="$MODULE_CACHE_KEY"
     DEPS_OUT_FILE="$(mktemp_suffix .deps)"
     export STRADA_DEPS_OUT="$DEPS_OUT_FILE"
 fi
@@ -1258,7 +1268,11 @@ if [ "$MODULE_CACHE" -eq 1 ] && [ -f "$DEPS_OUT_FILE" ]; then
         [ -f "$dep" ] || continue
         real_dep="$(realpath "$dep" 2>/dev/null)" || continue
         sib_o="${dep%.strada}.o"
-        cache_o="$MODULE_CACHE_DIR$real_dep.o"
+        if [ -n "$MODULE_CACHE_KEY" ]; then
+            cache_o="$MODULE_CACHE_DIR/$MODULE_CACHE_KEY$real_dep.o"
+        else
+            cache_o="$MODULE_CACHE_DIR$real_dep.o"
+        fi
         # Skip when a fresh artifact already exists (sibling or cached),
         # using the same gates the parser applies: at least as new as the
         # source AND not older than the compiler.
@@ -1269,8 +1283,14 @@ if [ "$MODULE_CACHE" -eq 1 ] && [ -f "$DEPS_OUT_FILE" ]; then
             continue
         fi
         mkdir -p "$(dirname "$cache_o")"
+        # Forward the build's -D defines so the artifact embeds the same
+        # configuration (see MODULE_CACHE_KEY above).
+        DEFINE_ARGS=()
+        for __mc_def in "${PP_DEFINES[@]}"; do
+            DEFINE_ARGS+=("-D" "$__mc_def")
+        done
         info "module cache: precompiling $dep"
-        if STRADA_DEPS_OUT= "$SCRIPT_PATH_MC" -M --object -o "$cache_o" "$dep" >/dev/null 2>&1; then
+        if STRADA_DEPS_OUT= "$SCRIPT_PATH_MC" -M --object "${DEFINE_ARGS[@]}" -o "$cache_o" "$dep" >/dev/null 2>&1; then
             warmed=$((warmed + 1))
         else
             warm_failed=$((warm_failed + 1))

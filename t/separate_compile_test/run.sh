@@ -327,6 +327,52 @@ else
     fail "--module-cache warm build reuses cached artifacts" "$warm_out"
 fi
 
+# --- Test 13: module cache is keyed by -D defines -------------------------
+# A module whose __C__ code depends on a define must produce DIFFERENT
+# cached artifacts per define set (regression: a DBI.o cached without
+# -DHAVE_MYSQL poisoned MySQL builds with "unsupported driver").
+mkdir -p "$WORK/defproj"
+cat > "$WORK/defproj/Feat.strada" <<'EOF'
+package Feat;
+func enabled() int {
+    my int $r = 0;
+    __C__ {
+#ifdef HAVE_FEAT
+        strada_decref(r);
+        r = strada_new_int(1);
+#endif
+    }
+    return $r;
+}
+EOF
+cat > "$WORK/defproj/dapp.strada" <<'EOF'
+use lib ".";
+use Feat;
+func main() int {
+    say("feat=" . Feat::enabled());
+    return 0;
+}
+EOF
+cd "$WORK/defproj"
+MC3_DIR="$WORK/mcache13"
+rm -rf "$MC3_DIR"
+STRADA_MODULE_CACHE_DIR="$MC3_DIR" "$STRADA" --module-cache -o dapp_off dapp.strada >"$WORK/t13a.log" 2>&1
+STRADA_MODULE_CACHE_DIR="$MC3_DIR" "$STRADA" --module-cache -D HAVE_FEAT -o dapp_on dapp.strada >"$WORK/t13b.log" 2>&1
+# Re-run both warm to ensure cached artifacts are used and still correct.
+STRADA_MODULE_CACHE_DIR="$MC3_DIR" "$STRADA" --module-cache -o dapp_off2 dapp.strada >"$WORK/t13c.log" 2>&1
+STRADA_MODULE_CACHE_DIR="$MC3_DIR" "$STRADA" --module-cache -D HAVE_FEAT -o dapp_on2 dapp.strada >"$WORK/t13d.log" 2>&1
+out_off="$(./dapp_off)"
+out_on="$(./dapp_on)"
+out_off2="$(./dapp_off2)"
+out_on2="$(./dapp_on2)"
+if [ "$out_off" = "feat=0" ] && [ "$out_on" = "feat=1" ] \
+    && [ "$out_off2" = "feat=0" ] && [ "$out_on2" = "feat=1" ]; then
+    pass "module cache keyed by -D defines"
+else
+    fail "module cache keyed by -D defines" "off=$out_off on=$out_on off2=$out_off2 on2=$out_on2"
+fi
+cd "$WORK/proj"
+
 # --- Summary --------------------------------------------------------------
 echo
 echo "===== $((PASS + FAIL)) tests, $PASS passed, $FAIL failed ====="

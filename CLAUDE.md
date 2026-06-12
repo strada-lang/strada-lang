@@ -627,9 +627,17 @@ Go-package-archive-style separate compilation, fully automatic:
 
 - **Cache**: `$STRADA_MODULE_CACHE_DIR` (default `~/.cache/strada/modules`),
   keyed by the module source's absolute path (works for read-only lib dirs
-  like `/usr/local/lib/strada/lib`). A fresh **sibling** `Foo.o` (from
-  `strada -M`) still takes priority. Freshness gates: artifact ≥ source
-  mtime AND artifact ≥ stradac mtime (compiler upgrades invalidate).
+  like `/usr/local/lib/strada/lib`) **and by a fingerprint of the build's
+  `-D` define set** (`STRADA_MODULE_CACHE_KEY`, set by the wrapper): module
+  artifacts embed stradapp AND `__C__` `#ifdef` conditionals — e.g. DBI's
+  MySQL driver exists only under `-DHAVE_MYSQL` — so builds with different
+  defines must never share artifacts (a defineless cached DBI.o once
+  poisoned MySQL builds with "unsupported driver" at runtime). The warmer
+  forwards the defines to its `-M` sub-builds. A fresh **sibling** `Foo.o`
+  (from `strada -M`) still takes priority — siblings are define-blind, so
+  only use them in single-configuration projects. Freshness gates:
+  artifact ≥ source mtime AND artifact ≥ stradac mtime (compiler upgrades
+  invalidate).
 - **Warming**: after a build, any module that had to be inlined from source
   is precompiled into the cache (leaves first), so the first build after a
   change pays a one-time warm-up and later builds skip unchanged modules.
