@@ -103,6 +103,9 @@ test_run "$EXAMPLES_DIR/test_foreach.strada" "test_foreach" "Foreach loops"
 # Test: JSON
 test_run "$EXAMPLES_DIR/test_json.strada" "test_json" "JSON"
 
+# Test: JSON C implementation vs JSON::PS differential equivalence
+test_output_contains "$EXAMPLES_DIR/test_json_differential.strada" "test_json_differential" "PASS: JSON / JSON::PS differential" "JSON C/PS differential"
+
 # Test: Sort
 test_run "$EXAMPLES_DIR/test_sort.strada" "test_sort" "Sort"
 test_run "$EXAMPLES_DIR/test_map_sort.strada" "test_map_sort" "Map sort"

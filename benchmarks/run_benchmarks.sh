@@ -11,7 +11,7 @@ RUBY=${RUBY:-ruby}
 NODE=${NODE:-node}
 PHP=${PHP:-php}
 
-ALL_BENCHMARKS="bench_compute bench_strings bench_array_hash bench_functions bench_oop bench_hotpaths bench_sort bench_regex bench_pipeline bench_exceptions bench_async bench_gc bench_json bench_data bench_startup bench_utf8 bench_binary bench_closures bench_sprintf bench_binary_trees"
+ALL_BENCHMARKS="bench_compute bench_strings bench_array_hash bench_functions bench_oop bench_hotpaths bench_sort bench_regex bench_pipeline bench_exceptions bench_async bench_gc bench_json bench_data bench_startup bench_utf8 bench_binary bench_closures bench_sprintf bench_binary_trees bench_oop_so"
 
 usage() {
     echo "Usage: $0 [OPTIONS] [BENCHMARK ...]"
@@ -119,6 +119,10 @@ echo ""
 # Compile all Strada benchmarks
 echo -e "${CYAN}Compiling Strada benchmarks...${RESET}"
 for bench in $BENCHMARKS; do
+    # bench_oop_so loads a class from a shared library — build it first
+    if [ "$bench" = "bench_oop_so" ] && [ ! -f bench_oop_so_lib.so ]; then
+        $STRADA --shared bench_oop_so_lib.strada -o bench_oop_so_lib.so 2>/dev/null
+    fi
     echo -n "  $bench.strada ... "
     if $STRADA "${bench}.strada" 2>/dev/null; then
         echo "ok"

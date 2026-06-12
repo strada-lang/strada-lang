@@ -1,0 +1,67 @@
+use lib "lib";
+use JSON;
+use JSON::PS;
+
+func main() int {
+    my scalar $doc = {
+        "name" => "Alice \"A\" \\ test",
+        "age" => 30,
+        "score" => 1.5,
+        "tags" => ["x", "y", 7, 2.25],
+        "nested" => { "a" => [1, 2, {"deep" => "yes"}], "b" => undef },
+        "numstr" => "123",
+        "neg" => -42,
+        "empty_h" => {},
+        "empty_a" => []
+    };
+    my str $c = JSON::encode($doc);
+    my str $p = JSON::PS::encode($doc);
+    say("C : " . $c);
+    say("PS: " . $p);
+    say("match=" . ($c eq $p ? 1 : 0));
+
+    my str $canon_c = JSON::encode_opts($doc, { "canonical" => 1 });
+    my str $canon_p = JSON::PS::encode_opts($doc, { "canonical" => 1 });
+    say("canon-match=" . ($canon_c eq $canon_p ? 1 : 0));
+
+    my scalar $back = JSON::decode($c);
+    say("rt-name=" . $back->{"name"});
+    say("rt-deep=" . $back->{"nested"}->{"a"}->[2]->{"deep"});
+    say("rt-null=" . (defined($back->{"nested"}->{"b"}) ? "BAD" : "ok"));
+    say("rt-true=" . JSON::decode("true") . " false=" . JSON::decode("false"));
+    say("bad=" . (defined(JSON::decode("{broken")) ? "BAD" : "ok"));
+    say("uni=" . JSON::decode("\"\\u00e9\\ud83d\\ude00x\""));
+    say("ps-uni=" . JSON::PS::decode("\"\\u00e9x\""));
+
+    # Differential sweep over generated structures
+    my int $mismatches = 0;
+    my int $i = 0;
+    while ($i < 200) {
+        my scalar $d = {
+            "i" => $i,
+            "neg" => 0 - $i,
+            "f" => $i / 7.0,
+            "s" => "str_" . $i . "_\"q\"\n\t\\",
+            "ns" => "" . ($i * 3),
+            "arr" => [$i, "a" . $i, $i / 3.0, undef, [$i, {"k" => $i}]],
+            "obj" => { "x" => { "y" => [1, 2, 3] }, "z" => undef }
+        };
+        my str $jc = JSON::encode($d);
+        my str $jp = JSON::PS::encode($d);
+        if ($jc ne $jp) { $mismatches = $mismatches + 1; }
+        my str $cc = JSON::encode_opts($d, { "canonical" => 1 });
+        my str $cp = JSON::PS::encode_opts($d, { "canonical" => 1 });
+        if ($cc ne $cp) { $mismatches = $mismatches + 1; }
+        # roundtrip through BOTH decoders, re-encode, compare
+        my scalar $rc = JSON::decode($jc);
+        my scalar $rp = JSON::PS::decode($jc);
+        if (JSON::encode($rc) ne JSON::encode($rp)) { $mismatches = $mismatches + 1; }
+        $i = $i + 1;
+    }
+    if ($mismatches > 0) {
+        say("FAIL: " . $mismatches . " differential mismatches");
+        return 1;
+    }
+    say("PASS: JSON / JSON::PS differential (600 comparisons)");
+    return 0;
+}

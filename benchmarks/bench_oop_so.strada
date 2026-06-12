@@ -1,0 +1,125 @@
+# Cross-.so OOP dispatch benchmark. Measures method calls on objects whose
+# class lives in an import_lib shared library (bench_oop_so_lib.strada,
+# compiled with `strada --shared`) against an IDENTICAL class compiled
+# into this binary. Sections run the same workload on both, so the deltas
+# are pure boundary cost: dispatch resolution through the runtime method
+# registry for symbols registered from dl metadata, the call itself
+# (PLT/indirect vs direct), and constructor dispatch.
+#
+# Sections (1M method calls each, 200k constructions):
+#   local-call    — bump() on the same-binary class
+#   so-call       — bump() on the .so class
+#   local-new     — constructor, same binary
+#   so-new        — constructor via the .so
+#   local-mixed   — bump/value/add rotation, same binary
+#   so-mixed      — bump/value/add rotation, .so
+#
+# Built and run by run_benchmarks.sh, which compiles the lib first:
+#   ../strada --shared bench_oop_so_lib.strada -o bench_oop_so_lib.so
+#
+# Reference numbers: benchmarks/BASELINE.md
+
+use lib ".";
+import_lib "bench_oop_so_lib.so";
+
+package LocalCounter;
+
+func new(int $start) scalar {
+    my hash %self = ();
+    $self{"n"} = $start;
+    $self{"step"} = 1;
+    return bless(\%self, "LocalCounter");
+}
+
+func bump(scalar $self) int {
+    $self->{"n"} = $self->{"n"} + $self->{"step"};
+    return $self->{"n"};
+}
+
+func value(scalar $self) int {
+    return $self->{"n"};
+}
+
+func add(scalar $self, int $k) int {
+    $self->{"n"} = $self->{"n"} + $k;
+    return $self->{"n"};
+}
+
+package main;
+
+func main() int {
+    my num $t0 = core::hires_time();
+
+    # 1. local method calls
+    my scalar $lc = LocalCounter::new(0);
+    my int $i = 0;
+    my int $lsum = 0;
+    while ($i < 1000000) {
+        $lsum = $lc->bump();
+        $i++;
+    }
+    my num $t1 = core::hires_time();
+    say("local-call: " . $lsum . " " . ($t1 - $t0));
+
+    # 2. .so method calls — same workload
+    my scalar $sc = SoCounter::new(0);
+    $i = 0;
+    my int $ssum = 0;
+    while ($i < 1000000) {
+        $ssum = $sc->bump();
+        $i++;
+    }
+    my num $t2 = core::hires_time();
+    say("so-call: " . $ssum . " " . ($t2 - $t1));
+
+    # 3. local construction
+    my int $lmade = 0;
+    $i = 0;
+    while ($i < 200000) {
+        my scalar $o = LocalCounter::new($i);
+        $lmade = $lmade + $o->value();
+        $i++;
+    }
+    my num $t3 = core::hires_time();
+    say("local-new: " . $lmade . " " . ($t3 - $t2));
+
+    # 4. .so construction
+    my int $smade = 0;
+    $i = 0;
+    while ($i < 200000) {
+        my scalar $o = SoCounter::new($i);
+        $smade = $smade + $o->value();
+        $i++;
+    }
+    my num $t4 = core::hires_time();
+    say("so-new: " . $smade . " " . ($t4 - $t3));
+
+    # 5. local mixed dispatch (three different methods per iteration)
+    my scalar $lm = LocalCounter::new(0);
+    $i = 0;
+    my int $lmix = 0;
+    while ($i < 333333) {
+        $lm->bump();
+        $lm->add(2);
+        $lmix = $lm->value();
+        $i++;
+    }
+    my num $t5 = core::hires_time();
+    say("local-mixed: " . $lmix . " " . ($t5 - $t4));
+
+    # 6. .so mixed dispatch
+    my scalar $sm = SoCounter::new(0);
+    $i = 0;
+    my int $smix = 0;
+    while ($i < 333333) {
+        $sm->bump();
+        $sm->add(2);
+        $smix = $sm->value();
+        $i++;
+    }
+    my num $t6 = core::hires_time();
+    say("so-mixed: " . $smix . " " . ($t6 - $t5));
+
+    say("total: " . ($t6 - $t0));
+    return 0;
+}

@@ -278,3 +278,24 @@ Remaining Node gap (~1.5x) is per-call structure: varargs entry, arg SV
 handling, result SV lifecycle. The identified fix is compile-time
 lowering of literal-format sprintf calls in the codegen (emit the op
 sequence directly); not yet attempted.
+
+### C-accelerated JSON module + cross-.so OOP benchmark (2026-06-12 evening)
+
+**bench_json: 2.474s -> 0.20s (12.4x).** lib/JSON.strada is now a C
+implementation (encoder/decoder walk StradaValue structures directly in
+__C__ code); the pure-Strada original moved unchanged to lib/JSON/PS.strada
+as JSON::PS. Output is byte-identical to JSON::PS (enforced by
+examples/test_json_differential.strada — 600 comparisons in the test
+suite), valgrind clean, and BOTH implementations gained proper \uXXXX
+decoding (incl. surrogate pairs). The Node gap narrowed from ~25x to
+~2.3x (0.20 vs 0.086); decode dominates the remainder.
+
+**bench_oop_so (new):** method dispatch on a class living in an
+import_lib .so vs an identical same-binary class. Measured on a LOADED
+box (load ~4 — treat as indicative only; rerun quiet for a clean record):
+plain method calls pay ~10-20% across the boundary; the mixed-method
+section runs ~1.6-2x slower for the .so class because LOCAL classes get
+compile-time devirtualization (the codegen knows the receiver type from
+the constructor and calls the function directly) while .so classes always
+dispatch through the runtime method registry. Constructors are
+comparable. The runner builds bench_oop_so_lib.so automatically.
