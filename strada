@@ -1088,11 +1088,26 @@ if [ "$SHARED_LIB" -eq 1 ]; then
         # (same split as the executable path; tcc objects lack the
         # GNU-stack note, hence -Wl,-z,noexecstack).
         info "TCC mode: tcc compiles, $CC links"
-        tcc_compile_obj "$C_FILE" -fPIC
-        if ! run_cmd $CC -shared -fPIC -Wl,-z,noexecstack $SHARED_UNDEFINED_FLAG -o "$OUTPUT" "$TCC_OBJ" $EXTRA_FILES -I"$RUNTIME_DIR" $INCLUDE_FLAGS $DLOPEN_LIBS -lm -lpthread $LINK_FLAGS; then
-            rm -f "$TCC_OBJ"; error "link failed"
+        # tcc SILENTLY DROPS __attribute__((constructor)): the .so's
+        # __strada_init_globals (our-globals / OOP / BEGIN registration)
+        # never lands in .init_array, so nothing initializes at dlopen and
+        # the library misbehaves at runtime. De-static the initializer in
+        # the generated C and link a tiny $CC-compiled shim whose
+        # (gcc-honored) constructor calls it.
+        TCC_CTOR_SHIM=""
+        if grep -q '^static void __strada_init_globals(void) {$' "$C_FILE"; then
+            sed -i 's/^static void __strada_init_globals(void) {$/void __strada_init_globals(void) {/' "$C_FILE"
+            TCC_CTOR_SHIM="$(mktemp_suffix .c)"
+            cat > "$TCC_CTOR_SHIM" <<'EOF'
+extern void __strada_init_globals(void);
+__attribute__((constructor)) static void __strada_tcc_ctor(void) { __strada_init_globals(); }
+EOF
         fi
-        rm -f "$TCC_OBJ"
+        tcc_compile_obj "$C_FILE" -fPIC
+        if ! run_cmd $CC -shared -fPIC -Wl,-z,noexecstack $SHARED_UNDEFINED_FLAG -o "$OUTPUT" "$TCC_OBJ" $TCC_CTOR_SHIM $EXTRA_FILES -I"$RUNTIME_DIR" $INCLUDE_FLAGS $DLOPEN_LIBS -lm -lpthread $LINK_FLAGS; then
+            rm -f "$TCC_OBJ" $TCC_CTOR_SHIM; error "link failed"
+        fi
+        rm -f "$TCC_OBJ" $TCC_CTOR_SHIM
     elif ! run_cmd $CC -shared -fPIC $GCC_FLAGS $SHARED_UNDEFINED_FLAG -o "$OUTPUT" "$C_FILE" $EXTRA_FILES -I"$RUNTIME_DIR" $INCLUDE_FLAGS $DLOPEN_LIBS -lm -lpthread $LINK_FLAGS; then
         error "C compilation failed"
     fi
