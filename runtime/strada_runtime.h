@@ -1591,6 +1591,11 @@ StradaValue* strada_getaddrinfo_first(StradaValue *hostname, StradaValue *servic
 
 /* Path functions */
 StradaValue* strada_realpath(StradaValue *path);
+/* Alias used by the FROZEN bootstrap compiler's generated C: it predates the
+ * sys::realpath -> strada_realpath codegen mapping and emits sys_realpath()
+ * calls directly. Declared here so that code compiles without an implicit
+ * (int-returning, pointer-truncating) declaration. */
+StradaValue* sys_realpath(StradaValue *path);
 StradaValue* strada_dirname(StradaValue *path);
 StradaValue* strada_basename(StradaValue *path);
 StradaValue* strada_glob(StradaValue *pattern);

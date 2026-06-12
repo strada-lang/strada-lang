@@ -26914,6 +26914,10 @@ static int evb_wait(int set, EvbEvent *out, int max, int timeout_ms) {
     return n;
 }
 
+/* Unused today: a loop's backend set lives for the process lifetime (one
+ * loop per worker; the kernel reclaims the fd at exit). Kept so both
+ * backends expose the same API for a future explicit-close path. */
+static void evb_close(int set) __attribute__((unused));
 static void evb_close(int set) { close(set); }
 
 #else  /* ----- poll(2) fallback backend (any POSIX) ----- */
@@ -27010,6 +27014,7 @@ static int evb_wait(int set, EvbEvent *out, int max, int timeout_ms) {
     return n;
 }
 
+static void evb_close(int set) __attribute__((unused));
 static void evb_close(int set) {
     if (set < 0 || set >= EVB_MAX_SETS || !evb_sets[set].used) return;
     free(evb_sets[set].fds);
