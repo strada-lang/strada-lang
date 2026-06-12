@@ -15,6 +15,10 @@ func ackermann(int $m, int $n) int {
 }
 
 func main() int {
+    # ackermann(3,8) nests >2000 calls deep — the VM counts every frame
+    # against the default limit (1000), so raise it for both backends.
+    core::set_recursion_limit(1000000);
+
     # Call a simple 3-arg function 5,000,000 times
     my int $sum = 0;
     my int $i = 0;

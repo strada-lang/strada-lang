@@ -5,6 +5,8 @@ cd "$(dirname "$0")"
 
 RUNS=3
 STRADA=../strada
+STRADA_INTERP=${STRADA_INTERP:-../interpreter/strada-interp}
+VM_TIMEOUT=${VM_TIMEOUT:-300}
 PERL=${PERL:-perl}
 PYTHON=${PYTHON:-python3}
 RUBY=${RUBY:-ruby}
@@ -26,8 +28,11 @@ usage() {
     echo "Options:"
     echo "  -r, --runs N    Number of runs per benchmark (default: 3)"
     echo "  -a, --all       Run all languages (default: strada, node, php —"
-    echo "                  perl/python/ruby are slow and skipped by default)"
-    echo "      --langs L   Comma-separated language list (e.g. --langs perl,node)"
+    echo "                  perl/python/ruby/vm are slow and skipped by default)"
+    echo "      --langs L   Comma-separated language list (e.g. --langs perl,node,vm)"
+    echo "                  'vm' = the Strada bytecode VM (interpreter/strada-interp)"
+    echo "                  running the same .strada sources; probe-run with a"
+    echo "                  \$VM_TIMEOUT cap (default 300s), SKIP on timeout/failure"
     echo "  -l, --list      List available benchmarks and exit"
     echo "  -h, --help      Show this help message"
     echo ""
@@ -54,7 +59,7 @@ while [[ $# -gt 0 ]]; do
             exit 0
             ;;
         -a|--all)
-            LANGS="strada perl python ruby node php"
+            LANGS="strada vm perl python ruby node php"
             shift
             ;;
         --langs)
@@ -114,6 +119,7 @@ echo -n "Python: "; $PYTHON --version 2>/dev/null || echo "(not found)"
 echo -n "Ruby:   "; $RUBY --version 2>/dev/null | awk '{print $2}' || echo "(not found)"
 echo -n "Node:   "; $NODE --version 2>/dev/null || echo "(not found)"
 echo -n "PHP:    "; $PHP --version 2>/dev/null | head -1 | awk '{print $2}' || echo "(not found)"
+echo -n "VM:     "; if [ -x "$STRADA_INTERP" ]; then echo "(available: $STRADA_INTERP)"; else echo "(not built — run 'make interpreter')"; fi
 echo ""
 
 # Compile all Strada benchmarks
@@ -168,10 +174,10 @@ speedup() {
 }
 
 # Header
-printf "\n${BOLD}%-20s %10s %10s %10s %10s %10s %10s${RESET}\n" \
-    "Benchmark" "Strada" "Perl" "Python" "Ruby" "Node" "PHP"
-printf "%-20s %10s %10s %10s %10s %10s %10s\n" \
-    "--------------------" "----------" "----------" "----------" "----------" "----------" "----------"
+printf "\n${BOLD}%-20s %10s %10s %10s %10s %10s %10s %10s${RESET}\n" \
+    "Benchmark" "Strada" "VM" "Perl" "Python" "Ruby" "Node" "PHP"
+printf "%-20s %10s %10s %10s %10s %10s %10s %10s\n" \
+    "--------------------" "----------" "----------" "----------" "----------" "----------" "----------" "----------"
 
 # Collect all results for the comparison table
 declare -A RESULTS
@@ -189,6 +195,23 @@ for bench in $BENCHMARKS; do
         printf " %10s" "SKIP"
     fi
     RESULTS["$bench,strada"]="$st"
+
+    # Strada VM (bytecode interpreter, same .strada source). Probe once
+    # under a timeout: unsupported features or a >$VM_TIMEOUT runtime
+    # mean SKIP rather than a hung table.
+    if lang_enabled vm && [ -x "$STRADA_INTERP" ]; then
+        if timeout "$VM_TIMEOUT" "$STRADA_INTERP" "${bench}.strada" > /dev/null 2>&1; then
+            vmt=$(best_time $RUNS "$STRADA_INTERP" "${bench}.strada")
+            printf " %9ss" "$vmt"
+        else
+            vmt=""
+            printf " %10s" "SKIP"
+        fi
+    else
+        vmt=""
+        printf " %10s" "SKIP"
+    fi
+    RESULTS["$bench,vm"]="$vmt"
 
     # Perl
     if lang_enabled perl && command -v $PERL &>/dev/null && [ -f "${bench}.pl" ]; then
@@ -245,16 +268,16 @@ done
 
 # Speedup comparison table
 echo ""
-printf "${BOLD}%-20s %14s %14s %14s %14s %14s${RESET}\n" \
-    "Speedup (vs Strada)" "Perl" "Python" "Ruby" "Node" "PHP"
-printf "%-20s %14s %14s %14s %14s %14s\n" \
-    "--------------------" "--------------" "--------------" "--------------" "--------------" "--------------"
+printf "${BOLD}%-20s %14s %14s %14s %14s %14s %14s${RESET}\n" \
+    "Speedup (vs Strada)" "VM" "Perl" "Python" "Ruby" "Node" "PHP"
+printf "%-20s %14s %14s %14s %14s %14s %14s\n" \
+    "--------------------" "--------------" "--------------" "--------------" "--------------" "--------------" "--------------"
 
 for bench in $BENCHMARKS; do
     printf "%-20s" "$bench"
     st="${RESULTS[$bench,strada]}"
 
-    for lang in perl python ruby node php; do
+    for lang in vm perl python ruby node php; do
         val="${RESULTS[$bench,$lang]}"
         if [ -n "$st" ] && [ -n "$val" ]; then
             ratio=$(speedup "$st" "$val")
