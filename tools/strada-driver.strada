@@ -517,6 +517,16 @@ func build_gcc_flags() array {
         @f = (@f, "-fno-lto");
     } elsif ($OPT_LEVEL eq "2" || $OPT_LEVEL eq "3" || $OPT_LEVEL eq "fast") {
         @f = (@f, "-flto=auto");
+    } else {
+        # Non-LTO opt levels (-O0/-O1/-Os): explicitly disable LTO. The
+        # precompiled runtime.o is built -ffat-lto-objects (native code +
+        # LTO bitcode) so -O2+ user builds can cross-inline it; but at -O0
+        # the linker otherwise still invokes the LTO plugin (lto1) on that
+        # bitcode — ~0.55s of pure overhead even though we're not optimizing.
+        # -fno-lto makes the link use the runtime's native code instead,
+        # cutting a small/dev build's link from ~0.57s to ~0.03s (the whole
+        # `strada -O0 hello` drops 0.59s -> 0.13s). No effect on -O2+ builds.
+        @f = (@f, "-fno-lto");
     }
     if ($OPT_LEVEL eq "3" || $OPT_LEVEL eq "fast") { @f = (@f, "-march=native"); }
     if ($DEBUG_SYMBOLS == 1 || $C_DEBUG_SYMBOLS == 1) { @f = (@f, "-g"); }
