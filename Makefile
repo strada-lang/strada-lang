@@ -417,6 +417,14 @@ tools: $(TOOL_BINS)
 	@echo ""
 	@echo "✓ Tools built in tools/"
 
+# Every tool is built by its recipe via `./strada` (the shim), which execs
+# the compiled strada-driver — so the tools need it present, not just stradac.
+# Declaring it as a prerequisite guarantees the driver is built first
+# (including under `make -j`); without it a tool build could run `./strada`
+# before the driver exists and fail (e.g. a missing stradapp then breaks every
+# -D build). Prerequisite-only rule: merges into each tool's existing deps.
+$(TOOL_BINS): strada-driver
+
 tools/stradadoc: tools/stradadoc.strada stradac
 	@echo "Building stradadoc..."
 	@./strada tools/stradadoc.strada -o tools/stradadoc
@@ -498,6 +506,11 @@ configure-check:
 libs: configure-check lib-dbi lib-crypt lib-ssl lib-readline lib-eval
 	@echo ""
 	@echo "✓ Libraries built in lib/ (as .o; programs that say 'use Foo;' auto-detect the sibling .o)"
+
+# Libraries are compiled with `./strada -M`, which execs strada-driver — so,
+# like the tools, they need it built first (not just stradac). Prerequisite-
+# only rule, merged into each lib's existing deps.
+lib/DBI.o lib/crypt.o lib/Eval.o lib/ssl.o lib/readline/readline.o: strada-driver
 
 # DBI library (database interface)
 lib/DBI.o: lib/DBI.strada stradac configure-check
