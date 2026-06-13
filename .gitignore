@@ -8,6 +8,7 @@ compiler/Combined.c
 compiler/Combined.strada
 compiler/Combined_stage1.c
 stradac
+strada-driver
 stradac_stage1
 stradac_stage1_debug
 bootstrap/stradac

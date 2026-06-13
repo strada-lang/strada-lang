@@ -107,6 +107,48 @@ Your Strada Programs
 
 **Critical**: The bootstrap compiler (`bootstrap/`) exists only to compile the self-hosting compiler. All new features and bug fixes go in `compiler/*.strada`.
 
+### The `strada` Driver: Thin Shim + Compiled Driver (2026-06)
+
+The `strada` command is a **~15-line bash shim** plus a **compiled Strada
+program**, `tools/strada-driver.strada` → the `strada-driver` binary. The
+shim does only what bash does well — find its own directory, source
+`config.sh`, set the env contract — then `exec`s the driver. Everything else
+(arg parsing, the preprocessor/compiler/linker orchestration, `--shared` /
+`--object` / `--static-lib` / `--static` / `--tcc` paths, module-cache
+warming, `-M`, `--repl`/`--script`/`--doc` hand-off) is Strada.
+
+- **Env contract** (shim → driver): `STRADA_HOME` (lib/home root — `runtime/`,
+  `lib/`, `stradapp`, `config.sh`), `STRADA_BIN` (binaries — `stradac`,
+  `strada-jit`, `stradadoc`, `strada-interp`), `STRADA_SHIM` (the shim's own
+  path, for sub-builds: `-M` directory walk, module-cache warmer). Dev tree:
+  HOME = BIN = repo root. Installed: HOME = `<prefix>/lib/strada`, BIN =
+  `<prefix>/bin` (the `install` rule patches the shim's two default lines).
+- **Subprocess calls use `core::system_argv` / argv ARRAYS, not shell strings**
+  — no quoting hazards. `system_argv` returns `WEXITSTATUS` directly (`== 0`
+  is success; unlike `core::system`, which returns the raw waitpid status
+  needing `>> 8`). The repl/script/doc/run-after "exec" hand-offs use
+  system_argv + `core::exit($rc)` (fork+wait, behaviorally identical to exec
+  for a one-shot CLI; `exec_argv` isn't in the Semantic builtin table).
+- **Build** (`make strada-driver`): built directly with `stradac` + `$(CC)`,
+  NOT via the `strada` shim (which would be circular — the shim execs this
+  binary). The driver has no `use`/`-D`, so emit-C-then-link suffices. It is
+  a dependency of `all`. `strada-driver` is gitignored (a build artifact).
+- **Self-reference gotcha**: the driver greps the generated C for link
+  markers (`__STRADA_OBJECT_FILES__:` etc.). Its OWN source mentions those
+  tokens, so they're assembled from a variable tail (`"__STRADA_OBJECT_FILES__" . $COLON`)
+  to keep the contiguous token out of its generated C — otherwise the
+  compiling driver mis-greps its own string literals.
+- **Strada-isms the rewrite surfaced** (real compiler limitations, worked
+  around in the driver, candidates for fixing): (1) `push(@g, x)` to an `our`
+  ARRAY inside a function does NOT persist to the caller — only reassignment
+  `@g = (@g, x)` writes back (scalar `our` globals mutate fine); (2) a literal
+  sublist does not flatten in list context — `(@g, ("a","b"))` nests the
+  tuple as ONE element; (3) a function's array return does not flatten either
+  — `(@g, split_ws(x))` nests it; only NAMED array variables flatten. Spread
+  `...@arr` works only in function-CALL arguments, not list literals.
+
+The original ~1400-line bash wrapper lives in git history before this change.
+
 ### Self-Hosting Compiler Source (`compiler/`)
 
 | File | Purpose |
