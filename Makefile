@@ -13,6 +13,28 @@
 
 # Default values if config.mk doesn't exist
 CC ?= gcc
+# Use ccache for the toolchain build when it's installed — the bootstrap
+# recompiles the ~60k-line Combined.c twice through gcc, so cached unchanged
+# rebuilds (runtime/test-only edits, no-op re-makes) go from minutes to
+# seconds. Mirrors the `strada` wrapper, which already ccache-wraps user
+# compiles.
+#
+# USE_CCACHE (set by ./configure, or override on the command line):
+#   auto (default) = use ccache iff it's on PATH
+#   1              = use it (still gracefully skips if not installed)
+#   0              = never (./configure --without-ccache sets this)
+# `make NO_CCACHE=1` is a one-off opt-out; an explicit `make CC=...` is
+# respected as-is (command-line vars win, so it's never wrapped).
+USE_CCACHE ?= auto
+ifndef NO_CCACHE
+ifneq ($(USE_CCACHE),0)
+ifeq ($(findstring ccache,$(CC)),)
+ifneq ($(shell command -v ccache 2>/dev/null),)
+CC := ccache $(CC)
+endif
+endif
+endif
+endif
 PREFIX ?= /usr/local
 HAVE_MYSQL ?= 0
 HAVE_SQLITE ?= 1

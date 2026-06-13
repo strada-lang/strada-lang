@@ -108,6 +108,12 @@ while [ $# -gt 0 ]; do
         --without-libffi)
             SKIP_LIBFFI=1
             ;;
+        --with-ccache)
+            USE_CCACHE=1
+            ;;
+        --without-ccache)
+            USE_CCACHE=0
+            ;;
         --bundled-pcre2)
             BUNDLED_PCRE2=1
             FORCE_PCRE2=1
@@ -148,6 +154,8 @@ while [ $# -gt 0 ]; do
             echo "  --with-arena        Enable the request arena allocator (default)"
             echo "  --without-arena     Disable the request arena allocator"
             echo "  --without-libffi    Disable c::callback trampolines (drops the -lffi link dep)"
+            echo "  --with-ccache       Wrap the toolchain C compiler with ccache (default if found)"
+            echo "  --without-ccache    Build the toolchain with plain gcc (no ccache)"
             echo "  --help, -h          Show this help"
             exit 0
             ;;
@@ -336,6 +344,21 @@ elif check_lib "libffi" "ffi.h" "ffi" "ffi_prep_cif"; then
     echo -e "${GREEN}yes${NC}"
 else
     echo -e "${RED}no${NC}"
+fi
+
+printf "  Checking for ccache... "
+if [ "$USE_CCACHE" = "0" ]; then
+    echo -e "${YELLOW}disabled${NC} (--without-ccache)"
+elif command -v ccache >/dev/null 2>&1; then
+    USE_CCACHE=1
+    echo -e "${GREEN}yes${NC} (speeds up repeated toolchain rebuilds)"
+elif [ "$USE_CCACHE" = "1" ]; then
+    echo -e "${RED}no${NC}"
+    echo "Error: --with-ccache requested but ccache not found in PATH" >&2
+    exit 1
+else
+    USE_CCACHE=0
+    echo -e "${YELLOW}not found${NC} (toolchain builds with plain gcc)"
 fi
 
 printf "  Checking for epoll (event loop)... "
@@ -555,6 +578,10 @@ HAVE_PCRE2 = $HAVE_PCRE2
 # Runtime memory-management features (compile-time)
 HAVE_CYCLE_GC = $HAVE_CYCLE_GC
 HAVE_ARENA = $HAVE_ARENA
+
+# Use ccache to wrap the toolchain C compiler (1 = yes, 0 = plain gcc).
+# Speeds up repeated full builds; --without-ccache to disable.
+USE_CCACHE = $USE_CCACHE
 
 # MySQL
 MYSQL_CFLAGS = $MYSQL_CFLAGS
