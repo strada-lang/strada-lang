@@ -864,6 +864,11 @@ func ast_new_anon_array() scalar {
     my array @elems = ();
     $node->{"elements"} = \@elems;
     $node->{"element_count"} = 0;
+    # is_list: 1 for a parenthesized list literal `(a, b)` (flattens in list
+    # context, Perl-style), 0 for a bracketed array ref `[a, b]` (a scalar
+    # reference, never flattens). The parser sets it; both syntaxes otherwise
+    # share this node type. Default 0 (the safe, non-flattening choice).
+    $node->{"is_list"} = 0;
     return $node;
 }
 

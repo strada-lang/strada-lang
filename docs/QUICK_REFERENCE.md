@@ -487,9 +487,13 @@ splice(@arr, 1, 2, @repl);   # Replace 2 elements at index 1 with @repl
 my scalar $nums = [1, 2, 3];
 say($nums->[0]);              # Access via reference
 
-# List flattening: arrays are flattened in list context
+# List flattening (Perl-style): array values splice in; refs stay single
 my array @a = (1, 2);
-my array @b = (0, @a, 3);    # (0, 1, 2, 3)
+my array @b = (0, @a, 3);          # (0, 1, 2, 3)  — @array
+my array @c = (0, (1, 2), 3);      # (0, 1, 2, 3)  — parenthesized list
+my array @d = (0, split(",","1,2"));  # (0, 1, 2)  — array builtins / func array-returns
+my array @e = (0, [1, 2], 3);      # 3 elements: 0, an arrayref, 3 (refs DON'T flatten)
+# (Use ...@array to spread elements as separate FUNCTION ARGUMENTS.)
 
 # Array capacity (performance optimization)
 reserve(@arr, 1000);  // pre-allocate capacity

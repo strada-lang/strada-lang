@@ -1417,6 +1417,10 @@ func parse_primary(scalar $parser) scalar {
         # Check if this is an array literal (has comma)
         if (parser_check($parser, "COMMA")) {
             my scalar $arr = ast_new_anon_array();
+            # Parenthesized list `(a, b)` — flattens in list context (unlike a
+            # bracketed `[a, b]` array ref). See ast_new_anon_array / the list
+            # flatten path in CodeGenExpr.
+            $arr->{"is_list"} = 1;
             ast_add_array_elem($arr, $first);
             
             while (parser_check($parser, "COMMA")) {

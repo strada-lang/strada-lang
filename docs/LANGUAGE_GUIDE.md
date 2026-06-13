@@ -1031,12 +1031,33 @@ my int $n = @items;    # 3 (same as size(@items))
 
 ### List Flattening
 
-Arrays in list context are flattened into the surrounding list:
+Arrays flatten into a surrounding list, exactly like Perl. Anything that
+*is* an array value splices its elements in; references stay single scalars:
 
 ```strada
 my array @middle = (2, 3, 4);
-my array @all = (1, @middle, 5);   # (1, 2, 3, 4, 5)
+my array @all = (1, @middle, 5);              # (1, 2, 3, 4, 5)  — array variable
+my array @lit = (1, (2, 3), 4);               # (1, 2, 3, 4)     — parenthesized list
+my array @fr  = (1, two(), 5);                # flattens what `func two() array` returns
+my array @sp  = ("a", split(",", "b,c"));     # ("a", "b", "c")  — array builtins flatten
 ```
+
+Flattens in list context: `@array` variables, parenthesized lists `(…)`,
+`map`/`grep`/`sort`, calls declared to return `array`, and array-returning
+builtins (`split`, `keys`, `values`, `reverse`, …).
+
+Does **not** flatten (they are scalar references, as in Perl): an array ref
+`[…]`, a reference `\@a`, or a scalar holding a ref. Use a ref when you want
+to nest one array as a single element:
+
+```strada
+my array @nested = (1, [2, 3], 4);            # 3 elements: 1, an arrayref, 4
+say(size(@nested));                            # 3
+say(ref($nested[1]));                          # ARRAY  (it's a reference)
+```
+
+To pass an array's elements as separate *function arguments*, use the spread
+operator `...@array` (see Variadic Functions).
 
 ### Anonymous Arrays
 

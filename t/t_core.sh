@@ -377,6 +377,12 @@ test_output_contains "$EXAMPLES_DIR/test_perf_round5.strada" "test_perf_round5" 
 # Test: flattened multi-part concat (strada_concat_multi — interpolation chains)
 test_output_contains "$EXAMPLES_DIR/test_concat_multi.strada" "test_concat_multi" "All concat-multi tests passed" "Multi-part concat flattening"
 
+# Test: Perl-style list flattening + our-array mutation (codegen bugs fixed 2026-06)
+test_output_contains "$EXAMPLES_DIR/test_list_flatten.strada" "test_list_flatten" "All list-flatten tests passed" "List flattening + our-array push"
+
+# Test: mutating `our` (package-global) composites from functions (init-form bugs fixed 2026-06)
+test_output_contains "$EXAMPLES_DIR/test_our_globals.strada" "test_our_globals" "All our-global tests passed" "our-global array/hash/scalar mutation"
+
 # Test: the in-language Test framework (TAP output, exit codes)
 test_output_contains "$EXAMPLES_DIR/test_test_framework.strada" "test_test_framework" "1..10" "Test framework (TAP)"
 test_exit_code "$EXAMPLES_DIR/test_test_framework_fails.strada" "test_test_framework_fails" 1 "Test framework failure exit"

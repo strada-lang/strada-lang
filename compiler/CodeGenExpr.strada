@@ -2803,6 +2803,59 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
         return;
 }
 
+# Declared/static return type of a call by name, or -1 if unknown. Mirrors
+# gen_user_call's resolver (plain name, then package-prefixed fallback for
+# unqualified calls inside a non-main package) so the two never diverge.
+func resolve_call_return_type(scalar $cg, str $name) int {
+    my str $c_name = sanitize_name($name);
+    my scalar $fi = $cg->{"functions"}->{$c_name};
+    if ($fi) {
+        my int $rt = $fi->{"return_type"};
+        if ($rt > 0 || $fi->{"is_extern"} == 1) { return $rt; }
+    }
+    my str $fn_pkg = "" . $cg->{"current_fn_package"};
+    if (length($fn_pkg) > 0 && $fn_pkg ne "main" && index($name, "::") < 0) {
+        my str $c_pkg = $fn_pkg;
+        my int $ci = index($c_pkg, "::");
+        while ($ci >= 0) {
+            $c_pkg = substr($c_pkg, 0, $ci) . "_" . substr($c_pkg, $ci + 2, length($c_pkg) - $ci - 2);
+            $ci = index($c_pkg, "::");
+        }
+        my scalar $fi2 = $cg->{"functions"}->{$c_pkg . "_" . $c_name};
+        if ($fi2) { return $fi2->{"return_type"}; }
+    }
+    return -1;
+}
+
+# How a list element flattens in list context (Perl semantics):
+#   0 = scalar/ref/unknown — push as ONE element (refs stay refs)
+#   1 = array value, BORROWED (an @array variable — its live elements)
+#   2 = array value, OWNED temp (paren-list, map/grep/sort, or a call whose
+#       declared return type is array, incl. the common array builtins)
+# Kinds 1 and 2 are spliced via strada_deref_array downstream, which unwraps
+# the REF-boxing that array-returning functions/builtins use — so a
+# `func f() array` flattens exactly like a bare @a (the user-visible goal:
+# arrays flatten like Perl). Explicit `[..]`/`\@a` (is_list==0, or a ref-typed
+# scalar) are kind 0 and never flatten — also Perl.
+func array_flatten_kind(scalar $cg, scalar $elem) int {
+    my int $t = $elem->{"type"};
+    if ($t == NODE_VARIABLE() && $elem->{"sigil"} eq "@") { return 1; }
+    if ($t == NODE_ANON_ARRAY() && $elem->{"is_list"} == 1) { return 2; }
+    if ($t == NODE_MAP() || $t == NODE_GREP() || $t == NODE_SORT()) { return 2; }
+    if ($t == NODE_CALL()) {
+        my str $nm = "" . $elem->{"name"};
+        if (length($nm) > 6 && substr($nm, 0, 6) eq "core::") {
+            $nm = "sys::" . substr($nm, 6, length($nm) - 6);
+        }
+        if ($nm eq "split" || $nm eq "keys" || $nm eq "values" || $nm eq "reverse"
+            || $nm eq "sys::split" || $nm eq "sys::keys" || $nm eq "sys::values" || $nm eq "sys::reverse") {
+            return 2;
+        }
+        if (resolve_call_return_type($cg, $elem->{"name"}) == TYPE_ARRAY()) { return 2; }
+    }
+    return 0;
+}
+
 func gen_expression(scalar $cg, scalar $expr) void {
     my int $type = $expr->{"type"};
     my int $in_extern = $cg->{"in_extern"};
@@ -4668,28 +4721,41 @@ func gen_expression(scalar $cg, scalar $expr) void {
             if (needs_temp_cleanup($cg, $elems->[$check_i]) == 1) {
                 $needs_elem_cleanup = 1;
             }
-            # Perl-style list flattening: check for @array variables in list context
-            my scalar $check_elem = $elems->[$check_i];
-            if ($check_elem->{"type"} == NODE_VARIABLE() && $check_elem->{"sigil"} eq "@") {
+            # Perl-style list flattening: array-typed elements splice their
+            # elements into the result; scalars/refs stay single. See
+            # array_flatten_kind.
+            if (array_flatten_kind($cg, $elems->[$check_i]) > 0) {
                 $has_array_flatten = 1;
             }
             $check_i = $check_i + 1;
         }
 
-        # If any element is an @array, use dynamic building with flattening
+        # If any element flattens, build the result dynamically.
         if ($has_array_flatten == 1) {
             emit($cg, "({ StradaValue *__fl_arr = strada_new_array(); ");
             my int $fi = 0;
             while ($fi < $elem_count) {
                 my scalar $fl_elem = $elems->[$fi];
-                if ($fl_elem->{"type"} == NODE_VARIABLE() && $fl_elem->{"sigil"} eq "@") {
-                    # Flatten @array: iterate elements and push each one
+                my int $fkind = array_flatten_kind($cg, $fl_elem);
+                if ($fkind == 1) {
+                    # @array: borrowed elements, push each (push increfs).
                     emit($cg, "{ StradaArray *__fl_sa = strada_deref_array(");
                     gen_expression($cg, $fl_elem);
                     emit($cg, "); if (__fl_sa) { for (size_t __fl_i = 0; __fl_i < __fl_sa->size; __fl_i++) { ");
                     emit($cg, "strada_array_push(__fl_arr->value.av, __fl_sa->elements[__fl_sa->head + __fl_i]); } } } ");
+                } elsif ($fkind == 2) {
+                    # Owned array temp (paren-list / map / grep / sort / array-
+                    # returning call). deref_array unwraps the REF-boxing; if it
+                    # somehow isn't an array, fall back to a single push.
+                    emit($cg, "{ StradaValue *__fl_tmp = ");
+                    gen_expression($cg, $fl_elem);
+                    emit($cg, "; StradaArray *__fl_da = strada_deref_array(__fl_tmp); ");
+                    emit($cg, "if (__fl_da) { for (size_t __fl_k = 0; __fl_k < __fl_da->size; __fl_k++) { ");
+                    emit($cg, "strada_array_push(__fl_arr->value.av, __fl_da->elements[__fl_da->head + __fl_k]); } } ");
+                    emit($cg, "else { strada_array_push(__fl_arr->value.av, __fl_tmp); } ");
+                    emit($cg, "strada_decref(__fl_tmp); } ");
                 } else {
-                    # Regular element: push directly
+                    # Regular element: push directly.
                     if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $fl_elem) == 1) {
                         emit($cg, "{ StradaValue *__fl_tmp = ");
                         gen_expression($cg, $fl_elem);

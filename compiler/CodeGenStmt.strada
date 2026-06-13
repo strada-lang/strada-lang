@@ -1,3 +1,40 @@
+# Emit an `our` global's initializer expression, picking the right empty
+# container for a bare `()` based on the declared sigil/type. Without this,
+# `our array @G = ()` was emitted as strada_anon_hash(0) — an empty HASH —
+# so push(@G, ...) inside a function deref_array'd a hash, got NULL, and
+# silently no-op'd (the array mutation never persisted). `()` is parsed as
+# an empty NODE_ANON_HASH regardless of sigil, so the container choice has
+# to be made here. Mirrors the non-`our` global path's special case.
+func emit_our_global_init(scalar $cg, scalar $init, str $sigil, int $var_type) void {
+    my int $it = $init->{"type"};
+    my int $is_hash_target = 0;
+    if ($sigil eq "%" || $var_type == TYPE_HASH()) { $is_hash_target = 1; }
+    my int $is_array_target = 0;
+    if ($sigil eq "@" || $var_type == TYPE_ARRAY()) { $is_array_target = 1; }
+
+    # Empty `()` is parsed as an empty NODE_ANON_HASH regardless of sigil.
+    if ($it == NODE_ANON_HASH() && $init->{"pair_count"} == 0) {
+        if ($is_array_target == 1) { emit($cg, "strada_new_array()"); return; }
+        if ($is_hash_target == 1) { emit($cg, "strada_new_hash()"); return; }
+    }
+
+    # A hash global initialized from a pair-list `("a" => 1)` (which parses as a
+    # flat NODE_ANON_ARRAY), a map, or an @array must be BUILT into a hash —
+    # mirrors the `my hash %h = (...)` path. Without this, `our hash %H = (...)`
+    # stored a flat ARRAY, so $H{k} access/store operated on an array.
+    if ($is_hash_target == 1) {
+        my int $is_array_var = 0;
+        if ($it == NODE_VARIABLE() && $init->{"sigil"} eq "@") { $is_array_var = 1; }
+        if ($it == NODE_MAP() || $it == NODE_ANON_ARRAY() || $is_array_var == 1) {
+            emit($cg, "strada_hash_from_flat_array(");
+            gen_expression($cg, $init);
+            emit($cg, ")");
+            return;
+        }
+    }
+    gen_expression($cg, $init);
+}
+
 func gen_block(scalar $cg, scalar $block) void {
     emit($cg, "{\n");
     indent($cg);
@@ -2327,17 +2364,24 @@ func gen_function(scalar $cg, scalar $fn) void {
 
                 # Handle our declarations - use global registry
                 if ($gvar_type == NODE_OUR_DECL()) {
+                    my str $pkg = $gvar->{"package"};
+                    if (length($pkg) == 0) { $pkg = "main"; }
+                    my str $our_key = $pkg . "::" . $name;
                     if ($init) {
-                        my str $pkg = $gvar->{"package"};
-                        if (length($pkg) == 0) { $pkg = "main"; }
-                        my str $our_key = $pkg . "::" . $name;
                         emit($cg, "    strada_global_set_cstr(\"" . $our_key . "\", ");
-                        gen_expression($cg, $init);
+                        emit_our_global_init($cg, $init, $sigil, $var_type);
                         emit($cg, ");\n");
-                        # Register in our_vars for codegen
-                        my scalar $our_vars_ref2 = $cg->{"our_vars"};
-                        $our_vars_ref2->{$name} = $our_key;
+                    } elsif ($sigil eq "@" || $var_type == TYPE_ARRAY()) {
+                        # No initializer: still create the empty container, else
+                        # the global never exists and push/element-set inside a
+                        # function deref a NULL array and silently no-op.
+                        emit($cg, "    strada_global_set_cstr(\"" . $our_key . "\", strada_new_array());\n");
+                    } elsif ($sigil eq "%" || $var_type == TYPE_HASH()) {
+                        emit($cg, "    strada_global_set_cstr(\"" . $our_key . "\", strada_new_hash());\n");
                     }
+                    # Register in our_vars for codegen
+                    my scalar $our_vars_ref2 = $cg->{"our_vars"};
+                    $our_vars_ref2->{$name} = $our_key;
                     $g = $g + 1;
                     next;
                 }
@@ -4266,17 +4310,23 @@ func gen_global_constructor(scalar $cg) void {
 
             # Handle our declarations - use global registry
             if ($gvar_type == NODE_OUR_DECL()) {
+                my str $pkg = $gvar->{"package"};
+                if (length($pkg) == 0) { $pkg = "main"; }
+                my str $our_key = $pkg . "::" . $name;
                 if ($init) {
-                    my str $pkg = $gvar->{"package"};
-                    if (length($pkg) == 0) { $pkg = "main"; }
-                    my str $our_key = $pkg . "::" . $name;
                     emit($cg, "    strada_global_set_cstr(\"" . $our_key . "\", ");
-                    gen_expression($cg, $init);
+                    emit_our_global_init($cg, $init, $sigil, $var_type);
                     emit($cg, ");\n");
-                    # Register in our_vars for codegen
-                    my scalar $our_vars_ref3 = $cg->{"our_vars"};
-                    $our_vars_ref3->{$name} = $our_key;
+                } elsif ($sigil eq "@" || $var_type == TYPE_ARRAY()) {
+                    # No initializer: create the empty container anyway (see the
+                    # matching note in the main-prologue global init path).
+                    emit($cg, "    strada_global_set_cstr(\"" . $our_key . "\", strada_new_array());\n");
+                } elsif ($sigil eq "%" || $var_type == TYPE_HASH()) {
+                    emit($cg, "    strada_global_set_cstr(\"" . $our_key . "\", strada_new_hash());\n");
                 }
+                # Register in our_vars for codegen
+                my scalar $our_vars_ref3 = $cg->{"our_vars"};
+                $our_vars_ref3->{$name} = $our_key;
                 $g = $g + 1;
                 next;
             }

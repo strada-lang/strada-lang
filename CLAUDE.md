@@ -138,13 +138,14 @@ warming, `-M`, `--repl`/`--script`/`--doc` hand-off) is Strada.
   tokens, so they're assembled from a variable tail (`"__STRADA_OBJECT_FILES__" . $COLON`)
   to keep the contiguous token out of its generated C — otherwise the
   compiling driver mis-greps its own string literals.
-- **Strada-isms the rewrite surfaced** (real compiler limitations, worked
-  around in the driver, candidates for fixing): (1) `push(@g, x)` to an `our`
-  ARRAY inside a function does NOT persist to the caller — only reassignment
-  `@g = (@g, x)` writes back (scalar `our` globals mutate fine); (2) a literal
-  sublist does not flatten in list context — `(@g, ("a","b"))` nests the
-  tuple as ONE element; (3) a function's array return does not flatten either
-  — `(@g, split_ws(x))` nests it; only NAMED array variables flatten. Spread
+- **Strada-isms the rewrite surfaced — now FIXED** (list-flatten + `our`
+  codegen, see CLAUDE_DEEP_DIVE.md "Perl-style list flattening"): the driver
+  originally worked around three compiler
+  bugs that have since been fixed: (1) `push`/element-set to an `our` array/
+  hash from a function not persisting (an init-form bug — the container was
+  mis-created); (2) literal sublists `(@g, ("a","b"))` not flattening; (3)
+  array-returning calls `(@g, f())` not flattening. The driver's manual
+  `@g = (@g, x)` accumulation style still works and is harmless. Spread
   `...@arr` works only in function-CALL arguments, not list literals.
 
 The original ~1400-line bash wrapper lives in git history before this change.
