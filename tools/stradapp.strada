@@ -238,6 +238,15 @@ func preprocess(str $filename) str {
                 # (Strada uses # for comments)
                 if (starts_with($directive, "# ")) {
                     # Comment line - skip it
+                } elsif ($i == 0 && starts_with($directive, "#!")) {
+                    # Shebang (#!/usr/bin/env strada) on line 1: valid in
+                    # Strada source — pass it through untouched. Without
+                    # this, any -D build of a shebanged module died here
+                    # (the module-cache warmer hit it on executables'
+                    # helper libs).
+                    if ($active) {
+                        $output = $output . $line . "\n";
+                    }
                 } else {
                     die("stradapp: " . $filename . ":" . ($i + 1) . ": unknown directive: " . $directive);
                 }

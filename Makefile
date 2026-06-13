@@ -566,7 +566,7 @@ install: stradac $(RUNTIME_OBJ) libs
 	@# Install standard library (Strada modules and shared libraries)
 	@echo "Installing standard library..."
 	@if [ -d lib ]; then \
-	    for ext in strada so o a c h; do \
+	    for ext in strada so o a c h smeta; do \
 	        find lib -name "*.$$ext" | while read f; do \
 	            dir=$$(dirname "$$f" | sed 's|^lib|$(INSTALL_LIB)/lib|'); \
 	            mkdir -p "$$dir"; \

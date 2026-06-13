@@ -54,6 +54,37 @@ mktemp_suffix() {
     echo "$newfile"
 }
 
+# Stable per-source scratch path (ccache-friendly temp files).
+#
+# ccache hashes the preprocessor output, which embeds the input file's
+# path in "# 1 <path>" line markers — so a RANDOM temp name for the
+# generated .c guarantees a cache miss even when its content is
+# byte-identical to the previous build. Deriving the scratch name from
+# what actually determines the generated C (source realpath + define
+# set + output mode) makes unchanged rebuilds hit ccache and skip the
+# whole gcc compile.
+#
+# The scratch dir is per-uid, mode 700, and refused if it's a symlink
+# or foreign-owned (same hardening rationale as the compiler's probe
+# temps). Empty output = caller should fall back to mktemp_suffix.
+# Known limit: two SIMULTANEOUS builds of the same source with the same
+# defines share a scratch path; sequential builds (make, the module
+# cache warmer — distinct sources) are unaffected.
+scratch_path() {
+    local suffix="$1"
+    local dir="${TMPDIR:-/tmp}/strada-scratch-$(id -u)"
+    if ! mkdir -p -m 700 "$dir" 2>/dev/null; then echo ""; return; fi
+    if [ -L "$dir" ] || [ ! -O "$dir" ]; then echo ""; return; fi
+    local src_real
+    src_real="$(realpath "$INPUT_FILE" 2>/dev/null || echo "$INPUT_FILE")"
+    local key
+    key="$(printf '%s' "$src_real|${PP_DEFINES[*]}|$SHARED$STATIC_LIB$OBJECT_ONLY$OPT_LEVEL" | cksum | cut -d' ' -f1)"
+    local base
+    base="$(basename "$INPUT_FILE")"
+    base="${base%.strada}"
+    echo "$dir/${base}-${key}${suffix}"
+}
+
 # Find the directory where this script lives
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -740,11 +771,15 @@ else
     fi
 fi
 
-# Determine C file name
+# Determine C file name. Non-kept C goes to a STABLE per-source scratch
+# path so ccache can hit on unchanged rebuilds (see scratch_path).
 if [ "$KEEP_C" -eq 1 ]; then
     C_FILE="${OUTPUT}.c"
 else
-    C_FILE="$(mktemp_suffix .c)"
+    C_FILE="$(scratch_path .c)"
+    if [ -z "$C_FILE" ]; then
+        C_FILE="$(mktemp_suffix .c)"
+    fi
     trap "rm -f '$C_FILE'" EXIT
 fi
 
@@ -900,8 +935,13 @@ if [ ${#PP_DEFINES[@]} -gt 0 ]; then
         PP_FLAGS="$PP_FLAGS -D$def"
     done
 
-    # Create temp file for preprocessed output
-    PP_OUTPUT="$(mktemp_suffix .strada)"
+    # Create temp file for preprocessed output — stable name too: the
+    # preprocessed path is what stradac sees as the source file, and a
+    # random name here would otherwise vary anything that embeds it.
+    PP_OUTPUT="$(scratch_path .pp.strada)"
+    if [ -z "$PP_OUTPUT" ]; then
+        PP_OUTPUT="$(mktemp_suffix .strada)"
+    fi
     trap "rm -f '$PP_OUTPUT' '$C_FILE'" EXIT
 
     info "Preprocessing $INPUT_FILE (defines: ${PP_DEFINES[*]})"
@@ -1118,8 +1158,19 @@ EOF
             rm -f "$TCC_OBJ" $TCC_CTOR_SHIM; error "link failed"
         fi
         rm -f "$TCC_OBJ" $TCC_CTOR_SHIM
-    elif ! run_cmd $CC -shared -fPIC $GCC_FLAGS $SHARED_UNDEFINED_FLAG -o "$OUTPUT" "$C_FILE" $EXTRA_FILES -I"$RUNTIME_DIR" $INCLUDE_FLAGS $DLOPEN_LIBS -lm -lpthread $LINK_FLAGS; then
-        error "C compilation failed"
+    else
+        # Split compile and link: ccache only caches single-file
+        # compile-to-object calls — a combined `cc -shared gen.c mods.o...`
+        # invocation is never cached, so unchanged rebuilds paid the full
+        # gcc compile every time. The link itself is cheap (~0.04s).
+        GEN_OBJ="$(scratch_path .gen.o)"
+        if [ -z "$GEN_OBJ" ]; then GEN_OBJ="$(mktemp_suffix .gen.o)"; fi
+        if ! run_cmd $CC -c -fPIC $GCC_FLAGS -o "$GEN_OBJ" "$C_FILE" -I"$RUNTIME_DIR" $INCLUDE_FLAGS; then
+            error "C compilation failed"
+        fi
+        if ! run_cmd $CC -shared -fPIC $GCC_FLAGS $SHARED_UNDEFINED_FLAG -o "$OUTPUT" "$GEN_OBJ" $EXTRA_FILES -I"$RUNTIME_DIR" $INCLUDE_FLAGS $DLOPEN_LIBS -lm -lpthread $LINK_FLAGS; then
+            error "link failed"
+        fi
     fi
 elif [ "$OBJECT_ONLY" -eq 1 ]; then
     # Object file only: compile to .o without linking
@@ -1244,8 +1295,18 @@ else
             error "C compilation failed"
         fi
     else
-        if ! run_cmd $CC $RDYNAMIC_FLAG $GCC_FLAGS $GC_SECTIONS_FLAG -o "$OUTPUT" "$C_FILE" $EXTRA_FILES "$RUNTIME_OBJ" -I"$RUNTIME_DIR" $INCLUDE_FLAGS $DLOPEN_LIBS -lm -lpthread $LINK_FLAGS; then
+        # Split compile and link so ccache can cache the generated-C
+        # compile (it never caches invocations that link — see the
+        # --shared path note). LTO note: $GCC_FLAGS is passed to both
+        # stages, so -flto compiles bitcode and the link runs the LTO
+        # pass exactly as the combined invocation did.
+        GEN_OBJ="$(scratch_path .gen.o)"
+        if [ -z "$GEN_OBJ" ]; then GEN_OBJ="$(mktemp_suffix .gen.o)"; fi
+        if ! run_cmd $CC -c $GCC_FLAGS -o "$GEN_OBJ" "$C_FILE" -I"$RUNTIME_DIR" $INCLUDE_FLAGS; then
             error "C compilation failed"
+        fi
+        if ! run_cmd $CC $RDYNAMIC_FLAG $GCC_FLAGS $GC_SECTIONS_FLAG -o "$OUTPUT" "$GEN_OBJ" $EXTRA_FILES "$RUNTIME_OBJ" -I"$RUNTIME_DIR" $INCLUDE_FLAGS $DLOPEN_LIBS -lm -lpthread $LINK_FLAGS; then
+            error "link failed"
         fi
     fi
 fi
@@ -1264,6 +1325,7 @@ if [ "$MODULE_CACHE" -eq 1 ] && [ -f "$DEPS_OUT_FILE" ]; then
     SCRIPT_PATH_MC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
     warmed=0
     warm_failed=0
+    warm_failed_names=""
     while IFS= read -r dep; do
         [ -f "$dep" ] || continue
         real_dep="$(realpath "$dep" 2>/dev/null)" || continue
@@ -1294,12 +1356,13 @@ if [ "$MODULE_CACHE" -eq 1 ] && [ -f "$DEPS_OUT_FILE" ]; then
             warmed=$((warmed + 1))
         else
             warm_failed=$((warm_failed + 1))
+            warm_failed_names="$warm_failed_names $dep"
             rm -f "$cache_o" "$cache_o.smeta"
         fi
     done < <(tac "$DEPS_OUT_FILE")
     if [ "$warmed" -gt 0 ] || [ "$warm_failed" -gt 0 ]; then
         msg="module cache: warmed $warmed module(s)"
-        [ "$warm_failed" -gt 0 ] && msg="$msg ($warm_failed failed; those keep compiling from source)"
+        [ "$warm_failed" -gt 0 ] && msg="$msg ($warm_failed failed:$warm_failed_names — those keep compiling from source)"
         echo "$msg" >&2
     fi
     rm -f "$DEPS_OUT_FILE"

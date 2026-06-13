@@ -373,6 +373,62 @@ else
 fi
 cd "$WORK/proj"
 
+# --- 17. probe-result cache: sidecar-less .o probes once, then caches -----
+# A .o in a (simulated) read-only tree without a .smeta sidecar pays a
+# compile-and-run metadata probe. With STRADA_MODULE_CACHE_DIR set, the
+# probe's output is cached under probe-meta/ keyed by realpath+mtime, so
+# later builds skip the probe entirely.
+mkdir -p "$WORK/probeproj/lib"
+cd "$WORK/probeproj"
+cat > lib/PCMod.strada <<'EOF'
+package PCMod;
+func quad(int $x) int { return $x * 4; }
+EOF
+cat > pchost.strada <<'EOF'
+use lib "lib";
+import_object "PCMod.o";
+func main() int { say("q=" . PCMod::quad(5)); return 0; }
+EOF
+"$STRADA" -M --object -o lib/PCMod.o lib/PCMod.strada >"$WORK/t17a.log" 2>&1
+rm -f lib/PCMod.o.smeta
+PC_DIR="$WORK/probecache"
+rm -rf "$PC_DIR"
+STRADA_MODULE_CACHE_DIR="$PC_DIR" "$STRADA" pchost.strada -o pchost lib/PCMod.o >"$WORK/t17b.log" 2>&1
+out17="$(./pchost)"
+pc_entries="$(ls "$PC_DIR/probe-meta/" 2>/dev/null | wc -l)"
+STRADA_MODULE_CACHE_DIR="$PC_DIR" "$STRADA" pchost.strada -o pchost2 lib/PCMod.o >"$WORK/t17c.log" 2>&1
+out17b="$(./pchost2)"
+if [ "$out17" = "q=20" ] && [ "$out17b" = "q=20" ] && [ "$pc_entries" -ge 1 ]; then
+    pass "probe-result cache for sidecar-less .o"
+else
+    fail "probe-result cache for sidecar-less .o" "out1=$out17 out2=$out17b entries=$pc_entries"
+fi
+
+# --- 18. shebanged module survives -D (stradapp passthrough) + warming ----
+# #!/usr/bin/env strada on line 1 is valid Strada; stradapp used to die
+# on it as an unknown directive, which silently broke module-cache
+# warming for any shebanged helper module in a -D build.
+mkdir -p "$WORK/sheproj/lib"
+cd "$WORK/sheproj"
+printf '#!/usr/bin/env strada\npackage SheMod;\nfunc five() int { return 5; }\n' > lib/SheMod.strada
+cat > shehost.strada <<'EOF'
+use lib "lib";
+use SheMod;
+func main() int { say("f=" . SheMod::five()); return 0; }
+EOF
+SHE_DIR="$WORK/shecache"
+rm -rf "$SHE_DIR"
+STRADA_MODULE_CACHE_DIR="$SHE_DIR" "$STRADA" --module-cache -D SOME_FLAG shehost.strada -o shehost >"$WORK/t18a.log" 2>&1
+out18="$(./shehost 2>/dev/null)"
+# The warmer must have produced an artifact for the shebanged module.
+she_warmed="$(find "$SHE_DIR" -name 'SheMod.strada.o' 2>/dev/null | wc -l)"
+if [ "$out18" = "f=5" ] && [ "$she_warmed" -ge 1 ]; then
+    pass "shebang module: stradapp passthrough + cache warming"
+else
+    fail "shebang module: stradapp passthrough + cache warming" "out=$out18 warmed=$she_warmed (see t18a.log)"
+fi
+cd "$WORK/proj"
+
 # --- Summary --------------------------------------------------------------
 echo
 echo "===== $((PASS + FAIL)) tests, $PASS passed, $FAIL failed ====="

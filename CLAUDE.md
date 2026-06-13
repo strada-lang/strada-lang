@@ -693,7 +693,15 @@ Go-package-archive-style separate compilation, fully automatic:
   it directly instead of compiling-and-running a metadata probe binary per
   module per build (~150ms each — the probe made artifacts SLOWER than
   source) — and no artifact code executes at compile time on this path.
-  Missing/stale sidecar falls back to the probe.
+  Missing/stale sidecar falls back to the probe. `make install` installs
+  sidecars alongside the lib `.o`s (the install ext loop includes `smeta`,
+  deliberately LAST so sidecars end up newer than their `.o`).
+- **Probe-result cache** (2026-06): when the sidecar is missing (e.g. a
+  `.o` in a read-only tree installed before sidecars existed), the probe's
+  output is cached under `$STRADA_MODULE_CACHE_DIR/probe-meta/` keyed by
+  the `.o`'s realpath+mtime (`extract_object_export_info` in
+  Parser.strada) — a replaced `.o` gets a new key, so entries can't go
+  stale. The probe then runs once per `.o` version instead of every build.
 - **Transitive deps**: export metadata now records `use:Module` lines;
   importing an artifact resolves its deps automatically (artifact
   preferred, source fallback) — main no longer needs to `use` everything
@@ -710,8 +718,26 @@ Go-package-archive-style separate compilation, fully automatic:
   module code is gcc-optimized within the module but doesn't cross-inline
   with the consumer; for maximum-performance release builds, compile
   without `--module-cache` (source inlining + LTO).
-- Tests: `t/separate_compile_test/run.sh` (16 scenarios, incl. sidecars,
-  transitive deps, cache dir, cold/warm).
+- **ccache-friendly build pipeline** (2026-06): the wrapper now (a) writes
+  the generated `.c` (and stradapp output) to a STABLE per-source scratch
+  path (`/tmp/strada-scratch-<uid>/<base>-<key>.c`, key = source realpath
+  + define set + output mode — `scratch_path()` in `strada`), and (b)
+  splits compile from link on the executable and `--shared` paths
+  (`cc -c gen.c -o gen.o` then link). Both are required for ccache to ever
+  hit: a random temp name changes cpp's `# 1 <path>` line markers (cache
+  miss even on identical content), and ccache refuses to cache any
+  invocation that links. Result on sysync-web (13k lines, 12 modules,
+  -O0): warm rebuild 2.9s → **0.39s** when the generated C is unchanged;
+  a real source change still pays one gcc compile (~1.5s). Known limit:
+  two SIMULTANEOUS builds of the same source+defines share a scratch path.
+- **stradapp shebang passthrough** (2026-06): `#!/usr/bin/env strada` on
+  line 1 passes through the preprocessor instead of dying as an unknown
+  directive — previously any `-D` build of a shebanged module failed, which
+  silently broke module-cache warming (the warmer now also NAMES failing
+  modules in its summary line instead of just counting them).
+- Tests: `t/separate_compile_test/run.sh` (19 scenarios, incl. sidecars,
+  transitive deps, cache dir, cold/warm, probe-result cache, shebang
+  passthrough + warming).
 
 **Cross-module forward declarations** (use-cycle workaround): when two modules `use` each other in a cycle, declare callees from the other side with a body-less qualified `extern func`:
 

@@ -23643,6 +23643,12 @@ StradaValue* sys_realpath(StradaValue *path_val) {
     return strada_realpath(path_val);
 }
 
+/* Same frozen-bootstrap alias story for core::mkdir (used by the
+ * import_object probe-result cache in Parser.strada). */
+StradaValue* sys_mkdir(StradaValue *path_val, StradaValue *mode_val) {
+    return strada_mkdir(path_val, mode_val);
+}
+
 StradaValue* strada_dirname(StradaValue *path_val) {
     char *path = strada_to_str(path_val);
     char *dir = dirname(path);

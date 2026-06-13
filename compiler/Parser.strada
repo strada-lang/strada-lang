@@ -5414,6 +5414,37 @@ func extract_object_export_info(scalar $parser, str $obj_name, str $o_path) str 
         }
     }
 
+    # User-cache layer: a .o in a read-only tree (e.g. /usr/local) without
+    # a sidecar pays a compile-and-run probe (~150ms of cc) on EVERY build.
+    # Cache the probe's output under the module cache dir, keyed by the
+    # .o's realpath + mtime (a replaced .o gets a new key, so entries are
+    # never stale — old ones just stop being read; --clear-module-cache
+    # wipes them with everything else). Flat layout: one probe-meta/ dir,
+    # hash + sanitized basename per entry.
+    my str $probe_cache_path = "";
+    my str $probe_cache_root = core::getenv("STRADA_MODULE_CACHE_DIR");
+    if (length($probe_cache_root) > 0) {
+        my str $real_o = core::realpath($o_path);
+        if (length($real_o) > 0) {
+            my int $o_mtime = core::file_mtime($o_path);
+            my int $probe_key = export_meta_hash32($real_o . ":" . $o_mtime);
+            my str $probe_dir = $probe_cache_root . "/probe-meta";
+            $probe_cache_path = $probe_dir . "/" . $probe_key . "_" . sanitize_name(path_basename($real_o)) . ".smeta";
+            my int $pc_fd = core::open_fd($probe_cache_path, "r");
+            if ($pc_fd > 0) {
+                close_fd($pc_fd);
+                my str $pc_text = slurp($probe_cache_path);
+                if (length($pc_text) > 0) {
+                    return $pc_text;
+                }
+            }
+            # mkdir is not recursive: create the cache root too (a build
+            # without --module-cache can still point at a fresh dir).
+            core::mkdir($probe_cache_root, 448);
+            core::mkdir($probe_dir, 448);
+        }
+    }
+
     # Get the compiler directory from STRADA_DIR environment variable
     # (set by the 'strada' wrapper script) or fall back to current directory
     # Read STRADA_DIR directly; avoids /bin/sh's echo -n which is unportable
@@ -5497,6 +5528,11 @@ func extract_object_export_info(scalar $parser, str $obj_name, str $o_path) str 
 
     if (length($metadata) == 0) {
         parser_error($parser, "import_object: " . $o_path . " has no export metadata (was it compiled with a recent strada compiler?)");
+    }
+
+    # Populate the probe cache so the next build skips the probe entirely.
+    if (length($probe_cache_path) > 0) {
+        spew($probe_cache_path, $metadata);
     }
 
     return $metadata;
