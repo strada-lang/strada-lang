@@ -1610,6 +1610,9 @@ StradaValue* strada_realpath(StradaValue *path);
  * calls directly. Declared here so that code compiles without an implicit
  * (int-returning, pointer-truncating) declaration. */
 StradaValue* sys_realpath(StradaValue *path);
+/* Same bootstrap-alias story for core::mkdir (used by the import_object
+ * probe-result cache in Parser.strada). */
+StradaValue* sys_mkdir(StradaValue *path, StradaValue *mode);
 StradaValue* strada_dirname(StradaValue *path);
 StradaValue* strada_basename(StradaValue *path);
 StradaValue* strada_glob(StradaValue *pattern);
