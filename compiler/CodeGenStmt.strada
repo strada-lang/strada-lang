@@ -1577,9 +1577,15 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         # This includes increment/decrement, method calls, and other temp values
         if ($expr->{"type"} == NODE_INCREMENT() ||
             ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $expr) == 1)) {
-            emit($cg, "({ StradaValue *__expr_tmp = ");
+            # Discard an owned result: decref it inline. No named temp is
+            # needed — the value is produced and immediately consumed by
+            # decref in one expression, with no window in between (same as
+            # the old `({ T = e; decref(T); })`), so this just drops a
+            # pseudo-register per discarded statement. strada_decref handles
+            # tagged ints (e.g. `$i++` yielding a tagged int) as a no-op.
+            emit($cg, "strada_decref(");
             gen_expression($cg, $expr);
-            emit($cg, "; strada_decref(__expr_tmp); });\n");
+            emit($cg, ");\n");
         } else {
             gen_expression($cg, $expr);
             emit($cg, ";\n");
