@@ -130,6 +130,7 @@ TESTS=(
     "test_hash_set_value_leak"
     "test_async_ergonomics"
     "test_import_lib_devirt"
+    "test_arena_hardened"
 )
 
 # c::callback needs libffi at build time — include only when configured in

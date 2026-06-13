@@ -436,12 +436,28 @@ typedef struct StradaArena {
 } StradaArena;
 static StradaArena *cur_arena = NULL;
 
+/* Reuse free-list of retired ArenaBlocks. arena_end returns blocks here
+ * (neutralized, see strada_arena_end) instead of free()ing them: an arena
+ * value referenced by a variable that outlives arena_end (the documented
+ * "escape", but also the NORMAL case — `my $t = build(); ...; arena_end()`
+ * leaves $t in scope until its scope-exit decref) must remain VALID memory so
+ * that decref/break_self_cycle can no-op on it (refcount neutralized to the
+ * immortal sentinel) rather than read freed memory. Blocks are recycled by the
+ * next arena_begin, so steady-state memory is bounded by peak arena depth. */
+static ArenaBlock *arena_block_freelist = NULL;
+
 static StradaValue *arena_alloc_sv(StradaArena *a) {
     ArenaBlock *b = a->blocks;
     if (!b || b->used >= b->cap) {
-        ArenaBlock *nb = (ArenaBlock*)malloc(sizeof(ArenaBlock) + ARENA_BLOCK_SVS * sizeof(StradaValue));
-        if (!nb) return NULL;
-        nb->next = a->blocks; nb->used = 0; nb->cap = ARENA_BLOCK_SVS;
+        ArenaBlock *nb = arena_block_freelist;
+        if (nb) {
+            arena_block_freelist = nb->next;
+        } else {
+            nb = (ArenaBlock*)malloc(sizeof(ArenaBlock) + ARENA_BLOCK_SVS * sizeof(StradaValue));
+            if (!nb) return NULL;
+            nb->cap = ARENA_BLOCK_SVS;
+        }
+        nb->next = a->blocks; nb->used = 0;
         a->blocks = nb; b = nb;
     }
     return &b->slots[b->used++];
@@ -1096,6 +1112,9 @@ static void strada_free_queue_push(StradaValue *sv) {
  * common case (local scalars / strings) costs ~1 instruction. */
 void strada_break_self_cycle_impl(StradaValue *sv) {
     if (!sv || STRADA_IS_TAGGED_INT(sv)) return;
+    /* Immortal (incl. neutralized request-arena SVs after arena_end): skip
+     * before touching ->type/->value, which may name a released backbone. */
+    if (sv->refcount > 1000000000) return;
     int t = sv->type;
     /* Remember the OUTER sv (possibly a REF wrapping an array/hash)
      * so we can break refs pointing back to it — that's how Strada
@@ -13668,11 +13687,29 @@ void strada_arena_end(void) {
     StradaArena *a = cur_arena;
     if (!a) return;
     cur_arena = a->parent;   /* pop FIRST so arena_owns() no longer claims these */
-    for (ArenaBlock *b = a->blocks; b; b = b->next)
-        for (size_t i = 0; i < b->used; i++)
-            arena_release_backbone(&b->slots[i]);
+    for (ArenaBlock *b = a->blocks; b; b = b->next) {
+        for (size_t i = 0; i < b->used; i++) {
+            StradaValue *sv = &b->slots[i];
+            arena_release_backbone(sv);
+            /* Neutralize: the backbone is gone, but the SV struct lives on in
+             * this (retained) block. A variable still holding this value runs
+             * its scope-exit decref/break_self_cycle AFTER us — make those
+             * no-ops by marking the SV immortal + inert. Mirrors the
+             * pooled-SV neutralization in strada_free_value. */
+            sv->refcount = 2000000000;
+            sv->type = STRADA_UNDEF;
+            sv->meta = NULL;
+        }
+    }
+    /* Retain blocks on the reuse free-list instead of freeing — see
+     * arena_block_freelist. Their slots stay valid memory for any escaped refs. */
     ArenaBlock *b = a->blocks;
-    while (b) { ArenaBlock *n = b->next; free(b); b = n; }
+    while (b) {
+        ArenaBlock *n = b->next;
+        b->next = arena_block_freelist;
+        arena_block_freelist = b;
+        b = n;
+    }
     free(a);
 }
 

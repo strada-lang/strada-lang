@@ -312,3 +312,16 @@ dynamic dispatch with full hook semantics). Best of 5 on a LOADED box
 ~1.1x. The residual is the wrapper hop + no cross-.so inlining
 (physics, not dispatch). Swap-the-.so safety is regression-tested by
 t/import_lib_devirt_test (incl. new hooks firing through the fallback).
+
+### binary_trees: arena for short-lived trees (2026-06)
+
+bench_binary_trees now wraps each short-lived tree (the iterate phase) in a
+request-arena scope (`core::arena_begin/end`): 1.27s -> ~1.08s (~15%). The
+arena bump-allocates the tree and reclaims it wholesale — no per-node
+refcount teardown and no cycle-collector buffering (immortal arena SVs are
+skipped by the CC). The one giant "stretch" tree is deliberately NOT
+arena-scoped: `arena_owns()` is O(blocks), so a single tens-of-blocks arena
+costs more than it saves; the arena wins for many small scopes. Node still
+wins this GC-torture benchmark (~0.08s, generational GC) — the gap narrowed
+from ~16x to ~13x. Prerequisite: the arena was hardened so nested/escaping
+values no longer crash (see CLAUDE.md Request Arena).

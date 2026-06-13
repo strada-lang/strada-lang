@@ -678,6 +678,11 @@ static inline __attribute__((always_inline)) double strada_to_num(StradaValue *s
  * to guarantee no cycle. */
 static inline __attribute__((always_inline)) void strada_break_self_cycle(StradaValue *sv) {
     if (!sv || STRADA_IS_TAGGED_INT(sv)) return;
+    /* Immortal (refcount sentinel > 1e9): small ints, statics, pooled-and-
+     * neutralized SVs, and request-arena SVs after arena_end. They are never
+     * freed and cannot be a collectable cycle member, so skip BEFORE reading
+     * ->type/->value — those may belong to a released arena backbone. */
+    if (sv->refcount > 1000000000) return;
     if (sv->refcount < 2) {
         int t = sv->type;
         if (t != STRADA_REF) return;
