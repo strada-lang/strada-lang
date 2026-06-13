@@ -293,7 +293,28 @@ API (Strada): `core::gc_collect()`, `core::gc_enable()`, `core::gc_disable()`, `
 
 A bump allocator for request-scoped `StradaValue` structs. `core::arena_begin()` / `core::arena_end()` wrap a unit of request-local work; every value allocated in between is bump-allocated and reclaimed wholesale at `arena_end` (struct + backbones), skipping per-object malloc/free and refcount teardown. Implemented under `#ifdef STRADA_ARENA`; dormant until `arena_begin()` (safe to ship enabled). Detection of arena pointers (`ARENA_OWNS`) makes `strada_free_value` and the cycle collector no-op on arena values.
 
-- **Caveats**: values created in an arena must **not** escape `arena_end()`; an arena container referencing a *persistent* value leaks one ref on it; `DESTROY` is not run for arena objects; single-threaded scope only (fits a preforking worker).
+- **Escape safety (2026-06)**: `arena_end()` no longer `free()`s the arena
+  blocks — it **neutralizes** every SV (immortal refcount sentinel + `UNDEF`
+  type) and **retains the blocks on a reuse free-list** (recycled by the next
+  `arena_begin`). So a value still referenced by a scoped variable past
+  `arena_end` (which is the NORMAL case: `my $t = build(); …; arena_end()`
+  leaves `$t` live until its scope-exit decref) is safe — its decref /
+  `break_self_cycle` no-op on the immortal/inert SV instead of touching freed
+  memory. `break_self_cycle` (header inline + `_impl`) gained the immortal
+  short-circuit this requires. Nested containers and arrays no longer crash.
+  Using `arena_begin/end` around short-lived request data is now safe with
+  ordinary variables.
+- **Perf note**: `arena_owns()` (consulted on every container decref/free while
+  an arena is open) scans O(blocks), so ONE huge arena (tens of blocks) costs
+  more than it saves. The arena is a win for **many small request-sized
+  scopes**, not one giant scope (e.g. `benchmarks/bench_binary_trees.strada`
+  arenas each short-lived tree → ~15% faster; arena-ing the one giant stretch
+  tree was slower). An O(1) `ARENA_OWNS` (struct_size flag bit) is a possible
+  future improvement.
+- **Remaining caveats**: an arena container referencing a *persistent* value
+  still leaks one ref on it; `DESTROY` is not run for arena objects;
+  single-threaded scope only (fits a preforking worker). Don't *use* (read) an
+  escaped arena value after `arena_end` — only cleanup of it is made safe.
 - Build `./configure --without-arena` to compile it out.
 
 API (Strada): `core::arena_begin()`, `core::arena_end()`, `core::arena_active()`. Runtime C: `strada_arena_begin()`, `strada_arena_end()`, `strada_arena_active()`.

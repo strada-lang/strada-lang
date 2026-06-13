@@ -32,7 +32,10 @@ func main() int {
 
     my num $t0 = core::hires_time();
 
-    # 1. stretch tree
+    # 1. stretch tree (one large tree; NOT arena-scoped — a single huge arena
+    # makes arena_owns() O(blocks) on every container decref, which costs more
+    # than it saves. The arena shines for many SMALL request-sized scopes, as
+    # in the iterate phase below.)
     my scalar $stretch = build($max_depth + 1);
     my int $stretch_check = check($stretch);
     $stretch = undef;
@@ -51,8 +54,13 @@ func main() int {
         my int $sum = 0;
         my int $i = 0;
         while ($i < $iters) {
+            # Each short-lived tree gets its own arena scope — bump-allocated
+            # and freed in one shot, the way request-scoped data is meant to be
+            # handled in Strada.
+            core::arena_begin();
             my scalar $t = build($depth);
             $sum += check($t);
+            core::arena_end();
             $i++;
         }
         say("depth " . $depth . ": " . $iters . " trees, check " . $sum);

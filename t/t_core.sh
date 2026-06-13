@@ -383,6 +383,9 @@ test_output_contains "$EXAMPLES_DIR/test_list_flatten.strada" "test_list_flatten
 # Test: mutating `our` (package-global) composites from functions (init-form bugs fixed 2026-06)
 test_output_contains "$EXAMPLES_DIR/test_our_globals.strada" "test_our_globals" "All our-global tests passed" "our-global array/hash/scalar mutation"
 
+# Test: hardened request arena (nested containers + values escaping arena_end)
+test_output_contains "$EXAMPLES_DIR/test_arena_hardened.strada" "test_arena_hardened" "All arena-hardened tests passed" "Arena nested/escaping correctness"
+
 # Test: the in-language Test framework (TAP output, exit codes)
 test_output_contains "$EXAMPLES_DIR/test_test_framework.strada" "test_test_framework" "1..10" "Test framework (TAP)"
 test_exit_code "$EXAMPLES_DIR/test_test_framework_fails.strada" "test_test_framework_fails" 1 "Test framework failure exit"

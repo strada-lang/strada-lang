@@ -1,0 +1,72 @@
+# Regression: request arena hardened to handle nested containers and values
+# that outlive arena_end (2026-06). Previously these crashed — a value created
+# in an arena and still referenced by a scoped variable past arena_end had its
+# scope-exit decref/break_self_cycle touch freed block memory (SIGSEGV), and
+# array/hash backbones double-freed against the pools. arena_end now neutralizes
+# each SV (immortal + UNDEF) and retains blocks on a reuse free-list, so escaped
+# refs are safe no-ops; break_self_cycle short-circuits on immortal.
+
+package main;
+
+func build(int $depth) scalar {
+    if ($depth == 0) { return { "l" => undef, "r" => undef }; }
+    return { "l" => build($depth - 1), "r" => build($depth - 1) };
+}
+func count(scalar $node) int {
+    if (!defined($node->{"l"})) { return 1; }
+    return 1 + count($node->{"l"}) + count($node->{"r"});
+}
+
+func main() int {
+    my int $fail = 0;
+
+    # 1. escaping array local (var outlives arena_end)
+    core::arena_begin();
+    my scalar $a = [1, 2, 3, 4];
+    my int $alen = size(@$a);
+    core::arena_end();
+    if ($alen != 4) { say("FAIL array len=" . $alen); $fail = 1; }
+
+    # 2. escaping hash local
+    core::arena_begin();
+    my scalar $h = { "x" => 10, "y" => 20, "z" => 30 };
+    my int $hx = $h->{"x"} + $h->{"z"};
+    core::arena_end();
+    if ($hx != 40) { say("FAIL hash sum=" . $hx); $fail = 1; }
+
+    # 3. nested hashes (tree) built + walked inside an arena, many scopes
+    my int $sum = 0;
+    my int $i = 0;
+    while ($i < 5000) {
+        core::arena_begin();
+        my scalar $t = build(6);
+        $sum += count($t);
+        core::arena_end();
+        $i++;
+    }
+    # depth-6 perfect tree has 127 nodes; 5000 trees
+    if ($sum != 5000 * 127) { say("FAIL nested sum=" . $sum); $fail = 1; }
+
+    # 4. block reuse: many begin/end cycles must not grow unbounded or corrupt
+    $i = 0;
+    while ($i < 10000) {
+        core::arena_begin();
+        my scalar $x = [ $i, $i + 1 ];
+        core::arena_end();
+        $i++;
+    }
+
+    # 5. nested arenas
+    core::arena_begin();
+    my scalar $outer = [ "a", "b" ];
+    core::arena_begin();
+    my scalar $inner = { "k" => 99 };
+    my int $ik = $inner->{"k"};
+    core::arena_end();
+    my int $ol = size(@$outer);
+    core::arena_end();
+    if ($ik != 99 || $ol != 2) { say("FAIL nested arenas ik=" . $ik . " ol=" . $ol); $fail = 1; }
+
+    if ($fail == 0) { say("All arena-hardened tests passed"); }
+    return $fail;
+}
