@@ -1,0 +1,4187 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# CodeGen.strada - C Code Generator for self-hosting Strada compiler
+# Transforms AST into C source code
+
+# ============================================================
+# Code Generator State
+# ============================================================
+
+# Sanitize function names for C (replace :: with _)
+# Module-only codegen filter (--object / -M).
+# Returns 1 if the item should be SKIPPED because it was inlined from a
+# `use`d module (and therefore lives in some other module's .o, not ours).
+# Returns 0 in all other cases (full-program mode, or the item came from
+# the file we're compiling).
+#
+# Items are tagged at parse time: load_module sets $item->{"from_use"} = 1
+# on everything it transfers into the main program; top-level parse leaves
+# this unset/0 on the file's own functions, globals, BEGIN/END blocks, and
+# top-level __C__ blocks. So the filter is just a boolean check.
+#
+# Accepts either a program or codegen context (both carry module_only_mode).
+func cg_skip_for_module(scalar $ctx, int $from_use) int {
+    if ($ctx->{"module_only_mode"} != 1) { return 0; }
+    if ($from_use == 1) { return 1; }
+    return 0;
+}
+
+func sanitize_name(str $name) str {
+    my str $result = "";
+    my int $i = 0;
+    my int $len = length($name);
+    while ($i < $len) {
+        my str $ch = substr($name, $i, 1);
+        if ($ch eq ":") {
+            # Check for :: sequence and replace with single _
+            if ($i + 1 < $len && substr($name, $i + 1, 1) eq ":") {
+                $result = $result . "_";
+                $i = $i + 1;  # Skip the second colon
+            } else {
+                $result = $result . "_";
+            }
+        } else {
+            # Map anything that is not a valid C identifier char to '_'. Without
+            # this a crafted name (e.g. an import name containing ';', '(', or a
+            # space) would inject raw tokens into the generated C symbol.
+            my int $code = char_at($name, $i);
+            if (($code >= ord("0") && $code <= ord("9")) || ($code >= ord("A") && $code <= ord("Z")) || ($code >= ord("a") && $code <= ord("z")) || $code == ord("_")) {
+                $result = $result . $ch;
+            } else {
+                $result = $result . "_";
+            }
+        }
+        $i = $i + 1;
+    }
+    return $result;
+}
+
+# Escape C keywords used as variable names by prefixing with v_
+func escape_c_keyword(str $name) str {
+    # C keywords that conflict with Strada variable names
+    if ($name eq "for") { return "v_for"; }
+    if ($name eq "while") { return "v_while"; }
+    if ($name eq "if") { return "v_if"; }
+    if ($name eq "else") { return "v_else"; }
+    if ($name eq "switch") { return "v_switch"; }
+    if ($name eq "case") { return "v_case"; }
+    if ($name eq "default") { return "v_default"; }
+    if ($name eq "break") { return "v_break"; }
+    if ($name eq "continue") { return "v_continue"; }
+    if ($name eq "return") { return "v_return"; }
+    if ($name eq "goto") { return "v_goto"; }
+    if ($name eq "do") { return "v_do"; }
+    if ($name eq "int") { return "v_int"; }
+    if ($name eq "char") { return "v_char"; }
+    if ($name eq "float") { return "v_float"; }
+    if ($name eq "double") { return "v_double"; }
+    if ($name eq "void") { return "v_void"; }
+    if ($name eq "long") { return "v_long"; }
+    if ($name eq "short") { return "v_short"; }
+    if ($name eq "unsigned") { return "v_unsigned"; }
+    if ($name eq "signed") { return "v_signed"; }
+    if ($name eq "const") { return "v_const"; }
+    if ($name eq "static") { return "v_static"; }
+    if ($name eq "extern") { return "v_extern"; }
+    if ($name eq "register") { return "v_register"; }
+    if ($name eq "volatile") { return "v_volatile"; }
+    if ($name eq "auto") { return "v_auto"; }
+    if ($name eq "struct") { return "v_struct"; }
+    if ($name eq "union") { return "v_union"; }
+    if ($name eq "enum") { return "v_enum"; }
+    if ($name eq "typedef") { return "v_typedef"; }
+    if ($name eq "sizeof") { return "v_sizeof"; }
+    # C99/C11 keywords
+    if ($name eq "inline") { return "v_inline"; }
+    if ($name eq "restrict") { return "v_restrict"; }
+    if ($name eq "_Bool") { return "v_Bool"; }
+    if ($name eq "_Complex") { return "v_Complex"; }
+    if ($name eq "_Imaginary") { return "v_Imaginary"; }
+    # C macros for standard I/O
+    if ($name eq "STDIN") { return "v_STDIN"; }
+    if ($name eq "STDOUT") { return "v_STDOUT"; }
+    if ($name eq "STDERR") { return "v_STDERR"; }
+    return $name;
+}
+
+# Compute djb2 hash at compile time (matches strada_hash_string in runtime)
+func djb2_hash(str $input_str) int {
+    my int $h = 5381;
+    my int $idx = 0;
+    my int $slen = length($input_str);
+    while ($idx < $slen) {
+        my int $ch = char_at($input_str, $idx);
+        my int $shifted = $h * 32;
+        $h = $shifted + $h + $ch;
+        $idx = $idx + 1;
+    }
+    return $h;
+}
+
+func djb2_hash_32(str $input_str) int {
+    my int $h = 5381;
+    my int $idx = 0;
+    my int $slen = length($input_str);
+    while ($idx < $slen) {
+        my int $ch = char_at($input_str, $idx);
+        $h = (($h * 33) + $ch) % 4294967296;
+        $idx = $idx + 1;
+    }
+    return $h;
+}
+
+# Returns 1 if every byte of $s is printable ASCII (1..127). Only then does the
+# compile-time djb2_hash_32 match the runtime hash: strada_hash_string reads
+# `signed char`, so bytes >= 128 (UTF-8 / high-bit) hash differently than
+# char_at's unsigned bytes. Gates the pre-hashed literal-key fast path so a
+# non-ASCII key never gets a mismatching precomputed hash (which would miss).
+func key_is_hashable_ascii(str $s) int {
+    my int $slen = length($s);
+    if ($slen == 0) {
+        return 0;
+    }
+    my int $idx = 0;
+    while ($idx < $slen) {
+        my int $ch = char_at($s, $idx);
+        if ($ch < 1 || $ch > 127) {
+            return 0;
+        }
+        $idx = $idx + 1;
+    }
+    return 1;
+}
+
+# Emit an owned hash fetch for a compile-time-literal string key. For ASCII keys,
+# use the pre-hashed fast path strada_hv_fetch_owned_ph(hash_expr, "key", HASHu),
+# which skips re-running DJB2 over the constant key on every access (the same
+# scheme already used for `has` accessors and constructors). Non-ASCII keys fall
+# back to strada_hv_fetch_owned. Handles both an owned (needs_cleanup) and a
+# borrowed hash/ref sub-expression. Shared by NODE_HASH_ACCESS / NODE_DEREF_HASH.
+func emit_hash_fetch_literal(scalar $cg, scalar $hash_expr, str $key_val, int $needs_cleanup) void {
+    my int $ascii = key_is_hashable_ascii($key_val);
+    if ($needs_cleanup == 1) {
+        emit($cg, "({ StradaValue *__hl_tmp = ");
+        gen_expression($cg, $hash_expr);
+        emit($cg, "; StradaValue *__hl_res = ");
+        if ($ascii == 1) {
+            emit($cg, "strada_hv_fetch_owned_ph(__hl_tmp, ");
+            gen_str_literal_c($cg, $key_val);
+            emit($cg, ", " . djb2_hash_32($key_val) . "u)");
+        } else {
+            emit($cg, "strada_hv_fetch_owned(__hl_tmp, ");
+            gen_str_literal_c($cg, $key_val);
+            emit($cg, ")");
+        }
+        emit($cg, "; strada_decref(__hl_tmp); __hl_res; })");
+    } else {
+        if ($ascii == 1) {
+            emit($cg, "strada_hv_fetch_owned_ph(");
+            gen_expression($cg, $hash_expr);
+            emit($cg, ", ");
+            gen_str_literal_c($cg, $key_val);
+            emit($cg, ", " . djb2_hash_32($key_val) . "u)");
+        } else {
+            emit($cg, "strada_hv_fetch_owned(");
+            gen_expression($cg, $hash_expr);
+            emit($cg, ", ");
+            gen_str_literal_c($cg, $key_val);
+            emit($cg, ")");
+        }
+    }
+}
+
+func codegen_new(str $filename, int $debug_info, int $enable_profiling, int $enable_stack_trace, int $full_profile) scalar {
+    my hash %cg = ();
+    # StringBuilder for O(1) amortized append (no O(n^2) string concat)
+    $cg{"output_sb"} = sb_new();
+    $cg{"preamble_content"} = "";  # Saved preamble when doing multi-phase
+    $cg{"funcs_content"} = "";     # Saved funcs when doing multi-phase
+    $cg{"oop_fwd_decls"} = "";     # OOP init forward declarations (generated after methods tracked)
+    # Module-only codegen mode (copied from program in generate() so the cg_skip_for_module
+    # helper works equivalently whether called with the program or the cg context).
+    $cg{"module_only_mode"} = 0;
+    $cg{"module_target"} = "";
+    $cg{"indent"} = 0;
+    $cg{"debug_info"} = $debug_info;  # Emit #line directives for debugging
+    $cg{"enable_profiling"} = $enable_profiling;  # Emit function profiling code
+    $cg{"enable_stack_trace"} = $enable_stack_trace;  # Emit stack trace push/pop calls
+    $cg{"full_profile"} = $full_profile;  # Emit line-level profiling code
+    $cg{"last_line"} = 0;  # Track last emitted line to avoid duplicates
+    $cg{"functions"} = {};  # Map function name -> function info
+    $cg{"owned_call_builtins"} = build_owned_call_builtins();  # owned-return builtin set (see build_owned_call_builtins)
+    $cg{"in_extern"} = 0;   # Track if we're inside an extern function
+    $cg{"extern_params"} = {};  # Map param name -> type for extern functions
+    $cg{"in_main"} = 0;     # Track if we're inside main function
+    $cg{"package"} = "";    # Current package name
+    $cg{"filename"} = $filename;  # Source file name for __FILE__
+    $cg{"map_counter"} = 0;     # Counter for unique map variable names
+    $cg{"sort_counter"} = 0;    # Counter for unique sort variable names
+    $cg{"grep_counter"} = 0;    # Counter for unique grep variable names
+    $cg{"foreach_counter"} = 0; # Counter for unique foreach variable names
+    $cg{"redo_counter"} = 0;    # Counter for unique redo labels
+    $cg{"current_redo_label"} = ""; # Current innermost redo label for unlabeled redo
+    $cg{"call_context"} = 0;   # Call context for dynamic functions (0=scalar, 1=array, 2=hash)
+    $cg{"autoviv"} = 0;        # Autovivification flag for nested hash assignment targets
+    $cg{"in_map_block"} = 0;  # Track if inside map block (for $_)
+    $cg{"in_sort_block"} = 0; # Track if inside sort block (for $a, $b)
+    $cg{"in_grep_block"} = 0; # Track if inside grep block (for $_)
+    $cg{"anon_func_counter"} = 0;  # Counter for unique anonymous function names
+    $cg{"anon_func_decls"} = "";   # Forward declarations for anonymous functions
+    $cg{"anon_func_defs"} = "";    # Function definitions for anonymous functions
+    $cg{"in_anon_func"} = 0;       # Track if inside anonymous function
+    $cg{"anon_param_str"} = "";    # Comma-separated param names
+    $cg{"anon_local_str"} = "";    # Comma-separated local names
+    $cg{"anon_capture_str"} = "";  # Comma-separated capture names
+    $cg{"anon_capture_count"} = 0; # Number of captures
+    $cg{"current_func_name"} = ""; # Current function name for profiling
+    $cg{"ret_is_int"} = 0;         # 1 while generating an int-returning function body
+    $cg{"ret_is_num"} = 0;         # 1 while generating a num-returning function body
+    $cg{"global_count"} = 0;       # Number of global variables
+    my array @empty_globals = ();
+    $cg{"globals"} = \@empty_globals;  # Array of global variable declarations
+    $cg{"switch_counter"} = 0;     # Counter for unique switch variable names
+    # OOP method registration - per-package tracking
+    my hash %empty_pkg_methods = ();
+    $cg{"pkg_methods"} = \%empty_pkg_methods;  # Hash: package -> array of method info
+    my array @empty_pkg_list = ();
+    $cg{"pkg_list"} = \@empty_pkg_list;        # Array of package names (to avoid keys())
+    $cg{"pkg_count"} = 0;                      # Number of packages
+    $cg{"pkg_seen"} = "|";                     # String of seen package names (for fast lookup)
+    $cg{"method_wrappers"} = "";   # Generated wrapper functions
+    # Scope tracking for memory management (using string-encoded var lists for bootstrap compat)
+    # Each scope is stored as "var1,var2,var3" string (bootstrap doesn't support scalar(@arr))
+    my array @scope_vars = ();   # Array of scope strings
+    my array @scope_counts = (); # Parallel array of counts
+    $cg{"scope_vars"} = \@scope_vars;
+    $cg{"scope_counts"} = \@scope_counts;
+    $cg{"scope_depth"} = 0;
+    $cg{"cleanup_enabled"} = 1;  # Enable scope-based memory cleanup
+    $cg{"try_depth"} = 0;        # Track nesting depth in try blocks (for proper cleanup on return)
+    $cg{"catch_cleanup_count"} = 0;  # Track catch vars on cleanup stack (for proper cleanup on throw)
+    $cg{"func_has_try"} = 0;     # Track if current function contains any try blocks (for volatile vars)
+    # Track label-to-scope-depth for proper cleanup on labeled break/continue
+    my hash %label_depths = ();
+    $cg{"label_depths"} = \%label_depths;
+    # Track loop body scope depth for unlabeled last/next cleanup
+    $cg{"loop_break_depth"} = 0;
+    # Track try_depth at the entry of the most recent loop. `last`/`next`
+    # inside a try body must STRADA_TRY_POP the try frames pushed inside
+    # the loop before jumping out, or each pass leaves an unclosed try
+    # frame — after 64 the static stack overflows and setjmp(*NULL)
+    # segfaults.
+    $cg{"loop_try_depth"} = 0;
+    # Per-scope list of vars whose strada_cleanup_push was elided (because
+    # no enclosing try/catch frame could ever drain them). emit_scope_decref
+    # must skip the matching cleanup_pop for these. Parallel to scope_vars.
+    my array @scope_no_push_vars = ();
+    $cg{"scope_no_push_vars"} = \@scope_no_push_vars;
+    $cg{"current_no_push_str"} = "";
+    # Track 'our' variables: maps C variable name -> "package::varname" registry key
+    my hash %our_vars = ();
+    $cg{"our_vars"} = \%our_vars;
+    # Track int-typed variables for integer arithmetic optimization
+    my hash %int_vars = ();
+    $cg{"int_vars"} = \%int_vars;
+    my hash %num_vars = ();
+    $cg{"num_vars"} = \%num_vars;
+    # Track known blessed types for method devirtualization
+    my hash %known_types = ();
+    $cg{"known_types"} = \%known_types;
+    # Operator overloading (set from program node in gen_program)
+    $cg{"has_overloads"} = 0;
+    my hash %empty_overloads = ();
+    $cg{"overloads"} = \%empty_overloads;
+    my hash %empty_overloaded_ops = ();
+    $cg{"overloaded_ops"} = \%empty_overloaded_ops;
+    # finally-block stack: blocks of enclosing try/finally statements,
+    # emitted before return/last/next leaves them (see gen_finally_upto).
+    my array @finally_blocks = ();
+    $cg{"finally_blocks"} = \@finally_blocks;
+    $cg{"finally_count"} = 0;
+    $cg{"loop_finally_mark"} = 0;
+
+    # Condition-level hash-fetch CSE state (see emit_condition_cse).
+    # uses_tie is set from the program node in gen_program.
+    $cg{"uses_tie"} = 0;
+    $cg{"cse_n"} = 0;
+    my array @cse_ids = ();
+    $cg{"cse_ids"} = \@cse_ids;
+    my array @cse_nodes = ();
+    $cg{"cse_nodes"} = \@cse_nodes;
+    return \%cg;
+}
+
+# Push a new scope onto the scope stack
+func scope_push(scalar $cg) void {
+    my int $enabled = $cg->{"cleanup_enabled"};
+    if ($enabled == 0) {
+        return;
+    }
+    my scalar $vars = $cg->{"scope_vars"};
+    my scalar $counts = $cg->{"scope_counts"};
+    my scalar $no_push = $cg->{"scope_no_push_vars"};
+    my int $depth = $cg->{"scope_depth"};
+    push($vars, "");  # Empty scope
+    push($counts, 0);
+    push($no_push, "");
+    $cg->{"scope_depth"} = $depth + 1;
+}
+
+# Track a variable in the current scope
+func scope_track_var(scalar $cg, str $name) void {
+    my int $enabled = $cg->{"cleanup_enabled"};
+    if ($enabled == 0) {
+        return;
+    }
+    my int $depth = $cg->{"scope_depth"};
+    if ($depth == 0) {
+        return;
+    }
+    my scalar $vars = $cg->{"scope_vars"};
+    my scalar $counts = $cg->{"scope_counts"};
+    my str $current = $vars->[$depth - 1];
+    my int $count = $counts->[$depth - 1];
+    if ($count == 0) {
+        $vars->[$depth - 1] = $name;
+    } else {
+        $vars->[$depth - 1] = $current . "," . $name;
+    }
+    $counts->[$depth - 1] = $count + 1;
+}
+
+# Mark a tracked variable as "push was elided" so emit_scope_decref will
+# skip the matching cleanup_pop. The var must already have been registered
+# via scope_track_var (its decref still has to fire on scope exit).
+func scope_mark_no_push(scalar $cg, str $name) void {
+    my int $enabled = $cg->{"cleanup_enabled"};
+    if ($enabled == 0) { return; }
+    my int $depth = $cg->{"scope_depth"};
+    if ($depth == 0) { return; }
+    my scalar $no_push = $cg->{"scope_no_push_vars"};
+    my str $current = $no_push->[$depth - 1];
+    if (length($current) == 0) {
+        $no_push->[$depth - 1] = $name;
+    } else {
+        $no_push->[$depth - 1] = $current . "," . $name;
+    }
+}
+
+# Decide whether strada_cleanup_push for a new owned local is meaningful at
+# the current codegen position. The push exists so an outer catch's
+# strada_cleanup_drain_to can decref locals on exception unwind. The
+# drain_to runs from the top of the stack down to the try-entry mark, so
+# only entries pushed AFTER an active try frame matter. In `main()` no
+# caller can hold a try frame for us — pushes from inside main are only
+# useful while we're nested in some try{} block of our own.
+func cleanup_push_useful(scalar $cg) int {
+    if ($cg->{"cleanup_enabled"} == 0) { return 0; }
+    if ($cg->{"in_main"} == 1 && $cg->{"try_depth"} == 0) {
+        return 0;
+    }
+    return 1;
+}
+
+# Emit cleanup for current scope and pop it
+func scope_pop(scalar $cg) void {
+    my int $enabled = $cg->{"cleanup_enabled"};
+    if ($enabled == 0) {
+        return;
+    }
+    my int $depth = $cg->{"scope_depth"};
+    if ($depth == 0) {
+        return;
+    }
+    my scalar $vars = $cg->{"scope_vars"};
+    my scalar $counts = $cg->{"scope_counts"};
+    my scalar $no_push = $cg->{"scope_no_push_vars"};
+    my str $scope_str = $vars->[$depth - 1];
+    my int $count = $counts->[$depth - 1];
+    my str $no_push_str = $no_push->[$depth - 1];
+
+    # Stash the no-push set on cg for emit_scope_decref to consult.
+    my str $saved_no_push = $cg->{"current_no_push_str"};
+    $cg->{"current_no_push_str"} = $no_push_str;
+    emit_scope_decref($cg, $scope_str, $count);
+    $cg->{"current_no_push_str"} = $saved_no_push;
+
+    pop($vars);
+    pop($counts);
+    pop($no_push);
+    $cg->{"scope_depth"} = $depth - 1;
+}
+
+# Check if a variable name is in a comma-separated string
+func is_var_in_list(str $var, str $list) int {
+    if (length($list) == 0) { return 0; }
+    my int $pos = 0;
+    my int $len = length($list);
+    my str $cur = "";
+    while ($pos <= $len) {
+        if ($pos == $len) {
+            if ($cur eq $var) { return 1; }
+            $pos = $pos + 1;
+        } else {
+            my str $ch = substr($list, $pos, 1);
+            if ($ch eq ",") {
+                if ($cur eq $var) { return 1; }
+                $cur = "";
+            } else {
+                $cur = $cur . $ch;
+            }
+            $pos = $pos + 1;
+        }
+    }
+    return 0;
+}
+
+# Helper to emit decref for vars in a scope, skipping already-cleaned names
+# Returns updated cleaned list (comma-separated) with this scope's vars added
+func emit_scope_decref_skip(scalar $cg, str $scope_str, int $count, str $cleaned) str {
+    if ($count == 0 || length($scope_str) == 0) {
+        return $cleaned;
+    }
+    my int $in_anon = $cg->{"in_anon_func"};
+    my str $capture_str = $cg->{"anon_capture_str"};
+    my str $no_push_str = $cg->{"current_no_push_str"};
+    if (!$no_push_str) { $no_push_str = ""; }
+
+    my int $pos = 0;
+    my int $len = length($scope_str);
+    my str $var_name = "";
+    while ($pos <= $len) {
+        if ($pos == $len) {
+            if (length($var_name) > 0) {
+                if ($in_anon == 0 || is_var_in_list($var_name, $capture_str) == 0) {
+                    if (is_var_in_list($var_name, $cleaned) == 0) {
+                        # Pair cleanup_pop with decref — NODE_VAR_DECL
+                        # pushed each owned local to the cleanup stack
+                        # at declaration so longjmp through callees
+                        # can free them via drain. On the normal return
+                        # / re-throw path we have to pop the matching
+                        # entry off the cleanup stack as we decref.
+                        emit_indent($cg);
+                        if (is_var_in_list($var_name, $no_push_str) == 1) {
+                            emit($cg, "strada_decref(" . $var_name . ");\n");
+                        } else {
+                            emit($cg, "strada_cleanup_pop(); strada_decref(" . $var_name . ");\n");
+                        }
+                    }
+                }
+                if (length($cleaned) == 0) {
+                    $cleaned = "" . $var_name;
+                } else {
+                    $cleaned = $cleaned . "," . $var_name;
+                }
+            }
+            $pos = $pos + 1;
+        } else {
+            my str $ch = substr($scope_str, $pos, 1);
+            if ($ch eq ",") {
+                if (length($var_name) > 0) {
+                    if ($in_anon == 0 || is_var_in_list($var_name, $capture_str) == 0) {
+                        if (is_var_in_list($var_name, $cleaned) == 0) {
+                            emit_indent($cg);
+                            if (is_var_in_list($var_name, $no_push_str) == 1) {
+                                emit($cg, "strada_decref(" . $var_name . ");\n");
+                            } else {
+                                emit($cg, "strada_cleanup_pop(); strada_decref(" . $var_name . ");\n");
+                            }
+                        }
+                    }
+                    if (length($cleaned) == 0) {
+                        $cleaned = $var_name;
+                    } else {
+                        $cleaned = $cleaned . "," . $var_name;
+                    }
+                }
+                $var_name = "";
+            } else {
+                $var_name = $var_name . $ch;
+            }
+            $pos = $pos + 1;
+        }
+    }
+    return $cleaned;
+}
+
+# Helper to emit decref (and cleanup-stack pop) for every var in a
+# scope string. NODE_VAR_DECL pushes each owned local to the runtime
+# cleanup stack at declaration so that a longjmp from a callee
+# function unwinds our heap locals via the surrounding catch's
+# strada_cleanup_drain_to. On the normal scope-exit path we have to
+# pair each push with a matching cleanup_pop here AND decref the
+# value to release ownership.
+func emit_scope_decref(scalar $cg, str $scope_str, int $count) void {
+    if ($count == 0 || length($scope_str) == 0) {
+        return;
+    }
+    # Get capture list to skip captured variables in closures
+    my int $in_anon = $cg->{"in_anon_func"};
+    my str $capture_str = $cg->{"anon_capture_str"};
+
+    # Pass 1: break direct self-reference cycles in every var
+    # while ALL vars are still alive. Doing this after the first
+    # decref would access freed memory when vars share storage
+    # (e.g. `my $arr = deref_array(\$ref);` where both $ref and $arr
+    # point to the same array). Breaking the cycle here just clears
+    # self-ref slots inside hashes/arrays and decref's the cleared
+    # ref — never frees the var itself.
+    my int $p1 = 0;
+    my int $l1 = length($scope_str);
+    my str $vn1 = "";
+    while ($p1 <= $l1) {
+        my int $emit_now = 0;
+        if ($p1 == $l1) {
+            if (length($vn1) > 0) { $emit_now = 1; }
+        } else {
+            my str $c1 = substr($scope_str, $p1, 1);
+            if ($c1 eq ",") {
+                if (length($vn1) > 0) { $emit_now = 1; }
+            } else {
+                $vn1 = $vn1 . $c1;
+            }
+        }
+        if ($emit_now == 1) {
+            if ($in_anon == 0 || is_var_in_list($vn1, $capture_str) == 0) {
+                emit_indent($cg);
+                emit($cg, "strada_break_self_cycle(" . $vn1 . ");\n");
+            }
+            $vn1 = "";
+        }
+        $p1 = $p1 + 1;
+    }
+
+    # Pass 2: cleanup_pop + decref each var. Vars whose push was elided
+    # (recorded in current_no_push_str) get only a decref — the matching
+    # cleanup_pop would underflow the runtime stack.
+    my str $no_push_str = $cg->{"current_no_push_str"};
+    if (!$no_push_str) { $no_push_str = ""; }
+    my int $pos = 0;
+    my int $len = length($scope_str);
+    my str $var_name = "";
+    while ($pos <= $len) {
+        if ($pos == $len) {
+            if (length($var_name) > 0) {
+                # Skip captured variables - they're accessed via __captures, not local vars
+                if ($in_anon == 0 || is_var_in_list($var_name, $capture_str) == 0) {
+                    emit_indent($cg);
+                    if (is_var_in_list($var_name, $no_push_str) == 1) {
+                        emit($cg, "strada_decref(" . $var_name . ");\n");
+                    } else {
+                        emit($cg, "strada_cleanup_pop(); strada_decref(" . $var_name . ");\n");
+                    }
+                }
+            }
+            $pos = $pos + 1;
+        } else {
+            my str $ch = substr($scope_str, $pos, 1);
+            if ($ch eq ",") {
+                if (length($var_name) > 0) {
+                    # Skip captured variables
+                    if ($in_anon == 0 || is_var_in_list($var_name, $capture_str) == 0) {
+                        emit_indent($cg);
+                        if (is_var_in_list($var_name, $no_push_str) == 1) {
+                            emit($cg, "strada_decref(" . $var_name . ");\n");
+                        } else {
+                            emit($cg, "strada_cleanup_pop(); strada_decref(" . $var_name . ");\n");
+                        }
+                    }
+                }
+                $var_name = "";
+            } else {
+                $var_name = $var_name . $ch;
+            }
+            $pos = $pos + 1;
+        }
+    }
+}
+
+# Emit cleanup for current scope without popping (for early returns)
+func scope_emit_cleanup(scalar $cg) void {
+    my int $enabled = $cg->{"cleanup_enabled"};
+    if ($enabled == 0) {
+        return;
+    }
+    my int $depth = $cg->{"scope_depth"};
+    if ($depth == 0) {
+        return;
+    }
+    my scalar $vars = $cg->{"scope_vars"};
+    my scalar $counts = $cg->{"scope_counts"};
+    my str $scope_str = $vars->[$depth - 1];
+    my int $count = $counts->[$depth - 1];
+    emit_scope_decref($cg, $scope_str, $count);
+}
+
+# Emit cleanup for all scopes (for return statements)
+func scope_emit_all_cleanup(scalar $cg) void {
+    my int $enabled = $cg->{"cleanup_enabled"};
+    if ($enabled == 0) {
+        return;
+    }
+    my int $depth = $cg->{"scope_depth"};
+    my scalar $vars = $cg->{"scope_vars"};
+    my scalar $counts = $cg->{"scope_counts"};
+    my scalar $no_push = $cg->{"scope_no_push_vars"};
+
+    # Track already-cleaned variable names to avoid double-free when
+    # inner scopes shadow outer variables with the same name
+    my str $cleaned = "";
+    my str $saved_no_push = $cg->{"current_no_push_str"};
+
+    # Emit cleanup from innermost to outermost scope
+    my int $d = $depth;
+    while ($d > 0) {
+        my str $scope_str = $vars->[$d - 1];
+        my int $count = $counts->[$d - 1];
+        $cg->{"current_no_push_str"} = $no_push->[$d - 1];
+        $cleaned = emit_scope_decref_skip($cg, $scope_str, $count, $cleaned);
+
+        $d = $d - 1;
+    }
+    $cg->{"current_no_push_str"} = $saved_no_push;
+
+    # Pop catch variables from cleanup stack (already decref'd by scope cleanup above)
+    # This is needed for proper cleanup order when throwing from inside a catch block
+    my int $ccc = $cg->{"catch_cleanup_count"} + 0;
+    while ($ccc > 0) {
+        emit_indent($cg);
+        emit($cg, "strada_cleanup_pop();\n");
+        $ccc = $ccc - 1;
+    }
+
+    # Also pop and decref function parameters (we incref'd and pushed them at function entry)
+    # Skip for int-typed params (tagged ints are immortal) and leaf-safe bodies
+    # (the wrap was elided at entry).
+    my int $pn_count = $cg->{"func_param_count"} + 0;
+    if ($pn_count > 0) {
+        my scalar $param_names = $cg->{"func_param_names"};
+        my scalar $param_skip = $cg->{"func_param_skip_wrap"};
+        my int $pn_i = 0;
+        while ($pn_i < $pn_count) {
+            if ($param_skip->[$pn_i] == 0) {
+                emit_indent($cg);
+                emit($cg, "strada_cleanup_pop();\n");
+                emit_indent($cg);
+                my str $pname = $param_names->[$pn_i];
+                emit($cg, "strada_decref(" . $pname . ");\n");
+            }
+            $pn_i = $pn_i + 1;
+        }
+    }
+}
+
+# Emit cleanup for scopes from current depth down to (but not including) target_depth
+# Used for labeled break/continue to clean up intermediate scopes
+func scope_emit_cleanup_to_depth(scalar $cg, int $target_depth) void {
+    my int $enabled = $cg->{"cleanup_enabled"};
+    if ($enabled == 0) {
+        return;
+    }
+    my int $depth = $cg->{"scope_depth"};
+    my scalar $vars = $cg->{"scope_vars"};
+    my scalar $counts = $cg->{"scope_counts"};
+    my scalar $no_push = $cg->{"scope_no_push_vars"};
+
+    # Emit cleanup from innermost scope down to (but not including) target_depth
+    # Track already-cleaned names to avoid double-free from variable shadowing
+    my str $cleaned = "";
+    my str $saved_no_push = $cg->{"current_no_push_str"};
+    my int $d = $depth;
+    while ($d > $target_depth) {
+        my str $scope_str = $vars->[$d - 1];
+        my int $count = $counts->[$d - 1];
+        $cg->{"current_no_push_str"} = $no_push->[$d - 1];
+        $cleaned = emit_scope_decref_skip($cg, $scope_str, $count, $cleaned);
+
+        $d = $d - 1;
+    }
+    $cg->{"current_no_push_str"} = $saved_no_push;
+}
+
+# Emit STRADA_TRY_POP() for each active try block (for early returns in try blocks)
+# Emit the finally blocks of enclosing try statements, innermost first,
+# down to (and excluding) stack index $upto. While a finally is being
+# emitted, the visible stack is truncated below it, so control flow
+# INSIDE a finally only triggers OUTER finallys (no self-recursion).
+func gen_finally_upto(scalar $cg, int $upto) void {
+    my int $n = $cg->{"finally_count"};
+    my scalar $blocks = $cg->{"finally_blocks"};
+    my int $i = $n - 1;
+    while ($i >= $upto) {
+        my scalar $fb = $blocks->[$i];
+        $cg->{"finally_count"} = $i;     # hide this + inner entries
+        gen_block($cg, $fb);
+        emit($cg, "\n");
+        $cg->{"finally_count"} = $n;     # restore
+        $i = $i - 1;
+    }
+}
+
+func emit_try_cleanup(scalar $cg) void {
+    my int $try_depth = $cg->{"try_depth"};
+    while ($try_depth > 0) {
+        emit_indent($cg);
+        emit($cg, "STRADA_TRY_POP();\n");
+        $try_depth = $try_depth - 1;
+    }
+}
+
+# Register a function with its parameters for default arg handling
+func codegen_register_function(scalar $cg, scalar $fn) void {
+    my str $name = sanitize_name($fn->{"name"});
+    my hash %info = ();
+    $info{"param_count"} = $fn->{"param_count"};
+    $info{"params"} = $fn->{"params"};
+    $info{"return_type"} = $fn->{"return_type"};
+    # Track if this is an extern function for call site conversion
+    if ($fn->{"type"} == NODE_EXTERN_FUNC()) {
+        # A `is_strada_extern_decl` extern is a body-less qualified extern
+        # declaring a Strada function defined in another module. At call sites
+        # it behaves like an ordinary Strada function (StradaValue* args/ret,
+        # no raw-C-type conversion). Register it that way so the existing
+        # call-emitter and needs_temp_cleanup paths just work -- the only
+        # asymmetry vs. an in-module definition is in the forward-decl phase,
+        # where we emit `extern StradaValue* X(StradaValue* ...)` so the
+        # linker pulls the symbol from the other `.o`.
+        if ($fn->{"is_strada_extern_decl"} == 1) {
+            $info{"is_extern"} = 0;
+            $info{"is_c_extern"} = 0;
+            $info{"is_strada_extern_decl"} = 1;
+        } else {
+            $info{"is_extern"} = 1;
+            # Track if this is a C-style extern (raw C types, direct calls)
+            if ($fn->{"is_c_extern"} == 1) {
+                $info{"is_c_extern"} = 1;
+            } else {
+                $info{"is_c_extern"} = 0;
+            }
+            $info{"is_strada_extern_decl"} = 0;
+        }
+    } else {
+        $info{"is_extern"} = 0;
+        $info{"is_c_extern"} = 0;
+        $info{"is_strada_extern_decl"} = 0;
+    }
+
+    # Track variadic function info
+    $info{"is_variadic"} = $fn->{"is_variadic"};
+    $info{"variadic_param_idx"} = -1;
+    if ($fn->{"is_variadic"} == 1) {
+        my scalar $params = $fn->{"params"};
+        my int $pc = $fn->{"param_count"};
+        for (my int $i = 0; $i < $pc; $i = $i + 1) {
+            if ($params->[$i]->{"is_variadic"} == 1) {
+                $info{"variadic_param_idx"} = $i;
+            }
+        }
+    }
+
+    $cg->{"functions"}->{$name} = \%info;
+}
+
+# Check if a method has any before/after/around modifiers.
+# Covers host-side modifiers AND modifier names advertised by import_lib
+# metadata (mod: lines) — a .so registers its hooks at dlopen, after the
+# host was compiled, so without this check devirtualization (and accessor
+# inlining) would silently skip them.
+func has_method_modifier(scalar $cg, str $method) int {
+    my scalar $libmods = $cg->{"lib_modified_methods"};
+    if ($libmods) {
+        my int $lm_hit = $libmods->{$method} + 0;
+        if ($lm_hit == 1) { return 1; }
+    }
+    my int $mc = $cg->{"method_modifier_count"};
+    if ($mc == 0) { return 0; }
+    my scalar $mods = $cg->{"method_modifiers"};
+    my int $mi = 0;
+    while ($mi < $mc) {
+        if ($mods->[$mi]->{"method_name"} eq $method) {
+            return 1;
+        }
+        $mi = $mi + 1;
+    }
+    return 0;
+}
+
+# Compile-time class-hierarchy walk: is $child_pkg a subclass of (or equal to)
+# $target_pkg? UNIVERSAL is the implicit root (matches anything blessed).
+# Used to constant-fold $obj->isa("X") when $obj's class is known statically.
+func is_subclass_compile_time(scalar $cg, str $child_pkg, str $target_pkg, int $depth) int {
+    if ($child_pkg eq $target_pkg) { return 1; }
+    if ($target_pkg eq "UNIVERSAL") { return 1; }
+    if ($depth > 32) { return 0; }
+    my scalar $inh = $cg->{"inherits"};
+    my int $ic = $cg->{"inherit_count"};
+    my int $i = 0;
+    while ($i < $ic) {
+        my str $c = $inh->[$i]->{"child"};
+        if ($c eq $child_pkg) {
+            my str $p = $inh->[$i]->{"parent"};
+            if (is_subclass_compile_time($cg, $p, $target_pkg, $depth + 1) == 1) {
+                return 1;
+            }
+        }
+        $i = $i + 1;
+    }
+    return 0;
+}
+
+# Two zero-arg accessor calls structurally equal? Compares method name and a
+# NODE_VARIABLE receiver by name. Used by the CSE peephole — within a single
+# expression there's no intervening write, so two reads of the same accessor on
+# the same receiver variable must yield the same value.
+func accessor_call_eq(scalar $a, scalar $b) int {
+    if (!$a || !$b) { return 0; }
+    if ($a->{"type"} != NODE_METHOD_CALL() || $b->{"type"} != NODE_METHOD_CALL()) { return 0; }
+    if ($a->{"arg_count"} != 0 || $b->{"arg_count"} != 0) { return 0; }
+    if ($a->{"method"} ne $b->{"method"}) { return 0; }
+    my scalar $ar = $a->{"base_object"};
+    if (!$ar) { $ar = $a->{"object"}; }
+    my scalar $br = $b->{"base_object"};
+    if (!$br) { $br = $b->{"object"}; }
+    if (!$ar || !$br) { return 0; }
+    if ($ar->{"type"} != NODE_VARIABLE() || $br->{"type"} != NODE_VARIABLE()) { return 0; }
+    if ($ar->{"name"} ne $br->{"name"}) { return 0; }
+    return 1;
+}
+
+# Is this expression a zero-arg call to an inline int-typed has accessor?
+func is_inline_int_accessor_call(scalar $cg, scalar $expr) int {
+    if (!$expr) { return 0; }
+    if ($expr->{"type"} != NODE_METHOD_CALL()) { return 0; }
+    if ($expr->{"arg_count"} != 0) { return 0; }
+    if (length(is_inline_accessor($cg, $expr->{"method"})) == 0) { return 0; }
+    return expr_is_int_typed($cg, $expr);
+}
+
+# Check if a zero-arg method call can be inlined as a direct hash access.
+# Returns the attribute name if inlineable, empty string otherwise.
+func is_inline_accessor(scalar $cg, str $method) str {
+    # Skip UNIVERSAL methods
+    if ($method eq "isa" || $method eq "can" || $method eq "new" || $method eq "DESTROY") {
+        return "";
+    }
+
+    my str $pkg = $cg->{"current_fn_package"};
+    if (length($pkg) == 0 || $pkg eq "main") { return ""; }
+
+    my scalar $lookup = $cg->{"accessor_lookup"};
+    if (!$lookup) { return ""; }
+
+    # Check direct match: method is a has attr of current package
+    my str $key = $pkg . "\t" . $method;
+    if (length("" . $lookup->{$key}) > 0) {
+        # Check no modifiers
+        if (has_method_modifier($cg, $method) == 0) {
+            return $method;
+        }
+        return "";
+    }
+
+    # Check inherited: walk parent chain via inherits
+    my scalar $inherits = $cg->{"inherits"};
+    my int $ic = $cg->{"inherit_count"};
+    my int $ii = 0;
+    while ($ii < $ic) {
+        my scalar $entry = $inherits->[$ii];
+        if ($entry->{"child"} eq $pkg) {
+            my str $parent = $entry->{"parent"};
+            my str $pkey = $parent . "\t" . $method;
+            if (length("" . $lookup->{$pkey}) > 0) {
+                # Check no override in current package
+                my str $override = $pkg . "_" . $method;
+                my scalar $funcs = $cg->{"functions"};
+                if (length("" . $funcs->{$override}) == 0) {
+                    if (has_method_modifier($cg, $method) == 0) {
+                        return $method;
+                    }
+                }
+            }
+        }
+        $ii = $ii + 1;
+    }
+
+    return "";
+}
+
+# Check if a 1-arg method call is an inline setter: $self->set_X(val) where X is has rw.
+# Returns the attribute name if inlineable, empty string otherwise.
+func is_inline_setter(scalar $cg, str $method) str {
+    # Must start with "set_"
+    if (length($method) <= 4) { return ""; }
+    if (substr($method, 0, 4) ne "set_") { return ""; }
+    my str $attr_name = substr($method, 4, length($method) - 4);
+
+    my str $pkg = $cg->{"current_fn_package"};
+    if (length($pkg) == 0 || $pkg eq "main") { return ""; }
+
+    my scalar $ha_attrs = $cg->{"has_attrs"};
+    my int $ha_count = $cg->{"has_attr_count"};
+    my scalar $acc_lookup = $cg->{"accessor_lookup"};
+
+    # Check direct match in current package
+    my int $hi = 0;
+    while ($hi < $ha_count) {
+        my str $a_name = $ha_attrs->[$hi]->{"name"};
+        my str $a_pkg = $ha_attrs->[$hi]->{"package"};
+        my int $a_rw = $ha_attrs->[$hi]->{"rw"};
+        if ($a_name eq $attr_name && $a_rw == 1) {
+            if ($a_pkg eq $pkg || exists($acc_lookup, $a_pkg . "\t" . $attr_name)) {
+                # Check no method override for the setter
+                my str $override = $pkg . "_set_" . $attr_name;
+                my scalar $funcs = $cg->{"functions"};
+                # The auto-generated setter IS in functions, so check if there's a user override
+                # by verifying the setter comes from has-attr (not user-defined)
+                # Actually: we know it's auto-generated because it's in has_attrs with rw=1.
+                # Only skip if there are method modifiers on the setter.
+                if (has_method_modifier($cg, $method) == 0) {
+                    return $attr_name;
+                }
+            }
+        }
+        $hi = $hi + 1;
+    }
+
+    # Check inherited attrs
+    my scalar $inherits = $cg->{"inherits"};
+    my int $ic = $cg->{"inherit_count"};
+    my int $ii = 0;
+    while ($ii < $ic) {
+        if ($inherits->[$ii]->{"child"} eq $pkg) {
+            my str $parent = $inherits->[$ii]->{"parent"};
+            my int $pi = 0;
+            while ($pi < $ha_count) {
+                my str $pa_name = $ha_attrs->[$pi]->{"name"};
+                my str $pa_pkg = $ha_attrs->[$pi]->{"package"};
+                my int $pa_rw = $ha_attrs->[$pi]->{"rw"};
+                if ($pa_name eq $attr_name && $pa_rw == 1 && $pa_pkg eq $parent) {
+                    if (has_method_modifier($cg, $method) == 0) {
+                        return $attr_name;
+                    }
+                }
+                $pi = $pi + 1;
+            }
+        }
+        $ii = $ii + 1;
+    }
+
+    return "";
+}
+
+# Returns 1 if the given AST node contains only operations that cannot throw,
+# allocate via the slow path, or store the parameter outside the call frame.
+# Used to decide whether the per-call incref / cleanup_push / cleanup_pop /
+# decref wrap on scalar parameters can be elided for leaf methods.
+func node_is_leaf_safe(scalar $cg, scalar $node) int {
+    if (!$node) { return 1; }
+    my int $t = $node->{"type"};
+    if ($t == NODE_BLOCK()) {
+        my scalar $stmts = $node->{"statements"};
+        my int $sc = $node->{"statement_count"};
+        my int $i = 0;
+        while ($i < $sc) {
+            if (node_is_leaf_safe($cg, $stmts->[$i]) == 0) { return 0; }
+            $i = $i + 1;
+        }
+        return 1;
+    }
+    if ($t == NODE_RETURN_STMT()) {
+        if ($node->{"value"}) { return node_is_leaf_safe($cg, $node->{"value"}); }
+        return 1;
+    }
+    if ($t == NODE_EXPR_STMT()) {
+        if ($node->{"expr"}) { return node_is_leaf_safe($cg, $node->{"expr"}); }
+        return 1;
+    }
+    if ($t == NODE_BINARY_OP()) {
+        my str $op = $node->{"op"};
+        # Only arithmetic and numeric/relational ops. Excludes ".", "x", "=~",
+        # "//", "and"/"or", etc. that can allocate or call user code.
+        if ($op ne "+" && $op ne "-" && $op ne "*" && $op ne "/" && $op ne "%" &&
+            $op ne "==" && $op ne "!=" && $op ne "<" && $op ne ">" &&
+            $op ne "<=" && $op ne ">=" && $op ne "&&" && $op ne "||") {
+            return 0;
+        }
+        if (node_is_leaf_safe($cg, $node->{"left"}) == 0) { return 0; }
+        if (node_is_leaf_safe($cg, $node->{"right"}) == 0) { return 0; }
+        return 1;
+    }
+    if ($t == NODE_UNARY_OP()) {
+        return node_is_leaf_safe($cg, $node->{"operand"});
+    }
+    if ($t == NODE_VARIABLE()) { return 1; }
+    if ($t == NODE_PARAM()) { return 1; }
+    if ($t == NODE_INT_LITERAL()) { return 1; }
+    if ($t == NODE_NUM_LITERAL()) { return 1; }
+    if ($t == NODE_STR_LITERAL()) { return 1; }
+    if ($t == NODE_METHOD_CALL()) {
+        # Only zero-arg inline-accessor method calls are safe.
+        if ($node->{"arg_count"} != 0) { return 0; }
+        if (length(is_inline_accessor($cg, $node->{"method"})) == 0) { return 0; }
+        my scalar $obj = $node->{"base_object"};
+        if (!$obj) { $obj = $node->{"object"}; }
+        return node_is_leaf_safe($cg, $obj);
+    }
+    if ($t == NODE_TERNARY()) {
+        if (node_is_leaf_safe($cg, $node->{"condition"}) == 0) { return 0; }
+        if (node_is_leaf_safe($cg, $node->{"true_expr"}) == 0) { return 0; }
+        if (node_is_leaf_safe($cg, $node->{"false_expr"}) == 0) { return 0; }
+        return 1;
+    }
+    if ($t == NODE_HASH_ACCESS()) {
+        # $hash{key} — strada_hv_fetch_owned/_ph never throws (returns undef
+        # on missing key) and doesn't escape the hash. Key must also be safe.
+        if (node_is_leaf_safe($cg, $node->{"hash"}) == 0) { return 0; }
+        if (node_is_leaf_safe($cg, $node->{"key"}) == 0) { return 0; }
+        return 1;
+    }
+    if ($t == NODE_DEREF_HASH()) {
+        # $ref->{key} — uses the same safe runtime path as NODE_HASH_ACCESS.
+        if (node_is_leaf_safe($cg, $node->{"ref"}) == 0) { return 0; }
+        if (node_is_leaf_safe($cg, $node->{"key"}) == 0) { return 0; }
+        return 1;
+    }
+    if ($t == NODE_SUBSCRIPT()) {
+        # $arr[idx] — strada_array_get/_owned never throws, returns undef
+        # for out-of-bounds. Both array expression and index must be safe.
+        if (node_is_leaf_safe($cg, $node->{"array"}) == 0) {
+            if (node_is_leaf_safe($cg, $node->{"target"}) == 0) { return 0; }
+        }
+        if (node_is_leaf_safe($cg, $node->{"index"}) == 0) { return 0; }
+        return 1;
+    }
+    if ($t == NODE_DEREF_ARRAY()) {
+        if (node_is_leaf_safe($cg, $node->{"ref"}) == 0) { return 0; }
+        if (node_is_leaf_safe($cg, $node->{"index"}) == 0) { return 0; }
+        return 1;
+    }
+    # Conservative default: any other node could allocate, throw, or escape self.
+    return 0;
+}
+
+# Check if an expression is a string concatenation with a string literal on the left.
+# Pattern: NODE_BINARY_OP(op=".") with left=NODE_STR_LITERAL
+# Returns 1 if the pattern matches, 0 otherwise.
+func is_concat_str_literal_left(scalar $expr) int {
+    if ($expr->{"type"} != NODE_BINARY_OP()) { return 0; }
+    if ($expr->{"op"} ne ".") { return 0; }
+    if ($expr->{"left"}->{"type"} == NODE_STR_LITERAL()) { return 1; }
+    return 0;
+}
+
+# Helper to get arg from packed args array
+func gen_oop_helper_decl(scalar $sb) void {
+    sb_append($sb, "/* OOP method dispatch helper */\n");
+    sb_append($sb, "static StradaValue* __strada_get_arg(StradaValue* args, int idx) {\n");
+    sb_append($sb, "    if (!args || args->type != STRADA_ARRAY) return NULL;\n");
+    sb_append($sb, "    if ((size_t)idx >= args->value.av->size) return NULL;\n");
+    sb_append($sb, "    return args->value.av->elements[idx];\n");
+    sb_append($sb, "}\n\n");
+}
+
+# Track a method for OOP registration (per-package)
+func codegen_track_method(scalar $cg, scalar $fn, str $pkg) void {
+    my str $name = sanitize_name($fn->{"name"});
+
+    # Skip main, extern functions, and functions starting with underscore
+    if ($name eq "main") { return; }
+    if ($fn->{"type"} == NODE_EXTERN_FUNC()) { return; }
+    if (substr($name, 0, 1) eq "_") { return; }
+
+    # Methods must have at least one parameter (self)
+    # Functions with 0 params are class init functions, not methods
+    my int $param_count = $fn->{"param_count"};
+    if ($param_count == 0) { return; }
+
+    # Check if function name starts with package prefix (e.g., Cannoli_)
+    # Sanitize package name for packages with :: (e.g., Nesso::Record -> Nesso_Record)
+    my str $prefix = sanitize_name($pkg) . "_";
+    my int $prefix_len = length($prefix);
+    if (length($name) <= $prefix_len) { return; }
+    if (substr($name, 0, $prefix_len) ne $prefix) { return; }
+
+    # Get method name without prefix
+    my str $method = substr($name, $prefix_len, length($name) - $prefix_len);
+
+    # Track method info
+    my hash %minfo = ();
+    $minfo{"func_name"} = $name;
+    $minfo{"method_name"} = $method;
+    $minfo{"param_count"} = $fn->{"param_count"};
+    $minfo{"params"} = $fn->{"params"};
+    $minfo{"return_type"} = $fn->{"return_type"};
+    $minfo{"package"} = $pkg;
+    $minfo{"is_variadic"} = $fn->{"is_variadic"};
+    # Find variadic param index
+    my int $variadic_idx = -1;
+    if ($fn->{"is_variadic"} == 1) {
+        my scalar $params = $fn->{"params"};
+        my int $pc = $fn->{"param_count"};
+        for (my int $vi = 0; $vi < $pc; $vi = $vi + 1) {
+            if ($params->[$vi]->{"is_variadic"} == 1) {
+                $variadic_idx = $vi;
+            }
+        }
+    }
+    $minfo{"variadic_param_idx"} = $variadic_idx;
+
+    # Get or create the methods info for this package
+    # Use string index check instead of exists() for bootstrap compatibility
+    my str $pkg_marker = "|" . $pkg . "|";
+    my str $seen = $cg->{"pkg_seen"};
+    my int $found_idx = index($seen, $pkg_marker);
+    if ($found_idx < 0) {
+        # New package - initialize it
+        my hash %pkg_info = ();
+        my array @new_arr = ();
+        $pkg_info{"methods"} = \@new_arr;
+        $pkg_info{"count"} = 0;
+        my scalar $pkg_methods = $cg->{"pkg_methods"};
+        $pkg_methods->{$pkg} = \%pkg_info;
+        # Also track package name in the list
+        my int $pkg_idx = $cg->{"pkg_count"};
+        $cg->{"pkg_list"}->[$pkg_idx] = $pkg;
+        $cg->{"pkg_count"} = $pkg_idx + 1;
+        # Mark as seen
+        $cg->{"pkg_seen"} = $seen . $pkg . "|";
+    }
+    my scalar $pkg_methods = $cg->{"pkg_methods"};
+    my scalar $pkg_info = $pkg_methods->{$pkg};
+    my int $idx = $pkg_info->{"count"};
+    $pkg_info->{"methods"}->[$idx] = \%minfo;
+    $pkg_info->{"count"} = $idx + 1;
+}
+
+# Helper: emit strada_overload_register for a single operator if it's in the overload hash
+func gen_overload_reg_if(scalar $sb, str $pkg, scalar $pkg_ol, scalar $methods, int $method_count, str $op) void {
+    my str $method_name = "" . $pkg_ol->{$op};
+    if (length($method_name) == 0) { return; }
+    # Find the wrapper function for this method
+    my int $i = 0;
+    while ($i < $method_count) {
+        my scalar $m = $methods->[$i];
+        if ($m->{"method_name"} eq $method_name) {
+            sb_append($sb, "    strada_overload_register(\"" . $pkg . "\", \"" . $op . "\", __wrap_" . $m->{"func_name"} . ");\n");
+            return;
+        }
+        $i = $i + 1;
+    }
+}
+
+# Helper: emit strada_overload_register for stringify ("") operator
+func gen_overload_reg_stringify(scalar $sb, str $pkg, scalar $pkg_ol, scalar $methods, int $method_count) void {
+    my str $method_name = "" . $pkg_ol->{"\"\""};
+    if (length($method_name) == 0) { return; }
+    # Find the wrapper function for this method
+    my int $i = 0;
+    while ($i < $method_count) {
+        my scalar $m = $methods->[$i];
+        if ($m->{"method_name"} eq $method_name) {
+            sb_append($sb, "    strada_overload_register(\"" . $pkg . "\", \"\\\"\\\"\", __wrap_" . $m->{"func_name"} . ");\n");
+            return;
+        }
+        $i = $i + 1;
+    }
+}
+
+# Generate method wrapper functions for a single package
+# $pkg_info is a hash with "methods" array and "count" int
+func gen_method_wrappers_for_pkg(scalar $sb, str $pkg, scalar $pkg_info, int $has_overloads, scalar $overloads, scalar $method_modifiers, int $method_modifier_count) void {
+    my int $method_count = $pkg_info->{"count"};
+    my scalar $methods = $pkg_info->{"methods"};
+    if ($method_count == 0) { return; }
+
+    sb_append($sb, "/* OOP method wrappers for package " . $pkg . " */\n");
+
+    my int $i = 0;
+    while ($i < $method_count) {
+        my scalar $m = $methods->[$i];
+        my str $func_name = $m->{"func_name"};
+        my int $param_count = $m->{"param_count"};
+        my int $ret_type = $m->{"return_type"};
+        my int $is_void = $ret_type == TYPE_VOID();
+
+        # Generate wrapper: __wrap_FuncName(self, args) { ... }
+        sb_append($sb, "static StradaValue* __wrap_" . $func_name . "(StradaValue* self, StradaValue* args) {\n");
+
+        if ($param_count <= 1 && $m->{"is_variadic"} == 1) {
+            # No-parens variadic function used as method: prepend self to args for @_
+            # Use incref on self and args elements since the packed array takes shared ownership
+            sb_append($sb, "    StradaValue *__packed = strada_new_array();\n");
+            sb_append($sb, "    strada_incref(self);\n");
+            sb_append($sb, "    strada_array_push_take(__packed->value.av, self);\n");
+            sb_append($sb, "    if (args && args->type == STRADA_ARRAY && args->value.av) {\n");
+            sb_append($sb, "        for (size_t __i = 0; __i < args->value.av->size; __i++) {\n");
+            sb_append($sb, "            strada_incref(args->value.av->elements[args->value.av->head + __i]);\n");
+            sb_append($sb, "            strada_array_push_take(__packed->value.av, args->value.av->elements[args->value.av->head + __i]);\n");
+            sb_append($sb, "        }\n");
+            sb_append($sb, "    }\n");
+            if ($is_void == 1) {
+                sb_append($sb, "    " . $func_name . "(__packed);\n");
+                sb_append($sb, "    strada_decref(__packed);\n");
+                sb_append($sb, "    return strada_undef_static();\n");
+            } else {
+                sb_append($sb, "    StradaValue *__r = " . $func_name . "(__packed);\n");
+                sb_append($sb, "    strada_decref(__packed);\n");
+                sb_append($sb, "    return __r;\n");
+            }
+        } elsif ($param_count <= 1) {
+            # 0 or 1 param (just self)
+            sb_append($sb, "    (void)args;\n");
+            if ($is_void == 1) {
+                sb_append($sb, "    " . $func_name . "(self);\n");
+                sb_append($sb, "    return strada_undef_static();\n");
+            } else {
+                sb_append($sb, "    return " . $func_name . "(self);\n");
+            }
+        } else {
+            # Multiple params - unpack from args
+            my int $is_variadic = $m->{"is_variadic"};
+            my int $variadic_idx = $m->{"variadic_param_idx"};
+
+            if ($is_variadic == 1) {
+                if ($variadic_idx == 1) {
+                    if ($is_void == 1) {
+                        sb_append($sb, "    " . $func_name . "(self, args);\n");
+                        sb_append($sb, "    return strada_undef_static();\n");
+                    } else {
+                        sb_append($sb, "    return " . $func_name . "(self, args);\n");
+                    }
+                } else {
+                    sb_append($sb, "    StradaArray *__args = strada_deref_array(args);\n");
+                    sb_append($sb, "    StradaValue *__va_arr = strada_new_array();\n");
+                    my int $var_start = $variadic_idx - 1;
+                    sb_append($sb, "    for (size_t __i = " . $var_start . "; __i < __args->size; __i++) {\n");
+                    sb_append($sb, "        strada_array_push(strada_deref_array(__va_arr), __args->elements[__i]);\n");
+                    sb_append($sb, "    }\n");
+                    if ($is_void == 1) {
+                        sb_append($sb, "    " . $func_name . "(self");
+                    } else {
+                        sb_append($sb, "    StradaValue *__va_result = " . $func_name . "(self");
+                    }
+                    my int $j = 1;
+                    while ($j < $variadic_idx) {
+                        my int $arg_idx = $j - 1;
+                        sb_append($sb, ", __strada_get_arg(args, " . $arg_idx . ")");
+                        $j = $j + 1;
+                    }
+                    sb_append($sb, ", __va_arr);\n");
+                    sb_append($sb, "    strada_decref(__va_arr);\n");
+                    if ($is_void == 1) {
+                        sb_append($sb, "    return strada_undef_static();\n");
+                    } else {
+                        sb_append($sb, "    return __va_result;\n");
+                    }
+                }
+            } else {
+                if ($is_void == 1) {
+                    sb_append($sb, "    " . $func_name . "(self");
+                } else {
+                    sb_append($sb, "    return " . $func_name . "(self");
+                }
+                my int $j = 1;
+                while ($j < $param_count) {
+                    my int $arg_idx = $j - 1;
+                    sb_append($sb, ", __strada_get_arg(args, " . $arg_idx . ")");
+                    $j = $j + 1;
+                }
+                sb_append($sb, ");\n");
+                if ($is_void == 1) {
+                    sb_append($sb, "    return strada_undef_static();\n");
+                }
+            }
+        }
+
+        sb_append($sb, "}\n\n");
+        $i = $i + 1;
+    }
+
+    # Generate initialization function for this package
+    my str $c_pkg = sanitize_name($pkg);
+
+    sb_append($sb, "/* OOP method registration initializer */\n");
+    sb_append($sb, "static int __" . $c_pkg . "_oop_initialized = 0;\n");
+    sb_append($sb, "void __" . $c_pkg . "_oop_init(void) {\n");
+    sb_append($sb, "    if (__" . $c_pkg . "_oop_initialized) return;\n");
+    sb_append($sb, "    __" . $c_pkg . "_oop_initialized = 1;\n\n");
+
+    $i = 0;
+    while ($i < $method_count) {
+        my scalar $m = $methods->[$i];
+        my str $func_name = $m->{"func_name"};
+        my str $method_name = $m->{"method_name"};
+
+        sb_append($sb, "    strada_method_register(\"" . $pkg . "\", \"" . $method_name . "\", __wrap_" . $func_name . ");\n");
+        $i = $i + 1;
+    }
+
+    # Generate overload registrations for this package
+    if ($has_overloads == 1) {
+        my str $pkg_ol_check = "" . $overloads->{$pkg};
+        if (length($pkg_ol_check) > 0) {
+            my scalar $pkg_ol = $overloads->{$pkg};
+            sb_append($sb, "\n    /* Operator overloads */\n");
+            # For each operator in the overload hash, find the matching wrapper
+            # and emit strada_overload_register() calls.
+            # We check each known operator individually (bootstrap-safe, no array iteration).
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "+");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "-");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "*");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "/");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "%");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "**");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, ".");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "==");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "!=");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "<");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, ">");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "<=");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, ">=");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "<=>");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "eq");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "ne");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "lt");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "gt");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "le");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "ge");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "cmp");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "neg");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "~");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "bool");
+            gen_overload_reg_if($sb, $pkg, $pkg_ol, $methods, $method_count, "!");
+            # Stringify ("") overload - key in hash is two double-quote chars
+            gen_overload_reg_stringify($sb, $pkg, $pkg_ol, $methods, $method_count);
+        }
+    }
+
+    # Generate method modifier registrations for this package
+    if ($method_modifier_count > 0) {
+        my int $has_mod = 0;
+        my int $mi = 0;
+        while ($mi < $method_modifier_count) {
+            my scalar $mod = $method_modifiers->[$mi];
+            if ($mod->{"package"} eq $pkg) {
+                if ($has_mod == 0) {
+                    sb_append($sb, "\n    /* Method modifiers */\n");
+                    $has_mod = 1;
+                }
+                my str $mod_type = $mod->{"mod_type"};
+                my int $type_int = 0;
+                if ($mod_type eq "before") {
+                    $type_int = 1;
+                } elsif ($mod_type eq "after") {
+                    $type_int = 2;
+                } elsif ($mod_type eq "around") {
+                    $type_int = 3;
+                }
+                my str $func_name = $mod->{"func_name"};
+                my str $method_name = $mod->{"method_name"};
+                # Find the wrapper for this modifier function
+                my int $wi = 0;
+                while ($wi < $method_count) {
+                    my scalar $wm = $methods->[$wi];
+                    if ($wm->{"func_name"} eq $func_name) {
+                        sb_append($sb, "    strada_modifier_register(\"" . $pkg . "\", \"" . $method_name . "\", " . $type_int . ", __wrap_" . $func_name . ");\n");
+                        $wi = $method_count;
+                    }
+                    $wi = $wi + 1;
+                }
+            }
+            $mi = $mi + 1;
+        }
+    }
+
+    sb_append($sb, "}\n\n");
+}
+
+# Generate method wrappers for ALL packages
+func gen_all_method_wrappers(scalar $cg) str {
+    my int $num_pkgs = get_oop_pkg_count($cg);
+    if ($num_pkgs == 0) { return ""; }
+
+    my scalar $pkg_methods = $cg->{"pkg_methods"};
+    my scalar $pkg_list = get_oop_packages($cg);
+
+    my scalar $sb = sb_new();
+
+    # Add the helper function once
+    gen_oop_helper_decl($sb);
+
+    # Get overload info
+    my int $has_overloads = $cg->{"has_overloads"};
+    my scalar $overloads = $cg->{"overloads"};
+
+    # Get method modifier info
+    my scalar $method_modifiers = $cg->{"method_modifiers"};
+    my int $method_modifier_count = $cg->{"method_modifier_count"};
+
+    # Generate wrappers for each package
+    my int $i = 0;
+    while ($i < $num_pkgs) {
+        my str $pkg = $pkg_list->[$i];
+        my scalar $pkg_info = $pkg_methods->{$pkg};
+        gen_method_wrappers_for_pkg($sb, $pkg, $pkg_info, $has_overloads, $overloads, $method_modifiers, $method_modifier_count);
+        $i = $i + 1;
+    }
+
+    return sb_to_string($sb);
+}
+
+# Get all packages that have registered methods
+# Returns the pkg_list array reference (not a copy)
+func get_oop_packages(scalar $cg) scalar {
+    return $cg->{"pkg_list"};
+}
+
+# Get count of packages
+func get_oop_pkg_count(scalar $cg) int {
+    return $cg->{"pkg_count"};
+}
+
+# Check if an expression could produce a blessed object at runtime.
+# Returns 1 if the expression MIGHT be blessed, 0 if it CANNOT be.
+# Used for operator overloading: only emit dispatch code when operands could be blessed.
+func could_be_blessed(scalar $expr) int {
+    my int $type = $expr->{"type"};
+
+    # Variables with scalar/undef type could be blessed
+    if ($type == NODE_VARIABLE()) {
+        my int $var_type = $expr->{"var_type"};
+        if ($var_type == TYPE_SCALAR() || $var_type == 0) {
+            return 1;
+        }
+        # Typed variables (int, num, str) cannot be blessed
+        return 0;
+    }
+
+    # Literals cannot be blessed
+    if ($type == NODE_INT_LITERAL() || $type == NODE_NUM_LITERAL() || $type == NODE_STR_LITERAL()) {
+        return 0;
+    }
+    if ($type == NODE_UNDEF()) {
+        return 0;
+    }
+
+    # Function calls returning scalar could be blessed
+    if ($type == NODE_CALL()) {
+        return 1;
+    }
+
+    # Method calls always return scalar (could be blessed)
+    if ($type == NODE_METHOD_CALL()) {
+        return 1;
+    }
+
+    # Dynamic method calls could return blessed
+    if ($type == NODE_DYN_METHOD_CALL()) {
+        return 1;
+    }
+
+    # Hash/array dereference access could return blessed
+    if ($type == NODE_HASH_ACCESS() || $type == NODE_DEREF_HASH() ||
+        $type == NODE_DEREF_ARRAY() || $type == NODE_SUBSCRIPT()) {
+        return 1;
+    }
+
+    # Ternary could return blessed
+    if ($type == NODE_TERNARY()) {
+        return 1;
+    }
+
+    # Closure calls could return blessed
+    if ($type == NODE_CLOSURE_CALL()) {
+        return 1;
+    }
+
+    # Binary/unary ops produce numeric/string results, not blessed
+    # (unless they themselves use overloading, but the dispatch handles that)
+    return 0;
+}
+
+# Generate overloaded binary operator dispatch
+# Emits: ({ StradaValue *__ol_l = <left>; StradaValue *__ol_r = <right>;
+#           StradaValue *__ol_res = strada_overload_binary(__ol_l, __ol_r, "op");
+#           if (!__ol_res) __ol_res = <fallback>; __ol_res; })
+# Emit the default (non-overloaded) fallback for a binary op using __ol_l, __ol_r temps
+func emit_overload_binary_fallback(scalar $cg, str $op) void {
+    if ($op eq "+") {
+        emit($cg, "(STRADA_IS_TAGGED_INT(__ol_l) && STRADA_IS_TAGGED_INT(__ol_r) ? STRADA_MAKE_TAGGED_INT(STRADA_TAGGED_INT_VAL(__ol_l) + STRADA_TAGGED_INT_VAL(__ol_r)) : strada_new_num(strada_to_num(__ol_l) + strada_to_num(__ol_r)))");
+    } elsif ($op eq "-") {
+        emit($cg, "(STRADA_IS_TAGGED_INT(__ol_l) && STRADA_IS_TAGGED_INT(__ol_r) ? STRADA_MAKE_TAGGED_INT(STRADA_TAGGED_INT_VAL(__ol_l) - STRADA_TAGGED_INT_VAL(__ol_r)) : strada_new_num(strada_to_num(__ol_l) - strada_to_num(__ol_r)))");
+    } elsif ($op eq "*") {
+        emit($cg, "(STRADA_IS_TAGGED_INT(__ol_l) && STRADA_IS_TAGGED_INT(__ol_r) ? STRADA_MAKE_TAGGED_INT(STRADA_TAGGED_INT_VAL(__ol_l) * STRADA_TAGGED_INT_VAL(__ol_r)) : strada_new_num(strada_to_num(__ol_l) * strada_to_num(__ol_r)))");
+    } elsif ($op eq "/") {
+        emit($cg, "strada_safe_div(strada_to_num(__ol_l), strada_to_num(__ol_r))");
+    } elsif ($op eq "%") {
+        emit($cg, "strada_safe_mod((int64_t)strada_to_int(__ol_l), (int64_t)strada_to_int(__ol_r))");
+    } elsif ($op eq "**") {
+        emit($cg, "strada_new_num(pow(strada_to_num(__ol_l), strada_to_num(__ol_r)))");
+    } elsif ($op eq ".") {
+        emit($cg, "strada_concat_sv(__ol_l, __ol_r)");
+    } elsif ($op eq "==") {
+        emit($cg, "strada_new_int(strada_to_num(__ol_l) == strada_to_num(__ol_r))");
+    } elsif ($op eq "!=") {
+        emit($cg, "strada_new_int(strada_to_num(__ol_l) != strada_to_num(__ol_r))");
+    } elsif ($op eq "<") {
+        emit($cg, "strada_new_int(strada_to_num(__ol_l) < strada_to_num(__ol_r))");
+    } elsif ($op eq ">") {
+        emit($cg, "strada_new_int(strada_to_num(__ol_l) > strada_to_num(__ol_r))");
+    } elsif ($op eq "<=") {
+        emit($cg, "strada_new_int(strada_to_num(__ol_l) <= strada_to_num(__ol_r))");
+    } elsif ($op eq ">=") {
+        emit($cg, "strada_new_int(strada_to_num(__ol_l) >= strada_to_num(__ol_r))");
+    } else {
+        emit($cg, "strada_new_num(strada_to_num(__ol_l))");
+    }
+}
+
+# Emit string comparison fallback for overloaded ops
+func emit_overload_strcmp_fallback(scalar $cg, str $op) void {
+    emit($cg, "({ char *__sl = strada_to_str_ss(__ol_l); char *__sr = strada_to_str_ss(__ol_r); ");
+    if ($op eq "eq") {
+        emit($cg, "int __r = (strcmp(__sl, __sr) == 0); ");
+    } elsif ($op eq "ne") {
+        emit($cg, "int __r = (strcmp(__sl, __sr) != 0); ");
+    } elsif ($op eq "lt") {
+        emit($cg, "int __r = (strcmp(__sl, __sr) < 0); ");
+    } elsif ($op eq "gt") {
+        emit($cg, "int __r = (strcmp(__sl, __sr) > 0); ");
+    } elsif ($op eq "le") {
+        emit($cg, "int __r = (strcmp(__sl, __sr) <= 0); ");
+    } elsif ($op eq "ge") {
+        emit($cg, "int __r = (strcmp(__sl, __sr) >= 0); ");
+    } elsif ($op eq "cmp") {
+        emit($cg, "int __c = strcmp(__sl, __sr); int __r = (__c < 0) ? -1 : ((__c > 0) ? 1 : 0); ");
+    } elsif ($op eq "<=>") {
+        emit($cg, "double __nl = strada_to_num(__ol_l); double __nr = strada_to_num(__ol_r); int __r = (__nl < __nr) ? -1 : ((__nl > __nr) ? 1 : 0); ");
+    } else {
+        emit($cg, "int __r = 0; ");
+    }
+    emit($cg, "strada_cstr_free(__sl); strada_cstr_free(__sr); strada_new_int(__r); })");
+}
+
+func gen_overloaded_binary(scalar $cg, scalar $left, scalar $right, str $op) void {
+    my int $left_tmp = 0;
+    my int $right_tmp = 0;
+    if ($cg->{"cleanup_enabled"} == 1) {
+        $left_tmp = needs_temp_cleanup($cg, $left);
+        $right_tmp = needs_temp_cleanup($cg, $right);
+    }
+    emit($cg, "({ StradaValue *__ol_l = ");
+    gen_expression($cg, $left);
+    emit($cg, "; StradaValue *__ol_r = ");
+    gen_expression($cg, $right);
+    emit($cg, "; StradaValue *__ol_res = strada_overload_binary(__ol_l, __ol_r, \"");
+    emit($cg, $op);
+    emit($cg, "\"); if (!__ol_res) { __ol_res = ");
+
+    # Generate the fallback - dispatch to appropriate helper
+    if ($op eq "eq" || $op eq "ne" || $op eq "lt" || $op eq "gt" || $op eq "le" || $op eq "ge" || $op eq "cmp" || $op eq "<=>") {
+        emit_overload_strcmp_fallback($cg, $op);
+    } else {
+        emit_overload_binary_fallback($cg, $op);
+    }
+    emit($cg, "; }");
+    # Clean up temporary operands
+    if ($left_tmp == 1) {
+        emit($cg, " strada_decref(__ol_l);");
+    }
+    if ($right_tmp == 1) {
+        emit($cg, " strada_decref(__ol_r);");
+    }
+    emit($cg, " __ol_res; })");
+}
+
+# Generate overloaded unary operator dispatch
+func gen_overloaded_unary(scalar $cg, scalar $operand, str $op) void {
+    my int $op_tmp = 0;
+    if ($cg->{"cleanup_enabled"} == 1) {
+        $op_tmp = needs_temp_cleanup($cg, $operand);
+    }
+    emit($cg, "({ StradaValue *__ol_v = ");
+    gen_expression($cg, $operand);
+    emit($cg, "; StradaValue *__ol_res = strada_overload_unary(__ol_v, \"");
+    emit($cg, $op);
+    emit($cg, "\"); if (!__ol_res) { __ol_res = ");
+
+    # Generate the fallback
+    if ($op eq "neg") {
+        emit($cg, "strada_new_num(-strada_to_num(__ol_v))");
+    } elsif ($op eq "!") {
+        emit($cg, "strada_new_int(!strada_to_bool(__ol_v))");
+    } elsif ($op eq "~") {
+        emit($cg, "strada_new_int(~strada_to_int(__ol_v))");
+    } else {
+        emit($cg, "strada_new_num(strada_to_num(__ol_v))");
+    }
+    emit($cg, "; }");
+    if ($op_tmp == 1) {
+        emit($cg, " strada_decref(__ol_v);");
+    }
+    emit($cg, " __ol_res; })");
+}
+
+# Generate overloaded string concatenation with stringify dispatch
+func gen_overloaded_concat(scalar $cg, scalar $left, scalar $right) void {
+    my int $left_tmp = 0;
+    my int $right_tmp = 0;
+    if ($cg->{"cleanup_enabled"} == 1) {
+        $left_tmp = needs_temp_cleanup($cg, $left);
+        $right_tmp = needs_temp_cleanup($cg, $right);
+    }
+    emit($cg, "({ StradaValue *__ol_l = ");
+    gen_expression($cg, $left);
+    emit($cg, "; StradaValue *__ol_r = ");
+    gen_expression($cg, $right);
+    emit($cg, ";");
+    # Push the (possibly owned) operands so a throwing stringify
+    # overload on either side doesn't leak the temp. Pop before the
+    # normal-path decrefs below.
+    if ($left_tmp == 1) { emit($cg, " strada_cleanup_push(__ol_l);"); }
+    if ($right_tmp == 1) { emit($cg, " strada_cleanup_push(__ol_r);"); }
+    emit($cg, " StradaValue *__ol_ls = strada_overload_stringify(__ol_l);");
+    emit($cg, " StradaValue *__ol_rs = strada_overload_stringify(__ol_r);");
+    emit($cg, " StradaValue *__ol_res = strada_concat_sv(__ol_ls ? __ol_ls : __ol_l, __ol_rs ? __ol_rs : __ol_r);");
+    emit($cg, " if (__ol_ls) strada_decref(__ol_ls);");
+    emit($cg, " if (__ol_rs) strada_decref(__ol_rs);");
+    if ($right_tmp == 1) { emit($cg, " strada_cleanup_pop();"); }
+    if ($left_tmp == 1) { emit($cg, " strada_cleanup_pop();"); }
+    if ($left_tmp == 1) {
+        emit($cg, " strada_decref(__ol_l);");
+    }
+    if ($right_tmp == 1) {
+        emit($cg, " strada_decref(__ol_r);");
+    }
+    emit($cg, " __ol_res; })");
+}
+
+# Check if a binary operator might be overloaded for given operands
+func check_overload_binary(scalar $cg, scalar $left, scalar $right, str $op) int {
+    if ($cg->{"has_overloads"} == 0) {
+        return 0;
+    }
+    # Check if this operator is overloaded (bootstrap-safe: no exists() on chained deref)
+    my scalar $ol_ops = $cg->{"overloaded_ops"};
+    my int $op_overloaded = length("" . $ol_ops->{$op}) > 0;
+    # Comparison/equality operators can be DERIVED at runtime from an overloaded
+    # <=> (numeric) or cmp (string) via fallback autogeneration. Emit the overload
+    # path when the source op is overloaded too — strada_overload_binary derives,
+    # and gen_overloaded_binary already falls back to a plain comparison when the
+    # runtime class doesn't actually overload <=>/cmp.
+    if ($op_overloaded == 0) {
+        my str $src = "";
+        if ($op eq "<" || $op eq "<=" || $op eq ">" || $op eq ">=" || $op eq "==" || $op eq "!=") {
+            $src = "<=>";
+        } elsif ($op eq "lt" || $op eq "le" || $op eq "gt" || $op eq "ge" || $op eq "eq" || $op eq "ne") {
+            $src = "cmp";
+        }
+        if (length($src) > 0 && length("" . $ol_ops->{$src}) > 0) {
+            $op_overloaded = 1;
+        }
+    }
+    if ($op_overloaded == 0) {
+        return 0;
+    }
+    if (could_be_blessed($left) == 1 || could_be_blessed($right) == 1) {
+        return 1;
+    }
+    return 0;
+}
+
+# Check if an expression is clearly a scalar value (not an array or function call)
+# Used to determine if we need to wrap it when assigning to an array variable
+func is_scalar_expr(scalar $expr) int {
+    my int $type = $expr->{"type"};
+
+    # Scalar variables ($x)
+    if ($type == NODE_VARIABLE()) {
+        my str $sigil = $expr->{"sigil"};
+        if ($sigil eq "$") {
+            return 1;
+        }
+        return 0;
+    }
+
+    # Literal values
+    if ($type == NODE_INT_LITERAL() || $type == NODE_NUM_LITERAL() || $type == NODE_STR_LITERAL()) {
+        return 1;
+    }
+
+    # Unary operators on scalars
+    if ($type == NODE_UNARY_OP()) {
+        return 1;
+    }
+
+    # Binary operators produce scalars (arithmetic, comparison, etc.)
+    if ($type == NODE_BINARY_OP()) {
+        return 1;
+    }
+
+    # Ternary produces a scalar
+    if ($type == NODE_TERNARY()) {
+        return 1;
+    }
+
+    # Array/hash subscript returns a scalar
+    if ($type == NODE_SUBSCRIPT() || $type == NODE_HASH_ACCESS()) {
+        return 1;
+    }
+
+    # Field access returns a scalar
+    if ($type == NODE_FIELD_ACCESS()) {
+        return 1;
+    }
+
+    # Everything else (function calls, deref, etc.) - assume not scalar
+    return 0;
+}
+
+func emit(scalar $cg, str $text) void {
+    # O(1) amortized append using StringBuilder
+    sb_append($cg->{"output_sb"}, $text);
+}
+
+# Emit #line directive for source-level debugging
+# Format: #line <line_number> "<filename>"
+func emit_line_directive(scalar $cg, int $line) void {
+    if ($cg->{"debug_info"} == 0) {
+        return;
+    }
+    if ($line <= 0) {
+        return;
+    }
+    # Avoid emitting duplicate line directives
+    if ($line == $cg->{"last_line"}) {
+        return;
+    }
+    $cg->{"last_line"} = $line;
+
+    my str $filename = $cg->{"filename"};
+    # Escape the filename — a `"`/`\`/newline in the source path would
+    # otherwise break out of the #line string literal and inject C (CWE-94).
+    # This directive is emitted per-statement under -g, so it fires even when
+    # the program never uses __FILE__.
+    emit($cg, "#line " . $line . " ");
+    gen_str_literal_c($cg, $filename);
+    emit($cg, "\n");
+}
+
+# Emit #line directive before a statement (with indent)
+func emit_line_for_stmt(scalar $cg, scalar $stmt) void {
+    if ($cg->{"debug_info"} == 0) {
+        return;
+    }
+    # stmt should always be defined when called from gen_statement
+    my int $line = $stmt->{"line"};
+    if ($line > 0) {
+        emit_line_directive($cg, $line);
+    }
+}
+
+# Generate string comparison with proper cleanup of temporaries
+# If one side is a string literal, use strada_str_*_lit to avoid creating temporaries
+func gen_str_cmp(scalar $cg, scalar $expr, str $op) void {
+    my scalar $left = $expr->{"left"};
+    my scalar $right = $expr->{"right"};
+    my int $left_type = $left->{"type"};
+    my int $right_type = $right->{"type"};
+
+    # Determine comparison function suffix and C operator
+    my str $cmp_suffix = $op;
+    my str $cmp_op = "== 0";
+    if ($op eq "ne") {
+        $cmp_op = "!= 0";
+    } elsif ($op eq "lt") {
+        $cmp_op = "< 0";
+    } elsif ($op eq "gt") {
+        $cmp_op = "> 0";
+    } elsif ($op eq "le") {
+        $cmp_op = "<= 0";
+    } elsif ($op eq "ge") {
+        $cmp_op = ">= 0";
+    }
+
+    # Case 1: Right side is string literal - use strada_str_*_lit (no temp allocation)
+    if ($right_type == NODE_STR_LITERAL()) {
+        # Check if left needs cleanup
+        if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $left) == 1) {
+            emit($cg, "({ StradaValue *__cmp_l = ");
+            gen_expression($cg, $left);
+            emit($cg, "; int __cmp_r = strada_str_");
+            emit($cg, $cmp_suffix);
+            emit($cg, "_lit(__cmp_l, ");
+            gen_str_literal_c($cg, $right->{"value"});
+            emit($cg, "); strada_decref(__cmp_l); strada_new_int(__cmp_r); })");
+        } else {
+            emit($cg, "strada_new_int(strada_str_");
+            emit($cg, $cmp_suffix);
+            emit($cg, "_lit(");
+            gen_expression($cg, $left);
+            emit($cg, ", ");
+            gen_str_literal_c($cg, $right->{"value"});
+            emit($cg, "))");
+        }
+        return;
+    }
+
+    # Case 2: Left side is string literal - swap and use strada_str_*_lit
+    if ($left_type == NODE_STR_LITERAL()) {
+        my str $swapped = $cmp_suffix;
+        if ($op eq "lt") {
+            $swapped = "gt";
+        } elsif ($op eq "gt") {
+            $swapped = "lt";
+        } elsif ($op eq "le") {
+            $swapped = "ge";
+        } elsif ($op eq "ge") {
+            $swapped = "le";
+        }
+        # Check if right needs cleanup
+        if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $right) == 1) {
+            emit($cg, "({ StradaValue *__cmp_r = ");
+            gen_expression($cg, $right);
+            emit($cg, "; int __cmp_res = strada_str_");
+            emit($cg, $swapped);
+            emit($cg, "_lit(__cmp_r, ");
+            gen_str_literal_c($cg, $left->{"value"});
+            emit($cg, "); strada_decref(__cmp_r); strada_new_int(__cmp_res); })");
+        } else {
+            emit($cg, "strada_new_int(strada_str_");
+            emit($cg, $swapped);
+            emit($cg, "_lit(");
+            gen_expression($cg, $right);
+            emit($cg, ", ");
+            gen_str_literal_c($cg, $left->{"value"});
+            emit($cg, "))");
+        }
+        return;
+    }
+
+    # Case 3: Neither side is a string literal - use standard comparison
+    # Must free both the strada_to_str_ss() results AND the StradaValue temporaries
+    my int $left_needs_cleanup = needs_temp_cleanup($cg, $left);
+    my int $right_needs_cleanup = needs_temp_cleanup($cg, $right);
+
+    if ($cg->{"cleanup_enabled"} == 1 && ($left_needs_cleanup == 1 || $right_needs_cleanup == 1)) {
+        emit($cg, "({ StradaValue *__cmp_lv = ");
+        gen_expression($cg, $left);
+        emit($cg, "; StradaValue *__cmp_rv = ");
+        gen_expression($cg, $right);
+        emit($cg, "; char *__cmp_ls = strada_to_str_ss(__cmp_lv); char *__cmp_rs = strada_to_str_ss(__cmp_rv); ");
+        emit($cg, "int __cmp_res = strcmp(__cmp_ls, __cmp_rs) ");
+        emit($cg, $cmp_op);
+        emit($cg, "; strada_cstr_free(__cmp_ls); strada_cstr_free(__cmp_rs); ");
+        if ($left_needs_cleanup == 1) {
+            emit($cg, "strada_decref(__cmp_lv); ");
+        }
+        if ($right_needs_cleanup == 1) {
+            emit($cg, "strada_decref(__cmp_rv); ");
+        }
+        emit($cg, "strada_new_int(__cmp_res); })");
+    } else {
+        emit($cg, "({ char *__cmp_ls = strada_to_str_ss(");
+        gen_expression($cg, $left);
+        emit($cg, "); char *__cmp_rs = strada_to_str_ss(");
+        gen_expression($cg, $right);
+        emit($cg, "); int __cmp_res = strcmp(__cmp_ls, __cmp_rs) ");
+        emit($cg, $cmp_op);
+        emit($cg, "; strada_cstr_free(__cmp_ls); strada_cstr_free(__cmp_rs); strada_new_int(__cmp_res); })");
+    }
+}
+
+# Emit a C string literal with proper escaping
+func gen_str_literal_c(scalar $cg, str $val) void {
+    emit($cg, "\"");
+    my int $i = 0;
+    my int $len = bytes($val);
+    my str $bs = chr(92);
+    while ($i < $len) {
+        my str $ch = substr_bytes($val, $i, 1);
+        my int $byte = ord($ch);
+        if ($byte == ord("\\")) {
+            emit($cg, $bs);
+            emit($cg, $bs);
+        } elsif ($byte == ord("\"")) {
+            emit($cg, $bs);
+            emit($cg, chr(34));
+        } elsif ($byte == ord("\n")) {
+            emit($cg, $bs);
+            emit($cg, "n");
+        } elsif ($byte == ord("\r")) {
+            emit($cg, $bs);
+            emit($cg, "r");
+        } elsif ($byte == ord("\t")) {
+            emit($cg, $bs);
+            emit($cg, "t");
+        } elsif ($byte >= ord(" ") && $byte < 127) {
+            emit($cg, $ch);
+        } else {
+            # Non-printable or high-bit byte - emit as \ooo (3-digit
+            # octal). Previously used integer division (`$byte / 64`)
+            # but Strada's `/` returns float and `my int` does not
+            # truncate, so emit($cg, $o1) got a float like 3.53125
+            # and emitted "3.531252.640625" etc., wrecking multi-byte
+            # UTF-8 in string literals. Decompose by subtraction
+            # instead - safe integer math, no division.
+            my int $b2 = $byte;
+            my int $o1 = 0;
+            if ($b2 >= 192) { $o1 = 3; $b2 = $b2 - 192; }
+            elsif ($b2 >= 128) { $o1 = 2; $b2 = $b2 - 128; }
+            elsif ($b2 >= 64)  { $o1 = 1; $b2 = $b2 - 64; }
+            my int $o2 = 0;
+            if ($b2 >= 56) { $o2 = 7; $b2 = $b2 - 56; }
+            elsif ($b2 >= 48) { $o2 = 6; $b2 = $b2 - 48; }
+            elsif ($b2 >= 40) { $o2 = 5; $b2 = $b2 - 40; }
+            elsif ($b2 >= 32) { $o2 = 4; $b2 = $b2 - 32; }
+            elsif ($b2 >= 24) { $o2 = 3; $b2 = $b2 - 24; }
+            elsif ($b2 >= 16) { $o2 = 2; $b2 = $b2 - 16; }
+            elsif ($b2 >= 8)  { $o2 = 1; $b2 = $b2 - 8; }
+            # $b2 is now 0-7 (the low octal digit)
+            emit($cg, $bs);
+            emit($cg, chr(48 + $o1));
+            emit($cg, chr(48 + $o2));
+            emit($cg, chr(48 + $b2));
+        }
+        $i = $i + 1;
+    }
+    emit($cg, "\"");
+}
+
+# Get accumulated output as a single string
+func get_output(scalar $cg) str {
+    # Get the current output from StringBuilder
+    my str $final = sb_to_string($cg->{"output_sb"});
+
+    # Check if we used multi-phase generation
+    my str $preamble = $cg->{"preamble_content"};
+    if (length($preamble) > 0) {
+        my str $funcs = $cg->{"funcs_content"};
+        my str $anon_decls = $cg->{"anon_func_decls"};
+        my str $oop_decls = $cg->{"oop_fwd_decls"};
+
+        # Build result: preamble + oop_decls + anon_decls + funcs + final
+        my scalar $out_sb = sb_new();
+        sb_append($out_sb, $preamble);
+        if (length($oop_decls) > 0) {
+            sb_append($out_sb, $oop_decls);
+        }
+        if (length($anon_decls) > 0) {
+            sb_append($out_sb, "/* Anonymous function forward declarations */\n");
+            sb_append($out_sb, $anon_decls);
+            sb_append($out_sb, "\n");
+        }
+        sb_append($out_sb, $funcs);
+        sb_append($out_sb, $final);
+        return sb_to_string($out_sb);
+    }
+
+    return $final;
+}
+
+# Set output - for save/restore pattern in anonymous functions
+func set_output(scalar $cg, str $text) void {
+    sb_clear($cg->{"output_sb"});
+    sb_append($cg->{"output_sb"}, $text);
+}
+
+func emit_line(scalar $cg, str $text) void {
+    emit_indent($cg);
+    emit($cg, $text . "\n");
+}
+
+func emit_indent(scalar $cg) void {
+    my int $i = 0;
+    while ($i < $cg->{"indent"}) {
+        emit($cg, "    ");
+        $i = $i + 1;
+    }
+}
+
+# Emit stack_pop if stack tracing is enabled
+func emit_stack_pop(scalar $cg) void {
+    if ($cg->{"enable_stack_trace"} == 1) {
+        emit_indent($cg);
+        emit($cg, "strada_stack_pop_il();\n");
+    }
+}
+
+# Emit inline stack_pop (no indent, for use in single-line statements)
+func emit_stack_pop_inline(scalar $cg) str {
+    if ($cg->{"enable_stack_trace"} == 1) {
+        return " strada_stack_pop_il();";
+    }
+    return "";
+}
+
+# Scan a statement to check if it contains any try blocks
+# Returns 1 if try found, 0 otherwise
+func stmt_has_try(scalar $stmt) int {
+    # If $stmt is null, $stmt->{"type"} returns 0/undef which won't match any NODE_* constant
+    my int $type = $stmt->{"type"} + 0;
+
+    # Direct try statement
+    if ($type == NODE_TRY_CATCH()) {
+        return 1;
+    }
+
+    # Check block statements
+    if ($type == NODE_BLOCK()) {
+        my scalar $stmts = $stmt->{"statements"};
+        my int $count = $stmt->{"statement_count"};
+        my int $i = 0;
+        while ($i < $count) {
+            if (stmt_has_try($stmts->[$i]) == 1) {
+                return 1;
+            }
+            $i = $i + 1;
+        }
+        return 0;
+    }
+
+    # Check if/elsif/else
+    if ($type == NODE_IF_STMT()) {
+        if (stmt_has_try($stmt->{"then_block"}) == 1) {
+            return 1;
+        }
+        if (stmt_has_try($stmt->{"else_block"}) == 1) {
+            return 1;
+        }
+        return 0;
+    }
+
+    # Check while/for loops
+    if ($type == NODE_WHILE_STMT() || $type == NODE_FOR_STMT()) {
+        if (stmt_has_try($stmt->{"body"}) == 1) {
+            return 1;
+        }
+        return 0;
+    }
+
+    # Check foreach
+    if ($type == NODE_FOREACH_STMT()) {
+        if (stmt_has_try($stmt->{"body"}) == 1) {
+            return 1;
+        }
+        return 0;
+    }
+
+    # Check switch/case
+    if ($type == NODE_SWITCH()) {
+        my scalar $cases = $stmt->{"cases"};
+        my int $count = $stmt->{"case_count"};
+        my int $i = 0;
+        while ($i < $count) {
+            my scalar $case_node = $cases->[$i];
+            if (stmt_has_try($case_node->{"body"}) == 1) {
+                return 1;
+            }
+            $i = $i + 1;
+        }
+        return 0;
+    }
+
+    return 0;
+}
+
+# Check if a function body contains any try blocks
+func func_body_has_try(scalar $body) int {
+    # If $body is null, statement_count will be 0/undef, loop won't run
+    my scalar $stmts = $body->{"statements"};
+    my int $count = $body->{"statement_count"} + 0;
+    my int $i = 0;
+    while ($i < $count) {
+        if (stmt_has_try($stmts->[$i]) == 1) {
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    return 0;
+}
+
+# Recursive check: does this statement (or any nested statement) contain
+# a `local` declaration? Used by gen_function to decide whether to emit
+# __local_saved_depth at function-top scope (so it stays visible across
+# nested if/try/switch/loop blocks).
+func stmt_has_local(scalar $stmt) int {
+    my int $type = $stmt->{"type"} + 0;
+    if ($type == NODE_LOCAL_DECL()) {
+        return 1;
+    }
+    if ($type == NODE_BLOCK()) {
+        my scalar $stmts = $stmt->{"statements"};
+        my int $count = $stmt->{"statement_count"};
+        my int $i = 0;
+        while ($i < $count) {
+            if (stmt_has_local($stmts->[$i]) == 1) { return 1; }
+            $i = $i + 1;
+        }
+        return 0;
+    }
+    if ($type == NODE_IF_STMT()) {
+        if (stmt_has_local($stmt->{"then_block"}) == 1) { return 1; }
+        if (stmt_has_local($stmt->{"else_block"}) == 1) { return 1; }
+        my scalar $elsif_blocks = $stmt->{"elsif_blocks"};
+        my int $elsif_count = $stmt->{"elsif_count"} + 0;
+        my int $ei = 0;
+        while ($ei < $elsif_count) {
+            if (stmt_has_local($elsif_blocks->[$ei]) == 1) { return 1; }
+            $ei = $ei + 1;
+        }
+        return 0;
+    }
+    if ($type == NODE_WHILE_STMT() || $type == NODE_FOR_STMT() || $type == NODE_FOREACH_STMT()) {
+        return stmt_has_local($stmt->{"body"});
+    }
+    if ($type == NODE_TRY_CATCH()) {
+        if (stmt_has_local($stmt->{"try_block"}) == 1) { return 1; }
+        if (stmt_has_local($stmt->{"catch_block"}) == 1) { return 1; }
+        return 0;
+    }
+    if ($type == NODE_SWITCH()) {
+        my scalar $cases = $stmt->{"cases"};
+        my int $count = $stmt->{"case_count"};
+        my int $i = 0;
+        while ($i < $count) {
+            if (stmt_has_local($cases->[$i]->{"body"}) == 1) { return 1; }
+            $i = $i + 1;
+        }
+        return 0;
+    }
+    return 0;
+}
+
+func func_body_has_local(scalar $body) int {
+    my scalar $stmts = $body->{"statements"};
+    my int $count = $body->{"statement_count"} + 0;
+    my int $i = 0;
+    while ($i < $count) {
+        if (stmt_has_local($stmts->[$i]) == 1) { return 1; }
+        $i = $i + 1;
+    }
+    return 0;
+}
+
+# Emit StradaValue* declaration with volatile qualifier when function contains try blocks
+# This is needed because setjmp/longjmp can corrupt non-volatile local variables
+# that were modified after setjmp was called. Using volatile ensures the variable
+# values survive longjmp in exception handling.
+# IMPORTANT: Use "StradaValue * volatile" (volatile pointer) not "volatile StradaValue *"
+# (pointer to volatile). The pointer value needs to survive longjmp.
+# We check func_has_try (set before generating the function) to determine if volatile is needed.
+func emit_sv_ptr_decl(scalar $cg, str $name) void {
+    my int $has_try = $cg->{"func_has_try"} + 0;
+    if ($has_try > 0) {
+        emit($cg, "StradaValue * volatile " . $name);
+    } else {
+        emit($cg, "StradaValue *" . $name);
+    }
+}
+
+func indent(scalar $cg) void {
+    $cg->{"indent"} = $cg->{"indent"} + 1;
+}
+
+func dedent(scalar $cg) void {
+    $cg->{"indent"} = $cg->{"indent"} - 1;
+}
+
+# Check if name is in comma-separated string (workaround for bootstrap limitation)
+func str_contains_name(str $list, str $name) int {
+    my str $search = "," . $name . ",";
+    my str $padded = "," . $list . ",";
+    my int $pos = index($padded, $search);
+    if ($pos >= 0) { return 1; }
+    return 0;
+}
+
+# Get index of name in comma-separated capture string
+func get_capture_index(str $list, str $name) int {
+    if ($list eq "") { return -1; }
+    my int $idx = 0;
+    my int $start = 0;
+    my int $len = length($list);
+    my int $i = 0;
+    while ($i <= $len) {
+        my str $ch = "";
+        if ($i < $len) { $ch = substr($list, $i, 1); }
+        if ($ch eq "," || $i == $len) {
+            my str $part = substr($list, $start, $i - $start);
+            if ($part eq $name) { return $idx; }
+            $idx = $idx + 1;
+            $start = $i + 1;
+        }
+        $i = $i + 1;
+    }
+    return -1;
+}
+
+# Generate code for regex pattern with variable interpolation
+# Pattern like "$foo" or "^$pattern$" gets converted to runtime string building
+func gen_regex_interpolated_pattern(scalar $cg, str $pattern) void {
+    # Parse pattern into parts (literals and variables)
+    # We manually track the count since bootstrap doesn't support scalar(@array)
+    my array @parts = ();
+    my int $num_parts = 0;
+    my int $len = length($pattern);
+    my int $i = 0;
+    my str $literal = "";
+
+    while ($i < $len) {
+        my str $ch = substr($pattern, $i, 1);
+
+        if ($ch eq "$") {
+            # Save any accumulated literal
+            if (length($literal) > 0) {
+                my hash %part = ();
+                $part{"type"} = "lit";
+                $part{"value"} = $literal;
+                push(@parts, \%part);
+                $num_parts = $num_parts + 1;
+                $literal = "";
+            }
+
+            # Parse variable name
+            $i = $i + 1;
+            my str $varname = "";
+            while ($i < $len) {
+                my str $vch = substr($pattern, $i, 1);
+                if ($vch eq "_" || ($vch ge "a" && $vch le "z") || ($vch ge "A" && $vch le "Z") || ($vch ge "0" && $vch le "9")) {
+                    $varname = $varname . $vch;
+                    $i = $i + 1;
+                } else {
+                    last;
+                }
+            }
+
+            if (length($varname) > 0) {
+                my hash %part = ();
+                $part{"type"} = "var";
+                $part{"value"} = $varname;
+                push(@parts, \%part);
+                $num_parts = $num_parts + 1;
+            } else {
+                # Not a variable - preserve $ as literal (regex end-of-line anchor)
+                $literal = $literal . "$";
+            }
+        } else {
+            $literal = $literal . $ch;
+            $i = $i + 1;
+        }
+    }
+
+    # Save any remaining literal
+    if (length($literal) > 0) {
+        my hash %part = ();
+        $part{"type"} = "lit";
+        $part{"value"} = $literal;
+        push(@parts, \%part);
+        $num_parts = $num_parts + 1;
+    }
+
+    # Generate concatenation code
+    if ($num_parts == 0) {
+        emit($cg, "strada_new_str(\"\")");
+        return;
+    }
+    if ($num_parts == 1) {
+        my scalar $p = $parts[0];
+        if ($p->{"type"} eq "var") {
+            emit($cg, $p->{"value"});
+        } else {
+            # STRADA_NEW_STR_LIT preserves embedded NUL bytes (sizeof(LIT)-1)
+            emit($cg, "STRADA_NEW_STR_LIT(\"");
+            emit_escaped_string($cg, $p->{"value"});
+            emit($cg, "\")");
+        }
+        return;
+    }
+
+    # Multiple parts - build with sequential concat (no leaked intermediates)
+    # Capture all parts into named temps, concat sequentially, free literal temps
+    emit($cg, "({ ");
+    # Capture all parts into named temps
+    my int $pi = 0;
+    while ($pi < $num_parts) {
+        my scalar $p = $parts[$pi];
+        emit($cg, "StradaValue *__rp" . $pi . " = ");
+        if ($p->{"type"} eq "var") {
+            emit($cg, $p->{"value"});
+        } else {
+            emit($cg, "STRADA_NEW_STR_LIT(\"");
+            emit_escaped_string($cg, $p->{"value"});
+            emit($cg, "\")");
+        }
+        emit($cg, "; ");
+        $pi = $pi + 1;
+    }
+    # Build chain: first concat, then concat_inplace for rest (frees intermediates)
+    emit($cg, "StradaValue *__rr = strada_concat_sv(__rp0, __rp1); ");
+    $pi = 2;
+    while ($pi < $num_parts) {
+        emit($cg, "__rr = strada_concat_inplace(__rr, __rp" . $pi . "); ");
+        $pi = $pi + 1;
+    }
+    # Free literal temps (not variable refs which are borrowed)
+    $pi = 0;
+    while ($pi < $num_parts) {
+        my scalar $p = $parts[$pi];
+        if ($p->{"type"} eq "lit") {
+            emit($cg, "strada_decref(__rp" . $pi . "); ");
+        }
+        $pi = $pi + 1;
+    }
+    emit($cg, "__rr; })");
+}
+
+# Helper to emit an escaped C string
+func emit_escaped_string(scalar $cg, str $s) void {
+    my int $i = 0;
+    my int $len = bytes($s);
+    while ($i < $len) {
+        my int $code = char_at($s, $i);
+        if ($code == ord("\\")) {
+            emit($cg, "\\\\");
+        } elsif ($code == ord("\"")) {
+            emit($cg, "\\\"");
+        } elsif ($code == ord("\n")) {
+            emit($cg, "\\n");
+        } elsif ($code == ord("\t")) {
+            emit($cg, "\\t");
+        } elsif ($code == ord("\r")) {
+            emit($cg, "\\r");
+        } elsif ($code == 0) {
+            # 3-digit octal so a following digit isn't merged into the escape
+            emit($cg, "\\000");
+        } elsif ($code < ord(" ") || $code == 127) {
+            my int $o2 = $code / 64;
+            my int $o1 = ($code / 8) % 8;
+            my int $o0 = $code % 8;
+            emit($cg, "\\" . chr(48 + $o2) . chr(48 + $o1) . chr(48 + $o0));
+        } else {
+            emit($cg, substr_bytes($s, $i, 1));
+        }
+        $i = $i + 1;
+    }
+}
+
+# ============================================================
+# Type Conversion
+# ============================================================
+
+func type_to_c(int $type) str {
+    if ($type == TYPE_INT()) { return "StradaValue*"; }
+    if ($type == TYPE_NUM()) { return "StradaValue*"; }
+    if ($type == TYPE_STR()) { return "StradaValue*"; }
+    if ($type == TYPE_BOOL()) { return "StradaValue*"; }
+    if ($type == TYPE_ARRAY()) { return "StradaValue*"; }
+    if ($type == TYPE_HASH()) { return "StradaValue*"; }
+    if ($type == TYPE_SCALAR()) { return "StradaValue*"; }
+    if ($type == TYPE_VOID()) { return "void"; }
+    if ($type == TYPE_DYNAMIC()) { return "StradaValue*"; }
+    if ($type == TYPE_FUNCPTR()) { return "void*"; }  # Function pointer
+    return "StradaValue*";
+}
+
+# ============================================================
+# Expression Code Generation
+# ============================================================
+
+# Helper: emit a numeric operand efficiently
+# For literals, emit the value directly; otherwise use strada_to_num()
+func emit_num_operand(scalar $cg, scalar $expr) void {
+    my int $type = $expr->{"type"};
+    if ($type == NODE_INT_LITERAL()) {
+        my str $val = $expr->{"value"};
+        # Check if it's a hex, octal, or binary literal
+        # Also check for leading zeros (octal in C)
+        my str $first = substr($val, 0, 1);
+        my str $second = "";
+        if (length($val) > 1) {
+            $second = substr($val, 1, 1);
+        }
+        if (substr($val, 0, 2) eq "0x" || substr($val, 0, 2) eq "0X" ||
+            substr($val, 0, 2) eq "0o" || substr($val, 0, 2) eq "0O" ||
+            substr($val, 0, 2) eq "0b" || substr($val, 0, 2) eq "0B") {
+            # Cast hex/octal/binary to double
+            emit($cg, "(double)(" . $val . ")");
+        } elsif ($first eq "0" && length($val) > 1 && $second ne ".") {
+            # Leading zero means octal in C - must cast to preserve value
+            emit($cg, "(double)(" . $val . ")");
+        } else {
+            emit($cg, $val . ".0");
+        }
+    } elsif ($type == NODE_NUM_LITERAL()) {
+        emit($cg, $expr->{"value"});
+    } elsif ($type == NODE_BINARY_OP() && $cg->{"has_overloads"} == 0) {
+        # Inline arithmetic sub-expressions: emit C arithmetic directly,
+        # skipping intermediate StradaValue creation
+        my str $op = $expr->{"op"};
+        if ($op eq "+" || $op eq "-" || $op eq "*") {
+            emit($cg, "(");
+            emit_num_operand($cg, $expr->{"left"});
+            emit($cg, " " . $op . " ");
+            emit_num_operand($cg, $expr->{"right"});
+            emit($cg, ")");
+        } else {
+            # Non-inlineable op: fall through to generic handler
+            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $expr) == 1) {
+                emit($cg, "({ StradaValue *__num_tmp = ");
+                gen_expression($cg, $expr);
+                emit($cg, "; double __num_val = strada_to_num(__num_tmp); strada_decref(__num_tmp); __num_val; })");
+            } else {
+                emit($cg, "strada_to_num(");
+                gen_expression($cg, $expr);
+                emit($cg, ")");
+            }
+        }
+    } else {
+        # Check if expression creates a temp that needs cleanup
+        if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $expr) == 1) {
+            # Wrap in statement expression to capture and cleanup temp
+            emit($cg, "({ StradaValue *__num_tmp = ");
+            gen_expression($cg, $expr);
+            emit($cg, "; double __num_val = strada_to_num(__num_tmp); strada_decref(__num_tmp); __num_val; })");
+        } else {
+            emit($cg, "strada_to_num(");
+            gen_expression($cg, $expr);
+            emit($cg, ")");
+        }
+    }
+}
+
+# Helper: emit an integer operand efficiently
+# For literals, emit the value directly; otherwise use strada_to_int()
+func emit_int_operand(scalar $cg, scalar $expr) void {
+    my int $type = $expr->{"type"};
+    if ($type == NODE_INT_LITERAL()) {
+        # Emit with an explicit 64-bit cast so the surrounding C arithmetic /
+        # shift is evaluated in int64, not 32-bit int. Without it `100000*100000`
+        # and `1 << 40` overflowed before being boxed as a tagged int.
+        emit($cg, "(int64_t)" . $expr->{"value"});
+    } elsif ($type == NODE_NUM_LITERAL()) {
+        emit($cg, "(int64_t)" . $expr->{"value"});
+    } elsif ($type == NODE_BINARY_OP() && $cg->{"has_overloads"} == 0) {
+        # Inline arithmetic sub-expressions: emit C arithmetic directly,
+        # skipping intermediate StradaValue creation
+        my str $op = $expr->{"op"};
+        if ($op eq "+" || $op eq "-" || $op eq "*") {
+            # CSE peephole: same inline int accessor on both sides — fetch once.
+            if (is_inline_int_accessor_call($cg, $expr->{"left"}) == 1 && accessor_call_eq($expr->{"left"}, $expr->{"right"}) == 1) {
+                my int $cseid = $cg->{"tmp_counter"} + 0;
+                $cg->{"tmp_counter"} = $cseid + 1;
+                emit($cg, "({ int64_t __cse" . $cseid . " = ");
+                emit_int_operand($cg, $expr->{"left"});
+                emit($cg, "; __cse" . $cseid . " " . $op . " __cse" . $cseid . "; })");
+            } else {
+                emit($cg, "(");
+                emit_int_operand($cg, $expr->{"left"});
+                emit($cg, " " . $op . " ");
+                emit_int_operand($cg, $expr->{"right"});
+                emit($cg, ")");
+            }
+        } else {
+            # Non-inlineable op: fall through to generic handler
+            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $expr) == 1) {
+                emit($cg, "({ StradaValue *__int_tmp = ");
+                gen_expression($cg, $expr);
+                emit($cg, "; int64_t __int_val; if (STRADA_IS_TAGGED_INT(__int_tmp)) { __int_val = STRADA_TAGGED_INT_VAL(__int_tmp); } else { __int_val = strada_to_int(__int_tmp); strada_decref(__int_tmp); } __int_val; })");
+            } else {
+                emit($cg, "strada_to_int(");
+                gen_expression($cg, $expr);
+                emit($cg, ")");
+            }
+        }
+    } elsif ($type == NODE_VARIABLE()) {
+        emit($cg, "strada_to_int(");
+        gen_expression($cg, $expr);
+        emit($cg, ")");
+    } elsif ($type == NODE_METHOD_CALL() && $expr->{"arg_count"} == 0 && length(is_inline_accessor($cg, $expr->{"method"})) > 0 && expr_is_int_typed($cg, $expr) == 1) {
+        # Inline int accessor in int context: emit strada_hv_fetch_int_ph directly,
+        # returning int64_t with no StradaValue temp / incref / decref.
+        my str $imethod = $expr->{"method"};
+        my int $ihash = djb2_hash_32($imethod);
+        my scalar $itarget = $expr->{"base_object"};
+        if (!$itarget) { $itarget = $expr->{"object"}; }
+        my int $itarget_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $itarget) == 1;
+        if ($itarget_cleanup == 1) {
+            emit($cg, "({ StradaValue *__iao = ");
+            gen_expression($cg, $itarget);
+            emit($cg, "; int64_t __iar = strada_hv_fetch_int_ph(__iao, \"" . $imethod . "\", " . $ihash . "u); strada_decref(__iao); __iar; })");
+        } else {
+            emit($cg, "strada_hv_fetch_int_ph(");
+            gen_expression($cg, $itarget);
+            emit($cg, ", \"" . $imethod . "\", " . $ihash . "u)");
+        }
+    } else {
+        # Int-returning function calls whose bodies are int arithmetic / params /
+        # inner calls return tagged ints, so extract the tagged value inline — this
+        # keeps the hot recursive-int path (e.g. fib's fib($n-1)+fib($n-2)) fast,
+        # with no per-call branch. Calls that may return a *heap* int/num (e.g. a
+        # body that does `return -1;`) are NOT routed here in comparison context —
+        # the int comparison codegen sends those through emit_num_operand (double),
+        # which reads them correctly. (See check_overload_binary / the cmp_int gate.)
+        my int $is_int_call = 0;
+        if ($type == NODE_CALL() && expr_is_int_typed($cg, $expr) == 1) { $is_int_call = 1; }
+        if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $expr) == 1) {
+            if ($is_int_call == 1) {
+                emit($cg, "({ StradaValue *__int_tmp = ");
+                gen_expression($cg, $expr);
+                emit($cg, "; STRADA_TAGGED_INT_VAL(__int_tmp); })");
+            } else {
+                emit($cg, "({ StradaValue *__int_tmp = ");
+                gen_expression($cg, $expr);
+                emit($cg, "; int64_t __int_val = strada_to_int(__int_tmp); strada_decref(__int_tmp); __int_val; })");
+            }
+        } else {
+            emit($cg, "strada_to_int(");
+            gen_expression($cg, $expr);
+            emit($cg, ")");
+        }
+    }
+}
+
+# Helper: determine if an expression is guaranteed to produce an integer value
+# Used to select STRADA_MAKE_TAGGED_INT() (zero-alloc) vs strada_new_num() (heap-alloc)
+# True when an expression's value is statically known to be NUMERIC —
+# a tagged int, heap INT, or heap NUM — i.e. canonical storage for a
+# num-declared variable. Strings/refs/unknowns return 0 and get coerced
+# at num boundaries (see the num coercion in declarations/assignment/
+# return). Arithmetic ops always produce numeric values regardless of
+# operand types, so they pass without recursion.
+func expr_is_numeric(scalar $cg, scalar $expr) int {
+    my int $t = $expr->{"type"};
+    if ($t == NODE_NUM_LITERAL() || $t == NODE_INT_LITERAL()) {
+        return 1;
+    }
+    if ($t == NODE_VARIABLE()) {
+        my str $vname = escape_c_keyword($expr->{"name"});
+        if (length("" . $cg->{"num_vars"}->{$vname}) > 0) {
+            return 1;
+        }
+        # int-declared vars are numeric too
+        if (length("" . $cg->{"int_vars"}->{$vname}) > 0) {
+            return 1;
+        }
+        return 0;
+    }
+    if ($t == NODE_BINARY_OP()) {
+        my str $op = $expr->{"op"};
+        if ($op eq "+" || $op eq "-" || $op eq "*" || $op eq "/"
+            || $op eq "%" || $op eq "**") {
+            return 1;
+        }
+        return 0;
+    }
+    if ($t == NODE_UNARY_OP()) {
+        if ($expr->{"op"} eq "-") {
+            return 1;
+        }
+        return 0;
+    }
+    if ($t == NODE_CALL()) {
+        # math:: builtins and the timing calls return owned numerics
+        my str $name = $expr->{"name"};
+        if (length($name) > 6 && substr($name, 0, 6) eq "math::") {
+            return 1;
+        }
+        if (length($name) > 6 && substr($name, 0, 6) eq "core::") {
+            $name = "sys::" . substr($name, 6, length($name) - 6);
+        }
+        if ($name eq "sys::hires_time" || $name eq "sys::time") {
+            return 1;
+        }
+    }
+    # int-typed exprs (incl. int-returning user calls) are numeric
+    if (expr_is_int_typed($cg, $expr) == 1) {
+        return 1;
+    }
+    return 0;
+}
+
+func expr_is_int_typed(scalar $cg, scalar $expr) int {
+    my int $type = $expr->{"type"};
+    if ($type == NODE_INT_LITERAL()) {
+        return 1;
+    }
+    # Variables declared as int
+    if ($type == NODE_VARIABLE()) {
+        my str $vname = escape_c_keyword($expr->{"name"});
+        my scalar $iv = $cg->{"int_vars"};
+        if (length("" . $iv->{$vname}) > 0) {
+            return 1;
+        }
+        return 0;
+    }
+    if ($type == NODE_BINARY_OP()) {
+        my str $op = $expr->{"op"};
+        if ($op eq "+" || $op eq "-" || $op eq "*" || $op eq "%") {
+            if (expr_is_int_typed($cg, $expr->{"left"}) == 1 && expr_is_int_typed($cg, $expr->{"right"}) == 1) {
+                return 1;
+            }
+        }
+        return 0;
+    }
+    # Method calls: check inline accessor or devirtualized method return type
+    if ($type == NODE_METHOD_CALL()) {
+        my int $arg_count = $expr->{"arg_count"};
+        my str $method = $expr->{"method"};
+
+        # Check 1: Inline accessor calls ($self->x() where x is has rw int $x)
+        if ($arg_count == 0) {
+            my str $cur_pkg = $cg->{"current_fn_package"};
+            if (length($cur_pkg) > 0 && $cur_pkg ne "main") {
+                my scalar $ha_attrs = $cg->{"has_attrs"};
+                my int $ha_count = $cg->{"has_attr_count"};
+                my scalar $acc_lookup = $cg->{"accessor_lookup"};
+                my int $hai = 0;
+                while ($hai < $ha_count) {
+                    my str $attr_name = $ha_attrs->[$hai]->{"name"};
+                    my str $attr_pkg = $ha_attrs->[$hai]->{"package"};
+                    if ($attr_name eq $method && ($attr_pkg eq $cur_pkg || exists($acc_lookup, $attr_pkg . "\t" . $method))) {
+                        my int $at = $ha_attrs->[$hai]->{"attr_type"};
+                        if ($at == TYPE_INT()) {
+                            return 1;
+                        }
+                        return 0;
+                    }
+                    $hai = $hai + 1;
+                }
+            }
+        }
+
+        # Check 2: Devirtualized method calls (known object type → direct function)
+        my scalar $meth_target = $expr->{"base_object"};
+        if (!$meth_target) {
+            $meth_target = $expr->{"object"};
+        }
+        if ($meth_target && $meth_target->{"type"} == NODE_VARIABLE()) {
+            my str $kt_name = escape_c_keyword($meth_target->{"name"});
+            my scalar $kt = $cg->{"known_types"};
+            if ($kt) {
+                my str $known_pkg = "" . $kt->{$kt_name};
+                if (length($known_pkg) > 0) {
+                    my str $direct_name = $known_pkg . "_" . $method;
+                    my int $dci = index($direct_name, "::");
+                    while ($dci >= 0) {
+                        $direct_name = substr($direct_name, 0, $dci) . "_" . substr($direct_name, $dci + 2, length($direct_name) - $dci - 2);
+                        $dci = index($direct_name, "::");
+                    }
+                    my scalar $fri = $cg->{"func_ret_int"};
+                    if ($fri && length("" . $fri->{$direct_name}) > 0) {
+                        return 1;
+                    }
+                }
+            }
+        }
+
+        return 0;
+    }
+    # Function calls: check if function returns int
+    if ($type == NODE_CALL()) {
+        my str $fn_name = sanitize_name($expr->{"name"});
+        my scalar $fri = $cg->{"func_ret_int"};
+        if ($fri) {
+            if (length("" . $fri->{$fn_name}) > 0) {
+                return 1;
+            }
+        }
+        return 0;
+    }
+    return 0;
+}
+
+# Helper: emit a bool operand efficiently
+# For literals, emit the value directly; otherwise use strada_to_bool()
+func emit_bool_operand(scalar $cg, scalar $expr) void {
+    my int $type = $expr->{"type"};
+    if ($type == NODE_INT_LITERAL()) {
+        my str $val = $expr->{"value"};
+        if ($val eq "0") {
+            emit($cg, "0");
+        } else {
+            emit($cg, "1");
+        }
+    } elsif ($type == NODE_NUM_LITERAL()) {
+        my str $val = $expr->{"value"};
+        if ($val eq "0" || $val eq "0.0") {
+            emit($cg, "0");
+        } else {
+            emit($cg, "1");
+        }
+    } else {
+        # Check if expression creates a temp that needs cleanup
+        if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $expr) == 1) {
+            # Wrap in statement expression to capture and cleanup temp
+            emit($cg, "({ StradaValue *__bool_tmp = ");
+            gen_expression($cg, $expr);
+            emit($cg, "; int __bool_val = strada_to_bool(__bool_tmp); strada_decref(__bool_tmp); __bool_val; })");
+        } else {
+            emit($cg, "strada_to_bool(");
+            gen_expression($cg, $expr);
+            emit($cg, ")");
+        }
+    }
+}
+
+# Helper: emit an expression as a C string in extern mode
+# Converts non-string types (int, num) to strings using helper functions
+func emit_extern_str_operand(scalar $cg, scalar $expr) void {
+    my int $type = $expr->{"type"};
+
+    # String literals - emit as raw C string
+    if ($type == NODE_STR_LITERAL()) {
+        gen_expression($cg, $expr);
+        return;
+    }
+
+    # Integer literals - convert to string
+    if ($type == NODE_INT_LITERAL()) {
+        emit($cg, "strada_int_to_cstr(" . $expr->{"value"} . ")");
+        return;
+    }
+
+    # Number literals - convert to string
+    if ($type == NODE_NUM_LITERAL()) {
+        emit($cg, "strada_num_to_cstr(" . $expr->{"value"} . ")");
+        return;
+    }
+
+    # Variables - check extern_params for type and convert if needed
+    if ($type == NODE_VARIABLE()) {
+        my str $var_name = $expr->{"name"};
+        my scalar $extern_params = $cg->{"extern_params"};
+        if ($extern_params) {
+            my scalar $param_type = $extern_params->{$var_name};
+            if ($param_type) {
+                if ($param_type == TYPE_INT() || $param_type == TYPE_BOOL() || $param_type == TYPE_INT32() || $param_type == TYPE_INT64()) {
+                    emit($cg, "strada_int_to_cstr(" . $var_name . ")");
+                    return;
+                } elsif ($param_type == TYPE_NUM() || $param_type == TYPE_FLOAT32() || $param_type == TYPE_FLOAT64()) {
+                    emit($cg, "strada_num_to_cstr(" . $var_name . ")");
+                    return;
+                }
+            }
+        }
+        # String type or unknown - emit as-is
+        emit($cg, $var_name);
+        return;
+    }
+
+    # Binary op (nested concatenation) - recurse
+    if ($type == NODE_BINARY_OP() && $expr->{"op"} eq ".") {
+        emit($cg, "strada_cstr_concat(");
+        emit_extern_str_operand($cg, $expr->{"left"});
+        emit($cg, ", ");
+        emit_extern_str_operand($cg, $expr->{"right"});
+        emit($cg, ")");
+        return;
+    }
+
+    # Other expressions - just emit (assume they return char*)
+    gen_expression($cg, $expr);
+}
+
+# Helper: emit a while condition for regex /g match with position tracking
+func emit_regex_g_condition(scalar $cg, scalar $expr, str $pos_var) void {
+    my str $pattern = $expr->{"pattern"};
+    my str $flags = $expr->{"flags"};
+    my str $op = $expr->{"op"};
+
+    # Get the target string
+    emit($cg, "({ char *__re_str = strada_to_str(");
+    gen_expression($cg, $expr->{"target"});
+    emit($cg, "); int __re_res = ");
+    if ($op eq "!~") { emit($cg, "!"); }
+    emit($cg, "strada_regex_match_global(__re_str, \"");
+    # Emit pattern with C escaping
+    my int $i = 0;
+    my int $len = length($pattern);
+    while ($i < $len) {
+        my str $ch = substr($pattern, $i, 1);
+        if ($ch eq "\\") { emit($cg, "\\\\"); }
+        elsif ($ch eq "\"") { emit($cg, "\\\""); }
+        elsif ($ch eq "\n") { emit($cg, "\\n"); }
+        elsif ($ch eq "\t") { emit($cg, "\\t"); }
+        else { emit($cg, $ch); }
+        $i = $i + 1;
+    }
+    emit($cg, "\", \"" . $flags . "\", &" . $pos_var . "); free(__re_str); __re_res; })");
+}
+
+# ===== Condition-level CSE for repeated literal-key hash fetches =====
+# `if ($h{"k"} > 0 && $h{"k"} < 100)` probes the hash twice. When the
+# condition tree is PURE (no calls, assignments, increments, regex ops —
+# nothing that could mutate %h or depend on evaluation order) and the
+# program never uses tie (a tied FETCH is observable per-mention), each
+# duplicated fetch is hoisted into a temp evaluated once per condition
+# evaluation. Short-circuit note: the hoisted fetch runs even when the
+# `&&` left side is false — safe for untied hashes (plain reads have no
+# side effects and do not autovivify).
+
+# Is the expression tree pure enough to hoist hash fetches across?
+# Strict whitelist: anything unrecognized (calls, method calls, regex
+# matches, assignments, ++/--) disables CSE for the whole condition.
+func cond_cse_pure(scalar $expr) int {
+    my int $t = $expr->{"type"};
+    if ($t == NODE_VARIABLE() || $t == NODE_INT_LITERAL() || $t == NODE_NUM_LITERAL()
+        || $t == NODE_STR_LITERAL() || $t == NODE_UNDEF()) {
+        return 1;
+    }
+    if ($t == NODE_BINARY_OP()) {
+        if (cond_cse_pure($expr->{"left"}) == 0) { return 0; }
+        return cond_cse_pure($expr->{"right"});
+    }
+    if ($t == NODE_UNARY_OP()) {
+        return cond_cse_pure($expr->{"operand"});
+    }
+    if ($t == NODE_TERNARY()) {
+        if (cond_cse_pure($expr->{"condition"}) == 0) { return 0; }
+        if (cond_cse_pure($expr->{"true_expr"}) == 0) { return 0; }
+        return cond_cse_pure($expr->{"false_expr"});
+    }
+    if ($t == NODE_HASH_ACCESS()) {
+        if (cond_cse_pure($expr->{"hash"}) == 0) { return 0; }
+        return cond_cse_pure($expr->{"key"});
+    }
+    return 0;
+}
+
+# Collect CSE candidates (literal-key accesses on simple hash variables)
+# into $cg->{"cse_ids"} / $cg->{"cse_nodes"} parallel arrays.
+func cond_cse_collect(scalar $cg, scalar $expr) void {
+    my int $t = $expr->{"type"};
+    if ($t == NODE_HASH_ACCESS()) {
+        my scalar $h = $expr->{"hash"};
+        my scalar $k = $expr->{"key"};
+        if ($h->{"type"} == NODE_VARIABLE() && $k->{"type"} == NODE_STR_LITERAL()) {
+            my int $n = $cg->{"cse_n"};
+            $cg->{"cse_ids"}->[$n] = $h->{"name"} . chr(31) . $k->{"value"};
+            $cg->{"cse_nodes"}->[$n] = $expr;
+            $cg->{"cse_n"} = $n + 1;
+        } else {
+            cond_cse_collect($cg, $h);
+            cond_cse_collect($cg, $k);
+        }
+        return;
+    }
+    if ($t == NODE_BINARY_OP()) {
+        cond_cse_collect($cg, $expr->{"left"});
+        cond_cse_collect($cg, $expr->{"right"});
+        return;
+    }
+    if ($t == NODE_UNARY_OP()) {
+        cond_cse_collect($cg, $expr->{"operand"});
+        return;
+    }
+    if ($t == NODE_TERNARY()) {
+        cond_cse_collect($cg, $expr->{"condition"});
+        cond_cse_collect($cg, $expr->{"true_expr"});
+        cond_cse_collect($cg, $expr->{"false_expr"});
+        return;
+    }
+}
+
+# Statement-position condition emitter (if/elsif/while/until/do-while/for).
+# Applies the hash-fetch CSE when safe, else delegates to emit_condition.
+# Expression-position conditions (ternaries) keep plain emit_condition.
+func emit_condition_cse(scalar $cg, scalar $expr) void {
+    if ($cg->{"uses_tie"} == 1 || $cg->{"cleanup_enabled"} != 1) {
+        emit_condition($cg, $expr);
+        return;
+    }
+    if (cond_cse_pure($expr) == 0) {
+        emit_condition($cg, $expr);
+        return;
+    }
+    $cg->{"cse_n"} = 0;
+    cond_cse_collect($cg, $expr);
+    my int $n = $cg->{"cse_n"};
+    if ($n < 2) {
+        emit_condition($cg, $expr);
+        return;
+    }
+    my scalar $ids = $cg->{"cse_ids"};
+    my scalar $nodes = $cg->{"cse_nodes"};
+    # Count occurrences of each id.
+    my hash %count = ();
+    my int $i = 0;
+    while ($i < $n) {
+        my str $cid = $ids->[$i];
+        $count{$cid} = $count{$cid} + 1;
+        $i = $i + 1;
+    }
+    # Tag nodes of duplicated ids with a shared temp; emit each temp's
+    # init (the real fetch) once, from the first — still untagged — node.
+    my hash %temp_for = ();
+    my array @temps = ();
+    my int $temp_count = 0;
+    my int $opened = 0;
+    $i = 0;
+    while ($i < $n) {
+        my str $cid = $ids->[$i];
+        if ($count{$cid} >= 2) {
+            my str $tmp = "" . $temp_for{$cid};
+            if (length($tmp) == 0) {
+                my int $tc = $cg->{"tmp_counter"};
+                $cg->{"tmp_counter"} = $tc + 1;
+                $tmp = "__cse_" . $tc;
+                if ($opened == 0) {
+                    emit($cg, "(({ ");
+                    $opened = 1;
+                }
+                emit($cg, "StradaValue *" . $tmp . " = ");
+                gen_expression($cg, $nodes->[$i]);
+                emit($cg, "; ");
+                $temp_for{$cid} = $tmp;
+                $temps[$temp_count] = $tmp;
+                $temp_count = $temp_count + 1;
+            }
+            my scalar $nd = $nodes->[$i];
+            $nd->{"cse_temp"} = $tmp;
+        }
+        $i = $i + 1;
+    }
+    if ($opened == 0) {
+        emit_condition($cg, $expr);
+        return;
+    }
+    emit($cg, "int __cse_c = ");
+    emit_condition($cg, $expr);
+    emit($cg, "; ");
+    $i = 0;
+    while ($i < $temp_count) {
+        emit($cg, "strada_decref(" . $temps[$i] . "); ");
+        $i = $i + 1;
+    }
+    emit($cg, "__cse_c; }))");
+    # Clear tags: the same AST may be consulted again (e.g. needs_temp_cleanup
+    # from an outer context) and must regenerate real fetches elsewhere.
+    $i = 0;
+    while ($i < $n) {
+        my scalar $nd = $nodes->[$i];
+        $nd->{"cse_temp"} = "";
+        $i = $i + 1;
+    }
+}
+
+# Helper: emit a condition as raw C boolean (avoids strada_new_int allocation)
+# Used for while/for/if conditions to prevent memory leaks
+func emit_condition(scalar $cg, scalar $expr) void {
+    my int $type = $expr->{"type"};
+
+    # Literals: emit 0 or 1 directly
+    if ($type == NODE_INT_LITERAL()) {
+        my str $val = $expr->{"value"};
+        if ($val eq "0") {
+            emit($cg, "0");
+        } else {
+            emit($cg, "1");
+        }
+        return;
+    }
+    if ($type == NODE_NUM_LITERAL()) {
+        my str $val = $expr->{"value"};
+        if ($val eq "0" || $val eq "0.0") {
+            emit($cg, "0");
+        } else {
+            emit($cg, "1");
+        }
+        return;
+    }
+
+    # Binary operators: handle comparisons and logical ops without allocation
+    if ($type == NODE_BINARY_OP()) {
+        my str $op = $expr->{"op"};
+
+        # Comparison operators: emit raw C comparison
+        if ($op eq "==" || $op eq "!=" || $op eq "<" || $op eq ">" || $op eq "<=" || $op eq ">=") {
+            # Use int path when both sides are int-typed (avoids int->double conversion)
+            if ($cg->{"has_overloads"} == 0 && expr_is_int_typed($cg, $expr->{"left"}) == 1 && expr_is_int_typed($cg, $expr->{"right"}) == 1) {
+                emit($cg, "(");
+                emit_int_operand($cg, $expr->{"left"});
+                emit($cg, " " . $op . " ");
+                emit_int_operand($cg, $expr->{"right"});
+                emit($cg, ")");
+            } else {
+                emit($cg, "(");
+                emit_num_operand($cg, $expr->{"left"});
+                emit($cg, " " . $op . " ");
+                emit_num_operand($cg, $expr->{"right"});
+                emit($cg, ")");
+            }
+            return;
+        }
+
+        # Logical AND: recurse on both sides
+        if ($op eq "&&") {
+            emit($cg, "(");
+            emit_condition($cg, $expr->{"left"});
+            emit($cg, " && ");
+            emit_condition($cg, $expr->{"right"});
+            emit($cg, ")");
+            return;
+        }
+
+        # Logical OR: recurse on both sides
+        if ($op eq "||") {
+            emit($cg, "(");
+            emit_condition($cg, $expr->{"left"});
+            emit($cg, " || ");
+            emit_condition($cg, $expr->{"right"});
+            emit($cg, ")");
+            return;
+        }
+    }
+
+    # Unary NOT: recurse
+    if ($type == NODE_UNARY_OP()) {
+        my str $op = $expr->{"op"};
+        if ($op eq "!") {
+            emit($cg, "!(");
+            emit_condition($cg, $expr->{"operand"});
+            emit($cg, ")");
+            return;
+        }
+    }
+
+    # Function call: handle defined() specially to avoid leak
+    if ($type == NODE_CALL()) {
+        my str $name = $expr->{"name"};
+        if ($name eq "defined") {
+            my scalar $args = $expr->{"args"};
+            my scalar $arg = $args->[0];
+            # Use non-allocating strada_defined_bool, cleanup arg if temporary
+            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $arg) == 1) {
+                emit($cg, "({ StradaValue *__def_tmp = ");
+                gen_expression($cg, $arg);
+                emit($cg, "; int __def_res = strada_defined_bool(__def_tmp); strada_decref(__def_tmp); __def_res; })");
+            } else {
+                emit($cg, "strada_defined_bool(");
+                gen_expression($cg, $arg);
+                emit($cg, ")");
+            }
+            return;
+        }
+    }
+
+    # Fallback: use strada_to_bool on the expression
+    # If expression produces temporary value, capture and free it
+    if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $expr) == 1) {
+        emit($cg, "({ StradaValue *__cond_tmp = ");
+        gen_expression($cg, $expr);
+        emit($cg, "; int __cond_res = strada_to_bool(__cond_tmp); strada_decref(__cond_tmp); __cond_res; })");
+    } else {
+        emit($cg, "strada_to_bool(");
+        gen_expression($cg, $expr);
+        emit($cg, ")");
+    }
+}
+
+# Helper: check if expression is a simple variable (doesn't need cleanup)
+func is_variable_expr(scalar $expr) int {
+    my int $type = $expr->{"type"};
+    if ($type == NODE_VARIABLE()) {
+        return 1;
+    }
+    return 0;
+}
+
+# Helper: check if expression produces an owned StradaValue* that needs cleanup
+# Returns 1 for expressions we KNOW produce owned pointers (literals, concat, arithmetic)
+# Returns 0 for unknown types (function calls, etc.) to be safe
+# Set of builtin call names whose results are owned StradaValue* (the
+# caller must decref temps). Built ONCE into a hash at codegen_new time and
+# probed with a single hash lookup in needs_temp_cleanup -- this used to be
+# a ~300-arm `$name eq` chain evaluated on every call-argument check (7.5%
+# of compile time on real programs). To register a new owned-return
+# builtin, add its (sys::-normalized) name to this list.
+func build_owned_call_builtins() scalar {
+    my hash %owned_set = ();
+    # One store per name: the frozen bootstrap compiler cannot parse
+    # multi-line array literals, so no list-plus-loop here.
+    $owned_set{"chr"} = 1;
+    $owned_set{"ord"} = 1;
+    $owned_set{"sys::byte"} = 1;
+    $owned_set{"sys::base64_encode"} = 1;
+    $owned_set{"sys::base64_decode"} = 1;
+    $owned_set{"sys::pack"} = 1;
+    $owned_set{"sys::unpack"} = 1;
+    $owned_set{"sys::hex"} = 1;
+    $owned_set{"sys::ord_byte"} = 1;
+    $owned_set{"sys::get_byte"} = 1;
+    $owned_set{"sys::vec_get"} = 1;
+    $owned_set{"sys::vec_set"} = 1;
+    $owned_set{"sys::byte_length"} = 1;
+    $owned_set{"sys::byte_substr"} = 1;
+    $owned_set{"sys::set_byte"} = 1;
+    $owned_set{"sys::random_bytes"} = 1;
+    $owned_set{"sys::random_bytes_hex"} = 1;
+    $owned_set{"sys::global_get"} = 1;
+    $owned_set{"sys::global_exists"} = 1;
+    $owned_set{"sys::global_keys"} = 1;
+    $owned_set{"sys::stack_trace"} = 1;
+    $owned_set{"sys::caller"} = 1;
+    $owned_set{"sys::full_profile_start"} = 1;
+    $owned_set{"sys::full_profile_stop"} = 1;
+    $owned_set{"sys::gc_collections"} = 1;
+    $owned_set{"sys::gc_freed"} = 1;
+    $owned_set{"sys::arena_active"} = 1;
+    $owned_set{"sys::set_recursion_limit"} = 1;
+    $owned_set{"sys::get_recursion_limit"} = 1;
+    $owned_set{"sys::epoll_create"} = 1;
+    $owned_set{"sys::epoll_add"} = 1;
+    $owned_set{"sys::epoll_mod"} = 1;
+    $owned_set{"sys::epoll_del"} = 1;
+    $owned_set{"sys::epoll_wait"} = 1;
+    $owned_set{"sys::eventfd"} = 1;
+    $owned_set{"sys::eventfd_signal"} = 1;
+    $owned_set{"sys::eventfd_drain"} = 1;
+    $owned_set{"sys::socket_try_recv"} = 1;
+    $owned_set{"sys::socket_try_send"} = 1;
+    $owned_set{"sys::socket_try_accept"} = 1;
+    $owned_set{"async::io_wait"} = 1;
+    $owned_set{"sys::coro_create"} = 1;
+    $owned_set{"sys::coro_resume"} = 1;
+    $owned_set{"sys::coro_yield_io"} = 1;
+    $owned_set{"sys::coro_state"} = 1;
+    $owned_set{"sys::coro_wait_fd"} = 1;
+    $owned_set{"sys::coro_wait_mask"} = 1;
+    $owned_set{"sys::coro_wait_timeout"} = 1;
+    $owned_set{"sys::coro_result"} = 1;
+    $owned_set{"sys::coro_free"} = 1;
+    $owned_set{"sys::mono_ms"} = 1;
+    $owned_set{"sys::coro_error"} = 1;
+    $owned_set{"sys::socket_try_connect"} = 1;
+    $owned_set{"async::resolve"} = 1;
+    $owned_set{"sys::socket_connect_check"} = 1;
+    $owned_set{"sys::socket_try_readline"} = 1;
+    $owned_set{"sys::wantarray"} = 1;
+    $owned_set{"sys::wantscalar"} = 1;
+    $owned_set{"sys::wanthash"} = 1;
+    $owned_set{"utf8::is_utf8"} = 1;
+    $owned_set{"utf8::valid"} = 1;
+    $owned_set{"utf8::encode"} = 1;
+    $owned_set{"utf8::decode"} = 1;
+    $owned_set{"utf8::downgrade"} = 1;
+    $owned_set{"utf8::upgrade"} = 1;
+    $owned_set{"utf8::unicode_to_native"} = 1;
+    $owned_set{"utf8::normalize"} = 1;
+    $owned_set{"utf8::nfc"} = 1;
+    $owned_set{"utf8::nfd"} = 1;
+    $owned_set{"utf8::nfkc"} = 1;
+    $owned_set{"utf8::nfkd"} = 1;
+    $owned_set{"substr"} = 1;
+    $owned_set{"length"} = 1;
+    $owned_set{"index"} = 1;
+    $owned_set{"rindex"} = 1;
+    $owned_set{"uc"} = 1;
+    $owned_set{"upper"} = 1;
+    $owned_set{"lc"} = 1;
+    $owned_set{"lower"} = 1;
+    $owned_set{"ucfirst"} = 1;
+    $owned_set{"lcfirst"} = 1;
+    $owned_set{"trim"} = 1;
+    $owned_set{"ltrim"} = 1;
+    $owned_set{"rtrim"} = 1;
+    $owned_set{"chomp"} = 1;
+    $owned_set{"chop"} = 1;
+    $owned_set{"repeat"} = 1;
+    $owned_set{"typeof"} = 1;
+    $owned_set{"cast_str"} = 1;
+    $owned_set{"cast_num"} = 1;
+    $owned_set{"sprintf"} = 1;
+    $owned_set{"sys::sprintf"} = 1;
+    $owned_set{"join"} = 1;
+    $owned_set{"reverse"} = 1;
+    $owned_set{"split"} = 1;
+    $owned_set{"keys"} = 1;
+    $owned_set{"values"} = 1;
+    $owned_set{"defined"} = 1;
+    $owned_set{"exists"} = 1;
+    $owned_set{"delete"} = 1;
+    $owned_set{"ref"} = 1;
+    $owned_set{"reftype"} = 1;
+    $owned_set{"is_ref"} = 1;
+    $owned_set{"is_refto"} = 1;
+    $owned_set{"deref"} = 1;
+    $owned_set{"derefto"} = 1;
+    $owned_set{"deref_array"} = 1;
+    $owned_set{"deref_hash"} = 1;
+    $owned_set{"blessed"} = 1;
+    $owned_set{"isa"} = 1;
+    $owned_set{"can"} = 1;
+    $owned_set{"UNIVERSAL::isa"} = 1;
+    $owned_set{"UNIVERSAL::can"} = 1;
+    $owned_set{"size"} = 1;
+    $owned_set{"scalar"} = 1;
+    $owned_set{"push"} = 1;
+    $owned_set{"pop"} = 1;
+    $owned_set{"shift"} = 1;
+    $owned_set{"unshift"} = 1;
+    $owned_set{"sort"} = 1;
+    $owned_set{"nsort"} = 1;
+    $owned_set{"splice"} = 1;
+    $owned_set{"each"} = 1;
+    $owned_set{"select"} = 1;
+    $owned_set{"tied"} = 1;
+    $owned_set{"tie"} = 1;
+    $owned_set{"abs"} = 1;
+    $owned_set{"int"} = 1;
+    $owned_set{"rand"} = 1;
+    $owned_set{"srand"} = 1;
+    $owned_set{"refcount"} = 1;
+    $owned_set{"sys::isweak"} = 1;
+    $owned_set{"time"} = 1;
+    $owned_set{"localtime"} = 1;
+    $owned_set{"gmtime"} = 1;
+    $owned_set{"math::sin"} = 1;
+    $owned_set{"math::cos"} = 1;
+    $owned_set{"math::tan"} = 1;
+    $owned_set{"math::sqrt"} = 1;
+    $owned_set{"math::pow"} = 1;
+    $owned_set{"math::log"} = 1;
+    $owned_set{"math::exp"} = 1;
+    $owned_set{"math::floor"} = 1;
+    $owned_set{"math::ceil"} = 1;
+    $owned_set{"math::abs"} = 1;
+    $owned_set{"math::round"} = 1;
+    $owned_set{"math::rand"} = 1;
+    $owned_set{"match"} = 1;
+    $owned_set{"replace"} = 1;
+    $owned_set{"replace_all"} = 1;
+    $owned_set{"captures"} = 1;
+    $owned_set{"named_captures"} = 1;
+    $owned_set{"sys::quotemeta"} = 1;
+    $owned_set{"bytes"} = 1;
+    $owned_set{"hash_new"} = 1;
+    $owned_set{"sys::file_exists"} = 1;
+    $owned_set{"sys::file_mtime"} = 1;
+    $owned_set{"sys::open"} = 1;
+    $owned_set{"sys::open_str"} = 1;
+    $owned_set{"sys::str_from_fh"} = 1;
+    $owned_set{"sys::slurp"} = 1;
+    $owned_set{"slurp"} = 1;
+    $owned_set{"sys::mkdir"} = 1;
+    $owned_set{"sys::seek"} = 1;
+    $owned_set{"sys::waitpid"} = 1;
+    $owned_set{"sys::getaddrinfo"} = 1;
+    $owned_set{"sys::socket_fd"} = 1;
+    $owned_set{"sys::socket_send"} = 1;
+    $owned_set{"sys::socket_set_nonblocking"} = 1;
+    $owned_set{"sys::socket_close"} = 1;
+    $owned_set{"sys::socket_flush"} = 1;
+    $owned_set{"sys::udp_bind"} = 1;
+    $owned_set{"sys::udp_sendto"} = 1;
+    $owned_set{"sys::array_default_capacity"} = 1;
+    $owned_set{"sys::hash_default_capacity"} = 1;
+    $owned_set{"sys::cstruct_new"} = 1;
+    $owned_set{"sys::cstruct_get_int"} = 1;
+    $owned_set{"sys::cstruct_get_double"} = 1;
+    $owned_set{"sys::cstruct_get_string"} = 1;
+    $owned_set{"sys::idiv"} = 1;
+    $owned_set{"sys::exception_trace"} = 1;
+    $owned_set{"async::select"} = 1;
+    $owned_set{"async::sleep"} = 1;
+    $owned_set{"async::cancelled"} = 1;
+    $owned_set{"async::spawn"} = 1;
+    $owned_set{"async::map"} = 1;
+    $owned_set{"thread::tls_get"} = 1;
+    $owned_set{"thread::tls_exists"} = 1;
+    $owned_set{"thread::tls_delete"} = 1;
+    $owned_set{"substr_bytes"} = 1;
+    $owned_set{"char_at"} = 1;
+    $owned_set{"byte_at"} = 1;
+    $owned_set{"sb_new"} = 1;
+    $owned_set{"sb_to_string"} = 1;
+    $owned_set{"sb_length"} = 1;
+    $owned_set{"sys::chdir"} = 1;
+    $owned_set{"sys::chroot"} = 1;
+    $owned_set{"sys::rmdir"} = 1;
+    $owned_set{"sys::unlink"} = 1;
+    $owned_set{"sys::link"} = 1;
+    $owned_set{"sys::symlink"} = 1;
+    $owned_set{"sys::readlink"} = 1;
+    $owned_set{"sys::rename"} = 1;
+    $owned_set{"sys::chmod"} = 1;
+    $owned_set{"sys::access"} = 1;
+    $owned_set{"sys::umask"} = 1;
+    $owned_set{"sys::getuid"} = 1;
+    $owned_set{"sys::geteuid"} = 1;
+    $owned_set{"sys::getgid"} = 1;
+    $owned_set{"sys::getegid"} = 1;
+    $owned_set{"sys::kill"} = 1;
+    $owned_set{"sys::signal"} = 1;
+    $owned_set{"sys::alarm"} = 1;
+    $owned_set{"sys::stat"} = 1;
+    $owned_set{"sys::lstat"} = 1;
+    $owned_set{"sys::isatty"} = 1;
+    $owned_set{"sys::is_dir"} = 1;
+    $owned_set{"sys::is_file"} = 1;
+    $owned_set{"sys::dir_exists"} = 1;
+    $owned_set{"sys::file_size"} = 1;
+    $owned_set{"sys::strerror"} = 1;
+    $owned_set{"sys::errno"} = 1;
+    $owned_set{"sys::mktime"} = 1;
+    $owned_set{"sys::strftime"} = 1;
+    $owned_set{"sys::ctime"} = 1;
+    $owned_set{"sys::gettimeofday"} = 1;
+    $owned_set{"sys::hires_time"} = 1;
+    $owned_set{"sys::tv_interval"} = 1;
+    $owned_set{"sys::nanosleep"} = 1;
+    $owned_set{"sys::clock_gettime"} = 1;
+    $owned_set{"sys::clock_getres"} = 1;
+    $owned_set{"sys::dl_open"} = 1;
+    $owned_set{"sys::dl_sym"} = 1;
+    $owned_set{"sys::dl_error"} = 1;
+    $owned_set{"sys::dl_call_export_info"} = 1;
+    $owned_set{"sys::dl_call_version"} = 1;
+    $owned_set{"sys::int_ptr"} = 1;
+    $owned_set{"sys::num_ptr"} = 1;
+    $owned_set{"sys::str_ptr"} = 1;
+    $owned_set{"sys::ptr_deref_int"} = 1;
+    $owned_set{"sys::ptr_deref_num"} = 1;
+    $owned_set{"sys::ptr_deref_str"} = 1;
+    $owned_set{"sys::readdir"} = 1;
+    $owned_set{"sys::readdir_full"} = 1;
+    $owned_set{"sys::realpath"} = 1;
+    $owned_set{"sys::dirname"} = 1;
+    $owned_set{"sys::basename"} = 1;
+    $owned_set{"sys::glob"} = 1;
+    $owned_set{"sys::fnmatch"} = 1;
+    $owned_set{"sys::file_ext"} = 1;
+    $owned_set{"sys::path_join"} = 1;
+    $owned_set{"sys::tell"} = 1;
+    $owned_set{"sys::rewind"} = 1;
+    $owned_set{"sys::eof"} = 1;
+    $owned_set{"sys::flush"} = 1;
+    $owned_set{"sys::readline"} = 1;
+    $owned_set{"sys::open_fd"} = 1;
+    $owned_set{"sys::gethostbyname"} = 1;
+    $owned_set{"sys::gethostbyname_all"} = 1;
+    $owned_set{"sys::gethostname"} = 1;
+    $owned_set{"math::atan2"} = 1;
+    $owned_set{"math::fabs"} = 1;
+    $owned_set{"math::fmod"} = 1;
+    $owned_set{"math::asin"} = 1;
+    $owned_set{"math::acos"} = 1;
+    $owned_set{"math::atan"} = 1;
+    $owned_set{"math::sinh"} = 1;
+    $owned_set{"math::cosh"} = 1;
+    $owned_set{"math::tanh"} = 1;
+    $owned_set{"math::log10"} = 1;
+    $owned_set{"math::hypot"} = 1;
+    $owned_set{"math::cbrt"} = 1;
+    $owned_set{"math::isnan"} = 1;
+    $owned_set{"math::isinf"} = 1;
+    $owned_set{"math::isfinite"} = 1;
+    $owned_set{"math::fmax"} = 1;
+    $owned_set{"math::fmin"} = 1;
+    $owned_set{"math::copysign"} = 1;
+    $owned_set{"math::remainder"} = 1;
+    $owned_set{"math::trunc"} = 1;
+    $owned_set{"math::ldexp"} = 1;
+    $owned_set{"math::frexp"} = 1;
+    $owned_set{"math::modf"} = 1;
+    $owned_set{"math::scalbn"} = 1;
+    $owned_set{"sys::getenv"} = 1;
+    $owned_set{"sys::setenv"} = 1;
+    $owned_set{"sys::unsetenv"} = 1;
+    $owned_set{"sys::popen"} = 1;
+    $owned_set{"sys::pclose"} = 1;
+    $owned_set{"sys::mkstemp"} = 1;
+    $owned_set{"sys::mkdtemp"} = 1;
+    $owned_set{"sys::tmpfile"} = 1;
+    $owned_set{"sys::sleep"} = 1;
+    $owned_set{"sys::usleep"} = 1;
+    $owned_set{"sys::qx"} = 1;
+    $owned_set{"sys::truncate"} = 1;
+    $owned_set{"sys::ftruncate"} = 1;
+    $owned_set{"sys::statvfs"} = 1;
+    $owned_set{"sys::fstatvfs"} = 1;
+    $owned_set{"sys::dup"} = 1;
+    $owned_set{"dumper"} = 1;
+    $owned_set{"dumper_str"} = 1;
+    $owned_set{"sys::atoi"} = 1;
+    $owned_set{"sys::atof"} = 1;
+    $owned_set{"sys::strtol"} = 1;
+    $owned_set{"sys::strtod"} = 1;
+    $owned_set{"sys::ttyname"} = 1;
+    $owned_set{"sys::tcgetattr"} = 1;
+    $owned_set{"sys::tcsetattr"} = 1;
+    $owned_set{"sys::cfgetospeed"} = 1;
+    $owned_set{"sys::cfsetospeed"} = 1;
+    $owned_set{"sys::cfgetispeed"} = 1;
+    $owned_set{"sys::cfsetispeed"} = 1;
+    $owned_set{"sys::tcflush"} = 1;
+    $owned_set{"sys::tcdrain"} = 1;
+    $owned_set{"sys::term_enable_raw"} = 1;
+    $owned_set{"sys::term_disable_raw"} = 1;
+    $owned_set{"sys::term_rows"} = 1;
+    $owned_set{"sys::term_cols"} = 1;
+    $owned_set{"sys::read_byte"} = 1;
+    $owned_set{"sys::opendir"} = 1;
+    $owned_set{"sys::readdir_next"} = 1;
+    $owned_set{"sys::closedir"} = 1;
+    $owned_set{"sys::ioctl"} = 1;
+    $owned_set{"sys::fcntl"} = 1;
+    $owned_set{"sys::flock"} = 1;
+    $owned_set{"async::channel"} = 1;
+    $owned_set{"async::mutex"} = 1;
+    $owned_set{"async::atomic"} = 1;
+    $owned_set{"async::recv"} = 1;
+    $owned_set{"async::try_recv"} = 1;
+    $owned_set{"async::all"} = 1;
+    $owned_set{"async::race"} = 1;
+    $owned_set{"async::timeout"} = 1;
+    $owned_set{"thread::create"} = 1;
+    $owned_set{"thread::join"} = 1;
+    $owned_set{"sys::sigprocmask"} = 1;
+    $owned_set{"sys::raise"} = 1;
+    $owned_set{"sys::killpg"} = 1;
+    $owned_set{"sys::getpwnam"} = 1;
+    $owned_set{"sys::getpwuid"} = 1;
+    $owned_set{"sys::getgrnam"} = 1;
+    $owned_set{"sys::getgrgid"} = 1;
+    $owned_set{"sys::nice"} = 1;
+    $owned_set{"sys::getpriority"} = 1;
+    $owned_set{"sys::setpriority"} = 1;
+    $owned_set{"sys::getrusage"} = 1;
+    $owned_set{"sys::getrlimit"} = 1;
+    $owned_set{"sys::setrlimit"} = 1;
+    return \%owned_set;
+}
+
+func needs_temp_cleanup(scalar $cg, scalar $expr) int {
+    my int $type = $expr->{"type"};
+
+    # A CSE-tagged hash fetch emits a borrowed, already-evaluated temp
+    # (see emit_condition_cse) — the wrapper owns the single decref.
+    if ($type == NODE_HASH_ACCESS()) {
+        if (length("" . $expr->{"cse_temp"}) > 0) {
+            return 0;
+        }
+    }
+
+    # bless($ref, "Class") returns its first argument unchanged — no incref —
+    # so the cleanup-ness of the bless RESULT must mirror the first arg's. A
+    # borrowed variable in (e.g. `bless($obj, "C")`) -> borrowed result (no
+    # cleanup); an owned temp in (e.g. `bless({...}, "C")`) -> owned result
+    # (caller must decref). Marking bless as unconditionally owned caused a
+    # use-after-free in the statement form `bless($var, "C");` because the
+    # caller decref'd the result, which is the same StradaValue* the variable
+    # still owned -> variable's refcount went to 0 -> next access UAF. Mirrors
+    # the same recursion used in return_needs_incref's bless branch.
+    if ($type == NODE_CALL() && $expr->{"name"} eq "bless") {
+        my scalar $bargs = $expr->{"args"};
+        if ($bargs && $expr->{"arg_count"} > 0) {
+            return needs_temp_cleanup($cg, $bargs->[0]);
+        }
+        return 0;
+    }
+
+    # Literals always create owned StradaValue*
+    if ($type == NODE_INT_LITERAL() || $type == NODE_NUM_LITERAL() || $type == NODE_STR_LITERAL() || $type == NODE_UNDEF()) {
+        return 1;
+    }
+
+    # Value-producing do{} yields an owned value (result is incref'd /
+    # freshly created before the block scope cleans up).
+    if ($type == NODE_DO_EXPR()) {
+        return 1;
+    }
+
+    # Binary ops that produce StradaValue*
+    if ($type == NODE_BINARY_OP()) {
+        my str $op = $expr->{"op"};
+        # These ops produce owned StradaValue*
+        if ($op eq "." || $op eq "+" || $op eq "-" || $op eq "*" || $op eq "/" ||
+            $op eq "%" || $op eq "**" || $op eq "x" || $op eq "==" || $op eq "!=" ||
+            $op eq "<" || $op eq ">" || $op eq "<=" || $op eq ">=" ||
+            $op eq "&&" || $op eq "||" || $op eq "//" || $op eq "&" || $op eq "|" ||
+            $op eq "^" || $op eq "<<" || $op eq ">>" ||
+            $op eq "eq" || $op eq "ne" || $op eq "lt" || $op eq "gt" ||
+            $op eq "le" || $op eq "ge" || $op eq "<=>" || $op eq "cmp" ||
+            $op eq "=~" || $op eq "!~") {
+            return 1;
+        }
+    }
+
+    # Unary ops that produce StradaValue*
+    if ($type == NODE_UNARY_OP()) {
+        my str $op = $expr->{"op"};
+        if ($op eq "!" || $op eq "-") {
+            return 1;
+        }
+    }
+
+    # Array/hash constructors
+    if ($type == NODE_ANON_ARRAY() || $type == NODE_ANON_HASH()) {
+        return 1;
+    }
+
+    # Hash access now returns owned ref (via strada_hv_fetch_owned)
+    if ($type == NODE_HASH_ACCESS() || $type == NODE_DEREF_HASH()) {
+        return 1;
+    }
+
+    # Array subscript / deref-array: borrowed when the source array is
+    # a long-lived value (variable, our, etc.), but owned when the
+    # source itself is an owned temp — in that case the codegen uses
+    # strada_array_get_owned to incref the element so it survives the
+    # source decref. See gen_expression NODE_SUBSCRIPT / NODE_DEREF_ARRAY.
+    if ($type == NODE_SUBSCRIPT()) {
+        if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $expr->{"array"}) == 1) {
+            return 1;
+        }
+        return 0;
+    }
+    if ($type == NODE_DEREF_ARRAY()) {
+        if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $expr->{"ref"}) == 1) {
+            return 1;
+        }
+        return 0;
+    }
+
+    # Slices create new arrays
+    if ($type == NODE_ARRAY_SLICE() || $type == NODE_HASH_SLICE()) {
+        return 1;
+    }
+
+    # Reference expressions (\$var, \@arr, \%hash) create owned refs
+    if ($type == NODE_REF()) {
+        return 1;
+    }
+
+    # Scalar deref ($$ref) returns owned reference via strada_deref() which increfs
+    if ($type == NODE_DEREF_SCALAR() && $expr->{"sigil"} eq "$") {
+        return 1;
+    }
+
+    # __PACKAGE__, __FILE__, __LINE__ produce owned StradaValue*
+    if ($type == NODE_DUNDER_PACKAGE() || $type == NODE_DUNDER_FILE() || $type == NODE_DUNDER_LINE()) {
+        return 1;
+    }
+
+    # Ternary produces owned StradaValue* (from either branch)
+    if ($type == NODE_TERNARY()) {
+        return 1;
+    }
+
+    # Range expression produces owned array
+    if ($type == NODE_RANGE()) {
+        return 1;
+    }
+
+    # Sort expression (with comparison block) produces owned array
+    if ($type == NODE_SORT()) {
+        return 1;
+    }
+
+    # map { ... } and grep { ... } both produce owned arrays
+    # (strada_new_array via the inline codegen). Without these
+    # entries, inline usages like `join(",", grep {...} @a)`,
+    # `return map {...} @a;`, `foreach my $x (grep {...} @a)`, etc.
+    # leaked the result array every call.
+    if ($type == NODE_MAP() || $type == NODE_GREP()) {
+        return 1;
+    }
+
+    # Regex match produces strada_new_int() (owned)
+    if ($type == NODE_REGEX_MATCH()) {
+        return 1;
+    }
+
+    # tr/// returns the count as an owned StradaValue (see codegen).
+    if ($type == NODE_TR()) {
+        return 1;
+    }
+
+    # Capture variables ($1-$9) return owned references
+    if ($type == NODE_CAPTURE_VAR()) {
+        return 1;
+    }
+
+    # Variables don't need cleanup (already tracked) - UNLESS they are 'our' variables
+    # which emit strada_global_get() returning an owned StradaValue*
+    if ($type == NODE_VARIABLE()) {
+        my str $var_name = $expr->{"name"};
+        my str $c_name = escape_c_keyword($var_name);
+        my scalar $our_vars = $cg->{"our_vars"};
+        my str $our_check = "" . $our_vars->{$c_name};
+        if (length($our_check) > 0) {
+            return 1;
+        }
+        return 0;
+    }
+
+    # Method calls return owned StradaValue* that need cleanup
+    if ($type == NODE_METHOD_CALL()) {
+        return 1;
+    }
+
+    # Dynamic method calls return owned StradaValue* that need cleanup
+    if ($type == NODE_DYN_METHOD_CALL()) {
+        return 1;
+    }
+
+    # Closure calls return owned StradaValue* that need cleanup
+    if ($type == NODE_CLOSURE_CALL()) {
+        return 1;
+    }
+
+    # Anonymous functions (closures) return owned StradaValue* that need cleanup
+    if ($type == NODE_ANON_FUNC()) {
+        return 1;
+    }
+
+    # Function calls: check if it's a known function that returns owned StradaValue*
+    if ($type == NODE_CALL()) {
+        # Constant references (enum values) always create owned StradaValue*
+        if ($expr->{"is_constant"} == 1) {
+            return 1;
+        }
+        my str $name = $expr->{"name"};
+        # Normalize core:: to sys::
+        if (length($name) > 6 && substr($name, 0, 6) eq "core::") {
+            $name = "sys::" . substr($name, 6, length($name) - 6);
+        }
+        # Built-in functions that return owned StradaValue*: single hash
+        # probe against the set built by build_owned_call_builtins().
+        my scalar $owned_set = $cg->{"owned_call_builtins"};
+        if ($owned_set != 0) {
+            my scalar $owned_hit = $owned_set->{$name};
+            if ($owned_hit != 0) {
+                return 1;
+            }
+        }
+        # For user-defined functions, look up return type in $cg->{"functions"}
+        my str $c_name = sanitize_name($name);
+        my scalar $funcs = $cg->{"functions"};
+        if ($funcs != 0) {
+            my scalar $func_info = $funcs->{$c_name};
+            if ($func_info != 0) {
+                my int $ret_type = $func_info->{"return_type"};
+                # TYPE_VOID() means no return value - don't try to capture it
+                if ($ret_type == TYPE_VOID()) {
+                    return 0;
+                }
+                # Non-void function returns owned StradaValue* that needs cleanup
+                return 1;
+            }
+            # Not found by unqualified name -- try the same package-prefix
+            # fallback the call-emission path uses (line ~12518). Without this,
+            # an unqualified call to a same-package function in a non-main
+            # package (e.g. `_tok(...)` inside `package Perla::Lexer`) misses
+            # cleanup -- the caller (e.g. push) skips the __push_v/decref
+            # wrapper and the owned return leaks. This was the root cause of
+            # the per-Perl-statement leak in perla.
+            my str $fn_pkg = $cg->{"current_fn_package"};
+            my int $has_colon = index($name, "::");
+            if (length($fn_pkg) > 0 && $fn_pkg ne "main" && $has_colon < 0) {
+                my str $c_pkg = $fn_pkg;
+                my int $ci = index($c_pkg, "::");
+                while ($ci >= 0) {
+                    $c_pkg = substr($c_pkg, 0, $ci) . "_" . substr($c_pkg, $ci + 2, length($c_pkg) - $ci - 2);
+                    $ci = index($c_pkg, "::");
+                }
+                my str $prefixed = $c_pkg . "_" . $c_name;
+                my scalar $fn_info_pkg = $funcs->{$prefixed};
+                if ($fn_info_pkg != 0) {
+                    my int $pkg_ret = $fn_info_pkg->{"return_type"};
+                    if ($pkg_ret == TYPE_VOID()) {
+                        return 0;
+                    }
+                    return 1;
+                }
+            }
+        }
+        # Unknown function - be conservative, don't cleanup
+        return 0;
+    }
+
+    # Default: don't cleanup (be conservative)
+    return 0;
+}
+
+# Helper: check if return value needs incref before returning
+# Returns 1 for variables and borrowed references (need incref to survive scope cleanup)
+# Returns 0 for new/owned values (already have correct refcount)
+func return_needs_incref(scalar $cg, scalar $expr) int {
+    my int $type = $expr->{"type"};
+
+    # Variables need incref because scope cleanup will decref them.
+    # EXCEPT `our` variables: their codegen calls strada_global_get
+    # which already returns an owned reference, so an additional
+    # incref would leak one ref per `return $g` call.
+    if ($type == NODE_VARIABLE()) {
+        my str $rn_var_name = "" . $expr->{"name"};
+        my str $rn_c_name = escape_c_keyword($rn_var_name);
+        my scalar $rn_our_vars = $cg->{"our_vars"};
+        my str $rn_our_check = "" . $rn_our_vars->{$rn_c_name};
+        if (length($rn_our_check) > 0) {
+            return 0;
+        }
+        return 1;
+    }
+
+    # Array access returns borrowed reference - need incref UNLESS the
+    # source was an owned temp (codegen used strada_array_get_owned).
+    if ($type == NODE_SUBSCRIPT()) {
+        if (needs_temp_cleanup($cg, $expr) == 1) {
+            return 0;
+        }
+        return 1;
+    }
+
+    # Hash access now returns owned ref (via strada_hv_fetch_owned) - no incref
+    if ($type == NODE_HASH_ACCESS() || $type == NODE_DEREF_HASH()) {
+        return 0;
+    }
+
+    # Deref array returns borrowed ref - need incref UNLESS owned-source.
+    if ($type == NODE_DEREF_ARRAY()) {
+        if (needs_temp_cleanup($cg, $expr) == 1) {
+            return 0;
+        }
+        return 1;
+    }
+
+    # Method calls return owned values - no incref needed (they already have refcount)
+    if ($type == NODE_METHOD_CALL()) {
+        return 0;
+    }
+
+    # Dynamic method calls return owned values - no incref needed
+    if ($type == NODE_DYN_METHOD_CALL()) {
+        return 0;
+    }
+
+    # Function calls - most return owned values, but bless() returns its argument
+    if ($type == NODE_CALL()) {
+        my str $name = $expr->{"name"};
+        # bless() returns its first argument, so check if THAT needs incref
+        if ($name eq "bless") {
+            my scalar $args = $expr->{"args"};
+            if ($args && $expr->{"arg_count"} > 0) {
+                return return_needs_incref($cg, $args->[0]);
+            }
+            return 0;
+        }
+        return 0;
+    }
+
+    # Literals create owned values
+    if ($type == NODE_INT_LITERAL() || $type == NODE_NUM_LITERAL() || $type == NODE_STR_LITERAL()) {
+        return 0;
+    }
+
+    # Undef creates an owned value
+    if ($type == NODE_UNDEF()) {
+        return 0;
+    }
+
+    # Binary ops create owned values
+    if ($type == NODE_BINARY_OP()) {
+        return 0;
+    }
+
+    # Unary ops create owned values
+    if ($type == NODE_UNARY_OP()) {
+        return 0;
+    }
+
+    # Reference/anon constructors create owned values
+    if ($type == NODE_REF() || $type == NODE_ANON_ARRAY() || $type == NODE_ANON_HASH()) {
+        return 0;
+    }
+
+    # Anonymous functions (closures) create owned values with refcount=1
+    if ($type == NODE_ANON_FUNC()) {
+        return 0;
+    }
+
+    # Closure calls return owned values
+    if ($type == NODE_CLOSURE_CALL()) {
+        return 0;
+    }
+
+    # Ternary - check both branches (if either needs incref, do incref to be safe)
+    if ($type == NODE_TERNARY()) {
+        my int $true_needs = return_needs_incref($cg, $expr->{"true_expr"});
+        my int $false_needs = return_needs_incref($cg, $expr->{"false_expr"});
+        if ($true_needs == 1 || $false_needs == 1) {
+            return 1;
+        }
+        return 0;
+    }
+
+    # Default: incref to be safe (conservative)
+    return 1;
+}
+
+# Helper: generate a function call with temporary argument cleanup
+# c_func_name: the C function to call (e.g., "strada_glob")
+# args: array of argument expressions
+# arg_count: number of arguments
+# Returns nothing, emits code directly
+func gen_call_with_arg_cleanup(scalar $cg, str $c_func_name, scalar $args, int $arg_count) void {
+    if ($cg->{"cleanup_enabled"} == 0 || $arg_count == 0) {
+        # No cleanup needed - emit simple call
+        emit($cg, $c_func_name . "(");
+        my int $i = 0;
+        while ($i < $arg_count) {
+            if ($i > 0) {
+                emit($cg, ", ");
+            }
+            gen_expression($cg, $args->[$i]);
+            $i = $i + 1;
+        }
+        emit($cg, ")");
+        return;
+    }
+
+    # Check which arguments are temporaries (up to 8 args supported)
+    my int $temp0 = 0;
+    my int $temp1 = 0;
+    my int $temp2 = 0;
+    my int $temp3 = 0;
+    my int $has_temps = 0;
+
+    if ($arg_count > 0 && needs_temp_cleanup($cg, $args->[0]) == 1) {
+        $temp0 = 1;
+        $has_temps = 1;
+    }
+    if ($arg_count > 1 && needs_temp_cleanup($cg, $args->[1]) == 1) {
+        $temp1 = 1;
+        $has_temps = 1;
+    }
+    if ($arg_count > 2 && needs_temp_cleanup($cg, $args->[2]) == 1) {
+        $temp2 = 1;
+        $has_temps = 1;
+    }
+    if ($arg_count > 3 && needs_temp_cleanup($cg, $args->[3]) == 1) {
+        $temp3 = 1;
+        $has_temps = 1;
+    }
+
+    if ($has_temps == 0) {
+        # No temporaries - emit simple call
+        emit($cg, $c_func_name . "(");
+        my int $i = 0;
+        while ($i < $arg_count) {
+            if ($i > 0) {
+                emit($cg, ", ");
+            }
+            gen_expression($cg, $args->[$i]);
+            $i = $i + 1;
+        }
+        emit($cg, ")");
+        return;
+    }
+
+    # Has temporaries - wrap with cleanup
+    emit($cg, "({ ");
+
+    # Declare temp variables for each temporary argument
+    if ($temp0 == 1) {
+        emit($cg, "StradaValue *__call_arg0 = ");
+        gen_expression($cg, $args->[0]);
+        emit($cg, "; ");
+    }
+    if ($temp1 == 1) {
+        emit($cg, "StradaValue *__call_arg1 = ");
+        gen_expression($cg, $args->[1]);
+        emit($cg, "; ");
+    }
+    if ($temp2 == 1) {
+        emit($cg, "StradaValue *__call_arg2 = ");
+        gen_expression($cg, $args->[2]);
+        emit($cg, "; ");
+    }
+    if ($temp3 == 1) {
+        emit($cg, "StradaValue *__call_arg3 = ");
+        gen_expression($cg, $args->[3]);
+        emit($cg, "; ");
+    }
+
+    # Emit the call with result capture
+    emit($cg, "StradaValue *__call_result = " . $c_func_name . "(");
+    my int $i = 0;
+    while ($i < $arg_count) {
+        if ($i > 0) {
+            emit($cg, ", ");
+        }
+        if ($i == 0 && $temp0 == 1) {
+            emit($cg, "__call_arg0");
+        } elsif ($i == 1 && $temp1 == 1) {
+            emit($cg, "__call_arg1");
+        } elsif ($i == 2 && $temp2 == 1) {
+            emit($cg, "__call_arg2");
+        } elsif ($i == 3 && $temp3 == 1) {
+            emit($cg, "__call_arg3");
+        } else {
+            gen_expression($cg, $args->[$i]);
+        }
+        $i = $i + 1;
+    }
+    emit($cg, "); ");
+
+    # Decref all temp arguments
+    if ($temp0 == 1) {
+        emit($cg, "strada_decref(__call_arg0); ");
+    }
+    if ($temp1 == 1) {
+        emit($cg, "strada_decref(__call_arg1); ");
+    }
+    if ($temp2 == 1) {
+        emit($cg, "strada_decref(__call_arg2); ");
+    }
+    if ($temp3 == 1) {
+        emit($cg, "strada_decref(__call_arg3); ");
+    }
+
+    # Return the result
+    emit($cg, "__call_result; })");
+}
+
+# Compound assignment on hash element: $h{"k"} += expr, $h{"k"} -= expr, $h{"k"} .= expr
+func gen_hash_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op) void {
+    my int $ttype = $target->{"type"};
+    my int $rhs_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $rhs) == 1;
+    # Determine hash expression and key expression
+    my scalar $hash_expr = $target->{"hash"};
+    my scalar $key_expr = $target->{"key"};
+    if ($ttype == NODE_DEREF_HASH()) {
+        $hash_expr = $target->{"ref"};
+    }
+    my int $key_is_lit = $key_expr->{"type"} == NODE_STR_LITERAL();
+    my int $hash_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $hash_expr) == 1;
+    # Autovivify intermediate hash levels of the target chain, exactly like
+    # plain assignment does: $deep{"a"}{"b"} += 2 must create $deep{"a"}
+    # rather than fetch undef and lose the store. The autoviv flag makes the
+    # hash sub-expression emit strada_autoviv_hash, which returns a BORROWED
+    # ref (owned by the parent hash) — so the owned-temp decref of __hca_h
+    # must be suppressed in that case.
+    my int $hca_autoviv = 0;
+    if (autoviv_link_type($hash_expr) == 1) {
+        $hca_autoviv = 1;
+        $hash_cleanup = 0;
+    }
+    # __hca_k must be decref'd ONLY when the key expression yields an owned
+    # temp (a concat, a call, …). A borrowed key — e.g. a bare scalar var
+    # `$h{$k}` — must NOT be decref'd: that frees the variable's own value,
+    # so the next read of $k is a use-after-free (segfault). Literal keys go
+    # through the inline gen_str_literal_c path and never bind __hca_k.
+    my int $key_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $key_expr) == 1;
+
+    # Single-lookup fast path: the supported ops compile to one
+    # strada_hv_compound* call — one hash probe and an in-place slot update
+    # instead of fetch_owned + store (two probes, key hashed twice, plus an
+    # incref/decref pair on the old value). The runtime falls back to
+    # FETCH/compute/STORE for tied/locked hashes. ASCII literal keys also
+    # get a compile-time djb2 hash (_ph variant), like fetch_owned_ph.
+    my str $hca_opch = "";
+    if ($op eq "+=") { $hca_opch = "'+'"; }
+    elsif ($op eq "-=") { $hca_opch = "'-'"; }
+    elsif ($op eq "*=") { $hca_opch = "'*'"; }
+    elsif ($op eq "/=") { $hca_opch = "'/'"; }
+    elsif ($op eq ".=") { $hca_opch = "'.'"; }
+    # Both emission paths below generate __hca_h (the hash sub-expression)
+    # first, which consumes the autoviv flag.
+    if ($hca_autoviv == 1) {
+        $cg->{"autoviv"} = 1;
+    }
+    if (length($hca_opch) > 0) {
+        emit($cg, "({ StradaValue *__hca_h = ");
+        gen_expression($cg, $hash_expr);
+        emit($cg, "; ");
+        if ($key_is_lit == 0) {
+            emit($cg, "StradaValue *__hca_k = ");
+            gen_expression($cg, $key_expr);
+            emit($cg, "; ");
+        }
+        emit($cg, "StradaValue *__hca_rhs = ");
+        gen_expression($cg, $rhs);
+        emit($cg, "; ");
+        if ($key_is_lit == 1) {
+            if (key_is_hashable_ascii($key_expr->{"value"}) == 1) {
+                emit($cg, "strada_hv_compound_ph(__hca_h, ");
+                gen_str_literal_c($cg, $key_expr->{"value"});
+                emit($cg, ", " . djb2_hash_32($key_expr->{"value"}) . "u, __hca_rhs, " . $hca_opch . "); ");
+            } else {
+                emit($cg, "strada_hv_compound(__hca_h, ");
+                gen_str_literal_c($cg, $key_expr->{"value"});
+                emit($cg, ", __hca_rhs, " . $hca_opch . "); ");
+            }
+        } else {
+            emit($cg, "strada_hv_compound_sv(__hca_h, __hca_k, __hca_rhs, " . $hca_opch . "); ");
+        }
+        if ($rhs_cleanup == 1) { emit($cg, "strada_decref(__hca_rhs); "); }
+        if ($key_is_lit == 0 && $key_cleanup == 1) { emit($cg, "strada_decref(__hca_k); "); }
+        if ($hash_cleanup == 1) { emit($cg, "strada_decref(__hca_h); "); }
+        emit($cg, "(StradaValue*)NULL; })");
+        return;
+    }
+
+    # Generate: ({ hash_ref; key; old = fetch; new = old OP rhs; store(hash, key, new); decref... })
+    emit($cg, "({ StradaValue *__hca_h = ");
+    gen_expression($cg, $hash_expr);
+    emit($cg, "; ");
+    if ($key_is_lit == 0) {
+        emit($cg, "StradaValue *__hca_k = ");
+        gen_expression($cg, $key_expr);
+        emit($cg, "; ");
+    }
+    emit($cg, "StradaValue *__hca_old = ");
+    if ($key_is_lit == 1) {
+        emit($cg, "strada_hv_fetch_owned(__hca_h, ");
+        gen_str_literal_c($cg, $key_expr->{"value"});
+        emit($cg, ")");
+    } else {
+        emit($cg, "strada_hv_fetch_owned_sv(__hca_h, __hca_k)");
+    }
+    emit($cg, "; ");
+    # Always capture the RHS into a temp so the int-aware fast path below can
+    # reference it multiple times without re-evaluating it (re-evaluation would
+    # re-run side effects and leak owned temps). Mirrors the plain binary-`+`
+    # codegen (~line 1408), which already keeps int OP int as a tagged int and
+    # only boxes a heap double when an operand is non-int. Decref of __hca_rhs
+    # below stays gated on ownership ($rhs_cleanup).
+    emit($cg, "StradaValue *__hca_rhs = ");
+    gen_expression($cg, $rhs);
+    emit($cg, "; ");
+    emit($cg, "StradaValue *__hca_new = ");
+    if ($op eq "+=") {
+        emit($cg, "(STRADA_IS_TAGGED_INT(__hca_old) && STRADA_IS_TAGGED_INT(__hca_rhs) ? STRADA_MAKE_TAGGED_INT(STRADA_TAGGED_INT_VAL(__hca_old) + STRADA_TAGGED_INT_VAL(__hca_rhs)) : strada_new_num(strada_to_num(__hca_old) + strada_to_num(__hca_rhs)))");
+    } elsif ($op eq "-=") {
+        emit($cg, "(STRADA_IS_TAGGED_INT(__hca_old) && STRADA_IS_TAGGED_INT(__hca_rhs) ? STRADA_MAKE_TAGGED_INT(STRADA_TAGGED_INT_VAL(__hca_old) - STRADA_TAGGED_INT_VAL(__hca_rhs)) : strada_new_num(strada_to_num(__hca_old) - strada_to_num(__hca_rhs)))");
+    } elsif ($op eq ".=") {
+        emit($cg, "strada_concat_sv(__hca_old, __hca_rhs)");
+    } elsif ($op eq "*=") {
+        emit($cg, "(STRADA_IS_TAGGED_INT(__hca_old) && STRADA_IS_TAGGED_INT(__hca_rhs) ? STRADA_MAKE_TAGGED_INT(STRADA_TAGGED_INT_VAL(__hca_old) * STRADA_TAGGED_INT_VAL(__hca_rhs)) : strada_new_num(strada_to_num(__hca_old) * strada_to_num(__hca_rhs)))");
+    } elsif ($op eq "/=") {
+        emit($cg, "strada_new_num(strada_to_num(__hca_old) / strada_to_num(__hca_rhs))");
+    } else {
+        # Fallback — compute as num
+        emit($cg, "strada_new_num(strada_to_num(__hca_old))");
+    }
+    emit($cg, "; ");
+    # Store
+    if ($key_is_lit == 1) {
+        emit($cg, "strada_hv_store(__hca_h, ");
+        gen_str_literal_c($cg, $key_expr->{"value"});
+        emit($cg, ", __hca_new); ");
+    } else {
+        emit($cg, "strada_hv_store_sv(__hca_h, __hca_k, __hca_new); ");
+    }
+    emit($cg, "strada_decref(__hca_new); strada_decref(__hca_old); ");
+    if ($rhs_cleanup == 1) { emit($cg, "strada_decref(__hca_rhs); "); }
+    if ($key_is_lit == 0 && $key_cleanup == 1) { emit($cg, "strada_decref(__hca_k); "); }
+    if ($hash_cleanup == 1) { emit($cg, "strada_decref(__hca_h); "); }
+    emit($cg, "(StradaValue*)NULL; })");
+}
+
+# Compound assignment on array element: $a[$i] += expr (NODE_SUBSCRIPT)
+# or $ref->[i] += expr (NODE_DEREF_ARRAY) — both share the same shape;
+# NODE_DEREF_ARRAY stores the array sub-expression in `ref` instead of
+# `array`. Accept both.
+func gen_array_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op) void {
+    my scalar $arr_expr;
+    if ($target->{"type"} == NODE_DEREF_ARRAY()) {
+        $arr_expr = $target->{"ref"};
+    } else {
+        $arr_expr = $target->{"array"};
+    }
+    my scalar $idx_expr = $target->{"index"};
+    my int $rhs_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $rhs) == 1;
+    # When the array expression returns an owned ref (e.g. $h{$k}[i] += ...),
+    # the captured __aca_arr must be decref'd at the end. Sister function
+    # gen_hash_compound_assign already does this for __hca_h.
+    my int $arr_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $arr_expr) == 1;
+    # Autovivify intermediate levels: $h{"a"}[0] += 1 must create $h{"a"}
+    # as an array. The autovivified intermediate is BORROWED (owned by the
+    # parent container), so the owned-temp decref must be suppressed.
+    my int $aca_autoviv = 0;
+    if (autoviv_link_type($arr_expr) == 1) {
+        $aca_autoviv = 1;
+        $arr_cleanup = 0;
+    }
+
+    # Single-pass fast path: the supported ops compile to one
+    # strada_array_compound call — one deref + one bounds check + an
+    # in-place slot update instead of array_get + compute + array_set.
+    # Mirrors the strada_hv_compound emission in gen_hash_compound_assign.
+    my str $aca_opch = "";
+    if ($op eq "+=") { $aca_opch = "'+'"; }
+    elsif ($op eq "-=") { $aca_opch = "'-'"; }
+    elsif ($op eq "*=") { $aca_opch = "'*'"; }
+    elsif ($op eq "/=") { $aca_opch = "'/'"; }
+    elsif ($op eq ".=") { $aca_opch = "'.'"; }
+    if (length($aca_opch) > 0) {
+        emit($cg, "({ StradaValue *__aca_arr = ");
+        if ($aca_autoviv == 1) {
+            $cg->{"autoviv"} = 2;
+        }
+        gen_expression($cg, $arr_expr);
+        emit($cg, "; StradaValue *__aca_rhs = ");
+        gen_expression($cg, $rhs);
+        emit($cg, "; strada_array_compound(__aca_arr, ");
+        emit_int_operand($cg, $idx_expr);
+        emit($cg, ", __aca_rhs, " . $aca_opch . "); ");
+        if ($rhs_cleanup == 1) { emit($cg, "strada_decref(__aca_rhs); "); }
+        if ($arr_cleanup == 1) { emit($cg, "strada_decref(__aca_arr); "); }
+        emit($cg, "(StradaValue*)NULL; })");
+        return;
+    }
+
+    emit($cg, "({ StradaValue *__aca_arr = ");
+    if ($aca_autoviv == 1) {
+        $cg->{"autoviv"} = 2;
+    }
+    gen_expression($cg, $arr_expr);
+    emit($cg, "; int __aca_idx = ");
+    emit_int_operand($cg, $idx_expr);
+    emit($cg, "; StradaValue *__aca_old = strada_array_get(strada_deref_array(__aca_arr), __aca_idx); ");
+    # Always capture the RHS (see gen_hash_compound_assign for rationale) so the
+    # int-aware fast path can reference it without re-evaluating. int OP int
+    # stays a tagged int; non-int operands fall back to a boxed double.
+    emit($cg, "StradaValue *__aca_rhs = ");
+    gen_expression($cg, $rhs);
+    emit($cg, "; ");
+    emit($cg, "StradaValue *__aca_new = ");
+    if ($op eq "+=") {
+        emit($cg, "(STRADA_IS_TAGGED_INT(__aca_old) && STRADA_IS_TAGGED_INT(__aca_rhs) ? STRADA_MAKE_TAGGED_INT(STRADA_TAGGED_INT_VAL(__aca_old) + STRADA_TAGGED_INT_VAL(__aca_rhs)) : strada_new_num(strada_to_num(__aca_old) + strada_to_num(__aca_rhs)))");
+    } elsif ($op eq "-=") {
+        emit($cg, "(STRADA_IS_TAGGED_INT(__aca_old) && STRADA_IS_TAGGED_INT(__aca_rhs) ? STRADA_MAKE_TAGGED_INT(STRADA_TAGGED_INT_VAL(__aca_old) - STRADA_TAGGED_INT_VAL(__aca_rhs)) : strada_new_num(strada_to_num(__aca_old) - strada_to_num(__aca_rhs)))");
+    } elsif ($op eq ".=") {
+        emit($cg, "strada_concat_sv(__aca_old, __aca_rhs)");
+    } elsif ($op eq "*=") {
+        emit($cg, "(STRADA_IS_TAGGED_INT(__aca_old) && STRADA_IS_TAGGED_INT(__aca_rhs) ? STRADA_MAKE_TAGGED_INT(STRADA_TAGGED_INT_VAL(__aca_old) * STRADA_TAGGED_INT_VAL(__aca_rhs)) : strada_new_num(strada_to_num(__aca_old) * strada_to_num(__aca_rhs)))");
+    } elsif ($op eq "/=") {
+        emit($cg, "strada_new_num(strada_to_num(__aca_old) / strada_to_num(__aca_rhs))");
+    } else {
+        emit($cg, "strada_new_num(strada_to_num(__aca_old))");
+    }
+    emit($cg, "; strada_array_set(strada_deref_array(__aca_arr), __aca_idx, __aca_new); ");
+    emit($cg, "strada_decref(__aca_new); strada_decref(__aca_old); ");
+    if ($rhs_cleanup == 1) { emit($cg, "strada_decref(__aca_rhs); "); }
+    if ($arr_cleanup == 1) { emit($cg, "strada_decref(__aca_arr); "); }
+    emit($cg, "(StradaValue*)NULL; })");
+}
+

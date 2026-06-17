@@ -1,0 +1,64 @@
+# Error chaining: Exception objects (message/cause/trace/describe) and
+# core::exception_trace() for plain thrown values.
+
+use lib "lib";
+use Test;
+use Exception;
+
+func deep_thrower() void {
+    throw "plain failure";
+}
+
+func mid_layer() void {
+    deep_thrower();
+}
+
+func main() int {
+    # core::exception_trace: where did a PLAIN thrown value come from?
+    try {
+        mid_layer();
+    } catch ($e) {
+        Test::is($e, "plain failure", "plain value caught");
+        my str $tr = core::exception_trace();
+        Test::like($tr, "deep_thrower", "trace names the throw site");
+        Test::like($tr, "mid_layer", "trace includes the caller");
+    }
+
+    # Exception objects: message + construction trace
+    try {
+        throw Exception::new("disk full");
+    } catch (Exception $e) {
+        Test::is($e->message(), "disk full", "typed catch + message");
+        Test::like($e->trace(), "main", "construction trace");
+        Test::nok(defined($e->cause()), "no cause by default");
+    }
+
+    # Cause chaining via wrap + describe rendering
+    try {
+        try {
+            throw Exception::new("disk full");
+        } catch (Exception $inner) {
+            throw Exception::wrap("saving config failed", $inner);
+        }
+    } catch (Exception $e) {
+        Test::is($e->message(), "saving config failed", "wrapper message");
+        Test::ok(defined($e->cause()), "cause present");
+        Test::is($e->cause()->message(), "disk full", "cause message");
+        my str $d = $e->describe();
+        Test::like($d, "saving config failed", "describe has outer");
+        Test::like($d, "Caused by: disk full", "describe has cause");
+    }
+
+    # Wrapping a plain (non-Exception) cause
+    try {
+        try {
+            throw "raw string error";
+        } catch ($raw) {
+            throw Exception::wrap("context", $raw);
+        }
+    } catch (Exception $e) {
+        Test::like($e->describe(), "Caused by: raw string error", "plain cause rendered");
+    }
+
+    return Test::done_testing();
+}

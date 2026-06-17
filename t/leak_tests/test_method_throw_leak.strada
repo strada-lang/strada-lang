@@ -1,0 +1,51 @@
+#!/usr/bin/env strada
+# Leak regression: method call on an owned-temp receiver leaked the
+# receiver — and the args array — when the method body threw. The
+# receiver capture's decref was emitted as the trailing statement of
+# a statement expression; longjmp from inside the method body skipped
+# past it, leaking one wrapper SV per throw. The args array
+# (strada_pack_args) leaked similarly.
+#
+# Fix: (1) codegen emits strada_cleanup_push(__meth_obj) right after
+# capturing the receiver and strada_cleanup_pop() before the normal-
+# path decref; (2) runtime strada_method_call / strada_super_call
+# push their `args` argument before invoking the user method and pop
+# after, so the surrounding try/catch's strada_cleanup_drain_to()
+# releases everything on the exception path.
+#
+# Run: valgrind --leak-check=full ./test_method_throw_leak
+
+package Worker;
+
+func new(str $name) scalar {
+    my hash %self = ();
+    $self{"name"} = $name;
+    return bless(\%self, "Worker");
+}
+
+func boom(scalar $self, int $i) void {
+    throw "boom";
+}
+
+package main;
+
+func test() void {
+    my hash %workers = ();
+    $workers{"a"} = Worker::new("alice");
+    my int $iter = 200;
+    my int $i = 0;
+    while ($i < $iter) {
+        try {
+            $workers{"a"}->boom($i);
+        } catch ($e) {
+            # caught
+        }
+        $i = $i + 1;
+    }
+    say("test: PASS");
+}
+
+func main() int {
+    test();
+    return 0;
+}

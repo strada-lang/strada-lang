@@ -1,0 +1,50 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# Test extern functions don't get package prefix
+package MyLib::Utils;
+
+# This should be exported as "compute" not "MyLib_Utils_compute"
+extern func compute(int $a, int $b) int {
+    return $a + $b;
+}
+
+# This internal function should get the prefix
+func helper(int $x) int {
+    return $x * 2;
+}
+
+# This should call MyLib_Utils_helper internally
+func process(int $val) int {
+    return helper($val) + 10;
+}
+
+# Strada-callable wrapper for compute (for testing from Strada code)
+func strada_compute(int $a, int $b) int {
+    return $a + $b;
+}
+
+# Test main function
+func main() int {
+    say("Testing extern package functions:");
+    say("  strada_compute(5, 3) = " . strada_compute(5, 3));
+    say("  helper(7) = " . helper(7));
+    say("  process(4) = " . process(4));
+    say("");
+    say("Note: extern func 'compute' is for C interop, not Strada calls.");
+    return 0;
+}

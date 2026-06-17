@@ -1,0 +1,194 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# function_args_demo.strada - Demonstrate function argument patterns
+
+# ===== Pattern 1: Multiple Signatures =====
+
+func greet_simple(str $name) void {
+    say("Hello, " . $name);
+}
+
+func greet_formal(str $title, str $name) void {
+    say("Hello, " . $title . " " . $name);
+}
+
+func greet_full(str $title, str $first, str $lastname) void {
+    say("Hello, " . $title . " " . $first . " " . $lastname);
+}
+
+func demo_multiple_signatures() void {
+    say("=== Multiple Signatures Pattern ===");
+    
+    greet_simple("Alice");
+    greet_formal("Dr.", "Bob");
+    greet_full("Prof.", "Carol", "Smith");
+    
+    say("");
+}
+
+# ===== Pattern 2: Sentinel Values =====
+
+func create_user(str $name, str $email, str $phone) void {
+    say("User: " . $name);
+    
+    if ($email != "") {
+        say("  Email: " . $email);
+    }
+    
+    if ($phone != "") {
+        say("  Phone: " . $phone);
+    }
+}
+
+func demo_sentinel_values() void {
+    say("=== Sentinel Values Pattern ===");
+    
+    create_user("Alice", "alice@example.com", "555-1234");
+    create_user("Bob", "bob@example.com", "");
+    create_user("Carol", "", "");
+    
+    say("");
+}
+
+# ===== Pattern 3: Configuration Hash =====
+
+func db_connect(scalar $options) void {
+    my str $host = hash_get($options, "host");
+    my str $port = hash_get($options, "port");
+    my str $timeout = hash_get($options, "timeout");
+    
+    say("Connecting to " . $host . ":" . $port);
+    
+    if ($timeout != "") {
+        say("  Timeout: " . $timeout . "s");
+    }
+}
+
+func demo_config_hash() void {
+    say("=== Configuration Hash Pattern ===");
+    
+    # Full options
+    my scalar $opts1 = hash_new();
+    hash_set($opts1, "host", "localhost");
+    hash_set($opts1, "port", "8080");
+    hash_set($opts1, "timeout", "30");
+    db_connect($opts1);
+    
+    # Minimal options
+    my scalar $opts2 = hash_new();
+    hash_set($opts2, "host", "server.com");
+    hash_set($opts2, "port", "443");
+    hash_set($opts2, "timeout", "");
+    db_connect($opts2);
+    
+    say("");
+}
+
+# ===== Pattern 4: Different Complexity Levels =====
+
+func log_simple(str $message) void {
+    say("[LOG] " . $message);
+}
+
+func log_level(str $level, str $message) void {
+    say("[" . upper($level) . "] " . $message);
+}
+
+func log_full(str $level, str $module, str $message) void {
+    say("[" . upper($level) . "] " . $module . ": " . $message);
+}
+
+func demo_complexity_levels() void {
+    say("=== Complexity Levels Pattern ===");
+    
+    log_simple("Application started");
+    log_level("info", "Config loaded");
+    log_full("error", "database", "Connection failed");
+    
+    say("");
+}
+
+# ===== Pattern 5: Default Values =====
+
+func make_request(str $method, str $url, str $body) str {
+    if ($method == "") {
+        $method = "GET";
+    }
+    
+    my str $request = $method . " " . $url;
+    
+    if ($body != "") {
+        $request = $request . " [" . $body . "]";
+    }
+    
+    return $request;
+}
+
+func demo_default_values() void {
+    say("=== Default Values Pattern ===");
+    
+    say(make_request("", "/api/users", ""));
+    say(make_request("POST", "/api/users", ""));
+    say(make_request("POST", "/api/users", "{\"name\":\"Alice\"}"));
+    
+    say("");
+}
+
+# ===== Built-in Variadic Functions =====
+
+func demo_variadic_builtins() void {
+    say("=== Built-in Variadic Functions ===");
+    
+    printf("Simple: %s\n", "Hello");
+    printf("Multiple: %s is %d years old\n", "Alice", 30);
+    
+    my str $msg1 = sprintf("Name: %s", "Bob");
+    my str $msg2 = sprintf("%s: %d points", "Score", 100);
+    
+    say("sprintf results:");
+    say("  " . $msg1);
+    say("  " . $msg2);
+    
+    say("");
+}
+
+func main() int {
+    say("╔════════════════════════════════════════╗");
+    say("║  Function Argument Patterns Demo      ║");
+    say("╚════════════════════════════════════════╝");
+    say("");
+    
+    demo_multiple_signatures();
+    demo_sentinel_values();
+    demo_config_hash();
+    demo_complexity_levels();
+    demo_default_values();
+    demo_variadic_builtins();
+    
+    say("✓ All patterns demonstrated!");
+    say("");
+    say("Key Patterns:");
+    say("  1. Multiple function signatures");
+    say("  2. Sentinel values (empty string, etc)");
+    say("  3. Configuration hashes");
+    say("  4. Different complexity levels");
+    say("  5. Default value handling");
+    say("  + Built-in variadics: printf, sprintf, warn");
+    
+    return 0;
+}

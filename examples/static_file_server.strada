@@ -1,0 +1,184 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# Simple static file server with directory listing
+# Usage: ./static_file_server [directory] [port]
+
+func get_mime_type(str $path) str {
+    if (index($path, ".html") >= 0) { return "text/html"; }
+    if (index($path, ".htm") >= 0) { return "text/html"; }
+    if (index($path, ".css") >= 0) { return "text/css"; }
+    if (index($path, ".js") >= 0) { return "application/javascript"; }
+    if (index($path, ".json") >= 0) { return "application/json"; }
+    if (index($path, ".png") >= 0) { return "image/png"; }
+    if (index($path, ".jpg") >= 0) { return "image/jpeg"; }
+    if (index($path, ".gif") >= 0) { return "image/gif"; }
+    if (index($path, ".txt") >= 0) { return "text/plain"; }
+    if (index($path, ".xml") >= 0) { return "application/xml"; }
+    return "application/octet-stream";
+}
+
+func format_size(int $size) str {
+    if ($size < 1024) { return $size . " B"; }
+    if ($size < 1048576) { return ($size / 1024) . " KB"; }
+    return ($size / 1048576) . " MB";
+}
+
+func dir_listing(str $dir, str $url) str {
+    my str $html = "<!DOCTYPE html>\n<html>\n<head>\n";
+    $html = $html . "<title>Index of " . $url . "</title>\n";
+    $html = $html . "<style>\n";
+    $html = $html . "body { font-family: sans-serif; margin: 20px; }\n";
+    $html = $html . "table { border-collapse: collapse; width: 100%; }\n";
+    $html = $html . "th, td { text-align: left; padding: 8px; border-bottom: 1px solid #ddd; }\n";
+    $html = $html . "a { text-decoration: none; color: #0066cc; }\n";
+    $html = $html . "a:hover { text-decoration: underline; }\n";
+    $html = $html . "</style>\n</head>\n<body>\n";
+    $html = $html . "<h1>Index of " . $url . "</h1>\n";
+    $html = $html . "<table>\n<tr><th>Name</th><th>Size</th></tr>\n";
+
+    # Parent directory link
+    if ($url ne "/") {
+        $html = $html . "<tr><td><a href=\"..\">..</a></td><td>-</td></tr>\n";
+    }
+
+    # List directory contents
+    my array @entries = sys::readdir_full($dir);
+    my int $i = 0;
+    while ($i < scalar(@entries)) {
+        my str $name = $entries[$i];
+        if ($name ne "." && $name ne "..") {
+            my str $full_path = $dir . "/" . $name;
+            my str $link_url = $url;
+            if ($url ne "/") {
+                $link_url = $url . "/";
+            }
+            $link_url = $link_url . $name;
+
+            if (sys::is_dir($full_path)) {
+                $html = $html . "<tr><td><a href=\"" . $link_url . "/\">" . $name . "/</a></td><td>-</td></tr>\n";
+            } else {
+                my int $size = sys::file_size($full_path);
+                $html = $html . "<tr><td><a href=\"" . $link_url . "\">" . $name . "</a></td><td>" . format_size($size) . "</td></tr>\n";
+            }
+        }
+        $i = $i + 1;
+    }
+
+    $html = $html . "</table>\n</body>\n</html>\n";
+    return $html;
+}
+
+func send_response(scalar $client, int $status, str $content_type, str $body) void {
+    my str $status_text = "OK";
+    if ($status == 404) { $status_text = "Not Found"; }
+    if ($status == 403) { $status_text = "Forbidden"; }
+
+    my str $response = "HTTP/1.1 " . $status . " " . $status_text . "\r\n";
+    $response = $response . "Content-Type: " . $content_type . "\r\n";
+    $response = $response . "Content-Length: " . length($body) . "\r\n";
+    $response = $response . "Connection: close\r\n";
+    $response = $response . "\r\n";
+    $response = $response . $body;
+
+    sys::socket_send($client, $response);
+}
+
+func handle_request(scalar $client, str $root) void {
+    my str $data = sys::socket_recv($client, 4096);
+    if (length($data) == 0) {
+        sys::socket_close($client);
+        return;
+    }
+
+    # Parse request line
+    my int $space1 = index($data, " ");
+    my int $space2 = index($data, " ", $space1 + 1);
+    my str $method = substr($data, 0, $space1);
+    my str $path = substr($data, $space1 + 1, $space2 - $space1 - 1);
+
+    # Security check
+    if (index($path, "..") >= 0) {
+        send_response($client, 403, "text/plain", "Forbidden");
+        sys::socket_close($client);
+        return;
+    }
+
+    # Build filesystem path
+    my str $fs_path = $root . $path;
+
+    # Handle directory
+    if (sys::is_dir($fs_path)) {
+        # Try index.html
+        my str $index_path = $fs_path . "/index.html";
+        if (sys::is_file($index_path)) {
+            $fs_path = $index_path;
+        } else {
+            # Show directory listing
+            my str $listing = dir_listing($fs_path, $path);
+            send_response($client, 200, "text/html", $listing);
+            sys::socket_close($client);
+            return;
+        }
+    }
+
+    # Serve file
+    if (sys::is_file($fs_path)) {
+        my str $content = slurp($fs_path);
+        my str $mime = get_mime_type($fs_path);
+        send_response($client, 200, $mime, $content);
+    } else {
+        send_response($client, 404, "text/plain", "Not Found");
+    }
+
+    sys::socket_close($client);
+}
+
+func main(int $argc, array @argv) int {
+    my str $root = ".";
+    my int $port = 8080;
+
+    if ($argc > 1) {
+        $root = $argv[1];
+    }
+    if ($argc > 2) {
+        $port = sys::atoi($argv[2]);
+    }
+
+    say("Static File Server");
+    say("Serving: " . $root);
+    say("Port: " . $port);
+    say("Directory listing: enabled");
+    say("");
+
+    my scalar $server = sys::socket_server(0, $port);
+    if (!defined($server)) {
+        say("Error: Could not bind to port " . $port);
+        return 1;
+    }
+
+    say("Listening on http://localhost:" . $port);
+
+    while (1) {
+        my scalar $client = sys::socket_accept($server);
+        if (defined($client)) {
+            handle_request($client, $root);
+        }
+    }
+
+    return 0;
+}

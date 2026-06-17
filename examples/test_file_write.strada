@@ -1,0 +1,89 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_file_write.strada - Demonstrate writing and appending to files
+
+func main() int {
+    my str $filename = "output_demo.txt";
+
+    say("=== File Write and Append Demo ===");
+    say("");
+
+    # Method 1: Using sys::spew() - overwrites entire file
+    say("1. Writing with sys::spew() (overwrites):");
+    sys::spew($filename, "Line 1: Written with spew\n");
+    say("   Wrote initial content");
+
+    # Read and show
+    my str $content = sys::slurp($filename);
+    say("   Current contents: " . $content);
+
+    # Method 2: Using open with "w" mode - truncates and writes
+    say("");
+    say("2. Writing with sys::open('w') mode (truncates):");
+    my scalar $fh = sys::open($filename, "w");
+    sys::fwrite($fh, "Line 1: Fresh start\n");
+    sys::fwrite($fh, "Line 2: Second line\n");
+    sys::close($fh);
+
+    $content = sys::slurp($filename);
+    say("   Current contents:");
+    say($content);
+
+    # Method 3: Using open with "a" mode - appends
+    say("3. Appending with sys::open('a') mode:");
+    $fh = sys::open($filename, "a");
+    sys::fwrite($fh, "Line 3: Appended first time\n");
+    sys::fwrite($fh, "Line 4: Appended second time\n");
+    sys::close($fh);
+
+    $content = sys::slurp($filename);
+    say("   After appending:");
+    say($content);
+
+    # Method 4: Multiple append operations
+    say("4. Multiple append sessions:");
+
+    $fh = sys::open($filename, "a");
+    sys::fwrite($fh, "Line 5: From session 1\n");
+    sys::close($fh);
+
+    $fh = sys::open($filename, "a");
+    sys::fwrite($fh, "Line 6: From session 2\n");
+    sys::close($fh);
+
+    $content = sys::slurp($filename);
+    say("   Final contents:");
+    say($content);
+
+    # Reading line by line
+    say("5. Reading line by line with sys::readline():");
+    $fh = sys::open($filename, "r");
+    my int $line_num = 1;
+    my str $line = sys::readline($fh);
+    while (length($line) > 0) {
+        say("   Line " . $line_num . ": " . $line);
+        $line_num = $line_num + 1;
+        $line = sys::readline($fh);
+    }
+    sys::close($fh);
+
+    say("");
+    say("=== Demo Complete ===");
+
+    return 0;
+}

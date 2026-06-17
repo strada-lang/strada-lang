@@ -1,0 +1,58 @@
+# Leak test: whole-array / whole-hash assignment to `our` (package-global)
+# containers. Exercises the CodeGenExpr `our`-array and `our`-hash assignment
+# branches, whose incref/decref/copy ownership must not leak on REASSIGNMENT
+# (each reassignment replaces the prior global value, which must be freed).
+#
+# Pass criterion (valgrind): definitely lost == 0 AND indirectly lost == 0.
+# `our` globals live in the registry and are "still reachable" at exit — that
+# is fine; what this catches is a per-iteration leak of the OVERWRITTEN value.
+#
+# Run: valgrind --leak-check=full ./test_our_container_assign
+
+our array @G = ();
+our hash  %H = ();
+our array @SRC = ();
+our hash  %HSRC = ();
+
+func reassign_arr_single(int $i) void { @G = ("elem-" . $i); }   # single-elem wrap, computed (owned) temp
+func reassign_arr_multi(int $i)  void { @G = ("a", "b-" . $i, "c"); }
+func reassign_hash(int $i)       void { %H = ("k" => "v-" . $i, "n" => $i); }
+
+func main() int {
+    my int $i = 0;
+    while ($i < 2000) {
+        # --- our array: single-element list (the -ldl shape) ---
+        @G = ("-ldl");                       # bare literal
+        @G = ("opt-" . $i);                  # computed string => owned temp, must be freed
+        reassign_arr_single($i);             # same, from a function
+
+        # --- our array: multi-element + nested (indirect-loss bait) ---
+        @G = ("a", "b", "c");
+        @G = ([1, 2, 3], { "x" => $i });     # elements are an arrayref + hashref
+        reassign_arr_multi($i);
+
+        # --- our array: copy from another array (must deep-own its own copy) ---
+        @SRC = ("s1-" . $i, "s2-" . $i);
+        @G = @SRC;                           # array_copy path
+        @G = ();                             # clear
+
+        # --- our hash: literal single + multi pair ---
+        %H = ("only" => "x-" . $i);
+        %H = ("a" => 1, "b" => "two-" . $i, "c" => [ $i, $i ]);   # nested arrayref value
+        reassign_hash($i);
+
+        # --- our hash: copy from another hash ---
+        %HSRC = ("p" => $i, "q" => "qv-" . $i);
+        %H = %HSRC;                          # hash_from_ref copy path
+        %H = ();                             # clear
+
+        $i = $i + 1;
+    }
+
+    # Leave non-empty globals live at exit too (exercises still-reachable, not lost).
+    @G = ("final");
+    %H = ("done" => 1);
+
+    say("our-container assign leak test done; G=" . size(@G) . " H=" . size(%H));
+    return 0;
+}

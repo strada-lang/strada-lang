@@ -1,0 +1,67 @@
+#!/usr/bin/env strada
+# Leak regression: NODE_DYN_METHOD_CALL (dynamic method dispatch via
+# `$obj->$methodname()`) previously passed the receiver `$obj` to
+# strada_method_call() via raw gen_expression with no needs_temp_cleanup
+# check. If `$obj` was a hash-access (`$h{"o"}->$method()`) — which
+# returns an owned ref — the receiver leaked on every call.
+#
+# Run: valgrind --leak-check=full ./test_dyn_method_call_hash_recv
+
+package Counter;
+
+func new(int $start) scalar {
+    my hash %self = ();
+    $self{"n"} = $start;
+    return bless(\%self, "Counter");
+}
+
+func bump(scalar $self) int {
+    $self->{"n"} = $self->{"n"} + 1;
+    return $self->{"n"};
+}
+
+func name(scalar $self) str {
+    return "counter:" . $self->{"n"};
+}
+
+package main;
+
+func test_dyn_dispatch_hash_receiver() void {
+    my hash %h = ();
+    $h{"obj"} = Counter::new(0);
+    my str $mname = "bump";
+
+    my int $iter = 200;
+    my int $i = 0;
+    while ($i < $iter) {
+        # Receiver is $h{"obj"} — owned ref via hash-access codegen.
+        # Method name comes from a variable, triggering NODE_DYN_METHOD_CALL.
+        my int $r = $h{"obj"}->$mname();
+        $i = $i + 1;
+    }
+    say("test_dyn_dispatch_hash_receiver: counter=" . $h{"obj"}->{"n"});
+}
+
+func test_dyn_dispatch_returning_str() void {
+    my hash %h = ();
+    $h{"obj"} = Counter::new(7);
+    my str $mname = "name";
+
+    my int $iter = 200;
+    my int $i = 0;
+    while ($i < $iter) {
+        my str $s = $h{"obj"}->$mname();
+        if ($s ne "counter:7") {
+            say("FAIL: " . $s);
+            return;
+        }
+        $i = $i + 1;
+    }
+    say("test_dyn_dispatch_returning_str: PASS");
+}
+
+func main() int {
+    test_dyn_dispatch_hash_receiver();
+    test_dyn_dispatch_returning_str();
+    return 0;
+}

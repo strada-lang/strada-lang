@@ -1,0 +1,7 @@
+use lib "lib";
+use Test;
+func main() int {
+    Test::ok(1, "passes");
+    Test::is("a", "b", "deliberately fails");
+    return Test::done_testing();
+}

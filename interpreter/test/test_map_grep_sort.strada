@@ -1,0 +1,21 @@
+func main() int {
+    my array @nums = (5, 2, 8, 1, 9, 3);
+
+    # Map
+    my scalar $doubled = map { $_ * 2; } @nums;
+    say(join(" ", $doubled));
+
+    # Grep
+    my scalar $big = grep { $_ > 4; } @nums;
+    say(join(" ", $big));
+
+    # Sort
+    my scalar $sorted = sort { $a <=> $b; } @nums;
+    say(join(" ", $sorted));
+
+    # Sort descending
+    my scalar $desc = sort { $b <=> $a; } @nums;
+    say(join(" ", $desc));
+
+    return 0;
+}

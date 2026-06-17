@@ -1,0 +1,131 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_regex.strada - Test regular expression support
+
+func test_match() void {
+    say("=== Testing match() ===");
+    
+    my str $text = "Hello World";
+    
+    if (match($text, "Hello")) {
+        say("✓ Matched 'Hello'");
+    }
+    
+    if (match($text, "World")) {
+        say("✓ Matched 'World'");
+    }
+    
+    if (!match($text, "Goodbye")) {
+        say("✓ Did not match 'Goodbye'");
+    }
+    
+    my str $email = "user@example.com";
+    if (match($email, ".*@.*\\.com")) {
+        say("✓ Email pattern matched");
+    }
+}
+
+func test_replace() void {
+    say("");
+    say("=== Testing replace() ===");
+    
+    my str $text = "Hello World";
+    my str $result = replace($text, "World", "Strada");
+    say("Original: " . $text);
+    say("Replaced: " . $result);
+    
+    my str $number = "Price: $100";
+    my str $new_price = replace($number, "[0-9]+", "200");
+    say("Original: " . $number);
+    say("Replaced: " . $new_price);
+}
+
+func test_replace_all() void {
+    say("");
+    say("=== Testing replace_all() ===");
+    
+    my str $text = "foo bar foo baz foo";
+    my str $result = replace_all($text, "foo", "BAR");
+    say("Original: " . $text);
+    say("All replaced: " . $result);
+    
+    my str $spaces = "a  b    c     d";
+    my str $normalized = replace_all($spaces, " +", " ");
+    say("Original: '" . $spaces . "'");
+    say("Normalized: '" . $normalized . "'");
+}
+
+func test_split() void {
+    say("");
+    say("=== Testing split() ===");
+    
+    my str $csv = "apple,banana,cherry,date";
+    my scalar $parts = split($csv, ",");
+    
+    say("Split CSV: " . $csv);
+    say("  (Array created with split)");
+    
+    my str $words = "one  two   three    four";
+    my scalar $word_list = split($words, " +");
+    say("Split words: " . $words);
+    say("  (Array created with split)");
+}
+
+func test_capture() void {
+    say("");
+    say("=== Testing capture() ===");
+    
+    my str $date = "2024-12-31";
+    my scalar $parts = capture($date, "([0-9]+)-([0-9]+)-([0-9]+)");
+    
+    say("Date: " . $date);
+    say("  (Captures extracted)");
+}
+
+func test_practical() void {
+    say("");
+    say("=== Practical Examples ===");
+    
+    my str $html = "<p>Hello <b>World</b></p>";
+    my str $text = replace_all($html, "<[^>]+>", "");
+    say("HTML: " . $html);
+    say("Text: " . $text);
+    
+    my str $phone = "Phone: 555-1234";
+    my str $cleaned = replace($phone, "Phone: ", "");
+    say("Original: " . $phone);
+    say("Cleaned: " . $cleaned);
+    
+    my str $url = "https://example.com/path/to/file.txt";
+    my str $domain = replace($url, "https://([^/]+)/.*", "$1");
+    say("URL: " . $url);
+}
+
+func main() int {
+    test_match();
+    test_replace();
+    test_replace_all();
+    test_split();
+    test_capture();
+    test_practical();
+    
+    say("");
+    say("✓ All regex tests complete!");
+    
+    return 0;
+}

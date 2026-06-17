@@ -1,0 +1,37 @@
+# Leak test: UTF-8 string operations
+# Exercises chr/ord/length/substr/reverse/concat on multi-byte strings
+# in a tight loop to surface any per-operation leaks.
+func main() int {
+    my int $i = 0;
+    while ($i < 5000) {
+        # High codepoint chr() — allocates UTF-8-flagged string
+        my str $eu = chr(8364);  # €
+        my str $zh = chr(0x4E2D) . chr(0x6587);  # 中文
+        my str $latin = chr(233);  # é (UTF-8 encoded)
+
+        # Length on multi-byte
+        my int $l1 = length($eu);
+        my int $l2 = length($zh);
+        my int $l3 = length($latin);
+
+        # ord round-trip
+        my int $cp = ord($eu);
+
+        # Substr on multi-byte
+        my str $mid = substr($zh, 0, 1);
+
+        # Concat
+        my str $s = "prefix:" . $eu . "/" . $zh . ":suffix";
+
+        # Reverse
+        my str $rev = reverse($zh);
+
+        # uc/lc on Greek
+        my str $sig_up = chr(0x03A3);  # Σ
+        my str $sig_lo = lc($sig_up);  # σ
+
+        $i = $i + 1;
+    }
+    say("done");
+    return 0;
+}

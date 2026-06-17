@@ -1,0 +1,104 @@
+# stradac
+
+Strada compiler - compile Strada source code to C
+
+## SYNOPSIS
+
+**stradac** [*options*] *input.strada* *output.c*
+
+## DESCRIPTION
+
+**stradac** is the Strada compiler. It compiles Strada source code (.strada files) into C code, which can then be compiled with gcc to produce native executables.
+
+Strada is a strongly-typed programming language inspired by Perl. It features Perl-like syntax with sigils ($, @, %), strong static typing, and compiles to efficient C code.
+
+The compiler is self-hosting - it is written in Strada itself.
+
+## OPTIONS
+
+- **-L** *path*
+  Add a library search path with high priority. These paths are searched first when resolving `use` statements.
+
+- **-LL** *path*
+  Add a library search path with low priority. These paths are searched last.
+
+- **--import-object** *path*
+  Treat *path* as an implicit `import_object` — extract its `__strada_export_info` metadata so calls to that module's namespace resolve, and emit it into `__STRADA_OBJECT_FILES__` so the linker picks it up. Used by the **strada** driver to forward CLI-passed Strada module objects.
+
+- **--import-archive** *path*
+  Same as `--import-object` but for static archives (`.a`).
+
+- **-M** [*target*]
+  Module-only codegen. Only the input file's own functions, globals, BEGIN/END blocks, and top-level `__C__` blocks produce bodies in the output; anything brought in by `use` gets a forward declaration but no body. *target* is normally derived from the input filename (`Foo.strada` → target `Foo`) and is used purely for naming. The actual filter looks at each AST item's `from_use` tag (set by `load_module`), so files declaring multiple packages — e.g. `Eval.strada` which declares `package Strada::Interpreter` and `package Strada::Eval` — still emit their own content correctly.
+
+- **-g**, **--debug**
+  Emit `#line` directives in the generated C code. This enables source-level debugging where the debugger shows Strada source lines instead of generated C code.
+
+- **-p**, **--profile**
+  Enable function profiling. When enabled, the compiled program will track timing and call counts for each function. At program exit, a profile report is printed to stderr.
+
+- **--full-profile**
+  Enable line-level profiling instrumentation (similar to Perl's Devel::NYTProf). Implies `-g` (debug/line info). The compiled program writes a `strada-prof.out` binary file on exit. Use `strada-proftext` or `strada-profhtml` to generate reports from the profile data.
+
+- **-t**, **--timing**
+  Show compilation phase timing. Displays how long each phase of compilation (lexing, parsing, code generation) takes.
+
+- **-w**, **--warnings**
+  Show compiler warnings such as unused variables.
+
+- **-h**, **--help**
+  Display help message and exit.
+
+## EXIT STATUS
+
+- **0** - Compilation successful
+- **1** - Compilation failed (syntax error, type error, etc.)
+
+## EXAMPLES
+
+Compile a Strada program to C:
+
+```
+stradac hello.strada hello.c
+```
+
+Compile with debug information:
+
+```
+stradac -g hello.strada hello.c
+```
+
+Compile with custom library paths:
+
+```
+stradac -L ./mylibs -L /opt/strada/lib app.strada app.c
+```
+
+Module-only compile (produces a `.c` whose `.o` only carries this file's own symbols — anything from `use` is left to the consumer to link):
+
+```
+stradac -M Foo.strada Foo.c
+```
+
+Forward a CLI-passed Strada module as an implicit import:
+
+```
+stradac --import-object /path/to/MyLib.o app.strada app.c
+```
+
+## FILES
+
+- */usr/local/lib/strada/lib* - System library directory (when installed); add others with **-L**
+- */usr/local/lib/strada/runtime* - Installed runtime (`strada_runtime.c`/`.h`, `strada_runtime.o`)
+
+## SEE ALSO
+
+**strada**(1), **strada-proftext**(1), **strada-profhtml**(1), **stradadoc**(1)
+
+## AUTHOR
+
+Michael J. Flickinger
+
+## COPYRIGHT
+
+Copyright (c) 2026 Michael J. Flickinger. Licensed under the GNU General Public License v2.

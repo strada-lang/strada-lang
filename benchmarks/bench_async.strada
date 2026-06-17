@@ -1,0 +1,121 @@
+# Concurrency benchmarks — thread-pool futures, channels, async::map,
+# atomics, and mutex contention. Strada-only (no cross-language
+# counterpart; the workloads are pool-shaped, not event-loop-shaped —
+# the event loop has its own examples/bench_event_loop.strada).
+#
+# Sections:
+#   spawn-join   — 20k future create/await round trips
+#   channel      — 500k send/recv through one channel (2 threads)
+#   async-map    — data-parallel map over 200k items (4 workers)
+#   atomics      — 1M atomic_add from 4 threads
+#   mutex        — 400k lock/unlock pairs from 4 threads
+#
+# Reference numbers: benchmarks/BASELINE.md
+
+package main;
+
+async func tiny(int $x) int {
+    return $x + 1;
+}
+
+func main() int {
+    my num $t0 = core::hires_time();
+
+    # 1. future spawn/await round trips
+    my int $sum = 0;
+    my int $i = 0;
+    while ($i < 20000) {
+        my scalar $f = tiny($i);
+        $sum += await $f;
+        $i++;
+    }
+    my num $t1 = core::hires_time();
+    say("spawn-join: " . $sum . " " . ($t1 - $t0));
+
+    # 2. channel throughput: producer thread -> main
+    my scalar $ch = async::channel();
+    my scalar $producer = async::spawn(fn () int {
+        my int $p = 0;
+        while ($p < 500000) {
+            async::send($ch, $p);
+            $p++;
+        }
+        async::send($ch, -1);
+        return 0;
+    });
+    my int $recv_sum = 0;
+    while (1) {
+        my scalar $v = async::recv($ch);
+        if ($v == -1) { last; }
+        $recv_sum += $v;
+    }
+    await $producer;
+    my num $t2 = core::hires_time();
+    say("channel: " . $recv_sum . " " . ($t2 - $t1));
+
+    # 3. async::map data parallelism
+    my array @items;
+    $i = 0;
+    while ($i < 200000) {
+        push(@items, $i);
+        $i++;
+    }
+    my scalar $mapped = async::map(fn (scalar $x) scalar {
+        return $x * 2 + 1;
+    }, \@items, 4);
+    my int $msum = $mapped->[199999];
+    my num $t3 = core::hires_time();
+    say("async-map: " . $msum . " " . ($t3 - $t2));
+
+    # 4. atomic adds from 4 threads
+    my scalar $counter = async::atomic(0);
+    my array @futs;
+    my int $w = 0;
+    while ($w < 4) {
+        push(@futs, async::spawn(fn () int {
+            my int $n = 0;
+            while ($n < 250000) {
+                async::atomic_add($counter, 1);
+                $n++;
+            }
+            return 0;
+        }));
+        $w++;
+    }
+    $i = 0;
+    while ($i < 4) {
+        await $futs[$i];
+        $i++;
+    }
+    my num $t4 = core::hires_time();
+    say("atomics: " . async::atomic_load($counter) . " " . ($t4 - $t3));
+
+    # 5. mutex contention: 4 threads bumping a shared count
+    my scalar $mu = async::mutex();
+    my scalar $shared = async::atomic(0);
+    my array @mfuts;
+    $w = 0;
+    while ($w < 4) {
+        push(@mfuts, async::spawn(fn () int {
+            my int $n = 0;
+            while ($n < 100000) {
+                async::lock($mu);
+                async::atomic_add($shared, 1);
+                async::unlock($mu);
+                $n++;
+            }
+            return 0;
+        }));
+        $w++;
+    }
+    $i = 0;
+    while ($i < 4) {
+        await $mfuts[$i];
+        $i++;
+    }
+    my num $t5 = core::hires_time();
+    say("mutex: " . async::atomic_load($shared) . " " . ($t5 - $t4));
+
+    say("total: " . ($t5 - $t0));
+    return 0;
+}

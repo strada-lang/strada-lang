@@ -1,0 +1,12 @@
+func main() int {
+    my int $i = 0;
+    while ($i < 100) {
+        my int $t = core::time();
+        my num $ht = core::hires_time();
+        my int $pid = core::getpid();
+        my str $cwd = core::getcwd();
+        $i = $i + 1;
+    }
+    say("done");
+    return 0;
+}

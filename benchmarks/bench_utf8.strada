@@ -1,0 +1,93 @@
+# UTF-8/Unicode benchmarks. Strada strings are byte-oriented with
+# UTF-8-aware case operations and codepoint-oriented chr/ord; this
+# measures exactly those paths (everything in bench_strings/bench_regex
+# is pure ASCII, so the multibyte branches have no other coverage).
+#
+# Sections:
+#   case       — uc/lc over 200k multibyte strings (UTF-8-aware folding)
+#   valid      — utf8::valid scans over 200k strings
+#   chr-build  — build 50k strings from mixed-plane codepoints via chr()
+#   concat     — multibyte concat chains (ASCII-flag propagation: these
+#                strings defeat the all-ASCII fast path)
+#   nfc        — Unicode NFC normalization over 50k decomposed strings
+#
+# Reference numbers: benchmarks/BASELINE.md
+
+package main;
+
+func main() int {
+    # Build a multibyte corpus: German/French-ish text with high chars
+    my array @corpus;
+    my int $i = 0;
+    while ($i < 200000) {
+        push(@corpus, "Müller-Straße " . $i . " — café №" . ($i % 100) . " übergröße");
+        $i++;
+    }
+
+    my num $t0 = core::hires_time();
+
+    # 1. UTF-8-aware case folding
+    my int $case_len = 0;
+    $i = 0;
+    while ($i < 200000) {
+        my str $u = uc($corpus[$i]);
+        my str $l = lc($u);
+        $case_len += bytes($l);
+        $i++;
+    }
+    my num $t1 = core::hires_time();
+    say("case: " . $case_len . " " . ($t1 - $t0));
+
+    # 2. validity scans
+    my int $valid = 0;
+    $i = 0;
+    while ($i < 200000) {
+        $valid += utf8::valid($corpus[$i]);
+        $i++;
+    }
+    my num $t2 = core::hires_time();
+    say("valid: " . $valid . " " . ($t2 - $t1));
+
+    # 3. build strings from codepoints (chr is codepoint-oriented:
+    #    128+ produces multibyte UTF-8)
+    my int $built = 0;
+    $i = 0;
+    while ($i < 50000) {
+        my str $s = "";
+        my int $j = 0;
+        while ($j < 20) {
+            $s = $s . chr(0x00E9 + ($j % 16));   # é and friends (2-byte)
+            $s = $s . chr(0x4E00 + ($j % 64));   # CJK (3-byte)
+            $j++;
+        }
+        $built += bytes($s);
+        $i++;
+    }
+    my num $t3 = core::hires_time();
+    say("chr-build: " . $built . " " . ($t3 - $t2));
+
+    # 4. multibyte concat (non-ASCII operands)
+    my str $acc = "";
+    $i = 0;
+    while ($i < 30000) {
+        $acc = $acc . "ü" . $i . "ß—";
+        $i++;
+    }
+    my num $t4 = core::hires_time();
+    say("concat: " . bytes($acc) . " " . ($t4 - $t3));
+
+    # 5. NFC normalization of decomposed input (e + combining acute)
+    my str $decomposed = "Cafe" . chr(0x0301) . " resume" . chr(0x0301) . " naive" . chr(0x0308);
+    my int $nfc_len = 0;
+    $i = 0;
+    while ($i < 50000) {
+        my str $n = utf8::nfc($decomposed);
+        $nfc_len += bytes($n);
+        $i++;
+    }
+    my num $t5 = core::hires_time();
+    say("nfc: " . $nfc_len . " " . ($t5 - $t4));
+
+    say("total: " . ($t5 - $t0));
+    return 0;
+}

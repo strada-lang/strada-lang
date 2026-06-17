@@ -1,0 +1,45 @@
+# Test: int-declared storage holds canonical integers. Regression test for
+# a type-confusion bug where `my int $x = $str_scalar` aliased the string
+# pointer into the "int" variable (it printed as the string), int functions
+# could return heap NUMs (`return -1;`) or shared strings, and the int
+# fast paths then read garbage from values they assumed were tagged ints.
+func ret_neg() int { return -1; }
+func ret_str(str $s) int { return $s; }
+func main() int {
+    my int $pass = 0;
+    my int $fail = 0;
+
+    my scalar $s = "12abc";
+    my int $d = $s;
+    if ("" . $d eq "12") { $pass++; } else { $fail++; say("FAIL 1: " . $d); }
+    if ($d + 1 == 13) { $pass++; } else { $fail++; say("FAIL 2"); }
+    if ($s eq "12abc") { $pass++; } else { $fail++; say("FAIL 3: source clobbered"); }
+
+    my int $b = ret_neg();
+    if ($b == -1 && $b * 2 == -2) { $pass++; } else { $fail++; say("FAIL 4: " . $b); }
+
+    my int $r = ret_str("42xyz");
+    if ("" . $r eq "42") { $pass++; } else { $fail++; say("FAIL 5: " . $r); }
+
+    my int $a = 5;
+    $a = $s;
+    if ("" . $a eq "12") { $pass++; } else { $fail++; say("FAIL 6: " . $a); }
+
+    my num $f = 7.9;
+    my int $t = $f;
+    if ("" . $t eq "7") { $pass++; } else { $fail++; say("FAIL 7: " . $t); }
+
+    my int $n = 17;
+    my int $m = -$n;
+    if ($m == -17) { $pass++; } else { $fail++; say("FAIL 8"); }
+
+    my scalar $cl = fn (str $x) int { return $x; };
+    if ($cl->("99bottles") == 99) { $pass++; } else { $fail++; say("FAIL 9"); }
+
+    if ($fail == 0) {
+        say("All int coercion tests passed (" . $pass . " checks)");
+    } else {
+        say("FAILED: " . $fail);
+    }
+    return $fail;
+}

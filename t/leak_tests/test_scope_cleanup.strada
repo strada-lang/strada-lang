@@ -1,0 +1,144 @@
+#!/usr/bin/env strada
+# Test scope-based cleanup for memory leaks
+# Run: valgrind --leak-check=full ./test_scope_cleanup
+
+func create_string(int $n) str {
+    return "string_" . $n;
+}
+
+func create_array(int $n) array {
+    my array @a = (1, 2, 3, $n);
+    return @a;
+}
+
+func create_hash(str $key, str $val) hash {
+    my hash %h = ();
+    $h{$key} = $val;
+    return %h;
+}
+
+func early_return(int $n) int {
+    my str $s1 = "allocated_1";
+    my str $s2 = "allocated_2";
+    my array @a = (1, 2, 3);
+    if ($n > 50) {
+        return 1;  # Early return - must clean up s1, s2, @a
+    }
+    my str $s3 = "allocated_3";
+    return 0;
+}
+
+func main() int {
+    say("Testing scope cleanup for memory leaks...");
+    my int $iterations = 100;
+
+    # Test variables going out of scope in while loop
+    say("  loop scope cleanup...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my str $s = create_string($i);
+        my array @a = create_array($i);
+        my hash %h = create_hash("key", "val_" . $i);
+        if (length($s) < 1) {
+            say("    FAIL: create_string");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test nested loop scope cleanup
+    say("  nested loop cleanup...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $j = 0;
+        while ($j < 5) {
+            my str $inner = "inner_" . $i . "_" . $j;
+            my scalar $ref = [1, 2, $j];
+            if (length($inner) < 1) {
+                say("    FAIL: inner");
+                return 1;
+            }
+            $j = $j + 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test early return cleanup
+    say("  early return cleanup...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $r = early_return($i);
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test if/else branch cleanup
+    say("  if/else branch cleanup...");
+    $i = 0;
+    while ($i < $iterations) {
+        if ($i % 2 == 0) {
+            my str $even = "even_" . $i;
+            my array @data = (1, 2, 3);
+            if (length($even) < 1) {
+                say("    FAIL: even");
+                return 1;
+            }
+        } else {
+            my str $odd = "odd_" . $i;
+            my hash %data = ();
+            $data{"x"} = "y";
+            if (length($odd) < 1) {
+                say("    FAIL: odd");
+                return 1;
+            }
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test last/next in loops with allocations
+    say("  last/next cleanup...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $j = 0;
+        while ($j < 20) {
+            my str $s = "item_" . $j;
+            if ($j == 10) {
+                $j = $j + 1;
+                last;
+            }
+            $j = $j + 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test reassignment cleanup
+    say("  reassignment cleanup...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = "first_" . $i;
+        $s = "second_" . $i;
+        $s = "third_" . $i;
+        if ($s ne "third_" . $i) {
+            say("    FAIL: reassignment");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test function return value cleanup (not captured)
+    say("  uncaptured returns...");
+    $i = 0;
+    while ($i < $iterations) {
+        create_string($i);
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All scope cleanup tests passed!");
+    return 0;
+}

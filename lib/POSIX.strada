@@ -1,0 +1,479 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+=head1 NAME
+
+POSIX - Perl-style POSIX interface for Strada
+
+=head1 SYNOPSIS
+
+    use lib "lib";
+    use POSIX;
+
+    # File tests
+    if (POSIX::is_file("/etc/passwd")) {
+        say("File exists");
+    }
+
+    # Wait status macros
+    my int $status = core::waitpid($pid, 0);
+    if (POSIX::WIFEXITED($status)) {
+        say("Exit code: " . POSIX::WEXITSTATUS($status));
+    }
+
+    # Constants
+    my int $sig = POSIX::SIGTERM();
+
+=head1 DESCRIPTION
+
+POSIX provides POSIX constants and utility functions similar to Perl's
+POSIX module. It includes signal constants, file mode constants, error
+constants, and helpful utility functions.
+
+=head1 SIGNAL CONSTANTS
+
+    POSIX::SIGHUP()    # 1 - Hangup
+    POSIX::SIGINT()    # 2 - Interrupt (Ctrl-C)
+    POSIX::SIGQUIT()   # 3 - Quit
+    POSIX::SIGKILL()   # 9 - Kill (cannot be caught)
+    POSIX::SIGUSR1()   # 10 - User signal 1
+    POSIX::SIGUSR2()   # 12 - User signal 2
+    POSIX::SIGPIPE()   # 13 - Broken pipe
+    POSIX::SIGALRM()   # 14 - Alarm
+    POSIX::SIGTERM()   # 15 - Termination
+    POSIX::SIGCHLD()   # 17 - Child status changed
+
+=head1 FILE ACCESS CONSTANTS
+
+    POSIX::F_OK()  # 0 - File exists
+    POSIX::R_OK()  # 4 - Readable
+    POSIX::W_OK()  # 2 - Writable
+    POSIX::X_OK()  # 1 - Executable
+
+=head1 FILE MODE CONSTANTS
+
+    # Owner permissions
+    POSIX::S_IRWXU()  # 0700 - rwx for owner
+    POSIX::S_IRUSR()  # 0400 - read for owner
+    POSIX::S_IWUSR()  # 0200 - write for owner
+    POSIX::S_IXUSR()  # 0100 - execute for owner
+
+    # Group permissions
+    POSIX::S_IRWXG()  # 0070 - rwx for group
+    POSIX::S_IRGRP()  # 0040 - read for group
+
+    # Other permissions
+    POSIX::S_IRWXO()  # 0007 - rwx for others
+    POSIX::S_IROTH()  # 0004 - read for others
+
+=head1 FILE TYPE FUNCTIONS
+
+=head2 S_ISREG($mode)
+
+Test if mode indicates a regular file.
+
+=head2 S_ISDIR($mode)
+
+Test if mode indicates a directory.
+
+=head2 S_ISLNK($mode)
+
+Test if mode indicates a symbolic link.
+
+=head2 S_ISCHR($mode), S_ISBLK($mode), S_ISFIFO($mode), S_ISSOCK($mode)
+
+Test for character device, block device, FIFO, and socket.
+
+=head1 WAIT STATUS MACROS
+
+=head2 WIFEXITED($status)
+
+Returns true if child exited normally.
+
+=head2 WEXITSTATUS($status)
+
+Returns exit code if WIFEXITED is true.
+
+=head2 WIFSIGNALED($status)
+
+Returns true if child was killed by a signal.
+
+=head2 WTERMSIG($status)
+
+Returns signal number if WIFSIGNALED is true.
+
+=head2 WIFSTOPPED($status)
+
+Returns true if child is stopped.
+
+=head2 WSTOPSIG($status)
+
+Returns stop signal if WIFSTOPPED is true.
+
+=head1 UTILITY FUNCTIONS
+
+=head2 file_exists($path)
+
+Check if file exists.
+
+    if (POSIX::file_exists("/tmp/myfile")) { ... }
+
+=head2 is_readable($path), is_writable($path), is_executable($path)
+
+Check file permissions.
+
+=head2 is_directory($path), is_file($path), is_symlink($path)
+
+Check file type.
+
+=head2 file_size($path)
+
+Get file size in bytes. Returns -1 if file doesn't exist.
+
+=head2 file_mtime($path)
+
+Get file modification time (Unix timestamp). Returns -1 if file doesn't exist.
+
+=head2 getenv_default($name, $default)
+
+Get environment variable with default value.
+
+    my str $home = POSIX::getenv_default("HOME", "/tmp");
+
+=head2 perror($prefix)
+
+Print error message to stderr (like C perror).
+
+    POSIX::perror("open failed");
+
+=head1 ERROR CONSTANTS
+
+    POSIX::EPERM()    # 1 - Operation not permitted
+    POSIX::ENOENT()   # 2 - No such file or directory
+    POSIX::EINTR()    # 4 - Interrupted system call
+    POSIX::EIO()      # 5 - I/O error
+    POSIX::EACCES()   # 13 - Permission denied
+    POSIX::EEXIST()   # 17 - File exists
+    POSIX::ENOTDIR()  # 20 - Not a directory
+    POSIX::EISDIR()   # 21 - Is a directory
+    POSIX::EINVAL()   # 22 - Invalid argument
+    POSIX::ENOSPC()   # 28 - No space left on device
+    POSIX::EPIPE()    # 32 - Broken pipe
+
+=head1 EXAMPLE
+
+    use lib "lib";
+    use POSIX;
+
+    # Check file and get info
+    my str $path = "/etc/passwd";
+    if (POSIX::is_file($path) && POSIX::is_readable($path)) {
+        say("Size: " . POSIX::file_size($path) . " bytes");
+    }
+
+    # Fork and wait
+    my int $pid = core::fork();
+    if ($pid == 0) {
+        exit(42);
+    }
+
+    my int $status = core::waitpid($pid, 0);
+    if (POSIX::WIFEXITED($status)) {
+        say("Child exited with code: " . POSIX::WEXITSTATUS($status));
+    } elsif (POSIX::WIFSIGNALED($status)) {
+        say("Child killed by signal: " . POSIX::WTERMSIG($status));
+    }
+
+=head1 SEE ALSO
+
+L<IPC::Open3>
+
+=cut
+
+package POSIX;
+
+# ============================================================
+# Signal Constants
+# ============================================================
+
+func SIGHUP() int { return 1; }
+func SIGINT() int { return 2; }
+func SIGQUIT() int { return 3; }
+func SIGILL() int { return 4; }
+func SIGTRAP() int { return 5; }
+func SIGABRT() int { return 6; }
+func SIGBUS() int { return 7; }
+func SIGFPE() int { return 8; }
+func SIGKILL() int { return 9; }
+func SIGUSR1() int { return 10; }
+func SIGSEGV() int { return 11; }
+func SIGUSR2() int { return 12; }
+func SIGPIPE() int { return 13; }
+func SIGALRM() int { return 14; }
+func SIGTERM() int { return 15; }
+func SIGCHLD() int { return 17; }
+func SIGCONT() int { return 18; }
+func SIGSTOP() int { return 19; }
+func SIGTSTP() int { return 20; }
+func SIGTTIN() int { return 21; }
+func SIGTTOU() int { return 22; }
+
+# ============================================================
+# Wait Constants
+# ============================================================
+
+func WNOHANG() int { return 1; }
+func WUNTRACED() int { return 2; }
+
+# ============================================================
+# File Access Constants
+# ============================================================
+
+func F_OK() int { return 0; }
+func R_OK() int { return 4; }
+func W_OK() int { return 2; }
+func X_OK() int { return 1; }
+
+# ============================================================
+# File Mode Constants
+# ============================================================
+
+func S_IRWXU() int { return 448; }   # 0700
+func S_IRUSR() int { return 256; }   # 0400
+func S_IWUSR() int { return 128; }   # 0200
+func S_IXUSR() int { return 64; }    # 0100
+
+func S_IRWXG() int { return 56; }    # 0070
+func S_IRGRP() int { return 32; }    # 0040
+func S_IWGRP() int { return 16; }    # 0020
+func S_IXGRP() int { return 8; }     # 0010
+
+func S_IRWXO() int { return 7; }     # 0007
+func S_IROTH() int { return 4; }     # 0004
+func S_IWOTH() int { return 2; }     # 0002
+func S_IXOTH() int { return 1; }     # 0001
+
+func S_ISUID() int { return 2048; }  # 04000
+func S_ISGID() int { return 1024; }  # 02000
+func S_ISVTX() int { return 512; }   # 01000
+
+# ============================================================
+# File Type Macros (from stat mode)
+# ============================================================
+
+func S_IFMT() int { return 61440; }  # 0170000 - file type mask
+func S_IFSOCK() int { return 49152; } # 0140000 - socket
+func S_IFLNK() int { return 40960; } # 0120000 - symbolic link
+func S_IFREG() int { return 32768; } # 0100000 - regular file
+func S_IFBLK() int { return 24576; } # 0060000 - block device
+func S_IFDIR() int { return 16384; } # 0040000 - directory
+func S_IFCHR() int { return 8192; }  # 0020000 - character device
+func S_IFIFO() int { return 4096; }  # 0010000 - FIFO
+
+# File type test functions
+func S_ISREG(int $mode) int {
+    return ($mode & POSIX::S_IFMT()) == POSIX::S_IFREG();
+}
+
+func S_ISDIR(int $mode) int {
+    return ($mode & POSIX::S_IFMT()) == POSIX::S_IFDIR();
+}
+
+func S_ISLNK(int $mode) int {
+    return ($mode & POSIX::S_IFMT()) == POSIX::S_IFLNK();
+}
+
+func S_ISCHR(int $mode) int {
+    return ($mode & POSIX::S_IFMT()) == POSIX::S_IFCHR();
+}
+
+func S_ISBLK(int $mode) int {
+    return ($mode & POSIX::S_IFMT()) == POSIX::S_IFBLK();
+}
+
+func S_ISFIFO(int $mode) int {
+    return ($mode & POSIX::S_IFMT()) == POSIX::S_IFIFO();
+}
+
+func S_ISSOCK(int $mode) int {
+    return ($mode & POSIX::S_IFMT()) == POSIX::S_IFSOCK();
+}
+
+# ============================================================
+# Standard File Descriptors
+# ============================================================
+
+func STDIN_FILENO() int { return 0; }
+func STDOUT_FILENO() int { return 1; }
+func STDERR_FILENO() int { return 2; }
+
+# ============================================================
+# Error Constants (common ones)
+# ============================================================
+
+func EPERM() int { return 1; }
+func ENOENT() int { return 2; }
+func ESRCH() int { return 3; }
+func EINTR() int { return 4; }
+func EIO() int { return 5; }
+func ENXIO() int { return 6; }
+func E2BIG() int { return 7; }
+func ENOEXEC() int { return 8; }
+func EBADF() int { return 9; }
+func ECHILD() int { return 10; }
+func EAGAIN() int { return 11; }
+func ENOMEM() int { return 12; }
+func EACCES() int { return 13; }
+func EFAULT() int { return 14; }
+func EBUSY() int { return 16; }
+func EEXIST() int { return 17; }
+func EXDEV() int { return 18; }
+func ENODEV() int { return 19; }
+func ENOTDIR() int { return 20; }
+func EISDIR() int { return 21; }
+func EINVAL() int { return 22; }
+func ENFILE() int { return 23; }
+func EMFILE() int { return 24; }
+func ENOTTY() int { return 25; }
+func EFBIG() int { return 27; }
+func ENOSPC() int { return 28; }
+func ESPIPE() int { return 29; }
+func EROFS() int { return 30; }
+func EMLINK() int { return 31; }
+func EPIPE() int { return 32; }
+func EDOM() int { return 33; }
+func ERANGE() int { return 34; }
+func EWOULDBLOCK() int { return 11; }
+
+# ============================================================
+# Utility Functions
+# ============================================================
+
+# Get environment variable with default value
+func getenv_default(str $name, str $fallback) str {
+    my scalar $val = core::getenv($name);
+    if (defined($val)) {
+        return $val;
+    }
+    return $fallback;
+}
+
+# Check if file exists
+func file_exists(str $path) int {
+    return core::access($path, POSIX::F_OK()) == 0;
+}
+
+# Check if file is readable
+func is_readable(str $path) int {
+    return core::access($path, POSIX::R_OK()) == 0;
+}
+
+# Check if file is writable
+func is_writable(str $path) int {
+    return core::access($path, POSIX::W_OK()) == 0;
+}
+
+# Check if file is executable
+func is_executable(str $path) int {
+    return core::access($path, POSIX::X_OK()) == 0;
+}
+
+# Check if path is a directory
+func is_directory(str $path) int {
+    my scalar $st = core::stat($path);
+    if (!defined($st)) {
+        return 0;
+    }
+    return POSIX::S_ISDIR($st->{"mode"});
+}
+
+# Check if path is a regular file
+func is_file(str $path) int {
+    my scalar $st = core::stat($path);
+    if (!defined($st)) {
+        return 0;
+    }
+    return POSIX::S_ISREG($st->{"mode"});
+}
+
+# Check if path is a symbolic link
+func is_symlink(str $path) int {
+    my scalar $st = core::lstat($path);
+    if (!defined($st)) {
+        return 0;
+    }
+    return POSIX::S_ISLNK($st->{"mode"});
+}
+
+# Get file size
+func file_size(str $path) int {
+    my scalar $st = core::stat($path);
+    if (!defined($st)) {
+        return -1;
+    }
+    return $st->{"size"};
+}
+
+# Get file modification time
+func file_mtime(str $path) int {
+    my scalar $st = core::stat($path);
+    if (!defined($st)) {
+        return -1;
+    }
+    return $st->{"mtime"};
+}
+
+# Get perror-style message
+func perror(str $prefix) void {
+    my int $err = core::errno();
+    my str $msg = core::strerror($err);
+    if (length($prefix) > 0) {
+        warn($prefix . ": " . $msg);
+    } else {
+        warn($msg);
+    }
+}
+
+# WIFEXITED macro equivalent
+func WIFEXITED(int $status) int {
+    return ($status & 127) == 0;
+}
+
+# WEXITSTATUS macro equivalent
+func WEXITSTATUS(int $status) int {
+    return ($status >> 8) & 255;
+}
+
+# WIFSIGNALED macro equivalent
+func WIFSIGNALED(int $status) int {
+    return (($status & 127) != 0) && (($status & 127) != 127);
+}
+
+# WTERMSIG macro equivalent
+func WTERMSIG(int $status) int {
+    return $status & 127;
+}
+
+# WIFSTOPPED macro equivalent
+func WIFSTOPPED(int $status) int {
+    return ($status & 255) == 127;
+}
+
+# WSTOPSIG macro equivalent
+func WSTOPSIG(int $status) int {
+    return ($status >> 8) & 255;
+}

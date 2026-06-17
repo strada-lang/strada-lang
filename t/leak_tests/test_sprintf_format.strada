@@ -1,0 +1,116 @@
+#!/usr/bin/env strada
+# Test sprintf formatting for memory leaks
+# Run: valgrind --leak-check=full ./test_sprintf_format
+
+func main() int {
+    say("Testing sprintf for memory leaks...");
+    my int $iterations = 100;
+
+    # Test basic %d format
+    say("  sprintf %%d...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my str $s = sprintf("%d", $i);
+        if (length($s) < 1) {
+            say("    FAIL: %d empty");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test %s format
+    say("  sprintf %%s...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = sprintf("Hello %s!", "world");
+        if ($s ne "Hello world!") {
+            say("    FAIL: %s = " . $s);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test %f format
+    say("  sprintf %%f...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = sprintf("%.2f", 3.14159);
+        if ($s ne "3.14") {
+            say("    FAIL: %f = " . $s);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test %x hex format
+    say("  sprintf %%x...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = sprintf("%x", 255);
+        if ($s ne "ff") {
+            say("    FAIL: %x = " . $s);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test multiple format specifiers
+    say("  sprintf multiple specs...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = sprintf("%s=%d (%.1f)", "count", $i, 1.5);
+        if (length($s) < 5) {
+            say("    FAIL: multi spec");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test %o octal format
+    say("  sprintf %%o...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = sprintf("%o", 8);
+        if ($s ne "10") {
+            say("    FAIL: %o = " . $s);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test width and padding
+    say("  sprintf width/padding...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = sprintf("%10d", 42);
+        if (length($s) != 10) {
+            say("    FAIL: width len = " . length($s));
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test sprintf with dynamic string args
+    say("  sprintf dynamic args...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $name = "item_" . $i;
+        my str $s = sprintf("[%s] %d", $name, $i * 10);
+        if (length($s) < 5) {
+            say("    FAIL: dynamic args");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All sprintf tests passed!");
+    return 0;
+}

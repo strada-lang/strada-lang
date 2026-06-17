@@ -1,0 +1,114 @@
+#!/usr/bin/env strada
+# Round 13 leak regressions:
+#
+# 1. sprintf("%s", $obj) leaked args when stringify overload threw
+# 2. Anon array/hash with throwing element leaked already-built elements
+# 3. num % num leaked heap-allocated operands (runtime fallback path)
+#
+# Run: valgrind --leak-check=full ./test_round13_sprintf_anon_mod
+
+package OL;
+func new() scalar {
+    my hash %self = ();
+    return bless(\%self, "OL");
+}
+func to_str(scalar $self) str {
+    throw "stringify-fail";
+}
+use overload '""' => "to_str";
+
+package main;
+
+func boom() int {
+    throw "elt-fail";
+    return 0;
+}
+
+func test_sprintf_stringify_throw() void {
+    my scalar $a = OL::new();
+    my int $iter = 100;
+    my int $i = 0;
+    while ($i < $iter) {
+        try {
+            my str $s = sprintf("v=%s end", $a);
+        } catch ($e) { }
+        $i = $i + 1;
+    }
+    say("test_sprintf_stringify_throw: PASS");
+}
+
+func test_anon_array_throw() void {
+    my int $iter = 100;
+    my int $i = 0;
+    while ($i < $iter) {
+        try {
+            my scalar $a = [1, boom(), 3];
+        } catch ($e) { }
+        $i = $i + 1;
+    }
+    say("test_anon_array_throw: PASS");
+}
+
+func test_anon_hash_throw() void {
+    my int $iter = 100;
+    my int $i = 0;
+    while ($i < $iter) {
+        try {
+            my scalar $h = { "a" => "ok", "b" => boom() };
+        } catch ($e) { }
+        $i = $i + 1;
+    }
+    say("test_anon_hash_throw: PASS");
+}
+
+func test_hash_literal_throw() void {
+    my int $iter = 100;
+    my int $i = 0;
+    while ($i < $iter) {
+        try {
+            my hash %h = ("a" => boom(), "b" => "ok");
+        } catch ($e) { }
+        $i = $i + 1;
+    }
+    say("test_hash_literal_throw: PASS");
+}
+
+func test_array_literal_throw() void {
+    my int $iter = 100;
+    my int $i = 0;
+    while ($i < $iter) {
+        try {
+            my array @a = (1, boom(), 3);
+        } catch ($e) { }
+        $i = $i + 1;
+    }
+    say("test_array_literal_throw: PASS");
+}
+
+func test_num_mod_heap_operand() void {
+    my int $iter = 500;
+    my int $i = 0;
+    my int $total = 0;
+    while ($i < $iter) {
+        # The 17.0 literal becomes a heap-allocated STRADA_NUM via
+        # strada_new_num. Without the fix, that SV leaked every iter.
+        my int $r = $i % 17;
+        $total = $total + $r;
+        $i = $i + 1;
+    }
+    if ($total < 0) {
+        say("FAIL mod");
+        return;
+    }
+    say("test_num_mod_heap_operand: PASS");
+}
+
+func main() int {
+    test_sprintf_stringify_throw();
+    test_anon_array_throw();
+    test_anon_hash_throw();
+    test_hash_literal_throw();
+    test_array_literal_throw();
+    test_num_mod_heap_operand();
+    return 0;
+}

@@ -1,0 +1,98 @@
+# test_variadic_oop.strada - Test variadic methods on blessed scalars
+
+package Calculator;
+
+func new() scalar {
+    my hash %self = ();
+    return bless(\%self, "Calculator");
+}
+
+# Variadic method - sum all numbers
+func sum(scalar $self, int ...@nums) int {
+    my int $total = 0;
+    foreach my int $n (@nums) {
+        $total = $total + $n;
+    }
+    return $total;
+}
+
+# Variadic method with fixed params before variadic
+func sum_with_base(scalar $self, int $base, int ...@nums) int {
+    my int $total = $base;
+    foreach my int $n (@nums) {
+        $total = $total + $n;
+    }
+    return $total;
+}
+
+# Join strings variadic
+func join_parts(scalar $self, str $sep, str ...@parts) str {
+    my str $result = "";
+    my int $first = 1;
+    foreach my str $s (@parts) {
+        if ($first == 0) {
+            $result = $result . $sep;
+        }
+        $result = $result . $s;
+        $first = 0;
+    }
+    return $result;
+}
+
+package main;
+
+func main() int {
+    say("=== Testing Variadic OOP Methods ===");
+    say("");
+
+    my scalar $calc = Calculator::new();
+
+    # Test basic variadic method call
+    say("--- Basic variadic method calls ---");
+    my int $r1 = $calc->sum(1, 2, 3);
+    say("\$calc->sum(1, 2, 3) = " . $r1);
+
+    my int $r2 = $calc->sum(10, 20, 30, 40, 50);
+    say("\$calc->sum(10, 20, 30, 40, 50) = " . $r2);
+
+    # Test variadic with no args
+    my int $r3 = $calc->sum();
+    say("\$calc->sum() = " . $r3);
+
+    say("");
+
+    # Test spread operator with method call
+    say("--- Spread operator with method call ---");
+    my array @nums = (100, 200, 300);
+    my int $r4 = $calc->sum(...@nums);
+    say("\$calc->sum(...@nums) with @nums = (100, 200, 300) = " . $r4);
+
+    # Test mixed args and spread
+    my int $r5 = $calc->sum(1, ...@nums, 999);
+    say("\$calc->sum(1, ...@nums, 999) = " . $r5);
+
+    say("");
+
+    # Test variadic with fixed param first
+    say("--- Variadic with fixed param ---");
+    my int $r6 = $calc->sum_with_base(1000, 1, 2, 3);
+    say("\$calc->sum_with_base(1000, 1, 2, 3) = " . $r6);
+
+    my int $r7 = $calc->sum_with_base(500, ...@nums);
+    say("\$calc->sum_with_base(500, ...@nums) = " . $r7);
+
+    say("");
+
+    # Test string joining
+    say("--- String joining variadic ---");
+    my str $s1 = $calc->join_parts("-", "a", "b", "c");
+    say("\$calc->join_parts(\"-\", \"a\", \"b\", \"c\") = \"" . $s1 . "\"");
+
+    my array @words = ("hello", "world");
+    my str $s2 = $calc->join_parts(" ", ...@words);
+    say("\$calc->join_parts(\" \", ...@words) = \"" . $s2 . "\"");
+
+    say("");
+    say("=== All OOP variadic tests passed! ===");
+    return 0;
+}

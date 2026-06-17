@@ -1,0 +1,58 @@
+# map_to_hash.strada - Demonstrates the Perl-style map { $_ => 1 } idiom
+#
+# This example shows how to use the fat arrow (=>) in map blocks to create
+# key-value pairs that can be used to build a hash for fast lookups.
+
+func main() int {
+    # Create an array of items
+    my array @fruits = ("apple", "banana", "cherry", "date", "elderberry");
+
+    say("=== Map with Fat Arrow ===");
+    say("Input array: " . join(", ", @fruits));
+
+    # Use map with fat arrow to create key-value pairs
+    # Each iteration produces 2 elements: the key and the value
+    my array @pairs = map { $_ => 1 } @fruits;
+
+    say("\nFlattened pairs array has " . scalar(@pairs) . " elements:");
+    my int $i = 0;
+    while ($i < scalar(@pairs)) {
+        say("  [" . $i . "]=" . $pairs[$i] . " [" . ($i + 1) . "]=" . $pairs[$i + 1]);
+        $i = $i + 2;
+    }
+
+    # Convert the flat array to a hash for O(1) lookups
+    my hash %lookup = ();
+    $i = 0;
+    while ($i < scalar(@pairs)) {
+        $lookup{$pairs[$i]} = $pairs[$i + 1];
+        $i = $i + 2;
+    }
+
+    say("\n=== Hash Lookup ===");
+    say("Keys in hash:");
+    foreach my str $k (keys(%lookup)) {
+        say("  " . $k);
+    }
+
+    # Fast membership testing
+    say("\nMembership tests:");
+    my array @test = ("apple", "grape", "cherry", "mango");
+    foreach my str $item (@test) {
+        if (exists($lookup{$item})) {
+            say("  " . $item . " - found!");
+        } else {
+            say("  " . $item . " - not found");
+        }
+    }
+
+    # You can also use variable keys in hash literals
+    say("\n=== Variable Keys in Hash Literals ===");
+    my str $dynamic_key = "my_key";
+    my hash %h = { $dynamic_key => "dynamic value", "static" => "static value" };
+    say("Hash with variable key:");
+    say("  " . $dynamic_key . " => " . $h{$dynamic_key});
+    say("  static => " . $h{"static"});
+
+    return 0;
+}

@@ -1,0 +1,86 @@
+#!/usr/bin/env strada
+# Test Digest::SHA library for memory leaks
+# Run: valgrind --leak-check=full ./test_digest_sha
+
+use lib "lib";
+use Digest::SHA;
+
+func main() int {
+    say("Testing Digest::SHA for memory leaks...");
+
+    # Test sha256_hex - 100 iterations
+    say("  sha256_hex()...");
+    my int $i = 0;
+    while ($i < 100) {
+        my str $hash = Digest::SHA::sha256_hex("test input " . $i);
+        if ($i == 0) {
+            my str $expected = "9440fc11c7a8d83dc498768ab4ab633336acd83d743e29433b7d98ae48f672c5";
+            if ($hash ne $expected) {
+                say("    FAIL: unexpected hash");
+                return 1;
+            }
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test sha256 (raw) - 100 iterations
+    say("  sha256()...");
+    $i = 0;
+    while ($i < 100) {
+        my str $raw = Digest::SHA::sha256("test " . $i);
+        if (sys::byte_length($raw) != 32) {
+            say("    FAIL: expected 32 bytes, got " . sys::byte_length($raw));
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test sha1_hex - 100 iterations
+    say("  sha1_hex()...");
+    $i = 0;
+    while ($i < 100) {
+        my str $hash = Digest::SHA::sha1_hex("test input " . $i);
+        if ($i == 0) {
+            my str $expected = "0d0749fbc75837dbbdad5d487cbef9c2df46b1be";
+            if ($hash ne $expected) {
+                say("    FAIL: unexpected hash");
+                return 1;
+            }
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test sha1 (raw) - 100 iterations
+    say("  sha1()...");
+    $i = 0;
+    while ($i < 100) {
+        my str $raw = Digest::SHA::sha1("test " . $i);
+        if (sys::byte_length($raw) != 20) {
+            say("    FAIL: expected 20 bytes, got " . sys::byte_length($raw));
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Known test vectors
+    say("  Verifying test vectors...");
+    my str $h1 = Digest::SHA::sha256_hex("Hello, World!");
+    if ($h1 ne "dffd6021bb2bd5b0af676290809ec3a53191dd81c7f70a4b28688a362182986f") {
+        say("    FAIL: SHA-256 test vector mismatch");
+        return 1;
+    }
+
+    my str $h2 = Digest::SHA::sha1_hex("Hello, World!");
+    if ($h2 ne "0a0a9f2a6772942557ab5355d76af442f8f65e01") {
+        say("    FAIL: SHA-1 test vector mismatch");
+        return 1;
+    }
+    say("    PASS");
+
+    say("All Digest::SHA tests passed!");
+    return 0;
+}

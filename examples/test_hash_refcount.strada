@@ -1,0 +1,133 @@
+package main;
+
+# Test hash value reference counting
+# This test catches bugs where hash_get returns borrowed references
+# that get freed prematurely when scope ends
+
+func test_hash_in_loop() int {
+    my hash %state = ();
+    $state{"running"} = 1;
+    $state{"counter"} = 0;
+
+    # Access hash value repeatedly in a loop
+    # If refcount is wrong, value gets freed after first iteration
+    my int $iterations = 0;
+    while ($state{"running"} == 1) {
+        $iterations = $iterations + 1;
+        $state{"counter"} = $iterations;
+
+        if ($iterations >= 5) {
+            $state{"running"} = 0;
+        }
+    }
+
+    if ($iterations != 5) {
+        say("FAIL: Expected 5 iterations, got " . $iterations);
+        return 1;
+    }
+
+    if ($state{"counter"} != 5) {
+        say("FAIL: Expected counter=5, got " . $state{"counter"});
+        return 1;
+    }
+
+    return 0;
+}
+
+func test_hash_ref_in_loop() int {
+    # Test with hash reference (like $server_ref->{"running"})
+    my hash %inner = ();
+    $inner{"running"} = 1;
+    $inner{"count"} = 0;
+
+    my scalar $ref = \%inner;
+
+    my int $iterations = 0;
+    while ($ref->{"running"} == 1) {
+        $iterations = $iterations + 1;
+        $ref->{"count"} = $iterations;
+
+        if ($iterations >= 3) {
+            $ref->{"running"} = 0;
+        }
+    }
+
+    if ($iterations != 3) {
+        say("FAIL: Ref test expected 3 iterations, got " . $iterations);
+        return 1;
+    }
+
+    return 0;
+}
+
+func test_nested_hash_access() int {
+    # Test nested hash access in loop
+    my hash %outer = ();
+    my hash %inner = ();
+    $inner{"value"} = 42;
+    $outer{"data"} = \%inner;
+
+    my int $sum = 0;
+    for (my int $i = 0; $i < 10; $i++) {
+        # Accessing nested hash value repeatedly
+        my scalar $data_ref = $outer{"data"};
+        my int $val = $data_ref->{"value"};
+        $sum = $sum + $val;
+    }
+
+    if ($sum != 420) {
+        say("FAIL: Nested access expected sum=420, got " . $sum);
+        return 1;
+    }
+
+    return 0;
+}
+
+func test_string_hash_values() int {
+    # Test string values in hash (different refcount behavior)
+    my hash %strings = ();
+    $strings{"name"} = "test_value";
+
+    my str $result = "";
+    for (my int $i = 0; $i < 5; $i++) {
+        my str $name = $strings{"name"};
+        $result = $result . $name;
+    }
+
+    if ($result ne "test_valuetest_valuetest_valuetest_valuetest_value") {
+        say("FAIL: String hash test failed");
+        return 1;
+    }
+
+    return 0;
+}
+
+func main() int {
+    my int $failed = 0;
+
+    my int $r1 = test_hash_in_loop();
+    if ($r1 != 0) {
+        $failed = 1;
+    }
+
+    my int $r2 = test_hash_ref_in_loop();
+    if ($r2 != 0) {
+        $failed = 1;
+    }
+
+    my int $r3 = test_nested_hash_access();
+    if ($r3 != 0) {
+        $failed = 1;
+    }
+
+    my int $r4 = test_string_hash_values();
+    if ($r4 != 0) {
+        $failed = 1;
+    }
+
+    if ($failed == 0) {
+        say("All hash refcount tests passed");
+    }
+
+    return $failed;
+}

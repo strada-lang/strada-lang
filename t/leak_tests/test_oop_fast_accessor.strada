@@ -1,0 +1,212 @@
+#!/usr/bin/env strada
+# Test inline accessor optimization for memory leaks
+# Run: valgrind --leak-check=full ./test_oop_fast_accessor
+
+# Simple class with has attributes
+package Point;
+has ro int $x (required);
+has ro int $y (required);
+
+func distance_sq(scalar $self) int {
+    return $self->x() * $self->x() + $self->y() * $self->y();
+}
+
+func sum_coords(scalar $self) int {
+    return $self->x() + $self->y();
+}
+
+# Inherited class
+package Point3D;
+extends Point;
+has ro int $z (required);
+
+func distance_sq(scalar $self) int {
+    return $self->x() * $self->x() + $self->y() * $self->y() + $self->z() * $self->z();
+}
+
+func sum_coords(scalar $self) int {
+    return $self->x() + $self->y() + $self->z();
+}
+
+# Class with rw attributes
+package MutablePoint;
+has rw int $x = 0;
+has rw int $y = 0;
+
+func distance_sq(scalar $self) int {
+    return $self->x() * $self->x() + $self->y() * $self->y();
+}
+
+package main;
+
+func main() int {
+    say("Testing inline accessor optimization for memory leaks...");
+    my int $iterations = 500;
+
+    # Test 1: Simple accessor calls on own-package has attrs
+    say("  Simple accessor calls...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my scalar $p = Point::new("x", $i % 100, "y", ($i + 1) % 100);
+        my int $xv = $p->x();
+        my int $yv = $p->y();
+        if ($xv + $yv < 0) {
+            say("    FAIL: negative coords");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 2: Accessor results in arithmetic expressions
+    say("  Accessor arithmetic...");
+    $i = 0;
+    my int $total = 0;
+    while ($i < $iterations) {
+        my scalar $p = Point::new("x", 3, "y", 4);
+        $total = $total + $p->distance_sq();
+        $i = $i + 1;
+    }
+    if ($total != $iterations * 25) {
+        say("    FAIL: expected " . ($iterations * 25) . " got " . $total);
+        return 1;
+    }
+    say("    PASS");
+
+    # Test 3: Inherited accessor calls (Point3D calling x(), y() from Point)
+    say("  Inherited accessor calls...");
+    $i = 0;
+    $total = 0;
+    while ($i < $iterations) {
+        my scalar $p = Point3D::new("x", 1, "y", 2, "z", 3);
+        $total = $total + $p->distance_sq();
+        $i = $i + 1;
+    }
+    if ($total != $iterations * 14) {
+        say("    FAIL: expected " . ($iterations * 14) . " got " . $total);
+        return 1;
+    }
+    say("    PASS");
+
+    # Test 4: Nested arithmetic (deep expression trees)
+    say("  Deep arithmetic expressions...");
+    $i = 0;
+    $total = 0;
+    while ($i < $iterations) {
+        my scalar $p = Point3D::new("x", 2, "y", 3, "z", 4);
+        # This creates a deep arithmetic tree: (x*x + y*y + z*z) + (x+y+z)
+        my int $dsq = $p->distance_sq();
+        my int $sc = $p->sum_coords();
+        $total = $total + $dsq + $sc;
+        $i = $i + 1;
+    }
+    if ($total != $iterations * 38) {
+        say("    FAIL: expected " . ($iterations * 38) . " got " . $total);
+        return 1;
+    }
+    say("    PASS");
+
+    # Test 5: Accessor results in conditions
+    say("  Accessor in conditions...");
+    $i = 0;
+    my int $count = 0;
+    while ($i < $iterations) {
+        my scalar $p = Point::new("x", $i % 10, "y", ($i + 5) % 10);
+        if ($p->x() > 5) {
+            $count = $count + 1;
+        }
+        if ($p->y() > 5) {
+            $count = $count + 1;
+        }
+        $i = $i + 1;
+    }
+    if ($count < 0) {
+        say("    FAIL: negative count");
+        return 1;
+    }
+    say("    PASS");
+
+    # Test 6: Accessor results used in function arguments
+    say("  Accessor in function args...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $p = Point::new("x", 42, "y", 99);
+        my str $xs = "" . $p->x();
+        my str $ys = "" . $p->y();
+        if ($xs ne "42" || $ys ne "99") {
+            say("    FAIL: string conversion");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 7: RW accessor calls
+    say("  RW accessor calls...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $p = MutablePoint::new("x", 10, "y", 20);
+        my int $dsq = $p->distance_sq();
+        if ($dsq != 500) {
+            say("    FAIL: expected 500 got " . $dsq);
+            return 1;
+        }
+        $p->set_x(3);
+        $p->set_y(4);
+        $dsq = $p->distance_sq();
+        if ($dsq != 25) {
+            say("    FAIL: expected 25 after mutation got " . $dsq);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 8: Multiple objects with accessor calls
+    say("  Multiple objects...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $p1 = Point::new("x", 1, "y", 2);
+        my scalar $p2 = Point::new("x", 3, "y", 4);
+        my scalar $p3 = Point3D::new("x", 5, "y", 6, "z", 7);
+        my int $sum = $p1->x() + $p2->y() + $p3->z();
+        if ($sum != 12) {
+            say("    FAIL: expected 12 got " . $sum);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 9: Accessor results assigned to variables
+    say("  Accessor assignments...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $p = Point3D::new("x", 10, "y", 20, "z", 30);
+        my int $a = $p->x();
+        my int $b = $p->y();
+        my int $c = $p->z();
+        if ($a + $b + $c != 60) {
+            say("    FAIL: expected 60 got " . ($a + $b + $c));
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 10: Accessor with isa (isa should NOT be inlined)
+    say("  isa not inlined...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $p = Point3D::new("x", 1, "y", 2, "z", 3);
+        if (!$p->isa("Point")) {
+            say("    FAIL: isa check");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All inline accessor tests passed!");
+    return 0;
+}

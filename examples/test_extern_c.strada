@@ -1,0 +1,100 @@
+# test_extern_c.strada - Test __C__ blocks with direct C function calls
+#
+# This demonstrates using __C__ blocks to define and call C functions
+# directly within Strada code.
+
+# Top-level C code: includes and helper function definitions
+__C__ {
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+
+static int c_add(int a, int b) {
+    return a + b;
+}
+
+static double c_multiply(double a, double b) {
+    return a * b;
+}
+
+static const char* c_get_message(void) {
+    return "Hello from C!";
+}
+
+static char* c_create_string(const char *prefix, int n) {
+    char *buf = malloc(256);
+    if (buf) {
+        snprintf(buf, 256, "%s: %d", prefix, n);
+    }
+    return buf;
+}
+
+static size_t c_strlen_func(const char *s) {
+    return strlen(s);
+}
+}
+
+func main() int {
+    say("=== Testing __C__ blocks ===");
+
+    # Test simple int addition
+    my int $sum = 0;
+    __C__ {
+        sum = strada_new_int(c_add(10, 32));
+    }
+    say("c_add(10, 32) = " . $sum);
+
+    # Test double multiplication
+    my num $product = 0.0;
+    __C__ {
+        product = strada_new_num(c_multiply(3.14, 2.0));
+    }
+    say("c_multiply(3.14, 2.0) = " . $product);
+
+    # Test getting a static string from C
+    my str $msg = "";
+    __C__ {
+        const char *m = c_get_message();
+        msg = strada_new_str(m);
+    }
+    say("c_get_message() = " . $msg);
+
+    # Test passing a string to C
+    my str $prefix = "Strada says";
+    my int $len = 0;
+    __C__ {
+        const char *p = strada_to_str(prefix);
+        len = strada_new_int((int)c_strlen_func(p));
+    }
+    say("c_strlen(\"Strada says\") = " . $len);
+
+    # Test C function that allocates a string (we must free it)
+    my str $created_str = "";
+    __C__ {
+        char *created = c_create_string("Result", 42);
+        if (created) {
+            created_str = strada_new_str(created);
+            free(created);
+        }
+    }
+    say("c_create_string(\"Result\", 42) = " . $created_str);
+
+    # Test c:: helper functions with int (pointers stored as int)
+    say("sizeof(int) = " . c::sizeof_int());
+    say("sizeof(long) = " . c::sizeof_long());
+    say("sizeof(ptr) = " . c::sizeof_ptr());
+
+    # Test memory allocation using c:: helpers (returns int)
+    my int $buffer = c::alloc(100);
+    if (c::is_null($buffer) == 0) {
+        say("Allocated 100 bytes successfully");
+        c::write_int32($buffer, 12345);
+        my int $read_back = c::read_int32($buffer);
+        say("Wrote 12345, read back: " . $read_back);
+        c::free($buffer);
+    }
+
+    say("=== All __C__ block tests passed! ===");
+    return 0;
+}

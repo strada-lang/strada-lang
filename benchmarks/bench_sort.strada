@@ -1,0 +1,81 @@
+# Sorting benchmarks. Exercises the decorated string sort (decorate-sort-
+# undecorate for non-STR elements; all-STR arrays skip decoration), nsort,
+# comparator blocks, and `sort %h` hash flattening — none of which the
+# general suite touches.
+#
+# Sections (deterministic pseudo-random input, LCG seeded):
+#   int-sort     — nsort over 1M ints
+#   str-sort     — default sort over 500k strings
+#   cmp-sort     — comparator block ({ $b <=> $a }) over 500k ints
+#   hash-sort    — sort %h (flatten + sort) over 200k pairs, x5
+#
+# Reference numbers: benchmarks/BASELINE.md
+
+package main;
+
+func lcg_next(int $state) int {
+    return ($state * 1103515245 + 12345) % 2147483648;
+}
+
+func main() int {
+    # Build deterministic inputs
+    my int $seed = 42;
+    my array @ints;
+    my int $i = 0;
+    while ($i < 1000000) {
+        $seed = lcg_next($seed);
+        push(@ints, $seed % 10000000);
+        $i++;
+    }
+
+    my array @strs;
+    $i = 0;
+    while ($i < 500000) {
+        $seed = lcg_next($seed);
+        push(@strs, "key_" . ($seed % 1000000) . "_suffix");
+        $i++;
+    }
+
+    my num $t0 = core::hires_time();
+
+    # 1. int sort (numeric)
+    my array @si = nsort(@ints);
+    my num $t1 = core::hires_time();
+    say("int-sort: " . $si[0] . " " . ($t1 - $t0));
+
+    # 2. string sort (default sort, all-STR fast path)
+    my array @ss = sort(@strs);
+    my num $t2 = core::hires_time();
+    say("str-sort: " . length($ss[0]) . " " . ($t2 - $t1));
+
+    # 3. comparator block (descending ints — comparator dispatch per pair)
+    my array @half;
+    $i = 0;
+    while ($i < 500000) {
+        push(@half, $ints[$i]);
+        $i++;
+    }
+    my array @sc = sort { $b <=> $a; } @half;
+    my num $t3 = core::hires_time();
+    say("cmp-sort: " . $sc[0] . " " . ($t3 - $t2));
+
+    # 4. hash sort: flatten + sort 200k keys, repeated
+    my hash %h;
+    $i = 0;
+    while ($i < 200000) {
+        $h{"k" . $i} = $i;
+        $i++;
+    }
+    my int $hsum = 0;
+    my int $r = 0;
+    while ($r < 5) {
+        my array @hk = sort(keys(%h));
+        $hsum += length($hk[0]);
+        $r++;
+    }
+    my num $t4 = core::hires_time();
+    say("hash-sort: " . $hsum . " " . ($t4 - $t3));
+
+    say("total: " . ($t4 - $t0));
+    return 0;
+}

@@ -1,0 +1,73 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# LWP Demo - HTTP client library usage
+#
+# Usage: ./lwp_demo [url]
+# Default: http://httpbin.org/get
+
+use lib "lib";
+use LWP;
+
+func main() int {
+    my str $url = "http://httpbin.org/get";
+
+    # Check for command line argument
+    if (scalar(@ARGV) > 1) {
+        $url = $ARGV[1];
+    }
+
+    say("Fetching: " . $url);
+    say("");
+
+    # Simple GET request
+    my hash %response = LWP::get($url);
+
+    if ($response{"success"}) {
+        say("Status: " . $response{"status"} . " " . $response{"reason"});
+        say("");
+
+        # Show some headers
+        my str $content_type = LWP::get_header(%response, "Content-Type");
+        if (length($content_type) > 0) {
+            say("Content-Type: " . $content_type);
+        }
+
+        my str $server = LWP::get_header(%response, "Server");
+        if (length($server) > 0) {
+            say("Server: " . $server);
+        }
+
+        say("");
+        say("=== Response Body ===");
+        my str $content = $response{"content"};
+        # Truncate if too long
+        if (length($content) > 500) {
+            say(substr($content, 0, 500) . "...");
+        } else {
+            say($content);
+        }
+    } else {
+        say("Request failed!");
+        if (defined($response{"error"})) {
+            say("Error: " . $response{"error"});
+        }
+        return 1;
+    }
+
+    return 0;
+}

@@ -1,0 +1,23 @@
+# HookLib - import_lib test library: defines its own class AND registers a
+# before-modifier on a class owned by the HOST program. Used to verify that
+# a lazily-loaded .so invalidates the host's warmed dispatch caches
+# (per-call-site, global, MRO, modifier-presence verdicts) via the shared
+# generation counter — the .so does not bundle the runtime, so there is
+# exactly one OOP registry.
+package LibCounter;
+
+func new(int $start) scalar {
+    my hash %self = ();
+    $self{"value"} = $start;
+    return bless(\%self, "LibCounter");
+}
+
+func bump(scalar $self) int {
+    $self->{"value"} = $self->{"value"} + 1;
+    return $self->{"value"};
+}
+
+package HookBase;
+before "greet" func(scalar $self) void {
+    $self->{"hooked"} = 1;
+}

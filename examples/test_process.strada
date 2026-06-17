@@ -1,0 +1,58 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_process.strada - Test sleep, usleep, fork, and process functions
+
+func main() int {
+    say("=== Process Control Test ===");
+    say("");
+
+    # Test getpid
+    my int $pid = sys::getpid();
+    say("Current PID: " . $pid);
+
+    # Test usleep (100ms = 100000 microseconds)
+    say("Sleeping for 100ms...");
+    sys::usleep(100000);
+    say("Woke up!");
+
+    # Test fork
+    say("");
+    say("Forking...");
+    my int $child = sys::fork();
+
+    if ($child == 0) {
+        # Child process
+        say("  Child: Hello from child! PID=" . sys::getpid() . " PPID=" . sys::getppid());
+        sys::usleep(50000);
+        say("  Child: Exiting");
+        exit(42);
+    } elsif ($child > 0) {
+        # Parent process
+        say("  Parent: Forked child with PID=" . $child);
+        say("  Parent: Waiting for child...");
+        my int $waited = sys::wait();
+        say("  Parent: Child " . $waited . " exited");
+    } else {
+        say("  Fork failed!");
+        return 1;
+    }
+
+    say("");
+    say("=== Test Complete ===");
+    return 0;
+}

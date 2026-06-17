@@ -1,0 +1,46 @@
+# Regression for the anon-array presize + direct-fill optimization: [a,b,...]
+# now allocates a buffer sized to its exact element count and fills it directly.
+# Verify correctness across sizes AND that growth (push past the tight capacity)
+# still works.
+package main;
+func main() int {
+    my int $pass = 1;
+
+    # Various literal sizes fill correctly.
+    my scalar $a = [10, 20, 30];
+    if ($a->[0] != 10 || $a->[1] != 20 || $a->[2] != 30 || size(@$a) != 3) { say("FAIL: 3-elem"); $pass = 0; }
+
+    my scalar $two = [ "x", "y" ];   # the binary_trees node shape
+    if ($two->[0] ne "x" || $two->[1] ne "y" || size(@$two) != 2) { say("FAIL: 2-elem"); $pass = 0; }
+
+    my scalar $one = [ 42 ];
+    if ($one->[0] != 42 || size(@$one) != 1) { say("FAIL: 1-elem"); $pass = 0; }
+
+    # Empty literal then build up (count 0 keeps a growable buffer).
+    my scalar $e = [];
+    if (size(@$e) != 0) { say("FAIL: empty size"); $pass = 0; }
+    my int $i = 0;
+    while ($i < 10) { push(@$e, $i); $i = $i + 1; }
+    if (size(@$e) != 10 || $e->[0] != 0 || $e->[9] != 9) { say("FAIL: empty-then-push"); $pass = 0; }
+
+    # Presized-to-exact then GROW past capacity (push must realloc the tight buffer).
+    my scalar $g = [1, 2];           # capacity exactly 2
+    push(@$g, 3); push(@$g, 4); push(@$g, 5);
+    if (size(@$g) != 5 || $g->[0] != 1 || $g->[2] != 3 || $g->[4] != 5) { say("FAIL: presize-then-grow: " . size(@$g)); $pass = 0; }
+
+    # Nested anon arrays (the tree shape) + element identity.
+    my scalar $t = [ [1, 2], [3, 4] ];
+    if ($t->[0]->[1] != 2 || $t->[1]->[0] != 3) { say("FAIL: nested"); $pass = 0; }
+
+    # Larger literal (beyond old default capacity 16).
+    my scalar $big = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19];
+    if (size(@$big) != 20 || $big->[19] != 19 || $big->[0] != 0) { say("FAIL: big-literal"); $pass = 0; }
+
+    # Elements that are existing variables must be incref'd (not use-after-free).
+    my str $s = "shared";
+    my scalar $r = [ $s, $s, $s ];
+    if ($r->[0] ne "shared" || $r->[2] ne "shared") { say("FAIL: shared-var"); $pass = 0; }
+
+    if ($pass == 1) { say("test_anon_array_presize: all passed"); }
+    return 0;
+}

@@ -1,0 +1,181 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# Test POSIX functions (built-in functions, no module import needed)
+
+func main() void {
+    say("=== POSIX Functions Test ===");
+    say("");
+
+    # Test environment functions
+    say("Environment:");
+    my scalar $home = sys::getenv("HOME");
+    say("  HOME = " . $home);
+    my scalar $user = sys::getenv("USER");
+    say("  USER = " . $user);
+
+    # Test setenv/getenv
+    sys::setenv("TEST_VAR", "hello_strada");
+    say("  TEST_VAR (after setenv) = " . sys::getenv("TEST_VAR"));
+    sys::unsetenv("TEST_VAR");
+    my scalar $gone = sys::getenv("TEST_VAR");
+    if (!defined($gone)) {
+        say("  TEST_VAR unset successfully");
+    }
+    say("");
+
+    # Test filesystem functions
+    say("Filesystem:");
+    my str $cwd = sys::getcwd();
+    say("  Current directory: " . $cwd);
+
+    # Test access (F_OK = 0, R_OK = 4, W_OK = 2, X_OK = 1)
+    if (sys::access("/etc/passwd", 0) == 0) {
+        say("  /etc/passwd exists (F_OK)");
+    }
+    if (sys::access("/etc/passwd", 4) == 0) {
+        say("  /etc/passwd is readable (R_OK)");
+    }
+    say("");
+
+    # Test stat
+    say("File stat:");
+    my scalar $st = sys::stat("/etc/passwd");
+    if (defined($st)) {
+        say("  /etc/passwd size: " . $st->{"size"} . " bytes");
+        say("  /etc/passwd mode: " . $st->{"mode"});
+        say("  /etc/passwd uid: " . $st->{"uid"});
+        say("  /etc/passwd nlink: " . $st->{"nlink"});
+
+        # Check if it's a regular file (S_IFREG = 32768, S_IFMT = 61440)
+        my int $mode = $st->{"mode"};
+        my int $ftype = $mode & 61440;
+        if ($ftype == 32768) {
+            say("  Confirmed: regular file");
+        }
+    }
+    say("");
+
+    # Test lstat on a potential symlink
+    say("Symlink test:");
+    my scalar $lst = sys::lstat("/etc/mtab");
+    if (defined($lst)) {
+        my int $lmode = $lst->{"mode"};
+        my int $lftype = $lmode & 61440;
+        if ($lftype == 40960) {
+            say("  /etc/mtab is a symbolic link");
+            my str $target = sys::readlink("/etc/mtab");
+            if (defined($target)) {
+                say("  Target: " . $target);
+            }
+        } else {
+            say("  /etc/mtab is not a symbolic link");
+        }
+    }
+    say("");
+
+    # Test process functions
+    say("Process info:");
+    say("  PID: " . sys::getpid());
+    say("  PPID: " . sys::getppid());
+    say("  UID: " . sys::getuid());
+    say("  GID: " . sys::getgid());
+    say("  EUID: " . sys::geteuid());
+    say("  EGID: " . sys::getegid());
+    say("");
+
+    # Test isatty
+    say("Terminal:");
+    if (sys::isatty(1)) {
+        say("  stdout (fd 1) is a TTY");
+    } else {
+        say("  stdout (fd 1) is not a TTY (maybe piped)");
+    }
+    say("");
+
+    # Test time
+    say("Time:");
+    my int $now = sys::time();
+    say("  Current time (epoch): " . $now);
+    say("");
+
+    # Test errno/strerror
+    say("Error handling:");
+    say("  ENOENT (2): " . sys::strerror(2));
+    say("  EACCES (13): " . sys::strerror(13));
+    say("");
+
+    # Test mkdir/rmdir
+    say("Directory operations:");
+    my str $testdir = "/tmp/strada_posix_test_" . sys::getpid();
+    my int $result = sys::mkdir($testdir, 493);
+    if ($result == 0) {
+        say("  Created " . $testdir);
+
+        # Test access on new directory
+        if (sys::access($testdir, 4) == 0) {
+            say("  Directory is readable");
+        }
+        if (sys::access($testdir, 2) == 0) {
+            say("  Directory is writable");
+        }
+
+        # Test chmod
+        sys::chmod($testdir, 448);
+        say("  Changed mode to 0700");
+
+        $result = sys::rmdir($testdir);
+        if ($result == 0) {
+            say("  Removed " . $testdir);
+        }
+    } else {
+        say("  mkdir failed: " . sys::strerror(sys::errno()));
+    }
+    say("");
+
+    # Test file operations
+    say("File operations:");
+    my str $testfile = "/tmp/strada_test_file_" . sys::getpid();
+    sys::spew($testfile, "test content");
+    say("  Created test file: " . $testfile);
+
+    my scalar $fst = sys::stat($testfile);
+    if (defined($fst)) {
+        say("  File size: " . $fst->{"size"} . " bytes");
+    }
+
+    # Test rename
+    my str $newname = $testfile . ".renamed";
+    if (sys::rename($testfile, $newname) == 0) {
+        say("  Renamed to: " . $newname);
+    }
+
+    # Test unlink
+    if (sys::unlink($newname) == 0) {
+        say("  Deleted: " . $newname);
+    }
+    say("");
+
+    # Test rand
+    say("Random numbers:");
+    say("  math::rand(): " . math::rand());
+    say("  math::rand(): " . math::rand());
+    say("  math::rand(): " . math::rand());
+    say("");
+
+    say("=== POSIX Functions Test Complete ===");
+}

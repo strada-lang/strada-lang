@@ -1,0 +1,82 @@
+# List-pipeline benchmarks — Perl-style data flow: map/grep/sort/join/
+# split chains. Exercises the lazy range map/grep (no input
+# materialization), strada_join_sv (borrowed elements, single sized
+# build), multi-part concat flattening, and split.
+#
+# Sections:
+#   map-range    — map over 1..2M (lazy range, no array build)
+#   grep-range   — grep over 1..2M
+#   chain        — map -> grep -> sort -> take over 300k items
+#   join         — join 500k strings, x3
+#   split-join   — split + rejoin a 5MB CSV-ish string
+#
+# Reference numbers: benchmarks/BASELINE.md
+
+package main;
+
+func main() int {
+    my num $t0 = core::hires_time();
+
+    # 1. map over a lazy int range
+    my array @squares = map { $_ * $_ } (1..2000000);
+    my num $t1 = core::hires_time();
+    say("map-range: " . $squares[1999999] . " " . ($t1 - $t0));
+
+    # 2. grep over a lazy int range
+    my array @mults = grep { $_ % 7 == 0 } (1..2000000);
+    my num $t2 = core::hires_time();
+    say("grep-range: " . scalar(@mults) . " " . ($t2 - $t1));
+
+    # 3. full chain: map -> grep -> sort desc -> sum top 100
+    my array @base;
+    my int $seed = 42;
+    my int $i = 0;
+    while ($i < 300000) {
+        $seed = ($seed * 1103515245 + 12345) % 2147483648;
+        push(@base, $seed % 1000000);
+        $i++;
+    }
+    my array @mapped = map { $_ * 3 + 1 } @base;
+    my array @kept = grep { $_ % 2 == 1 } @mapped;
+    my array @ordered = sort { $b <=> $a; } @kept;
+    my int $top = 0;
+    $i = 0;
+    while ($i < 100) {
+        $top += $ordered[$i];
+        $i++;
+    }
+    my num $t3 = core::hires_time();
+    say("chain: " . $top . " " . ($t3 - $t2));
+
+    # 4. join a large list
+    my array @words;
+    $i = 0;
+    while ($i < 500000) {
+        push(@words, "w" . ($i % 1000));
+        $i++;
+    }
+    my int $jlen = 0;
+    my int $r = 0;
+    while ($r < 3) {
+        my str $joined = join(",", @words);
+        $jlen += length($joined);
+        $r++;
+    }
+    my num $t4 = core::hires_time();
+    say("join: " . $jlen . " " . ($t4 - $t3));
+
+    # 5. split + rejoin
+    my str $csv = join(",", @words);
+    my int $slen = 0;
+    $r = 0;
+    while ($r < 3) {
+        my array @parts = split(",", $csv);
+        $slen += scalar(@parts);
+        $r++;
+    }
+    my num $t5 = core::hires_time();
+    say("split-join: " . $slen . " " . ($t5 - $t4));
+
+    say("total: " . ($t5 - $t0));
+    return 0;
+}

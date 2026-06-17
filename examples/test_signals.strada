@@ -1,0 +1,68 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+func sigint_handler(int $sig) void {
+    say("Caught SIGINT (Ctrl+C)! Signal number: " . $sig);
+    say("Cleaning up and exiting...");
+    exit(0);
+}
+
+func sigusr1_handler(int $sig) void {
+    say("Received USR1 signal: " . $sig);
+}
+
+func sigusr2_handler(int $sig) void {
+    say("Received USR2 signal: " . $sig);
+}
+
+func main() int {
+    say("=== Signal Handling Test ===");
+    say("");
+    say("PID: " . sys::getpid());
+    say("");
+
+    # Set up signal handlers
+    say("Setting up signal handlers...");
+    sys::signal("INT", \&sigint_handler);
+    sys::signal("USR1", \&sigusr1_handler);
+    sys::signal("USR2", \&sigusr2_handler);
+    sys::signal("PIPE", "IGNORE");
+    say("  - SIGINT: custom handler");
+    say("  - SIGUSR1: custom handler");
+    say("  - SIGUSR2: custom handler");
+    say("  - SIGPIPE: ignored");
+    say("");
+
+    say("Instructions:");
+    say("  - Press Ctrl+C to test SIGINT handler");
+    say("  - Run 'kill -USR1 " . sys::getpid() . "' to test USR1");
+    say("  - Run 'kill -USR2 " . sys::getpid() . "' to test USR2");
+    say("");
+
+    say("Waiting for signals (will auto-exit after 10 iterations)...");
+
+    my int $count = 0;
+    while ($count < 10) {
+        sys::sleep(1);
+        $count = $count + 1;
+        say("  tick " . $count);
+    }
+
+    say("");
+    say("No signals received, exiting normally.");
+    return 0;
+}

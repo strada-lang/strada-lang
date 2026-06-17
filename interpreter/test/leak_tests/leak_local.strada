@@ -1,0 +1,15 @@
+our int $x = 10;
+
+func modify() void {
+    local $x = 99;
+}
+
+func main() int {
+    my int $i = 0;
+    while ($i < 100) {
+        modify();
+        $i = $i + 1;
+    }
+    say("x=" . $x);
+    return 0;
+}

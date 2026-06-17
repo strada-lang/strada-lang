@@ -1,0 +1,80 @@
+#!/usr/bin/env strada
+# Test UTF-8 functions for memory leaks
+# Run: valgrind --leak-check=full ./test_utf8
+
+func main() int {
+    say("Testing UTF-8 functions for memory leaks...");
+    my int $iterations = 100;
+
+    # Test utf8::is_utf8 with valid ASCII
+    say("  utf8::is_utf8 ASCII...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my int $valid = utf8::is_utf8("Hello World");
+        if ($valid != 1) {
+            say("    FAIL: ASCII should be valid UTF-8");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test utf8::valid
+    say("  utf8::valid...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $v = utf8::valid("test string " . $i);
+        if ($v != 1) {
+            say("    FAIL: should be valid");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test utf8::encode
+    say("  utf8::encode...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $input = "hello world";
+        my str $encoded = utf8::encode($input);
+        if ($encoded ne "hello world") {
+            say("    FAIL: encode changed ASCII");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test utf8::decode
+    say("  utf8::decode...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $input = "hello world";
+        my int $valid = utf8::decode($input);
+        if ($valid != 1) {
+            say("    FAIL: decode should validate");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test with varying input
+    say("  Varying inputs...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = "test_" . $i . "_data";
+        my int $v1 = utf8::is_utf8($s);
+        my int $v2 = utf8::valid($s);
+        if ($v1 != 1 || $v2 != 1) {
+            say("    FAIL: varying input");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All UTF-8 tests passed!");
+    return 0;
+}

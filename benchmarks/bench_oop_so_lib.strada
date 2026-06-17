@@ -1,0 +1,29 @@
+# Shared-library half of bench_oop_so: an OOP class that will be compiled
+# with `strada --shared` and loaded by the host via import_lib. Identical
+# to the Local class in bench_oop_so.strada — the benchmark measures the
+# cost of method dispatch when the class's code lives across a .so
+# boundary (registered through dl metadata + the runtime method registry)
+# versus compiled into the same binary.
+
+package SoCounter;
+
+func new(int $start) scalar {
+    my hash %self = ();
+    $self{"n"} = $start;
+    $self{"step"} = 1;
+    return bless(\%self, "SoCounter");
+}
+
+func bump(scalar $self) int {
+    $self->{"n"} = $self->{"n"} + $self->{"step"};
+    return $self->{"n"};
+}
+
+func value(scalar $self) int {
+    return $self->{"n"};
+}
+
+func add(scalar $self, int $k) int {
+    $self->{"n"} = $self->{"n"} + $k;
+    return $self->{"n"};
+}

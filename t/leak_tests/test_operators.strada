@@ -1,0 +1,158 @@
+#!/usr/bin/env strada
+# Test operators for memory leaks (ternary, defined-or, comparisons)
+# Run: valgrind --leak-check=full ./test_operators
+
+func maybe_undef(int $n) scalar {
+    if ($n % 2 == 0) {
+        return "value_" . $n;
+    }
+    return undef;
+}
+
+func main() int {
+    say("Testing operators for memory leaks...");
+    my int $iterations = 100;
+
+    # Test ternary operator with temp values
+    say("  ternary operator...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my str $result = ($i % 2 == 0) ? "even_" . $i : "odd_" . $i;
+        if (length($result) < 1) {
+            say("    FAIL: ternary");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test defined-or (//) with undef
+    say("  defined-or...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $val = maybe_undef($i);
+        my str $result = $val // "default_" . $i;
+        if (length($result) < 1) {
+            say("    FAIL: defined-or");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test defined-or with non-undef
+    say("  defined-or non-undef...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $val = "present";
+        my str $result = $val // "fallback";
+        if ($result ne "present") {
+            say("    FAIL: defined-or present");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test spaceship operator (<=>)
+    say("  spaceship <=>...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $a = $i;
+        my int $b = $iterations - $i;
+        my int $cmp = $a <=> $b;
+        if ($a < $b && $cmp >= 0) {
+            say("    FAIL: spaceship");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test cmp operator
+    say("  cmp operator...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $a = "aaa";
+        my str $b = "bbb";
+        my int $r = $a cmp $b;
+        if ($r >= 0) {
+            say("    FAIL: cmp");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test logical operators with short-circuit
+    say("  logical short-circuit...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $a = 1;
+        my int $b = 0;
+        my scalar $r1 = $a || "fallback";
+        my scalar $r2 = $b || "fallback";
+        my scalar $r3 = $a && "second";
+        my scalar $r4 = $b && "second";
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test chained comparison temps
+    say("  comparison temps...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $a = $i;
+        my int $b = $i + 1;
+        my int $c = $i + 2;
+        my int $r1 = ($a == $a);
+        my int $r2 = ($a != $b);
+        my int $r3 = ($a < $b);
+        my int $r4 = ($b > $a);
+        my int $r5 = ($a <= $b);
+        my int $r6 = ($b >= $a);
+        if (!$r1 || !$r2 || !$r3 || !$r4 || !$r5 || !$r6) {
+            say("    FAIL: comparisons");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test string comparison operators
+    say("  string comparisons...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $a = "hello";
+        my str $b = "world";
+        my int $r1 = ($a eq "hello");
+        my int $r2 = ($a ne $b);
+        my int $r3 = ($a lt $b);
+        my int $r4 = ($b gt $a);
+        if (!$r1 || !$r2 || !$r3 || !$r4) {
+            say("    FAIL: string cmp");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test increment/decrement
+    say("  increment/decrement...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $n = 10;
+        $n++;
+        $n++;
+        $n--;
+        if ($n != 11) {
+            say("    FAIL: inc/dec = " . $n);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All operator tests passed!");
+    return 0;
+}

@@ -1,0 +1,117 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# Memory Management Examples
+# Demonstrates array capacity control and hash improvements
+
+func main() int {
+    say("=== Array Memory Management Examples ===\n");
+
+    # 1. Array with initial capacity syntax
+    say("1. Array with initial capacity:");
+    my array @preallocated[1000];
+    say("   Created $preallocated[1000] - capacity for 1000 elements");
+    say("   Current size: " . size(@preallocated));
+
+    # Fill it efficiently - no reallocations needed
+    for (my int $i = 0; $i < 500; $i++) {
+        push(@preallocated, $i);
+    }
+    say("   After adding 500 elements: " . size(@preallocated));
+
+    # 2. Dynamic size expression
+    say("\n2. Dynamic capacity from expression:");
+    my int $rows = 100;
+    my int $cols = 50;
+    my array @matrix[$rows * $cols];
+    say("   Created $matrix[$rows * $cols] = capacity for " . ($rows * $cols));
+
+    # 3. Combined with initialization
+    say("\n3. Capacity with initialization:");
+    my array @data[100] = (1, 2, 3, 4, 5);
+    say("   my array $data[100] = (1, 2, 3, 4, 5)");
+    say("   Size: " . size(@data) . " (capacity reserved for 100)");
+
+    # 4. Using reserve() function
+    say("\n4. Using reserve() function:");
+    my array @dynamic;
+    say("   Created empty @dynamic");
+    reserve(@dynamic, 500);
+    say("   Called reserve(@dynamic, 500)");
+    for (my int $i = 0; $i < 100; $i++) {
+        push(@dynamic, $i * 2);
+    }
+    say("   After adding 100 elements: " . size(@dynamic));
+
+    # 5. Setting global default array capacity
+    say("\n5. Global default array capacity:");
+    say("   Default: " . sys::array_default_capacity());
+    sys::array_default_capacity(256);
+    say("   After sys::array_default_capacity(256): " . sys::array_default_capacity());
+    my array @new_array;
+    say("   New arrays now start with capacity 256");
+    sys::array_default_capacity(8);
+    say("   Reset to: " . sys::array_default_capacity());
+
+    # 6. Setting global default hash capacity
+    say("\n6. Global default hash capacity:");
+    say("   Default: " . sys::hash_default_capacity());
+    sys::hash_default_capacity(128);
+    say("   After sys::hash_default_capacity(128): " . sys::hash_default_capacity());
+    my hash %new_hash;
+    say("   New hashes now start with 128 buckets");
+    sys::hash_default_capacity(16);
+    say("   Reset to: " . sys::hash_default_capacity());
+
+    # 7. Array reverse
+    say("\n7. Array reverse():");
+    my array @nums = (1, 2, 3, 4, 5);
+    say("   Before: " . join(", ", @nums));
+    reverse(@nums);
+    say("   After reverse(): " . join(", ", @nums));
+
+    # Works with array refs too
+    my scalar $ref = [10, 20, 30, 40];
+    say("   Ref before: " . join(", ", @{$ref}));
+    reverse($ref);
+    say("   Ref after: " . join(", ", @{$ref}));
+
+    # 8. Hash with initial capacity syntax
+    say("\n8. Hash with initial capacity:");
+    my hash %large[500];
+    say("   Created %large[500] - pre-allocated 500 buckets");
+    for (my int $i = 0; $i < 200; $i++) {
+        my str $key = "item_" . $i;
+        $large{$key} = $i * 5;
+    }
+    say("   Added 200 entries with minimal collisions");
+    say("   Value of item_100: " . $large{"item_100"});
+
+    # 9. Hash dynamic resizing (automatic)
+    say("\n9. Hash dynamic resizing:");
+    say("   Hashes automatically resize when load factor > 0.75");
+    my hash %growing;
+    for (my int $i = 0; $i < 100; $i++) {
+        my str $key = "key_" . $i;
+        $growing{$key} = $i * 10;
+    }
+    say("   Created hash with 100 entries - O(1) average lookup");
+    say("   Value of key_50: " . $growing{"key_50"});
+
+    say("\n=== All examples complete ===");
+    return 0;
+}

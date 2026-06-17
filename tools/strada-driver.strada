@@ -1,0 +1,1335 @@
+#!/usr/bin/env strada
+#
+# strada-driver — the compiled driver behind the thin `strada` shim.
+#
+# All the logic that used to live in the ~1400-line `strada` bash wrapper
+# now lives here, in Strada. The shim does only the two things bash does
+# trivially and portably: locate the toolchain directory and source
+# config.sh, then exec this binary. The driver reads its environment and
+# orchestrates the preprocessor / compiler / linker the same way the bash
+# wrapper did — but builds subprocess argv as ARRAYS (core::system_argv /
+# core::exec_argv), so there is no shell-quoting hazard anywhere.
+#
+# Environment contract (set by the shim):
+#   STRADA_HOME : lib/home root — holds runtime/, lib/, stradapp, config.sh.
+#                 In the dev tree this is the repo root; installed it is
+#                 <prefix>/lib/strada.
+#   STRADA_BIN  : binaries root — holds stradac, strada-jit, stradadoc,
+#                 strada-interp. Dev: repo root. Installed: <prefix>/bin.
+#   STRADA_SHIM : absolute path to the `strada` shim, for re-invoking
+#                 sub-builds (-M directory walk, module-cache warmer) so
+#                 they get the same config/env setup.
+#   plus every STRADA_* config var (the shim sources config.sh).
+
+package main;
+
+# ---------------------------------------------------------------------------
+# Option state (mirrors the bash wrapper's variables 1:1)
+# ---------------------------------------------------------------------------
+our int $KEEP_C = 0;
+our int $RUN_AFTER = 0;
+our int $VERBOSE = 0;
+our str $OPT_LEVEL = "2";
+our int $DEBUG_SYMBOLS = 0;
+our int $C_DEBUG_SYMBOLS = 0;
+our str $OUTPUT_FILE = "";
+our int $SHARED_LIB = 0;
+our int $STATIC_LIB = 0;
+our int $TCC_MODE = 0;
+our int $OBJECT_ONLY = 0;
+our int $OBJECT_FULL = 0;
+our int $MODULE_ONLY_MODE = 0;
+our int $MODULE_CACHE = 0;
+our int $CLEAR_MODULE_CACHE = 0;
+our int $STATIC_LINK = 0;
+our int $SHOW_WARNINGS = 0;
+our int $STRICT_TYPES = 0;
+our int $ENABLE_PROFILING = 0;
+our int $FULL_PROFILE = 0;
+our int $NO_STACK_TRACE = 0;
+our int $NO_LTO = 0;
+our int $REPL_MODE = 0;
+our str $SCRIPT_FILE = "";
+our int $DOC_MODE = 0;
+our str $DOC_TOPIC = "";
+
+our array @LIB_PATHS = ();
+our array @LIB_PATHS_LOW = ();
+our array @JIT_PASSTHROUGH = ();
+our array @EXTRA_C_FILES = ();
+our array @EXTRA_O_FILES = ();
+our array @EXTRA_A_FILES = ();
+our array @IMPLICIT_IMPORT_OBJS = ();
+our array @IMPLICIT_IMPORT_ARCHS = ();
+our array @LINK_LIBS = ();
+our array @INCLUDE_PATHS = ();
+our array @PP_DEFINES = ();
+our array @POSITIONAL = ();
+
+# Resolved paths / platform
+our str $HOME_DIR = "";
+our str $BIN_DIR = "";
+our str $SHIM = "";
+our str $STRADAC = "";
+our str $RUNTIME_SRC = "";
+our str $RUNTIME_OBJ = "";
+our str $RUNTIME_DIR = "";
+our array @CC = ();          # tokenized C compiler (e.g. ["ccache","cc"])
+our array @DLOPEN_LIBS = ();
+our str $GC_SECTIONS_FLAG = "";
+our str $SHARED_UNDEFINED_FLAG = "";
+our int $IS_DARWIN = 0;
+
+# Temp files to remove on exit (replaces the bash `trap ... EXIT`)
+our array @CLEANUP = ();
+
+# Colors
+our str $RED = "";
+our str $GREEN = "";
+our str $YELLOW = "";
+our str $CYAN = "";
+our str $BOLD = "";
+our str $NC = "";
+
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
+
+func env(str $k) str {
+    return "" . core::getenv($k);
+}
+
+func sw(str $s, str $p) int {
+    if (length($s) < length($p)) { return 0; }
+    if (substr($s, 0, length($p)) eq $p) { return 1; }
+    return 0;
+}
+
+func ew(str $s, str $p) int {
+    if (length($s) < length($p)) { return 0; }
+    if (substr($s, length($s) - length($p), length($p)) eq $p) { return 1; }
+    return 0;
+}
+
+# Split on ASCII whitespace, dropping empty tokens. Used to turn config.sh
+# flag strings ("-DPCRE2_STATIC -I/x") into argv elements.
+func split_ws(str $s) array {
+    my array @out = ();
+    my str $cur = "";
+    my int $i = 0;
+    my int $n = length($s);
+    while ($i < $n) {
+        my str $ch = substr($s, $i, 1);
+        if ($ch eq " " || $ch eq "\t" || $ch eq "\n") {
+            if (length($cur) > 0) { @out = (@out, $cur); $cur = ""; }
+        } else {
+            $cur = $cur . $ch;
+        }
+        $i = $i + 1;
+    }
+    if (length($cur) > 0) { @out = (@out, $cur); }
+    return @out;
+}
+
+func cleanup() void {
+    my int $i = 0;
+    while ($i < size(@CLEANUP)) {
+        my str $f = $CLEANUP[$i];
+        if (length($f) > 0) { core::unlink($f); }
+        $i = $i + 1;
+    }
+}
+
+func error(str $m) void {
+    say(STDERR, $RED . "error:" . $NC . " " . $m);
+    cleanup();
+    core::exit(1);
+}
+
+func info(str $m) void {
+    if ($VERBOSE == 1) { say($GREEN . "info:" . $NC . " " . $m); }
+}
+
+func warn(str $m) void {
+    say(STDERR, $YELLOW . "warning:" . $NC . " " . $m);
+}
+
+# Run a subprocess from a full argv array (element 0 is the program).
+# Returns the child's exit code (system_argv returns WEXITSTATUS directly).
+func run_argv(array @argv) int {
+    if ($VERBOSE == 1) {
+        say($CYAN . "$" . $NC . " " . join(" ", @argv));
+    }
+    return core::system_argv($argv[0], @argv);
+}
+
+# Terminal hand-off: run a child to completion and exit with its code.
+# (system_argv forks+waits — for a one-shot CLI this is indistinguishable
+# from exec: same tty/stdio, exit code propagates. exec_argv isn't in the
+# Semantic builtin table, so we can't true-exec without a compiler change.)
+func exec_or_run(array @cmd) void {
+    cleanup();
+    my int $rc = core::system_argv($cmd[0], @cmd);
+    core::exit($rc);
+}
+
+func have_cmd(str $name) int {
+    if (core::system("command -v " . $name . " >/dev/null 2>&1") == 0) { return 1; }
+    return 0;
+}
+
+# Single-quote a string for the few places we still shell out (qx for find,
+# the cc availability probe). Wraps in '...' and escapes embedded quotes.
+func sq(str $s) str {
+    my str $out = "'";
+    my int $i = 0;
+    while ($i < length($s)) {
+        my str $ch = substr($s, $i, 1);
+        if ($ch eq "'") { $out = $out . "'\\''"; }
+        else { $out = $out . $ch; }
+        $i = $i + 1;
+    }
+    return $out . "'";
+}
+
+# True if $s contains a shell-control metacharacter. Used to reject a poisoned
+# CC before it can reach a /bin/sh probe (CWE-78): a legitimate compiler
+# invocation is only words/paths/flags and never contains any of these.
+func has_shell_meta(str $s) int {
+    my int $i = 0;
+    while ($i < length($s)) {
+        my str $ch = substr($s, $i, 1);
+        if ($ch eq ";" || $ch eq "|" || $ch eq "&" || $ch eq "$"
+            || $ch eq "`" || $ch eq "(" || $ch eq ")" || $ch eq "<"
+            || $ch eq ">" || $ch eq "\n" || $ch eq "\r") {
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    return 0;
+}
+
+func basename_of(str $p) str {
+    my int $slash = rindex($p, "/");
+    if ($slash < 0) { return $p; }
+    return substr($p, $slash + 1, length($p) - $slash - 1);
+}
+
+func dirname_of(str $p) str {
+    my int $slash = rindex($p, "/");
+    if ($slash < 0) { return "."; }
+    if ($slash == 0) { return "/"; }
+    return substr($p, 0, $slash);
+}
+
+func strip_strada_ext(str $p) str {
+    if (ew($p, ".strada")) { return substr($p, 0, length($p) - 7); }
+    return $p;
+}
+
+# Pull a "__MARKER__: a b c */" payload out of the generated C, or "" if absent.
+func marker_payload(str $content, str $marker) str {
+    my int $pos = index($content, $marker);
+    if ($pos < 0) { return ""; }
+    my int $start = $pos + length($marker);
+    # Skip leading spaces
+    while ($start < length($content) && substr($content, $start, 1) eq " ") {
+        $start = $start + 1;
+    }
+    # To end of line
+    my int $eol = index(substr($content, $start, length($content) - $start), "\n");
+    my str $line = "";
+    if ($eol < 0) { $line = substr($content, $start, length($content) - $start); }
+    else { $line = substr($content, $start, $eol); }
+    # Strip trailing " */"
+    my int $cmt = rindex($line, "*/");
+    if ($cmt >= 0) { $line = substr($line, 0, $cmt); }
+    return trim($line);
+}
+
+func file_contains(str $path, str $needle) int {
+    if (!(-f $path)) { return 0; }
+    my str $c = core::slurp($path);
+    if (index($c, $needle) >= 0) { return 1; }
+    return 0;
+}
+
+# nm | grep __strada_export_info — detect a Strada module object/archive.
+func is_strada_module(str $file) int {
+    my str $out = core::qx("nm " . sq($file) . " 2>/dev/null");
+    if (index($out, "__strada_export_info") >= 0) { return 1; }
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# Setup: environment, platform, colors, compiler
+# ---------------------------------------------------------------------------
+
+func setup() void {
+    $HOME_DIR = env("STRADA_HOME");
+    $BIN_DIR = env("STRADA_BIN");
+    $SHIM = env("STRADA_SHIM");
+    if (length($HOME_DIR) == 0) { $HOME_DIR = "."; }
+    if (length($BIN_DIR) == 0) { $BIN_DIR = $HOME_DIR; }
+
+    $STRADAC = $BIN_DIR . "/stradac";
+    $RUNTIME_SRC = $HOME_DIR . "/runtime/strada_runtime.c";
+    $RUNTIME_OBJ = $HOME_DIR . "/runtime/strada_runtime.o";
+    $RUNTIME_DIR = $HOME_DIR . "/runtime";
+
+    # CC: env override, default cc; auto-prepend ccache unless disabled.
+    my str $cc = env("CC");
+    if (length($cc) == 0) { $cc = "cc"; }
+    if (length(env("CCACHE_DISABLE")) == 0 && index($cc, "ccache") < 0 && have_cmd("ccache") == 1) {
+        $cc = "ccache " . $cc;
+    }
+    @CC = split_ws($cc);
+
+    # Defense in depth: a poisoned CC must never reach the /bin/sh probes below
+    # (the --version and link_lib availability checks). Reject shell
+    # metacharacters outright (CWE-78) — they never appear in a real compiler
+    # command, and the probe sinks additionally sq()-quote every token.
+    my int $cci = 0;
+    while ($cci < size(@CC)) {
+        if (has_shell_meta($CC[$cci]) == 1) {
+            error("refusing to run: CC contains shell metacharacters: " . $CC[$cci]);
+        }
+        $cci = $cci + 1;
+    }
+
+    # Platform flags
+    my str $uname = trim(core::qx("uname -s"));
+    if ($uname eq "Darwin") {
+        $IS_DARWIN = 1;
+        @DLOPEN_LIBS = ();
+        $GC_SECTIONS_FLAG = "-Wl,-dead_strip";
+        $SHARED_UNDEFINED_FLAG = "-Wl,-undefined,dynamic_lookup";
+    } else {
+        # Explicit list syntax (trailing comma) — defensive. A bare 1-element
+        # list `@arr = ("-ldl")` assigned to a whole (non-`my`) array used to be
+        # miscompiled as a SCALAR-string store, leaving @DLOPEN_LIBS empty — so
+        # `-ldl` silently vanished from the link line (harmless on glibc >= 2.34
+        # where dlopen lives in libc, but a hard "undefined reference to dlopen"
+        # link failure on older glibc that needs libdl). Fixed in CodeGenExpr's
+        # `our`-array assignment path; the trailing comma keeps this correct even
+        # when the driver is rebuilt by a stradac that predates that fix.
+        @DLOPEN_LIBS = ("-ldl",);
+        $GC_SECTIONS_FLAG = "-Wl,--gc-sections";
+        $SHARED_UNDEFINED_FLAG = "";
+    }
+
+    # Exported for stradac (import_object/import_archive metadata probes) and cc.
+    core::setenv("CC", join(" ", @CC));
+    core::setenv("STRADA_DLOPEN_LIBS", join(" ", @DLOPEN_LIBS));
+
+    # Bundled PCRE2 paths are resolved relative to HOME (config.sh stores the
+    # build machine's absolute paths, which differ once installed).
+    if (env("STRADA_PCRE2_BUNDLED") eq "1") {
+        core::setenv("STRADA_PCRE2_CFLAGS", "-DPCRE2_STATIC -I" . $HOME_DIR . "/vendor/pcre2/src");
+        core::setenv("STRADA_PCRE2_LIBS", $HOME_DIR . "/vendor/pcre2/libpcre2-8.a");
+    }
+
+    # Colors only on a TTY.
+    if (core::isatty(1) == 1) {
+        my str $e = chr(27);
+        $RED = $e . "[0;31m";
+        $GREEN = $e . "[0;32m";
+        $YELLOW = $e . "[0;33m";
+        $CYAN = $e . "[0;36m";
+        $BOLD = $e . "[1m";
+        $NC = $e . "[0m";
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
+func parse_args(array @av) void {
+    my int $i = 0;
+    my int $n = size(@av);
+    while ($i < $n) {
+        my str $a = $av[$i];
+        if ($a eq "-c") { $KEEP_C = 1; $i = $i + 1; }
+        elsif ($a eq "-r" || $a eq "--run") { $RUN_AFTER = 1; $i = $i + 1; }
+        elsif ($a eq "-o") { $OUTPUT_FILE = $av[$i + 1]; $i = $i + 2; }
+        elsif ($a eq "-O") { $OPT_LEVEL = $av[$i + 1]; $i = $i + 2; }
+        elsif (sw($a, "-O")) { $OPT_LEVEL = substr($a, 2, length($a) - 2); $i = $i + 1; }
+        elsif ($a eq "-g") { $DEBUG_SYMBOLS = 1; $i = $i + 1; }
+        elsif ($a eq "--c-debug") { $C_DEBUG_SYMBOLS = 1; $i = $i + 1; }
+        elsif ($a eq "--shared") { $SHARED_LIB = 1; $i = $i + 1; }
+        elsif ($a eq "--static") { $STATIC_LINK = 1; $i = $i + 1; }
+        elsif ($a eq "--static-lib") { $STATIC_LIB = 1; $i = $i + 1; }
+        elsif ($a eq "--tcc") { $TCC_MODE = 1; $i = $i + 1; }
+        elsif ($a eq "--object") { $OBJECT_ONLY = 1; $i = $i + 1; }
+        elsif ($a eq "--object-full") { $OBJECT_ONLY = 1; $OBJECT_FULL = 1; $i = $i + 1; }
+        elsif ($a eq "-M") { $MODULE_ONLY_MODE = 1; $i = $i + 1; }
+        elsif ($a eq "--module-cache") { $MODULE_CACHE = 1; core::setenv("STRADA_USE_ARTIFACTS", "1"); $i = $i + 1; }
+        elsif ($a eq "--clear-module-cache") { $CLEAR_MODULE_CACHE = 1; $i = $i + 1; }
+        elsif ($a eq "-w" || $a eq "--warnings") { $SHOW_WARNINGS = 1; $i = $i + 1; }
+        elsif ($a eq "--strict-types") { $STRICT_TYPES = 1; $i = $i + 1; }
+        elsif ($a eq "-p" || $a eq "--profile") { $ENABLE_PROFILING = 1; $i = $i + 1; }
+        elsif ($a eq "--full-profile") { $FULL_PROFILE = 1; $i = $i + 1; }
+        elsif ($a eq "-fno-lto" || $a eq "--no-lto") { $NO_LTO = 1; $i = $i + 1; }
+        elsif ($a eq "--no-stack-trace") { $NO_STACK_TRACE = 1; $i = $i + 1; }
+        elsif ($a eq "--use-artifacts") { core::setenv("STRADA_USE_ARTIFACTS", "1"); $i = $i + 1; }
+        elsif ($a eq "-LL") { @LIB_PATHS_LOW = (@LIB_PATHS_LOW, $av[$i + 1]); $i = $i + 2; }
+        elsif (sw($a, "-LL")) { @LIB_PATHS_LOW = (@LIB_PATHS_LOW, substr($a, 3, length($a) - 3)); $i = $i + 1; }
+        elsif ($a eq "-L") { @LIB_PATHS = (@LIB_PATHS, $av[$i + 1]); $i = $i + 2; }
+        elsif (sw($a, "-L")) { @LIB_PATHS = (@LIB_PATHS, substr($a, 2, length($a) - 2)); $i = $i + 1; }
+        elsif ($a eq "-l") { @LINK_LIBS = (@LINK_LIBS, $av[$i + 1]); $i = $i + 2; }
+        elsif (sw($a, "-l")) { @LINK_LIBS = (@LINK_LIBS, substr($a, 2, length($a) - 2)); $i = $i + 1; }
+        elsif ($a eq "-I") { @INCLUDE_PATHS = (@INCLUDE_PATHS, $av[$i + 1]); $i = $i + 2; }
+        elsif (sw($a, "-I")) { @INCLUDE_PATHS = (@INCLUDE_PATHS, substr($a, 2, length($a) - 2)); $i = $i + 1; }
+        elsif ($a eq "-D") { @PP_DEFINES = (@PP_DEFINES, $av[$i + 1]); $i = $i + 2; }
+        elsif (sw($a, "-D")) { @PP_DEFINES = (@PP_DEFINES, substr($a, 2, length($a) - 2)); $i = $i + 1; }
+        elsif ($a eq "-v" || $a eq "--verbose") { $VERBOSE = 1; $i = $i + 1; }
+        elsif ($a eq "-h" || $a eq "--help") { usage(); }
+        elsif ($a eq "--repl") { $REPL_MODE = 1; $i = $i + 1; }
+        elsif ($a eq "--script") { $SCRIPT_FILE = $av[$i + 1]; $i = $i + 2; }
+        elsif (sw($a, "--compiler=") || $a eq "--chunked") { @JIT_PASSTHROUGH = (@JIT_PASSTHROUGH, $a); $i = $i + 1; }
+        elsif ($a eq "--doc") { $DOC_MODE = 1; $DOC_TOPIC = $av[$i + 1]; $i = $i + 2; }
+        elsif (sw($a, "-")) { error("Unknown option: " . $a); }
+        else { @POSITIONAL = (@POSITIONAL, $a); $i = $i + 1; }
+    }
+}
+
+func usage() void {
+    say("Usage: strada [options] input.strada [extra.c ...] [extra.o ...]");
+    say("");
+    say("Compile Strada programs to native executables or shared libraries.");
+    say("Run 'strada --doc' or see docs/ for the full option reference.");
+    say("");
+    say("Common options:");
+    say("  -c            Keep the generated C file");
+    say("  -r, --run     Run the program after compiling");
+    say("  -o FILE       Output file name");
+    say("  -O LEVEL      Optimization level (0,1,2,3,s,fast) [default: 2]");
+    say("  -D NAME[=VAL] Define a preprocessor macro");
+    say("  -L / -LL PATH Library search path (high / low priority)");
+    say("  -l LIB        Link with library");
+    say("  -I PATH       C include path");
+    say("  -g            Debug symbols + #line directives");
+    say("  --shared / --static / --static-lib / --object   Output kind");
+    say("  --tcc         Compile with tcc (fast), link with the C compiler");
+    say("  --module-cache  Use + warm precompiled module artifacts");
+    say("  --repl / --script FILE   Interactive / scripted JIT execution");
+    say("  -v            Verbose output");
+    say("  -h, --help    This help");
+    core::exit(0);
+}
+
+# ---------------------------------------------------------------------------
+# JIT / doc / clear-cache modes (each exec()s or exits)
+# ---------------------------------------------------------------------------
+
+func find_jit_bin() str {
+    if (-x ($BIN_DIR . "/tools/strada-jit")) { return $BIN_DIR . "/tools/strada-jit"; }
+    if (-x ($BIN_DIR . "/strada-jit")) { return $BIN_DIR . "/strada-jit"; }
+    if (-x ($HOME_DIR . "/tools/strada-jit")) { return $HOME_DIR . "/tools/strada-jit"; }
+    return "";
+}
+
+func handle_clear_cache() void {
+    my str $mc = env("STRADA_MODULE_CACHE_DIR");
+    if (length($mc) == 0) {
+        my str $xdg = env("XDG_CACHE_HOME");
+        if (length($xdg) == 0) { $xdg = env("HOME") . "/.cache"; }
+        $mc = $xdg . "/strada/modules";
+    }
+    if ($mc eq "" || $mc eq "/" || $mc eq "/home" || $mc eq "/usr" || $mc eq "/usr/local" || $mc eq env("HOME")) {
+        error("refusing to remove suspicious module cache path: '" . $mc . "'");
+    }
+    if (-d $mc) {
+        my array @rm = ("rm", "-rf", $mc);
+        run_argv(@rm);
+        say("module cache cleared: " . $mc);
+    } else {
+        say("module cache already empty: " . $mc);
+    }
+    core::exit(0);
+}
+
+func handle_repl() void {
+    my str $jit = find_jit_bin();
+    if (length($jit) == 0) { error("strada-jit not found. Run 'make tools' to build it."); }
+    my array @cmd = ($jit);
+    @cmd = (@cmd, @JIT_PASSTHROUGH);
+    @cmd = (@cmd, @POSITIONAL);
+    exec_or_run(@cmd);
+}
+
+func handle_script() void {
+    if (!(-f $SCRIPT_FILE)) { error("Script file not found: " . $SCRIPT_FILE); }
+    my str $jit = find_jit_bin();
+    if (length($jit) == 0) { error("strada-jit not found. Run 'make tools' to build it."); }
+    my int $picked = 0;
+    my int $k = 0;
+    while ($k < size(@JIT_PASSTHROUGH)) {
+        if (sw($JIT_PASSTHROUGH[$k], "--compiler=")) { $picked = 1; }
+        $k = $k + 1;
+    }
+    my array @cmd = ($jit);
+    if ($picked == 0) { @cmd = (@cmd, "--compiler=gcc"); }
+    @cmd = (@cmd, @JIT_PASSTHROUGH);
+    @cmd = (@cmd, $SCRIPT_FILE);
+    @cmd = (@cmd, @POSITIONAL);
+    exec_or_run(@cmd);
+}
+
+func handle_doc() void {
+    my str $docbin = "";
+    if (-x ($BIN_DIR . "/stradadoc")) { $docbin = $BIN_DIR . "/stradadoc"; }
+    elsif (-x ($BIN_DIR . "/tools/stradadoc")) { $docbin = $BIN_DIR . "/tools/stradadoc"; }
+    elsif (-x ($HOME_DIR . "/stradadoc")) { $docbin = $HOME_DIR . "/stradadoc"; }
+    elsif (-x ($HOME_DIR . "/tools/stradadoc")) { $docbin = $HOME_DIR . "/tools/stradadoc"; }
+    if (length($docbin) == 0) {
+        error("stradadoc not found.\nRun './strada tools/stradadoc.strada' to build it, or 'make install'.");
+    }
+    my array @cmd = ($docbin, $DOC_TOPIC);
+    @cmd = (@cmd, @POSITIONAL);
+    exec_or_run(@cmd);
+}
+
+# ---------------------------------------------------------------------------
+# Runtime object (re)build
+# ---------------------------------------------------------------------------
+
+func build_runtime() void {
+    info("Building pre-compiled runtime...");
+    my array @cmd = ();
+    @cmd = (@cmd, @CC);
+    @cmd = (@cmd, "-O2");
+    @cmd = (@cmd, "-flto=auto");
+    @cmd = (@cmd, "-ffat-lto-objects");
+    @cmd = (@cmd, "-std=c99");
+    @cmd = (@cmd, "-ffunction-sections");
+    @cmd = (@cmd, "-fdata-sections");
+    if (env("STRADA_HAVE_PCRE2") eq "1") {
+        @cmd = (@cmd, "-DHAVE_PCRE2");
+        my array @__pcre = split_ws(env("STRADA_PCRE2_CFLAGS")); @cmd = (@cmd, @__pcre);
+    }
+    my str $cgc = env("STRADA_HAVE_CYCLE_GC");
+    if ($cgc eq "1" || length($cgc) == 0) { @cmd = (@cmd, "-DSTRADA_CYCLE_GC"); }
+    my str $arena = env("STRADA_HAVE_ARENA");
+    if ($arena eq "1" || length($arena) == 0) { @cmd = (@cmd, "-DSTRADA_ARENA"); }
+    if (env("STRADA_HAVE_LIBFFI") eq "1") {
+        @cmd = (@cmd, "-DHAVE_LIBFFI");
+        my array @__ffi = split_ws(env("STRADA_FFI_CFLAGS")); @cmd = (@cmd, @__ffi);
+    }
+    @cmd = (@cmd, "-c");
+    @cmd = (@cmd, $RUNTIME_SRC);
+    @cmd = (@cmd, "-I" . $RUNTIME_DIR);
+    @cmd = (@cmd, "-o");
+    @cmd = (@cmd, $RUNTIME_OBJ);
+    if (run_argv(@cmd) != 0) { error("Failed to compile runtime"); }
+}
+
+# ---------------------------------------------------------------------------
+# GCC flag construction (returns an array of flag tokens)
+# ---------------------------------------------------------------------------
+
+# Faster linker for non-LTO links. The final link reads the whole runtime.o
+# and is a large share of a small/dev build's wall time; lld/gold are markedly
+# faster than GNU ld at it. Used only for non-LTO links — at -O2+ the link is
+# LTO-recompile-bound (lto1) where the linker choice barely matters and gcc+lld
+# LTO-plugin combos add risk. Opt out with STRADA_NO_FASTLD=1.
+func fast_ld_flag() str {
+    if (length(env("STRADA_NO_FASTLD")) > 0) { return ""; }
+    if (have_cmd("ld.lld") == 1) { return "-fuse-ld=lld"; }
+    if (have_cmd("ld.gold") == 1) { return "-fuse-ld=gold"; }
+    return "";
+}
+
+func build_gcc_flags() array {
+    my array @f = ("-Wall", "-Wextra", "-Wno-unused-variable", "-Wno-unused-function",
+                   "-Wno-unused-parameter", "-Wno-return-type", "-Wno-unused-result",
+                   "-Wno-comment", "-std=c99", "-ffunction-sections", "-fdata-sections");
+    # GCC-only flags (skip on clang)
+    my str $ccver = core::qx(sq($CC[0]) . " --version 2>&1");
+    my int $is_clang = 0;
+    if (index($ccver, "clang") >= 0) { $is_clang = 1; }
+    if ($is_clang == 0) {
+        @f = (@f, "-Wno-unused-but-set-variable");
+        @f = (@f, "-Wno-clobbered");
+    }
+    if ($IS_DARWIN == 1) { @f = (@f, "-Wno-unused-value"); }
+    @f = (@f, "-O" . $OPT_LEVEL);
+    if ($OPT_LEVEL eq "0" && $DEBUG_SYMBOLS != 1 && $C_DEBUG_SYMBOLS != 1) {
+        @f = (@f, "-pipe");
+        @f = (@f, "-fno-var-tracking");
+        @f = (@f, "-fno-var-tracking-assignments");
+        @f = (@f, "-fno-stack-protector");
+        @f = (@f, "-fno-asynchronous-unwind-tables");
+    }
+    my str $fld = fast_ld_flag();
+    if ($NO_LTO == 1) {
+        @f = (@f, "-fno-lto");
+        if (length($fld) > 0) { @f = (@f, $fld); }
+    } elsif ($OPT_LEVEL eq "2" || $OPT_LEVEL eq "3" || $OPT_LEVEL eq "fast") {
+        # NB: lld is deliberately NOT used here. gcc -flto -fuse-ld=lld fails
+        # to link (ld.lld: undefined symbol 'main' — GCC's LTO plugin + lld
+        # don't resolve bitcode symbols together). LTO links keep the default
+        # linker; lld is non-LTO-only (see the branches above/below).
+        @f = (@f, "-flto=auto");
+    } else {
+        # Non-LTO opt levels (-O0/-O1/-Os): explicitly disable LTO. The
+        # precompiled runtime.o is built -ffat-lto-objects (native code +
+        # LTO bitcode) so -O2+ user builds can cross-inline it; but at -O0
+        # the linker otherwise still invokes the LTO plugin (lto1) on that
+        # bitcode — ~0.55s of pure overhead even though we're not optimizing.
+        # -fno-lto makes the link use the runtime's native code instead,
+        # cutting a small/dev build's link from ~0.57s to ~0.03s (the whole
+        # `strada -O0 hello` drops 0.59s -> 0.13s). No effect on -O2+ builds.
+        @f = (@f, "-fno-lto");
+        if (length($fld) > 0) { @f = (@f, $fld); }
+    }
+    if ($OPT_LEVEL eq "3" || $OPT_LEVEL eq "fast") { @f = (@f, "-march=native"); }
+    if ($DEBUG_SYMBOLS == 1 || $C_DEBUG_SYMBOLS == 1) { @f = (@f, "-g"); }
+    my int $d = 0;
+    while ($d < size(@PP_DEFINES)) { @f = (@f, "-D" . $PP_DEFINES[$d]); $d = $d + 1; }
+    return @f;
+}
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+
+func main() int {
+    setup();
+    my array @av = core::argv();
+    parse_args(@av);
+
+    if ($CLEAR_MODULE_CACHE == 1) { handle_clear_cache(); }
+    if ($REPL_MODE == 1) { handle_repl(); }
+    if (length($SCRIPT_FILE) > 0) { handle_script(); }
+    if ($DOC_MODE == 1) { handle_doc(); }
+
+    if (size(@POSITIONAL) < 1) {
+        say("Usage: strada [options] input.strada [extra.c ...] [extra.o ...]");
+        say("Try 'strada --help' for more information.");
+        core::exit(1);
+    }
+
+    my str $input = $POSITIONAL[0];
+
+    # -M with a directory: walk and produce a sibling .o per .strada file.
+    if ($MODULE_ONLY_MODE == 1 && (-d $input)) {
+        my str $list = core::qx("find " . sq($input) . " -type f -name '*.strada'");
+        my array @files = split("\n", $list);
+        my int $count = 0;
+        my int $failc = 0;
+        my int $fi = 0;
+        while ($fi < size(@files)) {
+            my str $f = trim($files[$fi]);
+            if (length($f) > 0) {
+                my str $sibo = strip_strada_ext($f) . ".o";
+                info("-M: compiling " . $f . " -> " . $sibo);
+                my array @cmd = ($SHIM, "-M", "--object", "-o", $sibo, $f);
+                if (run_argv(@cmd) == 0) { $count = $count + 1; }
+                else { $failc = $failc + 1; }
+            }
+            $fi = $fi + 1;
+        }
+        if ($VERBOSE == 1 || $failc > 0) {
+            say("-M: compiled " . $count . " file(s), " . $failc . " failure(s)");
+        }
+        if ($failc > 0) { core::exit(1); }
+        core::exit(0);
+    }
+
+    if (!(-f $input)) { error("Input file not found: " . $input); }
+    if (!ew($input, ".strada")) { warn("Input file does not have .strada extension"); }
+
+    # -M single file -> sibling .o, OBJECT_ONLY output path.
+    if ($MODULE_ONLY_MODE == 1 && length($OUTPUT_FILE) == 0) {
+        $OUTPUT_FILE = strip_strada_ext($input) . ".o";
+        $OBJECT_ONLY = 1;
+    }
+
+    # Remaining positionals: extra .c/.o/.a files or the output name.
+    my int $pi = 1;
+    while ($pi < size(@POSITIONAL)) {
+        my str $arg = $POSITIONAL[$pi];
+        if (ew($arg, ".c")) {
+            if (!(-f $arg)) { error("C file not found: " . $arg); }
+            @EXTRA_C_FILES = (@EXTRA_C_FILES, $arg);
+        } elsif (ew($arg, ".o")) {
+            if (!(-f $arg)) { error("Object file not found: " . $arg); }
+            if (is_strada_module($arg) == 1) { @IMPLICIT_IMPORT_OBJS = (@IMPLICIT_IMPORT_OBJS, $arg); }
+            else { @EXTRA_O_FILES = (@EXTRA_O_FILES, $arg); }
+        } elsif (ew($arg, ".a")) {
+            if (!(-f $arg)) { error("Archive file not found: " . $arg); }
+            if (is_strada_module($arg) == 1) { @IMPLICIT_IMPORT_ARCHS = (@IMPLICIT_IMPORT_ARCHS, $arg); }
+            else { @EXTRA_A_FILES = (@EXTRA_A_FILES, $arg); }
+        } elsif (length($OUTPUT_FILE) == 0) {
+            $OUTPUT_FILE = $arg;
+        } else {
+            warn("Ignoring extra argument: " . $arg);
+        }
+        $pi = $pi + 1;
+    }
+
+    # Output name
+    my str $output = "";
+    if (length($OUTPUT_FILE) > 0) {
+        $output = $OUTPUT_FILE;
+    } else {
+        $output = strip_strada_ext(basename_of($input));
+        if ($SHARED_LIB == 1) { $output = $output . ".so"; }
+        elsif ($STATIC_LIB == 1) { $output = $output . ".a"; }
+        elsif ($OBJECT_ONLY == 1) { $output = $output . ".o"; }
+    }
+
+    # C file name (stable scratch path so ccache hits; see scratch_path below).
+    my str $cfile = "";
+    if ($KEEP_C == 1) {
+        $cfile = $output . ".c";
+    } else {
+        $cfile = scratch_path($input, ".c");
+        if (length($cfile) == 0) { $cfile = core::mkdtemp("/tmp/strada_XXXXXX") . "/out.c"; }
+        @CLEANUP = (@CLEANUP, $cfile);
+    }
+
+    if (!(-x $STRADAC)) {
+        error("Strada compiler not found at " . $STRADAC . "\nRun 'make' to build it.");
+    }
+    if (!(-f $RUNTIME_SRC)) { error("Runtime not found at " . $RUNTIME_SRC); }
+
+    # Runtime object freshness
+    if (!(-f $RUNTIME_OBJ)) {
+        build_runtime();
+    } elsif (core::file_mtime($RUNTIME_SRC) > core::file_mtime($RUNTIME_OBJ)) {
+        info("Runtime source changed, rebuilding...");
+        build_runtime();
+    }
+
+    my array @gcc_flags = build_gcc_flags();
+
+    # Include / link flag arrays
+    my array @include_flags = ();
+    my int $ii = 0;
+    while ($ii < size(@INCLUDE_PATHS)) { @include_flags = (@include_flags, "-I" . $INCLUDE_PATHS[$ii]); $ii = $ii + 1; }
+
+    my array @link_flags = ();
+    my int $li = 0;
+    while ($li < size(@LINK_LIBS)) { @link_flags = (@link_flags, "-l" . $LINK_LIBS[$li]); $li = $li + 1; }
+    if (env("STRADA_HAVE_PCRE2") eq "1") {
+        my array @__plib = split_ws(env("STRADA_PCRE2_LIBS")); @link_flags = (@link_flags, @__plib);
+    }
+
+    # Extra plain C/O/A files for the link line
+    my array @extra_files = ();
+    @extra_files = (@extra_files, @EXTRA_C_FILES);
+    @extra_files = (@extra_files, @EXTRA_O_FILES);
+    @extra_files = (@extra_files, @EXTRA_A_FILES);
+
+    # ---- Preprocessor (stradapp) if -D defines were given ----
+    my str $preprocessor = $HOME_DIR . "/stradapp";
+    if (!(-x $preprocessor)) { $preprocessor = $HOME_DIR . "/tools/stradapp"; }
+    my str $actual_input = $input;
+    if (size(@PP_DEFINES) > 0) {
+        if (!(-x $preprocessor)) {
+            error("Preprocessor not found.\nRun './strada tools/stradapp.strada' to build it.");
+        }
+        my str $ppout = scratch_path($input, ".pp.strada");
+        if (length($ppout) == 0) { $ppout = core::mkdtemp("/tmp/strada_XXXXXX") . "/pp.strada"; }
+        @CLEANUP = (@CLEANUP, $ppout);
+        info("Preprocessing " . $input . " (defines: " . join(" ", @PP_DEFINES) . ")");
+        my array @cmd = ($preprocessor);
+        my int $di = 0;
+        while ($di < size(@PP_DEFINES)) { @cmd = (@cmd, "-D" . $PP_DEFINES[$di]); $di = $di + 1; }
+        @cmd = (@cmd, $input);
+        @cmd = (@cmd, "-o");
+        @cmd = (@cmd, $ppout);
+        if (run_argv(@cmd) != 0) { error("Preprocessing failed"); }
+        $actual_input = $ppout;
+    }
+
+    # ---- Step 1: stradac (Strada -> C) ----
+    core::setenv("STRADA_DIR", $HOME_DIR);
+
+    my array @sc = ($STRADAC, "-LL", $HOME_DIR . "/lib");
+    if ($DEBUG_SYMBOLS == 1) { @sc = (@sc, "-g"); }
+    if ($SHOW_WARNINGS == 1) { @sc = (@sc, "-w"); }
+    if ($STRICT_TYPES == 1) { @sc = (@sc, "--strict-types"); }
+    if ($ENABLE_PROFILING == 1) { @sc = (@sc, "-p"); }
+    if ($FULL_PROFILE == 1) { @sc = (@sc, "--full-profile"); }
+    if ($NO_STACK_TRACE == 1) { @sc = (@sc, "--no-stack-trace"); }
+    my int $lp = 0;
+    while ($lp < size(@LIB_PATHS)) { @sc = (@sc, "-L"); @sc = (@sc, $LIB_PATHS[$lp]); $lp = $lp + 1; }
+    $lp = 0;
+    while ($lp < size(@LIB_PATHS_LOW)) { @sc = (@sc, "-LL"); @sc = (@sc, $LIB_PATHS_LOW[$lp]); $lp = $lp + 1; }
+    my int $io = 0;
+    while ($io < size(@IMPLICIT_IMPORT_OBJS)) { @sc = (@sc, "--import-object"); @sc = (@sc, $IMPLICIT_IMPORT_OBJS[$io]); $io = $io + 1; }
+    $io = 0;
+    while ($io < size(@IMPLICIT_IMPORT_ARCHS)) { @sc = (@sc, "--import-archive"); @sc = (@sc, $IMPLICIT_IMPORT_ARCHS[$io]); $io = $io + 1; }
+
+    # Module-only codegen: explicit -M, or --object without --object-full.
+    my int $want_module_only = 0;
+    if ($MODULE_ONLY_MODE == 1) { $want_module_only = 1; }
+    elsif ($OBJECT_ONLY == 1 && $OBJECT_FULL != 1) { $want_module_only = 1; }
+    if ($want_module_only == 1) { @sc = (@sc, "-M"); }
+
+    # --module-cache wiring
+    my str $cache_dir = "";
+    my str $cache_key = "";
+    my str $deps_file = "";
+    if ($MODULE_CACHE == 1) {
+        $cache_dir = env("STRADA_MODULE_CACHE_DIR");
+        if (length($cache_dir) == 0) {
+            my str $xdg = env("XDG_CACHE_HOME");
+            if (length($xdg) == 0) { $xdg = env("HOME") . "/.cache"; }
+            $cache_dir = $xdg . "/strada/modules";
+        }
+        core::setenv("STRADA_MODULE_CACHE_DIR", $cache_dir);
+        if (size(@PP_DEFINES) > 0) {
+            my str $sorted = core::qx("printf '%s\\n' " . join(" ", map { sq($_) } @PP_DEFINES) . " | sort | md5sum | cut -c1-12");
+            $cache_key = trim($sorted);
+        }
+        core::setenv("STRADA_MODULE_CACHE_KEY", $cache_key);
+        $deps_file = core::mkdtemp("/tmp/strada_deps_XXXXXX") . "/deps";
+        core::setenv("STRADA_DEPS_OUT", $deps_file);
+        @CLEANUP = (@CLEANUP, $deps_file);
+    }
+
+    info("Compiling " . $actual_input . " -> " . $cfile);
+    if ($VERBOSE == 1) { @sc = (@sc, "-v"); }
+    @sc = (@sc, $actual_input);
+    @sc = (@sc, $cfile);
+
+    # STRADA_GC=off: stradac is a one-shot batch — skip the cycle collector.
+    core::setenv("STRADA_GC", "off");
+    if (run_argv(@sc) != 0) { error("Strada compilation failed"); }
+
+    # ---- Extract link metadata markers from the generated C ----
+    my str $gen = "";
+    if (-f $cfile) { $gen = core::slurp($cfile); }
+
+    # The marker tokens are assembled from a variable tail so this source's
+    # OWN string literals don't appear in ITS generated C as the full token
+    # — otherwise the (bash or self-hosted) driver compiling this file would
+    # mis-grep them as real import markers. Concatenating with a variable
+    # can't be constant-folded back into the contiguous token.
+    my str $COLON = ":";
+    my str $US = "_";
+
+    my str $objs = marker_payload($gen, "__STRADA_OBJECT_FILES__" . $COLON);
+    if (length($objs) > 0) {
+        info("import_object files: " . $objs);
+        my array @ofiles = split_ws($objs);
+        my int $of = 0;
+        while ($of < size(@ofiles)) {
+            if (!(-f $ofiles[$of])) { error("import_object: object file not found: " . $ofiles[$of]); }
+            $of = $of + 1;
+        }
+        @extra_files = (@extra_files, @ofiles);
+    }
+
+    my int $skip_runtime = 0;
+    my str $archs = marker_payload($gen, "__STRADA_ARCHIVE_FILES__" . $COLON);
+    if (length($archs) > 0) {
+        info("import_archive files: " . $archs);
+        my array @afiles = split_ws($archs);
+        my int $af = 0;
+        while ($af < size(@afiles)) {
+            if (!(-f $afiles[$af])) { error("import_archive: archive file not found: " . $afiles[$af]); }
+            $af = $af + 1;
+        }
+        @extra_files = (@extra_files, @afiles);
+        if (index($gen, "__STRADA_SKIP_RUNTIME_" . $US) >= 0) {
+            $skip_runtime = 1;
+            info("Skipping runtime (included in archive)");
+        }
+    }
+
+    # link_lib deps: availability-filter each (a multi-driver module declares
+    # all backends even when only some are installed).
+    my str $llibs = marker_payload($gen, "__STRADA_LINK_LIBS__" . $COLON);
+    if (length($llibs) > 0) {
+        info("link_libs: " . $llibs);
+        my array @ll = split_ws($llibs);
+        my int $lli = 0;
+        while ($lli < size(@ll)) {
+            my str $lib = $ll[$lli];
+            my str $probe = "echo 'int main(void){return 0;}' | " . join(" ", map { sq($_) } @CC) . " -x c - -l" . sq($lib) . " -o /dev/null 2>/dev/null";
+            if (core::system($probe) == 0) {
+                @link_flags = (@link_flags, "-l" . $lib);
+            } else {
+                say(STDERR, "Warning: skipping -l" . $lib . " (declared via link_lib by a used module, but not installed)");
+            }
+            $lli = $lli + 1;
+        }
+    }
+
+    # ---- Step 2: link / archive ----
+    do_link($cfile, $output, @gcc_flags, @include_flags, @link_flags, @extra_files, $skip_runtime);
+
+    if ($VERBOSE == 1) { say($GREEN . "Created:" . $NC . " " . $output); }
+
+    # ---- Module-cache warmer ----
+    if ($MODULE_CACHE == 1 && length($deps_file) > 0 && (-f $deps_file)) {
+        warm_module_cache($deps_file, $cache_dir, $cache_key);
+    }
+
+    # ---- Run if requested ----
+    if ($RUN_AFTER == 1) {
+        if ($SHARED_LIB == 1) { warn("Cannot run a shared library directly."); }
+        elsif ($STATIC_LIB == 1) { warn("Cannot run a static library directly."); }
+        elsif ($OBJECT_ONLY == 1) { warn("Cannot run an object file directly."); }
+        else {
+            say("");
+            if ($VERBOSE == 1) { say($CYAN . "$" . $NC . " ./" . $output); }
+            say("---");
+            my str $runpath = "./" . $output;
+            my array @rcmd = ($runpath);
+            exec_or_run(@rcmd);
+        }
+    }
+
+    cleanup();
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# Stable per-source scratch path (ccache-friendly). Mirrors scratch_path()
+# in the old bash wrapper: a per-uid mode-700 dir, name keyed by source
+# realpath + define set + output mode. Returns "" on any failure so the
+# caller falls back to mkdtemp.
+# ---------------------------------------------------------------------------
+
+func scratch_path(str $input, str $suffix) str {
+    my str $tmp = env("TMPDIR");
+    if (length($tmp) == 0) { $tmp = "/tmp"; }
+    my str $dir = $tmp . "/strada-scratch-" . core::getuid();
+    core::mkdir($dir, 448);
+    if (!(-d $dir)) { return ""; }
+    # Refuse symlinked or foreign-owned scratch dirs.
+    my str $real = "" . core::realpath($input);
+    if (length($real) == 0) { $real = $input; }
+    my str $keysrc = $real . "|" . join(" ", @PP_DEFINES) . "|"
+        . $SHARED_LIB . $STATIC_LIB . $OBJECT_ONLY . $OPT_LEVEL;
+    my str $key = trim(core::qx("printf '%s' " . sq($keysrc) . " | cksum | cut -d' ' -f1"));
+    my str $base = strip_strada_ext(basename_of($input));
+    return $dir . "/" . $base . "-" . $key . $suffix;
+}
+
+# ---------------------------------------------------------------------------
+# Linking (the big shared/object/static-lib/static/executable branch)
+# ---------------------------------------------------------------------------
+
+func do_link(str $cfile, str $output, array @gcc_flags, array @include_flags,
+             array @link_flags, array @extra_files, int $skip_runtime) void {
+    if ($SHARED_LIB == 1) {
+        if ($STATIC_LINK == 1) { error("Cannot use --shared and --static together"); }
+        if ($STATIC_LIB == 1) { error("Cannot use --shared and --static-lib together"); }
+        if ($OBJECT_ONLY == 1) { error("Cannot use --shared and --object together"); }
+        info("Compiling " . $cfile . " -> " . $output . " (shared library)");
+        if ($TCC_MODE == 1) {
+            link_shared_tcc($cfile, $output, @include_flags, @link_flags, @extra_files);
+        } else {
+            # Split compile/link so ccache caches the generated-C compile.
+            my str $genobj = scratch_path_obj($cfile);
+            my array @c1 = ();
+            @c1 = (@c1, @CC);
+            @c1 = (@c1, "-c");
+            @c1 = (@c1, "-fPIC");
+            @c1 = (@c1, @gcc_flags);
+            @c1 = (@c1, "-o");
+            @c1 = (@c1, $genobj);
+            @c1 = (@c1, $cfile);
+            @c1 = (@c1, "-I" . $RUNTIME_DIR);
+            @c1 = (@c1, @include_flags);
+            if (run_argv(@c1) != 0) { error("C compilation failed"); }
+            my array @c2 = ();
+            @c2 = (@c2, @CC);
+            @c2 = (@c2, "-shared");
+            @c2 = (@c2, "-fPIC");
+            @c2 = (@c2, @gcc_flags);
+            if (length($SHARED_UNDEFINED_FLAG) > 0) { @c2 = (@c2, $SHARED_UNDEFINED_FLAG); }
+            @c2 = (@c2, "-o");
+            @c2 = (@c2, $output);
+            @c2 = (@c2, $genobj);
+            @c2 = (@c2, @extra_files);
+            @c2 = (@c2, "-I" . $RUNTIME_DIR);
+            @c2 = (@c2, @include_flags);
+            @c2 = (@c2, @DLOPEN_LIBS);
+            @c2 = (@c2, "-lm");
+            @c2 = (@c2, "-lpthread");
+            @c2 = (@c2, @link_flags);
+            if (run_argv(@c2) != 0) { error("link failed"); }
+        }
+    } elsif ($OBJECT_ONLY == 1) {
+        if ($STATIC_LIB == 1) { error("Cannot use --object and --static-lib together"); }
+        if ($STATIC_LINK == 1) { error("Cannot use --object and --static together"); }
+        my array @oextra = ();
+        my int $has_lto = 0;
+        my int $gf = 0;
+        while ($gf < size(@gcc_flags)) { if (sw($gcc_flags[$gf], "-flto")) { $has_lto = 1; } $gf = $gf + 1; }
+        if ($has_lto == 1) { @oextra = (@oextra, "-ffat-lto-objects"); }
+        if ($MODULE_ONLY_MODE == 1) { @oextra = ("-fno-lto", "-fPIC"); }
+        if ($TCC_MODE == 1) { warn("--tcc is not supported with --object; compiling with the C compiler"); }
+        info("Compiling " . $cfile . " -> " . $output . " (object file)");
+        my array @cmd = ();
+        @cmd = (@cmd, @CC);
+        @cmd = (@cmd, "-c");
+        @cmd = (@cmd, @gcc_flags);
+        @cmd = (@cmd, @oextra);
+        @cmd = (@cmd, "-o");
+        @cmd = (@cmd, $output);
+        @cmd = (@cmd, $cfile);
+        @cmd = (@cmd, "-I" . $RUNTIME_DIR);
+        @cmd = (@cmd, @include_flags);
+        if (run_argv(@cmd) != 0) { error("C compilation failed"); }
+        if ($MODULE_ONLY_MODE == 1) { write_smeta_sidecar($output); }
+    } elsif ($STATIC_LIB == 1) {
+        if ($STATIC_LINK == 1) { error("Cannot use --static-lib and --static together"); }
+        if ($TCC_MODE == 1) { warn("--tcc is not supported with --static-lib; compiling with the C compiler"); }
+        my str $objf = strip_ext($output, ".a") . ".o";
+        my str $rtobj = strip_ext($output, ".a") . "_runtime.o";
+        my array @extra_objs = ();
+        my int $ci = 0;
+        while ($ci < size(@EXTRA_C_FILES)) {
+            my str $cf = $EXTRA_C_FILES[$ci];
+            my str $on = strip_ext(basename_of($cf), ".c") . ".o";
+            info("Compiling " . $cf . " -> " . $on);
+            my array @cc1 = ();
+            @cc1 = (@cc1, @CC);
+            @cc1 = (@cc1, "-c");
+            @cc1 = (@cc1, @gcc_flags);
+            @cc1 = (@cc1, "-o");
+            @cc1 = (@cc1, $on);
+            @cc1 = (@cc1, $cf);
+            @cc1 = (@cc1, "-I" . $RUNTIME_DIR);
+            @cc1 = (@cc1, @include_flags);
+            if (run_argv(@cc1) != 0) { error("Compilation of " . $cf . " failed"); }
+            @extra_objs = (@extra_objs, $on);
+            $ci = $ci + 1;
+        }
+        info("Compiling " . $cfile . " -> " . $objf);
+        my array @cc2 = ();
+        @cc2 = (@cc2, @CC);
+        @cc2 = (@cc2, "-c");
+        @cc2 = (@cc2, @gcc_flags);
+        @cc2 = (@cc2, "-o");
+        @cc2 = (@cc2, $objf);
+        @cc2 = (@cc2, $cfile);
+        @cc2 = (@cc2, "-I" . $RUNTIME_DIR);
+        @cc2 = (@cc2, @include_flags);
+        if (run_argv(@cc2) != 0) { error("C compilation failed"); }
+        info("Compiling runtime -> " . $rtobj);
+        my array @cc3 = ();
+        @cc3 = (@cc3, @CC);
+        @cc3 = (@cc3, "-c");
+        @cc3 = (@cc3, @gcc_flags);
+        @cc3 = (@cc3, "-o");
+        @cc3 = (@cc3, $rtobj);
+        @cc3 = (@cc3, $RUNTIME_SRC);
+        @cc3 = (@cc3, "-I" . $RUNTIME_DIR);
+        if (run_argv(@cc3) != 0) { error("Runtime compilation failed"); }
+        info("Creating archive " . $output);
+        my array @arcmd = ("ar", "rcs", $output, $objf, $rtobj);
+        @arcmd = (@arcmd, @extra_objs);
+        @arcmd = (@arcmd, @EXTRA_O_FILES);
+        if (run_argv(@arcmd) != 0) { error("ar failed"); }
+        core::unlink($objf);
+        core::unlink($rtobj);
+        my int $eo = 0;
+        while ($eo < size(@extra_objs)) { core::unlink($extra_objs[$eo]); $eo = $eo + 1; }
+    } elsif ($STATIC_LINK == 1) {
+        if ($TCC_MODE == 1) { warn("--tcc is not supported with --static; compiling with the C compiler"); }
+        info("Compiling " . $cfile . " -> " . $output . " (static binary)");
+        warn("Static binaries cannot use FFI/dynamic library loading (sys::dl_open, import_lib)");
+        my array @cmd = ();
+        @cmd = (@cmd, @CC);
+        @cmd = (@cmd, "-static");
+        @cmd = (@cmd, @gcc_flags);
+        if (length($GC_SECTIONS_FLAG) > 0) { @cmd = (@cmd, $GC_SECTIONS_FLAG); }
+        @cmd = (@cmd, "-o");
+        @cmd = (@cmd, $output);
+        @cmd = (@cmd, $cfile);
+        @cmd = (@cmd, @extra_files);
+        @cmd = (@cmd, $RUNTIME_SRC);
+        @cmd = (@cmd, "-I" . $RUNTIME_DIR);
+        @cmd = (@cmd, @include_flags);
+        @cmd = (@cmd, "-lm");
+        @cmd = (@cmd, "-lpthread");
+        @cmd = (@cmd, @link_flags);
+        if (run_argv(@cmd) != 0) { error("C compilation failed"); }
+    } else {
+        # Executable
+        my str $rdynamic = "";
+        my str $gcsec = $GC_SECTIONS_FLAG;
+        if (file_contains($cfile, "dlopen") == 1 || file_contains($cfile, "strada_dl_open") == 1
+            || file_contains($cfile, "strada_tie_hash") == 1) {
+            $rdynamic = "-rdynamic";
+            info("FFI/import_lib detected, using -rdynamic");
+            $gcsec = "";
+            info("dlopen host: disabling --gc-sections (full runtime export)");
+        }
+        info("Compiling " . $cfile . " -> " . $output);
+        if ($TCC_MODE == 1) {
+            link_exe_tcc($cfile, $output, $rdynamic, @include_flags, @link_flags, @extra_files, $skip_runtime);
+        } elsif ($skip_runtime == 1) {
+            my array @cmd = ();
+            @cmd = (@cmd, @CC);
+            if (length($rdynamic) > 0) { @cmd = (@cmd, $rdynamic); }
+            @cmd = (@cmd, @gcc_flags);
+            if (length($gcsec) > 0) { @cmd = (@cmd, $gcsec); }
+            @cmd = (@cmd, "-o");
+            @cmd = (@cmd, $output);
+            @cmd = (@cmd, $cfile);
+            @cmd = (@cmd, @extra_files);
+            @cmd = (@cmd, "-I" . $RUNTIME_DIR);
+            @cmd = (@cmd, @include_flags);
+            @cmd = (@cmd, @DLOPEN_LIBS);
+            @cmd = (@cmd, "-lm");
+            @cmd = (@cmd, "-lpthread");
+            @cmd = (@cmd, @link_flags);
+            if (run_argv(@cmd) != 0) { error("C compilation failed"); }
+        } else {
+            # Split compile/link for ccache.
+            my str $genobj = scratch_path_obj($cfile);
+            my array @c1 = ();
+            @c1 = (@c1, @CC);
+            @c1 = (@c1, "-c");
+            @c1 = (@c1, @gcc_flags);
+            @c1 = (@c1, "-o");
+            @c1 = (@c1, $genobj);
+            @c1 = (@c1, $cfile);
+            @c1 = (@c1, "-I" . $RUNTIME_DIR);
+            @c1 = (@c1, @include_flags);
+            if (run_argv(@c1) != 0) { error("C compilation failed"); }
+            my array @c2 = ();
+            @c2 = (@c2, @CC);
+            if (length($rdynamic) > 0) { @c2 = (@c2, $rdynamic); }
+            @c2 = (@c2, @gcc_flags);
+            if (length($gcsec) > 0) { @c2 = (@c2, $gcsec); }
+            @c2 = (@c2, "-o");
+            @c2 = (@c2, $output);
+            @c2 = (@c2, $genobj);
+            @c2 = (@c2, @extra_files);
+            @c2 = (@c2, $RUNTIME_OBJ);
+            @c2 = (@c2, "-I" . $RUNTIME_DIR);
+            @c2 = (@c2, @include_flags);
+            @c2 = (@c2, @DLOPEN_LIBS);
+            @c2 = (@c2, "-lm");
+            @c2 = (@c2, "-lpthread");
+            @c2 = (@c2, @link_flags);
+            if (run_argv(@c2) != 0) { error("link failed"); }
+        }
+    }
+}
+
+func strip_ext(str $p, str $ext) str {
+    if (ew($p, $ext)) { return substr($p, 0, length($p) - length($ext)); }
+    return $p;
+}
+
+func scratch_path_obj(str $cfile) str {
+    # gen.o sits beside the generated C scratch file (or a fresh temp).
+    if (ew($cfile, ".c")) {
+        my str $base = substr($cfile, 0, length($cfile) - 2);
+        my str $obj = $base . ".gen.o";
+        @CLEANUP = (@CLEANUP, $obj);
+        return $obj;
+    }
+    my str $obj = core::mkdtemp("/tmp/strada_XXXXXX") . "/gen.o";
+    @CLEANUP = (@CLEANUP, $obj);
+    return $obj;
+}
+
+# ---------------------------------------------------------------------------
+# tcc link paths
+# ---------------------------------------------------------------------------
+
+func tcc_compile_obj(str $cfile, int $pic) str {
+    if (have_cmd("tcc") == 0) {
+        error("--tcc requires the 'tcc' compiler, which was not found in PATH");
+    }
+    # Swap the runtime header for the stripped tcc-parsable one.
+    my str $content = core::slurp($cfile);
+    $content = str_replace($content, "strada_runtime.h", "strada_runtime_tcc.h");
+    core::spew($cfile, $content);
+    my str $tccobj = core::mkdtemp("/tmp/strada_tcc_XXXXXX") . "/o.o";
+    @CLEANUP = (@CLEANUP, $tccobj);
+    my array @cmd = ("tcc", "-c", $cfile);
+    if ($pic == 1) { @cmd = (@cmd, "-fPIC"); }
+    @cmd = (@cmd, "-I" . $RUNTIME_DIR);
+    my int $ip = 0;
+    while ($ip < size(@INCLUDE_PATHS)) { @cmd = (@cmd, "-I" . $INCLUDE_PATHS[$ip]); $ip = $ip + 1; }
+    @cmd = (@cmd, "-o");
+    @cmd = (@cmd, $tccobj);
+    if (run_argv(@cmd) != 0) { error("tcc compilation failed"); }
+    # Re-weaken symbols tcc drops (optional __Pkg_oop_init hooks).
+    if (have_cmd("objcopy") == 1) {
+        my str $weaks = core::qx("grep '__attribute__((weak))' " . sq($cfile)
+            . " 2>/dev/null | grep -oE '[A-Za-z_][A-Za-z0-9_]*\\(' | tr -d '(' | grep -v '^__attribute__$' | sort -u");
+        my array @wl = split("\n", $weaks);
+        my int $wi = 0;
+        while ($wi < size(@wl)) {
+            my str $ws = trim($wl[$wi]);
+            if (length($ws) > 0) {
+                core::system("objcopy --weaken-symbol=" . sq($ws) . " " . sq($tccobj) . " 2>/dev/null");
+            }
+            $wi = $wi + 1;
+        }
+    }
+    return $tccobj;
+}
+
+func link_shared_tcc(str $cfile, str $output, array @include_flags,
+                     array @link_flags, array @extra_files) void {
+    info("TCC mode: tcc compiles, the C compiler links");
+    my str $ctorshim = "";
+    if (file_contains($cfile, "static void __strada_init_globals(void) {") == 1) {
+        my str $content = core::slurp($cfile);
+        $content = str_replace($content, "static void __strada_init_globals(void) {",
+                                          "void __strada_init_globals(void) {");
+        core::spew($cfile, $content);
+        $ctorshim = core::mkdtemp("/tmp/strada_shim_XXXXXX") . "/shim.c";
+        core::spew($ctorshim, "extern void __strada_init_globals(void);\n__attribute__((constructor)) static void __strada_tcc_ctor(void) { __strada_init_globals(); }\n");
+        @CLEANUP = (@CLEANUP, $ctorshim);
+    }
+    my str $tccobj = tcc_compile_obj($cfile, 1);
+    my array @cmd = ();
+    @cmd = (@cmd, @CC);
+    @cmd = (@cmd, "-shared");
+    @cmd = (@cmd, "-fPIC");
+    @cmd = (@cmd, "-Wl,-z,noexecstack");
+    if (length($SHARED_UNDEFINED_FLAG) > 0) { @cmd = (@cmd, $SHARED_UNDEFINED_FLAG); }
+    @cmd = (@cmd, "-o");
+    @cmd = (@cmd, $output);
+    @cmd = (@cmd, $tccobj);
+    if (length($ctorshim) > 0) { @cmd = (@cmd, $ctorshim); }
+    @cmd = (@cmd, @extra_files);
+    @cmd = (@cmd, "-I" . $RUNTIME_DIR);
+    @cmd = (@cmd, @include_flags);
+    @cmd = (@cmd, @DLOPEN_LIBS);
+    @cmd = (@cmd, "-lm");
+    @cmd = (@cmd, "-lpthread");
+    @cmd = (@cmd, @link_flags);
+    if (run_argv(@cmd) != 0) { error("link failed"); }
+}
+
+func link_exe_tcc(str $cfile, str $output, str $rdynamic, array @include_flags,
+                  array @link_flags, array @extra_files, int $skip_runtime) void {
+    info("TCC mode: tcc compiles, the C compiler links");
+    my str $tccobj = tcc_compile_obj($cfile, 0);
+    my array @cmd = ();
+    @cmd = (@cmd, @CC);
+    if (length($rdynamic) > 0) { @cmd = (@cmd, $rdynamic); }
+    @cmd = (@cmd, "-Wl,-z,noexecstack");
+    @cmd = (@cmd, "-o");
+    @cmd = (@cmd, $output);
+    @cmd = (@cmd, $tccobj);
+    @cmd = (@cmd, @extra_files);
+    if ($skip_runtime != 1) { @cmd = (@cmd, $RUNTIME_OBJ); }
+    @cmd = (@cmd, "-I" . $RUNTIME_DIR);
+    @cmd = (@cmd, @include_flags);
+    @cmd = (@cmd, @DLOPEN_LIBS);
+    @cmd = (@cmd, "-lm");
+    @cmd = (@cmd, "-lpthread");
+    @cmd = (@cmd, @link_flags);
+    if (run_argv(@cmd) != 0) { error("link failed"); }
+}
+
+# ---------------------------------------------------------------------------
+# Metadata sidecar (-M) — write <obj>.smeta via a probe binary
+# ---------------------------------------------------------------------------
+
+func write_smeta_sidecar(str $obj) void {
+    my str $dir = core::mkdtemp("/tmp/strada_smeta_XXXXXX");
+    my str $probe_c = $dir . "/probe.c";
+    my str $probe_exe = $dir . "/probe";
+    core::spew($probe_c, "#include <stdio.h>\nextern const char* __strada_export_info(void);\nint main(void) { const char *i = __strada_export_info(); if (i) printf(\"%s\", i); return 0; }\n");
+    my array @cmd = ();
+    @cmd = (@cmd, @CC);
+    @cmd = (@cmd, "-fno-lto");
+    @cmd = (@cmd, "-o");
+    @cmd = (@cmd, $probe_exe);
+    @cmd = (@cmd, $probe_c);
+    @cmd = (@cmd, $obj);
+    @cmd = (@cmd, $RUNTIME_OBJ);
+    @cmd = (@cmd, "-I" . $RUNTIME_DIR);
+    @cmd = (@cmd, @DLOPEN_LIBS);
+    @cmd = (@cmd, "-lm");
+    @cmd = (@cmd, "-lpthread");
+    @cmd = (@cmd, "-Wl,--unresolved-symbols=ignore-all");
+    my int $ok = 0;
+    if (run_argv(@cmd) == 0) {
+        my str $meta = core::qx(sq($probe_exe));
+        if (length($meta) > 0) {
+            core::spew($obj . ".smeta", $meta);
+            info("wrote metadata sidecar " . $obj . ".smeta");
+            $ok = 1;
+        }
+    }
+    if ($ok == 0) {
+        core::unlink($obj . ".smeta");
+        warn("could not write metadata sidecar for " . $obj . "; consumers will probe at compile time");
+    }
+    core::unlink($probe_c);
+    core::unlink($probe_exe);
+}
+
+# ---------------------------------------------------------------------------
+# Module-cache warmer
+# ---------------------------------------------------------------------------
+
+func warm_module_cache(str $deps_file, str $cache_dir, str $cache_key) void {
+    my str $depscontent = core::slurp($deps_file);
+    my array @deps = split("\n", $depscontent);
+    # Reverse order (leaves first) so a parent's warm build sees fresh deps.
+    my int $warmed = 0;
+    my int $failed = 0;
+    my str $failed_names = "";
+    my int $idx = size(@deps) - 1;
+    while ($idx >= 0) {
+        my str $dep = trim($deps[$idx]);
+        $idx = $idx - 1;
+        if (length($dep) == 0) { next; }
+        if (!(-f $dep)) { next; }
+        my str $real = "" . core::realpath($dep);
+        if (length($real) == 0) { next; }
+        my str $sibo = strip_strada_ext($dep) . ".o";
+        my str $cache_o = "";
+        if (length($cache_key) > 0) { $cache_o = $cache_dir . "/" . $cache_key . $real . ".o"; }
+        else { $cache_o = $cache_dir . $real . ".o"; }
+        # Skip when a fresh artifact already exists (sibling or cached).
+        if ((-f $sibo) && core::file_mtime($dep) <= core::file_mtime($sibo)
+            && core::file_mtime($STRADAC) <= core::file_mtime($sibo)) { next; }
+        if ((-f $cache_o) && core::file_mtime($dep) <= core::file_mtime($cache_o)
+            && core::file_mtime($STRADAC) <= core::file_mtime($cache_o)) { next; }
+        my array @mk = ("mkdir", "-p", dirname_of($cache_o));
+        run_argv(@mk);
+        info("module cache: precompiling " . $dep);
+        # Sub-build via the shim; clear DEPS_OUT so it doesn't clobber ours.
+        core::setenv("STRADA_DEPS_OUT", "");
+        my array @cmd = ($SHIM, "-M", "--object");
+        my int $di = 0;
+        while ($di < size(@PP_DEFINES)) { @cmd = (@cmd, "-D"); @cmd = (@cmd, $PP_DEFINES[$di]); $di = $di + 1; }
+        @cmd = (@cmd, "-o");
+        @cmd = (@cmd, $cache_o);
+        @cmd = (@cmd, $dep);
+        # Suppress sub-build chatter unless verbose.
+        my int $rc = 0;
+        if ($VERBOSE == 1) { $rc = core::system_argv($cmd[0], @cmd); }
+        else { $rc = core::system(join(" ", map { sq($_) } @cmd) . " >/dev/null 2>&1"); }
+        if ($rc == 0) {
+            $warmed = $warmed + 1;
+        } else {
+            $failed = $failed + 1;
+            $failed_names = $failed_names . " " . $dep;
+            core::unlink($cache_o);
+            core::unlink($cache_o . ".smeta");
+        }
+    }
+    if ($warmed > 0 || $failed > 0) {
+        my str $msg = "module cache: warmed " . $warmed . " module(s)";
+        if ($failed > 0) {
+            $msg = $msg . " (" . $failed . " failed:" . $failed_names . " — those keep compiling from source)";
+        }
+        say(STDERR, $msg);
+    }
+}

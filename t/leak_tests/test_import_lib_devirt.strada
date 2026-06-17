@@ -1,0 +1,48 @@
+# Leak test: cross-.so guarded devirtualization (import_lib).
+# Exercises every path the feature adds: devirtualized direct method
+# calls (int- and str-returning), the inline-constructed receiver, the
+# hook-bearing method that stays on dynamic dispatch (mod: gating), and
+# the wrapper-mediated static call. The companion .so is pre-built by
+# run_leak_tests.sh (see test_import_lib_devirt_lib.strada).
+
+use lib "t/leak_tests";
+import_lib "test_import_lib_devirt_lib.so";
+
+func main() int {
+    # Devirtualized hot loop: direct wrapper calls, int return
+    my scalar $c = LeakCounter::new(0);
+    my int $i = 0;
+    my int $sum = 0;
+    while ($i < 20000) {
+        $sum = $c->bump();
+        $i++;
+    }
+    say("sum=" . $sum);
+
+    # Devirtualized str-returning method (owned string results)
+    $i = 0;
+    while ($i < 5000) {
+        my str $s = $c->label();
+        $i++;
+    }
+    say("label=" . $c->label());
+
+    # Hook-bearing method: must stay on dynamic dispatch, hook fires
+    $i = 0;
+    while ($i < 5000) {
+        $c->audited_add(2);
+        $i++;
+    }
+    say("hooks=" . LeakCounter::hook_count());
+
+    # Constructor churn through the wrapper
+    $i = 0;
+    while ($i < 5000) {
+        my scalar $tmp = LeakCounter::new($i);
+        $tmp->bump();
+        $i++;
+    }
+
+    say("done");
+    return 0;
+}

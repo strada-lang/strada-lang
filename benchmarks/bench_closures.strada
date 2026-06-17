@@ -1,0 +1,100 @@
+# Closure benchmarks — creation, invocation, capture access (reads AND
+# writes through the capture cell), closures as values in containers,
+# and transitive capture through nested closures (the 2026-06 capture
+# fix has no other perf coverage).
+#
+# Sections:
+#   create     — 500k closure creations (capturing two locals)
+#   invoke     — one closure called 5M times
+#   capture-rw — 2M mutations of a captured counter
+#   table      — 200k dispatches through a hash of 16 closures
+#   transitive — 200k calls through a closure nested two levels deep
+#
+# Reference numbers: benchmarks/BASELINE.md
+
+package main;
+
+func make_adder(int $base) scalar {
+    my int $bias = $base * 2;
+    return fn (int $x) int { return $x + $bias; };
+}
+
+func make_outer(int $seed) scalar {
+    my int $level0 = $seed;
+    my scalar $mid = fn () scalar {
+        # captures $level0 transitively through the enclosing closure
+        return fn (int $x) int { return $x + $level0; };
+    };
+    return $mid->();
+}
+
+func main() int {
+    my num $t0 = core::hires_time();
+
+    # 1. closure creation
+    my int $made = 0;
+    my int $i = 0;
+    while ($i < 500000) {
+        my scalar $f = make_adder($i);
+        $made++;
+        $i++;
+    }
+    my num $t1 = core::hires_time();
+    say("create: " . $made . " " . ($t1 - $t0));
+
+    # 2. invocation of one closure
+    my scalar $add7 = make_adder(7);
+    my int $sum = 0;
+    $i = 0;
+    while ($i < 5000000) {
+        $sum += $add7->($i % 100);
+        $i++;
+    }
+    my num $t2 = core::hires_time();
+    say("invoke: " . $sum . " " . ($t2 - $t1));
+
+    # 3. mutating a captured variable
+    my int $counter = 0;
+    my scalar $bump = fn () int {
+        $counter = $counter + 1;
+        return $counter;
+    };
+    $i = 0;
+    while ($i < 2000000) {
+        $bump->();
+        $i++;
+    }
+    my num $t3 = core::hires_time();
+    say("capture-rw: " . $counter . " " . ($t3 - $t2));
+
+    # 4. dispatch table of closures
+    my hash %table;
+    $i = 0;
+    while ($i < 16) {
+        $table{"op" . $i} = make_adder($i);
+        $i++;
+    }
+    my int $tsum = 0;
+    $i = 0;
+    while ($i < 200000) {
+        my scalar $f = $table{"op" . ($i % 16)};
+        $tsum += $f->($i % 50);
+        $i++;
+    }
+    my num $t4 = core::hires_time();
+    say("table: " . $tsum . " " . ($t4 - $t3));
+
+    # 5. transitive captures through nested closures
+    my scalar $deep = make_outer(11);
+    my int $dsum = 0;
+    $i = 0;
+    while ($i < 200000) {
+        $dsum += $deep->($i % 10);
+        $i++;
+    }
+    my num $t5 = core::hires_time();
+    say("transitive: " . $dsum . " " . ($t5 - $t4));
+
+    say("total: " . ($t5 - $t0));
+    return 0;
+}

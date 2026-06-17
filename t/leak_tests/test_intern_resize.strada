@@ -1,0 +1,119 @@
+#!/usr/bin/env strada
+# Test dynamic intern table resizing for memory leaks
+# Optimization: intern table resizes at load factor > 2, rehashing all entries.
+# This test creates many distinct hash keys to trigger multiple resizes.
+# Run: valgrind --leak-check=full ./test_intern_resize
+
+func main() int {
+    say("Testing intern table resize for memory leaks...");
+
+    # Test 1: Create many distinct short keys to trigger intern table resize
+    # Initial size is 1024, resize at >2048. With 5000 keys we trigger
+    # at least one resize (1024 → 2048 → 4096).
+    say("  Many distinct keys (trigger resize)...");
+    my hash %h = ();
+    my int $i = 0;
+    while ($i < 5000) {
+        $h{"k" . $i} = $i;
+        $i++;
+    }
+    if (scalar(keys(%h)) != 5000) {
+        say("    FAIL: expected 5000 keys, got " . scalar(keys(%h)));
+        return 1;
+    }
+    # Verify some values survived the resize
+    if ($h{"k0"} != 0 || $h{"k2500"} != 2500 || $h{"k4999"} != 4999) {
+        say("    FAIL: value mismatch after resize");
+        return 1;
+    }
+    say("    PASS");
+
+    # Test 2: Delete all keys (exercises intern_release with resized table)
+    say("  Delete all keys after resize...");
+    $i = 0;
+    while ($i < 5000) {
+        delete($h{"k" . $i});
+        $i++;
+    }
+    if (scalar(keys(%h)) != 0) {
+        say("    FAIL: hash not empty after delete");
+        return 1;
+    }
+    say("    PASS");
+
+    # Test 3: Repeated create/destroy cycles with resize-triggering volume
+    say("  Create/destroy cycles with resize...");
+    $i = 0;
+    while ($i < 20) {
+        my hash %cycle = ();
+        my int $j = 0;
+        while ($j < 3000) {
+            $cycle{"c" . $j} = $j;
+            $j++;
+        }
+        if (scalar(keys(%cycle)) != 3000) {
+            say("    FAIL: cycle " . $i);
+            return 1;
+        }
+        # Hash goes out of scope, all intern refs released
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 4: Same keys reused across iterations (intern refcount > 1)
+    say("  Shared intern keys across hashes...");
+    $i = 0;
+    while ($i < 100) {
+        my hash %h1 = ("name" => "Alice", "age" => 30);
+        my hash %h2 = ("name" => "Bob", "age" => 25);
+        my hash %h3 = ("name" => "Carol", "age" => 35);
+        if ($h1{"name"} ne "Alice" || $h2{"name"} ne "Bob") {
+            say("    FAIL");
+            return 1;
+        }
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 5: Mix of short (interned) and long (not interned) keys
+    say("  Mixed short/long keys...");
+    $i = 0;
+    while ($i < 50) {
+        my hash %mixed = ();
+        my int $j = 0;
+        while ($j < 100) {
+            # Short key (interned, < 64 chars)
+            $mixed{"s" . $j} = $j;
+            # Long key (not interned, > 64 chars)
+            $mixed{"this_is_a_long_key_that_exceeds_the_64_byte_intern_limit_number_" . $j} = $j * 10;
+            $j++;
+        }
+        if (scalar(keys(%mixed)) != 200) {
+            say("    FAIL: expected 200, got " . scalar(keys(%mixed)));
+            return 1;
+        }
+        $i++;
+    }
+    say("    PASS");
+
+    # Test 6: Overwrite keys (intern ref stays, value changes)
+    say("  Overwrite interned keys...");
+    my hash %ow = ();
+    $i = 0;
+    while ($i < 100) {
+        my int $j = 0;
+        while ($j < 50) {
+            $ow{"ow" . $j} = $i * 100 + $j;
+            $j++;
+        }
+        $i++;
+    }
+    if ($ow{"ow0"} != 9900 || $ow{"ow49"} != 9949) {
+        say("    FAIL: overwrite values");
+        return 1;
+    }
+    say("    PASS");
+
+    say("All intern table resize tests passed!");
+    return 0;
+}

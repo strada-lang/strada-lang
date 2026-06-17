@@ -1,0 +1,91 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_namespaces.strada - Demonstrate magic namespace system
+#
+# Strada uses magic namespaces to organize built-in functions:
+#   - math:: for math functions (sin, cos, sqrt, etc.)
+#   - sys::  for system/libc functions (open, fork, socket, etc.)
+#
+# Core language functions remain unqualified (say, print, push, etc.)
+
+func main() int {
+    say("=== Magic Namespaces Demo ===");
+    say("");
+
+    # =============================================
+    # math:: namespace - mathematical functions
+    # =============================================
+    say("--- math:: namespace ---");
+
+    my num $pi = 3.14159265358979;
+    say("math::sin(pi/2) = " . math::sin($pi / 2));
+    say("math::cos(0) = " . math::cos(0));
+    say("math::sqrt(16) = " . math::sqrt(16));
+    say("math::pow(2, 10) = " . math::pow(2, 10));
+    say("math::log(10) = " . math::log(10));
+    say("math::floor(3.7) = " . math::floor(3.7));
+    say("math::ceil(3.2) = " . math::ceil(3.2));
+    say("math::abs(-42) = " . math::abs(-42));
+    say("");
+
+    # =============================================
+    # sys:: namespace - system/libc functions
+    # =============================================
+    say("--- sys:: namespace ---");
+
+    # File operations
+    my str $testfile = "/tmp/namespace_test.txt";
+    sys::spew($testfile, "Hello from Strada namespaces!\n");
+    my str $content = sys::slurp($testfile);
+    say("File content: " . chomp($content));
+    sys::unlink($testfile);
+
+    # Environment
+    my str $home = sys::getenv("HOME");
+    say("HOME = " . $home);
+
+    # Process info
+    say("PID = " . sys::getpid());
+
+    # Current directory
+    say("CWD = " . sys::getcwd());
+
+    # Time
+    say("Time = " . sys::time());
+    say("");
+
+    # =============================================
+    # Core functions remain unqualified
+    # =============================================
+    say("--- Core functions (no namespace) ---");
+
+    my array @arr;
+    push(\@arr, "apple");
+    push(\@arr, "banana");
+    push(\@arr, "cherry");
+    say("Array size: " . size(\@arr));
+    say("Joined: " . join(", ", \@arr));
+
+    my str $s = "HELLO";
+    say("lc('" . $s . "') = " . lc($s));
+    say("length('test') = " . length("test"));
+    say("");
+
+    say("=== Namespace Demo Complete ===");
+    return 0;
+}

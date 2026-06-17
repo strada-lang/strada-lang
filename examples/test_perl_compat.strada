@@ -1,0 +1,58 @@
+func test_shift {
+    my $a = shift;
+    my $b = shift;
+    return $a . "+" . $b;
+}
+
+func main() int {
+    my int $pass = 0;
+    my int $fail = 0;
+
+    # Test 1: chomp modifies in-place
+    my $s1 = "hello\n";
+    chomp($s1);
+    if ($s1 eq "hello") { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 1: chomp"); }
+
+    # Test 2: chomp with \r\n
+    my $s2 = "world\r\n";
+    chomp($s2);
+    if ($s2 eq "world") { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 2: chomp crlf"); }
+
+    # Test 3: chomp returns chomped string
+    my $s3 = "test\n";
+    my $result = chomp($s3);
+    if ($result eq "test") { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 3: chomp return"); }
+
+    # Test 4: bare shift defaults to @_
+    my $r = test_shift("alpha", "beta");
+    if ($r eq "alpha+beta") { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 4: shift"); }
+
+    # Test 5: unless with elsif
+    my $x = 0;
+    my $branch = "";
+    unless ($x == 1) {
+        $branch = "unless";
+    }
+    if ($branch eq "unless") { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 5: unless"); }
+
+    # Test 6: heredoc
+    my $text = <<EOT;
+line one
+line two
+EOT
+    my @lines = split("\n", $text);
+    if (size(@lines) == 2) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 6: heredoc got " . size(@lines)); }
+
+    # Test 7: heredoc with single quotes
+    my $text2 = <<'END';
+no $interpolation here
+END
+    if (index($text2, "$") >= 0) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 7: heredoc squote"); }
+
+    if ($fail == 0) {
+        say("All Perl compat tests passed (" . $pass . " checks)");
+    } else {
+        say("FAILED: " . $fail . " of " . ($pass + $fail));
+    }
+    return $fail;
+}

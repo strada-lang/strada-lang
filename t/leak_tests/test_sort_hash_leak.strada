@@ -1,0 +1,51 @@
+#!/usr/bin/env strada
+# Leak regression: strada_sort over a hash double-incref'd every key
+# and value (explicit strada_incref + strada_array_push, which itself
+# already increfs). Each sort() leaked one ref per key + one per value.
+#
+# Repro pre-fix: ~256KB definitely lost over 1000 iterations of a
+# 4-key hash.
+#
+# Run: valgrind --leak-check=full ./test_sort_hash_leak
+
+package main;
+
+func test_sort_hash() void {
+    my int $iter = 200;
+    my int $i = 0;
+    while ($i < $iter) {
+        my hash %h = ();
+        $h{"alpha"} = "a";
+        $h{"beta"} = "b";
+        $h{"gamma"} = "c";
+        $h{"delta"} = "d";
+        my scalar $sorted = sort(%h);
+        if (size($sorted) != 8) {
+            say("FAIL hash sort: expected 8 elements got " . size($sorted));
+            return;
+        }
+        $i = $i + 1;
+    }
+    say("test_sort_hash: PASS");
+}
+
+func test_sort_hashref() void {
+    my int $iter = 200;
+    my int $i = 0;
+    while ($i < $iter) {
+        my scalar $h = { "x" => 10, "y" => 20, "z" => 30 };
+        my scalar $sorted = sort(%{$h});
+        if (size($sorted) != 6) {
+            say("FAIL hashref sort: expected 6 elements got " . size($sorted));
+            return;
+        }
+        $i = $i + 1;
+    }
+    say("test_sort_hashref: PASS");
+}
+
+func main() int {
+    test_sort_hash();
+    test_sort_hashref();
+    return 0;
+}

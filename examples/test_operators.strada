@@ -1,0 +1,225 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_operators.strada - Test all math, bitwise, and comparison operators
+#
+# Tests:
+# - Arithmetic: + - * / % **
+# - Bitwise: & | ^ ~ << >>
+# - Comparison: == != < > <= >= <=>
+# - String comparison: eq ne lt gt le ge
+# - Logical: && || ! and or not
+
+func main() int {
+    my int $passed = 0;
+    my int $failed = 0;
+
+    say("=== Strada Operator Tests ===");
+    say("");
+
+    # ============================================================
+    # Arithmetic Operators
+    # ============================================================
+    say("--- Arithmetic Operators ---");
+
+    # Addition
+    if (5 + 3 == 8) { say("PASS: 5 + 3 = 8"); $passed = $passed + 1; }
+    else { say("FAIL: 5 + 3 != 8"); $failed = $failed + 1; }
+
+    # Subtraction
+    if (10 - 4 == 6) { say("PASS: 10 - 4 = 6"); $passed = $passed + 1; }
+    else { say("FAIL: 10 - 4 != 6"); $failed = $failed + 1; }
+
+    # Multiplication
+    if (7 * 6 == 42) { say("PASS: 7 * 6 = 42"); $passed = $passed + 1; }
+    else { say("FAIL: 7 * 6 != 42"); $failed = $failed + 1; }
+
+    # Division
+    my num $div = 15 / 4;
+    if ($div > 3.7 && $div < 3.8) { say("PASS: 15 / 4 = 3.75"); $passed = $passed + 1; }
+    else { say("FAIL: 15 / 4 != 3.75, got " . $div); $failed = $failed + 1; }
+
+    # Modulo
+    if (17 % 5 == 2) { say("PASS: 17 % 5 = 2"); $passed = $passed + 1; }
+    else { say("FAIL: 17 % 5 != 2"); $failed = $failed + 1; }
+
+    # Exponentiation
+    my num $exp1 = 2 ** 10;
+    if ($exp1 == 1024) { say("PASS: 2 ** 10 = 1024"); $passed = $passed + 1; }
+    else { say("FAIL: 2 ** 10 != 1024, got " . $exp1); $failed = $failed + 1; }
+
+    my num $exp2 = 3 ** 4;
+    if ($exp2 == 81) { say("PASS: 3 ** 4 = 81"); $passed = $passed + 1; }
+    else { say("FAIL: 3 ** 4 != 81, got " . $exp2); $failed = $failed + 1; }
+
+    # Right-associativity of **
+    my num $exp3 = 2 ** 3 ** 2;  # Should be 2^(3^2) = 2^9 = 512
+    if ($exp3 == 512) { say("PASS: 2 ** 3 ** 2 = 512 (right-associative)"); $passed = $passed + 1; }
+    else { say("FAIL: 2 ** 3 ** 2 != 512, got " . $exp3); $failed = $failed + 1; }
+
+    # Fractional exponent
+    my num $exp4 = 16 ** 0.5;
+    if ($exp4 == 4) { say("PASS: 16 ** 0.5 = 4 (square root)"); $passed = $passed + 1; }
+    else { say("FAIL: 16 ** 0.5 != 4, got " . $exp4); $failed = $failed + 1; }
+
+    # Negation
+    my int $neg = -42;
+    if ($neg == 0 - 42) { say("PASS: -42 works"); $passed = $passed + 1; }
+    else { say("FAIL: -42 doesn't work"); $failed = $failed + 1; }
+
+    say("");
+
+    # ============================================================
+    # Bitwise Operators
+    # ============================================================
+    say("--- Bitwise Operators ---");
+
+    my int $a = 12;  # 0b1100
+    my int $b = 10;  # 0b1010
+
+    # Bitwise AND
+    if (($a & $b) == 8) { say("PASS: 12 & 10 = 8"); $passed = $passed + 1; }
+    else { say("FAIL: 12 & 10 != 8"); $failed = $failed + 1; }
+
+    # Bitwise OR
+    if (($a | $b) == 14) { say("PASS: 12 | 10 = 14"); $passed = $passed + 1; }
+    else { say("FAIL: 12 | 10 != 14"); $failed = $failed + 1; }
+
+    # Bitwise XOR
+    if (($a ^ $b) == 6) { say("PASS: 12 ^ 10 = 6"); $passed = $passed + 1; }
+    else { say("FAIL: 12 ^ 10 != 6"); $failed = $failed + 1; }
+
+    # Bitwise NOT
+    my int $not_a = ~$a;
+    if ($not_a == -13) { say("PASS: ~12 = -13"); $passed = $passed + 1; }
+    else { say("FAIL: ~12 != -13, got " . $not_a); $failed = $failed + 1; }
+
+    # Left shift
+    if (($a << 2) == 48) { say("PASS: 12 << 2 = 48"); $passed = $passed + 1; }
+    else { say("FAIL: 12 << 2 != 48"); $failed = $failed + 1; }
+
+    # Right shift
+    if (($a >> 2) == 3) { say("PASS: 12 >> 2 = 3"); $passed = $passed + 1; }
+    else { say("FAIL: 12 >> 2 != 3"); $failed = $failed + 1; }
+
+    say("");
+
+    # ============================================================
+    # Comparison Operators
+    # ============================================================
+    say("--- Comparison Operators ---");
+
+    # Numeric comparisons
+    if (5 == 5) { say("PASS: 5 == 5"); $passed = $passed + 1; }
+    else { say("FAIL: 5 == 5"); $failed = $failed + 1; }
+
+    if (5 != 3) { say("PASS: 5 != 3"); $passed = $passed + 1; }
+    else { say("FAIL: 5 != 3"); $failed = $failed + 1; }
+
+    if (3 < 5) { say("PASS: 3 < 5"); $passed = $passed + 1; }
+    else { say("FAIL: 3 < 5"); $failed = $failed + 1; }
+
+    if (5 > 3) { say("PASS: 5 > 3"); $passed = $passed + 1; }
+    else { say("FAIL: 5 > 3"); $failed = $failed + 1; }
+
+    if (5 <= 5) { say("PASS: 5 <= 5"); $passed = $passed + 1; }
+    else { say("FAIL: 5 <= 5"); $failed = $failed + 1; }
+
+    if (5 >= 5) { say("PASS: 5 >= 5"); $passed = $passed + 1; }
+    else { say("FAIL: 5 >= 5"); $failed = $failed + 1; }
+
+    # Spaceship operator
+    my int $cmp1 = 5 <=> 3;
+    my int $cmp2 = 3 <=> 5;
+    my int $cmp3 = 5 <=> 5;
+    if ($cmp1 == 1 && $cmp2 == -1 && $cmp3 == 0) {
+        say("PASS: <=> spaceship operator");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: <=> spaceship operator");
+        $failed = $failed + 1;
+    }
+
+    say("");
+
+    # ============================================================
+    # String Comparison Operators
+    # ============================================================
+    say("--- String Comparison Operators ---");
+
+    if ("abc" eq "abc") { say("PASS: 'abc' eq 'abc'"); $passed = $passed + 1; }
+    else { say("FAIL: 'abc' eq 'abc'"); $failed = $failed + 1; }
+
+    if ("abc" ne "def") { say("PASS: 'abc' ne 'def'"); $passed = $passed + 1; }
+    else { say("FAIL: 'abc' ne 'def'"); $failed = $failed + 1; }
+
+    if ("abc" lt "def") { say("PASS: 'abc' lt 'def'"); $passed = $passed + 1; }
+    else { say("FAIL: 'abc' lt 'def'"); $failed = $failed + 1; }
+
+    if ("def" gt "abc") { say("PASS: 'def' gt 'abc'"); $passed = $passed + 1; }
+    else { say("FAIL: 'def' gt 'abc'"); $failed = $failed + 1; }
+
+    say("");
+
+    # ============================================================
+    # Logical Operators
+    # ============================================================
+    say("--- Logical Operators ---");
+
+    if (1 && 1) { say("PASS: 1 && 1"); $passed = $passed + 1; }
+    else { say("FAIL: 1 && 1"); $failed = $failed + 1; }
+
+    if (1 || 0) { say("PASS: 1 || 0"); $passed = $passed + 1; }
+    else { say("FAIL: 1 || 0"); $failed = $failed + 1; }
+
+    if (!0) { say("PASS: !0"); $passed = $passed + 1; }
+    else { say("FAIL: !0"); $failed = $failed + 1; }
+
+    say("");
+
+    # ============================================================
+    # Operator Precedence
+    # ============================================================
+    say("--- Operator Precedence ---");
+
+    # ** has higher precedence than *
+    my num $prec1 = 2 * 3 ** 2;  # Should be 2 * 9 = 18
+    if ($prec1 == 18) { say("PASS: 2 * 3 ** 2 = 18 (** before *)"); $passed = $passed + 1; }
+    else { say("FAIL: 2 * 3 ** 2 != 18, got " . $prec1); $failed = $failed + 1; }
+
+    # % at same level as * /
+    my int $prec2 = 10 + 20 % 7;  # Should be 10 + 6 = 16
+    if ($prec2 == 16) { say("PASS: 10 + 20 % 7 = 16 (% before +)"); $passed = $passed + 1; }
+    else { say("FAIL: 10 + 20 % 7 != 16, got " . $prec2); $failed = $failed + 1; }
+
+    say("");
+
+    # ============================================================
+    # Summary
+    # ============================================================
+    say("=== Summary ===");
+    say("Passed: " . $passed);
+    say("Failed: " . $failed);
+
+    if ($failed == 0) {
+        say("All tests passed!");
+        return 0;
+    } else {
+        say("Some tests failed.");
+        return 1;
+    }
+}

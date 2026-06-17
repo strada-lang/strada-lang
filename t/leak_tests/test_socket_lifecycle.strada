@@ -1,0 +1,38 @@
+#!/usr/bin/env strada
+# Regression test: strada_socket_close used to discard the owned undef
+# returned by strada_socket_flush (which became StradaValue*-returning
+# when it was exposed as a builtin) — leaking one StradaValue per socket
+# close. One leaked SV per connection is invisible in small tests because
+# strada_value_alloc recycles freed SVs (valgrind attributes the loss to
+# whatever allocation originally created the recycled block), so this
+# test churns enough connect/close cycles to make the loss unambiguous.
+
+package main;
+
+func main() int {
+    my int $port = 39411;
+    my scalar $listener = core::socket_server($port);
+    if (!defined($listener)) {
+        say("SKIP: could not bind test port");
+        return 0;
+    }
+
+    my int $i = 0;
+    while ($i < 50) {
+        my scalar $c = core::socket_client("127.0.0.1", $port);
+        if (defined($c)) {
+            my scalar $conn = core::socket_accept($listener);
+            if (defined($conn)) {
+                core::socket_send($conn, "x");
+                my str $got = core::socket_recv($c, 16);
+                core::socket_close($conn);
+            }
+            core::socket_close($c);
+        }
+        $i = $i + 1;
+    }
+
+    core::socket_close($listener);
+    say("socket lifecycle done");
+    return 0;
+}

@@ -1,0 +1,61 @@
+#!/usr/bin/env strada
+# Leak test for index()/substr() on UTF-8 strings.
+# Run: valgrind --leak-check=full ./test_utf8_index_substr
+#
+# Exercises all three index() codegen shapes (literal needle, variable
+# needle, 3-arg with offset) plus substr() on both non-flagged byte strings
+# (raw UTF-8 bytes) and char-oriented flagged strings (built via chr()).
+# The variable-needle and 3-arg shapes now route through strada_index_sv2;
+# this loops them hard so valgrind can catch any refcount/alloc imbalance.
+
+func main() int {
+    say("Testing UTF-8 index/substr for memory leaks...");
+    my int $iterations = 2000;
+
+    my int $i = 0;
+    while ($i < $iterations) {
+        # Non-flagged byte string with a multi-byte char before the needle.
+        my str $b = "héllo v_SIG " . $i;
+        my str $needle = "v_SIG";
+
+        # Shape A: literal needle.
+        my int $ia = index($b, "v_SIG");
+        my str $sa = substr($b, $ia, 5);
+
+        # Shape B: variable needle (general form -> strada_index_sv2).
+        my int $ib = index($b, $needle);
+        my str $sb = substr($b, $ib, 5);
+
+        # Shape C: 3-arg with offset (-> strada_index_sv2).
+        my int $ic = index($b, "v_SIG", 0);
+        my str $sc = substr($b, $ic, 5);
+
+        if ($sa ne "v_SIG" || $sb ne "v_SIG" || $sc ne "v_SIG") {
+            say("  FAIL: byte-string round-trip mismatch");
+            return 1;
+        }
+
+        # Char-oriented flagged string via chr() (中文 + ascii).
+        my str $u = chr(0x4e2d) . chr(0x6587) . "v_SIG " . $i;
+        my int $iu = index($u, "v_SIG");
+        my str $su = substr($u, $iu, 5);
+        my int $lu = length($u);
+        if ($su ne "v_SIG" || $lu < 7) {
+            say("  FAIL: char-string round-trip mismatch");
+            return 1;
+        }
+
+        # Not-found and empty-needle paths.
+        my int $nf = index($b, "ZZZZ");
+        my int $en = index($b, "");
+        if ($nf != -1 || $en != 0) {
+            say("  FAIL: edge-case index result");
+            return 1;
+        }
+
+        $i = $i + 1;
+    }
+
+    say("PASS: UTF-8 index/substr leak test completed");
+    return 0;
+}

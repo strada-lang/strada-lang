@@ -1,0 +1,64 @@
+# Test BEGIN and END blocks
+# Verifies:
+# - Multiple BEGIN blocks run in source order
+# - Multiple END blocks run in LIFO order
+# - BEGIN runs before main body
+# - END runs after main body
+# - BEGIN/END can access global variables
+
+my int $order = 0;
+my int $pass = 1;
+
+BEGIN {
+    $order = $order + 1;
+    if ($order != 1) {
+        $pass = 0;
+    }
+}
+
+BEGIN {
+    $order = $order + 1;
+    if ($order != 2) {
+        $pass = 0;
+    }
+}
+
+BEGIN {
+    $order = $order + 1;
+    if ($order != 3) {
+        $pass = 0;
+    }
+}
+
+END {
+    # This END registered first, runs last (LIFO)
+    say("PASS: BEGIN/END blocks");
+}
+
+END {
+    # This END registered second, runs second-to-last
+    $order = $order + 1;
+    if ($order != 5) {
+        say("FAIL: END LIFO order wrong, expected 5 got " . $order);
+    }
+}
+
+END {
+    # This END registered third, runs first
+    $order = $order + 1;
+    if ($order != 4) {
+        say("FAIL: END LIFO order wrong, expected 4 got " . $order);
+    }
+}
+
+func main() int {
+    if ($pass != 1) {
+        say("FAIL: BEGIN block order wrong");
+        return 1;
+    }
+    if ($order != 3) {
+        say("FAIL: expected order 3 after BEGINs, got " . $order);
+        return 1;
+    }
+    return 0;
+}

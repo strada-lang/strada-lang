@@ -1,0 +1,61 @@
+#!/usr/bin/env strada
+# Leak regression: =~ /pattern/g with (?P<name>...) named captures
+# leaked one StradaValue per group per match. strada_hash_set was
+# called with strada_new_str(...) result; both sides increfed,
+# leaving refcount 2 with no second decref.
+#
+# Repro pre-fix: 512KB+ definitely lost over 2000 iters * 4 matches
+# * 2 named groups. With the fix, zero loss.
+#
+# Run: valgrind --leak-check=full ./test_regex_g_named_captures
+
+package main;
+
+func test_g_with_named_captures() void {
+    my str $text = "a=1 b=2 c=3 d=4";
+    my int $iter = 500;
+    my int $i = 0;
+    while ($i < $iter) {
+        my int $count = 0;
+        while ($text =~ /(?P<key>\w+)=(?P<val>\w+)/g) {
+            $count = $count + 1;
+        }
+        if ($count != 4) {
+            say("FAIL: matched " . $count . " not 4");
+            return;
+        }
+        $i = $i + 1;
+    }
+    say("test_g_with_named_captures: PASS");
+}
+
+func test_g_with_named_captures_using_hash() void {
+    my str $text = "name=Alice age=30 city=NYC";
+    my int $iter = 200;
+    my int $i = 0;
+    while ($i < $iter) {
+        my int $count = 0;
+        while ($text =~ /(?P<k>\w+)=(?P<v>[^ ]+)/g) {
+            my hash %nc = named_captures();
+            my str $k = $nc{"k"};
+            my str $v = $nc{"v"};
+            if (length($k) == 0 || length($v) == 0) {
+                say("FAIL named_captures empty");
+                return;
+            }
+            $count = $count + 1;
+        }
+        if ($count != 3) {
+            say("FAIL: matched " . $count . " not 3");
+            return;
+        }
+        $i = $i + 1;
+    }
+    say("test_g_with_named_captures_using_hash: PASS");
+}
+
+func main() int {
+    test_g_with_named_captures();
+    test_g_with_named_captures_using_hash();
+    return 0;
+}

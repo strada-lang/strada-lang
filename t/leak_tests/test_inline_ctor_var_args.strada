@@ -1,0 +1,70 @@
+#!/usr/bin/env strada
+# Leak / UAF regression: inline constructor optimization (`Pkg::new(...)`
+# fast-path) emits `strada_hash_set_ss_take` which ADOPTS its value arg.
+# When the value is a borrowed reference (a variable, not a temp), the
+# variable's later scope-cleanup decref would drop refcount below the
+# hash's view of it — UAF when the constructed object is later accessed
+# or destroyed.
+#
+# Fix: when the value arg is not owned (`needs_temp_cleanup == 0`),
+# emit an explicit incref before _take.
+#
+# Run: valgrind --leak-check=full ./test_inline_ctor_var_args
+
+package Person;
+
+func greet(scalar $self) str {
+    return "Hello, " . $self->{"name"} . "! You are " . $self->{"age"} . ".";
+}
+
+package main;
+
+func make_person(str $n, int $a) scalar {
+    # Both args are local variables (borrowed when passed to ctor).
+    my str $local_name = $n;
+    my int $local_age = $a;
+    return Person::new("name", $local_name, "age", $local_age);
+}
+
+func test_var_args_in_inline_ctor() void {
+    my int $iter = 500;
+    my int $i = 0;
+    while ($i < $iter) {
+        my scalar $p = make_person("Alice", 30);
+        # Access the constructed object AFTER make_person's locals have
+        # been decref'd by scope cleanup — would crash/corrupt without
+        # the incref fix.
+        my str $g = $p->greet();
+        if ($g ne "Hello, Alice! You are 30.") {
+            say("FAIL at i=" . $i . ": " . $g);
+            return;
+        }
+        $i = $i + 1;
+    }
+    say("test_var_args_in_inline_ctor: PASS");
+}
+
+func test_ctor_mix_var_and_literal() void {
+    my int $iter = 500;
+    my int $i = 0;
+    while ($i < $iter) {
+        my str $n = "Bob";
+        # Mix: literal key + variable value + literal key + literal value.
+        # The variable path goes through the incref branch; the literal
+        # path goes through the _take-as-is branch.
+        my scalar $p = Person::new("name", $n, "age", 42);
+        my str $g = $p->greet();
+        if ($g ne "Hello, Bob! You are 42.") {
+            say("FAIL at i=" . $i . ": " . $g);
+            return;
+        }
+        $i = $i + 1;
+    }
+    say("test_ctor_mix_var_and_literal: PASS");
+}
+
+func main() int {
+    test_var_args_in_inline_ctor();
+    test_ctor_mix_var_and_literal();
+    return 0;
+}

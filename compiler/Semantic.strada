@@ -1,0 +1,1766 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# Semantic.strada - Semantic analysis and validation for Strada compiler
+# Performs symbol table building, type checking, and validation
+
+# ============================================================
+# Error Reporting
+# ============================================================
+
+func semantic_error(str $msg, int $line) void {
+    if ($line > 0) {
+        die("error: " . $msg . " at line " . $line);
+    } else {
+        die("error: " . $msg);
+    }
+}
+
+func semantic_warn(str $msg, int $line) void {
+    if ($line > 0) {
+        warn("warning: " . $msg . " at line " . $line);
+    } else {
+        warn("warning: " . $msg);
+    }
+}
+
+# Check if a node is valid (has a type field)
+# This works around the issue where != 0 doesn't work for hash references
+func is_valid_node(scalar $node) int {
+    my int $node_type = $node->{"type"};
+    if ($node_type > 0) {
+        return 1;
+    }
+    return 0;
+}
+
+# ============================================================
+# Scope Management
+# ============================================================
+
+# Create a new scope with optional parent
+func scope_new(scalar $parent) scalar {
+    my hash %scope = ();
+    my hash %vars = ();
+    my array @var_names = ();
+    $scope{"is_scope"} = 1;  # Marker to identify valid scopes
+    $scope{"parent"} = $parent;
+    $scope{"vars"} = \%vars;
+    $scope{"var_names"} = \@var_names;
+    $scope{"var_count"} = 0;
+    return \%scope;
+}
+
+# Add a variable to the current scope
+func scope_add_var(scalar $scope, str $name, str $sigil, int $var_type, int $line) void {
+    my scalar $vars = $scope->{"vars"};
+    my hash %info = ();
+    $info{"sigil"} = $sigil;
+    $info{"type"} = $var_type;
+    $info{"line"} = $line;
+    $info{"used"} = 0;
+    $vars->{$name} = \%info;
+
+    # Track variable name for iteration
+    my scalar $var_names = $scope->{"var_names"};
+    my int $count = $scope->{"var_count"};
+    $var_names->[$count] = $name;
+    $scope->{"var_count"} = $count + 1;
+}
+
+# Check if a scope is valid
+func is_valid_scope(scalar $scope) int {
+    my int $is_s = $scope->{"is_scope"};
+    if ($is_s == 1) {
+        return 1;
+    }
+    return 0;
+}
+
+# Look up a variable in scope chain
+# Returns a hash with "found" = 1 and "info" = var_info if found
+# Returns a hash with "found" = 0 if not found
+func scope_lookup_var(scalar $scope, str $name) scalar {
+    my hash %result = ();
+    my scalar $current = $scope;
+    while (is_valid_scope($current) == 1) {
+        my scalar $vars = $current->{"vars"};
+        my scalar $var_info = $vars->{$name};
+        if (is_valid_node($var_info) == 1) {
+            $result{"found"} = 1;
+            $result{"info"} = $var_info;
+            return \%result;
+        }
+        $current = $current->{"parent"};
+    }
+    $result{"found"} = 0;
+    return \%result;
+}
+
+# Mark a variable as used
+func scope_mark_used(scalar $scope, str $name) void {
+    my scalar $current = $scope;
+    while (is_valid_scope($current) == 1) {
+        my scalar $vars = $current->{"vars"};
+        my scalar $var_info = $vars->{$name};
+        if (is_valid_node($var_info) == 1) {
+            $var_info->{"used"} = 1;
+            return;
+        }
+        $current = $current->{"parent"};
+    }
+}
+
+# Check for unused variables in scope and warn (if warnings enabled)
+func scope_check_unused(scalar $ctx, scalar $scope) void {
+    my int $show_warnings = $ctx->{"show_warnings"};
+    if ($show_warnings == 0) {
+        return;
+    }
+    my scalar $vars = $scope->{"vars"};
+    my scalar $var_names = $scope->{"var_names"};
+    my int $count = $scope->{"var_count"};
+    for (my int $i = 0; $i < $count; $i = $i + 1) {
+        my str $name = $var_names->[$i];
+        my scalar $info = $vars->{$name};
+        if ($info->{"used"} == 0) {
+            semantic_warn("unused variable '$" . $name . "'", $info->{"line"});
+        }
+    }
+}
+
+# ============================================================
+# Builtin Function Registry
+# ============================================================
+
+func get_builtins() scalar {
+    my hash %b = ();
+
+    # ============================================================
+    # CORE LANGUAGE FUNCTIONS (stay unqualified)
+    # ============================================================
+
+    # I/O functions
+    $b{"say"} = 1;
+    $b{"print"} = 1;
+    $b{"printf"} = 1;
+    $b{"sprintf"} = 1;
+    $b{"warn"} = 1;
+    $b{"die"} = 1;
+    $b{"throw"} = 1;
+    $b{"readline"} = 1;
+    $b{"slurp"} = 1;  # Also sys::slurp
+    $b{"spew"} = 1;   # Also sys::spew
+    $b{"write_fd"} = 1;
+    $b{"close_fd"} = 1;
+    $b{"getpid"} = 1;
+    $b{"unlink"} = 1;
+
+    # String functions
+    $b{"length"} = 1;
+    $b{"bytes"} = 1;
+    $b{"char_at"} = 1;  # Fast char access by byte index
+    $b{"byte_at"} = 1;  # Preferred alias for char_at
+    $b{"substr"} = 1;
+    $b{"substr_bytes"} = 1;  # Byte-level substr
+    $b{"index"} = 1;
+    $b{"rindex"} = 1;
+    $b{"uc"} = 1;
+    $b{"lc"} = 1;
+    $b{"upper"} = 1;
+    $b{"lower"} = 1;
+    $b{"ucfirst"} = 1;
+    $b{"lcfirst"} = 1;
+    $b{"trim"} = 1;
+    $b{"ltrim"} = 1;
+    $b{"rtrim"} = 1;
+    $b{"chomp"} = 1;
+    $b{"chop"} = 1;
+    $b{"chr"} = 1;
+    $b{"ord"} = 1;
+    $b{"reverse"} = 1;
+    $b{"repeat"} = 1;
+    $b{"join"} = 1;
+    $b{"split"} = 1;
+
+    # Array functions
+    $b{"push"} = 1;
+    $b{"pop"} = 1;
+    $b{"shift"} = 1;
+    $b{"unshift"} = 1;
+    $b{"size"} = 1;
+    $b{"sort"} = 1;
+    $b{"nsort"} = 1;
+    $b{"splice"} = 1;
+    $b{"reserve"} = 1;
+
+    # Hash functions
+    $b{"keys"} = 1;
+    $b{"values"} = 1;
+    $b{"exists"} = 1;
+    $b{"delete"} = 1;
+    $b{"each"} = 1;
+    $b{"hash_new"} = 1;
+    $b{"hash_get"} = 1;
+    $b{"hash_set"} = 1;
+
+    # I/O control
+    $b{"select"} = 1;
+
+    # Tie/untie
+    $b{"tie"} = 1;
+    $b{"untie"} = 1;
+    $b{"tied"} = 1;
+
+    # Type functions
+    $b{"defined"} = 1;
+    $b{"typeof"} = 1;
+    $b{"ref"} = 1;
+    $b{"reftype"} = 1;
+    $b{"is_ref"} = 1;
+    $b{"cast_int"} = 1;
+    $b{"cast_num"} = 1;
+    $b{"cast_str"} = 1;
+    $b{"int"} = 1;
+
+    # Reference functions
+    $b{"clone"} = 1;
+    $b{"deref"} = 1;
+    $b{"deref_array"} = 1;
+    $b{"deref_hash"} = 1;
+    $b{"deref_set"} = 1;
+    $b{"refto"} = 1;
+    $b{"is_refto"} = 1;
+    $b{"derefto"} = 1;
+
+    # Regex
+    $b{"match"} = 1;
+    $b{"replace"} = 1;
+    $b{"replace_all"} = 1;
+    $b{"str_replace"} = 1;       # Plain string replace (all occurrences)
+    $b{"str_replace_first"} = 1; # Plain string replace (first only)
+    $b{"regex_replace"} = 1;     # Regex replace (first match)
+    $b{"regex_replace_all"} = 1; # Regex replace (all matches)
+    $b{"capture"} = 1;
+    $b{"captures"} = 1;
+    $b{"named_captures"} = 1;
+
+    # Control flow
+    $b{"exit"} = 1;
+
+    # Debug
+    $b{"dumper"} = 1;
+    $b{"dumper_str"} = 1;
+    $b{"dump"} = 1;
+    $b{"stacktrace"} = 1;
+    $b{"stacktrace_str"} = 1;
+    $b{"caller"} = 1;
+
+    # Misc
+    $b{"scalar"} = 1;
+    $b{"undef"} = 1;
+    $b{"refcount"} = 1;
+    $b{"strada_new_undef"} = 1;
+
+    # OOP - Blessed references
+    $b{"bless"} = 1;
+    $b{"blessed"} = 1;
+    $b{"set_package"} = 1;
+    $b{"inherit"} = 1;
+    $b{"isa"} = 1;
+    $b{"can"} = 1;
+    $b{"UNIVERSAL::isa"} = 1;
+    $b{"UNIVERSAL::can"} = 1;
+
+    # ============================================================
+    # math:: NAMESPACE
+    # ============================================================
+
+    $b{"math::sin"} = 1;
+    $b{"math::cos"} = 1;
+    $b{"math::tan"} = 1;
+    $b{"math::asin"} = 1;
+    $b{"math::acos"} = 1;
+    $b{"math::atan"} = 1;
+    $b{"math::atan2"} = 1;
+    $b{"math::sinh"} = 1;
+    $b{"math::cosh"} = 1;
+    $b{"math::tanh"} = 1;
+    $b{"math::log"} = 1;
+    $b{"math::log10"} = 1;
+    $b{"math::exp"} = 1;
+    $b{"math::pow"} = 1;
+    $b{"math::floor"} = 1;
+    $b{"math::ceil"} = 1;
+    $b{"math::round"} = 1;
+    $b{"math::fabs"} = 1;
+    $b{"math::fmod"} = 1;
+    $b{"math::sqrt"} = 1;
+    $b{"math::abs"} = 1;
+    $b{"math::rand"} = 1;
+
+    # ============================================================
+    # sys:: NAMESPACE
+    # ============================================================
+
+    # sys:: File I/O
+    $b{"sys::open"} = 1;
+    $b{"sys::close"} = 1;
+    $b{"sys::slurp"} = 1;
+    $b{"sys::slurp_fh"} = 1;
+    $b{"sys::slurp_fd"} = 1;
+    $b{"sys::spew"} = 1;
+    $b{"sys::spew_fh"} = 1;
+    $b{"sys::spew_fd"} = 1;
+    $b{"sys::fwrite"} = 1;
+    $b{"sys::fread"} = 1;
+    $b{"sys::seek"} = 1;
+    $b{"sys::tell"} = 1;
+    $b{"sys::rewind"} = 1;
+    $b{"sys::eof"} = 1;
+    $b{"sys::flush"} = 1;
+    $b{"sys::readline"} = 1;
+
+    # sys:: File system
+    $b{"sys::unlink"} = 1;
+    $b{"sys::link"} = 1;
+    $b{"sys::symlink"} = 1;
+    $b{"sys::readlink"} = 1;
+    $b{"sys::rename"} = 1;
+    $b{"sys::mkdir"} = 1;
+    $b{"sys::rmdir"} = 1;
+    $b{"sys::chdir"} = 1;
+    $b{"sys::getcwd"} = 1;
+    $b{"sys::chmod"} = 1;
+    $b{"sys::access"} = 1;
+    $b{"sys::umask"} = 1;
+    $b{"sys::stat"} = 1;
+    $b{"sys::lstat"} = 1;
+    $b{"sys::readdir"} = 1;
+    $b{"sys::readdir_full"} = 1;
+    $b{"sys::is_dir"} = 1;
+    $b{"sys::is_file"} = 1;
+    $b{"sys::file_exists"} = 1;
+    $b{"sys::dir_exists"} = 1;
+    $b{"sys::file_size"} = 1;
+    $b{"sys::realpath"} = 1;
+    $b{"sys::dirname"} = 1;
+    $b{"sys::basename"} = 1;
+    $b{"sys::file_ext"} = 1;
+    $b{"sys::glob"} = 1;
+    $b{"sys::fnmatch"} = 1;
+    $b{"sys::path_join"} = 1;
+
+    # StringBuilder functions for O(1) amortized string building
+    $b{"sb_new"} = 1;
+    $b{"sb_append"} = 1;
+    $b{"sb_to_string"} = 1;
+    $b{"sb_length"} = 1;
+    $b{"sb_clear"} = 1;
+    $b{"sb_free"} = 1;
+
+    # sys:: Process
+    # Event loop support (epoll/eventfd/non-blocking sockets/coroutines)
+    $b{"sys::epoll_create"} = 1;
+    $b{"sys::epoll_add"} = 1;
+    $b{"sys::epoll_mod"} = 1;
+    $b{"sys::epoll_del"} = 1;
+    $b{"sys::epoll_wait"} = 1;
+    $b{"sys::eventfd"} = 1;
+    $b{"sys::eventfd_signal"} = 1;
+    $b{"sys::eventfd_drain"} = 1;
+    $b{"sys::socket_try_recv"} = 1;
+    $b{"sys::socket_try_send"} = 1;
+    $b{"sys::socket_try_accept"} = 1;
+    $b{"async::io_wait"} = 1;
+    $b{"sys::coro_create"} = 1;
+    $b{"sys::coro_resume"} = 1;
+    $b{"sys::coro_yield_io"} = 1;
+    $b{"sys::coro_state"} = 1;
+    $b{"sys::coro_wait_fd"} = 1;
+    $b{"sys::coro_wait_mask"} = 1;
+    $b{"sys::coro_wait_timeout"} = 1;
+    $b{"sys::coro_result"} = 1;
+    $b{"sys::coro_free"} = 1;
+    $b{"sys::mono_ms"} = 1;
+
+    $b{"async::resolve"} = 1;
+    $b{"sys::coro_error"} = 1;
+    $b{"sys::socket_try_connect"} = 1;
+    $b{"sys::socket_connect_check"} = 1;
+    $b{"sys::socket_try_readline"} = 1;
+    $b{"sys::fork"} = 1;
+    $b{"sys::exec"} = 1;
+    $b{"sys::system"} = 1;
+    $b{"sys::wait"} = 1;
+    $b{"sys::waitpid"} = 1;
+    $b{"sys::getpid"} = 1;
+    $b{"sys::getppid"} = 1;
+    $b{"sys::kill"} = 1;
+    $b{"sys::alarm"} = 1;
+    $b{"sys::signal"} = 1;
+    $b{"sys::sleep"} = 1;
+    $b{"sys::usleep"} = 1;
+    $b{"sys::nanosleep"} = 1;
+    $b{"sys::setprocname"} = 1;
+    $b{"sys::getprocname"} = 1;
+    $b{"sys::setproctitle"} = 1;
+    $b{"sys::getproctitle"} = 1;
+    $b{"sys::exit_status"} = 1;
+
+    # thread:: Thread support
+    $b{"thread::create"} = 1;
+    $b{"thread::join"} = 1;
+    $b{"thread::detach"} = 1;
+    $b{"thread::self"} = 1;
+    $b{"thread::mutex_new"} = 1;
+    $b{"thread::mutex_lock"} = 1;
+    $b{"thread::mutex_trylock"} = 1;
+    $b{"thread::mutex_unlock"} = 1;
+    $b{"thread::mutex_destroy"} = 1;
+    $b{"thread::cond_new"} = 1;
+    $b{"thread::cond_wait"} = 1;
+    $b{"thread::cond_signal"} = 1;
+    $b{"thread::cond_broadcast"} = 1;
+    $b{"thread::cond_destroy"} = 1;
+
+    # sys:: IPC
+    $b{"sys::pipe"} = 1;
+    $b{"sys::dup2"} = 1;
+    $b{"sys::close_fd"} = 1;
+    $b{"sys::read_fd"} = 1;
+    $b{"sys::write_fd"} = 1;
+    $b{"sys::read_all_fd"} = 1;
+
+    # sys:: Environment
+    $b{"sys::getenv"} = 1;
+    $b{"sys::setenv"} = 1;
+    $b{"sys::unsetenv"} = 1;
+
+    # sys:: User/Group
+    $b{"sys::getuid"} = 1;
+    $b{"sys::geteuid"} = 1;
+    $b{"sys::getgid"} = 1;
+    $b{"sys::getegid"} = 1;
+
+    # sys:: Time
+    $b{"sys::time"} = 1;
+    $b{"sys::localtime"} = 1;
+    $b{"sys::gmtime"} = 1;
+    $b{"sys::mktime"} = 1;
+    $b{"sys::strftime"} = 1;
+    $b{"sys::ctime"} = 1;
+    $b{"sys::gettimeofday"} = 1;
+    $b{"sys::hires_time"} = 1;
+    $b{"sys::tv_interval"} = 1;
+    $b{"sys::clock_gettime"} = 1;
+    $b{"sys::clock_getres"} = 1;
+
+    # sys:: Socket
+    $b{"sys::socket_client"} = 1;
+    $b{"sys::socket_server"} = 1;
+    $b{"sys::socket_server_backlog"} = 1;
+    $b{"sys::socket_accept"} = 1;
+    $b{"sys::socket_recv"} = 1;
+    $b{"sys::socket_send"} = 1;
+    $b{"sys::socket_close"} = 1;
+    $b{"sys::socket_select"} = 1;
+    $b{"sys::socket_fd"} = 1;
+    $b{"sys::select_fds"} = 1;
+    $b{"sys::socket_set_nonblocking"} = 1;
+
+    # sys:: DNS/Network
+    $b{"sys::gethostbyname"} = 1;
+    $b{"sys::gethostbyname_all"} = 1;
+    $b{"sys::gethostname"} = 1;
+    $b{"sys::getaddrinfo"} = 1;
+
+    # sys:: Error handling
+    $b{"sys::isatty"} = 1;
+    $b{"sys::strerror"} = 1;
+    $b{"sys::errno"} = 1;
+
+    # sys:: Memory
+    $b{"sys::malloc"} = 1;
+    $b{"sys::free"} = 1;
+    $b{"sys::release"} = 1;
+
+    # sys:: Weak references
+    $b{"sys::weaken"} = 1;
+    $b{"sys::isweak"} = 1;
+
+    # sys:: Struct functions (C interop)
+    $b{"sys::cstruct_new"} = 1;
+    $b{"sys::cstruct_get"} = 1;
+    $b{"sys::cstruct_set"} = 1;
+    $b{"sys::cstruct_ptr"} = 1;
+    $b{"sys::cstruct_get_int"} = 1;
+    $b{"sys::cstruct_get_num"} = 1;
+    $b{"sys::cstruct_get_str"} = 1;
+    $b{"sys::cstruct_get_ptr"} = 1;
+    $b{"sys::cstruct_get_double"} = 1;
+    $b{"sys::cstruct_get_string"} = 1;
+    $b{"sys::cstruct_set_int"} = 1;
+    $b{"sys::cstruct_set_num"} = 1;
+    $b{"sys::cstruct_set_str"} = 1;
+    $b{"sys::cstruct_set_ptr"} = 1;
+    $b{"sys::cstruct_set_double"} = 1;
+    $b{"sys::cstruct_set_string"} = 1;
+    $b{"sys::file_mtime"} = 1;
+
+    # sys:: Dynamic loading (FFI)
+    $b{"sys::dl_open"} = 1;
+    $b{"strada_dl_open_raw"} = 1;        # Internal: load .so and return handle directly
+    $b{"strada_dl_sym_raw"} = 1;         # Internal: get symbol and return pointer directly
+    $b{"strada_dl_close_raw"} = 1;       # Internal: close library
+    $b{"strada_dl_call_export_info"} = 1; # Internal: call export info function
+    $b{"sys::dl_sym"} = 1;
+    $b{"sys::dl_close"} = 1;
+    $b{"sys::dl_error"} = 1;
+    $b{"sys::dl_call_int"} = 1;
+    $b{"sys::dl_call_num"} = 1;
+    $b{"sys::dl_call_str"} = 1;
+    $b{"sys::dl_call_void"} = 1;
+    $b{"sys::dl_call_int_sv"} = 1;
+    $b{"sys::dl_call_str_sv"} = 1;
+    $b{"sys::dl_call_void_sv"} = 1;
+    $b{"sys::dl_call_sv"} = 1;
+    $b{"sys::dl_call_export_info"} = 1;
+    $b{"sys::dl_call_version"} = 1;
+
+    # sys:: Pointer access for FFI
+    $b{"sys::int_ptr"} = 1;
+    $b{"sys::num_ptr"} = 1;
+    $b{"sys::str_ptr"} = 1;
+    $b{"sys::ptr_deref_int"} = 1;
+    $b{"sys::ptr_deref_num"} = 1;
+    $b{"sys::ptr_deref_str"} = 1;
+    $b{"sys::ptr_set_int"} = 1;
+    $b{"sys::ptr_set_num"} = 1;
+
+    # sys:: System/process args
+    $b{"sys::system_argv"} = 1;
+
+    # ============================================================
+    # NEW LIBC FUNCTIONS (Phase 1-3)
+    # ============================================================
+
+    # sys:: Additional File I/O
+    $b{"sys::fgetc"} = 1;
+    $b{"sys::fputc"} = 1;
+    $b{"sys::fgets"} = 1;
+    $b{"sys::fputs"} = 1;
+    $b{"sys::ferror"} = 1;
+    $b{"sys::fileno"} = 1;
+    $b{"sys::clearerr"} = 1;
+
+    # sys:: Temporary files
+    $b{"sys::tmpfile"} = 1;
+    $b{"sys::mkstemp"} = 1;
+    $b{"sys::mkdtemp"} = 1;
+
+    # sys:: Command execution (popen)
+    $b{"sys::popen"} = 1;
+    $b{"sys::pclose"} = 1;
+
+    # sys:: Additional file system
+    $b{"sys::truncate"} = 1;
+    $b{"sys::ftruncate"} = 1;
+    $b{"sys::chown"} = 1;
+    $b{"sys::lchown"} = 1;
+    $b{"sys::fchmod"} = 1;
+    $b{"sys::fchown"} = 1;
+    $b{"sys::utime"} = 1;
+    $b{"sys::utimes"} = 1;
+
+    # sys:: Session/process group control
+    $b{"sys::setsid"} = 1;
+    $b{"sys::getsid"} = 1;
+    $b{"sys::setpgid"} = 1;
+    $b{"sys::getpgid"} = 1;
+    $b{"sys::getpgrp"} = 1;
+    $b{"sys::setpgrp"} = 1;
+
+    # sys:: User/group ID control
+    $b{"sys::setuid"} = 1;
+    $b{"sys::setgid"} = 1;
+    $b{"sys::seteuid"} = 1;
+    $b{"sys::setegid"} = 1;
+    $b{"sys::setreuid"} = 1;
+    $b{"sys::setregid"} = 1;
+
+    # sys:: Additional socket operations
+    $b{"sys::setsockopt"} = 1;
+    $b{"sys::getsockopt"} = 1;
+    $b{"sys::shutdown"} = 1;
+    $b{"sys::getpeername"} = 1;
+    $b{"sys::getsockname"} = 1;
+    $b{"sys::inet_pton"} = 1;
+    $b{"sys::inet_ntop"} = 1;
+    $b{"sys::inet_addr"} = 1;
+    $b{"sys::inet_ntoa"} = 1;
+    $b{"sys::htons"} = 1;
+    $b{"sys::htonl"} = 1;
+    $b{"sys::ntohs"} = 1;
+    $b{"sys::ntohl"} = 1;
+    $b{"sys::poll"} = 1;
+
+    # sys:: Random
+    $b{"sys::srand"} = 1;
+    $b{"sys::srandom"} = 1;
+    $b{"sys::rand"} = 1;
+    $b{"sys::random"} = 1;
+    $b{"sys::idiv"} = 1;  # Integer division (truncated)
+
+    # sys:: Advanced signals
+    $b{"sys::sigaction"} = 1;
+    $b{"sys::sigprocmask"} = 1;
+    $b{"sys::raise"} = 1;
+    $b{"sys::killpg"} = 1;
+    $b{"sys::pause"} = 1;
+    $b{"sys::sigsuspend"} = 1;
+
+    # sys:: User/Group database
+    $b{"sys::getpwnam"} = 1;
+    $b{"sys::getpwuid"} = 1;
+    $b{"sys::getgrnam"} = 1;
+    $b{"sys::getgrgid"} = 1;
+    $b{"sys::getlogin"} = 1;
+    $b{"sys::getgroups"} = 1;
+
+    # sys:: Resource/Priority
+    $b{"sys::nice"} = 1;
+    $b{"sys::getpriority"} = 1;
+    $b{"sys::setpriority"} = 1;
+    $b{"sys::getrusage"} = 1;
+    $b{"sys::getrlimit"} = 1;
+    $b{"sys::setrlimit"} = 1;
+
+    # sys:: Additional time functions
+    $b{"sys::difftime"} = 1;
+    $b{"sys::clock"} = 1;
+    $b{"sys::times"} = 1;
+
+    # sys:: Additional memory functions
+    $b{"sys::calloc"} = 1;
+    $b{"sys::realloc"} = 1;
+    $b{"sys::mmap"} = 1;
+    $b{"sys::munmap"} = 1;
+    $b{"sys::mlock"} = 1;
+    $b{"sys::munlock"} = 1;
+
+    # sys:: String conversion
+    $b{"sys::strtol"} = 1;
+    $b{"sys::strtod"} = 1;
+    $b{"sys::atoi"} = 1;
+    $b{"sys::atof"} = 1;
+
+    # sys:: Terminal/TTY
+    $b{"sys::ttyname"} = 1;
+    $b{"sys::tcgetattr"} = 1;
+    $b{"sys::tcsetattr"} = 1;
+    $b{"sys::cfgetospeed"} = 1;
+    $b{"sys::cfsetospeed"} = 1;
+    $b{"sys::cfgetispeed"} = 1;
+    $b{"sys::cfsetispeed"} = 1;
+
+    # sys:: Advanced file operations
+    $b{"sys::fcntl"} = 1;
+    $b{"sys::flock"} = 1;
+    $b{"sys::ioctl"} = 1;
+    $b{"sys::statvfs"} = 1;
+    $b{"sys::fstatvfs"} = 1;
+    $b{"sys::dup"} = 1;
+
+    # sys:: Binary/Byte operations
+    $b{"sys::ord_byte"} = 1;
+    $b{"sys::get_byte"} = 1;
+    $b{"sys::set_byte"} = 1;
+    $b{"sys::byte_length"} = 1;
+    $b{"sys::byte_substr"} = 1;
+    $b{"sys::pack"} = 1;
+    $b{"sys::unpack"} = 1;
+    $b{"sys::base64_encode"} = 1;
+    $b{"sys::base64_decode"} = 1;
+
+    # ============================================================
+    # math:: ADDITIONAL FUNCTIONS
+    # ============================================================
+    $b{"math::hypot"} = 1;
+    $b{"math::cbrt"} = 1;
+    $b{"math::isnan"} = 1;
+    $b{"math::isinf"} = 1;
+    $b{"math::isfinite"} = 1;
+    $b{"math::fmax"} = 1;
+    $b{"math::fmin"} = 1;
+    $b{"math::copysign"} = 1;
+    $b{"math::remainder"} = 1;
+    $b{"math::trunc"} = 1;
+    $b{"math::ldexp"} = 1;
+    $b{"math::frexp"} = 1;
+    $b{"math::modf"} = 1;
+    $b{"math::scalbn"} = 1;
+
+    return \%b;
+}
+
+# ============================================================
+# Context Structure
+# ============================================================
+
+func ctx_new() scalar {
+    my hash %ctx = ();
+    my hash %funcs = ();
+    $ctx{"functions"} = \%funcs;
+    $ctx{"builtins"} = get_builtins();
+    $ctx{"scope"} = scope_new(0);
+    $ctx{"current_func"} = 0;
+
+    # Register built-in global variables: ARGV (array) and ARGC (int)
+    my scalar $global_scope = $ctx{"scope"};
+    scope_add_var($global_scope, "ARGV", "@", TYPE_ARRAY(), 0);
+    scope_add_var($global_scope, "ARGC", "$", TYPE_INT(), 0);
+    # Standard I/O filehandles
+    scope_add_var($global_scope, "STDIN", "$", TYPE_SCALAR(), 0);
+    scope_add_var($global_scope, "STDOUT", "$", TYPE_SCALAR(), 0);
+    scope_add_var($global_scope, "STDERR", "$", TYPE_SCALAR(), 0);
+    # Special variables
+    scope_add_var($global_scope, "__child_status", "$", TYPE_INT(), 0);
+    scope_add_var($global_scope, "__program_name", "$", TYPE_STR(), 0);
+    scope_add_var($global_scope, "_", "$", TYPE_SCALAR(), 0);
+
+    return \%ctx;
+}
+
+# ============================================================
+# Registration Pass (First Pass)
+# ============================================================
+
+func register_functions(scalar $ctx, scalar $ast) void {
+    my scalar $funcs = $ast->{"functions"};
+    my int $count = $ast->{"function_count"};
+
+    for (my int $i = 0; $i < $count; $i = $i + 1) {
+        my scalar $fn = $funcs->[$i];
+        my str $name = $fn->{"name"};
+        my int $line = ast_get_line($fn);
+
+        # Check for duplicate function. Body-less extern declarations
+        # (`extern func Pkg::name(...) ret;`) follow C semantics: a
+        # declaration never conflicts with anything, a definition replaces
+        # an earlier declaration, and only two *definitions* collide. This
+        # matters for use-cycles broken via externs — several sibling
+        # modules each declare the same `extern func Perla::CodeGen::emit`,
+        # and `use`-inlining surfaces those duplicate declarations in one
+        # compile unit (e.g. perla's CodeGen submodules).
+        my int $new_is_decl = 0;
+        if ($fn->{"is_extern"} == 1 && $fn->{"has_body"} != 1) { $new_is_decl = 1; }
+        my scalar $existing_fn = $ctx->{"functions"}->{$name};
+        my int $skip_register = 0;
+        if ($existing_fn != 0) {
+            if ($new_is_decl == 1) {
+                # Duplicate declaration: keep whatever is registered (a
+                # definition stays a definition; a prior decl is equivalent).
+                $skip_register = 1;
+            } elsif ($existing_fn->{"is_decl_only"} == 1) {
+                # Definition arriving after a forward declaration: replace
+                # the decl's info with the definition's (fall through).
+                $skip_register = 0;
+            } else {
+                semantic_error("function '" . $name . "' already defined", $line);
+            }
+        }
+
+        if ($skip_register == 0) {
+            # Register function
+            my hash %info = ();
+            $info{"is_registered"} = 1;  # Marker to distinguish from unfound
+            $info{"return_type"} = $fn->{"return_type"};
+            $info{"param_count"} = $fn->{"param_count"};
+            $info{"params"} = $fn->{"params"};
+            $info{"is_extern"} = $fn->{"is_extern"};
+            $info{"is_variadic"} = $fn->{"is_variadic"};
+            $info{"is_decl_only"} = $new_is_decl;
+            $info{"line"} = $line;
+            $ctx->{"functions"}->{$name} = \%info;
+        }
+    }
+}
+
+# Register functions from import_lib statements
+func register_import_lib_functions(scalar $ctx, scalar $ast) void {
+    my int $lib_count = $ast->{"import_lib_count"};
+    if ($lib_count == 0) {
+        return;
+    }
+
+    my scalar $import_libs = $ast->{"import_libs"};
+
+    for (my int $i = 0; $i < $lib_count; $i = $i + 1) {
+        my scalar $lib_info = $import_libs->[$i];
+        my scalar $lib_funcs = $lib_info->{"functions"};
+        my int $fn_count = $lib_info->{"function_count"};
+
+        for (my int $j = 0; $j < $fn_count; $j = $j + 1) {
+            my scalar $fn_info = $lib_funcs->[$j];
+            my str $name = $fn_info->{"name"};
+
+            # Register function (skip if already exists)
+            my scalar $existing_fn = $ctx->{"functions"}->{$name};
+            if ($existing_fn != 0) {
+                next;  # Function with this name already exists
+            }
+
+            my hash %info = ();
+            $info{"is_registered"} = 1;
+            $info{"return_type"} = $fn_info->{"return_type"};
+            $info{"param_count"} = $fn_info->{"param_count"};
+            $info{"params"} = $fn_info->{"params"};
+            $info{"is_extern"} = 0;
+            $info{"is_variadic"} = $fn_info->{"is_variadic"};
+            $info{"variadic_param_idx"} = $fn_info->{"variadic_param_idx"};
+            $info{"is_import_lib"} = 1;  # Mark as import_lib function
+            $info{"line"} = 0;
+            $ctx->{"functions"}->{$name} = \%info;
+        }
+    }
+}
+
+# Register functions from import_object statements (static linking)
+func register_import_object_functions(scalar $ctx, scalar $ast) void {
+    my int $obj_count = $ast->{"import_object_count"};
+    if ($obj_count == 0) {
+        return;
+    }
+
+    my scalar $import_objects = $ast->{"import_objects"};
+
+    for (my int $i = 0; $i < $obj_count; $i = $i + 1) {
+        my scalar $obj_info = $import_objects->[$i];
+        my scalar $obj_funcs = $obj_info->{"functions"};
+        my int $fn_count = $obj_info->{"function_count"};
+
+        for (my int $j = 0; $j < $fn_count; $j = $j + 1) {
+            my scalar $fn_info = $obj_funcs->[$j];
+            my str $name = $fn_info->{"name"};
+
+            # Register function (skip if already exists)
+            my scalar $existing_fn = $ctx->{"functions"}->{$name};
+            if ($existing_fn != 0) {
+                next;  # Function with this name already exists
+            }
+
+            my hash %info = ();
+            $info{"is_registered"} = 1;
+            $info{"return_type"} = $fn_info->{"return_type"};
+            $info{"param_count"} = $fn_info->{"param_count"};
+            $info{"params"} = $fn_info->{"params"};
+            $info{"is_extern"} = 0;
+            $info{"is_variadic"} = $fn_info->{"is_variadic"};
+            $info{"variadic_param_idx"} = $fn_info->{"variadic_param_idx"};
+            $info{"is_import_object"} = 1;  # Mark as import_object function
+            $info{"line"} = 0;
+            $ctx->{"functions"}->{$name} = \%info;
+        }
+    }
+}
+
+# Register global variables in the global scope
+func register_globals(scalar $ctx, scalar $ast) void {
+    my int $global_count = $ast->{"global_count"};
+    if ($global_count == 0) {
+        return;
+    }
+
+    my scalar $globals = $ast->{"globals"};
+    my scalar $scope = $ctx->{"scope"};
+
+    for (my int $i = 0; $i < $global_count; $i = $i + 1) {
+        my scalar $gvar = $globals->[$i];
+        my str $name = $gvar->{"name"};
+        my int $var_type = $gvar->{"var_type"};
+        my int $line = ast_get_line($gvar);
+
+        # Handle both var decls and const decls
+        my int $gvar_type = $gvar->{"type"};
+        my str $sigil = "$";  # Default for consts
+        if ($gvar_type == NODE_VAR_DECL()) {
+            $sigil = $gvar->{"sigil"};
+        }
+
+        scope_add_var($scope, $name, $sigil, $var_type, $line);
+    }
+}
+
+# ============================================================
+# Validation Pass (Second Pass)
+# ============================================================
+
+# ============================================================
+# Stage-0 type checking (gradual, warning-only, --strict-types)
+# ============================================================
+# Computes a best-effort static type for an expression and compares it
+# against declarations at the four sites where both sides are already in
+# hand: var-decl initializers, plain assignments, call arguments, and
+# returns. `scalar`/`dynamic`/unknown are BIVARIANT — compatible with
+# everything in both directions — so untyped code never warns (the
+# gradual escape hatch; the runtime's StradaValue checks remain the
+# soundness backstop). int/num (and the C-interop numeric kinds)
+# interconvert silently by design: flagging `my int $i = $x / 2`
+# (/ returns num) would bury the real findings under documented-coercion
+# noise. Name-resolution note: call return types use the plain registry
+# lookup; an unqualified same-package call in a non-main package may
+# miss and degrade to `scalar` — that can only SUPPRESS a warning, never
+# fabricate one (unlike needs_temp_cleanup, where divergence leaked).
+
+func stage0_is_numeric(int $t) int {
+    if ($t == TYPE_INT() || $t == TYPE_NUM() || $t == TYPE_BOOL() || $t == TYPE_ENUM()
+        || $t == TYPE_INT8() || $t == TYPE_INT16() || $t == TYPE_INT32() || $t == TYPE_INT64()
+        || $t == TYPE_UINT8() || $t == TYPE_UINT16() || $t == TYPE_UINT32() || $t == TYPE_UINT64()
+        || $t == TYPE_SIZE_T() || $t == TYPE_CHAR()
+        || $t == TYPE_FLOAT32() || $t == TYPE_FLOAT64() || $t == TYPE_LONG_DOUBLE()) {
+        return 1;
+    }
+    return 0;
+}
+
+func stage0_types_compatible(int $expected, int $actual) int {
+    if ($expected == $actual) { return 1; }
+    # A void result is never a usable value — flag even for untyped targets.
+    if ($actual == TYPE_VOID()) { return 0; }
+    # Bivariant: scalar/dynamic/unknown on either side accepts everything.
+    if ($expected == TYPE_SCALAR() || $expected == TYPE_DYNAMIC() || $expected <= 0) { return 1; }
+    if ($actual == TYPE_SCALAR() || $actual == TYPE_DYNAMIC() || $actual <= 0) { return 1; }
+    # The numeric family interconverts silently (documented coercions).
+    if (stage0_is_numeric($expected) == 1 && stage0_is_numeric($actual) == 1) { return 1; }
+    return 0;
+}
+
+# Best-effort static type of an expression; TYPE_SCALAR when unknown.
+func stage0_expr_type(scalar $ctx, scalar $expr) int {
+    if (is_valid_node($expr) == 0) { return TYPE_SCALAR(); }
+    my int $t = $expr->{"type"};
+    if ($t == NODE_INT_LITERAL()) { return TYPE_INT(); }
+    if ($t == NODE_NUM_LITERAL()) { return TYPE_NUM(); }
+    if ($t == NODE_STR_LITERAL()) { return TYPE_STR(); }
+    if ($t == NODE_VARIABLE()) {
+        my str $sigil = $expr->{"sigil"};
+        if ($sigil eq "@") { return TYPE_ARRAY(); }
+        if ($sigil eq "%") { return TYPE_HASH(); }
+        my scalar $lk = scope_lookup_var($ctx->{"scope"}, $expr->{"name"});
+        if ($lk->{"found"} == 1) {
+            my scalar $info = $lk->{"info"};
+            if ($info->{"sigil"} eq "$") {
+                return $info->{"type"};
+            }
+        }
+        return TYPE_SCALAR();
+    }
+    if ($t == NODE_BINARY_OP()) {
+        my str $op = $expr->{"op"};
+        if ($op eq "." || $op eq "x") { return TYPE_STR(); }
+        if ($op eq "==" || $op eq "!=" || $op eq "<" || $op eq ">" || $op eq "<=" || $op eq ">="
+            || $op eq "eq" || $op eq "ne" || $op eq "lt" || $op eq "gt" || $op eq "le" || $op eq "ge"
+            || $op eq "<=>" || $op eq "cmp") { return TYPE_INT(); }
+        if ($op eq "&" || $op eq "|" || $op eq "^" || $op eq "<<" || $op eq ">>") { return TYPE_INT(); }
+        if ($op eq "/") { return TYPE_NUM(); }
+        if ($op eq "+" || $op eq "-" || $op eq "*" || $op eq "%" || $op eq "**") {
+            my int $ltype = stage0_expr_type($ctx, $expr->{"left"});
+            my int $rtype_op = stage0_expr_type($ctx, $expr->{"right"});
+            if ($ltype == TYPE_INT() && $rtype_op == TYPE_INT()) { return TYPE_INT(); }
+            if (stage0_is_numeric($ltype) == 1 && stage0_is_numeric($rtype_op) == 1) { return TYPE_NUM(); }
+            # Strings/unknowns in numeric context coerce — stay permissive.
+            return TYPE_SCALAR();
+        }
+        if ($op eq "&&" || $op eq "||" || $op eq "//") {
+            # Value-returning logicals: only typed when both sides agree.
+            my int $ltype = stage0_expr_type($ctx, $expr->{"left"});
+            my int $rtype_op = stage0_expr_type($ctx, $expr->{"right"});
+            if ($ltype == $rtype_op) { return $ltype; }
+            return TYPE_SCALAR();
+        }
+        return TYPE_SCALAR();
+    }
+    if ($t == NODE_UNARY_OP()) {
+        my str $op = $expr->{"op"};
+        if ($op eq "!" || $op eq "not" || $op eq "~") { return TYPE_INT(); }
+        if ($op eq "-") {
+            my int $ot = stage0_expr_type($ctx, $expr->{"operand"});
+            if (stage0_is_numeric($ot) == 1) { return $ot; }
+            return TYPE_SCALAR();
+        }
+        return TYPE_SCALAR();
+    }
+    if ($t == NODE_TERNARY()) {
+        my int $tt = stage0_expr_type($ctx, $expr->{"true_expr"});
+        my int $ft = stage0_expr_type($ctx, $expr->{"false_expr"});
+        if ($tt == $ft) { return $tt; }
+        return TYPE_SCALAR();
+    }
+    if ($t == NODE_CALL()) {
+        my str $name = $expr->{"name"};
+        # High-signal builtins; everything else stays unknown.
+        if ($name eq "length" || $name eq "size" || $name eq "index" || $name eq "rindex"
+            || $name eq "ord" || $name eq "bytes" || $name eq "int"
+            || $name eq "exists" || $name eq "defined") { return TYPE_INT(); }
+        if ($name eq "substr" || $name eq "join" || $name eq "uc" || $name eq "lc"
+            || $name eq "ucfirst" || $name eq "lcfirst" || $name eq "trim"
+            || $name eq "chr" || $name eq "sprintf") { return TYPE_STR(); }
+        my scalar $fn_info = $ctx->{"functions"}->{$name};
+        if ($fn_info->{"is_registered"} == 1) {
+            return $fn_info->{"return_type"};
+        }
+        return TYPE_SCALAR();
+    }
+    return TYPE_SCALAR();
+}
+
+func analyze_expression(scalar $ctx, scalar $expr) void {
+    my int $node_type = $expr->{"type"};
+    my int $line = ast_get_line($expr);
+
+    # Variable reference
+    if ($node_type == NODE_VARIABLE()) {
+        my str $name = $expr->{"name"};
+        my str $sigil = $expr->{"sigil"};
+        my scalar $lookup_result = scope_lookup_var($ctx->{"scope"}, $name);
+        my int $found = $lookup_result->{"found"};
+        if ($found == 0) {
+            semantic_error("undefined variable '" . $sigil . $name . "'", $line);
+        }
+        scope_mark_used($ctx->{"scope"}, $name);
+        return;
+    }
+
+    # Value-producing do-block: analyze its statements in a nested scope
+    if ($node_type == NODE_DO_EXPR()) {
+        my scalar $outer_scope = $ctx->{"scope"};
+        $ctx->{"scope"} = scope_new($outer_scope);
+        analyze_block($ctx, $expr->{"block"});
+        scope_check_unused($ctx, $ctx->{"scope"});
+        $ctx->{"scope"} = $outer_scope;
+        return;
+    }
+
+    # Function call
+    if ($node_type == NODE_CALL()) {
+        my str $name = $expr->{"name"};
+        my scalar $args = $expr->{"args"};
+        my int $arg_count = $expr->{"arg_count"};
+
+        # Constant-fold ord("literal"): rewrite the call node in place into
+        # an int literal, so character-code comparisons can be WRITTEN as
+        # `$code == ord("#")` (readable) yet compile to a plain integer
+        # compare with every int-literal optimization (tagged ints, int
+        # conditions). ASCII first byte only -- for multi-byte UTF-8 the
+        # runtime ord() decodes the codepoint, so leave those to runtime.
+        if ($name eq "ord" && $arg_count == 1) {
+            my scalar $ord_arg = $args->[0];
+            if ($ord_arg->{"type"} == NODE_STR_LITERAL()) {
+                my str $ord_sval = $ord_arg->{"value"};
+                if (length($ord_sval) > 0) {
+                    my int $ord_code = char_at($ord_sval, 0);
+                    if ($ord_code > 0 && $ord_code < 128) {
+                        $expr->{"type"} = NODE_INT_LITERAL();
+                        $expr->{"value"} = $ord_code;
+                        return;
+                    }
+                }
+            }
+        }
+
+        # Record tie usage on the context: the codegen's condition-level
+        # hash-fetch CSE is only sound when no hash in the program can be
+        # tied (a tied FETCH is observable per-mention).
+        if ($name eq "tie" || $name eq "core::tie" || $name eq "sys::tie") {
+            $ctx->{"uses_tie"} = 1;
+        }
+
+        # Check if builtin (builtins hash stores 1 for each builtin)
+        my int $is_builtin = $ctx->{"builtins"}->{$name};
+        if ($is_builtin == 1) {
+            # Builtin - analyze arguments
+            for (my int $i = 0; $i < $arg_count; $i = $i + 1) {
+                analyze_expression($ctx, $args->[$i]);
+            }
+            return;
+        }
+
+        # Convert Package::func to Package_func for lookup (only for local packages)
+        # Module functions are registered as Package::func, so try both formats
+        my str $lookup_name = $name;
+        my int $colon_idx = index($name, "::");
+        if ($colon_idx >= 0) {
+            # Try Package_func format first (for local package functions)
+            my str $prefix = substr($name, 0, $colon_idx);
+            my str $suffix = substr($name, $colon_idx + 2, length($name) - $colon_idx - 2);
+            my str $underscore_name = $prefix . "_" . $suffix;
+            my scalar $fn_info_us = $ctx->{"functions"}->{$underscore_name};
+            if ($fn_info_us->{"is_registered"} == 1) {
+                $lookup_name = $underscore_name;
+            }
+            # Otherwise keep original Package::func format (for modules)
+        } else {
+            # Name has no ::, but might be Package_func format from ::func() calls
+            # Try to find Package::func format in registry
+            # Since package names can contain underscores (e.g., Sysync_Token),
+            # try all possible underscore positions as the separator
+            my int $found_colon = 0;
+            my int $us_idx = index($name, "_");
+            while ($us_idx > 0 && $found_colon == 0) {
+                my str $pkg_part = substr($name, 0, $us_idx);
+                my str $func_part = substr($name, $us_idx + 1, length($name) - $us_idx - 1);
+                if (length($pkg_part) > 0 && length($func_part) > 0) {
+                    my str $colon_name = $pkg_part . "::" . $func_part;
+                    my scalar $fn_info_colon = $ctx->{"functions"}->{$colon_name};
+                    if ($fn_info_colon->{"is_registered"} == 1) {
+                        $lookup_name = $colon_name;
+                        $found_colon = 1;
+                    }
+                }
+                if ($found_colon == 0) {
+                    # Try next underscore position
+                    my int $next_idx = index(substr($name, $us_idx + 1, length($name) - $us_idx - 1), "_");
+                    if ($next_idx >= 0) {
+                        $us_idx = $us_idx + 1 + $next_idx;
+                    } else {
+                        $us_idx = -1;  # No more underscores
+                    }
+                }
+            }
+        }
+
+        # Check if user-defined function
+        # Registered functions have is_registered = 1
+        my scalar $fn_info = $ctx->{"functions"}->{$lookup_name};
+        my int $is_reg = $fn_info->{"is_registered"};
+        if ($is_reg == 0) {
+            # Not found - try package-prefixed name if we're in a package
+            if ($colon_idx < 0) {
+                my scalar $cur_fn = $ctx->{"current_func"};
+                my str $pkg = "";
+                my int $has_cur_fn = 0;
+                if ($cur_fn) {
+                    $has_cur_fn = 1;
+                }
+                if ($has_cur_fn == 1) {
+                    $pkg = $cur_fn->{"package"};
+                }
+                if (length($pkg) > 0 && $pkg ne "main") {
+                    # Convert :: to _ in package name for underscore format lookup
+                    my str $c_pkg = $pkg;
+                    my int $ci = index($c_pkg, "::");
+                    while ($ci >= 0) {
+                        $c_pkg = substr($c_pkg, 0, $ci) . "_" . substr($c_pkg, $ci + 2, length($c_pkg) - $ci - 2);
+                        $ci = index($c_pkg, "::");
+                    }
+                    # Try package-prefixed name with underscore (Package_func format)
+                    my str $prefixed_name = $c_pkg . "_" . $name;
+                    my scalar $fn_info_pkg = $ctx->{"functions"}->{$prefixed_name};
+                    if ($fn_info_pkg->{"is_registered"} == 1) {
+                        # Found it! Update for continued validation
+                        $lookup_name = $prefixed_name;
+                        $fn_info = $fn_info_pkg;
+                        $is_reg = 1;
+                    }
+                    # Also try Package::func format (functions from modules)
+                    # Use original $pkg (not $c_pkg) to preserve :: in nested packages
+                    # e.g., Strada::Interpreter::func_name, not Strada_Interpreter::func_name
+                    if ($is_reg == 0) {
+                        my str $colon_name = $pkg . "::" . $name;
+                        my scalar $fn_info_colon = $ctx->{"functions"}->{$colon_name};
+                        if ($fn_info_colon->{"is_registered"} == 1) {
+                            $lookup_name = $colon_name;
+                            $fn_info = $fn_info_colon;
+                            $is_reg = 1;
+                        }
+                    }
+                }
+                if ($is_reg == 0) {
+                    semantic_error("undefined function '" . $name . "'", $line);
+                }
+            }
+            if ($is_reg == 0) {
+                # For namespaced functions, just analyze arguments and trust runtime
+                for (my int $i = 0; $i < $arg_count; $i = $i + 1) {
+                    analyze_expression($ctx, $args->[$i]);
+                }
+                return;
+            }
+        }
+
+        my int $expected = $fn_info->{"param_count"};
+        my int $actual = $expr->{"arg_count"};
+
+        # Check if any argument is a spread operator
+        my int $has_spread = 0;
+        for (my int $s = 0; $s < $actual; $s = $s + 1) {
+            if ($args->[$s]->{"type"} == NODE_SPREAD()) {
+                $has_spread = 1;
+            }
+        }
+
+        # Skip arg count validation when spread is present (count unknown at compile time)
+        if ($has_spread == 0) {
+            # Count required parameters (those without defaults, excluding variadic params)
+            my int $required = 0;
+            my scalar $params = $fn_info->{"params"};
+            for (my int $i = 0; $i < $expected; $i = $i + 1) {
+                my scalar $param = $params->[$i];
+                my int $has_def = $param->{"has_default"};
+                my int $is_variadic = $param->{"is_variadic"};
+                # Variadic params are optional (can have 0 items)
+                if ($has_def == 0 && $is_variadic == 0) {
+                    $required = $required + 1;
+                }
+            }
+
+            if ($actual < $required) {
+                semantic_error("too few arguments to '" . $name . "': expected " . $required . ", got " . $actual, $line);
+            }
+            if ($actual > $expected) {
+                # Check if function is variadic
+                my int $is_var = $fn_info->{"is_variadic"};
+                if ($is_var == 0) {
+                    semantic_error("too many arguments to '" . $name . "': expected " . $expected . ", got " . $actual, $line);
+                }
+            }
+        }
+
+        # Analyze arguments (args is already declared above)
+        for (my int $i = 0; $i < $actual; $i = $i + 1) {
+            analyze_expression($ctx, $args->[$i]);
+            # Stage-0 type check: scalar parameters with a declared type.
+            # Parameters are exempt from runtime coercion (borrowed values),
+            # so a mismatch here is the highest-signal site of the four.
+            if ($ctx->{"strict_types"} == 1 && $has_spread == 0 && $i < $expected) {
+                my scalar $cparam = $fn_info->{"params"}->[$i];
+                if ($cparam->{"is_variadic"} != 1) {
+                    my str $psigil = $cparam->{"sigil"};
+                    if ($psigil eq "$") {
+                        my int $ptype = $cparam->{"param_type"};
+                        my int $atype = stage0_expr_type($ctx, $args->[$i]);
+                        if (stage0_types_compatible($ptype, $atype) == 0) {
+                            my int $argno = $i + 1;
+                            semantic_warn("argument " . $argno . " to '" . $name
+                                . "': expected " . ast_data_type_name($ptype)
+                                . ", got " . ast_data_type_name($atype), $line);
+                        }
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    # Binary operation
+    if ($node_type == NODE_BINARY_OP()) {
+        analyze_expression($ctx, $expr->{"left"});
+        analyze_expression($ctx, $expr->{"right"});
+        return;
+    }
+
+    # Unary operation
+    if ($node_type == NODE_UNARY_OP()) {
+        analyze_expression($ctx, $expr->{"operand"});
+        return;
+    }
+
+    # Assignment
+    if ($node_type == NODE_ASSIGN()) {
+        analyze_expression($ctx, $expr->{"target"});
+        analyze_expression($ctx, $expr->{"value"});
+        # Stage-0 type check: plain `=` to a declared scalar variable.
+        # Compound ops (+=, .=, ...) keep their own operand semantics.
+        if ($ctx->{"strict_types"} == 1 && $expr->{"op"} eq "=") {
+            my scalar $tgt = $expr->{"target"};
+            if ($tgt->{"type"} == NODE_VARIABLE()) {
+                my str $tsigil = $tgt->{"sigil"};
+                if ($tsigil eq "$") {
+                    my scalar $lk = scope_lookup_var($ctx->{"scope"}, $tgt->{"name"});
+                    if ($lk->{"found"} == 1) {
+                        my int $dtype = $lk->{"info"}->{"type"};
+                        my int $atype = stage0_expr_type($ctx, $expr->{"value"});
+                        if (stage0_types_compatible($dtype, $atype) == 0) {
+                            # Assign nodes don't always carry a line — fall
+                            # back to the target, then the value expression.
+                            my int $aline = ast_get_line($expr);
+                            if ($aline == 0) { $aline = ast_get_line($tgt); }
+                            if ($aline == 0) { $aline = ast_get_line($expr->{"value"}); }
+                            semantic_warn("assigning a " . ast_data_type_name($atype)
+                                . " value to '$" . $tgt->{"name"} . "' (declared "
+                                . ast_data_type_name($dtype) . ")", $aline);
+                        }
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    # Array subscript
+    if ($node_type == NODE_SUBSCRIPT()) {
+        analyze_expression($ctx, $expr->{"array"});
+        analyze_expression($ctx, $expr->{"index"});
+        return;
+    }
+
+    # Hash access
+    if ($node_type == NODE_HASH_ACCESS()) {
+        analyze_expression($ctx, $expr->{"hash"});
+        analyze_expression($ctx, $expr->{"key"});
+        return;
+    }
+
+    # Reference
+    if ($node_type == NODE_REF()) {
+        analyze_expression($ctx, $expr->{"target"});
+        return;
+    }
+
+    # Dereference
+    if ($node_type == NODE_DEREF_SCALAR() || $node_type == NODE_DEREF_ARRAY() || $node_type == NODE_DEREF_HASH()) {
+        analyze_expression($ctx, $expr->{"ref"});
+        if ($node_type == NODE_DEREF_ARRAY()) {
+            analyze_expression($ctx, $expr->{"index"});
+        }
+        if ($node_type == NODE_DEREF_HASH()) {
+            analyze_expression($ctx, $expr->{"key"});
+        }
+        return;
+    }
+
+    # Field access
+    if ($node_type == NODE_FIELD_ACCESS()) {
+        analyze_expression($ctx, $expr->{"object"});
+        # Note: We could check struct field existence here, but we'd need to
+        # track the type of the object being accessed, which is complex
+        return;
+    }
+
+    # Anonymous array
+    if ($node_type == NODE_ANON_ARRAY()) {
+        my scalar $elems = $expr->{"elements"};
+        my int $count = $expr->{"element_count"};
+        for (my int $i = 0; $i < $count; $i = $i + 1) {
+            analyze_expression($ctx, $elems->[$i]);
+        }
+        return;
+    }
+
+    # Anonymous hash
+    if ($node_type == NODE_ANON_HASH()) {
+        my scalar $values = $expr->{"values"};
+        my int $count = $expr->{"pair_count"};
+        for (my int $i = 0; $i < $count; $i = $i + 1) {
+            analyze_expression($ctx, $values->[$i]);
+        }
+        return;
+    }
+
+    # Method call
+    if ($node_type == NODE_METHOD_CALL()) {
+        analyze_expression($ctx, $expr->{"object"});
+        my scalar $args = $expr->{"args"};
+        my int $count = $expr->{"arg_count"};
+        for (my int $i = 0; $i < $count; $i = $i + 1) {
+            analyze_expression($ctx, $args->[$i]);
+        }
+        return;
+    }
+
+    # Dynamic method call ($obj->$method(args))
+    if ($node_type == NODE_DYN_METHOD_CALL()) {
+        analyze_expression($ctx, $expr->{"base_object"});
+        analyze_expression($ctx, $expr->{"method_expr"});
+        my scalar $dmc_args = $expr->{"args"};
+        my int $dmc_count = $expr->{"arg_count"};
+        for (my int $dmc_i = 0; $dmc_i < $dmc_count; $dmc_i = $dmc_i + 1) {
+            analyze_expression($ctx, $dmc_args->[$dmc_i]);
+        }
+        return;
+    }
+
+    # SUPER:: call
+    if ($node_type == NODE_SUPER_CALL()) {
+        my scalar $args = $expr->{"args"};
+        my int $count = $expr->{"arg_count"};
+        for (my int $i = 0; $i < $count; $i = $i + 1) {
+            analyze_expression($ctx, $args->[$i]);
+        }
+        return;
+    }
+
+    # Closure call ($closure->(args))
+    if ($node_type == NODE_CLOSURE_CALL()) {
+        analyze_expression($ctx, $expr->{"closure"});
+        my scalar $args = $expr->{"args"};
+        my int $count = $expr->{"arg_count"};
+        for (my int $i = 0; $i < $count; $i = $i + 1) {
+            analyze_expression($ctx, $args->[$i]);
+        }
+        return;
+    }
+
+    # Spread expression (...@arr)
+    if ($node_type == NODE_SPREAD()) {
+        analyze_expression($ctx, $expr->{"target"});
+        return;
+    }
+
+    # Literals - no validation needed
+    # NODE_INT_LITERAL, NODE_NUM_LITERAL, NODE_STR_LITERAL, NODE_FUNC_REF
+}
+
+func analyze_statement(scalar $ctx, scalar $stmt) void {
+    my int $node_type = $stmt->{"type"};
+    my int $line = ast_get_line($stmt);
+
+    # Variable declaration
+    if ($node_type == NODE_VAR_DECL()) {
+        my str $name = $stmt->{"name"};
+        my str $sigil = $stmt->{"sigil"};
+        my int $var_type = $stmt->{"var_type"};
+
+        # Check for redeclaration in current scope
+        my scalar $current_scope = $ctx->{"scope"};
+        my scalar $scope_vars = $current_scope->{"vars"};
+        if (exists(%{$scope_vars}, $name)) {
+            my scalar $prev_info = $scope_vars->{$name};
+            my int $prev_line = $prev_info->{"line"};
+            semantic_error("variable '" . $sigil . $name . "' already declared in this scope (previous declaration at line " . $prev_line . ")", $line);
+        }
+
+        # Add variable to scope
+        scope_add_var($current_scope, $name, $sigil, $var_type, $line);
+
+        # Analyze initializer if present
+        my scalar $init_expr = $stmt->{"init"};
+        if (is_valid_node($init_expr) == 1) {
+            analyze_expression($ctx, $init_expr);
+            # Stage-0 type check (scalar declarations only — array/hash
+            # initializers are flattening lists with their own semantics).
+            if ($ctx->{"strict_types"} == 1 && $sigil eq "$") {
+                my int $atype = stage0_expr_type($ctx, $init_expr);
+                if (stage0_types_compatible($var_type, $atype) == 0) {
+                    semantic_warn("initializing '" . $sigil . $name . "' (declared "
+                        . ast_data_type_name($var_type) . ") with a "
+                        . ast_data_type_name($atype) . " value", $line);
+                }
+            }
+        }
+        return;
+    }
+
+    # Const declaration - similar to var decl but with $ sigil
+    if ($node_type == NODE_CONST_DECL()) {
+        my str $name = $stmt->{"name"};
+        my int $var_type = $stmt->{"var_type"};
+
+        # Check for redeclaration in current scope
+        my scalar $current_scope = $ctx->{"scope"};
+        my scalar $scope_vars = $current_scope->{"vars"};
+        if (exists(%{$scope_vars}, $name)) {
+            my scalar $prev_info = $scope_vars->{$name};
+            my int $prev_line = $prev_info->{"line"};
+            semantic_error("constant '" . $name . "' already declared in this scope (previous declaration at line " . $prev_line . ")", $line);
+        }
+
+        # Add const to scope as a scalar
+        scope_add_var($current_scope, $name, "$", $var_type, $line);
+
+        # Analyze initializer (required for const)
+        my scalar $init_expr = $stmt->{"init"};
+        if (is_valid_node($init_expr) == 1) {
+            analyze_expression($ctx, $init_expr);
+        }
+        return;
+    }
+
+    # Our declaration (package-scoped global via global registry)
+    if ($node_type == NODE_OUR_DECL()) {
+        my str $name = $stmt->{"name"};
+        my str $sigil = $stmt->{"sigil"};
+        my int $var_type = $stmt->{"var_type"};
+
+        # Add variable to scope so subsequent references are valid
+        my scalar $current_scope = $ctx->{"scope"};
+        scope_add_var($current_scope, $name, $sigil, $var_type, $line);
+
+        # Analyze initializer if present
+        my scalar $init_expr = $stmt->{"init"};
+        if (is_valid_node($init_expr) == 1) {
+            analyze_expression($ctx, $init_expr);
+        }
+        return;
+    }
+
+    # Destructuring assignment: my ($a, $b, $c) = expr;
+    if ($node_type == NODE_DESTRUCTURE()) {
+        my scalar $vars = $stmt->{"vars"};
+        my int $var_count = $stmt->{"var_count"};
+        my int $is_decl = $stmt->{"is_decl"};
+        my scalar $current_scope = $ctx->{"scope"};
+        my scalar $scope_vars = $current_scope->{"vars"};
+
+        # Register all variables if this is a declaration
+        if ($is_decl == 1) {
+            my int $i = 0;
+            while ($i < $var_count) {
+                my scalar $var = $vars->[$i];
+                my str $name = $var->{"name"};
+                my str $sigil = $var->{"sigil"};
+                my int $var_type = $var->{"var_type"};
+
+                # Check for redeclaration in current scope
+                if (exists(%{$scope_vars}, $name)) {
+                    my scalar $prev_info = $scope_vars->{$name};
+                    my int $prev_line = $prev_info->{"line"};
+                    semantic_error("variable '" . $sigil . $name . "' already declared in this scope (previous declaration at line " . $prev_line . ")", $line);
+                }
+
+                # Add variable to scope
+                scope_add_var($current_scope, $name, $sigil, $var_type, $line);
+                $i = $i + 1;
+            }
+        }
+
+        # Analyze initializer
+        my scalar $init_expr = $stmt->{"init"};
+        if (is_valid_node($init_expr) == 1) {
+            analyze_expression($ctx, $init_expr);
+        }
+        return;
+    }
+
+    # Expression statement
+    if ($node_type == NODE_EXPR_STMT()) {
+        analyze_expression($ctx, $stmt->{"expr"});
+        return;
+    }
+
+    # Return statement
+    if ($node_type == NODE_RETURN_STMT()) {
+        my scalar $ret_val = $stmt->{"value"};
+        if (is_valid_node($ret_val) == 1) {
+            analyze_expression($ctx, $ret_val);
+            # Stage-0 type check: returned value vs declared return type.
+            if ($ctx->{"strict_types"} == 1) {
+                my scalar $cur = $ctx->{"current_func"};
+                if ($cur) {
+                    my int $rtype = $cur->{"return_type"};
+                    if ($rtype != TYPE_DYNAMIC()) {
+                        my int $atype = stage0_expr_type($ctx, $ret_val);
+                        if (stage0_types_compatible($rtype, $atype) == 0) {
+                            semantic_warn("returning a " . ast_data_type_name($atype)
+                                . " value from '" . $cur->{"name"} . "' (declared to return "
+                                . ast_data_type_name($rtype) . ")", $line);
+                        }
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    # If statement
+    if ($node_type == NODE_IF_STMT()) {
+        analyze_expression($ctx, $stmt->{"condition"});
+        analyze_block($ctx, $stmt->{"then_block"});
+
+        # elsif clauses
+        my scalar $elsif_conds = $stmt->{"elsif_conditions"};
+        my scalar $elsif_blocks = $stmt->{"elsif_blocks"};
+        my int $elsif_count = $stmt->{"elsif_count"};
+        for (my int $i = 0; $i < $elsif_count; $i = $i + 1) {
+            analyze_expression($ctx, $elsif_conds->[$i]);
+            analyze_block($ctx, $elsif_blocks->[$i]);
+        }
+
+        # else block
+        my scalar $else_blk = $stmt->{"else_block"};
+        if (is_valid_node($else_blk) == 1) {
+            analyze_block($ctx, $else_blk);
+        }
+        return;
+    }
+
+    # While statement
+    if ($node_type == NODE_WHILE_STMT()) {
+        analyze_expression($ctx, $stmt->{"condition"});
+        analyze_block($ctx, $stmt->{"body"});
+        return;
+    }
+
+    # Switch statement (scrutinee, per-case exprs and blocks, optional default block)
+    if ($node_type == NODE_SWITCH()) {
+        analyze_expression($ctx, $stmt->{"expr"});
+
+        my scalar $cases = $stmt->{"cases"};
+        my scalar $blocks = $stmt->{"blocks"};
+        my int $case_count = $stmt->{"case_count"};
+        my int $i = 0;
+        while ($i < $case_count) {
+            analyze_expression($ctx, $cases->[$i]);
+            analyze_block($ctx, $blocks->[$i]);
+            $i = $i + 1;
+        }
+
+        my int $has_default = $stmt->{"has_default"};
+        if ($has_default == 1) {
+            analyze_block($ctx, $stmt->{"default_block"});
+        }
+        return;
+    }
+
+    # For statement
+    if ($node_type == NODE_FOR_STMT()) {
+        # For loop has its own scope for the init variable
+        my scalar $old_scope = $ctx->{"scope"};
+        $ctx->{"scope"} = scope_new($old_scope);
+
+        my scalar $for_init = $stmt->{"init"};
+        if (is_valid_node($for_init) == 1) {
+            # Init could be var decl or expression
+            if ($for_init->{"type"} == NODE_VAR_DECL()) {
+                analyze_statement($ctx, $for_init);
+            } else {
+                analyze_expression($ctx, $for_init);
+            }
+        }
+        analyze_expression($ctx, $stmt->{"condition"});
+        my scalar $for_upd = $stmt->{"update"};
+        if (is_valid_node($for_upd) == 1) {
+            analyze_expression($ctx, $for_upd);
+        }
+        analyze_block($ctx, $stmt->{"body"});
+
+        scope_check_unused($ctx, $ctx->{"scope"});
+        $ctx->{"scope"} = $old_scope;
+        return;
+    }
+
+    # Try/catch statement
+    if ($node_type == NODE_TRY_CATCH()) {
+        # Analyze try block
+        analyze_block($ctx, $stmt->{"try_block"});
+
+        # Catch block has its own scope with the exception variable
+        my scalar $old_scope = $ctx->{"scope"};
+        $ctx->{"scope"} = scope_new($old_scope);
+
+        # Declare the catch variable
+        my str $catch_var = $stmt->{"catch_var"};
+        if (length($catch_var) > 0) {
+            scope_add_var($ctx->{"scope"}, $catch_var, "$", TYPE_SCALAR(), $stmt->{"line"});
+            # Mark it as used since it captures the exception
+            scope_mark_used($ctx->{"scope"}, $catch_var);
+        }
+
+        analyze_block($ctx, $stmt->{"catch_block"});
+
+        scope_check_unused($ctx, $ctx->{"scope"});
+        $ctx->{"scope"} = $old_scope;
+        return;
+    }
+}
+
+func analyze_block(scalar $ctx, scalar $block) void {
+    # Create new scope for block
+    my scalar $old_scope = $ctx->{"scope"};
+    $ctx->{"scope"} = scope_new($old_scope);
+
+    my scalar $stmts = $block->{"statements"};
+    my int $count = $block->{"statement_count"};
+
+    for (my int $i = 0; $i < $count; $i = $i + 1) {
+        analyze_statement($ctx, $stmts->[$i]);
+    }
+
+    # Check for unused variables
+    scope_check_unused($ctx, $ctx->{"scope"});
+
+    # Restore scope
+    $ctx->{"scope"} = $old_scope;
+}
+
+func analyze_function(scalar $ctx, scalar $fn) void {
+    # Set current function for return type checking
+    $ctx->{"current_func"} = $fn;
+
+    # Create function scope
+    my scalar $old_scope = $ctx->{"scope"};
+    $ctx->{"scope"} = scope_new($old_scope);
+
+    # Add parameters to scope
+    my scalar $params = $fn->{"params"};
+    my int $param_count = $fn->{"param_count"};
+    for (my int $i = 0; $i < $param_count; $i = $i + 1) {
+        my scalar $param = $params->[$i];
+        my str $pname = $param->{"name"};
+        my str $sigil = $param->{"sigil"};
+        my int $ptype = $param->{"param_type"};
+        my int $pline = ast_get_line($param);
+        scope_add_var($ctx->{"scope"}, $pname, $sigil, $ptype, $pline);
+    }
+
+    # Analyze function body (non-extern functions always have a body)
+    analyze_block($ctx, $fn->{"body"});
+
+    # Check for unused parameters
+    scope_check_unused($ctx, $ctx->{"scope"});
+
+    # Restore scope
+    $ctx->{"scope"} = $old_scope;
+    $ctx->{"current_func"} = 0;
+}
+
+# ============================================================
+# Main Entry Point
+# ============================================================
+
+func semantic_analyze(scalar $ast, int $show_warnings, int $strict_types) void {
+    my scalar $ctx = ctx_new();
+    $ctx->{"show_warnings"} = $show_warnings;
+    $ctx->{"strict_types"} = $strict_types;
+
+    # First pass: register all functions and globals
+    register_functions($ctx, $ast);
+    register_globals($ctx, $ast);
+    register_import_lib_functions($ctx, $ast);
+    register_import_object_functions($ctx, $ast);
+
+    # Second pass: validate each function
+    my scalar $funcs = $ast->{"functions"};
+    my int $count = $ast->{"function_count"};
+
+    for (my int $i = 0; $i < $count; $i = $i + 1) {
+        my scalar $fn = $funcs->[$i];
+
+        # Skip extern functions (no body to analyze)
+        if ($fn->{"is_extern"} == 1) {
+            next;
+        }
+        analyze_function($ctx, $fn);
+    }
+
+    # Publish program-wide facts the codegen reads (mirrors has_overloads,
+    # which the parser sets directly). uses_tie gates condition-level CSE.
+    if ($ctx->{"uses_tie"} == 1) {
+        $ast->{"uses_tie"} = 1;
+    }
+}

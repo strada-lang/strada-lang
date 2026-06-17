@@ -1,0 +1,13 @@
+# Startup benchmark — the program itself is trivial; the measurement is
+# process spawn-to-exit time, taken by the runner (run_benchmarks.sh
+# times N back-to-back executions externally). Compiled Strada binaries
+# should win this by an order of magnitude over interpreter startups.
+#
+# Reference numbers: benchmarks/BASELINE.md
+
+package main;
+
+func main() int {
+    say("ok");
+    return 0;
+}

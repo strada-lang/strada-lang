@@ -1,0 +1,236 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# Test LWP library
+
+use lib "lib";
+use LWP;
+
+func test_parse_url() int {
+    say("Testing URL parsing...");
+
+    # Test basic HTTP URL
+    my hash %u1 = LWP::parse_url("http://example.com/path");
+    if ($u1{"scheme"} ne "http") {
+        say("FAIL: scheme should be http, got " . $u1{"scheme"});
+        return 1;
+    }
+    if ($u1{"host"} ne "example.com") {
+        say("FAIL: host should be example.com, got " . $u1{"host"});
+        return 1;
+    }
+    if ($u1{"port"} != 80) {
+        say("FAIL: port should be 80, got " . $u1{"port"});
+        return 1;
+    }
+    if ($u1{"path"} ne "/path") {
+        say("FAIL: path should be /path, got " . $u1{"path"});
+        return 1;
+    }
+    say("  Basic HTTP URL: OK");
+
+    # Test HTTPS URL with port
+    my hash %u2 = LWP::parse_url("https://api.example.com:8443/v1/data?key=value");
+    if ($u2{"scheme"} ne "https") {
+        say("FAIL: scheme should be https");
+        return 1;
+    }
+    if ($u2{"host"} ne "api.example.com") {
+        say("FAIL: host should be api.example.com");
+        return 1;
+    }
+    if ($u2{"port"} != 8443) {
+        say("FAIL: port should be 8443, got " . $u2{"port"});
+        return 1;
+    }
+    if ($u2{"path"} ne "/v1/data") {
+        say("FAIL: path should be /v1/data");
+        return 1;
+    }
+    if ($u2{"query"} ne "key=value") {
+        say("FAIL: query should be key=value");
+        return 1;
+    }
+    say("  HTTPS URL with port and query: OK");
+
+    # Test URL without path
+    my hash %u3 = LWP::parse_url("http://example.com");
+    if ($u3{"path"} ne "/") {
+        say("FAIL: path should be / for URL without path");
+        return 1;
+    }
+    say("  URL without path: OK");
+
+    return 0;
+}
+
+func test_url_encode() int {
+    say("Testing URL encoding...");
+
+    my str $encoded = LWP::url_encode("hello world");
+    if ($encoded ne "hello%20world") {
+        say("FAIL: 'hello world' should encode to 'hello%20world', got '" . $encoded . "'");
+        return 1;
+    }
+    say("  Space encoding: OK");
+
+    $encoded = LWP::url_encode("a=b&c=d");
+    if ($encoded ne "a%3Db%26c%3Dd") {
+        say("FAIL: 'a=b&c=d' should encode to 'a%3Db%26c%3Dd', got '" . $encoded . "'");
+        return 1;
+    }
+    say("  Special chars encoding: OK");
+
+    # Test roundtrip
+    my str $original = "hello world!";
+    my str $decoded = LWP::url_decode(LWP::url_encode($original));
+    if ($decoded ne $original) {
+        say("FAIL: roundtrip failed");
+        return 1;
+    }
+    say("  Roundtrip encoding: OK");
+
+    return 0;
+}
+
+func test_build_query() int {
+    say("Testing query string building...");
+
+    my hash %params = ();
+    $params{"name"} = "John Doe";
+    $params{"age"} = "30";
+
+    my str $query = LWP::build_query(%params);
+    # Order may vary, just check both params are present
+    if (index($query, "name=John%20Doe") < 0) {
+        say("FAIL: query should contain name=John%20Doe, got: " . $query);
+        return 1;
+    }
+    if (index($query, "age=30") < 0) {
+        say("FAIL: query should contain age=30, got: " . $query);
+        return 1;
+    }
+    say("  Query building: OK");
+
+    return 0;
+}
+
+func test_parse_headers() int {
+    say("Testing header parsing...");
+
+    my str $headers = "Content-Type: text/html\r\nContent-Length: 1234\r\nX-Custom: value";
+    my hash %h = LWP::parse_headers($headers);
+
+    if ($h{"content-type"} ne "text/html") {
+        say("FAIL: content-type should be text/html");
+        return 1;
+    }
+    if ($h{"content-length"} ne "1234") {
+        say("FAIL: content-length should be 1234");
+        return 1;
+    }
+    if ($h{"x-custom"} ne "value") {
+        say("FAIL: x-custom should be value");
+        return 1;
+    }
+    say("  Header parsing: OK");
+
+    return 0;
+}
+
+func test_parse_response() int {
+    say("Testing response parsing...");
+
+    my str $raw = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nHello";
+    my hash %resp = LWP::parse_response($raw);
+
+    if ($resp{"status"} != 200) {
+        say("FAIL: status should be 200, got " . $resp{"status"});
+        return 1;
+    }
+    if ($resp{"reason"} ne "OK") {
+        say("FAIL: reason should be OK, got " . $resp{"reason"});
+        return 1;
+    }
+    if ($resp{"content"} ne "Hello") {
+        say("FAIL: content should be Hello, got " . $resp{"content"});
+        return 1;
+    }
+    if ($resp{"success"} != 1) {
+        say("FAIL: success should be 1");
+        return 1;
+    }
+    say("  Response parsing: OK");
+
+    # Test error response
+    my str $raw404 = "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nNot Found";
+    my hash %resp404 = LWP::parse_response($raw404);
+    if ($resp404{"status"} != 404) {
+        say("FAIL: status should be 404");
+        return 1;
+    }
+    if ($resp404{"success"} != 0) {
+        say("FAIL: success should be 0 for 404");
+        return 1;
+    }
+    say("  404 response parsing: OK");
+
+    return 0;
+}
+
+func test_user_agent() int {
+    say("Testing UserAgent...");
+
+    my hash %ua = LWP::UserAgent_new();
+    if ($ua{"user_agent"} ne "Strada-LWP/1.0") {
+        say("FAIL: default user agent wrong");
+        return 1;
+    }
+    say("  UserAgent creation: OK");
+
+    LWP::UserAgent_set_agent(%ua, "MyApp/2.0");
+    if ($ua{"user_agent"} ne "MyApp/2.0") {
+        say("FAIL: user agent not set");
+        return 1;
+    }
+    say("  UserAgent set_agent: OK");
+
+    return 0;
+}
+
+func main() int {
+    say("=== LWP Library Tests ===");
+    say("");
+
+    my int $failed = 0;
+
+    $failed = $failed + test_parse_url();
+    $failed = $failed + test_url_encode();
+    $failed = $failed + test_build_query();
+    $failed = $failed + test_parse_headers();
+    $failed = $failed + test_parse_response();
+    $failed = $failed + test_user_agent();
+
+    say("");
+    if ($failed == 0) {
+        say("All LWP tests passed!");
+    } else {
+        say("FAILED: " . $failed . " test(s)");
+    }
+
+    return $failed;
+}

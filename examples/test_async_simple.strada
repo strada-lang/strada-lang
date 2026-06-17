@@ -1,0 +1,60 @@
+# Simple async/await test
+
+async func compute(int $n) int {
+    sys::usleep(10000);  # 10ms
+    return $n * 2;
+}
+
+func main() int {
+    say("=== Simple Async Test ===");
+    say("");
+
+    # Test 1: Basic async/await
+    say("Test 1: Basic async/await");
+    my scalar $f = compute(21);
+    say("  Future created...");
+    my int $result = await $f;
+    say("  Result: " . $result);
+    if ($result == 42) {
+        say("  PASS");
+    } else {
+        say("  FAIL");
+    }
+
+    # Test 2: Multiple concurrent futures
+    say("");
+    say("Test 2: Multiple concurrent futures");
+    my scalar $a = compute(10);
+    my scalar $b = compute(20);
+    my scalar $c = compute(30);
+    my int $r1 = await $a;
+    my int $r2 = await $b;
+    my int $r3 = await $c;
+    say("  Results: " . $r1 . ", " . $r2 . ", " . $r3);
+    if ($r1 == 20 && $r2 == 40 && $r3 == 60) {
+        say("  PASS");
+    } else {
+        say("  FAIL");
+    }
+
+    # Test 3: is_done polling
+    say("");
+    say("Test 3: is_done polling");
+    my scalar $poll_future = compute(42);
+    my int $polls = 0;
+    while (async::is_done($poll_future) == 0) {
+        $polls = $polls + 1;
+        sys::usleep(1000);  # 1ms
+    }
+    my int $poll_result = await $poll_future;
+    say("  Polled " . $polls . " times, result: " . $poll_result);
+    if ($poll_result == 84) {
+        say("  PASS");
+    } else {
+        say("  FAIL");
+    }
+
+    say("");
+    say("=== Tests complete ===");
+    return 0;
+}

@@ -1,0 +1,72 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# Test LWP_SSL - HTTPS support
+
+use lib "lib";
+use LWP_SSL;
+
+func main() int {
+    say("=== LWP_SSL Test ===");
+    say("");
+
+    # Check if SSL is available
+    if (!LWP_SSL::ssl_available()) {
+        say("SSL library not available.");
+        say("To enable HTTPS, build the SSL library:");
+        say("  cd lib/ssl && make");
+        say("");
+        say("Testing HTTP only...");
+    } else {
+        say("SSL library loaded successfully!");
+    }
+
+    say("");
+
+    # Test HTTP (should always work)
+    say("Testing HTTP...");
+    my hash %resp = LWP_SSL::get("http://example.com");
+    if ($resp{"success"}) {
+        say("HTTP GET: OK (status " . $resp{"status"} . ")");
+    } else {
+        say("HTTP GET: FAILED");
+        if (defined($resp{"error"})) {
+            say("  Error: " . $resp{"error"});
+        }
+    }
+
+    # Test HTTPS (requires SSL library)
+    say("");
+    say("Testing HTTPS...");
+    my hash %resp2 = LWP_SSL::get("https://example.com");
+    if ($resp2{"success"}) {
+        say("HTTPS GET: OK (status " . $resp2{"status"} . ")");
+        my str $content = $resp2{"content"};
+        if (length($content) > 100) {
+            say("  Content: " . substr($content, 0, 100) . "...");
+        }
+    } else {
+        say("HTTPS GET: FAILED");
+        if (defined($resp2{"error"})) {
+            say("  Error: " . $resp2{"error"});
+        }
+    }
+
+    say("");
+    say("Done.");
+    return 0;
+}

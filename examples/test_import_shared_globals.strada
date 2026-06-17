@@ -1,0 +1,68 @@
+# Test that shared library globals are properly initialized
+# This tests the __attribute__((constructor)) enhancement
+
+use lib "examples";
+import_lib "test_shared_lib_globals.so";
+
+func main() int {
+    say("Testing shared library global initialization...");
+
+    # Test 1: Verify globals were initialized (constructor ran)
+    my int $test_ok = SharedGlobals::test_globals();
+    if ($test_ok == 0) {
+        say("FAIL: Global initialization test failed");
+        return 1;
+    }
+    say("  [OK] Globals initialized correctly");
+
+    # Test 2: Use the library functions that depend on globals
+    SharedGlobals::init();
+
+    my int $count = SharedGlobals::get_count();
+    # test_globals() added 1 item, init() added 3 more = 4 total
+    if ($count != 4) {
+        say("FAIL: Expected 4 items, got " . $count);
+        return 1;
+    }
+    say("  [OK] Array operations work (" . $count . " items)");
+
+    # Test 3: Add more items
+    SharedGlobals::add_item("item4");
+    SharedGlobals::add_item("item5");
+
+    $count = SharedGlobals::get_count();
+    # 4 from before + 2 new = 6 total
+    if ($count != 6) {
+        say("FAIL: Expected 6 items, got " . $count);
+        return 1;
+    }
+    say("  [OK] Adding items works (" . $count . " items)");
+
+    # Test 4: Counter should have incremented
+    my int $counter = SharedGlobals::get_counter();
+    if ($counter != 2) {
+        say("FAIL: Expected counter=2, got " . $counter);
+        return 1;
+    }
+    say("  [OK] Counter works (" . $counter . ")");
+
+    # Test 5: String global
+    my str $name = SharedGlobals::get_name();
+    if ($name ne "SharedGlobals") {
+        say("FAIL: Expected name='SharedGlobals', got '" . $name . "'");
+        return 1;
+    }
+    say("  [OK] String global works");
+
+    # Test 6: Hash global via config
+    my str $version = SharedGlobals::get_config("version");
+    if ($version ne "1.0") {
+        say("FAIL: Expected version='1.0', got '" . $version . "'");
+        return 1;
+    }
+    say("  [OK] Hash operations work");
+
+    say("");
+    say("All shared library global initialization tests passed!");
+    return 0;
+}

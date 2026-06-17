@@ -1,0 +1,24 @@
+func main() int {
+    # core::qx - capture command output
+    my str $out = core::qx("echo hello_proc");
+    say("qx=" . chomp($out));
+
+    # core::system - run command and get exit code
+    my int $rc = core::system("true");
+    say("system_true=" . $rc);
+
+    my int $rc2 = core::system("false");
+    say("system_false=" . ($rc2 != 0 ? 1 : 0));
+
+    # core::getenv / core::setenv
+    core::setenv("STRADA_INTERP_TEST", "hello123");
+    my str $val = core::getenv("STRADA_INTERP_TEST");
+    say("env=" . $val);
+
+    # Verify qx with multi-line output
+    my str $multi = core::qx("echo line1; echo line2");
+    my array @lines = split("\n", $multi);
+    say("lines=" . size(@lines));
+
+    return 0;
+}

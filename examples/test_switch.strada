@@ -1,0 +1,238 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_switch.strada - Test switch statement
+#
+# Run: ./strada examples/test_switch.strada
+
+func get_day_name(int $day) str {
+    my str $name = "unknown";
+    switch ($day) {
+        case 1 { $name = "Monday"; }
+        case 2 { $name = "Tuesday"; }
+        case 3 { $name = "Wednesday"; }
+        case 4 { $name = "Thursday"; }
+        case 5 { $name = "Friday"; }
+        case 6 { $name = "Saturday"; }
+        case 7 { $name = "Sunday"; }
+        default { $name = "Invalid day"; }
+    }
+    return $name;
+}
+
+func get_season(str $month) str {
+    my str $season = "";
+    switch ($month) {
+        case "December" { $season = "Winter"; }
+        case "January" { $season = "Winter"; }
+        case "February" { $season = "Winter"; }
+        case "March" { $season = "Spring"; }
+        case "April" { $season = "Spring"; }
+        case "May" { $season = "Spring"; }
+        case "June" { $season = "Summer"; }
+        case "July" { $season = "Summer"; }
+        case "August" { $season = "Summer"; }
+        case "September" { $season = "Fall"; }
+        case "October" { $season = "Fall"; }
+        case "November" { $season = "Fall"; }
+        default { $season = "Unknown"; }
+    }
+    return $season;
+}
+
+func main() int {
+    say("=== Switch Statement Tests ===\n");
+
+    # Test 1: Integer switch
+    say("1. Integer switch (day names):");
+    my str $day = get_day_name(3);
+    say("   Day 3 = " . $day);
+    if ($day ne "Wednesday") {
+        say("FAIL: expected 'Wednesday'");
+        return 1;
+    }
+
+    $day = get_day_name(7);
+    say("   Day 7 = " . $day);
+    if ($day ne "Sunday") {
+        say("FAIL: expected 'Sunday'");
+        return 1;
+    }
+
+    # Test 2: Default case
+    say("\n2. Default case:");
+    $day = get_day_name(99);
+    say("   Day 99 = " . $day);
+    if ($day ne "Invalid day") {
+        say("FAIL: expected 'Invalid day'");
+        return 1;
+    }
+
+    # Test 3: String switch
+    say("\n3. String switch (seasons):");
+    my str $season = get_season("July");
+    say("   July = " . $season);
+    if ($season ne "Summer") {
+        say("FAIL: expected 'Summer'");
+        return 1;
+    }
+
+    $season = get_season("October");
+    say("   October = " . $season);
+    if ($season ne "Fall") {
+        say("FAIL: expected 'Fall'");
+        return 1;
+    }
+
+    # Test 4: Inline switch
+    say("\n4. Inline switch:");
+    my int $code = 200;
+    my str $status = "";
+    switch ($code) {
+        case 200 { $status = "OK"; }
+        case 201 { $status = "Created"; }
+        case 400 { $status = "Bad Request"; }
+        case 404 { $status = "Not Found"; }
+        case 500 { $status = "Server Error"; }
+        default { $status = "Unknown"; }
+    }
+    say("   HTTP " . $code . " = " . $status);
+    if ($status ne "OK") {
+        say("FAIL: expected 'OK'");
+        return 1;
+    }
+
+    # Test 5: Switch without default
+    say("\n5. Switch without default:");
+    my int $found = 0;
+    my int $val = 2;
+    switch ($val) {
+        case 1 { $found = 1; }
+        case 2 { $found = 2; }
+        case 3 { $found = 3; }
+    }
+    say("   Found case: " . $found);
+    if ($found != 2) {
+        say("FAIL: expected 2");
+        return 1;
+    }
+
+    # Test 6: Switch with no match and no default
+    say("\n6. No match, no default:");
+    $found = 0;
+    $val = 99;
+    switch ($val) {
+        case 1 { $found = 1; }
+        case 2 { $found = 2; }
+    }
+    say("   Found (should be 0): " . $found);
+    if ($found != 0) {
+        say("FAIL: expected 0");
+        return 1;
+    }
+
+    # Test 7: Nested switch
+    say("\n7. Nested switch:");
+    my int $category = 1;
+    my int $subcategory = 2;
+    my str $result = "";
+    switch ($category) {
+        case 1 {
+            switch ($subcategory) {
+                case 1 { $result = "Cat1-Sub1"; }
+                case 2 { $result = "Cat1-Sub2"; }
+                default { $result = "Cat1-Other"; }
+            }
+        }
+        case 2 {
+            $result = "Cat2";
+        }
+        default {
+            $result = "Other";
+        }
+    }
+    say("   Category 1, Subcategory 2 = " . $result);
+    if ($result ne "Cat1-Sub2") {
+        say("FAIL: expected 'Cat1-Sub2'");
+        return 1;
+    }
+
+    # Test 8: Switch with multiple statements in case
+    say("\n8. Multiple statements in case:");
+    my int $count = 0;
+    my str $msg = "";
+    my int $action = 1;
+    switch ($action) {
+        case 1 {
+            $count = $count + 1;
+            $msg = "incremented";
+            $count = $count + 1;
+        }
+        case 2 {
+            $count = $count - 1;
+            $msg = "decremented";
+        }
+    }
+    say("   Count: " . $count . ", Msg: " . $msg);
+    if ($count != 2) {
+        say("FAIL: expected count=2");
+        return 1;
+    }
+    if ($msg ne "incremented") {
+        say("FAIL: expected 'incremented'");
+        return 1;
+    }
+
+    # Test 9: Switch with variable case values
+    say("\n9. Variable case values:");
+    my int $target = 42;
+    my int $matched = 0;
+    my int $case1 = 10;
+    my int $case2 = 42;
+    my int $case3 = 100;
+    switch ($target) {
+        case $case1 { $matched = 1; }
+        case $case2 { $matched = 2; }
+        case $case3 { $matched = 3; }
+    }
+    say("   Matched case: " . $matched);
+    if ($matched != 2) {
+        say("FAIL: expected 2");
+        return 1;
+    }
+
+    # Test 10: Switch in a loop
+    say("\n10. Switch in loop:");
+    my str $output = "";
+    my int $i = 1;
+    while ($i <= 3) {
+        switch ($i) {
+            case 1 { $output = $output . "one "; }
+            case 2 { $output = $output . "two "; }
+            case 3 { $output = $output . "three "; }
+        }
+        $i = $i + 1;
+    }
+    say("    Output: " . $output);
+    if ($output ne "one two three ") {
+        say("FAIL: expected 'one two three '");
+        return 1;
+    }
+
+    say("\n=== All switch tests passed! ===");
+    return 0;
+}

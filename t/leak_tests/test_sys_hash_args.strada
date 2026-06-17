@@ -1,0 +1,204 @@
+#!/usr/bin/env strada
+# Test sys:: functions with hash access arguments for memory leaks
+# Exercises owned ref cleanup when hash access results flow through
+# filesystem, process, and DNS functions.
+# Run: valgrind --leak-check=full ./test_sys_hash_args
+
+func main() int {
+    say("Testing sys:: functions with hash access args for leaks...");
+    my int $iterations = 50;
+
+    # Test 1: sys::is_dir with hash access
+    say("  is_dir with hash access...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my hash %d = ();
+        $d{"path"} = "/tmp";
+        my scalar $r = core::is_dir($d{"path"});
+        if ($r != 1) {
+            say("    FAIL: is_dir /tmp");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 2: sys::is_file with hash access
+    say("  is_file with hash access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %d = ();
+        $d{"path"} = "/etc/hostname";
+        my scalar $r = core::is_file($d{"path"});
+        # May or may not exist, just verify no leak
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 3: sys::file_exists with hash access
+    say("  file_exists with hash access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %d = ();
+        $d{"path"} = "/tmp";
+        my scalar $r = core::file_exists($d{"path"});
+        if ($r != 1) {
+            say("    FAIL: file_exists /tmp");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 4: sys::dir_exists with hash access
+    say("  dir_exists with hash access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %d = ();
+        $d{"path"} = "/tmp";
+        my scalar $r = core::dir_exists($d{"path"});
+        if ($r != 1) {
+            say("    FAIL: dir_exists /tmp");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 5: sys::file_size with hash access
+    say("  file_size with hash access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %d = ();
+        $d{"path"} = "/etc/hostname";
+        my scalar $r = core::file_size($d{"path"});
+        # Just verify no leak, file may/may not exist
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 6: sys::mkdir + sys::rmdir with hash access
+    say("  mkdir/rmdir with hash access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %d = ();
+        $d{"dir"} = "/tmp/strada_test_leak_mkdir_" . $i;
+        core::mkdir($d{"dir"});
+        core::rmdir($d{"dir"});
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 7: sys::chdir with hash access (chdir to /tmp and back)
+    say("  chdir with hash access...");
+    my str $orig = core::getcwd();
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %d = ();
+        $d{"dir"} = "/tmp";
+        core::chdir($d{"dir"});
+        $i = $i + 1;
+    }
+    core::chdir($orig);
+    say("    PASS");
+
+    # Test 8: sys::rename with hash access (create, rename, unlink)
+    say("  rename with hash access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %d = ();
+        $d{"old"} = "/tmp/strada_leak_rename_old_" . $i;
+        $d{"new"} = "/tmp/strada_leak_rename_new_" . $i;
+        core::spew($d{"old"}, "test");
+        core::rename($d{"old"}, $d{"new"});
+        core::unlink($d{"new"});
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 9: sys::chmod with hash access
+    say("  chmod with hash access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %d = ();
+        $d{"path"} = "/tmp/strada_leak_chmod_" . $i;
+        $d{"mode"} = 0644;
+        core::spew($d{"path"}, "test");
+        core::chmod($d{"path"}, $d{"mode"});
+        core::unlink($d{"path"});
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 10: sys::access with hash access
+    say("  access with hash access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %d = ();
+        $d{"path"} = "/tmp";
+        $d{"mode"} = 0;
+        my scalar $r = core::access($d{"path"}, $d{"mode"});
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 11: sys::link with hash access
+    say("  link with hash access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %d = ();
+        $d{"src"} = "/tmp/strada_leak_link_src_" . $i;
+        $d{"dst"} = "/tmp/strada_leak_link_dst_" . $i;
+        core::spew($d{"src"}, "test");
+        core::link($d{"src"}, $d{"dst"});
+        core::unlink($d{"src"});
+        core::unlink($d{"dst"});
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 12: sys::readlink with hash access
+    say("  symlink/readlink with hash access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %d = ();
+        $d{"target"} = "/tmp";
+        $d{"link"} = "/tmp/strada_leak_symlink_" . $i;
+        core::symlink($d{"target"}, $d{"link"});
+        my str $target = core::readlink($d{"link"});
+        core::unlink($d{"link"});
+        if ($target ne "/tmp") {
+            say("    FAIL: readlink = '" . $target . "'");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 13: sys::gethostbyname with hash access
+    say("  gethostbyname with hash access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %d = ();
+        $d{"host"} = "localhost";
+        my str $ip = core::gethostbyname($d{"host"});
+        # May return empty on some systems, just verify no leak
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 14: sys::umask with hash access
+    say("  umask with hash access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %d = ();
+        $d{"mask"} = 0022;
+        my scalar $old = core::umask($d{"mask"});
+        core::umask($old);
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All sys:: hash arg tests passed!");
+    return 0;
+}

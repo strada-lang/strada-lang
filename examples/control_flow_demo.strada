@@ -1,0 +1,127 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# control_flow_demo.strada - Demonstrate all control structures
+
+func demo_if_else() void {
+    say("=== IF/ELSIF/ELSE Demo ===");
+    
+    my int $score = 85;
+    
+    if ($score >= 90) {
+        say("Grade: A");
+    } elsif ($score >= 80) {
+        say("Grade: B");
+    } elsif ($score >= 70) {
+        say("Grade: C");
+    } else {
+        say("Grade: F");
+    }
+    
+    say("");
+}
+
+func demo_while_loop() void {
+    say("=== WHILE Loop Demo ===");
+    
+    my int $count = 0;
+    
+    while ($count < 5) {
+        say("Count: " . $count);
+        $count = $count + 1;
+    }
+    
+    say("");
+}
+
+func demo_for_loop() void {
+    say("=== FOR Loop Demo ===");
+    
+    my int $i = 0;
+    for ($i = 0; $i < 5; $i = $i + 1) {
+        say("Iteration: " . $i);
+    }
+    
+    say("");
+}
+
+func demo_nested_loops() void {
+    say("=== Nested Loops Demo ===");
+    
+    my int $i = 0;
+    for ($i = 1; $i <= 3; $i = $i + 1) {
+        my int $j = 0;
+        for ($j = 1; $j <= 3; $j = $j + 1) {
+            say("  " . $i . " x " . $j . " = " . ($i * $j));
+        }
+    }
+    
+    say("");
+}
+
+func demo_complex_conditions() void {
+    say("=== Complex Conditions Demo ===");
+    
+    my int $age = 25;
+    my int $has_license = 1;
+    
+    if ($age >= 18) {
+        if ($has_license == 1) {
+            say("Can drive");
+        } else {
+            say("Need license");
+        }
+    } else {
+        say("Too young");
+    }
+    
+    say("");
+}
+
+func demo_factorial() void {
+    say("=== Factorial with While Loop ===");
+    
+    my int $n = 5;
+    my int $result = 1;
+    my int $i = 1;
+    
+    while ($i <= $n) {
+        $result = $result * $i;
+        $i = $i + 1;
+    }
+    
+    say("5! = " . $result);
+    say("");
+}
+
+func main() int {
+    say("╔════════════════════════════════════════╗");
+    say("║   Strada Control Flow Demonstration   ║");
+    say("╚════════════════════════════════════════╝");
+    say("");
+    
+    demo_if_else();
+    demo_while_loop();
+    demo_for_loop();
+    demo_nested_loops();
+    demo_complex_conditions();
+    demo_factorial();
+    
+    say("✓ All control flow working!");
+    
+    return 0;
+}

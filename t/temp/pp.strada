@@ -1,0 +1,23 @@
+package Nun;
+
+func exec (str ...@t2) void {
+    my scalar $moo;
+    $moo = undefd;
+    dumper({
+        string2 => \@t2,
+        pope => $moo,
+    });
+}
+
+package Butt;
+
+
+func exec (str ...@t2) void {
+    my scalar $moo;
+    say("BUGG");
+    $moo = undefd;
+    dumper({
+        string2 => \@t2,
+        pope => $moo,
+    });
+}

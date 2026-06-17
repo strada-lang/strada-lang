@@ -1,0 +1,82 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_native_hash.strada - Test native hash support with % prefix
+
+func main() int {
+    say("=== Native Hash Test ===");
+    say("");
+    
+    # Declare a hash with % prefix
+    my hash %user;
+    
+    # Set values using $hash{key} syntax
+    $user{"name"} = "Peter";
+    $user{"age"} = 30;
+    $user{"city"} = "New York";
+    $user{"email"} = "peter@example.com";
+    
+    # Read values
+    say("User Info:");
+    say("  Name: " . $user{"name"});
+    say("  Age: " . $user{"age"});
+    say("  City: " . $user{"city"});
+    say("  Email: " . $user{"email"});
+    
+    # Using keys() function
+    say("");
+    say("All keys:");
+    my scalar $k = keys(%user);
+    my int $i = 0;
+    my int $len = size($k);
+    while ($i < $len) {
+        say("  - " . $k[$i]);
+        $i = $i + 1;
+    }
+    
+    # Using values() function
+    say("");
+    say("All values:");
+    my scalar $v = values(%user);
+    $i = 0;
+    $len = size($v);
+    while ($i < $len) {
+        say("  - " . $v[$i]);
+        $i = $i + 1;
+    }
+    
+    # Test exists()
+    say("");
+    say("exists(name): " . exists($user{"name"}));
+    say("exists(phone): " . exists($user{"phone"}));
+    
+    # Test delete()
+    say("");
+    say("Deleting email...");
+    delete($user{"email"});
+    say("exists(email) after delete: " . exists($user{"email"}));
+    
+    # Update a value
+    say("");
+    $user{"age"} = 31;
+    say("Updated age: " . $user{"age"});
+    
+    say("");
+    say("=== Hash Test Complete ===");
+    
+    return 0;
+}

@@ -1,0 +1,61 @@
+#!/usr/bin/env strada
+# Leak / UAF regression: strada_concat_inplace fast-path with `a == b`
+# (e.g., `$s .= $s` or `$s = $s . $s`) could realloc-grow the underlying
+# StradaString while `str_b` still pointed into the old (freed) buffer,
+# leading to use-after-free on the subsequent memcpy.
+#
+# Fix: detect the alias and re-point `str_b` into the new buffer after
+# realloc.
+#
+# Run: valgrind --leak-check=full ./test_concat_self_alias
+
+package main;
+
+func test_self_concat_growth() void {
+    # Force the realloc path by exceeding the initial capacity. Each
+    # doubling triggers realloc; with the bug, the second .= self read
+    # from freed memory.
+    my str $s = "x";
+    my int $i = 0;
+    while ($i < 14) {
+        $s = $s . $s;   # doubles each iteration: 1, 2, 4, 8, ... 16384
+        $i = $i + 1;
+    }
+    my int $len = length($s);
+    if ($len != 16384) {
+        say("FAIL: self-concat length: " . $len);
+        return;
+    }
+    # Verify content is all 'x'
+    if (core::byte_length($s) != 16384) {
+        say("FAIL: byte_length: " . core::byte_length($s));
+        return;
+    }
+    if (core::ord_byte($s) != 120) {
+        say("FAIL: first byte not 'x' (120): " . core::ord_byte($s));
+        return;
+    }
+    say("test_self_concat_growth: PASS");
+}
+
+func test_compound_self_append() void {
+    # `.=` form
+    my str $s = "ab";
+    my int $i = 0;
+    while ($i < 12) {
+        $s .= $s;
+        $i = $i + 1;
+    }
+    my int $len = length($s);
+    if ($len != 8192) {
+        say("FAIL: compound-append length: " . $len);
+        return;
+    }
+    say("test_compound_self_append: PASS");
+}
+
+func main() int {
+    test_self_concat_growth();
+    test_compound_self_append();
+    return 0;
+}

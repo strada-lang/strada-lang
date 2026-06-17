@@ -1,0 +1,100 @@
+#!/usr/bin/env strada
+# Round 11 leak regressions — the three exception-path leaks deferred
+# from round 10:
+#
+# - foreach (LIST) { body throws } leaked the inline-list source array
+# - Pkg::new("k1","v1","k2", throwing_arg()) leaked the partial object
+# - cond ? (chain_with_throw) : ... leaked concat intermediates
+#
+# Run: valgrind --leak-check=full ./test_throw_paths_round11
+
+package Animal;
+
+func bark(scalar $self) void {
+    say($self->{"name"} . " barks");
+}
+
+package main;
+
+func boom_int() int {
+    throw "boom-int";
+    return 0;
+}
+
+func boom_str() str {
+    throw "boom-str";
+    return "";
+}
+
+func make() str {
+    return "made";
+}
+
+func test_foreach_inline_list_throw() void {
+    my int $iter = 100;
+    my int $i = 0;
+    while ($i < $iter) {
+        try {
+            foreach my int $x (1, 2, 3, 4, 5) {
+                if ($x == 3) {
+                    throw "foreach-body-fail";
+                }
+            }
+        } catch ($e) { }
+        $i = $i + 1;
+    }
+    say("test_foreach_inline_list_throw: PASS");
+}
+
+func test_foreach_call_source_throw() void {
+    my int $iter = 100;
+    my int $i = 0;
+    while ($i < $iter) {
+        try {
+            # Source is an owned array via list literal evaluated to
+            # an anon array.
+            foreach my int $x ((10, 20, 30)) {
+                throw "iter-fail";
+            }
+        } catch ($e) { }
+        $i = $i + 1;
+    }
+    say("test_foreach_call_source_throw: PASS");
+}
+
+func test_inline_ctor_arg_throw() void {
+    my int $iter = 100;
+    my int $i = 0;
+    while ($i < $iter) {
+        try {
+            # Constructor with throwing later arg: __ct_ref / hash
+            # allocated before boom_str(); partial object would leak
+            # pre-fix.
+            my scalar $a = Animal::new("name", "rex", "tag", boom_str());
+        } catch ($e) { }
+        $i = $i + 1;
+    }
+    say("test_inline_ctor_arg_throw: PASS");
+}
+
+func test_ternary_with_throwing_concat() void {
+    my int $iter = 100;
+    my int $i = 0;
+    while ($i < $iter) {
+        try {
+            # Concat chain inside true branch where the right side
+            # throws — pre-round-10 the left __concat_l leaked.
+            my str $s = ($i % 2 == 0) ? (make() . boom_str()) : "y";
+        } catch ($e) { }
+        $i = $i + 1;
+    }
+    say("test_ternary_with_throwing_concat: PASS");
+}
+
+func main() int {
+    test_foreach_inline_list_throw();
+    test_foreach_call_source_throw();
+    test_inline_ctor_arg_throw();
+    test_ternary_with_throwing_concat();
+    return 0;
+}

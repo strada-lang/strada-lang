@@ -1,0 +1,345 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+=head1 NAME
+
+IPC::Open3 - Run a command with separate stdin, stdout, and stderr
+
+=head1 SYNOPSIS
+
+    use lib "lib";
+    use IPC::Open3;
+
+    # Full control with open3
+    my hash %h = IPC::Open3::open3("cat -n");
+    core::write_fd($h{"stdin"}, "Hello\nWorld\n");
+    core::close_fd($h{"stdin"});
+    my str $output = core::slurp_fd($h{"stdout"});
+    my str $errors = core::slurp_fd($h{"stderr"});
+    core::waitpid($h{"pid"}, 0);
+
+    # Simple command output capture
+    my str $result = IPC::Open3::cmd_output("ls -la");
+
+=head1 DESCRIPTION
+
+IPC::Open3 provides functions for running external commands with full control
+over their standard input, output, and error streams. This is similar to
+Perl's IPC::Open3 module.
+
+The module is useful when you need to:
+
+=over 4
+
+=item * Send input to a command's stdin
+
+=item * Capture stdout and stderr separately
+
+=item * Process a command's output while it runs
+
+=item * Implement pipelines or filters
+
+=back
+
+=head1 FUNCTIONS
+
+=head2 open3($cmd)
+
+Run a command with full I/O control. Returns a hash reference containing:
+
+=over 4
+
+=item B<pid> - Child process ID
+
+=item B<stdin> - File descriptor to write to child's stdin
+
+=item B<stdout> - File descriptor to read child's stdout
+
+=item B<stderr> - File descriptor to read child's stderr
+
+=item B<error> - Error message if something failed (optional)
+
+=back
+
+Example:
+
+    my hash %h = IPC::Open3::open3("grep pattern");
+    core::write_fd($h{"stdin"}, "line1\npattern here\nline3\n");
+    core::close_fd($h{"stdin"});
+    my str $matches = core::slurp_fd($h{"stdout"});
+    core::waitpid($h{"pid"}, 0);
+
+B<Important:> Always close the stdin file descriptor when done writing,
+or the child process may hang waiting for more input.
+
+=head2 open2($cmd)
+
+Like C<open3()> but combines stdout and stderr into a single stream.
+Returns a hash with:
+
+=over 4
+
+=item B<pid> - Child process ID
+
+=item B<stdin> - File descriptor to write to child's stdin
+
+=item B<stdout> - File descriptor to read child's combined output
+
+=back
+
+Example:
+
+    my hash %h = IPC::Open3::open2("make 2>&1");
+    core::close_fd($h{"stdin"});
+    my str $output = core::slurp_fd($h{"stdout"});
+
+=head2 cmd_output($cmd)
+
+Simple command capture (like backticks in Perl/shell). Runs the command
+and returns its stdout as a string.
+
+    my str $files = IPC::Open3::cmd_output("ls -la");
+    my str $date = IPC::Open3::cmd_output("date +%Y-%m-%d");
+
+Note: stderr is not captured; it goes to the parent's stderr.
+
+=head2 run($cmd)
+
+Run a command and return its exit status. This is a simple wrapper
+around fork/exec/wait.
+
+    my int $status = IPC::Open3::run("make clean");
+    if ($status != 0) {
+        say("Command failed");
+    }
+
+=head1 EXAMPLE
+
+Capture both stdout and stderr from a command:
+
+    use lib "lib";
+    use IPC::Open3;
+
+    my hash %h = IPC::Open3::open3("ls /tmp /nonexistent");
+    core::close_fd($h{"stdin"});
+
+    my str $stdout = core::slurp_fd($h{"stdout"});
+    my str $stderr = core::slurp_fd($h{"stderr"});
+
+    core::close_fd($h{"stdout"});
+    core::close_fd($h{"stderr"});
+    core::waitpid($h{"pid"}, 0);
+
+    say("STDOUT: " . $stdout);
+    say("STDERR: " . $stderr);
+
+Interactive communication with a subprocess:
+
+    my hash %h = IPC::Open3::open3("bc");
+
+    core::write_fd($h{"stdin"}, "2 + 2\n");
+    core::write_fd($h{"stdin"}, "10 * 5\n");
+    core::write_fd($h{"stdin"}, "quit\n");
+    core::close_fd($h{"stdin"});
+
+    my str $result = core::slurp_fd($h{"stdout"});
+    say("Results: " . $result);
+
+    core::waitpid($h{"pid"}, 0);
+
+=head1 NOTES
+
+=over 4
+
+=item * Commands are executed via C</bin/sh -c>, so shell features work
+
+=item * Always close file descriptors when done to avoid resource leaks
+
+=item * Always call C<waitpid()> to reap zombie processes
+
+=item * Large outputs should be read incrementally to avoid deadlocks
+
+=back
+
+=head1 SEE ALSO
+
+L<core::fork>, L<core::pipe>, L<core::exec>, L<core::waitpid>
+
+=cut
+
+package IPC::Open3;
+
+# open3 - Run a command with full I/O control
+# Returns a hash with:
+#   pid    - Child process ID
+#   stdin  - File descriptor to write to child's stdin
+#   stdout - File descriptor to read child's stdout
+#   stderr - File descriptor to read child's stderr
+#
+func open3(str $cmd) hash {
+    my hash %result = ();
+
+    # Create pipes for stdin, stdout, stderr
+    my array @stdin_pipe = core::pipe();
+    my array @stdout_pipe = core::pipe();
+    my array @stderr_pipe = core::pipe();
+
+    if (scalar(@stdin_pipe) == 0 || scalar(@stdout_pipe) == 0 || scalar(@stderr_pipe) == 0) {
+        $result{"error"} = "Failed to create pipes";
+        return %result;
+    }
+
+    # stdin_pipe:  [0]=read (child),  [1]=write (parent)
+    # stdout_pipe: [0]=read (parent), [1]=write (child)
+    # stderr_pipe: [0]=read (parent), [1]=write (child)
+
+    my int $pid = core::fork();
+
+    if ($pid == 0) {
+        # Child process
+
+        # Redirect stdin from pipe
+        core::close_fd($stdin_pipe[1]);   # Close write end
+        core::dup2($stdin_pipe[0], 0);
+        core::close_fd($stdin_pipe[0]);
+
+        # Redirect stdout to pipe
+        core::close_fd($stdout_pipe[0]);  # Close read end
+        core::dup2($stdout_pipe[1], 1);
+        core::close_fd($stdout_pipe[1]);
+
+        # Redirect stderr to pipe
+        core::close_fd($stderr_pipe[0]);  # Close read end
+        core::dup2($stderr_pipe[1], 2);
+        core::close_fd($stderr_pipe[1]);
+
+        # Execute the command via shell
+        core::exec("/bin/sh -c '" . $cmd . "'");
+
+        # If exec returns, it failed
+        exit(127);
+    } elsif ($pid > 0) {
+        # Parent process
+
+        # Close unused ends of pipes
+        core::close_fd($stdin_pipe[0]);   # Close read end
+        core::close_fd($stdout_pipe[1]);  # Close write end
+        core::close_fd($stderr_pipe[1]);  # Close write end
+
+        $result{"pid"} = $pid;
+        $result{"stdin"} = $stdin_pipe[1];
+        $result{"stdout"} = $stdout_pipe[0];
+        $result{"stderr"} = $stderr_pipe[0];
+    } else {
+        $result{"error"} = "Fork failed";
+    }
+
+    return %result;
+}
+
+# open2 - Like open3 but combines stdout and stderr
+# Returns a hash with:
+#   pid    - Child process ID
+#   stdin  - File descriptor to write to child's stdin
+#   stdout - File descriptor to read child's combined output
+#
+func open2(str $cmd) hash {
+    my hash %result = ();
+
+    my array @stdin_pipe = core::pipe();
+    my array @stdout_pipe = core::pipe();
+
+    if (scalar(@stdin_pipe) == 0 || scalar(@stdout_pipe) == 0) {
+        $result{"error"} = "Failed to create pipes";
+        return %result;
+    }
+
+    my int $pid = core::fork();
+
+    if ($pid == 0) {
+        # Child process
+        core::close_fd($stdin_pipe[1]);
+        core::dup2($stdin_pipe[0], 0);
+        core::close_fd($stdin_pipe[0]);
+
+        core::close_fd($stdout_pipe[0]);
+        core::dup2($stdout_pipe[1], 1);
+        core::dup2($stdout_pipe[1], 2);  # stderr -> stdout
+        core::close_fd($stdout_pipe[1]);
+
+        core::exec("/bin/sh -c '" . $cmd . "'");
+        exit(127);
+    } elsif ($pid > 0) {
+        # Parent process
+        core::close_fd($stdin_pipe[0]);
+        core::close_fd($stdout_pipe[1]);
+
+        $result{"pid"} = $pid;
+        $result{"stdin"} = $stdin_pipe[1];
+        $result{"stdout"} = $stdout_pipe[0];
+    } else {
+        $result{"error"} = "Fork failed";
+    }
+
+    return %result;
+}
+
+# cmd_output - Simple command capture (like backticks)
+# Runs command and returns its stdout
+#
+func cmd_output(str $cmd) str {
+    my array @pipe = core::pipe();
+    if (scalar(@pipe) == 0) {
+        return "";
+    }
+
+    my int $pid = core::fork();
+
+    if ($pid == 0) {
+        # Child
+        core::close_fd($pipe[0]);
+        core::dup2($pipe[1], 1);
+        core::close_fd($pipe[1]);
+        core::exec("/bin/sh -c '" . $cmd . "'");
+        exit(127);
+    } elsif ($pid > 0) {
+        # Parent
+        core::close_fd($pipe[1]);
+        my str $output = core::slurp_fd($pipe[0]);
+        core::close_fd($pipe[0]);
+        core::wait();
+        return $output;
+    }
+
+    return "";
+}
+
+# run - Run command and return exit status
+#
+func run(str $cmd) int {
+    my int $pid = core::fork();
+
+    if ($pid == 0) {
+        core::exec("/bin/sh -c '" . $cmd . "'");
+        exit(127);
+    } elsif ($pid > 0) {
+        my int $raw_status = core::waitpid($pid, 0);
+        return core::exit_status($raw_status);
+    }
+
+    return -1;
+}

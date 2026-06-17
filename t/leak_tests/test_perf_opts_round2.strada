@@ -1,0 +1,112 @@
+#!/usr/bin/env strada
+# Test round 2 performance optimizations for memory leaks
+# Covers: fast itoa concat, isa cache, hash entry freelist churn, method dispatch
+
+package Animal;
+has ro str $species (required);
+
+func speak(scalar $self) str {
+    return "animal speaks";
+}
+
+package Dog;
+extends Animal;
+has ro str $name (required);
+
+func bark(scalar $self) str {
+    return $self->name() . " barks";
+}
+
+package main;
+
+func main() int {
+    say("Testing round 2 performance optimizations for memory leaks...");
+    my int $iterations = 500;
+
+    # Test 1: Fast itoa via string concatenation with integers
+    say("  fast itoa concat...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my str $s = "key" . $i;
+        my str $s2 = $i . "_suffix";
+        my str $s3 = "pre_" . $i . "_post";
+        # Negative numbers
+        my int $neg = 0 - $i;
+        my str $s4 = "neg" . $neg;
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 2: isa cache with repeated checks
+    say("  isa cache...");
+    my scalar $dog = Dog::new("name", "Rex", "species", "canine");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $r1 = $dog->isa("Dog");
+        my int $r2 = $dog->isa("Animal");
+        my int $r3 = $dog->isa("Nonexistent");
+        if ($r1 != 1) {
+            say("    FAIL: isa Dog returned " . $r1);
+            return 1;
+        }
+        if ($r2 != 1) {
+            say("    FAIL: isa Animal returned " . $r2);
+            return 1;
+        }
+        if ($r3 != 0) {
+            say("    FAIL: isa Nonexistent returned " . $r3);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 3: Hash entry freelist churn at scale
+    say("  hash entry freelist churn...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        my int $j = 0;
+        while ($j < 20) {
+            $h{"key" . $j} = "value" . $j;
+            $j = $j + 1;
+        }
+        # Delete half the entries to churn the freelist
+        $j = 0;
+        while ($j < 10) {
+            delete($h{"key" . $j});
+            $j = $j + 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 4: Method dispatch without modifiers
+    say("  method dispatch (no modifiers)...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $d = Dog::new("name", "Buddy", "species", "dog");
+        my str $r = $d->bark();
+        my str $r2 = $d->speak();
+        my str $r3 = $d->species();
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 5: Concat inplace with integer (fast itoa in .= path)
+    say("  concat inplace with int...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = "start";
+        my int $j = 0;
+        while ($j < 10) {
+            $s = $s . $j;
+            $j = $j + 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All round 2 perf optimization leak tests passed!");
+    return 0;
+}

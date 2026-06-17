@@ -1,0 +1,167 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_open3.strada - Test using the IPC::Open3 module
+
+# Note: Module system would be: use IPC::Open3;
+# For now, we inline the open3 function
+
+# open3 - Run command with stdin/stdout/stderr pipes
+func open3(str $cmd) hash {
+    my hash %result = ();
+
+    my scalar $stdin_pipe = sys::pipe();
+    my scalar $stdout_pipe = sys::pipe();
+    my scalar $stderr_pipe = sys::pipe();
+
+    if (!defined($stdin_pipe) || !defined($stdout_pipe) || !defined($stderr_pipe)) {
+        $result{"error"} = "Failed to create pipes";
+        return \%result;
+    }
+
+    my int $pid = sys::fork();
+
+    if ($pid == 0) {
+        # Child process
+        sys::close_fd($stdin_pipe->[1]);
+        sys::dup2($stdin_pipe->[0], 0);
+        sys::close_fd($stdin_pipe->[0]);
+
+        sys::close_fd($stdout_pipe->[0]);
+        sys::dup2($stdout_pipe->[1], 1);
+        sys::close_fd($stdout_pipe->[1]);
+
+        sys::close_fd($stderr_pipe->[0]);
+        sys::dup2($stderr_pipe->[1], 2);
+        sys::close_fd($stderr_pipe->[1]);
+
+        sys::exec($cmd);
+        exit(127);
+    } elsif ($pid > 0) {
+        # Parent process
+        sys::close_fd($stdin_pipe->[0]);
+        sys::close_fd($stdout_pipe->[1]);
+        sys::close_fd($stderr_pipe->[1]);
+
+        $result{"pid"} = $pid;
+        $result{"stdin"} = $stdin_pipe->[1];
+        $result{"stdout"} = $stdout_pipe->[0];
+        $result{"stderr"} = $stderr_pipe->[0];
+    } else {
+        $result{"error"} = "Fork failed";
+    }
+
+    return \%result;
+}
+
+# cmd_output - Run command and return stdout
+func cmd_output(str $cmd) str {
+    my scalar $pipe = sys::pipe();
+    if (!defined($pipe)) {
+        return "";
+    }
+
+    my int $pid = sys::fork();
+
+    if ($pid == 0) {
+        sys::close_fd($pipe->[0]);
+        sys::dup2($pipe->[1], 1);
+        sys::close_fd($pipe->[1]);
+        sys::exec($cmd);
+        exit(127);
+    } else {
+        sys::close_fd($pipe->[1]);
+        my str $output = sys::read_all_fd($pipe->[0]);
+        sys::close_fd($pipe->[0]);
+        sys::wait();
+        return $output;
+    }
+
+    return "";
+}
+
+func main() int {
+    say("=== IPC::Open3 Module Test ===");
+    say("");
+
+    # Test 1: Simple capture (like backticks)
+    say("--- Test 1: cmd_output() ---");
+    my str $hostname = cmd_output("hostname");
+    say("Hostname: " . $hostname);
+
+    my str $date = cmd_output("date");
+    say("Date: " . $date);
+
+    # Test 2: open3 with separate stdout/stderr
+    say("--- Test 2: open3() with stdout/stderr ---");
+    my hash $proc = open3("sh -c 'echo stdout message; echo stderr message >&2'");
+
+    if (defined($proc->{"error"})) {
+        say("Error: " . $proc->{"error"});
+        return 1;
+    }
+
+    say("Child PID: " . $proc->{"pid"});
+
+    # Close stdin (we're not sending anything)
+    sys::close_fd($proc->{"stdin"});
+
+    # Read stdout and stderr
+    my str $stdout = sys::read_all_fd($proc->{"stdout"});
+    my str $stderr = sys::read_all_fd($proc->{"stderr"});
+
+    sys::close_fd($proc->{"stdout"});
+    sys::close_fd($proc->{"stderr"});
+
+    sys::wait();
+
+    say("STDOUT: " . $stdout);
+    say("STDERR: " . $stderr);
+
+    # Test 3: Interactive communication
+    say("--- Test 3: Interactive with cat -n ---");
+    my hash $cat = open3("cat -n");
+
+    if (defined($cat->{"error"})) {
+        say("Error: " . $cat->{"error"});
+        return 1;
+    }
+
+    # Send some lines
+    sys::write_fd($cat->{"stdin"}, "First line\n");
+    sys::write_fd($cat->{"stdin"}, "Second line\n");
+    sys::write_fd($cat->{"stdin"}, "Third line\n");
+    sys::close_fd($cat->{"stdin"});
+
+    # Read numbered output
+    my str $numbered = sys::read_all_fd($cat->{"stdout"});
+    sys::close_fd($cat->{"stdout"});
+    sys::close_fd($cat->{"stderr"});
+    sys::wait();
+
+    say("Numbered output:");
+    say($numbered);
+
+    # Test 4: Capture command with arguments
+    say("--- Test 4: Complex command ---");
+    my str $files = cmd_output("ls -la /tmp 2>/dev/null | head -3");
+    say("Files in /tmp:");
+    say($files);
+
+    say("=== All Tests Passed ===");
+    return 0;
+}

@@ -1,0 +1,36 @@
+package main;
+func main() int {
+    my int $pass = 1;
+    # compact (cap<=8) arrays grown various ways -> exercise inline->heap migration
+    # 1. push past compact capacity
+    my scalar $a = [1, 2];
+    my int $i = 0; while ($i < 50) { push(@$a, $i); $i = $i + 1; }
+    if (size(@$a) != 52 || $a->[0] != 1 || $a->[51] != 49) { say("FAIL push-grow"); $pass = 0; }
+    # 2. unshift past compact capacity
+    my scalar $b = [9, 8];
+    $i = 0; while ($i < 30) { unshift(@$b, $i); $i = $i + 1; }
+    if (size(@$b) != 32 || $b->[31] != 8 || $b->[0] != 29) { say("FAIL unshift-grow"); $pass = 0; }
+    # 3. splice into a compact array (grows)
+    my scalar $c = [1, 2, 3];
+    splice(@$c, 1, 0, 10, 11, 12, 13, 14, 15);
+    if (size(@$c) != 9 || $c->[1] != 10 || $c->[7] != 2) { say("FAIL splice-grow: " . size(@$c)); $pass = 0; }
+    # 4. index-set creating holes (grows + gap-fill)
+    my scalar $d = [1, 2];
+    $d->[20] = 99;
+    if (size(@$d) != 21 || $d->[20] != 99 || $d->[0] != 1) { say("FAIL index-grow"); $pass = 0; }
+    # 5. pop a compact array to size<cap then grow again
+    my scalar $e = [1, 2, 3, 4];
+    pop(@$e); pop(@$e);
+    push(@$e, 100); push(@$e, 101); push(@$e, 102);
+    if (size(@$e) != 5 || $e->[4] != 102 || $e->[0] != 1) { say("FAIL pop-then-grow"); $pass = 0; }
+    # 6. nested compact arrays (tree shape), freed at scope exit
+    my int $k = 0;
+    while ($k < 10000) { my scalar $t = [ [$k, $k+1], [$k+2, $k+3] ]; $k = $k + 1; }
+    # 7. compact array shared via assignment then both used
+    my scalar $f = [7, 8];
+    my scalar $g = $f;
+    push(@$g, 9);
+    if (size(@$g) != 3) { say("FAIL shared-grow"); $pass = 0; }
+    if ($pass == 1) { say("compact_stress: all passed"); }
+    return 0;
+}

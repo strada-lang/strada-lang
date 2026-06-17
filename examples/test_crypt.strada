@@ -1,0 +1,152 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_crypt.strada - Test the crypt password hashing library
+#
+# Run: ./strada -r examples/test_crypt.strada
+
+use lib "lib";
+use crypt;
+
+func main() int {
+    say("=== Crypt Library Tests ===");
+    say("");
+
+    my int $passed = 0;
+    my int $failed = 0;
+
+    # Test 1: Check algorithm support
+    say("--- Algorithm Support ---");
+
+    if (crypt::is_supported("des") == 1) { say("  des: supported"); }
+    else { say("  des: NOT supported"); }
+
+    if (crypt::is_supported("md5") == 1) { say("  md5: supported"); }
+    else { say("  md5: NOT supported"); }
+
+    if (crypt::is_supported("sha256") == 1) { say("  sha256: supported"); }
+    else { say("  sha256: NOT supported"); }
+
+    if (crypt::is_supported("sha512") == 1) { say("  sha512: supported"); }
+    else { say("  sha512: NOT supported"); }
+
+    if (crypt::is_supported("bcrypt") == 1) { say("  bcrypt: supported"); }
+    else { say("  bcrypt: NOT supported"); }
+    say("");
+
+    # Test 2: Generate salts
+    say("--- Salt Generation ---");
+
+    my str $salt_md5 = crypt::gen_salt("md5");
+    say("  MD5 salt: " . $salt_md5);
+    if (length($salt_md5) > 0) { $passed = $passed + 1; } else { $failed = $failed + 1; }
+
+    my str $salt_sha256 = crypt::gen_salt("sha256");
+    say("  SHA-256 salt: " . $salt_sha256);
+    if (length($salt_sha256) > 0) { $passed = $passed + 1; } else { $failed = $failed + 1; }
+
+    my str $salt_sha512 = crypt::gen_salt("sha512");
+    say("  SHA-512 salt: " . $salt_sha512);
+    if (length($salt_sha512) > 0) { $passed = $passed + 1; } else { $failed = $failed + 1; }
+
+    my str $salt_rounds = crypt::gen_salt_rounds("sha512", 10000);
+    say("  SHA-512 (10000 rounds): " . $salt_rounds);
+    if (length($salt_rounds) > 0) { $passed = $passed + 1; } else { $failed = $failed + 1; }
+
+    say("");
+
+    # Test 3: Hash passwords
+    say("--- Password Hashing ---");
+
+    my str $password = "mysecretpassword";
+
+    my str $hash_sha512 = crypt::crypt_hash($password, $salt_sha512);
+    say("  SHA-512 hash: " . $hash_sha512);
+    if (length($hash_sha512) > 10) { $passed = $passed + 1; } else { $failed = $failed + 1; }
+
+    # Test convenience function
+    my str $hash_auto = crypt::hash_password($password);
+    say("  Auto hash: " . $hash_auto);
+    if (length($hash_auto) > 10) { $passed = $passed + 1; } else { $failed = $failed + 1; }
+
+    say("");
+
+    # Test 4: Verify passwords
+    say("--- Password Verification ---");
+
+    # Correct password
+    if (crypt::verify($password, $hash_sha512) == 1) {
+        say("  PASS: Correct password verified");
+        $passed = $passed + 1;
+    } else {
+        say("  FAIL: Correct password not verified");
+        $failed = $failed + 1;
+    }
+
+    # Wrong password
+    if (crypt::verify("wrongpassword", $hash_sha512) == 0) {
+        say("  PASS: Wrong password rejected");
+        $passed = $passed + 1;
+    } else {
+        say("  FAIL: Wrong password not rejected");
+        $failed = $failed + 1;
+    }
+
+    # Verify auto-generated hash
+    if (crypt::verify($password, $hash_auto) == 1) {
+        say("  PASS: Auto hash verified");
+        $passed = $passed + 1;
+    } else {
+        say("  FAIL: Auto hash not verified");
+        $failed = $failed + 1;
+    }
+
+    say("");
+
+    # Test 5: Algorithm detection
+    say("--- Algorithm Detection ---");
+
+    my str $algo1 = crypt::get_algorithm($hash_sha512);
+    say("  Detected algorithm for SHA-512 hash: " . $algo1);
+    if ($algo1 eq "sha512") { $passed = $passed + 1; } else { $failed = $failed + 1; }
+
+    my str $algo2 = crypt::get_algorithm($hash_auto);
+    say("  Detected algorithm for auto hash: " . $algo2);
+    if ($algo2 eq "sha512") { $passed = $passed + 1; } else { $failed = $failed + 1; }
+
+    # Test MD5 hash detection
+    my str $md5_salt = crypt::gen_salt("md5");
+    my str $md5_hash = crypt::crypt_hash("test", $md5_salt);
+    my str $algo3 = crypt::get_algorithm($md5_hash);
+    say("  Detected algorithm for MD5 hash: " . $algo3);
+    if ($algo3 eq "md5") { $passed = $passed + 1; } else { $failed = $failed + 1; }
+
+    say("");
+
+    # Summary
+    say("=== Summary ===");
+    say("Passed: " . $passed);
+    say("Failed: " . $failed);
+
+    if ($failed == 0) {
+        say("All tests passed!");
+        return 0;
+    } else {
+        say("Some tests failed.");
+        return 1;
+    }
+}

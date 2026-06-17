@@ -1,0 +1,37 @@
+use lib "lib";
+use Syslog;
+
+func main() int {
+    # Open syslog connection
+    # - "strada-demo" will be prepended to all messages
+    # - LOG_PID includes process ID
+    # - LOG_USER is the facility for user applications
+    Syslog::open("strada-demo", Syslog::LOG_PID(), Syslog::LOG_USER());
+
+    # Log messages at various priority levels
+    Syslog::info("Application started");
+    Syslog::debug("Debug message - may be filtered");
+    Syslog::notice("This is a notice");
+    Syslog::warning("This is a warning");
+    Syslog::err("This is an error");
+
+    # You can also use write() directly with any priority
+    Syslog::write(Syslog::LOG_INFO(), "Direct write with LOG_INFO");
+
+    # Set log mask to only log warnings and above
+    my int $old_mask = Syslog::setmask(Syslog::upto(Syslog::LOG_WARNING()));
+    Syslog::info("This won't be logged - below warning level");
+    Syslog::warning("This will be logged");
+    Syslog::err("This will also be logged");
+
+    # Restore old mask
+    Syslog::setmask($old_mask);
+
+    Syslog::info("Application shutting down");
+
+    # Close connection
+    Syslog::close();
+
+    say("Messages written to syslog. Check with: journalctl -t strada-demo");
+    return 0;
+}

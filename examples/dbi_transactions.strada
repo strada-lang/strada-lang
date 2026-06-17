@@ -1,0 +1,137 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# dbi_transactions.strada - DBI Transaction Example
+#
+# Demonstrates transaction handling with commit/rollback
+# Run: ./strada examples/dbi_transactions.strada
+
+use lib "lib";
+use DBI;
+
+func show_balance(scalar $dbh, str $account) int {
+    my scalar $row = DBI::selectrow_hashref($dbh,
+        "SELECT balance FROM accounts WHERE name = ?", [$account]);
+    if (defined($row)) {
+        return $row->{"balance"};
+    }
+    return 0;
+}
+
+func show_all_balances(scalar $dbh) void {
+    my scalar $accounts = DBI::selectall_hashref($dbh,
+        "SELECT name, balance FROM accounts ORDER BY name", []);
+
+    say("  Account Balances:");
+    my int $i = 0;
+    while ($i < size($accounts)) {
+        my scalar $acc = $accounts->[$i];
+        say("    " . $acc->{"name"} . ": $" . $acc->{"balance"});
+        $i = $i + 1;
+    }
+}
+
+func transfer(scalar $dbh, str $from, str $to, int $amount) int {
+    say("\n>>> Transferring $" . $amount . " from " . $from . " to " . $to);
+
+    # Start transaction
+    DBI::begin_work($dbh);
+
+    # Check source balance
+    my int $from_balance = show_balance($dbh, $from);
+    if ($from_balance < $amount) {
+        say("ERROR: Insufficient funds! Rolling back...");
+        DBI::rollback($dbh);
+        return 0;
+    }
+
+    # Deduct from source
+    DBI::do($dbh, "UPDATE accounts SET balance = balance - ? WHERE name = ?",
+        [$amount, $from]);
+
+    # Add to destination
+    DBI::do($dbh, "UPDATE accounts SET balance = balance + ? WHERE name = ?",
+        [$amount, $to]);
+
+    # Commit transaction
+    DBI::commit($dbh);
+    say("Transfer completed successfully");
+
+    return 1;
+}
+
+func main(int $argc, array @argv) int {
+    say("=== DBI Transaction Example ===\n");
+
+    my scalar $dbh = DBI::connect("dbi:SQLite::memory:", "", "");
+    if (!defined($dbh)) {
+        say("Error: Could not connect");
+        return 1;
+    }
+
+    # Create accounts table
+    DBI::do_sql($dbh, "
+        CREATE TABLE accounts (
+            id INTEGER PRIMARY KEY,
+            name TEXT UNIQUE NOT NULL,
+            balance INTEGER NOT NULL DEFAULT 0
+        )
+    ");
+
+    # Create some accounts
+    DBI::do($dbh, "INSERT INTO accounts (name, balance) VALUES (?, ?)", ["Alice", 1000]);
+    DBI::do($dbh, "INSERT INTO accounts (name, balance) VALUES (?, ?)", ["Bob", 500]);
+    DBI::do($dbh, "INSERT INTO accounts (name, balance) VALUES (?, ?)", ["Charlie", 250]);
+
+    say("Initial state:");
+    show_all_balances($dbh);
+
+    # Successful transfer
+    transfer($dbh, "Alice", "Bob", 200);
+    show_all_balances($dbh);
+
+    # Another transfer
+    transfer($dbh, "Bob", "Charlie", 100);
+    show_all_balances($dbh);
+
+    # Failed transfer (insufficient funds)
+    transfer($dbh, "Charlie", "Alice", 500);
+    show_all_balances($dbh);
+
+    say("\n=== Demonstrating Rollback ===");
+
+    # Manual rollback demonstration
+    say("\nStarting transaction...");
+    DBI::begin_work($dbh);
+
+    say("Setting all balances to 0...");
+    DBI::do_sql($dbh, "UPDATE accounts SET balance = 0");
+
+    say("Balances after update (within transaction):");
+    show_all_balances($dbh);
+
+    say("\nOops! Rolling back...");
+    DBI::rollback($dbh);
+
+    say("Balances after rollback:");
+    show_all_balances($dbh);
+
+    DBI::disconnect($dbh);
+    say("\nDone!");
+
+    return 0;
+}

@@ -1,0 +1,72 @@
+#!/usr/bin/env strada
+# Round 16 leak regressions:
+#
+# 1. `local $var = ...` inside a loop body leaked the strdup'd name
+#    plus the saved-value SV until function exit — but the
+#    integer-return-from-int-main path (and bare `return;`)
+#    didn't emit `strada_local_restore_to(__local_saved_depth)`,
+#    so even at function exit the saves leaked.
+# 2. `$obj->m(arg1, throwing_call(), arg3)` leaked arg1's owned
+#    temp — the devirtualized method-call codegen captured
+#    __dv_a0..N before evaluating each arg but never pushed the
+#    already-built ones to the cleanup stack.
+# 3. `my %h = ("a" => "x", "b" => throwing_call(), ...)` leaked the
+#    inner pair-array (__aa_arr<t>) after `strada_new_ref` if a
+#    later pair's value threw. The arr's refcount was 2 (caller +
+#    ref) but only the ref got drained; the caller's "owned" ref
+#    survived without owner. Fixed by switching the inner
+#    new_ref to new_ref_take and dropping the matching decref.
+#
+# Run: valgrind --leak-check=full ./test_round16_local_method_hash
+
+package Obj;
+func new() scalar { my hash %s = (); return bless(\%s, "Obj"); }
+func m(scalar $self, scalar $a, scalar $b, scalar $c) void { }
+
+package main;
+
+func boom() str { throw "x"; return ""; }
+
+our str $g = "init";
+
+func test_local_in_loop() void {
+    my int $iter = 200;
+    my int $i = 0;
+    while ($i < $iter) {
+        local $g = "loop";
+        $i = $i + 1;
+    }
+    say("test_local_in_loop: PASS");
+}
+
+func test_method_mid_arg_throw() void {
+    my scalar $o = Obj::new();
+    my int $iter = 200;
+    my int $i = 0;
+    while ($i < $iter) {
+        try {
+            $o->m("first-arg-payload-AAAAAA", boom(), "third");
+        } catch ($e) { }
+        $i = $i + 1;
+    }
+    say("test_method_mid_arg_throw: PASS");
+}
+
+func test_hash_pair_throw() void {
+    my int $iter = 200;
+    my int $i = 0;
+    while ($i < $iter) {
+        try {
+            my hash %h = ("a" => "one-payload-AAAAAAA", "b" => boom(), "c" => "three");
+        } catch ($e) { }
+        $i = $i + 1;
+    }
+    say("test_hash_pair_throw: PASS");
+}
+
+func main() int {
+    test_local_in_loop();
+    test_method_mid_arg_throw();
+    test_hash_pair_throw();
+    return 0;
+}

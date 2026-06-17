@@ -1,0 +1,393 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# Main.strada - Entry point for self-hosting Strada compiler
+# This is the main compiler executable
+
+# Deduce the lib root from a source file's `package X::Y;` directive and
+# the path it lives at. Returns "" if no package declaration is found or
+# the file path doesn't match the package's expected layout.
+#
+# Example: source declares `package Perla::CodeGen::Eval;` and lives at
+# `perla/lib/Perla/CodeGen/Eval.strada` -> lib root `perla/lib`.
+# Used in -M mode so submodules don't need explicit -L to resolve their
+# `use` statements.
+func _deduce_lib_root_from_source(str $source, str $filename) str {
+    # Locate the first start-of-line `package ` via index() — char-by-char
+    # scanning was O(N) per character and timed out on large concatenated
+    # .strada files (e.g. lib/Eval.strada is 15K lines, package is at line
+    # 9K — would scan ~470K chars × per-char substr() allocations).
+    my int $slen = length($source);
+    # Special-case: file starts with `package ` (no leading newline).
+    my int $pkg_decl_start = -1;
+    if ($slen >= 8 && substr($source, 0, 8) eq "package ") {
+        $pkg_decl_start = 0;
+    } else {
+        my int $nl_idx = index($source, "\npackage ");
+        if ($nl_idx >= 0) { $pkg_decl_start = $nl_idx + 1; }
+    }
+    if ($pkg_decl_start < 0) { return ""; }
+    # Skip past "package " and any extra whitespace.
+    my int $j = $pkg_decl_start + 8;
+    while ($j < $slen && (substr($source, $j, 1) eq " " || substr($source, $j, 1) eq "\t")) {
+        $j = $j + 1;
+    }
+    my int $pstart = $j;
+    while ($j < $slen) {
+        my str $ch = substr($source, $j, 1);
+        if (($ch ge "a" && $ch le "z") || ($ch ge "A" && $ch le "Z")
+            || ($ch ge "0" && $ch le "9") || $ch eq "_" || $ch eq ":") {
+            $j = $j + 1;
+        } else { last; }
+    }
+    my str $pkg_name = "";
+    if ($j > $pstart) {
+        $pkg_name = substr($source, $pstart, $j - $pstart);
+    }
+    if (length($pkg_name) == 0) { return ""; }
+    # Convert `X::Y::Z` to relative path `X/Y/Z.strada`.
+    my str $rel = "";
+    my int $pi = 0;
+    my int $plen = length($pkg_name);
+    while ($pi < $plen) {
+        my str $pc = substr($pkg_name, $pi, 1);
+        if ($pc eq ":" && $pi + 1 < $plen && substr($pkg_name, $pi + 1, 1) eq ":") {
+            $rel = $rel . "/";
+            $pi = $pi + 2;
+        } else {
+            $rel = $rel . $pc;
+            $pi = $pi + 1;
+        }
+    }
+    $rel = $rel . ".strada";
+    # Does $filename end with $rel (preceded by `/` so we don't match
+    # a path that just happens to share a tail)?
+    my int $fnlen = length($filename);
+    my int $rellen = length($rel);
+    if ($fnlen < $rellen) { return ""; }
+    my int $suffix_start = $fnlen - $rellen;
+    if (substr($filename, $suffix_start, $rellen) ne $rel) { return ""; }
+    # filename is exactly $rel — lib_root is cwd
+    if ($suffix_start == 0) { return "."; }
+    # Boundary: require a `/` right before $rel so we don't match a path
+    # whose tail just happens to coincide.
+    if (substr($filename, $suffix_start - 1, 1) ne "/") { return ""; }
+    # Lib root is the prefix WITHOUT the trailing slash.
+    return substr($filename, 0, $suffix_start - 1);
+}
+
+func compile(str $source, str $filename, int $debug_info, int $show_timing, int $show_warnings, int $strict_types, int $enable_profiling, int $enable_stack_trace, int $full_profile, scalar $lib_paths, scalar $lib_paths_low, scalar $implicit_objs, scalar $implicit_archs, int $module_only_mode, str $module_target) str {
+    my num $t0 = 0.0;
+    my num $t1 = 0.0;
+
+    # In `-M` mode (precompiling a single .strada module), auto-deduce a
+    # default lib path so cross-package `use Foo::Bar;` resolves to
+    # `<lib_root>/Foo/Bar.strada` without the caller having to pass -L
+    # explicitly. The deduction: if the source declares `package X::Y;`
+    # and the file lives at `.../X/Y.strada` (or `.../X/Y.strada`), then
+    # the lib root is the prefix BEFORE that nested directory. Without
+    # this, sub-modules built via `strada -M` see empty lib paths and
+    # can't resolve their `use` statements — silently falling through to
+    # implicit C function declarations whose default `int func()` ABI
+    # mismatches the actual `StradaValue *func(StradaValue *)`, causing
+    # SIGSEGV at runtime when the implicit-decl call hits a real
+    # cross-module function.
+    if ($module_only_mode == 1) {
+        my str $deduced = _deduce_lib_root_from_source($source, $filename);
+        if (length($deduced) > 0) {
+            # Append only if not already present (avoid duplicates).
+            my int $li = 0;
+            my int $lcount = scalar(@{$lib_paths});
+            my int $found = 0;
+            while ($li < $lcount) {
+                if ($lib_paths->[$li] eq $deduced) { $found = 1; last; }
+                $li = $li + 1;
+            }
+            if ($found == 0) {
+                push(@{$lib_paths}, $deduced);
+            }
+        }
+    }
+
+    # Tokenize
+    $t0 = core::hires_time();
+    my scalar $tokens = lex_tokenize($source);
+    $t1 = core::hires_time();
+    if ($show_timing == 1) {
+        say("  Lexer:    " . ($t1 - $t0) . " seconds");
+    }
+
+    # Parse (with optional library paths from -L and -LL flags, plus any
+    # implicit imports from CLI-passed .o/.a files)
+    $t0 = core::hires_time();
+    my scalar $ast = parse_with_implicit_imports($tokens, $filename, $lib_paths, $lib_paths_low, $implicit_objs, $implicit_archs);
+    $ast->{"module_only_mode"} = $module_only_mode;
+    $ast->{"module_target"} = $module_target;
+    $t1 = core::hires_time();
+    if ($show_timing == 1) {
+        say("  Parser:   " . ($t1 - $t0) . " seconds");
+    }
+
+    # Semantic analysis (validates symbols, types, etc.)
+    $t0 = core::hires_time();
+    semantic_analyze($ast, $show_warnings, $strict_types);
+    $t1 = core::hires_time();
+    if ($show_timing == 1) {
+        say("  Semantic: " . ($t1 - $t0) . " seconds");
+    }
+
+    # Generate code (pass debug flag for #line directives, profiling flag, stack trace flag)
+    $t0 = core::hires_time();
+    my str $code = generate($ast, $filename, $debug_info, $enable_profiling, $enable_stack_trace, $full_profile);
+    $t1 = core::hires_time();
+    if ($show_timing == 1) {
+        say("  CodeGen:  " . ($t1 - $t0) . " seconds");
+    }
+
+    return $code;
+}
+
+func print_usage() void {
+    say("Strada Compiler v1.0 (Self-Hosting)");
+    say("Usage: stradac [options] <input.strada> <output.c>");
+    say("");
+    say("Options:");
+    say("  -L <path>       Add library search path (high priority, searched first)");
+    say("  -LL <path>      Add library search path (low priority, searched last)");
+    say("  --import-object <path>   Treat <path> as implicit import_object (full path)");
+    say("  --import-archive <path>  Treat <path> as implicit import_archive (full path)");
+    say("  -M [TARGET]    Module-only codegen: only emit bodies/globals/blocks");
+    say("                 for TARGET (default: derived from input filename).");
+    say("                 Use after compiling Foo.strada to produce Foo.o.");
+    say("  -g, --debug     Emit #line directives for source-level debugging");
+    say("  -p, --profile   Enable function profiling (timing and call counts)");
+    say("  --full-profile  Enable line-level profiling (writes strada-prof.out)");
+    say("  -t, --timing    Show compilation phase timing");
+    say("  -w, --warnings  Show warnings (unused variables, etc.)");
+    say("  --stack-trace     Force enable stack trace support");
+    say("  --no-stack-trace  Force disable stack trace support");
+    say("                    (default: auto-detect from try/throw/caller usage)");
+    say("  -v, --verbose   Show compilation progress");
+    say("  -h, --help      Show this help message");
+    say("");
+    say("The self-hosting Strada compiler, written in Strada.");
+}
+
+func main() int {
+    # NOTE: the strada wrapper invokes stradac with STRADA_GC=off — the
+    # compiler is a one-shot batch process (everything freed by refcount +
+    # exit), so cycle-collector candidate buffering was ~6% of compile
+    # time. The switch lives in the runtime's strada_init_proctitle (env
+    # check) because the frozen bootstrap can't compile new builtins like
+    # core::gc_disable() into stage 1.
+    my int $arg_count = size(@ARGV);
+
+    # Parse command-line arguments
+    my int $debug_info = 0;
+    my int $show_timing = 0;
+    my int $show_warnings = 0;
+    my int $strict_types = 0;
+    my int $enable_profiling = 0;
+    my int $full_profile = 0;
+    my int $enable_stack_trace = -1;  # Auto-detect by default
+    my int $verbose = 0;
+    my str $input_file = "";
+    my str $output_file = "";
+    my array @lib_paths = ();
+    my array @lib_paths_low = ();
+    my array @implicit_objs = ();
+    my array @implicit_archs = ();
+    my int $module_only_mode = 0;
+    my str $module_target = "";
+    # Start from 0 — @ARGV excludes program name (Perl-style)
+    # For bootstrap compatibility, also skip if ARGV[0] looks like program name
+    my int $i = 0;
+    if ($arg_count > 0 && index($ARGV[0], "stradac") >= 0) {
+        $i = 1;
+    }
+
+    while ($i < $arg_count) {
+        my str $arg = $ARGV[$i];
+
+        if ($arg eq "-g" || $arg eq "--debug") {
+            $debug_info = 1;
+        } elsif ($arg eq "-p" || $arg eq "--profile") {
+            $enable_profiling = 1;
+        } elsif ($arg eq "-t" || $arg eq "--timing") {
+            $show_timing = 1;
+        } elsif ($arg eq "-w" || $arg eq "--warnings") {
+            $show_warnings = 1;
+        } elsif ($arg eq "--strict-types") {
+            $strict_types = 1;
+        } elsif ($arg eq "--full-profile") {
+            $full_profile = 1;
+            $debug_info = 1;  # Full profiling implies debug (needs line info)
+        } elsif ($arg eq "-v" || $arg eq "--verbose") {
+            $verbose = 1;
+        } elsif ($arg eq "--no-stack-trace") {
+            $enable_stack_trace = 0;
+        } elsif ($arg eq "--stack-trace") {
+            $enable_stack_trace = 1;
+        } elsif ($arg eq "-LL") {
+            # -LL <path> - add low-priority library search path
+            $i = $i + 1;
+            if ($i < $arg_count) {
+                push(@lib_paths_low, $ARGV[$i]);
+            } else {
+                say("Error: -LL requires a path argument");
+                return 1;
+            }
+        } elsif (substr($arg, 0, 3) eq "-LL") {
+            # -LL<path> (no space) - add low-priority library search path
+            my str $path = substr($arg, 3, length($arg) - 3);
+            push(@lib_paths_low, $path);
+        } elsif ($arg eq "-L") {
+            # -L <path> - add library search path
+            $i = $i + 1;
+            if ($i < $arg_count) {
+                push(@lib_paths, $ARGV[$i]);
+            } else {
+                say("Error: -L requires a path argument");
+                return 1;
+            }
+        } elsif (substr($arg, 0, 2) eq "-L") {
+            # -L<path> (no space) - add library search path
+            my str $path = substr($arg, 2, length($arg) - 2);
+            push(@lib_paths, $path);
+        } elsif ($arg eq "--import-object") {
+            # --import-object <path> - treat path as implicit import_object
+            $i = $i + 1;
+            if ($i < $arg_count) {
+                push(@implicit_objs, $ARGV[$i]);
+            } else {
+                say("Error: --import-object requires a path argument");
+                return 1;
+            }
+        } elsif ($arg eq "-M") {
+            # -M [TARGET] - module-only codegen. TARGET is optional; if the
+            # next arg starts with '-' or is missing, derive from input file.
+            $module_only_mode = 1;
+            if ($i + 1 < $arg_count) {
+                my str $next_arg = $ARGV[$i + 1];
+                if (length($next_arg) > 0 && substr($next_arg, 0, 1) ne "-") {
+                    # Next arg looks like a target name (NOT a flag). Consume
+                    # it only if it doesn't look like a filename — namely, if
+                    # it has no extension and no '/' in it.
+                    if (index($next_arg, "/") < 0 && index($next_arg, ".") < 0) {
+                        $module_target = $next_arg;
+                        $i = $i + 1;
+                    }
+                }
+            }
+        } elsif ($arg eq "--import-archive") {
+            # --import-archive <path> - treat path as implicit import_archive
+            $i = $i + 1;
+            if ($i < $arg_count) {
+                push(@implicit_archs, $ARGV[$i]);
+            } else {
+                say("Error: --import-archive requires a path argument");
+                return 1;
+            }
+        } elsif ($arg eq "-h" || $arg eq "--help") {
+            print_usage();
+            return 0;
+        } elsif (substr($arg, 0, 1) eq "-") {
+            say("Unknown option: " . $arg);
+            print_usage();
+            return 1;
+        } elsif (length($input_file) == 0) {
+            $input_file = $arg;
+        } elsif (length($output_file) == 0) {
+            $output_file = $arg;
+        }
+
+        $i = $i + 1;
+    }
+
+    # Check required arguments
+    if (length($input_file) == 0 || length($output_file) == 0) {
+        print_usage();
+        return 1;
+    }
+
+    if ($verbose == 1) {
+        say("Strada Compiler (Self-Hosting)");
+        if ($debug_info == 1) {
+            say("Debug mode: emitting #line directives");
+        }
+        if ($enable_profiling == 1) {
+            say("Profiling mode: instrumenting functions for timing");
+        }
+        if ($full_profile == 1) {
+            say("Full profiling mode: line-level instrumentation enabled");
+        }
+        say("Compiling: " . $input_file . " -> " . $output_file);
+    }
+
+    # Read source file
+    my str $source = slurp($input_file);
+
+    # Auto-detect stack trace need if not explicitly set
+    if ($enable_stack_trace == -1) {
+        if (index($source, "try ") >= 0 || index($source, "try{") >= 0 ||
+            index($source, "throw ") >= 0 || index($source, "throw(") >= 0 ||
+            index($source, "caller(") >= 0 || index($source, "caller()") >= 0 ||
+            index($source, "stack_trace(") >= 0 || index($source, "stacktrace(") >= 0) {
+            $enable_stack_trace = 1;
+        } else {
+            $enable_stack_trace = 0;
+        }
+    }
+
+    # Derive module target from input filename when -M was given without
+    # an explicit target: "path/Foo.strada" -> "Foo".
+    if ($module_only_mode == 1 && length($module_target) == 0) {
+        my str $base = $input_file;
+        my int $slash = -1;
+        my int $idx = length($base) - 1;
+        while ($idx >= 0) {
+            my str $ch = substr($base, $idx, 1);
+            if ($ch eq "/" || $ch eq "\\") { $slash = $idx; last; }
+            $idx = $idx - 1;
+        }
+        if ($slash >= 0) {
+            $base = substr($base, $slash + 1, length($base) - $slash - 1);
+        }
+        # Strip .strada extension
+        my int $blen = length($base);
+        if ($blen > 7 && substr($base, $blen - 7, 7) eq ".strada") {
+            $base = substr($base, 0, $blen - 7);
+        }
+        $module_target = $base;
+    }
+
+    if ($verbose == 1 && $module_only_mode == 1) {
+        say("Module-only mode: target = " . $module_target);
+    }
+
+    # Compile (pass lib paths, CLI-implicit imports, and module-only settings)
+    my str $code = compile($source, $input_file, $debug_info, $show_timing, $show_warnings, $strict_types, $enable_profiling, $enable_stack_trace, $full_profile, \@lib_paths, \@lib_paths_low, \@implicit_objs, \@implicit_archs, $module_only_mode, $module_target);
+
+    # Write output
+    spew($output_file, $code);
+
+    if ($verbose == 1) {
+        say("Success! Generated " . $output_file);
+    }
+
+    return 0;
+}

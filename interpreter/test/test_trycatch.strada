@@ -1,0 +1,35 @@
+package MyError;
+has ro str $message (required);
+
+package main;
+func main() int {
+    # Basic try/catch
+    try {
+        throw("simple error");
+    } catch ($e) {
+        say("caught: " . $e);
+    }
+
+    # Typed exception
+    try {
+        throw(MyError::new("message", "something went wrong"));
+    } catch (MyError $e) {
+        say("MyError: " . $e->message());
+    } catch ($e) {
+        say("should not reach here");
+    }
+
+    # Nested try/catch
+    try {
+        try {
+            throw("inner");
+        } catch ($e) {
+            say("inner caught: " . $e);
+            throw("rethrown");
+        }
+    } catch ($e) {
+        say("outer caught: " . $e);
+    }
+
+    return 0;
+}

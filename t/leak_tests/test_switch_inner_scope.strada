@@ -1,0 +1,73 @@
+#!/usr/bin/env strada
+# Leak regression test for switch case/default bodies with `my` decls.
+#
+# Before the fix, case bodies did not push a codegen scope, so `my`
+# declarations inside emitted decref calls at function epilogue —
+# outside the C scope where the variable was declared. The C compiler
+# refused to compile the result ("undeclared identifier"), so this
+# pattern was unusable. With the fix, each case body has its own
+# scope and any owned StradaValue* declared inside is freed at end
+# of case body.
+#
+# We exercise inner-scope decls of multiple types (str, int) inside
+# `case` bodies and `default`, in a hot loop. Case expressions use
+# outer-scope variables so the analyze_expression code path in the
+# semantic pass also runs.
+#
+# Run: valgrind --leak-check=full ./test_switch_inner_scope
+
+package main;
+
+func classify(int $zero_key, int $ten_key, int $n) str {
+    my str $tag = "?";
+    switch ($n) {
+        case $zero_key {
+            my str $local = "zero";
+            my str $stuffed = $local . "!";
+            $tag = $stuffed;
+        }
+        case $ten_key {
+            my str $local = "ten";
+            my int $double = 1 * 2;
+            $tag = $local . "x" . $double;
+        }
+        default {
+            my int $mag = $n;
+            if ($mag < 0) { $mag = 0 - $mag; }
+            my str $prefix = "other";
+            $tag = $prefix . ":" . $mag;
+        }
+    }
+    return $tag;
+}
+
+func test_switch_inner_decls() void {
+    my int $zero_key = 0;
+    my int $ten_key = 10;
+    my int $iterations = 500;
+    my int $i = 0;
+    while ($i < $iterations) {
+        my str $a = classify($zero_key, $ten_key, 0);
+        if ($a ne "zero!") {
+            say("FAIL a: expected 'zero!' got '" . $a . "'");
+            return;
+        }
+        my str $b = classify($zero_key, $ten_key, 10);
+        if ($b ne "tenx2") {
+            say("FAIL b: expected 'tenx2' got '" . $b . "'");
+            return;
+        }
+        my str $c = classify($zero_key, $ten_key, -5);
+        if ($c ne "other:5") {
+            say("FAIL c: expected 'other:5' got '" . $c . "'");
+            return;
+        }
+        $i = $i + 1;
+    }
+    say("test_switch_inner_decls: PASS");
+}
+
+func main() int {
+    test_switch_inner_decls();
+    return 0;
+}

@@ -1,0 +1,270 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_utf8.strada - Test UTF-8 string support and utf8:: namespace functions
+#
+# Tests that string functions correctly handle multi-byte UTF-8 characters
+# and that the utf8:: namespace functions work correctly
+
+func main(int $argc, array @argv) int {
+    say("=== UTF-8 Support Test ===");
+    say("");
+
+    my int $passed = 0;
+    my int $total = 0;
+
+    # Test 1: length() with ASCII
+    $total = $total + 1;
+    my str $ascii = "hello";
+    if (length($ascii) == 5) {
+        say("OK: length('hello') = 5");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: length('hello') = " . length($ascii) . " (expected 5)");
+    }
+
+    # Test 2: bytes() vs length() with ASCII (should be same)
+    $total = $total + 1;
+    if (bytes($ascii) == 5 && length($ascii) == 5) {
+        say("OK: ASCII: bytes=5, length=5");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: ASCII: bytes=" . bytes($ascii) . ", length=" . length($ascii));
+    }
+
+    # Test 3: chr() with Unicode - Euro sign (U+20AC = 8364)
+    $total = $total + 1;
+    my str $euro = chr(8364);
+    if (length($euro) == 1 && bytes($euro) == 3) {
+        say("OK: Euro sign chr(8364): length=1, bytes=3");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: Euro sign: length=" . length($euro) . ", bytes=" . bytes($euro));
+    }
+
+    # Test 4: ord() with Unicode - should recover codepoint
+    $total = $total + 1;
+    my int $code = ord($euro);
+    if ($code == 8364) {
+        say("OK: ord(Euro) = 8364");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: ord(Euro) = " . $code . " (expected 8364)");
+    }
+
+    # Test 5: chr() and ord() roundtrip with various codepoints
+    $total = $total + 1;
+    my int $heart_code = 10084;  # Red heart U+2764
+    my str $heart = chr($heart_code);
+    my int $recovered = ord($heart);
+    if ($recovered == $heart_code) {
+        say("OK: chr/ord roundtrip for heart (U+2764)");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: roundtrip got " . $recovered . " (expected " . $heart_code . ")");
+    }
+
+    # Test 6: Build multi-character UTF-8 string and check length
+    $total = $total + 1;
+    # Build "AeB" where e is e-acute (U+00E9)
+    my str $mixed = "A" . chr(233) . "B";  # 233 = 0xE9 = e-acute
+    if (length($mixed) == 3) {
+        say("OK: 'A[e-acute]B' has 3 characters");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: 'A[e-acute]B' has " . length($mixed) . " characters (expected 3)");
+    }
+
+    # Test 7: substr() with UTF-8 - extract the middle character
+    $total = $total + 1;
+    my str $mid = substr($mixed, 1, 1);
+    if (bytes($mid) == 2 && length($mid) == 1) {
+        say("OK: substr() extracted 2-byte character correctly");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: substr() got bytes=" . bytes($mid) . ", length=" . length($mid));
+    }
+
+    # Test 8: reverse() with UTF-8
+    $total = $total + 1;
+    my str $rev = reverse($mixed);
+    # Expected: "B[e-acute]A"
+    my str $first_char = substr($rev, 0, 1);
+    my str $last_char = substr($rev, 2, 1);
+    if ($first_char eq "B" && $last_char eq "A") {
+        say("OK: reverse() correctly reversed UTF-8 string");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: reverse() first='" . $first_char . "', last='" . $last_char . "'");
+    }
+
+    # Test 9: index() with UTF-8 - returns character position
+    $total = $total + 1;
+    # "hello[e-acute]world" - find "world" should be at char pos 6
+    my str $search = "hello" . chr(233) . "world";
+    my int $pos = index($search, "world");
+    if ($pos == 6) {
+        say("OK: index() returned character position 6");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: index() returned " . $pos . " (expected 6)");
+    }
+
+    # Test 10: Emoji test - Grinning face (U+1F600 = 128512)
+    $total = $total + 1;
+    my str $emoji = chr(128512);
+    if (length($emoji) == 1 && bytes($emoji) == 4) {
+        say("OK: Emoji chr(128512): length=1, bytes=4");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: Emoji: length=" . length($emoji) . ", bytes=" . bytes($emoji));
+    }
+
+    # Test 11: Emoji ord roundtrip
+    $total = $total + 1;
+    my int $emoji_code = ord($emoji);
+    if ($emoji_code == 128512) {
+        say("OK: ord(emoji) = 128512");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: ord(emoji) = " . $emoji_code . " (expected 128512)");
+    }
+
+    # Test 12: Mixed ASCII and multi-byte in substr
+    $total = $total + 1;
+    my str $multi = "Hi" . chr(128075) . "!";  # "Hi[wave]!"
+    if (length($multi) == 4) {
+        say("OK: 'Hi[wave]!' has 4 characters");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: 'Hi[wave]!' has " . length($multi) . " characters");
+    }
+
+    # --- utf8:: namespace function tests ---
+    say("");
+    say("=== utf8:: Namespace Tests ===");
+    say("");
+
+    # Test 13: utf8::is_utf8 with valid ASCII
+    $total = $total + 1;
+    if (utf8::is_utf8($ascii) == 1) {
+        say("OK: utf8::is_utf8('hello') = 1");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: utf8::is_utf8('hello') should be 1");
+    }
+
+    # Test 14: utf8::is_utf8 with valid multibyte UTF-8
+    $total = $total + 1;
+    my str $cafe = "caf" . chr(233);
+    if (utf8::is_utf8($cafe) == 1) {
+        say("OK: utf8::is_utf8('cafe') = 1");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: utf8::is_utf8('cafe') should be 1");
+    }
+
+    # Test 15: utf8::valid (alias for is_utf8)
+    $total = $total + 1;
+    if (utf8::valid($ascii) == 1) {
+        say("OK: utf8::valid('hello') = 1");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: utf8::valid('hello') should be 1");
+    }
+
+    # Test 16: utf8::encode (no-op for Strada, returns same string)
+    $total = $total + 1;
+    my str $encoded = utf8::encode($ascii);
+    if ($encoded eq "hello") {
+        say("OK: utf8::encode returns same string");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: utf8::encode should return same string");
+    }
+
+    # Test 17: utf8::decode with valid UTF-8
+    $total = $total + 1;
+    my scalar $decoded = utf8::decode($ascii);
+    if ($decoded == 1) {
+        say("OK: utf8::decode valid utf8 returns 1");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: utf8::decode valid utf8 should return 1");
+    }
+
+    # Test 18: utf8::upgrade (no-op for Strada)
+    $total = $total + 1;
+    my str $upgraded = utf8::upgrade($ascii);
+    if ($upgraded eq "hello") {
+        say("OK: utf8::upgrade returns same string");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: utf8::upgrade should return same string");
+    }
+
+    # Test 19: utf8::downgrade with pure ASCII (should succeed)
+    $total = $total + 1;
+    my scalar $downgraded = utf8::downgrade($ascii);
+    if ($downgraded eq "hello") {
+        say("OK: utf8::downgrade ascii returns same string");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: utf8::downgrade ascii should return same string");
+    }
+
+    # Test 20: utf8::downgrade with non-ASCII and fail_ok=1
+    $total = $total + 1;
+    my scalar $down_result = utf8::downgrade($cafe, 1);
+    if (defined($down_result) == 0) {
+        say("OK: utf8::downgrade non-ascii with fail_ok returns undef");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: utf8::downgrade non-ascii with fail_ok should return undef");
+    }
+
+    # Test 21: utf8::unicode_to_native (identity on modern systems)
+    $total = $total + 1;
+    my scalar $native = utf8::unicode_to_native(65);
+    if ($native == 65) {
+        say("OK: utf8::unicode_to_native(65) = 65");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: utf8::unicode_to_native(65) should be 65");
+    }
+
+    # Test 22: utf8::is_utf8 with literal string
+    $total = $total + 1;
+    if (utf8::is_utf8("test string") == 1) {
+        say("OK: utf8::is_utf8 with literal");
+        $passed = $passed + 1;
+    } else {
+        say("FAIL: utf8::is_utf8 with literal should be 1");
+    }
+
+    say("");
+    say("=== Results ===");
+    say("Passed: " . $passed . "/" . $total);
+
+    if ($passed == $total) {
+        say("All UTF-8 tests passed!");
+        return 0;
+    } else {
+        say("Some tests failed.");
+        return 1;
+    }
+}

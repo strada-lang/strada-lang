@@ -1,0 +1,43 @@
+# Test: a lazily-loaded .so registering a modifier on a HOST class must
+# take effect even after the host has warmed every dispatch cache.
+# Regression test for the generation-counter invalidation of the dispatch
+# caches (mc_cache, per-call-site StradaCallSite, MRO cache, has_mod
+# verdicts) when import_lib registration happens mid-run.
+use lib "examples";
+import_lib "HookLib.so";
+
+package HookBase;
+func new() scalar { my hash %self = (); $self{"hooked"} = 0; return bless(\%self, "HookBase"); }
+func greet(scalar $self) str { return "hi"; }
+
+package main;
+func main() int {
+    my int $fail = 0;
+    my array @objs;
+    push(@objs, HookBase::new());
+
+    # Warm the dispatch caches hard (type-opaque receiver)
+    my int $i = 0;
+    my int $warm = 0;
+    while ($i < 50000) {
+        my scalar $b = $objs[0];
+        $warm += length($b->greet());
+        $i++;
+    }
+    if ($warm != 100000) { $fail++; say("FAIL warm: " . $warm); }
+
+    my scalar $b = $objs[0];
+    if ($b->{"hooked"} != 0) { $fail++; say("FAIL pre-load hook fired"); }
+
+    # First lib call triggers the lazy dlopen; lib init registers the
+    # before-hook on HookBase::greet through the shared registry.
+    my scalar $c = LibCounter::new(41);
+    if ($c->bump() != 42) { $fail++; say("FAIL lib method"); }
+    if ($c->isa("LibCounter") != 1) { $fail++; say("FAIL lib isa"); }
+
+    $b->greet();
+    if ($b->{"hooked"} != 1) { $fail++; say("FAIL post-load hook did not fire"); }
+
+    if ($fail == 0) { say("All import_lib hook tests passed"); }
+    return $fail;
+}

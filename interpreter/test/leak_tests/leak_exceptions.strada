@@ -1,0 +1,12 @@
+func main() int {
+    my int $i = 0;
+    while ($i < 100) {
+        try {
+            throw("error " . $i);
+        } catch ($e) {
+            my str $msg = "caught: " . $e;
+        }
+        $i = $i + 1;
+    }
+    return 0;
+}

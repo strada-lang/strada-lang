@@ -1,0 +1,132 @@
+#!/usr/bin/env strada
+# Test string operations for memory leaks
+# Run: valgrind --leak-check=full ./test_string_ops
+
+func main() int {
+    say("Testing string operations for memory leaks...");
+    my int $iterations = 100;
+
+    # Test sprintf with various format specifiers
+    say("  sprintf patterns...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my str $s1 = sprintf("Hello %s, you are %d years old", "Alice", 30);
+        my str $s2 = sprintf("%05d", $i);
+        my str $s3 = sprintf("%.2f", 3.14159);
+        my str $s4 = sprintf("%x", 255);
+        if (length($s1) < 10) {
+            say("    FAIL: sprintf");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test string repeat operator (x)
+    say("  string repeat (x)...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $repeated = "ab" x 10;
+        if (length($repeated) != 20) {
+            say("    FAIL: repeat length = " . length($repeated));
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test string repeat with variable count
+    say("  string repeat variable...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $count = ($i % 5) + 1;
+        my str $r = "xyz" x $count;
+        if (length($r) != $count * 3) {
+            say("    FAIL: variable repeat");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test rindex
+    say("  rindex...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $haystack = "hello world hello";
+        my int $pos = rindex($haystack, "hello");
+        if ($pos != 12) {
+            say("    FAIL: rindex = " . $pos);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test tr///
+    say("  tr///...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = "Hello World";
+        $s =~ tr/a-z/A-Z/;
+        if ($s ne "HELLO WORLD") {
+            say("    FAIL: tr = " . $s);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test chomp/chop in loops
+    say("  chomp/chop loops...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s1 = "hello\n";
+        my str $chomped = chomp($s1);
+        if ($chomped ne "hello") {
+            say("    FAIL: chomp = " . $chomped);
+            return 1;
+        }
+        my str $s2 = "world";
+        my str $chopped = chop($s2);
+        if ($chopped ne "worl") {
+            say("    FAIL: chop = " . $chopped);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test complex concatenation chains
+    say("  concat chains...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $result = "a" . "b" . "c" . "d" . "e" . "f";
+        if ($result ne "abcdef") {
+            say("    FAIL: concat");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test uc/lc/ucfirst/lcfirst chained
+    say("  case transforms...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = "hello WORLD";
+        my str $u = uc($s);
+        my str $l = lc($s);
+        my str $uf = ucfirst(lc($s));
+        my str $lf = lcfirst(uc($s));
+        if ($u ne "HELLO WORLD") {
+            say("    FAIL: uc");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All string operations tests passed!");
+    return 0;
+}

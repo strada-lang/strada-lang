@@ -1,0 +1,78 @@
+# binary-trees (benchmarks-game style) — the classic allocator stress:
+# build perfect binary trees of arrayref nodes ([left, right]), walk them,
+# throw them away. Arrayref nodes (vs hashref {l,r}) avoid per-node key
+# hashing and a hash backbone, and element access is a borrowed ref (no
+# incref/decref per walk) — ~1.5x faster here than hashrefs. The leanest
+# 2-field node each runtime offers (cf. Go's struct, JS's hidden-class object).
+# Deep pointer-chasing plus allocation/teardown of millions of small
+# nodes; bench_gc's flat churn doesn't exercise depth. Comparable to the
+# public benchmarks-game tables for other languages (depth 16 here).
+#
+# Sections:
+#   stretch    — one depth-17 tree built+checked+freed
+#   long-lived — depth-16 tree kept alive across the run
+#   iterate    — depths 4..14 (step 2), many short-lived trees each
+#
+# Reference numbers: benchmarks/BASELINE.md
+
+package main;
+
+func build(int $depth) scalar {
+    if ($depth == 0) {
+        return [ undef, undef ];
+    }
+    return [ build($depth - 1), build($depth - 1) ];
+}
+
+func check(scalar $node) int {
+    if (!defined($node->[0])) {
+        return 1;
+    }
+    return 1 + check($node->[0]) + check($node->[1]);
+}
+
+func main() int {
+    my int $max_depth = 16;
+
+    my num $t0 = core::hires_time();
+
+    # 1. stretch tree (one large tree; NOT arena-scoped — a single huge arena
+    # makes arena_owns() O(blocks) on every container decref, which costs more
+    # than it saves. The arena shines for many SMALL request-sized scopes, as
+    # in the iterate phase below.)
+    my scalar $stretch = build($max_depth + 1);
+    my int $stretch_check = check($stretch);
+    $stretch = undef;
+    my num $t1 = core::hires_time();
+    say("stretch: " . $stretch_check . " " . ($t1 - $t0));
+
+    # 2. long-lived tree (held while the iteration churns)
+    my scalar $long_lived = build($max_depth);
+    my num $t2 = core::hires_time();
+    say("long-lived: built " . ($t2 - $t1));
+
+    # 3. iterations: many short-lived trees per depth
+    my int $depth = 4;
+    while ($depth <= 14) {
+        my int $iters = 1 << ($max_depth - $depth + 2);
+        my int $sum = 0;
+        my int $i = 0;
+        while ($i < $iters) {
+            # Each short-lived tree gets its own arena scope — bump-allocated
+            # and freed in one shot, the way request-scoped data is meant to be
+            # handled in Strada.
+            core::arena_begin();
+            my scalar $t = build($depth);
+            $sum += check($t);
+            core::arena_end();
+            $i++;
+        }
+        say("depth " . $depth . ": " . $iters . " trees, check " . $sum);
+        $depth += 2;
+    }
+    my num $t3 = core::hires_time();
+    say("iterate: " . check($long_lived) . " " . ($t3 - $t2));
+
+    say("total: " . ($t3 - $t0));
+    return 0;
+}

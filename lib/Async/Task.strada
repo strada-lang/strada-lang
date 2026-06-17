@@ -1,0 +1,170 @@
+# Async::Task — blocking-looking I/O inside green tasks (Async::Loop).
+#
+# Each call tries the non-blocking operation; on would-block it parks the
+# current task until the loop reports readiness. Called outside a task,
+# every function falls back to plain blocking behavior, so the same code
+# runs in both worlds.
+#
+#   use Async::Task;
+#   my scalar $c    = Async::Task::connect("example.com", 80);
+#   my str  $line   = Async::Task::readline($conn);          # undef at EOF
+#   my str  $req    = Async::Task::recv($conn, 4096);        # "" at EOF
+#   my str  $req2   = Async::Task::recv($conn, 4096, 5000);  # 5s timeout -> undef
+#   my int  $sent   = Async::Task::send($conn, $bytes);
+#   my scalar $conn = Async::Task::accept($listener);
+#   my scalar $c2   = Async::Task::accept($listener, 1000);  # timeout -> undef
+#   Async::Task::sleep(250);
+#
+# Timeouts: the optional trailing $timeout_ms (recv/readline/accept/connect)
+# makes the call return undef once the deadline passes. Without it, calls
+# wait indefinitely. (For recv, undef-on-timeout is distinguishable from
+# EOF, which returns "".)
+#
+# try/catch works inside tasks, including across suspensions. Note: name
+# resolution in connect() (getaddrinfo) is still synchronous; only the TCP
+# handshake is non-blocking, and hostname resolution runs on a background
+# thread (the task parks in 1ms slices while waiting).
+
+package Async::Task;
+
+# Park the current task until fd readiness or timeout.
+# Returns 1 = parked and resumed; 0 = not inside a task.
+private func park(scalar $sock_or_fd, str $mask, int $timeout_ms) int {
+    my int $r = core::coro_yield_io($sock_or_fd, $mask, $timeout_ms);
+    if ($r < 0) {
+        throw "Async::Task: illegal suspension";
+    }
+    return $r;
+}
+
+# Remaining time until $deadline (monotonic ms); 0 = no deadline.
+# Returns -1 when the deadline has passed.
+private func remaining(int $deadline) int {
+    if ($deadline == 0) { return 0; }
+    my int $left = $deadline - core::mono_ms();
+    if ($left <= 0) { return 0 - 1; }
+    return $left;
+}
+
+# Receive up to $max bytes. Returns "" on EOF; undef on timeout.
+func recv(scalar $sock, int $max, int $timeout_ms = 0) str {
+    my int $deadline = $timeout_ms > 0 ? core::mono_ms() + $timeout_ms : 0;
+    while (1) {
+        my scalar $data = core::socket_try_recv($sock, $max);
+        if (defined($data)) {
+            return $data;
+        }
+        my int $left = remaining($deadline);
+        if ($left < 0) { return undef; }
+        if (park($sock, "r", $left) == 0) {
+            return core::socket_recv($sock, $max);   # not in a task: block
+        }
+    }
+}
+
+# Read one line (newline stripped). Returns undef at EOF or on timeout.
+func readline(scalar $sock, int $timeout_ms = 0) str {
+    my int $deadline = $timeout_ms > 0 ? core::mono_ms() + $timeout_ms : 0;
+    while (1) {
+        my scalar $line = core::socket_try_readline($sock);
+        if (defined($line)) {
+            if (length($line) == 0) { return undef; }   # EOF
+            chomp($line);
+            return $line;
+        }
+        my int $left = remaining($deadline);
+        if ($left < 0) { return undef; }
+        if (park($sock, "r", $left) == 0) {
+            core::usleep(1000);                          # not in a task: poll
+        }
+    }
+}
+
+# Send all of $data (handles partial writes). Returns bytes sent, -1 error.
+func send(scalar $sock, str $data) int {
+    my int $total = length($data);
+    my str $rest = $data;
+    while (length($rest) > 0) {
+        my int $n = core::socket_try_send($sock, $rest);
+        if ($n < 0) { return 0 - 1; }
+        if ($n == length($rest)) { return $total; }
+        if ($n > 0) {
+            $rest = substr($rest, $n, length($rest) - $n);
+            next;
+        }
+        if (park($sock, "w", 0) == 0) {
+            core::socket_send($sock, $rest);          # not in a task: block
+            return $total;
+        }
+    }
+    return $total;
+}
+
+# Accept one connection. Returns undef on timeout. The listener is switched
+# to non-blocking once (recv/send use per-call MSG_DONTWAIT; accept has no
+# such flag).
+func accept(scalar $listener, int $timeout_ms = 0) scalar {
+    core::socket_set_nonblocking($listener, 1);
+    my int $deadline = $timeout_ms > 0 ? core::mono_ms() + $timeout_ms : 0;
+    while (1) {
+        my scalar $conn = core::socket_try_accept($listener);
+        if (defined($conn)) {
+            return $conn;
+        }
+        my int $left = remaining($deadline);
+        if ($left < 0) { return undef; }
+        if (park($listener, "r", $left) == 0) {
+            return core::socket_accept($listener);    # not in a task: block
+        }
+    }
+}
+
+# Connect without blocking the loop during the TCP handshake. Returns the
+# connected socket, or undef on failure/timeout. (getaddrinfo name
+# resolution is still synchronous.)
+func connect(str $host, int $port, int $timeout_ms = 0) scalar {
+    # Hostnames resolve on a background thread so a slow DNS lookup never
+    # stalls the loop; numeric addresses skip the round-trip entirely.
+    if ($host !~ /^[0-9.:a-fA-F\[\]]+$/ || $host !~ /[0-9]/) {
+        my scalar $rf = async::resolve($host);
+        while (async::is_done($rf) == 0) {
+            sleep(1);   # parks in a task; 1ms blocking poll outside one
+        }
+        my scalar $ip = await $rf;
+        if (!defined($ip)) { return undef; }
+        $host = "" . $ip;
+    }
+    my scalar $sock = core::socket_try_connect($host, $port);
+    if (!defined($sock)) { return undef; }
+    my int $deadline = $timeout_ms > 0 ? core::mono_ms() + $timeout_ms : 0;
+    while (1) {
+        my int $st = core::socket_connect_check($sock);
+        if ($st == 0) { return $sock; }
+        if ($st < 0) {
+            core::socket_close($sock);
+            return undef;
+        }
+        my int $left = remaining($deadline);
+        if ($left < 0) {
+            core::socket_close($sock);
+            return undef;
+        }
+        if (park($sock, "w", $left) == 0) {
+            # Not in a task: brief sleep-poll fallback (handshakes finish
+            # quickly; outside a loop there is nothing to suspend on).
+            core::usleep(1000);
+        }
+    }
+}
+
+# Sleep without blocking the loop.
+func sleep(int $ms) void {
+    my int $minus_one = 0 - 1;
+    my int $r = core::coro_yield_io($minus_one, "", $ms);
+    if ($r < 0) {
+        throw "Async::Task: illegal suspension";
+    }
+    if ($r == 0) {
+        core::usleep($ms * 1000);                     # not in a task: block
+    }
+}

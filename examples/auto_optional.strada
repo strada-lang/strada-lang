@@ -1,0 +1,60 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# auto_optional.strada - Test automatic optional parameter handling
+
+func greet(str $name, str $greeting = "Hello", str $punctuation = "!") void {
+    say($greeting . ", " . $name . $punctuation);
+}
+
+func add_numbers(int $a, int $b = 10, int $c = 5) int {
+    return $a + $b + $c;
+}
+
+func log_message(str $msg, str $level = "INFO", str $module = "main") void {
+    say("[" . upper($level) . "] [" . $module . "] " . $msg);
+}
+
+func main() int {
+    say("=== Automatic Optional Parameters ===");
+    say("");
+    
+    say("--- Greetings ---");
+    # All three ways of calling:
+    greet("Alice", "Hi", "!!!");      # All provided
+    greet("Bob", "Welcome");           # Uses default punctuation "!"
+    greet("Carol");                    # Uses default greeting and punctuation
+    
+    say("");
+    say("--- Number Addition ---");
+    say("5 + 20 + 3 = " . add_numbers(5, 20, 3));   # All provided
+    say("5 + 20 + 5 = " . add_numbers(5, 20));      # Uses default c=5
+    say("5 + 10 + 5 = " . add_numbers(5));          # Uses defaults b=10, c=5
+    
+    say("");
+    say("--- Logging ---");
+    log_message("System started", "INFO", "server");  # All provided
+    log_message("Processing data", "DEBUG");          # Uses default module
+    log_message("Application ready");                 # Uses all defaults
+    
+    say("");
+    say("✓ Optional parameters work automatically!");
+    say("✓ No need to pass strada_new_undef()!");
+    say("✓ Just omit the optional parameters!");
+    
+    return 0;
+}

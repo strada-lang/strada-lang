@@ -1,0 +1,49 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_import_lib.strada - Test the import_lib feature
+# This imports MathLib.so as if it were a normal module
+
+use lib "lib";
+import_lib "MathLib.so";
+
+func main() int {
+    say("Testing import_lib feature...");
+
+    # Test addition
+    my int $sum = MathLib_add(10, 32);
+    say("10 + 32 = " . $sum);
+
+    # Test subtraction
+    my int $diff = MathLib_subtract(100, 58);
+    say("100 - 58 = " . $diff);
+
+    # Test multiplication
+    my int $prod = MathLib_multiply(6, 7);
+    say("6 * 7 = " . $prod);
+
+    # Test double
+    my int $dbl = MathLib_double_val(21);
+    say("double(21) = " . $dbl);
+
+    # Test string function
+    my str $greeting = MathLib_greet("World");
+    say($greeting);
+
+    say("All import_lib tests passed!");
+    return 0;
+}

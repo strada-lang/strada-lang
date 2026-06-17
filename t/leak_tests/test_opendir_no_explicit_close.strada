@@ -1,0 +1,35 @@
+#!/usr/bin/env strada
+# Leak regression: core::opendir() returns a CPOINTER wrapping a DIR*,
+# but the runtime's STRADA_CPOINTER destructor only handled
+# StringBuilder / Mutex / Cond — DIR* leaked when the SV was freed
+# without an explicit closedir.
+#
+# This test deliberately drops the directory handle (lets it go out of
+# scope) without calling closedir. Pre-fix that leaked one DIR + an fd
+# per iteration.
+#
+# Run: valgrind --leak-check=full ./test_opendir_no_explicit_close
+
+package main;
+
+func test_opendir_drops() void {
+    my int $iter = 100;
+    my int $i = 0;
+    while ($i < $iter) {
+        my scalar $dh = core::opendir("/tmp");
+        if (!defined($dh)) {
+            say("FAIL: opendir returned undef");
+            return;
+        }
+        # Read one entry to make sure the DIR* is functional, then drop.
+        my str $first = core::readdir_next($dh);
+        # No explicit closedir — relying on scope-exit destruction.
+        $i = $i + 1;
+    }
+    say("test_opendir_drops: PASS");
+}
+
+func main() int {
+    test_opendir_drops();
+    return 0;
+}

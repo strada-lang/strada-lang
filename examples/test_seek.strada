@@ -1,0 +1,89 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_seek.strada - Test file seek functions
+
+func main() int {
+    say("=== File Seek Functions Test ===");
+    say("");
+
+    # Create a test file
+    my str $testfile = "/tmp/strada_seek_test.txt";
+    sys::spew($testfile, "Hello, World!\nThis is line 2.\nAnd line 3.\n");
+    say("Created test file: " . $testfile);
+    say("");
+
+    # Open file for reading
+    my scalar $fh = sys::open($testfile, "r");
+    if (!defined($fh)) {
+        say("Failed to open file");
+        return 1;
+    }
+
+    # Read first line
+    my str $line1 = sys::fread($fh);
+    say("First read: '" . chomp($line1) . "'");
+
+    # Get current position
+    my int $pos1 = sys::tell($fh);
+    say("Position after first read: " . $pos1);
+
+    # Read second line
+    my str $line2 = sys::fread($fh);
+    say("Second read: '" . chomp($line2) . "'");
+
+    my int $pos2 = sys::tell($fh);
+    say("Position after second read: " . $pos2);
+    say("");
+
+    # Rewind and read again
+    say("=== Rewind ===");
+    sys::rewind($fh);
+    my int $pos3 = sys::tell($fh);
+    say("Position after rewind: " . $pos3);
+
+    my str $line3 = sys::fread($fh);
+    say("Read after rewind: '" . chomp($line3) . "'");
+    say("");
+
+    # Seek to specific position
+    say("=== Seek ===");
+    sys::seek($fh, 7, 0);  # SEEK_SET
+    my int $pos4 = sys::tell($fh);
+    say("Position after seek(7, SEEK_SET): " . $pos4);
+
+    my str $rest = sys::fread($fh);
+    say("Read from position 7: '" . chomp($rest) . "'");
+    say("");
+
+    # Test EOF
+    say("=== EOF ===");
+    sys::seek($fh, 0, 2);  # Seek to end
+    say("EOF after seek to end: " . sys::eof($fh));
+    my int $end_pos = sys::tell($fh);
+    say("End position: " . $end_pos);
+    say("");
+
+    sys::close($fh);
+
+    # Cleanup
+    sys::unlink($testfile);
+    say("Cleaned up test file");
+
+    say("Seek tests completed!");
+    return 0;
+}

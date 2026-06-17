@@ -1,0 +1,118 @@
+=head1 NAME
+
+Async::Scope - structured concurrency (nursery) for Strada futures
+
+=head1 SYNOPSIS
+
+    use lib "lib";
+    use Async::Scope;
+
+    my scalar $scope = Async::Scope::new();
+    $scope->spawn(fn () scalar { return fetch("a"); });
+    $scope->spawn(fn () scalar { return fetch("b"); });
+    my array @results = $scope->wait();   # all results, spawn order
+
+=head1 DESCRIPTION
+
+A scope (nursery) owns every task spawned inside it. C<wait()> joins them
+all and returns their results in spawn order. If any task fails, C<wait()>
+cancels the remaining tasks (cooperative: they observe it via
+C<async::cancelled()> or an early-woken C<async::sleep>), drains them, and
+rethrows the FIRST failure. No task outlives the scope.
+
+=head1 METHODS
+
+=head2 new()
+
+Create an empty scope.
+
+=head2 spawn($closure)
+
+Run the closure as a pool task owned by this scope. Returns the future
+(also retained by the scope). Throws if the scope has already been waited.
+
+=head2 wait()
+
+Join all tasks. Returns their results as an array in spawn order. On the
+first failure: cancels every unfinished sibling, waits for them to settle,
+and rethrows the failure. A scope can only be waited once.
+
+=head2 cancel_all()
+
+Request cancellation of every task in the scope (does not wait).
+
+=cut
+
+package Async::Scope;
+version "1.0.0";
+
+func new() scalar {
+    my hash %self;
+    my array @futures;
+    $self{"futures"} = \@futures;
+    $self{"count"} = 0;
+    $self{"done"} = 0;
+    return bless(\%self, "Async::Scope");
+}
+
+func spawn(scalar $self, scalar $fn) scalar {
+    if ($self->{"done"} == 1) {
+        throw "Async::Scope: spawn after wait";
+    }
+    my scalar $f = async::spawn($fn);
+    my scalar $futures = $self->{"futures"};
+    my int $n = $self->{"count"};
+    $futures->[$n] = $f;
+    $self->{"count"} = $n + 1;
+    return $f;
+}
+
+func cancel_all(scalar $self) void {
+    my scalar $futures = $self->{"futures"};
+    my int $n = $self->{"count"};
+    my int $i = 0;
+    while ($i < $n) {
+        async::cancel($futures->[$i]);
+        $i = $i + 1;
+    }
+}
+
+func wait(scalar $self) array {
+    if ($self->{"done"} == 1) {
+        throw "Async::Scope: wait called twice";
+    }
+    $self->{"done"} = 1;
+    my scalar $futures = $self->{"futures"};
+    my int $n = $self->{"count"};
+    my array @results;
+    my scalar $first_error;
+    my int $failed = 0;
+
+    my int $i = 0;
+    while ($i < $n) {
+        if ($failed == 0) {
+            try {
+                my scalar $r = await $futures->[$i];
+                push(@results, $r);
+            } catch ($e) {
+                $failed = 1;
+                $first_error = $e;
+                # Cancel every remaining sibling, then fall through to
+                # the drain loop below.
+                cancel_all($self);
+            }
+        } else {
+            # Drain: wait for the sibling to settle; swallow its
+            # cancellation/error (the first failure wins).
+            try {
+                my scalar $ignored = await $futures->[$i];
+            } catch ($e2) { }
+        }
+        $i = $i + 1;
+    }
+
+    if ($failed == 1) {
+        throw $first_error;
+    }
+    return @results;
+}

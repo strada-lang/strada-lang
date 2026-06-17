@@ -1,0 +1,180 @@
+#!/usr/bin/env strada
+# Test error handling for memory leaks
+# Run: valgrind --leak-check=full ./test_error_handling
+
+package AppError;
+
+func new(str $msg, int $code) scalar {
+    my hash %self = ();
+    $self{"message"} = $msg;
+    $self{"code"} = $code;
+    return bless(\%self, "AppError");
+}
+
+func message(scalar $self) str {
+    return $self->{"message"};
+}
+
+func code(scalar $self) int {
+    return $self->{"code"};
+}
+
+package IOError;
+
+func new(str $msg) scalar {
+    my hash %self = ();
+    $self{"message"} = $msg;
+    $self{"code"} = 100;
+    return bless(\%self, "IOError");
+}
+
+func message(scalar $self) str {
+    return $self->{"message"};
+}
+
+package main;
+
+func risky_op(int $n) str {
+    if ($n % 3 == 0) {
+        throw AppError::new("app error " . $n, $n);
+    }
+    if ($n % 3 == 1) {
+        throw IOError::new("io error " . $n);
+    }
+    return "success_" . $n;
+}
+
+func main() int {
+    say("Testing error handling for memory leaks...");
+    my int $iterations = 100;
+
+    # Test basic try/catch
+    say("  basic try/catch...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        try {
+            if ($i % 2 == 0) {
+                throw "error_" . $i;
+            }
+        } catch ($e) {
+            # Caught string exception
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test typed catch
+    say("  typed catch...");
+    $i = 0;
+    while ($i < $iterations) {
+        try {
+            throw AppError::new("test_" . $i, $i);
+        } catch (AppError $e) {
+            my str $msg = $e->message();
+            if (length($msg) < 1) {
+                say("    FAIL: typed catch msg");
+                return 1;
+            }
+        } catch ($e) {
+            say("    FAIL: wrong catch branch");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test multiple typed catches
+    say("  multiple typed catches...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $caught_type = "";
+        try {
+            my str $result = risky_op($i);
+        } catch (AppError $e) {
+            $caught_type = "app";
+        } catch (IOError $e) {
+            $caught_type = "io";
+        } catch ($e) {
+            $caught_type = "other";
+        }
+        # i%3==0 => app, i%3==1 => io, i%3==2 => success (no catch)
+        if ($i % 3 == 0 && $caught_type ne "app") {
+            say("    FAIL: expected app");
+            return 1;
+        }
+        if ($i % 3 == 1 && $caught_type ne "io") {
+            say("    FAIL: expected io");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test nested try/catch (no rethrow — rethrow has known leak)
+    say("  nested try/catch...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $inner_caught = 0;
+        my int $outer_caught = 0;
+        try {
+            try {
+                if ($i % 2 == 0) {
+                    throw "inner_error";
+                }
+            } catch ($e) {
+                $inner_caught = 1;
+            }
+            if ($i % 2 == 1) {
+                throw "outer_error";
+            }
+        } catch ($e) {
+            $outer_caught = 1;
+        }
+        if ($i % 2 == 0 && !$inner_caught) {
+            say("    FAIL: inner not caught");
+            return 1;
+        }
+        if ($i % 2 == 1 && !$outer_caught) {
+            say("    FAIL: outer not caught");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test try with no throw (normal path)
+    say("  try no throw...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $result = 0;
+        try {
+            my str $s = "no_error_" . $i;
+            $result = length($s);
+        } catch ($e) {
+            say("    FAIL: unexpected catch");
+            return 1;
+        }
+        if ($result < 1) {
+            say("    FAIL: try result");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test die with string
+    say("  die with string...");
+    $i = 0;
+    while ($i < $iterations) {
+        try {
+            die("error_msg_" . $i);
+        } catch ($e) {
+            # caught
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All error handling tests passed!");
+    return 0;
+}

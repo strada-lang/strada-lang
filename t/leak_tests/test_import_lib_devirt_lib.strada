@@ -1,0 +1,36 @@
+# Companion shared library for test_import_lib_devirt.strada. The leak
+# runner pre-builds it:
+#   ./strada --shared t/leak_tests/test_import_lib_devirt_lib.strada \
+#       -o t/leak_tests/test_import_lib_devirt_lib.so
+
+package LeakCounter;
+
+our int $hooks = 0;
+
+func new(int $start) scalar {
+    my hash %self = ();
+    $self{"n"} = $start;
+    return bless(\%self, "LeakCounter");
+}
+
+func bump(scalar $self) int {
+    $self->{"n"} = $self->{"n"} + 1;
+    return $self->{"n"};
+}
+
+func label(scalar $self) str {
+    return "n is " . $self->{"n"};
+}
+
+before "audited_add" func(scalar $self) void {
+    $hooks = $hooks + 1;
+}
+
+func audited_add(scalar $self, int $k) int {
+    $self->{"n"} = $self->{"n"} + $k;
+    return $self->{"n"};
+}
+
+func hook_count() int {
+    return $hooks;
+}

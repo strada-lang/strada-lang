@@ -1,0 +1,604 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# ps - report process status
+# A Strada implementation of the Unix ps command
+
+func read_file(str $path) str {
+    my scalar $fh = sys::open($path, "r");
+    if (!defined($fh)) {
+        return "";
+    }
+    my str $content = "";
+    my str $line = sys::fgets($fh, 8192);
+    while (defined($line) && length($line) > 0) {
+        $content = $content . $line;
+        $line = sys::fgets($fh, 8192);
+    }
+    sys::close($fh);
+    return $content;
+}
+
+func rindex_str(str $haystack, str $needle) int {
+    my int $needle_len = length($needle);
+    my int $haystack_len = length($haystack);
+    if ($needle_len == 0 || $needle_len > $haystack_len) {
+        return -1;
+    }
+    my int $i = $haystack_len - $needle_len;
+    while ($i >= 0) {
+        if (substr($haystack, $i, $needle_len) eq $needle) {
+            return $i;
+        }
+        $i = $i - 1;
+    }
+    return -1;
+}
+
+func is_numeric(str $s) int {
+    if (length($s) == 0) {
+        return 0;
+    }
+    my int $i = 0;
+    while ($i < length($s)) {
+        my str $c = substr($s, $i, 1);
+        if ($c lt "0" || $c gt "9") {
+            return 0;
+        }
+        $i = $i + 1;
+    }
+    return 1;
+}
+
+func get_process_state(str $state) str {
+    if ($state eq "R") { return "R"; }  # Running
+    if ($state eq "S") { return "S"; }  # Sleeping
+    if ($state eq "D") { return "D"; }  # Disk sleep
+    if ($state eq "Z") { return "Z"; }  # Zombie
+    if ($state eq "T") { return "T"; }  # Stopped
+    if ($state eq "t") { return "t"; }  # Tracing stop
+    if ($state eq "X") { return "X"; }  # Dead
+    if ($state eq "I") { return "I"; }  # Idle
+    return $state;
+}
+
+func pad_left(str $s, int $width) str {
+    my int $len = length($s);
+    while ($len < $width) {
+        $s = " " . $s;
+        $len = $len + 1;
+    }
+    return $s;
+}
+
+func pad_right(str $s, int $width) str {
+    my int $len = length($s);
+    while ($len < $width) {
+        $s = $s . " ";
+        $len = $len + 1;
+    }
+    return $s;
+}
+
+func format_time(int $ticks) str {
+    # Convert clock ticks to seconds (assuming 100 ticks/sec)
+    my int $total_secs = cast_int($ticks / 100);
+    my int $hours = cast_int($total_secs / 3600);
+    my int $mins = cast_int(($total_secs % 3600) / 60);
+    my int $secs = $total_secs % 60;
+
+    my str $h = $hours . "";
+    my str $m = $mins . "";
+    my str $s = $secs . "";
+
+    if ($mins < 10) { $m = "0" . $m; }
+    if ($secs < 10) { $s = "0" . $s; }
+
+    return $h . ":" . $m . ":" . $s;
+}
+
+func format_mem(int $pages) str {
+    # Convert pages to KB (assuming 4KB pages)
+    my int $kb = $pages * 4;
+    return $kb . "";
+}
+
+func parse_stat(str $stat) hash {
+    my hash %info = ();
+
+    # Format: pid (comm) state ppid pgrp session tty_nr tpgid flags
+    #         minflt cminflt majflt cmajflt utime stime cutime cstime
+    #         priority nice num_threads itrealvalue starttime vsize rss ...
+
+    # Find comm (between parentheses) - handles commands with spaces/parens
+    my int $start = index($stat, "(");
+    my int $end = rindex_str($stat, ")");
+
+    if ($start < 0 || $end < 0) {
+        return %info;
+    }
+
+    my str $pid_str = substr($stat, 0, $start - 1);
+    my str $comm = substr($stat, $start + 1, $end - $start - 1);
+    my str $rest = substr($stat, $end + 2, length($stat) - $end - 2);
+
+    $info{"pid"} = $pid_str;
+    $info{"comm"} = $comm;
+
+    # Split the rest by spaces
+    my array @parts = split(" ", $rest);
+
+    if (scalar(@parts) >= 1) { $info{"state"} = $parts[0]; }
+    if (scalar(@parts) >= 2) { $info{"ppid"} = $parts[1]; }
+    if (scalar(@parts) >= 5) { $info{"tty_nr"} = $parts[4]; }
+    if (scalar(@parts) >= 12) { $info{"utime"} = $parts[11]; }
+    if (scalar(@parts) >= 13) { $info{"stime"} = $parts[12]; }
+    if (scalar(@parts) >= 18) { $info{"nice"} = $parts[16]; }
+    if (scalar(@parts) >= 20) { $info{"num_threads"} = $parts[17]; }
+    if (scalar(@parts) >= 22) { $info{"starttime"} = $parts[19]; }
+    if (scalar(@parts) >= 23) { $info{"vsize"} = $parts[20]; }
+    if (scalar(@parts) >= 24) { $info{"rss"} = $parts[21]; }
+
+    return %info;
+}
+
+func parse_status(str $status) hash {
+    my hash %info = ();
+    my array @lines = split("\n", $status);
+
+    my int $i = 0;
+    while ($i < scalar(@lines)) {
+        my str $line = $lines[$i];
+        my int $colon = index($line, ":");
+        if ($colon > 0) {
+            my str $key = substr($line, 0, $colon);
+            my str $val = substr($line, $colon + 1, length($line) - $colon - 1);
+            # Trim leading whitespace/tabs
+            while (length($val) > 0 && (substr($val, 0, 1) eq " " || substr($val, 0, 1) eq "\t")) {
+                $val = substr($val, 1, length($val) - 1);
+            }
+            $info{$key} = $val;
+        }
+        $i = $i + 1;
+    }
+
+    return %info;
+}
+
+func get_tty(int $tty_nr) str {
+    if ($tty_nr == 0) {
+        return "?";
+    }
+
+    my int $major = $tty_nr / 256;
+    my int $minor = $tty_nr % 256;
+
+    # pts devices have major 136
+    if ($major == 136) {
+        return "pts/" . $minor;
+    }
+    # tty devices have major 4, minor 0-63
+    if ($major == 4 && $minor < 64) {
+        return "tty" . $minor;
+    }
+    # console is tty0
+    if ($major == 4 && $minor >= 64) {
+        return "ttyS" . ($minor - 64);
+    }
+
+    return "?";
+}
+
+func get_uid_user(str $uid_str) str {
+    # Try to read /etc/passwd to map UID to username
+    my int $uid = cast_int($uid_str);
+    my str $passwd = read_file("/etc/passwd");
+
+    if (length($passwd) == 0) {
+        return $uid_str;
+    }
+
+    my array @lines = split("\n", $passwd);
+    my int $i = 0;
+    while ($i < scalar(@lines)) {
+        my str $line = $lines[$i];
+        my array @parts = split(":", $line);
+        if (scalar(@parts) >= 3) {
+            my int $line_uid = cast_int($parts[2]);
+            if ($line_uid == $uid) {
+                return $parts[0];
+            }
+        }
+        $i = $i + 1;
+    }
+
+    return $uid_str;
+}
+
+func print_usage() void {
+    say("Usage: ps [OPTIONS]");
+    say("Report process status.");
+    say("");
+    say("Options:");
+    say("  -e, -A          select all processes");
+    say("  -a              select all with a tty except session leaders");
+    say("  -u              user-oriented format");
+    say("  -x              select processes without controlling ttys");
+    say("  -f              full format listing");
+    say("  -l              long format");
+    say("  --help          display this help and exit");
+}
+
+func sort_by_pid(array @procs) array {
+    # Simple bubble sort by PID
+    my int $n = scalar(@procs);
+    my int $i = 0;
+    while ($i < $n - 1) {
+        my int $j = 0;
+        while ($j < $n - $i - 1) {
+            my scalar $p1 = $procs[$j];
+            my scalar $p2 = $procs[$j + 1];
+            my int $pid1 = cast_int($p1->{"pid"});
+            my int $pid2 = cast_int($p2->{"pid"});
+            if ($pid1 > $pid2) {
+                $procs[$j] = $p2;
+                $procs[$j + 1] = $p1;
+            }
+            $j = $j + 1;
+        }
+        $i = $i + 1;
+    }
+    return @procs;
+}
+
+func main() int {
+    my int $show_all = 0;
+    my int $show_no_tty = 0;
+    my int $user_format = 0;
+    my int $full_format = 0;
+    my int $long_format = 0;
+    my int $my_uid = sys::getuid();
+
+    # Parse arguments
+    my int $i = 0;
+    while ($i < scalar(@ARGV)) {
+        my str $arg = $ARGV[$i];
+
+        if ($arg eq "-e" || $arg eq "-A") {
+            $show_all = 1;
+        } elsif ($arg eq "-a") {
+            $show_all = 1;
+        } elsif ($arg eq "-x") {
+            $show_no_tty = 1;
+        } elsif ($arg eq "-u") {
+            $user_format = 1;
+        } elsif ($arg eq "-f") {
+            $full_format = 1;
+        } elsif ($arg eq "-l") {
+            $long_format = 1;
+        } elsif ($arg eq "-aux" || $arg eq "aux") {
+            $show_all = 1;
+            $user_format = 1;
+            $show_no_tty = 1;
+        } elsif ($arg eq "-ef") {
+            $show_all = 1;
+            $full_format = 1;
+        } elsif ($arg eq "--help") {
+            print_usage();
+            return 0;
+        }
+
+        $i = $i + 1;
+    }
+
+    # Read /proc directory
+    my scalar $entries = sys::readdir("/proc");
+    if (!defined($entries)) {
+        say("ps: cannot read /proc");
+        return 1;
+    }
+
+    # Collect process info
+    my array @processes = ();
+
+    $i = 0;
+    while ($i < scalar($entries)) {
+        my str $name = $entries->[$i];
+
+        # Only look at numeric directories (PIDs)
+        if (is_numeric($name)) {
+            my str $stat_path = "/proc/" . $name . "/stat";
+            my str $status_path = "/proc/" . $name . "/status";
+            my str $cmdline_path = "/proc/" . $name . "/cmdline";
+
+            my str $stat = read_file($stat_path);
+            my str $status = read_file($status_path);
+            my str $cmdline = read_file($cmdline_path);
+
+            if (length($stat) > 0) {
+                my hash %proc = parse_stat($stat);
+                my hash %status_info = parse_status($status);
+
+                # Get UID from status
+                if (defined($status_info{"Uid"})) {
+                    my array @uid_parts = split("\t", $status_info{"Uid"});
+                    if (scalar(@uid_parts) > 0) {
+                        $proc{"uid"} = $uid_parts[0];
+                    }
+                }
+
+                # Get command line
+                if (length($cmdline) > 0) {
+                    # Replace NUL bytes with spaces
+                    my str $cmd = "";
+                    my int $j = 0;
+                    while ($j < length($cmdline)) {
+                        my str $c = substr($cmdline, $j, 1);
+                        if (ord($c) == 0) {
+                            $cmd = $cmd . " ";
+                        } else {
+                            $cmd = $cmd . $c;
+                        }
+                        $j = $j + 1;
+                    }
+                    # Trim trailing spaces
+                    while (length($cmd) > 0 && substr($cmd, length($cmd) - 1, 1) eq " ") {
+                        $cmd = substr($cmd, 0, length($cmd) - 1);
+                    }
+                    $proc{"cmdline"} = $cmd;
+                } else {
+                    $proc{"cmdline"} = "[" . $proc{"comm"} . "]";
+                }
+
+                # Get VSZ and RSS from status if available
+                if (defined($status_info{"VmSize"})) {
+                    my str $vmsize = $status_info{"VmSize"};
+                    # Extract just the number
+                    my array @vm_parts = split(" ", $vmsize);
+                    if (scalar(@vm_parts) > 0) {
+                        $proc{"vsz"} = $vm_parts[0];
+                    }
+                }
+                if (defined($status_info{"VmRSS"})) {
+                    my str $vmrss = $status_info{"VmRSS"};
+                    my array @rss_parts = split(" ", $vmrss);
+                    if (scalar(@rss_parts) > 0) {
+                        $proc{"rss_kb"} = $rss_parts[0];
+                    }
+                }
+
+                # Filter based on options
+                my int $include = 0;
+                my int $proc_uid = 0;
+                if (defined($proc{"uid"})) {
+                    $proc_uid = cast_int($proc{"uid"});
+                }
+                my int $tty_nr = 0;
+                if (defined($proc{"tty_nr"})) {
+                    $tty_nr = cast_int($proc{"tty_nr"});
+                }
+
+                if ($show_all) {
+                    $include = 1;
+                } elsif ($show_no_tty && $proc_uid == $my_uid) {
+                    $include = 1;
+                } elsif ($tty_nr != 0 && $proc_uid == $my_uid) {
+                    $include = 1;
+                }
+
+                if ($include) {
+                    push(@processes, \%proc);
+                }
+            }
+        }
+
+        $i = $i + 1;
+    }
+
+    # Sort by PID
+    @processes = sort_by_pid(@processes);
+
+    # Print header and processes based on format
+    if ($user_format) {
+        # USER PID %CPU %MEM VSZ RSS TTY STAT START TIME COMMAND
+        say("USER       PID %CPU %MEM    VSZ   RSS TTY      STAT  TIME COMMAND");
+
+        $i = 0;
+        while ($i < scalar(@processes)) {
+            my scalar $p = $processes[$i];
+
+            my str $user = "?";
+            if (defined($p->{"uid"})) {
+                $user = get_uid_user($p->{"uid"});
+            }
+            if (length($user) > 8) {
+                $user = substr($user, 0, 8);
+            }
+
+            my str $pid = $p->{"pid"};
+            my str $cpu = "0.0";  # Would need more info to calculate
+            my str $mem = "0.0";  # Would need total memory to calculate
+
+            my str $vsz = "0";
+            if (defined($p->{"vsz"})) {
+                $vsz = $p->{"vsz"};
+            }
+
+            my str $rss = "0";
+            if (defined($p->{"rss_kb"})) {
+                $rss = $p->{"rss_kb"};
+            }
+
+            my str $tty = "?";
+            if (defined($p->{"tty_nr"})) {
+                $tty = get_tty(cast_int($p->{"tty_nr"}));
+            }
+
+            my str $stat = "?";
+            if (defined($p->{"state"})) {
+                $stat = get_process_state($p->{"state"});
+            }
+
+            my str $time = "0:00";
+            if (defined($p->{"utime"}) && defined($p->{"stime"})) {
+                my int $total = cast_int($p->{"utime"}) + cast_int($p->{"stime"});
+                $time = format_time($total);
+            }
+
+            my str $cmd = $p->{"cmdline"};
+
+            say(pad_right($user, 8) . " " . pad_left($pid, 5) . " " .
+                pad_left($cpu, 4) . " " . pad_left($mem, 4) . " " .
+                pad_left($vsz, 6) . " " . pad_left($rss, 5) . " " .
+                pad_right($tty, 8) . " " . pad_right($stat, 4) . " " .
+                pad_left($time, 5) . " " . $cmd);
+
+            $i = $i + 1;
+        }
+    } elsif ($full_format) {
+        # UID PID PPID C STIME TTY TIME CMD
+        say("UID        PID  PPID  C    TTY      TIME CMD");
+
+        $i = 0;
+        while ($i < scalar(@processes)) {
+            my scalar $p = $processes[$i];
+
+            my str $uid = "?";
+            if (defined($p->{"uid"})) {
+                $uid = get_uid_user($p->{"uid"});
+            }
+            if (length($uid) > 8) {
+                $uid = substr($uid, 0, 8);
+            }
+
+            my str $pid = $p->{"pid"};
+            my str $ppid = "?";
+            if (defined($p->{"ppid"})) {
+                $ppid = $p->{"ppid"};
+            }
+
+            my str $c = "0";  # CPU utilization
+
+            my str $tty = "?";
+            if (defined($p->{"tty_nr"})) {
+                $tty = get_tty(cast_int($p->{"tty_nr"}));
+            }
+
+            my str $time = "00:00:00";
+            if (defined($p->{"utime"}) && defined($p->{"stime"})) {
+                my int $total = cast_int($p->{"utime"}) + cast_int($p->{"stime"});
+                $time = format_time($total);
+            }
+
+            my str $cmd = $p->{"cmdline"};
+
+            say(pad_right($uid, 8) . " " . pad_left($pid, 5) . " " .
+                pad_left($ppid, 5) . "  " . $c . " " .
+                pad_right($tty, 8) . " " . pad_left($time, 8) . " " . $cmd);
+
+            $i = $i + 1;
+        }
+    } elsif ($long_format) {
+        # F S UID PID PPID C PRI NI ADDR SZ WCHAN TTY TIME CMD
+        say("F S   UID   PID  PPID  C PRI  NI    SZ    TTY      TIME CMD");
+
+        $i = 0;
+        while ($i < scalar(@processes)) {
+            my scalar $p = $processes[$i];
+
+            my str $f = "0";  # Flags
+            my str $s = "?";
+            if (defined($p->{"state"})) {
+                $s = get_process_state($p->{"state"});
+            }
+
+            my str $uid = "?";
+            if (defined($p->{"uid"})) {
+                $uid = $p->{"uid"};
+            }
+
+            my str $pid = $p->{"pid"};
+            my str $ppid = "?";
+            if (defined($p->{"ppid"})) {
+                $ppid = $p->{"ppid"};
+            }
+
+            my str $c = "0";
+            my str $pri = "20";
+            my str $ni = "0";
+            if (defined($p->{"nice"})) {
+                $ni = $p->{"nice"};
+            }
+
+            my str $sz = "0";
+            if (defined($p->{"vsz"})) {
+                $sz = $p->{"vsz"};
+            }
+
+            my str $tty = "?";
+            if (defined($p->{"tty_nr"})) {
+                $tty = get_tty(cast_int($p->{"tty_nr"}));
+            }
+
+            my str $time = "00:00:00";
+            if (defined($p->{"utime"}) && defined($p->{"stime"})) {
+                my int $total = cast_int($p->{"utime"}) + cast_int($p->{"stime"});
+                $time = format_time($total);
+            }
+
+            my str $cmd = $p->{"comm"};
+
+            say($f . " " . $s . " " . pad_left($uid, 5) . " " .
+                pad_left($pid, 5) . " " . pad_left($ppid, 5) . "  " .
+                $c . " " . pad_left($pri, 3) . " " . pad_left($ni, 3) . " " .
+                pad_left($sz, 5) . " " . pad_right($tty, 8) . " " .
+                pad_left($time, 8) . " " . $cmd);
+
+            $i = $i + 1;
+        }
+    } else {
+        # Default: PID TTY TIME CMD
+        say("  PID TTY          TIME CMD");
+
+        $i = 0;
+        while ($i < scalar(@processes)) {
+            my scalar $p = $processes[$i];
+
+            my str $pid = $p->{"pid"};
+
+            my str $tty = "?";
+            if (defined($p->{"tty_nr"})) {
+                $tty = get_tty(cast_int($p->{"tty_nr"}));
+            }
+
+            my str $time = "00:00:00";
+            if (defined($p->{"utime"}) && defined($p->{"stime"})) {
+                my int $total = cast_int($p->{"utime"}) + cast_int($p->{"stime"});
+                $time = format_time($total);
+            }
+
+            my str $cmd = $p->{"comm"};
+
+            say(pad_left($pid, 5) . " " . pad_right($tty, 8) . " " .
+                pad_left($time, 8) . " " . $cmd);
+
+            $i = $i + 1;
+        }
+    }
+
+    return 0;
+}

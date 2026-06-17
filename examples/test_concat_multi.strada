@@ -1,0 +1,86 @@
+# Regression tests for flattened multi-part concat (strada_concat_multi):
+# `.` chains of >= 3 parts — which string interpolation desugars to —
+# compile to a single builder call. Verify semantics match the pairwise
+# concat paths across part types, flags, and ownership.
+
+func ret_str() str { return "FN"; }
+
+func main() int {
+    my int $fails = 0;
+
+    my str $s1 = "alpha";
+    my int $n = 42;
+    my num $f = 2.5;
+
+    # interpolation (3+ parts)
+    my str $r1 = "a: ${s1}, n: ${n}!";
+    if ($r1 ne "a: alpha, n: 42!") { say("FAIL interp: " . $r1); $fails = $fails + 1; }
+
+    # explicit long chain with mixed types
+    my str $r2 = "x" . $n . "y" . $f . "z" . $s1;
+    if ($r2 ne "x42y2.5zalpha") { say("FAIL chain: " . $r2); $fails = $fails + 1; }
+
+    # owned parts: hash access + function call + uc()
+    my hash %h = ("k" => "VAL");
+    my str $r3 = "pre " . $h{"k"} . " mid " . ret_str() . " post " . uc("q");
+    if ($r3 ne "pre VAL mid FN post Q") { say("FAIL owned: " . $r3); $fails = $fails + 1; }
+
+    # undef part contributes empty (matches pairwise concat)
+    my scalar $u;
+    my str $r4 = "u=[" . $u . "]" . "fin";
+    if ($r4 ne "u=[]fin") { say("FAIL undef: " . $r4); $fails = $fails + 1; }
+
+    # non-ASCII literal parts survive byte-exactly
+    my str $r5 = "héllo " . $s1 . " ☃";
+    if ($r5 ne "héllo alpha ☃") { say("FAIL nonascii: " . $r5); $fails = $fails + 1; }
+
+    # SVf_UTF8 propagation: any char-oriented part flags the result
+    my str $wide = chr(9731);   # U+2603, UTF8-flagged
+    my str $r6 = "a" . $wide . "b" . $wide . "c";
+    if (length($r6) != 5) { say("FAIL utf8len: " . length($r6)); $fails = $fails + 1; }
+
+    # refs stringify like pairwise concat (PKG=HASH(0x...) / ARRAY(0x...))
+    my scalar $ref = \%h;
+    my str $r7 = "r=" . $ref . " end" . "!";
+    if (index($r7, "r=HASH(0x") != 0) { say("FAIL ref: " . $r7); $fails = $fails + 1; }
+
+    # deep nesting: a chain part that is itself an interpolated string via parens
+    my str $inner = "i${n}i";
+    my str $r8 = "[" . ("L" . $inner . "R") . "]" . " tail";
+    if ($r8 ne "[Li42iR] tail") { say("FAIL nested: " . $r8); $fails = $fails + 1; }
+
+    # exactly at and beyond the flatten boundary (2 parts = pairwise; 3 = multi)
+    my str $r9 = "two" . $s1;
+    my str $r10 = "th" . $s1 . "ree";
+    if ($r9 ne "twoalpha" || $r10 ne "thalpharee") { say("FAIL boundary"); $fails = $fails + 1; }
+
+    # .= accumulation across loop (in-place path must still work)
+    my str $accum = "";
+    foreach my $i (0..3) {
+        $accum = $accum . "p" . $i . ",";
+    }
+    if ($accum ne "p0,p1,p2,p3,") { say("FAIL accum: " . $accum); $fails = $fails + 1; }
+
+    # throwing part mid-chain: earlier owned parts must not leak (covered by
+    # valgrind in the leak suite; here just verify catch semantics)
+    my int $caught = 0;
+    try {
+        my str $bad = "a" . $h{"k"} . boom_helper() . "z";
+        say($bad);
+    } catch ($e) {
+        $caught = 1;
+    }
+    if ($caught != 1) { say("FAIL throw"); $fails = $fails + 1; }
+
+    if ($fails == 0) {
+        say("All concat-multi tests passed");
+    } else {
+        say($fails . " concat-multi tests FAILED");
+    }
+    return 0;
+}
+
+func boom_helper() str {
+    throw "boom";
+    return "never";
+}

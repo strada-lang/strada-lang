@@ -1,0 +1,181 @@
+#!/usr/bin/env strada
+# Test regex operations for memory leaks
+# Run: valgrind --leak-check=full ./test_regex
+
+func main() int {
+    say("Testing regex operations for memory leaks...");
+    my int $iterations = 100;
+
+    # Test basic match
+    say("  match()...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my str $s = "Hello World 123";
+        if (!match($s, "\\w+\\s+\\w+")) {
+            say("    FAIL: basic match");
+            return 1;
+        }
+        if (match($s, "^zzz$")) {
+            say("    FAIL: non-match should fail");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test match with captures
+    say("  match() with captures...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = "name=Alice age=30";
+        if ($s =~ /(\w+)=(\w+)/) {
+            my str $key = $1;
+            my str $val = $2;
+            if ($key ne "name") {
+                say("    FAIL: capture $1 = " . $key);
+                return 1;
+            }
+            if ($val ne "Alice") {
+                say("    FAIL: capture $2 = " . $val);
+                return 1;
+            }
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test captures() function
+    say("  captures()...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = "2024-01-15";
+        if ($s =~ /(\d{4})-(\d{2})-(\d{2})/) {
+            my array @caps = captures();
+            if (size(@caps) < 4) {
+                say("    FAIL: captures size");
+                return 1;
+            }
+            if ($caps[1] ne "2024") {
+                say("    FAIL: year capture");
+                return 1;
+            }
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test replace (regex)
+    say("  replace()...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = "Hello World";
+        my str $r = replace($s, "World", "Strada");
+        if ($r ne "Hello Strada") {
+            say("    FAIL: replace = " . $r);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test replace_all (plain string)
+    say("  replace_all()...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = "aaa bbb aaa ccc aaa";
+        my str $r = replace_all($s, "aaa", "xxx");
+        if ($r ne "xxx bbb xxx ccc xxx") {
+            say("    FAIL: replace_all = " . $r);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test s/// substitution
+    say("  s/// substitution...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = "foo bar baz foo";
+        $s =~ s/foo/qux/g;
+        if ($s ne "qux bar baz qux") {
+            say("    FAIL: s///g = " . $s);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test tr///
+    say("  tr///...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = "Hello World";
+        $s =~ tr/a-z/A-Z/;
+        if ($s ne "HELLO WORLD") {
+            say("    FAIL: tr = " . $s);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test complex regex patterns
+    say("  Complex patterns...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = "user@example.com";
+        if ($s =~ /^([^@]+)@([^@]+)$/) {
+            my str $user = $1;
+            my str $domain = $2;
+            if ($user ne "user" || $domain ne "example.com") {
+                say("    FAIL: email parse");
+                return 1;
+            }
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test repeated match on same string
+    say("  Repeated matches...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = "abc 123 def 456 ghi 789";
+        if ($s =~ /(\d+)/) {
+            my str $first = $1;
+            if ($first ne "123") {
+                say("    FAIL: first number");
+                return 1;
+            }
+        }
+        my str $r = replace($s, "\\d+", "NUM");
+        if (index($r, "NUM") < 0) {
+            say("    FAIL: replace digits");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test match failure (no leaks on non-match path)
+    say("  Match failures...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = "just plain text";
+        if ($s =~ /(\d{4})-(\d{2})-(\d{2})/) {
+            say("    FAIL: should not match");
+            return 1;
+        }
+        my str $r = replace($s, "NONEXISTENT", "replacement");
+        if ($r ne $s) {
+            say("    FAIL: replace nonexistent");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All regex tests passed!");
+    return 0;
+}

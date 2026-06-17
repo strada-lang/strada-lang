@@ -1,0 +1,129 @@
+#!/usr/bin/env strada
+# Regression test for inline-codegen leaks in byte/process built-ins.
+# Before the fix, these emitted gen_expression() on a StradaValue* arg
+# without checking needs_temp_cleanup(), so a hash-access argument would
+# leak its owned ref every call.
+#
+# Affected builtins: sys::ord_byte, sys::get_byte, sys::set_byte,
+# sys::byte_length, sys::byte_substr, sys::getpwnam, sys::getpwuid,
+# sys::getgrnam, sys::getgrgid, sys::nice, sys::getpriority,
+# sys::getrusage, sys::getrlimit, sys::sigprocmask, sys::raise,
+# sys::killpg, sys::setpriority, sys::setrlimit.
+#
+# Run: valgrind --leak-check=full ./test_byte_and_pwgr_hash_args
+
+package main;
+
+func test_byte_family_hash_args() void {
+    my int $iterations = 200;
+    my int $i = 0;
+    while ($i < $iterations) {
+        my hash %d = ();
+        $d{"s"} = "hello, world";
+
+        # All five byte-family calls take a StradaValue* string arg as
+        # the first operand. Pass it via hash access, which returns an
+        # owned ref that must be freed by the call site.
+        my int $b = core::ord_byte($d{"s"});
+        if ($b != 104) {
+            say("FAIL: ord_byte expected 104 got " . $b);
+            return;
+        }
+        my int $g = core::get_byte($d{"s"}, 7);
+        if ($g != 119) {
+            say("FAIL: get_byte expected 119 got " . $g);
+            return;
+        }
+        my int $bl = core::byte_length($d{"s"});
+        if ($bl != 12) {
+            say("FAIL: byte_length expected 12 got " . $bl);
+            return;
+        }
+        my str $sub = core::byte_substr($d{"s"}, 7, 5);
+        if ($sub ne "world") {
+            say("FAIL: byte_substr expected 'world' got '" . $sub . "'");
+            return;
+        }
+        my str $set = core::set_byte($d{"s"}, 0, 72);  # 'h' -> 'H'
+        if ($set ne "Hello, world") {
+            say("FAIL: set_byte expected 'Hello, world' got '" . $set . "'");
+            return;
+        }
+        $i = $i + 1;
+    }
+    say("test_byte_family_hash_args: PASS");
+}
+
+func test_pwgr_hash_args() void {
+    my int $iterations = 50;
+    my int $i = 0;
+    while ($i < $iterations) {
+        my hash %q = ();
+        $q{"name"} = "root";
+        $q{"uid"} = 0;
+        $q{"gid"} = 0;
+
+        # getpwnam, getpwuid, getgrnam, getgrgid all take a single
+        # StradaValue* arg and return owned StradaValue* (hash or undef).
+        my scalar $pw1 = core::getpwnam($q{"name"});
+        my scalar $pw2 = core::getpwuid($q{"uid"});
+        my scalar $gr1 = core::getgrgid($q{"gid"});
+
+        # Be lenient — environments without /etc/passwd may return undef.
+        if (defined($pw1) && ref($pw1) ne "HASH") {
+            say("FAIL: getpwnam should return hashref or undef");
+            return;
+        }
+        if (defined($pw2) && ref($pw2) ne "HASH") {
+            say("FAIL: getpwuid should return hashref or undef");
+            return;
+        }
+        if (defined($gr1) && ref($gr1) ne "HASH") {
+            say("FAIL: getgrgid should return hashref or undef");
+            return;
+        }
+        $i = $i + 1;
+    }
+    say("test_pwgr_hash_args: PASS");
+}
+
+func test_resource_hash_args() void {
+    my int $iterations = 50;
+    my int $i = 0;
+    while ($i < $iterations) {
+        my hash %q = ();
+        $q{"which"} = 0;   # PRIO_PROCESS
+        $q{"who"} = 0;     # current process
+        $q{"resource"} = 0;  # RLIMIT_CPU on Linux
+
+        # getpriority(which, who), getrlimit(resource), getrusage(who)
+        # — all take StradaValue* args; pass via hash access.
+        my scalar $p = core::getpriority($q{"which"}, $q{"who"});
+        my scalar $rl = core::getrlimit($q{"resource"});
+        my scalar $ru = core::getrusage($q{"who"});
+
+        # Validate that something sensible came back (don't assert specific
+        # values — only that we didn't crash and refs are well-formed).
+        if (!defined($p)) {
+            say("FAIL: getpriority returned undef");
+            return;
+        }
+        if (defined($rl) && ref($rl) ne "HASH") {
+            say("FAIL: getrlimit should return hashref or undef");
+            return;
+        }
+        if (defined($ru) && ref($ru) ne "HASH") {
+            say("FAIL: getrusage should return hashref or undef");
+            return;
+        }
+        $i = $i + 1;
+    }
+    say("test_resource_hash_args: PASS");
+}
+
+func main() int {
+    test_byte_family_hash_args();
+    test_pwgr_hash_args();
+    test_resource_hash_args();
+    return 0;
+}

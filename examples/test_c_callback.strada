@@ -1,0 +1,100 @@
+# Tests for c::callback — libffi trampolines that let C code call Strada
+# closures through a real C function pointer. Covers: qsort with a Strada
+# comparator (the canonical use), int/double/str argument marshaling,
+# return-value marshaling, capture state, and c::callback_free.
+
+our int $hits = 0;
+
+func main() int {
+    my int $fails = 0;
+
+    # --- qsort with a Strada closure comparator ---
+    # Build an int64 array in C memory, sort it via qsort, read it back.
+    my scalar $buf = c::alloc(8 * 6);
+    c::write_int64($buf, 42);
+    c::write_int64($buf + 8, 7);
+    c::write_int64($buf + 16, 99);
+    c::write_int64($buf + 24, -5);
+    c::write_int64($buf + 32, 0);
+    c::write_int64($buf + 40, 13);
+
+    my scalar $cmp = c::callback(fn (scalar $pa, scalar $pb) int {
+        my int $a = c::read_int64($pa);
+        my int $b = c::read_int64($pb);
+        if ($a < $b) { return -1; }
+        if ($a > $b) { return 1; }
+        return 0;
+    }, "int", "ptr,ptr");
+
+    __C__ {
+        typedef int (*qsort_cmp_t)(const void *, const void *);
+        qsort((void *)(intptr_t)strada_to_int(buf), 6, 8,
+              (qsort_cmp_t)(intptr_t)strada_to_int(cmp));
+    }
+
+    my str $sorted = "";
+    foreach my $i (0..5) {
+        $sorted = $sorted . c::read_int64($buf + ($i * 8)) . ",";
+    }
+    if ($sorted ne "-5,0,7,13,42,99,") { say("FAIL qsort: " . $sorted); $fails = $fails + 1; }
+    c::free($buf);
+
+    # --- int and double marshaling, both directions ---
+    my scalar $mathcb = c::callback(fn (int $n, num $f) num {
+        return $n + $f * 2.0;
+    }, "num", "int,num");
+    my num $mres = 0.0;
+    __C__ {
+        typedef double (*math_fn_t)(int64_t, double);
+        double __mr = ((math_fn_t)(intptr_t)strada_to_int(mathcb))(10, 2.25);
+        strada_decref(mres);
+        mres = strada_new_num(__mr);
+    }
+    if ($mres != 14.5) { say("FAIL math: " . $mres); $fails = $fails + 1; }
+
+    # --- str arguments arrive as Strada strings (NULL -> undef) ---
+    my scalar $strcb = c::callback(fn (str $s) int {
+        if (defined($s)) { return length($s); }
+        return -1;
+    }, "int", "str");
+    my int $slen = 0;
+    my int $snull = 0;
+    __C__ {
+        typedef int64_t (*str_fn_t)(const char *);
+        str_fn_t __sf = (str_fn_t)(intptr_t)strada_to_int(strcb);
+        strada_decref(slen);  slen  = strada_new_int(__sf("hello"));
+        strada_decref(snull); snull = strada_new_int(__sf(NULL));
+    }
+    if ($slen != 5) { say("FAIL str-len: " . $slen); $fails = $fails + 1; }
+    if ($snull != -1) { say("FAIL str-null: " . $snull); $fails = $fails + 1; }
+
+    # --- captures + our-globals work inside the callback ---
+    my int $base = 100;
+    my scalar $capcb = c::callback(fn (int $n) int {
+        $hits = $hits + 1;
+        return $base + $n;
+    }, "int", "int");
+    my int $cres = 0;
+    __C__ {
+        typedef int64_t (*int_fn_t)(int64_t);
+        int_fn_t __cf = (int_fn_t)(intptr_t)strada_to_int(capcb);
+        int64_t __cr = __cf(11) + __cf(22);
+        strada_decref(cres);
+        cres = strada_new_int(__cr);
+    }
+    if ($cres != 233) { say("FAIL capture: " . $cres); $fails = $fails + 1; }
+    if ($hits != 2) { say("FAIL hits: " . $hits); $fails = $fails + 1; }
+
+    # --- explicit free: returns 1 once, 0 for unknown/double free ---
+    if (c::callback_free($cmp) != 1) { say("FAIL free-1"); $fails = $fails + 1; }
+    if (c::callback_free($cmp) != 0) { say("FAIL free-2"); $fails = $fails + 1; }
+    # mathcb/strcb/capcb deliberately NOT freed — the exit-time registry
+    # sweep reclaims them (the valgrind leak test relies on this).
+
+    if ($fails == 0) {
+        say("All c::callback tests passed");
+    } else {
+        say($fails . " c::callback tests FAILED");
+    }
+    return 0;
+}

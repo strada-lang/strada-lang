@@ -1,0 +1,142 @@
+#!/usr/bin/env strada
+# Test compound assignment operators (+= -=) for memory leaks
+# The RHS of += and -= can return owned StradaValues (e.g., method calls,
+# hash access) that must be captured and freed after extraction.
+# Run: valgrind --leak-check=full ./test_compound_assign
+
+package Counter;
+has rw int $value = 0;
+
+func get_value(scalar $self) int {
+    return $self->value();
+}
+
+func get_double(scalar $self) int {
+    return $self->value() * 2;
+}
+
+package main;
+
+func return_int() int {
+    return 42;
+}
+
+func main() int {
+    say("Testing compound assignment leak cleanup...");
+    my int $iterations = 500;
+
+    # Test 1: += with method call returning int
+    say("  += with method call...");
+    my int $i = 0;
+    my int $sum = 0;
+    while ($i < $iterations) {
+        my scalar $c = Counter::new("value", $i % 100);
+        $sum += $c->get_value();
+        $i = $i + 1;
+    }
+    if ($sum < 0) {
+        say("    FAIL: negative sum");
+        return 1;
+    }
+    say("    PASS (sum=" . $sum . ")");
+
+    # Test 2: -= with method call returning int
+    say("  -= with method call...");
+    $i = 0;
+    my int $diff = 100000;
+    while ($i < $iterations) {
+        my scalar $c = Counter::new("value", $i % 50);
+        $diff -= $c->get_value();
+        $i = $i + 1;
+    }
+    say("    PASS (diff=" . $diff . ")");
+
+    # Test 3: += with function call returning int
+    say("  += with function call...");
+    $i = 0;
+    $sum = 0;
+    while ($i < $iterations) {
+        $sum += return_int();
+        $i = $i + 1;
+    }
+    if ($sum != $iterations * 42) {
+        say("    FAIL: expected " . ($iterations * 42) . " got " . $sum);
+        return 1;
+    }
+    say("    PASS");
+
+    # Test 4: += with arithmetic expression (method * method)
+    say("  += with arithmetic on method calls...");
+    $i = 0;
+    $sum = 0;
+    while ($i < $iterations) {
+        my scalar $c = Counter::new("value", 3);
+        $sum += $c->get_value() * $c->get_value();
+        $i = $i + 1;
+    }
+    if ($sum != $iterations * 9) {
+        say("    FAIL: expected " . ($iterations * 9) . " got " . $sum);
+        return 1;
+    }
+    say("    PASS");
+
+    # Test 5: += with hash access
+    say("  += with hash access...");
+    $i = 0;
+    $sum = 0;
+    while ($i < $iterations) {
+        my hash %h = ("val", $i % 100);
+        $sum += $h{"val"};
+        $i = $i + 1;
+    }
+    if ($sum < 0) {
+        say("    FAIL: negative sum");
+        return 1;
+    }
+    say("    PASS (sum=" . $sum . ")");
+
+    # Test 6: -= with hash access
+    say("  -= with hash access...");
+    $i = 0;
+    $diff = 100000;
+    while ($i < $iterations) {
+        my hash %h = ("val", $i % 50);
+        $diff -= $h{"val"};
+        $i = $i + 1;
+    }
+    say("    PASS (diff=" . $diff . ")");
+
+    # Test 7: += with OOP distance_sq pattern (the original benchmark pattern)
+    say("  += with distance_sq pattern...");
+    $i = 0;
+    $sum = 0;
+    while ($i < $iterations) {
+        my scalar $c = Counter::new("value", 5);
+        $sum += $c->get_double();
+        $i = $i + 1;
+    }
+    if ($sum != $iterations * 10) {
+        say("    FAIL: expected " . ($iterations * 10) . " got " . $sum);
+        return 1;
+    }
+    say("    PASS");
+
+    # Test 8: += with deref hash access
+    say("  += with deref hash access...");
+    $i = 0;
+    $sum = 0;
+    while ($i < $iterations) {
+        my hash %h = ("val", 7);
+        my scalar $ref = \%h;
+        $sum += $ref->{"val"};
+        $i = $i + 1;
+    }
+    if ($sum != $iterations * 7) {
+        say("    FAIL: expected " . ($iterations * 7) . " got " . $sum);
+        return 1;
+    }
+    say("    PASS");
+
+    say("All compound assignment tests passed!");
+    return 0;
+}

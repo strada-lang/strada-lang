@@ -1,0 +1,142 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_ternary.strada - Test ternary operator
+#
+# Run: ./strada examples/test_ternary.strada
+
+func main() int {
+    say("=== Ternary Operator Tests ===\n");
+
+    # Basic ternary with true condition
+    my int $x = 10;
+    my str $result = $x > 5 ? "big" : "small";
+    say("1. Basic (true): " . $result);
+    if ($result ne "big") {
+        say("FAIL: expected 'big'");
+        return 1;
+    }
+
+    # Basic ternary with false condition
+    $x = 3;
+    $result = $x > 5 ? "big" : "small";
+    say("2. Basic (false): " . $result);
+    if ($result ne "small") {
+        say("FAIL: expected 'small'");
+        return 1;
+    }
+
+    # Ternary with equality
+    $x = 5;
+    $result = $x == 5 ? "five" : "not five";
+    say("3. Equality: " . $result);
+    if ($result ne "five") {
+        say("FAIL: expected 'five'");
+        return 1;
+    }
+
+    # Nested ternary (right associative)
+    $x = 0;
+    $result = $x > 0 ? "positive" : $x < 0 ? "negative" : "zero";
+    say("4. Nested (zero): " . $result);
+    if ($result ne "zero") {
+        say("FAIL: expected 'zero'");
+        return 1;
+    }
+
+    $x = 5;
+    $result = $x > 0 ? "positive" : $x < 0 ? "negative" : "zero";
+    say("5. Nested (positive): " . $result);
+    if ($result ne "positive") {
+        say("FAIL: expected 'positive'");
+        return 1;
+    }
+
+    $x = -3;
+    $result = $x > 0 ? "positive" : $x < 0 ? "negative" : "zero";
+    say("6. Nested (negative): " . $result);
+    if ($result ne "negative") {
+        say("FAIL: expected 'negative'");
+        return 1;
+    }
+
+    # Ternary returning integers
+    my int $a = 10;
+    my int $b = 20;
+    my int $max = $a > $b ? $a : $b;
+    say("7. Max(10,20): " . $max);
+    if ($max != 20) {
+        say("FAIL: expected 20");
+        return 1;
+    }
+
+    my int $min = $a < $b ? $a : $b;
+    say("8. Min(10,20): " . $min);
+    if ($min != 10) {
+        say("FAIL: expected 10");
+        return 1;
+    }
+
+    # Ternary with string comparison
+    my str $name = "Alice";
+    $result = $name eq "Alice" ? "Hello Alice!" : "Hello stranger!";
+    say("9. String eq: " . $result);
+    if ($result ne "Hello Alice!") {
+        say("FAIL: expected 'Hello Alice!'");
+        return 1;
+    }
+
+    # Ternary with falsy/truthy values
+    my int $val = 0;
+    $result = $val ? "truthy" : "falsy";
+    say("10. Falsy (0): " . $result);
+    if ($result ne "falsy") {
+        say("FAIL: expected 'falsy'");
+        return 1;
+    }
+
+    $val = 1;
+    $result = $val ? "truthy" : "falsy";
+    say("11. Truthy (1): " . $result);
+    if ($result ne "truthy") {
+        say("FAIL: expected 'truthy'");
+        return 1;
+    }
+
+    # Ternary in expression context
+    my int $score = 85;
+    my str $grade = $score >= 90 ? "A" : $score >= 80 ? "B" : $score >= 70 ? "C" : "F";
+    say("12. Grade (85): " . $grade);
+    if ($grade ne "B") {
+        say("FAIL: expected 'B'");
+        return 1;
+    }
+
+    # Ternary with function calls
+    my int $len = length("hello") > 3 ? 1 : 0;
+    say("13. Function call: " . $len);
+    if ($len != 1) {
+        say("FAIL: expected 1");
+        return 1;
+    }
+
+    # Ternary as function argument
+    say("14. As argument: " . (1 == 1 ? "yes" : "no"));
+
+    say("\n=== All ternary tests passed! ===");
+    return 0;
+}

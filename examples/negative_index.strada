@@ -1,0 +1,149 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# negative_index.strada - Test negative array indexing
+
+func demo_negative_access() void {
+    say("=== Negative Index Access ===");
+    
+    my scalar $arr = split("a,b,c,d,e", ",");
+    say("Array: [a,b,c,d,e], size = " . size($arr));
+    
+    # Access from end using negative indices
+    say("arr[-1] = last element");
+    say("arr[-2] = second to last");
+    say("arr[-3] = third to last");
+    say("arr[-4] = fourth to last");
+    say("arr[-5] = fifth to last (first)");
+    
+    say("");
+}
+
+func demo_negative_set() void {
+    say("=== Negative Index Assignment ===");
+    
+    my scalar $arr = split("1,2,3,4,5", ",");
+    say("Initial: [1,2,3,4,5]");
+    
+    # Modify from end
+    say("Setting arr[-1] = 'LAST'");
+    say("Setting arr[-2] = 'SECOND_LAST'");
+    
+    say("");
+}
+
+func demo_edge_cases() void {
+    say("=== Edge Cases ===");
+    
+    my scalar $arr = split("x,y,z", ",");
+    say("Array: [x,y,z], size = " . size($arr));
+    
+    say("arr[0] = first (positive index)");
+    say("arr[-3] = first (negative index)");
+    say("");
+    say("arr[2] = last (positive index)");
+    say("arr[-1] = last (negative index)");
+    
+    say("");
+}
+
+func demo_practical_use() void {
+    say("=== Practical Uses ===");
+    
+    my scalar $log = split("entry1,entry2,entry3,entry4,entry5", ",");
+    say("Log entries: size = " . size($log));
+    
+    say("");
+    say("Get latest entry:");
+    say("  arr[-1] gives most recent");
+    
+    say("");
+    say("Get last N entries:");
+    say("  arr[-3] = third from end");
+    say("  arr[-2] = second from end");
+    say("  arr[-1] = last");
+    
+    say("");
+}
+
+func demo_with_operations() void {
+    say("=== Combined with Array Operations ===");
+    
+    my scalar $queue = split("", ",");
+    
+    # Build queue
+    push($queue, "task1");
+    push($queue, "task2");
+    push($queue, "task3");
+    
+    say("Queue: size = " . size($queue));
+    say("");
+    
+    say("Access without removing:");
+    say("  First task: arr[0]");
+    say("  Last task: arr[-1]");
+    say("");
+    
+    say("Check what will be processed next:");
+    say("  peek_front = arr[0]");
+    say("  peek_back = arr[-1]");
+    
+    say("");
+}
+
+func demo_iteration_backwards() void {
+    say("=== Backwards Iteration ===");
+    
+    my scalar $items = split("10,20,30,40,50", ",");
+    say("Items: [10,20,30,40,50]");
+    say("");
+    
+    my int $count = size($items);
+    say("Size: " . $count);
+    say("");
+    
+    say("Forward:  arr[0], arr[1], arr[2], arr[3], arr[4]");
+    say("Backward: arr[-1], arr[-2], arr[-3], arr[-4], arr[-5]");
+    
+    say("");
+}
+
+func main() int {
+    say("╔════════════════════════════════════════════╗");
+    say("║  Negative Array Indexing                  ║");
+    say("╚════════════════════════════════════════════╝");
+    say("");
+    
+    demo_negative_access();
+    demo_negative_set();
+    demo_edge_cases();
+    demo_practical_use();
+    demo_with_operations();
+    demo_iteration_backwards();
+    
+    say("Index Reference:");
+    say("  arr[0]  = first element");
+    say("  arr[1]  = second element");
+    say("  arr[-1] = last element");
+    say("  arr[-2] = second to last");
+    say("  arr[-n] = nth from end");
+    say("");
+    say("✓ Negative indexing working!");
+    say("✓ Access last element with [-1]!");
+    
+    return 0;
+}

@@ -1,0 +1,145 @@
+#!/usr/bin/env strada
+# Test pack/unpack operations for memory leaks
+# Run: valgrind --leak-check=full ./test_pack
+
+func main() int {
+    say("Testing pack/unpack for memory leaks...");
+    my int $iterations = 100;
+
+    # Test pack N (32-bit network byte order)
+    say("  pack N...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my str $packed = core::pack("N", 0x12345678);
+        my int $len = core::byte_length($packed);
+        if ($len != 4) {
+            say("    FAIL: pack N length = " . $len);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test unpack N
+    say("  unpack N...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $packed = core::pack("N", 305419896);
+        my array @parts = core::unpack("N", $packed);
+        if (size(@parts) < 1) {
+            say("    FAIL: unpack size");
+            return 1;
+        }
+        if ($parts[0] != 305419896) {
+            say("    FAIL: unpack N value");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test pack/unpack roundtrip with multiple values
+    say("  pack/unpack roundtrip...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $packed = core::pack("NnC", 1000000, 8080, 255);
+        my array @vals = core::unpack("NnC", $packed);
+        if ($vals[0] != 1000000) {
+            say("    FAIL: roundtrip N");
+            return 1;
+        }
+        if ($vals[1] != 8080) {
+            say("    FAIL: roundtrip n");
+            return 1;
+        }
+        if ($vals[2] != 255) {
+            say("    FAIL: roundtrip C");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test pack C (unsigned byte)
+    say("  pack C...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $packed = core::pack("CCCC", 72, 101, 108, 111);
+        my int $len = core::byte_length($packed);
+        if ($len != 4) {
+            say("    FAIL: pack C length");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test pack n (16-bit network byte order)
+    say("  pack n...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $packed = core::pack("nn", 80, 443);
+        my array @vals = core::unpack("nn", $packed);
+        if ($vals[0] != 80 || $vals[1] != 443) {
+            say("    FAIL: pack n roundtrip");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test repeated pack/unpack cycles
+    say("  Repeated cycles...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $j = 0;
+        while ($j < 10) {
+            my str $p = core::pack("NC", $j * 1000, $j);
+            my array @v = core::unpack("NC", $p);
+            if ($v[0] != $j * 1000) {
+                say("    FAIL: cycle value");
+                return 1;
+            }
+            $j = $j + 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test base64 encode/decode
+    say("  base64 encode/decode...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $data = "Hello, World! This is a test of base64 encoding.";
+        my str $encoded = core::base64_encode($data);
+        my str $decoded = core::base64_decode($encoded);
+        if ($decoded ne $data) {
+            say("    FAIL: base64 roundtrip");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test ord_byte / get_byte
+    say("  ord_byte/get_byte...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = "ABCDE";
+        my int $b0 = core::ord_byte($s);
+        my int $b2 = core::get_byte($s, 2);
+        if ($b0 != 65) {
+            say("    FAIL: ord_byte");
+            return 1;
+        }
+        if ($b2 != 67) {
+            say("    FAIL: get_byte");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All pack/unpack tests passed!");
+    return 0;
+}

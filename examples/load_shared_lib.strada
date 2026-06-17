@@ -1,0 +1,62 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# Example: Loading a Strada-compiled shared library
+#
+# First compile the shared library:
+#   ./strada --shared examples/shared_lib_example.strada
+#   mv shared_lib_example.so ./
+#
+# Then compile and run this program:
+#   ./strada -r examples/load_shared_lib.strada
+#
+# Strada functions return StradaValue*, so use sys::dl_call_sv()
+
+func main() int {
+    my int $lib = sys::dl_open("./shared_lib_example.so");
+    if ($lib == 0) {
+        say("Failed to load library: " . sys::dl_error());
+        say("Make sure to run: ./strada --shared examples/shared_lib_example.strada");
+        return 1;
+    }
+    say("Loaded shared_lib_example.so");
+
+    # Call add function - Strada functions use StradaValue*, so use dl_call_sv
+    my int $add_fn = sys::dl_sym($lib, "add");
+    if ($add_fn == 0) {
+        say("Failed to find 'add': " . sys::dl_error());
+        return 1;
+    }
+
+    # dl_call_sv passes StradaValue* args and gets StradaValue* return
+    my scalar $result = sys::dl_call_sv($add_fn, [10, 32]);
+    say("add(10, 32) = " . $result);
+
+    # Call greet function
+    my int $greet_fn = sys::dl_sym($lib, "greet");
+    if ($greet_fn == 0) {
+        say("Failed to find 'greet': " . sys::dl_error());
+        return 1;
+    }
+
+    my scalar $greeting = sys::dl_call_sv($greet_fn, ["World"]);
+    say("greet(\"World\") = " . $greeting);
+
+    sys::dl_close($lib);
+    say("Done!");
+    return 0;
+}

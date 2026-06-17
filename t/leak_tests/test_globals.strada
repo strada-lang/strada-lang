@@ -1,0 +1,113 @@
+#!/usr/bin/env strada
+# Test global variable registry for memory leaks
+# Run: valgrind --leak-check=full ./test_globals
+
+our int $pkg_counter = 0;
+our str $pkg_name = "initial";
+
+func increment_counter() void {
+    $pkg_counter = $pkg_counter + 1;
+}
+
+func set_name(str $n) void {
+    $pkg_name = $n;
+}
+
+func main() int {
+    say("Testing global variable registry for memory leaks...");
+    my int $iterations = 100;
+
+    # Test global_set/global_get
+    say("  global_set/global_get...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        core::global_set("test::key" . $i, "value" . $i);
+        my scalar $val = core::global_get("test::key" . $i);
+        if ($val ne "value" . $i) {
+            say("    FAIL: global get");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test global_exists
+    say("  global_exists...");
+    $i = 0;
+    while ($i < $iterations) {
+        core::global_set("exist::check" . $i, "yes");
+        if (!core::global_exists("exist::check" . $i)) {
+            say("    FAIL: should exist");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test global_delete
+    say("  global_delete...");
+    $i = 0;
+    while ($i < $iterations) {
+        core::global_set("del::key" . $i, "temp");
+        core::global_delete("del::key" . $i);
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test global_keys
+    say("  global_keys...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @keys = core::global_keys();
+        if (size(@keys) < 1) {
+            say("    FAIL: no global keys");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test overwriting globals
+    say("  Overwrite globals...");
+    $i = 0;
+    while ($i < $iterations) {
+        core::global_set("overwrite::key", "value_" . $i);
+        my scalar $val = core::global_get("overwrite::key");
+        if ($val ne "value_" . $i) {
+            say("    FAIL: overwrite");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test our variables
+    say("  our variables...");
+    $i = 0;
+    while ($i < $iterations) {
+        increment_counter();
+        set_name("iter_" . $i);
+        $i = $i + 1;
+    }
+    if ($pkg_counter != 100) {
+        say("    FAIL: counter = " . $pkg_counter);
+        return 1;
+    }
+    if ($pkg_name ne "iter_99") {
+        say("    FAIL: name = " . $pkg_name);
+        return 1;
+    }
+    say("    PASS");
+
+    # Cleanup test globals
+    $i = 0;
+    while ($i < $iterations) {
+        core::global_delete("test::key" . $i);
+        core::global_delete("exist::check" . $i);
+        $i = $i + 1;
+    }
+    core::global_delete("overwrite::key");
+
+    say("All global registry tests passed!");
+    return 0;
+}

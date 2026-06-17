@@ -1,0 +1,357 @@
+# stradapp - Strada Preprocessor
+#
+# A simple C-style preprocessor for Strada
+#
+# Supported directives:
+#   #define NAME [value]    - Define a macro (value defaults to 1)
+#   #undef NAME             - Undefine a macro
+#   #ifdef NAME             - Include following code if NAME is defined
+#   #ifndef NAME            - Include following code if NAME is NOT defined
+#   #else                   - Toggle the condition
+#   #endif                  - End conditional block
+#   #include "file"         - Include file relative to current file
+#   #include <file>         - Include file from include paths
+#   #error "message"        - Abort with error message
+#   #warning "message"      - Print warning message
+#
+# Usage: stradapp input.strada > output.strada
+#        stradapp input.strada -o output.strada
+#        stradapp -DDEBUG input.strada
+#
+# Note: Macro substitution in code is not yet supported.
+#       #define values only affect #ifdef/#ifndef checks.
+
+my hash %g_defines = ();
+my array @g_include_paths = ();
+
+func starts_with(str $s, str $prefix) int {
+    my int $plen = length($prefix);
+    if (length($s) < $plen) {
+        return 0;
+    }
+    return substr($s, 0, $plen) eq $prefix;
+}
+
+func file_exists(str $path) int {
+    my hash %stat = sys::stat($path);
+    return exists(%stat, "size");
+}
+
+func find_include(str $filename, str $current_dir) str {
+    # Try relative to current file first
+    my str $path = $current_dir . "/" . $filename;
+    if (file_exists($path)) {
+        return $path;
+    }
+
+    # Try include paths
+    my int $i = 0;
+    my int $n = size(@g_include_paths);
+    while ($i < $n) {
+        $path = $g_include_paths[$i] . "/" . $filename;
+        if (file_exists($path)) {
+            return $path;
+        }
+        $i++;
+    }
+
+    # Try current directory
+    if (file_exists($filename)) {
+        return $filename;
+    }
+
+    return "";
+}
+
+func preprocess(str $filename) str {
+    my str $content = slurp($filename);
+    if (!defined($content)) {
+        die("stradapp: cannot read file: " . $filename);
+    }
+
+    my str $file_dir = sys::dirname($filename);
+    if ($file_dir eq "") {
+        $file_dir = ".";
+    }
+
+    my array @lines = split("\n", $content);
+    my str $output = "";
+    my array @cond_stack = ();
+    my int $active = 1;
+    my int $in_c_block = 0;
+    my int $c_block_depth = 0;
+
+    my int $i = 0;
+    my int $num_lines = size(@lines);
+
+    while ($i < $num_lines) {
+        my str $line = $lines[$i];
+        my str $trimmed = trim($line);
+
+        # Check for __C__ block start
+        if ($in_c_block == 0 && index($trimmed, "__C__") >= 0) {
+            # Found __C__ - look for opening brace
+            my int $brace_pos = index($trimmed, "{");
+            if ($brace_pos >= 0) {
+                $in_c_block = 1;
+                $c_block_depth = 1;
+                # Count any additional braces on this line after the opening one
+                my int $j = $brace_pos + 1;
+                while ($j < length($trimmed)) {
+                    my str $ch = substr($trimmed, $j, 1);
+                    if ($ch eq "{") {
+                        $c_block_depth++;
+                    } elsif ($ch eq "}") {
+                        $c_block_depth--;
+                        if ($c_block_depth == 0) {
+                            $in_c_block = 0;
+                        }
+                    }
+                    $j++;
+                }
+            }
+            # Pass through the __C__ line as-is
+            if ($active) {
+                $output = $output . $line . "\n";
+            }
+            $i++;
+            next;
+        }
+
+        # If inside __C__ block, just pass through and track braces
+        if ($in_c_block == 1) {
+            # Count braces to track nesting
+            my int $j = 0;
+            while ($j < length($trimmed)) {
+                my str $ch = substr($trimmed, $j, 1);
+                if ($ch eq "{") {
+                    $c_block_depth++;
+                } elsif ($ch eq "}") {
+                    $c_block_depth--;
+                    if ($c_block_depth == 0) {
+                        $in_c_block = 0;
+                    }
+                }
+                $j++;
+            }
+            # Pass through C code as-is
+            if ($active) {
+                $output = $output . $line . "\n";
+            }
+            $i++;
+            next;
+        }
+
+        if (substr($trimmed, 0, 1) eq "#") {
+            my str $directive = $trimmed;
+
+            if (starts_with($directive, "#define ")) {
+                if ($active) {
+                    my str $rest = substr($directive, 8, -1);
+                    $rest = trim($rest);
+                    my int $space_idx = index($rest, " ");
+                    my str $name = "";
+                    my str $value = "1";
+                    if ($space_idx > 0) {
+                        $name = substr($rest, 0, $space_idx);
+                        $value = trim(substr($rest, $space_idx + 1, -1));
+                    } else {
+                        $name = $rest;
+                    }
+                    $g_defines{$name} = $value;
+                }
+            } elsif (starts_with($directive, "#undef ")) {
+                if ($active) {
+                    my str $name = trim(substr($directive, 7, -1));
+                    delete(%g_defines, $name);
+                }
+            } elsif (starts_with($directive, "#ifdef ")) {
+                my str $name = trim(substr($directive, 7, -1));
+                push(@cond_stack, $active);
+                if ($active) {
+                    $active = exists(%g_defines, $name);
+                }
+            } elsif (starts_with($directive, "#ifndef ")) {
+                my str $name = trim(substr($directive, 8, -1));
+                push(@cond_stack, $active);
+                if ($active) {
+                    $active = !exists(%g_defines, $name);
+                }
+            } elsif ($directive eq "#else") {
+                if (size(@cond_stack) == 0) {
+                    die("stradapp: " . $filename . ":" . ($i + 1) . ": #else without #ifdef/#ifndef");
+                }
+                my int $parent_active = $cond_stack[size(@cond_stack) - 1];
+                if ($parent_active) {
+                    $active = !$active;
+                }
+            } elsif ($directive eq "#endif") {
+                if (size(@cond_stack) == 0) {
+                    die("stradapp: " . $filename . ":" . ($i + 1) . ": #endif without #ifdef/#ifndef");
+                }
+                $active = pop(@cond_stack);
+            } elsif (starts_with($directive, "#include ")) {
+                if ($active) {
+                    my str $rest = trim(substr($directive, 9, -1));
+                    my str $inc_file = "";
+                    if (substr($rest, 0, 1) eq "\"") {
+                        my int $end = index(substr($rest, 1, -1), "\"");
+                        if ($end > 0) {
+                            $inc_file = substr($rest, 1, $end);
+                        }
+                    } elsif (substr($rest, 0, 1) eq "<") {
+                        my int $end = index(substr($rest, 1, -1), ">");
+                        if ($end > 0) {
+                            $inc_file = substr($rest, 1, $end);
+                        }
+                    }
+                    if ($inc_file eq "") {
+                        die("stradapp: " . $filename . ":" . ($i + 1) . ": invalid #include syntax");
+                    }
+                    my str $inc_path = find_include($inc_file, $file_dir);
+                    if ($inc_path eq "") {
+                        die("stradapp: " . $filename . ":" . ($i + 1) . ": cannot find include file: " . $inc_file);
+                    }
+                    my str $inc_content = preprocess($inc_path);
+                    $output = $output . $inc_content;
+                }
+            } elsif (starts_with($directive, "#error ")) {
+                if ($active) {
+                    my str $msg = trim(substr($directive, 7, -1));
+                    if (substr($msg, 0, 1) eq "\"") {
+                        $msg = substr($msg, 1, length($msg) - 2);
+                    }
+                    die("stradapp: " . $filename . ":" . ($i + 1) . ": error: " . $msg);
+                }
+            } elsif (starts_with($directive, "#warning ")) {
+                if ($active) {
+                    my str $msg = trim(substr($directive, 9, -1));
+                    if (substr($msg, 0, 1) eq "\"") {
+                        $msg = substr($msg, 1, length($msg) - 2);
+                    }
+                    warn("stradapp: " . $filename . ":" . ($i + 1) . ": warning: " . $msg);
+                }
+            } elsif ($trimmed eq "#") {
+                # Empty directive, skip
+            } else {
+                # Unknown directive - treat as comment if it starts with "# "
+                # (Strada uses # for comments)
+                if (starts_with($directive, "# ")) {
+                    # Comment line - skip it
+                } else {
+                    die("stradapp: " . $filename . ":" . ($i + 1) . ": unknown directive: " . $directive);
+                }
+            }
+        } else {
+            if ($active) {
+                $output = $output . $line . "\n";
+            }
+        }
+
+        $i++;
+    }
+
+    if (size(@cond_stack) > 0) {
+        die("stradapp: " . $filename . ": unterminated #ifdef/#ifndef");
+    }
+
+    return $output;
+}
+
+func print_usage() void {
+    say("stradapp - Strada Preprocessor");
+    say("");
+    say("Usage: stradapp [options] input.strada");
+    say("");
+    say("Options:");
+    say("  -o FILE       Write output to FILE (default: stdout)");
+    say("  -D NAME       Define NAME as 1");
+    say("  -D NAME=VAL   Define NAME as VAL");
+    say("  -I PATH       Add PATH to include search path");
+    say("  -h, --help    Show this help");
+    say("");
+    say("Supported directives:");
+    say("  #define NAME [value]");
+    say("  #undef NAME");
+    say("  #ifdef NAME / #ifndef NAME");
+    say("  #else / #endif");
+    say("  #include \"file\" / #include <file>");
+    say("  #error \"message\"");
+    say("  #warning \"message\"");
+}
+
+func main(int $argc, array @argv) int {
+    my str $input_file = "";
+    my str $output_file = "";
+
+    my int $i = 1;
+    while ($i < $argc) {
+        my str $arg = $argv[$i];
+
+        if ($arg eq "-h" || $arg eq "--help") {
+            print_usage();
+            return 0;
+        } elsif ($arg eq "-o") {
+            $i++;
+            if ($i >= $argc) {
+                die("stradapp: -o requires an argument");
+            }
+            $output_file = $argv[$i];
+        } elsif (starts_with($arg, "-D")) {
+            my str $def = "";
+            if (length($arg) > 2) {
+                $def = substr($arg, 2, -1);
+            } else {
+                $i++;
+                if ($i >= $argc) {
+                    die("stradapp: -D requires an argument");
+                }
+                $def = $argv[$i];
+            }
+            my int $eq_idx = index($def, "=");
+            if ($eq_idx > 0) {
+                my str $name = substr($def, 0, $eq_idx);
+                my str $value = substr($def, $eq_idx + 1, -1);
+                $g_defines{$name} = $value;
+            } else {
+                $g_defines{$def} = "1";
+            }
+        } elsif (starts_with($arg, "-I")) {
+            my str $path = "";
+            if (length($arg) > 2) {
+                $path = substr($arg, 2, -1);
+            } else {
+                $i++;
+                if ($i >= $argc) {
+                    die("stradapp: -I requires an argument");
+                }
+                $path = $argv[$i];
+            }
+            push(@g_include_paths, $path);
+        } elsif (substr($arg, 0, 1) eq "-") {
+            die("stradapp: unknown option: " . $arg);
+        } else {
+            if ($input_file ne "") {
+                die("stradapp: multiple input files not supported");
+            }
+            $input_file = $arg;
+        }
+
+        $i++;
+    }
+
+    if ($input_file eq "") {
+        print_usage();
+        return 1;
+    }
+
+    my str $result = preprocess($input_file);
+
+    if ($output_file ne "") {
+        spew($output_file, $result);
+    } else {
+        print($result);
+    }
+
+    return 0;
+}

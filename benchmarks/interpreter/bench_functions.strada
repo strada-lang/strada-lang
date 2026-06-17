@@ -1,0 +1,12 @@
+package main;
+func add(int $a, int $b) int { return $a + $b; }
+func mul(int $a, int $b) int { return $a * $b; }
+func run() void {
+    my int $sum = 0;
+    my int $i = 0;
+    while ($i < 100000) {
+        $sum += add($i, mul($i, 2));
+        $i++;
+    }
+    say("sum: " . $sum);
+}

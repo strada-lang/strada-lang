@@ -1,0 +1,156 @@
+# Strada DBI - Database Interface
+
+A Perl DBI-like database interface for Strada, supporting SQLite, MySQL, and PostgreSQL.
+
+## Dependencies
+
+### Ubuntu/Debian:
+```bash
+# SQLite (required)
+sudo apt-get install libsqlite3-dev
+
+# MySQL (optional)
+sudo apt-get install libmysqlclient-dev
+
+# PostgreSQL (optional)
+sudo apt-get install libpq-dev
+```
+
+### Fedora/RHEL:
+```bash
+# SQLite
+sudo dnf install sqlite-devel
+
+# MySQL
+sudo dnf install mysql-devel
+
+# PostgreSQL
+sudo dnf install libpq-devel
+```
+
+### macOS (Homebrew):
+```bash
+brew install sqlite3
+brew install mysql
+brew install libpq
+```
+
+## Building
+
+```bash
+cd lib/dbi
+
+# SQLite only (default)
+make
+
+# With MySQL support
+make MYSQL=1
+
+# With PostgreSQL support
+make POSTGRES=1
+
+# All drivers
+make MYSQL=1 POSTGRES=1
+```
+
+## Usage
+
+```strada
+use lib "lib";
+use DBI;
+
+# Connect to SQLite
+my scalar $dbh = DBI::connect("dbi:SQLite:test.db", "", "");
+
+# Or in-memory database
+my scalar $dbh = DBI::connect("dbi:SQLite::memory:", "", "");
+
+# Execute SQL
+DBI::do_sql($dbh, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)");
+
+# Insert with placeholders (safe from SQL injection)
+DBI::do($dbh, "INSERT INTO users (name) VALUES (?)", ["Alice"]);
+
+# Query
+my scalar $sth = DBI::prepare($dbh, "SELECT * FROM users");
+DBI::execute($sth, []);
+
+while (my scalar $row = DBI::fetchrow_hashref($sth)) {
+    say($row->{"name"});
+}
+
+# Convenience functions
+my scalar $all = DBI::selectall_hashref($dbh, "SELECT * FROM users", []);
+my scalar $one = DBI::selectrow_hashref($dbh, "SELECT * FROM users WHERE id = ?", [1]);
+my scalar $val = DBI::selectcol($dbh, "SELECT COUNT(*) FROM users", []);
+
+# Transactions
+DBI::begin_work($dbh);
+DBI::do($dbh, "UPDATE accounts SET balance = balance - 100 WHERE id = ?", [1]);
+DBI::do($dbh, "UPDATE accounts SET balance = balance + 100 WHERE id = ?", [2]);
+DBI::commit($dbh);  # or DBI::rollback($dbh);
+
+DBI::disconnect($dbh);
+```
+
+## DSN Formats
+
+```
+SQLite:
+  dbi:SQLite:filename.db
+  dbi:SQLite:dbname=/path/to/database.sqlite
+  dbi:SQLite::memory:
+
+MySQL:
+  dbi:mysql:database=test;host=localhost;port=3306
+
+PostgreSQL:
+  dbi:Pg:dbname=test;host=localhost;port=5432
+```
+
+## API Reference
+
+### Connection
+- `DBI::connect(dsn, user, pass)` - Connect to database
+- `DBI::connect_attrs(dsn, user, pass, attrs)` - Connect with attributes
+- `DBI::disconnect(dbh)` - Close connection
+- `DBI::ping(dbh)` - Test if connection is alive
+
+### Execution
+- `DBI::prepare(dbh, sql)` - Prepare a statement
+- `DBI::execute(sth, params)` - Execute prepared statement
+- `DBI::do(dbh, sql, params)` - Execute SQL directly
+- `DBI::do_sql(dbh, sql)` - Execute SQL without params
+
+### Fetching
+- `DBI::fetchrow_array(sth)` - Fetch row as array ref
+- `DBI::fetchrow_hashref(sth)` - Fetch row as hash ref
+- `DBI::fetchall_arrayref(sth)` - Fetch all rows
+- `DBI::finish(sth)` - Mark statement as finished
+
+### Convenience
+- `DBI::selectall_hashref(dbh, sql, params)` - Select all as array of hashes
+- `DBI::selectrow_hashref(dbh, sql, params)` - Select single row
+- `DBI::selectcol(dbh, sql, params)` - Select single value
+- `DBI::insert_get_id(dbh, sql, params)` - Insert and get ID
+
+### Transactions
+- `DBI::begin_work(dbh)` - Start transaction
+- `DBI::commit(dbh)` - Commit transaction
+- `DBI::rollback(dbh)` - Rollback transaction
+
+### Utility
+- `DBI::quote(dbh, str)` - Quote string for SQL
+- `DBI::last_insert_id(dbh)` - Get last auto-increment ID
+- `DBI::rows(sth)` - Get affected row count
+- `DBI::column_names(sth)` - Get column names
+- `DBI::errstr(dbh)` - Get last error message
+- `DBI::err(dbh)` - Get last error code
+
+## Examples
+
+See the examples directory:
+- `examples/dbi_basic.strada` - Basic usage
+- `examples/dbi_transactions.strada` - Transaction handling
+- `examples/dbi_crud.strada` - Complete CRUD operations
+- `examples/test_dbi.strada` - Comprehensive test suite

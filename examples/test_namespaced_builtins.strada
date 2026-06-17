@@ -1,0 +1,73 @@
+# Namespaced builtin aliases: re::, str::, sb::, and core::-qualified
+# spellings of historically-unqualified builtins. Normalized at call-node
+# creation (ast_normalize_call_name, compiler/AST.strada) so the whole
+# compiler sees the canonical unqualified names.
+
+use lib "lib";
+use Test;
+
+func main() int {
+    # --- re:: regex family ---
+    my str $s = "foo 123 bar 456";
+    Test::ok(re::match($s, "(\\d+)"), "re::match finds digits");
+    my array @caps = re::captures();
+    Test::is($caps[1], "123", "re::captures group 1");
+    my array @one = re::capture($s, "(\\d+)");
+    Test::is($one[1], "123", "re::capture match+groups");
+    Test::ok(re::match("name=widget", "name=(?P<thing>\\w+)"), "re::match named group");
+    my hash %nc = re::named_captures();
+    Test::is($nc{"thing"}, "widget", "re::named_captures");
+    Test::is(re::replace("a1b2c3", "\\d", "-"), "a-b2c3", "re::replace first match only");
+    Test::is(re::replace_all("a1b2c3", "\\d", "-"), "a-b-c-", "re::replace_all all matches");
+
+    # --- str:: plain-string replace ---
+    Test::is(str::replace("aaa.b", "a", "x"), "xxx.b", "str::replace all occurrences");
+    Test::is(str::replace_first("aaa", "a", "x"), "xaa", "str::replace_first");
+    Test::is(str::replace("1.2.3", ".", "-"), "1-2-3", "str::replace is literal, not regex");
+
+    # --- sb:: StringBuilder ---
+    my scalar $sb = sb::new();
+    sb::append($sb, "hello");
+    sb::append($sb, " world");
+    Test::is(sb::to_string($sb), "hello world", "sb:: build");
+    Test::is(sb::length($sb), 11, "sb::length");
+    sb::clear($sb);
+    Test::is(sb::length($sb), 0, "sb::clear");
+    sb::free($sb);
+
+    # --- core:: hash plumbing ---
+    my scalar $h = core::hash_new();
+    core::hash_set($h, "k", 42);
+    Test::is(core::hash_get($h, "k"), 42, "core::hash_new/set/get");
+
+    # --- core:: reference machinery ---
+    my int $n = 7;
+    my scalar $ref = \$n;
+    Test::ok(core::is_ref($ref), "core::is_ref");
+    Test::is(core::deref($ref), 7, "core::deref");
+    my array @arr = (10, 20, 30);
+    my scalar $aref = \@arr;
+    my array @copy = core::deref_array($aref);
+    Test::is($copy[1], 20, "core::deref_array");
+    my hash %hh = ("x" => 5);
+    my scalar $href = \%hh;
+    my hash %hcopy = core::deref_hash($href);
+    Test::is($hcopy{"x"}, 5, "core::deref_hash");
+    Test::ok(core::refcount($aref) >= 1, "core::refcount");
+
+    # --- core:: debug/introspection ---
+    Test::ok(length(core::dumper_str($aref)) > 0, "core::dumper_str");
+    Test::ok(length(core::stacktrace_str()) > 0, "core::stacktrace_str");
+
+    # --- core:: OOP plumbing ---
+    my scalar $obj = {};
+    bless($obj, "Widget");
+    Test::is(core::blessed($obj), "Widget", "core::blessed");
+
+    # --- legacy unqualified spellings still work ---
+    Test::is(str_replace("aaa", "a", "x"), "xxx", "legacy str_replace alias");
+    Test::is(regex_replace_all("a1b2", "\\d", "-"), "a-b-", "legacy regex_replace_all alias");
+    Test::is(sb_to_string(sb_new()), "", "legacy sb_new/sb_to_string alias");
+
+    return Test::done_testing();
+}

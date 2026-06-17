@@ -1,0 +1,83 @@
+# Test enum support
+
+# Simple enum with auto-incrementing values
+enum Color {
+    RED,
+    GREEN,
+    BLUE
+}
+
+# Enum with explicit values
+enum Status {
+    PENDING = 0,
+    ACTIVE = 10,
+    DONE = 20,
+    ERROR = -1
+}
+
+# Enum with mixed auto and explicit values
+enum HttpCode {
+    OK = 200,
+    CREATED,
+    ACCEPTED,
+    NOT_FOUND = 404,
+    SERVER_ERROR = 500
+}
+
+func main() int {
+    # Test simple enum
+    my int $color = Color::RED;
+    say("Color::RED = " . $color);
+
+    $color = Color::GREEN;
+    say("Color::GREEN = " . $color);
+
+    $color = Color::BLUE;
+    say("Color::BLUE = " . $color);
+
+    # Test enum with explicit values
+    my int $status = Status::PENDING;
+    say("Status::PENDING = " . $status);
+
+    $status = Status::ACTIVE;
+    say("Status::ACTIVE = " . $status);
+
+    $status = Status::DONE;
+    say("Status::DONE = " . $status);
+
+    $status = Status::ERROR;
+    say("Status::ERROR = " . $status);
+
+    # Set status back for switch test
+    $status = Status::DONE;
+
+    # Test mixed enum
+    my int $code = HttpCode::OK;
+    say("HttpCode::OK = " . $code);
+
+    $code = HttpCode::CREATED;
+    say("HttpCode::CREATED = " . $code);
+
+    $code = HttpCode::NOT_FOUND;
+    say("HttpCode::NOT_FOUND = " . $code);
+
+    # Test in comparisons
+    if ($color == Color::BLUE) {
+        say("Color is BLUE");
+    }
+
+    # Test in switch
+    switch ($status) {
+        case Status::PENDING {
+            say("Status is PENDING");
+        }
+        case Status::ACTIVE {
+            say("Status is ACTIVE");
+        }
+        case Status::DONE {
+            say("Status is DONE");
+        }
+    }
+
+    return 0;
+}

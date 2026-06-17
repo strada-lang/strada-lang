@@ -1,0 +1,73 @@
+#!/usr/bin/env strada
+# Request-arena leak test.
+#
+# Wraps allocation-heavy request-local work in strada_arena_begin/end. Every
+# StradaValue created between begin/end is bump-allocated and reclaimed wholesale
+# at end. valgrind must report 0 leaks (blocks + backbones freed) and 0 errors
+# (data valid during the arena; persistent data created before the arena is
+# untouched by arena teardown).
+
+package main;
+
+# Allocate request-local data (hashes, arrays, strings, nesting) and use it.
+func work(int $n) int {
+    my int $sum = 0;
+    my int $i = 0;
+    while ($i < $n) {
+        my scalar $h = {"a" => $i, "b" => "str" . $i, "nested" => {"x" => $i}};
+        my scalar $arr = [$i, $i + 1, $i + 2];
+        $h->{"arr"} = $arr;
+        # read back to prove the data is valid mid-arena
+        $sum = $sum + $h->{"a"} + $h->{"nested"}->{"x"} + $arr->[2];
+        $i = $i + 1;
+    }
+    return $sum;
+}
+
+func main() int {
+    say("Arena test...");
+
+    # Persistent data created BEFORE any arena — must survive every arena_end.
+    my scalar $persistent = {"keep" => "yes", "n" => 41};
+
+    # Many request cycles: begin -> allocate a lot -> end (wholesale free).
+    my int $rounds = 0;
+    my int $check = 0;
+    while ($rounds < 50) {
+        __C__ { strada_arena_begin(); }
+        $check = work(200);
+        __C__ { strada_arena_end(); }
+        $rounds = $rounds + 1;
+    }
+    say("  50 arena rounds done (last sum=" . $check . ")");
+
+    # Nested arenas.
+    __C__ { strada_arena_begin(); }
+    my int $r1 = work(50);
+    __C__ { strada_arena_begin(); }
+    my int $r2 = work(50);
+    __C__ { strada_arena_end(); }
+    my int $r3 = work(50);
+    __C__ { strada_arena_end(); }
+    say("  nested arenas done (" . $r1 . "," . $r2 . "," . $r3 . ")");
+
+    # active() reflects state.
+    my int $active_out = 0;
+    my int $active_in = 0;
+    __C__ { active_out = strada_new_int((int64_t)strada_arena_active()); }
+    __C__ { strada_arena_begin(); active_in = strada_new_int((int64_t)strada_arena_active()); }
+    __C__ { strada_arena_end(); }
+    if ($active_out != 0 || $active_in != 1) {
+        say("    FAIL: arena_active() wrong (out=" . $active_out . " in=" . $active_in . ")");
+        return 1;
+    }
+
+    # Persistent data must be intact and correct after all the arenas.
+    if ($persistent->{"keep"} ne "yes" || $persistent->{"n"} != 41) {
+        say("    FAIL: persistent data corrupted by arena teardown");
+        return 1;
+    }
+
+    say("Arena test passed!");
+    return 0;
+}

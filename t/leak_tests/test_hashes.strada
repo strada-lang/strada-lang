@@ -1,0 +1,245 @@
+#!/usr/bin/env strada
+# Test hash operations for memory leaks
+# Run: valgrind --leak-check=full ./test_hashes
+
+func main() int {
+    say("Testing hash operations for memory leaks...");
+    my int $iterations = 100;
+
+    # Test basic hash operations
+    say("  Basic hash operations...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        $h{"name"} = "Alice";
+        $h{"age"} = 30;
+        $h{"city"} = "Boston";
+
+        if ($h{"name"} ne "Alice") {
+            say("    FAIL: hash access");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test keys()
+    say("  keys()...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        $h{"a"} = 1;
+        $h{"b"} = 2;
+        $h{"c"} = 3;
+        my array @k = keys(%h);
+        if (size(@k) != 3) {
+            say("    FAIL: keys returned " . size(@k));
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test values()
+    say("  values()...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        $h{"x"} = 10;
+        $h{"y"} = 20;
+        $h{"z"} = 30;
+        my array @v = values(%h);
+        if (size(@v) != 3) {
+            say("    FAIL: values returned " . size(@v));
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test exists()
+    say("  exists()...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        $h{"present"} = "yes";
+
+        if (!exists($h{"present"})) {
+            say("    FAIL: exists should be true");
+            return 1;
+        }
+        if (exists($h{"absent"})) {
+            say("    FAIL: exists should be false");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test delete()
+    say("  delete()...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        $h{"key1"} = "value1";
+        $h{"key2"} = "value2";
+        delete($h{"key1"});
+
+        if (exists($h{"key1"})) {
+            say("    FAIL: delete didn't work");
+            return 1;
+        }
+        if (!exists($h{"key2"})) {
+            say("    FAIL: wrong key deleted");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test anonymous hash
+    say("  Anonymous hashes...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $h = { "name" => "Bob", "age" => 25 };
+        if ($h->{"name"} ne "Bob") {
+            say("    FAIL: anon hash access");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test empty anonymous hash assigned to scalar
+    say("  Empty anonymous hash to scalar...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $empty = {};
+        my array @k = keys($empty);
+        if (size(@k) != 0) {
+            say("    FAIL: empty anon hash keys");
+            return 1;
+        }
+        # Test reassignment
+        my scalar $x = {};
+        $x = { "a" => 1, "b" => 2 };
+        my array @k2 = keys($x);
+        if (size(@k2) != 2) {
+            say("    FAIL: reassigned hash keys");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test nested hashes
+    say("  Nested hashes...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        $h{"user"} = { "name" => "Charlie", "profile" => { "city" => "NYC" } };
+
+        my scalar $user = $h{"user"};
+        if ($user->{"name"} ne "Charlie") {
+            say("    FAIL: nested hash access");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test hash with array values
+    say("  Hash with array values...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        $h{"numbers"} = [1, 2, 3, 4, 5];
+        $h{"letters"} = ["a", "b", "c"];
+
+        my scalar $nums = $h{"numbers"};
+        if (size($nums) != 5) {
+            say("    FAIL: array in hash");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test defined() with hash access
+    say("  defined() with hash access...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        $h{"exists"} = "value";
+
+        if (!defined($h{"exists"})) {
+            say("    FAIL: defined should be true");
+            return 1;
+        }
+        if (defined($h{"missing"})) {
+            say("    FAIL: defined should be false");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test hash iteration with keys
+    say("  Hash iteration...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        $h{"a"} = 1;
+        $h{"b"} = 2;
+        $h{"c"} = 3;
+
+        my int $sum = 0;
+        my array @k = keys(%h);
+        foreach my str $key (@k) {
+            $sum = $sum + $h{$key};
+        }
+        if ($sum != 6) {
+            say("    FAIL: iteration sum");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test // operator with hash
+    say("  Defined-or (//) with hash...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        $h{"exists"} = "value";
+        $h{"zero"} = 0;
+        $h{"empty"} = "";
+
+        my str $v1 = $h{"exists"} // "default";
+        my scalar $v2 = $h{"zero"} // 99;
+        my str $v3 = $h{"empty"} // "default";
+        my str $v4 = $h{"missing"} // "default";
+
+        if ($v1 ne "value") {
+            say("    FAIL: // with existing");
+            return 1;
+        }
+        if ($v2 != 0) {
+            say("    FAIL: // with zero");
+            return 1;
+        }
+        if ($v3 ne "") {
+            say("    FAIL: // with empty");
+            return 1;
+        }
+        if ($v4 ne "default") {
+            say("    FAIL: // with missing");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All hash tests passed!");
+    return 0;
+}

@@ -1,0 +1,109 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_perl_refs.strada - Test Perl-style references
+
+func main() int {
+    say("╔══════════════════════════════════════╗");
+    say("║  Perl-Style References Test          ║");
+    say("╚══════════════════════════════════════╝");
+    say("");
+    
+    # ===== Anonymous Hash (hash reference) =====
+    say("=== Anonymous Hash ===");
+    
+    my scalar $user = { name => "Peter", age => 30, city => "NYC" };
+    
+    # Access via arrow notation
+    say("Name: " . $user->{name});
+    say("Age: " . $user->{age});
+    say("City: " . $user->{city});
+    
+    # Modify via arrow notation
+    $user->{age} = 31;
+    say("Updated age: " . $user->{age});
+    
+    # ===== Anonymous Array (array reference) =====
+    say("");
+    say("=== Anonymous Array ===");
+    
+    my scalar $numbers = [10, 20, 30, 40, 50];
+    
+    say("First: " . $numbers->[0]);
+    say("Third: " . $numbers->[2]);
+    say("Last: " . $numbers->[4]);
+    
+    # Modify
+    $numbers->[1] = 25;
+    say("Updated [1]: " . $numbers->[1]);
+    
+    # ===== Nested structures =====
+    say("");
+    say("=== Nested Structures ===");
+    
+    my scalar $person = {
+        name => "Alice",
+        favorites => [1, 2, 4, 8, 16]
+    };
+    
+    say("Person: " . $person->{name});
+    say("Favorite[0]: " . $person->{favorites}->[0]);
+    say("Favorite[3]: " . $person->{favorites}->[3]);
+    
+    # ===== Reference to existing hash =====
+    say("");
+    say("=== Reference to Hash ===");
+    
+    my hash %data;
+    $data{foo} = "bar";
+    $data{count} = 42;
+    
+    my scalar $ref = \%data;
+    
+    say("Via ref: foo = " . $ref->{foo});
+    say("Via ref: count = " . $ref->{count});
+    
+    # Modify through reference
+    $ref->{count} = 100;
+    say("Modified via ref: count = " . $data{count});
+    
+    # ===== Reference to scalar =====
+    say("");
+    say("=== Reference to Scalar ===");
+    
+    my str $greeting = "Hello";
+    my scalar $strref = \$greeting;
+    
+    say("is_ref(strref): " . is_ref($strref));
+    say("reftype: " . reftype($strref));
+    say("Dereferenced: " . deref($strref));
+    
+    # ===== Check reference types =====
+    say("");
+    say("=== Reference Types ===");
+    say("is_ref(user): " . is_ref($user));
+    say("reftype(user): " . reftype($user));
+    say("is_ref(numbers): " . is_ref($numbers));
+    say("reftype(numbers): " . reftype($numbers));
+    
+    say("");
+    say("╔══════════════════════════════════════╗");
+    say("║  ✓ Reference test complete!          ║");
+    say("╚══════════════════════════════════════╝");
+    
+    return 0;
+}

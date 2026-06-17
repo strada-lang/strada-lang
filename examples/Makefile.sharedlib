@@ -1,0 +1,37 @@
+# Makefile for Strada shared library example
+
+.PHONY: all clean test
+
+all: libmathlib.so test_mathlib
+
+# Compile Strada to C
+mathlib.c: mathlib.strada
+	../bootstrap/stradac mathlib.strada mathlib.c
+
+# Build shared library
+libmathlib.so: mathlib.c
+	gcc -shared -fPIC -o libmathlib.so \
+		mathlib.c \
+		../runtime/strada_runtime.c \
+		-I../runtime \
+		-rdynamic
+
+# Build C test program
+test_mathlib: test_mathlib.c libmathlib.so
+	gcc -o test_mathlib test_mathlib.c -L. -ldl
+
+# Run test
+test: test_mathlib
+	@echo "Running shared library test..."
+	@LD_LIBRARY_PATH=. ./test_mathlib
+
+clean:
+	rm -f mathlib.c libmathlib.so test_mathlib
+
+help:
+	@echo "Strada Shared Library Example"
+	@echo ""
+	@echo "Targets:"
+	@echo "  all   - Build shared library and test program"
+	@echo "  test  - Run the test"
+	@echo "  clean - Remove build files"

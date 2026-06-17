@@ -1,0 +1,94 @@
+# test_nesso_sqli.strada — security regression for Nesso identifier injection.
+# The _order directive (ORDER BY) and condition-hash KEYS (column names) are
+# interpolated into SQL (they can't be bound as ? parameters), so before the
+# fix a sort/filter parameter taken straight from a request was an injection
+# vector (CWE-89). They are now validated against the schema's declared columns.
+use lib "lib";
+use DBI;
+use Nesso;
+use Nesso::Record;
+
+package main;
+
+my int $g_pass = 0;
+my int $g_fail = 0;
+
+func ok(int $cond, str $msg) void {
+    if ($cond) { say("  ok: " . $msg); $g_pass = $g_pass + 1; }
+    else { say("  FAIL: " . $msg); $g_fail = $g_fail + 1; }
+}
+
+func main() int {
+    my scalar $db = DBI::connect("dbi:SQLite::memory:", "", "");
+    if (!defined($db)) { say("FAIL: no SQLite"); return 1; }
+    my scalar $n = Nesso::new($db);
+
+    DBI::do_sql($db, "CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, email TEXT, active INTEGER DEFAULT 1)");
+    $n->define("users", {
+        "table"   => "users",
+        "columns" => ["id", "username", "email", "active"],
+        "primary" => "id"
+    });
+    $n->save($n->create("users", { "username" => "alice", "email" => "a@x", "active" => 1 }));
+    $n->save($n->create("users", { "username" => "bob",   "email" => "b@x", "active" => 1 }));
+
+    # --- Legitimate usage still works ---
+    say("Legitimate _order / conditions:");
+    my scalar $asc = $n->where("users", { "active" => 1, "_order" => "username ASC" });
+    ok(size($asc) == 2 && $asc->[0]->{"username"} eq "alice", "_order 'username ASC' sorts ascending");
+    my scalar $desc = $n->where("users", { "_order" => "username DESC" });
+    ok($desc->[0]->{"username"} eq "bob", "_order 'username DESC' sorts descending");
+    my scalar $multi = $n->where("users", { "_order" => "active DESC, username ASC" });
+    ok(size($multi) == 2, "_order multi-column 'active DESC, username ASC' works");
+    my scalar $byname = $n->find_by("users", { "username" => "bob" });
+    ok(defined($byname) && $byname->{"username"} eq "bob", "condition on a real column works");
+
+    # --- Injection attempts must THROW (and never execute) ---
+    say("Injection attempts (must be rejected):");
+
+    # 1. ORDER BY subquery oracle
+    my int $t1 = 0;
+    try { $n->where("users", { "_order" => "(CASE WHEN (SELECT 1)=1 THEN username ELSE email END)" }); }
+    catch ($e) { $t1 = 1; }
+    ok($t1 == 1, "ORDER BY subquery/CASE payload rejected");
+
+    # 2. Stacked-statement / comment payload in _order
+    my int $t2 = 0;
+    try { $n->where("users", { "_order" => "username; DROP TABLE users--" }); }
+    catch ($e) { $t2 = 1; }
+    ok($t2 == 1, "ORDER BY stacked DROP payload rejected");
+
+    # 3. Invalid sort direction
+    my int $t3 = 0;
+    try { $n->where("users", { "_order" => "username EVIL" }); }
+    catch ($e) { $t3 = 1; }
+    ok($t3 == 1, "ORDER BY bad direction rejected");
+
+    # 4. Ordinal-position ordering (not a declared column)
+    my int $t4 = 0;
+    try { $n->where("users", { "_order" => "1" }); }
+    catch ($e) { $t4 = 1; }
+    ok($t4 == 1, "ORDER BY ordinal '1' rejected");
+
+    # 5. Condition-KEY (column-name) injection
+    my int $t5 = 0;
+    try { $n->where("users", { "username = '' OR 1=1 --" => 1 }); }
+    catch ($e) { $t5 = 1; }
+    ok($t5 == 1, "condition-key column-name injection rejected");
+
+    # 6. find_by path is guarded too
+    my int $t6 = 0;
+    try { $n->find_by("users", { "_order" => "username,(SELECT 1)" }); }
+    catch ($e) { $t6 = 1; }
+    ok($t6 == 1, "find_by _order injection rejected");
+
+    # --- The table survived every attempt (no DROP executed) ---
+    my int $cnt = $n->count("users", {});
+    ok($cnt == 2, "users table intact after injection attempts (no payload executed)");
+
+    say("");
+    say("Results: " . $g_pass . " passed, " . $g_fail . " failed");
+    if ($g_fail == 0) { say("PASS: All Nesso SQLi tests passed"); return 0; }
+    say("FAIL: Nesso SQLi tests failed");
+    return 1;
+}

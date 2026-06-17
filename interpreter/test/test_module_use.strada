@@ -1,0 +1,12 @@
+use lib "interpreter/test/lib";
+use lib "test/lib";
+use lib "lib";
+use TestHelper;
+
+func main() int {
+    my str $g = TestHelper::greet("World");
+    say($g);
+    my int $sum = TestHelper::add(3, 4);
+    say("sum=" . $sum);
+    return 0;
+}

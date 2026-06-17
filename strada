@@ -1,0 +1,17 @@
+#!/bin/bash
+#
+# strada — thin shim. Locates the toolchain and execs the compiled driver.
+#
+# All driver logic now lives in tools/strada-driver.strada, compiled to the
+# `strada-driver` binary beside this shim (dev tree) or in <prefix>/bin
+# (installed). Bash does only what it does best here: find this script's
+# directory and source config.sh, then hand off. `make install` rewrites the
+# STRADA_HOME / STRADA_BIN defaults below to the install layout.
+#
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STRADA_HOME="${STRADA_HOME:-$SCRIPT_DIR}"
+STRADA_BIN="${STRADA_BIN:-$SCRIPT_DIR}"
+[ -f "$STRADA_HOME/config.sh" ] && . "$STRADA_HOME/config.sh"
+export STRADA_HOME STRADA_BIN
+export STRADA_SHIM="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
+exec "$STRADA_BIN/strada-driver" "$@"

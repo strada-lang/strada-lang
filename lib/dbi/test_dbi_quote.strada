@@ -1,0 +1,51 @@
+use lib "lib";
+use DBI;
+package main;
+
+my int $pass = 0;
+my int $fail = 0;
+func ok(int $c, str $m) void {
+    if ($c) { say("  ok: " . $m); $pass = $pass + 1; }
+    else { say("  FAIL: " . $m); $fail = $fail + 1; }
+}
+
+func main() int {
+    my scalar $dbh = DBI::connect("dbi:SQLite::memory:", "", "");
+    if (!defined($dbh)) { say("FAIL: no SQLite"); return 1; }
+
+    # --- quote() value escaping (native sqlite3 %Q) ---
+    ok(DBI::quote($dbh, "hello") eq "'hello'", "quote plain value");
+    ok(DBI::quote($dbh, "O'Brien") eq "'O''Brien'", "quote doubles single quote");
+    ok(DBI::quote($dbh, "a'; DROP TABLE x--") eq "'a''; DROP TABLE x--'", "quote neutralizes injection payload");
+
+    # --- quote_identifier() (SQLite -> double quotes) ---
+    ok(DBI::quote_identifier($dbh, "name") eq "\"name\"", "quote_identifier wraps in double quotes");
+    ok(DBI::quote_identifier($dbh, "weird\"col") eq "\"weird\"\"col\"", "quote_identifier doubles embedded quote");
+    ok(DBI::quote_identifier($dbh, "a\"; DROP TABLE x--") eq "\"a\"\"; DROP TABLE x--\"", "quote_identifier neutralizes injection payload");
+
+    # --- functional: dynamic identifier in a real query ---
+    DBI::exec($dbh, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)", []);
+    DBI::exec($dbh, "INSERT INTO users (name) VALUES (?)", ["alice"]);
+
+    # legitimate dynamic column via quote_identifier
+    my str $col = "name";
+    my scalar $sth = DBI::prepare($dbh, "SELECT " . DBI::quote_identifier($dbh, $col) . " FROM users");
+    DBI::execute($sth, []);
+    my scalar $row = DBI::fetchrow_hashref($sth);
+    ok(defined($row) && $row->{"name"} eq "alice", "quote_identifier builds a valid dynamic-column query");
+
+    # injection attempt through the identifier slot: becomes one (invalid) quoted
+    # identifier -> the SELECT errors, but the DROP never executes.
+    my str $evil = "name FROM users; DROP TABLE users--";
+    my scalar $sth2 = DBI::prepare($dbh, "SELECT " . DBI::quote_identifier($dbh, $evil) . " FROM users");
+    if (defined($sth2)) { DBI::execute($sth2, []); }   # expected to fail harmlessly
+
+    # users table must still exist (DROP did not run)
+    my scalar $check = DBI::selectall_hashref($dbh, "SELECT COUNT(*) AS c FROM users", []);
+    ok(defined($check) && size($check) == 1, "users table intact after identifier-injection attempt");
+
+    say("");
+    say("Results: " . $pass . " passed, " . $fail . " failed");
+    if ($fail == 0) { say("PASS: All DBI quote tests passed"); return 0; }
+    return 1;
+}

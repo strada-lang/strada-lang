@@ -1,0 +1,178 @@
+=head1 NAME
+
+List - List::Util-style helpers (reduce, any, all, first, sum, min, max, uniq)
+
+=head1 SYNOPSIS
+
+    use lib "lib";
+    use List;
+
+    my int $total = List::reduce(fn ($acc, $x) scalar { return $acc + $x; }, \@nums, 0);
+    if (List::any(fn ($x) int { return $x > 10; }, \@nums)) { ... }
+    my scalar $hit = List::first(fn ($x) int { return $x % 2 == 0; }, \@nums);
+    my int $sum = List::sum(\@nums);
+    my array @u = List::uniq(\@words);
+
+=head1 FUNCTIONS
+
+reduce($fn, \@list, $initial) — fold left: $fn->($acc, $elem) per element.
+any($fn, \@list) — 1 if $fn is truthy for ANY element (short-circuits).
+all($fn, \@list) — 1 if $fn is truthy for EVERY element (short-circuits).
+none($fn, \@list) — 1 if $fn is truthy for NO element.
+first($fn, \@list) — the first element where $fn is truthy, else undef.
+sum(\@list) / product(\@list) — numeric fold (sum of empty list is 0,
+product of empty list is 1).
+min(\@list) / max(\@list) — numeric extremes (undef on empty).
+minstr(\@list) / maxstr(\@list) — string-comparison extremes.
+uniq(\@list) — elements with duplicates removed, first-seen order
+(stringified identity, like List::Util).
+zip(\@a, \@b) — array of [a_i, b_i] pairs, length of the shorter.
+pairs(\@list) — array of [list[2i], list[2i+1]] pairs.
+
+=cut
+
+package List;
+version "1.0.0";
+
+func reduce(scalar $fn, scalar $list, scalar $initial) scalar {
+    my scalar $acc = $initial;
+    foreach my $x (@{$list}) {
+        $acc = $fn->($acc, $x);
+    }
+    return $acc;
+}
+
+func any(scalar $fn, scalar $list) int {
+    foreach my $x (@{$list}) {
+        if ($fn->($x)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+func all(scalar $fn, scalar $list) int {
+    foreach my $x (@{$list}) {
+        if (!$fn->($x)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+func none(scalar $fn, scalar $list) int {
+    if (any($fn, $list)) {
+        return 0;
+    }
+    return 1;
+}
+
+func first(scalar $fn, scalar $list) scalar {
+    foreach my $x (@{$list}) {
+        if ($fn->($x)) {
+            return $x;
+        }
+    }
+    my scalar $undef;
+    return $undef;
+}
+
+func sum(scalar $list) scalar {
+    my scalar $acc = 0;
+    foreach my $x (@{$list}) {
+        $acc = $acc + $x;
+    }
+    return $acc;
+}
+
+func product(scalar $list) scalar {
+    my scalar $acc = 1;
+    foreach my $x (@{$list}) {
+        $acc = $acc * $x;
+    }
+    return $acc;
+}
+
+func min(scalar $list) scalar {
+    my scalar $best;
+    foreach my $x (@{$list}) {
+        if (!defined($best) || $x < $best) {
+            $best = $x;
+        }
+    }
+    return $best;
+}
+
+func max(scalar $list) scalar {
+    my scalar $best;
+    foreach my $x (@{$list}) {
+        if (!defined($best) || $x > $best) {
+            $best = $x;
+        }
+    }
+    return $best;
+}
+
+func minstr(scalar $list) scalar {
+    my scalar $best;
+    foreach my $x (@{$list}) {
+        if (!defined($best) || ("" . $x) lt ("" . $best)) {
+            $best = $x;
+        }
+    }
+    return $best;
+}
+
+func maxstr(scalar $list) scalar {
+    my scalar $best;
+    foreach my $x (@{$list}) {
+        if (!defined($best) || ("" . $x) gt ("" . $best)) {
+            $best = $x;
+        }
+    }
+    return $best;
+}
+
+func uniq(scalar $list) array {
+    my hash %seen;
+    my array @out;
+    foreach my $x (@{$list}) {
+        my str $k = "" . $x;
+        if (!exists(%seen, $k)) {
+            $seen{$k} = 1;
+            push(@out, $x);
+        }
+    }
+    return @out;
+}
+
+func zip(scalar $a, scalar $b) array {
+    my array @out;
+    my int $na = size(@{$a});
+    my int $nb = size(@{$b});
+    my int $n = $na;
+    if ($nb < $n) { $n = $nb; }
+    my int $i = 0;
+    while ($i < $n) {
+        my array @pair;
+        push(@pair, $a->[$i]);
+        push(@pair, $b->[$i]);
+        push(@out, \@pair);
+        $i = $i + 1;
+    }
+    return @out;
+}
+
+func pairs(scalar $list) array {
+    my array @out;
+    my int $n = size(@{$list});
+    my int $i = 0;
+    while ($i + 1 < $n) {
+        my array @pair;
+        push(@pair, $list->[$i]);
+        push(@pair, $list->[$i + 1]);
+        push(@out, \@pair);
+        $i = $i + 2;
+    }
+    return @out;
+}

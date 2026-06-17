@@ -1,0 +1,546 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_memory_stress.strada - Comprehensive memory stress test
+#
+# This test exercises all runtime functions that allocate memory to detect:
+# - Memory leaks (run with valgrind to verify)
+# - Double-free errors
+# - Use-after-free errors
+# - Reference counting bugs
+#
+# Usage:
+#   ./strada examples/test_memory_stress.strada
+#   valgrind --leak-check=full ./build/test_memory_stress
+
+func test_string_operations(int $iterations) void {
+    say("  Testing string operations...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        # String creation and concatenation
+        my str $s1 = "Hello";
+        my str $s2 = "World";
+        my str $s3 = $s1 . " " . $s2 . "!";
+
+        # String interpolation
+        my str $s4 = "Value: $i and $s3";
+
+        # Repeated concatenation (stress test)
+        my str $acc = "";
+        my int $j = 0;
+        while ($j < 10) {
+            $acc = $acc . "x";
+            $j = $j + 1;
+        }
+
+        $i = $i + 1;
+    }
+    say("    OK");
+}
+
+func test_array_operations(int $iterations) void {
+    say("  Testing array operations...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        # Array creation
+        my array @arr = ();
+
+        # Push many elements
+        my int $j = 0;
+        while ($j < 100) {
+            push(@arr, $j);
+            push(@arr, "string_$j");
+            $j = $j + 1;
+        }
+
+        # Pop elements
+        while (scalar(@arr) > 0) {
+            my scalar $x = pop(@arr);
+        }
+
+        # Array literal
+        my array @arr2 = (1, 2, 3, "a", "b", "c");
+
+        # Nested arrays
+        my scalar $nested = [[1, 2], [3, 4], [5, 6]];
+        my scalar $inner = $nested->[1];
+        my int $val = $inner->[0];
+
+        $i = $i + 1;
+    }
+    say("    OK");
+}
+
+func test_hash_operations(int $iterations) void {
+    say("  Testing hash operations...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        # Hash creation
+        my hash %h = ();
+
+        # Add many entries
+        my int $j = 0;
+        while ($j < 100) {
+            my str $key = "key_$j";
+            $h{$key} = $j * 2;
+            $j = $j + 1;
+        }
+
+        # Read entries
+        $j = 0;
+        while ($j < 100) {
+            my str $key = "key_$j";
+            my scalar $val = $h{$key};
+            $j = $j + 1;
+        }
+
+        # Hash literal (via reference)
+        my scalar $h2_ref = { "a" => 1, "b" => 2, "c" => 3 };
+        my hash %h2 = %{$h2_ref};
+
+        # Nested hashes
+        my scalar $nested = { "outer" => { "inner" => 42 } };
+        my scalar $inner = $nested->{"outer"};
+        my int $val = $inner->{"inner"};
+
+        # Keys and values
+        my array @keys = keys(%h2);
+        my array @vals = values(%h2);
+
+        $i = $i + 1;
+    }
+    say("    OK");
+}
+
+func test_reference_operations(int $iterations) void {
+    say("  Testing reference operations...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        # Scalar references
+        my int $x = 42;
+        my scalar $ref = \$x;
+        my int $y = $$ref;
+
+        # Array references
+        my array @arr = (1, 2, 3);
+        my scalar $aref = \@arr;
+        my int $first = $aref->[0];
+
+        # Hash references
+        my hash %h = ();
+        $h{"a"} = 1;
+        my scalar $href = \%h;
+        my int $val = $href->{"a"};
+
+        # Nested references
+        my scalar $nested = { "arr" => [1, 2, 3], "hash" => { "x" => 10 } };
+        my scalar $arr_ref = $nested->{"arr"};
+        my scalar $hash_ref = $nested->{"hash"};
+
+        # Reference assignment
+        my scalar $ref2 = $ref;
+        my scalar $ref3 = $ref2;
+
+        $i = $i + 1;
+    }
+    say("    OK");
+}
+
+func test_file_operations(int $iterations) void {
+    say("  Testing file operations...");
+    my str $testfile = "/tmp/strada_memtest_$$.txt";
+
+    my int $i = 0;
+    while ($i < $iterations) {
+        # Write file
+        sys::spew($testfile, "Test content line 1\nLine 2\nLine 3\n");
+
+        # Read entire file
+        my str $content = slurp($testfile);
+
+        # Open/close operations
+        my scalar $fh = sys::open($testfile, "r");
+        if (defined($fh)) {
+            my str $line1 = readline($fh);
+            my str $line2 = readline($fh);
+            sys::close($fh);
+        }
+
+        $i = $i + 1;
+    }
+
+    # Cleanup
+    sys::unlink($testfile);
+    say("    OK");
+}
+
+func test_directory_operations(int $iterations) void {
+    say("  Testing directory operations...");
+    my str $testdir = "/tmp/strada_memtest_dir_$$";
+
+    my int $i = 0;
+    while ($i < $iterations) {
+        # Create and remove directory
+        sys::mkdir($testdir, 493);  # 0755
+
+        # Create test files
+        sys::spew("$testdir/file1.txt", "content1");
+        sys::spew("$testdir/file2.txt", "content2");
+
+        # Read directory
+        my scalar $entries = sys::readdir($testdir);
+
+        # Read with full paths
+        my scalar $full = sys::readdir_full($testdir);
+
+        # Check file types
+        my int $is_d = sys::is_dir($testdir);
+        my int $is_f = sys::is_file("$testdir/file1.txt");
+
+        # Cleanup
+        sys::unlink("$testdir/file1.txt");
+        sys::unlink("$testdir/file2.txt");
+        sys::rmdir($testdir);
+
+        $i = $i + 1;
+    }
+    say("    OK");
+}
+
+func test_path_operations(int $iterations) void {
+    say("  Testing path operations...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        # Dirname/basename
+        my str $path = "/usr/local/bin/program";
+        my str $dir = sys::dirname($path);
+        my str $base = sys::basename($path);
+
+        # Realpath (on existing path)
+        my str $real = sys::realpath("/tmp");
+
+        # File extension
+        my str $ext = sys::file_ext("document.txt");
+        my str $ext2 = sys::file_ext("archive.tar.gz");
+
+        # Path join
+        my scalar $parts = ["usr", "local", "bin"];
+        my str $joined = sys::path_join($parts);
+
+        # Glob (on tmp directory)
+        my scalar $matches = sys::glob("/tmp/*");
+
+        # Fnmatch
+        my int $match = sys::fnmatch("*.txt", "file.txt");
+
+        $i = $i + 1;
+    }
+    say("    OK");
+}
+
+func test_environment_operations(int $iterations) void {
+    say("  Testing environment operations...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        # Set and get environment variable
+        my str $varname = "STRADA_TEST_VAR_$i";
+        sys::setenv($varname, "test_value_$i");
+        my str $val = sys::getenv($varname);
+        sys::unsetenv($varname);
+
+        # Get existing env var
+        my str $path = sys::getenv("PATH");
+
+        # Get current directory
+        my str $cwd = sys::getcwd();
+
+        $i = $i + 1;
+    }
+    say("    OK");
+}
+
+func test_stat_operations(int $iterations) void {
+    say("  Testing stat operations...");
+    my str $testfile = "/tmp/strada_stattest_$$.txt";
+    sys::spew($testfile, "test content");
+
+    my int $i = 0;
+    while ($i < $iterations) {
+        # Stat
+        my scalar $st = sys::stat($testfile);
+        if (defined($st)) {
+            my int $size = $st->{"size"};
+            my int $mode = $st->{"mode"};
+        }
+
+        # Lstat
+        my scalar $lst = sys::lstat($testfile);
+
+        # Access check
+        my int $readable = sys::access($testfile, 4);  # R_OK
+
+        $i = $i + 1;
+    }
+
+    sys::unlink($testfile);
+    say("    OK");
+}
+
+func test_dns_operations(int $iterations) void {
+    say("  Testing DNS operations...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        # Get hostname
+        my str $hostname = sys::gethostname();
+
+        # Resolve localhost (safe, always works)
+        my scalar $addrs = sys::gethostbyname_all("localhost");
+
+        $i = $i + 1;
+    }
+    say("    OK");
+}
+
+func test_regex_operations(int $iterations) void {
+    say("  Testing regex operations...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my str $text = "Hello World 123";
+
+        # Simple match
+        if ($text =~ /World/) {
+            my int $x = 1;
+        }
+
+        # Match with captures
+        my scalar $caps = capture($text, "(\\w+)\\s+(\\w+)");
+        if (defined($caps)) {
+            my str $m1 = $caps->[0];
+            my str $m2 = $caps->[1];
+        }
+
+        # Substitution
+        my str $result = $text;
+        $result =~ s/World/Universe/;
+
+        # Global substitution
+        my str $text2 = "aaa bbb aaa";
+        $text2 =~ s/aaa/xxx/g;
+
+        $i = $i + 1;
+    }
+    say("    OK");
+}
+
+func test_numeric_operations(int $iterations) void {
+    say("  Testing numeric operations...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        # Math operations that return new values
+        my num $x = 3.14159;
+        my num $s = math::sin($x);
+        my num $c = math::cos($x);
+        my num $t = math::tan($x);
+        my num $sq = math::sqrt(2.0);
+        my num $p = math::pow(2.0, 10.0);
+        my num $l = math::log(100.0);
+        my num $e = math::exp(1.0);
+        my num $f = math::floor(3.7);
+        my num $ce = math::ceil(3.2);
+        my num $a = math::abs(-5.0);
+
+        $i = $i + 1;
+    }
+    say("    OK");
+}
+
+func test_process_operations(int $iterations) void {
+    say("  Testing process operations...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        # Get PID (doesn't allocate much, but tests the path)
+        my int $pid = sys::getpid();
+        my int $ppid = sys::getppid();
+        my int $uid = sys::getuid();
+        my int $gid = sys::getgid();
+
+        # System call (quick command)
+        my int $ret = sys::system("true");
+
+        $i = $i + 1;
+    }
+    say("    OK");
+}
+
+# Note: JSON operations require the JSON module
+# To test, see examples/test_json.strada
+
+func test_clone_operations(int $iterations) void {
+    say("  Testing clone operations...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        # Clone array
+        my array @orig = (1, 2, 3, 4, 5);
+        my scalar $cloned = clone(\@orig);
+
+        # Clone hash
+        my hash %h = ();
+        $h{"a"} = 1;
+        $h{"b"} = 2;
+        my scalar $h_cloned = clone(\%h);
+
+        # Clone nested structure
+        my scalar $nested = {
+            "arr" => [1, 2, 3],
+            "hash" => { "x" => 10 }
+        };
+        my scalar $nested_cloned = clone($nested);
+
+        $i = $i + 1;
+    }
+    say("    OK");
+}
+
+func test_foreach_loops(int $iterations) void {
+    say("  Testing foreach loops...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        # Foreach over array
+        my array @arr = (1, 2, 3, 4, 5);
+        my int $sum = 0;
+        foreach my int $x (@arr) {
+            $sum = $sum + $x;
+        }
+
+        # Foreach over hash keys
+        my hash %h = ();
+        $h{"a"} = 1;
+        $h{"b"} = 2;
+        $h{"c"} = 3;
+        my array @k = keys(%h);
+        foreach my str $key (@k) {
+            my int $val = $h{$key};
+        }
+
+        $i = $i + 1;
+    }
+    say("    OK");
+}
+
+func test_exception_handling(int $iterations) void {
+    say("  Testing exception handling...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        # Try/catch with throw (every other iteration)
+        my num $mod = math::fmod($i, 2);
+        try {
+            if ($mod == 0) {
+                throw "Test exception $i";
+            }
+        } catch ($e) {
+            my str $msg = $e;
+        }
+
+        # Nested try/catch
+        try {
+            try {
+                throw "Inner exception";
+            } catch ($inner) {
+                throw "Outer exception: $inner";
+            }
+        } catch ($outer) {
+            my str $msg = $outer;
+        }
+
+        $i = $i + 1;
+    }
+    say("    OK");
+}
+
+func test_closures(int $iterations) void {
+    say("  Testing closures...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        # Create closure that captures variable
+        my int $multiplier = $i + 1;
+        my scalar $closure = func (int $n) int {
+            return $n * $multiplier;
+        };
+
+        # Call closure
+        my int $result = $closure->(5);
+
+        # Multiple closures
+        my scalar $add = func (int $a, int $b) int { return $a + $b; };
+        my scalar $sub = func (int $a, int $b) int { return $a - $b; };
+        my int $r1 = $add->(10, 5);
+        my int $r2 = $sub->(10, 5);
+
+        $i = $i + 1;
+    }
+    say("    OK");
+}
+
+func run_all_tests(int $iterations) void {
+    say("Running memory stress tests (" . $iterations . " iterations each)...");
+    say("");
+
+    test_string_operations($iterations);
+    test_array_operations($iterations);
+    test_hash_operations($iterations);
+    test_reference_operations($iterations);
+    test_file_operations($iterations);
+    test_directory_operations($iterations);
+    test_path_operations($iterations);
+    test_environment_operations($iterations);
+    test_stat_operations($iterations);
+    test_dns_operations($iterations);
+    test_regex_operations($iterations);
+    test_numeric_operations($iterations);
+    test_process_operations($iterations);
+    # test_json_operations requires JSON module
+    test_clone_operations($iterations);
+    test_foreach_loops($iterations);
+    test_exception_handling($iterations);
+    test_closures($iterations);
+
+    say("");
+    say("All memory stress tests passed!");
+}
+
+func main(int $argc, array @argv) int {
+    my int $iterations = 100;
+
+    # Allow custom iteration count via command line
+    if ($argc > 1) {
+        $iterations = sys::atoi($argv[1]);
+        if ($iterations < 1) {
+            $iterations = 100;
+        }
+    }
+
+    say("=== Strada Memory Stress Test ===");
+    say("");
+    say("This test exercises runtime memory management.");
+    say("Run with valgrind for comprehensive leak detection:");
+    say("  valgrind --leak-check=full ./build/test_memory_stress");
+    say("");
+
+    run_all_tests($iterations);
+
+    return 0;
+}

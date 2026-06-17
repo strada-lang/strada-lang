@@ -1,0 +1,69 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# mathlib.strada - Simple math library for shared library demo
+
+func strada_add(int $a, int $b) int {
+    return $a + $b;
+}
+
+func strada_multiply(int $a, int $b) int {
+    return $a * $b;
+}
+
+func strada_factorial(int $n) int {
+    if ($n <= 1) {
+        return 1;
+    }
+    
+    my int $result = 1;
+    my int $i = 2;
+    while ($i <= $n) {
+        $result = $result * $i;
+        $i = $i + 1;
+    }
+    
+    return $result;
+}
+
+func strada_fibonacci(int $n) int {
+    if ($n <= 1) {
+        return $n;
+    }
+    
+    my int $a = 0;
+    my int $b = 1;
+    my int $i = 2;
+    
+    while ($i <= $n) {
+        my int $temp = $a + $b;
+        $a = $b;
+        $b = $temp;
+        $i = $i + 1;
+    }
+    
+    return $b;
+}
+
+func main() int {
+    say("Math library test");
+    say("5 + 3 = " . strada_add(5, 3));
+    say("5 * 3 = " . strada_multiply(5, 3));
+    say("5! = " . strada_factorial(5));
+    say("fib(10) = " . strada_fibonacci(10));
+    return 0;
+}

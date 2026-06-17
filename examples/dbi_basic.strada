@@ -1,0 +1,96 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# dbi_basic.strada - Basic DBI Usage Example
+#
+# Demonstrates simple database operations with SQLite
+# Run: ./strada examples/dbi_basic.strada
+
+use lib "lib";
+use DBI;
+
+func main(int $argc, array @argv) int {
+    say("=== Strada DBI Basic Example ===\n");
+
+    # Connect to in-memory SQLite database
+    my scalar $dbh = DBI::connect("dbi:SQLite::memory:", "", "");
+    if (!defined($dbh)) {
+        say("Error: Could not connect to database");
+        return 1;
+    }
+    say("Connected to SQLite database");
+
+    # Create a simple table
+    DBI::do_sql($dbh, "
+        CREATE TABLE books (
+            id INTEGER PRIMARY KEY,
+            title TEXT NOT NULL,
+            author TEXT NOT NULL,
+            year INTEGER
+        )
+    ");
+    say("Created 'books' table");
+
+    # Insert some data using placeholders (safe from SQL injection)
+    DBI::do($dbh, "INSERT INTO books (title, author, year) VALUES (?, ?, ?)",
+        ["The Hobbit", "J.R.R. Tolkien", 1937]);
+
+    DBI::do($dbh, "INSERT INTO books (title, author, year) VALUES (?, ?, ?)",
+        ["1984", "George Orwell", 1949]);
+
+    DBI::do($dbh, "INSERT INTO books (title, author, year) VALUES (?, ?, ?)",
+        ["Dune", "Frank Herbert", 1965]);
+
+    say("Inserted 3 books\n");
+
+    # Query and display all books
+    say("All books:");
+    say("-" . "---------------" . "---" . "---" . "---");
+
+    my scalar $sth = DBI::prepare($dbh, "SELECT title, author, year FROM books ORDER BY year");
+    DBI::execute($sth, []);
+
+    my scalar $row = DBI::fetchrow_hashref($sth);
+    while (defined($row)) {
+        say("  " . $row->{"year"} . ": \"" . $row->{"title"} . "\" by " . $row->{"author"});
+        $row = DBI::fetchrow_hashref($sth);
+    }
+    DBI::finish($sth);
+
+    # Get count
+    my scalar $count = DBI::selectcol($dbh, "SELECT COUNT(*) FROM books", []);
+    say("\nTotal books: " . $count);
+
+    # Update a book
+    DBI::do($dbh, "UPDATE books SET year = ? WHERE title = ?", [1954, "The Hobbit"]);
+    say("\nUpdated 'The Hobbit' year to 1954 (corrected)");
+
+    # Find specific book
+    my scalar $book = DBI::selectrow_hashref($dbh,
+        "SELECT * FROM books WHERE author LIKE ?",
+        ["%Tolkien%"]);
+
+    if (defined($book)) {
+        say("Found book by Tolkien: " . $book->{"title"});
+    }
+
+    # Clean up
+    DBI::disconnect($dbh);
+    say("\nDisconnected from database");
+
+    return 0;
+}

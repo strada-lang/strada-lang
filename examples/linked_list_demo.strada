@@ -1,0 +1,34 @@
+use lib "lib";
+use LinkedList;
+
+func main() int {
+
+    my scalar $list = LinkedList::new();
+    $list->add("alpha");
+    $list->add("beta");
+    $list->unshift("start");
+
+    say("len=" . $list->len());
+    say("head=" . $list->peek_head());
+    say("tail=" . $list->peek_tail());
+    say("get(1)=" . $list->get(1));
+
+    my scalar $old = $list->set(1, "middle");
+    say("set(1) old=" . $old . " new=" . $list->get(1));
+
+    say("shift=" . $list->shift());
+    say("pop=" . $list->pop());
+
+    $list->add("x");
+    $list->add("y");
+
+    say("each:");
+    $list->each(func (scalar $v) {
+        say("  " . $v);
+    });
+
+    $list = $list->destroy();
+    say("destroyed=" . defined($list));
+
+    return 0;
+}

@@ -1,0 +1,213 @@
+# Test: our variable declarations (package-scoped globals)
+# Tests that 'our' variables work via the global registry
+
+our int $count = 0;
+our str $name = "hello";
+our int $no_init;
+
+package Config;
+our str $host = "localhost";
+our int $port = 8080;
+
+package main;
+
+func check_count() void {
+    # Cross-function access to our variable
+    if ($count == 0) {
+        say("ok 1 - our int with init");
+    } else {
+        say("not ok 1");
+    }
+}
+
+func modify_count() void {
+    # Modify our variable from another function
+    $count = 42;
+}
+
+func check_name() void {
+    if ($name eq "hello") {
+        say("ok 2 - our str with init");
+    } else {
+        say("not ok 2 - got: " . $name);
+    }
+}
+
+func check_no_init() void {
+    # our without init should return undef
+    if (defined($no_init) == 0) {
+        say("ok 3 - our without init is undef");
+    } else {
+        say("not ok 3");
+    }
+}
+
+func check_package_our() void {
+    # Access our vars declared in Config package via global registry
+    my scalar $h = sys::global_get("Config::host");
+    my scalar $p = sys::global_get("Config::port");
+    if ($h eq "localhost") {
+        say("ok 4 - package our str");
+    } else {
+        say("not ok 4 - got: " . $h);
+    }
+    if ($p == 8080) {
+        say("ok 5 - package our int");
+    } else {
+        say("not ok 5");
+    }
+}
+
+func check_assignment() void {
+    modify_count();
+    if ($count == 42) {
+        say("ok 6 - our assignment from function");
+    } else {
+        say("not ok 6 - got: " . $count);
+    }
+}
+
+func check_concat() void {
+    # String concat with our vars (tests needs_temp_cleanup)
+    my str $msg = "name=" . $name;
+    if ($msg eq "name=hello") {
+        say("ok 7 - string concat with our var");
+    } else {
+        say("not ok 7 - got: " . $msg);
+    }
+}
+
+func check_bool_context() void {
+    # Boolean context with our vars
+    if ($count) {
+        say("ok 8 - our var in bool context (truthy)");
+    } else {
+        say("not ok 8");
+    }
+}
+
+func check_compound_assign() void {
+    $count = 10;
+    $count += 5;
+    if ($count == 15) {
+        say("ok 9 - our var += operator");
+    } else {
+        say("not ok 9 - got: " . $count);
+    }
+
+    $count -= 3;
+    if ($count == 12) {
+        say("ok 10 - our var -= operator");
+    } else {
+        say("not ok 10 - got: " . $count);
+    }
+
+    $name = "hi";
+    $name .= " world";
+    if ($name eq "hi world") {
+        say("ok 11 - our var .= operator");
+    } else {
+        say("not ok 11 - got: " . $name);
+    }
+}
+
+func check_arithmetic() void {
+    # Use our var in arithmetic expression
+    $count = 10;
+    my int $result = $count + 5;
+    if ($result == 15) {
+        say("ok 12 - our var in arithmetic");
+    } else {
+        say("not ok 12 - got: " . $result);
+    }
+}
+
+our scalar $GLINES;
+
+func set_lines_from_local() void {
+    # Assigning a local array ref to an our variable.
+    # Bug: strada_global_set() consumed the local's ref, then function
+    # cleanup decreffed it again → double-decref → use-after-free.
+    my scalar $lines = ["alpha", "beta", "gamma"];
+    $GLINES = $lines;
+    # Both local and global should be usable after assignment
+    if (scalar(@$lines) == 3) {
+        say("ok 13 - local still valid after our assignment");
+    } else {
+        say("not ok 13 - local corrupted, got " . scalar(@$lines));
+    }
+}
+
+func check_our_from_local() void {
+    # After the function that assigned the local to our returns,
+    # the our variable must still be valid (local was cleaned up).
+    if (scalar(@$GLINES) == 3) {
+        say("ok 14 - our var survives after assigning function returns");
+    } else {
+        say("not ok 14 - our var corrupted, got " . scalar(@$GLINES));
+    }
+    if ($GLINES->[0] eq "alpha") {
+        say("ok 15 - our var element access correct");
+    } else {
+        say("not ok 15 - got: " . $GLINES->[0]);
+    }
+}
+
+our scalar $GBUF;
+
+func set_buf_from_param(scalar $data) void {
+    # Assigning a parameter to an our variable — same bug pattern.
+    $GBUF = $data;
+}
+
+func check_our_from_param() void {
+    set_buf_from_param(["one", "two"]);
+    if (scalar(@$GBUF) == 2) {
+        say("ok 16 - our var from param survives");
+    } else {
+        say("not ok 16 - our var from param corrupted, got " . scalar(@$GBUF));
+    }
+}
+
+our scalar $GHASH;
+
+func multi_our_assign() void {
+    # Assign multiple local refs to our vars in sequence
+    my scalar $h = {"key" => "value", "n" => 42};
+    $GHASH = $h;
+    my scalar $a = [10, 20, 30, 40];
+    $GLINES = $a;
+}
+
+func check_multi_our() void {
+    multi_our_assign();
+    if ($GHASH->{"key"} eq "value") {
+        say("ok 17 - multi our assign hash survives");
+    } else {
+        say("not ok 17");
+    }
+    if (scalar(@$GLINES) == 4) {
+        say("ok 18 - multi our assign array survives");
+    } else {
+        say("not ok 18");
+    }
+}
+
+func main() int {
+    check_count();
+    check_name();
+    check_no_init();
+    check_package_our();
+    check_assignment();
+    check_concat();
+    check_bool_context();
+    check_compound_assign();
+    check_arithmetic();
+    set_lines_from_local();
+    check_our_from_local();
+    check_our_from_param();
+    check_multi_our();
+
+    say("All our variable tests passed");
+    return 0;
+}

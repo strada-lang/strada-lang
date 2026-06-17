@@ -1,0 +1,27 @@
+# vec(EXPR, OFFSET, BITS) — both rvalue and lvalue forms.
+# Regression: per-call leaks of slot-ref and BITS-wrapper temps when
+# vec_get/vec_set were called in tight loops. Fix applied via the
+# capture-and-decref pattern in the compiler's vec codegen.
+func main() int {
+    my str $buf = "";
+    my int $i = 0;
+    while ($i < 500) {
+        core::vec_set(\$buf, $i, 8, $i % 256);
+        $i = $i + 1;
+    }
+    # Now read back
+    my int $j = 0;
+    my int $sum = 0;
+    while ($j < 500) {
+        $sum = $sum + core::vec_get($buf, $j, 8);
+        $j = $j + 1;
+    }
+    # Mixed bit widths
+    my str $buf2 = "";
+    core::vec_set(\$buf2, 0, 16, 0x4142);
+    core::vec_set(\$buf2, 1, 16, 0x4344);
+    core::vec_set(\$buf2, 0, 1, 1);
+    core::vec_set(\$buf2, 3, 1, 1);
+    core::vec_set(\$buf2, 0, 4, 0xA);
+    return 0;
+}

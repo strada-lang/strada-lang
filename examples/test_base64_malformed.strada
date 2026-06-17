@@ -1,0 +1,42 @@
+# Security regression test: malformed base64 input must not corrupt memory.
+#
+# SECURITY_AUDIT_MEMORY.md finding #1 (CRITICAL) described an integer
+# underflow in strada_base64_decode: for a cleaned input of 1-3 chars
+# ending in '=' (e.g. "=", "==", "A="), `(len/4)*3` is 0 while pad>=1, so a
+# naive `(len/4)*3 - pad` wraps the unsigned out_len to ~SIZE_MAX, making
+# the trailing `result[out_len] = '\0'` a wild out-of-bounds heap write.
+# The runtime guards this (out_len clamped to 0 when it would go negative);
+# this test exercises every named trigger so the guard can't silently
+# regress. Run it under ASan to assert no OOB write:
+#   gcc -fsanitize=address ... ; ./test_base64_malformed
+func main() int {
+    # Every audit trigger: short inputs whose alphabet-filtered form is
+    # 1-3 chars ending in '='. Each must decode to the empty string
+    # without crashing or writing out of bounds.
+    if (core::base64_decode("=") ne "") { say("FAIL: ="); return 1; }
+    if (core::base64_decode("==") ne "") { say("FAIL: =="); return 1; }
+    if (core::base64_decode("A=") ne "") { say("FAIL: A="); return 1; }
+    if (core::base64_decode("AB=") ne "") { say("FAIL: AB="); return 1; }
+    if (core::base64_decode("===") ne "") { say("FAIL: ==="); return 1; }
+
+    # Junk that filters down to the dangerous forms (MIME semantics ignore
+    # non-alphabet bytes, so these reduce to "=" / "A=").
+    if (core::base64_decode("  =  ") ne "") { say("FAIL: spaced ="); return 1; }
+    if (core::base64_decode("!@#A=$%") ne "") { say("FAIL: junk A="); return 1; }
+
+    # Empty input.
+    if (core::base64_decode("") ne "") { say("FAIL: empty"); return 1; }
+    # "====" is a full 4-char group (not the 1-3 char underflow case): it
+    # decodes one all-zero group to a single NUL byte. Assert the safe,
+    # well-defined result rather than empty.
+    if (length(core::base64_decode("====")) != 1) { say("FAIL: ===="); return 1; }
+
+    # Valid decodes still work (the guard must not break the happy path).
+    if (core::base64_decode("QQ==") ne "A") { say("FAIL: QQ=="); return 1; }
+    if (core::base64_decode("QUI=") ne "AB") { say("FAIL: QUI="); return 1; }
+    my str $rt = core::base64_decode(core::base64_encode("Hello, World!"));
+    if ($rt ne "Hello, World!") { say("FAIL: roundtrip"); return 1; }
+
+    say("All malformed-base64 safety tests passed");
+    return 0;
+}

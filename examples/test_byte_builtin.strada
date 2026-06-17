@@ -1,0 +1,40 @@
+# Test core::byte(n) — the byte-oriented counterpart to chr().
+#
+# chr(n) is codepoint-oriented: chr(255) is the character U+00FF, which is
+# 2 bytes in UTF-8 (0xC3 0xBF). byte(n) is the single raw byte (n & 0xFF).
+# byte() is what you build binary data from when it must round-trip through
+# base64 / pack / sockets / files. This was the fix for the base64
+# binary-roundtrip bug (binary built with chr() expanded high bytes to
+# multi-byte UTF-8 before base64 ever saw them).
+func main() int {
+    my int $pass = 0;
+    my int $fail = 0;
+
+    # Single raw byte, length 1, value preserved
+    if (core::byte_length(core::byte(255)) == 1
+        && core::get_byte(core::byte(255), 0) == 255) { $pass++; } else { $fail++; say("FAIL 1"); }
+    if (core::byte_length(core::byte(0)) == 1
+        && core::get_byte(core::byte(0), 0) == 0) { $pass++; } else { $fail++; say("FAIL 2"); }
+    if (core::byte_length(core::byte(128)) == 1
+        && core::get_byte(core::byte(128), 0) == 128) { $pass++; } else { $fail++; say("FAIL 3"); }
+
+    # Masks to a byte
+    if (core::get_byte(core::byte(300), 0) == 44) { $pass++; } else { $fail++; say("FAIL 4"); }
+
+    # Binary round-trip through base64 (the reported bug)
+    my str $binary = core::byte(0) . core::byte(255) . core::byte(128) . "ABC";
+    if (core::byte_length($binary) == 6) { $pass++; } else { $fail++; say("FAIL 5"); }
+    my str $back = core::base64_decode(core::base64_encode($binary));
+    if (core::byte_length($back) == 6
+        && core::get_byte($back, 0) == 0
+        && core::get_byte($back, 1) == 255
+        && core::get_byte($back, 2) == 128) { $pass++; } else { $fail++; say("FAIL 6"); }
+
+    # chr() is unchanged — still codepoint-oriented (2-byte UTF-8 for U+00FF)
+    if (core::byte_length(chr(255)) == 2) { $pass++; } else { $fail++; say("FAIL 7: chr changed"); }
+
+    if ($fail == 0) {
+        say("All byte() builtin tests passed (" . $pass . " checks)");
+    }
+    return $fail;
+}

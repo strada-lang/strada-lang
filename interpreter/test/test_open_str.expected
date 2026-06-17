@@ -1,0 +1,9 @@
+l1=line1
+l2=line2
+pos_gt0=1
+l3=line3
+at_eof=1
+after_rewind_eof=
+l1_again=line1
+l1_seek=line1
+written=written_data

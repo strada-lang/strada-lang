@@ -1,0 +1,59 @@
+# Regression test: mutating `our` (package-global) composites from inside
+# functions. Three init forms previously mis-created the backing container
+# (fixed 2026-06): empty `()` array became a hash; no-init array/hash was
+# never created; a non-empty hash literal `("a"=>1)` was stored as a flat
+# array. Scalars, element/key assignment, and refs are checked too.
+
+our array @A_EMPTY = ();
+our array @A_LIST = (1, 2);
+our array @A_NOINIT;
+our hash %H_EMPTY = ();
+our hash %H_INIT = ("a" => 1);
+our hash %H_NOINIT;
+our int $CNT = 0;
+our str $STR = "x";
+our scalar $SREF = [10, 20];
+
+func push_empty() void { push(@A_EMPTY, 9); }
+func push_list() void { push(@A_LIST, 3); }
+func push_noinit() void { push(@A_NOINIT, 7); }
+func set_hempty() void { $H_EMPTY{"k"} = "v"; }
+func set_hinit() void { $H_INIT{"b"} = 2; }
+func set_hnoinit() void { $H_NOINIT{"z"} = "w"; }
+func bump() void { $CNT += 5; }
+func app() void { $STR .= "y"; }
+func grow_ref() void { push(@$SREF, 30); }
+
+func main() int {
+    my int $fail = 0;
+
+    push_empty();
+    if (size(@A_EMPTY) != 1) { say("FAIL A_EMPTY size=" . size(@A_EMPTY)); $fail = 1; }
+
+    push_list();
+    if (size(@A_LIST) != 3) { say("FAIL A_LIST size=" . size(@A_LIST)); $fail = 1; }
+
+    push_noinit();
+    if (size(@A_NOINIT) != 1) { say("FAIL A_NOINIT size=" . size(@A_NOINIT)); $fail = 1; }
+
+    set_hempty();
+    if ($H_EMPTY{"k"} ne "v") { say("FAIL H_EMPTY"); $fail = 1; }
+
+    set_hinit();
+    if ($H_INIT{"b"} ne "2" || $H_INIT{"a"} ne "1") { say("FAIL H_INIT a=" . $H_INIT{"a"} . " b=" . $H_INIT{"b"}); $fail = 1; }
+
+    set_hnoinit();
+    if ($H_NOINIT{"z"} ne "w") { say("FAIL H_NOINIT"); $fail = 1; }
+
+    bump(); bump();
+    if ($CNT != 10) { say("FAIL CNT=" . $CNT); $fail = 1; }
+
+    app();
+    if ($STR ne "xy") { say("FAIL STR=" . $STR); $fail = 1; }
+
+    grow_ref();
+    if (size(@$SREF) != 3) { say("FAIL SREF size=" . size(@$SREF)); $fail = 1; }
+
+    if ($fail == 0) { say("All our-global tests passed"); }
+    return $fail;
+}

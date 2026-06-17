@@ -1,0 +1,2112 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# strada-repl - Interactive REPL for Strada
+# Uses in-process compilation with libtcc (fallback to tcc, then gcc)
+
+use lib "lib/readline";
+use readline;
+
+# Global state
+my hash %g_var_types = ();      # Variable name -> type (scalar, array, hash)
+my array @g_functions = ();     # Accumulated function definitions
+my array @g_imports = ();       # Accumulated use/import statements
+my array @g_lib_paths = ();     # Library search paths -L (high priority, searched first)
+my array @g_lib_paths_low = (); # Library search paths -LL (low priority, searched last)
+my str $g_current_package = ""; # Current package name
+my int $g_eval_count = 0;       # Counter for unique .so names
+my str $g_tmpdir = "/tmp";      # Temp directory for generated files
+my int $g_debug = 0;            # Debug mode (shows generated Strada)
+my int $g_cdebug = 0;           # C debug mode (shows generated C)
+my str $g_compiler = "";        # Detected compiler: "libtcc", "tcc", or "gcc"
+my int $g_libtcc_available = 0; # 1 if libtcc is usable
+
+# Stradac path - auto-detected at startup
+my str $g_stradac_path = "";
+
+# Runtime path - auto-detected at startup (directory containing strada_runtime_tcc.h/.o)
+my str $g_runtime_path = "";
+
+# Tools directory - where this REPL binary lives (for finding strada-soinfo, etc.)
+my str $g_tools_dir = "";
+
+# Incremental compilation state (for future optimization)
+my int $g_func_version = 0;     # Increments when functions change
+
+# Profiling state
+my int $g_memprof_enabled = 0;  # Memory profiling enabled
+my int $g_funcprof_enabled = 0; # Function profiling enabled
+my int $g_profile_lib = 0;      # Handle to loaded library (for profiling)
+my str $g_profile_files = "";   # Colon-separated list of temp files to clean up
+
+# Script mode
+my str $g_script_file = "";     # Script file to run (if provided)
+
+# libtcc state (kept across evaluations for speed)
+my int $g_tcc_state = 0;
+
+# Embedded libtcc support
+__C__ {
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <dlfcn.h>
+#include <sys/stat.h>
+
+/* Try to load libtcc dynamically */
+static void *libtcc_handle = NULL;
+static int libtcc_available = 0;
+
+/* Function pointers for libtcc API */
+typedef void* TCCState;
+static TCCState (*p_tcc_new)(void) = NULL;
+static void (*p_tcc_delete)(TCCState s) = NULL;
+static int (*p_tcc_set_output_type)(TCCState s, int type) = NULL;
+static int (*p_tcc_add_include_path)(TCCState s, const char *path) = NULL;
+static int (*p_tcc_compile_string)(TCCState s, const char *code) = NULL;
+static int (*p_tcc_relocate)(TCCState s, void *ptr) = NULL;
+static void* (*p_tcc_get_symbol)(TCCState s, const char *name) = NULL;
+static int (*p_tcc_add_symbol)(TCCState s, const char *name, const void *val) = NULL;
+static void (*p_tcc_set_error_func)(TCCState s, void *opaque, void (*func)(void*, const char*)) = NULL;
+
+#define TCC_OUTPUT_MEMORY 1
+#define TCC_RELOCATE_AUTO (void*)1
+
+static char libtcc_error_msg[1024] = "";
+
+static void libtcc_error_handler(void *opaque, const char *msg) {
+    (void)opaque;
+    strncpy(libtcc_error_msg, msg, sizeof(libtcc_error_msg) - 1);
+}
+
+/* Initialize libtcc (called once) */
+static int init_libtcc(void) {
+    if (libtcc_handle) return libtcc_available;
+
+    /* Try to load libtcc.so */
+    libtcc_handle = dlopen("libtcc.so", RTLD_NOW);
+    if (!libtcc_handle) {
+        libtcc_handle = dlopen("libtcc.so.1", RTLD_NOW);
+    }
+    if (!libtcc_handle) {
+        libtcc_handle = dlopen("/usr/lib/x86_64-linux-gnu/libtcc.so", RTLD_NOW);
+    }
+
+    if (!libtcc_handle) {
+        return 0;
+    }
+
+    /* Load function pointers */
+    p_tcc_new = dlsym(libtcc_handle, "tcc_new");
+    p_tcc_delete = dlsym(libtcc_handle, "tcc_delete");
+    p_tcc_set_output_type = dlsym(libtcc_handle, "tcc_set_output_type");
+    p_tcc_add_include_path = dlsym(libtcc_handle, "tcc_add_include_path");
+    p_tcc_compile_string = dlsym(libtcc_handle, "tcc_compile_string");
+    p_tcc_relocate = dlsym(libtcc_handle, "tcc_relocate");
+    p_tcc_get_symbol = dlsym(libtcc_handle, "tcc_get_symbol");
+    p_tcc_add_symbol = dlsym(libtcc_handle, "tcc_add_symbol");
+    p_tcc_set_error_func = dlsym(libtcc_handle, "tcc_set_error_func");
+
+    if (p_tcc_new && p_tcc_delete && p_tcc_compile_string && p_tcc_relocate && p_tcc_get_symbol) {
+        libtcc_available = 1;
+    }
+
+    return libtcc_available;
+}
+
+/* Add runtime symbols to TCC state */
+static void add_runtime_symbols(void *state) {
+    if (!p_tcc_add_symbol) return;
+
+    void *handle = dlopen(NULL, RTLD_NOW);
+    if (!handle) return;
+
+    #define ADD_SYM(name) { \
+        void *sym = dlsym(handle, #name); \
+        if (sym) p_tcc_add_symbol(state, #name, sym); \
+    }
+
+    ADD_SYM(strada_new_undef);
+    ADD_SYM(strada_new_int);
+    ADD_SYM(strada_new_num);
+    ADD_SYM(strada_new_str);
+    ADD_SYM(strada_new_str_len);
+    ADD_SYM(strada_new_array);
+    ADD_SYM(strada_new_hash);
+    ADD_SYM(strada_new_ref);
+    ADD_SYM(strada_incref);
+    ADD_SYM(strada_decref);
+    ADD_SYM(strada_to_int);
+    ADD_SYM(strada_to_num);
+    ADD_SYM(strada_to_str);
+    ADD_SYM(strada_to_bool);
+    ADD_SYM(strada_is_true);
+    ADD_SYM(strada_is_defined);
+    ADD_SYM(strada_str_concat);
+    ADD_SYM(strada_str_length);
+    ADD_SYM(strada_substr);
+    ADD_SYM(strada_index);
+    ADD_SYM(strada_chr);
+    ADD_SYM(strada_ord);
+    ADD_SYM(strada_sprintf);
+    ADD_SYM(strada_join);
+    ADD_SYM(strada_split);
+    ADD_SYM(strada_array_push);
+    ADD_SYM(strada_array_pop);
+    ADD_SYM(strada_array_get);
+    ADD_SYM(strada_array_set);
+    ADD_SYM(strada_array_length);
+    ADD_SYM(strada_hash_get);
+    ADD_SYM(strada_hash_set);
+    ADD_SYM(strada_hash_exists);
+    ADD_SYM(strada_hash_delete);
+    ADD_SYM(strada_hash_keys);
+    ADD_SYM(strada_hash_values);
+    ADD_SYM(strada_deref);
+    ADD_SYM(strada_deref_array);
+    ADD_SYM(strada_deref_hash);
+    ADD_SYM(strada_deref_array_value);
+    ADD_SYM(strada_deref_hash_value);
+    ADD_SYM(strada_say);
+    ADD_SYM(strada_print);
+    ADD_SYM(strada_warn);
+    ADD_SYM(strada_die);
+    ADD_SYM(strada_regex_match);
+    ADD_SYM(strada_regex_subst);
+    ADD_SYM(strada_bless);
+    ADD_SYM(strada_blessed);
+    ADD_SYM(strada_method_call);
+    ADD_SYM(strada_method_register);
+    ADD_SYM(strada_throw);
+    ADD_SYM(strada_defined);
+    ADD_SYM(strada_scalar);
+    ADD_SYM(strada_exists);
+    ADD_SYM(strada_delete);
+    ADD_SYM(strada_num_cmp);
+    ADD_SYM(strada_str_eq);
+    ADD_SYM(strada_str_ne);
+    ADD_SYM(strada_new_array_with_capacity);
+    ADD_SYM(strada_new_hash_with_capacity);
+    ADD_SYM(strada_dumper);
+    ADD_SYM(strada_dumper_str);
+    ADD_SYM(strada_typeof);
+    ADD_SYM(strada_anon_hash);
+    ADD_SYM(strada_anon_array);
+    ADD_SYM(strada_memprof_enable);
+    ADD_SYM(strada_memprof_disable);
+    ADD_SYM(strada_memprof_reset);
+    ADD_SYM(strada_memprof_report);
+    ADD_SYM(strada_profile_init);
+    ADD_SYM(strada_profile_enter);
+    ADD_SYM(strada_profile_exit);
+    ADD_SYM(strada_profile_report);
+
+    #undef ADD_SYM
+    dlclose(handle);
+}
+
+/* Check if command exists */
+static int command_exists(const char *cmd) {
+    char path[256];
+    snprintf(path, sizeof(path), "which %s >/dev/null 2>&1", cmd);
+    return system(path) == 0;
+}
+}
+
+func repl_debug(str $msg) void {
+    if ($g_debug == 1) {
+        say("[DEBUG] " . $msg);
+    }
+}
+
+# Detect stradac path - try multiple locations
+func detect_stradac() str {
+    my int $exists = 0;
+
+    # Try ./stradac first (development)
+    if (sys::is_file("./stradac") == 1) {
+        return "./stradac";
+    }
+
+    # Try stradac in PATH
+    __C__ {
+        exists = strada_new_int(command_exists("stradac"));
+    }
+    if ($exists == 1) {
+        return "stradac";
+    }
+
+    # Try common install locations
+    if (sys::is_file("/usr/local/bin/stradac") == 1) {
+        return "/usr/local/bin/stradac";
+    }
+    if (sys::is_file("/usr/bin/stradac") == 1) {
+        return "/usr/bin/stradac";
+    }
+
+    return "";
+}
+
+# Detect runtime path - try multiple locations
+# Returns directory containing strada_runtime_tcc.h and strada_runtime_tcc.o
+func detect_runtime() str {
+    # Try ./runtime first (development)
+    if (sys::is_file("./runtime/strada_runtime_tcc.h") == 1) {
+        return "./runtime";
+    }
+
+    # Try relative to stradac location: ../lib/strada/runtime
+    # e.g., if stradac is at /usr/local/bin/stradac, try /usr/local/lib/strada/runtime
+    if ($g_stradac_path ne "" && $g_stradac_path ne "stradac") {
+        my str $stradac_dir = sys::dirname($g_stradac_path);
+        my str $relative_runtime = $stradac_dir . "/../lib/strada/runtime";
+        if (sys::is_file($relative_runtime . "/strada_runtime_tcc.h") == 1) {
+            return $relative_runtime;
+        }
+    }
+
+    # Try /usr/local/lib/strada/runtime
+    if (sys::is_file("/usr/local/lib/strada/runtime/strada_runtime_tcc.h") == 1) {
+        return "/usr/local/lib/strada/runtime";
+    }
+
+    # Try /usr/lib/strada/runtime
+    if (sys::is_file("/usr/lib/strada/runtime/strada_runtime_tcc.h") == 1) {
+        return "/usr/lib/strada/runtime";
+    }
+
+    # Try /usr/local/share/strada/runtime (alternate layout)
+    if (sys::is_file("/usr/local/share/strada/runtime/strada_runtime_tcc.h") == 1) {
+        return "/usr/local/share/strada/runtime";
+    }
+
+    # Try /usr/share/strada/runtime (system install)
+    if (sys::is_file("/usr/share/strada/runtime/strada_runtime_tcc.h") == 1) {
+        return "/usr/share/strada/runtime";
+    }
+
+    return "";
+}
+
+# Add a library path (from -L flag or use lib statement)
+# $priority: 0 = high (searched first, -L), 1 = low (searched last, -LL)
+func add_lib_path(str $path, int $priority) void {
+    if ($priority == 0) {
+        # High priority (-L)
+        foreach my str $existing (@g_lib_paths) {
+            if ($existing eq $path) {
+                return;
+            }
+        }
+        push(@g_lib_paths, $path);
+        repl_debug("Added lib path (high priority): " . $path);
+    } else {
+        # Low priority (-LL)
+        foreach my str $existing (@g_lib_paths_low) {
+            if ($existing eq $path) {
+                return;
+            }
+        }
+        push(@g_lib_paths_low, $path);
+        repl_debug("Added lib path (low priority): " . $path);
+    }
+}
+
+# Detect available compiler
+func detect_compiler() str {
+    my int $has_libtcc = 0;
+    my int $has_tcc = 0;
+    my int $has_gcc = 0;
+
+    __C__ {
+        has_libtcc = strada_new_int(init_libtcc());
+        has_tcc = strada_new_int(command_exists("tcc"));
+        has_gcc = strada_new_int(command_exists("gcc"));
+    }
+
+    if ($has_libtcc == 1) {
+        $g_libtcc_available = 1;
+        return "libtcc";
+    }
+    if ($has_tcc == 1) {
+        return "tcc";
+    }
+    if ($has_gcc == 1) {
+        return "gcc";
+    }
+    return "";
+}
+
+# Compile C code using libtcc (in-process, fastest)
+func compile_with_libtcc(str $c_code, str $func_name) int {
+    my int $fn_ptr = 0;
+    __C__ {
+        if (!libtcc_available) {
+            fn_ptr = strada_new_int(0);
+        } else {
+            TCCState state = p_tcc_new();
+            if (!state) {
+                fn_ptr = strada_new_int(0);
+            } else {
+                libtcc_error_msg[0] = '\0';
+                if (p_tcc_set_error_func) {
+                    p_tcc_set_error_func(state, NULL, libtcc_error_handler);
+                }
+
+                p_tcc_set_output_type(state, TCC_OUTPUT_MEMORY);
+                /* Use detected runtime path */
+                const char *rt_path = strada_to_str(g_runtime_path);
+                if (rt_path && rt_path[0]) {
+                    p_tcc_add_include_path(state, rt_path);
+                } else {
+                    p_tcc_add_include_path(state, "runtime");
+                }
+
+                const char *code = strada_to_str(c_code);
+                int ret = p_tcc_compile_string(state, code);
+
+                if (ret != 0) {
+                    fprintf(stderr, "libtcc compile error: %s\n", libtcc_error_msg);
+                    p_tcc_delete(state);
+                    fn_ptr = strada_new_int(0);
+                } else {
+                    add_runtime_symbols(state);
+                    ret = p_tcc_relocate(state, TCC_RELOCATE_AUTO);
+
+                    if (ret != 0) {
+                        fprintf(stderr, "libtcc relocate error\n");
+                        p_tcc_delete(state);
+                        fn_ptr = strada_new_int(0);
+                    } else {
+                        const char *fname = strada_to_str(func_name);
+                        void *sym = p_tcc_get_symbol(state, fname);
+                        fn_ptr = strada_new_int((int64_t)(intptr_t)sym);
+                        /* Note: we leak the state to keep the code alive */
+                        /* In a real implementation, we'd track and clean up states */
+                    }
+                }
+            }
+        }
+    }
+    return $fn_ptr;
+}
+
+# Check if input looks like a function definition
+func is_function_def(str $input) int {
+    if ($input =~ /^\s*(private\s+)?func\s+\w+\s*\(/) {
+        return 1;
+    }
+    return 0;
+}
+
+# Extract function name from a function definition
+# e.g., "func moo(int $foo) void { ... }" -> "moo"
+func get_function_name(str $func_def) str {
+    my str $s = $func_def;
+    # Remove leading whitespace and "private" if present
+    $s =~ s/^\s*//;
+    $s =~ s/^private\s+//;
+    # Remove "func "
+    $s =~ s/^func\s+//;
+    # Extract name (up to opening paren or whitespace)
+    my int $paren = index($s, "(");
+    if ($paren > 0) {
+        return substr($s, 0, $paren);
+    }
+    return "";
+}
+
+# Replace or add a function definition
+# If a function with the same name exists, replace it; otherwise add
+func register_function(str $func_def) int {
+    my str $name = get_function_name($func_def);
+    if ($name eq "") {
+        push(@g_functions, $func_def);
+        return 0;  # Added
+    }
+
+    # Check if function already exists
+    my int $i = 0;
+    my int $count = scalar(@g_functions);
+    while ($i < $count) {
+        my str $existing_name = get_function_name($g_functions[$i]);
+        if ($existing_name eq $name) {
+            # Replace existing function
+            $g_functions[$i] = $func_def;
+            return 1;  # Replaced
+        }
+        $i = $i + 1;
+    }
+
+    # Not found, add new
+    push(@g_functions, $func_def);
+    return 0;  # Added
+}
+
+# Extract function definition from input, returns array: [func_def, remainder]
+# Handles: "func foo() int { return 1; }; foo();" -> ["func foo() int { return 1; }", "; foo();"]
+func extract_function_def(str $input) array {
+    my array @result = ("", "");
+
+    # Find the opening brace
+    my int $brace_pos = index($input, "{");
+    if ($brace_pos < 0) {
+        $result[0] = $input;
+        return @result;
+    }
+
+    # Count braces to find matching close
+    my int $depth = 0;
+    my int $len = length($input);
+    my int $i = $brace_pos;
+    my int $in_string = 0;
+    my int $end_pos = -1;
+
+    while ($i < $len) {
+        my str $c = substr($input, $i, 1);
+
+        # Handle escape sequences
+        if ($i > 0 && substr($input, $i - 1, 1) eq "\\") {
+            $i = $i + 1;
+            next;
+        }
+
+        # Track string state
+        if ($c eq "\"") {
+            $in_string = 1 - $in_string;
+        }
+
+        if ($in_string == 0) {
+            if ($c eq "{") {
+                $depth = $depth + 1;
+            } elsif ($c eq "}") {
+                $depth = $depth - 1;
+                if ($depth == 0) {
+                    $end_pos = $i;
+                    last;
+                }
+            }
+        }
+
+        $i = $i + 1;
+    }
+
+    if ($end_pos >= 0) {
+        $result[0] = substr($input, 0, $end_pos + 1);
+        if ($end_pos + 1 < $len) {
+            my str $remainder = substr($input, $end_pos + 1, $len - $end_pos - 1);
+            $remainder =~ s/^\s*;\s*//;  # Remove leading semicolon and whitespace
+            $remainder =~ s/^\s+//;
+            $remainder =~ s/\s+$//;
+            $result[1] = $remainder;
+        }
+    } else {
+        $result[0] = $input;
+    }
+
+    return @result;
+}
+
+# Check if input looks like a package declaration
+func is_package_decl(str $input) int {
+    if ($input =~ /^\s*package\s+\w+/) {
+        return 1;
+    }
+    return 0;
+}
+
+# Check if input is a use/import statement
+func is_import(str $input) int {
+    # Note: Using explicit space patterns instead of \s for POSIX compatibility
+    if ($input =~ /^[ \t]*use[ \t]+/) {
+        return 1;
+    }
+    if ($input =~ /^[ \t]*import_lib[ \t]+/) {
+        return 1;
+    }
+    if ($input =~ /^[ \t]*import_object[ \t]+/) {
+        return 1;
+    }
+    if ($input =~ /^[ \t]*import_archive[ \t]+/) {
+        return 1;
+    }
+    return 0;
+}
+
+# Register a use/import statement (avoid duplicates)
+func register_import(str $import_stmt) void {
+    # Normalize the statement (remove trailing semicolon, trim whitespace)
+    my str $normalized = $import_stmt;
+    $normalized =~ s/[ \t]+$//;
+    $normalized =~ s/;$//;
+    $normalized =~ s/[ \t]+$//;
+
+    # Handle "use lib" specially - extract the path and add to lib paths
+    if ($normalized =~ /^use[ \t]+lib[ \t]+/) {
+        my str $path = $normalized;
+        $path =~ s/^use[ \t]+lib[ \t]+//;
+        # Remove quotes if present
+        $path =~ s/^"//;
+        $path =~ s/"$//;
+        $path =~ s/^'//;
+        $path =~ s/'$//;
+        add_lib_path($path, 0);  # High priority (same as -L)
+        # Don't add "use lib" to imports - we handle it via -L flag
+        return;
+    }
+
+    # Check if already registered
+    foreach my str $existing (@g_imports) {
+        my str $existing_norm = $existing;
+        $existing_norm =~ s/[ \t]+$//;
+        $existing_norm =~ s/;$//;
+        $existing_norm =~ s/[ \t]+$//;
+        if ($existing_norm eq $normalized) {
+            return;  # Already have this import
+        }
+    }
+
+    # Add the statement (with semicolon)
+    push(@g_imports, $normalized . ";");
+    repl_debug("Registered import: " . $normalized);
+}
+
+# Simple check if line declares a variable
+func get_var_decl_type(str $input, str $sigil) str {
+    if ($sigil eq "$") {
+        if ($input =~ /my\s+int\s+\$/) { return "int"; }
+        if ($input =~ /my\s+num\s+\$/) { return "num"; }
+        if ($input =~ /my\s+str\s+\$/) { return "str"; }
+        if ($input =~ /my\s+scalar\s+\$/) { return "scalar"; }
+        if ($input =~ /my\s+\$/) { return "scalar"; }
+    } elsif ($sigil eq "@") {
+        if ($input =~ /my\s+array\s+\@/) { return "array"; }
+        if ($input =~ /my\s+\@/) { return "array"; }
+    } elsif ($sigil eq "%") {
+        if ($input =~ /my\s+hash\s+\%/) { return "hash"; }
+        if ($input =~ /my\s+\%/) { return "hash"; }
+    }
+    return "";
+}
+
+# Check if input declares a specific variable
+func input_declares_var(str $input, str $name, str $sigil) int {
+    my str $pattern = "my\\s+\\w*\\s*\\" . $sigil . $name . "\\b";
+    if ($input =~ /$pattern/) {
+        return 1;
+    }
+    return 0;
+}
+
+# Register variables from input
+func register_variables(str $input) void {
+    my int $pos = 0;
+    my int $len = length($input);
+
+    while ($pos < $len) {
+        my int $my_pos = index($input, "my ", $pos);
+        if ($my_pos < 0) {
+            last;
+        }
+
+        $pos = $my_pos + 3;
+
+        while ($pos < $len && substr($input, $pos, 1) eq " ") {
+            $pos = $pos + 1;
+        }
+
+        my str $type = "scalar";
+        my str $next_word = "";
+        my int $word_start = $pos;
+        while ($pos < $len) {
+            my str $c = substr($input, $pos, 1);
+            if ($c eq " " || $c eq "$" || $c eq "@" || $c eq "%") {
+                last;
+            }
+            $next_word = $next_word . $c;
+            $pos = $pos + 1;
+        }
+
+        if ($next_word eq "int" || $next_word eq "num" || $next_word eq "str" || $next_word eq "scalar") {
+            $type = $next_word;
+            while ($pos < $len && substr($input, $pos, 1) eq " ") {
+                $pos = $pos + 1;
+            }
+        } elsif ($next_word eq "array") {
+            $type = "array";
+            while ($pos < $len && substr($input, $pos, 1) eq " ") {
+                $pos = $pos + 1;
+            }
+        } elsif ($next_word eq "hash") {
+            $type = "hash";
+            while ($pos < $len && substr($input, $pos, 1) eq " ") {
+                $pos = $pos + 1;
+            }
+        } else {
+            $pos = $word_start;
+        }
+
+        if ($pos >= $len) { last; }
+        my str $sigil = substr($input, $pos, 1);
+
+        if ($sigil eq "$") {
+            $pos = $pos + 1;
+        } elsif ($sigil eq "@") {
+            $type = "array";
+            $pos = $pos + 1;
+        } elsif ($sigil eq "%") {
+            $type = "hash";
+            $pos = $pos + 1;
+        } else {
+            next;
+        }
+
+        my str $name = "";
+        while ($pos < $len) {
+            my str $c = substr($input, $pos, 1);
+            if ($c =~ /[a-zA-Z0-9_]/) {
+                $name = $name . $c;
+                $pos = $pos + 1;
+            } else {
+                last;
+            }
+        }
+
+        if ($name ne "") {
+            repl_debug("Registering variable: " . $type . " " . $sigil . $name);
+            $g_var_types{$name} = $type;
+        }
+    }
+}
+
+# Close previous profile library and clean up temp files
+func close_profile_lib() void {
+    if ($g_profile_lib != 0) {
+        sys::dl_close($g_profile_lib);
+        $g_profile_lib = 0;
+    }
+    # Clean up temp files
+    if ($g_profile_files ne "") {
+        my array @files = split(":", $g_profile_files);
+        foreach my str $f (@files) {
+            if ($f ne "" && sys::is_file($f) == 1) {
+                sys::unlink($f);
+            }
+        }
+        $g_profile_files = "";
+    }
+}
+
+# Call profile report from loaded library
+func call_profile_report() void {
+    if ($g_profile_lib == 0) {
+        say("No profile data (no code evaluated with profiling enabled)");
+        return;
+    }
+    my int $fn = sys::dl_sym($g_profile_lib, "__repl_profile_report");
+    if ($fn == 0) {
+        say("Profile function not found");
+        return;
+    }
+    # Call void function
+    __C__ {
+        typedef void (*VoidFunc)(void);
+        VoidFunc f = (VoidFunc)(intptr_t)strada_to_int(fn);
+        f();
+    }
+}
+
+# Compile and evaluate input
+func eval_input(str $input, scalar $state) scalar {
+    $g_eval_count = $g_eval_count + 1;
+
+    my str $base = $g_tmpdir . "/strada_repl_" . $g_eval_count;
+    my str $src_file = $base . ".strada";
+    my str $c_file = $base . ".c";
+    my str $so_file = $base . ".so";
+
+    # Register any new variables
+    register_variables($input);
+
+    # Generate Strada source
+    my str $strada_src = generate_strada_source($input);
+    repl_debug("Generated Strada code:\n" . $strada_src);
+
+    # Write Strada source file
+    my scalar $fh = sys::open($src_file, "w");
+    if (!defined($fh)) {
+        say("Error: Could not create temp file");
+        return undef;
+    }
+    sys::fwrite($fh, $strada_src);
+    sys::close($fh);
+
+    # Step 1: Use stradac to generate C code
+    my str $stradac_cmd = $g_stradac_path . " ";
+    if ($g_funcprof_enabled == 1) {
+        $stradac_cmd = $stradac_cmd . "-p ";
+    }
+    # Add library paths (high priority first, low priority last)
+    foreach my str $lp (@g_lib_paths) {
+        $stradac_cmd = $stradac_cmd . "-L " . $lp . " ";
+    }
+    foreach my str $lp (@g_lib_paths_low) {
+        $stradac_cmd = $stradac_cmd . "-LL " . $lp . " ";
+    }
+    $stradac_cmd = $stradac_cmd . $src_file . " " . $c_file . " 2>&1";
+    my scalar $pipe = sys::popen($stradac_cmd, "r");
+    my str $compile_output = "";
+    if (defined($pipe)) {
+        my scalar $line = sys::fgets($pipe, 4096);
+        while (defined($line)) {
+            $compile_output = $compile_output . $line;
+            $line = sys::fgets($pipe, 4096);
+        }
+        sys::pclose($pipe);
+    }
+
+    if (sys::is_file($c_file) == 0) {
+        format_error_display($input, $compile_output, $strada_src);
+        sys::unlink($src_file);
+        return undef;
+    }
+
+    # Show generated C code if cdebug is enabled
+    if ($g_cdebug == 1) {
+        say("");
+        say(color_cyan("=== Generated C Code ==="));
+        my scalar $cfh_dbg = sys::open($c_file, "r");
+        if (defined($cfh_dbg)) {
+            my scalar $cline_dbg = sys::fgets($cfh_dbg, 65536);
+            while (defined($cline_dbg)) {
+                print($cline_dbg);
+                $cline_dbg = sys::fgets($cfh_dbg, 65536);
+            }
+            sys::close($cfh_dbg);
+        }
+        say(color_cyan("========================"));
+        say("");
+    }
+
+    my scalar $result = undef;
+
+    # Step 2: Compile C to .so using selected backend
+    if ($g_compiler eq "libtcc") {
+        # Read C file and compile in-process
+        my str $c_code = "";
+        my scalar $cfh = sys::open($c_file, "r");
+        if (defined($cfh)) {
+            my scalar $cline = sys::fgets($cfh, 65536);
+            while (defined($cline)) {
+                $c_code = $c_code . $cline;
+                $cline = sys::fgets($cfh, 65536);
+            }
+            sys::close($cfh);
+        }
+
+        # Replace header for TCC compatibility
+        $c_code =~ s/strada_runtime\.h/strada_runtime_tcc.h/;
+
+        my int $fn = compile_with_libtcc($c_code, "repl_eval");
+        if ($fn != 0) {
+            try {
+                my array @args = ($state);
+                $result = sys::dl_call_sv($fn, \@args);
+            } catch ($e) {
+                say("");
+                say(color_red(color_bold("Runtime error: ")) . $e);
+                say("");
+            }
+            if ($g_debug == 0) {
+                sys::unlink($src_file);
+                sys::unlink($c_file);
+            }
+            return $result;
+        }
+        # Fall through to tcc if libtcc failed
+        say("libtcc failed, falling back to tcc");
+        $g_compiler = "tcc";
+    }
+
+    if ($g_compiler eq "tcc") {
+        # Check that runtime is available
+        if ($g_runtime_path eq "") {
+            say("");
+            say(color_red(color_bold("Error: ")) . "Could not find Strada runtime files");
+            say("Make sure strada_runtime_tcc.h and strada_runtime_tcc.o are installed");
+            say("");
+            sys::unlink($src_file);
+            sys::unlink($c_file);
+            return undef;
+        }
+
+        # Replace header for TCC compatibility
+        my str $sed_cmd = "sed -i 's/strada_runtime\\.h/strada_runtime_tcc.h/' " . $c_file;
+        sys::system($sed_cmd);
+
+        # Compile with tcc using detected runtime path
+        my str $tcc_cmd = "tcc -shared -o " . $so_file . " " . $c_file . " " . $g_runtime_path . "/strada_runtime_tcc.o -I" . $g_runtime_path . " -ldl -lm -lpthread 2>&1";
+        $pipe = sys::popen($tcc_cmd, "r");
+        my str $tcc_output = "";
+        if (defined($pipe)) {
+            my scalar $line = sys::fgets($pipe, 4096);
+            while (defined($line)) {
+                $tcc_output = $tcc_output . $line;
+                $line = sys::fgets($pipe, 4096);
+            }
+            sys::pclose($pipe);
+        }
+
+        if (sys::is_file($so_file) == 0) {
+            say("");
+            say(color_red(color_bold("C compilation error (TCC): ")) . $tcc_output);
+            say(color_yellow("This is likely an internal error. Try .debug to see generated code."));
+            say("");
+            sys::unlink($src_file);
+            sys::unlink($c_file);
+            return undef;
+        }
+
+        # Close previous profile library if any
+        if ($g_funcprof_enabled == 1) {
+            close_profile_lib();
+        }
+
+        # Load and call
+        my int $lib = sys::dl_open($so_file);
+        if ($lib == 0) {
+            say("Error: Could not load compiled library");
+            sys::unlink($src_file);
+            sys::unlink($c_file);
+            sys::unlink($so_file);
+            return undef;
+        }
+
+        my int $fn = sys::dl_sym($lib, "repl_eval");
+        if ($fn != 0) {
+            try {
+                my array @args = ($state);
+                $result = sys::dl_call_sv($fn, \@args);
+            } catch ($e) {
+                say("");
+                say(color_red(color_bold("Runtime error: ")) . $e);
+                say("");
+            }
+        }
+
+        # Keep library open for profiling, otherwise close
+        if ($g_funcprof_enabled == 1) {
+            $g_profile_lib = $lib;
+            $g_profile_files = $src_file . ":" . $c_file . ":" . $so_file;
+        } else {
+            sys::dl_close($lib);
+            if ($g_debug == 0) {
+                sys::unlink($src_file);
+                sys::unlink($c_file);
+                sys::unlink($so_file);
+            }
+        }
+        return $result;
+    }
+
+    # Fall back to gcc (slowest)
+    if ($g_compiler eq "gcc") {
+        # Close previous profile library if any
+        if ($g_funcprof_enabled == 1) {
+            close_profile_lib();
+        }
+
+        my str $gcc_cmd = "./strada --shared " . $src_file . " -o " . $so_file . " 2>&1";
+        if ($g_funcprof_enabled == 1) {
+            $gcc_cmd = "./strada --shared -p " . $src_file . " -o " . $so_file . " 2>&1";
+        }
+        $pipe = sys::popen($gcc_cmd, "r");
+        my str $output = "";
+        if (defined($pipe)) {
+            my scalar $line = sys::fgets($pipe, 4096);
+            while (defined($line)) {
+                $output = $output . $line;
+                $line = sys::fgets($pipe, 4096);
+            }
+            sys::pclose($pipe);
+        }
+
+        if (sys::is_file($so_file) == 0) {
+            say("");
+            say(color_red(color_bold("C compilation error (GCC): ")) . $output);
+            say(color_yellow("This is likely an internal error. Try .debug to see generated code."));
+            say("");
+            sys::unlink($src_file);
+            return undef;
+        }
+
+        my int $lib = sys::dl_open($so_file);
+        if ($lib == 0) {
+            say("Error: Could not load compiled library");
+            sys::unlink($src_file);
+            sys::unlink($so_file);
+            return undef;
+        }
+
+        my int $fn = sys::dl_sym($lib, "repl_eval");
+        if ($fn != 0) {
+            try {
+                my array @args = ($state);
+                $result = sys::dl_call_sv($fn, \@args);
+            } catch ($e) {
+                say("");
+                say(color_red(color_bold("Runtime error: ")) . $e);
+                say("");
+            }
+        }
+
+        # Keep library open for profiling, otherwise close
+        if ($g_funcprof_enabled == 1) {
+            $g_profile_lib = $lib;
+            $g_profile_files = $src_file . ":" . $so_file;
+        } else {
+            sys::dl_close($lib);
+            if ($g_debug == 0) {
+                sys::unlink($src_file);
+                sys::unlink($so_file);
+            }
+        }
+        return $result;
+    }
+
+    say("Error: No compiler available");
+    return undef;
+}
+
+# Generate Strada source
+func generate_strada_source(str $input) str {
+    my str $src = "";
+
+    # Import statements (must be at the top)
+    foreach my str $imp (@g_imports) {
+        $src = $src . $imp . "\n";
+    }
+    if (scalar(@g_imports) > 0) {
+        $src = $src . "\n";
+    }
+
+    # Package declaration (after imports, before functions)
+    if ($g_current_package ne "") {
+        $src = $src . "package " . $g_current_package . ";\n\n";
+    }
+
+    # User-defined functions (no package prefix)
+    foreach my str $fn (@g_functions) {
+        $src = $src . $fn . "\n\n";
+    }
+
+    # Main eval function
+    $src = $src . "func repl_eval(scalar \$__state) scalar {\n";
+
+    foreach my str $name (keys(%g_var_types)) {
+        my str $type = $g_var_types{$name};
+        my str $sigil = "\$";
+        if ($type eq "array") { $sigil = "@"; }
+        if ($type eq "hash") { $sigil = "%"; }
+
+        if (input_declares_var($input, $name, $sigil) == 1) {
+            next;
+        }
+
+        if ($type eq "array") {
+            $src = $src . "    my array \@" . $name . " = ();\n";
+            $src = $src . "    if (exists(\$__state, \"" . $name . "\")) {\n";
+            $src = $src . "        \@" . $name . " = \@{\$__state->{\"" . $name . "\"}};\n";
+            $src = $src . "    }\n";
+        } elsif ($type eq "hash") {
+            $src = $src . "    my hash \%" . $name . " = ();\n";
+            $src = $src . "    if (exists(\$__state, \"" . $name . "\")) {\n";
+            $src = $src . "        \%" . $name . " = \%{\$__state->{\"" . $name . "\"}};\n";
+            $src = $src . "    }\n";
+        } else {
+            $src = $src . "    my " . $type . " \$" . $name . " = undef;\n";
+            $src = $src . "    if (exists(\$__state, \"" . $name . "\")) {\n";
+            $src = $src . "        \$" . $name . " = \$__state->{\"" . $name . "\"};\n";
+            $src = $src . "    }\n";
+        }
+    }
+
+    $src = $src . "\n    # User code\n";
+
+    my str $trimmed = $input;
+    $trimmed =~ s/\s+$//;
+
+    # Check if this is a known void function call
+    my int $is_void_call = 0;
+    if ($trimmed =~ /^(say|print|warn|push|pop|shift|unshift|dumper|reverse)\(/) {
+        $is_void_call = 1;
+    }
+    # Check if calling a user-defined void function
+    foreach my str $fn (@g_functions) {
+        # Check if function is void: "func name(...) void {"
+        if ($fn =~ /\)\s*void\s*\{/) {
+            # Extract function name from "func name("
+            my int $func_pos = index($fn, "func ");
+            if ($func_pos >= 0) {
+                my int $name_start = $func_pos + 5;
+                my int $paren_pos = index($fn, "(", $name_start);
+                if ($paren_pos > $name_start) {
+                    my str $fn_name = substr($fn, $name_start, $paren_pos - $name_start);
+                    $fn_name =~ s/\s+$//;
+                    # Check if user is calling this function
+                    if ($trimmed =~ /^$fn_name\(/) {
+                        $is_void_call = 1;
+                    }
+                }
+            }
+        }
+    }
+
+    # Check if ends with semicolon (using substr because /;$/ regex is buggy)
+    my str $last_char = "";
+    if (length($trimmed) > 0) {
+        $last_char = substr($trimmed, length($trimmed) - 1, 1);
+    }
+
+    if ($trimmed =~ /;/) {
+        # Contains semicolon - multi-statement or statement ending with ;
+        # Block statements (ending with }) don't need trailing semicolon
+        my str $code_line = $input;
+        if ($last_char ne ";" && $last_char ne "}") {
+            $code_line = $input . ";";
+        }
+        $src = $src . "    " . $code_line . "\n";
+        $src = $src . "    my scalar \$__result = undef;\n";
+    } elsif ($is_void_call == 1) {
+        # Void function call - execute as statement
+        $src = $src . "    " . $input . ";\n";
+        $src = $src . "    my scalar \$__result = undef;\n";
+    } else {
+        # Expression - capture result
+        $src = $src . "    my scalar \$__result = " . $input . ";\n";
+    }
+
+    $src = $src . "\n    # Export variables back to state\n";
+
+    foreach my str $name (keys(%g_var_types)) {
+        my str $type = $g_var_types{$name};
+        if ($type eq "array") {
+            $src = $src . "    \$__state->{\"" . $name . "\"} = \\\@" . $name . ";\n";
+        } elsif ($type eq "hash") {
+            $src = $src . "    \$__state->{\"" . $name . "\"} = \\\%" . $name . ";\n";
+        } else {
+            $src = $src . "    \$__state->{\"" . $name . "\"} = \$" . $name . ";\n";
+        }
+    }
+
+    $src = $src . "\n    return \$__result;\n";
+    $src = $src . "}\n";
+
+    # Generate profile report wrapper when profiling is enabled
+    if ($g_funcprof_enabled == 1) {
+        $src = $src . "\n# Profile report wrapper (exported for REPL)\n";
+        $src = $src . "func __repl_profile_report() void {\n";
+        $src = $src . "    __C__ { strada_profile_report(); }\n";
+        $src = $src . "}\n";
+    }
+
+    return $src;
+}
+
+# Format a value for display
+func format_value(scalar $val) str {
+    if (!defined($val)) {
+        return "undef";
+    }
+    return "" . $val;
+}
+
+# ANSI color codes (use chr(27) for ESC character)
+my str $g_esc = chr(27);
+
+func color_red(str $s) str {
+    return $g_esc . "[31m" . $s . $g_esc . "[0m";
+}
+
+func color_yellow(str $s) str {
+    return $g_esc . "[33m" . $s . $g_esc . "[0m";
+}
+
+func color_cyan(str $s) str {
+    return $g_esc . "[36m" . $s . $g_esc . "[0m";
+}
+
+func color_bold(str $s) str {
+    return $g_esc . "[1m" . $s . $g_esc . "[0m";
+}
+
+# Parse error message to extract line number and column
+# Returns hash with: line, column, message, raw
+func parse_error(str $error_output) hash {
+    my hash %result = ();
+    $result{"line"} = 0;
+    $result{"column"} = 0;
+    $result{"message"} = "";
+    $result{"raw"} = $error_output;
+
+    # Split output into lines and find the actual error line
+    my array @lines = split("\n", $error_output);
+    my str $error_line = "";
+
+    foreach my str $line (@lines) {
+        # Skip compiler banner lines
+        if ($line =~ /^Strada Compiler/) { next; }
+        if ($line =~ /^Compiling:/) { next; }
+        if ($line =~ /^Success!/) { next; }
+        if ($line eq "") { next; }
+
+        # This should be the actual error
+        $error_line = $line;
+        last;
+    }
+
+    if ($error_line eq "") {
+        $result{"message"} = $error_output;
+        return %result;
+    }
+
+    # Use string manipulation to extract line number and message
+    my str $clean_msg = $error_line;
+
+    # Strip "error: " prefix if present
+    if (index($clean_msg, "error: ") == 0) {
+        $clean_msg = substr($clean_msg, 7, length($clean_msg) - 7);
+    }
+
+    # Try to find ":N:" pattern for line number (e.g., "file.strada:4: message")
+    my int $colon1 = index($error_line, ":");
+    if ($colon1 >= 0) {
+        my int $colon2 = index($error_line, ":", $colon1 + 1);
+        if ($colon2 > $colon1 + 1) {
+            my str $num_part = substr($error_line, $colon1 + 1, $colon2 - $colon1 - 1);
+            # Check if it looks like a number
+            if (length($num_part) > 0 && length($num_part) < 10) {
+                my int $is_num = 1;
+                my int $ni = 0;
+                while ($ni < length($num_part)) {
+                    my str $nc = substr($num_part, $ni, 1);
+                    if ($nc lt "0" || $nc gt "9") {
+                        $is_num = 0;
+                        last;
+                    }
+                    $ni = $ni + 1;
+                }
+                if ($is_num == 1) {
+                    $result{"line"} = $num_part + 0;
+                    # Get message after the second colon
+                    if ($colon2 + 1 < length($error_line)) {
+                        $clean_msg = substr($error_line, $colon2 + 1, length($error_line) - $colon2 - 1);
+                        # Trim leading whitespace
+                        while (length($clean_msg) > 0 && substr($clean_msg, 0, 1) eq " ") {
+                            $clean_msg = substr($clean_msg, 1, length($clean_msg) - 1);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    # Also check for " at line N" pattern and remove it (internal line numbers)
+    my int $at_line_pos = index($clean_msg, " at line ");
+    if ($at_line_pos >= 0) {
+        $clean_msg = substr($clean_msg, 0, $at_line_pos);
+    }
+
+    $result{"message"} = $clean_msg;
+
+    return %result;
+}
+
+# Format error display with source context and caret
+func format_error_display(str $user_input, str $error_output, str $generated_src) void {
+    my hash %err = parse_error($error_output);
+    my int $err_line = $err{"line"};
+    my int $err_col = $err{"column"};
+    my str $err_msg = $err{"message"};
+
+    # Print error header
+    say("");
+    say(color_red(color_bold("Error: ")) . $err_msg);
+
+    # If we have line info, try to show the relevant source
+    if ($err_line > 0) {
+        # The generated source has wrapper code. User code starts after "# User code" comment.
+        # We need to map the error line back to the user's input.
+
+        my array @gen_lines = split("\n", $generated_src);
+        my int $user_code_start = 0;
+        my int $i = 0;
+        foreach my str $gl (@gen_lines) {
+            $i = $i + 1;
+            if ($gl =~ /# User code/) {
+                $user_code_start = $i;
+                last;
+            }
+        }
+
+        # Calculate offset into user code
+        my int $user_line_offset = $err_line - $user_code_start - 1;
+
+        # Split user input into lines
+        my array @user_lines = split("\n", $user_input);
+        my int $num_user_lines = scalar(@user_lines);
+
+        # Show context around the error
+        say("");
+
+        if ($user_line_offset >= 0 && $user_line_offset < $num_user_lines) {
+            # We can pinpoint the exact line in user input
+            my int $start_line = $user_line_offset - 1;
+            if ($start_line < 0) { $start_line = 0; }
+            my int $end_line = $user_line_offset + 1;
+            if ($end_line >= $num_user_lines) { $end_line = $num_user_lines - 1; }
+
+            my int $ln = $start_line;
+            while ($ln <= $end_line) {
+                my str $line_content = $user_lines[$ln];
+                my int $display_ln = $ln + 1;
+                my str $prefix = "  " . $display_ln . " | ";
+
+                if ($ln == $user_line_offset) {
+                    # This is the error line
+                    say(color_red("> " . $display_ln . " | ") . $line_content);
+
+                    # Show caret pointing to column if available
+                    if ($err_col > 0) {
+                        my str $caret_line = "";
+                        my int $ci = 0;
+                        my int $prefix_len = length("> " . $display_ln . " | ");
+                        while ($ci < $prefix_len) {
+                            $caret_line = $caret_line . " ";
+                            $ci = $ci + 1;
+                        }
+                        # Adjust column for the "    " prefix added by generated code
+                        my int $adj_col = $err_col - 4;
+                        if ($adj_col < 1) { $adj_col = 1; }
+                        $ci = 1;
+                        while ($ci < $adj_col) {
+                            $caret_line = $caret_line . " ";
+                            $ci = $ci + 1;
+                        }
+                        $caret_line = $caret_line . color_red("^");
+                        say($caret_line);
+                    }
+                } else {
+                    say(color_cyan("  " . $display_ln . " | ") . $line_content);
+                }
+                $ln = $ln + 1;
+            }
+        } else {
+            # Can't map to user line, show all user input
+            my int $ln = 0;
+            foreach my str $ul (@user_lines) {
+                $ln = $ln + 1;
+                say(color_cyan("  " . $ln . " | ") . $ul);
+            }
+
+            # If we have column info and it's a single-line input, show caret
+            if ($err_col > 0 && $num_user_lines == 1) {
+                my str $caret_line = "      ";  # Align with "  1 | "
+                my int $adj_col = $err_col - 4;  # Adjust for generated code indent
+                if ($adj_col < 1) { $adj_col = 1; }
+                my int $ci = 1;
+                while ($ci < $adj_col) {
+                    $caret_line = $caret_line . " ";
+                    $ci = $ci + 1;
+                }
+                $caret_line = $caret_line . color_red("^");
+                say($caret_line);
+            }
+        }
+    } else {
+        # No line info, just show the input
+        say("");
+        my array @user_lines = split("\n", $user_input);
+        my int $ln = 0;
+        foreach my str $ul (@user_lines) {
+            $ln = $ln + 1;
+            say(color_cyan("  " . $ln . " | ") . $ul);
+        }
+    }
+
+    say("");
+}
+
+# Check if braces are balanced
+func is_balanced(str $input) int {
+    my int $braces = 0;
+    my int $parens = 0;
+    my int $brackets = 0;
+    my int $in_string = 0;
+
+    my int $len = length($input);
+    my int $i = 0;
+    while ($i < $len) {
+        my str $c = substr($input, $i, 1);
+
+        if ($i > 0 && substr($input, $i - 1, 1) eq "\\") {
+            $i = $i + 1;
+            next;
+        }
+
+        if ($c eq "\"") {
+            $in_string = 1 - $in_string;
+        }
+
+        if ($in_string == 0) {
+            if ($c eq "{") { $braces = $braces + 1; }
+            if ($c eq "}") { $braces = $braces - 1; }
+            if ($c eq "(") { $parens = $parens + 1; }
+            if ($c eq ")") { $parens = $parens - 1; }
+            if ($c eq "[") { $brackets = $brackets + 1; }
+            if ($c eq "]") { $brackets = $brackets - 1; }
+        }
+
+        $i = $i + 1;
+    }
+
+    # Check for incomplete function definition (func ... ) without body
+    # If it starts with 'func' but has no opening brace, it's incomplete
+    if ($braces == 0 && $parens == 0) {
+        if ($input =~ /^func\s+/ && index($input, "{") < 0) {
+            return 0;  # Incomplete - needs body
+        }
+    }
+
+    if ($braces == 0 && $parens == 0 && $brackets == 0) {
+        return 1;
+    }
+    return 0;
+}
+
+# Print help
+func print_help() void {
+    say("Strada REPL - Interactive Strada Shell");
+    say("");
+    say("Commands:");
+    say("  .help               - Show this help");
+    say("  .vars               - List declared variables");
+    say("  .funcs              - List defined functions");
+    say("  .imports            - List imports and library paths");
+    say("  .load FILE          - Load and execute code from file");
+    say("  .soinfo FILE        - Show exported functions from .so/.o/.a file");
+    say("  .clear              - Clear all state");
+    say("  .debug              - Toggle debug mode (show generated Strada)");
+    say("  .cdebug             - Toggle C debug mode (show generated C)");
+    say("  .compiler           - Show compiler backend");
+    say("  .set compiler=X     - Change compiler (libtcc, tcc, gcc)");
+    say("  .memprof            - Toggle memory profiling");
+    say("  .memstats           - Show memory statistics");
+    say("  .funcprof           - Toggle function profiling (compile with -p)");
+    say("  .profile            - Show function profile report");
+    say("  .quit               - Exit REPL");
+    say("");
+    say("Imports (use, import_lib, etc.):");
+    say("  use lib \"path\";");
+    say("  use ModuleName;");
+    say("  import_lib \"Library.so\";");
+    say("");
+    say("Examples:");
+    say("  my int \$x = 42;");
+    say("  \$x * 2");
+    say("  my array \@nums = (1, 2, 3);");
+    say("");
+}
+
+# Print CLI usage
+func print_usage() void {
+    say("Usage: strada-repl [OPTIONS] [SCRIPT]");
+    say("");
+    say("Options:");
+    say("  -L PATH             Add library search path (high priority, searched first)");
+    say("  -LL PATH            Add library search path (low priority, searched last)");
+    say("  --compiler=BACKEND  Use specific compiler (libtcc, tcc, gcc)");
+    say("  --debug             Enable debug mode");
+    say("  --help, -h          Show this help");
+    say("");
+    say("If SCRIPT is provided, runs the script and exits.");
+    say("Scripts can use shebang: #!/path/to/strada-repl");
+    say("");
+}
+
+# Parse command line arguments from @argv (skip argv[0] which is program name)
+func parse_args(array @args) int {
+    my int $i = 1;  # Skip program name
+    my int $argc = scalar(@args);
+    while ($i < $argc) {
+        my str $arg = $args[$i];
+
+        if ($arg eq "--help" || $arg eq "-h") {
+            print_usage();
+            return 1;  # Signal to exit
+        } elsif ($arg eq "-L") {
+            # High priority library path - next arg is the path
+            $i = $i + 1;
+            if ($i >= $argc) {
+                say("Error: -L requires a path argument");
+                return 1;
+            }
+            my str $path = $args[$i];
+            add_lib_path($path, 0);
+        } elsif ($arg eq "-LL") {
+            # Low priority library path - next arg is the path
+            $i = $i + 1;
+            if ($i >= $argc) {
+                say("Error: -LL requires a path argument");
+                return 1;
+            }
+            my str $path = $args[$i];
+            add_lib_path($path, 1);
+        } elsif ($arg =~ /^-LL/) {
+            # -LLpath (no space) - low priority
+            my str $path = $arg;
+            $path =~ s/^-LL//;
+            add_lib_path($path, 1);
+        } elsif ($arg =~ /^-L/) {
+            # -Lpath (no space) - high priority
+            my str $path = $arg;
+            $path =~ s/^-L//;
+            add_lib_path($path, 0);
+        } elsif ($arg =~ /^--compiler=/) {
+            my str $backend = $arg;
+            $backend =~ s/^--compiler=//;
+            if ($backend eq "libtcc" || $backend eq "tcc" || $backend eq "gcc") {
+                $g_compiler = $backend;
+            } else {
+                say("Error: Unknown compiler backend: " . $backend);
+                say("Valid options: libtcc, tcc, gcc");
+                return 1;  # Signal to exit
+            }
+        } elsif ($arg eq "--debug") {
+            $g_debug = 1;
+        } elsif ($arg =~ /^-/) {
+            say("Unknown option: " . $arg);
+            say("Use --help for usage information");
+            return 1;  # Signal to exit
+        } else {
+            # Non-option argument - assume it's a script file
+            $g_script_file = $arg;
+        }
+
+        $i = $i + 1;
+    }
+    return 0;  # Continue
+}
+
+# Run a script file
+func run_script(str $filename) int {
+    if (sys::is_file($filename) == 0) {
+        say("Error: File not found: " . $filename);
+        return 1;
+    }
+
+    my scalar $fh = sys::open($filename, "r");
+    if (!defined($fh)) {
+        say("Error: Could not open file: " . $filename);
+        return 1;
+    }
+
+    # Read all lines
+    my array @lines = ();
+    my scalar $line = sys::fgets($fh, 65536);
+    while (defined($line)) {
+        # Remove trailing newline
+        $line =~ s/\n$//;
+        push(@lines, $line);
+        $line = sys::fgets($fh, 65536);
+    }
+    sys::close($fh);
+
+    # Process lines
+    my hash %state = ();
+    my str $buffer = "";
+    my int $continuation = 0;
+    my int $line_num = 0;
+
+    repl_debug("Script: read " . scalar(@lines) . " lines");
+
+    foreach my str $raw_line (@lines) {
+        $line_num = $line_num + 1;
+
+        repl_debug("Script line " . $line_num . ": " . $raw_line);
+
+        # Skip shebang line
+        if ($line_num == 1 && $raw_line =~ /^#!/) {
+            repl_debug("  Skipping shebang");
+            next;
+        }
+
+        # Skip empty lines and comments (unless in continuation)
+        if ($continuation == 0) {
+            my str $trimmed = $raw_line;
+            $trimmed =~ s/^\s+//;
+            if ($trimmed eq "" || $trimmed =~ /^#/) {
+                repl_debug("  Skipping empty/comment");
+                next;
+            }
+        }
+
+        if ($continuation == 1) {
+            $buffer = $buffer . "\n" . $raw_line;
+        } else {
+            $buffer = $raw_line;
+        }
+
+        my int $balanced = is_balanced($buffer);
+        repl_debug("  Buffer: " . $buffer);
+        repl_debug("  Balanced: " . $balanced);
+        if ($balanced == 0) {
+            repl_debug("  Continuing...");
+            $continuation = 1;
+            next;
+        }
+        $continuation = 0;
+
+        my str $input = $buffer;
+        $input =~ s/^\s+//;
+        $input =~ s/\s+$//;
+
+        if ($input eq "") {
+            next;
+        }
+
+        # Check if this is an import statement
+        if (is_import($input)) {
+            repl_debug("Script: registering import");
+            register_import($input);
+            next;
+        }
+
+        # Check if this is a package declaration
+        if (is_package_decl($input)) {
+            my str $pkg_name = $input;
+            $pkg_name =~ s/^\s*package\s+//;
+            $pkg_name =~ s/\s*;.*$//;
+            $pkg_name =~ s/\s+$//;
+            $g_current_package = $pkg_name;
+            repl_debug("Script: set package to " . $g_current_package);
+            next;
+        }
+
+        # Check if this is a function definition
+        if (is_function_def($input)) {
+            repl_debug("Script: registering function");
+            register_function($input);
+            next;
+        }
+
+        # Register any variables
+        register_variables($input);
+
+        repl_debug("Script: evaluating: " . $input);
+
+        # Evaluate the input
+        my scalar $result = eval_input($input, \%state);
+        # Script mode: don't print results (unless it's an error)
+    }
+
+    # Clean up
+    close_profile_lib();
+    return 0;
+}
+
+# Main REPL loop
+func main(int $argc, array @argv) int {
+    # Parse command line arguments
+    if (parse_args(@argv) == 1) {
+        return 0;
+    }
+
+    # Detect tools directory from argv[0] (where this REPL binary lives)
+    my str $self_path = $argv[0];
+    my str $real_path = sys::realpath($self_path);
+    if ($real_path ne "") {
+        $g_tools_dir = sys::dirname($real_path);
+    } else {
+        $g_tools_dir = sys::dirname($self_path);
+    }
+    repl_debug("Tools dir: " . $g_tools_dir);
+
+    # Detect stradac compiler path
+    $g_stradac_path = detect_stradac();
+    if ($g_stradac_path eq "") {
+        say("Error: Could not find stradac compiler");
+        say("Make sure stradac is in your PATH or run from the Strada directory");
+        return 1;
+    }
+    repl_debug("Using stradac: " . $g_stradac_path);
+
+    # Detect runtime path (needed for tcc/libtcc backends)
+    $g_runtime_path = detect_runtime();
+    repl_debug("Using runtime: " . $g_runtime_path);
+
+    # Verify/detect compiler
+    if ($g_compiler ne "") {
+        # Verify requested compiler is available
+        my int $available = 0;
+        if ($g_compiler eq "libtcc") {
+            __C__ {
+                available = strada_new_int(init_libtcc());
+            }
+            if ($available == 1) {
+                $g_libtcc_available = 1;
+            }
+        } elsif ($g_compiler eq "tcc") {
+            __C__ {
+                available = strada_new_int(command_exists("tcc"));
+            }
+        } elsif ($g_compiler eq "gcc") {
+            __C__ {
+                available = strada_new_int(command_exists("gcc"));
+            }
+        }
+        if ($available == 0) {
+            say("Error: " . $g_compiler . " not available");
+            return 1;
+        }
+    } else {
+        # Auto-detect compiler
+        $g_compiler = detect_compiler();
+        if ($g_compiler eq "") {
+            say("Error: No C compiler found (need libtcc, tcc, or gcc)");
+            return 1;
+        }
+    }
+
+    # If a script file was provided, run it and exit
+    if ($g_script_file ne "") {
+        return run_script($g_script_file);
+    }
+
+    say("Strada REPL v0.2 (using " . $g_compiler . ")");
+    if ($g_compiler eq "gcc") {
+        say("Tip: Install tcc for faster compilation (apt install tcc)");
+    }
+    say("Type .help for help, .quit to exit");
+    say("");
+
+    readline::stifle_history(1000);
+
+    my hash %state = ();
+    my str $buffer = "";
+    my int $continuation = 0;
+
+    while (1) {
+        my str $prompt = "strada> ";
+        if ($continuation == 1) {
+            $prompt = "...    ";
+        }
+
+        my str $line = readline::readline($prompt);
+        if (!defined($line)) {
+            say("");
+            last;
+        }
+
+        if ($continuation == 1) {
+            $buffer = $buffer . "\n" . $line;
+        } else {
+            $buffer = $line;
+        }
+
+        if (is_balanced($buffer) == 0) {
+            $continuation = 1;
+            next;
+        }
+        $continuation = 0;
+
+        my str $input = $buffer;
+        $input =~ s/^\s+//;
+        $input =~ s/\s+$//;
+
+        if ($input eq "") {
+            next;
+        }
+
+        readline::add_history($input);
+
+        # Handle commands
+        if ($input eq ".quit" || $input eq ".exit" || $input eq ".q") {
+            close_profile_lib();
+            say("Goodbye!");
+            last;
+        }
+
+        if ($input eq ".help" || $input eq ".h") {
+            print_help();
+            next;
+        }
+
+        if ($input eq ".compiler") {
+            say("Compiler: " . $g_compiler);
+            next;
+        }
+
+        # .set compiler=X - change compiler backend
+        if ($input =~ /^\.set\s+compiler=/) {
+            my str $backend = $input;
+            $backend =~ s/^\.set\s+compiler=//;
+            $backend =~ s/\s+$//;
+            if ($backend eq "libtcc" || $backend eq "tcc" || $backend eq "gcc") {
+                my int $available = 0;
+                if ($backend eq "libtcc") {
+                    __C__ {
+                        available = strada_new_int(init_libtcc());
+                    }
+                } elsif ($backend eq "tcc") {
+                    __C__ {
+                        available = strada_new_int(command_exists("tcc"));
+                    }
+                } elsif ($backend eq "gcc") {
+                    __C__ {
+                        available = strada_new_int(command_exists("gcc"));
+                    }
+                }
+                if ($available == 1) {
+                    $g_compiler = $backend;
+                    if ($backend eq "libtcc") {
+                        $g_libtcc_available = 1;
+                    }
+                    say("Compiler set to: " . $g_compiler);
+                } else {
+                    say("Error: " . $backend . " not available");
+                }
+            } else {
+                say("Unknown compiler: " . $backend);
+                say("Valid options: libtcc, tcc, gcc");
+            }
+            next;
+        }
+
+        if ($input eq ".vars") {
+            if (scalar(keys(%g_var_types)) == 0) {
+                say("No variables declared");
+            } else {
+                say("Variables:");
+                foreach my str $name (keys(%g_var_types)) {
+                    my str $type = $g_var_types{$name};
+                    my str $sigil = "\$";
+                    if ($type eq "array") { $sigil = "@"; }
+                    if ($type eq "hash") { $sigil = "%"; }
+                    my scalar $val = undef;
+                    if (exists(%state, $name)) {
+                        $val = $state{$name};
+                    }
+                    say("  " . $type . " " . $sigil . $name . " = " . format_value($val));
+                }
+            }
+            next;
+        }
+
+        if ($input eq ".funcs") {
+            if (scalar(@g_functions) == 0) {
+                say("No functions defined");
+            } else {
+                say("Functions:");
+                foreach my str $fn (@g_functions) {
+                    my int $brace = index($fn, "{");
+                    my str $sig = $fn;
+                    if ($brace > 0) {
+                        $sig = substr($fn, 0, $brace);
+                    }
+                    $sig =~ s/\s+$//;
+                    say("  " . $sig);
+                }
+            }
+            next;
+        }
+
+        if ($input eq ".clear") {
+            %g_var_types = ();
+            @g_functions = ();
+            @g_imports = ();
+            $g_current_package = "";
+            %state = ();
+            $g_func_version = 0;
+            say("State cleared");
+            next;
+        }
+
+        # .imports - list registered imports and library paths
+        if ($input eq ".imports") {
+            my int $has_content = 0;
+            if (scalar(@g_lib_paths) > 0) {
+                say("Library paths (high priority):");
+                foreach my str $lp (@g_lib_paths) {
+                    say("  " . $lp);
+                }
+                $has_content = 1;
+            }
+            if (scalar(@g_lib_paths_low) > 0) {
+                say("Library paths (low priority):");
+                foreach my str $lp (@g_lib_paths_low) {
+                    say("  " . $lp);
+                }
+                $has_content = 1;
+            }
+            if (scalar(@g_imports) > 0) {
+                say("Imports:");
+                foreach my str $imp (@g_imports) {
+                    say("  " . $imp);
+                }
+                $has_content = 1;
+            }
+            if ($has_content == 0) {
+                say("No imports or library paths registered");
+            }
+            next;
+        }
+
+        # .memprof - toggle memory profiling
+        if ($input eq ".memprof") {
+            if ($g_memprof_enabled == 0) {
+                __C__ {
+                    strada_memprof_enable();
+                }
+                $g_memprof_enabled = 1;
+                say("Memory profiling enabled");
+            } else {
+                __C__ {
+                    strada_memprof_disable();
+                }
+                $g_memprof_enabled = 0;
+                say("Memory profiling disabled");
+            }
+            next;
+        }
+
+        # .memstats - show memory statistics
+        if ($input eq ".memstats") {
+            if ($g_memprof_enabled == 0) {
+                say("Memory profiling not enabled. Use .memprof first.");
+            } else {
+                __C__ {
+                    strada_memprof_report();
+                }
+            }
+            next;
+        }
+
+        # .funcprof - toggle function profiling
+        if ($input eq ".funcprof") {
+            if ($g_funcprof_enabled == 0) {
+                __C__ {
+                    strada_profile_init();
+                }
+                $g_funcprof_enabled = 1;
+                say("Function profiling enabled (code will be compiled with -p)");
+            } else {
+                $g_funcprof_enabled = 0;
+                say("Function profiling disabled");
+            }
+            next;
+        }
+
+        # .profile - show function profiling report
+        if ($input eq ".profile") {
+            if ($g_funcprof_enabled == 0) {
+                say("Function profiling is not enabled. Use .funcprof to enable.");
+            } elsif ($g_compiler eq "libtcc") {
+                # For libtcc, profiling data is in the main process
+                __C__ {
+                    strada_profile_report();
+                }
+            } else {
+                # For TCC/GCC, call through the loaded library
+                call_profile_report();
+            }
+            next;
+        }
+
+        # .load <file> - load and execute code from a file
+        if ($input =~ /^\.load\s+/) {
+            my str $filename = $input;
+            $filename =~ s/^\.load\s+//;
+            $filename =~ s/\s+$//;
+
+            if (sys::is_file($filename) == 0) {
+                say("Error: File not found: " . $filename);
+                next;
+            }
+
+            my scalar $lfh = sys::open($filename, "r");
+            if (!defined($lfh)) {
+                say("Error: Could not open file: " . $filename);
+                next;
+            }
+
+            say("Loading " . $filename . "...");
+            my int $line_count = 0;
+            my scalar $file_line = sys::fgets($lfh, 65536);
+            while (defined($file_line)) {
+                # Remove trailing newline
+                $file_line =~ s/\n$//;
+                $file_line =~ s/\r$//;
+
+                # Skip empty lines and comments
+                my str $trimmed_line = $file_line;
+                $trimmed_line =~ s/^\s+//;
+                if ($trimmed_line ne "" && $trimmed_line !~ /^#/) {
+                    $line_count = $line_count + 1;
+
+                    # Process the line like normal input
+                    if (is_function_def($trimmed_line)) {
+                        my array @parts = extract_function_def($trimmed_line);
+                        register_function($parts[0]);
+                        $g_func_version = $g_func_version + 1;
+
+                        # If there's a remainder, evaluate it
+                        if ($parts[1] ne "") {
+                            my scalar $result = eval_input($parts[1], \%state);
+                        }
+                    } else {
+                        # Regular expression or variable declaration
+                        my scalar $result = eval_input($trimmed_line, \%state);
+                    }
+                }
+
+                $file_line = sys::fgets($lfh, 65536);
+            }
+            sys::close($lfh);
+            say("Loaded " . $line_count . " lines from " . $filename);
+            next;
+        }
+
+        # .soinfo <file> - show exported functions from .so/.o/.a file
+        if ($input =~ /^\.soinfo\s+/) {
+            my str $filename = $input;
+            $filename =~ s/^\.soinfo\s+//;
+            $filename =~ s/\s+$//;
+
+            if (sys::is_file($filename) == 0) {
+                say("Error: File not found: " . $filename);
+                next;
+            }
+
+            # Find strada-soinfo tool (look in same directory as this REPL first)
+            my str $soinfo_path = "";
+            my str $sibling_path = $g_tools_dir . "/strada-soinfo";
+            if (sys::is_file($sibling_path) == 1) {
+                $soinfo_path = $sibling_path;
+            } elsif (sys::is_file("/usr/local/bin/strada-soinfo") == 1) {
+                $soinfo_path = "/usr/local/bin/strada-soinfo";
+            } elsif (sys::is_file("/usr/bin/strada-soinfo") == 1) {
+                $soinfo_path = "/usr/bin/strada-soinfo";
+            }
+
+            if ($soinfo_path eq "") {
+                say("Error: strada-soinfo tool not found");
+                next;
+            }
+
+            # Run strada-soinfo on the file
+            my str $cmd = $soinfo_path . " " . $filename . " 2>&1";
+            my str $output = sys::qx($cmd);
+            print($output);
+            next;
+        }
+
+        if ($input eq ".debug") {
+            $g_debug = 1 - $g_debug;
+            if ($g_debug == 1) {
+                say("Debug mode ON (shows generated Strada)");
+            } else {
+                say("Debug mode OFF");
+            }
+            next;
+        }
+
+        if ($input eq ".cdebug") {
+            $g_cdebug = 1 - $g_cdebug;
+            if ($g_cdebug == 1) {
+                say("C debug mode ON (shows generated C)");
+            } else {
+                say("C debug mode OFF");
+            }
+            next;
+        }
+
+        # Check for function definition
+        if (is_function_def($input)) {
+            my array @parts = extract_function_def($input);
+            my int $replaced = register_function($parts[0]);
+            $g_func_version = $g_func_version + 1;
+            if ($replaced == 1) {
+                say("Function redefined");
+            } else {
+                say("Function defined");
+            }
+
+            # If there's a remainder (e.g., "; foo()"), evaluate it
+            if ($parts[1] ne "") {
+                my scalar $result = eval_input($parts[1], \%state);
+                if (defined($result)) {
+                    say("=> " . format_value($result));
+                }
+            }
+            next;
+        }
+
+        # Check for package declaration
+        if (is_package_decl($input)) {
+            # Extract package name
+            my str $pkg_name = $input;
+            $pkg_name =~ s/^\s*package\s+//;
+            $pkg_name =~ s/\s*;.*$//;
+            $pkg_name =~ s/\s+$//;
+            $g_current_package = $pkg_name;
+            say("Package set to: " . $g_current_package);
+            next;
+        }
+
+        # Check for import
+        if (is_import($input)) {
+            # Check if it's a "use lib" statement
+            if ($input =~ /^[ \t]*use[ \t]+lib[ \t]+/) {
+                register_import($input);
+                # Extract path for display
+                my str $path = $input;
+                $path =~ s/^[ \t]*use[ \t]+lib[ \t]+//;
+                $path =~ s/;$//;
+                $path =~ s/^"//;
+                $path =~ s/"$//;
+                $path =~ s/^'//;
+                $path =~ s/'$//;
+                say("Library path added: " . $path);
+            } else {
+                register_import($input);
+                say("Import registered: " . $input);
+            }
+            next;
+        }
+
+        # Evaluate the input
+        my scalar $result = eval_input($input, \%state);
+
+        # Display result
+        if (defined($result)) {
+            say("=> " . format_value($result));
+        }
+    }
+
+    return 0;
+}

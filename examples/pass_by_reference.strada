@@ -1,0 +1,120 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# Demonstrates passing variables by reference to functions
+# Use \$var to pass a reference, $$ref to read/write through it
+
+# Modify a single value
+func double_it(scalar $ref) void {
+    $$ref = $$ref * 2;
+}
+
+# Modify multiple values at once  
+func scale_point(scalar $x_ref, scalar $y_ref, num $factor) void {
+    $$x_ref = $$x_ref * $factor;
+    $$y_ref = $$y_ref * $factor;
+}
+
+# Return success/failure and modify value through reference
+func safe_divide(num $a, num $b, scalar $result_ref) int {
+    if ($b == 0) {
+        return 0;  # failure - division by zero
+    }
+    $$result_ref = $a / $b;
+    return 1;  # success
+}
+
+# Swap two values
+func swap(scalar $a_ref, scalar $b_ref) void {
+    my scalar $temp = clone($$a_ref);
+    $$a_ref = $$b_ref;
+    $$b_ref = $temp;
+}
+
+# Append to a string
+func append(scalar $str_ref, str $suffix) void {
+    $$str_ref = $$str_ref . $suffix;
+}
+
+# Increment a counter
+func increment(scalar $ref) void {
+    $$ref = $$ref + 1;
+}
+
+func main() int {
+    say("=== Pass By Reference Examples ===");
+    say("");
+
+    # Example 1: Simple modification
+    say("--- Double a value ---");
+    my int $num = 21;
+    say("before: " . $num);
+    double_it(\$num);
+    say("after:  " . $num);
+    say("");
+
+    # Example 2: Multiple out parameters
+    say("--- Scale a point ---");
+    my num $x = 3.0;
+    my num $y = 4.0;
+    say("before: (" . $x . ", " . $y . ")");
+    scale_point(\$x, \$y, 2.5);
+    say("after:  (" . $x . ", " . $y . ")");
+    say("");
+
+    # Example 3: Success/failure with out parameter
+    say("--- Safe divide with result reference ---");
+    my num $result = 0;
+    if (safe_divide(10, 4, \$result)) {
+        say("10 / 4 = " . $result);
+    }
+    if (!safe_divide(10, 0, \$result)) {
+        say("10 / 0 = division by zero!");
+    }
+    say("");
+
+    # Example 4: Swap
+    say("--- Swap two values ---");
+    my str $first = "hello";
+    my str $second = "world";
+    say("before: first=" . $first . ", second=" . $second);
+    swap(\$first, \$second);
+    say("after:  first=" . $first . ", second=" . $second);
+    say("");
+
+    # Example 5: Building a string
+    say("--- Build a string ---");
+    my str $message = "Hello";
+    append(\$message, ", ");
+    append(\$message, "World");
+    append(\$message, "!");
+    say($message);
+    say("");
+
+    # Example 6: Increment via reference
+    say("--- Increment via reference ---");
+    my int $counter = 0;
+    say("counter: " . $counter);
+    increment(\$counter);
+    say("counter: " . $counter);
+    increment(\$counter);
+    say("counter: " . $counter);
+    increment(\$counter);
+    say("counter: " . $counter);
+
+    return 0;
+}

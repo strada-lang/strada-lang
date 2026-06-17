@@ -1,0 +1,94 @@
+func main() int {
+    my int $pass = 0;
+    my int $fail = 0;
+
+    # Test 1: Basic autovivification
+    my %h = ();
+    $h{"a"}{"b"} = 42;
+    if ($h{"a"}{"b"} == 42) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 1"); }
+
+    # Test 2: Multiple keys at same level
+    my %config = ();
+    $config{"db"}{"host"} = "localhost";
+    $config{"db"}{"port"} = 5432;
+    if ($config{"db"}{"host"} eq "localhost") { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 2a"); }
+    if ($config{"db"}{"port"} == 5432) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 2b"); }
+
+    # Test 3: Three levels deep
+    my %deep = ();
+    $deep{"x"}{"y"}{"z"} = "deep";
+    if ($deep{"x"}{"y"}{"z"} eq "deep") { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 3"); }
+
+    # Test 4: Multiple branches
+    my %tree = ();
+    $tree{"a"}{"x"} = 1;
+    $tree{"a"}{"y"} = 2;
+    $tree{"b"}{"x"} = 3;
+    if ($tree{"a"}{"x"} == 1 && $tree{"a"}{"y"} == 2 && $tree{"b"}{"x"} == 3) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 4"); }
+
+    # Test 5: Compound assignment through missing intermediates (regression:
+    # the compound path used to fetch undef instead of autovivifying, so the
+    # store was silently lost)
+    my %cnt = ();
+    $cnt{"a"}{"b"} += 2;
+    $cnt{"a"}{"b"} += 3;
+    if ($cnt{"a"}{"b"} == 5) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 5a"); }
+    my %cstr = ();
+    $cstr{"x"}{"y"} .= "ab";
+    $cstr{"x"}{"y"} .= "cd";
+    if ($cstr{"x"}{"y"} eq "abcd") { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 5b"); }
+    my %c3 = ();
+    $c3{"p"}{"q"}{"r"} += 4;
+    if ($c3{"p"}{"q"}{"r"} == 4) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 5c"); }
+
+    # Test 6: Hashref-rooted chains (regression: NODE_DEREF_HASH ignored the
+    # autoviv flag, so $r->{"a"}{"b"} = v lost the store entirely)
+    my scalar $r = {};
+    $r->{"a"}{"b"} = 3;
+    if ($r->{"a"}{"b"} == 3) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 6a"); }
+    $r->{"a"}{"b"} += 4;
+    if ($r->{"a"}{"b"} == 7) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 6b"); }
+
+    # Test 7: Compound autoviv must not clobber existing siblings
+    my %keep = ();
+    $keep{"a"}{"x"} = 1;
+    $keep{"a"}{"y"} += 2;
+    if ($keep{"a"}{"x"} == 1 && $keep{"a"}{"y"} == 2) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 7"); }
+
+    # Test 8: Array intermediates (regression: there was no array
+    # autovivification at all — $h{"a"}[0] = 7 was a silent no-op)
+    my %av = ();
+    $av{"a"}[0] = 7;
+    if ($av{"a"}[0] == 7) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 8a"); }
+    $av{"a"}[1] += 5;
+    if ($av{"a"}[1] == 5) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 8b"); }
+    my array @aoa = ();
+    $aoa[1][2] = 9;
+    if ($aoa[1][2] == 9) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 8c"); }
+    my array @ah = ();
+    $ah[2]{"k"} = 5;
+    if ($ah[2]{"k"} == 5) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 8d"); }
+
+    # Test 9: Ref-rooted array chains and deep mixed chains
+    my scalar $rl = {};
+    $rl->{"list"}[0] = "x";
+    if ($rl->{"list"}[0] eq "x") { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 9a"); }
+    my scalar $ar = [];
+    $ar->[0]{"n"} = 11;
+    if ($ar->[0]{"n"} == 11) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 9b"); }
+    my %mx = ();
+    $mx{"a"}[0]{"b"}[1] = "deep";
+    if ($mx{"a"}[0]{"b"}[1] eq "deep") { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 9c"); }
+
+    # Test 10: rvalue reads must NOT autovivify
+    my %ro = ();
+    my $rv = $ro{"nope"}[5];
+    if (!exists($ro{"nope"})) { $pass = $pass + 1; } else { $fail = $fail + 1; say("FAIL 10"); }
+
+    if ($fail == 0) {
+        say("All autovivification tests passed (" . $pass . " checks)");
+    } else {
+        say("FAILED: " . $fail . " of " . ($pass + $fail));
+    }
+    return $fail;
+}

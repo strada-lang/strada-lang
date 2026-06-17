@@ -1,0 +1,73 @@
+#!/usr/bin/env strada
+# Regression test for native cross-module qualified extern declarations.
+# `extern func Pkg::name(...) ret;` (body-less, qualified) registers the
+# function in $cg->{"functions"} with the correct return-type info so that
+# needs_temp_cleanup() recognises calls to it as owning -- a direct-pass
+# `consumer(producer())` then captures the owned return in __call_result
+# and decref's it after the consumer is done. Without the registration,
+# the codegen would fall back to "unknown function, be conservative" and
+# direct-pass sites would leak the owned return.
+#
+# Before this fix Perla worked around the issue with `__C__ extern`
+# blocks (raw C declarations) that bypass the codegen's symbol table.
+# That made direct-pass `emit($cg, c_var($vn))` leak ~231 bytes per
+# interpolated `$var` per Perl statement -- the path was patched by
+# capturing into `my str $cv` at every site, but the underlying language
+# gap remained. This test pins the new native form.
+
+package Producer;
+
+func make_str(int $n) str {
+    return "str_" . $n;
+}
+
+func make_arr(int $n) array {
+    my array @a = ();
+    push(@a, $n);
+    push(@a, $n + 1);
+    push(@a, $n + 2);
+    return @a;
+}
+
+func make_hash(int $n) hash {
+    my hash %h = ();
+    $h{"n"} = $n;
+    $h{"name"} = "row" . $n;
+    return %h;
+}
+
+package Consumer;
+
+# Body-less qualified extern -- the form that used to require __C__.
+# Here it picks up Producer's return-type info via the codegen symbol
+# table, so needs_temp_cleanup() returns 1 for these calls and the
+# direct-pass uses below get the owned-return cleanup wrapper.
+extern func Producer::make_str(int $n) str;
+extern func Producer::make_arr(int $n) array;
+extern func Producer::make_hash(int $n) hash;
+
+func consume(int $iters) int {
+    my int $i = 0;
+    my int $total = 0;
+    while ($i < $iters) {
+        # Direct-pass through a consumer that wants the value. The owned
+        # return from make_str / make_arr / make_hash needs to be captured
+        # in a temp and decref'd after the inner expression -- which only
+        # happens if needs_temp_cleanup recognises the qualified extern as
+        # owning. Pre-fix this would leak iters * 3 owned StradaValues.
+        $total = $total + length(Producer::make_str($i));
+        $total = $total + size(Producer::make_arr($i));
+        my hash %h = Producer::make_hash($i);
+        $total = $total + size(keys(%h));
+        $i = $i + 1;
+    }
+    return $total;
+}
+
+package main;
+
+func main() int {
+    my int $r = Consumer::consume(500);
+    say("total=" . $r);
+    return 0;
+}

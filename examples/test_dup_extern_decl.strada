@@ -1,0 +1,38 @@
+# Test: duplicate body-less extern declarations follow C semantics.
+#
+# A body-less `extern func Pkg::name(...) ret;` is a cross-module forward
+# declaration. Modules that participate in a use-cycle broken via externs
+# each carry the same declaration, and `use`-inlining can surface it more
+# than once in a single compile unit. The semantic pass must treat these
+# like C: a declaration never conflicts, a definition replaces an earlier
+# declaration, and only two *definitions* collide.
+#
+# Regression: register_functions() used to hard-error
+# "function 'X' already defined" on the second declaration, which broke
+# any project using the extern cycle-break pattern (e.g. perla's
+# Perla::CodeGen submodules).
+
+package Dup::Lib;
+
+# Forward declaration...
+extern func Dup::Lib::greet(str $s) str;
+# ...the same declaration again (as if inlined from a second module).
+extern func Dup::Lib::greet(str $s) str;
+
+# The actual definition arriving after the declarations.
+func greet(str $s) str {
+    return "greet:" . $s;
+}
+
+# A declaration arriving after the definition must also be tolerated.
+extern func Dup::Lib::greet(str $s) str;
+
+func main() int {
+    my str $r = Dup::Lib::greet("x");
+    if ($r eq "greet:x") {
+        print("All tests passed\n");
+        return 0;
+    }
+    print("FAIL: got '" . $r . "'\n");
+    return 1;
+}

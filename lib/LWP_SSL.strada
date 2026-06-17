@@ -1,0 +1,642 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+=head1 NAME
+
+LWP_SSL - HTTP/HTTPS client library with SSL support for Strada
+
+=head1 SYNOPSIS
+
+    use lib "lib";
+    use ssl;       # Required for HTTPS
+    use LWP_SSL;
+
+    # Simple GET request
+    my hash %response = LWP_SSL::get("https://example.com");
+    if ($response{"success"}) {
+        say($response{"content"});
+    }
+
+    # POST with form data
+    my hash %form = ();
+    $form{"username"} = "john";
+    $form{"password"} = "secret";
+    my hash %resp = LWP_SSL::post_form("https://api.example.com/login", %form);
+
+=head1 DESCRIPTION
+
+LWP_SSL is a standalone HTTP client that supports both HTTP and HTTPS.
+It provides a simple interface for making web requests. SSL/TLS support
+is provided via the ssl module using extern "C".
+
+B<Compile with:>
+
+    ./stradac myapp.strada myapp.c
+    gcc -o myapp myapp.c lib/ssl/strada_ssl.c runtime/strada_runtime.c \
+        -Iruntime -lssl -lcrypto -ldl -lm
+
+=head1 FUNCTIONS
+
+=head2 get($url)
+
+Perform an HTTP/HTTPS GET request. Returns a response hash.
+
+    my hash %resp = LWP_SSL::get("https://example.com/api/data");
+
+=head2 get_with_options($url, %options)
+
+GET request with custom options (headers, user agent).
+
+    my hash %opts = ();
+    $opts{"user_agent"} = "MyApp/1.0";
+    $opts{"headers"} = { "Authorization" => "Bearer token123" };
+    my hash %resp = LWP_SSL::get_with_options($url, %opts);
+
+=head2 post($url, $data)
+
+Perform a POST request with raw body data.
+
+    my hash %resp = LWP_SSL::post("https://api.example.com", $json_data);
+
+=head2 post_with_options($url, $data, %options)
+
+POST with custom options.
+
+=head2 post_form($url, %form_data)
+
+Perform a POST request with form-encoded data.
+
+    my hash %form = ();
+    $form{"key"} = "value";
+    my hash %resp = LWP_SSL::post_form("https://api.example.com", %form);
+
+=head2 put($url, $data)
+
+Make a PUT request.
+
+=head2 put_with_options($url, $data, %options)
+
+PUT with custom options.
+
+=head2 patch($url, $data)
+
+Make a PATCH request (partial update).
+
+=head2 patch_with_options($url, $data, %options)
+
+PATCH with custom options.
+
+=head2 delete_req($url)
+
+Make a DELETE request.
+
+=head2 delete_with_options($url, %options)
+
+DELETE with custom options.
+
+=head2 head($url)
+
+Make a HEAD request (get headers only).
+
+=head2 head_with_options($url, %options)
+
+HEAD with custom options.
+
+=head2 options($url)
+
+Make an OPTIONS request (get supported methods).
+
+=head2 options_with_options($url, %options)
+
+OPTIONS with custom options.
+
+=head2 get_content($url)
+
+Simple content fetch - returns just the body or empty string on error.
+
+    my str $html = LWP_SSL::get_content("https://example.com");
+
+=head2 is_reachable($url)
+
+Check if a URL is reachable (HEAD request).
+
+=head2 get_header(%response, $name)
+
+Get a response header value (case-insensitive).
+
+    my str $type = LWP_SSL::get_header(%resp, "Content-Type");
+
+=head1 LOW-LEVEL REQUEST
+
+=head2 do_request($method, $url, $body, %options)
+
+Make an HTTP/HTTPS request with full control over method, body, and options.
+All other request functions are wrappers around this. Automatically selects
+HTTP or HTTPS based on the URL scheme.
+
+B<Parameters:>
+
+=over 4
+
+=item B<$method> - HTTP method string ("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", or any custom method)
+
+=item B<$url> - Full URL including scheme, host, port, path, and query
+
+=item B<$body> - Request body (empty string for no body)
+
+=item B<%options> - Hash with optional keys:
+
+=over 4
+
+=item B<user_agent> - Custom User-Agent string (default: "Strada-LWP/1.0")
+
+=item B<headers> - Hash reference of custom headers
+
+=back
+
+=back
+
+Returns a response hash (see RESPONSE HASH below).
+
+    my hash %opts = ();
+    $opts{"headers"} = { "Content-Type" => "application/json" };
+    my hash %resp = LWP_SSL::do_request("PATCH", "https://api.example.com/item/1",
+        JSON::encode({ "status" => "active" }), %opts);
+
+=head2 parse_url($url)
+
+Parse a URL into components. Returns hash with: scheme, host, port, path, query.
+
+    my hash %parts = LWP_SSL::parse_url("https://example.com:8080/path?q=1");
+    # $parts{"scheme"} = "https"
+    # $parts{"host"} = "example.com"
+    # $parts{"port"} = 8080
+    # $parts{"path"} = "/path"
+    # $parts{"query"} = "q=1"
+
+=head2 url_encode($string)
+
+URL-encode a string.
+
+    my str $encoded = LWP_SSL::url_encode("hello world");
+    # "hello%20world"
+
+=head2 build_query(%params)
+
+Build a query string from a hash.
+
+    my hash %p = ();
+    $p{"a"} = "1";
+    $p{"b"} = "2";
+    my str $qs = LWP_SSL::build_query(%p);
+    # "a=1&b=2"
+
+=head2 ssl_available()
+
+Check if SSL is available (always returns 1 when linked properly).
+
+=head1 RESPONSE HASH
+
+All request functions return a response hash with:
+
+=over 4
+
+=item B<success> - 1 if status is 2xx, 0 otherwise
+
+=item B<status> - HTTP status code (200, 404, etc.)
+
+=item B<reason> - HTTP reason phrase ("OK", "Not Found", etc.)
+
+=item B<content> - Response body
+
+=item B<error> - Error message if connection failed
+
+=back
+
+=head1 EXAMPLE
+
+    use lib "lib";
+    use ssl;
+    use LWP_SSL;
+
+    # Fetch JSON API
+    my hash %resp = LWP_SSL::get("https://api.example.com/users/1");
+
+    if ($resp{"success"}) {
+        say("Status: " . $resp{"status"});
+        say("Body: " . $resp{"content"});
+    } else {
+        say("Error: " . $resp{"error"});
+    }
+
+    # Post form data
+    my hash %login = ();
+    $login{"user"} = "admin";
+    $login{"pass"} = "secret";
+    my hash %result = LWP_SSL::post_form("https://example.com/login", %login);
+
+=head1 SEE ALSO
+
+L<LWP>, L<ssl>
+
+=cut
+
+package LWP_SSL;
+
+# Parse a URL into components
+func parse_url(str $url) hash {
+    my hash %result = ();
+    $result{"scheme"} = "http";
+    $result{"host"} = "";
+    $result{"port"} = 80;
+    $result{"path"} = "/";
+    $result{"query"} = "";
+
+    my str $remaining = $url;
+
+    my int $scheme_end = index($remaining, "://");
+    if ($scheme_end > 0) {
+        $result{"scheme"} = substr($remaining, 0, $scheme_end);
+        $remaining = substr($remaining, $scheme_end + 3, length($remaining) - $scheme_end - 3);
+        if ($result{"scheme"} eq "https") {
+            $result{"port"} = 443;
+        }
+    }
+
+    my int $path_start = index($remaining, "/");
+    my str $host_part = "";
+    if ($path_start < 0) {
+        $host_part = $remaining;
+        $remaining = "/";
+    } else {
+        $host_part = substr($remaining, 0, $path_start);
+        $remaining = substr($remaining, $path_start, length($remaining) - $path_start);
+    }
+
+    my int $port_sep = index($host_part, ":");
+    if ($port_sep > 0) {
+        $result{"host"} = substr($host_part, 0, $port_sep);
+        my str $port_str = substr($host_part, $port_sep + 1, length($host_part) - $port_sep - 1);
+        $result{"port"} = cast_int($port_str);
+    } else {
+        $result{"host"} = $host_part;
+    }
+
+    my int $query_start = index($remaining, "?");
+    if ($query_start >= 0) {
+        $result{"path"} = substr($remaining, 0, $query_start);
+        $result{"query"} = substr($remaining, $query_start + 1, length($remaining) - $query_start - 1);
+    } else {
+        $result{"path"} = $remaining;
+    }
+
+    if (length($result{"path"}) == 0) {
+        $result{"path"} = "/";
+    }
+
+    return %result;
+}
+
+# URL encode
+func url_encode(str $s) str {
+    my str $result = "";
+    my int $i = 0;
+    while ($i < length($s)) {
+        my str $c = substr($s, $i, 1);
+        my int $code = ord($c);
+        if (($code >= 65 && $code <= 90) || ($code >= 97 && $code <= 122) ||
+            ($code >= 48 && $code <= 57) || $c eq "-" || $c eq "_" || $c eq "." || $c eq "~") {
+            $result = $result . $c;
+        } else {
+            my int $hi = cast_int($code / 16);
+            my int $lo = $code % 16;
+            my str $hex = "%";
+            if ($hi < 10) { $hex = $hex . chr(48 + $hi); } else { $hex = $hex . chr(55 + $hi); }
+            if ($lo < 10) { $hex = $hex . chr(48 + $lo); } else { $hex = $hex . chr(55 + $lo); }
+            $result = $result . $hex;
+        }
+        $i = $i + 1;
+    }
+    return $result;
+}
+
+# Build query string from hash
+func build_query(hash %params) str {
+    my str $result = "";
+    my array @keys = keys(%params);
+    my int $i = 0;
+    while ($i < scalar(@keys)) {
+        my str $key = $keys[$i];
+        if ($i > 0) { $result = $result . "&"; }
+        $result = $result . LWP_SSL::url_encode($key) . "=" . LWP_SSL::url_encode($params{$key});
+        $i = $i + 1;
+    }
+    return $result;
+}
+
+# Parse HTTP response
+func parse_response(str $raw) hash {
+    my hash %response = ();
+    $response{"success"} = 0;
+    $response{"status"} = 0;
+    $response{"reason"} = "";
+    $response{"content"} = "";
+
+    my int $sep = index($raw, "\r\n\r\n");
+    if ($sep < 0) {
+        $response{"error"} = "Invalid HTTP response";
+        return %response;
+    }
+
+    my str $header_section = substr($raw, 0, $sep);
+    my str $body = substr($raw, $sep + 4, length($raw) - $sep - 4);
+
+    my int $first_line_end = index($header_section, "\r\n");
+    my str $status_line = "";
+    if ($first_line_end > 0) {
+        $status_line = substr($header_section, 0, $first_line_end);
+    } else {
+        $status_line = $header_section;
+    }
+
+    my array @status_parts = split(" ", $status_line);
+    if (scalar(@status_parts) >= 2) {
+        $response{"protocol"} = $status_parts[0];
+        $response{"status"} = cast_int($status_parts[1]);
+        if (scalar(@status_parts) >= 3) {
+            my str $reason = "";
+            my int $i = 2;
+            while ($i < scalar(@status_parts)) {
+                if ($i > 2) { $reason = $reason . " "; }
+                $reason = $reason . $status_parts[$i];
+                $i = $i + 1;
+            }
+            $response{"reason"} = $reason;
+        }
+    }
+
+    $response{"content"} = $body;
+
+    my int $status = $response{"status"};
+    if ($status >= 200 && $status < 300) {
+        $response{"success"} = 1;
+    }
+
+    return %response;
+}
+
+# SSL is now linked via extern "C" - no dynamic loading needed
+
+# Build HTTP request
+func build_request(str $method, str $host, str $path, str $body, hash %options) str {
+    my str $request = $method . " " . $path . " HTTP/1.1\r\n";
+    $request = $request . "Host: " . $host . "\r\n";
+
+    # User-Agent
+    my str $ua = "Strada-LWP/1.0";
+    if (defined($options{"user_agent"})) {
+        $ua = $options{"user_agent"};
+    }
+    $request = $request . "User-Agent: " . $ua . "\r\n";
+    $request = $request . "Connection: close\r\n";
+
+    # Custom headers
+    if (defined($options{"headers"})) {
+        my scalar $custom_headers = $options{"headers"};
+        my array @hkeys = keys($custom_headers);
+        my int $i = 0;
+        while ($i < scalar(@hkeys)) {
+            my str $hname = $hkeys[$i];
+            $request = $request . $hname . ": " . $custom_headers->{$hname} . "\r\n";
+            $i++;
+        }
+    }
+
+    if (length($body) > 0) {
+        if (!defined($options{"headers"}) || !defined($options{"headers"}->{"Content-Type"})) {
+            $request = $request . "Content-Type: application/x-www-form-urlencoded\r\n";
+        }
+        $request = $request . "Content-Length: " . length($body) . "\r\n";
+    }
+
+    $request = $request . "\r\n";
+    if (length($body) > 0) {
+        $request = $request . $body;
+    }
+    return $request;
+}
+
+# Read HTTP response from socket
+func read_http_response(scalar $sock) str {
+    my str $response = "";
+    my int $reads = 0;
+    while ($reads < 1000) {
+        my str $chunk = core::socket_recv($sock, 8192);
+        if (!defined($chunk) || length($chunk) == 0) {
+            break;
+        }
+        $response = $response . $chunk;
+        $reads = $reads + 1;
+    }
+    return $response;
+}
+
+# Internal: Make HTTP request (plain)
+func do_http_request(str $host, int $port, str $request) hash {
+    my hash %response = ();
+    $response{"success"} = 0;
+
+    my scalar $sock = core::socket_client($host, $port);
+    if (!defined($sock)) {
+        $response{"error"} = "Connection failed to " . $host . ":" . $port;
+        return %response;
+    }
+
+    core::socket_send($sock, $request);
+    my str $raw_response = LWP_SSL::read_http_response($sock);
+    core::socket_close($sock);
+
+    return LWP_SSL::parse_response($raw_response);
+}
+
+# Internal: Make HTTPS request (uses ssl module via extern "C")
+func do_https_request(str $host, int $port, str $request) hash {
+    my hash %response = ();
+    $response{"success"} = 0;
+
+    # Connect using ssl module (extern "C")
+    my int $conn = ssl::connect($host, $port);
+    if (c::is_null($conn)) {
+        $response{"error"} = "SSL connection failed to " . $host . ":" . $port;
+        return %response;
+    }
+
+    # Write request
+    ssl::write($conn, $request);
+
+    # Read response
+    my str $raw_response = "";
+    my str $chunk = ssl::read($conn, 8192);
+    while (length($chunk) > 0) {
+        $raw_response = $raw_response . $chunk;
+        $chunk = ssl::read($conn, 8192);
+    }
+
+    # Close connection
+    ssl::close($conn);
+
+    return LWP_SSL::parse_response($raw_response);
+}
+
+# Main request function
+func do_request(str $method, str $url, str $body, hash %options) hash {
+    my hash %url_parts = LWP_SSL::parse_url($url);
+    my str $host = $url_parts{"host"};
+    my int $port = $url_parts{"port"};
+    my str $path = $url_parts{"path"};
+    my str $query = $url_parts{"query"};
+    my str $scheme = $url_parts{"scheme"};
+
+    if (length($query) > 0) {
+        $path = $path . "?" . $query;
+    }
+
+    my str $request = LWP_SSL::build_request($method, $host, $path, $body, %options);
+
+    if ($scheme eq "https") {
+        return LWP_SSL::do_https_request($host, $port, $request);
+    } else {
+        return LWP_SSL::do_http_request($host, $port, $request);
+    }
+}
+
+# GET request
+func get(str $url) hash {
+    my hash %empty = ();
+    return LWP_SSL::do_request("GET", $url, "", %empty);
+}
+
+# GET request with options
+func get_with_options(str $url, hash %options) hash {
+    return LWP_SSL::do_request("GET", $url, "", %options);
+}
+
+# POST request
+func post(str $url, str $data) hash {
+    my hash %empty = ();
+    return LWP_SSL::do_request("POST", $url, $data, %empty);
+}
+
+# POST request with options
+func post_with_options(str $url, str $data, hash %options) hash {
+    return LWP_SSL::do_request("POST", $url, $data, %options);
+}
+
+# POST form data
+func post_form(str $url, hash %form_data) hash {
+    my str $body = LWP_SSL::build_query(%form_data);
+    my hash %empty = ();
+    return LWP_SSL::do_request("POST", $url, $body, %empty);
+}
+
+# PUT request
+func put(str $url, str $data) hash {
+    my hash %empty = ();
+    return LWP_SSL::do_request("PUT", $url, $data, %empty);
+}
+
+# PUT request with options
+func put_with_options(str $url, str $data, hash %options) hash {
+    return LWP_SSL::do_request("PUT", $url, $data, %options);
+}
+
+# DELETE request
+func delete_req(str $url) hash {
+    my hash %empty = ();
+    return LWP_SSL::do_request("DELETE", $url, "", %empty);
+}
+
+# DELETE request with options
+func delete_with_options(str $url, hash %options) hash {
+    return LWP_SSL::do_request("DELETE", $url, "", %options);
+}
+
+# PATCH request
+func patch(str $url, str $data) hash {
+    my hash %empty = ();
+    return LWP_SSL::do_request("PATCH", $url, $data, %empty);
+}
+
+# PATCH request with options
+func patch_with_options(str $url, str $data, hash %options) hash {
+    return LWP_SSL::do_request("PATCH", $url, $data, %options);
+}
+
+# OPTIONS request
+func options(str $url) hash {
+    my hash %empty = ();
+    return LWP_SSL::do_request("OPTIONS", $url, "", %empty);
+}
+
+# OPTIONS request with options
+func options_with_options(str $url, hash %options) hash {
+    return LWP_SSL::do_request("OPTIONS", $url, "", %options);
+}
+
+# HEAD request
+func head(str $url) hash {
+    my hash %empty = ();
+    return LWP_SSL::do_request("HEAD", $url, "", %empty);
+}
+
+# HEAD request with options
+func head_with_options(str $url, hash %options) hash {
+    return LWP_SSL::do_request("HEAD", $url, "", %options);
+}
+
+# Simple content fetch
+func get_content(str $url) str {
+    my hash %resp = LWP_SSL::get($url);
+    if ($resp{"success"}) {
+        return $resp{"content"};
+    }
+    return "";
+}
+
+# Check if URL is reachable
+func is_reachable(str $url) int {
+    my hash %resp = LWP_SSL::head($url);
+    return $resp{"success"};
+}
+
+# Get response header value
+func get_header(hash %response, str $name) str {
+    if (!defined($response{"headers"})) {
+        return "";
+    }
+    my scalar $headers = $response{"headers"};
+    my str $lc_name = lc($name);
+    if (defined($headers->{$lc_name})) {
+        return $headers->{$lc_name};
+    }
+    return "";
+}
+
+# SSL is always available when linked via extern "C"
+func ssl_available() int {
+    return 1;
+}

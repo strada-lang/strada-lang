@@ -1,0 +1,90 @@
+# Test const declarations
+
+# Global consts (compile to #define)
+const int MAX_SIZE = 100;
+const str VERSION = "1.0.0";
+const num PI = 3.14159;
+
+# Const with $ sigil (optional)
+const int $LIMIT = 50;
+
+func test_global_consts() void {
+    say("MAX_SIZE: " . MAX_SIZE);
+    say("VERSION: " . VERSION);
+    say("PI: " . PI);
+    say("LIMIT: " . LIMIT);
+
+    if (MAX_SIZE != 100) {
+        die("MAX_SIZE should be 100");
+    }
+    if (VERSION ne "1.0.0") {
+        die("VERSION should be 1.0.0");
+    }
+    if (LIMIT != 50) {
+        die("LIMIT should be 50");
+    }
+}
+
+func test_local_consts() void {
+    # Local consts
+    const int LOCAL_MAX = 25;
+    const str LOCAL_NAME = "test";
+    const num LOCAL_PI = PI;  # Can use global const in initializer
+
+    say("LOCAL_MAX: " . LOCAL_MAX);
+    say("LOCAL_NAME: " . LOCAL_NAME);
+    say("LOCAL_PI: " . LOCAL_PI);
+
+    if (LOCAL_MAX != 25) {
+        die("LOCAL_MAX should be 25");
+    }
+    if (LOCAL_NAME ne "test") {
+        die("LOCAL_NAME should be test");
+    }
+}
+
+func test_const_in_expressions() void {
+    # Use consts in expressions
+    my int $doubled = MAX_SIZE * 2;
+    my int $half = LIMIT / 2;
+    my str $msg = "Version is " . VERSION;
+
+    say("doubled: " . $doubled);
+    say("half: " . $half);
+    say("msg: " . $msg);
+
+    if ($doubled != 200) {
+        die("doubled should be 200");
+    }
+    if ($half != 25) {
+        die("half should be 25");
+    }
+}
+
+func test_const_in_conditionals() void {
+    # Use consts in conditionals
+    if (MAX_SIZE > 50) {
+        say("MAX_SIZE is greater than 50");
+    } else {
+        die("Conditional with const failed");
+    }
+
+    my int $x = 75;
+    if ($x < MAX_SIZE) {
+        say("x is less than MAX_SIZE");
+    } else {
+        die("Comparison with const failed");
+    }
+}
+
+func main() int {
+    say("Testing const declarations...");
+
+    test_global_consts();
+    test_local_consts();
+    test_const_in_expressions();
+    test_const_in_conditionals();
+
+    say("All const tests passed!");
+    return 0;
+}

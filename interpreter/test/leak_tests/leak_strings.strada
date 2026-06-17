@@ -1,0 +1,11 @@
+func main() int {
+    my int $i = 0;
+    while ($i < 100) {
+        my str $s = "hello" . " " . "world" . " " . $i;
+        my str $u = uc($s);
+        my array @parts = split(" ", $s);
+        my str $joined = join("-", \@parts);
+        $i = $i + 1;
+    }
+    return 0;
+}

@@ -1,0 +1,49 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+
+# test_udp_ipv6.strada - dual-stack UDP datagram round trip.
+#
+# sys::udp_socket() / udp_server() create dual-stack IPv6 UDP sockets
+# (IPV6_V6ONLY off), so udp_sendto() reaches both IPv6 and IPv4 destinations
+# (v4 via v4-mapped addresses) and udp_recvfrom() reports the sender's address
+# (IPv4-mapped senders are shown as dotted-quad).
+
+func main() int {
+    my int $port = 19898;
+    my scalar $server = sys::udp_server($port);
+    if (!$server) { say("FAIL: could not bind UDP server"); return 1; }
+
+    my int $pid = sys::fork();
+    if ($pid == 0) {
+        # Child: send a datagram to the server over IPv6 loopback.
+        my scalar $sock = sys::udp_socket();
+        sys::udp_sendto($sock, "ping", "::1", $port);
+        my scalar $reply = sys::udp_recvfrom($sock, 1024);
+        say("client received: " . $reply->{"data"});
+        sys::socket_close($sock);
+        core::exit(0);
+    }
+
+    # Parent: receive the datagram and reply to its sender.
+    my scalar $msg = sys::udp_recvfrom($server, 1024);
+    say("server received: " . $msg->{"data"} . " from " . $msg->{"ip"});
+    sys::udp_sendto($server, "pong:" . $msg->{"data"}, $msg->{"ip"}, $msg->{"port"});
+    sys::socket_close($server);
+    sys::wait();
+    return 0;
+}

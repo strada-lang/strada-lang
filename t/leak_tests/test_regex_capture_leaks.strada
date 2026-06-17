@@ -1,0 +1,131 @@
+# Regression test: regex capture variables ($1, $2, ...) returned by
+# strada_capture_var() are OWNED (incref'd) references. When such a capture is
+# stored into a PERSISTENT container (hash, hashref, array) the codegen must
+# treat it as an owned temp and release the extra ref after the store, exactly
+# like a method-call result. It previously did not — NODE_CAPTURE_VAR was
+# missing from the hash-store ownership predicate — so every `$h{...} = $1`
+# leaked the capture string (one block per match). This test exercises the
+# whole class so the leak can't silently return. Must run valgrind-clean.
+
+package main;
+
+# $1 into a hash with a CONCAT key (the original leak: strada_hv_store_concat).
+func test_capture_into_hash_concat_key() void {
+    my hash %h;
+    my int $i = 0;
+    while ($i < 500) {
+        my str $s = "hello world";
+        if ($s =~ /(\w+) (\w+)/) {
+            $h{"first" . $i} = $1;
+            $h{"second" . $i} = $2;
+        }
+        $i++;
+    }
+    say("test_capture_into_hash_concat_key: PASS (size=" . scalar(keys(%h)) . ")");
+}
+
+# $1 into a hash with a LITERAL key (strada_hv_store / store_sv path).
+func test_capture_into_hash_literal_key() void {
+    my hash %h;
+    my int $i = 0;
+    while ($i < 500) {
+        my str $s = "alpha beta gamma";
+        if ($s =~ /(\w+) (\w+) (\w+)/) {
+            $h{"a"} = $1;
+            $h{"b"} = $2;
+            $h{"c"} = $3;
+        }
+        $i++;
+    }
+    say("test_capture_into_hash_literal_key: PASS (" . $h{"a"} . "," . $h{"b"} . "," . $h{"c"} . ")");
+}
+
+# $1 into a hashref ($ref->{...} = $1).
+func test_capture_into_hashref() void {
+    my scalar $ref = {};
+    my int $i = 0;
+    while ($i < 500) {
+        my str $s = "key value";
+        if ($s =~ /(\w+) (\w+)/) {
+            $ref->{"k" . $i} = $1;
+            $ref->{"v" . $i} = $2;
+        }
+        $i++;
+    }
+    say("test_capture_into_hashref: PASS (size=" . scalar(keys(%{$ref})) . ")");
+}
+
+# $1 into an array (push).
+func test_capture_into_array() void {
+    my array @parts;
+    my int $i = 0;
+    while ($i < 500) {
+        my str $s = "one two";
+        if ($s =~ /(\w+) (\w+)/) {
+            push(@parts, $1);
+            push(@parts, $2);
+        }
+        $i++;
+    }
+    say("test_capture_into_array: PASS (size=" . scalar(@parts) . ")");
+}
+
+# Captures persisted across substitution and re-matched in a loop.
+func test_capture_with_subst() void {
+    my hash %h;
+    my int $i = 0;
+    while ($i < 500) {
+        my str $s = "Name: Rex";
+        if ($s =~ /Name: (\w+)/) {
+            $h{"name" . $i} = $1;
+        }
+        $s =~ s/Rex/Fido/;
+        $i++;
+    }
+    say("test_capture_with_subst: PASS (size=" . scalar(keys(%h)) . ")");
+}
+
+# Named captures stored into a persistent hash.
+func test_named_capture_into_hash() void {
+    my hash %h;
+    my int $i = 0;
+    while ($i < 500) {
+        my str $s = "2026-06-05";
+        if ($s =~ /(?P<year>\d+)-(?P<month>\d+)-(?P<day>\d+)/) {
+            my hash %nc = named_captures();
+            $h{"y" . $i} = $nc{"year"};
+        }
+        $i++;
+    }
+    say("test_named_capture_into_hash: PASS (size=" . scalar(keys(%h)) . ")");
+}
+
+# Baseline: $1 read into a scoped local (must also stay clean).
+func test_capture_into_local() void {
+    my int $sum = 0;
+    my int $i = 0;
+    while ($i < 500) {
+        my str $s = "num 42";
+        if ($s =~ /num (\d+)/) {
+            my str $x = $1;
+            $sum += length($x);
+        }
+        $i++;
+    }
+    say("test_capture_into_local: PASS (sum=" . $sum . ")");
+}
+
+func main() int {
+    my int $iter = 0;
+    while ($iter < 5) {
+        test_capture_into_hash_concat_key();
+        test_capture_into_hash_literal_key();
+        test_capture_into_hashref();
+        test_capture_into_array();
+        test_capture_with_subst();
+        test_named_capture_into_hash();
+        test_capture_into_local();
+        $iter++;
+    }
+    return 0;
+}

@@ -1,0 +1,70 @@
+#!/usr/bin/env strada
+# Round 18 leak regressions for runtime-internal growth:
+#
+# 1. strada_array_get returned a fresh strada_new_undef() for the
+#    NULL-array and out-of-bounds paths. Callers treat the result
+#    as borrowed (no decref), so every OOB read leaked one SV.
+#    Now returns strada_undef_static() (immortal singleton).
+#
+# 2. Dynamically-blessed class names ("Cls_$i") exhausted the
+#    OOP_MAX_PACKAGES=2048 hard cap and the runtime called exit(1).
+#    The packages array grows on demand; the hard cap is removed.
+#
+# 3. weak_registry bookkeeping (bucket + entry lists) leaked at
+#    program exit because there was no atexit cleanup.
+#
+# 4. Intern table entries at refcount 0 were kept alive "sticky".
+#    Now freed in strada_intern_release just like the _with_hash
+#    sibling — programs that bless/unbless many distinct package
+#    names no longer hold those names in the intern table forever.
+#
+# Run: valgrind --leak-check=full ./test_round18_runtime_internals
+
+package main;
+
+func test_array_oob_read() void {
+    my array @a = (1, 2, 3);
+    my int $iter = 500;
+    my int $i = 0;
+    while ($i < $iter) {
+        my scalar $v = $a[10];  # OOB — pre-fix: allocated undef leaked
+        $i = $i + 1;
+    }
+    say("test_array_oob_read: PASS");
+}
+
+func test_dynamic_class_names() void {
+    # Pre-fix: crashed at 2049 with "Too many packages (max 2048)".
+    my int $iter = 3000;
+    my int $i = 0;
+    while ($i < $iter) {
+        my hash %h = ();
+        my str $cls = "Cls_" . $i;
+        my scalar $obj = bless(\%h, $cls);
+        $i = $i + 1;
+    }
+    say("test_dynamic_class_names: PASS");
+}
+
+func test_weak_cycle() void {
+    # Cyclic structure, weakened — exercises weak_registry. The
+    # atexit cleanup makes valgrind reports clean.
+    my int $iter = 100;
+    my int $i = 0;
+    while ($i < $iter) {
+        my hash %a = ();
+        my hash %b = ();
+        $a{"b"} = \%b;
+        $b{"a"} = \%a;
+        core::weaken($a{"b"});
+        $i = $i + 1;
+    }
+    say("test_weak_cycle: PASS");
+}
+
+func main() int {
+    test_array_oob_read();
+    test_dynamic_class_names();
+    test_weak_cycle();
+    return 0;
+}

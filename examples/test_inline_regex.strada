@@ -1,0 +1,81 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_inline_regex.strada - Demonstrates Perl-style inline regex operators
+
+func main() void {
+    say("=== Inline Regex Demo ===");
+    say("");
+
+    my str $text = "Hello World";
+
+    # Match operator with regex literal
+    say("Testing match (=~):");
+    if ($text =~ /World/) {
+        say("  Found 'World' in '" . $text . "'");
+    }
+
+    if ($text =~ /^Hello/) {
+        say("  Text starts with 'Hello'");
+    }
+
+    if ($text =~ /World$/) {
+        say("  Text ends with 'World'");
+    }
+
+    say("");
+
+    # Negated match
+    say("Testing negated match (!~):");
+    if ($text !~ /Goodbye/) {
+        say("  'Goodbye' not found in '" . $text . "'");
+    }
+
+    if ($text !~ /^World/) {
+        say("  Text does not start with 'World'");
+    }
+
+    say("");
+
+    # Substitution without global flag
+    say("Testing substitution (s///):");
+    my str $greeting = "Hello World";
+    say("  Before: " . $greeting);
+    $greeting =~ s/World/Strada/;
+    say("  After s/World/Strada/: " . $greeting);
+
+    say("");
+
+    # Substitution with global flag
+    say("Testing global substitution (s///g):");
+    my str $repeat = "foo bar foo baz foo";
+    say("  Before: " . $repeat);
+    $repeat =~ s/foo/XXX/g;
+    say("  After s/foo/XXX/g: " . $repeat);
+
+    say("");
+
+    # Match with string variable (fallback)
+    say("Testing match with string pattern:");
+    my str $pattern = "llo";
+    if ($text =~ $pattern) {
+        say("  Found pattern '" . $pattern . "' in '" . $text . "'");
+    }
+
+    say("");
+    say("=== Demo Complete ===");
+}

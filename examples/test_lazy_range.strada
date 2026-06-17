@@ -1,0 +1,43 @@
+# map/grep over int ranges iterate natively (no input materialization).
+# Semantics must match the array path exactly.
+
+use lib "lib";
+use Test;
+
+func main() int {
+    # map over a range
+    my array @sq = map { $_ * $_ } (1..5);
+    Test::is(join(",", @sq), "1,4,9,16,25", "map over range");
+
+    # grep over a range
+    my array @ev = grep { $_ % 2 == 0 } (1..10);
+    Test::is(join(",", @ev), "2,4,6,8,10", "grep over range");
+
+    # variable bounds
+    my int $lo = 3;
+    my int $hi = 6;
+    my array @r = map { $_ + 100 } ($lo..$hi);
+    Test::is(join(",", @r), "103,104,105,106", "variable bounds");
+
+    # reversed range iterates zero times (matches strada_range)
+    my array @z = map { $_ } (5..1);
+    Test::is(size(@z), 0, "reversed range is empty");
+
+    # map { $_ => 1 } flatten idiom over a range
+    my hash %h = map { $_ => 1 } (1..3);
+    Test::ok(exists(%h, "2"), "flatten idiom works");
+
+    # big range is FAST (would be slow/memory-heavy if materialized):
+    my num $t0 = core::hires_time();
+    my array @hits = grep { $_ == 999999 } (1..1000000);
+    my num $dt = core::hires_time() - $t0;
+    Test::is(size(@hits), 1, "big-range grep finds the needle");
+    Test::ok($dt < 2.0, "big-range grep is fast");
+
+    # non-range inputs still take the array path
+    my array @src = (10, 20, 30);
+    my array @m2 = map { $_ / 10 } @src;
+    Test::is(join(",", @m2), "1,2,3", "array path unchanged");
+
+    return Test::done_testing();
+}

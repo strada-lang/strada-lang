@@ -1,0 +1,42 @@
+# Security regression: dumper()/clone() must not stack-overflow on cyclic or
+# deeply-nested data (CWE-674). Before the depth cap + cycle detection, a
+# self-referential ref crashed dumper() immediately and ~100k-deep nesting
+# overran the C stack in both dumper() and clone().
+package main;
+
+func main() int {
+    my int $pass = 1;
+
+    # 1. Cyclic dumper: was an immediate SIGSEGV (no cycle detection).
+    my hash %h = ();
+    $h{"self"} = \%h;
+    my str $d1 = dumper(\%h);
+    if (index($d1, "cycle") < 0) { say("FAIL: cyclic dumper missing cycle marker"); $pass = 0; }
+
+    # 2. Deep dumper: was a stack overflow (no depth cap). Built iteratively so
+    #    construction itself doesn't hit the recursion limit.
+    my scalar $r = [];
+    my int $i = 0;
+    while ($i < 100000) { $r = [$r]; $i = $i + 1; }
+    my str $d2 = dumper($r);
+    if (index($d2, "max depth") < 0) { say("FAIL: deep dumper not truncated"); $pass = 0; }
+
+    # 3. Deep clone: was a stack overflow (no depth cap). Truncates past the cap
+    #    (prints a one-time warning to stderr, not stdout).
+    my scalar $c = clone($r);
+    if (!defined($c)) { say("FAIL: deep clone returned undef at top"); $pass = 0; }
+
+    # 4. Cyclic clone: already cycle-safe via the seen-map (regression guard).
+    my scalar $c2 = clone(\%h);
+    if (!defined($c2)) { say("FAIL: cyclic clone returned undef"); $pass = 0; }
+
+    # 5. Normal dumper/clone still correct (the cap must not disturb real data).
+    my hash %g = ("a" => 1, "b" => 2);
+    my str $dn = dumper(\%g);
+    if (index($dn, "'a'") < 0 || index($dn, "'b'") < 0) { say("FAIL: normal dumper lost keys"); $pass = 0; }
+    my scalar $cn = clone(\%g);
+    if ($cn->{"b"} != 2) { say("FAIL: normal clone lost value"); $pass = 0; }
+
+    if ($pass == 1) { say("test_dumper_clone_depth: all passed"); }
+    return 0;
+}

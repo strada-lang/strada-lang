@@ -1,0 +1,86 @@
+# Binary-data benchmarks — pack/unpack, base64, and raw byte access.
+# The wire-format toolkit (network protocols, file formats) that no
+# other suite file touches.
+#
+# Sections:
+#   pack       — 200k pack("NnC a8") records
+#   unpack     — 200k unpack round trips
+#   base64     — encode+decode of a 1MB blob, x20
+#   bytes      — byte-wise checksum over a 2MB buffer (get_byte)
+#   build      — assemble a 1MB binary frame from core::byte() pieces
+#
+# Reference numbers: benchmarks/BASELINE.md
+
+package main;
+
+func main() int {
+    my num $t0 = core::hires_time();
+
+    # 1. pack records
+    my array @packed;
+    my int $i = 0;
+    while ($i < 200000) {
+        push(@packed, core::pack("NnC", $i * 13, $i % 65536, $i % 256) . "payload!");
+        $i++;
+    }
+    my num $t1 = core::hires_time();
+    say("pack: " . scalar(@packed) . " " . ($t1 - $t0));
+
+    # 2. unpack round trips
+    my int $usum = 0;
+    $i = 0;
+    while ($i < 200000) {
+        my array @f = core::unpack("NnC", $packed[$i]);
+        $usum += $f[1];
+        $i++;
+    }
+    my num $t2 = core::hires_time();
+    say("unpack: " . $usum . " " . ($t2 - $t1));
+
+    # 3. base64 over a 1MB blob
+    my scalar $blob_sb = sb::new();
+    $i = 0;
+    while ($i < 65536) {
+        sb::append($blob_sb, core::byte($i % 256) . core::byte(($i * 7) % 256) . core::byte(($i * 13) % 256) . core::byte(($i * 31) % 256));
+        $i++;
+    }
+    my str $blob = sb::to_string($blob_sb);
+    sb::free($blob_sb);
+    my int $b64_len = 0;
+    my int $r = 0;
+    while ($r < 20) {
+        my str $enc = core::base64_encode($blob);
+        my str $dec = core::base64_decode($enc);
+        $b64_len += core::byte_length($dec);
+        $r++;
+    }
+    my num $t3 = core::hires_time();
+    say("base64: " . $b64_len . " " . ($t3 - $t2));
+
+    # 4. byte-wise checksum over 2MB
+    my str $big = $blob . $blob . $blob . $blob . $blob . $blob . $blob . $blob;
+    my int $cksum = 0;
+    my int $blen = core::byte_length($big);
+    $i = 0;
+    while ($i < $blen) {
+        $cksum = ($cksum + core::get_byte($big, $i)) % 65536;
+        $i += 16;
+    }
+    my num $t4 = core::hires_time();
+    say("bytes: " . $cksum . " " . ($t4 - $t3));
+
+    # 5. frame assembly from single bytes
+    my scalar $frame = sb::new();
+    $i = 0;
+    while ($i < 1000000) {
+        sb::append($frame, core::byte($i % 256));
+        $i++;
+    }
+    my int $flen = core::byte_length(sb::to_string($frame));
+    sb::free($frame);
+    my num $t5 = core::hires_time();
+    say("build: " . $flen . " " . ($t5 - $t4));
+
+    say("total: " . ($t5 - $t0));
+    return 0;
+}

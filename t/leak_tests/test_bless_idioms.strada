@@ -1,0 +1,74 @@
+#!/usr/bin/env strada
+# Regression test for the bless()-with-discarded-return UAF.
+#
+# Before the fix, the codegen marked bless() as unconditionally returning an
+# owned StradaValue* (needs_temp_cleanup -> 1), but strada_bless() returns its
+# first argument unchanged with no incref. Statement-form `bless($var,"C");`
+# then decref'd the result -- which is the SAME pointer the variable still
+# owned -- driving the variable's refcount to 0 mid-scope and producing
+# use-after-free on the next access. valgrind would report thousands of errors.
+#
+# Fix: needs_temp_cleanup(bless) now mirrors the first argument's ownership
+# (borrowed variable in -> borrowed out, owned temp in -> owned out).
+# This test exercises both idioms and asserts DESTROY fires the right number of
+# times. valgrind must report 0 leaks and 0 errors.
+
+package Node;
+
+func Node_DESTROY(scalar $self) void {
+    core::global_set("destroyed", core::global_get("destroyed") + 1);
+}
+
+package main;
+
+func main() int {
+    core::global_set("destroyed", 0);
+    my int $expected = 0;
+
+    # --- Previously buggy: statement form, return discarded ---
+    my int $i = 0;
+    while ($i < 100) {
+        my scalar $n1 = {"name" => "first"};
+        my scalar $n2 = {"name" => "second"};
+        bless($n1, "Node");
+        bless($n2, "Node");
+        # Use the blessed vars after bless — these used to UAF.
+        $n1->{"link"} = $n2;
+        $n2->{"link"} = $n1;
+        # Break the cycle so refcount-driven free fires DESTROY.
+        $n1->{"link"} = 0;
+        $n2->{"link"} = 0;
+        $i = $i + 1;
+    }
+    $expected = $expected + 200;
+
+    # --- Correct idiom: assignment captures the return ---
+    $i = 0;
+    while ($i < 100) {
+        my scalar $a = bless({"name" => "a"}, "Node");
+        my scalar $b = bless({"name" => "b"}, "Node");
+        $a->{"peer"} = $b;
+        $a->{"peer"} = 0;          # break before scope exit
+        $i = $i + 1;
+    }
+    $expected = $expected + 200;
+
+    # --- Discarded anonymous bless: bless({...}, "C"); as a statement ---
+    # arg0 is an owned temp -> bless result is owned -> caller decrefs the
+    # temp (the anon hash), DESTROY fires.
+    $i = 0;
+    while ($i < 100) {
+        bless({"name" => "anon"}, "Node");
+        $i = $i + 1;
+    }
+    $expected = $expected + 100;
+
+    my int $actual = core::global_get("destroyed");
+    say("destroyed=" . $actual . " expected=" . $expected);
+    if ($actual != $expected) {
+        say("FAIL: DESTROY count mismatch");
+        return 1;
+    }
+    say("bless idiom test passed!");
+    return 0;
+}

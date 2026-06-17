@@ -1,0 +1,87 @@
+#!/usr/bin/env strada
+# Test range operator for memory leaks
+# Run: valgrind --leak-check=full ./test_range
+
+func main() int {
+    say("Testing range operator for memory leaks...");
+    my int $iterations = 100;
+
+    # Test basic integer range
+    say("  basic int range...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my array @r = (1..10);
+        if (size(@r) != 10) {
+            say("    FAIL: range size = " . size(@r));
+            return 1;
+        }
+        if ($r[0] != 1 || $r[9] != 10) {
+            say("    FAIL: range values");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test large range
+    say("  large range...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @r = (1..100);
+        if (size(@r) != 100) {
+            say("    FAIL: large range");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test range with variables
+    say("  variable range...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $start = $i % 5;
+        my int $end = $start + 10;
+        my array @r = ($start..$end);
+        if (size(@r) != 11) {
+            say("    FAIL: variable range size");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test range in array slice
+    say("  range in slice...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @data = (10, 20, 30, 40, 50, 60, 70, 80, 90, 100);
+        my array @slice = @data[2..5];
+        if (size(@slice) != 4) {
+            say("    FAIL: slice size");
+            return 1;
+        }
+        if ($slice[0] != 30) {
+            say("    FAIL: slice value");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test zero-length range
+    say("  zero-length range...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @r = (5..5);
+        if (size(@r) != 1) {
+            say("    FAIL: single element range");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All range tests passed!");
+    return 0;
+}

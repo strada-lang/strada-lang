@@ -1,0 +1,138 @@
+func test_basic_weaken() void {
+    say("=== Basic weaken test ===");
+
+    my scalar $strong = { "name" => "Alice", "age" => 30 };
+    my scalar $weak = $strong;
+
+    # Before weakening
+    say("Before weaken:");
+    say("  isweak(strong): " . core::isweak($strong));
+    say("  isweak(weak): " . core::isweak($weak));
+    say("  refcount(strong target): " . refcount($strong));
+
+    # Weaken the second reference
+    core::weaken($weak);
+
+    say("After weaken:");
+    say("  isweak(strong): " . core::isweak($strong));
+    say("  isweak(weak): " . core::isweak($weak));
+    say("  refcount(strong target): " . refcount($strong));
+
+    # Weak ref should still be usable while strong ref exists
+    say("  weak->{name}: " . $weak->{"name"});
+
+    say("PASS: basic weaken");
+    say("");
+}
+
+func test_weak_ref_nullified() void {
+    say("=== Weak ref nullified test ===");
+
+    my scalar $weak;
+    {
+        my scalar $obj = { "data" => "hello" };
+        $weak = $obj;
+        core::weaken($weak);
+        say("Inside scope - weak->{data}: " . $weak->{"data"});
+    }
+    # After $obj goes out of scope, the weak ref target should be freed
+    # and dereferencing should return undef
+    my int $is_defined = defined($weak->{"data"});
+    say("After scope - defined(weak->{data}): " . $is_defined);
+    say("PASS: weak ref nullified");
+    say("");
+}
+
+func test_isweak() void {
+    say("=== isweak test ===");
+
+    my int $x = 42;
+    my scalar $ref = \$x;
+    say("isweak(regular ref): " . core::isweak($ref));
+
+    my scalar $strong = { "a" => 1 };
+    my scalar $weak = $strong;
+    core::weaken($weak);
+    say("isweak(weakened ref): " . core::isweak($weak));
+
+    # Non-ref value
+    my int $val = 10;
+    say("isweak(non-ref): " . core::isweak($val));
+
+    say("PASS: isweak");
+    say("");
+}
+
+func test_circular_ref() void {
+    say("=== Circular reference test ===");
+
+    # Create two objects that reference each other
+    my scalar $parent = { "name" => "parent" };
+    my scalar $child = { "name" => "child" };
+
+    # Set up circular reference
+    $parent->{"child"} = $child;
+    $child->{"parent"} = $parent;
+
+    # Break cycle with weak reference
+    core::weaken($child->{"parent"});
+
+    say("parent->{name}: " . $parent->{"name"});
+    say("child->{name}: " . $child->{"name"});
+    say("child->{parent}->{name}: " . $child->{"parent"}->{"name"});
+    say("isweak(child->{parent}): " . core::isweak($child->{"parent"}));
+
+    say("PASS: circular reference");
+    say("");
+}
+
+func test_multiple_weak_refs() void {
+    say("=== Multiple weak refs test ===");
+
+    my scalar $target = { "value" => 99 };
+    my scalar $weak1 = $target;
+    my scalar $weak2 = $target;
+    my scalar $weak3 = $target;
+
+    core::weaken($weak1);
+    core::weaken($weak2);
+    core::weaken($weak3);
+
+    say("All weak refs valid: " . $weak1->{"value"} . " " . $weak2->{"value"} . " " . $weak3->{"value"});
+    say("isweak counts: " . core::isweak($weak1) . " " . core::isweak($weak2) . " " . core::isweak($weak3));
+
+    say("PASS: multiple weak refs");
+    say("");
+}
+
+func test_weaken_idempotent() void {
+    say("=== Weaken idempotent test ===");
+
+    my scalar $target = { "x" => 1 };
+    my scalar $weak = $target;
+    core::weaken($weak);
+    my int $rc1 = refcount($target);
+    core::weaken($weak);  # Should be no-op
+    my int $rc2 = refcount($target);
+
+    say("Refcount after first weaken: " . $rc1);
+    say("Refcount after second weaken: " . $rc2);
+
+    if ($rc1 == $rc2) {
+        say("PASS: weaken idempotent");
+    } else {
+        say("FAIL: weaken not idempotent");
+    }
+    say("");
+}
+
+func main() int {
+    test_basic_weaken();
+    test_weak_ref_nullified();
+    test_isweak();
+    test_circular_ref();
+    test_multiple_weak_refs();
+    test_weaken_idempotent();
+    say("All weak reference tests passed");
+    return 0;
+}

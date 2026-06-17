@@ -1,0 +1,760 @@
+/*
+ Strada Package Manager (pacco)
+
+ A package manager for the Strada programming language.
+
+ Usage:
+   pacco init                    Create a new Strada.toml
+   pacco new <name>              Create a new project
+   pacco add <package>           Add a dependency
+   pacco remove <package>        Remove a dependency
+   pacco install                 Install all dependencies
+   pacco update                  Update dependencies
+   pacco build                   Build the project
+   pacco run [args]              Build and run
+   pacco test                    Run tests
+   pacco clean                   Remove build artifacts
+   pacco info                    Show project info
+   pacco --version               Show version
+   pacco --help                  Show help
+*/
+
+use lib ".";
+use SemVer;
+use Manifest;
+use Lock;
+use Fetch;
+use Resolver;
+use Build;
+
+my str $PACCO_VERSION = "0.1.0";
+my str $DEFAULT_REGISTRY = "https://pacco.strada-lang.org";
+
+# Get registry URL from environment or config
+func get_registry_url() str {
+    # Check environment variable first
+    my str $env_url = sys::getenv("PACCO_REGISTRY");
+    if (length($env_url) > 0) {
+        return $env_url;
+    }
+
+    # Check config file
+    my str $home = sys::getenv("HOME");
+    my str $config_path = $home . "/.pacco/config";
+
+    if (sys::file_exists($config_path) == 1) {
+        my str $content = slurp($config_path);
+        my array @lines = split("\n", $content);
+        foreach my str $line (@lines) {
+            if ($line =~ /^registry\s*=\s*(.+)$/) {
+                my array @caps = captures();
+                if (scalar(@caps) > 1) {
+                    return $caps[1];
+                }
+            }
+        }
+    }
+
+    return $DEFAULT_REGISTRY;
+}
+
+func main(int $argc, array @argv) int {
+    if ($argc < 2) {
+        print_help();
+        return 0;
+    }
+
+    my str $command = $argv[1];
+
+    # Global flags
+    if ($command eq "--version" || $command eq "-v") {
+        say("pacco " . $PACCO_VERSION);
+        return 0;
+    }
+
+    if ($command eq "--help" || $command eq "-h" || $command eq "help") {
+        print_help();
+        return 0;
+    }
+
+    # Commands
+    if ($command eq "init") {
+        return cmd_init($argc, @argv);
+    }
+
+    if ($command eq "new") {
+        return cmd_new($argc, @argv);
+    }
+
+    if ($command eq "add") {
+        return cmd_add($argc, @argv);
+    }
+
+    if ($command eq "remove" || $command eq "rm") {
+        return cmd_remove($argc, @argv);
+    }
+
+    if ($command eq "install" || $command eq "i") {
+        return cmd_install($argc, @argv);
+    }
+
+    if ($command eq "update" || $command eq "up") {
+        return cmd_update($argc, @argv);
+    }
+
+    if ($command eq "build" || $command eq "b") {
+        return cmd_build($argc, @argv);
+    }
+
+    if ($command eq "run" || $command eq "r") {
+        return cmd_run($argc, @argv);
+    }
+
+    if ($command eq "test" || $command eq "t") {
+        return cmd_test($argc, @argv);
+    }
+
+    if ($command eq "clean") {
+        return cmd_clean($argc, @argv);
+    }
+
+    if ($command eq "info") {
+        return cmd_info($argc, @argv);
+    }
+
+    if ($command eq "list" || $command eq "ls") {
+        return cmd_list($argc, @argv);
+    }
+
+    if ($command eq "search" || $command eq "s") {
+        return cmd_search($argc, @argv);
+    }
+
+    say("Unknown command: " . $command);
+    say("Run 'pacco --help' for usage.");
+    return 1;
+}
+
+func print_help() void {
+    say("pacco " . $PACCO_VERSION . " - Strada Package Manager");
+    say("");
+    say("USAGE:");
+    say("    pacco <command> [options]");
+    say("");
+    say("COMMANDS:");
+    say("    init                    Create a new Strada.toml in current directory");
+    say("    new <name>              Create a new project directory");
+    say("    add <package>           Add a dependency");
+    say("        <package>           Package name from registry");
+    say("        github:user/repo    GitHub repository");
+    say("        git:<url>           Any git URL");
+    say("        path:/local/path    Local path dependency");
+    say("    remove <package>        Remove a dependency");
+    say("    install                 Install all dependencies from Strada.toml");
+    say("    update                  Update dependencies to latest compatible versions");
+    say("    build [--release]       Build the project");
+    say("    run [args]              Build and run the project");
+    say("    test                    Run tests");
+    say("    clean                   Remove build artifacts");
+    say("    info                    Show project information");
+    say("    list                    List all packages from registry");
+    say("    search <query>          Search packages in registry");
+    say("");
+    say("OPTIONS:");
+    say("    -v, --version           Show version");
+    say("    -h, --help              Show this help");
+    say("");
+    say("EXAMPLES:");
+    say("    pacco new my-project");
+    say("    cd my-project");
+    say("    pacco add github:strada-lang/json");
+    say("    pacco build");
+    say("    pacco run");
+}
+
+# Initialize a new project in current directory
+func cmd_init(int $argc, array @argv) int {
+    my str $cwd = sys::getcwd();
+
+    if (sys::file_exists($cwd . "/Strada.toml") == 1) {
+        say("Error: Strada.toml already exists in this directory");
+        return 1;
+    }
+
+    # Get project name from directory name
+    my str $name = sys::basename($cwd);
+
+    say("Creating Strada.toml for '" . $name . "'...");
+
+    my str $content = Pacco::Manifest::generate_template($name, "0.1.0", "A Strada project");
+    spew($cwd . "/Strada.toml", $content);
+
+    # Create src directory if it doesn't exist
+    if (sys::dir_exists($cwd . "/src") == 0) {
+        sys::mkdir($cwd . "/src", 493);
+
+        # Create main.strada
+        my str $main_content = "func main() int {\n";
+        $main_content = $main_content . "    say(\"Hello from " . $name . "!\");\n";
+        $main_content = $main_content . "    return 0;\n";
+        $main_content = $main_content . "}\n";
+        spew($cwd . "/src/main.strada", $main_content);
+    }
+
+    say("Created Strada.toml");
+    say("Created src/main.strada");
+    say("");
+    say("Run 'pacco build' to compile your project.");
+
+    return 0;
+}
+
+# Create a new project directory
+func cmd_new(int $argc, array @argv) int {
+    if ($argc < 3) {
+        say("Usage: pacco new <project-name>");
+        return 1;
+    }
+
+    my str $name = $argv[2];
+    my str $cwd = sys::getcwd();
+    my str $project_dir = $cwd . "/" . $name;
+
+    if (sys::dir_exists($project_dir) == 1) {
+        say("Error: Directory '" . $name . "' already exists");
+        return 1;
+    }
+
+    say("Creating project '" . $name . "'...");
+
+    # Create directories
+    sys::mkdir($project_dir, 493);
+    sys::mkdir($project_dir . "/src", 493);
+    sys::mkdir($project_dir . "/t", 493);
+
+    # Create Strada.toml
+    my str $manifest = Pacco::Manifest::generate_template($name, "0.1.0", "A Strada project");
+    spew($project_dir . "/Strada.toml", $manifest);
+
+    # Create main.strada
+    my str $main_content = "func main() int {\n";
+    $main_content = $main_content . "    say(\"Hello from " . $name . "!\");\n";
+    $main_content = $main_content . "    return 0;\n";
+    $main_content = $main_content . "}\n";
+    spew($project_dir . "/src/main.strada", $main_content);
+
+    # Create .gitignore
+    my str $gitignore = "# Build artifacts\n";
+    $gitignore = $gitignore . "/" . $name . "\n";
+    $gitignore = $gitignore . "*.o\n";
+    $gitignore = $gitignore . "*.so\n";
+    $gitignore = $gitignore . "*.a\n";
+    $gitignore = $gitignore . "*.c\n";
+    $gitignore = $gitignore . "\n";
+    $gitignore = $gitignore . "# Dependencies\n";
+    $gitignore = $gitignore . ".strada/\n";
+    spew($project_dir . "/.gitignore", $gitignore);
+
+    say("Created " . $name . "/");
+    say("  Strada.toml");
+    say("  src/main.strada");
+    say("  t/");
+    say("  .gitignore");
+    say("");
+    say("Run 'cd " . $name . " && pacco build' to get started.");
+
+    return 0;
+}
+
+# Add a dependency
+func cmd_add(int $argc, array @argv) int {
+    if ($argc < 3) {
+        say("Usage: pacco add <package>");
+        say("Examples:");
+        say("  pacco add json                      # From registry");
+        say("  pacco add github:user/repo          # From GitHub");
+        say("  pacco add github:user/repo@v1.0.0   # Specific version");
+        say("  pacco add git:https://example.com/repo.git");
+        return 1;
+    }
+
+    my str $cwd = sys::getcwd();
+    my str $manifest_path = $cwd . "/Strada.toml";
+
+    if (sys::file_exists($manifest_path) == 0) {
+        say("Error: No Strada.toml found. Run 'pacco init' first.");
+        return 1;
+    }
+
+    my str $package = $argv[2];
+    my str $ver = "*";
+
+    # Check for version specifier
+    if ($argc >= 4) {
+        $ver = $argv[3];
+    }
+
+    # Parse package source
+    my scalar $source = Pacco::Fetch::parse_source($package);
+
+    say("Adding " . $package . "...");
+
+    # Fetch the package
+    my str $deps_dir = Pacco::Fetch::ensure_deps_dir($cwd);
+    my scalar $fetch_result = Pacco::Fetch::fetch_package($package, $ver, $deps_dir);
+
+    if ($fetch_result->{"success"} == 0) {
+        say("Error: " . $fetch_result->{"error"});
+        return 1;
+    }
+
+    my str $pkg_path = $fetch_result->{"path"};
+
+    # Get package info
+    my str $pkg_name = "";
+    my str $pkg_version = "";
+
+    if (sys::file_exists($pkg_path . "/Strada.toml") == 1) {
+        my scalar $pkg_manifest = Pacco::Manifest::parse($pkg_path . "/Strada.toml");
+        if (defined($pkg_manifest)) {
+            $pkg_name = Pacco::Manifest::get_name($pkg_manifest);
+            $pkg_version = Pacco::Manifest::get_version($pkg_manifest);
+        }
+    }
+
+    if ($pkg_name eq "") {
+        $pkg_name = Pacco::Fetch::extract_repo_name($package);
+    }
+
+    # Update Strada.toml
+    my str $manifest_content = slurp($manifest_path);
+    my str $dep_value = "";
+
+    if ($source->{"type"} eq "git") {
+        $dep_value = "{ git = \"" . $source->{"url"} . "\"";
+        if ($pkg_version ne "") {
+            $dep_value = $dep_value . ", version = \"" . $pkg_version . "\"";
+        }
+        $dep_value = $dep_value . " }";
+    } else {
+        $dep_value = "\"" . ($pkg_version ne "" ? "^" . $pkg_version : "*") . "\"";
+    }
+
+    $manifest_content = Pacco::Manifest::add_dependency($manifest_content, $pkg_name, $dep_value);
+    spew($manifest_path, $manifest_content);
+
+    # Update lock file
+    my scalar $manifest = Pacco::Manifest::parse($manifest_path);
+    my scalar $resolved = Pacco::Resolver::resolve($manifest, $deps_dir);
+    Pacco::Lock::write($cwd . "/Strada.lock", $resolved);
+
+    say("Added " . $pkg_name . " (" . ($pkg_version ne "" ? $pkg_version : "latest") . ")");
+
+    return 0;
+}
+
+# Remove a dependency
+func cmd_remove(int $argc, array @argv) int {
+    if ($argc < 3) {
+        say("Usage: pacco remove <package>");
+        return 1;
+    }
+
+    my str $name = $argv[2];
+    my str $cwd = sys::getcwd();
+    my str $manifest_path = $cwd . "/Strada.toml";
+
+    if (sys::file_exists($manifest_path) == 0) {
+        say("Error: No Strada.toml found.");
+        return 1;
+    }
+
+    # Read and modify manifest
+    my str $content = slurp($manifest_path);
+    my array @lines = split("\n", $content);
+    my array @new_lines = ();
+    my int $in_deps = 0;
+    my int $removed = 0;
+
+    foreach my str $line (@lines) {
+        if ($line eq "[dependencies]") {
+            $in_deps = 1;
+            push(@new_lines, $line);
+        } elsif (substr($line, 0, 1) eq "[" && $line ne "[dependencies]") {
+            $in_deps = 0;
+            push(@new_lines, $line);
+        } elsif ($in_deps == 1 && substr($line, 0, length($name)) eq $name) {
+            # Skip this line (remove the dependency)
+            $removed = 1;
+        } else {
+            push(@new_lines, $line);
+        }
+    }
+
+    if ($removed == 0) {
+        say("Error: Dependency '" . $name . "' not found");
+        return 1;
+    }
+
+    spew($manifest_path, join("\n", @new_lines));
+
+    # Remove from deps directory
+    my str $deps_dir = $cwd . "/.strada/deps";
+    sys::system("rm -rf " . $deps_dir . "/" . $name . "* 2>/dev/null");
+
+    # Update lock file
+    my scalar $manifest = Pacco::Manifest::parse($manifest_path);
+    my scalar $resolved = Pacco::Resolver::resolve($manifest, $deps_dir);
+    Pacco::Lock::write($cwd . "/Strada.lock", $resolved);
+
+    say("Removed " . $name);
+
+    return 0;
+}
+
+# Install dependencies
+func cmd_install(int $argc, array @argv) int {
+    my str $cwd = sys::getcwd();
+    my str $manifest_path = $cwd . "/Strada.toml";
+
+    if (sys::file_exists($manifest_path) == 0) {
+        say("Error: No Strada.toml found.");
+        return 1;
+    }
+
+    my scalar $manifest = Pacco::Manifest::parse($manifest_path);
+    my scalar $deps = Pacco::Manifest::get_dependencies($manifest);
+
+    my int $count = scalar(keys(%{$deps}));
+    if ($count == 0) {
+        say("No dependencies to install.");
+        return 0;
+    }
+
+    say("Installing " . $count . " dependencies...");
+
+    my str $deps_dir = Pacco::Fetch::ensure_deps_dir($cwd);
+
+    # Check for existing lock file
+    my scalar $lock = Pacco::Lock::parse($cwd . "/Strada.lock");
+
+    my int $installed = 0;
+    my int $errors = 0;
+
+    foreach my str $name (keys(%{$deps})) {
+        my scalar $spec = $deps->{$name};
+        my str $source = "";
+        my str $ver = "";
+
+        if (typeof($spec) eq "hash") {
+            $source = defined($spec->{"git"}) ? $spec->{"git"} : "";
+            $ver = defined($spec->{"version"}) ? $spec->{"version"} : "*";
+        } else {
+            $ver = $spec;
+        }
+
+        # Check if already installed with correct version
+        if (defined($lock) && defined($lock->{$name})) {
+            my str $locked_version = $lock->{$name}{"version"};
+            if (Pacco::Fetch::is_installed($deps_dir, $name, $locked_version) == 1) {
+                say("  " . $name . " (" . $locked_version . ") - already installed");
+                next;
+            }
+        }
+
+        # Fetch package
+        my str $fetch_source = $source ne "" ? $source : $name;
+        my scalar $result = Pacco::Fetch::fetch_package($fetch_source, $ver, $deps_dir);
+
+        if ($result->{"success"} == 1) {
+            say("  " . $name . " - installed");
+            $installed++;
+        } else {
+            say("  " . $name . " - ERROR: " . $result->{"error"});
+            $errors++;
+        }
+    }
+
+    # Update lock file
+    my scalar $resolved = Pacco::Resolver::resolve($manifest, $deps_dir);
+    Pacco::Lock::write($cwd . "/Strada.lock", $resolved);
+
+    say("");
+    say("Installed " . $installed . " packages, " . $errors . " errors.");
+
+    return $errors > 0 ? 1 : 0;
+}
+
+# Update dependencies
+func cmd_update(int $argc, array @argv) int {
+    my str $cwd = sys::getcwd();
+
+    # Remove lock file to force re-resolution
+    if (sys::file_exists($cwd . "/Strada.lock") == 1) {
+        sys::unlink($cwd . "/Strada.lock");
+    }
+
+    # Re-install
+    return cmd_install($argc, @argv);
+}
+
+# Build the project
+func cmd_build(int $argc, array @argv) int {
+    my str $cwd = sys::getcwd();
+
+    my hash %options = ();
+
+    # Parse options
+    for (my int $i = 2; $i < $argc; $i++) {
+        my str $arg = $argv[$i];
+        if ($arg eq "--release" || $arg eq "-r") {
+            $options{"release"} = 1;
+        } elsif ($arg eq "--verbose" || $arg eq "-v") {
+            $options{"verbose"} = 1;
+        }
+    }
+
+    say("Building...");
+
+    my scalar $result = Pacco::Build::build($cwd, \%options);
+
+    if ($result->{"success"} == 1) {
+        say("Built: " . $result->{"output"});
+        return 0;
+    } else {
+        say("Error: " . $result->{"error"});
+        return 1;
+    }
+}
+
+# Build and run
+func cmd_run(int $argc, array @argv) int {
+    my str $cwd = sys::getcwd();
+
+    # Build first
+    my hash %build_options = ();
+    my scalar $build_result = Pacco::Build::build($cwd, \%build_options);
+
+    if ($build_result->{"success"} == 0) {
+        say("Build failed: " . $build_result->{"error"});
+        return 1;
+    }
+
+    # Collect args for the program
+    my array @run_args = ();
+    for (my int $i = 2; $i < $argc; $i++) {
+        push(@run_args, $argv[$i]);
+    }
+
+    return Pacco::Build::run($cwd, \@run_args);
+}
+
+# Run tests
+func cmd_test(int $argc, array @argv) int {
+    my str $cwd = sys::getcwd();
+
+    say("Running tests...");
+
+    my hash %options = ();
+    my scalar $result = Pacco::Build::test($cwd, \%options);
+
+    say("");
+    say("Results: " . $result->{"passed"} . " passed, " . $result->{"failed"} . " failed");
+
+    if ($result->{"failed"} > 0) {
+        say("Failed tests:");
+        foreach my str $test (@{$result->{"errors"}}) {
+            say("  " . $test);
+        }
+    }
+
+    return $result->{"success"} == 1 ? 0 : 1;
+}
+
+# Clean build artifacts
+func cmd_clean(int $argc, array @argv) int {
+    my str $cwd = sys::getcwd();
+
+    say("Cleaning...");
+
+    Pacco::Build::clean($cwd);
+
+    say("Done.");
+    return 0;
+}
+
+# Show project info
+func cmd_info(int $argc, array @argv) int {
+    my str $cwd = sys::getcwd();
+    my str $manifest_path = $cwd . "/Strada.toml";
+
+    if (sys::file_exists($manifest_path) == 0) {
+        say("Error: No Strada.toml found.");
+        return 1;
+    }
+
+    my scalar $manifest = Pacco::Manifest::parse($manifest_path);
+
+    my str $name = Pacco::Manifest::get_name($manifest);
+    my str $ver = Pacco::Manifest::get_version($manifest);
+
+    say("Package: " . $name);
+    say("Version: " . $ver);
+
+    if (defined($manifest->{"package"}{"description"})) {
+        say("Description: " . $manifest->{"package"}{"description"});
+    }
+
+    if (defined($manifest->{"package"}{"license"})) {
+        say("License: " . $manifest->{"package"}{"license"});
+    }
+
+    say("");
+
+    # Dependencies
+    my scalar $deps = Pacco::Manifest::get_dependencies($manifest);
+    my int $dep_count = scalar(keys(%{$deps}));
+
+    if ($dep_count > 0) {
+        say("Dependencies (" . $dep_count . "):");
+        foreach my str $dep_name (keys(%{$deps})) {
+            my scalar $spec = $deps->{$dep_name};
+            if (typeof($spec) eq "hash") {
+                say("  " . $dep_name . " (git)");
+            } else {
+                say("  " . $dep_name . " " . $spec);
+            }
+        }
+    } else {
+        say("Dependencies: none");
+    }
+
+    return 0;
+}
+
+# List packages from registry
+func cmd_list(int $argc, array @argv) int {
+    my str $registry = get_registry_url();
+    my str $url = $registry . "/packages.txt";
+
+    say("Fetching packages from " . $registry . "...");
+
+    my scalar $result = http_get($url);
+    if (!defined($result)) {
+        say("Error: Could not fetch package list from " . $url);
+        say("");
+        say("Configure registry with:");
+        say("  export PACCO_REGISTRY=https://your-registry.com");
+        say("  or create ~/.pacco/config with: registry = https://your-registry.com");
+        return 1;
+    }
+
+    my str $content = "" . $result;
+    my array @lines = split("\n", $content);
+    my int $count = 0;
+
+    foreach my str $line (@lines) {
+        # Skip comments and empty lines
+        if (substr($line, 0, 1) eq "#" || length($line) == 0) {
+            next;
+        }
+
+        # Parse: name|version|description|repository|author|license|downloads
+        my array @parts = split("\\|", $line);
+        if (scalar(@parts) >= 3) {
+            my str $name = $parts[0];
+            my str $version = $parts[1];
+            my str $desc = $parts[2];
+
+            # Truncate description
+            if (length($desc) > 50) {
+                $desc = substr($desc, 0, 47) . "...";
+            }
+
+            say("  " . $name . " (" . $version . ")");
+            if (length($desc) > 0) {
+                say("    " . $desc);
+            }
+            $count++;
+        }
+    }
+
+    say("");
+    say($count . " packages available");
+
+    return 0;
+}
+
+# Search packages in registry
+func cmd_search(int $argc, array @argv) int {
+    if ($argc < 3) {
+        say("Usage: pacco search <query>");
+        return 1;
+    }
+
+    my str $query = $argv[2];
+    my str $registry = get_registry_url();
+    my str $url = $registry . "/packages.txt";
+
+    say("Searching for '" . $query . "'...");
+
+    my scalar $result = http_get($url);
+    if (!defined($result)) {
+        say("Error: Could not fetch package list from " . $url);
+        return 1;
+    }
+
+    my str $content = "" . $result;
+    my array @lines = split("\n", $content);
+    my int $count = 0;
+    my str $query_lower = lc($query);
+
+    foreach my str $line (@lines) {
+        # Skip comments and empty lines
+        if (substr($line, 0, 1) eq "#" || length($line) == 0) {
+            next;
+        }
+
+        # Parse: name|version|description|repository|author|license|downloads
+        my array @parts = split("\\|", $line);
+        if (scalar(@parts) >= 3) {
+            my str $name = $parts[0];
+            my str $version = $parts[1];
+            my str $desc = $parts[2];
+
+            # Check if query matches name or description (case insensitive)
+            if (index(lc($name), $query_lower) >= 0 || index(lc($desc), $query_lower) >= 0) {
+                say("  " . $name . " (" . $version . ")");
+                if (length($desc) > 0) {
+                    if (length($desc) > 60) {
+                        $desc = substr($desc, 0, 57) . "...";
+                    }
+                    say("    " . $desc);
+                }
+                $count++;
+            }
+        }
+    }
+
+    say("");
+    if ($count == 0) {
+        say("No packages found matching '" . $query . "'");
+    } else {
+        say($count . " packages found");
+    }
+
+    return 0;
+}
+
+# Simple HTTP GET (uses curl)
+func http_get(str $url) scalar {
+    my str $cmd = "curl -s -f \"" . $url . "\" 2>/dev/null";
+    my str $result = sys::backticks($cmd);
+
+    # Check if curl failed (empty result and non-zero exit)
+    if (length($result) == 0) {
+        return undef;
+    }
+
+    return $result;
+}

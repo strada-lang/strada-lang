@@ -1,0 +1,43 @@
+# Regression for lazy exception-trace capture: throw only SNAPSHOTS the call
+# frames (cheap memcpy); core::exception_trace() formats the string lazily on
+# read. Must produce the same trace the old eager capture did.
+package main;
+func inner() void { throw "boom from inner"; }
+func middle() void { inner(); }
+func outer() void { middle(); }
+func main() int {
+    my int $pass = 1;
+
+    # 1. The trace, when read, names the frames active at the throw.
+    try { outer(); }
+    catch ($e) {
+        my str $tr = core::exception_trace();
+        if (index($tr, "inner") < 0 || index($tr, "middle") < 0 || index($tr, "outer") < 0) {
+            say("FAIL: trace missing frames:\n" . $tr); $pass = 0;
+        }
+    }
+
+    # 2. Reading the trace twice is consistent (lazy cache) and non-empty.
+    try { inner(); }
+    catch ($e) {
+        my str $a = core::exception_trace();
+        my str $b = core::exception_trace();
+        if ($a ne $b || length($a) == 0 || index($a, "inner") < 0) { say("FAIL: repeat read"); $pass = 0; }
+    }
+
+    # 3. A catch that ignores the trace (the common, now-cheap path) still works.
+    my int $n = 0; my int $i = 0;
+    while ($i < 2000) { try { throw "x"; } catch ($e) { $n = $n + 1; } $i = $i + 1; }
+    if ($n != 2000) { say("FAIL: ignore-trace path"); $pass = 0; }
+
+    # 4. The trace reflects the throw, not the catch site (read from a deeper frame).
+    try { outer(); }
+    catch ($e) {
+        my str $t = core::exception_trace();
+        # innermost frame should be 'inner' (first line of the trace)
+        if (index($t, "inner") < 0) { say("FAIL: innermost frame"); $pass = 0; }
+    }
+
+    if ($pass == 1) { say("exception_trace_lazy: all passed"); }
+    return 0;
+}

@@ -1,0 +1,177 @@
+#!/usr/bin/env strada
+# Test operator overloading for memory leaks
+# Run: valgrind --leak-check=full ./test_overload
+
+package Vector;
+
+func new(int $x, int $y) scalar {
+    my hash %self = ();
+    $self{"x"} = $x;
+    $self{"y"} = $y;
+    return bless(\%self, "Vector");
+}
+
+func x(scalar $self) int {
+    return $self->{"x"};
+}
+
+func y(scalar $self) int {
+    return $self->{"y"};
+}
+
+func add(scalar $self, scalar $other, int $reversed) scalar {
+    return Vector::new($self->{"x"} + $other->{"x"}, $self->{"y"} + $other->{"y"});
+}
+
+func subtract(scalar $self, scalar $other, int $reversed) scalar {
+    return Vector::new($self->{"x"} - $other->{"x"}, $self->{"y"} - $other->{"y"});
+}
+
+func multiply(scalar $self, scalar $factor, int $reversed) scalar {
+    my int $f = $factor;
+    return Vector::new($self->{"x"} * $f, $self->{"y"} * $f);
+}
+
+func to_str(scalar $self) str {
+    return "(" . $self->{"x"} . "," . $self->{"y"} . ")";
+}
+
+func equals(scalar $self, scalar $other, int $reversed) int {
+    return ($self->{"x"} == $other->{"x"} && $self->{"y"} == $other->{"y"});
+}
+
+func negate(scalar $self) scalar {
+    return Vector::new(0 - $self->{"x"}, 0 - $self->{"y"});
+}
+
+use overload "+" => "add", "-" => "subtract", "*" => "multiply", '""' => "to_str", "==" => "equals", "neg" => "negate", "fallback" => 1;
+
+package main;
+
+func main() int {
+    say("Testing operator overloading for memory leaks...");
+    my int $iterations = 100;
+
+    # Test overloaded addition
+    say("  Overloaded +...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my scalar $v1 = Vector::new(1, 2);
+        my scalar $v2 = Vector::new(3, 4);
+        my scalar $v3 = $v1 + $v2;
+        if ($v3->x() != 4 || $v3->y() != 6) {
+            say("    FAIL: addition");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test overloaded subtraction
+    say("  Overloaded -...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $v1 = Vector::new(10, 20);
+        my scalar $v2 = Vector::new(3, 5);
+        my scalar $v3 = $v1 - $v2;
+        if ($v3->x() != 7 || $v3->y() != 15) {
+            say("    FAIL: subtraction");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test overloaded multiplication
+    say("  Overloaded *...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $v1 = Vector::new(3, 4);
+        my scalar $v2 = $v1 * 5;
+        if ($v2->x() != 15 || $v2->y() != 20) {
+            say("    FAIL: multiplication");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test overloaded stringify
+    say("  Overloaded stringify...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $v = Vector::new(7, 8);
+        my str $s = "" . $v;
+        if ($s ne "(7,8)") {
+            say("    FAIL: stringify = " . $s);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test overloaded equality
+    say("  Overloaded ==...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $v1 = Vector::new(5, 10);
+        my scalar $v2 = Vector::new(5, 10);
+        my int $eq = ($v1 == $v2);
+        if ($eq != 1) {
+            say("    FAIL: equal vectors returned " . $eq);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test overloaded negation
+    say("  Overloaded neg...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $v = Vector::new(3, -4);
+        my scalar $neg = -$v;
+        if ($neg->x() != -3 || $neg->y() != 4) {
+            say("    FAIL: negation");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test chained operations
+    say("  Chained operations...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $v1 = Vector::new(1, 1);
+        my scalar $v2 = Vector::new(2, 2);
+        my scalar $v3 = Vector::new(3, 3);
+        my scalar $result = $v1 + $v2 + $v3;
+        if ($result->x() != 6 || $result->y() != 6) {
+            say("    FAIL: chained add");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test mixed operations
+    say("  Mixed operations...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $v1 = Vector::new(10, 20);
+        my scalar $v2 = Vector::new(3, 5);
+        my scalar $diff = $v1 - $v2;
+        my scalar $scaled = $diff * 2;
+        my str $s = "" . $scaled;
+        if ($s ne "(14,30)") {
+            say("    FAIL: mixed ops = " . $s);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All operator overloading tests passed!");
+    return 0;
+}

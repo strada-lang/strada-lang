@@ -1,0 +1,55 @@
+# Regression for the self-append codegen optimization: `$s = $s . a . b . ...`
+# (left-deep `.` chain whose leftmost leaf is the assignment target) now lowers
+# to in-place strada_concat_inplace appends of the tail parts instead of a
+# fresh concat_multi copy of the whole accumulator (O(n) vs O(n^2)). Must stay
+# byte-identical to the naive build.
+package main;
+
+func twice(str $s) str { return $s . $s; }
+
+func main() int {
+    my int $pass = 1;
+
+    # 1. Multi-part ASCII self-append accumulation.
+    my str $a = "";
+    my int $i = 0;
+    while ($i < 5) { $a = $a . "[" . $i . "]"; $i = $i + 1; }
+    if ($a ne "[0][1][2][3][4]") { say("FAIL: ascii multi-part: " . $a); $pass = 0; }
+
+    # 2. Multibyte literals (the bytes()-not-length() fix): "ü"=2B, "ß—"=5B.
+    my str $b = "";
+    $i = 0;
+    while ($i < 3) { $b = $b . "ü" . $i . "ß—"; $i = $i + 1; }
+    #   3 iters * (2 + 1 + 5) bytes = 24 bytes
+    if (bytes($b) != 24) { say("FAIL: multibyte byte count: " . bytes($b)); $pass = 0; }
+    if ($b ne "ü0ß—ü1ß—ü2ß—") { say("FAIL: multibyte content: " . $b); $pass = 0; }
+
+    # 3. `=`+`.` must equal `.=` for the same work.
+    my str $c1 = "x"; my str $c2 = "x";
+    $i = 0;
+    while ($i < 10) { $c1 = $c1 . "-" . $i; $c2 .= "-" . $i; $i = $i + 1; }
+    if ($c1 ne $c2) { say("FAIL: =. vs .= differ: " . $c1 . " | " . $c2); $pass = 0; }
+
+    # 4. Self-reference `$x = $x . $x` (the aliasing case) must take the safe
+    #    fresh-copy fallback and still be correct.
+    my str $d = "ab";
+    $d = $d . $d;
+    if ($d ne "abab") { say("FAIL: self-ref: " . $d); $pass = 0; }
+    $d = $d . "!" . $d;            # target appears in the tail too -> fallback
+    if ($d ne "abab!abab") { say("FAIL: self-ref mixed: " . $d); $pass = 0; }
+
+    # 5. Tail part that is an owned call result (cleanup path).
+    my str $e = "";
+    $i = 0;
+    while ($i < 4) { $e = $e . twice("" . $i) . ","; $i = $i + 1; }
+    if ($e ne "00,11,22,33,") { say("FAIL: call-tail: " . $e); $pass = 0; }
+
+    # 6. Single-tail (2-part) still works (the original optimization).
+    my str $f = "";
+    $i = 0;
+    while ($i < 4) { $f = $f . "z"; $i = $i + 1; }
+    if ($f ne "zzzz") { say("FAIL: 2-part: " . $f); $pass = 0; }
+
+    if ($pass == 1) { say("test_self_append: all passed"); }
+    return 0;
+}

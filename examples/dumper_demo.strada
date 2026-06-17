@@ -1,0 +1,111 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# dumper_demo.strada - Demonstrating Strada's built-in dumper
+
+func create_person(str $name, int $age, str $city) hash {
+    my hash %person = ();
+    $person{"name"} = $name;
+    $person{"age"} = $age;
+    $person{"city"} = $city;
+    $person{"active"} = 1;
+    return \%person;
+}
+
+func create_address_book() hash {
+    my hash %book = ();
+    
+    my hash $alice = create_person("Alice", 30, "NYC");
+    my hash $bob = create_person("Bob", 25, "SF");
+    my hash $charlie = create_person("Charlie", 35, "LA");
+    
+    $book{"contacts"} = ();
+    $book{"contacts"}{"alice"} = $alice;
+    $book{"contacts"}{"bob"} = $bob;
+    $book{"contacts"}{"charlie"} = $charlie;
+    
+    my array @recent = ();
+    push(@recent, "alice");
+    push(@recent, "bob");
+    $book{"recent"} = \@recent;
+    
+    $book{"count"} = 3;
+    
+    return \%book;
+}
+
+func main() int {
+    say("=== Strada Data::Dumper Demo ===");
+    say("");
+    
+    # Simple scalar dump
+    say("Simple values:");
+    my int $number = 42;
+    dumper(\$number);
+    say("");
+    
+    my str $text = "Hello, Strada!";
+    dumper(\$text);
+    say("");
+    
+    # Array dump
+    say("Array:");
+    my array @fibonacci = (1, 1, 2, 3, 5, 8, 13, 21);
+    dumper(\@fibonacci);
+    say("");
+    
+    # Simple hash dump
+    say("Simple hash:");
+    my hash %config = ();
+    $config{"host"} = "localhost";
+    $config{"port"} = 8080;
+    $config{"debug"} = 1;
+    $config{"timeout"} = 30;
+    dumper(\%config);
+    say("");
+    
+    # Complex nested structure
+    say("Complex nested structure (address book):");
+    my hash $book = create_address_book();
+    dumper($book);
+    say("");
+    
+    # Array of hashes
+    say("Array of hashes:");
+    my array @users = ();
+    my hash $user1 = create_person("Dave", 28, "Boston");
+    my hash $user2 = create_person("Eve", 32, "Seattle");
+    push(@users, $user1);
+    push(@users, $user2);
+    dumper(\@users);
+    say("");
+    
+    # Mixed data types
+    say("Mixed data types:");
+    my hash %mixed = ();
+    $mixed{"string"} = "text";
+    $mixed{"number"} = 123;
+    $mixed{"float"} = 3.14159;
+    my array @nums = (1, 2, 3);
+    $mixed{"array"} = \@nums;
+    my hash %inner = ();
+    $inner{"key"} = "value";
+    $mixed{"hash"} = \%inner;
+    dumper(\%mixed);
+    
+    return 0;
+}

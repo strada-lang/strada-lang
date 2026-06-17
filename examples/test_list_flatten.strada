@@ -1,0 +1,48 @@
+# Regression test: Perl-style list flattening + `our` array mutation.
+# Covers the three codegen bugs fixed 2026-06:
+#   1. push() to an `our` array inside a function now persists.
+#   2. parenthesized list literals flatten in list context.
+#   3. array-returning function calls flatten (they return a ref internally;
+#      the flatten path unwraps it), as do array builtins — while array REFs
+#      `[...]` correctly do NOT flatten.
+
+our array @ACC = ();
+
+func collect(str $x) void { push(@ACC, $x); }
+
+func two() array { my array @r = ("x", "y"); return @r; }
+
+func main() int {
+    my int $fail = 0;
+
+    # (1) our-array push persists across function calls
+    collect("a"); collect("b"); collect("c");
+    if (size(@ACC) != 3) { say("FAIL our-push size=" . size(@ACC)); $fail = 1; }
+    if (join(",", @ACC) ne "a,b,c") { say("FAIL our-push join=" . join(",", @ACC)); $fail = 1; }
+
+    my array @base = ("1", "2");
+
+    # (2) parenthesized list literal flattens
+    my array @lit = (@base, ("3", "4"));
+    if (join(",", @lit) ne "1,2,3,4") { say("FAIL lit=" . join(",", @lit)); $fail = 1; }
+
+    # (3a) array-returning user function flattens
+    my array @fr = (@base, two());
+    if (join(",", @fr) ne "1,2,x,y") { say("FAIL userfn=" . join(",", @fr)); $fail = 1; }
+
+    # (3b) array builtin (split) flattens
+    my array @sp = (@base, split(",", "p,q"));
+    if (join(",", @sp) ne "1,2,p,q") { say("FAIL split=" . join(",", @sp)); $fail = 1; }
+
+    # arrayref [..] must NOT flatten — stays one element (a reference)
+    my array @ref = (@base, [9, 8]);
+    if (size(@ref) != 3) { say("FAIL arrayref flattened, size=" . size(@ref)); $fail = 1; }
+    if (ref($ref[2]) ne "ARRAY") { say("FAIL arrayref type=" . ref($ref[2])); $fail = 1; }
+
+    # nested flatten: list of lists
+    my array @nest = (("a", "b"), ("c", "d"), "e");
+    if (join(",", @nest) ne "a,b,c,d,e") { say("FAIL nest=" . join(",", @nest)); $fail = 1; }
+
+    if ($fail == 0) { say("All list-flatten tests passed"); }
+    return $fail;
+}

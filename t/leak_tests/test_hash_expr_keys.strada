@@ -1,0 +1,275 @@
+#!/usr/bin/env strada
+# Test hash operations with expression keys for memory leaks
+# Exercises _sv hash function variants (store, fetch, exists, delete)
+# Run: valgrind --leak-check=full ./test_hash_expr_keys
+
+func main() int {
+    say("Testing hash expression key operations for memory leaks...");
+    my int $iterations = 200;
+
+    # Test 1: Hash store with concatenated expression key (%hash{"prefix" . $var})
+    say("  store with concat key (NODE_HASH_ACCESS)...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        my int $j = 0;
+        while ($j < 10) {
+            my str $k = "key" . $j;
+            $h{$k} = $j;
+            $j = $j + 1;
+        }
+        if (scalar(keys(%h)) != 10) {
+            say("FAIL: expected 10 keys, got " . scalar(keys(%h)));
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 2: Hash fetch with concatenated expression key
+    say("  fetch with concat key (NODE_HASH_ACCESS)...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ("key0" => 100, "key1" => 200, "key2" => 300);
+        my int $j = 0;
+        my int $sum = 0;
+        while ($j < 3) {
+            my str $k = "key" . $j;
+            $sum = $sum + $h{$k};
+            $j = $j + 1;
+        }
+        if ($sum != 600) {
+            say("FAIL: expected sum 600, got " . $sum);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 3: Hash exists with concatenated expression key
+    say("  exists with concat key (NODE_HASH_ACCESS)...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ("key0" => 1, "key2" => 2, "key4" => 3);
+        my int $found = 0;
+        my int $j = 0;
+        while ($j < 5) {
+            my str $k = "key" . $j;
+            if (exists($h{$k})) {
+                $found = $found + 1;
+            }
+            $j = $j + 1;
+        }
+        if ($found != 3) {
+            say("FAIL: expected 3 found, got " . $found);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 4: Hash delete with concatenated expression key
+    say("  delete with concat key (NODE_HASH_ACCESS)...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        my int $j = 0;
+        while ($j < 10) {
+            $h{"item" . $j} = $j * 10;
+            $j = $j + 1;
+        }
+        $j = 0;
+        while ($j < 10) {
+            delete($h{"item" . $j});
+            $j = $j + 1;
+        }
+        if (scalar(keys(%h)) != 0) {
+            say("FAIL: expected 0 keys after delete, got " . scalar(keys(%h)));
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 5: Deref hash store with expression key ($ref->{"prefix" . $var})
+    say("  store with concat key (NODE_DEREF_HASH)...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $h = {};
+        my int $j = 0;
+        while ($j < 10) {
+            $h->{"k" . $j} = "val" . $j;
+            $j = $j + 1;
+        }
+        my array @k = keys(%{$h});
+        if (scalar(@k) != 10) {
+            say("FAIL: expected 10 keys, got " . scalar(@k));
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 6: Deref hash fetch with expression key
+    say("  fetch with concat key (NODE_DEREF_HASH)...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $h = {"a0" => "x", "a1" => "y", "a2" => "z"};
+        my str $result = "";
+        my int $j = 0;
+        while ($j < 3) {
+            $result = $result . $h->{"a" . $j};
+            $j = $j + 1;
+        }
+        if ($result ne "xyz") {
+            say("FAIL: expected 'xyz', got '" . $result . "'");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 7: Deref hash exists with expression key
+    say("  exists with concat key (NODE_DEREF_HASH)...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $h = {"b1" => 1, "b3" => 3};
+        my int $found = 0;
+        my int $j = 0;
+        while ($j < 5) {
+            if (exists($h->{"b" . $j})) {
+                $found = $found + 1;
+            }
+            $j = $j + 1;
+        }
+        if ($found != 2) {
+            say("FAIL: expected 2, got " . $found);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 8: Deref hash delete with expression key
+    say("  delete with concat key (NODE_DEREF_HASH)...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $h = {"c0" => 0, "c1" => 1, "c2" => 2, "c3" => 3, "c4" => 4};
+        my int $j = 0;
+        while ($j < 5) {
+            delete($h->{"c" . $j});
+            $j = $j + 1;
+        }
+        my array @k = keys(%{$h});
+        if (scalar(@k) != 0) {
+            say("FAIL: expected 0 keys, got " . scalar(@k));
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 9: Two-arg exists form
+    say("  exists two-arg form...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $h = {"x0" => 1, "x1" => 2};
+        my int $j = 0;
+        my int $found = 0;
+        while ($j < 4) {
+            my str $k = "x" . $j;
+            if (exists($h, $k)) {
+                $found = $found + 1;
+            }
+            $j = $j + 1;
+        }
+        if ($found != 2) {
+            say("FAIL: expected 2, got " . $found);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 10: Two-arg delete form
+    say("  delete two-arg form...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $h = {"d0" => 10, "d1" => 20, "d2" => 30};
+        my int $j = 0;
+        while ($j < 3) {
+            my str $k = "d" . $j;
+            delete($h, $k);
+            $j = $j + 1;
+        }
+        my array @k = keys(%{$h});
+        if (scalar(@k) != 0) {
+            say("FAIL: expected 0 keys, got " . scalar(@k));
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 11: Mixed store/fetch/exists/delete with same expression keys (stress test)
+    say("  mixed ops with expression keys...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %cache = ();
+        my int $j = 0;
+        while ($j < 20) {
+            my str $k = "entry" . $j;
+            $cache{$k} = $j * $j;
+            $j = $j + 1;
+        }
+        # Fetch all
+        $j = 0;
+        my int $sum = 0;
+        while ($j < 20) {
+            $sum = $sum + $cache{"entry" . $j};
+            $j = $j + 1;
+        }
+        # Delete odd entries
+        $j = 1;
+        while ($j < 20) {
+            delete($cache{"entry" . $j});
+            $j = $j + 2;
+        }
+        # Check exists for remaining
+        $j = 0;
+        my int $remaining = 0;
+        while ($j < 20) {
+            if (exists($cache{"entry" . $j})) {
+                $remaining = $remaining + 1;
+            }
+            $j = $j + 1;
+        }
+        if ($remaining != 10) {
+            say("FAIL: expected 10 remaining, got " . $remaining);
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 12: Integer keys (exercises fallback path in sv_key_extract)
+    say("  integer expression keys...");
+    $i = 0;
+    while ($i < $iterations) {
+        my hash %h = ();
+        my int $j = 0;
+        while ($j < 10) {
+            $h{$j + 100} = "v" . $j;
+            $j = $j + 1;
+        }
+        if (scalar(keys(%h)) != 10) {
+            say("FAIL: expected 10 keys, got " . scalar(keys(%h)));
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All hash expression key tests passed!");
+    return 0;
+}

@@ -1,0 +1,108 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_bool_context.strada - Arrays and hashes in boolean context
+#
+# In Strada (like Perl), arrays and hashes can be used directly
+# in conditions:
+#   - Empty arrays/hashes are FALSE
+#   - Non-empty arrays/hashes are TRUE
+#
+# This enables idiomatic patterns like:
+#   while (@queue) { ... }
+#   if (%options) { ... }
+
+func main() int {
+    say("=== Arrays in boolean context ===\n");
+
+    # while (@array) - process until empty
+    my array @queue = ("task1", "task2", "task3");
+    say("Processing queue:");
+    while (@queue) {
+        my scalar $task = shift(@queue);
+        say("  Processing: " . $task);
+    }
+    say("Queue empty!\n");
+
+    # if (@array) - check if has elements
+    my array @results = ();
+    if (@results) {
+        say("Has results");
+    } else {
+        say("No results yet");
+    }
+
+    push(@results, "found something");
+    if (@results) {
+        say("Now has results: " . size(@results) . " item(s)\n");
+    }
+
+    say("=== Hashes in boolean context ===\n");
+
+    # while (%hash) - process until empty
+    my hash %todo = ();
+    $todo{"dishes"} = "kitchen";
+    $todo{"laundry"} = "bedroom";
+    $todo{"vacuum"} = "living room";
+
+    say("Completing chores:");
+    while (%todo) {
+        my array @tasks = keys(%todo);
+        my str $task = $tasks[0];
+        say("  Done: " . $task . " in " . $todo{$task});
+        delete($todo{$task});
+    }
+    say("All chores done!\n");
+
+    # if (%hash) - check if has keys
+    my hash %config = ();
+    if (%config) {
+        say("Config loaded");
+    } else {
+        say("No config - using defaults");
+    }
+
+    $config{"debug"} = "true";
+    if (%config) {
+        say("Config now has " . size(%config) . " setting(s)\n");
+    }
+
+    # Combining with logical operators
+    say("=== Combined conditions ===\n");
+
+    my array @errors = ();
+    my array @warnings = ("minor issue");
+
+    if (@errors || @warnings) {
+        say("Issues found:");
+        if (@errors) {
+            say("  Errors: " . size(@errors));
+        }
+        if (@warnings) {
+            say("  Warnings: " . size(@warnings));
+        }
+    }
+
+    if (!@errors && !@warnings) {
+        say("All clear!");
+    } elsif (!@errors) {
+        say("No errors, but has warnings");
+    }
+
+    say("\n=== All tests passed! ===");
+    return 0;
+}

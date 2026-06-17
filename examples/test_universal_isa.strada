@@ -1,0 +1,104 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_universal_isa.strada - Demonstrates UNIVERSAL::isa() for type checking
+#
+# UNIVERSAL::isa($obj, "Package") is a Perl-style way to check if an object
+# is of a certain type. It's equivalent to isa($obj, "Package") but uses
+# the UNIVERSAL:: namespace prefix.
+
+func Animal_new(str $name) scalar {
+    my hash %self = ();
+    $self{"name"} = $name;
+    $self{"type"} = "animal";
+    return bless(\%self, "Animal");
+}
+
+func Dog_new(str $name, str $breed) scalar {
+    my hash %self = ();
+    $self{"name"} = $name;
+    $self{"breed"} = $breed;
+    $self{"type"} = "dog";
+    return bless(\%self, "Dog");
+}
+
+func Cat_new(str $name) scalar {
+    my hash %self = ();
+    $self{"name"} = $name;
+    $self{"type"} = "cat";
+    return bless(\%self, "Cat");
+}
+
+func main() int {
+    say("=== UNIVERSAL::isa() Example ===\n");
+
+    # Set up inheritance: Dog inherits from Animal
+    inherit("Dog", "Animal");
+    inherit("Cat", "Animal");
+
+    my scalar $dog = Dog_new("Rex", "German Shepherd");
+    my scalar $cat = Cat_new("Whiskers");
+    my scalar $animal = Animal_new("Generic");
+
+    say("Created objects:");
+    say("  \$dog = Dog (Rex, German Shepherd)");
+    say("  \$cat = Cat (Whiskers)");
+    say("  \$animal = Animal (Generic)\n");
+
+    # Check dog's type
+    say("Checking \$dog:");
+    if (UNIVERSAL::isa($dog, "Dog")) {
+        say("  UNIVERSAL::isa(\$dog, 'Dog') = TRUE");
+    }
+    if (UNIVERSAL::isa($dog, "Animal")) {
+        say("  UNIVERSAL::isa(\$dog, 'Animal') = TRUE (inherited)");
+    }
+    if (!UNIVERSAL::isa($dog, "Cat")) {
+        say("  UNIVERSAL::isa(\$dog, 'Cat') = FALSE");
+    }
+
+    # Check cat's type
+    say("\nChecking \$cat:");
+    if (UNIVERSAL::isa($cat, "Cat")) {
+        say("  UNIVERSAL::isa(\$cat, 'Cat') = TRUE");
+    }
+    if (UNIVERSAL::isa($cat, "Animal")) {
+        say("  UNIVERSAL::isa(\$cat, 'Animal') = TRUE (inherited)");
+    }
+    if (!UNIVERSAL::isa($cat, "Dog")) {
+        say("  UNIVERSAL::isa(\$cat, 'Dog') = FALSE");
+    }
+
+    # Check animal's type
+    say("\nChecking \$animal:");
+    if (UNIVERSAL::isa($animal, "Animal")) {
+        say("  UNIVERSAL::isa(\$animal, 'Animal') = TRUE");
+    }
+    if (!UNIVERSAL::isa($animal, "Dog")) {
+        say("  UNIVERSAL::isa(\$animal, 'Dog') = FALSE (parent doesn't match child)");
+    }
+
+    # Compare with traditional isa()
+    say("\n--- Comparison with traditional isa() ---");
+    say("UNIVERSAL::isa(\$dog, 'Dog') is equivalent to isa(\$dog, 'Dog')");
+    if (isa($dog, "Dog") && UNIVERSAL::isa($dog, "Dog")) {
+        say("  Both return TRUE for \$dog");
+    }
+
+    say("\n=== Example Complete ===");
+    return 0;
+}

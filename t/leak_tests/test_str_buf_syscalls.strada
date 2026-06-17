@@ -1,0 +1,134 @@
+#!/usr/bin/env strada
+# Test strada_to_str_buf conversions in syscall wrappers (Phase 4)
+# Verifies no leaks when calling system functions that previously
+# used strada_to_str (malloc+free) and now use stack buffers.
+# Run: valgrind --leak-check=full ./test_str_buf_syscalls
+
+func main() int {
+    say("Testing str_buf conversions in syscalls...");
+    my int $iterations = 50;
+
+    # Test 1: getenv/setenv (converted to str_buf)
+    say("  getenv/setenv...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        core::setenv("STRADA_LEAK_TEST", "value_" . $i, 1);
+        my str $val = core::getenv("STRADA_LEAK_TEST");
+        if ($val ne "value_" . $i) {
+            say("    FAIL: setenv/getenv");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    core::unsetenv("STRADA_LEAK_TEST");
+    say("    PASS");
+
+    # Test 2: File operations (open, read, write, close)
+    say("  File I/O...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $tmpfile = "/tmp/strada_leak_test_strbuf_" . $i . ".txt";
+        core::spew($tmpfile, "test content " . $i);
+        my str $content = core::slurp($tmpfile);
+        if ($content ne "test content " . $i) {
+            say("    FAIL: file I/O");
+            return 1;
+        }
+        core::unlink($tmpfile);
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 3: String operations (length, substr, print to string)
+    say("  String operations via str_buf...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $s = "hello world " . $i;
+        my int $len = length($s);
+        my str $sub = substr($s, 0, 5);
+        if ($sub ne "hello" || $len < 12) {
+            say("    FAIL: string ops");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 4: Filesystem stat/access (path uses PATH_MAX buffer)
+    say("  Filesystem path operations...");
+    $i = 0;
+    while ($i < $iterations) {
+        my int $exists = core::access("/tmp", 0);
+        my int $is_dir = core::is_dir("/tmp");
+        if ($exists != 0 || !$is_dir) {
+            say("    FAIL: filesystem");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 5: sprintf (format string via str_buf)
+    say("  sprintf formatting...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $result = sprintf("item_%d_val_%s", $i, "test");
+        if (length($result) < 14) {
+            say("    FAIL: sprintf");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 6: join (element conversion via str_buf)
+    say("  Array join...");
+    $i = 0;
+    while ($i < $iterations) {
+        my array @nums = (1, 2, 3, 4, 5);
+        my str $joined = join(",", @nums);
+        if ($joined ne "1,2,3,4,5") {
+            say("    FAIL: join");
+            return 1;
+        }
+        my array @strs = ("a", "b", "c");
+        my str $joined2 = join("-", @strs);
+        if ($joined2 ne "a-b-c") {
+            say("    FAIL: join strings");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 7: realpath (uses PATH_MAX str_buf)
+    say("  Realpath...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $rp = core::realpath("/tmp");
+        if (length($rp) < 1) {
+            say("    FAIL: realpath");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    # Test 8: Global registry (key via str_buf)
+    say("  Global registry...");
+    $i = 0;
+    while ($i < $iterations) {
+        core::global_set("test::key_" . $i, "val_" . $i);
+        my scalar $v = core::global_get("test::key_" . $i);
+        if ("" . $v ne "val_" . $i) {
+            say("    FAIL: global registry");
+            return 1;
+        }
+        core::global_delete("test::key_" . $i);
+        $i = $i + 1;
+    }
+    say("    PASS");
+
+    say("All str_buf syscall tests passed!");
+    return 0;
+}

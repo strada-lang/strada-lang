@@ -1,0 +1,57 @@
+# Regression test: parse_equality must descend into parse_regex_match on
+# the RHS, not parse_relational. The regex-match precedence layer sits
+# *between* equality and relational, so without the fix, the RHS of
+# ==/!=/eq/ne couldn't contain =~ — Perl's standard precedence has it
+# the other way (=~ binds tighter than ==).
+#
+# Expected output:
+#   All tests passed
+
+func main() int {
+    my int $fail = 0;
+
+    # 1. `1 == ("foo" =~ /foo/)`: without parens, =~ should bind tighter
+    #    so the expression evaluates to 1 == 1 → true.
+    my str $s = "foo";
+    my int $r1 = 1 == $s =~ /foo/;
+    if ($r1 != 1) {
+        say("FAIL r1: expected 1 got " . $r1);
+        $fail++;
+    }
+
+    # 2. `0 == ($s =~ /nope/)`: regex fails, so RHS is 0 (or empty),
+    #    and 0 == 0 → true.
+    my int $r2 = 0 == $s =~ /nope/;
+    if ($r2 != 1) {
+        say("FAIL r2: expected 1 got " . $r2);
+        $fail++;
+    }
+
+    # 3. With eq: stringly compare "1" eq ($s =~ /foo/).
+    #    Regex returns 1 on match, which stringifies to "1".
+    my int $r3 = "1" eq $s =~ /foo/;
+    if ($r3 != 1) {
+        say("FAIL r3: expected 1 got " . $r3);
+        $fail++;
+    }
+
+    # 4. With !=: `1 != ($s =~ /foo/)` → 1 != 1 → false (0).
+    my int $r4 = 1 != $s =~ /foo/;
+    if ($r4 != 0) {
+        say("FAIL r4: expected 0 got " . $r4);
+        $fail++;
+    }
+
+    # 5. With ne: "1" ne ($s =~ /nope/) → "1" ne "" → true.
+    my int $r5 = "1" ne $s =~ /nope/;
+    if ($r5 != 1) {
+        say("FAIL r5: expected 1 got " . $r5);
+        $fail++;
+    }
+
+    if ($fail == 0) {
+        say("All tests passed");
+        return 0;
+    }
+    return 1;
+}

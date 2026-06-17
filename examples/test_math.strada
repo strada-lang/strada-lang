@@ -1,0 +1,102 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_math.strada - Test math functions
+
+func test_trig() void {
+    say("=== Trigonometry ===");
+
+    my num $pi = 3.14159265358979;
+
+    say("math::sin(0) = " . math::sin(0));
+    say("math::cos(0) = " . math::cos(0));
+    say("math::tan(0) = " . math::tan(0));
+
+    say("math::sin(pi/2) = " . math::sin($pi / 2));
+    say("math::cos(pi) = " . math::cos($pi));
+
+    say("math::asin(1) = " . math::asin(1));
+    say("math::acos(0) = " . math::acos(0));
+    say("math::atan(1) = " . math::atan(1));
+    say("math::atan2(1, 1) = " . math::atan2(1, 1));
+
+    say("");
+}
+
+func test_hyperbolic() void {
+    say("=== Hyperbolic ===");
+
+    say("math::sinh(0) = " . math::sinh(0));
+    say("math::cosh(0) = " . math::cosh(0));
+    say("math::tanh(0) = " . math::tanh(0));
+
+    say("math::sinh(1) = " . math::sinh(1));
+    say("math::cosh(1) = " . math::cosh(1));
+    say("math::tanh(1) = " . math::tanh(1));
+
+    say("");
+}
+
+func test_exponential() void {
+    say("=== Exponential & Logarithmic ===");
+
+    say("math::exp(0) = " . math::exp(0));
+    say("math::exp(1) = " . math::exp(1));
+
+    say("math::log(1) = " . math::log(1));
+    say("math::log(2.718281828) = " . math::log(2.718281828));
+
+    say("math::log10(10) = " . math::log10(10));
+    say("math::log10(100) = " . math::log10(100));
+
+    say("math::pow(2, 10) = " . math::pow(2, 10));
+    say("math::pow(10, 3) = " . math::pow(10, 3));
+
+    say("");
+}
+
+func test_rounding() void {
+    say("=== Rounding ===");
+
+    say("math::floor(3.7) = " . math::floor(3.7));
+    say("math::floor(-3.7) = " . math::floor(-3.7));
+
+    say("math::ceil(3.2) = " . math::ceil(3.2));
+    say("math::ceil(-3.2) = " . math::ceil(-3.2));
+
+    say("math::round(3.5) = " . math::round(3.5));
+    say("math::round(3.4) = " . math::round(3.4));
+    say("math::round(-3.5) = " . math::round(-3.5));
+
+    say("math::fabs(-5.5) = " . math::fabs(-5.5));
+    say("math::fmod(10.5, 3) = " . math::fmod(10.5, 3));
+
+    say("");
+}
+
+func main() int {
+    say("=== Math Functions Test ===");
+    say("");
+
+    test_trig();
+    test_hyperbolic();
+    test_exponential();
+    test_rounding();
+
+    say("All math tests completed!");
+    return 0;
+}

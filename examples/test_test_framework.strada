@@ -1,0 +1,17 @@
+use lib "lib";
+use Test;
+
+func main() int {
+    Test::ok(1 == 1, "ok truthy");
+    Test::nok(0, "nok falsy");
+    Test::is("abc", "abc", "is strings");
+    Test::is(42, "42", "is stringifies");
+    Test::isnt("a", "b", "isnt");
+    Test::is_num(2.5, 2.5, "is_num");
+    Test::like("hello world", "wor\\w+", "like");
+    Test::unlike("hello", "\\d+", "unlike");
+    Test::skip("not today", "skipped thing");
+    my scalar $u;
+    Test::is($u, $u, "is undef==undef");
+    return Test::done_testing();
+}

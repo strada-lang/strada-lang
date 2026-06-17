@@ -1,0 +1,117 @@
+# bench_event_loop.strada — task-based echo throughput on one Async::Loop.
+#
+#   ./strada -O2 examples/bench_event_loop.strada -o bench && ./bench
+#
+# Spawns ACCEPTORS accept-tasks + CLIENTS client-tasks on a single loop;
+# every client does ROUNDS echo round-trips. Everything (server and
+# clients) shares one OS thread, so the req/s number measures loop +
+# green-task overhead, not parallelism. A sequential blocking baseline
+# (one connection, same total round-trips) runs first for comparison.
+
+use lib "lib";
+use Async::Loop;
+use Async::Task;
+
+const int ACCEPTORS = 4;
+const int CLIENTS = 50;
+const int ROUNDS = 40;
+
+our int $g_done_clients = 0;
+our int $g_end_ms = 0;
+
+func bench_blocking(int $port, int $total) num {
+    my scalar $c = core::socket_client("127.0.0.1", $port);
+    my int $t0 = core::mono_ms();
+    my int $i = 0;
+    while ($i < $total) {
+        core::socket_send($c, "ping\n");
+        my str $r = core::socket_recv($c, 64);
+        $i = $i + 1;
+    }
+    my int $took = core::mono_ms() - $t0;
+    core::socket_close($c);
+    return $took > 0 ? ($total * 1000.0) / $took : 0;
+}
+
+func main() int {
+    my int $port = 38970;
+    my scalar $listener = core::socket_server($port);
+    if (!defined($listener)) {
+        say("could not bind port " . $port);
+        return 1;
+    }
+
+    # --- Baseline: blocking echo peer in a thread-pool worker ---
+    my scalar $srv = async::spawn(fn () scalar {
+        my scalar $conn = core::socket_accept($listener);
+        my int $n = 0;
+        while ($n < ACCEPTORS * 0 + (CLIENTS * ROUNDS)) {
+            my str $m = core::socket_recv($conn, 64);
+            if (length($m) == 0) { last; }
+            core::socket_send($conn, $m);
+            $n = $n + 1;
+        }
+        core::socket_close($conn);
+        return 0;
+    });
+    my num $base_rps = bench_blocking($port, CLIENTS * ROUNDS);
+    await $srv;
+    say("blocking baseline:  " . math::round($base_rps) . " req/s (1 connection, sequential)");
+
+    # --- Event loop: ACCEPTORS accept-tasks, CLIENTS concurrent clients ---
+    my scalar $loop = Async::Loop::new();
+    $g_done_clients = 0;
+
+    my int $a = 0;
+    while ($a < ACCEPTORS) {
+        $loop->spawn(fn () {
+            while (1) {
+                my scalar $conn = Async::Task::accept($listener, 2000);
+                if (!defined($conn)) { last; }   # idle: benchmark over
+                $loop->spawn(fn () {
+                    my int $served = 0;
+                    while ($served < ROUNDS) {
+                        my str $m = Async::Task::recv($conn, 64);
+                        if (length($m) == 0) { last; }
+                        Async::Task::send($conn, $m);
+                        $served = $served + 1;
+                    }
+                    core::socket_close($conn);
+                });
+            }
+        });
+        $a = $a + 1;
+    }
+
+    my int $t0 = core::mono_ms();
+    my int $k = 0;
+    while ($k < CLIENTS) {
+        $loop->spawn(fn () {
+            my scalar $c = Async::Task::connect("127.0.0.1", $port);
+            my int $r = 0;
+            while ($r < ROUNDS) {
+                Async::Task::send($c, "ping\n");
+                my str $reply = Async::Task::recv($c, 64);
+                $r = $r + 1;
+            }
+            core::socket_close($c);
+            $g_done_clients = $g_done_clients + 1;
+            if ($g_done_clients == CLIENTS) {
+                $g_end_ms = core::mono_ms();
+                $loop->stop();   # don't wait for the acceptors' idle timeout
+            }
+        });
+        $k = $k + 1;
+    }
+
+    $loop->run();
+    my int $took = ($g_end_ms > 0 ? $g_end_ms : core::mono_ms()) - $t0;
+    core::socket_close($listener);
+
+    my int $total = CLIENTS * ROUNDS;
+    my num $rps = $took > 0 ? ($total * 1000.0) / $took : 0;
+    say("event loop (tasks): " . math::round($rps) . " req/s (" . CLIENTS .
+        " concurrent connections x " . ROUNDS . " round-trips, " .
+        $g_done_clients . "/" . CLIENTS . " clients completed, one thread)");
+    return 0;
+}

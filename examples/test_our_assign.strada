@@ -1,0 +1,102 @@
+# Regression test: whole-array / whole-hash assignment to `our` (package
+# global) containers. These paths in CodeGenExpr (the `our`-array and
+# `our`-hash branches of NODE_ASSIGN) historically had three bugs:
+#
+#   1. `@our = ("x")`  — a single-element parenthesized list parses to a bare
+#      scalar node (the parser collapses 1-elem parens), and the `our`-array
+#      path stored that scalar directly as the global instead of wrapping it
+#      in a 1-element array. size() then returned strlen(), join() saw nothing.
+#      This silently dropped `-ldl` from the compiler driver's link line and
+#      broke tool builds on glibc < 2.34 ("undefined reference to dlopen").
+#   2. `%our = (...)` — the `our`-hash case had NO dedicated branch and fell
+#      through to the local-hash path, which emits `strada_global_get(...) = ...`
+#      (a non-lvalue) — a hard C compile error for *every* such reassignment.
+#   3. `@our = @other` — stored a shared ref to the source array, so a later
+#      push/edit to either mutated both (aliasing).
+#
+# Keep this passing; it guards all three.
+
+our array @OA = ();
+our hash  %OH = ();
+
+func set_arr_single() void { @OA = ("x"); }            # bug #1 (from a function)
+func set_arr_multi()  void { @OA = ("a", "b", "c"); }
+func set_arr_var(array @src) void { @OA = @src; }      # bug #3
+func set_hash_single() void { %OH = ("only" => 9); }   # bug #2
+func set_hash_multi()  void { %OH = ("a" => 1, "b" => 2); }
+
+our int $failures = 0;
+
+func ck(str $label, int $got, int $want) void {
+    if ($got != $want) {
+        say("FAIL: " . $label . " got=" . $got . " want=" . $want);
+        $failures = $failures + 1;
+    }
+}
+
+func cks(str $label, str $got, str $want) void {
+    if ($got ne $want) {
+        say("FAIL: " . $label . " got='" . $got . "' want='" . $want . "'");
+        $failures = $failures + 1;
+    }
+}
+
+func main() int {
+    # --- bug #1: single-element list to an `our` array (the -ldl case) ---
+    @OA = ("-ldl");                       # bare 1-elem paren list, from main
+    ck("our-arr single main: size", size(@OA), 1);
+    cks("our-arr single main: elem", $OA[0], "-ldl");
+    cks("our-arr single main: join", join(",", @OA), "-ldl");
+
+    set_arr_single();                     # same, but assigned inside a function
+    ck("our-arr single func: size", size(@OA), 1);
+    cks("our-arr single func: elem", $OA[0], "x");
+
+    # --- multi-element and empty `our` array ---
+    set_arr_multi();
+    ck("our-arr multi: size", size(@OA), 3);
+    cks("our-arr multi: join", join(",", @OA), "a,b,c");
+    @OA = ();
+    ck("our-arr empty: size", size(@OA), 0);
+
+    # --- bug #3: `@our = @other` must COPY, not alias ---
+    my array @src = (10, 20);
+    set_arr_var(@src);
+    ck("our-arr from-var: size", size(@OA), 2);
+    push(@src, 30);                       # must NOT grow @OA
+    ck("our-arr no-alias after push", size(@OA), 2);
+
+    # local single-element array (regression guard for the shared codepath)
+    my array @LA = ("z");
+    ck("local-arr single: size", size(@LA), 1);
+    cks("local-arr single: elem", $LA[0], "z");
+
+    # --- bug #2: whole-hash assignment to an `our` hash (must compile + run) ---
+    %OH = ("k" => "v");                   # single pair, from main
+    ck("our-hash single main: size", size(%OH), 1);
+    cks("our-hash single main: val", $OH{"k"}, "v");
+
+    set_hash_single();                    # single pair, from a function
+    ck("our-hash single func: size", size(%OH), 1);
+    ck("our-hash single func: val", $OH{"only"}, 9);
+
+    set_hash_multi();
+    ck("our-hash multi: size", size(%OH), 2);
+
+    # `%our = %other` must copy (no aliasing)
+    my hash %src2 = ("p" => 1, "q" => 2);
+    %OH = %src2;
+    ck("our-hash from-var: size", size(%OH), 2);
+    $src2{"r"} = 3;                       # must NOT grow %OH
+    ck("our-hash no-alias after set", size(%OH), 2);
+
+    %OH = ();
+    ck("our-hash empty: size", size(%OH), 0);
+
+    if ($failures == 0) {
+        say("All our-assign tests passed");
+    } else {
+        say($failures . " our-assign test(s) FAILED");
+    }
+    return 0;
+}

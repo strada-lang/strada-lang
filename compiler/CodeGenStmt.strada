@@ -1,0 +1,4544 @@
+# Emit an `our` global's initializer expression, picking the right empty
+# container for a bare `()` based on the declared sigil/type. Without this,
+# `our array @G = ()` was emitted as strada_anon_hash(0) — an empty HASH —
+# so push(@G, ...) inside a function deref_array'd a hash, got NULL, and
+# silently no-op'd (the array mutation never persisted). `()` is parsed as
+# an empty NODE_ANON_HASH regardless of sigil, so the container choice has
+# to be made here. Mirrors the non-`our` global path's special case.
+func emit_our_global_init(scalar $cg, scalar $init, str $sigil, int $var_type) void {
+    my int $it = $init->{"type"};
+    my int $is_hash_target = 0;
+    if ($sigil eq "%" || $var_type == TYPE_HASH()) { $is_hash_target = 1; }
+    my int $is_array_target = 0;
+    if ($sigil eq "@" || $var_type == TYPE_ARRAY()) { $is_array_target = 1; }
+
+    # Empty `()` is parsed as an empty NODE_ANON_HASH regardless of sigil.
+    if ($it == NODE_ANON_HASH() && $init->{"pair_count"} == 0) {
+        if ($is_array_target == 1) { emit($cg, "strada_new_array()"); return; }
+        if ($is_hash_target == 1) { emit($cg, "strada_new_hash()"); return; }
+    }
+
+    # A hash global initialized from a pair-list `("a" => 1)` (which parses as a
+    # flat NODE_ANON_ARRAY), a map, or an @array must be BUILT into a hash —
+    # mirrors the `my hash %h = (...)` path. Without this, `our hash %H = (...)`
+    # stored a flat ARRAY, so $H{k} access/store operated on an array.
+    if ($is_hash_target == 1) {
+        my int $is_array_var = 0;
+        if ($it == NODE_VARIABLE() && $init->{"sigil"} eq "@") { $is_array_var = 1; }
+        if ($it == NODE_MAP() || $it == NODE_ANON_ARRAY() || $is_array_var == 1) {
+            emit($cg, "strada_hash_from_flat_array(");
+            gen_expression($cg, $init);
+            emit($cg, ")");
+            return;
+        }
+    }
+    gen_expression($cg, $init);
+}
+
+func gen_block(scalar $cg, scalar $block) void {
+    emit($cg, "{\n");
+    indent($cg);
+    scope_push($cg);
+
+    # Block-scope the int/num type registries. They are keyed by C name, so
+    # without save/restore a nested block's `my int $result` would leak onto
+    # a sibling/outer `my str $result` (same C name, different binding) and
+    # poison later assignments with int coercion — strada_to_int("text") = 0.
+    # (Root cause of the tree-walk s/// handler returning "0".)
+    my hash %saved_int_vars = ();
+    my hash %saved_num_vars = ();
+    foreach my str $iv_k (keys(%{$cg->{"int_vars"}})) {
+        $saved_int_vars{$iv_k} = $cg->{"int_vars"}->{$iv_k};
+    }
+    foreach my str $nv_k (keys(%{$cg->{"num_vars"}})) {
+        $saved_num_vars{$nv_k} = $cg->{"num_vars"}->{$nv_k};
+    }
+
+    my scalar $stmts = $block->{"statements"};
+    my int $i = 0;
+    while ($i < $block->{"statement_count"}) {
+        gen_statement($cg, $stmts->[$i]);
+        $i = $i + 1;
+    }
+
+    $cg->{"int_vars"} = \%saved_int_vars;
+    $cg->{"num_vars"} = \%saved_num_vars;
+
+    scope_pop($cg);
+    dedent($cg);
+    emit_indent($cg);
+    emit($cg, "}");
+}
+
+# Emit the return-value expression. Int-returning functions coerce values
+# the codegen can't prove int-typed into canonical ints
+# (strada_new_int(strada_to_int(...))): int-declared storage and the
+# int-call fast paths (emit_int_operand's STRADA_TAGGED_INT_VAL extraction)
+# assume canonical int results, but e.g. `return $str_param;` from an int
+# function previously returned the shared string pointer. Returns 1 when
+# the value was coerced — the result is then a fresh OWNED value and the
+# caller must skip its return_needs_incref logic.
+func gen_return_value(scalar $cg, scalar $value) int {
+    if ($cg->{"ret_is_num"} == 1 && expr_is_numeric($cg, $value) == 0) {
+        emit($cg, "({ StradaValue *__rcv = ");
+        gen_expression($cg, $value);
+        emit($cg, "; StradaValue *__rcr = strada_new_num(strada_to_num(__rcv)); ");
+        if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $value) == 1) {
+            emit($cg, "strada_decref(__rcv); ");
+        }
+        emit($cg, "__rcr; })");
+        return 1;
+    }
+    if ($cg->{"ret_is_int"} == 1 && expr_is_int_typed($cg, $value) == 0) {
+        emit($cg, "({ StradaValue *__rcv = ");
+        gen_expression($cg, $value);
+        emit($cg, "; StradaValue *__rcr = strada_new_int(strada_to_int(__rcv)); ");
+        if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $value) == 1) {
+            emit($cg, "strada_decref(__rcv); ");
+        }
+        emit($cg, "__rcr; })");
+        return 1;
+    }
+    gen_expression($cg, $value);
+    return 0;
+}
+
+func gen_statement(scalar $cg, scalar $stmt) void {
+    # Emit #line directive for source-level debugging
+    emit_line_for_stmt($cg, $stmt);
+
+    # Emit line-level profiling call if full profiling enabled
+    if ($cg->{"full_profile"} == 1) {
+        my int $fp_line = $stmt->{"line"} + 0;
+        if ($fp_line > 0) {
+            emit_indent($cg);
+            emit($cg, "strada_full_profile_line(__fp_file_id, " . $fp_line . ");\n");
+        }
+    }
+
+    my int $type = $stmt->{"type"};
+
+    # Variable declaration
+    if ($type == NODE_VAR_DECL()) {
+        emit_indent($cg);
+
+        # Track local variables when inside anonymous function
+        if ($cg->{"in_anon_func"}) {
+            my str $var_name = $stmt->{"name"};
+            my str $local_str = $cg->{"anon_local_str"};
+            if ($local_str eq "") {
+                $cg->{"anon_local_str"} = $var_name;
+            } else {
+                $cg->{"anon_local_str"} = $local_str . "," . $var_name;
+            }
+        }
+
+        my str $sigil = $stmt->{"sigil"};
+        my int $var_type = $stmt->{"var_type"};
+        # Escape C keywords in variable names (e.g., $for -> v_for)
+        my str $c_name = escape_c_keyword($stmt->{"name"});
+
+        # Track int-typed variables for arithmetic optimization
+        if ($var_type == TYPE_INT()) {
+            $cg->{"int_vars"}->{$c_name} = 1;
+        }
+        # Track num-typed variables for the numeric-coercion predicate
+        if ($var_type == TYPE_NUM()) {
+            $cg->{"num_vars"}->{$c_name} = 1;
+        }
+
+        if ($sigil eq "%" || $var_type == TYPE_HASH()) {
+            emit_sv_ptr_decl($cg, $c_name);
+            if ($stmt->{"init"}) {
+                emit($cg, " = ");
+                # Handle empty () which parser returns as anon_hash
+                my scalar $init = $stmt->{"init"};
+                if ($init->{"type"} == NODE_ANON_HASH() && $init->{"pair_count"} == 0) {
+                    emit($cg, "strada_new_hash()");
+                } else {
+                    my int $init_type = $init->{"type"};
+                    # If init is a map expression, array-of-pairs, or @array variable, convert to hash
+                    my int $is_array_var = $init_type == NODE_VARIABLE() && $init->{"sigil"} eq "@";
+                    if ($init_type == NODE_MAP() || $init_type == NODE_ANON_ARRAY() || $is_array_var == 1) {
+                        emit($cg, "strada_hash_from_flat_array(");
+                        gen_expression($cg, $init);
+                        emit($cg, ")");
+                    } else {
+                        # Set hash context for dynamic function calls
+                        if ($init_type == NODE_CALL()) {
+                            $cg->{"call_context"} = 2;
+                        }
+                        gen_expression($cg, $init);
+                        if ($init_type == NODE_CALL()) {
+                            $cg->{"call_context"} = 0;
+                        }
+                        # If initializing from a variable or deref, incref to share ownership properly
+                        if ($init_type == NODE_VARIABLE()) {
+                            emit($cg, "; strada_incref(" . $c_name . ")");
+                        } elsif ($init_type == NODE_DEREF_SCALAR() && $init->{"sigil"} eq "%") {
+                            # Hash deref like %{$ref} returns borrowed reference - need to incref
+                            emit($cg, "; strada_incref(" . $c_name . ")");
+                        }
+                    }
+                }
+            } else {
+                emit($cg, " = strada_new_hash()");
+            }
+            # Handle initial capacity: my hash %name{size};
+            if ($stmt->{"initial_capacity"}) {
+                emit($cg, "; strada_hash_reserve_sv(" . $c_name . ", ({ StradaValue *__cap_tmp = ");
+                gen_expression($cg, $stmt->{"initial_capacity"});
+                emit($cg, "; int64_t __cap_val = strada_to_int(__cap_tmp); strada_decref(__cap_tmp); __cap_val; }))");
+            }
+        } elsif ($sigil eq "@" || $var_type == TYPE_ARRAY()) {
+            emit_sv_ptr_decl($cg, $c_name);
+            if ($stmt->{"init"}) {
+                emit($cg, " = ");
+                # Handle empty () which parser returns as anon_hash
+                my scalar $init = $stmt->{"init"};
+                my int $init_type = $init->{"type"};
+                if ($init_type == NODE_READLINE()) {
+                    # Diamond operator in array context - read all lines
+                    my str $varname = $init->{"varname"};
+                    emit($cg, "strada_read_all_lines(" . escape_c_keyword($varname) . ")");
+                } elsif ($init_type == NODE_ANON_HASH() && $init->{"pair_count"} == 0) {
+                    emit($cg, "strada_new_array()");
+                } elsif ($init_type == NODE_ANON_ARRAY()) {
+                    # Array literal like [1, 2, 3] - generate directly
+                    gen_expression($cg, $init);
+                } elsif (is_scalar_expr($init)) {
+                    # Single scalar expression like ($x) - wrap in array
+                    # Create array and push the element, cleaning up temp if needed
+                    my int $init_needs_cleanup = needs_temp_cleanup($cg, $init);
+                    if ($init_needs_cleanup == 1) {
+                        emit($cg, "strada_new_array(); { StradaValue *__arr_init_tmp = ");
+                        gen_expression($cg, $init);
+                        emit($cg, "; strada_array_push(" . $c_name . "->value.av, __arr_init_tmp); strada_decref(__arr_init_tmp); }");
+                    } else {
+                        emit($cg, "strada_new_array(); strada_array_push(" . $c_name . "->value.av, ");
+                        gen_expression($cg, $init);
+                        emit($cg, ")");
+                    }
+                } elsif ($init_type == NODE_VARIABLE() && $init->{"sigil"} eq "%") {
+                    # Hash-to-array flattening: my array @arr = %hash
+                    emit($cg, "strada_hash_to_flat_array(");
+                    gen_expression($cg, $init);
+                    emit($cg, ")");
+                } else {
+                    # Could be array/hash/function returning array - assign directly
+                    # If source is a variable or deref, copy the array to avoid aliasing
+                    if ($init_type == NODE_VARIABLE() || ($init_type == NODE_DEREF_SCALAR() && $init->{"sigil"} eq "@")) {
+                        emit($cg, "strada_array_copy(");
+                        gen_expression($cg, $init);
+                        emit($cg, ")");
+                    } else {
+                        # Set array context for dynamic function calls
+                        if ($init_type == NODE_CALL()) {
+                            $cg->{"call_context"} = 1;
+                        }
+                        gen_expression($cg, $init);
+                        if ($init_type == NODE_CALL()) {
+                            $cg->{"call_context"} = 0;
+                        }
+                    }
+                }
+            } else {
+                emit($cg, " = strada_new_array()");
+            }
+            # Handle initial capacity: my array $name[size];
+            if ($stmt->{"initial_capacity"}) {
+                emit($cg, "; strada_reserve_sv(" . $c_name . ", ({ StradaValue *__cap_tmp = ");
+                gen_expression($cg, $stmt->{"initial_capacity"});
+                emit($cg, "; int64_t __cap_val = strada_to_int(__cap_tmp); strada_decref(__cap_tmp); __cap_val; }))");
+            }
+        } else {
+            emit_sv_ptr_decl($cg, $c_name);
+            if ($stmt->{"init"}) {
+                my scalar $init = $stmt->{"init"};
+                my int $init_type = $init->{"type"};
+                # Perl-style scalar context: my $n = @arr gives array count
+                if ($init_type == NODE_VARIABLE() && $init->{"sigil"} eq "@") {
+                    emit($cg, " = STRADA_MAKE_TAGGED_INT((int64_t)strada_size(");
+                    gen_expression($cg, $init);
+                    emit($cg, "))");
+                } elsif ($var_type == TYPE_NUM() && expr_is_numeric($cg, $init) == 0) {
+                    # num-declared variables hold canonical numerics; coerce
+                    # strings/refs/unknowns (mirrors the int coercion below).
+                    emit($cg, " = ({ StradaValue *__ncv = ");
+                    gen_expression($cg, $init);
+                    emit($cg, "; StradaValue *__ncr = strada_new_num(strada_to_num(__ncv)); ");
+                    if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $init) == 1) {
+                        emit($cg, "strada_decref(__ncv); ");
+                    }
+                    emit($cg, "__ncr; })");
+                } elsif ($var_type == TYPE_INT() && expr_is_int_typed($cg, $init) == 0) {
+                    # Int-declared variables hold canonical ints. Previously
+                    # `my int $x = $str_scalar` aliased the string pointer
+                    # (incref'd) into the "int" variable, and
+                    # `my int $x = f()` could store a heap NUM — type
+                    # confusion that broke the int fast paths' assumptions.
+                    # strada_new_int returns an owned canonical int, so no
+                    # incref; owned init temps are released here.
+                    emit($cg, " = ({ StradaValue *__icv = ");
+                    gen_expression($cg, $init);
+                    emit($cg, "; StradaValue *__icr = strada_new_int(strada_to_int(__icv)); ");
+                    if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $init) == 1) {
+                        emit($cg, "strada_decref(__icv); ");
+                    }
+                    emit($cg, "__icr; })");
+                } else {
+                emit($cg, " = ");
+                gen_expression($cg, $init);
+                # If initializing from borrowed reference, incref to share ownership properly
+                # This prevents the original value from being freed when this one goes out of scope
+                if ($init_type == NODE_VARIABLE()) {
+                    # `our` variables resolve to strada_global_get(),
+                    # which ALREADY returns an owned (incref'd)
+                    # reference. Skip the extra incref or we leak one
+                    # ref per assignment that the registry's atexit
+                    # cleanup later turns into a visible
+                    # "definitely lost".
+                    my str $init_name_chk = escape_c_keyword($init->{"name"});
+                    my scalar $our_vars_chk = $cg->{"our_vars"};
+                    my str $init_our_chk = "" . $our_vars_chk->{$init_name_chk};
+                    if (length($init_our_chk) == 0) {
+                        emit($cg, "; strada_incref(" . $c_name . ")");
+                    }
+                } elsif ($init_type == NODE_SUBSCRIPT()) {
+                    # Subscript is borrowed unless its source needed cleanup —
+                    # in that case codegen used strada_array_get_owned and the
+                    # result is already owned. needs_temp_cleanup reflects this.
+                    if (needs_temp_cleanup($cg, $init) == 0) {
+                        emit($cg, "; strada_incref(" . $c_name . ")");
+                    }
+                } elsif ($init_type == NODE_DEREF_ARRAY()) {
+                    # Same as NODE_SUBSCRIPT.
+                    if (needs_temp_cleanup($cg, $init) == 0) {
+                        emit($cg, "; strada_incref(" . $c_name . ")");
+                    }
+                } elsif ($init_type == NODE_TERNARY()) {
+                    # Ternary expression may contain borrowed references in branches
+                    if (return_needs_incref($cg, $init) == 1) {
+                        emit($cg, "; strada_incref(" . $c_name . ")");
+                    }
+                }
+                } # end else (non-array scalar context)
+            } else {
+                emit($cg, " = strada_new_undef()");
+            }
+        }
+        emit($cg, ";\n");
+        # Track variable for scope cleanup
+        # Use escaped name for C code generation
+        scope_track_var($cg, $c_name);
+
+        # Track known blessed type for devirtualization
+        # When $p = Point::new(...) or $p = Counter::new_counter(), we know the class
+        if ($stmt->{"init"}) {
+            my scalar $dinit = $stmt->{"init"};
+            my int $dinit_type = $dinit->{"type"};
+            if ($dinit_type == NODE_CALL()) {
+                my str $dname = $dinit->{"name"};
+                # Any Package::method() call — extract package name before last ::
+                my int $dcolon = rindex($dname, "::");
+                if ($dcolon > 0) {
+                    my str $dpkg = substr($dname, 0, $dcolon);
+                    $cg->{"known_types"}->{$c_name} = $dpkg;
+                }
+            }
+        }
+
+        # Push every owned local to the cleanup stack at declaration.
+        # The matching strada_cleanup_pop is emitted by
+        # emit_scope_decref at scope_pop. Without this, a function
+        # that does `my $x = ...; another_func(); ...` leaked $x
+        # whenever another_func() threw — longjmp skipped our
+        # scope_pop. The catch's strada_cleanup_drain_to walks the
+        # cleanup stack down to the try-entry mark and decref's
+        # everything above it, including our pushed locals.
+        #
+        # In `main()` outside any try block, no catch frame can ever drain
+        # the entry (no caller has a try around us; no local try is
+        # active), so the push is pure overhead. Skip it and record the
+        # var in scope_no_push_vars so emit_scope_decref doesn't emit a
+        # mismatched cleanup_pop.
+        if (cleanup_push_useful($cg) == 1) {
+            emit_indent($cg);
+            emit($cg, "strada_cleanup_push(" . $c_name . ");\n");
+        } else {
+            scope_mark_no_push($cg, $c_name);
+        }
+        return;
+    }
+
+    # Const declaration (local scope) - emit as regular variable with init
+    if ($type == NODE_CONST_DECL()) {
+        my str $c_name = escape_c_keyword($stmt->{"name"});
+        my scalar $init = $stmt->{"init"};
+
+        # Track variable for cleanup
+        scope_track_var($cg, $c_name);
+
+        emit_indent($cg);
+        emit_sv_ptr_decl($cg, $c_name);
+        emit($cg, " = ");
+        gen_expression($cg, $init);
+        emit($cg, ";\n");
+
+        # Same indirect-throw protection as NODE_VAR_DECL — same elision
+        # criterion (main()-with-no-try has nothing to drain).
+        if (cleanup_push_useful($cg) == 1) {
+            emit_indent($cg);
+            emit($cg, "strada_cleanup_push(" . $c_name . ");\n");
+        } else {
+            scope_mark_no_push($cg, $c_name);
+        }
+        return;
+    }
+
+    # Our declaration (package-scoped global via global registry)
+    if ($type == NODE_OUR_DECL()) {
+        my str $var_name = $stmt->{"name"};
+        my str $c_name = escape_c_keyword($var_name);
+        my str $sigil = $stmt->{"sigil"};
+        my str $pkg = $cg->{"package"};
+        if (length($pkg) == 0) {
+            $pkg = "main";
+        }
+        my str $our_key = $pkg . "::" . $var_name;
+
+        if ($sigil eq "@" || $sigil eq "%") {
+            # Array/hash our: create local C variable backed by global registry
+            my str $new_func = "strada_new_array()";
+            if ($sigil eq "%") {
+                $new_func = "strada_new_hash()";
+            }
+
+            if ($stmt->{"init"}) {
+                # our array @foo = (1,2,3); → create from init, store in registry
+                my scalar $init = $stmt->{"init"};
+                my int $init_type = $init->{"type"};
+                emit_indent($cg);
+                emit($cg, "StradaValue *" . $c_name . " = ");
+                if ($init_type == NODE_ANON_HASH() && $init->{"pair_count"} == 0) {
+                    emit($cg, $new_func);
+                } else {
+                    gen_expression($cg, $init);
+                }
+                emit($cg, ";\n");
+                emit_indent($cg);
+                emit($cg, "strada_global_set_cstr(\"" . $our_key . "\", " . $c_name . ");\n");
+                # global_set consumes caller's ref; incref so local var has its own ref
+                emit_indent($cg);
+                emit($cg, "strada_incref(" . $c_name . ");\n");
+            } else {
+                # our array @foo; → get from registry or create new
+                emit_indent($cg);
+                emit($cg, "StradaValue *" . $c_name . " = strada_global_get(strada_new_str(\"" . $our_key . "\"));\n");
+                emit_indent($cg);
+                emit($cg, "if (" . $c_name . "->type == STRADA_UNDEF) { strada_decref(" . $c_name . "); ");
+                emit($cg, $c_name . " = " . $new_func . "; ");
+                emit($cg, "strada_global_set_cstr(\"" . $our_key . "\", " . $c_name . "); ");
+                emit($cg, "strada_incref(" . $c_name . "); }\n");
+            }
+            # Track for cleanup (decref at scope exit)
+            scope_track_var($cg, $c_name);
+            return;
+        }
+
+        # Scalar our: register in our_vars for variable reference/assignment interception
+        my scalar $our_vars_ref = $cg->{"our_vars"};
+        $our_vars_ref->{$c_name} = $our_key;
+
+        # If there's an initializer, emit strada_global_set
+        if ($stmt->{"init"}) {
+            emit_indent($cg);
+            emit($cg, "strada_global_set_cstr(\"" . $our_key . "\", ");
+            gen_expression($cg, $stmt->{"init"});
+            emit($cg, ");\n");
+        }
+        # No scope_track_var - our scalar variables are not locally owned
+        return;
+    }
+
+    # local $var; or local $var = expr;
+    # Saves the current value of an 'our' variable on the local stack
+    if ($type == NODE_LOCAL_DECL()) {
+        my str $var_name = $stmt->{"name"};
+        my str $c_name = escape_c_keyword($var_name);
+        my str $sigil = $stmt->{"sigil"};
+
+        # Determine package-qualified name
+        my str $pkg = $cg->{"package"};
+        if (length($pkg) == 0) {
+            $pkg = "main";
+        }
+        my str $our_key = $pkg . "::" . $var_name;
+
+        # Check if this is an 'our' variable
+        my scalar $our_vars_ref = $cg->{"our_vars"};
+        my str $our_check = "" . $our_vars_ref->{$c_name};
+        if (length($our_check) > 0) {
+            $our_key = $our_check;
+        }
+
+        # On first local() in this function, emit depth save
+        if ($cg->{"has_local"} != 1) {
+            $cg->{"has_local"} = 1;
+            emit_indent($cg);
+            emit($cg, "int __local_saved_depth = strada_local_depth_get();\n");
+        }
+
+        # Check for hash element localization: local $hash{key}
+        if ($stmt->{"is_hash_elem"} == 1) {
+            my scalar $key_expr = $stmt->{"hash_key"};
+            # Get the hash variable (may be an our variable via global registry)
+            my str $hash_expr = $c_name;
+            if (length($our_check) > 0) {
+                $hash_expr = "strada_global_get(strada_new_str(\"" . $our_key . "\"))";
+            }
+            emit_indent($cg);
+            emit($cg, "{ StradaValue *__lh = " . $hash_expr . ";\n");
+            emit_indent($cg);
+            if ($key_expr->{"type"} == NODE_STR_LITERAL()) {
+                emit($cg, "strada_local_save_hash_elem(__lh, ");
+                gen_str_literal_c($cg, $key_expr->{"value"});
+                emit($cg, ");\n");
+            } else {
+                # Capture the key-expr result, stringify, then decref.
+                # Without the explicit capture, owned-temp key exprs
+                # (anon-array for slice form, function calls, concat
+                # chains) leaked the result every local() call.
+                my int $k_cln = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $key_expr) == 1;
+                if ($k_cln == 1) {
+                    emit($cg, "{ StradaValue *__lk_sv = ");
+                    gen_expression($cg, $key_expr);
+                    emit($cg, "; char *__lk = strada_to_str_ss(__lk_sv); strada_local_save_hash_elem(__lh, __lk); strada_cstr_free(__lk); strada_decref(__lk_sv); }\n");
+                } else {
+                    emit($cg, "char *__lk = strada_to_str_ss(");
+                    gen_expression($cg, $key_expr);
+                    emit($cg, "); strada_local_save_hash_elem(__lh, __lk); strada_cstr_free(__lk);\n");
+                }
+            }
+            # If there's an initializer, set the new value
+            if ($stmt->{"init"}) {
+                emit_indent($cg);
+                emit($cg, "{ StradaValue *__lv = ");
+                gen_expression($cg, $stmt->{"init"});
+                emit($cg, "; strada_hv_store(__lh, ");
+                if ($key_expr->{"type"} == NODE_STR_LITERAL()) {
+                    gen_str_literal_c($cg, $key_expr->{"value"});
+                } else {
+                    emit($cg, "\"__dyn_key\"");
+                }
+                emit($cg, ", __lv); strada_decref(__lv); }\n");
+            }
+            if (length($our_check) > 0) {
+                emit_indent($cg);
+                emit($cg, "strada_decref(__lh);\n");
+            }
+            emit_indent($cg);
+            emit($cg, "}\n");
+            return;
+        }
+
+        # Save current value
+        emit_indent($cg);
+        emit($cg, "strada_local_save(\"" . $our_key . "\");\n");
+
+        # If there's an initializer, set the new value
+        if ($stmt->{"init"}) {
+            emit_indent($cg);
+            emit($cg, "strada_global_set_cstr(\"" . $our_key . "\", ");
+            gen_expression($cg, $stmt->{"init"});
+            emit($cg, ");\n");
+        }
+        return;
+    }
+
+    # Destructuring assignment: my ($a, $b, $c) = @arr;
+    if ($type == NODE_DESTRUCTURE()) {
+        my scalar $vars = $stmt->{"vars"};
+        my int $var_count = $stmt->{"var_count"};
+        my scalar $init = $stmt->{"init"};
+        my int $is_decl = $stmt->{"is_decl"};
+
+        # If declaration, first declare all variables at outer scope
+        if ($is_decl == 1) {
+            my int $i = 0;
+            while ($i < $var_count) {
+                my scalar $var = $vars->[$i];
+                my str $name = escape_c_keyword($var->{"name"});
+                my str $vsigil = "" . $var->{"sigil"};
+                emit_indent($cg);
+                if ($vsigil eq "%") {
+                    emit($cg, "StradaValue *" . $name . " = strada_new_hash();\n");
+                } elsif ($vsigil eq "@") {
+                    emit($cg, "StradaValue *" . $name . " = strada_new_array();\n");
+                } else {
+                    emit($cg, "StradaValue *" . $name . " = strada_new_undef();\n");
+                }
+                scope_track_var($cg, $name);
+                $i = $i + 1;
+            }
+        }
+
+        # Wrap assignment in a block for the temporary
+        emit_indent($cg);
+        emit($cg, "{\n");
+        indent($cg);
+
+        # Evaluate source expression once
+        emit_indent($cg);
+        emit($cg, "StradaValue *__destruct_src = ");
+        gen_expression($cg, $init);
+        emit($cg, ";\n");
+
+        # Check if source is a variable (needs incref since we're borrowing)
+        my int $init_type = $init->{"type"};
+        if ($init_type == NODE_VARIABLE()) {
+            emit_indent($cg);
+            emit($cg, "strada_incref(__destruct_src);\n");
+        }
+
+        # Assign each variable
+        my int $i = 0;
+        while ($i < $var_count) {
+            my scalar $var = $vars->[$i];
+            my str $name = escape_c_keyword($var->{"name"});
+            my str $var_sigil = "" . $var->{"sigil"};
+
+            # Hash slurp: last variable with % sigil gets remaining key-value pairs
+            if ($var_sigil eq "%" && $i == $var_count - 1) {
+                emit_indent($cg);
+                emit($cg, "strada_decref(" . $name . ");\n");
+                emit_indent($cg);
+                emit($cg, $name . " = strada_new_hash();\n");
+                emit_indent($cg);
+                emit($cg, "{ StradaArray *__ds_arr = strada_deref_array(__destruct_src);\n");
+                emit_indent($cg);
+                emit($cg, "  int __ds_len = __ds_arr ? strada_array_length(__ds_arr) : 0;\n");
+                emit_indent($cg);
+                emit($cg, "  for (int __ds_j = " . $i . "; __ds_j + 1 < __ds_len; __ds_j += 2) {\n");
+                emit_indent($cg);
+                emit($cg, "    StradaValue *__ds_k = strada_array_get(__ds_arr, __ds_j);\n");
+                emit_indent($cg);
+                emit($cg, "    StradaValue *__ds_v = strada_array_get(__ds_arr, __ds_j + 1);\n");
+                emit_indent($cg);
+                emit($cg, "    char *__ds_ks = strada_to_str(__ds_k);\n");
+                emit_indent($cg);
+                emit($cg, "    strada_hv_store(" . $name . ", __ds_ks, __ds_v);\n");
+                emit_indent($cg);
+                emit($cg, "    strada_incref(__ds_v);\n");
+                emit_indent($cg);
+                emit($cg, "    free(__ds_ks);\n");
+                emit_indent($cg);
+                emit($cg, "  }\n");
+                emit_indent($cg);
+                emit($cg, "}\n");
+            } elsif ($var_sigil eq "@") {
+                # Array slurp: collect remaining elements
+                emit_indent($cg);
+                emit($cg, "strada_decref(" . $name . ");\n");
+                emit_indent($cg);
+                emit($cg, $name . " = strada_new_array();\n");
+                emit_indent($cg);
+                emit($cg, "{ StradaArray *__ds_arr = strada_deref_array(__destruct_src);\n");
+                emit_indent($cg);
+                emit($cg, "  int __ds_len = __ds_arr ? strada_array_length(__ds_arr) : 0;\n");
+                emit_indent($cg);
+                emit($cg, "  for (int __ds_j = " . $i . "; __ds_j < __ds_len; __ds_j++)\n");
+                emit_indent($cg);
+                emit($cg, "    strada_array_push(strada_deref_array(" . $name . "), strada_array_get_safe(__destruct_src, __ds_j));\n");
+                emit_indent($cg);
+                emit($cg, "}\n");
+            } else {
+                # Decref old value if already assigned
+                emit_indent($cg);
+                emit($cg, "strada_decref(" . $name . ");\n");
+
+                # Get element from array (strada_array_get_safe returns owned reference)
+                emit_indent($cg);
+                emit($cg, $name . " = strada_array_get_safe(__destruct_src, " . $i . ");\n");
+            }
+
+            $i = $i + 1;
+        }
+
+        # Release source
+        emit_indent($cg);
+        emit($cg, "strada_decref(__destruct_src);\n");
+
+        dedent($cg);
+        emit_indent($cg);
+        emit($cg, "}\n");
+        return;
+    }
+
+    # Bare block { ... }
+    if ($type == NODE_BLOCK()) {
+        emit_indent($cg);
+        gen_block($cg, $stmt);
+        emit($cg, "\n");
+        return;
+    }
+
+    # If statement
+    if ($type == NODE_IF_STMT()) {
+        emit_indent($cg);
+        emit($cg, "if (");
+        emit_condition_cse($cg, $stmt->{"condition"});
+        emit($cg, ") ");
+        gen_block($cg, $stmt->{"then_block"});
+
+        # Elsif clauses
+        my scalar $elsif_conds = $stmt->{"elsif_conditions"};
+        my scalar $elsif_blocks = $stmt->{"elsif_blocks"};
+        my int $i = 0;
+        while ($i < $stmt->{"elsif_count"}) {
+            emit($cg, " else if (");
+            emit_condition_cse($cg, $elsif_conds->[$i]);
+            emit($cg, ") ");
+            gen_block($cg, $elsif_blocks->[$i]);
+            $i = $i + 1;
+        }
+        
+        # Else clause
+        if ($stmt->{"else_block"}) {
+            emit($cg, " else ");
+            gen_block($cg, $stmt->{"else_block"});
+        }
+        
+        emit($cg, "\n");
+        return;
+    }
+    
+    # While statement
+    if ($type == NODE_WHILE_STMT()) {
+        my str $label = $stmt->{"label"};
+        # Register label depth BEFORE scope_push so cleanup covers loop body
+        if (length($label) > 0) {
+            my scalar $label_depths = $cg->{"label_depths"};
+            $label_depths->{$label} = $cg->{"scope_depth"};
+        }
+
+        # Set up redo label
+        my str $saved_redo = $cg->{"current_redo_label"};
+        my str $redo_label = "";
+        if (length($label) > 0) {
+            $redo_label = $label . "_redo";
+        } else {
+            my int $redo_id = $cg->{"redo_counter"};
+            $cg->{"redo_counter"} = $redo_id + 1;
+            $redo_label = "__redo_" . $redo_id;
+        }
+        $cg->{"current_redo_label"} = $redo_label;
+
+        # Track loop body scope depth for unlabeled last/next cleanup
+        my int $saved_loop_break_depth = $cg->{"loop_break_depth"};
+        my int $saved_loop_finally_mark = $cg->{"loop_finally_mark"};
+        $cg->{"loop_finally_mark"} = $cg->{"finally_count"};
+        $cg->{"loop_break_depth"} = $cg->{"scope_depth"};
+        my int $saved_loop_try_depth = $cg->{"loop_try_depth"};
+        $cg->{"loop_try_depth"} = $cg->{"try_depth"};
+
+        # Check for while ($str =~ /pat/g) — needs position-tracking regex
+        my scalar $while_cond = $stmt->{"condition"};
+        my int $is_regex_g = 0;
+        my str $gpos_var = "";
+        my int $wc_type = 0;
+        my int $wc_ok = length("" . $while_cond);
+        if ($wc_ok > 0) {
+            $wc_type = $while_cond->{"type"};
+        }
+        if ($wc_type == NODE_REGEX_MATCH()) {
+            my str $wflags = "" . $while_cond->{"flags"};
+            if (length($wflags) > 0) {
+                if (index($wflags, "g") >= 0) {
+                    $is_regex_g = 1;
+                    my int $gc = $cg->{"regex_g_counter"} + 0;
+                    $gpos_var = "__gpos_" . $gc;
+                    $cg->{"regex_g_counter"} = $gc + 1;
+                    emit_indent($cg);
+                    emit($cg, "{ size_t " . $gpos_var . " = 0;\n");
+                    indent($cg);
+                }
+            }
+        }
+
+        emit_indent($cg);
+        if ($is_regex_g == 1) {
+            # Emit regex /g condition with position tracking
+            emit($cg, "while (");
+            emit_regex_g_condition($cg, $while_cond, $gpos_var);
+            emit($cg, ") {\n");
+        } else {
+            emit($cg, "while (");
+            emit_condition_cse($cg, $while_cond);
+            emit($cg, ") {\n");
+        }
+        indent($cg);
+        scope_push($cg);
+
+        # Emit redo label at top of loop body
+        emit_indent($cg);
+        emit($cg, $redo_label . ": __attribute__((unused));\n");
+
+        my scalar $body = $stmt->{"body"};
+        # If the loop body contains a `local` statement, mark the
+        # local-save depth at the top of every iteration and restore
+        # to it at the bottom. Without this, each iteration's
+        # strada_local_save pushed a fresh strdup'd name + saved
+        # value that never got popped until function exit — after
+        # STRADA_LOCAL_STACK_MAX=256 the runtime calls exit(1).
+        my int $while_body_has_local = stmt_has_local($body);
+        my int $while_local_id = 0;
+        if ($while_body_has_local == 1) {
+            $while_local_id = $cg->{"tmp_counter"} + 0;
+            $cg->{"tmp_counter"} = $while_local_id + 1;
+            emit_indent($cg);
+            emit($cg, "int __local_iter_mark_" . $while_local_id . " = strada_local_depth_get();\n");
+        }
+        my scalar $stmts = $body->{"statements"};
+        my int $i = 0;
+        while ($i < $body->{"statement_count"}) {
+            gen_statement($cg, $stmts->[$i]);
+            $i = $i + 1;
+        }
+
+        # Add continue label at end of loop body if labeled
+        if (length($label) > 0) {
+            emit_indent($cg);
+            emit($cg, $label);
+            emit($cg, "_continue: ;\n");
+        }
+
+        # Restore local() saves at end of every iteration.
+        if ($while_body_has_local == 1) {
+            emit_indent($cg);
+            emit($cg, "strada_local_restore_to(__local_iter_mark_" . $while_local_id . ");\n");
+        }
+
+        scope_pop($cg);
+        dedent($cg);
+        emit_indent($cg);
+        emit($cg, "}\n");
+
+        # Add break label after loop if labeled
+        if (length($label) > 0) {
+            emit_indent($cg);
+            emit($cg, $label);
+            emit($cg, "_break: ;\n");
+        }
+        # Close regex /g position-tracking block
+        if ($is_regex_g == 1) {
+            dedent($cg);
+            emit_indent($cg);
+            emit($cg, "}\n");
+        }
+        $cg->{"loop_break_depth"} = $saved_loop_break_depth;
+        $cg->{"loop_finally_mark"} = $saved_loop_finally_mark;
+        $cg->{"loop_try_depth"} = $saved_loop_try_depth;
+        $cg->{"current_redo_label"} = $saved_redo;
+        return;
+    }
+
+    # Do-while statement
+    if ($type == NODE_DO_WHILE_STMT()) {
+        my str $label = $stmt->{"label"};
+        # Register label depth BEFORE scope_push so cleanup covers loop body
+        if (length($label) > 0) {
+            my scalar $label_depths = $cg->{"label_depths"};
+            $label_depths->{$label} = $cg->{"scope_depth"};
+        }
+
+        # Set up redo label
+        my str $saved_redo = $cg->{"current_redo_label"};
+        my str $redo_label = "";
+        if (length($label) > 0) {
+            $redo_label = $label . "_redo";
+        } else {
+            my int $redo_id = $cg->{"redo_counter"};
+            $cg->{"redo_counter"} = $redo_id + 1;
+            $redo_label = "__redo_" . $redo_id;
+        }
+        $cg->{"current_redo_label"} = $redo_label;
+
+        # Track loop body scope depth for unlabeled last/next cleanup
+        my int $saved_loop_break_depth = $cg->{"loop_break_depth"};
+        my int $saved_loop_finally_mark = $cg->{"loop_finally_mark"};
+        $cg->{"loop_finally_mark"} = $cg->{"finally_count"};
+        $cg->{"loop_break_depth"} = $cg->{"scope_depth"};
+        my int $saved_loop_try_depth = $cg->{"loop_try_depth"};
+        $cg->{"loop_try_depth"} = $cg->{"try_depth"};
+
+        emit_indent($cg);
+        emit($cg, "do {\n");
+        indent($cg);
+        scope_push($cg);
+
+        # Emit redo label at top of loop body
+        emit_indent($cg);
+        emit($cg, $redo_label . ": __attribute__((unused));\n");
+
+        my scalar $body = $stmt->{"body"};
+        # Per-iter local() restore (see while-loop above for rationale).
+        my int $dw_body_has_local = stmt_has_local($body);
+        my int $dw_local_id = 0;
+        if ($dw_body_has_local == 1) {
+            $dw_local_id = $cg->{"tmp_counter"} + 0;
+            $cg->{"tmp_counter"} = $dw_local_id + 1;
+            emit_indent($cg);
+            emit($cg, "int __local_iter_mark_" . $dw_local_id . " = strada_local_depth_get();\n");
+        }
+        my scalar $stmts = $body->{"statements"};
+        my int $i = 0;
+        while ($i < $body->{"statement_count"}) {
+            gen_statement($cg, $stmts->[$i]);
+            $i = $i + 1;
+        }
+
+        # Add continue label at end of loop body if labeled
+        if (length($label) > 0) {
+            emit_indent($cg);
+            emit($cg, $label);
+            emit($cg, "_continue: ;\n");
+        }
+
+        if ($dw_body_has_local == 1) {
+            emit_indent($cg);
+            emit($cg, "strada_local_restore_to(__local_iter_mark_" . $dw_local_id . ");\n");
+        }
+        scope_pop($cg);
+        dedent($cg);
+        emit_indent($cg);
+        emit($cg, "} while (");
+        emit_condition_cse($cg, $stmt->{"condition"});
+        emit($cg, ");\n");
+
+        # Add break label after loop if labeled
+        if (length($label) > 0) {
+            emit_indent($cg);
+            emit($cg, $label);
+            emit($cg, "_break: ;\n");
+        }
+        $cg->{"loop_break_depth"} = $saved_loop_break_depth;
+        $cg->{"loop_finally_mark"} = $saved_loop_finally_mark;
+        $cg->{"loop_try_depth"} = $saved_loop_try_depth;
+        $cg->{"current_redo_label"} = $saved_redo;
+        return;
+    }
+
+    # For statement
+    if ($type == NODE_FOR_STMT()) {
+        my str $label = $stmt->{"label"};
+        # Register label depth BEFORE any blocks so cleanup covers everything
+        if (length($label) > 0) {
+            my scalar $label_depths = $cg->{"label_depths"};
+            $label_depths->{$label} = $cg->{"scope_depth"};
+        }
+
+        # Track loop body scope depth for unlabeled last/next cleanup
+        my int $saved_loop_break_depth = $cg->{"loop_break_depth"};
+        my int $saved_loop_finally_mark = $cg->{"loop_finally_mark"};
+        $cg->{"loop_finally_mark"} = $cg->{"finally_count"};
+        $cg->{"loop_break_depth"} = $cg->{"scope_depth"};
+        my int $saved_loop_try_depth = $cg->{"loop_try_depth"};
+        $cg->{"loop_try_depth"} = $cg->{"try_depth"};
+
+        # Set up redo label
+        my str $saved_redo = $cg->{"current_redo_label"};
+        my str $redo_label = "";
+        if (length($label) > 0) {
+            $redo_label = $label . "_redo";
+        } else {
+            my int $redo_id = $cg->{"redo_counter"};
+            $cg->{"redo_counter"} = $redo_id + 1;
+            $redo_label = "__redo_" . $redo_id;
+        }
+        $cg->{"current_redo_label"} = $redo_label;
+
+        my str $loop_var_name = "";
+        my int $has_var_decl = 0;
+
+        # Check if init declares a variable that needs cleanup
+        if ($stmt->{"init"}) {
+            my scalar $init = $stmt->{"init"};
+            if ($init->{"type"} == NODE_VAR_DECL()) {
+                $has_var_decl = 1;
+                $loop_var_name = escape_c_keyword($init->{"name"});
+                # Wrap in a block for proper scoping
+                emit_indent($cg);
+                emit($cg, "{\n");
+                indent($cg);
+                emit_indent($cg);
+                emit($cg, "StradaValue *" . $loop_var_name . " = ");
+                if ($init->{"init"}) {
+                    gen_expression($cg, $init->{"init"});
+                    # If initializing from borrowed reference, incref to own the value
+                    # (matches normal var decl logic at ~line 12670)
+                    my scalar $for_init = $init->{"init"};
+                    my int $for_init_type = $for_init->{"type"};
+                    if ($for_init_type == NODE_VARIABLE()) {
+                        emit($cg, "; strada_incref(" . $loop_var_name . ")");
+                    } elsif ($for_init_type == NODE_SUBSCRIPT()) {
+                        if (needs_temp_cleanup($cg, $for_init) == 0) {
+                            emit($cg, "; strada_incref(" . $loop_var_name . ")");
+                        }
+                    } elsif ($for_init_type == NODE_DEREF_ARRAY()) {
+                        if (needs_temp_cleanup($cg, $for_init) == 0) {
+                            emit($cg, "; strada_incref(" . $loop_var_name . ")");
+                        }
+                    } elsif ($for_init_type == NODE_TERNARY()) {
+                        if (return_needs_incref($cg, $for_init) == 1) {
+                            emit($cg, "; strada_incref(" . $loop_var_name . ")");
+                        }
+                    }
+                } else {
+                    emit($cg, "strada_new_undef()");
+                }
+                emit($cg, ";\n");
+            }
+        }
+
+        emit_indent($cg);
+        emit($cg, "for (");
+
+        if ($stmt->{"init"} && $has_var_decl == 0) {
+            gen_expression($cg, $stmt->{"init"});
+        }
+        emit($cg, "; ");
+
+        if ($stmt->{"condition"}) {
+            emit_condition_cse($cg, $stmt->{"condition"});
+        }
+        emit($cg, "; ");
+
+        if ($stmt->{"update"}) {
+            my scalar $update = $stmt->{"update"};
+            # Check if update is an increment/decrement - its return value must be freed
+            if ($update->{"type"} == NODE_INCREMENT()) {
+                emit($cg, "({ StradaValue *__upd_tmp = ");
+                gen_expression($cg, $update);
+                emit($cg, "; strada_decref(__upd_tmp); })");
+            } else {
+                gen_expression($cg, $update);
+            }
+        }
+
+        emit($cg, ") {\n");
+        indent($cg);
+        scope_push($cg);
+
+        # Emit redo label at top of loop body
+        emit_indent($cg);
+        emit($cg, $redo_label . ": __attribute__((unused));\n");
+
+        my scalar $body = $stmt->{"body"};
+        # Per-iter local() restore so save-stack doesn't grow unbounded.
+        my int $for_body_has_local = stmt_has_local($body);
+        my int $for_local_id = 0;
+        if ($for_body_has_local == 1) {
+            $for_local_id = $cg->{"tmp_counter"} + 0;
+            $cg->{"tmp_counter"} = $for_local_id + 1;
+            emit_indent($cg);
+            emit($cg, "int __local_iter_mark_" . $for_local_id . " = strada_local_depth_get();\n");
+        }
+        my scalar $stmts = $body->{"statements"};
+        my int $i = 0;
+        while ($i < $body->{"statement_count"}) {
+            gen_statement($cg, $stmts->[$i]);
+            $i = $i + 1;
+        }
+
+        # Add continue label at end of loop body if labeled
+        if (length($label) > 0) {
+            emit_indent($cg);
+            emit($cg, $label);
+            emit($cg, "_continue: ;\n");
+        }
+
+        if ($for_body_has_local == 1) {
+            emit_indent($cg);
+            emit($cg, "strada_local_restore_to(__local_iter_mark_" . $for_local_id . ");\n");
+        }
+        scope_pop($cg);
+        dedent($cg);
+        emit_indent($cg);
+        emit($cg, "}\n");
+
+        # Clean up loop variable if we declared one
+        if ($has_var_decl == 1) {
+            emit_indent($cg);
+            emit($cg, "strada_decref(" . $loop_var_name . ");\n");
+            dedent($cg);
+            emit_indent($cg);
+            emit($cg, "}\n");
+        }
+
+        # Add break label after loop if labeled
+        if (length($label) > 0) {
+            emit_indent($cg);
+            emit($cg, $label);
+            emit($cg, "_break: ;\n");
+        }
+        $cg->{"loop_break_depth"} = $saved_loop_break_depth;
+        $cg->{"loop_finally_mark"} = $saved_loop_finally_mark;
+        $cg->{"loop_try_depth"} = $saved_loop_try_depth;
+        $cg->{"current_redo_label"} = $saved_redo;
+        return;
+    }
+
+    # Foreach statement
+    if ($type == NODE_FOREACH_STMT()) {
+        my str $label = $stmt->{"label"};
+        # Register label depth BEFORE any blocks so cleanup covers everything
+        if (length($label) > 0) {
+            my scalar $label_depths = $cg->{"label_depths"};
+            $label_depths->{$label} = $cg->{"scope_depth"};
+        }
+
+        # Track loop body scope depth for unlabeled last/next cleanup
+        my int $saved_loop_break_depth = $cg->{"loop_break_depth"};
+        my int $saved_loop_finally_mark = $cg->{"loop_finally_mark"};
+        $cg->{"loop_finally_mark"} = $cg->{"finally_count"};
+        $cg->{"loop_break_depth"} = $cg->{"scope_depth"};
+        my int $saved_loop_try_depth = $cg->{"loop_try_depth"};
+        $cg->{"loop_try_depth"} = $cg->{"try_depth"};
+
+        # Set up redo label
+        my str $saved_redo = $cg->{"current_redo_label"};
+        my str $redo_label = "";
+        if (length($label) > 0) {
+            $redo_label = $label . "_redo";
+        } else {
+            my int $redo_id = $cg->{"redo_counter"};
+            $cg->{"redo_counter"} = $redo_id + 1;
+            $redo_label = "__redo_" . $redo_id;
+        }
+        $cg->{"current_redo_label"} = $redo_label;
+
+        my scalar $var_decl = $stmt->{"var_decl"};
+        my str $var_name = escape_c_keyword($stmt->{"var_name"});
+        my scalar $array_expr = $stmt->{"array"};
+        my scalar $body = $stmt->{"body"};
+
+        my int $foreach_id = $cg->{"foreach_counter"};
+        $cg->{"foreach_counter"} = $foreach_id + 1;
+
+        # Fast path: foreach over an int-typed range (e.g. 0..$n) compiles to
+        # a native C for loop — no strada_range array materialization, no
+        # per-iteration array_get. Bounds are evaluated once up front and
+        # `5..1` iterates zero times, matching strada_range (Perl ranges only
+        # count upward). The loop variable is rebuilt from the C counter each
+        # iteration via strada_new_int (tagged int for the entire practical
+        # range, so no allocation), and the body treats it as borrowed —
+        # exactly like the array_get path. emit_int_operand handles
+        # owned-temp cleanup for the bound expressions itself.
+        if ($array_expr->{"type"} == NODE_RANGE()
+            && expr_is_int_typed($cg, $array_expr->{"start"}) == 1
+            && expr_is_int_typed($cg, $array_expr->{"end"}) == 1) {
+            emit_indent($cg);
+            emit($cg, "{\n");
+            indent($cg);
+            scope_push($cg);
+
+            emit_indent($cg);
+            emit($cg, "int64_t __fr_start_" . $foreach_id . " = ");
+            emit_int_operand($cg, $array_expr->{"start"});
+            emit($cg, ";\n");
+            emit_indent($cg);
+            emit($cg, "int64_t __fr_end_" . $foreach_id . " = ");
+            emit_int_operand($cg, $array_expr->{"end"});
+            emit($cg, ";\n");
+
+            # For pre-existing loop variables, release the old value before the loop
+            if (!$var_decl) {
+                emit_indent($cg);
+                emit($cg, "strada_decref(" . $var_name . "); " . $var_name . " = NULL;\n");
+            } else {
+                emit_indent($cg);
+                emit($cg, "StradaValue *" . $var_name . " = NULL;\n");
+                # Loop var is a LOCAL of an enclosing anon fn (else it gets
+                # misclassified as an outer-scope capture — see the catch-var
+                # note in the try/catch emitter).
+                if ($cg->{"in_anon_func"}) {
+                    my str $fr_locals = $cg->{"anon_local_str"};
+                    if ($fr_locals eq "") { $cg->{"anon_local_str"} = $var_name; }
+                    else { $cg->{"anon_local_str"} = $fr_locals . "," . $var_name; }
+                }
+            }
+
+            # The loop variable always holds an int here; register it as
+            # int-typed for the body (scoped: restored after the loop) so
+            # int fast paths (tagged arithmetic, int conditions) apply.
+            my str $fr_prev_iv = "";
+            if ($var_decl) {
+                $fr_prev_iv = "" . $cg->{"int_vars"}->{$var_name};
+                $cg->{"int_vars"}->{$var_name} = 1;
+            }
+
+            emit_indent($cg);
+            emit($cg, "for (int64_t __fr_i_" . $foreach_id . " = __fr_start_" . $foreach_id . "; __fr_i_" . $foreach_id . " <= __fr_end_" . $foreach_id . "; __fr_i_" . $foreach_id . "++) {\n");
+            indent($cg);
+            scope_push($cg);
+
+            emit_indent($cg);
+            emit($cg, $var_name . " = strada_new_int(__fr_i_" . $foreach_id . ");\n");
+
+            # Emit redo label after variable assignment
+            emit_indent($cg);
+            emit($cg, $redo_label . ": __attribute__((unused));\n");
+
+            # Per-iter local() restore.
+            my int $fr_body_has_local = stmt_has_local($body);
+            my int $fr_local_id = 0;
+            if ($fr_body_has_local == 1) {
+                $fr_local_id = $cg->{"tmp_counter"} + 0;
+                $cg->{"tmp_counter"} = $fr_local_id + 1;
+                emit_indent($cg);
+                emit($cg, "int __local_iter_mark_" . $fr_local_id . " = strada_local_depth_get();\n");
+            }
+
+            # Generate body statements
+            my scalar $fr_stmts = $body->{"statements"};
+            my int $fr_i = 0;
+            while ($fr_i < $body->{"statement_count"}) {
+                gen_statement($cg, $fr_stmts->[$fr_i]);
+                $fr_i = $fr_i + 1;
+            }
+
+            if (length($label) > 0) {
+                emit_indent($cg);
+                emit($cg, $label);
+                emit($cg, "_continue: ;\n");
+            }
+            if ($fr_body_has_local == 1) {
+                emit_indent($cg);
+                emit($cg, "strada_local_restore_to(__local_iter_mark_" . $fr_local_id . ");\n");
+            }
+            scope_pop($cg);
+            dedent($cg);
+            emit_indent($cg);
+            emit($cg, "}\n");
+
+            if ($var_decl) {
+                $cg->{"int_vars"}->{$var_name} = $fr_prev_iv;
+            }
+
+            scope_pop($cg);
+            dedent($cg);
+            emit_indent($cg);
+            emit($cg, "}\n");
+
+            if (length($label) > 0) {
+                emit_indent($cg);
+                emit($cg, $label);
+                emit($cg, "_break: ;\n");
+            }
+            $cg->{"loop_break_depth"} = $saved_loop_break_depth;
+        $cg->{"loop_finally_mark"} = $saved_loop_finally_mark;
+            $cg->{"loop_try_depth"} = $saved_loop_try_depth;
+            $cg->{"current_redo_label"} = $saved_redo;
+            return;
+        }
+
+        # Open a block scope
+        emit_indent($cg);
+        emit($cg, "{\n");
+        indent($cg);
+        scope_push($cg);
+
+        # Get the array and iterate
+        emit_indent($cg);
+        emit($cg, "StradaValue *__foreach_arr_" . $foreach_id . " = ");
+        # Set array context for dynamic function calls
+        if ($array_expr->{"type"} == NODE_CALL()) {
+            $cg->{"call_context"} = 1;
+        }
+        gen_expression($cg, $array_expr);
+        if ($array_expr->{"type"} == NODE_CALL()) {
+            $cg->{"call_context"} = 0;
+        }
+        emit($cg, ";\n");
+
+        # If the source list is an owned ref (e.g. inline list literal
+        # like `foreach (1,2,3) { ... }`, function call result, or
+        # `@{$h{k}}`), push it onto the cleanup stack so a throwing body
+        # statement lets the surrounding catch's drain decref it. The
+        # matching pop happens before the normal-path decref below.
+        my int $foreach_arr_cleanup = needs_temp_cleanup($cg, $array_expr) == 1;
+        if ($foreach_arr_cleanup) {
+            emit_indent($cg);
+            emit($cg, "strada_cleanup_push(__foreach_arr_" . $foreach_id . ");\n");
+        }
+
+        emit_indent($cg);
+        emit($cg, "StradaArray *__foreach_av_" . $foreach_id . " = strada_deref_array(__foreach_arr_" . $foreach_id . ");\n");
+
+        emit_indent($cg);
+        emit($cg, "int __foreach_len_" . $foreach_id . " = strada_array_length(__foreach_av_" . $foreach_id . ");\n");
+
+        # For pre-existing loop variables, release the old value before the loop
+        if (!$var_decl) {
+            emit_indent($cg);
+            emit($cg, "strada_decref(" . $var_name . "); " . $var_name . " = NULL;\n");
+        }
+
+        emit_indent($cg);
+        emit($cg, "for (int __foreach_i_" . $foreach_id . " = 0; __foreach_i_" . $foreach_id . " < __foreach_len_" . $foreach_id . "; __foreach_i_" . $foreach_id . "++) {\n");
+        indent($cg);
+        scope_push($cg);
+
+        # Declare or assign the loop variable
+        emit_indent($cg);
+        if ($var_decl) {
+            # New variable declaration
+            emit($cg, "StradaValue *" . $var_name . " = strada_array_get(__foreach_av_" . $foreach_id . ", __foreach_i_" . $foreach_id . ");\n");
+            # Anon-fn local registration (see range path above).
+            if ($cg->{"in_anon_func"}) {
+                my str $fe_locals = $cg->{"anon_local_str"};
+                if ($fe_locals eq "") { $cg->{"anon_local_str"} = $var_name; }
+                else { $cg->{"anon_local_str"} = $fe_locals . "," . $var_name; }
+            }
+        } else {
+            # Existing variable - assign to it (borrowed ref from array_get, no decref needed)
+            emit($cg, $var_name . " = strada_array_get(__foreach_av_" . $foreach_id . ", __foreach_i_" . $foreach_id . ");\n");
+        }
+
+        # Emit redo label after variable assignment
+        emit_indent($cg);
+        emit($cg, $redo_label . ": __attribute__((unused));\n");
+
+        # Per-iter local() restore.
+        my int $fe_body_has_local = stmt_has_local($body);
+        my int $fe_local_id = 0;
+        if ($fe_body_has_local == 1) {
+            $fe_local_id = $cg->{"tmp_counter"} + 0;
+            $cg->{"tmp_counter"} = $fe_local_id + 1;
+            emit_indent($cg);
+            emit($cg, "int __local_iter_mark_" . $fe_local_id . " = strada_local_depth_get();\n");
+        }
+
+        # Generate body statements
+        my scalar $stmts = $body->{"statements"};
+        my int $i = 0;
+        while ($i < $body->{"statement_count"}) {
+            gen_statement($cg, $stmts->[$i]);
+            $i = $i + 1;
+        }
+
+        # Add continue label at end of loop body if labeled
+        if (length($label) > 0) {
+            emit_indent($cg);
+            emit($cg, $label);
+            emit($cg, "_continue: ;\n");
+        }
+
+        if ($fe_body_has_local == 1) {
+            emit_indent($cg);
+            emit($cg, "strada_local_restore_to(__local_iter_mark_" . $fe_local_id . ");\n");
+        }
+        scope_pop($cg);
+        dedent($cg);
+        emit_indent($cg);
+        emit($cg, "}\n");
+
+        # Clean up the foreach array if it was an owned value (function call result, etc.)
+        if ($foreach_arr_cleanup) {
+            emit_indent($cg);
+            emit($cg, "strada_cleanup_pop();\n");
+            emit_indent($cg);
+            emit($cg, "strada_decref(__foreach_arr_" . $foreach_id . ");\n");
+        }
+
+        # Close block scope
+        scope_pop($cg);
+        dedent($cg);
+        emit_indent($cg);
+        emit($cg, "}\n");
+
+        # Add break label after loop if labeled
+        if (length($label) > 0) {
+            emit_indent($cg);
+            emit($cg, $label);
+            emit($cg, "_break: ;\n");
+        }
+        $cg->{"loop_break_depth"} = $saved_loop_break_depth;
+        $cg->{"loop_finally_mark"} = $saved_loop_finally_mark;
+        $cg->{"loop_try_depth"} = $saved_loop_try_depth;
+        $cg->{"current_redo_label"} = $saved_redo;
+        return;
+    }
+
+    # Return statement
+    if ($type == NODE_RETURN_STMT()) {
+        my int $in_main = $cg->{"in_main"};
+        my int $cleanup_enabled = $cg->{"cleanup_enabled"};
+        my int $profiling = $cg->{"enable_profiling"};
+        my int $fp = $cg->{"full_profile"};
+        my str $func_name = $cg->{"current_func_name"};
+        my int $in_extern = $cg->{"in_extern"};
+
+        # NOTE: local() restore happens AFTER return value is evaluated (see below)
+        # This ensures the return expression can see localized values
+
+        # extern functions - simple return with raw C types
+        if ($in_extern == 1) {
+            emit_indent($cg);
+            emit($cg, "return");
+            if ($stmt->{"value"}) {
+                emit($cg, " ");
+                gen_expression($cg, $stmt->{"value"});
+            }
+            emit($cg, ";\n");
+            return;
+        }
+
+        # main() - evaluate return value, cleanup, then return
+        if ($in_main == 1) {
+            if ($stmt->{"value"}) {
+                # Evaluate return expression BEFORE cleanup to avoid use-after-free
+                emit_indent($cg);
+                if ($stmt->{"value"}->{"type"} == NODE_INT_LITERAL()) {
+                    # Simple literal - can emit directly after cleanup
+                    if ($cleanup_enabled == 1) {
+                        # finally blocks run AFTER the return value is captured and
+                        # BEFORE scope cleanup decrefs the locals they may reference.
+                        if ($cg->{"finally_count"} > 0) { gen_finally_upto($cg, 0); }
+                        scope_emit_all_cleanup($cg);
+                    }
+                    # Restore the local() save stack so strdup'd names
+                    # and saved values don't accumulate per call
+                    # (this path was missing the restore that the
+                    # complex-expression case below already had).
+                    if ($cg->{"has_local"} == 1) {
+                        emit_indent($cg);
+                        emit($cg, "strada_local_restore_to(__local_saved_depth);\n");
+                    }
+                    emit_try_cleanup($cg);
+                    emit_stack_pop($cg);
+                    emit_indent($cg);
+                    emit($cg, "return " . $stmt->{"value"}->{"value"} . ";\n");
+                } else {
+                    # Complex expression - evaluate first, then cleanup
+                    emit($cg, "{ int __main_ret = strada_to_int(");
+                    gen_expression($cg, $stmt->{"value"});
+                    emit($cg, ");\n");
+                    indent($cg);
+                    if ($cleanup_enabled == 1) {
+                        # finally blocks run AFTER the return value is captured and
+                        # BEFORE scope cleanup decrefs the locals they may reference.
+                        if ($cg->{"finally_count"} > 0) { gen_finally_upto($cg, 0); }
+                        scope_emit_all_cleanup($cg);
+                    }
+                    if ($cg->{"has_local"} == 1) {
+                        emit_indent($cg);
+                        emit($cg, "strada_local_restore_to(__local_saved_depth);\n");
+                    }
+                    emit_try_cleanup($cg);
+                    emit_stack_pop($cg);
+                    emit_indent($cg);
+                    emit($cg, "return __main_ret; }\n");
+                    dedent($cg);
+                }
+            } else {
+                # No return value - cleanup then return
+                if ($cleanup_enabled == 1) {
+                    # finally blocks run AFTER the return value is captured and
+                    # BEFORE scope cleanup decrefs the locals they may reference.
+                    if ($cg->{"finally_count"} > 0) { gen_finally_upto($cg, 0); }
+                    scope_emit_all_cleanup($cg);
+                }
+                if ($cg->{"has_local"} == 1) {
+                    emit_indent($cg);
+                    emit($cg, "strada_local_restore_to(__local_saved_depth);\n");
+                }
+                emit_try_cleanup($cg);
+                emit_stack_pop($cg);
+                emit_indent($cg);
+                emit($cg, "return;\n");
+            }
+        } elsif ($cleanup_enabled == 0) {
+            # Cleanup disabled - simple return
+            # Still need to pop try blocks even if cleanup is disabled
+            emit_try_cleanup($cg);
+            # Add profiling exit if enabled (for non-main)
+            if (($profiling == 1 || $fp == 1) && $in_main == 0 && length($func_name) > 0) {
+                if ($stmt->{"value"}) {
+                    # Save return value, call profile_exit, then return
+                    emit_indent($cg);
+                    emit($cg, "{ StradaValue *__retval = ");
+                    gen_return_value($cg, $stmt->{"value"});
+                    emit($cg, "; ");
+                    if ($profiling == 1) {
+                        emit($cg, "strada_profile_exit(\"" . $func_name . "\"); ");
+                    }
+                    if ($fp == 1) {
+                        emit($cg, "strada_full_profile_exit(\"" . $func_name . "\"); ");
+                    }
+                    emit($cg, emit_stack_pop_inline($cg) . " return __retval; }\n");
+                } else {
+                    if ($profiling == 1) {
+                        emit_indent($cg);
+                        emit($cg, "strada_profile_exit(\"" . $func_name . "\");\n");
+                    }
+                    if ($fp == 1) {
+                        emit_indent($cg);
+                        emit($cg, "strada_full_profile_exit(\"" . $func_name . "\");\n");
+                    }
+                    emit_stack_pop($cg);
+                    emit_indent($cg);
+                    emit($cg, "return;\n");
+                }
+            } else {
+                emit_stack_pop($cg);
+                emit_indent($cg);
+                emit($cg, "return");
+                if ($stmt->{"value"}) {
+                    emit($cg, " ");
+                    gen_return_value($cg, $stmt->{"value"});
+                }
+                emit($cg, ";\n");
+            }
+        } elsif ($stmt->{"value"}) {
+            # Non-main function with return value - save, cleanup, return
+            emit_indent($cg);
+            emit($cg, "{ StradaValue *__retval = ");
+            my int $ret_coerced = gen_return_value($cg, $stmt->{"value"});
+            emit($cg, ";\n");
+            indent($cg);
+            # Only incref if returning a variable/borrowed ref (not for new
+            # values; a coerced int return is fresh and owned)
+            if ($ret_coerced == 0 && return_needs_incref($cg, $stmt->{"value"}) == 1) {
+                emit_indent($cg);
+                emit($cg, "strada_incref(__retval);\n");
+            }
+            # finally blocks run AFTER the return value is captured and
+            # BEFORE scope cleanup decrefs the locals they may reference.
+            if ($cg->{"finally_count"} > 0) { gen_finally_upto($cg, 0); }
+            scope_emit_all_cleanup($cg);
+            # Restore local() variables AFTER return value is captured
+            if ($cg->{"has_local"} == 1) {
+                emit_indent($cg);
+                emit($cg, "strada_local_restore_to(__local_saved_depth);\n");
+            }
+            # Pop any active try blocks before returning
+            emit_try_cleanup($cg);
+            # Add profiling exit if enabled
+            if ($profiling == 1 && length($func_name) > 0) {
+                emit_indent($cg);
+                emit($cg, "strada_profile_exit(\"" . $func_name . "\");\n");
+            }
+            # Add full profiling exit if enabled
+            if ($fp == 1 && length($func_name) > 0) {
+                emit_indent($cg);
+                emit($cg, "strada_full_profile_exit(\"" . $func_name . "\");\n");
+            }
+            emit_stack_pop($cg);
+            emit_indent($cg);
+            emit($cg, "return __retval; }\n");
+            dedent($cg);
+        } else {
+            # Void return - cleanup then return
+            # finally blocks run AFTER the return value is captured and
+            # BEFORE scope cleanup decrefs the locals they may reference.
+            if ($cg->{"finally_count"} > 0) { gen_finally_upto($cg, 0); }
+            scope_emit_all_cleanup($cg);
+            if ($cg->{"has_local"} == 1) {
+                emit_indent($cg);
+                emit($cg, "strada_local_restore_to(__local_saved_depth);\n");
+            }
+            # Pop any active try blocks before returning
+            emit_try_cleanup($cg);
+            # Add profiling exit if enabled
+            if ($profiling == 1 && length($func_name) > 0) {
+                emit_indent($cg);
+                emit($cg, "strada_profile_exit(\"" . $func_name . "\");\n");
+            }
+            # Add full profiling exit if enabled
+            if ($fp == 1 && length($func_name) > 0) {
+                emit_indent($cg);
+                emit($cg, "strada_full_profile_exit(\"" . $func_name . "\");\n");
+            }
+            emit_stack_pop($cg);
+            emit_indent($cg);
+            emit($cg, "return;\n");
+        }
+        return;
+    }
+    
+    # Expression statement
+    if ($type == NODE_EXPR_STMT()) {
+        emit_indent($cg);
+        my scalar $expr = $stmt->{"expr"};
+
+        # Check if expression produces owned value that must be freed
+        # This includes increment/decrement, method calls, and other temp values
+        if ($expr->{"type"} == NODE_INCREMENT() ||
+            ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $expr) == 1)) {
+            # Discard an owned result: decref it inline. No named temp is
+            # needed — the value is produced and immediately consumed by
+            # decref in one expression, with no window in between (same as
+            # the old `({ T = e; decref(T); })`), so this just drops a
+            # pseudo-register per discarded statement. strada_decref handles
+            # tagged ints (e.g. `$i++` yielding a tagged int) as a no-op.
+            emit($cg, "strada_decref(");
+            gen_expression($cg, $expr);
+            emit($cg, ");\n");
+        } else {
+            gen_expression($cg, $expr);
+            emit($cg, ";\n");
+        }
+        return;
+    }
+    
+    # Last (break)
+    if ($type == 100) {
+        my str $label = $stmt->{"label"};
+        if (length($label) > 0) {
+            # Emit cleanup for all scopes between current and target label's scope
+            my scalar $label_depths = $cg->{"label_depths"};
+            my int $target_depth = $label_depths->{$label} + 0;
+            scope_emit_cleanup_to_depth($cg, $target_depth);
+            emit_indent($cg);
+            emit($cg, "goto ");
+            emit($cg, $label);
+            emit($cg, "_break;\n");
+        } else {
+            # Unlabeled last: run finallys of try/finally constructs inside
+            # the loop first (their code may use loop-scope vars), then
+            # clean up loop body scope vars before break.
+            if ($cg->{"finally_count"} > $cg->{"loop_finally_mark"}) {
+                gen_finally_upto($cg, $cg->{"loop_finally_mark"});
+            }
+            scope_emit_cleanup_to_depth($cg, $cg->{"loop_break_depth"});
+            # If we're inside one or more `try` blocks within the loop,
+            # we must STRADA_TRY_POP each of them — otherwise each pass
+            # leaves a stale try frame on the static stack (max 64),
+            # eventually segfaulting setjmp(*NULL).
+            my int $td_now = $cg->{"try_depth"} + 0;
+            my int $td_loop = $cg->{"loop_try_depth"} + 0;
+            while ($td_now > $td_loop) {
+                emit_indent($cg);
+                emit($cg, "STRADA_TRY_POP();\n");
+                $td_now = $td_now - 1;
+            }
+            emit_indent($cg);
+            emit($cg, "break;\n");
+        }
+        return;
+    }
+
+    # Next (continue)
+    if ($type == 101) {
+        my str $label = $stmt->{"label"};
+        if (length($label) > 0) {
+            # Emit cleanup for scopes between current and target label's BODY scope
+            # Note: For next, we use label_depth + 1 because the _continue label is
+            # placed before scope_pop, so the loop body's cleanup still runs normally
+            my scalar $label_depths = $cg->{"label_depths"};
+            my int $target_depth = $label_depths->{$label} + 1;
+            scope_emit_cleanup_to_depth($cg, $target_depth);
+            emit_indent($cg);
+            emit($cg, "goto ");
+            emit($cg, $label);
+            emit($cg, "_continue;\n");
+        } else {
+            # Unlabeled next: finallys first (see `last` above), then cleanup.
+            if ($cg->{"finally_count"} > $cg->{"loop_finally_mark"}) {
+                gen_finally_upto($cg, $cg->{"loop_finally_mark"});
+            }
+            scope_emit_cleanup_to_depth($cg, $cg->{"loop_break_depth"});
+            my int $td_now = $cg->{"try_depth"} + 0;
+            my int $td_loop = $cg->{"loop_try_depth"} + 0;
+            while ($td_now > $td_loop) {
+                emit_indent($cg);
+                emit($cg, "STRADA_TRY_POP();\n");
+                $td_now = $td_now - 1;
+            }
+            emit_indent($cg);
+            emit($cg, "continue;\n");
+        }
+        return;
+    }
+
+    # Redo (restart current iteration without re-checking condition)
+    if ($type == NODE_REDO()) {
+        my str $label = $stmt->{"label"};
+        if (length($label) > 0) {
+            # Labeled redo: cleanup to target label's body scope, then goto LABEL_redo
+            my scalar $label_depths = $cg->{"label_depths"};
+            my int $target_depth = $label_depths->{$label} + 1;
+            scope_emit_cleanup_to_depth($cg, $target_depth);
+            emit_indent($cg);
+            emit($cg, "goto ");
+            emit($cg, $label);
+            emit($cg, "_redo;\n");
+        } else {
+            # Unlabeled redo: clean up the current loop body's scope
+            # locals before jumping back. Mirrors unlabeled last/next.
+            # Previously this emitted a bare `goto`, leaking any `my`
+            # decl in the loop body when redo fired.
+            scope_emit_cleanup_to_depth($cg, $cg->{"loop_break_depth"});
+            my str $redo_lbl = $cg->{"current_redo_label"};
+            emit_indent($cg);
+            emit($cg, "goto " . $redo_lbl . ";\n");
+        }
+        return;
+    }
+
+    # Try/Catch statement with typed exceptions
+    if ($type == NODE_TRY_CATCH()) {
+        # Save cleanup stack depth BEFORE the try block so it's accessible in catch
+        my int $cleanup_var_id = $cg->{"try_cleanup_counter"} + 0;
+        $cg->{"try_cleanup_counter"} = $cleanup_var_id + 1;
+
+        # finally support: register the block so return/last/next emitted
+        # INSIDE this construct run it on the way out (gen_finally_upto).
+        my scalar $finally_block = $stmt->{"finally_block"};
+        my int $has_finally = 0;
+        my int $fin_idx = $cg->{"finally_count"};
+        if ($finally_block) {
+            $has_finally = 1;
+            $cg->{"finally_blocks"}->[$fin_idx] = $finally_block;
+            $cg->{"finally_count"} = $fin_idx + 1;
+        }
+        emit_indent($cg);
+        emit($cg, "int __cleanup_mark_" . $cleanup_var_id . " = strada_cleanup_mark();\n");
+        # Save local() save-stack depth too — if the try body uses
+        # `local $var = ...` and then throws, the matching restore
+        # would otherwise be skipped by longjmp, leaking the saved
+        # name/value pair forever (1 entry per throw). The catch arm
+        # below restores to this depth before draining cleanup.
+        emit_indent($cg);
+        emit($cg, "int __local_mark_" . $cleanup_var_id . " = strada_local_depth_get();\n");
+
+        emit_indent($cg);
+        emit($cg, "if (setjmp(*STRADA_TRY_PUSH()) == 0) {\n");
+        indent($cg);
+        scope_push($cg);
+
+        # Track that we're inside a try block (for proper cleanup on return)
+        my int $try_depth = $cg->{"try_depth"};
+        $cg->{"try_depth"} = $try_depth + 1;
+
+        # Generate try block
+        my scalar $try_block = $stmt->{"try_block"};
+        my scalar $stmts = $try_block->{"statements"};
+        my int $i = 0;
+        while ($i < $try_block->{"statement_count"}) {
+            gen_statement($cg, $stmts->[$i]);
+            $i = $i + 1;
+        }
+
+        # Decrement try_depth before we emit the pop
+        $cg->{"try_depth"} = $try_depth;
+
+        # No cleanup_restore here: emit_scope_decref emits
+        # `strada_cleanup_pop()` paired with each var's decref, so
+        # inner-try locals are removed from the cleanup stack
+        # one-by-one via scope_pop. Items pushed by helpers
+        # (method dispatch args, etc.) pop themselves before
+        # returning. The cleanup stack is back at __cleanup_mark
+        # by the time we get here on the normal exit path.
+
+        emit_indent($cg);
+        emit($cg, "STRADA_TRY_POP();\n");
+        if ($has_finally == 1) {
+            # Normal completion path. Hide this entry while emitting its
+            # own block (control flow inside finally sees only OUTER ones).
+            $cg->{"finally_count"} = $fin_idx;
+            gen_block($cg, $finally_block);
+            emit($cg, "\n");
+            $cg->{"finally_count"} = $fin_idx + 1;
+        }
+        scope_pop($cg);
+        dedent($cg);
+        emit_indent($cg);
+        emit($cg, "} else {\n");
+        indent($cg);
+        scope_push($cg);
+        emit_indent($cg);
+        emit($cg, "STRADA_TRY_POP();\n");
+
+        # Restore local() save stack to the try-entry depth. Pairs with
+        # __local_mark_N saved before setjmp, so any `local $x = ...`
+        # inside the try that threw gets its original value restored
+        # and the save-stack entries freed.
+        emit_indent($cg);
+        emit($cg, "strada_local_restore_to(__local_mark_" . $cleanup_var_id . ");\n");
+
+        # Drain pending cleanup args from function calls that threw, but only
+        # back to the mark saved at try entry (don't drain caller's items!)
+        emit_indent($cg);
+        emit($cg, "strada_cleanup_drain_to(__cleanup_mark_" . $cleanup_var_id . ");\n");
+
+        # Get the exception into a temporary variable
+        emit_indent($cg);
+        emit($cg, "StradaValue *__strada_exc = strada_get_exception();\n");
+
+        # With finally: a guard frame around the catch dispatch, so a
+        # throwing catch body AND the unmatched-rethrow both run the
+        # finally block before propagating.
+        if ($has_finally == 1) {
+            emit_indent($cg);
+            emit($cg, "if (setjmp(*STRADA_TRY_PUSH()) == 0) {\n");
+            indent($cg);
+            $cg->{"try_depth"} = $cg->{"try_depth"} + 1;
+        }
+
+        # Generate catch clauses
+        my scalar $catch_clauses = $stmt->{"catch_clauses"};
+        my int $catch_count = $stmt->{"catch_count"};
+        my int $has_catchall = 0;
+
+        my int $c = 0;
+        while ($c < $catch_count) {
+            my scalar $clause = $catch_clauses->[$c];
+            my str $catch_type = $clause->{"catch_type"};
+            my str $catch_var = $clause->{"catch_var"};
+            my scalar $catch_block = $clause->{"catch_block"};
+
+            emit_indent($cg);
+
+            if (length($catch_type) > 0) {
+                # Typed catch clause
+                if ($c == 0) {
+                    emit($cg, "if (strada_isa(__strada_exc, \"");
+                } else {
+                    emit($cg, "} else if (strada_isa(__strada_exc, \"");
+                }
+                emit($cg, $catch_type);
+                emit($cg, "\")) {\n");
+            } else {
+                # Catch-all clause
+                $has_catchall = 1;
+                if ($c == 0) {
+                    emit($cg, "{\n");
+                } else {
+                    emit($cg, "} else {\n");
+                }
+            }
+
+            indent($cg);
+            scope_push($cg);
+
+            # Declare catch variable and assign exception
+            emit_indent($cg);
+            emit($cg, "StradaValue *");
+            emit($cg, $catch_var);
+            emit($cg, " = __strada_exc;\n");
+            scope_track_var($cg, $catch_var);
+            # Register the catch variable as a LOCAL of any enclosing
+            # anonymous function — without this, references to it inside a
+            # closure body were classified as outer-scope CAPTURES, emitting
+            # `&e` for a variable that doesn't exist outside ("'e'
+            # undeclared" C errors for any try/catch inside an anon fn).
+            if ($cg->{"in_anon_func"}) {
+                my str $cv_locals = $cg->{"anon_local_str"};
+                if ($cv_locals eq "") {
+                    $cg->{"anon_local_str"} = $catch_var;
+                } else {
+                    $cg->{"anon_local_str"} = $cv_locals . "," . $catch_var;
+                }
+            }
+            # Push to cleanup stack in case we throw from inside this catch block
+            emit_indent($cg);
+            emit($cg, "strada_cleanup_push(" . $catch_var . ");\n");
+            # Track that we have a catch var on the cleanup stack (for throw handling)
+            my int $ccc = $cg->{"catch_cleanup_count"} + 0;
+            $cg->{"catch_cleanup_count"} = $ccc + 1;
+
+            # Generate catch block statements
+            my scalar $catch_stmts = $catch_block->{"statements"};
+            my int $j = 0;
+            while ($j < $catch_block->{"statement_count"}) {
+                gen_statement($cg, $catch_stmts->[$j]);
+                $j = $j + 1;
+            }
+
+            # No explicit cleanup_pop here — emit_scope_decref emits
+            # the pop paired with decref for the catch var.
+            $cg->{"catch_cleanup_count"} = $cg->{"catch_cleanup_count"} - 1;
+            scope_pop($cg);
+            dedent($cg);
+
+            $c = $c + 1;
+        }
+
+        # If no catch-all, add a re-throw for unmatched exceptions
+        if ($has_catchall == 0 && $catch_count > 0) {
+            emit_indent($cg);
+            emit($cg, "} else {\n");
+            indent($cg);
+            emit_indent($cg);
+            emit($cg, "strada_throw_value(__strada_exc);\n");
+            dedent($cg);
+        }
+
+        if ($catch_count > 0) {
+            emit_indent($cg);
+            emit($cg, "}\n");
+        } else {
+            # try { } finally { } with no catch: nothing handled the
+            # exception here — rethrow (after finally, via the guard).
+            emit_indent($cg);
+            emit($cg, "strada_throw_value(__strada_exc);\n");
+        }
+
+        if ($has_finally == 1) {
+            $cg->{"try_depth"} = $cg->{"try_depth"} - 1;
+            emit_indent($cg);
+            emit($cg, "STRADA_TRY_POP();\n");
+            # Catch completed normally -> run finally.
+            $cg->{"finally_count"} = $fin_idx;
+            gen_block($cg, $finally_block);
+            emit($cg, "\n");
+            emit_indent($cg);
+            emit($cg, "} else {\n");
+            indent($cg);
+            emit_indent($cg);
+            emit($cg, "STRADA_TRY_POP();\n");
+            emit_indent($cg);
+            emit($cg, "strada_local_restore_to(__local_mark_" . $cleanup_var_id . ");\n");
+            emit_indent($cg);
+            emit($cg, "strada_cleanup_drain_to(__cleanup_mark_" . $cleanup_var_id . ");\n");
+            emit_indent($cg);
+            emit($cg, "StradaValue *__fin_exc_" . $cleanup_var_id . " = strada_get_exception();\n");
+            # Catch threw (or no catch matched / no catch at all): run
+            # finally, then propagate the pending exception.
+            gen_block($cg, $finally_block);
+            emit($cg, "\n");
+            $cg->{"finally_count"} = $fin_idx + 1;
+            emit_indent($cg);
+            emit($cg, "strada_throw_value(__fin_exc_" . $cleanup_var_id . ");\n");
+            dedent($cg);
+            emit_indent($cg);
+            emit($cg, "}\n");
+        }
+
+        scope_pop($cg);
+        dedent($cg);
+        emit_indent($cg);
+        emit($cg, "}\n");
+
+        # Unregister this construct's finally entry.
+        if ($has_finally == 1) {
+            $cg->{"finally_count"} = $fin_idx;
+        }
+        return;
+    }
+
+    # Throw statement
+    # Note: We intentionally don't emit scope cleanup before throw because:
+    # 1. If inside a try block, the longjmp will skip any cleanup anyway
+    # 2. The catch handler is responsible for cleanup via strada_decref on exception var
+    # 3. Before throwing, we MUST clean up ALL local variables in scope AND function
+    #    parameters, because the normal function epilogue/scope cleanup won't run.
+    #    This is especially important when re-throwing from a catch block, where
+    #    variables declared before the try block would otherwise leak.
+    # 4. IMPORTANT: We must evaluate the throw expression BEFORE cleanup, because the
+    #    expression may reference local variables. Then cleanup, then throw.
+    # 5. We must incref the throw value before cleanup to protect it, because the
+    #    cleanup might decref a variable that IS the throw value (e.g., re-throwing $e).
+    #    The incref balances the cleanup's decref; strada_throw_value takes ownership.
+    if ($type == NODE_THROW()) {
+        my int $td = $cg->{"try_depth"} + 0;
+        my int $ccc = $cg->{"catch_cleanup_count"} + 0;
+        my scalar $throw_expr = $stmt->{"expr"};
+        my int $throw_is_var = 0;
+        if ($throw_expr->{"type"} == NODE_VARIABLE()) {
+            $throw_is_var = 1;
+        }
+
+        if ($ccc > 0) {
+            # We're in a catch block (possibly inside an outer try) - need to clean up
+            # catch scope and pop catch vars, but if inside outer try, don't clean
+            # outer scopes (outer catch will handle cleanup via drain)
+            emit_indent($cg);
+            emit($cg, "{ StradaValue *__throw_val = ");
+            gen_expression($cg, $throw_expr);
+            emit($cg, ";\n");
+            indent($cg);
+            emit_indent($cg);
+            emit($cg, "strada_incref(__throw_val);\n");
+            if ($td == 0) {
+                # Not inside any outer try - clean up everything
+                scope_emit_all_cleanup($cg);
+            } else {
+                # Inside an outer try - only clean up catch scope and catch vars
+                scope_emit_cleanup($cg);
+                # Pop catch vars from cleanup stack
+                my int $cv = $ccc;
+                while ($cv > 0) {
+                    emit_indent($cg);
+                    emit($cg, "strada_cleanup_pop();\n");
+                    $cv = $cv - 1;
+                }
+            }
+            # Only decref if throw expression was NOT a variable (variables get decrefd by cleanup)
+            if ($throw_is_var == 0) {
+                emit_indent($cg);
+                emit($cg, "strada_decref(__throw_val);\n");
+            }
+            emit_indent($cg);
+            emit($cg, "strada_throw_value(__throw_val); }\n");
+            dedent($cg);
+            return;
+        }
+
+        if ($td > 0) {
+            # We're inside a try block (not a catch). The longjmp to the
+            # catch handler skips any scope_pop calls, so locals declared
+            # inside the try would leak. Mirror the outside-try / catch
+            # paths: capture the throw value, incref to protect it,
+            # emit scope cleanup, then throw. Borrowed-ref throw_expr
+            # (variable case) gets decref balance from the cleanup.
+            emit_indent($cg);
+            emit($cg, "{ StradaValue *__throw_val = ");
+            gen_expression($cg, $throw_expr);
+            emit($cg, ";\n");
+            indent($cg);
+            emit_indent($cg);
+            emit($cg, "strada_incref(__throw_val);\n");
+            scope_emit_cleanup($cg);
+            # Only decref if throw expression was NOT a variable
+            if ($throw_is_var == 0) {
+                emit_indent($cg);
+                emit($cg, "strada_decref(__throw_val);\n");
+            }
+            emit_indent($cg);
+            emit($cg, "strada_throw_value(__throw_val); }\n");
+            dedent($cg);
+            return;
+        }
+
+        # We're outside any try/catch - exiting the function, full cleanup
+        emit_indent($cg);
+        emit($cg, "{ StradaValue *__throw_val = ");
+        gen_expression($cg, $throw_expr);
+        emit($cg, ";\n");
+        indent($cg);
+        emit_indent($cg);
+        emit($cg, "strada_incref(__throw_val);\n");
+        scope_emit_all_cleanup($cg);
+        # Only decref if throw expression was NOT a variable (variables get decrefd by cleanup)
+        if ($throw_is_var == 0) {
+            emit_indent($cg);
+            emit($cg, "strada_decref(__throw_val);\n");
+        }
+        emit_indent($cg);
+        emit($cg, "strada_throw_value(__throw_val); }\n");
+        dedent($cg);
+        return;
+    }
+
+    # Label statement
+    if ($type == NODE_LABEL()) {
+        # Register the label's scope depth so a backward `goto LABEL`
+        # can emit cleanup for the scopes it exits.
+        my scalar $label_depths = $cg->{"label_depths"};
+        $label_depths->{$stmt->{"name"}} = $cg->{"scope_depth"};
+        emit($cg, $stmt->{"name"} . ":;\n");
+        return;
+    }
+
+    # Goto statement
+    if ($type == NODE_GOTO()) {
+        # If the label has been registered (backward goto — the common
+        # case), emit cleanup for every scope between the goto and the
+        # label's scope. Without this, locals declared between the
+        # label and the goto leaked permanently. Forward gotos (label
+        # not yet seen) fall back to bare goto and may still leak —
+        # rare in practice, and over-cleaning here would double-free
+        # via the natural scope_pop on fall-through.
+        my str $target = $stmt->{"target"};
+        my scalar $label_depths = $cg->{"label_depths"};
+        my int $has_target = exists(%{$label_depths}, $target);
+        if ($has_target == 1) {
+            my int $target_depth = $label_depths->{$target} + 0;
+            scope_emit_cleanup_to_depth($cg, $target_depth);
+        }
+        emit_indent($cg);
+        emit($cg, "goto " . $target . ";\n");
+        return;
+    }
+
+    # Switch statement
+    if ($type == NODE_SWITCH()) {
+        # Generate a unique variable to hold the switch expression
+        my int $switch_id = $cg->{"switch_counter"};
+        $cg->{"switch_counter"} = $switch_id + 1;
+        my str $switch_var = "_switch_val_" . $switch_id;
+
+        emit_indent($cg);
+        emit($cg, "{\n");
+        indent($cg);
+
+        # Evaluate switch expression once and extract to C string
+        emit_indent($cg);
+        emit($cg, "StradaValue *" . $switch_var . " = ");
+        gen_expression($cg, $stmt->{"expr"});
+        emit($cg, ";\n");
+        emit_indent($cg);
+        emit($cg, "char *" . $switch_var . "_str = strada_to_str_ss(" . $switch_var . ");\n");
+
+        my scalar $cases = $stmt->{"cases"};
+        my scalar $blocks = $stmt->{"blocks"};
+        my int $case_count = $stmt->{"case_count"};
+        my int $i = 0;
+
+        while ($i < $case_count) {
+            emit_indent($cg);
+            my scalar $case_expr = $cases->[$i];
+            if ($i == 0) {
+                emit($cg, "if (");
+            } else {
+                emit($cg, "} else if (");
+            }
+            # Check if case is a string literal - can compare directly
+            if ($case_expr->{"type"} == NODE_STR_LITERAL()) {
+                emit($cg, "strcmp(" . $switch_var . "_str, ");
+                gen_str_literal_c($cg, $case_expr->{"value"});
+                emit($cg, ") == 0");
+            } else {
+                # Non-literal case - need to extract and free
+                emit($cg, "({ StradaValue *__case_sv = ");
+                gen_expression($cg, $case_expr);
+                emit($cg, "; char *__case_str = strada_to_str_ss(__case_sv); int __case_eq = strcmp(" . $switch_var . "_str, __case_str) == 0; strada_cstr_free(__case_str); strada_decref(__case_sv); __case_eq; })");
+            }
+            emit($cg, ") {\n");
+            indent($cg);
+
+            # Generate the block body (statements only, not the braces).
+            # Push a scope so any `my` decls inside the case body get
+            # decref'd at the end of this case's C block — without this,
+            # cleanup is deferred to the function epilogue where the C
+            # variable is already out of scope, producing "undeclared
+            # identifier" at gcc time.
+            scope_push($cg);
+            my scalar $block = $blocks->[$i];
+            my scalar $stmts = $block->{"statements"};
+            my int $j = 0;
+            while ($j < $block->{"statement_count"}) {
+                gen_statement($cg, $stmts->[$j]);
+                $j = $j + 1;
+            }
+            scope_pop($cg);
+
+            dedent($cg);
+            $i = $i + 1;
+        }
+
+        # Default block
+        my int $has_default = $stmt->{"has_default"};
+        if ($has_default) {
+            my scalar $default_block = $stmt->{"default_block"};
+            emit_indent($cg);
+            if ($case_count > 0) {
+                emit($cg, "} else {\n");
+            } else {
+                emit($cg, "{\n");
+            }
+            indent($cg);
+
+            # Same scope handling as case bodies.
+            scope_push($cg);
+            my scalar $def_stmts = $default_block->{"statements"};
+            my int $k = 0;
+            while ($k < $default_block->{"statement_count"}) {
+                gen_statement($cg, $def_stmts->[$k]);
+                $k = $k + 1;
+            }
+            scope_pop($cg);
+
+            dedent($cg);
+        }
+
+        if ($case_count > 0 || $has_default) {
+            emit_indent($cg);
+            emit($cg, "}\n");
+        }
+
+        # Free the switch expression string
+        emit_indent($cg);
+        emit($cg, "strada_cstr_free(" . $switch_var . "_str);\n");
+
+        dedent($cg);
+        emit_indent($cg);
+        emit($cg, "}\n");
+        return;
+    }
+
+    # __C__ { ... } - raw C code block
+    if ($type == NODE_C_BLOCK()) {
+        my str $code = $stmt->{"code"};
+        emit($cg, "/* Begin __C__ block */\n");
+        emit($cg, $code);
+        emit($cg, "\n/* End __C__ block */\n");
+        return;
+    }
+}
+
+# ============================================================
+# Function and Program Code Generation
+# ============================================================
+
+func gen_function(scalar $cg, scalar $fn) void {
+    my str $ret_type = type_to_c($fn->{"return_type"});
+    my str $name = sanitize_name($fn->{"name"});
+    my int $ret_type_id = $fn->{"return_type"};
+
+    # Reset function parameter tracking for each new function
+    $cg->{"func_params"} = {};
+    $cg->{"func_param_names"} = [];
+    $cg->{"func_param_count"} = 0;
+
+    # Check if this is a DESTROY method - these should NOT have parameter incref/decref
+    # because DESTROY is called during object destruction when refcount is already 0
+    my int $is_destroy = 0;
+    if ($name eq "DESTROY") {
+        $is_destroy = 1;
+    } else {
+        my int $name_len = length($name);
+        if ($name_len > 8) {
+            my str $suffix = substr($name, $name_len - 8, 8);
+            if ($suffix eq "_DESTROY") {
+                $is_destroy = 1;
+            }
+        }
+    }
+    $cg->{"is_destroy_method"} = $is_destroy;
+
+    # Check if function body contains any try blocks - if so, local variables need volatile
+    # to preserve their values across setjmp/longjmp in exception handling
+    my scalar $fn_body = $fn->{"body"};
+    if (func_body_has_try($fn_body) == 1) {
+        $cg->{"func_has_try"} = 1;
+    } else {
+        $cg->{"func_has_try"} = 0;
+    }
+
+    # Special case for main
+    if ($name eq "main") {
+        $cg->{"in_main"} = 1;
+        $cg->{"has_local"} = 0;
+        $cg->{"int_vars"} = {};
+        $cg->{"num_vars"} = {};
+        # Store main's package for function call resolution
+        $cg->{"current_fn_package"} = $fn->{"package"};
+        # Note: previously emitted `__attribute__((flatten))` here for
+        # small OOP-heavy TUs. With LTO now enabled on the runtime, flatten
+        # pulls error paths and cold runtime code into main, blowing icache
+        # and bloating the binary ~10x for no perf gain. Plain main + LTO
+        # lets gcc make smarter inline choices.
+        emit($cg, "int main(int _argc, char **_argv) {\n");
+        emit($cg, "    /* Initialize proctitle support */\n");
+        emit($cg, "    strada_init_proctitle(_argc, _argv);\n\n");
+
+        # Push stack frame for stack traces (if enabled)
+        my str $src_file = $cg->{"filename"};
+        if ($cg->{"enable_stack_trace"} == 1) {
+            emit($cg, "    strada_stack_push_il(\"main\", \"" . $src_file . "\");\n\n");
+        }
+
+        # Initialize profiling if enabled
+        if ($cg->{"enable_profiling"} == 1) {
+            emit($cg, "    /* Initialize function profiling */\n");
+            emit($cg, "    strada_profile_init();\n");
+            emit($cg, "    atexit(strada_profile_report);\n\n");
+        }
+
+        # Initialize full profiling if enabled
+        if ($cg->{"full_profile"} == 1) {
+            emit($cg, "    /* Initialize full (line-level) profiling */\n");
+            emit($cg, "    strada_full_profile_init(NULL);\n");
+            emit($cg, "    atexit(strada_full_profile_write);\n");
+            emit($cg, "    __fp_file_id = strada_full_profile_register_file(\"" . $cg->{"filename"} . "\");\n\n");
+        }
+        emit($cg, "    /* Populate global ARGV array */\n");
+        emit($cg, "    ARGV = strada_new_array();\n");
+        emit($cg, "    for (int i = 1; i < _argc; i++) {\n");
+        emit($cg, "        strada_array_push(ARGV->value.av, strada_new_str(_argv[i]));\n");
+        emit($cg, "    }\n");
+        emit($cg, "    ARGC = strada_new_int(_argc - 1);\n");
+        emit($cg, "    /* Initialize special variables */\n");
+        emit($cg, "    __child_status = STRADA_MAKE_TAGGED_INT(0);\n");
+        emit($cg, "    __program_name = strada_new_str(_argv[0]);\n\n");
+        emit($cg, "    /* Initialize standard I/O filehandles (immortal — never closed) */\n");
+        emit($cg, "    v_STDIN = strada_new_undef(); v_STDIN->type = STRADA_FILEHANDLE; v_STDIN->refcount = 1000000001; v_STDIN->value.fh = stdin;\n");
+        emit($cg, "    v_STDOUT = strada_new_undef(); v_STDOUT->type = STRADA_FILEHANDLE; v_STDOUT->refcount = 1000000001; v_STDOUT->value.fh = stdout;\n");
+        emit($cg, "    v_STDERR = strada_new_undef(); v_STDERR->type = STRADA_FILEHANDLE; v_STDERR->refcount = 1000000001; v_STDERR->value.fh = stderr;\n");
+        emit($cg, "    atexit(__strada_cleanup_globals);\n\n");
+
+        # Set package if declared at file level
+        my str $pkg = $cg->{"package"};
+        if ($pkg ne "") {
+            emit($cg, "    /* Set package from file-level declaration */\n");
+            emit($cg, "    strada_set_package(\"" . $pkg . "\");\n\n");
+        }
+
+        # Set up inheritance from file-level declarations
+        my scalar $inherits = $cg->{"inherits"};
+        my int $inherit_count = $cg->{"inherit_count"};
+        if ($inherit_count > 0) {
+            emit($cg, "    /* Set up inheritance from file-level declarations */\n");
+            my int $inh = 0;
+            while ($inh < $inherit_count) {
+                my scalar $entry = $inherits->[$inh];
+                my str $child = $entry->{"child"};
+                my str $parent = $entry->{"parent"};
+                emit($cg, "    strada_inherit(\"" . $child . "\", \"" . $parent . "\");\n");
+                $inh = $inh + 1;
+            }
+            emit($cg, "\n");
+        }
+
+        # Initialize OOP method registration for all packages that have methods
+        my int $num_oop_pkgs = get_oop_pkg_count($cg);
+        if ($num_oop_pkgs > 0) {
+            my scalar $oop_pkgs = get_oop_packages($cg);
+            emit($cg, "    /* Initialize OOP method registration */\n");
+            my int $oop_i = 0;
+            while ($oop_i < $num_oop_pkgs) {
+                my str $oop_pkg = $oop_pkgs->[$oop_i];
+                my str $c_oop_pkg = sanitize_name($oop_pkg);
+                emit($cg, "    __" . $c_oop_pkg . "_oop_init();\n");
+                $oop_i = $oop_i + 1;
+            }
+            emit($cg, "\n");
+        }
+
+        # Also call OOP init for each imported .o file's package. The weak
+        # forward decl above lets these resolve to NULL when the .o has no
+        # methods; main() guards each call with a NULL check.
+        my int $impo_count = $cg->{"import_object_count"};
+        if ($impo_count > 0) {
+            my scalar $impo_objs = $cg->{"import_objects"};
+            emit($cg, "    /* OOP init for imported .o modules (weak) */\n");
+            my int $impo_i = 0;
+            while ($impo_i < $impo_count) {
+                my scalar $impo = $impo_objs->[$impo_i];
+                my str $impo_name = $impo->{"obj_name"};
+                my str $c_impo = sanitize_name($impo_name);
+                emit($cg, "    if (__" . $c_impo . "_oop_init) __" . $c_impo . "_oop_init();\n");
+                $impo_i = $impo_i + 1;
+            }
+            emit($cg, "\n");
+        }
+
+        # If main has parameters, bind argc/argv from raw C values (includes program name)
+        my scalar $params = $fn->{"params"};
+        my int $param_count = $fn->{"param_count"};
+        if ($param_count >= 1) {
+            # First parameter gets raw C argc (includes program name)
+            my scalar $p1 = $params->[0];
+            emit($cg, "    StradaValue* " . $p1->{"name"} . " = strada_new_int(_argc);\n");
+        }
+        if ($param_count >= 2) {
+            # Second parameter gets raw C argv (includes program name at [0])
+            my scalar $p2 = $params->[1];
+            emit($cg, "    StradaValue* " . $p2->{"name"} . " = strada_new_array();\n");
+            emit($cg, "    for (int __mi = 0; __mi < _argc; __mi++) {\n");
+            emit($cg, "        strada_array_push(" . $p2->{"name"} . "->value.av, strada_new_str(_argv[__mi]));\n");
+            emit($cg, "    }\n");
+        }
+        if ($param_count > 0) {
+            emit($cg, "\n");
+        }
+
+        # Initialize global variables
+        my int $global_count = $cg->{"global_count"};
+        if ($global_count > 0) {
+            emit($cg, "    /* Initialize global variables */\n");
+            my scalar $globals = $cg->{"globals"};
+            my int $g = 0;
+            while ($g < $global_count) {
+                my scalar $gvar = $globals->[$g];
+                my int $gvar_type = $gvar->{"type"};
+                my int $var_type = $gvar->{"var_type"};
+                my str $sigil = $gvar->{"sigil"};
+                my str $name = $gvar->{"name"};
+                my scalar $init = $gvar->{"init"};
+
+                # Module-only: skip globals from other modules.
+                if (cg_skip_for_module($cg, $gvar->{"from_use"}) == 1) {
+                    $g = $g + 1;
+                    next;
+                }
+
+                # Handle our declarations - use global registry
+                if ($gvar_type == NODE_OUR_DECL()) {
+                    my str $pkg = $gvar->{"package"};
+                    if (length($pkg) == 0) { $pkg = "main"; }
+                    my str $our_key = $pkg . "::" . $name;
+                    if ($init) {
+                        emit($cg, "    strada_global_set_cstr(\"" . $our_key . "\", ");
+                        emit_our_global_init($cg, $init, $sigil, $var_type);
+                        emit($cg, ");\n");
+                    } elsif ($sigil eq "@" || $var_type == TYPE_ARRAY()) {
+                        # No initializer: still create the empty container, else
+                        # the global never exists and push/element-set inside a
+                        # function deref a NULL array and silently no-op.
+                        emit($cg, "    strada_global_set_cstr(\"" . $our_key . "\", strada_new_array());\n");
+                    } elsif ($sigil eq "%" || $var_type == TYPE_HASH()) {
+                        emit($cg, "    strada_global_set_cstr(\"" . $our_key . "\", strada_new_hash());\n");
+                    }
+                    # Register in our_vars for codegen
+                    my scalar $our_vars_ref2 = $cg->{"our_vars"};
+                    $our_vars_ref2->{$name} = $our_key;
+                    $g = $g + 1;
+                    next;
+                }
+
+                # Handle const declarations - initialize static variables
+                if ($gvar_type == NODE_CONST_DECL()) {
+                    my int $init_type = $init->{"type"};
+                    if ($init_type == NODE_INT_LITERAL() || $init_type == NODE_NUM_LITERAL() || $init_type == NODE_STR_LITERAL()) {
+                        emit($cg, "    " . $name . " = ");
+                        gen_expression($cg, $init);
+                        emit($cg, ";\n");
+                        $g = $g + 1;
+                        next;
+                    }
+                }
+
+                emit($cg, "    " . $name . " = ");
+                if ($sigil eq "%" || $var_type == TYPE_HASH()) {
+                    if ($init) {
+                        # Handle empty () which parser returns as anon_hash
+                        if ($init->{"type"} == NODE_ANON_HASH() && $init->{"pair_count"} == 0) {
+                            emit($cg, "strada_new_hash()");
+                        } else {
+                            gen_expression($cg, $init);
+                        }
+                    } else {
+                        emit($cg, "strada_new_hash()");
+                    }
+                } elsif ($sigil eq "@" || $var_type == TYPE_ARRAY()) {
+                    if ($init) {
+                        # Handle empty () which parser returns as anon_hash
+                        if ($init->{"type"} == NODE_ANON_HASH() && $init->{"pair_count"} == 0) {
+                            emit($cg, "strada_new_array()");
+                        } else {
+                            gen_expression($cg, $init);
+                        }
+                    } else {
+                        emit($cg, "strada_new_array()");
+                    }
+                } else {
+                    if ($init) {
+                        gen_expression($cg, $init);
+                    } else {
+                        emit($cg, "strada_new_undef()");
+                    }
+                }
+                emit($cg, ";\n");
+                $g = $g + 1;
+            }
+            emit($cg, "\n");
+        }
+
+        # Call BEGIN blocks (only if any exist)
+        my int $main_begin_count = $cg->{"begin_block_count"};
+        if ($main_begin_count > 0) {
+            emit($cg, "    /* BEGIN blocks */\n");
+            my int $mbi = 0;
+            while ($mbi < $main_begin_count) {
+                emit($cg, "    __begin_" . $mbi . "();\n");
+                $mbi = $mbi + 1;
+            }
+            emit($cg, "\n");
+        }
+
+        # Register END blocks via atexit (LIFO - atexit calls in reverse registration order)
+        my int $main_end_count = $cg->{"end_block_count"};
+        if ($main_end_count > 0) {
+            emit($cg, "    /* Register END blocks (run at exit in LIFO order) */\n");
+            my int $mei = 0;
+            while ($mei < $main_end_count) {
+                emit($cg, "    atexit(__end_" . $mei . ");\n");
+                $mei = $mei + 1;
+            }
+            emit($cg, "\n");
+        }
+
+        # Call import() functions (only if any exist)
+        my int $main_import_call_count = $cg->{"import_call_count"};
+        if ($main_import_call_count > 0) {
+            my scalar $import_calls = $cg->{"import_calls"};
+            emit($cg, "    /* Module import() calls */\n");
+            my int $mic = 0;
+            while ($mic < $main_import_call_count) {
+                my scalar $call_info = $import_calls->[$mic];
+                my str $call_fn = sanitize_name($call_info->{"func_name"});
+                my str $call_pkg = $call_info->{"pkg_name"};
+                emit($cg, "    " . $call_fn . "(strada_new_str(\"" . $call_pkg . "\"), strada_new_array());\n");
+                $mic = $mic + 1;
+            }
+            emit($cg, "\n");
+        }
+
+        # Generate the body statements directly (without the outer braces)
+        # Push scope for main's local variables
+        scope_push($cg);
+        my scalar $body = $fn->{"body"};
+        # Lift __local_saved_depth to main's outermost scope when a
+        # `local` is used anywhere in main. See gen_function for the
+        # rationale.
+        if (func_body_has_local($body) == 1) {
+            emit($cg, "int __local_saved_depth = strada_local_depth_get();\n");
+            $cg->{"has_local"} = 1;
+        }
+        my scalar $stmts = $body->{"statements"};
+        my int $i = 0;
+        while ($i < $body->{"statement_count"}) {
+            gen_statement($cg, $stmts->[$i]);
+            $i = $i + 1;
+        }
+        scope_pop($cg);
+        emit($cg, "}\n\n");
+        $cg->{"in_main"} = 0;
+    } else {
+        # Private functions get static prefix (file-scope only).
+        # When this TU also defines `main`, the export_info table is
+        # emitted static and no other image can dlsym our function bodies —
+        # so make non-private OOP/regular functions `static inline` too,
+        # letting gcc inline them across direct call sites under -O2/LTO.
+        # This was the dominant cost on the OOP benchmark (Point_distance_sq
+        # being called out-of-line from the hot inline-constructor loop).
+        # `inline` (not `always_inline`) so gcc can still skip inlining
+        # recursive / large bodies it doesn't want to grow.
+        my str $static_prefix = "";
+        if ($fn->{"is_private"} == 1) {
+            $static_prefix = "static ";
+        } elsif ($cg->{"aggressive_inline"} == 1) {
+            $static_prefix = "static inline ";
+        }
+        emit($cg, $static_prefix . $ret_type . " " . $name . "(");
+
+        my scalar $params = $fn->{"params"};
+        my int $i = 0;
+        while ($i < $fn->{"param_count"}) {
+            if ($i > 0) {
+                emit($cg, ", ");
+            }
+            my scalar $param = $params->[$i];
+            my int $ptype = $param->{"param_type"};
+            my str $c_param_name = escape_c_keyword($param->{"name"});
+            emit($cg, type_to_c($ptype) . " " . $c_param_name);
+            $i = $i + 1;
+        }
+
+        if ($fn->{"param_count"} == 0) {
+            emit($cg, "void");
+        }
+
+        emit($cg, ") {\n");
+
+        # Push stack frame for stack traces (if enabled)
+        my str $src_file = $cg->{"filename"};
+        if ($cg->{"enable_stack_trace"} == 1) {
+            emit($cg, "strada_stack_push_il(\"" . $name . "\", \"" . $src_file . "\");\n");
+        }
+
+        # Add profiling entry if enabled
+        if ($cg->{"enable_profiling"} == 1) {
+            emit($cg, "    strada_profile_enter(\"" . $name . "\");\n");
+        }
+
+        # Add full profiling entry if enabled
+        if ($cg->{"full_profile"} == 1) {
+            emit($cg, "    strada_full_profile_enter(\"" . $name . "\");\n");
+        }
+
+        # Store current function name for profiling exit in return statements
+        $cg->{"current_func_name"} = $name;
+
+        # Int-returning functions coerce non-int return values to canonical
+        # ints (see gen_return_value) — the int-call fast paths and
+        # int-declared storage assume canonical int results.
+        $cg->{"ret_is_int"} = 0;
+        if ($ret_type_id == TYPE_INT()) {
+            $cg->{"ret_is_int"} = 1;
+        }
+        $cg->{"ret_is_num"} = 0;
+        if ($ret_type_id == TYPE_NUM()) {
+            $cg->{"ret_is_num"} = 1;
+        }
+
+        # Reset local() tracking for this function
+        $cg->{"has_local"} = 0;
+
+        # Store current function's package for SUPER:: calls
+        $cg->{"current_fn_package"} = $fn->{"package"};
+
+        # Generate the function body (without the outer braces, we handle them)
+        scope_push($cg);
+
+        # Track function parameters and their C names for proper reference counting
+        # We incref each parameter at entry so the function "owns" its reference
+        # This allows safe reassignment without affecting the caller's copy
+        # EXCEPTION: DESTROY methods should NOT have parameter incref/decref because
+        # they are called during object destruction when refcount is already 0
+        # We also push parameters to the cleanup stack for exception safety:
+        # if a called function throws, cleanup_drain in the catch will decref our params
+        $cg->{"func_params"} = {};
+        $cg->{"func_param_names"} = [];
+        $cg->{"func_param_count"} = 0;
+        $cg->{"func_param_is_int"} = [];
+        $cg->{"func_param_skip_wrap"} = [];
+        # Reset int_vars tracking for this function (prevents cross-function leaks)
+        $cg->{"int_vars"} = {};
+        $cg->{"num_vars"} = {};
+        # Detect "leaf-safe" function bodies: bodies that contain only
+        # inline-able operations (arithmetic, comparisons, inline accessor
+        # calls, literals, ternary) and can never throw or escape the
+        # parameters. For these, skip the per-call incref / cleanup_push /
+        # cleanup_pop / decref wrap on scalar parameters — the caller's
+        # reference is guaranteed to remain live for the call duration.
+        my int $is_leaf_body = 0;
+        if ($cg->{"is_destroy_method"} != 1 && $cg->{"cleanup_enabled"} == 1) {
+            $is_leaf_body = node_is_leaf_safe($cg, $fn->{"body"});
+        }
+        if ($cg->{"is_destroy_method"} != 1) {
+            my int $param_i = 0;
+            while ($param_i < $fn->{"param_count"}) {
+                my scalar $param = $params->[$param_i];
+                my str $c_param_name = escape_c_keyword($param->{"name"});
+                $cg->{"func_params"}->{$param->{"name"}} = 1;
+                my int $pc = $cg->{"func_param_count"};
+                $cg->{"func_param_names"}->[$pc] = $c_param_name;
+                $cg->{"func_param_count"} = $pc + 1;
+                # Track int-typed parameters for arithmetic optimization
+                my int $is_int_param = 0;
+                if ($param->{"param_type"} == TYPE_INT()) {
+                    $cg->{"int_vars"}->{$c_param_name} = 1;
+                    $is_int_param = 1;
+                }
+                # Track num-typed params for the numeric-coercion predicate
+                if ($param->{"param_type"} == TYPE_NUM()) {
+                    $cg->{"num_vars"}->{$c_param_name} = 1;
+                }
+                $cg->{"func_param_is_int"}->[$pc] = $is_int_param;
+                # Skip wrap when param is int (tagged-int immortal) OR when
+                # the whole function body is leaf-safe.
+                my int $skip_wrap = 0;
+                if ($is_int_param == 1 || $is_leaf_body == 1) {
+                    $skip_wrap = 1;
+                }
+                $cg->{"func_param_skip_wrap"}->[$pc] = $skip_wrap;
+                if ($skip_wrap == 0) {
+                    emit($cg, "strada_incref(" . $c_param_name . ");\n");
+                    # Push to cleanup stack for exception unwinding
+                    emit($cg, "strada_cleanup_push(" . $c_param_name . ");\n");
+                }
+                $param_i = $param_i + 1;
+            }
+        }
+
+        my scalar $body = $fn->{"body"};
+        # If this function uses `local` anywhere (including inside an
+        # if/try/while/switch nest), declare __local_saved_depth at
+        # function-top scope. Otherwise the declaration would land
+        # inside whatever nested C scope first used `local` — making
+        # the matching strada_local_restore_to() call later in the
+        # function reference an out-of-scope name. The C compiler
+        # rejects it with "undeclared identifier".
+        if (func_body_has_local($body) == 1) {
+            emit($cg, "int __local_saved_depth = strada_local_depth_get();\n");
+            $cg->{"has_local"} = 1;
+        }
+        my scalar $stmts = $body->{"statements"};
+        my int $stmt_i = 0;
+        while ($stmt_i < $body->{"statement_count"}) {
+            gen_statement($cg, $stmts->[$stmt_i]);
+            $stmt_i = $stmt_i + 1;
+        }
+        scope_pop($cg);
+
+        # Pop and decref function parameters for void functions that fall through
+        # (functions with return statements handle this in scope_emit_all_cleanup)
+        if ($ret_type_id == TYPE_VOID()) {
+            my int $pn_count = $cg->{"func_param_count"} + 0;
+            if ($pn_count > 0) {
+                my scalar $param_names = $cg->{"func_param_names"};
+                my scalar $param_skip3 = $cg->{"func_param_skip_wrap"};
+                my int $pn_i = 0;
+                while ($pn_i < $pn_count) {
+                    if ($param_skip3->[$pn_i] == 0) {
+                        my str $pname = $param_names->[$pn_i];
+                        emit($cg, "strada_cleanup_pop();\n");
+                        emit($cg, "strada_decref(" . $pname . ");\n");
+                    }
+                    $pn_i = $pn_i + 1;
+                }
+            }
+        }
+
+        # Add implicit profiling exit for void functions (no explicit return)
+        if ($cg->{"enable_profiling"} == 1 && $ret_type_id == TYPE_VOID()) {
+            emit($cg, "    strada_profile_exit(\"" . $name . "\");\n");
+        }
+        # Add implicit full profiling exit for void functions
+        if ($cg->{"full_profile"} == 1 && $ret_type_id == TYPE_VOID()) {
+            emit($cg, "    strada_full_profile_exit(\"" . $name . "\");\n");
+        }
+        # Restore local() saves for void functions falling through
+        if ($cg->{"has_local"} == 1) {
+            emit($cg, "strada_local_restore_to(__local_saved_depth);\n");
+        }
+        # Pop stack frame for void functions falling through
+        if ($ret_type_id == TYPE_VOID() && $cg->{"enable_stack_trace"} == 1) {
+            emit($cg, "strada_stack_pop_il();\n");
+        }
+        # Implicit return undef for non-void functions that fall through without return
+        if ($ret_type_id != TYPE_VOID()) {
+            my int $pn_count2 = $cg->{"func_param_count"} + 0;
+            if ($pn_count2 > 0) {
+                my scalar $param_names2 = $cg->{"func_param_names"};
+                my scalar $param_skip4 = $cg->{"func_param_skip_wrap"};
+                my int $pn_i2 = 0;
+                while ($pn_i2 < $pn_count2) {
+                    if ($param_skip4->[$pn_i2] == 0) {
+                        emit($cg, "strada_cleanup_pop();\n");
+                        emit($cg, "strada_decref(" . $param_names2->[$pn_i2] . ");\n");
+                    }
+                    $pn_i2 = $pn_i2 + 1;
+                }
+            }
+            if ($cg->{"enable_stack_trace"} == 1) {
+                emit($cg, "strada_stack_pop_il();\n");
+            }
+            emit($cg, "return strada_new_undef();\n");
+        }
+        emit($cg, "}\n");
+
+        $cg->{"current_func_name"} = "";
+        $cg->{"ret_is_int"} = 0;
+        $cg->{"ret_is_num"} = 0;
+        $cg->{"current_fn_package"} = "";
+
+        # Clear func_params
+        $cg->{"func_params"} = {};
+
+        emit($cg, "\n\n");
+    }
+}
+
+# Generate async function (creates inner closure + outer wrapper)
+func gen_async_function(scalar $cg, scalar $fn) void {
+    my str $name = sanitize_name($fn->{"name"});
+    my str $inner_name = "__async_" . $name . "_inner";
+    my scalar $params = $fn->{"params"};
+    my int $param_count = $fn->{"param_count"};
+
+    # Private functions get static prefix
+    my str $static_prefix = "";
+    if ($fn->{"is_private"} == 1) {
+        $static_prefix = "static ";
+    }
+
+    # --- Generate inner closure function ---
+    emit($cg, "/* Async inner: " . $name . " */\n");
+    emit($cg, "static StradaValue* " . $inner_name . "(StradaValue ***__captures) {\n");
+
+    # Unpack captured parameters
+    my int $i = 0;
+    while ($i < $param_count) {
+        my scalar $p = $params->[$i];
+        my str $pname = escape_c_keyword($p->{"name"});
+        emit($cg, "    StradaValue *" . $pname . " = (*__captures[" . $i . "]);\n");
+        $i = $i + 1;
+    }
+    if ($param_count > 0) {
+        emit($cg, "\n");
+    }
+
+    # Save scope state (async inner is a separate function with its own scope)
+    my scalar $saved_scope_vars = $cg->{"scope_vars"};
+    my scalar $saved_scope_counts = $cg->{"scope_counts"};
+    my int $saved_scope_depth = $cg->{"scope_depth"};
+    my scalar $saved_func_param_names = $cg->{"func_param_names"};
+    my int $saved_func_param_count = $cg->{"func_param_count"};
+
+    # Reset scope for async inner function (it's a new function)
+    my array @new_scope_vars = ();
+    my array @new_scope_counts = ();
+    $cg->{"scope_vars"} = \@new_scope_vars;
+    $cg->{"scope_counts"} = \@new_scope_counts;
+    $cg->{"scope_depth"} = 0;
+    $cg->{"func_param_names"} = [];
+    $cg->{"func_param_count"} = 0;
+
+    # Save and check func_has_try for async inner function
+    my int $saved_func_has_try = $cg->{"func_has_try"};
+    my scalar $async_body = $fn->{"body"};
+    if (func_body_has_try($async_body) == 1) {
+        $cg->{"func_has_try"} = 1;
+    } else {
+        $cg->{"func_has_try"} = 0;
+    }
+
+    # Generate body
+    scope_push($cg);
+    my scalar $body = $fn->{"body"};
+    my scalar $stmts = $body->{"statements"};
+    my int $stmt_i = 0;
+    while ($stmt_i < $body->{"statement_count"}) {
+        gen_statement($cg, $stmts->[$stmt_i]);
+        $stmt_i = $stmt_i + 1;
+    }
+    scope_pop($cg);
+
+    # Restore scope state
+    $cg->{"scope_vars"} = $saved_scope_vars;
+    $cg->{"scope_counts"} = $saved_scope_counts;
+    $cg->{"scope_depth"} = $saved_scope_depth;
+    $cg->{"func_param_names"} = $saved_func_param_names;
+    $cg->{"func_param_count"} = $saved_func_param_count;
+
+    # Restore func_has_try
+    $cg->{"func_has_try"} = $saved_func_has_try;
+
+    emit($cg, "    return strada_undef_static();\n");
+    emit($cg, "}\n\n");
+
+    # --- Generate outer wrapper ---
+    emit($cg, "/* Async wrapper: " . $name . " */\n");
+    emit($cg, $static_prefix . "StradaValue* " . $name . "(");
+    $i = 0;
+    while ($i < $param_count) {
+        if ($i > 0) { emit($cg, ", "); }
+        my scalar $p = $params->[$i];
+        my str $c_param_name = escape_c_keyword($p->{"name"});
+        my int $ptype = $p->{"param_type"};
+        emit($cg, type_to_c($ptype) . " " . $c_param_name);
+        $i = $i + 1;
+    }
+    if ($param_count == 0) { emit($cg, "void"); }
+    emit($cg, ") {\n");
+
+    # Build closure with captures
+    if ($param_count > 0) {
+        emit($cg, "    StradaValue *__closure = strada_closure_new((void*)&" . $inner_name);
+        emit($cg, ", 0, " . $param_count . ", (StradaValue**[]){");
+        $i = 0;
+        while ($i < $param_count) {
+            if ($i > 0) { emit($cg, ", "); }
+            my str $c_param_name = escape_c_keyword($params->[$i]->{"name"});
+            emit($cg, "&" . $c_param_name);
+            $i = $i + 1;
+        }
+        emit($cg, "});\n");
+    } else {
+        emit($cg, "    StradaValue *__closure = strada_closure_new((void*)&" . $inner_name);
+        emit($cg, ", 0, 0, NULL);\n");
+    }
+
+    emit($cg, "    return strada_future_new(__closure);\n");
+    emit($cg, "}\n\n");
+}
+
+func gen_program(scalar $cg, scalar $program) void {
+    # First pass: register all functions for default parameter handling
+    my scalar $funcs = $program->{"functions"};
+    my int $i = 0;
+    my int $reg = 0;
+    while ($reg < $program->{"function_count"}) {
+        codegen_register_function($cg, $funcs->[$reg]);
+        $reg = $reg + 1;
+    }
+    
+    # Store package name in codegen context for later use
+    $cg->{"package"} = $program->{"package"};
+
+    # Store inherits in codegen context for later use
+    $cg->{"inherits"} = $program->{"inherits"};
+    $cg->{"inherit_count"} = $program->{"inherit_count"};
+
+    # Store import_objects so gen_function (which doesn't get $program) and
+    # gen_global_constructor can emit weak OOP-init calls for them — needed
+    # because an auto-imported .o module may contain OOP method registrations
+    # whose __<pkg>_oop_init() must be called at process start.
+    $cg->{"import_objects"} = $program->{"import_objects"};
+    $cg->{"import_object_count"} = $program->{"import_object_count"};
+
+    # Store overload info
+    $cg->{"has_overloads"} = $program->{"has_overloads"};
+    $cg->{"overloads"} = $program->{"overloads"};
+    $cg->{"overloaded_ops"} = $program->{"overloaded_ops"};
+
+    # Condition-level hash-fetch CSE is sound only when the program never
+    # ties a variable (tied FETCH is observable per-mention). Semantic
+    # sets uses_tie on the program node.
+    $cg->{"uses_tie"} = $program->{"uses_tie"};
+
+    # Store method modifiers
+    $cg->{"method_modifiers"} = $program->{"method_modifiers"};
+    $cg->{"method_modifier_count"} = $program->{"method_modifier_count"};
+
+    # Store has_attrs and build accessor lookup for inline accessor optimization
+    $cg->{"has_attrs"} = $program->{"has_attrs"};
+    $cg->{"has_attr_count"} = $program->{"has_attr_count"};
+    my hash %accessor_lookup;
+    my int $ha = 0;
+    while ($ha < $program->{"has_attr_count"}) {
+        my scalar $attr = $program->{"has_attrs"}->[$ha];
+        my str $akey = $attr->{"package"} . "\t" . $attr->{"name"};
+        $accessor_lookup{$akey} = 1;
+        $ha = $ha + 1;
+    }
+    $cg->{"accessor_lookup"} = \%accessor_lookup;
+
+    # Build function return type lookup for int arithmetic optimization
+    my hash %func_ret_types;
+    my int $fri = 0;
+    while ($fri < $program->{"function_count"}) {
+        my scalar $fn = $funcs->[$fri];
+        my str $fn_name = sanitize_name($fn->{"name"});
+        my int $fn_ret = $fn->{"return_type"};
+        if ($fn_ret == TYPE_INT()) {
+            $func_ret_types{$fn_name} = 1;
+        }
+        $fri = $fri + 1;
+    }
+    $cg->{"func_ret_int"} = \%func_ret_types;
+
+    # Detect whether this TU has a `main` (executable build). When true the
+    # export_info table is emitted static and dlsym from another image can't
+    # reach the function definitions anyway, so we're free to mark them
+    # `static inline` for cross-call inlining.
+    #
+    # Gate the aggressive `static inline` + `flatten` propagation on
+    # function count: with many functions visible to gcc, `flatten` on
+    # main() recursively inlines everything and blows up build time (the
+    # self-hosting compiler itself has ~900 funcs; gcc never returns).
+    # Below the threshold, the optimization is a clear win on OOP-style
+    # programs where main()'s hot loop calls a handful of small accessors.
+    my int $tu_has_main = 0;
+    my int $hmi = 0;
+    while ($hmi < $program->{"function_count"}) {
+        if ($funcs->[$hmi]->{"name"} eq "main") {
+            $tu_has_main = 1;
+            last;
+        }
+        $hmi = $hmi + 1;
+    }
+    $cg->{"tu_has_main"} = $tu_has_main;
+    my int $aggressive = 0;
+    if ($tu_has_main == 1 && $program->{"function_count"} <= 100) {
+        $aggressive = 1;
+    }
+    $cg->{"aggressive_inline"} = $aggressive;
+
+    # Build all function names lookup for devirtualization
+    # Maps sanitized function name -> return type id (or -1 for variadic)
+    my hash %all_func_names;
+    my int $fni = 0;
+    while ($fni < $program->{"function_count"}) {
+        my scalar $fn2 = $funcs->[$fni];
+        my str $fn2_name = sanitize_name($fn2->{"name"});
+        if ($fn2->{"is_variadic"} == 1) {
+            $all_func_names{$fn2_name} = -1;
+        } else {
+            $all_func_names{$fn2_name} = $fn2->{"return_type"};
+        }
+        $fni = $fni + 1;
+    }
+
+    # Cross-.so devirtualization: import_lib methods join the lookup so a
+    # method call on a receiver whose class lives in a .so compiles to a
+    # direct call to the (already native-convention) import wrapper —
+    # same as a local class. Eligibility: the library's metadata carries
+    # modifier info (modinfo:1 — older .so files never devirtualize), the
+    # function's original name was package-qualified (method-shaped), it
+    # is non-variadic, and it takes at least one parameter (the invocant).
+    # Safety against swapping the .so after the host is compiled lives in
+    # the generated wrapper, not here: the per-lib ensure() compares a
+    # metadata fingerprint and a mismatch routes every wrapper call
+    # through dynamic dispatch (see the import_lib wrapper emission).
+    # `mod:`-listed method names are blocked via lib_modified_methods in
+    # has_method_modifier — the same name-keyed rule as host modifiers.
+    my hash %lib_modified_methods;
+    my int $dvl_count = $program->{"import_lib_count"};
+    if ($dvl_count > 0) {
+        my scalar $dvl_libs = $program->{"import_libs"};
+        my int $dvli = 0;
+        while ($dvli < $dvl_count) {
+            my scalar $dvl_info = $dvl_libs->[$dvli];
+            if ($dvl_info->{"has_mod_info"} == 1) {
+                my scalar $dvl_funcs = $dvl_info->{"functions"};
+                my int $dvl_fc = $dvl_info->{"function_count"};
+                my int $dvlf = 0;
+                while ($dvlf < $dvl_fc) {
+                    my scalar $dvl_fn = $dvl_funcs->[$dvlf];
+                    my str $dvl_method = "" . $dvl_fn->{"orig_method"};
+                    if (length($dvl_method) > 0 && $dvl_fn->{"is_variadic"} != 1 && $dvl_fn->{"param_count"} >= 1) {
+                        my str $dvl_name = sanitize_name($dvl_fn->{"name"});
+                        my str $dvl_existing = "" . $all_func_names{$dvl_name};
+                        if (length($dvl_existing) == 0) {
+                            $all_func_names{$dvl_name} = $dvl_fn->{"return_type"};
+                        }
+                    }
+                    $dvlf = $dvlf + 1;
+                }
+                my scalar $dvl_mods = $dvl_info->{"modified_methods"};
+                my int $dvl_mc = size($dvl_mods);
+                my int $dvlm = 0;
+                while ($dvlm < $dvl_mc) {
+                    $lib_modified_methods{$dvl_mods->[$dvlm]} = 1;
+                    $dvlm = $dvlm + 1;
+                }
+            }
+            $dvli = $dvli + 1;
+        }
+    }
+    $cg->{"lib_modified_methods"} = \%lib_modified_methods;
+    $cg->{"all_func_names"} = \%all_func_names;
+
+    # Header
+    emit($cg, "/* Generated by Strada Self-Hosting Compiler */\n");
+
+    # Package name
+    if ($program->{"package"} ne "") {
+        emit($cg, "/* Package: " . $program->{"package"} . " */\n");
+    }
+    
+    emit($cg, "#include \"strada_runtime.h\"\n");
+    emit($cg, "#include <string.h>\n");
+    emit($cg, "#include <stdint.h>\n");
+    emit($cg, "#include <stdbool.h>\n");
+    emit($cg, "#include <dlfcn.h>\n");
+    emit($cg, "#include <math.h>\n\n");
+
+    # Full profiling: declare file ID variable
+    if ($cg->{"full_profile"} == 1) {
+        emit($cg, "static int __fp_file_id = 0;\n\n");
+    }
+
+    # Emit top-level C blocks (includes, typedefs, etc.). In module-only
+    # mode, skip blocks contributed by other modules — they'd duplicate
+    # definitions that already live in those modules' .o files.
+    my int $c_block_count = $program->{"c_block_count"};
+    if ($c_block_count > 0) {
+        emit($cg, "/* Top-level C code blocks */\n");
+        my scalar $c_blocks = $program->{"c_blocks"};
+        my scalar $cb_from_use = $program->{"c_block_from_use"};
+        my int $cb = 0;
+        while ($cb < $c_block_count) {
+            my int $cb_fu = 0;
+            if ($cb < size($cb_from_use)) {
+                $cb_fu = $cb_from_use->[$cb];
+            }
+            if (cg_skip_for_module($program, $cb_fu) == 1) {
+                $cb = $cb + 1;
+                next;
+            }
+            emit($cg, $c_blocks->[$cb]);
+            emit($cg, "\n");
+            $cb = $cb + 1;
+        }
+        emit($cg, "\n");
+    }
+
+    # Check if there's a main function
+    my int $has_main = 0;
+    $i = 0;
+    while ($i < $program->{"function_count"}) {
+        if ($funcs->[$i]->{"name"} eq "main") {
+            $has_main = 1;
+            last;
+        }
+        $i = $i + 1;
+    }
+    
+    # Global ARGV and ARGC (only for files with main)
+    if ($has_main == 1) {
+        emit($cg, "/* Global command-line argument variables */\n");
+        emit($cg, "StradaValue *ARGV = NULL;\n");
+        emit($cg, "StradaValue *ARGC = NULL;\n");
+        emit($cg, "/* Standard I/O filehandle variables */\n");
+        emit($cg, "StradaValue *v_STDIN = NULL;\n");
+        emit($cg, "StradaValue *v_STDOUT = NULL;\n");
+        emit($cg, "StradaValue *v_STDERR = NULL;\n");
+        emit($cg, "/* Special variables */\n");
+        emit($cg, "StradaValue *__child_status = NULL;\n");
+        emit($cg, "StradaValue *__program_name = NULL;\n");
+        emit($cg, "StradaValue *_ = NULL;\n");
+        emit($cg, "static void __strada_cleanup_globals(void) {\n");
+        emit($cg, "    if (__program_name) { strada_decref(__program_name); __program_name = NULL; }\n");
+        emit($cg, "    if (v_STDIN) { free(v_STDIN); v_STDIN = NULL; }\n");
+        emit($cg, "    if (v_STDOUT) { free(v_STDOUT); v_STDOUT = NULL; }\n");
+        emit($cg, "    if (v_STDERR) { free(v_STDERR); v_STDERR = NULL; }\n");
+        emit($cg, "}\n\n");
+    } else {
+        emit($cg, "/* External globals from main module */\n");
+        emit($cg, "extern StradaValue *ARGV;\n");
+        emit($cg, "extern StradaValue *ARGC;\n");
+        emit($cg, "extern StradaValue *v_STDIN;\n");
+        emit($cg, "extern StradaValue *v_STDOUT;\n");
+        emit($cg, "extern StradaValue *v_STDERR;\n");
+        emit($cg, "extern StradaValue *__child_status;\n\n");
+    }
+
+    # Emit global variable declarations. In module-only mode, skip globals
+    # tagged as coming from other modules — they live in those modules' .o.
+    my int $global_count = $program->{"global_count"};
+    if ($global_count > 0) {
+        my scalar $globals = $program->{"globals"};
+        emit($cg, "/* Global variables and constants */\n");
+        my int $g = 0;
+        while ($g < $global_count) {
+            my scalar $gvar = $globals->[$g];
+            my int $gvar_type = $gvar->{"type"};
+            my int $var_type = $gvar->{"var_type"};
+            my str $name = $gvar->{"name"};
+
+            if (cg_skip_for_module($program, $gvar->{"from_use"}) == 1) {
+                $g = $g + 1;
+                next;
+            }
+
+            # Our declarations don't need C global variables (use registry)
+            if ($gvar_type == NODE_OUR_DECL()) {
+                $g = $g + 1;
+                next;
+            }
+            # Handle const declarations - emit as global variable (initialized once in main)
+            # Using #define with strada_new_* causes leaks since it creates new values on every use
+            if ($gvar_type == NODE_CONST_DECL()) {
+                emit($cg, "static StradaValue *" . $name . " = NULL;\n");
+            } else {
+                emit($cg, "StradaValue *" . $name . " = NULL;\n");
+            }
+            $g = $g + 1;
+        }
+        emit($cg, "\n");
+    }
+
+    # Store globals in codegen context for initialization in main
+    $cg->{"globals"} = $program->{"globals"};
+    $cg->{"global_count"} = $program->{"global_count"};
+
+    # Pre-register 'our' variables so function codegen can intercept references
+    if ($global_count > 0) {
+        my scalar $our_globals = $program->{"globals"};
+        my int $og = 0;
+        while ($og < $global_count) {
+            my scalar $ogvar = $our_globals->[$og];
+            if ($ogvar->{"type"} == NODE_OUR_DECL()) {
+                my str $og_name = $ogvar->{"name"};
+                my str $og_pkg = $ogvar->{"package"};
+                if (length($og_pkg) == 0) { $og_pkg = "main"; }
+                my str $og_key = $og_pkg . "::" . $og_name;
+                my scalar $our_vars_pre = $cg->{"our_vars"};
+                $our_vars_pre->{$og_name} = $og_key;
+            }
+            $og = $og + 1;
+        }
+    }
+
+    # Store BEGIN/END blocks and import calls in codegen context. In
+    # module-only mode, filter out blocks contributed by other modules so the
+    # generated function indices stay consecutive and don't reference bodies
+    # we never emit.
+    if ($cg->{"module_only_mode"} == 1) {
+        my array @begin_keep = ();
+        my scalar $bbs = $program->{"begin_blocks"};
+        my int $bbc = $program->{"begin_block_count"};
+        my int $bbi = 0;
+        while ($bbi < $bbc) {
+            my scalar $bb = $bbs->[$bbi];
+            if (cg_skip_for_module($cg, $bb->{"from_use"}) == 0) {
+                push(@begin_keep, $bb);
+            }
+            $bbi = $bbi + 1;
+        }
+        $cg->{"begin_blocks"} = \@begin_keep;
+        $cg->{"begin_block_count"} = size(@begin_keep);
+
+        my array @end_keep = ();
+        my scalar $ebs = $program->{"end_blocks"};
+        my int $ebc = $program->{"end_block_count"};
+        my int $ebi = 0;
+        while ($ebi < $ebc) {
+            my scalar $eb = $ebs->[$ebi];
+            if (cg_skip_for_module($cg, $eb->{"from_use"}) == 0) {
+                push(@end_keep, $eb);
+            }
+            $ebi = $ebi + 1;
+        }
+        $cg->{"end_blocks"} = \@end_keep;
+        $cg->{"end_block_count"} = size(@end_keep);
+    } else {
+        $cg->{"begin_blocks"} = $program->{"begin_blocks"};
+        $cg->{"begin_block_count"} = $program->{"begin_block_count"};
+        $cg->{"end_blocks"} = $program->{"end_blocks"};
+        $cg->{"end_block_count"} = $program->{"end_block_count"};
+    }
+    $cg->{"import_calls"} = $program->{"import_calls"};
+    $cg->{"import_call_count"} = $program->{"import_call_count"};
+
+    # Generate enum definitions
+    my scalar $enums = $program->{"enums"};
+    my int $e = 0;
+    while ($e < $program->{"enum_count"}) {
+        my scalar $en = $enums->[$e];
+        my str $enum_name = $en->{"name"};
+
+        emit($cg, "/* enum " . $enum_name . " */\n");
+
+        # Generate #define constants for enum values
+        # This allows Color::RED to be used (converted to Color_RED by parser)
+        my scalar $members = $en->{"members"};
+        my int $m = 0;
+        while ($m < $en->{"member_count"}) {
+            my scalar $member = $members->[$m];
+            my str $member_name = $member->{"name"};
+            my int $member_value = $member->{"value"};
+            emit($cg, "#define " . $enum_name . "_" . $member_name . " " . $member_value . "\n");
+            $m = $m + 1;
+        }
+        emit($cg, "\n");
+        $e = $e + 1;
+    }
+
+    # Generate extern declarations for imported functions
+    my int $imp_count = $program->{"import_count"};
+    if ($imp_count > 0) {
+        emit($cg, "/* Imported function declarations */\n");
+        my scalar $imports = $program->{"imports"};
+        my int $imp = 0;
+        while ($imp < $imp_count) {
+            my str $imp_name = $imports->[$imp];
+            # Generate generic extern declaration (assume StradaValue* return and variadic params)
+            emit($cg, "extern StradaValue* " . $imp_name . "();\n");
+            $imp = $imp + 1;
+        }
+        emit($cg, "\n");
+    }
+    
+    # Generate extern declarations for qualified module function calls
+    my int $use_count = $program->{"use_count"};
+    if ($use_count > 0) {
+        my scalar $uses = $program->{"uses"};
+        my int $u = 0;
+        while ($u < $use_count) {
+            my str $mod_name = $uses->[$u];
+            # Skip "lib" pseudo-module
+            if ($mod_name ne "lib") {
+                # Convert :: to __ for C identifier prefix
+                my str $prefix = "";
+                my int $p = 0;
+                my int $plen = length($mod_name);
+                while ($p < $plen) {
+                    my str $ch = substr($mod_name, $p, 1);
+                    if ($ch eq ":") {
+                        $prefix = $prefix . "_";
+                    } else {
+                        $prefix = $prefix . $ch;
+                    }
+                    $p = $p + 1;
+                }
+                $prefix = $prefix . "__";
+                
+                # Generate extern declarations for imported funcs with qualified names
+                emit($cg, "/* Qualified imports from " . $mod_name . " */\n");
+                my scalar $imports = $program->{"imports"};
+                my int $imp = 0;
+                while ($imp < $program->{"import_count"}) {
+                    my str $imp_name = $imports->[$imp];
+                    emit($cg, "extern StradaValue* " . $prefix . $imp_name . "();\n");
+                    $imp = $imp + 1;
+                }
+                emit($cg, "\n");
+            }
+            $u = $u + 1;
+        }
+    }
+
+    # Generate import_lib wrapper infrastructure
+    my int $import_lib_count = $program->{"import_lib_count"};
+    if ($import_lib_count > 0) {
+        my scalar $import_libs = $program->{"import_libs"};
+
+        emit($cg, "/* import_lib: static library handles and function pointers */\n");
+
+        my int $lib_idx = 0;
+        while ($lib_idx < $import_lib_count) {
+            my scalar $lib_info = $import_libs->[$lib_idx];
+            my str $lib_name = $lib_info->{"lib_name"};
+            my str $safe_lib = sanitize_name($lib_name);
+
+            # Static handle for the library
+            emit($cg, "static void *__import_lib_" . $safe_lib . "_handle = NULL;\n");
+            # Set by __import_lib_<lib>_ensure() when the loaded .so's
+            # metadata fingerprint matches what we compiled against;
+            # gates devirtualized direct calls in the method wrappers.
+            emit($cg, "static int __import_lib_" . $safe_lib . "_devirt_ok = 0;\n");
+            emit($cg, "static void __import_lib_" . $safe_lib . "_ensure(void);\n");
+
+            # Static function pointers for each function
+            my scalar $lib_funcs = $lib_info->{"functions"};
+            my int $fn_idx = 0;
+            my int $fn_count = $lib_info->{"function_count"};
+            while ($fn_idx < $fn_count) {
+                my scalar $fn_info = $lib_funcs->[$fn_idx];
+                my str $fn_name = sanitize_name($fn_info->{"name"});
+                emit($cg, "static void *__import_lib_" . $safe_lib . "_fn_" . $fn_name . " = NULL;\n");
+                $fn_idx = $fn_idx + 1;
+            }
+
+            $lib_idx = $lib_idx + 1;
+        }
+        emit($cg, "\n");
+
+        # Forward declarations for wrapper functions
+        emit($cg, "/* import_lib: wrapper function forward declarations */\n");
+        $lib_idx = 0;
+        while ($lib_idx < $import_lib_count) {
+            my scalar $lib_info = $import_libs->[$lib_idx];
+            my scalar $lib_funcs = $lib_info->{"functions"};
+            my int $fn_idx = 0;
+            my int $fn_count = $lib_info->{"function_count"};
+
+            while ($fn_idx < $fn_count) {
+                my scalar $fn_info = $lib_funcs->[$fn_idx];
+                my str $fn_name = sanitize_name($fn_info->{"name"});
+                my int $ret_type = $fn_info->{"return_type"};
+                my int $param_count = $fn_info->{"param_count"};
+                my scalar $params = $fn_info->{"params"};
+
+                # static: the wrapper must NOT be a global symbol. The .so
+                # defines the same-named real function, and its internal
+                # calls (e.g. its registered dispatch wrappers) would
+                # interpose to OUR wrapper under -rdynamic — harmless
+                # extra hop before, infinite recursion now that the
+                # wrapper can re-enter dynamic dispatch on a fingerprint
+                # mismatch. Wrappers are only called from this TU.
+                emit($cg, "static " . type_to_c($ret_type) . " " . $fn_name . "(");
+
+                my int $p = 0;
+                while ($p < $param_count) {
+                    if ($p > 0) {
+                        emit($cg, ", ");
+                    }
+                    my scalar $param = $params->[$p];
+                    my int $ptype = $param->{"param_type"};
+                    emit($cg, type_to_c($ptype) . " " . escape_c_keyword($param->{"name"}));
+                    $p = $p + 1;
+                }
+
+                if ($param_count == 0) {
+                    emit($cg, "void");
+                }
+
+                emit($cg, ");\n");
+
+                # Register in functions context so calls work correctly
+                my hash %func_info = ();
+                $func_info{"name"} = $fn_name;
+                $func_info{"return_type"} = $ret_type;
+                $func_info{"param_count"} = $param_count;
+                $func_info{"params"} = $params;
+                $func_info{"is_import_lib"} = 1;
+                $func_info{"is_variadic"} = $fn_info->{"is_variadic"};
+                $func_info{"variadic_param_idx"} = $fn_info->{"variadic_param_idx"};
+                $cg->{"functions"}->{$fn_name} = \%func_info;
+
+                $fn_idx = $fn_idx + 1;
+            }
+
+            $lib_idx = $lib_idx + 1;
+        }
+        emit($cg, "\n");
+    }
+
+    # Generate import_object extern declarations (for statically linked object files)
+    my int $import_object_count = $program->{"import_object_count"};
+    if ($import_object_count > 0) {
+        my scalar $import_objects = $program->{"import_objects"};
+
+        emit($cg, "/* import_object: extern declarations for statically linked functions */\n");
+        my int $obj_idx = 0;
+        while ($obj_idx < $import_object_count) {
+            my scalar $obj_info = $import_objects->[$obj_idx];
+            my str $obj_name = $obj_info->{"obj_name"};
+            my scalar $functions = $obj_info->{"functions"};
+            my int $fn_count = $obj_info->{"function_count"};
+
+            emit($cg, "/* Functions from " . $obj_name . ".o */\n");
+
+            my int $fn_idx = 0;
+            while ($fn_idx < $fn_count) {
+                my scalar $fn_info = $functions->[$fn_idx];
+                my str $fn_name = $fn_info->{"name"};
+                my int $ret_type = $fn_info->{"return_type"};
+                my int $param_count = $fn_info->{"param_count"};
+                my scalar $params = $fn_info->{"params"};
+
+                # Generate extern declaration
+                emit($cg, "extern " . type_to_c($ret_type) . " " . $fn_name . "(");
+
+                my int $pi = 0;
+                while ($pi < $param_count) {
+                    if ($pi > 0) {
+                        emit($cg, ", ");
+                    }
+                    my scalar $param = $params->[$pi];
+                    my int $ptype = $param->{"type"};
+                    emit($cg, type_to_c($ptype));
+                    $pi = $pi + 1;
+                }
+                if ($param_count == 0) {
+                    emit($cg, "void");
+                }
+                emit($cg, ");\n");
+
+                # Register in functions context so calls work
+                my hash %func_info = ();
+                $func_info{"name"} = $fn_name;
+                $func_info{"return_type"} = $ret_type;
+                $func_info{"param_count"} = $param_count;
+                $func_info{"params"} = $params;
+                $func_info{"is_import_object"} = 1;
+                $func_info{"is_variadic"} = $fn_info->{"is_variadic"};
+                $func_info{"variadic_param_idx"} = $fn_info->{"variadic_param_idx"};
+                $cg->{"functions"}->{$fn_name} = \%func_info;
+
+                $fn_idx = $fn_idx + 1;
+            }
+
+            $obj_idx = $obj_idx + 1;
+        }
+        emit($cg, "\n");
+
+        # Imported .o modules may contain OOP method registrations whose
+        # __<pkg>_oop_init() needs to be called from main() to populate the
+        # runtime's method-dispatch table. Locally-defined packages already
+        # get oop_init calls via the pkg_list path; for imported .o we don't
+        # know at parse-time whether the module has methods, so emit a weak
+        # forward declaration and let main() call it iff defined. Without
+        # this, calls through OOP method dispatch on imported types
+        # silently no-op or segfault, because the method table never got
+        # populated.
+        emit($cg, "/* import_object: weak OOP init forward declarations */\n");
+        my int $oop_obj_idx = 0;
+        while ($oop_obj_idx < $import_object_count) {
+            my scalar $obj_info_o = $import_objects->[$oop_obj_idx];
+            my str $obj_name_o = $obj_info_o->{"obj_name"};
+            my str $c_oop_obj = sanitize_name($obj_name_o);
+            emit($cg, "__attribute__((weak)) void __" . $c_oop_obj . "_oop_init(void);\n");
+            $oop_obj_idx = $oop_obj_idx + 1;
+        }
+        emit($cg, "\n");
+    }
+
+    # Generate import_archive extern declarations (for statically linked archive files)
+    my int $import_archive_count = $program->{"import_archive_count"};
+    if ($import_archive_count > 0) {
+        my scalar $import_archives = $program->{"import_archives"};
+
+        emit($cg, "/* import_archive: extern declarations for statically linked functions */\n");
+        my int $arch_idx = 0;
+        while ($arch_idx < $import_archive_count) {
+            my scalar $arch_info = $import_archives->[$arch_idx];
+            my str $arch_name = $arch_info->{"lib_name"};
+            my scalar $functions = $arch_info->{"functions"};
+            my int $fn_count = $arch_info->{"function_count"};
+
+            emit($cg, "/* Functions from " . $arch_name . ".a */\n");
+
+            my int $fn_idx = 0;
+            while ($fn_idx < $fn_count) {
+                my scalar $fn_info = $functions->[$fn_idx];
+                my str $fn_name = $fn_info->{"name"};
+                my int $ret_type = $fn_info->{"return_type"};
+                my int $param_count = $fn_info->{"param_count"};
+                my scalar $params = $fn_info->{"params"};
+
+                # Generate extern declaration
+                emit($cg, "extern " . type_to_c($ret_type) . " " . $fn_name . "(");
+
+                my int $pi = 0;
+                while ($pi < $param_count) {
+                    if ($pi > 0) {
+                        emit($cg, ", ");
+                    }
+                    my scalar $param = $params->[$pi];
+                    my int $ptype = $param->{"type"};
+                    emit($cg, type_to_c($ptype));
+                    $pi = $pi + 1;
+                }
+                if ($param_count == 0) {
+                    emit($cg, "void");
+                }
+                emit($cg, ");\n");
+
+                # Register in functions context so calls work
+                my hash %func_info = ();
+                $func_info{"name"} = $fn_name;
+                $func_info{"return_type"} = $ret_type;
+                $func_info{"param_count"} = $param_count;
+                $func_info{"params"} = $params;
+                $func_info{"is_import_archive"} = 1;
+                $func_info{"is_variadic"} = $fn_info->{"is_variadic"};
+                $func_info{"variadic_param_idx"} = $fn_info->{"variadic_param_idx"};
+                $cg->{"functions"}->{$fn_name} = \%func_info;
+
+                $fn_idx = $fn_idx + 1;
+            }
+
+            $arch_idx = $arch_idx + 1;
+        }
+        emit($cg, "\n");
+    }
+
+    # Forward declarations
+    #
+    # Pre-scan: collect the sanitized names of every function DEFINED in
+    # this unit (anything that isn't a body-less extern declaration). A
+    # body-less `extern func Pkg::name(...) ret;` whose definition is also
+    # in this unit must NOT emit its `extern` line — the definition's own
+    # forward decl (often `static inline`) covers it, and emitting both
+    # is a C storage-class conflict ("static declaration follows
+    # non-static declaration"). Duplicate decls with no in-unit definition
+    # are fine: identical `extern` lines are legal C.
+    my hash %__defined_in_unit = ();
+    $i = 0;
+    while ($i < $program->{"function_count"}) {
+        my scalar $dfn = $funcs->[$i];
+        my int $dfn_is_decl = 0;
+        if ($dfn->{"type"} == NODE_EXTERN_FUNC() && $dfn->{"has_body"} != 1) {
+            $dfn_is_decl = 1;
+        }
+        if ($dfn_is_decl == 0) {
+            $__defined_in_unit{sanitize_name($dfn->{"name"})} = 1;
+        }
+        $i = $i + 1;
+    }
+    $i = 0;
+    while ($i < $program->{"function_count"}) {
+        my scalar $fn = $funcs->[$i];
+        my str $name = sanitize_name($fn->{"name"});
+        my int $fn_type = $fn->{"type"};
+        my str $fn_pkg = $fn->{"package"};
+
+        # In module-only mode, skip forward decls for private functions in
+        # other modules — they'd require `static` without a body, which won't
+        # compile. Non-private decls are kept so cross-module calls link.
+        if ($fn->{"is_private"} == 1 && cg_skip_for_module($program, $fn->{"from_use"}) == 1) {
+            $i = $i + 1;
+            next;
+        }
+
+        # Skip extern functions (they're declared elsewhere)
+        if ($fn_type == NODE_EXTERN_FUNC()) {
+            # Body-less qualified extern -> cross-module Strada forward decl.
+            # Emit it with StradaValue* params/return so the symbol matches
+            # the Strada-style definition in the other module's `.o`, not the
+            # raw-C-type signature `gen_extern_decl` emits for `extern "C"`
+            # interop. This is what lets `extern func Pkg::name(...) ret;`
+            # register the call as a real Strada function in $cg->{"functions"}
+            # so needs_temp_cleanup recognises owned returns and the call
+            # site uses the ordinary Strada calling convention (no conversion).
+            if ($fn->{"is_strada_extern_decl"} == 1) {
+                my str $sname = sanitize_name($fn->{"name"});
+                # The declared function is also DEFINED in this unit: skip
+                # the extern line (see pre-scan above) — the definition's
+                # own forward decl covers it and the storage classes clash.
+                if ($__defined_in_unit{$sname} == 1) {
+                    $i = $i + 1;
+                    next;
+                }
+                emit($cg, "extern " . type_to_c($fn->{"return_type"}) . " " . $sname . "(");
+                my scalar $eparams = $fn->{"params"};
+                my int $ej = 0;
+                while ($ej < $fn->{"param_count"}) {
+                    if ($ej > 0) {
+                        emit($cg, ", ");
+                    }
+                    my scalar $eparam = $eparams->[$ej];
+                    my int $eptype = $eparam->{"param_type"};
+                    my str $ec_pname = escape_c_keyword($eparam->{"name"});
+                    emit($cg, type_to_c($eptype) . " " . $ec_pname);
+                    $ej = $ej + 1;
+                }
+                if ($fn->{"param_count"} == 0) {
+                    emit($cg, "void");
+                }
+                emit($cg, ");\n");
+                $i = $i + 1;
+                next;
+            }
+            # Generate C-style extern declaration (raw types for C interop)
+            emit($cg, "extern ");
+            gen_extern_decl($cg, $fn);
+            $i = $i + 1;
+            next;
+        }
+
+        if ($name eq "main") {
+            emit($cg, "int main(int _argc, char **_argv);\n");
+        } else {
+            # Match storage class chosen by gen_function (see comment there).
+            my str $static_prefix = "";
+            if ($fn->{"is_private"} == 1) {
+                $static_prefix = "static ";
+            } elsif ($cg->{"aggressive_inline"} == 1) {
+                $static_prefix = "static inline ";
+            }
+            emit($cg, $static_prefix . type_to_c($fn->{"return_type"}) . " " . $name . "(");
+            
+            my scalar $params = $fn->{"params"};
+            my int $j = 0;
+            while ($j < $fn->{"param_count"}) {
+                if ($j > 0) {
+                    emit($cg, ", ");
+                }
+                my scalar $param = $params->[$j];
+                my int $ptype = $param->{"param_type"};
+                my str $c_pname = escape_c_keyword($param->{"name"});
+                emit($cg, type_to_c($ptype) . " " . $c_pname);
+                $j = $j + 1;
+            }
+
+            if ($fn->{"param_count"} == 0) {
+                emit($cg, "void");
+            }
+
+            emit($cg, ");\n");
+        }
+        $i = $i + 1;
+    }
+
+    # NOTE: OOP init forward declarations are generated after methods are tracked
+    # and stored in oop_fwd_decls for insertion in get_output()
+
+    # Forward declarations for BEGIN/END blocks (only if they exist)
+    my int $begin_block_count = $cg->{"begin_block_count"};
+    my int $end_block_count = $cg->{"end_block_count"};
+    if ($begin_block_count > 0 || $end_block_count > 0) {
+        emit($cg, "\n/* BEGIN/END block forward declarations */\n");
+        my int $bi = 0;
+        while ($bi < $begin_block_count) {
+            emit($cg, "static void __begin_" . $bi . "(void);\n");
+            $bi = $bi + 1;
+        }
+        my int $ei = 0;
+        while ($ei < $end_block_count) {
+            emit($cg, "static void __end_" . $ei . "(void);\n");
+            $ei = $ei + 1;
+        }
+    }
+
+    emit($cg, "\n");
+
+    # Save preamble content and start fresh for function definitions
+    $cg->{"preamble_content"} = sb_to_string($cg->{"output_sb"});
+    sb_clear($cg->{"output_sb"});
+
+    # Function definitions (skip extern declarations without bodies).
+    # In module-only mode, skip bodies that belong to other packages — their
+    # forward declarations were already emitted, and their definitions live in
+    # the other module's .o.
+    $i = 0;
+    while ($i < $program->{"function_count"}) {
+        my scalar $fn = $funcs->[$i];
+        my int $fn_type = $fn->{"type"};
+        my str $fn_pkg = $fn->{"package"};
+
+        if (cg_skip_for_module($program, $fn->{"from_use"}) == 1) {
+            $i = $i + 1;
+            next;
+        }
+
+        if ($fn_type == NODE_EXTERN_FUNC()) {
+            # Extern with body - generate the function
+            if ($fn->{"has_body"} == 1) {
+                gen_extern_function($cg, $fn);
+            }
+        } elsif ($fn_type == NODE_ASYNC_FUNC()) {
+            gen_async_function($cg, $fn);
+        } else {
+            gen_function($cg, $fn);
+        }
+
+        # Track method for OOP registration using the function's stored package
+        # (check package string directly - parser always sets it)
+        if (length($fn_pkg) > 0 && $fn_pkg ne "main") {
+            codegen_track_method($cg, $fn, $fn_pkg);
+        }
+
+        $i = $i + 1;
+    }
+
+    # Generate OOP init forward declarations (now that methods are tracked)
+    my int $num_fwd_pkgs = get_oop_pkg_count($cg);
+    if ($num_fwd_pkgs > 0) {
+        my scalar $fwd_pkgs = get_oop_packages($cg);
+        my str $fwd_decls = "\n/* OOP method registration forward declarations */\n";
+        my int $fwd_i = 0;
+        while ($fwd_i < $num_fwd_pkgs) {
+            my str $fwd_pkg = $fwd_pkgs->[$fwd_i];
+            my str $c_fwd_pkg = sanitize_name($fwd_pkg);
+            $fwd_decls = $fwd_decls . "void __" . $c_fwd_pkg . "_oop_init(void);\n";
+            $fwd_i = $fwd_i + 1;
+        }
+        $cg->{"oop_fwd_decls"} = $fwd_decls;
+    }
+
+    # Emit anonymous function definitions
+    my str $anon_defs = $cg->{"anon_func_defs"};
+    if (length($anon_defs) > 0) {
+        emit($cg, "\n/* Anonymous function definitions */\n");
+        emit($cg, $anon_defs);
+    }
+
+    # Emit OOP method wrappers for all packages
+    my str $wrappers = gen_all_method_wrappers($cg);
+    if (length($wrappers) > 0) {
+        emit($cg, "\n");
+        emit($cg, $wrappers);
+    }
+
+    # Generate import_lib wrapper function implementations
+    if ($import_lib_count > 0) {
+        my scalar $import_libs = $program->{"import_libs"};
+        emit($cg, "\n/* import_lib: wrapper function implementations */\n");
+
+        my int $lib_idx = 0;
+        while ($lib_idx < $import_lib_count) {
+            my scalar $lib_info = $import_libs->[$lib_idx];
+            my str $lib_name = $lib_info->{"lib_name"};
+            my str $safe_lib = sanitize_name($lib_name);
+            my str $so_path = $lib_info->{"so_path"};
+
+            my scalar $lib_funcs = $lib_info->{"functions"};
+            my int $fn_idx = 0;
+            my int $fn_count = $lib_info->{"function_count"};
+
+            # Shared lazy-load: dlopen + OOP inits, factored out of the
+            # wrappers (it used to be duplicated in every one), plus the
+            # devirtualization fingerprint check — the loaded .so's
+            # metadata is rehashed and compared with what we compiled
+            # against. Match → wrappers may call symbols directly.
+            # Mismatch (the .so was swapped) → method wrappers fall back
+            # to dynamic dispatch, which late-binds with full
+            # hook/override semantics.
+            emit($cg, "static void __import_lib_" . $safe_lib . "_ensure(void) {\n");
+            emit($cg, "    if (__import_lib_" . $safe_lib . "_handle != NULL) return;\n");
+            emit($cg, "    __import_lib_" . $safe_lib . "_handle = dlopen(\"");
+            emit_escaped_string($cg, $so_path);
+            emit($cg, "\", RTLD_LAZY);\n");
+            emit($cg, "    if (__import_lib_" . $safe_lib . "_handle == NULL) {\n");
+            # Path goes through %s (NOT the format literal) and is escaped, so
+            # a path containing % or " can't trigger a format-string bug or
+            # break out of the C string literal.
+            emit($cg, "        fprintf(stderr, \"import_lib: failed to load %s: %s\\n\", \"");
+            emit_escaped_string($cg, $so_path);
+            emit($cg, "\", dlerror());\n");
+            emit($cg, "        exit(1);\n");
+            emit($cg, "    }\n");
+            # Call OOP init functions for any packages in this library
+            my scalar $ens_oop_inits = $lib_info->{"oop_init_funcs"};
+            if ($ens_oop_inits) {
+                my int $ens_oop_count = size($ens_oop_inits);
+                my int $ens_oi = 0;
+                while ($ens_oi < $ens_oop_count) {
+                    my str $ens_oop_fn = $ens_oop_inits->[$ens_oi];
+                    emit($cg, "    { void (*__oop_init)(void) = (void (*)(void))dlsym(__import_lib_" . $safe_lib . "_handle, \"" . $ens_oop_fn . "\"); if (__oop_init) __oop_init(); }\n");
+                    $ens_oi = $ens_oi + 1;
+                }
+            }
+            my int $ens_meta_hash = $lib_info->{"meta_hash"} + 0;
+            emit($cg, "    {\n");
+            emit($cg, "        const char* (*__ei)(void) = (const char* (*)(void))dlsym(__import_lib_" . $safe_lib . "_handle, \"__strada_export_info\");\n");
+            emit($cg, "        if (__ei) {\n");
+            emit($cg, "            const char *__meta = __ei();\n");
+            emit($cg, "            if (__meta && strada_export_meta_hash_cstr(__meta) == " . $ens_meta_hash . "LL) __import_lib_" . $safe_lib . "_devirt_ok = 1;\n");
+            emit($cg, "        }\n");
+            emit($cg, "    }\n");
+            emit($cg, "}\n\n");
+
+            while ($fn_idx < $fn_count) {
+                my scalar $fn_info = $lib_funcs->[$fn_idx];
+                my str $fn_name = sanitize_name($fn_info->{"name"});
+                my int $ret_type = $fn_info->{"return_type"};
+                my int $param_count = $fn_info->{"param_count"};
+                my scalar $params = $fn_info->{"params"};
+
+                # Function signature (static — see the forward-decl note
+                # on symbol interposition)
+                emit($cg, "static " . type_to_c($ret_type) . " " . $fn_name . "(");
+
+                my int $p = 0;
+                while ($p < $param_count) {
+                    if ($p > 0) {
+                        emit($cg, ", ");
+                    }
+                    my scalar $param = $params->[$p];
+                    my int $ptype = $param->{"param_type"};
+                    emit($cg, type_to_c($ptype) . " " . escape_c_keyword($param->{"name"}));
+                    $p = $p + 1;
+                }
+
+                if ($param_count == 0) {
+                    emit($cg, "void");
+                }
+
+                emit($cg, ") {\n");
+
+                # Lazy load via the shared per-lib ensure()
+                emit($cg, "    __import_lib_" . $safe_lib . "_ensure();\n");
+
+                # Guarded-devirtualization fallback for method-shaped
+                # functions: when the loaded .so's metadata fingerprint
+                # didn't match (swapped after the host was compiled) and
+                # the invocant is actually blessed, re-dispatch by name
+                # through the runtime registry — late-bound, hooks and
+                # overrides included — instead of calling a possibly
+                # stale symbol directly. Unblessed first arg (a static
+                # helper-style call) falls through to the direct call,
+                # i.e. exactly the pre-devirt behavior.
+                my str $fb_method = "" . $fn_info->{"orig_method"};
+                if (length($fb_method) > 0 && $fn_info->{"is_variadic"} != 1 && $param_count >= 1 && key_is_hashable_ascii($fb_method) == 1) {
+                    my scalar $fb_p0 = $params->[0];
+                    my str $fb_inv = escape_c_keyword($fb_p0->{"name"});
+                    my int $fb_argc = $param_count - 1;
+                    emit($cg, "    if (!__import_lib_" . $safe_lib . "_devirt_ok && strada_blessed_name_cstr(" . $fb_inv . ") != NULL) {\n");
+                    emit($cg, "        StradaValue *__fb_args = strada_pack_args(" . $fb_argc);
+                    my int $fbp = 1;
+                    while ($fbp < $param_count) {
+                        emit($cg, ", " . escape_c_keyword($params->[$fbp]->{"name"}));
+                        $fbp = $fbp + 1;
+                    }
+                    emit($cg, ");\n");
+                    if ($ret_type == TYPE_VOID()) {
+                        emit($cg, "        StradaValue *__fb_r = strada_method_call_ph(" . $fb_inv . ", \"" . $fb_method . "\", __fb_args, " . djb2_hash_32($fb_method) . "u);\n");
+                        emit($cg, "        if (__fb_r) strada_decref(__fb_r);\n");
+                        emit($cg, "        return;\n");
+                    } else {
+                        emit($cg, "        return strada_method_call_ph(" . $fb_inv . ", \"" . $fb_method . "\", __fb_args, " . djb2_hash_32($fb_method) . "u);\n");
+                    }
+                    emit($cg, "    }\n");
+                }
+
+                # Lazy lookup the function pointer
+                emit($cg, "    if (__import_lib_" . $safe_lib . "_fn_" . $fn_name . " == NULL) {\n");
+                emit($cg, "        __import_lib_" . $safe_lib . "_fn_" . $fn_name . " = dlsym(__import_lib_" . $safe_lib . "_handle, \"" . $fn_name . "\");\n");
+                emit($cg, "        if (__import_lib_" . $safe_lib . "_fn_" . $fn_name . " == NULL) {\n");
+                emit($cg, "            fprintf(stderr, \"import_lib: symbol not found: " . $fn_name . ": %s\\n\", dlerror());\n");
+                emit($cg, "            exit(1);\n");
+                emit($cg, "        }\n");
+                emit($cg, "    }\n");
+
+                # Generate typedef for the function pointer type
+                emit($cg, "    typedef " . type_to_c($ret_type) . " (*__fn_type_" . $fn_name . ")(");
+                $p = 0;
+                while ($p < $param_count) {
+                    if ($p > 0) {
+                        emit($cg, ", ");
+                    }
+                    emit($cg, "StradaValue*");
+                    $p = $p + 1;
+                }
+                if ($param_count == 0) {
+                    emit($cg, "void");
+                }
+                emit($cg, ");\n");
+
+                # Cast and call the function directly
+                emit($cg, "    __fn_type_" . $fn_name . " __fn = (__fn_type_" . $fn_name . ")__import_lib_" . $safe_lib . "_fn_" . $fn_name . ";\n");
+                if ($ret_type == TYPE_VOID()) {
+                    emit($cg, "    __fn(");
+                } else {
+                    emit($cg, "    return __fn(");
+                }
+                $p = 0;
+                while ($p < $param_count) {
+                    if ($p > 0) {
+                        emit($cg, ", ");
+                    }
+                    my scalar $param = $params->[$p];
+                    emit($cg, escape_c_keyword($param->{"name"}));
+                    $p = $p + 1;
+                }
+                emit($cg, ");\n");
+
+                emit($cg, "}\n\n");
+                $fn_idx = $fn_idx + 1;
+            }
+
+            $lib_idx = $lib_idx + 1;
+        }
+    }
+
+    # Generate import_object: object file list comment (for strada wrapper to parse)
+    # NOTE: extern declarations are generated earlier with other forward declarations
+    my int $io_count = $program->{"import_object_count"};
+    if ($io_count > 0) {
+        my scalar $io_objs = $program->{"import_objects"};
+
+        # Emit object file list as a comment for strada wrapper to parse
+        emit($cg, "\n/* import_object: required object files\n");
+        emit($cg, " * __STRADA_OBJECT_FILES__:");
+        my int $io_idx = 0;
+        while ($io_idx < $io_count) {
+            my scalar $io_info = $io_objs->[$io_idx];
+            my str $io_path = $io_info->{"o_path"};
+            emit($cg, " " . $io_path);
+            $io_idx = $io_idx + 1;
+        }
+        emit($cg, "\n */\n\n");
+    }
+
+    # Generate import_archive: archive file list comment (for strada wrapper to parse)
+    my int $ia_count = $program->{"import_archive_count"};
+    if ($ia_count > 0) {
+        my scalar $ia_archs = $program->{"import_archives"};
+
+        # Emit archive file list as a comment for strada wrapper to parse
+        emit($cg, "\n/* import_archive: required archive files\n");
+        emit($cg, " * __STRADA_ARCHIVE_FILES__:");
+        my int $ia_idx = 0;
+        while ($ia_idx < $ia_count) {
+            my scalar $ia_info = $ia_archs->[$ia_idx];
+            my str $ia_path = $ia_info->{"a_path"};
+            emit($cg, " " . $ia_path);
+            $ia_idx = $ia_idx + 1;
+        }
+        emit($cg, "\n * __STRADA_SKIP_RUNTIME__: archives include runtime\n");
+        emit($cg, " */\n\n");
+    }
+
+    # Emit extern-C link deps (`link_lib`) as a comment for the strada
+    # driver / test harness to pick up and add to the final gcc link.
+    my scalar $ll_arr = $program->{"link_libs"};
+    my int $ll_count = 0;
+    if (defined($ll_arr)) { $ll_count = size($ll_arr); }
+    if ($ll_count > 0) {
+        emit($cg, "\n/* link_lib: extern-C libraries the final binary needs\n");
+        emit($cg, " * __STRADA_LINK_LIBS__:");
+        my int $ll_idx = 0;
+        while ($ll_idx < $ll_count) {
+            emit($cg, " " . $ll_arr->[$ll_idx]);
+            $ll_idx = $ll_idx + 1;
+        }
+        emit($cg, "\n */\n\n");
+    }
+
+    # Generate BEGIN/END block function bodies (only if they exist)
+    if ($begin_block_count > 0 || $end_block_count > 0) {
+        emit($cg, "\n/* BEGIN/END block implementations */\n");
+        if ($begin_block_count > 0) {
+            my scalar $begin_blocks = $cg->{"begin_blocks"};
+            my int $bi = 0;
+            while ($bi < $begin_block_count) {
+                emit($cg, "static void __begin_" . $bi . "(void) {\n");
+                # Generate statements for this BEGIN block
+                my scalar $begin_body = $begin_blocks->[$bi];
+                my scalar $begin_stmts = $begin_body->{"statements"};
+                my int $begin_stmt_count = $begin_body->{"statement_count"};
+                scope_push($cg);
+                my int $bs = 0;
+                while ($bs < $begin_stmt_count) {
+                    gen_statement($cg, $begin_stmts->[$bs]);
+                    $bs = $bs + 1;
+                }
+                scope_pop($cg);
+                emit($cg, "}\n\n");
+                $bi = $bi + 1;
+            }
+        }
+        if ($end_block_count > 0) {
+            my scalar $end_blocks = $cg->{"end_blocks"};
+            my int $ei = 0;
+            while ($ei < $end_block_count) {
+                emit($cg, "static void __end_" . $ei . "(void) {\n");
+                # Generate statements for this END block
+                my scalar $end_body = $end_blocks->[$ei];
+                my scalar $end_stmts = $end_body->{"statements"};
+                my int $end_stmt_count = $end_body->{"statement_count"};
+                scope_push($cg);
+                my int $es = 0;
+                while ($es < $end_stmt_count) {
+                    gen_statement($cg, $end_stmts->[$es]);
+                    $es = $es + 1;
+                }
+                scope_pop($cg);
+                emit($cg, "}\n\n");
+                $ei = $ei + 1;
+            }
+        }
+    }
+
+    # Save funcs content and start fresh for remaining code
+    $cg->{"funcs_content"} = sb_to_string($cg->{"output_sb"});
+    sb_clear($cg->{"output_sb"});
+
+    # Generate qualified name aliases if package is declared
+    my str $pkg_alias = $program->{"package"};
+    if ($pkg_alias ne "") {
+        # Convert :: to __ for C identifier
+        my str $prefix = "";
+        my int $p = 0;
+        my int $plen = length($pkg_alias);
+        while ($p < $plen) {
+            my str $ch = substr($pkg_alias, $p, 1);
+            if ($ch eq ":") {
+                $prefix = $prefix . "_";
+            } else {
+                $prefix = $prefix . $ch;
+            }
+            $p = $p + 1;
+        }
+        $prefix = $prefix . "__";
+
+        emit($cg, "/* Qualified name aliases for package " . $pkg_alias . " */\n");
+        $i = 0;
+        while ($i < $program->{"function_count"}) {
+            my scalar $fn = $funcs->[$i];
+            my int $fn_type = $fn->{"type"};
+            my str $name = sanitize_name($fn->{"name"});
+
+            # Skip main and extern functions
+            if ($name ne "main" && $fn_type != NODE_EXTERN_FUNC()) {
+                my str $ret = type_to_c($fn->{"return_type"});
+                my str $qname = sanitize_name($prefix . $fn->{"name"});
+
+                # Generate: RetType QualifiedName(params) { return UnqualifiedName(params); }
+                emit($cg, $ret . " " . $qname . "(");
+
+                my scalar $params = $fn->{"params"};
+                my int $j = 0;
+                while ($j < $fn->{"param_count"}) {
+                    if ($j > 0) {
+                        emit($cg, ", ");
+                    }
+                    my scalar $param = $params->[$j];
+                    my int $ptype = $param->{"param_type"};
+                    my str $c_pname = escape_c_keyword($param->{"name"});
+                    emit($cg, type_to_c($ptype) . " " . $c_pname);
+                    $j = $j + 1;
+                }
+                if ($fn->{"param_count"} == 0) {
+                    emit($cg, "void");
+                }
+                emit($cg, ") { return " . $name . "(");
+
+                $j = 0;
+                while ($j < $fn->{"param_count"}) {
+                    if ($j > 0) {
+                        emit($cg, ", ");
+                    }
+                    emit($cg, escape_c_keyword($params->[$j]->{"name"}));
+                    $j = $j + 1;
+                }
+                emit($cg, "); }\n");
+            }
+            $i = $i + 1;
+        }
+        emit($cg, "\n");
+    }
+
+    # Generate __strada_export_info function for shared library metadata
+    # This allows import_lib to work without needing the .strada source file
+    # Pass has_main flag - for executables (with main), make these static to avoid conflicts
+    my int $has_main_fn = 0;
+    my int $mi = 0;
+    while ($mi < $program->{"function_count"}) {
+        if ($funcs->[$mi]->{"name"} eq "main") {
+            $has_main_fn = 1;
+            last;
+        }
+        $mi = $mi + 1;
+    }
+    gen_export_info($cg, $program, $has_main_fn);
+
+    # Generate global initialization constructor for shared libraries (no main)
+    if ($has_main_fn == 0) {
+        gen_global_constructor($cg);
+    }
+}
+
+# Generate __strada_export_info function that returns metadata about exported functions
+# Format: "func:name:return_type:param_count:param_types:variadic_idx\n" for each function
+# variadic_idx: index of variadic param (-1 if not variadic)
+# $has_main: if true, make functions static to avoid conflicts when linked with object files
+func gen_export_info(scalar $cg, scalar $program, int $has_main) void {
+    my str $static_prefix = "";
+    if ($has_main == 1) {
+        $static_prefix = "static ";
+    } elsif ($cg->{"module_only_mode"} == 1) {
+        # Module-only .o: emit as weak so multiple modules can be linked into
+        # the same executable without multiple-definition errors. The metadata
+        # is only read at compile time by the probe (which links one .o at a
+        # time), so the runtime never actually calls these — duplicate-weak
+        # behaviour (linker picks one) is fine.
+        $static_prefix = "__attribute__((weak)) ";
+    }
+    emit($cg, "\n/* Strada export metadata for import_lib */\n");
+    emit($cg, $static_prefix . "const char* __strada_export_info(void) {\n");
+    emit($cg, "    return \"");
+
+    my scalar $funcs = $program->{"functions"};
+    my int $i = 0;
+    my int $count = $program->{"function_count"};
+
+    while ($i < $count) {
+        my scalar $fn = $funcs->[$i];
+        my str $name = $fn->{"name"};
+        my int $fn_type = $fn->{"type"};
+
+        # Module-only: only export the target module's own functions.
+        if (cg_skip_for_module($program, $fn->{"from_use"}) == 1) {
+            $i = $i + 1;
+            next;
+        }
+
+        # Skip main function, extern functions, and private functions
+        my int $is_private = $fn->{"is_private"};
+        if ($name ne "main" && $fn_type != NODE_EXTERN_FUNC() && $is_private != 1) {
+            my int $ret_type = $fn->{"return_type"};
+            my int $param_count = $fn->{"param_count"};
+
+            # func:name:return_type:param_count:param_types:variadic_idx
+            emit($cg, "func:" . sanitize_name($name) . ":" . type_to_export($ret_type) . ":" . $param_count . ":");
+
+            my scalar $params = $fn->{"params"};
+            my int $j = 0;
+            while ($j < $param_count) {
+                if ($j > 0) {
+                    emit($cg, ",");
+                }
+                my scalar $param = $params->[$j];
+                emit($cg, type_to_export($param->{"param_type"}));
+                $j = $j + 1;
+            }
+
+            # Add variadic index
+            my int $variadic_idx = -1;
+            if ($fn->{"is_variadic"} == 1) {
+                my int $k = 0;
+                while ($k < $param_count) {
+                    if ($params->[$k]->{"is_variadic"} == 1) {
+                        $variadic_idx = $k;
+                    }
+                    $k = $k + 1;
+                }
+            }
+            emit($cg, ":" . $variadic_idx);
+
+            # Field 6: original (unsanitized) Strada name, with "::"
+            # encoded as "." so it stays one colon-delimited field
+            # (identifiers can't contain dots). Consumers use it to
+            # recover the package/method split for cross-.so method
+            # devirtualization; old consumers ignore extra fields.
+            # Package-parsed functions pre-mangle their name at parse
+            # time (Pkg_method) — for those, rebuild the qualified form
+            # from the recorded package + bare method name.
+            my str $orig_dotted = $name;
+            my str $oef_bare = "" . $fn->{"bare_name"};
+            my str $oef_pkg = "" . $fn->{"package"};
+            if (length($oef_bare) > 0 && length($oef_pkg) > 0 && $oef_pkg ne "main") {
+                $orig_dotted = $oef_pkg . "::" . $oef_bare;
+            }
+            my int $odi = index($orig_dotted, "::");
+            while ($odi >= 0) {
+                $orig_dotted = substr($orig_dotted, 0, $odi) . "." . substr($orig_dotted, $odi + 2, length($orig_dotted) - $odi - 2);
+                $odi = index($orig_dotted, "::");
+            }
+            emit($cg, ":" . $orig_dotted);
+
+            emit($cg, "\\n");
+        }
+        $i = $i + 1;
+    }
+
+    # Emit modifier info for cross-.so devirtualization. `modinfo:1` marks
+    # the metadata as carrying modifier knowledge — consumers only ever
+    # devirtualize methods from libraries with this marker (an old .so
+    # without it might have before/after/around hooks the metadata doesn't
+    # mention, and a devirtualized call would silently skip them). One
+    # `mod:NAME` line per modified method name; the consumer blocks
+    # devirtualization of that method name globally (same conservative
+    # name-keyed rule as has_method_modifier on the host side).
+    emit($cg, "modinfo:1\\n");
+    my scalar $mm_arr = $program->{"method_modifiers"};
+    my int $mm_count = $program->{"method_modifier_count"};
+    if ($mm_count > 0) {
+        my hash %mm_seen = ();
+        my int $mmi = 0;
+        while ($mmi < $mm_count) {
+            my str $mm_name = $mm_arr->[$mmi]->{"method_name"};
+            my scalar $mm_hit = $mm_seen{$mm_name};
+            if ($mm_hit == 0) {
+                $mm_seen{$mm_name} = 1;
+                emit($cg, "mod:" . $mm_name . "\\n");
+            }
+            $mmi = $mmi + 1;
+        }
+    }
+
+    # Emit `link:NAME` entries so consumers of this .o/.so/.a can pick up
+    # the extern-C library deps via the metadata probe.
+    my scalar $ll_arr2 = $program->{"link_libs"};
+    if (defined($ll_arr2)) {
+        my int $ll2 = 0;
+        my int $ll2_count = size($ll_arr2);
+        while ($ll2 < $ll2_count) {
+            emit($cg, "link:" . $ll_arr2->[$ll2] . "\\n");
+            $ll2 = $ll2 + 1;
+        }
+    }
+
+    # Emit `use:Module` entries: the Strada modules this unit was compiled
+    # against. A module-only .o contains ONLY its own code, so a consumer
+    # importing the artifact must also import (or inline) these deps for
+    # the link to resolve — even when the consumer never uses them
+    # directly. parse_export_metadata resolves them transitively.
+    # "lib"/"overload" are pseudo-uses, not modules.
+    my scalar $use_arr = $program->{"uses"};
+    if (defined($use_arr)) {
+        my hash %use_seen = ();
+        my int $ui = 0;
+        my int $ui_count = size($use_arr);
+        while ($ui < $ui_count) {
+            my str $use_name = $use_arr->[$ui];
+            my scalar $use_hit = $use_seen{$use_name};
+            if ($use_name ne "lib" && $use_name ne "overload" && $use_hit == 0) {
+                $use_seen{$use_name} = 1;
+                emit($cg, "use:" . $use_name . "\\n");
+            }
+            $ui = $ui + 1;
+        }
+    }
+
+    emit($cg, "\";\n");
+    emit($cg, "}\n");
+
+    # Also generate version info if specified
+    gen_version_info($cg, $program, $has_main);
+}
+
+# Generate __strada_version function that returns the module version
+func gen_version_info(scalar $cg, scalar $program, int $has_main) void {
+    my str $static_prefix = "";
+    if ($has_main == 1) {
+        $static_prefix = "static ";
+    } elsif ($cg->{"module_only_mode"} == 1) {
+        # Same rationale as __strada_export_info — weak avoids multi-def
+        # when several module-only .o files are linked into one binary.
+        $static_prefix = "__attribute__((weak)) ";
+    }
+    my str $version = "";
+    if ($program->{"version"} ne "") {
+        $version = $program->{"version"};
+    }
+
+    emit($cg, "\n/* Strada module version */\n");
+    emit($cg, $static_prefix . "const char* __strada_version(void) {\n");
+    emit($cg, "    return \"" . $version . "\";\n");
+    emit($cg, "}\n");
+}
+
+# Generate global variable initialization constructor for shared libraries
+# This runs automatically when the library is loaded (dlopen)
+func gen_global_constructor(scalar $cg) void {
+    my int $global_count = $cg->{"global_count"};
+    my int $num_oop_pkgs = get_oop_pkg_count($cg);
+    my int $lib_begin_count = $cg->{"begin_block_count"};
+    my int $lib_end_count = $cg->{"end_block_count"};
+
+    # Only generate constructor if there are globals, OOP methods, or BEGIN/END blocks
+    if ($global_count == 0 && $num_oop_pkgs == 0 && $lib_begin_count == 0 && $lib_end_count == 0) {
+        return;
+    }
+
+    emit($cg, "\n/* Shared library global initialization */\n");
+    emit($cg, "__attribute__((constructor))\n");
+    emit($cg, "static void __strada_init_globals(void) {\n");
+
+    # Initialize OOP method registration for all packages that have methods
+    if ($num_oop_pkgs > 0) {
+        my scalar $oop_pkgs = get_oop_packages($cg);
+        emit($cg, "    /* Initialize OOP method registration */\n");
+        my int $oop_i = 0;
+        while ($oop_i < $num_oop_pkgs) {
+            my str $oop_pkg = $oop_pkgs->[$oop_i];
+            my str $c_oop_pkg = sanitize_name($oop_pkg);
+            emit($cg, "    __" . $c_oop_pkg . "_oop_init();\n");
+            $oop_i = $oop_i + 1;
+        }
+        emit($cg, "\n");
+    }
+
+    # Also call OOP init for imported .o modules (weak — guarded by NULL check
+    # in case the .o has no OOP methods and didn't emit an init). Same fix as
+    # in main() — without this, shared-library builds whose `use`d modules
+    # have methods won't have those methods registered at dlopen time.
+    my int $impo_count = $cg->{"import_object_count"};
+    if ($impo_count > 0) {
+        my scalar $impo_objs = $cg->{"import_objects"};
+        emit($cg, "    /* OOP init for imported .o modules (weak) */\n");
+        my int $impo_i = 0;
+        while ($impo_i < $impo_count) {
+            my scalar $impo = $impo_objs->[$impo_i];
+            my str $impo_name = $impo->{"obj_name"};
+            my str $c_impo = sanitize_name($impo_name);
+            emit($cg, "    if (__" . $c_impo . "_oop_init) __" . $c_impo . "_oop_init();\n");
+            $impo_i = $impo_i + 1;
+        }
+        emit($cg, "\n");
+    }
+
+    # Initialize globals
+    if ($global_count > 0) {
+        my scalar $globals = $cg->{"globals"};
+        my int $g = 0;
+        while ($g < $global_count) {
+            my scalar $gvar = $globals->[$g];
+            my int $gvar_type = $gvar->{"type"};
+            my int $var_type = $gvar->{"var_type"};
+            my str $sigil = $gvar->{"sigil"};
+            my str $name = $gvar->{"name"};
+            my scalar $init = $gvar->{"init"};
+
+            # Module-only: skip globals from other modules; they're initialised
+            # by their own constructor.
+            if (cg_skip_for_module($cg, $gvar->{"from_use"}) == 1) {
+                $g = $g + 1;
+                next;
+            }
+
+            # Handle our declarations - use global registry
+            if ($gvar_type == NODE_OUR_DECL()) {
+                my str $pkg = $gvar->{"package"};
+                if (length($pkg) == 0) { $pkg = "main"; }
+                my str $our_key = $pkg . "::" . $name;
+                if ($init) {
+                    emit($cg, "    strada_global_set_cstr(\"" . $our_key . "\", ");
+                    emit_our_global_init($cg, $init, $sigil, $var_type);
+                    emit($cg, ");\n");
+                } elsif ($sigil eq "@" || $var_type == TYPE_ARRAY()) {
+                    # No initializer: create the empty container anyway (see the
+                    # matching note in the main-prologue global init path).
+                    emit($cg, "    strada_global_set_cstr(\"" . $our_key . "\", strada_new_array());\n");
+                } elsif ($sigil eq "%" || $var_type == TYPE_HASH()) {
+                    emit($cg, "    strada_global_set_cstr(\"" . $our_key . "\", strada_new_hash());\n");
+                }
+                # Register in our_vars for codegen
+                my scalar $our_vars_ref3 = $cg->{"our_vars"};
+                $our_vars_ref3->{$name} = $our_key;
+                $g = $g + 1;
+                next;
+            }
+
+            # Handle const declarations - initialize static variables
+            if ($gvar_type == NODE_CONST_DECL()) {
+                my int $init_type = $init->{"type"};
+                if ($init_type == NODE_INT_LITERAL() || $init_type == NODE_NUM_LITERAL() || $init_type == NODE_STR_LITERAL()) {
+                    emit($cg, "    if (" . $name . " == NULL) {\n");
+                    emit($cg, "        " . $name . " = ");
+                    gen_expression($cg, $init);
+                    emit($cg, ";\n");
+                    emit($cg, "    }\n");
+                    $g = $g + 1;
+                    next;
+                }
+            }
+
+            # Skip if already initialized (non-NULL check for safety)
+            emit($cg, "    if (" . $name . " == NULL) {\n");
+            emit($cg, "        " . $name . " = ");
+
+            if ($sigil eq "%" || $var_type == TYPE_HASH()) {
+                if ($init) {
+                    # Handle empty () which parser returns as anon_hash
+                    if ($init->{"type"} == NODE_ANON_HASH() && $init->{"pair_count"} == 0) {
+                        emit($cg, "strada_new_hash()");
+                    } else {
+                        gen_expression($cg, $init);
+                    }
+                } else {
+                    emit($cg, "strada_new_hash()");
+                }
+            } elsif ($sigil eq "@" || $var_type == TYPE_ARRAY()) {
+                if ($init) {
+                    # Handle empty () which parser returns as anon_hash
+                    if ($init->{"type"} == NODE_ANON_HASH() && $init->{"pair_count"} == 0) {
+                        emit($cg, "strada_new_array()");
+                    } else {
+                        gen_expression($cg, $init);
+                    }
+                } else {
+                    emit($cg, "strada_new_array()");
+                }
+            } else {
+                if ($init) {
+                    gen_expression($cg, $init);
+                } else {
+                    emit($cg, "strada_new_undef()");
+                }
+            }
+            emit($cg, ";\n");
+            emit($cg, "    }\n");
+            $g = $g + 1;
+        }
+    }
+
+    # Call BEGIN blocks in shared library constructor
+    if ($lib_begin_count > 0) {
+        emit($cg, "\n    /* BEGIN blocks */\n");
+        my int $lbi = 0;
+        while ($lbi < $lib_begin_count) {
+            emit($cg, "    __begin_" . $lbi . "();\n");
+            $lbi = $lbi + 1;
+        }
+    }
+
+    # Register END blocks via atexit in shared library constructor
+    if ($lib_end_count > 0) {
+        emit($cg, "\n    /* Register END blocks (run at exit in LIFO order) */\n");
+        my int $lei = 0;
+        while ($lei < $lib_end_count) {
+            emit($cg, "    atexit(__end_" . $lei . ");\n");
+            $lei = $lei + 1;
+        }
+    }
+
+    emit($cg, "}\n");
+}
+
+# Convert type constant to export string
+func type_to_export(int $type) str {
+    if ($type == TYPE_INT()) { return "int"; }
+    if ($type == TYPE_NUM()) { return "num"; }
+    if ($type == TYPE_STR()) { return "str"; }
+    if ($type == TYPE_BOOL()) { return "bool"; }
+    if ($type == TYPE_ARRAY()) { return "array"; }
+    if ($type == TYPE_HASH()) { return "hash"; }
+    if ($type == TYPE_SCALAR()) { return "scalar"; }
+    if ($type == TYPE_VOID()) { return "void"; }
+    # Explicit sized types
+    if ($type == TYPE_INT32()) { return "int32"; }
+    if ($type == TYPE_INT64()) { return "int64"; }
+    if ($type == TYPE_FLOAT32()) { return "float32"; }
+    if ($type == TYPE_FLOAT64()) { return "float64"; }
+    if ($type == TYPE_INT8()) { return "int8"; }
+    if ($type == TYPE_INT16()) { return "int16"; }
+    if ($type == TYPE_UINT8()) { return "uint8"; }
+    if ($type == TYPE_UINT16()) { return "uint16"; }
+    if ($type == TYPE_UINT32()) { return "uint32"; }
+    if ($type == TYPE_UINT64()) { return "uint64"; }
+    if ($type == TYPE_SIZE_T()) { return "size_t"; }
+    if ($type == TYPE_CHAR()) { return "char"; }
+    if ($type == TYPE_LONG_DOUBLE()) { return "long_double"; }
+    if ($type == TYPE_DYNAMIC()) { return "dynamic"; }
+    return "scalar";
+}
+
+# Generate extern function with body
+func gen_extern_function(scalar $cg, scalar $fn) void {
+    my str $ret_type = type_to_c_raw($fn->{"return_type"});
+    my str $name = sanitize_name($fn->{"name"});
+
+    emit($cg, $ret_type . " " . $name . "(");
+
+    my scalar $params = $fn->{"params"};
+    my int $i = 0;
+    while ($i < $fn->{"param_count"}) {
+        if ($i > 0) {
+            emit($cg, ", ");
+        }
+        my scalar $param = $params->[$i];
+        emit($cg, type_to_c_raw($param->{"param_type"}) . " " . escape_c_keyword($param->{"name"}));
+        $i = $i + 1;
+    }
+
+    if ($fn->{"param_count"} == 0) {
+        emit($cg, "void");
+    }
+
+    emit($cg, ") ");
+    $cg->{"in_extern"} = 1;  # Enable raw C code generation
+    # Track extern function parameter types for string interpolation conversion
+    # Use escaped names to match variable references
+    my hash %extern_params = ();
+    my int $p = 0;
+    while ($p < $fn->{"param_count"}) {
+        my scalar $param = $params->[$p];
+        my str $c_pname = escape_c_keyword($param->{"name"});
+        $extern_params{$c_pname} = $param->{"param_type"};
+        $p = $p + 1;
+    }
+    $cg->{"extern_params"} = \%extern_params;
+    gen_block($cg, $fn->{"body"});
+    $cg->{"in_extern"} = 0;  # Disable raw C code generation
+    $cg->{"extern_params"} = {};
+    emit($cg, "\n\n");
+}
+
+# Generate extern function declaration
+func gen_extern_decl(scalar $cg, scalar $fn) void {
+    my str $ret_type = type_to_c_raw($fn->{"return_type"});
+    emit($cg, $ret_type . " " . sanitize_name($fn->{"name"}) . "(");
+
+    my scalar $params = $fn->{"params"};
+    my int $i = 0;
+    while ($i < $fn->{"param_count"}) {
+        if ($i > 0) {
+            emit($cg, ", ");
+        }
+        my scalar $param = $params->[$i];
+        emit($cg, type_to_c_raw($param->{"param_type"}) . " " . escape_c_keyword($param->{"name"}));
+        $i = $i + 1;
+    }
+
+    if ($fn->{"param_count"} == 0) {
+        emit($cg, "void");
+    }
+    
+    emit($cg, ");\n");
+}
+
+# Convert type to raw C type (for extern functions)
+func type_to_c_raw(int $type) str {
+    if ($type == TYPE_INT()) { return "int"; }
+    if ($type == TYPE_BOOL()) { return "bool"; }
+    if ($type == TYPE_NUM()) { return "double"; }
+    if ($type == TYPE_STR()) { return "char*"; }
+    if ($type == TYPE_VOID()) { return "void"; }
+    # Explicit sized types
+    if ($type == TYPE_INT32()) { return "int32_t"; }
+    if ($type == TYPE_INT64()) { return "int64_t"; }
+    if ($type == TYPE_FLOAT32()) { return "float"; }
+    if ($type == TYPE_FLOAT64()) { return "double"; }
+    if ($type == TYPE_INT8()) { return "int8_t"; }
+    if ($type == TYPE_INT16()) { return "int16_t"; }
+    if ($type == TYPE_UINT8()) { return "uint8_t"; }
+    if ($type == TYPE_UINT16()) { return "uint16_t"; }
+    if ($type == TYPE_UINT32()) { return "uint32_t"; }
+    if ($type == TYPE_UINT64()) { return "uint64_t"; }
+    if ($type == TYPE_SIZE_T()) { return "size_t"; }
+    if ($type == TYPE_CHAR()) { return "char"; }
+    if ($type == TYPE_LONG_DOUBLE()) { return "long double"; }
+    return "void*";
+}
+
+# ============================================================
+# Main Entry Point
+# ============================================================
+
+func generate(scalar $ast, str $filename, int $debug_info, int $enable_profiling, int $enable_stack_trace, int $full_profile) str {
+    my scalar $cg = codegen_new($filename, $debug_info, $enable_profiling, $enable_stack_trace, $full_profile);
+    # Propagate module-only settings from program to cg so helpers that only
+    # have $cg in scope can still filter (e.g., gen_global_constructor).
+    $cg->{"module_only_mode"} = $ast->{"module_only_mode"};
+    $cg->{"module_target"} = $ast->{"module_target"};
+    gen_program($cg, $ast);
+    return get_output($cg);  # Join array into final string
+}

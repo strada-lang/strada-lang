@@ -1,0 +1,44 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# mathlib.strada - Shared library with C-callable functions
+# Compile with: stradac mathlib.strada mathlib.c
+# Then: gcc -shared -fPIC -o libmathlib.so mathlib.c runtime/strada_runtime.c -I runtime
+
+# Add two integers - exported as C function
+func add_integers(int $a, int $b) int {
+    return $a + $b;
+}
+
+# Multiply two integers
+func multiply_integers(int $a, int $b) int {
+    return $a * $b;
+}
+
+# Subtract
+func subtract_integers(int $a, int $b) int {
+    return $a - $b;
+}
+
+# Test main function
+func main() int {
+    say("Testing shared library functions:");
+    say("  add_integers(5, 3) = " . add_integers(5, 3));
+    say("  multiply_integers(4, 7) = " . multiply_integers(4, 7));
+    say("  subtract_integers(10, 4) = " . subtract_integers(10, 4));
+    return 0;
+}

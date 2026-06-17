@@ -1,0 +1,128 @@
+#!/usr/bin/env strada
+# Test in-memory I/O for memory leaks
+# Run: valgrind --leak-check=full ./test_memio
+
+func main() int {
+    say("Testing in-memory I/O for memory leaks...");
+    my int $iterations = 100;
+
+    # Test 1: open_str read mode — repeated open/read/close
+    say("  open_str read...");
+    my int $i = 0;
+    while ($i < $iterations) {
+        my scalar $fh = core::open_str("hello\nworld\n", "r");
+        my str $l1 = <$fh>;
+        my str $l2 = <$fh>;
+        core::close($fh);
+        $i++;
+    }
+
+    # Test 2: open_str write mode — repeated open/write/extract/close
+    say("  open_str write...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $wfh = core::open_str("", "w");
+        say($wfh, "data line");
+        print($wfh, "more data");
+        my str $result = core::str_from_fh($wfh);
+        core::close($wfh);
+        $i++;
+    }
+
+    # Test 3: open_str append mode
+    say("  open_str append...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $afh = core::open_str("existing\n", "a");
+        say($afh, "added");
+        my str $result = core::str_from_fh($afh);
+        core::close($afh);
+        $i++;
+    }
+
+    # Test 4: Reference-style read
+    say("  ref read...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $src = "alpha\nbeta\ngamma\n";
+        my scalar $fh = core::open(\$src, "r");
+        my str $l1 = <$fh>;
+        my str $l2 = <$fh>;
+        my str $l3 = <$fh>;
+        core::close($fh);
+        $i++;
+    }
+
+    # Test 5: Reference-style write with writeback
+    say("  ref write...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $output = "";
+        my scalar $wfh = core::open(\$output, "w");
+        say($wfh, "written");
+        core::close($wfh);
+        $i++;
+    }
+
+    # Test 6: Reference-style append with writeback
+    say("  ref append...");
+    $i = 0;
+    while ($i < $iterations) {
+        my str $buf = "start\n";
+        my scalar $afh = core::open(\$buf, "a");
+        say($afh, "added");
+        core::close($afh);
+        $i++;
+    }
+
+    # Test 7: Auto-close via scope exit (no explicit close)
+    say("  auto-close...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $fh = core::open_str("test data\n", "r");
+        my str $line = <$fh>;
+        # $fh goes out of scope — auto-closed
+        $i++;
+    }
+
+    # Test 8: Auto-close write streams via scope exit
+    say("  auto-close write...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $wfh = core::open_str("", "w");
+        say($wfh, "data");
+        # $wfh goes out of scope — auto-closed, buffer freed
+        $i++;
+    }
+
+    # Test 9: str_from_fh called multiple times
+    say("  str_from_fh multiple...");
+    $i = 0;
+    while ($i < $iterations) {
+        my scalar $wfh = core::open_str("", "w");
+        say($wfh, "chunk1");
+        my str $r1 = core::str_from_fh($wfh);
+        say($wfh, "chunk2");
+        my str $r2 = core::str_from_fh($wfh);
+        core::close($wfh);
+        $i++;
+    }
+
+    # Test 10: Write with large data
+    say("  large write...");
+    $i = 0;
+    while ($i < 10) {
+        my scalar $wfh = core::open_str("", "w");
+        my int $j = 0;
+        while ($j < 100) {
+            say($wfh, "this is line number " . $j . " with some padding data to make it longer");
+            $j++;
+        }
+        my str $result = core::str_from_fh($wfh);
+        core::close($wfh);
+        $i++;
+    }
+
+    say("All in-memory I/O leak tests completed.");
+    return 0;
+}

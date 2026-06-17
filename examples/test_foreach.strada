@@ -1,0 +1,120 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# test_foreach.strada - Test foreach-style loops
+
+func main() int {
+    say("=== Foreach Loop Tests ===");
+    say("");
+
+    # Test 1: Basic foreach with inline declaration
+    say("Test 1: foreach my int $n (@nums)");
+    my array @nums = ();
+    push(@nums, 1);
+    push(@nums, 2);
+    push(@nums, 3);
+
+    foreach my int $n (@nums) {
+        say("  n = " . $n);
+    }
+    say("");
+
+    # Test 2: Foreach with existing variable
+    say("Test 2: foreach $item (@nums)");
+    my scalar $item;
+    foreach $item (@nums) {
+        say("  item = " . $item);
+    }
+    say("");
+
+    # Test 3: Foreach with strings
+    say("Test 3: foreach my str $color");
+    my array @colors = ();
+    push(@colors, "red");
+    push(@colors, "green");
+    push(@colors, "blue");
+
+    foreach my str $color (@colors) {
+        say("  color = " . $color);
+    }
+    say("");
+
+    # Test 4: Foreach with anonymous array
+    say("Test 4: foreach with anonymous array");
+    foreach my str $fruit (["apple", "banana", "cherry"]) {
+        say("  fruit = " . $fruit);
+    }
+    say("");
+
+    # Test 5: Nested foreach
+    say("Test 5: Nested foreach");
+    foreach my int $i (@nums) {
+        foreach my int $j (@nums) {
+            say("  " . $i . " * " . $j . " = " . ($i * $j));
+        }
+    }
+    say("");
+
+    # Test 6: Labeled foreach with last
+    say("Test 6: Labeled foreach with last OUTER");
+    OUTER: foreach my int $i (@nums) {
+        foreach my int $j (@nums) {
+            if ($i * $j > 4) {
+                say("  Breaking at " . $i . " * " . $j);
+                last OUTER;
+            }
+            say("  " . $i . " x " . $j . " = " . ($i * $j));
+        }
+    }
+    say("");
+
+    # Test 7: Labeled foreach with next
+    say("Test 7: Labeled foreach with next OUTER");
+    SKIP: foreach my int $i (@nums) {
+        if ($i == 2) {
+            say("  Skipping i=2");
+            next SKIP;
+        }
+        say("  Processing i=" . $i);
+    }
+    say("");
+
+    # Test 8: Foreach with last (unlabeled)
+    say("Test 8: foreach with unlabeled last");
+    foreach my int $n (@nums) {
+        if ($n == 2) {
+            say("  Breaking at n=2");
+            last;
+        }
+        say("  n = " . $n);
+    }
+    say("");
+
+    # Test 9: Foreach with next (unlabeled)
+    say("Test 9: foreach with unlabeled next");
+    foreach my int $n (@nums) {
+        if ($n == 2) {
+            say("  Skipping n=2");
+            next;
+        }
+        say("  n = " . $n);
+    }
+    say("");
+
+    say("=== All foreach tests passed! ===");
+    return 0;
+}

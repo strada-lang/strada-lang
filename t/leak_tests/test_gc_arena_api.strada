@@ -1,0 +1,61 @@
+#!/usr/bin/env strada
+# Exercises the core:: memory-management API surface (compiler wiring for the
+# cycle GC + request arena). valgrind must be clean.
+
+package main;
+
+func main() int {
+    say("GC/arena core:: API test...");
+
+    # Tune + drive the collector through the core:: surface.
+    core::gc_threshold(64);
+
+    my int $i = 0;
+    while ($i < 300) {
+        my scalar $a = {"n" => "a"};
+        my scalar $b = {"n" => "b"};
+        $a->{"peer"} = $b;
+        $b->{"peer"} = $a;     # indirect cycle, no weaken
+        $i = $i + 1;
+    }
+    core::gc_collect();
+
+    my int $freed = core::gc_freed();
+    my int $runs = core::gc_collections();
+    say("  collections=" . $runs . " freed=" . $freed);
+    if ($freed < 1) {
+        say("    FAIL: core::gc_freed() reports nothing freed");
+        return 1;
+    }
+
+    # Disable/enable toggles compile and run.
+    core::gc_disable();
+    core::gc_enable();
+
+    # Arena surface.
+    if (core::arena_active() != 0) {
+        say("    FAIL: arena active before begin");
+        return 1;
+    }
+    core::arena_begin();
+    if (core::arena_active() != 1) {
+        say("    FAIL: arena not active after begin");
+        return 1;
+    }
+    my int $j = 0;
+    my int $acc = 0;
+    while ($j < 200) {
+        my scalar $h = {"k" => $j, "s" => "v" . $j, "list" => [$j, $j + 1]};
+        $acc = $acc + $h->{"k"};
+        $j = $j + 1;
+    }
+    core::arena_end();
+    if (core::arena_active() != 0) {
+        say("    FAIL: arena still active after end");
+        return 1;
+    }
+    say("  arena acc=" . $acc);
+
+    say("GC/arena core:: API test passed!");
+    return 0;
+}
