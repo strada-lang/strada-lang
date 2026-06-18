@@ -212,6 +212,11 @@ func codegen_new(str $filename, int $debug_info, int $enable_profiling, int $ena
     $cg{"preamble_content"} = "";  # Saved preamble when doing multi-phase
     $cg{"funcs_content"} = "";     # Saved funcs when doing multi-phase
     $cg{"oop_fwd_decls"} = "";     # OOP init forward declarations (generated after methods tracked)
+    # Module-only (separate compilation): mangled names of functions called but
+    # neither defined nor declared in this translation unit. get_output() emits an
+    # `extern StradaValue* name();` for each so C doesn't default the call to an
+    # int return and truncate the 64-bit StradaValue* pointer it really returns.
+    $cg{"auto_externs"} = {};
     # Module-only codegen mode (copied from program in generate() so the cg_skip_for_module
     # helper works equivalently whether called with the program or the cg context).
     $cg{"module_only_mode"} = 0;
@@ -1963,6 +1968,27 @@ func gen_str_literal_c(scalar $cg, str $val) void {
     emit($cg, "\"");
 }
 
+# Byte-lexicographic "$a comes before $b". The compiler's OWN source must stay
+# parseable by the frozen bootstrap, which doesn't accept `sort { }` blocks or
+# the lt/gt/cmp string operators (none appear elsewhere in compiler/*.strada),
+# so ordering is done by hand with substr/ord/int compares — all bootstrap-safe.
+func ae_str_before(str $a, str $b) int {
+    my int $la = length($a);
+    my int $lb = length($b);
+    my int $n = $la;
+    if ($lb < $n) { $n = $lb; }
+    my int $i = 0;
+    while ($i < $n) {
+        my int $ca = ord(substr($a, $i, 1));
+        my int $cb = ord(substr($b, $i, 1));
+        if ($ca < $cb) { return 1; }
+        if ($ca > $cb) { return 0; }
+        $i = $i + 1;
+    }
+    if ($la < $lb) { return 1; }
+    return 0;
+}
+
 # Get accumulated output as a single string
 func get_output(scalar $cg) str {
     # Get the current output from StringBuilder
@@ -1975,11 +2001,48 @@ func get_output(scalar $cg) str {
         my str $anon_decls = $cg->{"anon_func_decls"};
         my str $oop_decls = $cg->{"oop_fwd_decls"};
 
-        # Build result: preamble + oop_decls + anon_decls + funcs + final
+        # Build result: preamble + oop_decls + auto_externs + anon_decls + funcs + final
         my scalar $out_sb = sb_new();
         sb_append($out_sb, $preamble);
         if (length($oop_decls) > 0) {
             sb_append($out_sb, $oop_decls);
+        }
+        # Extern prototypes for cross-module/stdlib functions called but not defined
+        # in this unit (separate compilation). Placed after the preamble (which has
+        # the includes defining StradaValue) and before the function bodies. All
+        # Strada functions use the StradaValue* convention, so an unspecified-arg
+        # `extern StradaValue* name();` is correct; the final link resolves them.
+        my scalar $auto_ext = $cg->{"auto_externs"};
+        if (defined($auto_ext)) {
+            my array @ae_names = keys(%{$auto_ext});
+            # Deterministic order (ccache-stable) via a bootstrap-safe manual
+            # insertion sort — see ae_str_before. The list is tiny (undeclared
+            # cross-module call names in this TU).
+            my int $as_i = 1;
+            while ($as_i < size(@ae_names)) {
+                my str $as_key = $ae_names[$as_i];
+                my int $as_j = $as_i - 1;
+                while ($as_j >= 0 && ae_str_before($as_key, $ae_names[$as_j]) == 1) {
+                    $ae_names[$as_j + 1] = $ae_names[$as_j];
+                    $as_j = $as_j - 1;
+                }
+                $ae_names[$as_j + 1] = $as_key;
+                $as_i = $as_i + 1;
+            }
+            my str $ae_block = "";
+            my int $ae_i = 0;
+            while ($ae_i < size(@ae_names)) {
+                my str $ae_nm = $ae_names[$ae_i];
+                # Skip anything actually defined/declared in this unit (no clash).
+                if (!defined($cg->{"functions"}->{$ae_nm})) {
+                    $ae_block = $ae_block . "extern StradaValue* " . $ae_nm . "();\n";
+                }
+                $ae_i = $ae_i + 1;
+            }
+            if (length($ae_block) > 0) {
+                sb_append($out_sb, "/* Extern prototypes: cross-module/stdlib calls (separate compilation) */\n");
+                sb_append($out_sb, $ae_block);
+            }
         }
         if (length($anon_decls) > 0) {
             sb_append($out_sb, "/* Anonymous function forward declarations */\n");

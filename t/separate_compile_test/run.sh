@@ -429,6 +429,56 @@ else
 fi
 cd "$WORK/proj"
 
+# --- Test 19: -M auto-extern for an undeclared cross-module call ----------
+# Regression: a module compiled with -M that calls a function it neither
+# defines nor `use`s (resolved only at the final link) must emit
+# `extern StradaValue* name();`. Without it, C defaults the call to `int
+# name()` and TRUNCATES the returned 64-bit StradaValue* pointer to 32 bits.
+# A heap return (a string) then becomes a garbage pointer -> segfault. (An
+# int return like 25 would survive truncation as a tagged int, which is why
+# the earlier end-to-end test couldn't catch this.) Relay deliberately omits
+# `use StrLib`, so StrLib::banner is unknown to Relay's translation unit.
+mkdir -p "$WORK/ax"
+cat > "$WORK/ax/StrLib.strada" <<'EOF'
+package StrLib;
+func banner(int $n) {                 # no return type -> heap string
+    my str $s = "[";
+    my int $i = 0;
+    while ($i < $n) { $s = $s . "="; $i = $i + 1; }
+    return $s . "]";
+}
+EOF
+cat > "$WORK/ax/Relay.strada" <<'EOF'
+package Relay;                        # NOTE: no `use StrLib;`
+func get_banner() { return StrLib::banner(20); }
+EOF
+cat > "$WORK/ax/app.strada" <<'EOF'
+use lib ".";
+use Relay;
+use StrLib;
+func main() int {
+    my str $b = Relay::get_banner();
+    if (length($b) == 22) { say("OK"); return 0; }
+    say("CORRUPT len=" . length($b)); return 1;
+}
+EOF
+cd "$WORK/ax"
+ax_ok=0
+out19=""; rc19=""
+if "$STRADA" -M StrLib.strada >"$WORK/t19a.log" 2>&1 \
+   && "$STRADA" -M Relay.strada >"$WORK/t19b.log" 2>&1 \
+   && "$STRADA" -o app app.strada >"$WORK/t19c.log" 2>&1 && [ -x app ]; then
+    out19="$(./app 2>/dev/null)"; rc19=$?
+    if [ "$out19" = "OK" ] && [ "$rc19" -eq 0 ]; then ax_ok=1; fi
+fi
+if [ "$ax_ok" -eq 1 ]; then
+    pass "-M emits extern for undeclared cross-module call (no pointer truncation)"
+else
+    fail "-M emits extern for undeclared cross-module call (no pointer truncation)" \
+         "app output='${out19}' rc='${rc19}' (segfault/CORRUPT => returned StradaValue* truncated to int)"
+fi
+cd "$WORK/proj"
+
 # --- Summary --------------------------------------------------------------
 echo
 echo "===== $((PASS + FAIL)) tests, $PASS passed, $FAIL failed ====="

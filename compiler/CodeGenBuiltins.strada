@@ -8054,6 +8054,28 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
             }
         }
 
+        # Separate compilation (module-only / -M): a call to a function neither
+        # defined nor declared in this translation unit is a legitimate cross-module
+        # or stdlib reference that the final link resolves. Record its mangled name
+        # so get_output() emits `extern StradaValue* name();` — otherwise C assumes
+        # `int name()` and truncates the returned 64-bit StradaValue* pointer.
+        if ($cg->{"module_only_mode"} == 1) {
+            # NB: no `//` defined-or here — the frozen bootstrap can't parse it
+            # (it appears nowhere else in compiler/*.strada). Default with
+            # explicit defined() checks instead.
+            my int $is_known = 0;
+            if (defined($func_info)) {
+                my int $ak_rt = 0;
+                if (defined($func_info->{"return_type"})) { $ak_rt = $func_info->{"return_type"}; }
+                my int $ak_ext = 0;
+                if (defined($func_info->{"is_extern"})) { $ak_ext = $func_info->{"is_extern"}; }
+                if ($ak_rt > 0 || $ak_ext == 1) { $is_known = 1; }
+            }
+            if ($is_known == 0 && length($c_name) > 0) {
+                $cg->{"auto_externs"}->{$c_name} = 1;
+            }
+        }
+
         # Handle extern function calls - convert between StradaValue* and raw C types
         if ($func_info && $func_info->{"is_extern"} == 1) {
             my int $ret_type = $func_info->{"return_type"};
