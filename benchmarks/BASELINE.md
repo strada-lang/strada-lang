@@ -489,3 +489,31 @@ wins or ties all 18 with a Perl counterpart (was 16/18). vs Node, Strada wins 12
 of 18; Node's remaining edges are binary_trees (generational GC — narrowed by
 compact arrays, 0.74s vs the pre-merge 0.80s) and the C++-native
 json/regex/sprintf/closures.
+
+### bench_oop_so vs Perl (2026-06-17)
+
+Added `bench_oop_so.pl`, a Perl counterpart to `bench_oop_so.strada`. Perl has
+no shared-library / same-binary distinction for method dispatch, so its "local"
+and "so" sections run the IDENTICAL class — the workload (loop counts, methods,
+arithmetic) matches the Strada benchmark section-for-section, and the per-section
+result sums are identical (1000000 / 19999900000 / 999999), so the comparison is
+provably equivalent work. Strada / Perl 5.38.2, best of 7 per section (the
+internal hires timers), box at load ~0.7 (cleaner than the earlier loaded-box
+`.so` records). `.so` = class loaded via `import_lib`; "local" = same-binary
+class. Note this benchmark deliberately uses a TRIVIAL hash-counter class to
+isolate *dispatch* cost — hence the modest Strada/Perl ratios vs `bench_oop`'s
+61× (which does real per-method arithmetic, inheritance, and `isa`).
+
+| section                | Strada local | Strada `.so` | Perl   | Perl ÷ Strada-`.so` | `.so` ÷ local |
+| ---------------------- | ------------ | ------------ | ------ | ------------------- | ------------- |
+| call (1M `bump()`)     | 0.0495s      | 0.0704s      | 0.165s | Strada 2.3×         | 1.42×         |
+| construct (200k `new`) | 0.0367s      | 0.0413s      | 0.099s | Strada 2.5×         | 1.13×         |
+| mixed (bump/add/value) | 0.0335s      | 0.0477s      | 0.129s | Strada 2.7×         | 1.42×         |
+
+Whole-process (official runner, best of 5, interleaved): **Strada 0.304s vs Perl
+0.855s = Strada 2.81×**. Takeaways: (1) Strada OOP dispatched across an
+`import_lib` `.so` boundary is **~2.3–2.7× faster than Perl** on this
+dispatch-bound workload; (2) the `.so` boundary costs Strada ~1.1–1.4× over its
+own same-binary dispatch (constructors are nearly free across the boundary;
+call/mixed pay the wrapper hop + no cross-`.so` inlining). The runner builds
+`bench_oop_so_lib.so` automatically; opt Perl in with `--langs strada,perl`.
