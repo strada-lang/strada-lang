@@ -479,6 +479,49 @@ else
 fi
 cd "$WORK/proj"
 
+# --- Test 20: passing a Strada-module .so on the command line -------------
+# A .so can be supplied as a positional arg or via --import-lib; both are
+# treated as an implicit `import_lib` (dlopen'd at runtime), so the app can
+# call into it WITHOUT a source-level `import_lib` directive. (.o/.a are
+# linked statically; a .so is loaded at runtime — see do_import_lib_at.)
+mkdir -p "$WORK/so"
+cat > "$WORK/so/MyLib.strada" <<'EOF'
+package MyLib;
+func greet(str $name) { return "Hello, " . $name . "!"; }
+func add(int $a, int $b) int { return $a + $b; }
+EOF
+cat > "$WORK/so/app.strada" <<'EOF'
+func main() int {              # NOTE: no `import_lib` directive
+    say(MyLib::greet("world"));
+    say("add=" . MyLib::add(40, 2));
+    return 0;
+}
+EOF
+cd "$WORK/so"
+so_ok=0
+out20a=""; out20b=""
+if "$STRADA" --shared MyLib.strada -o MyLib.so >"$WORK/t20build.log" 2>&1 && [ -f MyLib.so ]; then
+    # form 1: positional .so
+    if "$STRADA" -o app1 app.strada "$WORK/so/MyLib.so" >"$WORK/t20a.log" 2>&1 && [ -x app1 ]; then
+        out20a="$(./app1 2>/dev/null)"
+    fi
+    # form 2: --import-lib flag
+    if "$STRADA" --import-lib "$WORK/so/MyLib.so" -o app2 app.strada >"$WORK/t20b.log" 2>&1 && [ -x app2 ]; then
+        out20b="$(./app2 2>/dev/null)"
+    fi
+fi
+expected=$'Hello, world!\nadd=42'
+if [ "$out20a" = "$expected" ] && [ "$out20b" = "$expected" ]; then
+    so_ok=1
+fi
+if [ "$so_ok" -eq 1 ]; then
+    pass "CLI .so (positional + --import-lib) imported as runtime import_lib"
+else
+    fail "CLI .so (positional + --import-lib) imported as runtime import_lib" \
+         "positional='${out20a}' --import-lib='${out20b}' (want 'Hello, world!' / 'add=42')"
+fi
+cd "$WORK/proj"
+
 # --- Summary --------------------------------------------------------------
 echo
 echo "===== $((PASS + FAIL)) tests, $PASS passed, $FAIL failed ====="

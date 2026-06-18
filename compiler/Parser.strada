@@ -5720,6 +5720,22 @@ func parse_implicit_import_object(scalar $parser, scalar $program, str $o_path) 
     return do_import_object_at($parser, $program, $obj_file, $o_path);
 }
 
+# Register an implicit import_lib from a full path (e.g., a .so passed on the
+# `strada` command line, or via --import-lib). Mirrors
+# parse_implicit_import_object: derive the lib name from the basename (minus
+# .so, matching source `import_lib "Foo.so"`) and reuse do_import_lib_at, which
+# dlopens the .so for its __strada_export_info metadata at compile time and
+# generates the runtime dlopen wrappers. Returns 1 if added, 0 if a lib of the
+# same name was already imported.
+func parse_implicit_import_lib(scalar $parser, scalar $program, str $so_path) int {
+    my str $lib_file = path_basename($so_path);
+    my str $lib_name = $lib_file;
+    if (length($lib_file) > 3 && substr($lib_file, length($lib_file) - 3, 3) eq ".so") {
+        $lib_name = substr($lib_file, 0, length($lib_file) - 3);
+    }
+    return do_import_lib_at($parser, $program, $lib_name, $so_path);
+}
+
 # Parse `link_lib "name";` (and the comma-separated form
 # `link_lib "a", "b", "c";`). Records the C library names so consumers of
 # this module's .o can pass -l<name> at final link time.
@@ -6613,6 +6629,7 @@ func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low, sca
         $imp_i = $imp_i + 1;
     }
 
+
     # STRADA_DEPS_OUT: write every resolved module source path, one per
     # line, in resolution order (parents before their nested deps). The
     # wrapper's --module-cache warmer uses this to precompile stale
@@ -6659,8 +6676,23 @@ func parse_with_lib_paths(scalar $tokens, str $filename, scalar $lib_paths, scal
 # Parse with pre-configured library paths and CLI-implicit import paths (full
 # paths to .o/.a files passed on the `strada` command line that should be
 # treated as if they were source-level import_object/import_archive).
-func parse_with_implicit_imports(scalar $tokens, str $filename, scalar $lib_paths, scalar $lib_paths_low, scalar $implicit_objs, scalar $implicit_archs) scalar {
+func parse_with_implicit_imports(scalar $tokens, str $filename, scalar $lib_paths, scalar $lib_paths_low, scalar $implicit_objs, scalar $implicit_archs, scalar $implicit_libs) scalar {
     my scalar $parser = parser_new($tokens);
     parser_set_filename($parser, $filename);
-    return parse_program($parser, $lib_paths, $lib_paths_low, $implicit_objs, $implicit_archs);
+    my scalar $program = parse_program($parser, $lib_paths, $lib_paths_low, $implicit_objs, $implicit_archs);
+    # Apply CLI-implicit import_lib paths (`strada main.strada foo.so` or
+    # `--import-lib foo.so`) here rather than inside parse_program — keeping
+    # parse_program's signature stable so the interpreter and lib/Strada
+    # callers don't break. Same pipeline point: registered after the source is
+    # parsed, before codegen (in compile()). Treated as `import_lib "foo.so";`
+    # (dlopen'd at runtime via the generated wrappers, not statically linked).
+    if (defined($implicit_libs)) {
+        my int $imp_lib_count = size($implicit_libs);
+        my int $imp_i = 0;
+        while ($imp_i < $imp_lib_count) {
+            parse_implicit_import_lib($parser, $program, $implicit_libs->[$imp_i]);
+            $imp_i = $imp_i + 1;
+        }
+    }
+    return $program;
 }

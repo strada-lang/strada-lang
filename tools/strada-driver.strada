@@ -61,6 +61,7 @@ our array @EXTRA_O_FILES = ();
 our array @EXTRA_A_FILES = ();
 our array @IMPLICIT_IMPORT_OBJS = ();
 our array @IMPLICIT_IMPORT_ARCHS = ();
+our array @IMPLICIT_IMPORT_LIBS = ();
 our array @LINK_LIBS = ();
 our array @INCLUDE_PATHS = ();
 our array @PP_DEFINES = ();
@@ -254,10 +255,14 @@ func file_contains(str $path, str $needle) int {
     return 0;
 }
 
-# nm | grep __strada_export_info — detect a Strada module object/archive.
+# nm | grep __strada_export_info — detect a Strada module object/archive/.so.
 func is_strada_module(str $file) int {
     my str $out = core::qx("nm " . sq($file) . " 2>/dev/null");
     if (index($out, "__strada_export_info") >= 0) { return 1; }
+    # A .so may carry the export symbol only in its dynamic symbol table (its
+    # regular symtab stripped) — `nm -D` reads that.
+    my str $dout = core::qx("nm -D " . sq($file) . " 2>/dev/null");
+    if (index($dout, "__strada_export_info") >= 0) { return 1; }
     return 0;
 }
 
@@ -373,6 +378,7 @@ func parse_args(array @av) void {
         elsif ($a eq "-fno-lto" || $a eq "--no-lto") { $NO_LTO = 1; $i = $i + 1; }
         elsif ($a eq "--no-stack-trace") { $NO_STACK_TRACE = 1; $i = $i + 1; }
         elsif ($a eq "--use-artifacts") { core::setenv("STRADA_USE_ARTIFACTS", "1"); $i = $i + 1; }
+        elsif ($a eq "--import-lib") { @IMPLICIT_IMPORT_LIBS = (@IMPLICIT_IMPORT_LIBS, $av[$i + 1]); $i = $i + 2; }
         elsif ($a eq "-LL") { @LIB_PATHS_LOW = (@LIB_PATHS_LOW, $av[$i + 1]); $i = $i + 2; }
         elsif (sw($a, "-LL")) { @LIB_PATHS_LOW = (@LIB_PATHS_LOW, substr($a, 3, length($a) - 3)); $i = $i + 1; }
         elsif ($a eq "-L") { @LIB_PATHS = (@LIB_PATHS, $av[$i + 1]); $i = $i + 2; }
@@ -662,6 +668,12 @@ func main() int {
             if (!(-f $arg)) { error("Archive file not found: " . $arg); }
             if (is_strada_module($arg) == 1) { @IMPLICIT_IMPORT_ARCHS = (@IMPLICIT_IMPORT_ARCHS, $arg); }
             else { @EXTRA_A_FILES = (@EXTRA_A_FILES, $arg); }
+        } elsif (ew($arg, ".so")) {
+            if (!(-f $arg)) { error("Shared library not found: " . $arg); }
+            # A Strada-module .so is dlopen'd at runtime via import_lib; a plain
+            # C .so is just a link input (the linker accepts a .so path directly).
+            if (is_strada_module($arg) == 1) { @IMPLICIT_IMPORT_LIBS = (@IMPLICIT_IMPORT_LIBS, $arg); }
+            else { @EXTRA_O_FILES = (@EXTRA_O_FILES, $arg); }
         } elsif (length($OUTPUT_FILE) == 0) {
             $OUTPUT_FILE = $arg;
         } else {
@@ -764,6 +776,8 @@ func main() int {
     while ($io < size(@IMPLICIT_IMPORT_OBJS)) { @sc = (@sc, "--import-object"); @sc = (@sc, $IMPLICIT_IMPORT_OBJS[$io]); $io = $io + 1; }
     $io = 0;
     while ($io < size(@IMPLICIT_IMPORT_ARCHS)) { @sc = (@sc, "--import-archive"); @sc = (@sc, $IMPLICIT_IMPORT_ARCHS[$io]); $io = $io + 1; }
+    $io = 0;
+    while ($io < size(@IMPLICIT_IMPORT_LIBS)) { @sc = (@sc, "--import-lib"); @sc = (@sc, $IMPLICIT_IMPORT_LIBS[$io]); $io = $io + 1; }
 
     # Module-only codegen: explicit -M, or --object without --object-full.
     my int $want_module_only = 0;

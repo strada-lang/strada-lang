@@ -90,7 +90,7 @@ func _deduce_lib_root_from_source(str $source, str $filename) str {
     return substr($filename, 0, $suffix_start - 1);
 }
 
-func compile(str $source, str $filename, int $debug_info, int $show_timing, int $show_warnings, int $strict_types, int $enable_profiling, int $enable_stack_trace, int $full_profile, scalar $lib_paths, scalar $lib_paths_low, scalar $implicit_objs, scalar $implicit_archs, int $module_only_mode, str $module_target) str {
+func compile(str $source, str $filename, int $debug_info, int $show_timing, int $show_warnings, int $strict_types, int $enable_profiling, int $enable_stack_trace, int $full_profile, scalar $lib_paths, scalar $lib_paths_low, scalar $implicit_objs, scalar $implicit_archs, scalar $implicit_libs, int $module_only_mode, str $module_target) str {
     my num $t0 = 0.0;
     my num $t1 = 0.0;
 
@@ -134,7 +134,7 @@ func compile(str $source, str $filename, int $debug_info, int $show_timing, int 
     # Parse (with optional library paths from -L and -LL flags, plus any
     # implicit imports from CLI-passed .o/.a files)
     $t0 = core::hires_time();
-    my scalar $ast = parse_with_implicit_imports($tokens, $filename, $lib_paths, $lib_paths_low, $implicit_objs, $implicit_archs);
+    my scalar $ast = parse_with_implicit_imports($tokens, $filename, $lib_paths, $lib_paths_low, $implicit_objs, $implicit_archs, $implicit_libs);
     $ast->{"module_only_mode"} = $module_only_mode;
     $ast->{"module_target"} = $module_target;
     $t1 = core::hires_time();
@@ -170,6 +170,7 @@ func print_usage() void {
     say("  -LL <path>      Add library search path (low priority, searched last)");
     say("  --import-object <path>   Treat <path> as implicit import_object (full path)");
     say("  --import-archive <path>  Treat <path> as implicit import_archive (full path)");
+    say("  --import-lib <path>      Treat <path> as implicit import_lib (.so, dlopen'd at runtime)");
     say("  -M [TARGET]    Module-only codegen: only emit bodies/globals/blocks");
     say("                 for TARGET (default: derived from input filename).");
     say("                 Use after compiling Foo.strada to produce Foo.o.");
@@ -211,6 +212,7 @@ func main() int {
     my array @lib_paths_low = ();
     my array @implicit_objs = ();
     my array @implicit_archs = ();
+    my array @implicit_libs = ();
     my int $module_only_mode = 0;
     my str $module_target = "";
     # Start from 0 — @ARGV excludes program name (Perl-style)
@@ -302,6 +304,16 @@ func main() int {
                 say("Error: --import-archive requires a path argument");
                 return 1;
             }
+        } elsif ($arg eq "--import-lib") {
+            # --import-lib <path> - treat path as implicit import_lib (a .so
+            # dlopen'd at runtime, like a source-level `import_lib "foo.so";`)
+            $i = $i + 1;
+            if ($i < $arg_count) {
+                push(@implicit_libs, $ARGV[$i]);
+            } else {
+                say("Error: --import-lib requires a path argument");
+                return 1;
+            }
         } elsif ($arg eq "-h" || $arg eq "--help") {
             print_usage();
             return 0;
@@ -380,7 +392,7 @@ func main() int {
     }
 
     # Compile (pass lib paths, CLI-implicit imports, and module-only settings)
-    my str $code = compile($source, $input_file, $debug_info, $show_timing, $show_warnings, $strict_types, $enable_profiling, $enable_stack_trace, $full_profile, \@lib_paths, \@lib_paths_low, \@implicit_objs, \@implicit_archs, $module_only_mode, $module_target);
+    my str $code = compile($source, $input_file, $debug_info, $show_timing, $show_warnings, $strict_types, $enable_profiling, $enable_stack_trace, $full_profile, \@lib_paths, \@lib_paths_low, \@implicit_objs, \@implicit_archs, \@implicit_libs, $module_only_mode, $module_target);
 
     # Write output
     spew($output_file, $code);
