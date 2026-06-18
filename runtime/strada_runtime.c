@@ -25704,6 +25704,72 @@ StradaValue* strada_dl_call_export_info(StradaValue *fn_ptr_sv) {
     return strada_new_str(result);
 }
 
+#if defined(__linux__)
+#include <elf.h>
+#endif
+/* strada_read_meta_section - read the .strada_meta section straight out of an
+ * ELF object/.so file: no subprocess, no dlopen, no code execution. Returns
+ * the section bytes (trailing NUL terminator/padding stripped) as a string,
+ * or "" if the file isn't a readable little-endian 64-bit ELF, has no such
+ * section, or anything is out of bounds. Lets the compiler read a module's
+ * export metadata without building+running a probe or dlopen'ing it.
+ * (Mach-O / ELF32 fall through to "" -> the caller's probe/dlopen path.) */
+StradaValue* strada_read_meta_section(StradaValue *path_sv) {
+    if (!path_sv || STRADA_IS_TAGGED_INT(path_sv)) return strada_new_str("");
+#if defined(__linux__)
+    char *path = strada_to_str(path_sv);
+    if (!path) return strada_new_str("");
+    FILE *f = fopen(path, "rb");
+    free(path);
+    if (!f) return strada_new_str("");
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return strada_new_str(""); }
+    long sz = ftell(f);
+    if (sz < (long)sizeof(Elf64_Ehdr) || fseek(f, 0, SEEK_SET) != 0) { fclose(f); return strada_new_str(""); }
+    unsigned char *buf = (unsigned char*)malloc((size_t)sz);
+    if (!buf) { fclose(f); return strada_new_str(""); }
+    size_t got = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    if (got != (size_t)sz) { free(buf); return strada_new_str(""); }
+
+    StradaValue *result = NULL;
+    uint64_t usz = (uint64_t)sz;
+    /* ELF identity: magic + 64-bit + little-endian */
+    if (memcmp(buf, ELFMAG, SELFMAG) == 0
+        && buf[EI_CLASS] == ELFCLASS64
+        && buf[EI_DATA] == ELFDATA2LSB) {
+        Elf64_Ehdr eh; memcpy(&eh, buf, sizeof(eh));
+        if (eh.e_shoff != 0 && eh.e_shentsize >= sizeof(Elf64_Shdr) && eh.e_shnum != 0
+            && eh.e_shstrndx < eh.e_shnum
+            && eh.e_shoff + (uint64_t)eh.e_shnum * eh.e_shentsize <= usz) {
+            Elf64_Shdr shstr;
+            memcpy(&shstr, buf + eh.e_shoff + (uint64_t)eh.e_shstrndx * eh.e_shentsize, sizeof(shstr));
+            uint64_t strtab_off = shstr.sh_offset, strtab_size = shstr.sh_size;
+            if (strtab_off <= usz && strtab_off + strtab_size <= usz) {
+                const char *target = ".strada_meta";
+                size_t tlen = 12; /* strlen(".strada_meta") */
+                for (uint16_t i = 0; i < eh.e_shnum && result == NULL; i++) {
+                    Elf64_Shdr sh;
+                    memcpy(&sh, buf + eh.e_shoff + (uint64_t)i * eh.e_shentsize, sizeof(sh));
+                    /* bounded, exact name match (must be NUL-terminated within strtab) */
+                    if ((uint64_t)sh.sh_name + tlen + 1 > strtab_size) continue;
+                    const unsigned char *nm = buf + strtab_off + sh.sh_name;
+                    if (memcmp(nm, target, tlen) != 0 || nm[tlen] != 0) continue;
+                    uint64_t off = sh.sh_offset, len = sh.sh_size;
+                    if (off > usz || off + len > usz) break;
+                    while (len > 0 && buf[off + len - 1] == 0) len--;  /* strip trailing NUL(s) */
+                    result = strada_new_str_len((const char*)(buf + off), (size_t)len);
+                }
+            }
+        }
+    }
+    free(buf);
+    if (!result) result = strada_new_str("");
+    return result;
+#else
+    return strada_new_str("");
+#endif
+}
+
 /* 32-bit additive djb2 over an export-metadata string. Used by
  * import_lib's guarded devirtualization: the compiler hashes the
  * metadata it devirtualized against (export_meta_hash32 in

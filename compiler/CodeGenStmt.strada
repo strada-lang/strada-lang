@@ -4080,9 +4080,20 @@ func gen_export_info(scalar $cg, scalar $program, int $has_main) void {
         # behaviour (linker picks one) is fine.
         $static_prefix = "__attribute__((weak)) ";
     }
-    emit($cg, "\n/* Strada export metadata for import_lib */\n");
-    emit($cg, $static_prefix . "const char* __strada_export_info(void) {\n");
-    emit($cg, "    return \"");
+    # Emit the metadata into a dedicated .strada_meta section (as well as the
+    # __strada_export_info() function). A consumer can then read the interface
+    # straight out of the .o/.so with objcopy/readelf — no compile-and-run probe
+    # and no code execution — while __strada_export_info() still returns the same
+    # bytes for the runtime import_lib dlopen path. The array is always `static`
+    # (file-local, so several module-only .o's linking together don't collide);
+    # `used` keeps it through --gc-sections.
+    emit($cg, "\n/* Strada export metadata (also in the .strada_meta section) */\n");
+    emit($cg, "#if defined(__APPLE__)\n");
+    emit($cg, "__attribute__((used, section(\"__DATA,__strada_meta\")))\n");
+    emit($cg, "#else\n");
+    emit($cg, "__attribute__((used, section(\".strada_meta\")))\n");
+    emit($cg, "#endif\n");
+    emit($cg, "static const char __strada_meta[] = \"");
 
     my scalar $funcs = $program->{"functions"};
     my int $i = 0;
@@ -4218,7 +4229,7 @@ func gen_export_info(scalar $cg, scalar $program, int $has_main) void {
     }
 
     emit($cg, "\";\n");
-    emit($cg, "}\n");
+    emit($cg, $static_prefix . "const char* __strada_export_info(void) { return __strada_meta; }\n");
 
     # Also generate version info if specified
     gen_version_info($cg, $program, $has_main);

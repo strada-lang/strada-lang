@@ -4920,27 +4920,36 @@ func do_import_lib_at(scalar $parser, scalar $program, str $lib_name, str $so_pa
         $li = $li + 1;
     }
 
-    # Load the .so file and get metadata using runtime functions
-    my scalar $lib_handle = strada_dl_open_raw($so_path);
-    my int $lib_handle_int = $lib_handle;
-    if ($lib_handle_int == 0) {
-        parser_error($parser, "failed to load shared library: " . $so_path);
-    }
-
-    # Get the __strada_export_info function
-    my scalar $export_fn = strada_dl_sym_raw($lib_handle, "__strada_export_info");
-    my int $export_fn_int = $export_fn;
-    if ($export_fn_int == 0) {
-        strada_dl_close_raw($lib_handle);
-        parser_error($parser, "library missing __strada_export_info: " . $so_path . " (was it compiled with a recent strada compiler?)");
-    }
-
-    # Call __strada_export_info to get metadata string
-    my str $metadata = strada_dl_call_export_info($export_fn);
-    strada_dl_close_raw($lib_handle);
-
+    # Get the export metadata. Prefer reading the .strada_meta section straight
+    # from the .so (objcopy): this runs NONE of the library's code in the
+    # compiler — no dlopen, no constructors, no __strada_export_info() call —
+    # and is faster. Fall back to dlopen + __strada_export_info() for .so's that
+    # predate the section, or when objcopy is unavailable. (The runtime
+    # import_lib path still dlopens the .so at program run time — unchanged.)
+    my str $metadata = read_strada_meta_section($so_path);
     if (length($metadata) == 0) {
-        parser_error($parser, "empty metadata from library: " . $so_path);
+        # Load the .so file and get metadata using runtime functions
+        my scalar $lib_handle = strada_dl_open_raw($so_path);
+        my int $lib_handle_int = $lib_handle;
+        if ($lib_handle_int == 0) {
+            parser_error($parser, "failed to load shared library: " . $so_path);
+        }
+
+        # Get the __strada_export_info function
+        my scalar $export_fn = strada_dl_sym_raw($lib_handle, "__strada_export_info");
+        my int $export_fn_int = $export_fn;
+        if ($export_fn_int == 0) {
+            strada_dl_close_raw($lib_handle);
+            parser_error($parser, "library missing __strada_export_info: " . $so_path . " (was it compiled with a recent strada compiler?)");
+        }
+
+        # Call __strada_export_info to get metadata string
+        $metadata = strada_dl_call_export_info($export_fn);
+        strada_dl_close_raw($lib_handle);
+
+        if (length($metadata) == 0) {
+            parser_error($parser, "empty metadata from library: " . $so_path);
+        }
     }
 
     # Parse the metadata string to extract function signatures
@@ -5402,20 +5411,28 @@ func secure_create_temp(scalar $parser, str $path, str $what) void {
 
 # Extract export metadata from object file by compiling and running a temp program
 # This allows import_object to work like import_lib - metadata comes from the .o file
+# Read the .strada_meta section straight from an artifact — the same metadata
+# bytes __strada_export_info() would print, but with no compile-and-run probe,
+# no dlopen, and no code execution. Done IN-PROCESS by strada_read_meta_section
+# (parses the ELF section table directly — no subprocess/objcopy fork). Returns
+# "" if the section is absent (an artifact predating it), the file isn't a
+# 64-bit ELF (Mach-O, an .a archive, ELF32), etc. — every such case falls
+# through to the caller's probe/dlopen path, so this is purely an additive
+# fast path. (The trailing NUL terminator is already stripped by the reader.)
+func read_strada_meta_section(str $o_path) str {
+    return strada_read_meta_section($o_path);
+}
+
 func extract_object_export_info(scalar $parser, str $obj_name, str $o_path) str {
-    # Sidecar fast path: <o_path>.smeta holds the exact metadata text the
-    # probe would print (the strada wrapper's -M writes it right after
-    # building the .o). Reading it skips the compile-and-run probe
-    # (~150ms of cc per module, which made artifact-based `use` SLOWER
-    # than source inlining) and — unlike the probe — executes no artifact
-    # code at compile time. Must be at least as fresh as the .o itself;
-    # a stale or missing sidecar falls through to the probe.
-    my str $smeta_path = $o_path . ".smeta";
-    if (artifact_is_fresh($smeta_path, $o_path) == 1) {
-        my str $smeta_text = slurp($smeta_path);
-        if (length($smeta_text) > 0) {
-            return $smeta_text;
-        }
+    # Section fast path: read the .strada_meta section straight out of the .o
+    # (in-process ELF parse — no subprocess, no dlopen, no artifact code run,
+    # sub-ms so no caching needed). This is the primary path; the metadata is
+    # embedded in the artifact, so there is no separate sidecar to
+    # write/keep-fresh/install. Absent section (non-ELF / an old .o / an .a)
+    # falls through to the probe below.
+    my str $sec_first = read_strada_meta_section($o_path);
+    if (length($sec_first) > 0) {
+        return $sec_first;
     }
 
     # User-cache layer: a .o in a read-only tree (e.g. /usr/local) without

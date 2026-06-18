@@ -528,6 +528,7 @@ func get_builtins() scalar {
     $b{"strada_dl_sym_raw"} = 1;         # Internal: get symbol and return pointer directly
     $b{"strada_dl_close_raw"} = 1;       # Internal: close library
     $b{"strada_dl_call_export_info"} = 1; # Internal: call export info function
+    $b{"strada_read_meta_section"} = 1;  # Internal: read .strada_meta ELF section (no dlopen)
     $b{"sys::dl_sym"} = 1;
     $b{"sys::dl_close"} = 1;
     $b{"sys::dl_error"} = 1;

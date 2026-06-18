@@ -233,13 +233,16 @@ else
 fi
 cd "$WORK/proj"
 
-# --- Test 9: -M writes a metadata sidecar; probe is the fallback ---------
-rm -f Util.o Util.o.smeta Big.o Big.o.smeta app9
+# --- Test 9: -M embeds export metadata in the .strada_meta section -------
+# The .o is self-describing: its interface lives in a .strada_meta section
+# (read in-process by the consumer). No separate .smeta sidecar is written.
+rm -f Util.o Big.o app9
 "$STRADA" -M Util.strada >"$WORK/t9a.log" 2>&1
-if [ -s Util.o.smeta ] && grep -q '^func:Util_doubled:' Util.o.smeta; then
-    pass "-M writes metadata sidecar (.smeta)"
+if [ ! -f Util.o.smeta ] \
+   && objcopy -O binary --only-section=.strada_meta Util.o /dev/stdout 2>/dev/null | grep -q '^func:Util_doubled:'; then
+    pass "-M embeds export metadata in the .strada_meta section (no sidecar)"
 else
-    fail "-M writes metadata sidecar (.smeta)" "missing or wrong $PWD/Util.o.smeta"
+    fail "-M embeds export metadata in the .strada_meta section (no sidecar)" "no func:Util_doubled in Util.o .strada_meta (or a .smeta was written)"
 fi
 cat > app9.strada <<'EOF'
 use lib ".";
@@ -251,26 +254,20 @@ func main() int {
 }
 EOF
 if "$STRADA" -o app9 app9.strada >"$WORK/t9b.log" 2>&1 && [ "$(./app9)" = "OK" ]; then
-    pass "use with .smeta sidecar compiles and runs"
+    pass "use reads the interface from the .strada_meta section"
 else
-    fail "use with .smeta sidecar compiles and runs" "$(cat "$WORK/t9b.log")"
-fi
-rm -f Util.o.smeta app9
-if "$STRADA" -o app9 app9.strada >"$WORK/t9c.log" 2>&1 && [ "$(./app9)" = "OK" ]; then
-    pass "missing sidecar falls back to metadata probe"
-else
-    fail "missing sidecar falls back to metadata probe" "$(cat "$WORK/t9c.log")"
+    fail "use reads the interface from the .strada_meta section" "$(cat "$WORK/t9b.log")"
 fi
 
 # --- Test 10: transitive use: deps from artifact metadata ----------------
 # main uses ONLY Big; Big's artifact metadata records `use:Util`, so Util
 # must be resolved (and its artifact linked) without main ever naming it.
 # Before use:-metadata this failed at link with undefined Util_* symbols.
-rm -f Util.o Util.o.smeta Big.o Big.o.smeta app10
+rm -f Util.o Big.o app10
 "$STRADA" -M Util.strada >"$WORK/t10a.log" 2>&1
 "$STRADA" -M Big.strada  >"$WORK/t10b.log" 2>&1
-if ! grep -q '^use:Util$' Big.o.smeta 2>/dev/null; then
-    fail "artifact metadata records use: deps" "no use:Util line in Big.o.smeta"
+if ! objcopy -O binary --only-section=.strada_meta Big.o /dev/stdout 2>/dev/null | grep -q '^use:Util$'; then
+    fail "artifact metadata records use: deps" "no use:Util line in Big.o .strada_meta"
 else
     pass "artifact metadata records use: deps"
 fi
@@ -373,11 +370,12 @@ else
 fi
 cd "$WORK/proj"
 
-# --- 17. probe-result cache: sidecar-less .o probes once, then caches -----
-# A .o in a (simulated) read-only tree without a .smeta sidecar pays a
-# compile-and-run metadata probe. With STRADA_MODULE_CACHE_DIR set, the
-# probe's output is cached under probe-meta/ keyed by realpath+mtime, so
-# later builds skip the probe entirely.
+# --- 17. import_object .o consumed via its .strada_meta section ----------
+# A .o referenced by import_object (in a simulated read-only lib tree) is
+# self-describing: the compiler reads its .strada_meta section in-process,
+# with no .smeta sidecar and no compile-and-run probe. (The probe + its
+# result-cache remain only as a fallback for non-ELF artifacts, which can't
+# easily be produced on Linux to exercise here.)
 mkdir -p "$WORK/probeproj/lib"
 cd "$WORK/probeproj"
 cat > lib/PCMod.strada <<'EOF'
@@ -390,18 +388,14 @@ import_object "PCMod.o";
 func main() int { say("q=" . PCMod::quad(5)); return 0; }
 EOF
 "$STRADA" -M --object -o lib/PCMod.o lib/PCMod.strada >"$WORK/t17a.log" 2>&1
-rm -f lib/PCMod.o.smeta
-PC_DIR="$WORK/probecache"
-rm -rf "$PC_DIR"
-STRADA_MODULE_CACHE_DIR="$PC_DIR" "$STRADA" pchost.strada -o pchost lib/PCMod.o >"$WORK/t17b.log" 2>&1
+"$STRADA" pchost.strada -o pchost lib/PCMod.o >"$WORK/t17b.log" 2>&1
 out17="$(./pchost)"
-pc_entries="$(ls "$PC_DIR/probe-meta/" 2>/dev/null | wc -l)"
-STRADA_MODULE_CACHE_DIR="$PC_DIR" "$STRADA" pchost.strada -o pchost2 lib/PCMod.o >"$WORK/t17c.log" 2>&1
+"$STRADA" pchost.strada -o pchost2 lib/PCMod.o >"$WORK/t17c.log" 2>&1
 out17b="$(./pchost2)"
-if [ "$out17" = "q=20" ] && [ "$out17b" = "q=20" ] && [ "$pc_entries" -ge 1 ]; then
-    pass "probe-result cache for sidecar-less .o"
+if [ "$out17" = "q=20" ] && [ "$out17b" = "q=20" ] && [ ! -f lib/PCMod.o.smeta ]; then
+    pass "import_object .o consumed via .strada_meta section (no sidecar/probe)"
 else
-    fail "probe-result cache for sidecar-less .o" "out1=$out17 out2=$out17b entries=$pc_entries"
+    fail "import_object .o consumed via .strada_meta section (no sidecar/probe)" "out1=$out17 out2=$out17b"
 fi
 
 # --- 18. shebanged module survives -D (stradapp passthrough) + warming ----
@@ -519,6 +513,40 @@ if [ "$so_ok" -eq 1 ]; then
 else
     fail "CLI .so (positional + --import-lib) imported as runtime import_lib" \
          "positional='${out20a}' --import-lib='${out20b}' (want 'Hello, world!' / 'add=42')"
+fi
+cd "$WORK/proj"
+
+# --- Test 21: in-process .strada_meta read across a heap-returning call ---
+# End-to-end exercise of the in-process section reader: a consumer resolves
+# a .o's interface purely from its .strada_meta section (no sidecar, no
+# probe) and correctly calls a function returning a heap string (a pointer
+# the metadata path must convey accurately). Util::banner has no declared
+# return type, so it returns a heap string across the artifact boundary.
+mkdir -p "$WORK/sec"
+cat > "$WORK/sec/Util.strada" <<'EOF'
+package Util;
+func banner(int $n) { my str $s = "["; my int $i = 0; while ($i < $n) { $s = $s . "="; $i = $i + 1; } return $s . "]"; }
+EOF
+cat > "$WORK/sec/app.strada" <<'EOF'
+use lib ".";
+use Util;
+func main() int {
+    my str $b = Util::banner(20);
+    if (length($b) == 22) { say("OK"); return 0; }
+    say("BAD len=" . length($b)); return 1;
+}
+EOF
+cd "$WORK/sec"
+sec_ok=0; sec_out=""
+if "$STRADA" -M Util.strada >"$WORK/t21a.log" 2>&1 && [ ! -f Util.o.smeta ] \
+   && "$STRADA" -o app app.strada >"$WORK/t21b.log" 2>&1 && [ -x app ]; then
+    sec_out="$(./app 2>/dev/null)"
+    [ "$sec_out" = "OK" ] && sec_ok=1
+fi
+if [ "$sec_ok" -eq 1 ]; then
+    pass "in-process .strada_meta read resolves a heap-returning cross-artifact call"
+else
+    fail "in-process .strada_meta read resolves a heap-returning cross-artifact call" "out='${sec_out}'"
 fi
 cd "$WORK/proj"
 

@@ -1319,6 +1319,7 @@ StradaValue* strada_dl_open_raw(StradaValue *path);
 StradaValue* strada_dl_sym_raw(StradaValue *handle_sv, StradaValue *symbol);
 StradaValue* strada_dl_close_raw(StradaValue *handle_sv);
 StradaValue* strada_dl_call_export_info(StradaValue *fn_ptr_sv);
+StradaValue* strada_read_meta_section(StradaValue *path_sv);  /* read .strada_meta from an ELF .o/.so, no dlopen */
 StradaValue* strada_dl_call_version(StradaValue *fn_ptr_sv);
 
 /* import_lib guarded devirtualization (metadata fingerprint + fallback) */

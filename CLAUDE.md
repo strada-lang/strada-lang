@@ -773,44 +773,48 @@ Go-package-archive-style separate compilation, fully automatic:
   change pays a one-time warm-up and later builds skip unchanged modules.
   Measured on sysync-web (13k lines, 12 modules): warm full build 0.47s vs
   1.7s uncached (stradac phase 0.36s vs 1.95s).
-- **`.smeta` sidecars**: every `-M` build **automatically** writes
-  `Foo.o.smeta` (the text `__strada_export_info()` returns) right after the
-  `.o` compile succeeds (`write_smeta_sidecar`, called at
-  `tools/strada-driver.strada:928`) — this is unconditional, not gated on
-  `--module-cache`. When a consumer resolves `use Foo;` against an artifact
-  (i.e. on the artifact path: `--use-artifacts`, `--module-cache`, or a
-  fresh sibling `Foo.o`), it reads the module's export interface (functions,
-  signatures, transitive `use:` deps) from the sidecar **instead of**
-  compiling-and-running a metadata probe binary per module per build (~150ms
-  of `cc` each — the probe made artifacts SLOWER than source). The sidecar
-  path executes **no** artifact code at compile time; note the `.o` is still
-  *linked* into the final binary either way — the sidecar only removes the
-  compile-time probe/source-parse of the module's interface, not the object.
-  Compile-time interface resolution order in `extract_object_export_info`
-  (Parser.strada): (1) fresh `Foo.o.smeta` → read directly; (2) else the
-  probe-result cache (below); (3) else the **live probe** — the original
-  pre-sidecar path that builds a tiny binary, links the `.o`, runs it to
-  print `__strada_export_info()`, and parses that. So a **missing, stale, or
-  failed-to-write sidecar never breaks a build** — it just degrades to the
-  old probe path (correct, slower). Freshness gate: the sidecar must be at
-  least as new as its `.o` or it's ignored.
-- **Generation vs. install**: `make libs` is what *generates* the lib
-  sidecars — it builds each library with `./strada -M …`
-  (`Makefile:519,536,547,554,561`), so `lib/Foo.o` + `lib/Foo.o.smeta`
-  appear together. `make install` does **not** generate sidecars; it only
-  *copies* existing ones — its ext loop (`Makefile:616`) globs
-  `lib/**/*.smeta` and installs each alongside its `.o`, ordered LAST so the
-  sidecar's mtime ends up newer than the `.o` (keeps the freshness gate
-  happy). `install:` depends on `libs`, so they exist by install time. An
-  installed `.o` lacks a sidecar only if its `-M` build couldn't write one
-  (probe link failed → it warns "could not write metadata sidecar…"); such a
-  lib still works via the probe path on the consumer side.
-- **Probe-result cache** (2026-06): when the sidecar is missing (e.g. a
-  `.o` in a read-only tree installed before sidecars existed), the probe's
-  output is cached under `$STRADA_MODULE_CACHE_DIR/probe-meta/` keyed by
-  the `.o`'s realpath+mtime (`extract_object_export_info` in
-  Parser.strada) — a replaced `.o` gets a new key, so entries can't go
-  stale. The probe then runs once per `.o` version instead of every build.
+- **`.strada_meta` section — self-describing artifacts (2026-06, replaced
+  `.smeta` sidecars)**: every compiled `.o`/`.so` embeds its export metadata
+  (the text `__strada_export_info()` returns — functions, signatures,
+  transitive `use:` deps, modifier info) in a dedicated `.strada_meta` ELF
+  section, emitted by `gen_export_info` (CodeGenStmt.strada) as a `static
+  const char __strada_meta[]` that the function also returns. A consumer
+  resolving `use Foo;` / `import_object` / `import_lib` against an artifact
+  reads that section **in-process** via `strada_read_meta_section` (runtime
+  C): it parses the ELF section table directly — **no subprocess, no
+  `objcopy`, no dlopen, no artifact code executed** at compile time, sub-ms.
+  This single self-describing mechanism replaced BOTH the old `.smeta`
+  sidecar files (a separate, losable/stale file that had to be
+  written/installed/kept-fresh) and, on the hot path, the old
+  compile-and-run probe (~150ms of `cc` per module). The metadata lives *in*
+  the artifact, so there is nothing extra to write or install (the `.o` is
+  still linked into the final binary either way — the section only removes
+  the compile-time interface read, not the object). Resolution order in
+  `extract_object_export_info` (Parser.strada): (1) `.strada_meta` section →
+  read in-process; (2) else the probe-result cache (below); (3) else the
+  **live probe** (build a tiny binary, link the `.o`, run it to print
+  `__strada_export_info()`). The probe now fires only for **non-ELF / ELF32 /
+  `.a`-archive** artifacts the reader can't parse (a Mach-O in-process reader
+  is a follow-up) — on Linux ELF the section is always the path. `.so`
+  consumption (`do_import_lib_at`) reads the section too, falling back to
+  dlopen + `__strada_export_info` only for section-less `.so`s, so consuming
+  a `.so` no longer runs its constructors/code in the compiler.
+- **`strada_read_meta_section` is a runtime builtin** (`StradaValue*` in/out,
+  wired like `strada_dl_open_raw`: Semantic + CodeGenBuiltins + `owned_set`).
+  Adding it required a full `make`, NOT `make quick`: the existing `stradac`
+  rejects a call to a builtin it doesn't yet know ("undefined function"),
+  while the permissive frozen bootstrap emits the unknown call as a direct C
+  call, and stage-1 onward (compiled from the registering source) then knows
+  it. New compiler-callable runtime functions must follow this — `make quick`
+  cannot introduce them.
+- **Probe-result cache** (2026-06): for the rare artifacts that fall to the
+  live probe (non-ELF / ELF32 / `.a`, where the `.strada_meta` section can't
+  be read in-process), the probe's output is cached under
+  `$STRADA_MODULE_CACHE_DIR/probe-meta/` keyed by the `.o`'s realpath+mtime
+  (`extract_object_export_info` in Parser.strada) — a replaced `.o` gets a
+  new key, so entries can't go stale. The probe then runs once per `.o`
+  version instead of every build. (On Linux ELF the section path wins and
+  this is never hit.)
 - **Transitive deps**: export metadata now records `use:Module` lines;
   importing an artifact resolves its deps automatically (artifact
   preferred, source fallback) — main no longer needs to `use` everything

@@ -2190,6 +2190,11 @@ func gen_builtin_g3(scalar $cg, scalar $expr, str $name) int {
             return 1;
         }
 
+        if ($name eq "strada_read_meta_section") {
+            gen_call_with_arg_cleanup($cg, "strada_read_meta_section", $expr->{"args"}, 1);
+            return 1;
+        }
+
         if ($name eq "sys::dl_sym") {
             gen_call_with_arg_cleanup($cg, "strada_dl_sym", $expr->{"args"}, 2);
             return 1;
@@ -4553,6 +4558,15 @@ func gen_builtin_g5(scalar $cg, scalar $expr, str $name) int {
             emit($cg, "strada_dl_open(");
             my scalar $args = $expr->{"args"};
             gen_expression($cg, $args->[0]);
+            emit($cg, ")");
+            return 1;
+        }
+
+        # strada_read_meta_section - read .strada_meta ELF section (no dlopen)
+        if ($name eq "strada_read_meta_section") {
+            emit($cg, "strada_read_meta_section(");
+            my scalar $rms_args = $expr->{"args"};
+            gen_expression($cg, $rms_args->[0]);
             emit($cg, ")");
             return 1;
         }
