@@ -25706,17 +25706,138 @@ StradaValue* strada_dl_call_export_info(StradaValue *fn_ptr_sv) {
 
 #if defined(__linux__)
 #include <elf.h>
+#elif defined(__APPLE__)
+#include <mach-o/loader.h>
 #endif
+
+#if defined(__linux__)
+/* Find __strada_meta in a little-endian ELF image (ELF64 or ELF32) at
+ * p[0..avail). The two classes share identical logic over different struct
+ * widths, so the loop is a macro parameterized by the Ehdr/Shdr types. Fully
+ * bounds-checked; `return`s the section bytes (trailing NULs stripped) on a
+ * hit. (Big-endian ELF is not handled — x86/ARM are little-endian.) */
+#define STRADA_ELF_FIND_META(Ehdr, Shdr) do { \
+    if (avail >= sizeof(Ehdr)) { \
+        Ehdr eh; memcpy(&eh, p, sizeof(eh)); \
+        if (eh.e_shoff != 0 && eh.e_shentsize >= sizeof(Shdr) && eh.e_shnum != 0 \
+            && eh.e_shstrndx < eh.e_shnum \
+            && (uint64_t)eh.e_shoff + (uint64_t)eh.e_shnum * eh.e_shentsize <= avail) { \
+            Shdr shstr; \
+            memcpy(&shstr, p + eh.e_shoff + (uint64_t)eh.e_shstrndx * eh.e_shentsize, sizeof(shstr)); \
+            uint64_t strtab_off = shstr.sh_offset, strtab_size = shstr.sh_size; \
+            if (strtab_off <= avail && strtab_off + strtab_size <= avail) { \
+                for (uint32_t i = 0; i < eh.e_shnum; i++) { \
+                    Shdr sh; \
+                    memcpy(&sh, p + eh.e_shoff + (uint64_t)i * eh.e_shentsize, sizeof(sh)); \
+                    if ((uint64_t)sh.sh_name + 13 > strtab_size) continue; \
+                    const unsigned char *nm = p + strtab_off + sh.sh_name; \
+                    if (memcmp(nm, ".strada_meta", 12) != 0 || nm[12] != 0) continue; \
+                    uint64_t off = sh.sh_offset, len = sh.sh_size; \
+                    if (off > avail || off + len > avail) break; \
+                    while (len > 0 && p[off + len - 1] == 0) len--; \
+                    return strada_new_str_len((const char*)(p + off), (size_t)len); \
+                } \
+            } \
+        } \
+    } \
+} while (0)
+
+static StradaValue* strada_elf_find_meta(const unsigned char *p, uint64_t avail) {
+    if (avail < EI_NIDENT || memcmp(p, ELFMAG, SELFMAG) != 0 || p[EI_DATA] != ELFDATA2LSB) return NULL;
+    if (p[EI_CLASS] == ELFCLASS64) { STRADA_ELF_FIND_META(Elf64_Ehdr, Elf64_Shdr); }
+    else if (p[EI_CLASS] == ELFCLASS32) { STRADA_ELF_FIND_META(Elf32_Ehdr, Elf32_Shdr); }
+    return NULL;
+}
+#undef STRADA_ELF_FIND_META
+#endif
+
+#if defined(__APPLE__)
+/* Find the __strada_meta section in a native little-endian 64-bit Mach-O image
+ * (MH_MAGIC_64) at p[0..avail). Returns the section bytes (trailing NULs
+ * stripped) or NULL, fully bounds-checked. Thin images only — a fat/universal
+ * binary or a 32-bit/byte-swapped image returns NULL and falls back to the
+ * dlopen/probe path. (Strada's own --shared/-M artifacts are thin native.) */
+static StradaValue* strada_macho_find_meta(const unsigned char *p, uint64_t avail) {
+    if (avail < sizeof(struct mach_header_64)) return NULL;
+    struct mach_header_64 mh; memcpy(&mh, p, sizeof(mh));
+    if (mh.magic != MH_MAGIC_64) return NULL;
+    uint64_t lc_off = sizeof(struct mach_header_64);
+    for (uint32_t i = 0; i < mh.ncmds; i++) {
+        if (lc_off + sizeof(struct load_command) > avail) break;
+        struct load_command lc; memcpy(&lc, p + lc_off, sizeof(lc));
+        if (lc.cmdsize < sizeof(struct load_command) || lc_off + lc.cmdsize > avail) break;
+        if (lc.cmd == LC_SEGMENT_64 && lc.cmdsize >= sizeof(struct segment_command_64)) {
+            struct segment_command_64 seg; memcpy(&seg, p + lc_off, sizeof(seg));
+            uint64_t sec_off = lc_off + sizeof(struct segment_command_64);
+            for (uint32_t s = 0; s < seg.nsects; s++) {
+                if (sec_off + sizeof(struct section_64) > lc_off + lc.cmdsize) break;
+                struct section_64 sec; memcpy(&sec, p + sec_off, sizeof(sec));
+                /* sectname is char[16], NUL-padded; "__strada_meta\0" is 14 bytes */
+                if (memcmp(sec.sectname, "__strada_meta", 14) == 0) {
+                    uint64_t off = sec.offset, len = sec.size;
+                    if (off <= avail && off + len <= avail) {
+                        while (len > 0 && p[off + len - 1] == 0) len--;
+                        return strada_new_str_len((const char*)(p + off), (size_t)len);
+                    }
+                    return NULL;
+                }
+                sec_off += sizeof(struct section_64);
+            }
+        }
+        lc_off += lc.cmdsize;
+    }
+    return NULL;
+}
+#endif
+
+#if defined(__linux__) || defined(__APPLE__)
+/* Find __strada_meta in an `ar` archive (.a) by iterating its members and
+ * running the per-image finder on each, returning the first member that has
+ * the section. The archive's symbol/string-table members aren't objects, so
+ * the finder just returns NULL on them. Handles BSD-style extended names
+ * (`#1/N` -> N name bytes precede the object). GNU long names (`/N`) keep the
+ * object at the data start, so no special handling is needed there. */
+static StradaValue* strada_ar_find_meta(const unsigned char *buf, uint64_t sz) {
+    if (sz < 8 || memcmp(buf, "!<arch>\n", 8) != 0) return NULL;
+    uint64_t pos = 8;
+    while (pos + 60 <= sz) {
+        const unsigned char *hdr = buf + pos;
+        if (hdr[58] != 0x60 || hdr[59] != 0x0a) break;  /* member header magic "`\n" */
+        char szbuf[11]; memcpy(szbuf, hdr + 48, 10); szbuf[10] = 0;
+        uint64_t msize = strtoull(szbuf, NULL, 10);
+        uint64_t data_off = pos + 60;
+        if (data_off + msize > sz) break;
+        uint64_t obj_off = data_off, obj_len = msize;
+        if (hdr[0] == '#' && hdr[1] == '1' && hdr[2] == '/') {  /* BSD extended name */
+            char nb[14]; memcpy(nb, hdr + 3, 13); nb[13] = 0;
+            uint64_t nlen = strtoull(nb, NULL, 10);
+            if (nlen <= obj_len) { obj_off += nlen; obj_len -= nlen; }
+        }
+#if defined(__linux__)
+        StradaValue *r = strada_elf_find_meta(buf + obj_off, obj_len);
+#else
+        StradaValue *r = strada_macho_find_meta(buf + obj_off, obj_len);
+#endif
+        if (r) return r;
+        pos = data_off + msize;
+        if (pos & 1) pos++;  /* members are 2-byte aligned */
+    }
+    return NULL;
+}
+#endif
+
 /* strada_read_meta_section - read the .strada_meta section straight out of an
- * ELF object/.so file: no subprocess, no dlopen, no code execution. Returns
- * the section bytes (trailing NUL terminator/padding stripped) as a string,
- * or "" if the file isn't a readable little-endian 64-bit ELF, has no such
- * section, or anything is out of bounds. Lets the compiler read a module's
- * export metadata without building+running a probe or dlopen'ing it.
- * (Mach-O / ELF32 fall through to "" -> the caller's probe/dlopen path.) */
+ * object/.so/.a file: no subprocess, no dlopen, no code execution. Parses the
+ * native format in-process (ELF64/ELF32 on Linux, thin 64-bit Mach-O on macOS,
+ * and `ar` archives on either) and returns the section bytes (trailing NUL
+ * terminator/padding stripped), or "" if the file isn't a parseable object,
+ * has no such section, or anything is out of bounds. Lets the compiler read a
+ * module's export metadata without building+running a probe or dlopen'ing it.
+ * (fat/32-bit Mach-O / big-endian / other formats -> "" -> the caller's
+ * probe/dlopen path.) */
 StradaValue* strada_read_meta_section(StradaValue *path_sv) {
     if (!path_sv || STRADA_IS_TAGGED_INT(path_sv)) return strada_new_str("");
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
     char *path = strada_to_str(path_sv);
     if (!path) return strada_new_str("");
     FILE *f = fopen(path, "rb");
@@ -25724,7 +25845,7 @@ StradaValue* strada_read_meta_section(StradaValue *path_sv) {
     if (!f) return strada_new_str("");
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return strada_new_str(""); }
     long sz = ftell(f);
-    if (sz < (long)sizeof(Elf64_Ehdr) || fseek(f, 0, SEEK_SET) != 0) { fclose(f); return strada_new_str(""); }
+    if (sz < 4 || fseek(f, 0, SEEK_SET) != 0) { fclose(f); return strada_new_str(""); }
     unsigned char *buf = (unsigned char*)malloc((size_t)sz);
     if (!buf) { fclose(f); return strada_new_str(""); }
     size_t got = fread(buf, 1, (size_t)sz, f);
@@ -25733,34 +25854,14 @@ StradaValue* strada_read_meta_section(StradaValue *path_sv) {
 
     StradaValue *result = NULL;
     uint64_t usz = (uint64_t)sz;
-    /* ELF identity: magic + 64-bit + little-endian */
-    if (memcmp(buf, ELFMAG, SELFMAG) == 0
-        && buf[EI_CLASS] == ELFCLASS64
-        && buf[EI_DATA] == ELFDATA2LSB) {
-        Elf64_Ehdr eh; memcpy(&eh, buf, sizeof(eh));
-        if (eh.e_shoff != 0 && eh.e_shentsize >= sizeof(Elf64_Shdr) && eh.e_shnum != 0
-            && eh.e_shstrndx < eh.e_shnum
-            && eh.e_shoff + (uint64_t)eh.e_shnum * eh.e_shentsize <= usz) {
-            Elf64_Shdr shstr;
-            memcpy(&shstr, buf + eh.e_shoff + (uint64_t)eh.e_shstrndx * eh.e_shentsize, sizeof(shstr));
-            uint64_t strtab_off = shstr.sh_offset, strtab_size = shstr.sh_size;
-            if (strtab_off <= usz && strtab_off + strtab_size <= usz) {
-                const char *target = ".strada_meta";
-                size_t tlen = 12; /* strlen(".strada_meta") */
-                for (uint16_t i = 0; i < eh.e_shnum && result == NULL; i++) {
-                    Elf64_Shdr sh;
-                    memcpy(&sh, buf + eh.e_shoff + (uint64_t)i * eh.e_shentsize, sizeof(sh));
-                    /* bounded, exact name match (must be NUL-terminated within strtab) */
-                    if ((uint64_t)sh.sh_name + tlen + 1 > strtab_size) continue;
-                    const unsigned char *nm = buf + strtab_off + sh.sh_name;
-                    if (memcmp(nm, target, tlen) != 0 || nm[tlen] != 0) continue;
-                    uint64_t off = sh.sh_offset, len = sh.sh_size;
-                    if (off > usz || off + len > usz) break;
-                    while (len > 0 && buf[off + len - 1] == 0) len--;  /* strip trailing NUL(s) */
-                    result = strada_new_str_len((const char*)(buf + off), (size_t)len);
-                }
-            }
-        }
+    if (usz >= 8 && memcmp(buf, "!<arch>\n", 8) == 0) {
+        result = strada_ar_find_meta(buf, usz);
+    } else {
+#if defined(__linux__)
+        result = strada_elf_find_meta(buf, usz);
+#elif defined(__APPLE__)
+        result = strada_macho_find_meta(buf, usz);
+#endif
     }
     free(buf);
     if (!result) result = strada_new_str("");

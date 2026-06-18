@@ -5414,11 +5414,12 @@ func secure_create_temp(scalar $parser, str $path, str $what) void {
 # Read the .strada_meta section straight from an artifact — the same metadata
 # bytes __strada_export_info() would print, but with no compile-and-run probe,
 # no dlopen, and no code execution. Done IN-PROCESS by strada_read_meta_section
-# (parses the ELF section table directly — no subprocess/objcopy fork). Returns
-# "" if the section is absent (an artifact predating it), the file isn't a
-# 64-bit ELF (Mach-O, an .a archive, ELF32), etc. — every such case falls
-# through to the caller's probe/dlopen path, so this is purely an additive
-# fast path. (The trailing NUL terminator is already stripped by the reader.)
+# (parses the native object format directly — ELF64 on Linux, thin 64-bit
+# Mach-O on macOS — no subprocess/objcopy fork). Returns "" if the section is
+# absent (an artifact predating it) or the format is unparsed (ELF32 / fat or
+# 32-bit Mach-O / an .a archive), in which case the caller falls through to its
+# probe/dlopen path — so this is purely an additive fast path. (The trailing
+# NUL terminator is already stripped by the reader.)
 func read_strada_meta_section(str $o_path) str {
     return strada_read_meta_section($o_path);
 }
@@ -5834,6 +5835,15 @@ func find_a_file(scalar $program, str $arch_file) str {
 
 # Extract export metadata from archive file by compiling and running a temp program
 func extract_archive_export_info(scalar $parser, str $arch_name, str $a_path) str {
+    # Section fast path: read .strada_meta from a member of the archive
+    # in-process (strada_read_meta_section parses the `ar` format and the
+    # member objects) — no probe binary, no artifact code run. Absent (an old
+    # .a, or one whose members predate the section) falls through to the probe.
+    my str $arch_sec = read_strada_meta_section($a_path);
+    if (length($arch_sec) > 0) {
+        return $arch_sec;
+    }
+
     # Temp file names from the sanitized import name + pid (see
     # extract_object_export_info); the command below shell-quotes every path.
     my str $temp_base = "/tmp/strada_import_archive_" . sanitize_name($arch_name) . "_" . core::getpid();

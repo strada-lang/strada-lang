@@ -793,12 +793,21 @@ Go-package-archive-style separate compilation, fully automatic:
   `extract_object_export_info` (Parser.strada): (1) `.strada_meta` section →
   read in-process; (2) else the probe-result cache (below); (3) else the
   **live probe** (build a tiny binary, link the `.o`, run it to print
-  `__strada_export_info()`). The probe now fires only for **non-ELF / ELF32 /
-  `.a`-archive** artifacts the reader can't parse (a Mach-O in-process reader
-  is a follow-up) — on Linux ELF the section is always the path. `.so`
-  consumption (`do_import_lib_at`) reads the section too, falling back to
-  dlopen + `__strada_export_info` only for section-less `.so`s, so consuming
-  a `.so` no longer runs its constructors/code in the compiler.
+  `__strada_export_info()`). The reader (`strada_read_meta_section`, runtime
+  C) handles, in-process: **ELF64 + ELF32** (Linux), **thin 64-bit Mach-O**
+  (macOS), and **`ar` archives** (`.a` — it scans members and reads the
+  section from the member object). It is **format-based, not arch-based**, so
+  every mainstream architecture works for free — an `aarch64`/`arm64` ELF
+  section table is identical to x86-64's, and Apple-Silicon macOS produces the
+  same `MH_MAGIC_64` thin Mach-O as Intel. The probe fires only for what the
+  reader can't parse: **fat or 32-bit Mach-O, big-endian, or LTO objects**
+  (a `-flto` `.o` keeps its `__strada_meta` array in LTO bitcode, not a real
+  ELF section — so it has no readable section; `-M`/`-fno-lto` artifacts have a
+  real one, which is why `-M` deliberately disables LTO. `--static-lib` `.a`s
+  are LTO and thus fall back to the probe). `.so` consumption
+  (`do_import_lib_at`) reads the section too, falling back to dlopen +
+  `__strada_export_info` only for section-less `.so`s, so consuming a `.so` no
+  longer runs its constructors/code in the compiler.
 - **`strada_read_meta_section` is a runtime builtin** (`StradaValue*` in/out,
   wired like `strada_dl_open_raw`: Semantic + CodeGenBuiltins + `owned_set`).
   Adding it required a full `make`, NOT `make quick`: the existing `stradac`
