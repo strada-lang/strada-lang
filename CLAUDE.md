@@ -800,11 +800,13 @@ Go-package-archive-style separate compilation, fully automatic:
   every mainstream architecture works for free — an `aarch64`/`arm64` ELF
   section table is identical to x86-64's, and Apple-Silicon macOS produces the
   same `MH_MAGIC_64` thin Mach-O as Intel. The probe fires only for what the
-  reader can't parse: **fat or 32-bit Mach-O, big-endian, or LTO objects**
-  (a `-flto` `.o` keeps its `__strada_meta` array in LTO bitcode, not a real
-  ELF section — so it has no readable section; `-M`/`-fno-lto` artifacts have a
-  real one, which is why `-M` deliberately disables LTO. `--static-lib` `.a`s
-  are LTO and thus fall back to the probe). `.so` consumption
+  reader can't parse: **fat or 32-bit Mach-O, big-endian, or thin-LTO objects**
+  (a plain `-flto` `.o` keeps its `__strada_meta` array in LTO bitcode, with no
+  real section). To get a readable section, an artifact must materialize one:
+  `-M` builds `-fno-lto`; `--object` and `--static-lib` build
+  `-ffat-lto-objects` (real section **and** LTO bitcode — so consumers read the
+  section in-process yet can still cross-inline across the library at link).
+  `.so` consumption
   (`do_import_lib_at`) reads the section too, falling back to dlopen +
   `__strada_export_info` only for section-less `.so`s, so consuming a `.so` no
   longer runs its constructors/code in the compiler.

@@ -550,12 +550,11 @@ else
 fi
 cd "$WORK/proj"
 
-# --- Test 22: .a archive interface read from a member's .strada_meta ------
-# The in-process reader parses `ar` archives too: it scans members and reads
-# the .strada_meta section from the member object. -M objects are -fno-lto so
-# the section is a real ELF section (an LTO archive's section lives in bitcode
-# and falls back to the probe — correct, just slower). A non-`use`d qualified
-# call resolves purely from the archive member's metadata.
+# --- Test 22: --static-lib .a is fat-LTO with a readable .strada_meta ------
+# --static-lib members are built -ffat-lto-objects: they keep LTO bitcode (so
+# a consumer can still cross-inline across the library) AND carry a real
+# .strada_meta section, so the interface is read in-process (no probe). A
+# non-`use`d qualified call resolves purely from the archive member metadata.
 mkdir -p "$WORK/arc"
 cat > "$WORK/arc/A.strada" <<'EOF'
 package A;
@@ -565,20 +564,23 @@ cat > "$WORK/arc/app.strada" <<'EOF'
 func main() int { say(A::tag("hi")); return 0; }   # no import_archive; .a on CLI
 EOF
 cd "$WORK/arc"
-arc_ok=0; arc_out=""
-# Bundle the runtime into the .a (a real --static-lib does this; the driver
-# relies on a Strada .a to be self-contained). A.o stays -fno-lto (-M) so its
-# .strada_meta is a real section the reader uses.
-if "$STRADA" -M A.strada >"$WORK/t22a.log" 2>&1 \
-   && ar rcs libA.a A.o "$REPO_DIR/runtime/strada_runtime.o" 2>/dev/null \
-   && "$STRADA" -o app app.strada "$WORK/arc/libA.a" >"$WORK/t22b.log" 2>&1 && [ -x app ]; then
-    arc_out="$(./app 2>/dev/null)"
-    [ "$arc_out" = "<hi>" ] && arc_ok=1
+arc_ok=0; arc_out=""; arc_sec=0
+if "$STRADA" --static-lib A.strada -o libA.a >"$WORK/t22a.log" 2>&1; then
+    # some member carries a REAL .strada_meta section (fat-LTO, not just bitcode)
+    rm -rf members; mkdir members; ( cd members && ar x ../libA.a 2>/dev/null )
+    for o in members/*.o; do
+        readelf -S "$o" 2>/dev/null | grep -q '\.strada_meta' && arc_sec=1
+    done
+    if [ "$arc_sec" -eq 1 ] \
+       && "$STRADA" -o app app.strada "$WORK/arc/libA.a" >"$WORK/t22b.log" 2>&1 && [ -x app ]; then
+        arc_out="$(./app 2>/dev/null)"
+        [ "$arc_out" = "<hi>" ] && arc_ok=1
+    fi
 fi
 if [ "$arc_ok" -eq 1 ]; then
-    pass ".a archive interface read from a member's .strada_meta section"
+    pass "--static-lib .a is fat-LTO with a readable .strada_meta section"
 else
-    fail ".a archive interface read from a member's .strada_meta section" "out='${arc_out}'"
+    fail "--static-lib .a is fat-LTO with a readable .strada_meta section" "sec=$arc_sec out='${arc_out}'"
 fi
 cd "$WORK/proj"
 
