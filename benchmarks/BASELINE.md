@@ -517,3 +517,22 @@ dispatch-bound workload; (2) the `.so` boundary costs Strada ~1.1–1.4× over i
 own same-binary dispatch (constructors are nearly free across the boundary;
 call/mixed pay the wrapper hop + no cross-`.so` inlining). The runner builds
 `bench_oop_so_lib.so` automatically; opt Perl in with `--langs strada,perl`.
+
+### Five-language sweep refresh (2026-06-19)
+
+Full five-benchmark × six-language sweep, best of 3. Raw numbers and per-language
+speedups saved in `benchmarks/RESULTS_2026-06-19.md` (the website's tables/bars
+are generated from these). Toolchains: Perl 5.38.2 / Python 3.12.3 / Ruby 3.2.3 /
+Node 24.15.0 / PHP 8.3.6.
+
+| benchmark   | Strada | vs Perl | vs Python | vs Ruby | vs Node | vs PHP |
+| ----------- | ------ | ------- | --------- | ------- | ------- | ------ |
+| compute     | 0.912s | 101×    | 30×       | 22×     | 2.8×    | 13×    |
+| functions   | 0.014s | 79×     | 63×       | 28×     | 2.9×    | 12×    |
+| oop         | 0.023s | 56×     | 25×       | 22×     | 1.9×    | 5.9×   |
+| strings     | 0.055s | 2.6×    | 2524×*    | 1102×*  | 2.4×    | 1.4×   |
+| array_hash  | 0.101s | 6.7×    | 5.2×      | 7.0×    | 5.4×    | 1.3×   |
+
+\* Python/Ruby `strings` is an O(n²) `+=`-on-immutable-strings pathology, not a
+general result — the fair string margin is ~1.3–2.6× (Perl/Node/PHP). OOP roughly
+doubled since the last record (Strada 0.051s → 0.023s; vs Perl 30× → 56×).
