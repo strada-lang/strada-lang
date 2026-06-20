@@ -947,8 +947,29 @@ Thread pool backend (default 4 workers). Functions: `async::all()`, `async::race
 func sum(int ...@nums) int { ... }
 sum(1, 2, 3);
 my array @vals = (10, 20);
-sum(1, ...@vals, 99);  # Spread operator
+sum(1, ...@vals, 99);        # explicit spread
+sum(@vals);                  # bare @array also flattens into a variadic call
+sum(get_array());            # so does any array-VALUED argument (call/map/grep/sort/list)
 ```
+
+**Flattening into a variadic call** (`gen_user_call`, the `is_variadic ||
+has_spread` packing loop in CodeGenBuiltins): an argument flattens its elements
+into the variadic array when it is an explicit `...spread`, **or** when it is
+statically an array *value* per `array_flatten_kind` — a bare `@array` variable
+(kind 1, borrowed) or an owned array temp (kind 2: an array-returning call,
+`map`/`grep`/`sort`, a parenthesized list, `split`/`keys`/`values`/`reverse`).
+Owned temps are decref'd after their elements are copied out (kind-1 borrowed
+vars are not). So for a variadic target, `...` is only *required* to flatten
+something `array_flatten_kind` can't prove is an array (e.g. a deref `@$ref`
+where the static type is opaque); a bare array-returning call now flattens
+correctly instead of being pushed as a single array-ref element (which silently
+produced garbage when the callee read it as a scalar). Regression:
+`examples/spread_operator.strada`.
+
+Limits (unchanged): spread is a *call-argument* form only — `(0, ...@a, 9)` in a
+list literal is a parse error, and spread into a **fixed-arity** (non-variadic)
+function does not expand into the parameters (it currently emits a raw C
+"too few arguments" error rather than a clean Strada diagnostic).
 
 ### Regex (PCRE2 with POSIX fallback)
 

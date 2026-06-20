@@ -8675,11 +8675,17 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
                     emit($cg, "strada_incref(__sa->elements[__si]); ");
                     emit($cg, "strada_array_push_take(strada_deref_array(__va_arr), __sa->elements[__si]); ");
                     emit($cg, "} } } ");
-                } elsif ($arg->{"type"} == NODE_VARIABLE() && $arg->{"sigil"} eq "@") {
-                    # A bare @array argument to a variadic function flattens its
-                    # elements into the call (Perl list semantics), rather than
-                    # being pushed as a single array-ref element. Same handling as
-                    # an explicit spread.
+                } elsif (array_flatten_kind($cg, $arg) >= 1) {
+                    # A bare argument that is statically an array VALUE flattens
+                    # its elements into the variadic call (Perl list semantics),
+                    # exactly like an explicit ...spread. array_flatten_kind covers
+                    # a bare @array variable (kind 1) AND owned array temps (kind 2:
+                    # an array-returning call, map/grep/sort, a parenthesized list,
+                    # split/keys/values/reverse). Before this, only a bare @array
+                    # variable flattened; an array-returning call passed bare
+                    # (e.g. sum(get_array())) fell through to the scalar branch and
+                    # was pushed as a SINGLE array-ref element — silently yielding
+                    # garbage when the variadic callee read it as a scalar.
                     emit($cg, "{ StradaValue *__flat = ");
                     gen_expression($cg, $arg);
                     emit($cg, "; StradaArray *__fa = strada_deref_array(__flat); ");
@@ -8687,7 +8693,13 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
                     emit($cg, "StradaValue *__fe = strada_array_get(__fa, __fi); ");
                     emit($cg, "strada_incref(__fe); ");
                     emit($cg, "strada_array_push_take(strada_deref_array(__va_arr), __fe); ");
-                    emit($cg, "} } } ");
+                    emit($cg, "} } ");
+                    # An owned array temp (kind 2 — a call/map/list) must be
+                    # released after its elements are copied out, or it leaks; a
+                    # bare @array variable (kind 1) is borrowed and must NOT be
+                    # decref'd (the variable keeps owning it).
+                    if (needs_temp_cleanup($cg, $arg) == 1) { emit($cg, "strada_decref(__flat); "); }
+                    emit($cg, "} ");
                 } else {
                     # Regular scalar arg: push (with incref) for variables since
                     # they'll be cleaned up later; push_take for temporaries.

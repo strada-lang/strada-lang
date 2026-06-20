@@ -56,6 +56,11 @@ func log_all(str $level, str ...@messages) void {
     }
 }
 
+# Returns an array VALUE — used to test that a bare array-returning call
+# flattens into a variadic call (regression: it used to be pushed as a single
+# array-ref element, silently producing garbage).
+func three_hundreds() array { return (100, 200, 300); }
+
 func main() int {
     say("=== Spread Operator Test ===");
     say("");
@@ -93,6 +98,21 @@ func main() int {
     # Spread with fixed param
     my array @logs = ("error1", "error2");
     log_all("ERROR", ...@logs);
+
+    say("");
+    say("--- Array-returning call into variadic (bare, no spread) ---");
+    # Regression: a bare array-returning call must FLATTEN into the variadic
+    # call, just like ...spread — not be pushed as one array-ref element.
+    my int $bare_call = sum(three_hundreds());           # expect 600
+    say("  sum(three_hundreds()) = " . $bare_call);
+    my int $spread_call = sum(...three_hundreds());      # expect 600
+    my int $mixed_call = sum(5, three_hundreds());       # expect 605
+    my int $map_bare = sum(map { $_ + 1 } @nums);        # (101+201+301)=603
+    if ($bare_call != 600) { say("FAIL: bare array-returning call did not flatten (got " . $bare_call . ")"); return 1; }
+    if ($spread_call != 600) { say("FAIL: spread call (got " . $spread_call . ")"); return 1; }
+    if ($mixed_call != 605) { say("FAIL: fixed + bare array-call (got " . $mixed_call . ")"); return 1; }
+    if ($map_bare != 603) { say("FAIL: bare map result did not flatten (got " . $map_bare . ")"); return 1; }
+    say("  bare/spread/mixed/map array-call flatten: OK");
 
     say("");
     say("All tests passed!");
