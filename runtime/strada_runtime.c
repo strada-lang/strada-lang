@@ -403,6 +403,19 @@ static StradaMethod strada_overload_lookup(const char *package, const char *op);
 StradaValue* strada_pack_args(int count, ...);
 static int oop_any_stringify_overloads;
 
+/* Perla I/O separators: $, (output field sep) and $/ (input record sep). The
+ * Strada runtime honors them in print/readline when present, but they are
+ * defined by Perla, not Strada. Define them WEAKLY here (default NULL) so a
+ * plain Strada build links and the read/print paths skip them (value NULL); a
+ * Perla build provides STRONG definitions that override these. Why a weak
+ * *definition* and not a weak extern *reference* (as before): GNU ld resolves
+ * an undefined weak reference to 0, but macOS ld64 errors on a weak reference
+ * no linked object defines ("Undefined symbols ... perla_ofs"). A weak
+ * definition is defined on both, so it links everywhere; the call sites already
+ * gate on the value being non-NULL, so behavior is unchanged. */
+StradaValue *perla_ofs __attribute__((weak)) = NULL;
+StradaValue *perla_irs __attribute__((weak)) = NULL;
+
 /* ===== STRADAVALUE FREE-LIST POOL ===== */
 /* Recycles freed StradaValue structs to avoid malloc/free overhead */
 #define SV_POOL_MAX 16384
@@ -6394,10 +6407,9 @@ void strada_print(StradaValue *sv) {
      * links. */
     if (sv && !STRADA_IS_TAGGED_INT(sv) && sv->type == STRADA_ARRAY) {
         StradaArray *av = sv->value.av;
-        extern StradaValue *perla_ofs __attribute__((weak));
         const char *sep = NULL;
         size_t sep_len = 0;
-        if (&perla_ofs && perla_ofs && !STRADA_IS_TAGGED_INT(perla_ofs)
+        if (perla_ofs && !STRADA_IS_TAGGED_INT(perla_ofs)
             && perla_ofs->type == STRADA_STR && perla_ofs->value.pv && perla_ofs->value.pv[0]) {
             sep = perla_ofs->value.pv;
             sep_len = strlen(sep);
@@ -8285,10 +8297,9 @@ StradaValue* strada_read_line(StradaValue *fh) {
          * "\n" → keep existing fgets+strip behavior (Strada convention).
          * Custom delimiter → read up to and including the delimiter, do
          * not strip (Perl convention for custom $/). */
-        extern StradaValue *perla_irs __attribute__((weak));
         const char *irs = NULL;
         size_t irs_len = 0;
-        if (&perla_irs && perla_irs && !STRADA_IS_TAGGED_INT(perla_irs)
+        if (perla_irs && !STRADA_IS_TAGGED_INT(perla_irs)
             && perla_irs->type == STRADA_STR && perla_irs->value.pv) {
             irs = perla_irs->value.pv;
             irs_len = strlen(irs);
@@ -8378,11 +8389,10 @@ StradaValue* strada_read_all_lines(StradaValue *fh) {
         /* Honor perla_irs ($/) for custom record separator and slurp mode.
          * Without this, `<$fh>` in list context always split on '\n' and
          * stripped it, ignoring any `local $/ = "..."` in the caller. */
-        extern StradaValue *perla_irs __attribute__((weak));
         const char *irs = NULL;
         size_t irs_len = 0;
         int slurp = 0;
-        if (&perla_irs && perla_irs && !STRADA_IS_TAGGED_INT(perla_irs)) {
+        if (perla_irs && !STRADA_IS_TAGGED_INT(perla_irs)) {
             if (perla_irs->type == STRADA_UNDEF) {
                 slurp = 1;
             } else if (perla_irs->type == STRADA_STR && perla_irs->value.pv) {
