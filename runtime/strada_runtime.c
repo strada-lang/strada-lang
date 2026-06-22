@@ -7187,19 +7187,24 @@ static StradaValue* strada_sprintf_sv_args(StradaValue *format_sv,
      * No throw point exists between its malloc and the converge free. */
     char *spec_res = NULL;
 
+/* NB: macro-locals use the spg_ prefix, NOT a leading double underscore.
+ * `__used` (and friends like `__unused`) are reserved identifiers that macOS's
+ * <sys/cdefs.h> actually #defines (`#define __used __attribute__((__used__))`),
+ * so a local named `__used` expanded to attribute syntax and broke the build
+ * on clang/macOS. Keep these names free of the `__` prefix. */
 #define SPRINTF_GROW(n) do { \
-        size_t __need = (size_t)(n); \
-        size_t __used = (size_t)(out - buffer); \
-        if (__used + __need + 1 > buf_cap) { \
-            while (__used + __need + 1 > buf_cap) buf_cap *= 2; \
-            char *__nb; \
+        size_t spg_need = (size_t)(n); \
+        size_t spg_used = (size_t)(out - buffer); \
+        if (spg_used + spg_need + 1 > buf_cap) { \
+            while (spg_used + spg_need + 1 > buf_cap) buf_cap *= 2; \
+            char *spg_nb; \
             if (buf_guard) { \
-                __nb = realloc(buffer, buf_cap); \
+                spg_nb = realloc(buffer, buf_cap); \
             } else { \
-                __nb = malloc(buf_cap); \
-                if (__nb) memcpy(__nb, buffer, __used); \
+                spg_nb = malloc(buf_cap); \
+                if (spg_nb) memcpy(spg_nb, buffer, spg_used); \
             } \
-            if (!__nb) { \
+            if (!spg_nb) { \
                 if (buf_guard) { strada_cleanup_pop(); strada_decref(buf_guard); } \
                 free(spec_res); \
                 return strada_new_str(""); \
@@ -7210,12 +7215,12 @@ static StradaValue* strada_sprintf_sv_args(StradaValue *format_sv,
                 buf_guard->meta = NULL; \
                 buf_guard->type = STRADA_CSTRUCT; \
                 buf_guard->refcount = 1; \
-                buf_guard->value.ptr = __nb; \
+                buf_guard->value.ptr = spg_nb; \
                 strada_cleanup_push(buf_guard); \
             } else { \
-                buf_guard->value.ptr = __nb; \
+                buf_guard->value.ptr = spg_nb; \
             } \
-            buffer = __nb; out = __nb + __used; end = __nb + buf_cap - 1; \
+            buffer = spg_nb; out = spg_nb + spg_used; end = spg_nb + buf_cap - 1; \
         } \
     } while (0)
 
