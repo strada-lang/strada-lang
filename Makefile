@@ -68,6 +68,13 @@ MM_DEFINES = $(if $(filter 1,$(HAVE_CYCLE_GC)),-DSTRADA_CYCLE_GC) $(if $(filter 
 DEV ?= 0
 # Detect platform (Darwin/Linux/etc.) for platform-specific flags
 UNAME_S := $(shell uname -s)
+# Detect clang: -flto=auto and -ffat-lto-objects are GCC-only spellings; clang
+# (the default cc/gcc on macOS) rejects both (`unsupported option
+# '-ffat-lto-objects'`). On clang we build the runtime native-only (no LTO):
+# clang has no fat-LTO-object equivalent, so a single .o can't carry both
+# native code and bitcode — native-only links correctly at every opt level,
+# at the cost of no runtime cross-inlining on clang/macOS.
+CC_IS_CLANG := $(shell $(CC) --version 2>&1 | grep -qi clang && echo 1)
 
 # Optimization flags. DEV=1 switches to -O0 and disables LTO on the runtime.
 ifeq ($(DEV),1)
@@ -76,7 +83,11 @@ RUNTIME_LTO_FLAGS =
 $(info === DEV=1: building at -O0, no LTO (fast compile, slower binaries) ===)
 else
 OPT_FLAGS = -O2
+ifeq ($(CC_IS_CLANG),1)
+RUNTIME_LTO_FLAGS =
+else
 RUNTIME_LTO_FLAGS = -flto=auto -ffat-lto-objects
+endif
 endif
 
 # In-tree make builds (libs, examples, `make run`, the test suite) trust their
@@ -100,7 +111,7 @@ endif
 # GCC-specific flags (not available on clang/macOS)
 CFLAGS_GCC = -Wno-unused-but-set-variable
 # Detect compiler and set appropriate flags
-ifeq ($(shell $(CC) --version 2>&1 | grep -q clang && echo clang),clang)
+ifeq ($(CC_IS_CLANG),1)
 CFLAGS = $(CFLAGS_BASE)
 else
 CFLAGS = $(CFLAGS_BASE) $(CFLAGS_GCC)

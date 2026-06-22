@@ -497,6 +497,17 @@ func handle_doc() void {
     exec_or_run(@cmd);
 }
 
+# True when $CC is clang. -flto=auto and -ffat-lto-objects are GCC-only
+# spellings that clang (the default cc on macOS) rejects, so every LTO-flag
+# emission gates on this. Cached after first probe.
+our int $CC_IS_CLANG_CACHE = -1;
+func cc_is_clang() int {
+    if ($CC_IS_CLANG_CACHE >= 0) { return $CC_IS_CLANG_CACHE; }
+    my str $v = core::qx(sq($CC[0]) . " --version 2>&1");
+    if (index($v, "clang") >= 0) { $CC_IS_CLANG_CACHE = 1; } else { $CC_IS_CLANG_CACHE = 0; }
+    return $CC_IS_CLANG_CACHE;
+}
+
 # ---------------------------------------------------------------------------
 # Runtime object (re)build
 # ---------------------------------------------------------------------------
@@ -506,8 +517,12 @@ func build_runtime() void {
     my array @cmd = ();
     @cmd = (@cmd, @CC);
     @cmd = (@cmd, "-O2");
-    @cmd = (@cmd, "-flto=auto");
-    @cmd = (@cmd, "-ffat-lto-objects");
+    # GCC-only fat-LTO flags; clang has no equivalent and rejects them. On
+    # clang the runtime is native-only (links at every opt level, no cross-inline).
+    if (cc_is_clang() == 0) {
+        @cmd = (@cmd, "-flto=auto");
+        @cmd = (@cmd, "-ffat-lto-objects");
+    }
     @cmd = (@cmd, "-std=c99");
     @cmd = (@cmd, "-ffunction-sections");
     @cmd = (@cmd, "-fdata-sections");
@@ -552,9 +567,7 @@ func build_gcc_flags() array {
                    "-Wno-unused-parameter", "-Wno-return-type", "-Wno-unused-result",
                    "-Wno-comment", "-std=c99", "-ffunction-sections", "-fdata-sections");
     # GCC-only flags (skip on clang)
-    my str $ccver = core::qx(sq($CC[0]) . " --version 2>&1");
-    my int $is_clang = 0;
-    if (index($ccver, "clang") >= 0) { $is_clang = 1; }
+    my int $is_clang = cc_is_clang();
     if ($is_clang == 0) {
         @f = (@f, "-Wno-unused-but-set-variable");
         @f = (@f, "-Wno-clobbered");
@@ -572,11 +585,13 @@ func build_gcc_flags() array {
     if ($NO_LTO == 1) {
         @f = (@f, "-fno-lto");
         if (length($fld) > 0) { @f = (@f, $fld); }
-    } elsif ($OPT_LEVEL eq "2" || $OPT_LEVEL eq "3" || $OPT_LEVEL eq "fast") {
+    } elsif (($OPT_LEVEL eq "2" || $OPT_LEVEL eq "3" || $OPT_LEVEL eq "fast") && $is_clang == 0) {
         # NB: lld is deliberately NOT used here. gcc -flto -fuse-ld=lld fails
         # to link (ld.lld: undefined symbol 'main' — GCC's LTO plugin + lld
         # don't resolve bitcode symbols together). LTO links keep the default
         # linker; lld is non-LTO-only (see the branches above/below).
+        # clang is excluded: -flto=auto is a GCC spelling clang rejects, and the
+        # runtime.o is native-only there, so a -O2+ clang build links non-LTO.
         @f = (@f, "-flto=auto");
     } else {
         # Non-LTO opt levels (-O0/-O1/-Os): explicitly disable LTO. The
