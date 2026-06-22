@@ -1,0 +1,1 @@
+[% TRY %]ok[% CATCH %]caught[% END %]

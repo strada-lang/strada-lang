@@ -1,0 +1,6 @@
+[% total = 0 -%]
+Invoice:
+[% FOREACH item IN items -%]
+  [% loop.count %]. [% item.name | ucfirst %] x[% item.qty %] @ [% item.price | format("%.2f") %] = [% line = item.qty * item.price; total = total + line; line | format("%.2f") %]
+[% END -%]
+Total: [% total | format("%.2f") %]

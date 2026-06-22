@@ -1,0 +1,1 @@
+[% BLOCK g %]<[% x %]>[% END %][% INCLUDE g x=1 %][% INCLUDE g x=2 %]

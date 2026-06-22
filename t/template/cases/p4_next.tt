@@ -1,0 +1,1 @@
+[% FOREACH i IN [10,20,30] %][% i %][% NEXT IF i == 20 %]!![% END %]

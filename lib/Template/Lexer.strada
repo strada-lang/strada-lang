@@ -1,0 +1,134 @@
+# lib/Template/Lexer.strada — TT2 template scanner. Splits a template into a flat
+# list of chunks the parser consumes:
+#     {"k"=>"text", "s"=>"literal text"}
+#     {"k"=>"dir",  "src"=>"directive body, trimmed"}
+# Comments ([%# ... %]) are dropped. Whitespace chomping (the tag's own -/+/~
+# flags and the PRE_CHOMP/POST_CHOMP config defaults) is applied to the adjacent
+# text chunks here, so the parser/interpreter never deal with whitespace control.
+
+package Template::Lexer;
+
+func is_ws(str $ch) int {
+    return ($ch eq " " || $ch eq "\t" || $ch eq "\n" || $ch eq "\r") ? 1 : 0;
+}
+func is_inline_ws(str $ch) int { return ($ch eq " " || $ch eq "\t" || $ch eq "\r") ? 1 : 0; }
+
+# Chomp flag char -> level (0 none, 1 one+newline, 2 collapse-to-space, 3 greedy),
+# or -1 if $ch is not a chomp flag.
+func flag_level(str $ch) int {
+    if ($ch eq "+") { return 0; }
+    if ($ch eq "-") { return 1; }
+    if ($ch eq "~") { return 2; }
+    return -1;
+}
+
+# Trim trailing whitespace from $text per pre-chomp $level.
+func pre_chomp(str $text, int $level) str {
+    if ($level == 0) { return $text; }
+    my int $n = length($text);
+    my int $e = $n;
+    while ($e > 0 && is_ws(substr($text, $e - 1, 1)) == 1) { $e = $e - 1; }
+    if ($e == $n) { return $text; }                    # no trailing whitespace
+    if ($level == 3) { return substr($text, 0, $e); }  # greedy: drop it all
+    if ($level == 2) { return substr($text, 0, $e) . " "; }  # collapse to one space
+    # level 1 (ONE): drop trailing inline ws + a single newline
+    my int $j = $n;
+    while ($j > 0 && is_inline_ws(substr($text, $j - 1, 1)) == 1) { $j = $j - 1; }
+    if ($j > 0 && substr($text, $j - 1, 1) eq "\n") { $j = $j - 1; }
+    return substr($text, 0, $j);
+}
+
+# Trim leading whitespace from $text per post-chomp $level.
+func post_chomp(str $text, int $level) str {
+    if ($level == 0) { return $text; }
+    my int $n = length($text);
+    my int $s = 0;
+    while ($s < $n && is_ws(substr($text, $s, 1)) == 1) { $s = $s + 1; }
+    if ($s == 0) { return $text; }                     # no leading whitespace
+    if ($level == 3) { return substr($text, $s, $n - $s); }
+    if ($level == 2) { return " " . substr($text, $s, $n - $s); }
+    # level 1 (ONE): drop leading inline ws + a single newline
+    my int $j = 0;
+    while ($j < $n && is_inline_ws(substr($text, $j, 1)) == 1) { $j = $j + 1; }
+    if ($j < $n && substr($text, $j, 1) eq "\n") { $j = $j + 1; }
+    return substr($text, $j, $n - $j);
+}
+
+# Tokenize $template into a chunk list. $pre_def/$post_def are the config
+# PRE_CHOMP/POST_CHOMP defaults (used when a tag has no explicit flag).
+func tokenize(str $template, str $start_tag, str $end_tag, int $pre_def, int $post_def) scalar {
+    my array @chunks = ();
+    my int $n = length($template);
+    my int $slen = length($start_tag);
+    my int $elen = length($end_tag);
+    my int $i = 0;
+    my int $pending_post = -1;       # post-chomp level owed to the NEXT text chunk
+    my str $pending_text = "";       # text accumulated since the last directive
+
+    while ($i < $n) {
+        my int $ts = index_from($template, $start_tag, $i);
+        if ($ts < 0) {
+            $pending_text = $pending_text . substr($template, $i, $n - $i);
+            $i = $n;
+            last;
+        }
+        # text before this tag
+        $pending_text = $pending_text . substr($template, $i, $ts - $i);
+
+        # pre-chomp flag (char right after the start tag)
+        my int $after = $ts + $slen;
+        my int $pre = $pre_def;
+        my str $pflag = ($after < $n) ? substr($template, $after, 1) : "";
+        my int $plev = flag_level($pflag);
+        if ($plev >= 0) { $pre = $plev; $after = $after + 1; }
+
+        # apply pending post-chomp (from the previous tag) then this tag's pre-chomp
+        if ($pending_post >= 0) { $pending_text = post_chomp($pending_text, $pending_post); $pending_post = -1; }
+        $pending_text = pre_chomp($pending_text, $pre);
+        if (length($pending_text) > 0) { push(@chunks, text_chunk($pending_text)); }
+        $pending_text = "";
+
+        # find the end tag
+        my int $te = index_from($template, $end_tag, $after);
+        if ($te < 0) {
+            # unterminated tag: treat the rest as literal text
+            $pending_text = substr($template, $ts, $n - $ts);
+            $i = $n;
+            last;
+        }
+        # post-chomp flag (char right before the end tag)
+        my int $inner_end = $te;
+        my int $post = $post_def;
+        my str $qflag = ($te - 1 >= $after) ? substr($template, $te - 1, 1) : "";
+        my int $qlev = flag_level($qflag);
+        if ($qlev >= 0) { $post = $qlev; $inner_end = $te - 1; }
+
+        my str $src = trim(substr($template, $after, $inner_end - $after));
+        $pending_post = $post;
+
+        # comment ([%# ... %]) -> drop; otherwise a directive
+        if (length($src) > 0 && substr($src, 0, 1) eq "#") {
+            # nothing emitted
+        } else {
+            push(@chunks, dir_chunk($src));
+        }
+        $i = $te + $elen;
+    }
+
+    # trailing text (apply any owed post-chomp)
+    if ($pending_post >= 0) { $pending_text = post_chomp($pending_text, $pending_post); }
+    if (length($pending_text) > 0) { push(@chunks, text_chunk($pending_text)); }
+    return \@chunks;
+}
+
+func text_chunk(str $s) scalar { my hash %h = (); $h{"k"} = "text"; $h{"s"} = $s; return \%h; }
+func dir_chunk(str $s) scalar  { my hash %h = (); $h{"k"} = "dir";  $h{"src"} = $s; return \%h; }
+
+# index() starting at $from (Strada index() searches the whole string; slice + offset).
+func index_from(str $hay, str $needle, int $from) int {
+    if ($from <= 0) { return index($hay, $needle); }
+    my int $n = length($hay);
+    if ($from >= $n) { return -1; }
+    my int $rel = index(substr($hay, $from, $n - $from), $needle);
+    return ($rel < 0) ? -1 : ($from + $rel);
+}

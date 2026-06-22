@@ -1,0 +1,1 @@
+[% WRAPPER box %]inside[% END %][% BLOCK box %][[% content %]][% END %]

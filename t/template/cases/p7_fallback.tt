@@ -1,0 +1,1 @@
+[% TRY %][% THROW other "x" %][% CATCH db %]db[% CATCH %]fallback[% END %]

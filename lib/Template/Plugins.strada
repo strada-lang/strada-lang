@@ -1,0 +1,175 @@
+# lib/Template/Plugins.strada — the USE plugin framework and a starter set.
+#
+# A plugin instance is a hashref tagged {"__plugin__"=>type, ...state}. The dot
+# operator routes `plugin.method(args)` here (Stash::dot checks __plugin__), and
+# the call path routes `plugin(args)` to invoke() (for callable plugins like
+# format). Methods receive args as an arrayref and read them defensively — we do
+# NOT spread into fixed-arity closures (Strada fills missing closure params with
+# garbage, so that path is unsafe).
+#
+# Starter plugins: Math, String, format, date (UTC), List (stub). Date uses a
+# self-contained UTC civil-date computation (no strftime dependency); a local
+# timezone is treated as UTC, so format with an explicit "GMT"/"UTC" zone is the
+# deterministic, supported form.
+
+package Template::Plugins;
+
+func is_plugin(scalar $v) int {
+    return (defined($v) && ref($v) eq "HASH" && exists(%{$v}, "__plugin__")) ? 1 : 0;
+}
+func mk(str $type) scalar { my hash %o = (); $o{"__plugin__"} = $type; return \%o; }
+
+# Instantiate a plugin for USE. $pos = positional arg values, $named = name=>value.
+func instantiate(str $name, scalar $pos, scalar $named) scalar {
+    if ($name eq "Math" || $name eq "math") { return mk("Math"); }
+    if ($name eq "String") { return string_obj(pos_str($pos, 0, "")); }
+    if ($name eq "List" || $name eq "list") { return mk("List"); }
+    if ($name eq "format" || $name eq "Format") {
+        if (defined($pos) && size(@{$pos}) >= 1) { return format_obj("" . $pos->[0]); }
+        return format_obj(undef);                       # factory
+    }
+    if ($name eq "date" || $name eq "Date") {
+        my scalar $o = mk("date");
+        $o->{"format"} = (defined($named) && exists(%{$named}, "format")) ? ("" . $named->{"format"}) : "%H:%M:%S %d-%b-%Y";
+        return $o;
+    }
+    throw(Template::Exception::make("plugin", $name . ": plugin not found"));
+}
+
+# plugin.method(args) dispatch. Returns undef for unknown methods (TT renders
+# those empty), which also lets missing methods fall through harmlessly.
+func method(scalar $obj, str $m, scalar $args) scalar {
+    my str $type = $obj->{"__plugin__"};
+    if ($type eq "Math")   { return math_method($m, $args); }
+    if ($type eq "String") { return string_method($obj, $m, $args); }
+    if ($type eq "date")   { return date_method($obj, $m, $args); }
+    return undef;
+}
+
+# plugin(args) — for callable plugins (the format factory / formatter).
+func invoke(scalar $obj, scalar $args) scalar {
+    if ($obj->{"__plugin__"} eq "format") {
+        if (!defined($obj->{"fmt"})) { return format_obj(pos_str($args, 0, "%s")); }   # factory -> formatter
+        return sprintf($obj->{"fmt"}, pos_str($args, 0, ""));                            # formatter -> apply
+    }
+    return undef;
+}
+
+# ---- arg helpers -----------------------------------------------------------
+func pos(scalar $args, int $i) scalar {
+    if (!defined($args) || $i >= size(@{$args})) { return undef; }
+    return $args->[$i];
+}
+func pos_str(scalar $args, int $i, str $def) str {
+    my scalar $v = pos($args, $i);
+    return defined($v) ? ("" . $v) : $def;
+}
+func pos_num(scalar $args, int $i, num $def) num {
+    my scalar $v = pos($args, $i);
+    return defined($v) ? (("" . $v) + 0.0) : $def;
+}
+
+# ---- Math ------------------------------------------------------------------
+func math_method(str $m, scalar $args) scalar {
+    if ($m eq "pi")  { return 3.14159265358979; }
+    if ($m eq "e")   { return 2.71828182845905; }
+    my num $a = pos_num($args, 0, 0.0);
+    if ($m eq "sqrt") { return math::sqrt($a); }
+    if ($m eq "abs")  { my num $r = ($a < 0.0) ? (0.0 - $a) : $a; return int_if_whole($r); }
+    if ($m eq "int")  { my int $r = $a; return $r; }
+    if ($m eq "floor"){ return math::floor($a) + 0; }
+    if ($m eq "ceil") { return math::ceil($a) + 0; }
+    if ($m eq "cos")  { return math::cos($a); }
+    if ($m eq "sin")  { return math::sin($a); }
+    if ($m eq "pow")  { return math::pow($a, pos_num($args, 1, 0.0)); }
+    return undef;
+}
+func int_if_whole(num $n) scalar { my int $i = $n + 0; return (($i + 0.0) == $n) ? $i : $n; }
+
+# ---- String (objects stringify to their text via Stash::as_text) -----------
+func string_obj(str $s) scalar {
+    my hash %o = (); $o{"__plugin__"} = "String"; $o{"__strval__"} = $s;
+    return \%o;
+}
+# TT's String objects are MUTABLE: methods modify the buffer in place and return
+# the same object (so `s.lower` then `s.text` is lowercased, and `.append(x).y`
+# chains on the mutated object).
+func string_method(scalar $obj, str $m, scalar $args) scalar {
+    my str $s = "" . $obj->{"__strval__"};
+    if ($m eq "text")    { return $s; }
+    if ($m eq "length")  { return length($s); }
+    if ($m eq "size")    { return length($s); }
+    if ($m eq "upper")   { $obj->{"__strval__"} = uc($s); return $obj; }
+    if ($m eq "lower")   { $obj->{"__strval__"} = lc($s); return $obj; }
+    if ($m eq "trim")    { $obj->{"__strval__"} = trim($s); return $obj; }
+    if ($m eq "append")  { $obj->{"__strval__"} = $s . pos_str($args, 0, ""); return $obj; }
+    if ($m eq "prepend") { $obj->{"__strval__"} = pos_str($args, 0, "") . $s; return $obj; }
+    if ($m eq "repeat")  { $obj->{"__strval__"} = Template::VMethods::str_repeat($s, pos_num($args, 0, 1.0) + 0); return $obj; }
+    return undef;
+}
+
+# ---- format (callable) -----------------------------------------------------
+func format_obj(scalar $fmt) scalar {
+    my hash %o = (); $o{"__plugin__"} = "format"; $o{"fmt"} = $fmt;
+    return \%o;
+}
+
+# ---- date (UTC) ------------------------------------------------------------
+func date_method(scalar $obj, str $m, scalar $args) scalar {
+    if ($m eq "format") {
+        my int $epoch = pos_num($args, 0, 0.0) + 0;
+        my str $fmt = (defined(pos($args, 1))) ? pos_str($args, 1, "") : ("" . $obj->{"format"});
+        return date_strftime_utc($fmt, $epoch);
+    }
+    return undef;
+}
+# Truncating integer division (Strada `/` is float division, so divide explicitly).
+func idiv(int $a, int $b) int { my int $r = $a / $b; return $r; }
+
+# Civil date from days since the Unix epoch (Howard Hinnant's algorithm, which is
+# designed for truncating division). Every division goes through idiv().
+func date_strftime_utc(str $fmt, int $epoch) str {
+    my int $days = ($epoch >= 0) ? idiv($epoch, 86400) : idiv($epoch - 86399, 86400);
+    my int $secs = $epoch - $days * 86400;
+    my int $hh = idiv($secs, 3600);
+    my int $mi = idiv($secs % 3600, 60);
+    my int $ss = $secs % 60;
+    my int $z = $days + 719468;
+    my int $era = idiv(($z >= 0 ? $z : ($z - 146096)), 146097);
+    my int $doe = $z - $era * 146097;
+    my int $yoe = idiv($doe - idiv($doe, 1460) + idiv($doe, 36524) - idiv($doe, 146096), 365);
+    my int $y = $yoe + $era * 400;
+    my int $doy = $doe - (365 * $yoe + idiv($yoe, 4) - idiv($yoe, 100));
+    my int $mp = idiv(5 * $doy + 2, 153);
+    my int $d = $doy - idiv(153 * $mp + 2, 5) + 1;
+    my int $mo = ($mp < 10) ? ($mp + 3) : ($mp - 9);
+    my int $year = ($mo <= 2) ? ($y + 1) : $y;
+    return render_strftime($fmt, $year, $mo, $d, $hh, $mi, $ss);
+}
+func render_strftime(str $fmt, int $year, int $mo, int $d, int $hh, int $mi, int $ss) str {
+    my array @mon = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec");
+    my str $out = "";
+    my int $i = 0;
+    my int $n = length($fmt);
+    while ($i < $n) {
+        my str $c = substr($fmt, $i, 1);
+        if ($c eq "%" && $i + 1 < $n) {
+            my str $code = substr($fmt, $i + 1, 1);
+            if    ($code eq "Y") { $out = $out . sprintf("%04d", $year); }
+            elsif ($code eq "y") { $out = $out . sprintf("%02d", $year % 100); }
+            elsif ($code eq "m") { $out = $out . sprintf("%02d", $mo); }
+            elsif ($code eq "d") { $out = $out . sprintf("%02d", $d); }
+            elsif ($code eq "H") { $out = $out . sprintf("%02d", $hh); }
+            elsif ($code eq "M") { $out = $out . sprintf("%02d", $mi); }
+            elsif ($code eq "S") { $out = $out . sprintf("%02d", $ss); }
+            elsif ($code eq "b") { $out = $out . $mon[$mo - 1]; }
+            elsif ($code eq "%") { $out = $out . "%"; }
+            else { $out = $out . "%" . $code; }
+            $i = $i + 2;
+        } else {
+            $out = $out . $c;
+            $i = $i + 1;
+        }
+    }
+    return $out;
+}

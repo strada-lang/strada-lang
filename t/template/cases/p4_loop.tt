@@ -1,0 +1,1 @@
+[% FOREACH i IN items %][% loop.count %][% loop.first ? "F" : "" %][% loop.last ? "L" : "" %][% loop.parity %] [% END %]

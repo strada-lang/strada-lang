@@ -1,0 +1,305 @@
+# lib/Template/VMethods.strada — TT virtual methods. When the dot-operator finds
+# no real method / hash-key / list-index for `obj.key`, it falls here: scalar,
+# list, and hash values gain a set of built-in "methods" (upper, join, keys, ...).
+# Calling convention from Stash::dot: dispatch(vtype, value, name, args, stash)
+# where args is an evaluated arrayref (or undef). Behaviours are matched against
+# Perl TT 3.106 via the differential harness (e.g. hash.keys is SORTED; list.max
+# is the max INDEX; booleans render 1/"").
+#
+# Faithfully omitted (not core scalar vmethods in TT 3.106 — they are filters or
+# plugin methods, and return undef there): uri, url, int, abs, format, dec, hex.
+
+package Template::VMethods;
+
+func dispatch(str $vtype, scalar $obj, str $key, scalar $args, scalar $stash) scalar {
+    if ($vtype eq "scalar") { return scalar_vm($obj, $key, $args); }
+    if ($vtype eq "list")   { return list_vm($obj, $key, $args); }
+    if ($vtype eq "hash")   { return hash_vm($obj, $key, $args); }
+    return undef;
+}
+
+# ---- arg helpers -----------------------------------------------------------
+func argc(scalar $args) int { return defined($args) ? size(@{$args}) : 0; }
+func arg(scalar $args, int $i) scalar {
+    if (!defined($args) || $i >= size(@{$args})) { return undef; }
+    return $args->[$i];
+}
+func arg_int(scalar $args, int $i, int $def) int {
+    my scalar $v = arg($args, $i);
+    return defined($v) ? (("" . $v) + 0) : $def;
+}
+func arg_str(scalar $args, int $i, str $def) str {
+    my scalar $v = arg($args, $i);
+    return defined($v) ? ("" . $v) : $def;
+}
+
+# ============================ SCALAR vmethods ==============================
+func scalar_vm(scalar $val, str $key, scalar $args) scalar {
+    my str $s = "" . $val;
+    if ($key eq "length")  { return length($s); }
+    if ($key eq "size")    { return 1; }
+    if ($key eq "defined") { return 1; }
+    if ($key eq "upper")   { return uc($s); }
+    if ($key eq "lower")   { return lc($s); }
+    if ($key eq "ucfirst") { return ucfirst_str($s); }
+    if ($key eq "lcfirst") { return lcfirst_str($s); }
+    if ($key eq "trim")    { return trim($s); }
+    if ($key eq "collapse"){ return re::replace_all(trim($s), "\\s+", " "); }
+    if ($key eq "html")    { return html_escape($s); }
+    if ($key eq "xml")     { return xml_escape($s); }
+    if ($key eq "repeat")  { return str_repeat($s, arg_int($args, 0, 1)); }
+    if ($key eq "replace") { return re::replace_all($s, arg_str($args, 0, ""), arg_str($args, 1, "")); }
+    if ($key eq "remove")  { return re::replace_all($s, arg_str($args, 0, ""), ""); }
+    if ($key eq "search")  { return (re::match($s, arg_str($args, 0, "")) == 1) ? 1 : ""; }
+    if ($key eq "match")   { return scalar_match($s, $args); }
+    if ($key eq "split")   { return scalar_split($s, $args); }
+    if ($key eq "substr")  { return scalar_substr($s, $args); }
+    if ($key eq "chunk")   { return str_chunk($s, arg_int($args, 0, 1)); }
+    if ($key eq "list")    { my array @l = ($val); return \@l; }
+    if ($key eq "hash")    { my hash %h = (); $h{"value"} = $val; return \%h; }
+    return undef;
+}
+
+func ucfirst_str(str $s) str {
+    if (length($s) == 0) { return $s; }
+    return uc(substr($s, 0, 1)) . substr($s, 1, length($s) - 1);
+}
+func lcfirst_str(str $s) str {
+    if (length($s) == 0) { return $s; }
+    return lc(substr($s, 0, 1)) . substr($s, 1, length($s) - 1);
+}
+func html_escape(str $s) str {
+    my str $o = re::replace_all($s, "&", "&amp;");
+    $o = re::replace_all($o, "<", "&lt;");
+    $o = re::replace_all($o, ">", "&gt;");
+    $o = re::replace_all($o, "\"", "&quot;");
+    return $o;
+}
+func xml_escape(str $s) str {
+    my str $o = html_escape($s);
+    return re::replace_all($o, "'", "&apos;");
+}
+func str_repeat(str $s, int $n) str {
+    my str $o = "";
+    my int $i = 0;
+    while ($i < $n) { $o = $o . $s; $i = $i + 1; }
+    return $o;
+}
+func str_chunk(str $s, int $size) scalar {
+    if ($size <= 0) { $size = 1; }
+    my array @out = ();
+    my int $n = length($s);
+    my int $i = 0;
+    while ($i < $n) {
+        my int $l = ($i + $size <= $n) ? $size : ($n - $i);
+        push(@out, substr($s, $i, $l));
+        $i = $i + $size;
+    }
+    return \@out;
+}
+func scalar_substr(str $s, scalar $args) str {
+    my int $n = length($s);
+    my int $off = arg_int($args, 0, 0);
+    if ($off < 0) { $off = $n + $off; }
+    if ($off < 0) { $off = 0; }
+    if ($off > $n) { return ""; }
+    my int $len = (argc($args) >= 2) ? arg_int($args, 1, 0) : ($n - $off);
+    if ($len < 0) { $len = 0; }
+    if ($off + $len > $n) { $len = $n - $off; }
+    return substr($s, $off, $len);
+}
+func scalar_split(str $s, scalar $args) scalar {
+    my str $pat = (argc($args) >= 1) ? arg_str($args, 0, "") : " ";
+    my array @parts = split($pat, $s);
+    return \@parts;
+}
+# Non-global match: capture groups as a list, or [1] when the pattern matched
+# with no groups, or "" on no match. re::match performs the match and stores the
+# captures; re::captures() (no args) reads them ([0]=full match, [1..]=groups).
+# (Global match is a documented P3 TODO.)
+func scalar_match(str $s, scalar $args) scalar {
+    my str $pat = arg_str($args, 0, "");
+    if (re::match($s, $pat) == 0) { return ""; }
+    my array @caps = re::captures();
+    if (size(@caps) <= 1) { my array @one = (1); return \@one; }
+    my array @groups = ();
+    my int $i = 1;
+    while ($i < size(@caps)) { push(@groups, $caps[$i]); $i = $i + 1; }
+    return \@groups;
+}
+
+# ============================= LIST vmethods ===============================
+func list_vm(scalar $val, str $key, scalar $args) scalar {
+    my int $n = size(@{$val});
+    if ($key eq "size")    { return $n; }
+    if ($key eq "max")     { return $n - 1; }
+    if ($key eq "defined") { return 1; }
+    if ($key eq "list")    { return $val; }
+    if ($key eq "first") {
+        if (argc($args) == 0) { return ($n > 0) ? $val->[0] : undef; }
+        return list_slice_range($val, 0, arg_int($args, 0, 1) - 1);
+    }
+    if ($key eq "last") {
+        if (argc($args) == 0) { return ($n > 0) ? $val->[$n - 1] : undef; }
+        my int $cnt = arg_int($args, 0, 1);
+        return list_slice_range($val, $n - $cnt, $n - 1);
+    }
+    if ($key eq "join")    { return list_join($val, (argc($args) >= 1) ? arg_str($args, 0, " ") : " "); }
+    if ($key eq "reverse") { return list_reverse($val); }
+    if ($key eq "sort")    { return list_sort($val, $args, 0); }
+    if ($key eq "nsort")   { return list_sort($val, $args, 1); }
+    if ($key eq "unique")  { return list_unique($val); }
+    if ($key eq "grep")    { return list_grep($val, arg_str($args, 0, "")); }
+    if ($key eq "merge")   { return list_merge($val, $args); }
+    if ($key eq "slice")   { return list_slice_range($val, arg_int($args, 0, 0), (argc($args) >= 2) ? arg_int($args, 1, $n - 1) : ($n - 1)); }
+    if ($key eq "item")    { my int $i = arg_int($args, 0, 0); if ($i < 0) { $i = $n + $i; } return ($i >= 0 && $i < $n) ? $val->[$i] : undef; }
+    if ($key eq "hash")    { return list_to_hash($val); }
+    if ($key eq "push")    { my int $i = 0; while ($i < argc($args)) { push(@{$val}, arg($args, $i)); $i = $i + 1; } return $val; }
+    if ($key eq "pop")     { return ($n > 0) ? pop(@{$val}) : undef; }
+    if ($key eq "shift")   { return ($n > 0) ? shift(@{$val}) : undef; }
+    if ($key eq "unshift") { my int $i = argc($args) - 1; while ($i >= 0) { unshift(@{$val}, arg($args, $i)); $i = $i - 1; } return $val; }
+    return undef;
+}
+
+func list_join(scalar $val, str $sep) str {
+    my str $out = "";
+    my int $i = 0;
+    my int $n = size(@{$val});
+    while ($i < $n) {
+        if ($i > 0) { $out = $out . $sep; }
+        $out = $out . Template::Stash::as_text($val->[$i]);
+        $i = $i + 1;
+    }
+    return $out;
+}
+func list_reverse(scalar $val) scalar {
+    my array @out = ();
+    my int $i = size(@{$val}) - 1;
+    while ($i >= 0) { push(@out, $val->[$i]); $i = $i - 1; }
+    return \@out;
+}
+# Elements at indices $from..$to inclusive (negative indices count from the end).
+func list_slice_range(scalar $val, int $from, int $to) scalar {
+    my int $n = size(@{$val});
+    if ($from < 0) { $from = $n + $from; }
+    if ($to < 0) { $to = $n + $to; }
+    if ($from < 0) { $from = 0; }
+    my array @out = ();
+    my int $i = $from;
+    while ($i <= $to && $i < $n) { if ($i >= 0) { push(@out, $val->[$i]); } $i = $i + 1; }
+    return \@out;
+}
+func list_unique(scalar $val) scalar {
+    my array @out = ();
+    my hash %seen = ();
+    foreach my scalar $e (@{$val}) {
+        my str $k = Template::Stash::as_text($e);
+        if (exists(%seen, $k) == 0) { $seen{$k} = 1; push(@out, $e); }
+    }
+    return \@out;
+}
+func list_grep(scalar $val, str $pat) scalar {
+    my array @out = ();
+    foreach my scalar $e (@{$val}) {
+        if (re::match(Template::Stash::as_text($e), $pat) == 1) { push(@out, $e); }
+    }
+    return \@out;
+}
+func list_merge(scalar $val, scalar $args) scalar {
+    my array @out = @{$val};
+    my int $i = 0;
+    while ($i < argc($args)) {
+        my scalar $a = arg($args, $i);
+        if (defined($a) && ref($a) eq "ARRAY") { foreach my scalar $e (@{$a}) { push(@out, $e); } }
+        elsif (defined($a)) { push(@out, $a); }
+        $i = $i + 1;
+    }
+    return \@out;
+}
+# list.hash: pair up elements as key=>value (TT: [3,1,2] -> {3=>1, 2=>undef}).
+func list_to_hash(scalar $val) scalar {
+    my hash %h = ();
+    my int $i = 0;
+    my int $n = size(@{$val});
+    while ($i < $n) {
+        my str $k = Template::Stash::as_text($val->[$i]);
+        $h{$k} = ($i + 1 < $n) ? $val->[$i + 1] : undef;
+        $i = $i + 2;
+    }
+    return \%h;
+}
+func sort_str_key(scalar $el, str $key) str {
+    if (length($key) > 0 && defined($el) && ref($el) eq "HASH") { return "" . ($el->{$key} // ""); }
+    return Template::Stash::as_text($el);
+}
+func sort_num_key(scalar $el, str $key) num {
+    if (length($key) > 0 && defined($el) && ref($el) eq "HASH") { return ("" . ($el->{$key} // 0)) + 0.0; }
+    if (!defined($el)) { return 0.0; }
+    return ("" . $el) + 0.0;
+}
+func list_sort(scalar $val, scalar $args, int $numeric) scalar {
+    my str $key = (argc($args) >= 1) ? arg_str($args, 0, "") : "";
+    my array @copy = @{$val};
+    my scalar $sorted = undef;
+    if ($numeric == 1) {
+        $sorted = sort { sort_num_key($a, $key) <=> sort_num_key($b, $key); } @copy;
+    } else {
+        $sorted = sort { sort_str_key($a, $key) cmp sort_str_key($b, $key); } @copy;
+    }
+    return $sorted;
+}
+
+# ============================= HASH vmethods ===============================
+func hash_vm(scalar $val, str $key, scalar $args) scalar {
+    if ($key eq "keys")    { my array @ks = keys(%{$val}); return \@ks; }
+    if ($key eq "values")  { return hash_values($val); }
+    if ($key eq "size")    { return size(keys(%{$val})); }
+    if ($key eq "each")    { return hash_items($val); }
+    if ($key eq "items")   { return hash_items($val); }
+    if ($key eq "pairs")   { return hash_pairs($val); }
+    if ($key eq "list")    { return hash_pairs($val); }
+    if ($key eq "sort")    { return hash_sort($val, 0); }
+    if ($key eq "nsort")   { return hash_sort($val, 1); }
+    if ($key eq "item")    { my str $k = arg_str($args, 0, ""); return exists(%{$val}, $k) ? $val->{$k} : undef; }
+    if ($key eq "defined") { my str $k = arg_str($args, 0, ""); return (exists(%{$val}, $k) && defined($val->{$k})) ? 1 : ""; }
+    if ($key eq "exists")  { my str $k = arg_str($args, 0, ""); return exists(%{$val}, $k) ? 1 : ""; }
+    if ($key eq "delete")  { my str $k = arg_str($args, 0, ""); my scalar $v = $val->{$k}; delete(%{$val}, $k); return $v; }
+    return undef;
+}
+
+func sorted_keys(scalar $val) scalar {
+    my array @ks = keys(%{$val});
+    my scalar $sorted = sort { $a cmp $b; } @ks;
+    return $sorted;
+}
+# values / items / each follow raw hash order (matching TT's unordered keys).
+func hash_values(scalar $val) scalar {
+    my array @out = ();
+    foreach my str $k (keys(%{$val})) { push(@out, $val->{$k}); }
+    return \@out;
+}
+func hash_items(scalar $val) scalar {
+    my array @out = ();
+    foreach my str $k (keys(%{$val})) { push(@out, $k); push(@out, $val->{$k}); }
+    return \@out;
+}
+func hash_pairs(scalar $val) scalar {
+    my scalar $ks = sorted_keys($val);
+    my array @out = ();
+    foreach my str $k (@{$ks}) {
+        my hash %p = (); $p{"key"} = $k; $p{"value"} = $val->{$k};
+        push(@out, \%p);
+    }
+    return \@out;
+}
+# hash.sort / hash.nsort: keys sorted by their corresponding values.
+func hash_sort(scalar $val, int $numeric) scalar {
+    my array @ks = keys(%{$val});
+    my scalar $sorted = undef;
+    if ($numeric == 1) {
+        $sorted = sort { (("" . ($val->{$a} // 0)) + 0.0) <=> (("" . ($val->{$b} // 0)) + 0.0); } @ks;
+    } else {
+        $sorted = sort { ("" . ($val->{$a} // "")) cmp ("" . ($val->{$b} // "")); } @ks;
+    }
+    return $sorted;
+}

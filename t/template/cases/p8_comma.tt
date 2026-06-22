@@ -1,0 +1,1 @@
+[% USE comma = format("%.2f") %][% comma(3.14159) %]

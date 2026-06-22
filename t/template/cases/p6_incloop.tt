@@ -1,0 +1,2 @@
+[% BLOCK item %]* [% i %]
+[% END %][% FOREACH i IN [1,2,3] %][% INCLUDE item %][% END %]

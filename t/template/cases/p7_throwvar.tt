@@ -1,0 +1,1 @@
+[% msg = "hi" %][% TRY %][% THROW e msg %][% CATCH %][% error.info %][% END %]

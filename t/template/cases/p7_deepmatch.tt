@@ -1,0 +1,1 @@
+[% TRY %][% THROW a.b.c "deep" %][% CATCH a.b %]match-ab[% END %]

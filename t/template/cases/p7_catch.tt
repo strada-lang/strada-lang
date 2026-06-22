@@ -1,0 +1,1 @@
+[% TRY %]a[% THROW foo "boom" %]b[% CATCH %]got:[% error %][% END %]

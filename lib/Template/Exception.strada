@@ -1,0 +1,48 @@
+# lib/Template/Exception.strada — Template::Toolkit exceptions and the internal
+# control signals (NEXT/LAST/RETURN/STOP), both modelled as plain hashrefs and
+# moved with throw()/catch (the Eval.strada pattern). Executors catch, inspect,
+# and re-throw anything that isn't theirs.
+
+package Template::Exception;
+
+# A TT exception: { __tt_exception__, type, info }. CATCH matches on type with
+# dotted-prefix semantics (CATCH 'file' also catches 'file.missing').
+func make(str $type, str $info) scalar {
+    my hash %e = ();
+    $e{"__tt_exception__"} = 1;
+    $e{"type"} = $type;
+    $e{"info"} = $info;
+    return \%e;
+}
+func is_exception(scalar $e) int {
+    return (defined($e) && ref($e) eq "HASH" && exists(%{$e}, "__tt_exception__")) ? 1 : 0;
+}
+
+# An internal control signal: { __tt_signal__, sig: next|last|return|stop, value }.
+func signal(str $sig, scalar $value) scalar {
+    my hash %s = ();
+    $s{"__tt_signal__"} = 1;
+    $s{"sig"} = $sig;
+    $s{"value"} = $value;
+    return \%s;
+}
+func is_signal(scalar $e, str $sig) int {
+    return (defined($e) && ref($e) eq "HASH" && exists(%{$e}, "__tt_signal__") && ($e->{"sig"} eq $sig)) ? 1 : 0;
+}
+func is_any_signal(scalar $e) int {
+    return (defined($e) && ref($e) eq "HASH" && exists(%{$e}, "__tt_signal__")) ? 1 : 0;
+}
+
+# CATCH type match: clause "" (or undef) = catch-all; else exact or dotted prefix.
+func type_matches(str $clause_type, str $exc_type) int {
+    if (length($clause_type) == 0) { return 1; }
+    if ($clause_type eq $exc_type) { return 1; }
+    my str $pfx = $clause_type . ".";
+    if (length($exc_type) >= length($pfx) && substr($exc_type, 0, length($pfx)) eq $pfx) { return 1; }
+    return 0;
+}
+
+# How TT stringifies an exception: "type error - info".
+func as_string(scalar $e) str {
+    return ($e->{"type"} // "undef") . " error - " . ($e->{"info"} // "");
+}

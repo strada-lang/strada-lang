@@ -1,0 +1,1 @@
+[% USE Math %][% Math.sqrt(16) %]|[% Math.abs(-5) %]|[% Math.int(3.9) %]|[% Math.pi FILTER format("%.4f") %]

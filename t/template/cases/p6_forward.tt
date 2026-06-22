@@ -1,0 +1,1 @@
+[% INCLUDE inner %][% BLOCK inner %]forward[% END %]

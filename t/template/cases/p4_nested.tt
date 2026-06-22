@@ -1,0 +1,1 @@
+[% FOREACH r IN rows %][% FOREACH c IN r %][% c %][% END %];[% END %]

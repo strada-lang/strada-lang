@@ -1,0 +1,1 @@
+[% MACRO sq(n) GET n * n %][% sq(4) %]|[% MACRO add(a, b) GET a + b %][% add(2, 3) %]

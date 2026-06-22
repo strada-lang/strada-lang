@@ -1,0 +1,1 @@
+[% BLOCK card %][[% title %]:[% body %]][% END %][% INCLUDE card title="T" body="B" %]

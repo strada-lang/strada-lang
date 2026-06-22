@@ -1,0 +1,4 @@
+Tags: [% post.tags.sort.join(", ") %] ([% post.tags.size %])
+Author: [% post.author.name %] <[% post.author.email %]>
+Status: [% post.tags.size > 2 ? "many" : "few" %]
+Upper: [% post.author.name | upper %]

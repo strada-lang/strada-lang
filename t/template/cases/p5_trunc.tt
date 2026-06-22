@@ -1,0 +1,1 @@
+[% txt | truncate(9) %]|[% txt | truncate(9, ">>") %]|[% sh | truncate(20) %]

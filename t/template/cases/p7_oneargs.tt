@@ -1,0 +1,1 @@
+[% TRY %][% THROW myerr %][% CATCH %]T=[% error.type %] I=[% error.info %][% END %]

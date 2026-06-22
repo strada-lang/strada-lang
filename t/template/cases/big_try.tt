@@ -1,0 +1,3 @@
+[% FOREACH n IN nums -%]
+[% TRY %][% IF n == 0 %][% THROW math "div by zero" %][% END %]100/[% n %]=[% (100 / n) | format("%.1f") %][% CATCH math %]skip:[% error.info %][% END %]
+[% END -%]

@@ -1,0 +1,152 @@
+# lib/Template/Stash.strada — the variable context (stash) and the polymorphic
+# dot operator that is the heart of TT. A stash is a chain of scope frames; the
+# dot operator resolves `obj.key(args)` against whatever obj turns out to be:
+# a blessed object (real method), a hashref (key, else hash-vmethod), an arrayref
+# (numeric index, else list-vmethod), or a scalar (scalar-vmethod). Virtual
+# methods are wired in P3 (the `vmethod_*` fallbacks currently return undef).
+
+package Template::Stash;
+
+# stash = { "top" => frame, "strict" => 0/1 }
+# frame = { "vars" => hashref, "parent" => frame|undef }
+func stash_new(scalar $vars, int $strict) scalar {
+    if (!defined($vars)) { $vars = {}; }
+    my hash %top = ();
+    $top{"vars"} = $vars;
+    $top{"parent"} = undef;
+    my hash %st = ();
+    $st{"top"} = \%top;
+    $st{"strict"} = $strict;
+    return \%st;
+}
+
+func is_strict(scalar $stash) int { return ($stash->{"strict"} // 0) + 0; }
+
+# Push a fresh scope frame; returns the previous top as a restore token.
+func push_frame(scalar $stash) scalar {
+    my scalar $prev = $stash->{"top"};
+    my hash %f = ();
+    $f{"vars"} = {};
+    $f{"parent"} = $prev;
+    $stash->{"top"} = \%f;
+    return $prev;
+}
+func pop_frame(scalar $stash, scalar $prev) void {
+    my scalar $old = $stash->{"top"};
+    $old->{"parent"} = undef;          # break link so the frame can be collected
+    $stash->{"top"} = $prev;
+}
+
+func set_local(scalar $stash, str $name, scalar $value) void {
+    $stash->{"top"}->{"vars"}->{$name} = $value;
+}
+
+# Root variable lookup: walk frames top->parent. undef if unbound.
+func get_root(scalar $stash, str $name) scalar {
+    my scalar $f = $stash->{"top"};
+    while (defined($f)) {
+        if (exists(%{$f->{"vars"}}, $name)) { return $f->{"vars"}->{$name}; }
+        $f = $f->{"parent"};
+    }
+    return undef;
+}
+
+# SET always writes to the current (top) frame — matching TT, where a localized
+# scope (INCLUDE/MACRO/WRAPPER pushes one) shadows rather than mutating the caller,
+# while same-template SETs (FOREACH pushes no frame) all share the one frame.
+func set_var(scalar $stash, str $name, scalar $value) void {
+    set_local($stash, $name, $value);
+}
+
+func is_int_key(str $key) int { return re::match($key, "^-?[0-9]+$"); }
+
+# TT auto-invokes a stored code ref on access.
+func auto_call(scalar $v, scalar $args) scalar {
+    if (defined($v) && ref($v) eq "CODE") {
+        if (defined($args) && size(@{$args}) > 0) { return $v->(...@{$args}); }
+        return $v->();
+    }
+    return $v;
+}
+
+# Dynamic method call on a blessed object: $obj->$name(@args).
+func invoke_method(scalar $obj, str $name, scalar $args) scalar {
+    if (defined($args) && size(@{$args}) > 0) { return $obj->$name(...@{$args}); }
+    return $obj->$name();
+}
+
+# The polymorphic dot step. (P3 replaces the three vmethod fallbacks below with
+# Template::VMethods::dispatch calls.)
+func dot(scalar $obj, str $key, scalar $args, scalar $stash) scalar {
+    if (!defined($obj)) {
+        if (is_strict($stash) == 1) { throw(Template::Exception::make("undef", $key)); }
+        return undef;
+    }
+    # USE plugin instances dispatch their methods through the plugin framework.
+    if (ref($obj) eq "HASH" && exists(%{$obj}, "__plugin__")) {
+        return Template::Plugins::method($obj, $key, $args);
+    }
+    my str $r = ref($obj);
+    my str $cls = blessed($obj);
+    if (length($cls) > 0) {
+        if (can($obj, $key) == 1) { return invoke_method($obj, $key, $args); }
+        if ($r eq "HASH" && exists(%{$obj}, $key)) { return auto_call($obj->{$key}, $args); }
+        return vmethod("hash", $obj, $key, $args, $stash);
+    }
+    if ($r eq "HASH") {
+        if (exists(%{$obj}, $key)) { return auto_call($obj->{$key}, $args); }
+        return vmethod("hash", $obj, $key, $args, $stash);
+    }
+    if ($r eq "ARRAY") {
+        if (is_int_key($key) == 1) {
+            my int $len = size(@{$obj});
+            my int $idx = $key + 0;
+            if ($idx < 0) { $idx = $len + $idx; }
+            if ($idx >= 0 && $idx < $len) { return $obj->[$idx]; }
+            return undef;
+        }
+        return vmethod("list", $obj, $key, $args, $stash);
+    }
+    return vmethod("scalar", $obj, $key, $args, $stash);
+}
+
+# Virtual-method fallback: consult the scalar/list/hash vmethod tables. An
+# unknown method yields undef (and, under STRICT, an undef error).
+func vmethod(str $vtype, scalar $obj, str $key, scalar $args, scalar $stash) scalar {
+    my scalar $v = Template::VMethods::dispatch($vtype, $obj, $key, $args, $stash);
+    if (defined($v)) { return $v; }
+    if (is_strict($stash) == 1) { throw(Template::Exception::make("undef", $key)); }
+    return $v;
+}
+
+# TT truthiness: undef / "" / "0" / empty list / empty hash are false.
+func is_true(scalar $v) int {
+    if (!defined($v)) { return 0; }
+    my str $r = ref($v);
+    if ($r eq "ARRAY") { return (size(@{$v}) > 0) ? 1 : 0; }
+    if ($r eq "HASH")  { return (size(keys(%{$v})) > 0) ? 1 : 0; }
+    if (length(blessed($v)) > 0) { return 1; }
+    my str $s = "" . $v;
+    if ($s eq "" || $s eq "0") { return 0; }
+    return 1;
+}
+
+# Render a value as output text (undef -> "").
+func as_text(scalar $v) str {
+    if (!defined($v)) { return ""; }
+    my str $r = ref($v);
+    if ($r eq "ARRAY") {
+        my str $out = "";
+        my int $i = 0;
+        while ($i < size(@{$v})) { $out = $out . as_text($v->[$i]); $i = $i + 1; }
+        return $out;
+    }
+    if ($r eq "HASH") {
+        # a TT exception stringifies as "type error - info"
+        if (exists(%{$v}, "__tt_exception__")) { return Template::Exception::as_string($v); }
+        # a String plugin object stringifies to its text
+        if (exists(%{$v}, "__strval__")) { return "" . $v->{"__strval__"}; }
+        return "";
+    }
+    return "" . $v;
+}

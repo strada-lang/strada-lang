@@ -1,0 +1,12 @@
+use Template;
+func main() int {
+    # Inline passthrough (no directives yet — P0).
+    my str $out = Template::render("Hello, plain text.\nLine two.\n", {});
+    say("INLINE=[" . $out . "]");
+
+    # File via INCLUDE_PATH.
+    my scalar $tt = Template::new({"INCLUDE_PATH" => "/tmp/ttp0"});
+    my str $f = $tt->process("a.tt", {});
+    say("FILE=[" . $f . "]");
+    return 0;
+}

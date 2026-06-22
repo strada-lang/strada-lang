@@ -1,0 +1,1 @@
+[% s.length %]|[% s.upper %]|[% s.lower %]|[% s.ucfirst %]|[% s.replace("o","0") %]|[% s.remove("o") %]|[% s.split(" ").join("-") %]|[% s.substr(0,5) %]|[% s.substr(6) %]

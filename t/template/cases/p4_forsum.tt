@@ -1,0 +1,1 @@
+[% total = 0 %][% FOREACH n IN nums %][% total = total + n %][% END %][% total %]

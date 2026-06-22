@@ -1,0 +1,1 @@
+[% user.name = "Ada"; user.age = 36 %][% user.name %]/[% user.age %]

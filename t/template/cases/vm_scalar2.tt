@@ -1,0 +1,1 @@
+[% x.repeat(3) %]|[% s.search("World") %]|[% s.search("xyz") %]|[% pad.trim %]|[% ws.collapse %]|[% s.chunk(3).join("-") %]

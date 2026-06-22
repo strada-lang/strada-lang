@@ -1,0 +1,1 @@
+[% IF n == 1 %]1[% ELSIF n == 2 %]2[% ELSE %]other[% END %]

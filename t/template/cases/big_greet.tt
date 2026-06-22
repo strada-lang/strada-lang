@@ -1,0 +1,4 @@
+[% DEFAULT greeting = "Hello" -%]
+[% FOREACH name IN names -%]
+[% greeting %], [% name | ucfirst %][% loop.last ? "!" : ";" %]
+[% END -%]

@@ -1,0 +1,1 @@
+[% words.sort.join(",") %]|[% dups.unique.join(",") %]|[% list.grep("1").join(",") %]|[% words.first(2).join(",") %]|[% list.slice(1,2).join(",") %]|[% list.item(2) %]|[% words.last(2).join(",") %]|[% list.merge([99]).join(",") %]

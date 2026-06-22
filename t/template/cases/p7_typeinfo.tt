@@ -1,0 +1,1 @@
+[% TRY %][% THROW foo "boom" %][% CATCH %]t=[% error.type %] i=[% error.info %][% END %]

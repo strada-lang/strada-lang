@@ -1,0 +1,1 @@
+[% TRY %][% THROW foo "bar" %][% CATCH foo %]e=[% error %][% END %]

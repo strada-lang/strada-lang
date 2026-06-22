@@ -1,0 +1,1 @@
+[% words.join.length %]|[% s.split(" ").size %]|[% s.lower.ucfirst %]|[% list.reverse.first %]

@@ -1,0 +1,1 @@
+[% SWITCH x %][% CASE ["a","b"] %]inlist[% CASE %]no[% END %]

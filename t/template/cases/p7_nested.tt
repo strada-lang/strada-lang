@@ -1,0 +1,1 @@
+[% TRY %][% TRY %][% THROW inner "x" %][% CATCH bar %]nope[% END %][% CATCH %]outer:[% error.type %][% END %]

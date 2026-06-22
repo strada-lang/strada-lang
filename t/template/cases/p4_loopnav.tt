@@ -1,0 +1,1 @@
+[% FOREACH i IN items %][% loop.prev %]<[% i %]>[% loop.next %]/[% loop.size %]/[% loop.max %]/[% loop.odd %][% loop.even %] [% END %]

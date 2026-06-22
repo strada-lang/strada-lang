@@ -1,0 +1,110 @@
+# lib/Template/Filters.strada — TT output filters, applied via `expr | name(args)`,
+# the `expr FILTER name` infix, or the `[% FILTER name %]...[% END %]` block. A
+# filter takes the already-stringified text plus its (evaluated) args and returns
+# new text. Static filters ignore args; dynamic ones (repeat/replace/truncate/
+# indent/format/...) consume them. Behaviour matched to Perl TT 3.106.
+
+package Template::Filters;
+
+func apply(str $name, scalar $args, str $text, scalar $stash) str {
+    # --- static text filters ---
+    if ($name eq "html" || $name eq "html_entity") { return Template::VMethods::html_escape($text); }
+    if ($name eq "xml")      { return Template::VMethods::xml_escape($text); }
+    if ($name eq "upper")    { return uc($text); }
+    if ($name eq "lower")    { return lc($text); }
+    if ($name eq "ucfirst")  { return Template::VMethods::ucfirst_str($text); }
+    if ($name eq "lcfirst")  { return Template::VMethods::lcfirst_str($text); }
+    if ($name eq "trim")     { return trim($text); }
+    if ($name eq "collapse") { return re::replace_all(trim($text), "\\s+", " "); }
+    if ($name eq "uri")      { return percent_encode($text, 0); }
+    if ($name eq "url")      { return percent_encode($text, 1); }
+    if ($name eq "null")     { return ""; }
+    if ($name eq "none")     { return $text; }
+    # --- dynamic (arg-taking) filters ---
+    if ($name eq "repeat")   { return Template::VMethods::str_repeat($text, arg_int($args, 0, 1)); }
+    if ($name eq "replace")  { return re::replace_all($text, arg_str($args, 0, ""), arg_str($args, 1, "")); }
+    if ($name eq "remove")   { return re::replace_all($text, arg_str($args, 0, ""), ""); }
+    if ($name eq "format")   { return sprintf(arg_str($args, 0, "%s"), $text); }
+    if ($name eq "truncate") { return filter_truncate($text, arg_int($args, 0, 32), arg_str($args, 1, "...")); }
+    if ($name eq "indent")   { return filter_indent($text, $args); }
+    throw(Template::Exception::make("filter", $name . ": filter not found"));
+}
+
+# ---- arg helpers -----------------------------------------------------------
+func argc(scalar $args) int { return defined($args) ? size(@{$args}) : 0; }
+func arg(scalar $args, int $i) scalar {
+    if (!defined($args) || $i >= size(@{$args})) { return undef; }
+    return $args->[$i];
+}
+func arg_int(scalar $args, int $i, int $def) int {
+    my scalar $v = arg($args, $i);
+    return defined($v) ? (("" . $v) + 0) : $def;
+}
+func arg_str(scalar $args, int $i, str $def) str {
+    my scalar $v = arg($args, $i);
+    return defined($v) ? ("" . $v) : $def;
+}
+
+# ---- truncate / indent -----------------------------------------------------
+# Keep at most $len chars; if longer, cut to ($len - len(suffix)) and append suffix.
+func filter_truncate(str $text, int $len, str $suffix) str {
+    if (length($text) <= $len) { return $text; }
+    my int $keep = $len - length($suffix);
+    if ($keep < 0) { $keep = 0; }
+    return substr($text, 0, $keep) . $suffix;
+}
+
+# Prefix every line with $pad: an all-digits arg => that many spaces; else literal.
+func filter_indent(str $text, scalar $args) str {
+    my str $pad = "  ";
+    if (argc($args) >= 1) {
+        my str $a = "" . arg($args, 0);
+        if (re::match($a, "^[0-9]+$") == 1) { $pad = Template::VMethods::str_repeat(" ", $a + 0); }
+        else { $pad = $a; }
+    }
+    my array @lines = split("\n", $text);
+    my str $out = "";
+    my int $i = 0;
+    while ($i < size(@lines)) {
+        if ($i > 0) { $out = $out . "\n"; }
+        $out = $out . $pad . $lines[$i];
+        $i = $i + 1;
+    }
+    return $out;
+}
+
+# ---- percent-encoding (uri / url) ------------------------------------------
+func is_alnum(str $c) int {
+    return (($c ge "a" && $c le "z") || ($c ge "A" && $c le "Z") || ($c ge "0" && $c le "9")) ? 1 : 0;
+}
+# url mode keeps the URI-structural punctuation in addition to the unreserved set.
+func is_safe(str $c, int $url_mode) int {
+    if (is_alnum($c) == 1) { return 1; }
+    if (index("-_.~", $c) >= 0) { return 1; }
+    if ($url_mode == 1 && index("/?=&+:@;$,", $c) >= 0) { return 1; }
+    return 0;
+}
+func percent_encode(str $text, int $url_mode) str {
+    my str $out = "";
+    my int $i = 0;
+    my int $n = length($text);
+    while ($i < $n) {
+        my str $c = substr($text, $i, 1);
+        if (is_safe($c, $url_mode) == 1) { $out = $out . $c; }
+        else { $out = $out . encode_cp(ord($c)); }
+        $i = $i + 1;
+    }
+    return $out;
+}
+# Percent-encode a Unicode codepoint as its UTF-8 bytes (%XX each, uppercase).
+func encode_cp(int $cp) str {
+    if ($cp < 128) { return "%" . sprintf("%02X", $cp); }
+    if ($cp < 2048) {
+        return pct(192 + ($cp / 64)) . pct(128 + ($cp % 64));
+    }
+    if ($cp < 65536) {
+        return pct(224 + ($cp / 4096)) . pct(128 + (($cp / 64) % 64)) . pct(128 + ($cp % 64));
+    }
+    return pct(240 + ($cp / 262144)) . pct(128 + (($cp / 4096) % 64)) . pct(128 + (($cp / 64) % 64)) . pct(128 + ($cp % 64));
+}
+func pct(int $b) str { return "%" . sprintf("%02X", $b); }

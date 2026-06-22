@@ -1,0 +1,230 @@
+# lib/Template.strada — a Strada port of Perl's Template::Toolkit (TT2/TT3).
+#
+# Public API mirrors Perl:
+#     my $tt  = Template::new({ INCLUDE_PATH => "tpl", STRICT => 0, ... });
+#     my $out = $tt->process("page.tt", { name => "World" });   # file (via INCLUDE_PATH)
+#     my $out = $tt->process_string("[% name %]", { name => ... });  # inline string
+#
+# This is the facade (≈ TT's Template + Service + Provider): config, template
+# loading + caching, and the compile→execute pipeline. The pieces it drives —
+# Lexer, Parser, Stash/dot-operator, vmethods, filters, interpreter, plugins —
+# arrive in later phases and are `use`d here. Forma.strada is the structural
+# model (two-tier compile/execute + text/AST cache); Eval.strada the runtime model.
+#
+# Status: COMPLETE (P0-P9) — a faithful Template::Toolkit (TT2) port: lexer,
+# expression engine, polymorphic dot-operator + virtual methods, control
+# directives, filters, composition (BLOCK/INCLUDE/PROCESS/WRAPPER/MACRO),
+# TRY/CATCH/THROW + STRICT, the USE plugin framework + starter plugins, and the
+# config tail. AST compile-once caching (shared by process() + INCLUDE). Validated
+# byte-identical against Perl TT 3.106 across the t/template/ differential corpus.
+# Docs: docs/TEMPLATE_TOOLKIT.md. Deferred: PERL/VIEW, mid-template TAGS, the
+# broad third-party plugin set (see the docs).
+
+use Template::Exception;
+use Template::Lexer;
+use Template::Stash;
+use Template::VMethods;
+use Template::Filters;
+use Template::Plugins;
+use Template::Expr;
+use Template::Parser;
+use Template::Interp;
+
+package Template;
+
+# --- module state (Forma's cache pattern) ----------------------------------
+my hash %g_tt_text_cache = ();    # template name -> raw source text
+my hash %g_tt_ast_cache  = ();    # template name -> compiled node list
+my hash %g_tt_path_cache = ();    # template name -> resolved file path
+my hash %g_tt_mtime_cache = ();   # template name -> file mtime at load time
+my int  $g_tt_cache_enabled = 1;
+my int  $g_tt_stat_check = 1;     # re-stat cached files and invalidate on change
+
+# Template::new(config) -> blessed Template object. $config is a hashref of TT
+# options (undef = defaults). INCLUDE_PATH may be a string (colon-separated) or
+# an arrayref of directories; it's normalized to an arrayref here.
+func new(scalar $config) scalar {
+    my hash %self = ();
+    if (!defined($config)) { $config = {}; }
+    $self{"config"} = $config;
+
+    my scalar $ip = $config->{"INCLUDE_PATH"};
+    my array @paths = ();
+    if (!defined($ip)) {
+        push(@paths, ".");
+    } elsif (ref($ip) eq "ARRAY") {
+        @paths = @{$ip};
+    } else {
+        foreach my str $p (split(":", "" . $ip)) {
+            if (length($p) > 0) { push(@paths, $p); }
+        }
+        if (size(@paths) == 0) { push(@paths, "."); }
+    }
+    $self{"include_path"} = \@paths;
+
+    my scalar $r = \%self;
+    bless($r, "Template");
+    return $r;
+}
+
+# --- config accessors -------------------------------------------------------
+func config(scalar $self) scalar { return $self->{"config"}; }
+func conf_int(scalar $self, str $key, int $def) int {
+    my scalar $v = $self->{"config"}->{$key};
+    return defined($v) ? ($v + 0) : $def;
+}
+func conf_str(scalar $self, str $key, str $def) str {
+    my scalar $v = $self->{"config"}->{$key};
+    return defined($v) ? ("" . $v) : $def;
+}
+
+# --- public process methods -------------------------------------------------
+# Process a template FILE (resolved through INCLUDE_PATH) with $vars.
+func process(scalar $self, str $name, scalar $vars) str {
+    my str $text = provider_load($self, $name);
+    return run($self, $name, $text, $vars);
+}
+
+# Process an inline template STRING with $vars (no file lookup, not cached).
+func process_string(scalar $self, str $template, scalar $vars) str {
+    return run($self, "", $template, $vars);
+}
+
+# --- internal pipeline ------------------------------------------------------
+# compile (cached by name) then execute against a context built from $vars.
+func run(scalar $self, str $name, str $text, scalar $vars) str {
+    my scalar $ast = compile_cached($self, $name, $text);
+    if (!defined($vars)) { $vars = {}; }
+    return execute($self, $ast, $vars);
+}
+
+# Compile once per template name, reusing the cached AST on later calls (used by
+# both top-level process() and INCLUDE/PROCESS/WRAPPER). Anonymous strings
+# (name == "") are never cached.
+func compile_cached(scalar $self, str $name, str $text) scalar {
+    my int $cacheable = (length($name) > 0 && $g_tt_cache_enabled == 1) ? 1 : 0;
+    if ($cacheable == 1 && exists(%g_tt_ast_cache, $name)) { return $g_tt_ast_cache{$name}; }
+    my scalar $ast = compile($self, $text);
+    if ($cacheable == 1) { $g_tt_ast_cache{$name} = $ast; }
+    return $ast;
+}
+
+# Load a template file by searching INCLUDE_PATH (cached by name). When the cache
+# is warm, the file's mtime is re-checked; if it changed on disk, the stale text
+# AND compiled AST for that name are evicted so it is reloaded + recompiled.
+# Throws a TT 'file' exception when not found.
+func provider_load(scalar $self, str $name) str {
+    if ($g_tt_cache_enabled == 1 && exists(%g_tt_text_cache, $name)) {
+        if (cache_fresh($name) == 1) { return $g_tt_text_cache{$name}; }
+        invalidate($name);                       # mtime changed -> drop text + AST, reload below
+    }
+    my scalar $paths = $self->{"include_path"};
+    my int $i = 0;
+    while ($i < size(@{$paths})) {
+        my str $full = $paths->[$i] . "/" . $name;
+        if (core::is_file($full)) {
+            my str $text = slurp($full);
+            if ($g_tt_cache_enabled == 1) {
+                $g_tt_text_cache{$name} = $text;
+                $g_tt_path_cache{$name} = $full;
+                $g_tt_mtime_cache{$name} = file_mtime($full);
+            }
+            return $text;
+        }
+        $i = $i + 1;
+    }
+    throw(Template::Exception::make("file", $name . ": not found"));
+}
+
+# A cached entry is fresh when stat checking is off, or the recorded path still
+# has the same mtime it had at load time. A vanished/changed file => not fresh.
+func cache_fresh(str $name) int {
+    if ($g_tt_stat_check == 0) { return 1; }
+    if (!exists(%g_tt_path_cache, $name)) { return 1; }
+    return (file_mtime($g_tt_path_cache{$name}) == ($g_tt_mtime_cache{$name} // -1)) ? 1 : 0;
+}
+
+# Drop every cached artifact for one template name.
+func invalidate(str $name) void {
+    delete(%g_tt_text_cache, $name);
+    delete(%g_tt_ast_cache, $name);
+    delete(%g_tt_path_cache, $name);
+    delete(%g_tt_mtime_cache, $name);
+}
+
+# File mtime in seconds, or -1 if the path can't be stat'd.
+func file_mtime(str $path) int {
+    my scalar $st = core::stat($path);
+    if (!defined($st)) { return -1; }
+    return ($st->{"mtime"} // -1) + 0;
+}
+
+# --- compile / execute ------------------------------------------------------
+# compile(): lex the source into TEXT/DIRECTIVE chunks (chomping applied), then
+# parse the chunk stream into a directive/expression AST.
+func compile(scalar $self, str $text) scalar {
+    my scalar $style = tag_style(conf_str($self, "TAG_STYLE", "template"));
+    my str $start = conf_str($self, "START_TAG", $style->[0]);
+    my str $end   = conf_str($self, "END_TAG", $style->[1]);
+    my int $pre   = conf_int($self, "PRE_CHOMP", 0);
+    my int $post  = conf_int($self, "POST_CHOMP", 0);
+    my scalar $chunks = Template::Lexer::tokenize($text, $start, $end, $pre, $post);
+    return Template::Parser::parse_template($chunks);
+}
+
+# TAG_STYLE name -> [start, end] delimiters.
+func tag_style(str $name) scalar {
+    if ($name eq "star")     { my array @s = ("[*", "*]"); return \@s; }
+    if ($name eq "php")      { my array @s = ("<?", "?>"); return \@s; }
+    if ($name eq "asp")      { my array @s = ("<%", "%>"); return \@s; }
+    if ($name eq "mason")    { my array @s = ("<%", "%>"); return \@s; }
+    if ($name eq "metatext") { my array @s = ("%%", "%%"); return \@s; }
+    if ($name eq "html")     { my array @s = ("<!--", "-->"); return \@s; }
+    my array @s = ("[%", "%]");                      # template (default)
+    return \@s;
+}
+
+# execute(): build a stash from $vars and interpret the node list. STOP/RETURN
+# (and any stray loop signal) at the top level halt processing but keep whatever
+# output was produced; real exceptions propagate.
+func execute(scalar $self, scalar $nodes, scalar $vars) str {
+    my int $strict = conf_int($self, "STRICT", 0);
+    my scalar $stash = Template::Stash::stash_new($vars, $strict);
+    # runtime context carried on the stash (out of band of template vars):
+    # the engine (for INCLUDE/MACRO), the hoisted BLOCK table, and recursion depth.
+    $stash->{"__tt__"} = $self;
+    my hash %blocks = ();
+    $stash->{"__blocks__"} = \%blocks;
+    $stash->{"__depth__"} = 0;
+    $stash->{"__maxrec__"} = conf_int($self, "MAX_RECURSION", 100);
+    Template::Interp::register_blocks($nodes, \%blocks);
+    my scalar $sb = sb::new();
+    try {
+        Template::Interp::exec_into($self, $nodes, $stash, $sb);
+    } catch ($sig) {
+        if (Template::Exception::is_any_signal($sig) == 0) {
+            sb::free($sb);
+            throw($sig);
+        }
+    }
+    my str $out = sb::to_string($sb);
+    sb::free($sb);
+    return $out;
+}
+
+# Toggle compiled-template caching (off for dev so edits are picked up).
+func set_cache(int $enabled) void { $g_tt_cache_enabled = $enabled; }
+func clear_cache() void {
+    %g_tt_text_cache = (); %g_tt_ast_cache = ();
+    %g_tt_path_cache = (); %g_tt_mtime_cache = ();
+}
+# Toggle file-mtime re-checking on cached loads. On (default): a file edited on
+# disk is reloaded + recompiled automatically. Off: cache lives for the process
+# (one fewer stat() per cached load).
+func set_stat_check(int $enabled) void { $g_tt_stat_check = $enabled; }
+
+# One-shot convenience: render an inline template with no explicit object.
+func render(str $template, scalar $vars) str {
+    my scalar $tt = Template::new({});
+    return $tt->process_string($template, $vars);
+}

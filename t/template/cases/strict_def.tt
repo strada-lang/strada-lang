@@ -1,0 +1,1 @@
+[% TRY %][% defvar %]ok[% CATCH %]err[% END %]

@@ -1,0 +1,71 @@
+# Differential test runner for the Template (TT2) port. For every <case>.tt in
+# the corpus dir, render it through the Strada engine with vars from <case>.json
+# and assert the output equals <case>.expected (the golden output produced by
+# real Perl TT via tt_ref.pl). Prints a per-case ok/FAIL line and a summary;
+# exits non-zero if any case differs.
+#
+#   strada -L ./lib -r t/template/run.strada [corpus_dir]
+
+use Template;
+use JSON;
+
+func base_name(str $path) str {
+    my int $slash = rindex($path, "/");
+    my str $b = ($slash >= 0) ? substr($path, $slash + 1, length($path) - $slash - 1) : $path;
+    my int $blen = length($b);
+    if ($blen > 3 && substr($b, $blen - 3, 3) eq ".tt") { $b = substr($b, 0, $blen - 3); }
+    return $b;
+}
+
+func main(int $argc, array @argv) int {
+    my str $dir = ($argc > 1) ? $argv[1] : "t/template/cases";
+    my array @tts = core::glob($dir . "/*.tt");
+
+    my int $pass = 0;
+    my int $fail = 0;
+    foreach my str $ttpath (@tts) {
+        my str $base = base_name($ttpath);
+        my str $expected = slurp($dir . "/" . $base . ".expected");
+
+        my scalar $vars = {};
+        my str $jf = $dir . "/" . $base . ".json";
+        if (core::is_file($jf)) {
+            my str $jtxt = slurp($jf);
+            if (length(trim($jtxt)) > 0) { $vars = JSON::decode($jtxt); }
+        }
+
+        my str $actual = "";
+        try {
+            my hash %cfg = ();
+            $cfg{"INCLUDE_PATH"} = $dir;
+            if (length($base) >= 7 && substr($base, 0, 7) eq "strict_") { $cfg{"STRICT"} = 1; }
+            my str $cf = $dir . "/" . $base . ".cfg";
+            if (core::is_file($cf)) {
+                my scalar $extra = JSON::decode(slurp($cf));
+                foreach my str $k (keys(%{$extra})) { $cfg{$k} = $extra->{$k}; }
+            }
+            my scalar $tt = Template::new(\%cfg);
+            $actual = $tt->process($base . ".tt", $vars);
+        } catch ($e) {
+            if (Template::Exception::is_exception($e)) {
+                $actual = "STRADA-ERROR: " . Template::Exception::as_string($e);
+            } else {
+                $actual = "STRADA-ERROR: " . ("" . $e);
+            }
+        }
+
+        if ($actual eq $expected) {
+            $pass = $pass + 1;
+            say("ok   " . $base);
+        } else {
+            $fail = $fail + 1;
+            say("FAIL " . $base);
+            say("  expected=[" . $expected . "]");
+            say("  actual  =[" . $actual . "]");
+        }
+    }
+
+    say("------------------------------------");
+    say("" . $pass . " passed, " . $fail . " failed (" . size(@tts) . " cases)");
+    return ($fail == 0) ? 0 : 1;
+}

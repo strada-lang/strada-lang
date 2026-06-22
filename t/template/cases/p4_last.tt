@@ -1,0 +1,1 @@
+[% FOREACH i IN items %][% i %][% LAST IF loop.count == 2 %][% END %]

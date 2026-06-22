@@ -1,0 +1,1 @@
+[% MACRO hi(who) BLOCK %]Hello [% who %][% END %][% hi("Bob") %]/[% hi("Sue") %]

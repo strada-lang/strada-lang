@@ -1,0 +1,1 @@
+[% FOREACH i IN items %][% i | ucfirst %] [% END %]

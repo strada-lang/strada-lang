@@ -1,0 +1,1 @@
+[% FOREACH p IN people %][% p.name %]=[% p.age %] [% END %]

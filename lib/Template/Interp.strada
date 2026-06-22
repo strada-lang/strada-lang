@@ -1,0 +1,483 @@
+# lib/Template/Interp.strada — the directive interpreter. Walks a node list and
+# appends output to a StringBuilder buffer ($sb), so text produced before a
+# NEXT/LAST is preserved when the signal unwinds. Control flow (NEXT/LAST/STOP/
+# RETURN) travels as thrown signal hashrefs (Template::Exception::signal); the
+# loop executors catch next/last and re-throw anything else.
+
+package Template::Interp;
+
+func exec_into(scalar $tt, scalar $nodes, scalar $stash, scalar $sb) void {
+    my int $i = 0;
+    while ($i < size(@{$nodes})) {
+        my scalar $node = $nodes->[$i];
+        my str $t = $node->{"t"};
+        if ($t eq "text") {
+            sb::append($sb, $node->{"s"});
+        } elsif ($t eq "get") {
+            my scalar $v = Template::Expr::eval_node($node->{"expr"}, $stash);
+            if (is_macro($v) == 1) { sb::append($sb, invoke_macro($tt, $v, undef, $stash)); }
+            else { sb::append($sb, Template::Stash::as_text($v)); }
+        } elsif ($t eq "call") {
+            Template::Expr::eval_node($node->{"expr"}, $stash);
+        } elsif ($t eq "set") {
+            exec_set($node, $stash, 0);
+        } elsif ($t eq "default") {
+            exec_set($node, $stash, 1);
+        } elsif ($t eq "if") {
+            exec_if($tt, $node, $stash, $sb);
+        } elsif ($t eq "foreach") {
+            exec_foreach($tt, $node, $stash, $sb);
+        } elsif ($t eq "while") {
+            exec_while($tt, $node, $stash, $sb);
+        } elsif ($t eq "switch") {
+            exec_switch($tt, $node, $stash, $sb);
+        } elsif ($t eq "filterblock") {
+            exec_filterblock($tt, $node, $stash, $sb);
+        } elsif ($t eq "blockdef") {
+            # named-block definition: registered in the hoist pass, no inline output
+        } elsif ($t eq "macrodef") {
+            Template::Stash::set_var($stash, $node->{"name"}, make_macro($node));
+        } elsif ($t eq "include") {
+            exec_include($tt, $node, $stash, $sb, 0);
+        } elsif ($t eq "process") {
+            exec_include($tt, $node, $stash, $sb, 1);
+        } elsif ($t eq "insert") {
+            exec_insert($tt, $node, $stash, $sb);
+        } elsif ($t eq "wrapper") {
+            exec_wrapper($tt, $node, $stash, $sb);
+        } elsif ($t eq "use") {
+            exec_use($node, $stash);
+        } elsif ($t eq "meta") {
+            exec_meta($node, $stash);
+        } elsif ($t eq "try") {
+            exec_try($tt, $node, $stash, $sb);
+        } elsif ($t eq "throw") {
+            throw(Template::Exception::make($node->{"type"},
+                Template::Stash::as_text(Template::Expr::eval_node($node->{"info"}, $stash))));
+        } elsif ($t eq "next") {
+            throw(Template::Exception::signal("next", undef));
+        } elsif ($t eq "last") {
+            throw(Template::Exception::signal("last", undef));
+        } elsif ($t eq "stop") {
+            throw(Template::Exception::signal("stop", undef));
+        } elsif ($t eq "return") {
+            throw(Template::Exception::signal("return", undef));
+        } elsif ($t eq "clear") {
+            sb::clear($sb);
+        }
+        $i = $i + 1;
+    }
+}
+
+# ---- SET / DEFAULT ---------------------------------------------------------
+func exec_set(scalar $node, scalar $stash, int $is_default) void {
+    my scalar $assigns = $node->{"assigns"};
+    my int $i = 0;
+    while ($i < size(@{$assigns})) {
+        my scalar $a = $assigns->[$i];
+        my scalar $path = $a->{"path"};
+        if ($is_default == 1) {
+            if (Template::Stash::is_true(navigate_path($stash, $path)) == 0) {
+                set_path($stash, $path, Template::Expr::eval_node($a->{"expr"}, $stash));
+            }
+        } else {
+            set_path($stash, $path, Template::Expr::eval_node($a->{"expr"}, $stash));
+        }
+        $i = $i + 1;
+    }
+}
+
+# Assign $value at a dotted path, autovivifying intermediate hashes.
+func set_path(scalar $stash, scalar $path, scalar $value) void {
+    if (size(@{$path}) == 1) { Template::Stash::set_var($stash, $path->[0], $value); return; }
+    my str $root_name = $path->[0];
+    my scalar $root = Template::Stash::get_root($stash, $root_name);
+    if (!defined($root) || ref($root) ne "HASH") { my hash %nh = (); $root = \%nh; Template::Stash::set_var($stash, $root_name, $root); }
+    my scalar $cur = $root;
+    my int $last = size(@{$path}) - 1;
+    my int $i = 1;
+    while ($i < $last) {
+        my str $k = $path->[$i];
+        my scalar $nxt = $cur->{$k};
+        if (!defined($nxt) || ref($nxt) ne "HASH") { my hash %nh = (); $nxt = \%nh; $cur->{$k} = $nxt; }
+        $cur = $nxt;
+        $i = $i + 1;
+    }
+    $cur->{$path->[$last]} = $value;
+}
+
+# Read the current value at a dotted path (for DEFAULT's "is it set?" test).
+func navigate_path(scalar $stash, scalar $path) scalar {
+    my scalar $cur = Template::Stash::get_root($stash, $path->[0]);
+    my int $i = 1;
+    while ($i < size(@{$path}) && defined($cur)) {
+        $cur = Template::Stash::dot($cur, $path->[$i], undef, $stash);
+        $i = $i + 1;
+    }
+    return $cur;
+}
+
+# ---- IF / UNLESS -----------------------------------------------------------
+func exec_if(scalar $tt, scalar $node, scalar $stash, scalar $sb) void {
+    my scalar $branches = $node->{"branches"};
+    my int $i = 0;
+    while ($i < size(@{$branches})) {
+        my scalar $b = $branches->[$i];
+        if (Template::Stash::is_true(Template::Expr::eval_node($b->{"cond"}, $stash)) == 1) {
+            exec_into($tt, $b->{"body"}, $stash, $sb);
+            return;
+        }
+        $i = $i + 1;
+    }
+    if (defined($node->{"else"})) { exec_into($tt, $node->{"else"}, $stash, $sb); }
+}
+
+# ---- FOREACH ---------------------------------------------------------------
+func exec_foreach(scalar $tt, scalar $node, scalar $stash, scalar $sb) void {
+    my scalar $items = to_iter_list(Template::Expr::eval_node($node->{"list"}, $stash));
+    my int $n = size(@{$items});
+    my scalar $var = $node->{"var"};
+    my scalar $saved_loop = Template::Stash::get_root($stash, "loop");
+    my int $i = 0;
+    my int $stop = 0;
+    while ($i < $n && $stop == 0) {
+        my scalar $item = $items->[$i];
+        if (defined($var)) { Template::Stash::set_local($stash, $var, $item); }
+        else { foreach_no_var($stash, $item); }
+        Template::Stash::set_local($stash, "loop", make_loop($items, $i, $n));
+        my int $brk = 0;
+        try {
+            exec_into($tt, $node->{"body"}, $stash, $sb);
+        } catch ($sig) {
+            if (Template::Exception::is_signal($sig, "next") == 1) { }
+            elsif (Template::Exception::is_signal($sig, "last") == 1) { $brk = 1; }
+            else { Template::Stash::set_local($stash, "loop", $saved_loop); throw($sig); }
+        }
+        if ($brk == 1) { $stop = 1; }
+        $i = $i + 1;
+    }
+    Template::Stash::set_local($stash, "loop", $saved_loop);
+}
+
+# FOREACH with no loop var: a hash item exposes its keys directly in the stash.
+func foreach_no_var(scalar $stash, scalar $item) void {
+    if (defined($item) && ref($item) eq "HASH") {
+        foreach my str $k (keys(%{$item})) { Template::Stash::set_local($stash, $k, $item->{$k}); }
+    }
+}
+
+func to_iter_list(scalar $v) scalar {
+    if (!defined($v)) { my array @e = (); return \@e; }
+    if (ref($v) eq "ARRAY") { return $v; }
+    my array @one = ($v);
+    return \@one;
+}
+
+# The TT `loop` iterator variable for the current iteration.
+func make_loop(scalar $items, int $i, int $n) scalar {
+    my hash %l = ();
+    $l{"index"} = $i;
+    $l{"count"} = $i + 1;
+    $l{"max"} = $n - 1;
+    $l{"size"} = $n;
+    $l{"first"} = ($i == 0) ? 1 : 0;
+    $l{"last"}  = ($i == $n - 1) ? 1 : 0;
+    my int $c = $i + 1;
+    $l{"odd"}  = ($c % 2 == 1) ? 1 : 0;
+    $l{"even"} = ($c % 2 == 0) ? 1 : 0;
+    $l{"parity"} = ($c % 2 == 1) ? "odd" : "even";
+    $l{"prev"} = ($i > 0) ? $items->[$i - 1] : undef;
+    $l{"next"} = ($i < $n - 1) ? $items->[$i + 1] : undef;
+    return \%l;
+}
+
+# ---- WHILE -----------------------------------------------------------------
+func exec_while(scalar $tt, scalar $node, scalar $stash, scalar $sb) void {
+    my int $guard = 0;
+    my int $stop = 0;
+    while ($stop == 0 && Template::Stash::is_true(Template::Expr::eval_node($node->{"cond"}, $stash)) == 1) {
+        $guard = $guard + 1;
+        if ($guard > 100000) { throw(Template::Exception::make("while", "iteration limit exceeded")); }
+        my int $brk = 0;
+        try {
+            exec_into($tt, $node->{"body"}, $stash, $sb);
+        } catch ($sig) {
+            if (Template::Exception::is_signal($sig, "next") == 1) { }
+            elsif (Template::Exception::is_signal($sig, "last") == 1) { $brk = 1; }
+            else { throw($sig); }
+        }
+        if ($brk == 1) { $stop = 1; }
+    }
+}
+
+# ---- FILTER block ----------------------------------------------------------
+# Render the body to a temporary buffer, then run the filter over that text.
+func exec_filterblock(scalar $tt, scalar $node, scalar $stash, scalar $sb) void {
+    my scalar $inner = sb::new();
+    exec_into($tt, $node->{"body"}, $stash, $inner);
+    my str $text = sb::to_string($inner);
+    sb::free($inner);
+    my scalar $args = defined($node->{"args"}) ? Template::Expr::eval_args($node->{"args"}, $stash) : undef;
+    sb::append($sb, Template::Filters::apply($node->{"name"}, $args, $text, $stash));
+}
+
+# ---- SWITCH / CASE ---------------------------------------------------------
+func exec_switch(scalar $tt, scalar $node, scalar $stash, scalar $sb) void {
+    my scalar $val = Template::Expr::eval_node($node->{"expr"}, $stash);
+    my scalar $cases = $node->{"cases"};
+    my scalar $defaultbody = undef;
+    my int $i = 0;
+    while ($i < size(@{$cases})) {
+        my scalar $c = $cases->[$i];
+        if (!defined($c->{"match"})) {
+            $defaultbody = $c->{"body"};
+        } else {
+            if (case_matches($val, Template::Expr::eval_node($c->{"match"}, $stash)) == 1) {
+                exec_into($tt, $c->{"body"}, $stash, $sb);
+                return;
+            }
+        }
+        $i = $i + 1;
+    }
+    if (defined($defaultbody)) { exec_into($tt, $defaultbody, $stash, $sb); }
+}
+
+# CASE matches if the switch value equals the case value (string compare), or is
+# a member of the case value when that is a list.
+func case_matches(scalar $val, scalar $cval) int {
+    if (defined($cval) && ref($cval) eq "ARRAY") {
+        foreach my scalar $e (@{$cval}) {
+            if (Template::Stash::as_text($val) eq Template::Stash::as_text($e)) { return 1; }
+        }
+        return 0;
+    }
+    return (Template::Stash::as_text($val) eq Template::Stash::as_text($cval)) ? 1 : 0;
+}
+
+# META key=value... — record template metadata, accessible via `template.key`.
+func exec_meta(scalar $node, scalar $stash) void {
+    my scalar $tpl = Template::Stash::get_root($stash, "template");
+    if (!defined($tpl) || ref($tpl) ne "HASH") { my hash %t = (); $tpl = \%t; Template::Stash::set_var($stash, "template", $tpl); }
+    my scalar $assigns = $node->{"assigns"};
+    my int $i = 0;
+    while ($i < size(@{$assigns})) {
+        my scalar $a = $assigns->[$i];
+        $tpl->{$a->{"path"}->[0]} = Template::Expr::eval_node($a->{"expr"}, $stash);
+        $i = $i + 1;
+    }
+}
+
+# ==================== USE (plugins) =========================================
+func exec_use(scalar $node, scalar $stash) void {
+    my scalar $pos = $node->{"pos"};
+    my array @posvals = ();
+    my int $i = 0;
+    while ($i < size(@{$pos})) { push(@posvals, Template::Expr::eval_node($pos->[$i], $stash)); $i = $i + 1; }
+    my hash %named = ();
+    my scalar $nm = $node->{"named"};
+    $i = 0;
+    while ($i < size(@{$nm})) {
+        my scalar $a = $nm->[$i];
+        $named{$a->{"key"}} = Template::Expr::eval_node($a->{"expr"}, $stash);
+        $i = $i + 1;
+    }
+    my scalar $obj = Template::Plugins::instantiate($node->{"plugin"}, \@posvals, \%named);
+    Template::Stash::set_var($stash, $node->{"alias"}, $obj);
+}
+
+# ==================== TRY / CATCH / FINAL ===================================
+# Render the TRY body directly into $sb (output before an error is kept). On a
+# (non-signal) exception, run the first matching CATCH; FINAL always runs;
+# control signals and unmatched/rethrown errors propagate after FINAL.
+func exec_try(scalar $tt, scalar $node, scalar $stash, scalar $sb) void {
+    my scalar $pending = undef;
+    try {
+        exec_into($tt, $node->{"body"}, $stash, $sb);
+    } catch ($e) {
+        if (Template::Exception::is_any_signal($e) == 1) {
+            $pending = $e;                       # control flow: skip catches
+        } else {
+            my scalar $exc = normalize_exception($e);
+            my scalar $clause = find_catch($node->{"catches"}, $exc->{"type"});
+            if (defined($clause)) {
+                my scalar $prev = Template::Stash::push_frame($stash);
+                Template::Stash::set_local($stash, "error", $exc);
+                try { exec_into($tt, $clause->{"body"}, $stash, $sb); }
+                catch ($e2) { $pending = $e2; }
+                Template::Stash::pop_frame($stash, $prev);
+            } else {
+                $pending = $e;                   # no clause matched -> rethrow after FINAL
+            }
+        }
+    }
+    if (defined($node->{"final"})) {
+        try { exec_into($tt, $node->{"final"}, $stash, $sb); }
+        catch ($e3) { if (!defined($pending)) { $pending = $e3; } }
+    }
+    if (defined($pending)) { throw($pending); }
+}
+
+# First CATCH clause whose type matches (dotted-prefix; "" = catch-all), in order.
+func find_catch(scalar $catches, str $exc_type) scalar {
+    my int $i = 0;
+    while ($i < size(@{$catches})) {
+        my scalar $c = $catches->[$i];
+        if (Template::Exception::type_matches($c->{"type"}, $exc_type) == 1) { return $c; }
+        $i = $i + 1;
+    }
+    return undef;
+}
+
+# Coerce any thrown value into a TT exception hashref (so error.type/.info work).
+func normalize_exception(scalar $e) scalar {
+    if (Template::Exception::is_exception($e) == 1) { return $e; }
+    if (defined($e) && ref($e) eq "HASH") { return Template::Exception::make("undef", ""); }
+    return Template::Exception::make("undef", defined($e) ? ("" . $e) : "");
+}
+
+# ==================== composition (BLOCK/INCLUDE/PROCESS/...) ================
+
+func is_macro(scalar $v) int {
+    return (defined($v) && ref($v) eq "HASH" && exists(%{$v}, "__macro__")) ? 1 : 0;
+}
+func make_macro(scalar $node) scalar {
+    my hash %m = (); $m{"__macro__"} = 1; $m{"params"} = $node->{"params"}; $m{"body"} = $node->{"body"};
+    return \%m;
+}
+
+# Render a node list to a string in a fresh buffer. RETURN is caught here (it ends
+# the current template/macro); STOP and real exceptions propagate.
+func render_nodes(scalar $tt, scalar $nodes, scalar $stash) str {
+    my scalar $b = sb::new();
+    try {
+        exec_into($tt, $nodes, $stash, $b);
+    } catch ($sig) {
+        if (Template::Exception::is_signal($sig, "return") == 0) { sb::free($b); throw($sig); }
+    }
+    my str $s = sb::to_string($b);
+    sb::free($b);
+    return $s;
+}
+
+# Invoke a MACRO: bind positional params in a pushed scope, render the body.
+func invoke_macro(scalar $tt, scalar $macro, scalar $argvals, scalar $stash) str {
+    my scalar $prev = Template::Stash::push_frame($stash);
+    my scalar $params = $macro->{"params"};
+    my int $i = 0;
+    while ($i < size(@{$params})) {
+        my scalar $v = (defined($argvals) && $i < size(@{$argvals})) ? $argvals->[$i] : undef;
+        Template::Stash::set_local($stash, $params->[$i], $v);
+        $i = $i + 1;
+    }
+    my str $out = "";
+    try {
+        $out = render_nodes($tt, $macro->{"body"}, $stash);
+    } catch ($sig) {
+        Template::Stash::pop_frame($stash, $prev);
+        throw($sig);
+    }
+    Template::Stash::pop_frame($stash, $prev);
+    return $out;
+}
+
+# Resolve a template name to its node list: a defined BLOCK first, else a file
+# loaded + compiled via the engine's provider (whose own blocks get hoisted).
+func resolve_template_nodes(scalar $tt, str $name, scalar $stash) scalar {
+    my scalar $blocks = $stash->{"__blocks__"};
+    if (defined($blocks) && exists(%{$blocks}, $name)) { return $blocks->{$name}; }
+    my str $text = Template::provider_load($tt, $name);
+    my scalar $nodes = Template::compile_cached($tt, $name, $text);
+    register_blocks($nodes, $blocks);
+    return $nodes;
+}
+
+# Bind INCLUDE/PROCESS/WRAPPER key=value params into the current scope.
+func bind_params(scalar $params, scalar $stash) void {
+    if (!defined($params)) { return; }
+    my int $i = 0;
+    while ($i < size(@{$params})) {
+        my scalar $a = $params->[$i];
+        set_path($stash, $a->{"path"}, Template::Expr::eval_node($a->{"expr"}, $stash));
+        $i = $i + 1;
+    }
+}
+
+# INCLUDE ($share=0, localized scope) / PROCESS ($share=1, shared scope). Renders
+# the target directly into $sb so output is preserved if a STOP unwinds.
+func exec_include(scalar $tt, scalar $node, scalar $stash, scalar $sb, int $share) void {
+    my str $name = Template::Stash::as_text(Template::Expr::eval_node($node->{"name"}, $stash));
+    my scalar $prev = undef;
+    if ($share == 0) { $prev = Template::Stash::push_frame($stash); }
+    bind_params($node->{"params"}, $stash);
+    my scalar $nodes = resolve_template_nodes($tt, $name, $stash);
+    my int $depth = ($stash->{"__depth__"} // 0) + 0;
+    my int $max = ($stash->{"__maxrec__"} // 100) + 0;
+    if ($depth >= $max) {
+        if ($share == 0) { Template::Stash::pop_frame($stash, $prev); }
+        throw(Template::Exception::make("file", $name . ": recursion limit exceeded"));
+    }
+    $stash->{"__depth__"} = $depth + 1;
+    my int $returned = 0;
+    try {
+        exec_into($tt, $nodes, $stash, $sb);
+    } catch ($sig) {
+        $stash->{"__depth__"} = $depth;
+        if ($share == 0) { Template::Stash::pop_frame($stash, $prev); }
+        if (Template::Exception::is_signal($sig, "return") == 1) { $returned = 1; }
+        else { throw($sig); }
+    }
+    if ($returned == 1) { return; }
+    $stash->{"__depth__"} = $depth;
+    if ($share == 0) { Template::Stash::pop_frame($stash, $prev); }
+}
+
+# INSERT: raw file contents, no processing.
+func exec_insert(scalar $tt, scalar $node, scalar $stash, scalar $sb) void {
+    my str $name = Template::Stash::as_text(Template::Expr::eval_node($node->{"name"}, $stash));
+    sb::append($sb, Template::provider_load($tt, $name));
+}
+
+# WRAPPER: render the body into `content`, then process the wrapper template.
+func exec_wrapper(scalar $tt, scalar $node, scalar $stash, scalar $sb) void {
+    my str $content = render_nodes($tt, $node->{"body"}, $stash);
+    my scalar $prev = Template::Stash::push_frame($stash);
+    Template::Stash::set_local($stash, "content", $content);
+    bind_params($node->{"params"}, $stash);
+    my str $name = Template::Stash::as_text(Template::Expr::eval_node($node->{"name"}, $stash));
+    my str $out = "";
+    try {
+        $out = render_nodes($tt, resolve_template_nodes($tt, $name, $stash), $stash);
+    } catch ($sig) {
+        Template::Stash::pop_frame($stash, $prev);
+        throw($sig);
+    }
+    Template::Stash::pop_frame($stash, $prev);
+    sb::append($sb, $out);
+}
+
+# Hoist BLOCK definitions (recursively) into the runtime blocks table so they are
+# available before their textual position (forward references).
+func register_blocks(scalar $nodes, scalar $table) void {
+    if (!defined($table) || !defined($nodes)) { return; }
+    my int $i = 0;
+    while ($i < size(@{$nodes})) {
+        my scalar $node = $nodes->[$i];
+        my str $t = $node->{"t"};
+        if ($t eq "blockdef") {
+            $table->{$node->{"name"}} = $node->{"body"};
+            register_blocks($node->{"body"}, $table);
+        } elsif ($t eq "if") {
+            my scalar $branches = $node->{"branches"};
+            my int $j = 0;
+            while ($j < size(@{$branches})) { register_blocks($branches->[$j]->{"body"}, $table); $j = $j + 1; }
+            if (defined($node->{"else"})) { register_blocks($node->{"else"}, $table); }
+        } elsif ($t eq "foreach" || $t eq "while" || $t eq "filterblock" || $t eq "wrapper" || $t eq "macrodef") {
+            register_blocks($node->{"body"}, $table);
+        } elsif ($t eq "switch") {
+            my scalar $cases = $node->{"cases"};
+            my int $j = 0;
+            while ($j < size(@{$cases})) { register_blocks($cases->[$j]->{"body"}, $table); $j = $j + 1; }
+        }
+        $i = $i + 1;
+    }
+}

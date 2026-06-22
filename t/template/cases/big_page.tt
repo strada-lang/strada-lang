@@ -1,0 +1,6 @@
+[% BLOCK header %]== [% title %] ==[% END -%]
+[% MACRO link(url, text) BLOCK %][[% text | html %]]([% url %])[% END -%]
+[% INCLUDE header title="Links" %]
+[% FOREACH u IN users -%]
+- [% link(u.url, u.name) %]
+[% END -%]

@@ -1,0 +1,588 @@
+# lib/Template/Parser.strada — turns the lexer's chunk list into a directive AST.
+# Each [% %] tag is first flattened into its ";"-separated statements, producing a
+# single stream of items (text | stmt). parse_block walks that stream; block
+# directives (IF/FOREACH/WHILE/SWITCH/...) recurse to collect their body up to the
+# matching terminator (END, or ELSE/ELSIF/CASE for branching). This handles both
+# multi-tag bodies ([% IF x %]..[% END %]) and inline ones ([% IF x; "y"; END %]).
+#
+# Directive AST nodes (key "t"):
+#   text  {"s"}                         get   {"expr"}        call {"expr"}
+#   set   {"assigns"=>[{path,expr}]}    default {"assigns"}
+#   next/last/stop/return/clear {}
+#   if    {"branches"=>[{cond,body}], "else"=>body|undef}
+#   foreach {"var"|undef, "list"=>expr, "body"}
+#   while {"cond"=>expr, "body"}
+#   switch {"expr", "cases"=>[{match|undef(default), body}]}
+
+package Template::Parser;
+
+func parse_template(scalar $chunks) scalar {
+    my scalar $stream = flatten($chunks);
+    my hash %state = (); $state{"items"} = $stream; $state{"pos"} = 0;
+    my scalar $st = \%state;
+    my array @none = ();
+    my scalar $res = parse_block($st, \@none);
+    return $res->{"nodes"};
+}
+
+# Expand chunks into a flat item stream: text items pass through; each directive
+# chunk becomes one or more {"k"=>"stmt","src"=>...} items (split on top-level ";").
+func flatten(scalar $chunks) scalar {
+    my array @out = ();
+    my int $i = 0;
+    while ($i < size(@{$chunks})) {
+        my scalar $c = $chunks->[$i];
+        if ($c->{"k"} eq "text") {
+            push(@out, $c);
+        } else {
+            my scalar $stmts = split_statements($c->{"src"});
+            my int $j = 0;
+            while ($j < size(@{$stmts})) {
+                my str $s = trim($stmts->[$j]);
+                if (length($s) > 0) {
+                    my hash %it = (); $it{"k"} = "stmt"; $it{"src"} = $s;
+                    push(@out, \%it);
+                }
+                $j = $j + 1;
+            }
+        }
+        $i = $i + 1;
+    }
+    return \@out;
+}
+
+# Collect nodes until a directive whose leading keyword is in @{$terminators}.
+# Returns {"nodes","end"=>keyword or "","src"=>terminator src}. Consumes the
+# terminating statement.
+func parse_block(scalar $st, scalar $terminators) scalar {
+    my array @nodes = ();
+    my scalar $items = $st->{"items"};
+    while ($st->{"pos"} < size(@{$items})) {
+        my scalar $it = $items->[$st->{"pos"}];
+        if ($it->{"k"} eq "text") {
+            my hash %tn = (); $tn{"t"} = "text"; $tn{"s"} = $it->{"s"};
+            push(@nodes, \%tn);
+            $st->{"pos"} = $st->{"pos"} + 1;
+            next;
+        }
+        my str $src = $it->{"src"};
+        my str $kw = leading_keyword($src);
+        if (in_list($terminators, $kw) == 1) {
+            $st->{"pos"} = $st->{"pos"} + 1;
+            my hash %r = (); $r{"nodes"} = \@nodes; $r{"end"} = $kw; $r{"src"} = $src;
+            return \%r;
+        }
+        $st->{"pos"} = $st->{"pos"} + 1;       # consume this statement
+        my scalar $node = undef;
+        if ($kw eq "IF")       { $node = parse_if($st, strip_keyword($src, "IF"), 0); }
+        elsif ($kw eq "UNLESS"){ $node = parse_if($st, strip_keyword($src, "UNLESS"), 1); }
+        elsif ($kw eq "FOREACH"){ $node = parse_foreach($st, strip_keyword($src, "FOREACH")); }
+        elsif ($kw eq "FOR")   { $node = parse_foreach($st, strip_keyword($src, "FOR")); }
+        elsif ($kw eq "WHILE") { $node = parse_while($st, strip_keyword($src, "WHILE")); }
+        elsif ($kw eq "SWITCH"){ $node = parse_switch($st, strip_keyword($src, "SWITCH")); }
+        elsif ($kw eq "FILTER"){ $node = parse_filter_block($st, strip_keyword($src, "FILTER")); }
+        elsif ($kw eq "BLOCK") { $node = parse_block_def($st, strip_keyword($src, "BLOCK")); }
+        elsif ($kw eq "WRAPPER"){ $node = parse_wrapper($st, strip_keyword($src, "WRAPPER")); }
+        elsif ($kw eq "MACRO") { $node = parse_macro($st, strip_keyword($src, "MACRO")); }
+        elsif ($kw eq "TRY")   { $node = parse_try($st); }
+        else                   { $node = parse_statement($src); }
+        if (defined($node)) { push(@nodes, $node); }
+    }
+    my hash %r = (); $r{"nodes"} = \@nodes; $r{"end"} = ""; $r{"src"} = "";
+    return \%r;
+}
+
+# ---- block directives ------------------------------------------------------
+func parse_if(scalar $st, str $cond_src, int $negate) scalar {
+    my array @branches = ();
+    my scalar $cond = Template::Expr::parse($cond_src);
+    if ($negate == 1) { $cond = negate_expr($cond); }
+    my array @ee = ("ELSIF", "ELSE", "END");
+    my scalar $res = parse_block($st, \@ee);
+    push(@branches, branch($cond, $res->{"nodes"}));
+    my str $end = $res->{"end"};
+    while ($end eq "ELSIF") {
+        my scalar $c2 = Template::Expr::parse(strip_keyword($res->{"src"}, "ELSIF"));
+        $res = parse_block($st, \@ee);
+        push(@branches, branch($c2, $res->{"nodes"}));
+        $end = $res->{"end"};
+    }
+    my scalar $elsebody = undef;
+    if ($end eq "ELSE") {
+        my array @e2 = ("END");
+        $res = parse_block($st, \@e2);
+        $elsebody = $res->{"nodes"};
+    }
+    my hash %h = (); $h{"t"} = "if"; $h{"branches"} = \@branches; $h{"else"} = $elsebody;
+    return \%h;
+}
+func branch(scalar $cond, scalar $body) scalar { my hash %b = (); $b{"cond"} = $cond; $b{"body"} = $body; return \%b; }
+
+func parse_foreach(scalar $st, str $header_src) scalar {
+    my scalar $hdr = Template::Expr::parse_foreach_header($header_src);
+    my array @e = ("END");
+    my scalar $res = parse_block($st, \@e);
+    my hash %h = (); $h{"t"} = "foreach"; $h{"var"} = $hdr->{"var"}; $h{"list"} = $hdr->{"list"}; $h{"body"} = $res->{"nodes"};
+    return \%h;
+}
+
+# [% BLOCK name %]...[% END %] — define a named, reusable fragment (no inline output).
+func parse_block_def(scalar $st, str $name_src) scalar {
+    my str $name = unquote(trim($name_src));
+    my array @e = ("END");
+    my scalar $res = parse_block($st, \@e);
+    my hash %h = (); $h{"t"} = "blockdef"; $h{"name"} = $name; $h{"body"} = $res->{"nodes"};
+    return \%h;
+}
+
+# [% WRAPPER name [params] %]...[% END %] — render body into `content`, then process name.
+func parse_wrapper(scalar $st, str $header_src) scalar {
+    my scalar $hdr = parse_include_header($header_src);
+    my array @e = ("END");
+    my scalar $res = parse_block($st, \@e);
+    my hash %h = (); $h{"t"} = "wrapper"; $h{"name"} = $hdr->{"name"}; $h{"params"} = $hdr->{"params"}; $h{"body"} = $res->{"nodes"};
+    return \%h;
+}
+
+# [% MACRO name(params) DIRECTIVE %] — DIRECTIVE is either `BLOCK ... END` or a
+# single inline directive. Defines a callable producing text.
+func parse_macro(scalar $st, str $src) scalar {
+    my scalar $sig = parse_macro_sig($src);          # {"name","params","rest"}
+    my array @body = ();
+    if (leading_keyword($sig->{"rest"}) eq "BLOCK") {
+        my array @e = ("END");
+        my scalar $res = parse_block($st, \@e);
+        @body = @{$res->{"nodes"}};
+    } else {
+        my scalar $one = parse_statement($sig->{"rest"});
+        if (defined($one)) { push(@body, $one); }
+    }
+    my hash %h = (); $h{"t"} = "macrodef"; $h{"name"} = $sig->{"name"}; $h{"params"} = $sig->{"params"}; $h{"body"} = \@body;
+    return \%h;
+}
+
+# Parse "name(a, b) rest" / "name rest" -> {"name","params"=>[..],"rest"}.
+func parse_macro_sig(str $src) scalar {
+    my str $s = trim($src);
+    my int $n = length($s);
+    my int $i = 0;
+    while ($i < $n && is_word_char(substr($s, $i, 1)) == 1) { $i = $i + 1; }
+    my str $name = substr($s, 0, $i);
+    my array @params = ();
+    my str $rest = trim(substr($s, $i, $n - $i));
+    if (length($rest) > 0 && substr($rest, 0, 1) eq "(") {
+        my int $close = index($rest, ")");
+        if ($close > 0) {
+            my str $inside = substr($rest, 1, $close - 1);
+            foreach my str $p (split(",", $inside)) {
+                my str $pp = unsigil(trim($p));
+                if (length($pp) > 0) { push(@params, $pp); }
+            }
+            $rest = trim(substr($rest, $close + 1, length($rest) - $close - 1));
+        }
+    }
+    my hash %h = (); $h{"name"} = $name; $h{"params"} = \@params; $h{"rest"} = $rest;
+    return \%h;
+}
+
+# Parse an INCLUDE/PROCESS/WRAPPER/INSERT header: a template name (bareword path,
+# quoted string, or $var) followed by optional `key=value` params. Returns
+# {"name"=>exprnode, "params"=>assignlist|undef}.
+func parse_include_header(str $src) scalar {
+    my str $s = trim($src);
+    my int $n = length($s);
+    my int $pos = 0;
+    my str $first = ($n > 0) ? substr($s, 0, 1) : "";
+    if ($first eq "\"" || $first eq "'") {
+        my int $j = 1;
+        while ($j < $n) { my str $c = substr($s, $j, 1); if ($c eq "\\" && $j + 1 < $n) { $j = $j + 2; next; } if ($c eq $first) { $j = $j + 1; last; } $j = $j + 1; }
+        $pos = $j;
+    } else {
+        my int $j = 0;
+        while ($j < $n && is_boundary(substr($s, $j, 1)) == 0) { $j = $j + 1; }
+        $pos = $j;
+    }
+    my str $name_src = substr($s, 0, $pos);
+    my str $rest = trim(substr($s, $pos, $n - $pos));
+    my scalar $name_node = undef;
+    if ($first eq "\"" || $first eq "'" || $first eq "\$") {
+        $name_node = Template::Expr::parse($name_src);
+    } else {
+        my hash %sn = (); $sn{"t"} = "str"; $sn{"v"} = $name_src; $name_node = \%sn;
+    }
+    my scalar $params = (length($rest) > 0) ? Template::Expr::parse_assignments($rest) : undef;
+    my hash %h = (); $h{"name"} = $name_node; $h{"params"} = $params;
+    return \%h;
+}
+
+func is_word_char(str $c) int {
+    return (($c ge "a" && $c le "z") || ($c ge "A" && $c le "Z") || ($c ge "0" && $c le "9") || $c eq "_") ? 1 : 0;
+}
+func unsigil(str $s) str { return (length($s) > 0 && substr($s, 0, 1) eq "\$") ? substr($s, 1, length($s) - 1) : $s; }
+func unquote(str $s) str {
+    my int $n = length($s);
+    if ($n >= 2) {
+        my str $q = substr($s, 0, 1);
+        if (($q eq "\"" || $q eq "'") && substr($s, $n - 1, 1) eq $q) { return substr($s, 1, $n - 2); }
+    }
+    return $s;
+}
+
+# [% TRY %]..[% CATCH [type] %]..[% FINAL %]..[% END %]
+func parse_try(scalar $st) scalar {
+    my array @clauses = ("CATCH", "FINAL", "END");
+    my scalar $res = parse_block($st, \@clauses);
+    my scalar $body = $res->{"nodes"};
+    my str $end = $res->{"end"};
+    my array @catches = ();
+    while ($end eq "CATCH") {
+        my str $ctype = unquote(trim(strip_keyword($res->{"src"}, "CATCH")));
+        $res = parse_block($st, \@clauses);
+        my hash %c = (); $c{"type"} = $ctype; $c{"body"} = $res->{"nodes"};
+        push(@catches, \%c);
+        $end = $res->{"end"};
+    }
+    my scalar $final = undef;
+    if ($end eq "FINAL") {
+        my array @e = ("END");
+        $res = parse_block($st, \@e);
+        $final = $res->{"nodes"};
+    }
+    my hash %h = (); $h{"t"} = "try"; $h{"body"} = $body; $h{"catches"} = \@catches; $h{"final"} = $final;
+    return \%h;
+}
+
+# [% USE [alias =] Plugin[(args)] %]. Binds the plugin under `alias` (or its own
+# name). Args may be positional and/or named (key=value). Node:
+#   {"t"=>"use","alias","plugin","pos"=>[exprnodes],"named"=>[{key,expr}]}.
+func parse_use(str $src) scalar {
+    my str $s = trim($src);
+    my int $n = length($s);
+    my int $i = 0;
+    while ($i < $n && is_word_char(substr($s, $i, 1)) == 1) { $i = $i + 1; }
+    my str $word1 = substr($s, 0, $i);
+    my str $after1 = trim(substr($s, $i, $n - $i));
+    my scalar $alias = undef;
+    my str $spec = $s;
+    if (length($after1) > 0 && substr($after1, 0, 1) eq "=" && (length($after1) < 2 || substr($after1, 1, 1) ne "=")) {
+        $alias = $word1;
+        $spec = trim(substr($after1, 1, length($after1) - 1));
+    }
+    # plugin name
+    my int $sn = length($spec);
+    my int $j = 0;
+    while ($j < $sn && is_word_char(substr($spec, $j, 1)) == 1) { $j = $j + 1; }
+    my str $pname = substr($spec, 0, $j);
+    if (!defined($alias)) { $alias = $pname; }
+    my str $argsrc = trim(substr($spec, $j, $sn - $j));
+    my scalar $parsed = parse_use_args($argsrc);
+    my hash %h = (); $h{"t"} = "use"; $h{"alias"} = $alias; $h{"plugin"} = $pname;
+    $h{"pos"} = $parsed->{"pos"}; $h{"named"} = $parsed->{"named"};
+    return \%h;
+}
+
+# Parse USE args -> {"pos"=>[exprnodes], "named"=>[{key,expr}]}. Either "(items)"
+# (comma-separated positional and/or key=value) or a single bare/quoted arg.
+func parse_use_args(str $src) scalar {
+    my array @pos = ();
+    my array @named = ();
+    my int $n = length($src);
+    if ($n == 0) {
+        my hash %r = (); $r{"pos"} = \@pos; $r{"named"} = \@named; return \%r;
+    }
+    if (substr($src, 0, 1) eq "(") {
+        my int $close = matching_paren($src, 0);
+        my str $inner = substr($src, 1, $close - 1);
+        my scalar $items = split_statements_csv($inner);
+        my int $i = 0;
+        while ($i < size(@{$items})) {
+            my str $item = trim($items->[$i]);
+            if (length($item) > 0) {
+                if (Template::Expr::has_assignment($item) == 1) {
+                    my scalar $as = Template::Expr::parse_assignments($item);
+                    my int $k = 0;
+                    while ($k < size(@{$as})) {
+                        my scalar $a = $as->[$k];
+                        my hash %nv = (); $nv{"key"} = $a->{"path"}->[0]; $nv{"expr"} = $a->{"expr"};
+                        push(@named, \%nv);
+                        $k = $k + 1;
+                    }
+                } else {
+                    push(@pos, Template::Expr::parse($item));
+                }
+            }
+            $i = $i + 1;
+        }
+    } else {
+        push(@pos, Template::Expr::parse($src));
+    }
+    my hash %r = (); $r{"pos"} = \@pos; $r{"named"} = \@named; return \%r;
+}
+
+func matching_paren(str $s, int $open) int {
+    my int $n = length($s);
+    my int $depth = 0;
+    my int $i = $open;
+    my str $q = "";
+    while ($i < $n) {
+        my str $c = substr($s, $i, 1);
+        if (length($q) > 0) { if ($c eq "\\" && $i + 1 < $n) { $i = $i + 2; next; } if ($c eq $q) { $q = ""; } $i = $i + 1; next; }
+        if ($c eq "'" || $c eq "\"") { $q = $c; $i = $i + 1; next; }
+        if ($c eq "(") { $depth = $depth + 1; }
+        elsif ($c eq ")") { $depth = $depth - 1; if ($depth == 0) { return $i; } }
+        $i = $i + 1;
+    }
+    return $n - 1;
+}
+# Split on top-level commas (respecting quotes and () [] {} nesting).
+func split_statements_csv(str $src) scalar {
+    my array @out = ();
+    my int $n = length($src);
+    my int $i = 0; my int $start = 0; my int $depth = 0; my str $q = "";
+    while ($i < $n) {
+        my str $c = substr($src, $i, 1);
+        if (length($q) > 0) { if ($c eq "\\" && $i + 1 < $n) { $i = $i + 2; next; } if ($c eq $q) { $q = ""; } $i = $i + 1; next; }
+        if ($c eq "'" || $c eq "\"") { $q = $c; $i = $i + 1; next; }
+        if ($c eq "(" || $c eq "[" || $c eq "{") { $depth = $depth + 1; }
+        elsif ($c eq ")" || $c eq "]" || $c eq "}") { if ($depth > 0) { $depth = $depth - 1; } }
+        elsif ($c eq "," && $depth == 0) { push(@out, substr($src, $start, $i - $start)); $i = $i + 1; $start = $i; next; }
+        $i = $i + 1;
+    }
+    if ($start < $n) { push(@out, substr($src, $start, $n - $start)); }
+    return \@out;
+}
+
+# [% THROW type [info] %]. Two args: type=bareword, info=expr. One arg: type
+# defaults to "undef" and the single token becomes the (literal) info.
+func parse_throw(str $src) scalar {
+    my str $s = trim($src);
+    my int $n = length($s);
+    my str $first = ($n > 0) ? substr($s, 0, 1) : "";
+    my str $tok = "";
+    my int $pos = 0;
+    if ($first eq "\"" || $first eq "'") {
+        my int $j = 1;
+        while ($j < $n) { my str $c = substr($s, $j, 1); if ($c eq "\\" && $j + 1 < $n) { $j = $j + 2; next; } if ($c eq $first) { $j = $j + 1; last; } $j = $j + 1; }
+        $tok = unquote(substr($s, 0, $j));
+        $pos = $j;
+    } else {
+        my int $j = 0;
+        while ($j < $n && is_boundary(substr($s, $j, 1)) == 0) { $j = $j + 1; }
+        $tok = substr($s, 0, $j);
+        $pos = $j;
+    }
+    my str $rest = trim(substr($s, $pos, $n - $pos));
+    my hash %h = (); $h{"t"} = "throw";
+    if (length($rest) > 0) {
+        $h{"type"} = $tok;
+        $h{"info"} = Template::Expr::parse($rest);
+    } else {
+        $h{"type"} = "undef";
+        my hash %sn = (); $sn{"t"} = "str"; $sn{"v"} = $tok; $h{"info"} = \%sn;
+    }
+    return \%h;
+}
+
+func parse_filter_block(scalar $st, str $header_src) scalar {
+    my scalar $spec = Template::Expr::parse_filter_spec($header_src);
+    my array @e = ("END");
+    my scalar $res = parse_block($st, \@e);
+    my hash %h = (); $h{"t"} = "filterblock"; $h{"name"} = $spec->{"name"}; $h{"args"} = $spec->{"args"}; $h{"body"} = $res->{"nodes"};
+    return \%h;
+}
+
+func parse_while(scalar $st, str $cond_src) scalar {
+    my scalar $cond = Template::Expr::parse($cond_src);
+    my array @e = ("END");
+    my scalar $res = parse_block($st, \@e);
+    my hash %h = (); $h{"t"} = "while"; $h{"cond"} = $cond; $h{"body"} = $res->{"nodes"};
+    return \%h;
+}
+
+func parse_switch(scalar $st, str $expr_src) scalar {
+    my scalar $expr = Template::Expr::parse($expr_src);
+    my array @cases = ();
+    my array @ce = ("CASE", "END");
+    my scalar $res = parse_block($st, \@ce);   # content before first CASE is discarded
+    my str $end = $res->{"end"};
+    while ($end eq "CASE") {
+        my str $csrc = trim(strip_keyword($res->{"src"}, "CASE"));
+        my scalar $match = undef;              # undef => default case
+        if (length($csrc) > 0 && $csrc ne "DEFAULT") { $match = Template::Expr::parse($csrc); }
+        $res = parse_block($st, \@ce);
+        my hash %c = (); $c{"match"} = $match; $c{"body"} = $res->{"nodes"};
+        push(@cases, \%c);
+        $end = $res->{"end"};
+    }
+    my hash %h = (); $h{"t"} = "switch"; $h{"expr"} = $expr; $h{"cases"} = \@cases;
+    return \%h;
+}
+
+# ---- simple statements -----------------------------------------------------
+# Parse a non-block statement, honoring a trailing IF/UNLESS modifier
+# ([% NEXT IF x %] => an if-node wrapping the base statement).
+func parse_statement(str $s) scalar {
+    my scalar $pm = find_postfix($s);
+    if (defined($pm)) {
+        my scalar $base = parse_statement_base(trim($pm->{"head"}));
+        if (!defined($base)) { return undef; }
+        my scalar $cond = Template::Expr::parse($pm->{"expr"});
+        if ($pm->{"kw"} eq "UNLESS") { $cond = negate_expr($cond); }
+        # NB: `my array @x = (call())` flattens a hashref return in Strada — build
+        # the single-element arrays via push to keep exactly one element.
+        my array @body = ();
+        push(@body, $base);
+        my array @branches = ();
+        push(@branches, branch($cond, \@body));
+        my hash %h = (); $h{"t"} = "if"; $h{"branches"} = \@branches; $h{"else"} = undef;
+        return \%h;
+    }
+    return parse_statement_base($s);
+}
+
+func parse_statement_base(str $s) scalar {
+    my str $kw = leading_keyword($s);
+    if ($kw eq "GET")     { return get_node(Template::Expr::parse(strip_keyword($s, "GET"))); }
+    if ($kw eq "CALL")    { my hash %h = (); $h{"t"} = "call"; $h{"expr"} = Template::Expr::parse(strip_keyword($s, "CALL")); return \%h; }
+    if ($kw eq "SET")     { return set_node(Template::Expr::parse_assignments(strip_keyword($s, "SET")), 0); }
+    if ($kw eq "DEFAULT") { return set_node(Template::Expr::parse_assignments(strip_keyword($s, "DEFAULT")), 1); }
+    if ($kw eq "USE")     { return parse_use(strip_keyword($s, "USE")); }
+    if ($kw eq "META")    { my hash %h = (); $h{"t"} = "meta"; $h{"assigns"} = Template::Expr::parse_assignments(strip_keyword($s, "META")); return \%h; }
+    if ($kw eq "THROW")   { return parse_throw(strip_keyword($s, "THROW")); }
+    if ($kw eq "INCLUDE") { return include_node("include", strip_keyword($s, "INCLUDE")); }
+    if ($kw eq "PROCESS") { return include_node("process", strip_keyword($s, "PROCESS")); }
+    if ($kw eq "INSERT")  { return include_node("insert", strip_keyword($s, "INSERT")); }
+    if ($kw eq "NEXT")    { return tag_node("next"); }
+    if ($kw eq "LAST" || $kw eq "BREAK") { return tag_node("last"); }
+    if ($kw eq "STOP")    { return tag_node("stop"); }
+    if ($kw eq "RETURN")  { return tag_node("return"); }
+    if ($kw eq "CLEAR")   { return tag_node("clear"); }
+    if ($kw eq "DEBUG") { return undef; }   # debug output is off by default — no-op
+    if ($kw eq "END" || $kw eq "ELSE" || $kw eq "ELSIF" || $kw eq "CASE" || $kw eq "CATCH" || $kw eq "FINAL") { return undef; }  # stray terminator
+    # no keyword: an assignment ("a = 1") is an implicit SET; otherwise a GET.
+    if ($kw eq "" && Template::Expr::has_assignment($s) == 1) {
+        return set_node(Template::Expr::parse_assignments($s), 0);
+    }
+    return get_node(Template::Expr::parse($s));
+}
+
+func get_node(scalar $expr) scalar { my hash %h = (); $h{"t"} = "get"; $h{"expr"} = $expr; return \%h; }
+func set_node(scalar $assigns, int $is_default) scalar {
+    my hash %h = (); $h{"t"} = $is_default ? "default" : "set"; $h{"assigns"} = $assigns; return \%h;
+}
+func tag_node(str $t) scalar { my hash %h = (); $h{"t"} = $t; return \%h; }
+func include_node(str $t, str $header) scalar {
+    my scalar $hdr = parse_include_header($header);
+    my hash %h = (); $h{"t"} = $t; $h{"name"} = $hdr->{"name"}; $h{"params"} = $hdr->{"params"};
+    return \%h;
+}
+
+# Wrap an expression node in a logical-not (for UNLESS / negated conditions).
+func negate_expr(scalar $e) scalar { my hash %h = (); $h{"t"} = "unop"; $h{"op"} = "not"; $h{"rhs"} = $e; return \%h; }
+
+# ---- helpers ---------------------------------------------------------------
+func leading_keyword(str $src) str {
+    my str $s = trim($src);
+    my int $n = length($s);
+    if ($n == 0) { return ""; }
+    my int $i = 0;
+    while ($i < $n) {
+        my str $c = substr($s, $i, 1);
+        if ((($c ge "A" && $c le "Z")) || $c eq "_") { $i = $i + 1; next; }
+        last;
+    }
+    if ($i == 0) { return ""; }
+    if ($i < $n) {
+        my str $c = substr($s, $i, 1);
+        if ((($c ge "a" && $c le "z")) || (($c ge "0" && $c le "9"))) { return ""; }
+    }
+    return substr($s, 0, $i);
+}
+
+func strip_keyword(str $s, str $kw) str {
+    my str $t = trim($s);
+    return trim(substr($t, length($kw), length($t) - length($kw)));
+}
+
+func in_list(scalar $list, str $v) int {
+    if (!defined($list) || length($v) == 0) { return 0; }
+    my int $i = 0;
+    while ($i < size(@{$list})) { if (($list->[$i]) eq $v) { return 1; } $i = $i + 1; }
+    return 0;
+}
+
+# Find a top-level trailing IF/UNLESS modifier. Returns {"head","kw","expr"} or
+# undef. Scans respecting quotes and () [] {} nesting; the keyword must be a
+# standalone word at depth 0 and not at the very start.
+func find_postfix(str $src) scalar {
+    my int $n = length($src);
+    my int $i = 0;
+    my int $depth = 0;
+    my str $q = "";
+    while ($i < $n) {
+        my str $c = substr($src, $i, 1);
+        if (length($q) > 0) {
+            if ($c eq "\\" && $i + 1 < $n) { $i = $i + 2; next; }
+            if ($c eq $q) { $q = ""; }
+            $i = $i + 1;
+            next;
+        }
+        if ($c eq "'" || $c eq "\"") { $q = $c; $i = $i + 1; next; }
+        if ($c eq "(" || $c eq "[" || $c eq "{") { $depth = $depth + 1; $i = $i + 1; next; }
+        if ($c eq ")" || $c eq "]" || $c eq "}") { if ($depth > 0) { $depth = $depth - 1; } $i = $i + 1; next; }
+        if ($depth == 0 && $i > 0 && is_boundary(substr($src, $i - 1, 1)) == 1) {
+            my scalar $m = match_kw_at($src, $i, "IF");
+            if (!defined($m)) { $m = match_kw_at($src, $i, "UNLESS"); }
+            if (defined($m)) { return $m; }
+        }
+        $i = $i + 1;
+    }
+    return undef;
+}
+func is_boundary(str $c) int { return ($c eq " " || $c eq "\t" || $c eq "\n" || $c eq "\r") ? 1 : 0; }
+# If keyword $kw starts at $i and is followed by a boundary, return the split.
+func match_kw_at(str $src, int $i, str $kw) scalar {
+    my int $kl = length($kw);
+    my int $n = length($src);
+    if ($i + $kl > $n) { return undef; }
+    if (substr($src, $i, $kl) ne $kw) { return undef; }
+    if ($i + $kl < $n && is_boundary(substr($src, $i + $kl, 1)) == 0) { return undef; }
+    my str $head = substr($src, 0, $i);
+    if (length(trim($head)) == 0) { return undef; }
+    my hash %r = ();
+    $r{"head"} = $head;
+    $r{"kw"} = $kw;
+    $r{"expr"} = trim(substr($src, $i + $kl, $n - $i - $kl));
+    return \%r;
+}
+
+# Split a directive body on top-level ";" (respecting quotes and () [] {} nesting).
+func split_statements(str $src) scalar {
+    my array @out = ();
+    my int $n = length($src);
+    my int $i = 0;
+    my int $start = 0;
+    my int $depth = 0;
+    my str $q = "";
+    while ($i < $n) {
+        my str $c = substr($src, $i, 1);
+        if (length($q) > 0) {
+            if ($c eq "\\" && $i + 1 < $n) { $i = $i + 2; next; }
+            if ($c eq $q) { $q = ""; }
+            $i = $i + 1;
+            next;
+        }
+        if ($c eq "'" || $c eq "\"") { $q = $c; $i = $i + 1; next; }
+        if ($c eq "(" || $c eq "[" || $c eq "{") { $depth = $depth + 1; $i = $i + 1; next; }
+        if ($c eq ")" || $c eq "]" || $c eq "}") { if ($depth > 0) { $depth = $depth - 1; } $i = $i + 1; next; }
+        if ($c eq ";" && $depth == 0) {
+            push(@out, substr($src, $start, $i - $start));
+            $i = $i + 1;
+            $start = $i;
+            next;
+        }
+        $i = $i + 1;
+    }
+    if ($start < $n) { push(@out, substr($src, $start, $n - $start)); }
+    return \@out;
+}

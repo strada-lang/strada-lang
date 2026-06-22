@@ -1,0 +1,1 @@
+[% name | upper %]|[% name | upper | replace("O","0") %]

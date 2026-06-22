@@ -1,0 +1,1 @@
+[% USE Math %][[% Math.max(3,7) %]]

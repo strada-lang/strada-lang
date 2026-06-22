@@ -1,0 +1,1 @@
+[% name | ucfirst %]|[% "  hi  " | trim %]|[% mixed | lower %]

@@ -1,0 +1,1 @@
+[% h.keys.sort.join(",") %]|[% h.values.nsort.join(",") %]|[% h.size %]|[% h.sort.join(",") %]|[% h.nsort.join(",") %]|[% h.pairs.first.key %]|[% h.pairs.first.value %]|[% h.item("a") %]|[% h.defined("a") %]|[% h.exists("z") %]

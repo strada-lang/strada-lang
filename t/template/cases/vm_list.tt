@@ -1,0 +1,1 @@
+[% list.size %]|[% list.first %]|[% list.last %]|[% list.max %]|[% list.join %]|[% list.join(",") %]|[% list.reverse.join(",") %]|[% list.sort.join(",") %]|[% list.nsort.join(",") %]

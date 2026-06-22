@@ -1,0 +1,1 @@
+[% x = 1 %][% BLOCK b %][% x = 99 %][% x %][% END %][% PROCESS b %]|[% x %]

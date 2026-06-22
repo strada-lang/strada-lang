@@ -1,0 +1,1 @@
+[% FILTER html %]<b>bold</b>[% END %]

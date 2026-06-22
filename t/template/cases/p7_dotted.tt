@@ -1,0 +1,1 @@
+[% TRY %][% THROW db.conn "x" %][% CATCH db %]caught-db[% CATCH %]other[% END %]

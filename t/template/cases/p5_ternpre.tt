@@ -1,0 +1,1 @@
+[% 1 ? "yes" : "no" | upper %]|[% name.length | format("%03d") %]
