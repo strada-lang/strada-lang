@@ -15,6 +15,7 @@ NC='\033[0m' # No Color
 # Default values
 PREFIX="/usr/local"
 CC="${CC:-gcc}"
+UNAME_S="$(uname -s)"
 
 # Detected features
 HAVE_MYSQL=0
@@ -198,6 +199,21 @@ EOF
     fi
 }
 
+# Test-compile `#include <HEADER>` with optional extra cflags ($2). Verifies the
+# header is actually reachable — pkg-config can report stale -I paths that no
+# longer exist (e.g. a macOS libffi.pc pointing at a since-removed SDK), and
+# `pkg-config --exists` returns true without checking the header compiles.
+check_header() {
+    local header="$1"
+    local cflags="$2"
+    local tmpsrc="$(mktemp).c"
+    printf '#include <%s>\nint main(void){return 0;}\n' "$header" > "$tmpsrc"
+    local rc=1
+    if $CC $cflags -fsyntax-only "$tmpsrc" 2>/dev/null; then rc=0; fi
+    rm -f "$tmpsrc"
+    return $rc
+}
+
 # Helper function to check pkg-config
 check_pkg() {
     local pkg="$1"
@@ -333,11 +349,23 @@ fi
 printf "  Checking for libffi... "
 if [ "$SKIP_LIBFFI" = "1" ]; then
     echo -e "${YELLOW}disabled${NC}"
-elif [ "$HAS_PKGCONFIG" = "1" ] && check_pkg libffi; then
+elif [ "$HAS_PKGCONFIG" = "1" ] && check_pkg libffi && check_header "ffi.h" "$(pkg-config --cflags libffi)"; then
+    # pkg-config found it AND its cflags actually compile ffi.h. The header
+    # check guards against a stale .pc whose -I path no longer exists.
     HAVE_LIBFFI=1
     FFI_CFLAGS="$(pkg-config --cflags libffi)"
     FFI_LIBS="$(pkg-config --libs libffi)"
     echo -e "${GREEN}yes${NC} (pkg-config)"
+elif [ "$UNAME_S" = "Darwin" ] && command -v xcrun >/dev/null 2>&1 && \
+     FFI_SDK="$(xcrun --show-sdk-path 2>/dev/null)" && [ -n "$FFI_SDK" ] && \
+     [ -f "$FFI_SDK/usr/include/ffi/ffi.h" ]; then
+    # macOS: ffi.h ships in the active SDK at $SDKROOT/usr/include/ffi. Resolve
+    # the SDK with xcrun (not a hard-coded version) so it tracks the real
+    # toolchain — this is the path that fixes a stale/wrong pkg-config SDK.
+    HAVE_LIBFFI=1
+    FFI_CFLAGS="-I$FFI_SDK/usr/include/ffi"
+    FFI_LIBS="-lffi"
+    echo -e "${GREEN}yes${NC} (macOS SDK)"
 elif check_lib "libffi" "ffi.h" "ffi" "ffi_prep_cif"; then
     HAVE_LIBFFI=1
     FFI_LIBS="-lffi"
