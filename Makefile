@@ -542,12 +542,20 @@ lib/Eval.o: lib/Eval.strada stradac
 
 lib-eval: lib/Eval.o
 
-# SSL library
+# SSL library — only built when OpenSSL was detected by ./configure. lib/ssl.strada
+# #include <openssl/ssl.h> in a __C__ block, so without OpenSSL headers the
+# compile fails; SSL is optional (TLS sockets), so skip it cleanly instead.
+# Run ./configure --with-ssl (and install OpenSSL) to enable.
+ifeq ($(HAVE_SSL),1)
 lib/ssl.o: lib/ssl.strada stradac
 	@echo "Building SSL library..."
 	./strada -M lib/ssl.strada
 
 lib-ssl: lib/ssl.o
+else
+lib-ssl:
+	@echo "Skipping SSL library (OpenSSL not detected — ./configure --with-ssl to enable)"
+endif
 
 # Readline library
 lib/readline/readline.o: lib/readline/readline.strada stradac
