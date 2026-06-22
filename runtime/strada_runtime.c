@@ -23,9 +23,22 @@
  * macro, <unistd.h> omits those declarations and gcc/clang warns then
  * errors (under -Werror) with "implicit function declaration 'chroot'".
  * Define it before any system header include so the extension prototypes
- * are exposed. Harmless on non-Darwin. */
-#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
-#define _DARWIN_C_SOURCE
+ * are exposed. Harmless on non-Darwin.
+ *
+ * _XOPEN_SOURCE: macOS's <ucontext.h> has a literal
+ *   #if !defined(_XOPEN_SOURCE) #error
+ * guard around the (deprecated but functional) getcontext/makecontext/
+ * swapcontext routines the stackful-coroutine runtime uses. Define it too.
+ * _DARWIN_C_SOURCE forces __DARWIN_C_FULL, which takes precedence over the
+ * X/Open level, so the BSD/Darwin extensions above stay visible — both
+ * together is the documented way to use ucontext on macOS. */
+#if defined(__APPLE__)
+#  if !defined(_XOPEN_SOURCE)
+#    define _XOPEN_SOURCE 700
+#  endif
+#  if !defined(_DARWIN_C_SOURCE)
+#    define _DARWIN_C_SOURCE
+#  endif
 #endif
 
 #include "strada_runtime.h"
