@@ -363,6 +363,13 @@ my hash %g_forma_ast_cache = ();
 # Custom helper registry
 my hash %g_forma_helpers = ();
 
+# Auto-escape mode for the compiled (AST) engine. 0 = legacy raw output (render /
+# render_string), 1 = HTML-escape plain {{x}} and filtered {{x|f}} output, leaving
+# {{{x}}} raw. render_safe / render_string_safe flip this around an execute() so
+# the SAME cached AST renders escaped on demand; it is saved/restored so a partial
+# rendered inside a safe render inherits escaping without leaking to later renders.
+my int $g_forma_escape = 0;
+
 # Register a custom helper function
 # Usage: Forma::register_helper("name", \&my_handler);
 # Helper signature: my_handler(scalar $args_array_ref, scalar $vars) str
@@ -1542,6 +1549,20 @@ func compile(str $template) scalar {
             }
         }
 
+        # {{{ ... }}} raw (never-escaped) variable. Must be checked before the
+        # double-brace tag below. In legacy (raw) mode it reads the same as {{x}};
+        # in safe mode it's the opt-out that emits trusted HTML unescaped.
+        if ($i + 2 < $len && substr($template, $i, 3) eq "{{{") {
+            my int $rend = Forma::find_triple_closing($template, $i + 3);
+            if ($rend > $i + 3) {
+                my str $rname = trim(substr($template, $i + 3, $rend - $i - 3));
+                Forma::flush_lit($nodes, $lit); $lit = "";
+                push(@{$nodes}, {"k" => "rv", "name" => $rname});
+                $i = $rend + 3;
+                next;
+            }
+        }
+
         # Simple {{ ... }} tag (variable, helper, partial, dump, pipe, ...)
         if ($i + 1 < $len && substr($template, $i, 2) eq "{{") {
             my int $end = Forma::find_closing($template, $i + 2);
@@ -1575,15 +1596,25 @@ func execute(scalar $nodes, scalar $vars) str {
             # at runtime) would shadow a bare name in the interpreter, so guard
             # with an O(1) registry check before taking the fast path.
             my str $nm = $node->{"name"};
+            my str $vv = "";
             if (exists(%g_forma_helpers, $nm)) {
-                $result = $result . Forma::render_string("{{" . $nm . "}}", $vars);
+                $vv = Forma::render_string("{{" . $nm . "}}", $vars);
             } else {
-                $result = $result . Forma::resolve_var($nm, $vars);
+                $vv = Forma::resolve_var($nm, $vars);
             }
+            if ($g_forma_escape == 1) { $vv = Forma::escape_html($vv); }
+            $result = $result . $vv;
+        } elsif ($k eq "rv") {
+            # {{{x}}} raw — emitted unescaped even in safe mode (trusted HTML).
+            $result = $result . Forma::resolve_var($node->{"name"}, $vars);
         } elsif ($k eq "p") {
             $result = $result . Forma::process_partial($node->{"expr"}, $vars);
         } elsif ($k eq "g") {
-            $result = $result . Forma::render_string($node->{"s"}, $vars);
+            # Helper/pipe/dump expression. Escape its text output in safe mode
+            # (use {{{x}}} for raw); harmless for plain-text filters like money.
+            my str $gv = Forma::render_string($node->{"s"}, $vars);
+            if ($g_forma_escape == 1) { $gv = Forma::escape_html($gv); }
+            $result = $result . $gv;
         } elsif ($k eq "e") {
             $result = $result . Forma::exec_each($node->{"coll"}, $node->{"lv"}, $node->{"body"}, $vars);
         } elsif ($k eq "i") {
@@ -2442,67 +2473,27 @@ func escape_html(str $s) str {
     return $result;
 }
 
-# Render with HTML escaping for variables
+# Render a template FILE with HTML auto-escaping. Runs the full compiled (AST)
+# engine — loops, conditionals, with/range/switch, filters and partials all work
+# — by flipping the auto-escape flag around execute(): plain {{x}} and filtered
+# {{x|f}} output is HTML-escaped, {{{x}}} is emitted raw (trusted HTML). The flag
+# is saved/restored so a partial rendered inside inherits escaping and later
+# non-safe renders are unaffected.
 func render_safe(str $name, scalar $vars) str {
-    my str $template = Forma::load($name);
-    if (length($template) == 0) {
-        return "";
-    }
-    return Forma::render_string_safe($template, $vars);
+    my int $prev = $g_forma_escape;
+    $g_forma_escape = 1;
+    my str $out = Forma::render($name, $vars);
+    $g_forma_escape = $prev;
+    return $out;
 }
 
-# Render string with HTML escaping
+# Render a template STRING with the same HTML auto-escaping as render_safe.
 func render_string_safe(str $template, scalar $vars) str {
-    my str $result = "";
-    my int $len = length($template);
-    my int $i = 0;
-
-    while ($i < $len) {
-        # Look for {{ start
-        if ($i + 1 < $len) {
-            my str $two = substr($template, $i, 2);
-            if ($two eq "{{") {
-                # Find closing }}
-                my int $end = Forma::find_closing($template, $i + 2);
-                if ($end > $i + 2) {
-                    # Extract variable name
-                    my str $var_name = substr($template, $i + 2, $end - $i - 2);
-                    $var_name = trim($var_name);
-
-                    # Check for raw output marker {{{var}}}
-                    if (length($var_name) > 0 && substr($var_name, 0, 1) eq "{") {
-                        # Check if this is {{{ which means raw
-                        if ($i + 2 < $len && substr($template, $i, 3) eq "{{{") {
-                            my int $raw_end = Forma::find_triple_closing($template, $i + 3);
-                            if ($raw_end > 0) {
-                                $var_name = substr($template, $i + 3, $raw_end - $i - 3);
-                                $var_name = trim($var_name);
-                                my str $value = Forma::resolve_var($var_name, $vars);
-                                $result = $result . $value;
-                                $i = $raw_end + 3;
-                                next;
-                            }
-                        }
-                    }
-
-                    # Resolve and escape variable
-                    my str $value = Forma::resolve_var($var_name, $vars);
-                    $result = $result . Forma::escape_html($value);
-
-                    # Skip past }}
-                    $i = $end + 2;
-                    next;
-                }
-            }
-        }
-
-        # Regular character
-        my str $ch = substr($template, $i, 1);
-        $result = $result . $ch;
-        $i = $i + 1;
-    }
-
-    return $result;
+    my int $prev = $g_forma_escape;
+    $g_forma_escape = 1;
+    my str $out = Forma::execute(Forma::compile($template), $vars);
+    $g_forma_escape = $prev;
+    return $out;
 }
 
 # Find triple closing }}}
@@ -3085,6 +3076,20 @@ func helper_plural(str $args, scalar $vars) str {
     return $count . " " . $plural;
 }
 
+# Accounting-style money format: thousands separators + exactly 2 decimals +
+# leading minus, no currency symbol (e.g. -1234567.5 -> "-1,234,567.50"). Reuses
+# helper_commas for the integer grouping.
+func helper_money(str $val) str {
+    my num $n = trim($val) + 0.0;
+    my num $a = ($n < 0.0) ? ($n * -1.0) : $n;
+    my str $sign = ($n < 0.0) ? "-" : "";
+    my str $s = sprintf("%.2f", $a);
+    my int $dot = index($s, ".");
+    my str $intpart = ($dot >= 0) ? substr($s, 0, $dot) : $s;
+    my str $frac    = ($dot >= 0) ? substr($s, $dot, length($s) - $dot) : ".00";
+    return $sign . Forma::helper_commas($intpart) . $frac;
+}
+
 # Apply a filter to a value (for pipe syntax)
 func apply_filter(str $var_name, str $filter, scalar $vars) str {
     my str $val = Forma::resolve_var($var_name, $vars);
@@ -3146,6 +3151,10 @@ func apply_filter(str $var_name, str $filter, scalar $vars) str {
 
     if ($filter_name eq "commas") {
         return Forma::helper_commas($val);
+    }
+
+    if ($filter_name eq "money") {
+        return Forma::helper_money($val);
     }
 
     if ($filter_name eq "truncate") {
