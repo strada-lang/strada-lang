@@ -4848,15 +4848,19 @@ func resolve_use_module(scalar $parser, scalar $program, str $mod_name) void {
         # different codegen — linking that .o into a binary compiled by
         # current stradac silently segfaults at runtime. Failing either
         # check makes us re-parse the source and inline it.
-        # Silently using a precompiled sibling .o/.so runs its native code
-        # (library constructors, the metadata-extraction probe) at COMPILE time
-        # just from a plain `use Foo;`. That is opt-in: without
-        # --use-artifacts (STRADA_USE_ARTIFACTS), we ignore sibling artifacts
-        # and recompile from the source we already found, so dropping a hostile
-        # Foo.o next to Foo.strada can't get code run. The explicit
-        # import_object/import_lib/import_archive forms are unaffected.
+        # Default ON: a plain `use Foo;` prefers a fresh precompiled sibling
+        # Foo.o/.so over re-parsing Foo.strada (faster builds). Disable with
+        # --no-use-artifacts (STRADA_USE_ARTIFACTS=0). Reading the artifact's
+        # metadata no longer runs its code — the .strada_meta section is parsed
+        # in-process (no probe, no dlopen) — so the old compile-time
+        # code-execution risk is closed for section-bearing artifacts. The
+        # residual trust note: the sibling .o is LINKED into your binary instead
+        # of the source you can see, and only freshness (mtime vs source and vs
+        # stradac) guards staleness; --no-use-artifacts restores "always compile
+        # the source." The explicit import_object/import_lib/import_archive forms
+        # are unaffected (those are always honored).
         my str $__ua = core::getenv("STRADA_USE_ARTIFACTS");
-        if (length($__ua) > 0 && $__ua ne "0") {
+        if ($__ua ne "0") {
             if (artifact_is_fresh($o_path, $file_path) == 1
                 && artifact_newer_than_compiler($o_path) == 1) {
                 ast_mark_module_loaded($program, $mod_name);

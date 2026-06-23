@@ -834,7 +834,16 @@ Go-package-archive-style separate compilation, fully automatic:
 - **Artifact codegen**: `-M` objects are built `-fno-lto` (LTO bitcode made
   every consumer link re-run a ~25s LTO pass) and `-fPIC` (same artifact
   links into executables and `--shared` libraries).
-- Implies `--use-artifacts` (artifact use stays opt-in by default).
+- Implies `--use-artifacts`. **Artifact use is now ON by default** (2026-06):
+  a plain `use Foo;` prefers a fresh sibling `Foo.o`/`Foo.so` (read in-process
+  via `.strada_meta`, no code executed at compile time). Disable with
+  `--no-use-artifacts` (or `STRADA_USE_ARTIFACTS=0`) to always recompile from
+  source. The default flipped from off→on because the in-process section reader
+  closed the old compile-time code-execution risk; the residual is that the
+  sibling `.o` is linked into your binary (trust the artifact over the source),
+  guarded only by the two freshness gates. The gate lives in Parser.strada
+  (`$__ua ne "0"` ⇒ default on). The explicit
+  `import_object`/`import_lib`/`import_archive` forms are always honored.
 - `strada --clear-module-cache` wipes the cache directory (always safe —
   the next `--module-cache` build regenerates it).
 - Artifacts are deliberately **not LTO-participating** (`-fno-lto`): fat-LTO

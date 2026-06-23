@@ -378,6 +378,7 @@ func parse_args(array @av) void {
         elsif ($a eq "-fno-lto" || $a eq "--no-lto") { $NO_LTO = 1; $i = $i + 1; }
         elsif ($a eq "--no-stack-trace") { $NO_STACK_TRACE = 1; $i = $i + 1; }
         elsif ($a eq "--use-artifacts") { core::setenv("STRADA_USE_ARTIFACTS", "1"); $i = $i + 1; }
+        elsif ($a eq "--no-use-artifacts") { core::setenv("STRADA_USE_ARTIFACTS", "0"); $i = $i + 1; }
         elsif ($a eq "--import-lib") { @IMPLICIT_IMPORT_LIBS = (@IMPLICIT_IMPORT_LIBS, $av[$i + 1]); $i = $i + 2; }
         elsif ($a eq "-LL") { @LIB_PATHS_LOW = (@LIB_PATHS_LOW, $av[$i + 1]); $i = $i + 2; }
         elsif (sw($a, "-LL")) { @LIB_PATHS_LOW = (@LIB_PATHS_LOW, substr($a, 3, length($a) - 3)); $i = $i + 1; }
@@ -401,27 +402,54 @@ func parse_args(array @av) void {
 }
 
 func usage() void {
-    say("Usage: strada [options] input.strada [extra.c ...] [extra.o ...]");
+    say("Usage: strada [options] input.strada [extra.c ...] [extra.o ...] [extra.a ...] [lib.so ...]");
     say("");
-    say("Compile Strada programs to native executables or shared libraries.");
-    say("Run 'strada --doc' or see docs/ for the full option reference.");
+    say("Compile Strada programs to native executables or libraries (see strada(1)).");
     say("");
-    say("Common options:");
-    say("  -c            Keep the generated C file");
-    say("  -r, --run     Run the program after compiling");
-    say("  -o FILE       Output file name");
-    say("  -O LEVEL      Optimization level (0,1,2,3,s,fast) [default: 2]");
-    say("  -D NAME[=VAL] Define a preprocessor macro");
-    say("  -L / -LL PATH Library search path (high / low priority)");
-    say("  -l LIB        Link with library");
-    say("  -I PATH       C include path");
-    say("  -g            Debug symbols + #line directives");
-    say("  --shared / --static / --static-lib / --object   Output kind");
-    say("  --tcc         Compile with tcc (fast), link with the C compiler");
-    say("  --module-cache  Use + warm precompiled module artifacts");
-    say("  --repl / --script FILE   Interactive / scripted JIT execution");
-    say("  -v            Verbose output");
-    say("  -h, --help    This help");
+    say("Output:");
+    say("  -o FILE             Output file name");
+    say("  -c                  Keep the generated C file");
+    say("  --shared            Build a shared library (.so), dlopen'd via import_lib");
+    say("  --object            Build a single module object (.o)");
+    say("  --object-full       Like --object, but bundle the module's deps");
+    say("  --static-lib        Build a static library (.a)");
+    say("  --static            Build a fully static executable (no dynamic libs)");
+    say("  -M [TARGET]         Module-only compile (sibling .o for separate compilation)");
+    say("");
+    say("Optimization:");
+    say("  -O LEVEL            0,1,2,3,s,fast  [default: 2; -O2+ enables LTO]");
+    say("  --no-lto, -fno-lto  Disable link-time optimization");
+    say("  --tcc               Compile with tcc (fast, unoptimized), link with the C compiler");
+    say("");
+    say("Modules & artifacts:");
+    say("  --use-artifacts     Prefer fresh precompiled sibling .o/.so for `use Foo;` [DEFAULT]");
+    say("  --no-use-artifacts  Always recompile modules from source (ignore sibling artifacts)");
+    say("  --import-lib PATH   Load a Strada-module .so at runtime (like import_lib \"PATH\")");
+    say("  --module-cache      Use + warm the precompiled module cache");
+    say("  --clear-module-cache  Wipe the module cache and exit");
+    say("");
+    say("Diagnostics & profiling:");
+    say("  -w, --warnings      Enable warnings (unused variables, etc.)");
+    say("  --strict-types      Stage-0 gradual type checking (warnings only)");
+    say("  -g                  Debug symbols + #line directives");
+    say("  --c-debug           C-level debug symbols only");
+    say("  -p, --profile       Function-level profiling to stderr");
+    say("  --full-profile      Line-level profiling (writes strada-prof.out)");
+    say("  --no-stack-trace    Omit stack-trace tracking (faster)");
+    say("  -v, --verbose       Verbose output (show subcommands)");
+    say("");
+    say("Compile-time inputs:");
+    say("  -D NAME[=VAL]       Define a preprocessor macro");
+    say("  -I PATH             C include path");
+    say("  -L / -LL PATH       Library search path (high / low priority)");
+    say("  -l LIB              Link with library");
+    say("");
+    say("Run / interactive:");
+    say("  -r, --run           Run the program after compiling");
+    say("  --repl              Interactive JIT REPL");
+    say("  --script FILE       Run FILE through the JIT (no compile to disk)");
+    say("  --doc [TOPIC]       Open documentation");
+    say("  -h, --help          This help");
     core::exit(0);
 }
 

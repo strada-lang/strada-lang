@@ -87,7 +87,28 @@ Strada is a strongly-typed programming language inspired by Perl. It features Pe
 - **-M** *file_or_dir*
   Precompile module(s). With a `.strada` file, produces a sibling `.o` containing only that file's own symbols. With a directory, walks recursively and produces a sibling `.o` for each `.strada` underneath. The resulting `.o`s are picked up automatically by `use Foo;` when sitting next to `Foo.strada` (mtime-fresh).
 
-- **-w**
+- **--use-artifacts**
+  Prefer a fresh precompiled sibling `Foo.o`/`Foo.so` over re-parsing `Foo.strada` when resolving `use Foo;`. **This is the default.** A module's interface is read in-process from its `.strada_meta` section (no subprocess, no `dlopen`, no module code executed at compile time). Two freshness gates apply: the artifact must be at least as new as its source *and* as new as `stradac`; otherwise the source is recompiled. Note that the chosen `.o` is linked into your binary, so `--use-artifacts` trusts the sibling artifact in your tree over the source you can see.
+
+- **--no-use-artifacts**
+  Disable the above: always recompile `use`d modules from their `.strada` source, ignoring any sibling `.o`/`.so`. Use this when you want "compile exactly the source in front of me" (untrusted trees, or to rule out a stale artifact). The explicit **import_object** / **import_lib** / **import_archive** forms are unaffected and always honored. Equivalent to `STRADA_USE_ARTIFACTS=0`.
+
+- **--import-lib** *path*
+  Load a Strada-module shared library (`.so`) at runtime, exactly as if the source contained `import_lib "path";`. A Strada-module `.so` passed as a bare positional argument is treated the same way. (Plain C `.so`s are linked, not import_lib'd.)
+
+- **--module-cache**
+  Use and warm the precompiled module cache (separate compilation, keyed by source path and `-D` define set). Implies **--use-artifacts**. Speeds up rebuilds of multi-module projects.
+
+- **--clear-module-cache**
+  Wipe the module cache directory and exit. Always safe; the next `--module-cache` build regenerates it.
+
+- **--strict-types**
+  Enable stage-0 gradual type checking: compares declared types against a best-effort static expression type and emits warnings (never errors) on likely mismatches. `scalar`/`dynamic`/unannotated values never warn.
+
+- **--no-stack-trace**
+  Omit stack-trace frame tracking from the compiled program. Slightly faster; uncaught exceptions no longer print a Strada call stack.
+
+- **-w**, **--warnings**
   Show compiler warnings (unused variables, etc.).
 
 - **-v**
@@ -239,6 +260,15 @@ man stradac
 
 - **STRADA_LIB**
   Additional library search paths, colon-separated.
+
+- **STRADA_USE_ARTIFACTS**
+  Controls whether `use Foo;` prefers a fresh sibling `Foo.o`/`Foo.so` over the source. Enabled by default; set to `0` to disable (equivalent to **--no-use-artifacts**). Any other value (or unset) leaves it enabled.
+
+- **STRADA_MODULE_CACHE_DIR**
+  Directory for the `--module-cache` artifacts (default `~/.cache/strada/modules`).
+
+- **CC**
+  C compiler used for the final compile/link (default `gcc`; on macOS this is clang).
 
 ## FILES
 
