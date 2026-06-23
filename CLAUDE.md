@@ -64,6 +64,16 @@ which roughly halves a clean `make` with no effect on the final compiler.
 
 Detected libraries: MySQL, SQLite, PostgreSQL, libcrypt, OpenSSL, PCRE2, readline, zlib, libusb
 
+**macOS / OpenSSL (2026-06)**: Apple ships LibreSSL and no OpenSSL headers in the
+SDK, so OpenSSL comes from Homebrew (`brew install openssl@3`), kept *keg-only*
+(off the default include/lib path). `./configure` detects it via `brew --prefix
+openssl@3` and sets `SSL_CFLAGS=-I<prefix>/include`, `SSL_LIBS=-L<prefix>/lib
+-lssl -lcrypto`. The driver injects `STRADA_SSL_CFLAGS` into the `lib/ssl`
+compile (so the `#include <openssl/ssl.h>` __C__ block resolves) and adds the
+`-L` dir for any ssl/crypto `link_lib` (so the keg-only libs link). Without
+OpenSSL, `make` skips `lib/ssl` cleanly (the SSL lib build is gated on
+`HAVE_SSL`). All of this is no-op on Linux, where OpenSSL is on the default path.
+
 Memory-management features (compile-time, default on): cycle collector (`--with/--without-cycle-gc`), request arena (`--with/--without-arena`). See "Memory Management and Leak Detection" below.
 
 ## Compilation

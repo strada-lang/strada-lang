@@ -427,15 +427,26 @@ fi
 
 # Check OpenSSL
 printf "  Checking for OpenSSL... "
-if [ "$HAS_PKGCONFIG" = "1" ] && check_pkg openssl; then
+if [ "$HAS_PKGCONFIG" = "1" ] && check_pkg openssl && check_header "openssl/ssl.h" "$(pkg-config --cflags openssl)"; then
     HAVE_SSL=1
     SSL_CFLAGS="$(pkg-config --cflags openssl)"
     SSL_LIBS="$(pkg-config --libs openssl)"
     echo -e "${GREEN}yes${NC} (pkg-config)"
 elif check_lib "OpenSSL" "openssl/ssl.h" "ssl" "SSL_new"; then
+    # openssl/ssl.h on the default include path (Linux, or macOS with -I already set)
     HAVE_SSL=1
     SSL_LIBS="-lssl -lcrypto"
     echo -e "${GREEN}yes${NC}"
+elif [ "$UNAME_S" = "Darwin" ] && command -v brew >/dev/null 2>&1 && \
+     SSL_PREFIX="$(brew --prefix openssl@3 2>/dev/null || brew --prefix openssl 2>/dev/null)" && \
+     [ -n "$SSL_PREFIX" ] && [ -f "$SSL_PREFIX/include/openssl/ssl.h" ]; then
+    # macOS: Apple ships LibreSSL and no OpenSSL headers in the SDK; OpenSSL comes
+    # from Homebrew, kept "keg-only" (off the default include/lib path), so neither
+    # pkg-config (no PKG_CONFIG_PATH) nor check_lib finds it. Point at the keg.
+    HAVE_SSL=1
+    SSL_CFLAGS="-I$SSL_PREFIX/include"
+    SSL_LIBS="-L$SSL_PREFIX/lib -lssl -lcrypto"
+    echo -e "${GREEN}yes${NC} (Homebrew: $SSL_PREFIX)"
 else
     echo -e "${RED}no${NC}"
 fi

@@ -765,6 +765,12 @@ func main() int {
     my array @include_flags = ();
     my int $ii = 0;
     while ($ii < size(@INCLUDE_PATHS)) { @include_flags = (@include_flags, "-I" . $INCLUDE_PATHS[$ii]); $ii = $ii + 1; }
+    # OpenSSL compile flags (configure's STRADA_SSL_CFLAGS): needed to compile
+    # lib/ssl.strada's `#include <openssl/ssl.h>` __C__ block when OpenSSL lives
+    # off the default include path (e.g. Homebrew's keg-only openssl@3 on macOS).
+    # Empty on Linux / when SSL is absent, so a harmless no-op there.
+    my str $__ssl_cf = env("STRADA_SSL_CFLAGS");
+    if (length($__ssl_cf) > 0) { @include_flags = (@include_flags, split_ws($__ssl_cf)); }
 
     my array @link_flags = ();
     my int $li = 0;
@@ -905,11 +911,28 @@ func main() int {
     my str $llibs = marker_payload($gen, "__STRADA_LINK_LIBS__" . $COLON);
     if (length($llibs) > 0) {
         info("link_libs: " . $llibs);
+        # If this build pulls in OpenSSL (ssl/crypto declared via link_lib), add
+        # OpenSSL's configured -L dirs (the -L tokens of STRADA_SSL_LIBS) so a
+        # keg-only install — Homebrew's openssl@3 on macOS, off the default
+        # linker path — both probes and links. No-op on Linux / when SSL is on
+        # the default path (STRADA_SSL_LIBS has no -L).
+        my str $probe_ldirs = "";
+        if (index($llibs, "ssl") >= 0 || index($llibs, "crypto") >= 0) {
+            my array @__slt = split_ws(env("STRADA_SSL_LIBS"));
+            my int $__sti = 0;
+            while ($__sti < size(@__slt)) {
+                if (sw($__slt[$__sti], "-L")) {
+                    @link_flags = (@link_flags, $__slt[$__sti]);
+                    $probe_ldirs = $probe_ldirs . " " . sq($__slt[$__sti]);
+                }
+                $__sti = $__sti + 1;
+            }
+        }
         my array @ll = split_ws($llibs);
         my int $lli = 0;
         while ($lli < size(@ll)) {
             my str $lib = $ll[$lli];
-            my str $probe = "echo 'int main(void){return 0;}' | " . join(" ", map { sq($_) } @CC) . " -x c - -l" . sq($lib) . " -o /dev/null 2>/dev/null";
+            my str $probe = "echo 'int main(void){return 0;}' | " . join(" ", map { sq($_) } @CC) . $probe_ldirs . " -x c - -l" . sq($lib) . " -o /dev/null 2>/dev/null";
             if (core::system($probe) == 0) {
                 @link_flags = (@link_flags, "-l" . $lib);
             } else {
