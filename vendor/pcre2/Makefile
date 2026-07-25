@@ -4,6 +4,16 @@
 CC ?= gcc
 CFLAGS ?= -O2
 CFLAGS += -DHAVE_CONFIG_H -DPCRE2_CODE_UNIT_WIDTH=8 -DPCRE2_STATIC -I. -Isrc
+# Unicode support: the Strada runtime compiles patterns with PCRE2_UTF|PCRE2_UCP
+# whenever the subject string carries the UTF-8 flag (see
+# strada_regex_set_subject_for_sv). Without SUPPORT_UNICODE, that pcre2_compile
+# fails outright and every regex on a UTF-8-flagged subject silently never
+# matches (all `use utf8` Perl modules under perla — Date::Manip's whole config/
+# TZ layer, for one). The UCD table sources are already in SRCS; this define
+# activates them (~0.4MB archive growth, no cost for non-UTF patterns).
+# Passed as -D (not edited into config.h) because config.h is regenerated from
+# src/config.h.generic on clean builds.
+CFLAGS += -DSUPPORT_UNICODE=1
 AR ?= ar
 
 # Core PCRE2-8 source files (no JIT, no POSIX wrapper, no fuzzer, no dftables)
@@ -31,7 +41,6 @@ SRCS = src/pcre2_auto_possess.c \
        src/pcre2_substring.c \
        src/pcre2_tables.c \
        src/pcre2_ucd.c \
-       src/pcre2_ucptables.c \
        src/pcre2_valid_utf.c \
        src/pcre2_xclass.c \
        src/pcre2_chartables.c
