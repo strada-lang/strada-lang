@@ -12,6 +12,24 @@ func process_hash(scalar $h) int {
     return scalar(@keys);
 }
 
+# A typed container initialized from an anonymous literal is internally backed
+# by that literal's reference wrapper. Taking the whole-container reference
+# must reuse it, rather than producing REF -> REF -> HASH/ARRAY.
+func hash_literal_ref(int $value) scalar {
+    my hash %record = { value => $value };
+    return \%record;
+}
+
+func array_literal_ref(int $value) scalar {
+    my array @record = [$value, 2];
+    return \@record;
+}
+
+func blessed_hash_literal_ref(int $value) scalar {
+    my hash %record = { value => $value };
+    return bless(\%record, "LiteralRecord");
+}
+
 func main() int {
     my int $i = 0;
 
@@ -93,6 +111,23 @@ func main() int {
     while ($i < 1000) {
         my scalar $result = 10 % 0;
         $i = $i + 1;
+    }
+
+    # Test 12: References to typed containers initialized by anonymous literals
+    my scalar $href = hash_literal_ref(20);
+    if ($href->{value} != 20) {
+        say("FAIL: hash literal reference lost its value");
+        return 1;
+    }
+    my scalar $aref = array_literal_ref(30);
+    if ($aref->[0] != 30 || $aref->[1] != 2) {
+        say("FAIL: array literal reference lost its values");
+        return 1;
+    }
+    my scalar $object = blessed_hash_literal_ref(40);
+    if ($object->{value} != 40 || ref($object) ne "LiteralRecord") {
+        say("FAIL: blessed hash literal reference lost its value or class");
+        return 1;
     }
 
     say("PASS: Temporary cleanup test completed");

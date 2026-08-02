@@ -20046,10 +20046,30 @@ StradaValue* strada_slot_ref_create(StradaValue **slot) {
     return ref;
 }
 
+/* Whole-container variables may be backed either by a direct ARRAY/HASH SV or
+ * by the matching REF wrapper returned from an anonymous [..] / {..}
+ * initializer.  Taking \@array or \%hash in the latter case must not add a
+ * second wrapper: the source-level value is still one whole container.  Keep
+ * scalar refs distinct so \$ref continues to create a real reference-to-ref. */
+static inline int strada_ref_wraps_container_kind(StradaValue *target, char ref_type) {
+    if ((ref_type != '@' && ref_type != '%') || !target ||
+        STRADA_IS_TAGGED_INT(target) || target->type != STRADA_REF ||
+        strada_is_slot_ref(target) || SV_IS_WEAK(target) || !target->value.rv ||
+        STRADA_IS_TAGGED_INT(target->value.rv)) {
+        return 0;
+    }
+    return (ref_type == '@' && target->value.rv->type == STRADA_ARRAY) ||
+           (ref_type == '%' && target->value.rv->type == STRADA_HASH);
+}
+
 StradaValue* strada_new_ref(StradaValue *target, char ref_type) {
     /* Create a reference with type info: \$var, \@arr, \%hash */
-    (void)ref_type;  /* Reserved for future type checking */
     if (!target) return strada_new_undef();
+
+    if (strada_ref_wraps_container_kind(target, ref_type)) {
+        strada_incref(target);
+        return target;
+    }
 
     StradaValue *ref = strada_value_alloc();
     ref->type = STRADA_REF;
@@ -20074,8 +20094,8 @@ StradaValue* strada_new_ref(StradaValue *target, char ref_type) {
 
 /* Take-ownership variant: caller donates the target (no incref) */
 StradaValue* strada_new_ref_take(StradaValue *target, char ref_type) {
-    (void)ref_type;
     if (!target) return strada_new_undef();
+    if (strada_ref_wraps_container_kind(target, ref_type)) return target;
     StradaValue *ref = strada_value_alloc();
     ref->type = STRADA_REF;
     ref->refcount = 1;
