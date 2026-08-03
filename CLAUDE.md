@@ -1203,6 +1203,87 @@ core::array_reserve(@arr, $n);
 ./strada -Ofast input.strada    # Aggressive optimization + LTO + -march=native
 ```
 
+### Diagnostics Format (2026-08)
+
+All compiler diagnostics carry a source location:
+
+- **Lexer errors**: `file:line: msg` (`lex_error` in Lexer.strada), with
+  `file:line:col` where a column is known (unexpected character; token-start
+  column). Unterminated string/comment errors point at the opening line, not
+  EOF. `lex_tokenize_file(source, filename)` is the filename-carrying entry
+  point; bare `lex_tokenize` (synthetic sources, e.g. `s///e` replacement
+  re-lexing) falls back to `line N: msg`.
+- **Parse errors**: `file:line: msg` (`parser_error`). Module sub-parsers get
+  their filename set in `load_module`, so errors in `use`'d modules name the
+  module's own path.
+- **Semantic errors/warnings**: `file:line: error|warning: msg`. Function AST
+  nodes are stamped with a `file` at module-merge time (module path) and at
+  the end of `parse_program` (main file / synthesized functions);
+  `semantic_error`/`semantic_warn` take `$ctx` and read `$ctx->{"cur_file"}`,
+  set per-function in both semantic passes. Nodes without a file fall back to
+  the old `error: msg at line N` format.
+
+**Multi-error reporting (2026-08)**: one compile reports every error, not
+just the first.
+
+- **Semantic**: `semantic_error` accumulates into `$ctx->{"errors"}` and
+  RETURNS — analysis continues, all errors print at the end (capped at 25
+  shown), then one `die("compilation failed: N semantic errors")`. Every
+  error site must therefore be fall-through-safe: an error may suppress
+  behavior but must never leave state that crashes later analysis.
+- **Parse recovery (function boundary)**: `parse_program`'s function branch
+  calls `parse_function_guarded`, which invokes `parse_function` through
+  **`strada_call_named_guarded(name, arg)`** — a runtime builtin that dlsyms
+  the process's own symbol (stradac's functions are non-static globals in a
+  `-rdynamic` binary) and calls it under a hand-rolled try frame, returning
+  `[1, result]` / `[0, errmsg]` / `[-1]` (symbol unavailable → caller falls
+  back to a direct fatal call). On error: recorded, `parser_resync_toplevel`
+  skips to the next top-level keyword at relative brace depth <= 0, parsing
+  continues (capped at 20). All recovered errors print at end of
+  `parse_program`, then one die — semantic analysis never runs on a partial
+  AST. Config-level items (`use`/`import_*`) stay fatal-on-first by design.
+  This runtime-assisted shape exists because the frozen bootstrap compiles
+  NONE of: `try/catch`, `__C__` blocks, `extern func` declarations, `\&func`,
+  or `undef`-initializers — a bare unknown builtin call (emitted by the
+  bootstrap as a direct C call) is the one mechanism that works everywhere.
+  Like all new compiler-callable runtime builtins (see
+  `strada_read_meta_section`), it is wired in Semantic (`$b{...}`),
+  CodeGenBuiltins (both dispatch sites), CodeGen `owned_set`, both runtime
+  headers — and requires a full `make`, never `make quick`.
+- **`--check`** (stradac + driver): syntax/semantic validation only — stops
+  after `semantic_analyze`, writes no C, runs no cc. `<output.c>` optional.
+  Exit 0 clean / non-zero with located errors. The editor-integration hook.
+
+**Columns + caret snippets (2026-08)**: errors render gcc-style — location,
+the offending source line, and a caret:
+
+```
+app.strada:2:19: Unexpected character: `
+    my int $a = 3 ` 4;
+                  ^
+```
+
+- **Token columns are stamped centrally**: `lex_next_token` records the
+  token-start column on the lexer (`tok_col`, captured after whitespace
+  skip), and `lex_tokenize_file`'s loop stamps `$token->{"column"}` — one
+  site, not ~55 creation sites. In-token readers (string/regex/qw/__C__)
+  pass `$lexer->{"tok_col"}` to `lex_error` for the opener's column.
+- **Snippet helpers live in Lexer.strada** (`diag_snippet`,
+  `diag_snippet_from_file`, `diag_line_from_source`, `diag_caret_pad`) —
+  char_at byte-walk, error-path only, tab-preserving caret pad. The lexer
+  renders from its in-memory source; parser and semantic re-slurp by
+  filename (skipped for synthetic/unreadable sources). Semantic errors show
+  the line without a caret (AST nodes carry line, not column); warnings
+  stay single-line by design (`-w` output stays compact).
+- `parser_error` emits `file:line:col:` via `parser_current_col` (current
+  token's stamped column).
+
+Anything matching diagnostics must accept the `file:line[:col]:` prefix (a
+`^warning:` anchor broke when this landed — see `t/t_core.sh`'s strict-types
+count). Regression tests: `t/diagnostics_test/run.sh` (19 cases: located
+lexer/parser/semantic errors incl. exact columns and caret alignment,
+module-file attribution, multi-error, parse recovery, --check).
+
 ### Full Profiling (Line-Level)
 
 ```bash

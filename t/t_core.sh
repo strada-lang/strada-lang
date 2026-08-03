@@ -479,8 +479,8 @@ test_output_contains "$EXAMPLES_DIR/test_namespaced_builtins.strada" "test_names
 TOTAL=$((TOTAL + 1))
 STRICT_OUT=$("$STRADAC" --strict-types "$EXAMPLES_DIR/test_strict_types.strada" "$BUILD_DIR/test_strict_types.c" 2>&1)
 STRICT_RC=$?
-STRICT_WARNS=$(echo "$STRICT_OUT" | grep -c "^warning:")
-NOFLAG_WARNS=$("$STRADAC" "$EXAMPLES_DIR/test_strict_types.strada" "$BUILD_DIR/test_strict_types.c" 2>&1 | grep -c "^warning:")
+STRICT_WARNS=$(echo "$STRICT_OUT" | grep -cE '(^|:[0-9]+: )warning: ')
+NOFLAG_WARNS=$("$STRADAC" "$EXAMPLES_DIR/test_strict_types.strada" "$BUILD_DIR/test_strict_types.c" 2>&1 | grep -cE '(^|:[0-9]+: )warning: ')
 if [ "$STRICT_RC" -eq 0 ] && [ "$STRICT_WARNS" -eq 5 ] && [ "$NOFLAG_WARNS" -eq 0 ]; then
     log_pass "compile: --strict-types warnings (5 expected, 0 without flag)"
     PASSED=$((PASSED + 1))

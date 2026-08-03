@@ -30,7 +30,61 @@ func parser_new(scalar $tokens) scalar {
     $parser{"filename"} = "";
     $parser{"current_package"} = "";
     $parser{"const_names"} = {};  # Track declared const names
+    $parser{"errors"} = [];       # Recovered parse errors (see parse_function_guarded)
     return \%parser;
+}
+
+func parser_record_error(scalar $parser, str $msg) void {
+    push(@{$parser->{"errors"}}, $msg);
+}
+
+# Parse one function definition under an exception guard, so an error inside
+# one body doesn't abort the whole compile: the error is recorded and the
+# caller resyncs to the next top-level item (multiple parse errors per run).
+# Detection contract: the caller compares the parser's error count before and
+# after — on failure the count grows and the return value is meaningless.
+# The guard needs the process's own symbols (non-static + -rdynamic, true for
+# stradac); if unavailable, falls back to a direct call (fatal-on-error, the
+# pre-recovery behavior).
+func parse_function_guarded(scalar $parser) scalar {
+    my scalar $pair = strada_call_named_guarded("parse_function", $parser);
+    my int $status = $pair->[0];
+    if ($status == 1) {
+        return $pair->[1];
+    }
+    if ($status == 0) {
+        parser_record_error($parser, $pair->[1]);
+        return 0;
+    }
+    return parse_function($parser);
+}
+
+# After a recovered parse error: skip tokens until the next plausible
+# top-level item start. Brace depth is tracked RELATIVE to the error point
+# (the absolute depth is unknown), so the closing brace of the broken
+# function drives the count negative — top-level keywords are only honored
+# at relative depth <= 0.
+func parser_resync_toplevel(scalar $parser) void {
+    my int $depth = 0;
+    while (!parser_check($parser, "EOF")) {
+        my scalar $tok = parser_current($parser);
+        my str $ttype = $tok->{"type"};
+        if ($ttype eq "LBRACE") {
+            $depth = $depth + 1;
+        } elsif ($ttype eq "RBRACE") {
+            $depth = $depth - 1;
+        } elsif ($depth <= 0) {
+            if ($ttype eq "FUNC" || $ttype eq "PACKAGE" || $ttype eq "PRIVATE" ||
+                $ttype eq "ASYNC" || $ttype eq "USE" || $ttype eq "CONST" ||
+                $ttype eq "ENUM" || $ttype eq "EXTERN" || $ttype eq "OUR") {
+                return;
+            }
+            if ($ttype eq "IDENT" && $tok->{"value"} eq "fn") {
+                return;
+            }
+        }
+        parser_advance($parser);
+    }
 }
 
 func parser_set_filename(scalar $parser, str $filename) void {
@@ -94,15 +148,23 @@ func friendly_expected(str $type) str {
     return $type;
 }
 
-# Format and die with error message including file:line
+# Format and die with error message including file:line:col plus a
+# source-line + caret snippet (rendered from the file; skipped for
+# synthetic/unreadable sources).
 func parser_error(scalar $parser, str $msg) void {
     my str $filename = $parser->{"filename"};
     my int $line = parser_current_line($parser);
+    my int $col = parser_current_col($parser);
+    my str $loc = "";
     if (length($filename) > 0) {
-        die($filename . ":" . $line . ": " . $msg);
+        $loc = $filename . ":" . $line;
     } else {
-        die("line " . $line . ": " . $msg);
+        $loc = "line " . $line;
     }
+    if ($col > 0) {
+        $loc = $loc . ":" . $col;
+    }
+    die($loc . ": " . $msg . diag_snippet_from_file($filename, $line, $col));
 }
 
 func parser_current(scalar $parser) scalar {
@@ -203,6 +265,11 @@ func parser_expect_func(scalar $parser) void {
 func parser_current_line(scalar $parser) int {
     my scalar $tok = parser_current($parser);
     return $tok->{"line"};
+}
+
+func parser_current_col(scalar $parser) int {
+    my scalar $tok = parser_current($parser);
+    return $tok->{"column"};
 }
 
 # Parse a variable name - allows type keywords as variable names
@@ -4379,10 +4446,11 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
     }
 
     # Lex the module
-    my scalar $tokens = lex_tokenize($source);
+    my scalar $tokens = lex_tokenize_file($source, $file_path);
 
     # Parse the module
     my scalar $mod_parser = parser_new($tokens);
+    parser_set_filename($mod_parser, $file_path);
     my scalar $mod_program = ast_new_program();
 
     # Copy lib_paths from parent program so nested use statements work
@@ -4554,6 +4622,14 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
     while ($i < $count) {
         my scalar $fn = $mod_funcs->[$i];
         my str $fn_name = $fn->{"name"};
+
+        # Stamp the defining source file for diagnostics (semantic errors
+        # report file:line). Nested-use functions are already stamped with
+        # their own module's path — don't overwrite.
+        my str $fn_file = $fn->{"file"};
+        if (length($fn_file) == 0) {
+            $fn->{"file"} = $file_path;
+        }
 
         # Check if function already has a qualified name (from nested use)
         my int $has_qualifier = index($fn_name, "::");
@@ -6491,7 +6567,17 @@ func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low, sca
         }
 
         if (parser_check_func($parser)) {
-            my scalar $fn = parse_function($parser);
+            my int $perr_before = size(@{$parser->{"errors"}});
+            my scalar $fn = parse_function_guarded($parser);
+            if (size(@{$parser->{"errors"}}) > $perr_before) {
+                # Error recorded: skip to the next top-level item and keep
+                # going, so one run reports every broken function (capped).
+                if (size(@{$parser->{"errors"}}) >= 20) {
+                    last;
+                }
+                parser_resync_toplevel($parser);
+                next;
+            }
             $fn->{"is_private"} = $is_private;
             if ($is_async == 1) {
                 $fn->{"type"} = NODE_ASYNC_FUNC();
@@ -6661,6 +6747,22 @@ func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low, sca
     }
 
 
+    # Report every recovered parse error and fail the compile with a single
+    # die (semantic analysis never runs on a partial AST).
+    my scalar $perrs = $parser->{"errors"};
+    my int $perr_count = size(@{$perrs});
+    if ($perr_count > 0) {
+        my int $pe_i = 0;
+        while ($pe_i < $perr_count) {
+            warn($perrs->[$pe_i]);
+            $pe_i = $pe_i + 1;
+        }
+        if ($perr_count == 1) {
+            die("compilation failed: 1 parse error");
+        }
+        die("compilation failed: " . $perr_count . " parse errors");
+    }
+
     # STRADA_DEPS_OUT: write every resolved module source path, one per
     # line, in resolution order (parents before their nested deps). The
     # wrapper's --module-cache warmer uses this to precompile stale
@@ -6676,6 +6778,24 @@ func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low, sca
             $dep_i = $dep_i + 1;
         }
         spew($deps_out, $deps_text);
+    }
+
+    # Stamp remaining functions (main-file and synthesized ones) with this
+    # parser's filename for diagnostics. use-inlined module functions were
+    # already stamped with their module path at merge time.
+    my str $prog_file = $parser->{"filename"};
+    if (length($prog_file) > 0) {
+        my scalar $all_funcs = $program->{"functions"};
+        my int $all_count = $program->{"function_count"};
+        my int $sfi = 0;
+        while ($sfi < $all_count) {
+            my scalar $sfn = $all_funcs->[$sfi];
+            my str $sfn_file = $sfn->{"file"};
+            if (length($sfn_file) == 0) {
+                $sfn->{"file"} = $prog_file;
+            }
+            $sfi = $sfi + 1;
+        }
     }
 
     return $program;

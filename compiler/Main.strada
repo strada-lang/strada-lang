@@ -90,7 +90,7 @@ func _deduce_lib_root_from_source(str $source, str $filename) str {
     return substr($filename, 0, $suffix_start - 1);
 }
 
-func compile(str $source, str $filename, int $debug_info, int $show_timing, int $show_warnings, int $strict_types, int $enable_profiling, int $enable_stack_trace, int $full_profile, scalar $lib_paths, scalar $lib_paths_low, scalar $implicit_objs, scalar $implicit_archs, scalar $implicit_libs, int $module_only_mode, str $module_target) str {
+func compile(str $source, str $filename, int $debug_info, int $show_timing, int $show_warnings, int $strict_types, int $enable_profiling, int $enable_stack_trace, int $full_profile, scalar $lib_paths, scalar $lib_paths_low, scalar $implicit_objs, scalar $implicit_archs, scalar $implicit_libs, int $module_only_mode, str $module_target, int $check_only) str {
     my num $t0 = 0.0;
     my num $t1 = 0.0;
 
@@ -125,7 +125,7 @@ func compile(str $source, str $filename, int $debug_info, int $show_timing, int 
 
     # Tokenize
     $t0 = core::hires_time();
-    my scalar $tokens = lex_tokenize($source);
+    my scalar $tokens = lex_tokenize_file($source, $filename);
     $t1 = core::hires_time();
     if ($show_timing == 1) {
         say("  Lexer:    " . ($t1 - $t0) . " seconds");
@@ -148,6 +148,12 @@ func compile(str $source, str $filename, int $debug_info, int $show_timing, int 
     $t1 = core::hires_time();
     if ($show_timing == 1) {
         say("  Semantic: " . ($t1 - $t0) . " seconds");
+    }
+
+    # --check: validation only. Errors above have already die'd; a clean
+    # program stops here without generating C.
+    if ($check_only == 1) {
+        return "";
     }
 
     # Generate code (pass debug flag for #line directives, profiling flag, stack trace flag)
@@ -179,6 +185,8 @@ func print_usage() void {
     say("  --full-profile  Enable line-level profiling (writes strada-prof.out)");
     say("  -t, --timing    Show compilation phase timing");
     say("  -w, --warnings  Show warnings (unused variables, etc.)");
+    say("  --check         Syntax/semantic check only: no C output is written.");
+    say("                  <output.c> may be omitted. Exit 0 if clean.");
     say("  --stack-trace     Force enable stack trace support");
     say("  --no-stack-trace  Force disable stack trace support");
     say("                    (default: auto-detect from try/throw/caller usage)");
@@ -206,6 +214,7 @@ func main() int {
     my int $full_profile = 0;
     my int $enable_stack_trace = -1;  # Auto-detect by default
     my int $verbose = 0;
+    my int $check_only = 0;
     my str $input_file = "";
     my str $output_file = "";
     my array @lib_paths = ();
@@ -235,6 +244,8 @@ func main() int {
             $show_warnings = 1;
         } elsif ($arg eq "--strict-types") {
             $strict_types = 1;
+        } elsif ($arg eq "--check") {
+            $check_only = 1;
         } elsif ($arg eq "--full-profile") {
             $full_profile = 1;
             $debug_info = 1;  # Full profiling implies debug (needs line info)
@@ -330,8 +341,8 @@ func main() int {
         $i = $i + 1;
     }
 
-    # Check required arguments
-    if (length($input_file) == 0 || length($output_file) == 0) {
+    # Check required arguments (--check needs no output file)
+    if (length($input_file) == 0 || (length($output_file) == 0 && $check_only == 0)) {
         print_usage();
         return 1;
     }
@@ -392,7 +403,13 @@ func main() int {
     }
 
     # Compile (pass lib paths, CLI-implicit imports, and module-only settings)
-    my str $code = compile($source, $input_file, $debug_info, $show_timing, $show_warnings, $strict_types, $enable_profiling, $enable_stack_trace, $full_profile, \@lib_paths, \@lib_paths_low, \@implicit_objs, \@implicit_archs, \@implicit_libs, $module_only_mode, $module_target);
+    my str $code = compile($source, $input_file, $debug_info, $show_timing, $show_warnings, $strict_types, $enable_profiling, $enable_stack_trace, $full_profile, \@lib_paths, \@lib_paths_low, \@implicit_objs, \@implicit_archs, \@implicit_libs, $module_only_mode, $module_target, $check_only);
+
+    # --check: validation passed (any errors die before reaching here) —
+    # nothing to write.
+    if ($check_only == 1) {
+        return 0;
+    }
 
     # Write output
     spew($output_file, $code);

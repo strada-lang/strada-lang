@@ -22,15 +22,37 @@
 # Error Reporting
 # ============================================================
 
-func semantic_error(str $msg, int $line) void {
-    if ($line > 0) {
-        die("error: " . $msg . " at line " . $line);
+# Both helpers report "file:line: error: msg" when the enclosing function's
+# source file is known (ctx "cur_file", stamped by the parser on function
+# nodes), falling back to the old "error: msg at line N" format otherwise.
+#
+# semantic_error ACCUMULATES into ctx "errors" and returns (analysis
+# continues, so one compile reports every error); semantic_analyze prints
+# them all and dies once at the end. Every error site must therefore be safe
+# to fall through — an error must only suppress behavior, never leave state
+# that crashes later analysis.
+func semantic_error(scalar $ctx, str $msg, int $line) void {
+    my str $fname = $ctx->{"cur_file"};
+    my str $full = "";
+    if (length($fname) > 0 && $line > 0) {
+        # Append the offending source line (no caret — AST nodes carry a
+        # line but no column). Errors only; warnings stay single-line.
+        $full = $fname . ":" . $line . ": error: " . $msg
+            . diag_snippet_from_file($fname, $line, 0);
+    } elsif ($line > 0) {
+        $full = "error: " . $msg . " at line " . $line;
     } else {
-        die("error: " . $msg);
+        $full = "error: " . $msg;
     }
+    push(@{$ctx->{"errors"}}, $full);
 }
 
-func semantic_warn(str $msg, int $line) void {
+func semantic_warn(scalar $ctx, str $msg, int $line) void {
+    my str $fname = $ctx->{"cur_file"};
+    if (length($fname) > 0 && $line > 0) {
+        warn($fname . ":" . $line . ": warning: " . $msg);
+        return;
+    }
     if ($line > 0) {
         warn("warning: " . $msg . " at line " . $line);
     } else {
@@ -138,7 +160,7 @@ func scope_check_unused(scalar $ctx, scalar $scope) void {
         my str $name = $var_names->[$i];
         my scalar $info = $vars->{$name};
         if ($info->{"used"} == 0) {
-            semantic_warn("unused variable '$" . $name . "'", $info->{"line"});
+            semantic_warn($ctx, "unused variable '$" . $name . "'", $info->{"line"});
         }
     }
 }
@@ -529,6 +551,7 @@ func get_builtins() scalar {
     $b{"strada_dl_close_raw"} = 1;       # Internal: close library
     $b{"strada_dl_call_export_info"} = 1; # Internal: call export info function
     $b{"strada_read_meta_section"} = 1;  # Internal: read .strada_meta ELF section (no dlopen)
+    $b{"strada_call_named_guarded"} = 1; # Internal: dlsym self + call under try frame (parse recovery)
     $b{"sys::dl_sym"} = 1;
     $b{"sys::dl_close"} = 1;
     $b{"sys::dl_error"} = 1;
@@ -730,6 +753,8 @@ func ctx_new() scalar {
     $ctx{"builtins"} = get_builtins();
     $ctx{"scope"} = scope_new(0);
     $ctx{"current_func"} = 0;
+    $ctx{"cur_file"} = "";
+    $ctx{"errors"} = [];
 
     # Register built-in global variables: ARGV (array) and ARGC (int)
     my scalar $global_scope = $ctx{"scope"};
@@ -759,6 +784,7 @@ func register_functions(scalar $ctx, scalar $ast) void {
         my scalar $fn = $funcs->[$i];
         my str $name = $fn->{"name"};
         my int $line = ast_get_line($fn);
+        $ctx->{"cur_file"} = $fn->{"file"};
 
         # Check for duplicate function. Body-less extern declarations
         # (`extern func Pkg::name(...) ret;`) follow C semantics: a
@@ -782,7 +808,7 @@ func register_functions(scalar $ctx, scalar $ast) void {
                 # the decl's info with the definition's (fall through).
                 $skip_register = 0;
             } else {
-                semantic_error("function '" . $name . "' already defined", $line);
+                semantic_error($ctx, "function '" . $name . "' already defined", $line);
             }
         }
 
@@ -1041,7 +1067,7 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
         my scalar $lookup_result = scope_lookup_var($ctx->{"scope"}, $name);
         my int $found = $lookup_result->{"found"};
         if ($found == 0) {
-            semantic_error("undefined variable '" . $sigil . $name . "'", $line);
+            semantic_error($ctx, "undefined variable '" . $sigil . $name . "'", $line);
         }
         scope_mark_used($ctx->{"scope"}, $name);
         return;
@@ -1192,7 +1218,7 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
                     }
                 }
                 if ($is_reg == 0) {
-                    semantic_error("undefined function '" . $name . "'", $line);
+                    semantic_error($ctx, "undefined function '" . $name . "'", $line);
                 }
             }
             if ($is_reg == 0) {
@@ -1231,13 +1257,13 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
             }
 
             if ($actual < $required) {
-                semantic_error("too few arguments to '" . $name . "': expected " . $required . ", got " . $actual, $line);
+                semantic_error($ctx, "too few arguments to '" . $name . "': expected " . $required . ", got " . $actual, $line);
             }
             if ($actual > $expected) {
                 # Check if function is variadic
                 my int $is_var = $fn_info->{"is_variadic"};
                 if ($is_var == 0) {
-                    semantic_error("too many arguments to '" . $name . "': expected " . $expected . ", got " . $actual, $line);
+                    semantic_error($ctx, "too many arguments to '" . $name . "': expected " . $expected . ", got " . $actual, $line);
                 }
             }
         }
@@ -1257,7 +1283,7 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
                         my int $atype = stage0_expr_type($ctx, $args->[$i]);
                         if (stage0_types_compatible($ptype, $atype) == 0) {
                             my int $argno = $i + 1;
-                            semantic_warn("argument " . $argno . " to '" . $name
+                            semantic_warn($ctx, "argument " . $argno . " to '" . $name
                                 . "': expected " . ast_data_type_name($ptype)
                                 . ", got " . ast_data_type_name($atype), $line);
                         }
@@ -1302,7 +1328,7 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
                             my int $aline = ast_get_line($expr);
                             if ($aline == 0) { $aline = ast_get_line($tgt); }
                             if ($aline == 0) { $aline = ast_get_line($expr->{"value"}); }
-                            semantic_warn("assigning a " . ast_data_type_name($atype)
+                            semantic_warn($ctx, "assigning a " . ast_data_type_name($atype)
                                 . " value to '$" . $tgt->{"name"} . "' (declared "
                                 . ast_data_type_name($dtype) . ")", $aline);
                         }
@@ -1443,7 +1469,7 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         if (exists(%{$scope_vars}, $name)) {
             my scalar $prev_info = $scope_vars->{$name};
             my int $prev_line = $prev_info->{"line"};
-            semantic_error("variable '" . $sigil . $name . "' already declared in this scope (previous declaration at line " . $prev_line . ")", $line);
+            semantic_error($ctx, "variable '" . $sigil . $name . "' already declared in this scope (previous declaration at line " . $prev_line . ")", $line);
         }
 
         # Add variable to scope
@@ -1458,7 +1484,7 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
             if ($ctx->{"strict_types"} == 1 && $sigil eq "$") {
                 my int $atype = stage0_expr_type($ctx, $init_expr);
                 if (stage0_types_compatible($var_type, $atype) == 0) {
-                    semantic_warn("initializing '" . $sigil . $name . "' (declared "
+                    semantic_warn($ctx, "initializing '" . $sigil . $name . "' (declared "
                         . ast_data_type_name($var_type) . ") with a "
                         . ast_data_type_name($atype) . " value", $line);
                 }
@@ -1478,7 +1504,7 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         if (exists(%{$scope_vars}, $name)) {
             my scalar $prev_info = $scope_vars->{$name};
             my int $prev_line = $prev_info->{"line"};
-            semantic_error("constant '" . $name . "' already declared in this scope (previous declaration at line " . $prev_line . ")", $line);
+            semantic_error($ctx, "constant '" . $name . "' already declared in this scope (previous declaration at line " . $prev_line . ")", $line);
         }
 
         # Add const to scope as a scalar
@@ -1531,7 +1557,7 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
                 if (exists(%{$scope_vars}, $name)) {
                     my scalar $prev_info = $scope_vars->{$name};
                     my int $prev_line = $prev_info->{"line"};
-                    semantic_error("variable '" . $sigil . $name . "' already declared in this scope (previous declaration at line " . $prev_line . ")", $line);
+                    semantic_error($ctx, "variable '" . $sigil . $name . "' already declared in this scope (previous declaration at line " . $prev_line . ")", $line);
                 }
 
                 # Add variable to scope
@@ -1567,7 +1593,7 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
                     if ($rtype != TYPE_DYNAMIC()) {
                         my int $atype = stage0_expr_type($ctx, $ret_val);
                         if (stage0_types_compatible($rtype, $atype) == 0) {
-                            semantic_warn("returning a " . ast_data_type_name($atype)
+                            semantic_warn($ctx, "returning a " . ast_data_type_name($atype)
                                 . " value from '" . $cur->{"name"} . "' (declared to return "
                                 . ast_data_type_name($rtype) . ")", $line);
                         }
@@ -1756,6 +1782,7 @@ func semantic_analyze(scalar $ast, int $show_warnings, int $strict_types) void {
         if ($fn->{"is_extern"} == 1) {
             next;
         }
+        $ctx->{"cur_file"} = $fn->{"file"};
         analyze_function($ctx, $fn);
     }
 
@@ -1763,5 +1790,28 @@ func semantic_analyze(scalar $ast, int $show_warnings, int $strict_types) void {
     # which the parser sets directly). uses_tie gates condition-level CSE.
     if ($ctx->{"uses_tie"} == 1) {
         $ast->{"uses_tie"} = 1;
+    }
+
+    # Report every accumulated error (capped for readability) and fail the
+    # compile with a single die at the end, so one run surfaces them all.
+    my scalar $sem_errs = $ctx->{"errors"};
+    my int $sem_err_count = size(@{$sem_errs});
+    if ($sem_err_count > 0) {
+        my int $sem_show = $sem_err_count;
+        if ($sem_show > 25) {
+            $sem_show = 25;
+        }
+        my int $sem_i = 0;
+        while ($sem_i < $sem_show) {
+            warn($sem_errs->[$sem_i]);
+            $sem_i = $sem_i + 1;
+        }
+        if ($sem_err_count > $sem_show) {
+            warn("... and " . ($sem_err_count - $sem_show) . " more errors");
+        }
+        if ($sem_err_count == 1) {
+            die("compilation failed: 1 semantic error");
+        }
+        die("compilation failed: " . $sem_err_count . " semantic errors");
     }
 }

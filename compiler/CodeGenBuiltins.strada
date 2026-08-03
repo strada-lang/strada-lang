@@ -2195,6 +2195,11 @@ func gen_builtin_g3(scalar $cg, scalar $expr, str $name) int {
             return 1;
         }
 
+        if ($name eq "strada_call_named_guarded") {
+            gen_call_with_arg_cleanup($cg, "strada_call_named_guarded", $expr->{"args"}, 2);
+            return 1;
+        }
+
         if ($name eq "sys::dl_sym") {
             gen_call_with_arg_cleanup($cg, "strada_dl_sym", $expr->{"args"}, 2);
             return 1;
@@ -4567,6 +4572,17 @@ func gen_builtin_g5(scalar $cg, scalar $expr, str $name) int {
             emit($cg, "strada_read_meta_section(");
             my scalar $rms_args = $expr->{"args"};
             gen_expression($cg, $rms_args->[0]);
+            emit($cg, ")");
+            return 1;
+        }
+
+        # strada_call_named_guarded - dlsym self + call under try frame
+        if ($name eq "strada_call_named_guarded") {
+            emit($cg, "strada_call_named_guarded(");
+            my scalar $cng_args = $expr->{"args"};
+            gen_expression($cg, $cng_args->[0]);
+            emit($cg, ", ");
+            gen_expression($cg, $cng_args->[1]);
             emit($cg, ")");
             return 1;
         }

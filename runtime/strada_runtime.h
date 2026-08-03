@@ -1160,6 +1160,7 @@ StradaValue* strada_ref_hash(StradaHash **ptr);       /* Reference to hash */
 /* New Perl-style reference functions */
 StradaValue* strada_new_ref(StradaValue *target, char ref_type);  /* \$var, \@arr, \%hash */
 StradaValue* strada_new_ref_take(StradaValue *target, char ref_type);  /* takes ownership — no incref */
+StradaValue* strada_call_named_guarded(StradaValue *name_sv, StradaValue *arg_sv);  /* dlsym + try frame; [status, payload] */
 
 /* Slot references — reference to a C local variable's storage (StradaValue**).
  * Allows $$ref and $$ref = val to read/write the original variable.

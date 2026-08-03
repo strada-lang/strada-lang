@@ -21,6 +21,7 @@
 func lex_new(str $source) scalar {
     my hash %lexer = ();
     $lexer{"source"} = $source;
+    $lexer{"file"} = "";
     $lexer{"pos"} = 0;
     $lexer{"line"} = 1;
     $lexer{"column"} = 1;
@@ -29,7 +30,96 @@ func lex_new(str $source) scalar {
     $lexer{"expect_regex"} = 0;
     $lexer{"heredoc_pending_semi"} = 0;
     $lexer{"after_sigil"} = 0;
+    $lexer{"tok_col"} = 1;
     return \%lexer;
+}
+
+# ---- Diagnostic snippet rendering (shared by lexer/parser/semantic) ----
+# Byte-walk to line N (1-based) of a source string; "" when out of range.
+# char_at is O(1) by byte index (10 = '\n'), so this is one linear scan on
+# the error path only.
+func diag_line_from_source(str $source, int $want_line) str {
+    my int $src_len = bytes($source);
+    my int $pos = 0;
+    my int $cur = 1;
+    while ($cur < $want_line && $pos < $src_len) {
+        if (char_at($source, $pos) == 10) {
+            $cur = $cur + 1;
+        }
+        $pos = $pos + 1;
+    }
+    if ($cur < $want_line) {
+        return "";
+    }
+    my int $line_start = $pos;
+    while ($pos < $src_len && char_at($source, $pos) != 10) {
+        $pos = $pos + 1;
+    }
+    return substr($source, $line_start, $pos - $line_start);
+}
+
+# Whitespace pad for a caret under column N: mirrors tabs (9) from the
+# source line so the caret stays aligned under tab indentation.
+func diag_caret_pad(str $line_text, int $want_col) str {
+    my str $pad = "";
+    my int $line_len = bytes($line_text);
+    my int $ci = 0;
+    while ($ci < $want_col - 1 && $ci < $line_len) {
+        if (char_at($line_text, $ci) == 9) {
+            $pad = $pad . "\t";
+        } else {
+            $pad = $pad . " ";
+        }
+        $ci = $ci + 1;
+    }
+    return $pad;
+}
+
+# "\n<source line>\n<pad>^" — the gcc-style snippet appended to an error
+# message. Column 0 renders the line without a caret; "" when the line is
+# unavailable (synthetic sources, blank lines, out-of-range).
+func diag_snippet(str $source, int $want_line, int $want_col) str {
+    if ($want_line <= 0) {
+        return "";
+    }
+    my str $line_text = diag_line_from_source($source, $want_line);
+    if (length($line_text) == 0) {
+        return "";
+    }
+    if ($want_col > 0) {
+        return "\n" . $line_text . "\n" . diag_caret_pad($line_text, $want_col) . "^";
+    }
+    return "\n" . $line_text;
+}
+
+# Same, for callers that only hold a filename (parser/semantic). Slurps on
+# the error path only; "" when the file can't be read.
+func diag_snippet_from_file(str $fname, int $want_line, int $want_col) str {
+    if (length($fname) == 0) {
+        return "";
+    }
+    my str $src = slurp($fname);
+    if (length($src) == 0) {
+        return "";
+    }
+    return diag_snippet($src, $want_line, $want_col);
+}
+
+# Die with a source location. Format matches parser_error: "file:line: msg"
+# (plus ":col" when a column is known), falling back to "line N: msg" when
+# the lexer has no filename (synthetic sources, e.g. s///e replacements).
+func lex_error(scalar $lexer, str $msg, int $err_line, int $err_col) void {
+    my str $fname = $lexer->{"file"};
+    my str $loc = "";
+    if (length($fname) > 0) {
+        $loc = $fname . ":" . $err_line;
+    } else {
+        $loc = "line " . $err_line;
+    }
+    if ($err_col > 0) {
+        $loc = $loc . ":" . $err_col;
+    }
+    die($loc . ": " . $msg . diag_snippet($lexer->{"source"}, $err_line, $err_col));
 }
 
 # Fast char code access - no string allocation
@@ -127,6 +217,8 @@ func lex_skip_comment(scalar $lexer) void {
 }
 
 func lex_skip_block_comment(scalar $lexer) void {
+    my int $start_line = $lexer->{"line"};
+    my int $start_col = $lexer->{"column"};
     # Skip the opening /*
     lex_advance($lexer);
     lex_advance($lexer);
@@ -136,7 +228,7 @@ func lex_skip_block_comment(scalar $lexer) void {
         my int $code = lex_current_code($lexer);
 
         if ($code == 0) {
-            die("Unterminated block comment");
+            lex_error($lexer, "Unterminated block comment", $start_line, $start_col);
         }
 
         # Check for */  ('*'=42, '/'=47)
@@ -360,6 +452,8 @@ func lex_read_number(scalar $lexer) scalar {
 
 # Read a single-quoted string (no interpolation) - optimized with char codes
 func lex_read_sq_string(scalar $lexer) str {
+    my int $start_line = $lexer->{"line"};
+    my int $start_col = $lexer->{"column"};
     lex_advance($lexer); # Skip opening quote
     my scalar $sb = sb_new();
     my str $source = $lexer->{"source"};
@@ -369,7 +463,7 @@ func lex_read_sq_string(scalar $lexer) str {
         my int $pos = $lexer->{"pos"};
 
         if ($code == 0) {
-            die("Unterminated string");
+            lex_error($lexer, "Unterminated string", $start_line, $start_col);
         }
 
         # 39 = single quote
@@ -449,7 +543,7 @@ func lex_dq_content(scalar $lexer, int $term_code, int $token_line) scalar {
         }
 
         if ($code == 0) {
-            die("Unterminated string");
+            lex_error($lexer, "Unterminated string", $token_line, $lexer->{"tok_col"});
         }
 
         # 92 = backslash
@@ -556,7 +650,7 @@ func lex_dq_content(scalar $lexer, int $term_code, int $token_line) scalar {
                 while (1) {
                     my int $vc = lex_current_code($lexer);
                     if ($vc == 0) {
-                        die("Unterminated interpolation in string");
+                        lex_error($lexer, "Unterminated interpolation in string", $token_line, $lexer->{"tok_col"});
                     }
                     # 125 = }
                     if ($vc == 125) {
@@ -564,7 +658,7 @@ func lex_dq_content(scalar $lexer, int $term_code, int $token_line) scalar {
 
                         my str $ivar = sb_to_string($ivar_sb);
                         if (length($ivar) == 0) {
-                            die("Empty variable name in interpolation");
+                            lex_error($lexer, "Empty variable name in interpolation", $lexer->{"line"}, $lexer->{"column"});
                         }
 
                         # Save current part and variable
@@ -593,6 +687,8 @@ func lex_dq_content(scalar $lexer, int $term_code, int $token_line) scalar {
 
 # Legacy function for compatibility
 func lex_read_string(scalar $lexer) str {
+    my int $start_line = $lexer->{"line"};
+    my int $start_col = $lexer->{"column"};
     my str $quote = lex_current_char($lexer);
     lex_advance($lexer); # Skip opening quote
 
@@ -602,7 +698,7 @@ func lex_read_string(scalar $lexer) str {
         my str $ch = lex_current_char($lexer);
 
         if ($ch eq "") {
-            die("Unterminated string");
+            lex_error($lexer, "Unterminated string", $start_line, $start_col);
         }
 
         if ($ch eq $quote) {
@@ -784,7 +880,7 @@ func lex_read_regex_literal(scalar $lexer, int $token_line) scalar {
             lex_advance($lexer);
         }
     }
-    die("Unterminated regex literal at line " . $token_line);
+    lex_error($lexer, "Unterminated regex literal", $token_line, $lexer->{"tok_col"});
 }
 
 func lex_read_subst_literal(scalar $lexer, int $token_line) scalar {
@@ -1032,7 +1128,7 @@ func lex_read_qw(scalar $lexer, int $token_line) scalar {
         }
     }
 
-    die("Unterminated qw() at line " . $token_line);
+    lex_error($lexer, "Unterminated qw()", $token_line, $lexer->{"tok_col"});
 }
 
 # Read q() or qq() - single/double quoted string with custom delimiters
@@ -1151,7 +1247,7 @@ func lex_read_q_string(scalar $lexer, int $token_line, int $is_qq) scalar {
                 while (1) {
                     my int $vc = lex_current_code($lexer);
                     if ($vc == 0) {
-                        die("Unterminated interpolation in qq string");
+                        lex_error($lexer, "Unterminated interpolation in qq string", $token_line, $lexer->{"tok_col"});
                     }
                     # 125 = }
                     if ($vc == 125) {
@@ -1159,7 +1255,7 @@ func lex_read_q_string(scalar $lexer, int $token_line, int $is_qq) scalar {
 
                         my str $ivar = sb_to_string($ivar_sb);
                         if (length($ivar) == 0) {
-                            die("Empty variable name in interpolation");
+                            lex_error($lexer, "Empty variable name in interpolation", $lexer->{"line"}, $lexer->{"column"});
                         }
 
                         # Save current part and variable
@@ -1188,7 +1284,7 @@ func lex_read_q_string(scalar $lexer, int $token_line, int $is_qq) scalar {
         }
     }
 
-    die("Unterminated q/qq string at line " . $token_line);
+    lex_error($lexer, "Unterminated q/qq string", $token_line, $lexer->{"tok_col"});
 }
 
 # Read a raw C code block __C__ { ... }
@@ -1199,7 +1295,7 @@ func lex_read_c_block(scalar $lexer, int $token_line) scalar {
     # Expect opening brace  {=123
     my int $code = lex_current_code($lexer);
     if ($code != ord("{")) {
-        die("Expected '{' after __C__ at line " . $token_line);
+        lex_error($lexer, "Expected '{' after __C__", $token_line, $lexer->{"tok_col"});
     }
     lex_advance($lexer);  # Skip opening {
 
@@ -1329,7 +1425,7 @@ func lex_read_c_block(scalar $lexer, int $token_line) scalar {
     }
 
     if ($depth > 0) {
-        die("Unterminated __C__ block at line " . $token_line);
+        lex_error($lexer, "Unterminated __C__ block", $token_line, $lexer->{"tok_col"});
     }
 
     my hash %token = ();
@@ -1474,8 +1570,12 @@ func lex_next_token(scalar $lexer) scalar {
 
     my int $code = lex_current_code($lexer);
 
-    # Capture line number at token start (after whitespace)
+    # Capture line/column at token start (after whitespace). tok_col is
+    # exposed on the lexer so lex_tokenize_file can stamp the returned
+    # token's "column" centrally (one site instead of ~55 creation sites).
     my int $token_line = $lexer->{"line"};
+    my int $token_col = $lexer->{"column"};
+    $lexer->{"tok_col"} = $token_col;
 
     # Check for EOF (code == 0)
     if ($code == 0) {
@@ -1702,11 +1802,11 @@ func lex_next_token(scalar $lexer) scalar {
         lex_advance($lexer);  # Skip $
         my str $varname = lex_read_identifier($lexer);
         if ($varname eq "") {
-            die("Expected variable name in diamond operator at line " . $token_line);
+            lex_error($lexer, "Expected variable name in diamond operator", $token_line, $lexer->{"tok_col"});
         }
         my int $close = lex_current_code($lexer);
         if ($close != 62) {  # >
-            die("Expected '>' to close diamond operator at line " . $token_line);
+            lex_error($lexer, "Expected '>' to close diamond operator", $token_line, $lexer->{"tok_col"});
         }
         lex_advance($lexer);  # Skip >
         my hash %token = ();
@@ -2134,16 +2234,23 @@ func lex_next_token(scalar $lexer) scalar {
     if ($code == ord("~")) { $token{"type"} = "TILDE"; return \%token; }
     if ($code == ord("?")) { $token{"type"} = "QUESTION"; return \%token; }
 
-    die("Unexpected character: " . chr($code) . " at line " . $token_line);
+    lex_error($lexer, "Unexpected character: " . chr($code), $token_line, $token_col);
 }
 
 func lex_tokenize(str $source) array {
+    return lex_tokenize_file($source, "");
+}
+
+# Tokenize with a filename for diagnostics: lexer errors report "file:line:".
+func lex_tokenize_file(str $source, str $filename) array {
     my hash $lexer = lex_new($source);
+    $lexer->{"file"} = $filename;
     my array @tokens = ();
     my str $prev_type = "";
 
     while (1) {
         my scalar $token = lex_next_token($lexer);
+        $token->{"column"} = $lexer->{"tok_col"};
 
         # Disambiguate PERCENT (hash sigil) vs MOD (modulo operator)
         # If previous token could end a value expression, % is modulo

@@ -14044,6 +14044,63 @@ StradaValue* strada_dl_error(void) {
     return strada_new_str("");
 }
 
+/* Guarded call-by-name, for parse-error recovery in the self-hosted compiler
+ * (whose functions are non-static globals in a -rdynamic binary, so the
+ * process's own symbols resolve via dlsym). Invokes a
+ * StradaValue* (*)(StradaValue*) function under a try frame so a die()
+ * inside becomes data instead of process death. Returns an owned ARRAY:
+ *   [1, result]  - call returned normally
+ *   [0, errmsg]  - call died; errmsg is the stringified exception
+ *   [-1]         - symbol not resolvable (caller should fall back to a
+ *                  direct, unguarded call)
+ * The frozen bootstrap emits calls to this as a direct C call (unknown
+ * bare builtin), so the signature must stay StradaValue* in/out. */
+StradaValue* strada_call_named_guarded(StradaValue *name_sv, StradaValue *arg_sv) {
+    StradaValue *out = strada_new_array();
+    char *name = strada_to_str(name_sv);
+    void *sym = NULL;
+    if (name && name[0]) {
+        void *self = dlopen(NULL, RTLD_LAZY);
+        if (self) {
+            sym = dlsym(self, name);
+            /* dlopen(NULL) refcounts the handle; releasing it does not
+             * unload the main program. */
+            dlclose(self);
+        }
+    }
+    free(name);
+    if (!sym) {
+        strada_array_push_take(out->value.av, strada_new_int(-1));
+        return out;
+    }
+    StradaValue* (*fnp)(StradaValue*) = (StradaValue* (*)(StradaValue*))sym;
+    int cm = strada_cleanup_mark();
+    int lm = strada_local_depth_get();
+    StradaValue * volatile result = NULL;
+    StradaValue * volatile error = NULL;
+    if (setjmp(*STRADA_TRY_PUSH()) == 0) {
+        result = fnp(arg_sv);
+        STRADA_TRY_POP();
+    } else {
+        STRADA_TRY_POP();
+        strada_local_restore_to(lm);
+        strada_cleanup_drain_to(cm);
+        error = strada_get_exception();
+    }
+    if (error) {
+        strada_array_push_take(out->value.av, strada_new_int(0));
+        char *es = strada_to_str((StradaValue*)error);
+        strada_array_push_take(out->value.av, strada_new_str(es ? es : "error"));
+        free(es);
+        strada_decref((StradaValue*)error);
+    } else {
+        strada_array_push_take(out->value.av, strada_new_int(1));
+        strada_array_push_take(out->value.av,
+            result ? (StradaValue*)result : strada_new_undef());
+    }
+    return out;
+}
+
 /* Type definitions for function pointer calls - supports up to 10 arguments */
 typedef int64_t (*ffi_func_0)(void);
 typedef int64_t (*ffi_func_1)(int64_t);
