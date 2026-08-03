@@ -1284,6 +1284,15 @@ count). Regression tests: `t/diagnostics_test/run.sh` (19 cases: located
 lexer/parser/semantic errors incl. exact columns and caret alignment,
 module-file attribution, multi-error, parse recovery, --check).
 
+**Editor support** (`editors/`, 2026-08): Vim runtime tree
+(`editors/vim/{syntax,ftdetect,ftplugin,indent}/strada.vim` — highlighting
+incl. embedded C in `__C__` blocks, `:make` = `strada --check %` with an
+errorformat that parses the located diagnostics and drops snippet lines)
+and Emacs `editors/emacs/strada-mode.el` (`strada-mode`, `C-c C-c` =
+`strada --check` in compilation-mode — the gcc-style errors match its
+built-in GNU pattern). Install instructions in `editors/README.md`. When
+diagnostic FORMATS change, update the vim `errorformat` and both READMEs.
+
 ### Full Profiling (Line-Level)
 
 ```bash
