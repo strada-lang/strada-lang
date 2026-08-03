@@ -2,6 +2,22 @@
 
 ## Unreleased (since `0da0455`, 2026-06-09 → 2026-06-10)
 
+### File I/O (2026-08-03)
+- **`core::fsync(fd)` / `core::fdatasync(fd)`** — new builtins wrapping
+  fsync(2)/fdatasync(2); return 0 on success, -1 on failure (fchmod-style
+  passthrough). fdatasync falls back to fsync on macOS.
+- **`core::fdopen_read` / `core::fdopen_write` fixed** — codegen only
+  matched the bare names, but `core::X` is rewritten to `sys::X` before
+  codegen, so calls passed semantic analysis and then failed at link time
+  with `undefined reference to 'sys_fdopen_write'`. Both spellings now
+  work and the sys:: forms are registered as builtins.
+- **Binary-safe slurps** — `slurp`, `core::slurp_fd`, and
+  `core::read_all_fd` built their results with strlen-based
+  `strada_new_str`, truncating at the first embedded NUL byte
+  (`strada_slurp_fh` had already been fixed). All now use
+  `strada_new_str_len`; `slurp` also opens `"rb"` and returns undef on a
+  stream error instead of silently returning a partial read.
+
 ### Language & stdlib (2026-06-10)
 - **Lazy ranges in map/grep** — `map {...} (1..1e6)` / `grep {...}`
   over int-typed ranges iterate a native C loop (no input array;

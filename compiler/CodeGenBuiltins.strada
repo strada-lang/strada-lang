@@ -1404,7 +1404,7 @@ func gen_builtin_g2(scalar $cg, scalar $expr, str $name) int {
             return 1;
         }
 
-        if ($name eq "fdopen_read") {
+        if ($name eq "fdopen_read" || $name eq "sys::fdopen_read") {
             emit($cg, "strada_fdopen_read(");
             my scalar $args = $expr->{"args"};
             gen_expression($cg, $args->[0]);
@@ -1412,8 +1412,24 @@ func gen_builtin_g2(scalar $cg, scalar $expr, str $name) int {
             return 1;
         }
 
-        if ($name eq "fdopen_write") {
+        if ($name eq "fdopen_write" || $name eq "sys::fdopen_write") {
             emit($cg, "strada_fdopen_write(");
+            my scalar $args = $expr->{"args"};
+            gen_expression($cg, $args->[0]);
+            emit($cg, ")");
+            return 1;
+        }
+
+        if ($name eq "sys::fsync") {
+            emit($cg, "strada_fsync(");
+            my scalar $args = $expr->{"args"};
+            gen_expression($cg, $args->[0]);
+            emit($cg, ")");
+            return 1;
+        }
+
+        if ($name eq "sys::fdatasync") {
+            emit($cg, "strada_fdatasync(");
             my scalar $args = $expr->{"args"};
             gen_expression($cg, $args->[0]);
             emit($cg, ")");

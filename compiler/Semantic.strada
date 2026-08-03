@@ -467,6 +467,10 @@ func get_builtins() scalar {
     $b{"sys::read_fd"} = 1;
     $b{"sys::write_fd"} = 1;
     $b{"sys::read_all_fd"} = 1;
+    $b{"sys::fdopen_read"} = 1;
+    $b{"sys::fdopen_write"} = 1;
+    $b{"sys::fsync"} = 1;
+    $b{"sys::fdatasync"} = 1;
 
     # sys:: Environment
     $b{"sys::getenv"} = 1;

@@ -915,6 +915,8 @@ StradaValue* strada_write_fd(StradaValue *fd, StradaValue *data);
 StradaValue* strada_read_all_fd(StradaValue *fd);
 StradaValue* strada_fdopen_read(StradaValue *fd);
 StradaValue* strada_fdopen_write(StradaValue *fd);
+StradaValue* strada_fsync(StradaValue *fd);
+StradaValue* strada_fdatasync(StradaValue *fd);
 
 /* Session/process group control */
 StradaValue* strada_setsid(void);

@@ -8553,7 +8553,7 @@ StradaValue* sys_file_mtime(StradaValue *path_sv) {
 }
 
 StradaValue* strada_slurp(const char *filename) {
-    FILE *f = fopen(filename, "r");
+    FILE *f = fopen(filename, "rb");
     if (!f) {
         return strada_new_undef();
     }
@@ -8571,9 +8571,19 @@ StradaValue* strada_slurp(const char *filename) {
     size_t read_size = fread(content, 1, size, f);
     content[read_size] = '\0';
 
+    /* A short read is EOF-vs-error ambiguous; only a stream error
+     * should turn into undef (a file truncated between ftell and
+     * fread just yields the shorter content). */
+    if (read_size < (size_t)size && ferror(f)) {
+        fclose(f);
+        free(content);
+        return strada_new_undef();
+    }
     fclose(f);
 
-    StradaValue *result = strada_new_str(content);
+    /* Binary-safe: pass read_size explicitly so embedded NULs are
+     * preserved (strada_new_str truncates at the first NUL). */
+    StradaValue *result = strada_new_str_len(content, read_size);
     free(content);
 
     return result;
@@ -8645,7 +8655,7 @@ StradaValue* strada_slurp_fd(StradaValue *fd_sv) {
                 /* realloc failed — the original `content` is still valid;
                  * return what we've read so far rather than leak it. */
                 content[total_read] = '\0';
-                StradaValue *partial = strada_new_str(content);
+                StradaValue *partial = strada_new_str_len(content, total_read);
                 free(content);
                 return partial;
             }
@@ -8662,7 +8672,8 @@ StradaValue* strada_slurp_fd(StradaValue *fd_sv) {
 
     content[total_read] = '\0';
 
-    StradaValue *result = strada_new_str(content);
+    /* Binary-safe: preserve embedded NULs. */
+    StradaValue *result = strada_new_str_len(content, total_read);
     free(content);
 
     return result;
@@ -22126,7 +22137,8 @@ StradaValue* strada_read_all_fd(StradaValue *fd_val) {
         total += n;
     }
     buf[total] = '\0';
-    StradaValue *result = strada_new_str(buf);
+    /* Binary-safe: preserve embedded NULs. */
+    StradaValue *result = strada_new_str_len(buf, total);
     free(buf);
     return result;
 }
@@ -22146,6 +22158,21 @@ StradaValue* strada_fdopen_read(StradaValue *fd_val) {
     sv->refcount = 1;
     sv->value.fh = fp;
     return sv;
+}
+
+StradaValue* strada_fsync(StradaValue *fd_val) {
+    int fd = (int)strada_to_int(fd_val);
+    return strada_new_int(fsync(fd));
+}
+
+StradaValue* strada_fdatasync(StradaValue *fd_val) {
+    int fd = (int)strada_to_int(fd_val);
+#if defined(__APPLE__)
+    /* macOS has no fdatasync; fsync is the closest portable equivalent. */
+    return strada_new_int(fsync(fd));
+#else
+    return strada_new_int(fdatasync(fd));
+#endif
 }
 
 StradaValue* strada_fdopen_write(StradaValue *fd_val) {

@@ -243,6 +243,8 @@ Use `core::` in user code. `sys::` is a legacy alias (the compiler normalizes
 | `core::read_all_fd(fd)` | `int → str` | Read until EOF. |
 | `core::read_byte(fh)` | `scalar → int` | Read one byte (-1 on EOF). |
 | `core::write_fd(fd, data)` | `int, str → int` | write(2). |
+| `core::fsync(fd)` | `int → int` | fsync(2); 0 on success, -1 on failure. |
+| `core::fdatasync(fd)` | `int → int` | fdatasync(2); falls back to fsync on macOS. |
 | `core::seek(fh, offset, whence)` | `scalar, int, int → int` | fseek; whence ∈ {SEEK_SET=0, SEEK_CUR=1, SEEK_END=2}. |
 | `core::tell(fh)` | `scalar → int` | ftell(3). |
 | `core::eof(fh)` | `scalar → int` | feof(3). |
