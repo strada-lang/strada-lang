@@ -68,6 +68,15 @@ What you get:
 - `strada-program` customizes the compiler command (default `strada` from
   `PATH`).
 
+## Tree-sitter
+
+`tree-sitter-strada/` is a full tree-sitter grammar (Neovim, Helix, Zed,
+and anything else tree-sitter-based): zero parse errors across the entire
+repository corpus (245 examples + 66 stdlib modules + the compiler's own
+sources), with heredocs, POD, and `__C__` blocks handled by an external
+scanner, and C injection inside `__C__` bodies. See
+`tree-sitter-strada/README.md` for editor setup.
+
 ## Notes
 
 - Heredoc and `s///e` interior highlighting is approximate in both editors

@@ -26,7 +26,7 @@ EOF
 
 - **Static typing** with `int`, `num`, `str`, `scalar`, `array`, `hash`
 - **Perl-like syntax** - familiar sigils, operators, and control structures
-- **Self-hosting** - the compiler is written in Strada (~2,300 lines)
+- **Self-hosting** - the compiler is written in Strada (~2,300 lines of Strada source, generating ~60k lines of C during the build)
 - **Native compilation** - compiles to C, then to native executables
 - **Object-oriented** - blessed references, multiple inheritance, destructors
 - **Closures** - anonymous functions with captured variables
@@ -131,14 +131,19 @@ The self-hosting compiler in `compiler/*.strada` is the primary codebase. The bo
 ```
 strada/
 ├── stradac              # Self-hosting compiler
-├── strada               # Compilation wrapper script
+├── strada               # Compilation wrapper script (thin shim + compiled tools/strada-driver)
 ├── runtime/             # C runtime library
 ├── compiler/            # Compiler source (in Strada)
-├── bootstrap/           # Bootstrap compiler (in C)
+├── bootstrap/           # Bootstrap compiler (in C, frozen)
+├── interpreter/         # Bytecode VM interpreter (strada-interp)
 ├── examples/            # Example programs
 ├── lib/                 # Standard library modules
+├── tools/               # Dev tools (strada-driver, stradadoc, strada2perl, ...)
 ├── docs/                # Documentation
-└── t/                   # Test suite
+├── t/                   # Test suite
+├── benchmarks/          # Benchmark programs
+├── editors/             # Vim/Emacs/tree-sitter support
+└── vendor/              # Vendored dependencies (PCRE2)
 ```
 
 ## Contributing

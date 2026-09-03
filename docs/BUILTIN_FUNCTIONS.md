@@ -11,6 +11,16 @@ by namespace.
 Bare built-ins (no namespace) and Perl-compatibility helpers are listed at the
 end.
 
+> **Source of truth** — this file is hand-maintained; the compiler is
+> authoritative. When adding a builtin, update all three compiler sites and
+> this doc: `compiler/CodeGenBuiltins.strada` (`if ($name eq "...")` branches
+> do the actual codegen), `compiler/AST.strada` (`ast_normalize_call_name()`
+> for `re::`/`str::`/`sb::`/`core::` aliases), and `compiler/Semantic.strada`
+> (`get_builtins()` is only the semantic fast-path — unknown `ns::` names
+> fall through to "analyze args and trust runtime", so a missing entry there
+> won't error but also won't document). `Async::*` actors/scopes additionally
+> live in `lib/Async/`.
+
 > **Note on `sys::`** — `sys::` is the legacy alias for `core::` and still
 > compiles (the compiler normalizes `core::` to `sys::` internally), but new
 > code should use `core::`.
@@ -148,9 +158,17 @@ are based on POSIX threads underneath.
 | `c::ptr_to_str(ptr)` | `scalar → str` | Treat ptr as NUL-terminated C string; copy into a Strada str. |
 | `c::ptr_to_str_n(ptr, n)` | `scalar, int → str` | Copy n bytes starting at ptr. |
 | `c::str_to_ptr(s)` | `str → scalar` | Return a pointer to the string's underlying bytes. |
+| `c::read_int8(ptr)` | `scalar → int` | Read a signed 8-bit int at ptr. |
+| `c::read_int16(ptr)` | `scalar → int` | Read a signed 16-bit int at ptr. |
+| `c::read_int32(ptr)` | `scalar → int` | Read a signed 32-bit int at ptr. |
+| `c::read_int64(ptr)` | `scalar → int` | Read a signed 64-bit int at ptr. |
 | `c::read_float(ptr)` | `scalar → num` | Read a float at ptr. |
 | `c::read_double(ptr)` | `scalar → num` | Read a double at ptr. |
 | `c::read_ptr(ptr)` | `scalar → scalar` | Dereference a pointer-to-pointer. |
+| `c::write_int8(ptr, val)` | `scalar, int → void` | Write a signed 8-bit int at ptr. |
+| `c::write_int16(ptr, val)` | `scalar, int → void` | Write a signed 16-bit int at ptr. |
+| `c::write_int32(ptr, val)` | `scalar, int → void` | Write a signed 32-bit int at ptr. |
+| `c::write_int64(ptr, val)` | `scalar, int → void` | Write a signed 64-bit int at ptr. |
 | `c::write_float(ptr, val)` | `scalar, num → void` | Write a float at ptr. |
 | `c::write_double(ptr, val)` | `scalar, num → void` | Write a double at ptr. |
 | `c::write_ptr(ptr, val)` | `scalar, scalar → void` | Write a pointer at ptr. |

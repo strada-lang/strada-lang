@@ -490,13 +490,6 @@ Run leak tests with: `./t/leak_tests/run_leak_tests.sh` (117 tests, incl. `test_
 - **`lib/Exception.strada`** — chainable exceptions (see Error chaining above).
 - **`lib/Async/Scope.strada`**, **`lib/Async/Actor.strada`** — structured concurrency + actors (see Async/Await).
 
-## Standard Library Additions (2026-06)
-
-- **`lib/Test.strada`** — TAP-emitting test framework: `Test::ok/nok/is/isnt/is_num/like/unlike/pass/fail/skip/diag/plan`, `Test::done_testing()` returns the exit code. Runs under any TAP harness (`prove`).
-- **`lib/List.strada`** — List::Util-style helpers: `reduce/any/all/none/first/sum/product/min/max/minstr/maxstr/uniq/zip/pairs`.
-- **`lib/Exception.strada`** — chainable exceptions (see Error chaining above).
-- **`lib/Async/Scope.strada`**, **`lib/Async/Actor.strada`** — structured concurrency + actors (see Async/Await).
-
 ## Conversion Tools
 
 - **xs2strada** — Converts Perl XS modules to Strada `__C__` blocks.
@@ -1292,6 +1285,22 @@ and Emacs `editors/emacs/strada-mode.el` (`strada-mode`, `C-c C-c` =
 `strada --check` in compilation-mode — the gcc-style errors match its
 built-in GNU pattern). Install instructions in `editors/README.md`. When
 diagnostic FORMATS change, update the vim `errorformat` and both READMEs.
+
+**Tree-sitter grammar** (`editors/tree-sitter-strada/`, 2026-08): full
+grammar + external scanner (`src/scanner.c`: heredoc bodies via a FIFO
+tag queue with serialized state, raw `__C__`/`extern "C"` bodies with
+C-string/comment-aware brace counting, column-0 POD) + highlight/injection
+queries. Parses the ENTIRE repo corpus with zero error nodes (245
+examples, 66 lib modules, compiler sources) — keep it that way: after
+language syntax changes, re-run the corpus sweep (`npx tree-sitter-cli
+parse --quiet` over examples/ + lib/). `src/parser.c` is generated
+(`npx tree-sitter-cli generate` from grammar.js) but committed. Scanner
+gotchas learned the hard way: external scanners run BEFORE internal
+whitespace skipping (skip leading ws yourself, with skip=true); error
+recovery marks ALL external tokens valid (bail or c_block_body eats the
+file); string internals must be token.immediate AND higher lexical prec
+than comment tokens (or a literal "/*" in a string loses the lexing race
+and the comment swallows the closing quote).
 
 ### Full Profiling (Line-Level)
 
