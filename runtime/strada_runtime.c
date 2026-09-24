@@ -22429,6 +22429,7 @@ typedef struct {
     const char *package;   /* pointer comparison (packages are static) */
     char method[OOP_MAX_NAME_LEN];
     StradaMethod func;
+    uint32_t gen;          /* mc_cache_gen stamp; stale when it differs */
 } MethodCacheEntry;
 static MethodCacheEntry method_cache[METHOD_CACHE_SIZE];
 static int method_cache_initialized = 0;
@@ -22446,8 +22447,12 @@ static void method_cache_init(void) {
  * zero-initialized cache is stale by construction. */
 static uint32_t mc_cache_gen = 1;
 
+/* Invalidate both method caches by bumping the generation: entries stamped
+ * with an older generation are treated as empty. This used to memset the
+ * whole ~290KB direct-mapped cache on EVERY method registration — thousands
+ * of registrations at program start-up (each module's methods) made that
+ * ~90M instructions, most of a Strada program's start-up time. */
 static void method_cache_invalidate(void) {
-    memset(method_cache, 0, sizeof(method_cache));
     mc_cache_gen++;
 }
 
@@ -22771,9 +22776,17 @@ void strada_method_register(const char *package, const char *name, StradaMethod 
     m->name[OOP_MAX_NAME_LEN - 1] = '\0';
     m->func = func;
 
-    /* Keep the per-package method hash index current. Registration is
-     * rare (startup + import_lib loads), so a full rebuild is fine. */
-    oop_method_index_rebuild(pkg);
+    /* Keep the per-package method hash index current: insert just the new
+     * entry while the table stays under half full, else rebuild (grow).
+     * A rebuild per registration made start-up O(n^2) per package. */
+    if (pkg->method_index && (uint32_t)pkg->method_count * 2 <= pkg->method_index_cap) {
+        uint32_t mask = pkg->method_index_cap - 1;
+        uint32_t pos = oop_method_hash(m->name) & mask;
+        while (pkg->method_index[pos] >= 0) pos = (pos + 1) & mask;
+        pkg->method_index[pos] = (int32_t)(pkg->method_count - 1);
+    } else {
+        oop_method_index_rebuild(pkg);
+    }
 }
 
 /* Method modifier registration */
@@ -23079,7 +23092,7 @@ static StradaMethod oop_lookup_method(const char *package, const char *method) {
     if (!method_cache_initialized) method_cache_init();
     unsigned int h = (oop_hash_name(package) ^ oop_hash_name(method)) & (METHOD_CACHE_SIZE - 1);
     MethodCacheEntry *ce = &method_cache[h];
-    if (ce->func && ce->package == package && strcmp(ce->method, method) == 0) {
+    if (ce->func && ce->gen == mc_cache_gen && ce->package == package && strcmp(ce->method, method) == 0) {
         return ce->func;
     }
 
@@ -23100,6 +23113,7 @@ static StradaMethod oop_lookup_method(const char *package, const char *method) {
         strncpy(ce->method, method, OOP_MAX_NAME_LEN - 1);
         ce->method[OOP_MAX_NAME_LEN - 1] = '\0';
         ce->func = func;
+        ce->gen = mc_cache_gen;
     }
 
     return func;
