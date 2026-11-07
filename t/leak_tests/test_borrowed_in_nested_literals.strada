@@ -1,0 +1,26 @@
+# Regression (2026-11): a borrowed variable inside an inlined nested literal
+# (each `k => v` pair of `my hash %h = (...)`, or a nested [..]/{..} element)
+# was pushed (incref) and then unconditionally decref'd, freeing the
+# variable's value. `my hash %in = ("s" => f(), "p" => $pw)` in a loop turned
+# $pw into "b", then "ARRAY(0x...)" - corrupting seeded passwords.
+func f(str $s) str { return $s; }
+func main() int {
+    my str $pw = "secret";
+    my array @arr = (1, 2);
+    my int $bad = 0;
+    my int $i = 0;
+    while ($i < 50) {
+        my hash %in = ("s" => f("x"), "p" => $pw, "n" => $i);
+        my hash %h2 = ("s" => trim(" y "), "p" => $pw);
+        my scalar $r1 = {"a" => [f("q"), $pw], "b" => {"x" => f("z"), "y" => $pw}};
+        my scalar $r2 = [[f("q"), $pw], {"k" => f("v"), "p" => $pw}];
+        if ($in{"p"} ne "secret" || $h2{"p"} ne "secret") { $bad = 1; }
+        if ($r1->{"a"}->[1] ne "secret" || $r1->{"b"}->{"y"} ne "secret") { $bad = 1; }
+        if ($r2->[0]->[1] ne "secret" || $r2->[1]->{"p"} ne "secret") { $bad = 1; }
+        $i = $i + 1;
+    }
+    if ($pw ne "secret") { say("FAIL: borrowed var clobbered: [" . $pw . "]"); return 1; }
+    if ($bad == 1) { say("FAIL: nested literal lost a borrowed value"); return 1; }
+    say("all borrowed nested literal tests passed");
+    return 0;
+}

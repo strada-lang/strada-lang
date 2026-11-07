@@ -4797,7 +4797,11 @@ func gen_expression(scalar $cg, scalar $expr) void {
                             emit($cg, "StradaValue *__ah_ael" . $t . "_" . $e . " = ");
                             gen_expression($cg, $elems->[$e]);
                             emit($cg, "; strada_array_push(__ah_arr" . $t . "->value.av, __ah_ael" . $t . "_" . $e . "); ");
-                            emit($cg, "strada_decref(__ah_ael" . $t . "_" . $e . "); ");
+                            # push increfs: release only an owned temporary,
+                            # never a borrowed variable (that freed it)
+                            if (needs_temp_cleanup($cg, $elems->[$e]) == 1) {
+                                emit($cg, "strada_decref(__ah_ael" . $t . "_" . $e . "); ");
+                            }
                             $e = $e + 1;
                         }
                         emit($cg, "StradaValue *__ah_val" . $t . " = strada_new_ref(__ah_arr" . $t . ", '@'); ");
@@ -4816,7 +4820,9 @@ func gen_expression(scalar $cg, scalar $expr) void {
                             emit($cg, "; strada_hash_set(__ah_hsh" . $t . "->value.hv, \"");
                             emit_escaped_string($cg, $inner_keys->[$p]);
                             emit($cg, "\", __ah_hel" . $t . "_" . $p . "); ");
-                            emit($cg, "strada_decref(__ah_hel" . $t . "_" . $p . "); ");
+                            if (needs_temp_cleanup($cg, $inner_values->[$p]) == 1) {
+                                emit($cg, "strada_decref(__ah_hel" . $t . "_" . $p . "); ");
+                            }
                             $p = $p + 1;
                         }
                         emit($cg, "StradaValue *__ah_val" . $t . " = strada_new_ref(__ah_hsh" . $t . ", '%'); ");
@@ -4983,7 +4989,12 @@ func gen_expression(scalar $cg, scalar $expr) void {
                             emit($cg, "StradaValue *__aa_inner" . $t . "_" . $e . " = ");
                             gen_expression($cg, $inner_elems->[$e]);
                             emit($cg, "; strada_array_push(__aa_arr" . $t . "->value.av, __aa_inner" . $t . "_" . $e . "); ");
-                            emit($cg, "strada_decref(__aa_inner" . $t . "_" . $e . "); ");
+                            # push increfs: release only an owned temporary.
+                            # Unconditional decref freed borrowed variables:
+                            # my hash %h = ("a" => f(), "b" => $var) clobbered $var.
+                            if (needs_temp_cleanup($cg, $inner_elems->[$e]) == 1) {
+                                emit($cg, "strada_decref(__aa_inner" . $t . "_" . $e . "); ");
+                            }
                             $e = $e + 1;
                         }
                         # _take transfers __aa_arr<t>'s sole owned ref
@@ -5011,7 +5022,9 @@ func gen_expression(scalar $cg, scalar $expr) void {
                             emit($cg, "; strada_hash_set(__aa_hsh" . $t . "->value.hv, \"");
                             emit_escaped_string($cg, $inner_keys->[$p]);
                             emit($cg, "\", __aa_hval" . $t . "_" . $p . "); ");
-                            emit($cg, "strada_decref(__aa_hval" . $t . "_" . $p . "); ");
+                            if (needs_temp_cleanup($cg, $inner_values->[$p]) == 1) {
+                                emit($cg, "strada_decref(__aa_hval" . $t . "_" . $p . "); ");
+                            }
                             $p = $p + 1;
                         }
                         emit($cg, "strada_cleanup_pop(); ");

@@ -312,6 +312,9 @@ test_output "$EXAMPLES_DIR/test_hash_literal_keys.strada" "test_hash_literal_key
 # Test: core::waitpid WNOHANG returns 0 for a running child; core::wait returns pid
 test_output "$EXAMPLES_DIR/test_waitpid_wnohang.strada" "test_waitpid_wnohang" "all waitpid tests passed" "waitpid WNOHANG / wait pid"
 
+# Test: borrowed variables inside inlined nested literals are not freed
+test_output "$EXAMPLES_DIR/test_borrowed_in_nested_literals.strada" "test_borrowed_in_nested_literals" "all borrowed nested literal tests passed" "Borrowed values in nested literals"
+
 # Test: Our variable declarations
 test_output_contains "$EXAMPLES_DIR/test_our.strada" "test_our" "All our variable tests passed" "Our variables"
 
