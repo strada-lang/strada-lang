@@ -1880,10 +1880,24 @@ func parse_primary(scalar $parser) scalar {
             parser_advance($parser);
             my scalar $block = ast_new_block();
 
-            # Parse block body
+            # Parse block body. The comparator is normally a bare expression
+            # (`{ $a <=> $b }`, as documented); the trailing `;` is optional,
+            # mirroring map/grep. `return EXPR;` is also accepted.
             while (!parser_check($parser, "RBRACE") && !parser_check($parser, "EOF")) {
-                my scalar $stmt = parse_statement($parser);
-                ast_add_statement($block, $stmt);
+                if (parser_check($parser, "RETURN") || parser_check($parser, "MY")) {
+                    my scalar $stmt = parse_statement($parser);
+                    ast_add_statement($block, $stmt);
+                    next;
+                }
+                my scalar $expr = parse_expression($parser);
+                if (parser_check($parser, "SEMI")) {
+                    parser_advance($parser);
+                    ast_add_statement($block, ast_new_expr_stmt($expr));
+                } elsif (parser_check($parser, "RBRACE")) {
+                    ast_add_statement($block, ast_new_expr_stmt($expr));
+                } else {
+                    parser_error($parser, "expected ; or } in sort block");
+                }
             }
             parser_expect($parser, "RBRACE");
 

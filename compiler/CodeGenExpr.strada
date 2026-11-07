@@ -5188,11 +5188,20 @@ func gen_expression(scalar $cg, scalar $expr) void {
         # Generate comparator block - extract the comparison expression
         my scalar $stmts = $block->{"statements"};
         my int $stmt_count = $block->{"statement_count"};
-        if ($stmt_count > 0) {
-            my scalar $last_stmt = $stmts->[$stmt_count - 1];
-            if ($last_stmt->{"type"} == NODE_EXPR_STMT()) {
-                gen_expression($cg, $last_stmt->{"expr"});
-            }
+        # Only a single comparison expression is supported (optionally written
+        # as `return EXPR;`). Anything else used to be silently dropped and
+        # produced invalid C (an empty `__cmp_sv = ;` initializer).
+        my str $sort_err = "error: sort comparator block must be a single comparison expression";
+        if ($stmt_count != 1) {
+            die($sort_err);
+        }
+        my scalar $last_stmt = $stmts->[0];
+        if ($last_stmt->{"type"} == NODE_EXPR_STMT()) {
+            gen_expression($cg, $last_stmt->{"expr"});
+        } elsif ($last_stmt->{"type"} == NODE_RETURN_STMT() && defined($last_stmt->{"value"})) {
+            gen_expression($cg, $last_stmt->{"value"});
+        } else {
+            die($sort_err);
         }
 
         # Reset flag
