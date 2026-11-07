@@ -33,6 +33,18 @@ func main() int {
     if ($sp->[0] ne "1:1" || $sp->[1] ne "1:3" || $sp->[2] ne "1:5") { say("FAIL: stable-1 " . $sp->[0] . $sp->[1] . $sp->[2]); return 1; }
     if ($sp->[3] ne "2:0" || $sp->[4] ne "2:2" || $sp->[5] ne "2:4") { say("FAIL: stable-2"); return 1; }
 
+    # Documented form: bare comparator expression, no trailing `;`.
+    my array @n = (10, 2, 33, 4);
+    my array @na = sort { $a <=> $b } @n;
+    if ($na[0] != 2 || $na[3] != 33) { say("FAIL: bare <=>"); return 1; }
+    my array @wd = sort { $b cmp $a } @w;
+    if ($wd[0] ne "pear" || $wd[3] ne "apple") { say("FAIL: bare cmp desc"); return 1; }
+    my array @wp = sort { ($a cmp $b) } @w;
+    if ($wp[0] ne "apple") { say("FAIL: parenthesized cmp"); return 1; }
+    # `return EXPR;` form used to generate invalid C.
+    my array @wr = sort { return $a cmp $b; } @w;
+    if ($wr[0] ne "apple" || $wr[3] ne "pear") { say("FAIL: return cmp"); return 1; }
+
     say("all sort tests passed");
     return 0;
 }
