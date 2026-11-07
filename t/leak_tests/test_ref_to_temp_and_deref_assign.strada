@@ -1,0 +1,30 @@
+# Leak/UAF regressions (2026-11):
+#  * \"lit", \f(), \42 : the reference must TAKE the temporary (was increfed
+#    and leaked 32 bytes per evaluation).
+#  * %{$ref} = LIST / %{$ref} = %h / @{$ref} = LIST replace the container's
+#    contents (was: list turned the hash into an array; %h shared the
+#    StradaHash without a refcount and double-freed).
+# valgrind must report 0 leaks and 0 errors.
+func mk() str { return "made"; }
+
+func main() int {
+    my hash %src = ("a" => 1, "b" => 2);
+    my array @arr = (7, 8);
+    my int $i = 0;
+    while ($i < 500) {
+        my scalar $s = \"lit";
+        my scalar $f = \mk();
+        my scalar $n = \42;
+        my scalar $h = {"z" => 1};
+        %{$h} = ("m" => $i, "n" => "two");
+        %{$h} = %src;
+        %$h = ();
+        my scalar $a = [1];
+        @{$a} = (4, 5, 6);
+        @{$a} = @arr;
+        if ($$s ne "lit" || $$f ne "made" || $$n != 42 || scalar(@{$a}) != 2) { say("FAIL"); return 1; }
+        $i = $i + 1;
+    }
+    say("PASS: ref to temp + deref container assign");
+    return 0;
+}
