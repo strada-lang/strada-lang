@@ -21581,6 +21581,13 @@ StradaValue* strada_waitpid(StradaValue *pid_val, StradaValue *options_val) {
     if (result == -1) {
         return strada_new_int(-1);
     }
+    /* WNOHANG and no child has changed state: waitpid() leaves `status`
+     * untouched, so returning it read uninitialized memory. Report 0.
+     * (To learn WHICH child was reaped, use core::wait(), which returns
+     * the pid.) */
+    if (result == 0) {
+        return strada_new_int(0);
+    }
     return strada_new_int(status);
 }
 
