@@ -2115,15 +2115,21 @@ my int $ppid = core::getppid();
 ### Waiting for Child Processes
 
 ```strada
-# Wait for any child
-core::wait();
+# Wait for any child; returns the pid that exited (-1 if there are none)
+my int $done = core::wait();
 
-# Wait for specific child (blocking)
-core::waitpid($child_pid, 0);
+# Wait for a specific child (blocking); returns its raw exit status
+my int $status = core::waitpid($child_pid, 0);
+my int $code = ($status >> 8) & 255;
 
-# Non-blocking wait (check without blocking)
-# my int $result = core::waitpid($child_pid, 1);  # WNOHANG
+# Non-blocking check (WNOHANG = 1): 0 while the child is still running,
+# otherwise its exit status (and the child is reaped)
+my int $st = core::waitpid($child_pid, 1);
 ```
+
+`core::waitpid` returns the child's exit *status*, not its pid (unlike
+waitpid(2)). When you need to know *which* child exited, for example in a
+preforking server's respawn loop, use `core::wait()`.
 
 ### Executing Commands
 
@@ -3726,7 +3732,7 @@ See `docs/PERL_INTEGRATION.md` for comprehensive documentation on:
 | `match($str, $pattern)` | Test match |
 | `replace($str, $pat, $rep)` | Replace first |
 | `replace_all($str, $pat, $rep)` | Replace all |
-| `split($pat, $str)` | Split string |
+| `split($pat, $str [, $limit])` | Split string (regex; trailing empty fields dropped, `" "` = whitespace) |
 | `capture($str, $pat)` | Extract captures |
 | `captures()` | Get captures from last `=~` match |
 | `$1`-`$9` | Capture group variables (sugar for `captures()[N]`) |
@@ -3761,8 +3767,8 @@ func log_msg(str $msg) void {
 | `core::sleep($seconds)` | Sleep for seconds |
 | `core::usleep($microseconds)` | Sleep for microseconds |
 | `core::fork()` | Fork process |
-| `core::wait()` | Wait for any child |
-| `core::waitpid($pid, $opts)` | Wait for specific child |
+| `core::wait()` | Wait for any child; returns its pid |
+| `core::waitpid($pid, $opts)` | Wait for specific child; returns its exit status (0 under WNOHANG while running) |
 | `core::getpid()` | Get process ID |
 | `core::getppid()` | Get parent process ID |
 | `core::system($cmd)` | Run shell command |

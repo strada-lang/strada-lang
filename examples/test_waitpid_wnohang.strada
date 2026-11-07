@@ -1,0 +1,20 @@
+# Regression (2026-11): core::waitpid($pid, WNOHANG) on a still-running child
+# returned an uninitialized status; it must return 0. core::wait() returns the
+# reaped pid; a blocking core::waitpid returns the exit status.
+func main() int {
+    my int $pid = core::fork();
+    if ($pid == 0) { core::usleep(300000); core::exit(3); }
+    my int $bad = 0;
+    my int $r = core::waitpid($pid, 1);
+    if ($r != 0) { say("FAIL: WNOHANG on running child returned " . $r); $bad = 1; }
+    my int $st = core::waitpid($pid, 0);
+    if ((($st >> 8) & 255) != 3) { say("FAIL: exit status " . $st); $bad = 1; }
+    my int $pid2 = core::fork();
+    if ($pid2 == 0) { core::exit(0); }
+    my int $got = core::wait();
+    if ($got != $pid2) { say("FAIL: wait() returned " . $got . " want " . $pid2); $bad = 1; }
+    if (core::wait() != -1) { say("FAIL: wait() with no children"); $bad = 1; }
+    if ($bad == 1) { return 1; }
+    say("all waitpid tests passed");
+    return 0;
+}

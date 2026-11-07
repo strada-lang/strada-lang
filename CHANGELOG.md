@@ -2,6 +2,44 @@
 
 ## Unreleased (since `0da0455`, 2026-06-09 → 2026-06-10)
 
+### Language, runtime & DBI fixes (2026-11-07)
+- **`sort { $a <=> $b } @list`** — the documented form (no trailing `;`)
+  was a parse error, and `sort { return $a cmp $b; }` generated invalid C.
+  Both work; a block that is not a single comparison is a clear compile
+  error instead of silently dropping statements.
+- **Keyword/type words as parameter names** — `func f(str $default,
+  scalar $hash)` was rejected (and `default` leaked into C unescaped in
+  anonymous functions). Parameters now follow the same naming rules as
+  `my` variables.
+- **`%h = ...` after a `}`** — a statement starting with `%name` right after
+  a block was lexed as modulo (`unexpected '%'`). Fixed.
+- **Empty statements** — a stray `;` (`;;`, `if (...) { ... };`, after a
+  top-level `func`) is a no-op, as in Perl/C.
+- **`%{$ref} = LIST` / `%{$ref} = %h` / `@{$ref} = LIST`** — replaced the
+  container's contents in place. Previously a list RHS turned the hash into
+  an array (keys vanished) and a hash RHS shared the StradaHash without a
+  refcount (double free / segfault).
+- **Anonymous-hash keys may be any expression** — `{"plan_" . $p => 1,
+  lc($k) => 2}`, and any bareword (keywords too) before `=>`. The old
+  computed-key path also stole references from borrowed values (`{$k => $v}`
+  corrupted `$v`) and produced a bare hash instead of a hashref (lost keys
+  in lists and nested literals).
+- **`\"literal"` / `\f()` leak** — references to temporaries now take
+  ownership (was 32 bytes per evaluation).
+- **`split` follows Perl** — trailing empty fields dropped (empty input →
+  empty list), `" "` awk mode, negative LIMIT keeps trailing empties.
+  `split("\n", $text)` no longer counts a phantom last line.
+- **`core::waitpid(pid, WNOHANG)`** returned uninitialized memory while the
+  child was running; it now returns 0. (It returns the exit status; use
+  `core::wait()` for the pid.)
+- **DBI (MySQL): transactions** — `begin_work`/`commit`/`rollback` always
+  failed ("not supported in the prepared statement protocol"); they are now
+  sent as text queries. **Empty strings** were bound as NULL; they are now
+  stored as empty strings.
+- Regression tests: `test_parser_fixes_2026_11`, `test_split_perl_semantics`,
+  `test_hash_literal_keys`, `test_waitpid_wnohang`, plus leak tests
+  `test_ref_to_temp_and_deref_assign` and `test_hash_literal_keys`.
+
 ### File I/O (2026-08-03)
 - **`core::fsync(fd)` / `core::fdatasync(fd)`** — new builtins wrapping
   fsync(2)/fdatasync(2); return 0 on success, -1 on failure (fchmod-style

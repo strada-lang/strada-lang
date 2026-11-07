@@ -1196,7 +1196,8 @@ For Moose-style `rw` setters to support chaining you'd write a custom setter tha
 - **Strings are not arrays.** Use `substr`, `length`, `index` rather than indexing characters with `$s[0]`. `$s[0]` would treat `$s` as an array.
 - **`scalar(keys(%h))` for size.** Just `keys %h` in scalar context gives the count, but the explicit form is clearer and the compiler optimizes it to a single hash-size call.
 - **Empty `@{$ref}` is `undef`-able.** If `$ref` is undef, `@{$ref}` is an empty list (autoviv'd in lvalue context, empty otherwise).
-- **`split` regex:** the first arg is a regex pattern; metacharacters need escaping. `split(/,/, $csv)` — yes; `split(/./, $s)` matches *any* character — usually you want `split(/\./, $s)`.
+- **`split` regex:** the first arg is a regex pattern; metacharacters need escaping. `split(/,/, $csv)` — yes; `split(/./, $s)` matches *any* character — usually you want `split(/\./, $s)`. Perl rules apply: trailing empty fields are dropped (`split(",", "a,b,,")` → 2 fields; empty input → empty list), `" "` is awk mode, and a negative limit keeps trailing empties.
+- **`core::waitpid` returns the exit status, not the pid.** Under WNOHANG it returns 0 while the child runs. To find out which child exited (respawn loops), use `core::wait()`, which returns the pid.
 
 ---
 

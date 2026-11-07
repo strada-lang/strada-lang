@@ -195,8 +195,8 @@ Use `core::` in user code. `sys::` is a legacy alias (the compiler normalizes
 | `core::exec_argv(@argv)` | `array → int` | execvp with argument list. |
 | `core::system(cmd)` | `str → int` | Shell-out via /bin/sh -c; returns exit status. |
 | `core::system_argv(@argv)` | `array → int` | system() with argv (no shell). |
-| `core::wait()` | `→ int` | wait(2); returns child pid; updates $?. |
-| `core::waitpid(pid, flags)` | `int, int → int` | waitpid(2). |
+| `core::wait()` | `→ int` | wait(2): blocks until any child exits; returns its pid, or -1 when there are no children. |
+| `core::waitpid(pid, flags)` | `int, int → int` | waitpid(2), but returns the child's raw exit **status** (exit code is `($st >> 8) & 255`), not its pid. With `flags` = 1 (WNOHANG) returns 0 while the child is still running; -1 on error. Use `core::wait()` to learn which child exited. |
 | `core::kill(sig, pid)` | `str/int, int → int` | Send signal. Sig may be name ("USR1") or number. |
 | `core::killpg(pgid, sig)` | `int, int → int` | killpg(2). |
 | `core::exit(code)` | `int → void` | Run END blocks then exit(code). |
@@ -717,7 +717,7 @@ for binary data.
 | `sprintf(fmt, ...)` | Format string (printf-style). |
 | `printf(fh, fmt, ...)` | Print formatted to filehandle. |
 | `join(sep, @list)` | Join with separator. |
-| `split(pat, s [, limit])` | Split on pattern. |
+| `split(pat, s [, limit])` | Split on regex pattern, Perl rules: trailing empty fields are dropped (empty input → empty list); `" "` is awk mode (skip leading whitespace, split on runs of whitespace); a positive limit caps the field count and keeps trailing empties; a negative limit keeps trailing empties. |
 | `trim(s)`, `ltrim(s)`, `rtrim(s)` | Strip whitespace. |
 | `quotemeta(s)` | Escape regex metacharacters. |
 | `match(s, pat)` | Regex match returning captures. |

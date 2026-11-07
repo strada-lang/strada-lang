@@ -1015,7 +1015,7 @@ All character-counting; UTF-8 codepoint aware unless noted.
 | `chr($n)` | Character from code point. 0-127 → one ASCII byte; 128+ → UTF-8 encoded (sets the UTF-8 flag) |
 | `ord($s)` | Code point of first character |
 | `join($sep, @arr)` | Join array elements |
-| `split($sep, $s)` | Split string to array |
+| `split($pat, $s [, $limit])` | Split string to array (regex, Perl rules: trailing empty fields dropped; `" "` splits on whitespace) |
 | `utf8::is_utf8($s)` | 1 if string contains valid UTF-8 |
 | `utf8::valid($s)` | Synonym for `utf8::is_utf8` |
 | `utf8::encode($s)` | No-op (strings already byte-encoded) |
@@ -2070,7 +2070,8 @@ Socket readline automatically strips `\r` characters for clean CRLF handling.
 
 **Process:**
 - `core::fork()` - Fork process
-- `core::wait()` - Wait for child
+- `core::wait()` - Wait for any child; returns its pid (-1 if none)
+- `core::waitpid($pid, $flags)` - Wait for a specific child; returns its exit status (0 under WNOHANG while it is still running)
 - `core::exec($cmd)` - Replace process
 - `core::system($cmd)` - Run command
 - `core::getpid()` - Get process ID
