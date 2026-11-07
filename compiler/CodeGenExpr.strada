@@ -720,6 +720,18 @@ func gen_assign_hash_slice(scalar $cg, scalar $expr, scalar $target) void {
                 return;
 }
 
+# True when an anonymous hash literal has at least one computed key.
+func anon_hash_has_expr_keys(scalar $node) int {
+    my scalar $kx = $node->{"key_exprs"};
+    my int $n = $node->{"pair_count"};
+    my int $i = 0;
+    while ($i < $n) {
+        if ($kx && $kx->[$i]) { return 1; }
+        $i = $i + 1;
+    }
+    return 0;
+}
+
 func gen_assign_deref_scalar(scalar $cg, scalar $expr, scalar $target) void {
     my int $type = $expr->{"type"};
     my int $in_extern = $cg->{"in_extern"};
@@ -4721,30 +4733,48 @@ func gen_expression(scalar $cg, scalar $expr) void {
         }
 
         if ($has_expr_keys == 1) {
-            # Has expression keys - build hash manually
+            # Computed keys ({$k => $v}, {"p_" . $x => 1}): build the hash
+            # pair by pair. Borrowed values are increfed by strada_hash_set;
+            # owned temporaries are handed over with _take. Owned key temps
+            # are released after stringification. The result is a hash
+            # REFERENCE, exactly like the constant-key constructors.
+            my int $ah_cl = $cg->{"cleanup_enabled"};
             emit($cg, "({ StradaValue *__ah_hash = strada_new_hash(); ");
+            if ($ah_cl == 1) { emit($cg, "strada_cleanup_push(__ah_hash); "); }
             my int $e = 0;
             while ($e < $pair_count) {
+                emit($cg, "{ ");
                 if ($key_exprs && $key_exprs->[$e]) {
-                    # Expression key - use strada_to_str
-                    emit($cg, "{ char *__ah_k" . $e . " = strada_to_str_ss(");
-                    gen_expression($cg, $key_exprs->[$e]);
-                    emit($cg, "); strada_hash_set_take(__ah_hash->value.hv, __ah_k" . $e . ", ");
-                    gen_expression($cg, $values->[$e]);
-                    emit($cg, "); strada_cstr_free(__ah_k" . $e . "); } ");
+                    my scalar $kx = $key_exprs->[$e];
+                    emit($cg, "StradaValue *__ah_kv" . $e . " = ");
+                    gen_expression($cg, $kx);
+                    emit($cg, "; char *__ah_k" . $e . " = strada_to_str_ss(__ah_kv" . $e . "); ");
+                    if ($ah_cl == 1 && needs_temp_cleanup($cg, $kx) == 1) {
+                        emit($cg, "strada_decref(__ah_kv" . $e . "); ");
+                    }
                 } else {
-                    # String key (escape into the C string literal — keys can
-                    # contain " etc. from single-quoted source, which would
-                    # otherwise break out of the literal and inject C)
-                    emit($cg, "strada_hash_set_take(__ah_hash->value.hv, \"");
+                    # constant key (escaped: keys can contain " from source)
+                    emit($cg, "char *__ah_k" . $e . " = strdup(\"");
                     emit_escaped_string($cg, $keys->[$e]);
-                    emit($cg, "\", ");
-                    gen_expression($cg, $values->[$e]);
-                    emit($cg, "); ");
+                    emit($cg, "\"); ");
+                }
+                emit($cg, "StradaValue *__ah_v" . $e . " = ");
+                gen_expression($cg, $values->[$e]);
+                emit($cg, "; ");
+                if (needs_temp_cleanup($cg, $values->[$e]) == 1) {
+                    emit($cg, "strada_hash_set_take(__ah_hash->value.hv, __ah_k" . $e . ", __ah_v" . $e . "); ");
+                } else {
+                    emit($cg, "strada_hash_set(__ah_hash->value.hv, __ah_k" . $e . ", __ah_v" . $e . "); ");
+                }
+                if ($key_exprs && $key_exprs->[$e]) {
+                    emit($cg, "strada_cstr_free(__ah_k" . $e . "); } ");
+                } else {
+                    emit($cg, "free(__ah_k" . $e . "); } ");
                 }
                 $e = $e + 1;
             }
-            emit($cg, "__ah_hash; })");
+            if ($ah_cl == 1) { emit($cg, "strada_cleanup_pop(); "); }
+            emit($cg, "strada_ref_create_take(__ah_hash); })");
         } elsif ($needs_val_cleanup == 1 && $cg->{"cleanup_enabled"} == 1) {
             # Generate block with temps for values that need cleanup
             emit($cg, "({ ");
@@ -4771,7 +4801,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
                             $e = $e + 1;
                         }
                         emit($cg, "StradaValue *__ah_val" . $t . " = strada_new_ref(__ah_arr" . $t . ", '@'); ");
-                    } elsif ($val->{"type"} == NODE_ANON_HASH()) {
+                    } elsif ($val->{"type"} == NODE_ANON_HASH() && anon_hash_has_expr_keys($val) == 0) {
                         # Anonymous hash: create explicit hash + ref pattern
                         # This avoids the strada_ref_create_take issue that can cause heap corruption
                         my scalar $inner_keys = $val->{"keys"};
@@ -4835,7 +4865,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
                     if ($val->{"type"} == NODE_ANON_ARRAY()) {
                         # Decref both the ref and the underlying array
                         emit($cg, "strada_decref(__ah_arr" . $d . "); ");
-                    } elsif ($val->{"type"} == NODE_ANON_HASH()) {
+                    } elsif ($val->{"type"} == NODE_ANON_HASH() && anon_hash_has_expr_keys($val) == 0) {
                         # Decref both the ref and the underlying hash
                         emit($cg, "strada_decref(__ah_hsh" . $d . "); ");
                     }
@@ -4965,8 +4995,9 @@ func gen_expression(scalar $cg, scalar $expr) void {
                         # decref (its ownership is in the ref now).
                         emit($cg, "strada_cleanup_pop(); ");
                         emit($cg, "StradaValue *__aa_el" . $t . " = strada_new_ref_take(__aa_arr" . $t . ", '@'); ");
-                    } elsif ($elem->{"type"} == NODE_ANON_HASH()) {
+                    } elsif ($elem->{"type"} == NODE_ANON_HASH() && anon_hash_has_expr_keys($elem) == 0) {
                         # Anonymous hash: create explicit hash + ref pattern
+                        # (computed-key hashes take the generic path below)
                         my scalar $inner_keys = $elem->{"keys"};
                         my scalar $inner_values = $elem->{"values"};
                         my int $inner_pair_count = $elem->{"pair_count"};

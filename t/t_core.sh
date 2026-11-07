@@ -303,6 +303,12 @@ test_output "$EXAMPLES_DIR/test_sort_mergesort.strada" "test_sort_mergesort" "al
 # Test: keyword param names, %hash after }, empty statements, %{$ref} = LIST
 test_output "$EXAMPLES_DIR/test_parser_fixes_2026_11.strada" "test_parser_fixes_2026_11" "all parser fix tests passed" "Parser fixes (keyword params, % after }, ;;, deref hash assign)"
 
+# Test: split() Perl semantics (trailing empties, awk mode, LIMIT)
+test_output "$EXAMPLES_DIR/test_split_perl_semantics.strada" "test_split_perl_semantics" "all split tests passed" "split() Perl semantics"
+
+# Test: anon hash literal keys may be any expression; keyword barewords
+test_output "$EXAMPLES_DIR/test_hash_literal_keys.strada" "test_hash_literal_keys" "all hash literal key tests passed" "Hash literal computed keys"
+
 # Test: Our variable declarations
 test_output_contains "$EXAMPLES_DIR/test_our.strada" "test_our" "All our variable tests passed" "Our variables"
 

@@ -10444,6 +10444,7 @@ int strada_udp_sendto_sv(StradaValue *sock, StradaValue *data, const char *host,
  * compiled without -DHAVE_PCRE2) still resolve. Zero is the "unset"
  * sentinel — empty strings still fall through to strlen, which returns 0. */
 static __thread size_t strada_regex_subject_len = 0;
+static StradaArray* strada_string_split_raw(const char *str, const char *delim);
 /* Thread-local hint: when set, the next regex match's subject is a
  * UTF-8 char-oriented string. Used by pcre2_get_or_compile to enable
  * PCRE2_UTF/PCRE2_UCP so `\w`/`\b` etc. recognize multibyte chars.
@@ -11974,10 +11975,10 @@ static int has_regex_meta(const char *s) {
     return 0;
 }
 
-StradaArray* strada_regex_split(const char *str, const char *pattern) {
+static StradaArray* strada_regex_split_raw(const char *str, const char *pattern) {
     /* Fast path: if pattern has no regex metacharacters, use plain string split */
     if (!has_regex_meta(pattern)) {
-        return strada_string_split(str, pattern);
+        return strada_string_split_raw(str, pattern);
     }
 
     StradaArray *parts = strada_array_new();
@@ -12066,8 +12067,8 @@ StradaArray* strada_regex_split(const char *str, const char *pattern) {
 /* split with limit: stops splitting after producing `limit` parts; the last
  * part contains the unsplit remainder of the input (including any matched
  * separators). limit <= 0 behaves like the unlimited form. */
-StradaArray* strada_regex_split_limit(const char *str, const char *pattern, int limit) {
-    if (limit <= 0) return strada_regex_split(str, pattern);
+static StradaArray* strada_regex_split_limit_raw(const char *str, const char *pattern, int limit) {
+    if (limit <= 0) return strada_regex_split_raw(str, pattern);
     StradaArray *parts = strada_array_new();
     if (limit == 1) {
         strada_array_push_take(parts, strada_new_str(str));
@@ -12842,7 +12843,7 @@ StradaValue* strada_regex_build_result(const char *src, StradaValue *matches, St
     return res;
 }
 
-StradaArray* strada_regex_split(const char *str, const char *pattern) {
+static StradaArray* strada_regex_split_raw(const char *str, const char *pattern) {
     StradaArray *parts = strada_array_new();
 
     regex_t *rx = regex_cache_compile_posix(pattern, NULL);
@@ -12876,8 +12877,8 @@ StradaArray* strada_regex_split(const char *str, const char *pattern) {
     return parts;
 }
 
-StradaArray* strada_regex_split_limit(const char *str, const char *pattern, int limit) {
-    if (limit <= 0) return strada_regex_split(str, pattern);
+static StradaArray* strada_regex_split_limit_raw(const char *str, const char *pattern, int limit) {
+    if (limit <= 0) return strada_regex_split_raw(str, pattern);
     StradaArray *parts = strada_array_new();
     if (limit == 1) {
         strada_array_push_take(parts, strada_new_str(str));
@@ -12944,7 +12945,7 @@ StradaValue* strada_named_captures(void) {
 #endif /* HAVE_PCRE2 */
 
 /* String split - literal string delimiter (no regex) */
-StradaArray* strada_string_split(const char *str, const char *delim) {
+static StradaArray* strada_string_split_raw(const char *str, const char *delim) {
     StradaArray *parts = strada_array_new();
 
     if (!str || !delim) {
@@ -29282,4 +29283,73 @@ StradaValue* strada_resolve_async(StradaValue *host) {
     }
     pthread_detach(tid);
     return sv;
+}
+
+/* ===== split(): Perl semantics on top of the raw splitters =====
+ *  - trailing empty fields are removed (unless LIMIT is negative); this also
+ *    makes split of an empty string an empty list;
+ *  - a pattern of exactly " " is awk mode: leading whitespace is skipped and
+ *    fields are separated by runs of whitespace.
+ * (Previously `split(",", "a,b,,")` gave 4 fields, `split("\n", "a\nb\n")`
+ * counted a phantom last line and `split(" ", "  a b")` began with "" "".) */
+static void strada_split_strip_trailing(StradaArray *parts) {
+    while (parts && parts->size > 0) {
+        StradaValue *last = parts->elements[parts->head + parts->size - 1];
+        int empty = 0;
+        if (!last) empty = 1;
+        else if (!STRADA_IS_TAGGED_INT(last)) {
+            if (last->type == STRADA_UNDEF) empty = 1;
+            else if (last->type == STRADA_STR && (!last->value.pv || last->value.pv[0] == '\0')) empty = 1;
+        }
+        if (!empty) break;
+        StradaValue *v = strada_array_pop(parts);
+        if (v) strada_decref(v);
+    }
+}
+
+static int strada_split_is_space(unsigned char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+}
+
+/* awk-mode split; limit > 0 caps the field count (last field keeps the rest) */
+static StradaArray* strada_split_awk(const char *str, int limit) {
+    StradaArray *parts = strada_array_new();
+    if (!str) return parts;
+    size_t len = strada_regex_subject_length(str);
+    size_t i = 0;
+    while (i < len && strada_split_is_space((unsigned char)str[i])) i++;
+    while (i < len) {
+        if (limit > 0 && (int)parts->size == limit - 1) {
+            strada_array_push_take(parts, strada_regex_new_capture(str + i, len - i));
+            return parts;
+        }
+        size_t start = i;
+        while (i < len && !strada_split_is_space((unsigned char)str[i])) i++;
+        strada_array_push_take(parts, strada_regex_new_capture(str + start, i - start));
+        while (i < len && strada_split_is_space((unsigned char)str[i])) i++;
+    }
+    return parts;
+}
+
+StradaArray* strada_string_split(const char *str, const char *delim) {
+    if (delim && delim[0] == ' ' && delim[1] == '\0') return strada_split_awk(str, 0);
+    StradaArray *parts = strada_string_split_raw(str, delim);
+    strada_split_strip_trailing(parts);
+    return parts;
+}
+
+StradaArray* strada_regex_split(const char *str, const char *pattern) {
+    if (pattern && pattern[0] == ' ' && pattern[1] == '\0') return strada_split_awk(str, 0);
+    StradaArray *parts = strada_regex_split_raw(str, pattern);
+    strada_split_strip_trailing(parts);
+    return parts;
+}
+
+/* limit > 0: at most `limit` fields, trailing empties kept (Perl);
+ * limit == 0: same as no limit; limit < 0: unlimited, trailing empties kept. */
+StradaArray* strada_regex_split_limit(const char *str, const char *pattern, int limit) {
+    if (limit == 0) return strada_regex_split(str, pattern);
+    if (pattern && pattern[0] == ' ' && pattern[1] == '\0') return strada_split_awk(str, limit > 0 ? limit : 0);
+    if (limit < 0) return strada_regex_split_raw(str, pattern);
+    return strada_regex_split_limit_raw(str, pattern, limit);
 }

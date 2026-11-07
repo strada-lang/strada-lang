@@ -1404,15 +1404,17 @@ func parse_primary(scalar $parser) scalar {
             my str $key = "";
             my scalar $key_expr = 0;
 
-            if ($key_tok->{"type"} eq "STR_LITERAL" || $key_tok->{"type"} eq "IDENT") {
+            my str $key_next = parser_peek($parser)->{"type"};
+            if (($key_tok->{"type"} eq "STR_LITERAL" || $key_tok->{"type"} eq "IDENT"
+                 || $key_tok->{"is_word"}) && $key_next eq "FAT_ARROW") {
+                # Constant key: "name" => v, or any bareword (keywords too,
+                # e.g. default => 1) before =>, as in Perl
                 $key = $key_tok->{"value"};
                 parser_advance($parser);
-            } elsif ($key_tok->{"type"} eq "DOLLAR") {
-                # Variable key like $_ => 1 or $var => value
-                $key_expr = parse_primary($parser);
             } else {
-                my scalar $hk_tok = parser_current($parser);
-                parser_error($parser, "expected hash key (string, identifier, or \$variable), got " . friendly_token($hk_tok->{"type"}, $hk_tok->{"value"}));
+                # Computed key, as in Perl: $k => v, "plan_" . $p => v,
+                # lc($name) => v. parse_logical_or stops before `=>`.
+                $key_expr = parse_logical_or($parser);
             }
 
             parser_expect($parser, "FAT_ARROW");

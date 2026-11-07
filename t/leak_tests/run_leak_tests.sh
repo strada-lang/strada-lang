@@ -52,6 +52,7 @@ TESTS=(
     "test_regex_advanced"
     "test_scope_cleanup"
     "test_ref_to_temp_and_deref_assign"
+    "test_hash_literal_keys"
     "test_slices"
     "test_operators"
     "test_error_handling"

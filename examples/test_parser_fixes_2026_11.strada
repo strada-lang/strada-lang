@@ -1,0 +1,56 @@
+# Regressions (2026-11):
+#  1. keyword/type words as PARAMETER names ($default, $hash) - named + anon funcs
+#  2. a statement starting with %hash right after a closing } (lexed as modulo)
+#  3. empty statements: `;;` and `{ ... };`
+#  4. %{$ref} = LIST / %{$ref} = %h / @{$ref} = LIST replace contents in place
+my hash %g = ("a" => 1, "b" => 2);
+
+func pick(str $default, scalar $hash, int $case) str {
+    return $default . ":" . $hash . ":" . $case;
+};
+
+func main() int {
+    if (pick("d", "h", 3) ne "d:h:3") { say("FAIL: keyword params"); return 1; }
+    my scalar $f = func (str $default, hash %hash) { return $default . scalar(keys(%hash)); };
+    my hash %two = ("x" => 1, "y" => 2);
+    if ($f->("anon", %two) ne "anon2") { say("FAIL: anon keyword params"); return 1; }
+
+    if (1) { my int $noop = 0; }
+    %g = ();
+    if (scalar(keys(%g)) != 0) { say("FAIL: %g after if"); return 1; }
+    my hash %h = ("k" => 9);
+    foreach my str $k (keys(%h)) { my str $kk = $k; };
+    %h = ("p" => 1, "q" => 2, "r" => 3);
+    if (scalar(keys(%h)) != 3) { say("FAIL: %h after foreach"); return 1; };;
+    my int $m = 17;
+    my hash %mh = ("v" => 5);
+    if (($m % 5) != 2 || ($mh{"v"} % 3) != 2 || ((10) % 4) != 2) { say("FAIL: modulo"); return 1; }
+
+    my scalar $ref = {"z" => 1};
+    my scalar $alias = $ref;
+    %{$ref} = ("m" => 1, "n" => 2);
+    if (scalar(keys(%{$alias})) != 2 || $alias->{"m"} != 1 || defined($alias->{"z"})) { say("FAIL: %{} = list"); return 1; }
+    my hash %src = ("a" => 1, "b" => 2, "c" => 3);
+    %{$ref} = %src;
+    $src{"a"} = 99;
+    if (scalar(keys(%{$ref})) != 3 || $ref->{"a"} != 1) { say("FAIL: %{} = %h (copy)"); return 1; }
+    %$ref = ();
+    if (scalar(keys(%{$alias})) != 0) { say("FAIL: %$ref = ()"); return 1; }
+    my hash %named = ("x" => 1);
+    my scalar $nr = \%named;
+    %{$nr} = ("p" => 1, "q" => 2);
+    if (scalar(keys(%named)) != 2) { say("FAIL: through \\%named"); return 1; }
+    my scalar $obj = bless({"v" => 1}, "Thing");
+    %{$obj} = ("v" => 2);
+    if (core::blessed($obj) ne "Thing" || $obj->{"v"} != 2) { say("FAIL: blessed keeps package"); return 1; }
+    my scalar $ar = [1];
+    @{$ar} = (4, 5, 6);
+    my array @b = (7, 8);
+    my scalar $ar2 = [0];
+    @{$ar2} = @b;
+    push(@b, 9);
+    if (scalar(@{$ar}) != 3 || scalar(@{$ar2}) != 2 || $ar2->[0] != 7) { say("FAIL: @{} = list"); return 1; }
+
+    say("all parser fix tests passed");
+    return 0;
+}

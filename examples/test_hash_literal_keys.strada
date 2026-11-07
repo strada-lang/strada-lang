@@ -1,0 +1,35 @@
+# Regression (2026-11): anonymous hash literal keys may be any expression
+# (Perl semantics), and any bareword - keywords included - before => is a
+# string key. Previously {"plan_" . $p => 1} was a parse error.
+func k(str $s) str { return "fn_" . $s; }
+func main() int {
+    my str $p = "growth";
+    my str $name = "Ada";
+    my scalar $h = {"plan_" . $p => 1, lc($name) => 2, k("x") => 3, $name => 4,
+                    default => 5, if => 6, "lit" => 7, bare => 8, 1 + 1 => 9};
+    my int $bad = 0;
+    if ($h->{"plan_growth"} != 1) { say("FAIL concat key"); $bad = 1; }
+    if ($h->{"ada"} != 2) { say("FAIL call key"); $bad = 1; }
+    if ($h->{"fn_x"} != 3) { say("FAIL user func key"); $bad = 1; }
+    if ($h->{"Ada"} != 4) { say("FAIL var key"); $bad = 1; }
+    if ($h->{"default"} != 5 || $h->{"if"} != 6) { say("FAIL keyword barewords"); $bad = 1; }
+    if ($h->{"lit"} != 7 || $h->{"bare"} != 8) { say("FAIL literal keys"); $bad = 1; }
+    if ($h->{"2"} != 9) { say("FAIL arithmetic key"); $bad = 1; }
+    if (scalar(keys(%{$h})) != 9) { say("FAIL count " . scalar(keys(%{$h}))); $bad = 1; }
+    my scalar $nested = {"a" => {"b" . "c" => [1, 2]}};
+    if ($nested->{"a"}->{"bc"}->[1] != 2) { say("FAIL nested"); $bad = 1; }
+    # computed keys with BORROWED values must not steal the variable
+    my str $kk = "key";
+    my str $vv = "value";
+    my int $i = 0;
+    while ($i < 50) { my scalar $t = {$kk => $vv, "c" => $vv}; $i = $i + 1; }
+    if ($vv ne "value") { say("FAIL borrowed value clobbered: " . $vv); $bad = 1; }
+    # computed-key hashes are hash REFERENCES: they survive list contexts
+    my array @list = ({$kk => 1}, {$kk => 2});
+    if (scalar(@list) != 2 || $list[1]->{"key"} != 2) { say("FAIL list of computed-key hashes"); $bad = 1; }
+    my scalar $ar = [{$kk => 3}];
+    if ($ar->[0]->{"key"} != 3) { say("FAIL aref of computed-key hash"); $bad = 1; }
+    if ($bad == 1) { return 1; }
+    say("all hash literal key tests passed");
+    return 0;
+}

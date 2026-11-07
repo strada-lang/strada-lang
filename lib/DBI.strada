@@ -983,7 +983,9 @@ static void dbi_bind_value(DbiStatement *sth, int idx, StradaValue *val) {
                 free(sth->mysql_param_buffers[param_idx]);
             }
 
-            if (str && strlen(str) > 0) {
+            /* Only a missing value is NULL: an empty string is a real value
+             * (binding "" as NULL broke NOT NULL columns and lost data). */
+            if (str) {
                 /* Use the str directly instead of strdup - we own it now */
                 sth->mysql_param_buffers[param_idx] = str;
                 sth->mysql_param_lengths[param_idx] = strlen(str);
@@ -1302,6 +1304,27 @@ static void dbi_free_statement(DbiStatement *sth) {
 /* Execute SQL directly */
 static int dbi_do_sql(DbiHandle *dbh, const char *sql) {
     if (!dbh || !sql) return -1;
+#ifdef HAVE_MYSQL
+    /* MySQL's prepared-statement protocol rejects BEGIN/COMMIT/ROLLBACK and
+     * other utility statements ("This command is not supported in the
+     * prepared statement protocol yet"), which made begin_work/commit/
+     * rollback always fail. do_sql never has placeholders, so send it as a
+     * plain text query and drain any result set. */
+    if (dbh->driver == DBI_DRIVER_MYSQL) {
+        MYSQL *my = (MYSQL*)dbh->conn;
+        if (!my) return -1;
+        if (mysql_real_query(my, sql, (unsigned long)strlen(sql)) != 0) {
+            dbi_set_error(dbh, (int)mysql_errno(my), mysql_error(my));
+            return -1;
+        }
+        do {
+            MYSQL_RES *res = mysql_store_result(my);
+            if (res) mysql_free_result(res);
+        } while (mysql_next_result(my) == 0);
+        uint64_t n = mysql_affected_rows(my);
+        return (n == (uint64_t)-1) ? 0 : (int)n;
+    }
+#endif
     DbiStatement *sth = dbi_prepare(dbh, sql);
     if (!sth) return -1;
     int result = dbi_execute_raw(sth);

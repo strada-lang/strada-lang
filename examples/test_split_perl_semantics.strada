@@ -1,0 +1,36 @@
+# Regression (2026-11): split() follows Perl semantics.
+#  - trailing empty fields are removed (empty input -> empty list)
+#  - a negative LIMIT keeps trailing empties; a positive LIMIT caps fields
+#  - " " is awk mode (skip leading whitespace, split on whitespace runs)
+func join_parts(array @a) str {
+    my str $o = "";
+    foreach my str $x (@a) { $o = $o . "[" . $x . "]"; }
+    return scalar(@a) . ":" . $o;
+}
+func check(str $label, str $got, str $want) int {
+    if ($got ne $want) { say("FAIL " . $label . ": got " . $got . " want " . $want); return 1; }
+    return 0;
+}
+func main() int {
+    my int $bad = 0;
+    $bad = $bad + check("trailing", join_parts(split(",", "a,b,,c,,")), "4:[a][b][][c]");
+    $bad = $bad + check("lines", join_parts(split("\n", "one\ntwo\n")), "2:[one][two]");
+    $bad = $bad + check("empty input", join_parts(split(",", "")), "0:");
+    $bad = $bad + check("all empty", join_parts(split(",", ",,,")), "0:");
+    $bad = $bad + check("leading kept", join_parts(split(",", ",a")), "2:[][a]");
+    $bad = $bad + check("regex dot", join_parts(split(".", "x.y")), "0:");
+    $bad = $bad + check("escaped pipe", join_parts(split("\\|", "a|b|")), "2:[a][b]");
+    $bad = $bad + check("awk", join_parts(split(" ", "  a \t b\n c  ")), "3:[a][b][c]");
+    $bad = $bad + check("awk empty", join_parts(split(" ", "   ")), "0:");
+    $bad = $bad + check("ws regex keeps leading", join_parts(split("\\s+", " a b")), "3:[][a][b]");
+    $bad = $bad + check("neg limit", join_parts(split(",", "a,b,,", -1)), "4:[a][b][][]");
+    $bad = $bad + check("pos limit", join_parts(split(",", "a,b,c,d", 2)), "2:[a][b,c,d]");
+    $bad = $bad + check("pos limit keeps empty", join_parts(split(",", "a,,", 3)), "3:[a][][]");
+    $bad = $bad + check("awk limit", join_parts(split(" ", " a b  c", 2)), "2:[a][b  c]");
+    my str $sep = ",";
+    $bad = $bad + check("dynamic pattern", join_parts(split($sep, "x,y,")), "2:[x][y]");
+    $bad = $bad + check("chars", join_parts(split("", "abc")), "3:[a][b][c]");
+    if ($bad > 0) { return 1; }
+    say("all split tests passed");
+    return 0;
+}
