@@ -1,0 +1,39 @@
+# Regression (2026-11): #ifdef/#ifndef/#else/#endif were only processed when
+# the driver ran stradapp (i.e. when -D was given), and never inside `use`d
+# modules - otherwise the lines were comments and BOTH branches compiled
+# (e.g. DBI's `#ifdef HAVE_POSTGRES link_lib "pq"` always applied).
+use lib "examples/lib_pp_fixture";
+use PpMod;
+
+#define LOCAL_FLAG
+
+func main() int {
+    my int $bad = 0;
+    my str $seen = "";
+#ifdef NOT_DEFINED_ANYWHERE
+    $seen = $seen . "A";
+#else
+    $seen = $seen . "B";
+#endif
+#ifndef NOT_DEFINED_ANYWHERE
+    $seen = $seen . "C";
+#endif
+#ifdef LOCAL_FLAG
+    $seen = $seen . "D";
+#ifdef NOT_DEFINED_ANYWHERE
+    $seen = $seen . "E";
+#else
+    $seen = $seen . "F";
+#endif
+#endif
+#undef LOCAL_FLAG
+#ifdef LOCAL_FLAG
+    $seen = $seen . "G";
+#endif
+    if ($seen ne "BCDF") { say("FAIL: main-file branches: " . $seen . " (want BCDF)"); $bad = 1; }
+    if (PpMod::mode() ne "noflag") { say("FAIL: module #ifdef: " . PpMod::mode()); $bad = 1; }
+    if (PpMod::inverse() ne "ifndef-taken") { say("FAIL: module #ifndef: " . PpMod::inverse()); $bad = 1; }
+    if ($bad == 1) { return 1; }
+    say("all preprocessor conditional tests passed");
+    return 0;
+}

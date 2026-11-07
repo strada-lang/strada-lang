@@ -240,7 +240,8 @@ test_output_contains "$EXAMPLES_DIR/test_lwp.strada" "test_lwp" "All LWP tests p
 # Test: DateTime library
 test_output_contains "$EXAMPLES_DIR/test_datetime.strada" "test_datetime" "All DateTime tests passed" "DateTime library"
 
-# Test: Nesso ORM (requires SQLite)
+# Test: Nesso ORM + DBI quoting (require SQLite; skipped when it is not installed)
+if printf '#include <sqlite3.h>\n' | ${CC:-gcc} -E -x c - >/dev/null 2>&1; then
 SAVED_EXTRA_LDFLAGS="$EXTRA_LDFLAGS"
 EXTRA_LDFLAGS="$EXTRA_LDFLAGS -lsqlite3"
 test_output_contains "lib/Nesso/test_nesso.strada" "test_nesso" "PASS: All Nesso tests passed" "Nesso ORM"
@@ -249,6 +250,11 @@ test_output_contains "lib/Nesso/test_nesso_sqli.strada" "test_nesso_sqli" "PASS:
 # Test: DBI::quote (native escaper) + DBI::quote_identifier
 test_output_contains "lib/dbi/test_dbi_quote.strada" "test_dbi_quote" "PASS: All DBI quote tests passed" "DBI quote/quote_identifier"
 EXTRA_LDFLAGS="$SAVED_EXTRA_LDFLAGS"
+else
+test_skip "Nesso ORM" "SQLite (libsqlite3-dev) not installed"
+test_skip "Nesso SQLi guard" "SQLite (libsqlite3-dev) not installed"
+test_skip "DBI quote/quote_identifier" "SQLite (libsqlite3-dev) not installed"
+fi
 
 # Test: Nested use statements (modules that use other modules)
 test_output_contains "$SCRIPT_DIR/test_nested_use.strada" "test_nested_use" "All nested use tests passed" "Nested use"
@@ -314,6 +320,9 @@ test_output "$EXAMPLES_DIR/test_waitpid_wnohang.strada" "test_waitpid_wnohang" "
 
 # Test: borrowed variables inside inlined nested literals are not freed
 test_output "$EXAMPLES_DIR/test_borrowed_in_nested_literals.strada" "test_borrowed_in_nested_literals" "all borrowed nested literal tests passed" "Borrowed values in nested literals"
+
+# Test: #ifdef/#ifndef/#else/#endif honoured without -D and inside `use`d modules
+test_output "$EXAMPLES_DIR/test_pp_conditionals.strada" "test_pp_conditionals" "all preprocessor conditional tests passed" "Preprocessor conditionals (no -D, modules)"
 
 # Test: Our variable declarations
 test_output_contains "$EXAMPLES_DIR/test_our.strada" "test_our" "All our variable tests passed" "Our variables"

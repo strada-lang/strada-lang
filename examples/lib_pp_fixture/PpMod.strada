@@ -1,0 +1,15 @@
+# Fixture for test_pp_conditionals: a module whose #ifdef must be honoured
+# when it is pulled in by `use` (modules never went through stradapp).
+package PpMod;
+
+#ifdef STRADA_PP_FIXTURE_FLAG
+func mode() str { return "flag"; }
+#else
+func mode() str { return "noflag"; }
+#endif
+
+#ifndef STRADA_PP_FIXTURE_FLAG
+func inverse() str { return "ifndef-taken"; }
+#else
+func inverse() str { return "ifndef-skipped"; }
+#endif

@@ -27,6 +27,12 @@ func parser_new(scalar $tokens) scalar {
     $parser{"tokens"} = $tokens;
     $parser{"pos"} = 0;
     $parser{"token_count"} = size($tokens);
+    # -D defines (attached by the lexer to EOF) for `use`d modules' #ifdef
+    $parser{"pp_defines"} = 0;
+    if (size($tokens) > 0) {
+        my scalar $eof_tok = $tokens->[size($tokens) - 1];
+        $parser{"pp_defines"} = $eof_tok->{"pp_cli_defines"};
+    }
     $parser{"filename"} = "";
     $parser{"current_package"} = "";
     $parser{"const_names"} = {};  # Track declared const names
@@ -4473,13 +4479,14 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
         return;
     }
 
-    # Lex the module
-    my scalar $tokens = lex_tokenize_file($source, $file_path);
+    # Lex the module with the program's -D defines so its #ifdef work
+    my scalar $tokens = lex_tokenize_file_defs($source, $file_path, $program->{"pp_defines"});
 
     # Parse the module
     my scalar $mod_parser = parser_new($tokens);
     parser_set_filename($mod_parser, $file_path);
     my scalar $mod_program = ast_new_program();
+    $mod_program->{"pp_defines"} = $program->{"pp_defines"};
 
     # Copy lib_paths from parent program so nested use statements work
     my scalar $parent_lib_paths = $program->{"lib_paths"};
@@ -6552,6 +6559,7 @@ func parse_method_modifier(scalar $parser, scalar $program, str $mod_type) void 
 
 func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low, scalar $implicit_objs, scalar $implicit_archs) scalar {
     my scalar $program = ast_new_program();
+    $program->{"pp_defines"} = $parser->{"pp_defines"};
 
     # Low-priority paths are consulted as a FALLBACK by find_module_file
     # during parsing (they are also appended to lib_paths after the parse,

@@ -198,6 +198,146 @@ func lex_skip_whitespace(scalar $lexer) void {
     }
 }
 
+# ---- Conditional compilation -------------------------------------------
+# #ifdef NAME / #ifndef NAME / #else / #endif / #define NAME / #undef NAME
+# at the start of a line, in every file the compiler reads - including
+# modules pulled in by `use`. (Previously only the driver's stradapp pass
+# handled them, and only for the main file and only when -D was given;
+# everywhere else the lines were comments and BOTH branches compiled.)
+# Defines come from STRADA_DEFINES ("NAME NAME=VAL ...", set by stradac -D)
+# plus #define in the file. __C__ blocks are lexed as one token, so C
+# preprocessor lines inside them are never seen here.
+func lex_pp_init(scalar $lexer) void {
+    my hash %defs = ();
+    my str $env = core::getenv("STRADA_DEFINES");
+    if (length($env) > 0) {
+        my array @parts = split(" ", $env);
+        my int $i = 0;
+        while ($i < size(@parts)) {
+            my str $d = $parts[$i];
+            my int $eqp = index($d, "=");
+            if ($eqp > 0) { $d = substr($d, 0, $eqp); }
+            if (length($d) > 0) { $defs{$d} = 1; }
+            $i = $i + 1;
+        }
+    }
+    $lexer->{"pp_defines"} = \%defs;
+    $lexer->{"pp_depth"} = 0;
+}
+
+func lex_pp_is_word_char(int $c) int {
+    if (($c >= 97 && $c <= 122) || ($c >= 65 && $c <= 90) || ($c >= 48 && $c <= 57) || $c == 95) { return 1; }
+    return 0;
+}
+
+# Directive word at pos (just after '#'), or "".
+func lex_pp_word_at(scalar $source, int $pos, int $len) str {
+    my int $end = $pos;
+    while ($end < $len && lex_pp_is_word_char(char_at($source, $end)) == 1) { $end = $end + 1; }
+    if ($end == $pos) { return ""; }
+    return substr($source, $pos, $end - $pos);
+}
+
+func lex_pp_is_directive(str $w) int {
+    if ($w eq "ifdef" || $w eq "ifndef" || $w eq "else" || $w eq "endif" || $w eq "define" || $w eq "undef") { return 1; }
+    return 0;
+}
+
+# Skip lines of a false branch. Starts with pos on the newline that ends the
+# directive line. Returns "else" (stopped after a matching #else, only when
+# stop_else) or "endif"; leaves pos on the newline ending that line.
+func lex_pp_skip(scalar $lexer, int $stop_else, int $start_line) str {
+    my scalar $src = $lexer->{"source"};
+    my int $len = $lexer->{"length"};
+    my int $pos = $lexer->{"pos"};
+    my int $line = $lexer->{"line"};
+    my int $nest = 0;
+    while (1) {
+        # move past the current line's newline
+        while ($pos < $len && char_at($src, $pos) != 10) { $pos = $pos + 1; }
+        if ($pos >= $len) {
+            $lexer->{"pos"} = $pos;
+            lex_error($lexer, "unterminated #ifdef/#ifndef (missing #endif)", $start_line, 1);
+        }
+        $pos = $pos + 1;
+        $line = $line + 1;
+        my int $q = $pos;
+        while ($q < $len && (char_at($src, $q) == 32 || char_at($src, $q) == 9)) { $q = $q + 1; }
+        if ($q < $len && char_at($src, $q) == 35) {
+            my str $w = lex_pp_word_at($src, $q + 1, $len);
+            if ($w eq "ifdef" || $w eq "ifndef") {
+                $nest = $nest + 1;
+            } elsif ($w eq "endif") {
+                if ($nest == 0) {
+                    while ($q < $len && char_at($src, $q) != 10) { $q = $q + 1; }
+                    $lexer->{"pos"} = $q;
+                    $lexer->{"line"} = $line;
+                    $lexer->{"column"} = 1;
+                    return "endif";
+                }
+                $nest = $nest - 1;
+            } elsif ($w eq "else" && $nest == 0 && $stop_else == 1) {
+                while ($q < $len && char_at($src, $q) != 10) { $q = $q + 1; }
+                $lexer->{"pos"} = $q;
+                $lexer->{"line"} = $line;
+                $lexer->{"column"} = 1;
+                return "else";
+            }
+        }
+    }
+    return "endif";
+}
+
+# Handle a directive at the current '#'. Returns 1 if it was one (and has
+# been processed), 0 if this '#' is an ordinary comment.
+func lex_pp_directive(scalar $lexer) int {
+    my scalar $src = $lexer->{"source"};
+    my int $pos = $lexer->{"pos"};
+    my int $len = $lexer->{"length"};
+    # must be the first non-blank thing on its line
+    my int $bk = $pos - 1;
+    while ($bk >= 0 && (char_at($src, $bk) == 32 || char_at($src, $bk) == 9)) { $bk = $bk - 1; }
+    if ($bk >= 0 && char_at($src, $bk) != 10) { return 0; }
+    my str $word = lex_pp_word_at($src, $pos + 1, $len);
+    if (lex_pp_is_directive($word) == 0) { return 0; }
+    if (!defined($lexer->{"pp_defines"})) { lex_pp_init($lexer); }
+    my int $dline = $lexer->{"line"};
+    # argument: first word after the directive
+    my int $q = $pos + 1 + length($word);
+    while ($q < $len && (char_at($src, $q) == 32 || char_at($src, $q) == 9)) { $q = $q + 1; }
+    my str $name = lex_pp_word_at($src, $q, $len);
+    # consume the rest of the directive line (stop on its newline)
+    while ($q < $len && char_at($src, $q) != 10) { $q = $q + 1; }
+    $lexer->{"pos"} = $q;
+    $lexer->{"column"} = 1;
+    my scalar $defs = $lexer->{"pp_defines"};
+    if ($word eq "define") {
+        if (length($name) > 0) { $defs->{$name} = 1; }
+    } elsif ($word eq "undef") {
+        if (length($name) > 0) { $defs->{$name} = 0; }
+    } elsif ($word eq "ifdef" || $word eq "ifndef") {
+        if (length($name) == 0) { lex_error($lexer, "#" . $word . " needs a name", $dline, 1); }
+        my int $is_def = 0;
+        if (defined($defs->{$name}) && $defs->{$name} == 1) { $is_def = 1; }
+        my int $take = $is_def;
+        if ($word eq "ifndef") { $take = 1 - $is_def; }
+        if ($take == 1) {
+            $lexer->{"pp_depth"} = $lexer->{"pp_depth"} + 1;
+        } else {
+            my str $stop = lex_pp_skip($lexer, 1, $dline);
+            if ($stop eq "else") { $lexer->{"pp_depth"} = $lexer->{"pp_depth"} + 1; }
+        }
+    } elsif ($word eq "else") {
+        if ($lexer->{"pp_depth"} <= 0) { lex_error($lexer, "#else without #ifdef/#ifndef", $dline, 1); }
+        lex_pp_skip($lexer, 0, $dline);
+        $lexer->{"pp_depth"} = $lexer->{"pp_depth"} - 1;
+    } elsif ($word eq "endif") {
+        if ($lexer->{"pp_depth"} <= 0) { lex_error($lexer, "#endif without #ifdef/#ifndef", $dline, 1); }
+        $lexer->{"pp_depth"} = $lexer->{"pp_depth"} - 1;
+    }
+    return 1;
+}
+
 func lex_skip_comment(scalar $lexer) void {
     if (lex_current_code($lexer) != 35) {  # '#'
         return;
@@ -1588,7 +1728,9 @@ func lex_next_token(scalar $lexer) scalar {
 
     # Skip line comments (#=35)
     if ($code == ord("#")) {
-        lex_skip_comment($lexer);
+        if (lex_pp_directive($lexer) == 0) {
+            lex_skip_comment($lexer);
+        }
         return lex_next_token($lexer);
     }
 
@@ -2243,8 +2385,26 @@ func lex_tokenize(str $source) array {
 
 # Tokenize with a filename for diagnostics: lexer errors report "file:line:".
 func lex_tokenize_file(str $source, str $filename) array {
+    return lex_tokenize_file_defs($source, $filename, 0);
+}
+
+# Tokenize with command-line defines (a hash of NAME => 1) for #ifdef. The
+# defines are also attached to the EOF token so the parser can hand them to
+# every `use`d module.
+func lex_tokenize_file_defs(str $source, str $filename, scalar $cli_defs) array {
     my hash $lexer = lex_new($source);
     $lexer->{"file"} = $filename;
+    if ($cli_defs) {
+        my hash %own = ();
+        my array @dk = keys(%{$cli_defs});
+        my int $dki = 0;
+        while ($dki < size(@dk)) {
+            $own{$dk[$dki]} = $cli_defs->{$dk[$dki]};
+            $dki = $dki + 1;
+        }
+        $lexer->{"pp_defines"} = \%own;
+        $lexer->{"pp_depth"} = 0;
+    }
     my array @tokens = ();
     my str $prev_type = "";
 
@@ -2264,6 +2424,7 @@ func lex_tokenize_file(str $source, str $filename) array {
         $prev_type = $token->{"type"};
 
         if ($token->{"type"} eq "EOF") {
+            $token->{"pp_cli_defines"} = $cli_defs;
             return \@tokens;
         }
     }

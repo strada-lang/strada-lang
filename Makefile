@@ -37,14 +37,20 @@ endif
 endif
 PREFIX ?= /usr/local
 HAVE_MYSQL ?= 0
-HAVE_SQLITE ?= 1
+# Without ./configure, use SQLite only if its headers are actually installed.
+HAVE_SQLITE ?= $(shell printf '\043include <sqlite3.h>\n' | $(CC) -E -x c - >/dev/null 2>&1 && echo 1 || echo 0)
 HAVE_POSTGRES ?= 0
 HAVE_CRYPT ?= 0
 HAVE_CRYPT_R ?= 0
 HAVE_READLINE ?= 0
 HAVE_SSL ?= 0
-DBI_DEFINES ?=
+ifeq ($(HAVE_SQLITE),1)
+DBI_DEFINES ?= -DHAVE_SQLITE3
 DBI_LIBS ?= -lsqlite3
+else
+DBI_DEFINES ?=
+DBI_LIBS ?=
+endif
 CRYPT_LIBS ?= -lcrypt
 READLINE_LIBS ?= -lreadline
 SSL_LIBS ?= -lssl -lcrypto
@@ -509,12 +515,11 @@ lib/DBI.o lib/crypt.o lib/Eval.o lib/ssl.o lib/readline/readline.o: strada-drive
 # DBI library (database interface)
 lib/DBI.o: lib/DBI.strada stradac configure-check
 	@echo "Building DBI library..."
-	@if [ "$(HAVE_MYSQL)" = "1" ] || [ "$(HAVE_POSTGRES)" = "1" ] || [ "$(HAVE_SQLITE)" = "1" ]; then \
-	    ./strada -M $(DBI_DEFINES) lib/DBI.strada; \
-	else \
-	    echo "  No database drivers detected. Run ./configure."; \
-	    exit 1; \
+	@if [ "$(HAVE_MYSQL)" != "1" ] && [ "$(HAVE_POSTGRES)" != "1" ] && [ "$(HAVE_SQLITE)" != "1" ]; then \
+	    echo "  No database drivers detected: building DBI without drivers"; \
+	    echo "  (DBI::connect will fail; install libsqlite3-dev / libmysqlclient-dev / libpq-dev and re-run ./configure)."; \
 	fi
+	@./strada -M $(DBI_DEFINES) lib/DBI.strada
 	@echo "  DBI drivers: MySQL=$(HAVE_MYSQL) SQLite=$(HAVE_SQLITE) PostgreSQL=$(HAVE_POSTGRES)"
 
 lib-dbi: lib/DBI.o

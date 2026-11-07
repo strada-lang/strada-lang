@@ -90,7 +90,7 @@ func _deduce_lib_root_from_source(str $source, str $filename) str {
     return substr($filename, 0, $suffix_start - 1);
 }
 
-func compile(str $source, str $filename, int $debug_info, int $show_timing, int $show_warnings, int $strict_types, int $enable_profiling, int $enable_stack_trace, int $full_profile, scalar $lib_paths, scalar $lib_paths_low, scalar $implicit_objs, scalar $implicit_archs, scalar $implicit_libs, int $module_only_mode, str $module_target, int $check_only) str {
+func compile(str $source, str $filename, int $debug_info, int $show_timing, int $show_warnings, int $strict_types, int $enable_profiling, int $enable_stack_trace, int $full_profile, scalar $lib_paths, scalar $lib_paths_low, scalar $implicit_objs, scalar $implicit_archs, scalar $implicit_libs, int $module_only_mode, str $module_target, int $check_only, scalar $pp_defines) str {
     my num $t0 = 0.0;
     my num $t1 = 0.0;
 
@@ -125,7 +125,21 @@ func compile(str $source, str $filename, int $debug_info, int $show_timing, int 
 
     # Tokenize
     $t0 = core::hires_time();
-    my scalar $tokens = lex_tokenize_file($source, $filename);
+    # -D NAME[=VAL] -> #ifdef/#ifndef defines for this file and its modules
+    my scalar $cli_defs = 0;
+    if (defined($pp_defines) && size(@{$pp_defines}) > 0) {
+        my hash %dh = ();
+        my int $pdi = 0;
+        while ($pdi < size(@{$pp_defines})) {
+            my str $dn = $pp_defines->[$pdi];
+            my int $deq = index($dn, "=");
+            if ($deq > 0) { $dn = substr($dn, 0, $deq); }
+            if (length($dn) > 0) { $dh{$dn} = 1; }
+            $pdi = $pdi + 1;
+        }
+        $cli_defs = \%dh;
+    }
+    my scalar $tokens = lex_tokenize_file_defs($source, $filename, $cli_defs);
     $t1 = core::hires_time();
     if ($show_timing == 1) {
         say("  Lexer:    " . ($t1 - $t0) . " seconds");
@@ -219,6 +233,7 @@ func main() int {
     my str $output_file = "";
     my array @lib_paths = ();
     my array @lib_paths_low = ();
+    my array @pp_defines = ();
     my array @implicit_objs = ();
     my array @implicit_archs = ();
     my array @implicit_libs = ();
@@ -255,6 +270,18 @@ func main() int {
             $enable_stack_trace = 0;
         } elsif ($arg eq "--stack-trace") {
             $enable_stack_trace = 1;
+        } elsif ($arg eq "-D") {
+            # -D NAME[=VAL] - define a name for #ifdef/#ifndef (all files,
+            # including modules); exported to the lexer via STRADA_DEFINES
+            $i = $i + 1;
+            if ($i < $arg_count) {
+                push(@pp_defines, $ARGV[$i]);
+            } else {
+                say("Error: -D requires a name");
+                return 1;
+            }
+        } elsif (substr($arg, 0, 2) eq "-D" && length($arg) > 2) {
+            push(@pp_defines, substr($arg, 2, length($arg) - 2));
         } elsif ($arg eq "-LL") {
             # -LL <path> - add low-priority library search path
             $i = $i + 1;
@@ -403,7 +430,7 @@ func main() int {
     }
 
     # Compile (pass lib paths, CLI-implicit imports, and module-only settings)
-    my str $code = compile($source, $input_file, $debug_info, $show_timing, $show_warnings, $strict_types, $enable_profiling, $enable_stack_trace, $full_profile, \@lib_paths, \@lib_paths_low, \@implicit_objs, \@implicit_archs, \@implicit_libs, $module_only_mode, $module_target, $check_only);
+    my str $code = compile($source, $input_file, $debug_info, $show_timing, $show_warnings, $strict_types, $enable_profiling, $enable_stack_trace, $full_profile, \@lib_paths, \@lib_paths_low, \@implicit_objs, \@implicit_archs, \@implicit_libs, $module_only_mode, $module_target, $check_only, \@pp_defines);
 
     # --check: validation passed (any errors die before reaching here) —
     # nothing to write.

@@ -814,6 +814,10 @@ func main() int {
     core::setenv("STRADA_DIR", $HOME_DIR);
 
     my array @sc = ($STRADAC, "-LL", $HOME_DIR . "/lib");
+    # Pass -D through so #ifdef also works in `use`d modules (stradapp only
+    # preprocesses the main file).
+    my int $pd = 0;
+    while ($pd < size(@PP_DEFINES)) { @sc = (@sc, "-D" . $PP_DEFINES[$pd]); $pd = $pd + 1; }
     if ($DEBUG_SYMBOLS == 1) { @sc = (@sc, "-g"); }
     if ($SHOW_WARNINGS == 1) { @sc = (@sc, "-w"); }
     if ($STRICT_TYPES == 1) { @sc = (@sc, "--strict-types"); }

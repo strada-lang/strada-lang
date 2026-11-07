@@ -326,10 +326,9 @@ __C__ {
    extern prototypes here: on newer glibc strdup/strtok_r are declared via
    __REDIRECT/__extension__ and a plain re-declaration fails to compile. */
 
-/* Always include SQLite as it's commonly available */
-#ifndef HAVE_SQLITE3
-#define HAVE_SQLITE3 1
-#endif
+/* Drivers are compiled in only when requested (-DHAVE_SQLITE3, -DHAVE_MYSQL,
+ * -DHAVE_POSTGRES; the Makefile passes what ./configure detected). SQLite used
+ * to be forced on here, so DBI - and `make` - failed without libsqlite3-dev. */
 
 #ifdef HAVE_SQLITE3
 #include <sqlite3.h>
@@ -572,7 +571,7 @@ static DbiHandle* dbi_connect_raw(const char *dsn, const char *user, const char 
 #endif
 
         default:
-            dbi_set_error(dbh, -1, "Unknown or unsupported database driver");
+            dbi_set_error(dbh, -1, "Unknown database driver, or its support is not compiled in (DBI is built with -DHAVE_SQLITE3 / -DHAVE_MYSQL / -DHAVE_POSTGRES; run ./configure and rebuild)");
             free(database);
             free(host);
             free(dbh->dsn);

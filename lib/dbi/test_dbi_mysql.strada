@@ -1,0 +1,69 @@
+# DBI against a live MySQL/MariaDB server (driven by t/t_dbi_mysql.sh).
+#
+#   STRADA_TEST_MYSQL_DSN="dbi:mysql:database=test;host=127.0.0.1;port=3306"
+#   STRADA_TEST_MYSQL_USER=...  STRADA_TEST_MYSQL_PASSWORD=...
+#
+# Regressions (2026-11):
+#   * begin_work/commit/rollback ran BEGIN/COMMIT/ROLLBACK through the
+#     prepared-statement protocol, which MySQL rejects - transactions never
+#     worked on MySQL.
+#   * an empty string parameter was bound as NULL.
+use DBI;
+
+my int $g_fail = 0;
+
+func check(int $ok, str $name) void {
+    if ($ok) { say("ok - " . $name); } else { say("not ok - " . $name); $g_fail = $g_fail + 1; }
+}
+
+func count_s(scalar $dbh, str $s) int {
+    my scalar $n = DBI::selectcol($dbh, "SELECT COUNT(*) FROM strada_dbi_mysql_t WHERE s = ?", [$s]);
+    return core::atoi("" . $n);
+}
+
+func main() int {
+    my str $dsn = core::getenv("STRADA_TEST_MYSQL_DSN");
+    my scalar $dbh = DBI::connect_attrs($dsn, core::getenv("STRADA_TEST_MYSQL_USER"),
+        core::getenv("STRADA_TEST_MYSQL_PASSWORD"), {"RaiseError" => 1, "PrintError" => 0});
+    if (!defined($dbh)) { say("FAIL: cannot connect to " . $dsn); return 1; }
+
+    DBI::do_sql($dbh, "CREATE TEMPORARY TABLE strada_dbi_mysql_t (id INT AUTO_INCREMENT PRIMARY KEY, s VARCHAR(20) NOT NULL, n VARCHAR(20) NULL) ENGINE=InnoDB");
+
+    # Empty string is a value, undef is NULL
+    my int $ins_ok = 1;
+    try { DBI::exec($dbh, "INSERT INTO strada_dbi_mysql_t (s, n) VALUES (?, ?)", ["", undef]); }
+    catch ($e) { $ins_ok = 0; say("  insert failed: " . $e); }
+    check($ins_ok == 1, "insert of an empty string into a NOT NULL column");
+    my scalar $row = DBI::selectrow_hashref($dbh, "SELECT s, n, s IS NULL AS s_is_null FROM strada_dbi_mysql_t ORDER BY id LIMIT 1", []);
+    check(defined($row) && defined($row->{"s"}) && $row->{"s"} eq "", "empty string stored as empty string");
+    check(defined($row) && ("" . $row->{"s_is_null"}) eq "0", "empty string is not NULL");
+    check(defined($row) && !defined($row->{"n"}), "undef stored as NULL");
+
+    # Transactions
+    my int $bw = -1;
+    try { $bw = DBI::begin_work($dbh); } catch ($e) { say("  begin_work: " . $e); }
+    check($bw >= 0, "begin_work succeeds");
+    DBI::exec($dbh, "INSERT INTO strada_dbi_mysql_t (s) VALUES (?)", ["rolled"]);
+    check(count_s($dbh, "rolled") == 1, "row visible inside transaction");
+    check(DBI::rollback($dbh) >= 0, "rollback succeeds");
+    check(count_s($dbh, "rolled") == 0, "rollback discards the row");
+
+    check(DBI::begin_work($dbh) >= 0, "begin_work again");
+    DBI::exec($dbh, "INSERT INTO strada_dbi_mysql_t (s) VALUES (?)", ["kept"]);
+    check(DBI::commit($dbh) >= 0, "commit succeeds");
+    check(count_s($dbh, "kept") == 1, "commit keeps the row");
+
+    # An error inside a transaction can still be rolled back
+    DBI::begin_work($dbh);
+    DBI::exec($dbh, "INSERT INTO strada_dbi_mysql_t (s) VALUES (?)", ["doomed"]);
+    my int $threw = 0;
+    try { DBI::exec($dbh, "INSERT INTO no_such_table_xyz VALUES (1)", []); } catch ($e) { $threw = 1; }
+    check($threw == 1, "RaiseError throws inside a transaction");
+    DBI::rollback($dbh);
+    check(count_s($dbh, "doomed") == 0, "rollback after an error");
+
+    DBI::disconnect($dbh);
+    if ($g_fail > 0) { say("FAIL: " . $g_fail . " DBI MySQL check(s) failed"); return 1; }
+    say("PASS: All DBI MySQL tests passed");
+    return 0;
+}
