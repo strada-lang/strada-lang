@@ -1174,6 +1174,7 @@ static inline int strada_is_slot_ref(StradaValue *sv) {
 }
 StradaValue* strada_deref(StradaValue *ref);          /* $$ref - deref scalar ref */
 StradaValue* strada_deref_set(StradaValue *ref, StradaValue *new_value); /* deref_set($ref, $val) */
+StradaValue* strada_deref_assign_container(StradaValue *ref, StradaValue *value, int sigil); /* %{$ref} = LIST, @{$ref} = LIST */
 StradaHash* strada_deref_hash(StradaValue *ref);      /* For $ref->{key} */
 StradaArray* strada_deref_array(StradaValue *ref);    /* For $ref->[index] */
 StradaValue* strada_deref_hash_value(StradaValue *ref);  /* deref_hash() builtin */

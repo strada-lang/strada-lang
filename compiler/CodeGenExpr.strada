@@ -724,6 +724,24 @@ func gen_assign_deref_scalar(scalar $cg, scalar $expr, scalar $target) void {
     my int $type = $expr->{"type"};
     my int $in_extern = $cg->{"in_extern"};
     my int $target_type = $target->{"type"};
+                # %{$ref} = LIST / @{$ref} = LIST replace the container's
+                # contents; only $$ref = VALUE is a scalar store.
+                my str $dsig = "" . $target->{"sigil"};
+                if ($dsig eq "%" || $dsig eq "@") {
+                    emit($cg, "({ StradaValue *__dc_ref = ");
+                    gen_expression($cg, $target->{"ref"});
+                    emit($cg, "; StradaValue *__dc_val = ");
+                    gen_expression($cg, $expr->{"value"});
+                    emit($cg, "; StradaValue *__dc_res = strada_deref_assign_container(__dc_ref, __dc_val, '" . $dsig . "'); ");
+                    if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $target->{"ref"}) == 1) {
+                        emit($cg, "strada_decref(__dc_ref); ");
+                    }
+                    if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $expr->{"value"}) == 1) {
+                        emit($cg, "strada_decref(__dc_val); ");
+                    }
+                    emit($cg, "__dc_res; })");
+                    return;
+                }
                 my int $ref_needs_cleanup = 0;
                 my int $val_needs_cleanup = 0;
                 if ($cg->{"cleanup_enabled"} == 1) {
@@ -4183,7 +4201,14 @@ func gen_expression(scalar $cg, scalar $expr) void {
             gen_expression($cg, $expr->{"target"});
             emit($cg, ")");
         } else {
-            emit($cg, "strada_new_ref(");
+            # \"lit", \(f()), \[...]: the target is an owned temporary, so the
+            # new reference takes it over. strada_new_ref() increfs, which
+            # leaked the temporary (e.g. 32 bytes per `\"str"`).
+            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $expr->{"target"}) == 1) {
+                emit($cg, "strada_new_ref_take(");
+            } else {
+                emit($cg, "strada_new_ref(");
+            }
             gen_expression($cg, $expr->{"target"});
             emit($cg, ", '");
             emit($cg, $ref_type);
@@ -5364,7 +5389,9 @@ func gen_expression(scalar $cg, scalar $expr) void {
         $i = 0;
         while ($i < $param_count) {
             my scalar $p = $params->[$i];
-            $decl = $decl . ", StradaValue *" . $p->{"name"};
+            # Escape C keywords ($default -> v_default) exactly like named
+            # functions and variable references do.
+            $decl = $decl . ", StradaValue *" . escape_c_keyword($p->{"name"});
             $i = $i + 1;
         }
         $decl = $decl . ")";

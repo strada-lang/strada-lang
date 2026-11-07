@@ -300,6 +300,9 @@ test_output "$EXAMPLES_DIR/test_hash_compound_varkey.strada" "test_hash_compound
 # Test: sort { ... } uses an O(n log n) stable merge sort (was O(n^2) bubble).
 test_output "$EXAMPLES_DIR/test_sort_mergesort.strada" "test_sort_mergesort" "all sort tests passed" "Comparator sort is O(n log n) + stable"
 
+# Test: keyword param names, %hash after }, empty statements, %{$ref} = LIST
+test_output "$EXAMPLES_DIR/test_parser_fixes_2026_11.strada" "test_parser_fixes_2026_11" "all parser fix tests passed" "Parser fixes (keyword params, % after }, ;;, deref hash assign)"
+
 # Test: Our variable declarations
 test_output_contains "$EXAMPLES_DIR/test_our.strada" "test_our" "All our variable tests passed" "Our variables"
 

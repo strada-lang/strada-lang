@@ -736,9 +736,8 @@ func parse_anon_func(scalar $parser, int $line) scalar {
             $sigil = "%";
         }
 
-        my scalar $name_tok = parser_current($parser);
-        parser_expect($parser, "IDENT");
-        $pname = $name_tok->{"value"};
+        # Same naming rules as `my` declarations ($default, $hash, ... are fine)
+        $pname = parse_var_name($parser);
 
         my scalar $param = ast_new_param($pname, $ptype, $sigil);
         ast_add_param($anon, $param);
@@ -769,9 +768,7 @@ func parse_anon_func(scalar $parser, int $line) scalar {
                 $sigil = "%";
             }
 
-            $name_tok = parser_current($parser);
-            parser_expect($parser, "IDENT");
-            $pname = $name_tok->{"value"};
+            $pname = parse_var_name($parser);
 
             $param = ast_new_param($pname, $ptype, $sigil);
             ast_add_param($anon, $param);
@@ -3372,6 +3369,21 @@ func parse_statement(scalar $parser) scalar {
     my scalar $tok = parser_current($parser);
     my str $type = $tok->{"type"};
 
+    # The lexer turns `%` into MOD after any `}` (it can't tell a block's brace
+    # from `$h{k} % 2`). A statement can never begin with modulo, so here `%`
+    # is the hash sigil: `if (...) { ... } %h = ();`
+    if ($type eq "MOD") {
+        $tok->{"type"} = "PERCENT";
+        $type = "PERCENT";
+    }
+
+    # Empty statement: a stray `;` (`;;`, or `if (...) { ... };`) is a no-op,
+    # as in Perl and C.
+    if ($type eq "SEMI") {
+        parser_advance($parser);
+        return ast_new_block();
+    }
+
     if ($type eq "MY") {
         return parse_var_decl($parser);
     }
@@ -3989,10 +4001,10 @@ func parse_function(scalar $parser) scalar {
                 parser_error($parser, "variadic parameter must use array sigil (@), e.g., int ...@nums");
             }
 
-            my scalar $pname_tok = parser_current($parser);
-            parser_expect($parser, "IDENT");
-            
-            my scalar $param = ast_new_param($pname_tok->{"value"}, $param_type, $sigil);
+            # Same naming rules as `my` declarations ($default, $hash, ... are fine)
+            my str $pname = parse_var_name($parser);
+
+            my scalar $param = ast_new_param($pname, $param_type, $sigil);
             $param->{"is_variadic"} = $is_variadic;
             
             # Check for default value
@@ -6562,6 +6574,11 @@ func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low, sca
     my int $low_path_count = size($lib_paths_low);
 
     while (!parser_check($parser, "EOF")) {
+        # Stray `;` between top-level items (e.g. `func f() { ... };`)
+        if (parser_check($parser, "SEMI")) {
+            parser_advance($parser);
+            next;
+        }
         # Check for private or async func
         my int $is_private = 0;
         my int $is_async = 0;

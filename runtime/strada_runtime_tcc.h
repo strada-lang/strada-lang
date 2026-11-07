@@ -504,6 +504,7 @@ StradaValue* strada_ref_array(StradaArray **ptr);
 StradaValue* strada_ref_hash(StradaHash **ptr);
 StradaValue* strada_deref(StradaValue *ref);
 StradaValue* strada_deref_set(StradaValue *ref, StradaValue *new_value);
+StradaValue* strada_deref_assign_container(StradaValue *ref, StradaValue *value, int sigil); /* %{$ref} = LIST, @{$ref} = LIST */
 StradaHash* strada_deref_hash(StradaValue *ref);
 StradaArray* strada_deref_array(StradaValue *ref);
 StradaValue* strada_deref_hash_value(StradaValue *ref);

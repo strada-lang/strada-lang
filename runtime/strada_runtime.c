@@ -20283,6 +20283,53 @@ StradaValue* strada_deref_set(StradaValue *ref, StradaValue *new_value) {
     return target;
 }
 
+/* %{$ref} = LIST / @{$ref} = LIST: replace the CONTENTS of the referenced
+ * container in place, like assigning to a named %h / @a. Every other
+ * reference to the container sees the new contents and a blessed target
+ * keeps its package. (This used to go through strada_deref_set, which blitted
+ * the RHS's type/payload into the target: a list RHS turned a hash into an
+ * array, and a hash RHS shared the StradaHash without a refcount, so it was
+ * freed twice.) Returns the target, borrowed. */
+StradaValue* strada_deref_assign_container(StradaValue *ref, StradaValue *value, int sigil) {
+    if (!ref || STRADA_IS_TAGGED_INT(ref) || ref->type != STRADA_REF) return strada_deref_set(ref, value);
+    StradaValue *target = strada_is_slot_ref(ref) ? *(StradaValue**)ref->value.ptr : ref->value.rv;
+    if (!target || STRADA_IS_TAGGED_INT(target)) return strada_deref_set(ref, value);
+
+    /* What the RHS really is, looking through one reference. */
+    StradaValue *rv = value;
+    if (rv && !STRADA_IS_TAGGED_INT(rv) && rv->type == STRADA_REF && rv->value.rv && !STRADA_IS_TAGGED_INT(rv->value.rv)) {
+        rv = rv->value.rv;
+    }
+    int rhs_type = (rv && !STRADA_IS_TAGGED_INT(rv)) ? (int)rv->type : -1;
+
+    if (sigil == '%' && target->type == STRADA_HASH) {
+        StradaValue *fresh = (rhs_type == STRADA_HASH) ? strada_hash_from_ref(value)
+                                                       : strada_hash_from_flat_array(value);
+        StradaHash *old = target->value.hv;
+        target->value.hv = fresh->value.hv;
+        fresh->value.hv = old;
+        strada_decref(fresh);          /* frees the old contents */
+        return target;
+    }
+    if (sigil == '@' && target->type == STRADA_ARRAY) {
+        StradaValue *fresh;
+        if (rhs_type == STRADA_ARRAY) {
+            fresh = strada_array_copy(value);
+        } else {
+            fresh = strada_new_array();
+            if (value && (STRADA_IS_TAGGED_INT(value) || value->type != STRADA_UNDEF)) {
+                strada_array_push(fresh->value.av, value);   /* @{$r} = $x -> ($x) */
+            }
+        }
+        StradaArray *old = target->value.av;
+        target->value.av = fresh->value.av;
+        fresh->value.av = old;
+        strada_decref(fresh);
+        return target;
+    }
+    return strada_deref_set(ref, value);
+}
+
 StradaHash* strada_deref_hash(StradaValue *ref) {
     /* Get hash from hash reference for $ref->{key} */
     if (!ref || STRADA_IS_TAGGED_INT(ref)) return NULL;
