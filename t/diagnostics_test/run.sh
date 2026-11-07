@@ -234,6 +234,21 @@ else
         "multi_sem.strada:2: error:" "$out"
 fi
 
+# --- Missing module: `use` of a module that does not exist is an error --
+# (it used to be silently ignored and fail later at link time, or not at all)
+cat > "$WORK/use_missing.strada" <<'EOF'
+use No::Such::ModuleXyz;
+func main() int { return 0; }
+EOF
+out="$("$STRADA" "$WORK/use_missing.strada" -o "$WORK/use_missing" 2>&1)"
+rc=$?
+check "use of a missing module is reported" \
+    "cannot find module No::Such::ModuleXyz (looked for No/Such/ModuleXyz.strada" "$out"
+if [ "$rc" -eq 0 ]; then
+    echo "FAIL: use of a missing module must fail the build (exit 0)"
+    FAILURES=$((FAILURES + 1))
+fi
+
 echo ""
 if [ $FAILURES -gt 0 ]; then
     echo "diagnostics: $FAILURES case(s) FAILED"

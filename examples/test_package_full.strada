@@ -18,13 +18,12 @@
 # test_package_full.strada - Full package/module test
 
 # Add custom library paths
+use lib "lib";
 use lib "/var/strada/lib";
 use lib "mylib";
 
 # Import modules (paths resolved at compile time)
 use Math::Utils;
-use File::IO;
-use Data::Structures;
 
 # This file is in the 'main' package (no package declaration)
 
@@ -54,8 +53,6 @@ func main() int {
     say("");
     say("Imported modules:");
     say("  - Math::Utils");
-    say("  - File::IO");
-    say("  - Data::Structures");
     
     say("");
     say("╔══════════════════════════════════════╗");

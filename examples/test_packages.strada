@@ -19,7 +19,6 @@
 
 use lib "lib";
 use Math::Utils;
-use File::IO;
 
 func main() int {
     say("╔══════════════════════════════════════╗");

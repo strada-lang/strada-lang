@@ -5017,6 +5017,12 @@ func resolve_use_module(scalar $parser, scalar $program, str $mod_name) void {
 
         ast_mark_module_loaded($program, $mod_name);
         load_module($program, $mod_name, $file_path);
+    } else {
+        # A `use` that resolves to nothing used to be silently ignored; the
+        # program then failed at link time with undefined references (or,
+        # worse, compiled if nothing from the module was called).
+        my str $rel = module_to_path($mod_name);
+        parser_error($parser, "cannot find module " . $mod_name . " (looked for " . $rel . " in the `use lib` paths and the Strada library)");
     }
 }
 
