@@ -62,6 +62,8 @@ TESTS=(
     "test_method_throw_temp_args"
     "test_throw_after_reassign"
     "test_main_params"
+    "test_foreach_var_write"
+    "test_socket_owned_args"
     "test_slices"
     "test_operators"
     "test_error_handling"

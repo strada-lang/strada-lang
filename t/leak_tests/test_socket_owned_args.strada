@@ -1,0 +1,23 @@
+# socket_recv / socket_accept with an owned argument (a hash element)
+# leaked a reference to the socket, so it (and its buffer) was never freed.
+func main() int {
+    my int $port = 23000 + core::getpid() % 9000;
+    my hash %s = ();
+    $s{"srv"} = core::socket_server_host("127.0.0.1", $port, 8);
+    my int $i = 0;
+    my int $got = 0;
+    while ($i < 20) {
+        my hash %c = ();
+        $c{"sock"} = core::socket_client("127.0.0.1", $port);
+        $c{"peer"} = core::socket_accept($s{"srv"});
+        core::socket_send($c{"peer"}, "ping");
+        my str $r = core::socket_recv($c{"sock"}, 16);
+        if ($r eq "ping") { $got = $got + 1; }
+        core::socket_close($c{"sock"});
+        core::socket_close($c{"peer"});
+        $i = $i + 1;
+    }
+    core::socket_close($s{"srv"});
+    if ($got == 20) { say("ok socket owned args"); } else { say("FAIL " . $got); }
+    return 0;
+}

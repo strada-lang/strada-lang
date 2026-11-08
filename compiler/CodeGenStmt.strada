@@ -1342,6 +1342,20 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         if ($var_decl) {
             # New variable declaration
             emit($cg, "StradaValue *" . $var_name . " = strada_array_get(__foreach_av_" . $foreach_id . ", __foreach_i_" . $foreach_id . ");\n");
+            # The variable borrows the element. A body that writes to it
+            # would release the array's element and leak the new value: own
+            # it instead (an iteration-scope local, released like any other).
+            if ($cg->{"cleanup_enabled"} == 1 && node_writes_var($body, $stmt->{"var_name"}) == 1) {
+                emit_indent($cg);
+                emit($cg, "strada_incref(" . $var_name . ");\n");
+                scope_track_var($cg, $var_name);
+                if (cleanup_push_useful($cg) == 1) {
+                    emit_indent($cg);
+                    emit($cg, "strada_cleanup_push_slot((StradaValue **)&" . $var_name . ");\n");
+                } else {
+                    scope_mark_no_push($cg, $var_name);
+                }
+            }
             # Anon-fn local registration (see range path above).
             if ($cg->{"in_anon_func"}) {
                 my str $fe_locals = $cg->{"anon_local_str"};

@@ -5695,18 +5695,37 @@ func gen_builtin_g6(scalar $cg, scalar $expr, str $name) int {
 
         # socket_accept
         if ($name eq "sys::socket_accept") {
-            emit($cg, "strada_socket_accept(");
             my scalar $args = $expr->{"args"};
-            gen_expression($cg, $args->[0]);
+            my scalar $sa0 = $args->[0];
+            # an owned argument ($h->{"srv"}, a call) must be released
+            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $sa0) == 1) {
+                emit($cg, "({ StradaValue *__sa_s = ");
+                gen_expression($cg, $sa0);
+                emit($cg, "; StradaValue *__sa_r = strada_socket_accept(__sa_s); strada_decref(__sa_s); __sa_r; })");
+                return 1;
+            }
+            emit($cg, "strada_socket_accept(");
+            gen_expression($cg, $sa0);
             emit($cg, ")");
             return 1;
         }
         
         # socket_recv
         if ($name eq "sys::socket_recv") {
-            emit($cg, "strada_socket_recv(");
             my scalar $args = $expr->{"args"};
-            gen_expression($cg, $args->[0]);
+            my scalar $sr0 = $args->[0];
+            # an owned socket argument ($self->{"socket"}) must be released:
+            # it leaked a reference, so the socket was never freed
+            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $sr0) == 1) {
+                emit($cg, "({ StradaValue *__sr_s = ");
+                gen_expression($cg, $sr0);
+                emit($cg, "; StradaValue *__sr_r = strada_socket_recv(__sr_s, ");
+                emit_int_operand($cg, $args->[1]);
+                emit($cg, "); strada_decref(__sr_s); __sr_r; })");
+                return 1;
+            }
+            emit($cg, "strada_socket_recv(");
+            gen_expression($cg, $sr0);
             emit($cg, ", ");
             emit_int_operand($cg, $args->[1]);
             emit($cg, ")");

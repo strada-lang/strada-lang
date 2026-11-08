@@ -1,0 +1,56 @@
+# A foreach loop variable borrows the array element. Writing to it (=, .=,
+# s///, chomp) used to release the array's element and leak the new value.
+func stuff(str $text) str {
+    my str $r = "";
+    foreach my str $line (split("\n", $text)) {
+        if (length($line) > 0 && substr($line, 0, 1) eq ".") { $line = "." . $line; }
+        $r = $r . $line . "|";
+    }
+    return $r;
+}
+
+func edits(scalar $list) str {
+    my str $out = "";
+    foreach my str $w (@{$list}) {
+        $w .= "!";
+        $w =~ s/a/A/g;
+        if ($w eq "skip!") { next; }
+        if ($w eq "stop!") { last; }
+        $out = $out . $w . " ";
+    }
+    return $out;
+}
+
+func chomps(scalar $lines) int {
+    my int $n = 0;
+    foreach my str $l (@{$lines}) {
+        chomp($l);
+        $n = $n + length($l);
+    }
+    return $n;
+}
+
+func thrower(scalar $list) void {
+    foreach my str $w (@{$list}) {
+        $w = $w . "x";
+        if ($w eq "bx") { throw "boom " . $w; }
+    }
+}
+
+func main() int {
+    my int $ok = 1;
+    if (stuff("a\n.b\nc") ne "a|..b|c|") { say("FAIL stuff"); $ok = 0; }
+    my array @words = ("banana", "skip", "cab", "stop", "never");
+    if (edits(\@words) ne "bAnAnA! cAb! ") { say("FAIL edits"); $ok = 0; }
+    if ($words[0] ne "banana") { say("FAIL: the array changed"); $ok = 0; }
+    my array @ls = ("ab\n", "c\n");
+    if (chomps(\@ls) != 3) { say("FAIL chomp"); $ok = 0; }
+    if ($ls[0] ne "ab\n") { say("FAIL: chomp changed the array"); $ok = 0; }
+    my int $i = 0;
+    while ($i < 50) {
+        try { thrower(["a", "b", "c"]); } catch ($e) { if ($e ne "boom bx") { say("FAIL throw " . $e); $ok = 0; } }
+        $i = $i + 1;
+    }
+    if ($ok == 1) { say("ok foreach var writes"); }
+    return 0;
+}
