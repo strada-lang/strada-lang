@@ -23271,8 +23271,11 @@ static StradaValue* method_call_impl(StradaValue *obj, const char *method,
     } else if (obj->type == STRADA_STR && obj->value.pv) {
         pkg_name = obj->value.pv;
     } else {
-        fprintf(stderr, "Error: Cannot call method '%s' on unblessed reference\n", method);
-        exit(1);
+        /* catchable, as in Perl: a server must survive a bad call */
+        char _m[512];
+        snprintf(_m, sizeof(_m), "Can't call method \"%s\" on an unblessed reference", method);
+        strada_throw(_m);
+        return strada_new_undef();
     }
 
     if (!oop_initialized) strada_oop_init();
@@ -23356,9 +23359,10 @@ static StradaValue* method_call_impl(StradaValue *obj, const char *method,
             if (args) { strada_cleanup_pop(); strada_decref(args); }
             return result;
         }
-        fprintf(stderr, "Error: Can't locate method '%s' in package '%s' or its parents\n",
-                method, pkg_name);
-        exit(1);
+        char _m[512];
+        snprintf(_m, sizeof(_m), "Can't locate method \"%s\" via package \"%s\" or its parents", method, pkg_name);
+        strada_throw(_m);
+        return strada_new_undef();
     }
 
     /* Check for method modifiers (before/after/around) — skip entirely when none registered */
@@ -23575,8 +23579,10 @@ StradaValue* strada_super_call(StradaValue *obj, const char *from_package,
     }
 
     if (!SV_BLESSED(obj)) {   /* obj guaranteed heap by the guard above */
-        fprintf(stderr, "Error: Cannot call SUPER::%s on unblessed reference\n", method);
-        exit(1);
+        char _m[512];
+        snprintf(_m, sizeof(_m), "Can't call SUPER::%s on an unblessed reference", method);
+        strada_throw(_m);
+        return strada_new_undef();
     }
 
     if (!oop_initialized) strada_oop_init();
@@ -23584,8 +23590,10 @@ StradaValue* strada_super_call(StradaValue *obj, const char *from_package,
     /* Find the package we're calling from */
     OopPackage *pkg = oop_find_package(from_package);
     if (!pkg) {
-        fprintf(stderr, "Error: Package '%s' not found for SUPER:: call\n", from_package);
-        exit(1);
+        char _m[512];
+        snprintf(_m, sizeof(_m), "Package \"%s\" not found for SUPER::%s", from_package, method);
+        strada_throw(_m);
+        return strada_new_undef();
     }
 
     /* Search for method in all parents */
@@ -23596,9 +23604,10 @@ StradaValue* strada_super_call(StradaValue *obj, const char *from_package,
     }
 
     if (!func) {
-        fprintf(stderr, "Error: Can't locate SUPER::%s via package '%s'\n",
-                method, from_package);
-        exit(1);
+        char _m[512];
+        snprintf(_m, sizeof(_m), "Can't locate SUPER::%s via package \"%s\"", method, from_package);
+        strada_throw(_m);
+        return strada_new_undef();
     }
 
     /* Save and set method package context */

@@ -2357,8 +2357,14 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
                         if (length($isa_known_pkg) > 0) {
                             my str $isa_target_pkg = $isa_target_arg->{"value"};
                             my int $isa_result = is_subclass_compile_time($cg, $isa_known_pkg, $isa_target_pkg, 0);
-                            emit($cg, "strada_new_int(" . $isa_result . ")");
-                            return;
+                            # Only a proven "yes" is folded: the hierarchy seen at
+                            # compile time can be incomplete (classes from an
+                            # import_lib library, inherit() calls at runtime), so
+                            # "not found" falls through to the runtime check.
+                            if ($isa_result == 1) {
+                                emit($cg, "strada_new_int(1)");
+                                return;
+                            }
                         }
                     }
                 }

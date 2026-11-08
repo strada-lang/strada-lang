@@ -335,6 +335,7 @@ test_output "$EXAMPLES_DIR/test_namespaced_has_extends.strada" "test_namespaced_
 test_output "$EXAMPLES_DIR/test_regex_control_chars.strada" "test_regex_control_chars" "all regex control character tests passed" "Control characters in regex literals"
 test_output "$EXAMPLES_DIR/test_builtin_temp_args.strada" "test_builtin_temp_args" "all builtin temp arg tests passed" "Builtin results passed as arguments are released"
 test_output "$EXAMPLES_DIR/test_str_builtin_temp_keys.strada" "test_str_builtin_temp_keys" "all str builtin temp key tests passed" "str:: builtin results used as keys are released"
+test_output "$EXAMPLES_DIR/test_method_errors_catchable.strada" "test_method_errors_catchable" "all method error tests passed" "Missing/unblessed/SUPER method calls throw catchable errors"
 
 # Test: Our variable declarations
 test_output_contains "$EXAMPLES_DIR/test_our.strada" "test_our" "All our variable tests passed" "Our variables"

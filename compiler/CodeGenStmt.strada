@@ -4289,8 +4289,9 @@ func gen_global_constructor(scalar $cg) void {
     my int $lib_begin_count = $cg->{"begin_block_count"};
     my int $lib_end_count = $cg->{"end_block_count"};
 
-    # Only generate constructor if there are globals, OOP methods, or BEGIN/END blocks
-    if ($global_count == 0 && $num_oop_pkgs == 0 && $lib_begin_count == 0 && $lib_end_count == 0) {
+    my int $lib_inherit_count = $cg->{"inherit_count"} + 0;
+    # Only generate constructor if there are globals, OOP methods, inheritance or BEGIN/END blocks
+    if ($global_count == 0 && $num_oop_pkgs == 0 && $lib_begin_count == 0 && $lib_end_count == 0 && $lib_inherit_count == 0) {
         return;
     }
 
@@ -4308,6 +4309,21 @@ func gen_global_constructor(scalar $cg) void {
             my str $c_oop_pkg = sanitize_name($oop_pkg);
             emit($cg, "    __" . $c_oop_pkg . "_oop_init();\n");
             $oop_i = $oop_i + 1;
+        }
+        emit($cg, "\n");
+    }
+
+    # File-level inheritance (extends / inherit / with), as main() does for
+    # executables: without it a shared library's subclasses can't find their
+    # parents' methods.
+    if ($lib_inherit_count > 0) {
+        my scalar $lib_inherits = $cg->{"inherits"};
+        emit($cg, "    /* Set up inheritance from file-level declarations */\n");
+        my int $li = 0;
+        while ($li < $lib_inherit_count) {
+            my scalar $lentry = $lib_inherits->[$li];
+            emit($cg, "    strada_inherit(\"" . $lentry->{"child"} . "\", \"" . $lentry->{"parent"} . "\");\n");
+            $li = $li + 1;
         }
         emit($cg, "\n");
     }

@@ -1,0 +1,23 @@
+# Calling a missing method, a method on an unblessed value, or a missing
+# SUPER:: method throws a catchable exception (it used to exit the process).
+package MeBase;
+func new_obj() scalar { my hash %h = (); return bless(\%h, "MeKid"); }
+func hello(scalar $self) str { return "hi"; }
+package MeKid;
+inherit MeBase;
+func broken(scalar $self) str { return SUPER::nope($self); }
+package main;
+func main() int {
+    my int $fail = 0;
+    my scalar $o = MeBase::new_obj();
+    my str $r = "";
+    try { $o->nope(); $r = "no throw"; } catch ($e) { $r = "" . $e; }
+    if (index($r, "nope") < 0) { say("FAIL missing method: " . $r); $fail = 1; }
+    try { my scalar $plain = {}; $plain->hello(); $r = "no throw"; } catch ($e) { $r = "" . $e; }
+    if (index($r, "unblessed") < 0) { say("FAIL unblessed: " . $r); $fail = 1; }
+    try { $o->broken(); $r = "no throw"; } catch ($e) { $r = "" . $e; }
+    if (index($r, "SUPER::nope") < 0) { say("FAIL super: " . $r); $fail = 1; }
+    if ($o->hello() ne "hi") { say("FAIL still works"); $fail = 1; }
+    if ($fail == 0) { say("all method error tests passed"); }
+    return $fail;
+}
