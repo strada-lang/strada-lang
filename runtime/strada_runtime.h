@@ -1153,6 +1153,7 @@ void strada_overwrite_in_place(StradaValue *dst, StradaValue *src);
 StradaValue* strada_ref_deref(StradaValue *ref);      /* Dereference */
 int strada_is_ref(StradaValue *sv);                   /* Check if reference */
 const char* strada_reftype(StradaValue *ref);         /* Get type of referent */
+const char* strada_reftype_raw(StradaValue *ref);     /* reftype(): ignoring bless */
 StradaValue* strada_ref_scalar(StradaValue **ptr);    /* Reference to scalar variable */
 StradaValue* strada_ref_array(StradaArray **ptr);     /* Reference to array */
 StradaValue* strada_ref_hash(StradaHash **ptr);       /* Reference to hash */

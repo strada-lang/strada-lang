@@ -20068,6 +20068,41 @@ const char* strada_reftype(StradaValue *ref) {
     }
 }
 
+/* reftype(): the underlying type, ignoring bless (Perl's
+ * Scalar::Util::reftype) - "HASH" for a blessed hash, where ref() gives
+ * the class name. */
+const char* strada_reftype_raw(StradaValue *ref) {
+    if (!ref || STRADA_IS_TAGGED_INT(ref)) return "";
+    if (strada_is_slot_ref(ref)) return "SCALAR";
+    if (ref->type == STRADA_REF) {
+        StradaValue *target = ref->value.rv;
+        if (!target) return "";
+        int depth = 0;
+        while (!STRADA_IS_TAGGED_INT(target) && target->type == STRADA_REF && target->value.rv && depth < 10
+               && !SV_BLESSED(target)) {
+            target = target->value.rv;
+            depth++;
+        }
+        if (STRADA_IS_TAGGED_INT(target)) return "SCALAR";
+        switch (target->type) {
+            case STRADA_ARRAY: return "ARRAY";
+            case STRADA_HASH: return "HASH";
+            case STRADA_REF: return "REF";
+            case STRADA_CLOSURE: return "CODE";
+            case STRADA_REGEX: return "Regexp";
+            case STRADA_FILEHANDLE: return "GLOB";
+            case STRADA_SOCKET: return "GLOB";
+            default: return "SCALAR";
+        }
+    }
+    switch (ref->type) {
+        case STRADA_ARRAY: return "ARRAY";
+        case STRADA_HASH: return "HASH";
+        case STRADA_CLOSURE: return "CODE";
+        default: return "";
+    }
+}
+
 StradaValue* strada_ref_scalar(StradaValue **ptr) {
     /* Create reference to a scalar variable */
     if (!ptr || !*ptr) return strada_new_undef();

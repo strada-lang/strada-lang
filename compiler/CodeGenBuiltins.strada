@@ -4305,7 +4305,7 @@ func gen_builtin_g5(scalar $cg, scalar $expr, str $name) int {
         
         # reftype - get reference type string
         if ($name eq "reftype") {
-            emit($cg, "strada_new_str(strada_reftype(");
+            emit($cg, "strada_new_str(strada_reftype_raw(");
             my scalar $args = $expr->{"args"};
             gen_expression($cg, $args->[0]);
             emit($cg, "))");

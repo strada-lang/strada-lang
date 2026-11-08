@@ -1,0 +1,15 @@
+# reftype() ignores bless (like Perl's Scalar::Util::reftype); ref() gives the class.
+package RtThing;
+func main() int {
+    my int $fail = 0;
+    my hash %h = ();
+    my scalar $o = bless(\%h, "RtThing");
+    my scalar $a = bless([], "RtList");
+    if (reftype($o) ne "HASH") { say("FAIL blessed hash " . reftype($o)); $fail = 1; }
+    if (reftype($a) ne "ARRAY") { say("FAIL blessed array " . reftype($a)); $fail = 1; }
+    if (ref($o) ne "RtThing") { say("FAIL ref keeps class " . ref($o)); $fail = 1; }
+    if (reftype({}) ne "HASH" || reftype([]) ne "ARRAY") { say("FAIL plain refs"); $fail = 1; }
+    if (reftype("x") ne "") { say("FAIL non-ref"); $fail = 1; }
+    if ($fail == 0) { say("all reftype tests passed"); }
+    return $fail;
+}
