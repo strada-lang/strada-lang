@@ -1,0 +1,19 @@
+# Word-like keywords (has, extends, with) can name functions, as in Perl.
+package KwNames;
+func has(scalar $h, str $k) int { return exists(%{$h}, $k); }
+func extends(int $a) int { return $a + 1; }
+func with(str $s) str { return "with " . $s; }
+func check(scalar $h) int { return ::has($h, "x"); }
+
+package main;
+func main() int {
+    my int $fail = 0;
+    my scalar $h = {"x" => 1};
+    if (KwNames::has($h, "x") != 1) { say("FAIL qualified has true"); $fail = 1; }
+    if (KwNames::has($h, "y") != 0) { say("FAIL qualified has false"); $fail = 1; }
+    if (KwNames::check($h) != 1) { say("FAIL ::has from own package"); $fail = 1; }
+    if (KwNames::extends(41) != 42) { say("FAIL extends"); $fail = 1; }
+    if (KwNames::with("cheese") ne "with cheese") { say("FAIL with"); $fail = 1; }
+    if ($fail == 0) { say("all keyword function name tests passed"); }
+    return $fail;
+}

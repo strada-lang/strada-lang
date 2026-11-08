@@ -1,0 +1,68 @@
+# Leaving a foreach early (return, labeled last/next, return from a catch)
+# must release the loop's list and keep the try/catch cleanup stack in step;
+# a stale entry used to be freed again by the next caught throw, freeing the
+# caller's live variables.
+func subset(scalar $a, scalar $b) int {
+    foreach my str $k (keys(%{$a})) {
+        if (!exists(%{$b}, $k)) { return 0; }
+    }
+    return 1;
+}
+
+func find_pair(scalar $h, scalar $want) str {
+    my str $found = "";
+    OUTER: foreach my str $x (sort keys(%{$h})) {
+        foreach my str $y (sort keys(%{$want})) {
+            if ($x eq $y) { $found = $x; last OUTER; }
+            if ($y eq "skip") { next OUTER; }
+        }
+    }
+    return $found;
+}
+
+func from_catch(scalar $h) int {
+    foreach my str $k (keys(%{$h})) {
+        try { throw "x"; } catch ($e) { return 7; }
+    }
+    return 0;
+}
+
+func via_closure(scalar $h) int {
+    my scalar $f = func (scalar $m) {
+        foreach my str $k (keys(%{$m})) { return 1; }
+        return 0;
+    };
+    my int $total = 0;
+    foreach my str $k (keys(%{$h})) { $total = $total + $f->($h); }
+    return $total;
+}
+
+func churn() void {
+    my array @junk = ();
+    my int $i = 0;
+    while ($i < 300) { push(@junk, {"junk" => "j" . $i}); $i = $i + 1; }
+}
+
+func main() int {
+    my int $fail = 0;
+    my scalar $keep = {"x" => 1, "y" => 2};
+    my scalar $other = {"b" => 1, "y" => 1};
+    my int $round = 0;
+    while ($round < 20) {
+        try {
+            if (subset($keep, {}) == 0) { throw "not allowed"; }
+        } catch ($e) { }
+        try {
+            if (find_pair($keep, $other) ne "y") { say("FAIL labeled last"); $fail = 1; }
+            if (from_catch($keep) != 7) { say("FAIL return from catch"); $fail = 1; }
+            if (via_closure($keep) != 2) { say("FAIL closure"); $fail = 1; }
+            throw "again";
+        } catch ($e) { }
+        churn();
+        if ($keep->{"x"} != 1 || scalar(keys(%{$keep})) != 2) { say("FAIL caller variable freed in round " . $round); $fail = 1; last; }
+        if ($other->{"b"} != 1) { say("FAIL second variable freed"); $fail = 1; last; }
+        $round = $round + 1;
+    }
+    if ($fail == 0) { say("all foreach early exit cleanup tests passed"); }
+    return $fail;
+}

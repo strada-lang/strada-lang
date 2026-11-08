@@ -5468,6 +5468,10 @@ func gen_expression(scalar $cg, scalar $expr) void {
         my scalar $saved_func_params = $cg->{"func_params"};
         my scalar $saved_func_param_names = $cg->{"func_param_names"};
         my int $saved_func_param_count = $cg->{"func_param_count"};
+        my scalar $saved_fe_cl_names = $cg->{"fe_cl_names"};
+        my scalar $saved_fe_cl_depths = $cg->{"fe_cl_depths"};
+        my int $saved_fe_cl_count = $cg->{"fe_cl_count"} + 0;
+        foreach_cleanup_reset($cg);
 
         # Start fresh for function body (closures are NOT main)
         sb_clear($cg->{"output_sb"});
@@ -5548,6 +5552,9 @@ func gen_expression(scalar $cg, scalar $expr) void {
         $cg->{"func_params"} = $saved_func_params;
         $cg->{"func_param_names"} = $saved_func_param_names;
         $cg->{"func_param_count"} = $saved_func_param_count;
+        $cg->{"fe_cl_names"} = $saved_fe_cl_names;
+        $cg->{"fe_cl_depths"} = $saved_fe_cl_depths;
+        $cg->{"fe_cl_count"} = $saved_fe_cl_count;
 
         # Restore capture state
         $cg->{"in_anon_func"} = $saved_in_anon;

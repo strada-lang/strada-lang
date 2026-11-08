@@ -3930,6 +3930,11 @@ func parse_function(scalar $parser) scalar {
     } elsif (parser_check($parser, "VERSION")) {
         $func_name = "version";
         parser_advance($parser);
+    } elsif ($name_tok->{"type"} ne "IDENT" && $name_tok->{"is_word"} != 0 && index($name_tok->{"type"}, "TYPE_") != 0) {
+        # any other word-like keyword (has, extends, with, ...) can name a
+        # function too, as in Perl; callers use a qualified name or ::name
+        $func_name = $name_tok->{"value"};
+        parser_advance($parser);
     } else {
         parser_expect($parser, "IDENT");
         $func_name = $name_tok->{"value"};

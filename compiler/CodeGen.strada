@@ -278,6 +278,14 @@ func codegen_new(str $filename, int $debug_info, int $enable_profiling, int $ena
     $cg{"cleanup_enabled"} = 1;  # Enable scope-based memory cleanup
     $cg{"try_depth"} = 0;        # Track nesting depth in try blocks (for proper cleanup on return)
     $cg{"catch_cleanup_count"} = 0;  # Track catch vars on cleanup stack (for proper cleanup on throw)
+    # foreach lists currently on the cleanup stack (innermost last), with the
+    # scope depth each loop started at, so an early exit (return, labeled
+    # last/next, goto) pops and releases them; the loop's own pop is skipped then
+    my array @fe_cl_names = ();
+    my array @fe_cl_depths = ();
+    $cg{"fe_cl_names"} = \@fe_cl_names;
+    $cg{"fe_cl_depths"} = \@fe_cl_depths;
+    $cg{"fe_cl_count"} = 0;
     $cg{"func_has_try"} = 0;     # Track if current function contains any try blocks (for volatile vars)
     # Track label-to-scope-depth for proper cleanup on labeled break/continue
     my hash %label_depths = ();
@@ -670,6 +678,9 @@ func scope_emit_all_cleanup(scalar $cg) void {
         $ccc = $ccc - 1;
     }
 
+    # foreach lists of the loops we are leaving
+    emit_foreach_cleanup_from($cg, 0);
+
     # Also pop and decref function parameters (we incref'd and pushed them at function entry)
     # Skip for int-typed params (tagged ints are immortal) and leaf-safe bodies
     # (the wrap was elided at entry).
@@ -689,6 +700,50 @@ func scope_emit_all_cleanup(scalar $cg) void {
             $pn_i = $pn_i + 1;
         }
     }
+}
+
+# Pop and release foreach lists of loops that started at depth >= min_depth
+# (pass 0 for all of them). Used on paths that leave loops without reaching
+# the loop's own cleanup_pop: return, throw outside any try, labeled
+# last/next and goto.
+func emit_foreach_cleanup_from(scalar $cg, int $min_depth) void {
+    if ($cg->{"cleanup_enabled"} == 0) { return; }
+    my int $n = $cg->{"fe_cl_count"} + 0;
+    my scalar $names = $cg->{"fe_cl_names"};
+    my scalar $depths = $cg->{"fe_cl_depths"};
+    my int $i = $n - 1;
+    while ($i >= 0) {
+        my int $d = $depths->[$i] + 0;
+        if ($d >= $min_depth) {
+            emit_indent($cg);
+            emit($cg, "strada_cleanup_pop();\n");
+            emit_indent($cg);
+            emit($cg, "strada_decref(" . $names->[$i] . ");\n");
+        }
+        $i = $i - 1;
+    }
+}
+
+func foreach_cleanup_enter(scalar $cg, int $depth, str $name) void {
+    my int $n = $cg->{"fe_cl_count"} + 0;
+    my scalar $names = $cg->{"fe_cl_names"};
+    my scalar $depths = $cg->{"fe_cl_depths"};
+    $names->[$n] = $name;
+    $depths->[$n] = $depth;
+    $cg->{"fe_cl_count"} = $n + 1;
+}
+
+func foreach_cleanup_leave(scalar $cg) void {
+    my int $n = $cg->{"fe_cl_count"} + 0;
+    if ($n > 0) { $cg->{"fe_cl_count"} = $n - 1; }
+}
+
+func foreach_cleanup_reset(scalar $cg) void {
+    my array @fe_cl_names = ();
+    my array @fe_cl_depths = ();
+    $cg->{"fe_cl_names"} = \@fe_cl_names;
+    $cg->{"fe_cl_depths"} = \@fe_cl_depths;
+    $cg->{"fe_cl_count"} = 0;
 }
 
 # Emit cleanup for scopes from current depth down to (but not including) target_depth

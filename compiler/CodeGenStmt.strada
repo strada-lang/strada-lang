@@ -1263,6 +1263,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         }
 
         # Open a block scope
+        my int $saved_fe_depth = $cg->{"scope_depth"};
         emit_indent($cg);
         emit($cg, "{\n");
         indent($cg);
@@ -1290,6 +1291,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         if ($foreach_arr_cleanup) {
             emit_indent($cg);
             emit($cg, "strada_cleanup_push(__foreach_arr_" . $foreach_id . ");\n");
+            foreach_cleanup_enter($cg, $saved_fe_depth, "__foreach_arr_" . $foreach_id);
         }
 
         emit_indent($cg);
@@ -1365,6 +1367,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
 
         # Clean up the foreach array if it was an owned value (function call result, etc.)
         if ($foreach_arr_cleanup) {
+            foreach_cleanup_leave($cg);
             emit_indent($cg);
             emit($cg, "strada_cleanup_pop();\n");
             emit_indent($cg);
@@ -1620,6 +1623,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             my scalar $label_depths = $cg->{"label_depths"};
             my int $target_depth = $label_depths->{$label} + 0;
             scope_emit_cleanup_to_depth($cg, $target_depth);
+            emit_foreach_cleanup_from($cg, $target_depth);
             emit_indent($cg);
             emit($cg, "goto ");
             emit($cg, $label);
@@ -1659,6 +1663,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             my scalar $label_depths = $cg->{"label_depths"};
             my int $target_depth = $label_depths->{$label} + 1;
             scope_emit_cleanup_to_depth($cg, $target_depth);
+            emit_foreach_cleanup_from($cg, $target_depth);
             emit_indent($cg);
             emit($cg, "goto ");
             emit($cg, $label);
@@ -2078,6 +2083,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         if ($has_target == 1) {
             my int $target_depth = $label_depths->{$target} + 0;
             scope_emit_cleanup_to_depth($cg, $target_depth);
+            emit_foreach_cleanup_from($cg, $target_depth);
         }
         emit_indent($cg);
         emit($cg, "goto " . $target . ";\n");
@@ -2209,6 +2215,7 @@ func gen_function(scalar $cg, scalar $fn) void {
     my str $name = sanitize_name($fn->{"name"});
     my int $ret_type_id = $fn->{"return_type"};
 
+    foreach_cleanup_reset($cg);
     # Reset function parameter tracking for each new function
     $cg->{"func_params"} = {};
     $cg->{"func_param_names"} = [];
@@ -2594,6 +2601,7 @@ func gen_function(scalar $cg, scalar $fn) void {
         # they are called during object destruction when refcount is already 0
         # We also push parameters to the cleanup stack for exception safety:
         # if a called function throws, cleanup_drain in the catch will decref our params
+        foreach_cleanup_reset($cg);
         $cg->{"func_params"} = {};
         $cg->{"func_param_names"} = [];
         $cg->{"func_param_count"} = 0;
@@ -2772,6 +2780,10 @@ func gen_async_function(scalar $cg, scalar $fn) void {
     my int $saved_scope_depth = $cg->{"scope_depth"};
     my scalar $saved_func_param_names = $cg->{"func_param_names"};
     my int $saved_func_param_count = $cg->{"func_param_count"};
+    my scalar $saved_fe_cl_names = $cg->{"fe_cl_names"};
+    my scalar $saved_fe_cl_depths = $cg->{"fe_cl_depths"};
+    my int $saved_fe_cl_count = $cg->{"fe_cl_count"} + 0;
+    foreach_cleanup_reset($cg);
 
     # Reset scope for async inner function (it's a new function)
     my array @new_scope_vars = ();
@@ -2808,6 +2820,9 @@ func gen_async_function(scalar $cg, scalar $fn) void {
     $cg->{"scope_depth"} = $saved_scope_depth;
     $cg->{"func_param_names"} = $saved_func_param_names;
     $cg->{"func_param_count"} = $saved_func_param_count;
+    $cg->{"fe_cl_names"} = $saved_fe_cl_names;
+    $cg->{"fe_cl_depths"} = $saved_fe_cl_depths;
+    $cg->{"fe_cl_count"} = $saved_fe_cl_count;
 
     # Restore func_has_try
     $cg->{"func_has_try"} = $saved_func_has_try;
