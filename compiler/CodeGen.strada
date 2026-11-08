@@ -3887,6 +3887,14 @@ func needs_temp_cleanup(scalar $cg, scalar $expr) int {
             $name = "sys::" . substr($name, 6, length($name) - 6);
         }
         # Built-in functions that return owned StradaValue*: single hash
+        # str::replace / str_replace are listed under their bare names
+        if (length($name) > 5 && substr($name, 0, 5) eq "str::") {
+            $name = substr($name, 5, length($name) - 5);
+        } elsif (length($name) > 4 && substr($name, 0, 4) eq "str_") {
+            my str $bare = substr($name, 4, length($name) - 4);
+            my scalar $os = $cg->{"owned_call_builtins"};
+            if (defined($os) && defined($os->{$bare})) { $name = $bare; }
+        }
         # probe against the set built by build_owned_call_builtins().
         my scalar $owned_set = $cg->{"owned_call_builtins"};
         if ($owned_set != 0) {

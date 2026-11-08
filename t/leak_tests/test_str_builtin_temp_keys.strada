@@ -1,0 +1,19 @@
+# str::replace(...) results used as a hash key, an exists() probe or a call
+# argument must be released (the owned-result lookup missed str:: names).
+func takes(str $s) int { return length($s); }
+func main() int {
+    my scalar $src = {"accounts.view" => 1, "servers.view" => 1, "team.manage" => 1};
+    my int $i = 0;
+    my int $n = 0;
+    while ($i < 100) {
+        my scalar $flags = {};
+        foreach my str $k (keys(%{$src})) {
+            $flags->{str::replace($k, ".", "_")} = 1;
+            if (exists(%{$flags}, str::replace($k, ".", "_"))) { $n = $n + 1; }
+            $n = $n + takes(str::replace($k, ".", "-"));
+        }
+        $i = $i + 1;
+    }
+    if ($n > 0) { say("all str builtin temp key tests passed"); }
+    return 0;
+}
