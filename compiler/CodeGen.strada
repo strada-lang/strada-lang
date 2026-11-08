@@ -669,14 +669,9 @@ func scope_emit_all_cleanup(scalar $cg) void {
     }
     $cg->{"current_no_push_str"} = $saved_no_push;
 
-    # Pop catch variables from cleanup stack (already decref'd by scope cleanup above)
-    # This is needed for proper cleanup order when throwing from inside a catch block
-    my int $ccc = $cg->{"catch_cleanup_count"} + 0;
-    while ($ccc > 0) {
-        emit_indent($cg);
-        emit($cg, "strada_cleanup_pop();\n");
-        $ccc = $ccc - 1;
-    }
+    # (catch variables are scope locals: the scope cleanup above already
+    # popped and released them - popping them again here took an entry that
+    # belongs to a caller)
 
     # foreach lists of the loops we are leaving
     emit_foreach_cleanup_from($cg, 0);

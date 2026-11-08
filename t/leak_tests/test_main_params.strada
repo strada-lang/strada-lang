@@ -1,0 +1,15 @@
+# main(argc, argv) gets its own argument array; it must be released when
+# main returns (it leaked 32 bytes plus one string per argument).
+func count_args(array @a) int {
+    return scalar(@a);
+}
+
+func main(int $argc, array @argv) int {
+    my int $n = count_args(@argv);
+    if ($n != $argc) {
+        say("FAIL: " . $n . " != " . $argc);
+        return 1;
+    }
+    say("ok main params " . $argc);
+    return 0;
+}

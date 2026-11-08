@@ -409,7 +409,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         # mismatched cleanup_pop.
         if (cleanup_push_useful($cg) == 1) {
             emit_indent($cg);
-            emit($cg, "strada_cleanup_push(" . $c_name . ");\n");
+            emit($cg, "strada_cleanup_push_slot((StradaValue **)&" . $c_name . ");\n");
         } else {
             scope_mark_no_push($cg, $c_name);
         }
@@ -434,7 +434,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         # criterion (main()-with-no-try has nothing to drain).
         if (cleanup_push_useful($cg) == 1) {
             emit_indent($cg);
-            emit($cg, "strada_cleanup_push(" . $c_name . ");\n");
+            emit($cg, "strada_cleanup_push_slot((StradaValue **)&" . $c_name . ");\n");
         } else {
             scope_mark_no_push($cg, $c_name);
         }
@@ -1895,7 +1895,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             }
             # Push to cleanup stack in case we throw from inside this catch block
             emit_indent($cg);
-            emit($cg, "strada_cleanup_push(" . $catch_var . ");\n");
+            emit($cg, "strada_cleanup_push_slot((StradaValue **)&" . $catch_var . ");\n");
             # Track that we have a catch var on the cleanup stack (for throw handling)
             my int $ccc = $cg->{"catch_cleanup_count"} + 0;
             $cg->{"catch_cleanup_count"} = $ccc + 1;
@@ -2017,15 +2017,10 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 # Not inside any outer try - clean up everything
                 scope_emit_all_cleanup($cg);
             } else {
-                # Inside an outer try - only clean up catch scope and catch vars
+                # Inside an outer try - clean up this scope; anything else
+                # still registered (outer catch variables, enclosing locals)
+                # is released by the throw's drain to the try's mark
                 scope_emit_cleanup($cg);
-                # Pop catch vars from cleanup stack
-                my int $cv = $ccc;
-                while ($cv > 0) {
-                    emit_indent($cg);
-                    emit($cg, "strada_cleanup_pop();\n");
-                    $cv = $cv - 1;
-                }
             }
             # Only decref if throw expression was NOT a variable (variables get decrefd by cleanup)
             if ($throw_is_var == 0) {
@@ -2314,7 +2309,7 @@ func gen_function(scalar $cg, scalar $fn) void {
         emit($cg, "    /* Populate global ARGV array */\n");
         emit($cg, "    ARGV = strada_new_array();\n");
         emit($cg, "    for (int i = 1; i < _argc; i++) {\n");
-        emit($cg, "        strada_array_push(ARGV->value.av, strada_new_str(_argv[i]));\n");
+        emit($cg, "        strada_array_push_take(ARGV->value.av, strada_new_str(_argv[i]));\n");
         emit($cg, "    }\n");
         emit($cg, "    ARGC = strada_new_int(_argc - 1);\n");
         emit($cg, "    /* Initialize special variables */\n");
@@ -2395,7 +2390,7 @@ func gen_function(scalar $cg, scalar $fn) void {
             my scalar $p2 = $params->[1];
             emit($cg, "    StradaValue* " . $p2->{"name"} . " = strada_new_array();\n");
             emit($cg, "    for (int __mi = 0; __mi < _argc; __mi++) {\n");
-            emit($cg, "        strada_array_push(" . $p2->{"name"} . "->value.av, strada_new_str(_argv[__mi]));\n");
+            emit($cg, "        strada_array_push_take(" . $p2->{"name"} . "->value.av, strada_new_str(_argv[__mi]));\n");
             emit($cg, "    }\n");
         }
         if ($param_count > 0) {
@@ -2528,6 +2523,16 @@ func gen_function(scalar $cg, scalar $fn) void {
         # Generate the body statements directly (without the outer braces)
         # Push scope for main's local variables
         scope_push($cg);
+        # main's argc/argv were created above and are owned by main: release
+        # them on every return like any other local (nothing is pushed for
+        # them, as main has no caller that could catch)
+        my int $mp_i = 0;
+        while ($mp_i < $param_count && $mp_i < 2) {
+            my scalar $mp = $params->[$mp_i];
+            scope_track_var($cg, $mp->{"name"});
+            scope_mark_no_push($cg, $mp->{"name"});
+            $mp_i = $mp_i + 1;
+        }
         my scalar $body = $fn->{"body"};
         # Lift __local_saved_depth to main's outermost scope when a
         # `local` is used anywhere in main. See gen_function for the
@@ -2679,7 +2684,8 @@ func gen_function(scalar $cg, scalar $fn) void {
                 if ($skip_wrap == 0) {
                     emit($cg, "strada_incref(" . $c_param_name . ");\n");
                     # Push to cleanup stack for exception unwinding
-                    emit($cg, "strada_cleanup_push(" . $c_param_name . ");\n");
+                    # by address: it may be reassigned before a callee throws
+                    emit($cg, "strada_cleanup_push_slot((StradaValue **)&" . $c_param_name . ");\n");
                 }
                 $param_i = $param_i + 1;
             }

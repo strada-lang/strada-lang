@@ -8855,7 +8855,9 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
             # Generate block with temp variables for cleanup
             emit($cg, "({ ");
             # Declare temps for args that need cleanup
-            my int $in_try = $cg->{"try_depth"} + 0;
+            # register owned temps whenever a try could catch the callee's
+            # throw - in this function or in any caller (not just a lexical try)
+            my int $in_try = cleanup_push_useful($cg);
             my int $t = 0;
             while ($t < $arg_count) {
                 if (needs_temp_cleanup($cg, $args->[$t]) == 1) {

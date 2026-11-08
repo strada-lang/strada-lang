@@ -60,6 +60,8 @@ TESTS=(
     "test_builtin_temp_args"
     "test_str_builtin_temp_keys"
     "test_method_throw_temp_args"
+    "test_throw_after_reassign"
+    "test_main_params"
     "test_slices"
     "test_operators"
     "test_error_handling"

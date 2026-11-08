@@ -938,6 +938,7 @@ const char* strada_caller(int level);
 typedef struct {
     jmp_buf buf;
     int active;
+    int cleanup_mark;   /* cleanup-stack depth when the try began (drained by the throw) */
 } StradaTryContext;
 
 /* THREAD-LOCAL (see runtime): per-thread try frames + exception slots. */
@@ -1004,6 +1005,7 @@ int strada_in_try_block(void);
  * touching the __thread variable, which tcc cannot express). */
 #define STRADA_MAX_PENDING_CLEANUP 4096
 void strada_cleanup_push(StradaValue *sv);
+void strada_cleanup_push_slot(StradaValue **slot);  /* a variable: its CURRENT value is released on unwind */
 void strada_cleanup_pop(void);
 void strada_cleanup_drain(void);
 int strada_cleanup_mark(void);         /* Get current depth */
@@ -1012,7 +1014,8 @@ void strada_cleanup_drain_to(int mark); /* Drain to depth (with decref) */
 
 /* Macros for try/catch - used by generated code */
 #define STRADA_TRY_PUSH() (strada_try_depth < STRADA_MAX_TRY_DEPTH ? \
-    (strada_try_stack[strada_try_depth].active = 1, &strada_try_stack[strada_try_depth++].buf) : NULL)
+    (strada_try_stack[strada_try_depth].active = 1, strada_try_stack[strada_try_depth].cleanup_mark = strada_cleanup_mark(), \
+     &strada_try_stack[strada_try_depth++].buf) : NULL)
 #define STRADA_TRY_POP() (strada_try_depth > 0 ? (strada_try_stack[--strada_try_depth].active = 0, 1) : 0)
 
 /* Call stack for stack traces */

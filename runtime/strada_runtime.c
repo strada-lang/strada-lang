@@ -9335,6 +9335,7 @@ StradaValue* strada_exception_trace_get(void) {
 jmp_buf *strada_try_push_slot(void) {
     if (strada_try_depth >= STRADA_MAX_TRY_DEPTH) return NULL;
     strada_try_stack[strada_try_depth].active = 1;
+    strada_try_stack[strada_try_depth].cleanup_mark = strada_cleanup_mark();
     return &strada_try_stack[strada_try_depth++].buf;
 }
 int strada_try_pop_slot(void) {
@@ -9513,10 +9514,38 @@ static void strada_snapshot_exception_trace(void) {
 #endif
 static STRADA_CLEANUP_TLS StradaValue *strada_pending_cleanup[STRADA_MAX_PENDING_CLEANUP];
 static STRADA_CLEANUP_TLS int strada_pending_cleanup_count = 0;
+/* The value a pushed variable held when pushed. Never released from here:
+ * it only keeps that value visibly referenced, so a leak checker run when
+ * the program exits from deep inside (exit() in a callee) doesn't report
+ * values that are still owned by live frames. */
+static STRADA_CLEANUP_TLS StradaValue *strada_pending_cleanup_seen[STRADA_MAX_PENDING_CLEANUP];
 
 void strada_cleanup_push(StradaValue *sv) {
     if (strada_pending_cleanup_count < STRADA_MAX_PENDING_CLEANUP)
         strada_pending_cleanup[strada_pending_cleanup_count++] = sv;
+}
+/* A local variable or parameter is pushed by ADDRESS (tagged with bit 1
+ * bit): it may be reassigned after the push, and unwinding must release the
+ * value it holds then, not the one it was declared with (that one may
+ * already be freed). The throw drains the stack before longjmp'ing, while
+ * the frames holding these variables still exist. */
+void strada_cleanup_push_slot(StradaValue **slot) {
+    if (strada_pending_cleanup_count < STRADA_MAX_PENDING_CLEANUP) {
+        strada_pending_cleanup_seen[strada_pending_cleanup_count] = *slot;
+        strada_pending_cleanup[strada_pending_cleanup_count++] = (StradaValue *)((uintptr_t)slot | 2);
+    }
+}
+/* Entries: a value (pointer, or a tagged int: bit 0 set), or a variable's
+ * address tagged with bit 1 (addresses are 8-aligned, so bits 0-2 are free). */
+static inline void strada_cleanup_release(StradaValue *e) {
+    if (((uintptr_t)e & 3) == 2) {
+        StradaValue **slot = (StradaValue **)((uintptr_t)e & ~(uintptr_t)3);
+        StradaValue *sv = *slot;
+        *slot = NULL;
+        if (sv) strada_decref(sv);
+    } else if (e) {
+        strada_decref(e);
+    }
 }
 void strada_cleanup_pop(void) {
     if (strada_pending_cleanup_count > 0)
@@ -9528,7 +9557,7 @@ void strada_cleanup_pop(void) {
 void strada_cleanup_drain(void) {
     while (strada_pending_cleanup_count > 0) {
         StradaValue *sv = strada_pending_cleanup[--strada_pending_cleanup_count];
-        if (sv) strada_decref(sv);
+        strada_cleanup_release(sv);
     }
 }
 
@@ -9548,7 +9577,7 @@ void strada_cleanup_restore(int mark) {
 void strada_cleanup_drain_to(int mark) {
     while (strada_pending_cleanup_count > mark) {
         StradaValue *sv = strada_pending_cleanup[--strada_pending_cleanup_count];
-        if (sv) strada_decref(sv);
+        strada_cleanup_release(sv);
     }
 }
 
@@ -9575,7 +9604,10 @@ void strada_throw(const char *msg) {
         if (strada_die_trace_hook) {
             strada_die_trace_hook(strada_exception_msg, strada_try_depth);
         }
-        /* Jump to the nearest catch block */
+        /* Release what the frames being unwound own while they still exist
+         * (their variables are on the cleanup stack by address), then jump
+         * to the nearest catch block. */
+        strada_cleanup_drain_to(strada_try_stack[strada_try_depth - 1].cleanup_mark);
         longjmp(strada_try_stack[strada_try_depth - 1].buf, 1);
     } else {
         /* No try block - fatal error with stack trace */
@@ -9605,6 +9637,7 @@ void strada_throw_value(StradaValue *sv) {
     strada_exception_msg = msg;  /* Take ownership directly */
 
     if (strada_in_try_block()) {
+        strada_cleanup_drain_to(strada_try_stack[strada_try_depth - 1].cleanup_mark);
         longjmp(strada_try_stack[strada_try_depth - 1].buf, 1);
     } else {
         fprintf(stderr, "Uncaught exception: %s\n", msg);

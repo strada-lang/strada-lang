@@ -216,6 +216,7 @@ struct StradaHash {
 typedef struct {
     jmp_buf buf;
     int active;
+    int cleanup_mark;
 } StradaTryContext;
 
 /* The try stack is thread-local in the runtime; tcc-compiled code must
@@ -713,6 +714,7 @@ int strada_in_try_block(void);
 /* Cleanup stack (temp value tracking) — real functions in the runtime now, with
  * thread-local internal storage; a tcc program calls into the gcc runtime. */
 void strada_cleanup_push(StradaValue *sv);
+void strada_cleanup_push_slot(StradaValue **slot);
 void strada_cleanup_pop(void);
 void strada_cleanup_drain(void);
 int strada_cleanup_mark(void);

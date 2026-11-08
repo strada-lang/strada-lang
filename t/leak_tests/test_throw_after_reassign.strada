@@ -1,0 +1,28 @@
+# A local or parameter reassigned after its declaration, then a CALLEE
+# throws: unwinding must release the variable's current value (not the
+# freed original), and nothing may leak.
+func boom(str $s) void { throw "boom " . $s; }
+func by_assign(str $raw) str { my str $v = "x" . $raw; $v = trim($v); boom($v); return $v; }
+func by_subst(str $raw) str { my str $w = "y" . $raw; $w =~ s/y/z/g; boom($w); return $w; }
+func by_concat(str $raw) str { my str $u = "q" . $raw; $u = $u . "!"; boom($u); return $u; }
+func by_param(str $p) str { $p = $p . "-changed"; boom($p); return $p; }
+func by_hash(str $k) str { my scalar $h = {"a" => $k}; $h = {"b" => $k . "2"}; boom($h->{"b"}); return ""; }
+func rethrow(str $k) str {
+    try { by_assign($k); } catch ($e) { my str $m = "again: " . $e; $m = $m . "."; throw $m; }
+    return "";
+}
+func main() int {
+    my int $n = 0;
+    my int $i = 0;
+    while ($i < 50) {
+        try { by_assign(" a "); } catch ($e) { $n = $n + 1; }
+        try { by_subst("yy"); } catch ($e) { $n = $n + 1; }
+        try { by_concat("k"); } catch ($e) { $n = $n + 1; }
+        try { by_param("p"); } catch ($e) { $n = $n + 1; }
+        try { by_hash("h"); } catch ($e) { $n = $n + 1; }
+        try { rethrow("r"); } catch ($e) { $n = $n + 1; }
+        $i = $i + 1;
+    }
+    if ($n == 300) { say("all throw after reassign tests passed"); }
+    return 0;
+}
