@@ -574,6 +574,20 @@ func parse_var_name(scalar $parser) str {
         return "around";
     }
 
+    # so can the other statement keywords ($until, $unless, $do)
+    if ($type_str eq "UNTIL") {
+        parser_advance($parser);
+        return "until";
+    }
+    if ($type_str eq "UNLESS") {
+        parser_advance($parser);
+        return "unless";
+    }
+    if ($type_str eq "DO") {
+        parser_advance($parser);
+        return "do";
+    }
+
     parser_error($parser, "expected a variable name after '$', got " . friendly_token($type_str, $tok->{"value"}));
 }
 
