@@ -264,7 +264,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                         if ($init_type == NODE_CALL()) { $cg->{"call_context"} = 1; }
                         emit($cg, "({ StradaValue *__lr = ");
                         gen_expression($cg, $init);
-                        emit($cg, "; if (!__lr || STRADA_IS_TAGGED_INT(__lr) || (__lr->type != STRADA_ARRAY && __lr->type != STRADA_REF)) { StradaValue *__lw = strada_new_array(); if (__lr && (STRADA_IS_TAGGED_INT(__lr) || __lr->type != STRADA_UNDEF)) { strada_array_push_take(__lw->value.av, __lr); } else if (__lr) { strada_decref(__lr); } __lr = __lw; } __lr; })");
+                        emit($cg, "; if (!__lr || STRADA_IS_TAGGED_INT(__lr) || (__lr->type != STRADA_ARRAY && !(__lr->type == STRADA_REF && __lr->value.rv && !STRADA_IS_TAGGED_INT(__lr->value.rv) && __lr->value.rv->type == STRADA_ARRAY))) { StradaValue *__lw = strada_new_array(); if (__lr && (STRADA_IS_TAGGED_INT(__lr) || __lr->type != STRADA_UNDEF)) { strada_array_push_take(__lw->value.av, __lr); } else if (__lr) { strada_decref(__lr); } __lr = __lw; } __lr; })");
                         if ($init_type == NODE_CALL()) { $cg->{"call_context"} = 0; }
                     } else {
                         # Set array context for dynamic function calls

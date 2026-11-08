@@ -8,6 +8,8 @@ package main;
 func five() int { return 5; }
 func nothing() scalar { return undef; }
 func pair() array { my array @p = (1, 2); return @p; }
+func a_hashref() scalar { return {"id" => "t1"}; }
+func an_arrayref() scalar { my array @x = (7, 8, 9); return \@x; }
 func main() int {
     my int $fail = 0;
     my scalar $r = Rec::new_rec(7);
@@ -40,6 +42,13 @@ func main() int {
     if (scalar(@i) != 2) { say("FAIL assign array call"); $fail = 1; }
     @i = nothing();
     if (scalar(@i) != 0) { say("FAIL assign undef"); $fail = 1; }
+    my array @hr = (a_hashref());
+    push(@hr, {"id" => "t2"});
+    if (scalar(@hr) != 2 || $hr[0]->{"id"} ne "t1") { say("FAIL hash ref result is one element"); $fail = 1; }
+    my array @ar = an_arrayref();
+    if (scalar(@ar) != 3) { say("FAIL array ref result is the list"); $fail = 1; }
+    @hr = (a_hashref());
+    if (scalar(@hr) != 1) { say("FAIL assign hash ref result"); $fail = 1; }
     if ($fail == 0) { say("all array from scalar call tests passed"); }
     return $fail;
 }
