@@ -1,0 +1,29 @@
+# A variable set from a factory (not a constructor) may hold a subclass:
+# method calls on it must dispatch at runtime.
+package Kind;
+func make(str $t) scalar {
+    my hash %h = ();
+    if ($t eq "c") { return bless(\%h, "Kind::C"); }
+    return bless(\%h, "Kind");
+}
+func label(scalar $self) str { return "base"; }
+package Kind::C;
+inherit Kind;
+func label(scalar $self) str { return "contact"; }
+package Other;
+func uses(str $t) str {
+    my scalar $kind = Kind::make($t);
+    return $kind->label();
+}
+func later(scalar $kind) str { return $kind->label(); }
+package main;
+func main() int {
+    my int $fail = 0;
+    if (Other::uses("c") ne "contact") { say("FAIL factory result"); $fail = 1; }
+    my scalar $k = Kind::make("x");
+    $k = Kind::make("c");
+    if ($k->label() ne "contact") { say("FAIL reassigned"); $fail = 1; }
+    if (Other::later(Kind::make("c")) ne "contact") { say("FAIL param named like another function's local"); $fail = 1; }
+    if ($fail == 0) { say("all devirtualization tests passed"); }
+    return $fail;
+}

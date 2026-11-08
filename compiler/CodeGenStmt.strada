@@ -362,8 +362,18 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 my int $dcolon = rindex($dname, "::");
                 if ($dcolon > 0) {
                     my str $dpkg = substr($dname, 0, $dcolon);
-                    $cg->{"known_types"}->{$c_name} = $dpkg;
+                    my str $dfn = substr($dname, $dcolon + 2, length($dname) - $dcolon - 2);
+                    # only constructors (new, new_*) are known to return an
+                    # object of their own class; factories (Pkg::find,
+                    # Pkg::prototype) can return subclasses or anything else
+                    if ($dfn eq "new" || index($dfn, "new_") == 0) {
+                        $cg->{"known_types"}->{$c_name} = $dpkg;
+                    } else {
+                        $cg->{"known_types"}->{$c_name} = "";
+                    }
                 }
+            } else {
+                $cg->{"known_types"}->{$c_name} = "";
             }
         }
 
@@ -2216,6 +2226,8 @@ func gen_function(scalar $cg, scalar $fn) void {
     my int $ret_type_id = $fn->{"return_type"};
 
     foreach_cleanup_reset($cg);
+    # types inferred for variables belong to one function
+    $cg->{"known_types"} = {};
     # Reset function parameter tracking for each new function
     $cg->{"func_params"} = {};
     $cg->{"func_param_names"} = [];
@@ -2602,6 +2614,7 @@ func gen_function(scalar $cg, scalar $fn) void {
         # We also push parameters to the cleanup stack for exception safety:
         # if a called function throws, cleanup_drain in the catch will decref our params
         foreach_cleanup_reset($cg);
+        $cg->{"known_types"} = {};
         $cg->{"func_params"} = {};
         $cg->{"func_param_names"} = [];
         $cg->{"func_param_count"} = 0;

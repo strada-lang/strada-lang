@@ -808,7 +808,14 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
         my str $op = $expr->{"op"};
         my scalar $target = $expr->{"target"};
         my int $target_type = $target->{"type"};
-        
+
+        # a reassigned variable no longer holds the object its declaration
+        # made, so forget its inferred class (no devirtualized calls)
+        if ($target_type == NODE_VARIABLE()) {
+            my scalar $kt_a = $cg->{"known_types"};
+            if ($kt_a) { $kt_a->{escape_c_keyword($target->{"name"})} = ""; }
+        }
+
         if ($op eq "=") {
             # Special case: substr($s, offset, len) = value — in-place string modification
             if ($target_type == NODE_CALL()) {
@@ -5054,7 +5061,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
                     # Push the just-allocated element so a throw from a
                     # later element doesn't leak the prior ones. Popped
                     # in reverse order before the result is yielded.
-                    emit($cg, "strada_cleanup_push(__aa_el" . $t . "); ");
+                    emit($cg, "strada_cleanup_push(__aa_el" . $t . ");\n");
                 }
                 $t = $t + 1;
             }
@@ -5478,6 +5485,8 @@ func gen_expression(scalar $cg, scalar $expr) void {
         my scalar $saved_fe_cl_depths = $cg->{"fe_cl_depths"};
         my int $saved_fe_cl_count = $cg->{"fe_cl_count"} + 0;
         foreach_cleanup_reset($cg);
+        my scalar $saved_known_types = $cg->{"known_types"};
+        $cg->{"known_types"} = {};
 
         # Start fresh for function body (closures are NOT main)
         sb_clear($cg->{"output_sb"});
@@ -5561,6 +5570,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
         $cg->{"fe_cl_names"} = $saved_fe_cl_names;
         $cg->{"fe_cl_depths"} = $saved_fe_cl_depths;
         $cg->{"fe_cl_count"} = $saved_fe_cl_count;
+        $cg->{"known_types"} = $saved_known_types;
 
         # Restore capture state
         $cg->{"in_anon_func"} = $saved_in_anon;
