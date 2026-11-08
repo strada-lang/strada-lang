@@ -29,6 +29,10 @@ package OLib;
 func make(str $name, str $email) scalar {
     return OLib::Contact::new("name", $name, "id", 7, "email", $email);
 }
+func via_closure(str $x) str {
+    my scalar $f = func (str $v) { return "lib:" . $v; };
+    return $f->($x);
+}
 func missing(scalar $o) str {
     my str $r = "no exception";
     try { $o->no_such_method(); } catch ($e) { $r = "caught: " . $e; }
@@ -44,6 +48,9 @@ func main() int {
     my str \$l = \$c->label();
     if (\$l ne "contact #7 Wile <w\@acme.test>") { say("FAIL inherited method: " . \$l); return 1; }
     if (\$c->isa("OLib::Model") != 1) { say("FAIL isa"); return 1; }
+    my scalar \$hf = func (str \$v) { return "host:" . \$v; };
+    if (\$hf->("a") ne "host:a") { say("FAIL host closure"); return 1; }
+    if (OLib::via_closure("b") ne "lib:b") { say("FAIL library closure ran the host's: " . OLib::via_closure("b")); return 1; }
     my str \$m = OLib::missing(\$c);
     if (index(\$m, "caught: ") != 0 || index(\$m, "no_such_method") < 0) { say("FAIL missing method: " . \$m); return 1; }
     say("OK");
@@ -63,4 +70,4 @@ if [ "$out" != "OK" ]; then
     echo "FAIL: shared-library OOP (got: $out)"
     exit 1
 fi
-echo "PASS --shared library inheritance and catchable missing methods"
+echo "PASS --shared library inheritance, closures and catchable missing methods"

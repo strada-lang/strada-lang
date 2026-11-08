@@ -250,6 +250,16 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                             gen_expression($cg, $init);
                             emit($cg, ")");
                         }
+                    } elsif ($init_type == NODE_METHOD_CALL() || ($init_type == NODE_CALL() && length("" . $init->{"name"}) > 0 && defined($cg->{"functions"}->{sanitize_name("" . $init->{"name"})}))) {
+                        # A user function or method may return a plain scalar:
+                        # `my array @a = ($o->id())` is then a one-element list
+                        # (it used to become an empty array). Arrays and refs
+                        # pass through; undef is an empty list.
+                        if ($init_type == NODE_CALL()) { $cg->{"call_context"} = 1; }
+                        emit($cg, "({ StradaValue *__lr = ");
+                        gen_expression($cg, $init);
+                        emit($cg, "; if (!__lr || STRADA_IS_TAGGED_INT(__lr) || (__lr->type != STRADA_ARRAY && __lr->type != STRADA_REF)) { StradaValue *__lw = strada_new_array(); if (__lr && (STRADA_IS_TAGGED_INT(__lr) || __lr->type != STRADA_UNDEF)) { strada_array_push_take(__lw->value.av, __lr); } else if (__lr) { strada_decref(__lr); } __lr = __lw; } __lr; })");
+                        if ($init_type == NODE_CALL()) { $cg->{"call_context"} = 0; }
                     } else {
                         # Set array context for dynamic function calls
                         if ($init_type == NODE_CALL()) {

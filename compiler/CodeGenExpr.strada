@@ -5453,7 +5453,10 @@ func gen_expression(scalar $cg, scalar $expr) void {
         $cg->{"anon_param_str"} = $param_str;
 
         # Generate forward declaration (triple pointer for capture-by-reference)
-        my str $decl = "StradaValue* " . $func_name . "(StradaValue ***__captures";
+        # static: a closure is only referenced in its own C file, and an exported
+        # name would be interposed by a same-named one in the host binary when
+        # this is a shared library (the .so then ran the host's closure)
+        my str $decl = "static StradaValue* " . $func_name . "(StradaValue ***__captures";
         $i = 0;
         while ($i < $param_count) {
             my scalar $p = $params->[$i];

@@ -340,6 +340,7 @@ test_output "$EXAMPLES_DIR/test_reftype_blessed.strada" "test_reftype_blessed" "
 test_output "$EXAMPLES_DIR/test_class_after_main.strada" "test_class_after_main" "all class after main tests passed" "Classes defined after main()"
 test_output "$EXAMPLES_DIR/test_accessor_inline_scope.strada" "test_accessor_inline_scope" "all accessor inline tests passed" "Accessor inlining only for the class and its ancestors"
 test_output "$EXAMPLES_DIR/test_devirt_soundness.strada" "test_devirt_soundness" "all devirtualization tests passed" "Method calls are devirtualized only when the class is certain"
+test_output "$EXAMPLES_DIR/test_array_from_scalar_call.strada" "test_array_from_scalar_call" "all array from scalar call tests passed" "Array initialized from a scalar-returning call"
 
 # Test: Our variable declarations
 test_output_contains "$EXAMPLES_DIR/test_our.strada" "test_our" "All our variable tests passed" "Our variables"

@@ -1,0 +1,26 @@
+# my array @a = (f()) / ($o->m()) where the call returns a plain scalar is a
+# one-element list; arrays still pass through; undef gives an empty list.
+package Rec;
+func new_rec(int $id) scalar { my hash %h = ("id" => $id); return bless(\%h, "Rec"); }
+func id(scalar $self) int { return $self->{"id"}; }
+func tags(scalar $self) array { my array @t = ("a", "b"); return @t; }
+package main;
+func five() int { return 5; }
+func nothing() scalar { return undef; }
+func pair() array { my array @p = (1, 2); return @p; }
+func main() int {
+    my int $fail = 0;
+    my scalar $r = Rec::new_rec(7);
+    my array @a = ($r->id());
+    if (scalar(@a) != 1 || $a[0] != 7) { say("FAIL method scalar"); $fail = 1; }
+    my array @b = five();
+    if (scalar(@b) != 1 || $b[0] != 5) { say("FAIL function scalar"); $fail = 1; }
+    my array @c = pair();
+    if (scalar(@c) != 2) { say("FAIL array function"); $fail = 1; }
+    my array @d = $r->tags();
+    if (scalar(@d) != 2) { say("FAIL array method"); $fail = 1; }
+    my array @e = nothing();
+    if (scalar(@e) != 0) { say("FAIL undef"); $fail = 1; }
+    if ($fail == 0) { say("all array from scalar call tests passed"); }
+    return $fail;
+}
