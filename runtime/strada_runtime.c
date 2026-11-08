@@ -21158,32 +21158,38 @@ StradaValue* strada_gmtime(StradaValue *timestamp) {
 
 /* mktime - convert time hash back to timestamp */
 StradaValue* strada_mktime(StradaValue *time_hash) {
-    if (!time_hash || time_hash->type != STRADA_HASH) {
+    /* a hash, or a reference to one */
+    StradaHash *hv = time_hash ? strada_deref_hash(time_hash) : NULL;
+    if (!hv) {
         return strada_new_int(-1);
     }
 
     struct tm tm = {0};
     StradaValue *v;
 
-    v = strada_hash_get(time_hash->value.hv, "sec");
+    v = strada_hash_get(hv, "sec");
     if (v) tm.tm_sec = (int)strada_to_int(v);
 
-    v = strada_hash_get(time_hash->value.hv, "min");
+    v = strada_hash_get(hv, "min");
     if (v) tm.tm_min = (int)strada_to_int(v);
 
-    v = strada_hash_get(time_hash->value.hv, "hour");
+    v = strada_hash_get(hv, "hour");
     if (v) tm.tm_hour = (int)strada_to_int(v);
 
-    v = strada_hash_get(time_hash->value.hv, "mday");
+    v = strada_hash_get(hv, "mday");
     if (v) tm.tm_mday = (int)strada_to_int(v);
 
-    v = strada_hash_get(time_hash->value.hv, "mon");
+    v = strada_hash_get(hv, "mon");
     if (v) tm.tm_mon = (int)strada_to_int(v);
 
-    v = strada_hash_get(time_hash->value.hv, "year");
+    v = strada_hash_get(hv, "year");
     if (v) tm.tm_year = (int)strada_to_int(v);
 
-    v = strada_hash_get(time_hash->value.hv, "isdst");
+    /* strada_hash_get returns undef (not NULL) for a missing key: without
+     * an isdst the system must work out DST (-1), not assume none (0) -
+     * that put every summer time an hour off */
+    v = strada_hash_get(hv, "isdst");
+    if (v && !STRADA_IS_TAGGED_INT(v) && v->type == STRADA_UNDEF) v = NULL;
     if (v) tm.tm_isdst = (int)strada_to_int(v);
     else tm.tm_isdst = -1;  /* Let system determine DST */
 

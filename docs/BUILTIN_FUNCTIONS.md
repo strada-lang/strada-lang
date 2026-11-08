@@ -355,10 +355,10 @@ Use `core::` in user code. `sys::` is a legacy alias (the compiler normalizes
 | `core::nanosleep(sec)` | `num → int` | Sleep with sub-second precision. |
 | `core::sleep(sec)` | `int → int` | Sleep whole seconds. |
 | `core::usleep(usec)` | `int → int` | Sleep microseconds. |
-| `core::localtime(epoch)` | `int → array` | Local time as 9-tuple. |
-| `core::gmtime(epoch)` | `int → array` | UTC time as 9-tuple. |
-| `core::mktime(@parts)` | `array → int` | Inverse of localtime. |
-| `core::strftime(fmt, @parts)` | `str, array → str` | Format time. |
+| `core::localtime(epoch)` | `int → hash` | Local time (in `$TZ`): sec, min, hour, mday, mon (0-11), year (since 1900), wday (0 = Sunday), yday, isdst. |
+| `core::gmtime(epoch)` | `int → hash` | UTC time, same keys. |
+| `core::mktime(%parts)` | `hash or hashref → int` | Inverse of localtime. Leave out isdst to let the system work out daylight saving time. |
+| `core::strftime(fmt, %parts)` | `str, hash → str` | Format time. |
 | `core::ctime(epoch)` | `int → str` | "Day Mon DD HH:MM:SS YYYY". |
 | `core::difftime(t2, t1)` | `int, int → num` | t2 - t1 in seconds. |
 | `core::clock()` | `→ int` | CPU clock ticks. |
