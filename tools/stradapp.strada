@@ -87,6 +87,10 @@ func preprocess(str $filename) str {
     while ($i < $num_lines) {
         my str $line = $lines[$i];
         my str $trimmed = trim($line);
+        # every input line yields an output line (blank when consumed: a
+        # comment, a directive, an inactive branch) so compiler diagnostics
+        # point at the right line of the original file
+        my int $before = length($output);
 
         # Check for __C__ block start
         if ($in_c_block == 0 && index($trimmed, "__C__") >= 0) {
@@ -113,6 +117,8 @@ func preprocess(str $filename) str {
             # Pass through the __C__ line as-is
             if ($active) {
                 $output = $output . $line . "\n";
+            } else {
+                $output = $output . "\n";
             }
             $i++;
             next;
@@ -137,6 +143,8 @@ func preprocess(str $filename) str {
             # Pass through C code as-is
             if ($active) {
                 $output = $output . $line . "\n";
+            } else {
+                $output = $output . "\n";
             }
             $i++;
             next;
@@ -257,6 +265,7 @@ func preprocess(str $filename) str {
             }
         }
 
+        if (length($output) == $before) { $output = $output . "\n"; }
         $i++;
     }
 

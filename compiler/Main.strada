@@ -230,6 +230,7 @@ func main() int {
     my int $verbose = 0;
     my int $check_only = 0;
     my str $input_file = "";
+    my str $source_name = "";
     my str $output_file = "";
     my array @lib_paths = ();
     my array @lib_paths_low = ();
@@ -352,6 +353,11 @@ func main() int {
                 say("Error: --import-lib requires a path argument");
                 return 1;
             }
+        } elsif ($arg eq "--source-name") {
+            # the file the source really came from (the driver compiles a
+            # preprocessed copy): used in diagnostics and to find `use`d files
+            $i = $i + 1;
+            if ($i < $arg_count) { $source_name = $ARGV[$i]; }
         } elsif ($arg eq "-h" || $arg eq "--help") {
             print_usage();
             return 0;
@@ -430,7 +436,9 @@ func main() int {
     }
 
     # Compile (pass lib paths, CLI-implicit imports, and module-only settings)
-    my str $code = compile($source, $input_file, $debug_info, $show_timing, $show_warnings, $strict_types, $enable_profiling, $enable_stack_trace, $full_profile, \@lib_paths, \@lib_paths_low, \@implicit_objs, \@implicit_archs, \@implicit_libs, $module_only_mode, $module_target, $check_only, \@pp_defines);
+    my str $diag_name = $input_file;
+    if (length($source_name) > 0) { $diag_name = $source_name; }
+    my str $code = compile($source, $diag_name, $debug_info, $show_timing, $show_warnings, $strict_types, $enable_profiling, $enable_stack_trace, $full_profile, \@lib_paths, \@lib_paths_low, \@implicit_objs, \@implicit_archs, \@implicit_libs, $module_only_mode, $module_target, $check_only, \@pp_defines);
 
     # --check: validation passed (any errors die before reaching here) —
     # nothing to write.

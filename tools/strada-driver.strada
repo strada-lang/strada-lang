@@ -814,6 +814,8 @@ func main() int {
     core::setenv("STRADA_DIR", $HOME_DIR);
 
     my array @sc = ($STRADAC, "-LL", $HOME_DIR . "/lib");
+    # diagnostics name the original file, not the preprocessed copy
+    if ($actual_input ne $input) { @sc = (@sc, "--source-name", $input); }
     # Pass -D through so #ifdef also works in `use`d modules (stradapp only
     # preprocesses the main file).
     my int $pd = 0;
