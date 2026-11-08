@@ -3283,7 +3283,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 } elsif ($ch eq "\t") {
                     emit($cg, "\\t");
                 } else {
-                    emit($cg, $ch);
+                    emit($cg, c_ctrl_escape($ch));
                 }
                 $i = $i + 1;
             }
@@ -3348,7 +3348,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 } elsif ($ch eq "\r") {
                     emit($cg, "\\r");
                 } else {
-                    emit($cg, $ch);
+                    emit($cg, c_ctrl_escape($ch));
                 }
                 $i = $i + 1;
             }
@@ -3456,7 +3456,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 } elsif ($ch eq "\r") {
                     emit($cg, "\\r");
                 } else {
-                    emit($cg, $ch);
+                    emit($cg, c_ctrl_escape($ch));
                 }
                 $i = $i + 1;
             }
@@ -3477,7 +3477,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 } elsif ($ch eq "\r") {
                     emit($cg, "\\r");
                 } else {
-                    emit($cg, $ch);
+                    emit($cg, c_ctrl_escape($ch));
                 }
                 $i = $i + 1;
             }
@@ -3511,7 +3511,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
             } elsif ($ch eq "\r") {
                 emit($cg, "\\r");
             } else {
-                emit($cg, $ch);
+                emit($cg, c_ctrl_escape($ch));
             }
             $i = $i + 1;
         }
@@ -3532,7 +3532,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
             } elsif ($ch eq "\r") {
                 emit($cg, "\\r");
             } else {
-                emit($cg, $ch);
+                emit($cg, c_ctrl_escape($ch));
             }
             $i = $i + 1;
         }
@@ -3572,7 +3572,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
             } elsif ($ch eq "\"") {
                 emit($cg, "\\\"");
             } else {
-                emit($cg, $ch);
+                emit($cg, c_ctrl_escape($ch));
             }
             $i = $i + 1;
         }
@@ -3587,7 +3587,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
             } elsif ($ch eq "\"") {
                 emit($cg, "\\\"");
             } else {
-                emit($cg, $ch);
+                emit($cg, c_ctrl_escape($ch));
             }
             $i = $i + 1;
         }

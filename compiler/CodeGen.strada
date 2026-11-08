@@ -2501,6 +2501,18 @@ func gen_regex_interpolated_pattern(scalar $cg, str $pattern) void {
 }
 
 # Helper to emit an escaped C string
+# A character for a C string literal: control characters (CR, ESC, ...)
+# become 3-digit octal escapes, anything else is returned as is.
+func c_ctrl_escape(str $ch) str {
+    if (length($ch) != 1) { return $ch; }
+    my int $code = ord($ch);
+    if ($code >= 32 && $code != 127) { return $ch; }
+    my int $o2 = $code / 64;
+    my int $o1 = ($code / 8) % 8;
+    my int $o0 = $code % 8;
+    return "\\" . chr(48 + $o2) . chr(48 + $o1) . chr(48 + $o0);
+}
+
 func emit_escaped_string(scalar $cg, str $s) void {
     my int $i = 0;
     my int $len = bytes($s);
@@ -2969,7 +2981,7 @@ func emit_regex_g_condition(scalar $cg, scalar $expr, str $pos_var) void {
         elsif ($ch eq "\"") { emit($cg, "\\\""); }
         elsif ($ch eq "\n") { emit($cg, "\\n"); }
         elsif ($ch eq "\t") { emit($cg, "\\t"); }
-        else { emit($cg, $ch); }
+        else { emit($cg, c_ctrl_escape($ch)); }
         $i = $i + 1;
     }
     emit($cg, "\", \"" . $flags . "\", &" . $pos_var . "); free(__re_str); __re_res; })");

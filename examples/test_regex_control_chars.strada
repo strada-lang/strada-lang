@@ -1,0 +1,25 @@
+# Control characters in regex literals (\r, \e, \x01...) used to be written
+# raw into the generated C string, breaking the C build.
+func main() int {
+    my int $fail = 0;
+    my str $crlf = "a\r\nb";
+    if ($crlf !~ /\r\n/) { say("FAIL match \\r\\n"); $fail = 1; }
+    if ("x,y" !~ /[",\r\n]/) { say("FAIL class with quote and \\r"); $fail = 1; }
+    if ("plain" =~ /[",\r\n]/) { say("FAIL false positive"); $fail = 1; }
+    my str $t = "one\r\ntwo\r\n";
+    $t =~ s/\r\n/|/g;
+    if ($t ne "one|two|") { say("FAIL subst " . $t); $fail = 1; }
+    my str $u = "a\tb";
+    $u =~ s/\t/\r/;
+    if ($u ne "a\rb") { say("FAIL replacement with \\r"); $fail = 1; }
+    my str $esc = "x\x1by";
+    if ($esc !~ /\x1b/) { say("FAIL \\x1b"); $fail = 1; }
+    my int $n = 0;
+    my str $lines = "l1\rl2\rl3";
+    while ($lines =~ /\r/g) { $n = $n + 1; }
+    if ($n != 2) { say("FAIL global match count " . $n); $fail = 1; }
+    my array @parts = split(/\r?\n/, "p\r\nq\nr");
+    if (scalar(@parts) != 3) { say("FAIL split " . scalar(@parts)); $fail = 1; }
+    if ($fail == 0) { say("all regex control character tests passed"); }
+    return $fail;
+}
