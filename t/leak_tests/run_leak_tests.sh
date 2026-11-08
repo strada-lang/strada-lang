@@ -132,6 +132,7 @@ TESTS=(
     "test_round19_architectural"
     "test_cycle_collector"
     "test_threads_cycles"
+    "test_threads_gc_race"
     "test_arena"
     "test_gc_arena_api"
     "test_bless_idioms"

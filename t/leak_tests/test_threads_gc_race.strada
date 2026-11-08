@@ -1,0 +1,24 @@
+# Threads build garbage cycles while other threads trigger frequent
+# collections: every cycle must still be collected (valgrind-clean).
+func main() int {
+    core::gc_threshold(200);
+    my array @threads = ();
+    my int $t = 0;
+    while ($t < 6) {
+        push(@threads, thread::create(func () {
+            my int $i = 0;
+            while ($i < 2000) {
+                my scalar $a = {};
+                my scalar $b = {};
+                $a->{"peer"} = $b;
+                $b->{"peer"} = $a;
+                $i = $i + 1;
+            }
+            return 0;
+        }));
+        $t = $t + 1;
+    }
+    foreach my scalar $th (@threads) { thread::join($th); }
+    say("threads done");
+    return 0;
+}

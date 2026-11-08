@@ -1363,7 +1363,12 @@ void strada_decref(StradaValue *sv) {
      * candidate root of a cycle. Buffer it for the collector. Buffered roots
      * are pinned (incref'd) inside cc_possible_root, so they can never reach
      * the drop-to-zero branch above while buffered — no dangling-pointer race. */
-    else if (new_rc > 0 && cc_enabled && !__atomic_load_n(&cc_collecting, __ATOMIC_RELAXED)) {
+    /* Only the COLLECTING thread's own decrefs (freeing garbage) skip this:
+     * other threads keep running while a collector waits to stop the world,
+     * and testing the global cc_collecting here made the decref that takes
+     * each of them to its safepoint drop its candidate - a cycle that was
+     * then never collected (an intermittent leak under threads). */
+    else if (new_rc > 0 && cc_enabled && !cc_self_collecting) {
         cc_possible_root(sv);
     }
     /* Safepoint poll AFTER buffering, never before it: parking between the
