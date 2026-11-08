@@ -1,0 +1,16 @@
+# Results of builtins used directly as arguments (strftime(localtime(...)),
+# length(getcwd()), ...) must be released after the call.
+func main() int {
+    my int $i = 0;
+    my int $n = 0;
+    while ($i < 200) {
+        $n = $n + length(core::strftime("%Y-%m-%d", core::localtime(core::time())));
+        $n = $n + length(core::strftime("%H", core::gmtime(core::time())));
+        $n = $n + length(core::getcwd());
+        $n = $n + scalar(keys(%{core::localtime(core::time())}));
+        $n = $n + length("" . core::getpid());
+        $i = $i + 1;
+    }
+    if ($n > 0) { say("all builtin temp arg tests passed"); }
+    return 0;
+}

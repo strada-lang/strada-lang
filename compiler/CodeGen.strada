@@ -3276,6 +3276,59 @@ func is_variable_expr(scalar $expr) int {
 # builtin, add its (sys::-normalized) name to this list.
 func build_owned_call_builtins() scalar {
     my hash %owned_set = ();
+    # builtins whose runtime function always returns a fresh value (audited:
+    # every return path is strada_new_* or a newly built container), so a
+    # result used as an argument is released after the call
+    $owned_set{"sys::localtime"} = 1;
+    $owned_set{"sys::gmtime"} = 1;
+    $owned_set{"sys::time"} = 1;
+    $owned_set{"sys::getpid"} = 1;
+    $owned_set{"sys::getppid"} = 1;
+    $owned_set{"sys::fork"} = 1;
+    $owned_set{"sys::wait"} = 1;
+    $owned_set{"sys::getcwd"} = 1;
+    $owned_set{"sys::getlogin"} = 1;
+    $owned_set{"sys::getgroups"} = 1;
+    $owned_set{"sys::inet_ntoa"} = 1;
+    $owned_set{"sys::inet_ntop"} = 1;
+    $owned_set{"sys::fgets"} = 1;
+    $owned_set{"sys::fgetc"} = 1;
+    $owned_set{"sys::read_fd"} = 1;
+    $owned_set{"sys::read_all_fd"} = 1;
+    $owned_set{"sys::slurp_fd"} = 1;
+    $owned_set{"sys::slurp_fh"} = 1;
+    $owned_set{"sys::socket_recv"} = 1;
+    $owned_set{"sys::getpeername"} = 1;
+    $owned_set{"sys::getsockname"} = 1;
+    $owned_set{"sys::select_fds"} = 1;
+    $owned_set{"sys::socket_select"} = 1;
+    $owned_set{"sys::socket_accept"} = 1;
+    $owned_set{"sys::socket_server"} = 1;
+    $owned_set{"sys::socket_server_backlog"} = 1;
+    $owned_set{"sys::socket_client"} = 1;
+    $owned_set{"sys::pipe"} = 1;
+    $owned_set{"sys::poll"} = 1;
+    $owned_set{"sys::system"} = 1;
+    $owned_set{"sys::exec"} = 1;
+    $owned_set{"sys::dl_call_sv"} = 1;
+    $owned_set{"sys::dl_call_str_sv"} = 1;
+    $owned_set{"sys::dl_call_int_sv"} = 1;
+    $owned_set{"sys::dl_call_void_sv"} = 1;
+    $owned_set{"sys::difftime"} = 1;
+    $owned_set{"sys::clock"} = 1;
+    $owned_set{"sys::times"} = 1;
+    $owned_set{"sys::rand"} = 1;
+    $owned_set{"sys::getprocname"} = 1;
+    $owned_set{"sys::getproctitle"} = 1;
+    $owned_set{"sys::close"} = 1;
+    $owned_set{"sys::close_fd"} = 1;
+    $owned_set{"sys::write_fd"} = 1;
+    $owned_set{"sys::fputs"} = 1;
+    $owned_set{"sys::setproctitle"} = 1;
+    $owned_set{"sys::getpgid"} = 1;
+    $owned_set{"sys::getsid"} = 1;
+    $owned_set{"sys::getpgrp"} = 1;
+    $owned_set{"sys::exit_status"} = 1;
     # One store per name: the frozen bootstrap compiler cannot parse
     # multi-line array literals, so no list-plus-loop here.
     $owned_set{"chr"} = 1;

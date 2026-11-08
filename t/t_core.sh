@@ -333,6 +333,7 @@ test_output "$EXAMPLES_DIR/test_keyword_function_names.strada" "test_keyword_fun
 test_output "$EXAMPLES_DIR/test_foreach_early_exit_cleanup.strada" "test_foreach_early_exit_cleanup" "all foreach early exit cleanup tests passed" "Early exits from foreach keep the cleanup stack in step"
 test_output "$EXAMPLES_DIR/test_namespaced_has_extends.strada" "test_namespaced_has_extends" "all namespaced has/extends tests passed" "Moose-style classes with :: names inherit methods"
 test_output "$EXAMPLES_DIR/test_regex_control_chars.strada" "test_regex_control_chars" "all regex control character tests passed" "Control characters in regex literals"
+test_output "$EXAMPLES_DIR/test_builtin_temp_args.strada" "test_builtin_temp_args" "all builtin temp arg tests passed" "Builtin results passed as arguments are released"
 
 # Test: Our variable declarations
 test_output_contains "$EXAMPLES_DIR/test_our.strada" "test_our" "All our variable tests passed" "Our variables"

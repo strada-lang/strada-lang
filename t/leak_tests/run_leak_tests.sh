@@ -57,6 +57,7 @@ TESTS=(
     "test_lexical_globals"
     "test_deref_temp_and_hash_copy"
     "test_foreach_early_exit_cleanup"
+    "test_builtin_temp_args"
     "test_slices"
     "test_operators"
     "test_error_handling"
