@@ -135,6 +135,15 @@ static inline size_t strada_next_pow2(size_t n) {
  * NON-static: the header-inline ss_incref/ss_decref gate their atomic
  * branch on it from user TUs (mirrors strada_incref's gate). */
 extern int strada_threading_active;
+/* STRADA_NO_POOL=1 turns off every free-list pool (values, strings, metadata,
+ * arrays, class instances) so valgrind/ASan report each leak at the call
+ * that really allocated it rather than wherever a recycled block was first
+ * malloc'd. Slower; for debugging only. */
+static int strada_no_pool = 0;
+__attribute__((constructor)) static void strada_no_pool_init(void) {
+    const char *e = getenv("STRADA_NO_POOL");
+    strada_no_pool = (e && *e && *e != '0');
+}
 static StradaString *ss_pool_stack[SS_POOL_MAX];
 static int ss_pool_count = 0;
 
@@ -147,7 +156,7 @@ static void ss_pool_cleanup(void) {
 void ss_decref_slow(StradaString *ss) {
     /* Return short strings to pool instead of freeing (single-threaded only —
      * the pool has no lock). */
-    if (!strada_threading_active && ss->len <= SS_POOL_DATA_MAX && ss_pool_count < SS_POOL_MAX) {
+    if (!strada_threading_active && !strada_no_pool && ss->len <= SS_POOL_DATA_MAX && ss_pool_count < SS_POOL_MAX) {
         ss_pool_stack[ss_pool_count++] = ss;
     } else {
         free(ss);
@@ -657,7 +666,7 @@ static int strada_instance_pool_push(StradaValue *sv) {
      * via its own method table). Skipping the hook would leave stale
      * registry entries pointing at recycled SVs. Disable pooling whenever
      * any destroy hook is installed. */
-    if (strada_destroy_hook) return 0;
+    if (strada_destroy_hook || strada_no_pool) return 0;
     if (sv->type != STRADA_HASH) return 0;
     StradaMetadata *m = sv->meta;
     if (!m || !m->blessed_package) return 0;
@@ -13317,14 +13326,14 @@ void strada_free_value(StradaValue *sv) {
             strada_decref(sv->meta->glob_scalar_slot);
             sv->meta->glob_scalar_slot = NULL;
         }
-        if (meta_pool_count < META_POOL_MAX) {
+        if (!strada_no_pool && meta_pool_count < META_POOL_MAX) {
             meta_pool[meta_pool_count++] = sv->meta;
         } else {
             free(sv->meta);
         }
         sv->meta = NULL;
     }
-    if (!strada_threading_active && sv_pool_count < SV_POOL_MAX) {
+    if (!strada_threading_active && !strada_no_pool && sv_pool_count < SV_POOL_MAX) {
         sv->refcount = 2000000000;
         sv_pool_stack[sv_pool_count++] = sv;
     } else
@@ -13347,7 +13356,7 @@ void strada_free_array(StradaArray *av) {
      * mismatch (after growth) means the buffer is too big to pool
      * cheaply — let it fall through to free(). */
     if (!strada_threading_active
-        && strada_array_pool_count < STRADA_ARRAY_POOL_MAX
+        && !strada_no_pool && strada_array_pool_count < STRADA_ARRAY_POOL_MAX
         && av->capacity == strada_default_array_capacity
         && !array_elems_inline(av)) {
         strada_array_pool[strada_array_pool_count++] = av;
@@ -13557,7 +13566,7 @@ static void cc_free_shell(StradaValue *sv) {
         case STRADA_ARRAY: {
             StradaArray *av = sv->value.av;
             if (av) {
-                if (!strada_threading_active && strada_array_pool_count < STRADA_ARRAY_POOL_MAX
+                if (!strada_threading_active && !strada_no_pool && strada_array_pool_count < STRADA_ARRAY_POOL_MAX
                     && av->capacity == strada_default_array_capacity
                     && !array_elems_inline(av)) {
                     strada_array_pool[strada_array_pool_count++] = av;
@@ -13583,11 +13592,11 @@ static void cc_free_shell(StradaValue *sv) {
             return;
     }
     if (sv->meta) {
-        if (meta_pool_count < META_POOL_MAX) meta_pool[meta_pool_count++] = sv->meta;
+        if (!strada_no_pool && meta_pool_count < META_POOL_MAX) meta_pool[meta_pool_count++] = sv->meta;
         else free(sv->meta);
         sv->meta = NULL;
     }
-    if (!strada_threading_active && sv_pool_count < SV_POOL_MAX) {
+    if (!strada_threading_active && !strada_no_pool && sv_pool_count < SV_POOL_MAX) {
         sv->refcount = 2000000000;  /* immortal sentinel: stale decrefs are no-ops */
         sv_pool_stack[sv_pool_count++] = sv;
     } else free(sv);
@@ -13940,7 +13949,7 @@ static void arena_release_backbone(StradaValue *sv) {
         default: break;  /* INT/NUM/UNDEF: no owned storage */
     }
     if (sv->meta) {
-        if (meta_pool_count < META_POOL_MAX) meta_pool[meta_pool_count++] = sv->meta;
+        if (!strada_no_pool && meta_pool_count < META_POOL_MAX) meta_pool[meta_pool_count++] = sv->meta;
         else free(sv->meta);
         sv->meta = NULL;
     }

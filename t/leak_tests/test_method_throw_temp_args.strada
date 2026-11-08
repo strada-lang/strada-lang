@@ -1,0 +1,22 @@
+# Owned temporaries passed to a dynamically dispatched method (and an owned
+# receiver) must be released when the method throws.
+package D;
+func make() scalar { my hash %h = (); return bless(\%h, "D"); }
+func fail(scalar $self, str $s, int $n) void {
+    my str $t = "x" . $s;
+    if ($n > 0) { throw "You can't do that " . $t; }
+}
+func get(scalar $self, str $k) str { return "v" . $k; }
+package main;
+func main() int {
+    my scalar $d = D::make();
+    my int $caught = 0;
+    for (my int $i = 0; $i < 200; $i = $i + 1) {
+        try { $d->fail("a" . $i, 1); } catch ($e) { $caught = $caught + 1; }
+        try { $d->fail($d->get("k" . $i), 1); } catch ($e) { $caught = $caught + 1; }
+        try { D::make()->fail("b" . $i, 1); } catch ($e) { $caught = $caught + 1; }
+        try { $d->fail("c" . $i, 0); } catch ($e) { $caught = $caught + 100; }
+    }
+    if ($caught == 600) { say("all method throw temp arg tests passed"); }
+    return 0;
+}

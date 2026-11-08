@@ -59,6 +59,7 @@ TESTS=(
     "test_foreach_early_exit_cleanup"
     "test_builtin_temp_args"
     "test_str_builtin_temp_keys"
+    "test_method_throw_temp_args"
     "test_slices"
     "test_operators"
     "test_error_handling"
