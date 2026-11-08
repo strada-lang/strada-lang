@@ -1445,11 +1445,6 @@ func lex_read_c_block(scalar $lexer, int $token_line) scalar {
     while (!lex_at_end($lexer) && $depth > 0) {
         my int $ch = lex_current_code($lexer);
 
-        # Track line numbers for better error messages
-        if ($ch == 10) {
-            $lexer->{"line"} = $lexer->{"line"} + 1;
-        }
-
         # Handle C-style strings - don't count braces inside strings
         # "=34
         if ($ch == 34) {
@@ -1458,9 +1453,6 @@ func lex_read_c_block(scalar $lexer, int $token_line) scalar {
             while (!lex_at_end($lexer)) {
                 my int $sch = lex_current_code($lexer);
                 sb_append($sb, lex_current_char($lexer));
-                if ($sch == 10) {
-                    $lexer->{"line"} = $lexer->{"line"} + 1;
-                }
                 lex_advance($lexer);
                 # End of string  "=34
                 if ($sch == 34) {
@@ -1506,9 +1498,6 @@ func lex_read_c_block(scalar $lexer, int $token_line) scalar {
                 lex_advance($lexer);
                 while (!lex_at_end($lexer)) {
                     my int $c1 = lex_current_code($lexer);
-                    if ($c1 == 10) {
-                        $lexer->{"line"} = $lexer->{"line"} + 1;
-                    }
                     # *=42
                     if ($c1 == 42) {
                         my int $c2 = char_at($lexer->{"source"}, $lexer->{"pos"} + 1);
@@ -1533,7 +1522,6 @@ func lex_read_c_block(scalar $lexer, int $token_line) scalar {
                     # newline=10
                     if ($lc == 10) {
                         sb_append($sb, "\n");
-                        $lexer->{"line"} = $lexer->{"line"} + 1;
                         lex_advance($lexer);
                         last;
                     }
