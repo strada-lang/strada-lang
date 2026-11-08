@@ -31,7 +31,8 @@ Net::SMTP provides an SMTP client for sending emails. It supports:
 
 =back
 
-B<Note:> For TLS/SSL connections, upgrade after STARTTLS using the ssl module.
+B<Note:> For TLS (STARTTLS on 587, or implicit TLS on 465) use
+L<Net::SMTP_SSL>, which needs the ssl module.
 
 =head1 CONSTRUCTOR
 
@@ -75,7 +76,20 @@ Authenticate using AUTH PLAIN mechanism.
 
 =head2 starttls()
 
-Send STARTTLS command. After this, upgrade to TLS using ssl module.
+Send STARTTLS command. Net::SMTP_SSL::starttls() sends it and does the
+TLS handshake.
+
+=head2 supports($ext)
+
+Whether the last EHLO advertised an extension ("STARTTLS", "AUTH", ...).
+
+=head2 send_message($from, $to_list, $message)
+
+Send a message that already has its headers.
+
+=head2 set_timeout($seconds)
+
+Give up on a server that stops answering (default 30 seconds).
 
 =head2 mail($from)
 
@@ -165,28 +179,63 @@ L<ssl>, L<LWP>
 
 package SMTP;
 
+__C__ {
+#include <sys/socket.h>
+#include <sys/time.h>
+}
+
 # Create new SMTP connection
 # Returns blessed hash reference or undef on failure
 func new(str $host, int $port) scalar {
+    my scalar $obj = SMTP::make($host, $port);
+    my scalar $sock = core::socket_client($host, $port);
+    if (!defined($sock)) { return undef; }
+    $obj->{"socket"} = $sock;
+    SMTP::set_timeout($obj, 30);
+    if (!SMTP::greeting($obj)) { return undef; }
+    return $obj;
+}
+
+# An unconnected client (Net::SMTP_SSL connects it over TLS itself).
+func make(str $host, int $port) scalar {
     my hash %self = ();
     $self{"host"} = $host;
     $self{"port"} = $port;
-    $self{"socket"} = 0;
+    $self{"socket"} = undef;
     $self{"debug"} = 0;
     $self{"last_code"} = 0;
     $self{"last_response"} = "";
-
-    # Default timeout 30 seconds
+    $self{"buf"} = "";
     $self{"timeout"} = 30;
+    # set by Net::SMTP_SSL once the connection is encrypted
+    $self{"send_fn"} = undef;
+    $self{"recv_fn"} = undef;
+    return bless(\%self, "SMTP");
+}
 
-    my scalar $obj = bless(\%self, "SMTP");
-
-    # Connect to the server
-    if (!SMTP::do_connect($obj)) {
-        return undef;
+# Read the server's 220 greeting; closes the connection if it isn't one.
+func greeting(scalar $self) int {
+    SMTP::recv_response($self);
+    if ($self->{"last_code"} != 220) {
+        SMTP::close($self);
+        return 0;
     }
+    return 1;
+}
 
-    return $obj;
+# Give up on a server that stops answering (seconds, for reads and writes).
+func set_timeout(scalar $self, int $seconds) void {
+    $self->{"timeout"} = $seconds;
+    if (!defined($self->{"socket"})) { return; }
+    my int $fd = core::socket_fd($self->{"socket"});
+    __C__ {
+        struct timeval tv;
+        tv.tv_sec = (long)strada_to_int(seconds);
+        tv.tv_usec = 0;
+        int sfd = (int)strada_to_int(fd);
+        setsockopt(sfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setsockopt(sfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    }
 }
 
 # Enable debug mode (prints SMTP conversation)
@@ -194,27 +243,22 @@ func debug(scalar $self, int $on) void {
     $self->{"debug"} = $on;
 }
 
-# Internal: connect to SMTP server (plain)
-func do_connect(scalar $self) int {
-    my str $host = $self->{"host"};
-    my int $port = $self->{"port"};
+# Internal: write raw bytes (over TLS once Net::SMTP_SSL has upgraded)
+func send_raw(scalar $self, str $data) int {
+    my scalar $fn = $self->{"send_fn"};
+    if (defined($fn)) { return $fn->($data); }
+    if (!defined($self->{"socket"})) { return 0; }
+    return core::socket_send($self->{"socket"}, $data);
+}
 
-    my int $sock = core::socket_client($host, $port);
-    if ($sock <= 0) {
-        return 0;
-    }
-
-    $self->{"socket"} = $sock;
-
-    # Read server greeting
-    my str $response = SMTP::recv_response($self);
-    if ($self->{"last_code"} != 220) {
-        core::socket_close($sock);
-        $self->{"socket"} = 0;
-        return 0;
-    }
-
-    return 1;
+# Internal: read some bytes ("" when the connection closed or timed out)
+func recv_raw(scalar $self) str {
+    my scalar $fn = $self->{"recv_fn"};
+    if (defined($fn)) { return $fn->(4096); }
+    if (!defined($self->{"socket"})) { return ""; }
+    my str $chunk = core::socket_recv($self->{"socket"}, 4096);
+    if (!defined($chunk)) { return ""; }
+    return $chunk;
 }
 
 # Internal: send command to server
@@ -222,42 +266,45 @@ func send_cmd(scalar $self, str $cmd) int {
     if ($self->{"debug"} == 1) {
         say("C: " . $cmd);
     }
-
-    my str $data = $cmd . "\r\n";
-    core::socket_send($self->{"socket"}, $data);
-
-    return 1;
+    return SMTP::send_raw($self, $cmd . "\r\n");
 }
 
-# Internal: receive response from server
+# Internal: one line from the server, without its line ending ("" at EOF)
+func read_line(scalar $self) scalar {
+    while (index($self->{"buf"}, "\n") < 0) {
+        my str $chunk = SMTP::recv_raw($self);
+        if (length($chunk) == 0) {
+            if (length($self->{"buf"}) == 0) { return undef; }
+            my str $rest = $self->{"buf"};
+            $self->{"buf"} = "";
+            return $rest;
+        }
+        $self->{"buf"} = $self->{"buf"} . $chunk;
+    }
+    my str $b = $self->{"buf"};
+    my int $nl = index($b, "\n");
+    my str $line = substr($b, 0, $nl);
+    $self->{"buf"} = substr($b, $nl + 1, length($b) - $nl - 1);
+    if (length($line) > 0 && substr($line, length($line) - 1, 1) eq "\r") {
+        $line = substr($line, 0, length($line) - 1);
+    }
+    return $line;
+}
+
+# Internal: receive a (possibly multi-line) response. Replies are read a
+# line at a time: a server may send every line of a multi-line reply in
+# one packet ("250-a\r\n250 b\r\n"), and the last line is the one whose
+# code is followed by a space. last_code is 0 if the connection dropped.
 func recv_response(scalar $self) str {
     my str $response = "";
-    my str $line = "";
     my int $code = 0;
-
-    # Read lines until we get a final response (no dash after code)
     while (1) {
-        $line = core::socket_recv($self->{"socket"}, 1024);
-
-        if (!defined($line) || length($line) == 0) {
-            last;
-        }
-
-        $response = $response . $line;
-
-        # Check if this is a continuation line (code followed by dash)
-        # or final line (code followed by space)
-        # Format: "250-text" (continue) or "250 text" (final)
-        if (length($line) >= 4) {
-            my str $code_str = substr($line, 0, 3);
-            $code = cast_int($code_str);
-            my str $sep = substr($line, 3, 1);
-            if ($sep ne "-") {
-                last;
-            }
-        } else {
-            last;
-        }
+        my scalar $line = SMTP::read_line($self);
+        if (!defined($line)) { $code = 0; last; }
+        $response = $response . $line . "\r\n";
+        if (length($line) < 3 || $line !~ /^[0-9]{3}/) { $code = 0; last; }
+        $code = core::atoi(substr($line, 0, 3));
+        if (length($line) == 3 || substr($line, 3, 1) ne "-") { last; }
     }
 
     $self->{"last_code"} = $code;
@@ -283,14 +330,27 @@ func helo(scalar $self, str $domain) int {
     return ($code == 250);
 }
 
-# EHLO command - extended greeting (returns capabilities)
+# EHLO command - extended greeting (capabilities: see supports())
 func ehlo(scalar $self, str $domain) int {
     my int $code = SMTP::command($self, "EHLO " . $domain);
+    if ($code == 250) { $self->{"ehlo"} = uc($self->{"last_response"}); }
     return ($code == 250);
 }
 
-# STARTTLS - upgrade connection to TLS
-# Note: Requires reconnecting with SSL after this
+# Did the last EHLO advertise this extension (e.g. "STARTTLS", "AUTH")?
+func supports(scalar $self, str $ext) int {
+    my str $caps = "" . $self->{"ehlo"};
+    my str $e = uc($ext);
+    foreach my str $line (split("\r\n", $caps)) {
+        if (length($line) < 4) { next; }
+        my str $rest = substr($line, 4, length($line) - 4);
+        if ($rest eq $e || index($rest, $e . " ") == 0) { return 1; }
+    }
+    return 0;
+}
+
+# STARTTLS - ask the server to switch to TLS. Net::SMTP_SSL::starttls()
+# sends this and then does the TLS handshake.
 func starttls(scalar $self) int {
     my int $code = SMTP::command($self, "STARTTLS");
     return ($code == 220);
@@ -302,18 +362,11 @@ func auth(scalar $self, str $username, str $password) int {
     if ($code != 334) {
         return 0;
     }
-
-    # Send base64-encoded username
-    my str $user_b64 = core::base64_encode($username);
-    $code = SMTP::command($self, $user_b64);
+    $code = SMTP::command($self, core::base64_encode($username));
     if ($code != 334) {
         return 0;
     }
-
-    # Send base64-encoded password
-    my str $pass_b64 = core::base64_encode($password);
-    $code = SMTP::command($self, $pass_b64);
-
+    $code = SMTP::command($self, core::base64_encode($password));
     return ($code == 235);
 }
 
@@ -321,9 +374,7 @@ func auth(scalar $self, str $username, str $password) int {
 func auth_plain(scalar $self, str $username, str $password) int {
     # PLAIN format: \0username\0password
     my str $auth_str = chr(0) . $username . chr(0) . $password;
-    my str $auth_b64 = core::base64_encode($auth_str);
-
-    my int $code = SMTP::command($self, "AUTH PLAIN " . $auth_b64);
+    my int $code = SMTP::command($self, "AUTH PLAIN " . core::base64_encode($auth_str));
     return ($code == 235);
 }
 
@@ -351,16 +402,10 @@ func data(scalar $self, str $message) int {
     if ($code != 354) {
         return 0;
     }
-
-    # Send message body
-    # Need to handle dot-stuffing: lines starting with . get extra .
-    my str $stuffed = SMTP::dot_stuff($message);
-
-    SMTP::send_cmd($self, $stuffed);
-
-    # Send terminating dot
+    # dot-stuffed, every line ending in CRLF, then the lone "."
+    if ($self->{"debug"} == 1) { say("C: (message, " . length($message) . " bytes)"); }
+    SMTP::send_raw($self, SMTP::dot_stuff($message));
     $code = SMTP::command($self, ".");
-
     return ($code == 250);
 }
 
@@ -385,13 +430,20 @@ func verify(scalar $self, str $address) int {
 # QUIT - close connection
 func quit(scalar $self) int {
     my int $code = SMTP::command($self, "QUIT");
-
-    if ($self->{"socket"} > 0) {
-        core::socket_close($self->{"socket"});
-        $self->{"socket"} = 0;
-    }
-
+    SMTP::close($self);
     return ($code == 221);
+}
+
+# Drop the connection (TLS too) without QUIT.
+func close(scalar $self) void {
+    my scalar $cf = $self->{"close_fn"};
+    if (defined($cf)) { $cf->(); $self->{"close_fn"} = undef; }
+    $self->{"send_fn"} = undef;
+    $self->{"recv_fn"} = undef;
+    if (defined($self->{"socket"})) {
+        core::socket_close($self->{"socket"});
+        $self->{"socket"} = undef;
+    }
 }
 
 # Get last response code
@@ -404,78 +456,44 @@ func message(scalar $self) str {
     return $self->{"last_response"};
 }
 
-# Convenience method: send a complete email
-func send_mail(scalar $self, str $from, scalar $to_list, str $subject, str $body) int {
-    # MAIL FROM
+# Send a message that already has its headers (envelope from/to given).
+func send_message(scalar $self, str $from, scalar $to_list, str $message) int {
     if (!SMTP::mail($self, $from)) {
         return 0;
     }
-
-    # RCPT TO for each recipient
-    my int $i = 0;
-    my int $count = scalar($to_list);
-    while ($i < $count) {
-        my str $rcpt = $to_list->[$i];
+    foreach my str $rcpt (@{$to_list}) {
         if (!SMTP::rcpt_to($self, $rcpt)) {
             return 0;
         }
-        $i = $i + 1;
     }
+    return SMTP::data($self, $message);
+}
 
-    # Build recipient list string
-    my str $to_str = "";
-    $i = 0;
-    while ($i < $count) {
-        if ($i > 0) {
-            $to_str = $to_str . ", ";
-        }
-        $to_str = $to_str . $to_list->[$i];
-        $i = $i + 1;
-    }
-
-    # Build message with headers
+# Convenience method: send a complete plain-text email
+func send_mail(scalar $self, str $from, scalar $to_list, str $subject, str $body) int {
     my str $msg = "From: " . $from . "\r\n";
-    $msg = $msg . "To: " . $to_str . "\r\n";
+    $msg = $msg . "To: " . join(", ", @{$to_list}) . "\r\n";
     $msg = $msg . "Subject: " . $subject . "\r\n";
+    $msg = $msg . "Date: " . core::strftime("%a, %d %b %Y %H:%M:%S +0000", core::gmtime(core::time())) . "\r\n";
     $msg = $msg . "MIME-Version: 1.0\r\n";
     $msg = $msg . "Content-Type: text/plain; charset=UTF-8\r\n";
     $msg = $msg . "\r\n";
     $msg = $msg . $body;
-
-    # Send DATA
-    return SMTP::data($self, $msg);
+    return SMTP::send_message($self, $from, $to_list, $msg);
 }
 
-# Internal: dot-stuffing for DATA command
-# Lines starting with . get an extra . prepended
+# Internal: dot-stuffing for DATA command. Lines starting with "." get an
+# extra "."; every line ends in CRLF.
 func dot_stuff(str $text) str {
-    my array @lines = split("\n", $text);
+    my str $t = $text;
+    $t =~ s/\r\n/\n/g;
+    if (length($t) > 0 && substr($t, length($t) - 1, 1) eq "\n") { $t = substr($t, 0, length($t) - 1); }
     my str $result = "";
-    my int $i = 0;
-    my int $count = size(@lines);
-
-    while ($i < $count) {
-        my str $line = $lines[$i];
-
-        # Remove any trailing \r
-        if (length($line) > 0) {
-            my str $last_ch = substr($line, length($line) - 1, 1);
-            if ($last_ch eq "\r") {
-                $line = substr($line, 0, length($line) - 1);
-            }
+    foreach my str $line (split("\n", $t)) {
+        if (length($line) > 0 && substr($line, 0, 1) eq ".") {
+            $line = "." . $line;
         }
-
-        # Dot-stuff: if line starts with ., add another .
-        if (length($line) > 0) {
-            my str $first_ch = substr($line, 0, 1);
-            if ($first_ch eq ".") {
-                $line = "." . $line;
-            }
-        }
-
         $result = $result . $line . "\r\n";
-        $i = $i + 1;
     }
-
     return $result;
 }

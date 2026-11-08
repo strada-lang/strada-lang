@@ -1,0 +1,47 @@
+use Net::SMTP;
+
+# a tiny fake SMTP server: one connection, replies sent in single packets
+func serve(scalar $srv, str $out) void {
+    my scalar $c = core::socket_accept($srv);
+    core::socket_send($c, "220 fake ESMTP\r\n");
+    my str $buf = "";
+    my str $log = "";
+    my int $in_data = 0;
+    while (1) {
+        my str $chunk = core::socket_recv($c, 4096);
+        if (!defined($chunk) || length($chunk) == 0) { last; }
+        $buf = $buf . $chunk;
+        while (index($buf, "\r\n") >= 0) {
+            my int $i = index($buf, "\r\n");
+            my str $line = substr($buf, 0, $i);
+            $buf = substr($buf, $i + 2, length($buf) - $i - 2);
+            if ($in_data == 1) {
+                if ($line eq ".") { $in_data = 0; core::socket_send($c, "250 queued\r\n"); next; }
+                $log = $log . "D:" . $line . "\n";
+                next;
+            }
+            $log = $log . "C:" . $line . "\n";
+            if (index($line, "EHLO") == 0) { core::socket_send($c, "250-fake\r\n250-AUTH LOGIN PLAIN\r\n250-SIZE 1000\r\n250 8BITMIME\r\n"); }
+            elsif ($line eq "DATA") { $in_data = 1; core::socket_send($c, "354 go\r\n"); }
+            elsif ($line eq "QUIT") { core::socket_send($c, "221 bye\r\n"); core::spew($out, $log); core::socket_close($c); return; }
+            else { core::socket_send($c, "250 ok\r\n"); }
+        }
+    }
+    core::spew($out, $log);
+}
+
+func main(int $argc, array @argv) int {
+    my int $port = core::atoi($argv[1]);
+    my str $out = $argv[2];
+    my scalar $srv = core::socket_server_host("127.0.0.1", $port, 4);
+    my int $pid = core::fork();
+    if ($pid == 0) { ::serve($srv, $out); exit(0); }
+    my scalar $smtp = SMTP::new("127.0.0.1", $port);
+    if (!defined($smtp)) { say("connect failed"); return 1; }
+    say("ehlo " . $smtp->ehlo("client.test"));
+    my array @to = ("a@x.test", "b@x.test");
+    say("send " . $smtp->send_mail("me@x.test", \@to, "Hi", "line one\n\n.dot line\nlast"));
+    say("quit " . $smtp->quit());
+    core::waitpid($pid, 0);
+    return 0;
+}

@@ -370,7 +370,7 @@ Use `core::` in user code. `sys::` is a legacy alias (the compiler normalizes
 | Function | Signature | Description |
 |---|---|---|
 | `core::socket_client(host, port)` | `str, int → scalar` | TCP connect. |
-| `core::socket_server(host, port)` | `str, int → scalar` | TCP listen socket. |
+| `core::socket_server(port)` | `int → scalar` | TCP listen socket on every address (use `socket_server_host` to bind one). |
 | `core::socket_server_backlog(host, port, backlog)` | `str, int, int → scalar` | TCP listen with explicit backlog. |
 | `core::socket_server_host(host, port, backlog)` | `str, int, int → scalar` | TCP listen bound to `host`. `""`/`"*"`/`"::"` → dual-stack; `"0.0.0.0"` → IPv4 wildcard; literal → its family. IPv6-aware. |
 | `core::socket_accept(srv)` | `scalar → scalar` | Accept a connection (IPv6/IPv4). |

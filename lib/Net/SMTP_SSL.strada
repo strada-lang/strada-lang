@@ -1,0 +1,133 @@
+/*
+ This file is part of the Strada Language (https://github.com/strada-lang/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+=head1 NAME
+
+Net::SMTP_SSL - TLS for Net::SMTP (STARTTLS and implicit TLS)
+
+=head1 SYNOPSIS
+
+    use ssl;
+    use Net::SMTP_SSL;
+
+    # submission port with STARTTLS
+    my scalar $smtp = SMTP::new("smtp.example.com", 587);
+    $smtp->ehlo("me.example.com");
+    if (!SMTP_SSL::starttls($smtp, "smtp.example.com", 1)) { die("no TLS"); }
+    $smtp->ehlo("me.example.com");          # again, over TLS
+    $smtp->auth_plain("user", "password");
+
+    # or implicit TLS (port 465)
+    my scalar $s2 = SMTP_SSL::new_tls("smtp.example.com", 465, 1);
+
+=head1 DESCRIPTION
+
+The third argument turns certificate verification on (checked against the
+system CA store and the host name). Turn it off only for testing.
+
+=cut
+
+use ssl;
+use Net::SMTP;
+
+package SMTP_SSL;
+
+__C__ {
+#include <poll.h>
+}
+
+# Wait until fd is readable (dir 1) or writable (dir 2); 0 on timeout.
+func wait_fd(int $fd, int $dir, int $ms) int {
+    my int $ok = 0;
+    __C__ {
+        struct pollfd p;
+        p.fd = (int)strada_to_int(fd);
+        p.events = strada_to_int(dir) == 2 ? POLLOUT : POLLIN;
+        p.revents = 0;
+        int r = poll(&p, 1, (int)strada_to_int(ms));
+        if (r > 0) { strada_decref(ok); ok = strada_new_int(1); }
+    }
+    return $ok;
+}
+
+func handshake(int $conn, int $fd, int $ms) int {
+    while (1) {
+        my int $r = ssl::handshake_step($conn);
+        if ($r == 0) { return 1; }
+        if ($r < 0) { return 0; }
+        if (::wait_fd($fd, $r, $ms) == 0) { return 0; }
+    }
+    return 0;
+}
+
+# Encrypt an SMTP client's connection (after STARTTLS, or straight away
+# for implicit TLS). Returns 1 on success.
+func attach(scalar $smtp, str $host, int $verify) int {
+    my scalar $sock = $smtp->{"socket"};
+    if (!defined($sock)) { return 0; }
+    my int $fd = core::socket_fd($sock);
+    my int $conn = ssl::attach_fd($fd, $verify, $host);
+    if ($conn == 0) { return 0; }
+    my int $ms = $smtp->{"timeout"} * 1000;
+    if (::handshake($conn, $fd, $ms) == 0) { ssl::close($conn); return 0; }
+    if ($verify == 1 && ssl::verify($conn) != 0) { ssl::close($conn); return 0; }
+    $smtp->{"buf"} = "";
+    $smtp->{"send_fn"} = func (str $data) {
+        my str $left = $data;
+        while (length($left) > 0) {
+            my int $n = ssl::try_write($conn, $left);
+            if ($n < 0) { return 0; }
+            if ($n == 0) {
+                if (::wait_fd($fd, ssl::want($conn), $ms) == 0) { return 0; }
+                next;
+            }
+            $left = substr($left, $n, length($left) - $n);
+        }
+        return length($data);
+    };
+    $smtp->{"recv_fn"} = func (int $max) {
+        while (1) {
+            my scalar $chunk = ssl::try_read($conn, $max);
+            if (defined($chunk)) { return $chunk; }
+            if (::wait_fd($fd, ssl::want($conn), $ms) == 0) { return ""; }
+        }
+        return "";
+    };
+    $smtp->{"close_fn"} = func () { ssl::close($conn); };
+    $smtp->{"tls"} = 1;
+    return 1;
+}
+
+# STARTTLS on a connected client. EHLO again afterwards: the server
+# forgets what was said before the switch.
+func starttls(scalar $smtp, str $host, int $verify) int {
+    if (!SMTP::starttls($smtp)) { return 0; }
+    if (::attach($smtp, $host, $verify) == 0) { SMTP::close($smtp); return 0; }
+    $smtp->{"ehlo"} = "";
+    return 1;
+}
+
+# Connect with TLS from the start (port 465). Returns the client or undef.
+func new_tls(str $host, int $port, int $verify) scalar {
+    my scalar $smtp = SMTP::make($host, $port);
+    my scalar $sock = core::socket_client($host, $port);
+    if (!defined($sock)) { return undef; }
+    $smtp->{"socket"} = $sock;
+    if (::attach($smtp, $host, $verify) == 0) { SMTP::close($smtp); return undef; }
+    if (!SMTP::greeting($smtp)) { return undef; }
+    return $smtp;
+}

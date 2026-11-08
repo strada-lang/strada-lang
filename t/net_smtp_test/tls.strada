@@ -1,0 +1,94 @@
+use ssl;
+use Net::SMTP_SSL;
+
+func srv_send(scalar $c, int $tls, str $data) void {
+    if ($tls > 0) {
+        my str $left = $data;
+        while (length($left) > 0) {
+            my int $n = ssl::try_write($tls, $left);
+            if ($n < 0) { return; }
+            if ($n == 0) { SMTP_SSL::wait_fd(core::socket_fd($c), ssl::want($tls), 5000); next; }
+            $left = substr($left, $n, length($left) - $n);
+        }
+        return;
+    }
+    core::socket_send($c, $data);
+}
+
+func srv_recv(scalar $c, int $tls) str {
+    if ($tls > 0) {
+        while (1) {
+            my scalar $r = ssl::try_read($tls, 4096);
+            if (defined($r)) { return $r; }
+            if (SMTP_SSL::wait_fd(core::socket_fd($c), ssl::want($tls), 5000) == 0) { return ""; }
+        }
+    }
+    my scalar $chunk = core::socket_recv($c, 4096);
+    if (!defined($chunk)) { return ""; }
+    return $chunk;
+}
+
+func serve(scalar $srv, int $ctx, str $out) void {
+    my scalar $c = core::socket_accept($srv);
+    my int $tls = 0;
+    ::srv_send($c, $tls, "220 fake ESMTP\r\n");
+    my str $buf = "";
+    my str $log = "";
+    my int $in_data = 0;
+    while (1) {
+        my str $chunk = ::srv_recv($c, $tls);
+        if (length($chunk) == 0) { last; }
+        $buf = $buf . $chunk;
+        while (index($buf, "\r\n") >= 0) {
+            my int $i = index($buf, "\r\n");
+            my str $line = substr($buf, 0, $i);
+            $buf = substr($buf, $i + 2, length($buf) - $i - 2);
+            if ($in_data == 1) {
+                if ($line eq ".") { $in_data = 0; ::srv_send($c, $tls, "250 queued\r\n"); next; }
+                $log = $log . "D:" . $line . "\n";
+                next;
+            }
+            my str $t = "plain";
+            if ($tls > 0) { $t = "tls"; }
+            $log = $log . $t . ":" . $line . "\n";
+            if (index($line, "EHLO") == 0) {
+                if ($tls == 0) { ::srv_send($c, $tls, "250-fake\r\n250-STARTTLS\r\n250 8BITMIME\r\n"); }
+                else { ::srv_send($c, $tls, "250-fake\r\n250-AUTH PLAIN\r\n250 8BITMIME\r\n"); }
+            } elsif ($line eq "STARTTLS") {
+                ::srv_send($c, $tls, "220 go ahead\r\n");
+                my int $fd = core::socket_fd($c);
+                $tls = ssl::attach_server_fd($ctx, $fd);
+                SMTP_SSL::handshake($tls, $fd, 5000);
+            } elsif (index($line, "AUTH PLAIN") == 0) { ::srv_send($c, $tls, "235 ok\r\n"); }
+            elsif ($line eq "DATA") { $in_data = 1; ::srv_send($c, $tls, "354 go\r\n"); }
+            elsif ($line eq "QUIT") { ::srv_send($c, $tls, "221 bye\r\n"); core::spew($out, $log); return; }
+            else { ::srv_send($c, $tls, "250 ok\r\n"); }
+        }
+    }
+    core::spew($out, $log);
+}
+
+func main(int $argc, array @argv) int {
+    my int $port = core::atoi($argv[1]);
+    my str $out = $argv[2];
+    my int $ctx = ssl::server(core::atoi($argv[5]), $argv[3], $argv[4]);
+    my scalar $srv = core::socket_server_host("127.0.0.1", $port, 4);
+    my int $pid = core::fork();
+    if ($pid == 0) { ::serve($srv, $ctx, $out); exit(0); }
+    my scalar $smtp = SMTP::new("127.0.0.1", $port);
+    say("ehlo " . $smtp->ehlo("client.test") . " starttls offered " . $smtp->supports("STARTTLS"));
+    say("starttls (verify, self-signed) " . SMTP_SSL::starttls($smtp, "localhost", 1));
+    core::waitpid($pid, 0);
+    $pid = core::fork();
+    if ($pid == 0) { ::serve($srv, $ctx, $out); exit(0); }
+    $smtp = SMTP::new("127.0.0.1", $port);
+    $smtp->ehlo("client.test");
+    say("starttls " . SMTP_SSL::starttls($smtp, "localhost", 0));
+    say("ehlo again " . $smtp->ehlo("client.test") . " auth offered " . $smtp->supports("AUTH"));
+    say("auth " . $smtp->auth_plain("u", "p"));
+    my array @to = ("a@x.test");
+    say("send " . $smtp->send_mail("me@x.test", \@to, "Secret", "over tls"));
+    say("quit " . $smtp->quit());
+    core::waitpid($pid, 0);
+    return 0;
+}
