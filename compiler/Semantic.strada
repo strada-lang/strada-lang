@@ -933,8 +933,61 @@ func register_globals(scalar $ctx, scalar $ast) void {
             $sigil = $gvar->{"sigil"};
         }
 
+        # File-level `my`/const variables are lexical, as in Perl: the same
+        # name may be declared again later (another package in the same
+        # file, or another module). Every declaration must become its own C
+        # global, and each reference binds to the nearest declaration before
+        # it in the same file. (They used to share one C name, so a second
+        # `my $X` was a C "redefinition" error.)
+        my scalar $root_vars = $scope->{"vars"};
+        my scalar $prev = $root_vars->{$name};
+        if (is_valid_node($prev) == 1 && $prev->{"is_global"} == 1) {
+            my scalar $decls = $prev->{"decls"};
+            my int $nd = size(@{$decls});
+            # later declarations get a distinct C name
+            $gvar->{"name"} = $name . "__shadow" . $nd;
+            push(@{$decls}, $gvar);
+            next;
+        }
+
         scope_add_var($scope, $name, $sigil, $var_type, $line);
+        my scalar $ginfo = $root_vars->{$name};
+        $ginfo->{"is_global"} = 1;
+        my array @first = ();
+        push(@first, $gvar);
+        $ginfo->{"decls"} = \@first;
     }
+}
+
+# "" for the main file, else the module file a node came from.
+func sem_file_key(scalar $node) str {
+    if ($node->{"from_use"} == 1) {
+        return "" . $node->{"file"};
+    }
+    return "";
+}
+
+# For a reference to a global with several file-level declarations, the C
+# name of the declaration that lexically precedes the current function.
+func resolve_shadowed_global(scalar $ctx, scalar $info, str $name) str {
+    my scalar $decls = $info->{"decls"};
+    my scalar $fn = $ctx->{"current_func"};
+    if (is_valid_node($fn) == 0) { return $name; }
+    my str $fkey = sem_file_key($fn);
+    my int $fline = ast_get_line($fn);
+    my str $best = $name;
+    my int $best_line = -1;
+    my int $i = 0;
+    while ($i < size(@{$decls})) {
+        my scalar $d = $decls->[$i];
+        my int $dl = ast_get_line($d);
+        if (sem_file_key($d) eq $fkey && $dl < $fline && $dl > $best_line) {
+            $best_line = $dl;
+            $best = $d->{"name"};
+        }
+        $i = $i + 1;
+    }
+    return $best;
 }
 
 # ============================================================
@@ -1074,6 +1127,37 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
             semantic_error($ctx, "undefined variable '" . $sigil . $name . "'", $line);
         }
         scope_mark_used($ctx->{"scope"}, $name);
+        if ($found == 1) {
+            my scalar $vinfo = $lookup_result->{"info"};
+            if ($vinfo->{"is_global"} == 1 && size(@{$vinfo->{"decls"}}) > 1) {
+                $expr->{"name"} = resolve_shadowed_global($ctx, $vinfo, $name);
+            }
+        }
+        return;
+    }
+
+    # Anonymous function: walk its body (with its params in scope) so its
+    # references resolve - e.g. to the right one of several same-named
+    # file-level globals. Closure bodies were not analyzed before, so any
+    # errors found here are discarded to keep that behaviour; current_func
+    # stays the enclosing named function, which fixes the lexical position.
+    if ($node_type == NODE_ANON_FUNC()) {
+        my scalar $af_saved_errors = $ctx->{"errors"};
+        $ctx->{"errors"} = [];
+        my scalar $af_outer = $ctx->{"scope"};
+        $ctx->{"scope"} = scope_new($af_outer);
+        my scalar $af_params = $expr->{"params"};
+        my int $af_pi = 0;
+        while ($af_pi < $expr->{"param_count"}) {
+            my scalar $af_p = $af_params->[$af_pi];
+            scope_add_var($ctx->{"scope"}, $af_p->{"name"}, $af_p->{"sigil"}, $af_p->{"param_type"}, ast_get_line($af_p));
+            $af_pi = $af_pi + 1;
+        }
+        if (is_valid_node($expr->{"body"}) == 1) {
+            analyze_block($ctx, $expr->{"body"});
+        }
+        $ctx->{"scope"} = $af_outer;
+        $ctx->{"errors"} = $af_saved_errors;
         return;
     }
 

@@ -324,6 +324,12 @@ test_output "$EXAMPLES_DIR/test_borrowed_in_nested_literals.strada" "test_borrow
 # Test: #ifdef/#ifndef/#else/#endif honoured without -D and inside `use`d modules
 test_output "$EXAMPLES_DIR/test_pp_conditionals.strada" "test_pp_conditionals" "all preprocessor conditional tests passed" "Preprocessor conditionals (no -D, modules)"
 
+# Test: file-level `my` is lexical (same name in two packages); pair-list global hash init
+test_output "$EXAMPLES_DIR/test_lexical_globals.strada" "test_lexical_globals" "all lexical global tests passed" "Lexical file-level globals / global hash init"
+
+# Test: @{f()} / %{f()} over temporaries are safe; my hash %h = %other copies
+test_output "$EXAMPLES_DIR/test_deref_temp_and_hash_copy.strada" "test_deref_temp_and_hash_copy" "all deref temp / hash copy tests passed" "Deref of temporaries / hash copy semantics"
+
 # Test: Our variable declarations
 test_output_contains "$EXAMPLES_DIR/test_our.strada" "test_our" "All our variable tests passed" "Our variables"
 

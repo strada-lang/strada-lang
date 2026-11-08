@@ -3637,6 +3637,13 @@ func needs_temp_cleanup(scalar $cg, scalar $expr) int {
     if ($type == NODE_DEREF_SCALAR() && $expr->{"sigil"} eq "$") {
         return 1;
     }
+    # @{f()} / %{f()} over an owned temporary yields an owned container
+    # (codegen uses strada_deref_*_value_owned before releasing the temp)
+    if ($type == NODE_DEREF_SCALAR() && ($expr->{"sigil"} eq "@" || $expr->{"sigil"} eq "%")) {
+        if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $expr->{"ref"}) == 1) {
+            return 1;
+        }
+    }
 
     # __PACKAGE__, __FILE__, __LINE__ produce owned StradaValue*
     if ($type == NODE_DUNDER_PACKAGE() || $type == NODE_DUNDER_FILE() || $type == NODE_DUNDER_LINE()) {

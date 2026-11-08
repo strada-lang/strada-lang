@@ -1005,9 +1005,16 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                         gen_expression($cg, $target);
                         emit($cg, "); ");
                         gen_expression($cg, $target);
-                        emit($cg, " = strada_array_copy(");
-                        gen_expression($cg, $val);
-                        emit($cg, ")");
+                        if (needs_temp_cleanup($cg, $val) == 1) {
+                            # @a = @{f()}: copy the owned temporary, then release it
+                            emit($cg, " = ({ StradaValue *__acs = ");
+                            gen_expression($cg, $val);
+                            emit($cg, "; StradaValue *__acr = strada_array_copy(__acs); strada_decref(__acs); __acr; })");
+                        } else {
+                            emit($cg, " = strada_array_copy(");
+                            gen_expression($cg, $val);
+                            emit($cg, ")");
+                        }
                     } else {
                         if ($cg->{"cleanup_enabled"} == 1) {
                             emit($cg, "({ StradaValue *__old = ");
@@ -4402,10 +4409,14 @@ func gen_expression(scalar $cg, scalar $expr) void {
             # Inner expression returns owned ref - capture and decref after deref
             emit($cg, "({ StradaValue *__dtmp = ");
             gen_expression($cg, $expr->{"ref"});
+            # @{f()} / %{f()}: the container lives inside the temporary ref,
+            # so take a reference to it BEFORE the temp is released (the
+            # borrowed form freed it: `foreach (@{f()})` read freed memory).
+            # The result is owned - see needs_temp_cleanup.
             if ($sigil eq "@") {
-                emit($cg, "; StradaValue *__dres = strada_deref_array_value(__dtmp); ");
+                emit($cg, "; StradaValue *__dres = strada_deref_array_value_owned(__dtmp); ");
             } elsif ($sigil eq "%") {
-                emit($cg, "; StradaValue *__dres = strada_deref_hash_value(__dtmp); ");
+                emit($cg, "; StradaValue *__dres = strada_deref_hash_value_owned(__dtmp); ");
             } else {
                 emit($cg, "; StradaValue *__dres = strada_deref(__dtmp); ");
             }

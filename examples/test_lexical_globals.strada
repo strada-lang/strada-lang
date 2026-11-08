@@ -1,0 +1,40 @@
+# Regressions (2026-11):
+#  1. File-level `my` variables are lexical, as in Perl: the same name may be
+#     declared again (e.g. in another package in the same file). Each
+#     declaration is its own variable and code binds to the nearest preceding
+#     one. Before, both compiled to one C global -> "redefinition of 'X'".
+#  2. A file-level hash initialized from a pair list, `my hash %h = (k => v)`,
+#     stored the flat ARRAY, so $h{"k"} found nothing.
+my hash %top = ("k" => "v", "n" => 2);
+my array @nums = (1, 2, 3);
+
+package A;
+my str $X = "from A";
+my hash %h = ("k" => "A-hash");
+func get() str { return $X . "|" . $h{"k"}; }
+func set(str $v) void { $X = $v; }
+
+package B;
+my str $X = "from B";
+my hash %h = ("k" => "B-hash");
+func get() str { return $X . "|" . $h{"k"}; }
+func local_shadow() str { my str $X = "local"; return $X; }
+func closure() scalar { return func () { return $X; }; }
+func bump() void { $h{"k"} = $h{"k"} . "+"; }
+
+package main;
+func main() int {
+    my int $bad = 0;
+    if ($top{"k"} ne "v" || $top{"n"} != 2 || scalar(keys(%top)) != 2) { say("FAIL: pair-list global hash"); $bad = 1; }
+    if (scalar(@nums) != 3) { say("FAIL: global array"); $bad = 1; }
+    A::set("A changed");
+    B::bump();
+    if (A::get() ne "A changed|A-hash") { say("FAIL: A sees " . A::get()); $bad = 1; }
+    if (B::get() ne "from B|B-hash+") { say("FAIL: B sees " . B::get()); $bad = 1; }
+    if (B::local_shadow() ne "local") { say("FAIL: local shadowing"); $bad = 1; }
+    my scalar $f = B::closure();
+    if ($f->() ne "from B") { say("FAIL: closure sees " . $f->()); $bad = 1; }
+    if ($bad == 1) { return 1; }
+    say("all lexical global tests passed");
+    return 0;
+}

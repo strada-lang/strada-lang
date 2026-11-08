@@ -4715,6 +4715,9 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
         my scalar $gvar = $mod_globals->[$i];
         $gvar->{"source_module"} = $src_module;
         $gvar->{"from_use"} = 1;
+        # defining file: lets the semantic pass bind file-level `my`
+        # variables lexically (same name declared in several files/packages)
+        $gvar->{"file"} = $file_path;
         ast_add_global($program, $gvar);
         $i = $i + 1;
     }

@@ -159,10 +159,24 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     my int $init_type = $init->{"type"};
                     # If init is a map expression, array-of-pairs, or @array variable, convert to hash
                     my int $is_array_var = $init_type == NODE_VARIABLE() && $init->{"sigil"} eq "@";
+                    my int $is_hash_src = 0;
+                    if (($init_type == NODE_VARIABLE() || $init_type == NODE_DEREF_SCALAR()) && $init->{"sigil"} eq "%") { $is_hash_src = 1; }
                     if ($init_type == NODE_MAP() || $init_type == NODE_ANON_ARRAY() || $is_array_var == 1) {
                         emit($cg, "strada_hash_from_flat_array(");
                         gen_expression($cg, $init);
                         emit($cg, ")");
+                    } elsif ($is_hash_src == 1) {
+                        # my hash %h = %other / %{$ref}: COPY, as in Perl (it used to
+                        # alias the source, so writes to %h changed the original)
+                        if (needs_temp_cleanup($cg, $init) == 1) {
+                            emit($cg, "({ StradaValue *__hcs = ");
+                            gen_expression($cg, $init);
+                            emit($cg, "; StradaValue *__hcr = strada_hash_from_ref(__hcs); strada_decref(__hcs); __hcr; })");
+                        } else {
+                            emit($cg, "strada_hash_from_ref(");
+                            gen_expression($cg, $init);
+                            emit($cg, ")");
+                        }
                     } else {
                         # Set hash context for dynamic function calls
                         if ($init_type == NODE_CALL()) {
@@ -172,11 +186,9 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                         if ($init_type == NODE_CALL()) {
                             $cg->{"call_context"} = 0;
                         }
-                        # If initializing from a variable or deref, incref to share ownership properly
+                        # Initializing from a (scalar) variable: incref to share ownership.
+                        # (%var / %{...} sources are copied above.)
                         if ($init_type == NODE_VARIABLE()) {
-                            emit($cg, "; strada_incref(" . $c_name . ")");
-                        } elsif ($init_type == NODE_DEREF_SCALAR() && $init->{"sigil"} eq "%") {
-                            # Hash deref like %{$ref} returns borrowed reference - need to incref
                             emit($cg, "; strada_incref(" . $c_name . ")");
                         }
                     }
@@ -228,9 +240,16 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     # Could be array/hash/function returning array - assign directly
                     # If source is a variable or deref, copy the array to avoid aliasing
                     if ($init_type == NODE_VARIABLE() || ($init_type == NODE_DEREF_SCALAR() && $init->{"sigil"} eq "@")) {
-                        emit($cg, "strada_array_copy(");
-                        gen_expression($cg, $init);
-                        emit($cg, ")");
+                        if (needs_temp_cleanup($cg, $init) == 1) {
+                            # @{f()} is an owned temporary: copy, then release it
+                            emit($cg, "({ StradaValue *__acs = ");
+                            gen_expression($cg, $init);
+                            emit($cg, "; StradaValue *__acr = strada_array_copy(__acs); strada_decref(__acs); __acr; })");
+                        } else {
+                            emit($cg, "strada_array_copy(");
+                            gen_expression($cg, $init);
+                            emit($cg, ")");
+                        }
                     } else {
                         # Set array context for dynamic function calls
                         if ($init_type == NODE_CALL()) {
@@ -2407,23 +2426,14 @@ func gen_function(scalar $cg, scalar $fn) void {
                 emit($cg, "    " . $name . " = ");
                 if ($sigil eq "%" || $var_type == TYPE_HASH()) {
                     if ($init) {
-                        # Handle empty () which parser returns as anon_hash
-                        if ($init->{"type"} == NODE_ANON_HASH() && $init->{"pair_count"} == 0) {
-                            emit($cg, "strada_new_hash()");
-                        } else {
-                            gen_expression($cg, $init);
-                        }
+                        # pair list -> real hash (see emit_our_global_init)
+                        emit_our_global_init($cg, $init, $sigil, $var_type);
                     } else {
                         emit($cg, "strada_new_hash()");
                     }
                 } elsif ($sigil eq "@" || $var_type == TYPE_ARRAY()) {
                     if ($init) {
-                        # Handle empty () which parser returns as anon_hash
-                        if ($init->{"type"} == NODE_ANON_HASH() && $init->{"pair_count"} == 0) {
-                            emit($cg, "strada_new_array()");
-                        } else {
-                            gen_expression($cg, $init);
-                        }
+                        emit_our_global_init($cg, $init, $sigil, $var_type);
                     } else {
                         emit($cg, "strada_new_array()");
                     }
@@ -4368,23 +4378,16 @@ func gen_global_constructor(scalar $cg) void {
 
             if ($sigil eq "%" || $var_type == TYPE_HASH()) {
                 if ($init) {
-                    # Handle empty () which parser returns as anon_hash
-                    if ($init->{"type"} == NODE_ANON_HASH() && $init->{"pair_count"} == 0) {
-                        emit($cg, "strada_new_hash()");
-                    } else {
-                        gen_expression($cg, $init);
-                    }
+                    # `my hash %h = ("k" => "v")` (a pair list) must be BUILT
+                    # into a hash, as for locals and `our` - it used to store
+                    # the flat array, so $h{"k"} found nothing.
+                    emit_our_global_init($cg, $init, $sigil, $var_type);
                 } else {
                     emit($cg, "strada_new_hash()");
                 }
             } elsif ($sigil eq "@" || $var_type == TYPE_ARRAY()) {
                 if ($init) {
-                    # Handle empty () which parser returns as anon_hash
-                    if ($init->{"type"} == NODE_ANON_HASH() && $init->{"pair_count"} == 0) {
-                        emit($cg, "strada_new_array()");
-                    } else {
-                        gen_expression($cg, $init);
-                    }
+                    emit_our_global_init($cg, $init, $sigil, $var_type);
                 } else {
                     emit($cg, "strada_new_array()");
                 }

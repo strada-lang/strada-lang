@@ -54,6 +54,8 @@ TESTS=(
     "test_ref_to_temp_and_deref_assign"
     "test_hash_literal_keys"
     "test_borrowed_in_nested_literals"
+    "test_lexical_globals"
+    "test_deref_temp_and_hash_copy"
     "test_slices"
     "test_operators"
     "test_error_handling"

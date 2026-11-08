@@ -1,0 +1,40 @@
+# Regressions (2026-11):
+#  1. @{f()} / %{f()} over a temporary returned by a call took a BORROWED
+#     pointer into the temp and then freed the temp:
+#     `foreach my $r (@{roles()})` read freed memory (crashed a web worker).
+#  2. `my hash %h = %other` / `my hash %h = %{$ref}` ALIASED the source, so
+#     writes to %h changed the original (Perl copies; arrays already did).
+func roles() scalar { return ["owner", "admin", "member"]; }
+func cfg() scalar { return {"a" => 1, "b" => 2}; }
+func main() int {
+    my int $bad = 0;
+    my str $seen = "";
+    foreach my str $r (@{roles()}) { $seen = $seen . $r . ","; }
+    if ($seen ne "owner,admin,member,") { say("FAIL: foreach over @{f()}: " . $seen); $bad = 1; }
+    my int $i = 0;
+    my int $total = 0;
+    while ($i < 100) {
+        foreach my str $r (@{roles()}) { $total = $total + length($r); }
+        my array @copy = @{roles()};
+        my hash %h = %{cfg()};
+        $total = $total + scalar(@copy) + scalar(keys(%h));
+        $i = $i + 1;
+    }
+    if ($total != 100 * (16 + 3 + 2)) { say("FAIL: totals " . $total); $bad = 1; }
+    my array @ks = sort keys(%{cfg()});
+    if (join(",", @ks) ne "a,b") { say("FAIL: keys(%{f()})"); $bad = 1; }
+
+    my hash %orig = ("a" => 1);
+    my hash %copy = %orig;
+    $copy{"b"} = 2;
+    if (scalar(keys(%orig)) != 1) { say("FAIL: my hash %copy = %orig aliased the original"); $bad = 1; }
+    my scalar $ref = {"x" => 1};
+    my hash %c2 = %{$ref};
+    $c2{"y"} = 2;
+    if (scalar(keys(%{$ref})) != 1) { say("FAIL: my hash %c = %{$ref} aliased the original"); $bad = 1; }
+    if ($c2{"x"} != 1 || $copy{"a"} != 1) { say("FAIL: copies lost data"); $bad = 1; }
+
+    if ($bad == 1) { return 1; }
+    say("all deref temp / hash copy tests passed");
+    return 0;
+}
