@@ -1757,6 +1757,7 @@ static void strada_fh_writeback_sync(FILE *fh) {
 
 /* Forward declaration for hash function used by weak ref helper */
 static unsigned int strada_hash_string(const char *str);
+static unsigned int strada_hash_bytes(const char *p, size_t len);
 
 void strada_weaken_hv_entry(StradaHash *hv, const char *key) {
     if (!hv || !key) return;
@@ -2364,6 +2365,59 @@ int strada_to_bool(StradaValue *sv) {
     }
 }
 
+/* ===== BINARY-SAFE STRING COMPARISON =====
+ * Strings may hold NUL bytes (binary data, "a\0b"), so compare bytes and
+ * lengths, never strcmp: a shorter string that is a prefix sorts first. */
+static const char *strada_cmp_bytes(StradaValue *sv, char *buf, size_t bufsz, size_t *len, char **owned) {
+    *owned = NULL;
+    if (sv && !STRADA_IS_TAGGED_INT(sv) && sv->type == STRADA_STR && !(sv->meta && sv->meta->is_tied)) {
+        const char *p = sv->value.pv;
+        if (!p) { *len = 0; return ""; }
+        size_t n = STRADA_STR_BYTELEN(sv);
+        *len = n ? n : strlen(p);
+        return p;
+    }
+    if (STRADA_IS_TAGGED_INT(sv)) {
+        strada_fast_itoa(STRADA_TAGGED_INT_VAL(sv), buf);
+        *len = strlen(buf);
+        return buf;
+    }
+    (void)bufsz;
+    char *s = strada_to_str_ss(sv);
+    *owned = s;
+    *len = s ? strlen(s) : 0;
+    return s ? s : "";
+}
+
+static int strada_cmp_mem(const char *a, size_t al, const char *b, size_t bl) {
+    size_t n = al < bl ? al : bl;
+    int c = n ? memcmp(a, b, n) : 0;
+    if (c != 0) return c;
+    return (al < bl) ? -1 : ((al > bl) ? 1 : 0);
+}
+
+int strada_sv_strcmp(StradaValue *a, StradaValue *b) {
+    char ba[32], bb[32];
+    size_t al, bl;
+    char *oa, *ob;
+    const char *pa = strada_cmp_bytes(a, ba, sizeof(ba), &al, &oa);
+    const char *pb = strada_cmp_bytes(b, bb, sizeof(bb), &bl, &ob);
+    int c = strada_cmp_mem(pa, al, pb, bl);
+    if (oa) strada_cstr_free(oa);
+    if (ob) strada_cstr_free(ob);
+    return c;
+}
+
+static int strada_sv_strcmp_lit(StradaValue *sv, const char *lit) {
+    char buf[32];
+    size_t l;
+    char *o;
+    const char *p = strada_cmp_bytes(sv, buf, sizeof(buf), &l, &o);
+    int c = strada_cmp_mem(p, l, lit, strlen(lit));
+    if (o) strada_cstr_free(o);
+    return c;
+}
+
 /* ===== STRING COMPARISON WITH C LITERALS (no temporaries) ===== */
 
 /* Compare StradaValue string to C string literal - returns 1 if equal.
@@ -2397,33 +2451,25 @@ int strada_str_ne_lit(StradaValue *sv, const char *lit) {
 /* Compare StradaValue string to C string literal - returns 1 if less than */
 int strada_str_lt_lit(StradaValue *sv, const char *lit) {
     if (!sv || !lit) return 0;
-    char buf[128];
-    const char *str = strada_to_str_buf(sv, buf, sizeof(buf));
-    return strcmp(str, lit) < 0;
+    return strada_sv_strcmp_lit(sv, lit) < 0;
 }
 
 /* Compare StradaValue string to C string literal - returns 1 if greater than */
 int strada_str_gt_lit(StradaValue *sv, const char *lit) {
     if (!sv || !lit) return 0;
-    char buf[128];
-    const char *str = strada_to_str_buf(sv, buf, sizeof(buf));
-    return strcmp(str, lit) > 0;
+    return strada_sv_strcmp_lit(sv, lit) > 0;
 }
 
 /* Compare StradaValue string to C string literal - returns 1 if less than or equal */
 int strada_str_le_lit(StradaValue *sv, const char *lit) {
     if (!sv || !lit) return 0;
-    char buf[128];
-    const char *str = strada_to_str_buf(sv, buf, sizeof(buf));
-    return strcmp(str, lit) <= 0;
+    return strada_sv_strcmp_lit(sv, lit) <= 0;
 }
 
 /* Compare StradaValue string to C string literal - returns 1 if greater than or equal */
 int strada_str_ge_lit(StradaValue *sv, const char *lit) {
     if (!sv || !lit) return 0;
-    char buf[128];
-    const char *str = strada_to_str_buf(sv, buf, sizeof(buf));
-    return strcmp(str, lit) >= 0;
+    return strada_sv_strcmp_lit(sv, lit) >= 0;
 }
 
 /* ===== INCREMENT/DECREMENT OPERATIONS ===== */
@@ -2801,11 +2847,17 @@ StradaValue* strada_array_delete_idx(StradaArray *av, int64_t idx) {
 /* `delete $h{key}`: returns the deleted value (with incref so caller
  * owns it; immortal undef singleton if key absent), removes entry.
  * Counterpart to strada_hash_delete which discards the value. */
+static StradaValue* strada_hash_delete_take_len(StradaHash *hv, const char *key, size_t key_sz);
 StradaValue* strada_hash_delete_take(StradaHash *hv, const char *key) {
     if (!hv || !key) return strada_undef_static();
+    return strada_hash_delete_take_len(hv, key, strlen(key));
+}
 
-    unsigned int hash = strada_hash_string(key);
-    uint32_t key_len = (uint32_t)strlen(key);
+static StradaValue* strada_hash_delete_take_len(StradaHash *hv, const char *key, size_t key_sz) {
+    if (!hv || !key) return strada_undef_static();
+
+    unsigned int hash = strada_hash_bytes(key, key_sz);
+    uint32_t key_len = (uint32_t)key_sz;
     uint32_t pos = hash & (hv->num_buckets - 1);
     int iters = 0;
 
@@ -2840,13 +2892,6 @@ StradaValue* strada_hash_delete_take(StradaHash *hv, const char *key) {
     }
 }
 
-StradaValue* strada_hash_delete_take_sv(StradaHash *hv, StradaValue *key_sv) {
-    if (!hv || !key_sv) return strada_undef_static();
-    char *ks = strada_to_str(key_sv);
-    StradaValue *v = strada_hash_delete_take(hv, ks);
-    free(ks);
-    return v;
-}
 
 /* Get array element from StradaValue* - safe for destructuring.
  * Always returns an OWNED reference (caller must decref).
@@ -3537,6 +3582,17 @@ static unsigned int strada_hash_string(const char *str) {
     return hash;
 }
 
+/* The same hash over a byte range (keys may hold NUL bytes); equal to
+ * strada_hash_string() for any NUL-free string. */
+static unsigned int strada_hash_bytes(const char *p, size_t len) {
+    unsigned int hash = 5381;
+    for (size_t i = 0; i < len; i++) {
+        int c = p[i];   /* promoted exactly as in strada_hash_string */
+        hash = ((hash << 5) + hash) + c;
+    }
+    return hash;
+}
+
 /* Resize hash table when load factor exceeds threshold */
 static void strada_hash_resize(StradaHash *hv) {
     if (!hv) return;
@@ -3849,10 +3905,16 @@ void strada_hash_set_take_ph(StradaHash *hv, const char *key, unsigned int hash,
  * resize. The caller must NOT mutate this hash between getting the pointer and
  * using it (perla only uses it with a side-effect-free RHS). Mirrors the
  * find-or-insert of strada_hash_set_take_ph. */
+StradaValue **strada_hv_fetch_lvalue_len(StradaHash *hv, const char *key, size_t key_sz, int autoviv);
 StradaValue **strada_hv_fetch_lvalue(StradaHash *hv, const char *key, int autoviv) {
     if (!hv || !key) return NULL;
-    unsigned int hash = strada_hash_string(key);
-    uint32_t key_len = (uint32_t)strlen(key);
+    return strada_hv_fetch_lvalue_len(hv, key, strlen(key), autoviv);
+}
+
+StradaValue **strada_hv_fetch_lvalue_len(StradaHash *hv, const char *key, size_t key_sz, int autoviv) {
+    if (!hv || !key) return NULL;
+    unsigned int hash = strada_hash_bytes(key, key_sz);
+    uint32_t key_len = (uint32_t)key_sz;
     uint32_t pos = hash & (hv->num_buckets - 1);
     uint32_t first_tombstone = HASH_EMPTY;
     int iters = 0;
@@ -3867,7 +3929,7 @@ StradaValue **strada_hv_fetch_lvalue(StradaHash *hv, const char *key, int autovi
             if (first_tombstone == HASH_EMPTY) first_tombstone = pos;
         } else {
             StradaHashEntry *e = &hv->entries[idx];
-            if (e->key->hash == hash && strcmp(e->key->data, key) == 0)
+            if (e->key->hash == hash && e->key->len == key_len && memcmp(e->key->data, key, key_len) == 0)
                 return &e->value;
         }
         pos = (pos + 1) & (hv->num_buckets - 1);
@@ -4128,6 +4190,7 @@ StradaValue* strada_autoviv_array(StradaValue *sv, const char *key) {
     return new_arr;
 }
 
+
 /* Element autovivification: fetch array element idx, auto-creating an
  * empty hash (want_array=0) or array (want_array=1) when the slot is
  * missing, a hole, undef, or a non-container. For intermediate
@@ -4254,13 +4317,17 @@ void strada_hash_delete(StradaHash *hv, const char *key) {
  * (strada_fast_itoa / %llu for UV / strada_format_double). */
 static inline const char *sv_key_extract_buf(StradaValue *key_sv,
                                              char *buf, size_t buflen,
-                                             char **alloc_out) {
+                                             char **alloc_out, size_t *len_out) {
     *alloc_out = NULL;
     if (key_sv && STRADA_IS_TAGGED_INT(key_sv)) {
         itoa_buf_bounded(STRADA_TAGGED_INT_VAL(key_sv), buf, buflen);
+        *len_out = strlen(buf);
         return buf;
     }
     if (key_sv && key_sv->type == STRADA_STR && key_sv->value.pv) {
+        /* the whole string: keys may hold NUL bytes */
+        size_t n = STRADA_STR_BYTELEN(key_sv);
+        *len_out = n ? n : strlen(key_sv->value.pv);
         return key_sv->value.pv;
     }
     if (key_sv && (!key_sv->meta || !key_sv->meta->is_tied)) {
@@ -4269,18 +4336,66 @@ static inline const char *sv_key_extract_buf(StradaValue *key_sv,
                 snprintf(buf, buflen, "%llu", (unsigned long long)(uint64_t)key_sv->value.iv);
             else
                 itoa_buf_bounded(key_sv->value.iv, buf, buflen);
+            *len_out = strlen(buf);
             return buf;
         }
         if (key_sv->type == STRADA_NUM) {
             strada_format_double(key_sv->value.nv, buf, buflen);
+            *len_out = strlen(buf);
             return buf;
         }
     }
     /* Fallback for refs/tied/other keys */
     *alloc_out = strada_to_str(key_sv);
+    *len_out = *alloc_out ? strlen(*alloc_out) : 0;
     return *alloc_out;
 }
 
+
+StradaValue* strada_hash_delete_take_sv(StradaHash *hv, StradaValue *key_sv) {
+    if (!hv || !key_sv) return strada_undef_static();
+    char key_buf[SV_KEYBUF_LEN];
+    char *key_alloc;
+    size_t key_sz = 0;
+    const char *key = sv_key_extract_buf(key_sv, key_buf, sizeof(key_buf), &key_alloc, &key_sz);
+    StradaValue *v = key ? strada_hash_delete_take_len(hv, key, key_sz) : strada_undef_static();
+    if (key_alloc) free(key_alloc);
+    return v;
+}
+
+
+/* strada_autoviv_hash / strada_autoviv_array with the key as a value: every
+ * byte of the key counts (keys may hold NUL bytes). */
+static StradaValue* autoviv_container_sv(StradaValue *sv, StradaValue *key_sv, int want_array) {
+    if (!sv || STRADA_IS_TAGGED_INT(sv) || (sv->meta && sv->meta->is_tied)) {
+        char *ks = strada_to_str_ss(key_sv);
+        StradaValue *r = want_array ? strada_autoviv_array(sv, ks) : strada_autoviv_hash(sv, ks);
+        strada_cstr_free(ks);
+        return r;
+    }
+    StradaHash *hv = strada_deref_hash(sv);
+    if (!hv) return want_array ? strada_new_array() : strada_new_hash();
+    char key_buf[SV_KEYBUF_LEN];
+    char *key_alloc;
+    size_t key_sz = 0;
+    const char *key = sv_key_extract_buf(key_sv, key_buf, sizeof(key_buf), &key_alloc, &key_sz);
+    if (!key) { if (key_alloc) free(key_alloc); return want_array ? strada_new_array() : strada_new_hash(); }
+    StradaValue **slot = strada_hv_fetch_lvalue_len(hv, key, key_sz, 1);
+    if (key_alloc) free(key_alloc);
+    if (!slot) return want_array ? strada_new_array() : strada_new_hash();
+    StradaValue *val = *slot;
+    int ok = val && !STRADA_IS_TAGGED_INT(val) &&
+             (val->type == STRADA_REF || val->type == (want_array ? STRADA_ARRAY : STRADA_HASH));
+    if (!ok) {
+        StradaValue *fresh = want_array ? strada_new_array() : strada_new_hash();
+        strada_decref(val);
+        *slot = fresh;
+        return fresh;
+    }
+    return val;
+}
+StradaValue* strada_autoviv_hash_sv(StradaValue *sv, StradaValue *key_sv) { return autoviv_container_sv(sv, key_sv, 0); }
+StradaValue* strada_autoviv_array_sv(StradaValue *sv, StradaValue *key_sv) { return autoviv_container_sv(sv, key_sv, 1); }
 
 StradaValue **strada_hv_fetch_lvalue_sv_key(StradaValue *sv, StradaValue *key_sv, int autoviv) {
     if (!sv || STRADA_IS_TAGGED_INT(sv)) return NULL;
@@ -4289,9 +4404,10 @@ StradaValue **strada_hv_fetch_lvalue_sv_key(StradaValue *sv, StradaValue *key_sv
     if (!hv) return NULL;
     char key_buf[SV_KEYBUF_LEN];
     char *key_alloc;
-    const char *key = sv_key_extract_buf(key_sv, key_buf, sizeof(key_buf), &key_alloc);   /* STR key: no strdup */
+    size_t key_sz = 0;
+    const char *key = sv_key_extract_buf(key_sv, key_buf, sizeof(key_buf), &key_alloc, &key_sz);   /* STR key: no strdup */
     if (!key) { if (key_alloc) free(key_alloc); return NULL; }
-    StradaValue **slot = strada_hv_fetch_lvalue(hv, key, autoviv);  /* ss_new copies key */
+    StradaValue **slot = strada_hv_fetch_lvalue_len(hv, key, key_sz, autoviv);  /* ss_new copies key */
     if (key_alloc) free(key_alloc);
     return slot;
 }
@@ -4300,11 +4416,12 @@ void strada_hash_set_sv(StradaHash *hv, StradaValue *key_sv, StradaValue *sv) {
     if (!hv) return;
     char key_buf[SV_KEYBUF_LEN];
     char *key_alloc;
-    const char *key = sv_key_extract_buf(key_sv, key_buf, sizeof(key_buf), &key_alloc);
+    size_t key_sz = 0;
+    const char *key = sv_key_extract_buf(key_sv, key_buf, sizeof(key_buf), &key_alloc, &key_sz);
     if (!key) { if (key_alloc) free(key_alloc); return; }
 
-    unsigned int hash = strada_hash_string(key);
-    uint32_t key_len = (uint32_t)strlen(key);
+    unsigned int hash = strada_hash_bytes(key, key_sz);
+    uint32_t key_len = (uint32_t)key_sz;
     uint32_t pos = hash & (hv->num_buckets - 1);
     uint32_t first_tombstone = HASH_EMPTY;
 
@@ -4371,11 +4488,12 @@ StradaValue* strada_hash_get_sv(StradaHash *hv, StradaValue *key_sv) {
     if (!hv) return strada_undef_static();
     char key_buf[SV_KEYBUF_LEN];
     char *key_alloc;
-    const char *key = sv_key_extract_buf(key_sv, key_buf, sizeof(key_buf), &key_alloc);
+    size_t key_sz = 0;
+    const char *key = sv_key_extract_buf(key_sv, key_buf, sizeof(key_buf), &key_alloc, &key_sz);
     if (!key) { if (key_alloc) free(key_alloc); return strada_undef_static(); }
 
-    unsigned int hash = strada_hash_string(key);
-    uint32_t key_len = (uint32_t)strlen(key);
+    unsigned int hash = strada_hash_bytes(key, key_sz);
+    uint32_t key_len = (uint32_t)key_sz;
     uint32_t pos = hash & (hv->num_buckets - 1);
     int iters = 0;
 
@@ -4484,8 +4602,16 @@ static void hv_compound_fallback(StradaValue *sv, const char *key,
 /* op is '+', '-', '*', '/' or '.'. rhs is BORROWED. hash must equal
  * strada_hash_string(key) (codegen passes a compile-time djb2 for
  * ASCII literal keys). */
+static void strada_hv_compound_len(StradaValue *sv, const char *key, size_t key_sz, unsigned int hash,
+                                   StradaValue *rhs, int op);
 void strada_hv_compound_ph(StradaValue *sv, const char *key, unsigned int hash,
                            StradaValue *rhs, int op) {
+    if (!key) return;
+    strada_hv_compound_len(sv, key, strlen(key), hash, rhs, op);
+}
+
+static void strada_hv_compound_len(StradaValue *sv, const char *key, size_t key_sz, unsigned int hash,
+                                   StradaValue *rhs, int op) {
     if (!sv || STRADA_IS_TAGGED_INT(sv) || !key) return;
     if (__builtin_expect(sv->meta && (sv->meta->is_tied || sv->meta->is_hash_locked), 0)) {
         hv_compound_fallback(sv, key, rhs, op);
@@ -4493,7 +4619,7 @@ void strada_hv_compound_ph(StradaValue *sv, const char *key, unsigned int hash,
     }
     StradaHash *hv = strada_deref_hash(sv);
     if (!hv) return;  /* non-hash: matches the old fetch(undef)/store no-op */
-    uint32_t key_len = (uint32_t)strlen(key);
+    uint32_t key_len = (uint32_t)key_sz;
     StradaValue **slot = hash_lvalue_slot(hv, key, key_len, hash);
     if (!slot) {
         /* Missing key: combine against undef, insert once (reusing the
@@ -4524,9 +4650,10 @@ void strada_hv_compound(StradaValue *sv, const char *key, StradaValue *rhs, int 
 void strada_hv_compound_sv(StradaValue *sv, StradaValue *key_sv, StradaValue *rhs, int op) {
     char key_buf[SV_KEYBUF_LEN];
     char *key_alloc;
-    const char *key = sv_key_extract_buf(key_sv, key_buf, sizeof(key_buf), &key_alloc);
+    size_t key_sz = 0;
+    const char *key = sv_key_extract_buf(key_sv, key_buf, sizeof(key_buf), &key_alloc, &key_sz);
     if (!key) { if (key_alloc) free(key_alloc); return; }
-    strada_hv_compound_ph(sv, key, strada_hash_string(key), rhs, op);
+    strada_hv_compound_len(sv, key, key_sz, strada_hash_bytes(key, key_sz), rhs, op);
     if (key_alloc) free(key_alloc);
 }
 
@@ -4572,11 +4699,12 @@ int strada_hash_exists_sv(StradaHash *hv, StradaValue *key_sv) {
     if (!hv) return 0;
     char key_buf[SV_KEYBUF_LEN];
     char *key_alloc;
-    const char *key = sv_key_extract_buf(key_sv, key_buf, sizeof(key_buf), &key_alloc);
+    size_t key_sz = 0;
+    const char *key = sv_key_extract_buf(key_sv, key_buf, sizeof(key_buf), &key_alloc, &key_sz);
     if (!key) { if (key_alloc) free(key_alloc); return 0; }
 
-    unsigned int hash = strada_hash_string(key);
-    uint32_t key_len = (uint32_t)strlen(key);
+    unsigned int hash = strada_hash_bytes(key, key_sz);
+    uint32_t key_len = (uint32_t)key_sz;
     uint32_t pos = hash & (hv->num_buckets - 1);
     int iters = 0;
 
@@ -4608,11 +4736,12 @@ void strada_hash_delete_sv(StradaHash *hv, StradaValue *key_sv) {
     if (!hv) return;
     char key_buf[SV_KEYBUF_LEN];
     char *key_alloc;
-    const char *key = sv_key_extract_buf(key_sv, key_buf, sizeof(key_buf), &key_alloc);
+    size_t key_sz = 0;
+    const char *key = sv_key_extract_buf(key_sv, key_buf, sizeof(key_buf), &key_alloc, &key_sz);
     if (!key) { if (key_alloc) free(key_alloc); return; }
 
-    unsigned int hash = strada_hash_string(key);
-    uint32_t key_len = (uint32_t)strlen(key);
+    unsigned int hash = strada_hash_bytes(key, key_sz);
+    uint32_t key_len = (uint32_t)key_sz;
     uint32_t pos = hash & (hv->num_buckets - 1);
     int iters = 0;
 

@@ -2294,8 +2294,7 @@ func gen_binop_node(scalar $cg, scalar $expr) void {
                 gen_expression($cg, $left);
                 emit($cg, "; StradaValue *__cmp_rv = ");
                 gen_expression($cg, $right);
-                emit($cg, "; char *__sl = strada_to_str_ss(__cmp_lv); char *__sr = strada_to_str_ss(__cmp_rv); ");
-                emit($cg, "int __cmp_res = strcmp(__sl, __sr); strada_cstr_free(__sl); strada_cstr_free(__sr); ");
+                emit($cg, "; int __cmp_res = strada_sv_strcmp(__cmp_lv, __cmp_rv); ");
                 if ($left_needs_cleanup == 1) {
                     emit($cg, "strada_decref(__cmp_lv); ");
                 }
@@ -2304,11 +2303,11 @@ func gen_binop_node(scalar $cg, scalar $expr) void {
                 }
                 emit($cg, "strada_new_int((__cmp_res < 0) ? -1 : ((__cmp_res > 0) ? 1 : 0)); })");
             } else {
-                emit($cg, "strada_new_int(({ char *__sl = strada_to_str_ss(");
+                emit($cg, "strada_new_int(({ int __cmp_res = strada_sv_strcmp(");
                 gen_expression($cg, $left);
-                emit($cg, "); char *__sr = strada_to_str_ss(");
+                emit($cg, ", ");
                 gen_expression($cg, $right);
-                emit($cg, "); int __cmp_res = strcmp(__sl, __sr); strada_cstr_free(__sl); strada_cstr_free(__sr); (__cmp_res < 0) ? -1 : ((__cmp_res > 0) ? 1 : 0); }))");
+                emit($cg, "); (__cmp_res < 0) ? -1 : ((__cmp_res > 0) ? 1 : 0); }))");
             }
         } elsif ($op eq "=~") {
             # Regex match with string pattern (no flags)
@@ -4046,10 +4045,10 @@ func gen_expression(scalar $cg, scalar $expr) void {
             } else {
                 emit($cg, "({ StradaValue *__av_k = ");
                 gen_expression($cg, $key_expr);
-                emit($cg, "; char *__av_ks = strada_to_str_ss(__av_k); StradaValue *__av_r = " . $av_fn . "(");
+                emit($cg, "; StradaValue *__av_r = " . $av_fn . "_sv(");
                 if ($av_propagate == 1) { $cg->{"autoviv"} = 1; }
                 gen_expression($cg, $expr->{"hash"});
-                emit($cg, ", __av_ks); strada_cstr_free(__av_ks); ");
+                emit($cg, ", __av_k); ");
                 if (needs_temp_cleanup($cg, $key_expr) == 1) {
                     emit($cg, "strada_decref(__av_k); ");
                 }
@@ -4304,10 +4303,10 @@ func gen_expression(scalar $cg, scalar $expr) void {
             } else {
                 emit($cg, "({ StradaValue *__av_k = ");
                 gen_expression($cg, $key_expr);
-                emit($cg, "; char *__av_ks = strada_to_str_ss(__av_k); StradaValue *__av_r = " . $dh_av_fn . "(");
+                emit($cg, "; StradaValue *__av_r = " . $dh_av_fn . "_sv(");
                 if ($dh_propagate == 1) { $cg->{"autoviv"} = 1; }
                 gen_expression($cg, $expr->{"ref"});
-                emit($cg, ", __av_ks); strada_cstr_free(__av_ks); ");
+                emit($cg, ", __av_k); ");
                 if (needs_temp_cleanup($cg, $key_expr) == 1) {
                     emit($cg, "strada_decref(__av_k); ");
                 }

@@ -946,18 +946,38 @@ static void dbi_clear_bindings(DbiStatement *sth) {
 }
 
 /* Bind a StradaValue directly - handles type detection and proper memory management */
+/* A parameter's bytes and length: strings are copied whole (they may hold
+ * NUL bytes - images, any binary data); other values are stringified.
+ * Returns a malloc'd, NUL-terminated buffer. */
+static char *dbi_value_bytes(StradaValue *val, unsigned long *len) {
+    if (val && !STRADA_IS_TAGGED_INT(val) && val->type == STRADA_STR
+        && !(val->meta && val->meta->is_tied)) {
+        size_t n = STRADA_STR_BYTELEN(val);
+        char *p = malloc(n + 1);
+        if (!p) { *len = 0; return NULL; }
+        if (n > 0 && val->value.pv) memcpy(p, val->value.pv, n);
+        p[n] = 0;
+        *len = (unsigned long)n;
+        return p;
+    }
+    char *s = strada_to_str(val);
+    *len = s ? (unsigned long)strlen(s) : 0;
+    return s;
+}
+
 static void dbi_bind_value(DbiStatement *sth, int idx, StradaValue *val) {
     if (!sth || !sth->dbh || !val) return;
 
-    /* Get the string representation of the value - MUST be freed! */
-    char *str = strada_to_str(val);
+    /* The value's bytes (binary-safe) - MUST be freed! */
+    unsigned long str_len = 0;
+    char *str = dbi_value_bytes(val, &str_len);
 
     switch (sth->dbh->driver) {
 #ifdef HAVE_SQLITE3
         case DBI_DRIVER_SQLITE:
             if (str) {
                 /* SQLITE_TRANSIENT makes SQLite copy the string, so we can free it */
-                sqlite3_bind_text((sqlite3_stmt*)sth->stmt, idx, str, -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text((sqlite3_stmt*)sth->stmt, idx, str, (int)str_len, SQLITE_TRANSIENT);
             } else {
                 sqlite3_bind_null((sqlite3_stmt*)sth->stmt, idx);
             }
@@ -987,7 +1007,7 @@ static void dbi_bind_value(DbiStatement *sth, int idx, StradaValue *val) {
             if (str) {
                 /* Use the str directly instead of strdup - we own it now */
                 sth->mysql_param_buffers[param_idx] = str;
-                sth->mysql_param_lengths[param_idx] = strlen(str);
+                sth->mysql_param_lengths[param_idx] = str_len;
                 sth->mysql_param_nulls[param_idx] = 0;
                 sth->mysql_param_binds[param_idx].buffer_type = MYSQL_TYPE_STRING;
                 sth->mysql_param_binds[param_idx].buffer = sth->mysql_param_buffers[param_idx];
@@ -1176,7 +1196,15 @@ static char* dbi_column_str(DbiStatement *sth, int idx) {
 #ifdef HAVE_MYSQL
         case DBI_DRIVER_MYSQL: {
             if (!sth->mysql_buffers || sth->mysql_nulls[idx]) return strdup("");
-            return strdup(sth->mysql_buffers[idx]);
+            {
+                unsigned long n = sth->mysql_lengths ? sth->mysql_lengths[idx] : strlen(sth->mysql_buffers[idx]);
+                if (sth->mysql_buffer_sizes && n > sth->mysql_buffer_sizes[idx]) n = sth->mysql_buffer_sizes[idx];
+                char *p = malloc(n + 1);
+                if (!p) return strdup("");
+                memcpy(p, sth->mysql_buffers[idx], n);
+                p[n] = 0;
+                return p;
+            }
         }
 #endif
 #ifdef HAVE_POSTGRES
@@ -1194,6 +1222,19 @@ static char* dbi_column_str(DbiStatement *sth, int idx) {
 }
 
 /* Check if column is null */
+/* Byte length of a column's value in the current row (strings may hold NULs). */
+static unsigned long dbi_column_len(DbiStatement *sth, int idx, const char *str) {
+#ifdef HAVE_MYSQL
+    if (sth && sth->dbh && sth->dbh->driver == DBI_DRIVER_MYSQL && sth->mysql_lengths
+        && idx >= 0 && idx < sth->num_columns && !sth->mysql_nulls[idx]) {
+        unsigned long n = sth->mysql_lengths[idx];
+        if (sth->mysql_buffer_sizes && n > sth->mysql_buffer_sizes[idx]) n = sth->mysql_buffer_sizes[idx];
+        return n;
+    }
+#endif
+    return str ? (unsigned long)strlen(str) : 0;
+}
+
 static int dbi_column_is_null(DbiStatement *sth, int idx) {
     if (!sth || !sth->dbh) return 1;
     if (idx < 0 || idx >= sth->num_columns) return 1;
@@ -1747,7 +1788,7 @@ func fetchrow_array(scalar $sth) scalar {
             int_val = strada_new_int(dbi_column_int(s, idx));
             num_val = strada_new_num(dbi_column_num(s, idx));
             char *str = dbi_column_str(s, idx);
-            str_val = strada_new_str(str);
+            str_val = strada_new_str_len(str, dbi_column_len(s, idx, str));
             free(str);
         }
 
@@ -1815,7 +1856,7 @@ func fetchrow_hashref(scalar $sth) scalar {
             int_val = strada_new_int(dbi_column_int(s, idx));
             num_val = strada_new_num(dbi_column_num(s, idx));
             char *str = dbi_column_str(s, idx);
-            str_val = strada_new_str(str);
+            str_val = strada_new_str_len(str, dbi_column_len(s, idx, str));
             free(str);
         }
 

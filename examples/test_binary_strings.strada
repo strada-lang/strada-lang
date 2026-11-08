@@ -1,0 +1,35 @@
+# Strings may hold NUL bytes: comparisons and hash keys use every byte.
+func main() int {
+    my int $fail = 0;
+    my str $nul = core::pack("C", 0);
+    my str $a = "Wile" . $nul . "Coyote";
+    my str $b = "Wile";
+    if ($a eq $b) { say("FAIL eq stops at NUL"); $fail = 1; }
+    if (!($a ne $b)) { say("FAIL ne"); $fail = 1; }
+    if (($a cmp $b) != 1 || ($b cmp $a) != -1 || ($a cmp $a) != 0) { say("FAIL cmp"); $fail = 1; }
+    if (!($b lt $a) || !($a gt $b) || !($b le $a) || !($a ge $b)) { say("FAIL ordering"); $fail = 1; }
+    if ($a eq "Wile") { say("FAIL eq literal"); $fail = 1; }
+    if ($a lt "Wile" || !($a gt "Wile")) { say("FAIL ordering vs literal"); $fail = 1; }
+    if (!(($nul . "x") gt "")) { say("FAIL NUL-led string vs empty"); $fail = 1; }
+
+    my hash %h = ();
+    $h{$a} = 1;
+    $h{$b} = 2;
+    if (scalar(keys(%h)) != 2) { say("FAIL keys collide"); $fail = 1; }
+    if ($h{$a} != 1 || $h{$b} != 2) { say("FAIL fetch"); $fail = 1; }
+    if (!exists($h{$a})) { say("FAIL exists"); $fail = 1; }
+    my int $found = 0;
+    foreach my str $k (keys(%h)) { if ($k eq $a && bytes($k) == 11) { $found = 1; } }
+    if ($found == 0) { say("FAIL keys() lost bytes"); $fail = 1; }
+    $h{$a} .= "x";
+    if ($h{$a} ne "1x" || $h{$b} != 2) { say("FAIL compound assign"); $fail = 1; }
+    $h{$a . "!"}{"deep"} = 5;
+    if ($h{$a . "!"}{"deep"} != 5 || exists($h{"Wile"}{"deep"})) { say("FAIL nested autoviv"); $fail = 1; }
+    my scalar $gone = delete($h{$a});
+    if ("" . $gone ne "1x" || exists($h{$a}) || !exists($h{$b})) { say("FAIL delete"); $fail = 1; }
+
+    my array @s = sort ($a, $b, "Wile" . $nul);
+    if (bytes($s[0]) != 4 || bytes($s[1]) != 5 || bytes($s[2]) != 11) { say("FAIL sort"); $fail = 1; }
+    if ($fail == 0) { say("all binary string tests passed"); }
+    return $fail;
+}

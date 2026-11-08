@@ -714,6 +714,7 @@ void strada_arena_end(void);             /* Free the current arena wholesale */
 int  strada_arena_active(void);          /* 1 if an arena is currently active */
 
 /* String comparison with C literals (no temporaries) */
+int strada_sv_strcmp(StradaValue *a, StradaValue *b);  /* binary-safe <0, 0, >0 */
 int strada_str_eq_lit(StradaValue *sv, const char *lit);
 int strada_str_ne_lit(StradaValue *sv, const char *lit);
 int strada_str_lt_lit(StradaValue *sv, const char *lit);
@@ -779,6 +780,8 @@ StradaValue **strada_hv_fetch_lvalue_sv_key(StradaValue *sv, StradaValue *key_sv
 void strada_hash_set_ss_take(StradaHash *hv, StradaString *key_ss, StradaValue *sv);
 StradaValue* strada_hash_get(StradaHash *hv, const char *key);
 StradaValue* strada_autoviv_hash(StradaValue *sv, const char *key);
+StradaValue* strada_autoviv_hash_sv(StradaValue *sv, StradaValue *key_sv);   /* binary-safe key */
+StradaValue* strada_autoviv_array_sv(StradaValue *sv, StradaValue *key_sv);
 StradaValue* strada_autoviv_array(StradaValue *sv, const char *key);
 StradaValue* strada_autoviv_elem_hash(StradaValue *arr_sv, int64_t idx);
 StradaValue* strada_autoviv_elem_array(StradaValue *arr_sv, int64_t idx);

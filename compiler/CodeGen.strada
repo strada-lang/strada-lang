@@ -1986,10 +1986,9 @@ func gen_str_cmp(scalar $cg, scalar $expr, str $op) void {
         gen_expression($cg, $left);
         emit($cg, "; StradaValue *__cmp_rv = ");
         gen_expression($cg, $right);
-        emit($cg, "; char *__cmp_ls = strada_to_str_ss(__cmp_lv); char *__cmp_rs = strada_to_str_ss(__cmp_rv); ");
-        emit($cg, "int __cmp_res = strcmp(__cmp_ls, __cmp_rs) ");
+        emit($cg, "; int __cmp_res = strada_sv_strcmp(__cmp_lv, __cmp_rv) ");
         emit($cg, $cmp_op);
-        emit($cg, "; strada_cstr_free(__cmp_ls); strada_cstr_free(__cmp_rs); ");
+        emit($cg, "; ");
         if ($left_needs_cleanup == 1) {
             emit($cg, "strada_decref(__cmp_lv); ");
         }
@@ -1998,13 +1997,13 @@ func gen_str_cmp(scalar $cg, scalar $expr, str $op) void {
         }
         emit($cg, "strada_new_int(__cmp_res); })");
     } else {
-        emit($cg, "({ char *__cmp_ls = strada_to_str_ss(");
+        emit($cg, "({ int __cmp_res = strada_sv_strcmp(");
         gen_expression($cg, $left);
-        emit($cg, "); char *__cmp_rs = strada_to_str_ss(");
+        emit($cg, ", ");
         gen_expression($cg, $right);
-        emit($cg, "); int __cmp_res = strcmp(__cmp_ls, __cmp_rs) ");
+        emit($cg, ") ");
         emit($cg, $cmp_op);
-        emit($cg, "; strada_cstr_free(__cmp_ls); strada_cstr_free(__cmp_rs); strada_new_int(__cmp_res); })");
+        emit($cg, "; strada_new_int(__cmp_res); })");
     }
 }
 

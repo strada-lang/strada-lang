@@ -62,6 +62,20 @@ func main() int {
     DBI::rollback($dbh);
     check(count_s($dbh, "doomed") == 0, "rollback after an error");
 
+    # Binary data (NUL bytes) round-trips intact through bind and fetch
+    DBI::do_sql($dbh, "CREATE TEMPORARY TABLE strada_dbi_mysql_bin (id INT AUTO_INCREMENT PRIMARY KEY, b MEDIUMBLOB NOT NULL, t VARCHAR(40) NOT NULL)");
+    my str $bin = "";
+    for (my int $k = 0; $k < 1200; $k = $k + 1) { $bin = $bin . core::pack("C", $k % 256); }
+    my str $txt = "Wile" . chr(0) . "Coyote";
+    DBI::exec($dbh, "INSERT INTO strada_dbi_mysql_bin (b, t) VALUES (?, ?)", [$bin, $txt]);
+    check(("" . DBI::selectcol($dbh, "SELECT LENGTH(b) FROM strada_dbi_mysql_bin", [])) eq "1200", "a binary parameter is stored whole");
+    my scalar $brow = DBI::selectrow_hashref($dbh, "SELECT b, t FROM strada_dbi_mysql_bin", []);
+    check(defined($brow) && bytes($brow->{"b"}) == 1200 && $brow->{"b"} eq $bin, "a binary column is fetched whole (hash row)");
+    check(defined($brow) && $brow->{"t"} eq $txt, "a NUL inside text survives");
+    my scalar $brows = DBI::selectall_arrayref_bind($dbh, "SELECT b FROM strada_dbi_mysql_bin", []);
+    check(defined($brows) && scalar(@{$brows}) == 1 && $brows->[0]->[0] eq $bin, "a binary column is fetched whole (array row)");
+    check(defined(DBI::selectrow_hashref($dbh, "SELECT id FROM strada_dbi_mysql_bin WHERE b = ?", [$bin])), "a binary value matches in WHERE");
+
     DBI::disconnect($dbh);
     if ($g_fail > 0) { say("FAIL: " . $g_fail . " DBI MySQL check(s) failed"); return 1; }
     say("PASS: All DBI MySQL tests passed");

@@ -24,7 +24,7 @@ else
         log_fail "DBI MySQL" "compile failed, see $my_log"
     elif "$my_exe" >> "$my_log" 2>&1 && grep -q "PASS: All DBI MySQL tests passed" "$my_log"; then
         PASSED=$((PASSED + 1))
-        log_pass "DBI MySQL (transactions, empty string vs NULL)"
+        log_pass "DBI MySQL (transactions, empty string vs NULL, binary data)"
     else
         FAILED=$((FAILED + 1))
         log_fail "DBI MySQL" "see $my_log"
