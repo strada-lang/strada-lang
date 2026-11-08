@@ -1,0 +1,14 @@
+# A class defined after main(), constructed through its generated new(),
+# must have its methods registered and be blessed with its Strada name.
+package main;
+func build() scalar { return Late::Thing::new("name", "x"); }
+func main() int {
+    my scalar $o = build();
+    if (blessed($o) ne "Late::Thing") { say("FAIL blessed " . blessed($o)); return 1; }
+    if ($o->hello() ne "hi x") { say("FAIL method"); return 1; }
+    say("all class after main tests passed");
+    return 0;
+}
+package Late::Thing;
+has ro str $name = "";
+func hello(scalar $self) str { return "hi " . $self->name(); }

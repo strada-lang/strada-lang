@@ -3669,6 +3669,19 @@ func gen_program(scalar $cg, scalar $program) void {
     # In module-only mode, skip bodies that belong to other packages — their
     # forward declarations were already emitted, and their definitions live in
     # the other module's .o.
+    # Track every package method first: main() (generated in this loop)
+    # registers the methods of all packages, including ones defined later in
+    # the file.
+    $i = 0;
+    while ($i < $program->{"function_count"}) {
+        my scalar $tfn = $funcs->[$i];
+        my str $tfn_pkg = $tfn->{"package"};
+        if (cg_skip_for_module($program, $tfn->{"from_use"}) == 0 && length($tfn_pkg) > 0 && $tfn_pkg ne "main") {
+            codegen_track_method($cg, $tfn, $tfn_pkg);
+        }
+        $i = $i + 1;
+    }
+
     $i = 0;
     while ($i < $program->{"function_count"}) {
         my scalar $fn = $funcs->[$i];
@@ -3691,12 +3704,7 @@ func gen_program(scalar $cg, scalar $program) void {
             gen_function($cg, $fn);
         }
 
-        # Track method for OOP registration using the function's stored package
-        # (check package string directly - parser always sets it)
-        if (length($fn_pkg) > 0 && $fn_pkg ne "main") {
-            codegen_track_method($cg, $fn, $fn_pkg);
-        }
-
+        # (methods were tracked for OOP registration before this loop)
         $i = $i + 1;
     }
 

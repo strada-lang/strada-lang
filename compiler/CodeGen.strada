@@ -1002,7 +1002,7 @@ func is_inline_setter(scalar $cg, str $method) str {
         my str $a_pkg = $ha_attrs->[$hi]->{"package"};
         my int $a_rw = $ha_attrs->[$hi]->{"rw"};
         if ($a_name eq $attr_name && $a_rw == 1) {
-            if ($a_pkg eq $pkg || exists($acc_lookup, $a_pkg . "\t" . $attr_name)) {
+            if ($a_pkg eq $pkg || is_subclass_compile_time($cg, $pkg, $a_pkg, 0) == 1) {
                 # Check no method override for the setter
                 my str $override = $pkg . "_set_" . $attr_name;
                 my scalar $funcs = $cg->{"functions"};
@@ -1527,6 +1527,16 @@ func strada_pkg_for_c(scalar $cg, str $c_pkg) str {
     while ($i < $ic) {
         my str $ch = $inh->[$i]->{"child"};
         if (pkg_c_safe($ch) eq $c_pkg) { return $ch; }
+        $i = $i + 1;
+    }
+    # has-attribute declarations are collected for the whole program up
+    # front, so they also know classes defined later in the file
+    my scalar $ha = $cg->{"has_attrs"};
+    my int $hc = $cg->{"has_attr_count"} + 0;
+    $i = 0;
+    while ($i < $hc) {
+        my str $hp = $ha->[$i]->{"package"};
+        if (pkg_c_safe($hp) eq $c_pkg) { return $hp; }
         $i = $i + 1;
     }
     return $c_pkg;
@@ -2816,7 +2826,7 @@ func expr_is_int_typed(scalar $cg, scalar $expr) int {
                 while ($hai < $ha_count) {
                     my str $attr_name = $ha_attrs->[$hai]->{"name"};
                     my str $attr_pkg = $ha_attrs->[$hai]->{"package"};
-                    if ($attr_name eq $method && ($attr_pkg eq $cur_pkg || exists($acc_lookup, $attr_pkg . "\t" . $method))) {
+                    if ($attr_name eq $method && ($attr_pkg eq $cur_pkg || is_subclass_compile_time($cg, $cur_pkg, $attr_pkg, 0) == 1)) {
                         my int $at = $ha_attrs->[$hai]->{"attr_type"};
                         if ($at == TYPE_INT()) {
                             return 1;

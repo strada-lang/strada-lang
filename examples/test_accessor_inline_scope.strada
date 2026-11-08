@@ -1,0 +1,16 @@
+# $self->c() inside a method must call the method c(), not inline a has-attribute
+# named c that belongs to an unrelated class.
+package AccReq;
+has ro scalar $c;
+package AccCtl;
+has ro scalar $req;
+func c(scalar $self) scalar { return $self->req()->c(); }
+func status(scalar $self) str { return $self->c()->{"s"}; }
+package main;
+func main() int {
+    my scalar $req = AccReq::new("c", {"s" => "ok"});
+    my scalar $ctl = AccCtl::new("req", $req);
+    if ($ctl->status() ne "ok") { say("FAIL"); return 1; }
+    say("all accessor inline tests passed");
+    return 0;
+}

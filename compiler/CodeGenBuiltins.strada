@@ -8618,7 +8618,9 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
                             gen_expression($cg, $vexpr);
                             emit($cg, "; strada_incref(__ct_v" . $cs_uid . "); strada_hash_set_ss_take(__ct_ref->value.rv->value.hv, __attr_ss" . $cs_uid . ", __ct_v" . $cs_uid . "); ");
                         }
-                        emit($cg, "}); ");
+                        # one attribute per line: long constructors otherwise make a
+                        # single C line gcc stops column-tracking
+                        emit($cg, "});\n");
                         $ci = $ci + 2;
                     }
                     # Apply defaults from has_attrs (own + parent packages)

@@ -337,6 +337,8 @@ test_output "$EXAMPLES_DIR/test_builtin_temp_args.strada" "test_builtin_temp_arg
 test_output "$EXAMPLES_DIR/test_str_builtin_temp_keys.strada" "test_str_builtin_temp_keys" "all str builtin temp key tests passed" "str:: builtin results used as keys are released"
 test_output "$EXAMPLES_DIR/test_method_errors_catchable.strada" "test_method_errors_catchable" "all method error tests passed" "Missing/unblessed/SUPER method calls throw catchable errors"
 test_output "$EXAMPLES_DIR/test_reftype_blessed.strada" "test_reftype_blessed" "all reftype tests passed" "reftype() ignores bless"
+test_output "$EXAMPLES_DIR/test_class_after_main.strada" "test_class_after_main" "all class after main tests passed" "Classes defined after main()"
+test_output "$EXAMPLES_DIR/test_accessor_inline_scope.strada" "test_accessor_inline_scope" "all accessor inline tests passed" "Accessor inlining only for the class and its ancestors"
 
 # Test: Our variable declarations
 test_output_contains "$EXAMPLES_DIR/test_our.strada" "test_our" "All our variable tests passed" "Our variables"

@@ -2417,7 +2417,7 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
                     while ($hai < $ha_count) {
                         my str $attr_name = $ha_attrs->[$hai]->{"name"};
                         my str $attr_pkg = $ha_attrs->[$hai]->{"package"};
-                        if ($attr_name eq $method && ($attr_pkg eq $cur_pkg || exists($acc_lookup, $attr_pkg . "\t" . $method))) {
+                        if ($attr_name eq $method && ($attr_pkg eq $cur_pkg || is_subclass_compile_time($cg, $cur_pkg, $attr_pkg, 0) == 1)) {
                             $is_accessor = 1;
                         }
                         $hai = $hai + 1;
