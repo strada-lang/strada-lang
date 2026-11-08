@@ -26,6 +26,20 @@ func main() int {
     if (scalar(@f) != 1 || $f[0] ne "wile") { say("FAIL builtin scalar"); $fail = 1; }
     my array @g = split(",", "x,y,z");
     if (scalar(@g) != 3) { say("FAIL builtin array"); $fail = 1; }
+    my array @h = ({"v" => 1});
+    push(@h, {"v" => 2});
+    if (scalar(@h) != 2 || $h[0]->{"v"} != 1) { say("FAIL single hash literal"); $fail = 1; }
+    my array @i = ();
+    @i = ({"v" => 1});
+    if (scalar(@i) != 1) { say("FAIL assign hash literal"); $fail = 1; }
+    @i = five();
+    if (scalar(@i) != 1 || $i[0] != 5) { say("FAIL assign scalar call"); $fail = 1; }
+    @i = ($r->id());
+    if (scalar(@i) != 1) { say("FAIL assign method"); $fail = 1; }
+    @i = pair();
+    if (scalar(@i) != 2) { say("FAIL assign array call"); $fail = 1; }
+    @i = nothing();
+    if (scalar(@i) != 0) { say("FAIL assign undef"); $fail = 1; }
     if ($fail == 0) { say("all array from scalar call tests passed"); }
     return $fail;
 }

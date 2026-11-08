@@ -215,6 +215,12 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     emit($cg, "strada_read_all_lines(" . escape_c_keyword($varname) . ")");
                 } elsif ($init_type == NODE_ANON_HASH() && $init->{"pair_count"} == 0) {
                     emit($cg, "strada_new_array()");
+                } elsif ($init_type == NODE_ANON_HASH()) {
+                    # my array @a = ({"k" => 1}): a one-element list holding
+                    # that hash (it used to leave @a unusable)
+                    emit($cg, "({ StradaValue *__lw = strada_new_array(); strada_array_push_take(__lw->value.av, ");
+                    gen_expression($cg, $init);
+                    emit($cg, "); __lw; })");
                 } elsif ($init_type == NODE_ANON_ARRAY()) {
                     # Array literal like [1, 2, 3] - generate directly
                     gen_expression($cg, $init);
