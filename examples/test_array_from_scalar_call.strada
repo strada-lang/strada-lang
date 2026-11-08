@@ -21,6 +21,11 @@ func main() int {
     if (scalar(@d) != 2) { say("FAIL array method"); $fail = 1; }
     my array @e = nothing();
     if (scalar(@e) != 0) { say("FAIL undef"); $fail = 1; }
+    my str $nm = "Wile";
+    my array @f = (lc($nm));
+    if (scalar(@f) != 1 || $f[0] ne "wile") { say("FAIL builtin scalar"); $fail = 1; }
+    my array @g = split(",", "x,y,z");
+    if (scalar(@g) != 3) { say("FAIL builtin array"); $fail = 1; }
     if ($fail == 0) { say("all array from scalar call tests passed"); }
     return $fail;
 }
