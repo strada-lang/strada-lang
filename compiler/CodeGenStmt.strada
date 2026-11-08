@@ -3710,6 +3710,7 @@ func gen_program(scalar $cg, scalar $program) void {
         }
         $i = $i + 1;
     }
+    check_override_signatures($cg, $program);
 
     $i = 0;
     while ($i < $program->{"function_count"}) {
@@ -4624,3 +4625,91 @@ func generate(scalar $ast, str $filename, int $debug_info, int $enable_profiling
     gen_program($cg, $ast);
     return get_output($cg);  # Join array into final string
 }
+
+
+# A method that overrides an inherited one with a different number of
+# parameters is almost always a mistake: the parent class's own calls
+# ($self->page(403, ...)) silently run the override with the wrong
+# arguments. Warn (always: it is too easy to miss) with both locations.
+# Only methods (first parameter $self) defined in the file being compiled.
+func check_override_signatures(scalar $cg, scalar $program) void {
+    my scalar $funcs = $program->{"functions"};
+    my hash %by = ();
+    my int $i = 0;
+    while ($i < $program->{"function_count"}) {
+        my scalar $fn = $funcs->[$i];
+        $i = $i + 1;
+        if ($fn->{"type"} == NODE_EXTERN_FUNC()) { next; }
+        my str $pkg = "" . $fn->{"package"};
+        if (length($pkg) == 0 || $pkg eq "main") { next; }
+        my int $pc = $fn->{"param_count"};
+        if ($pc < 1) { next; }
+        my scalar $p0 = $fn->{"params"}->[0];
+        if (!defined($p0) || ("" . $p0->{"name"}) ne "self") { next; }
+        my str $name = sanitize_name("" . $fn->{"name"});
+        my str $prefix = sanitize_name($pkg) . "_";
+        if (length($name) <= length($prefix) || substr($name, 0, length($prefix)) ne $prefix) { next; }
+        my str $method = substr($name, length($prefix), length($name) - length($prefix));
+        $by{$pkg . "\t" . $method} = $fn;
+    }
+    my scalar $inh = $cg->{"inherits"};
+    my int $ic = $cg->{"inherit_count"} + 0;
+    my array @keys = keys(%by);
+    my int $ki = 0;
+    # (a while loop: the frozen bootstrap compiler mis-scopes foreach locals)
+    while ($ki < scalar(@keys)) {
+        my str $key = $keys[$ki];
+        $ki = $ki + 1;
+        my scalar $fn = $by{$key};
+        my int $tab = index($key, "\t");
+        my str $pkg = substr($key, 0, $tab);
+        my str $method = substr($key, $tab + 1, length($key) - $tab - 1);
+        my array @queue = ($pkg);
+        my hash %seen = ();
+        my scalar $hit = $fn;
+        my int $found = 0;
+        my str $hit_pkg = "";
+        my int $qi = 0;
+        my int $mine = 0;
+        my int $theirs = 0;
+        my str $where = "" . $cg->{"filename"};
+        my int $line = $fn->{"line"} + 0;
+        my str $at = "";
+        my str $theirs_at = "";
+        my str $noun = "arguments";
+        my int $skip = 0;
+        if ($fn->{"from_use"}) { $skip = 1; }
+        if ($fn->{"is_variadic"} == 1) { $skip = 1; }
+        if ($method eq "new" || $method eq "BUILD" || $method eq "DESTROY" || substr($method, 0, 1) eq "_") { $skip = 1; }
+        # nearest ancestor that defines the method (breadth first)
+        while ($skip == 0 && $qi < scalar(@queue) && $found == 0) {
+            my str $cur = $queue[$qi];
+            $qi = $qi + 1;
+            my int $k = 0;
+            while ($k < $ic) {
+                if (("" . $inh->[$k]->{"child"}) eq $cur) {
+                    my str $par = "" . $inh->[$k]->{"parent"};
+                    if (!exists(%seen, $par)) {
+                        $seen{$par} = 1;
+                        if ($found == 0 && exists(%by, $par . "\t" . $method)) { $hit = $by{$par . "\t" . $method}; $hit_pkg = $par; $found = 1; }
+                        push(@queue, $par);
+                    }
+                }
+                $k = $k + 1;
+            }
+        }
+        if ($skip == 0 && $found == 1 && $hit->{"is_variadic"} != 1) {
+            $mine = $fn->{"param_count"} - 1;
+            $theirs = $hit->{"param_count"} - 1;
+            if ($mine != $theirs) {
+                if (length($where) > 0 && $line > 0) { $at = $where . ":" . $line . ": "; }
+                if (!$hit->{"from_use"} && $hit->{"line"} + 0 > 0) { $theirs_at = " (line " . ($hit->{"line"} + 0) . ")"; }
+                if ($mine == 1) { $noun = "argument"; }
+                warn($at . "warning: " . $pkg . "::" . $method . " takes " . $mine . " " . $noun
+                    . " but overrides " . $hit_pkg . "::" . $method . $theirs_at . ", which takes " . $theirs
+                    . "; calls of " . $method . "() made by " . $hit_pkg . " will run the override with the wrong arguments (rename one of them)");
+            }
+        }
+    }
+}
+
