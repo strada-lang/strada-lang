@@ -30,6 +30,13 @@ func main() int {
 
     my array @s = sort ($a, $b, "Wile" . $nul);
     if (bytes($s[0]) != 4 || bytes($s[1]) != 5 || bytes($s[2]) != 11) { say("FAIL sort"); $fail = 1; }
+    my array @sp = split(",", "a" . $nul . "b,c");
+    if (scalar(@sp) != 2 || bytes($sp[0]) != 3) { say("FAIL split (one-char delimiter)"); $fail = 1; }
+    my array @mp = split("--B", "x" . $nul . "y--Bz" . $nul);
+    if (scalar(@mp) != 2 || bytes($mp[0]) != 3 || bytes($mp[1]) != 2) { say("FAIL split (multi-char delimiter)"); $fail = 1; }
+    my str $re = ",+";
+    my array @rp = split($re, "a" . $nul . "b,,c");
+    if (scalar(@rp) != 2 || bytes($rp[0]) != 3) { say("FAIL split (pattern)"); $fail = 1; }
     if ($fail == 0) { say("all binary string tests passed"); }
     return $fail;
 }

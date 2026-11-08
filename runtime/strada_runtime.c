@@ -12113,6 +12113,12 @@ static int has_regex_meta(const char *s) {
     return 0;
 }
 
+/* One piece of a split subject: by length (it may hold NUL bytes), keeping
+ * the subject's UTF-8 flag. */
+static StradaValue *split_piece(const char *p, size_t n) {
+    return strada_regex_subject_utf8 ? strada_new_str_len_utf8(p, n) : strada_new_str_len(p, n);
+}
+
 static StradaArray* strada_regex_split_raw(const char *str, const char *pattern) {
     /* Fast path: if pattern has no regex metacharacters, use plain string split */
     if (!has_regex_meta(pattern)) {
@@ -12150,12 +12156,7 @@ static StradaArray* strada_regex_split_raw(const char *str, const char *pattern)
 
         if (!skip_part) {
             /* Add part before match (chunk from current chunk-start to match) */
-            size_t part_len = match_start - offset;
-            char *part = malloc(part_len + 1);
-            memcpy(part, str + offset, part_len);
-            part[part_len] = '\0';
-            strada_array_push_take(parts, strada_new_str(part));
-            free(part);
+            strada_array_push_take(parts, split_piece(str + offset, match_start - offset));
         }
 
         /* Perl semantics: if the split pattern has capture groups, insert
@@ -12169,12 +12170,7 @@ static StradaArray* strada_regex_split_raw(const char *str, const char *pattern)
             if (cs == PCRE2_UNSET) {
                 strada_array_push_take(parts, strada_new_undef());
             } else {
-                size_t cl = ce - cs;
-                char *cpart = malloc(cl + 1);
-                memcpy(cpart, str + cs, cl);
-                cpart[cl] = '\0';
-                strada_array_push_take(parts, strada_new_str(cpart));
-                free(cpart);
+                strada_array_push_take(parts, split_piece(str + cs, ce - cs));
             }
         }
 
@@ -12193,7 +12189,7 @@ static StradaArray* strada_regex_split_raw(const char *str, const char *pattern)
 
     /* Add remaining part */
     if (offset <= subject_length) {
-        strada_array_push_take(parts, strada_new_str(str + offset));
+        strada_array_push_take(parts, split_piece(str + offset, subject_length - offset));
     }
 
     strada_md_release(match_data);
@@ -12237,12 +12233,7 @@ static StradaArray* strada_regex_split_limit_raw(const char *str, const char *pa
         int skip_part = (first_iter && match_start == 0 && match_end == match_start);
         first_iter = 0;
         if (!skip_part) {
-            size_t part_len = match_start - offset;
-            char *part = malloc(part_len + 1);
-            memcpy(part, str + offset, part_len);
-            part[part_len] = '\0';
-            strada_array_push_take(parts, strada_new_str(part));
-            free(part);
+            strada_array_push_take(parts, split_piece(str + offset, match_start - offset));
             chunks++;
         }
         /* Captures are inserted between adjacent chunks but do NOT count
@@ -12255,12 +12246,7 @@ static StradaArray* strada_regex_split_limit_raw(const char *str, const char *pa
             if (cs == PCRE2_UNSET) {
                 strada_array_push_take(parts, strada_new_undef());
             } else {
-                size_t cl = ce - cs;
-                char *cpart = malloc(cl + 1);
-                memcpy(cpart, str + cs, cl);
-                cpart[cl] = '\0';
-                strada_array_push_take(parts, strada_new_str(cpart));
-                free(cpart);
+                strada_array_push_take(parts, split_piece(str + cs, ce - cs));
             }
         }
         if (match_end == match_start) {
@@ -12280,7 +12266,7 @@ static StradaArray* strada_regex_split_limit_raw(const char *str, const char *pa
 
     /* push the remainder as one element (may be empty) */
     if (offset <= subject_length) {
-        strada_array_push_take(parts, strada_new_str(str + offset));
+        strada_array_push_take(parts, split_piece(str + offset, subject_length - offset));
     } else {
         strada_array_push_take(parts, strada_new_str(""));
     }
@@ -13136,17 +13122,18 @@ static StradaArray* strada_string_split_raw(const char *str, const char *delim) 
         return parts;
     }
 
-    /* Multi-character delimiter — use strstr */
+    /* Multi-character delimiter — memmem over the whole subject (it may hold NULs) */
     const char *p = str;
+    const char *end = str + str_len;
     const char *found;
 
-    while ((found = strstr(p, delim)) != NULL) {
+    while (p <= end && (found = memmem(p, (size_t)(end - p), delim, delim_len)) != NULL) {
         strada_array_push_take(parts, strada_new_str_len(p, found - p));
         p = found + delim_len;
     }
 
     /* Add remaining part */
-    strada_array_push_take(parts, strada_new_str(p));
+    strada_array_push_take(parts, strada_new_str_len(p, end - p));
 
     return parts;
 }
