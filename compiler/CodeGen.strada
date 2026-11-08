@@ -1509,6 +1509,39 @@ func get_oop_packages(scalar $cg) scalar {
     return $cg->{"pkg_list"};
 }
 
+# The Strada package name ("Base::Model") for a C-safe one ("Base_Model"):
+# objects must be blessed with the name methods and inheritance are
+# registered under. Falls back to the given name.
+func strada_pkg_for_c(scalar $cg, str $c_pkg) str {
+    my scalar $pl = $cg->{"pkg_list"};
+    my int $n = $cg->{"pkg_count"} + 0;
+    my int $i = 0;
+    while ($i < $n) {
+        my str $p = $pl->[$i];
+        if (pkg_c_safe($p) eq $c_pkg) { return $p; }
+        $i = $i + 1;
+    }
+    my scalar $inh = $cg->{"inherits"};
+    my int $ic = $cg->{"inherit_count"} + 0;
+    $i = 0;
+    while ($i < $ic) {
+        my str $ch = $inh->[$i]->{"child"};
+        if (pkg_c_safe($ch) eq $c_pkg) { return $ch; }
+        $i = $i + 1;
+    }
+    return $c_pkg;
+}
+
+func pkg_c_safe(str $p) str {
+    my str $out = $p;
+    my int $ci = index($out, "::");
+    while ($ci >= 0) {
+        $out = substr($out, 0, $ci) . "_" . substr($out, $ci + 2, length($out) - $ci - 2);
+        $ci = index($out, "::");
+    }
+    return $out;
+}
+
 # Get count of packages
 func get_oop_pkg_count(scalar $cg) int {
     return $cg->{"pkg_count"};

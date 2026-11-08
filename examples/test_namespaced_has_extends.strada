@@ -1,0 +1,31 @@
+# Moose-style classes with namespaced names: the generated constructor must
+# bless with the Strada name (App::Contact), the one methods and inheritance
+# are registered under, not the C name (App_Contact).
+package App::Model;
+has rw str $name = "";
+has rw int $id = 0;
+func label(scalar $self) str { return "model:" . $self->name(); }
+func describe(scalar $self) str { return $self->kind() . "/" . $self->label(); }
+func kind(scalar $self) str { return "model"; }
+
+package App::Contact;
+extends App::Model;
+has rw str $email = "";
+func kind(scalar $self) str { return "contact"; }
+func label(scalar $self) str { return "contact:" . SUPER::label($self); }
+
+package main;
+func build_contact(str $k, str $v) scalar { return App::Contact::new($k, $v); }
+func main() int {
+    my int $fail = 0;
+    my scalar $c = App::Contact::new("name", "Wile", "email", "w\@acme.test");
+    if (blessed($c) ne "App::Contact") { say("FAIL blessed name " . blessed($c)); $fail = 1; }
+    if ($c->describe() ne "contact/contact:model:Wile") { say("FAIL inherited method " . $c->describe()); $fail = 1; }
+    if ($c->isa("App::Model") != 1) { say("FAIL isa"); $fail = 1; }
+    my scalar $d = build_contact("name", "Road");
+    if ($d->describe() ne "contact/contact:model:Road") { say("FAIL non-literal constructor"); $fail = 1; }
+    my scalar $n = App::Contact::new("id", 4, "name", "Ints");
+    if ($n->id() != 4 || $n->kind() ne "contact") { say("FAIL int-valued constructor"); $fail = 1; }
+    if ($fail == 0) { say("all namespaced has/extends tests passed"); }
+    return $fail;
+}

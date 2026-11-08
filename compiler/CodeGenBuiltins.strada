@@ -8494,7 +8494,7 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
                             # Emit fused call.
                             my int $fbn = $cg->{"tmp_counter"} + 0;
                             $cg->{"tmp_counter"} = $fbn + 1;
-                            emit($cg, "({ static char *__fpkg" . $fbn . " = NULL; if (__builtin_expect(!__fpkg" . $fbn . ", 0)) __fpkg" . $fbn . " = strada_intern_pkg_name(\"" . $pkg_name . "\"); ");
+                            emit($cg, "({ static char *__fpkg" . $fbn . " = NULL; if (__builtin_expect(!__fpkg" . $fbn . ", 0)) __fpkg" . $fbn . " = strada_intern_pkg_name(\"" . strada_pkg_for_c($cg, $pkg_name) . "\"); ");
                             my int $nattr = $arg_count / 2;
                             my array @fss_ids = ();
                             my int $fai = 0;
@@ -8590,7 +8590,7 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
                     # on every construction.
                     my int $bn_uid = $cg->{"tmp_counter"} + 0;
                     $cg->{"tmp_counter"} = $bn_uid + 1;
-                    emit($cg, "{ static char *__pkg_n" . $bn_uid . " = NULL; if (__builtin_expect(!__pkg_n" . $bn_uid . ", 0)) __pkg_n" . $bn_uid . " = strada_intern_pkg_name(\"" . $pkg_name . "\"); strada_bless_cached(__ct_ref, __pkg_n" . $bn_uid . "); } ");
+                    emit($cg, "{ static char *__pkg_n" . $bn_uid . " = NULL; if (__builtin_expect(!__pkg_n" . $bn_uid . ", 0)) __pkg_n" . $bn_uid . " = strada_intern_pkg_name(\"" . strada_pkg_for_c($cg, $pkg_name) . "\"); strada_bless_cached(__ct_ref, __pkg_n" . $bn_uid . "); } ");
                     my int $ci = 0;
                     while ($ci < $arg_count) {
                         my str $key_val = $args->[$ci]->{"value"};

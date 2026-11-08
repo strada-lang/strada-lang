@@ -331,6 +331,7 @@ test_output "$EXAMPLES_DIR/test_lexical_globals.strada" "test_lexical_globals" "
 test_output "$EXAMPLES_DIR/test_deref_temp_and_hash_copy.strada" "test_deref_temp_and_hash_copy" "all deref temp / hash copy tests passed" "Deref of temporaries / hash copy semantics"
 test_output "$EXAMPLES_DIR/test_keyword_function_names.strada" "test_keyword_function_names" "all keyword function name tests passed" "Keywords (has, extends, with) as function names"
 test_output "$EXAMPLES_DIR/test_foreach_early_exit_cleanup.strada" "test_foreach_early_exit_cleanup" "all foreach early exit cleanup tests passed" "Early exits from foreach keep the cleanup stack in step"
+test_output "$EXAMPLES_DIR/test_namespaced_has_extends.strada" "test_namespaced_has_extends" "all namespaced has/extends tests passed" "Moose-style classes with :: names inherit methods"
 
 # Test: Our variable declarations
 test_output_contains "$EXAMPLES_DIR/test_our.strada" "test_our" "All our variable tests passed" "Our variables"
