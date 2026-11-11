@@ -48,6 +48,15 @@ Compute SHA-256 hash. Returns 32 bytes of raw binary data.
 
 Compute SHA-256 hash. Returns 64-character lowercase hex string.
 
+=head2 hmac_sha256($key, $data)
+
+HMAC-SHA256 (RFC 2104) of binary data with a binary key; raw 32 bytes.
+For AWS SigV4, webhook signatures, signed URLs.
+
+=head2 hmac_sha256_hex($key, $data)
+
+The same, as a 64-character hex string.
+
 =head2 sha1($data)
 
 Compute SHA-1 hash. Returns 20 bytes of raw binary data.
@@ -354,6 +363,60 @@ func sha256_hex(str $data) str {
         bytes_to_hex_impl(hash, 32, hex);
 
         free(input);
+        strada_decref(result);
+        result = strada_new_str(hex);
+    }
+    return $result;
+}
+
+# HMAC-SHA256 (RFC 2104) of binary-safe key and data, raw 32 bytes.
+func hmac_sha256(str $key, str $data) str {
+    my str $result = "";
+    __C__ {
+        char *k = strada_to_str(key);
+        size_t klen = strada_str_len(key);
+        char *d = strada_to_str(data);
+        size_t dlen = strada_str_len(data);
+        uint8_t kb[64];
+        uint8_t pad[64];
+        uint8_t inner[32];
+        uint8_t mac[32];
+        SHA256_CTX_IMPL ctx;
+        memset(kb, 0, sizeof(kb));
+        if (klen > 64) {
+            sha256_init_impl(&ctx);
+            sha256_update_impl(&ctx, (const uint8_t *)k, klen);
+            sha256_final_impl(&ctx, kb);
+        } else {
+            memcpy(kb, k, klen);
+        }
+        for (int i = 0; i < 64; i++) pad[i] = kb[i] ^ 0x36;
+        sha256_init_impl(&ctx);
+        sha256_update_impl(&ctx, pad, 64);
+        sha256_update_impl(&ctx, (const uint8_t *)d, dlen);
+        sha256_final_impl(&ctx, inner);
+        for (int i = 0; i < 64; i++) pad[i] = kb[i] ^ 0x5c;
+        sha256_init_impl(&ctx);
+        sha256_update_impl(&ctx, pad, 64);
+        sha256_update_impl(&ctx, inner, 32);
+        sha256_final_impl(&ctx, mac);
+        free(k);
+        free(d);
+        strada_decref(result);
+        result = strada_new_str_len((char *)mac, 32);
+    }
+    return $result;
+}
+
+# HMAC-SHA256 as a 64-character hex string.
+func hmac_sha256_hex(str $key, str $data) str {
+    my str $raw = ::hmac_sha256($key, $data);
+    my str $result = "";
+    __C__ {
+        char *r = strada_to_str(raw);
+        char hex[65];
+        bytes_to_hex_impl((const uint8_t *)r, 32, hex);
+        free(r);
         strada_decref(result);
         result = strada_new_str(hex);
     }
