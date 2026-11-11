@@ -16,7 +16,8 @@ Strada is a strongly-typed programming language inspired by Perl. It compiles to
 ```bash
 ./configure                 # Detect dependencies (MySQL, PostgreSQL, OpenSSL, etc.)
 make                        # Build self-hosting compiler (./stradac) via full bootstrap chain
-make quick                  # Fast compiler edit/test loop (~30s vs ~7min) — see below
+make quick                  # Fast compiler edit/test loop (~4s with tcc, ~30s without) — see below
+QUICK=1 make test-suite     # Fast suite: tests via tcc, delegated builds at -O0 — see below
 make DEV=1                  # Build everything at -O0 (fast compile, slower binaries)
 make libs                   # Build libraries (DBI, crypt, ssl, readline)
 make tools                  # Build tools (stradadoc, strada-soinfo, strada-proftext, strada-profhtml, etc.)
@@ -45,6 +46,36 @@ caveats:
 - It requires a working `./stradac` already on disk (run `make` once first).
 - It does **not** exercise the frozen bootstrap or verify the self-host fixpoint.
   Before committing, run `make` (full bootstrap build) and `make test-selfhost`.
+
+**tcc (2026-11)**: when `tcc` is on PATH, both throwaway compilers — `make quick`'s and
+the stage-1 compiler of a full `make` — compile their generated C with tcc and
+link with `$(CC)` (the `TCC_COMPILER` macro in the
+Makefile): ~0.2s instead of ~20s of gcc `-O0`, so the `make quick` loop is ~4s and stage 1 builds in 0.3s instead of ~28s
+(the stage-2 `Combined.c` it emits is byte-identical). Without
+tcc it uses gcc `-O0` as before. The macro swaps only the anchored `#include`
+line to `strada_runtime_tcc.h` (never a string literal — the compiler's own
+source mentions the header name), treats tcc's "implicit declaration" WARNING as
+a failure (a runtime function missing from `strada_runtime_tcc.h` would become
+an implicit `int` → truncated pointer → a compiler that crashes at run time),
+and falls back to gcc `-O0` on any tcc/link failure. If you see "tcc build
+failed -- falling back", add the named prototype to `strada_runtime_tcc.h`.
+
+**`QUICK` environment variable (opt-in; unset/empty/`0` = off)** — test-suite
+shortcuts that change *what gets exercised*, so they are never the default:
+
+- `QUICK=1 ./t/run_tests.sh` (or `QUICK=1 make test-suite`): implies
+  `STRADA_TEST_TCC=1` (tests compile with tcc, link with gcc; gcc only for tests
+  tcc can't compile) and `STRADA_DEFAULT_OPT=0` (the delegated `t/*/run.sh`
+  scenarios build at `-O0` instead of `-O2`+LTO). ~35s vs ~85s+ warm. Explicit
+  settings of either variable win. Run the suite without `QUICK` before committing.
+- `STRADA_DEFAULT_OPT=0|1|2|3|s|fast` is a driver knob (`parse_args` in
+  `tools/strada-driver.strada`): the opt level when no `-O` flag is given.
+
+Unconditional (output-neutral) companions: the final `stradac` rule and the test
+runner's gcc path compile and link as **two** commands, because ccache never
+caches a command that links (the one-step forms were 100% cache misses). The
+test runner compiles from inside its build dir on a relative file name — the dir
+contains the run's PID, and an absolute path would defeat the cache.
 
 Note also that the stage-1 compiler is throwaway (its only job is to regenerate
 `Combined.c`), so it is now built at `-O0` (`FAST_CFLAGS`) regardless of `DEV`,

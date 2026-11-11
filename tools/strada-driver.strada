@@ -352,6 +352,14 @@ func setup() void {
 # ---------------------------------------------------------------------------
 
 func parse_args(array @av) void {
+    # STRADA_DEFAULT_OPT=0|1|2|3|s|fast (a leading "-O" is accepted): the
+    # optimization level when no -O flag is given. An explicit -O still wins.
+    # The test suite sets it to 0 under QUICK=1 (skips the -O2 LTO link).
+    my str $dopt = env("STRADA_DEFAULT_OPT");
+    if (sw($dopt, "-O")) { $dopt = substr($dopt, 2, length($dopt) - 2); }
+    if ($dopt eq "0" || $dopt eq "1" || $dopt eq "2" || $dopt eq "3" || $dopt eq "s" || $dopt eq "fast") {
+        $OPT_LEVEL = $dopt;
+    }
     my int $i = 0;
     my int $n = size(@av);
     while ($i < $n) {

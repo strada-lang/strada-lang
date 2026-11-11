@@ -503,6 +503,7 @@ StradaValue* strada_ref_create_take(StradaValue *sv);
 StradaValue* strada_ref_deref(StradaValue *ref);
 int strada_is_ref(StradaValue *sv);
 const char* strada_reftype(StradaValue *ref);
+const char* strada_reftype_raw(StradaValue *ref);
 StradaValue* strada_ref_scalar(StradaValue **ptr);
 StradaValue* strada_ref_array(StradaArray **ptr);
 StradaValue* strada_ref_hash(StradaHash **ptr);
@@ -983,6 +984,8 @@ StradaValue* strada_realpath(StradaValue *path);
  * (int-returning, pointer-truncating) declaration. */
 StradaValue* sys_realpath(StradaValue *path);
 StradaValue* sys_mkdir(StradaValue *path, StradaValue *mode);
+StradaValue* sys_file_mtime(StradaValue *path);    /* alias used by bootstrap codegen */
+int getpid(void);                                 /* bootstrap codegen emits a bare getpid() */
 StradaValue* strada_dirname(StradaValue *path);
 StradaValue* strada_basename(StradaValue *path);
 StradaValue* strada_glob(StradaValue *pattern);
@@ -1135,6 +1138,7 @@ StradaValue* strada_dl_call_str_sv(StradaValue *func_ptr, StradaValue *args);
 StradaValue* strada_dl_call_void_sv(StradaValue *func_ptr, StradaValue *args);
 StradaValue* strada_dl_call_sv(StradaValue *func_ptr, StradaValue *args);
 StradaValue* strada_dl_open_raw(StradaValue *path);
+StradaValue* strada_read_meta_section(StradaValue *path_sv);
 StradaValue* strada_dl_sym_raw(StradaValue *handle_sv, StradaValue *symbol);
 StradaValue* strada_dl_close_raw(StradaValue *handle_sv);
 StradaValue* strada_dl_call_export_info(StradaValue *fn_ptr_sv);

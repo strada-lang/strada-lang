@@ -69,6 +69,18 @@ if [ -z "${STRADA_TEST_NO_FASTLD:-}" ]; then
     fi
 fi
 
+# QUICK=1 (unset, empty or 0 = off): trade backend coverage for speed.
+#   - tests compile with tcc and link with gcc (as STRADA_TEST_TCC=1), so the
+#     gcc code generator is only exercised by tests tcc can't compile;
+#   - `strada` builds that pass no -O flag (the delegated t/*/run.sh scenarios)
+#     build at -O0 instead of -O2 + LTO, via STRADA_DEFAULT_OPT.
+# An explicit STRADA_TEST_TCC / STRADA_DEFAULT_OPT wins. Run without QUICK
+# before committing.
+if [ -n "${QUICK:-}" ] && [ "$QUICK" != "0" ]; then
+    export STRADA_TEST_TCC="${STRADA_TEST_TCC:-1}"
+    export STRADA_DEFAULT_OPT="${STRADA_DEFAULT_OPT:-0}"
+fi
+
 # Parallelism: run each t_*.sh suite file concurrently (default = nproc).
 # Set STRADA_TEST_JOBS=1 to force sequential.
 TEST_JOBS="${STRADA_TEST_JOBS:-$(nproc 2>/dev/null || echo 2)}"
@@ -254,7 +266,15 @@ compile_strada() {
     #   -fno-stack-protector               skip stack canary instrumentation
     #   -fno-asynchronous-unwind-tables    skip C++ unwind info
     # Cuts ~30-60s off the full 148-test suite vs the pre-flags default.
-    if ! $GCC -fno-lto $FASTLD -pipe -fno-var-tracking -fno-var-tracking-assignments -fno-stack-protector -fno-asynchronous-unwind-tables -rdynamic -o "$exe_file" "$c_file" $extra_link "$RUNTIME" -I"$RUNTIME_H" -ldl -lm ${EXTRA_LDFLAGS:-} > "$BUILD_DIR/${name}_gcc.log" 2>&1; then
+    # Compiled and linked as two commands: ccache never caches a command that
+    # links. The compile runs from inside BUILD_DIR on a relative file name,
+    # because BUILD_DIR contains this run's PID and an absolute path would
+    # change the preprocessed line markers (a cache miss) on every run.
+    local cflags="-fno-lto -pipe -fno-var-tracking -fno-var-tracking-assignments -fno-stack-protector -fno-asynchronous-unwind-tables"
+    if ! (cd "$BUILD_DIR" && $GCC $cflags -c "${name}.c" -o "${name}.o" -I"$RUNTIME_H") > "$BUILD_DIR/${name}_gcc.log" 2>&1; then
+        return 2
+    fi
+    if ! $GCC -fno-lto $FASTLD -rdynamic -o "$exe_file" "$BUILD_DIR/${name}.o" $extra_link "$RUNTIME" -ldl -lm ${EXTRA_LDFLAGS:-} >> "$BUILD_DIR/${name}_gcc.log" 2>&1; then
         return 2
     fi
 

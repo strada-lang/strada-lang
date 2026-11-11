@@ -2487,3 +2487,20 @@ Both are compile-time features in `runtime/strada_runtime.c`, gated by `STRADA_C
 ---
 
 *Last updated: 2026-02-23* (added NODE_DYN_METHOD_CALL for $obj->$method() dynamic dispatch)
+
+## Build-speed shortcuts: tcc throwaway compilers and `QUICK` (2026-11)
+
+See CLAUDE.md "Fast Compiler Iteration". Summary of the mechanics:
+
+- Makefile `TCC_COMPILER` macro: sed the anchored `#include "strada_runtime.h"`
+  to the tcc header, `tcc -c`, link with `$(CC)` against the normal gcc-built
+  `runtime.o`. Used by `make quick` and the stage-1 rule whenever tcc exists
+  (gcc `-O0` otherwise); `QUICK` no longer affects the Makefile. tcc's "implicit declaration" warning is fatal to the tcc
+  attempt (falls back to gcc `-O0`).
+- `strada_runtime_tcc.h` must therefore declare every runtime function the
+  compiler's generated C calls, including bootstrap-only aliases
+  (`sys_file_mtime`, bare `getpid`). `strada_reftype_raw` and
+  `strada_read_meta_section` were missing until this change — under `--tcc` a
+  missing prototype is a silent pointer truncation, not an error.
+- `t/run_tests.sh`: `QUICK=1` sets `STRADA_TEST_TCC=1` + `STRADA_DEFAULT_OPT=0`;
+  the gcc path is split into compile + link for ccache regardless of `QUICK`.

@@ -140,6 +140,39 @@ FAST_CFLAGS = $(filter-out -O0 -O1 -O2 -O3 -Ofast,$(CFLAGS)) -O0
 # user programs still build at $(CFLAGS)/-O2. DEV=1 keeps -O0 (fastest).
 STRADAC_CFLAGS = $(filter-out -O0 -O1 -O2 -O3 -Ofast,$(CFLAGS)) $(if $(filter -O0,$(OPT_FLAGS)),-O0,-O1)
 
+# Throwaway compiler builds via tcc.
+#
+# tcc compiles the ~72k-line generated Combined.c in ~0.2s where gcc -O0 takes
+# ~20s. tcc can't parse the full runtime header, so the #include is swapped for
+# strada_runtime_tcc.h (as `strada --tcc` does); the object still links against
+# the normal gcc-built runtime with $(CC). Only the #include line is rewritten
+# (anchored), never a string literal: the compiler's own source mentions the
+# header name.
+#
+# Used for both THROWAWAY compilers whenever tcc is on PATH (gcc -O0 otherwise):
+# the stage-1 compiler of a full `make`, and `make quick`. The final ./stradac
+# is always gcc at $(STRADAC_CFLAGS).
+HAVE_TCC := $(if $(shell command -v tcc 2>/dev/null),1,)
+
+# $(call TCC_COMPILER,<generated.c>,<output exe>)
+# A runtime function missing from strada_runtime_tcc.h is only a tcc WARNING
+# (implicit int declaration => truncated pointer => a compiler that crashes at
+# run time), so that warning is treated as a failure. Any tcc or link failure
+# falls back to $(CC) -O0: the build still succeeds, just slower, and the tcc
+# output above it names the prototype to add.
+define TCC_COMPILER
+@sed 's/^#include "strada_runtime\.h"/#include "strada_runtime_tcc.h"/' $(1) > $(1).tcc.c
+@if tcc -c $(1).tcc.c -I$(RUNTIME_DIR) -o $(1).tcc.o 2> $(1).tcc.log && \
+    ! grep 'implicit declaration' $(1).tcc.log && \
+    $(CC) -fno-lto -rdynamic -Wl,-z,noexecstack -o $(2) $(1).tcc.o $(RUNTIME_OBJ) $(LDFLAGS); then \
+    rc=0; \
+else \
+    grep -v 'implicit declaration' $(1).tcc.log | head -20; \
+    echo "tcc build failed -- falling back to $(CC) -O0"; \
+    $(CC) $(FAST_CFLAGS) -Wno-unused-function -rdynamic -o $(2) $(1) $(RUNTIME_OBJ) -I$(RUNTIME_DIR) $(LDFLAGS); rc=$$?; \
+fi; rm -f $(1).tcc.c $(1).tcc.o $(1).tcc.log; exit $$rc
+endef
+
 # Platform-specific LDFLAGS:
 #   Linux: -ldl for dlopen, --gc-sections to strip unused fns
 #   macOS: dlopen is in libc (no -ldl), linker uses -dead_strip instead of --gc-sections
@@ -256,8 +289,12 @@ $(BOOTSTRAP_STRADAC):
 # Note: -rdynamic exports symbols so that shared libraries loaded at compile time
 # (via import_lib) can access runtime functions
 stradac_stage1: $(COMPILER_DIR)/Combined_stage1.c $(RUNTIME_OBJ)
-	@echo "=== Building stage 1 compiler (-O0: throwaway, only regenerates Combined.c) ==="
+	@echo "=== Building stage 1 compiler ($(if $(HAVE_TCC),tcc,-O0): throwaway, only regenerates Combined.c) ==="
+ifneq ($(HAVE_TCC),)
+	$(call TCC_COMPILER,$(COMPILER_DIR)/Combined_stage1.c,stradac_stage1)
+else
 	$(CC) $(FAST_CFLAGS) -rdynamic -o stradac_stage1 $(COMPILER_DIR)/Combined_stage1.c $(RUNTIME_OBJ) -I$(RUNTIME_DIR) $(LDFLAGS)
+endif
 
 stage1: stradac_stage1
 
@@ -269,7 +306,10 @@ $(COMPILER_DIR)/Combined.c: $(COMPILER_DIR)/Combined.strada stradac_stage1
 # Build the final self-hosting compiler executable
 stradac: $(COMPILER_DIR)/Combined.c $(RUNTIME_OBJ)
 	@echo "=== Building self-hosting compiler executable ==="
-	$(CC) $(STRADAC_CFLAGS) -Wno-unused-function -rdynamic -o stradac $(COMPILER_DIR)/Combined.c $(RUNTIME_OBJ) -I$(RUNTIME_DIR) $(LDFLAGS)
+	@# Compile and link separately: ccache never caches a command that links,
+	@# so the one-step form re-ran the full gcc pass on every unchanged rebuild.
+	$(CC) $(STRADAC_CFLAGS) -Wno-unused-function -c $(COMPILER_DIR)/Combined.c -o $(COMPILER_DIR)/Combined.o -I$(RUNTIME_DIR)
+	$(CC) $(STRADAC_CFLAGS) -rdynamic -o stradac $(COMPILER_DIR)/Combined.o $(RUNTIME_OBJ) $(LDFLAGS)
 	@echo "✓ Self-hosting compiler built: ./stradac (stage 2, $(if $(filter -O0,$(OPT_FLAGS)),-O0,-O1))"
 
 # The `strada` driver is itself a Strada program (tools/strada-driver.strada),
@@ -299,9 +339,16 @@ quick: $(COMPILER_DIR)/Combined.strada $(RUNTIME_OBJ)
 	fi
 	@echo "=== quick: regenerating Combined.c with existing ./stradac ==="
 	STRADA_GC=off ./stradac $(COMPILER_DIR)/Combined.strada $(COMPILER_DIR)/Combined.c
+ifneq ($(HAVE_TCC),)
+	@echo "=== quick: building ./stradac with tcc ==="
+	$(call TCC_COMPILER,$(COMPILER_DIR)/Combined.c,stradac.quick.tmp)
+	@mv -f stradac.quick.tmp stradac
+	@echo "✓ quick rebuild done (./stradac, tcc; not bootstrap-verified)"
+else
 	@echo "=== quick: linking ./stradac at -O0 ==="
 	$(CC) $(FAST_CFLAGS) -Wno-unused-function -rdynamic -o stradac $(COMPILER_DIR)/Combined.c $(RUNTIME_OBJ) -I$(RUNTIME_DIR) $(LDFLAGS)
 	@echo "✓ quick rebuild done (./stradac, -O0; not bootstrap-verified)"
+endif
 
 # Aliases
 compiler: stradac
