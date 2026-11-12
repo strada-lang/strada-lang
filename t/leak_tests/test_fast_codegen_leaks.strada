@@ -9,6 +9,15 @@
 #   - strada_to_int_take / strada_to_num_take / strada_to_bool_take
 #   - strada_concat_cstr_sv / strada_concat_sv_cstr / strada_concat_inplace_cstr (UTF-8 & NUL)
 
+package MooseBase;
+has rw str $label = "base_lbl";
+has rw int $base_num = 10;
+
+package MooseChild;
+extends MooseBase;
+has rw str $label = "child_lbl";
+has rw str $extra = "def_extra";
+
 package FastBox;
 
 func new(str $tag) scalar {
@@ -226,6 +235,30 @@ func main() int {
             early_scope_returns(2, $shared) ne "outer_" . $shared . ",i2_outer_" . $shared . ",lit") {
             say("FAIL 18");
             return 1;
+        }
+
+        # 10. Inlined Moose new() (non-throwing + throwing) & self-cycle break
+        my scalar $mc_obj = MooseChild::new("extra", $shared);
+        my scalar $poly = $iter >= 0 ? $mc_obj : $box;
+        if ($poly->label() ne "child_lbl" || $poly->base_num() != 10 || $poly->extra() ne $shared) {
+            say("FAIL 19: " . $poly->label() . "/" . $poly->base_num() . "/" . $poly->extra());
+            return 1;
+        }
+        $caught = 0;
+        try {
+            my scalar $bad_m = MooseChild::new("label", make_str($iter), "extra", boom_str("mctor"));
+        } catch ($e) {
+            $caught = 1;
+        }
+        if ($caught != 1) { say("FAIL 20"); return 1; }
+
+        {
+            my int $ci_int = $iter + 1;
+            my num $ci_num = $ci_int * 1.5;
+            my hash %self_cyc = ("n" => $ci_num);
+            $self_cyc{"me"} = \%self_cyc;
+            my scalar $ref_cyc = {"k" => "v"};
+            $ref_cyc->{"self"} = $ref_cyc;
         }
     }
 

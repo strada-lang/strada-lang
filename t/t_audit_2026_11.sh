@@ -450,12 +450,12 @@ sh_log1=$("$PROJECT_DIR/strada" -v -O0 --shared "$sh_src" -o "$sh_so" 2>&1)
 if echo "$sh_log1" | grep -q "C shards" &&
    "$PROJECT_DIR/strada" -O0 -fno-lto -L "$aud_dir" "$sh_host" -o "$sh_bin" >"$aud_dir/sh_host.log" 2>&1; then
     sh_out1=$(LD_LIBRARY_PATH="$aud_dir" "$sh_bin" 2>&1)
-    sed -i 's/return "v1:"/return "v2:"/' "$sh_src"
+    sed -i 's/func greet(str \$who) str { return "v1:"/private func added_helper() str { return "v2:"; }\nfunc greet(str \$who) str { return ShardTarget::added_helper()/' "$sh_src"
     sh_log2=$("$PROJECT_DIR/strada" -v -O0 --shared "$sh_src" -o "$sh_so" 2>&1)
     sh_out2=$(LD_LIBRARY_PATH="$aud_dir" "$sh_bin" 2>&1)
     if [ "$sh_out1" = "87|PFX:ok_5|v1:world" ] &&
        [ "$sh_out2" = "87|PFX:ok_5|v2:world" ] &&
-       echo "$sh_log2" | grep -q "Compiling 1/"; then
+       echo "$sh_log2" | grep -q "Compiling [12]/"; then
         sh_ok=0
     else
         sh_diag="out1=$sh_out1 out2=$sh_out2 log2=$(echo "$sh_log2" | grep 'shards')"

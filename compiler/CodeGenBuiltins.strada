@@ -9278,60 +9278,61 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
                         }
                     }
 
-                    # Count total attributes (explicit + defaults from chain).
-                    # Capacity hint must match the *distinct* number of fields
-                    # the constructor will set — double-counting (args + every
-                    # has-attr in chain) inflates min_buckets past the small-
-                    # bucket fast path and forces an extra malloc per object.
-                    my int $total_attrs = $arg_count / 2;
-                    my scalar $ha_attrs2 = $cg->{"has_attrs"};
-                    my int $ha_count2 = $cg->{"has_attr_count"};
-                    my int $dai = 0;
-                    while ($dai < $ha_count2) {
-                        my scalar $dattr = $ha_attrs2->[$dai];
-                        my str $dattr_pkg = $dattr->{"package"};
-                        my int $dcol = index($dattr_pkg, "::");
-                        while ($dcol >= 0) {
-                            $dattr_pkg = substr($dattr_pkg, 0, $dcol) . "_" . substr($dattr_pkg, $dcol + 2, length($dattr_pkg) - $dcol - 2);
-                            $dcol = index($dattr_pkg, "::");
+                    # Collect unique default attrs in MRO order (child before parent)
+                    # so overridden child defaults win and capacity is exact.
+                    my hash %ctor_seen_attrs = ();
+                    my int $ctor_can_throw = 0;
+                    my int $csi = 0;
+                    while ($csi < $arg_count) {
+                        $ctor_seen_attrs{"" . $args->[$csi]->{"value"}} = 1;
+                        if (expr_cannot_throw($cg, $args->[$csi + 1]) == 0) {
+                            $ctor_can_throw = 1;
                         }
-                        my int $in_chain2 = 0;
-                        my int $pj2 = 0;
-                        while ($pj2 < $pc_len) {
-                            if ($dattr_pkg eq $pkg_chain[$pj2]) { $in_chain2 = 1; }
-                            $pj2 = $pj2 + 1;
-                        }
-                        if ($in_chain2 == 1 && $dattr->{"default_node"} != 0) {
-                            # Only counts toward capacity if the default will
-                            # actually run — i.e. the attr wasn't already in
-                            # the explicit args list.
-                            my str $da_name = $dattr->{"name"};
-                            my int $da_was_set = 0;
-                            my int $dasi = 0;
-                            while ($dasi < $arg_count) {
-                                if ($args->[$dasi]->{"value"} eq $da_name) { $da_was_set = 1; }
-                                $dasi = $dasi + 2;
-                            }
-                            if ($da_was_set == 0) { $total_attrs = $total_attrs + 1; }
-                        }
-                        $dai = $dai + 1;
+                        $csi = $csi + 2;
                     }
+                    my scalar $ha_attrs = $cg->{"has_attrs"};
+                    my int $ha_count = $cg->{"has_attr_count"};
+                    my array @ctor_def_names = ();
+                    my array @ctor_def_nodes = ();
+                    my int $pj0 = 0;
+                    while ($pj0 < $pc_len) {
+                        my str $want_pkg = $pkg_chain[$pj0];
+                        my int $di0 = 0;
+                        while ($di0 < $ha_count) {
+                            my scalar $attr0 = $ha_attrs->[$di0];
+                            if ($attr0->{"default_node"} != 0) {
+                                my str $attr_pkg0 = $attr0->{"package"};
+                                my int $col_idx0 = index($attr_pkg0, "::");
+                                while ($col_idx0 >= 0) {
+                                    $attr_pkg0 = substr($attr_pkg0, 0, $col_idx0) . "_" . substr($attr_pkg0, $col_idx0 + 2, length($attr_pkg0) - $col_idx0 - 2);
+                                    $col_idx0 = index($attr_pkg0, "::");
+                                }
+                                if ($attr_pkg0 eq $want_pkg) {
+                                    my str $anm0 = "" . $attr0->{"name"};
+                                    if (($ctor_seen_attrs{$anm0} + 0) == 0) {
+                                        $ctor_seen_attrs{$anm0} = 1;
+                                        push(@ctor_def_names, $anm0);
+                                        push(@ctor_def_nodes, $attr0->{"default_node"});
+                                        if (expr_cannot_throw($cg, $attr0->{"default_node"}) == 0) {
+                                            $ctor_can_throw = 1;
+                                        }
+                                    }
+                                }
+                            }
+                            $di0 = $di0 + 1;
+                        }
+                        $pj0 = $pj0 + 1;
+                    }
+                    my int $total_attrs = ($arg_count / 2) + size(@ctor_def_names);
                     emit($cg, "({ StradaValue *__ct_h = strada_new_hash_presized(" . $total_attrs . "); ");
                     emit($cg, "StradaValue *__ct_ref = strada_ref_create_take(__ct_h); ");
-                    # Push __ct_ref to the cleanup stack so a later
-                    # arg expression that throws (e.g.
-                    # `Pkg::new("name", boom())`) lets the surrounding
-                    # catch's drain free the partial object. Pop just
-                    # before the expression yields __ct_ref at the end.
-                    # When in main() outside any try block, no catch can
-                    # drain — skip the push/pop pair entirely.
-                    my int $ctor_needs_push = cleanup_push_useful($cg);
+                    my int $ctor_needs_push = 0;
+                    if ($ctor_can_throw == 1) {
+                        $ctor_needs_push = cleanup_push_useful($cg);
+                    }
                     if ($ctor_needs_push == 1) {
                         emit($cg, "strada_cleanup_push(__ct_ref); ");
                     }
-                    # Cache the interned package-name pointer at the call site —
-                    # skips strada_intern_str's bucket walk and oop_find_package
-                    # on every construction.
                     my int $bn_uid = $cg->{"tmp_counter"} + 0;
                     $cg->{"tmp_counter"} = $bn_uid + 1;
                     emit($cg, "{ static char *__pkg_n" . $bn_uid . " = NULL; if (__builtin_expect(!__pkg_n" . $bn_uid . ", 0)) __pkg_n" . $bn_uid . " = strada_intern_pkg_name(\"" . strada_pkg_for_c($cg, $pkg_name) . "\"); strada_bless_cached(__ct_ref, __pkg_n" . $bn_uid . "); } ");
@@ -9340,73 +9341,41 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
                         my str $key_val = $args->[$ci]->{"value"};
                         my int $key_hash = djb2_hash_32($key_val);
                         my scalar $vexpr = $args->[$ci + 1];
-                        # strada_hash_set_ss_take adopts the value ref without
-                        # increfing. If the value is a borrowed reference
-                        # (e.g., a plain variable — needs_temp_cleanup == 0),
-                        # we must incref so the variable's later scope-decref
-                        # doesn't drop the refcount below the hash's view.
-                        # If it's a temp (owned), pass through unchanged.
                         my int $v_owned = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $vexpr) == 1;
-                        # Use a per-call-site cached interned StradaString singleton
-                        # to skip per-construction ss_new/strlen/memcpy overhead.
                         my int $cs_uid = $cg->{"tmp_counter"} + 0;
                         $cg->{"tmp_counter"} = $cs_uid + 1;
-                        emit($cg, "({ static StradaString *__attr_ss" . $cs_uid . " = NULL; ");
+                        emit($cg, "{ static StradaString *__attr_ss" . $cs_uid . " = NULL; ");
                         emit($cg, "if (__builtin_expect(!__attr_ss" . $cs_uid . ", 0)) __attr_ss" . $cs_uid . " = strada_intern_attr_ss(" . c_str_lit($key_val) . ", " . $key_hash . "u); ");
                         if ($v_owned == 1) {
-                            emit($cg, "strada_hash_set_ss_take(__ct_ref->value.rv->value.hv, __attr_ss" . $cs_uid . ", ");
+                            emit($cg, "strada_hash_set_ss_take(__ct_h->value.hv, __attr_ss" . $cs_uid . ", ");
                             gen_expression($cg, $vexpr);
                             emit($cg, "); ");
                         } else {
                             emit($cg, "StradaValue *__ct_v" . $cs_uid . " = ");
                             gen_expression($cg, $vexpr);
-                            emit($cg, "; strada_incref(__ct_v" . $cs_uid . "); strada_hash_set_ss_take(__ct_ref->value.rv->value.hv, __attr_ss" . $cs_uid . ", __ct_v" . $cs_uid . "); ");
+                            emit($cg, "; strada_incref(__ct_v" . $cs_uid . "); strada_hash_set_ss_take(__ct_h->value.hv, __attr_ss" . $cs_uid . ", __ct_v" . $cs_uid . "); ");
                         }
-                        # one attribute per line: long constructors otherwise make a
-                        # single C line gcc stops column-tracking
-                        emit($cg, "});\n");
+                        emit($cg, "}\n");
                         $ci = $ci + 2;
                     }
-                    # Apply defaults from has_attrs (own + parent packages)
-                    my scalar $ha_attrs = $cg->{"has_attrs"};
-                    my int $ha_count = $cg->{"has_attr_count"};
                     my int $di = 0;
-                    while ($di < $ha_count) {
-                        my scalar $attr = $ha_attrs->[$di];
-                        my str $attr_pkg = $attr->{"package"};
-                        # Sanitize :: to _ for comparison
-                        my int $col_idx = index($attr_pkg, "::");
-                        while ($col_idx >= 0) {
-                            $attr_pkg = substr($attr_pkg, 0, $col_idx) . "_" . substr($attr_pkg, $col_idx + 2, length($attr_pkg) - $col_idx - 2);
-                            $col_idx = index($attr_pkg, "::");
-                        }
-                        # Check if attr belongs to any package in the chain
-                        my int $in_chain = 0;
-                        my int $pj = 0;
-                        while ($pj < $pc_len) {
-                            if ($attr_pkg eq $pkg_chain[$pj]) {
-                                $in_chain = 1;
-                            }
-                            $pj = $pj + 1;
-                        }
-                        if ($in_chain == 1 && $attr->{"default_node"} != 0) {
-                            my str $attr_name = $attr->{"name"};
-                            # Check if this attr was explicitly set
-                            my int $was_set = 0;
-                            my int $si = 0;
-                            while ($si < $arg_count) {
-                                if ($args->[$si]->{"value"} eq $attr_name) {
-                                    $was_set = 1;
-                                }
-                                $si = $si + 2;
-                            }
-                            if ($was_set == 0) {
-                                # Apply default
-                                emit($cg, "if (!strada_hash_exists(__ct_h->value.hv, " . c_str_lit($attr_name) . ")) { ");
-                                emit($cg, "strada_hash_set_take(__ct_h->value.hv, " . c_str_lit($attr_name) . ", ");
-                                gen_expression($cg, $attr->{"default_node"});
-                                emit($cg, "); } ");
-                            }
+                    my int $ndf = size(@ctor_def_names);
+                    while ($di < $ndf) {
+                        my str $attr_name = $ctor_def_names[$di];
+                        my scalar $dnode = $ctor_def_nodes[$di];
+                        my int $d_owned = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $dnode) == 1;
+                        if ($d_owned == 1 && key_is_hashable_ascii($attr_name) == 1) {
+                            emit($cg, "strada_hash_set_take_ph(__ct_h->value.hv, " . c_str_lit($attr_name) . ", " . djb2_hash_32($attr_name) . "u, ");
+                            gen_expression($cg, $dnode);
+                            emit($cg, "); ");
+                        } elsif ($d_owned == 1) {
+                            emit($cg, "strada_hash_set_take(__ct_h->value.hv, " . c_str_lit($attr_name) . ", ");
+                            gen_expression($cg, $dnode);
+                            emit($cg, "); ");
+                        } else {
+                            emit($cg, "strada_hash_set(__ct_h->value.hv, " . c_str_lit($attr_name) . ", ");
+                            gen_expression($cg, $dnode);
+                            emit($cg, "); ");
                         }
                         $di = $di + 1;
                     }

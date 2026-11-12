@@ -679,22 +679,13 @@ STRADA_HOT_INLINE int strada_to_bool_take(StradaValue *sv) {
  * to guarantee no cycle. */
 STRADA_HOT_INLINE void strada_break_self_cycle(StradaValue *sv) {
     if (!sv || STRADA_IS_TAGGED_INT(sv)) return;
-    /* Immortal (refcount sentinel > 1e9): small ints, statics, pooled-and-
-     * neutralized SVs, and request-arena SVs after arena_end. They are never
-     * freed and cannot be a collectable cycle member, so skip BEFORE reading
-     * ->type/->value — those may belong to a released arena backbone. */
-    if (sv->refcount > 1000000000) return;
-    /* Slot references point to a C local variable slot (StradaValue**), not
-     * an owned heap StradaValue*, so skip before reading sv->value.rv. */
-    if (sv->struct_size == STRADA_SLOT_REF_MARKER) return;
-    if (sv->refcount < 2) {
-        int t = sv->type;
-        if (t != STRADA_REF) return;
-        StradaValue *target = sv->value.rv;
-        if (!target || STRADA_IS_TAGGED_INT(target)) return;
-        if (target->refcount < 2) return;
+    /* Only live heap ARRAY (4), HASH (5), or REF (6) can participate in a
+     * direct self-cycle. Guard refcount <= 1e9 first so neutralized arena
+     * SVs and immortals exit before touching ->type. */
+    if ((unsigned int)sv->refcount <= 1000000000u
+        && (unsigned int)(sv->type - STRADA_ARRAY) <= (unsigned int)(STRADA_REF - STRADA_ARRAY)) {
+        strada_break_self_cycle_impl(sv);
     }
-    strada_break_self_cycle_impl(sv);
 }
 #endif
 

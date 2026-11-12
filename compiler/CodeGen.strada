@@ -255,11 +255,18 @@ func codegen_new(str $filename, int $debug_info, int $enable_profiling, int $ena
     $cg{"split_dir"} = "";
     $cg{"split_includes"} = "";
     $cg{"split_ext_globals"} = "";
+    $cg{"split_common_decls"} = "";
     $cg{"split_fwd_decls"} = "";
     $cg{"split_markers"} = "";
     $cg{"split_fn_codes"} = [];
     $cg{"split_fn_pkgs"} = [];
     $cg{"split_fn_c0"} = [];
+    $cg{"split_fn_proto_map"} = {};
+    $cg{"split_fn_proto_order"} = [];
+    $cg{"split_glob_ext_map"} = {};
+    $cg{"split_glob_ext_order"} = [];
+    $cg{"split_anon_proto_map"} = {};
+    $cg{"split_anon_proto_order"} = [];
     $cg{"indent"} = 0;
     $cg{"debug_info"} = $debug_info;  # Emit #line directives for debugging
     $cg{"enable_profiling"} = $enable_profiling;  # Emit function profiling code
@@ -645,8 +652,13 @@ func emit_scope_decref(scalar $cg, str $scope_str, int $count) void {
         }
         if ($emit_now == 1) {
             if ($in_anon == 0 || is_var_in_list($vn1, $capture_str) == 0) {
-                emit_indent($cg);
-                emit($cg, "strada_break_self_cycle(" . $vn1 . ");\n");
+                # int- and num-declared vars are coerced to canonical INT/NUM on
+                # every init and assignment, so they can never hold a container cycle.
+                if (length("" . $cg->{"int_vars"}->{$vn1}) == 0
+                    && length("" . $cg->{"num_vars"}->{$vn1}) == 0) {
+                    emit_indent($cg);
+                    emit($cg, "strada_break_self_cycle(" . $vn1 . ");\n");
+                }
             }
             $vn1 = "";
         }
@@ -1241,6 +1253,84 @@ func node_is_leaf_safe(scalar $cg, scalar $node) int {
         return 1;
     }
     # Conservative default: any other node could allocate, throw, or escape self.
+    return 0;
+}
+
+# Stricter leaf check for stack-frame elision under enable_stack_trace == 1:
+# excludes '/' and '%' (which can throw division-by-zero) while allowing
+# non-throwing leaf expressions (literals, undef, vars, inline accessors,
+# untied hash/array reads, and non-overloaded '.' string concat).
+func node_is_leaf_safe_nothrow(scalar $cg, scalar $node) int {
+    if (!$node) { return 1; }
+    my int $t = $node->{"type"} + 0;
+    if ($t == NODE_BLOCK()) {
+        my scalar $stmts = $node->{"statements"};
+        my int $sc = $node->{"statement_count"} + 0;
+        my int $i = 0;
+        while ($i < $sc) {
+            if (node_is_leaf_safe_nothrow($cg, $stmts->[$i]) == 0) { return 0; }
+            $i = $i + 1;
+        }
+        return 1;
+    }
+    if ($t == NODE_RETURN_STMT()) {
+        if ($node->{"value"}) { return node_is_leaf_safe_nothrow($cg, $node->{"value"}); }
+        return 1;
+    }
+    if ($t == NODE_EXPR_STMT()) {
+        if ($node->{"expr"}) { return node_is_leaf_safe_nothrow($cg, $node->{"expr"}); }
+        return 1;
+    }
+    if ($t == NODE_BINARY_OP()) {
+        my str $op = "" . $node->{"op"};
+        if ($op eq "+" || $op eq "-" || $op eq "*" ||
+            $op eq "==" || $op eq "!=" || $op eq "<" || $op eq ">" ||
+            $op eq "<=" || $op eq ">=" || $op eq "&&" || $op eq "||" || $op eq ".") {
+            if (node_is_leaf_safe_nothrow($cg, $node->{"left"}) == 0) { return 0; }
+            if (node_is_leaf_safe_nothrow($cg, $node->{"right"}) == 0) { return 0; }
+            return 1;
+        }
+        return 0;
+    }
+    if ($t == NODE_UNARY_OP()) {
+        return node_is_leaf_safe_nothrow($cg, $node->{"operand"});
+    }
+    if ($t == NODE_VARIABLE() || $t == NODE_PARAM() || $t == NODE_INT_LITERAL()
+        || $t == NODE_NUM_LITERAL() || $t == NODE_STR_LITERAL() || $t == NODE_UNDEF()) {
+        return 1;
+    }
+    if ($t == NODE_METHOD_CALL()) {
+        if ($node->{"arg_count"} != 0) { return 0; }
+        if (length(is_inline_accessor($cg, $node->{"method"})) == 0) { return 0; }
+        my scalar $obj = $node->{"base_object"};
+        if (!$obj) { $obj = $node->{"object"}; }
+        return node_is_leaf_safe_nothrow($cg, $obj);
+    }
+    if ($t == NODE_TERNARY()) {
+        if (node_is_leaf_safe_nothrow($cg, $node->{"condition"}) == 0) { return 0; }
+        if (node_is_leaf_safe_nothrow($cg, $node->{"true_expr"}) == 0) { return 0; }
+        if (node_is_leaf_safe_nothrow($cg, $node->{"false_expr"}) == 0) { return 0; }
+        return 1;
+    }
+    if ($t == NODE_HASH_ACCESS()) {
+        if (node_is_leaf_safe_nothrow($cg, $node->{"hash"}) == 0) { return 0; }
+        return node_is_leaf_safe_nothrow($cg, $node->{"key"});
+    }
+    if ($t == NODE_DEREF_HASH()) {
+        if (node_is_leaf_safe_nothrow($cg, $node->{"ref"}) == 0) { return 0; }
+        return node_is_leaf_safe_nothrow($cg, $node->{"key"});
+    }
+    if ($t == NODE_SUBSCRIPT()) {
+        if (node_is_leaf_safe_nothrow($cg, $node->{"array"}) == 0) { return 0; }
+        return node_is_leaf_safe_nothrow($cg, $node->{"index"});
+    }
+    if ($t == NODE_DEREF_ARRAY()) {
+        if (node_is_leaf_safe_nothrow($cg, $node->{"ref"}) == 0) { return 0; }
+        return node_is_leaf_safe_nothrow($cg, $node->{"index"});
+    }
+    if ($t == NODE_ANON_ARRAY() || $t == NODE_ANON_HASH()) {
+        return expr_cannot_throw($cg, $node);
+    }
     return 0;
 }
 
@@ -2460,7 +2550,34 @@ func get_output(scalar $cg) str {
             write_shard_if_changed($s0_path, sb_to_string($sb0));
             my str $manifest = $s0_path . "\n";
 
-            my str $pure_prefix = "" . $cg->{"split_includes"} . $cg->{"split_ext_globals"} . $cg->{"split_fwd_decls"} . $oop_decls . $ae_section . $anon_section . "\n";
+            # Per-shard minimal header: scan C identifiers in each shard's body
+            # and emit only the referenced globals, Strada function prototypes,
+            # OOP init prototypes, auto_externs, and anon_func prototypes so
+            # adding/removing a function only invalidates shards that call it.
+            my scalar $fn_pmap = $cg->{"split_fn_proto_map"};
+            my scalar $glob_emap = $cg->{"split_glob_ext_map"};
+            my scalar $anon_pmap = $cg->{"split_anon_proto_map"};
+            my str $base_inc = "" . $cg->{"split_includes"}
+                . "extern StradaValue *ARGV;\nextern StradaValue *ARGC;\nextern StradaValue *v_STDIN;\nextern StradaValue *v_STDOUT;\nextern StradaValue *v_STDERR;\nextern StradaValue *__child_status;\n"
+                . "extern StradaValue *__program_name;\nextern StradaValue *_;\n"
+                . $cg->{"split_common_decls"};
+            if ($cg->{"full_profile"} == 1) {
+                $base_inc = $base_inc . "extern STRADA_SHARD_HIDDEN int __fp_file_id;\n";
+            }
+
+            my hash %ae_map = ();
+            if (defined($auto_ext)) {
+                my array @ak = keys(%{$auto_ext});
+                my int $aki = 0;
+                while ($aki < size(@ak)) {
+                    my str $anm = $ak[$aki];
+                    if (!defined($cg->{"functions"}->{$anm})) {
+                        $ae_map{$anm} = "extern StradaValue* " . $anm . "();\n";
+                    }
+                    $aki = $aki + 1;
+                }
+            }
+
             $bi = 0;
             while ($bi < $nbuckets) {
                 my int $snum = $bi + 1;
@@ -2468,7 +2585,103 @@ func get_output(scalar $cg) str {
                 if ($snum < 10) { $tag = "0" . $snum; }
                 my str $spath = $split_dir . "/shard_" . $tag . ".c";
                 if ($bucket_cnt[$bi] > 0) {
-                    write_shard_if_changed($spath, $pure_prefix . sb_to_string($bucket_sbs[$bi]));
+                    my str $bbody = sb_to_string($bucket_sbs[$bi]);
+                    my array @toks = split("[^A-Za-z0-9_]+", $bbody);
+                    my hash %seen_id = ();
+                    my array @used_globs = ();
+                    my array @used_fns = ();
+                    my array @used_oops = ();
+                    my array @used_aes = ();
+                    my array @used_anons = ();
+                    my int $ti = 0;
+                    my int $tn = size(@toks);
+                    while ($ti < $tn) {
+                        my str $id = $toks[$ti];
+                        if (length($id) > 0 && ($seen_id{$id} + 0) == 0) {
+                            $seen_id{$id} = 1;
+                            my str $gd = "" . $glob_emap->{$id};
+                            if (length($gd) > 0) { push(@used_globs, $id); }
+                            my str $fd = "" . $fn_pmap->{$id};
+                            if (length($fd) > 0) { push(@used_fns, $id); }
+                            if (length($id) > 11 && substr($id, 0, 2) eq "__" && substr($id, length($id) - 9, 9) eq "_oop_init") {
+                                push(@used_oops, $id);
+                            }
+                            my str $ad = "" . $ae_map{$id};
+                            if (length($ad) > 0) { push(@used_aes, $id); }
+                            my str $nd = "" . $anon_pmap->{$id};
+                            if (length($nd) > 0) { push(@used_anons, $id); }
+                        }
+                        $ti = $ti + 1;
+                    }
+                    # Sort each small per-shard identifier list for deterministic output
+                    my scalar $sh_sb = sb_new();
+                    sb_append($sh_sb, $base_inc);
+                    my int $si1 = 1;
+                    while ($si1 < size(@used_globs)) {
+                        my str $kv = $used_globs[$si1];
+                        my int $sj = $si1 - 1;
+                        while ($sj >= 0 && ae_str_before($kv, $used_globs[$sj]) == 1) {
+                            $used_globs[$sj + 1] = $used_globs[$sj];
+                            $sj = $sj - 1;
+                        }
+                        $used_globs[$sj + 1] = $kv;
+                        $si1 = $si1 + 1;
+                    }
+                    $si1 = 0;
+                    while ($si1 < size(@used_globs)) {
+                        sb_append($sh_sb, $glob_emap->{$used_globs[$si1]});
+                        $si1 = $si1 + 1;
+                    }
+
+                    $si1 = 1;
+                    while ($si1 < size(@used_fns)) {
+                        my str $kv = $used_fns[$si1];
+                        my int $sj = $si1 - 1;
+                        while ($sj >= 0 && ae_str_before($kv, $used_fns[$sj]) == 1) {
+                            $used_fns[$sj + 1] = $used_fns[$sj];
+                            $sj = $sj - 1;
+                        }
+                        $used_fns[$sj + 1] = $kv;
+                        $si1 = $si1 + 1;
+                    }
+                    $si1 = 0;
+                    while ($si1 < size(@used_fns)) {
+                        sb_append($sh_sb, $fn_pmap->{$used_fns[$si1]});
+                        $si1 = $si1 + 1;
+                    }
+
+                    $si1 = 0;
+                    while ($si1 < size(@used_oops)) {
+                        sb_append($sh_sb, "void " . $used_oops[$si1] . "(void);\n");
+                        $si1 = $si1 + 1;
+                    }
+
+                    $si1 = 1;
+                    while ($si1 < size(@used_aes)) {
+                        my str $kv = $used_aes[$si1];
+                        my int $sj = $si1 - 1;
+                        while ($sj >= 0 && ae_str_before($kv, $used_aes[$sj]) == 1) {
+                            $used_aes[$sj + 1] = $used_aes[$sj];
+                            $sj = $sj - 1;
+                        }
+                        $used_aes[$sj + 1] = $kv;
+                        $si1 = $si1 + 1;
+                    }
+                    $si1 = 0;
+                    while ($si1 < size(@used_aes)) {
+                        sb_append($sh_sb, $ae_map{$used_aes[$si1]});
+                        $si1 = $si1 + 1;
+                    }
+
+                    $si1 = 0;
+                    while ($si1 < size(@used_anons)) {
+                        sb_append($sh_sb, $anon_pmap->{$used_anons[$si1]});
+                        $si1 = $si1 + 1;
+                    }
+
+                    sb_append($sh_sb, "\n");
+                    sb_append($sh_sb, $bbody);
+                    write_shard_if_changed($spath, sb_to_string($sh_sb));
                     $manifest = $manifest . $spath . "\n";
                 } else {
                     core::unlink($spath);

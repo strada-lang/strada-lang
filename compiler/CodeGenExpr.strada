@@ -5939,6 +5939,9 @@ func gen_expression(scalar $cg, scalar $expr) void {
         }
         $decl = $decl . ")";
         $cg->{"anon_func_decls"} = $cg->{"anon_func_decls"} . $decl . ";\n";
+        if (length("" . $cg->{"split_dir"}) > 0) {
+            $cg->{"split_anon_proto_map"}->{$func_name} = $decl . ";\n";
+        }
 
         my str $def = $decl . " {\n";
 

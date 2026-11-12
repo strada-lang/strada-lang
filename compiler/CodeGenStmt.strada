@@ -2981,7 +2981,12 @@ func gen_function(scalar $cg, scalar $fn) void {
         $cg->{"current_fn_package"} = $fn->{"package"};
 
         if ($cg->{"enable_stack_trace"} == 1) {
-            $cg->{"func_tracks_depth"} = 1;
+            if ($cg->{"uses_tie"} == 0 && $cg->{"has_overloads"} == 0
+                && stmt_has_call($fn_body) == 0 && node_is_leaf_safe_nothrow($cg, $fn_body) == 1) {
+                $cg->{"func_tracks_depth"} = 0;
+            } else {
+                $cg->{"func_tracks_depth"} = 1;
+            }
         } elsif ($cg->{"enable_stack_trace"} == 2 && stmt_has_call($fn_body) == 1 && node_is_leaf_safe($cg, $fn_body) == 0) {
             $cg->{"func_tracks_depth"} = 2;
         } else {
@@ -3114,76 +3119,84 @@ func gen_function(scalar $cg, scalar $fn) void {
             $cg->{"has_local"} = 1;
         }
         my scalar $stmts = $body->{"statements"};
+        my int $b_sc = $body->{"statement_count"} + 0;
         my int $stmt_i = 0;
-        while ($stmt_i < $body->{"statement_count"}) {
+        while ($stmt_i < $b_sc) {
             gen_statement($cg, $stmts->[$stmt_i]);
             $stmt_i = $stmt_i + 1;
         }
-        scope_pop($cg);
+        my int $ends_with_return = 0;
+        if ($b_sc > 0 && $stmts->[$b_sc - 1]->{"type"} == NODE_RETURN_STMT()) {
+            $ends_with_return = 1;
+        }
+        if ($ends_with_return == 1) {
+            # Unconditional final return already emitted full scope/param/stack
+            # cleanup; pop compile-time scope state without emitting dead code.
+            if ($cg->{"cleanup_enabled"} == 1 && $cg->{"scope_depth"} > 0) {
+                pop($cg->{"scope_vars"});
+                pop($cg->{"scope_counts"});
+                pop($cg->{"scope_no_push_vars"});
+                $cg->{"scope_depth"} = $cg->{"scope_depth"} - 1;
+            }
+        } else {
+            scope_pop($cg);
 
-        # Pop and decref function parameters for void functions that fall through
-        # (functions with return statements handle this in scope_emit_all_cleanup)
-        if ($ret_type_id == TYPE_VOID()) {
-            my int $pn_count = $cg->{"func_param_count"} + 0;
-            if ($pn_count > 0) {
-                my scalar $param_names = $cg->{"func_param_names"};
-                my scalar $param_skip3 = $cg->{"func_param_skip_wrap"};
-                my int $pn_i = 0;
-                while ($pn_i < $pn_count) {
-                    if ($param_skip3->[$pn_i] == 0) {
-                        my str $pname = $param_names->[$pn_i];
-                        emit($cg, "strada_cleanup_pop();\n");
-                        emit($cg, "strada_decref(" . $pname . ");\n");
-                    } elsif ($param_skip3->[$pn_i] == 2) {
-                        my str $pname = $param_names->[$pn_i];
-                        emit($cg, "strada_decref(" . $pname . ");\n");
+            # Pop and decref function parameters for void functions that fall through
+            if ($ret_type_id == TYPE_VOID()) {
+                my int $pn_count = $cg->{"func_param_count"} + 0;
+                if ($pn_count > 0) {
+                    my scalar $param_names = $cg->{"func_param_names"};
+                    my scalar $param_skip3 = $cg->{"func_param_skip_wrap"};
+                    my int $pn_i = 0;
+                    while ($pn_i < $pn_count) {
+                        if ($param_skip3->[$pn_i] == 0) {
+                            my str $pname = $param_names->[$pn_i];
+                            emit($cg, "strada_cleanup_pop_decref(" . $pname . ");\n");
+                        } elsif ($param_skip3->[$pn_i] == 2) {
+                            my str $pname = $param_names->[$pn_i];
+                            emit($cg, "strada_decref(" . $pname . ");\n");
+                        }
+                        $pn_i = $pn_i + 1;
                     }
-                    $pn_i = $pn_i + 1;
                 }
             }
-        }
 
-        # Add implicit profiling exit for void functions (no explicit return)
-        if ($cg->{"enable_profiling"} == 1 && $ret_type_id == TYPE_VOID()) {
-            emit($cg, "    strada_profile_exit(\"" . $name . "\");\n");
-        }
-        # Add implicit full profiling exit for void functions
-        if ($cg->{"full_profile"} == 1 && $ret_type_id == TYPE_VOID()) {
-            emit($cg, "    strada_full_profile_exit(\"" . $name . "\");\n");
-        }
-        # Restore local() saves for void functions falling through
-        if ($cg->{"has_local"} == 1) {
-            emit($cg, "strada_local_restore_to(__local_saved_depth);\n");
-        }
-        # Pop stack frame for void functions falling through
-        if ($ret_type_id == TYPE_VOID() && $cg->{"func_tracks_depth"} == 1) {
-            emit($cg, "strada_stack_pop_il();\n");
-        } elsif ($ret_type_id == TYPE_VOID() && $cg->{"func_tracks_depth"} == 2) {
-            emit($cg, "strada_depth_pop_il();\n");
-        }
-        # Implicit return undef for non-void functions that fall through without return
-        if ($ret_type_id != TYPE_VOID()) {
-            my int $pn_count2 = $cg->{"func_param_count"} + 0;
-            if ($pn_count2 > 0) {
-                my scalar $param_names2 = $cg->{"func_param_names"};
-                my scalar $param_skip4 = $cg->{"func_param_skip_wrap"};
-                my int $pn_i2 = 0;
-                while ($pn_i2 < $pn_count2) {
-                    if ($param_skip4->[$pn_i2] == 0) {
-                        emit($cg, "strada_cleanup_pop();\n");
-                        emit($cg, "strada_decref(" . $param_names2->[$pn_i2] . ");\n");
-                    } elsif ($param_skip4->[$pn_i2] == 2) {
-                        emit($cg, "strada_decref(" . $param_names2->[$pn_i2] . ");\n");
-                    }
-                    $pn_i2 = $pn_i2 + 1;
-                }
+            if ($cg->{"enable_profiling"} == 1 && $ret_type_id == TYPE_VOID()) {
+                emit($cg, "    strada_profile_exit(\"" . $name . "\");\n");
             }
-            if ($cg->{"func_tracks_depth"} == 1) {
+            if ($cg->{"full_profile"} == 1 && $ret_type_id == TYPE_VOID()) {
+                emit($cg, "    strada_full_profile_exit(\"" . $name . "\");\n");
+            }
+            if ($cg->{"has_local"} == 1) {
+                emit($cg, "strada_local_restore_to(__local_saved_depth);\n");
+            }
+            if ($ret_type_id == TYPE_VOID() && $cg->{"func_tracks_depth"} == 1) {
                 emit($cg, "strada_stack_pop_il();\n");
-            } elsif ($cg->{"func_tracks_depth"} == 2) {
+            } elsif ($ret_type_id == TYPE_VOID() && $cg->{"func_tracks_depth"} == 2) {
                 emit($cg, "strada_depth_pop_il();\n");
             }
-            emit($cg, "return strada_new_undef();\n");
+            if ($ret_type_id != TYPE_VOID()) {
+                my int $pn_count2 = $cg->{"func_param_count"} + 0;
+                if ($pn_count2 > 0) {
+                    my scalar $param_names2 = $cg->{"func_param_names"};
+                    my scalar $param_skip4 = $cg->{"func_param_skip_wrap"};
+                    my int $pn_i2 = 0;
+                    while ($pn_i2 < $pn_count2) {
+                        if ($param_skip4->[$pn_i2] == 0) {
+                            emit($cg, "strada_cleanup_pop_decref(" . $param_names2->[$pn_i2] . ");\n");
+                        } elsif ($param_skip4->[$pn_i2] == 2) {
+                            emit($cg, "strada_decref(" . $param_names2->[$pn_i2] . ");\n");
+                        }
+                        $pn_i2 = $pn_i2 + 1;
+                    }
+                }
+                if ($cg->{"func_tracks_depth"} == 1) {
+                    emit($cg, "strada_stack_pop_il();\n");
+                } elsif ($cg->{"func_tracks_depth"} == 2) {
+                    emit($cg, "strada_depth_pop_il();\n");
+                }
+                emit($cg, "return strada_new_undef();\n");
+            }
         }
         emit($cg, "}\n");
 
@@ -3758,11 +3771,15 @@ func gen_program(scalar $cg, scalar $program) void {
         }
         if ($global_count > 0) {
             my scalar $sglobals = $program->{"globals"};
+            my scalar $gemap = $cg->{"split_glob_ext_map"};
             my int $sg = 0;
             while ($sg < $global_count) {
                 my scalar $sgvar = $sglobals->[$sg];
                 if (cg_skip_for_module($program, $sgvar->{"from_use"}) == 0 && $sgvar->{"type"} != NODE_OUR_DECL()) {
-                    $ext_g = $ext_g . "extern STRADA_SHARD_HIDDEN StradaValue *" . escape_c_keyword($sgvar->{"name"}) . ";\n";
+                    my str $sg_c = escape_c_keyword($sgvar->{"name"});
+                    my str $sg_line = "extern STRADA_SHARD_HIDDEN StradaValue *" . $sg_c . ";\n";
+                    $ext_g = $ext_g . $sg_line;
+                    $gemap->{$sg_c} = $sg_line;
                 }
                 $sg = $sg + 1;
             }
@@ -4269,12 +4286,21 @@ func gen_program(scalar $cg, scalar $program) void {
         }
         $i = $i + 1;
     }
+    if (length("" . $cg->{"split_dir"}) > 0) {
+        my str $com_now = sb_to_string($cg->{"output_sb"});
+        $cg->{"split_common_decls"} = substr_bytes($com_now, $split_fwd_start, bytes($com_now) - $split_fwd_start) . "\n";
+    }
+    my scalar $fn_pmap = $cg->{"split_fn_proto_map"};
+    my int $rec_pmap = 0;
+    if (length("" . $cg->{"split_dir"}) > 0) { $rec_pmap = 1; }
     $i = 0;
     while ($i < $program->{"function_count"}) {
         my scalar $fn = $funcs->[$i];
         my str $name = sanitize_name($fn->{"name"});
         my int $fn_type = $fn->{"type"};
         my str $fn_pkg = $fn->{"package"};
+        my int $pstart = 0;
+        if ($rec_pmap == 1) { $pstart = sb_length($cg->{"output_sb"}); }
 
         # In module-only mode, skip forward decls for private functions in
         # other modules — they'd require `static` without a body, which won't
@@ -4286,19 +4312,8 @@ func gen_program(scalar $cg, scalar $program) void {
 
         # Skip extern functions (they're declared elsewhere)
         if ($fn_type == NODE_EXTERN_FUNC()) {
-            # Body-less qualified extern -> cross-module Strada forward decl.
-            # Emit it with StradaValue* params/return so the symbol matches
-            # the Strada-style definition in the other module's `.o`, not the
-            # raw-C-type signature `gen_extern_decl` emits for `extern "C"`
-            # interop. This is what lets `extern func Pkg::name(...) ret;`
-            # register the call as a real Strada function in $cg->{"functions"}
-            # so needs_temp_cleanup recognises owned returns and the call
-            # site uses the ordinary Strada calling convention (no conversion).
             if ($fn->{"is_strada_extern_decl"} == 1) {
                 my str $sname = sanitize_name($fn->{"name"});
-                # The declared function is also DEFINED in this unit: skip
-                # the extern line (see pre-scan above) — the definition's
-                # own forward decl covers it and the storage classes clash.
                 if ($__defined_in_unit{$sname} == 1) {
                     $i = $i + 1;
                     next;
@@ -4320,12 +4335,19 @@ func gen_program(scalar $cg, scalar $program) void {
                     emit($cg, "void");
                 }
                 emit($cg, ");\n");
+                if ($rec_pmap == 1) {
+                    my str $ps = sb_to_string($cg->{"output_sb"});
+                    $fn_pmap->{$sname} = substr_bytes($ps, $pstart, bytes($ps) - $pstart);
+                }
                 $i = $i + 1;
                 next;
             }
-            # Generate C-style extern declaration (raw types for C interop)
             emit($cg, "extern ");
             gen_extern_decl($cg, $fn);
+            if ($rec_pmap == 1) {
+                my str $ps = sb_to_string($cg->{"output_sb"});
+                $fn_pmap->{$fn->{"name"}} = substr_bytes($ps, $pstart, bytes($ps) - $pstart);
+            }
             $i = $i + 1;
             next;
         }
@@ -4333,7 +4355,6 @@ func gen_program(scalar $cg, scalar $program) void {
         if ($name eq "main") {
             emit($cg, "int main(int _argc, char **_argv);\n");
         } else {
-            # Match storage class chosen by gen_function (see comment there).
             my str $static_prefix = "";
             if ($fn->{"is_private"} == 1) {
                 if (length("" . $cg->{"split_dir"}) > 0) {
@@ -4374,6 +4395,10 @@ func gen_program(scalar $cg, scalar $program) void {
             }
 
             emit($cg, ");\n");
+            if ($rec_pmap == 1) {
+                my str $ps = sb_to_string($cg->{"output_sb"});
+                $fn_pmap->{$name} = substr_bytes($ps, $pstart, bytes($ps) - $pstart);
+            }
         }
         $i = $i + 1;
     }
