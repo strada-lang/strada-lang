@@ -1,0 +1,17 @@
+# EXPECT: fetched:7 stored:9
+# tie($scalar, ...) looked for TIEHASH, and assigning to a tied scalar
+# replaced it instead of calling STORE.
+package C;
+our int $last = 0;
+func TIESCALAR(str $class) scalar { my hash %s = ("v" => 7); return bless(\%s, "C"); }
+func FETCH(scalar $self) scalar { return $self->{"v"}; }
+func STORE(scalar $self, scalar $v) void { $self->{"v"} = $v; $last = $v; }
+func last_stored() int { return $last; }
+package main;
+func main() int {
+    my scalar $x; tie($x, "C");
+    my str $a = "fetched:" . $x;
+    $x = 9;
+    say($a . " stored:" . C::last_stored());
+    return 0;
+}

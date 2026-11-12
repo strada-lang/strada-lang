@@ -1,0 +1,5 @@
+# EXPECT: Hi Bob / Hello Al / G
+# A parameter with the same name as an `our` variable read and wrote the global.
+our str $greeting = "G";
+func greet(str $name, str $greeting = "Hello") str { return $greeting . " " . $name; }
+func main() int { say(greet("Bob", "Hi") . " / " . greet("Al") . " / " . $greeting); return 0; }

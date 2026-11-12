@@ -24,7 +24,7 @@ make tools                  # Build tools (stradadoc, strada-soinfo, strada-prof
 make run PROG=test_simple   # Compile and run an example program
 make test                   # Test runtime system
 make test-selfhost          # Verify self-compilation (stage 2)
-make test-suite             # Run comprehensive test suite (233 tests)
+make test-suite             # Run comprehensive test suite (269 tests)
 make test-suite V=1         # Verbose test output
 make examples               # Build all example programs
 make install                # Install to /usr/local (or PREFIX=/path make install)
@@ -277,7 +277,7 @@ my @flat = (1, @arr, 2)  # @arr elements are flattened into the list
 [ 1, 2, 3 ]              # Array reference
 { key => "value" }       # Hash reference
 $$ref, @$ref, %$ref      # Dereference (shorthand)
-@{$ref}, %{$ref}          # Dereference (braced; ${$ref} is NOT accepted, use $$ref)
+${$ref}, @{$ref}, %{$ref}  # Dereference (braced)
 ```
 
 ### Weak References
@@ -304,7 +304,7 @@ Note: the automatic **cycle collector** (default on, see Memory Management below
 make clean && make          # Full rebuild
 make run PROG=test_simple   # Test specific example
 make test-selfhost          # Verify compiler can compile itself
-make test-suite             # Run comprehensive test suite (233 tests)
+make test-suite             # Run comprehensive test suite (269 tests)
 ./t/run_tests.sh -v string  # Run tests matching "string" with verbose output
 ```
 
@@ -313,7 +313,7 @@ make test-suite             # Run comprehensive test suite (233 tests)
 Located in `t/`:
 
 ```bash
-./t/run_tests.sh            # Run all 233 tests
+./t/run_tests.sh            # Run all 269 tests
 ./t/run_tests.sh -v         # Verbose output
 ./t/run_tests.sh -t         # TAP format for CI/CD
 ./t/run_tests.sh regex      # Run only tests matching "regex"
@@ -655,6 +655,8 @@ No-parens methods use `@_` (object prepended): `func bark { my $self = shift; sa
 
 Features: `has ro|rw`, `extends`, `with` (roles), `before`/`after`/`around` hooks, `(required)`, `(lazy)`, `(builder => "method")`, auto-generated constructor with named args, `isa()`, `can()`, `AUTOLOAD`.
 
+`(required)` is enforced by the generated constructor (it throws "Missing required attribute ..."); a call that omits one is not inlined (`inline_ctor_missing_required`). An attribute with a builder gets an accessor that calls the builder on first read while unset and stores the result; such accessors are never inlined as plain hash reads. Named arguments may be written `Pkg::new(name => "x")`: in call arguments the fat comma is a comma (`ast_add_arg` spreads the pair the expression parser builds for `=>`).
+
 ### Dynamic Method Dispatch
 
 ```strada
@@ -981,9 +983,14 @@ closures with "'name' undeclared": `/$var/` and `!~` regex patterns, `++`/`--` o
 int variables, `chomp($var)`/`chop($var)`. Likewise a declaration that bypasses
 `gen_statement`'s `NODE_VAR_DECL` branch (the C-style `for (my int $i …)` init)
 must add the name to `anon_local_str`, or it is treated as a capture. Regression:
-`examples/test_closure_capture_sites.strada`. Known gap: `s/$var/…/` does not
-interpolate variables in the PATTERN at all (it is passed as the literal regex
-`$var`), in or out of closures; use `re::replace_all($s, $var, …)`.
+`examples/test_closure_capture_sites.strada`.
+
+**Regex pattern interpolation** (2026-11): match AND substitution patterns
+interpolate `$name` and `${name}` (`regex_pattern_has_interp`,
+`gen_regex_interpolated_pattern`, `gen_subst_pattern_prelude` in CodeGen.strada).
+Substitution patterns used to be passed as the literal text `$var` and silently
+matched nothing. The replacement side of `s///` still does not interpolate
+variables (only `$1`-style backreferences).
 
 Transitive capture works: a closure nested inside another closure captures outer variables through the enclosing closure's `__captures` slots (gen at CodeGenExpr's capture-array emission forces the enclosing closure to capture pass-through names).
 
@@ -1166,10 +1173,42 @@ END { say("runs after main, LIFO order"); }
 ### Other Features
 
 - **Map to hash**: `my hash %lookup = map { $_ => 1 } @fruits;`
-- **`tie`/`untie`/`tied`**: Custom variable implementations dispatching FETCH/STORE/EXISTS/DELETE/FIRSTKEY/NEXTKEY/CLEAR. Zero overhead when untied.
+- **`tie`/`untie`/`tied`**: Custom variable implementations dispatching FETCH/STORE/EXISTS/DELETE/FIRSTKEY/NEXTKEY/CLEAR. Zero overhead when untied. The kind of tie follows the variable's sigil (`tie($x, ...)` → TIESCALAR, `@` → TIEARRAY, `%` → TIEHASH). In a program that uses `tie` (`uses_tie`), `keys`/`values`/`each` go through the SV-level runtime entry points (`strada_hash_keys_sv` etc.), `%h = ()` calls CLEAR and keeps the tie (`strada_hash_clear_if_tied`), and a statement `$x = EXPR;` on a tied scalar calls STORE.
 - **Private functions**: `private func helper(int $x) int { ... }` — `static` in C, not exported
 - **Dynamic return type**: `func flexible() dynamic { ... }` with `core::wantarray()` / `core::wanthash()`
-- **Package-qualified calls**: `::helper()` resolves to current package. Also `.::func()`. (`__PACKAGE__::func()` is accepted by the parser but fails at link: it emits `__PACKAGE___func`.)
+- **Package-qualified calls**: `::helper()` resolves to current package. Also `.::func()`, `__PACKAGE__::func()`. Plain `__PACKAGE__` is the package the code is written in, resolved at compile time.
+
+### Semantics fixed in 2026-11 (each has a test in `t/bugfix_tests/`)
+
+`t/t_bugfixes.sh` runs one small program per fixed bug; the first comment line
+of each file states the expected output (`# EXPECT:`), a required failure
+(`# EXPECT-STDERR:`) or a required compile error (`# COMPILE-ERROR:`). Add a
+file there with every bug fix. Behaviours worth knowing when touching the
+compiler:
+
+- **`our` shadowing**: `our_vars` is keyed by name, so a parameter or `my`
+  variable of the same name must blank the entry for its scope
+  (`our_shadow_begin` / `our_shadow_restore`; `gen_block` and `gen_function`
+  restore). Any new declaration form must call `our_shadow_begin`.
+- **Bare `/re/` as a truth value** is `$_ =~ /re/`: the parser yields a bare
+  regex as a string node flagged `is_regex` (what `split(/,/, …)` wants), and the
+  AST constructors that take a condition route it through `ast_regex_truth`.
+  `m/re/` is lexed where a regex may start.
+- **List assignment** `($a, $b) = LIST;` becomes a `NODE_DESTRUCTURE` with
+  `is_decl == 0` (`list_assign_as_destructure` in Parser.strada).
+- **`local` in a bare or if/elsif/else block** is undone at the end of that
+  block (`gen_block_local_scoped`); loops restore per iteration, the function
+  exit restores the rest.
+- **Method wrappers apply literal default parameters** (`wrapper_default_literal`):
+  a dynamically dispatched call arrives with the argument missing.
+- **Unknown builtin names** (`core::x`, `math::x`, `async::x`, `c::x`,
+  `thread::x`, `utf8::x` that no handler claims) are a located compile error
+  raised in `gen_user_call` (`unknown_builtin_name`), and `--check` now runs the
+  code generator (output discarded) so it reports them too.
+- `foreach ("a")` iterates once; `chomp;` / `$u = uc;` act on `$_`;
+  `use Mod qw(a b);` parses; `tr///r` returns a copy; `"\x{E9}"` is one
+  character; `core::fread($fh, $n)` / `core::fwrite($fh, $data, $n)` /
+  `is_refto($v, "KIND")` honour their extra argument.
 
 ### Stack Traces and Introspection
 
@@ -1178,7 +1217,7 @@ END { say("runs after main, LIFO order"); }
 - `core::caller()` - Returns hash with `function`, `file`, `line` of calling frame
 - `core::caller($level)` - Optional level: 0 = immediate caller, 1 = caller's caller, etc.
 - `--no-stack-trace` flag to disable for performance
-- `core::set_recursion_limit($n)` - Deep recursion protection (default: 1000)
+- `core::set_recursion_limit($n)` - Deep recursion protection (default: 1000). Part of stack-trace tracking, so only active in programs that use try/throw/caller/stack_trace (or `--stack-trace`). Calls deeper than the 256-entry frame array are counted (`strada_call_overflow`) rather than recorded, so the limit is exact; a try frame saves the logical depth (`strada_stack_mark`) and a throw restores it.
 
 ```strada
 my scalar $info = core::caller();
@@ -1212,7 +1251,7 @@ back.
 my array @data[1000];           # Pre-allocate array capacity
 my hash %cache[500];            # Pre-allocate hash capacity
 core::hash_default_capacity(1000);
-reserve(@arr, $n);              # (core::array_reserve does not exist: link error)
+reserve(@arr, $n);              # core::array_reserve(@arr, $n) is an alias
 ```
 
 **Runtime optimizations** (automatic, no code changes needed):

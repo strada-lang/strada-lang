@@ -1,0 +1,11 @@
+# EXPECT: nonzero 42
+# core::int_ptr(\$x) returned 0: `\$x` is a slot reference, which the
+# pointer functions read as an ordinary reference.
+func main() int {
+    my int $x = 5;
+    my scalar $p = core::int_ptr(\$x);
+    my str $a = ($p != 0) ? "nonzero" : "zero";
+    core::ptr_set_int($p, 42);
+    say($a . " " . core::ptr_deref_int($p));
+    return 0;
+}

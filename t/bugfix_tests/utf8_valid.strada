@@ -1,0 +1,4 @@
+# EXPECT: 0 1
+# utf8::valid() accepted any bytes: stray continuation and invalid lead
+# bytes were treated as one-byte characters.
+func main() int { my str $bad = core::byte(255) . core::byte(254); say(utf8::valid($bad) . " " . utf8::valid("ok")); return 0; }

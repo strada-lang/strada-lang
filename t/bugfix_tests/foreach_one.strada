@@ -1,0 +1,9 @@
+# EXPECT: 1 1 2
+# foreach over a single literal, `foreach ("a")`, iterated zero times.
+func main() int {
+    my int $n = 0; foreach ("a") { $n = $n + 1; }
+    my int $m = 0; foreach my $e (7) { $m = $m + 1; }
+    my int $k = 0; foreach my $e ("a", "b") { $k = $k + 1; }
+    say($n . " " . $m . " " . $k);
+    return 0;
+}

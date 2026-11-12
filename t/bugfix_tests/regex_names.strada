@@ -1,0 +1,12 @@
+# EXPECT: 1 1 1 0
+# A regex pattern variable whose name is longer than one letter: /$pattern/
+# must not be read as $p followed by "attern". Also ${name} inside a pattern.
+func main() int {
+    my str $pattern = "b+"; my str $regex_pattern = "^a"; my str $s = "abbc"; my str $stem = "bb";
+    my int $a = ($s =~ /$pattern/) ? 1 : 0;
+    my int $b = ($s =~ /$regex_pattern/) ? 1 : 0;
+    my int $c = ($s =~ /a${stem}c/) ? 1 : 0;
+    my int $d = ($s =~ /^$pattern$/) ? 1 : 0;
+    say($a . " " . $b . " " . $c . " " . $d);
+    return 0;
+}

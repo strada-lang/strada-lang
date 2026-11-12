@@ -167,6 +167,11 @@ func compile(str $source, str $filename, int $debug_info, int $show_timing, int 
     # --check: validation only. Errors above have already die'd; a clean
     # program stops here without generating C.
     if ($check_only == 1) {
+        # Run the code generator too and discard its output: a few errors are
+        # only detected there (an unknown core::/math::/async:: builtin, a
+        # spread outside a call). Without this `--check` passed programs that
+        # then failed to build.
+        generate($ast, $filename, 0, 0, $enable_stack_trace, 0);
         return "";
     }
 

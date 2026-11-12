@@ -1,0 +1,12 @@
+# EXPECT: 3 42 t
+# Calling a `dynamic` function in a program with stack traces on (one that
+# mentions try or stack_trace) generated C with unbalanced parentheses.
+func flex() dynamic { if (core::wantarray()) { my array @a = (1, 2, 3); return @a; } return 42; }
+func main() int {
+    my array @a = flex(); my int $s = flex();
+    my str $t = "";
+    try { $t = "t"; } catch ($e) { $t = "c"; }
+    my str $st = core::stack_trace();
+    say(size(@a) . " " . $s . " " . $t);
+    return 0;
+}

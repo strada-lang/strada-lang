@@ -1,0 +1,24 @@
+# EXPECT: keys=a,b values=1,2 each=2 cleared=1 after=0
+# keys/values/each on a tied hash read the (empty) underlying table instead of
+# calling FIRSTKEY/NEXTKEY/FETCH, and `%h = ()` dropped the tie without CLEAR.
+package T;
+our int $cleared = 0;
+func TIEHASH(str $class) scalar { my hash %s = ("d" => { "a" => 1, "b" => 2 }, "ks" => [], "i" => 0); return bless(\%s, "T"); }
+func FETCH(scalar $self, str $k) scalar { return $self->{"d"}->{$k}; }
+func STORE(scalar $self, str $k, scalar $v) void { $self->{"d"}->{$k} = $v; }
+func EXISTS(scalar $self, str $k) int { return exists($self->{"d"}->{$k}) ? 1 : 0; }
+func DELETE(scalar $self, str $k) void { delete($self->{"d"}->{$k}); }
+func FIRSTKEY(scalar $self) scalar { my array @k = sort(keys(%{$self->{"d"}})); $self->{"ks"} = \@k; $self->{"i"} = 0; return ::NEXTKEY($self, ""); }
+func NEXTKEY(scalar $self, str $last) scalar { my int $i = $self->{"i"}; my scalar $ks = $self->{"ks"}; if ($i >= size(@{$ks})) { return undef; } $self->{"i"} = $i + 1; return $ks->[$i]; }
+func CLEAR(scalar $self) void { $cleared = 1; $self->{"d"} = {}; }
+func was_cleared() int { return $cleared; }
+package main;
+func main() int {
+    my hash %h; tie(%h, "T");
+    my str $ks = join(",", sort(keys(%h)));
+    my str $vs = join(",", sort(values(%h)));
+    my int $n = 0; my int $more = 1; while ($more) { my array @kv = each(%h); if (size(@kv) == 0) { $more = 0; } else { $n = $n + 1; } if ($n > 5) { $more = 0; } }
+    %h = ();
+    say("keys=" . $ks . " values=" . $vs . " each=" . $n . " cleared=" . T::was_cleared() . " after=" . size(keys(%h)));
+    return 0;
+}

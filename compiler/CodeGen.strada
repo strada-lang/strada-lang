@@ -307,6 +307,11 @@ func codegen_new(str $filename, int $debug_info, int $enable_profiling, int $ena
     # Track 'our' variables: maps C variable name -> "package::varname" registry key
     my hash %our_vars = ();
     $cg{"our_vars"} = \%our_vars;
+    my array @our_shadow_names = ();
+    my array @our_shadow_keys = ();
+    $cg{"our_shadow_names"} = \@our_shadow_names;
+    $cg{"our_shadow_keys"} = \@our_shadow_keys;
+    $cg{"our_shadow_n"} = 0;
     # Track int-typed variables for integer arithmetic optimization
     my hash %int_vars = ();
     $cg{"int_vars"} = \%int_vars;
@@ -1255,6 +1260,72 @@ func gen_overload_reg_stringify(scalar $sb, str $pkg, scalar $pkg_ol, scalar $me
     }
 }
 
+# The C expression for a parameter's default value when that default is a
+# simple literal (an int, a negated int, a number, or a string of ordinary
+# characters); "" for no default or anything more involved. Used by the method
+# wrappers, which are assembled as text and cannot run the expression codegen.
+func wrapper_default_literal(scalar $param) str {
+    if (!$param) { return ""; }
+    if ($param->{"has_default"} != 1) { return ""; }
+    my scalar $dv = $param->{"default"};
+    if (!$dv) { return ""; }
+    my int $dt = $dv->{"type"};
+    if ($dt == NODE_INT_LITERAL()) {
+        return "STRADA_MAKE_TAGGED_INT(" . $dv->{"value"} . ")";
+    }
+    if ($dt == NODE_NUM_LITERAL()) {
+        return "strada_new_num(" . $dv->{"value"} . ")";
+    }
+    if ($dt == NODE_UNARY_OP()) {
+        my str $du_op = $dv->{"op"};
+        my scalar $du_arg = $dv->{"operand"};
+        if ($du_op eq "-" && $du_arg) {
+            if ($du_arg->{"type"} == NODE_INT_LITERAL()) {
+                return "STRADA_MAKE_TAGGED_INT(-" . $du_arg->{"value"} . ")";
+            }
+            if ($du_arg->{"type"} == NODE_NUM_LITERAL()) {
+                return "strada_new_num(-" . $du_arg->{"value"} . ")";
+            }
+        }
+        return "";
+    }
+    if ($dt == NODE_STR_LITERAL()) {
+        my str $ds = $dv->{"value"};
+        my str $dq = "";
+        my int $di = 0;
+        my int $dn = bytes($ds);
+        while ($di < $dn) {
+            my int $dc = char_at($ds, $di);
+            if ($dc == 34 || $dc == 92) {
+                $dq = $dq . "\\" . chr($dc);
+            } elsif ($dc == 10) {
+                $dq = $dq . "\\n";
+            } elsif ($dc == 9) {
+                $dq = $dq . "\\t";
+            } elsif ($dc < 32 || $dc >= 127) {
+                return "";      # leave unusual bytes to the ordinary path
+            } else {
+                $dq = $dq . chr($dc);
+            }
+            $di = $di + 1;
+        }
+        return "strada_new_str(\"" . $dq . "\")";
+    }
+    return "";
+}
+
+func wrapper_has_literal_default(scalar $m) int {
+    my scalar $wh_params = $m->{"params"};
+    if (!$wh_params) { return 0; }
+    my int $wh_n = $m->{"param_count"};
+    my int $wh_i = 1;
+    while ($wh_i < $wh_n) {
+        if (length(wrapper_default_literal($wh_params->[$wh_i])) > 0) { return 1; }
+        $wh_i = $wh_i + 1;
+    }
+    return 0;
+}
+
 # Generate method wrapper functions for a single package
 # $pkg_info is a hash with "methods" array and "count" int
 func gen_method_wrappers_for_pkg(scalar $sb, str $pkg, scalar $pkg_info, int $has_overloads, scalar $overloads, scalar $method_modifiers, int $method_modifier_count) void {
@@ -1344,7 +1415,47 @@ func gen_method_wrappers_for_pkg(scalar $sb, str $pkg, scalar $pkg_info, int $ha
                         sb_append($sb, "    return __va_result;\n");
                     }
                 }
-            } else {
+            } elsif (wrapper_has_literal_default($m) == 1) {
+                # A parameter with a default value. Direct calls fill defaults
+                # in at the call site; a dynamically dispatched call arrives
+                # here with the argument simply missing, and used to pass NULL
+                # (undef) on: `$obj->method()` ignored the default whenever the
+                # receiver's class was not known statically.
+                my scalar $wd_params = $m->{"params"};
+                my int $wd_j = 1;
+                while ($wd_j < $param_count) {
+                    my int $wd_idx = $wd_j - 1;
+                    my str $wd_lit = wrapper_default_literal($wd_params->[$wd_j]);
+                    sb_append($sb, "    StradaValue *__wa" . $wd_idx . " = __strada_get_arg(args, " . $wd_idx . "); int __wo" . $wd_idx . " = 0;\n");
+                    if (length($wd_lit) > 0) {
+                        sb_append($sb, "    if (!__wa" . $wd_idx . ") { __wa" . $wd_idx . " = " . $wd_lit . "; __wo" . $wd_idx . " = 1; }\n");
+                    }
+                    $wd_j = $wd_j + 1;
+                }
+                if ($is_void == 1) {
+                    sb_append($sb, "    " . $func_name . "(self");
+                } else {
+                    sb_append($sb, "    StradaValue *__wr = " . $func_name . "(self");
+                }
+                $wd_j = 1;
+                while ($wd_j < $param_count) {
+                    sb_append($sb, ", __wa" . ($wd_j - 1));
+                    $wd_j = $wd_j + 1;
+                }
+                sb_append($sb, ");\n");
+                $wd_j = 1;
+                while ($wd_j < $param_count) {
+                    # strada_decref is a no-op on tagged ints, so one release
+                    # covers every kind of literal default.
+                    sb_append($sb, "    if (__wo" . ($wd_j - 1) . ") strada_decref(__wa" . ($wd_j - 1) . ");\n");
+                    $wd_j = $wd_j + 1;
+                }
+                if ($is_void == 1) {
+                    sb_append($sb, "    return strada_undef_static();\n");
+                } else {
+                    sb_append($sb, "    return __wr;\n");
+                }
+} else {
                 if ($is_void == 1) {
                     sb_append($sb, "    " . $func_name . "(self");
                 } else {
@@ -1819,6 +1930,17 @@ func is_scalar_expr(scalar $expr) int {
     # Literal values
     if ($type == NODE_INT_LITERAL() || $type == NODE_NUM_LITERAL() || $type == NODE_STR_LITERAL()) {
         return 1;
+    }
+
+    # $$ref / ${$ref}: one scalar. (@$ref and %$ref share the node type and
+    # are whole containers.) Missing this made `my array @a = ($$ref);` an
+    # alias of the dereferenced value instead of a one-element list.
+    if ($type == NODE_DEREF_SCALAR()) {
+        my str $ds_sigil = $expr->{"sigil"};
+        if ($ds_sigil eq "$") {
+            return 1;
+        }
+        return 0;
     }
 
     # Unary operators on scalars
@@ -2430,6 +2552,97 @@ func get_capture_index(str $list, str $name) int {
     return -1;
 }
 
+# 1 when constructing class $c_pkg (C-safe name) with these literal-keyed
+# arguments would leave a (required) attribute, its own or an inherited one,
+# unset.
+func inline_ctor_missing_required(scalar $cg, str $c_pkg, scalar $args, int $arg_count) int {
+    my scalar $rq_attrs = $cg->{"has_attrs"};
+    my int $rq_n = 0 + $cg->{"has_attr_count"};
+    my str $rq_pkg = strada_pkg_for_c($cg, $c_pkg);
+    my int $rq_i = 0;
+    while ($rq_i < $rq_n) {
+        my scalar $rq_attr = $rq_attrs->[$rq_i];
+        if ($rq_attr->{"required"} == 1) {
+            my str $rq_owner = $rq_attr->{"package"};
+            if ($rq_owner eq $rq_pkg || pkg_c_safe($rq_owner) eq $c_pkg || is_subclass_compile_time($cg, $rq_pkg, $rq_owner, 0) == 1) {
+                my str $rq_name = $rq_attr->{"name"};
+                my int $rq_found = 0;
+                my int $rq_k = 0;
+                while ($rq_k < $arg_count) {
+                    my scalar $rq_key = $args->[$rq_k];
+                    if ($rq_key->{"type"} == NODE_STR_LITERAL()) {
+                        my str $rq_kv = $rq_key->{"value"};
+                        if ($rq_kv eq $rq_name) { $rq_found = 1; }
+                    }
+                    $rq_k = $rq_k + 2;
+                }
+                if ($rq_found == 0) { return 1; }
+            }
+        }
+        $rq_i = $rq_i + 1;
+    }
+    return 0;
+}
+
+# 1 when $name is in a builtin namespace (core::/sys::, math::, async::, c::,
+# thread::, utf8::) but is neither a function the program defines or imports
+# nor one of the runtime entry points that are called by their plain C name.
+func unknown_builtin_name(scalar $cg, str $name, str $c_name) int {
+    my int $ub_sep = index($name, "::");
+    if ($ub_sep < 0) { return 0; }
+    my str $ub_ns = substr($name, 0, $ub_sep);
+    if ($ub_ns ne "sys" && $ub_ns ne "core" && $ub_ns ne "math" && $ub_ns ne "async" &&
+        $ub_ns ne "c" && $ub_ns ne "thread" && $ub_ns ne "utf8") {
+        return 0;
+    }
+    # A program may define its own package with one of these names.
+    my scalar $ub_all = $cg->{"all_func_names"};
+    if ($ub_all) {
+        my str $ub_hit = "" . $ub_all->{$c_name};
+        if (length($ub_hit) > 0) { return 0; }
+    }
+    # Runtime functions spelled sys_NAME in C (aliases used by bootstrap output).
+    if ($c_name eq "sys_file_mtime" || $c_name eq "sys_system" || $c_name eq "sys_qx" ||
+        $c_name eq "sys_unlink" || $c_name eq "sys_realpath" || $c_name eq "sys_mkdir") {
+        return 0;
+    }
+    return 1;
+}
+
+# ---- Lexical shadowing of `our` variables ---------------------------------
+# our_vars maps a variable's C name to its global-registry key, and every
+# variable reference consults it first. It is keyed by NAME only, so a function
+# parameter or `my` variable with the same name as an `our` variable was read
+# and written as the global: `our str $greeting; func greet(str $greeting)`
+# ignored its argument. A declaration that shadows one blanks the entry (an
+# empty key means "not an our variable") and records it; the enclosing block or
+# function restores it on the way out.
+func our_shadow_mark(scalar $cg) int {
+    return 0 + $cg->{"our_shadow_n"};
+}
+
+func our_shadow_begin(scalar $cg, str $c_name) void {
+    my scalar $os_vars = $cg->{"our_vars"};
+    my str $os_key = "" . $os_vars->{$c_name};
+    if (length($os_key) == 0) { return; }
+    my int $os_n = 0 + $cg->{"our_shadow_n"};
+    $cg->{"our_shadow_names"}->[$os_n] = $c_name;
+    $cg->{"our_shadow_keys"}->[$os_n] = $os_key;
+    $cg->{"our_shadow_n"} = $os_n + 1;
+    $os_vars->{$c_name} = "";
+}
+
+func our_shadow_restore(scalar $cg, int $mark) void {
+    my int $os_n = 0 + $cg->{"our_shadow_n"};
+    my scalar $os_vars = $cg->{"our_vars"};
+    while ($os_n > $mark) {
+        $os_n = $os_n - 1;
+        my str $os_name = $cg->{"our_shadow_names"}->[$os_n];
+        $os_vars->{$os_name} = $cg->{"our_shadow_keys"}->[$os_n];
+    }
+    $cg->{"our_shadow_n"} = $os_n;
+}
+
 # The C expression that names scalar variable $var_name at the current point
 # of code generation. Outside an anonymous function that is just its C name.
 # Inside one it is the C name for a parameter or local, and the capture slot
@@ -2464,6 +2677,42 @@ func scalar_var_c_ref(scalar $cg, str $var_name, str $c_var_name) str {
     return "(*__captures[" . $idx . "])";
 }
 
+# 1 when a regex pattern mentions a variable: a `$` followed by a letter or
+# underscore. (A `$` followed by anything else is the end-of-line anchor.)
+func regex_pattern_has_interp(str $pattern) int {
+    my int $len = length($pattern);
+    my int $i = 0;
+    while ($i + 1 < $len) {
+        if (substr($pattern, $i, 1) eq "$") {
+            my str $nch = substr($pattern, $i + 1, 1);
+            if ($nch eq "_" || ($nch ge "a" && $nch le "z") || ($nch ge "A" && $nch le "Z")) {
+                return 1;
+            }
+            # ${name}
+            if ($nch eq "{" && $i + 2 < $len) {
+                my str $bch0 = substr($pattern, $i + 2, 1);
+                if ($bch0 eq "_" || ($bch0 ge "a" && $bch0 le "z") || ($bch0 ge "A" && $bch0 le "Z")) {
+                    return 1;
+                }
+            }
+        }
+        $i = $i + 1;
+    }
+    return 0;
+}
+
+# Emit `char *__subst_pat = <the interpolated pattern as a C string>; ` for a
+# substitution whose pattern mentions variables. The caller passes __subst_pat
+# as the pattern and releases it with strada_cstr_free.
+func gen_subst_pattern_prelude(scalar $cg, str $pattern) void {
+    emit($cg, "StradaValue *__subst_psv = ");
+    gen_regex_interpolated_pattern($cg, $pattern);
+    emit($cg, "; char *__subst_pat = strada_to_str_ss(__subst_psv); ");
+    if (regex_pattern_is_single_var($pattern) == 0) {
+        emit($cg, "strada_decref(__subst_psv); ");
+    }
+}
+
 # 1 when an interpolated regex pattern is exactly one variable ("$name" and
 # nothing else), in which case gen_regex_interpolated_pattern yields that
 # variable's own (borrowed) value rather than a freshly built string.
@@ -2471,6 +2720,10 @@ func regex_pattern_is_single_var(str $pattern) int {
     my int $len = length($pattern);
     if ($len < 2) { return 0; }
     if (substr($pattern, 0, 1) ne "$") { return 0; }
+    # "${name}" and nothing else
+    if ($len > 3 && substr($pattern, 1, 1) eq "{" && substr($pattern, $len - 1, 1) eq "}") {
+        return regex_pattern_is_single_var("$" . substr($pattern, 2, $len - 3));
+    }
     my int $i = 1;
     while ($i < $len) {
         my str $vch = substr($pattern, $i, 1);
@@ -2508,10 +2761,32 @@ func gen_regex_interpolated_pattern(scalar $cg, str $pattern) void {
                 $literal = "";
             }
 
-            # Parse variable name
+            # Parse variable name: $name, or the braced ${name} that lets a
+            # name be followed directly by word characters (/${stem}ing/).
             $i = $i + 1;
             my str $varname = "";
-            while ($i < $len) {
+            if ($i < $len && substr($pattern, $i, 1) eq "{") {
+                my int $close = index($pattern, "}", $i);
+                if ($close > $i + 1) {
+                    my str $braced = substr($pattern, $i + 1, $close - $i - 1);
+                    my int $bi = 0;
+                    my int $b_ok = 1;
+                    while ($bi < length($braced)) {
+                        my str $bch = substr($braced, $bi, 1);
+                        if (!($bch eq "_" || ($bch ge "a" && $bch le "z") || ($bch ge "A" && $bch le "Z") || ($bch ge "0" && $bch le "9"))) {
+                            $b_ok = 0;
+                        }
+                        $bi = $bi + 1;
+                    }
+                    if ($b_ok == 1) {
+                        $varname = $braced;
+                        $i = $close + 1;
+                    }
+                }
+            }
+            my int $braced_done = 0;
+            if (length($varname) > 0) { $braced_done = 1; }
+            while ($braced_done == 0 && $i < $len) {
                 my str $vch = substr($pattern, $i, 1);
                 if ($vch eq "_" || ($vch ge "a" && $vch le "z") || ($vch ge "A" && $vch le "Z") || ($vch ge "0" && $vch le "9")) {
                     $varname = $varname . $vch;
@@ -3455,6 +3730,7 @@ func build_owned_call_builtins() scalar {
     $owned_set{"sys::global_keys"} = 1;
     $owned_set{"sys::stack_trace"} = 1;
     $owned_set{"sys::caller"} = 1;
+    $owned_set{"caller"} = 1;
     $owned_set{"sys::full_profile_start"} = 1;
     $owned_set{"sys::full_profile_stop"} = 1;
     $owned_set{"sys::gc_collections"} = 1;

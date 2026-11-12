@@ -1,0 +1,13 @@
+# EXPECT: -1 5 -1
+# A default parameter value was ignored when the method was dispatched
+# dynamically (receiver class not known statically, or $obj->$name()).
+package A;
+func new() scalar { my hash %s = (); return bless(\%s, "A"); }
+func age(scalar $self, int $n = -1) int { return $n; }
+package main;
+func pick(int $w) scalar { if ($w) { return A::new(); } return undef; }
+func main() int {
+    my scalar $o = pick(1); my str $m = "age";
+    say($o->age() . " " . $o->age(5) . " " . $o->$m());
+    return 0;
+}

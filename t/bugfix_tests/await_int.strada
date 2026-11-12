@@ -1,0 +1,9 @@
+# EXPECT: 5 7
+# `await` on a plain integer (not a future) crashed.
+async func w(int $n) int { return $n; }
+func main() int {
+    my scalar $v = 5; my int $x = await $v;
+    my scalar $f = w(7); my int $y = await $f;
+    say($x . " " . $y);
+    return 0;
+}

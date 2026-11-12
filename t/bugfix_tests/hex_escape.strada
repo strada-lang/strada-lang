@@ -1,0 +1,4 @@
+# EXPECT: 2 2 c3a9 c3a9
+# "\x{E9}" was double-encoded into 4 bytes.
+func hexs(str $s) str { my str $o = ""; my int $i = 0; while ($i < core::byte_length($s)) { $o = $o . sprintf("%02x", core::get_byte($s, $i)); $i = $i + 1; } return $o; }
+func main() int { my str $a = "\x{E9}"; my str $b = "\xE9"; say(core::byte_length($a) . " " . core::byte_length($b) . " " . hexs($a) . " " . hexs($b)); return 0; }

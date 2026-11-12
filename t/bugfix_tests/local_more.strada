@@ -1,0 +1,12 @@
+# EXPECT: 1 2 1 | 5 1 | 9 9 1
+# `local` inside an if block, and a whole-function local next to a nested block.
+our int $g = 1;
+func show() int { return $g; }
+func in_if(int $c) str { my int $b = 0; if ($c) { local $g = 5; $b = show(); } return $b . " " . show(); }
+func whole() str { local $g = 9; my int $a = show(); { my int $z = 0; $z = $z + 1; } return $a . " " . show(); }
+func main() int {
+    my int $a = show(); my int $b = 0;
+    { local $g = 2; $b = show(); }
+    say($a . " " . $b . " " . show() . " | " . in_if(1) . " | " . whole() . " " . show());
+    return 0;
+}

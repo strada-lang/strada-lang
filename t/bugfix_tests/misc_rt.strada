@@ -1,0 +1,13 @@
+# EXPECT: 0 1 ab 2
+# is_refto() ignored its type argument; core::fread and core::fwrite ignored
+# their size argument.
+func main() int {
+    my scalar $r = [1];
+    core::spew("/tmp/strada_t_bugfix_f.txt", "abcdef");
+    my scalar $fh = core::open("/tmp/strada_t_bugfix_f.txt", "r");
+    my str $d = core::fread($fh, 2);
+    core::close($fh);
+    my scalar $w = core::open("/tmp/strada_t_bugfix_g.txt", "w"); core::fwrite($w, "abcdef", 2); core::close($w);
+    say(is_refto($r, "HASH") . " " . is_refto($r, "ARRAY") . " " . $d . " " . length(core::slurp("/tmp/strada_t_bugfix_g.txt")));
+    return 0;
+}

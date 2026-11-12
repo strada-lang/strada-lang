@@ -1,0 +1,9 @@
+# EXPECT: 1,2,35,3 | 1,99,4,5 | 9,1
+# splice() with exactly one replacement value that is an integer inserted nothing.
+func main() int {
+    my array @a = (1, 2, 3); splice(@a, 2, 0, 35);
+    my array @b = (1, 2, 3, 4, 5); splice(@b, 1, 2, 99);
+    my array @c = (1); splice(@c, 0, 0, 9);
+    say(join(",", @a) . " | " . join(",", @b) . " | " . join(",", @c));
+    return 0;
+}

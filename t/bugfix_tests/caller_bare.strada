@@ -1,0 +1,4 @@
+# EXPECT: main
+# Bare caller() generated a call with an obsolete signature.
+func who() str { my scalar $c = caller(); return $c->{"function"}; }
+func main() int { say(who()); return 0; }

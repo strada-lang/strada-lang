@@ -1,0 +1,12 @@
+# EXPECT: no yes m
+# A bare /regex/ used as a condition was always true (it is `$_ =~ /regex/`),
+# and m/regex/ was a parse error.
+func main() int {
+    my str $a = "";
+    foreach ("abc") { if (/zzz/) { $a = "yes"; } else { $a = "no"; } }
+    my str $b = "";
+    foreach ("abc") { if (/b/) { $b = "yes"; } else { $b = "no"; } }
+    my str $c = ("abc" =~ m/b/) ? "m" : "x";
+    say($a . " " . $b . " " . $c);
+    return 0;
+}

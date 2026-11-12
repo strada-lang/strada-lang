@@ -1046,8 +1046,14 @@ func parse_primary(scalar $parser) scalar {
             return $call;
         }
 
-        # Plain __PACKAGE__ - runtime value
-        return ast_new_dunder_package();
+        # Plain __PACKAGE__: the package this code is written in, known now.
+        # (The runtime's "current package" is set once, for main, so reading it
+        # at run time answered "main" from inside any package.)
+        my scalar $dp_node = ast_new_dunder_package();
+        my str $dp_pkg = $parser->{"current_package"};
+        if (length($dp_pkg) == 0) { $dp_pkg = "main"; }
+        $dp_node->{"package"} = $dp_pkg;
+        return $dp_node;
     }
 
     # ::func() - shorthand for __PACKAGE__::func()
@@ -1243,6 +1249,29 @@ func parse_primary(scalar $parser) scalar {
             my scalar $cs_var = ast_new_variable("__child_status", "$");
             ast_set_line($cs_var, $var_line);
             return $cs_var;
+        }
+
+        # ${ EXPR } — braced scalar dereference (`${$ref}`, `${$h{"r"}}`),
+        # the scalar counterpart of @{...} and %{...}. `${name}` with a bare
+        # identifier is just the variable $name.
+        if (parser_check($parser, "LBRACE")) {
+            parser_advance($parser);
+            if (parser_check($parser, "IDENT")) {
+                my scalar $bv_tok = parser_current($parser);
+                my scalar $bv_next = parser_peek($parser);
+                if ($bv_next->{"type"} eq "RBRACE") {
+                    parser_advance($parser);
+                    parser_advance($parser);
+                    my scalar $bv_var = ast_new_variable($bv_tok->{"value"}, "$");
+                    ast_set_line($bv_var, $var_line);
+                    return $bv_var;
+                }
+            }
+            my scalar $bd_expr = parse_expression($parser);
+            parser_expect($parser, "RBRACE");
+            my scalar $bd_deref = ast_new_deref_scalar($bd_expr, "$");
+            ast_set_line($bd_deref, $var_line);
+            return $bd_deref;
         }
 
         # Check for $$var or $${expr} scalar dereference syntax
@@ -1789,6 +1818,22 @@ func parse_primary(scalar $parser) scalar {
             my scalar $underscore_arr = ast_new_variable("_", "@");
             ast_add_arg($bare_call, $underscore_arr);
             return $bare_call;
+        }
+
+        # A $_-defaulting builtin written with no parentheses and nothing after
+        # it: `chomp;` / `$u = uc;`. It used to be taken for the bareword
+        # STRING "chomp" / "uc" (a silent no-op, or the function's own name as
+        # the value). Only when the statement ends right there, so barewords
+        # used as hash keys or list words are untouched.
+        if (parser_check($parser, "SEMI")) {
+            if ($name eq "chomp" || $name eq "chop" || $name eq "uc" || $name eq "lc" ||
+                $name eq "ucfirst" || $name eq "lcfirst" || $name eq "trim" || $name eq "length" ||
+                $name eq "ord" || $name eq "chr") {
+                my scalar $topic_call = ast_new_call($name);
+                ast_set_line($topic_call, $call_line);
+                ast_add_arg($topic_call, ast_new_variable("_", "$"));
+                return $topic_call;
+            }
         }
 
         # Just an identifier (bareword string in some contexts)
@@ -2594,6 +2639,7 @@ func parse_ternary(scalar $parser) scalar {
         my scalar $pair = ast_new_anon_array();
         ast_add_array_elem($pair, $cond);
         ast_add_array_elem($pair, $value);
+        $pair->{"is_pair"} = 1;   # ast_add_arg spreads it: f(k => v) is f(k, v)
         return $pair;
     }
 
@@ -3841,9 +3887,51 @@ func parse_statement(scalar $parser) scalar {
     }
 
     parser_expect($parser, "SEMI");
+
+    # List assignment to existing variables: `($a, $b) = (1, 2);`,
+    # `($p, $q) = ($q, $p);`. The left side parses as a list literal, which is
+    # not assignable (a C "lvalue required" error). When every element is a
+    # plain variable it is the same operation as `my ($a, $b) = LIST;` without
+    # the declaration, so build that node.
+    my scalar $la_stmt = list_assign_as_destructure($expr);
+    if ($la_stmt) {
+        ast_set_line($la_stmt, $stmt_line);
+        return $la_stmt;
+    }
+
     my scalar $expr_stmt = ast_new_expr_stmt($expr);
     ast_set_line($expr_stmt, $stmt_line);
     return $expr_stmt;
+}
+
+# See the list-assignment note above. Returns 0 when $expr is not that shape.
+func list_assign_as_destructure(scalar $expr) scalar {
+    if ($expr->{"type"} != NODE_ASSIGN()) { return 0; }
+    my str $la_op = $expr->{"op"};
+    if ($la_op ne "=") { return 0; }
+    my scalar $la_target = $expr->{"target"};
+    if ($la_target->{"type"} != NODE_ANON_ARRAY()) { return 0; }
+    if (!$la_target->{"is_list"}) { return 0; }
+    my int $la_n = $la_target->{"element_count"};
+    if ($la_n < 1) { return 0; }
+    my scalar $la_elems = $la_target->{"elements"};
+    my array @la_vars = ();
+    my int $la_i = 0;
+    while ($la_i < $la_n) {
+        my scalar $la_el = $la_elems->[$la_i];
+        if ($la_el->{"type"} != NODE_VARIABLE()) { return 0; }
+        my str $la_sigil = $la_el->{"sigil"};
+        # An array or hash swallows the rest of the list: only valid last.
+        if ($la_sigil ne "$" && $la_i != $la_n - 1) { return 0; }
+        my hash %la_info = ();
+        $la_info{"name"} = $la_el->{"name"};
+        $la_info{"sigil"} = $la_sigil;
+        $la_info{"var_type"} = TYPE_SCALAR();
+        $la_info{"type_name"} = "";
+        push(@la_vars, \%la_info);
+        $la_i = $la_i + 1;
+    }
+    return ast_new_destructure(\@la_vars, $la_n, $expr->{"value"}, 0);
 }
 
 # ============================================================
@@ -4908,8 +4996,20 @@ func parse_use(scalar $parser, scalar $program) void {
             $mod_name = $mod_name . "::" . $next_tok->{"value"};
         }
 
-        # Check for qw() import list
-        if (parser_check($parser, "IDENT")) {
+        # Check for qw() import list. The lexer turns `qw(a b)` into ONE
+        # QW_LITERAL token, so the IDENT `qw` + LPAREN form below never
+        # matched it and `use Mod qw(a b);` was a parse error.
+        if (parser_check($parser, "QW_LITERAL")) {
+            my scalar $qwl_tok = parser_current($parser);
+            my scalar $qwl_words = $qwl_tok->{"words"};
+            my int $qwl_n = $qwl_tok->{"word_count"};
+            my int $qwl_i = 0;
+            while ($qwl_i < $qwl_n) {
+                ast_add_import($program, $qwl_words->[$qwl_i]);
+                $qwl_i = $qwl_i + 1;
+            }
+            parser_advance($parser);
+        } elsif (parser_check($parser, "IDENT")) {
             my scalar $qw_tok = parser_current($parser);
             if ($qw_tok->{"value"} eq "qw") {
                 parser_advance($parser);
@@ -6282,6 +6382,22 @@ func parse_has_declaration(scalar $parser, scalar $program) void {
     ast_add_param($getter, $self_param);
     $getter->{"package"} = $pkg;
     my scalar $getter_body = ast_new_block();
+    # (builder => "method") / (lazy): the value is computed by calling the
+    # builder the first time the attribute is read while still unset, then kept:
+    #   if (!defined($self->{"name"})) { $self->{"name"} = $self->BUILDER(); }
+    # (These options used to be parsed and then ignored: the accessor just
+    # returned undef.)
+    if (length($builder_name) > 0) {
+        my scalar $lb_read = ast_new_deref_hash(ast_new_variable("self", "$"), ast_new_str_literal($attr_name));
+        my scalar $lb_defined = ast_new_call("defined");
+        ast_add_arg($lb_defined, $lb_read);
+        my scalar $lb_cond = ast_new_unary_op("!", $lb_defined);
+        my scalar $lb_block = ast_new_block();
+        my scalar $lb_target = ast_new_deref_hash(ast_new_variable("self", "$"), ast_new_str_literal($attr_name));
+        my scalar $lb_call = ast_new_method_call(ast_new_variable("self", "$"), $builder_name);
+        ast_add_statement($lb_block, ast_new_expr_stmt(ast_new_assign("=", $lb_target, $lb_call)));
+        ast_add_statement($getter_body, ast_new_if_stmt($lb_cond, $lb_block));
+    }
     # return $self->{"name"};
     my scalar $self_var = ast_new_variable("self", "$");
     my scalar $key_lit = ast_new_str_literal($attr_name);
@@ -6481,6 +6597,20 @@ func flush_has_constructor(scalar $program, str $pkg) void {
 
             my scalar $attr_assign = ast_new_assign("=", $self_acc, $rhs);
             ast_add_statement($ctor_body, ast_new_expr_stmt($attr_assign));
+        }
+
+        # (required): the constructor refuses to build the object without it.
+        #   if (!exists(%self, "name")) { throw "Missing required attribute ..."; }
+        # (The option used to be parsed and then ignored.)
+        if ($attr->{"required"} == 1) {
+            my scalar $rq_exists = ast_new_call("exists");
+            ast_add_arg($rq_exists, ast_new_variable("self", "%"));
+            ast_add_arg($rq_exists, ast_new_str_literal($a_name));
+            my scalar $rq_cond = ast_new_unary_op("!", $rq_exists);
+            my scalar $rq_block = ast_new_block();
+            my scalar $rq_msg = ast_new_str_literal("Missing required attribute '" . $a_name . "' for " . $pkg . "::new");
+            ast_add_statement($rq_block, ast_new_throw($rq_msg));
+            ast_add_statement($ctor_body, ast_new_if_stmt($rq_cond, $rq_block));
         }
         $pi = $pi + 1;
     }

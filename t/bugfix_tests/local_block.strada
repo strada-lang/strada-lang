@@ -1,0 +1,10 @@
+# EXPECT: 1 2 1
+# `local` inside a bare block stayed in force after the block ended.
+our int $g = 1;
+func show() int { return $g; }
+func main() int {
+    my int $a = show(); my int $b = 0;
+    { local $g = 2; $b = show(); }
+    say($a . " " . $b . " " . show());
+    return 0;
+}

@@ -2521,3 +2521,31 @@ a string SV that was passed straight to `strada_to_str_ss` and never released
 (one leak per match). The match codegen now binds it to `__re_psv` and decrefs it
 unless `regex_pattern_is_single_var($pattern)` (then it is the variable itself,
 borrowed).
+
+## Bug-fix batch, 2026-11 (see CLAUDE.md "Semantics fixed in 2026-11")
+
+Runtime pieces added alongside the compiler changes listed in CLAUDE.md:
+
+- **Call depth beyond the frame array**: `strada_call_overflow` (thread-local,
+  runtime-internal) counts calls deeper than `STRADA_MAX_CALL_DEPTH`;
+  `strada_stack_push` checks `depth + overflow` against the recursion limit and
+  `strada_stack_pop` unwinds the overflow first. `strada_stack_pop_il` defers to
+  the out-of-line pop when the depth is at the array limit. `StradaTryContext`
+  gained `stack_mark`; `STRADA_TRY_PUSH` / `strada_try_push_slot` record
+  `strada_stack_mark()` and both throw paths call `strada_stack_restore()`
+  before the `longjmp`. (ABI: the try-context struct grew; rebuild objects.)
+- `strada_array_splice_sv` treats a tagged int as a scalar replacement.
+- `strada_slurp` refuses directories (`fstat`) instead of trusting `ftell`.
+- `strada_future_await{,_timeout}` pass a tagged int through.
+- `strada_utf8_is_valid` rejects bytes that cannot start a character
+  (`utf8_char_len` reports 1 for them so walkers make progress).
+- `strada_ptr_api_target`: `core::int_ptr/num_ptr/str_ptr` understand slot
+  references (`\$var`); an int variable's tagged value is boxed in place.
+- `strada_tr`: `r` flag returns a copy; an empty replacement list maps each
+  searched character to itself so it is counted.
+- `strada_read_file_n` / `strada_write_file_n` back the sized forms of
+  `core::fread` / `core::fwrite`.
+- `strada_hash_clear_if_tied`, `strada_scalar_is_tied` support the tie codegen;
+  `strada_hash_each_sv` no longer leaks the key on each step.
+- Lexer: `\x{HEX}` appends `chr($hv)` (chr is codepoint-oriented; assembling
+  UTF-8 bytes by hand with `chr(192 + …)` double-encoded).

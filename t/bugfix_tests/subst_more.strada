@@ -1,0 +1,11 @@
+# EXPECT: a[B]c[B] x1y end
+# Interpolated substitution patterns with /e, inside a closure, and next to a
+# literal pattern that must keep working.
+func main() int {
+    my str $w = "b"; my str $s = "abcb";
+    $s =~ s/($w)/"[" . uc($1) . "]"/eg;
+    my scalar $f = func (str $t) { $t =~ s/$w/1/; return $t; };
+    my str $e = "the end"; $e =~ s/^the //;
+    say($s . " " . $f->("xby") . " " . $e);
+    return 0;
+}

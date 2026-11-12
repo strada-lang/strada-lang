@@ -1,0 +1,7 @@
+# COMPILE-ERROR: unknown builtin function 'core::no_such_thing'
+# A name in a builtin namespace that is not a builtin is a located compile
+# error (it used to reach the C compiler as a call to sys_no_such_thing).
+func main() int {
+    my int $a = core::no_such_thing(1);
+    return 0;
+}

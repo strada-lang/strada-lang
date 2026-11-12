@@ -1,0 +1,17 @@
+# EXPECT: died:1 lazy=42 built=1 again=42 built=1
+# `has ... (required)` was not enforced, and `(lazy, builder => ...)` never
+# called the builder: the accessor returned undef.
+package P;
+has ro str $name (required);
+has ro int $v (lazy, builder => "_build_v");
+our int $built = 0;
+func _build_v(scalar $self) int { $built = $built + 1; return 42; }
+func built() int { return $built; }
+package main;
+func main() int {
+    my int $died = 0;
+    try { my scalar $o = P::new(); } catch ($e) { $died = 1; }
+    my scalar $p = P::new("name", "x");
+    say("died:" . $died . " lazy=" . $p->v() . " built=" . P::built() . " again=" . $p->v() . " built=" . P::built());
+    return 0;
+}

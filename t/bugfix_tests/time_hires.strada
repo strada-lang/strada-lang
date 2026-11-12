@@ -1,0 +1,14 @@
+# EXPECT: ok ok ok
+# lib/Time/HiRes.strada did not compile (it called builtins by bare names).
+use lib "lib";
+use Time::HiRes;
+func main() int {
+    my num $m1 = Time::HiRes::clock_monotonic();
+    Time::HiRes::sleep_ms(20);
+    my num $m2 = Time::HiRes::clock_monotonic();
+    my scalar $t = Time::HiRes::timer_start();
+    Time::HiRes::sleep_us(5000);
+    my num $e = Time::HiRes::timer_elapsed($t);
+    say((($m2 - $m1) >= 0.015 ? "ok" : "bad") . " " . (Time::HiRes::clock_realtime() > 1000000 ? "ok" : "bad") . " " . (($e >= 0.004 && $e < 2) ? "ok" : "bad:" . $e));
+    return 0;
+}

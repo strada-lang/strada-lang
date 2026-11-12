@@ -1,0 +1,3 @@
+# EXPECT: ok
+# core::array_reserve (the documented spelling of reserve) was a link error.
+func main() int { my array @a = (); core::array_reserve(@a, 100); say("ok"); return 0; }

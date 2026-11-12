@@ -1,0 +1,10 @@
+# EXPECT: 5 z 2 1
+# List assignment to existing variables, ($a, $b) = (1, 2) and the swap
+# ($p, $q) = ($q, $p), was a C "lvalue required" error.
+func main() int {
+    my int $c = 0; my str $s = "a"; my int $p = 1; my int $q = 2;
+    ($c, $s) = (5, "z");
+    ($p, $q) = ($q, $p);
+    say($c . " " . $s . " " . $p . " " . $q);
+    return 0;
+}

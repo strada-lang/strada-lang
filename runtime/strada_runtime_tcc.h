@@ -217,10 +217,13 @@ typedef struct {
     jmp_buf buf;
     int active;
     int cleanup_mark;
+    int stack_mark;     /* logical call depth when the try began (restored by the throw) */
 } StradaTryContext;
 
 /* The try stack is thread-local in the runtime; tcc-compiled code must
  * go through the exported helpers (tcc TLS support is unreliable). */
+int strada_stack_mark(void);
+void strada_stack_restore(int mark);
 jmp_buf *strada_try_push_slot(void);
 int strada_try_pop_slot(void);
 StradaValue* strada_exception_trace_get(void);  /* core::exception_trace */
@@ -557,6 +560,8 @@ StradaValue* strada_open_sv(StradaValue *first_arg, StradaValue *mode_arg);
 StradaValue* strada_str_from_fh(StradaValue *fh);
 StradaValue* strada_close(StradaValue *fh);  /* returns tagged int: 1 closed, 0 nothing */
 StradaValue* strada_read_file(StradaValue *fh);
+StradaValue* strada_read_file_n(StradaValue *fh, int64_t n);
+void strada_write_file_n(StradaValue *fh, StradaValue *data, int64_t n);
 StradaValue* strada_read_line(StradaValue *fh);
 StradaValue* strada_read_all_lines(StradaValue *fh);
 void strada_write_file(StradaValue *fh, const char *content);
@@ -1566,6 +1571,8 @@ StradaValue **strada_hv_fetch_lvalue_sv_key(StradaValue *sv, StradaValue *key_sv
 StradaArray* strada_hash_keys_sv(StradaValue *sv);
 StradaArray* strada_hash_values_sv(StradaValue *sv);
 StradaValue* strada_hash_each_sv(StradaValue *sv);
+int strada_hash_clear_if_tied(StradaValue *sv);
+int strada_scalar_is_tied(StradaValue *sv);
 void strada_tied_each_reset(StradaValue *sv);
 size_t strada_length_chars_sv(StradaValue *sv);  /* Binary-safe UTF-8 char count */
 StradaValue* strada_byte_at(StradaValue *str, StradaValue *index);  /* Preferred alias for char_at */

@@ -1,0 +1,10 @@
+# EXPECT: hello HELLO 2 hello 3
+# tr///r modified the string in place and returned a count; tr with an empty
+# replacement list always counted 0.
+func main() int {
+    my str $s = "hello"; my str $u = ($s =~ tr/a-z/A-Z/r);
+    my str $v = "hello"; my int $n = ($v =~ tr/l//);
+    my str $x = "education"; my int $m = ($x =~ tr/aeo//);
+    say($s . " " . $u . " " . $n . " " . $v . " " . $m);
+    return 0;
+}

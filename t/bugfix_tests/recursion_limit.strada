@@ -1,0 +1,11 @@
+# EXPECT-STDERR: Maximum recursion depth exceeded (1000)
+# Runaway recursion must hit the recursion limit and say so. The call depth
+# used to saturate at the size of the frame array (256), so the default limit
+# of 1000 was never reached and the program ran on until the C stack overflowed.
+func r(int $n) int { return r($n + 1) + 1; }
+func main() int {
+    my int $ok = 0;
+    try { r(0); } catch ($e) { $ok = 1; }
+    say($ok);
+    return 0;
+}

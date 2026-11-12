@@ -483,11 +483,28 @@ func ast_new_our_decl(str $name, int $var_type, str $sigil) scalar {
 }
 
 # Create if statement
+# A bare /regex/ used as a truth value means `$_ =~ /regex/`. The parser
+# yields a bare regex literal as a string node flagged is_regex (that is what
+# split(/,/, ...) wants: the pattern). In a CONDITION that node was just a
+# non-empty string, so `if (/x/)` was always true. Every constructor that
+# takes a condition routes it through here.
+func ast_regex_truth(scalar $cond) scalar {
+    if (!$cond) { return $cond; }
+    if ($cond->{"type"} != NODE_STR_LITERAL()) { return $cond; }
+    if (!$cond->{"is_regex"}) { return $cond; }
+    my scalar $topic = ast_new_variable("_", "$");
+    $topic->{"line"} = $cond->{"line"};
+    my str $rt_flags = "" . $cond->{"regex_flags"};
+    my scalar $match = ast_new_regex_match("=~", $topic, $cond->{"value"}, $rt_flags);
+    $match->{"line"} = $cond->{"line"};
+    return $match;
+}
+
 func ast_new_if_stmt(scalar $condition, scalar $then_block) scalar {
     my scalar $node = ast_new_node(NODE_IF_STMT());
     my array @elsif_conds = ();
     my array @elsif_blocks = ();
-    $node->{"condition"} = $condition;
+    $node->{"condition"} = ast_regex_truth($condition);
     $node->{"then_block"} = $then_block;
     $node->{"elsif_conditions"} = \@elsif_conds;
     $node->{"elsif_blocks"} = \@elsif_blocks;
@@ -500,7 +517,7 @@ func ast_new_if_stmt(scalar $condition, scalar $then_block) scalar {
 func ast_add_elsif(scalar $if_stmt, scalar $condition, scalar $block) void {
     my scalar $conds = $if_stmt->{"elsif_conditions"};
     my scalar $blocks = $if_stmt->{"elsif_blocks"};
-    push($conds, $condition);
+    push($conds, ast_regex_truth($condition));
     push($blocks, $block);
     $if_stmt->{"elsif_count"} = $if_stmt->{"elsif_count"} + 1;
 }
@@ -508,7 +525,7 @@ func ast_add_elsif(scalar $if_stmt, scalar $condition, scalar $block) void {
 # Create while statement
 func ast_new_while_stmt(scalar $condition, scalar $body, str $label) scalar {
     my scalar $node = ast_new_node(NODE_WHILE_STMT());
-    $node->{"condition"} = $condition;
+    $node->{"condition"} = ast_regex_truth($condition);
     $node->{"body"} = $body;
     $node->{"label"} = $label;
     return $node;
@@ -518,7 +535,7 @@ func ast_new_while_stmt(scalar $condition, scalar $body, str $label) scalar {
 func ast_new_do_while_stmt(scalar $body, scalar $condition, str $label) scalar {
     my scalar $node = ast_new_node(NODE_DO_WHILE_STMT());
     $node->{"body"} = $body;
-    $node->{"condition"} = $condition;
+    $node->{"condition"} = ast_regex_truth($condition);
     $node->{"label"} = $label;
     return $node;
 }
@@ -539,6 +556,18 @@ func ast_new_foreach_stmt(scalar $var_decl, str $var_name, scalar $array_expr, s
     my scalar $node = ast_new_node(NODE_FOREACH_STMT());
     $node->{"var_decl"} = $var_decl;      # Variable declaration node (or undef if using existing var)
     $node->{"var_name"} = $var_name;      # Variable name (for existing var case)
+    # A single literal in the parentheses, `foreach ("a")` / `foreach my $n (7)`,
+    # is a one-element list. The parser hands it over as the bare literal (the
+    # parentheses are just grouping), and iterating a non-array iterated zero
+    # times. Wrap it so it goes down the ordinary list path.
+    if ($array_expr) {
+        my int $fe_kind = $array_expr->{"type"};
+        if ($fe_kind == NODE_STR_LITERAL() || $fe_kind == NODE_INT_LITERAL() || $fe_kind == NODE_NUM_LITERAL()) {
+            my scalar $fe_list = ast_new_anon_array();
+            ast_add_array_elem($fe_list, $array_expr);
+            $array_expr = $fe_list;
+        }
+    }
     $node->{"array"} = $array_expr;       # Array expression to iterate
     $node->{"body"} = $body;              # Loop body
     $node->{"label"} = $label;            # Optional label for last/next
@@ -584,6 +613,10 @@ func ast_new_expr_stmt(scalar $expr) scalar {
 func ast_new_binary_op(str $op, scalar $left, scalar $right) scalar {
     my scalar $node = ast_new_node(NODE_BINARY_OP());
     $node->{"op"} = $op;
+    if ($op eq "&&" || $op eq "||") {
+        $left = ast_regex_truth($left);
+        $right = ast_regex_truth($right);
+    }
     $node->{"left"} = $left;
     $node->{"right"} = $right;
     return $node;
@@ -593,6 +626,7 @@ func ast_new_binary_op(str $op, scalar $left, scalar $right) scalar {
 func ast_new_unary_op(str $op, scalar $operand) scalar {
     my scalar $node = ast_new_node(NODE_UNARY_OP());
     $node->{"op"} = $op;
+    if ($op eq "!") { $operand = ast_regex_truth($operand); }
     $node->{"operand"} = $operand;
     return $node;
 }
@@ -649,6 +683,9 @@ func ast_normalize_call_name(str $name) str {
         # core::-qualified spellings of unqualified builtins (runtime
         # plumbing, reference machinery, debug/introspection, OOP plumbing).
         if ($rest eq "hash_new") { return "hash_new"; }
+        # core::array_reserve / array_capacity / array_shrink: the documented
+        # spellings of the bare reserve() family (they were link errors).
+        if ($rest eq "array_reserve") { return "reserve"; }
         if ($rest eq "hash_get") { return "hash_get"; }
         if ($rest eq "hash_set") { return "hash_set"; }
         if ($rest eq "deref") { return "deref"; }
@@ -685,6 +722,17 @@ func ast_new_call(str $name) scalar {
 # Add argument to call
 func ast_add_arg(scalar $call, scalar $arg) void {
     my scalar $args = $call->{"args"};
+    # `f(key => value)`: the fat comma is a comma, so this is two arguments.
+    # The expression parser builds a 2-element pair for `=>` (what
+    # `map { $_ => 1 }` needs); passed on as ONE argument it made
+    # `Pkg::new(name => "x")` silently ignore every named argument.
+    if ($arg && $arg->{"is_pair"}) {
+        my scalar $pair_elems = $arg->{"elements"};
+        push($args, $pair_elems->[0]);
+        push($args, $pair_elems->[1]);
+        $call->{"arg_count"} = $call->{"arg_count"} + 2;
+        return;
+    }
     push($args, $arg);
     $call->{"arg_count"} = $call->{"arg_count"} + 1;
 }
@@ -1039,7 +1087,7 @@ func ast_new_closure_call(scalar $closure, scalar $args, int $arg_count) scalar 
 # Create ternary expression node ($cond ? $true_val : $false_val)
 func ast_new_ternary(scalar $condition, scalar $true_expr, scalar $false_expr) scalar {
     my scalar $node = ast_new_node(NODE_TERNARY());
-    $node->{"condition"} = $condition;
+    $node->{"condition"} = ast_regex_truth($condition);
     $node->{"true_expr"} = $true_expr;
     $node->{"false_expr"} = $false_expr;
     return $node;

@@ -1,0 +1,10 @@
+# EXPECT: 5 5 1 6
+# ${$ref} was a parse error, and `my array @a = ($$ref);` did not make a
+# one-element list.
+func main() int {
+    my int $v = 5; my scalar $r = \$v;
+    my array @o = ($$r);
+    ${$r} = 6;
+    say(${$r} - 1 . " " . ($$r - 1) . " " . size(@o) . " " . $v);
+    return 0;
+}

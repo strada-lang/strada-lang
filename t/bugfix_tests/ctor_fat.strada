@@ -1,0 +1,8 @@
+# EXPECT: x 3
+# Pkg::new(name => "x") passed each `key => value` as ONE argument, so the
+# named arguments were ignored and the defaults kept.
+package K;
+has ro str $name = "d";
+has ro int $n = 1;
+package main;
+func main() int { my scalar $k = K::new(name => "x", "n" => 3); say($k->name() . " " . $k->n()); return 0; }

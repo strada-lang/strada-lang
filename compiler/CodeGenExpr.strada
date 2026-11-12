@@ -1102,6 +1102,16 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 }
                 if ($val_type == NODE_ANON_HASH() && $val->{"pair_count"} == 0) {
                     # Empty () - clear hash: %h = ()
+                    # A TIED hash is cleared through its CLEAR method and stays
+                    # tied. (Replacing the variable's value with a fresh hash,
+                    # as below, silently untied it and never called CLEAR.)
+                    if ($cg->{"uses_tie"} == 1) {
+                        emit($cg, "(strada_hash_clear_if_tied(");
+                        gen_expression($cg, $target);
+                        emit($cg, ") ? ");
+                        gen_expression($cg, $target);
+                        emit($cg, " : (");
+                    }
                     if ($cg->{"cleanup_enabled"} == 1) {
                         emit($cg, "({ StradaValue *__old = ");
                         gen_expression($cg, $target);
@@ -1113,6 +1123,9 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                         emit($cg, "; strada_decref(__old); ");
                         gen_expression($cg, $target);
                         emit($cg, "; })");
+                    }
+                    if ($cg->{"uses_tie"} == 1) {
+                        emit($cg, "))");
                     }
                 } elsif ($val_type == NODE_ANON_ARRAY() || $val_type == NODE_MAP()) {
                     # List init: %h = ("a" => 1, "b" => 2) or %h = map { ... } @arr
@@ -2438,7 +2451,12 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
                         my str $attr_name = $ha_attrs->[$hai]->{"name"};
                         my str $attr_pkg = $ha_attrs->[$hai]->{"package"};
                         if ($attr_name eq $method && ($attr_pkg eq $cur_pkg || is_subclass_compile_time($cg, $cur_pkg, $attr_pkg, 0) == 1)) {
-                            $is_accessor = 1;
+                            # An attribute with a builder is NOT a plain hash
+                            # read: its accessor may have to run the builder.
+                            my str $attr_builder = "" . $ha_attrs->[$hai]->{"builder"};
+                            if (length($attr_builder) == 0) {
+                                $is_accessor = 1;
+                            }
                         }
                         $hai = $hai + 1;
                     }
@@ -3229,18 +3247,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
         my int $has_interp = 0;
         my int $check_i = 0;
         my int $pat_len = length($pattern);
-        while ($check_i < $pat_len) {
-            my str $ch = substr($pattern, $check_i, 1);
-            if ($ch eq "$" && $check_i + 1 < $pat_len) {
-                my str $next_ch = substr($pattern, $check_i + 1, 1);
-                # Check if next char is start of variable name (letter or underscore)
-                if ($next_ch eq "_" || ($next_ch ge "a" && $next_ch le "z") || ($next_ch ge "A" && $next_ch le "Z")) {
-                    $has_interp = 1;
-                    last;
-                }
-            }
-            $check_i = $check_i + 1;
-        }
+        $has_interp = regex_pattern_has_interp($pattern);
 
         # Wrap in statement expression to free strada_to_str_ss() temp
         # Also cleanup target if it's a temp (e.g., string literal in "abc" =~ /pattern/)
@@ -3343,11 +3350,22 @@ func gen_expression(scalar $cg, scalar $expr) void {
             emit($cg, "char *__re_src = strada_to_str_ss(");
             gen_expression($cg, $expr->{"target"});
             emit($cg, ");\n");
+            my int $subst_e_interp = regex_pattern_has_interp($pattern);
+            if ($subst_e_interp == 1) {
+                emit_indent($cg);
+                gen_subst_pattern_prelude($cg, $pattern);
+                emit($cg, "\n");
+            }
             emit_indent($cg);
-            emit($cg, "StradaValue *__re_matches = strada_regex_find_all(__re_src, \"");
+            if ($subst_e_interp == 1) {
+                emit($cg, "StradaValue *__re_matches = strada_regex_find_all(__re_src, __subst_pat");
+            } else {
+                emit($cg, "StradaValue *__re_matches = strada_regex_find_all(__re_src, \"");
+            }
             # Escape pattern for C string
             my int $i = 0;
             my int $len = length($pattern);
+            if ($subst_e_interp == 1) { $len = 0; }
             while ($i < $len) {
                 my str $ch = substr($pattern, $i, 1);
                 if ($ch eq "\\") {
@@ -3365,13 +3383,21 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 }
                 $i = $i + 1;
             }
-            emit($cg, "\", ");
+            if ($subst_e_interp == 1) {
+                emit($cg, ", ");
+            } else {
+                emit($cg, "\", ");
+            }
             if (length($flags) > 0) {
                 emit($cg, "\"" . $flags . "\"");
             } else {
                 emit($cg, "NULL");
             }
             emit($cg, ", " . $global . ");\n");
+            if ($subst_e_interp == 1) {
+                emit_indent($cg);
+                emit($cg, "strada_cstr_free(__subst_pat);\n");
+            }
             emit_indent($cg);
             emit($cg, "StradaValue *__re_repls = strada_new_array();\n");
             emit_indent($cg);
@@ -3499,18 +3525,32 @@ func gen_expression(scalar $cg, scalar $expr) void {
         }
 
         # Regex path: { char *__subst_src = strada_to_str_ss(target); char *__subst_res = strada_regex_replace[_all](__subst_src, pattern, replacement, flags); strada_decref(target); target = strada_new_str(__subst_res); strada_cstr_free(__subst_res); strada_cstr_free(__subst_src); }
+        # A pattern that mentions variables (s/$word/X/) is built at run time.
+        # It used to be passed through as the literal regex text "$word",
+        # i.e. an end-of-line anchor followed by letters, which never matches:
+        # the substitution silently did nothing.
+        my int $subst_interp = regex_pattern_has_interp($pattern);
         emit($cg, "{ char *__subst_src = strada_to_str_ss(");
         gen_expression($cg, $expr->{"target"});
-        emit($cg, "); char *__subst_res = ");
+        emit($cg, "); ");
+        if ($subst_interp == 1) {
+            gen_subst_pattern_prelude($cg, $pattern);
+        }
+        emit($cg, "char *__subst_res = ");
         if ($global == 1) {
             emit($cg, "strada_regex_replace_all(");
         } else {
             emit($cg, "strada_regex_replace(");
         }
-        emit($cg, "__subst_src, \"");
+        if ($subst_interp == 1) {
+            emit($cg, "__subst_src, __subst_pat, \"");
+        } else {
+            emit($cg, "__subst_src, \"");
+        }
         # Escape pattern
         my int $i = 0;
         my int $len = length($pattern);
+        if ($subst_interp == 1) { $len = 0; }
         while ($i < $len) {
             my str $ch = substr($pattern, $i, 1);
             if ($ch eq "\\") {
@@ -3528,7 +3568,9 @@ func gen_expression(scalar $cg, scalar $expr) void {
             }
             $i = $i + 1;
         }
-        emit($cg, "\", \"");
+        if ($subst_interp == 0) {
+            emit($cg, "\", \"");
+        }
         # Escape replacement
         $i = 0;
         $len = length($replacement);
@@ -3560,7 +3602,11 @@ func gen_expression(scalar $cg, scalar $expr) void {
         gen_expression($cg, $expr->{"target"});
         emit($cg, "); ");
         gen_expression($cg, $expr->{"target"});
-        emit($cg, " = strada_new_str(__subst_res); free(__subst_res); strada_cstr_free(__subst_src); }");
+        emit($cg, " = strada_new_str(__subst_res); free(__subst_res); strada_cstr_free(__subst_src); ");
+        if ($subst_interp == 1) {
+            emit($cg, "strada_cstr_free(__subst_pat); ");
+        }
+        emit($cg, "}");
         return;
     }
 
@@ -4653,6 +4699,13 @@ func gen_expression(scalar $cg, scalar $expr) void {
 
     # __PACKAGE__ - returns current package name
     if ($type == NODE_DUNDER_PACKAGE()) {
+        my str $dp_name = "" . $expr->{"package"};
+        if (length($dp_name) > 0) {
+            emit($cg, "strada_new_str(");
+            gen_str_literal_c($cg, $dp_name);
+            emit($cg, ")");
+            return;
+        }
         emit($cg, "strada_new_str(strada_current_package() ? strada_current_package() : \"\")");
         return;
     }

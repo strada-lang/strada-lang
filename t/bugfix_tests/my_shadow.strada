@@ -1,0 +1,7 @@
+# EXPECT: local G inner G
+# A `my` variable with the same name as an `our` variable read and wrote the
+# global; the shadowing must end with the enclosing block.
+our str $g = "G";
+func f() str { my str $g = "local"; return $g; }
+func h() str { my str $r = ""; { my str $g = "inner"; $r = $g; } return $r . " " . $g; }
+func main() int { say(f() . " " . $g . " " . h()); return 0; }

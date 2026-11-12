@@ -1,0 +1,11 @@
+# EXPECT: ab AB
+# `chomp;` and `$u = uc;` (no parentheses) were taken for the bareword strings
+# "chomp" / "uc" instead of acting on $_.
+func main() int {
+    my str $o = "";
+    foreach ("ab\n") { chomp; $o = $_; }
+    my str $u = "";
+    foreach ("ab") { $u = uc; }
+    say($o . " " . $u);
+    return 0;
+}

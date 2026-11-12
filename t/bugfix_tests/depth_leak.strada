@@ -1,0 +1,10 @@
+# EXPECT: done 300
+# The call depth was not restored when an exception was caught, so repeated
+# throw/catch from deep frames crept toward the recursion limit.
+func deep(int $n) int { if ($n == 0) { throw "x"; } return deep($n - 1) + 1; }
+func main() int {
+    my int $c = 0; my int $i = 0;
+    while ($i < 300) { try { deep(20); } catch ($e) { $c = $c + 1; } $i = $i + 1; }
+    say("done " . $c);
+    return 0;
+}

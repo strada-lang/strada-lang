@@ -797,6 +797,8 @@ StradaArray* strada_hash_values(StradaHash *hv);
 StradaArray* strada_hash_keys_sv(StradaValue *sv);
 StradaArray* strada_hash_values_sv(StradaValue *sv);
 StradaValue* strada_hash_each_sv(StradaValue *sv);
+int strada_hash_clear_if_tied(StradaValue *sv);
+int strada_scalar_is_tied(StradaValue *sv);
 void strada_tied_each_reset(StradaValue *sv);
 void strada_hash_reserve(StradaHash *hv, size_t capacity);
 void strada_hash_reserve_sv(StradaValue *sv, int64_t capacity);
@@ -901,6 +903,8 @@ StradaValue* strada_open_sv(StradaValue *first_arg, StradaValue *mode_arg);  /* 
 StradaValue* strada_str_from_fh(StradaValue *fh);  /* Extract string from memstream */
 StradaValue* strada_close(StradaValue *fh);  /* returns tagged int: 1 closed, 0 nothing to close */
 StradaValue* strada_read_file(StradaValue *fh);
+StradaValue* strada_read_file_n(StradaValue *fh, int64_t n);
+void strada_write_file_n(StradaValue *fh, StradaValue *data, int64_t n);
 StradaValue* strada_read_line(StradaValue *fh);
 StradaValue* strada_read_all_lines(StradaValue *fh);
 void strada_write_file(StradaValue *fh, const char *content);
@@ -939,6 +943,7 @@ typedef struct {
     jmp_buf buf;
     int active;
     int cleanup_mark;   /* cleanup-stack depth when the try began (drained by the throw) */
+    int stack_mark;     /* logical call depth when the try began (restored by the throw) */
 } StradaTryContext;
 
 /* THREAD-LOCAL (see runtime): per-thread try frames + exception slots. */
@@ -1015,6 +1020,7 @@ void strada_cleanup_drain_to(int mark); /* Drain to depth (with decref) */
 /* Macros for try/catch - used by generated code */
 #define STRADA_TRY_PUSH() (strada_try_depth < STRADA_MAX_TRY_DEPTH ? \
     (strada_try_stack[strada_try_depth].active = 1, strada_try_stack[strada_try_depth].cleanup_mark = strada_cleanup_mark(), \
+     strada_try_stack[strada_try_depth].stack_mark = strada_stack_mark(), \
      &strada_try_stack[strada_try_depth++].buf) : NULL)
 #define STRADA_TRY_POP() (strada_try_depth > 0 ? (strada_try_stack[--strada_try_depth].active = 0, 1) : 0)
 
@@ -1045,6 +1051,8 @@ extern int strada_pending_call_line;  /* set by codegen at each call site; strad
 void strada_stack_push(const char *func_name, const char *file_name);
 void strada_stack_pop(void);
 void strada_stack_set_line(int line);
+int strada_stack_mark(void);          /* logical call depth, incl. calls too deep to record */
+void strada_stack_restore(int mark);  /* reset it (exception unwound to a try frame) */
 
 /* Inline fast paths — emitted by the codegen at every function entry/exit
  * and call site, so they must not be out-of-line calls (profiled at ~4.5%
@@ -1065,6 +1073,9 @@ static inline void strada_stack_push_il(const char *func_name, const char *file_
     f->line = 0;
 }
 static inline void strada_stack_pop_il(void) {
+    /* At the array limit the call being popped may be an unrecorded one
+     * (see strada_call_overflow): let the out-of-line pop sort it out. */
+    if (__builtin_expect(strada_call_depth >= STRADA_MAX_CALL_DEPTH, 0)) { strada_stack_pop(); return; }
     if (strada_call_depth > 0) strada_call_depth--;
 }
 static inline void strada_stack_line_il(int line) {

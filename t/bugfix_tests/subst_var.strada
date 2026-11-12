@@ -1,0 +1,10 @@
+# EXPECT: aXcX /aX/bX a-c-
+# s/$var/X/ never interpolated the variable: the pattern was passed on as the
+# literal regex "$var" (an end-of-line anchor plus letters) and silently matched nothing.
+func main() int {
+    my str $w = "b"; my str $s = "abcb"; $s =~ s/$w/X/g;
+    my str $p = "/users"; my str $q = "/a/users/b/users"; $q =~ s/$p/X/g;
+    my str $r = "abcb"; $r =~ s/$w$/-/; $r =~ s/${w}c/-c/;
+    say($s . " " . $q . " " . $r);
+    return 0;
+}

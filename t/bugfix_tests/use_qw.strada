@@ -1,0 +1,10 @@
+# EXPECT: 6 3
+# `use Module qw(names);` was a parse error: the lexer hands qw(...) over as
+# one token, and the parser looked for the word `qw` followed by `(`.
+use lib "lib";
+use List qw(sum max);
+func main() int {
+    my array @n = (1, 2, 3);
+    say(List::sum(\@n) . " " . List::max(\@n));
+    return 0;
+}

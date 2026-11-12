@@ -35,10 +35,33 @@ func emit_our_global_init(scalar $cg, scalar $init, str $sigil, int $var_type) v
     gen_expression($cg, $init);
 }
 
+# A bare block or an if/elsif/else block: `local` inside it is undone when the
+# block ends, as in Perl. (Loops restore per iteration, and the function exit
+# restores everything, but a plain block restored nothing: the localized value
+# stayed in force for the rest of the function.) A one-statement block is left
+# alone: that is the shape of `local $x = 1 if COND;`, whose local belongs to
+# the enclosing scope.
+func gen_block_local_scoped(scalar $cg, scalar $block) void {
+    my int $bl_scoped = 0;
+    if ($block && $block->{"type"} == NODE_BLOCK() && $block->{"statement_count"} > 1) {
+        $bl_scoped = stmt_has_local($block);
+    }
+    if ($bl_scoped != 1) {
+        gen_block($cg, $block);
+        return;
+    }
+    my int $bl_id = 0 + $cg->{"local_block_id"};
+    $cg->{"local_block_id"} = $bl_id + 1;
+    emit($cg, "{ int __local_blk_mark_" . $bl_id . " = strada_local_depth_get(); ");
+    gen_block($cg, $block);
+    emit($cg, " strada_local_restore_to(__local_blk_mark_" . $bl_id . "); }");
+}
+
 func gen_block(scalar $cg, scalar $block) void {
     emit($cg, "{\n");
     indent($cg);
     scope_push($cg);
+    my int $our_shadow_at_entry = our_shadow_mark($cg);
 
     # Block-scope the int/num type registries. They are keyed by C name, so
     # without save/restore a nested block's `my int $result` would leak onto
@@ -63,6 +86,7 @@ func gen_block(scalar $cg, scalar $block) void {
 
     $cg->{"int_vars"} = \%saved_int_vars;
     $cg->{"num_vars"} = \%saved_num_vars;
+    our_shadow_restore($cg, $our_shadow_at_entry);
 
     scope_pop($cg);
     dedent($cg);
@@ -137,6 +161,10 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         my int $var_type = $stmt->{"var_type"};
         # Escape C keywords in variable names (e.g., $for -> v_for)
         my str $c_name = escape_c_keyword($stmt->{"name"});
+
+        # A `my` variable hides an `our` variable of the same name until the
+        # enclosing block ends.
+        our_shadow_begin($cg, $c_name);
 
         # Track int-typed variables for arithmetic optimization
         if ($var_type == TYPE_INT()) {
@@ -698,13 +726,28 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 emit_indent($cg);
                 emit($cg, "}\n");
             } else {
-                # Decref old value if already assigned
-                emit_indent($cg);
-                emit($cg, "strada_decref(" . $name . ");\n");
+                # Plain list assignment `($a, $b) = LIST;` (is_decl == 0) names
+                # variables that already exist, so they may be `our` globals
+                # (no C variable at all) or, inside a closure, captures.
+                my str $ds_our_key = "";
+                my str $ds_ref = $name;
+                if ($is_decl == 0) {
+                    my scalar $ds_our = $cg->{"our_vars"};
+                    $ds_our_key = "" . $ds_our->{$name};
+                    $ds_ref = scalar_var_c_ref($cg, $var->{"name"}, $name);
+                }
+                if (length($ds_our_key) > 0) {
+                    emit_indent($cg);
+                    emit($cg, "strada_global_set_cstr(\"" . $ds_our_key . "\", strada_array_get_safe(__destruct_src, " . $i . "));\n");
+                } else {
+                    # Decref old value if already assigned
+                    emit_indent($cg);
+                    emit($cg, "strada_decref(" . $ds_ref . ");\n");
 
-                # Get element from array (strada_array_get_safe returns owned reference)
-                emit_indent($cg);
-                emit($cg, $name . " = strada_array_get_safe(__destruct_src, " . $i . ");\n");
+                    # Get element from array (strada_array_get_safe returns owned reference)
+                    emit_indent($cg);
+                    emit($cg, $ds_ref . " = strada_array_get_safe(__destruct_src, " . $i . ");\n");
+                }
             }
 
             $i = $i + 1;
@@ -723,7 +766,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
     # Bare block { ... }
     if ($type == NODE_BLOCK()) {
         emit_indent($cg);
-        gen_block($cg, $stmt);
+        gen_block_local_scoped($cg, $stmt);
         emit($cg, "\n");
         return;
     }
@@ -734,7 +777,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         emit($cg, "if (");
         emit_condition_cse($cg, $stmt->{"condition"});
         emit($cg, ") ");
-        gen_block($cg, $stmt->{"then_block"});
+        gen_block_local_scoped($cg, $stmt->{"then_block"});
 
         # Elsif clauses
         my scalar $elsif_conds = $stmt->{"elsif_conditions"};
@@ -744,14 +787,14 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             emit($cg, " else if (");
             emit_condition_cse($cg, $elsif_conds->[$i]);
             emit($cg, ") ");
-            gen_block($cg, $elsif_blocks->[$i]);
+            gen_block_local_scoped($cg, $elsif_blocks->[$i]);
             $i = $i + 1;
         }
         
         # Else clause
         if ($stmt->{"else_block"}) {
             emit($cg, " else ");
-            gen_block($cg, $stmt->{"else_block"});
+            gen_block_local_scoped($cg, $stmt->{"else_block"});
         }
         
         emit($cg, "\n");
@@ -1179,6 +1222,11 @@ func gen_statement(scalar $cg, scalar $stmt) void {
 
         my scalar $var_decl = $stmt->{"var_decl"};
         my str $var_name = escape_c_keyword($stmt->{"var_name"});
+        # `foreach $x (...)` over a variable that already exists: inside a
+        # closure that variable may be a capture, not a local C variable.
+        if (!$var_decl) {
+            $var_name = scalar_var_c_ref($cg, $stmt->{"var_name"}, $var_name);
+        }
         my scalar $array_expr = $stmt->{"array"};
         my scalar $body = $stmt->{"body"};
 
@@ -1648,6 +1696,32 @@ func gen_statement(scalar $cg, scalar $stmt) void {
     if ($type == NODE_EXPR_STMT()) {
         emit_indent($cg);
         my scalar $expr = $stmt->{"expr"};
+
+        # `$x = EXPR;` in a program that uses tie: a tied scalar takes the
+        # value through its STORE method. Plain assignment replaces the
+        # variable's value outright, which dropped the tie without a STORE.
+        if ($cg->{"uses_tie"} == 1 && $expr->{"type"} == NODE_ASSIGN()) {
+            my scalar $ts_target = $expr->{"target"};
+            my str $ts_op = $expr->{"op"};
+            if ($ts_op eq "=" && $ts_target->{"type"} == NODE_VARIABLE()) {
+                my str $ts_sigil = $ts_target->{"sigil"};
+                my str $ts_our = "" . $cg->{"our_vars"}->{escape_c_keyword($ts_target->{"name"})};
+                if ($ts_sigil eq "$" && length($ts_our) == 0) {
+                    my scalar $ts_value = $expr->{"value"};
+                    emit($cg, "if (strada_scalar_is_tied(");
+                    gen_expression($cg, $ts_target);
+                    emit($cg, ")) { StradaValue *__ts_v = ");
+                    gen_expression($cg, $ts_value);
+                    emit($cg, "; strada_tied_scalar_store(");
+                    gen_expression($cg, $ts_target);
+                    emit($cg, ", __ts_v); ");
+                    if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $ts_value) == 1) {
+                        emit($cg, "strada_decref(__ts_v); ");
+                    }
+                    emit($cg, "} else ");
+                }
+            }
+        }
 
         # Check if expression produces owned value that must be freed
         # This includes increment/decrement, method calls, and other temp values
@@ -2265,6 +2339,16 @@ func gen_function(scalar $cg, scalar $fn) void {
     my int $ret_type_id = $fn->{"return_type"};
 
     foreach_cleanup_reset($cg);
+    # Parameters hide `our` variables of the same name for the whole function.
+    # (Restoring to 0 first also drops the previous function's shadows.)
+    our_shadow_restore($cg, 0);
+    my scalar $os_params = $fn->{"params"};
+    my int $os_pi = 0;
+    while ($os_pi < $fn->{"param_count"}) {
+        my scalar $os_param = $os_params->[$os_pi];
+        our_shadow_begin($cg, escape_c_keyword($os_param->{"name"}));
+        $os_pi = $os_pi + 1;
+    }
     # types inferred for variables belong to one function
     $cg->{"known_types"} = {};
     # Reset function parameter tracking for each new function
@@ -3766,6 +3850,7 @@ func gen_program(scalar $cg, scalar $program) void {
             gen_async_function($cg, $fn);
         } else {
             gen_function($cg, $fn);
+            our_shadow_restore($cg, 0);
         }
 
         # (methods were tracked for OOP registration before this loop)

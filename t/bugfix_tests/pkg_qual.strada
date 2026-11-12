@@ -1,0 +1,10 @@
+# EXPECT: 7 P P::Q
+# __PACKAGE__::func() was a link error, and __PACKAGE__ said "main" from
+# inside any package.
+package P;
+func helper() int { return 7; }
+func run() str { return "" . __PACKAGE__::helper() . " " . __PACKAGE__; }
+package P::Q;
+func name() str { return __PACKAGE__; }
+package main;
+func main() int { say(P::run() . " " . P::Q::name()); return 0; }

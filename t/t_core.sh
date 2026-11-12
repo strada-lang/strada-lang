@@ -165,9 +165,8 @@ test_output_contains "$EXAMPLES_DIR/test_socket_libc.strada" "test_socket_libc" 
 test_output_contains "$EXAMPLES_DIR/test_misc_libc.strada" "test_misc_libc" "All misc libc tests passed" "Misc libc functions"
 
 # Test: Closures and anonymous functions
-# Note: test_closures.strada tests capture-by-reference mutation which was
-# changed to capture-by-value for thread safety - compile only
-test_compile "$EXAMPLES_DIR/test_closures.strada" "test_closures" "Closures"
+# (scalars are captured by value, arrays and hashes are shared)
+test_output_contains "$EXAMPLES_DIR/test_closures.strada" "test_closures" "All closure tests passed" "Closures"
 test_output_contains "$EXAMPLES_DIR/test_closure_params.strada" "test_closure_params" "All closure parameter tests passed" "Closure params"
 # Captured variables reached through codegen paths that emit a C name by hand:
 # /$pat/ regex patterns, ++/-- on ints, chomp/chop, and for-loop locals.

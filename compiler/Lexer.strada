@@ -731,21 +731,10 @@ func lex_dq_content(scalar $lexer, int $term_code, int $token_line) scalar {
                         lex_advance($lexer);
                     }
                     if (lex_current_code($lexer) == 125) { lex_advance($lexer); }
-                    if ($hv < 128) {
-                        sb_append($sb, chr($hv));
-                    } elsif ($hv < 2048) {
-                        sb_append($sb, chr(192 + ($hv / 64)));
-                        sb_append($sb, chr(128 + ($hv % 64)));
-                    } elsif ($hv < 65536) {
-                        sb_append($sb, chr(224 + ($hv / 4096)));
-                        sb_append($sb, chr(128 + (($hv / 64) % 64)));
-                        sb_append($sb, chr(128 + ($hv % 64)));
-                    } else {
-                        sb_append($sb, chr(240 + ($hv / 262144)));
-                        sb_append($sb, chr(128 + (($hv / 4096) % 64)));
-                        sb_append($sb, chr(128 + (($hv / 64) % 64)));
-                        sb_append($sb, chr(128 + ($hv % 64)));
-                    }
+                    # chr() is codepoint-oriented: it yields the UTF-8 encoding of $hv.
+                    # (Assembling the UTF-8 bytes by hand with chr(192 + ...) encoded
+                    # each of THOSE as a codepoint too: "\x{E9}" came out as 4 bytes.)
+                    sb_append($sb, chr($hv));
                     next;
                 } else {
                     # \xHH — up to 2 hex digits, single byte
@@ -893,21 +882,8 @@ func lex_read_string(scalar $lexer) str {
                         lex_advance($lexer);
                     }
                     if (lex_current_char($lexer) eq "}") { lex_advance($lexer); }
-                    if ($hv < 128) {
-                        $result = $result . chr($hv);
-                    } elsif ($hv < 2048) {
-                        $result = $result . chr(192 + ($hv / 64));
-                        $result = $result . chr(128 + ($hv % 64));
-                    } elsif ($hv < 65536) {
-                        $result = $result . chr(224 + ($hv / 4096));
-                        $result = $result . chr(128 + (($hv / 64) % 64));
-                        $result = $result . chr(128 + ($hv % 64));
-                    } else {
-                        $result = $result . chr(240 + ($hv / 262144));
-                        $result = $result . chr(128 + (($hv / 4096) % 64));
-                        $result = $result . chr(128 + (($hv / 64) % 64));
-                        $result = $result . chr(128 + ($hv % 64));
-                    }
+                    # chr() yields the UTF-8 encoding of the codepoint (see above).
+                    $result = $result . chr($hv);
                     next;
                 } else {
                     # Up to 2 hex digits — single byte
@@ -1758,6 +1734,16 @@ func lex_next_token(scalar $lexer) scalar {
             $lexer->{"expect_regex"} = 0;
             return lex_read_regex_literal($lexer, $token_line);
         }
+        # m/pattern/flags: the explicit spelling of a match. Skip the `m`
+        # and read an ordinary /regex/ literal.
+        if ($code == ord("m")) {
+            my int $m_peek = char_at($lexer->{"source"}, $lexer->{"pos"} + 1);
+            if ($m_peek == ord("/")) {
+                $lexer->{"expect_regex"} = 0;
+                lex_advance($lexer);
+                return lex_read_regex_literal($lexer, $token_line);
+            }
+        }
         # s=115
         if ($code == ord("s")) {
             my int $peek_code = char_at($lexer->{"source"}, $lexer->{"pos"} + 1);
@@ -1835,7 +1821,11 @@ func lex_next_token(scalar $lexer) scalar {
         # A word immediately followed by '::' is a namespace qualifier
         # (e.g. str::replace), never a keyword — demote to IDENT so type
         # keywords like 'str' can name builtin namespaces.
-        if (lex_current_code($lexer) == 58 && lex_peek_code($lexer, 1) == 58) {
+        # ...except __PACKAGE__: `__PACKAGE__::func()` is resolved against the
+        # current package by the parser, which needs the DUNDER_PACKAGE token
+        # (demoted, it became a call to a function literally named
+        # __PACKAGE___func: a link error).
+        if (lex_current_code($lexer) == 58 && lex_peek_code($lexer, 1) == 58 && $type ne "DUNDER_PACKAGE") {
             $type = "IDENT";
         }
 

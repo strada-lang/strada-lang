@@ -1,0 +1,4 @@
+# EXPECT: 500500
+# Recursion deeper than the frame array but under the limit must still work.
+func sum(int $n) int { if ($n == 0) { return 0; } return $n + sum($n - 1); }
+func main() int { my int $r = 0; try { core::set_recursion_limit(5000); $r = sum(1000); } catch ($e) { $r = -1; } say($r); return 0; }

@@ -1,0 +1,9 @@
+# EXPECT: 3
+# `foreach $x (...)` over an existing variable captured by a closure used an
+# undeclared C name.
+func main() int {
+    my array @a = (1, 2); my int $c = 0; my int $t = 0;
+    my scalar $f = func () { foreach $c (@a) { $t = $t + $c; } return $t; };
+    say($f->());
+    return 0;
+}

@@ -596,6 +596,30 @@ func gen_builtin_g1(scalar $cg, scalar $expr, str $name) int {
         }
 
         # each(%hash) - returns [key, value] pair or empty array
+        # In a program that uses tie, each/keys/values go through the SV-level
+        # runtime entry points, which dispatch to FIRSTKEY/NEXTKEY/FETCH for a
+        # tied hash. (The fast paths below read the hash table directly, so a
+        # tied hash looked empty.)
+        if ($cg->{"uses_tie"} == 1 && ($name eq "each" || $name eq "keys" || $name eq "values") && $expr->{"arg_count"} == 1) {
+            my scalar $th_args = $expr->{"args"};
+            # each() yields its [key, value] pair directly; keys()/values()
+            # yield a raw array that is wrapped into a value.
+            my str $th_open = "strada_hash_each_sv(";
+            my str $th_close = ")";
+            if ($name eq "keys") { $th_open = "strada_new_array_from_av(strada_hash_keys_sv("; $th_close = "))"; }
+            if ($name eq "values") { $th_open = "strada_new_array_from_av(strada_hash_values_sv("; $th_close = "))"; }
+            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $th_args->[0]) == 1) {
+                emit($cg, "({ StradaValue *__th_h = ");
+                gen_expression($cg, $th_args->[0]);
+                emit($cg, "; StradaValue *__th_r = " . $th_open . "__th_h" . $th_close . "; strada_decref(__th_h); __th_r; })");
+            } else {
+                emit($cg, $th_open);
+                gen_expression($cg, $th_args->[0]);
+                emit($cg, $th_close);
+            }
+            return 1;
+        }
+
         if ($name eq "each") {
             my scalar $args = $expr->{"args"};
             if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $args->[0]) == 1) {
@@ -636,7 +660,17 @@ func gen_builtin_g1(scalar $cg, scalar $expr, str $name) int {
             my int $argc = $expr->{"arg_count"};
             # tie(%hash, "ClassName", @extra_args...)
             # strada_tie_hash(ref, const char *classname, int argc, ...)
-            emit($cg, "strada_tie_hash(");
+            # The kind of tie follows the variable: tie($x, ...) calls
+            # TIESCALAR and tie(@a, ...) TIEARRAY. (Everything used to be tied
+            # as a hash, so a scalar tie died looking for TIEHASH.)
+            my str $tie_fn = "strada_tie_hash";
+            my scalar $tie_var = $args->[0];
+            if ($tie_var->{"type"} == NODE_VARIABLE()) {
+                my str $tie_sigil = $tie_var->{"sigil"};
+                if ($tie_sigil eq "$") { $tie_fn = "strada_tie_scalar"; }
+                if ($tie_sigil eq "@") { $tie_fn = "strada_tie_array"; }
+            }
+            emit($cg, $tie_fn . "(");
             gen_expression($cg, $args->[0]);
             emit($cg, ", ");
             # Class name must be a string literal for now. Route through the
@@ -4188,6 +4222,24 @@ func gen_builtin_g5(scalar $cg, scalar $expr, str $name) int {
         if ($name eq "sys::fwrite") {
             my scalar $args = $expr->{"args"};
             my scalar $data_arg = $args->[1];
+            if ($expr->{"arg_count"} >= 3) {
+                # fwrite(fh, data, n): the first n bytes only.
+                emit($cg, "({ StradaValue *__fw_v = ");
+                gen_expression($cg, $data_arg);
+                emit($cg, "; StradaValue *__fw_n = ");
+                gen_expression($cg, $args->[2]);
+                emit($cg, "; strada_write_file_n(");
+                gen_expression($cg, $args->[0]);
+                emit($cg, ", __fw_v, strada_to_int(__fw_n)); ");
+                if (needs_temp_cleanup($cg, $args->[2]) == 1) {
+                    emit($cg, "strada_decref(__fw_n); ");
+                }
+                if (needs_temp_cleanup($cg, $data_arg) == 1) {
+                    emit($cg, "strada_decref(__fw_v); ");
+                }
+                emit($cg, "(StradaValue*)NULL; })");
+                return 1;
+            }
             emit($cg, "({ StradaValue *__fw_v = ");
             gen_expression($cg, $data_arg);
             emit($cg, "; char *__fw_s = strada_to_str_ss(__fw_v); strada_write_file(");
@@ -4201,6 +4253,20 @@ func gen_builtin_g5(scalar $cg, scalar $expr, str $name) int {
         }
 
         # fread(fh) - read entire file from handle
+        if ($name eq "sys::fread" && $expr->{"arg_count"} >= 2) {
+            # fread(fh, n): up to n bytes from the current position.
+            my scalar $fr_args = $expr->{"args"};
+            emit($cg, "({ StradaValue *__fr_n = ");
+            gen_expression($cg, $fr_args->[1]);
+            emit($cg, "; StradaValue *__fr_r = strada_read_file_n(");
+            gen_expression($cg, $fr_args->[0]);
+            emit($cg, ", strada_to_int(__fr_n)); ");
+            if (needs_temp_cleanup($cg, $fr_args->[1]) == 1) {
+                emit($cg, "strada_decref(__fr_n); ");
+            }
+            emit($cg, "__fr_r; })");
+            return 1;
+        }
         if ($name eq "sys::fread") {
             emit($cg, "strada_read_file(");
             my scalar $args = $expr->{"args"};
@@ -4296,6 +4362,24 @@ func gen_builtin_g5(scalar $cg, scalar $expr, str $name) int {
         }
         
         # is_ref / is_refto - check if value is a reference
+        if ($name eq "is_refto" && $expr->{"arg_count"} >= 2) {
+            # is_refto($value, "ARRAY"): a reference AND of that kind. The
+            # type argument used to be ignored, making this plain is_ref().
+            my scalar $rt_args = $expr->{"args"};
+            emit($cg, "({ StradaValue *__rt_v = ");
+            gen_expression($cg, $rt_args->[0]);
+            emit($cg, "; StradaValue *__rt_t = ");
+            gen_expression($cg, $rt_args->[1]);
+            emit($cg, "; char *__rt_s = strada_to_str(__rt_t); int __rt_r = strada_is_ref(__rt_v) && strcmp(strada_reftype_raw(__rt_v), __rt_s) == 0; free(__rt_s); ");
+            if (needs_temp_cleanup($cg, $rt_args->[1]) == 1) {
+                emit($cg, "strada_decref(__rt_t); ");
+            }
+            if (needs_temp_cleanup($cg, $rt_args->[0]) == 1) {
+                emit($cg, "strada_decref(__rt_v); ");
+            }
+            emit($cg, "strada_new_int(__rt_r); })");
+            return 1;
+        }
         if ($name eq "is_ref" || $name eq "is_refto") {
             emit($cg, "strada_new_int(strada_is_ref(");
             my scalar $args = $expr->{"args"};
@@ -5944,13 +6028,14 @@ func gen_builtin_g6(scalar $cg, scalar $expr, str $name) int {
 
         # caller - get caller info at given level
         if ($name eq "caller") {
+            # Bare caller(): same as core::caller(). (It used to emit a call
+            # with the pre-StradaValue signature, which no longer compiles
+            # to anything meaningful.)
             my scalar $args = $expr->{"args"};
-            if ($expr->{"arg_count"} > 0) {
-                emit($cg, "strada_new_str(strada_caller_info(strada_to_int(");
-                gen_expression($cg, $args->[0]);
-                emit($cg, ")))");
+            if ($expr->{"arg_count"} == 0) {
+                emit($cg, "strada_caller_info(STRADA_MAKE_TAGGED_INT(0))");
             } else {
-                emit($cg, "strada_new_str(strada_caller_info(1))");
+                gen_call_with_arg_cleanup($cg, "strada_caller_info", $args, 1);
             }
             return 1;
         }
@@ -8120,6 +8205,21 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
             }
         }
 
+        # A name in a BUILTIN namespace that no builtin handler claimed and that
+        # is not a user function: there is no such builtin. Emitting a C call
+        # to it anyway (`sys_frobnicate(...)`) produced an implicit-declaration
+        # warning and a link error far from the source line, and `--check`
+        # passed it. A handful of names are real runtime functions reached
+        # exactly this way (kept for the frozen bootstrap), and stay allowed.
+        if ($func_found == 0 && unknown_builtin_name($cg, $name, $c_name) == 1) {
+            my str $ub_shown = $name;
+            if (index($ub_shown, "sys::") == 0) {
+                $ub_shown = "core::" . substr($ub_shown, 5, length($ub_shown) - 5);
+            }
+            my int $ub_line = $expr->{"line"} + 0;
+            die($cg->{"filename"} . ":" . $ub_line . ": error: unknown builtin function '" . $ub_shown . "'");
+        }
+
         # Separate compilation (module-only / -M): a call to a function neither
         # defined nor declared in this translation unit is a legitimate cross-module
         # or stdlib reference that the final link resolves. Record its mangled name
@@ -8407,6 +8507,7 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
                 }
             }
             if ($is_ctor == 1 && $arg_count >= 2) {
+                my str $ctor_pkg_chk = substr($c_name, 0, $cnl - 4);
                 my int $all_lit_keys = 1;
                 my int $ki = 0;
                 while ($ki < $arg_count) {
@@ -8414,6 +8515,12 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
                         $all_lit_keys = 0;
                     }
                     $ki = $ki + 2;
+                }
+                # A (required) attribute the call does not pass: leave it to the
+                # real constructor, which throws. (Inlined, the object was
+                # simply built without it.)
+                if ($all_lit_keys == 1 && inline_ctor_missing_required($cg, $ctor_pkg_chk, $args, $arg_count) == 1) {
+                    $all_lit_keys = 0;
                 }
                 if ($all_lit_keys == 1) {
                     # Inline constructor: create hash, set entries directly, bless
@@ -9051,17 +9158,20 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
                     $i = $i + 1;
                 }
             }
-            if ($is_dynamic_call == 1) {
-                emit($cg, "); strada_set_call_context(0); __dyn_r; })");
-            } else {
-                emit($cg, ")");
-            }
-            # Close the comma-expression wrapper from the call-line set.
+            emit($cg, ")");
+            # Close the comma-expression wrapper from the call-line set. It
+            # wraps just the call, so it must close BEFORE the dynamic-call
+            # epilogue: closing it after left `(line, f(); ...` unbalanced, and
+            # a `dynamic` call in any program with stack traces on (one that
+            # mentions try/throw/caller/stack_trace) did not compile.
             if ($cg->{"enable_stack_trace"} == 1) {
                 my int $__cl_line3c = $expr->{"line"} + 0;
                 if ($__cl_line3c > 0) {
                     emit($cg, ")");
                 }
+            }
+            if ($is_dynamic_call == 1) {
+                emit($cg, "; strada_set_call_context(0); __dyn_r; })");
             }
         }
         return;
