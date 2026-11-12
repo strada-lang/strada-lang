@@ -48,7 +48,7 @@ if ("cat catalog" =~ /\bcat\b/) { say("Found standalone 'cat'"); }
 # IMPORTANT: $ in regex means end-of-line, NOT variable interpolation
 # To use both a variable and $ anchor:
 my str $suffix = "world";
-if ("hello world" =~ /$suffix$/) { say("Ends with $suffix"); }
+if ("hello world" =~ /$suffix$/) { say("Ends with " . $suffix); }
 ```
 
 ### Character Classes
@@ -124,8 +124,8 @@ Zero-width assertions that match a position without consuming characters:
 
 ```strada
 # Positive lookahead: digits followed by "px"
-if ("width: 100px" =~ /\d+(?=px)/) {
-    say("Found pixel value: " . $1);
+if ("width: 100px" =~ /(\d+)(?=px)/) {
+    say("Found pixel value: " . $1);   # 100
 }
 
 # Negative lookahead: digits NOT followed by "px"
@@ -338,18 +338,19 @@ $word = uc($word);         # Using uc() function
 
 ## Variable Interpolation in Patterns
 
-Variables are interpolated in regex patterns:
+Variables are interpolated in regex patterns (written bare, as `$name` — unlike
+double-quoted strings, where only `${name}` interpolates and `"$name"` is literal text):
 
 ```strada
 my str $search = "world";
 if ($text =~ /$search/) {
-    say("Found: $search");
+    say("Found: " . $search);
 }
 
 # Combine variable with $ anchor (end of line)
 my str $suffix = "end";
 if ($text =~ /$suffix$/) {
-    say("Text ends with $suffix");
+    say("Text ends with " . $suffix);
 }
 ```
 
@@ -382,8 +383,8 @@ my int $found = match($text, "pattern");
 Get all capture groups as an array (pass string and pattern as arguments):
 
 ```strada
-my array @groups = capture($text, "(\d+)-(\d+)");
-# @groups[0] = full match, @groups[1] = first group, etc.
+my array @groups = capture($text, "(\\d+)-(\\d+)");   # pattern is a string: double the backslashes
+# $groups[0] = full match, $groups[1] = first group, etc.
 ```
 
 ### captures()
@@ -561,7 +562,6 @@ $str =~ tr/0-9/*/;
 | `c` | Complement -- transliterate characters NOT in SEARCHLIST |
 | `d` | Delete -- delete characters found in SEARCHLIST that have no replacement |
 | `s` | Squeeze -- collapse duplicate consecutive replaced characters into one |
-| `r` | Return -- return a modified copy instead of modifying in place |
 
 #### `d` (Delete) Flag
 
@@ -597,33 +597,38 @@ $text =~ tr/a-zA-Z//cd;     # Delete non-alpha characters
 say($text);                  # HelloWorld
 
 my str $data = "abc\x01\x02def";
-$data =~ tr/\x20-\x7E//cd;  # Keep only printable ASCII
+$data =~ tr/ -~//cd;         # Keep only printable ASCII (space through ~; \x escapes are not understood by tr)
 say($data);                  # abcdef
 ```
 
-#### `r` (Return Copy) Flag
+#### No `r` (Return Copy) Flag
 
-Return a modified copy instead of modifying the original:
+Perl's `r` flag is accepted but **not honoured** in compiled code: the string is
+still modified in place and the expression still yields the count. To keep the
+original, copy first:
 
 ```strada
 my str $original = "Hello World";
-my str $upper = ($original =~ tr/a-z/A-Z/r);
+my str $upper = $original;
+$upper =~ tr/a-z/A-Z/;
 say($original);              # Hello World  (unchanged)
 say($upper);                 # HELLO WORLD
 ```
 
 ### Return Value (Count)
 
-`tr///` returns the number of characters that were transliterated (or matched):
+`tr///` returns the number of characters that were transliterated. To count
+without changing the string, map the set onto itself (an **empty** replacement
+list without the `d` flag returns 0, unlike Perl):
 
 ```strada
 my str $text = "Hello World";
-my int $vowels = ($text =~ tr/aeiouAEIOU//);
+my int $vowels = ($text =~ tr/aeiouAEIOU/aeiouAEIOU/);
 say("Vowel count: " . $vowels);   # Vowel count: 3
 
-# Count without modifying (empty replacement = count only)
+# Count without modifying (identity mapping)
 my str $data = "abc123def456";
-my int $digits = ($data =~ tr/0-9//);
+my int $digits = ($data =~ tr/0-9/0-9/);
 say("Digit count: " . $digits);   # Digit count: 6
 ```
 
@@ -636,7 +641,7 @@ Flags can be combined:
 my str $messy = "  Hello,   World!!  123  ";
 $messy =~ tr/a-zA-Z0-9 //cd;   # Delete non-alnum/space (complement + delete)
 $messy =~ tr/ / /s;             # Squeeze spaces
-say($messy);                     # Hello World 123
+say($messy);                     # " Hello World 123 " (one space left at each end)
 ```
 
 ---
@@ -729,8 +734,8 @@ say($url);   # hello%20world%21
 | Backreferences | `$1`-`$9` | Supported |
 | Character class shortcuts | `\d`, `\w`, `\s` | Supported |
 | Flags | `/i`, `/m`, `/s`, `/x`, `/g`, `/e` | Supported |
-| Possessive quantifiers | `*+`, `++` | Not supported |
-| Unicode properties | `\p{...}` | Not supported |
+| Possessive quantifiers | `*+`, `++` | Supported |
+| Unicode properties | `\p{...}` | Supported |
 
 ---
 

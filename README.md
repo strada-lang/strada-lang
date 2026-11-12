@@ -26,7 +26,7 @@ EOF
 
 - **Static typing** with `int`, `num`, `str`, `scalar`, `array`, `hash`
 - **Perl-like syntax** - familiar sigils, operators, and control structures
-- **Self-hosting** - the compiler is written in Strada (~2,300 lines of Strada source, generating ~60k lines of C during the build)
+- **Self-hosting** - the compiler is written in Strada (~37,000 lines of Strada source, generating ~70k lines of C during the build)
 - **Native compilation** - compiles to C, then to native executables
 - **Object-oriented** - blessed references, multiple inheritance, destructors
 - **Closures** - anonymous functions with captured variables
@@ -87,7 +87,7 @@ func main() int {
     my scalar $p1 = Point_new(0, 0);
     my scalar $p2 = Point_new(3, 4);
 
-    say("Distance: " . Point_distance($p1, $p2));  # 5.0
+    say("Distance: " . Point_distance($p1, $p2));  # 5
 
     return 0;
 }
@@ -98,7 +98,8 @@ func main() int {
 ```bash
 make                    # Build self-hosting compiler
 make run PROG=name      # Compile and run examples/name.strada
-make test               # Run test suite
+make test               # Run runtime tests
+make test-suite         # Run the full test suite
 make examples           # Build all examples
 make clean              # Clean build artifacts
 ```
@@ -110,6 +111,8 @@ make clean              # Clean build artifacts
 ./strada -r program.strada   # Compile and run
 ./strada -c program.strada   # Keep generated C code
 ./strada -g program.strada   # Include debug symbols
+./strada --check program.strada  # Syntax/semantic check only
+./strada --help              # All options
 ```
 
 ## Architecture
@@ -154,8 +157,8 @@ All development happens in the self-hosting compiler (`compiler/*.strada`). The 
 # Edit compiler
 vim compiler/Parser.strada
 
-# Rebuild
-make
+# Rebuild (fast loop; run a full `make` and `make test-selfhost` before committing)
+make quick
 
 # Test
 make run PROG=your_test

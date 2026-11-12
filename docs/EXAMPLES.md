@@ -49,13 +49,14 @@ Compile and run:
 ```strada
 # args.strada
 func main() int {
-    say("Program: " . $ARGV[0]);
-    say("Arguments: " . ($ARGC - 1));
+    # $0 is the program name; @ARGV holds only the arguments
+    say("Program: " . $0);
+    say("Arguments: " . $ARGC);
 
-    if ($ARGC > 1) {
+    if ($ARGC > 0) {
         say("\nArguments:");
-        for (my int $i = 1; $i < $ARGC; $i = $i + 1) {
-            say("  " . $i . ": " . $ARGV[$i]);
+        for (my int $i = 0; $i < $ARGC; $i = $i + 1) {
+            say("  " . ($i + 1) . ": " . $ARGV[$i]);
         }
     }
 
@@ -139,22 +140,22 @@ func main() int {
     }
 
     say("Original: ");
-    dumper(\@numbers);
+    say(dumper(\@numbers));
 
     # Map: square each number
     my scalar $squared = map { $_ * $_; } @numbers;
     say("\nSquared:");
-    dumper($squared);
+    say(dumper($squared));
 
     # Grep: filter even numbers
     my scalar $evens = grep { $_ % 2 == 0; } @numbers;
     say("\nEven numbers:");
-    dumper($evens);
+    say(dumper($evens));
 
     # Sort: descending order
     my scalar $desc = sort { $b <=> $a; } @numbers;
     say("\nDescending:");
-    dumper($desc);
+    say(dumper($desc));
 
     # Reduce-style sum
     my int $sum = 0;
@@ -180,7 +181,7 @@ func main() int {
     $person{"occupation"} = "Engineer";
 
     say("Person data:");
-    dumper(\%person);
+    say(dumper(\%person));
 
     # Iterate over keys
     say("\nFormatted output:");
@@ -244,7 +245,7 @@ func main() int {
 
     # Full dump
     say("\nFull structure:");
-    dumper($company);
+    say(dumper($company));
 
     return 0;
 }
@@ -283,12 +284,12 @@ func main() int {
 ```strada
 # word_count.strada
 func main() int {
-    if ($ARGC < 2) {
+    if ($ARGC < 1) {
         say("Usage: word_count <filename>");
         return 1;
     }
 
-    my str $filename = $ARGV[1];
+    my str $filename = $ARGV[0];
     my str $content = core::slurp($filename);
 
     if (!defined($content)) {
@@ -709,9 +710,10 @@ func main() int {
 
     say("5 * 10 = " . $scale->(5));
 
-    # Captured by reference - changes affect closure
+    # Captured by value when the closure is created - later changes
+    # to the outer variable don't affect the closure
     $multiplier = 100;
-    say("5 * 100 = " . $scale->(5));
+    say("still 5 * 10 = " . $scale->(5));
 
     return 0;
 }
@@ -812,16 +814,20 @@ func main() int {
 ```strada
 # threads_mutex.strada
 func main() int {
-    my int $counter = 0;
+    # Closures capture a snapshot of each variable, so shared mutable
+    # state lives in a hash reference (the reference is what gets captured)
+    my scalar $state = { "counter" => 0 };
     my scalar $mutex = thread::mutex_new();
     my int $iterations = 10000;
 
     # Create worker closure
     my scalar $worker = func () {
-        for (my int $i = 0; $i < $iterations; $i = $i + 1) {
+        my int $i = 0;
+        while ($i < $iterations) {
             thread::mutex_lock($mutex);
-            $counter = $counter + 1;
+            $state->{"counter"} = $state->{"counter"} + 1;
             thread::mutex_unlock($mutex);
+            $i = $i + 1;
         }
         return 0;
     };
@@ -839,7 +845,7 @@ func main() int {
     thread::mutex_destroy($mutex);
 
     say("Expected: " . ($iterations * 3));
-    say("Actual: " . $counter);
+    say("Actual: " . $state->{"counter"});
 
     return 0;
 }
@@ -851,13 +857,15 @@ func main() int {
 # threads_prodcons.strada
 func main() int {
     my array @queue = ();
-    my int $done = 0;
+    # Shared flag lives in a hash reference: closures capture a snapshot
+    # of plain scalars, but a reference still points at the same hash
+    my scalar $state = { "done" => 0 };
     my scalar $mutex = thread::mutex_new();
     my scalar $cond = thread::cond_new();
 
     # Producer
     my scalar $producer = thread::create(func () {
-        for (my int $i = 1; $i <= 5; $i = $i + 1) {
+        foreach my int $i (1..5) {
             core::usleep(100000);  # Simulate work
 
             thread::mutex_lock($mutex);
@@ -868,7 +876,7 @@ func main() int {
         }
 
         thread::mutex_lock($mutex);
-        $done = 1;
+        $state->{"done"} = 1;
         thread::cond_signal($cond);
         thread::mutex_unlock($mutex);
 
@@ -880,7 +888,7 @@ func main() int {
         while (1) {
             thread::mutex_lock($mutex);
 
-            while (size(@queue) == 0 && !$done) {
+            while (size(@queue) == 0 && !$state->{"done"}) {
                 thread::cond_wait($cond, $mutex);
             }
 
@@ -890,7 +898,7 @@ func main() int {
                 say("Consumed: " . $item);
             } else {
                 thread::mutex_unlock($mutex);
-                if ($done) {
+                if ($state->{"done"}) {
                     last;
                 }
             }

@@ -35,22 +35,25 @@ use lib "lib";
 use Async::Loop;
 use Async::Task;
 
-my scalar $loop = Async::Loop::new();
-my scalar $listener = core::socket_server(8080);
+func main() int {
+    my scalar $loop = Async::Loop::new();
+    my scalar $listener = core::socket_server(8080);
 
-$loop->spawn(fn () {
-    while (1) {
-        my scalar $conn = Async::Task::accept($listener);
-        $loop->spawn(fn () {
-            my str $req = Async::Task::recv($conn, 8192);
-            Async::Task::send($conn, "HTTP/1.0 200 OK\r\n\r\nhello");
-            core::socket_close($conn);
-        });
-    }
-});
+    $loop->spawn(fn () {
+        while (1) {
+            my scalar $conn = Async::Task::accept($listener);
+            $loop->spawn(fn () {
+                my str $req = Async::Task::recv($conn, 8192);
+                Async::Task::send($conn, "HTTP/1.0 200 OK\r\n\r\nhello");
+                core::socket_close($conn);
+            });
+        }
+    });
 
-$loop->timer_after(250, fn () { say("tick"); });
-$loop->run();   # until stop() or nothing left to wait for
+    $loop->timer_after(250, fn () { say("tick"); });
+    $loop->run();   # until stop() or nothing left to wait for
+    return 0;
+}
 ```
 
 ## Callback API

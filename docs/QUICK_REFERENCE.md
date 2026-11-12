@@ -12,6 +12,8 @@ make
 ./strada -c program.strada       # Keep .c file
 ./strada -g program.strada       # Debug symbols
 ./strada -w program.strada       # Enable warnings (unused vars)
+./strada --check program.strada  # Syntax/semantic check only (no output; reports all errors)
+./strada -O0 program.strada      # Fast unoptimized build (default is -O2 + LTO)
 ./strada -p program.strada       # Function profiling (report on exit)
 ./strada --full-profile program.strada  # Line-level profiling (writes strada-prof.out)
 
@@ -40,7 +42,7 @@ Built-in functions are organized into namespaces:
 | `c::` | Low-level memory & C callbacks | `c::alloc()`, `c::read_int64()`, `c::callback()` |
 | *(none)* | Core language | `say()`, `push()`, `keys()` |
 
-**Note:** `core::` is the preferred way to call system functions. `sys::` is a legacy alias for `core::` — both are normalized at compile time with zero runtime overhead. `core::getpid()` and `sys::getpid()` generate identical code.
+**Note:** `core::` is the preferred way to call system functions. `sys::` is a legacy alias for `core::` — both are normalized at compile time with zero runtime overhead. `core::getpid()` and `sys::getpid()` generate identical code, but the compiler prints `Warning: sys:: is deprecated, use core::getpid instead` for the `sys::` spelling.
 
 ## Basic Structure
 
@@ -85,7 +87,8 @@ our int $port = 8080;        # Key: "Config::port"
 # Dynamic scoping (local) - temporarily override our vars
 our str $mode = "normal";
 func risky() void {
-    local($mode) = "safe";   # Temporarily "safe", restored on scope exit
+    local $mode = "safe";    # Temporarily "safe", restored when the function returns
+                             # (no parens: local($mode) = ... is a parse error)
 }
 ```
 
@@ -318,17 +321,24 @@ my int $sum = $add->(3, 4);        # 7
 my str $msg = $greet->("World");   # "Hello, World"
 my num $pi = $get_pi->();          # 3.14159
 
-# Capture variables from enclosing scope (by reference)
+# Capture variables from enclosing scope.
+# Scalars are captured BY VALUE (a private copy taken when the closure is created)
 my int $multiplier = 10;
 my scalar $scale = func (int $n) { return $n * $multiplier; };
 say($scale->(5));                  # 50
 
-# Mutations visible in outer scope
+# The closure's copy persists between calls, but the outer variable is NOT modified
 my int $count = 0;
 my scalar $inc = func () { $count = $count + 1; return $count; };
 $inc->();                          # returns 1
 $inc->();                          # returns 2
-say($count);                       # 2 (outer variable modified)
+say($count);                       # 0 (outer variable unchanged)
+
+# Arrays and hashes ARE shared; use one (or a reference, \$x + $$ref) for shared state
+my hash %state = ("count" => 0);
+my scalar $bump = func () { $state{"count"} = $state{"count"} + 1; };
+$bump->(); $bump->();
+say($state{"count"});              # 2
 
 # Pass closures to functions
 func apply(scalar $f, int $x) int {
@@ -347,33 +357,34 @@ my scalar $t = thread::create(func () {
 });
 thread::join($t);
 
-# Mutex for shared data
-my int $counter = 0;
+# Mutex for shared data (closures copy scalars, so share state through a hash)
+my hash %shared = ("counter" => 0);
 my scalar $mutex = thread::mutex_new();
 
 my scalar $worker = thread::create(func () {
     thread::mutex_lock($mutex);
-    $counter = $counter + 1;
+    $shared{"counter"} = $shared{"counter"} + 1;
     thread::mutex_unlock($mutex);
 });
 thread::join($worker);
 thread::mutex_destroy($mutex);
+say($shared{"counter"});           # 1
 
 # Condition variables
-my int $ready = 0;
+my hash %state = ("ready" => 0);
 my scalar $m = thread::mutex_new();
 my scalar $cv = thread::cond_new();
 
 my scalar $waiter = thread::create(func () {
     thread::mutex_lock($m);
-    while ($ready == 0) {
+    while ($state{"ready"} == 0) {
         thread::cond_wait($cv, $m);
     }
     thread::mutex_unlock($m);
 });
 
 thread::mutex_lock($m);
-$ready = 1;
+$state{"ready"} = 1;
 thread::cond_signal($cv);
 thread::mutex_unlock($m);
 thread::join($waiter);
@@ -406,16 +417,16 @@ my scalar $b = compute(20);
 my int $r1 = await $a;  # 20
 my int $r2 = await $b;  # 40
 
-# Wait for all
+# Wait for all (all/race/timeout block and return the result directly — no await)
 my array @futures = (compute(1), compute(2), compute(3));
-my array @results = async::all(\@futures);  # [2, 4, 6]
+my array @results = async::all(\@futures);  # (2, 4, 6)
 
 # Race - first to complete
-my str $winner = async::race(\@futures);
+my scalar $winner = async::race(\@futures);
 
 # Timeout
 try {
-    my str $r = async::timeout($future, 100);  # 100ms
+    my scalar $r = async::timeout($future, 100);  # 100ms; throws on timeout
 } catch ($e) {
     say("Timed out");
 }
@@ -451,7 +462,7 @@ async::len($ch);                       # Items in queue
 my scalar $m = async::mutex();
 async::lock($m);                       # Acquire (blocking)
 async::unlock($m);                     # Release
-async::try_lock($m);                   # Non-blocking (0=success)
+async::try_lock($m);                   # Non-blocking (0=success, non-zero if already locked)
 async::mutex_destroy($m);              # Clean up
 ```
 
@@ -479,7 +490,7 @@ my scalar $first = shift;     # Bare shift defaults to @_ (useful in no-parens f
 my int $len = size(@arr);     # Length
 my int $n = @arr;             # Scalar context: array count (same as size)
 my scalar $el = $arr[0];      # Access element
-reverse(@arr);                # Reverse in place
+my array @rev = reverse(@arr);  # Returns a reversed copy (@arr unchanged)
 splice(@arr, 2, 1);          # Remove 1 element at index 2, returns removed
 splice(@arr, 1, 2, @repl);   # Replace 2 elements at index 1 with @repl
 
@@ -496,7 +507,7 @@ my array @e = (0, [1, 2], 3);      # 3 elements: 0, an arrayref, 3 (refs DON'T f
 # (Use ...@array to spread elements as separate FUNCTION ARGUMENTS.)
 
 # Array capacity (performance optimization)
-reserve(@arr, 1000);  // pre-allocate capacity
+reserve(@arr, 1000);  # pre-allocate capacity
 ```
 
 ## Map, Grep, Sort
@@ -532,7 +543,7 @@ my array @k = keys(%h);       # All keys (use % for whole hash)
 my array @v = values(%h);     # All values
 
 # Iterate key-value pairs
-my array @pair = each(%h);    # Returns [key, value], empty array when done
+my array @pair = each(%h);    # Returns (key, value), empty array when done
 
 # Anonymous hash
 my scalar $person = {
@@ -594,16 +605,23 @@ core::weaken($child->{"parent"});   # Parent can be freed normally
 ## Strings
 
 ```strada
-length($s)              # Length
-length($s)              # UTF-8 codepoint count (use core::byte_length for raw bytes)
-substr($s, 0, 5)        # Substring (codepoint offsets, UTF-8 safe)
-index($s, "sub")        # Find (codepoint position)
+length($s)              # Length (see UTF-8 note below; core::byte_length for raw bytes)
+substr($s, 0, 5)        # Substring
+index($s, "sub")        # Find (-1 if absent)
 uc($s)  lc($s)          # Case (handles Latin-1 range)
 trim($s)                # Whitespace
 chomp($s)               # Strip trailing \n or \r\n in-place, returns modified string
 join(",", @arr)         # Join array
-chr(65)  ord("A")       # Char conversion (chr 0-255 = single byte, 256+ = UTF-8)
+chr(65)  ord("A")       # Char conversion (chr is codepoint-oriented: chr(233) is "é",
+                        #   2 bytes of UTF-8; use core::byte(n) for a single raw byte)
 reverse("café")         # éfac — codepoint-aware
+
+# UTF-8 note: length/substr/index count characters only for strings built from
+# code points (chr): length("caf" . chr(233)) is 4. For a non-ASCII string
+# LITERAL or data read from a file they currently count bytes: length("café") is 5.
+
+# Interpolation: only "${name}" (braced plain scalar) interpolates.
+# "$name", "$arr[0]", "$h{k}" stay literal text — use . or sprintf.
 
 # Heredocs
 my str $text = <<EOT;
@@ -657,7 +675,7 @@ say("with newline");
 print("no newline");
 printf("%s: %d", $name, $val);
 
-my str $line = core::readline();               # Read from stdin
+my str $line = <STDIN>;                        # Read a line from stdin
 my str $content = core::slurp("file.txt");     # Read entire file
 core::spew("file.txt", $data);                 # Write entire file
 my int $m = core::file_mtime("file.txt");      # mtime in epoch seconds, -1 if stat fails
@@ -705,7 +723,7 @@ core::close($rfh);  # $buf = "text\n"
 
 # Select default filehandle for print/say
 my scalar $prev = select($out);  # Set default, returns previous
-say("goes to $out");             # No filehandle arg needed
+say("goes to the selected handle"); # No filehandle arg needed
 select($prev);                   # Restore previous default
 
 # Works with sockets too!
@@ -745,7 +763,6 @@ $str =~ s/(\d+)/$1 * 2/eg;      # With /g: all occurrences
 my int $count = ($str =~ tr/a-z/A-Z/);  # Uppercase, returns count changed
 $str =~ tr/0-9//d;              # Delete digits (d flag)
 $str =~ tr/ / /s;               # Squeeze repeated spaces (s flag)
-$str =~ tr/a-z/A-Z/r;          # Return copy, don't modify original (r flag)
 $str =~ y/abc/xyz/;             # y/// is alias for tr///
 
 # Function-based alternatives (re:: = regex, str:: = literal string)
@@ -763,6 +780,7 @@ my array @parts = split(",", $csv);
 ## Event Loop and Green Tasks (Async::Loop)
 
 ```strada
+use lib "lib";
 use Async::Loop;
 use Async::Task;
 
@@ -788,8 +806,8 @@ See `docs/EVENT_LOOP.md` for the full API, task rules, and caveats.
 
 ```strada
 # Using modules (compile-time source inclusion)
-use Math::Utils;
-use Math::Utils qw(add multiply);
+use lib "lib";                # so Math/Utils.strada is found
+use Math::Utils;              # then call Math::Utils::add(1, 2)
 
 # In lib/Math/Utils.strada
 package Math::Utils;
@@ -938,13 +956,13 @@ if ($dog->can("speak")) { ... }   # Check if method exists
 my str $pkg = core::blessed($dog);  # "Dog" (bare blessed() is a legacy alias)
 
 # Current package
-say(__PACKAGE__);                 # Returns current package name at runtime
+say(__PACKAGE__);                 # Runtime "current package": "main" unless changed with
+                                  # core::set_package() — not the enclosing `package` block
 
 # Call function in current package (compile-time resolution)
 ::helper("arg");                  # Preferred shorthand
 .::helper("arg");                 # Alternate shorthand
-__PACKAGE__::helper("arg");       # Explicit form
-# All three resolve to PackageName_helper("arg") at compile time
+# Both resolve to PackageName_helper("arg") at compile time
 
 # Runtime package control (for multi-package files)
 core::inherit("Dog", "Animal");   # Explicit child and parent
@@ -987,7 +1005,6 @@ use overload
 | `__PACKAGE__` | Get current package name (runtime) |
 | `::func()` | Call func in current package (compile-time) |
 | `.::func()` | Alternate syntax for above |
-| `__PACKAGE__::func()` | Explicit form of above |
 
 ## Moose-Style Declarative OOP
 
@@ -999,7 +1016,7 @@ package Person;
 has ro str $name (required);          # Read-only, required in constructor
 has rw int $age = 0;                  # Read/write, default value
 has rw str $nickname;                 # Read/write, no default (undef)
-has ro str $id (lazy, builder => "_build_id");  # Lazy, built on first access
+has ro str $id (lazy, builder => "_build_id");  # Parsed, but lazy/builder currently have no effect
 
 # Inheritance
 package Employee;
@@ -1023,7 +1040,7 @@ after "save" func(scalar $self) void {
     say("saved successfully");        # Runs after save()
 }
 
-around "validate" func(scalar $self, scalar $orig, scalar ...@args) scalar {
+around "validate" func(scalar $orig, scalar $self, scalar ...@args) scalar {
     say("pre-check");
     my scalar $result = $orig->($self, ...@args);  # Call original
     say("post-check");
@@ -1038,13 +1055,13 @@ around "validate" func(scalar $self, scalar $orig, scalar ...@args) scalar {
 | `has ro type $name;` | Read-only attribute (getter only) |
 | `has rw type $name;` | Read/write attribute (getter + `set_NAME()` setter) |
 | `has ro type $name = VALUE;` | Default value |
-| `has ro type $name (required);` | Must be provided in constructor |
-| `has ro type $name (lazy);` | Computed on first access |
-| `has ro type $name (lazy, builder => "method");` | Built by named method |
+| `has ro type $name (required);` | Marks the attribute required (not currently enforced: omitting it leaves the attribute undef, no error) |
+| `has ro type $name (lazy);` | Accepted by the parser; currently no effect |
+| `has ro type $name (lazy, builder => "method");` | Accepted by the parser; the builder is currently never called |
 
 **Auto-generated constructor:** `Package::new("name", "value", "age", 42)`
 
-Named arguments: keys and values alternate in the argument list. Child constructors include parent attributes from the `extends` chain.
+Named arguments: keys and values alternate in the argument list, separated by commas (don't write `Package::new(name => "value")` — in a call, `=>` builds a pair value and the attribute silently keeps its default). Child constructors include parent attributes from the `extends` chain.
 
 **Generated accessor methods:**
 
@@ -1097,9 +1114,9 @@ Named arguments: keys and values alternate in the argument list. Child construct
 
 **Control Flow:** `goto`, `last`, `next`, `redo`, `last LABEL`, `next LABEL`, `redo LABEL`, `unless`, `until`, statement modifiers (`if`/`unless`/`while`/`until`), `exit`
 
-### core:: / core:: Namespace Functions
+### core:: / sys:: Namespace Functions
 
-All `core::` functions can also be called via the `core::` prefix (preferred). For example, `core::open()` and `core::open()` are identical.
+All `sys::` functions can also be called via the `core::` prefix (preferred). For example, `sys::open()` and `core::open()` are identical.
 
 **Files:** `core::open`, `core::open_str`, `core::str_from_fh`, `core::close`, `core::readline`, `core::slurp`, `core::spew`, `core::seek`, `core::tell`, `core::flush`, `core::autoflush`, `core::file_exists`, `core::file_mtime`, `core::stat`
 
@@ -1258,6 +1275,8 @@ my str $sval = core::dl_call_str_sv($fn, [args]);
 core::dl_call_void_sv($fn, [args]);
 
 # Pass pointers (for output params)
+# NOTE: core::int_ptr / core::num_ptr currently return 0 (examples/test_ffi.strada
+# skips these cases), so the pointer helpers below do not work at present.
 my int $x = 10;
 my int $ptr = core::int_ptr(\$x);
 core::dl_call_void($inc_fn, [$ptr]);  # modifies $x

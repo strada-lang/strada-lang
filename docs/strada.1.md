@@ -16,6 +16,8 @@ Compile and run Strada programs
 
 **strada** **--script** *file.st*
 
+**strada** **--check** *input.strada*
+
 ## DESCRIPTION
 
 **strada** is the main driver script for compiling Strada programs. It wraps the **stradac** compiler and **gcc** to provide a streamlined compilation experience, similar to how `go build` or `rustc` work.
@@ -34,7 +36,7 @@ Strada is a strongly-typed programming language inspired by Perl. It features Pe
   Specify the output file name. By default, the output is named after the input file without the .strada extension.
 
 - **-O** *level*
-  Set gcc optimization level (0, 1, 2, 3, s, fast). Default is 2. At -O2 and above, -flto (link-time optimization) is automatically enabled for cross-function inlining. At -O3 and -Ofast, -march=native is also added.
+  Set gcc optimization level (0, 1, 2, 3, s, fast). Default is 2 (or the level named by **STRADA_DEFAULT_OPT**). At -O2 and above, -flto (link-time optimization) is automatically enabled for cross-function inlining. At -O3 and -Ofast, -march=native is also added.
 
 - **-fno-lto**, **--no-lto**
   Skip link-time optimization. Useful for test/dev builds — gcc finishes in a fraction of the time, at the cost of some cross-module inlining in the final binary. The pre-built runtime is compiled with `-ffat-lto-objects`, so this flag lets you link against it without paying for an LTO pass.
@@ -76,7 +78,7 @@ Strada is a strongly-typed programming language inspired by Perl. It features Pe
   Compile the generated program with **tcc** (the Tiny C Compiler) instead of gcc and link the object with the C compiler. Much faster compilation (especially on large programs), at the cost of unoptimized output — good for fast edit/run iteration. Full runtime features are preserved. Requires `tcc` in `PATH`.
 
 - **-D***NAME*[**=***value*]
-  Pass a preprocessor define through to the C compiler (e.g. `-DHAVE_MYSQL`). Repeatable.
+  Define a preprocessor macro (e.g. `-DHAVE_MYSQL`): it is visible to `#ifdef`/`#ifndef` conditionals in Strada source and is passed through to the C compiler. Repeatable.
 
 - **--object**
   Compile to an object file (.o). By default the .o contains only the input file's own symbols — anything brought in by `use` lives in *that* module's `.o`, not yours. Combine with `--object-full` to bundle every transitively-used module's compiled code into one self-contained `.o`.
@@ -108,10 +110,13 @@ Strada is a strongly-typed programming language inspired by Perl. It features Pe
 - **--no-stack-trace**
   Omit stack-trace frame tracking from the compiled program. Slightly faster; uncaught exceptions no longer print a Strada call stack.
 
+- **--check**
+  Syntax/semantic check only: stops after semantic analysis, writes no C and runs no C compiler. Reports every error found (with `file:line:col` locations and source snippets). Exit status 0 if clean, non-zero otherwise. Intended for editor integration.
+
 - **-w**, **--warnings**
   Show compiler warnings (unused variables, etc.).
 
-- **-v**
+- **-v**, **--verbose**
   Verbose output. Shows the commands being executed.
 
 - **-h**, **--help**
@@ -119,6 +124,9 @@ Strada is a strongly-typed programming language inspired by Perl. It features Pe
 
 - **--repl**
   Start the interactive REPL (Read-Eval-Print Loop), routed through **strada-jit**. The JIT compiles each balanced chunk to a `.so` and dlopens it, so the REPL supports the full Strada language (closures, try/catch, OOP, etc.). Compiler backend is auto-detected: **tcc** when installed (snappier per-line latency), **gcc** otherwise. Override with `--compiler=tcc` or `--compiler=gcc`.
+
+- **--doc** [*topic*]
+  Open documentation for *topic* via **stradadoc**.
 
 - **--script** *file*
   Compile and run a Strada script via **strada-jit** in whole-file mode: the entire file is handed to `stradac` once and the resulting binary is exec'd. Defaults to `gcc` (the latency cost is amortised over the whole script and gcc enables `try/catch`, `const`, `enum`). Pass `--compiler=tcc` for fast TCC compilation, or `--chunked` to fall back to per-statement REPL semantics.
@@ -258,8 +266,8 @@ man stradac
 
 ## ENVIRONMENT
 
-- **STRADA_LIB**
-  Additional library search paths, colon-separated.
+- **STRADA_DEFAULT_OPT**
+  Optimization level used when no **-O** flag is given (`0`, `1`, `2`, `3`, `s` or `fast`; a leading `-O` is accepted). An explicit **-O** on the command line wins.
 
 - **STRADA_USE_ARTIFACTS**
   Controls whether `use Foo;` prefers a fresh sibling `Foo.o`/`Foo.so` over the source. Enabled by default; set to `0` to disable (equivalent to **--no-use-artifacts**). Any other value (or unset) leaves it enabled.
@@ -272,7 +280,7 @@ man stradac
 
 ## FILES
 
-- *~/.strada/lib* - User library directory
+- *~/.cache/strada/modules* - Module cache (`--module-cache`)
 - */usr/local/lib/strada/lib* - System library directory
 - */usr/local/share/doc/strada* - Documentation files
 

@@ -6,7 +6,7 @@ This guide covers building Strada from source on Unix-like systems (Linux, macOS
 
 ### Required
 
-- **GCC** (GNU Compiler Collection) version 7.0 or later
+- **GCC** (GNU Compiler Collection) version 7.0 or later (clang also works; it is the default `cc` on macOS)
 - **GNU Make** version 3.81 or later
 - **Standard C library** with POSIX support
 
@@ -16,6 +16,9 @@ This guide covers building Strada from source on Unix-like systems (Linux, macOS
 - **libdl** - For dynamic loading/FFI (usually included)
 - **libm** - Math library (usually included)
 - **OpenSSL** - For SSL/TLS support in networking
+- **PCRE2** - Regex engine (a bundled copy in `vendor/pcre2/` is used by default; POSIX regex is the fallback)
+- **libffi** headers - For `c::callback` trampolines
+- **tcc** - Optional: speeds up the compiler's own build and enables `strada --tcc`
 - **Perl 5** development headers - For Perl integration (`libperl-dev`)
 
 ### Checking Prerequisites
@@ -41,10 +44,10 @@ cd strada-lang
 # Detect system dependencies (MySQL, PostgreSQL, OpenSSL, etc.)
 ./configure
 
-# Build the compiler
+# Build the compiler, the strada driver, tools and libraries
 make
 
-# Build libraries (DBI, crypt, ssl, readline)
+# (Re)build just the libraries (DBI, crypt, ssl, readline, Eval)
 make libs
 
 # Verify it works
@@ -64,7 +67,7 @@ Run the configure script to detect available libraries:
 This detects:
 - **Database drivers**: MySQL, SQLite, PostgreSQL
 - **Cryptography**: libcrypt, OpenSSL
-- **Other**: readline, zlib, libusb
+- **Other**: PCRE2, libffi, readline, zlib, libusb, epoll, ccache
 
 Output:
 ```
@@ -90,6 +93,11 @@ Configure options:
 ./configure --with-mysql        # Require MySQL (fail if not found)
 ./configure --without-postgres  # Skip PostgreSQL detection
 ./configure --prefix=/opt/strada # Set installation prefix
+./configure --without-pcre2     # Use the POSIX regex fallback
+./configure --without-cycle-gc  # Compile out the cycle collector (default on)
+./configure --without-arena     # Compile out the request arena (default on)
+./configure --without-libffi    # Disable c::callback trampolines
+./configure --without-epoll     # Use the poll(2) event-loop backend
 ```
 
 ### Step 2: Build the Self-Hosting Compiler
@@ -102,12 +110,13 @@ make
 
 This does the following:
 1. Compiles the bootstrap compiler (C code in `bootstrap/`)
-2. Uses bootstrap to compile the self-hosting compiler (`compiler/*.strada`)
-3. Produces `./stradac` - the Strada compiler
+2. Uses bootstrap to compile the self-hosting compiler (`compiler/*.strada`) into a throwaway stage-1 compiler
+3. Uses the stage-1 compiler to recompile the compiler sources, producing `./stradac` - the Strada compiler
+4. Builds `strada-driver` (the program behind the `./strada` command), the tools in `tools/`, and the libraries (`make libs`)
 
 ### Step 3: Build Libraries (Optional)
 
-Build the standard libraries with detected dependencies:
+`make` already builds these (except with `DEV=1`); to build the standard libraries with detected dependencies on their own:
 
 ```bash
 make libs
@@ -131,8 +140,11 @@ make lib-readline  # Build readline only
 ### Step 4: Verify the Build
 
 ```bash
-# Run the test suite
+# Run the runtime tests
 make test
+
+# Run the full test suite
+make test-suite
 
 # Verify self-hosting (compiler compiles itself)
 make test-selfhost
@@ -146,31 +158,22 @@ make examples
 For system-wide installation:
 
 ```bash
-# Create installation directories
-sudo mkdir -p /usr/local/bin
-sudo mkdir -p /usr/local/lib/strada
-sudo mkdir -p /usr/local/include/strada
+# Install to /usr/local
+sudo make install
 
-# Install compiler and wrapper
-sudo cp stradac /usr/local/bin/
-sudo cp strada /usr/local/bin/
-sudo chmod +x /usr/local/bin/strada
-
-# Install runtime
-sudo cp runtime/strada_runtime.c /usr/local/lib/strada/
-sudo cp runtime/strada_runtime.h /usr/local/include/strada/
-
-# Add to PATH (add to your .bashrc or .zshrc)
-export PATH="/usr/local/bin:$PATH"
-export STRADA_HOME="/usr/local/lib/strada"
+# Or to another prefix
+PREFIX=$HOME/.local make install
 ```
+
+This installs `stradac`, `strada` (plus its `strada-driver` binary) and the tools to `<prefix>/bin`, the runtime and library modules to `<prefix>/lib/strada`, documentation to `<prefix>/share/doc/strada`, and man pages to `<prefix>/share/man/man1`. Make sure `<prefix>/bin` is in your `PATH`. Do not copy the `strada` script by hand: it needs `strada-driver`, `config.sh` and the runtime at the installed locations.
 
 ## Build Targets
 
 | Target | Description |
 |--------|-------------|
 | `./configure` | Detect system dependencies |
-| `make` | Build the self-hosting compiler and tools. **Does not** build `strada-interp` (tree-walking interpreter / bytecode VM) — run `make interpreter` explicitly if you need it. |
+| `make` | Build the self-hosting compiler, the `strada` driver, tools and libraries. **Does not** build `strada-interp` (tree-walking interpreter / bytecode VM) — run `make interpreter` explicitly if you need it. |
+| `make quick` | Fast rebuild of `./stradac` from the existing `./stradac` (skips the bootstrap chain; for compiler development) |
 | `make libs` | Build all standard libraries as **module-only `.o`** files (DBI, crypt, ssl, readline, Eval). Programs that `use Foo;` auto-detect the sibling `.o`. No `.so` is built by default. |
 | `make lib-dbi` | Build DBI as `.o` with detected database drivers (`link_lib` propagates `-lmysqlclient`/`-lsqlite3`/`-lpq` to the final link). |
 | `make lib-crypt` | Build crypt library as `.o`. |
@@ -181,8 +184,9 @@ export STRADA_HOME="/usr/local/lib/strada"
 | `make run PROG=name` | Compile and run `examples/name.strada` |
 | `make test` | Run runtime tests |
 | `make test-selfhost` | Verify compiler can compile itself |
-| `make test-suite` | Run comprehensive test suite (~90s) |
+| `make test-suite` | Run comprehensive test suite (`QUICK=1 make test-suite` for a faster, less thorough run) |
 | `make examples` | Build all example programs |
+| `make uninstall` | Remove an installed copy |
 | `make install` | Install to system (default: /usr/local). Builds libs first so the precompiled `.o`s ship with the install. |
 | `make clean` | Remove all build artifacts |
 | `make help` | Show all available targets |
@@ -238,7 +242,8 @@ After building:
 ```
 strada/
 ├── stradac              # Self-hosting compiler executable
-├── strada               # Wrapper script for easy compilation
+├── strada               # Wrapper script for easy compilation (thin shim)
+├── strada-driver        # Compiled driver the shim execs (built from tools/strada-driver.strada)
 ├── runtime/
 │   ├── strada_runtime.c # Runtime library (link with programs)
 │   └── strada_runtime.h # Runtime header
@@ -246,7 +251,8 @@ strada/
 │   ├── AST.strada       # Compiler source (AST definitions)
 │   ├── Lexer.strada     # Compiler source (tokenizer)
 │   ├── Parser.strada    # Compiler source (parser)
-│   ├── CodeGen.strada   # Compiler source (code generator)
+│   ├── Semantic.strada  # Compiler source (semantic analysis)
+│   ├── CodeGen*.strada  # Compiler source (code generator: CodeGen, CodeGenExpr, CodeGenStmt, CodeGenBuiltins)
 │   └── Main.strada      # Compiler source (entry point)
 ├── interpreter/
 │   ├── Main.strada      # Interpreter driver (REPL + file execution)
@@ -255,7 +261,6 @@ strada/
 │   └── Combined.strada  # Combined source (generated)
 ├── bootstrap/
 │   └── stradac          # Bootstrap compiler (frozen)
-├── build/               # Build artifacts (generated)
 ├── examples/            # Example programs
 ├── lib/                 # Standard library modules
 │   └── Strada/
@@ -466,10 +471,7 @@ make test
 If you installed system-wide:
 
 ```bash
-sudo rm /usr/local/bin/stradac
-sudo rm /usr/local/bin/strada
-sudo rm -rf /usr/local/lib/strada
-sudo rm -rf /usr/local/include/strada
+sudo make uninstall
 ```
 
 For local installation, simply delete the repository:

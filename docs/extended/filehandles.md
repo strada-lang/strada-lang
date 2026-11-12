@@ -292,17 +292,19 @@ core::close($fh);
 For advanced use cases, low-level file descriptor operations are available:
 
 ```strada
-# Open with file descriptor
-my int $fd = core::open_fd("file.txt", 0);  # O_RDONLY
+# Open and get a raw file descriptor (mode is a string: "r", "w", "a", "rw")
+my int $fd = core::open_fd("file.txt", "r");   # -1 on failure
 
 # Read raw bytes
 my str $data = core::read_fd($fd, 1024);
+core::close_fd($fd);
 
 # Write raw bytes
-core::write_fd($fd, "data");
+my int $out = core::open_fd("out.txt", "w");
+core::write_fd($out, "data");                  # returns bytes written
 
 # Close
-core::close_fd($fd);
+core::close_fd($out);
 ```
 
 ## Default Output Filehandle (`select`)

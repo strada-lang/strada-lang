@@ -436,24 +436,25 @@ my num $r = math::rand();       # e.g., 0.7234...
 my int $die = int(math::rand() * 6) + 1;  # Random 1-6
 ```
 
-### math::srand
+### core::srand
 
 ```strada
-math::srand($seed);
+core::srand($seed);
 ```
 
-Seed the random number generator.
+Seed the random number generator used by `math::rand()`. The seeding
+function lives in `core::` — there is no `math::srand`.
 
 - `$seed` - An integer seed value
 
 Use to get reproducible sequences of random numbers.
 
 ```strada
-math::srand(12345);             # Set seed
+core::srand(12345);             # Set seed
 my num $r1 = math::rand();      # Will always be the same
 my num $r2 = math::rand();      # for this seed
 
-math::srand(core::time());       # Seed with current time
+core::srand(core::time());       # Seed with current time
 ```
 
 ## Constants

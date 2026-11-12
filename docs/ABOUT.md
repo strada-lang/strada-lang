@@ -109,7 +109,7 @@ Many Perl idioms work natively in Strada:
 - **each(%hash)**: Iterate over hash key-value pairs
 - **select($fh)**: Set default output filehandle
 - **tr///**: Character transliteration (`$s =~ tr/a-z/A-Z/`)
-- **local()**: Dynamic scoping for global variables
+- **local**: Dynamic scoping for `our` (global) variables (`local $var = ...;`)
 - **tie/untie/tied**: Custom variable implementations with magic methods
 
 ### Exception Handling
@@ -119,6 +119,9 @@ Try/catch for error handling:
 ```strada
 try {
     my scalar $fh = core::open("file.txt", "r");
+    if (!defined($fh)) {
+        throw "cannot open file.txt";   # core::open returns undef on failure
+    }
     # ...
 } catch ($e) {
     say("Error: " . $e);
@@ -182,7 +185,7 @@ Strada is well-suited for:
 
 | Feature | Perl | Strada |
 |---------|------|--------|
-| Typing | Dynamic | Static |
+| Typing | Dynamic | Static (annotations optional) |
 | Execution | Interpreted | Compiled + Bytecode VM Interpreter |
 | Sigils | Yes | Yes |
 | Regex | Yes | Yes |

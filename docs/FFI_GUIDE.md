@@ -96,12 +96,12 @@ func main() int {
     # double sqrt(double x)
     my int $sqrt = core::dl_sym($libm, "sqrt");
     my num $result = core::dl_call_num($sqrt, [16.0]);
-    say("sqrt(16) = " . $result);  # 4.0
+    say("sqrt(16) = " . $result);  # 4
 
     # double pow(double x, double y)
     my int $pow = core::dl_sym($libm, "pow");
     $result = core::dl_call_num($pow, [2.0, 10.0]);
-    say("pow(2, 10) = " . $result);  # 1024.0
+    say("pow(2, 10) = " . $result);  # 1024
 
     core::dl_close($libm);
     return 0;
@@ -143,10 +143,11 @@ int64_t my_add(StradaValue *a, StradaValue *b) {
 
 // Function that returns a string
 char* my_greet(StradaValue *name) {
-    const char *n = strada_to_str(name);
+    char *n = strada_to_str(name);       // allocated copy - must free
     char *result = malloc(strlen(n) + 10);
     sprintf(result, "Hello, %s!", n);
-    return result;  // Caller (Strada) takes ownership
+    free(n);
+    return result;  // Strada copies this string; it does not free() it
 }
 
 // Function that modifies data
@@ -248,24 +249,30 @@ void strada_decref(StradaValue *sv);
 StradaValue *ARGV = NULL;
 StradaValue *ARGC = NULL;
 
-// Declare Strada functions (from compiled .c file)
-StradaValue* add(StradaValue *a, StradaValue *b);
-StradaValue* greet(StradaValue *name);
+// Declare Strada functions (from compiled .c file).
+// The C symbol is the package name + "_" + the function name.
+StradaValue* mylib_add(StradaValue *a, StradaValue *b);
+StradaValue* mylib_greet(StradaValue *name);
 
 int main(int argc, char **argv) {
     // Initialize globals
     ARGV = strada_new_array();
     for (int i = 0; i < argc; i++) {
-        strada_array_push(ARGV->value.av, strada_new_str(argv[i]));
+        strada_array_push_take(ARGV->value.av, strada_new_str(argv[i]));
     }
     ARGC = strada_new_int(argc);
 
     // Call Strada functions
-    StradaValue *result = add(strada_new_int(10), strada_new_int(20));
+    StradaValue *result = mylib_add(strada_new_int(10), strada_new_int(20));
     printf("10 + 20 = %ld\n", strada_to_int(result));
 
-    StradaValue *msg = greet(strada_new_str("World"));
-    printf("%s\n", strada_to_str(msg));
+    StradaValue *name = strada_new_str("World");
+    StradaValue *msg = mylib_greet(name);
+    char *text = strada_to_str(msg);     // allocated copy - must free
+    printf("%s\n", text);
+    free(text);
+    strada_decref(msg);
+    strada_decref(name);
 
     return 0;
 }
@@ -430,21 +437,28 @@ func main() int {
 ### Pointer Manipulation
 
 ```strada
-# Get raw pointer to variable
-my int $x = 42;
-my int $ptr = core::int_ptr(\$x);
+# Get raw pointer to a num variable's storage (pass the variable itself)
+my num $x = 1.5;
+my int $ptr = core::num_ptr($x);
 
 # Read through pointer
-my int $val = core::ptr_deref_int($ptr);
+my num $val = core::ptr_deref_num($ptr);
 
 # Write through pointer
-core::ptr_set_int($ptr, 100);
-say($x);  # 100
+core::ptr_set_num($ptr, 2.5);
+say($x);  # 2.5
 
-# String pointer
+# String pointer (the char* of the string's bytes)
 my str $s = "hello";
-my int $str_ptr = core::str_ptr(\$s);
+my int $str_ptr = core::str_ptr($s);
+say(core::ptr_deref_str($str_ptr));  # hello
 ```
+
+Notes: pass the variable itself, not `\$var` — with a `\$var` reference these
+functions currently return 0. `core::int_ptr()` returns 0 for ordinary
+integers, because they are tagged values encoded in the pointer and have no
+address; for a writable C integer cell use `c::alloc()` with
+`c::write_int64()` / `c::read_int64()`.
 
 ### Callbacks
 
@@ -452,12 +466,14 @@ C code can call back into Strada using closures:
 
 ```c
 // C side
-typedef StradaValue* (*StradaCallback)(StradaValue*);
-
-void process_with_callback(StradaValue *data, StradaCallback cb) {
+// A Strada closure is a StradaValue*, not a bare C function pointer:
+// invoke it with strada_closure_call(closure, argc, args...).
+// (For C APIs that need a real function pointer, see c::callback above.)
+void process_with_callback(StradaValue *data, StradaValue *cb) {
     // Process data
-    StradaValue *result = cb(data);
+    StradaValue *result = strada_closure_call(cb, 1, data);
     // Use result
+    strada_decref(result);
 }
 ```
 
@@ -479,8 +495,8 @@ When working with C:
 // Creating values that Strada will own
 StradaValue* create_data() {
     StradaValue *arr = strada_new_array();
-    strada_array_push(arr->value.av, strada_new_int(1));
-    strada_array_push(arr->value.av, strada_new_int(2));
+    strada_array_push_take(arr->value.av, strada_new_int(1));
+    strada_array_push_take(arr->value.av, strada_new_int(2));
     return arr;  // Strada takes ownership, will free later
 }
 
@@ -593,10 +609,14 @@ func greet(str $name) str {
 // Good: Type-safe wrapper
 StradaValue* safe_add(StradaValue *a, StradaValue *b) {
     if (!a || !b) return strada_new_undef();
-    if (a->type != STRADA_INT || b->type != STRADA_INT) {
+    // Integers are normally tagged pointers: never read ->type or ->value
+    // without checking STRADA_IS_TAGGED_INT() first.
+    int a_is_int = STRADA_IS_TAGGED_INT(a) || a->type == STRADA_INT;
+    int b_is_int = STRADA_IS_TAGGED_INT(b) || b->type == STRADA_INT;
+    if (!a_is_int || !b_is_int) {
         return strada_new_undef();
     }
-    return strada_new_int(a->value.iv + b->value.iv);
+    return strada_new_int(strada_to_int(a) + strada_to_int(b));
 }
 ```
 
@@ -648,12 +668,13 @@ int64_t ssl_init(void) {
 }
 
 int64_t ssl_connect(StradaValue *host_sv, StradaValue *port_sv) {
-    const char *host = strada_to_str(host_sv);
+    char *host = strada_to_str(host_sv);   // allocated copy - must free
     int port = (int)strada_to_int(port_sv);
 
     // Create connection...
     SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
     // ... setup and connect ...
+    free(host);
 
     return (int64_t)ctx;  // Return handle
 }

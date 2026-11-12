@@ -42,6 +42,12 @@ Source Code
 
 Let's follow a simple program through each stage.
 
+> **Note:** the code samples in this guide are simplified sketches meant to
+> show the idea, not verbatim compiler source. In the real compiler, token and
+> node helpers have prefixed names (`lex_next_token()`, `parser_expect()`,
+> `ast_new_call()`, ...), token types are strings such as `"FUNC"` or
+> `"IDENT"`, and the generated C carries more bookkeeping than shown here.
+
 ## Example Program
 
 We'll trace this simple program:
@@ -118,17 +124,17 @@ func next_token(scalar $lexer) hash {
 
 ### Token Types
 
-Common token types (defined in `Lexer.strada`):
+Common token types (produced in `Lexer.strada`; the type is a string stored in the token's `"type"` field):
 
 | Token | Example | Meaning |
 |-------|---------|---------|
-| `TOK_FUNC` | `func` / `fn` | Function keyword (`fn` is shorthand) |
-| `TOK_MY` | `my` | Variable declaration |
-| `TOK_IDENT` | `main`, `name` | Identifier name |
-| `TOK_STRING` | `"Hello"` | String literal |
-| `TOK_NUMBER` | `42`, `3.14` | Number literal |
-| `TOK_ASSIGN` | `=` | Assignment operator |
-| `TOK_SEMICOLON` | `;` | Statement terminator |
+| `FUNC` | `func` / `fn` | Function keyword (`fn` is shorthand) |
+| `MY` | `my` | Variable declaration |
+| `IDENT` | `main`, `name` | Identifier name |
+| `STR_LITERAL` | `"Hello"` | String literal |
+| `INT_LITERAL`, `NUM_LITERAL` | `42`, `3.14` | Number literal |
+| `ASSIGN` | `=` | Assignment operator |
+| `SEMI` | `;` | Statement terminator |
 
 ---
 
@@ -260,20 +266,26 @@ func make_call(str $name, array @args) hash {
 
 | Node Type | Represents | Example |
 |-----------|------------|---------|
-| `NODE_FUNCTION` | Function definition | `func foo() { }` |
+| `NODE_FUNC` | Function definition | `func foo() { }` |
 | `NODE_VAR_DECL` | Variable declaration | `my int $x = 5;` |
 | `NODE_ASSIGN` | Assignment | `$x = 10;` |
 | `NODE_CALL` | Function call | `say("hi")` |
 | `NODE_BINARY_OP` | Binary operation | `$a + $b` |
 | `NODE_IF_STMT` | If statement | `if (...) { }` |
 | `NODE_WHILE_STMT` | While loop | `while (...) { }` |
-| `NODE_RETURN` | Return statement | `return 0;` |
+| `NODE_RETURN_STMT` | Return statement | `return 0;` |
 
 ---
 
 ## Stage 3: Code Generation
 
-**File:** `compiler/CodeGen.strada`
+**Files:** `compiler/CodeGen.strada` (core helpers), `compiler/CodeGenStmt.strada`
+(statements and functions), `compiler/CodeGenExpr.strada` (expressions),
+`compiler/CodeGenBuiltins.strada` (built-in function calls)
+
+Before code generation, a semantic pass (`compiler/Semantic.strada`) checks the
+AST: undefined variables and functions, redeclarations, and so on. It reports
+every error it finds rather than stopping at the first.
 
 The code generator walks the AST and outputs C code.
 
@@ -487,24 +499,24 @@ C (with reference counting):
 ### Start Here
 
 1. **`compiler/Main.strada`** - Entry point, very short
-2. **`compiler/Lexer.strada`** - Read `next_token()` first
+2. **`compiler/Lexer.strada`** - Read `lex_next_token()` first
 3. **`compiler/Parser.strada`** - Read `parse_function()` and `parse_statement()`
-4. **`compiler/CodeGen.strada`** - Read `gen_statement()` and `gen_expression()`
+4. **`compiler/CodeGenStmt.strada`** / **`compiler/CodeGenExpr.strada`** - Read `gen_statement()` and `gen_expression()`
 
 ### Key Functions to Understand
 
 | File | Function | Purpose |
 |------|----------|---------|
-| Lexer | `next_token()` | Get next token |
-| Lexer | `read_string()` | Parse string literal |
-| Lexer | `read_identifier()` | Parse identifier/keyword |
+| Lexer | `lex_next_token()` | Get next token |
+| Lexer | `lex_read_string()` | Parse string literal |
+| Lexer | `lex_read_identifier()` | Parse identifier/keyword |
 | Parser | `parse_function()` | Parse function definition |
 | Parser | `parse_statement()` | Parse any statement |
 | Parser | `parse_expression()` | Parse any expression |
 | Parser | `parse_primary()` | Parse literals, variables, calls |
-| CodeGen | `gen_function()` | Generate C function |
-| CodeGen | `gen_statement()` | Generate C for any statement |
-| CodeGen | `gen_expression()` | Generate C for any expression |
+| CodeGenStmt | `gen_function()` | Generate C function |
+| CodeGenStmt | `gen_statement()` | Generate C for any statement |
+| CodeGenExpr | `gen_expression()` | Generate C for any expression |
 | CodeGen | `emit()` | Output C code text |
 
 ### Tracing a Feature
@@ -518,8 +530,8 @@ To understand how a feature works, trace it through all stages:
 Example - tracing `if` statements:
 
 ```
-Lexer:   TOK_IF, TOK_LPAREN, ..., TOK_RPAREN, TOK_LBRACE, ...
-Parser:  parse_if_statement() → NODE_IF_STMT
+Lexer:   IF, LPAREN, ..., RPAREN, LBRACE, ...
+Parser:  parse_if_stmt() → NODE_IF_STMT
 CodeGen: gen_statement() sees NODE_IF_STMT → emits "if (...) { ... }"
 ```
 
@@ -590,7 +602,8 @@ if ($type == NODE_MYFEATURE()) {
 ### 5. Test
 
 ```bash
-make clean && make
+make quick                   # fast rebuild using the existing ./stradac
+# before committing: make && make test-selfhost   (full bootstrap build)
 ./strada test_myfeature.strada
 ./test_myfeature
 ```
@@ -628,12 +641,13 @@ say("DEBUG: parsing function " . $name);
 
 1. **Lexer** breaks source into tokens (words)
 2. **Parser** builds a tree structure (AST) from tokens
-3. **CodeGen** walks the tree and outputs C code
-4. **GCC** compiles C to native executable
+3. **Semantic** checks names and types on the tree
+4. **CodeGen** walks the tree and outputs C code
+5. **GCC** compiles C to native executable
 
 Each stage is independent - tokens flow into parser, AST flows into codegen.
-To understand a feature, trace it through all three stages.
+To understand a feature, trace it through all the stages.
 
-The compiler is about 32,000 lines of Strada code total. Start with simple
-functions like `next_token()`, `parse_primary()`, and `gen_expression()`
+The compiler is about 37,000 lines of Strada code total. Start with simple
+functions like `lex_next_token()`, `parse_primary()`, and `gen_expression()`
 to build understanding, then explore more complex features.

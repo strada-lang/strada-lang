@@ -46,7 +46,7 @@ Strada is a strongly-typed, compiled programming language that combines Perl's e
 - **Self-hosting**: The compiler is written in Strada itself
 - **Reference counting**: Automatic memory management
 - **Rich standard library**: Strings, arrays, hashes, regex, I/O
-- **Magic namespaces**: `core::` (preferred) / `core::` for libc functions, `math::` for math functions
+- **Magic namespaces**: `core::` (preferred; `sys::` is a legacy alias) for libc functions, `math::` for math functions
 
 ### Philosophy
 
@@ -63,11 +63,7 @@ Strada aims to be:
 ### Installation
 
 ```bash
-# Extract the archive
-unzip strada-full.zip
-cd strada
-
-# Build the compiler
+# From the top of the source tree, build the compiler
 make
 
 # Verify it works
@@ -94,7 +90,7 @@ Compile and run:
 ./strada -r hello.strada        # Compile and run immediately
 
 # Or use make (for files in `examples/`)
-make run PROG=hello
+make run PROG=test_simple
 
 # Two-step compilation (manual)
 ./stradac hello.strada hello.c
@@ -121,7 +117,6 @@ func main() int {
 ```
 
 (`./stradac --help` prints the version banner; there is no separate `--version` flag.)
-```
 
 ---
 
@@ -187,9 +182,8 @@ while ($running) {
 | Type | C Equivalent |
 |------|--------------|
 | `char` | `char` |
-| `short` | `short` |
-| `long` | `long` |
 | `float` | `float` |
+| `double` | `double` |
 | `bool` | `bool` |
 | `int8`, `int16`, `int32`, `int64` | `int8_t`, etc. |
 | `uint8` (or `byte`), `uint16`, `uint32`, `uint64` | `uint8_t`, etc. |
@@ -292,7 +286,7 @@ Unlike `my` globals (compiled to C global variables), `our` globals use `strada_
 
 ### Local Variables (Dynamic Scoping)
 
-Use `local()` to temporarily override an `our` variable. The original value is automatically restored when the enclosing scope exits, providing dynamic (not lexical) scoping -- just like Perl's `local`:
+Use `local` to temporarily override an `our` variable. The original value is automatically restored when the enclosing scope exits, providing dynamic (not lexical) scoping -- just like Perl's `local`:
 
 ```strada
 our str $greeting = "Hello";
@@ -314,7 +308,7 @@ func main() int {
 }
 ```
 
-Key points about `local()`:
+Key points about `local`:
 - Only works with `our` variables (not `my` variables)
 - The original value is restored on scope exit, even if the scope exits via exception (`throw`/`die`)
 - Works correctly with `try`/`catch` blocks
@@ -721,20 +715,15 @@ try {
 4. **Don't use for control flow**: Exceptions are for exceptional conditions
 
 ```strada
-# Good: Specific error message
-if (!defined($file)) {
-    throw "Cannot open config file: " . $path;
-}
-
-# Good: Handle at appropriate level
+# Good: Specific error message, thrown where the problem is detected
 func process_file(str $path) void {
-    my scalar $fh = open($path, "r");
+    my scalar $fh = core::open($path, "r");
     if (!defined($fh)) {
         throw "File not found: " . $path;
     }
 
     # Process file...
-    close($fh);
+    core::close($fh);
 }
 
 func main() int {
@@ -943,7 +932,8 @@ my num $pi = $get_pi->();
 
 #### Capturing Variables
 
-Closures capture variables from their enclosing scope by reference:
+Closures capture variables from their enclosing scope. A captured scalar is
+copied into the closure when the closure is created:
 
 ```strada
 my int $multiplier = 10;
@@ -955,7 +945,10 @@ say($scale->(3));   # 30
 
 #### Mutation Through Captures
 
-Since captures are by reference, closures can modify outer variables:
+Each closure keeps its own copy of a captured scalar. Assignments made inside
+the closure persist between calls to that closure, but they do not change the
+outer variable (and later changes to the outer variable are not seen by the
+closure):
 
 ```strada
 my int $count = 0;
@@ -967,7 +960,23 @@ my scalar $increment = func () {
 say($increment->());  # 1
 say($increment->());  # 2
 say($increment->());  # 3
-say($count);          # 3 (outer variable was modified)
+say($count);          # 0 (the outer variable is unchanged)
+```
+
+To share mutable state with the enclosing scope, capture an array, a hash or a
+reference -- the container itself is shared, so changes to its contents are
+visible on both sides:
+
+```strada
+my hash %state = ("count" => 0);
+my scalar $bump = func () {
+    $state{"count"} = $state{"count"} + 1;
+    return $state{"count"};
+};
+
+$bump->();
+$bump->();
+say($state{"count"});   # 2
 ```
 
 #### Multiple Captures
@@ -1113,12 +1122,12 @@ my array @old = splice(@arr, 0, 1, 100, 200);
 # @old is (10), @arr is now (100, 200, 40, 50)
 
 # Insert without removing (length = 0)
-splice(@arr, 2, 0, 35);
-# @arr is now (100, 200, 35, 40, 50)
+splice(@arr, 2, 0, 35, 36);
+# @arr is now (100, 200, 35, 36, 40, 50)
 
 # Negative offset counts from the end
 splice(@arr, -1, 1);
-# Removes the last element; @arr is now (100, 200, 35, 40)
+# Removes the last element; @arr is now (100, 200, 35, 36, 40)
 ```
 
 ### Map, Grep, and Sort
@@ -1242,6 +1251,7 @@ my array @data = (5, 2, 8, 1, 9, 3, 7);
 # Filter, transform, and sort in one pipeline
 my array @result = sort { $a <=> $b } map { $_ * 10 } grep { $_ > 3 } @data;
 # Result: (50, 70, 80, 90)
+```
 
 ---
 
@@ -1786,8 +1796,10 @@ Read from and write to strings using standard file handle operations:
 ```strada
 # Read from a string
 my scalar $fh = core::open_str("line1\nline2\n", "r");
-while (defined(my str $line = <$fh>)) {
+my str $line = <$fh>;
+while (defined($line)) {
     say($line);  # prints "line1" then "line2"
+    $line = <$fh>;
 }
 core::close($fh);
 
@@ -2018,9 +2030,10 @@ my str $msg = "Hello";
 $msg =~ tr/A-Za-z/N-ZA-Mn-za-m/;
 say($msg);  # "Uryyb"
 
-# Count characters (tr returns the count of transliterations)
+# Count characters (tr returns the count of transliterations;
+# translating a set to itself counts without changing the string)
 my str $str = "Hello World";
-my int $vowels = ($str =~ tr/aeiouAEIOU//);
+my int $vowels = ($str =~ tr/aeiouAEIOU/aeiouAEIOU/);
 say("Vowels: " . $vowels);  # 3
 ```
 
@@ -2031,7 +2044,6 @@ say("Vowels: " . $vowels);  # 3
 | `c` | Complement the search list (translate characters NOT in the list) |
 | `d` | Delete characters found in search list that have no replacement |
 | `s` | Squeeze duplicate replaced characters into a single character |
-| `r` | Return a modified copy instead of modifying in place |
 
 ```strada
 # Delete digits (d flag)
@@ -2048,21 +2060,18 @@ say($spaced);  # "too many spaces"
 my str $letters = "H3ll0 W0rld!";
 $letters =~ tr/a-zA-Z//cd;
 say($letters);  # "HllWrld"
-
-# Return copy without modifying original (r flag)
-my str $original = "hello";
-my str $upper = ($original =~ tr/a-z/A-Z/r);
-say($original);  # "hello" (unchanged)
-say($upper);     # "HELLO"
 ```
 
 ### Capturing
 
 ```strada
 my str $date = "2024-01-15";
-my array @matches = capture($date, "(\d+)-(\d+)-(\d+)");
-# @matches = ["2024", "01", "15"]
+my array @matches = capture($date, '(\d+)-(\d+)-(\d+)');
+# @matches = ("2024-01-15", "2024", "01", "15")  -- full match first, then the groups
 ```
+
+Write regex patterns passed as strings in single quotes (or double the
+backslashes): in a double-quoted string `"\d"` is just `d`.
 
 ---
 
@@ -2134,9 +2143,10 @@ preforking server's respawn loop, use `core::wait()`.
 ### Executing Commands
 
 ```strada
-# Run command via shell and get exit status (like Perl's system())
+# Run command via shell (like Perl's system()); returns the raw wait status,
+# so the command's exit code is $status >> 8
 my int $status = core::system("ls -la");
-say("Exit status: " . $status);
+say("Exit code: " . ($status >> 8));
 
 # Run command with shell interpretation
 core::system("echo 'Hello' && echo 'World'");
@@ -2332,17 +2342,20 @@ func cmd_output(str $cmd) str {
 Example usage:
 
 ```strada
+use lib "lib";
+use IPC::Open3;
+
 # Capture command output
-my str $hostname = cmd_output("hostname");
+my str $hostname = IPC::Open3::cmd_output("hostname");
 say("Host: " . $hostname);
 
 # Full I/O control
-my hash $proc = open3("cat -n");
-core::write_fd($proc->{"stdin"}, "Line 1\nLine 2\n");
-core::close_fd($proc->{"stdin"});
-my str $output = core::read_all_fd($proc->{"stdout"});
-core::close_fd($proc->{"stdout"});
-core::close_fd($proc->{"stderr"});
+my hash %proc = IPC::Open3::open3("cat -n");
+core::write_fd($proc{"stdin"}, "Line 1\nLine 2\n");
+core::close_fd($proc{"stdin"});
+my str $output = core::read_all_fd($proc{"stdout"});
+core::close_fd($proc{"stdout"});
+core::close_fd($proc{"stderr"});
 core::wait();
 say($output);
 ```
@@ -2377,17 +2390,21 @@ thread::join($thread);
 
 ### Mutexes
 
-Mutexes prevent race conditions when multiple threads access shared data:
+Mutexes prevent race conditions when multiple threads access shared data.
+A closure gets its own copy of each captured scalar (see
+[Mutation Through Captures](#mutation-through-captures)), so shared state
+must live in a hash or array that the threads reach through a reference:
 
 ```strada
-my int $counter = 0;
+my hash %shared = ("counter" => 0);
+my scalar $state = \%shared;
 my scalar $mutex = thread::mutex_new();
 
 my scalar $t1 = thread::create(func () {
     my int $i = 0;
     while ($i < 1000) {
         thread::mutex_lock($mutex);
-        $counter = $counter + 1;
+        $state->{"counter"} = $state->{"counter"} + 1;
         thread::mutex_unlock($mutex);
         $i = $i + 1;
     }
@@ -2397,7 +2414,7 @@ my scalar $t2 = thread::create(func () {
     my int $i = 0;
     while ($i < 1000) {
         thread::mutex_lock($mutex);
-        $counter = $counter + 1;
+        $state->{"counter"} = $state->{"counter"} + 1;
         thread::mutex_unlock($mutex);
         $i = $i + 1;
     }
@@ -2407,7 +2424,7 @@ thread::join($t1);
 thread::join($t2);
 thread::mutex_destroy($mutex);
 
-say("Counter: " . $counter);  # Always 2000
+say("Counter: " . $state->{"counter"});  # Always 2000
 ```
 
 | Function | Description |
@@ -2423,24 +2440,25 @@ say("Counter: " . $counter);  # Always 2000
 Condition variables allow threads to wait for specific conditions:
 
 ```strada
-my int $ready = 0;
+my hash %shared = ("ready" => 0);
+my scalar $state = \%shared;
 my scalar $mutex = thread::mutex_new();
 my scalar $cond = thread::cond_new();
 
 # Consumer thread - waits for data
 my scalar $consumer = thread::create(func () {
     thread::mutex_lock($mutex);
-    while ($ready == 0) {
+    while ($state->{"ready"} == 0) {
         thread::cond_wait($cond, $mutex);
     }
     thread::mutex_unlock($mutex);
-    say("Got signal, ready = " . $ready);
+    say("Got signal, ready = " . $state->{"ready"});
 });
 
 # Producer - signals when ready
 core::usleep(10000);  # Simulate work
 thread::mutex_lock($mutex);
-$ready = 1;
+$state->{"ready"} = 1;
 thread::cond_signal($cond);
 thread::mutex_unlock($mutex);
 
@@ -2460,9 +2478,9 @@ thread::mutex_destroy($mutex);
 ### Thread Safety Notes
 
 - Strada's reference counting is atomic, making basic operations thread-safe
-- Always use mutexes when modifying shared variables
-- Closures capture variables by reference - changes are visible across threads
-- Programs using threads must link with `-lpthread`
+- Always use mutexes when modifying shared data
+- Closures copy captured scalars - share state between threads through a hash/array reference (its contents are visible to every thread)
+- Programs using threads must link with `-lpthread` (the `strada` driver adds it automatically)
 
 ---
 
@@ -2625,7 +2643,7 @@ func main() int {
 ### Declaring a Package
 
 ```strada
-# File: lib/Math/Utils.sm
+# File: lib/Math/Utils.strada
 package Math::Utils;
 
 func add(int $a, int $b) int {
@@ -2640,16 +2658,12 @@ func multiply(int $a, int $b) int {
 ### Using Modules
 
 ```strada
-# Import all functions (use qualified names)
+# Load the module, then call its functions by qualified name
+use lib "lib";
 use Math::Utils;
 
 my int $sum = Math::Utils::add(10, 20);
-
-# Import specific functions
-use Math::Utils qw(add multiply);
-
-my int $sum = add(10, 20);        # Unqualified
-my int $prod = multiply(5, 6);
+my int $prod = Math::Utils::multiply(5, 6);
 ```
 
 ### Library Paths
@@ -2788,22 +2802,21 @@ func multiply(int $a, int $b) int {
 }
 
 func compute(int $x, int $y) int {
-    # These all call Calculator_add and Calculator_multiply
+    # These call Calculator::add and Calculator::multiply
     my int $sum = ::add($x, $y);           # Preferred shorthand
     my int $prod = ::multiply($x, $y);
     return $sum + $prod;
 }
 ```
 
-Three equivalent syntaxes are supported:
+Two equivalent syntaxes are supported:
 - `::func()` — Preferred shorthand
 - `.::func()` — Alternate shorthand
-- `__PACKAGE__::func()` — Explicit form
 
-All three resolve to `PackageName_func()` at compile time.
+Both resolve to `PackageName::func()` at compile time.
 
-**Note:** `__PACKAGE__` alone (without `::`) returns the package name as a string at runtime,
-while `::func()` and `__PACKAGE__::func()` are compile-time function resolution.
+**Note:** `__PACKAGE__` returns the package name as a string at runtime,
+while `::func()` is compile-time function resolution.
 
 #### Inheritance
 
@@ -2815,8 +2828,8 @@ or within functions:
 package Dog;
 inherit Animal;
 
-# Or within a function
-func Dog_init() void {
+# Or within a function (call it as Dog::init() before creating objects)
+func init() void {
     set_package("Dog");
     inherit("Animal");
 }
@@ -2836,7 +2849,7 @@ Build class hierarchies with multiple levels:
 # Animal.strada
 package Animal;
 
-func Animal_new(str $name) scalar {
+func new(str $name) scalar {
     my hash %self = ();
     $self{"name"} = $name;
     return bless(\%self, "Animal");
@@ -2848,7 +2861,7 @@ func Animal_new(str $name) scalar {
 package Dog;
 inherit Animal;
 
-func Dog_new(str $name) scalar {
+func new(str $name) scalar {
     my hash %self = ();
     $self{"name"} = $name;
     return bless(\%self, "Dog");
@@ -2860,7 +2873,7 @@ func Dog_new(str $name) scalar {
 package GermanShepherd;
 inherit Dog;
 
-func GermanShepherd_new(str $name) scalar {
+func new(str $name) scalar {
     my hash %self = ();
     $self{"name"} = $name;
     $self{"breed"} = "German Shepherd";
@@ -2874,14 +2887,14 @@ A class can inherit from multiple parent classes. Use comma-separated parents
 with the `inherit` statement, or call `inherit()` multiple times:
 
 ```strada
-# Comma-separated syntax (single-package files)
+# Comma-separated syntax
 package Duck;
 inherit Animal, Flyable, Swimmable;
 
-# Or use explicit inherit() calls (required for multi-package files)
+# Or use explicit inherit() calls (run Duck::init() before creating objects)
 package Duck;
 
-func Duck_init() void {
+func init() void {
     inherit("Duck", "Animal");
     inherit("Duck", "Flyable");
     inherit("Duck", "Swimmable");
@@ -2892,26 +2905,36 @@ When using multiple inheritance, method resolution follows depth-first search
 through the inheritance hierarchy (left-to-right through parents).
 
 ```strada
+package Animal;
+func new(str $name) scalar {
+    my hash %self = ();
+    $self{"name"} = $name;
+    return bless(\%self, "Animal");
+}
+
 package Flyable;
-func Flyable_fly(scalar $self) str {
+func fly(scalar $self) str {
     return "Flying!";
 }
 
 package Swimmable;
-func Swimmable_swim(scalar $self) str {
+func swim(scalar $self) str {
     return "Swimming!";
 }
 
 package Duck;
-func Duck_init() void {
-    inherit("Duck", "Animal");
-    inherit("Duck", "Flyable");
-    inherit("Duck", "Swimmable");
+inherit Animal, Flyable, Swimmable;
+
+func new(str $name) scalar {
+    my hash %self = ();
+    $self{"name"} = $name;
+    return bless(\%self, "Duck");
 }
 
+package main;
+
 func main() int {
-    Duck_init();
-    my scalar $duck = Duck_new("Donald");
+    my scalar $duck = Duck::new("Donald");
 
     # Duck inherits from all three parents
     say(isa($duck, "Animal"));    # 1
@@ -2919,15 +2942,15 @@ func main() int {
     say(isa($duck, "Swimmable")); # 1
 
     # Can call methods from any parent
-    say(Flyable_fly($duck));      # "Flying!"
-    say(Swimmable_swim($duck));   # "Swimming!"
+    say($duck->fly());            # "Flying!"
+    say($duck->swim());           # "Swimming!"
     return 0;
 }
 ```
 
-**Note:** When using multiple packages in one file, you must use the
-`inherit("Child", "Parent")` function call syntax instead of the
-`inherit Parent;` statement syntax.
+**Note:** The `inherit Parent;` statement applies to the package it appears in,
+so it also works when one file defines several packages. The
+`inherit("Child", "Parent")` function form takes effect only when it runs.
 
 #### SUPER:: Calls
 
@@ -2935,25 +2958,30 @@ Call a parent class method using `SUPER::method()`:
 
 ```strada
 package Animal;
-func Animal_speak(scalar $self) str {
+func speak(scalar $self) str {
     return "Animal speaks";
 }
 
 package Dog;
-func Dog_init() void {
-    inherit("Dog", "Animal");
+inherit Animal;
+
+func new(str $name) scalar {
+    my hash %self = ();
+    $self{"name"} = $name;
+    return bless(\%self, "Dog");
 }
 
-func Dog_speak(scalar $self) str {
+func speak(scalar $self) str {
     # Call parent's speak method
     my str $parent_msg = SUPER::speak($self);
     return $parent_msg . " - Dog says Woof!";
 }
 
+package main;
+
 func main() int {
-    Dog_init();
-    my scalar $dog = Dog_new("Buddy");
-    say(Dog_speak($dog));  # "Animal speaks - Dog says Woof!"
+    my scalar $dog = Dog::new("Buddy");
+    say($dog->speak());  # "Animal speaks - Dog says Woof!"
     return 0;
 }
 ```
@@ -2967,17 +2995,17 @@ Define a `DESTROY` method to run cleanup code when an object is freed:
 ```strada
 package FileHandler;
 
-func FileHandler_new(str $filename) scalar {
+func new(str $filename) scalar {
     my hash %self = ();
     $self{"filename"} = $filename;
-    $self{"handle"} = open($filename, "r");
+    $self{"handle"} = core::open($filename, "r");
     say("Opened " . $filename);
     return bless(\%self, "FileHandler");
 }
 
-func FileHandler_DESTROY(scalar $self) void {
+func DESTROY(scalar $self) void {
     say("Closing " . $self->{"filename"});
-    close($self->{"handle"});
+    core::close($self->{"handle"});
 }
 ```
 
@@ -2985,7 +3013,10 @@ DESTROY is automatically called when the object's reference count reaches zero.
 To chain destructors in an inheritance hierarchy, call `SUPER::DESTROY($self)`:
 
 ```strada
-func Child_DESTROY(scalar $self) void {
+package Child;
+inherit Parent;
+
+func DESTROY(scalar $self) void {
     say("Child cleanup");
     SUPER::DESTROY($self);  # Call parent's DESTROY
 }
@@ -3003,7 +3034,7 @@ inherit Animal;
 func bark { my scalar $self = $_[0]; say($self->{"name"} . " barks!"); }
 
 func main() int {
-    my scalar $dog = Dog_new("Rex");
+    my scalar $dog = Dog::new("Rex");
     $dog->bark();  # $_[0] is the Dog object
     return 0;
 }
@@ -3017,7 +3048,7 @@ implicit `@_` access instead of named parameters.
 Check if an object is of a type (follows inheritance chain):
 
 ```strada
-my scalar $dog = GermanShepherd_new("Max");
+my scalar $dog = GermanShepherd::new("Max");
 
 if (isa($dog, "GermanShepherd")) {
     say("Is a GermanShepherd");  # YES
@@ -3038,7 +3069,7 @@ if (!isa($dog, "Cat")) {
 Strada provides UNIVERSAL methods that can be called on any blessed object using method syntax:
 
 ```strada
-my scalar $dog = Dog_new("Buddy");
+my scalar $dog = Dog::new("Buddy");
 
 # Method-style type checking
 if ($dog->isa("Animal")) {
@@ -3055,8 +3086,8 @@ These UNIVERSAL methods work on any blessed reference:
 
 ```strada
 # Create different objects
-my scalar $cat = Cat_new("Whiskers");
-my scalar $dog = Dog_new("Rex");
+my scalar $cat = Cat::new("Whiskers");
+my scalar $dog = Dog::new("Rex");
 
 # Both can use UNIVERSAL methods
 say($cat->isa("Animal"));  # 1 (true)
@@ -3080,15 +3111,15 @@ The `can()` method returns true if the object's class (or any parent class) defi
 | `set_package("Name")` | Set current package context |
 | `inherit("Parent")` | Inherit from Parent (uses current package) |
 | `inherit("Child", "Parent")` | Set up inheritance explicitly |
-| `inherit Parent;` | Statement form (single-package files only) |
+| `inherit Parent;` | Statement form (applies to the current package) |
 | `inherit A, B, C;` | Multiple inheritance statement form |
 | `isa($obj, "Package")` | Check if object is of type (follows inheritance) |
 | `$obj->isa("Package")` | Method-style type check (UNIVERSAL) |
 | `can($obj, "method")` | Check if object can do a method |
 | `$obj->can("method")` | Method-style capability check (UNIVERSAL) |
 | `SUPER::method($self, ...)` | Call parent class method |
-| `Package_DESTROY($self)` | Destructor (called when object freed) |
-| `Package_AUTOLOAD($self, $method, ...@args)` | Fallback for undefined method calls |
+| `func DESTROY($self)` | Destructor defined in the package (called when object freed) |
+| `func AUTOLOAD($self, $method, ...@args)` | Fallback (defined in the package) for undefined method calls |
 | `$obj->$method()` | Dynamic method dispatch (method name from variable) |
 | `__PACKAGE__` | Returns current package name as string |
 
@@ -3136,6 +3167,10 @@ func _build_db_url(scalar $self) str {
     return "postgres://localhost/mydb";
 }
 ```
+
+**Note:** `lazy` and `builder` are currently accepted by the parser but not yet
+acted on: the builder method is never called, and the accessor returns `undef`
+unless a value was passed to the constructor.
 
 #### Auto-Generated Constructor
 
@@ -3253,7 +3288,7 @@ Rex barks!
 **`around` -- wraps the method, receives the original as a callable:**
 
 ```strada
-around "validate" func(scalar $self, scalar $orig, scalar ...@args) scalar {
+around "validate" func(scalar $orig, scalar $self, scalar ...@args) scalar {
     say("pre-validation");
     my scalar $result = $orig->($self, ...@args);   # Call the original method
     say("post-validation");
@@ -3261,7 +3296,7 @@ around "validate" func(scalar $self, scalar $orig, scalar ...@args) scalar {
 }
 ```
 
-The `$orig` parameter is a reference to the original method. You must call it explicitly to execute the wrapped method. This gives you full control over whether and how the original method is invoked.
+The hook receives `($orig, $self, @args)`: the first parameter, `$orig`, is a reference to the original method. You must call it explicitly to execute the wrapped method. This gives you full control over whether and how the original method is invoked.
 
 #### Complete Moose-Style Example
 
@@ -3434,7 +3469,7 @@ The `core::` namespace is preferred for system/libc functions. `sys::` is a lega
 ```strada
 # These are equivalent:
 my str $home = core::getenv("HOME");    # Preferred
-my str $home = sys::getenv("HOME");     # Also works (legacy alias)
+my str $home = sys::getenv("HOME");     # Also works (legacy alias; compiler prints a deprecation warning)
 
 my int $pid = core::getpid();
 my str $cwd = core::getcwd();
@@ -3473,7 +3508,7 @@ func my_sqrt(num $x) num {
 
 func main() int {
     my num $result = my_sqrt(16.0);
-    say($result);  # 4.0
+    say($result);  # 4
     return 0;
 }
 ```
@@ -3563,8 +3598,7 @@ func main() int {
 
     # Call Perl subroutines
     perl5::run("sub greet { return 'Hello, ' . shift; }");
-    my array @args = ("World");
-    my str $greeting = perl5::call("greet", \@args);
+    my str $greeting = perl5::call("greet", "World");  # one string argument
     say($greeting);
 
     perl5::shutdown();
@@ -3585,7 +3619,7 @@ The `Strada` Perl module allows Perl programs to load Strada shared libraries:
 use Strada;
 
 my $lib = Strada::Library->new('./libmylib.so');
-my $result = $lib->call('mypackage__add', 10, 20);
+my $result = $lib->call('mypackage::add', 10, 20);
 print "Result: $result\n";
 $lib->unload();
 ```
@@ -3821,7 +3855,7 @@ func safe_divide(num $a, num $b) num {
 }
 
 # Check for errors
-my scalar $result = open("file.txt", "r");
+my scalar $result = core::open("file.txt", "r");
 if (!defined($result)) {
     die("Could not open file");
 }
@@ -4019,11 +4053,11 @@ func main() int {
 
     # Call sqrt(16.0)
     my num $result = core::dl_call_num($sqrt, [16.0]);
-    say("sqrt(16) = " . $result);  # 4.0
+    say("sqrt(16) = " . $result);  # 4
 
     # Call pow(2.0, 10.0)
     $result = core::dl_call_num($pow, [2.0, 10.0]);
-    say("pow(2, 10) = " . $result);  # 1024.0
+    say("pow(2, 10) = " . $result);  # 1024
 
     core::dl_close($libm);
     return 0;
@@ -4052,6 +4086,12 @@ core::dl_call_void($double_it_fn, [$nptr]);
 my int $val = core::ptr_deref_int($ptr);
 core::ptr_set_int($ptr, 42);
 ```
+
+**Note:** with the current compiler `core::int_ptr(\$var)` and
+`core::num_ptr(\$var)` return 0 (no pointer) for ordinary `my` variables, so
+the snippet above does not modify `$x`. For out-parameters, allocate C memory
+instead: `my int $p = c::alloc(8); c::write_int64($p, 10);`, pass `$p` to the
+C function, then read the result with `c::read_int64($p)` and `c::free($p)`.
 
 ### Pointer Functions (core:: namespace)
 
@@ -4235,8 +4275,6 @@ my int $new_ts = core::mktime($lt);
 ### High-Resolution Time
 
 ```strada
-use Time::HiRes;
-
 # Get time as float with microseconds
 my num $t = core::hires_time();
 

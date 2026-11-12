@@ -60,7 +60,7 @@ All math functions take and return scalars (int or num). Most are libm wrappers.
 | `math::log(x)` | `num → num` | Natural logarithm (base e). |
 | `math::modf(x)` | `num → array` | Splits into integer and fractional parts: `[ipart, fpart]`. |
 | `math::pow(x, y)` | `num, num → num` | x^y. |
-| `math::rand()` | `→ num` | Random float in [0, 1). |
+| `math::rand()` | `→ num` | Random float in [0, 1). Seed with `core::srand(seed)`. |
 | `math::remainder(x, y)` | `num, num → num` | IEEE 754 remainder. |
 | `math::round(x)` | `num → num` | Round to nearest integer (away from zero on halfway). |
 | `math::scalbn(x, e)` | `num, int → num` | x × 2^e (integer exponent). |
@@ -191,13 +191,12 @@ Use `core::` in user code. `sys::` is a legacy alias (the compiler normalizes
 | Function | Signature | Description |
 |---|---|---|
 | `core::fork()` | `→ int` | fork(2); returns child pid in parent, 0 in child, -1 on error. |
-| `core::exec(cmd)` | `str → int` | execlp; replaces current process. |
-| `core::exec_argv(@argv)` | `array → int` | execvp with argument list. |
-| `core::system(cmd)` | `str → int` | Shell-out via /bin/sh -c; returns exit status. |
-| `core::system_argv(@argv)` | `array → int` | system() with argv (no shell). |
+| `core::exec(cmd)` | `str → int` | Replaces the current process with `/bin/sh -c cmd`; returns -1 only if the exec fails. |
+| `core::system(cmd)` | `str → int` | Shell-out via /bin/sh -c; returns the raw wait status (exit code is `core::exit_status($st)` or `$st >> 8`). |
+| `core::system_argv(prog, \@argv)` | `str, array → int` | Run `prog` with an argv array (no shell; `argv[0]` is the program name). Returns the exit code directly. |
 | `core::wait()` | `→ int` | wait(2): blocks until any child exits; returns its pid, or -1 when there are no children. |
 | `core::waitpid(pid, flags)` | `int, int → int` | waitpid(2), but returns the child's raw exit **status** (exit code is `($st >> 8) & 255`), not its pid. With `flags` = 1 (WNOHANG) returns 0 while the child is still running; -1 on error. Use `core::wait()` to learn which child exited. |
-| `core::kill(sig, pid)` | `str/int, int → int` | Send signal. Sig may be name ("USR1") or number. |
+| `core::kill(pid, sig)` | `int, int → int` | kill(2): send signal number `sig` to `pid`; 0 on success. |
 | `core::killpg(pgid, sig)` | `int, int → int` | killpg(2). |
 | `core::exit(code)` | `int → void` | Run END blocks then exit(code). |
 | `core::_exit(code)` | `int → void` | _exit(2); skips END blocks. |
@@ -219,10 +218,10 @@ Use `core::` in user code. `sys::` is a legacy alias (the compiler normalizes
 | `core::chroot(dir)` | `str → int` | chroot(2). |
 | `core::chdir(dir)` | `str → int` | chdir(2). |
 | `core::getcwd()` | `→ str` | getcwd(3). |
-| `core::times()` | `→ array` | Returns [user, system, cuser, csystem] CPU times. |
-| `core::getrlimit(resource)` | `int → array` | getrlimit; returns [soft, hard]. |
-| `core::setrlimit(resource, soft, hard)` | `int, int, int → int` | setrlimit. |
-| `core::getrusage(who)` | `int → array` | getrusage; returns assorted accounting fields. |
+| `core::times()` | `→ hash` | CPU times: keys `utime`, `stime`, `cutime`, `cstime`, `ticks`. |
+| `core::getrlimit(resource)` | `int → hash` | getrlimit; returns hash with `cur` (soft) and `max` (hard). |
+| `core::setrlimit(resource, %limit)` | `int, hash → int` | setrlimit; `%limit` has keys `cur` and `max`. |
+| `core::getrusage(who)` | `int → hash` | getrusage; keys `utime_sec`, `utime_usec`, `stime_sec`, `stime_usec`, `maxrss`, `minflt`, `majflt`, `nvcsw`, `nivcsw`. |
 
 ### User / group
 
@@ -239,48 +238,48 @@ Use `core::` in user code. `sys::` is a legacy alias (the compiler normalizes
 | `core::setegid(gid)` | `int → int` | setegid(2). |
 | `core::setregid(real, eff)` | `int, int → int` | setregid(2). |
 | `core::getgroups()` | `→ array` | Supplementary groups. |
-| `core::getpwuid(uid)` | `int → array` | Password entry by uid. |
-| `core::getpwnam(name)` | `str → array` | Password entry by name. |
-| `core::getgrgid(gid)` | `int → array` | Group entry by gid. |
-| `core::getgrnam(name)` | `str → array` | Group entry by name. |
+| `core::getpwuid(uid)` | `int → hash` | Password entry by uid: `name`, `passwd`, `uid`, `gid`, `gecos`, `dir`, `shell`. |
+| `core::getpwnam(name)` | `str → hash` | Password entry by name (same keys). |
+| `core::getgrgid(gid)` | `int → hash` | Group entry by gid: `name`, `passwd`, `gid`, `members`. |
+| `core::getgrnam(name)` | `str → hash` | Group entry by name (same keys). |
 | `core::getlogin()` | `→ str` | Login name. |
 
 ### File I/O
 
 | Function | Signature | Description |
 |---|---|---|
-| `core::open(path, mode)` | `str, str → scalar` | Open file; mode ∈ {"r","w","a","rb","<",">",">>","+>"}. Returns filehandle. |
+| `core::open(path, mode)` | `str, str → scalar` | Open file; mode ∈ {"r","w","a","r+","w+","a+","<",">",">>","+<","+>"}. Returns filehandle, or undef on failure. `path` may be a `\$string` reference for in-memory I/O. |
 | `core::close(fh)` | `scalar → int` | Close filehandle. |
-| `core::open_fd(fd, mode)` | `int, str → scalar` | fdopen(3); wrap an fd as a filehandle. |
-| `core::open_str(ref)` | `scalar → scalar` | In-memory open over a scalar ref. |
+| `core::open_fd(path, mode)` | `str, str → int` | open(2) a file and return the raw file descriptor (-1 on failure); mode ∈ {"r","w","a","rw","wx"}. |
+| `core::open_str(content, mode)` | `str, str → scalar` | In-memory filehandle over a string; mode "r", "w" or "a". |
 | `core::fdopen_read(fd)` | `int → scalar` | Open fd for reading. |
 | `core::fdopen_write(fd)` | `int → scalar` | Open fd for writing. |
 | `core::close_fd(fd)` | `int → int` | close(2). |
-| `core::readline(fh)` | `scalar → str` | Read one line (or undef at EOF). |
+| `core::readline(fh)` | `scalar → str` | Read one line, newline stripped (undef at EOF). |
 | `core::read_fd(fd, n)` | `int, int → str` | read(2) up to n bytes. |
 | `core::read_all_fd(fd)` | `int → str` | Read until EOF. |
-| `core::read_byte(fh)` | `scalar → int` | Read one byte (-1 on EOF). |
+| `core::read_byte(fd)` | `int → int` | Read one byte from a file descriptor (-1 on EOF). |
 | `core::write_fd(fd, data)` | `int, str → int` | write(2). |
 | `core::fsync(fd)` | `int → int` | fsync(2); 0 on success, -1 on failure. |
 | `core::fdatasync(fd)` | `int → int` | fdatasync(2); falls back to fsync on macOS. |
 | `core::seek(fh, offset, whence)` | `scalar, int, int → int` | fseek; whence ∈ {SEEK_SET=0, SEEK_CUR=1, SEEK_END=2}. |
 | `core::tell(fh)` | `scalar → int` | ftell(3). |
-| `core::eof(fh)` | `scalar → int` | feof(3). |
+| `core::eof(fh)` | `scalar → int` | 1 at end of file, empty string (false) otherwise. |
 | `core::flush(fh)` | `scalar → int` | fflush(3). |
 | `core::autoflush(fh, on)` | `scalar, int → int` | setvbuf to `_IONBF` (unbuffered) when on, else `_IOFBF`. Matches perl `$|=1`. |
 | `core::rewind(fh)` | `scalar → int` | rewind(3). |
 | `core::clearerr(fh)` | `scalar → void` | clearerr(3). |
 | `core::ferror(fh)` | `scalar → int` | ferror(3). |
 | `core::fileno(fh)` | `scalar → int` | Underlying fd. |
-| `core::fread(fh, len)` | `scalar, int → str` | Read len bytes from fh. |
-| `core::fwrite(fh, data)` | `scalar, str → int` | Write data to fh. |
+| `core::fread(fh)` | `scalar → str` | Read the whole file behind fh (from the start; a length argument is ignored). |
+| `core::fwrite(fh, data)` | `scalar, str → void` | Write data to fh. |
 | `core::fgetc(fh)` | `scalar → int` | Read one char (-1 on EOF). |
 | `core::fputc(c, fh)` | `int, scalar → int` | Write one char. |
-| `core::fgets(fh, max)` | `scalar, int → str` | Read up to max bytes or newline. |
+| `core::fgets(fh, max)` | `scalar, int → str` | Read up to max-1 bytes or through a newline (newline kept). |
 | `core::fputs(s, fh)` | `str, scalar → int` | Write string to fh. |
 | `core::dup(fd)` | `int → int` | dup(2). |
 | `core::pipe()` | `→ array` | Returns [read_fd, write_fd]. |
-| `core::popen(cmd, mode)` | `str, str → scalar` | popen(3). |
+| `core::popen(cmd, mode)` | `str, str → scalar` | popen(3); returns a filehandle. |
 | `core::pclose(fh)` | `scalar → int` | pclose(3). |
 | `core::tmpfile()` | `→ scalar` | tmpfile(3) — auto-deleted filehandle. |
 | `core::mkstemp(template)` | `str → array` | mkstemp(3); returns [fd, actual_path]. |
@@ -288,12 +287,12 @@ Use `core::` in user code. `sys::` is a legacy alias (the compiler normalizes
 | `core::slurp(path)` | `str → str` | Read entire file into a string. |
 | `core::slurp_fd(fd)` | `int → str` | Slurp from open fd. |
 | `core::slurp_fh(fh)` | `scalar → str` | Slurp from open filehandle. |
-| `core::spew(path, data)` | `str, str → int` | Write entire string to file (truncate). |
-| `core::spew_fd(fd, data)` | `int, str → int` | Write to fd. |
-| `core::spew_fh(fh, data)` | `scalar, str → int` | Write to filehandle. |
+| `core::spew(path, data)` | `str, str → void` | Write entire string to file (truncate). |
+| `core::spew_fd(fd, data)` | `int, str → void` | Write to fd. |
+| `core::spew_fh(fh, data)` | `scalar, str → void` | Write to filehandle. |
 | `core::str_from_fh(fh)` | `scalar → str` | Slurp filehandle to string. |
 | `core::qx(cmd)` | `str → str` | Capture command output (shell). |
-| `core::flock(fh, op)` | `scalar, int → int` | flock(2); op ∈ {LOCK_SH=1, LOCK_EX=2, LOCK_UN=8, LOCK_NB=4}. |
+| `core::flock(fd, op)` | `int, int → int` | flock(2) on a file descriptor (`core::fileno($fh)`); op ∈ {LOCK_SH=1, LOCK_EX=2, LOCK_UN=8, LOCK_NB=4}. |
 
 ### Filesystem
 
@@ -308,12 +307,12 @@ Use `core::` in user code. `sys::` is a legacy alias (the compiler normalizes
 | `core::is_executable(path)` | `str → int` | Executable? |
 | `core::is_zero_size(path)` | `str → int` | Zero-byte file? |
 | `core::dir_exists(path)` | `str → int` | Directory existence (alias for is_dir). |
-| `core::file_size(path)` | `str → int` | Bytes; -1 on error. |
-| `core::file_mtime(path)` | `str → int` | Modification time (epoch seconds). |
+| `core::file_size(path)` | `str → int` | Bytes; 0 if the file does not exist. |
+| `core::file_mtime(path)` | `str → int` | Modification time (epoch seconds); -1 on error. |
 | `core::file_ext(path)` | `str → str` | Filename extension (without leading "."). |
 | `core::basename(path)` | `str → str` | Basename (last path component). |
 | `core::dirname(path)` | `str → str` | Directory part of path. |
-| `core::path_join(@parts)` | `array → str` | Join with platform separator. |
+| `core::path_join(@parts)` | `array → str` | Join the elements of one array (or array ref) with `/`. |
 | `core::realpath(path)` | `str → str` | Resolve symlinks, return absolute path. |
 | `core::readlink(path)` | `str → str` | readlink(2). |
 | `core::symlink(target, link)` | `str, str → int` | symlink(2). |
@@ -322,26 +321,26 @@ Use `core::` in user code. `sys::` is a legacy alias (the compiler normalizes
 | `core::rename(old, new)` | `str, str → int` | rename(2). |
 | `core::mkdir(path, mode)` | `str, int → int` | mkdir(2). |
 | `core::rmdir(path)` | `str → int` | rmdir(2). |
-| `core::chmod(mode, path)` | `int, str → int` | chmod(2). |
-| `core::fchmod(fh, mode)` | `scalar, int → int` | fchmod(2). |
-| `core::chown(uid, gid, path)` | `int, int, str → int` | chown(2). |
-| `core::fchown(fh, uid, gid)` | `scalar, int, int → int` | fchown(2). |
-| `core::lchown(uid, gid, path)` | `int, int, str → int` | lchown(2). |
+| `core::chmod(path, mode)` | `str, int → int` | chmod(2). |
+| `core::fchmod(fd, mode)` | `int, int → int` | fchmod(2). |
+| `core::chown(path, uid, gid)` | `str, int, int → int` | chown(2). |
+| `core::fchown(fd, uid, gid)` | `int, int, int → int` | fchown(2). |
+| `core::lchown(path, uid, gid)` | `str, int, int → int` | lchown(2). |
 | `core::access(path, mode)` | `str, int → int` | access(2). |
 | `core::truncate(path, len)` | `str, int → int` | truncate(2). |
-| `core::ftruncate(fh, len)` | `scalar, int → int` | ftruncate(2). |
-| `core::stat(path)` | `str → array` | stat(2); returns 13-element list. |
-| `core::lstat(path)` | `str → array` | lstat(2). |
-| `core::statvfs(path)` | `str → array` | statvfs(3). |
-| `core::fstatvfs(fh)` | `scalar → array` | fstatvfs(3). |
-| `core::utime(atime, mtime, @paths)` | `int, int, array → int` | utime(2). |
-| `core::utimes(atime, mtime, path)` | `int, int, str → int` | utimes(2). |
+| `core::ftruncate(fd, len)` | `int, int → int` | ftruncate(2). |
+| `core::stat(path)` | `str → hash` | stat(2); hash with `dev`, `ino`, `mode`, `nlink`, `uid`, `gid`, `rdev`, `size`, `atime`, `mtime`, `ctime`, `blksize`, `blocks` (undef on failure). |
+| `core::lstat(path)` | `str → hash` | lstat(2); same keys. |
+| `core::statvfs(path)` | `str → hash` | statvfs(3): `bsize`, `frsize`, `blocks`, `bfree`, `bavail`, `files`, `ffree`, `favail`, `fsid`, `flag`, `namemax`. |
+| `core::fstatvfs(fd)` | `int → hash` | fstatvfs(3). |
+| `core::utime(path, atime, mtime)` | `str, int, int → int` | utime(2). |
+| `core::utimes(path, atime, mtime)` | `str, int, int → int` | utimes(2). |
 | `core::glob(pattern)` | `str → array` | Filename globbing. |
 | `core::fnmatch(pattern, name)` | `str, str → int` | fnmatch(3). |
 | `core::opendir(path)` | `str → scalar` | Open directory. |
-| `core::readdir(dh)` | `scalar → array` | All entries. |
+| `core::readdir(path)` | `str → array` | All entry names in directory `path` (no `.`/`..`). |
 | `core::readdir_next(dh)` | `scalar → str` | One entry (undef when done). |
-| `core::readdir_full(dh)` | `scalar → array` | Entries with type info. |
+| `core::readdir_full(path)` | `str → array` | Entries of directory `path` as full paths. |
 | `core::closedir(dh)` | `scalar → int` | Close directory. |
 
 ### Time / dates
@@ -350,9 +349,9 @@ Use `core::` in user code. `sys::` is a legacy alias (the compiler normalizes
 |---|---|---|
 | `core::time()` | `→ int` | Seconds since epoch. |
 | `core::hires_time()` | `→ num` | Sub-second-precision seconds since epoch. |
-| `core::gettimeofday()` | `→ array` | [sec, usec]. |
-| `core::tv_interval(t1, t2)` | `array, array → num` | Difference in seconds. |
-| `core::nanosleep(sec)` | `num → int` | Sleep with sub-second precision. |
+| `core::gettimeofday()` | `→ hash` | Hash with `sec` and `usec`. |
+| `core::tv_interval(%t1, %t2)` | `hash, hash → num` | Difference in seconds between two `gettimeofday` hashes. |
+| `core::nanosleep(ns)` | `int → int` | Sleep for `ns` nanoseconds. |
 | `core::sleep(sec)` | `int → int` | Sleep whole seconds. |
 | `core::usleep(usec)` | `int → int` | Sleep microseconds. |
 | `core::localtime(epoch)` | `int → hash` | Local time (in `$TZ`): sec, min, hour, mday, mon (0-11), year (since 1900), wday (0 = Sunday), yday, isdst. |
@@ -362,8 +361,8 @@ Use `core::` in user code. `sys::` is a legacy alias (the compiler normalizes
 | `core::ctime(epoch)` | `int → str` | "Day Mon DD HH:MM:SS YYYY". |
 | `core::difftime(t2, t1)` | `int, int → num` | t2 - t1 in seconds. |
 | `core::clock()` | `→ int` | CPU clock ticks. |
-| `core::clock_gettime(clk)` | `int → array` | clock_gettime(2). |
-| `core::clock_getres(clk)` | `int → array` | Resolution. |
+| `core::clock_gettime(clk)` | `int → hash` | clock_gettime(2); hash with `sec` and `nsec`. |
+| `core::clock_getres(clk)` | `int → hash` | Resolution; hash with `sec` and `nsec`. |
 
 ### Network / sockets
 
@@ -371,34 +370,34 @@ Use `core::` in user code. `sys::` is a legacy alias (the compiler normalizes
 |---|---|---|
 | `core::socket_client(host, port)` | `str, int → scalar` | TCP connect. |
 | `core::socket_server(port)` | `int → scalar` | TCP listen socket on every address (use `socket_server_host` to bind one). |
-| `core::socket_server_backlog(host, port, backlog)` | `str, int, int → scalar` | TCP listen with explicit backlog. |
+| `core::socket_server_backlog(port, backlog)` | `int, int → scalar` | TCP listen with explicit backlog. |
 | `core::socket_server_host(host, port, backlog)` | `str, int, int → scalar` | TCP listen bound to `host`. `""`/`"*"`/`"::"` → dual-stack; `"0.0.0.0"` → IPv4 wildcard; literal → its family. IPv6-aware. |
 | `core::socket_accept(srv)` | `scalar → scalar` | Accept a connection (IPv6/IPv4). |
 | `core::socket_send(sock, data)` | `scalar, str → int` | Send bytes. |
 | `core::socket_recv(sock, n)` | `scalar, int → str` | Receive up to n bytes. |
 | `core::socket_close(sock)` | `scalar → int` | Close. |
 | `core::socket_flush(sock)` | `scalar → int` | Flush write buffer. |
-| `core::socket_select(@socks)` | `array → array` | Indexes of ready sockets. |
+| `core::socket_select(\@socks, timeout_ms)` | `array, int → array` | The sockets that are ready to read (timeout -1 = wait forever). |
 | `core::socket_fd(sock)` | `scalar → int` | Underlying fd. |
-| `core::socket_set_nonblocking(sock)` | `scalar → int` | Set O_NONBLOCK. |
-| `core::shutdown(sock, how)` | `scalar, int → int` | shutdown(2); how ∈ {0,1,2}. |
-| `core::getsockname(sock)` | `scalar → array` | Local [addr, port]. |
-| `core::getpeername(sock)` | `scalar → array` | Remote [addr, port]. |
-| `core::getsockopt(sock, level, opt)` | `scalar, int, int → int` | getsockopt(2). |
-| `core::setsockopt(sock, level, opt, val)` | `scalar, int, int, int → int` | setsockopt(2). |
+| `core::socket_set_nonblocking(sock, on)` | `scalar, int → int` | Set (1) or clear (0) O_NONBLOCK; 0 on success. |
+| `core::shutdown(fd, how)` | `int, int → int` | shutdown(2) on a socket fd (`core::socket_fd($sock)`); how ∈ {0,1,2}. |
+| `core::getsockname(fd)` | `int → hash` | Local address of a socket fd: hash with `addr`, `port`. |
+| `core::getpeername(fd)` | `int → hash` | Remote address of a socket fd: hash with `addr`, `port`. |
+| `core::getsockopt(fd, level, opt)` | `int, int, int → int` | getsockopt(2) on a socket fd. |
+| `core::setsockopt(fd, level, opt, val)` | `int, int, int, int → int` | setsockopt(2) on a socket fd. |
 | `core::udp_socket()` | `→ scalar` | New UDP socket. |
-| `core::udp_bind(sock, host, port)` | `scalar, str, int → int` | bind UDP socket. |
-| `core::udp_server(host, port)` | `str, int → scalar` | UDP server (socket + bind). |
+| `core::udp_bind(sock, port)` | `scalar, int → int` | Bind UDP socket to a port (wildcard address). |
+| `core::udp_server(port)` | `int → scalar` | UDP server (socket + bind). |
 | `core::udp_sendto(sock, data, host, port)` | `scalar, str, str, int → int` | sendto. |
 | `core::udp_recvfrom(sock, max)` | `scalar, int → array` | Returns [data, from_addr, from_port]. |
 | `core::gethostname()` | `→ str` | gethostname(3). |
 | `core::gethostbyname(host)` | `str → str` | First IP for hostname. |
 | `core::gethostbyname_all(host)` | `str → array` | All IPs. |
-| `core::getaddrinfo(host, port)` | `str, int → array` | getaddrinfo(3) results. |
+| `core::getaddrinfo(host, service)` | `str, str → str` | First getaddrinfo(3) result as a numeric address string. |
 | `core::inet_addr(ip)` | `str → int` | "1.2.3.4" → 32-bit int. |
 | `core::inet_ntoa(addr)` | `int → str` | int → "1.2.3.4". |
-| `core::inet_pton(af, str)` | `int, str → str` | Generic address presentation→binary. |
-| `core::inet_ntop(af, bin)` | `int, str → str` | Binary→presentation. |
+| `core::inet_pton(af, str)` | `int, str → int` | Address presentation→binary, as an integer (IPv4: network-order 32-bit value). |
+| `core::inet_ntop(af, bin)` | `int, int → str` | Binary (as returned by `inet_pton`)→presentation. |
 | `core::htonl(n)` | `int → int` | Host → network long. |
 | `core::ntohl(n)` | `int → int` | Network → host long. |
 | `core::htons(n)` | `int → int` | Host → network short. |
@@ -410,23 +409,23 @@ Use `core::` in user code. `sys::` is a legacy alias (the compiler normalizes
 |---|---|---|
 | `core::ioctl(fd, req, arg)` | `int, int, scalar → int` | ioctl(2). |
 | `core::fcntl(fd, cmd, arg)` | `int, int, scalar → int` | fcntl(2). |
-| `core::poll(@fds, timeout)` | `array, int → array` | poll(2). |
-| `core::select_fds(rfds, wfds, efds, timeout)` | `array, array, array, num → int` | select(2). |
+| `core::poll(\@fds, timeout)` | `array, int → int` | poll(2) over an array of `{fd, events}` entries; returns the ready count. |
+| `core::select_fds(\@fds, timeout_ms)` | `array, int → array` | select(2) for readability; returns the fds that are ready. |
 | `core::isatty(fd)` | `int → int` | isatty(3). |
 | `core::ttyname(fd)` | `int → str` | ttyname(3). |
 | `core::term_rows()` | `→ int` | Terminal height. |
 | `core::term_cols()` | `→ int` | Terminal width. |
 | `core::term_enable_raw()` | `→ int` | Put terminal into raw mode. |
 | `core::term_disable_raw()` | `→ int` | Restore terminal mode. |
-| `core::tcgetattr(fd)` | `int → array` | Read terminal attributes. |
-| `core::tcsetattr(fd, attrs)` | `int, array → int` | Write terminal attributes. |
+| `core::tcgetattr(fd)` | `int → hash` | Read terminal attributes: `iflag`, `oflag`, `cflag`, `lflag`, `ispeed`, `ospeed` (undef if not a tty). |
+| `core::tcsetattr(fd, when, %attrs)` | `int, int, hash → int` | Write terminal attributes. |
 | `core::tcdrain(fd)` | `int → int` | tcdrain(2). |
 | `core::tcflush(fd, q)` | `int, int → int` | tcflush(2). |
-| `core::cfgetispeed(attrs)` | `array → int` | Input speed. |
-| `core::cfgetospeed(attrs)` | `array → int` | Output speed. |
-| `core::cfsetispeed(attrs, speed)` | `array, int → int` | Set input speed. |
-| `core::cfsetospeed(attrs, speed)` | `array, int → int` | Set output speed. |
-| `core::serial_open(path)` | `str → scalar` | Open serial port. |
+| `core::cfgetispeed(%attrs)` | `hash → int` | Input speed. |
+| `core::cfgetospeed(%attrs)` | `hash → int` | Output speed. |
+| `core::cfsetispeed(%attrs, speed)` | `hash, int → int` | Set input speed. |
+| `core::cfsetospeed(%attrs, speed)` | `hash, int → int` | Set output speed. |
+| `core::serial_open(path, baud [, config])` | `str, int, str → int` | Open serial port (config like "8N1", the default); returns an fd, -1 on error. |
 
 ### Signals
 
@@ -434,7 +433,7 @@ Use `core::` in user code. `sys::` is a legacy alias (the compiler normalizes
 |---|---|---|
 | `core::signal(name, handler)` | `str, scalar → int` | Install signal handler. handler can be a code ref or "IGNORE"/"DEFAULT". |
 | `core::raise(sig)` | `int → int` | raise(3). |
-| `core::sigprocmask(how, set)` | `int, str → str` | sigprocmask(2). |
+| `core::sigprocmask(how, \@signals)` | `int, array → int` | sigprocmask(2) with an array of signal numbers; 0 on success. |
 
 ### Environment
 
@@ -459,20 +458,20 @@ Use `core::` in user code. `sys::` is a legacy alias (the compiler normalizes
 | `core::munlock(addr, len)` | `scalar, int → int` | munlock(2). |
 | `core::calloc(n, sz)` | `int, int → scalar` | calloc(3). |
 | `core::realloc(ptr, sz)` | `scalar, int → scalar` | realloc(3). |
-| `core::free(ptr)` | `scalar → void` | free(3). |
+| `core::free(\$var)` | `scalar → void` | Alias of `core::release` — does **not** free(3) a raw pointer; use `c::free(ptr)` for that. |
 | `core::dl_open(path)` | `str → scalar` | dlopen(3). |
 | `core::dl_close(handle)` | `scalar → int` | dlclose. |
 | `core::dl_sym(handle, name)` | `scalar, str → scalar` | dlsym. |
 | `core::dl_error()` | `→ str` | dlerror. |
-| `core::dl_call_void(sym, @args)` | `scalar, ... → void` | Call a `void(int...)` function. |
-| `core::dl_call_int(sym, @args)` | `scalar, ... → int` | Call a `int(int...)` function. |
-| `core::dl_call_num(sym, @args)` | `scalar, ... → num` | Call a `double(int...)` function. |
-| `core::dl_call_str(sym, @args)` | `scalar, ... → str` | Returns char*. |
-| `core::dl_call_void_sv(sym, @args)` | `scalar, ... → void` | Pass StradaValue* args. |
-| `core::dl_call_int_sv(sym, @args)` | `scalar, ... → int` | StradaValue args, int return. |
-| `core::dl_call_str_sv(sym, @args)` | `scalar, ... → str` | StradaValue args, str return. |
-| `core::dl_call_sv(sym, @args)` | `scalar, ... → scalar` | StradaValue args + return. |
-| `core::dl_call_export_info(sym)` | `scalar → array` | Read __strada_export_info from a loaded shared lib. |
+| `core::dl_call_void(sym, \@args)` | `scalar, array → void` | Call a `void(int...)` function. |
+| `core::dl_call_int(sym, \@args)` | `scalar, array → int` | Call a `int(int...)` function. |
+| `core::dl_call_num(sym, \@args)` | `scalar, array → num` | Call a `double(...)` function. |
+| `core::dl_call_str(sym, arg)` | `scalar, str → str` | Call a `char*(const char*)` function. |
+| `core::dl_call_void_sv(sym, \@args)` | `scalar, array → void` | Pass StradaValue* args. |
+| `core::dl_call_int_sv(sym, \@args)` | `scalar, array → int` | StradaValue args, int return. |
+| `core::dl_call_str_sv(sym, \@args)` | `scalar, array → str` | StradaValue args, str return. |
+| `core::dl_call_sv(sym, \@args)` | `scalar, array → scalar` | StradaValue args + return. |
+| `core::dl_call_export_info(sym)` | `scalar → str` | Call a loaded library's `__strada_export_info` and return its metadata text. |
 | `core::dl_call_version(sym)` | `scalar → str` | Module version string. |
 
 ### Strings / encoding
@@ -488,13 +487,13 @@ Use `core::` in user code. `sys::` is a legacy alias (the compiler normalizes
 | `core::byte_substr(s, off, len)` | `str, int, int → str` | Byte-offset substring. |
 | `core::get_byte(s, pos)` | `str, int → int` | Byte at position. |
 | `core::set_byte(s, pos, val)` | `str, int, int → str` | Return s with byte at pos replaced. |
-| `core::read_byte(fh)` | `scalar → int` | Read one byte. |
+| `core::read_byte(fd)` | `int → int` | Read one byte from a file descriptor. |
 | `core::hex(s)` | `str → int` | Parse hex string. |
 | `core::random_bytes(n)` | `int → str` | Cryptographic random bytes. |
 | `core::random_bytes_hex(n)` | `int → str` | Random bytes as hex. |
 | `core::strerror(errno)` | `int → str` | Errno → message. |
-| `core::strtod(s)` | `str → num` | strtod(3). |
-| `core::strtol(s, base)` | `str, int → int` | strtol(3). |
+| `core::strtod(s)` | `str → array` | strtod(3); returns `[value, chars_consumed]`. |
+| `core::strtol(s, base)` | `str, int → array` | strtol(3); returns `[value, chars_consumed]`. |
 | `core::atof(s)` | `str → num` | atof(3). |
 | `core::atoi(s)` | `str → int` | atoi(3). |
 | `core::quotemeta(s)` | `str → str` | Escape regex metacharacters. |
@@ -526,16 +525,16 @@ A count suffix (`N`) or `*` (consume all remaining) follows each code. Endiannes
 | Function | Signature | Description |
 |---|---|---|
 | `core::errno()` | `→ int` | Current errno. |
-| `core::caller(level)` | `int → array` | Returns hash with function/file/line. level=0 is immediate caller. |
+| `core::caller(level)` | `int → hash` | Returns hash with function/file/line (undef if there is no such frame). level=0 is immediate caller. |
 | `core::stack_trace()` | `→ str` | Format current call stack. |
-| `core::wantarray()` | `→ int` | 1 in list context, 0 in scalar, undef in void. |
+| `core::wantarray()` | `→ int` | 1 in array context, 0 otherwise. |
 | `core::wanthash()` | `→ int` | 1 if caller expects a hash. |
 | `core::wantscalar()` | `→ int` | 1 in scalar context. |
 | `core::set_recursion_limit(n)` | `int → int` | Set max sub recursion depth. |
 | `core::get_recursion_limit()` | `→ int` | Current limit. |
 | `core::isweak(ref)` | `scalar → int` | 1 if a weak reference. |
 | `core::weaken(ref)` | `scalar → void` | Make a weak reference. |
-| `core::release(ref)` | `scalar → void` | Force-free a reference. |
+| `core::release(\$var)` | `scalar → void` | Release the value a reference points to and set it to undef. |
 
 ### Globals / package storage
 
@@ -544,26 +543,26 @@ A count suffix (`N`) or `*` (consume all remaining) follows each code. Endiannes
 | `core::global_get(name)` | `str → scalar` | Read package-scoped global. |
 | `core::global_set(name, val)` | `str, scalar → void` | Write global. |
 | `core::global_exists(name)` | `str → int` | Existence check. |
-| `core::global_delete(name)` | `str → scalar` | Remove and return. |
+| `core::global_delete(name)` | `str → void` | Remove a global. |
 | `core::global_keys()` | `→ array` | All package-global keys. |
 
 ### Profiling
 
 | Function | Signature | Description |
 |---|---|---|
-| `core::full_profile_start(path)` | `str → int` | Begin line-level profiling, write to path. |
-| `core::full_profile_stop()` | `→ int` | Stop profiling. |
-| `core::memprof_enable()` | `→ int` | Enable allocation tracking. |
-| `core::memprof_disable()` | `→ int` | Disable. |
-| `core::memprof_report()` | `→ array` | Report counts/sizes by type. |
-| `core::memprof_reset()` | `→ int` | Zero counters. |
+| `core::full_profile_start(path)` | `str → void` | Begin line-level profiling, write to path. |
+| `core::full_profile_stop()` | `→ void` | Stop profiling. |
+| `core::memprof_enable()` | `→ void` | Enable allocation tracking. |
+| `core::memprof_disable()` | `→ void` | Disable. |
+| `core::memprof_report()` | `→ void` | Print a report of counts/sizes by type. |
+| `core::memprof_reset()` | `→ void` | Zero counters. |
 
 ### Misc utilities
 
 | Function | Signature | Description |
 |---|---|---|
-| `core::rand()` | `→ num` | Random in [0, 1). |
-| `core::srand(seed)` | `int → int` | Seed RNG. |
+| `core::rand()` | `→ int` | libc rand(3): random integer in [0, RAND_MAX]. Use `math::rand()` for a float in [0, 1). |
+| `core::srand(seed)` | `int → int` | Seed the RNG used by `core::rand()` and `math::rand()`. |
 | `core::random()` | `→ int` | random(3). |
 | `core::srandom(seed)` | `int → void` | Seed random(3). |
 | `core::idiv(a, b)` | `int, int → int` | Truncated integer division. |
@@ -601,12 +600,12 @@ A count suffix (`N`) or `*` (consume all remaining) follows each code. Endiannes
 | Function | Signature | Description |
 |---|---|---|
 | `core::cstruct_new(layout)` | `str → scalar` | Allocate a struct described by layout. |
-| `core::cstruct_get_int(cs, field)` | `scalar, str → int` | Read int field. |
-| `core::cstruct_get_double(cs, field)` | `scalar, str → num` | Read double field. |
-| `core::cstruct_get_string(cs, field)` | `scalar, str → str` | Read string field. |
-| `core::cstruct_set_int(cs, field, v)` | `scalar, str, int → void` | Write int field. |
-| `core::cstruct_set_double(cs, field, v)` | `scalar, str, num → void` | Write double field. |
-| `core::cstruct_set_string(cs, field, v)` | `scalar, str, str → void` | Write string field. |
+| `core::cstruct_get_int(cs, field, offset)` | `scalar, str, int → int` | Read int field at byte offset. |
+| `core::cstruct_get_double(cs, field, offset)` | `scalar, str, int → num` | Read double field at byte offset. |
+| `core::cstruct_get_string(cs, field, offset)` | `scalar, str, int → str` | Read string field at byte offset. |
+| `core::cstruct_set_int(cs, field, offset, v)` | `scalar, str, int, int → void` | Write int field. |
+| `core::cstruct_set_double(cs, field, offset, v)` | `scalar, str, int, num → void` | Write double field. |
+| `core::cstruct_set_string(cs, field, offset, v)` | `scalar, str, int, str → void` | Write string field. |
 | `core::cstruct_ptr(cs)` | `scalar → scalar` | Raw pointer to the struct. |
 | `core::int_ptr(v)` | `int → scalar` | Pointer to an int holding v. |
 | `core::num_ptr(v)` | `num → scalar` | Pointer to a double holding v. |
@@ -678,7 +677,7 @@ working as legacy aliases, but new code should use the qualified forms:
 | `core::dumper(v)`, `core::dumper_str(v)` | `dumper`, `dumper_str` | Debug dump. |
 | `core::stacktrace()`, `core::stacktrace_str()` | `stacktrace`, `stacktrace_str` | Manual stack traces. |
 | `core::blessed(v)` | `blessed` | Package name or undef. |
-| `core::set_package(ref, "Pkg")` | `set_package` | OOP plumbing. |
+| `core::set_package("Pkg")` | `set_package` | OOP plumbing. |
 | `core::inherit("Parent")` | `inherit` | OOP plumbing (prefer `extends`). |
 
 Beware the legacy naming trap the aliases fix: bare `replace` is
@@ -708,7 +707,7 @@ for binary data.
 | `ucfirst(s)` | Uppercase first character. |
 | `chomp(var)` | Remove trailing newline; mutates in place. |
 | `chop(var)` | Remove last character; mutates in place. |
-| `chr(n)` | Codepoint → string. 0-255 = single byte, ≥256 = UTF-8 multi-byte. |
+| `chr(n)` | Codepoint → string. 0-127 = single byte, ≥128 = UTF-8 multi-byte (use `core::byte(n)` for a raw byte). |
 | `ord(s)` | First-character codepoint. |
 | `reverse(s)` or `reverse(@arr)` | Reverse string (codepoint-aware) in scalar context, array in list context. |
 | `substr(s, off [, len [, repl]])` | Substring extract (3-arg, codepoint offsets) or replace (4-arg lvalue). |
@@ -719,27 +718,26 @@ for binary data.
 | `join(sep, @list)` | Join with separator. |
 | `split(pat, s [, limit])` | Split on regex pattern, Perl rules: trailing empty fields are dropped (empty input → empty list); `" "` is awk mode (skip leading whitespace, split on runs of whitespace); a positive limit caps the field count and keeps trailing empties; a negative limit keeps trailing empties. |
 | `trim(s)`, `ltrim(s)`, `rtrim(s)` | Strip whitespace. |
-| `quotemeta(s)` | Escape regex metacharacters. |
-| `match(s, pat)` | Regex match returning captures. |
-| `replace(s, pat, repl)` | Single replacement. |
-| `replace_all(s, pat, repl)` | All replacements. |
+| `core::quotemeta(s)` | Escape regex metacharacters. |
+| `match(s, pat)` | Regex match (returns truth; groups via `captures()`). |
+| `replace(s, pat, repl)` | Regex replacement, first match only. |
+| `replace_all(s, pat, repl)` | **Literal** string replacement, all occurrences. |
 | `captures()` | Last regex capture group list. |
 | `named_captures()` | Last regex named captures as hash. |
-| `pos(var)` | Current /g position. |
-| `pack(fmt, ...)` | Binary pack. |
-| `unpack(fmt, data)` | Binary unpack. |
+| `core::pack(fmt, ...)` | Binary pack. |
+| `core::unpack(fmt, data)` | Binary unpack. |
 
 ### Numbers
 
 | Function | Description |
 |---|---|
-| `abs(n)` | Absolute value. |
+| `math::abs(n)` | Absolute value. |
 | `int(n)` | Truncate to integer. |
 | `chr(n)` | Codepoint → char. |
 | `ord(s)` | Char → codepoint. |
-| `hex(s)` | Parse hex string. |
-| `rand([n])` | Random float in [0, n) (default n=1). |
-| `srand([seed])` | Seed RNG. |
+| `core::hex(s)` | Parse hex string. |
+| `math::rand()` | Random float in [0, 1). |
+| `core::srand(seed)` | Seed RNG. |
 
 ### Arrays
 
@@ -757,7 +755,6 @@ for binary data.
 | `scalar(@arr)` | Array count. |
 | `map { ... } @arr` | Transform. |
 | `grep { ... } @arr` | Filter. |
-| `array_new()` | New empty array. |
 | `clone(ref)` | Deep clone. |
 | `reserve(@arr, n)` | Preallocate capacity. |
 | `deref(ref)` | Dereference. |
@@ -805,14 +802,14 @@ for binary data.
 | `printf(...)` | Format and print. |
 | `warn(...)` | Print to STDERR. |
 | `die(...)` | Throw exception. |
-| `eval { ... }` | Exception-catching block. |
+| `try { ... } catch ($e) { ... }` | Exception-catching block (statement; there is no `eval { }` block form). |
 | `caller([level])` | Caller info. |
-| `time()`, `gmtime()`, `localtime()` | Time helpers. |
-| `wait()`, `waitpid()` | Process waiting. |
-| `fork()`, `exec()`, `exit()`, `system()` | Process control. |
+| `core::time()`, `core::gmtime()`, `core::localtime()` | Time helpers (no bare forms). |
+| `core::wait()`, `core::waitpid()` | Process waiting (no bare forms). |
+| `core::fork()`, `core::exec()`, `exit()`, `core::system()` | Process control (only `exit` has a bare form). |
 | `getpid()` | Current PID. |
 | `__PACKAGE__`, `__FILE__`, `__LINE__` | Compile-time constants. |
-| `__program_name` | Program name (= $0 in Perl). |
+| `$0` | Program name (as in Perl). |
 | `dumper($v)` | Pretty-print value (returns string). |
 | `dumper_str($v)` | Variant: shorter format. |
 | `clone($v)` | Deep clone (Storable::dclone equivalent). |
@@ -830,12 +827,12 @@ for binary data.
 ### Statement keywords (not functions)
 
 `if`, `unless`, `elsif`, `else`, `while`, `until`, `for`, `foreach`, `do`,
-`my`, `our`, `local`, `state`, `package`, `use`, `require`, `import_lib`,
-`import_object`, `import_archive`, `version`, `func`, `fn`, `sub`,
-`private`, `extern`, `inline`, `auto`, `async`, `await`, `try`, `catch`,
+`my`, `our`, `local`, `package`, `use`, `import_lib`,
+`import_object`, `import_archive`, `version`, `func`, `fn`,
+`private`, `extern`, `async`, `await`, `try`, `catch`,
 `finally`, `throw`, `redo`, `last`, `next`, `goto`, `return`, `break`,
 `continue`, `case`, `default`, `switch`, `enum`, `const`, `BEGIN`, `END`,
-`__C__`, `__STRADA__`.
+`__C__`.
 
 ---
 

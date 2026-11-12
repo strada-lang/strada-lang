@@ -6,6 +6,8 @@ Strada compiler - compile Strada source code to C
 
 **stradac** [*options*] *input.strada* *output.c*
 
+**stradac** **--check** [*options*] *input.strada*
+
 ## DESCRIPTION
 
 **stradac** is the Strada compiler. It compiles Strada source code (.strada files) into C code, which can then be compiled with gcc to produce native executables.
@@ -22,11 +24,17 @@ The compiler is self-hosting - it is written in Strada itself.
 - **-LL** *path*
   Add a library search path with low priority. These paths are searched last.
 
+- **-D** *NAME*[**=***value*]
+  Define a name for `#ifdef`/`#ifndef` conditionals in the source (applies to all files, including `use`d modules). Repeatable.
+
 - **--import-object** *path*
   Treat *path* as an implicit `import_object` — extract its `__strada_export_info` metadata so calls to that module's namespace resolve, and emit it into `__STRADA_OBJECT_FILES__` so the linker picks it up. Used by the **strada** driver to forward CLI-passed Strada module objects.
 
 - **--import-archive** *path*
   Same as `--import-object` but for static archives (`.a`).
+
+- **--import-lib** *path*
+  Treat *path* as an implicit `import_lib` (a Strada-module `.so`, dlopen'd at runtime).
 
 - **-M** [*target*]
   Module-only codegen. Only the input file's own functions, globals, BEGIN/END blocks, and top-level `__C__` blocks produce bodies in the output; anything brought in by `use` gets a forward declaration but no body. *target* is normally derived from the input filename (`Foo.strada` → target `Foo`) and is used purely for naming. The actual filter looks at each AST item's `from_use` tag (set by `load_module`), so files declaring multiple packages — e.g. `Eval.strada` which declares `package Strada::Interpreter` and `package Strada::Eval` — still emit their own content correctly.
@@ -45,6 +53,18 @@ The compiler is self-hosting - it is written in Strada itself.
 
 - **-w**, **--warnings**
   Show compiler warnings such as unused variables.
+
+- **--strict-types**
+  Stage-0 gradual type checking: warn (never error) where a declared type and the static type of an expression are likely to mismatch.
+
+- **--check**
+  Syntax/semantic check only: no C output is written and *output.c* may be omitted. All errors found are reported. Exit status 0 if clean.
+
+- **--stack-trace**, **--no-stack-trace**
+  Force stack-trace support on or off in the generated code. The default is auto-detected from the program's use of `try`/`throw`/`caller`.
+
+- **-v**, **--verbose**
+  Show compilation progress.
 
 - **-h**, **--help**
   Display help message and exit.

@@ -1,22 +1,25 @@
 # Strada REPL
 
-The Strada REPL (Read-Eval-Print Loop) provides an interactive shell for experimenting with Strada code without creating files. It is part of `strada-interp`, which defaults to the bytecode VM backend for file execution but uses the tree-walking backend for the REPL (persistent VM state between inputs is not yet supported).
+The Strada REPL (Read-Eval-Print Loop) provides an interactive shell for experimenting with Strada code without creating files. There are two of them:
+
+- **The JIT REPL** — `./strada --repl`, the `tools/strada-jit` program (built by `make tools`). Each input is compiled and run natively. This is the REPL most of this page describes.
+- **The interpreter REPL** — `interpreter/strada-interp` (built by `make interpreter`). `strada-interp` defaults to the bytecode VM backend for file execution but uses the tree-walking backend for its REPL (persistent VM state between inputs is not yet supported). It understands only `.help`, `.vars`, `.funcs`, `.load FILE`, `.clear` and `.quit`.
 
 ## Starting the REPL
 
 ```bash
-# Start interactive REPL (uses tree-walking backend)
-./strada-interp
-
-# Run a script file (uses VM backend by default)
-./strada-interp script.strada
-
-# Run a script with the tree-walking backend
-./strada-interp --tree-walk script.strada
-
-# Use via the strada command
+# JIT REPL and JIT script runner (via the strada command)
 ./strada --repl
 ./strada --script script.st
+
+# Interpreter REPL (uses tree-walking backend)
+./interpreter/strada-interp
+
+# Run a script file with the interpreter (uses VM backend by default)
+./interpreter/strada-interp script.strada
+
+# Run a script with the tree-walking backend
+./interpreter/strada-interp --tree-walk script.strada
 ```
 
 ## Basic Usage
@@ -28,8 +31,10 @@ strada> $x * 2
 strada> my array @nums = (1, 2, 3);
 strada> push(@nums, 4);
 strada> @nums
-=> (1, 2, 3, 4)
+=> 4
 ```
+
+A bare `@array` is evaluated in scalar context, so it shows the element count; use `.vars` to see the contents. (The interpreter REPL prints results without the `=> ` prefix and dumps the array.)
 
 ## Commands
 
@@ -38,15 +43,15 @@ strada> @nums
 | `.help` | Show help message |
 | `.vars` | List declared variables with their types and values |
 | `.funcs` | List defined functions with signatures |
+| `.imports` | List imports and library paths |
 | `.load FILE` | Load and execute code from a file |
+| `.soinfo FILE` | Show exported functions from a .so/.o/.a file |
 | `.clear` | Clear all state (variables and functions) |
-| `.debug` | Toggle debug mode (shows generated code) |
-| `.compiler` | Show current compiler backend |
-| `.set compiler=X` | Change compiler (libtcc, tcc, gcc) |
+| `.debug` | Toggle debug mode (shows generated Strada) |
+| `.cdebug` | Toggle C debug mode (shows generated C) |
+| `.compiler` | Show current compiler backend (choose it at startup: `strada-jit --compiler=tcc` or `--compiler=gcc`) |
 | `.memprof` | Toggle memory profiling |
 | `.memstats` | Show memory statistics |
-| `.funcprof` | Toggle function profiling |
-| `.profile` | Show function profile report |
 | `.quit` | Exit the REPL |
 
 ## Defining Functions
@@ -57,7 +62,6 @@ Functions can span multiple lines:
 strada> func greet(str $name) void {
 ...        say("Hello, " . $name . "!");
 ...    }
-Function defined
 strada> greet("World")
 Hello, World!
 ```
@@ -84,8 +88,8 @@ strada> $person{"name"}
 
 For file execution, the VM is used by default. Use `--tree-walk` to switch:
 ```bash
-./strada-interp program.strada            # VM (default)
-./strada-interp --tree-walk program.strada # tree-walk
+./interpreter/strada-interp program.strada            # VM (default)
+./interpreter/strada-interp --tree-walk program.strada # tree-walk
 ```
 
 ## Profiling
@@ -102,37 +106,24 @@ strada> for (my int $i = 0; $i < 1000; $i++) { push(@big, $i); }
 strada> .memstats
 ```
 
-### Function Profiling
-
-Profile function execution times:
-
-```
-strada> .funcprof
-Function profiling enabled (code will be compiled with -p)
-strada> func fib(int $n) int {
-...        if ($n <= 1) { return $n; }
-...        return fib($n - 1) + fib($n - 2);
-...    }
-Function defined
-strada> fib(20)
-=> 6765
-strada> .profile
-```
+There are no REPL commands for function profiling; compile a file with `./strada -p` (function-level) or `./strada --full-profile` (line-level) instead.
 
 ## Script Mode
 
-Create executable scripts with a shebang:
+Create executable scripts with a shebang. By default a script is compiled as a whole file, so it is an ordinary program with a `main` function:
 
 ```strada
 #!/path/to/strada-jit
 
-say("Hello from script!");
-
-func double(int $x) int {
+func twice(int $x) int {
     return $x * 2;
 }
 
-say("Double of 21 is " . double(21));
+func main() int {
+    say("Hello from script!");
+    say("Double of 21 is " . twice(21));
+    return 0;
+}
 ```
 
 Make executable and run:
@@ -141,6 +132,8 @@ chmod +x myscript.st
 ./myscript.st
 ```
 
+(Files not named `*.strada` print an "Input file does not have .strada extension" notice before running.) To run a file of top-level statements the way the REPL would, line by line, use `strada-jit --chunked myscript.st` (slower).
+
 ## Error Display
 
 The REPL provides helpful error messages with source context:
@@ -148,12 +141,12 @@ The REPL provides helpful error messages with source context:
 ```
 strada> my int $ = 5;
 
-Error: expected variable name, got ASSIGN
-
-> 1 | my int $ = 5;
+Error: JIT compile error: /tmp/strada_repl_lib_9.strada:36:14: expected a variable name after '$', got '='
+    my int $ = 5;
+             ^
 ```
 
-For multi-line input, the error shows context around the problematic line.
+The file name and line number refer to the temporary source the REPL generates, not to your input; the offending line and caret are shown beneath.
 
 ## Tips
 
@@ -165,8 +158,8 @@ For multi-line input, the error shows context around the problematic line.
 
 ## Limitations
 
-- The REPL uses the tree-walking backend (no persistent VM state between inputs yet)
+- The interpreter REPL uses the tree-walking backend (no persistent VM state between inputs yet)
 - Package declarations are ignored (all code is in the default namespace)
-- `use` and `import_lib` statements are not yet supported in the REPL
+- `use` and `import_lib` statements work in the JIT REPL (see `.help` / `.imports`) but are not supported in the interpreter REPL
 - Some complex language features may not work in the dynamic REPL context
 - `__C__` blocks are skipped in the REPL (they are JIT-compiled and cached in the VM backend for file execution)

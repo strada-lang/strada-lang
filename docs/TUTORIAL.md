@@ -152,8 +152,12 @@ When you need to temporarily override an `our` variable and have it automaticall
 ```strada
 our str $log_level = "info";
 
+func do_work() void {
+    say("Working at level: " . $log_level);
+}
+
 func debug_section() void {
-    local($log_level) = "debug";   # Override for this scope
+    local $log_level = "debug";    # Override for this scope
     say("Level: " . $log_level);   # "debug"
     do_work();                      # Called functions see "debug" too
 }   # $log_level automatically restored to "info" here
@@ -505,7 +509,10 @@ func greet {
     say("Hello, " . $_[0] . "!");
 }
 
-greet("World");  # Hello, World!
+func main() int {
+    greet("World");  # Hello, World!
+    return 0;
+}
 ```
 
 Access individual args with `$_[0]`, `$_[1]`, etc., or use `shift(@_)` and `size(@_)`. The return type defaults to `scalar`.
@@ -1025,14 +1032,15 @@ if ($date =~ /(\d+)-(\d+)-(\d+)/) {
 }
 ```
 
-You can also use the `capture()` function for a combined match-and-capture, or `captures()` after a `=~` match for programmatic access (including `$0` for the full match):
+You can also use the `capture()` function for a combined match-and-capture, or `captures()` after a `=~` match for programmatic access. Both return an array whose element 0 is the full match, followed by the capture groups (write the pattern in single quotes so `\d` reaches the regex engine intact):
 
 ```strada
 my str $date = "2024-01-15";
-my array @parts = capture($date, "(\d+)-(\d+)-(\d+)");
-say("Year: " . $parts[0]);   # 2024
-say("Month: " . $parts[1]);  # 01
-say("Day: " . $parts[2]);    # 15
+my array @parts = capture($date, '(\d+)-(\d+)-(\d+)');
+say("Match: " . $parts[0]);  # 2024-01-15
+say("Year: " . $parts[1]);   # 2024
+say("Month: " . $parts[2]);  # 01
+say("Day: " . $parts[3]);    # 15
 ```
 
 ### The /e Modifier: Evaluate Replacement
@@ -1070,7 +1078,6 @@ say("Vowels: " . $vowels);  # 3
 
 - `d` -- Delete characters not in the replacement list: `$s =~ tr/0-9//d;` removes all digits
 - `s` -- Squeeze repeated translated characters into one: `$s =~ tr/ / /s;` collapses multiple spaces
-- `r` -- Return a modified copy instead of changing the original: `my str $upper = ($s =~ tr/a-z/A-Z/r);`
 - `c` -- Complement the search list (translate characters NOT in the list)
 
 ---
@@ -1102,14 +1109,14 @@ core::spew("output.txt", "Hello, World!\n");
 
 # Write with file handle
 my scalar $fh = core::open("output.txt", "w");
-core::write_fd($fh, "Line 1\n");
-core::write_fd($fh, "Line 2\n");
+print($fh, "Line 1\n");
+print($fh, "Line 2\n");
 core::close($fh);
 
 # Append to file
-my scalar $fh = core::open("log.txt", "a");
-core::write_fd($fh, "New log entry\n");
-core::close($fh);
+my scalar $log = core::open("log.txt", "a");
+print($log, "New log entry\n");
+core::close($log);
 ```
 
 ### File Modes
@@ -1146,7 +1153,7 @@ This is especially useful for logging or when you want to temporarily redirect o
 
 ```strada
 say("Enter your name: ");
-my str $name = core::readline();
+my str $name = core::readline(STDIN);
 say("Hello, " . $name);
 ```
 
@@ -1219,30 +1226,34 @@ Strada supports Perl-style OOP with blessed references.
 ```strada
 package Animal;
 
-func Animal_new(str $name, str $species) scalar {
+func new(str $name, str $species) scalar {
     my hash %self = ();
     $self{"name"} = $name;
     $self{"species"} = $species;
     return bless(\%self, "Animal");
 }
 
-func Animal_speak(scalar $self) void {
+func speak(scalar $self) void {
     say($self->{"name"} . " the " . $self->{"species"} . " makes a sound");
 }
 
-func Animal_get_name(scalar $self) str {
+func get_name(scalar $self) str {
     return $self->{"name"};
 }
 ```
 
 ### Using Objects
 
-```strada
-func main() int {
-    my scalar $dog = Animal_new("Rex", "dog");
-    Animal_speak($dog);  # Rex the dog makes a sound
+Call the constructor with its package-qualified name, and methods with `->`:
 
-    say("Name: " . Animal_get_name($dog));
+```strada
+package main;
+
+func main() int {
+    my scalar $dog = Animal::new("Rex", "dog");
+    $dog->speak();  # Rex the dog makes a sound
+
+    say("Name: " . $dog->get_name());
 
     return 0;
 }
@@ -1254,7 +1265,7 @@ func main() int {
 package Dog;
 inherit Animal;
 
-func Dog_new(str $name) scalar {
+func new(str $name) scalar {
     my hash %self = ();
     $self{"name"} = $name;
     $self{"species"} = "dog";
@@ -1262,11 +1273,11 @@ func Dog_new(str $name) scalar {
     return bless(\%self, "Dog");
 }
 
-func Dog_speak(scalar $self) void {
+func speak(scalar $self) void {
     say($self->{"name"} . " says: Woof!");
 }
 
-func Dog_learn_trick(scalar $self) void {
+func learn_trick(scalar $self) void {
     $self->{"tricks"} = $self->{"tricks"} + 1;
     say($self->{"name"} . " knows " . $self->{"tricks"} . " tricks");
 }
@@ -1278,7 +1289,7 @@ func Dog_learn_trick(scalar $self) void {
 package Duck;
 inherit Animal, Flyable, Swimmable;
 
-func Duck_init() void {
+func init() void {
     inherit("Duck", "Animal");
     inherit("Duck", "Flyable");
     inherit("Duck", "Swimmable");
@@ -1288,7 +1299,7 @@ func Duck_init() void {
 ### Type Checking
 
 ```strada
-my scalar $dog = Dog_new("Rex");
+my scalar $dog = Dog::new("Rex");
 
 if (isa($dog, "Dog")) {
     say("It's a dog");
@@ -1305,7 +1316,7 @@ say(blessed($dog));  # "Dog"
 ### SUPER:: Calls
 
 ```strada
-func Dog_greet(scalar $self) str {
+func greet(scalar $self) str {
     my str $base = SUPER::greet($self);  # Call Animal's greet
     return $base . " Woof!";
 }
@@ -1314,7 +1325,7 @@ func Dog_greet(scalar $self) str {
 ### DESTROY Destructors
 
 ```strada
-func Dog_DESTROY(scalar $self) void {
+func DESTROY(scalar $self) void {
     say($self->{"name"} . " is being destroyed");
     SUPER::DESTROY($self);  # Chain to parent
 }
@@ -1350,12 +1361,15 @@ my scalar $scale = func (int $n) {
 say($scale->(5));   # 50
 say($scale->(7));   # 70
 
-# Captured by reference - changes visible
+# Captured by value when the closure is created - later changes
+# to the outer variable are not seen by the closure
 $multiplier = 100;
-say($scale->(5));   # 500
+say($scale->(5));   # 50
 ```
 
 ### Closures with State
+
+Each closure keeps its own copy of the variables it captured, and that copy persists between calls:
 
 ```strada
 func make_counter() scalar {
@@ -1367,10 +1381,13 @@ func make_counter() scalar {
     };
 }
 
-my scalar $counter = make_counter();
-say($counter->());  # 1
-say($counter->());  # 2
-say($counter->());  # 3
+func main() int {
+    my scalar $counter = make_counter();
+    say($counter->());  # 1
+    say($counter->());  # 2
+    say($counter->());  # 3
+    return 0;
+}
 ```
 
 ### Passing Closures to Functions
@@ -1380,8 +1397,11 @@ func apply_twice(scalar $f, int $x) int {
     return $f->($f->($x));
 }
 
-my scalar $double = func (int $n) { return $n * 2; };
-say(apply_twice($double, 3));  # 12 (3 -> 6 -> 12)
+func main() int {
+    my scalar $double = func (int $n) { return $n * 2; };
+    say(apply_twice($double, 3));  # 12 (3 -> 6 -> 12)
+    return 0;
+}
 ```
 
 ---
@@ -1403,14 +1423,16 @@ say("Thread returned: " . $result);
 
 ### Sharing Data with Mutexes
 
+Closures capture a snapshot of each variable, so shared mutable state lives in a hash reference (the reference is what gets captured, and it still points at the same hash):
+
 ```strada
-my int $counter = 0;
+my scalar $state = { "counter" => 0 };
 my scalar $mutex = thread::mutex_new();
 
 my scalar $worker = func () {
-    for (my int $i = 0; $i < 1000; $i = $i + 1) {
+    foreach my int $i (1..1000) {
         thread::mutex_lock($mutex);
-        $counter = $counter + 1;
+        $state->{"counter"} = $state->{"counter"} + 1;
         thread::mutex_unlock($mutex);
     }
 };
@@ -1422,7 +1444,7 @@ my scalar $t2 = thread::create($worker);
 thread::join($t1);
 thread::join($t2);
 
-say("Counter: " . $counter);  # 2000
+say("Counter: " . $state->{"counter"});  # 2000
 
 thread::mutex_destroy($mutex);
 ```
@@ -1430,7 +1452,7 @@ thread::mutex_destroy($mutex);
 ### Condition Variables
 
 ```strada
-my int $ready = 0;
+my scalar $state = { "ready" => 0 };
 my scalar $mutex = thread::mutex_new();
 my scalar $cond = thread::cond_new();
 
@@ -1439,14 +1461,14 @@ my scalar $producer = thread::create(func () {
     core::sleep(1);  # Simulate work
 
     thread::mutex_lock($mutex);
-    $ready = 1;
+    $state->{"ready"} = 1;
     thread::cond_signal($cond);
     thread::mutex_unlock($mutex);
 });
 
 # Consumer waits
 thread::mutex_lock($mutex);
-while ($ready == 0) {
+while ($state->{"ready"} == 0) {
     thread::cond_wait($cond, $mutex);
 }
 say("Data is ready!");

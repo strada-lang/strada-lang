@@ -32,13 +32,13 @@ The Strada compiler is **self-hosting**, meaning it's written in Strada itself. 
 
 ```
 ┌─────────────────────┐
-│  Bootstrap Compiler │  Written in C (~4,400 lines)
+│  Bootstrap Compiler │  Written in C (~6,100 lines)
 │  (bootstrap/stradac)│  FROZEN - no longer modified
 └──────────┬──────────┘
            │ compiles
            ▼
 ┌─────────────────────┐
-│ Self-Hosting Compiler│  Written in Strada (~32,400 lines)
+│ Self-Hosting Compiler│  Written in Strada (~37,100 lines)
 │    (./stradac)      │  PRIMARY - all development here
 └──────────┬──────────┘
            │ compiles
@@ -58,13 +58,13 @@ The bootstrap compiler is written in C. It exists only to compile the self-hosti
 
 | File | Lines | Description |
 |------|-------|-------------|
-| `lexer.c/h` | ~400 | Tokenizer |
-| `parser.c/h` | ~1,200 | Recursive descent parser |
-| `ast.c/h` | ~600 | AST node definitions |
-| `codegen.c/h` | ~2,150 | C code generator |
-| `main.c` | ~100 | Entry point |
+| `lexer.c/h` | ~600 | Tokenizer |
+| `parser.c/h` | ~1,350 | Recursive descent parser |
+| `ast.c/h` | ~1,150 | AST node definitions |
+| `codegen.c/h` | ~2,850 | C code generator |
+| `main.c` | ~120 | Entry point |
 
-**Total: ~4,450 lines of C**
+**Total: ~6,100 lines of C**
 
 ### 2. Self-Hosting Compiler (`compiler/`) - PRIMARY
 
@@ -72,19 +72,19 @@ The self-hosting compiler is written in Strada. This is where all development ha
 
 | File | Lines | Description |
 |------|-------|-------------|
-| `AST.strada` | ~1,150 | AST node types and constructors |
-| `Lexer.strada` | ~2,100 | Tokenizer |
-| `Parser.strada` | ~6,300 | Recursive descent parser |
-| `Semantic.strada` | ~1,500 | Semantic analysis |
-| `CodeGen.strada` | ~3,600 | C code generator (core) |
-| `CodeGenExpr.strada` | ~4,900 | Expression code generation |
-| `CodeGenStmt.strada` | ~3,900 | Statement code generation |
-| `CodeGenBuiltins.strada` | ~8,600 | Built-in function code generation |
-| `Main.strada` | ~390 | Entry point |
+| `AST.strada` | ~1,200 | AST node types and constructors |
+| `Lexer.strada` | ~2,450 | Tokenizer |
+| `Parser.strada` | ~6,900 | Recursive descent parser |
+| `Semantic.strada` | ~1,900 | Semantic analysis |
+| `CodeGen.strada` | ~4,450 | C code generator (core) |
+| `CodeGenBuiltins.strada` | ~9,050 | Built-in function code generation |
+| `CodeGenExpr.strada` | ~5,900 | Expression code generation |
+| `CodeGenStmt.strada` | ~4,750 | Statement code generation |
+| `Main.strada` | ~460 | Entry point |
 
-**Total: ~32,400 lines of Strada**
+**Total: ~37,100 lines of Strada**
 
-The self-hosting compiler is combined into a single `Combined.strada` file during build, then compiled to `Combined.c` by the bootstrap compiler, and finally linked into `./stradac`.
+The self-hosting compiler is combined into a single `Combined.strada` file during build. The bootstrap compiler compiles that to `Combined_stage1.c`, which is built into a throwaway stage-1 compiler (`stradac_stage1`); the stage-1 compiler then recompiles `Combined.strada` to `Combined.c`, which is compiled and linked into the final `./stradac`.
 
 ### 3. Runtime Library (`runtime/`)
 
@@ -92,8 +92,8 @@ The runtime provides memory management, data structures, and built-in functions.
 
 | File | Lines | Description |
 |------|-------|-------------|
-| `strada_runtime.c` | ~24,700 | Runtime implementation |
-| `strada_runtime.h` | ~2,080 | Runtime header |
+| `strada_runtime.c` | ~29,600 | Runtime implementation |
+| `strada_runtime.h` | ~2,300 | Runtime header |
 
 ## Interpreter (Alternative Execution Path)
 
@@ -170,7 +170,7 @@ Becomes:
 - Delimiters: `(`, `)`, `{`, `}`, `[`, `]`, `;`, `,`
 - Literals: integers, floats, strings, `TR_LITERAL` (transliteration `tr///` / `y///`)
 - Identifiers: variable and function names
-- Special: `LOCAL` token for `local()` declarations
+- Special: `LOCAL` token for `local` declarations
 
 ### Stage 2: Parsing (Parser)
 
@@ -246,10 +246,9 @@ strada_say(x);
 
 ### Declarations
 - `NODE_PROGRAM` - Root node
-- `NODE_FUNCTION` - Function definition
+- `NODE_FUNC` - Function definition
 - `NODE_PARAM` - Function parameter
 - `NODE_VAR_DECL` - Variable declaration
-- `NODE_STRUCT_DEF` - Struct definition
 
 ### Statements
 - `NODE_BLOCK` - Code block
@@ -258,8 +257,8 @@ strada_say(x);
 - `NODE_FOR_STMT` - For loop
 - `NODE_RETURN_STMT` - Return statement
 - `NODE_EXPR_STMT` - Expression statement
-- `NODE_LAST_STMT` - Break (last)
-- `NODE_NEXT_STMT` - Continue (next)
+- `NODE_LAST` - Break (last)
+- `NODE_NEXT` - Continue (next)
 - `NODE_REDO` - Redo (restart iteration)
 - `NODE_FOREACH_STMT` - Foreach loop
 - `NODE_DO_WHILE_STMT` - Do-while loop
@@ -290,7 +289,7 @@ strada_say(x);
 
 ### Transliteration and Scoping
 - `NODE_TR` - Transliteration operator (`tr///` / `y///`)
-- `NODE_LOCAL_DECL` - Dynamic scoping declaration (`local()`)
+- `NODE_LOCAL_DECL` - Dynamic scoping declaration (`local $var = ...;`)
 
 ## Closure Implementation
 
@@ -307,7 +306,7 @@ say($f->(5));  # 50
 
 **Generated C:**
 ```c
-// Forward declaration with triple pointer for capture-by-reference
+// Forward declaration: captures arrive as an array of capture cells
 StradaValue* __anon_func_0(StradaValue ***__captures, StradaValue *n);
 
 // In the enclosing function:
@@ -323,10 +322,11 @@ StradaValue* __anon_func_0(StradaValue ***__captures, StradaValue *n) {
 
 ### Capture Mechanism
 
-Closures use **capture-by-reference** with triple pointers:
+Closures receive their captures through triple pointers. Scalars are captured **by value** (a snapshot taken when the closure is created); arrays and hashes are shared, since the snapshot is a pointer to the same container:
 
-1. **At closure creation**: Addresses of captured variables are stored in an array
+1. **At closure creation**: Addresses of captured variables are passed in an array
    - `(StradaValue**[]){&var1, &var2}` - array of pointers to pointers
+   - `strada_closure_new()` copies each variable's current value into a private, refcounted cell owned by the closure (it does not keep the addresses)
 
 2. **Function signature**: Anonymous functions receive captures as first parameter
    - `StradaValue ***__captures` - pointer to array of double pointers
@@ -334,8 +334,8 @@ Closures use **capture-by-reference** with triple pointers:
 3. **Capture access**: Variables are accessed through double dereference
    - `(*__captures[idx])` - dereference to get the actual StradaValue*
 
-4. **Mutation**: Assignments to captured variables update the original
-   - `(*__captures[idx]) = new_value` - modifies outer variable
+4. **Mutation**: Assignments to captured variables update the closure's own cell
+   - `(*__captures[idx]) = new_value` - persists across calls of this closure, but does not modify the outer variable (and later changes to the outer variable are not seen by the closure)
 
 ### Capture Detection
 
@@ -419,7 +419,7 @@ Key properties:
 
 ### Concat Key Skip-Intern Optimization
 
-Hash key storage uses `strdup()` instead of `strada_intern_str()` for keys set via `strada_hash_set_with_hash()`. Concatenated keys (e.g., `"item_" . $i`) are typically unique, so interning wastes time. `strada_intern_release()` handles both interned and non-interned keys transparently.
+Hash keys built by concatenation (e.g., `"item_" . $i`) are typically unique, so interning them wastes time; such keys are stored without going through the intern table (`strada_hv_store_concat()`). `strada_intern_release()` handles both interned and non-interned keys transparently.
 
 Combined with tagged integers, Strada achieves 3.4-3.5x faster performance than Python/Perl on hash-heavy integer workloads.
 
@@ -453,10 +453,12 @@ When you write:
 use Math::Utils;
 ```
 
-The compiler searches:
-1. `lib/Math/Utils.strada`
-2. `./Math/Utils.strada`
-3. Custom paths from `use lib`
+The compiler searches, in order:
+1. Paths given with `-L` on the command line
+2. Paths from `use lib "..."` statements
+3. Low-priority `-LL` paths (the `strada` driver passes its bundled `lib/` here, so the standard library modules are always found)
+
+There is no implicit search of the current directory: a project-local module directory must be named with `use lib` or `-L`.
 
 ### Namespace Prefixing
 
@@ -474,17 +476,7 @@ StradaValue* Math_Utils_add(StradaValue* a, StradaValue* b) { ... }
 
 ### Selective Imports
 
-```strada
-use Math::Utils qw(add multiply);
-```
-
-Generates:
-```c
-extern StradaValue* Math_Utils_add();
-#define add Math_Utils_add
-extern StradaValue* Math_Utils_multiply();
-#define multiply Math_Utils_multiply
-```
+Import lists are not supported: `use Math::Utils qw(add multiply);` is a parse error. Call module functions by their qualified name (`Math::Utils::add(1, 2)`).
 
 ## `__C__` Blocks
 
@@ -533,6 +525,8 @@ Key points:
 | Target | Description |
 |--------|-------------|
 | `make` | Build self-hosting compiler (default) |
+| `make quick` | Fast rebuild of `./stradac` using the existing `./stradac` (no bootstrap chain) |
+| `make test-suite` | Run the full test suite (`t/run_tests.sh`) |
 | `make run PROG=x` | Compile and run example with self-hosting compiler |
 | `make run-bootstrap PROG=x` | Compile example with bootstrap compiler |
 | `make examples` | Build all example programs |
@@ -551,12 +545,22 @@ make
 # This does:
 #   a. Build bootstrap compiler (C) if needed
 #   b. Combine compiler/*.strada into Combined.strada
-#   c. Compile Combined.strada to Combined.c using bootstrap
-#   d. Link Combined.c + runtime into ./stradac
+#   c. Compile Combined.strada to Combined_stage1.c using bootstrap
+#   d. Build the throwaway stage-1 compiler (stradac_stage1) from it
+#      (with tcc when tcc is installed, otherwise $(CC) -O0)
+#   e. Stage 1 recompiles Combined.strada to Combined.c
+#   f. Compile Combined.c (gcc -O1) + link with the runtime into ./stradac
+#   g. Build the strada-driver binary behind the ./strada shim,
+#      then the tools (tools/) and libraries (lib/)
+
+# Fast edit/test loop while hacking on compiler/*.strada (needs an existing
+# ./stradac; skips the bootstrap chain, so run a full `make` and
+# `make test-selfhost` before committing):
+make quick
 
 # 2. Compile a program with self-hosting compiler
 ./stradac program.strada program.c
-gcc -o program program.c runtime/strada_runtime.c -Iruntime -ldl
+gcc -o program program.c runtime/strada_runtime.c -Iruntime -ldl -lm
 ./program
 
 # Or use the shortcut:
@@ -583,7 +587,7 @@ When the `-p` flag is set, CodeGen wraps each function body with `strada_profile
 
 The `--full-profile` flag enables comprehensive line-level instrumentation, similar to Perl's Devel::NYTProf. It implies `-g` (debug/line info).
 
-**CodeGen behavior**: When full profiling is enabled, the code generator inserts a `strada_full_profile_tick(file, line)` call before each statement. This records the source file, line number, and high-resolution timestamp.
+**CodeGen behavior**: When full profiling is enabled, the code generator inserts a `strada_full_profile_line(file_id, line)` call before each statement. This records the source file, line number, and high-resolution timestamp.
 
 **Runtime behavior**: The profiled program writes a binary `strada-prof.out` file on exit containing per-line execution counts and timing data.
 
@@ -594,6 +598,8 @@ The `--full-profile` flag enables comprehensive line-level instrumentation, simi
 **Programmatic API**: `core::full_profile_start(file)` and `core::full_profile_stop()` allow enabling/disabling profiling at runtime for targeted analysis of specific code sections.
 
 ## Error Handling
+
+Compile-time diagnostics are reported as `file:line[:col]: message` followed by the offending source line and a caret, and one run reports every error found (parse errors recover at function boundaries; semantic errors accumulate).
 
 ### Lexer Errors
 - Unexpected character
@@ -626,12 +632,9 @@ The self-hosting compiler applies several automatic optimizations during code ge
 
 ## Future Improvements
 
-1. **Optimization passes** - Dead code elimination, constant folding
-2. **Better error messages** - Line numbers, source context
-3. **Type checking** - Enforce type annotations at compile time
-4. **Incremental compilation** - Only recompile changed modules
-5. **Debug information** - Generate DWARF debug info
-6. **LLVM backend** - Alternative to C generation
+1. **Optimization passes** - Dead code elimination, more constant folding
+2. **Type checking** - Enforce type annotations at compile time (today `--strict-types` only warns)
+3. **LLVM backend** - Alternative to C generation
 
 ---
 
@@ -654,7 +657,11 @@ strada/
 │   ├── AST.strada      # AST node types
 │   ├── Lexer.strada    # Tokenizer
 │   ├── Parser.strada   # Parser
-│   ├── CodeGen.strada  # Code generator
+│   ├── Semantic.strada # Semantic analysis
+│   ├── CodeGen.strada  # Code generator (core)
+│   ├── CodeGenBuiltins.strada # Built-in function codegen
+│   ├── CodeGenExpr.strada     # Expression codegen
+│   ├── CodeGenStmt.strada     # Statement codegen
 │   ├── Main.strada     # Entry point
 │   ├── Combined.strada # Combined source (generated)
 │   └── Combined.c      # Compiled to C (generated)

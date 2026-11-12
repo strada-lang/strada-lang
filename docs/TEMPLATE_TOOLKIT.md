@@ -8,18 +8,21 @@ corpus (see [Testing](#testing)).
 ```strada
 use Template;
 
-my $tt  = Template::new({ INCLUDE_PATH => "templates", STRICT => 0 });
-my $out = $tt->process("page.tt", { name => "World", items => [1, 2, 3] });
+func main() int {
+    my $tt  = Template::new({ INCLUDE_PATH => "templates", STRICT => 0 });
+    my $out = $tt->process("page.tt", { name => "World", items => [1, 2, 3] });
 
-# inline, no file lookup:
-my $s = $tt->process_string("[% name %]!", { name => "Hi" });
+    # inline, no file lookup:
+    my $s = $tt->process_string("[% name %]!", { name => "Hi" });
 
-# one-shot convenience:
-my $s2 = Template::render("[% 2 + 3 %]", {});
+    # one-shot convenience:
+    my $s2 = Template::render("[% 2 + 3 %]", {});
+    return 0;
+}
 ```
 
 `process` resolves `name` through `INCLUDE_PATH`; `process_string` renders a
-literal string. Both return the rendered text (and throw a `Template::Exception`
+literal string. Both return the rendered text (and throw an exception hashref
 on error — see [Error handling](#error-handling)).
 
 ## Architecture

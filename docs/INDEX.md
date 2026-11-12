@@ -26,10 +26,24 @@ Welcome to the Strada programming language documentation. Strada is a strongly-t
 |----------|-------------|
 | [Debugging Guide](DEBUGGING.md) | Using GDB with Strada programs, line-level profiling |
 | [FFI Guide](FFI_GUIDE.md) | C integration and foreign functions |
-| [Perl Integration](PERL_INTEGRATION.md) | Calling Perl from Strada and vice versa |
 | [Runtime API](RUNTIME_API.md) | C runtime library reference |
 | [Compiler Architecture](COMPILER_ARCHITECTURE.md) | How the compiler works |
+| [Understanding the Compiler](UNDERSTANDING_THE_COMPILER.md) | Beginner-friendly, step-by-step tour of the compiler |
+| [Interpreter](INTERPRETER.md) | `strada-interp`: bytecode VM and tree-walking backends |
+| [Event Loop](EVENT_LOOP.md) | `Async::Loop` event loop and green tasks (experimental) |
+| [Packages](PACKAGES.md) | Pacco, the Strada package manager |
+| [Template Toolkit](TEMPLATE_TOOLKIT.md) | `lib/Template`: port of Perl's Template::Toolkit |
 | [Perl Integration](PERL_INTEGRATION.md) | Perl interop, Perla compiler, and conversion tools |
+
+## Compact References and Man Pages
+
+| Document | Description |
+|----------|-------------|
+| [Strada Quick Guide](strada-quick.md) | Compact working memory for writing and maintaining Strada programs |
+| [Quick Memory](STRADA_QUICK_MEMORY.md) | Single-file reminder for day-to-day Strada programming |
+| [Strada for Claude](STRADA_FOR_CLAUDE.md) | Self-contained reference for writing Strada code |
+| [strada(1)](strada.1.md), [stradac(1)](stradac.1.md) | Man pages for the driver and the compiler |
+| [extended/](extended/) | Topic deep-dives: async, filehandles, math, memory, regex, repl, structs, sys (core::), types |
 
 ## Quick Example
 
@@ -69,13 +83,13 @@ Compile and run:
 - Control flow: `if/elsif/else` (also `else if`), `unless`, `while`, `until`, `for`, `foreach`, `do-while`, statement modifiers
 - Built-ins: `say`, `push`, `pop`, `splice`, `keys`, `values`, `each`, `split`, `join`
 - Transliteration: `tr///` / `y///` for character replacement
-- Scoping: `local()` for dynamic scoping of global variables
+- Scoping: `local` for dynamic scoping of `our` (global) variables
 - I/O: `select($fh)` for setting default output filehandle
 - Regex: `/e` modifier for expression evaluation in substitutions
 - Magic variables: `tie`/`untie`/`tied` for custom variable implementations
 
 ### Modern Features
-- **Closures** with captured variables
+- **Closures** with captured variables (scalars are captured by value)
 - **Multithreading** with mutexes and condition variables
 - **Exception handling** with try/catch/throw
 - **OOP** with multiple inheritance, SUPER::, DESTROY
@@ -85,7 +99,7 @@ Compile and run:
 ### REPL and Scripting
 - `strada --repl` routes through `strada-jit` (real native compilation via tcc/gcc + dlopen), so the REPL supports the full language — closures, try/catch, OOP, the lot. tcc is auto-detected for snappier per-line latency; falls back to gcc.
 - `strada --script FILE` runs in **whole-file mode** by default (`gcc` slurps the whole file once and exec's the binary). Pass `--chunked` for line-by-line REPL semantics.
-- Bytecode VM and tree-walking interpreter still exist under `interpreter/strada-interp` (opt-in via `make interpreter`). Embedded `Strada::Interpreter::eval()` defaults to the tree-walking backend so it works out of the box without `-DHAVE_VM` in the runtime.
+- Bytecode VM and tree-walking interpreter still exist under `interpreter/strada-interp` (opt-in via `make interpreter`). Embedded `Strada::Interpreter::eval_string()` defaults to the tree-walking backend so it works out of the box without `-DHAVE_VM` in the runtime.
 
 ### Performance
 - Compiles to C, then native code
@@ -95,9 +109,9 @@ Compile and run:
 ## Project Status
 
 Strada is a fully functional, self-hosting language with:
-- ~2,300 lines of compiler code (in Strada)
-- ~5,000 lines of runtime code (in C)
-- 93+ working example programs
+- ~74,000 lines of compiler code (in Strada)
+- ~29,500 lines of runtime code (in C)
+- 260+ example programs
 - Comprehensive standard library
 
 ## Getting Help
@@ -119,4 +133,4 @@ In addition to this `docs/` directory, see these key files in the project root:
 
 ## Version
 
-This documentation covers Strada as of May 2026.
+This documentation covers Strada as of November 2026.

@@ -16,9 +16,10 @@ Strada is a strongly-typed, Perl-inspired language that **compiles to C, then to
 ./strada hello.strada       # compile to ./hello executable
 ./strada -r hello.strada    # compile and run
 ./strada -c hello.strada    # also keep the generated .c
-./strada -O2 hello.strada   # optimize (LTO enabled at -O2+)
+./strada -O2 hello.strada   # optimize (the default; LTO enabled at -O2+)
 ./strada -O3 hello.strada   # LTO + -march=native
 ./strada -g hello.strada    # debug symbols
+./strada --check hello.strada  # syntax/semantic check only (no output), reports all errors
 ./strada --shared lib.strada     # build .so shared library
 ./strada --static-lib lib.strada # build .a static library
 ```
@@ -32,7 +33,7 @@ func main() int {
 }
 ```
 
-A program needs a `func main() int { ... return 0; }` entry point. The return type is `int`, and `0` means success (standard exit code convention).
+A program needs a `func main() int { ... return 0; }` entry point. The return type is `int`, and `0` means success (standard exit code convention). **There is no top-level script code:** only declarations (`func`, `package`, `has`, `our`, `const`, `enum`, `use`, ...) may appear outside a function — every executable statement must be inside a function. (Snippets below that show bare statements are fragments meant to sit inside a function body.)
 
 ---
 
@@ -42,7 +43,7 @@ Three sigils, each defaulting to a type:
 
 | Sigil | Used for | Default type |
 |---|---|---|
-| `$` | scalars, plus element access on `@arr[0]` and `%hash{"key"}` | `scalar` |
+| `$` | scalars, plus element access: `$arr[0]` and `$hash{"key"}` | `scalar` |
 | `@` | whole-array operations | `array` |
 | `%` | whole-hash operations | `hash` |
 
@@ -72,7 +73,7 @@ my hash %config = ("port" => 8080, "host" => "localhost");
 our int $GLOBAL_COUNTER = 0;
 ```
 
-`local $var = expr;` does dynamic scoping — saves/restores the value across the rest of the enclosing block.
+`local $var = expr;` does dynamic scoping on an `our` variable — the old value is restored when the enclosing **function** returns (not at the end of an inner block). `local($var) = ...` with parens is not accepted.
 
 ### Primitive types
 
@@ -91,13 +92,13 @@ The `dynamic` return type lets a function react to whether its result is being a
 
 ### Conversion
 
-Implicit coercions follow Perl's rules. Explicit coercions:
+Implicit coercions follow Perl's rules. `int()` is the only conversion *function* — `num(...)` and `str(...)` do **not** exist (`num`/`str` are type keywords, so calling them is a parse error). Convert with arithmetic, concatenation, or a typed declaration:
 
 ```strada
-my int $i = int($str);     # parse string → int
-my num $n = num($str);     # parse string → float
-my str $s = str($i);       # int → string
-say(typeof($val));         # returns "int", "num", "str", "array", "hash", "ref", "undef", ...
+my int $i = int($str);     # parse string → int ("42abc" → 42)
+my num $n = $str + 0;      # parse string → number
+my str $s = "" . $i;       # number → string
+say(typeof($val));         # returns "int", "num", "str", "array", "hash", "ref", "undef", ... (any reference/object is "ref"; use ref() for ARRAY/HASH/class)
 ```
 
 ### Scalar context and list flattening
@@ -142,7 +143,7 @@ my array @byname = sort { $a cmp $b; } @strings;
 
 ### Logical
 
-`&&`, `||`, `//` (defined-or), `!`. Low-precedence aliases: `and`, `or`, `not`.
+`&&`, `||`, `//` (defined-or), `!`. There are **no** `and` / `or` / `not` word operators (parse error) — use `&&`, `||`, `!`.
 
 `||` returns the actual value, not a boolean (Perl-style):
 
@@ -160,11 +161,11 @@ my int $port = $cfg{"port"} // 8080;   # 0 stays as 0; only undef → default
 
 - `.` — concatenation: `"hello " . $name`
 - `x` — repetition: `"-" x 40` produces 40 dashes
-- Interpolation in double-quoted strings (see Strings section).
+- Interpolation in double-quoted strings — **only the braced `${name}` form** (see Strings section).
 
 ### Assignment
 
-`=`, `+=`, `-=`, `*=`, `/=`, `.=`, `//=`. Compound assignments work with `int`-typed variables and stay on the tagged-int fast path.
+`=`, `+=`, `-=`, `*=`, `/=`, `%=`, `**=`, `.=`, `//=`. Compound assignments work with `int`-typed variables and stay on the tagged-int fast path.
 
 ### Bitwise
 
@@ -207,8 +208,9 @@ Bare `last`, `next`, `redo` apply to the innermost loop.
 say("verbose mode") if $verbose;
 return 0 unless $ok;
 $i = $i + 1 while $i < 10;
-print($_) for @arr;
 ```
+
+The modifiers are `if`, `unless`, `while`, `until`. There is no `for`/`foreach` statement modifier (`print($_) for @arr;` is a parse error — write a `foreach` loop). `throw EXPR if COND;` is also a parse error; use `if (COND) { throw EXPR; }` (`die(...) unless COND;` is fine).
 
 ---
 
@@ -230,10 +232,25 @@ func default_ret($x) { return $x + 1; }    # params and return default to scalar
 my scalar $double = func(int $n) int { return $n * 2; };
 my int $r = $double->(21);     # 42
 
-# Closures capture surrounding variables by reference
+# Call a closure with ->( ); `$double(21)` is a parse error.
+
+# Scalars are captured BY VALUE: the closure gets its own private copy,
+# which persists between calls but is not shared with the outer variable.
 my int $count = 0;
-my scalar $tick = func() void { $count = $count + 1; };
-$tick(); $tick(); say($count);  # 2
+my scalar $tick = func() int { $count = $count + 1; return $count; };
+$tick->(); say($tick->());      # 2  (the closure's own counter)
+say($count);                    # 0  (outer variable is unchanged)
+
+# Arrays and hashes ARE shared with the enclosing scope:
+my array @seen = ();
+my scalar $note = func(int $v) void { push(@seen, $v); };
+$note->(1); $note->(2); say(scalar(@seen));   # 2
+
+# To share a scalar, capture a reference to it:
+my int $n = 0;
+my scalar $nref = \$n;
+my scalar $bump = func() void { $$nref = $$nref + 1; };
+$bump->(); $bump->(); say($n);  # 2
 ```
 
 ### Variadic and spread
@@ -277,15 +294,15 @@ Private functions are `static` in C and not exported from a module.
 ### Async functions
 
 ```strada
-async func fetch(str $url) str { return http_get($url); }
+async func fetch(str $url) str { return "body of " . $url; }
 
-my scalar $f = fetch("http://example.com");
+my scalar $f = fetch("http://example.com");   # returns a future immediately
 my str $content = await $f;
 ```
 
 ### Function references / first-class
 
-A bare function name passed to a scalar variable is taken as a reference:
+`\&name` takes a reference to a named function; call it with `->( )`:
 
 ```strada
 my scalar $fn = \&add;
@@ -299,22 +316,30 @@ my int $r = $fn->(2, 3);       # 5
 ### Quoting
 
 ```strada
-"double quoted"          # interpolates variables and \n, \t, etc.
+"double quoted"          # interpolates ${var} and \n, \t, etc.
 'single quoted'          # raw, no interpolation
 q(text)                  # like single quotes
-qq(text $var)            # like double quotes
+qq(text ${var})          # like double quotes
 qw(one two three)        # word list — same as ("one","two","three")
 ```
 
 ### Interpolation
 
+**Only the braced form `${name}` of a plain scalar variable interpolates** (in `"..."`, `qq(...)`, and `<<EOT` / `<<"EOT"` heredocs). A bare `$name` inside a string is literal text — it compiles fine and prints `$name`.
+
 ```strada
 my str $name = "World";
-say("Hello, $name!");                       # Hello, World!
-say("Total: ${count}");                     # explicit braces
-say("Sum: ${\ ($a + $b) }");                # arbitrary expression
-say("Item: $arr[0]");                       # array element
-say("Key: $hash{name}");                    # hash element (bare key)
+my int $count = 3;
+say("Hello, ${name}!");                     # Hello, World!
+say("Total: ${count}");                     # Total: 3
+say("Hello, $name!");                       # prints: Hello, $name!   (NOT interpolated)
+say("Cost: \$5");                           # \$ is a literal dollar sign
+
+# Elements, method calls and expressions do not interpolate
+# ("$arr[0]", "$hash{name}", "${\ ($a + $b) }" do not work) — concatenate or use sprintf:
+say("Item: " . $arr[0]);
+say("Key: " . $hash{"name"});
+say(sprintf("Sum: %d", $a + $b));
 ```
 
 ### Heredocs
@@ -334,7 +359,7 @@ Same as bare <<EOT.
 EOT
 ```
 
-The semicolon goes on the `<<EOT;` line.
+The semicolon goes on the `<<EOT;` line. Bare and double-quoted heredocs interpolate `${name}` like double-quoted strings. The value has no trailing newline after its last line (`$body` above is `"Multi-line\ntext here."`).
 
 ### Common string operations
 
@@ -348,14 +373,14 @@ ucfirst($s)   lcfirst($s)
 trim($s)
 chr(65)                         # "A"
 ord("A")                        # 65
-"a-b-c" =~ /-/                  # split-style with regex
+"a-b-c" =~ /-/                  # regex match (true/false)
 split(/,/, $csv)                # → array
 join(",", @arr)                 # → string
-reverse($s)                     # reversed string (or array if @-sigil arg)
+reverse($s)                     # reversed string (reversed copy of the array if @-sigil arg)
 sprintf("%d/%d", $a, $b)
 ```
 
-Many string built-ins default to `$_` when called with no arg: `chomp`, `uc`, `lc`, `length`, `ucfirst`, `lcfirst`, `trim`, `defined`, `chr`, `ord`, `say`, `print`, `chop`.
+Many string built-ins default to `$_` when called with no arg (write the empty parens: `uc()`, `chomp()`): `chomp`, `uc`, `lc`, `length`, `ucfirst`, `lcfirst`, `trim`, `defined`, `chr`, `ord`, `say`, `print`, `chop`.
 
 ### `.=`, `x`
 
@@ -383,9 +408,9 @@ my $last = pop(@arr);
 unshift(@arr, 0);               # prepend
 my $first = shift(@arr);
 scalar(@arr);                   # length
-reverse(@arr);                  # in-place reverse
-sort(@arr);                     # default string sort
-sort { $a <=> $b; } @arr;       # numeric sort
+my array @rev = reverse(@arr);  # returns a reversed copy (@arr is unchanged)
+my array @srt = sort(@arr);     # default string sort — returns a sorted copy
+my array @num = sort { $a <=> $b; } @arr;   # numeric sort
 splice(@arr, 1, 2);             # remove 2 elements starting at index 1
 splice(@arr, 1, 0, 88, 99);     # insert 88, 99 at index 1
 ```
@@ -443,7 +468,7 @@ $h{"new_key"} = 99;             # add or update
 foreach my str $k (keys(%h)) { say($k . " = " . $h{$k}); }
 foreach my int $v (values(%h)) { ... }
 
-# each() returns [key, value] pairs; iterator state lives in the hash
+# each() returns a (key, value) pair, or an empty list when done; iterator state lives in the hash
 my array @pair = each(%h);
 while (scalar(@pair) > 0) {
     say($pair[0] . " => " . $pair[1]);
@@ -480,7 +505,7 @@ $h{"a"}{"b"}{"c"} = 42;         # auto-creates intermediate hashrefs
 
 ## References and dereferencing
 
-Strada uses Perl-style references. `\` takes a reference; `$$`, `@$`, `%$` (or `${...}`, `@{...}`, `%{...}`) dereference.
+Strada uses Perl-style references. `\` takes a reference; `$$`, `@$`, `%$` (or `@{...}`, `%{...}`) dereference. The braced scalar form `${$ref}` is **not** accepted — write `$$ref`.
 
 ```strada
 my int $x = 10;
@@ -501,8 +526,7 @@ $$sref;                          # 10
 $aref->[0];                      # 1 (arrow is preferred for refs)
 $href->{"k"};                    # 1
 
-${$sref};                        # explicit
-@{$aref};
+@{$aref};                        # braced forms (arrays and hashes only)
 %{$href};
 ```
 
@@ -515,7 +539,7 @@ my hash %parent = ();
 my hash %child = ();
 $child{"parent"} = \%parent;
 $parent{"child"} = \%child;
-core::weaken(\$parent{"child"});      # break the cycle
+core::weaken($parent{"child"});       # break the cycle (pass the ref itself, not \$...)
 ```
 
 ---
@@ -557,13 +581,13 @@ $str =~ tr/a-z/A-Z/;                 # uppercase
 $str =~ y/abc/xyz/;                  # y/// is the same as tr///
 ```
 
-### Default-target matching
+### Always name the match target
 
-`m/PATTERN/` (or just `/PATTERN/`) matches against `$_` if no target is given:
+There is no implicit `$_` match: `m/PATTERN/` is a parse error, and a bare `/PATTERN/` used as a condition compiles but is **always true** (it does not test `$_`). Write the target explicitly:
 
 ```strada
 foreach (@lines) {
-    if (/error/i) { ... }
+    if ($_ =~ /error/i) { ... }
 }
 ```
 
@@ -625,9 +649,8 @@ has [ro|rw] TYPE $NAME [= DEFAULT] [(OPTIONS)];
 | `ro` | Generate getter only (default if omitted) |
 | `rw` | Generate getter + `set_NAME(val)` setter |
 | `= DEFAULT` | Default value if not passed to constructor |
-| `(required)` | Must be passed to constructor |
-| `(lazy)` | Computed on first access |
-| `(builder => "method_name")` | Function that computes the lazy value |
+| `(required)` | Marks the attribute as required. Documentation only at present: the generated constructor does **not** raise an error when it is omitted (the attribute is just undef). |
+| `(lazy)`, `(builder => "method_name")` | Accepted by the parser but currently have **no effect** (the builder is never called). Compute lazily in a hand-written method instead. |
 
 ### Auto-generated constructor
 
@@ -637,6 +660,8 @@ When a package has `has` attributes and no explicit `func new(...)`, the compile
 my scalar $p = Person::new("name", "Alice", "age", 30);
 ```
 
+Pass the pairs **comma-separated**. Do not use `=>` in the call (`Person::new(name => "Alice")`): in a call argument list `k => v` builds a pair value rather than two arguments, so the attributes silently keep their defaults.
+
 If you write your own `new`, the auto-generated one is suppressed.
 
 ### Method modifiers
@@ -644,10 +669,10 @@ If you write your own `new`, the auto-generated one is suppressed.
 ```strada
 before "method" func(scalar $self, ...) { ... }
 after  "method" func(scalar $self, ...) { ... }
-around "method" func(scalar $self, scalar $orig, ...) { ... }
+around "method" func(scalar $orig, scalar $self, ...) { ... }
 ```
 
-`around` wraps the original — call `$orig->($self, @args)` to invoke it.
+`around` wraps the original. Its first parameter is the original method (`$orig`), then `$self`, then the method's own arguments — call `$orig->($self, $arg1, ...)` to invoke it. Modifiers must be declared inside a package (not `main`).
 
 ### Multiple inheritance
 
@@ -735,8 +760,8 @@ Supported operators: `+`, `-`, `*`, `/`, `%`, `**`, `.`, `""`, `==`, `!=`, `<`, 
 
 ```strada
 package Proxy;
-func AUTOLOAD(scalar $self) scalar {
-    my str $method = $AUTOLOAD;        # the called name
+func AUTOLOAD(scalar $self, str $method, scalar ...@args) scalar {
+    # $method is the called name; @args are the call's arguments
     return "called: " . $method;
 }
 ```
@@ -772,7 +797,7 @@ try {
 
 Exceptions are scalar values. Throwing a blessed object lets typed catches match by class. Strada also accepts plain string throws.
 
-Uncaught exceptions print a stack trace and exit. Disable trace with `--no-stack-trace` flag, or programmatically:
+Uncaught exceptions print a stack trace and exit (disable trace tracking with the `--no-stack-trace` compile flag). `throw` takes no statement modifier (`throw X if COND;` is a parse error). Introspection:
 
 ```strada
 my scalar $info = core::caller();        # immediate caller
@@ -792,8 +817,10 @@ File handles are reference-counted scalars; auto-closed on scope exit. Modes: `"
 
 ```strada
 my scalar $fh = core::open("file.txt", "r");
-while (defined(my str $line = <$fh>)) {  # diamond op strips newline
+my str $line = <$fh>;                    # diamond op strips newline; undef at EOF
+while (defined($line)) {                 # (a `my` declaration inside the condition is a parse error)
     say($line);
+    $line = <$fh>;
 }
 core::close($fh);    # explicit close optional — also auto on scope exit
 
@@ -808,7 +835,7 @@ my str $out = core::qx("ls -la");
 say(STDOUT, "to stdout");
 say(STDERR, "error message");
 print(STDERR, "debug\n");
-my str $line = <STDIN>;
+my str $input = <STDIN>;
 ```
 
 ### File tests
@@ -833,13 +860,17 @@ core::flush($fh);
 
 ### Pipe and process I/O
 
-```strada
-my scalar $pipe = core::open("|gzip > file.gz", "w");
-print($pipe, $data);
-core::close($pipe);
+Use `core::popen` / `core::pclose` (`core::open` does not understand `"cmd|"` / `"|cmd"`):
 
-my scalar $rd = core::open("ls -la|", "r");
-while (defined(my str $line = <$rd>)) { say($line); }
+```strada
+my scalar $pipe = core::popen("gzip > file.gz", "w");
+print($pipe, $data);
+core::pclose($pipe);
+
+my scalar $rd = core::popen("ls -la", "r");
+my str $line = <$rd>;
+while (defined($line)) { say($line); $line = <$rd>; }
+core::pclose($rd);
 ```
 
 ### Directory operations
@@ -857,17 +888,18 @@ my str $cwd = core::getcwd();
 ## Async, threading, and concurrency
 
 ```strada
-async func fetch(str $url) str { return http_get($url); }
+async func fetch(str $url) str { return "body of " . $url; }
 
 # Single
 my scalar $f = fetch("http://example.com");
 my str $r = await $f;
 
-# Combinators
+# Combinators — these block and return the result(s) directly; do not `await` them
+# (`await` on a plain int result currently crashes)
 my array @futures = (fetch($u1), fetch($u2), fetch($u3));
-my array @results = await async::all(@futures);
-my scalar $first = await async::race(@futures);
-my scalar $r2 = await async::timeout($f, 5000);   # ms; throws on timeout
+my array @results = async::all(@futures);
+my scalar $first = async::race(@futures);
+my scalar $r2 = async::timeout($f, 5000);   # ms; throws "Future timed out" on timeout
 async::cancel($f);
 ```
 
@@ -891,11 +923,11 @@ async::unlock($m);
 
 my scalar $counter = async::atomic(0);
 async::atomic_add($counter, 1);
-my int $v = async::atomic_get($counter);
+my int $v = async::atomic_load($counter);
 async::atomic_cas($counter, $expected, $new);
 ```
 
-The default thread pool has 4 workers; tune with `async::set_pool_size($n)`.
+The default thread pool has 4 workers; call `async::pool_init($n)` before the first async call to choose a different size.
 
 ---
 
@@ -950,7 +982,7 @@ Built-in namespaces that don't need importing:
 | Namespace | Scope |
 |---|---|
 | `core::` | System, libc, I/O, profiling, introspection |
-| `sys::` | Legacy alias for `core::` (both work) |
+| `sys::` | Legacy alias for `core::` (still works, but the compiler prints a deprecation warning — write `core::`) |
 | `math::` | `sin`, `cos`, `sqrt`, `pow`, `floor`, `log`, `rand`, etc. |
 | `async::` | `all`, `race`, `timeout`, `channel`, `mutex`, `atomic`, ... |
 | `c::` | Low-level: `c::alloc`, `c::free`, `c::is_null`, ... |
@@ -969,7 +1001,7 @@ core::pack("NnC", $a, $b, $c)
 core::unpack("NnC", $packed)
 core::base64_encode($bytes), core::base64_decode($s)
 core::time(), core::sleep($s)
-core::weaken(\$ref), core::isweak(\$ref)
+core::weaken($ref), core::isweak($ref)
 core::full_profile_start("file.prof"), core::full_profile_stop()
 core::global_set/get/exists/delete/keys()       # 'our' var registry
 ```
@@ -1004,10 +1036,10 @@ math::rand()              # 0.0 ≤ x < 1.0
 
 | Function | Notes |
 |---|---|
-| `typeof($v)` | Returns `"int"`, `"num"`, `"str"`, `"array"`, `"hash"`, `"ref"`, `"undef"`, etc. |
+| `typeof($v)` | Returns `"int"`, `"num"`, `"str"`, `"array"`, `"hash"`, `"ref"` (any reference or object), `"undef"`, etc. |
 | `defined($v)` | True unless undef |
-| `ref($v)` | Reference type name, or `""` for non-refs |
-| `int($v)`, `num($v)`, `str($v)` | Convert |
+| `ref($v)` | `"ARRAY"`, `"HASH"`, `"SCALAR"`, `"CODE"`, or the class name for a blessed object; `""` for non-refs |
+| `int($v)` | Convert to integer (there is no `num()` / `str()` — use `$v + 0` / `"" . $v`) |
 | `chr($n)`, `ord($c)` | Numeric ↔ character |
 
 ### Container ops
@@ -1017,8 +1049,8 @@ math::rand()              # 0.0 ≤ x < 1.0
 | `push(@a, ...)`, `pop(@a)`, `shift(@a)`, `unshift(@a, ...)` | Array endpoint ops |
 | `scalar(@a)` | Length |
 | `splice(@a, $offset, $len?, @repl?)` | Remove/replace; returns removed |
-| `reverse(@a)` | In-place |
-| `sort(@a)` or `sort { ... } @a` | Sort with optional comparator block |
+| `reverse(@a)` | Returns a reversed copy |
+| `sort(@a)` or `sort { ... } @a` | Returns a sorted copy; optional comparator block |
 | `map { EXPR } @a` | Transform |
 | `grep { EXPR } @a` | Filter |
 | `keys(%h)`, `values(%h)`, `each(%h)` | Hash iteration |
@@ -1197,7 +1229,7 @@ For Moose-style `rw` setters to support chaining you'd write a custom setter tha
 - **`scalar(keys(%h))` for size.** Just `keys %h` in scalar context gives the count, but the explicit form is clearer and the compiler optimizes it to a single hash-size call.
 - **Empty `@{$ref}` is `undef`-able.** If `$ref` is undef, `@{$ref}` is an empty list (autoviv'd in lvalue context, empty otherwise).
 - **`split` regex:** the first arg is a regex pattern; metacharacters need escaping. `split(/,/, $csv)` — yes; `split(/./, $s)` matches *any* character — usually you want `split(/\./, $s)`. Perl rules apply: trailing empty fields are dropped (`split(",", "a,b,,")` → 2 fields; empty input → empty list), `" "` is awk mode, and a negative limit keeps trailing empties.
-- **`core::waitpid` returns the exit status, not the pid.** Under WNOHANG it returns 0 while the child runs. To find out which child exited (respawn loops), use `core::wait()`, which returns the pid.
+- **`core::waitpid` returns the raw wait status, not the pid** (a child that exits with code 3 gives 768; the exit code is `$status >> 8`). Under WNOHANG it returns 0 while the child runs. To find out which child exited (respawn loops), use `core::wait()`, which returns the pid.
 
 ---
 
@@ -1208,7 +1240,7 @@ The compiler already does these automatically — these notes help you write cod
 - **Type your hot variables as `int`.** Tagged-int arithmetic is zero-allocation: no heap, no refcount. `my int $i = 0;` in a loop counter is materially faster than `my $i = 0`.
 - **Use `int` parameter types.** Int params skip incref/decref entirely (tagged ints are immortal).
 - **`has rw int $x` accessors are inlined** to direct hash fetches — zero method-dispatch overhead. Same for setters.
-- **`Pkg::new(name => val, ...)` constructors are inlined** to direct hash construction with precomputed key hashes — no method call to a `new()` function.
+- **`Pkg::new("name", val, ...)` constructors are inlined** to direct hash construction with precomputed key hashes — no method call to a `new()` function.
 - **`$obj->isa("Pkg")` is folded at compile time** when `$obj`'s class is statically known (e.g. just assigned from `Pkg::new(...)`).
 - **CSE for repeated accessor reads.** `$self->x() * $self->x()` fetches `x` once and reuses.
 - **Pre-allocate containers** when you know the size: `my array @data[1000];`, `my hash %cache[500];`. Avoids resizes during fill.
@@ -1253,10 +1285,10 @@ Disable trace globally with the `--no-stack-trace` compile flag.
 ## Testing your code
 
 ```bash
-make test-suite                  # 148 tests
+make test-suite                  # full test suite
 ./t/run_tests.sh -v string       # verbose, only tests matching "string"
 ./t/run_tests.sh -t              # TAP format for CI
-./t/leak_tests/run_leak_tests.sh # 75 leak tests
+./t/leak_tests/run_leak_tests.sh # valgrind leak tests
 make test-selfhost               # the compiler can recompile itself (stage-2)
 ```
 
@@ -1295,11 +1327,11 @@ func summary(scalar $self) str {
 package main;
 
 func main() int {
-    my scalar $a = BankAccount::new("name", "Alice", "balance", 100.0);
+    my scalar $a = BankAccount::new("owner", "Alice", "balance", 100.0);
     $a->deposit(50.0);
     try { $a->withdraw(1000.0); }
     catch ($e) { say("error: " . $e); }
-    say($a->summary());
+    say($a->summary());                  # Alice: $150.00
     return 0;
 }
 ```
@@ -1358,15 +1390,14 @@ func main() int {
     if ($pid == 0) {
         # child
         core::close_fd($rd);
-        my scalar $w = core::fdopen($wr, "w");
-        say($w, "hello from child");
-        core::close($w);
+        core::write_fd($wr, "hello from child");
+        core::close_fd($wr);
         core::exit(0);
     } else {
         # parent
         core::close_fd($wr);
-        my scalar $r = core::fdopen($rd, "r");
-        my str $msg = <$r>;
+        my str $msg = core::read_all_fd($rd);
+        core::close_fd($rd);
         say("parent got: " . $msg);
         core::wait();
     }
@@ -1384,7 +1415,7 @@ async func work(int $id) int {
 
 func main() int {
     my array @futs = (work(1), work(2), work(3));
-    my array @results = await async::all(@futs);
+    my array @results = async::all(@futs);
     foreach my int $r (@results) { say($r); }
     return 0;
 }
@@ -1400,7 +1431,8 @@ When generating Strada code:
 2. **Type hints help.** Write `my int $x = 0;` instead of `my $x = 0;` in hot loops — the compiler emits tagged-int arithmetic.
 3. **Prefer Moose-style OOP** (`has rw int $x`) over hand-written bless boilerplate. The compiler generates faster code for it (inline accessors, inline constructor).
 4. **Use `//` for defaults**, not `||`, unless you specifically want `0`/`""` to fall through.
-5. **`func main() int { return 0; }`** is the entry point of a complete program.
+5. **`func main() int { return 0; }`** is the entry point of a complete program. No statements outside functions.
 6. **`core::` for system calls**, `math::` for math, `async::` for concurrency. No `use` needed for these.
 7. **Don't over-engineer.** Strada is Perl-flavored — small scripts and clean OOP both work without ceremony.
-8. **Test locally:** `./strada -r yourfile.strada`. The compile-and-run roundtrip is fast.
+8. **Interpolate with `"${name}"` only** — bare `"$name"` prints literally; use `.` or `sprintf` for elements and expressions. No `num()`/`str()`, no `and`/`or`/`not`, no `${$ref}`.
+9. **Test locally:** `./strada --check yourfile.strada` for a fast syntax/semantic check, `./strada -O0 -r yourfile.strada` to compile and run quickly.

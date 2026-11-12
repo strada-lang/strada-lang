@@ -76,18 +76,21 @@ Write string to a file descriptor.
 ### core::fwrite
 
 ```strada
-my int $written = core::fwrite($fh, $data, $size);
+core::fwrite($fh, $data);
 ```
 
-Write binary data to a file handle. Returns number of bytes written.
+Write the string `$data` to a file handle. The whole string is written (a
+third "size" argument is accepted but ignored) and nothing useful is returned.
 
 ### core::fread
 
 ```strada
-my str $data = core::fread($fh, $size);
+my str $data = core::fread($fh);
 ```
 
-Read binary data from a file handle.
+Read the **entire** file behind the handle (it seeks to the start first, so the
+current position is ignored). A second "size" argument is accepted but ignored;
+for sized reads use `core::fgets()` or `core::read_fd(core::fileno($fh), $n)`.
 
 ### core::readline
 
@@ -95,7 +98,7 @@ Read binary data from a file handle.
 my str $line = core::readline($fh);
 ```
 
-Read a single line from a file handle (includes newline).
+Read a single line from a file handle. The trailing newline is stripped (same as `<$fh>`); returns `undef` at EOF.
 
 ### core::seek
 
@@ -129,7 +132,7 @@ Reset file position to beginning.
 if (core::eof($fh)) { ... }
 ```
 
-Check if at end of file. Returns 1 if at EOF, 0 otherwise.
+Check if at end of file. Returns 1 if at EOF, an empty string (false) otherwise.
 
 ### core::flush
 
@@ -142,18 +145,18 @@ Flush buffered output to file.
 ### core::fgetc
 
 ```strada
-my str $ch = core::fgetc($fh);
+my int $code = core::fgetc($fh);
 ```
 
-Read a single character from file handle.
+Read a single byte from file handle. Returns its numeric code (use `chr()` to get the character), or -1 at EOF.
 
 ### core::fputc
 
 ```strada
-core::fputc($fh, $char);
+core::fputc($code, $fh);
 ```
 
-Write a single character to file handle.
+Write a single byte to file handle. Note the C-style argument order (value first, handle second); `$code` is the numeric byte value, e.g. `core::fputc(ord("A"), $fh)`.
 
 ### core::fgets
 
@@ -161,15 +164,15 @@ Write a single character to file handle.
 my str $line = core::fgets($fh, $maxlen);
 ```
 
-Read up to `$maxlen` characters or until newline.
+Read up to `$maxlen - 1` bytes or until newline (the newline is kept, as with C `fgets`). Returns `undef` at EOF.
 
 ### core::fputs
 
 ```strada
-core::fputs($fh, $str);
+core::fputs($str, $fh);
 ```
 
-Write string to file handle.
+Write string to file handle. Note the C-style argument order (string first, handle second).
 
 ### core::ferror
 
@@ -283,7 +286,7 @@ Change file permissions.
 my int $ok = core::access($path, $mode);
 ```
 
-Check file accessibility.
+Check file accessibility. Returns 0 if the access is permitted, -1 otherwise (as `access(2)`).
 
 - `$mode` - 0 (F_OK exists), 1 (X_OK exec), 2 (W_OK write), 4 (R_OK read)
 
@@ -301,7 +304,7 @@ Set file creation mask. Returns previous mask.
 my hash %st = core::stat($path);
 ```
 
-Get file status. Returns hash with keys: `dev`, `ino`, `mode`, `nlink`, `uid`, `gid`, `size`, `atime`, `mtime`, `ctime`.
+Get file status. Returns hash with keys: `dev`, `ino`, `mode`, `nlink`, `uid`, `gid`, `rdev`, `size`, `atime`, `mtime`, `ctime`, `blksize`, `blocks`. Returns `undef` if the path cannot be stat'ed.
 
 ### core::lstat
 
@@ -383,7 +386,7 @@ Check if path is a regular file.
 my int $size = core::file_size($path);
 ```
 
-Get file size in bytes.
+Get file size in bytes (0 if the file does not exist).
 
 ### core::realpath
 
@@ -436,10 +439,11 @@ Match string against shell wildcard pattern.
 ### core::path_join
 
 ```strada
-my str $path = core::path_join($dir, $file);
+my array @parts = ($dir, $file);
+my str $path = core::path_join(@parts);      # or core::path_join([$dir, $file])
 ```
 
-Join path components.
+Join path components with `/`. Takes a single array (or array reference) of components, not separate arguments.
 
 ### core::truncate
 
@@ -518,10 +522,12 @@ Create a temporary file (auto-deleted on close).
 ### core::mkstemp
 
 ```strada
-my str $path = core::mkstemp($template);
+my scalar $tmp = core::mkstemp($template);
+my int $fd = $tmp->[0];
+my str $path = $tmp->[1];
 ```
 
-Create unique temporary file. Template should end with "XXXXXX".
+Create unique temporary file. Template should end with "XXXXXX". Returns an array reference `[fd, path]` (the open file descriptor and the actual file name), or `undef` on failure.
 
 ### core::mkdtemp
 
@@ -544,10 +550,10 @@ Create child process. Returns 0 in child, child PID in parent.
 ### core::exec
 
 ```strada
-core::exec($program, @args);
+core::exec($command);
 ```
 
-Replace current process with new program.
+Replace current process with a shell command (run via `/bin/sh -c`). Takes a single command string.
 
 ### core::system
 
@@ -555,7 +561,7 @@ Replace current process with new program.
 my int $status = core::system($command);
 ```
 
-Execute shell command. Returns exit status.
+Execute shell command. Returns the raw wait status; the exit code is `core::exit_status($status)` (or `$status >> 8`).
 
 ### core::wait
 
@@ -571,7 +577,7 @@ Wait for any child process to terminate.
 my int $status = core::waitpid($pid, $options);
 ```
 
-Wait for specific child process.
+Wait for specific child process. Returns the child's raw wait status (not its pid); extract the exit code with `core::exit_status($status)`.
 
 ### core::getpid
 
@@ -613,7 +619,7 @@ core::signal($signame, "IGNORE");
 core::signal($signame, "DEFAULT");
 ```
 
-Set signal handler. `$signame` is "INT", "TERM", "HUP", etc.
+Set signal handler. `$signame` is "INT", "TERM", "HUP", etc. The handler function receives the signal number.
 
 ### core::sleep
 
@@ -634,10 +640,10 @@ Sleep for specified microseconds.
 ### core::nanosleep
 
 ```strada
-core::nanosleep($seconds, $nanoseconds);
+core::nanosleep($nanoseconds);
 ```
 
-High-precision sleep.
+High-precision sleep. Takes a single argument: the total time in nanoseconds (e.g. `core::nanosleep(1500000000)` sleeps 1.5 s).
 
 ### core::setprocname
 
@@ -677,17 +683,17 @@ Get process title.
 my int $code = core::exit_status($status);
 ```
 
-Extract exit code from wait status.
+Extract exit code from a wait status as returned by `core::system()` / `core::waitpid()` (-1 if the process did not exit normally).
 
 ## Command Execution
 
 ### core::popen
 
 ```strada
-my int $pipe = core::popen($command, $mode);
+my scalar $pipe = core::popen($command, $mode);
 ```
 
-Open pipe to/from command.
+Open pipe to/from command. Returns a file handle usable with `<$pipe>`, `core::readline()`, `say($pipe, ...)`.
 
 - `$mode` - "r" (read from command) or "w" (write to command)
 
@@ -707,7 +713,7 @@ Close pipe and get exit status.
 my array @fds = core::pipe();
 ```
 
-Create pipe. Returns [read_fd, write_fd].
+Create pipe. Returns the two file descriptors: (read_fd, write_fd).
 
 ### core::dup2
 
@@ -921,7 +927,7 @@ Convert timestamp to local time. Returns hash with: `sec`, `min`, `hour`, `mday`
 my hash %tm = core::gmtime($time);
 ```
 
-Convert timestamp to UTC time.
+Convert timestamp to UTC time. Same keys as `localtime` (`mon` is 0-11, `year` is years since 1900).
 
 ### core::mktime
 
@@ -937,7 +943,7 @@ Convert time hash to timestamp.
 my str $formatted = core::strftime($format, %tm);
 ```
 
-Format time as string.
+Format time as string. The second argument must be a time hash as returned by `localtime`/`gmtime` (pass the hash itself, not a reference).
 
 ### core::ctime
 
@@ -950,10 +956,10 @@ Convert timestamp to string.
 ### core::gettimeofday
 
 ```strada
-my array @tv = core::gettimeofday();
+my hash %tv = core::gettimeofday();
 ```
 
-Get time with microsecond precision. Returns [seconds, microseconds].
+Get time with microsecond precision. Returns a hash with keys `sec` and `usec`.
 
 ### core::hires_time
 
@@ -966,26 +972,26 @@ Get high-resolution time as floating point seconds.
 ### core::tv_interval
 
 ```strada
-my num $elapsed = core::tv_interval(@start, @end);
+my num $elapsed = core::tv_interval(%start, %end);
 ```
 
-Calculate interval between two gettimeofday results.
+Calculate interval in seconds between two `gettimeofday` hashes.
 
 ### core::clock_gettime
 
 ```strada
-my array @ts = core::clock_gettime($clock_id);
+my hash %ts = core::clock_gettime($clock_id);
 ```
 
-Get time from specified clock.
+Get time from specified clock. Returns a hash with keys `sec` and `nsec`.
 
 ### core::clock_getres
 
 ```strada
-my array @res = core::clock_getres($clock_id);
+my hash %res = core::clock_getres($clock_id);
 ```
 
-Get clock resolution.
+Get clock resolution. Returns a hash with keys `sec` and `nsec`.
 
 ### core::difftime
 
@@ -1009,14 +1015,14 @@ Get processor time.
 my hash %times = core::times();
 ```
 
-Get process times.
+Get process times. Returns a hash with keys `utime`, `stime`, `cutime`, `cstime`, `ticks`.
 
 ## Sockets
 
 ### core::socket_client
 
 ```strada
-my int $sock = core::socket_client($host, $port);
+my scalar $sock = core::socket_client($host, $port);
 ```
 
 Create TCP client connection.
@@ -1024,7 +1030,7 @@ Create TCP client connection.
 ### core::socket_server
 
 ```strada
-my int $sock = core::socket_server($port);
+my scalar $sock = core::socket_server($port);
 ```
 
 Create TCP server socket (default backlog).
@@ -1032,7 +1038,7 @@ Create TCP server socket (default backlog).
 ### core::socket_server_backlog
 
 ```strada
-my int $sock = core::socket_server_backlog($port, $backlog);
+my scalar $sock = core::socket_server_backlog($port, $backlog);
 ```
 
 Create TCP server socket with specified backlog.
@@ -1063,7 +1069,7 @@ selects the address family and scope:
 ### core::socket_accept
 
 ```strada
-my int $client = core::socket_accept($server_sock);
+my scalar $client = core::socket_accept($server_sock);
 ```
 
 Accept incoming connection.
@@ -1095,10 +1101,10 @@ Close socket.
 ### core::socket_select
 
 ```strada
-my int $ready = core::socket_select($sock, $timeout_ms);
+my array @ready = core::socket_select(\@socks, $timeout_ms);
 ```
 
-Wait for socket to be ready.
+Wait until one or more of the given sockets is readable. Takes an array (reference) of sockets and a timeout in milliseconds (-1 = wait forever, 0 = poll); returns the sockets that are ready.
 
 ### core::socket_fd
 
@@ -1111,10 +1117,10 @@ Get file descriptor from socket.
 ### core::select_fds
 
 ```strada
-my array @ready = core::select_fds(@read_fds, @write_fds, $timeout_ms);
+my array @ready = core::select_fds(\@read_fds, $timeout_ms);
 ```
 
-Select on multiple file descriptors.
+Select on multiple file descriptors for readability. Takes one array (reference) of fds and a timeout in milliseconds; returns the fds that are ready to read.
 
 ### core::setsockopt
 
@@ -1122,7 +1128,7 @@ Select on multiple file descriptors.
 core::setsockopt($sock, $level, $optname, $value);
 ```
 
-Set socket option.
+Set socket option. `$sock` here (and for `getsockopt`, `shutdown`, `getpeername`, `getsockname`) is a numeric file descriptor — pass `core::socket_fd($socket)` for a socket object. `$value` is an integer.
 
 ### core::getsockopt
 
@@ -1143,26 +1149,26 @@ Shutdown socket. `$how`: 0=read, 1=write, 2=both.
 ### core::getpeername
 
 ```strada
-my str $addr = core::getpeername($sock);
+my hash %peer = core::getpeername($fd);
 ```
 
-Get address of peer.
+Get address of peer. Returns a hash with keys `addr` and `port` (`undef` on error).
 
 ### core::getsockname
 
 ```strada
-my str $addr = core::getsockname($sock);
+my hash %local = core::getsockname($fd);
 ```
 
-Get local socket address.
+Get local socket address. Returns a hash with keys `addr` and `port` (`undef` on error).
 
 ### core::poll
 
 ```strada
-my array @ready = core::poll(@fds, $timeout_ms);
+my int $count = core::poll(\@fds, $timeout_ms);
 ```
 
-Poll multiple file descriptors.
+Poll multiple file descriptors. `@fds` is an array of `{fd, events}` entries; returns the number of ready descriptors (-1 on error). For simple readability checks, `core::select_fds()` is easier to use.
 
 ## DNS/Network
 
@@ -1193,18 +1199,18 @@ Get local hostname.
 ### core::getaddrinfo
 
 ```strada
-my array @addrs = core::getaddrinfo($host, $service);
+my str $addr = core::getaddrinfo($host, $service);
 ```
 
-Get address info for host and service.
+Resolve host and service with `getaddrinfo(3)`. Returns the first resulting address as a numeric string (e.g. `"127.0.0.1"`).
 
 ### core::inet_pton
 
 ```strada
-my str $binary = core::inet_pton($af, $addr);
+my int $binary = core::inet_pton($af, $addr);
 ```
 
-Convert IP address string to binary.
+Convert IP address string to binary form, returned as an integer (for `AF_INET` (2) the 32-bit address in network byte order; for IPv6 only the first 64 bits).
 
 ### core::inet_ntop
 
@@ -1325,7 +1331,7 @@ Get last dynamic loading error.
 ### core::dl_call_sv
 
 ```strada
-my scalar $result = core::dl_call_sv($func, [$arg1, $arg2, ...]);
+my scalar $result = core::dl_call_sv($func, [$arg1, $arg2]);
 ```
 
 Call Strada function in shared library.
@@ -1333,23 +1339,23 @@ Call Strada function in shared library.
 ### core::dl_call_int
 
 ```strada
-my int $result = core::dl_call_int($func, $arg1, $arg2);
+my int $result = core::dl_call_int($func, [$arg1, $arg2]);
 ```
 
-Call C function returning int.
+Call C function returning int. Arguments are passed as an array reference of integers.
 
 ### core::dl_call_str
 
 ```strada
-my str $result = core::dl_call_str($func, $arg1, $arg2);
+my str $result = core::dl_call_str($func, $arg);
 ```
 
-Call C function returning string.
+Call C function taking one string argument and returning a string (`char*`).
 
 ### core::dl_call_void
 
 ```strada
-core::dl_call_void($func, $arg1, $arg2);
+core::dl_call_void($func, [$arg1, $arg2]);
 ```
 
 Call C function returning void.
@@ -1395,28 +1401,30 @@ Convert string to float.
 ### core::strtol
 
 ```strada
-my int $n = core::strtol($str, $base);
+my scalar $r = core::strtol($str, $base);
+my int $n = $r->[0];
 ```
 
-Convert string to integer with base.
+Convert string to integer with base. Returns an array reference `[value, chars_consumed]`.
 
 ### core::strtod
 
 ```strada
-my num $n = core::strtod($str);
+my scalar $r = core::strtod($str);
+my num $n = $r->[0];
 ```
 
-Convert string to double.
+Convert string to double. Returns an array reference `[value, chars_consumed]`.
 
 ## Binary/Byte Operations
 
 ### core::ord_byte
 
 ```strada
-my int $byte = core::ord_byte($str, $index);
+my int $byte = core::ord_byte($str);
 ```
 
-Get byte value at index.
+Get the value of the first byte of the string.
 
 ### core::get_byte
 
@@ -1424,7 +1432,7 @@ Get byte value at index.
 my int $byte = core::get_byte($str, $index);
 ```
 
-Alias for ord_byte.
+Get byte value at index.
 
 ### core::set_byte
 
@@ -1484,13 +1492,8 @@ Decode base64 data.
 
 ## Memory
 
-### core::malloc
-
-```strada
-my int $ptr = core::malloc($size);
-```
-
-Allocate memory. Returns pointer.
+> For raw memory, prefer the `c::` namespace (`c::alloc($size)`, `c::realloc()`,
+> `c::free()`, `c::read_*`/`c::write_*`). There is no `core::malloc`.
 
 ### core::calloc
 
@@ -1511,18 +1514,18 @@ Reallocate memory.
 ### core::free
 
 ```strada
-core::free($ptr);
+core::free(\$var);
 ```
 
-Free allocated memory.
+Same as `core::release()` (below): releases the value a reference points to. It does **not** free a raw pointer from `core::calloc()`/`core::realloc()` — use `c::free($ptr)` for that.
 
 ### core::release
 
 ```strada
-core::release($sv);
+core::release(\$var);
 ```
 
-Release StradaValue reference.
+Release the value a reference points to and set it to undef.
 
 ### core::mmap
 
@@ -1661,21 +1664,13 @@ Set process group.
 
 ## Advanced Signals
 
-### core::sigaction
-
-```strada
-core::sigaction($signum, \&handler);
-```
-
-Set signal action.
-
 ### core::sigprocmask
 
 ```strada
-core::sigprocmask($how, @signals);
+core::sigprocmask($how, \@signals);
 ```
 
-Change blocked signals.
+Change blocked signals. `$how` is 0 (SIG_BLOCK), 1 (SIG_UNBLOCK) or 2 (SIG_SETMASK); `@signals` holds signal numbers. Returns 0 on success.
 
 ### core::raise
 
@@ -1700,14 +1695,6 @@ core::pause();
 ```
 
 Wait for signal.
-
-### core::sigsuspend
-
-```strada
-core::sigsuspend(@signals);
-```
-
-Wait for signal with mask.
 
 ## Resource/Priority
 
@@ -1741,7 +1728,7 @@ Set process priority.
 my hash %usage = core::getrusage($who);
 ```
 
-Get resource usage.
+Get resource usage. Returns a hash with keys `utime_sec`, `utime_usec`, `stime_sec`, `stime_usec`, `maxrss`, `minflt`, `majflt`, `nvcsw`, `nivcsw`.
 
 ### core::getrlimit
 
@@ -1749,15 +1736,15 @@ Get resource usage.
 my hash %limit = core::getrlimit($resource);
 ```
 
-Get resource limits.
+Get resource limits. Returns a hash with keys `cur` (soft limit) and `max` (hard limit).
 
 ### core::setrlimit
 
 ```strada
-core::setrlimit($resource, $soft, $hard);
+core::setrlimit($resource, %limit);
 ```
 
-Set resource limits.
+Set resource limits. `%limit` is a hash with keys `cur` and `max`, as returned by `getrlimit`.
 
 ## Terminal/TTY
 
@@ -1775,7 +1762,7 @@ Get terminal name.
 my hash %attr = core::tcgetattr($fd);
 ```
 
-Get terminal attributes.
+Get terminal attributes. Returns a hash with keys `iflag`, `oflag`, `cflag`, `lflag`, `ispeed`, `ospeed` (`undef` if `$fd` is not a terminal).
 
 ### core::tcsetattr
 
@@ -1930,13 +1917,13 @@ func main() int {
 }
 ```
 
-Output:
+Output (callers show the line of the call):
 ```
 Current stack:
   at debug_here (myprogram.strada)
-  at inner (myprogram.strada)
-  at outer (myprogram.strada)
-  at main (myprogram.strada)
+  at inner (myprogram.strada:7)
+  at outer (myprogram.strada:11)
+  at main (myprogram.strada:15)
 ```
 
 This is useful for debugging, logging, and error reporting. Note that uncaught exceptions automatically print a stack trace.
@@ -1950,6 +1937,11 @@ core::set_recursion_limit($limit);
 Set the maximum recursion depth. When the call stack exceeds this limit, the program will print an error with a stack trace and exit.
 
 - `$limit` - Maximum recursion depth (default: 1000, set to 0 to disable)
+
+The check is part of stack-trace tracking, which the compiler only emits when
+the program source uses `try`/`throw`, `caller()` or `stack_trace()` (or is
+compiled with `stradac --stack-trace`). In a program without tracking the limit
+is not enforced and runaway recursion ends in a native stack overflow.
 
 Example:
 ```strada
@@ -1978,13 +1970,13 @@ When the recursion limit is exceeded, output looks like:
 ```
 Error: Maximum recursion depth exceeded (1000)
 Stack trace:
-  at recursive_func (myprogram.strada)
-  at recursive_func (myprogram.strada)
+  at recursive_func (myprogram.strada:2)
+  at recursive_func (myprogram.strada:2)
   ...
-  at main (myprogram.strada)
+  at main (myprogram.strada:7)
   -> recursive_func (myprogram.strada)
 
-Hint: Use core::set_recursion_limit(n) to increase the limit, or 0 to disable.
+Hint: Use sys::set_recursion_limit(n) to increase the limit, or 0 to disable.
 ```
 
 ## Call Context (Dynamic Return Type)
@@ -2120,7 +2112,7 @@ always have the UTF-8 flag set. `normalize()` takes the form name (`"NFC"`,
 
 ```strada
 my str $ascii = "Hello";
-my str $utf8 = "Hello \x{C3}\x{A9}";  # "Hello " + UTF-8 e-acute
+my str $utf8 = "Hello " . chr(233);   # "Hello " + e-acute (U+00E9)
 
 say(utf8::is_utf8($ascii));  # 1 (ASCII is valid UTF-8)
 say(utf8::is_utf8($utf8));   # 1
@@ -2137,26 +2129,28 @@ if (!defined($result)) {
 
 ## Default Output Filehandle
 
-### core::select
+### select
 
 ```strada
-my scalar $prev = core::select($fh);
+my scalar $prev = select($fh);
 ```
+
+`select` is a bare builtin (there is no `core::select`).
 
 Set the default filehandle for `print` and `say`. Returns the previous default filehandle.
 
 When called with a filehandle argument, subsequent calls to `print()` and `say()` without a filehandle argument will write to the selected filehandle instead of stdout.
 
 ```strada
-my scalar $prev = core::select($fh);   # Set $fh as default output
-say("This goes to $fh");               # Writes to $fh, not stdout
-core::select($prev);                    # Restore previous default
+my scalar $prev = select($fh);         # Set $fh as default output
+say("This goes to the file");          # Writes to $fh, not stdout
+select($prev);                         # Restore previous default
 ```
 
 When called with no arguments, returns the current default filehandle without changing it:
 
 ```strada
-my scalar $current = core::select();
+my scalar $current = select();
 ```
 
 Example:
@@ -2165,12 +2159,12 @@ Example:
 my scalar $log = core::open("/tmp/output.log", "w");
 
 # Redirect all print/say output to log file
-my scalar $old = core::select($log);
+my scalar $old = select($log);
 say("This goes to the log file");
 say("So does this");
 
 # Restore stdout
-core::select($old);
+select($old);
 say("This goes to stdout again");
 
 core::close($log);

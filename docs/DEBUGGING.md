@@ -66,7 +66,7 @@ Strada variables are renamed in the generated C code:
 # Strada: my str $name = "hello";
 (gdb) print name
 
-# Strada: my array @items = [1, 2, 3];
+# Strada: my array @items = (1, 2, 3);
 (gdb) print items
 ```
 
@@ -81,7 +81,7 @@ All Strada values are `StradaValue*` pointers. To inspect them:
 ```bash
 (gdb) print (uintptr_t)x & 1
 # If result is 1, it's a tagged integer. Extract the value:
-(gdb) print (int64_t)((uintptr_t)x >> 1)
+(gdb) print (long)x >> 1
 # Shows: 42
 
 # If result is 0, it's a heap-allocated StradaValue — safe to dereference:
@@ -130,7 +130,7 @@ Attempting to dereference a tagged integer pointer as a struct will cause a segf
 
 ```bash
 # Most integers are tagged pointers — use this:
-(gdb) print (int64_t)((uintptr_t)count >> 1)
+(gdb) print (long)count >> 1
 # Shows: 42
 
 # For heap-allocated integers (rare), you can also use:
@@ -151,21 +151,21 @@ Attempting to dereference a tagged integer pointer as a struct will cause a segf
 (gdb) print items->value.av->size
 # Shows: 3
 
-# First element
-(gdb) print *items->value.av->elements[0]
+# First element (elements start at offset `head`, which is usually 0)
+(gdb) print *items->value.av->elements[items->value.av->head]
 
-# First element's integer value
-(gdb) print items->value.av->elements[0]->value.iv
+# First element's integer value (integers are tagged pointers)
+(gdb) print (long)items->value.av->elements[items->value.av->head] >> 1
 ```
 
 ### Inspecting Hashes
 
 ```bash
 # Hash size
-(gdb) print hash->value.hv.size
+(gdb) print hash->value.hv->num_entries
 
-# Hash internals (more complex, uses buckets)
-(gdb) print hash->value.hv
+# Hash internals (more complex: entry array + index table)
+(gdb) print *hash->value.hv
 ```
 
 ## Setting Breakpoints
@@ -195,7 +195,7 @@ With `-g` flag, you can break at Strada source lines:
 
 ```bash
 # Break when $i equals 5
-(gdb) break program.strada:10 if i->value.iv == 5
+(gdb) break program.strada:10 if ((long)i >> 1) == 5
 ```
 
 ## Stepping Through Code
@@ -220,11 +220,12 @@ With `-g` flag, you can break at Strada source lines:
 Watch for variable changes:
 
 ```bash
-# Watch when integer value changes
-(gdb) watch x->value.iv
-
-# Watch when variable pointer changes
+# Watch when a variable changes (an int variable's value lives in the
+# pointer itself, so watching the pointer catches every assignment)
 (gdb) watch x
+
+# Watch a heap value's payload, e.g. a num
+(gdb) watch price->value.nv
 ```
 
 ## Useful GDB Commands
@@ -237,13 +238,13 @@ Watch for variable changes:
 (gdb) list my_function
 
 # Print expression
-(gdb) print x->value.iv + 10
+(gdb) print ((long)x >> 1) + 10
 
 # Print in hex
 (gdb) print/x x
 
 # Examine memory
-(gdb) x/10xw arr->value.av->elements
+(gdb) x/10xg arr->value.av->elements
 
 # Show all breakpoints
 (gdb) info breakpoints
@@ -336,7 +337,7 @@ Then use:
 
 ```bash
 (gdb) pval x
-INT: 42
+INT (tagged): 42
 
 (gdb) pval name
 STR: hello
@@ -374,13 +375,13 @@ Breakpoint 1 at 0x...: file debug_example.strada, line 2.
 Starting program: ./debug_example
 Breakpoint 1, factorial (n=0x...) at debug_example.strada:2
 
-(gdb) print n->value.iv
+(gdb) print (long)n >> 1
 $1 = 5
 
 (gdb) continue
 Breakpoint 1, factorial (n=0x...) at debug_example.strada:2
 
-(gdb) print n->value.iv
+(gdb) print (long)n >> 1
 $2 = 4
 
 (gdb) backtrace
@@ -406,8 +407,8 @@ When an exception goes uncaught, Strada automatically prints a stack trace:
 Uncaught exception: division by zero
 Stack trace:
   at divide (calculator.strada)
-  at compute (calculator.strada)
-  at main (calculator.strada)
+  at compute (calculator.strada:12)
+  at main (calculator.strada:17)
 ```
 
 This shows the call chain from innermost function (where the error occurred) to outermost (main).
@@ -454,19 +455,24 @@ Strada automatically detects excessive recursion and exits gracefully with a sta
 
 ### Default Behavior
 
-The default recursion limit is 1000 calls. When exceeded:
+The default recursion limit is 1000 calls. When the limit is exceeded:
 
 ```
-Error: Maximum recursion depth exceeded (1000)
+Error: Maximum recursion depth exceeded (100)
 Stack trace:
-  at infinite_recurse (broken.strada)
-  at infinite_recurse (broken.strada)
+  at infinite_recurse (broken.strada:2)
+  at infinite_recurse (broken.strada:2)
   ...
-  at main (broken.strada)
+  at main (broken.strada:5)
   -> infinite_recurse (broken.strada)
 
-Hint: Use core::set_recursion_limit(n) to increase the limit, or 0 to disable.
+Hint: Use sys::set_recursion_limit(n) to increase the limit, or 0 to disable.
 ```
+
+**Current limitations** (verified against the current runtime):
+
+- The check is part of stack-trace tracking, which `stradac` only enables when the program uses `try`/`throw`/`core::caller()` (or when compiled with `stradac --stack-trace`). A program without any of those has no recursion check at all.
+- The tracked call depth saturates at 256 frames, so the limit only fires when it is set below 256 (the example above used `core::set_recursion_limit(100)`). With the default of 1000 the check never triggers, and runaway recursion ends in a stack-overflow segfault.
 
 ### Configuring the Limit
 
@@ -519,10 +525,10 @@ GDB needs access to the original `.strada` file. Either:
 
 ### Breakpoint not hit
 
-Function names in C are prefixed with ``:
+Functions in a package are prefixed with the package name in C (`::` becomes `_`):
 ```bash
-(gdb) break my_function   # Correct
-(gdb) break my_function        # Won't work
+(gdb) break MyClass_method     # Correct (package MyClass, func method)
+(gdb) break method             # Won't work
 ```
 
 ## Line-Level Profiling (Full Profile)

@@ -196,7 +196,7 @@ StradaValue* strada_array_shift(StradaArray *arr);
 void strada_array_unshift(StradaArray *arr, StradaValue *value);
 
 // Get array length
-int64_t strada_array_length(StradaArray *arr);
+size_t strada_array_length(StradaArray *arr);
 ```
 
 ## Hash Operations
@@ -223,8 +223,9 @@ StradaArray* strada_hash_keys(StradaHash *hash);
 // Get all values as array
 StradaArray* strada_hash_values(StradaHash *hash);
 
-// Get number of keys
-int64_t strada_hash_size(StradaHash *hash);
+// Number of keys: read hash->num_entries, or call strada_size(sv)
+// on the StradaValue* that wraps the hash
+int64_t strada_size(StradaValue *sv);
 ```
 
 ## Reference Operations
@@ -263,7 +264,8 @@ typedef struct StradaClosure {
     void *func_ptr;           // Pointer to generated C function
     int param_count;          // Number of parameters
     int capture_count;        // Number of captured variables
-    StradaValue ***captures;  // Array of pointers to pointers (capture-by-reference)
+    StradaValue ***captures;  // Array of per-closure capture cells (each holds a StradaValue*)
+    // ... capture_is_static, prototype
 } StradaClosure;
 ```
 
@@ -274,7 +276,8 @@ typedef struct StradaClosure {
 // func: pointer to the generated C function
 // params: number of parameters the function takes
 // captures: number of captured variables
-// cap_array: array of pointers to captured variable pointers
+// cap_array: array of pointers to captured variable pointers; the current
+//            value of each is copied into a private cell owned by the closure
 StradaValue* strada_closure_new(void *func, int params, int captures, StradaValue ***cap_array);
 
 // Call a closure with arguments
@@ -314,15 +317,15 @@ StradaValue* __anon_func_0(StradaValue ***__captures, StradaValue *n) {
 }
 ```
 
-### Capture-by-Reference
+### Capture Semantics
 
-Closures capture variables by reference using triple pointers:
+`strada_closure_new()` snapshots each captured variable: it allocates a private cell per capture, copies the variable's current `StradaValue*` into it and increments its refcount. The closure keeps those cells for its whole lifetime (so it stays valid after the enclosing function returns, and across threads).
 
-- `StradaValue ***captures` - pointer to array of double pointers
+- `StradaValue ***captures` - pointer to array of cells (double pointers)
 - `(*__captures[i])` - dereference to access the captured StradaValue*
-- Assignments like `(*__captures[i]) = value` modify the original variable
+- Assignments like `(*__captures[i]) = value` update the closure's own cell, **not** the enclosing function's variable
 
-This allows mutations inside the closure to be visible in the enclosing scope.
+So scalar variables are effectively captured **by value**: an assignment inside the closure persists between calls of that closure but is not seen in the enclosing scope, and later assignments to the outer variable are not seen by the closure. Arrays and hashes are shared, because the cell holds a pointer to the same container: `push(@a, ...)` or `$h{"k"} = ...` inside a closure is visible outside.
 
 ## Thread Operations
 
@@ -403,7 +406,7 @@ StradaValue* strada_cond_destroy(StradaValue *cond);
 
 ### Thread Safety
 
-Reference counting uses atomic operations for thread safety. Tagged integers (bit 0 = 1) are immortal and bypass refcounting:
+Reference counting uses atomic operations for thread safety (once a thread has been started; single-threaded programs use plain increments). Tagged integers (bit 0 = 1) are immortal and bypass refcounting. Simplified:
 
 ```c
 void strada_incref(StradaValue *sv) {
@@ -694,8 +697,8 @@ int64_t strada_atomic_dec(StradaValue *atomic);
 ## String Operations
 
 ```c
-// Get string length
-int64_t strada_length(const char *str);
+// Get string length (UTF-8 character count)
+size_t strada_length(const char *str);
 
 // Concatenate two strings
 char* strada_concat(const char *a, const char *b);
@@ -704,10 +707,10 @@ char* strada_concat(const char *a, const char *b);
 StradaValue* strada_substr(StradaValue *sv, int64_t start, int64_t len);
 
 // Find substring (returns -1 if not found)
-int64_t strada_index(const char *str, const char *substr);
+int strada_index(const char *str, const char *substr);
 
 // Find substring from end
-int64_t strada_rindex(const char *str, const char *substr);
+int strada_rindex(const char *str, const char *substr);
 
 // Case conversion
 char* strada_upper(const char *str);
@@ -829,11 +832,13 @@ void strada_printf(const char *fmt, ...);
 // Print to stderr
 void strada_warn(const char *fmt, ...);
 
-// Print error and exit
-void strada_die(const char *msg);
+// Raise an error: throws if inside a try block, otherwise prints and exits.
+// The first argument is used as the literal message (it is NOT a printf
+// format), except for the exact format "%s", which takes one string argument.
+void strada_die(const char *msg, ...);
 
-// Debug dump (Data::Dumper style)
-void strada_dumper(StradaValue *sv);
+// Debug dump (Data::Dumper style); returns the dump as a string value
+StradaValue* strada_dumper(StradaValue *sv);
 ```
 
 ## File I/O
@@ -855,8 +860,8 @@ StradaValue* strada_open_sv(StradaValue *first_arg, StradaValue *mode_arg);
 // Returns empty string if fh is not a memstream
 StradaValue* strada_str_from_fh(StradaValue *fh);
 
-// Close file
-void strada_close(StradaValue *fh);
+// Close file (returns 1 if closed, 0 if there was nothing to close)
+StradaValue* strada_close(StradaValue *fh);
 
 // Read line from file or socket (used by diamond operator <$fh>)
 // For files: uses fgets()
@@ -917,11 +922,11 @@ The `say()` and `print()` builtins with two arguments compile to `strada_say_fh(
 // Test if pattern matches
 int strada_regex_match(const char *str, const char *pattern);
 
-// Replace first occurrence
-char* strada_regex_replace(const char *str, const char *pattern, const char *replacement);
+// Replace first occurrence (flags: regex modifier letters such as "i", or "")
+char* strada_regex_replace(const char *str, const char *pattern, const char *replacement, const char *flags);
 
 // Replace all occurrences
-char* strada_regex_replace_all(const char *str, const char *pattern, const char *replacement);
+char* strada_regex_replace_all(const char *str, const char *pattern, const char *replacement, const char *flags);
 
 // Split string by pattern
 StradaArray* strada_regex_split(const char *pattern, const char *str);
@@ -949,11 +954,11 @@ void strada_incref(StradaValue *sv);
 // Decrement reference count (frees if zero)
 void strada_decref(StradaValue *sv);
 
-// Free value immediately
+// Explicitly release a value (same as strada_decref)
 void strada_free(StradaValue *sv);
 
-// Set value to undef
-void strada_undef(StradaValue *sv);
+// Set value to undef (and return it)
+StradaValue* strada_undef(StradaValue *sv);
 
 // Get reference count
 int strada_refcount(StradaValue *sv);
@@ -969,17 +974,19 @@ Strada supports Perl-style OOP with blessed references, inheritance (including m
 ### OOP Data Structures
 
 ```c
-#define OOP_MAX_PACKAGES 64      /* Max registered packages */
-#define OOP_MAX_METHODS 32       /* Max methods per package */
+/* The per-package tables grow dynamically; these are soft caps only. */
+#define OOP_MAX_PACKAGES 2048    /* Max registered packages */
+#define OOP_MAX_METHODS 4096     /* Max methods per package */
 #define OOP_MAX_NAME_LEN 256     /* Max package/method name length */
-#define OOP_MAX_PARENTS 16       /* Max parents for multiple inheritance */
+#define OOP_MAX_PARENTS 128      /* Max parents for multiple inheritance */
 
-typedef struct {
+typedef struct OopPackage {
     char name[OOP_MAX_NAME_LEN];
-    char parents[OOP_MAX_PARENTS][OOP_MAX_NAME_LEN];  /* Multiple parents */
+    char **parents;                /* Multiple parents (dynamic) */
     int parent_count;
-    OopMethod methods[OOP_MAX_METHODS];
+    OopMethod *methods;            /* dynamic */
     int method_count;
+    /* ... overloads, method modifiers, method index, cached MRO ... */
 } OopPackage;
 ```
 
@@ -1047,10 +1054,9 @@ The `strada_free_value()` function automatically calls `strada_call_destroy()` f
 void strada_free_value(StradaValue *sv) {
     if (!sv) return;
     /* Call DESTROY method if this is a blessed reference */
-    if (sv->blessed_package) {
+    if (sv->meta && sv->meta->blessed_package) {
         strada_call_destroy(sv);
-        free(sv->blessed_package);
-        sv->blessed_package = NULL;
+        // ... release the package name
     }
     // ... rest of cleanup
 }
@@ -1066,10 +1072,12 @@ void strada_set_package(const char *pkg);
 const char* strada_current_package(void);
 
 // Register a method for a package (internal use)
-void strada_register_method(const char *package, const char *method, void *func);
+// StradaMethod is: StradaValue* (*)(StradaValue *self, StradaValue *args)
+void strada_method_register(const char *package, const char *name, StradaMethod func);
 
 // Look up a method in package's inheritance chain
-void* oop_lookup_method(const char *package, const char *method);
+// (static helper inside strada_runtime.c — not callable from outside)
+static StradaMethod oop_lookup_method(const char *package, const char *method);
 ```
 
 ### Method Resolution Order (MRO)
@@ -1101,7 +1109,7 @@ void Dog_init(void) {
 StradaValue* Dog_new(StradaValue* name) {
     StradaValue *self = strada_new_hash();
     strada_hash_set(self->value.hv, "name", name);
-    strada_hash_set(self->value.hv, "species", strada_new_str("dog"));
+    strada_hash_set_take(self->value.hv, "species", strada_new_str("dog"));
     return strada_bless(strada_new_ref(self, '%'), "Dog");
 }
 
@@ -1151,7 +1159,7 @@ int strada_socket_send(StradaValue *socket, const char *data);
 StradaValue* strada_socket_recv(StradaValue *socket, int maxlen);
 
 // Close socket
-void strada_socket_close(StradaValue *socket);
+StradaValue* strada_socket_close(StradaValue *socket);
 ```
 
 ## Process Control
@@ -1289,16 +1297,16 @@ For interfacing with C structures:
 
 ```c
 // Create new C struct wrapper
-StradaValue* strada_cstruct_new(const char *name, int size);
+StradaValue* strada_cstruct_new(const char *name, size_t size);
 
 // Get pointer to struct data
 void* strada_cstruct_ptr(StradaValue *cs);
 
 // Set field value
-void strada_cstruct_set_field(StradaValue *cs, const char *name, int offset, void *data, int size);
+void strada_cstruct_set_field(StradaValue *cs, const char *name, size_t offset, void *data, size_t size);
 
 // Get field value
-void* strada_cstruct_get_field(StradaValue *cs, const char *name, int offset, int size);
+void* strada_cstruct_get_field(StradaValue *cs, const char *name, size_t offset, size_t size);
 ```
 
 ## Formatted Output
@@ -1315,7 +1323,7 @@ The `strada_printf` function supports these format specifiers:
 
 ## Error Handling
 
-Runtime errors call `strada_die()` which:
+Runtime errors call `strada_die()` which, if a `try` block is active, throws the message as an exception (catchable with `catch`). Otherwise it:
 1. Prints error message to stderr
 2. Optionally prints stack trace
 3. Exits with code 1
@@ -1329,17 +1337,16 @@ if (index < 0 || index >= arr->length) {
 
 ## Thread Safety
 
-Reference counting uses **atomic operations**, so reference-counted values can be shared across threads, and the async runtime (`async::`) provides a thread pool for parallel work. Two memory features operate in single-threaded scope and self-disable when threading is active: the automatic **cycle collector** and the request **arena**.
+Reference counting uses **atomic operations** once threading is active, so reference-counted values can be shared across threads, and the async runtime (`async::`) provides a thread pool for parallel work. The automatic **cycle collector** also runs under threads (via a stop-the-world pause at safepoints); the request **arena** is single-threaded scope only.
 
 ## Memory Model
 
 - **Tagged integers**: Integers in the range -(2^62) to (2^62-1) are encoded directly in `StradaValue*` pointers using `(val << 1) | 1`. They require zero heap allocation and zero reference counting (`strada_incref`/`strada_decref` are no-ops). `strada_to_int()`, `strada_to_num()`, `strada_to_str()`, `strada_to_bool()`, and `strada_new_int()` handle tagged integers transparently. Any runtime or `__C__` block code that accesses `sv->type` must check `STRADA_IS_TAGGED_INT(sv)` first to avoid dereferencing the tagged pointer as a memory address.
 - **Reference unboxing**: `strada_ref_create()` unboxes tagged ints to heap-allocated values before creating a reference, since references need a stable pointer target.
-- **Hash key optimization**: `strada_hash_set_with_hash()` uses `strdup()` instead of `strada_intern_str()` for keys, avoiding intern table overhead for unique concatenated keys (e.g., `"item_" . $i`). `strada_intern_release()` handles both interned and non-interned keys.
+- **Hash keys**: keys are stored as refcounted `StradaString`s. Short keys (64 bytes or less) are interned to avoid duplicate key allocations; `strada_intern_release()` handles both interned and non-interned keys.
 - All other `StradaValue` objects (strings, arrays, hashes, refs, nums) are heap-allocated
 - Reference counting manages memory automatically for heap-allocated values
-- Circular references can cause memory leaks
-- Use `strada_free()` to break cycles if needed
+- Indirect reference cycles (array/hash/ref graphs) are reclaimed by the cycle collector when it is compiled in (the default); closure-capture cycles still leak unless broken with `core::weaken()`
 
 ## Time Functions
 
@@ -1390,7 +1397,7 @@ StradaValue* strada_hires_time(void);
 StradaValue* strada_tv_interval(StradaValue *start, StradaValue *end);
 
 // Sleep for nanoseconds
-StradaValue* strada_nanosleep(StradaValue *nanoseconds);
+StradaValue* strada_nanosleep_ns(StradaValue *nanoseconds);
 
 // Get clock time (CLOCK_REALTIME, CLOCK_MONOTONIC, etc.)
 // Returns: {sec, nsec}
@@ -1426,12 +1433,12 @@ These functions convert all arguments to their primitive types. Use for C functi
 
 ```c
 // Call function returning int64_t
-// args: array of int arguments (up to 5)
+// args: array of int arguments (up to 9)
 // WARNING: Strings are converted to 0 via strada_to_int()
 StradaValue* strada_dl_call_int(StradaValue *func_ptr, StradaValue *args);
 
 // Call function returning double
-// args: array of double arguments (up to 2)
+// args: array of double arguments (up to 4)
 StradaValue* strada_dl_call_num(StradaValue *func_ptr, StradaValue *args);
 
 // Call function returning char* (takes 1 string arg)
@@ -1448,17 +1455,17 @@ These `_sv` variants pass `StradaValue*` pointers directly to C functions. The C
 ```c
 // Call function passing StradaValue* directly, returns int64_t
 // C function signature: int64_t func(StradaValue*, StradaValue*, ...)
-// Up to 5 arguments
+// Up to 9 arguments
 StradaValue* strada_dl_call_int_sv(StradaValue *func_ptr, StradaValue *args);
 
 // Call function passing StradaValue* directly, returns char*
 // C function signature: char* func(StradaValue*, StradaValue*, ...)
-// Up to 3 arguments
+// Up to 9 arguments
 StradaValue* strada_dl_call_str_sv(StradaValue *func_ptr, StradaValue *args);
 
 // Call function passing StradaValue* directly, no return value
 // C function signature: void func(StradaValue*, StradaValue*, ...)
-// Up to 3 arguments
+// Up to 9 arguments
 StradaValue* strada_dl_call_void_sv(StradaValue *func_ptr, StradaValue *args);
 ```
 
@@ -1472,10 +1479,11 @@ C libraries using `_sv` functions must include the Strada runtime header:
 // Example: Function taking host (string) and port (int)
 int64_t my_connect(StradaValue *host_sv, StradaValue *port_sv) {
     // Extract actual values from StradaValue
-    const char *host = strada_to_str(host_sv);
+    char *host = strada_to_str(host_sv);   // allocated copy - must free
     int port = (int)strada_to_int(port_sv);
 
     // Do work...
+    free(host);
     return connection_handle;
 }
 
@@ -1486,7 +1494,7 @@ char* my_read(StradaValue *handle_sv, StradaValue *max_len_sv) {
 
     char *buffer = malloc(max_len + 1);
     // Read into buffer...
-    return buffer;  // Strada takes ownership
+    return buffer;  // Strada copies the string and does NOT free it
 }
 ```
 
@@ -1506,6 +1514,7 @@ The `./strada` wrapper script does this automatically.
 
 ```c
 // Get pointer to an int variable's underlying value
+// (returns 0 for tagged integers, i.e. practically every int: they have no address)
 StradaValue* strada_int_ptr(StradaValue *ref);
 
 // Get pointer to a num variable's underlying value
@@ -1562,7 +1571,7 @@ int main(int argc, char **argv) {
     // Initialize globals
     ARGV = strada_new_array();
     for (int i = 0; i < argc; i++) {
-        strada_array_push(ARGV->value.av, strada_new_str(argv[i]));
+        strada_array_push_take(ARGV->value.av, strada_new_str(argv[i]));
     }
     ARGC = strada_new_int(argc);
 
@@ -1603,14 +1612,14 @@ The `--full-profile` compiler flag instruments every source line with timing and
 ```c
 // Start line-level profiling, writing output to the specified file
 // Strada: core::full_profile_start("output.prof")
-void strada_full_profile_start(StradaValue *filename);
+void strada_full_profile_start(const char *output_file);
 
 // Stop profiling and flush collected data to disk
 // Strada: core::full_profile_stop()
 void strada_full_profile_stop(void);
 ```
 
-When `--full-profile` is used, the code generator inserts `strada_full_profile_tick(file, line)` calls before each statement. The program writes a binary `strada-prof.out` file on exit.
+When `--full-profile` is used, the code generator inserts `strada_full_profile_line(file_id, line)` calls before each statement. The program writes a binary `strada-prof.out` file on exit.
 
 **Report tools:**
 - `strada-proftext <profile.out>` -- text report to stdout (options: `-f` functions only, `-l` lines only, `--top N`)

@@ -44,30 +44,31 @@ Both paths share the same Lexer and Parser front-end. The compiler generates C c
 ### File Execution
 
 ```bash
-# Build the interpreter
+# Build the interpreter (not built by a plain `make`); the binary is
+# interpreter/strada-interp
 make interpreter
 
 # Run a Strada program (uses VM by default)
-./strada-interp program.strada
+./interpreter/strada-interp program.strada
 
 # Explicitly use the VM backend
-./strada-interp --vm program.strada
+./interpreter/strada-interp --vm program.strada
 
 # Use the tree-walking backend (legacy fallback)
-./strada-interp --tree-walk program.strada
+./interpreter/strada-interp --tree-walk program.strada
 
 # With library search paths
-./strada-interp -L lib program.strada
+./interpreter/strada-interp -L lib program.strada
 ```
 
 ### Interactive REPL
 
 ```bash
 # Start the REPL
-./strada-interp
+./interpreter/strada-interp
 
 # With library paths
-./strada-interp -L lib
+./interpreter/strada-interp -L lib
 ```
 
 The REPL provides an interactive prompt with readline support (line editing, history). The REPL currently uses the tree-walking backend (persistent VM state between inputs is not yet supported).
@@ -75,19 +76,19 @@ The REPL provides an interactive prompt with readline support (line editing, his
 ```
 strada> my int $x = 42;
 strada> $x * 2
-=> 84
+84
 strada> func square(int $n) int { return $n * $n; }
 strada> square(7)
-=> 49
+49
 ```
 
 ### Embedded Eval
 
-The interpreter can be used from compiled Strada programs via `Strada::Interpreter`:
+The interpreter can be used from compiled Strada programs via the `Eval` module (`lib/Eval.strada`, built by `make lib-eval` / `make libs`; it bundles the lexer, parser and `Strada::Interpreter`). `use Strada::Interpreter;` on its own does not compile, because it lacks the front-end:
 
 ```strada
 use lib "lib";
-use Strada::Interpreter;
+use Eval;
 
 Strada::Interpreter::init();
 
@@ -100,8 +101,8 @@ my scalar $val = Strada::Interpreter::eval_string("$x * 5");
 say($val);  # 50
 
 # Function definitions persist
-Strada::Interpreter::eval_string("func double(int $n) int { return $n * 2; }");
-say(Strada::Interpreter::eval_string("double(21)"));  # 42
+Strada::Interpreter::eval_string("func twice(int $n) int { return $n * 2; }");
+say(Strada::Interpreter::eval_string("twice(21)"));  # 42
 
 # Reset all state
 Strada::Interpreter::reset();
@@ -112,14 +113,16 @@ Strada::Interpreter::reset();
 The embedded eval API supports selecting the execution backend:
 
 ```strada
-# Set the default eval backend
-set_eval_backend("vm");          # Use bytecode VM (default)
-set_eval_backend("tree-walk");   # Use tree-walking interpreter
+# Set the default eval backend used by Strada::Interpreter::eval()
+Strada::Interpreter::set_eval_backend("tree-walk");   # Tree-walking interpreter (default)
+Strada::Interpreter::set_eval_backend("vm");          # Bytecode VM
 
 # Evaluate with a specific backend for one call
-my scalar $result = eval_with("1 + 2", "vm");
-my scalar $result2 = eval_with("1 + 2", "tree-walk");
+my scalar $result = Strada::Interpreter::eval_with("1 + 2", "tree-walk");
+my scalar $result2 = Strada::Interpreter::eval_with("1 + 2", "vm");
 ```
+
+The `"vm"` backend needs a runtime built with `-DHAVE_VM`, which is only the case for the `strada-interp` binary itself; in an ordinary compiled program use the tree-walk backend.
 
 ## Architecture
 
@@ -220,6 +223,8 @@ The Strada VM also serves as the execution backend for [Perla](PERL_INTEGRATION.
 ./perla --vm script.pl    # Perl → Strada → VM execution
 ```
 
+(Perla lives in a separate repository; there is no `perla/` directory in this tree.)
+
 All 53 Perla tests pass in VM mode, matching the compiled path. This enables running Perl programs without a C compiler at runtime. See the Perla section in `CLAUDE.md` for details.
 
 ## Limitations
@@ -267,7 +272,7 @@ make interpreter
 make && make interpreter
 
 # The interpreter binary
-./strada-interp --help
+./interpreter/strada-interp --help
 ```
 
 The interpreter is built by combining `compiler/Lexer.strada`, `compiler/Parser.strada`, `compiler/AST.strada`, `lib/Strada/Interpreter.strada`, and `interpreter/Main.strada` into a single source, then compiling that with the Strada compiler.

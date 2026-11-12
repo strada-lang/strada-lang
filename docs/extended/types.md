@@ -35,10 +35,13 @@ func flexible() dynamic {
     return 42;  # scalar context (default)
 }
 
-my array @arr = flexible();   # Array context → (1, 2, 3)
-my hash %h = flexible();      # Hash context → {"key" => "value"}
-my int $val = flexible();     # Scalar context → 42
-foreach my int $x (flexible()) { ... }  # Array context
+func main() int {
+    my array @arr = flexible();   # Array context → (1, 2, 3)
+    my hash %h = flexible();      # Hash context → {"key" => "value"}
+    my int $val = flexible();     # Scalar context → 42
+    foreach my int $x (flexible()) { say($x); }  # Array context
+    return 0;
+}
 ```
 
 ### Context Detection Functions
@@ -63,9 +66,13 @@ my hash %h = { "x" => 1 };
 
 say(typeof($n));    # "int"
 say(typeof($s));    # "str"
-say(typeof(\@a));   # "array_ref"
-say(typeof(\%h));   # "hash_ref"
+say(typeof(\@a));   # "ref"
+say(typeof(\%h));   # "ref"
 ```
+
+`typeof()` reports every reference (including blessed objects) as `"ref"`.
+Use `ref()` (below) to tell array, hash, scalar and code references and
+object classes apart.
 
 Type strings returned by `typeof()`:
 
@@ -75,11 +82,9 @@ Type strings returned by `typeof()`:
 | Float | `"num"` |
 | String | `"str"` |
 | Boolean | `"int"` (bools are ints internally) |
-| Array ref | `"array_ref"` |
-| Hash ref | `"hash_ref"` |
-| Scalar ref | `"scalar_ref"` |
+| Array / hash / scalar ref | `"ref"` |
 | Undef | `"undef"` |
-| Blessed object | `"ClassName"` (the package name) |
+| Blessed object | `"ref"` (use `ref($obj)` for the class name) |
 
 ### defined() - Check if Not Undef
 
@@ -120,6 +125,7 @@ my hash %hash = { "a" => 1 };
 say(ref(\@arr));    # "ARRAY"
 say(ref(\%hash));   # "HASH"
 say(ref(42));       # "" (not a reference)
+# also: "SCALAR" for \$x, "CODE" for a closure
 ```
 
 For blessed objects, returns the class name:
@@ -159,24 +165,25 @@ my int $d = int("42abc");   # 42 (parses leading digits)
 my int $e = int("hello");   # 0
 ```
 
-### To Number - num() or Arithmetic
+### To Number - Arithmetic
 
-Convert to floating-point:
+There is no `num()` function (`num` is a type keyword, so `num(...)` is a
+parse error). Convert to floating-point with arithmetic or a typed declaration:
 
 ```strada
-my num $a = num(42);        # 42.0
-my num $b = num("3.14");    # 3.14
-my num $c = $x + 0.0;       # Alternative: add 0.0
+my num $a = 42 + 0.0;       # 42
+my num $b = "3.14" + 0;     # 3.14
+my num $c = $x + 0.0;       # any value: add 0.0
 ```
 
-### To String - str() or Concatenation
+### To String - Concatenation
 
-Convert to string:
+There is no `str()` function either. Convert to string by concatenating:
 
 ```strada
-my str $a = str(42);        # "42"
-my str $b = str(3.14);      # "3.14"
-my str $c = "" . $x;        # Alternative: concatenate with ""
+my str $a = "" . 42;        # "42"
+my str $b = "" . 3.14;      # "3.14"
+my str $c = "" . $x;        # any value: concatenate with ""
 ```
 
 ### Implicit Conversions
@@ -282,8 +289,8 @@ if (math::isnan($x)) {
 ### math::isinf() - Check for Infinity
 
 ```strada
-my num $x = 1.0 / 0.0;              # Infinity
-if (math::isinf($x)) {
+my num $x = math::exp(1000);        # Infinity (overflow); note 1.0 / 0.0 does NOT give Inf
+if (math::isinf($x)) {              # 1 for +Inf, -1 for -Inf, 0 otherwise
     say("infinite");
 }
 ```
@@ -311,9 +318,9 @@ func process(scalar $val) void {
         say("Number: " . $val);
     } elsif ($type eq "str") {
         say("String: " . $val);
-    } elsif ($type eq "array_ref") {
+    } elsif (ref($val) eq "ARRAY") {
         say("Array with " . scalar(@{$val}) . " elements");
-    } elsif ($type eq "hash_ref") {
+    } elsif (ref($val) eq "HASH") {
         say("Hash");
     } else {
         say("Unknown type: " . $type);
@@ -339,7 +346,7 @@ func calculate(scalar $x, scalar $y) num {
         die("Second argument must be numeric");
     }
 
-    return num($x) + num($y);
+    return $x + $y + 0.0;
 }
 ```
 
@@ -486,19 +493,24 @@ These types are primarily used when working with C code via `__C__` blocks
 to match C function signatures:
 
 ```strada
-func write_byte(int $fd, int $byte) int {
+__C__ {
+#include <unistd.h>
+}
+
+# Inside __C__, a parameter $fd is the StradaValue* named fd
+func write_byte(int $fd, int $value) int {
     __C__ {
-        int fd = (int)strada_to_int(fd_var);
-        uint8_t b = (uint8_t)strada_to_int(byte);
-        return strada_new_int(write(fd, &b, 1));
+        int cfd = (int)strada_to_int(fd);
+        uint8_t b = (uint8_t)strada_to_int(value);
+        return strada_new_int(write(cfd, &b, 1));
     }
 }
 
 func read_int64(int $fd) int {
     __C__ {
-        int fd = (int)strada_to_int(fd_var);
-        int64_t val;
-        read(fd, &val, sizeof(val));
+        int cfd = (int)strada_to_int(fd);
+        int64_t val = 0;
+        if (read(cfd, &val, sizeof(val)) != (ssize_t)sizeof(val)) { val = -1; }
         return strada_new_int(val);
     }
 }

@@ -1,204 +1,180 @@
 # Structs in Strada
 
 Structs provide a way to group related data together, similar to C structs.
-Strada offers two approaches: native struct syntax and the low-level cstruct API.
 
-## Native Struct Syntax
+> **Status (current compiler):** Strada has **no working struct feature**.
+>
+> - **Native struct syntax is not supported.** `struct Point { int x; int y; }`
+>   is rejected by the parser (`unexpected 'struct' at top level`), as are
+>   struct-typed variables (`my Point $pt;` — `expected a type (int, num, str,
+>   array, hash, scalar), got 'Point'`). Field assignment without parentheses
+>   (`$pt->x = 10;`) fails at the C-compile step.
+> - **The `core::cstruct_*` functions do not work.** They compile and link, but
+>   `core::cstruct_new($size)` returns an ordinary empty hash, so
+>   `core::cstruct_set_int/double/string` store nothing and
+>   `core::cstruct_get_int` always returns 0.
+>
+> Use one of the approaches below instead: a class with `has` attributes
+> (fixed, named, typed fields), a plain hash, or — for real C memory layouts —
+> the `c::` raw-memory functions. Every example on this page has been compiled
+> and run against the current compiler.
 
-The preferred way to use structs in Strada.
+## Fixed Fields: a Class with `has`
 
-### Defining a Struct
+The closest equivalent to a struct is a package with `has` attributes. Each
+attribute gets a typed accessor (`$pt->x()`), `rw` attributes also get a setter
+(`$pt->set_x(...)`), and the compiler generates a constructor taking
+name/value pairs.
+
+### Defining the Type
 
 ```strada
-struct Point {
-    int x;
-    int y;
-}
+package Point;
+has rw int $x = 0;
+has rw int $y = 0;
 
-struct Person {
-    str name;
-    int age;
-    num salary;
-}
+package Person;
+has rw str $name = "";
+has rw int $age = 0;
+has rw num $salary = 0.0;
 ```
 
-### Declaring Struct Variables
+### Creating Values and Accessing Fields
 
 ```strada
-my Point $pt;
-my Person $alice;
-```
+my scalar $pt = Point::new("x", 10, "y", 20);   # name, value, name, value, ...
 
-### Accessing Fields
-
-Use the arrow operator `->` to read and write fields:
-
-```strada
 # Set fields
-$pt->x = 10;
-$pt->y = 20;
+$pt->set_x(15);
+$pt->set_y(25);
 
 # Read fields
-say("x = " . $pt->x);
-say("y = " . $pt->y);
+say("x = " . $pt->x());
+say("y = " . $pt->y());
 ```
 
-### Structs in Functions
+Pass the constructor pairs separated by commas (`"x", 10`). Do not write
+`Point::new(x => 10)`: in a call argument list `=>` builds a pair value, and
+the attribute silently keeps its default.
 
-Functions can take and return structs:
+### Functions and Methods
+
+Functions in the package that take `$self` first are methods:
 
 ```strada
-func create_point(int $x, int $y) Point {
-    my Point $pt;
-    $pt->x = $x;
-    $pt->y = $y;
-    return $pt;
+package Point;
+has rw int $x = 0;
+has rw int $y = 0;
+
+func move(scalar $self, int $dx, int $dy) void {
+    $self->set_x($self->x() + $dx);
+    $self->set_y($self->y() + $dy);
 }
 
-func print_point(Point $pt) void {
-    say("Point(" . $pt->x . ", " . $pt->y . ")");
+func to_text(scalar $self) str {
+    return "Point(" . $self->x() . ", " . $self->y() . ")";
 }
 
-func move_point(Point $pt, int $dx, int $dy) Point {
-    $pt->x = $pt->x + $dx;
-    $pt->y = $pt->y + $dy;
-    return $pt;
+func distance(scalar $self, scalar $other) num {
+    my int $dx = $other->x() - $self->x();
+    my int $dy = $other->y() - $self->y();
+    return math::sqrt($dx * $dx + $dy * $dy);
 }
 ```
 
 ### Complete Example
 
 ```strada
-struct Rectangle {
-    int x;
-    int y;
-    int width;
-    int height;
+package Rectangle;
+has rw int $x = 0;
+has rw int $y = 0;
+has rw int $width = 0;
+has rw int $height = 0;
+
+func area(scalar $self) int {
+    return $self->width() * $self->height();
 }
 
-func create_rect(int $x, int $y, int $w, int $h) Rectangle {
-    my Rectangle $r;
-    $r->x = $x;
-    $r->y = $y;
-    $r->width = $w;
-    $r->height = $h;
-    return $r;
-}
-
-func area(Rectangle $r) int {
-    return $r->width * $r->height;
-}
+package main;
 
 func main() int {
-    my Rectangle $box = create_rect(0, 0, 100, 50);
-    say("Area: " . area($box));  # Area: 5000
+    my scalar $box = Rectangle::new("width", 100, "height", 50);
+    say("Area: " . $box->area());  # Area: 5000
     return 0;
 }
 ```
 
-### Supported Field Types
+## Raw C Memory Layouts: the `c::` Functions
 
-| Type | Description |
-|------|-------------|
-| `int` | Integer (4 bytes) |
-| `num` | Float/double (8 bytes) |
-| `str` | String |
-
-## Low-Level cstruct API
-
-For more control or C interop, use the cstruct functions directly.
-
-### Creating a Struct
-
-Allocate a block of memory:
+When you need a real C struct layout (to hand a pointer to C code, or to read
+one back), allocate raw memory and read/write fields at explicit byte offsets.
 
 ```strada
-# Allocate 8 bytes (for two 4-byte ints)
-my scalar $pt = sys::cstruct_new(8);
-```
-
-### Setting Fields
-
-Specify the field name, byte offset, and value:
-
-```strada
-# Integer field (4 bytes)
-sys::cstruct_set_int($pt, "x", 0, 10);    # x at offset 0
-sys::cstruct_set_int($pt, "y", 4, 20);    # y at offset 4
-
-# Double field (8 bytes)
-sys::cstruct_set_double($p, "salary", 68, 50000.0);
-
-# String field (fixed size)
-sys::cstruct_set_string($p, "name", 0, "Alice");
-```
-
-### Getting Fields
-
-```strada
-my int $x = sys::cstruct_get_int($pt, "x", 0);
-my int $y = sys::cstruct_get_int($pt, "y", 4);
-my num $salary = sys::cstruct_get_double($p, "salary", 68);
-my str $name = sys::cstruct_get_string($p, "name", 0);
-```
-
-### Memory Layout Example
-
-```strada
-# Person struct layout:
-#   name:   string, 64 bytes, offset 0
-#   age:    int, 4 bytes, offset 64
-#   salary: double, 8 bytes, offset 68
-# Total: 76 bytes
-
-func create_person(str $name, int $age, num $salary) scalar {
-    my scalar $p = sys::cstruct_new(76);
-    sys::cstruct_set_string($p, "name", 0, $name);
-    sys::cstruct_set_int($p, "age", 64, $age);
-    sys::cstruct_set_double($p, "salary", 68, $salary);
+# struct point { int32_t x; int32_t y; double weight; }  -> 16 bytes
+# x: int32 at offset 0, y: int32 at offset 4, weight: double at offset 8
+func point_new(int $x, int $y, num $weight) scalar {
+    my scalar $p = c::alloc(16);
+    c::write_int32($p, $x);
+    c::write_int32(c::ptr_add($p, 4), $y);
+    c::write_double(c::ptr_add($p, 8), $weight);
     return $p;
 }
 
-func person_name(scalar $p) str {
-    return sys::cstruct_get_string($p, "name", 0);
-}
+func point_x(scalar $p) int { return c::read_int32($p); }
+func point_y(scalar $p) int { return c::read_int32(c::ptr_add($p, 4)); }
+func point_weight(scalar $p) num { return c::read_double(c::ptr_add($p, 8)); }
 
-func person_age(scalar $p) int {
-    return sys::cstruct_get_int($p, "age", 64);
-}
-
-func person_salary(scalar $p) num {
-    return sys::cstruct_get_double($p, "salary", 68);
+func main() int {
+    my scalar $p = point_new(10, 20, 1.5);
+    say(point_x($p));        # 10
+    say(point_y($p));        # 20
+    say(point_weight($p));   # 1.5
+    c::free($p);             # required: c::alloc memory is not reference counted
+    return 0;
 }
 ```
 
-### cstruct API Reference
+### `c::` Memory API Reference
 
 | Function | Description |
 |----------|-------------|
-| `sys::cstruct_new($size)` | Allocate $size bytes |
-| `sys::cstruct_set_int($s, $name, $offset, $val)` | Set 4-byte int |
-| `sys::cstruct_get_int($s, $name, $offset)` | Get 4-byte int |
-| `sys::cstruct_set_double($s, $name, $offset, $val)` | Set 8-byte double |
-| `sys::cstruct_get_double($s, $name, $offset)` | Get 8-byte double |
-| `sys::cstruct_set_string($s, $name, $offset, $val)` | Set string |
-| `sys::cstruct_get_string($s, $name, $offset)` | Get string |
+| `c::alloc($size)` | Allocate `$size` bytes; returns a pointer |
+| `c::realloc($ptr, $size)` | Resize an allocation |
+| `c::free($ptr)` | Free memory from `c::alloc` / `c::str_to_ptr` |
+| `c::ptr_add($ptr, $offset)` | Pointer plus byte offset |
+| `c::is_null($ptr)`, `c::null()` | NULL test / NULL pointer |
+| `c::write_int8/16/32/64($ptr, $val)` | Write an integer of that width |
+| `c::read_int8/16/32/64($ptr)` | Read an integer of that width |
+| `c::write_float($ptr, $val)`, `c::write_double($ptr, $val)` | Write a float / double |
+| `c::read_float($ptr)`, `c::read_double($ptr)` | Read a float / double |
+| `c::write_ptr($ptr, $val)`, `c::read_ptr($ptr)` | Write / read a pointer-sized value |
+| `c::str_to_ptr($str)` | Copy a string to newly allocated C memory |
+| `c::ptr_to_str($ptr)`, `c::ptr_to_str_n($ptr, $len)` | Read a C string back |
+| `c::memcpy($dst, $src, $n)`, `c::memset($ptr, $byte, $n)` | Block copy / fill |
+| `c::sizeof_int()`, `c::sizeof_long()`, `c::sizeof_ptr()`, `c::sizeof_size_t()` | Platform sizes |
 
-## Structs vs Hashes vs OOP
+## Classes vs Hashes vs Raw Memory
 
 When should you use each?
 
-### Use Structs When:
+### Use a Class (`has`) When:
 
-- You need fixed, known fields
-- Performance matters (direct memory access)
-- Interfacing with C code
-- Memory layout must be predictable
+- You need fixed, known, typed fields
+- You want methods, inheritance, or destructors (`DESTROY`)
+- Performance matters (accessors and constructors are inlined by the compiler)
 
 ```strada
-struct Point { int x; int y; }
-my Point $p;
-$p->x = 10;  # Direct memory access, fast
+package Point;
+has rw int $x = 0;
+has rw int $y = 0;
+
+package main;
+
+func main() int {
+    my scalar $p = Point::new("x", 10);
+    say($p->x());   # 10
+    return 0;
+}
 ```
 
 ### Use Hashes When:
@@ -208,15 +184,13 @@ $p->x = 10;  # Direct memory access, fast
 - Rapid prototyping
 
 ```strada
-my hash %point = { "x" => 10, "y" => 20 };
+my hash %point = ("x" => 10, "y" => 20);
 $point{"z"} = 30;  # Can add fields anytime
 ```
 
-### Use OOP When:
+### Use a Hand-Written `bless` Class When:
 
-- You need inheritance
-- You need methods and polymorphism
-- You need destructors (DESTROY)
+- You want full control over construction and storage
 
 ```strada
 package Point;
@@ -229,97 +203,73 @@ func move(scalar $self, int $dx, int $dy) void {
 }
 ```
 
+### Use `c::` Raw Memory When:
+
+- Interfacing with C code
+- Memory layout must be predictable
+
 ## Common Patterns
 
-### Constructor Function
+### Constructor with Defaults
+
+Attribute defaults replace hand-written initialization:
 
 ```strada
-struct Config {
-    str host;
-    int port;
-    int timeout;
-}
+package Config;
+has rw str $host = "localhost";
+has rw int $port = 80;
+has rw int $timeout = 30;      # Default value
 
-func new_config(str $host, int $port) Config {
-    my Config $c;
-    $c->host = $host;
-    $c->port = $port;
-    $c->timeout = 30;  # Default value
-    return $c;
-}
-```
-
-### Struct Methods
-
-Use naming conventions to group related functions:
-
-```strada
-struct Point { int x; int y; }
-
-func Point_new(int $x, int $y) Point {
-    my Point $p;
-    $p->x = $x;
-    $p->y = $y;
-    return $p;
-}
-
-func Point_print(Point $p) void {
-    say("(" . $p->x . ", " . $p->y . ")");
-}
-
-func Point_distance(Point $a, Point $b) num {
-    my int $dx = $b->x - $a->x;
-    my int $dy = $b->y - $a->y;
-    return math::sqrt($dx * $dx + $dy * $dy);
-}
-```
-
-### Array of Structs
-
-```strada
-struct Point { int x; int y; }
+package main;
 
 func main() int {
-    my array @points;
+    my scalar $c = Config::new("host", "example.com", "port", 8080);
+    say($c->host() . ":" . $c->port() . " timeout " . $c->timeout());
+    return 0;
+}
+```
 
-    push(@points, Point_new(0, 0));
-    push(@points, Point_new(10, 20));
-    push(@points, Point_new(30, 40));
+### Array of Objects
 
-    my int $i = 0;
-    while ($i < scalar(@points)) {
-        Point_print($points[$i]);
-        $i++;
+```strada
+package Point;
+has rw int $x = 0;
+has rw int $y = 0;
+
+package main;
+
+func main() int {
+    my array @points = ();
+
+    push(@points, Point::new("x", 0, "y", 0));
+    push(@points, Point::new("x", 10, "y", 20));
+    push(@points, Point::new("x", 30, "y", 40));
+
+    foreach my scalar $p (@points) {
+        say("(" . $p->x() . ", " . $p->y() . ")");
     }
 
     return 0;
 }
 ```
 
-### Nested Data (Struct + Hash)
+### Nested Data (Object + Hash)
 
 ```strada
-struct Employee {
-    str name;
-    int id;
-}
+package Employee;
+has rw str $name = "";
+has rw int $id = 0;
+
+package main;
 
 func main() int {
-    my hash %department;
+    my hash %department = ();
 
-    my Employee $alice;
-    $alice->name = "Alice";
-    $alice->id = 101;
+    $department{"manager"} = Employee::new("name", "Alice", "id", 101);
+    $department{"developer"} = Employee::new("name", "Bob", "id", 102);
 
-    my Employee $bob;
-    $bob->name = "Bob";
-    $bob->id = 102;
-
-    $department{"manager"} = $alice;
-    $department{"developer"} = $bob;
-
-    my Employee $mgr = $department{"manager"};
-    say("Manager: " . $mgr->name);
+    my scalar $mgr = $department{"manager"};
+    say("Manager: " . $mgr->name());
 
     return 0;
 }
@@ -327,48 +277,32 @@ func main() int {
 
 ## Memory Considerations
 
-### Struct Memory
+### Objects and Hashes
 
-Structs are allocated on the stack or as part of the runtime's memory.
-They are automatically cleaned up when they go out of scope.
+Objects and hashes are reference counted like other Strada values and are
+freed automatically when the last reference goes away.
 
-```strada
-func example() void {
-    my Point $p;      # Allocated
-    $p->x = 10;
-    # $p automatically freed when function returns
-}
-```
+### `c::alloc` Memory
 
-### cstruct Memory
-
-Low-level cstructs are reference counted like other Strada values:
-
-```strada
-my scalar $pt = sys::cstruct_new(8);
-# When $pt goes out of scope or is set to undef, memory is freed
-```
+Memory from `c::alloc` (and `c::str_to_ptr`) is **not** reference counted. The
+pointer is just a number; you must call `c::free($ptr)` yourself, exactly once.
 
 ## Tips
 
-1. **Prefer native syntax** - It's cleaner and less error-prone than manual offsets
+1. **Prefer a `has` class** - It's cleaner and less error-prone than manual offsets
 
-2. **Document your layouts** - When using cstruct, comment the memory layout:
+2. **Document your layouts** - When using `c::` raw memory, comment the layout:
    ```strada
-   # Point: x(int,0), y(int,4) = 8 bytes total
+   # point: x(int32,0), y(int32,4), weight(double,8) = 16 bytes total
    ```
 
-3. **Use constructor functions** - Don't repeat initialization code
+3. **Use attribute defaults** - Don't repeat initialization code
 
-4. **Name functions consistently** - Use `TypeName_method` pattern for methods
-
-5. **Consider alignment** - When interfacing with C, match C struct alignment
+4. **Consider alignment** - When interfacing with C, match C struct alignment
 
 ## Examples
 
 See these files for more examples:
 
-- `examples/native_struct_syntax.strada` - Native struct syntax
-- `examples/struct_definition_example.strada` - cstruct API patterns
-- `examples/struct_funcs.strada` - Structs in functions
-- `examples/test_struct_types.strada` - Various struct types
+- `examples/test_c_callback.strada` - `c::alloc` / `c::read_*` / `c::write_*` with C callbacks
+- `examples/test_extern_c.strada` - Calling C from Strada

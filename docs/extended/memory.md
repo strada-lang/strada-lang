@@ -36,7 +36,7 @@ func example() void {
 4. **Reassignment** - decrements old value, increments new
 5. **Zero refcount** - memory freed immediately
 
-No garbage collector, no pauses, no manual free() calls.
+No tracing garbage collector, no manual free() calls (a cycle collector handles reference cycles — see below).
 
 ## Inspecting Reference Counts
 
@@ -44,10 +44,10 @@ Use `core::refcount()` to check a value's reference count:
 
 ```strada
 my array @data = (1, 2, 3);
-say(core::refcount(\@data));   # 1
+say(core::refcount(\@data));   # 2 (the variable + the temporary \@data reference)
 
 my array @alias = @data;
-say(core::refcount(\@data));   # 2
+say(core::refcount(\@data));   # 3
 ```
 
 ## Arrays and Memory
@@ -105,7 +105,7 @@ func new(str $path) scalar {
 }
 
 func DESTROY(scalar $self) void {
-    if (length($self->{"fh"}) > 0) {
+    if (defined($self->{"fh"})) {
         core::close($self->{"fh"});
     }
     say("Closed: " . $self->{"path"});
@@ -173,7 +173,11 @@ say($child->{"parent"}->{"name"});        # "parent" (still accessible)
 
 ## Memory in Closures
 
-Closures capture variables by reference:
+Closures capture scalar variables **by value**: the closure gets its own
+private, persistent copy taken when it is created, so changes made inside the
+closure are not visible in the outer scope (and vice versa). Arrays and hashes
+are shared — to share mutable state, capture an array/hash (or a reference to
+one) or use an `our` variable.
 
 ```strada
 func make_counter() scalar {
@@ -187,7 +191,7 @@ func make_counter() scalar {
 my scalar $counter = make_counter();
 say($counter->());  # 1
 say($counter->());  # 2
-# $count stays alive as long as $counter exists
+# The closure's own copy of $count stays alive as long as $counter exists
 ```
 
 ## Thread Safety
@@ -263,28 +267,28 @@ Once a variable is untied, it has **zero overhead** -- it behaves exactly like a
 ```strada
 package UpperCase;
 
-func TIESCALAR(str $class) scalar {
-    my hash %self = { "value" => "" };
+func TIEHASH(str $class) scalar {
+    my hash %self = { "data" => {} };
     return bless(\%self, "UpperCase");
 }
 
-func STORE(scalar $self, scalar $val) void {
-    $self->{"value"} = uc($val);
+func STORE(scalar $self, str $key, scalar $val) void {
+    $self->{"data"}->{$key} = uc($val);
 }
 
-func FETCH(scalar $self) scalar {
-    return $self->{"value"};
+func FETCH(scalar $self, str $key) scalar {
+    return $self->{"data"}->{$key};
 }
 
 package main;
 
 func main() int {
-    my str $name = "";
-    tie($name, "UpperCase");
-    $name = "hello";
-    say($name);              # "HELLO"
-    say(tied($name)->isa("UpperCase"));  # 1
-    untie($name);            # Zero overhead from here on
+    my hash %h = ();
+    tie(%h, "UpperCase");
+    $h{"name"} = "hello";
+    say($h{"name"});         # "HELLO"
+    say(tied(%h)->isa("UpperCase"));  # 1
+    untie(%h);               # Zero overhead from here on
     return 0;
 }
 ```
@@ -312,6 +316,6 @@ say("Refcount: " . core::refcount($obj));
 - All other values are managed automatically via reference counting
 - Values are freed immediately when refcount reaches zero
 - Pre-allocate arrays/hashes when size is known
-- Avoid circular references (they leak)
+- Reference cycles are reclaimed by the cycle collector (use `core::weaken()` for closure-capture cycles or deterministic teardown)
 - Use DESTROY for cleanup in OOP classes
 - Reference counting is thread-safe

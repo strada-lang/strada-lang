@@ -39,7 +39,7 @@ Use the `async` keyword before `func` (or `fn`) to create an async function:
 ```strada
 async func fetch_data(str $url) str {
     # This runs in a thread pool worker
-    my str $response = http_get($url);
+    my str $response = "response from " . $url;   # stand-in for real I/O
     return $response;
 }
 ```
@@ -121,6 +121,13 @@ func main() int {
 A Future represents an async operation that will complete in the future.
 
 ### Future Combinators
+
+`async::all()`, `async::race()` and `async::timeout()` block and return the
+result value(s) directly, so the `await` in front of them (as in the examples
+below) is optional. Leave it off when the result is an integer:
+`await async::race(...)` / `await async::timeout(...)` on an `int` result
+currently crashes, because `await` is then applied to a plain integer rather
+than a future (`my int $r = async::race(\@futures);` works).
 
 #### `async::all()` - Wait for All
 

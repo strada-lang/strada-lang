@@ -247,7 +247,7 @@ func format_nums(str $prefix, str $sep, int ...@nums) str {
 ```perl
 use Strada;
 
-my $lib = Strada::Library->new('./libmylib.so');
+my $lib = Strada::Library->new('./mylib.so');
 
 # Pass variadic args as array reference
 my $sum = $lib->call('mylib::sum_all', [1, 2, 3, 4, 5]);
@@ -366,7 +366,7 @@ perl/
 
 ## Perla — Perl 5 Compiler
 
-Perla is a full Perl 5 compiler built on Strada. It converts Perl 5 source to native executables (via C code generation) or runs it directly through the Strada VM interpreter. Located in `perla/`.
+Perla is a full Perl 5 compiler built on Strada. It converts Perl 5 source to native executables (via C code generation) or runs it directly through the Strada VM interpreter. Perla lives in a separate repository; there is no `perla/` directory in this tree, so the commands below apply to a Perla checkout.
 
 Perla compiles Perl programs directly in one step, with no intermediate Strada source.
 
@@ -426,7 +426,7 @@ Strada includes two additional tools for converting code between Strada and Perl
 Converts Perl XS modules into Strada code using `__C__` blocks:
 
 ```bash
-# Build the tool
+# Build the tool (or: make xs2strada, which builds tools/xs2strada)
 ./strada tools/xs2strada.strada
 
 # Convert an XS module
@@ -469,9 +469,9 @@ Comprehensive converter that translates Strada source code into equivalent Perl 
 | `async func task() str { }` | `sub task { # was async }` |
 | `func () int { ... }` (closure) | `sub { ... }` |
 | `func main() int { ... return 0; }` | Body unwrapped to inline code |
-| `core::getcwd()` / `core::getcwd()` | `Cwd::getcwd()` |
-| `core::exit(1)` / `core::exit(1)` | `exit(1)` |
-| `core::getenv("K")` / `core::getenv("K")` | `$ENV{"K"}` |
+| `core::getcwd()` | `Cwd::getcwd()` |
+| `core::exit(1)` | `exit(1)` |
+| `core::getenv("K")` | `$ENV{"K"}` |
 | `math::sqrt($n)` | `sqrt($n)` |
 | `math::floor($n)` | `POSIX::floor($n)` |
 | `try { } catch ($e) { }` | `eval { }; if ($@) { my $e = $@; }` |
@@ -524,7 +524,7 @@ func main() int {
 }
 ```
 
-Perl output:
+Perl output (abridged: the real file also starts with a `# Converted from Strada` header comment and includes the compatibility helper subs listed above):
 ```perl
 #!/usr/bin/env perl
 use strict;
@@ -543,9 +543,9 @@ sub greet {
 package main;
 
 # Main
-my $cwd = Cwd::getcwd();
-say("Dir: " . $cwd);
-say(Utils::greet("world"));
+    my $cwd = Cwd::getcwd();
+    say("Dir: " . $cwd);
+    say(Utils::greet("world"));
 ```
 
 ---
@@ -561,7 +561,7 @@ The following Perl features are natively supported in Strada and do not require 
 | each() | `each(%hash)` | `each(%hash)` |
 | select() | `select($fh)` | `select($fh)` |
 | tr/// | `$s =~ tr/a-z/A-Z/` | `$s =~ tr/a-z/A-Z/` |
-| local() | `local($var) = $val` | `local($var) = $val` |
+| local | `local $var = $val;` (for `our` variables; the parenthesized `local($var)` form is not accepted) | `local $var = $val;` |
 | /e modifier | `$s =~ s/(\d+)/$1 * 2/e` | `$s =~ s/(\d+)/$1 * 2/e` |
 | tie/untie/tied | `tie($var, "Class")` | `tie($var, "Class")` |
 

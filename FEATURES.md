@@ -6,8 +6,8 @@ A complete feature matrix for the Strada programming language.
 
 ### Type System
 - **Primitives**: `int` (64-bit), `num` (double), `str`, `scalar` (dynamic)
-- **Composites**: `array`, `hash`, user-defined `struct`
-- **Type functions**: `typeof()`, `defined()`, `ref()`, `int()`, `num()`, `str()`
+- **Composites**: `array`, `hash`
+- **Type functions**: `typeof()`, `defined()`, `ref()`, `int()` (`num` and `str` are type keywords, not functions: convert with `$x + 0` / `"" . $x`)
 - **Strong typing** with automatic coercion where sensible
 
 ### Variables and Sigils
@@ -29,7 +29,7 @@ A complete feature matrix for the Strada programming language.
 ### Functions
 - Typed parameters and return: `func add(int $a, int $b) int { }`
 - Optional parameters with defaults: `func greet(str $name, str $msg = "Hi") str { }`
-- Variadic functions: `func sum(int ...$nums) int { }`
+- Variadic functions: `func sum(int ...@nums) int { }`
 - Spread operator: `my int $total = sum(...@values);`
 - Closures: `my scalar $f = func (int $n) { return $n * 2; };`
 - Function references: `\&func_name`
@@ -38,7 +38,7 @@ A complete feature matrix for the Strada programming language.
 - **Arithmetic**: `+`, `-`, `*`, `/`, `%`, `**`, `++`, `--` (prefix/postfix)
 - **Comparison**: `==`, `!=`, `<`, `>`, `<=`, `>=`
 - **String comparison**: `eq`, `ne`, `lt`, `gt`, `le`, `ge`
-- **Logical**: `&&`, `||`, `!`, `and`, `or`, `not`
+- **Logical**: `&&`, `||`, `//` (defined-or), `!`
 - **Bitwise**: `&`, `|`, `^`, `~`, `<<`, `>>`
 - **String**: `.` (concat), `x` (repeat), `=~`, `!~` (regex)
 - **Assignment**: `=`, `+=`, `-=`, `.=`
@@ -53,17 +53,19 @@ A complete feature matrix for the Strada programming language.
 `length()`, `substr()`, `index()`, `rindex()`, `uc()`, `lc()`, `ucfirst()`, `lcfirst()`, `trim()`, `ltrim()`, `rtrim()`, `chomp()`, `chop()`, `chr()`, `ord()`, `reverse()`, `join()`, `split()`
 
 ### Arrays
-`push()`, `pop()`, `shift()`, `unshift()`, `size()`, `sort()`, `reverse()`, `splice()`, `sys::array_capacity()`, `sys::array_reserve()`, `sys::array_shrink()`
+`push()`, `pop()`, `shift()`, `unshift()`, `size()`, `sort()`, `reverse()`, `splice()`, `reserve()`, `core::array_default_capacity()`
 
 ### Hashes
-`keys()`, `values()`, `exists()`, `delete()`, `each()`, `sys::hash_default_capacity()`
+`keys()`, `values()`, `exists()`, `delete()`, `each()`, `core::hash_default_capacity()`
 
 ### math:: Namespace
 `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `log`, `log10`, `exp`, `pow`, `floor`, `ceil`, `round`, `fabs`, `fmod`, `sqrt`, `abs`, `rand`
 
-### sys:: Namespace
+### core:: Namespace
 
-**File I/O**: `open`, `close`, `read`, `readline`, `write`, `seek`, `tell`, `rewind`, `eof`, `flush`, `slurp`, `spew`
+(`sys::` is a deprecated alias: it still works but prints a warning.)
+
+**File I/O**: `open`, `close`, `fread`, `readline`, `fwrite`, `seek`, `tell`, `rewind`, `eof`, `flush`, `slurp`, `spew`
 
 **File System**: `unlink`, `rename`, `mkdir`, `rmdir`, `chdir`, `getcwd`, `chmod`, `access`, `stat`, `lstat`, `readdir`, `readdir_full`, `is_dir`, `is_file`, `realpath`, `dirname`, `basename`, `glob`, `fnmatch`
 
@@ -96,21 +98,6 @@ A complete feature matrix for the Strada programming language.
 - Dereference: `$$ref`, `$ref->[0]`, `$ref->{"key"}`
 - Functions: `clone()`, `deref()`, `reftype()`
 
-## Structs
-
-```strada
-struct Person {
-    str name;
-    int age;
-    func(int, int) int operation;  # Function pointer field
-}
-
-my Person $p;
-$p->name = "Alice";
-$p->operation = &add;
-my int $result = $p->operation(10, 5);
-```
-
 ## Object-Oriented Programming
 
 - Perl-style blessing: `bless(\%self, "ClassName")`
@@ -118,7 +105,8 @@ my int $result = $p->operation(10, 5);
 - Auto function prefixing inside `package` blocks
 - Method calls: `$obj->method(args)`
 - UNIVERSAL methods: `$obj->isa("Class")`, `$obj->can("method")`
-- Inheritance: `inherit "ParentClass"`
+- Inheritance: `inherit ParentClass;` or `extends ParentClass;`
+- Moose-style attributes and hooks: `has ro|rw`, `with` (roles), `before`/`after`/`around`
 
 ## Modules and Packages
 
@@ -134,14 +122,14 @@ my int $result = $p->operation(10, 5);
 - Compile: `./strada --shared mylib.strada` creates `mylib.so`
 - Load and call:
   ```strada
-  my int $lib = sys::dl_open("./mylib.so");
-  my int $fn = sys::dl_sym($lib, "my_function");
-  my scalar $result = sys::dl_call_sv($fn, [arg1, arg2]);
+  my int $lib = core::dl_open("./mylib.so");
+  my int $fn = core::dl_sym($lib, "my_function");
+  my scalar $result = core::dl_call_sv($fn, [$arg1, $arg2]);
   ```
 
 ## SSL/TLS Support
 
-- Build: `cd lib/ssl && make`
+- Build: `make lib-ssl` (needs OpenSSL; part of `make` when `./configure` detects it)
 - Connect: `my int $conn = ssl::connect("example.com", 443);`
 - Read/write: `ssl::write($conn, $data);`, `my str $resp = ssl::read($conn, 4096);`
 
@@ -158,15 +146,15 @@ throw "Custom error message";
 
 ## Debugging
 
-- `dumper($val)` - Inspect data structures
+- `say(dumper($val))` - Inspect data structures (`dumper` returns the dump as a string)
 - `stacktrace()` - Show call stack
-- `caller()` - Get caller info
+- `core::caller()` - Get caller info
 - `./strada -g file.strada` - Debug symbols
 - `./strada -w file.strada` - Enable warnings (unused variables)
 
 ## Cannoli Web Framework
 
-A preforking web server and framework:
+A preforking web server and framework (separate repository: https://github.com/strada-lang/cannoli):
 
 ```bash
 cd cannoli && make
@@ -180,11 +168,11 @@ Features: routing, JSON/HTML responses, request/response headers, cookies, file 
 ## Test Suite
 
 ```bash
-make test-suite              # Run all 93 tests
+make test-suite              # Run all tests
 ./t/run_tests.sh -v          # Verbose output
 ./t/run_tests.sh -t          # TAP format for CI/CD
 ```
 
 ---
 
-*Last updated: 2026-01-10*
+*Last updated: 2026-11-12*

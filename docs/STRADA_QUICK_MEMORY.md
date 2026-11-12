@@ -28,16 +28,18 @@ make
 
 # Manual two-step
 ./stradac program.strada program.c
-gcc -o program program.c runtime/strada_runtime.c -Iruntime -ldl
+gcc -o program program.c runtime/strada_runtime.c -Iruntime -ldl -lm
 
-# Interpreter / REPL
-./strada-interp program.strada  # run without compilation
-./strada-interp                 # REPL
+# Fast checks
+./strada --check program.strada  # syntax/semantic check only, reports all errors
+./strada -O0 -r program.strada   # quick unoptimized compile + run (default is -O2 + LTO)
 
-# Perla (Perl 5 compiler)
-./perla script.pl               # compile Perl to native
-./perla --vm script.pl          # run Perl via VM
+# Interpreter / REPL (build first with: make interpreter)
+./interpreter/strada-interp program.strada  # run without compilation
+./interpreter/strada-interp                 # REPL
 ```
+
+(Perla, the Perl 5 compiler built on Strada, lives in a separate repository.)
 
 ## Minimal program
 
@@ -160,9 +162,14 @@ my int $x = 10;
 my scalar $f = func (int $n) int { return $n * $x; };
 my int $y = $f->(5);  # 50
 
-# fn is an alias for func
-fn double(int $n) int { return $n * 2; }
+# fn is an alias for func ("double" is a reserved type name, so not usable as a function name)
+fn twice(int $n) int { return $n * 2; }
 ```
+
+Closures capture **scalars by value** (a private copy taken when the closure is
+created; assignments inside the closure are not seen outside, and vice versa).
+Arrays and hashes are shared. To share a scalar, capture a reference (`\$x`,
+then `$$ref`) or keep it in a hash/array.
 
 ## Arrays and hashes
 
@@ -175,8 +182,8 @@ splice(@arr, $offset, $length);
 
 my int $len = size(@arr);
 my scalar $el = $arr[0];
-reverse(@arr);
-my array @sorted = sort(@arr);
+my array @rev = reverse(@arr);   # returns a reversed copy
+my array @sorted = sort(@arr);   # returns a sorted copy
 
 my array @keys = keys(%h);
 my array @vals = values(%h);
@@ -304,8 +311,8 @@ async func work(int $n) int { return $n * $n; }
 my scalar $f1 = work(10);
 my int $a = await $f1;
 
-my array @results = await async::all(\@futures);
-my str $first = await async::race(\@futures);
+my array @results = async::all(\@futures);   # blocks, returns results (no await)
+my scalar $first = async::race(\@futures);   # first result
 
 my scalar $ch = async::channel(10);
 async::send($ch, "msg");
@@ -383,7 +390,7 @@ Types: `defined`, `typeof`, `isa`
 `system($cmd) → int` | `qx($cmd) → str` — capture output
 `wait() → int` | `waitpid($pid, $opts) → int`
 `getpid() → int` | `getppid() → int` | `kill($pid, $sig)` | `_exit($code)`
-`sleep($secs)` | `usleep($μsecs)` | `nanosleep($secs, $nsecs)`
+`sleep($secs)` | `usleep($μsecs)` | `nanosleep($nsecs)`
 `setprocname($name)` | `getprocname() → str`
 
 ### Signals
@@ -396,7 +403,7 @@ Types: `defined`, `typeof`, `isa`
 `time() → int` | `hires_time() → num` (microsecond precision)
 `localtime($ts) → hash` — keys: sec, min, hour, mday, mon(0-11), year(+1900), wday, yday
 `gmtime($ts) → hash` | `mktime(%tm) → int` | `strftime($fmt, %tm) → str`
-`gettimeofday() → [$secs, $μsecs]` | `clock() → int`
+`gettimeofday() → hash {sec, usec}` | `clock() → int`
 
 ### Sockets
 
@@ -472,7 +479,7 @@ Types: `defined`, `typeof`, `isa`
 
 **PCRE2 features** (require libpcre2): `*?` `+?` lazy quantifiers | `\b` word boundary | `(?=...)` `(?!...)` lookahead | `(?<=...)` `(?<!...)` lookbehind | `(?P<name>...)` named captures
 
-**Transliteration flags:** `c` complement | `d` delete unmatched | `s` squeeze duplicates | `r` return copy | Returns count of replacements
+**Transliteration flags:** `c` complement | `d` delete unmatched | `s` squeeze duplicates | Returns count of replacements (the `r` "return copy" flag is not honoured in compiled code: the string is still modified in place)
 
 **Gotcha:** `replace_all()` is plain string replacement. `replace()` and `s///` use regex.
 
@@ -486,7 +493,7 @@ Types: `defined`, `typeof`, `isa`
 `sinh($x)` | `cosh($x)` | `tanh($x)`
 `exp($x)` | `log($x)` (natural) | `log10($x)`
 `isnan($x) → 1/0` | `isinf($x) → 1/0/-1`
-`rand() → num [0,1)` | `srand($seed)`
+`rand() → num [0,1)`
 
 ---
 
@@ -508,13 +515,13 @@ Types: `defined`, `typeof`, `isa`
 
 **Check:** `typeof($val) → str` | `defined($val) → 1/0` | `ref($val) → "ARRAY"|"HASH"|""|classname` | `isa($obj, "Class") → 1/0`
 
-**Cast:** `int($val)` truncates | `num($val)` | `str($val)` | `chr($code) → str` | `ord($str) → int`
+**Cast:** `int($val)` truncates | to number: `$val + 0` | to string: `"" . $val` (there is no `num()`/`str()` function) | `chr($code) → str` | `ord($str) → int`
 
 **C interop types:** `int8/16/32/64`, `uint8/16/32/64`, `float`/`double`, `size_t`, `byte`, `char`
 
 **Bool:** `my bool $flag = 1` — internally `int`. Truthiness: `0`, `0.0`, `""`, `undef` = false
 
-**Dynamic return:** `func flex() dynamic { if (wantarray()) { ... } return 42; }`
+**Dynamic return:** `func flex() dynamic { if (core::wantarray()) { ... } return 42; }`
 
 ---
 
@@ -534,7 +541,7 @@ Types: `defined`, `typeof`, `isa`
 
 ## REPL
 
-Start: `./strada-interp` | Commands: `.help`, `.vars`, `.funcs`, `.load FILE`, `.clear`, `.debug`, `.quit`
+Start: `./interpreter/strada-interp` (after `make interpreter`) | Commands: `.help`, `.vars`, `.funcs`, `.load FILE`, `.clear`, `.quit`
 
 Multi-line auto-detected (unbalanced braces). Functions/vars persist until `.clear`.
 

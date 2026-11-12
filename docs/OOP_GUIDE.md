@@ -14,7 +14,9 @@ Strada supports Perl-style object-oriented programming with blessed references, 
 8. [DESTROY Destructors](#8-destroy-destructors)
 9. [Type Checking](#9-type-checking)
 10. [UNIVERSAL Methods](#10-universal-methods)
-11. [Operator Overloading](#11-operator-overloading)
+11. [AUTOLOAD](#11-autoload)
+    - [11.5 Dynamic Method Dispatch](#115-dynamic-method-dispatch)
+    - [11.6 Operator Overloading](#116-operator-overloading)
 12. [Design Patterns](#12-design-patterns)
 13. [Best Practices](#13-best-practices)
 14. [Moose-Style Declarative OOP](#14-moose-style-declarative-oop)
@@ -215,6 +217,8 @@ func Person_set_name(scalar $self, str $name) void {
 }
 
 # Combined getter/setter
+# (call it as Person_age($p): the default is only filled in for direct calls;
+#  a dynamically dispatched $p->age() passes undef for the missing argument)
 func Person_age(scalar $self, int $new_age = -1) int {
     if ($new_age >= 0) {
         $self->{"age"} = $new_age;
@@ -302,16 +306,14 @@ func complex_operation(scalar $self) void {
     ::helper1();                     # Person_helper1
     ::helper2($self);                # Person_helper2
     .::helper3();                    # Alternate syntax
-    __PACKAGE__::helper4();          # Explicit form
 }
 ```
 
-Three equivalent syntaxes:
+Two equivalent syntaxes:
 - `::func()` — Preferred shorthand
 - `.::func()` — Alternate shorthand
-- `__PACKAGE__::func()` — Explicit form
 
-All resolve to `PackageName_func()` at **compile time**.
+Both resolve to `PackageName_func()` at **compile time**.
 
 ### Variadic Methods
 
@@ -558,10 +560,10 @@ When multiple parents have the same method, the first parent in the inheritance 
 
 ```strada
 package A;
-func A_method() str { return "A"; }
+func A_method(scalar $self) str { return "A"; }
 
 package B;
-func B_method() str { return "B"; }
+func B_method(scalar $self) str { return "B"; }
 
 package C;
 func C_init() void {
@@ -569,7 +571,7 @@ func C_init() void {
     inherit("C", "B");
 }
 
-# When looking up 'method' on C:
+# When looking up 'method' on C ($c->method()):
 # 1. Check C_method - not found
 # 2. Check A_method - found, use A's implementation
 # 3. B_method would only be checked if A didn't have it
@@ -686,6 +688,12 @@ package Dog;
 
 func Dog_init() void {
     inherit("Dog", "Animal");
+}
+
+func Dog_new(str $name) scalar {
+    my hash %self = ();
+    $self{"name"} = $name;
+    return bless(\%self, "Dog");
 }
 
 func Dog_DESTROY(scalar $self) void {
@@ -1021,7 +1029,7 @@ $obj->$method(...@args);
 
 ### Use Cases
 
-- **Dispatch tables** — Map action names to methods: `$handler->$dispatch{$action}()`
+- **Dispatch tables** — Map action names to methods: `my str $m = $dispatch{$action}; $handler->$m();` (the method name must be a plain scalar variable; `$handler->$dispatch{$action}()` does not parse)
 - **Plugin systems** — Call methods by name from configuration
 - **Dynamic APIs** — Invoke methods determined at runtime
 - **Testing** — Parameterize method calls in test frameworks
@@ -1079,7 +1087,7 @@ func main() int {
 | Arithmetic | `+`, `-`, `*`, `/`, `%`, `**` |
 | String | `.` (concatenation) |
 | Stringify | `""` (automatic string conversion) |
-| Unary | `neg` (unary minus), `!`, `bool` |
+| Unary | `neg` (unary minus), `!`, `~`, `bool` |
 | Numeric comparison | `==`, `!=`, `<`, `>`, `<=`, `>=`, `<=>` |
 | String comparison | `eq`, `ne`, `lt`, `gt`, `le`, `ge`, `cmp` |
 
@@ -1428,7 +1436,7 @@ Strada supports a Moose-inspired declarative OOP system that drastically reduces
 | Role composition | `with Role1, Role2;` |
 | Before modifier | `before "method" func(scalar $self) void { ... }` |
 | After modifier | `after "method" func(scalar $self) void { ... }` |
-| Around modifier | `around "method" func(scalar $self) void { ... }` |
+| Around modifier | `around "method" func(scalar $orig, scalar $self) void { ... }` |
 | Auto-constructor | Generated automatically (named-argument style) |
 
 ---
@@ -1648,7 +1656,7 @@ The generated constructor:
 
 #### Inherited Attributes
 
-The constructor collects attributes from the entire inheritance chain. If `Dog extends Animal`, and `Animal` has `$species` and `$energy`, then `Dog::new` accepts all of: `name`, `age`, `nickname` (from Dog) plus `species`, `energy` (from Animal).
+The constructor collects attributes from the entire inheritance chain. If `Dog extends Animal`, and `Animal` has `$species` and `$energy`, then `Dog::new` accepts all of: `name`, `age` (from Dog) plus `species`, `energy` (from Animal).
 
 ```strada
 package Animal;
@@ -1699,7 +1707,7 @@ func new(int $x, int $y) scalar {
 
 ### 14.5 Method Modifiers: `before`, `after`, `around`
 
-Method modifiers let you add behavior before, after, or around an existing method without modifying the method itself. They are declared in the package where the method is defined.
+Method modifiers let you add behavior before, after, or around an existing method without modifying the method itself. They are declared in the package where the method is defined, or in a subclass that inherits it.
 
 #### `before` Modifier
 
@@ -1750,13 +1758,20 @@ after "save" func(scalar $self) void {
 
 #### `around` Modifier
 
-Wraps the target method entirely. The around modifier receives `$self` plus the original method function pointer (as the first element of a packed args array). This allows the around modifier to decide whether (and how) to call the original method.
+Wraps the target method entirely. The around modifier receives the original method as its first parameter (`$orig`, a callable), followed by `$self` and any arguments. This allows the around modifier to decide whether (and how) to call the original method, and its return value becomes the result of the call.
 
 ```
-around "METHOD_NAME" func(PARAMS) void { BODY }
+around "METHOD_NAME" func(scalar $orig, scalar $self, PARAMS) TYPE { BODY }
 ```
 
-The runtime passes the original method as an integer function pointer in the first argument slot. The around modifier can invoke it, skip it, or call it multiple times.
+Call the original with `$orig->($self, ARGS)`. The around modifier can invoke it, skip it, or call it multiple times:
+
+```strada
+around "feed" func(scalar $orig, scalar $self, int $amount) int {
+    my int $base = $orig->($self, $amount);
+    return $base * 2;
+}
+```
 
 #### Modifier Execution Order
 
@@ -1942,7 +1957,7 @@ func main() int {
 }
 ```
 
-Note: When calling through `import_lib`, use `Package::method($obj)` syntax rather than `$obj->method()`, as the OOP method dispatch tables are set up at compile time per binary.
+Note: Both `Package::method($obj)` and `$obj->method()` work on objects from an `import_lib` library — the library registers its methods with the shared runtime when it is loaded.
 
 ---
 
@@ -1980,12 +1995,13 @@ Composes roles. Functionally identical to `extends` (both set up inheritance).
 ```
 before "method_name" func(scalar $self) void { BODY }
 after  "method_name" func(scalar $self) void { BODY }
-around "method_name" func(scalar $self) void { BODY }
+around "method_name" func(scalar $orig, scalar $self) void { BODY }
 ```
 
 - Method name is a string literal
 - The modifier function follows standard Strada function syntax (params, return type, body)
-- Modifiers must be declared in the same package as the method they modify
+- An `around` modifier takes the original method (`$orig`) before `$self` and calls it as `$orig->($self, ...)`
+- Modifiers are declared in the same package as the method they modify, or in a subclass that inherits it
 
 ---
 
@@ -2154,7 +2170,7 @@ func new(str $name) scalar {
 
 ## 16. Tied Hashes (`tie` / `untie` / `tied`)
 
-Strada supports Perl-style tied hashes, which allow you to bind a hash variable to a class that intercepts all access operations. When a hash is tied, every read, write, delete, and iteration goes through methods you define on the tied class.
+Strada supports Perl-style tied hashes, which allow you to bind a hash variable to a class that intercepts all access operations. When a hash is tied, every read, write, and delete goes through methods you define on the tied class.
 
 ### Overview
 
@@ -2175,11 +2191,13 @@ To make a class work with `tie`, define these methods in your package:
 | `STORE` | `$hash{"key"} = $val` | `func STORE(scalar $self, str $key, scalar $val) void` |
 | `EXISTS` | `exists($hash{"key"})` | `func EXISTS(scalar $self, str $key) int` |
 | `DELETE` | `delete($hash{"key"})` | `func DELETE(scalar $self, str $key) void` |
-| `FIRSTKEY` | `keys(%hash)` (start iteration) | `func FIRSTKEY(scalar $self) scalar` |
-| `NEXTKEY` | `keys(%hash)` (continue iteration) | `func NEXTKEY(scalar $self, str $lastkey) scalar` |
-| `CLEAR` | `%hash = ()` | `func CLEAR(scalar $self) void` |
+| `FIRSTKEY` | iteration start (see limitation below) | `func FIRSTKEY(scalar $self) scalar` |
+| `NEXTKEY` | iteration continue (see limitation below) | `func NEXTKEY(scalar $self, str $lastkey) scalar` |
+| `CLEAR` | clearing (see limitation below) | `func CLEAR(scalar $self) void` |
 
-Only `TIEHASH` and `FETCH`/`STORE` are required. The others are optional -- if not defined, the corresponding operations will use default behavior or fail gracefully.
+Only `TIEHASH` and `FETCH`/`STORE` are required. `EXISTS` and `DELETE` are only needed if you call `exists()`/`delete()` on the tied hash -- without them those calls throw a "Can't locate method" exception.
+
+**Current limitation:** compiled Strada code does not yet dispatch `keys()`, `values()`, `each()` or `%hash = ()` to the tied class. `keys()`/`values()`/`each()` on a tied hash see the (empty) underlying hash and return nothing, and `%hash = ()` replaces the hash and drops the tie without calling `CLEAR`. To iterate, call a method on the tied object (`tied(%hash)`) instead.
 
 ### Basic Example
 
@@ -2256,7 +2274,6 @@ func main() int {
    - `$hash{"key"} = $val` calls `STORE($tied_obj, "key", $val)`
    - `exists($hash{"key"})` calls `EXISTS($tied_obj, "key")`
    - `delete($hash{"key"})` calls `DELETE($tied_obj, "key")`
-   - `keys(%hash)` uses `FIRSTKEY` and `NEXTKEY` to iterate
 3. `untie(%hash)` removes the binding, returning the hash to normal behavior.
 4. `tied(%hash)` returns the underlying tied object, or `undef` if the hash is not tied.
 
@@ -2316,7 +2333,7 @@ Tied hash dispatch uses `__builtin_expect` to hint to the CPU branch predictor t
 | Role composition | `with Role1, Role2;` |
 | Before modifier | `before "method" func($self) void { ... }` |
 | After modifier | `after "method" func($self) void { ... }` |
-| Around modifier | `around "method" func($self) void { ... }` |
+| Around modifier | `around "method" func($orig, $self) void { ... }` |
 | Tie hash to class | `tie(%hash, "ClassName", @args)` |
 | Untie hash | `untie(%hash)` |
 | Get tied object | `tied(%hash)` |

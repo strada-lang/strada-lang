@@ -73,15 +73,13 @@ Variable names are prefixed with sigils indicating their type:
 ```strada
 42        # Decimal
 0xFF      # Hexadecimal
-0o77      # Octal
-0b1010    # Binary
+077       # Octal (leading zero)
 ```
 
-**Floating-point literals:**
+**Floating-point literals** (scientific notation such as `1.5e10` is not accepted in source; use `core::atof("1.5e10")` or write the value out):
 ```strada
 3.14      # Standard
-1.5e10    # Scientific notation
-2.5E-3    # Scientific with negative exponent
+0.0025    # Leading digit required
 ```
 
 **String literals:**
@@ -116,7 +114,7 @@ eq ne lt gt le ge   # String comparison
 && || !             # Logical
 & | ^ ~ << >>       # Bitwise
 . x                 # String (concat, repeat)
-= += -= *= /= .=    # Assignment
+= += -= *= /= .=    # Assignment (also %= **= //= x=)
 -> =>               # Arrow, fat comma
 \ @{ %{ ${         # Reference operators
 ```
@@ -312,7 +310,7 @@ local $VAR = EXPR;
 ```
 
 Semantics:
-- Only applies to `our` variables (compile error on `my` variables)
+- Only applies to `our` variables (on a `my` variable it is accepted but has no effect)
 - Saves the current value, assigns the new one
 - Restores the saved value when the enclosing block exits (including via exception)
 - Provides dynamic scoping: called functions see the overridden value
@@ -347,7 +345,6 @@ func verbose_operation() void {
 | `__LINE__` | Current line number |
 | `::func()` | Call func in current package (compile-time) |
 | `.::func()` | Alternate syntax for above |
-| `__PACKAGE__::func()` | Explicit form of above |
 
 ---
 
@@ -459,8 +456,11 @@ If the count is zero or negative, the result is an empty string.
 | `/=` | `$x = $x / $y` |
 | `%=` | `$x = $x % $y` |
 | `.=` | `$s = $s . $t` |
-| `&=` | `$x = $x & $y` |
-| `|=` | `$x = $x | $y` |
+| `**=` | `$x = $x ** $y` |
+| `x=` | `$s = $s x $n` |
+| `//=` | `$x = $x // $y` (assign if undefined) |
+
+There are no bitwise compound assignments (`&=`, `|=`, `^=`, `<<=`, `>>=`); write `$x = $x & $y`.
 
 ### 4.8 Other Operators
 
@@ -592,8 +592,11 @@ func sum_all {
     return $total;
 }
 
-greet("World");           # Hello, World!
-say(sum_all(1, 2, 3));    # 6
+func main() int {
+    greet("World");           # Hello, World!
+    say(sum_all(1, 2, 3));    # 6
+    return 0;
+}
 ```
 
 Standard array operations work on `@_`: `shift(@_)`, `pop(@_)`, `size(@_)`, `$_[N]`.
@@ -655,8 +658,11 @@ func flexible() dynamic {
     return 42;             # Scalar context (default)
 }
 
-my array @arr = flexible();  # Gets (1, 2, 3)
-my int $val = flexible();    # Gets 42
+func main() int {
+    my array @arr = flexible();  # Gets (1, 2, 3)
+    my int $val = flexible();    # Gets 42
+    return 0;
+}
 ```
 
 The `dynamic` return type allows functions to inspect calling context using `core::wantarray()`, `core::wantscalar()`, and `core::wanthash()`, returning different types based on how the result is used.
@@ -674,13 +680,11 @@ func factorial(int $n) int {
 }
 ```
 
-### 7.5 Forward Declarations
+### 7.5 Mutual Recursion
 
-For mutual recursion:
+Functions may be called before they are defined, so no forward declaration is needed (a body-less `func name(...) type;` is a parse error):
 
 ```strada
-func is_even(int $n) int;  # Forward declaration
-
 func is_odd(int $n) int {
     if ($n == 0) { return 0; }
     return is_even($n - 1);
@@ -771,10 +775,10 @@ Removes `LENGTH` elements from `@ARRAY` starting at `OFFSET`, replacing them wit
 my array @a = (1, 2, 3, 4, 5);
 my array @removed = splice(@a, 1, 2);       # @removed=(2,3), @a=(1,4,5)
 splice(@a, 1, 0, 20, 30);                   # Insert: @a=(1,20,30,4,5)
-splice(@a, -2, 2, 99);                      # @a=(1,20,30,99)
+splice(@a, -2, 2, 98, 99);                  # @a=(1,20,30,98,99)
 ```
 
-### 8.5 Iteration
+### 8.6 Iteration
 
 ```strada
 foreach my TYPE $var (@arr) {
@@ -786,7 +790,7 @@ for (my int $i = 0; $i < size(@arr); $i = $i + 1) {
 }
 ```
 
-### 8.6 Map, Grep, Sort
+### 8.7 Map, Grep, Sort
 
 ```strada
 # Map - transform elements
@@ -856,7 +860,7 @@ untie(%HASH);
 tied(%HASH);
 ```
 
-`tie` binds a hash variable to a class that implements the TIEHASH interface. All subsequent operations on the hash (`FETCH`, `STORE`, `EXISTS`, `DELETE`, iteration via `FIRSTKEY`/`NEXTKEY`, `CLEAR`) are dispatched to methods on the tied object.
+`tie` binds a hash variable to a class that implements the TIEHASH interface. All subsequent operations on the hash (`FETCH`, `STORE`, `EXISTS`, `DELETE`, iteration via `FIRSTKEY`/`NEXTKEY`) are dispatched to methods on the tied object.
 
 **TIEHASH interface:**
 
@@ -869,7 +873,7 @@ tied(%HASH);
 | `DELETE($self, $key)` | `delete($h{"key"})` |
 | `FIRSTKEY($self)` | Start of `keys(%h)` / `each(%h)` |
 | `NEXTKEY($self, $lastkey)` | Continue iteration |
-| `CLEAR($self)` | `%h = ()` or reassignment |
+| `CLEAR($self)` | Reserved (`%h = ()` does not currently call it) |
 
 `tied(%h)` returns the underlying blessed object if the hash is tied, or `undef` otherwise. `untie(%h)` removes the tie binding, restoring normal hash behavior.
 
@@ -975,33 +979,38 @@ my scalar $weak;
 
 ## 11. Strings
 
-Strada strings are **UTF-8 character oriented** by default. Built-in
-string functions (`length`, `substr`, `index`, `reverse`) count Unicode
-codepoints, not bytes. Source files are UTF-8 — non-ASCII characters
-in string literals are stored as UTF-8 byte sequences but treated as
-single characters by the standard functions.
+Strada strings are byte sequences carrying a per-string **UTF-8 flag**
+(Perl-style). A string written as a source literal is a plain byte
+string: `length`, `substr`, `index` and `rindex` count **bytes**. A
+string that carries the UTF-8 flag — built with `chr($n)` for n ≥ 128,
+or by concatenating with such a string — is character oriented: the
+same functions count Unicode codepoints. `reverse`, `uc`, `lc` and
+`ord` are codepoint-aware in both cases.
 
 ```
-my str $s = "café";          # 4 chars, 5 bytes on disk
-length($s);                  # 4
-substr($s, 0, 3);            # "caf"
-core::byte_length($s);       # 5
-core::byte_substr($s, 0, 3); # "caf" (3 bytes — happens to align here)
+my str $s = "café";          # literal: byte string, 5 bytes
+length($s);                  # 5
+my str $u = "caf" . chr(233); # UTF-8 flagged: same bytes, 4 chars
+length($u);                  # 4
+substr($u, 3, 1);            # "é"
+core::byte_length($u);       # 5
+core::byte_substr($u, 0, 3); # "caf"
+reverse($s);                 # "éfac" (codepoint-aware either way)
 ```
 
 ### 11.1 String Functions
 
-All character-counting; UTF-8 codepoint aware unless noted.
+Lengths and offsets are in codepoints for UTF-8-flagged strings and in bytes for unflagged strings (see above).
 
 | Function | Description |
 |----------|-------------|
-| `length($s)` | Codepoint count (use `core::byte_length` for bytes) |
-| `substr($s, $start)` | Substring from start (codepoint offset) |
-| `substr($s, $start, $len)` | Substring with length (codepoints) |
+| `length($s)` | Length: codepoints if UTF-8 flagged, else bytes (`core::byte_length` is always bytes) |
+| `substr($s, $start)` | Substring from start |
+| `substr($s, $start, $len)` | Substring with length |
 | `substr($s, $start, $len, $repl)` | 4-arg in-place replacement |
-| `index($s, $sub)` | Find substring position (codepoint) |
+| `index($s, $sub)` | Find substring position (-1 if absent) |
 | `index($s, $sub, $start)` | Search from offset |
-| `rindex($s, $sub)` | Find from end (codepoint) |
+| `rindex($s, $sub)` | Find from end |
 | `uc($s)` | Uppercase (handles Latin-1 range) |
 | `lc($s)` | Lowercase (handles Latin-1 range) |
 | `ucfirst($s)` | Capitalize first character |
@@ -1019,7 +1028,7 @@ All character-counting; UTF-8 codepoint aware unless noted.
 | `utf8::is_utf8($s)` | 1 if string contains valid UTF-8 |
 | `utf8::valid($s)` | Synonym for `utf8::is_utf8` |
 | `utf8::encode($s)` | No-op (strings already byte-encoded) |
-| `utf8::decode($s)` | No-op (strings already char-oriented) |
+| `utf8::decode($s)` | Validates UTF-8: returns 1 if valid, 0 if not (does not change `$s`) |
 
 ### 11.2 Binary/Byte Operations
 
@@ -1051,9 +1060,9 @@ For working with binary data (protocols, file formats, etc.):
 
 ### 11.3 UTF-8 Handling
 
-Strada's strings are byte sequences interpreted as UTF-8 by default.
-This gives the convenience of character-aware indexing without paying
-the cost of a per-string flag at runtime.
+Strada's strings are byte sequences; a per-string UTF-8 flag decides
+whether `length`/`substr`/`index`/`rindex` work in characters or bytes
+(see the start of this section).
 
 **Source files** must be UTF-8 (the lexer parses byte-by-byte; non-
 ASCII bytes only appear inside string/regex/comment text, never in
@@ -1063,11 +1072,12 @@ identifiers).
 
 | Operation | Counts characters | Counts bytes |
 |-----------|-------------------|--------------|
-| `length`, `substr`, `index`, `rindex`, `reverse` | ✓ | |
+| `length`, `substr`, `index`, `rindex` | ✓ (UTF-8-flagged strings) | ✓ (unflagged strings, e.g. literals) |
+| `reverse`, `uc`, `lc`, `ord` | ✓ | |
 | `core::byte_length`, `core::byte_substr` | | ✓ |
 | `core::ord_byte`, `core::get_byte`, `core::set_byte` | | ✓ |
 | `core::pack`, `core::unpack` | | ✓ (binary format) |
-| `=~` regex (with PCRE2) | ✓ (UTF-8 aware) | |
+| `=~` regex | | ✓ (`.` matches one byte) |
 | `eq`, `ne`, `cmp` | (byte-equal — same for normalized UTF-8) | |
 | `chr($n)` for n in 0–127 | (one ASCII byte) | ✓ |
 | `chr($n)` for n ≥ 128 | ✓ (UTF-8 encoded, sets UTF-8 flag) | |
@@ -1175,14 +1185,12 @@ Performs character-by-character transliteration (not regex). Each character in `
 | `c` | Complement: transliterate characters NOT in SEARCH |
 | `d` | Delete: remove SEARCH characters that have no REPLACEMENT |
 | `s` | Squeeze: collapse runs of the same replacement character to one |
-| `r` | Return: return modified copy, do not modify original |
 
 ```strada
 $s =~ tr/a-z/A-Z/;          # Lowercase to uppercase
 $s =~ tr/0-9//d;             # Delete all digits
 $s =~ tr/ / /s;              # Squeeze multiple spaces to one
-my str $copy = ($s =~ tr/a-z/A-Z/r);  # Return uppercase copy
-my int $n = ($s =~ tr/aeiou//);       # Count vowels (no replacement)
+my int $n = ($s =~ tr/aeiou/aeiou/);  # Count vowels (map each to itself)
 ```
 
 ### 12.7 Capture Variables and Functions
@@ -1198,7 +1206,7 @@ if ($string =~ /(\w+)\s+(\w+)/) {
 
 `$1`-`$9` are syntactic sugar for `captures()[N]`. They return `undef` if the group does not exist.
 
-For programmatic access or the full match (`$0`), use `captures()`:
+For programmatic access or the full match, use `captures()` (element 0 is the full match):
 
 ```strada
 if ($string =~ /(\w+)\s+(\w+)/) {
@@ -1211,8 +1219,10 @@ if ($string =~ /(\w+)\s+(\w+)/) {
 The `capture()` function performs a match and returns captures in one call:
 
 ```strada
-my array @captures = capture($string, $pattern);
+my array @captures = capture($string, $pattern);   # [0] = full match, [1..] = groups
 ```
+
+Write the pattern in single quotes (`'(\d+)-(\d+)'`) or double the backslashes: in a double-quoted string `"\d"` loses its backslash.
 
 ---
 
@@ -1411,9 +1421,11 @@ package MyPackage;
 ### 15.2 Using Modules
 
 ```strada
-use Module::Name;                    # Import all
-use Module::Name qw(func1 func2);    # Import specific
+use Module::Name;                    # Load the module
+use lib "lib";                       # Add a module search path
 ```
+
+There is no import list (`use Module qw(...)` is a parse error); call module functions by qualified name.
 
 ### 15.3 Module Files
 
@@ -1423,7 +1435,7 @@ Module `Foo::Bar` is in file `lib/Foo/Bar.strada`.
 
 ```strada
 My::Module::function($arg);
-$My::Module::variable;
+core::global_get("My::Module::variable");   # another package's `our` variable
 ```
 
 ---
@@ -1445,8 +1457,8 @@ inherit Parent;
 # Or for multiple inheritance
 inherit Parent1, Parent2;
 
-# Or at runtime
-inherit("Child", "Parent");
+# Or at runtime (inside a function)
+# inherit("Child", "Parent");
 ```
 
 ### 16.3 OOP Functions
@@ -1464,7 +1476,9 @@ inherit("Child", "Parent");
 Destructor called when object is freed:
 
 ```strada
-func ClassName_DESTROY(scalar $self) void {
+package ClassName;
+
+func DESTROY(scalar $self) void {
     # Cleanup
     SUPER::DESTROY($self);
 }
@@ -1524,9 +1538,9 @@ has ACCESS TYPE $NAME [= DEFAULT] [(OPTIONS)];
 
 | Option | Description |
 |--------|-------------|
-| `required` | Must be provided in constructor |
-| `lazy` | Default computed on first access |
-| `builder => "method"` | Method to call for lazy default |
+| `required` | Marks the attribute as required (not enforced at runtime: if omitted, the value is `undef`) |
+| `lazy` | Parsed and stored; reserved for future use |
+| `builder => "method"` | Parsed and stored; reserved for future use (the builder is not called) |
 
 Options can be combined: `(required)`, `(lazy)`, `(lazy, builder => "_build_name")`
 
@@ -1536,7 +1550,7 @@ package Person;
 has ro str $name (required);              # Read-only, required
 has rw int $age = 0;                      # Read/write, default 0
 has rw str $email;                        # Read/write, no default
-has ro str $id (lazy, builder => "_build_id");  # Lazy with builder
+has ro str $id (lazy, builder => "_build_id");  # Parsed; builder not yet called
 ```
 
 #### 16.6.2 Inheritance (`extends`)
@@ -1611,13 +1625,13 @@ after "METHOD_NAME" func(PARAMS) RETURN_TYPE {
 
 **`around` -- wraps the method, receives the original as `$orig`:**
 ```strada
-around "METHOD_NAME" func(scalar $self, scalar $orig, scalar ...@args) RETURN_TYPE {
+around "METHOD_NAME" func(scalar $orig, scalar $self, scalar ...@args) RETURN_TYPE {
     # Call original: $orig->($self, ...@args)
     BODY
 }
 ```
 
-The `$orig` parameter is a callable reference to the original method. You must invoke it explicitly.
+The `$orig` parameter (the **first** parameter, before `$self`) is a callable reference to the original method. You must invoke it explicitly.
 
 **Example:**
 ```strada
@@ -1664,7 +1678,7 @@ use overload
 | Arithmetic | `+`, `-`, `*`, `/`, `%`, `**` |
 | String | `.` (concatenation) |
 | Stringify | `""` (automatic string conversion) |
-| Unary | `neg` (unary minus), `!`, `bool` |
+| Unary | `neg` (unary minus), `!`, `~`, `bool` |
 | Numeric comparison | `==`, `!=`, `<`, `>`, `<=`, `>=`, `<=>` |
 | String comparison | `eq`, `ne`, `lt`, `gt`, `le`, `ge`, `cmp` |
 
@@ -1753,14 +1767,16 @@ $closure->(ARGS);
 
 ### 17.3 Capturing
 
-Variables from enclosing scope are captured by reference:
+Scalar variables from the enclosing scope are captured **by value**: the closure takes a snapshot when it is created and keeps its own private, persistent copy (so a counter closure works, but later changes to the outer variable are not seen, and assignments inside the closure do not affect the outer variable):
 
 ```strada
 my int $x = 10;
 my scalar $f = func () { return $x; };
 $x = 20;
-say($f->());  # 20
+say($f->());  # 10
 ```
+
+Arrays and hashes (and anything reached through a reference) are shared: `push(@a, 1)` or `$h->{"n"} = 1` inside a closure is visible outside. To share mutable scalar state, keep it in a hash/array reference or an `our` variable.
 
 ---
 
@@ -1985,9 +2001,9 @@ my int $result = core::dl_call_int_sv($func, [$sv1, $sv2]);
 
 ---
 
-## 20. Built-in Functions
+## 21. Built-in Functions
 
-### 20.1 Core Functions
+### 21.1 Core Functions
 
 **Output:**
 - `say($val)` - Print with newline
@@ -2003,9 +2019,9 @@ my int $result = core::dl_call_int_sv($func, [$sv1, $sv2]);
 - `reftype($ref)` - Get reference type
 
 **Debugging:**
-- `core::dumper($val)` - Data::Dumper-style output (bare `dumper` is a legacy alias)
+- `core::dumper($val)` - Returns a Data::Dumper-style string, e.g. `say(core::dumper($val))` (bare `dumper` is a legacy alias)
 
-### 20.2 core:: / sys:: Namespace
+### 21.2 core:: / sys:: Namespace
 
 The `core::` namespace is preferred. `sys::` is a legacy alias — both generate identical code. At compile time, `core::` is normalized to `sys::` internally with zero runtime overhead.
 
@@ -2071,9 +2087,9 @@ Socket readline automatically strips `\r` characters for clean CRLF handling.
 **Process:**
 - `core::fork()` - Fork process
 - `core::wait()` - Wait for any child; returns its pid (-1 if none)
-- `core::waitpid($pid, $flags)` - Wait for a specific child; returns its exit status (0 under WNOHANG while it is still running)
+- `core::waitpid($pid, $flags)` - Wait for a specific child; returns its raw wait status (exit code is `$status >> 8`; 0 under WNOHANG while it is still running)
 - `core::exec($cmd)` - Replace process
-- `core::system($cmd)` - Run command
+- `core::system($cmd)` - Run command; returns the raw wait status (exit code is `>> 8`)
 - `core::getpid()` - Get process ID
 - `core::exit($code)` - Exit process
 
@@ -2113,7 +2129,7 @@ Socket readline automatically strips `\r` characters for clean CRLF handling.
 - `core::pack($fmt, @vals)` - Pack values to binary string
 - `core::unpack($fmt, $s)` - Unpack binary string to array
 
-### 20.3 math:: Namespace
+### 21.3 math:: Namespace
 
 - `math::sin($x)`, `math::cos($x)`, `math::tan($x)`
 - `math::sqrt($x)`, `math::pow($x, $y)`
@@ -2121,13 +2137,13 @@ Socket readline automatically strips `\r` characters for clean CRLF handling.
 - `math::log($x)`, `math::exp($x)`
 - `math::rand()` - Random 0.0-1.0
 
-### 20.4 thread:: Namespace
+### 21.4 thread:: Namespace
 
 See [Multithreading](#18-multithreading).
 
 ---
 
-## 21. Magic Variables
+## 22. Magic Variables
 
 | Variable | Description |
 |----------|-------------|
@@ -2140,13 +2156,12 @@ See [Multithreading](#18-multithreading).
 | `__LINE__` | Current line number |
 | `::func()` | Call func in current package (compile-time) |
 | `.::func()` | Alternate syntax for above |
-| `__PACKAGE__::func()` | Explicit form of above |
 
 ---
 
-## 22. Reserved Words
+## 23. Reserved Words
 
-The following words are reserved and cannot be used as identifiers:
+The following words are keywords or built-in names; avoid using them as identifiers (also `async`, `await`, `const`, `dynamic`, `enum`, `finally`, `fn`, `private`, `redo`):
 
 ```
 after       array       around      before      break
@@ -2173,7 +2188,7 @@ program         := (package_decl | use_decl | inherit_decl | extends_decl
                  |  with_decl | has_decl | method_modifier | func_def | stmt)*
 
 package_decl    := 'package' IDENT ';'
-use_decl        := 'use' qualified_name ('qw(' IDENT* ')')? ';'
+use_decl        := 'use' qualified_name ';'
 inherit_decl    := 'inherit' IDENT (',' IDENT)* ';'
 
 # Moose-style OOP declarations
@@ -2220,7 +2235,7 @@ expr            := assignment | ternary | logical | comparison | arithmetic
 | Comparison (str) | `eq ne lt gt le ge cmp` |
 | Logical | `&& || !` |
 | Bitwise | `& | ^ ~ << >>` |
-| Assignment | `= += -= *= /= %= .= &= |=` |
+| Assignment | `= += -= *= /= %= .= **= //= x=` |
 | Reference | `\ -> @{} %{} ${}` |
 | Regex | `=~ !~ s/// s///e tr/// y///` |
 | Other | `? : .. ,` |
@@ -2232,18 +2247,22 @@ expr            := assignment | ternary | logical | comparison | arithmetic
 | `-c` | Keep generated .c file |
 | `-r`, `--run` | Compile and run immediately |
 | `-o FILE` | Set output file name |
-| `-O LEVEL` | Set gcc optimization level (0, 1, 2, 3, s, fast). -O2+ enables -flto; -O3/-Ofast adds -march=native |
+| `-O LEVEL` | Set gcc optimization level (0, 1, 2, 3, s, fast; default 2). -O2+ enables -flto; -O3/-Ofast adds -march=native |
+| `--no-lto` | Disable link-time optimization |
+| `--tcc` | Compile with tcc (fast, unoptimized), link with the C compiler |
+| `--check` | Syntax/semantic check only; no output |
+| `--strict-types` | Stage-0 gradual type checking (warnings only) |
 | `-g` | Emit `#line` directives and debug symbols |
 | `--c-debug` | C-level debugging only (DWARF symbols, no `#line`) |
 | `-p`, `--profile` | Function-level profiling (call counts + timing to stderr) |
 | `--full-profile` | Line-level profiling (writes `strada-prof.out`; implies `-g`) |
 | `-w`, `--warnings` | Show compiler warnings |
-| `-t`, `--timing` | Show compilation phase timing |
+| `-t`, `--timing` | Show compilation phase timing (`stradac` only; the `strada` driver rejects it) |
 | `--shared` | Compile as shared library (.so) |
 | `--static` | Compile as fully static binary |
 | `--static-lib` | Compile as static library archive (.a) |
 | `--object` | Compile to object file (.o) only |
-| `-v` | Verbose output |
+| `-v`, `--verbose` | Verbose output |
 
 ### Line-Level Profiling
 
