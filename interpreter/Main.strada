@@ -252,6 +252,9 @@ func repl_eval(scalar $interp, str $input) scalar {
             $eval_func = $fn;
         } else {
             Strada::Interpreter::interp_register_func($interp, $fn->{"name"}, $fn->{"params"}, $fn->{"param_count"}, $fn->{"body"}, $interp->{"global_env"});
+            if (defined($fn->{"package"}) && length("" . $fn->{"package"}) > 0) {
+                $interp->{"functions"}->{$fn->{"name"}}->{"package"} = $fn->{"package"};
+            }
         }
         $i = $i + 1;
     }
@@ -351,6 +354,9 @@ func load_file(scalar $interp, str $filename) void {
         my scalar $fn = $funcs->[$i];
         if ($fn->{"name"} ne "main") {
             Strada::Interpreter::interp_register_func($interp, $fn->{"name"}, $fn->{"params"}, $fn->{"param_count"}, $fn->{"body"}, $interp->{"global_env"});
+            if (defined($fn->{"package"}) && length("" . $fn->{"package"}) > 0) {
+                $interp->{"functions"}->{$fn->{"name"}}->{"package"} = $fn->{"package"};
+            }
         }
         $i = $i + 1;
     }
@@ -555,10 +561,14 @@ func run_file(scalar $interp, str $filename, scalar $argv) int {
     # Add source file's directory
     push(@lib_paths, $source_dir);
 
-    # Change to project root so relative use-lib paths resolve correctly
+    # Change to project root so relative use-lib paths resolve correctly;
+    # disable precompiled sibling artifact loading so `use` parses AST bodies
     my str $saved_cwd = core::getcwd();
     if (length($project_root) > 0) {
         core::chdir($project_root);
+    }
+    if (length("" . core::getenv("STRADA_USE_ARTIFACTS")) == 0) {
+        core::setenv("STRADA_USE_ARTIFACTS", "0");
     }
 
     # Tokenize and parse
@@ -602,12 +612,22 @@ func run_file_vm(str $filename) int {
     }
     push(@lib_paths, $source_dir);
 
+    my str $saved_cwd = core::getcwd();
+    if (length($project_root) > 0) {
+        core::chdir($project_root);
+    }
+    if (length("" . core::getenv("STRADA_USE_ARTIFACTS")) == 0) {
+        core::setenv("STRADA_USE_ARTIFACTS", "0");
+    }
+
     # Tokenize and parse (reuses the same parser as tree-walker)
     my scalar $tokens = lex_tokenize($source);
     my scalar $parser = parser_new($tokens);
     parser_set_filename($parser, $filename);
     my array @empty = ();
     my scalar $program = parse_program($parser, \@lib_paths, \@empty, \@empty, \@empty);
+
+    core::chdir($saved_cwd);
 
     # Compile to bytecode and execute via VM
     my int $result = 0;

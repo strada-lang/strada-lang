@@ -308,11 +308,28 @@ private func detect_compiler() str {
     return "";
 }
 
+# Single-quote a string safely for /bin/sh
+private func shell_quote(str $s) str {
+    my str $out = "'";
+    my int $i = 0;
+    my int $len = length($s);
+    while ($i < $len) {
+        my str $ch = substr($s, $i, 1);
+        if ($ch eq "'") {
+            $out = $out . "'\\''";
+        } else {
+            $out = $out . $ch;
+        }
+        $i = $i + 1;
+    }
+    return $out . "'";
+}
+
 # Check if input looks like a function definition
 private func is_function_def(str $input) int {
     # Accepts both parens form `func name(...)` and no-parens form `func name { ... }`
-    # (implicit @_ parameter, like Perl subs).
-    if ($input =~ /^\s*(private\s+)?(async\s+)?(func|fn)\s+\w+\s*[\(\{]/) {
+    # (or `func name rettype { ... }`).
+    if ($input =~ /^\s*(private\s+|async\s+)*(func|fn)\s+\w+\s*(\(|(\w+\s+)?\{)/) {
         return 1;
     }
     return 0;
@@ -322,13 +339,19 @@ private func is_function_def(str $input) int {
 private func get_function_name(str $func_def) str {
     my str $s = $func_def;
     $s =~ s/^\s*//;
-    $s =~ s/^private\s+//;
-    $s =~ s/^async\s+//;
-    $s =~ s/^func\s+//;
-    $s =~ s/^fn\s+//;
-    my int $paren = index($s, "(");
-    if ($paren > 0) {
-        return substr($s, 0, $paren);
+    $s =~ s/^(private\s+|async\s+)+//;
+    $s =~ s/^(func|fn)\s+//;
+    my int $i = 0;
+    my int $len = length($s);
+    while ($i < $len) {
+        my str $ch = substr($s, $i, 1);
+        if ($ch eq "(" || $ch eq "{" || $ch eq " " || $ch eq "\t" || $ch eq "\n" || $ch eq "\r") {
+            last;
+        }
+        $i = $i + 1;
+    }
+    if ($i > 0) {
+        return substr($s, 0, $i);
     }
     return "";
 }
@@ -729,6 +752,145 @@ private func last_toplevel_semi(str $s) int {
     return -1;
 }
 
+# Strip top-level (depth 0) `my [TYPE] SIGIL+name` prefixes so declarations
+# inside the wrapped helper closure assign to repl_eval()'s captured locals
+# instead of shadowing them inside the closure.
+private func strip_toplevel_my(str $input) str {
+    my str $result = "";
+    my int $len = length($input);
+    my int $i = 0;
+    my int $depth = 0;
+    my int $pdepth = 0;
+    my int $bdepth = 0;
+    my int $in_str = 0;
+    my int $in_cmt = 0;
+
+    while ($i < $len) {
+        my str $c = substr($input, $i, 1);
+
+        if ($in_cmt == 1) {
+            $result = $result . $c;
+            if ($c eq "\n") { $in_cmt = 0; }
+            $i = $i + 1;
+            next;
+        }
+
+        if ($in_str == 1) {
+            if ($c eq "\\" && $i + 1 < $len) {
+                $result = $result . substr($input, $i, 2);
+                $i = $i + 2;
+                next;
+            }
+            if ($c eq "\"") { $in_str = 0; }
+            $result = $result . $c;
+            $i = $i + 1;
+            next;
+        }
+
+        if ($in_str == 2) {
+            if ($c eq "\\" && $i + 1 < $len) {
+                $result = $result . substr($input, $i, 2);
+                $i = $i + 2;
+                next;
+            }
+            if ($c eq "'") { $in_str = 0; }
+            $result = $result . $c;
+            $i = $i + 1;
+            next;
+        }
+
+        if ($c eq "\"") { $in_str = 1; $result = $result . $c; $i = $i + 1; next; }
+        if ($c eq "'") { $in_str = 2; $result = $result . $c; $i = $i + 1; next; }
+        if ($c eq "#") { $in_cmt = 1; $result = $result . $c; $i = $i + 1; next; }
+
+        if ($c eq "{") { $depth = $depth + 1; $result = $result . $c; $i = $i + 1; next; }
+        if ($c eq "}") { $depth = $depth - 1; $result = $result . $c; $i = $i + 1; next; }
+        if ($c eq "(") { $pdepth = $pdepth + 1; $result = $result . $c; $i = $i + 1; next; }
+        if ($c eq ")") { $pdepth = $pdepth - 1; $result = $result . $c; $i = $i + 1; next; }
+        if ($c eq "[") { $bdepth = $bdepth + 1; $result = $result . $c; $i = $i + 1; next; }
+        if ($c eq "]") { $bdepth = $bdepth - 1; $result = $result . $c; $i = $i + 1; next; }
+
+        if ($depth == 0 && $pdepth == 0 && $bdepth == 0 && $c eq "m" && $i + 2 < $len && substr($input, $i + 1, 1) eq "y") {
+            my str $after_my = substr($input, $i + 2, 1);
+            if ($after_my eq " " || $after_my eq "\t") {
+                my int $word_ok = 0;
+                if ($i == 0) {
+                    $word_ok = 1;
+                } else {
+                    my str $prev = substr($input, $i - 1, 1);
+                    if (!($prev =~ /[a-zA-Z0-9_]/)) {
+                        $word_ok = 1;
+                    }
+                }
+                if ($word_ok == 1) {
+                    my int $j = $i + 2;
+                    while ($j < $len && (substr($input, $j, 1) eq " " || substr($input, $j, 1) eq "\t")) {
+                        $j = $j + 1;
+                    }
+                    my str $vtype = "scalar";
+                    my int $wstart = $j;
+                    my str $word = "";
+                    while ($j < $len) {
+                        my str $wc = substr($input, $j, 1);
+                        if ($wc =~ /[a-zA-Z0-9_]/) {
+                            $word = $word . $wc;
+                            $j = $j + 1;
+                        } else {
+                            last;
+                        }
+                    }
+                    if ($word eq "int" || $word eq "num" || $word eq "str" || $word eq "scalar" || $word eq "array" || $word eq "hash") {
+                        $vtype = $word;
+                        while ($j < $len && (substr($input, $j, 1) eq " " || substr($input, $j, 1) eq "\t")) {
+                            $j = $j + 1;
+                        }
+                    } else {
+                        $j = $wstart;
+                    }
+                    if ($j < $len) {
+                        my str $sigil = substr($input, $j, 1);
+                        if ($sigil eq "$" || $sigil eq "@" || $sigil eq "%") {
+                            $j = $j + 1;
+                            my str $vname = "";
+                            while ($j < $len && (substr($input, $j, 1) =~ /[a-zA-Z0-9_]/)) {
+                                $vname = $vname . substr($input, $j, 1);
+                                $j = $j + 1;
+                            }
+                            if ($vname ne "") {
+                                my int $k = $j;
+                                while ($k < $len && (substr($input, $k, 1) eq " " || substr($input, $k, 1) eq "\t")) {
+                                    $k = $k + 1;
+                                }
+                                if ($k < $len && substr($input, $k, 1) eq ";") {
+                                    # Standalone `my int $x;` -> reset to default value
+                                    my str $defv = "undef";
+                                    if ($sigil eq "@" || $sigil eq "%") { $defv = "()"; }
+                                    elsif ($vtype eq "int") { $defv = "0"; }
+                                    elsif ($vtype eq "num") { $defv = "0.0"; }
+                                    elsif ($vtype eq "str") { $defv = "\"\""; }
+                                    $result = $result . $sigil . $vname . " = " . $defv;
+                                    $i = $k;
+                                    next;
+                                } else {
+                                    # `my int $x = expr` -> `$x = expr`
+                                    $result = $result . $sigil . $vname;
+                                    $i = $j;
+                                    next;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        $result = $result . $c;
+        $i = $i + 1;
+    }
+
+    return $result;
+}
+
 # Generate Strada source wrapping user code
 private func generate_source(str $input) str {
     my str $src = "";
@@ -743,6 +905,7 @@ private func generate_source(str $input) str {
 
     # Always use repl package for variable persistence via global registry
     $src = $src . "package repl;\n\n";
+    $src = $src . "__C__ {\n    static StradaValue ***__repl_caps = NULL;\n}\n\n";
 
     # Constants and enums (must be at package level)
     foreach my str $const_decl (@g_constants) {
@@ -757,12 +920,13 @@ private func generate_source(str $input) str {
         $src = $src . $fndef . "\n\n";
     }
 
+    my int $use_closure_wrap = (index($input, "__C__") < 0) ? 1 : 0;
+
     # Main eval function
     $src = $src . "func repl_eval() scalar {\n";
 
-    # For previously-declared variables NOT redeclared in current input,
-    # emit my declarations and restore their values from the global registry.
-    # Using my (not our) gives us real C lvalues so $i++, s///, etc. all work.
+    # Declare tracked variables as real C `my` locals in repl_eval() and restore
+    # previously-saved values from the global registry (unless redeclared in $input).
     my str $restore_code = "";
     foreach my str $vname (keys(%g_var_types)) {
         my str $type = $g_var_types{$vname};
@@ -770,8 +934,8 @@ private func generate_source(str $input) str {
         if ($type eq "array") { $sigil = "@"; }
         if ($type eq "hash") { $sigil = "%"; }
 
-        # Skip if the current input declares this variable
-        if (input_declares_var($input, $vname, $sigil) == 1) {
+        my int $redecl = input_declares_var($input, $vname, $sigil);
+        if ($use_closure_wrap == 0 && $redecl == 1) {
             next;
         }
 
@@ -790,14 +954,15 @@ private func generate_source(str $input) str {
             $src = $src . "    my scalar \$" . $vname . " = undef;\n";
         }
 
-        # Build C restore code — needed for precise refcount management
-        $restore_code = $restore_code . "        StradaValue *__saved_" . $vname . " = strada_global_get(strada_new_str(\"repl::" . $vname . "\"));\n";
-        $restore_code = $restore_code . "        if (STRADA_IS_TAGGED_INT(__saved_" . $vname . ") || __saved_" . $vname . "->type != STRADA_UNDEF) {\n";
-        $restore_code = $restore_code . "            strada_decref(" . $vname . ");\n";
-        $restore_code = $restore_code . "            " . $vname . " = __saved_" . $vname . ";\n";
-        $restore_code = $restore_code . "        } else {\n";
-        $restore_code = $restore_code . "            strada_decref(__saved_" . $vname . ");\n";
-        $restore_code = $restore_code . "        }\n";
+        if ($redecl == 0) {
+            $restore_code = $restore_code . "        StradaValue *__saved_" . $vname . " = strada_global_get(strada_new_str(\"repl::" . $vname . "\"));\n";
+            $restore_code = $restore_code . "        if (STRADA_IS_TAGGED_INT(__saved_" . $vname . ") || __saved_" . $vname . "->type != STRADA_UNDEF) {\n";
+            $restore_code = $restore_code . "            strada_decref(" . $vname . ");\n";
+            $restore_code = $restore_code . "            " . $vname . " = __saved_" . $vname . ";\n";
+            $restore_code = $restore_code . "        } else {\n";
+            $restore_code = $restore_code . "            strada_decref(__saved_" . $vname . ");\n";
+            $restore_code = $restore_code . "        }\n";
+        }
     }
 
     # Emit restore __C__ block if we have variables to restore
@@ -809,16 +974,13 @@ private func generate_source(str $input) str {
 
     $src = $src . "    # User code\n";
 
-    # Multi-statement eval: in Perl-ish eval semantics the value of a block is
-    # its LAST expression. Emit everything up to the final top-level ';'
-    # verbatim, then classify only the trailing segment ($tail) below — so e.g.
-    # `my %h=(); $h{"a"}=41; $h{"a"}+1` captures `$h{"a"}+1` instead of dropping
-    # it because the whole input started with `my`.
-    my str $tail = $input;
-    my int $split_at = last_toplevel_semi($input);
+    my str $body_input = ($use_closure_wrap == 1) ? strip_toplevel_my($input) : $input;
+    my str $tail = $body_input;
+    my int $split_at = last_toplevel_semi($body_input);
+    my str $prefix_stmts = "";
     if ($split_at >= 0) {
-        $src = $src . "    " . substr($input, 0, $split_at + 1) . "\n";
-        $tail = substr($input, $split_at + 1, length($input) - $split_at - 1);
+        $prefix_stmts = substr($body_input, 0, $split_at + 1);
+        $tail = substr($body_input, $split_at + 1, length($body_input) - $split_at - 1);
     }
 
     my str $trimmed = $tail;
@@ -830,7 +992,6 @@ private func generate_source(str $input) str {
     if ($trimmed =~ /^(say|print|warn|push|pop|shift|unshift)\(/) {
         $is_void_call = 1;
     }
-    # Check user-defined void functions
     foreach my str $fndef (@g_functions) {
         if ($fndef =~ /\)\s*void\s*\{/) {
             my str $vfn_name = get_function_name($fndef);
@@ -839,6 +1000,9 @@ private func generate_source(str $input) str {
             }
         }
     }
+
+    my int $is_return_stmt = 0;
+    if ($trimmed =~ /^return(\s|;|\(|$)/) { $is_return_stmt = 1; }
 
     # Check if this is a statement (not an expression to capture)
     my int $is_statement = 0;
@@ -853,53 +1017,124 @@ private func generate_source(str $input) str {
     if ($trimmed =~ /^for\s/) { $is_statement = 1; }
     if ($trimmed =~ /^foreach\s/) { $is_statement = 1; }
     if ($trimmed =~ /^try\s*\{/) { $is_statement = 1; }
-    # Bare block: { ... }
     if ($trimmed =~ /^\{/) { $is_statement = 1; }
-    # Variable assignment: $x = ..., @arr = ..., %h = ...
-    if ($trimmed =~ /^[\$\@\%]\w+\s*=/) { $is_statement = 1; }
+    if ($trimmed =~ /^[\$\@\%]\w+\s*=[^=~]/) { $is_statement = 1; }
+    if ($trimmed =~ /^[\$\@\%]\w+\s*=$/) { $is_statement = 1; }
 
-    # Check if ends with semicolon
     my str $last_char = "";
     if (length($trimmed) > 0) {
         $last_char = substr($trimmed, length($trimmed) - 1, 1);
     }
 
-    if ($is_statement == 1) {
-        # True statements (my, if, while, etc.) — no result to capture
-        my str $code_line = $tail;
-        if ($last_char ne ";" && $last_char ne "}") {
-            $code_line = $tail . ";";
+    if ($use_closure_wrap == 1) {
+        # Wrap user body in a helper closure so even an explicit `return EXPR;`
+        # returns to repl_eval(), which then saves live *__repl_caps[i] cells!
+        my array @tracked_names = keys(%g_var_types);
+        my int $tracked_count = scalar(@tracked_names);
+        $src = $src . "    my scalar \$__repl_fn = func() scalar {\n";
+        if ($tracked_count > 0) {
+            $src = $src . "        if (0) {\n";
+            my int $ti = 0;
+            while ($ti < $tracked_count) {
+                my str $tvn = $tracked_names[$ti];
+                my str $tvt = $g_var_types{$tvn};
+                if ($tvt eq "array") {
+                    $src = $src . "            my scalar \$__touch_" . $ti . " = \\@" . $tvn . ";\n";
+                } elsif ($tvt eq "hash") {
+                    $src = $src . "            my scalar \$__touch_" . $ti . " = \\%" . $tvn . ";\n";
+                } else {
+                    $src = $src . "            my scalar \$__touch_" . $ti . " = \$" . $tvn . ";\n";
+                }
+                $ti = $ti + 1;
+            }
+            $src = $src . "        }\n";
+            $src = $src . "        __C__ { __repl_caps = __captures; }\n";
         }
-        $src = $src . "    " . $code_line . "\n";
-        $src = $src . "    my scalar \$__result = undef;\n";
-    } elsif ($is_void_call == 1) {
-        # Void functions (say, print, etc.) — execute but no result
-        my str $code_line = $tail;
-        if ($last_char ne ";") { $code_line = $tail . ";"; }
-        $src = $src . "    " . $code_line . "\n";
-        $src = $src . "    my scalar \$__result = undef;\n";
+        if ($prefix_stmts ne "") {
+            $src = $src . "        " . $prefix_stmts . "\n";
+        }
+        if ($is_return_stmt == 1) {
+            my str $code_line = $tail;
+            if ($last_char ne ";") { $code_line = $tail . ";"; }
+            $src = $src . "        " . $code_line . "\n";
+            $src = $src . "        return undef;\n";
+        } elsif ($is_statement == 1) {
+            my str $code_line = $tail;
+            if ($last_char ne ";" && $last_char ne "}") {
+                $code_line = $tail . ";";
+            }
+            $src = $src . "        " . $code_line . "\n";
+            $src = $src . "        return undef;\n";
+        } elsif ($is_void_call == 1) {
+            my str $code_line = $tail;
+            if ($last_char ne ";") { $code_line = $tail . ";"; }
+            $src = $src . "        " . $code_line . "\n";
+            $src = $src . "        return undef;\n";
+        } else {
+            my str $expr = $trimmed;
+            if ($last_char eq ";") {
+                $expr = substr($trimmed, 0, length($trimmed) - 1);
+            }
+            if ($expr eq "") {
+                $src = $src . "        return undef;\n";
+            } else {
+                $src = $src . "        return " . $expr . ";\n";
+            }
+        }
+        $src = $src . "    };\n";
+        if ($tracked_count > 0) {
+            $src = $src . "    __C__ { __repl_caps = NULL; }\n";
+        }
+        $src = $src . "    my scalar \$__result = \$__repl_fn->();\n";
+        if ($tracked_count > 0) {
+            $src = $src . "    __C__ {\n";
+            $src = $src . "        if (__repl_caps) {\n";
+            my int $si = 0;
+            while ($si < $tracked_count) {
+                my str $svn = $tracked_names[$si];
+                $src = $src . "            strada_incref(*__repl_caps[" . $si . "]);\n";
+                $src = $src . "            strada_global_set(strada_new_str(\"repl::" . $svn . "\"), *__repl_caps[" . $si . "]);\n";
+                $si = $si + 1;
+            }
+            $src = $src . "            __repl_caps = NULL;\n";
+            $src = $src . "        }\n";
+            $src = $src . "    }\n";
+        }
     } else {
-        # Expression — capture the result
-        # Strip trailing semicolon if present
-        my str $expr = $trimmed;
-        if ($last_char eq ";") {
-            $expr = substr($trimmed, 0, length($trimmed) - 1);
+        if ($prefix_stmts ne "") {
+            $src = $src . "    " . $prefix_stmts . "\n";
         }
-        $src = $src . "    my scalar \$__result = " . $expr . ";\n";
-    }
+        if ($is_return_stmt == 1 || $is_statement == 1) {
+            my str $code_line = $tail;
+            if ($last_char ne ";" && $last_char ne "}") {
+                $code_line = $tail . ";";
+            }
+            $src = $src . "    " . $code_line . "\n";
+            $src = $src . "    my scalar \$__result = undef;\n";
+        } elsif ($is_void_call == 1) {
+            my str $code_line = $tail;
+            if ($last_char ne ";") { $code_line = $tail . ";"; }
+            $src = $src . "    " . $code_line . "\n";
+            $src = $src . "    my scalar \$__result = undef;\n";
+        } else {
+            my str $expr = $trimmed;
+            if ($last_char eq ";") {
+                $expr = substr($trimmed, 0, length($trimmed) - 1);
+            }
+            $src = $src . "    my scalar \$__result = " . $expr . ";\n";
+        }
 
-    # Save all tracked variables back to global registry
-    # Save all tracked variables back to global registry
-    # strada_global_set() consumes val, so incref to keep our local alive for cleanup.
-    my str $save_c = "";
-    foreach my str $vname (keys(%g_var_types)) {
-        $save_c = $save_c . "        strada_incref(" . $vname . ");\n";
-        $save_c = $save_c . "        strada_global_set(strada_new_str(\"repl::" . $vname . "\"), " . $vname . ");\n";
-    }
-    if ($save_c ne "") {
-        $src = $src . "\n    __C__ {\n";
-        $src = $src . $save_c;
-        $src = $src . "    }\n";
+        # Save all tracked variables back to global registry (inline __C__ path)
+        my str $save_c = "";
+        foreach my str $vname (keys(%g_var_types)) {
+            $save_c = $save_c . "        strada_incref(" . $vname . ");\n";
+            $save_c = $save_c . "        strada_global_set(strada_new_str(\"repl::" . $vname . "\"), " . $vname . ");\n";
+        }
+        if ($save_c ne "") {
+            $src = $src . "\n    __C__ {\n";
+            $src = $src . $save_c;
+            $src = $src . "    }\n";
+        }
     }
 
     $src = $src . "\n    return \$__result;\n";
@@ -937,11 +1172,11 @@ private func eval_one(str $input) scalar {
     core::close($fh);
 
     # Step 1: stradac → C
-    my str $stradac_cmd = $g_stradac_path . " ";
+    my str $stradac_cmd = shell_quote($g_stradac_path) . " ";
     foreach my str $lp (@g_lib_paths) {
-        $stradac_cmd = $stradac_cmd . "-L " . $lp . " ";
+        $stradac_cmd = $stradac_cmd . "-L " . shell_quote($lp) . " ";
     }
-    $stradac_cmd = $stradac_cmd . $src_file . " " . $c_file . " 2>&1";
+    $stradac_cmd = $stradac_cmd . shell_quote($src_file) . " " . shell_quote($c_file) . " 2>&1";
     my scalar $pipe = core::popen($stradac_cmd, "r");
     my str $compile_output = "";
     if (defined($pipe)) {
@@ -988,10 +1223,22 @@ private func eval_one(str $input) scalar {
             throw "JIT: Could not find Strada runtime files for tcc backend";
         }
 
-        my str $sed_cmd = "sed -i 's/strada_runtime\\.h/strada_runtime_tcc.h/' " . $c_file;
-        core::system($sed_cmd);
+        my str $c_content = core::slurp($c_file);
+        my str $hdr_line = "#include \"strada_runtime.h\"\n";
+        my str $tcc_line = "#include \"strada_runtime_tcc.h\"\n";
+        if (length($c_content) >= length($hdr_line) && substr($c_content, 0, length($hdr_line)) eq $hdr_line) {
+            $c_content = $tcc_line . substr($c_content, length($hdr_line), length($c_content) - length($hdr_line));
+        } else {
+            my int $hpos = index($c_content, "\n" . $hdr_line);
+            if ($hpos >= 0) {
+                my int $after_h = $hpos + 1 + length($hdr_line);
+                $c_content = substr($c_content, 0, $hpos + 1) . $tcc_line
+                    . substr($c_content, $after_h, length($c_content) - $after_h);
+            }
+        }
+        core::spew($c_file, $c_content);
 
-        my str $tcc_cmd = "tcc -shared -o " . $so_file . " " . $c_file . " -I" . $g_runtime_path . " -ldl -lm -lpthread 2>&1";
+        my str $tcc_cmd = "tcc -shared -o " . shell_quote($so_file) . " " . shell_quote($c_file) . " -I" . shell_quote($g_runtime_path) . " -ldl -lm -lpthread 2>&1";
         $pipe = core::popen($tcc_cmd, "r");
         my str $tcc_output = "";
         if (defined($pipe)) {
@@ -1013,13 +1260,13 @@ private func eval_one(str $input) scalar {
         # -O0 explicitly: snippets are one-shot (dlopen'd, executed, discarded),
         # so any -O2 + LTO time is pure overhead. -O0 also triggers strada's
         # speed flags (-pipe, -fno-var-tracking, etc).
-        my str $gcc_cmd = "./strada -O0 --shared " . $src_file . " -o " . $so_file . " 2>&1";
+        my str $gcc_cmd = "./strada -O0 --shared " . shell_quote($src_file) . " -o " . shell_quote($so_file) . " 2>&1";
         # If stradac is not in ./, try using the strada wrapper from stradac's dir
         if ($g_stradac_path ne "./stradac" && $g_stradac_path ne "stradac") {
             my str $stradac_dir = core::dirname($g_stradac_path);
             my str $strada_bin = $stradac_dir . "/strada";
             if (core::is_file($strada_bin) == 1) {
-                $gcc_cmd = $strada_bin . " -O0 --shared " . $src_file . " -o " . $so_file . " 2>&1";
+                $gcc_cmd = shell_quote($strada_bin) . " -O0 --shared " . shell_quote($src_file) . " -o " . shell_quote($so_file) . " 2>&1";
             }
         }
         $pipe = core::popen($gcc_cmd, "r");
@@ -1217,9 +1464,8 @@ func run_file(str $filename) int {
     my int $pid = core::getpid();
     my str $exe_file = $g_tmpdir . "/strada_script_" . $pid;
 
-    # Compile via the driver — quote the input path defensively in case it
-    # contains spaces. The redirection captures any compile-time errors.
-    my str $compile_cmd = $strada_bin . " -o " . $exe_file . " " . $filename;
+    # Compile via the driver — quote paths defensively in case they contain spaces.
+    my str $compile_cmd = shell_quote($strada_bin) . " -o " . shell_quote($exe_file) . " " . shell_quote($filename);
     my int $rc = core::system($compile_cmd);
     if ($rc != 0 || core::is_file($exe_file) == 0) {
         if ($rc == 0) { $rc = 1; }
@@ -1227,7 +1473,7 @@ func run_file(str $filename) int {
     }
 
     # Exec and propagate the script's exit code.
-    $rc = core::system($exe_file);
+    $rc = core::system(shell_quote($exe_file));
     core::unlink($exe_file);
     return $rc;
 }

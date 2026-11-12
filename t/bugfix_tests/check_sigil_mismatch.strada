@@ -1,0 +1,8 @@
+# COMPILE-ERROR: undefined variable '@x'
+# Semantic scope lookup previously ignored variable sigils, allowing
+# `my int $x = 1; push(@x, 2);` to pass `--check` and fail in C compilation.
+func main() int {
+    my int $x = 1;
+    push(@x, 2);
+    return 0;
+}

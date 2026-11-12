@@ -80,6 +80,8 @@
 #   #   $user->save();                           # Inherited from Nesso::Record
 #   #   if (isa($user, "Nesso::Record")) { }     # True - User inherits from Nesso::Record
 
+use DBI;
+
 package Nesso;
 
 # --- Internal helpers ---

@@ -71,13 +71,16 @@ func trim(str $s) str {
 
 # Get terminal width (default 80)
 func get_term_width() int {
-    my int $pipe = core::popen("tput cols 2>/dev/null", "r");
-    if ($pipe < 0) {
+    my scalar $pipe = core::popen("tput cols 2>/dev/null", "r");
+    if (!defined($pipe)) {
         return 80;
     }
-    my str $width_str = core::readline($pipe);
+    my scalar $width_line = core::readline($pipe);
     core::pclose($pipe);
-    $width_str = trim($width_str);
+    if (!defined($width_line)) {
+        return 80;
+    }
+    my str $width_str = trim($width_line);
     if (length($width_str) > 0) {
         my int $w = core::atoi($width_str);
         if ($w > 40) {
@@ -574,7 +577,7 @@ func format_inline(str $line) str {
 # Format markdown and return as string
 func format_markdown(str $filepath, int $raw_mode) str {
     my scalar $fh = core::open($filepath, "r");
-    if (length($fh) == 0) {
+    if (!defined($fh)) {
         return "Error: Cannot open file: " . $filepath . "\n";
     }
 
@@ -980,7 +983,7 @@ func main(int $argc, array @argv) int {
     if ($use_pager == 1) {
         # Pipe through less with color support
         my scalar $pipe = core::popen("less -R", "w");
-        if (length($pipe) > 0) {
+        if (defined($pipe)) {
             core::fputs($content, $pipe);
             core::pclose($pipe);
         } else {

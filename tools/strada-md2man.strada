@@ -119,12 +119,15 @@ func convert_inline(str $line) str {
 # Get today's date in man page format
 func get_date() str {
     # Use date command to get current date
-    my int $pipe = core::popen("date '+%Y-%m-%d'", "r");
-    if ($pipe < 0) {
+    my scalar $fh = core::popen("date '+%Y-%m-%d'", "r");
+    if (!defined($fh)) {
         return "2026-01-01";
     }
-    my str $date = core::readline($pipe);
-    core::pclose($pipe);
+    my scalar $date = core::readline($fh);
+    core::pclose($fh);
+    if (!defined($date) || length($date) == 0) {
+        return "2026-01-01";
+    }
     $date =~ s/\n//;
     $date =~ s/\r//;
     return $date;
@@ -280,7 +283,7 @@ func convert_md_to_man(str $input_file, str $name, str $section, str $date, str 
 
         # Horizontal rule (---, ***, ___)
         if ($line =~ /^[\-\*_]{3,}$/) {
-            $output = $output . ".PP\n.HR\n";
+            $output = $output . ".PP\n.ti 0\n\\l'\\n(.lu'\n";
             next;
         }
 

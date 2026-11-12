@@ -1,0 +1,126 @@
+# EXPECT: inline_hd|4:4:4:4:1|hello world|3:a,b|A:35|-4|p1:bbc|k=10:42|99:0:1:77|sub_err|10,20|\|\|A:(
+# Lexer & Parser fixes:
+# - UTF-8 in q(café), qq(café), qw(café), heredoc, and /café/
+# - `<<EOT . " world"` and `say(<<EOT);`
+# - `$byte % 16` and `sort { $a cmp $b } %h`
+# - `"${byte}"` braced interpolation
+# - `-2 ** 2 == -4` precedence
+# - `$s . ($t =~ s/a/b/)` and `$t =~ s/a/b/`
+# - `pair(k => $c ? 10 : 20)` and `(default => 42)`
+# - Moose child `has` default overriding parent + `(lazy)` without `builder`
+# - `catch (My::Sub::Err $e)`
+# - `fn () array { ... }`
+# - `s/a/"\\"/eg`, `qq(\x41)`, and `q(\()`
+
+package BaseMoose;
+has ro int $val (default => 10);
+
+package ChildMoose;
+extends BaseMoose;
+our int $lazy_calls = 0;
+func next_lazy() int {
+    $lazy_calls = $lazy_calls + 1;
+    return 77;
+}
+func lazy_calls() int { return $lazy_calls; }
+has ro int $val (default => 99);
+has ro int $lz (lazy, default => ChildMoose::next_lazy());
+
+package My::Sub::Err;
+func new(str $msg) scalar {
+    my hash %s = ("msg" => $msg);
+    return bless(\%s, "My::Sub::Err");
+}
+func msg(scalar $self) str { return $self->{"msg"}; }
+
+package main;
+
+func pair(str $k, int $v) str {
+    return $k . "=" . $v;
+}
+
+func main() int {
+    # 1. Inline `say(<<EOT);` (no trailing newline if chomped? Heredoc includes newline — wait: say adds newline; let's print(<<EOT); or test say!)
+    # Let's use print() with inline heredoc so output stays on one line for # EXPECT:!
+    my str $hd_inline = chomp(<<EOT);
+inline_hd
+EOT
+
+    # 2. UTF-8 in q(), qq(), qw(), heredoc, and /café/
+    my str $u_q = q(café);
+    my str $u_qq = qq(café);
+    my array @u_qw = qw(café thé);
+    my str $u_hd = <<EOT;
+café
+EOT
+    my int $u_re = ("le café!" =~ /café/) ? 1 : 0;
+    my str $u_res = length($u_q) . ":" . length($u_qq) . ":" . length($u_qw[0]) . ":" . length($u_hd) . ":" . $u_re;
+
+    # 3. `<<EOT . " world"` inline concat
+    my str $hd_cat = <<EOT . " world";
+hello
+EOT
+    $hd_cat =~ s/\n/\\n/;
+
+    # 4. `$byte % 16` and `sort { $a cmp $b } %h` and `"${byte}"`
+    my int $byte = 35;
+    my int $mod = $byte % 16;
+    my hash %sh = ("b" => "n", "a" => "m");
+    my array @sorted_h_parse = sort { $a cmp $b } %sh;
+    my array @sorted_k = sort { $a cmp $b } keys(%sh);
+    my str $mod_sort = $mod . ":" . join(",", @sorted_k);
+    my str $interp_b = qq(\x41) . ":" . "${byte}";
+
+    # 5. `-2 ** 2 == -4`
+    my int $pw = -2 ** 2;
+
+    # 6. `$s . ($t =~ s/a/b/)`
+    my str $s_pre = "p";
+    my str $t_sub = "aac";
+    my str $sub_cat = $s_pre . ($t_sub =~ s/a/b/);
+    $t_sub =~ s/a/b/;
+    my str $sub_res = $sub_cat . ":" . $t_sub;
+
+    # 7. `pair(k => $c ? 10 : 20)` and `(default => 42)`
+    my int $cond = 1;
+    my str $pr = pair(k => $cond ? 10 : 20);
+    my hash %dh = (default => 42);
+    my str $pair_res = $pr . ":" . $dh{"default"};
+
+    # 8. Moose child `has` default overriding parent + `(lazy)` without `builder`
+    my scalar $cm = ChildMoose::new();
+    my int $before_lz = ChildMoose::lazy_calls();
+    my int $lz_val = $cm->lz();
+    my int $after_lz = ChildMoose::lazy_calls();
+    my str $moose_res = $cm->val() . ":" . $before_lz . ":" . $after_lz . ":" . $lz_val;
+
+    # 9. `catch (My::Sub::Err $e)`
+    my str $caught_ns = "";
+    try {
+        die(My::Sub::Err::new("sub_err"));
+    } catch (My::Sub::Err $e) {
+        $caught_ns = $e->msg();
+    }
+
+    # 10. `fn () array { ... }`
+    my scalar $arr_fn = fn () array {
+        my array @r = (10, 20);
+        return @r;
+    };
+    my array @got_arr = $arr_fn->();
+    my str $arr_res = join(",", @got_arr);
+
+    # 11. `s/a/"\\"/eg`, `qq(\x41)`, and `q(\()`
+    my str $bs = "a|a";
+    $bs =~ s/a/"\\"/eg;
+    my str $qparen = q(\();
+
+    my str $out_line = $hd_inline . "|" . $u_res . "|" . $hd_cat . "|" . $mod_sort . "|" .
+        $interp_b . "|" . $pw . "|" . $sub_res . "|" . $pair_res . "|" .
+        $moose_res . "|" . $caught_ns . "|" . $arr_res . "|" . $bs . "|" .
+        qq(\x41) . ":" . $qparen;
+    say(<<EOT);
+${out_line}
+EOT
+    return 0;
+}

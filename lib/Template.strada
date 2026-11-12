@@ -32,13 +32,34 @@ use Template::Interp;
 
 package Template;
 
-# --- module state (Forma's cache pattern) ----------------------------------
-my hash %g_tt_text_cache = ();    # template name -> raw source text
-my hash %g_tt_ast_cache  = ();    # template name -> compiled node list
-my hash %g_tt_path_cache = ();    # template name -> resolved file path
-my hash %g_tt_mtime_cache = ();   # template name -> file mtime at load time
+# --- module state -----------------------------------------------------------
 my int  $g_tt_cache_enabled = 1;
 my int  $g_tt_stat_check = 1;     # re-stat cached files and invalidate on change
+my int  $g_tt_cache_epoch = 0;    # incremented by Template::clear_cache()
+
+# Check if path has any '..' segment
+func _has_dotdot_segment(str $name) int {
+    if ($name eq "..") { return 1; }
+    if (length($name) >= 3) {
+        if (substr($name, 0, 3) eq "../" || substr($name, 0, 3) eq "..\\") { return 1; }
+        if (substr($name, length($name) - 3, 3) eq "/.." || substr($name, length($name) - 3, 3) eq "\\..") { return 1; }
+    }
+    if (index($name, "/../") >= 0 || index($name, "\\..\\") >= 0 ||
+        index($name, "/..\\") >= 0 || index($name, "\\../") >= 0) {
+        return 1;
+    }
+    return 0;
+}
+
+func _sync_instance_cache(scalar $self) void {
+    if (($self->{"cache_epoch"} // -1) != $g_tt_cache_epoch) {
+        $self->{"text_cache"} = {};
+        $self->{"ast_cache"} = {};
+        $self->{"path_cache"} = {};
+        $self->{"mtime_cache"} = {};
+        $self->{"cache_epoch"} = $g_tt_cache_epoch;
+    }
+}
 
 # Template::new(config) -> blessed Template object. $config is a hashref of TT
 # options (undef = defaults). INCLUDE_PATH may be a string (colon-separated) or
@@ -61,6 +82,13 @@ func new(scalar $config) scalar {
         if (size(@paths) == 0) { push(@paths, "."); }
     }
     $self{"include_path"} = \@paths;
+    $self{"relative"} = defined($config->{"RELATIVE"}) ? ($config->{"RELATIVE"} + 0) : (defined($config->{"relative"}) ? ($config->{"relative"} + 0) : 0);
+    $self{"absolute"} = defined($config->{"ABSOLUTE"}) ? ($config->{"ABSOLUTE"} + 0) : (defined($config->{"absolute"}) ? ($config->{"absolute"} + 0) : 0);
+    $self{"text_cache"} = {};
+    $self{"ast_cache"} = {};
+    $self{"path_cache"} = {};
+    $self{"mtime_cache"} = {};
+    $self{"cache_epoch"} = $g_tt_cache_epoch;
 
     my scalar $r = \%self;
     bless($r, "Template");
@@ -98,26 +126,59 @@ func run(scalar $self, str $name, str $text, scalar $vars) str {
     return execute($self, $ast, $vars);
 }
 
-# Compile once per template name, reusing the cached AST on later calls (used by
-# both top-level process() and INCLUDE/PROCESS/WRAPPER). Anonymous strings
-# (name == "") are never cached.
+# Compile once per template name on $self, reusing the cached AST on later calls
+# (used by both top-level process() and INCLUDE/PROCESS/WRAPPER). Anonymous
+# strings (name == "") are never cached.
 func compile_cached(scalar $self, str $name, str $text) scalar {
+    _sync_instance_cache($self);
+    my scalar $ast_cache = $self->{"ast_cache"};
     my int $cacheable = (length($name) > 0 && $g_tt_cache_enabled == 1) ? 1 : 0;
-    if ($cacheable == 1 && exists(%g_tt_ast_cache, $name)) { return $g_tt_ast_cache{$name}; }
+    if ($cacheable == 1 && exists(%{$ast_cache}, $name)) { return $ast_cache->{$name}; }
     my scalar $ast = compile($self, $text);
-    if ($cacheable == 1) { $g_tt_ast_cache{$name} = $ast; }
+    if ($cacheable == 1) { $ast_cache->{$name} = $ast; }
     return $ast;
 }
 
-# Load a template file by searching INCLUDE_PATH (cached by name). When the cache
-# is warm, the file's mtime is re-checked; if it changed on disk, the stale text
-# AND compiled AST for that name are evicted so it is reloaded + recompiled.
-# Throws a TT 'file' exception when not found.
+# Load a template file by searching INCLUDE_PATH (cached per $self instance).
+# Rejects leading '/' unless $self->{"absolute"} / ABSOLUTE is opted in, and
+# rejects '..' path segments unless $self->{"relative"} / RELATIVE is opted in.
+# Throws a TT 'file' exception when disallowed or not found.
 func provider_load(scalar $self, str $name) str {
-    if ($g_tt_cache_enabled == 1 && exists(%g_tt_text_cache, $name)) {
-        if (cache_fresh($name) == 1) { return $g_tt_text_cache{$name}; }
-        invalidate($name);                       # mtime changed -> drop text + AST, reload below
+    my int $allow_abs = (($self->{"absolute"} // 0) != 0 || conf_int($self, "ABSOLUTE", 0) != 0) ? 1 : 0;
+    my int $allow_rel = (($self->{"relative"} // 0) != 0 || conf_int($self, "RELATIVE", 0) != 0) ? 1 : 0;
+
+    if (length($name) > 0 && substr($name, 0, 1) eq "/") {
+        if ($allow_abs == 0) {
+            throw(Template::Exception::make("file", $name . ": absolute paths are not allowed (set ABSOLUTE => 1)"));
+        }
     }
+    if (_has_dotdot_segment($name) == 1 && $allow_rel == 0) {
+        throw(Template::Exception::make("file", $name . ": relative paths are not allowed (set RELATIVE => 1)"));
+    }
+
+    _sync_instance_cache($self);
+    my scalar $text_cache = $self->{"text_cache"};
+    my scalar $path_cache = $self->{"path_cache"};
+    my scalar $mtime_cache = $self->{"mtime_cache"};
+
+    if ($g_tt_cache_enabled == 1 && exists(%{$text_cache}, $name)) {
+        if (cache_fresh($self, $name) == 1) { return $text_cache->{$name}; }
+        invalidate($self, $name);                # mtime changed -> drop text + AST, reload below
+    }
+
+    if (length($name) > 0 && substr($name, 0, 1) eq "/") {
+        if (core::is_file($name)) {
+            my str $text = slurp($name);
+            if ($g_tt_cache_enabled == 1) {
+                $text_cache->{$name} = $text;
+                $path_cache->{$name} = $name;
+                $mtime_cache->{$name} = file_mtime($name);
+            }
+            return $text;
+        }
+        throw(Template::Exception::make("file", $name . ": not found"));
+    }
+
     my scalar $paths = $self->{"include_path"};
     my int $i = 0;
     while ($i < size(@{$paths})) {
@@ -125,9 +186,9 @@ func provider_load(scalar $self, str $name) str {
         if (core::is_file($full)) {
             my str $text = slurp($full);
             if ($g_tt_cache_enabled == 1) {
-                $g_tt_text_cache{$name} = $text;
-                $g_tt_path_cache{$name} = $full;
-                $g_tt_mtime_cache{$name} = file_mtime($full);
+                $text_cache->{$name} = $text;
+                $path_cache->{$name} = $full;
+                $mtime_cache->{$name} = file_mtime($full);
             }
             return $text;
         }
@@ -138,18 +199,20 @@ func provider_load(scalar $self, str $name) str {
 
 # A cached entry is fresh when stat checking is off, or the recorded path still
 # has the same mtime it had at load time. A vanished/changed file => not fresh.
-func cache_fresh(str $name) int {
+func cache_fresh(scalar $self, str $name) int {
     if ($g_tt_stat_check == 0) { return 1; }
-    if (!exists(%g_tt_path_cache, $name)) { return 1; }
-    return (file_mtime($g_tt_path_cache{$name}) == ($g_tt_mtime_cache{$name} // -1)) ? 1 : 0;
+    my scalar $path_cache = $self->{"path_cache"};
+    my scalar $mtime_cache = $self->{"mtime_cache"};
+    if (!exists(%{$path_cache}, $name)) { return 1; }
+    return (file_mtime($path_cache->{$name}) == ($mtime_cache->{$name} // -1)) ? 1 : 0;
 }
 
-# Drop every cached artifact for one template name.
-func invalidate(str $name) void {
-    delete(%g_tt_text_cache, $name);
-    delete(%g_tt_ast_cache, $name);
-    delete(%g_tt_path_cache, $name);
-    delete(%g_tt_mtime_cache, $name);
+# Drop every cached artifact for one template name on $self.
+func invalidate(scalar $self, str $name) void {
+    delete($self->{"text_cache"}->{$name});
+    delete($self->{"ast_cache"}->{$name});
+    delete($self->{"path_cache"}->{$name});
+    delete($self->{"mtime_cache"}->{$name});
 }
 
 # File mtime in seconds, or -1 if the path can't be stat'd.
@@ -215,8 +278,7 @@ func execute(scalar $self, scalar $nodes, scalar $vars) str {
 # Toggle compiled-template caching (off for dev so edits are picked up).
 func set_cache(int $enabled) void { $g_tt_cache_enabled = $enabled; }
 func clear_cache() void {
-    %g_tt_text_cache = (); %g_tt_ast_cache = ();
-    %g_tt_path_cache = (); %g_tt_mtime_cache = ();
+    $g_tt_cache_epoch = $g_tt_cache_epoch + 1;
 }
 # Toggle file-mtime re-checking on cached loads. On (default): a file edited on
 # disk is reloaded + recompiled automatically. Off: cache lives for the process

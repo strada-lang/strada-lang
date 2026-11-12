@@ -227,8 +227,8 @@ func open3(str $cmd) hash {
         core::dup2($stderr_pipe[1], 2);
         core::close_fd($stderr_pipe[1]);
 
-        # Execute the command via shell
-        core::exec("/bin/sh -c '" . $cmd . "'");
+        # Execute the command via /bin/sh -c (core::exec invokes execlp("/bin/sh","sh","-c",cmd,NULL) directly)
+        core::exec($cmd);
 
         # If exec returns, it failed
         exit(127);
@@ -245,6 +245,12 @@ func open3(str $cmd) hash {
         $result{"stdout"} = $stdout_pipe[0];
         $result{"stderr"} = $stderr_pipe[0];
     } else {
+        core::close_fd($stdin_pipe[0]);
+        core::close_fd($stdin_pipe[1]);
+        core::close_fd($stdout_pipe[0]);
+        core::close_fd($stdout_pipe[1]);
+        core::close_fd($stderr_pipe[0]);
+        core::close_fd($stderr_pipe[1]);
         $result{"error"} = "Fork failed";
     }
 
@@ -281,7 +287,7 @@ func open2(str $cmd) hash {
         core::dup2($stdout_pipe[1], 2);  # stderr -> stdout
         core::close_fd($stdout_pipe[1]);
 
-        core::exec("/bin/sh -c '" . $cmd . "'");
+        core::exec($cmd);
         exit(127);
     } elsif ($pid > 0) {
         # Parent process
@@ -292,6 +298,10 @@ func open2(str $cmd) hash {
         $result{"stdin"} = $stdin_pipe[1];
         $result{"stdout"} = $stdout_pipe[0];
     } else {
+        core::close_fd($stdin_pipe[0]);
+        core::close_fd($stdin_pipe[1]);
+        core::close_fd($stdout_pipe[0]);
+        core::close_fd($stdout_pipe[1]);
         $result{"error"} = "Fork failed";
     }
 
@@ -314,15 +324,18 @@ func cmd_output(str $cmd) str {
         core::close_fd($pipe[0]);
         core::dup2($pipe[1], 1);
         core::close_fd($pipe[1]);
-        core::exec("/bin/sh -c '" . $cmd . "'");
+        core::exec($cmd);
         exit(127);
     } elsif ($pid > 0) {
         # Parent
         core::close_fd($pipe[1]);
         my str $output = core::slurp_fd($pipe[0]);
         core::close_fd($pipe[0]);
-        core::wait();
+        core::waitpid($pid, 0);
         return $output;
+    } else {
+        core::close_fd($pipe[0]);
+        core::close_fd($pipe[1]);
     }
 
     return "";
@@ -334,7 +347,7 @@ func run(str $cmd) int {
     my int $pid = core::fork();
 
     if ($pid == 0) {
-        core::exec("/bin/sh -c '" . $cmd . "'");
+        core::exec($cmd);
         exit(127);
     } elsif ($pid > 0) {
         my int $raw_status = core::waitpid($pid, 0);

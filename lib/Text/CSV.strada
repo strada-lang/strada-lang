@@ -269,6 +269,7 @@ func parse(scalar $self, str $line) int {
     my scalar $fields = [];
     my str $current = "";
     my int $in_quotes = 0;
+    my int $after_quote = 0;
     my int $i = 0;
     my int $len = length($line);
 
@@ -282,6 +283,7 @@ func parse(scalar $self, str $line) int {
                     $i = $i + 1;
                 } else {
                     $in_quotes = 0;
+                    $after_quote = 1;
                 }
             } elsif ($escape ne "" && $escape ne $quote && $ch eq $escape) {
                 if ($i + 1 < $len) {
@@ -297,7 +299,11 @@ func parse(scalar $self, str $line) int {
             if ($ch eq $sep) {
                 push($fields, $current);
                 $current = "";
-            } elsif ($ch eq $quote) {
+                $after_quote = 0;
+            } elsif ($after_quote) {
+                Text::CSV::_set_error($self, "Unexpected character after closing quote");
+                return 0;
+            } elsif ($ch eq $quote && $quote ne "") {
                 if ($current ne "") {
                     Text::CSV::_set_error($self, "Unexpected quote in field");
                     return 0;
@@ -321,16 +327,31 @@ func parse(scalar $self, str $line) int {
     return 1;
 }
 
+func _read_raw_line(scalar $fh) scalar {
+    my scalar $chunk = core::fgets($fh, 65536);
+    if (!defined($chunk)) {
+        return undef;
+    }
+    my str $line = "" . $chunk;
+    while (length($line) > 0 && substr($line, length($line) - 1, 1) ne "\n") {
+        my scalar $more = core::fgets($fh, 65536);
+        if (!defined($more)) {
+            last;
+        }
+        $line = $line . $more;
+    }
+    return $line;
+}
+
 func getline(scalar $self, scalar $fh) scalar {
-    if (!defined($self)) {
+    if (!defined($self) || !defined($fh)) {
         return undef;
     }
     my str $buf = $self->{"buffer"};
-    my int $appended = 0;
 
     while (1) {
-        my str $line = core::readline($fh);
-        if (!defined($line) || $line eq "") {
+        my scalar $raw = Text::CSV::_read_raw_line($fh);
+        if (!defined($raw)) {
             if ($buf ne "") {
                 # EOF with partial record
                 Text::CSV::_set_error($self, "Unmatched quote");
@@ -339,12 +360,12 @@ func getline(scalar $self, scalar $fh) scalar {
             return undef;
         }
 
+        my str $line = "" . $raw;
         if ($buf eq "") {
             $buf = $line;
         } else {
             $buf = $buf . $line;
         }
-        $appended = 1;
 
         if (Text::CSV::parse($self, $buf)) {
             Text::CSV::_clear_buffer($self);

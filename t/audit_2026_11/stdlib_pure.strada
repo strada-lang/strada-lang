@@ -1,0 +1,149 @@
+use lib "lib";
+use Digest::SHA;
+use Digest::MD5;
+use JSON;
+use JSON::PS;
+use Math::BigInt;
+use Math::BigFloat;
+use Getopt::Long;
+use List::Util;
+use YAML;
+use Text::CSV;
+use LWP;
+use DateTime;
+use Async::Loop;
+use IPC::Open3;
+use Test;
+
+our int $g_fail = 0;
+
+func check(int $ok, str $label) void {
+    if ($ok == 0) {
+        say("FAIL: " . $label);
+        $g_fail = $g_fail + 1;
+    }
+}
+
+func main(int $argc, array @argv) int {
+    my str $work_dir = "/tmp";
+    my int $ai = 1;
+    while ($ai + 1 < $argc) {
+        if ($argv[$ai] eq "--workdir") {
+            $work_dir = $argv[$ai + 1];
+        }
+        $ai = $ai + 1;
+    }
+
+    # 1. Digest::SHA & Digest::MD5 UTF-8 digests
+    my str $cafe = "caf" . chr(233);
+    check(Digest::SHA::sha256_hex($cafe) eq "850f7dc43910ff890f8879c0ed26fe697c93a067ad93a7d50f466a7028a9bf4e", "sha256_hex(cafe)");
+    check(Digest::SHA::hmac_sha256_hex("key", $cafe) eq "d16d57e1f4e2beb8dfeb4c1f56a05ba9d1df33457de1058444369792bc7d8a78", "hmac_sha256_hex(key, cafe)");
+    check(Digest::MD5::md5_hex($cafe) eq "07117fe4a1ebd544965dc19573183da2", "md5_hex(cafe)");
+
+    # 2. JSON & JSON::PS
+    my scalar $j_in = { "a" => "2e", "b" => "0123", "ctrl" => chr(1) };
+    my str $j_enc = JSON::encode($j_in);
+    my str $jps_enc = JSON::PS::encode($j_in);
+    check(index($j_enc, "\"2e\"") >= 0 && index($j_enc, "\"0123\"") >= 0, "JSON::encode preserves 2e and 0123 as strings");
+    check(index($jps_enc, "\"2e\"") >= 0 && index($jps_enc, "\"0123\"") >= 0, "JSON::PS::encode preserves 2e and 0123 as strings");
+    check(index($j_enc, "\\u0001") >= 0, "JSON::encode escapes \\x01 as \\u0001");
+    check(index($jps_enc, "\\u0001") >= 0, "JSON::PS::encode escapes \\x01 as \\u0001");
+    my scalar $j_dec = JSON::decode($j_enc);
+    my scalar $jps_dec = JSON::PS::decode($jps_enc);
+    check($j_dec->{"a"} eq "2e" && $j_dec->{"b"} eq "0123" && ord($j_dec->{"ctrl"}) == 1, "JSON roundtrip");
+    check($jps_dec->{"a"} eq "2e" && $jps_dec->{"b"} eq "0123" && ord($jps_dec->{"ctrl"}) == 1, "JSON::PS roundtrip");
+    check(!defined(JSON::decode("[1] trailing")), "JSON rejects trailing garbage");
+    check(!defined(JSON::PS::decode("[1] trailing")), "JSON::PS rejects trailing garbage");
+    check(!defined(JSON::decode("-.")), "JSON rejects -.");
+    check(!defined(JSON::PS::decode("-.")), "JSON::PS rejects -.");
+    check(!defined(JSON::decode("[1, 2")), "JSON rejects unclosed array");
+    check(!defined(JSON::PS::decode("[1, 2")), "JSON::PS rejects unclosed array");
+
+    # 3. Math::BigInt & Math::BigFloat
+    my scalar $bi_empty = BigInt::new("");
+    check($bi_empty->is_zero() == 1, "BigInt::new(\"\")->is_zero() == 1");
+    my int $div_threw = 0;
+    try {
+        my scalar $x = BigInt::new("42")->div($bi_empty);
+    } catch ($e) {
+        $div_threw = 1;
+    }
+    check($div_threw == 1, "BigInt div by zero throws");
+
+    check(BigFloat::new("0.5")->round(0)->to_str() eq "1", "BigFloat 0.5->round(0) == 1");
+    check(BigFloat::new("10")->div_precision(BigFloat::new("0.01"), 0)->to_str() eq "1000", "BigFloat div_precision negative scale");
+    check(BigFloat::new("-9999999999999999999999999.5")->floor()->to_str() eq "-10000000000000000000000000", "BigFloat arbitrary-precision negative floor");
+    check(BigFloat::new("9999999999999999999999999.9")->floor()->to_str() eq "9999999999999999999999999", "BigFloat arbitrary-precision positive floor");
+
+    # 4. Getopt::Long
+    my array @specs = ("workdir=s", "flag", "num=i");
+    my hash %opts = ("workdir" => "", "flag" => "0", "num" => "0");
+    my int $go_ok = Getopt::Long::GetOptions(@specs, %opts);
+    check($go_ok == 1 && $opts{"flag"} eq "1" && $opts{"num"} eq "25", "Getopt::Long::GetOptions");
+
+    # 5. List::Util::last_idx
+    my array @lu = (10, 20, 30);
+    check(List::Util::last_idx(@lu, 20) == 1, "List::Util::last_idx((10,20,30), 20) == 1");
+
+    # 6. YAML
+    check(YAML::ltrim("   \thello") eq "hello", "YAML::ltrim");
+    my str $yd = YAML::Dump(["a: b"]);
+    my scalar $yl = YAML::Load($yd);
+    check(defined($yl) && $yl->[0] eq "a: b", "YAML Dump/Load [\"a: b\"] roundtrip");
+
+    # 7. Text::CSV multiline quoted field + blank line
+    my str $csv_path = $work_dir . "/multiline.csv";
+    core::spew($csv_path, "h1,\"line1\n\nline2\",h3\nr2c1,r2c2,r2c3\n");
+    my scalar $csv = Text::CSV::new({});
+    my scalar $fh = core::open($csv_path, "<");
+    my scalar $row1 = Text::CSV::getline($csv, $fh);
+    my scalar $row2 = Text::CSV::getline($csv, $fh);
+    core::close($fh);
+    check(defined($row1) && $row1->[0] eq "h1" && $row1->[1] eq "line1\n\nline2" && $row1->[2] eq "h3", "Text::CSV multiline quoted field with blank line");
+    check(defined($row2) && $row2->[0] eq "r2c1" && $row2->[2] eq "r2c3", "Text::CSV subsequent row");
+
+    # 8. LWP
+    my str $euro = chr(8364);
+    check(LWP::url_encode($euro) eq "%E2%82%AC", "LWP::url_encode(euro)");
+    my hash %pu = LWP::parse_url("http://example.com?a=1");
+    check($pu{"host"} eq "example.com" && $pu{"path"} eq "/" && $pu{"query"} eq "a=1", "LWP::parse_url(http://example.com?a=1)");
+    my hash %lwp_opts = ("user_agent" => "Bad\r\nInjected: 1");
+    my hash %bad_req = LWP::do_request("GET", "http://127.0.0.1:1/", "", %lwp_opts);
+    check($bad_req{"success"} == 0 && index($bad_req{"error"}, "CR/LF") >= 0, "LWP CRLF guard");
+
+    # 9. DateTime UTC clone & add_days
+    my scalar $dt_utc = DateTime::make_utc(2026, 11, 12, 23, 30, 0);
+    my scalar $dt_cl = DateTime::clone($dt_utc);
+    my scalar $dt_plus = DateTime::add_days($dt_utc, 1);
+    check(DateTime::iso8601($dt_cl) eq "2026-11-12T23:30:00" && $dt_cl->{"utc"} == 1 && DateTime::epoch($dt_cl) == DateTime::epoch($dt_utc), "DateTime UTC clone");
+    check(DateTime::iso8601($dt_plus) eq "2026-11-13T23:30:00" && $dt_plus->{"utc"} == 1 && (DateTime::epoch($dt_plus) - DateTime::epoch($dt_utc)) == 86400, "DateTime UTC add_days");
+
+    # 10. Async::Loop same-tick timer_cancel
+    my scalar $loop2 = Async::Loop::new();
+    my scalar $st2 = { "a" => 0, "b" => 0 };
+    my array @ids = ();
+    $loop2->timer_after(0, fn () {
+        $st2->{"a"} = 1;
+        $loop2->timer_cancel($ids[0]);
+    });
+    my int $id2 = $loop2->timer_after(0, fn () {
+        $st2->{"b"} = 1;
+    });
+    push(@ids, $id2);
+    $loop2->run();
+    $loop2->close();
+    check($st2->{"a"} == 1 && $st2->{"b"} == 0, "Async::Loop same-tick timer_cancel");
+
+    # 11. IPC::Open3::cmd_output with single quote
+    my str $echo_out = IPC::Open3::cmd_output("echo \"it's\"");
+    check($echo_out eq "it's\n", "IPC::Open3::cmd_output single quote");
+
+    # 12. Test::is_num
+    check(Test::is_num(2.5, 2.5, "is_num float match") == 1, "Test::is_num float match");
+
+    if ($g_fail == 0) {
+        say("ALL_STDLIB_PURE_OK");
+        return 0;
+    }
+    return 1;
+}

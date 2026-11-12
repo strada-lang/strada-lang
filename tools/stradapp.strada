@@ -32,6 +32,118 @@ func starts_with(str $s, str $prefix) int {
     return substr($s, 0, $plen) eq $prefix;
 }
 
+func is_ident_char(str $ch) int {
+    my int $c = ord($ch);
+    if (($c >= 97 && $c <= 122) || ($c >= 65 && $c <= 90) || ($c >= 48 && $c <= 57) || $c == 95) {
+        return 1;
+    }
+    return 0;
+}
+
+# Extract directive word immediately following '#' (at index 1), or "" if none.
+func directive_word(str $trimmed) str {
+    my int $len = length($trimmed);
+    my int $end = 1;
+    while ($end < $len && is_ident_char(substr($trimmed, $end, 1)) == 1) {
+        $end++;
+    }
+    if ($end == 1) {
+        return "";
+    }
+    my str $w = substr($trimmed, 1, $end - 1);
+    if ($end < $len) {
+        my str $next = substr($trimmed, $end, 1);
+        if ($next ne " " && $next ne "\t") {
+            if (!($w eq "include" && ($next eq "\"" || $next eq "<"))) {
+                return "";
+            }
+        }
+    }
+    return $w;
+}
+
+# Strip trailing '# ...' comments outside single/double-quoted literals.
+func strip_pp_comment(str $s) str {
+    my int $len = length($s);
+    my int $i = 0;
+    my int $in_dq = 0;
+    my int $in_sq = 0;
+    while ($i < $len) {
+        my str $ch = substr($s, $i, 1);
+        if ($in_dq == 1) {
+            if ($ch eq "\\") {
+                $i = $i + 2;
+                next;
+            }
+            if ($ch eq "\"") {
+                $in_dq = 0;
+            }
+        } elsif ($in_sq == 1) {
+            if ($ch eq "\\") {
+                $i = $i + 2;
+                next;
+            }
+            if ($ch eq "'") {
+                $in_sq = 0;
+            }
+        } else {
+            if ($ch eq "\"") {
+                $in_dq = 1;
+            } elsif ($ch eq "'") {
+                $in_sq = 1;
+            } elsif ($ch eq "#") {
+                return trim(substr($s, 0, $i));
+            }
+        }
+        $i++;
+    }
+    return trim($s);
+}
+
+# Find '__C__' outside Strada string literals and '#' comments; returns index or -1.
+func find_c_block_kw(str $line) int {
+    my int $len = length($line);
+    my int $i = 0;
+    my int $in_dq = 0;
+    my int $in_sq = 0;
+    while ($i < $len) {
+        my str $ch = substr($line, $i, 1);
+        if ($in_dq == 1) {
+            if ($ch eq "\\") { $i = $i + 2; next; }
+            if ($ch eq "\"") { $in_dq = 0; }
+            $i++;
+            next;
+        }
+        if ($in_sq == 1) {
+            if ($ch eq "\\") { $i = $i + 2; next; }
+            if ($ch eq "'") { $in_sq = 0; }
+            $i++;
+            next;
+        }
+        if ($ch eq "\"") { $in_dq = 1; $i++; next; }
+        if ($ch eq "'") { $in_sq = 1; $i++; next; }
+        if ($ch eq "#") { return -1; }
+        if ($i + 5 <= $len && substr($line, $i, 5) eq "__C__") {
+            my int $prev_ok = 1;
+            if ($i > 0 && is_ident_char(substr($line, $i - 1, 1)) == 1) {
+                $prev_ok = 0;
+            }
+            my int $next_ok = 1;
+            if ($i + 5 < $len) {
+                my str $nc = substr($line, $i + 5, 1);
+                if ($nc ne " " && $nc ne "\t" && $nc ne "{") {
+                    $next_ok = 0;
+                }
+            }
+            if ($prev_ok == 1 && $next_ok == 1) {
+                return $i;
+            }
+        }
+        $i++;
+    }
+    return -1;
+}
+
 func file_exists(str $path) int {
     my hash %stat = core::stat($path);
     return exists(%stat, "size");
@@ -78,8 +190,11 @@ func preprocess(str $filename) str {
     my str $output = "";
     my array @cond_stack = ();
     my int $active = 1;
-    my int $in_c_block = 0;
+    my int $in_c_block = 0;       # 0 = outside, 1 = inside {..}, 2 = saw __C__ awaiting {
     my int $c_block_depth = 0;
+    my int $c_in_block_cmt = 0;
+    my int $c_in_str = 0;
+    my int $c_in_chr = 0;
 
     my int $i = 0;
     my int $num_lines = size(@lines);
@@ -92,50 +207,73 @@ func preprocess(str $filename) str {
         # point at the right line of the original file
         my int $before = length($output);
 
-        # Check for __C__ block start
-        if ($in_c_block == 0 && index($trimmed, "__C__") >= 0) {
-            # Found __C__ - look for opening brace
-            my int $brace_pos = index($trimmed, "{");
-            if ($brace_pos >= 0) {
-                $in_c_block = 1;
-                $c_block_depth = 1;
-                # Count any additional braces on this line after the opening one
-                my int $j = $brace_pos + 1;
-                while ($j < length($trimmed)) {
-                    my str $ch = substr($trimmed, $j, 1);
-                    if ($ch eq "{") {
-                        $c_block_depth++;
-                    } elsif ($ch eq "}") {
-                        $c_block_depth--;
-                        if ($c_block_depth == 0) {
-                            $in_c_block = 0;
-                        }
-                    }
-                    $j++;
-                }
+        # Check for __C__ block start or continuation
+        my int $c_scan_from = -1;
+        if ($in_c_block != 0) {
+            $c_scan_from = 0;
+        } else {
+            my int $kw_pos = find_c_block_kw($line);
+            if ($kw_pos >= 0) {
+                $in_c_block = 2;
+                $c_block_depth = 0;
+                $c_in_block_cmt = 0;
+                $c_in_str = 0;
+                $c_in_chr = 0;
+                $c_scan_from = $kw_pos + 5;
             }
-            # Pass through the __C__ line as-is
-            if ($active) {
-                $output = $output . $line . "\n";
-            } else {
-                $output = $output . "\n";
-            }
-            $i++;
-            next;
         }
 
-        # If inside __C__ block, just pass through and track braces
-        if ($in_c_block == 1) {
-            # Count braces to track nesting
-            my int $j = 0;
-            while ($j < length($trimmed)) {
-                my str $ch = substr($trimmed, $j, 1);
+        if ($c_scan_from >= 0) {
+            my int $j = $c_scan_from;
+            my int $llen = length($line);
+            while ($j < $llen) {
+                my str $ch = substr($line, $j, 1);
+                if ($c_in_block_cmt == 1) {
+                    if ($ch eq "*" && $j + 1 < $llen && substr($line, $j + 1, 1) eq "/") {
+                        $c_in_block_cmt = 0;
+                        $j = $j + 2;
+                        next;
+                    }
+                    $j++;
+                    next;
+                }
+                if ($c_in_str == 1) {
+                    if ($ch eq "\\") { $j = $j + 2; next; }
+                    if ($ch eq "\"") { $c_in_str = 0; }
+                    $j++;
+                    next;
+                }
+                if ($c_in_chr == 1) {
+                    if ($ch eq "\\") { $j = $j + 2; next; }
+                    if ($ch eq "'") { $c_in_chr = 0; }
+                    $j++;
+                    next;
+                }
+                if ($ch eq "/" && $j + 1 < $llen) {
+                    my str $nch = substr($line, $j + 1, 1);
+                    if ($nch eq "/") {
+                        last;
+                    }
+                    if ($nch eq "*") {
+                        $c_in_block_cmt = 1;
+                        $j = $j + 2;
+                        next;
+                    }
+                }
+                if ($ch eq "\"") { $c_in_str = 1; $j++; next; }
+                if ($ch eq "'") { $c_in_chr = 1; $j++; next; }
                 if ($ch eq "{") {
-                    $c_block_depth++;
-                } elsif ($ch eq "}") {
+                    if ($in_c_block == 2) {
+                        $in_c_block = 1;
+                        $c_block_depth = 1;
+                    } else {
+                        $c_block_depth++;
+                    }
+                } elsif ($ch eq "}" && $in_c_block == 1) {
                     $c_block_depth--;
                     if ($c_block_depth == 0) {
                         $in_c_block = 0;
+                        last;
                     }
                 }
                 $j++;
@@ -151,112 +289,125 @@ func preprocess(str $filename) str {
         }
 
         if (substr($trimmed, 0, 1) eq "#") {
-            my str $directive = $trimmed;
-
-            if (starts_with($directive, "#define ")) {
+            if ($i == 0 && starts_with($trimmed, "#!")) {
+                # Shebang (#!/usr/bin/env strada) on line 1: pass through untouched.
                 if ($active) {
-                    my str $rest = substr($directive, 8, -1);
-                    $rest = trim($rest);
-                    my int $space_idx = index($rest, " ");
-                    my str $name = "";
-                    my str $value = "1";
-                    if ($space_idx > 0) {
-                        $name = substr($rest, 0, $space_idx);
-                        $value = trim(substr($rest, $space_idx + 1, -1));
-                    } else {
-                        $name = $rest;
-                    }
-                    $g_defines{$name} = $value;
+                    $output = $output . $line . "\n";
                 }
-            } elsif (starts_with($directive, "#undef ")) {
-                if ($active) {
-                    my str $name = trim(substr($directive, 7, -1));
-                    delete(%g_defines, $name);
-                }
-            } elsif (starts_with($directive, "#ifdef ")) {
-                my str $name = trim(substr($directive, 7, -1));
-                push(@cond_stack, $active);
-                if ($active) {
-                    $active = exists(%g_defines, $name);
-                }
-            } elsif (starts_with($directive, "#ifndef ")) {
-                my str $name = trim(substr($directive, 8, -1));
-                push(@cond_stack, $active);
-                if ($active) {
-                    $active = !exists(%g_defines, $name);
-                }
-            } elsif ($directive eq "#else") {
-                if (size(@cond_stack) == 0) {
-                    die("stradapp: " . $filename . ":" . ($i + 1) . ": #else without #ifdef/#ifndef");
-                }
-                my int $parent_active = $cond_stack[size(@cond_stack) - 1];
-                if ($parent_active) {
-                    $active = !$active;
-                }
-            } elsif ($directive eq "#endif") {
-                if (size(@cond_stack) == 0) {
-                    die("stradapp: " . $filename . ":" . ($i + 1) . ": #endif without #ifdef/#ifndef");
-                }
-                $active = pop(@cond_stack);
-            } elsif (starts_with($directive, "#include ")) {
-                if ($active) {
-                    my str $rest = trim(substr($directive, 9, -1));
-                    my str $inc_file = "";
-                    if (substr($rest, 0, 1) eq "\"") {
-                        my int $end = index(substr($rest, 1, -1), "\"");
-                        if ($end > 0) {
-                            $inc_file = substr($rest, 1, $end);
-                        }
-                    } elsif (substr($rest, 0, 1) eq "<") {
-                        my int $end = index(substr($rest, 1, -1), ">");
-                        if ($end > 0) {
-                            $inc_file = substr($rest, 1, $end);
-                        }
-                    }
-                    if ($inc_file eq "") {
-                        die("stradapp: " . $filename . ":" . ($i + 1) . ": invalid #include syntax");
-                    }
-                    my str $inc_path = find_include($inc_file, $file_dir);
-                    if ($inc_path eq "") {
-                        die("stradapp: " . $filename . ":" . ($i + 1) . ": cannot find include file: " . $inc_file);
-                    }
-                    my str $inc_content = preprocess($inc_path);
-                    $output = $output . $inc_content;
-                }
-            } elsif (starts_with($directive, "#error ")) {
-                if ($active) {
-                    my str $msg = trim(substr($directive, 7, -1));
-                    if (substr($msg, 0, 1) eq "\"") {
-                        $msg = substr($msg, 1, length($msg) - 2);
-                    }
-                    die("stradapp: " . $filename . ":" . ($i + 1) . ": error: " . $msg);
-                }
-            } elsif (starts_with($directive, "#warning ")) {
-                if ($active) {
-                    my str $msg = trim(substr($directive, 9, -1));
-                    if (substr($msg, 0, 1) eq "\"") {
-                        $msg = substr($msg, 1, length($msg) - 2);
-                    }
-                    warn("stradapp: " . $filename . ":" . ($i + 1) . ": warning: " . $msg);
-                }
-            } elsif ($trimmed eq "#") {
-                # Empty directive, skip
             } else {
-                # Unknown directive - treat as comment if it starts with "# "
-                # (Strada uses # for comments)
-                if (starts_with($directive, "# ")) {
-                    # Comment line - skip it
-                } elsif ($i == 0 && starts_with($directive, "#!")) {
-                    # Shebang (#!/usr/bin/env strada) on line 1: valid in
-                    # Strada source — pass it through untouched. Without
-                    # this, any -D build of a shebanged module died here
-                    # (the module-cache warmer hit it on executables'
-                    # helper libs).
+                my str $word = directive_word($trimmed);
+                my str $raw_rest = "";
+                if ($word ne "" && length($trimmed) > 1 + length($word)) {
+                    $raw_rest = trim(substr($trimmed, 1 + length($word)));
+                }
+
+                if ($word eq "define") {
                     if ($active) {
-                        $output = $output . $line . "\n";
+                        my str $rest = strip_pp_comment($raw_rest);
+                        if ($rest ne "") {
+                            my int $ws_idx = -1;
+                            my int $ri = 0;
+                            while ($ri < length($rest)) {
+                                my str $rch = substr($rest, $ri, 1);
+                                if ($rch eq " " || $rch eq "\t") {
+                                    $ws_idx = $ri;
+                                    last;
+                                }
+                                $ri++;
+                            }
+                            my str $name = "";
+                            my str $value = "1";
+                            if ($ws_idx > 0) {
+                                $name = substr($rest, 0, $ws_idx);
+                                $value = trim(substr($rest, $ws_idx + 1));
+                                if ($value eq "") { $value = "1"; }
+                            } else {
+                                $name = $rest;
+                            }
+                            $g_defines{$name} = $value;
+                        }
+                    }
+                } elsif ($word eq "undef") {
+                    if ($active) {
+                        my str $name = strip_pp_comment($raw_rest);
+                        if ($name ne "") {
+                            delete(%g_defines, $name);
+                        }
+                    }
+                } elsif ($word eq "ifdef") {
+                    my str $name = strip_pp_comment($raw_rest);
+                    push(@cond_stack, $active);
+                    if ($active) {
+                        $active = exists(%g_defines, $name);
+                    }
+                } elsif ($word eq "ifndef") {
+                    my str $name = strip_pp_comment($raw_rest);
+                    push(@cond_stack, $active);
+                    if ($active) {
+                        $active = !exists(%g_defines, $name);
+                    }
+                } elsif ($word eq "else") {
+                    my str $extra = strip_pp_comment($raw_rest);
+                    if ($extra eq "") {
+                        if (size(@cond_stack) == 0) {
+                            die("stradapp: " . $filename . ":" . ($i + 1) . ": #else without #ifdef/#ifndef");
+                        }
+                        my int $parent_active = $cond_stack[size(@cond_stack) - 1];
+                        if ($parent_active) {
+                            $active = !$active;
+                        }
+                    }
+                } elsif ($word eq "endif") {
+                    my str $extra = strip_pp_comment($raw_rest);
+                    if ($extra eq "") {
+                        if (size(@cond_stack) == 0) {
+                            die("stradapp: " . $filename . ":" . ($i + 1) . ": #endif without #ifdef/#ifndef");
+                        }
+                        $active = pop(@cond_stack);
+                    }
+                } elsif ($word eq "include") {
+                    if ($active) {
+                        my str $rest = strip_pp_comment($raw_rest);
+                        my str $inc_file = "";
+                        if (substr($rest, 0, 1) eq "\"") {
+                            my int $end = index(substr($rest, 1), "\"");
+                            if ($end > 0) {
+                                $inc_file = substr($rest, 1, $end);
+                            }
+                        } elsif (substr($rest, 0, 1) eq "<") {
+                            my int $end = index(substr($rest, 1), ">");
+                            if ($end > 0) {
+                                $inc_file = substr($rest, 1, $end);
+                            }
+                        }
+                        if ($inc_file eq "") {
+                            die("stradapp: " . $filename . ":" . ($i + 1) . ": invalid #include syntax");
+                        }
+                        my str $inc_path = find_include($inc_file, $file_dir);
+                        if ($inc_path eq "") {
+                            die("stradapp: " . $filename . ":" . ($i + 1) . ": cannot find include file: " . $inc_file);
+                        }
+                        my str $inc_content = preprocess($inc_path);
+                        $output = $output . $inc_content;
+                    }
+                } elsif ($word eq "error" && starts_with($raw_rest, "\"")) {
+                    if ($active) {
+                        my str $msg = strip_pp_comment($raw_rest);
+                        if (length($msg) >= 2 && substr($msg, 0, 1) eq "\"" && substr($msg, length($msg) - 1, 1) eq "\"") {
+                            $msg = substr($msg, 1, length($msg) - 2);
+                        }
+                        die("stradapp: " . $filename . ":" . ($i + 1) . ": error: " . $msg);
+                    }
+                } elsif ($word eq "warning" && starts_with($raw_rest, "\"")) {
+                    if ($active) {
+                        my str $msg = strip_pp_comment($raw_rest);
+                        if (length($msg) >= 2 && substr($msg, 0, 1) eq "\"" && substr($msg, length($msg) - 1, 1) eq "\"") {
+                            $msg = substr($msg, 1, length($msg) - 2);
+                        }
+                        warn("stradapp: " . $filename . ":" . ($i + 1) . ": warning: " . $msg);
                     }
                 } else {
-                    die("stradapp: " . $filename . ":" . ($i + 1) . ": unknown directive: " . $directive);
+                    # Ordinary Strada comment (e.g. '# ...', '### banner', '#comment') — skip
                 }
             }
         } else {
@@ -318,7 +469,7 @@ func main(int $argc, array @argv) int {
         } elsif (starts_with($arg, "-D")) {
             my str $def = "";
             if (length($arg) > 2) {
-                $def = substr($arg, 2, -1);
+                $def = substr($arg, 2);
             } else {
                 $i++;
                 if ($i >= $argc) {
@@ -329,7 +480,7 @@ func main(int $argc, array @argv) int {
             my int $eq_idx = index($def, "=");
             if ($eq_idx > 0) {
                 my str $name = substr($def, 0, $eq_idx);
-                my str $value = substr($def, $eq_idx + 1, -1);
+                my str $value = substr($def, $eq_idx + 1);
                 $g_defines{$name} = $value;
             } else {
                 $g_defines{$def} = "1";
@@ -337,7 +488,7 @@ func main(int $argc, array @argv) int {
         } elsif (starts_with($arg, "-I")) {
             my str $path = "";
             if (length($arg) > 2) {
-                $path = substr($arg, 2, -1);
+                $path = substr($arg, 2);
             } else {
                 $i++;
                 if ($i >= $argc) {

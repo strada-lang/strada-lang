@@ -470,12 +470,31 @@ func generate_file_page(str $outdir, str $filename, scalar $lines, int $total_ti
     say("  file-" . $safe . ".html");
 }
 
+func mkdir_p(str $path) void {
+    if (length($path) == 0 || core::dir_exists($path) == 1) { return; }
+    my array @parts = split("/", $path);
+    my str $cur = "";
+    if (substr($path, 0, 1) eq "/") { $cur = "/"; }
+    my int $i = 0;
+    while ($i < size(@parts)) {
+        my str $p = $parts[$i];
+        if (length($p) > 0) {
+            if ($cur eq "" || $cur eq "/") { $cur = $cur . $p; }
+            else { $cur = $cur . "/" . $p; }
+            if (core::dir_exists($cur) == 0) {
+                core::mkdir($cur, 493);
+            }
+        }
+        $i = $i + 1;
+    }
+}
+
 func main() int {
     my str $input_file = "strada-prof.out";
     my str $outdir = "profhtml";
 
     my int $argc = size(@ARGV);
-    my int $i = 1;
+    my int $i = 0;
     my int $positional = 0;
     while ($i < $argc) {
         my str $arg = $ARGV[$i];
@@ -571,7 +590,7 @@ func main() int {
     sort_funcs_by_excl(\@funcs);
 
     # Create output directory
-    core::system("mkdir -p " . $outdir);
+    mkdir_p($outdir);
 
     say("Generating HTML report in " . $outdir . "/");
 

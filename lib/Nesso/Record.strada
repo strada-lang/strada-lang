@@ -25,6 +25,8 @@
 #   $user->reload();
 #   my scalar $posts = $user->related("posts");
 
+use Nesso;
+
 package Nesso::Record;
 
 # Save this record to the database (INSERT or UPDATE)

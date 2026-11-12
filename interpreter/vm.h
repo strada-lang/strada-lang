@@ -4,6 +4,13 @@
 #ifndef STRADA_VM_H
 #define STRADA_VM_H
 
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 700
+#endif
+
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -200,6 +207,11 @@ typedef enum {
 
     OP_SLICE_IDXS,      /* pop idx_array, src_array, res_array — append src[i] for each i */
     OP_REGEX_FIND,      /* u16 pat_idx — pop start_pos, subject; push match_start, match_end (-1,-1 if none); sets captures */
+    OP_SUPER_CALL,      /* u16 pkg_str_idx, u16 method_str_idx, u8 argc — SUPER::method($self, ...) */
+    OP_ARRAY_EXTEND,    /* pop src, pop dst_array — append elements of src (if array) or src itself */
+    OP_CALL_SPREAD,     /* u16 func_index — pop args_array, unpack and call function */
+    OP_METHOD_CALL_SPREAD,  /* u16 method_str_idx — pop args_array, unpack and dispatch method */
+    OP_CALL_CLOSURE_SPREAD, /* pop closure, pop args_array, unpack and call closure */
 
     OP_OPCODE_COUNT     /* must be last */
 } StradaOpcode;
@@ -314,6 +326,7 @@ enum {
     BUILTIN_CORE_PIPE,
     BUILTIN_CORE_DUP2,
     BUILTIN_CORE_ORD_BYTE,
+    BUILTIN_CORE_BYTE,
     BUILTIN_CORE_GET_BYTE,
     BUILTIN_CORE_BYTE_LENGTH,
     BUILTIN_CORE_CALLER,
@@ -659,6 +672,7 @@ typedef struct {
     int local_count;
     int fixed_param_count;
     int has_variadic;
+    int return_type;
     int int_only;
     char *name;
     /* Closure info */
@@ -869,5 +883,6 @@ int vm_class_isa(VMProgram *p, const char *cls, const char *target, int depth);
  * Safe to call from inside opcode handlers (sync stack_top/frame->ip first;
  * refresh cached stack/frame pointers after — both arrays may realloc). */
 VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc);
+struct StradaValue *vm_value_to_sv(VMValue v);
 
 #endif

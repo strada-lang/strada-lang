@@ -6,6 +6,69 @@
 
 package Pacco::Build;
 
+# Extract normalized exit code (0..255) from core::system wait status
+func wait_exit_code(int $rc) int {
+    if ($rc < 0) { return 1; }
+    if (($rc & 127) != 0) { return 128 + ($rc & 127); }
+    return ($rc >> 8) & 255;
+}
+
+# Collect deduplicated -L library search paths for a project and its installed deps
+func collect_lib_paths(str $project_dir, scalar $manifest) scalar {
+    my array @paths = ();
+    my hash %seen = ();
+
+    if (core::dir_exists($project_dir . "/src") == 1) {
+        my str $p = $project_dir . "/src";
+        $seen{$p} = 1;
+        push(@paths, $p);
+    }
+    if (core::dir_exists($project_dir . "/lib") == 1) {
+        my str $p = $project_dir . "/lib";
+        $seen{$p} = 1;
+        push(@paths, $p);
+    }
+
+    my str $deps_dir = $project_dir . "/.strada/deps";
+    if (defined($manifest)) {
+        my scalar $resolved = Pacco::Resolver::resolve($manifest, $deps_dir);
+        my scalar $resolved_paths = Pacco::Resolver::get_lib_paths($resolved);
+        foreach my str $rp (@{$resolved_paths}) {
+            if (!exists($seen{$rp})) {
+                $seen{$rp} = 1;
+                push(@paths, $rp);
+            }
+        }
+    }
+
+    # Also include any installed dep directories under .strada/deps/
+    if (core::dir_exists($deps_dir) == 1) {
+        my array @entries = core::readdir($deps_dir);
+        foreach my str $ent (@entries) {
+            if (length($ent) == 0 || substr($ent, 0, 1) eq ".") {
+                next;
+            }
+            my str $dpath = $deps_dir . "/" . $ent;
+            if (core::dir_exists($dpath) == 1) {
+                if (core::dir_exists($dpath . "/src") == 1 && !exists($seen{$dpath . "/src"})) {
+                    $seen{$dpath . "/src"} = 1;
+                    push(@paths, $dpath . "/src");
+                }
+                if (core::dir_exists($dpath . "/lib") == 1 && !exists($seen{$dpath . "/lib"})) {
+                    $seen{$dpath . "/lib"} = 1;
+                    push(@paths, $dpath . "/lib");
+                }
+                if (!exists($seen{$dpath})) {
+                    $seen{$dpath} = 1;
+                    push(@paths, $dpath);
+                }
+            }
+        }
+    }
+
+    return \@paths;
+}
+
 # Build a project
 func build(str $project_dir, scalar $options) scalar {
     my hash %result = ();
@@ -34,11 +97,15 @@ func build(str $project_dir, scalar $options) scalar {
     # Validate manifest
     my scalar $errors = Pacco::Manifest::validate($manifest);
     if (scalar(@{$errors}) > 0) {
-        $result{"error"} = "Invalid manifest: " . @{$errors}[0];
+        $result{"error"} = "Invalid manifest: " . $errors->[0];
         return \%result;
     }
 
     my str $name = Pacco::Manifest::get_name($manifest);
+    if (Pacco::Fetch::is_safe_name($name) == 0) {
+        $result{"error"} = "Invalid package name: " . $name;
+        return \%result;
+    }
     my str $ver = Pacco::Manifest::get_version($manifest);
 
     # Get build configuration
@@ -65,12 +132,17 @@ func build(str $project_dir, scalar $options) scalar {
         return \%result;
     }
 
-    # Resolve dependencies
-    my str $deps_dir = $project_dir . "/.strada/deps";
-    my scalar $resolved = Pacco::Resolver::resolve($manifest, $deps_dir);
+    # Ensure .strada/build directory exists
+    if (core::dir_exists($project_dir . "/.strada") == 0) {
+        core::mkdir($project_dir . "/.strada", 493);
+    }
+    my str $build_dir = $project_dir . "/.strada/build";
+    if (core::dir_exists($build_dir) == 0) {
+        core::mkdir($build_dir, 493);
+    }
 
     # Get library paths
-    my scalar $lib_paths = Pacco::Resolver::get_lib_paths($resolved);
+    my scalar $lib_paths = Pacco::Build::collect_lib_paths($project_dir, $manifest);
 
     # Build compiler command
     my str $strada_bin = Pacco::Build::find_strada_compiler();
@@ -79,11 +151,11 @@ func build(str $project_dir, scalar $options) scalar {
         return \%result;
     }
 
-    my str $cmd = $strada_bin;
+    my str $cmd = Pacco::Fetch::shell_quote($strada_bin);
 
     # Add library paths
     foreach my str $path (@{$lib_paths}) {
-        $cmd = $cmd . " -L " . $path;
+        $cmd = $cmd . " -L " . Pacco::Fetch::shell_quote($path);
     }
 
     # Add extra cflags
@@ -92,31 +164,33 @@ func build(str $project_dir, scalar $options) scalar {
     }
 
     foreach my str $flag (@extra_cflags) {
-        $cmd = $cmd . " " . $flag;
+        $cmd = $cmd . " " . Pacco::Fetch::shell_quote($flag);
     }
 
-    # Build type
+    # Build type and default output path
+    my str $output_name = $build_dir . "/" . $name;
     if ($build_type eq "shared") {
         $cmd = $cmd . " --shared";
+        $output_name = $build_dir . "/" . $name . ".so";
     } elsif ($build_type eq "static") {
         $cmd = $cmd . " --object";
+        $output_name = $build_dir . "/" . $name . ".o";
     } elsif ($build_type eq "archive") {
         $cmd = $cmd . " --static-lib";
+        $output_name = $build_dir . "/" . $name . ".a";
     }
 
-    # Output name
-    my str $output_name = $name;
     if ($target ne "") {
         $output_name = $target;
     }
-    $cmd = $cmd . " -o " . $output_name;
+    $cmd = $cmd . " -o " . Pacco::Fetch::shell_quote($output_name);
 
     # Source file
-    $cmd = $cmd . " " . $main_file;
+    $cmd = $cmd . " " . Pacco::Fetch::shell_quote($main_file);
 
     # Link libraries
     foreach my str $lib (@link_libs) {
-        $cmd = $cmd . " -l" . $lib;
+        $cmd = $cmd . " -l" . Pacco::Fetch::shell_quote($lib);
     }
 
     # Execute build
@@ -124,13 +198,13 @@ func build(str $project_dir, scalar $options) scalar {
         say("Building: " . $cmd);
     }
 
-    my int $build_result = core::system($cmd . " 2>&1");
+    my int $build_rc = Pacco::Build::wait_exit_code(core::system($cmd . " 2>&1"));
 
-    if ($build_result == 0) {
+    if ($build_rc == 0) {
         $result{"success"} = 1;
         $result{"output"} = $output_name;
     } else {
-        $result{"error"} = "Build failed with exit code " . $build_result;
+        $result{"error"} = "Build failed with exit code " . $build_rc;
     }
 
     return \%result;
@@ -168,6 +242,12 @@ func find_main_file(str $project_dir, scalar $manifest) str {
 
 # Find the strada compiler
 func find_strada_compiler() str {
+    # Honor PACCO_STRADA environment variable first
+    my str $env_strada = "" . core::getenv("PACCO_STRADA");
+    if (length($env_strada) > 0) {
+        return $env_strada;
+    }
+
     # Check common locations
     my array @candidates = (
         "./strada",
@@ -184,7 +264,7 @@ func find_strada_compiler() str {
     }
 
     # Try PATH
-    my int $which_result = core::system("which strada >/dev/null 2>&1");
+    my int $which_result = core::system("command -v strada >/dev/null 2>&1");
     if ($which_result == 0) {
         return "strada";
     }
@@ -203,7 +283,10 @@ func run(str $project_dir, scalar $args) int {
     }
 
     my str $name = Pacco::Manifest::get_name($manifest);
-    my str $exe = $project_dir . "/" . $name;
+    my str $exe = $project_dir . "/.strada/build/" . $name;
+    if (core::file_exists($exe) == 0 && core::file_exists($project_dir . "/" . $name) == 1) {
+        $exe = $project_dir . "/" . $name;
+    }
 
     if (core::file_exists($exe) == 0) {
         warn("Executable not found: " . $exe);
@@ -211,14 +294,14 @@ func run(str $project_dir, scalar $args) int {
         return 1;
     }
 
-    my str $cmd = $exe;
+    my str $cmd = Pacco::Fetch::shell_quote($exe);
     if (defined($args) && scalar(@{$args}) > 0) {
         foreach my str $arg (@{$args}) {
-            $cmd = $cmd . " " . $arg;
+            $cmd = $cmd . " " . Pacco::Fetch::shell_quote($arg);
         }
     }
 
-    return core::system($cmd);
+    return Pacco::Build::wait_exit_code(core::system($cmd));
 }
 
 # Clean build artifacts
@@ -226,27 +309,34 @@ func clean(str $project_dir) int {
     my str $manifest_path = $project_dir . "/Strada.toml";
     my scalar $manifest = Pacco::Manifest::parse($manifest_path);
 
+    if (core::dir_exists($project_dir . "/.strada/build") == 1) {
+        core::system("rm -rf -- " . Pacco::Fetch::shell_quote($project_dir . "/.strada/build") . " 2>/dev/null");
+    }
+
     if (!defined($manifest)) {
         return 0;
     }
 
     my str $name = Pacco::Manifest::get_name($manifest);
+    if (Pacco::Fetch::is_safe_name($name) == 1) {
+        # Remove executable
+        if (core::file_exists($project_dir . "/" . $name) == 1) {
+            core::unlink($project_dir . "/" . $name);
+        }
 
-    # Remove executable
-    if (core::file_exists($project_dir . "/" . $name) == 1) {
-        core::unlink($project_dir . "/" . $name);
+        # Remove .c file if exists
+        if (core::file_exists($project_dir . "/" . $name . ".c") == 1) {
+            core::unlink($project_dir . "/" . $name . ".c");
+        }
     }
 
-    # Remove .c file if exists
-    if (core::file_exists($project_dir . "/" . $name . ".c") == 1) {
-        core::unlink($project_dir . "/" . $name . ".c");
+    # Remove .o and .so files safely
+    my array @entries = core::readdir($project_dir);
+    foreach my str $ent (@entries) {
+        if ($ent =~ /\.(o|so)$/) {
+            core::unlink($project_dir . "/" . $ent);
+        }
     }
-
-    # Remove .o files
-    core::system("rm -f " . $project_dir . "/*.o 2>/dev/null");
-
-    # Remove .so files
-    core::system("rm -f " . $project_dir . "/*.so 2>/dev/null");
 
     return 1;
 }
@@ -273,8 +363,8 @@ func test(str $project_dir, scalar $options) scalar {
         return \%result;
     }
 
-    # Find and run test files
-    my str $cmd = "find " . $test_dir . " -name '*.sh' -o -name 'test_*.strada' 2>/dev/null";
+    # Find test files (*.strada and *.sh)
+    my str $cmd = "find " . Pacco::Fetch::shell_quote($test_dir) . " -type f \\( -name '*.strada' -o -name '*.sh' \\) 2>/dev/null | sort";
     my scalar $fh = core::popen($cmd, "r");
 
     if (!defined($fh)) {
@@ -295,19 +385,49 @@ func test(str $project_dir, scalar $options) scalar {
     }
     core::pclose($fh);
 
-    # Run each test
-    foreach my str $test_file (@test_files) {
-        my int $test_result = 0;
+    my str $strada_bin = Pacco::Build::find_strada_compiler();
+    my scalar $manifest = Pacco::Manifest::parse($project_dir . "/Strada.toml");
+    my scalar $lib_paths = Pacco::Build::collect_lib_paths($project_dir, $manifest);
+    my str $lib_flags = "";
+    foreach my str $lp (@{$lib_paths}) {
+        $lib_flags = $lib_flags . " -L " . Pacco::Fetch::shell_quote($lp);
+    }
 
-        if (substr($test_file, length($test_file) - 3, 3) eq ".sh") {
-            $test_result = core::system("bash " . $test_file);
+    if (core::dir_exists($project_dir . "/.strada") == 0) {
+        core::mkdir($project_dir . "/.strada", 493);
+    }
+    my str $build_dir = $project_dir . "/.strada/build";
+    if (core::dir_exists($build_dir) == 0) {
+        core::mkdir($build_dir, 493);
+    }
+
+    # Run each test
+    my int $test_idx = 0;
+    foreach my str $test_file (@test_files) {
+        my int $test_rc = 0;
+        $test_idx = $test_idx + 1;
+
+        if (length($test_file) > 3 && substr($test_file, length($test_file) - 3, 3) eq ".sh") {
+            $test_rc = Pacco::Build::wait_exit_code(core::system("bash " . Pacco::Fetch::shell_quote($test_file)));
         } else {
-            # Compile and run strada test
-            my str $strada_bin = Pacco::Build::find_strada_compiler();
-            $test_result = core::system($strada_bin . " -r " . $test_file);
+            if ($strada_bin eq "") {
+                warn("Could not find strada compiler");
+                $test_rc = 1;
+            } else {
+                my str $test_bin = $build_dir . "/test_" . $test_idx;
+                my str $compile_cmd = Pacco::Fetch::shell_quote($strada_bin) . $lib_flags
+                    . " -o " . Pacco::Fetch::shell_quote($test_bin)
+                    . " " . Pacco::Fetch::shell_quote($test_file) . " 2>&1";
+                my int $compile_rc = Pacco::Build::wait_exit_code(core::system($compile_cmd));
+                if ($compile_rc != 0) {
+                    $test_rc = $compile_rc;
+                } else {
+                    $test_rc = Pacco::Build::wait_exit_code(core::system(Pacco::Fetch::shell_quote($test_bin)));
+                }
+            }
         }
 
-        if ($test_result == 0) {
+        if ($test_rc == 0) {
             $result{"passed"} = $result{"passed"} + 1;
         } else {
             $result{"failed"} = $result{"failed"} + 1;

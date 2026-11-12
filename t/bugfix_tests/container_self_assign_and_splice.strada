@@ -1,0 +1,59 @@
+# EXPECT: 10,20,30 2:v1,v2 1,1,2,3,2,3 abc:123 x,y 1:0
+# Container self-assignment (`@a = @a`, `%h = %h`), self-splice
+# (`splice(@a, 1, 0, @a)`), mutating `captures()` with `shift` without
+# corrupting `$1`, spread `...@arr` after `shift(@arr)`, and 0-arg call on
+# variadic OOP method `vmeth($self, $first, ...@rest)`.
+
+package VarObj;
+func new() scalar {
+    my hash %s = ();
+    return bless(\%s, "VarObj");
+}
+func vmeth(scalar $self, scalar $first, scalar ...@rest) str {
+    my int $f_undef = !defined($first) ? 1 : 0;
+    return $f_undef . ":" . size(@rest);
+}
+
+package main;
+
+func join_spread(scalar ...@items) str {
+    return join(",", @items);
+}
+
+func main() int {
+    # 1. @a = @a
+    my array @a = (10, 20, 30);
+    @a = @a;
+    my str $as = join(",", @a);
+
+    # 2. %h = %h
+    my hash %h = ("k1" => "v1", "k2" => "v2");
+    %h = %h;
+    my str $hs = size(keys(%h)) . ":" . $h{"k1"} . "," . $h{"k2"};
+
+    # 3. splice(@s, 1, 0, @s)
+    my array @s = (1, 2, 3);
+    splice(@s, 1, 0, @s);
+    my str $ss = join(",", @s);
+
+    # 4. captures() mutated with shift must not corrupt $1 / $2
+    my str $txt = "abc-123";
+    my str $cap_res = "";
+    if ($txt =~ /(\w+)-(\d+)/) {
+        my array @caps = captures();
+        shift(@caps);
+        $cap_res = $1 . ":" . $2;
+    }
+
+    # 5. ...@arr after shift(@arr) (non-zero array head offset)
+    my array @sh = ("drop", "x", "y");
+    shift(@sh);
+    my str $sp = join_spread(... @sh);
+
+    # 6. 0-arg call on variadic OOP method
+    my scalar $vo = VarObj::new();
+    my str $vm = $vo->vmeth();
+
+    say($as . " " . $hs . " " . $ss . " " . $cap_res . " " . $sp . " " . $vm);
+    return 0;
+}

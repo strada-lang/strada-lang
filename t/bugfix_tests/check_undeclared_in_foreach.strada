@@ -1,0 +1,10 @@
+# COMPILE-ERROR: undefined variable '$undecl'
+# Semantic `--check` previously skipped `foreach` statement bodies and failed
+# to report undeclared variables used inside a `foreach` loop.
+func main() int {
+    my array @items = (1, 2, 3);
+    foreach my int $x (@items) {
+        say($undecl);
+    }
+    return 0;
+}

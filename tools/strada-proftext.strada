@@ -186,7 +186,7 @@ func main() int {
     my int $top_n = 50;
 
     my int $argc = size(@ARGV);
-    my int $i = 1;
+    my int $i = 0;
     while ($i < $argc) {
         my str $arg = $ARGV[$i];
         if ($arg eq "-h" || $arg eq "--help") {

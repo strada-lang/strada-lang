@@ -158,12 +158,14 @@ func isnt(scalar $got, scalar $unexpected, str $name) int {
 }
 
 func is_num(scalar $got, scalar $expected, str $name) int {
-    if (defined($got) && ($got + 0) == ($expected + 0)) {
-        return pass($name);
+    if (defined($got) == defined($expected)) {
+        if (!defined($got) || ($got + 0) == ($expected + 0)) {
+            return pass($name);
+        }
     }
     fail($name);
     diag("  got:      " . (defined($got) ? "" . $got : "undef"));
-    diag("  expected: " . $expected);
+    diag("  expected: " . (defined($expected) ? "" . $expected : "undef"));
     return 0;
 }
 

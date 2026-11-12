@@ -1,0 +1,72 @@
+# EXPECT: 5 5 1 é cafX 1 0 aXbXc 4 5 a,b 3:é,a,b 12 3 xy:2 2
+# UTF-8 & NUL-safe runtime string operations:
+# - core::fwrite UTF-8 byte count
+# - 4-arg substr("café", 3, 1, "X") codepoint slicing & utf8::valid
+# - tr/☃/X/
+# - clone("café") & s/// preserving UTF-8 character length
+# - split(/\x{2603}/, "a☃b") and zero-width split(/(?=.)/, "éab")
+# - NUL-safe ("a\x00b") x 4 and s/z+/w/ on "a\x00b"
+# - core::deref_set shrinking string
+# - core::pack("aaa/", 1) trailing slash safety
+
+func main() int {
+    # 1. core::fwrite UTF-8 byte count
+    my str $path = "/tmp/opencode/utf8_fwrite_" . core::getpid() . ".bin";
+    my scalar $fh = core::open($path, "w");
+    my int $wrote = core::fwrite($fh, "café");
+    core::close($fh);
+    my str $raw = core::slurp($path);
+    core::unlink($path);
+    my int $raw_blen = core::byte_length($raw);
+    my int $raw_valid = utf8::valid($raw);
+
+    # 2. 4-arg substr codepoint slicing & utf8::valid
+    my str $s = "café";
+    my str $old = substr($s, 3, 1, "X");
+    my int $s_valid = utf8::valid($s);
+    my str $bad_utf8 = core::byte(255) . core::byte(128);
+    my int $bad_valid = utf8::valid($bad_utf8);
+
+    # 3. tr/☃/X/
+    my str $snow = "a☃b☃c";
+    $snow =~ tr/☃/X/;
+
+    # 4. clone("café") & s/// preserving UTF-8 length
+    my str $cl = clone("café");
+    my int $cl_len = length($cl);
+    my str $sc = "café!";
+    $sc =~ s/!/?/;
+    my int $sc_len = length($sc);
+
+    # 5. split(/\x{2603}/, "a☃b") and zero-width split(/(?=.)/, "éab")
+    my array @sp1 = split(/\x{2603}/, "a☃b");
+    my str $sp1_s = join(",", @sp1);
+    my array @sp2 = split(/(?=.)/, "éab");
+    my str $sp2_s = size(@sp2) . ":" . join(",", @sp2);
+
+    # 6. NUL-safe ("a\x00b") x 4 and s/z+/w/ on "a\x00b"
+    my str $nul_base = "a" . core::byte(0) . "b";
+    my str $nul_rep = $nul_base x 4;
+    my int $nul_rep_len = core::byte_length($nul_rep);
+    my str $nul_sub = $nul_base;
+    $nul_sub =~ s/z+/w/;
+    my int $nul_sub_len = core::byte_length($nul_sub);
+
+    # 7. core::deref_set shrinking string
+    my str $shrink = "abcdefghij";
+    my scalar $rsh = \$shrink;
+    core::deref_set($rsh, "xy");
+    my str $sh_res = $shrink . ":" . length($shrink);
+
+    # 8. core::pack("aaa/", 1) trailing slash guard
+    my str $pk = core::pack("aaa/", 1);
+    my int $pk_len = core::byte_length($pk);
+
+    say($wrote . " " . $raw_blen . " " . $raw_valid . " " .
+        $old . " " . $s . " " . $s_valid . " " . $bad_valid . " " .
+        $snow . " " . $cl_len . " " . $sc_len . " " .
+        $sp1_s . " " . $sp2_s . " " .
+        $nul_rep_len . " " . $nul_sub_len . " " .
+        $sh_res . " " . $pk_len);
+    return 0;
+}

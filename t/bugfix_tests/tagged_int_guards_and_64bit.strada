@@ -1,0 +1,33 @@
+# EXPECT: 0 0 1 1 6000000000000000000
+# Tagged-integer guards in C runtime (sb::length(0), core::slurp_fh(0),
+# async::send(0, "x")), sparse destructuring `my ($x, $y) = @arr; $x->{"k"}`,
+# and full 64-bit integer literals/addition.
+
+func main() int {
+    # 1. sb::length(0) must not dereference tagged int 0
+    my int $sbl = sb::length(0);
+
+    # 2. core::slurp_fh(0) must not dereference tagged int 0
+    my str $sfh = core::slurp_fh(0);
+    my int $sfh_len = length($sfh);
+
+    # 3. async::send(0, "x") must throw cleanly rather than segfaulting
+    my int $caught = 0;
+    try {
+        async::send(0, "x");
+    } catch ($e) {
+        $caught = 1;
+    }
+
+    # 4. Sparse destructuring: missing elements must be valid undef SVs
+    my array @arr = ();
+    my ($x, $y) = @arr;
+    my scalar $v = $x->{"k"};
+    my int $undef_ok = (!defined($x) && !defined($y) && !defined($v)) ? 1 : 0;
+
+    # 5. 64-bit integer arithmetic
+    my int $big = 3000000000000000000 + 3000000000000000000;
+
+    say($sbl . " " . $sfh_len . " " . $caught . " " . $undef_ok . " " . $big);
+    return 0;
+}

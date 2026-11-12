@@ -5,7 +5,7 @@ func greet(scalar $self) str {
     return "Hello, " . $self->name();
 }
 
-around "greet" func(scalar $self, scalar $orig) str {
+around "greet" func(scalar $orig, scalar $self) str {
     my str $result = $orig->($self);
     return "[" . $result . "]";
 }

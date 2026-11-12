@@ -1,0 +1,29 @@
+use ParityMod;
+
+func main() int {
+    my int $fail = 0;
+
+    if (PMBase::get_const() != 42) { say("FAIL: PM_CONST got " . PMBase::get_const()); $fail++; }
+    if (PMBase::get_our() != 10) { say("FAIL: initial PM_OUR got " . PMBase::get_our()); $fail++; }
+    PMBase::set_our(20);
+    if (PMBase::get_our() != 20) { say("FAIL: updated PM_OUR got " . PMBase::get_our()); $fail++; }
+
+    my scalar $c1 = PMChild::new("base_v", 5, "extra", 3);
+    my scalar $c2 = PMChild::new("base_v", 2, "extra", 4);
+    # compute = 5 + 42 + 20 + 3 = 70
+    if ($c1->compute() != 70) { say("FAIL: PMChild::compute got " . $c1->compute()); $fail++; }
+
+    my scalar $c3 = $c1 + $c2;
+    # base_v=7, extra=7 => compute = 7 + 42 + 20 + 7 = 76
+    if (("" . $c3) ne "PM(76)") { say("FAIL: overload got " . $c3); $fail++; }
+
+    my scalar $fut = PMBase::async_double(21);
+    my int $ares = await $fut;
+    if ($ares != 42) { say("FAIL: async_double got " . $ares); $fail++; }
+
+    if ($fail == 0) {
+        say("ALL_USE_PARITY_OK");
+        return 0;
+    }
+    return 1;
+}

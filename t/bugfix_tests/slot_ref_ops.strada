@@ -1,0 +1,51 @@
+# EXPECT: 1 1 1 42 42 1 0 0 4294967298
+# Slot-ref (\$x) fixes: truthiness, clone(\$x), dumper_str(\$x),
+# core::release(\$x) / core::release($r), and scope-exit break_self_cycle
+# on 64-bit tagged/boxed integers like 4294967298 ((1 << 32) + 2).
+
+func big_int_scope() int {
+    my scalar $x = 4294967298;
+    return $x;
+}
+
+func main() int {
+    # 1. Truthiness of \$x even when $x is 0 or undef
+    my int $zero = 0;
+    my scalar $rz = \$zero;
+    my int $t1 = 0;
+    if ($rz) { $t1 = 1; }
+
+    my scalar $u = undef;
+    my scalar $ru = \$u;
+    my int $t2 = 0;
+    if ($ru) { $t2 = 1; }
+
+    # 2. clone(\$x) and dumper_str(\$x)
+    my int $val = 42;
+    my scalar $rv = \$val;
+    my scalar $cloned = clone($rv);
+    my int $orig_v = $$rv;
+    my int $clone_v = $$cloned;
+    $$cloned = 99;
+    # Mutating cloned scalar ref must not overwrite $val
+    my int $indep = ($val == 42 && $$cloned == 99) ? 1 : 0;
+
+    my str $dumped = dumper_str($rv);
+    my int $dump_ok = (length($dumped) > 0) ? 1 : 0;
+
+    # 3. core::release(\$x) and core::release($r)
+    my scalar $s1 = "hello";
+    core::release(\$s1);
+    my int $rel1 = defined($s1) ? 1 : 0;
+
+    my scalar $s2 = { "a" => "b" };
+    my scalar $rs2 = \$s2;
+    core::release($rs2);
+    my int $rel2 = defined($s2) ? 1 : 0;
+
+    # 4. Scope-exit break_self_cycle with 4294967298
+    my int $big = big_int_scope();
+
+    say($t1 . " " . $t2 . " " . $indep . " " . $orig_v . " " . $clone_v . " " . $dump_ok . " " . $rel1 . " " . $rel2 . " " . $big);
+    return 0;
+}

@@ -38,6 +38,7 @@ func parser_new(scalar $tokens) scalar {
     $parser{"const_names"} = {};  # Track declared const names
     $parser{"structs"} = {};      # Track declared native struct types
     $parser{"errors"} = [];       # Recovered parse errors (see parse_function_guarded)
+    $parser{"in_guard"} = 0;      # 1 while inside parse_function_guarded
     return \%parser;
 }
 
@@ -54,7 +55,9 @@ func parser_record_error(scalar $parser, str $msg) void {
 # stradac); if unavailable, falls back to a direct call (fatal-on-error, the
 # pre-recovery behavior).
 func parse_function_guarded(scalar $parser) scalar {
+    $parser->{"in_guard"} = 1;
     my scalar $pair = strada_call_named_guarded("parse_function", $parser);
+    $parser->{"in_guard"} = 0;
     my int $status = $pair->[0];
     if ($status == 1) {
         return $pair->[1];
@@ -67,10 +70,9 @@ func parse_function_guarded(scalar $parser) scalar {
 }
 
 # After a recovered parse error: skip tokens until the next plausible
-# top-level item start. Brace depth is tracked RELATIVE to the error point
-# (the absolute depth is unknown), so the closing brace of the broken
-# function drives the count negative — top-level keywords are only honored
-# at relative depth <= 0.
+# top-level item start. Brace depth is clamped at 0 so unmatched closing
+# braces from nested blocks inside the broken function don't drive $depth
+# negative and cause inner braces of subsequent constructs to look top-level.
 func parser_resync_toplevel(scalar $parser) void {
     my int $depth = 0;
     while (!parser_check($parser, "EOF")) {
@@ -79,14 +81,21 @@ func parser_resync_toplevel(scalar $parser) void {
         if ($ttype eq "LBRACE") {
             $depth = $depth + 1;
         } elsif ($ttype eq "RBRACE") {
-            $depth = $depth - 1;
-        } elsif ($depth <= 0) {
+            if ($depth > 0) {
+                $depth = $depth - 1;
+            }
+        } elsif ($depth == 0) {
             if ($ttype eq "FUNC" || $ttype eq "PACKAGE" || $ttype eq "PRIVATE" ||
                 $ttype eq "ASYNC" || $ttype eq "USE" || $ttype eq "CONST" ||
-                $ttype eq "ENUM" || $ttype eq "EXTERN" || $ttype eq "OUR") {
+                $ttype eq "ENUM" || $ttype eq "EXTERN" || $ttype eq "OUR" ||
+                $ttype eq "HAS" || $ttype eq "EXTENDS" || $ttype eq "WITH" ||
+                $ttype eq "BEFORE" || $ttype eq "AFTER" || $ttype eq "AROUND" ||
+                $ttype eq "INHERIT" || $ttype eq "BEGIN_BLOCK" || $ttype eq "END_BLOCK" ||
+                $ttype eq "IMPORT_LIB" || $ttype eq "IMPORT_OBJECT" || $ttype eq "IMPORT_ARCHIVE" ||
+                $ttype eq "LINK_LIB" || $ttype eq "VERSION") {
                 return;
             }
-            if ($ttype eq "IDENT" && $tok->{"value"} eq "fn") {
+            if ($ttype eq "IDENT" && ($tok->{"value"} eq "fn" || $tok->{"value"} eq "struct")) {
                 return;
             }
         }
@@ -171,7 +180,24 @@ func parser_error(scalar $parser, str $msg) void {
     if ($col > 0) {
         $loc = $loc . ":" . $col;
     }
-    die($loc . ": " . $msg . diag_snippet_from_file($filename, $line, $col));
+    my str $full_msg = $loc . ": " . $msg . diag_snippet_from_file($filename, $line, $col);
+    # If we are NOT inside parse_function_guarded and have previously collected
+    # recovered errors, print them all before exiting so none are lost.
+    if ($parser->{"in_guard"} != 1) {
+        my scalar $prev_errs = $parser->{"errors"};
+        my int $prev_count = size(@{$prev_errs});
+        if ($prev_count > 0) {
+            my int $pei = 0;
+            while ($pei < $prev_count) {
+                warn($prev_errs->[$pei]);
+                $pei = $pei + 1;
+            }
+            warn($full_msg);
+            my int $total_errs = $prev_count + 1;
+            die("compilation failed: " . $total_errs . " parse errors");
+        }
+    }
+    die($full_msg);
 }
 
 func parser_current(scalar $parser) scalar {
@@ -334,11 +360,11 @@ func parse_var_name(scalar $parser) str {
     }
     if ($type_str eq "TYPE_FLOAT32") {
         parser_advance($parser);
-        return "float32";
+        return $tok->{"value"};
     }
     if ($type_str eq "TYPE_FLOAT64") {
         parser_advance($parser);
-        return "float64";
+        return $tok->{"value"};
     }
     if ($type_str eq "TYPE_INT8") {
         parser_advance($parser);
@@ -350,7 +376,7 @@ func parse_var_name(scalar $parser) str {
     }
     if ($type_str eq "TYPE_UINT8") {
         parser_advance($parser);
-        return "uint8";
+        return $tok->{"value"};
     }
     if ($type_str eq "TYPE_UINT16") {
         parser_advance($parser);
@@ -390,7 +416,7 @@ func parse_var_name(scalar $parser) str {
     # Loop control keywords
     if ($type_str eq "LAST") {
         parser_advance($parser);
-        return "last";
+        return $tok->{"value"};
     }
     if ($type_str eq "NEXT") {
         parser_advance($parser);
@@ -697,12 +723,19 @@ func parse_type(scalar $parser) int {
     if ($type_str eq "FUNC" || ($type_str eq "IDENT" && $tok->{"value"} eq "fn")) {
         parser_advance($parser);
         parser_expect($parser, "LPAREN");
-        # Skip parameter types
-        while (!parser_check($parser, "RPAREN")) {
+        # Skip parameter types (guard against EOF and non-advancing tokens)
+        while (!parser_check($parser, "RPAREN") && !parser_check($parser, "EOF")) {
+            my int $fp_pos = $parser->{"pos"};
             if (parser_check($parser, "COMMA")) {
                 parser_advance($parser);
             } else {
                 parse_type($parser);  # Parse and discard param type
+            }
+            if ($parser->{"pos"} == $fp_pos) {
+                my scalar $bad_fp = parser_current($parser);
+                parser_advance($parser);
+                parser_error($parser, "unexpected " . friendly_token($bad_fp->{"type"}, $bad_fp->{"value"}) . " in function pointer parameter list");
+                last;
             }
         }
         parser_expect($parser, "RPAREN");
@@ -821,6 +854,12 @@ func parse_anon_func(scalar $parser, int $line) scalar {
     } elsif (parser_check($parser, "TYPE_BOOL")) {
         parser_advance($parser);
         $anon->{"return_type"} = TYPE_BOOL();
+    } elsif (parser_check($parser, "TYPE_ARRAY")) {
+        parser_advance($parser);
+        $anon->{"return_type"} = TYPE_ARRAY();
+    } elsif (parser_check($parser, "TYPE_HASH")) {
+        parser_advance($parser);
+        $anon->{"return_type"} = TYPE_HASH();
     } elsif (parser_check($parser, "TYPE_SCALAR")) {
         parser_advance($parser);
         $anon->{"return_type"} = TYPE_SCALAR();
@@ -882,7 +921,20 @@ func parse_anon_func(scalar $parser, int $line) scalar {
 func parse_primary(scalar $parser) scalar {
     my scalar $tok = parser_current($parser);
     my str $type = $tok->{"type"};
-    
+
+    # In primary position, `%` can only be a hash sigil (`%h`), never binary modulo.
+    if ($type eq "MOD") {
+        $tok->{"type"} = "PERCENT";
+        $type = "PERCENT";
+    }
+
+    # Auto-quote any bareword or keyword immediately before `=>` (Perl fat comma):
+    # `(default => 42)`, `foo(type => 1, int => 2)`, `$obj->m(next => 3)`.
+    if ($tok->{"is_word"} != 0 && parser_peek($parser)->{"type"} eq "FAT_ARROW") {
+        parser_advance($parser);
+        return ast_new_str_literal($tok->{"value"});
+    }
+
     # Integer literal
     if ($type eq "INT_LITERAL") {
         parser_advance($parser);
@@ -956,17 +1008,6 @@ func parse_primary(scalar $parser) scalar {
     if ($type eq "UNDEF") {
         parser_advance($parser);
         return ast_new_undef();
-    }
-
-    # Value-producing do { } block: the block's last expression statement
-    # is the value (undef if the block ends with a non-expression).
-    # Statement-level `do { } while (...)` is parsed by the statement
-    # parser and never reaches here.
-    if ($type eq "DO") {
-        parser_advance($parser);
-        my scalar $do_block = parse_block($parser);
-        my scalar $do_node = ast_new_do_expr($do_block);
-        return $do_node;
     }
 
     # Value-producing do { } block: the block's last expression statement
@@ -1921,9 +1962,14 @@ func parse_primary(scalar $parser) scalar {
         parser_expect($parser, "LBRACE");
         my scalar $block = ast_new_block();
 
-        # Parse block body - can be statements with ; or bare expression
+        # Parse block body - can be statements or bare expression
         while (!parser_check($parser, "RBRACE") && !parser_check($parser, "EOF")) {
-            # Parse expression first
+            if (parser_check($parser, "MY") || parser_check($parser, "LOCAL") ||
+                parser_check($parser, "IF") || parser_check($parser, "WHILE") ||
+                parser_check($parser, "FOR") || parser_check($parser, "FOREACH")) {
+                ast_add_statement($block, parse_statement($parser));
+                next;
+            }
             my scalar $expr = parse_expression($parser);
             # Check if this is a full statement (with ;) or bare expression
             if (parser_check($parser, "SEMI")) {
@@ -1997,8 +2043,14 @@ func parse_primary(scalar $parser) scalar {
         parser_expect($parser, "LBRACE");
         my scalar $block = ast_new_block();
 
-        # Parse block body - can be statements with ; or bare expression
+        # Parse block body - can be statements or bare expression
         while (!parser_check($parser, "RBRACE") && !parser_check($parser, "EOF")) {
+            if (parser_check($parser, "MY") || parser_check($parser, "LOCAL") ||
+                parser_check($parser, "IF") || parser_check($parser, "WHILE") ||
+                parser_check($parser, "FOR") || parser_check($parser, "FOREACH")) {
+                ast_add_statement($block, parse_statement($parser));
+                next;
+            }
             my scalar $expr = parse_expression($parser);
             if (parser_check($parser, "SEMI")) {
                 parser_advance($parser);
@@ -2277,10 +2329,47 @@ func parse_postfix(scalar $parser, scalar $left) scalar {
     }
 }
 
-# Unary expressions
+# Atomic / prefix-inc expressions (tighter than **, so ++$x ** 2 is (++$x) ** 2,
+# while unary -/+/!/~ sits outside parse_power so -2 ** 2 is -(2 ** 2) = -4!)
+func parse_atom(scalar $parser) scalar {
+    my scalar $tok = parser_current($parser);
+
+    if ($tok->{"type"} eq "PLUSPLUS") {
+        parser_advance($parser);
+        my scalar $operand = parse_atom($parser);
+        return ast_new_increment("++", $operand, 1);
+    }
+
+    if ($tok->{"type"} eq "MINUSMINUS") {
+        parser_advance($parser);
+        my scalar $operand = parse_atom($parser);
+        return ast_new_increment("--", $operand, 1);
+    }
+
+    my scalar $primary = parse_primary($parser);
+    return parse_postfix($parser, $primary);
+}
+
+# Power: ** (right-associative, binds tighter than unary -/+/!/~ on LHS,
+# while RHS allows unary operators so `2 ** -3` and `2 ** 3 ** 2` both work!)
+func parse_power(scalar $parser) scalar {
+    my scalar $left = parse_atom($parser);
+
+    my scalar $tok = parser_current($parser);
+    if ($tok->{"type"} eq "POWER") {
+        my str $op = $tok->{"value"};
+        parser_advance($parser);
+        my scalar $right = parse_unary($parser);
+        return ast_new_binary_op($op, $left, $right);
+    }
+
+    return $left;
+}
+
+# Unary expressions: - + ! ~ await (wraps parse_power so -2 ** 2 == -4)
 func parse_unary(scalar $parser) scalar {
     my scalar $tok = parser_current($parser);
-    
+
     if ($tok->{"type"} eq "MINUS") {
         # Check for file test operators: -e, -f, -d
         my scalar $ft_peek = parser_peek($parser);
@@ -2311,7 +2400,12 @@ func parse_unary(scalar $parser) scalar {
         my scalar $operand = parse_unary($parser);
         return ast_new_unary_op("-", $operand);
     }
-    
+
+    if ($tok->{"type"} eq "PLUS") {
+        parser_advance($parser);
+        return parse_unary($parser);
+    }
+
     if ($tok->{"type"} eq "NOT") {
         parser_advance($parser);
         my scalar $operand = parse_unary($parser);
@@ -2324,19 +2418,6 @@ func parse_unary(scalar $parser) scalar {
         return ast_new_unary_op("~", $operand);
     }
 
-    # Prefix increment/decrement
-    if ($tok->{"type"} eq "PLUSPLUS") {
-        parser_advance($parser);
-        my scalar $operand = parse_unary($parser);
-        return ast_new_increment("++", $operand, 1);
-    }
-
-    if ($tok->{"type"} eq "MINUSMINUS") {
-        parser_advance($parser);
-        my scalar $operand = parse_unary($parser);
-        return ast_new_increment("--", $operand, 1);
-    }
-
     # await expression
     if ($tok->{"type"} eq "AWAIT") {
         my int $line = parser_current_line($parser);
@@ -2347,29 +2428,67 @@ func parse_unary(scalar $parser) scalar {
         return $await;
     }
 
-    my scalar $primary = parse_primary($parser);
-    return parse_postfix($parser, $primary);
+    return parse_power($parser);
 }
 
-# Power: ** (right-associative, higher precedence than multiplicative)
-func parse_power(scalar $parser) scalar {
+# Regex match: =~ !~ (Perl precedence: below unary, above multiplicative * / % x)
+func parse_regex_match(scalar $parser) scalar {
     my scalar $left = parse_unary($parser);
 
     my scalar $tok = parser_current($parser);
-    if ($tok->{"type"} eq "POWER") {
+    my str $type = $tok->{"type"};
+
+    if ($type eq "MATCH_OP" || $type eq "NOT_MATCH_OP") {
         my str $op = $tok->{"value"};
         parser_advance($parser);
-        # Right-associative: recurse on right side
-        my scalar $right = parse_power($parser);
-        return ast_new_binary_op($op, $left, $right);
+
+        my scalar $right_tok = parser_current($parser);
+        my str $right_type = $right_tok->{"type"};
+
+        if ($right_type eq "REGEX_LITERAL") {
+            parser_advance($parser);
+            return ast_new_regex_match($op, $left, $right_tok->{"pattern"}, $right_tok->{"flags"});
+        } elsif ($right_type eq "SUBST_LITERAL") {
+            parser_advance($parser);
+            if ($op eq "!~") {
+                parser_error($parser, "cannot use !~ with substitution s///");
+            }
+            my scalar $subst_node = ast_new_regex_subst($left, $right_tok->{"pattern"}, $right_tok->{"replacement"}, $right_tok->{"flags"});
+            # If /e flag, parse the replacement string as a Strada expression
+            my str $subst_flags = $right_tok->{"flags"};
+            if (index($subst_flags, "e") >= 0) {
+                my str $repl_src = $right_tok->{"replacement"};
+                my scalar $repl_tokens = lex_tokenize($repl_src);
+                my scalar $repl_parser = parser_new($repl_tokens);
+                $repl_parser->{"const_names"} = $parser->{"const_names"};
+                $repl_parser->{"current_package"} = $parser->{"current_package"};
+                my scalar $eval_expr = parse_ternary($repl_parser);
+                if (!parser_check($repl_parser, "EOF")) {
+                    my scalar $bad_tok = parser_current($repl_parser);
+                    parser_error($parser, "unexpected " . friendly_token($bad_tok->{"type"}, $bad_tok->{"value"}) . " in s///e replacement expression");
+                }
+                $subst_node->{"eval_expr"} = $eval_expr;
+            }
+            return $subst_node;
+        } elsif ($right_type eq "TR_LITERAL") {
+            parser_advance($parser);
+            if ($op eq "!~") {
+                parser_error($parser, "cannot use !~ with tr///");
+            }
+            return ast_new_tr($left, $right_tok->{"search"}, $right_tok->{"replace"}, $right_tok->{"flags"});
+        } else {
+            # String expression as pattern: $foo =~ $pattern
+            my scalar $right = parse_unary($parser);
+            return ast_new_binary_op($op, $left, $right);
+        }
     }
 
     return $left;
 }
 
-# Multiplicative: * / %
+# Multiplicative: * / % x
 func parse_multiplicative(scalar $parser) scalar {
-    my scalar $left = parse_power($parser);
+    my scalar $left = parse_regex_match($parser);
 
     while (1) {
         my scalar $tok = parser_current($parser);
@@ -2378,14 +2497,14 @@ func parse_multiplicative(scalar $parser) scalar {
         if ($type eq "MULT" || $type eq "DIV" || $type eq "MOD") {
             my str $op = $tok->{"value"};
             parser_advance($parser);
-            my scalar $right = parse_power($parser);
+            my scalar $right = parse_regex_match($parser);
             $left = ast_new_binary_op($op, $left, $right);
         } elsif ($type eq "IDENT" && $tok->{"value"} eq "x"
                  && parser_peek($parser)->{"type"} ne "ASSIGN") {
             # String repetition: "ab" x 3. (x followed by '=' is the x=
             # repeat-assign operator, handled in parse_assignment.)
             parser_advance($parser);
-            my scalar $right = parse_power($parser);
+            my scalar $right = parse_regex_match($parser);
             $left = ast_new_binary_op("x", $left, $right);
         } else {
             return $left;
@@ -2455,31 +2574,31 @@ func parse_relational(scalar $parser) scalar {
         if ($type eq "LT" || $type eq "GT" || $type eq "LE" || $type eq "GE") {
             my str $op = $tok->{"value"};
             parser_advance($parser);
-            my scalar $right = parse_shift($parser);
+            my scalar $right = parse_range($parser);
             $left = ast_new_binary_op($op, $left, $right);
         } elsif ($type eq "STR_LT") {
             parser_advance($parser);
-            my scalar $right = parse_shift($parser);
+            my scalar $right = parse_range($parser);
             $left = ast_new_binary_op("lt", $left, $right);
         } elsif ($type eq "STR_GT") {
             parser_advance($parser);
-            my scalar $right = parse_shift($parser);
+            my scalar $right = parse_range($parser);
             $left = ast_new_binary_op("gt", $left, $right);
         } elsif ($type eq "STR_LE") {
             parser_advance($parser);
-            my scalar $right = parse_shift($parser);
+            my scalar $right = parse_range($parser);
             $left = ast_new_binary_op("le", $left, $right);
         } elsif ($type eq "STR_GE") {
             parser_advance($parser);
-            my scalar $right = parse_shift($parser);
+            my scalar $right = parse_range($parser);
             $left = ast_new_binary_op("ge", $left, $right);
         } elsif ($type eq "SPACESHIP") {
             parser_advance($parser);
-            my scalar $right = parse_shift($parser);
+            my scalar $right = parse_range($parser);
             $left = ast_new_binary_op("<=>", $left, $right);
         } elsif ($type eq "STR_CMP") {
             parser_advance($parser);
-            my scalar $right = parse_shift($parser);
+            my scalar $right = parse_range($parser);
             $left = ast_new_binary_op("cmp", $left, $right);
         } else {
             return $left;
@@ -2487,58 +2606,9 @@ func parse_relational(scalar $parser) scalar {
     }
 }
 
-# Regex match: =~ !~
-func parse_regex_match(scalar $parser) scalar {
-    my scalar $left = parse_relational($parser);
-
-    my scalar $tok = parser_current($parser);
-    my str $type = $tok->{"type"};
-
-    if ($type eq "MATCH_OP" || $type eq "NOT_MATCH_OP") {
-        my str $op = $tok->{"value"};
-        parser_advance($parser);
-
-        my scalar $right_tok = parser_current($parser);
-        my str $right_type = $right_tok->{"type"};
-
-        if ($right_type eq "REGEX_LITERAL") {
-            parser_advance($parser);
-            return ast_new_regex_match($op, $left, $right_tok->{"pattern"}, $right_tok->{"flags"});
-        } elsif ($right_type eq "SUBST_LITERAL") {
-            parser_advance($parser);
-            if ($op eq "!~") {
-                parser_error($parser, "cannot use !~ with substitution s///");
-            }
-            my scalar $subst_node = ast_new_regex_subst($left, $right_tok->{"pattern"}, $right_tok->{"replacement"}, $right_tok->{"flags"});
-            # If /e flag, parse the replacement string as a Strada expression
-            my str $subst_flags = $right_tok->{"flags"};
-            if (index($subst_flags, "e") >= 0) {
-                my str $repl_src = $right_tok->{"replacement"};
-                my scalar $repl_tokens = lex_tokenize($repl_src);
-                my scalar $repl_parser = parser_new($repl_tokens);
-                my scalar $eval_expr = parse_ternary($repl_parser);
-                $subst_node->{"eval_expr"} = $eval_expr;
-            }
-            return $subst_node;
-        } elsif ($right_type eq "TR_LITERAL") {
-            parser_advance($parser);
-            if ($op eq "!~") {
-                parser_error($parser, "cannot use !~ with tr///");
-            }
-            return ast_new_tr($left, $right_tok->{"search"}, $right_tok->{"replace"}, $right_tok->{"flags"});
-        } else {
-            # String expression as pattern: $foo =~ $pattern
-            my scalar $right = parse_relational($parser);
-            return ast_new_binary_op($op, $left, $right);
-        }
-    }
-
-    return $left;
-}
-
 # Equality: == != eq ne
 func parse_equality(scalar $parser) scalar {
-    my scalar $left = parse_regex_match($parser);
+    my scalar $left = parse_relational($parser);
     
     while (1) {
         my scalar $tok = parser_current($parser);
@@ -2547,15 +2617,15 @@ func parse_equality(scalar $parser) scalar {
         if ($type eq "EQ" || $type eq "NE") {
             my str $op = $tok->{"value"};
             parser_advance($parser);
-            my scalar $right = parse_regex_match($parser);
+            my scalar $right = parse_relational($parser);
             $left = ast_new_binary_op($op, $left, $right);
         } elsif ($type eq "STR_EQ") {
             parser_advance($parser);
-            my scalar $right = parse_regex_match($parser);
+            my scalar $right = parse_relational($parser);
             $left = ast_new_binary_op("eq", $left, $right);
         } elsif ($type eq "STR_NE") {
             parser_advance($parser);
-            my scalar $right = parse_regex_match($parser);
+            my scalar $right = parse_relational($parser);
             $left = ast_new_binary_op("ne", $left, $right);
         } else {
             return $left;
@@ -2645,7 +2715,7 @@ func parse_ternary(scalar $parser) scalar {
     # Fat arrow creates a pair (2-element array) for map { $_ => 1 } idiom
     if (parser_check($parser, "FAT_ARROW")) {
         parser_advance($parser);
-        my scalar $value = parse_logical_or($parser);
+        my scalar $value = parse_ternary($parser);
         # Create a 2-element anonymous array [key, value]
         my scalar $pair = ast_new_anon_array();
         ast_add_array_elem($pair, $cond);
@@ -2673,18 +2743,20 @@ func parse_assignment(scalar $parser) scalar {
         return ast_new_assign($op, $left, $right);
     }
 
-    # %=, **=, //=, x= — desugar to `target = target OP rhs`, which reuses
-    # the ordinary assignment paths (including hash/array element targets,
-    # autovivification, and int/num coercion) with no codegen changes.
-    # Note the target node is shared between the assignment LHS and the
-    # binary's left operand — codegen treats AST nodes as read-only.
+    # %=, **=, //=, x= — desugar to `target = target OP rhs` ONLY when target
+    # is a plain variable (zero side effects on read; //= short-circuits via //).
+    # Non-variable targets ($a[i++], $h{next_k()}, $$r, etc.) keep their compound
+    # op so codegen evaluates the container and index/key ONCE!
     if ($type eq "MOD_ASSIGN" || $type eq "POWER_ASSIGN" || $type eq "DOR_ASSIGN") {
         my str $bop = "%";
         if ($type eq "POWER_ASSIGN") { $bop = "**"; }
         if ($type eq "DOR_ASSIGN") { $bop = "//"; }
         parser_advance($parser);
         my scalar $right = parse_assignment($parser);
-        return ast_new_assign("=", $left, ast_new_binary_op($bop, $left, $right));
+        if ($left->{"type"} == NODE_VARIABLE()) {
+            return ast_new_assign("=", $left, ast_new_binary_op($bop, $left, $right));
+        }
+        return ast_new_assign($bop . "=", $left, $right);
     }
 
     # x= string-repeat assign: lexed as IDENT "x" + ASSIGN since x is an
@@ -2694,7 +2766,10 @@ func parse_assignment(scalar $parser) scalar {
         parser_advance($parser);
         parser_advance($parser);
         my scalar $right = parse_assignment($parser);
-        return ast_new_assign("=", $left, ast_new_binary_op("x", $left, $right));
+        if ($left->{"type"} == NODE_VARIABLE()) {
+            return ast_new_assign("=", $left, ast_new_binary_op("x", $left, $right));
+        }
+        return ast_new_assign("x=", $left, $right);
     }
     
     return $left;
@@ -3034,6 +3109,13 @@ func parse_local_decl(scalar $parser) scalar {
     }
 
     my str $name = parse_var_name($parser);
+    my int $is_pkg_qualified = 0;
+    while (parser_check($parser, "DOUBLE_COLON")) {
+        parser_advance($parser);
+        my str $qpart = parse_var_name($parser);
+        $name = $name . "::" . $qpart;
+        $is_pkg_qualified = 1;
+    }
 
     # Check for local $hash{key} — hash element localization
     if (parser_check($parser, "LBRACE")) {
@@ -3045,6 +3127,9 @@ func parse_local_decl(scalar $parser) scalar {
         ast_set_line($decl, $decl_line);
         $decl->{"is_hash_elem"} = 1;
         $decl->{"hash_key"} = $key_expr;
+        if ($is_pkg_qualified == 1) {
+            $decl->{"our_key"} = $name;
+        }
 
         # Optional initialization
         if (parser_check($parser, "ASSIGN")) {
@@ -3058,6 +3143,9 @@ func parse_local_decl(scalar $parser) scalar {
 
     my scalar $decl = ast_new_local_decl($name, $sigil, 0);
     ast_set_line($decl, $decl_line);
+    if ($is_pkg_qualified == 1) {
+        $decl->{"our_key"} = $name;
+    }
 
     # Optional initialization
     if (parser_check($parser, "ASSIGN")) {
@@ -3708,15 +3796,17 @@ func parse_statement(scalar $parser) scalar {
 
             my str $catch_type = "";
 
-            # Check for typed catch: catch (TypeName $var)
-            # Look ahead: if we see IDENT followed by DOLLAR, it's a type name
+            # Check for typed catch: catch (TypeName $var) or catch (Pkg::Sub::Err $var)
+            # Any IDENT before $var is the exception type name (optionally :: qualified).
             if (parser_check($parser, "IDENT")) {
-                my scalar $peek = parser_peek($parser);
-                if ($peek->{"type"} eq "DOLLAR") {
-                    # It's a type name
-                    my scalar $type_tok = parser_current($parser);
+                my scalar $type_tok = parser_current($parser);
+                parser_advance($parser);
+                $catch_type = $type_tok->{"value"};
+                while (parser_check($parser, "DOUBLE_COLON")) {
                     parser_advance($parser);
-                    $catch_type = $type_tok->{"value"};
+                    my scalar $part_tok = parser_current($parser);
+                    parser_expect_ident_like($parser);
+                    $catch_type = $catch_type . "::" . $part_tok->{"value"};
                 }
             }
 
@@ -4693,96 +4783,176 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
     $mod_program->{"lib_paths_fallback"} = $program->{"lib_paths_fallback"};
     # Share the resolved-deps list so nested modules land in STRADA_DEPS_OUT
     $mod_program->{"dep_files"} = $program->{"dep_files"};
+    # Offset method modifier sequence numbers so modifier C names never collide across modules
+    $mod_program->{"mod_seq_offset"} = $program->{"method_modifier_count"} + 0;
 
-    # Parse the module's contents
+    # Seed structs from parent program so struct types from earlier modules are visible
+    my int $seed_si = 0;
+    my int $seed_sn = $program->{"struct_count"} + 0;
+    my scalar $seed_snames = $program->{"struct_names"};
+    my scalar $seed_smap = $program->{"structs"};
+    while ($seed_si < $seed_sn) {
+        my str $ssn = $seed_snames->[$seed_si];
+        $mod_parser->{"structs"}->{$ssn} = $seed_smap->{$ssn};
+        ast_add_struct($mod_program, $seed_smap->{$ssn});
+        $seed_si = $seed_si + 1;
+    }
+
+    # Seed inherits and has_attrs from parent program so classes in this module
+    # that `extends` an already-loaded base class inherit its `has` attributes.
+    my int $base_inh_count = $program->{"inherit_count"} + 0;
+    my scalar $parent_inhs = $program->{"inherits"};
+    my int $sii = 0;
+    while ($sii < $base_inh_count) {
+        my scalar $ie = $parent_inhs->[$sii];
+        ast_add_inherit($mod_program, $ie->{"child"}, $ie->{"parent"});
+        $sii = $sii + 1;
+    }
+    my int $base_has_count = $program->{"has_attr_count"} + 0;
+    my scalar $parent_has = $program->{"has_attrs"};
+    my int $shi = 0;
+    while ($shi < $base_has_count) {
+        push($mod_program->{"has_attrs"}, $parent_has->[$shi]);
+        $mod_program->{"has_attr_count"} = $mod_program->{"has_attr_count"} + 1;
+        $shi = $shi + 1;
+    }
+
+    # Default current package to module name until an explicit `package` statement
+    $mod_program->{"package"} = $mod_name;
+    $mod_parser->{"current_package"} = $mod_name;
+    my str $current_mod_pkg = $mod_name;
+
+    # Parse the module's contents (full parity with parse_program)
     while (!parser_check($mod_parser, "EOF")) {
-        if (parser_check($mod_parser, "USE")) {
-            # Handle nested use statements
-            parse_use($mod_parser, $mod_program);
-        } elsif (parser_check($mod_parser, "IMPORT_LIB")) {
-            # Handle nested import_lib statements
-            parse_import_lib($mod_parser, $mod_program);
-        } elsif (parser_check($mod_parser, "IMPORT_OBJECT")) {
-            # Handle nested import_object statements
-            parse_import_object($mod_parser, $mod_program);
-        } elsif (parser_check($mod_parser, "IMPORT_ARCHIVE")) {
-            # Handle nested import_archive statements
-            parse_import_archive($mod_parser, $mod_program);
-        } elsif (parser_check($mod_parser, "LINK_LIB")) {
-            parse_link_lib($mod_parser, $mod_program);
-        } elsif (parser_check_func($mod_parser)) {
+        if (parser_check($mod_parser, "SEMI")) {
+            parser_advance($mod_parser);
+            next;
+        }
+
+        my int $m_is_private = 0;
+        my int $m_is_async = 0;
+        if (parser_check($mod_parser, "PRIVATE")) {
+            parser_advance($mod_parser);
+            $m_is_private = 1;
+            if (!parser_check_func($mod_parser) && !parser_check($mod_parser, "ASYNC")) {
+                parser_error($mod_parser, "expected 'func' or 'async func' after 'private'");
+            }
+        }
+        if (parser_check($mod_parser, "ASYNC")) {
+            parser_advance($mod_parser);
+            $m_is_async = 1;
+            if (!parser_check_func($mod_parser)) {
+                parser_error($mod_parser, "expected 'func' after 'async'");
+            }
+        }
+
+        if (parser_check_func($mod_parser)) {
             my scalar $fn = parse_function($mod_parser);
+            $fn->{"is_private"} = $m_is_private;
+            if ($m_is_async == 1) {
+                $fn->{"type"} = NODE_ASYNC_FUNC();
+            }
+            $fn->{"package"} = $current_mod_pkg;
             ast_add_function($mod_program, $fn);
-        } elsif (parser_check($mod_parser, "PACKAGE")) {
-            parse_package($mod_parser, $mod_program);
-        } elsif (parser_check($mod_parser, "VERSION")) {
-            parse_version($mod_parser, $mod_program);
+        } elsif (parser_check($mod_parser, "EXTERN")) {
+            my scalar $next_tok = parser_peek($mod_parser);
+            if ($next_tok->{"type"} eq "STR_LITERAL") {
+                parse_extern_c_block($mod_parser, $mod_program);
+            } else {
+                my scalar $fn = parse_extern_function($mod_parser);
+                $fn->{"package"} = $current_mod_pkg;
+                ast_add_function($mod_program, $fn);
+            }
         } elsif (parser_check($mod_parser, "ENUM")) {
             my scalar $en = parse_enum($mod_parser);
             ast_add_enum($mod_program, $en);
-        } elsif (parser_check($mod_parser, "MY")) {
-            # Parse module-level variable declarations
-            my scalar $var = parse_var_decl($mod_parser);
-            ast_add_global($mod_program, $var);
-        } elsif (parser_check($mod_parser, "EXTERN")) {
-            # Check if this is extern "C" { } or extern func
-            my scalar $next_tok = parser_peek($mod_parser);
-            if ($next_tok->{"type"} eq "STR_LITERAL") {
-                # extern "C" { ... } block
-                parse_extern_c_block($mod_parser, $mod_program);
-            } else {
-                # Traditional extern func declaration
-                my scalar $fn = parse_extern_function($mod_parser);
-                ast_add_function($mod_program, $fn);
+        } elsif (parser_check($mod_parser, "IDENT") && parser_current($mod_parser)->{"value"} eq "struct") {
+            my scalar $st = parse_struct($mod_parser);
+            ast_add_struct($mod_program, $st);
+        } elsif (parser_check($mod_parser, "PACKAGE")) {
+            flush_has_constructor($mod_program, $current_mod_pkg);
+            parse_package($mod_parser, $mod_program);
+            $current_mod_pkg = $mod_program->{"package"};
+        } elsif (parser_check($mod_parser, "VERSION")) {
+            parse_version($mod_parser, $mod_program);
+        } elsif (parser_check($mod_parser, "INHERIT")) {
+            parse_inherit($mod_parser, $mod_program);
+        } elsif (parser_check($mod_parser, "USE")) {
+            parse_use($mod_parser, $mod_program);
+            # Refresh structs in mod_parser from any nested `use`
+            my int $ns_i = 0;
+            my int $ns_n = $mod_program->{"struct_count"} + 0;
+            my scalar $ns_names = $mod_program->{"struct_names"};
+            my scalar $ns_map = $mod_program->{"structs"};
+            while ($ns_i < $ns_n) {
+                my str $ns_nm = $ns_names->[$ns_i];
+                $mod_parser->{"structs"}->{$ns_nm} = $ns_map->{$ns_nm};
+                $ns_i = $ns_i + 1;
             }
+        } elsif (parser_check($mod_parser, "IMPORT_LIB")) {
+            parse_import_lib($mod_parser, $mod_program);
+        } elsif (parser_check($mod_parser, "IMPORT_OBJECT")) {
+            parse_import_object($mod_parser, $mod_program);
+        } elsif (parser_check($mod_parser, "IMPORT_ARCHIVE")) {
+            parse_import_archive($mod_parser, $mod_program);
+        } elsif (parser_check($mod_parser, "LINK_LIB")) {
+            parse_link_lib($mod_parser, $mod_program);
+        } elsif (parser_check($mod_parser, "MY")) {
+            my scalar $var = parse_var_decl($mod_parser);
+            $var->{"source_module"} = $current_mod_pkg;
+            ast_add_global($mod_program, $var);
+        } elsif (parser_check($mod_parser, "CONST")) {
+            my scalar $const_decl = parse_const_decl($mod_parser);
+            $const_decl->{"source_module"} = $current_mod_pkg;
+            ast_add_global($mod_program, $const_decl);
+        } elsif (parser_check($mod_parser, "OUR")) {
+            my scalar $our_decl = parse_our_decl($mod_parser);
+            $our_decl->{"package"} = $current_mod_pkg;
+            $our_decl->{"source_module"} = $current_mod_pkg;
+            ast_add_global($mod_program, $our_decl);
         } elsif (parser_check($mod_parser, "C_BLOCK")) {
-            # Top-level __C__ { ... } block - collect for transfer to main program
             my scalar $tok = parser_current($mod_parser);
             my str $c_code = $tok->{"value"};
             parser_advance($mod_parser);
             ast_add_c_block($mod_program, $c_code);
         } elsif (parser_check($mod_parser, "BEGIN_BLOCK")) {
-            # BEGIN { ... } block in module
             parser_advance($mod_parser);
             my scalar $block = parse_block($mod_parser);
+            $block->{"source_module"} = $current_mod_pkg;
+            $block->{"file"} = $file_path;
             ast_add_begin_block($mod_program, $block);
         } elsif (parser_check($mod_parser, "END_BLOCK")) {
-            # END { ... } block in module
             parser_advance($mod_parser);
             my scalar $block = parse_block($mod_parser);
+            $block->{"source_module"} = $current_mod_pkg;
+            $block->{"file"} = $file_path;
             ast_add_end_block($mod_program, $block);
-        } elsif (parser_check($mod_parser, "PRIVATE")) {
-            # private func in module
+        } elsif (parser_check($mod_parser, "HAS")) {
+            parse_has_declaration($mod_parser, $mod_program);
+        } elsif (parser_check($mod_parser, "EXTENDS")) {
+            parse_extends($mod_parser, $mod_program);
+        } elsif (parser_check($mod_parser, "WITH")) {
+            parse_with($mod_parser, $mod_program);
+        } elsif (parser_check($mod_parser, "BEFORE")) {
+            parse_method_modifier($mod_parser, $mod_program, "before");
+        } elsif (parser_check($mod_parser, "AFTER")) {
+            parse_method_modifier($mod_parser, $mod_program, "after");
+        } elsif (parser_check($mod_parser, "AROUND")) {
+            parse_method_modifier($mod_parser, $mod_program, "around");
+        } elsif (parser_check($mod_parser, "INT_LITERAL") && parser_current($mod_parser)->{"value"} eq "1" && parser_peek($mod_parser)->{"type"} eq "SEMI") {
+            # Optional Perl-style trailing `1;` at end of module
             parser_advance($mod_parser);
-            if (parser_check_func($mod_parser)) {
-                my scalar $fn = parse_function($mod_parser);
-                $fn->{"is_private"} = 1;
-                ast_add_function($mod_program, $fn);
-            } else {
-                parser_error($mod_parser, "expected 'func' after 'private'");
-            }
-        } elsif (parser_check($mod_parser, "ASYNC")) {
-            # async func in module
-            parser_advance($mod_parser);
-            if (parser_check_func($mod_parser)) {
-                my scalar $fn = parse_function($mod_parser);
-                $fn->{"is_async"} = 1;
-                ast_add_function($mod_program, $fn);
-            } else {
-                parser_error($mod_parser, "expected 'func' after 'async'");
-            }
-        } elsif (parser_check($mod_parser, "HASH")) {
-            # Skip comments that look like hash
             parser_advance($mod_parser);
         } else {
-            # Skip other tokens (comments, etc)
-            parser_advance($mod_parser);
+            my scalar $mtl_tok = parser_current($mod_parser);
+            parser_error($mod_parser, "unexpected " . friendly_token($mtl_tok->{"type"}, $mtl_tok->{"value"}) . " at top level in module (expected a function, package, or declaration)");
         }
     }
 
-    # Get the module's own package name for tagging (used to filter in
-    # module-only codegen mode). Fall back to the module's `use` name if no
-    # explicit `package` statement was found.
+    # Flush auto-constructor for the last package in the module
+    flush_has_constructor($mod_program, $current_mod_pkg);
+
+    # Get the module's primary package name for tagging
     my str $src_module = $mod_program->{"package"};
     if (length($src_module) == 0) {
         $src_module = $mod_name;
@@ -4812,7 +4982,12 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
         my int $bb = 0;
         while ($bb < $mod_begin_count) {
             my scalar $bblock = $mod_begins->[$bb];
-            $bblock->{"source_module"} = $src_module;
+            if (length("" . $bblock->{"source_module"}) == 0) {
+                $bblock->{"source_module"} = $src_module;
+            }
+            if (length("" . $bblock->{"file"}) == 0) {
+                $bblock->{"file"} = $file_path;
+            }
             $bblock->{"from_use"} = 1;
             ast_add_begin_block($program, $bblock);
             $bb = $bb + 1;
@@ -4826,20 +5001,25 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
         my int $eb = 0;
         while ($eb < $mod_end_count) {
             my scalar $eblock = $mod_ends->[$eb];
-            $eblock->{"source_module"} = $src_module;
+            if (length("" . $eblock->{"source_module"}) == 0) {
+                $eblock->{"source_module"} = $src_module;
+            }
+            if (length("" . $eblock->{"file"}) == 0) {
+                $eblock->{"file"} = $file_path;
+            }
             $eblock->{"from_use"} = 1;
             ast_add_end_block($program, $eblock);
             $eb = $eb + 1;
         }
     }
 
-    # Get the package name from the module (defaults to module name)
+    # Get the fallback package name from the module (defaults to module name)
     my str $pkg_name = $mod_program->{"package"};
     if (length($pkg_name) == 0) {
         $pkg_name = $mod_name;
     }
 
-    # Merge functions into main program with package prefix
+    # Merge functions into main program with per-function package prefix
     my scalar $mod_funcs = $mod_program->{"functions"};
     my int $i = 0;
     my int $count = $mod_program->{"function_count"};
@@ -4856,34 +5036,100 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
             $fn->{"file"} = $file_path;
         }
 
-        # Check if function already has a qualified name (from nested use)
+        # Check if function already came from a nested `use` or has a qualified name
         my int $has_qualifier = index($fn_name, "::");
-        if ($has_qualifier >= 0) {
-            # Already qualified - don't re-prefix, just add to program
+        if ($has_qualifier >= 0 || $fn->{"from_use"} == 1) {
+            $fn->{"from_use"} = 1;
             ast_add_function($program, $fn);
             $i = $i + 1;
             next;
         }
 
+        # Use the function's OWN package (stamped when parsed in multi-package modules!)
+        my str $fn_pkg = "" . $fn->{"package"};
+        if (length($fn_pkg) == 0) {
+            $fn_pkg = $pkg_name;
+        }
+
         # Store original name and package, and mark as inlined via use so
         # module-only codegen filters it out of the .o we're building.
         $fn->{"original_name"} = $fn_name;
-        $fn->{"package"} = $pkg_name;
+        $fn->{"package"} = $fn_pkg;
         $fn->{"from_use"} = 1;
 
-        # extern "C" functions keep their exact C symbol name (no package prefix)
-        if ($fn->{"is_c_extern"} == 1) {
-            # Keep original name for C linkage
+        # extern functions and synthesized OOP helpers (`has` accessors, `new`,
+        # method modifiers — already prefixed with C package name) keep their name
+        if ($fn->{"is_c_extern"} == 1 || $fn->{"type"} == NODE_EXTERN_FUNC() || $fn->{"is_synthesized"} == 1) {
+            $fn->{"name"} = $fn_name;
+        } elsif ($fn_pkg eq "main" || $fn_name eq "main") {
             $fn->{"name"} = $fn_name;
         } else {
-            # Create qualified name version for Strada functions
-            $fn->{"name"} = $pkg_name . "::" . $fn_name;
+            # Create qualified name version for Strada functions in their own package
+            $fn->{"bare_name"} = $fn_name;
+            $fn->{"name"} = $fn_pkg . "::" . $fn_name;
         }
 
         # Add to main program
         ast_add_function($program, $fn);
 
         $i = $i + 1;
+    }
+
+    # Merge newly added inherits (`extends` / `with` / `inherit`)
+    my scalar $mod_inhs = $mod_program->{"inherits"};
+    $i = $base_inh_count;
+    $count = $mod_program->{"inherit_count"};
+    while ($i < $count) {
+        my scalar $mentry = $mod_inhs->[$i];
+        ast_add_inherit($program, $mentry->{"child"}, $mentry->{"parent"});
+        $i = $i + 1;
+    }
+
+    # Merge newly added Moose `has` attributes
+    my scalar $mod_has = $mod_program->{"has_attrs"};
+    $i = $base_has_count;
+    $count = $mod_program->{"has_attr_count"};
+    while ($i < $count) {
+        push($program->{"has_attrs"}, $mod_has->[$i]);
+        $program->{"has_attr_count"} = $program->{"has_attr_count"} + 1;
+        $i = $i + 1;
+    }
+
+    # Merge method modifiers (`before` / `after` / `around`)
+    my scalar $mod_mms = $mod_program->{"method_modifiers"};
+    $i = 0;
+    $count = $mod_program->{"method_modifier_count"};
+    while ($i < $count) {
+        push($program->{"method_modifiers"}, $mod_mms->[$i]);
+        $program->{"method_modifier_count"} = $program->{"method_modifier_count"} + 1;
+        $i = $i + 1;
+    }
+
+    # Merge operator overloads (`use overload`)
+    if ($mod_program->{"has_overloads"} == 1) {
+        $program->{"has_overloads"} = 1;
+        my scalar $mod_ols = $mod_program->{"overloads"};
+        my scalar $dst_ols = $program->{"overloads"};
+        my array @ol_pkgs = keys(%{$mod_ols});
+        my int $opi = 0;
+        while ($opi < size(@ol_pkgs)) {
+            my str $opkg = $ol_pkgs[$opi];
+            my scalar $src_pkg_ol = $mod_ols->{$opkg};
+            if (length("" . $dst_ols->{$opkg}) == 0) {
+                my hash %new_pkg_ol = ();
+                $dst_ols->{$opkg} = \%new_pkg_ol;
+            }
+            my scalar $dst_pkg_ol = $dst_ols->{$opkg};
+            my array @ol_ops = keys(%{$src_pkg_ol});
+            my int $ooi = 0;
+            while ($ooi < size(@ol_ops)) {
+                my str $oop = $ol_ops[$ooi];
+                $dst_pkg_ol->{$oop} = $src_pkg_ol->{$oop};
+                $program->{"overloaded_ops"}->{$oop} = 1;
+                $ooi = $ooi + 1;
+            }
+            $opi = $opi + 1;
+        }
     }
 
     # Merge enums
@@ -4930,11 +5176,15 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
     $count = $mod_program->{"global_count"};
     while ($i < $count) {
         my scalar $gvar = $mod_globals->[$i];
-        $gvar->{"source_module"} = $src_module;
+        if (length("" . $gvar->{"source_module"}) == 0) {
+            $gvar->{"source_module"} = $src_module;
+        }
         $gvar->{"from_use"} = 1;
         # defining file: lets the semantic pass bind file-level `my`
         # variables lexically (same name declared in several files/packages)
-        $gvar->{"file"} = $file_path;
+        if (length("" . $gvar->{"file"}) == 0) {
+            $gvar->{"file"} = $file_path;
+        }
         ast_add_global($program, $gvar);
         $i = $i + 1;
     }
@@ -4970,18 +5220,18 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
     merge_link_libs($program, $mod_program->{"link_libs"});
 
     # Check if module defines an import() function
-    # Look for a function named "pkg_name::import" or "pkg_name_import" in merged functions
-    my str $import_func_name = $pkg_name . "::import";
+    my str $import_func_name = $mod_name . "::import";
+    my str $alt_import_func = $pkg_name . "::import";
     my scalar $all_funcs = $program->{"functions"};
     my int $all_func_count = $program->{"function_count"};
     my int $fi = 0;
     while ($fi < $all_func_count) {
         my scalar $check_fn = $all_funcs->[$fi];
-        if ($check_fn->{"name"} eq $import_func_name) {
-            # Found import() function - record a call
+        my str $cfn_name = $check_fn->{"name"};
+        if ($cfn_name eq $import_func_name || $cfn_name eq $alt_import_func) {
             my hash %call_info = ();
-            $call_info{"func_name"} = $import_func_name;
-            $call_info{"pkg_name"} = $pkg_name;
+            $call_info{"func_name"} = $cfn_name;
+            $call_info{"pkg_name"} = $check_fn->{"package"};
             $call_info{"is_import_lib"} = 0;
             ast_add_import_call($program, \%call_info);
             last;
@@ -6410,7 +6660,9 @@ func parse_with(scalar $parser, scalar $program) void {
     parse_parent_list($parser, $program);
 }
 
-# Parse: has [ro|rw] type $name [= default] [(options)];
+# Parse: has [ro|rw] [type] $name [= default] [(options)];
+# Also supports Moose-style options: is => "ro"/"rw", isa => "...", default => <expr>,
+# required / required => 0/1, lazy / lazy => 0/1, builder => "...".
 func parse_has_declaration(scalar $parser, scalar $program) void {
     parser_expect($parser, "HAS");
 
@@ -6432,12 +6684,23 @@ func parse_has_declaration(scalar $parser, scalar $program) void {
         }
     }
 
-    # Parse type
-    my int $attr_type = parse_type($parser);
-
-    # Parse $name
-    parser_expect($parser, "DOLLAR");
-    my str $attr_name = parse_var_name($parser);
+    # Parse optional type (defaults to scalar if $name or string name follows directly)
+    my int $attr_type = TYPE_SCALAR();
+    my str $attr_name = "";
+    if (parser_check($parser, "DOLLAR")) {
+        parser_advance($parser);
+        $attr_name = parse_var_name($parser);
+    } elsif (parser_check($parser, "STR_LITERAL")) {
+        $attr_name = parser_current($parser)->{"value"};
+        parser_advance($parser);
+        if (parser_check($parser, "FAT_ARROW") || parser_check($parser, "COMMA")) {
+            parser_advance($parser);
+        }
+    } else {
+        $attr_type = parse_type($parser);
+        parser_expect($parser, "DOLLAR");
+        $attr_name = parse_var_name($parser);
+    }
 
     # Parse optional = default_expr
     my scalar $default_node = 0;
@@ -6446,30 +6709,105 @@ func parse_has_declaration(scalar $parser, scalar $program) void {
         $default_node = parse_expression($parser);
     }
 
-    # Parse optional (options)
+    # Parse optional (options) — guaranteed to advance or error on every token!
     my int $is_required = 0;
     my int $is_lazy = 0;
     my str $builder_name = "";
     if (parser_check($parser, "LPAREN")) {
         parser_advance($parser);
-        while (!parser_check($parser, "RPAREN")) {
+        while (!parser_check($parser, "RPAREN") && !parser_check($parser, "EOF")) {
             my scalar $opt_tok = parser_current($parser);
-            if ($opt_tok->{"type"} eq "IDENT") {
+            my str $opt_ttype = $opt_tok->{"type"};
+            if ($opt_ttype eq "IDENT" || $opt_tok->{"is_word"} != 0 || $opt_ttype eq "STR_LITERAL") {
                 my str $opt_val = $opt_tok->{"value"};
                 parser_advance($parser);
-                if ($opt_val eq "required") {
-                    $is_required = 1;
+                if ($opt_val eq "is") {
+                    parser_expect($parser, "FAT_ARROW");
+                    my scalar $is_tok = parser_current($parser);
+                    if ($is_tok->{"type"} eq "STR_LITERAL" || $is_tok->{"type"} eq "IDENT") {
+                        my str $is_mode = $is_tok->{"value"};
+                        parser_advance($parser);
+                        if ($is_mode eq "rw") {
+                            $is_rw = 1;
+                        } elsif ($is_mode eq "ro") {
+                            $is_rw = 0;
+                        } else {
+                            parser_error($parser, "'has' option 'is' must be \"ro\" or \"rw\", got \"" . $is_mode . "\"");
+                        }
+                    } else {
+                        parser_error($parser, "expected \"ro\" or \"rw\" after 'is =>'");
+                    }
+                } elsif ($opt_val eq "isa") {
+                    parser_expect($parser, "FAT_ARROW");
+                    my scalar $isa_tok = parser_current($parser);
+                    if ($isa_tok->{"type"} eq "STR_LITERAL" || $isa_tok->{"type"} eq "IDENT" || $isa_tok->{"is_word"} != 0) {
+                        my str $isa_str = $isa_tok->{"value"};
+                        parser_advance($parser);
+                        if ($isa_str eq "int" || $isa_str eq "Int") { $attr_type = TYPE_INT(); }
+                        elsif ($isa_str eq "num" || $isa_str eq "Num") { $attr_type = TYPE_NUM(); }
+                        elsif ($isa_str eq "str" || $isa_str eq "Str") { $attr_type = TYPE_STR(); }
+                        elsif ($isa_str eq "bool" || $isa_str eq "Bool") { $attr_type = TYPE_BOOL(); }
+                        elsif ($isa_str eq "array" || $isa_str eq "ArrayRef") { $attr_type = TYPE_ARRAY(); }
+                        elsif ($isa_str eq "hash" || $isa_str eq "HashRef") { $attr_type = TYPE_HASH(); }
+                        else { $attr_type = TYPE_SCALAR(); }
+                    } else {
+                        parser_error($parser, "expected type string after 'isa =>'");
+                    }
+                } elsif ($opt_val eq "default") {
+                    parser_expect($parser, "FAT_ARROW");
+                    $default_node = parse_ternary($parser);
+                } elsif ($opt_val eq "required") {
+                    if (parser_check($parser, "FAT_ARROW")) {
+                        parser_advance($parser);
+                        my scalar $req_tok = parser_current($parser);
+                        if ($req_tok->{"type"} eq "INT_LITERAL") {
+                            parser_advance($parser);
+                            if (($req_tok->{"value"} + 0) != 0) { $is_required = 1; }
+                            else { $is_required = 0; }
+                        } else {
+                            parser_error($parser, "expected 0 or 1 after 'required =>'");
+                        }
+                    } else {
+                        $is_required = 1;
+                    }
                 } elsif ($opt_val eq "lazy") {
-                    $is_lazy = 1;
+                    if (parser_check($parser, "FAT_ARROW")) {
+                        parser_advance($parser);
+                        my scalar $lz_tok = parser_current($parser);
+                        if ($lz_tok->{"type"} eq "INT_LITERAL") {
+                            parser_advance($parser);
+                            if (($lz_tok->{"value"} + 0) != 0) { $is_lazy = 1; }
+                            else { $is_lazy = 0; }
+                        } else {
+                            parser_error($parser, "expected 0 or 1 after 'lazy =>'");
+                        }
+                    } else {
+                        $is_lazy = 1;
+                    }
                 } elsif ($opt_val eq "builder") {
                     parser_expect($parser, "FAT_ARROW");
                     my scalar $builder_tok = parser_current($parser);
-                    parser_expect($parser, "STR_LITERAL");
-                    $builder_name = $builder_tok->{"value"};
+                    if ($builder_tok->{"type"} eq "STR_LITERAL" || $builder_tok->{"type"} eq "IDENT") {
+                        $builder_name = $builder_tok->{"value"};
+                        parser_advance($parser);
+                    } else {
+                        parser_expect($parser, "STR_LITERAL");
+                    }
+                } else {
+                    parser_error($parser, "unknown 'has' option '" . $opt_val . "'");
                 }
+            } else {
+                parser_advance($parser);
+                parser_error($parser, "expected option name in 'has' declaration, got " . friendly_token($opt_ttype, $opt_tok->{"value"}));
+                last;
             }
             if (parser_check($parser, "COMMA")) {
                 parser_advance($parser);
+            } elsif (!parser_check($parser, "RPAREN")) {
+                my scalar $sep_tok = parser_current($parser);
+                parser_advance($parser);
+                parser_error($parser, "expected ',' or ')' in 'has' options, got " . friendly_token($sep_tok->{"type"}, $sep_tok->{"value"}));
+                last;
             }
         }
         parser_expect($parser, "RPAREN");
@@ -6477,14 +6815,25 @@ func parse_has_declaration(scalar $parser, scalar $program) void {
 
     parser_expect($parser, "SEMI");
 
+    # For `(lazy)` without `builder`, the default expression is evaluated on first
+    # getter call rather than eagerly in new(). Mark builder="__lazy" and store
+    # eager default_node=0 on %attr so neither new() nor inline-accessor bypasses it!
+    my scalar $eager_default_node = $default_node;
+    my str $meta_builder = $builder_name;
+    if ($is_lazy == 1 && length($builder_name) == 0 && $default_node != 0) {
+        $eager_default_node = 0;
+        $meta_builder = "__lazy";
+    }
+
     # Store attribute metadata on program
     my hash %attr = ();
     $attr{"name"} = $attr_name;
     $attr{"attr_type"} = $attr_type;
-    $attr{"default_node"} = $default_node;
+    $attr{"default_node"} = $eager_default_node;
+    $attr{"lazy_default_node"} = $default_node;
     $attr{"required"} = $is_required;
     $attr{"lazy"} = $is_lazy;
-    $attr{"builder"} = $builder_name;
+    $attr{"builder"} = $meta_builder;
     $attr{"rw"} = $is_rw;
     $attr{"package"} = $pkg;
     my scalar $attrs = $program->{"has_attrs"};
@@ -6504,12 +6853,10 @@ func parse_has_declaration(scalar $parser, scalar $program) void {
     my scalar $self_param = ast_new_param("self", TYPE_SCALAR(), "$");
     ast_add_param($getter, $self_param);
     $getter->{"package"} = $pkg;
+    $getter->{"bare_name"} = $attr_name;
+    $getter->{"is_synthesized"} = 1;
     my scalar $getter_body = ast_new_block();
-    # (builder => "method") / (lazy): the value is computed by calling the
-    # builder the first time the attribute is read while still unset, then kept:
-    #   if (!defined($self->{"name"})) { $self->{"name"} = $self->BUILDER(); }
-    # (These options used to be parsed and then ignored: the accessor just
-    # returned undef.)
+    # (builder => "method") or (lazy) with default: compute on first read while unset
     if (length($builder_name) > 0) {
         my scalar $lb_read = ast_new_deref_hash(ast_new_variable("self", "$"), ast_new_str_literal($attr_name));
         my scalar $lb_defined = ast_new_call("defined");
@@ -6520,6 +6867,15 @@ func parse_has_declaration(scalar $parser, scalar $program) void {
         my scalar $lb_call = ast_new_method_call(ast_new_variable("self", "$"), $builder_name);
         ast_add_statement($lb_block, ast_new_expr_stmt(ast_new_assign("=", $lb_target, $lb_call)));
         ast_add_statement($getter_body, ast_new_if_stmt($lb_cond, $lb_block));
+    } elsif ($is_lazy == 1 && $default_node != 0) {
+        my scalar $lz_read = ast_new_deref_hash(ast_new_variable("self", "$"), ast_new_str_literal($attr_name));
+        my scalar $lz_defined = ast_new_call("defined");
+        ast_add_arg($lz_defined, $lz_read);
+        my scalar $lz_cond = ast_new_unary_op("!", $lz_defined);
+        my scalar $lz_block = ast_new_block();
+        my scalar $lz_target = ast_new_deref_hash(ast_new_variable("self", "$"), ast_new_str_literal($attr_name));
+        ast_add_statement($lz_block, ast_new_expr_stmt(ast_new_assign("=", $lz_target, $default_node)));
+        ast_add_statement($getter_body, ast_new_if_stmt($lz_cond, $lz_block));
     }
     # return $self->{"name"};
     my scalar $self_var = ast_new_variable("self", "$");
@@ -6539,6 +6895,8 @@ func parse_has_declaration(scalar $parser, scalar $program) void {
         ast_add_param($setter, $setter_self);
         ast_add_param($setter, $setter_val);
         $setter->{"package"} = $pkg;
+        $setter->{"bare_name"} = "set_" . $attr_name;
+        $setter->{"is_synthesized"} = 1;
         my scalar $setter_body = ast_new_block();
         # $self->{"name"} = $val;
         my scalar $s_self = ast_new_variable("self", "$");
@@ -6600,23 +6958,29 @@ func flush_has_constructor(scalar $program, str $pkg) void {
         $chain_i = $chain_i + 1;
     }
 
+    # Walk @pkg_chain in MRO order (child first, then parents) and deduplicate
+    # by attribute name so child class `has` declarations override inherited
+    # parent `has` defaults/attributes of the same name!
     my array @pkg_attrs = ();
+    my hash %seen_attr_names = ();
     my int $pkg_attr_count = 0;
-    my int $ai = 0;
-    while ($ai < $attr_count) {
-        my scalar $a = $all_attrs->[$ai];
-        # Check if attr belongs to any package in our chain
-        my str $a_pkg = $a->{"package"};
-        my int $ci = 0;
-        while ($ci < $chain_len) {
-            if ($pkg_chain[$ci] eq $a_pkg) {
-                push(@pkg_attrs, $a);
-                $pkg_attr_count = $pkg_attr_count + 1;
-                $ci = $chain_len;
+    my int $ci_ord = 0;
+    while ($ci_ord < $chain_len) {
+        my str $target_pkg = $pkg_chain[$ci_ord];
+        my int $ai = 0;
+        while ($ai < $attr_count) {
+            my scalar $a = $all_attrs->[$ai];
+            if ($a->{"package"} eq $target_pkg) {
+                my str $anm = $a->{"name"};
+                if (!exists(%seen_attr_names, $anm)) {
+                    $seen_attr_names{$anm} = 1;
+                    push(@pkg_attrs, $a);
+                    $pkg_attr_count = $pkg_attr_count + 1;
+                }
             }
-            $ci = $ci + 1;
+            $ai = $ai + 1;
         }
-        $ai = $ai + 1;
+        $ci_ord = $ci_ord + 1;
     }
 
     # Only generate if THIS package has has-attrs (own or inherited)
@@ -6632,12 +6996,14 @@ func flush_has_constructor(scalar $program, str $pkg) void {
         $colon_idx = index($c_pkg, "::");
     }
     my str $new_name = $c_pkg . "_new";
+    my str $qual_new = $pkg . "::new";
     my scalar $funcs = $program->{"functions"};
     my int $fi = 0;
     my int $fcount = $program->{"function_count"};
     while ($fi < $fcount) {
         my scalar $fn = $funcs->[$fi];
-        if ($fn->{"name"} eq $new_name) {
+        my str $fn_nm = $fn->{"name"};
+        if ($fn_nm eq $new_name || $fn_nm eq $qual_new || ($fn_nm eq "new" && $fn->{"package"} eq $pkg)) {
             return;
         }
         $fi = $fi + 1;
@@ -6646,6 +7012,8 @@ func flush_has_constructor(scalar $program, str $pkg) void {
     # Generate: func new(scalar ...@args) scalar { ... }
     my scalar $ctor = ast_new_function($new_name, TYPE_SCALAR());
     $ctor->{"package"} = $pkg;
+    $ctor->{"bare_name"} = "new";
+    $ctor->{"is_synthesized"} = 1;
     # variadic param: scalar ...@args
     my scalar $args_param = ast_new_param("args", TYPE_SCALAR(), "@");
     $args_param->{"is_variadic"} = 1;
@@ -6776,7 +7144,7 @@ func parse_method_modifier(scalar $parser, scalar $program, str $mod_type) void 
         $c_pkg = substr($c_pkg, 0, $colon_idx) . "_" . substr($c_pkg, $colon_idx + 2, length($c_pkg) - $colon_idx - 2);
         $colon_idx = index($c_pkg, "::");
     }
-    my int $mod_count = $program->{"method_modifier_count"};
+    my int $mod_count = $program->{"method_modifier_count"} + ($program->{"mod_seq_offset"} + 0);
     my str $mod_func_name = $c_pkg . "___" . $mod_type . "_" . $method_name . "_" . $mod_count;
 
     # Parse function parameters and body (reuse parse_function logic but without name)
@@ -6825,6 +7193,7 @@ func parse_method_modifier(scalar $parser, scalar $program, str $mod_type) void 
     my scalar $body = parse_block($parser);
     $fn->{"body"} = $body;
     $fn->{"package"} = $pkg;
+    $fn->{"is_synthesized"} = 1;
     ast_add_function($program, $fn);
 
     # Store modifier metadata
@@ -7105,9 +7474,8 @@ func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low, sca
         spew($deps_out, $deps_text);
     }
 
-    # Stamp remaining functions (main-file and synthesized ones) with this
-    # parser's filename for diagnostics. use-inlined module functions were
-    # already stamped with their module path at merge time.
+    # Stamp remaining functions, globals, and BEGIN/END blocks (main-file and
+    # synthesized ones) with this parser's filename for diagnostics.
     my str $prog_file = $parser->{"filename"};
     if (length($prog_file) > 0) {
         my scalar $all_funcs = $program->{"functions"};
@@ -7120,6 +7488,36 @@ func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low, sca
                 $sfn->{"file"} = $prog_file;
             }
             $sfi = $sfi + 1;
+        }
+        my scalar $all_globals = $program->{"globals"};
+        my int $all_gcount = $program->{"global_count"};
+        my int $sgi = 0;
+        while ($sgi < $all_gcount) {
+            my scalar $sg = $all_globals->[$sgi];
+            if (length("" . $sg->{"file"}) == 0) {
+                $sg->{"file"} = $prog_file;
+            }
+            $sgi = $sgi + 1;
+        }
+        my scalar $all_begins = $program->{"begin_blocks"};
+        my int $all_bcount = $program->{"begin_block_count"};
+        my int $sbi = 0;
+        while ($sbi < $all_bcount) {
+            my scalar $sb_blk = $all_begins->[$sbi];
+            if (length("" . $sb_blk->{"file"}) == 0) {
+                $sb_blk->{"file"} = $prog_file;
+            }
+            $sbi = $sbi + 1;
+        }
+        my scalar $all_ends = $program->{"end_blocks"};
+        my int $all_ecount = $program->{"end_block_count"};
+        my int $sei = 0;
+        while ($sei < $all_ecount) {
+            my scalar $se_blk = $all_ends->[$sei];
+            if (length("" . $se_blk->{"file"}) == 0) {
+                $se_blk->{"file"} = $prog_file;
+            }
+            $sei = $sei + 1;
         }
     }
 

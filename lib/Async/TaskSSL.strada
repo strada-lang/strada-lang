@@ -137,14 +137,15 @@ func read(scalar $h, int $max, int $timeout_ms = 0) str {
 func write(scalar $h, str $data) int {
     my int $conn = $h->{"ssl"};
     my int $fd = $h->{"fd"};
-    my int $total = length($data);
+    my int $total = core::byte_length($data);
     my str $rest = $data;
-    while (length($rest) > 0) {
+    while (core::byte_length($rest) > 0) {
+        my int $rlen = core::byte_length($rest);
         my int $n = ssl::try_write($conn, $rest);
         if ($n < 0) { return 0 - 1; }
-        if ($n == length($rest)) { return $total; }
+        if ($n == $rlen) { return $total; }
         if ($n > 0) {
-            $rest = substr($rest, $n, length($rest) - $n);
+            $rest = core::byte_substr($rest, $n, $rlen - $n);
             next;
         }
         park_fd($fd, want_mask($conn), 0);

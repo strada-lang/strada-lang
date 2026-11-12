@@ -8,7 +8,7 @@ package StradaPM::Lock;
 
 # Parse a Strada.lock file
 func parse(str $path) scalar {
-    if (sys::file_exists($path) == 0) {
+    if (core::file_exists($path) == 0) {
         return undef;
     }
 
@@ -152,7 +152,13 @@ func is_current(scalar $lock, scalar $manifest) int {
         }
 
         # Check version satisfies constraint
-        my str $constraint = $deps->{$name};
+        my scalar $spec = $deps->{$name};
+        my str $constraint = "*";
+        if (typeof($spec) eq "hash") {
+            $constraint = defined($spec->{"version"}) ? $spec->{"version"} : "*";
+        } else {
+            $constraint = "" . $spec;
+        }
         my str $locked_version = $lock->{$name}->{"version"};
 
         if (defined($locked_version)) {
@@ -180,10 +186,10 @@ func sort_strings(array @arr) array {
     # Bubble sort (simple, works for small arrays)
     for (my int $i = 0; $i < $n - 1; $i++) {
         for (my int $j = 0; $j < $n - $i - 1; $j++) {
-            if (@arr[$j] gt @arr[$j + 1]) {
-                my str $temp = @arr[$j];
-                @arr[$j] = @arr[$j + 1];
-                @arr[$j + 1] = $temp;
+            if ($arr[$j] gt $arr[$j + 1]) {
+                my str $temp = $arr[$j];
+                $arr[$j] = $arr[$j + 1];
+                $arr[$j + 1] = $temp;
             }
         }
     }

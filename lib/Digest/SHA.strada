@@ -321,6 +321,29 @@ static void bytes_to_hex_impl(const uint8_t *bytes, size_t len, char *hex) {
     }
     hex[len*2] = '\0';
 }
+
+/* Helper: extract raw bytes and byte length from StradaValue */
+static const uint8_t *sha_get_bytes_impl(StradaValue *sv, size_t *out_len, char **out_owned) {
+    *out_owned = NULL;
+    if (!sv) {
+        *out_len = 0;
+        return (const uint8_t *)"";
+    }
+    if (!STRADA_IS_TAGGED_INT(sv)) {
+        if (sv->type == STRADA_STR && !(sv->meta && sv->meta->is_tied)) {
+            *out_len = STRADA_STR_BYTELEN(sv);
+            return (const uint8_t *)(sv->value.pv ? sv->value.pv : "");
+        }
+        if (sv->type == STRADA_UNDEF) {
+            *out_len = 0;
+            return (const uint8_t *)"";
+        }
+    }
+    char *s = strada_to_str(sv);
+    *out_owned = s;
+    *out_len = s ? strlen(s) : 0;
+    return (const uint8_t *)(s ? s : "");
+}
 }
 
 # ============================================================
@@ -331,16 +354,17 @@ static void bytes_to_hex_impl(const uint8_t *bytes, size_t len, char *hex) {
 func sha256(str $data) str {
     my str $result = "";
     __C__ {
-        char *input = strada_to_str(data);
-        int len = strada_str_len(data);
+        size_t len = 0;
+        char *owned = NULL;
+        const uint8_t *input = sha_get_bytes_impl(data, &len, &owned);
         uint8_t hash[32];
 
         SHA256_CTX_IMPL ctx;
         sha256_init_impl(&ctx);
-        sha256_update_impl(&ctx, (const uint8_t *)input, len);
+        sha256_update_impl(&ctx, input, len);
         sha256_final_impl(&ctx, hash);
 
-        free(input);
+        free(owned);
         strada_decref(result);
         result = strada_new_str_len((char *)hash, 32);
     }
@@ -351,18 +375,19 @@ func sha256(str $data) str {
 func sha256_hex(str $data) str {
     my str $result = "";
     __C__ {
-        char *input = strada_to_str(data);
-        int len = strada_str_len(data);
+        size_t len = 0;
+        char *owned = NULL;
+        const uint8_t *input = sha_get_bytes_impl(data, &len, &owned);
         uint8_t hash[32];
         char hex[65];
 
         SHA256_CTX_IMPL ctx;
         sha256_init_impl(&ctx);
-        sha256_update_impl(&ctx, (const uint8_t *)input, len);
+        sha256_update_impl(&ctx, input, len);
         sha256_final_impl(&ctx, hash);
         bytes_to_hex_impl(hash, 32, hex);
 
-        free(input);
+        free(owned);
         strada_decref(result);
         result = strada_new_str(hex);
     }
@@ -373,10 +398,10 @@ func sha256_hex(str $data) str {
 func hmac_sha256(str $key, str $data) str {
     my str $result = "";
     __C__ {
-        char *k = strada_to_str(key);
-        size_t klen = strada_str_len(key);
-        char *d = strada_to_str(data);
-        size_t dlen = strada_str_len(data);
+        size_t klen = 0, dlen = 0;
+        char *kowned = NULL, *downed = NULL;
+        const uint8_t *k = sha_get_bytes_impl(key, &klen, &kowned);
+        const uint8_t *d = sha_get_bytes_impl(data, &dlen, &downed);
         uint8_t kb[64];
         uint8_t pad[64];
         uint8_t inner[32];
@@ -385,23 +410,23 @@ func hmac_sha256(str $key, str $data) str {
         memset(kb, 0, sizeof(kb));
         if (klen > 64) {
             sha256_init_impl(&ctx);
-            sha256_update_impl(&ctx, (const uint8_t *)k, klen);
+            sha256_update_impl(&ctx, k, klen);
             sha256_final_impl(&ctx, kb);
-        } else {
+        } else if (klen > 0) {
             memcpy(kb, k, klen);
         }
         for (int i = 0; i < 64; i++) pad[i] = kb[i] ^ 0x36;
         sha256_init_impl(&ctx);
         sha256_update_impl(&ctx, pad, 64);
-        sha256_update_impl(&ctx, (const uint8_t *)d, dlen);
+        sha256_update_impl(&ctx, d, dlen);
         sha256_final_impl(&ctx, inner);
         for (int i = 0; i < 64; i++) pad[i] = kb[i] ^ 0x5c;
         sha256_init_impl(&ctx);
         sha256_update_impl(&ctx, pad, 64);
         sha256_update_impl(&ctx, inner, 32);
         sha256_final_impl(&ctx, mac);
-        free(k);
-        free(d);
+        free(kowned);
+        free(downed);
         strada_decref(result);
         result = strada_new_str_len((char *)mac, 32);
     }
@@ -413,10 +438,12 @@ func hmac_sha256_hex(str $key, str $data) str {
     my str $raw = ::hmac_sha256($key, $data);
     my str $result = "";
     __C__ {
-        char *r = strada_to_str(raw);
+        size_t rlen = 0;
+        char *rowned = NULL;
+        const uint8_t *r = sha_get_bytes_impl(raw, &rlen, &rowned);
         char hex[65];
-        bytes_to_hex_impl((const uint8_t *)r, 32, hex);
-        free(r);
+        bytes_to_hex_impl(r, rlen == 32 ? 32 : rlen, hex);
+        free(rowned);
         strada_decref(result);
         result = strada_new_str(hex);
     }
@@ -431,16 +458,17 @@ func hmac_sha256_hex(str $key, str $data) str {
 func sha1(str $data) str {
     my str $result = "";
     __C__ {
-        char *input = strada_to_str(data);
-        int len = strada_str_len(data);
+        size_t len = 0;
+        char *owned = NULL;
+        const uint8_t *input = sha_get_bytes_impl(data, &len, &owned);
         uint8_t hash[20];
 
         SHA1_CTX_IMPL ctx;
         sha1_init_impl(&ctx);
-        sha1_update_impl(&ctx, (const uint8_t *)input, len);
+        sha1_update_impl(&ctx, input, len);
         sha1_final_impl(&ctx, hash);
 
-        free(input);
+        free(owned);
         strada_decref(result);
         result = strada_new_str_len((char *)hash, 20);
     }
@@ -451,18 +479,19 @@ func sha1(str $data) str {
 func sha1_hex(str $data) str {
     my str $result = "";
     __C__ {
-        char *input = strada_to_str(data);
-        int len = strada_str_len(data);
+        size_t len = 0;
+        char *owned = NULL;
+        const uint8_t *input = sha_get_bytes_impl(data, &len, &owned);
         uint8_t hash[20];
         char hex[41];
 
         SHA1_CTX_IMPL ctx;
         sha1_init_impl(&ctx);
-        sha1_update_impl(&ctx, (const uint8_t *)input, len);
+        sha1_update_impl(&ctx, input, len);
         sha1_final_impl(&ctx, hash);
         bytes_to_hex_impl(hash, 20, hex);
 
-        free(input);
+        free(owned);
         strada_decref(result);
         result = strada_new_str(hex);
     }

@@ -31,6 +31,23 @@ func chomp(str $s) str {
     return $s;
 }
 
+# Single-quote a string safely for /bin/sh
+func shell_quote(str $s) str {
+    my str $out = "'";
+    my int $i = 0;
+    my int $len = length($s);
+    while ($i < $len) {
+        my str $ch = substr($s, $i, 1);
+        if ($ch eq "'") {
+            $out = $out . "'\\''";
+        } else {
+            $out = $out . $ch;
+        }
+        $i = $i + 1;
+    }
+    return $out . "'";
+}
+
 func usage() void {
     say("Usage: soinfo [options] <library>");
     say("");
@@ -113,7 +130,7 @@ func parse_source(str $filename) hash {
     my hash %funcs = ();
 
     my scalar $fh = core::open($filename, "r");
-    if (length($fh) == 0) {
+    if (!defined($fh)) {
         return %funcs;
     }
 
@@ -321,8 +338,9 @@ func generate_example_from_export(str $name, hash %info, str $lib_var) str {
 # Check if library is a Strada shared library and get export info
 # Returns: export info string if Strada library, empty string otherwise
 func get_strada_export_info(str $so_file) str {
-    # Load the library
-    my int $handle = core::dl_open($so_file);
+    # Load the library (prepend ./ if bare filename so dlopen doesn't search system dirs)
+    my str $dl_path = (index($so_file, "/") < 0) ? ("./" . $so_file) : $so_file;
+    my int $handle = core::dl_open($dl_path);
     if ($handle == 0) {
         return "";
     }
@@ -344,7 +362,7 @@ func get_strada_export_info(str $so_file) str {
 # Extract export info from .o or .a files using strings command
 # The export info is embedded in .rodata as "func:name:ret:count:types:variadic"
 func get_export_info_from_binary(str $file) str {
-    my str $cmd = "strings " . $file . " 2>/dev/null";
+    my str $cmd = "strings -- " . shell_quote($file) . " 2>/dev/null";
     my str $output = core::qx($cmd);
 
     # Collect all lines that match the export info format
@@ -377,7 +395,8 @@ func get_export_info_from_binary(str $file) str {
 # Get the version string from a Strada shared library
 # Returns: version string if available, empty string otherwise
 func get_strada_version(str $so_file) str {
-    my int $handle = core::dl_open($so_file);
+    my str $dl_path = (index($so_file, "/") < 0) ? ("./" . $so_file) : $so_file;
+    my int $handle = core::dl_open($dl_path);
     if ($handle == 0) {
         return "";
     }
@@ -493,9 +512,11 @@ func main(int $argc, array @argv) int {
             usage();
             return 1;
         } else {
-            # Positional argument - should be the .so file
+            # Positional argument - library file, then optional source file
             if (length($so_file) == 0) {
                 $so_file = $arg;
+            } elsif (length($source_file) == 0) {
+                $source_file = $arg;
             }
         }
         $i = $i + 1;
@@ -574,7 +595,7 @@ func main(int $argc, array @argv) int {
     if ($is_shared) {
         $nm_flags = "-D ";
     }
-    my str $cmd = "nm " . $nm_flags . "--defined-only " . $so_file . " 2>/dev/null";
+    my str $cmd = "nm " . $nm_flags . "--defined-only -- " . shell_quote($so_file) . " 2>/dev/null";
     my str $nm_output = core::qx($cmd);
 
     # Collect function names from nm output
@@ -776,7 +797,8 @@ func main(int $argc, array @argv) int {
             say("# Dynamic loading (C library):");
         }
 
-        say("my int " . chr(36) . "lib = core::dl_open(\"./" . $so_file . "\");");
+        my str $dl_example_path = (index($so_file, "/") < 0) ? ("./" . $so_file) : $so_file;
+        say("my int " . chr(36) . "lib = core::dl_open(\"" . $dl_example_path . "\");");
         say("if (" . chr(36) . "lib == 0) {");
         say("    say(\"Failed to load: \" . core::dl_error());");
         say("    return 1;");
@@ -796,7 +818,7 @@ func main(int $argc, array @argv) int {
                 print($example);
             } elsif (exists(%source_funcs, $name)) {
                 my scalar $info = $source_funcs{$name};
-                my str $example = generate_example(%{$info}, $name, chr(36) . "lib");
+                my str $example = generate_example($name, %{$info}, chr(36) . "lib");
                 print($example);
             } else {
                 # Generic example without type info

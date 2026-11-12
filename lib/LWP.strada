@@ -280,6 +280,11 @@ L<LWP_SSL>, L<ssl>, L<JSON>
 
 package LWP;
 
+# Helper: check if string contains CR or LF (CWE-93 header injection guard)
+func _has_crlf(str $s) int {
+    return (index($s, "\r") >= 0 || index($s, "\n") >= 0) ? 1 : 0;
+}
+
 # Parse a URL into components
 # Returns hash with: scheme, host, port, path, query
 func parse_url(str $url) hash {
@@ -305,10 +310,14 @@ func parse_url(str $url) hash {
         }
     }
 
-    # Extract host and port
+    # Extract host and port (handle '?' preceding '/' e.g. http://example.com?a=1/2)
     my int $path_start = index($remaining, "/");
+    my int $q_start_raw = index($remaining, "?");
     my str $host_part = "";
-    if ($path_start < 0) {
+    if ($q_start_raw >= 0 && ($path_start < 0 || $q_start_raw < $path_start)) {
+        $host_part = substr($remaining, 0, $q_start_raw);
+        $remaining = "/" . substr($remaining, $q_start_raw, length($remaining) - $q_start_raw);
+    } elsif ($path_start < 0) {
         $host_part = $remaining;
         $remaining = "/";
     } else {
@@ -342,23 +351,22 @@ func parse_url(str $url) hash {
     return %result;
 }
 
-# URL encode a string
+# URL encode a string (percent-encodes raw UTF-8 bytes per RFC 3986)
 func url_encode(str $s) str {
     my str $result = "";
+    my int $blen = core::byte_length($s);
     my int $i = 0;
-    while ($i < length($s)) {
-        my str $c = substr($s, $i, 1);
-        my int $code = ord($c);
+    while ($i < $blen) {
+        my int $code = core::get_byte($s, $i);
 
-        # Unreserved characters (RFC 3986)
-        if (($code >= 65 && $code <= 90) ||   # A-Z
-            ($code >= 97 && $code <= 122) ||  # a-z
-            ($code >= 48 && $code <= 57) ||   # 0-9
-            $c eq "-" || $c eq "_" || $c eq "." || $c eq "~") {
-            $result = $result . $c;
+        # Unreserved characters (RFC 3986): A-Z, a-z, 0-9, '-', '.', '_', '~'
+        if (($code >= 65 && $code <= 90) ||
+            ($code >= 97 && $code <= 122) ||
+            ($code >= 48 && $code <= 57) ||
+            $code == 45 || $code == 46 || $code == 95 || $code == 126) {
+            $result = $result . chr($code);
         } else {
-            # Percent encode
-            my int $hi = cast_int($code / 16);
+            my int $hi = ($code / 16) % 16;
             my int $lo = $code % 16;
             my str $hex = "%";
             if ($hi < 10) { $hex = $hex . chr(48 + $hi); }
@@ -372,34 +380,36 @@ func url_encode(str $s) str {
     return $result;
 }
 
-# URL decode a string
+# URL decode a string (binary/UTF-8 byte-accurate)
 func url_decode(str $s) str {
     my str $result = "";
+    my int $blen = core::byte_length($s);
     my int $i = 0;
-    while ($i < length($s)) {
-        my str $c = substr($s, $i, 1);
-        if ($c eq "%" && $i + 2 < length($s)) {
-            my str $hex = substr($s, $i + 1, 2);
-            my int $val = 0;
-            my int $j = 0;
-            while ($j < 2) {
-                my str $h = substr($hex, $j, 1);
-                my int $hc = ord($h);
-                $val = $val * 16;
-                if ($hc >= 48 && $hc <= 57) { $val = $val + ($hc - 48); }
-                elsif ($hc >= 65 && $hc <= 70) { $val = $val + ($hc - 55); }
-                elsif ($hc >= 97 && $hc <= 102) { $val = $val + ($hc - 87); }
-                $j = $j + 1;
+    while ($i < $blen) {
+        my int $b = core::get_byte($s, $i);
+        if ($b == 37 && $i + 2 < $blen) {
+            my int $h1 = core::get_byte($s, $i + 1);
+            my int $h2 = core::get_byte($s, $i + 2);
+            my int $v1 = -1;
+            my int $v2 = -1;
+            if ($h1 >= 48 && $h1 <= 57) { $v1 = $h1 - 48; }
+            elsif ($h1 >= 65 && $h1 <= 70) { $v1 = $h1 - 55; }
+            elsif ($h1 >= 97 && $h1 <= 102) { $v1 = $h1 - 87; }
+            if ($h2 >= 48 && $h2 <= 57) { $v2 = $h2 - 48; }
+            elsif ($h2 >= 65 && $h2 <= 70) { $v2 = $h2 - 55; }
+            elsif ($h2 >= 97 && $h2 <= 102) { $v2 = $h2 - 87; }
+            if ($v1 >= 0 && $v2 >= 0) {
+                $result = $result . core::byte($v1 * 16 + $v2);
+                $i = $i + 3;
+                next;
             }
-            $result = $result . chr($val);
-            $i = $i + 3;
-        } elsif ($c eq "+") {
-            $result = $result . " ";
-            $i = $i + 1;
-        } else {
-            $result = $result . $c;
-            $i = $i + 1;
         }
+        if ($b == 43) {
+            $result = $result . " ";
+        } else {
+            $result = $result . core::byte($b);
+        }
+        $i = $i + 1;
     }
     return $result;
 }
@@ -539,9 +549,8 @@ func read_response(scalar $sock) str {
                     $cl_line = substr($cl_line, 1, length($cl_line) - 1);
                 }
                 my int $content_length = cast_int($cl_line);
-                my int $body_start = $header_end + 4;
-                my int $body_len = length($response) - $body_start;
-                if ($body_len >= $content_length) {
+                my int $body_bytes = core::byte_length(substr($response, $header_end + 4));
+                if ($body_bytes >= $content_length) {
                     break;
                 }
             }
@@ -553,6 +562,14 @@ func read_response(scalar $sock) str {
 
 # Internal: Make HTTP request
 func do_request(str $method, str $url, str $body, hash %options) hash {
+    my hash %response = ();
+    $response{"success"} = 0;
+
+    if (LWP::_has_crlf($method) || LWP::_has_crlf($url)) {
+        $response{"error"} = "Invalid CR/LF in HTTP request";
+        return %response;
+    }
+
     my hash %url_parts = LWP::parse_url($url);
 
     my str $host = $url_parts{"host"};
@@ -560,6 +577,11 @@ func do_request(str $method, str $url, str $body, hash %options) hash {
     my str $path = $url_parts{"path"};
     my str $query = $url_parts{"query"};
     my str $scheme = $url_parts{"scheme"};
+
+    if (LWP::_has_crlf($host) || LWP::_has_crlf($path) || LWP::_has_crlf($query)) {
+        $response{"error"} = "Invalid CR/LF in URL";
+        return %response;
+    }
 
     if (length($query) > 0) {
         $path = $path . "?" . $query;
@@ -574,6 +596,10 @@ func do_request(str $method, str $url, str $body, hash %options) hash {
     if (defined($options{"user_agent"})) {
         $ua = $options{"user_agent"};
     }
+    if (LWP::_has_crlf($ua)) {
+        $response{"error"} = "Invalid CR/LF in User-Agent header";
+        return %response;
+    }
     $request = $request . "User-Agent: " . $ua . "\r\n";
 
     # Connection
@@ -586,28 +612,30 @@ func do_request(str $method, str $url, str $body, hash %options) hash {
         my int $i = 0;
         while ($i < scalar(@hkeys)) {
             my str $hname = $hkeys[$i];
-            $request = $request . $hname . ": " . $custom_headers->{$hname} . "\r\n";
+            my str $hval = "" . $custom_headers->{$hname};
+            if (LWP::_has_crlf($hname) || LWP::_has_crlf($hval) || index($hname, ":") >= 0) {
+                $response{"error"} = "Invalid HTTP header";
+                return %response;
+            }
+            $request = $request . $hname . ": " . $hval . "\r\n";
             $i = $i + 1;
         }
     }
 
     # Body for POST/PUT
-    if (length($body) > 0) {
+    my int $body_len = core::byte_length($body);
+    if ($body_len > 0) {
         if (!defined($options{"headers"}) || !defined($options{"headers"}->{"Content-Type"})) {
             $request = $request . "Content-Type: application/x-www-form-urlencoded\r\n";
         }
-        $request = $request . "Content-Length: " . length($body) . "\r\n";
+        $request = $request . "Content-Length: " . $body_len . "\r\n";
     }
 
     $request = $request . "\r\n";
 
-    if (length($body) > 0) {
+    if ($body_len > 0) {
         $request = $request . $body;
     }
-
-    # Connect and send
-    my hash %response = ();
-    $response{"success"} = 0;
 
     if ($scheme eq "https") {
         # HTTPS requires the SSL library to be linked

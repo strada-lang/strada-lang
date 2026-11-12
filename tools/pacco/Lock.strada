@@ -16,28 +16,40 @@ func parse(str $path) scalar {
     return Pacco::Lock::parse_string($content);
 }
 
-# Parse lock file content
+# Parse lock file content (supports [package.<name>] and [[package]])
 func parse_string(str $content) scalar {
     my hash %packages = ();
     my array @lines = split("\n", $content);
 
     my str $current_name = "";
-    my hash %current_pkg = ();
+    my scalar $current_pkg = {};
 
-    foreach my str $line (@lines) {
-        # Skip comments
-        if (length($line) > 0 && substr($line, 0, 1) eq "#") {
+    foreach my str $raw_line (@lines) {
+        my str $line = Pacco::Manifest::trim($raw_line);
+
+        # Skip empty lines and comments
+        if (length($line) == 0 || substr($line, 0, 1) eq "#") {
             next;
         }
 
-        # Package block start
+        # [[package]] block start
         if ($line eq "[[package]]") {
-            # Save previous package if exists
             if ($current_name ne "") {
-                $packages{$current_name} = \%current_pkg;
+                $packages{$current_name} = $current_pkg;
             }
             $current_name = "";
-            %current_pkg = ();
+            $current_pkg = {};
+            next;
+        }
+
+        # [package.<name>] section header
+        if (length($line) > 10 && substr($line, 0, 9) eq "[package." && substr($line, length($line) - 1, 1) eq "]") {
+            if ($current_name ne "") {
+                $packages{$current_name} = $current_pkg;
+            }
+            $current_name = substr($line, 9, length($line) - 10);
+            $current_pkg = {};
+            $current_pkg->{"name"} = $current_name;
             next;
         }
 
@@ -54,16 +66,16 @@ func parse_string(str $content) scalar {
                 }
             }
 
-            if ($key eq "name") {
+            if ($key eq "name" && $current_name eq "") {
                 $current_name = $value;
             }
-            $current_pkg{$key} = $value;
+            $current_pkg->{$key} = $value;
         }
     }
 
     # Save last package
     if ($current_name ne "") {
-        $packages{$current_name} = \%current_pkg;
+        $packages{$current_name} = $current_pkg;
     }
 
     return \%packages;
@@ -83,26 +95,34 @@ func generate(scalar $resolved) str {
     foreach my str $name (@names) {
         my scalar $pkg = $resolved->{$name};
 
-        $output = $output . "[[package]]\n";
+        $output = $output . "[package." . $name . "]\n";
         $output = $output . "name = \"" . $name . "\"\n";
 
-        if (defined($pkg->{"version"})) {
+        if (defined($pkg->{"version"}) && $pkg->{"version"} ne "") {
             $output = $output . "version = \"" . $pkg->{"version"} . "\"\n";
         }
 
-        if (defined($pkg->{"source"})) {
+        if (defined($pkg->{"source"}) && $pkg->{"source"} ne "") {
             $output = $output . "source = \"" . $pkg->{"source"} . "\"\n";
         }
 
-        if (defined($pkg->{"checksum"})) {
+        if (defined($pkg->{"constraint"}) && $pkg->{"constraint"} ne "") {
+            $output = $output . "constraint = \"" . $pkg->{"constraint"} . "\"\n";
+        }
+
+        if (defined($pkg->{"path"}) && $pkg->{"path"} ne "") {
+            $output = $output . "path = \"" . $pkg->{"path"} . "\"\n";
+        }
+
+        if (defined($pkg->{"checksum"}) && $pkg->{"checksum"} ne "") {
             $output = $output . "checksum = \"" . $pkg->{"checksum"} . "\"\n";
         }
 
-        if (defined($pkg->{"git"})) {
+        if (defined($pkg->{"git"}) && $pkg->{"git"} ne "") {
             $output = $output . "git = \"" . $pkg->{"git"} . "\"\n";
         }
 
-        if (defined($pkg->{"rev"})) {
+        if (defined($pkg->{"rev"}) && $pkg->{"rev"} ne "") {
             $output = $output . "rev = \"" . $pkg->{"rev"} . "\"\n";
         }
 
@@ -111,6 +131,7 @@ func generate(scalar $resolved) str {
             my scalar $deps = $pkg->{"dependencies"};
             my array @dep_names = keys(%{$deps});
             if (scalar(@dep_names) > 0) {
+                @dep_names = Pacco::Lock::sort_strings(@dep_names);
                 $output = $output . "dependencies = [";
                 my int $first = 1;
                 foreach my str $dep (@dep_names) {
@@ -152,7 +173,13 @@ func is_current(scalar $lock, scalar $manifest) int {
         }
 
         # Check version satisfies constraint
-        my str $constraint = $deps->{$name};
+        my scalar $spec = $deps->{$name};
+        my str $constraint = "*";
+        if (Pacco::Manifest::is_hash($spec) == 1) {
+            $constraint = defined($spec->{"version"}) ? $spec->{"version"} : "*";
+        } else {
+            $constraint = "" . $spec;
+        }
         my str $locked_version = $lock->{$name}->{"version"};
 
         if (defined($locked_version)) {

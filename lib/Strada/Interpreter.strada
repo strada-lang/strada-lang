@@ -1492,6 +1492,9 @@ func interp_resolve_method(scalar $interp, str $pkg, str $method) scalar {
         $fi = $funcs->{$func_key};
     }
     if (defined($fi)) {
+        if (!exists($fi, "package") || length("" . $fi->{"package"}) == 0) {
+            $fi->{"package"} = $pkg;
+        }
         $interp->{"method_cache"}->{$cache_key} = $fi;
         return $fi;
     }
@@ -1510,6 +1513,9 @@ func interp_resolve_method(scalar $interp, str $pkg, str $method) scalar {
             my str $anc_key = $ancestor . "_" . $method;
             if (exists($funcs, $anc_key)) {
                 my scalar $found = $funcs->{$anc_key};
+                if (!exists($found, "package") || length("" . $found->{"package"}) == 0) {
+                    $found->{"package"} = $ancestor;
+                }
                 $interp->{"method_cache"}->{$cache_key} = $found;
                 return $found;
             }
@@ -1813,6 +1819,9 @@ func interp_load_program(scalar $interp, scalar $program) void {
         my scalar $fn = $funcs->[$i];
         my str $name = $fn->{"name"};
         interp_register_func($interp, $name, $fn->{"params"}, $fn->{"param_count"}, $fn->{"body"}, $interp->{"global_env"});
+        if (defined($fn->{"package"}) && length("" . $fn->{"package"}) > 0) {
+            $interp->{"functions"}->{$name}->{"package"} = $fn->{"package"};
+        }
         $i = $i + 1;
     }
 
@@ -4160,6 +4169,9 @@ func call_user_func(scalar $interp, scalar $func_info, scalar $args) scalar {
 
     # Create function scope
     my scalar $func_env = env_new($closure_env);
+    if (exists($func_info, "package") && defined($func_info->{"package"}) && length("" . $func_info->{"package"}) > 0) {
+        $func_env->{"vars"}->{"__def_pkg__"} = $func_info->{"package"};
+    }
 
     # Bind parameters (skip entirely for zero-param functions)
     if ($param_count > 0) {
@@ -4671,52 +4683,83 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
         return \@sorted;
     }
 
-    # --- Try/Catch ---
+    # --- Try/Catch/Finally ---
     if ($type == NI::TRY_CATCH) {
         my scalar $try_block = $node->{"try_block"};
         my scalar $catch_clauses = $node->{"catch_clauses"};
         my int $catch_count = $node->{"catch_count"};
+        my scalar $finally_block = $node->{"finally_block"};
+        my int $has_finally = (defined($finally_block) && $finally_block != 0) ? 1 : 0;
+
+        my scalar $tc_result = undef;
+        my int $pending_rethrow = 0;
+        my scalar $pending_exc = undef;
 
         try {
             my scalar $try_env = env_new($env);
-            return eval_block($interp, $try_block, $try_env);
+            $tc_result = eval_block($interp, $try_block, $try_env);
         } catch ($e) {
-            # Don't catch interpreter control flow signals
             if (is_signal($e, "return") || is_signal($e, "last") || is_signal($e, "next") || is_signal($e, "redo")) {
-                throw($e);
-            }
+                $pending_rethrow = 1;
+                $pending_exc = $e;
+            } else {
+                my int $handled = 0;
+                my int $ci = 0;
+                while ($ci < $catch_count) {
+                    my scalar $clause = $catch_clauses->[$ci];
+                    my str $catch_type = $clause->{"catch_type"};
+                    my str $catch_var = $clause->{"catch_var"};
+                    my scalar $catch_block = $clause->{"catch_block"};
 
-            # Try each catch clause
-            my int $ci = 0;
-            while ($ci < $catch_count) {
-                my scalar $clause = $catch_clauses->[$ci];
-                my str $catch_type = $clause->{"catch_type"};
-                my str $catch_var = $clause->{"catch_var"};
-                my scalar $catch_block = $clause->{"catch_block"};
-
-                my int $matches = 0;
-                if (length($catch_type) == 0) {
-                    # Catch-all
-                    $matches = 1;
-                } elsif (ref($e) eq "HASH" && exists($e, "__class__")) {
-                    # Typed catch: check isa (walks inheritance chain)
-                    if (interp_isa($interp, $e->{"__class__"}, $catch_type)) {
+                    my int $matches = 0;
+                    if (length($catch_type) == 0) {
                         $matches = 1;
+                    } elsif (ref($e) eq "HASH" && exists($e, "__class__")) {
+                        if (interp_isa($interp, $e->{"__class__"}, $catch_type)) {
+                            $matches = 1;
+                        }
+                    }
+
+                    if ($matches) {
+                        $handled = 1;
+                        try {
+                            my scalar $catch_env = env_new($env);
+                            env_set($catch_env, $catch_var, $e);
+                            $tc_result = eval_block($interp, $catch_block, $catch_env);
+                        } catch ($ce) {
+                            $pending_rethrow = 1;
+                            $pending_exc = $ce;
+                        }
+                        $ci = $catch_count;
+                    } else {
+                        $ci = $ci + 1;
                     }
                 }
 
-                if ($matches) {
-                    my scalar $catch_env = env_new($env);
-                    env_set($catch_env, $catch_var, $e);
-                    return eval_block($interp, $catch_block, $catch_env);
+                if ($handled == 0) {
+                    $pending_rethrow = 1;
+                    $pending_exc = $e;
                 }
-
-                $ci = $ci + 1;
             }
-
-            # No catch matched - re-throw
-            throw($e);
         }
+
+        if ($has_finally == 1) {
+            my int $saved_sig = $interp->{"signal"};
+            my scalar $saved_sig_val = $interp->{"signal_value"};
+            $interp->{"signal"} = SIG::NONE;
+            $interp->{"signal_value"} = undef;
+            my scalar $fin_env = env_new($env);
+            eval_block($interp, $finally_block, $fin_env);
+            if ($interp->{"signal"} == SIG::NONE && $saved_sig != SIG::NONE) {
+                $interp->{"signal"} = $saved_sig;
+                $interp->{"signal_value"} = $saved_sig_val;
+            }
+        }
+
+        if ($pending_rethrow == 1) {
+            throw($pending_exc);
+        }
+        return $tc_result;
     }
 
     # --- Throw ---
@@ -4834,25 +4877,63 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
         my scalar $raw_args = $node->{"args"};
         my int $argc = $node->{"arg_count"};
 
-        # Get $self from environment
-        my scalar $self_obj = env_get($env, "self");
+        # Evaluate explicit arguments (supporting spread)
+        my array @evaled_args = ();
+        my int $ai = 0;
+        while ($ai < $argc) {
+            my scalar $arg_node = $raw_args->[$ai];
+            if (defined($arg_node) && $arg_node->{"type"} == NI::SPREAD) {
+                my scalar $spread_val = eval_node($interp, $arg_node->{"target"}, $env);
+                my int $slen = size($spread_val);
+                my int $si = 0;
+                while ($si < $slen) {
+                    push(@evaled_args, $spread_val->[$si]);
+                    $si = $si + 1;
+                }
+            } else {
+                push(@evaled_args, eval_node($interp, $arg_node, $env));
+            }
+            $ai = $ai + 1;
+        }
+
+        my scalar $env_self = env_get($env, "self");
+        my scalar $self_obj = $env_self;
+        my array @args = ();
+
+        if (size(\@evaled_args) > 0) {
+            my scalar $first_raw = $raw_args->[0];
+            my int $first_is_self = 0;
+            if (defined($first_raw) && $first_raw->{"type"} == NI::VARIABLE && $first_raw->{"name"} eq "self") {
+                $first_is_self = 1;
+            } elsif (length(get_obj_class($evaled_args[0])) > 0 || !defined($env_self)) {
+                $first_is_self = 1;
+            }
+            if ($first_is_self == 1) {
+                $self_obj = $evaled_args[0];
+                @args = @evaled_args;
+            } else {
+                push(@args, $self_obj);
+                my int $k = 0;
+                while ($k < size(\@evaled_args)) {
+                    push(@args, $evaled_args[$k]);
+                    $k = $k + 1;
+                }
+            }
+        } else {
+            push(@args, $self_obj);
+        }
+
+        # Resolve starting from the current method's defining package (NOT get_obj_class($self_obj)!)
+        # so multi-level inheritance A <- B <- C resolves B's SUPER to A instead of recursing into B.
+        my scalar $def_pkg = env_get($env, "__def_pkg__");
         my str $pkg = "";
-        if (defined($self_obj)) {
+        if (defined($def_pkg) && length("" . $def_pkg) > 0) {
+            $pkg = "" . $def_pkg;
+        } elsif (defined($self_obj)) {
             $pkg = get_obj_class($self_obj);
         }
 
-        # Build args
-        my array @args = ();
-        push(@args, $self_obj);
-        if ($argc > 0) {
-            my int $ai = 0;
-            while ($ai < $argc) {
-                push(@args, eval_node($interp, $raw_args->[$ai], $env));
-                $ai = $ai + 1;
-            }
-        }
-
-        # Look up method in parent classes only
+        # Look up method in parent classes of $pkg
         if (length($pkg) > 0 && exists($interp->{"inherits"}, $pkg)) {
             my scalar $parents = $interp->{"inherits"}->{$pkg};
             my int $pi = 0;
@@ -5409,7 +5490,9 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
                     return undef;
                 }
                 if ($del_type == NI::DEREF_HASH) {
-                    my scalar $del_hash = eval_node($interp, $del_arg->{"target"}, $env);
+                    my scalar $del_ref_node = $del_arg->{"ref"};
+                    if (!defined($del_ref_node)) { $del_ref_node = $del_arg->{"target"}; }
+                    my scalar $del_hash = eval_node($interp, $del_ref_node, $env);
                     my scalar $del_key = eval_node($interp, $del_arg->{"key"}, $env);
                     delete($del_hash, $del_key);
                     return undef;
@@ -5428,7 +5511,9 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
                     return exists($ex_hash, $ex_key) ? 1 : 0;
                 }
                 if ($ex_type == NI::DEREF_HASH) {
-                    my scalar $ex_hash = eval_node($interp, $ex_arg->{"target"}, $env);
+                    my scalar $ex_ref_node = $ex_arg->{"ref"};
+                    if (!defined($ex_ref_node)) { $ex_ref_node = $ex_arg->{"target"}; }
+                    my scalar $ex_hash = eval_node($interp, $ex_ref_node, $env);
                     my scalar $ex_key = eval_node($interp, $ex_arg->{"key"}, $env);
                     return exists($ex_hash, $ex_key) ? 1 : 0;
                 }
@@ -5568,7 +5653,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
         # Handle isa() special method
         if ($method eq "isa") {
             if (length($pkg) > 0 && $argc >= 1) {
-                my str $target_class = $args->[1];
+                my str $target_class = $args[1];
                 return interp_isa($interp, $pkg, $target_class) ? 1 : 0;
             }
             return 0;
@@ -5577,7 +5662,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
         # Handle can() special method
         if ($method eq "can") {
             if (length($pkg) > 0 && $argc >= 1) {
-                my str $target_method = $args->[1];
+                my str $target_method = $args[1];
                 my scalar $found = interp_resolve_method($interp, $pkg, $target_method);
                 return defined($found) ? 1 : 0;
             }
@@ -5587,7 +5672,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
         # ---- BigInt method overrides (C-backed) ----
         if ($pkg eq "BigInt") {
             if ($method eq "add") {
-                my scalar $other = $args->[1];
+                my scalar $other = $args[1];
                 my int $sa = $obj->{"s"};
                 my int $sb = $other->{"s"};
                 my str $va = $obj->{"v"};
@@ -5614,7 +5699,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
             # sub/neg/pow/etc. - fall through to user-defined functions
             # (sub calls neg+add, pow calls mul - all intercepted above)
             if ($method eq "compare") {
-                my scalar $other = $args->[1];
+                my scalar $other = $args[1];
                 my int $sa = $obj->{"s"};
                 my int $sb = $other->{"s"};
                 if ($obj->{"v"} eq "0" && $other->{"v"} eq "0") { return 0; }
@@ -5625,7 +5710,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
                 return 0 - $mc;
             }
             if ($method eq "mul") {
-                my scalar $other = $args->[1];
+                my scalar $other = $args[1];
                 my str $va = $obj->{"v"};
                 my str $vb = $other->{"v"};
                 my hash %r = ();
@@ -5638,7 +5723,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
                 return bless(\%r, "BigInt");
             }
             if ($method eq "div") {
-                my scalar $other = $args->[1];
+                my scalar $other = $args[1];
                 my str $va = $obj->{"v"};
                 my str $vb = $other->{"v"};
                 if ($vb eq "0") { die("BigInt: division by zero"); }
@@ -5651,7 +5736,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
                 return bless(\%r, "BigInt");
             }
             if ($method eq "mod") {
-                my scalar $other = $args->[1];
+                my scalar $other = $args[1];
                 my str $va = $obj->{"v"};
                 my str $vb = $other->{"v"};
                 if ($vb eq "0") { die("BigInt: modulo by zero"); }
@@ -5667,7 +5752,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
         # ---- BigFloat method overrides (C-backed) ----
         if ($pkg eq "BigFloat") {
             if ($method eq "add") {
-                my scalar $other = $args->[1];
+                my scalar $other = $args[1];
                 my int $sa = $obj->{"s"};
                 my int $sb = $other->{"s"};
                 my str $ma = $obj->{"m"};
@@ -5706,7 +5791,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
                 return bless(\%r, "BigFloat");
             }
             if ($method eq "mul") {
-                my scalar $other = $args->[1];
+                my scalar $other = $args[1];
                 my str $ma = $obj->{"m"};
                 my str $mb = $other->{"m"};
                 my hash %r = ();
@@ -5723,10 +5808,10 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
                 return bless(\%r, "BigFloat");
             }
             if ($method eq "div" || $method eq "div_precision") {
-                my scalar $other = $args->[1];
+                my scalar $other = $args[1];
                 my int $precision = 20;
-                if ($method eq "div_precision" && size($args) > 2) {
-                    $precision = $args->[2];
+                if ($method eq "div_precision" && size(\@args) > 2) {
+                    $precision = $args[2];
                 }
                 my str $ma = $obj->{"m"};
                 my str $mb = $other->{"m"};
@@ -5751,7 +5836,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
                 return bless(\%r, "BigFloat");
             }
             if ($method eq "compare") {
-                my scalar $other = $args->[1];
+                my scalar $other = $args[1];
                 my int $sa = $obj->{"s"};
                 my int $sb = $other->{"s"};
                 if ($obj->{"m"} eq "0" && $other->{"m"} eq "0") { return 0; }
@@ -5772,7 +5857,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
                 return 0 - $mc;
             }
             if ($method eq "round") {
-                my int $places = $args->[1];
+                my int $places = $args[1];
                 my str $m = $obj->{"m"};
                 my int $scale = $obj->{"e"};
                 if ($scale <= $places) {
@@ -5865,57 +5950,87 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
 
             my scalar $mods = $interp->{"method_modifiers"};
 
-            # Execute before modifiers
-            my int $mi = 0;
-            while ($mi < $mod_count) {
-                my scalar $mod = $mods->[$mi];
-                if ($mod->{"mod_type"} eq "before" && $mod->{"method_name"} eq $method && $mod->{"package"} eq $pkg) {
-                    my scalar $mod_fi = $mod->{"func_info"};
-                    if (defined($mod_fi)) {
-                        call_user_func($interp, $mod_fi, \@args);
-                    }
+            # Build class search order (most-derived first) across MRO
+            my array @mod_classes = ($pkg);
+            if (exists($interp->{"mro"}, $pkg)) {
+                my scalar $mro_list = $interp->{"mro"}->{$pkg};
+                my int $mri = 0;
+                while ($mri < size($mro_list)) {
+                    push(@mod_classes, $mro_list->[$mri]);
+                    $mri = $mri + 1;
                 }
-                $mi = $mi + 1;
             }
 
-            # Execute around modifiers (wraps the actual call)
-            $mi = 0;
-            while ($mi < $mod_count) {
-                my scalar $mod = $mods->[$mi];
-                if ($mod->{"mod_type"} eq "around" && $mod->{"method_name"} eq $method && $mod->{"package"} eq $pkg) {
-                    my scalar $mod_fi = $mod->{"func_info"};
-                    if (defined($mod_fi)) {
-                        # Build a closure-like wrapper for $orig
-                        my hash %orig = ();
-                        $orig{"__orig_func__"} = $func_info;
-                        my array @around_args = ();
-                        push(@around_args, $args[0]);
-                        push(@around_args, \%orig);
-                        my int $aai = 1;
-                        while ($aai < size(\@args)) {
-                            push(@around_args, $args[$aai]);
-                            $aai = $aai + 1;
+            # Execute before modifiers (across MRO, most-derived first)
+            my int $ci = 0;
+            while ($ci < size(\@mod_classes)) {
+                my str $mcls = $mod_classes[$ci];
+                my int $mi = 0;
+                while ($mi < $mod_count) {
+                    my scalar $mod = $mods->[$mi];
+                    if ($mod->{"mod_type"} eq "before" && $mod->{"method_name"} eq $method && $mod->{"package"} eq $mcls) {
+                        my scalar $mod_fi = $mod->{"func_info"};
+                        if (defined($mod_fi)) {
+                            call_user_func($interp, $mod_fi, \@args);
                         }
-                        return call_user_func($interp, $mod_fi, \@around_args);
                     }
+                    $mi = $mi + 1;
                 }
-                $mi = $mi + 1;
+                $ci = $ci + 1;
             }
 
-            # Call the actual method
-            my scalar $result = call_user_func($interp, $func_info, \@args);
-
-            # Execute after modifiers
-            $mi = 0;
-            while ($mi < $mod_count) {
-                my scalar $mod = $mods->[$mi];
-                if ($mod->{"mod_type"} eq "after" && $mod->{"method_name"} eq $method && $mod->{"package"} eq $pkg) {
-                    my scalar $mod_fi = $mod->{"func_info"};
-                    if (defined($mod_fi)) {
-                        call_user_func($interp, $mod_fi, \@args);
+            # Execute around modifier (first found walking MRO most-derived first; passes ($orig, $self, @args))
+            my int $ran_around = 0;
+            my scalar $result = undef;
+            $ci = 0;
+            while ($ci < size(\@mod_classes) && $ran_around == 0) {
+                my str $mcls = $mod_classes[$ci];
+                my int $mi = 0;
+                while ($mi < $mod_count && $ran_around == 0) {
+                    my scalar $mod = $mods->[$mi];
+                    if ($mod->{"mod_type"} eq "around" && $mod->{"method_name"} eq $method && $mod->{"package"} eq $mcls) {
+                        my scalar $mod_fi = $mod->{"func_info"};
+                        if (defined($mod_fi)) {
+                            my hash %orig = ();
+                            $orig{"__orig_func__"} = $func_info;
+                            my array @around_args = ();
+                            push(@around_args, \%orig);
+                            push(@around_args, $args[0]);
+                            my int $aai = 1;
+                            while ($aai < size(\@args)) {
+                                push(@around_args, $args[$aai]);
+                                $aai = $aai + 1;
+                            }
+                            $result = call_user_func($interp, $mod_fi, \@around_args);
+                            $ran_around = 1;
+                        }
                     }
+                    $mi = $mi + 1;
                 }
-                $mi = $mi + 1;
+                $ci = $ci + 1;
+            }
+
+            # Call the actual method if no around modifier handled it
+            if ($ran_around == 0) {
+                $result = call_user_func($interp, $func_info, \@args);
+            }
+
+            # Execute after modifiers (across MRO)
+            $ci = 0;
+            while ($ci < size(\@mod_classes)) {
+                my str $mcls = $mod_classes[$ci];
+                my int $mi = 0;
+                while ($mi < $mod_count) {
+                    my scalar $mod = $mods->[$mi];
+                    if ($mod->{"mod_type"} eq "after" && $mod->{"method_name"} eq $method && $mod->{"package"} eq $mcls) {
+                        my scalar $mod_fi = $mod->{"func_info"};
+                        if (defined($mod_fi)) {
+                            call_user_func($interp, $mod_fi, \@args);
+                        }
+                    }
+                    $mi = $mi + 1;
+                }
+                $ci = $ci + 1;
             }
 
             return $result;
@@ -6332,6 +6447,9 @@ func eval_string(str $code) scalar {
             $eval_func = $fn;
         } else {
             interp_register_func($g_eval_interp, $fn->{"name"}, $fn->{"params"}, $fn->{"param_count"}, $fn->{"body"}, $g_eval_interp->{"global_env"});
+            if (defined($fn->{"package"}) && length("" . $fn->{"package"}) > 0) {
+                $g_eval_interp->{"functions"}->{$fn->{"name"}}->{"package"} = $fn->{"package"};
+            }
         }
         $i = $i + 1;
     }
@@ -6414,10 +6532,20 @@ func get_eval_backend() str {
     return $g_eval_backend;
 }
 
-# Evaluate code using the bytecode VM backend.
-# Parses the code, compiles to bytecode, executes, returns int result.
-# Note: VM eval is stateless — no persistent variables between calls.
+# Evaluate code using the bytecode VM backend (falls back to tree-walk when
+# the binary was not built with -DHAVE_VM).
 func eval_string_vm(str $code) scalar {
+    my int $have_vm = 0;
+    __C__ {
+#ifdef HAVE_VM
+        strada_decref(have_vm);
+        have_vm = STRADA_MAKE_TAGGED_INT(1);
+#endif
+    }
+    if ($have_vm == 0) {
+        return eval_string($code);
+    }
+
     my str $trimmed = $code;
     $trimmed =~ s/^\s+//;
     $trimmed =~ s/\s+$//;
@@ -6436,14 +6564,18 @@ func eval_string_vm(str $code) scalar {
     # Check if input is a top-level construct
     my int $is_top = 0;
     if (index($trimmed, "func ") == 0 || index($trimmed, "fn ") == 0) { $is_top = 1; }
+    if (index($trimmed, "async func") == 0 || index($trimmed, "async fn") == 0) { $is_top = 1; }
+    if (index($trimmed, "private func") == 0 || index($trimmed, "private fn") == 0) { $is_top = 1; }
     if (index($trimmed, "package ") == 0) { $is_top = 1; }
+    if (index($trimmed, "enum ") == 0) { $is_top = 1; }
+    if (index($trimmed, "has ") == 0) { $is_top = 1; }
+    if (index($trimmed, "extends ") == 0) { $is_top = 1; }
 
     my str $source = "";
     if ($is_top == 1) {
         $source = $trimmed . "\nfunc __eval__() scalar { return undef; }\n";
     } else {
-        # Wrap in main() for the VM (VM looks for main or __eval__)
-        $source = "func main() int {\n" . $trimmed . "\nreturn 0;\n}\n";
+        $source = "func __eval__() scalar {\n" . $trimmed . "\n}\n";
     }
 
     # Parse
@@ -6453,8 +6585,63 @@ func eval_string_vm(str $code) scalar {
     my array @empty = ();
     my scalar $program = parse_program($parser, \@empty, \@empty, \@empty, \@empty);
 
+    # Rewrite trailing expression statement of __eval__ to NI::RETURN_STMT so VM returns its value
+    my scalar $pfuncs = $program->{"functions"};
+    my int $pfcount = $program->{"function_count"};
+    my int $pfi = 0;
+    while ($pfi < $pfcount) {
+        my scalar $pfn = $pfuncs->[$pfi];
+        if ($pfn->{"name"} eq "__eval__") {
+            my scalar $body = $pfn->{"body"};
+            if (defined($body)) {
+                my scalar $stmts = $body->{"statements"};
+                my int $scnt = $body->{"statement_count"};
+                if ($scnt > 0) {
+                    my scalar $last_stmt = $stmts->[$scnt - 1];
+                    if (defined($last_stmt)) {
+                        my int $ltype = $last_stmt->{"type"};
+                        if ($ltype == NI::EXPR_STMT) {
+                            my scalar $expr_node = $last_stmt->{"expr"};
+                            if (defined($expr_node) && ($expr_node->{"type"} == NI::REGEX_SUBST || $expr_node->{"type"} == NI::TR)) {
+                                my hash %undef_node = ();
+                                $undef_node{"type"} = NI::UNDEF;
+                                my hash %ret_u = ();
+                                $ret_u{"type"} = NI::RETURN_STMT;
+                                $ret_u{"value"} = \%undef_node;
+                                push($stmts, \%ret_u);
+                                $body->{"statement_count"} = $scnt + 1;
+                            } else {
+                                my hash %ret_node = ();
+                                $ret_node{"type"} = NI::RETURN_STMT;
+                                $ret_node{"value"} = $expr_node;
+                                $stmts->[$scnt - 1] = \%ret_node;
+                            }
+                        } elsif ($ltype != NI::RETURN_STMT) {
+                            my hash %undef_node = ();
+                            $undef_node{"type"} = NI::UNDEF;
+                            my hash %ret_u = ();
+                            $ret_u{"type"} = NI::RETURN_STMT;
+                            $ret_u{"value"} = \%undef_node;
+                            push($stmts, \%ret_u);
+                            $body->{"statement_count"} = $scnt + 1;
+                        }
+                    }
+                } else {
+                    my hash %undef_node = ();
+                    $undef_node{"type"} = NI::UNDEF;
+                    my hash %ret_u = ();
+                    $ret_u{"type"} = NI::RETURN_STMT;
+                    $ret_u{"value"} = \%undef_node;
+                    push($stmts, \%ret_u);
+                    $body->{"statement_count"} = 1;
+                }
+            }
+        }
+        $pfi = $pfi + 1;
+    }
+
     # Compile to bytecode and execute
-    my int $vm_result = 0;
+    my scalar $vm_result = undef;
     __C__ {
 #ifdef HAVE_VM
         VMProgram *vprog = vm_compile_program(program);
@@ -6467,9 +6654,8 @@ func eval_string_vm(str $code) scalar {
             if (entry) {
                 VM *vvm = vm_new(vprog);
                 VMValue vres = vm_execute(vvm, entry);
-                int64_t rc = VM_IS_INT(vres) ? VM_INT_VAL(vres) : 0;
                 strada_decref(vm_result);
-                vm_result = STRADA_MAKE_TAGGED_INT(rc);
+                vm_result = vm_value_to_sv(vres);
                 vm_free(vvm);
             }
             vm_program_free(vprog);

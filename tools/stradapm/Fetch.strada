@@ -6,11 +6,47 @@
 
 package StradaPM::Fetch;
 
+# Single-quote a string safely for /bin/sh
+func shell_quote(str $s) str {
+    my str $out = "'";
+    my int $i = 0;
+    my int $len = length($s);
+    while ($i < $len) {
+        my str $ch = substr($s, $i, 1);
+        if ($ch eq "'") {
+            $out = $out . "'\\''";
+        } else {
+            $out = $out . $ch;
+        }
+        $i = $i + 1;
+    }
+    return $out . "'";
+}
+
+# Validate a package/project/version token so it cannot traverse paths or inject flags
+func is_safe_name(str $name) int {
+    if (length($name) == 0) { return 0; }
+    if ($name eq "." || $name eq "..") { return 0; }
+    if (substr($name, 0, 1) eq "-" || substr($name, 0, 1) eq ".") { return 0; }
+    if (index($name, "..") >= 0 || index($name, "/") >= 0 || index($name, "\\") >= 0) { return 0; }
+    if ($name =~ /^[a-zA-Z0-9._-]+$/) { return 1; }
+    return 0;
+}
+
 # Fetch a package from a git URL
 func fetch_git(str $url, str $ref, str $dest) int {
+    if (length($url) == 0 || substr($url, 0, 1) eq "-") {
+        warn("Invalid git URL: " . $url);
+        return 0;
+    }
+    if ($ref ne "" && substr($ref, 0, 1) eq "-") {
+        warn("Invalid git ref: " . $ref);
+        return 0;
+    }
+
     # Remove destination if it exists
-    if (sys::dir_exists($dest) == 1) {
-        my int $rm_result = sys::system("rm -rf " . $dest);
+    if (core::dir_exists($dest) == 1) {
+        my int $rm_result = core::system("rm -rf -- " . StradaPM::Fetch::shell_quote($dest));
         if ($rm_result != 0) {
             warn("Failed to remove existing directory: " . $dest);
             return 0;
@@ -20,19 +56,21 @@ func fetch_git(str $url, str $ref, str $dest) int {
     # Clone with specific ref/tag
     my str $cmd = "";
     if ($ref ne "" && $ref ne "HEAD" && $ref ne "main" && $ref ne "master") {
-        $cmd = "git clone --depth 1 --branch " . $ref . " " . $url . " " . $dest . " 2>&1";
+        $cmd = "git clone --depth 1 --branch " . StradaPM::Fetch::shell_quote($ref)
+            . " -- " . StradaPM::Fetch::shell_quote($url) . " " . StradaPM::Fetch::shell_quote($dest) . " 2>&1";
     } else {
-        $cmd = "git clone --depth 1 " . $url . " " . $dest . " 2>&1";
+        $cmd = "git clone --depth 1 -- " . StradaPM::Fetch::shell_quote($url)
+            . " " . StradaPM::Fetch::shell_quote($dest) . " 2>&1";
     }
 
-    my int $result = sys::system($cmd);
+    my int $result = core::system($cmd);
     if ($result != 0) {
         warn("Git clone failed: " . $cmd);
         return 0;
     }
 
     # Remove .git directory to save space
-    sys::system("rm -rf " . $dest . "/.git");
+    core::system("rm -rf -- " . StradaPM::Fetch::shell_quote($dest . "/.git"));
 
     return 1;
 }
@@ -119,16 +157,21 @@ func fetch_package(str $source, str $ver, str $deps_dir) scalar {
         my str $ref = $parsed->{"ref"};
 
         # Use version as ref if no explicit ref
-        if ($ref eq "" && $ver ne "") {
+        my str $clean_ver = ($ver eq "*") ? "" : $ver;
+        if ($ref eq "" && $clean_ver ne "") {
             # Try v-prefixed tag first
-            $ref = "v" . $ver;
+            $ref = "v" . $clean_ver;
         }
 
         # Generate destination directory name
         my str $name = StradaPM::Fetch::extract_repo_name($url);
+        if (StradaPM::Fetch::is_safe_name($name) == 0 || ($clean_ver ne "" && StradaPM::Fetch::is_safe_name($clean_ver) == 0)) {
+            $result{"error"} = "Unsafe package name or version: " . $name;
+            return \%result;
+        }
         my str $dest = $deps_dir . "/" . $name;
-        if ($ver ne "") {
-            $dest = $dest . "-" . $ver;
+        if ($clean_ver ne "") {
+            $dest = $dest . "-" . $clean_ver;
         }
 
         # Fetch
@@ -137,7 +180,7 @@ func fetch_package(str $source, str $ver, str $deps_dir) scalar {
             $result{"path"} = $dest;
         } else {
             # Try without v prefix
-            if (StradaPM::Fetch::fetch_git($url, $ver, $dest) == 1) {
+            if (StradaPM::Fetch::fetch_git($url, $clean_ver, $dest) == 1) {
                 $result{"success"} = 1;
                 $result{"path"} = $dest;
             } else {
@@ -146,7 +189,7 @@ func fetch_package(str $source, str $ver, str $deps_dir) scalar {
         }
     } elsif ($type eq "path") {
         my str $path = $parsed->{"path"};
-        if (sys::dir_exists($path) == 1) {
+        if (core::dir_exists($path) == 1) {
             $result{"success"} = 1;
             $result{"path"} = $path;
         } else {
@@ -189,12 +232,12 @@ func extract_repo_name(str $url) str {
 func ensure_deps_dir(str $project_dir) str {
     my str $deps_dir = $project_dir . "/.strada/deps";
 
-    if (sys::dir_exists($project_dir . "/.strada") == 0) {
-        sys::mkdir($project_dir . "/.strada", 493);  # 0755
+    if (core::dir_exists($project_dir . "/.strada") == 0) {
+        core::mkdir($project_dir . "/.strada", 493);  # 0755
     }
 
-    if (sys::dir_exists($deps_dir) == 0) {
-        sys::mkdir($deps_dir, 493);
+    if (core::dir_exists($deps_dir) == 0) {
+        core::mkdir($deps_dir, 493);
     }
 
     return $deps_dir;
@@ -207,17 +250,17 @@ func is_installed(str $deps_dir, str $name, str $ver) int {
         $path = $path . "-" . $ver;
     }
 
-    if (sys::dir_exists($path) == 1) {
+    if (core::dir_exists($path) == 1) {
         # Check if it has a Strada.toml
-        if (sys::file_exists($path . "/Strada.toml") == 1) {
+        if (core::file_exists($path . "/Strada.toml") == 1) {
             return 1;
         }
         # Or source files
-        if (sys::dir_exists($path . "/src") == 1) {
+        if (core::dir_exists($path . "/src") == 1) {
             return 1;
         }
         # Or a lib directory
-        if (sys::dir_exists($path . "/lib") == 1) {
+        if (core::dir_exists($path . "/lib") == 1) {
             return 1;
         }
     }
@@ -232,7 +275,7 @@ func get_installed_path(str $deps_dir, str $name, str $ver) str {
         $path = $path . "-" . $ver;
     }
 
-    if (sys::dir_exists($path) == 1) {
+    if (core::dir_exists($path) == 1) {
         return $path;
     }
 
@@ -244,11 +287,11 @@ func checksum_file(str $path) str {
     my str $result = "";
 
     # Use sha256sum if available
-    my str $cmd = "sha256sum " . $path . " 2>/dev/null | cut -d' ' -f1";
-    my scalar $fh = sys::popen($cmd, "r");
+    my str $cmd = "sha256sum -- " . StradaPM::Fetch::shell_quote($path) . " 2>/dev/null | cut -d' ' -f1";
+    my scalar $fh = core::popen($cmd, "r");
     if (defined($fh)) {
-        $result = sys::fgets($fh, 128);
-        sys::pclose($fh);
+        $result = core::fgets($fh, 128);
+        core::pclose($fh);
 
         # Trim newline
         if (length($result) > 0 && substr($result, length($result) - 1, 1) eq "\n") {
@@ -261,13 +304,13 @@ func checksum_file(str $path) str {
 
 # Compute checksum of a directory (hash of all file hashes)
 func checksum_dir(str $path) str {
-    my str $cmd = "find " . $path . " -type f -exec sha256sum {} \\; 2>/dev/null | sort | sha256sum | cut -d' ' -f1";
+    my str $cmd = "find " . StradaPM::Fetch::shell_quote($path) . " -type f -exec sha256sum {} \\; 2>/dev/null | sort | sha256sum | cut -d' ' -f1";
     my str $result = "";
 
-    my scalar $fh = sys::popen($cmd, "r");
+    my scalar $fh = core::popen($cmd, "r");
     if (defined($fh)) {
-        $result = sys::fgets($fh, 128);
-        sys::pclose($fh);
+        $result = core::fgets($fh, 128);
+        core::pclose($fh);
 
         if (length($result) > 0 && substr($result, length($result) - 1, 1) eq "\n") {
             $result = substr($result, 0, length($result) - 1);

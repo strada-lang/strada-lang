@@ -8,7 +8,7 @@ package StradaPM::Manifest;
 
 # Parse a Strada.toml file
 func parse(str $path) scalar {
-    if (sys::file_exists($path) == 0) {
+    if (core::file_exists($path) == 0) {
         return undef;
     }
 
@@ -44,11 +44,11 @@ func parse_string(str $content) scalar {
                         $result{$current_section} = {};
                     }
                 } elsif (scalar(@parts) == 2) {
-                    if (!exists($result{@parts[0]})) {
-                        $result{@parts[0]} = {};
+                    if (!exists($result{$parts[0]})) {
+                        $result{$parts[0]} = {};
                     }
-                    if (!exists($result{@parts[0]}{@parts[1]})) {
-                        $result{@parts[0]}{@parts[1]} = {};
+                    if (!exists($result{$parts[0]}{$parts[1]})) {
+                        $result{$parts[0]}{$parts[1]} = {};
                     }
                 }
             }
@@ -72,7 +72,7 @@ func parse_string(str $content) scalar {
                 if (scalar(@parts) == 1) {
                     $result{$current_section}{$key} = $parsed_value;
                 } elsif (scalar(@parts) == 2) {
-                    $result{@parts[0]}{@parts[1]}{$key} = $parsed_value;
+                    $result{$parts[0]}{$parts[1]}{$key} = $parsed_value;
                 }
             }
         }
@@ -81,9 +81,34 @@ func parse_string(str $content) scalar {
     return \%result;
 }
 
+# Strip inline '#' comments outside single/double-quoted strings
+func strip_inline_comment(str $s) str {
+    my int $len = length($s);
+    my int $i = 0;
+    my int $in_dq = 0;
+    my int $in_sq = 0;
+    while ($i < $len) {
+        my str $ch = substr($s, $i, 1);
+        if ($in_dq == 1) {
+            if ($ch eq "\\") { $i = $i + 2; next; }
+            if ($ch eq "\"") { $in_dq = 0; }
+        } elsif ($in_sq == 1) {
+            if ($ch eq "'") { $in_sq = 0; }
+        } else {
+            if ($ch eq "\"") { $in_dq = 1; }
+            elsif ($ch eq "'") { $in_sq = 1; }
+            elsif ($ch eq "#") {
+                return substr($s, 0, $i);
+            }
+        }
+        $i = $i + 1;
+    }
+    return $s;
+}
+
 # Parse a TOML value (string, number, boolean, array, inline table)
 func parse_value(str $value) scalar {
-    my str $v = StradaPM::Manifest::trim($value);
+    my str $v = StradaPM::Manifest::trim(StradaPM::Manifest::strip_inline_comment($value));
 
     # Empty value
     if (length($v) == 0) {
@@ -323,6 +348,16 @@ func add_dependency(str $toml_content, str $name, str $ver) str {
     my int $in_deps = 0;
     my int $added = 0;
 
+    my str $tv = StradaPM::Manifest::trim($ver);
+    my str $formatted_val = "";
+    if (length($tv) > 0 && (substr($tv, 0, 1) eq "{" || substr($tv, 0, 1) eq "["
+        || substr($tv, 0, 1) eq "\"" || substr($tv, 0, 1) eq "'")) {
+        $formatted_val = $tv;
+    } else {
+        $formatted_val = "\"" . $tv . "\"";
+    }
+    my str $dep_line = $name . " = " . $formatted_val;
+
     foreach my str $line (@lines) {
         push(@result, $line);
 
@@ -332,7 +367,7 @@ func add_dependency(str $toml_content, str $name, str $ver) str {
             if ($in_deps == 1 && $added == 0) {
                 # Add before next section
                 my int $last_idx = scalar(@result) - 1;
-                @result[$last_idx] = $name . " = \"" . $ver . "\"";
+                $result[$last_idx] = $dep_line;
                 push(@result, "");
                 push(@result, $line);
                 $added = 1;
@@ -343,7 +378,7 @@ func add_dependency(str $toml_content, str $name, str $ver) str {
 
     # If we're still in deps section at end of file
     if ($in_deps == 1 && $added == 0) {
-        push(@result, $name . " = \"" . $ver . "\"");
+        push(@result, $dep_line);
     }
 
     return join("\n", @result);

@@ -6,6 +6,18 @@
 
 package Pacco::Manifest;
 
+# Check whether a parsed TOML value is a table / hash reference
+func is_hash(scalar $v) int {
+    if (!defined($v)) {
+        return 0;
+    }
+    my str $t = typeof($v);
+    if ($t eq "hash" || $t eq "ref") {
+        return 1;
+    }
+    return 0;
+}
+
 # Parse a Strada.toml file
 func parse(str $path) scalar {
     if (core::file_exists($path) == 0) {
@@ -81,9 +93,34 @@ func parse_string(str $content) scalar {
     return \%result;
 }
 
+# Strip inline '#' comments outside single/double-quoted strings
+func strip_inline_comment(str $s) str {
+    my int $len = length($s);
+    my int $i = 0;
+    my int $in_dq = 0;
+    my int $in_sq = 0;
+    while ($i < $len) {
+        my str $ch = substr($s, $i, 1);
+        if ($in_dq == 1) {
+            if ($ch eq "\\") { $i = $i + 2; next; }
+            if ($ch eq "\"") { $in_dq = 0; }
+        } elsif ($in_sq == 1) {
+            if ($ch eq "'") { $in_sq = 0; }
+        } else {
+            if ($ch eq "\"") { $in_dq = 1; }
+            elsif ($ch eq "'") { $in_sq = 1; }
+            elsif ($ch eq "#") {
+                return substr($s, 0, $i);
+            }
+        }
+        $i = $i + 1;
+    }
+    return $s;
+}
+
 # Parse a TOML value (string, number, boolean, array, inline table)
 func parse_value(str $value) scalar {
-    my str $v = Pacco::Manifest::trim($value);
+    my str $v = Pacco::Manifest::trim(Pacco::Manifest::strip_inline_comment($value));
 
     # Empty value
     if (length($v) == 0) {
@@ -138,6 +175,43 @@ func parse_value(str $value) scalar {
     return $v;
 }
 
+# Split a string on top-level commas (ignoring commas inside quotes or nested brackets/braces)
+func split_top_commas(str $s) scalar {
+    my array @items = ();
+    my int $len = length($s);
+    my int $i = 0;
+    my int $start = 0;
+    my int $in_dq = 0;
+    my int $in_sq = 0;
+    my int $depth = 0;
+
+    while ($i < $len) {
+        my str $ch = substr($s, $i, 1);
+        if ($in_dq == 1) {
+            if ($ch eq "\\") { $i = $i + 2; next; }
+            if ($ch eq "\"") { $in_dq = 0; }
+        } elsif ($in_sq == 1) {
+            if ($ch eq "'") { $in_sq = 0; }
+        } else {
+            if ($ch eq "\"") { $in_dq = 1; }
+            elsif ($ch eq "'") { $in_sq = 1; }
+            elsif ($ch eq "[" || $ch eq "{") { $depth = $depth + 1; }
+            elsif ($ch eq "]" || $ch eq "}") { if ($depth > 0) { $depth = $depth - 1; } }
+            elsif ($ch eq "," && $depth == 0) {
+                push(@items, substr($s, $start, $i - $start));
+                $start = $i + 1;
+            }
+        }
+        $i = $i + 1;
+    }
+
+    if ($start <= $len) {
+        push(@items, substr($s, $start, $len - $start));
+    }
+
+    return \@items;
+}
+
 # Parse a TOML array
 func parse_array(str $value) scalar {
     my array @result = ();
@@ -159,10 +233,9 @@ func parse_array(str $value) scalar {
         return \@result;
     }
 
-    # Split on commas (simple implementation - doesn't handle nested arrays well)
-    my array @items = split(",", $v);
+    my scalar $items = Pacco::Manifest::split_top_commas($v);
 
-    foreach my str $item (@items) {
+    foreach my str $item (@{$items}) {
         my str $trimmed = Pacco::Manifest::trim($item);
         if (length($trimmed) > 0) {
             push(@result, Pacco::Manifest::parse_value($trimmed));
@@ -193,10 +266,9 @@ func parse_inline_table(str $value) scalar {
         return \%result;
     }
 
-    # Split on commas
-    my array @pairs = split(",", $v);
+    my scalar $pairs = Pacco::Manifest::split_top_commas($v);
 
-    foreach my str $pair (@pairs) {
+    foreach my str $pair (@{$pairs}) {
         my str $trimmed = Pacco::Manifest::trim($pair);
         my int $eq_pos = index($trimmed, "=");
         if ($eq_pos > 0) {
@@ -316,35 +388,87 @@ func get_dev_dependencies(scalar $manifest) scalar {
     return \%empty;
 }
 
-# Add a dependency to manifest content
+# Add or update a dependency in manifest content (idempotent)
 func add_dependency(str $toml_content, str $name, str $ver) str {
     my array @lines = split("\n", $toml_content);
     my array @result = ();
     my int $in_deps = 0;
+    my int $saw_deps = 0;
     my int $added = 0;
 
-    foreach my str $line (@lines) {
-        push(@result, $line);
+    my str $tv = Pacco::Manifest::trim($ver);
+    my str $formatted_val = "";
+    if (length($tv) > 0 && (substr($tv, 0, 1) eq "{" || substr($tv, 0, 1) eq "["
+        || substr($tv, 0, 1) eq "\"" || substr($tv, 0, 1) eq "'")) {
+        $formatted_val = $tv;
+    } else {
+        $formatted_val = "\"" . $tv . "\"";
+    }
+    my str $dep_line = $name . " = " . $formatted_val;
 
-        if ($line eq "[dependencies]") {
+    foreach my str $line (@lines) {
+        my str $tline = Pacco::Manifest::trim($line);
+
+        if ($tline eq "[dependencies]") {
             $in_deps = 1;
-        } elsif (substr($line, 0, 1) eq "[" && $line ne "[dependencies]") {
+            $saw_deps = 1;
+            push(@result, $line);
+            next;
+        }
+
+        if (length($tline) > 0 && substr($tline, 0, 1) eq "[" && $tline ne "[dependencies]") {
             if ($in_deps == 1 && $added == 0) {
-                # Add before next section
-                my int $last_idx = scalar(@result) - 1;
-                $result[$last_idx] = $name . " = \"" . $ver . "\"";
+                # Remove trailing empty lines inside [dependencies] before inserting
+                while (scalar(@result) > 0 && Pacco::Manifest::trim($result[scalar(@result) - 1]) eq "") {
+                    pop(@result);
+                }
+                push(@result, $dep_line);
                 push(@result, "");
-                push(@result, $line);
                 $added = 1;
             }
             $in_deps = 0;
+            push(@result, $line);
+            next;
+        }
+
+        if ($in_deps == 1 && length($tline) > 0 && substr($tline, 0, 1) ne "#") {
+            my int $eq_pos = index($tline, "=");
+            if ($eq_pos > 0) {
+                my str $existing_key = Pacco::Manifest::trim(substr($tline, 0, $eq_pos));
+                if ($existing_key eq $name) {
+                    if ($added == 0) {
+                        push(@result, $dep_line);
+                        $added = 1;
+                    }
+                    next;
+                }
+            }
+        }
+
+        push(@result, $line);
+    }
+
+    # If [dependencies] was the last section or didn't exist yet
+    if ($added == 0) {
+        if ($saw_deps == 1) {
+            while (scalar(@result) > 0 && Pacco::Manifest::trim($result[scalar(@result) - 1]) eq "") {
+                pop(@result);
+            }
+            push(@result, $dep_line);
+            push(@result, "");
+        } else {
+            if (scalar(@result) > 0 && Pacco::Manifest::trim($result[scalar(@result) - 1]) ne "") {
+                push(@result, "");
+            }
+            push(@result, "[dependencies]");
+            push(@result, $dep_line);
+            push(@result, "");
         }
     }
 
-    # If we're still in deps section at end of file
-    if ($in_deps == 1 && $added == 0) {
-        push(@result, $name . " = \"" . $ver . "\"");
+    my str $out = join("\n", @result);
+    if (length($out) > 0 && substr($out, length($out) - 1, 1) ne "\n") {
+        $out = $out . "\n";
     }
-
-    return join("\n", @result);
+    return $out;
 }

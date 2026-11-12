@@ -1,0 +1,70 @@
+# EXPECT: hello|world|123 t1:one t2:two outer
+# `<$sock>` readline followed by `core::socket_recv($sock, 5)` must drain
+# prefetched buffer bytes first, and `Async::Loop` green-task coroutines
+# must isolate `local $g` across `Async::Task::sleep` context switches.
+
+use lib "lib";
+use Async::Loop;
+use Async::Task;
+
+our str $g = "outer";
+
+func main() int {
+    # 1. <$sock> followed by core::socket_recv($sock, 5)
+    # Pick an ephemeral port by trying a range
+    my int $port = 39410 + (core::getpid() % 500);
+    my scalar $srv = core::socket_server($port);
+    my int $tries = 0;
+    while (!defined($srv) && $tries < 20) {
+        $port = $port + 1;
+        $srv = core::socket_server($port);
+        $tries = $tries + 1;
+    }
+    if (!defined($srv)) {
+        say("bind_failed");
+        return 1;
+    }
+
+    my scalar $writer = thread::create(func () {
+        my scalar $cli = core::socket_client("127.0.0.1", $port);
+        core::socket_send($cli, "hello\nworld123");
+        core::usleep(20000);
+        core::socket_close($cli);
+        return 0;
+    });
+
+    my scalar $conn = core::socket_accept($srv);
+    my str $line = <$conn>;
+    chomp($line);
+    my str $chunk1 = core::socket_recv($conn, 5);
+    my str $chunk2 = core::socket_recv($conn, 3);
+    core::socket_close($conn);
+    core::socket_close($srv);
+    thread::join($writer);
+
+    # 2. Async::Loop coroutines isolating `local $g` across Async::Task::sleep
+    my scalar $loop = Async::Loop::new();
+    my scalar $seen = { "t1" => "", "t2" => "" };
+
+    $loop->spawn(fn () {
+        local $g = "one";
+        Async::Task::sleep(20);
+        $seen->{"t1"} = "t1:" . $g;
+    });
+
+    $loop->spawn(fn () {
+        local $g = "two";
+        Async::Task::sleep(5);
+        $seen->{"t2"} = "t2:" . $g;
+        Async::Task::sleep(25);
+        if ($g ne "two") {
+            $seen->{"t2"} = "corrupted:" . $g;
+        }
+    });
+
+    $loop->run();
+
+    say($line . "|" . $chunk1 . "|" . $chunk2 . " " .
+        $seen->{"t1"} . " " . $seen->{"t2"} . " " . $g);
+    return 0;
+}

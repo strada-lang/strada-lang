@@ -39,6 +39,7 @@ our int $TCC_MODE = 0;
 our int $OBJECT_ONLY = 0;
 our int $OBJECT_FULL = 0;
 our int $MODULE_ONLY_MODE = 0;
+our str $MODULE_TARGET = "";
 our int $MODULE_CACHE = 0;
 our int $CLEAR_MODULE_CACHE = 0;
 our int $STATIC_LINK = 0;
@@ -82,8 +83,9 @@ our str $GC_SECTIONS_FLAG = "";
 our str $SHARED_UNDEFINED_FLAG = "";
 our int $IS_DARWIN = 0;
 
-# Temp files to remove on exit (replaces the bash `trap ... EXIT`)
+# Temp files and directories to remove on exit (replaces the bash `trap ... EXIT`)
 our array @CLEANUP = ();
+our array @CLEANUP_DIRS = ();
 
 # Colors
 our str $RED = "";
@@ -133,6 +135,14 @@ func split_ws(str $s) array {
     return @out;
 }
 
+func mkdtemp_tracked(str $tmpl) str {
+    my str $d = core::mkdtemp($tmpl);
+    if (length($d) > 0) {
+        @CLEANUP_DIRS = (@CLEANUP_DIRS, $d);
+    }
+    return $d;
+}
+
 func cleanup() void {
     my int $i = 0;
     while ($i < size(@CLEANUP)) {
@@ -140,6 +150,14 @@ func cleanup() void {
         if (length($f) > 0) { core::unlink($f); }
         $i = $i + 1;
     }
+    my int $di = size(@CLEANUP_DIRS) - 1;
+    while ($di >= 0) {
+        my str $d = $CLEANUP_DIRS[$di];
+        if (length($d) > 0) { core::rmdir($d); }
+        $di = $di - 1;
+    }
+    @CLEANUP = ();
+    @CLEANUP_DIRS = ();
 }
 
 func error(str $m) void {
@@ -351,6 +369,11 @@ func setup() void {
 # Argument parsing
 # ---------------------------------------------------------------------------
 
+func need_arg(array @av, int $i, int $n, str $a) str {
+    if ($i + 1 >= $n) { error("Option " . $a . " requires an argument"); }
+    return $av[$i + 1];
+}
+
 func parse_args(array @av) void {
     # STRADA_DEFAULT_OPT=0|1|2|3|s|fast (a leading "-O" is accepted): the
     # optimization level when no -O flag is given. An explicit -O still wins.
@@ -366,8 +389,8 @@ func parse_args(array @av) void {
         my str $a = $av[$i];
         if ($a eq "-c") { $KEEP_C = 1; $i = $i + 1; }
         elsif ($a eq "-r" || $a eq "--run") { $RUN_AFTER = 1; $i = $i + 1; }
-        elsif ($a eq "-o") { $OUTPUT_FILE = $av[$i + 1]; $i = $i + 2; }
-        elsif ($a eq "-O") { $OPT_LEVEL = $av[$i + 1]; $i = $i + 2; }
+        elsif ($a eq "-o") { $OUTPUT_FILE = need_arg(@av, $i, $n, $a); $i = $i + 2; }
+        elsif ($a eq "-O") { $OPT_LEVEL = need_arg(@av, $i, $n, $a); $i = $i + 2; }
         elsif (sw($a, "-O")) { $OPT_LEVEL = substr($a, 2, length($a) - 2); $i = $i + 1; }
         elsif ($a eq "-g") { $DEBUG_SYMBOLS = 1; $i = $i + 1; }
         elsif ($a eq "--c-debug") { $C_DEBUG_SYMBOLS = 1; $i = $i + 1; }
@@ -377,7 +400,21 @@ func parse_args(array @av) void {
         elsif ($a eq "--tcc") { $TCC_MODE = 1; $i = $i + 1; }
         elsif ($a eq "--object") { $OBJECT_ONLY = 1; $i = $i + 1; }
         elsif ($a eq "--object-full") { $OBJECT_ONLY = 1; $OBJECT_FULL = 1; $i = $i + 1; }
-        elsif ($a eq "-M") { $MODULE_ONLY_MODE = 1; $i = $i + 1; }
+        elsif ($a eq "-M") {
+            $MODULE_ONLY_MODE = 1;
+            if ($i + 1 < $n) {
+                my str $next = $av[$i + 1];
+                if (length($next) > 0 && !sw($next, "-") && !(-f $next) && !(-d $next)
+                    && index($next, "/") < 0 && index($next, ".") < 0) {
+                    $MODULE_TARGET = $next;
+                    $i = $i + 2;
+                } else {
+                    $i = $i + 1;
+                }
+            } else {
+                $i = $i + 1;
+            }
+        }
         elsif ($a eq "--module-cache") { $MODULE_CACHE = 1; core::setenv("STRADA_USE_ARTIFACTS", "1"); $i = $i + 1; }
         elsif ($a eq "--clear-module-cache") { $CLEAR_MODULE_CACHE = 1; $i = $i + 1; }
         elsif ($a eq "-w" || $a eq "--warnings") { $SHOW_WARNINGS = 1; $i = $i + 1; }
@@ -389,25 +426,38 @@ func parse_args(array @av) void {
         elsif ($a eq "--no-stack-trace") { $NO_STACK_TRACE = 1; $i = $i + 1; }
         elsif ($a eq "--use-artifacts") { core::setenv("STRADA_USE_ARTIFACTS", "1"); $i = $i + 1; }
         elsif ($a eq "--no-use-artifacts") { core::setenv("STRADA_USE_ARTIFACTS", "0"); $i = $i + 1; }
-        elsif ($a eq "--import-lib") { @IMPLICIT_IMPORT_LIBS = (@IMPLICIT_IMPORT_LIBS, $av[$i + 1]); $i = $i + 2; }
-        elsif ($a eq "-LL") { @LIB_PATHS_LOW = (@LIB_PATHS_LOW, $av[$i + 1]); $i = $i + 2; }
+        elsif ($a eq "--import-lib") { @IMPLICIT_IMPORT_LIBS = (@IMPLICIT_IMPORT_LIBS, need_arg(@av, $i, $n, $a)); $i = $i + 2; }
+        elsif ($a eq "-LL") { @LIB_PATHS_LOW = (@LIB_PATHS_LOW, need_arg(@av, $i, $n, $a)); $i = $i + 2; }
         elsif (sw($a, "-LL")) { @LIB_PATHS_LOW = (@LIB_PATHS_LOW, substr($a, 3, length($a) - 3)); $i = $i + 1; }
-        elsif ($a eq "-L") { @LIB_PATHS = (@LIB_PATHS, $av[$i + 1]); $i = $i + 2; }
+        elsif ($a eq "-L") { @LIB_PATHS = (@LIB_PATHS, need_arg(@av, $i, $n, $a)); $i = $i + 2; }
         elsif (sw($a, "-L")) { @LIB_PATHS = (@LIB_PATHS, substr($a, 2, length($a) - 2)); $i = $i + 1; }
-        elsif ($a eq "-l") { @LINK_LIBS = (@LINK_LIBS, $av[$i + 1]); $i = $i + 2; }
+        elsif ($a eq "-l") { @LINK_LIBS = (@LINK_LIBS, need_arg(@av, $i, $n, $a)); $i = $i + 2; }
         elsif (sw($a, "-l")) { @LINK_LIBS = (@LINK_LIBS, substr($a, 2, length($a) - 2)); $i = $i + 1; }
-        elsif ($a eq "-I") { @INCLUDE_PATHS = (@INCLUDE_PATHS, $av[$i + 1]); $i = $i + 2; }
+        elsif ($a eq "-I") { @INCLUDE_PATHS = (@INCLUDE_PATHS, need_arg(@av, $i, $n, $a)); $i = $i + 2; }
         elsif (sw($a, "-I")) { @INCLUDE_PATHS = (@INCLUDE_PATHS, substr($a, 2, length($a) - 2)); $i = $i + 1; }
-        elsif ($a eq "-D") { @PP_DEFINES = (@PP_DEFINES, $av[$i + 1]); $i = $i + 2; }
+        elsif ($a eq "-D") { @PP_DEFINES = (@PP_DEFINES, need_arg(@av, $i, $n, $a)); $i = $i + 2; }
         elsif (sw($a, "-D")) { @PP_DEFINES = (@PP_DEFINES, substr($a, 2, length($a) - 2)); $i = $i + 1; }
         elsif ($a eq "-v" || $a eq "--verbose") { $VERBOSE = 1; $i = $i + 1; }
         elsif ($a eq "-h" || $a eq "--help") { usage(); }
         elsif ($a eq "--repl") { $REPL_MODE = 1; $i = $i + 1; }
-        elsif ($a eq "--script") { $SCRIPT_FILE = $av[$i + 1]; $i = $i + 2; }
+        elsif ($a eq "--script") { $SCRIPT_FILE = need_arg(@av, $i, $n, $a); $i = $i + 2; }
         elsif (sw($a, "--compiler=") || $a eq "--chunked") { @JIT_PASSTHROUGH = (@JIT_PASSTHROUGH, $a); $i = $i + 1; }
-        elsif ($a eq "--doc") { $DOC_MODE = 1; $DOC_TOPIC = $av[$i + 1]; $i = $i + 2; }
+        elsif ($a eq "--doc") {
+            $DOC_MODE = 1;
+            if ($i + 1 < $n && !sw($av[$i + 1], "-")) {
+                $DOC_TOPIC = $av[$i + 1];
+                $i = $i + 2;
+            } else {
+                $DOC_TOPIC = "";
+                $i = $i + 1;
+            }
+        }
         elsif (sw($a, "-")) { error("Unknown option: " . $a); }
         else { @POSITIONAL = (@POSITIONAL, $a); $i = $i + 1; }
+    }
+    if (size(@POSITIONAL) == 0 && length($MODULE_TARGET) > 0) {
+        @POSITIONAL = (@POSITIONAL, $MODULE_TARGET);
+        $MODULE_TARGET = "";
     }
 }
 
@@ -531,7 +581,8 @@ func handle_doc() void {
     if (length($docbin) == 0) {
         error("stradadoc not found.\nRun './strada tools/stradadoc.strada' to build it, or 'make install'.");
     }
-    my array @cmd = ($docbin, $DOC_TOPIC);
+    my array @cmd = ($docbin);
+    if (length($DOC_TOPIC) > 0) { @cmd = (@cmd, $DOC_TOPIC); }
     @cmd = (@cmd, @POSITIONAL);
     exec_or_run(@cmd);
 }
@@ -551,6 +602,26 @@ func cc_is_clang() int {
 # Runtime object (re)build
 # ---------------------------------------------------------------------------
 
+func runtime_feature_flags() array {
+    my array @rf = ();
+    if (env("STRADA_HAVE_PCRE2") eq "1") {
+        @rf = (@rf, "-DHAVE_PCRE2");
+        my array @__pcre = split_ws(env("STRADA_PCRE2_CFLAGS")); @rf = (@rf, @__pcre);
+    }
+    my str $cgc = env("STRADA_HAVE_CYCLE_GC");
+    if ($cgc eq "1" || length($cgc) == 0) { @rf = (@rf, "-DSTRADA_CYCLE_GC"); }
+    my str $arena = env("STRADA_HAVE_ARENA");
+    if ($arena eq "1" || length($arena) == 0) { @rf = (@rf, "-DSTRADA_ARENA"); }
+    my str $epoll = env("STRADA_HAVE_EPOLL");
+    if ($epoll eq "1") { @rf = (@rf, "-DSTRADA_HAVE_EPOLL"); }
+    elsif ($epoll eq "0") { @rf = (@rf, "-DSTRADA_NO_EPOLL"); }
+    if (env("STRADA_HAVE_LIBFFI") eq "1") {
+        @rf = (@rf, "-DHAVE_LIBFFI");
+        my array @__ffi = split_ws(env("STRADA_FFI_CFLAGS")); @rf = (@rf, @__ffi);
+    }
+    return @rf;
+}
+
 func build_runtime() void {
     info("Building pre-compiled runtime...");
     my array @cmd = ();
@@ -565,18 +636,8 @@ func build_runtime() void {
     @cmd = (@cmd, "-std=c99");
     @cmd = (@cmd, "-ffunction-sections");
     @cmd = (@cmd, "-fdata-sections");
-    if (env("STRADA_HAVE_PCRE2") eq "1") {
-        @cmd = (@cmd, "-DHAVE_PCRE2");
-        my array @__pcre = split_ws(env("STRADA_PCRE2_CFLAGS")); @cmd = (@cmd, @__pcre);
-    }
-    my str $cgc = env("STRADA_HAVE_CYCLE_GC");
-    if ($cgc eq "1" || length($cgc) == 0) { @cmd = (@cmd, "-DSTRADA_CYCLE_GC"); }
-    my str $arena = env("STRADA_HAVE_ARENA");
-    if ($arena eq "1" || length($arena) == 0) { @cmd = (@cmd, "-DSTRADA_ARENA"); }
-    if (env("STRADA_HAVE_LIBFFI") eq "1") {
-        @cmd = (@cmd, "-DHAVE_LIBFFI");
-        my array @__ffi = split_ws(env("STRADA_FFI_CFLAGS")); @cmd = (@cmd, @__ffi);
-    }
+    my array @__rf = runtime_feature_flags();
+    @cmd = (@cmd, @__rf);
     @cmd = (@cmd, "-c");
     @cmd = (@cmd, $RUNTIME_SRC);
     @cmd = (@cmd, "-I" . $RUNTIME_DIR);
@@ -685,7 +746,19 @@ func main() int {
             if (length($f) > 0) {
                 my str $sibo = strip_strada_ext($f) . ".o";
                 info("-M: compiling " . $f . " -> " . $sibo);
-                my array @cmd = ($SHIM, "-M", "--object", "-o", $sibo, $f);
+                my array @cmd = ($SHIM, "-M", "--object", "-O", $OPT_LEVEL);
+                if ($DEBUG_SYMBOLS == 1) { @cmd = (@cmd, "-g"); }
+                if ($SHOW_WARNINGS == 1) { @cmd = (@cmd, "-w"); }
+                if ($STRICT_TYPES == 1) { @cmd = (@cmd, "--strict-types"); }
+                my int $di = 0;
+                while ($di < size(@PP_DEFINES)) { @cmd = (@cmd, "-D", $PP_DEFINES[$di]); $di = $di + 1; }
+                my int $lpi = 0;
+                while ($lpi < size(@LIB_PATHS)) { @cmd = (@cmd, "-L", $LIB_PATHS[$lpi]); $lpi = $lpi + 1; }
+                $lpi = 0;
+                while ($lpi < size(@LIB_PATHS_LOW)) { @cmd = (@cmd, "-LL", $LIB_PATHS_LOW[$lpi]); $lpi = $lpi + 1; }
+                my int $ipi = 0;
+                while ($ipi < size(@INCLUDE_PATHS)) { @cmd = (@cmd, "-I", $INCLUDE_PATHS[$ipi]); $ipi = $ipi + 1; }
+                @cmd = (@cmd, "-o", $sibo, $f);
                 if (run_argv(@cmd) == 0) { $count = $count + 1; }
                 else { $failc = $failc + 1; }
             }
@@ -701,9 +774,11 @@ func main() int {
     if (!(-f $input)) { error("Input file not found: " . $input); }
     if (!ew($input, ".strada")) { warn("Input file does not have .strada extension"); }
 
-    # -M single file -> sibling .o, OBJECT_ONLY output path.
-    if ($MODULE_ONLY_MODE == 1 && length($OUTPUT_FILE) == 0) {
-        $OUTPUT_FILE = strip_strada_ext($input) . ".o";
+    # -M single file -> sibling .o (unless -o given), OBJECT_ONLY output path.
+    if ($MODULE_ONLY_MODE == 1 && $SHARED_LIB == 0 && $STATIC_LIB == 0) {
+        if (length($OUTPUT_FILE) == 0) {
+            $OUTPUT_FILE = strip_strada_ext($input) . ".o";
+        }
         $OBJECT_ONLY = 1;
     }
 
@@ -753,7 +828,7 @@ func main() int {
         $cfile = $output . ".c";
     } else {
         $cfile = scratch_path($input, ".c");
-        if (length($cfile) == 0) { $cfile = core::mkdtemp("/tmp/strada_XXXXXX") . "/out.c"; }
+        if (length($cfile) == 0) { $cfile = mkdtemp_tracked("/tmp/strada_XXXXXX") . "/out.c"; }
         @CLEANUP = (@CLEANUP, $cfile);
     }
 
@@ -805,12 +880,14 @@ func main() int {
             error("Preprocessor not found.\nRun './strada tools/stradapp.strada' to build it.");
         }
         my str $ppout = scratch_path($input, ".pp.strada");
-        if (length($ppout) == 0) { $ppout = core::mkdtemp("/tmp/strada_XXXXXX") . "/pp.strada"; }
+        if (length($ppout) == 0) { $ppout = mkdtemp_tracked("/tmp/strada_XXXXXX") . "/pp.strada"; }
         @CLEANUP = (@CLEANUP, $ppout);
         info("Preprocessing " . $input . " (defines: " . join(" ", @PP_DEFINES) . ")");
         my array @cmd = ($preprocessor);
         my int $di = 0;
         while ($di < size(@PP_DEFINES)) { @cmd = (@cmd, "-D" . $PP_DEFINES[$di]); $di = $di + 1; }
+        my int $pi2 = 0;
+        while ($pi2 < size(@INCLUDE_PATHS)) { @cmd = (@cmd, "-I" . $INCLUDE_PATHS[$pi2]); $pi2 = $pi2 + 1; }
         @cmd = (@cmd, $input);
         @cmd = (@cmd, "-o");
         @cmd = (@cmd, $ppout);
@@ -861,7 +938,10 @@ func main() int {
     my int $want_module_only = 0;
     if ($MODULE_ONLY_MODE == 1) { $want_module_only = 1; }
     elsif ($OBJECT_ONLY == 1 && $OBJECT_FULL != 1) { $want_module_only = 1; }
-    if ($want_module_only == 1) { @sc = (@sc, "-M"); }
+    if ($want_module_only == 1) {
+        @sc = (@sc, "-M");
+        if (length($MODULE_TARGET) > 0) { @sc = (@sc, $MODULE_TARGET); }
+    }
 
     # --module-cache wiring
     my str $cache_dir = "";
@@ -880,7 +960,7 @@ func main() int {
             $cache_key = trim($sorted);
         }
         core::setenv("STRADA_MODULE_CACHE_KEY", $cache_key);
-        $deps_file = core::mkdtemp("/tmp/strada_deps_XXXXXX") . "/deps";
+        $deps_file = mkdtemp_tracked("/tmp/strada_deps_XXXXXX") . "/deps";
         core::setenv("STRADA_DEPS_OUT", $deps_file);
         @CLEANUP = (@CLEANUP, $deps_file);
     }
@@ -987,10 +1067,11 @@ func main() int {
         elsif ($STATIC_LIB == 1) { warn("Cannot run a static library directly."); }
         elsif ($OBJECT_ONLY == 1) { warn("Cannot run an object file directly."); }
         else {
+            my str $runpath = $output;
+            if (index($output, "/") < 0) { $runpath = "./" . $output; }
             say("");
-            if ($VERBOSE == 1) { say($CYAN . "$" . $NC . " ./" . $output); }
+            if ($VERBOSE == 1) { say($CYAN . "$" . $NC . " " . $runpath); }
             say("---");
-            my str $runpath = "./" . $output;
             my array @rcmd = ($runpath);
             exec_or_run(@rcmd);
         }
@@ -1012,12 +1093,26 @@ func scratch_path(str $input, str $suffix) str {
     if (length($tmp) == 0) { $tmp = "/tmp"; }
     my str $dir = $tmp . "/strada-scratch-" . core::getuid();
     core::mkdir($dir, 448);
-    if (!(-d $dir)) { return ""; }
-    # Refuse symlinked or foreign-owned scratch dirs.
+    # Refuse symlinked, non-directory, foreign-owned, or non-0700 scratch dirs.
+    my scalar $st = core::lstat($dir);
+    if (!defined($st)) { return ""; }
+    my int $mode = $st->{"mode"};
+    # S_IFMT = 0170000 (61440), S_IFDIR = 0040000 (16384)
+    if (($mode & 61440) != 16384) { return ""; }
+    if ($st->{"uid"} != core::getuid()) { return ""; }
+    # Enforce 0700 (448) permissions (511 = 0777)
+    if (($mode & 511) != 448) {
+        core::chmod($dir, 448);
+        $st = core::lstat($dir);
+        if (!defined($st)) { return ""; }
+        if (($st->{"mode"} & 61440) != 16384) { return ""; }
+        if ($st->{"uid"} != core::getuid()) { return ""; }
+        if (($st->{"mode"} & 511) != 448) { return ""; }
+    }
     my str $real = "" . core::realpath($input);
     if (length($real) == 0) { $real = $input; }
     my str $keysrc = $real . "|" . join(" ", @PP_DEFINES) . "|"
-        . $SHARED_LIB . $STATIC_LIB . $OBJECT_ONLY . $OPT_LEVEL;
+        . $SHARED_LIB . $STATIC_LIB . $OBJECT_ONLY . $MODULE_ONLY_MODE . "|" . $MODULE_TARGET . "|" . $OPT_LEVEL;
     my str $key = trim(core::qx("printf '%s' " . sq($keysrc) . " | cksum | cut -d' ' -f1"));
     my str $base = strip_strada_ext(basename_of($input));
     return $dir . "/" . $base . "-" . $key . $suffix;
@@ -1105,13 +1200,18 @@ func do_link(str $cfile, str $output, array @gcc_flags, array @include_flags,
         while ($slf < size(@gcc_flags)) { if (sw($gcc_flags[$slf], "-flto")) { $sl_has_lto = 1; } $slf = $slf + 1; }
         my array @sl_fat = ();
         if ($sl_has_lto == 1) { @sl_fat = (@sl_fat, "-ffat-lto-objects"); }
-        my str $objf = strip_ext($output, ".a") . ".o";
-        my str $rtobj = strip_ext($output, ".a") . "_runtime.o";
+        my array @rt_flags = runtime_feature_flags();
+        my str $sldir = mkdtemp_tracked("/tmp/strada_slib_XXXXXX");
+        my str $outbase = strip_ext(basename_of($output), ".a");
+        my str $objf = $sldir . "/" . $outbase . ".o";
+        my str $rtobj = $sldir . "/" . $outbase . "_runtime.o";
+        @CLEANUP = (@CLEANUP, $objf, $rtobj);
         my array @extra_objs = ();
         my int $ci = 0;
         while ($ci < size(@EXTRA_C_FILES)) {
             my str $cf = $EXTRA_C_FILES[$ci];
-            my str $on = strip_ext(basename_of($cf), ".c") . ".o";
+            my str $on = $sldir . "/extra_" . $ci . "_" . strip_ext(basename_of($cf), ".c") . ".o";
+            @CLEANUP = (@CLEANUP, $on);
             info("Compiling " . $cf . " -> " . $on);
             my array @cc1 = ();
             @cc1 = (@cc1, @CC);
@@ -1145,6 +1245,7 @@ func do_link(str $cfile, str $output, array @gcc_flags, array @include_flags,
         @cc3 = (@cc3, "-c");
         @cc3 = (@cc3, @gcc_flags);
         @cc3 = (@cc3, @sl_fat);
+        @cc3 = (@cc3, @rt_flags);
         @cc3 = (@cc3, "-o");
         @cc3 = (@cc3, $rtobj);
         @cc3 = (@cc3, $RUNTIME_SRC);
@@ -1155,18 +1256,16 @@ func do_link(str $cfile, str $output, array @gcc_flags, array @include_flags,
         @arcmd = (@arcmd, @extra_objs);
         @arcmd = (@arcmd, @EXTRA_O_FILES);
         if (run_argv(@arcmd) != 0) { error("ar failed"); }
-        core::unlink($objf);
-        core::unlink($rtobj);
-        my int $eo = 0;
-        while ($eo < size(@extra_objs)) { core::unlink($extra_objs[$eo]); $eo = $eo + 1; }
     } elsif ($STATIC_LINK == 1) {
         if ($TCC_MODE == 1) { warn("--tcc is not supported with --static; compiling with the C compiler"); }
         info("Compiling " . $cfile . " -> " . $output . " (static binary)");
         warn("Static binaries cannot use FFI/dynamic library loading (sys::dl_open, import_lib)");
+        my array @rt_flags = runtime_feature_flags();
         my array @cmd = ();
         @cmd = (@cmd, @CC);
         @cmd = (@cmd, "-static");
         @cmd = (@cmd, @gcc_flags);
+        @cmd = (@cmd, @rt_flags);
         if (length($GC_SECTIONS_FLAG) > 0) { @cmd = (@cmd, $GC_SECTIONS_FLAG); }
         @cmd = (@cmd, "-o");
         @cmd = (@cmd, $output);
@@ -1257,7 +1356,7 @@ func scratch_path_obj(str $cfile) str {
         @CLEANUP = (@CLEANUP, $obj);
         return $obj;
     }
-    my str $obj = core::mkdtemp("/tmp/strada_XXXXXX") . "/gen.o";
+    my str $obj = mkdtemp_tracked("/tmp/strada_XXXXXX") . "/gen.o";
     @CLEANUP = (@CLEANUP, $obj);
     return $obj;
 }
@@ -1266,21 +1365,33 @@ func scratch_path_obj(str $cfile) str {
 # tcc link paths
 # ---------------------------------------------------------------------------
 
-func tcc_compile_obj(str $cfile, int $pic) str {
+func tcc_compile_obj(str $cfile, int $pic, array @include_flags) str {
     if (have_cmd("tcc") == 0) {
         error("--tcc requires the 'tcc' compiler, which was not found in PATH");
     }
-    # Swap the runtime header for the stripped tcc-parsable one.
+    # Swap ONLY the anchored runtime header line at the top for the stripped tcc-parsable one.
     my str $content = core::slurp($cfile);
-    $content = str_replace($content, "strada_runtime.h", "strada_runtime_tcc.h");
+    my str $hdr_line = "#include \"strada_runtime.h\"\n";
+    my str $tcc_line = "#include \"strada_runtime_tcc.h\"\n";
+    if (sw($content, $hdr_line) == 1) {
+        $content = $tcc_line . substr($content, length($hdr_line), length($content) - length($hdr_line));
+    } else {
+        my int $hpos = index($content, "\n" . $hdr_line);
+        if ($hpos >= 0) {
+            my int $after_hdr = $hpos + 1 + length($hdr_line);
+            $content = substr($content, 0, $hpos + 1) . $tcc_line
+                . substr($content, $after_hdr, length($content) - $after_hdr);
+        }
+    }
     core::spew($cfile, $content);
-    my str $tccobj = core::mkdtemp("/tmp/strada_tcc_XXXXXX") . "/o.o";
+    my str $tccobj = mkdtemp_tracked("/tmp/strada_tcc_XXXXXX") . "/o.o";
     @CLEANUP = (@CLEANUP, $tccobj);
     my array @cmd = ("tcc", "-c", $cfile);
     if ($pic == 1) { @cmd = (@cmd, "-fPIC"); }
     @cmd = (@cmd, "-I" . $RUNTIME_DIR);
-    my int $ip = 0;
-    while ($ip < size(@INCLUDE_PATHS)) { @cmd = (@cmd, "-I" . $INCLUDE_PATHS[$ip]); $ip = $ip + 1; }
+    @cmd = (@cmd, @include_flags);
+    my int $di = 0;
+    while ($di < size(@PP_DEFINES)) { @cmd = (@cmd, "-D" . $PP_DEFINES[$di]); $di = $di + 1; }
     @cmd = (@cmd, "-o");
     @cmd = (@cmd, $tccobj);
     if (run_argv(@cmd) != 0) { error("tcc compilation failed"); }
@@ -1310,11 +1421,11 @@ func link_shared_tcc(str $cfile, str $output, array @include_flags,
         $content = str_replace($content, "static void __strada_init_globals(void) {",
                                           "void __strada_init_globals(void) {");
         core::spew($cfile, $content);
-        $ctorshim = core::mkdtemp("/tmp/strada_shim_XXXXXX") . "/shim.c";
+        $ctorshim = mkdtemp_tracked("/tmp/strada_shim_XXXXXX") . "/shim.c";
         core::spew($ctorshim, "extern void __strada_init_globals(void);\n__attribute__((constructor)) static void __strada_tcc_ctor(void) { __strada_init_globals(); }\n");
         @CLEANUP = (@CLEANUP, $ctorshim);
     }
-    my str $tccobj = tcc_compile_obj($cfile, 1);
+    my str $tccobj = tcc_compile_obj($cfile, 1, @include_flags);
     my array @cmd = ();
     @cmd = (@cmd, @CC);
     @cmd = (@cmd, "-shared");
@@ -1338,7 +1449,7 @@ func link_shared_tcc(str $cfile, str $output, array @include_flags,
 func link_exe_tcc(str $cfile, str $output, str $rdynamic, array @include_flags,
                   array @link_flags, array @extra_files, int $skip_runtime) void {
     info("TCC mode: tcc compiles, the C compiler links");
-    my str $tccobj = tcc_compile_obj($cfile, 0);
+    my str $tccobj = tcc_compile_obj($cfile, 0, @include_flags);
     my array @cmd = ();
     @cmd = (@cmd, @CC);
     if (length($rdynamic) > 0) { @cmd = (@cmd, $rdynamic); }
@@ -1393,6 +1504,12 @@ func warm_module_cache(str $deps_file, str $cache_dir, str $cache_key) void {
         my array @cmd = ($SHIM, "-M", "--object");
         my int $di = 0;
         while ($di < size(@PP_DEFINES)) { @cmd = (@cmd, "-D"); @cmd = (@cmd, $PP_DEFINES[$di]); $di = $di + 1; }
+        my int $lpi = 0;
+        while ($lpi < size(@LIB_PATHS)) { @cmd = (@cmd, "-L"); @cmd = (@cmd, $LIB_PATHS[$lpi]); $lpi = $lpi + 1; }
+        $lpi = 0;
+        while ($lpi < size(@LIB_PATHS_LOW)) { @cmd = (@cmd, "-LL"); @cmd = (@cmd, $LIB_PATHS_LOW[$lpi]); $lpi = $lpi + 1; }
+        my int $ipi = 0;
+        while ($ipi < size(@INCLUDE_PATHS)) { @cmd = (@cmd, "-I"); @cmd = (@cmd, $INCLUDE_PATHS[$ipi]); $ipi = $ipi + 1; }
         @cmd = (@cmd, "-o");
         @cmd = (@cmd, $cache_o);
         @cmd = (@cmd, $dep);

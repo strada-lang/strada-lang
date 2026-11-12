@@ -1314,14 +1314,26 @@ func ast_data_type_name(int $type) str {
     if ($type == TYPE_INT()) { return "int"; }
     if ($type == TYPE_NUM()) { return "num"; }
     if ($type == TYPE_STR()) { return "str"; }
+    if ($type == TYPE_BOOL()) { return "bool"; }
     if ($type == TYPE_ARRAY()) { return "array"; }
     if ($type == TYPE_HASH()) { return "hash"; }
     if ($type == TYPE_SCALAR()) { return "scalar"; }
     if ($type == TYPE_VOID()) { return "void"; }
+    if ($type == TYPE_FUNCPTR()) { return "funcptr"; }
+    if ($type == TYPE_INT8()) { return "int8"; }
+    if ($type == TYPE_INT16()) { return "int16"; }
     if ($type == TYPE_INT32()) { return "int32"; }
     if ($type == TYPE_INT64()) { return "int64"; }
+    if ($type == TYPE_UINT8()) { return "uint8"; }
+    if ($type == TYPE_UINT16()) { return "uint16"; }
+    if ($type == TYPE_UINT32()) { return "uint32"; }
+    if ($type == TYPE_UINT64()) { return "uint64"; }
+    if ($type == TYPE_SIZE_T()) { return "size_t"; }
+    if ($type == TYPE_CHAR()) { return "char"; }
     if ($type == TYPE_FLOAT32()) { return "float32"; }
     if ($type == TYPE_FLOAT64()) { return "float64"; }
+    if ($type == TYPE_LONG_DOUBLE()) { return "long_double"; }
+    if ($type == TYPE_ENUM()) { return "enum"; }
     if ($type == TYPE_DYNAMIC()) { return "dynamic"; }
     return "unknown";
 }

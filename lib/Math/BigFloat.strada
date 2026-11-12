@@ -294,9 +294,14 @@ func to_str(scalar $self) str {
     }
 
     if ($scale <= 0) {
-        # No decimal point needed
+        # No decimal point needed; append -scale trailing zeros when scale < 0
         $result = $m;
-        # Append zeros if scale < 0 (shouldn't normally happen after normalize)
+        my int $zeros = 0 - $scale;
+        my int $zi = 0;
+        while ($zi < $zeros) {
+            $result = $result . "0";
+            $zi = $zi + 1;
+        }
     } else {
         my int $mlen = length($m);
         if ($mlen <= $scale) {
@@ -327,20 +332,8 @@ func to_str(scalar $self) str {
 
 func to_int(scalar $self) int {
     # Truncate to integer
-    my str $m = $self->{"m"};
-    my int $scale = $self->{"e"};
-    my int $mlen = length($m);
-
-    if ($mlen <= $scale) {
-        return 0;
-    }
-
-    my str $int_part = substr($m, 0, $mlen - $scale);
-    my int $val = cast_int($int_part);
-    if ($self->{"s"} < 0) {
-        $val = 0 - $val;
-    }
-    return $val;
+    my str $s = $self->to_bigint_str();
+    return cast_int($s);
 }
 
 func is_zero(scalar $self) int {
@@ -717,6 +710,10 @@ func round(scalar $self, int $places) scalar {
     my str $m = $self->{"m"};
     my int $scale = $self->{"e"};
 
+    if ($m eq "0") {
+        return BigFloat::new("0");
+    }
+
     if ($scale <= $places) {
         return $self->clone();
     }
@@ -725,12 +722,12 @@ func round(scalar $self, int $places) scalar {
     my int $trim = $scale - $places;
     my int $mlen = length($m);
 
-    if ($trim >= $mlen) {
-        # Rounding away all digits
+    if ($trim > $mlen) {
+        # Rounding away more digits than exist -> first inspected digit is 0 (< 5)
         return BigFloat::new("0");
     }
 
-    my str $kept = substr($m, 0, $mlen - $trim);
+    my str $kept = ($trim == $mlen) ? "0" : substr($m, 0, $mlen - $trim);
     my str $digit_str = substr($m, $mlen - $trim, 1);
     my int $round_digit = cast_int($digit_str);
 
@@ -774,34 +771,113 @@ func round(scalar $self, int $places) scalar {
     return bless(\%r, "BigFloat");
 }
 
-func floor(scalar $self) scalar {
-    my int $int_val = $self->to_int();
-    # If negative and has fractional part, subtract 1
-    if ($self->{"s"} < 0) {
-        my scalar $check = BigFloat::from_int($int_val);
-        if ($check->is_eq($self) == 0) {
-            $int_val = $int_val - 1;
-        }
+# Helper: extract [int_mag, has_frac] on the decimal string directly
+func _split_int_frac(scalar $self) scalar {
+    my str $m = $self->{"m"};
+    my int $scale = $self->{"e"};
+
+    if ($m eq "0") {
+        return ["0", 0];
     }
-    return BigFloat::from_int($int_val);
+
+    if ($scale <= 0) {
+        my str $int_mag = $m;
+        my int $zeros = 0 - $scale;
+        my int $i = 0;
+        while ($i < $zeros) {
+            $int_mag = $int_mag . "0";
+            $i = $i + 1;
+        }
+        return [$int_mag, 0];
+    }
+
+    my int $mlen = length($m);
+    if ($mlen <= $scale) {
+        return ["0", 1];
+    }
+
+    my str $int_mag = substr($m, 0, $mlen - $scale);
+    my str $frac = substr($m, $mlen - $scale, $scale);
+    my int $has_frac = 0;
+    my int $fi = 0;
+    while ($fi < $scale) {
+        if (substr($frac, $fi, 1) ne "0") {
+            $has_frac = 1;
+            last;
+        }
+        $fi = $fi + 1;
+    }
+    return [$int_mag, $has_frac];
+}
+
+func floor(scalar $self) scalar {
+    my scalar $parts = $self->_split_int_frac();
+    my str $int_mag = $parts->[0];
+    my int $has_frac = $parts->[1];
+    my int $sign = $self->{"s"};
+
+    if ($sign < 0 && $has_frac == 1) {
+        my str $inc = "";
+        __C__ {
+            char *k_str = strada_to_str(int_mag);
+            char *sum = _bf_add(k_str, "1");
+            free(k_str);
+            strada_decref(inc);
+            inc = strada_new_str(sum);
+            free(sum);
+        }
+        return BigFloat::new("-" . $inc);
+    }
+
+    if ($int_mag eq "0") {
+        return BigFloat::new("0");
+    }
+    if ($sign < 0) {
+        return BigFloat::new("-" . $int_mag);
+    }
+    return BigFloat::new($int_mag);
 }
 
 func ceil(scalar $self) scalar {
-    my int $int_val = $self->to_int();
-    # If positive and has fractional part, add 1
-    if ($self->{"s"} > 0 && $self->{"m"} ne "0") {
-        my scalar $check = BigFloat::from_int($int_val);
-        if ($check->is_eq($self) == 0) {
-            $int_val = $int_val + 1;
+    my scalar $parts = $self->_split_int_frac();
+    my str $int_mag = $parts->[0];
+    my int $has_frac = $parts->[1];
+    my int $sign = $self->{"s"};
+
+    if ($sign > 0 && $has_frac == 1) {
+        my str $inc = "";
+        __C__ {
+            char *k_str = strada_to_str(int_mag);
+            char *sum = _bf_add(k_str, "1");
+            free(k_str);
+            strada_decref(inc);
+            inc = strada_new_str(sum);
+            free(sum);
         }
+        return BigFloat::new($inc);
     }
-    return BigFloat::from_int($int_val);
+
+    if ($int_mag eq "0") {
+        return BigFloat::new("0");
+    }
+    if ($sign < 0) {
+        return BigFloat::new("-" . $int_mag);
+    }
+    return BigFloat::new($int_mag);
 }
 
 func truncate(scalar $self) scalar {
-    return BigFloat::from_int($self->to_int());
+    return BigFloat::new($self->to_bigint_str());
 }
 
 func to_bigint_str(scalar $self) str {
-    return "" . $self->to_int();
+    my scalar $parts = $self->_split_int_frac();
+    my str $int_mag = $parts->[0];
+    if ($int_mag eq "0") {
+        return "0";
+    }
+    if ($self->{"s"} < 0) {
+        return "-" . $int_mag;
+    }
+    return $int_mag;
 }

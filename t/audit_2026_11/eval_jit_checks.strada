@@ -1,0 +1,61 @@
+use lib "lib";
+use Eval;
+use Strada::JIT;
+
+func main() int {
+    my int $fail = 0;
+
+    # 1. Eval: 3-level A <- B <- C SUPER:: returns "B->A"
+    Strada::Interpreter::eval('
+        package A;
+        func new() scalar { my hash %h = (); return bless(\%h, "A"); }
+        func chain(scalar $self) str { return "A"; }
+        package B;
+        extends A;
+        func new() scalar { my hash %h = (); return bless(\%h, "B"); }
+        func chain(scalar $self) str { return "B->" . SUPER::chain($self); }
+        package C;
+        extends B;
+        func new() scalar { my hash %h = (); return bless(\%h, "C"); }
+        func chain(scalar $self) str { return SUPER::chain($self); }
+    ');
+    my scalar $sup_res = Strada::Interpreter::eval('my scalar $c = C::new(); $c->chain()');
+    if ($sup_res ne "B->A") {
+        say("FAIL: Eval 3-level SUPER:: got '" . $sup_res . "'");
+        $fail++;
+    }
+
+    # 2. Eval: exists($hr->{"k"}) & delete($hr->{"k"})
+    my scalar $ex_res = Strada::Interpreter::eval('my scalar $hr = { "k" => 77 }; my int $e1 = exists($hr->{"k"}); delete($hr->{"k"}); my int $e2 = exists($hr->{"k"}); $e1 . ":" . $e2');
+    if ($ex_res ne "1:0") {
+        say("FAIL: Eval exists/delete hashref got '" . $ex_res . "'");
+        $fail++;
+    }
+
+    # 3. Eval: around modifier
+    Strada::Interpreter::eval('package Greeter; has ro str $who = "world"; func hi(scalar $self) str { return "hi " . $self->who(); } around "hi" func(scalar $orig, scalar $self) str { return "<" . $orig->($self) . ">"; }');
+    my scalar $ar_res = Strada::Interpreter::eval('my scalar $g = Greeter::new(); $g->hi()');
+    if ($ar_res ne "<hi world>") {
+        say("FAIL: Eval around got '" . $ar_res . "'");
+        $fail++;
+    }
+
+    # 4. Strada::JIT: redefining no-parens func greet { ... } & $x = 99; return $x; persists $x
+    Strada::JIT::init();
+    Strada::JIT::eval('func greet { return "hello1"; }');
+    Strada::JIT::eval('func greet { return "hello2"; }');
+    Strada::JIT::eval('my int $x = 10;');
+    my scalar $j3 = Strada::JIT::eval('$x = 99; return $x;');
+    my scalar $j_persisted = Strada::JIT::get("x");
+    my scalar $j_greet = Strada::JIT::eval('greet()');
+    if ($j_greet ne "hello2" || ($j3 + 0) != 99 || ($j_persisted + 0) != 99) {
+        say("FAIL: Strada::JIT got greet='" . $j_greet . "' ret='" . $j3 . "' persisted='" . $j_persisted . "'");
+        $fail++;
+    }
+
+    if ($fail == 0) {
+        say("ALL_EVAL_JIT_OK");
+        return 0;
+    }
+    return 1;
+}

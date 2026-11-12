@@ -1,0 +1,8 @@
+# COMPILE-ERROR: Unterminated heredoc
+# Missing heredoc terminator at EOF previously went undiagnosed instead of
+# raising a located compile error.
+func main() int {
+    my str $s = <<EOT;
+hello world
+    return 0;
+}

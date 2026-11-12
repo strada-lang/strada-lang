@@ -149,19 +149,44 @@ func satisfies(str $ver_str, str $constraint) int {
         return 1;
     }
 
-    # Caret constraint: ^1.2.3 means >=1.2.3 <2.0.0
+    # Caret constraint: ^1.2.3 means >=1.2.3 <2.0.0; ^0.2.3 means >=0.2.3 <0.3.0; ^0.0.3 means >=0.0.3 <0.0.4
     if (substr($c, 0, 1) eq "^") {
         my str $base = substr($c, 1, length($c) - 1);
         my scalar $v = Pacco::SemVer::parse($base);
         my int $major = $v->{"major"};
+        my int $minor = $v->{"minor"};
+        my int $patch = $v->{"patch"};
+
+        # Count dot-separated numeric parts in base (excluding prerelease)
+        my str $base_num = $base;
+        if (substr($base_num, 0, 1) eq "v") {
+            $base_num = substr($base_num, 1, length($base_num) - 1);
+        }
+        my int $dpos = index($base_num, "-");
+        if ($dpos >= 0) {
+            $base_num = substr($base_num, 0, $dpos);
+        }
+        my array @bparts = split("\\.", $base_num);
+        my int $nparts = scalar(@bparts);
 
         # Must be >= base version
         if (Pacco::SemVer::compare($ver_str, $base) < 0) {
             return 0;
         }
 
-        # Must be < next major version
-        my str $ceiling = ($major + 1) . ".0.0";
+        my str $ceiling = "";
+        if ($major > 0) {
+            $ceiling = ($major + 1) . ".0.0";
+        } elsif ($minor > 0) {
+            $ceiling = "0." . ($minor + 1) . ".0";
+        } elsif ($nparts >= 3) {
+            $ceiling = "0.0." . ($patch + 1);
+        } elsif ($nparts == 2) {
+            $ceiling = "0.1.0";
+        } else {
+            $ceiling = "1.0.0";
+        }
+
         if (Pacco::SemVer::compare($ver_str, $ceiling) >= 0) {
             return 0;
         }

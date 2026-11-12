@@ -1,0 +1,90 @@
+# EXPECT: gc_ok timeout_caught worker_done cancel_ok
+# Cycle-collector STW + candidate drop-to-zero race under concurrent
+# core::gc_collect(), async::timeout when worker completes after timeout,
+# and async::cancel on queued futures.
+
+async func slow_worker(scalar $done_ch) str {
+    core::usleep(60000);
+    async::send($done_ch, "finished");
+    return "late_" . "payload";
+}
+
+func main() int {
+    # 1. Multithreaded core::gc_collect() + candidate drop-to-zero race
+    core::gc_threshold(100);
+    my array @threads = ();
+    my int $t = 0;
+    while ($t < 4) {
+        push(@threads, thread::create(func () {
+            my int $i = 0;
+            while ($i < 400) {
+                # Cyclic pair (using core::hash_new() to stress CC STW directly)
+                my scalar $a = core::hash_new();
+                my scalar $b = core::hash_new();
+                $a->{"p"} = $b;
+                $b->{"p"} = $a;
+                # Non-cyclic candidate container that drops to refcount 0
+                my scalar $c = core::hash_new();
+                $c->{"self"} = $c;
+                delete($c->{"self"});
+                if ($i % 40 == 0) {
+                    core::gc_collect();
+                }
+                $i = $i + 1;
+            }
+            return 0;
+        }));
+        $t = $t + 1;
+    }
+    core::gc_collect();
+    foreach my scalar $th (@threads) {
+        thread::join($th);
+    }
+    core::gc_collect();
+    my str $p1 = "gc_ok";
+
+    # 2. async::timeout + worker completion after timeout
+    my scalar $done_ch = async::channel(2);
+    my scalar $fut = slow_worker($done_ch);
+    my int $timed_out = 0;
+    try {
+        my scalar $res = async::timeout($fut, 10);
+    } catch ($e) {
+        if (index("" . $e, "timed out") >= 0 || length("" . $e) > 0) {
+            $timed_out = 1;
+        }
+    }
+    # Wait for worker to finish after the caller already timed out and dropped $fut
+    my str $wmsg = async::recv($done_ch);
+    core::usleep(15000);
+    async::close($done_ch);
+    my str $p2 = ($timed_out == 1) ? "timeout_caught" : "no_timeout";
+    my str $p3 = ($wmsg eq "finished") ? "worker_done" : "worker_missing";
+
+    # 3. async::cancel on queued/running futures
+    my array @futs = ();
+    my int $fi = 0;
+    while ($fi < 16) {
+        push(@futs, async::spawn(fn () scalar {
+            async::sleep(2000);
+            if (async::cancelled()) { return "cancelled"; }
+            return "ran";
+        }));
+        $fi = $fi + 1;
+    }
+    foreach my scalar $qf (@futs) {
+        async::cancel($qf);
+    }
+    my int $cancel_errs = 0;
+    foreach my scalar $qf2 (@futs) {
+        try {
+            my scalar $rv = await $qf2;
+        } catch ($ce) {
+            $cancel_errs = $cancel_errs + 1;
+        }
+    }
+    my str $p4 = ($cancel_errs > 0) ? "cancel_ok" : "cancel_none";
+
+    say($p1 . " " . $p2 . " " . $p3 . " " . $p4);
+    return 0;
+}

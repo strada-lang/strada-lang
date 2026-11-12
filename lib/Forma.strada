@@ -402,11 +402,13 @@ func clear_helpers() void {
 # Initialize template system with directory
 func init(str $dir) void {
     $g_forma_dir = $dir;
+    Forma::clear_cache();
 }
 
 # Set template directory
 func set_dir(str $dir) void {
     $g_forma_dir = $dir;
+    Forma::clear_cache();
 }
 
 # Get template directory
@@ -425,8 +427,38 @@ func clear_cache() void {
     %g_forma_ast_cache = ();
 }
 
+# Check for disallowed leading '/' or '..' path segments
+func _is_unsafe_path(str $name) int {
+    if (length($name) == 0) {
+        return 1;
+    }
+    if (substr($name, 0, 1) eq "/" || substr($name, 0, 1) eq "\\") {
+        return 1;
+    }
+    if ($name eq "..") {
+        return 1;
+    }
+    if (length($name) >= 3) {
+        if (substr($name, 0, 3) eq "../" || substr($name, 0, 3) eq "..\\") {
+            return 1;
+        }
+        if (substr($name, length($name) - 3, 3) eq "/.." || substr($name, length($name) - 3, 3) eq "\\..") {
+            return 1;
+        }
+    }
+    if (index($name, "/../") >= 0 || index($name, "\\..\\") >= 0 ||
+        index($name, "/..\\") >= 0 || index($name, "\\../") >= 0) {
+        return 1;
+    }
+    return 0;
+}
+
 # Load a template file (with caching)
 func load(str $name) str {
+    if (Forma::_is_unsafe_path($name) == 1) {
+        return "";
+    }
+
     # Check cache first
     if ($g_forma_cache_enabled == 1 && exists(%g_forma_cache, $name)) {
         return $g_forma_cache{$name};
@@ -909,6 +941,17 @@ func render_string(str $template, scalar $vars) str {
                         next;
                     }
                 }
+            }
+        }
+
+        # Check for {{{raw}}} triple-brace variable (must come before {{ handling)
+        if ($i + 2 < $len && substr($template, $i, 3) eq "{{{") {
+            my int $rend = Forma::find_triple_closing($template, $i + 3);
+            if ($rend > $i + 3) {
+                my str $rname = trim(substr($template, $i + 3, $rend - $i - 3));
+                $result = $result . Forma::resolve_var($rname, $vars);
+                $i = $rend + 3;
+                next;
             }
         }
 
@@ -1981,7 +2024,24 @@ func find_closing(str $template, int $start) int {
     return -1;
 }
 
-# Resolve a variable name (supports dot notation for nested access)
+# Check if a path segment is a non-negative integer index ("0", "1", "12", ...)
+func _is_uint_index(str $seg) int {
+    my int $len = length($seg);
+    if ($len == 0) {
+        return 0;
+    }
+    my int $i = 0;
+    while ($i < $len) {
+        my str $ch = substr($seg, $i, 1);
+        if ($ch lt "0" || $ch gt "9") {
+            return 0;
+        }
+        $i = $i + 1;
+    }
+    return 1;
+}
+
+# Resolve a variable name (supports dot notation for nested hash + numeric array access)
 func resolve_var(str $name, scalar $vars) str {
     if (!defined($vars)) {
         return "";
@@ -2003,17 +2063,21 @@ func resolve_var(str $name, scalar $vars) str {
         return "";
     }
 
-    # Check for dot notation (e.g., user.name, user.address.city)
+    # Check for dot notation (e.g., user.name, items.0, items.0.title)
     my int $dot = index($name, ".");
     if ($dot > 0) {
-        # Split on first dot
         my str $first = substr($name, 0, $dot);
         my str $rest = substr($name, $dot + 1, length($name) - $dot - 1);
 
-        # Get nested value
         if (ref($vars) eq "HASH" && exists(%{$vars}, $first)) {
             my scalar $nested = $vars->{$first};
             return Forma::resolve_var($rest, $nested);
+        }
+        if (ref($vars) eq "ARRAY" && Forma::_is_uint_index($first) == 1) {
+            my int $idx = cast_int($first);
+            if ($idx >= 0 && $idx < scalar(@{$vars})) {
+                return Forma::resolve_var($rest, $vars->[$idx]);
+            }
         }
         return "";
     }
@@ -2021,12 +2085,20 @@ func resolve_var(str $name, scalar $vars) str {
     # Simple variable lookup
     if (ref($vars) eq "HASH" && exists(%{$vars}, $name)) {
         my scalar $value = $vars->{$name};
-
-        # Convert to string
         if (!defined($value)) {
             return "";
         }
         return "" . $value;
+    }
+    if (ref($vars) eq "ARRAY" && Forma::_is_uint_index($name) == 1) {
+        my int $idx = cast_int($name);
+        if ($idx >= 0 && $idx < scalar(@{$vars})) {
+            my scalar $value = $vars->[$idx];
+            if (!defined($value)) {
+                return "";
+            }
+            return "" . $value;
+        }
     }
 
     return "";
@@ -2064,12 +2136,24 @@ func get_var(str $name, scalar $vars) scalar {
             my scalar $nested = $vars->{$first};
             return Forma::get_var($rest, $nested);
         }
+        if (ref($vars) eq "ARRAY" && Forma::_is_uint_index($first) == 1) {
+            my int $idx = cast_int($first);
+            if ($idx >= 0 && $idx < scalar(@{$vars})) {
+                return Forma::get_var($rest, $vars->[$idx]);
+            }
+        }
         return undef;
     }
 
     # Simple variable lookup
     if (ref($vars) eq "HASH" && exists(%{$vars}, $name)) {
         return $vars->{$name};
+    }
+    if (ref($vars) eq "ARRAY" && Forma::_is_uint_index($name) == 1) {
+        my int $idx = cast_int($name);
+        if ($idx >= 0 && $idx < scalar(@{$vars})) {
+            return $vars->[$idx];
+        }
     }
 
     return undef;
@@ -2119,13 +2203,16 @@ func find_block_end(str $template, int $start, str $block_type) int {
         }
         $i = $i + $next_brace;
 
-        # Check for nested open tag
-        if ($i + $open_len <= $len) {
+        # Check for nested open tag (with boundary check so {{#if doesn't match {{#if_eq)
+        if ($i + $open_len < $len) {
             my str $check_open = substr($template, $i, $open_len);
             if ($check_open eq $open_tag) {
-                $depth = $depth + 1;
-                $i = $i + $open_len;
-                next;
+                my str $after = substr($template, $i + $open_len, 1);
+                if ($after eq " " || $after eq "\t" || $after eq "}") {
+                    $depth = $depth + 1;
+                    $i = $i + $open_len;
+                    next;
+                }
             }
         }
 
@@ -2149,15 +2236,12 @@ func find_block_end(str $template, int $start, str $block_type) int {
     return -1;
 }
 
-# Find {{else}} at current nesting level
-# Optimized to use index() instead of character-by-character scanning
+# Find {{else}} at current nesting level (tracks all block tags that may nest or own an {{else}})
 func find_else(str $template, int $start, int $block_end) int {
     my int $i = $start;
     my int $depth = 0;
-    my str $search_region = substr($template, $start, $block_end - $start);
 
     while ($i < $block_end) {
-        # Find next {{ using index() - much faster than char-by-char
         my str $remaining = substr($template, $i, $block_end - $i);
         my int $next_brace = index($remaining, "{{");
         if ($next_brace < 0) {
@@ -2165,22 +2249,49 @@ func find_else(str $template, int $start, int $block_end) int {
         }
         $i = $i + $next_brace;
 
-        # Track nested #if blocks
-        if ($i + 5 <= $block_end) {
-            my str $check = substr($template, $i, 5);
-            if ($check eq "{{#if") {
-                $depth = $depth + 1;
-                $i = $i + 5;
+        # Skip comments {{!-- ... --}}
+        if ($i + 4 < $block_end && substr($template, $i, 4) eq "{{!-") {
+            my int $cend = Forma::find_comment_end($template, $i + 4);
+            if ($cend > 0 && $cend + 4 <= $block_end) {
+                $i = $cend + 4;
                 next;
             }
         }
 
-        if ($i + 7 <= $block_end) {
-            my str $check = substr($template, $i, 7);
-            if ($check eq "{{/if}}") {
-                $depth = $depth - 1;
-                $i = $i + 7;
-                next;
+        # Track nested block openers: {{#if ...}}, {{#if_eq/ne/gt/lt/ge/le ...}},
+        # {{#unless ...}}, {{#each ...}}, {{#with ...}}, {{#range ...}}, {{#switch ...}}
+        if ($i + 3 < $block_end && substr($template, $i, 3) eq "{{#") {
+            my int $tend = Forma::find_closing($template, $i + 3);
+            if ($tend > $i + 3 && $tend + 2 <= $block_end) {
+                my str $inner = trim(substr($template, $i + 3, $tend - $i - 3));
+                my int $sp = index($inner, " ");
+                my str $bname = ($sp > 0) ? substr($inner, 0, $sp) : $inner;
+                if ($bname eq "if" || $bname eq "if_eq" || $bname eq "if_ne" ||
+                    $bname eq "if_gt" || $bname eq "if_lt" || $bname eq "if_ge" ||
+                    $bname eq "if_le" || $bname eq "unless" || $bname eq "each" ||
+                    $bname eq "with" || $bname eq "range" || $bname eq "switch") {
+                    $depth = $depth + 1;
+                    $i = $tend + 2;
+                    next;
+                }
+            }
+        }
+
+        # Track nested block closers: {{/if}}, {{/if_eq}}, {{/unless}}, etc.
+        if ($i + 3 < $block_end && substr($template, $i, 3) eq "{{/") {
+            my int $tend = Forma::find_closing($template, $i + 3);
+            if ($tend > $i + 3 && $tend + 2 <= $block_end) {
+                my str $bname = trim(substr($template, $i + 3, $tend - $i - 3));
+                if ($bname eq "if" || $bname eq "if_eq" || $bname eq "if_ne" ||
+                    $bname eq "if_gt" || $bname eq "if_lt" || $bname eq "if_ge" ||
+                    $bname eq "if_le" || $bname eq "unless" || $bname eq "each" ||
+                    $bname eq "with" || $bname eq "range" || $bname eq "switch") {
+                    if ($depth > 0) {
+                        $depth = $depth - 1;
+                    }
+                    $i = $tend + 2;
+                    next;
+                }
             }
         }
 

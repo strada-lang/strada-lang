@@ -106,29 +106,15 @@ func find_package(str $name, str $constraint, str $deps_dir) str {
     my array @candidates = ();
 
     # Check deps directory
-    if (sys::dir_exists($deps_dir) == 1) {
-        # List directories in deps_dir
-        my str $cmd = "ls -1 " . $deps_dir . " 2>/dev/null";
-        my scalar $fh = sys::popen($cmd, "r");
-        if (defined($fh)) {
-            my str $line = sys::fgets($fh, 256);
-            while (defined($line) && length($line) > 0) {
-                # Trim newline
-                if (substr($line, length($line) - 1, 1) eq "\n") {
-                    $line = substr($line, 0, length($line) - 1);
+    if (core::dir_exists($deps_dir) == 1) {
+        my array @entries = core::readdir($deps_dir);
+        foreach my str $line (@entries) {
+            if ($line eq $name || (length($line) > length($name) + 1 && substr($line, 0, length($name) + 1) eq $name . "-")) {
+                my str $path = $deps_dir . "/" . $line;
+                if (core::file_exists($path . "/Strada.toml") == 1) {
+                    push(@candidates, $path);
                 }
-
-                # Check if this matches the package name
-                if ($line eq $name || substr($line, 0, length($name) + 1) eq $name . "-") {
-                    my str $path = $deps_dir . "/" . $line;
-                    if (sys::file_exists($path . "/Strada.toml") == 1) {
-                        push(@candidates, $path);
-                    }
-                }
-
-                $line = sys::fgets($fh, 256);
             }
-            sys::pclose($fh);
         }
     }
 
@@ -140,7 +126,7 @@ func find_package(str $name, str $constraint, str $deps_dir) str {
         my scalar $manifest = StradaPM::Manifest::parse($path . "/Strada.toml");
         if (defined($manifest)) {
             my str $ver = StradaPM::Manifest::get_version($manifest);
-            if (StradaPM::SemVer::satisfies($ver, $constraint, 0) == 0) {
+            if (StradaPM::SemVer::satisfies($ver, $constraint) == 1) {
                 if ($best_version eq "" || StradaPM::SemVer::compare($ver, $best_version) > 0) {
                     $best_version = $ver;
                     $best_path = $path;
@@ -249,10 +235,10 @@ func get_lib_paths(scalar $resolved) scalar {
 
         if ($path ne "") {
             # Add standard library locations
-            if (sys::dir_exists($path . "/lib") == 1) {
+            if (core::dir_exists($path . "/lib") == 1) {
                 push(@paths, $path . "/lib");
             }
-            if (sys::dir_exists($path . "/src") == 1) {
+            if (core::dir_exists($path . "/src") == 1) {
                 push(@paths, $path . "/src");
             }
             # Also add the package root

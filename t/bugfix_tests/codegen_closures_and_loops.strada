@@ -1,0 +1,164 @@
+# EXPECT: 7:outer_err inner:outer 43 a,b,c 10:20:30 70:after_out fin_err:1 base:base:base
+# Codegen closure, try/finally, and loop-exit fixes:
+# - closure inside `try` returning without popping outer `try`
+# - closure with `my $x` not corrupting `cleanup_stack` when outer `main` has `my $x`
+# - closure capturing C keyword `$default`
+# - closure spread `$fn->("a", ...@arr)`
+# - reassigning closure / async / int parameters without corrupting caller args
+# - `redo` (70x) and `last OUTER` inside `try`
+# - throwing inside `finally` on `return` propagating to outer `catch` (running `finally` once)
+# - `local $g` restored on loop `last` / `next` / `redo`
+
+our str $g = "base";
+our int $fin_runs = 0;
+
+func mutate_int(int $p) int {
+    $p = $p + 99;
+    return $p;
+}
+
+async func mutate_async(str $s) str {
+    $s = $s . "_mut";
+    return $s;
+}
+
+func throw_in_finally_on_return() str {
+    try {
+        return "early_val";
+    } finally {
+        $fin_runs = $fin_runs + 1;
+        throw "fin_err";
+    }
+    return "unreach";
+}
+
+func main() int {
+    # 1. Closure inside `try` returning must not pop outer `try`
+    my int $cret = 0;
+    my str $ccaught = "";
+    try {
+        my scalar $f = fn () int {
+            return 7;
+        };
+        $cret = $f->();
+        throw "outer_err";
+    } catch ($e) {
+        $ccaught = "" . $e;
+    }
+
+    # 2. Closure with `my $x` when `main` also has `my $x` (cleanup_stack safety)
+    my str $x = "outer";
+    my scalar $clash = fn () str {
+        my str $x = "inner";
+        return $x;
+    };
+    my str $clash_res = "";
+    try {
+        my scalar $thrower = fn () void {
+            my str $x = "temp_" . "str";
+            throw "boom";
+        };
+        $thrower->();
+    } catch ($e) {}
+    $clash_res = $clash->() . ":" . $x;
+
+    # 3. Closure capturing C keyword `$default`
+    my int $default = 42;
+    my scalar $cap_kw = fn () int {
+        return $default + 1;
+    };
+    my int $kw_val = $cap_kw->();
+
+    # 4. Closure spread `$fn->("a", ...@arr)` after shift
+    my array @sp_arr = ("skip", "b", "c");
+    shift(@sp_arr);
+    my scalar $joiner = fn (str $p1, str $p2, str $p3) str {
+        return $p1 . "," . $p2 . "," . $p3;
+    };
+    my str $sp_res = $joiner->("a", ...@sp_arr);
+
+    # 5. Reassigning closure / async / int parameters without corrupting caller args
+    my int $caller_i = 10;
+    my int $ignored_i = mutate_int($caller_i);
+
+    my scalar $mut_cl = fn (int $ci) int {
+        $ci = $ci + 50;
+        return $ci;
+    };
+    my int $caller_ci = 20;
+    my int $ignored_ci = $mut_cl->($caller_ci);
+
+    my str $caller_as = "30";
+    my str $ignored_as = await mutate_async($caller_as);
+    my str $param_res = $caller_i . ":" . $caller_ci . ":" . $caller_as;
+
+    # 6. `redo` (70x) and `last OUTER` inside `try`
+    my int $redos = 0;
+    my int $once = 0;
+    while ($once == 0) {
+        $once = 1;
+        try {
+            if ($redos < 70) {
+                $redos = $redos + 1;
+                redo;
+            }
+        } catch ($e) {}
+    }
+
+    OUTER: while (1) {
+        while (1) {
+            try {
+                last OUTER;
+            } catch ($e) {}
+        }
+    }
+    my str $after_out = "";
+    try {
+        throw "after_out";
+    } catch ($e) {
+        $after_out = "" . $e;
+    }
+
+    # 7. Throwing inside `finally` on `return` propagates to outer `catch` & runs `finally` once
+    my str $fin_caught = "";
+    try {
+        my str $unused = throw_in_finally_on_return();
+    } catch ($e) {
+        $fin_caught = "" . $e;
+    }
+
+    # 8. `local $g` restored on loop `last` / `next` / `redo`
+    my int $li = 0;
+    while ($li < 3) {
+        $li = $li + 1;
+        local $g = "in_next";
+        if ($li < 3) { next; }
+    }
+    my str $g1 = $g;
+
+    my int $rd = 0;
+    while ($rd == 0) {
+        local $g = "in_redo";
+        if ($rd == 0) {
+            $rd = 1;
+            redo;
+        }
+    }
+    my str $g2 = $g;
+
+    while (1) {
+        local $g = "in_last";
+        last;
+    }
+    my str $g3 = $g;
+
+    say($cret . ":" . $ccaught . " " .
+        $clash_res . " " .
+        $kw_val . " " .
+        $sp_res . " " .
+        $param_res . " " .
+        $redos . ":" . $after_out . " " .
+        $fin_caught . ":" . $fin_runs . " " .
+        $g1 . ":" . $g2 . ":" . $g3);
+    return 0;
+}

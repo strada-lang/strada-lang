@@ -146,6 +146,8 @@ TESTS=(
     "test_async_ergonomics"
     "test_import_lib_devirt"
     "test_arena_hardened"
+    "test_encoding"
+    "test_audit_2026_11_leaks"
 )
 
 # c::callback needs libffi at build time — include only when configured in
@@ -153,9 +155,6 @@ TESTS=(
 if grep -q "^export STRADA_HAVE_LIBFFI=1" "$STRADA_DIR/config.sh" 2>/dev/null; then
     TESTS+=("test_c_callback")
 fi
-
-# Tests with known leaks (for future work):
-# - test_encoding: JSON library has leaks
 
 PASSED=0
 FAILED=0

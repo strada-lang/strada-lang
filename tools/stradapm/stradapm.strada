@@ -19,6 +19,7 @@
    stradapm --help                  Show help
 */
 
+use lib "tools/stradapm";
 use lib ".";
 use SemVer;
 use Manifest;
@@ -35,7 +36,7 @@ func main(int $argc, array @argv) int {
         return 0;
     }
 
-    my str $command = @argv[1];
+    my str $command = $argv[1];
 
     # Global flags
     if ($command eq "--version" || $command eq "-v") {
@@ -135,15 +136,15 @@ func print_help() void {
 
 # Initialize a new project in current directory
 func cmd_init(int $argc, array @argv) int {
-    my str $cwd = sys::getcwd();
+    my str $cwd = core::getcwd();
 
-    if (sys::file_exists($cwd . "/Strada.toml") == 1) {
+    if (core::file_exists($cwd . "/Strada.toml") == 1) {
         say("Error: Strada.toml already exists in this directory");
         return 1;
     }
 
     # Get project name from directory name
-    my str $name = sys::basename($cwd);
+    my str $name = core::basename($cwd);
 
     say("Creating Strada.toml for '" . $name . "'...");
 
@@ -151,8 +152,8 @@ func cmd_init(int $argc, array @argv) int {
     spew($cwd . "/Strada.toml", $content);
 
     # Create src directory if it doesn't exist
-    if (sys::dir_exists($cwd . "/src") == 0) {
-        sys::mkdir($cwd . "/src", 493);
+    if (core::dir_exists($cwd . "/src") == 0) {
+        core::mkdir($cwd . "/src", 493);
 
         # Create main.strada
         my str $main_content = "func main() int {\n";
@@ -177,11 +178,15 @@ func cmd_new(int $argc, array @argv) int {
         return 1;
     }
 
-    my str $name = @argv[2];
-    my str $cwd = sys::getcwd();
+    my str $name = $argv[2];
+    if (StradaPM::Fetch::is_safe_name($name) == 0) {
+        say("Error: Invalid project name '" . $name . "'");
+        return 1;
+    }
+    my str $cwd = core::getcwd();
     my str $project_dir = $cwd . "/" . $name;
 
-    if (sys::dir_exists($project_dir) == 1) {
+    if (core::dir_exists($project_dir) == 1) {
         say("Error: Directory '" . $name . "' already exists");
         return 1;
     }
@@ -189,9 +194,9 @@ func cmd_new(int $argc, array @argv) int {
     say("Creating project '" . $name . "'...");
 
     # Create directories
-    sys::mkdir($project_dir, 493);
-    sys::mkdir($project_dir . "/src", 493);
-    sys::mkdir($project_dir . "/t", 493);
+    core::mkdir($project_dir, 493);
+    core::mkdir($project_dir . "/src", 493);
+    core::mkdir($project_dir . "/t", 493);
 
     # Create Strada.toml
     my str $manifest = StradaPM::Manifest::generate_template($name, "0.1.0", "A Strada project");
@@ -239,20 +244,20 @@ func cmd_add(int $argc, array @argv) int {
         return 1;
     }
 
-    my str $cwd = sys::getcwd();
+    my str $cwd = core::getcwd();
     my str $manifest_path = $cwd . "/Strada.toml";
 
-    if (sys::file_exists($manifest_path) == 0) {
+    if (core::file_exists($manifest_path) == 0) {
         say("Error: No Strada.toml found. Run 'stradapm init' first.");
         return 1;
     }
 
-    my str $package = @argv[2];
+    my str $package = $argv[2];
     my str $ver = "*";
 
     # Check for version specifier
     if ($argc >= 4) {
-        $ver = @argv[3];
+        $ver = $argv[3];
     }
 
     # Parse package source
@@ -275,7 +280,7 @@ func cmd_add(int $argc, array @argv) int {
     my str $pkg_name = "";
     my str $pkg_version = "";
 
-    if (sys::file_exists($pkg_path . "/Strada.toml") == 1) {
+    if (core::file_exists($pkg_path . "/Strada.toml") == 1) {
         my scalar $pkg_manifest = StradaPM::Manifest::parse($pkg_path . "/Strada.toml");
         if (defined($pkg_manifest)) {
             $pkg_name = StradaPM::Manifest::get_name($pkg_manifest);
@@ -321,11 +326,15 @@ func cmd_remove(int $argc, array @argv) int {
         return 1;
     }
 
-    my str $name = @argv[2];
-    my str $cwd = sys::getcwd();
+    my str $name = $argv[2];
+    if (StradaPM::Fetch::is_safe_name($name) == 0) {
+        say("Error: Invalid package name '" . $name . "'");
+        return 1;
+    }
+    my str $cwd = core::getcwd();
     my str $manifest_path = $cwd . "/Strada.toml";
 
-    if (sys::file_exists($manifest_path) == 0) {
+    if (core::file_exists($manifest_path) == 0) {
         say("Error: No Strada.toml found.");
         return 1;
     }
@@ -361,7 +370,14 @@ func cmd_remove(int $argc, array @argv) int {
 
     # Remove from deps directory
     my str $deps_dir = $cwd . "/.strada/deps";
-    sys::system("rm -rf " . $deps_dir . "/" . $name . "* 2>/dev/null");
+    if (core::dir_exists($deps_dir) == 1) {
+        my array @entries = core::readdir($deps_dir);
+        foreach my str $ent (@entries) {
+            if ($ent eq $name || (length($ent) > length($name) + 1 && substr($ent, 0, length($name) + 1) eq $name . "-")) {
+                core::system("rm -rf -- " . StradaPM::Fetch::shell_quote($deps_dir . "/" . $ent) . " 2>/dev/null");
+            }
+        }
+    }
 
     # Update lock file
     my scalar $manifest = StradaPM::Manifest::parse($manifest_path);
@@ -375,10 +391,10 @@ func cmd_remove(int $argc, array @argv) int {
 
 # Install dependencies
 func cmd_install(int $argc, array @argv) int {
-    my str $cwd = sys::getcwd();
+    my str $cwd = core::getcwd();
     my str $manifest_path = $cwd . "/Strada.toml";
 
-    if (sys::file_exists($manifest_path) == 0) {
+    if (core::file_exists($manifest_path) == 0) {
         say("Error: No Strada.toml found.");
         return 1;
     }
@@ -448,11 +464,11 @@ func cmd_install(int $argc, array @argv) int {
 
 # Update dependencies
 func cmd_update(int $argc, array @argv) int {
-    my str $cwd = sys::getcwd();
+    my str $cwd = core::getcwd();
 
     # Remove lock file to force re-resolution
-    if (sys::file_exists($cwd . "/Strada.lock") == 1) {
-        sys::unlink($cwd . "/Strada.lock");
+    if (core::file_exists($cwd . "/Strada.lock") == 1) {
+        core::unlink($cwd . "/Strada.lock");
     }
 
     # Re-install
@@ -461,13 +477,13 @@ func cmd_update(int $argc, array @argv) int {
 
 # Build the project
 func cmd_build(int $argc, array @argv) int {
-    my str $cwd = sys::getcwd();
+    my str $cwd = core::getcwd();
 
     my hash %options = ();
 
     # Parse options
     for (my int $i = 2; $i < $argc; $i++) {
-        my str $arg = @argv[$i];
+        my str $arg = $argv[$i];
         if ($arg eq "--release" || $arg eq "-r") {
             $options{"release"} = 1;
         } elsif ($arg eq "--verbose" || $arg eq "-v") {
@@ -490,7 +506,7 @@ func cmd_build(int $argc, array @argv) int {
 
 # Build and run
 func cmd_run(int $argc, array @argv) int {
-    my str $cwd = sys::getcwd();
+    my str $cwd = core::getcwd();
 
     # Build first
     my hash %build_options = ();
@@ -504,7 +520,7 @@ func cmd_run(int $argc, array @argv) int {
     # Collect args for the program
     my array @run_args = ();
     for (my int $i = 2; $i < $argc; $i++) {
-        push(@run_args, @argv[$i]);
+        push(@run_args, $argv[$i]);
     }
 
     return StradaPM::Build::run($cwd, \@run_args);
@@ -512,7 +528,7 @@ func cmd_run(int $argc, array @argv) int {
 
 # Run tests
 func cmd_test(int $argc, array @argv) int {
-    my str $cwd = sys::getcwd();
+    my str $cwd = core::getcwd();
 
     say("Running tests...");
 
@@ -534,7 +550,7 @@ func cmd_test(int $argc, array @argv) int {
 
 # Clean build artifacts
 func cmd_clean(int $argc, array @argv) int {
-    my str $cwd = sys::getcwd();
+    my str $cwd = core::getcwd();
 
     say("Cleaning...");
 
@@ -546,10 +562,10 @@ func cmd_clean(int $argc, array @argv) int {
 
 # Show project info
 func cmd_info(int $argc, array @argv) int {
-    my str $cwd = sys::getcwd();
+    my str $cwd = core::getcwd();
     my str $manifest_path = $cwd . "/Strada.toml";
 
-    if (sys::file_exists($manifest_path) == 0) {
+    if (core::file_exists($manifest_path) == 0) {
         say("Error: No Strada.toml found.");
         return 1;
     }

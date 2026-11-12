@@ -124,7 +124,7 @@ func convert_c_body(str $code, str $ret_type, hash %param_types) str {
     }
     # SvNV(x) -> strada_to_num() (returns double in C)
     if (match($result, "SvNV")) {
-        $result = replace_all($result, "SvNV", "strada_to_num_c");
+        $result = replace_all($result, "SvNV", "strada_to_num");
     }
     # SvPV_nolen(x) -> strada_to_str(x)
     if (match($result, "SvPV_nolen")) {
@@ -152,91 +152,91 @@ func convert_c_body(str $code, str $ret_type, hash %param_types) str {
         $result = replace_all($result, "newSVpv", "strada_new_str");
     }
 
-    # croak -> die
-    if (match($result, "croak(")) {
-        $result = replace_all($result, "croak(", "/* REVIEW: was croak() */ die(");
+    # croak -> strada_die
+    if (index($result, "croak(") >= 0) {
+        $result = str_replace($result, "croak(", "/* REVIEW: was croak() */ strada_die(");
     }
 
     # XSRETURN_UNDEF (must come before XSRETURN)
-    if (match($result, "XSRETURN_UNDEF")) {
-        $result = replace_all($result, "XSRETURN_UNDEF", "return strada_new_undef() /* was XSRETURN_UNDEF */");
+    if (index($result, "XSRETURN_UNDEF") >= 0) {
+        $result = str_replace($result, "XSRETURN_UNDEF", "return strada_new_undef() /* was XSRETURN_UNDEF */");
     }
     # XSRETURN_YES
-    if (match($result, "XSRETURN_YES")) {
-        $result = replace_all($result, "XSRETURN_YES", "return strada_new_int(1) /* was XSRETURN_YES */");
+    if (index($result, "XSRETURN_YES") >= 0) {
+        $result = str_replace($result, "XSRETURN_YES", "return strada_new_int(1) /* was XSRETURN_YES */");
     }
     # XSRETURN_NO
-    if (match($result, "XSRETURN_NO")) {
-        $result = replace_all($result, "XSRETURN_NO", "return strada_new_int(0) /* was XSRETURN_NO */");
+    if (index($result, "XSRETURN_NO") >= 0) {
+        $result = str_replace($result, "XSRETURN_NO", "return strada_new_int(0) /* was XSRETURN_NO */");
     }
     # XSRETURN_EMPTY
-    if (match($result, "XSRETURN_EMPTY")) {
-        $result = replace_all($result, "XSRETURN_EMPTY", "return /* was XSRETURN_EMPTY */");
+    if (index($result, "XSRETURN_EMPTY") >= 0) {
+        $result = str_replace($result, "XSRETURN_EMPTY", "return /* was XSRETURN_EMPTY */");
     }
     # XSRETURN(n) -> REVIEW
-    if (match($result, "XSRETURN(")) {
-        $result = replace_all($result, "XSRETURN(", "/* REVIEW: multi-return */ XSRETURN(");
+    if (index($result, "XSRETURN(") >= 0) {
+        $result = str_replace($result, "XSRETURN(", "/* REVIEW: multi-return */ XSRETURN(");
     }
 
     # Strip Perl thread context macros
-    if (match($result, "aTHX_ ")) {
-        $result = replace_all($result, "aTHX_ ", "");
+    if (index($result, "aTHX_ ") >= 0) {
+        $result = str_replace($result, "aTHX_ ", "");
     }
-    if (match($result, "aTHX_,")) {
-        $result = replace_all($result, "aTHX_,", ",");
+    if (index($result, "aTHX_,") >= 0) {
+        $result = str_replace($result, "aTHX_,", ",");
     }
-    if (match($result, "pTHX_ ")) {
-        $result = replace_all($result, "pTHX_ ", "");
+    if (index($result, "pTHX_ ") >= 0) {
+        $result = str_replace($result, "pTHX_ ", "");
     }
-    if (match($result, "dTHX;")) {
-        $result = replace_all($result, "dTHX;", "/* dTHX removed */");
+    if (index($result, "dTHX;") >= 0) {
+        $result = str_replace($result, "dTHX;", "/* dTHX removed */");
     }
     # dXSARGS
-    if (match($result, "dXSARGS;")) {
-        $result = replace_all($result, "dXSARGS;", "/* dXSARGS removed - params are StradaValue* */");
+    if (index($result, "dXSARGS;") >= 0) {
+        $result = str_replace($result, "dXSARGS;", "/* dXSARGS removed - params are StradaValue* */");
     }
-    if (match($result, "dXSARGS")) {
-        $result = replace_all($result, "dXSARGS", "/* dXSARGS removed */");
+    if (index($result, "dXSARGS") >= 0) {
+        $result = str_replace($result, "dXSARGS", "/* dXSARGS removed */");
     }
     # dXSTARG
-    if (match($result, "dXSTARG;")) {
-        $result = replace_all($result, "dXSTARG;", "/* dXSTARG removed */");
+    if (index($result, "dXSTARG;") >= 0) {
+        $result = str_replace($result, "dXSTARG;", "/* dXSTARG removed */");
     }
 
     # SvOK(x) -> check for non-undef
-    if (match($result, "SvOK(")) {
-        $result = replace_all($result, "SvOK(", "/* REVIEW: SvOK = not undef */ strada_is_defined(");
+    if (index($result, "SvOK(") >= 0) {
+        $result = str_replace($result, "SvOK(", "/* REVIEW: SvOK = not undef */ strada_defined_bool(");
     }
     # SvROK(x) -> check for reference
-    if (match($result, "SvROK(")) {
-        $result = replace_all($result, "SvROK(", "/* REVIEW: SvROK = is reference */ strada_is_ref(");
+    if (index($result, "SvROK(") >= 0) {
+        $result = str_replace($result, "SvROK(", "/* REVIEW: SvROK = is reference */ strada_is_ref(");
     }
     # SvTRUE(x) -> check for truthy
-    if (match($result, "SvTRUE(")) {
-        $result = replace_all($result, "SvTRUE(", "/* REVIEW: SvTRUE = truthy */ strada_is_true(");
+    if (index($result, "SvTRUE(") >= 0) {
+        $result = str_replace($result, "SvTRUE(", "/* REVIEW: SvTRUE = truthy */ strada_to_bool(");
     }
     # SvIOK(x) -> check for integer type
-    if (match($result, "SvIOK(")) {
-        $result = replace_all($result, "SvIOK(", "/* REVIEW: SvIOK = is integer */ strada_is_int(");
+    if (index($result, "SvIOK(") >= 0) {
+        $result = str_replace($result, "SvIOK(", "/* REVIEW: SvIOK = is integer */ strada_is_int(");
     }
     # SvNOK(x) -> check for number type
-    if (match($result, "SvNOK(")) {
-        $result = replace_all($result, "SvNOK(", "/* REVIEW: SvNOK = is number */ strada_is_num(");
+    if (index($result, "SvNOK(") >= 0) {
+        $result = str_replace($result, "SvNOK(", "/* REVIEW: SvNOK = is number */ strada_is_num(");
     }
 
     # &PL_sv_undef -> strada_new_undef()
-    if (match($result, "&PL_sv_undef")) {
-        $result = replace_all($result, "&PL_sv_undef", "strada_new_undef()");
+    if (index($result, "&PL_sv_undef") >= 0) {
+        $result = str_replace($result, "&PL_sv_undef", "strada_new_undef()");
     }
 
     # ST(n) -> add REVIEW
-    if (match($result, "ST(")) {
-        $result = replace_all($result, "ST(", "/* REVIEW: use named params instead */ ST(");
+    if (index($result, "ST(") >= 0) {
+        $result = str_replace($result, "ST(", "/* REVIEW: use named params instead */ ST(");
     }
 
     # sv_2mortal -> not needed in Strada (refcounting handles it)
-    if (match($result, "sv_2mortal(")) {
-        $result = replace_all($result, "sv_2mortal(", "/* REVIEW: sv_2mortal not needed in Strada */ (");
+    if (index($result, "sv_2mortal(") >= 0) {
+        $result = str_replace($result, "sv_2mortal(", "/* REVIEW: sv_2mortal not needed in Strada */ (");
     }
 
     return $result;
@@ -251,7 +251,7 @@ func generate_param_extraction(str $param_name, str $c_type) str {
         return "        " . $st . " " . $param_name . "_c = (" . $st . ")strada_to_int(" . $param_name . ");";
     }
     if ($st eq "double" || $st eq "float" || $st eq "NV" || $st eq "long double") {
-        return "        " . $st . " " . $param_name . "_c = (" . $st . ")strada_to_num_c(" . $param_name . ");";
+        return "        " . $st . " " . $param_name . "_c = (" . $st . ")strada_to_num(" . $param_name . ");";
     }
     if ($st eq "char *" || $st eq "const char *" || $st eq "char*" || $st eq "const char*" || $st eq "unsigned char *") {
         return "        char *" . $param_name . "_c = strada_to_str(" . $param_name . ");  /* free() when done */";
@@ -436,20 +436,48 @@ func main(int $argc, array @argv) int {
                     $param_str = replace($param_str, "\\s+$", "");
                 }
 
-                # Parse parameter names
+                # Parse parameter names (supports both K&R `foo(x, y)` and ANSI `foo(SV *x, double y)`)
                 my array @param_names = ();
-                if (length($param_str) > 0) {
+                my hash %param_types = ();
+                my array @param_defaults = ();  # "name=value" pairs
+                if (length($param_str) > 0 && $param_str ne "void") {
                     my array @raw_params = split(",", $param_str);
                     foreach my str $p (@raw_params) {
-                        my str $pname = replace($p, "^\\s+", "");
-                        $pname = replace($pname, "\\s+$", "");
-                        # Strip default value
-                        if (match($pname, "=")) {
-                            my array @dp = split("=", $pname);
-                            $pname = replace($dp[0], "\\s+$", "");
+                        my str $pdecl = replace($p, "^\\s+", "");
+                        $pdecl = replace($pdecl, "\\s+$", "");
+                        my str $defv = "";
+                        if (match($pdecl, "=")) {
+                            my int $eqp = index($pdecl, "=");
+                            $defv = replace(substr($pdecl, $eqp + 1, length($pdecl) - $eqp - 1), "^\\s+", "");
+                            $pdecl = replace(substr($pdecl, 0, $eqp), "\\s+$", "");
+                        }
+                        my str $pname = "";
+                        my str $ptype = "";
+                        if (match($pdecl, "\\*\\s*[a-zA-Z_]")) {
+                            my array @ptc = capture($pdecl, "^(.+\\*)\\s*([a-zA-Z_][a-zA-Z0-9_]*)$");
+                            if (scalar(@ptc) > 2) {
+                                $ptype = $ptc[1];
+                                $pname = $ptc[2];
+                            }
+                        } elsif (match($pdecl, "\\s")) {
+                            my array @wds = split("\\s+", $pdecl);
+                            my int $nwd = scalar(@wds);
+                            if ($nwd >= 2) {
+                                $pname = $wds[$nwd - 1];
+                                my str $tps = "";
+                                for (my int $wi = 0; $wi < $nwd - 1; $wi++) {
+                                    if (length($tps) > 0) { $tps = $tps . " "; }
+                                    $tps = $tps . $wds[$wi];
+                                }
+                                $ptype = $tps;
+                            }
+                        } else {
+                            $pname = $pdecl;
                         }
                         if (length($pname) > 0) {
                             push(@param_names, $pname);
+                            if (length($ptype) > 0) { $param_types{$pname} = $ptype; }
+                            if (length($defv) > 0) { push(@param_defaults, $pname . "=" . $defv); }
                         }
                     }
                 }
@@ -457,8 +485,6 @@ func main(int $argc, array @argv) int {
                 $i = $i + 2;  # Skip return type and function name lines
 
                 # Parse parameter type declarations (indented lines before first section keyword)
-                my hash %param_types = ();
-                my array @param_defaults = ();  # "name=value" pairs
 
                 while ($i < $total_lines) {
                     my str $pline = $lines[$i];

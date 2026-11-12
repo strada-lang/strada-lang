@@ -1,0 +1,54 @@
+use lib "lib";
+use Template;
+use Forma;
+use Markdown;
+
+our int $g_fail = 0;
+
+func check(int $ok, str $label) void {
+    if ($ok == 0) {
+        say("FAIL: " . $label);
+        $g_fail = $g_fail + 1;
+    }
+}
+
+func main(int $argc, array @argv) int {
+    my str $work_dir = $argc > 1 ? $argv[1] : "/tmp";
+
+    # 1. Template ../ traversal blocked & per-instance INCLUDE_PATH cache isolation
+    my str $tdir1 = $work_dir . "/tt1";
+    my str $tdir2 = $work_dir . "/tt2";
+    core::mkdir($tdir1, 493);
+    core::mkdir($tdir2, 493);
+    core::spew($work_dir . "/secret.tt", "SECRET");
+    core::spew($tdir1 . "/shared.tt", "FROM_ONE:[% x %]");
+    core::spew($tdir2 . "/shared.tt", "FROM_TWO:[% x %]");
+    my scalar $tt1 = Template::new({ "INCLUDE_PATH" => $tdir1 });
+    my scalar $tt2 = Template::new({ "INCLUDE_PATH" => $tdir2 });
+    my int $trav_blocked = 0;
+    try {
+        $tt1->process("../secret.tt", {});
+    } catch ($e) {
+        $trav_blocked = 1;
+    }
+    check($trav_blocked == 1, "Template ../ traversal blocked");
+    my str $o1 = $tt1->process("shared.tt", { "x" => "1" });
+    my str $o2 = $tt2->process("shared.tt", { "x" => "2" });
+    check($o1 eq "FROM_ONE:1" && $o2 eq "FROM_TWO:2", "Template per-instance INCLUDE_PATH cache isolation");
+
+    # 2. Forma {{{raw}}} & {{items.0}}
+    my str $f_raw = Forma::render_string_safe("{{{raw}}}|{{raw}}", { "raw" => "<b>hi</b>" });
+    my str $f_idx = Forma::render_string("{{items.0}}-{{items.1}}", { "items" => ["alpha", "beta"] });
+    check($f_raw eq "<b>hi</b>|&lt;b&gt;hi&lt;/b&gt;", "Forma {{{raw}}} unescaped vs {{raw}} escaped");
+    check($f_idx eq "alpha-beta", "Forma {{items.0}} numeric array index");
+
+    # 3. Markdown inline code `my_var_name`
+    my str $md_html = Markdown::to_html("Check `my_var_name` now");
+    check(index($md_html, "<code>my_var_name</code>") >= 0, "Markdown `my_var_name` preserved");
+
+    if ($g_fail == 0) {
+        say("ALL_STDLIB_TPL_OK");
+        return 0;
+    }
+    return 1;
+}

@@ -184,19 +184,37 @@ static char *_bi_divmod(const char *a, const char *b, char **rem) {
 func new(str $val) scalar {
     my hash %self = ();
     my int $sign = 1;
-    my str $digits = $val;
+    my str $digits = trim($val);
 
     # Handle sign
-    if (length($val) > 0 && substr($val, 0, 1) eq "-") {
+    if (length($digits) > 0 && substr($digits, 0, 1) eq "-") {
         $sign = -1;
-        $digits = substr($val, 1, length($val) - 1);
-    } elsif (length($val) > 0 && substr($val, 0, 1) eq "+") {
-        $digits = substr($val, 1, length($val) - 1);
+        $digits = substr($digits, 1, length($digits) - 1);
+    } elsif (length($digits) > 0 && substr($digits, 0, 1) eq "+") {
+        $digits = substr($digits, 1, length($digits) - 1);
     }
 
-    # Strip leading zeros
-    while (length($digits) > 1 && substr($digits, 0, 1) eq "0") {
-        $digits = substr($digits, 1, length($digits) - 1);
+    # Validate non-empty digit string; normalize empty/whitespace/invalid to "0"
+    my int $dlen = length($digits);
+    my int $valid = ($dlen > 0) ? 1 : 0;
+    my int $i = 0;
+    while ($i < $dlen) {
+        my str $ch = substr($digits, $i, 1);
+        if ($ch lt "0" || $ch gt "9") {
+            $valid = 0;
+            last;
+        }
+        $i = $i + 1;
+    }
+
+    if ($valid == 0) {
+        $digits = "0";
+        $sign = 1;
+    } else {
+        # Strip leading zeros
+        while (length($digits) > 1 && substr($digits, 0, 1) eq "0") {
+            $digits = substr($digits, 1, length($digits) - 1);
+        }
     }
 
     # Zero is always positive

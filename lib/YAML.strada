@@ -176,7 +176,7 @@ func ltrim(str $s) str {
     my int $i = 0;
 
     while ($i < $len) {
-        my str $ch = substr($i, $i, 1);
+        my str $ch = substr($s, $i, 1);
         if ($ch eq " " || $ch eq "\t") {
             $i = $i + 1;
         } else {
@@ -312,9 +312,171 @@ func process_escapes(str $s) str {
     return $result;
 }
 
+# Strip trailing # comment outside quotes (when preceded by whitespace/SOL/closing quote)
+func strip_comment(str $s) str {
+    my int $len = length($s);
+    my int $i = 0;
+    my int $in_single = 0;
+    my int $in_double = 0;
+    my int $just_closed_quote = 0;
+
+    while ($i < $len) {
+        my str $ch = substr($s, $i, 1);
+
+        if ($in_single) {
+            if ($ch eq "'") {
+                if ($i + 1 < $len && substr($s, $i + 1, 1) eq "'") {
+                    $i = $i + 2;
+                    next;
+                }
+                $in_single = 0;
+                $just_closed_quote = 1;
+            }
+            $i = $i + 1;
+            next;
+        }
+
+        if ($in_double) {
+            if ($ch eq "\\" && $i + 1 < $len) {
+                $i = $i + 2;
+                next;
+            }
+            if ($ch eq "\"") {
+                $in_double = 0;
+                $just_closed_quote = 1;
+            }
+            $i = $i + 1;
+            next;
+        }
+
+        if ($ch eq "'") {
+            $in_single = 1;
+            $just_closed_quote = 0;
+            $i = $i + 1;
+            next;
+        }
+        if ($ch eq "\"") {
+            $in_double = 1;
+            $just_closed_quote = 0;
+            $i = $i + 1;
+            next;
+        }
+
+        if ($ch eq "#") {
+            if ($i == 0 || $just_closed_quote) {
+                return YAML::trim(substr($s, 0, $i));
+            }
+            my str $prev = substr($s, $i - 1, 1);
+            if ($prev eq " " || $prev eq "\t") {
+                return YAML::trim(substr($s, 0, $i));
+            }
+        }
+
+        $just_closed_quote = 0;
+        $i = $i + 1;
+    }
+
+    return YAML::trim($s);
+}
+
+# Find YAML mapping colon (outside quotes/brackets, followed by space/tab or EOL)
+func find_mapping_colon(str $s) int {
+    my int $len = length($s);
+    if ($len == 0) {
+        return -1;
+    }
+    my str $first = substr($s, 0, 1);
+    if ($first eq "{" || $first eq "[") {
+        return -1;
+    }
+
+    my int $i = 0;
+    if ($first eq "'") {
+        $i = 1;
+        while ($i < $len) {
+            my str $ch = substr($s, $i, 1);
+            if ($ch eq "'") {
+                if ($i + 1 < $len && substr($s, $i + 1, 1) eq "'") {
+                    $i = $i + 2;
+                    next;
+                }
+                $i = $i + 1;
+                last;
+            }
+            $i = $i + 1;
+        }
+        while ($i < $len && (substr($s, $i, 1) eq " " || substr($s, $i, 1) eq "\t")) {
+            $i = $i + 1;
+        }
+        if ($i < $len && substr($s, $i, 1) eq ":") {
+            if ($i + 1 == $len || substr($s, $i + 1, 1) eq " " || substr($s, $i + 1, 1) eq "\t") {
+                return $i;
+            }
+        }
+        return -1;
+    }
+
+    if ($first eq "\"") {
+        $i = 1;
+        while ($i < $len) {
+            my str $ch = substr($s, $i, 1);
+            if ($ch eq "\\" && $i + 1 < $len) {
+                $i = $i + 2;
+                next;
+            }
+            if ($ch eq "\"") {
+                $i = $i + 1;
+                last;
+            }
+            $i = $i + 1;
+        }
+        while ($i < $len && (substr($s, $i, 1) eq " " || substr($s, $i, 1) eq "\t")) {
+            $i = $i + 1;
+        }
+        if ($i < $len && substr($s, $i, 1) eq ":") {
+            if ($i + 1 == $len || substr($s, $i + 1, 1) eq " " || substr($s, $i + 1, 1) eq "\t") {
+                return $i;
+            }
+        }
+        return -1;
+    }
+
+    while ($i < $len) {
+        my str $ch = substr($s, $i, 1);
+        if ($ch eq ":" && $i > 0) {
+            if ($i + 1 == $len) {
+                return $i;
+            }
+            my str $nx = substr($s, $i + 1, 1);
+            if ($nx eq " " || $nx eq "\t") {
+                return $i;
+            }
+        }
+        $i = $i + 1;
+    }
+    return -1;
+}
+
+# Unquote a YAML key if wrapped in single or double quotes
+func unquote_key(str $k) str {
+    my str $t = YAML::trim($k);
+    my int $len = length($t);
+    if ($len >= 2) {
+        my str $f = substr($t, 0, 1);
+        my str $l = substr($t, $len - 1, 1);
+        if ($f eq "'" && $l eq "'") {
+            return replace_all(substr($t, 1, $len - 2), "''", "'");
+        }
+        if ($f eq "\"" && $l eq "\"") {
+            return YAML::process_escapes(substr($t, 1, $len - 2));
+        }
+    }
+    return $t;
+}
+
 # Parse a YAML value (handles quotes, numbers, booleans)
 func parse_value(str $s) scalar {
-    my str $trimmed = YAML::trim($s);
+    my str $trimmed = YAML::strip_comment($s);
     my int $len = length($trimmed);
 
     if ($len == 0) {
@@ -332,14 +494,14 @@ func parse_value(str $s) scalar {
                 if ($first eq "\"") {
                     return YAML::process_escapes($content);
                 }
-                return $content;
+                return replace_all($content, "''", "'");
             }
         }
         my str $content = substr($trimmed, 1, $len - 1);
         if ($first eq "\"") {
             return YAML::process_escapes($content);
         }
-        return $content;
+        return replace_all($content, "''", "'");
     }
 
     # Check for inline hash { ... }
@@ -352,33 +514,30 @@ func parse_value(str $s) scalar {
         return YAML::parse_inline_array($trimmed);
     }
 
-    # Strip trailing comment
-    my int $comment_pos = index($trimmed, " #");
-    if ($comment_pos >= 0) {
-        $trimmed = YAML::trim(substr($trimmed, 0, $comment_pos));
-        $len = length($trimmed);
-    }
-
-    # Check for boolean/null values
-    if ($trimmed eq "true" || $trimmed eq "yes" || $trimmed eq "on") {
+    # Check for boolean/null values (case-insensitive YAML 1.1)
+    my str $low = lc($trimmed);
+    if ($low eq "true" || $low eq "yes" || $low eq "on") {
         return 1;
     }
-    if ($trimmed eq "false" || $trimmed eq "no" || $trimmed eq "off") {
+    if ($low eq "false" || $low eq "no" || $low eq "off") {
         return 0;
     }
-    if ($trimmed eq "null" || $trimmed eq "~") {
+    if ($low eq "null" || $trimmed eq "~") {
         return undef;
     }
 
     # Check if it looks like a number
     if (YAML::looks_like_num($trimmed)) {
+        if (index($trimmed, ".") < 0 && index($trimmed, "e") < 0 && index($trimmed, "E") < 0) {
+            return cast_int($trimmed);
+        }
         return $trimmed + 0;
     }
 
     return $trimmed;
 }
 
-# Check if a string looks like a number
+# Check if a string looks like a number (decimal int/float/scientific)
 func looks_like_num(str $s) int {
     my int $len = length($s);
     if ($len == 0) {
@@ -395,14 +554,24 @@ func looks_like_num(str $s) int {
     }
 
     my int $has_dot = 0;
+    my int $has_exp = 0;
     my int $has_digit = 0;
 
     while ($i < $len) {
         $ch = substr($s, $i, 1);
         if ($ch ge "0" && $ch le "9") {
             $has_digit = 1;
-        } elsif ($ch eq "." && !$has_dot) {
+        } elsif ($ch eq "." && !$has_dot && !$has_exp) {
             $has_dot = 1;
+        } elsif (($ch eq "e" || $ch eq "E") && $has_digit && !$has_exp) {
+            $has_exp = 1;
+            $has_digit = 0;
+            if ($i + 1 < $len) {
+                my str $nx = substr($s, $i + 1, 1);
+                if ($nx eq "+" || $nx eq "-") {
+                    $i = $i + 1;
+                }
+            }
         } else {
             return 0;
         }
@@ -521,7 +690,7 @@ func parse_block(scalar $state, int $base_indent) scalar {
     }
 
     # Check if this line is a key: value
-    my int $colon_pos = index($content, ":");
+    my int $colon_pos = YAML::find_mapping_colon($content);
     if ($colon_pos > 0) {
         return YAML::parse_hash($state, $indent);
     }
@@ -556,13 +725,13 @@ func parse_hash(scalar $state, int $base_indent) scalar {
         my str $content = YAML::trim($line);
 
         # Parse key: value
-        my int $colon_pos = index($content, ":");
+        my int $colon_pos = YAML::find_mapping_colon($content);
         if ($colon_pos <= 0) {
             # Not a key-value line, done
             return $result;
         }
 
-        my str $key = substr($content, 0, $colon_pos);
+        my str $key = YAML::unquote_key(substr($content, 0, $colon_pos));
         my str $after_colon = "";
         if ($colon_pos + 1 < length($content)) {
             $after_colon = substr($content, $colon_pos + 1, length($content) - $colon_pos - 1);
@@ -648,16 +817,16 @@ func parse_array(scalar $state, int $base_indent) scalar {
         $state->{"pos"} = $state->{"pos"} + 1;
 
         if (length($after_dash) > 0) {
-            # Check if after dash has a colon (inline hash item)
-            my int $colon_pos = index($after_dash, ":");
+            # Check if after dash is an inline hash or a mapping entry (colon followed by space/tab/EOL outside quotes)
+            my int $colon_pos = YAML::find_mapping_colon($after_dash);
             if (substr($after_dash, 0, 1) eq "{") {
                 # Inline hash
-                push($result, YAML::parse_inline_hash($after_dash));
+                push($result, YAML::parse_inline_hash(YAML::strip_comment($after_dash)));
             } elsif ($colon_pos > 0) {
                 # This is a hash entry starting on the - line
                 # Parse as nested hash
                 my scalar $item = {};
-                my str $key = substr($after_dash, 0, $colon_pos);
+                my str $key = YAML::unquote_key(substr($after_dash, 0, $colon_pos));
                 my str $val_str = "";
                 if ($colon_pos + 1 < length($after_dash)) {
                     $val_str = YAML::trim(substr($after_dash, $colon_pos + 1, length($after_dash) - $colon_pos - 1));
@@ -681,9 +850,9 @@ func parse_array(scalar $state, int $base_indent) scalar {
                             $done_item = 1;
                         } else {
                             my str $next_content = YAML::trim($next_line);
-                            my int $next_colon = index($next_content, ":");
+                            my int $next_colon = YAML::find_mapping_colon($next_content);
                             if ($next_colon > 0) {
-                                my str $next_key = substr($next_content, 0, $next_colon);
+                                my str $next_key = YAML::unquote_key(substr($next_content, 0, $next_colon));
                                 my str $next_val_str = "";
                                 if ($next_colon + 1 < length($next_content)) {
                                     $next_val_str = YAML::trim(substr($next_content, $next_colon + 1, length($next_content) - $next_colon - 1));
@@ -818,14 +987,48 @@ func dump_value(scalar $value, int $indent) str {
     }
 
     # Scalar value
+    my str $vtype = typeof($value);
     my str $str_val = "" . $value;
+    if ($vtype eq "int" || $vtype eq "num") {
+        return $str_val;
+    }
 
-    # Check if needs quoting
+    # Strings containing control characters (\n, \r, \t) use double-quoted escapes
+    if (index($str_val, "\n") >= 0 || index($str_val, "\r") >= 0 || index($str_val, "\t") >= 0) {
+        return "\"" . YAML::escape_double_quote($str_val) . "\"";
+    }
+
+    # Check if string needs quoting
     if (YAML::needs_quote($str_val)) {
         return "'" . YAML::escape_single_quote($str_val) . "'";
     }
 
     return $str_val;
+}
+
+# Escape double-quoted YAML strings
+func escape_double_quote(str $s) str {
+    my str $result = "";
+    my int $len = length($s);
+    my int $i = 0;
+    while ($i < $len) {
+        my str $ch = substr($s, $i, 1);
+        if ($ch eq "\\") {
+            $result = $result . "\\\\";
+        } elsif ($ch eq "\"") {
+            $result = $result . "\\\"";
+        } elsif ($ch eq "\n") {
+            $result = $result . "\\n";
+        } elsif ($ch eq "\r") {
+            $result = $result . "\\r";
+        } elsif ($ch eq "\t") {
+            $result = $result . "\\t";
+        } else {
+            $result = $result . $ch;
+        }
+        $i = $i + 1;
+    }
+    return $result;
 }
 
 # Check if string needs quoting
@@ -835,21 +1038,38 @@ func needs_quote(str $s) int {
         return 1;
     }
 
-    # Check for special first characters
+    # Leading or trailing spaces
     my str $first = substr($s, 0, 1);
+    my str $last = substr($s, $len - 1, 1);
+    if ($first eq " " || $last eq " ") {
+        return 1;
+    }
+
+    # Check for special first characters
     if ($first eq "'" || $first eq "\"" || $first eq "{" || $first eq "[" ||
         $first eq "-" || $first eq ":" || $first eq "#" || $first eq "&" ||
-        $first eq "*" || $first eq "!" || $first eq "|" || $first eq ">") {
+        $first eq "*" || $first eq "!" || $first eq "|" || $first eq ">" ||
+        $first eq "%" || $first eq "@" || $first eq "`" || $first eq "?" ||
+        $first eq "~") {
         return 1;
     }
 
-    # Check for special words
-    if ($s eq "true" || $s eq "false" || $s eq "null" || $s eq "yes" || $s eq "no") {
+    # Check for YAML 1.1 boolean / null keywords (case-insensitive)
+    my str $low = lc($s);
+    if ($low eq "true" || $low eq "false" || $low eq "null" ||
+        $low eq "yes" || $low eq "no" || $low eq "on" || $low eq "off" ||
+        $low eq "y" || $low eq "n" || $s eq "~") {
         return 1;
     }
 
-    # Check for colon
-    if (index($s, ":") >= 0) {
+    # Numeric-looking strings must be quoted so they stay strings on Load
+    if (YAML::looks_like_num($s)) {
+        return 1;
+    }
+
+    # Check for colon, hash comment character, or newline/tab
+    if (index($s, ":") >= 0 || index($s, "#") >= 0 ||
+        index($s, "\n") >= 0 || index($s, "\r") >= 0 || index($s, "\t") >= 0) {
         return 1;
     }
 

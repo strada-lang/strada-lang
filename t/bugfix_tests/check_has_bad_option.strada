@@ -1,0 +1,9 @@
+# COMPILE-ERROR: expected option name in 'has' declaration
+# An invalid token inside `has (...)` previously failed to advance the parser,
+# hanging the compiler in an infinite loop instead of reporting an error.
+package BadHas;
+has ro int $x (123);
+
+func main() int {
+    return 0;
+}

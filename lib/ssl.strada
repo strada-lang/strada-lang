@@ -192,6 +192,7 @@ __C__ {
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -210,12 +211,43 @@ typedef struct {
 
 static int ssl_initialized = 0;
 static char ssl_errbuf[256];
+
+static int ssl_has_crlf(const char *s) {
+    if (!s) return 0;
+    for (; *s; s++) {
+        if (*s == '\r' || *s == '\n') return 1;
+    }
+    return 0;
+}
+
+static const char *ssl_extract_bytes(StradaValue *sv, size_t *out_len, char **out_owned) {
+    *out_owned = NULL;
+    if (!sv) {
+        *out_len = 0;
+        return "";
+    }
+    if (!STRADA_IS_TAGGED_INT(sv)) {
+        if (sv->type == STRADA_STR && !(sv->meta && sv->meta->is_tied)) {
+            *out_len = STRADA_STR_BYTELEN(sv);
+            return sv->value.pv ? sv->value.pv : "";
+        }
+        if (sv->type == STRADA_UNDEF) {
+            *out_len = 0;
+            return "";
+        }
+    }
+    char *s = strada_to_str(sv);
+    *out_owned = s;
+    *out_len = s ? strlen(s) : 0;
+    return s ? s : "";
+}
 }
 
 # Initialize OpenSSL (called automatically by connect/server)
 func init() int {
     __C__ {
         if (!ssl_initialized) {
+            signal(SIGPIPE, SIG_IGN);
             SSL_library_init();
             SSL_load_error_strings();
             OpenSSL_add_all_algorithms();
@@ -231,87 +263,86 @@ func connect_impl(str $host, int $port, int $verify) int {
     my int $result = 0;
     __C__ {
         if (!ssl_initialized) {
+            signal(SIGPIPE, SIG_IGN);
             SSL_library_init();
             SSL_load_error_strings();
             OpenSSL_add_all_algorithms();
             ssl_initialized = 1;
         }
 
-        const char *host_str = strada_to_str(host);
+        char *host_str = strada_to_str(host);
         int port_val = (int)strada_to_int(port);
         int do_verify = (int)strada_to_int(verify);
 
-        SSLConnection *conn = malloc(sizeof(SSLConnection));
-        if (!conn) {
-            result = strada_new_int(0);
+        if (!host_str || !host_str[0] || ssl_has_crlf(host_str)) {
+            free(host_str);
         } else {
-            memset(conn, 0, sizeof(SSLConnection));
-            conn->is_server = 0;
+            SSLConnection *conn = malloc(sizeof(SSLConnection));
+            if (conn) {
+                memset(conn, 0, sizeof(SSLConnection));
+                conn->is_server = 0;
 
-            const SSL_METHOD *method = TLS_client_method();
-            conn->ctx = SSL_CTX_new(method);
-            if (!conn->ctx) {
-                free(conn);
-                result = strada_new_int(0);
-            } else {
-                if (do_verify) {
-                    /* Verify the peer cert chain against the system trust store. */
-                    SSL_CTX_set_verify(conn->ctx, SSL_VERIFY_PEER, NULL);
-                    SSL_CTX_set_default_verify_paths(conn->ctx);
-                }
-                conn->socket_fd = socket(AF_INET, SOCK_STREAM, 0);
-                if (conn->socket_fd < 0) {
-                    SSL_CTX_free(conn->ctx);
+                const SSL_METHOD *method = TLS_client_method();
+                conn->ctx = SSL_CTX_new(method);
+                if (!conn->ctx) {
                     free(conn);
-                    result = strada_new_int(0);
                 } else {
-                    struct hostent *he = gethostbyname(host_str);
-                    if (!he) {
-                        close(conn->socket_fd);
+                    if (do_verify) {
+                        /* Verify the peer cert chain against the system trust store. */
+                        SSL_CTX_set_verify(conn->ctx, SSL_VERIFY_PEER, NULL);
+                        SSL_CTX_set_default_verify_paths(conn->ctx);
+                    }
+                    conn->socket_fd = socket(AF_INET, SOCK_STREAM, 0);
+                    if (conn->socket_fd < 0) {
                         SSL_CTX_free(conn->ctx);
                         free(conn);
-                        result = strada_new_int(0);
                     } else {
-                        struct sockaddr_in addr;
-                        memset(&addr, 0, sizeof(addr));
-                        addr.sin_family = AF_INET;
-                        addr.sin_port = htons(port_val);
-                        memcpy(&addr.sin_addr, he->h_addr_list[0], he->h_length);
-
-                        if (connect(conn->socket_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+                        struct hostent *he = gethostbyname(host_str);
+                        if (!he) {
                             close(conn->socket_fd);
                             SSL_CTX_free(conn->ctx);
                             free(conn);
-                            result = strada_new_int(0);
                         } else {
-                            conn->ssl = SSL_new(conn->ctx);
-                            if (!conn->ssl) {
+                            struct sockaddr_in addr;
+                            memset(&addr, 0, sizeof(addr));
+                            addr.sin_family = AF_INET;
+                            addr.sin_port = htons(port_val);
+                            memcpy(&addr.sin_addr, he->h_addr_list[0], he->h_length);
+
+                            if (connect(conn->socket_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
                                 close(conn->socket_fd);
                                 SSL_CTX_free(conn->ctx);
                                 free(conn);
-                                result = strada_new_int(0);
                             } else {
-                                SSL_set_fd(conn->ssl, conn->socket_fd);
-                                SSL_set_tlsext_host_name(conn->ssl, host_str);
-                                if (do_verify) {
-                                    /* Fail the handshake on a wrong-host cert. */
-                                    SSL_set1_host(conn->ssl, host_str);
-                                }
-
-                                if (SSL_connect(conn->ssl) <= 0) {
-                                    SSL_free(conn->ssl);
+                                conn->ssl = SSL_new(conn->ctx);
+                                if (!conn->ssl) {
                                     close(conn->socket_fd);
                                     SSL_CTX_free(conn->ctx);
                                     free(conn);
-                                    result = strada_new_int(0);
                                 } else {
-                                    result = strada_new_int((int64_t)(intptr_t)conn);
+                                    SSL_set_fd(conn->ssl, conn->socket_fd);
+                                    SSL_set_tlsext_host_name(conn->ssl, host_str);
+                                    if (do_verify) {
+                                        /* Fail the handshake on a wrong-host cert. */
+                                        SSL_set1_host(conn->ssl, host_str);
+                                    }
+
+                                    if (SSL_connect(conn->ssl) <= 0) {
+                                        SSL_free(conn->ssl);
+                                        close(conn->socket_fd);
+                                        SSL_CTX_free(conn->ctx);
+                                        free(conn);
+                                    } else {
+                                        strada_decref(result);
+                                        result = strada_new_int((int64_t)(intptr_t)conn);
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
+            free(host_str);
         }
     }
     return $result;
@@ -334,6 +365,7 @@ func server(int $port, str $cert_file, str $key_file) int {
     my int $result = 0;
     __C__ {
         if (!ssl_initialized) {
+            signal(SIGPIPE, SIG_IGN);
             SSL_library_init();
             SSL_load_error_strings();
             OpenSSL_add_all_algorithms();
@@ -345,9 +377,7 @@ func server(int $port, str $cert_file, str $key_file) int {
         char *key_str = strada_to_str(key_file);
 
         SSLConnection *conn = malloc(sizeof(SSLConnection));
-        if (!conn) {
-            result = strada_new_int(0);
-        } else {
+        if (conn) {
             memset(conn, 0, sizeof(SSLConnection));
             conn->is_server = 1;
 
@@ -355,25 +385,20 @@ func server(int $port, str $cert_file, str $key_file) int {
             conn->ctx = SSL_CTX_new(method);
             if (!conn->ctx) {
                 free(conn);
-                result = strada_new_int(0);
             } else if (SSL_CTX_use_certificate_file(conn->ctx, cert_str, SSL_FILETYPE_PEM) <= 0) {
                 SSL_CTX_free(conn->ctx);
                 free(conn);
-                result = strada_new_int(0);
             } else if (SSL_CTX_use_PrivateKey_file(conn->ctx, key_str, SSL_FILETYPE_PEM) <= 0) {
                 SSL_CTX_free(conn->ctx);
                 free(conn);
-                result = strada_new_int(0);
             } else if (!SSL_CTX_check_private_key(conn->ctx)) {
                 SSL_CTX_free(conn->ctx);
                 free(conn);
-                result = strada_new_int(0);
             } else {
                 conn->socket_fd = socket(AF_INET, SOCK_STREAM, 0);
                 if (conn->socket_fd < 0) {
                     SSL_CTX_free(conn->ctx);
                     free(conn);
-                    result = strada_new_int(0);
                 } else {
                     int opt = 1;
                     setsockopt(conn->socket_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
@@ -388,13 +413,12 @@ func server(int $port, str $cert_file, str $key_file) int {
                         close(conn->socket_fd);
                         SSL_CTX_free(conn->ctx);
                         free(conn);
-                        result = strada_new_int(0);
                     } else if (listen(conn->socket_fd, 10) < 0) {
                         close(conn->socket_fd);
                         SSL_CTX_free(conn->ctx);
                         free(conn);
-                        result = strada_new_int(0);
                     } else {
+                        strada_decref(result);
                         result = strada_new_int((int64_t)(intptr_t)conn);
                     }
                 }
@@ -411,37 +435,31 @@ func accept(int $server) int {
     my int $result = 0;
     __C__ {
         SSLConnection *server_conn = (SSLConnection*)(intptr_t)strada_to_int(server);
-        if (!server_conn || !server_conn->is_server) {
-            result = strada_new_int(0);
-        } else {
+        if (server_conn && server_conn->is_server) {
             struct sockaddr_in client_addr;
             socklen_t addr_len = sizeof(client_addr);
             int client_fd = accept(server_conn->socket_fd, (struct sockaddr*)&client_addr, &addr_len);
-            if (client_fd < 0) {
-                result = strada_new_int(0);
-            } else {
+            if (client_fd >= 0) {
                 SSLConnection *conn = malloc(sizeof(SSLConnection));
                 if (!conn) {
                     close(client_fd);
-                    result = strada_new_int(0);
                 } else {
                     memset(conn, 0, sizeof(SSLConnection));
                     conn->socket_fd = client_fd;
-                    conn->ctx = server_conn->ctx;
+                    conn->ctx = NULL; /* owned by server_conn */
                     conn->is_server = 0;
                     conn->ssl = SSL_new(server_conn->ctx);
                     if (!conn->ssl) {
                         close(client_fd);
                         free(conn);
-                        result = strada_new_int(0);
                     } else {
                         SSL_set_fd(conn->ssl, client_fd);
                         if (SSL_accept(conn->ssl) <= 0) {
                             SSL_free(conn->ssl);
                             close(client_fd);
                             free(conn);
-                            result = strada_new_int(0);
                         } else {
+                            strada_decref(result);
                             result = strada_new_int((int64_t)(intptr_t)conn);
                         }
                     }
@@ -458,22 +476,16 @@ func read(int $conn, int $max_len) str {
     __C__ {
         SSLConnection *c = (SSLConnection*)(intptr_t)strada_to_int(conn);
         int max = (int)strada_to_int(max_len);
-        if (!c || !c->ssl) {
-            result = strada_new_str("");
-        } else {
-            char *buffer = malloc(max + 1);
-            if (!buffer) {
-                result = strada_new_str("");
-            } else {
+        if (c && c->ssl && max > 0) {
+            char *buffer = malloc((size_t)max + 1);
+            if (buffer) {
                 int n = SSL_read(c->ssl, buffer, max);
-                if (n <= 0) {
-                    free(buffer);
-                    result = strada_new_str("");
-                } else {
+                if (n > 0) {
                     buffer[n] = '\0';
-                    result = strada_new_str(buffer);
-                    free(buffer);
+                    strada_decref(result);
+                    result = strada_new_str_len(buffer, (size_t)n);
                 }
+                free(buffer);
             }
         }
     }
@@ -486,13 +498,9 @@ func readline(int $conn, int $max_len) str {
     __C__ {
         SSLConnection *c = (SSLConnection*)(intptr_t)strada_to_int(conn);
         int max = (int)strada_to_int(max_len);
-        if (!c || !c->ssl) {
-            result = strada_new_str("");
-        } else {
-            char *buffer = malloc(max + 1);
-            if (!buffer) {
-                result = strada_new_str("");
-            } else {
+        if (c && c->ssl && max > 0) {
+            char *buffer = malloc((size_t)max + 1);
+            if (buffer) {
                 int pos = 0;
                 char ch;
                 while (pos < max) {
@@ -502,7 +510,8 @@ func readline(int $conn, int $max_len) str {
                     if (ch == '\n') break;
                 }
                 buffer[pos] = '\0';
-                result = strada_new_str(buffer);
+                strada_decref(result);
+                result = strada_new_str_len(buffer, (size_t)pos);
                 free(buffer);
             }
         }
@@ -515,12 +524,16 @@ func write(int $conn, str $data) int {
     my int $result = 0;
     __C__ {
         SSLConnection *c = (SSLConnection*)(intptr_t)strada_to_int(conn);
-        const char *data_str = strada_to_str(data);
-        if (!c || !c->ssl || !data_str) {
+        if (!c || !c->ssl) {
+            strada_decref(result);
             result = strada_new_int(-1);
         } else {
-            int len = strlen(data_str);
-            int written = SSL_write(c->ssl, data_str, len);
+            size_t len = 0;
+            char *owned = NULL;
+            const char *data_str = ssl_extract_bytes(data, &len, &owned);
+            int written = (len == 0) ? 0 : SSL_write(c->ssl, data_str, (int)len);
+            free(owned);
+            strada_decref(result);
             result = strada_new_int(written);
         }
     }
@@ -534,22 +547,15 @@ func read_binary(int $conn, int $max_len) str {
     __C__ {
         SSLConnection *c = (SSLConnection*)(intptr_t)strada_to_int(conn);
         int max = (int)strada_to_int(max_len);
-        if (!c || !c->ssl) {
-            result = strada_new_str_len("", 0);
-        } else {
-            char *buffer = malloc(max + 1);
-            if (!buffer) {
-                result = strada_new_str_len("", 0);
-            } else {
+        if (c && c->ssl && max > 0) {
+            char *buffer = malloc((size_t)max + 1);
+            if (buffer) {
                 int n = SSL_read(c->ssl, buffer, max);
-                if (n <= 0) {
-                    free(buffer);
-                    result = strada_new_str_len("", 0);
-                } else {
-                    // Use binary-safe string creation
-                    result = strada_new_str_len(buffer, n);
-                    free(buffer);
+                if (n > 0) {
+                    strada_decref(result);
+                    result = strada_new_str_len(buffer, (size_t)n);
                 }
+                free(buffer);
             }
         }
     }
@@ -563,12 +569,15 @@ func write_binary(int $conn, str $data) int {
     __C__ {
         SSLConnection *c = (SSLConnection*)(intptr_t)strada_to_int(conn);
         if (!c || !c->ssl) {
+            strada_decref(result);
             result = strada_new_int(-1);
         } else {
-            // Get binary data with proper length (not strlen)
-            int len = strada_str_len(data);
-            const char *data_str = strada_to_str(data);
-            int written = SSL_write(c->ssl, data_str, len);
+            size_t len = 0;
+            char *owned = NULL;
+            const char *data_str = ssl_extract_bytes(data, &len, &owned);
+            int written = (len == 0) ? 0 : SSL_write(c->ssl, data_str, (int)len);
+            free(owned);
+            strada_decref(result);
             result = strada_new_int(written);
         }
     }
@@ -605,6 +614,7 @@ func error() str {
     my str $result = "";
     __C__ {
         unsigned long err = ERR_get_error();
+        strada_decref(result);
         if (err == 0) {
             result = strada_new_str("No error");
         } else {
@@ -621,10 +631,9 @@ func peer_cert(int $conn) str {
     __C__ {
         static char cert_buf[1024];
         SSLConnection *c = (SSLConnection*)(intptr_t)strada_to_int(conn);
-        if (!c || !c->ssl) {
-            result = strada_new_str("");
-        } else {
+        if (c && c->ssl) {
             X509 *cert = SSL_get_peer_certificate(c->ssl);
+            strada_decref(result);
             if (!cert) {
                 result = strada_new_str("No certificate");
             } else {
@@ -642,6 +651,7 @@ func get_version(int $conn) str {
     my str $result = "";
     __C__ {
         SSLConnection *c = (SSLConnection*)(intptr_t)strada_to_int(conn);
+        strada_decref(result);
         if (!c || !c->ssl) {
             result = strada_new_str("Not connected");
         } else {
@@ -656,6 +666,7 @@ func cipher(int $conn) str {
     my str $result = "";
     __C__ {
         SSLConnection *c = (SSLConnection*)(intptr_t)strada_to_int(conn);
+        strada_decref(result);
         if (!c || !c->ssl) {
             result = strada_new_str("Not connected");
         } else {
@@ -670,6 +681,7 @@ func fd(int $conn) int {
     my int $result = 0;
     __C__ {
         SSLConnection *c = (SSLConnection*)(intptr_t)strada_to_int(conn);
+        strada_decref(result);
         if (!c) {
             result = strada_new_int(-1);
         } else {
@@ -684,6 +696,7 @@ func verify(int $conn) int {
     my int $result = 0;
     __C__ {
         SSLConnection *c = (SSLConnection*)(intptr_t)strada_to_int(conn);
+        strada_decref(result);
         if (!c || !c->ssl) {
             result = strada_new_int(-1);
         } else {
@@ -696,6 +709,10 @@ func verify(int $conn) int {
 
 # Convenience: HTTP GET over SSL
 func http_get(str $host, int $port, str $path) str {
+    if (index($host, "\r") >= 0 || index($host, "\n") >= 0 ||
+        index($path, "\r") >= 0 || index($path, "\n") >= 0) {
+        return "";
+    }
     my int $conn = ssl::connect($host, $port);
     if ($conn == 0) {
         return "";
@@ -751,10 +768,9 @@ func attach_fd(int $fd, int $verify, str $host) int {
             SSL *ssl = SSL_new(ctx);
             if (ssl) {
                 char *hname = strada_to_str(host);
-                if (do_verify && (!hname || !hname[0])) {
-                    /* Verification requested but no hostname to bind: refuse,
-                     * rather than return a connection that validates the chain
-                     * but accepts a wrong-host cert (MITM). */
+                if (ssl_has_crlf(hname) || (do_verify && (!hname || !hname[0]))) {
+                    /* Reject CRLF in host/SNI, or verification requested without
+                     * hostname to bind. */
                     free(hname);
                     SSL_free(ssl);
                     SSL_CTX_free(ctx);
@@ -895,10 +911,11 @@ func try_write(int $conn, str $data) int {
     __C__ {
         SSLConnection *c = (SSLConnection*)(intptr_t)strada_to_int(conn);
         if (c && c->ssl) {
-            size_t len = strada_str_len(data);
-            char *bytes = strada_to_str(data);
+            size_t len = 0;
+            char *owned = NULL;
+            const char *bytes = ssl_extract_bytes(data, &len, &owned);
             int n = SSL_write(c->ssl, bytes, (int)len);
-            free(bytes);
+            free(owned);
             if (n > 0) {
                 strada_decref(result);
                 result = strada_new_int(n);

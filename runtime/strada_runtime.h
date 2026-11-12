@@ -227,6 +227,7 @@ struct StradaFuture {
     /* For timeout support */
     struct timespec deadline;       /* Absolute deadline (0 = no timeout) */
     int has_deadline;
+    int internal_refs;              /* Atomic internal refcount (SV + queued/running task) */
 };
 
 /* Global thread pool */
@@ -372,6 +373,7 @@ typedef struct StradaMetadata {
                               * insert of new keys (existing keys still
                               * modifiable). locked_keys (below) holds
                               * the allowed-key set when populated. */
+    uint8_t is_destroying;   /* 1 = DESTROY currently running on this SV */
     int32_t regex_pos;       /* Perl pos() value for /g matches; -1 = unset.
                               * Updated by /g matches outside while loops,
                               * read by the pos() builtin and assignable via
@@ -423,47 +425,14 @@ struct StradaArray {
     size_t head;    /* Offset into elements[] where data starts (for O(1) shift) */
 };
 
-/* Stack-allocated 1-element array for fast method calls.
- * Usage: STRADA_STACK_ARGS1(args, self_val);
- *        method_func(&args.sv);
- * Avoids heap allocation for the common $self->method() pattern. */
-typedef struct {
-    StradaValue *elems[1];
-    StradaArray av;
-    StradaValue sv;
-} StradaStackArgs1;
-
-static inline void strada_stack_args1_init(StradaStackArgs1 *sa, StradaValue *elem) {
-    sa->elems[0] = elem;
-    sa->av.elements = sa->elems;
-    sa->av.size = 1;
-    sa->av.capacity = 1;
-    sa->av.refcount = 2;  /* prevent freeing — StradaArray has no incref/decref API */
-    sa->av.head = 0;
-    sa->sv.type = STRADA_ARRAY;
-    sa->sv.value.av = &sa->av;
-    /* Immortal sentinel rather than just "2 to prevent freeing":
-     * - strada_incref / strada_decref short-circuit on refcount > 1e9
-     *   (see runtime/strada_runtime.c around lines 913 and 1031), so
-     *   the stack SV stays at this value no matter how many balanced
-     *   incref/decref pairs the callee performs.
-     * - More importantly, the survive path in strada_decref calls
-     *   cc_possible_root when a non-immortal SV's refcount drops but
-     *   stays > 0 — and the cycle collector then buffers a pointer
-     *   to this STACK-RESIDENT SV in its cc_roots array. When the
-     *   stack frame unwinds the pointer dangles; the cc_atexit final
-     *   sweep dereferences it and SIGSEGVs. Setting refcount immortal
-     *   from the start makes the immortal check at strada_decref's
-     *   top branch out before reaching cc_possible_root, so the stack
-     *   SV is never registered with the collector. */
-    sa->sv.refcount = 2000000000;
-    sa->sv.meta = NULL;
-    sa->sv.struct_size = 0;
-    /* Match heap-array convention: pushed elements are incref'd so
-     * that `my $s = shift @_;` inside the callee doesn't underflow the
-     * refcount when the caller's invocant SV is shared. Caller emits
-     * a matching strada_decref after the dispatched call returns. */
-    if (elem && !STRADA_IS_TAGGED_INT(elem)) elem->refcount++;
+/* Slot references — reference to a C local variable's storage (StradaValue**).
+ * Allows $$ref and $$ref = val to read/write the original variable.
+ * Used for pass-by-reference patterns: func(\$var).
+ * WARNING: The slot ref MUST NOT outlive the stack frame containing the variable. */
+#define STRADA_SLOT_REF_MARKER ((size_t)0xDEAD5107ULL)
+static inline int strada_is_slot_ref(StradaValue *sv) {
+    return sv && !STRADA_IS_TAGGED_INT(sv) && sv->type == STRADA_REF &&
+           sv->struct_size == STRADA_SLOT_REF_MARKER;
 }
 
 /* Refcounted string — single allocation for header + data.
@@ -568,6 +537,11 @@ void strada_hash_mark_index_dirty(StradaHash *hv);
 StradaValue* strada_new_undef(void);
 StradaValue* strada_undef_static(void);  /* Static singleton for void returns */
 StradaValue* strada_new_int(int64_t i);
+static inline __attribute__((always_inline)) StradaValue* strada_new_int_il(int64_t i) {
+    return __builtin_expect(i >= STRADA_TAGGED_INT_MIN && i <= STRADA_TAGGED_INT_MAX, 1)
+        ? STRADA_MAKE_TAGGED_INT(i)
+        : strada_new_int(i);
+}
 /* Scratch buffer (n StradaValue* slots) wrapped in a freeable STRADA_CSTRUCT —
  * used by the inlined merge-sort so a throwing comparator can't leak it. */
 StradaValue* strada_sortbuf_new(int64_t n);
@@ -685,6 +659,9 @@ static inline __attribute__((always_inline)) void strada_break_self_cycle(Strada
      * freed and cannot be a collectable cycle member, so skip BEFORE reading
      * ->type/->value — those may belong to a released arena backbone. */
     if (sv->refcount > 1000000000) return;
+    /* Slot references point to a C local variable slot (StradaValue**), not
+     * an owned heap StradaValue*, so skip before reading sv->value.rv. */
+    if (sv->struct_size == STRADA_SLOT_REF_MARKER) return;
     if (sv->refcount < 2) {
         int t = sv->type;
         if (t != STRADA_REF) return;
@@ -695,6 +672,31 @@ static inline __attribute__((always_inline)) void strada_break_self_cycle(Strada
     strada_break_self_cycle_impl(sv);
 }
 #endif
+
+/* Stack-allocated 1-element array for fast method calls.
+ * Usage: STRADA_STACK_ARGS1(args, self_val);
+ *        method_func(&args.sv);
+ * Avoids heap allocation for the common $self->method() pattern. */
+typedef struct {
+    StradaValue *elems[1];
+    StradaArray av;
+    StradaValue sv;
+} StradaStackArgs1;
+
+static inline void strada_stack_args1_init(StradaStackArgs1 *sa, StradaValue *elem) {
+    sa->elems[0] = elem;
+    sa->av.elements = sa->elems;
+    sa->av.size = 1;
+    sa->av.capacity = 1;
+    sa->av.refcount = 2;  /* prevent freeing — StradaArray has no incref/decref API */
+    sa->av.head = 0;
+    sa->sv.type = STRADA_ARRAY;
+    sa->sv.value.av = &sa->av;
+    sa->sv.refcount = 2000000000;
+    sa->sv.meta = NULL;
+    sa->sv.struct_size = 0;
+    strada_incref(elem);
+}
 char* strada_to_str(StradaValue *sv);    /* Returns strdup'd char* — free with free() (backward compat) */
 char* strada_to_str_ss(StradaValue *sv); /* Returns StradaString-backed char* — free with strada_cstr_free() */
 void strada_cstr_free(char *s);          /* Free a strada_to_str_ss() result (handles both SS and malloc'd) */
@@ -758,6 +760,7 @@ void strada_array_reserve(StradaArray *av, size_t capacity);
 void strada_reserve_sv(StradaValue *sv, int64_t capacity);
 int64_t strada_size(StradaValue *sv);
 StradaValue* strada_new_array_from_av(StradaArray *av);
+StradaValue* strada_sort_copy_input(StradaValue *arr);
 StradaValue* strada_sort(StradaValue *arr);   /* Sort array alphabetically */
 StradaValue* strada_nsort(StradaValue *arr);  /* Sort array numerically */
 StradaValue* strada_range(StradaValue *start, StradaValue *end);  /* Create array from range */
@@ -1211,16 +1214,8 @@ StradaValue* strada_new_ref(StradaValue *target, char ref_type);  /* \$var, \@ar
 StradaValue* strada_new_ref_take(StradaValue *target, char ref_type);  /* takes ownership — no incref */
 StradaValue* strada_call_named_guarded(StradaValue *name_sv, StradaValue *arg_sv);  /* dlsym + try frame; [status, payload] */
 
-/* Slot references — reference to a C local variable's storage (StradaValue**).
- * Allows $$ref and $$ref = val to read/write the original variable.
- * Used for pass-by-reference patterns: func(\$var).
- * WARNING: The slot ref MUST NOT outlive the stack frame containing the variable. */
-#define STRADA_SLOT_REF_MARKER ((size_t)0xDEAD5107ULL)
+/* Slot references — reference to a C local variable's storage (StradaValue**). */
 StradaValue* strada_slot_ref_create(StradaValue **slot);
-static inline int strada_is_slot_ref(StradaValue *sv) {
-    return sv && !STRADA_IS_TAGGED_INT(sv) && sv->type == STRADA_REF &&
-           sv->struct_size == STRADA_SLOT_REF_MARKER;
-}
 StradaValue* strada_deref(StradaValue *ref);          /* $$ref - deref scalar ref */
 StradaValue* strada_deref_set(StradaValue *ref, StradaValue *new_value); /* deref_set($ref, $val) */
 StradaValue* strada_deref_assign_container(StradaValue *ref, StradaValue *value, int sigil); /* %{$ref} = LIST, @{$ref} = LIST */
@@ -1516,6 +1511,7 @@ char* strada_repeat(const char *str, int count);
 char* strada_replace_all(const char *str, const char *find, const char *replace);
 char* strada_replace_first(const char *str, const char *find, const char *replace);
 void strada_subst_sv(StradaValue **target_ptr, const char *find, const char *replace, int global);
+int64_t strada_subst_sv_cnt(StradaValue **target_ptr, const char *find, const char *replace, int global);
 
 /* Additional CStruct helper functions */
 void strada_cstruct_set_int(StradaValue *sv, const char *field, size_t offset, int64_t value);
@@ -2040,38 +2036,59 @@ int64_t      strada_tied_array_unshift(StradaValue *sv, StradaValue *vals_array)
 int          strada_tied_array_exists(StradaValue *sv, int64_t idx);
 void         strada_tied_array_delete(StradaValue *sv, int64_t idx);
 void         strada_tied_array_clear(StradaValue *sv);
+StradaValue* strada_tied_array_splice(StradaValue *sv, int64_t offset, int64_t length, StradaValue *repl_sv);
+void         strada_av_push_sv(StradaValue *sv, StradaValue *val);
+void         strada_av_push_take_sv(StradaValue *sv, StradaValue *val);
+StradaValue* strada_av_pop_sv(StradaValue *sv);
+StradaValue* strada_av_shift_sv(StradaValue *sv);
+void         strada_av_unshift_sv(StradaValue *sv, StradaValue *val);
 
 /* Tied-aware array accessors. Use these instead of raw strada_array_get /
  * strada_array_push when operating on an SV that might be tied — they
  * dispatch FETCH/STORE/PUSH/etc. when sv->meta->is_tied. */
+static inline StradaValue* strada_av_unwrap_tied(StradaValue *sv) {
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return NULL;
+    if (sv->meta && sv->meta->is_tied) return sv;
+    if (sv->type == STRADA_REF && !strada_is_slot_ref(sv) && sv->value.rv
+        && !STRADA_IS_TAGGED_INT(sv->value.rv) && sv->value.rv->meta && sv->value.rv->meta->is_tied) {
+        return sv->value.rv;
+    }
+    return NULL;
+}
 static inline StradaValue* strada_av_fetch_sv(StradaValue *sv, int64_t idx) {
-    if (sv && !STRADA_IS_TAGGED_INT(sv) && sv->meta && sv->meta->is_tied) {
-        return strada_tied_array_fetch(sv, idx);
+    StradaValue *tsv = strada_av_unwrap_tied(sv);
+    if (__builtin_expect(tsv != NULL, 0)) {
+        return strada_tied_array_fetch(tsv, idx);
     }
     StradaArray *av = strada_deref_array(sv);
-    StradaValue *el = strada_array_get(av, (int)idx);
+    StradaValue *el = strada_array_get(av, idx);
     if (el) strada_incref(el);
     return el ? el : strada_new_undef();
 }
 static inline void strada_av_store_sv(StradaValue *sv, int64_t idx, StradaValue *val) {
-    if (sv && !STRADA_IS_TAGGED_INT(sv) && sv->meta && sv->meta->is_tied) {
-        strada_tied_array_store(sv, idx, val);
+    StradaValue *tsv = strada_av_unwrap_tied(sv);
+    if (__builtin_expect(tsv != NULL, 0)) {
+        strada_tied_array_store(tsv, idx, val);
         return;
     }
     StradaArray *av = strada_deref_array(sv);
-    if (val) strada_incref(val);
-    strada_array_set(av, (int)idx, val);
+    strada_array_set(av, idx, val);
 }
 static inline int64_t strada_av_fetchsize_sv(StradaValue *sv) {
-    if (sv && !STRADA_IS_TAGGED_INT(sv) && sv->meta && sv->meta->is_tied) {
-        return strada_tied_array_fetchsize(sv);
+    StradaValue *tsv = strada_av_unwrap_tied(sv);
+    if (__builtin_expect(tsv != NULL, 0)) {
+        return strada_tied_array_fetchsize(tsv);
     }
     StradaArray *av = strada_deref_array(sv);
     return av ? (int64_t)strada_array_length(av) : 0;
 }
+static inline int64_t strada_av_size_sv(StradaValue *sv) {
+    return strada_av_fetchsize_sv(sv);
+}
 static inline int strada_av_exists_sv(StradaValue *sv, int64_t idx) {
-    if (sv && !STRADA_IS_TAGGED_INT(sv) && sv->meta && sv->meta->is_tied) {
-        return strada_tied_array_exists(sv, idx);
+    StradaValue *tsv = strada_av_unwrap_tied(sv);
+    if (__builtin_expect(tsv != NULL, 0)) {
+        return strada_tied_array_exists(tsv, idx);
     }
     StradaArray *av = strada_deref_array(sv);
     if (!av) return 0;
@@ -2082,12 +2099,14 @@ static inline int strada_av_exists_sv(StradaValue *sv, int64_t idx) {
     return el != NULL;
 }
 static inline void strada_av_delete_sv(StradaValue *sv, int64_t idx) {
-    if (sv && !STRADA_IS_TAGGED_INT(sv) && sv->meta && sv->meta->is_tied) {
-        strada_tied_array_delete(sv, idx);
+    StradaValue *tsv = strada_av_unwrap_tied(sv);
+    if (__builtin_expect(tsv != NULL, 0)) {
+        strada_tied_array_delete(tsv, idx);
         return;
     }
     StradaArray *av = strada_deref_array(sv);
-    strada_array_delete_idx(av, (int)idx);
+    StradaValue *old = strada_array_delete_idx(av, idx);
+    strada_decref(old);
 }
 
 /* Attach a metadata block to an SV if absent. Public so perla can set
@@ -2106,12 +2125,15 @@ StradaValue* strada_tie_hash(StradaValue *ref, const char *classname, int argc, 
 StradaValue* strada_tie_array(StradaValue *ref, const char *classname, int argc, ...);
 StradaValue* strada_tie_scalar(StradaValue *ref, const char *classname, int argc, ...);
 StradaValue* strada_tie_scalar_slot(StradaValue **slot, const char *classname, int argc, ...);
+StradaValue* strada_tie_global_scalar(const char *global_name, const char *pkg, int argc, ...);
 void strada_untie(StradaValue *ref);
+void strada_untie_global_scalar(const char *global_name);
 StradaValue* strada_tied(StradaValue *ref);
+StradaValue* strada_tied_global_scalar(const char *global_name);
 
 /* Inline wrapper implementations */
 static inline StradaValue* strada_hv_fetch(StradaValue *sv, const char *key) {
-    if (STRADA_IS_TAGGED_INT(sv)) return strada_undef_static();
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return strada_undef_static();
     if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) return strada_tied_hash_fetch(sv, key);
     return strada_hash_get(strada_deref_hash(sv), key);
 }
@@ -2125,7 +2147,7 @@ static inline StradaValue* strada_hv_fetch_owned(StradaValue *sv, const char *ke
 }
 /* Pre-hashed fetch: caller provides DJB2 hash of key — skips re-hashing */
 static inline StradaValue* strada_hv_fetch_owned_ph(StradaValue *sv, const char *key, unsigned int hash) {
-    if (STRADA_IS_TAGGED_INT(sv)) return strada_undef_static();
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return strada_undef_static();
     if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) return strada_tied_hash_fetch(sv, key);
     StradaValue *result = strada_hash_get_with_hash(strada_deref_hash(sv), key, hash);
     strada_incref(result);
@@ -2142,7 +2164,7 @@ static inline StradaValue* strada_hv_fetch_owned_ph(StradaValue *sv, const char 
  * Falls back to strada_hash_get_with_hash for collisions / tombstones /
  * dirty index, which is far slower but rare. */
 static inline __attribute__((always_inline)) int64_t strada_hv_fetch_int_ph(StradaValue *sv, const char *key, unsigned int hash) {
-    if (STRADA_IS_TAGGED_INT(sv)) return 0;
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return 0;
     if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) {
         StradaValue *r = strada_tied_hash_fetch(sv, key);
         int64_t v = strada_to_int(r);
@@ -2233,8 +2255,8 @@ static inline void strada_hv_store(StradaValue *sv, const char *key, StradaValue
 }
 /* _take variant: caller donates ownership of val (no incref) */
 static inline void strada_hv_store_take(StradaValue *sv, const char *key, StradaValue *val) {
-    if (!sv || STRADA_IS_TAGGED_INT(sv)) return;
-    if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) { strada_tied_hash_store(sv, key, val); return; }
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) { strada_decref(val); return; }
+    if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) { strada_tied_hash_store(sv, key, val); strada_decref(val); return; }
     if (__builtin_expect(sv->meta && sv->meta->is_hash_locked, 0)) {
         if (!strada_hv_check_lock(sv, key)) { strada_decref(val); return; }
     }
@@ -2252,24 +2274,24 @@ static inline void strada_hv_delete(StradaValue *sv, const char *key) {
 }
 /* _sv inline wrappers: accept StradaValue* key directly */
 static inline void strada_hv_store_sv(StradaValue *sv, StradaValue *key, StradaValue *val) {
-    if (STRADA_IS_TAGGED_INT(sv)) return;
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return;
     if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) { char *ks = strada_to_str(key); strada_tied_hash_store(sv, ks, val); free(ks); return; }
     strada_hash_set_sv(strada_deref_hash(sv), key, val);
 }
 static inline StradaValue* strada_hv_fetch_owned_sv(StradaValue *sv, StradaValue *key) {
-    if (STRADA_IS_TAGGED_INT(sv)) return strada_undef_static();
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return strada_undef_static();
     if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) { char *ks = strada_to_str(key); StradaValue *r = strada_tied_hash_fetch(sv, ks); free(ks); return r; }
     StradaValue *result = strada_hash_get_sv(strada_deref_hash(sv), key);
     strada_incref(result);
     return result;
 }
 static inline int strada_hv_exists_sv(StradaValue *sv, StradaValue *key) {
-    if (STRADA_IS_TAGGED_INT(sv)) return 0;
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return 0;
     if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) { char *ks = strada_to_str(key); int r = strada_tied_hash_exists(sv, ks); free(ks); return r; }
     return strada_hash_exists_sv(strada_deref_hash(sv), key);
 }
 static inline void strada_hv_delete_sv(StradaValue *sv, StradaValue *key) {
-    if (STRADA_IS_TAGGED_INT(sv)) return;
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return;
     if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) { char *ks = strada_to_str(key); strada_tied_hash_delete(sv, ks); free(ks); return; }
     strada_hash_delete_sv(strada_deref_hash(sv), key);
 }
@@ -2277,7 +2299,7 @@ static inline void strada_hv_delete_sv(StradaValue *sv, StradaValue *key) {
  * value (caller owns). For tied hashes, FETCH-then-DELETE through the
  * tied vtable so user-defined DELETE handlers still fire. */
 static inline StradaValue* strada_hv_delete_take_sv(StradaValue *sv, StradaValue *key) {
-    if (STRADA_IS_TAGGED_INT(sv) || !sv) return strada_undef_static();
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return strada_undef_static();
     if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) {
         char *ks = strada_to_str(key);
         StradaValue *old = strada_tied_hash_fetch(sv, ks);
@@ -2291,11 +2313,13 @@ static inline StradaValue* strada_hv_delete_take_sv(StradaValue *sv, StradaValue
 /* Concat key operations: build key from prefix + suffix in stack buffer (zero allocations) */
 /* Autovivifying fetch: if key doesn't exist, create empty hash and store it */
 static inline StradaValue* strada_hv_autoviv(StradaValue *sv, const char *key) {
-    if (STRADA_IS_TAGGED_INT(sv) || !sv) return strada_new_hash();
-    StradaValue *result = strada_hash_get(strada_deref_hash(sv), key);
-    if (!result || (result->type == STRADA_UNDEF)) {
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return strada_new_hash();
+    StradaHash *hv = strada_deref_hash(sv);
+    if (!hv) return strada_new_hash();
+    StradaValue *result = strada_hash_get(hv, key);
+    if (!result || STRADA_IS_TAGGED_INT(result) || (result->type == STRADA_UNDEF)) {
         result = strada_new_hash();
-        strada_hash_set(strada_deref_hash(sv), key, result);
+        strada_hash_set_take(hv, key, result);
     }
     return result;
 }
@@ -2303,6 +2327,8 @@ static inline StradaValue* strada_hv_autoviv(StradaValue *sv, const char *key) {
 StradaValue* strada_hv_fetch_owned_concat(StradaValue *sv, const char *prefix, size_t prefix_len, StradaValue *suffix);
 void strada_hv_store_concat(StradaValue *sv, const char *prefix, size_t prefix_len, StradaValue *suffix, StradaValue *value);
 void strada_hv_delete_concat(StradaValue *sv, const char *prefix, size_t prefix_len, StradaValue *suffix);
+StradaValue* strada_hv_delete_take_concat(StradaValue *sv, const char *prefix, size_t prefix_len, StradaValue *suffix);
+StradaValue* strada_hv_delete_concat_sv(StradaValue *sv, const char *prefix, size_t prefix_len, StradaValue *suffix);
 
 /* Single-lookup hash-element compound assignment: $h{k} op= rhs.
  * op is '+', '-', '*', '/' or '.'; rhs is borrowed. One probe instead of

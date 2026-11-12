@@ -34,7 +34,7 @@ version "1.0.0";
 #   "name|n"    - Alias (--name or -n)
 #   "name|n=s"  - Alias with argument
 
-our array @__remaining = ();
+my array @__remaining = ();
 
 # Parse a single spec string into its parts
 # Returns hash with: name, type (bool/str/int/float), negatable, aliases
@@ -115,7 +115,7 @@ private func matches_spec(str $arg, str $primary, str $aliases) int {
 func GetOptions(array @specs, hash %opts) int {
     my array @args = core::argv();
     my int $argc = scalar(@args);
-    my int $i = 1;  # Skip program name
+    my int $i = 0;  # @ARGV excludes program name
     @__remaining = ();
 
     # Pre-parse all specs

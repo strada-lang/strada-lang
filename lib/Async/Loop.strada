@@ -52,11 +52,47 @@ func new() scalar {
     $self{"epfd"} = $epfd;
     $self{"watchers"} = {};      # fd -> { mask, subs => [ {mask, cb, id} ... ] }
     $self{"timers"} = [];        # [ { at, cb, id, dead } ... ]
+    $self{"timer_by_id"} = {};   # id -> timer hashref (including while in @due)
     $self{"next_id"} = 1;
     $self{"running"} = 0;
     $self{"ntasks"} = 0;
     $self{"on_task_error"} = undef;
     return bless(\%self, "Async::Loop");
+}
+
+func close(scalar $self) void {
+    if (!defined($self)) { return; }
+    $self->{"running"} = 0;
+    $self->{"watchers"} = {};
+    $self->{"timers"} = [];
+    $self->{"timer_by_id"} = {};
+    if (defined($self->{"epfd"}) && $self->{"epfd"} >= 0) {
+        core::close_fd($self->{"epfd"});
+        $self->{"epfd"} = 0 - 1;
+    }
+}
+
+func DESTROY(scalar $self) void {
+    __C__ {
+        if (self && !STRADA_IS_TAGGED_INT(self)) {
+            StradaHash *hv = NULL;
+            if (self->type == STRADA_REF && self->value.rv && !STRADA_IS_TAGGED_INT(self->value.rv) && self->value.rv->type == STRADA_HASH) {
+                hv = self->value.rv->value.hv;
+            } else if (self->type == STRADA_HASH) {
+                hv = self->value.hv;
+            }
+            if (hv) {
+                StradaValue *ep = strada_hash_get(hv, "epfd");
+                if (ep) {
+                    int fd = (int)strada_to_int(ep);
+                    if (fd >= 0) {
+                        close(fd);
+                        strada_hash_set_take(hv, "epfd", strada_new_int(-1));
+                    }
+                }
+            }
+        }
+    }
 }
 
 # Subscribe to fd readiness. $cb->($fd, $mask) per event. Returns a
@@ -124,11 +160,22 @@ func timer_after(scalar $self, int $ms, scalar $cb) int {
     my int $id = $self->{"next_id"};
     $self->{"next_id"} = $id + 1;
     my scalar $timers = $self->{"timers"};
-    push(@{$timers}, { "at" => core::mono_ms() + $ms, "cb" => $cb, "id" => $id, "dead" => 0 });
+    my scalar $t = { "at" => core::mono_ms() + $ms, "cb" => $cb, "id" => $id, "dead" => 0 };
+    push(@{$timers}, $t);
+    $self->{"timer_by_id"}->{$id} = $t;
     return $id;
 }
 
 func timer_cancel(scalar $self, int $id) void {
+    my scalar $by_id = $self->{"timer_by_id"};
+    if (defined($by_id) && exists(%{$by_id}, $id)) {
+        my scalar $t = $by_id->{$id};
+        if (defined($t)) {
+            $t->{"dead"} = 1;
+        }
+        delete($by_id->{$id});
+        return;
+    }
     my scalar $timers = $self->{"timers"};
     foreach my scalar $t (@{$timers}) {
         if ($t->{"id"} == $id) {
@@ -206,6 +253,7 @@ func run(scalar $self) void {
             # captures, so a self-referential entry would outlive the loop.
             $self->{"watchers"} = {};
             $self->{"timers"} = [];
+            $self->{"timer_by_id"} = {};
             last;
         }
 
@@ -288,10 +336,12 @@ private func next_timeout(scalar $self) int {
 private func fire_due_timers(scalar $self) void {
     my int $now = core::mono_ms();
     my scalar $timers = $self->{"timers"};
+    my scalar $by_id = $self->{"timer_by_id"};
     my array @due = ();
     my array @keep = ();
     foreach my scalar $t (@{$timers}) {
         if ($t->{"dead"} == 1) {
+            delete($by_id->{$t->{"id"}});
             next;
         } elsif ($t->{"at"} <= $now) {
             push(@due, $t);
@@ -301,6 +351,10 @@ private func fire_due_timers(scalar $self) void {
     }
     $self->{"timers"} = \@keep;
     foreach my scalar $t (@due) {
+        delete($by_id->{$t->{"id"}});
+        if ($t->{"dead"} == 1) {
+            next;
+        }
         my scalar $cb = $t->{"cb"};
         $cb->();
     }

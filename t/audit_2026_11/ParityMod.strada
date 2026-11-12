@@ -1,0 +1,45 @@
+const int PM_CONST = 42;
+
+package PMBase;
+our int $PM_OUR = 10;
+has ro int $base_v = 5;
+
+func get_const() int {
+    return PM_CONST;
+}
+
+func set_our(int $v) void {
+    $PM_OUR = $v;
+}
+
+func get_our() int {
+    return $PM_OUR;
+}
+
+async func async_double(int $n) int {
+    return $n * 2;
+}
+
+func compute(scalar $self) int {
+    return $self->base_v() + PM_CONST + $PM_OUR;
+}
+
+package PMChild;
+extends PMBase;
+has rw int $extra = 3;
+
+use overload
+    "+" => "add_pm",
+    '""' => "str_pm";
+
+around "compute" func(scalar $orig, scalar $self) int {
+    return $orig->($self) + $self->extra();
+}
+
+func add_pm(scalar $self, scalar $other, int $rev) scalar {
+    return PMChild::new("base_v", $self->base_v() + $other->base_v(), "extra", $self->extra() + $other->extra());
+}
+
+func str_pm(scalar $self) str {
+    return "PM(" . $self->compute() . ")";
+}

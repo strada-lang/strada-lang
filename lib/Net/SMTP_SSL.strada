@@ -87,17 +87,19 @@ func attach(scalar $smtp, str $host, int $verify) int {
     if ($verify == 1 && ssl::verify($conn) != 0) { ssl::close($conn); return 0; }
     $smtp->{"buf"} = "";
     $smtp->{"send_fn"} = func (str $data) {
+        my int $total = core::byte_length($data);
         my str $left = $data;
-        while (length($left) > 0) {
+        while (core::byte_length($left) > 0) {
+            my int $rlen = core::byte_length($left);
             my int $n = ssl::try_write($conn, $left);
             if ($n < 0) { return 0; }
             if ($n == 0) {
                 if (::wait_fd($fd, ssl::want($conn), $ms) == 0) { return 0; }
                 next;
             }
-            $left = substr($left, $n, length($left) - $n);
+            $left = ($n < $rlen) ? core::byte_substr($left, $n, $rlen - $n) : "";
         }
-        return length($data);
+        return $total;
     };
     $smtp->{"recv_fn"} = func (int $max) {
         while (1) {

@@ -324,14 +324,20 @@ func command(scalar $self, str $cmd) int {
     return $self->{"last_code"};
 }
 
+func _has_crlf(str $s) int {
+    return (index($s, "\r") >= 0 || index($s, "\n") >= 0) ? 1 : 0;
+}
+
 # HELO command - simple greeting
 func helo(scalar $self, str $domain) int {
+    if (SMTP::_has_crlf($domain)) { return 0; }
     my int $code = SMTP::command($self, "HELO " . $domain);
     return ($code == 250);
 }
 
 # EHLO command - extended greeting (capabilities: see supports())
 func ehlo(scalar $self, str $domain) int {
+    if (SMTP::_has_crlf($domain)) { return 0; }
     my int $code = SMTP::command($self, "EHLO " . $domain);
     if ($code == 250) { $self->{"ehlo"} = uc($self->{"last_response"}); }
     return ($code == 250);
@@ -373,19 +379,21 @@ func auth(scalar $self, str $username, str $password) int {
 # AUTH PLAIN - authenticate with PLAIN mechanism
 func auth_plain(scalar $self, str $username, str $password) int {
     # PLAIN format: \0username\0password
-    my str $auth_str = chr(0) . $username . chr(0) . $password;
+    my str $auth_str = core::byte(0) . $username . core::byte(0) . $password;
     my int $code = SMTP::command($self, "AUTH PLAIN " . core::base64_encode($auth_str));
     return ($code == 235);
 }
 
 # MAIL FROM - specify sender
 func mail(scalar $self, str $from) int {
+    if (SMTP::_has_crlf($from)) { return 0; }
     my int $code = SMTP::command($self, "MAIL FROM:<" . $from . ">");
     return ($code == 250);
 }
 
 # RCPT TO - specify recipient (call multiple times for multiple recipients)
 func rcpt_to(scalar $self, str $recipient) int {
+    if (SMTP::_has_crlf($recipient)) { return 0; }
     my int $code = SMTP::command($self, "RCPT TO:<" . $recipient . ">");
     return ($code == 250 || $code == 251);
 }
@@ -403,7 +411,7 @@ func data(scalar $self, str $message) int {
         return 0;
     }
     # dot-stuffed, every line ending in CRLF, then the lone "."
-    if ($self->{"debug"} == 1) { say("C: (message, " . length($message) . " bytes)"); }
+    if ($self->{"debug"} == 1) { say("C: (message, " . core::byte_length($message) . " bytes)"); }
     SMTP::send_raw($self, SMTP::dot_stuff($message));
     $code = SMTP::command($self, ".");
     return ($code == 250);
@@ -423,6 +431,7 @@ func noop(scalar $self) int {
 
 # VRFY - verify address (often disabled on servers)
 func verify(scalar $self, str $address) int {
+    if (SMTP::_has_crlf($address)) { return 0; }
     my int $code = SMTP::command($self, "VRFY " . $address);
     return ($code == 250 || $code == 251 || $code == 252);
 }
@@ -458,6 +467,14 @@ func message(scalar $self) str {
 
 # Send a message that already has its headers (envelope from/to given).
 func send_message(scalar $self, str $from, scalar $to_list, str $message) int {
+    if (SMTP::_has_crlf($from)) {
+        return 0;
+    }
+    foreach my str $rcpt_chk (@{$to_list}) {
+        if (SMTP::_has_crlf($rcpt_chk)) {
+            return 0;
+        }
+    }
     if (!SMTP::mail($self, $from)) {
         return 0;
     }
@@ -471,6 +488,14 @@ func send_message(scalar $self, str $from, scalar $to_list, str $message) int {
 
 # Convenience method: send a complete plain-text email
 func send_mail(scalar $self, str $from, scalar $to_list, str $subject, str $body) int {
+    if (SMTP::_has_crlf($from) || SMTP::_has_crlf($subject)) {
+        return 0;
+    }
+    foreach my str $rcpt_chk (@{$to_list}) {
+        if (SMTP::_has_crlf($rcpt_chk)) {
+            return 0;
+        }
+    }
     my str $msg = "From: " . $from . "\r\n";
     $msg = $msg . "To: " . join(", ", @{$to_list}) . "\r\n";
     $msg = $msg . "Subject: " . $subject . "\r\n";
@@ -483,13 +508,27 @@ func send_mail(scalar $self, str $from, scalar $to_list, str $subject, str $body
 }
 
 # Internal: dot-stuffing for DATA command. Lines starting with "." get an
-# extra "."; every line ends in CRLF.
+# extra "."; every line ends in CRLF, preserving trailing blank lines (such
+# as the blank header/body separator when $body is empty).
 func dot_stuff(str $text) str {
+    if (length($text) == 0) {
+        return "";
+    }
     my str $t = $text;
     $t =~ s/\r\n/\n/g;
-    if (length($t) > 0 && substr($t, length($t) - 1, 1) eq "\n") { $t = substr($t, 0, length($t) - 1); }
+    my int $len = length($t);
+    my int $pos = 0;
     my str $result = "";
-    foreach my str $line (split("\n", $t)) {
+    while ($pos < $len) {
+        my int $nl = index($t, "\n", $pos);
+        my str $line = "";
+        if ($nl < 0) {
+            $line = substr($t, $pos, $len - $pos);
+            $pos = $len;
+        } else {
+            $line = substr($t, $pos, $nl - $pos);
+            $pos = $nl + 1;
+        }
         if (length($line) > 0 && substr($line, 0, 1) eq ".") {
             $line = "." . $line;
         }

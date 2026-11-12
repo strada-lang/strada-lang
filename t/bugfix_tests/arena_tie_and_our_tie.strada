@@ -1,0 +1,142 @@
+# EXPECT: 25 tied_our 1 1 5 a,x,y,c,z b,e 3 p,q,d local_in outer local_try outer
+# Arena + tie safety, tie($our_scalar, ...) not poisoning undef / $h{"missing"},
+# full TIEARRAY dispatch (PUSH/POP/SHIFT/UNSHIFT/STORE/FETCH/FETCHSIZE/SPLICE),
+# and cross-package `local $Pkg::var`.
+
+package ArenaScalar;
+func TIESCALAR(str $class, int $init) scalar {
+    my hash %s = ("v" => $init);
+    return bless(\%s, $class);
+}
+func FETCH(scalar $self) scalar { return $self->{"v"}; }
+func STORE(scalar $self, scalar $v) void { $self->{"v"} = $v; }
+
+package OurTieScalar;
+func TIESCALAR(str $class) scalar {
+    my hash %s = ("v" => "tied_our");
+    return bless(\%s, $class);
+}
+func FETCH(scalar $self) scalar { return $self->{"v"}; }
+func STORE(scalar $self, scalar $v) void { $self->{"v"} = $v; }
+
+package FullTieArr;
+func TIEARRAY(str $class) scalar {
+    my array @d = ();
+    my hash %s = ("d" => \@d);
+    return bless(\%s, $class);
+}
+func FETCH(scalar $self, int $i) scalar { return $self->{"d"}->[$i]; }
+func STORE(scalar $self, int $i, scalar $v) void { $self->{"d"}->[$i] = $v; }
+func FETCHSIZE(scalar $self) int { return scalar(@{$self->{"d"}}); }
+func STORESIZE(scalar $self, int $n) void {
+    while (scalar(@{$self->{"d"}}) > $n) { pop(@{$self->{"d"}}); }
+}
+func PUSH(scalar $self, scalar ...@vals) int {
+    foreach my scalar $v (@vals) { push(@{$self->{"d"}}, $v); }
+    return scalar(@{$self->{"d"}});
+}
+func POP(scalar $self) scalar { return pop(@{$self->{"d"}}); }
+func SHIFT(scalar $self) scalar { return shift(@{$self->{"d"}}); }
+func UNSHIFT(scalar $self, scalar ...@vals) int {
+    my array @nd = ();
+    foreach my scalar $v (@vals) { push(@nd, $v); }
+    foreach my scalar $old (@{$self->{"d"}}) { push(@nd, $old); }
+    $self->{"d"} = \@nd;
+    return scalar(@nd);
+}
+func SPLICE(scalar $self, int $off, int $len, scalar ...@repl) array {
+    my array @removed = splice(@{$self->{"d"}}, $off, $len, @repl);
+    return @removed;
+}
+
+package FallbackSpliceArr;
+func TIEARRAY(str $class) scalar {
+    my array @d = ();
+    my hash %s = ("d" => \@d);
+    return bless(\%s, $class);
+}
+func FETCH(scalar $self, int $i) scalar { return $self->{"d"}->[$i]; }
+func STORE(scalar $self, int $i, scalar $v) void { $self->{"d"}->[$i] = $v; }
+func FETCHSIZE(scalar $self) int { return scalar(@{$self->{"d"}}); }
+func STORESIZE(scalar $self, int $n) void {
+    while (scalar(@{$self->{"d"}}) > $n) { pop(@{$self->{"d"}}); }
+    while (scalar(@{$self->{"d"}}) < $n) { push(@{$self->{"d"}}, undef); }
+}
+
+package OtherPkg;
+our str $var = "outer";
+func get_var() str { return $var; }
+
+package main;
+our scalar $our_sc;
+
+func test_local_pkg() str {
+    local $OtherPkg::var = "local_in";
+    return OtherPkg::get_var();
+}
+
+func main() int {
+    # 1. core::arena_begin() + tie($x, ...) + core::arena_end()
+    core::arena_begin();
+    my scalar $ax;
+    tie($ax, "ArenaScalar", 10);
+    $ax = $ax + 15;
+    my int $ares = $ax;
+    untie($ax);
+    core::arena_end();
+
+    # 2. tie($our_scalar, ...) must NOT poison undef / $h{"missing"}
+    tie($our_sc, "OurTieScalar");
+    my str $our_val = "" . $our_sc;
+    my hash %plain = ("present" => 1);
+    my scalar $miss = $plain{"missing"};
+    my int $miss_undef = !defined($miss) ? 1 : 0;
+    my scalar $u = undef;
+    my int $u_undef = !defined($u) ? 1 : 0;
+    untie($our_sc);
+
+    # 3. TIEARRAY: PUSH, POP, SHIFT, UNSHIFT, STORE, FETCH, FETCHSIZE, SPLICE
+    my array @ta = ();
+    tie(@ta, "FullTieArr");
+    push(@ta, "b");
+    push(@ta, "c");
+    push(@ta, "d");
+    unshift(@ta, "w");
+    my str $sh = shift(@ta);      # removes "w", leaves b,c,d
+    unshift(@ta, "a");            # a,b,c,d
+    push(@ta, "e");               # a,b,c,d,e
+    my str $pp = pop(@ta);        # removes "e", leaves a,b,c,d
+    $ta[3] = "z";                 # a,b,c,z
+    my array @rem = splice(@ta, 1, 1, ("x", "y")); # removes "b", leaves a,x,y,c,z
+    my int $tsz = scalar(@ta);
+    my str $tjoined = $ta[0] . "," . $ta[1] . "," . $ta[2] . "," . $ta[3] . "," . $ta[4];
+    my str $rem_pop = $rem[0] . "," . $pp;
+    untie(@ta);
+
+    # Fallback SPLICE on TIEARRAY without SPLICE method
+    my array @fa = ();
+    tie(@fa, "FallbackSpliceArr");
+    $fa[0] = "m";
+    $fa[1] = "n";
+    $fa[2] = "d";
+    my array @frem = splice(@fa, 0, 2, ("p", "q"));
+    my int $fsz = scalar(@fa);
+    my str $fjoined = $fa[0] . "," . $fa[1] . "," . $fa[2];
+    untie(@fa);
+
+    # 4. local $Pkg::var (normal return + exception unwind)
+    my str $lin = test_local_pkg();
+    my str $lafter = OtherPkg::get_var();
+    my str $ltry = "";
+    try {
+        local $OtherPkg::var = "local_try";
+        $ltry = OtherPkg::get_var();
+        throw "unwind";
+    } catch ($e) {}
+    my str $lafter2 = OtherPkg::get_var();
+
+    say($ares . " " . $our_val . " " . $miss_undef . " " . $u_undef . " " .
+        $tsz . " " . $tjoined . " " . $rem_pop . " " . $fsz . " " . $fjoined . " " .
+        $lin . " " . $lafter . " " . $ltry . " " . $lafter2);
+    return 0;
+}

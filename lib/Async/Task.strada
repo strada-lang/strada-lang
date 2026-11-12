@@ -82,18 +82,19 @@ func readline(scalar $sock, int $timeout_ms = 0) str {
 
 # Send all of $data (handles partial writes). Returns bytes sent, -1 error.
 func send(scalar $sock, str $data) int {
-    my int $total = length($data);
+    my int $total = core::byte_length($data);
     my str $rest = $data;
-    while (length($rest) > 0) {
+    while (core::byte_length($rest) > 0) {
+        my int $rlen = core::byte_length($rest);
         my int $n = core::socket_try_send($sock, $rest);
         if ($n < 0) { return 0 - 1; }
-        if ($n == length($rest)) { return $total; }
+        if ($n == $rlen) { return $total; }
         if ($n > 0) {
-            $rest = substr($rest, $n, length($rest) - $n);
+            $rest = core::byte_substr($rest, $n, $rlen - $n);
             next;
         }
         if (park($sock, "w", 0) == 0) {
-            core::socket_send($sock, $rest);          # not in a task: block
+            if (core::socket_send($sock, $rest) < 0) { return 0 - 1; }
             return $total;
         }
     }
@@ -125,7 +126,7 @@ func accept(scalar $listener, int $timeout_ms = 0) scalar {
 func connect(str $host, int $port, int $timeout_ms = 0) scalar {
     # Hostnames resolve on a background thread so a slow DNS lookup never
     # stalls the loop; numeric addresses skip the round-trip entirely.
-    if ($host !~ /^[0-9.:a-fA-F\[\]]+$/ || $host !~ /[0-9]/) {
+    if ($host !~ /^[]0-9.:a-fA-F[]+$/ || $host !~ /[0-9]/) {
         my scalar $rf = async::resolve($host);
         while (async::is_done($rf) == 0) {
             sleep(1);   # parks in a task; 1ms blocking poll outside one

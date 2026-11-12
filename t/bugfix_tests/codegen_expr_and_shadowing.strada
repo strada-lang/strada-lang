@@ -1,0 +1,142 @@
+# EXPECT: a,b,c a1a2,b1b2 4:3,4 hit_b XYZdef GHIdef ok:1:Zb:hi:hi del_val hi:7 2:scalar 1:99 11
+# Expression codegen, shadowing, wantarray, and struct-call fixes:
+# - `map { $_ } @a`, nested `map` preserving outer `$_`, multi-stmt `grep`
+# - `switch` with `case $var` and early `return`
+# - lvalue `substr($s, 0, 3) = $repl` and 4-arg `substr`
+# - value-context `my $v = ($h{"k"} = "ok")`, `if ($s =~ s/\d+/X/)`,
+#   `$h{"k"} =~ s/a/Z/`, and `chomp($our_g)`
+# - `delete($h{"p_" . $k})` returning deleted value
+# - `my str $x` shadowing `my int $x`
+# - nested `dynamic` preserving outer `wantarray()`
+# - `$arr[$i++] //= 99` evaluating `$i++` once
+# - same-package unqualified struct-returning call
+
+package Geom;
+struct Vec2 {
+    int x;
+    int y;
+}
+
+func make_vec(int $x, int $y) Vec2 {
+    my Vec2 $v;
+    $v->x = $x;
+    $v->y = $y;
+    return $v;
+}
+
+func sum_vec() int {
+    my Vec2 $p = make_vec(5, 6);
+    return $p->x + $p->y;
+}
+
+package main;
+our str $our_g = "hi\n";
+our int $grep_side = 0;
+
+func bump_grep() void {
+    $grep_side = $grep_side + 1;
+}
+
+func switch_ret(str $target, str $k1, str $k2) str {
+    switch ($target) {
+        case $k1 {
+            return "hit_a";
+        }
+        case $k2 {
+            return "hit_b";
+        }
+        default {
+            return "miss";
+        }
+    }
+    return "unreach";
+}
+
+func inner_dyn() dynamic {
+    if (core::wantarray()) {
+        my array @ia = ("list");
+        return @ia;
+    }
+    return "scalar";
+}
+
+func outer_dyn() dynamic {
+    # Scalar call to inner_dyn() must NOT clobber outer_dyn's wantarray()!
+    my str $sc = inner_dyn();
+    if (core::wantarray()) {
+        my array @oa = ($sc, "keep_list");
+        return @oa;
+    }
+    return "bad_scalar";
+}
+
+func main() int {
+    # 1. Identity map, nested map preserving outer $_, and multi-stmt grep
+    my array @base = ("a", "b", "c");
+    my array @id = map { $_ } @base;
+    my str $m1 = join(",", @id);
+
+    my array @outers = ("a", "b");
+    my array @inners = ("1", "2");
+    my array @nested = map {
+        my array @sub = map { $_ } @inners;
+        $_ . $sub[0] . $_ . $sub[1]
+    } @outers;
+    my str $m2 = join(",", @nested);
+
+    my array @nums = (1, 2, 3, 4);
+    my array @gt = grep { bump_grep(); $_ > 2 } @nums;
+    my str $g_res = $grep_side . ":" . join(",", @gt);
+
+    # 2. switch with case $var and early return
+    my str $sw = switch_ret("beta", "alpha", "beta");
+
+    # 3. lvalue substr($s, 0, 3) = $repl and 4-arg substr
+    my str $ls1 = "abcdef";
+    substr($ls1, 0, 3) = "XYZ";
+    my str $ls2 = "abcdef";
+    my str $old_sub = substr($ls2, 0, 3, "GHI");
+
+    # 4. Value-context hash assign, if(s///), hash elem s///, chomp($our_g)
+    my hash %vh = ();
+    my str $v = ($vh{"k"} = "ok");
+    my str $ dig = "id123";
+    my int $sub_if = 0;
+    if ($dig =~ s/\d+/X/) { $sub_if = 1; }
+    $vh{"m"} = "ab";
+    $vh{"m"} =~ s/a/Z/;
+    my str $ch_s = chomp($our_g);
+    my str $val_ctx = $v . ":" . $sub_if . ":" . $vh{"m"} . ":" . $ch_s . ":" . $our_g;
+
+    # 5. delete($h{"p_" . $k}) returning deleted value
+    my hash %dh = ("p_key" => "del_val");
+    my str $dk = "key";
+    my str $deleted = delete($dh{"p_" . $dk});
+
+    # 6. `my str $x` shadowing `my int $x`
+    my int $x = 7;
+    my str $inner_s = "";
+    {
+        my str $x = "hi";
+        $inner_s = $x;
+    }
+    my str $shad = $inner_s . ":" . $x;
+
+    # 7. Nested dynamic preserving outer wantarray()
+    my array @dyn_out = outer_dyn();
+    my str $dyn_res = size(@dyn_out) . ":" . $dyn_out[0];
+
+    # 8. `$arr[$i++] //= 99` evaluating `$i++` once
+    my array @da = (undef, 5);
+    my int $i = 0;
+    $da[$i++] //= 99;
+    my str $d_res = $i . ":" . $da[0];
+
+    # 9. Same-package unqualified struct-returning call
+    my int $vec_sum = Geom::sum_vec();
+
+    say($m1 . " " . $m2 . " " . $g_res . " " . $sw . " " .
+        $ls1 . " " . $ls2 . " " . $val_ctx . " " . $deleted . " " .
+        $shad . " " . $dyn_res . " " . $d_res . " " . $vec_sum);
+    return 0;
+}

@@ -1,0 +1,105 @@
+use lib "lib";
+use compress;
+use ssl;
+use LWP_SSL;
+use DBI;
+
+our int $g_fail = 0;
+
+func check(int $ok, str $label) void {
+    if ($ok == 0) {
+        say("FAIL: " . $label);
+        $g_fail = $g_fail + 1;
+    }
+}
+
+func untyped_int() scalar {
+    return 12345;
+}
+
+func main(int $argc, array @argv) int {
+    my str $work_dir = $argc > 1 ? $argv[1] : "/tmp";
+    my str $cert_file = $argc > 2 ? $argv[2] : "";
+    my str $key_file = $argc > 3 ? $argv[3] : "";
+    my int $port = $argc > 4 ? core::atoi($argv[4]) : 39123;
+
+    # 1. compress::gzip / gunzip
+    my str $plain = "Hello Strada gzip payload! " . ("ABCD" x 20);
+    my str $gz = compress::gzip($plain);
+    check(core::byte_length($gz) > 18 && $gz ne $plain, "compress::gzip produces compressed frame (not plaintext)");
+    check(core::get_byte($gz, 0) == 31 && core::get_byte($gz, 1) == 139, "compress::gzip magic 1f 8b");
+    check(compress::gunzip($gz) eq $plain, "compress::gunzip roundtrip");
+
+    my str $gz_empty = compress::gzip("");
+    check(core::byte_length($gz_empty) > 0, "compress::gzip(\"\") non-empty");
+    check(compress::gunzip($gz_empty) eq "", "compress::gunzip(gzip(\"\")) == \"\"");
+
+    my str $trunc = core::byte_substr($gz, 0, 10);
+    check(compress::gunzip($trunc) eq "", "truncated gzip returns empty string without hanging");
+
+    my scalar $tagged = untyped_int();
+    my str $gz_int = compress::gzip($tagged);
+    check(compress::gunzip($gz_int) eq "12345", "compress::gzip handles tagged int without segfault");
+
+    # 2. LWP_SSL CRLF stripping + parse_response headers
+    my hash %ssl_opts = ("user_agent" => "Agent\r\nEvil: 1", "headers" => { "X-Clean" => "ok\r\nInjected: bad" });
+    my str $built = LWP_SSL::build_request("GET\r\nX", "example.com\r\nY", "/test\r\nZ", "", %ssl_opts);
+    check(index($built, "\r\nEvil:") < 0 && index($built, "\r\nInjected:") < 0 && index($built, "GETX /testZ HTTP/1.1\r\n") == 0, "LWP_SSL::build_request strips CRLF");
+    my hash %sresp = LWP_SSL::parse_response("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Test: val42\r\n\r\n{\"ok\":1}");
+    check($sresp{"status"} == 200 && defined($sresp{"headers"}) && $sresp{"headers"}->{"x-test"} eq "val42", "LWP_SSL::parse_response populates headers");
+
+    # 3. ssl::server + accept + close($cli) + close($srv) (no SSL_CTX double-free)
+    if (length($cert_file) > 0 && (-f $cert_file)) {
+        my int $srv = ssl::server($port, $cert_file, $key_file);
+        check($srv != 0, "ssl::server started");
+        if ($srv != 0) {
+            my int $pid = core::fork();
+            if ($pid == 0) {
+                core::usleep(20000);
+                my int $c = ssl::connect_insecure("127.0.0.1", $port);
+                if ($c != 0) {
+                    ssl::write($c, "ping");
+                    my str $echo = ssl::read($c, 64);
+                    ssl::close($c);
+                }
+                core::exit(0);
+            }
+            my int $cli = ssl::accept($srv);
+            check($cli != 0, "ssl::accept client");
+            if ($cli != 0) {
+                my str $got = ssl::read($cli, 64);
+                check($got eq "ping", "ssl::read ping");
+                ssl::write($cli, "pong");
+                ssl::close($cli);
+            }
+            ssl::close($srv);
+            core::waitpid($pid, 0);
+        }
+    }
+
+    # 4. DBI SQLite: INSERT ... RETURNING (1 row, not 2), embedded NUL, double disconnect
+    my str $db_path = $work_dir . "/audit_dbi.sqlite";
+    my scalar $dbh = DBI::connect("dbi:SQLite:" . $db_path, "", "");
+    check(defined($dbh), "DBI::connect SQLite");
+    if (defined($dbh)) {
+        DBI::do_sql($dbh, "CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, payload BLOB)");
+        my scalar $ret_row = DBI::selectrow_hashref($dbh, "INSERT INTO items (payload) VALUES (?) RETURNING id, payload", ["first"]);
+        check(defined($ret_row) && $ret_row->{"payload"} eq "first", "DBI INSERT ... RETURNING row");
+        my scalar $cnt = DBI::selectcol($dbh, "SELECT COUNT(*) FROM items", []);
+        check(($cnt + 0) == 1, "DBI INSERT ... RETURNING inserted exactly 1 row (got " . $cnt . ")");
+
+        my str $nul_blob = "ab" . core::byte(0) . "cd";
+        DBI::exec($dbh, "INSERT INTO items (payload) VALUES (?)", [$nul_blob]);
+        my scalar $got_blob = DBI::selectcol($dbh, "SELECT payload FROM items WHERE id = 2", []);
+        check(core::byte_length($got_blob) == 5 && core::get_byte($got_blob, 2) == 0 && core::get_byte($got_blob, 4) == 100, "DBI embedded NUL roundtrip");
+
+        DBI::disconnect($dbh);
+        DBI::disconnect($dbh);
+    }
+
+    if ($g_fail == 0) {
+        say("ALL_STDLIB_C_EXT_OK");
+        return 0;
+    }
+    return 1;
+}

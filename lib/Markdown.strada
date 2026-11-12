@@ -12,32 +12,12 @@ func html_escape(str $s) str {
     return $result;
 }
 
-# Process inline formatting (bold, italic, code, links)
-private func process_inline(str $line) str {
-    my str $result = $line;
+# Process emphasis (**bold**, __bold__, *italic*, _italic_) on unprotected text
+private func process_emphasis(str $text) str {
+    my str $result = $text;
 
-    # Inline code - handle separately using index/substr since backticks are tricky in regex
+    # Bold: **text**
     my int $done = 0;
-    while ($done == 0) {
-        my int $start = index($result, "`");
-        if ($start < 0) {
-            $done = 1;
-        } else {
-            my int $end = index($result, "`", $start + 1);
-            if ($end < 0) {
-                $done = 1;
-            } else {
-                my str $before = substr($result, 0, $start);
-                my str $code = substr($result, $start + 1, $end - $start - 1);
-                my str $after = substr($result, $end + 1, length($result) - $end - 1);
-                my str $escaped = ::html_escape($code);
-                $result = $before . "<code>" . $escaped . "</code>" . $after;
-            }
-        }
-    }
-
-    # Bold: **text** - use string operations
-    $done = 0;
     while ($done == 0) {
         my int $start = index($result, "**");
         if ($start < 0) {
@@ -74,7 +54,7 @@ private func process_inline(str $line) str {
         }
     }
 
-    # Italic: *text* - use string operations (single asterisk)
+    # Italic: *text*
     $done = 0;
     while ($done == 0) {
         my int $start = index($result, "*");
@@ -112,64 +92,106 @@ private func process_inline(str $line) str {
         }
     }
 
-    # Images: ![alt](url) - process before links
-    $done = 0;
-    while ($done == 0) {
-        my int $bang = index($result, "![");
-        if ($bang < 0) {
-            $done = 1;
-        } else {
-            my int $close_bracket = index($result, "]", $bang + 2);
-            if ($close_bracket < 0) {
-                $done = 1;
-            } else {
-                my int $open_paren = index($result, "(", $close_bracket);
-                if ($open_paren != $close_bracket + 1) {
-                    $done = 1;
-                } else {
-                    my int $close_paren = index($result, ")", $open_paren);
-                    if ($close_paren < 0) {
-                        $done = 1;
-                    } else {
-                        my str $before = substr($result, 0, $bang);
-                        my str $alt = substr($result, $bang + 2, $close_bracket - $bang - 2);
-                        my str $url = substr($result, $open_paren + 1, $close_paren - $open_paren - 1);
-                        my str $after = substr($result, $close_paren + 1, length($result) - $close_paren - 1);
-                        $result = $before . "<img src=\"" . $url . "\" alt=\"" . $alt . "\">" . $after;
-                    }
-                }
-            }
+    return $result;
+}
+
+# Process inline formatting (code, images, links, bold, italic)
+private func process_inline(str $line) str {
+    my str $result = $line;
+    my str $sentinel = core::byte(1);
+    my array @tokens = ();
+
+    # 1. Extract inline `code` spans into protected placeholders first
+    my int $search_pos = 0;
+    while (1) {
+        my int $start = index($result, "`", $search_pos);
+        if ($start < 0) {
+            last;
         }
+        my int $end = index($result, "`", $start + 1);
+        if ($end < 0) {
+            last;
+        }
+        my str $before = substr($result, 0, $start);
+        my str $code = substr($result, $start + 1, $end - $start - 1);
+        my str $after = substr($result, $end + 1, length($result) - $end - 1);
+        my str $tok = $sentinel . "MDTOK" . size(@tokens) . $sentinel;
+        push(@tokens, "<code>" . ::html_escape($code) . "</code>");
+        $result = $before . $tok . $after;
+        $search_pos = length($before) + length($tok);
     }
 
-    # Links: [text](url)
-    $done = 0;
-    while ($done == 0) {
-        my int $open_bracket = index($result, "[");
-        if ($open_bracket < 0) {
-            $done = 1;
-        } else {
-            my int $close_bracket = index($result, "]", $open_bracket + 1);
-            if ($close_bracket < 0) {
-                $done = 1;
-            } else {
-                my int $open_paren = index($result, "(", $close_bracket);
-                if ($open_paren != $close_bracket + 1) {
-                    $done = 1;
-                } else {
-                    my int $close_paren = index($result, ")", $open_paren);
-                    if ($close_paren < 0) {
-                        $done = 1;
-                    } else {
-                        my str $before = substr($result, 0, $open_bracket);
-                        my str $text = substr($result, $open_bracket + 1, $close_bracket - $open_bracket - 1);
-                        my str $url = substr($result, $open_paren + 1, $close_paren - $open_paren - 1);
-                        my str $after = substr($result, $close_paren + 1, length($result) - $close_paren - 1);
-                        $result = $before . "<a href=\"" . $url . "\">" . $text . "</a>" . $after;
-                    }
-                }
-            }
+    # 2. Extract images ![alt](url) before links and emphasis (protecting URLs/attrs)
+    $search_pos = 0;
+    while (1) {
+        my int $bang = index($result, "![", $search_pos);
+        if ($bang < 0) {
+            last;
         }
+        my int $close_bracket = index($result, "]", $bang + 2);
+        if ($close_bracket < 0) {
+            last;
+        }
+        my int $open_paren = index($result, "(", $close_bracket);
+        if ($open_paren != $close_bracket + 1) {
+            $search_pos = $bang + 2;
+            next;
+        }
+        my int $close_paren = index($result, ")", $open_paren + 1);
+        if ($close_paren < 0) {
+            $search_pos = $bang + 2;
+            next;
+        }
+        my str $before = substr($result, 0, $bang);
+        my str $alt = substr($result, $bang + 2, $close_bracket - $bang - 2);
+        my str $url = substr($result, $open_paren + 1, $close_paren - $open_paren - 1);
+        my str $after = substr($result, $close_paren + 1, length($result) - $close_paren - 1);
+        my str $tok = $sentinel . "MDTOK" . size(@tokens) . $sentinel;
+        push(@tokens, "<img src=\"" . $url . "\" alt=\"" . $alt . "\">");
+        $result = $before . $tok . $after;
+        $search_pos = length($before) + length($tok);
+    }
+
+    # 3. Extract links [text](url) before emphasis (protecting URLs; non-link [0] skipped)
+    $search_pos = 0;
+    while (1) {
+        my int $open_bracket = index($result, "[", $search_pos);
+        if ($open_bracket < 0) {
+            last;
+        }
+        my int $close_bracket = index($result, "]", $open_bracket + 1);
+        if ($close_bracket < 0) {
+            last;
+        }
+        my int $open_paren = index($result, "(", $close_bracket);
+        if ($open_paren != $close_bracket + 1) {
+            $search_pos = $open_bracket + 1;
+            next;
+        }
+        my int $close_paren = index($result, ")", $open_paren + 1);
+        if ($close_paren < 0) {
+            $search_pos = $open_bracket + 1;
+            next;
+        }
+        my str $before = substr($result, 0, $open_bracket);
+        my str $text = ::process_emphasis(substr($result, $open_bracket + 1, $close_bracket - $open_bracket - 1));
+        my str $url = substr($result, $open_paren + 1, $close_paren - $open_paren - 1);
+        my str $after = substr($result, $close_paren + 1, length($result) - $close_paren - 1);
+        my str $tok = $sentinel . "MDTOK" . size(@tokens) . $sentinel;
+        push(@tokens, "<a href=\"" . $url . "\">" . $text . "</a>");
+        $result = $before . $tok . $after;
+        $search_pos = length($before) + length($tok);
+    }
+
+    # 4. Emphasis on remaining unprotected text
+    $result = ::process_emphasis($result);
+
+    # 5. Restore placeholders in reverse order (so code spans inside link text restore cleanly)
+    my int $ti = size(@tokens) - 1;
+    while ($ti >= 0) {
+        my str $tok = $sentinel . "MDTOK" . $ti . $sentinel;
+        $result = replace_all($result, $tok, $tokens[$ti]);
+        $ti = $ti - 1;
     }
 
     return $result;

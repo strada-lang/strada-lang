@@ -133,26 +133,44 @@ version "1.0.0";
 
 # Escape a string for JSON output
 func escape_str(str $s) str {
+    my str $hex = "0123456789abcdef";
     my str $result = "";
-    my int $len = length($s);
+    my int $len = core::byte_length($s);
     my int $i = 0;
 
     while ($i < $len) {
-        my str $ch = substr($s, $i, 1);
-        my int $code = ord($ch);
+        my int $b = core::get_byte($s, $i);
 
-        if ($ch eq "\"") {
+        if ($b == 34) {
             $result = $result . "\\\"";
-        } elsif ($ch eq "\\") {
+        } elsif ($b == 92) {
             $result = $result . "\\\\";
-        } elsif ($code == ord("\n")) {
+        } elsif ($b == 8) {
+            $result = $result . "\\b";
+        } elsif ($b == 12) {
+            $result = $result . "\\f";
+        } elsif ($b == 10) {
             $result = $result . "\\n";
-        } elsif ($code == ord("\r")) {
+        } elsif ($b == 13) {
             $result = $result . "\\r";
-        } elsif ($code == ord("\t")) {
+        } elsif ($b == 9) {
             $result = $result . "\\t";
+        } elsif ($b < 32) {
+            my int $hi = ($b / 16) % 16;
+            my int $lo = $b % 16;
+            $result = $result . "\\u00" . substr($hex, $hi, 1) . substr($hex, $lo, 1);
         } else {
-            $result = $result . $ch;
+            my int $start = $i;
+            $i = $i + 1;
+            while ($i < $len) {
+                my int $nb = core::get_byte($s, $i);
+                if ($nb == 34 || $nb == 92 || $nb < 32) {
+                    last;
+                }
+                $i = $i + 1;
+            }
+            $result = $result . core::byte_substr($s, $start, $i - $start);
+            next;
         }
 
         $i = $i + 1;
@@ -161,43 +179,85 @@ func escape_str(str $s) str {
     return $result;
 }
 
-# Check if a string looks like a number
+# Check if a string strictly matches RFC 8259 JSON number syntax
 func looks_like_num(str $s) int {
-    my int $len = length($s);
+    my int $len = core::byte_length($s);
     if ($len == 0) {
         return 0;
     }
     my int $i = 0;
-    my str $ch = substr($s, 0, 1);
-    if ($ch eq "-") {
+    my int $b = core::get_byte($s, 0);
+    if ($b == 45) {
         $i = 1;
-        if ($len == 1) {
+        if ($i >= $len) {
             return 0;
         }
+        $b = core::get_byte($s, $i);
     }
-    my int $has_dot = 0;
-    my int $has_digit = 0;
-    while ($i < $len) {
-        $ch = substr($s, $i, 1);
-        if ($ch ge "0" && $ch le "9") {
-            $has_digit = 1;
-        } elsif ($ch eq "." && !$has_dot) {
-            $has_dot = 1;
-        } elsif ($ch eq "e" || $ch eq "E") {
-            # Allow exponent notation
+    if ($b == 48) {
+        $i = $i + 1;
+        if ($i < $len) {
+            my int $nb = core::get_byte($s, $i);
+            if ($nb >= 48 && $nb <= 57) {
+                return 0;
+            }
+        }
+    } elsif ($b >= 49 && $b <= 57) {
+        $i = $i + 1;
+        while ($i < $len) {
+            my int $nb = core::get_byte($s, $i);
+            if ($nb < 48 || $nb > 57) {
+                last;
+            }
+            $i = $i + 1;
+        }
+    } else {
+        return 0;
+    }
+    if ($i < $len && core::get_byte($s, $i) == 46) {
+        $i = $i + 1;
+        if ($i >= $len) {
+            return 0;
+        }
+        my int $fb = core::get_byte($s, $i);
+        if ($fb < 48 || $fb > 57) {
+            return 0;
+        }
+        while ($i < $len) {
+            my int $nb = core::get_byte($s, $i);
+            if ($nb < 48 || $nb > 57) {
+                last;
+            }
+            $i = $i + 1;
+        }
+    }
+    if ($i < $len) {
+        my int $eb = core::get_byte($s, $i);
+        if ($eb == 101 || $eb == 69) {
             $i = $i + 1;
             if ($i < $len) {
-                $ch = substr($s, $i, 1);
-                if ($ch eq "+" || $ch eq "-") {
+                my int $sb = core::get_byte($s, $i);
+                if ($sb == 43 || $sb == 45) {
                     $i = $i + 1;
                 }
             }
-        } else {
-            return 0;
+            if ($i >= $len) {
+                return 0;
+            }
+            my int $db = core::get_byte($s, $i);
+            if ($db < 48 || $db > 57) {
+                return 0;
+            }
+            while ($i < $len) {
+                my int $nb = core::get_byte($s, $i);
+                if ($nb < 48 || $nb > 57) {
+                    last;
+                }
+                $i = $i + 1;
+            }
         }
-        $i = $i + 1;
     }
-    return $has_digit;
+    return ($i == $len) ? 1 : 0;
 }
 
 # Encode any value to JSON
@@ -299,7 +359,8 @@ func make_parser(str $json) scalar {
     return {
         "json" => $json,
         "pos" => 0,
-        "len" => length($json)
+        "len" => length($json),
+        "err" => 0
     };
 }
 
@@ -348,6 +409,10 @@ func parse_str(scalar $p) str {
         }
 
         if ($ch eq "\\") {
+            if ($p->{"pos"} >= $p->{"len"}) {
+                $p->{"err"} = 1;
+                return "";
+            }
             my str $escaped = JSON::PS::advance($p);
             if ($escaped eq "\"") {
                 $result = $result . "\"";
@@ -368,20 +433,30 @@ func parse_str(scalar $p) str {
             } elsif ($escaped eq "u") {
                 # \uXXXX escape (with surrogate-pair handling) -> UTF-8
                 my int $cp = JSON::PS::parse_hex4($p);
+                if ($cp < 0) {
+                    $p->{"err"} = 1;
+                    return "";
+                }
                 if ($cp >= 55296 && $cp <= 56319) {
                     # high surrogate: expect \uDC00-\uDFFF
-                    if (JSON::PS::peek($p) eq "\\") {
-                        JSON::PS::advance($p);
-                        if (JSON::PS::peek($p) eq "u") {
-                            JSON::PS::advance($p);
-                            my int $lo = JSON::PS::parse_hex4($p);
-                            if ($lo >= 56320 && $lo <= 57343) {
-                                $cp = 65536 + (($cp - 55296) * 1024) + ($lo - 56320);
-                            }
+                    if ($p->{"pos"} + 1 < $p->{"len"} && substr($p->{"json"}, $p->{"pos"}, 2) eq "\\u") {
+                        $p->{"pos"} = $p->{"pos"} + 2;
+                        my int $lo = JSON::PS::parse_hex4($p);
+                        if ($lo < 0) {
+                            $p->{"err"} = 1;
+                            return "";
+                        }
+                        if ($lo >= 56320 && $lo <= 57343) {
+                            $cp = 65536 + (($cp - 55296) * 1024) + ($lo - 56320);
+                        } else {
+                            $result = $result . chr($cp);
+                            $cp = $lo;
                         }
                     }
                 }
-                if ($cp >= 0) {
+                if ($cp == 0) {
+                    $result = $result . core::byte(0);
+                } else {
                     $result = $result . chr($cp);
                 }
             } else {
@@ -392,7 +467,8 @@ func parse_str(scalar $p) str {
         }
     }
 
-    return $result;
+    $p->{"err"} = 1;
+    return "";
 }
 
 # Read exactly four hex digits at the parser position; returns the code
@@ -423,7 +499,7 @@ func parse_hex4(scalar $p) int {
 
 # Check if character is a digit
 func is_digit(str $ch) int {
-    return ($ch ge "0" && $ch le "9");
+    return ($ch ne "" && $ch ge "0" && $ch le "9") ? 1 : 0;
 }
 
 # Parse a JSON number
@@ -433,16 +509,35 @@ func parse_num(scalar $p) scalar {
     # Handle negative
     if (JSON::PS::peek($p) eq "-") {
         $num_str = $num_str . JSON::PS::advance($p);
+        if (!JSON::PS::is_digit(JSON::PS::peek($p))) {
+            $p->{"err"} = 1;
+            return undef;
+        }
     }
 
-    # Integer part
-    while ($p->{"pos"} < $p->{"len"} && JSON::PS::is_digit(JSON::PS::peek($p))) {
+    # Integer part: 0 or [1-9][0-9]*
+    if (JSON::PS::peek($p) eq "0") {
         $num_str = $num_str . JSON::PS::advance($p);
+        if (JSON::PS::is_digit(JSON::PS::peek($p))) {
+            $p->{"err"} = 1;
+            return undef;
+        }
+    } elsif (JSON::PS::is_digit(JSON::PS::peek($p))) {
+        while ($p->{"pos"} < $p->{"len"} && JSON::PS::is_digit(JSON::PS::peek($p))) {
+            $num_str = $num_str . JSON::PS::advance($p);
+        }
+    } else {
+        $p->{"err"} = 1;
+        return undef;
     }
 
     # Decimal part
     if (JSON::PS::peek($p) eq ".") {
         $num_str = $num_str . JSON::PS::advance($p);
+        if (!JSON::PS::is_digit(JSON::PS::peek($p))) {
+            $p->{"err"} = 1;
+            return undef;
+        }
         while ($p->{"pos"} < $p->{"len"} && JSON::PS::is_digit(JSON::PS::peek($p))) {
             $num_str = $num_str . JSON::PS::advance($p);
         }
@@ -455,6 +550,10 @@ func parse_num(scalar $p) scalar {
         $ch = JSON::PS::peek($p);
         if ($ch eq "+" || $ch eq "-") {
             $num_str = $num_str . JSON::PS::advance($p);
+        }
+        if (!JSON::PS::is_digit(JSON::PS::peek($p))) {
+            $p->{"err"} = 1;
+            return undef;
         }
         while ($p->{"pos"} < $p->{"len"} && JSON::PS::is_digit(JSON::PS::peek($p))) {
             $num_str = $num_str . JSON::PS::advance($p);
@@ -485,16 +584,26 @@ func match_kw(scalar $p, str $keyword) int {
 # Parse any JSON value (recursive)
 func do_parse(scalar $p, int $depth) scalar {
     if ($depth > 100) {
+        $p->{"err"} = 1;
         return undef;
     }
 
     JSON::PS::skip_ws($p);
 
+    if ($p->{"pos"} >= $p->{"len"}) {
+        $p->{"err"} = 1;
+        return undef;
+    }
+
     my str $ch = JSON::PS::peek($p);
 
     # String
     if ($ch eq "\"") {
-        return JSON::PS::parse_str($p);
+        my str $s = JSON::PS::parse_str($p);
+        if ($p->{"err"}) {
+            return undef;
+        }
+        return $s;
     }
 
     # Array - return as array reference
@@ -504,7 +613,7 @@ func do_parse(scalar $p, int $depth) scalar {
 
         my scalar $result = [];
 
-        if (JSON::PS::peek($p) eq "]") {
+        if ($p->{"pos"} < $p->{"len"} && JSON::PS::peek($p) eq "]") {
             JSON::PS::advance($p);
             return $result;
         }
@@ -512,9 +621,16 @@ func do_parse(scalar $p, int $depth) scalar {
         while (1) {
             JSON::PS::skip_ws($p);
             my scalar $val = JSON::PS::do_parse($p, $depth + 1);
+            if ($p->{"err"}) {
+                return undef;
+            }
             push($result, $val);
 
             JSON::PS::skip_ws($p);
+            if ($p->{"pos"} >= $p->{"len"}) {
+                $p->{"err"} = 1;
+                return undef;
+            }
             $ch = JSON::PS::peek($p);
 
             if ($ch eq "]") {
@@ -525,7 +641,8 @@ func do_parse(scalar $p, int $depth) scalar {
             if ($ch eq ",") {
                 JSON::PS::advance($p);
             } else {
-                return $result;
+                $p->{"err"} = 1;
+                return undef;
             }
         }
     }
@@ -537,7 +654,7 @@ func do_parse(scalar $p, int $depth) scalar {
 
         my scalar $result = {};
 
-        if (JSON::PS::peek($p) eq "}") {
+        if ($p->{"pos"} < $p->{"len"} && JSON::PS::peek($p) eq "}") {
             JSON::PS::advance($p);
             return $result;
         }
@@ -545,24 +662,36 @@ func do_parse(scalar $p, int $depth) scalar {
         while (1) {
             JSON::PS::skip_ws($p);
 
-            if (JSON::PS::peek($p) ne "\"") {
-                return $result;
+            if ($p->{"pos"} >= $p->{"len"} || JSON::PS::peek($p) ne "\"") {
+                $p->{"err"} = 1;
+                return undef;
             }
             my str $key = JSON::PS::parse_str($p);
+            if ($p->{"err"}) {
+                return undef;
+            }
 
             JSON::PS::skip_ws($p);
 
-            if (JSON::PS::peek($p) ne ":") {
-                return $result;
+            if ($p->{"pos"} >= $p->{"len"} || JSON::PS::peek($p) ne ":") {
+                $p->{"err"} = 1;
+                return undef;
             }
             JSON::PS::advance($p);
 
             JSON::PS::skip_ws($p);
 
             my scalar $val = JSON::PS::do_parse($p, $depth + 1);
+            if ($p->{"err"}) {
+                return undef;
+            }
             $result->{$key} = $val;
 
             JSON::PS::skip_ws($p);
+            if ($p->{"pos"} >= $p->{"len"}) {
+                $p->{"err"} = 1;
+                return undef;
+            }
             $ch = JSON::PS::peek($p);
 
             if ($ch eq "}") {
@@ -573,7 +702,8 @@ func do_parse(scalar $p, int $depth) scalar {
             if ($ch eq ",") {
                 JSON::PS::advance($p);
             } else {
-                return $result;
+                $p->{"err"} = 1;
+                return undef;
             }
         }
     }
@@ -596,11 +726,20 @@ func do_parse(scalar $p, int $depth) scalar {
         return undef;
     }
 
+    $p->{"err"} = 1;
     return undef;
 }
 
 # Public decode function
 func decode(str $json) scalar {
     my scalar $p = JSON::PS::make_parser($json);
-    return JSON::PS::do_parse($p, 0);
+    my scalar $res = JSON::PS::do_parse($p, 0);
+    if ($p->{"err"}) {
+        return undef;
+    }
+    JSON::PS::skip_ws($p);
+    if ($p->{"pos"} != $p->{"len"}) {
+        return undef;
+    }
+    return $res;
 }

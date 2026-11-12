@@ -23,14 +23,21 @@ func resolve(scalar $manifest, str $deps_dir) scalar {
         $item{"name"} = $name;
 
         # Handle different dependency formats
-        if (typeof($spec) eq "hash") {
-            # { version = "^1.0", git = "...", optional = true }
-            $item{"constraint"} = defined($spec->{"version"}) ? $spec->{"version"} : "*";
-            $item{"source"} = defined($spec->{"git"}) ? $spec->{"git"} : "";
+        if (Pacco::Manifest::is_hash($spec) == 1) {
+            # { version = "^1.0", git = "...", path = "...", optional = true }
+            $item{"constraint"} = defined($spec->{"version"}) ? ("" . $spec->{"version"}) : "*";
+            if (defined($spec->{"path"}) && $spec->{"path"} ne "") {
+                $item{"source"} = "path:" . $spec->{"path"};
+            } elsif (defined($spec->{"git"}) && $spec->{"git"} ne "") {
+                $item{"source"} = "git:" . $spec->{"git"};
+                $item{"git"} = "" . $spec->{"git"};
+            } else {
+                $item{"source"} = "";
+            }
             $item{"optional"} = defined($spec->{"optional"}) ? $spec->{"optional"} : 0;
         } else {
             # Simple version constraint string "^1.0"
-            $item{"constraint"} = $spec;
+            $item{"constraint"} = "" . $spec;
             $item{"source"} = "";
             $item{"optional"} = 0;
         }
@@ -61,6 +68,7 @@ func resolve(scalar $manifest, str $deps_dir) scalar {
         my str $pkg_path = Pacco::Resolver::find_package($name, $constraint, $deps_dir);
         my str $ver = "";
         my str $source = $item->{"source"};
+        my scalar $pkg_deps = undef;
 
         if ($pkg_path ne "") {
             # Load manifest from package
@@ -69,17 +77,24 @@ func resolve(scalar $manifest, str $deps_dir) scalar {
                 $ver = Pacco::Manifest::get_version($pkg_manifest);
 
                 # Add transitive dependencies to queue
-                my scalar $pkg_deps = Pacco::Manifest::get_dependencies($pkg_manifest);
+                $pkg_deps = Pacco::Manifest::get_dependencies($pkg_manifest);
                 foreach my str $dep_name (keys(%{$pkg_deps})) {
                     if (!exists($seen{$dep_name})) {
                         my hash %dep_item = ();
                         $dep_item{"name"} = $dep_name;
                         my scalar $dep_spec = $pkg_deps->{$dep_name};
-                        if (typeof($dep_spec) eq "hash") {
-                            $dep_item{"constraint"} = defined($dep_spec->{"version"}) ? $dep_spec->{"version"} : "*";
-                            $dep_item{"source"} = defined($dep_spec->{"git"}) ? $dep_spec->{"git"} : "";
+                        if (Pacco::Manifest::is_hash($dep_spec) == 1) {
+                            $dep_item{"constraint"} = defined($dep_spec->{"version"}) ? ("" . $dep_spec->{"version"}) : "*";
+                            if (defined($dep_spec->{"path"}) && $dep_spec->{"path"} ne "") {
+                                $dep_item{"source"} = "path:" . $dep_spec->{"path"};
+                            } elsif (defined($dep_spec->{"git"}) && $dep_spec->{"git"} ne "") {
+                                $dep_item{"source"} = "git:" . $dep_spec->{"git"};
+                                $dep_item{"git"} = "" . $dep_spec->{"git"};
+                            } else {
+                                $dep_item{"source"} = "";
+                            }
                         } else {
-                            $dep_item{"constraint"} = $dep_spec;
+                            $dep_item{"constraint"} = "" . $dep_spec;
                             $dep_item{"source"} = "";
                         }
                         push(@queue, \%dep_item);
@@ -94,6 +109,12 @@ func resolve(scalar $manifest, str $deps_dir) scalar {
         $pkg_info{"constraint"} = $constraint;
         $pkg_info{"source"} = $source;
         $pkg_info{"path"} = $pkg_path;
+        if (defined($item->{"git"}) && $item->{"git"} ne "") {
+            $pkg_info{"git"} = $item->{"git"};
+        }
+        if (defined($pkg_deps)) {
+            $pkg_info{"dependencies"} = $pkg_deps;
+        }
         $resolved{$name} = \%pkg_info;
     }
 
@@ -107,28 +128,14 @@ func find_package(str $name, str $constraint, str $deps_dir) str {
 
     # Check deps directory
     if (core::dir_exists($deps_dir) == 1) {
-        # List directories in deps_dir
-        my str $cmd = "ls -1 " . $deps_dir . " 2>/dev/null";
-        my scalar $fh = core::popen($cmd, "r");
-        if (defined($fh)) {
-            my str $line = core::fgets($fh, 256);
-            while (defined($line) && length($line) > 0) {
-                # Trim newline
-                if (substr($line, length($line) - 1, 1) eq "\n") {
-                    $line = substr($line, 0, length($line) - 1);
+        my array @entries = core::readdir($deps_dir);
+        foreach my str $line (@entries) {
+            if ($line eq $name || (length($line) > length($name) + 1 && substr($line, 0, length($name) + 1) eq $name . "-")) {
+                my str $path = $deps_dir . "/" . $line;
+                if (core::dir_exists($path) == 1) {
+                    push(@candidates, $path);
                 }
-
-                # Check if this matches the package name
-                if ($line eq $name || substr($line, 0, length($name) + 1) eq $name . "-") {
-                    my str $path = $deps_dir . "/" . $line;
-                    if (core::file_exists($path . "/Strada.toml") == 1) {
-                        push(@candidates, $path);
-                    }
-                }
-
-                $line = core::fgets($fh, 256);
             }
-            core::pclose($fh);
         }
     }
 
@@ -137,14 +144,20 @@ func find_package(str $name, str $constraint, str $deps_dir) str {
     my str $best_version = "";
 
     foreach my str $path (@candidates) {
-        my scalar $manifest = Pacco::Manifest::parse($path . "/Strada.toml");
-        if (defined($manifest)) {
-            my str $ver = Pacco::Manifest::get_version($manifest);
-            if (Pacco::SemVer::satisfies($ver, $constraint, 0) == 0) {
-                if ($best_version eq "" || Pacco::SemVer::compare($ver, $best_version) > 0) {
-                    $best_version = $ver;
-                    $best_path = $path;
+        if (core::file_exists($path . "/Strada.toml") == 1) {
+            my scalar $manifest = Pacco::Manifest::parse($path . "/Strada.toml");
+            if (defined($manifest)) {
+                my str $ver = Pacco::Manifest::get_version($manifest);
+                if (Pacco::SemVer::satisfies($ver, $constraint) == 1) {
+                    if ($best_version eq "" || Pacco::SemVer::compare($ver, $best_version) > 0) {
+                        $best_version = $ver;
+                        $best_path = $path;
+                    }
                 }
+            }
+        } elsif ($constraint eq "*" || $constraint eq "") {
+            if ($best_path eq "") {
+                $best_path = $path;
             }
         }
     }

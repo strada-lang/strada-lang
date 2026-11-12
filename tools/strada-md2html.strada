@@ -27,32 +27,12 @@ func html_escape(str $s) str {
     return $result;
 }
 
-# Process inline formatting (bold, italic, code, links)
-func process_inline(str $line) str {
-    my str $result = $line;
+# Apply emphasis (**bold**, __bold__, *italic*, _italic_) to plain text
+func process_inline_emph(str $s) str {
+    my str $result = $s;
 
-    # Inline code - handle separately using index/substr since backticks are tricky in regex
+    # Bold: **text**
     my int $done = 0;
-    while ($done == 0) {
-        my int $start = index($result, "`");
-        if ($start < 0) {
-            $done = 1;
-        } else {
-            my int $end = index($result, "`", $start + 1);
-            if ($end < 0) {
-                $done = 1;
-            } else {
-                my str $before = substr($result, 0, $start);
-                my str $code = substr($result, $start + 1, $end - $start - 1);
-                my str $after = substr($result, $end + 1, length($result) - $end - 1);
-                my str $escaped = html_escape($code);
-                $result = $before . "<code>" . $escaped . "</code>" . $after;
-            }
-        }
-    }
-
-    # Bold: **text** - use string operations
-    $done = 0;
     while ($done == 0) {
         my int $start = index($result, "**");
         if ($start < 0) {
@@ -89,7 +69,7 @@ func process_inline(str $line) str {
         }
     }
 
-    # Italic: *text* - use string operations (single asterisk)
+    # Italic: *text*
     $done = 0;
     while ($done == 0) {
         my int $start = index($result, "*");
@@ -127,10 +107,46 @@ func process_inline(str $line) str {
         }
     }
 
-    # Images: ![alt](url) - process before links
-    $done = 0;
+    return $result;
+}
+
+# Process inline formatting (bold, italic, code, links)
+# Protects inline `code` and link/image URLs from */_ emphasis corruption.
+func process_inline(str $line) str {
+    my str $result = $line;
+    my array @tokens = ();
+    my str $soh = chr(1);
+    my str $stx = chr(2);
+
+    # 1. Extract inline `code` spans into protected tokens
+    my int $done = 0;
+    my int $search_from = 0;
     while ($done == 0) {
-        my int $bang = index($result, "![");
+        my int $start = index($result, "`", $search_from);
+        if ($start < 0) {
+            $done = 1;
+        } else {
+            my int $end = index($result, "`", $start + 1);
+            if ($end < 0) {
+                $done = 1;
+            } else {
+                my str $before = substr($result, 0, $start);
+                my str $code = substr($result, $start + 1, $end - $start - 1);
+                my str $after = substr($result, $end + 1, length($result) - $end - 1);
+                my int $tidx = size(@tokens);
+                my str $ph = $soh . "T" . $tidx . $stx;
+                push(@tokens, "<code>" . html_escape($code) . "</code>");
+                $result = $before . $ph . $after;
+                $search_from = length($before) + length($ph);
+            }
+        }
+    }
+
+    # 2. Extract images ![alt](url) into protected tokens before links & emphasis
+    $done = 0;
+    $search_from = 0;
+    while ($done == 0) {
+        my int $bang = index($result, "![", $search_from);
         if ($bang < 0) {
             $done = 1;
         } else {
@@ -140,7 +156,7 @@ func process_inline(str $line) str {
             } else {
                 my int $open_paren = index($result, "(", $close_bracket);
                 if ($open_paren != $close_bracket + 1) {
-                    $done = 1;
+                    $search_from = $close_bracket + 1;
                 } else {
                     my int $close_paren = index($result, ")", $open_paren);
                     if ($close_paren < 0) {
@@ -150,17 +166,22 @@ func process_inline(str $line) str {
                         my str $alt = substr($result, $bang + 2, $close_bracket - $bang - 2);
                         my str $url = substr($result, $open_paren + 1, $close_paren - $open_paren - 1);
                         my str $after = substr($result, $close_paren + 1, length($result) - $close_paren - 1);
-                        $result = $before . "<img src=\"" . $url . "\" alt=\"" . $alt . "\">" . $after;
+                        my int $tidx = size(@tokens);
+                        my str $ph = $soh . "T" . $tidx . $stx;
+                        push(@tokens, "<img src=\"" . $url . "\" alt=\"" . $alt . "\">");
+                        $result = $before . $ph . $after;
+                        $search_from = length($before) + length($ph);
                     }
                 }
             }
         }
     }
 
-    # Links: [text](url)
+    # 3. Extract links [text](url) into protected tokens (format emphasis in text, protect url)
     $done = 0;
+    $search_from = 0;
     while ($done == 0) {
-        my int $open_bracket = index($result, "[");
+        my int $open_bracket = index($result, "[", $search_from);
         if ($open_bracket < 0) {
             $done = 1;
         } else {
@@ -170,7 +191,7 @@ func process_inline(str $line) str {
             } else {
                 my int $open_paren = index($result, "(", $close_bracket);
                 if ($open_paren != $close_bracket + 1) {
-                    $done = 1;
+                    $search_from = $close_bracket + 1;
                 } else {
                     my int $close_paren = index($result, ")", $open_paren);
                     if ($close_paren < 0) {
@@ -180,11 +201,32 @@ func process_inline(str $line) str {
                         my str $text = substr($result, $open_bracket + 1, $close_bracket - $open_bracket - 1);
                         my str $url = substr($result, $open_paren + 1, $close_paren - $open_paren - 1);
                         my str $after = substr($result, $close_paren + 1, length($result) - $close_paren - 1);
-                        $result = $before . "<a href=\"" . $url . "\">" . $text . "</a>" . $after;
+                        my int $tidx = size(@tokens);
+                        my str $ph = $soh . "T" . $tidx . $stx;
+                        push(@tokens, "<a href=\"" . $url . "\">" . process_inline_emph($text) . "</a>");
+                        $result = $before . $ph . $after;
+                        $search_from = length($before) + length($ph);
                     }
                 }
             }
         }
+    }
+
+    # 4. Format emphasis on remaining non-protected text
+    $result = process_inline_emph($result);
+
+    # 5. Restore protected tokens in reverse order (so nested tokens inside links expand)
+    my int $ti = size(@tokens) - 1;
+    while ($ti >= 0) {
+        my str $ph = $soh . "T" . $ti . $stx;
+        my int $ppos = index($result, $ph);
+        while ($ppos >= 0) {
+            my str $b = substr($result, 0, $ppos);
+            my str $a = substr($result, $ppos + length($ph), length($result) - $ppos - length($ph));
+            $result = $b . $tokens[$ti] . $a;
+            $ppos = index($result, $ph);
+        }
+        $ti = $ti - 1;
     }
 
     return $result;
@@ -524,6 +566,16 @@ func md2html(str $markdown) str {
     return $html;
 }
 
+# Strip HTML tags (and unescape entities produced by <code>) for plain-text <title>
+func strip_html_tags(str $s) str {
+    my str $res = $s;
+    $res =~ s/<\/?[a-zA-Z][^>]*>//g;
+    $res =~ s/&lt;/</g;
+    $res =~ s/&gt;/>/g;
+    $res =~ s/&amp;/&/g;
+    return $res;
+}
+
 # Generate full HTML document
 func generate_html_doc(str $title, str $body) str {
     my str $doc = "<!DOCTYPE html>\n";
@@ -531,7 +583,7 @@ func generate_html_doc(str $title, str $body) str {
     $doc = $doc . "<head>\n";
     $doc = $doc . "  <meta charset=\"UTF-8\">\n";
     $doc = $doc . "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n";
-    $doc = $doc . "  <title>" . html_escape($title) . "</title>\n";
+    $doc = $doc . "  <title>" . html_escape(strip_html_tags($title)) . "</title>\n";
     $doc = $doc . "  <style>\n";
     $doc = $doc . "    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 20px; color: #333; }\n";
     $doc = $doc . "    h1, h2, h3, h4, h5, h6 { margin-top: 1.5em; margin-bottom: 0.5em; }\n";
@@ -558,7 +610,7 @@ func extract_title(str $html, str $filename) str {
     if ($h1_start >= 0) {
         my int $h1_end = index($html, "</h1>", $h1_start);
         if ($h1_end > $h1_start) {
-            return substr($html, $h1_start + 4, $h1_end - $h1_start - 4);
+            return strip_html_tags(substr($html, $h1_start + 4, $h1_end - $h1_start - 4));
         }
     }
     # Use filename without extension
@@ -611,7 +663,7 @@ func main() int {
     my int $fragment_only = 0;
     my str $input_file = "";
     my str $output_file = "";
-    my int $i = 1;
+    my int $i = 0;
 
     while ($i < $argc) {
         my str $arg = $ARGV[$i];
@@ -640,6 +692,10 @@ func main() int {
 
     # Read input file
     my str $markdown = slurp($input_file);
+    if (!defined($markdown)) {
+        say("Error: Cannot read file: " . $input_file);
+        return 1;
+    }
 
     # Convert to HTML
     my str $body = md2html($markdown);

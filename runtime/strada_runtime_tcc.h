@@ -67,8 +67,14 @@ static inline int64_t strada_floored_mod(int64_t a, int64_t b) {
 /* ASCII string flag: bit 63 of struct_size. When set, the string is pure ASCII
  * and byte offset == char offset, making substr() O(1). */
 #define STRADA_ASCII_FLAG ((size_t)1 << 63)
-#define STRADA_STR_BYTELEN(sv) ((sv)->struct_size & ~STRADA_ASCII_FLAG)
+#define STRADA_UTF8_FLAG ((size_t)1 << 62)
+#define STRADA_STR_FLAGS_MASK (STRADA_ASCII_FLAG | STRADA_UTF8_FLAG)
+#define STRADA_STR_BYTELEN(sv) ((sv)->struct_size & ~STRADA_STR_FLAGS_MASK)
 #define STRADA_STR_IS_ASCII(sv) (((sv)->struct_size & STRADA_ASCII_FLAG) != 0)
+#define STRADA_STR_IS_UTF8(sv) (((sv)->struct_size & STRADA_UTF8_FLAG) != 0)
+#define STRADA_STR_IS_CHARS(sv) (((sv)->struct_size & STRADA_STR_FLAGS_MASK) != 0)
+#define STRADA_UV_FLAG ((size_t)1 << 61)
+#define STRADA_INT_IS_UV(sv) (!STRADA_IS_TAGGED_INT(sv) && (sv) && (sv)->type == STRADA_INT && (((sv)->struct_size & STRADA_UV_FLAG) != 0))
 
 #if STRADA_POINTER_SIZE == 4
 #define STRADA_TAGGED_INT_BITS 30
@@ -125,6 +131,7 @@ typedef struct StradaMetadata {
     uint8_t blessed_immortal;
     uint8_t has_iv_override;
     uint8_t is_hash_locked;
+    uint8_t is_destroying;
     int32_t regex_pos;
     void *locked_keys;
     StradaValue *glob_scalar_slot;
@@ -269,6 +276,7 @@ extern int (*strada_die_continue_hook)(void);
 StradaValue* strada_new_undef(void);
 StradaValue* strada_undef_static(void);
 StradaValue* strada_new_int(int64_t value);
+#define strada_new_int_il strada_new_int
 StradaValue* strada_new_num(double value);
 StradaValue* strada_safe_div(double a, double b);
 StradaValue* strada_safe_mod(int64_t a, int64_t b);
@@ -420,6 +428,7 @@ char* strada_join(const char *sep, StradaArray *arr);
 char* strada_replace_all(const char *str, const char *find, const char *replace);
 char* strada_replace_first(const char *str, const char *find, const char *replace);
 void strada_subst_sv(StradaValue **target_ptr, const char *find, const char *replace, int global);
+int64_t strada_subst_sv_cnt(StradaValue **target_ptr, const char *find, const char *replace, int global);
 StradaValue* strada_quotemeta(StradaValue *str);
 
 /* StringBuilder */
@@ -460,6 +469,7 @@ int64_t strada_get_array_default_capacity(void);
 void strada_set_array_default_capacity(int64_t capacity);
 StradaValue* strada_new_array_from_av(StradaArray *av);
 StradaValue* strada_array_copy(StradaValue *src);
+StradaValue* strada_sort_copy_input(StradaValue *arr);
 StradaValue* strada_sort(StradaValue *arr);
 StradaValue* strada_nsort(StradaValue *arr);
 StradaValue* strada_range(StradaValue *start, StradaValue *end);
@@ -766,7 +776,7 @@ void strada_stack_set_line(int line);
 #define strada_depth_pop_il  strada_depth_pop
 #define strada_current_depth_il strada_current_depth
 #define strada_stack_line_il strada_stack_set_line
-void strada_print_stack_trace(void);
+void strada_print_stack_trace(FILE *out);
 char* strada_capture_stack_trace(void);
 void strada_set_recursion_limit(int limit);
 int strada_get_recursion_limit(void);
@@ -1194,6 +1204,129 @@ StradaValue* strada_serial_open(const char *device, int baud, const char *config
 StradaValue* strada_tcflush(StradaValue *fd, StradaValue *queue);
 StradaValue* strada_tcdrain(StradaValue *fd);
 
+/* POSIX / Linux fcntl open flags (guarded by #ifndef so __C__ blocks that
+ * later include <fcntl.h> or <termios.h> do not clash) */
+#ifndef O_RDONLY
+#define O_RDONLY   0x0
+#endif
+#ifndef O_WRONLY
+#define O_WRONLY   0x1
+#endif
+#ifndef O_RDWR
+#define O_RDWR     0x2
+#endif
+#ifndef O_CREAT
+#define O_CREAT    0x40
+#endif
+#ifndef O_EXCL
+#define O_EXCL     0x80
+#endif
+#ifndef O_NOCTTY
+#define O_NOCTTY   0x100
+#endif
+#ifndef O_TRUNC
+#define O_TRUNC    0x200
+#endif
+#ifndef O_APPEND
+#define O_APPEND   0x400
+#endif
+#ifndef O_NONBLOCK
+#define O_NONBLOCK 0x800
+#endif
+#ifndef O_SYNC
+#define O_SYNC     0x101000
+#endif
+#ifndef O_CLOEXEC
+#define O_CLOEXEC  0x80000
+#endif
+
+/* Termios baud rates, cflag/iflag/oflag/lflag bits, and tcsetattr/tcflush constants */
+#ifndef B0
+#define B0       0x0
+#define B50      0x1
+#define B75      0x2
+#define B110     0x3
+#define B134     0x4
+#define B150     0x5
+#define B200     0x6
+#define B300     0x7
+#define B600     0x8
+#define B1200    0x9
+#define B1800    0xa
+#define B2400    0xb
+#define B4800    0xc
+#define B9600    0xd
+#define B19200   0xe
+#define B38400   0xf
+#define B57600   0x1001
+#define B115200  0x1002
+#define B230400  0x1003
+#define B460800  0x1004
+#define B500000  0x1005
+#define B576000  0x1006
+#define B921600  0x1007
+#define B1000000 0x1008
+#define B1152000 0x1009
+#define B1500000 0x100a
+#define B2000000 0x100b
+#endif
+#ifndef CSIZE
+#define CSIZE    0x30
+#define CS5      0x0
+#define CS6      0x10
+#define CS7      0x20
+#define CS8      0x30
+#define CSTOPB   0x40
+#define CREAD    0x80
+#define PARENB   0x100
+#define PARODD   0x200
+#define HUPCL    0x400
+#define CLOCAL   0x800
+#endif
+#ifndef CRTSCTS
+#define CRTSCTS  0x80000000u
+#endif
+#ifndef IGNBRK
+#define IGNBRK   0x1
+#define BRKINT   0x2
+#define IGNPAR   0x4
+#define PARMRK   0x8
+#define INPCK    0x10
+#define ISTRIP   0x20
+#define INLCR    0x40
+#define IGNCR    0x80
+#define ICRNL    0x100
+#define IXON     0x400
+#define IXANY    0x800
+#define IXOFF    0x1000
+#endif
+#ifndef OPOST
+#define OPOST    0x1
+#define ONLCR    0x4
+#define OCRNL    0x8
+#endif
+#ifndef ISIG
+#define ISIG     0x1
+#define ICANON   0x2
+#define ECHO     0x8
+#define ECHOE    0x10
+#define ECHOK    0x20
+#define ECHONL   0x40
+#define NOFLSH   0x80
+#define TOSTOP   0x100
+#define IEXTEN   0x8000
+#endif
+#ifndef TCSANOW
+#define TCSANOW   0
+#define TCSADRAIN 1
+#define TCSAFLUSH 2
+#endif
+#ifndef TCIFLUSH
+#define TCIFLUSH  0
+#define TCOFLUSH  1
+#define TCIOFLUSH 2
+#endif
+
 /* Advanced file operations */
 StradaValue* strada_fcntl(StradaValue *fd, StradaValue *cmd, StradaValue *arg);
 StradaValue* strada_flock(StradaValue *fd, StradaValue *operation);
@@ -1325,8 +1458,11 @@ StradaValue* strada_tie_hash(StradaValue *ref, const char *classname, int argc, 
 StradaValue* strada_tie_array(StradaValue *ref, const char *classname, int argc, ...);
 StradaValue* strada_tie_scalar(StradaValue *ref, const char *classname, int argc, ...);
 StradaValue* strada_tie_scalar_slot(StradaValue **slot, const char *classname, int argc, ...);
+StradaValue* strada_tie_global_scalar(const char *global_name, const char *pkg, int argc, ...);
 void strada_untie(StradaValue *ref);
+void strada_untie_global_scalar(const char *global_name);
 StradaValue* strada_tied(StradaValue *ref);
+StradaValue* strada_tied_global_scalar(const char *global_name);
 StradaValue* strada_tied_hash_fetch(StradaValue *sv, const char *key);
 void strada_tied_hash_store(StradaValue *sv, const char *key, StradaValue *val);
 int strada_tied_hash_exists(StradaValue *sv, const char *key);
@@ -1337,7 +1473,7 @@ void strada_tied_hash_clear(StradaValue *sv);
 
 /* hv_fetch/store wrappers for tied variable support */
 static inline StradaValue* strada_hv_fetch(StradaValue *sv, const char *key) {
-    if (STRADA_IS_TAGGED_INT(sv)) return strada_undef_static();
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return strada_undef_static();
     if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) return strada_tied_hash_fetch(sv, key);
     return strada_hash_get(strada_deref_hash(sv), key);
 }
@@ -1351,7 +1487,7 @@ static inline StradaValue* strada_hv_fetch_owned(StradaValue *sv, const char *ke
 }
 /* Pre-hashed fetch: caller provides DJB2 hash of key — skips re-hashing */
 static inline StradaValue* strada_hv_fetch_owned_ph(StradaValue *sv, const char *key, unsigned int hash) {
-    if (STRADA_IS_TAGGED_INT(sv)) return strada_undef_static();
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return strada_undef_static();
     if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) return strada_tied_hash_fetch(sv, key);
     StradaValue *result = strada_hash_get_with_hash(strada_deref_hash(sv), key, hash);
     strada_incref(result);
@@ -1360,7 +1496,7 @@ static inline StradaValue* strada_hv_fetch_owned_ph(StradaValue *sv, const char 
 /* Pre-hashed int fetch: returns int64_t directly, skipping StradaValue temp +
  * incref/decref. Used by inline int accessors. Returns 0 for missing keys. */
 static inline int64_t strada_hv_fetch_int_ph(StradaValue *sv, const char *key, unsigned int hash) {
-    if (STRADA_IS_TAGGED_INT(sv)) return 0;
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return 0;
     if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) {
         StradaValue *r = strada_tied_hash_fetch(sv, key);
         int64_t v = strada_to_int(r);
@@ -1376,18 +1512,18 @@ static inline void strada_hv_store(StradaValue *sv, const char *key, StradaValue
     strada_hash_set(strada_deref_hash(sv), key, val);
 }
 static inline int strada_hv_exists(StradaValue *sv, const char *key) {
-    if (STRADA_IS_TAGGED_INT(sv)) return 0;
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return 0;
     if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) return strada_tied_hash_exists(sv, key);
     return strada_hash_exists(strada_deref_hash(sv), key);
 }
 static inline void strada_hv_delete(StradaValue *sv, const char *key) {
-    if (STRADA_IS_TAGGED_INT(sv)) return;
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return;
     if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) { strada_tied_hash_delete(sv, key); return; }
     strada_hash_delete(strada_deref_hash(sv), key);
 }
 /* _sv inline wrappers: accept StradaValue* key directly */
 static inline void strada_hv_store_sv(StradaValue *sv, StradaValue *key, StradaValue *val) {
-    if (STRADA_IS_TAGGED_INT(sv)) return;
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return;
     if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) { char *ks = strada_to_str(key); strada_tied_hash_store(sv, ks, val); free(ks); return; }
     strada_hash_set_sv(strada_deref_hash(sv), key, val);
 }
@@ -1409,24 +1545,24 @@ static inline StradaValue* strada_num_set_inplace(StradaValue *a, double v) {
 }
 
 static inline StradaValue* strada_hv_fetch_owned_sv(StradaValue *sv, StradaValue *key) {
-    if (STRADA_IS_TAGGED_INT(sv)) return strada_undef_static();
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return strada_undef_static();
     if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) { char *ks = strada_to_str(key); StradaValue *r = strada_tied_hash_fetch(sv, ks); free(ks); return r; }
     StradaValue *result = strada_hash_get_sv(strada_deref_hash(sv), key);
     strada_incref(result);
     return result;
 }
 static inline int strada_hv_exists_sv(StradaValue *sv, StradaValue *key) {
-    if (STRADA_IS_TAGGED_INT(sv)) return 0;
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return 0;
     if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) { char *ks = strada_to_str(key); int r = strada_tied_hash_exists(sv, ks); free(ks); return r; }
     return strada_hash_exists_sv(strada_deref_hash(sv), key);
 }
 static inline void strada_hv_delete_sv(StradaValue *sv, StradaValue *key) {
-    if (STRADA_IS_TAGGED_INT(sv)) return;
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return;
     if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) { char *ks = strada_to_str(key); strada_tied_hash_delete(sv, ks); free(ks); return; }
     strada_hash_delete_sv(strada_deref_hash(sv), key);
 }
 static inline StradaValue* strada_hv_delete_take_sv(StradaValue *sv, StradaValue *key) {
-    if (STRADA_IS_TAGGED_INT(sv) || !sv) return strada_undef_static();
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return strada_undef_static();
     if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) {
         char *ks = strada_to_str(key);
         StradaValue *old = strada_tied_hash_fetch(sv, ks);
@@ -1441,6 +1577,8 @@ static inline StradaValue* strada_hv_delete_take_sv(StradaValue *sv, StradaValue
 StradaValue* strada_hv_fetch_owned_concat(StradaValue *sv, const char *prefix, size_t prefix_len, StradaValue *suffix);
 void strada_hv_store_concat(StradaValue *sv, const char *prefix, size_t prefix_len, StradaValue *suffix, StradaValue *value);
 void strada_hv_delete_concat(StradaValue *sv, const char *prefix, size_t prefix_len, StradaValue *suffix);
+StradaValue* strada_hv_delete_take_concat(StradaValue *sv, const char *prefix, size_t prefix_len, StradaValue *suffix);
+StradaValue* strada_hv_delete_concat_sv(StradaValue *sv, const char *prefix, size_t prefix_len, StradaValue *suffix);
 
 /* Single-lookup hash-element compound assignment ($h{k} op= rhs); see strada_runtime.h */
 void strada_hv_compound_ph(StradaValue *sv, const char *key, unsigned int hash, StradaValue *rhs, int op);
@@ -1486,18 +1624,21 @@ static inline void strada_stack_args1_init(StradaStackArgs1 *sa, StradaValue *el
     sa->av.head = 0;
     sa->sv.type = STRADA_ARRAY;
     sa->sv.value.av = &sa->av;
-    sa->sv.refcount = 2;
+    sa->sv.refcount = 2000000000;
     sa->sv.meta = NULL;
     sa->sv.struct_size = 0;
+    strada_incref(elem);
 }
 
 /* Autovivifying hash fetch: creates intermediate hash if key missing */
 static inline StradaValue* strada_hv_autoviv(StradaValue *sv, const char *key) {
-    if (STRADA_IS_TAGGED_INT(sv) || !sv) return strada_new_hash();
-    StradaValue *result = strada_hash_get(strada_deref_hash(sv), key);
-    if (!result || (result->type == STRADA_UNDEF)) {
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return strada_new_hash();
+    StradaHash *hv = strada_deref_hash(sv);
+    if (!hv) return strada_new_hash();
+    StradaValue *result = strada_hash_get(hv, key);
+    if (!result || STRADA_IS_TAGGED_INT(result) || (result->type == STRADA_UNDEF)) {
         result = strada_new_hash();
-        strada_hash_set(strada_deref_hash(sv), key, result);
+        strada_hash_set_take(hv, key, result);
     }
     return result;
 }
@@ -1538,12 +1679,6 @@ void strada_cstruct_set_int(StradaValue *sv, const char *field, size_t offset, i
    missing here (kept in sync with the main header; TCC has no system
    headers so anything needing system types stays out). */
 /* ===================================================================== */
-#define STRADA_UTF8_FLAG ((size_t)1 << 62)
-#define STRADA_STR_FLAGS_MASK (STRADA_ASCII_FLAG | STRADA_UTF8_FLAG)
-#define STRADA_STR_IS_UTF8(sv) (((sv)->struct_size & STRADA_UTF8_FLAG) != 0)
-#define STRADA_STR_IS_CHARS(sv) (((sv)->struct_size & STRADA_STR_FLAGS_MASK) != 0)
-#define STRADA_UV_FLAG ((size_t)1 << 61)
-#define STRADA_INT_IS_UV(sv) (!STRADA_IS_TAGGED_INT(sv) && (sv) && (sv)->type == STRADA_INT && (((sv)->struct_size & STRADA_UV_FLAG) != 0))
 extern StradaThreadPool *strada_thread_pool;
 void strada_pool_submit(StradaFuture *future);
 static inline char *ss_alloc_pv(const char *s, size_t len) {
@@ -1673,34 +1808,55 @@ int64_t      strada_tied_array_unshift(StradaValue *sv, StradaValue *vals_array)
 int          strada_tied_array_exists(StradaValue *sv, int64_t idx);
 void         strada_tied_array_delete(StradaValue *sv, int64_t idx);
 void         strada_tied_array_clear(StradaValue *sv);
+StradaValue* strada_tied_array_splice(StradaValue *sv, int64_t offset, int64_t length, StradaValue *repl_sv);
+void         strada_av_push_sv(StradaValue *sv, StradaValue *val);
+void         strada_av_push_take_sv(StradaValue *sv, StradaValue *val);
+StradaValue* strada_av_pop_sv(StradaValue *sv);
+StradaValue* strada_av_shift_sv(StradaValue *sv);
+void         strada_av_unshift_sv(StradaValue *sv, StradaValue *val);
+static inline StradaValue* strada_av_unwrap_tied(StradaValue *sv) {
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return NULL;
+    if (sv->meta && sv->meta->is_tied) return sv;
+    if (sv->type == STRADA_REF && !strada_is_slot_ref(sv) && sv->value.rv
+        && !STRADA_IS_TAGGED_INT(sv->value.rv) && sv->value.rv->meta && sv->value.rv->meta->is_tied) {
+        return sv->value.rv;
+    }
+    return NULL;
+}
 static inline StradaValue* strada_av_fetch_sv(StradaValue *sv, int64_t idx) {
-    if (sv && !STRADA_IS_TAGGED_INT(sv) && sv->meta && sv->meta->is_tied) {
-        return strada_tied_array_fetch(sv, idx);
+    StradaValue *tsv = strada_av_unwrap_tied(sv);
+    if (__builtin_expect(tsv != NULL, 0)) {
+        return strada_tied_array_fetch(tsv, idx);
     }
     StradaArray *av = strada_deref_array(sv);
-    StradaValue *el = strada_array_get(av, (int)idx);
+    StradaValue *el = strada_array_get(av, idx);
     if (el) strada_incref(el);
     return el ? el : strada_new_undef();
 }
 static inline void strada_av_store_sv(StradaValue *sv, int64_t idx, StradaValue *val) {
-    if (sv && !STRADA_IS_TAGGED_INT(sv) && sv->meta && sv->meta->is_tied) {
-        strada_tied_array_store(sv, idx, val);
+    StradaValue *tsv = strada_av_unwrap_tied(sv);
+    if (__builtin_expect(tsv != NULL, 0)) {
+        strada_tied_array_store(tsv, idx, val);
         return;
     }
     StradaArray *av = strada_deref_array(sv);
-    if (val) strada_incref(val);
-    strada_array_set(av, (int)idx, val);
+    strada_array_set(av, idx, val);
 }
 static inline int64_t strada_av_fetchsize_sv(StradaValue *sv) {
-    if (sv && !STRADA_IS_TAGGED_INT(sv) && sv->meta && sv->meta->is_tied) {
-        return strada_tied_array_fetchsize(sv);
+    StradaValue *tsv = strada_av_unwrap_tied(sv);
+    if (__builtin_expect(tsv != NULL, 0)) {
+        return strada_tied_array_fetchsize(tsv);
     }
     StradaArray *av = strada_deref_array(sv);
     return av ? (int64_t)strada_array_length(av) : 0;
 }
+static inline int64_t strada_av_size_sv(StradaValue *sv) {
+    return strada_av_fetchsize_sv(sv);
+}
 static inline int strada_av_exists_sv(StradaValue *sv, int64_t idx) {
-    if (sv && !STRADA_IS_TAGGED_INT(sv) && sv->meta && sv->meta->is_tied) {
-        return strada_tied_array_exists(sv, idx);
+    StradaValue *tsv = strada_av_unwrap_tied(sv);
+    if (__builtin_expect(tsv != NULL, 0)) {
+        return strada_tied_array_exists(tsv, idx);
     }
     StradaArray *av = strada_deref_array(sv);
     if (!av) return 0;
@@ -1711,12 +1867,14 @@ static inline int strada_av_exists_sv(StradaValue *sv, int64_t idx) {
     return el != NULL;
 }
 static inline void strada_av_delete_sv(StradaValue *sv, int64_t idx) {
-    if (sv && !STRADA_IS_TAGGED_INT(sv) && sv->meta && sv->meta->is_tied) {
-        strada_tied_array_delete(sv, idx);
+    StradaValue *tsv = strada_av_unwrap_tied(sv);
+    if (__builtin_expect(tsv != NULL, 0)) {
+        strada_tied_array_delete(tsv, idx);
         return;
     }
     StradaArray *av = strada_deref_array(sv);
-    strada_array_delete_idx(av, (int)idx);
+    StradaValue *old = strada_array_delete_idx(av, idx);
+    strada_decref(old);
 }
 struct StradaMetadata *strada_ensure_meta(StradaValue *sv);
 extern StradaValue* (*strada_method_dispatch_hook)(StradaValue *obj, const char *method, StradaValue *args);

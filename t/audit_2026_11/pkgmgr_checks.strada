@@ -1,0 +1,43 @@
+use lib "tools/pacco";
+use SemVer;
+use Manifest;
+use Resolver;
+
+func main(int $argc, array @argv) int {
+    my str $work_dir = $argc > 1 ? $argv[1] : "/tmp";
+    my int $fail = 0;
+
+    if (Pacco::SemVer::satisfies("1.4.2", "^1.2.0") != 1 || Pacco::SemVer::satisfies("2.0.0", "^1.2.0") != 0) {
+        say("FAIL: Pacco::SemVer::satisfies");
+        $fail++;
+    }
+    if (Pacco::SemVer::compare("1.2.3", "1.2.4") >= 0) {
+        say("FAIL: Pacco::SemVer::compare");
+        $fail++;
+    }
+
+    my str $toml = "[package]\nname = \"demo\"\nversion = \"0.2.0\"\n\n[dependencies]\nhelper = \"^1.0.0\"\n";
+    my scalar $m = Pacco::Manifest::parse_string($toml);
+    if (Pacco::Manifest::get_name($m) ne "demo" || Pacco::Manifest::get_version($m) ne "0.2.0") {
+        say("FAIL: Pacco::Manifest::parse_string");
+        $fail++;
+    }
+
+    my str $deps = $work_dir . "/deps";
+    my str $hdir = $deps . "/helper-1.3.0";
+    core::mkdir($deps, 493);
+    core::mkdir($hdir, 493);
+    core::spew($hdir . "/Strada.toml", "[package]\nname = \"helper\"\nversion = \"1.3.0\"\n");
+    my scalar $res = Pacco::Resolver::resolve($m, $deps);
+    my scalar $order = Pacco::Resolver::get_install_order($res);
+    if (!defined($res) || !defined($res->{"helper"}) || $res->{"helper"}->{"version"} ne "1.3.0" || size($order) != 1) {
+        say("FAIL: Pacco::Resolver::resolve");
+        $fail++;
+    }
+
+    if ($fail == 0) {
+        say("ALL_PKGMGR_OK");
+        return 0;
+    }
+    return 1;
+}

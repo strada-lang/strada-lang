@@ -156,13 +156,32 @@ func replace_func_2arg_assign(str $line, str $fname, str $prefix, str $mid, str 
 }
 
 # ============================================================
-# Helper: count open braces in a line
+# Helper: count open braces in a line (ignoring strings and # comments)
 # ============================================================
 func count_opens(str $line) int {
     my int $count = 0;
     my int $j = 0;
-    while ($j < length($line)) {
-        if (char_at($line, $j) == 123) {
+    my int $len = length($line);
+    my int $in_dq = 0;
+    my int $in_sq = 0;
+    while ($j < $len) {
+        my int $ch = char_at($line, $j);
+        if ($in_dq == 1) {
+            if ($ch == 92) { $j = $j + 2; next; }
+            if ($ch == 34) { $in_dq = 0; }
+            $j = $j + 1;
+            next;
+        }
+        if ($in_sq == 1) {
+            if ($ch == 92) { $j = $j + 2; next; }
+            if ($ch == 39) { $in_sq = 0; }
+            $j = $j + 1;
+            next;
+        }
+        if ($ch == 34) { $in_dq = 1; $j = $j + 1; next; }
+        if ($ch == 39) { $in_sq = 1; $j = $j + 1; next; }
+        if ($ch == 35) { last; }
+        if ($ch == 123) {
             $count = $count + 1;
         }
         $j = $j + 1;
@@ -171,13 +190,32 @@ func count_opens(str $line) int {
 }
 
 # ============================================================
-# Helper: count close braces in a line
+# Helper: count close braces in a line (ignoring strings and # comments)
 # ============================================================
 func count_closes(str $line) int {
     my int $count = 0;
     my int $j = 0;
-    while ($j < length($line)) {
-        if (char_at($line, $j) == 125) {
+    my int $len = length($line);
+    my int $in_dq = 0;
+    my int $in_sq = 0;
+    while ($j < $len) {
+        my int $ch = char_at($line, $j);
+        if ($in_dq == 1) {
+            if ($ch == 92) { $j = $j + 2; next; }
+            if ($ch == 34) { $in_dq = 0; }
+            $j = $j + 1;
+            next;
+        }
+        if ($in_sq == 1) {
+            if ($ch == 92) { $j = $j + 2; next; }
+            if ($ch == 39) { $in_sq = 0; }
+            $j = $j + 1;
+            next;
+        }
+        if ($ch == 34) { $in_dq = 1; $j = $j + 1; next; }
+        if ($ch == 39) { $in_sq = 1; $j = $j + 1; next; }
+        if ($ch == 35) { last; }
+        if ($ch == 125) {
             $count = $count + 1;
         }
         $j = $j + 1;
@@ -225,8 +263,8 @@ func convert_line(str $line) str {
         return $result;
     }
 
-    # --- Normalize core:: to core:: for uniform handling ---
-    $result =~ s/\bcore::/core::/g;
+    # --- Normalize sys:: to core:: for uniform handling ---
+    $result =~ s/\bsys::/core::/g;
 
     # --- Package declarations: pass through ---
     if (match($trimmed, "^package\\s+")) {
@@ -380,8 +418,9 @@ func convert_line(str $line) str {
     $result =~ s/\bcore::slurp\(/strada_slurp(/g;
     $result =~ s/\bcore::spew\(/strada_spew(/g;
 
-    # core::backtick(cmd) -> qx(cmd)
-    $result =~ s/\bcore::backtick\(/qx(/g;
+    # core::backtick(cmd) / core::backticks(cmd) / core::qx(cmd) -> qx(cmd)
+    $result =~ s/\bcore::backticks?\(/qx(/g;
+    $result =~ s/\bcore::qx\(/qx(/g;
 
     # core::getenv("KEY") -> $ENV{"KEY"}
     $result = replace_func_1arg($result, "core::getenv", "$ENV{", "}");
@@ -403,10 +442,11 @@ func convert_line(str $line) str {
         }
     }
 
-    # core::file_exists/is_file/is_dir/file_size -> file test operators
+    # core::file_exists/is_file/is_dir/dir_exists/file_size -> file test operators
     $result = replace_func_1arg($result, "core::file_exists", "-e ", "");
     $result = replace_func_1arg($result, "core::is_file", "-f ", "");
     $result = replace_func_1arg($result, "core::is_dir", "-d ", "");
+    $result = replace_func_1arg($result, "core::dir_exists", "-d ", "");
     $result = replace_func_1arg($result, "core::file_size", "-s ", "");
 
     # core::readdir(path) -> strada_readdir(path)
@@ -523,22 +563,31 @@ func convert_func_def(str $line) str {
     my str $prefix = "";
     my int $is_async = 0;
 
-    # Strip private/async
-    if (match($work, "^private\\s+")) {
-        $work = replace($work, "^private\\s+", "");
-    }
-    if (match($work, "^async\\s+")) {
-        $work = replace($work, "^async\\s+", "");
-        $is_async = 1;
+    # Strip private/async (in any order)
+    my int $mod_stripped = 1;
+    while ($mod_stripped == 1) {
+        $mod_stripped = 0;
+        if (match($work, "^private\\s+")) {
+            $work = replace($work, "^private\\s+", "");
+            $mod_stripped = 1;
+        }
+        if (match($work, "^async\\s+")) {
+            $work = replace($work, "^async\\s+", "");
+            $is_async = 1;
+            $mod_stripped = 1;
+        }
     }
 
-    # Extract: func NAME(PARAMS) RETTYPE {
-    $work = replace($work, "^func\\s+", "");
+    # Extract: (func|fn) NAME(PARAMS) RETTYPE {  or  (func|fn) NAME {
+    $work = replace($work, "^(func|fn)\\s+", "");
     my int $paren_open = index($work, "(");
     if ($paren_open < 0) {
-        # Fallback: just do basic conversion
+        # No-parens function: e.g. func greet { or fn greet int {
         my str $fallback = $indent . "sub " . $work;
-        $fallback = replace($fallback, "\\)\\s+\\w+\\s*\\{", ") {");
+        $fallback = replace($fallback, "^(\\s*sub\\s+\\w+)\\s+\\w+\\s*\\{", "$1 {");
+        if ($is_async) {
+            $fallback = $fallback . " # was async";
+        }
         return $fallback;
     }
     my str $name = substr($work, 0, $paren_open);
@@ -766,19 +815,19 @@ func convert_file(str $input_path, str $output_path) int {
     my int $needs_carp = 0;
     my int $needs_moose = 0;
 
-    if (match($content, "core::getcwd") || match($content, "core::realpath") || match($content, "core::getcwd") || match($content, "core::realpath")) {
+    if (match($content, "core::getcwd") || match($content, "core::realpath") || match($content, "sys::getcwd") || match($content, "sys::realpath")) {
         $needs_cwd = 1;
     }
-    if (match($content, "core::basename") || match($content, "core::dirname") || match($content, "core::basename") || match($content, "core::dirname")) {
+    if (match($content, "core::basename") || match($content, "core::dirname") || match($content, "sys::basename") || match($content, "sys::dirname")) {
         $needs_fbase = 1;
     }
-    if (match($content, "core::_exit") || match($content, "math::floor") || match($content, "math::ceil") || match($content, "math::pow") || match($content, "core::_exit")) {
+    if (match($content, "core::_exit") || match($content, "math::floor") || match($content, "math::ceil") || match($content, "math::pow") || match($content, "sys::_exit")) {
         $needs_posix = 1;
     }
-    if (match($content, "core::usleep") || match($content, "core::usleep")) {
+    if (match($content, "core::usleep") || match($content, "sys::usleep")) {
         $needs_thr = 1;
     }
-    if (match($content, "core::stack_trace") || match($content, "core::stack_trace")) {
+    if (match($content, "core::stack_trace") || match($content, "sys::stack_trace")) {
         $needs_carp = 1;
     }
     if (match($content, "\\bhas\\s+(ro|rw)\\s+") || match($content, "\\bextends\\s+\\w") || match($content, "\\bwith\\s+\\w") || match($content, "\\bbefore\\s+\"") || match($content, "\\bafter\\s+\"") || match($content, "\\baround\\s+\"")) {
@@ -801,6 +850,8 @@ func convert_file(str $input_path, str $output_path) int {
     my int $mod_depth = 0;
     my int $moose_declared = 0;
     my str $current_package = "main";
+    my int $brace_depth = 0;
+    my array @catch_chain_stack = ();
 
     my int $i = 0;
     while ($i < size(@lines)) {
@@ -810,6 +861,20 @@ func convert_file(str $input_path, str $output_path) int {
         $trimmed =~ s/\s+$//;
         my int $opens = count_opens($ln);
         my int $closes = count_closes($ln);
+        my int $prev_brace_depth = $brace_depth;
+        $brace_depth = $brace_depth + $opens - $closes;
+        if (!match($trimmed, "^\\}\\s*catch\\s*\\(")) {
+            while (size(@catch_chain_stack) > 0) {
+                my str $top_cc = $catch_chain_stack[size(@catch_chain_stack) - 1];
+                my int $colon_p = index($top_cc, ":");
+                my int $cc_depth = substr($top_cc, $colon_p + 1) + 0;
+                if ($brace_depth <= $cc_depth) {
+                    pop(@catch_chain_stack);
+                } else {
+                    last;
+                }
+            }
+        }
 
         # Track main depth for ALL lines (even those consumed by other handlers)
         if ($in_main) {
@@ -957,8 +1022,8 @@ func convert_file(str $input_path, str $output_path) int {
             next;
         }
 
-        # --- func main() ---
-        if (match($trimmed, "^func\\s+main\\s*\\(")) {
+        # --- func/fn main() ---
+        if (match($trimmed, "^(func|fn)\\s+main\\s*[\\(\\{]")) {
             $in_main = 1;
             $main_depth = 1;
             $body = $body . "# Main\n";
@@ -1030,8 +1095,8 @@ func convert_file(str $input_path, str $output_path) int {
             next;
         }
 
-        # --- Moose: before/after/around "method" func(...) { ---
-        if (match($trimmed, "^(before|after|around)\\s+\"(\\w+)\"\\s+func")) {
+        # --- Moose: before/after/around "method" func/fn(...) { ---
+        if (match($trimmed, "^(before|after|around)\\s+\"(\\w+)\"\\s+(func|fn)\\b")) {
             my array @c = captures();
             my str $mod_type = $c[1];
             my str $method_name = $c[2];
@@ -1066,6 +1131,7 @@ func convert_file(str $input_path, str $output_path) int {
 
         # --- try { -> eval { ---
         if (match($trimmed, "^try\\s*\\{")) {
+            push(@catch_chain_stack, "try:" . $prev_brace_depth);
             my str $conv = $ln;
             $conv = replace($conv, "\\btry\\s*\\{", "eval {");
             $body = $body . $conv . "\n";
@@ -1073,15 +1139,31 @@ func convert_file(str $input_path, str $output_path) int {
             next;
         }
 
-        # --- } catch (Type $e) { -> }; if (ref($@) && ...) ---
+        # --- } catch (Type $e) { -> }; if (...) or } elsif (...) ---
         if (match($trimmed, "^\\}\\s*catch\\s*\\(")) {
-            if (match($trimmed, "^\\}\\s*catch\\s*\\((\\w+)\\s+[$](\\w+)\\)\\s*\\{")) {
+            my str $indent = "";
+            if (match($ln, "^(\\s+)")) {
+                my array @ic = captures();
+                $indent = $ic[1];
+            }
+            my int $target_depth = $prev_brace_depth - 1;
+            my int $is_subsequent_catch = 0;
+            if (size(@catch_chain_stack) > 0) {
+                my str $top_cc = $catch_chain_stack[size(@catch_chain_stack) - 1];
+                if ($top_cc eq ("try:" . $target_depth)) {
+                    $catch_chain_stack[size(@catch_chain_stack) - 1] = "catch:" . $target_depth;
+                } elsif ($top_cc eq ("catch:" . $target_depth)) {
+                    $is_subsequent_catch = 1;
+                }
+            }
+            my str $lead = $is_subsequent_catch ? ($indent . "} elsif ") : ($indent . "}; if ");
+            if (match($trimmed, "^\\}\\s*catch\\s*\\(([\\w:]+)\\s+[$](\\w+)\\)\\s*\\{")) {
                 # Typed catch: } catch (TypeName $e) {
                 my array @c = captures();
                 my str $type = $c[1];
                 my str $var = $c[2];
-                $body = $body . "}; if (ref($@) && $@->isa('" . $type . "')) {\n";
-                $body = $body . "    my $" . $var . " = $@;\n";
+                $body = $body . $lead . "(ref($@) && $@->isa('" . $type . "')) {\n";
+                $body = $body . $indent . "    my $" . $var . " = $@;\n";
             } else {
                 # Generic catch: } catch ($e) {
                 my str $var = "e";
@@ -1089,25 +1171,29 @@ func convert_file(str $input_path, str $output_path) int {
                     my array @c = captures();
                     $var = $c[1];
                 }
-                $body = $body . "}; if ($@) {\n";
-                $body = $body . "    my $" . $var . " = $@;\n";
+                $body = $body . $lead . "($@) {\n";
+                $body = $body . $indent . "    my $" . $var . " = $@;\n";
             }
             $i = $i + 1;
             next;
         }
 
-        # --- Named function definitions: [private|async] func NAME(...) TYPE { ---
-        if (match($trimmed, "^(private\\s+|async\\s+)?func\\s+\\w+\\s*\\(")) {
+        # --- Named function definitions: [private|async] (func|fn) NAME(...) TYPE { ---
+        if (match($trimmed, "^(private\\s+|async\\s+)*(func|fn)\\s+\\w+\\s*[\\(\\{]")) {
             $body = $body . convert_func_def($ln) . "\n";
             $i = $i + 1;
             next;
         }
 
-        # --- Anonymous function: func (...) TYPE { -> sub { my (...) = @_; ---
-        if (match($trimmed, "\\bfunc\\s+\\(")) {
+        # --- Anonymous function: (func|fn) (...) TYPE { -> sub { my (...) = @_; ---
+        if (match($trimmed, "\\b(func|fn)\\s*\\(")) {
             my str $conv = $ln;
-            # Extract params
-            my int $fp = index($conv, "func ");
+            # Find func/fn keyword followed by '('
+            my int $fp = -1;
+            if (match($conv, "^(.*?)\\b(func|fn)\\s*\\(")) {
+                my array @fc = captures();
+                $fp = length($fc[1]);
+            }
             if ($fp >= 0) {
                 my int $po = index($conv, "(", $fp);
                 if ($po >= 0) {
@@ -1115,11 +1201,11 @@ func convert_file(str $input_path, str $output_path) int {
                     if ($pc >= 0) {
                         my str $raw = substr($conv, $po + 1, $pc - $po - 1);
                         my str $params = extract_params($raw);
-                        # Replace func (raw_params) rettype { with sub { my (params) = @_;
+                        # Replace func/fn (raw_params) rettype { with sub { my (params) = @_;
                         my str $before = substr($conv, 0, $fp);
                         my str $after = substr($conv, $pc + 1);
-                        # Strip return type and opening brace (we add our own in sub {)
-                        $after = replace($after, "^\\s*\\w+\\s*\\{", "");
+                        # Strip optional return type and opening brace (we add our own in sub {)
+                        $after = replace($after, "^\\s*(\\w+\\s*)?\\{", "");
                         if (length($params) > 0) {
                             $conv = $before . "sub { my (" . $params . ") = @_;" . $after;
                         } else {

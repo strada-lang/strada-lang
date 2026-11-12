@@ -1,0 +1,344 @@
+#!/usr/bin/env strada
+# Valgrind leak & UAF regression suite for the 2026-11 compiler/runtime audit.
+# Exercises container self-assignment, identity map, global_set/get, hash_get,
+# switch case $var + early return, lvalue & 4-arg substr, spread after shift,
+# variadic subscript arg, param reassignment, closure/destructure throw unwind,
+# mixed borrowed/owned ternary, return of do{}/$$r/$1, await, readline/fread,
+# clone, str::replace_first, stacktrace_str, delete with concat key,
+# typeof/is_ref/reftype/refcount on hash lookups, NUL-safe x repeat,
+# deref_set shrink, captures + shift, arena + tie, and async timeout + cancel.
+
+package LeakTieScalar;
+func TIESCALAR(str $class, str $init) scalar {
+    my hash %s = ("v" => $init);
+    return bless(\%s, $class);
+}
+func FETCH(scalar $self) scalar { return $self->{"v"}; }
+func STORE(scalar $self, scalar $v) void { $self->{"v"} = $v; }
+
+package main;
+
+func sw_early(str $in, str $k1, str $k2) str {
+    switch ($in) {
+        case $k1 {
+            my str $tmp = "hit_" . $in;
+            return $tmp;
+        }
+        case $k2 {
+            my str $tmp2 = "hit2_" . $in;
+            return $tmp2;
+        }
+        default {
+            return "miss";
+        }
+    }
+    return "unreach";
+}
+
+func var_fn(scalar ...@args) str {
+    return join(":", @args);
+}
+
+func reassign_int_param(int $n, str $s) str {
+    $n = $n + 100;
+    $s = $s . "_reassigned";
+    return $s . ":" . $n;
+}
+
+func ret_do(int $i) str {
+    return do {
+        my str $p = "do_val_" . $i;
+        $p;
+    };
+}
+
+func ret_deref(scalar $r) str {
+    return $$r;
+}
+
+func ret_cap1(str $s) str {
+    if ($s =~ /item_(\w+)/) {
+        return $1;
+    }
+    return "";
+}
+
+async func compute_val(int $n) str {
+    return "computed_" . ($n * 2);
+}
+
+async func slow_timeout_task(scalar $ch) str {
+    core::usleep(40000);
+    async::send($ch, "done");
+    return "late_" . "result";
+}
+
+func main() int {
+    my int $iters = 50;
+    my int $i = 0;
+
+    # Outer $x in main to ensure closure `my $x` doesn't collide on cleanup_stack
+    my str $x = "main_outer_x";
+
+    # 1. @a = @a, %h = %h, map { $_ } @a
+    $i = 0;
+    while ($i < $iters) {
+        my array @a = ("alpha_" . $i, "beta_" . $i, "gamma_" . $i);
+        @a = @a;
+        my array @mapped = map { $_ } @a;
+        if (size(@mapped) != 3 || $mapped[1] ne ("beta_" . $i)) {
+            say("FAIL: self-assign / identity map");
+            return 1;
+        }
+
+        my hash %h = ("k1" => "val1_" . $i, "k2" => "val2_" . $i);
+        %h = %h;
+        my scalar $hg = core::hash_get(%h, "k1");
+        if ($hg ne ("val1_" . $i)) {
+            say("FAIL: %h = %h / core::hash_get");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+
+    # 2. core::global_set($k, $v) + core::global_get($k)
+    $i = 0;
+    while ($i < $iters) {
+        my str $gk = "dyn::glob_" . ($i % 5);
+        my str $gv = "gval_" . $i;
+        core::global_set($gk, $gv);
+        my scalar $got_g = core::global_get($gk);
+        if ($got_g ne $gv) {
+            say("FAIL: global_set / global_get");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+
+    # 3. switch case $var + early return, lvalue & 4-arg substr
+    $i = 0;
+    while ($i < $iters) {
+        my str $k1 = "k_one_" . $i;
+        my str $k2 = "k_two_" . $i;
+        my str $sr = sw_early($k2, $k1, $k2);
+        if ($sr ne ("hit2_" . $k2)) {
+            say("FAIL: switch early return");
+            return 1;
+        }
+
+        my str $sub1 = "abcdef_" . $i;
+        substr($sub1, 0, 3) = "XYZ";
+        my str $sub2 = "abcdef_" . $i;
+        my str $removed = substr($sub2, 0, 3, "QRS");
+        if ($removed ne "abc" || substr($sub1, 0, 3) ne "XYZ" || substr($sub2, 0, 3) ne "QRS") {
+            say("FAIL: lvalue / 4-arg substr");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+
+    # 4. ...@arr after shift, variadic $arr[0] arg, closure/int param reassignment
+    $i = 0;
+    while ($i < $iters) {
+        my array @sh = ("drop_" . $i, "keep1_" . $i, "keep2_" . $i);
+        shift(@sh);
+        my str $vf1 = var_fn(...@sh);
+        my str $vf2 = var_fn($sh[0], "tail_" . $i);
+
+        my scalar $cl_sp = fn (str $a, str $b, str $c) str {
+            $a = $a . "!";
+            return $a . "|" . $b . "|" . $c;
+        };
+        my str $cf = $cl_sp->("head_" . $i, ...@sh);
+        my str $rp = reassign_int_param($i, "orig_" . $i);
+        if (length($vf1) == 0 || length($vf2) == 0 || length($cf) == 0 || length($rp) == 0) {
+            say("FAIL: spread / variadic / param reassign");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+
+    # 5. Closure `my $x` + throw unwind, and `my ($a, $b, $c) = @arr` + throw unwind
+    $i = 0;
+    while ($i < $iters) {
+        try {
+            my scalar $c_unwind = fn () void {
+                my str $x = "closure_local_" . $i;
+                throw "cl_err_" . $x;
+            };
+            $c_unwind->();
+        } catch ($e) {}
+
+        try {
+            my array @dsrc = ("da_" . $i, "db_" . $i, "dc_" . $i, "extra_" . $i);
+            my ($da, $db, $dc) = @dsrc;
+            throw "destr_err_" . $da;
+        } catch ($e) {}
+        $i = $i + 1;
+    }
+    if ($x ne "main_outer_x") {
+        say("FAIL: outer $x corrupted");
+        return 1;
+    }
+
+    # 6. Ternary borrowed vs owned, and return of do {} / $$r / $1
+    $i = 0;
+    while ($i < $iters) {
+        my str $b = "borrowed_" . $i;
+        my int $c1 = 1;
+        my int $c0 = 0;
+        my str $t1 = $c1 ? $b : ("ow" . "ned_" . $i);
+        my str $t2 = $c0 ? $b : ("ow" . "ned_" . $i);
+        if ($t1 ne $b || $t2 ne ("owned_" . $i)) {
+            say("FAIL: ternary borrowed/owned");
+            return 1;
+        }
+
+        my str $rd = ret_do($i);
+        my str $heap_s = "ref_target_" . $i;
+        my scalar $slot_r = \$heap_s;
+        my str $rr1 = ret_deref($slot_r);
+        my scalar $box_r = clone($slot_r);
+        my str $rr2 = ret_deref($box_r);
+        my str $rc1 = ret_cap1("prefix_item_tok" . $i);
+        if ($rd ne ("do_val_" . $i) || $rr1 ne $heap_s || $rr2 ne $heap_s || $rc1 ne ("tok" . $i)) {
+            say("FAIL: return do/deref/$1");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+
+    # 7. await compute(), <$fh>, core::fread, clone, str::replace_first, stacktrace_str()
+    my str $tmpfile = "/tmp/opencode/leak_audit_io_" . core::getpid() . ".txt";
+    core::spew($tmpfile, "line_one\nline_two\n0123456789abcdef");
+    $i = 0;
+    while ($i < 20) {
+        my str $aw = await compute_val($i);
+        if ($aw ne ("computed_" . ($i * 2))) {
+            say("FAIL: await compute_val");
+            return 1;
+        }
+
+        my scalar $fh = core::open($tmpfile, "r");
+        my str $l1 = <$fh>;
+        my str $l2 = <$fh>;
+        my str $fr = core::fread($fh, 16);
+        core::close($fh);
+        if ($fr ne "0123456789abcdef" || length($l1) == 0 || length($l2) == 0) {
+            say("FAIL: readline / fread");
+            return 1;
+        }
+
+        my scalar $orig_obj = { "arr" => [1, "two_" . $i], "str" => "café_" . $i };
+        my scalar $cloned_obj = clone($orig_obj);
+        my str $rpf = str::replace_first("aa_bb_aa_" . $i, "aa", "ZZ");
+        my str $st = stacktrace_str();
+        if ($cloned_obj->{"str"} ne ("café_" . $i) || substr($rpf, 0, 2) ne "ZZ" || length($st) == 0) {
+            say("FAIL: clone / replace_first / stacktrace_str");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    core::unlink($tmpfile);
+
+    # 8. delete($h{"p_" . $k}), typeof/is_ref/reftype/refcount($h{"k"}),
+    #    ("aa...\0bb") x 5, core::deref_set shrink, captures() + shift
+    $i = 0;
+    while ($i < $iters) {
+        my hash %ih = (
+            "p_del" => "gone_" . $i,
+            "p_disc" => "discard_" . $i,
+            "ref_k" => { "inner" => $i },
+            "str_k" => "plain_" . $i
+        );
+        my str $dk = "del";
+        my str $dv = delete($ih{"p_" . $dk});
+        my str $ dk2 = "disc";
+        delete($ih{"p_" . $dk2});
+
+        my str $tp = typeof($ih{"str_k"});
+        my int $ir = is_ref($ih{"ref_k"});
+        my str $rt = reftype($ih{"ref_k"});
+        my int $rc = refcount($ih{"ref_k"});
+        if ($dv ne ("gone_" . $i) || length($tp) == 0 || $ir != 1 || $rt ne "HASH" || $rc < 1) {
+            say("FAIL: delete / introspection on hash element");
+            return 1;
+        }
+
+        my str $nul_chunk = "aaaaaaaaaaaaaaaaaaaa" . core::byte(0) . "bbbbbbbbbbbbbbbbbbbb";
+        my str $nul_x5 = $nul_chunk x 5;
+        if (core::byte_length($nul_x5) != 41 * 5) {
+            say("FAIL: NUL x 5 byte_length");
+            return 1;
+        }
+
+        my str $long_s = "0123456789_long_heap_string_" . $i;
+        my scalar $rs = \$long_s;
+        core::deref_set($rs, "xy");
+        if ($long_s ne "xy") {
+            say("FAIL: deref_set shrink");
+            return 1;
+        }
+
+        my str $subj = "foo" . $i . "-bar" . $i;
+        if ($subj =~ /(foo\d+)-(bar\d+)/) {
+            my array @caps = captures();
+            my str $first_c = shift(@caps);
+            if ($1 ne ("foo" . $i) || $first_c ne $subj) {
+                say("FAIL: captures + shift");
+                return 1;
+            }
+        }
+        $i = $i + 1;
+    }
+
+    # 9. arena_begin + tie + arena_end
+    $i = 0;
+    while ($i < 25) {
+        core::arena_begin();
+        my scalar $tx;
+        tie($tx, "LeakTieScalar", "init_" . $i);
+        $tx = "updated_" . $i;
+        my str $tv = "" . $tx;
+        untie($tx);
+        core::arena_end();
+        if ($tv ne ("updated_" . $i)) {
+            say("FAIL: arena + tie");
+            return 1;
+        }
+        $i = $i + 1;
+    }
+
+    # 10. async::timeout + async::cancel
+    $i = 0;
+    while ($i < 4) {
+        my scalar $ch = async::channel(1);
+        my scalar $tf = slow_timeout_task($ch);
+        my int $to_ok = 0;
+        try {
+            my scalar $unused = async::timeout($tf, 5);
+        } catch ($e) {
+            $to_ok = 1;
+        }
+        my str $done_s = async::recv($ch);
+        async::close($ch);
+        if ($to_ok != 1 || $done_s ne "done") {
+            say("FAIL: async::timeout");
+            return 1;
+        }
+
+        my scalar $cf = async::spawn(fn () scalar {
+            async::sleep(2000);
+            return "cancelled_done";
+        });
+        async::cancel($cf);
+        try {
+            my scalar $u2 = await $cf;
+        } catch ($ce) {}
+        $i = $i + 1;
+    }
+    core::usleep(20000);
+
+    say("All 2026-11 audit leak tests passed!");
+    return 0;
+}

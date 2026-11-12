@@ -90,6 +90,308 @@ func _deduce_lib_root_from_source(str $source, str $filename) str {
     return substr($filename, 0, $suffix_start - 1);
 }
 
+# Scan parsed AST (including inlined `use` modules, BEGIN/END blocks, closures,
+# and synthesized constructors) to determine whether full stack-trace / line
+# tracking (mode 1) is needed vs lightweight recursion-depth guard (mode 2).
+func ast_call_needs_stack_trace(str $cname) int {
+    if ($cname eq "caller" || $cname eq "core::caller" || $cname eq "sys::caller") { return 1; }
+    if ($cname eq "stack_trace" || $cname eq "core::stack_trace" || $cname eq "sys::stack_trace") { return 1; }
+    if ($cname eq "stacktrace" || $cname eq "core::stacktrace" || $cname eq "sys::stacktrace") { return 1; }
+    if ($cname eq "stacktrace_str" || $cname eq "core::stacktrace_str" || $cname eq "sys::stacktrace_str") { return 1; }
+    if ($cname eq "exception_trace" || $cname eq "core::exception_trace" || $cname eq "sys::exception_trace") { return 1; }
+    if ($cname eq "throw" || $cname eq "core::throw" || $cname eq "sys::throw") { return 1; }
+    if ($cname eq "coro_create" || $cname eq "core::coro_create" || $cname eq "sys::coro_create") { return 1; }
+    return 0;
+}
+
+func ast_expr_needs_stack_trace(scalar $expr) int {
+    if (is_valid_node($expr) == 0) { return 0; }
+    my int $t = $expr->{"type"};
+    if ($t == NODE_CALL()) {
+        if ($expr->{"is_constant"} != 1 && ast_call_needs_stack_trace("" . $expr->{"name"}) == 1) {
+            return 1;
+        }
+        my scalar $args = $expr->{"args"};
+        my int $ac = $expr->{"arg_count"} + 0;
+        my int $i = 0;
+        while ($i < $ac) {
+            if (ast_expr_needs_stack_trace($args->[$i]) == 1) { return 1; }
+            $i = $i + 1;
+        }
+        return 0;
+    }
+    if ($t == NODE_BINARY_OP()) {
+        if (ast_expr_needs_stack_trace($expr->{"left"}) == 1) { return 1; }
+        return ast_expr_needs_stack_trace($expr->{"right"});
+    }
+    if ($t == NODE_UNARY_OP() || $t == NODE_INCREMENT()) {
+        return ast_expr_needs_stack_trace($expr->{"operand"});
+    }
+    if ($t == NODE_TERNARY()) {
+        if (ast_expr_needs_stack_trace($expr->{"condition"}) == 1) { return 1; }
+        if (ast_expr_needs_stack_trace($expr->{"true_expr"}) == 1) { return 1; }
+        return ast_expr_needs_stack_trace($expr->{"false_expr"});
+    }
+    if ($t == NODE_ASSIGN()) {
+        if (ast_expr_needs_stack_trace($expr->{"target"}) == 1) { return 1; }
+        return ast_expr_needs_stack_trace($expr->{"value"});
+    }
+    if ($t == NODE_METHOD_CALL()) {
+        if (ast_expr_needs_stack_trace($expr->{"object"}) == 1) { return 1; }
+        my scalar $args = $expr->{"args"};
+        my int $ac = $expr->{"arg_count"} + 0;
+        my int $i = 0;
+        while ($i < $ac) {
+            if (ast_expr_needs_stack_trace($args->[$i]) == 1) { return 1; }
+            $i = $i + 1;
+        }
+        return 0;
+    }
+    if ($t == NODE_DYN_METHOD_CALL()) {
+        if (ast_expr_needs_stack_trace($expr->{"base_object"}) == 1) { return 1; }
+        if (ast_expr_needs_stack_trace($expr->{"method_expr"}) == 1) { return 1; }
+        my scalar $args = $expr->{"args"};
+        my int $ac = $expr->{"arg_count"} + 0;
+        my int $i = 0;
+        while ($i < $ac) {
+            if (ast_expr_needs_stack_trace($args->[$i]) == 1) { return 1; }
+            $i = $i + 1;
+        }
+        return 0;
+    }
+    if ($t == NODE_SUPER_CALL()) {
+        my scalar $args = $expr->{"args"};
+        my int $ac = $expr->{"arg_count"} + 0;
+        my int $i = 0;
+        while ($i < $ac) {
+            if (ast_expr_needs_stack_trace($args->[$i]) == 1) { return 1; }
+            $i = $i + 1;
+        }
+        return 0;
+    }
+    if ($t == NODE_CLOSURE_CALL()) {
+        if (ast_expr_needs_stack_trace($expr->{"closure"}) == 1) { return 1; }
+        my scalar $args = $expr->{"args"};
+        my int $ac = $expr->{"arg_count"} + 0;
+        my int $i = 0;
+        while ($i < $ac) {
+            if (ast_expr_needs_stack_trace($args->[$i]) == 1) { return 1; }
+            $i = $i + 1;
+        }
+        return 0;
+    }
+    if ($t == NODE_ANON_FUNC()) {
+        return ast_stmt_needs_stack_trace($expr->{"body"});
+    }
+    if ($t == NODE_DO_EXPR()) {
+        return ast_stmt_needs_stack_trace($expr->{"block"});
+    }
+    if ($t == NODE_MAP() || $t == NODE_GREP() || $t == NODE_SORT()) {
+        if (ast_expr_needs_stack_trace($expr->{"array"}) == 1) { return 1; }
+        return ast_stmt_needs_stack_trace($expr->{"block"});
+    }
+    if ($t == NODE_ANON_ARRAY()) {
+        my scalar $elems = $expr->{"elements"};
+        my int $ec = $expr->{"element_count"} + 0;
+        my int $i = 0;
+        while ($i < $ec) {
+            if (ast_expr_needs_stack_trace($elems->[$i]) == 1) { return 1; }
+            $i = $i + 1;
+        }
+        return 0;
+    }
+    if ($t == NODE_ANON_HASH()) {
+        my scalar $kexprs = $expr->{"key_exprs"};
+        my scalar $vals = $expr->{"values"};
+        my int $pc = $expr->{"pair_count"} + 0;
+        my int $i = 0;
+        while ($i < $pc) {
+            if (ast_expr_needs_stack_trace($kexprs->[$i]) == 1) { return 1; }
+            if (ast_expr_needs_stack_trace($vals->[$i]) == 1) { return 1; }
+            $i = $i + 1;
+        }
+        return 0;
+    }
+    if ($t == NODE_SUBSCRIPT()) {
+        if (ast_expr_needs_stack_trace($expr->{"array"}) == 1) { return 1; }
+        return ast_expr_needs_stack_trace($expr->{"index"});
+    }
+    if ($t == NODE_HASH_ACCESS()) {
+        if (ast_expr_needs_stack_trace($expr->{"hash"}) == 1) { return 1; }
+        return ast_expr_needs_stack_trace($expr->{"key"});
+    }
+    if ($t == NODE_ARRAY_SLICE() || $t == NODE_HASH_SLICE()) {
+        if (ast_expr_needs_stack_trace($expr->{"source"}) == 1) { return 1; }
+        my scalar $items = $expr->{"items"};
+        my int $ic = $expr->{"item_count"} + 0;
+        my int $i = 0;
+        while ($i < $ic) {
+            if (ast_expr_needs_stack_trace($items->[$i]) == 1) { return 1; }
+            $i = $i + 1;
+        }
+        return 0;
+    }
+    if ($t == NODE_DEREF_SCALAR() || $t == NODE_DEREF_ARRAY() || $t == NODE_DEREF_HASH()) {
+        if (ast_expr_needs_stack_trace($expr->{"ref"}) == 1) { return 1; }
+        if ($t == NODE_DEREF_ARRAY()) { return ast_expr_needs_stack_trace($expr->{"index"}); }
+        if ($t == NODE_DEREF_HASH()) { return ast_expr_needs_stack_trace($expr->{"key"}); }
+        return 0;
+    }
+    if ($t == NODE_FIELD_ACCESS()) {
+        return ast_expr_needs_stack_trace($expr->{"object"});
+    }
+    if ($t == NODE_REF() || $t == NODE_SPREAD()) {
+        return ast_expr_needs_stack_trace($expr->{"target"});
+    }
+    if ($t == NODE_RANGE()) {
+        if (ast_expr_needs_stack_trace($expr->{"start"}) == 1) { return 1; }
+        return ast_expr_needs_stack_trace($expr->{"end"});
+    }
+    if ($t == NODE_AWAIT()) {
+        return ast_expr_needs_stack_trace($expr->{"expr"});
+    }
+    if ($t == NODE_REGEX_MATCH() || $t == NODE_TR()) {
+        return ast_expr_needs_stack_trace($expr->{"target"});
+    }
+    if ($t == NODE_REGEX_SUBST()) {
+        if (ast_expr_needs_stack_trace($expr->{"target"}) == 1) { return 1; }
+        return ast_expr_needs_stack_trace($expr->{"eval_expr"});
+    }
+    return 0;
+}
+
+func ast_stmt_needs_stack_trace(scalar $stmt) int {
+    if (is_valid_node($stmt) == 0) { return 0; }
+    my int $t = $stmt->{"type"};
+    if ($t == NODE_TRY_CATCH() || $t == NODE_THROW()) { return 1; }
+    if ($t == NODE_BLOCK()) {
+        my scalar $stmts = $stmt->{"statements"};
+        my int $sc = $stmt->{"statement_count"} + 0;
+        my int $i = 0;
+        while ($i < $sc) {
+            if (ast_stmt_needs_stack_trace($stmts->[$i]) == 1) { return 1; }
+            $i = $i + 1;
+        }
+        return 0;
+    }
+    if ($t == NODE_IF_STMT()) {
+        if (ast_expr_needs_stack_trace($stmt->{"condition"}) == 1) { return 1; }
+        if (ast_stmt_needs_stack_trace($stmt->{"then_block"}) == 1) { return 1; }
+        my scalar $ec = $stmt->{"elsif_conditions"};
+        my scalar $eb = $stmt->{"elsif_blocks"};
+        my int $en = $stmt->{"elsif_count"} + 0;
+        my int $i = 0;
+        while ($i < $en) {
+            if (ast_expr_needs_stack_trace($ec->[$i]) == 1) { return 1; }
+            if (ast_stmt_needs_stack_trace($eb->[$i]) == 1) { return 1; }
+            $i = $i + 1;
+        }
+        return ast_stmt_needs_stack_trace($stmt->{"else_block"});
+    }
+    if ($t == NODE_WHILE_STMT()) {
+        my scalar $wc = $stmt->{"condition"};
+        if (is_valid_node($wc) == 1 && $wc->{"type"} == NODE_VAR_DECL()) {
+            if (ast_stmt_needs_stack_trace($wc) == 1) { return 1; }
+        } else {
+            if (ast_expr_needs_stack_trace($wc) == 1) { return 1; }
+        }
+        return ast_stmt_needs_stack_trace($stmt->{"body"});
+    }
+    if ($t == NODE_DO_WHILE_STMT()) {
+        if (ast_stmt_needs_stack_trace($stmt->{"body"}) == 1) { return 1; }
+        return ast_expr_needs_stack_trace($stmt->{"condition"});
+    }
+    if ($t == NODE_FOR_STMT()) {
+        my scalar $fi = $stmt->{"init"};
+        if (is_valid_node($fi) == 1) {
+            if ($fi->{"type"} == NODE_VAR_DECL()) {
+                if (ast_stmt_needs_stack_trace($fi) == 1) { return 1; }
+            } else {
+                if (ast_expr_needs_stack_trace($fi) == 1) { return 1; }
+            }
+        }
+        if (ast_expr_needs_stack_trace($stmt->{"condition"}) == 1) { return 1; }
+        if (ast_expr_needs_stack_trace($stmt->{"update"}) == 1) { return 1; }
+        return ast_stmt_needs_stack_trace($stmt->{"body"});
+    }
+    if ($t == NODE_FOREACH_STMT()) {
+        if (ast_expr_needs_stack_trace($stmt->{"array"}) == 1) { return 1; }
+        return ast_stmt_needs_stack_trace($stmt->{"body"});
+    }
+    if ($t == NODE_SWITCH()) {
+        if (ast_expr_needs_stack_trace($stmt->{"expr"}) == 1) { return 1; }
+        my scalar $cases = $stmt->{"cases"};
+        my scalar $blocks = $stmt->{"blocks"};
+        my int $cc = $stmt->{"case_count"} + 0;
+        my int $i = 0;
+        while ($i < $cc) {
+            if (ast_expr_needs_stack_trace($cases->[$i]) == 1) { return 1; }
+            if (ast_stmt_needs_stack_trace($blocks->[$i]) == 1) { return 1; }
+            $i = $i + 1;
+        }
+        if ($stmt->{"has_default"} == 1) {
+            return ast_stmt_needs_stack_trace($stmt->{"default_block"});
+        }
+        return 0;
+    }
+    if ($t == NODE_RETURN_STMT()) {
+        return ast_expr_needs_stack_trace($stmt->{"value"});
+    }
+    if ($t == NODE_EXPR_STMT()) {
+        return ast_expr_needs_stack_trace($stmt->{"expr"});
+    }
+    if ($t == NODE_VAR_DECL() || $t == NODE_CONST_DECL() || $t == NODE_OUR_DECL() ||
+        $t == NODE_LOCAL_DECL() || $t == NODE_DESTRUCTURE()) {
+        if (ast_expr_needs_stack_trace($stmt->{"initial_capacity"}) == 1) { return 1; }
+        if (ast_expr_needs_stack_trace($stmt->{"hash_key"}) == 1) { return 1; }
+        return ast_expr_needs_stack_trace($stmt->{"init"});
+    }
+    return 0;
+}
+
+func ast_needs_stack_trace(scalar $ast) int {
+    my scalar $funcs = $ast->{"functions"};
+    my int $fc = $ast->{"function_count"} + 0;
+    my int $i = 0;
+    while ($i < $fc) {
+        my scalar $fn = $funcs->[$i];
+        my scalar $params = $fn->{"params"};
+        my int $pc = $fn->{"param_count"} + 0;
+        my int $pi = 0;
+        while ($pi < $pc) {
+            my scalar $prm = $params->[$pi];
+            if ($prm->{"has_default"} == 1) {
+                if (ast_expr_needs_stack_trace($prm->{"default"}) == 1) { return 1; }
+            }
+            $pi = $pi + 1;
+        }
+        if (ast_stmt_needs_stack_trace($fn->{"body"}) == 1) { return 1; }
+        $i = $i + 1;
+    }
+    my scalar $globals = $ast->{"globals"};
+    my int $gc = $ast->{"global_count"} + 0;
+    $i = 0;
+    while ($i < $gc) {
+        if (ast_stmt_needs_stack_trace($globals->[$i]) == 1) { return 1; }
+        $i = $i + 1;
+    }
+    my scalar $begins = $ast->{"begin_blocks"};
+    my int $bc = $ast->{"begin_block_count"} + 0;
+    $i = 0;
+    while ($i < $bc) {
+        if (ast_stmt_needs_stack_trace($begins->[$i]) == 1) { return 1; }
+        $i = $i + 1;
+    }
+    my scalar $ends = $ast->{"end_blocks"};
+    my int $ec = $ast->{"end_block_count"} + 0;
+    $i = 0;
+    while ($i < $ec) {
+        if (ast_stmt_needs_stack_trace($ends->[$i]) == 1) { return 1; }
+        $i = $i + 1;
+    }
+    return 0;
+}
+
 func compile(str $source, str $filename, int $debug_info, int $show_timing, int $show_warnings, int $strict_types, int $enable_profiling, int $enable_stack_trace, int $full_profile, scalar $lib_paths, scalar $lib_paths_low, scalar $implicit_objs, scalar $implicit_archs, scalar $implicit_libs, int $module_only_mode, str $module_target, int $check_only, scalar $pp_defines) str {
     my num $t0 = 0.0;
     my num $t1 = 0.0;
@@ -162,6 +464,18 @@ func compile(str $source, str $filename, int $debug_info, int $show_timing, int 
     $t1 = core::hires_time();
     if ($show_timing == 1) {
         say("  Semantic: " . ($t1 - $t0) . " seconds");
+    }
+
+    # Auto-detect stack trace mode from the parsed AST (including `use`d modules!)
+    # when not explicitly overridden via --stack-trace / --no-stack-trace:
+    # Mode 1 = full stack trace + line numbers; Mode 2 = lightweight recursion-depth
+    # guard on non-leaf functions (zero overhead on leaf functions and statements).
+    if ($enable_stack_trace == -1) {
+        if (ast_needs_stack_trace($ast) == 1) {
+            $enable_stack_trace = 1;
+        } else {
+            $enable_stack_trace = 2;
+        }
     }
 
     # --check: validation only. Errors above have already die'd; a clean
@@ -401,21 +715,6 @@ func main() int {
 
     # Read source file
     my str $source = slurp($input_file);
-
-    # Auto-detect stack trace need if not explicitly set
-    # Mode 1 = full stack trace + line numbers; Mode 2 = recursion-depth guard
-    # on non-leaf functions (zero overhead on leaf functions and statements);
-    # Mode 0 = explicitly disabled via --no-stack-trace.
-    if ($enable_stack_trace == -1) {
-        if (index($source, "try ") >= 0 || index($source, "try{") >= 0 ||
-            index($source, "throw ") >= 0 || index($source, "throw(") >= 0 ||
-            index($source, "caller(") >= 0 || index($source, "caller()") >= 0 ||
-            index($source, "stack_trace(") >= 0 || index($source, "stacktrace(") >= 0) {
-            $enable_stack_trace = 1;
-        } else {
-            $enable_stack_trace = 2;
-        }
-    }
 
     # Derive module target from input filename when -M was given without
     # an explicit target: "path/Foo.strada" -> "Foo".

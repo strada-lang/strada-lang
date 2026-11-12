@@ -1,0 +1,177 @@
+# EXPECT: 3,4 1 2 1 1 2 0 1 1 1 0 30 auto:ping:7 21
+# OOP fixes:
+# - 2-int-attr Moose `try { die($pt); } catch (Point $e) {}`
+# - core::weaken on shared blessed ref running DESTROY once (not twice when weak ref dies)
+#   and sole-ref weaken running DESTROY immediately
+# - throwing DESTROY not disabling subsequent DESTROYs
+# - `use overload "bool"`, empty blessed `{}` truthiness, `if ($a == $b)` overloaded `==`
+# - multiple/inherited `around` modifiers chaining `(5 + 10) * 2 == 30`
+# - `SUPER::` falling back to parent `AUTOLOAD`
+# - 6-arg closure call
+
+package Point;
+has ro int $x;
+has ro int $y;
+
+package TrackDestroy;
+our int $count = 0;
+func new(str $label) scalar {
+    my hash %s = ("label" => $label);
+    return bless(\%s, "TrackDestroy");
+}
+func DESTROY(scalar $self) void {
+    $count = $count + 1;
+}
+func count() int { return $count; }
+
+package ThrowDestroy;
+our int $after_count = 0;
+func new(int $should_throw) scalar {
+    my hash %s = ("throw" => $should_throw);
+    return bless(\%s, "ThrowDestroy");
+}
+func DESTROY(scalar $self) void {
+    if ($self->{"throw"} == 1) {
+        die("destroy_boom");
+    }
+    $after_count = $after_count + 1;
+}
+func after_count() int { return $after_count; }
+
+package BoolVal;
+func new(int $flag, int $id) scalar {
+    my hash %s = ("flag" => $flag, "id" => $id);
+    return bless(\%s, "BoolVal");
+}
+func as_bool(scalar $self) int { return $self->{"flag"}; }
+func eq_op(scalar $self, scalar $other, int $rev) int {
+    return ($self->{"id"} == $other->{"id"}) ? 1 : 0;
+}
+use overload "bool" => "as_bool", "==" => "eq_op";
+
+package EmptyBlessed;
+func new() scalar {
+    my hash %s = ();
+    return bless(\%s, "EmptyBlessed");
+}
+
+package CalcBase;
+func new() scalar {
+    my hash %s = ();
+    return bless(\%s, "CalcBase");
+}
+func compute(scalar $self, int $n) int {
+    return $n;
+}
+around "compute" func(scalar $orig, scalar $self, int $n) int {
+    return $orig->($self, $n) + 10;
+}
+
+package CalcChild;
+extends CalcBase;
+func new() scalar {
+    my hash %s = ();
+    return bless(\%s, "CalcChild");
+}
+around "compute" func(scalar $orig, scalar $self, int $n) int {
+    return $orig->($self, $n) * 2;
+}
+
+package AutoParent;
+func AUTOLOAD(scalar $self, str $method, scalar ...@args) scalar {
+    return "auto:" . $method . ":" . $args[0];
+}
+
+package AutoChild;
+extends AutoParent;
+func new() scalar {
+    my hash %s = ();
+    return bless(\%s, "AutoChild");
+}
+func ping(scalar $self, int $v) str {
+    return SUPER::ping($self, $v);
+}
+
+package main;
+
+func test_shared_weaken() int {
+    my scalar $weak;
+    {
+        my scalar $strong = TrackDestroy::new("shared");
+        $weak = $strong;
+        core::weaken($weak);
+    }
+    # $strong died -> DESTROY ran once; $weak is now undef and leaving scope must not run DESTROY again
+    return TrackDestroy::count();
+}
+
+func main() int {
+    # 1. 2-int-attr Moose typed catch
+    my str $pt_got = "";
+    try {
+        my scalar $pt = Point::new("x", 3, "y", 4);
+        die($pt);
+    } catch (Point $e) {
+        $pt_got = $e->x() . "," . $e->y();
+    }
+
+    # 2. Weaken + DESTROY lifecycle
+    my int $c_during = test_shared_weaken();
+    my int $c_after_weak = TrackDestroy::count();
+    my scalar $sole = TrackDestroy::new("sole");
+    core::weaken($sole);
+    my int $c_after_sole = TrackDestroy::count();
+    my int $sole_undef = !defined($sole) ? 1 : 0;
+
+    # 3. Throwing DESTROY must not disable subsequent DESTROYs
+    my int $td_caught = 0;
+    try {
+        {
+            my scalar $bad = ThrowDestroy::new(1);
+        }
+    } catch ($e) {
+        $td_caught = 1;
+    }
+    {
+        my scalar $ok1 = ThrowDestroy::new(0);
+        my scalar $ok2 = ThrowDestroy::new(0);
+    }
+    my int $td_after = ThrowDestroy::after_count();
+
+    # 4. use overload "bool", empty blessed {}, and `if ($a == $b)`
+    my scalar $bfalse = BoolVal::new(0, 100);
+    my scalar $btrue = BoolVal::new(1, 100);
+    my scalar $bother = BoolVal::new(1, 200);
+    my int $bt0 = 0;
+    if ($bfalse) { $bt0 = 1; }
+    my int $bt1 = 0;
+    if ($btrue) { $bt1 = 1; }
+    my scalar $eb = EmptyBlessed::new();
+    my int $eb_t = 0;
+    if ($eb) { $eb_t = 1; }
+    my int $eq1 = 0;
+    if ($bfalse == $btrue) { $eq1 = 1; }
+    my int $eq2 = 0;
+    if ($btrue == $bother) { $eq2 = 1; }
+
+    # 5. Inherited around modifiers: (5 + 10) * 2 == 30
+    my scalar $calc = CalcChild::new();
+    my int $cres = $calc->compute(5);
+
+    # 6. SUPER:: falling back to parent AUTOLOAD
+    my scalar $ac = AutoChild::new();
+    my str $ares = $ac->ping(7);
+
+    # 7. 6-arg closure call
+    my scalar $fn6 = fn (int $a, int $b, int $c, int $d, int $e, int $f) int {
+        return $a + $b + $c + $d + $e + $f;
+    };
+    my int $sum6 = $fn6->(1, 2, 3, 4, 5, 6);
+
+    say($pt_got . " " .
+        $c_during . " " . $c_after_sole . " " . $sole_undef . " " .
+        $td_caught . " " . $td_after . " " .
+        $bt0 . " " . $bt1 . " " . $eb_t . " " . $eq1 . " " . $eq2 . " " .
+        $cres . " " . $ares . " " . $sum6);
+    return 0;
+}

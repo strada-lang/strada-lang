@@ -1,0 +1,119 @@
+package ErrA;
+func new(str $msg) scalar {
+    my hash %self = ("msg" => $msg);
+    return bless(\%self, "ErrA");
+}
+
+package ErrB;
+func new(str $msg) scalar {
+    my hash %self = ("msg" => $msg);
+    return bless(\%self, "ErrB");
+}
+
+package BaseBox;
+func new() scalar {
+    my hash %h = ();
+    return bless(\%h, "BaseBox");
+}
+func tag(scalar $self) str {
+    return "base";
+}
+
+package SubBox;
+extends BaseBox;
+func new() scalar {
+    my hash %h = ();
+    return bless(\%h, "SubBox");
+}
+func tag(scalar $self) str {
+    return "sub+" . SUPER::tag($self);
+}
+around "tag" func(scalar $orig, scalar $self) str {
+    return "[" . $orig->($self) . "]";
+}
+
+package main;
+
+our int $g_rhs_calls = 0;
+our int $g_key_calls = 0;
+
+func rhs_five() int {
+    $g_rhs_calls = $g_rhs_calls + 1;
+    return 5;
+}
+
+func key_a() str {
+    $g_key_calls = $g_key_calls + 1;
+    return "a";
+}
+
+func ret_inside_try() int {
+    try {
+        return 42;
+    } catch ($e) {
+        return -1;
+    }
+    return 0;
+}
+
+func main() int {
+    my int $fail = 0;
+
+    # 1. return inside try unwinds exc_stack
+    my int $rv = ret_inside_try();
+    if ($rv != 42) { say("FAIL: ret_inside_try value"); $fail++; }
+    my str $outer_caught = "";
+    try {
+        throw "outer_boom";
+    } catch ($e) {
+        $outer_caught = "" . $e;
+    }
+    if ($outer_caught ne "outer_boom") {
+        say("FAIL: exc_stack not unwound on return inside try: " . $outer_caught);
+        $fail++;
+    }
+
+    # 2. Single typed catch (ErrA $e) doesn't catch ErrB, and finally runs
+    my int $finally_count = 0;
+    my int $wrong_catch = 0;
+    my int $right_outer = 0;
+    try {
+        try {
+            throw ErrB::new("b_err");
+        } catch (ErrA $ea) {
+            $wrong_catch = 1;
+        } finally {
+            $finally_count = $finally_count + 1;
+        }
+    } catch (ErrB $eb) {
+        $right_outer = 1;
+    } finally {
+        $finally_count = $finally_count + 1;
+    }
+    if ($wrong_catch != 0 || $right_outer != 1 || $finally_count != 2) {
+        say("FAIL: typed catch / finally (" . $wrong_catch . "," . $right_outer . "," . $finally_count . ")");
+        $fail++;
+    }
+
+    # 3. $h{"a"} += 5 evaluates key and RHS once and adds
+    my hash %h = ("a" => 10);
+    $h{"a"} += 5;
+    $h{key_a()} += rhs_five();
+    if ($h{"a"} != 20 || $g_rhs_calls != 1 || $g_key_calls != 1) {
+        say("FAIL: hash += (" . $h{"a"} . ", rhs=" . $g_rhs_calls . ", key=" . $g_key_calls . ")");
+        $fail++;
+    }
+
+    # 4. SUPER:: & around
+    my scalar $sb = SubBox::new();
+    if ($sb->tag() ne "[sub+base]") {
+        say("FAIL: SUPER:: & around got " . $sb->tag());
+        $fail++;
+    }
+
+    if ($fail == 0) {
+        say("ALL_VM_CHECKS_OK");
+        return 0;
+    }
+    return 1;
+}
