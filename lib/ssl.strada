@@ -69,6 +69,27 @@ Read a line (up to newline) from the connection.
 
     my str $line = ssl::readline($conn, 1024);
 
+On a non-blocking connection (for example one made with C<attach_fd>),
+C<read>, C<readline>, C<write> and C<write_binary> wait for the peer for
+at most the connection's timeout (default 5000 ms). If nothing arrives in
+that time, reads return C<""> and writes return the bytes written so far
+(or -1). Blocking sockets are governed by the kernel (SO_RCVTIMEO /
+SO_SNDTIMEO) instead.
+
+=head2 set_timeout($conn, $ms)
+
+Set how long blocking-style reads/writes on this connection wait for a
+non-blocking peer: C<$ms> milliseconds, C<0> to not wait at all, or a
+negative value to wait indefinitely. Returns 1 on success, 0 for a bad handle.
+
+    ssl::set_timeout($conn, 30000);   # slow peer: allow 30 s
+
+=head2 set_default_timeout($ms)
+
+Set the process-wide default used by connections that have not called
+C<set_timeout> (initially 5000 ms; same meaning of 0 and negative values).
+Returns the previous default.
+
 =head2 close($conn)
 
 Close the SSL connection and free resources.
@@ -165,7 +186,7 @@ Convenience function for HTTPS GET requests.
 
     my str $response = "";
     my str $chunk = ssl::read($conn, 4096);
-    while (length($chunk) > 0) {
+    while (core::byte_length($chunk) > 0) {
         $response = $response . $chunk;
         $chunk = ssl::read($conn, 4096);
     }
@@ -197,6 +218,8 @@ __C__ {
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <poll.h>
+#include <errno.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
@@ -207,6 +230,8 @@ typedef struct {
     int is_server;
     int last_want;   /* after a would-block: 1 = want-read, 2 = want-write */
     int borrowed_fd; /* fd owned by a Strada socket SV — do not close here */
+    int wait_ms;     /* per-connection wait limit (see ssl::set_timeout) */
+    int wait_ms_set; /* 0 = use the process default (ssl::set_default_timeout) */
 } SSLConnection;
 
 static int ssl_initialized = 0;
@@ -240,6 +265,72 @@ static const char *ssl_extract_bytes(StradaValue *sv, size_t *out_len, char **ou
     *out_owned = s;
     *out_len = s ? strlen(s) : 0;
     return s ? s : "";
+}
+
+/* How long a blocking-style read/write waits for a non-blocking fd to
+ * become ready before giving up (peer went silent). Milliseconds; < 0 waits
+ * indefinitely, 0 does not wait. Process default, overridable per
+ * connection: ssl::set_default_timeout / ssl::set_timeout. */
+static int ssl_default_wait_ms = 5000;
+
+/* Wait for the fd to become ready after SSL_ERROR_WANT_READ/WRITE.
+ * Returns 1 if the caller should retry the SSL call, 0 if it should give up:
+ *   - blocking fd: WANT_* only happens when SO_RCVTIMEO/SO_SNDTIMEO already
+ *     expired in the kernel, so give up at once (the caller's timeout);
+ *   - non-blocking fd: poll for up to the connection's wait limit (default
+ *     5000 ms); give up on timeout or poll error. Without this bound a
+ *     silent peer hung read() forever. */
+static int ssl_wait_want(SSLConnection *c, int err) {
+    if (!c || c->socket_fd < 0) return 0;
+    int fl = fcntl(c->socket_fd, F_GETFL, 0);
+    if (fl < 0 || !(fl & O_NONBLOCK)) return 0;
+    int wait_ms = c->wait_ms_set ? c->wait_ms : ssl_default_wait_ms;
+    if (wait_ms == 0) return 0;
+    if (wait_ms < 0) wait_ms = -1;   /* poll(): infinite */
+    struct pollfd pfd;
+    pfd.fd = c->socket_fd;
+    pfd.events = (err == SSL_ERROR_WANT_WRITE) ? POLLOUT : POLLIN;
+    pfd.revents = 0;
+    int r;
+    do {
+        r = poll(&pfd, 1, wait_ms);
+    } while (r < 0 && errno == EINTR);
+    return r > 0 ? 1 : 0;
+}
+
+static int ssl_read_retry(SSLConnection *c, char *buf, int max_len) {
+    for (;;) {
+        int n = SSL_read(c->ssl, buf, max_len);
+        if (n > 0) return n;
+        int err = SSL_get_error(c->ssl, n);
+        if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+            if (!ssl_wait_want(c, err)) return n;
+            continue;
+        }
+        if (err == SSL_ERROR_SYSCALL && errno == EINTR) continue;
+        return n;
+    }
+}
+
+static int ssl_write_all_retry(SSLConnection *c, const char *data, size_t len) {
+    size_t total = 0;
+    while (total < len) {
+        size_t chunk = len - total;
+        if (chunk > 0x40000000UL) chunk = 0x40000000UL;
+        int n = SSL_write(c->ssl, data + total, (int)chunk);
+        if (n > 0) {
+            total += (size_t)n;
+            continue;
+        }
+        int err = SSL_get_error(c->ssl, n);
+        if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+            if (!ssl_wait_want(c, err)) return total > 0 ? (int)total : -1;
+            continue;
+        }
+        if (err == SSL_ERROR_SYSCALL && errno == EINTR) continue;
+        return total > 0 ? (int)total : -1;
+    }
+    return (int)total;
 }
 }
 
@@ -479,7 +570,7 @@ func read(int $conn, int $max_len) str {
         if (c && c->ssl && max > 0) {
             char *buffer = malloc((size_t)max + 1);
             if (buffer) {
-                int n = SSL_read(c->ssl, buffer, max);
+                int n = ssl_read_retry(c, buffer, max);
                 if (n > 0) {
                     buffer[n] = '\0';
                     strada_decref(result);
@@ -504,7 +595,7 @@ func readline(int $conn, int $max_len) str {
                 int pos = 0;
                 char ch;
                 while (pos < max) {
-                    int n = SSL_read(c->ssl, &ch, 1);
+                    int n = ssl_read_retry(c, &ch, 1);
                     if (n <= 0) break;
                     buffer[pos++] = ch;
                     if (ch == '\n') break;
@@ -531,7 +622,7 @@ func write(int $conn, str $data) int {
             size_t len = 0;
             char *owned = NULL;
             const char *data_str = ssl_extract_bytes(data, &len, &owned);
-            int written = (len == 0) ? 0 : SSL_write(c->ssl, data_str, (int)len);
+            int written = (len == 0) ? 0 : ssl_write_all_retry(c, data_str, len);
             free(owned);
             strada_decref(result);
             result = strada_new_int(written);
@@ -550,7 +641,7 @@ func read_binary(int $conn, int $max_len) str {
         if (c && c->ssl && max > 0) {
             char *buffer = malloc((size_t)max + 1);
             if (buffer) {
-                int n = SSL_read(c->ssl, buffer, max);
+                int n = ssl_read_retry(c, buffer, max);
                 if (n > 0) {
                     strada_decref(result);
                     result = strada_new_str_len(buffer, (size_t)n);
@@ -575,11 +666,46 @@ func write_binary(int $conn, str $data) int {
             size_t len = 0;
             char *owned = NULL;
             const char *data_str = ssl_extract_bytes(data, &len, &owned);
-            int written = (len == 0) ? 0 : SSL_write(c->ssl, data_str, (int)len);
+            int written = (len == 0) ? 0 : ssl_write_all_retry(c, data_str, len);
             free(owned);
             strada_decref(result);
             result = strada_new_int(written);
         }
+    }
+    return $result;
+}
+
+# Per-connection wait limit for blocking-style reads/writes on a non-blocking
+# fd: milliseconds, 0 = don't wait, < 0 = wait indefinitely.
+# Returns 1, or 0 for an invalid handle.
+func set_timeout(int $conn, int $ms) int {
+    my int $result = 0;
+    __C__ {
+        SSLConnection *c = (SSLConnection*)(intptr_t)strada_to_int(conn);
+        if (c) {
+            int64_t v = strada_to_int(ms);
+            if (v > 2147483647LL) v = 2147483647LL;
+            if (v < 0) v = -1;
+            c->wait_ms = (int)v;
+            c->wait_ms_set = 1;
+            strada_decref(result);
+            result = strada_new_int(1);
+        }
+    }
+    return $result;
+}
+
+# Process-wide default wait limit (initially 5000 ms) for connections that
+# have not called set_timeout. Returns the previous default.
+func set_default_timeout(int $ms) int {
+    my int $result = 0;
+    __C__ {
+        int64_t v = strada_to_int(ms);
+        if (v > 2147483647LL) v = 2147483647LL;
+        if (v < 0) v = -1;
+        strada_decref(result);
+        result = strada_new_int(ssl_default_wait_ms);
+        ssl_default_wait_ms = (int)v;
     }
     return $result;
 }
@@ -727,7 +853,7 @@ func http_get(str $host, int $port, str $path) str {
 
     my str $response = "";
     my str $chunk = ssl::read($conn, 4096);
-    while (length($chunk) > 0) {
+    while (core::byte_length($chunk) > 0) {
         $response = $response . $chunk;
         $chunk = ssl::read($conn, 4096);
     }
@@ -914,21 +1040,27 @@ func try_write(int $conn, str $data) int {
             size_t len = 0;
             char *owned = NULL;
             const char *bytes = ssl_extract_bytes(data, &len, &owned);
-            int n = SSL_write(c->ssl, bytes, (int)len);
-            free(owned);
-            if (n > 0) {
+            if (len == 0) {
+                free(owned);
                 strada_decref(result);
-                result = strada_new_int(n);
+                result = strada_new_int(0);
             } else {
-                int err = SSL_get_error(c->ssl, n);
-                if (err == SSL_ERROR_WANT_READ) {
-                    c->last_want = 1;
+                int n = SSL_write(c->ssl, bytes, (int)len);
+                free(owned);
+                if (n > 0) {
                     strada_decref(result);
-                    result = strada_new_int(0);
-                } else if (err == SSL_ERROR_WANT_WRITE) {
-                    c->last_want = 2;
-                    strada_decref(result);
-                    result = strada_new_int(0);
+                    result = strada_new_int(n);
+                } else {
+                    int err = SSL_get_error(c->ssl, n);
+                    if (err == SSL_ERROR_WANT_READ) {
+                        c->last_want = 1;
+                        strada_decref(result);
+                        result = strada_new_int(0);
+                    } else if (err == SSL_ERROR_WANT_WRITE) {
+                        c->last_want = 2;
+                        strada_decref(result);
+                        result = strada_new_int(0);
+                    }
                 }
             }
         }

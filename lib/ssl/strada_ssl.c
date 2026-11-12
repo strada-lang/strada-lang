@@ -31,6 +31,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <errno.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -47,12 +48,18 @@ typedef struct {
     SSL *ssl;
     SSL_CTX *ctx;
     int is_server;
+    int wait_ms;     /* per-connection wait limit (strada_ssl_set_timeout) */
+    int wait_ms_set; /* 0 = use the process default */
 } SSLConnection;
+
+/* Wait limit for blocking-style wrappers on non-blocking fds, in ms
+ * (< 0 = indefinitely, 0 = don't wait). */
+static int strada_ssl_default_wait_ms = 5000;
 
 /* Global initialization flag */
 static int ssl_initialized = 0;
 
-static void strada_ssl_wait_want(SSLConnection *conn, int err);
+static int strada_ssl_wait_want(SSLConnection *conn, int err);
 
 /* Initialize OpenSSL library */
 int strada_ssl_init(void) {
@@ -317,7 +324,7 @@ SSLConnection* strada_ssl_accept(SSLConnection *server) {
 
     memset(conn, 0, sizeof(SSLConnection));
     conn->socket_fd = client_fd;
-    conn->ctx = server->ctx;  /* Share context with server */
+    conn->ctx = NULL;  /* Share context with server (owned by server) */
     conn->is_server = 0;
 
     /* Create SSL for this connection */
@@ -362,8 +369,7 @@ char* strada_ssl_read_str(SSLConnection *conn, int max_len) {
         if (n > 0) break;
         int err = SSL_get_error(conn->ssl, n);
         if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
-            strada_ssl_wait_want(conn, err);   /* non-blocking fd: retry */
-            continue;
+            if (strada_ssl_wait_want(conn, err)) continue;   /* non-blocking fd: retry */
         }
         free(buffer);
         return strdup("");
@@ -436,12 +442,27 @@ int strada_ssl_write(SSLConnection *conn, const char *data, int len) {
  * blocking-style wrappers so they stay correct when the underlying fd is
  * O_NONBLOCK (event-loop servers accept with non-blocking fds but reuse
  * these wrappers for cold paths like chunked responses). */
-static void strada_ssl_wait_want(SSLConnection *conn, int err) {
+/* Returns 1 to retry, 0 to give up. A blocking fd only reports WANT_* after
+ * SO_RCVTIMEO/SO_SNDTIMEO expired, so give up at once; a non-blocking fd is
+ * polled for up to the connection's wait limit (default 5 s; see
+ * strada_ssl_set_timeout / strada_ssl_set_default_timeout). (Previously the callers retried forever, so a silent
+ * peer hung the read/write indefinitely.) */
+static int strada_ssl_wait_want(SSLConnection *conn, int err) {
+    if (!conn || conn->socket_fd < 0) return 0;
+    int fl = fcntl(conn->socket_fd, F_GETFL, 0);
+    if (fl < 0 || !(fl & O_NONBLOCK)) return 0;
+    int wait_ms = conn->wait_ms_set ? conn->wait_ms : strada_ssl_default_wait_ms;
+    if (wait_ms == 0) return 0;
+    if (wait_ms < 0) wait_ms = -1;
     struct pollfd p;
     p.fd = conn->socket_fd;
     p.events = (err == SSL_ERROR_WANT_WRITE) ? POLLOUT : POLLIN;
     p.revents = 0;
-    poll(&p, 1, 1000);
+    int r;
+    do {
+        r = poll(&p, 1, wait_ms);
+    } while (r < 0 && errno == EINTR);
+    return r > 0 ? 1 : 0;
 }
 
 int strada_ssl_write_str(SSLConnection *conn, const char *data, int len) {
@@ -452,11 +473,24 @@ int strada_ssl_write_str(SSLConnection *conn, const char *data, int len) {
         if (n > 0) return n;
         int err = SSL_get_error(conn->ssl, n);
         if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
-            strada_ssl_wait_want(conn, err);   /* non-blocking fd: retry */
-            continue;
+            if (strada_ssl_wait_want(conn, err)) continue;   /* non-blocking fd: retry */
         }
         return n;
     }
+}
+
+/* Per-connection wait limit (ms; 0 = don't wait, < 0 = indefinitely). */
+void strada_ssl_set_timeout(SSLConnection *conn, int ms) {
+    if (!conn) return;
+    conn->wait_ms = ms < 0 ? -1 : ms;
+    conn->wait_ms_set = 1;
+}
+
+/* Process-wide default wait limit; returns the previous value. */
+int strada_ssl_set_default_timeout(int ms) {
+    int prev = strada_ssl_default_wait_ms;
+    strada_ssl_default_wait_ms = ms < 0 ? -1 : ms;
+    return prev;
 }
 
 /* Close SSL connection
@@ -473,8 +507,9 @@ void strada_ssl_close(SSLConnection *conn) {
         close(conn->socket_fd);
     }
 
-    /* Only free context if this is a server or standalone connection */
-    if (conn->is_server && conn->ctx) {
+    /* Free context whenever this connection owns one (standalone client or server;
+     * connections accepted via strada_ssl_accept share server->ctx). */
+    if (conn->ctx) {
         SSL_CTX_free(conn->ctx);
     }
 
@@ -625,9 +660,15 @@ char* strada_ssl_read_sv(StradaValue *conn_sv, StradaValue *max_len_sv) {
  */
 int64_t strada_ssl_write_sv(StradaValue *conn_sv, StradaValue *data_sv) {
     SSLConnection *conn = (SSLConnection*)(intptr_t)strada_to_int(conn_sv);
+    if (!data_sv) return 0;
+    if (!STRADA_IS_TAGGED_INT(data_sv) && data_sv->type == STRADA_STR && data_sv->value.pv) {
+        size_t len = STRADA_STR_BYTELEN(data_sv);
+        if (len == 0 && data_sv->value.pv[0] != '\0') len = strlen(data_sv->value.pv);
+        return (int64_t)strada_ssl_write_str(conn, data_sv->value.pv, (int)len);
+    }
     char *data = strada_to_str(data_sv);
-    int len = strlen(data);
-    int written = strada_ssl_write_str(conn, data, len);
+    int len = data ? (int)strlen(data) : 0;
+    int written = strada_ssl_write_str(conn, data ? data : "", len);
     free(data);
     return (int64_t)written;
 }
@@ -687,7 +728,7 @@ StradaValue* strada_ssl_try_accept_sv(StradaValue *server_sv) {
     if (!conn) { close(client_fd); return strada_new_undef(); }
     memset(conn, 0, sizeof(SSLConnection));
     conn->socket_fd = client_fd;
-    conn->ctx = server->ctx;   /* shared with the server; not freed on close */
+    conn->ctx = NULL;   /* shares server->ctx (owned by the server); NULL so close won't free it */
     conn->is_server = 0;
 
     conn->ssl = SSL_new(server->ctx);
@@ -741,11 +782,23 @@ StradaValue* strada_ssl_try_read_sv(StradaValue *conn_sv, StradaValue *max_len_s
 int64_t strada_ssl_try_write_sv(StradaValue *conn_sv, StradaValue *data_sv) {
     SSLConnection *conn = (SSLConnection*)(intptr_t)strada_to_int(conn_sv);
     if (!conn || !conn->ssl) return -1;
-    char *data = strada_to_str(data_sv);
-    int len = strlen(data);
-    if (len == 0) { free(data); return 0; }
+    if (!data_sv) return 0;
+    char *owned = NULL;
+    const char *data = "";
+    int len = 0;
+    if (!STRADA_IS_TAGGED_INT(data_sv) && data_sv->type == STRADA_STR && data_sv->value.pv) {
+        data = data_sv->value.pv;
+        size_t bl = STRADA_STR_BYTELEN(data_sv);
+        if (bl == 0 && data_sv->value.pv[0] != '\0') bl = strlen(data_sv->value.pv);
+        len = (int)bl;
+    } else {
+        owned = strada_to_str(data_sv);
+        data = owned ? owned : "";
+        len = (int)strlen(data);
+    }
+    if (len == 0) { free(owned); return 0; }
     int n = SSL_write(conn->ssl, data, len);
-    free(data);
+    free(owned);
     if (n > 0) return (int64_t)n;
     int err = SSL_get_error(conn->ssl, n);
     if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) return 0;

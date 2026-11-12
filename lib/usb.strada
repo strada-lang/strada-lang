@@ -553,11 +553,12 @@ func bulk_write(int $handle, int $endpoint, str $data, int $timeout) int {
     __C__ {
         libusb_device_handle *h = (libusb_device_handle *)(intptr_t)strada_to_int(handle);
         unsigned char ep = (unsigned char)strada_to_int(endpoint);
-        const char *d = strada_to_str(data);
-        int length = (int)data->struct_size;
-        if (length <= 0) length = (int)strlen(d);
+        const char *d = (!STRADA_IS_TAGGED_INT(data) && data && data->type == STRADA_STR && data->value.pv) ? data->value.pv : "";
+        int length = (!STRADA_IS_TAGGED_INT(data) && data && data->type == STRADA_STR) ? (int)STRADA_STR_BYTELEN(data) : 0;
+        if (length == 0 && d[0] != '\0') length = (int)strlen(d);
         int tm = (int)strada_to_int(timeout);
 
+        strada_decref(result);
         if (!h) {
             result = strada_new_int(LIBUSB_ERROR_INVALID_PARAM);
         } else {
@@ -612,11 +613,12 @@ func interrupt_write(int $handle, int $endpoint, str $data, int $timeout) int {
     __C__ {
         libusb_device_handle *h = (libusb_device_handle *)(intptr_t)strada_to_int(handle);
         unsigned char ep = (unsigned char)strada_to_int(endpoint);
-        const char *d = strada_to_str(data);
-        int length = (int)data->struct_size;
-        if (length <= 0) length = (int)strlen(d);
+        const char *d = (!STRADA_IS_TAGGED_INT(data) && data && data->type == STRADA_STR && data->value.pv) ? data->value.pv : "";
+        int length = (!STRADA_IS_TAGGED_INT(data) && data && data->type == STRADA_STR) ? (int)STRADA_STR_BYTELEN(data) : 0;
+        if (length == 0 && d[0] != '\0') length = (int)strlen(d);
         int tm = (int)strada_to_int(timeout);
 
+        strada_decref(result);
         if (!h) {
             result = strada_new_int(LIBUSB_ERROR_INVALID_PARAM);
         } else {
@@ -673,11 +675,12 @@ func control_write(int $handle, int $request_type, int $request, int $value, int
         uint8_t req = (uint8_t)strada_to_int(request);
         uint16_t val = (uint16_t)strada_to_int(value);
         uint16_t index = (uint16_t)strada_to_int(idx);
-        const char *d = strada_to_str(data);
-        int length = (int)data->struct_size;
-        if (length <= 0) length = (int)strlen(d);
+        const char *d = (!STRADA_IS_TAGGED_INT(data) && data && data->type == STRADA_STR && data->value.pv) ? data->value.pv : "";
+        int length = (!STRADA_IS_TAGGED_INT(data) && data && data->type == STRADA_STR) ? (int)STRADA_STR_BYTELEN(data) : 0;
+        if (length == 0 && d[0] != '\0') length = (int)strlen(d);
         unsigned int tm = (unsigned int)strada_to_int(timeout);
 
+        strada_decref(result);
         if (!h) {
             result = strada_new_int(LIBUSB_ERROR_INVALID_PARAM);
         } else {

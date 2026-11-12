@@ -1,0 +1,85 @@
+use ssl;
+use Net::SMTP_SSL;
+
+# Regression test: ssl::read / ssl::readline on a non-blocking fd (as set up
+# by ssl::attach_fd) must give up once the peer goes silent, instead of
+# retrying SSL_ERROR_WANT_READ forever; and the wait limit is configurable
+# (ssl::set_timeout per connection, ssl::set_default_timeout process-wide).
+# The forked server completes the TLS handshake, sends one line, then keeps
+# the connection open without sending anything else.
+
+func serve(scalar $srv, int $ctx) void {
+    my scalar $c = core::socket_accept($srv);
+    my int $fd = core::socket_fd($c);
+    my int $tls = ssl::attach_server_fd($ctx, $fd);
+    if ($tls == 0 || SMTP_SSL::handshake($tls, $fd, 5000) == 0) { exit(1); }
+    my str $left = "hello\n";
+    while (core::byte_length($left) > 0) {
+        my int $n = ssl::try_write($tls, $left);
+        if ($n < 0) { exit(1); }
+        if ($n == 0) { SMTP_SSL::wait_fd($fd, ssl::want($tls), 5000); next; }
+        $left = core::byte_substr($left, $n, core::byte_length($left) - $n);
+    }
+    core::sleep(60);   # silent, connection stays open; parent kills us
+    exit(0);
+}
+
+# Milliseconds a silent ssl::read took, or -1 if it returned data.
+func timed_read(int $conn) int {
+    my num $t0 = core::hires_time();
+    my str $r = ssl::read($conn, 100);
+    my int $ms = cast_int((core::hires_time() - $t0) * 1000);
+    if (core::byte_length($r) != 0) { return 0 - 1; }
+    return $ms;
+}
+
+func main(int $argc, array @argv) int {
+    my int $port = core::atoi($argv[1]);
+    my int $ctx = ssl::server(core::atoi($argv[4]), $argv[2], $argv[3]);
+    if ($ctx == 0) { say("server ctx failed"); return 1; }
+    my scalar $srv = core::socket_server_host("127.0.0.1", $port, 4);
+    my int $pid = core::fork();
+    if ($pid == 0) { ::serve($srv, $ctx); exit(0); }
+
+    my scalar $sock = core::socket_client("127.0.0.1", $port);
+    if (!defined($sock)) { say("connect failed"); core::kill($pid, 9); return 1; }
+    my int $fd = core::socket_fd($sock);
+    my int $conn = ssl::attach_fd($fd, 0, "localhost");
+    if ($conn == 0 || SMTP_SSL::handshake($conn, $fd, 5000) == 0) {
+        say("handshake failed");
+        core::kill($pid, 9);
+        return 1;
+    }
+
+    # Data that arrives after a would-block is still delivered.
+    my str $first = ssl::read($conn, 100);
+    say("first " . ($first eq "hello\n" ? "ok" : "bad:" . $first));
+
+    # Process default: initially 5000 ms; lower it to 1000 ms.
+    my int $prev = ssl::set_default_timeout(1000);
+    my int $ms = ::timed_read($conn);
+    say("default was " . $prev . ", silent read ~1s " . ($ms >= 800 && $ms < 3000 ? 1 : $ms));
+
+    # Per-connection override beats the default.
+    ssl::set_timeout($conn, 2000);
+    $ms = ::timed_read($conn);
+    say("set_timeout 2000, silent read ~2s " . ($ms >= 1800 && $ms < 4500 ? 1 : $ms));
+
+    # 0 = do not wait at all.
+    ssl::set_timeout($conn, 0);
+    $ms = ::timed_read($conn);
+    say("set_timeout 0, immediate " . ($ms >= 0 && $ms < 500 ? 1 : $ms));
+
+    # readline is bounded by the same limit.
+    ssl::set_timeout($conn, 1000);
+    my num $t0 = core::hires_time();
+    my str $line = ssl::readline($conn, 100);
+    $ms = cast_int((core::hires_time() - $t0) * 1000);
+    say("readline empty " . (core::byte_length($line) == 0 ? 1 : 0)
+        . " bounded " . ($ms < 3000 ? 1 : $ms));
+
+    ssl::close($conn);
+    core::kill($pid, 9);
+    core::waitpid($pid, 0);
+    return 0;
+}

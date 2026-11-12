@@ -194,51 +194,61 @@ func open3(str $cmd) hash {
     my hash %result = ();
 
     # Create pipes for stdin, stdout, stderr
-    my array @stdin_pipe = core::pipe();
-    my array @stdout_pipe = core::pipe();
-    my array @stderr_pipe = core::pipe();
-
-    if (scalar(@stdin_pipe) == 0 || scalar(@stdout_pipe) == 0 || scalar(@stderr_pipe) == 0) {
+    my scalar $p_in = core::pipe();
+    if (!defined($p_in)) {
         $result{"error"} = "Failed to create pipes";
         return %result;
     }
-
-    # stdin_pipe:  [0]=read (child),  [1]=write (parent)
-    # stdout_pipe: [0]=read (parent), [1]=write (child)
-    # stderr_pipe: [0]=read (parent), [1]=write (child)
+    my scalar $p_out = core::pipe();
+    if (!defined($p_out)) {
+        core::close_fd($p_in->[0]);
+        core::close_fd($p_in->[1]);
+        $result{"error"} = "Failed to create pipes";
+        return %result;
+    }
+    my scalar $p_err = core::pipe();
+    if (!defined($p_err)) {
+        core::close_fd($p_in->[0]);
+        core::close_fd($p_in->[1]);
+        core::close_fd($p_out->[0]);
+        core::close_fd($p_out->[1]);
+        $result{"error"} = "Failed to create pipes";
+        return %result;
+    }
+    my array @stdin_pipe = @{$p_in};
+    my array @stdout_pipe = @{$p_out};
+    my array @stderr_pipe = @{$p_err};
 
     my int $pid = core::fork();
 
     if ($pid == 0) {
         # Child process
 
-        # Redirect stdin from pipe
-        core::close_fd($stdin_pipe[1]);   # Close write end
-        core::dup2($stdin_pipe[0], 0);
-        core::close_fd($stdin_pipe[0]);
+        core::close_fd($stdin_pipe[1]);
+        if ($stdin_pipe[0] != 0) {
+            core::dup2($stdin_pipe[0], 0);
+            core::close_fd($stdin_pipe[0]);
+        }
 
-        # Redirect stdout to pipe
-        core::close_fd($stdout_pipe[0]);  # Close read end
-        core::dup2($stdout_pipe[1], 1);
-        core::close_fd($stdout_pipe[1]);
+        core::close_fd($stdout_pipe[0]);
+        if ($stdout_pipe[1] != 1) {
+            core::dup2($stdout_pipe[1], 1);
+            core::close_fd($stdout_pipe[1]);
+        }
 
-        # Redirect stderr to pipe
-        core::close_fd($stderr_pipe[0]);  # Close read end
-        core::dup2($stderr_pipe[1], 2);
-        core::close_fd($stderr_pipe[1]);
+        core::close_fd($stderr_pipe[0]);
+        if ($stderr_pipe[1] != 2) {
+            core::dup2($stderr_pipe[1], 2);
+            core::close_fd($stderr_pipe[1]);
+        }
 
-        # Execute the command via /bin/sh -c (core::exec invokes execlp("/bin/sh","sh","-c",cmd,NULL) directly)
         core::exec($cmd);
-
-        # If exec returns, it failed
-        exit(127);
+        core::_exit(127);
     } elsif ($pid > 0) {
         # Parent process
-
-        # Close unused ends of pipes
-        core::close_fd($stdin_pipe[0]);   # Close read end
-        core::close_fd($stdout_pipe[1]);  # Close write end
-        core::close_fd($stderr_pipe[1]);  # Close write end
+        core::close_fd($stdin_pipe[0]);
+        core::close_fd($stdout_pipe[1]);
+        core::close_fd($stderr_pipe[1]);
 
         $result{"pid"} = $pid;
         $result{"stdin"} = $stdin_pipe[1];
@@ -258,37 +268,43 @@ func open3(str $cmd) hash {
 }
 
 # open2 - Like open3 but combines stdout and stderr
-# Returns a hash with:
-#   pid    - Child process ID
-#   stdin  - File descriptor to write to child's stdin
-#   stdout - File descriptor to read child's combined output
-#
 func open2(str $cmd) hash {
     my hash %result = ();
 
-    my array @stdin_pipe = core::pipe();
-    my array @stdout_pipe = core::pipe();
-
-    if (scalar(@stdin_pipe) == 0 || scalar(@stdout_pipe) == 0) {
+    my scalar $p_in = core::pipe();
+    if (!defined($p_in)) {
         $result{"error"} = "Failed to create pipes";
         return %result;
     }
+    my scalar $p_out = core::pipe();
+    if (!defined($p_out)) {
+        core::close_fd($p_in->[0]);
+        core::close_fd($p_in->[1]);
+        $result{"error"} = "Failed to create pipes";
+        return %result;
+    }
+    my array @stdin_pipe = @{$p_in};
+    my array @stdout_pipe = @{$p_out};
 
     my int $pid = core::fork();
 
     if ($pid == 0) {
         # Child process
         core::close_fd($stdin_pipe[1]);
-        core::dup2($stdin_pipe[0], 0);
-        core::close_fd($stdin_pipe[0]);
+        if ($stdin_pipe[0] != 0) {
+            core::dup2($stdin_pipe[0], 0);
+            core::close_fd($stdin_pipe[0]);
+        }
 
         core::close_fd($stdout_pipe[0]);
         core::dup2($stdout_pipe[1], 1);
         core::dup2($stdout_pipe[1], 2);  # stderr -> stdout
-        core::close_fd($stdout_pipe[1]);
+        if ($stdout_pipe[1] != 1 && $stdout_pipe[1] != 2) {
+            core::close_fd($stdout_pipe[1]);
+        }
 
         core::exec($cmd);
-        exit(127);
+        core::_exit(127);
     } elsif ($pid > 0) {
         # Parent process
         core::close_fd($stdin_pipe[0]);

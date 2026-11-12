@@ -3742,7 +3742,7 @@ See `docs/PERL_INTEGRATION.md` for comprehensive documentation on:
 |----------|-------------|
 | `core::open($path, $mode)` | Open file |
 | `core::close($fh)` | Close file |
-| `core::readline($fh)` | Read line |
+| `core::readline($fh [, $max])` | Read line (optionally at most `$max` bytes; rest on next call) |
 | `core::slurp($path)` | Read entire file |
 | `core::spew($path, $data)` | Write entire file |
 | `select($fh)` | Set default filehandle |

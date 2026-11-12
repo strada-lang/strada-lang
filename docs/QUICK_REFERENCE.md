@@ -683,6 +683,7 @@ my int $m = core::file_mtime("file.txt");      # mtime in epoch seconds, -1 if s
 # File handle operations
 my scalar $fh = core::open("file.txt", "r");
 my str $line = core::readline($fh);
+my str $part = core::readline($fh, 4096);      # at most 4096 bytes; rest on next call
 core::close($fh);
 
 # Perl-style open modes (also accepts C-style "r", "w", "a")
@@ -789,6 +790,7 @@ my scalar $loop = Async::Loop::new();      # epoll (Linux) / poll (elsewhere)
 $loop->spawn(fn () {                        # green task: blocking-looking code
     my scalar $conn = Async::Task::accept($listener);
     my str $line = Async::Task::readline($conn, 5000);   # 5s timeout
+    my str $cmd  = Async::Task::readline($conn, 5000, 1024); # + at most 1024 bytes
     Async::Task::send($conn, "ok\n");
     core::socket_close($conn);
 });

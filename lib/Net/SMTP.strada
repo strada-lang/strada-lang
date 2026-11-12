@@ -91,6 +91,13 @@ Send a message that already has its headers.
 
 Give up on a server that stops answering (default 30 seconds).
 
+=head2 set_max_line($bytes)
+
+Longest reply line accepted from the server (default 8192 bytes; RFC 5321
+limits reply lines to 512). A longer line, or a multi-line reply of more
+than 1000 lines, is treated as a broken connection: the connection is
+closed and C<code()> returns 0. Returns the previous limit.
+
 =head2 mail($from)
 
 Set sender (MAIL FROM command).
@@ -207,6 +214,7 @@ func make(str $host, int $port) scalar {
     $self{"last_response"} = "";
     $self{"buf"} = "";
     $self{"timeout"} = 30;
+    $self{"max_line"} = 8192;   # longest reply line accepted (set_max_line)
     # set by Net::SMTP_SSL once the connection is encrypted
     $self{"send_fn"} = undef;
     $self{"recv_fn"} = undef;
@@ -236,6 +244,14 @@ func set_timeout(scalar $self, int $seconds) void {
         setsockopt(sfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
         setsockopt(sfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
     }
+}
+
+# Longest reply line accepted from the server, in bytes (default 8192).
+# Returns the previous limit. Values <= 0 are ignored.
+func set_max_line(scalar $self, int $bytes) int {
+    my int $prev = $self->{"max_line"};
+    if ($bytes > 0) { $self->{"max_line"} = $bytes; }
+    return $prev;
 }
 
 # Enable debug mode (prints SMTP conversation)
@@ -269,12 +285,19 @@ func send_cmd(scalar $self, str $cmd) int {
     return SMTP::send_raw($self, $cmd . "\r\n");
 }
 
-# Internal: one line from the server, without its line ending ("" at EOF)
+# Internal: one line from the server, without its line ending (undef at EOF,
+# or when the server sends a line longer than max_line: the connection is
+# closed rather than buffering without limit).
 func read_line(scalar $self) scalar {
+    my int $max = $self->{"max_line"};
     while (index($self->{"buf"}, "\n") < 0) {
+        if ($max > 0 && core::byte_length($self->{"buf"}) > $max + 1) {
+            SMTP::_line_too_long($self);
+            return undef;
+        }
         my str $chunk = SMTP::recv_raw($self);
-        if (length($chunk) == 0) {
-            if (length($self->{"buf"}) == 0) { return undef; }
+        if (core::byte_length($chunk) == 0) {
+            if (core::byte_length($self->{"buf"}) == 0) { return undef; }
             my str $rest = $self->{"buf"};
             $self->{"buf"} = "";
             return $rest;
@@ -282,13 +305,31 @@ func read_line(scalar $self) scalar {
         $self->{"buf"} = $self->{"buf"} . $chunk;
     }
     my str $b = $self->{"buf"};
+    my int $blen = core::byte_length($b);
     my int $nl = index($b, "\n");
-    my str $line = substr($b, 0, $nl);
-    $self->{"buf"} = substr($b, $nl + 1, length($b) - $nl - 1);
-    if (length($line) > 0 && substr($line, length($line) - 1, 1) eq "\r") {
-        $line = substr($line, 0, length($line) - 1);
+    my str $line = core::byte_substr($b, 0, $nl);
+    $self->{"buf"} = core::byte_substr($b, $nl + 1, $blen - $nl - 1);
+    my int $llen = core::byte_length($line);
+    if ($llen > 0 && core::byte_substr($line, $llen - 1, 1) eq "\r") {
+        $llen = $llen - 1;
+        $line = core::byte_substr($line, 0, $llen);
+    }
+    if ($max > 0 && $llen > $max) {
+        SMTP::_line_too_long($self);
+        return undef;
     }
     return $line;
+}
+
+# Internal: the server sent an over-long line (or endless reply); drop the
+# connection (the rest of the stream can't be trusted to be in sync).
+func _line_too_long(scalar $self, str $why = "") void {
+    if ($self->{"debug"} == 1) {
+        if ($why eq "") { $why = "reply line longer than " . $self->{"max_line"} . " bytes"; }
+        say("S: <" . $why . "; closing>");
+    }
+    $self->{"buf"} = "";
+    SMTP::close($self);
 }
 
 # Internal: receive a (possibly multi-line) response. Replies are read a
@@ -298,9 +339,16 @@ func read_line(scalar $self) scalar {
 func recv_response(scalar $self) str {
     my str $response = "";
     my int $code = 0;
+    my int $nlines = 0;
     while (1) {
         my scalar $line = SMTP::read_line($self);
         if (!defined($line)) { $code = 0; last; }
+        $nlines = $nlines + 1;
+        if ($nlines > 1000) {   # endless "250-..." continuation: give up
+            SMTP::_line_too_long($self, "reply longer than 1000 lines");
+            $code = 0;
+            last;
+        }
         $response = $response . $line . "\r\n";
         if (length($line) < 3 || $line !~ /^[0-9]{3}/) { $code = 0; last; }
         $code = core::atoi(substr($line, 0, 3));

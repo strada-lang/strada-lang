@@ -481,7 +481,7 @@ func readline(scalar $self, int $max_bytes) str {
 
     while ($count < $max_bytes) {
         my str $c = core::read_fd($self->{"fd"}, 1);
-        if (length($c) == 0) {
+        if (core::byte_length($c) == 0) {
             # Timeout or error
             last;
         }

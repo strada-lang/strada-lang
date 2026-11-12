@@ -168,6 +168,16 @@ B<Parameters:>
 
 =item B<headers> - Hash reference of custom headers
 
+=item B<max_header_bytes> - Largest response header section accepted
+(default 65536). A server whose status line and headers exceed this gets the
+error C<"HTTP response headers exceed N bytes"> instead of being buffered
+without limit; 0 disables the check.
+
+=item B<max_response_bytes> - Largest whole response (headers and body)
+accepted (default 67108864, i.e. 64 MiB). A bigger response stops being read
+and the request fails with C<"HTTP response exceeds N bytes"> rather than
+being silently truncated; 0 disables the check.
+
 =back
 
 =back
@@ -470,8 +480,9 @@ func parse_response(str $raw) hash {
         return %response;
     }
 
-    my str $header_section = substr($raw, 0, $sep);
-    my str $body = substr($raw, $sep + 4, length($raw) - $sep - 4);
+    my str $header_section = core::byte_substr($raw, 0, $sep);
+    my int $raw_bytes = core::byte_length($raw);
+    my str $body = core::byte_substr($raw, $sep + 4, $raw_bytes - $sep - 4);
 
     # Parse status line
     my int $first_line_end = index($header_section, "\r\n");
@@ -518,38 +529,68 @@ func parse_response(str $raw) hash {
     return %response;
 }
 
-# Internal: read HTTP response from socket
-func read_response(scalar $sock) str {
-    my str $response = "";
-    my int $max_reads = 1000;
-    my int $reads = 0;
+# Internal: max_header_bytes option (default 65536; 0 = no limit)
+func _max_header_bytes(hash %options) int {
+    if (defined($options{"max_header_bytes"})) {
+        my int $m = $options{"max_header_bytes"} + 0;
+        if ($m < 0) { $m = 0; }
+        return $m;
+    }
+    return 65536;
+}
 
-    while ($reads < $max_reads) {
+# Internal: max_response_bytes option (default 64 MiB; 0 = no limit)
+func _max_response_bytes(hash %options) int {
+    if (defined($options{"max_response_bytes"})) {
+        my int $m = $options{"max_response_bytes"} + 0;
+        if ($m < 0) { $m = 0; }
+        return $m;
+    }
+    return 67108864;
+}
+
+# Internal: does a raw response's header section exceed $max bytes?
+func _headers_too_large(str $raw, int $max) int {
+    if ($max <= 0) { return 0; }
+    my int $sep = index($raw, "\r\n\r\n");
+    if ($sep < 0) { return core::byte_length($raw) > $max ? 1 : 0; }
+    return $sep > $max ? 1 : 0;
+}
+
+# Internal: read HTTP response from socket. Stops early once more than
+# $max_header_bytes arrive without the end of the headers, or once the
+# response grows past $max_response_bytes (0 = no limit for either).
+func read_response(scalar $sock, int $max_header_bytes = 65536, int $max_response_bytes = 67108864) str {
+    my str $response = "";
+
+    while (1) {
         my str $chunk = core::socket_recv($sock, 8192);
-        if (!defined($chunk) || length($chunk) == 0) {
+        if (!defined($chunk) || core::byte_length($chunk) == 0) {
             break;
         }
         $response = $response . $chunk;
-        $reads = $reads + 1;
+        if ($max_response_bytes > 0 && core::byte_length($response) > $max_response_bytes) {
+            break;
+        }
 
-        # Check if we have complete response
-        # For now, simple heuristic - if we got headers and some content
         my int $header_end = index($response, "\r\n\r\n");
+        if ($header_end < 0 && LWP::_headers_too_large($response, $max_header_bytes)) {
+            break;
+        }
         if ($header_end > 0) {
-            # Check Content-Length if present
-            my str $headers_part = substr($response, 0, $header_end);
+            my str $headers_part = core::byte_substr($response, 0, $header_end);
             my str $headers_lower = lc($headers_part);
             my int $cl_pos = index($headers_lower, "content-length:");
             if ($cl_pos >= 0) {
                 my int $cl_end = index($headers_part, "\r\n", $cl_pos);
-                if ($cl_end < 0) { $cl_end = length($headers_part); }
-                my str $cl_line = substr($headers_part, $cl_pos + 15, $cl_end - $cl_pos - 15);
-                # Trim spaces
+                if ($cl_end < 0) { $cl_end = core::byte_length($headers_part); }
+                my str $cl_line = core::byte_substr($headers_part, $cl_pos + 15, $cl_end - $cl_pos - 15);
                 while (length($cl_line) > 0 && substr($cl_line, 0, 1) eq " ") {
                     $cl_line = substr($cl_line, 1, length($cl_line) - 1);
                 }
                 my int $content_length = cast_int($cl_line);
-                my int $body_bytes = core::byte_length(substr($response, $header_end + 4));
+                my int $resp_bytes = core::byte_length($response);
+                my int $body_bytes = $resp_bytes - ($header_end + 4);
                 if ($body_bytes >= $content_length) {
                     break;
                 }
@@ -653,9 +694,19 @@ func do_request(str $method, str $url, str $body, hash %options) hash {
 
     core::socket_send($sock, $request);
 
-    my str $raw_response = LWP::read_response($sock);
+    my int $max_hdr = LWP::_max_header_bytes(%options);
+    my int $max_resp = LWP::_max_response_bytes(%options);
+    my str $raw_response = LWP::read_response($sock, $max_hdr, $max_resp);
     core::socket_close($sock);
 
+    if ($max_resp > 0 && core::byte_length($raw_response) > $max_resp) {
+        $response{"error"} = "HTTP response exceeds " . $max_resp . " bytes";
+        return %response;
+    }
+    if (LWP::_headers_too_large($raw_response, $max_hdr)) {
+        $response{"error"} = "HTTP response headers exceed " . $max_hdr . " bytes";
+        return %response;
+    }
     return LWP::parse_response($raw_response);
 }
 

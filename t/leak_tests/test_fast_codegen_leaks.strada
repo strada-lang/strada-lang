@@ -260,6 +260,27 @@ func main() int {
             my scalar $ref_cyc = {"k" => "v"};
             $ref_cyc->{"self"} = $ref_cyc;
         }
+
+        # 11. Binary I/O & temp-arg cleanup on fd/fh/socket builtins
+        my scalar $io_p = core::pipe();
+        my str $io_bin = "a\x00b" . core::byte(255) . make_str($iter);
+        my int $io_w = core::write_fd($io_p->[1], $io_bin);
+        core::close_fd($io_p->[1]);
+        my str $io_r = core::read_fd($io_p->[0], 64);
+        core::close_fd($io_p->[0]);
+        if ($io_w != core::byte_length($io_bin) || $io_r ne $io_bin) {
+            say("FAIL 21");
+            return 1;
+        }
+        my scalar $mem_fh = core::open_str("line1\x00ok\nline2", "r");
+        my str $ml1 = core::readline($mem_fh);
+        my int $meof = core::eof($mem_fh) ? 1 : 0;
+        my str $ml2 = core::fread($mem_fh, 10);
+        core::close($mem_fh);
+        if (core::byte_length($ml1) != 8 || $meof != 0 || $ml2 ne "line2") {
+            say("FAIL 22: " . core::byte_length($ml1) . "/" . $meof . "/" . $ml2);
+            return 1;
+        }
     }
 
     if ($shared ne "borrowed_val_42") {

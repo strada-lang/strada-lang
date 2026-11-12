@@ -583,6 +583,7 @@ void strada_die_sv(StradaValue *msg);
  * ============================================================ */
 StradaValue* strada_open(const char *filename, const char *mode);
 StradaValue* strada_open_str(const char *content, const char *mode);
+StradaValue* strada_open_str_sv(StradaValue *content_sv, StradaValue *mode_sv);
 StradaValue* strada_open_sv(StradaValue *first_arg, StradaValue *mode_arg);
 StradaValue* strada_str_from_fh(StradaValue *fh);
 StradaValue* strada_close(StradaValue *fh);  /* returns tagged int: 1 closed, 0 nothing */
@@ -592,6 +593,7 @@ int64_t strada_write_file_n(StradaValue *fh, StradaValue *data, int64_t n);  /* 
 int64_t strada_fwrite_sv(StradaValue *fh, StradaValue *data);
 int64_t strada_fwrite_sv_n(StradaValue *fh, StradaValue *data, int64_t n);
 StradaValue* strada_read_line(StradaValue *fh);
+StradaValue* strada_read_line_max(StradaValue *fh, StradaValue *max_sv);  /* max <= 0: unlimited */
 StradaValue* strada_read_all_lines(StradaValue *fh);
 void strada_write_file(StradaValue *fh, const char *content);
 int strada_file_exists(const char *filename);
@@ -1945,6 +1947,7 @@ StradaValue* strada_mono_ms(void);
 StradaValue* strada_socket_try_connect(StradaValue *host, StradaValue *port);
 StradaValue* strada_socket_connect_check(StradaValue *sock);
 StradaValue* strada_socket_try_readline(StradaValue *sock);
+StradaValue* strada_socket_try_readline_max(StradaValue *sock, StradaValue *max_sv);
 StradaValue* strada_resolve_async(StradaValue *host);
 
 #endif /* STRADA_RUNTIME_TCC_H */

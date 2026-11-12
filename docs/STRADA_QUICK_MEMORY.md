@@ -365,7 +365,7 @@ Types: `defined`, `typeof`, `isa`
 
 `open($file, $mode) → fh` — modes: `"r"`, `"w"`, `"a"`, `"rb"`, `"<"`, `">"`, `">>"`, `"rw"`
 `close($fh)` | `slurp($file) → str` | `slurp_fh($fh) → str` | `spew($file, $str)`
-`readline($fh) → str` | `fread($fh, $size) → str` | `fwrite($fh, $data, $size)`
+`readline($fh [, $max]) → str` | `fread($fh, $size) → str` | `fwrite($fh, $data, $size)`
 `tell($fh) → int` | `seek($fh, $offset, $whence)` — 0=SET, 1=CUR, 2=END
 `rewind($fh)` | `eof($fh) → 1/0` | `flush($fh)` | `fileno($fh) → int`
 `open_str($content, $mode) → fh` — in-memory I/O | `str_from_fh($fh) → str`

@@ -1,0 +1,187 @@
+# EXPECT: All binary I/O and socket tests passed
+# Comprehensive regression test for binary-safe raw fd, filehandle, pipe,
+# in-memory stream, qx, and socket operations:
+#   1. core::write_fd / core::read_fd with NUL bytes, high bytes (0x80-0xFF),
+#      and UTF-8-flagged strings (ticket: write_fd-read_fd-not-binary-safe)
+#   2. core::write_fd partial-write loop on a >128 KiB binary pipe payload
+#   3. core::spew_fh / core::spew_fd / core::fputs / 1-arg core::fread with NULs
+#   4. core::open_str and core::open(\$buf, "r"/"w"/"a") with NUL bytes & empty str
+#   5. say() / say($fh, ...) / printf("%c", 0) binary safety + expression value
+#   6. core::qx with embedded NUL bytes
+#   7. core::getsockname / getpeername / setsockopt / getsockopt / shutdown / poll
+#      accepting STRADA_SOCKET objects directly (not fd 0!)
+#   8. core::socket_select and core::readline($sock) >4096-byte line + buffered-read
+#      select readiness
+
+func main() int {
+    # 1. Exact reproduction from write_fd-read_fd-not-binary-safe.md + high bytes + UTF-8
+    my scalar $p = core::pipe();
+    my str $data = core::byte(1) . core::byte(6) . core::byte(0) . core::byte(1) . "tail"
+                 . core::byte(128) . core::byte(255) . core::byte(0) . "end";
+    my int $want = core::byte_length($data);
+    my int $wrote = core::write_fd($p->[1], $data);
+    core::close_fd($p->[1]);
+    my str $got = core::read_fd($p->[0], 100);
+    core::close_fd($p->[0]);
+    if ($want != 14 || $wrote != 14 || core::byte_length($got) != 14 || $got ne $data) {
+        say("FAIL 1: want=" . $want . " wrote=" . $wrote . " got=" . core::byte_length($got));
+        return 1;
+    }
+
+    # UTF-8-flagged string with NUL byte through write_fd / read_fd
+    my scalar $pu = core::pipe();
+    my str $u_str = "café\x00naïve";
+    my int $u_want = core::byte_length($u_str);
+    my int $u_wrote = core::write_fd($pu->[1], $u_str);
+    core::close_fd($pu->[1]);
+    my str $u_got = core::read_fd($pu->[0], 100);
+    core::close_fd($pu->[0]);
+    if ($u_want != 12 || $u_wrote != 12 || core::byte_length($u_got) != 12 || $u_got ne $u_str) {
+        say("FAIL 1b: u_want=" . $u_want . " u_wrote=" . $u_wrote . " u_got=" . core::byte_length($u_got));
+        return 1;
+    }
+
+    # 2. Large (>128 KiB) binary payload across a pipe (exercises partial-write loop)
+    my str $chunk16 = core::byte(0) . core::byte(1) . core::byte(255) . "AbCdEfGhIjKl\x00";
+    my str $big_payload = $chunk16 x 10000; # 160,000 bytes (exceeds 64 KiB Linux pipe buffer)
+    my int $big_len = core::byte_length($big_payload);
+    my scalar $pb = core::pipe();
+    my int $pid = core::fork();
+    if ($pid == 0) {
+        core::close_fd($pb->[0]);
+        my int $nw = core::write_fd($pb->[1], $big_payload);
+        core::close_fd($pb->[1]);
+        exit($nw == $big_len ? 0 : 2);
+    }
+    core::close_fd($pb->[1]);
+    my str $big_got = core::read_all_fd($pb->[0]);
+    core::close_fd($pb->[0]);
+    my int $st = core::waitpid($pid, 0);
+    if (core::exit_status($st) != 0 || core::byte_length($big_got) != $big_len || $big_got ne $big_payload) {
+        say("FAIL 2: big_got=" . core::byte_length($big_got) . " want=" . $big_len);
+        return 1;
+    }
+
+    # 3. spew_fh, spew_fd, fputs, and 1-arg fread with embedded NULs
+    my scalar $tmp = core::tmpfile();
+    core::spew_fh($tmp, $data);
+    core::rewind($tmp);
+    my str $fr_all = core::fread($tmp);
+    core::close($tmp);
+    if (core::byte_length($fr_all) != 14 || $fr_all ne $data) {
+        say("FAIL 3a: fread=" . core::byte_length($fr_all));
+        return 1;
+    }
+
+    my scalar $ps = core::pipe();
+    core::spew_fd($ps->[1], $data);
+    core::close_fd($ps->[1]);
+    my str $sp_got = core::slurp_fd($ps->[0]);
+    core::close_fd($ps->[0]);
+    if (core::byte_length($sp_got) != 14 || $sp_got ne $data) {
+        say("FAIL 3b: spew_fd=" . core::byte_length($sp_got));
+        return 1;
+    }
+
+    # 4. open_str and open(\$buf, "r"/"w"/"a") with NUL bytes and empty string
+    my scalar $mfh = core::open_str($data, "r");
+    my str $mread = core::fread($mfh, 100);
+    core::close($mfh);
+    if (core::byte_length($mread) != 14 || $mread ne $data) {
+        say("FAIL 4a: open_str read=" . core::byte_length($mread));
+        return 1;
+    }
+
+    my scalar $empty_fh = core::open_str("", "r");
+    if (!defined($empty_fh)) {
+        say("FAIL 4b: open_str empty returned undef");
+        return 1;
+    }
+    core::close($empty_fh);
+
+    my str $backing = "A\x00B";
+    my scalar $rfh = core::open(\$backing, "a");
+    core::fputs("C\x00D", $rfh);
+    core::close($rfh);
+    if (core::byte_length($backing) != 6 || $backing ne "A\x00BC\x00D") {
+        say("FAIL 4c: backing len=" . core::byte_length($backing));
+        return 1;
+    }
+
+    # 5. say($fh, ...) and print($fh, ...) binary safety + expression value
+    my str $say_buf = "";
+    my scalar $sfh = core::open(\$say_buf, "w");
+    my int $ok1 = print($sfh, "X\x00Y");
+    my int $ok2 = say($sfh, "Z\x00W");
+    core::close($sfh);
+    if ($ok1 != 1 || $ok2 != 1 || core::byte_length($say_buf) != 7 || $say_buf ne "X\x00YZ\x00W\n") {
+        say("FAIL 5: say_buf len=" . core::byte_length($say_buf));
+        return 1;
+    }
+
+    # 6. core::qx with embedded NUL bytes
+    my str $qx_out = core::qx("printf 'hello\\0world'");
+    if (core::byte_length($qx_out) != 11 || $qx_out ne "hello\x00world") {
+        say("FAIL 6: qx len=" . core::byte_length($qx_out));
+        return 1;
+    }
+
+    # 7 & 8. Socket objects with getsockname/getpeername/setsockopt/poll,
+    # >4096-byte socket readline, and socket_select with buffered bytes
+    my scalar $srv = core::socket_server(0);
+    if (!defined($srv)) {
+        say("FAIL 7a: socket_server(0)");
+        return 1;
+    }
+    my scalar $sname = core::getsockname($srv);
+    my int $port = $sname->{"port"} + 0;
+    if ($port <= 0) {
+        say("FAIL 7b: getsockname port=" . $port);
+        return 1;
+    }
+    my scalar $cli = core::socket_client("127.0.0.1", $port);
+    my scalar $acc = core::socket_accept($srv);
+    my scalar $pname = core::getpeername($acc);
+    if (!defined($pname) || ($pname->{"port"} + 0) <= 0) {
+        say("FAIL 7c: getpeername failed");
+        return 1;
+    }
+    my array @pfd_list = ({ "fd" => $cli, "events" => 4 }); # POLLOUT = 4
+    if (core::poll(\@pfd_list, 1000) <= 0) {
+        say("FAIL 7d: poll on STRADA_SOCKET failed");
+        return 1;
+    }
+
+    # Send a 6000-byte line (exceeds old 4096-byte cap) followed by binary tail
+    my str $long_line = ("L" x 6000);
+    my str $bin_tail = "B\x00C\x00D";
+    core::socket_send($cli, $long_line . "\r\n" . $bin_tail);
+    core::shutdown($cli, 1); # SHUT_WR = 1
+
+    my str $got_line = core::readline($acc);
+    if (core::byte_length($got_line) != 6000 || $got_line ne $long_line) {
+        say("FAIL 8a: readline len=" . core::byte_length($got_line));
+        return 1;
+    }
+
+    # $bin_tail is now sitting in $acc's user-space StradaSocketBuffer!
+    # core::socket_select MUST still report $acc as readable immediately.
+    my array @watch = ($acc);
+    my array @ready = core::socket_select(\@watch, 50);
+    if (size(@ready) != 1) {
+        say("FAIL 8b: socket_select missed buffered bytes");
+        return 1;
+    }
+    my str $got_tail = core::socket_recv($acc, 100);
+    if (core::byte_length($got_tail) != 5 || $got_tail ne $bin_tail) {
+        say("FAIL 8c: socket_recv tail len=" . core::byte_length($got_tail));
+        return 1;
+    }
+
+    core::socket_close($acc);
+    core::socket_close($cli);
+    core::socket_close($srv);
+
+    say("All binary I/O and socket tests passed");
+    return 0;
+}

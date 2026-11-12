@@ -166,6 +166,16 @@ B<Parameters:>
 
 =item B<headers> - Hash reference of custom headers
 
+=item B<max_header_bytes> - Largest response header section accepted
+(default 65536). A server whose status line and headers exceed this gets the
+error C<"HTTP response headers exceed N bytes"> instead of being buffered
+without limit; 0 disables the check.
+
+=item B<max_response_bytes> - Largest whole response (headers and body)
+accepted (default 67108864, i.e. 64 MiB). A bigger response stops being read
+and the request fails with C<"HTTP response exceeds N bytes"> rather than
+being silently truncated; 0 disables the check.
+
 =back
 
 =back
@@ -401,8 +411,9 @@ func parse_response(str $raw) hash {
         return %response;
     }
 
-    my str $header_section = substr($raw, 0, $sep);
-    my str $body = substr($raw, $sep + 4, length($raw) - $sep - 4);
+    my str $header_section = core::byte_substr($raw, 0, $sep);
+    my int $raw_bytes = core::byte_length($raw);
+    my str $body = core::byte_substr($raw, $sep + 4, $raw_bytes - $sep - 4);
 
     my int $first_line_end = index($header_section, "\r\n");
     my str $status_line = "";
@@ -488,23 +499,58 @@ func build_request(str $method, str $host, str $path, str $body, hash %options) 
     return $request;
 }
 
-# Read HTTP response from socket
-func read_http_response(scalar $sock) str {
+# Internal: max_header_bytes option (default 65536; 0 = no limit)
+func _max_header_bytes(hash %options) int {
+    if (defined($options{"max_header_bytes"})) {
+        my int $m = $options{"max_header_bytes"} + 0;
+        if ($m < 0) { $m = 0; }
+        return $m;
+    }
+    return 65536;
+}
+
+# Internal: max_response_bytes option (default 64 MiB; 0 = no limit)
+func _max_response_bytes(hash %options) int {
+    if (defined($options{"max_response_bytes"})) {
+        my int $m = $options{"max_response_bytes"} + 0;
+        if ($m < 0) { $m = 0; }
+        return $m;
+    }
+    return 67108864;
+}
+
+# Internal: does a raw response's header section exceed $max bytes?
+func _headers_too_large(str $raw, int $max) int {
+    if ($max <= 0) { return 0; }
+    my int $sep = index($raw, "\r\n\r\n");
+    if ($sep < 0) { return core::byte_length($raw) > $max ? 1 : 0; }
+    return $sep > $max ? 1 : 0;
+}
+
+# Read HTTP response from socket. Stops early once more than
+# $max_header_bytes arrive without the end of the headers, or once the
+# response grows past $max_response_bytes (0 = no limit for either).
+func read_http_response(scalar $sock, int $max_header_bytes = 65536, int $max_response_bytes = 67108864) str {
     my str $response = "";
-    my int $reads = 0;
-    while ($reads < 1000) {
+    while (1) {
         my str $chunk = core::socket_recv($sock, 8192);
-        if (!defined($chunk) || length($chunk) == 0) {
+        if (!defined($chunk) || core::byte_length($chunk) == 0) {
             break;
         }
         $response = $response . $chunk;
-        $reads = $reads + 1;
+        if ($max_response_bytes > 0 && core::byte_length($response) > $max_response_bytes) {
+            break;
+        }
+        if (index($response, "\r\n\r\n") < 0
+            && LWP_SSL::_headers_too_large($response, $max_header_bytes)) {
+            break;
+        }
     }
     return $response;
 }
 
 # Internal: Make HTTP request (plain)
-func do_http_request(str $host, int $port, str $request) hash {
+func do_http_request(str $host, int $port, str $request, int $max_header_bytes = 65536, int $max_response_bytes = 67108864) hash {
     my hash %response = ();
     $response{"success"} = 0;
 
@@ -515,14 +561,22 @@ func do_http_request(str $host, int $port, str $request) hash {
     }
 
     core::socket_send($sock, $request);
-    my str $raw_response = LWP_SSL::read_http_response($sock);
+    my str $raw_response = LWP_SSL::read_http_response($sock, $max_header_bytes, $max_response_bytes);
     core::socket_close($sock);
 
+    if ($max_response_bytes > 0 && core::byte_length($raw_response) > $max_response_bytes) {
+        $response{"error"} = "HTTP response exceeds " . $max_response_bytes . " bytes";
+        return %response;
+    }
+    if (LWP_SSL::_headers_too_large($raw_response, $max_header_bytes)) {
+        $response{"error"} = "HTTP response headers exceed " . $max_header_bytes . " bytes";
+        return %response;
+    }
     return LWP_SSL::parse_response($raw_response);
 }
 
 # Internal: Make HTTPS request (uses ssl module via extern "C")
-func do_https_request(str $host, int $port, str $request) hash {
+func do_https_request(str $host, int $port, str $request, int $max_header_bytes = 65536, int $max_response_bytes = 67108864) hash {
     my hash %response = ();
     $response{"success"} = 0;
 
@@ -539,14 +593,29 @@ func do_https_request(str $host, int $port, str $request) hash {
     # Read response
     my str $raw_response = "";
     my str $chunk = ssl::read($conn, 8192);
-    while (length($chunk) > 0) {
+    while (core::byte_length($chunk) > 0) {
         $raw_response = $raw_response . $chunk;
+        if ($max_response_bytes > 0 && core::byte_length($raw_response) > $max_response_bytes) {
+            last;
+        }
+        if (index($raw_response, "\r\n\r\n") < 0
+            && LWP_SSL::_headers_too_large($raw_response, $max_header_bytes)) {
+            last;
+        }
         $chunk = ssl::read($conn, 8192);
     }
 
     # Close connection
     ssl::close($conn);
 
+    if ($max_response_bytes > 0 && core::byte_length($raw_response) > $max_response_bytes) {
+        $response{"error"} = "HTTP response exceeds " . $max_response_bytes . " bytes";
+        return %response;
+    }
+    if (LWP_SSL::_headers_too_large($raw_response, $max_header_bytes)) {
+        $response{"error"} = "HTTP response headers exceed " . $max_header_bytes . " bytes";
+        return %response;
+    }
     return LWP_SSL::parse_response($raw_response);
 }
 
@@ -585,10 +654,12 @@ func do_request(str $method, str $url, str $body, hash %options) hash {
 
     my str $request = LWP_SSL::build_request($method, $host, $path, $body, %options);
 
+    my int $max_hdr = LWP_SSL::_max_header_bytes(%options);
+    my int $max_resp = LWP_SSL::_max_response_bytes(%options);
     if ($scheme eq "https") {
-        return LWP_SSL::do_https_request($host, $port, $request);
+        return LWP_SSL::do_https_request($host, $port, $request, $max_hdr, $max_resp);
     } else {
-        return LWP_SSL::do_http_request($host, $port, $request);
+        return LWP_SSL::do_http_request($host, $port, $request, $max_hdr, $max_resp);
     }
 }
 

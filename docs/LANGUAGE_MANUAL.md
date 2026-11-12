@@ -2041,7 +2041,7 @@ my int $pid = sys::getpid();      # Also works (legacy alias)
 - `core::open_str($content, $mode)` - Open in-memory handle from string
 - `core::str_from_fh($fh)` - Extract string from memstream (without closing)
 - `core::close($fh)` - Close file
-- `core::readline($fh)` - Read line
+- `core::readline($fh [, $max])` - Read line; with `$max` > 0, at most `$max` bytes (the rest of a longer line comes back on the next call)
 - `core::slurp($path)` - Read entire file
 - `core::spew($path, $data)` - Write file
 

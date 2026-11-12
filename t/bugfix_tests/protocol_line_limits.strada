@@ -1,0 +1,173 @@
+# EXPECT: protocol line limits ok
+# Network clients buffered whatever the peer sent until a line or header
+# terminator showed up, so a hostile or broken server could make them use
+# unbounded memory. Now: LWP rejects response headers over max_header_bytes
+# (default 64 KiB) and whole responses over max_response_bytes (default
+# 64 MiB), Net::SMTP drops a reply line over set_max_line (default
+# 8192) or a reply of more than 1000 lines, and Async::Task::readline takes
+# an optional $max_bytes.
+use lib "lib";
+use LWP;
+use Net::SMTP;
+use Async::Task;
+
+func fail(str $msg) int {
+    say("FAIL " . $msg);
+    return 1;
+}
+
+# Listen on an ephemeral port; returns [server, port].
+func open_listener() scalar {
+    my scalar $srv = core::socket_server(0);
+    my int $port = core::getsockname($srv)->{"port"} + 0;
+    return [$srv, $port];
+}
+
+# Read an HTTP request's headers (up to the blank line).
+func read_request(scalar $c) void {
+    my str $req = "";
+    while (index($req, "\r\n\r\n") < 0) {
+        my scalar $chunk = core::socket_recv($c, 4096);
+        if (!defined($chunk) || core::byte_length($chunk) == 0) { return; }
+        $req = $req . $chunk;
+    }
+}
+
+# Fork a one-connection server that runs $mode, returns the child pid.
+func serve(scalar $srv, str $mode) int {
+    my int $pid = core::fork();
+    if ($pid != 0) { return $pid; }
+    my scalar $c = core::socket_accept($srv);
+    if ($mode eq "http_endless_header") {
+        ::read_request($c);
+        core::socket_send($c, "HTTP/1.1 200 OK\r\nX-Big: " . ("a" x 100000));
+        core::sleep(30);          # never finishes the headers, never closes
+    } elsif ($mode eq "http_big_header") {
+        ::read_request($c);
+        core::socket_send($c, "HTTP/1.1 200 OK\r\nX-Big: " . ("a" x 100000)
+                              . "\r\nContent-Length: 2\r\n\r\nok");
+    } elsif ($mode eq "http_big_body") {
+        ::read_request($c);
+        core::socket_send($c, "HTTP/1.1 200 OK\r\nContent-Length: 300000\r\n\r\n" . ("b" x 300000));
+        core::sleep(30);          # body complete; keep the connection open
+    } elsif ($mode eq "smtp_long_greeting") {
+        core::socket_send($c, "220 " . ("g" x 20000) . "\r\n");
+        core::sleep(30);
+    } elsif ($mode eq "smtp_endless_reply" || $mode eq "smtp_9k_line") {
+        core::socket_send($c, "220 hi\r\n");
+        my str $buf = "";
+        while (index($buf, "\r\n") < 0) {
+            my scalar $chunk = core::socket_recv($c, 4096);
+            if (!defined($chunk) || core::byte_length($chunk) == 0) { exit(0); }
+            $buf = $buf . $chunk;
+        }
+        if ($mode eq "smtp_endless_reply") {
+            core::socket_send($c, ("250-x\r\n" x 1500) . "250 end\r\n");
+        } else {
+            core::socket_send($c, "250-" . ("k" x 9000) . "\r\n250 ok\r\n");
+        }
+        core::sleep(30);
+    } elsif ($mode eq "lines") {
+        core::socket_send($c, "abcdefghij\r\nshort\n" . ("Z" x 10000) . "\nend\n");
+        core::sleep(30);
+    }
+    exit(0);
+}
+
+func finish(int $pid) void {
+    core::kill($pid, 9);
+    core::waitpid($pid, 0);
+}
+
+func main() int {
+    my scalar $l = ::open_listener();
+    my scalar $srv = $l->[0];
+    my str $url = "http://127.0.0.1:" . $l->[1] . "/";
+
+    # LWP: endless header section -> error once past the default 64 KiB,
+    # without waiting for the server to finish or close.
+    my int $pid = ::serve($srv, "http_endless_header");
+    my hash %empty = ();
+    my hash %r = LWP::get_with_options($url, %empty);
+    ::finish($pid);
+    if ($r{"success"} || index("" . $r{"error"}, "headers exceed 65536 bytes") < 0) {
+        return ::fail("lwp default limit: " . $r{"error"});
+    }
+
+    # LWP: the same big header is fine with a larger max_header_bytes.
+    $pid = ::serve($srv, "http_big_header");
+    my hash %opts = ();
+    $opts{"max_header_bytes"} = 200000;
+    %r = LWP::get_with_options($url, %opts);
+    ::finish($pid);
+    if (!$r{"success"} || $r{"content"} ne "ok") { return ::fail("lwp raised limit: " . $r{"error"}); }
+
+    # LWP: a 300 KB response fails with max_response_bytes => 100000 ...
+    $pid = ::serve($srv, "http_big_body");
+    my hash %small = ();
+    $small{"max_response_bytes"} = 100000;
+    %r = LWP::get_with_options($url, %small);
+    ::finish($pid);
+    if ($r{"success"} || index("" . $r{"error"}, "response exceeds 100000 bytes") < 0) {
+        return ::fail("lwp max_response_bytes: " . $r{"error"});
+    }
+    # ... and succeeds under the default 64 MiB limit.
+    $pid = ::serve($srv, "http_big_body");
+    %r = LWP::get_with_options($url, %empty);
+    ::finish($pid);
+    if (!$r{"success"} || core::byte_length($r{"content"}) != 300000) {
+        return ::fail("lwp default response limit: " . $r{"error"});
+    }
+
+    # SMTP: a greeting line over 8192 bytes -> connection refused.
+    $l = ::open_listener();
+    $srv = $l->[0];
+    my int $port = $l->[1];
+    $pid = ::serve($srv, "smtp_long_greeting");
+    my scalar $smtp = SMTP::new("127.0.0.1", $port);
+    ::finish($pid);
+    if (defined($smtp)) { return ::fail("smtp long greeting accepted"); }
+
+    # SMTP: endless multi-line reply -> gives up after 1000 lines.
+    $pid = ::serve($srv, "smtp_endless_reply");
+    $smtp = SMTP::new("127.0.0.1", $port);
+    if (!defined($smtp)) { ::finish($pid); return ::fail("smtp connect"); }
+    my int $ok = $smtp->ehlo("client.test");
+    ::finish($pid);
+    if ($ok != 0 || $smtp->code() != 0) { return ::fail("smtp endless reply accepted"); }
+
+    # SMTP: a 9000-byte reply line is accepted after set_max_line(16384).
+    $pid = ::serve($srv, "smtp_9k_line");
+    $smtp = SMTP::new("127.0.0.1", $port);
+    if (!defined($smtp)) { ::finish($pid); return ::fail("smtp connect 2"); }
+    my int $prev = $smtp->set_max_line(16384);
+    $ok = $smtp->ehlo("client.test");
+    ::finish($pid);
+    if ($prev != 8192 || $ok != 1) { return ::fail("smtp set_max_line prev=$prev ok=$ok"); }
+
+    # Async::Task::readline (outside a task: blocking fallback) with a limit.
+    $l = ::open_listener();
+    $srv = $l->[0];
+    $pid = ::serve($srv, "lines");
+    my scalar $c = core::socket_client("127.0.0.1", $l->[1]);
+    my str $a = Async::Task::readline($c, 5000, 4);
+    my str $b = Async::Task::readline($c, 5000, 4);
+    my str $d = Async::Task::readline($c, 5000, 4);
+    my str $e = Async::Task::readline($c, 5000, 100);
+    if ($a ne "abcd" || $b ne "efgh" || $d ne "ij" || $e ne "short") {
+        ::finish($pid);
+        return ::fail("task readline max: $a/$b/$d/$e");
+    }
+    # Without a limit, a 10000-byte line comes back in socket-buffer pieces.
+    my str $p1 = Async::Task::readline($c, 5000);
+    my str $p2 = Async::Task::readline($c, 5000);
+    my str $p3 = Async::Task::readline($c, 5000);
+    ::finish($pid);
+    if (core::byte_length($p1) != 8192 || core::byte_length($p2) != 1808 || $p3 ne "end") {
+        return ::fail("task readline pieces " . core::byte_length($p1) . "/" . core::byte_length($p2) . "/" . $p3);
+    }
+    core::socket_close($c);
+
+    say("protocol line limits ok");
+    return 0;
+}

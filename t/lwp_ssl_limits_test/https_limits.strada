@@ -1,0 +1,116 @@
+use lib "lib";
+use ssl;
+use LWP_SSL;
+
+func fail(str $msg) int {
+    say("FAIL " . $msg);
+    return 1;
+}
+
+func finish(int $pid) void {
+    core::kill($pid, 9);
+    core::waitpid($pid, 0);
+}
+
+func serve(int $srv, str $mode) int {
+    my int $pid = core::fork();
+    if ($pid != 0) { return $pid; }
+
+    my int $cli = ssl::accept($srv);
+    if ($cli == 0) { core::_exit(1); }
+
+    my str $req = "";
+    while (index($req, "\r\n\r\n") < 0) {
+        my str $chunk = ssl::read($cli, 4096);
+        if (core::byte_length($chunk) == 0) { break; }
+        $req = $req . $chunk;
+    }
+
+    if ($mode eq "endless_header") {
+        ssl::write($cli, "HTTP/1.1 200 OK\r\nX-Big: " . ("a" x 100000));
+        core::sleep(30);
+    } elsif ($mode eq "big_header") {
+        ssl::write($cli, "HTTP/1.1 200 OK\r\nX-Big: " . ("a" x 100000) . "\r\nContent-Length: 2\r\n\r\nok");
+        ssl::close($cli);
+    } elsif ($mode eq "endless_body") {
+        ssl::write($cli, "HTTP/1.1 200 OK\r\nContent-Length: 300000\r\n\r\n" . ("b" x 300000));
+        core::sleep(30);
+    } elsif ($mode eq "big_body") {
+        my str $payload = ("B" . core::byte(0) . core::byte(255)) x 100000;
+        ssl::write($cli, "HTTP/1.1 200 OK\r\nContent-Length: 300000\r\n\r\n" . $payload);
+        ssl::close($cli);
+    }
+
+    core::_exit(0);
+    return 0;
+}
+
+func main(int $argc, array @argv) int {
+    if ($argc < 4) {
+        return ::fail("usage: https_limits <port> <cert> <key>");
+    }
+    my int $base_port = core::atoi($argv[1]);
+    my str $cert_file = $argv[2];
+    my str $key_file = $argv[3];
+
+    my int $port = $base_port;
+    my int $srv = 0;
+    my int $tries = 0;
+    while ($tries < 30) {
+        $srv = ssl::server($port, $cert_file, $key_file);
+        if ($srv != 0) { last; }
+        $port = $port + 1;
+        $tries = $tries + 1;
+    }
+    if ($srv == 0) {
+        return ::fail("ssl::server failed starting at port " . $base_port);
+    }
+
+    my str $url = "https://localhost:" . $port . "/";
+
+    # 1. Endless header section -> error once past default 64 KiB
+    my int $pid = ::serve($srv, "endless_header");
+    my hash %empty = ();
+    my hash %r = LWP_SSL::get_with_options($url, %empty);
+    ::finish($pid);
+    if ($r{"success"} || index("" . $r{"error"}, "headers exceed 65536 bytes") < 0) {
+        ssl::close($srv);
+        return ::fail("https endless_header: " . $r{"error"});
+    }
+
+    # 2. Big header succeeds when max_header_bytes is raised
+    $pid = ::serve($srv, "big_header");
+    my hash %opts = ();
+    $opts{"max_header_bytes"} = 200000;
+    %r = LWP_SSL::get_with_options($url, %opts);
+    ::finish($pid);
+    if (!$r{"success"} || $r{"content"} ne "ok") {
+        ssl::close($srv);
+        return ::fail("https big_header: " . $r{"error"});
+    }
+
+    # 3. Endless body exceeding max_response_bytes -> error
+    $pid = ::serve($srv, "endless_body");
+    my hash %small = ();
+    $small{"max_response_bytes"} = 100000;
+    %r = LWP_SSL::get_with_options($url, %small);
+    ::finish($pid);
+    if ($r{"success"} || index("" . $r{"error"}, "response exceeds 100000 bytes") < 0) {
+        ssl::close($srv);
+        return ::fail("https endless_body: " . $r{"error"});
+    }
+
+    # 4. Big binary body succeeds under default 64 MiB limit
+    $pid = ::serve($srv, "big_body");
+    %r = LWP_SSL::get_with_options($url, %empty);
+    ::finish($pid);
+    my str $expected_body = ("B" . core::byte(0) . core::byte(255)) x 100000;
+    if (!$r{"success"} || core::byte_length($r{"content"}) != 300000 || $r{"content"} ne $expected_body) {
+        ssl::close($srv);
+        return ::fail("https big_body: success=" . $r{"success"} . " len=" . core::byte_length($r{"content"}) . " err=" . $r{"error"});
+    }
+
+    ssl::close($srv);
+    say("lwp_ssl https limits ok");
+    return 0;
+}

@@ -2267,9 +2267,8 @@ func gen_str_cmp(scalar $cg, scalar $expr, str $op) void {
         $cmp_op = ">= 0";
     }
 
-    # Case 1: Right side is string literal - use strada_str_*_lit (no temp allocation)
-    if ($right_type == NODE_STR_LITERAL()) {
-        # Check if left needs cleanup
+    # Case 1: Right side is string literal (without embedded NUL) - use strada_str_*_lit
+    if ($right_type == NODE_STR_LITERAL() && index($right->{"value"}, "\x00") < 0) {
         if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $left) == 1) {
             emit($cg, "({ StradaValue *__cmp_l = ");
             gen_expression($cg, $left);
@@ -2290,8 +2289,8 @@ func gen_str_cmp(scalar $cg, scalar $expr, str $op) void {
         return;
     }
 
-    # Case 2: Left side is string literal - swap and use strada_str_*_lit
-    if ($left_type == NODE_STR_LITERAL()) {
+    # Case 2: Left side is string literal (without embedded NUL) - swap and use strada_str_*_lit
+    if ($left_type == NODE_STR_LITERAL() && index($left->{"value"}, "\x00") < 0) {
         my str $swapped = $cmp_suffix;
         if ($op eq "lt") {
             $swapped = "gt";

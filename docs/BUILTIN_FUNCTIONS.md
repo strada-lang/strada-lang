@@ -257,7 +257,7 @@ Use `core::` in user code. `sys::` is a legacy alias (the compiler normalizes
 | `core::fdopen_read(fd)` | `int → scalar` | Open fd for reading. |
 | `core::fdopen_write(fd)` | `int → scalar` | Open fd for writing. |
 | `core::close_fd(fd)` | `int → int` | close(2). |
-| `core::readline(fh)` | `scalar → str` | Read one line, newline stripped (undef at EOF). |
+| `core::readline(fh [, max])` | `scalar, int → str` | Read one line, newline stripped (undef at EOF). With `max` > 0, returns at most `max` bytes; the rest of a longer line is returned by the next call (a truncated line has `byte_length == max`). |
 | `core::read_fd(fd, n)` | `int, int → str` | read(2) up to n bytes. |
 | `core::read_all_fd(fd)` | `int → str` | Read until EOF. |
 | `core::read_byte(fd)` | `int → int` | Read one byte from a file descriptor (-1 on EOF). |
@@ -584,7 +584,7 @@ A count suffix (`N`) or `*` (consume all remaining) follows each code. Endiannes
 | `core::eventfd()` / `eventfd_signal(fd)` / `eventfd_drain(fd)` | Wakeup channel (eventfd or pipe). |
 | `core::socket_try_recv/try_send/try_accept` | Non-blocking socket ops with explicit would-block results. |
 | `core::socket_try_connect(host, port)` / `socket_connect_check(sock)` | Non-blocking TCP handshake. |
-| `core::socket_try_readline(sock)` | Buffered non-blocking readline. |
+| `core::socket_try_readline(sock [, max])` | Buffered non-blocking readline (keeps the newline; undef = would block, `""` = EOF). At most 8192 bytes per line, or `max` bytes if smaller; the rest of a longer line comes back on the next call. |
 | `core::coro_*` | Stackful coroutine primitives (compiled-only; used by `$loop->spawn`). |
 | `core::mono_ms()` | Monotonic milliseconds. |
 | `async::io_wait(fd, "r"/"w", timeout_ms)` | Future completed by the poller thread. |

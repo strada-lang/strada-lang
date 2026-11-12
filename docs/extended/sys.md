@@ -98,9 +98,12 @@ to `$n` bytes from the current position (an empty string at end of file).
 
 ```strada
 my str $line = core::readline($fh);
+my str $part = core::readline($fh, 4096);   # at most 4096 bytes
 ```
 
-Read a single line from a file handle. The trailing newline is stripped (same as `<$fh>`); returns `undef` at EOF.
+Read a single line from a file handle or socket. The trailing newline is stripped (same as `<$fh>`); returns `undef` at EOF.
+
+With the optional second argument `$max` (> 0), at most `$max` bytes are returned. The rest of a longer line is left unread and comes back on the next call (like Python's `readline(size)` or C's `fgets`). The stripped line ending does not count toward the limit, so a truncated line has `core::byte_length($part) == $max`. A line of exactly `$max` bytes is followed by `""` on the next call (its newline had not been read yet). Without a limit (or with 0 / a negative value), a line can be any length — pass a limit when reading from an untrusted peer.
 
 ### core::seek
 

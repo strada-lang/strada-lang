@@ -2390,8 +2390,7 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         return \@sp_r;
     }
     if ($bid == BI::REVERSE) {
-        reverse($args->[0]);
-        return undef;
+        return reverse($args->[0]);
     }
     if ($bid == BI::SIZE || $bid == BI::SCALAR_FN) {
         return size($args->[0]);
@@ -2438,7 +2437,7 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         return ord($args->[0]);
     }
     if ($bid == BI::CHAR_AT) {
-        return chr(char_at($args->[0], $args->[1]));
+        return char_at($args->[0], $args->[1]);
     }
     if ($bid == BI::UC) {
         return uc($args->[0]);
@@ -3050,6 +3049,7 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         return undef;
     }
     if ($bid == BI::READLINE_FN) {
+        if ($argc >= 2) { return core::readline($args->[0], $args->[1]); }
         return core::readline($args->[0]);
     }
 
@@ -3082,6 +3082,7 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         return undef;
     }
     if ($bid == BI::SYS_READLINE) {
+        if ($argc >= 2) { return core::readline($args->[0], $args->[1]); }
         return core::readline($args->[0]);
     }
     if ($bid == BI::SYS_EOF) {
@@ -3106,26 +3107,28 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
 
     # ---- core:: file I/O ----
     if ($bid == BI::SYS_FWRITE) {
-        core::fwrite($args->[0], $args->[1]);
-        return undef;
+        if ($argc >= 3) {
+            return core::fwrite($args->[0], $args->[1], $args->[2]);
+        }
+        return core::fwrite($args->[0], $args->[1]);
     }
     if ($bid == BI::SYS_FREAD) {
-        return core::fread($args->[0], $args->[1]);
+        if ($argc >= 2) {
+            return core::fread($args->[0], $args->[1]);
+        }
+        return core::fread($args->[0]);
     }
     if ($bid == BI::SYS_FPUTS) {
-        core::fputs($args->[0], $args->[1]);
-        return undef;
+        return core::fputs($args->[0], $args->[1]);
     }
     if ($bid == BI::SYS_FGETS) {
         return core::fgets($args->[0], $args->[1]);
     }
     if ($bid == BI::SYS_PCLOSE) {
-        core::close($args->[0]);
-        return undef;
+        return core::pclose($args->[0]);
     }
     if ($bid == BI::SYS_TRUNCATE) {
-        core::truncate($args->[0], $args->[1]);
-        return undef;
+        return core::truncate($args->[0], $args->[1]);
     }
     if ($bid == BI::SYS_OPEN_STR) {
         return core::open_str($args->[0], $args->[1]);

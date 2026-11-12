@@ -7111,15 +7111,9 @@ void strada_say(StradaValue *sv) {
         strada_say_fh(sv, strada_default_output);
         return;
     }
-    if (sv && !STRADA_IS_TAGGED_INT(sv) && sv->type == STRADA_REF) {
-        char *s = strada_to_str(sv);
-        if (s) { fputs(s, stdout); free(s); }
-        putchar('\n');
-        return;
-    }
-    char _tb[256];
-    const char *str = strada_to_str_buf(sv, _tb, sizeof(_tb));
-    printf("%s\n", str);
+    strada_print(sv);
+    putchar('\n');
+    fflush(stdout);
 }
 
 /* Helper: buffered write to socket */
@@ -7128,7 +7122,16 @@ static void socket_buffered_write(StradaSocketBuffer *sb, const char *data, size
         size_t space = STRADA_SOCKET_BUFSIZE - sb->write_len;
         if (space == 0) {
             /* Buffer full, flush it */
-            send(sb->fd, sb->write_buf, sb->write_len, 0);
+            size_t sent = 0;
+            while (sent < sb->write_len) {
+                ssize_t n = send(sb->fd, sb->write_buf + sent, sb->write_len - sent, MSG_NOSIGNAL);
+                if (n < 0) {
+                    if (errno == EINTR) continue;
+                    break;
+                }
+                if (n == 0) break;
+                sent += (size_t)n;
+            }
             sb->write_len = 0;
             space = STRADA_SOCKET_BUFSIZE;
         }
@@ -7156,26 +7159,24 @@ void strada_print_fh(StradaValue *sv, StradaValue *fh) {
         return;
     }
 
-    /* Stringy filehandle: if fh is a STRADA_STR matching a known
-     * standard handle name, route to the corresponding libc stream.
-     * Perl semantics: `print $fhname ARGS` where \$fhname holds
-     * "STDOUT"/"STDERR"/"STDIN" treats it as a symbolic FH ref under
-     * `no strict 'refs'`. Without this, perla wrote nothing. */
     FILE *redir_stream = NULL;
     if (fh->type == STRADA_STR && fh->value.pv) {
         if (strcmp(fh->value.pv, "STDOUT") == 0) redir_stream = stdout;
         else if (strcmp(fh->value.pv, "STDERR") == 0) redir_stream = stderr;
     }
 
-    /* Use binary-safe length for strings to handle embedded NULs */
     size_t len;
     char _tb[256];
     const char *str;
+    char *owned = NULL;
     if (!STRADA_IS_TAGGED_INT(sv) && sv && sv->type == STRADA_STR && sv->value.pv) {
         str = sv->value.pv;
-        /* BYTE length — see strada_print for rationale. */
         len = STRADA_STR_BYTELEN(sv);
-        if (len == 0) len = strlen(sv->value.pv);
+        if (len == 0 && sv->value.pv[0] != '\0') len = strlen(sv->value.pv);
+    } else if (!STRADA_IS_TAGGED_INT(sv) && sv && (sv->type == STRADA_REF || SV_BLESSED(sv))) {
+        owned = strada_to_str(sv);
+        str = owned ? owned : "";
+        len = strlen(str);
     } else {
         str = strada_to_str_buf(sv, _tb, sizeof(_tb));
         len = strlen(str);
@@ -7183,27 +7184,32 @@ void strada_print_fh(StradaValue *sv, StradaValue *fh) {
 
     if (redir_stream) {
         fwrite(str, 1, len, redir_stream);
+        free(owned);
         return;
     }
     if (fh->type == STRADA_FILEHANDLE && fh->value.fh) {
         fwrite(str, 1, len, fh->value.fh);
-        /* For `open my $fh, ">", \$scalar` filehandles, mirror the
-         * write to the backing scalar so the user sees the latest
-         * content before close(). Perl's PerlIO::scalar layer flushes
-         * to the scalar on every write; perla's open_memstream backing
-         * defers the buffer pointer update until fflush. */
         strada_fh_writeback_sync(fh->value.fh);
     } else if (fh->type == STRADA_SOCKET && fh->value.sock) {
         socket_buffered_write(fh->value.sock, str, len);
-        /* Flush if data ends with newline (line-buffered behavior) */
         if (len > 0 && str[len - 1] == '\n') {
             StradaSocketBuffer *sb = fh->value.sock;
             if (sb->write_len > 0) {
-                send(sb->fd, sb->write_buf, sb->write_len, 0);
+                size_t sent = 0;
+                while (sent < sb->write_len) {
+                    ssize_t n = send(sb->fd, sb->write_buf + sent, sb->write_len - sent, MSG_NOSIGNAL);
+                    if (n < 0) {
+                        if (errno == EINTR) continue;
+                        break;
+                    }
+                    if (n == 0) break;
+                    sent += (size_t)n;
+                }
                 sb->write_len = 0;
             }
         }
     }
+    free(owned);
 }
 
 /* Say to filehandle or socket (with newline) */
@@ -7215,40 +7221,64 @@ void strada_say_fh(StradaValue *sv, StradaValue *fh) {
         if (fetched) strada_decref(fetched);
         return;
     }
-
-    char _tb[256];
-    const char *str = strada_to_str_buf(sv, _tb, sizeof(_tb));
-    size_t len = strlen(str);
-
+    if (strada_fh_write_hook) {
+        StradaValue *with_nl = strada_concat_sv_cstr(sv, "\n", 1);
+        int handled = strada_fh_write_hook(with_nl, fh);
+        strada_decref(with_nl);
+        if (handled) return;
+    }
+    strada_print_fh(sv, fh);
+    if (fh->type == STRADA_STR && fh->value.pv) {
+        if (strcmp(fh->value.pv, "STDOUT") == 0) { fputc('\n', stdout); fflush(stdout); return; }
+        if (strcmp(fh->value.pv, "STDERR") == 0) { fputc('\n', stderr); fflush(stderr); return; }
+    }
     if (fh->type == STRADA_FILEHANDLE && fh->value.fh) {
-        fputs(str, fh->value.fh);
-        fputs("\n", fh->value.fh);
+        fputc('\n', fh->value.fh);
         fflush(fh->value.fh);
-        /* Sync backing scalar for in-memory `open ..., \$scalar`. */
         strada_fh_writeback_sync(fh->value.fh);
     } else if (fh->type == STRADA_SOCKET && fh->value.sock) {
-        socket_buffered_write(fh->value.sock, str, len);
         socket_buffered_write(fh->value.sock, "\n", 1);
-        /* Flush on newline for line-buffered behavior */
         StradaSocketBuffer *sb = fh->value.sock;
         if (sb->write_len > 0) {
-            send(sb->fd, sb->write_buf, sb->write_len, 0);
+            size_t sent = 0;
+            while (sent < sb->write_len) {
+                ssize_t n = send(sb->fd, sb->write_buf + sent, sb->write_len - sent, MSG_NOSIGNAL);
+                if (n < 0) {
+                    if (errno == EINTR) continue;
+                    break;
+                }
+                if (n == 0) break;
+                sent += (size_t)n;
+            }
             sb->write_len = 0;
         }
     }
 }
 
 StradaValue* strada_readline(void) {
-    char buffer[4096];
-    if (fgets(buffer, sizeof(buffer), stdin)) {
-        /* Remove trailing newline */
-        size_t len = strlen(buffer);
-        if (len > 0 && buffer[len-1] == '\n') {
-            buffer[len-1] = '\0';
+    size_t cap = 4096;
+    size_t len = 0;
+    char *buf = malloc(cap);
+    if (!buf) return strada_new_undef();
+    int c;
+    while ((c = fgetc(stdin)) != EOF) {
+        if (c == '\n') break;
+        if (len + 1 >= cap) {
+            cap *= 2;
+            char *nb = realloc(buf, cap);
+            if (!nb) { free(buf); return strada_new_undef(); }
+            buf = nb;
         }
-        return strada_new_str(buffer);
+        buf[len++] = (char)c;
     }
-    return strada_new_undef();
+    if (len == 0 && c == EOF) {
+        free(buf);
+        return strada_new_undef();
+    }
+    if (len > 0 && buf[len - 1] == '\r') len--;
+    StradaValue *r = strada_new_str_len(buf, len);
+    free(buf);
+    return r;
 }
 
 /* Reject format strings containing %n — the only directive that writes
@@ -8802,28 +8832,51 @@ StradaValue* strada_open(const char *filename, const char *mode) {
     return sv;
 }
 
+/* Helper: extract raw bytes + byte length from a StradaValue.
+ * When `owned_out` is set to non-NULL, caller must free(*owned_out). */
+static const char* strada_sv_raw_bytes(StradaValue *sv, char *tb, size_t tbsz, size_t *len_out, char **owned_out) {
+    *owned_out = NULL;
+    if (!sv) { *len_out = 0; return ""; }
+    if (!STRADA_IS_TAGGED_INT(sv) && sv->meta && sv->meta->is_tied && sv->meta->tied_obj) {
+        StradaValue *fetched = strada_tied_scalar_fetch(sv);
+        char *tmp = strada_to_str(fetched);
+        if (fetched) strada_decref(fetched);
+        *owned_out = tmp;
+        *len_out = tmp ? strlen(tmp) : 0;
+        return tmp ? tmp : "";
+    }
+    if (!STRADA_IS_TAGGED_INT(sv) && sv->type == STRADA_STR && sv->value.pv) {
+        size_t bl = STRADA_STR_BYTELEN(sv);
+        if (bl == 0 && sv->value.pv[0] != '\0') bl = strlen(sv->value.pv);
+        *len_out = bl;
+        return sv->value.pv;
+    }
+    const char *s = strada_to_str_buf(sv, tb, tbsz);
+    *len_out = strlen(s);
+    return s;
+}
+
 StradaValue* strada_open_str(const char *content, const char *mode) {
     if (!mode) return strada_new_undef();
 
     if (mode[0] == 'r') {
-        /* Read mode: copy content into buffer, fmemopen for reading */
         size_t len = content ? strlen(content) : 0;
         char *buf = malloc(len + 1);
-        if (content) memcpy(buf, content, len);
+        if (!buf) return strada_new_undef();
+        if (content && len > 0) memcpy(buf, content, len);
         buf[len] = '\0';
-        FILE *fh = fmemopen(buf, len, "r");
+        FILE *fh = len > 0 ? fmemopen(buf, len, "r") : fopen("/dev/null", "r");
         if (!fh) { free(buf); return strada_new_undef(); }
         StradaFhMeta *meta = fh_meta_add(fh, FH_MEMREAD);
         meta->mem_buf = buf;
         return strada_new_filehandle(fh);
     } else if (mode[0] == 'w' || mode[0] == 'a') {
-        /* Write/append mode: open_memstream for dynamic buffer */
         StradaFhMeta *meta = fh_meta_add(NULL, FH_MEMWRITE);
         FILE *fh = open_memstream(&meta->mem_buf, &meta->mem_size);
         if (!fh) { fh_meta_remove(NULL); return strada_new_undef(); }
         meta->fh = fh;
         if (mode[0] == 'a' && content && content[0]) {
-            fputs(content, fh);
+            fwrite(content, 1, strlen(content), fh);
             fflush(fh);
         }
         return strada_new_filehandle(fh);
@@ -8831,14 +8884,46 @@ StradaValue* strada_open_str(const char *content, const char *mode) {
     return strada_new_undef();
 }
 
+StradaValue* strada_open_str_sv(StradaValue *content_sv, StradaValue *mode_sv) {
+    if (!mode_sv || STRADA_IS_TAGGED_INT(mode_sv)) return strada_new_undef();
+    char _mb[16];
+    const char *mode = strada_to_str_buf(mode_sv, _mb, sizeof(_mb));
+    char _tb[256];
+    size_t len = 0;
+    char *owned = NULL;
+    const char *content = strada_sv_raw_bytes(content_sv, _tb, sizeof(_tb), &len, &owned);
+
+    if (mode[0] == 'r') {
+        char *buf = malloc(len + 1);
+        if (!buf) { free(owned); return strada_new_undef(); }
+        if (len > 0) memcpy(buf, content, len);
+        buf[len] = '\0';
+        free(owned);
+        FILE *fh = len > 0 ? fmemopen(buf, len, "r") : fopen("/dev/null", "r");
+        if (!fh) { free(buf); return strada_new_undef(); }
+        StradaFhMeta *meta = fh_meta_add(fh, FH_MEMREAD);
+        meta->mem_buf = buf;
+        return strada_new_filehandle(fh);
+    } else if (mode[0] == 'w' || mode[0] == 'a') {
+        StradaFhMeta *meta = fh_meta_add(NULL, FH_MEMWRITE);
+        FILE *fh = open_memstream(&meta->mem_buf, &meta->mem_size);
+        if (!fh) { free(owned); fh_meta_remove(NULL); return strada_new_undef(); }
+        meta->fh = fh;
+        if (mode[0] == 'a' && len > 0) {
+            fwrite(content, 1, len, fh);
+            fflush(fh);
+        }
+        free(owned);
+        return strada_new_filehandle(fh);
+    }
+    free(owned);
+    return strada_new_undef();
+}
+
 StradaValue* strada_open_sv(StradaValue *first_arg, StradaValue *mode_arg) {
     if (!first_arg || !mode_arg || STRADA_IS_TAGGED_INT(first_arg) || STRADA_IS_TAGGED_INT(mode_arg)) return strada_new_undef();
 
     if (first_arg->type == STRADA_REF) {
-        /* Reference-style open: core::open(\$var, "r"/"w"/"a").
-         * Slot refs store the variable address in value.ptr (StradaValue**);
-         * regular refs store the target StradaValue* in value.rv. Pick the
-         * right field via strada_is_slot_ref so writes propagate back. */
         StradaValue *referent;
         if (strada_is_slot_ref(first_arg)) {
             StradaValue **slot = (StradaValue**)first_arg->value.ptr;
@@ -8848,37 +8933,37 @@ StradaValue* strada_open_sv(StradaValue *first_arg, StradaValue *mode_arg) {
         }
         char _tb[16];
         const char *mode = strada_to_str_buf(mode_arg, _tb, sizeof(_tb));
+        char _tb2[256];
+        size_t len = 0;
+        char *owned = NULL;
+        const char *content = referent ? strada_sv_raw_bytes(referent, _tb2, sizeof(_tb2), &len, &owned) : "";
 
         if (mode[0] == 'r') {
-            /* Read from referenced string */
-            char _tb2[256];
-            const char *content = referent ? strada_to_str_buf(referent, _tb2, sizeof(_tb2)) : "";
-            size_t len = strlen(content);
             char *buf = malloc(len + 1);
-            memcpy(buf, content, len);
+            if (!buf) { free(owned); return strada_new_undef(); }
+            if (len > 0) memcpy(buf, content, len);
             buf[len] = '\0';
-            FILE *fh = fmemopen(buf, len, "r");
+            free(owned);
+            FILE *fh = len > 0 ? fmemopen(buf, len, "r") : fopen("/dev/null", "r");
             if (!fh) { free(buf); return strada_new_undef(); }
             StradaFhMeta *meta = fh_meta_add(fh, FH_MEMREAD);
             meta->mem_buf = buf;
             return strada_new_filehandle(fh);
         } else if (mode[0] == 'w' || mode[0] == 'a') {
-            /* Write to referenced string — writeback on close */
             StradaFhMeta *meta = fh_meta_add(NULL, FH_MEMWRITE_REF);
             FILE *fh = open_memstream(&meta->mem_buf, &meta->mem_size);
-            if (!fh) { fh_meta_remove(NULL); return strada_new_undef(); }
+            if (!fh) { free(owned); fh_meta_remove(NULL); return strada_new_undef(); }
             meta->fh = fh;
             meta->target_ref = first_arg;
-            strada_incref(first_arg);  /* Keep ref alive until close */
-            if (mode[0] == 'a' && referent) {
-                /* Append: pre-write existing content */
-                char _tb3[256];
-                const char *existing = strada_to_str_buf(referent, _tb3, sizeof(_tb3));
-                fputs(existing, fh);
+            strada_incref(first_arg);
+            if (mode[0] == 'a' && len > 0) {
+                fwrite(content, 1, len, fh);
                 fflush(fh);
             }
+            free(owned);
             return strada_new_filehandle(fh);
         }
+        free(owned);
         return strada_new_undef();
     }
 
@@ -8920,7 +9005,7 @@ StradaValue* strada_read_file(StradaValue *fh) {
         return strada_new_undef();
     }
     
-    /* Read entire file */
+    /* Read entire file (binary-safe) */
     fseek(fh->value.fh, 0, SEEK_END);
     long size = ftell(fh->value.fh);
     fseek(fh->value.fh, 0, SEEK_SET);
@@ -8933,15 +9018,30 @@ StradaValue* strada_read_file(StradaValue *fh) {
     size_t read_size = fread(content, 1, size, fh->value.fh);
     content[read_size] = '\0';
     
-    StradaValue *result = strada_new_str(content);
+    StradaValue *result = strada_new_str_len(content, read_size);
     free(content);
     
     return result;
 }
 
 StradaValue* strada_read_line(StradaValue *fh) {
+    return strada_read_line_max(fh, NULL);
+}
+
+/* readline with an optional byte limit (max_sv NULL / undef / <= 0 means
+ * unlimited). When the limit is reached before the end of the line, the
+ * first max bytes are returned and the rest of the line is left unread for
+ * the next call (like Python's readline(size) / C's fgets). The stripped
+ * line ending does not count toward the limit. Callers can detect a
+ * truncated line by byte_length($line) == $max. */
+StradaValue* strada_read_line_max(StradaValue *fh, StradaValue *max_sv) {
     if (!fh || STRADA_IS_TAGGED_INT(fh)) {
         return strada_new_undef();
+    }
+    size_t max = 0;   /* 0 = unlimited */
+    if (max_sv && (STRADA_IS_TAGGED_INT(max_sv) || max_sv->type != STRADA_UNDEF)) {
+        int64_t m = strada_to_int(max_sv);
+        if (m > 0) max = (size_t)m;
     }
 
     /* Handle filehandle (FILE*) */
@@ -8964,7 +9064,7 @@ StradaValue* strada_read_line(StradaValue *fh) {
             char *buf = (char*)malloc(cap);
             if (!buf) return strada_new_undef();
             int c;
-            while ((c = fgetc(fh->value.fh)) != EOF) {
+            while ((max == 0 || len < max) && (c = fgetc(fh->value.fh)) != EOF) {
                 if (len + 1 >= cap) {
                     cap *= 2;
                     char *nb = (char*)realloc(buf, cap);
@@ -8981,49 +9081,67 @@ StradaValue* strada_read_line(StradaValue *fh) {
             free(buf);
             return r;
         }
-        char buffer[4096];
-        if (fgets(buffer, sizeof(buffer), fh->value.fh)) {
-            /* Remove trailing newline */
-            size_t len = strlen(buffer);
-            if (len > 0 && buffer[len-1] == '\n') {
-                buffer[len-1] = '\0';
+        size_t cap = 4096;
+        size_t len = 0;
+        char *buf = (char*)malloc(cap);
+        if (!buf) return strada_new_undef();
+        int c = 0;
+        while ((max == 0 || len < max) && (c = fgetc(fh->value.fh)) != EOF) {
+            if (c == '\n') break;
+            if (len + 1 >= cap) {
+                cap *= 2;
+                char *nb = (char*)realloc(buf, cap);
+                if (!nb) { free(buf); return strada_new_undef(); }
+                buf = nb;
             }
-            return strada_new_str(buffer);
+            buf[len++] = (char)c;
         }
-        return strada_new_undef();
+        if (len == 0 && c == EOF) {
+            free(buf);
+            return strada_new_undef();
+        }
+        StradaValue *r = strada_new_str_len(buf, len);
+        free(buf);
+        return r;
     }
 
-    /* Handle socket - buffered reading */
+    /* Handle socket - buffered reading (dynamically grown, binary-safe) */
     if (fh->type == STRADA_SOCKET && fh->value.sock) {
         StradaSocketBuffer *sb = fh->value.sock;
-        char line[4096];
+        size_t cap = 4096;
         size_t line_pos = 0;
+        char *line = (char*)malloc(cap);
+        if (!line) return strada_new_undef();
 
-        while (line_pos < sizeof(line) - 1) {
-            /* Refill buffer if empty */
+        while (max == 0 || line_pos < max) {
             if (sb->read_pos >= sb->read_len) {
-                ssize_t n = recv(sb->fd, sb->read_buf, STRADA_SOCKET_BUFSIZE, 0);
+                ssize_t n;
+                do {
+                    n = recv(sb->fd, sb->read_buf, STRADA_SOCKET_BUFSIZE, 0);
+                } while (n < 0 && errno == EINTR);
                 if (n <= 0) {
-                    /* EOF or error */
-                    if (line_pos == 0) return strada_new_undef();
+                    if (line_pos == 0) { free(line); return strada_new_undef(); }
                     break;
                 }
                 sb->read_pos = 0;
                 sb->read_len = (size_t)n;
             }
 
-            /* Get next character from buffer */
             char c = sb->read_buf[sb->read_pos++];
-
-            if (c == '\n') {
-                break;  /* Don't include newline */
-            }
-            if (c != '\r') {  /* Skip carriage return */
+            if (c == '\n') break;
+            if (c != '\r') {
+                if (line_pos + 1 >= cap) {
+                    cap *= 2;
+                    char *nb = (char*)realloc(line, cap);
+                    if (!nb) { free(line); return strada_new_undef(); }
+                    line = nb;
+                }
                 line[line_pos++] = c;
             }
         }
-        line[line_pos] = '\0';
-        return strada_new_str(line);
+        StradaValue *r = strada_new_str_len(line, line_pos);
+        free(line);
+        return r;
     }
 
     return strada_new_undef();
@@ -9102,62 +9220,26 @@ StradaValue* strada_read_all_lines(StradaValue *fh) {
             return arr;
         }
         /* Default newline-separated, strip trailing \n */
-        char buffer[4096];
-        while (fgets(buffer, sizeof(buffer), fh->value.fh)) {
-            size_t len = strlen(buffer);
-            if (len > 0 && buffer[len-1] == '\n') {
-                buffer[len-1] = '\0';
+        while (1) {
+            StradaValue *ln = strada_read_line(fh);
+            if (!ln || (!STRADA_IS_TAGGED_INT(ln) && ln->type == STRADA_UNDEF)) {
+                if (ln) strada_decref(ln);
+                break;
             }
-            strada_array_push_take(arr->value.av, strada_new_str(buffer));
+            strada_array_push_take(arr->value.av, ln);
         }
         return arr;
     }
 
     /* Handle socket - buffered reading */
     if (fh->type == STRADA_SOCKET && fh->value.sock) {
-        StradaSocketBuffer *sb = fh->value.sock;
-
         while (1) {
-            char line[4096];
-            size_t line_pos = 0;
-            int got_line = 0;
-
-            while (line_pos < sizeof(line) - 1) {
-                /* Refill buffer if empty */
-                if (sb->read_pos >= sb->read_len) {
-                    ssize_t n = recv(sb->fd, sb->read_buf, STRADA_SOCKET_BUFSIZE, 0);
-                    if (n <= 0) {
-                        /* EOF or error */
-                        if (line_pos > 0) {
-                            /* Return what we have */
-                            line[line_pos] = '\0';
-                            strada_array_push_take(arr->value.av, strada_new_str(line));
-                        }
-                        return arr;
-                    }
-                    sb->read_pos = 0;
-                    sb->read_len = (size_t)n;
-                }
-
-                /* Get next character from buffer */
-                char c = sb->read_buf[sb->read_pos++];
-
-                if (c == '\n') {
-                    got_line = 1;
-                    break;  /* Don't include newline */
-                }
-                if (c != '\r') {  /* Skip carriage return */
-                    line[line_pos++] = c;
-                }
-            }
-
-            line[line_pos] = '\0';
-            strada_array_push_take(arr->value.av, strada_new_str(line));
-
-            if (!got_line) {
-                /* Line too long or EOF */
+            StradaValue *ln = strada_read_line(fh);
+            if (!ln || (!STRADA_IS_TAGGED_INT(ln) && ln->type == STRADA_UNDEF)) {
+                if (ln) strada_decref(ln);
                 break;
             }
+            strada_array_push_take(arr->value.av, ln);
         }
         return arr;
     }
@@ -9400,6 +9482,7 @@ StradaValue* strada_slurp_fd(StradaValue *fd_sv) {
         }
 
         ssize_t n = read(fd, content + total_read, 1024);
+        if (n < 0 && errno == EINTR) continue;
         if (n <= 0) {
             break;
         }
@@ -9438,19 +9521,16 @@ void strada_spew_len(const char *filename, const char *content, size_t len) {
 void strada_spew_sv(const char *filename, StradaValue *content_sv) {
     FILE *f = fopen(filename, "w");
     if (!f) return;
-    if (content_sv && !STRADA_IS_TAGGED_INT(content_sv) && content_sv->type == STRADA_STR && content_sv->value.pv) {
-        /* BYTE length (not char count) — see strada_print. */
-        size_t len = STRADA_STR_BYTELEN(content_sv);
-        if (len == 0) len = strlen(content_sv->value.pv);
-        fwrite(content_sv->value.pv, 1, len, f);
-    } else if (content_sv) {
-        char *s = strada_to_str(content_sv);
-        if (s) { fputs(s, f); free(s); }
-    }
+    char _tb[256];
+    size_t len = 0;
+    char *owned = NULL;
+    const char *content = strada_sv_raw_bytes(content_sv, _tb, sizeof(_tb), &len, &owned);
+    if (len > 0) fwrite(content, 1, len, f);
+    free(owned);
     fclose(f);
 }
 
-/* Write content to an open FILE handle */
+/* Write content to an open FILE handle (binary-safe) */
 void strada_spew_fh(StradaValue *fh_sv, StradaValue *content_sv) {
     if (!fh_sv || STRADA_IS_TAGGED_INT(fh_sv) || fh_sv->type != STRADA_FILEHANDLE || !fh_sv->value.fh) {
         return;
@@ -9461,11 +9541,15 @@ void strada_spew_fh(StradaValue *fh_sv, StradaValue *content_sv) {
 
     FILE *f = fh_sv->value.fh;
     char _tb[256];
-    const char *content = strada_to_str_buf(content_sv, _tb, sizeof(_tb));
-    fputs(content, f);
+    size_t len = 0;
+    char *owned = NULL;
+    const char *content = strada_sv_raw_bytes(content_sv, _tb, sizeof(_tb), &len, &owned);
+    if (len > 0) fwrite(content, 1, len, f);
+    strada_fh_writeback_sync(f);
+    free(owned);
 }
 
-/* Write content to a raw file descriptor */
+/* Write content to a raw file descriptor (binary-safe, retries on EINTR) */
 void strada_spew_fd(StradaValue *fd_sv, StradaValue *content_sv) {
     if (!fd_sv || !content_sv) {
         return;
@@ -9477,14 +9561,20 @@ void strada_spew_fd(StradaValue *fd_sv, StradaValue *content_sv) {
     }
 
     char _tb[256];
-    const char *content = strada_to_str_buf(content_sv, _tb, sizeof(_tb));
-    size_t len = strlen(content);
+    size_t len = 0;
+    char *owned = NULL;
+    const char *content = strada_sv_raw_bytes(content_sv, _tb, sizeof(_tb), &len, &owned);
     size_t written = 0;
     while (written < len) {
         ssize_t n = write(fd, content + written, len - written);
-        if (n <= 0) break;  // Error or EOF
-        written += n;
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (n == 0) break;
+        written += (size_t)n;
     }
+    free(owned);
 }
 
 /* ===== BUILT-IN FUNCTIONS ===== */
@@ -10780,7 +10870,10 @@ StradaValue* strada_socket_accept(StradaValue *sock) {
     struct sockaddr_storage client_addr;   /* fits IPv4 and IPv6 peers */
     socklen_t client_len = sizeof(client_addr);
 
-    int client_fd = accept(sock->value.sock->fd, (struct sockaddr *)&client_addr, &client_len);
+    int client_fd;
+    do {
+        client_fd = accept(sock->value.sock->fd, (struct sockaddr *)&client_addr, &client_len);
+    } while (client_fd < 0 && errno == EINTR);
     if (client_fd < 0) {
         return strada_new_undef();
     }
@@ -10807,31 +10900,44 @@ int strada_socket_send(StradaValue *sock, const char *data) {
     }
 
     size_t len = strlen(data);
-    ssize_t sent = send(sock->value.sock->fd, data, len, MSG_NOSIGNAL);
-
-    return (int)sent;
+    size_t total = 0;
+    while (total < len) {
+        ssize_t sent = send(sock->value.sock->fd, data + total, len - total, MSG_NOSIGNAL);
+        if (sent < 0) {
+            if (errno == EINTR) continue;
+            return total > 0 ? (int)total : -1;
+        }
+        if (sent == 0) break;
+        total += (size_t)sent;
+    }
+    return (int)total;
 }
 
-/* Binary-safe version: uses struct_size to handle embedded NULLs */
+/* Binary-safe version: uses struct_size to handle embedded NULLs and loops on partial sends */
 int strada_socket_send_sv(StradaValue *sock, StradaValue *data) {
     if (!sock || STRADA_IS_TAGGED_INT(sock) || sock->type != STRADA_SOCKET || !sock->value.sock
-        || !data || STRADA_IS_TAGGED_INT(data)) {
+        || !data) {
         return -1;
     }
 
-    const char *buf;
-    size_t len;
-
-    if (data->type == STRADA_STR && data->value.pv) {
-        buf = data->value.pv;
-        len = STRADA_STR_BYTELEN(data);
-        if (len == 0 && data->value.pv[0] != '\0') len = strlen(data->value.pv);
-    } else {
-        return -1;
+    char _tb[256];
+    size_t len = 0;
+    char *owned = NULL;
+    const char *buf = strada_sv_raw_bytes(data, _tb, sizeof(_tb), &len, &owned);
+    int fd = sock->value.sock->fd;
+    size_t total = 0;
+    while (total < len) {
+        ssize_t sent = send(fd, buf + total, len - total, MSG_NOSIGNAL);
+        if (sent < 0) {
+            if (errno == EINTR) continue;
+            free(owned);
+            return total > 0 ? (int)total : -1;
+        }
+        if (sent == 0) break;
+        total += (size_t)sent;
     }
-
-    ssize_t sent = send(sock->value.sock->fd, buf, len, MSG_NOSIGNAL);
-    return (int)sent;
+    free(owned);
+    return (int)total;
 }
 
 StradaValue* strada_socket_recv(StradaValue *sock, int max_len) {
@@ -10859,7 +10965,10 @@ StradaValue* strada_socket_recv(StradaValue *sock, int max_len) {
     char *buffer = malloc(cap + 1);
     if (!buffer) return strada_new_undef();
     cc_blocking_enter();
-    ssize_t received = recv(sb->fd, buffer, cap, 0);
+    ssize_t received;
+    do {
+        received = recv(sb->fd, buffer, cap, 0);
+    } while (received < 0 && errno == EINTR);
     cc_blocking_leave();
 
     if (received < 0) {
@@ -10886,7 +10995,16 @@ StradaValue* strada_socket_flush(StradaValue *sock) {
     }
     StradaSocketBuffer *buf = sock->value.sock;
     if (buf->write_len > 0) {
-        send(buf->fd, buf->write_buf, buf->write_len, MSG_NOSIGNAL);
+        size_t sent = 0;
+        while (sent < buf->write_len) {
+            ssize_t n = send(buf->fd, buf->write_buf + sent, buf->write_len - sent, MSG_NOSIGNAL);
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                break;
+            }
+            if (n == 0) break;
+            sent += (size_t)n;
+        }
         buf->write_len = 0;
     }
     return strada_new_undef();
@@ -11040,47 +11158,63 @@ StradaValue* strada_socket_select(StradaValue *sockets, int timeout_ms) {
     FD_ZERO(&readfds);
 
     int maxfd = -1;
+    int any_buffered = 0;
 
-    /* Add all socket fds to the set */
+    /* Add all socket fds to the set, and detect sockets that already have
+     * unread user-space bytes in read_buf from a prior readline. */
     for (int i = 0; i < count; i++) {
         StradaValue *sock = arr->elements[arr->head + i];
-        if (sock && !STRADA_IS_TAGGED_INT(sock) && sock->type == STRADA_SOCKET && sock->value.sock
-            && sock->value.sock->fd >= 0 && sock->value.sock->fd < FD_SETSIZE) {
-            FD_SET(sock->value.sock->fd, &readfds);
-            if (sock->value.sock->fd > maxfd) {
-                maxfd = sock->value.sock->fd;
+        if (sock && !STRADA_IS_TAGGED_INT(sock) && sock->type == STRADA_SOCKET && sock->value.sock) {
+            if (sock->value.sock->read_len > sock->value.sock->read_pos) {
+                any_buffered = 1;
+            }
+            if (sock->value.sock->fd >= 0 && sock->value.sock->fd < FD_SETSIZE) {
+                FD_SET(sock->value.sock->fd, &readfds);
+                if (sock->value.sock->fd > maxfd) {
+                    maxfd = sock->value.sock->fd;
+                }
             }
         }
     }
 
-    if (maxfd < 0) {
+    if (maxfd < 0 && !any_buffered) {
         return strada_new_array();
     }
 
-    /* Set up timeout */
+    /* Set up timeout (poll non-blocking when any socket already has buffered data) */
     struct timeval tv;
     struct timeval *tvp = NULL;
 
-    if (timeout_ms >= 0) {
+    if (any_buffered) {
+        tv.tv_sec = 0;
+        tv.tv_usec = 0;
+        tvp = &tv;
+    } else if (timeout_ms >= 0) {
         tv.tv_sec = timeout_ms / 1000;
         tv.tv_usec = (timeout_ms % 1000) * 1000;
         tvp = &tv;
     }
 
     /* Call select */
-    cc_blocking_enter();
-    int result = select(maxfd + 1, &readfds, NULL, NULL, tvp);
-    cc_blocking_leave();
+    int result = 0;
+    if (maxfd >= 0) {
+        cc_blocking_enter();
+        result = select(maxfd + 1, &readfds, NULL, NULL, tvp);
+        cc_blocking_leave();
+    }
 
     /* Build result array of ready sockets */
     StradaValue *ready = strada_new_array();
 
-    if (result > 0) {
+    if (result > 0 || any_buffered) {
         for (int i = 0; i < count; i++) {
             StradaValue *sock = arr->elements[arr->head + i];
-            if (sock && !STRADA_IS_TAGGED_INT(sock) && sock->type == STRADA_SOCKET && sock->value.sock
-                && sock->value.sock->fd >= 0 && sock->value.sock->fd < FD_SETSIZE) {
-                if (FD_ISSET(sock->value.sock->fd, &readfds)) {
+            if (sock && !STRADA_IS_TAGGED_INT(sock) && sock->type == STRADA_SOCKET && sock->value.sock) {
+                int buf_ready = (sock->value.sock->read_len > sock->value.sock->read_pos);
+                int fd_ready = (result > 0 && sock->value.sock->fd >= 0
+                                && sock->value.sock->fd < FD_SETSIZE
+                                && FD_ISSET(sock->value.sock->fd, &readfds));
+                if (buf_ready || fd_ready) {
                     strada_array_push(ready->value.av, sock);
                 }
             }
@@ -11148,8 +11282,9 @@ StradaValue* strada_select_fds(StradaValue *fds, int timeout_ms) {
     for (int i = 0; i < count; i++) {
         StradaValue *fdval = arr->elements[arr->head + i];
         if (fdval) {
-            int fd = (int)strada_to_int(fdval);
-            if (fd >= 0) {
+            int fd = (!STRADA_IS_TAGGED_INT(fdval) && fdval->type == STRADA_SOCKET && fdval->value.sock)
+                ? fdval->value.sock->fd : (int)strada_to_int(fdval);
+            if (fd >= 0 && fd < FD_SETSIZE) {
                 FD_SET(fd, &readfds);
                 if (fd > maxfd) {
                     maxfd = fd;
@@ -11182,8 +11317,9 @@ StradaValue* strada_select_fds(StradaValue *fds, int timeout_ms) {
         for (int i = 0; i < count; i++) {
             StradaValue *fdval = arr->elements[arr->head + i];
             if (fdval) {
-                int fd = (int)strada_to_int(fdval);
-                if (fd >= 0 && FD_ISSET(fd, &readfds)) {
+                int fd = (!STRADA_IS_TAGGED_INT(fdval) && fdval->type == STRADA_SOCKET && fdval->value.sock)
+                    ? fdval->value.sock->fd : (int)strada_to_int(fdval);
+                if (fd >= 0 && fd < FD_SETSIZE && FD_ISSET(fd, &readfds)) {
                     strada_array_push_take(ready->value.av, strada_new_int(fd));
                 }
             }
@@ -23544,8 +23680,9 @@ StradaValue* strada_system_argv(StradaValue *program, StradaValue *args_arr) {
 }
 
 StradaValue* strada_read_fd(StradaValue *fd_val, StradaValue *size_val) {
-    /* Read from file descriptor, returns string */
-    int fd = (int)strada_to_int(fd_val);
+    /* Read from file descriptor, returns binary-safe string */
+    int fd = (!STRADA_IS_TAGGED_INT(fd_val) && fd_val && fd_val->type == STRADA_SOCKET && fd_val->value.sock)
+        ? fd_val->value.sock->fd : (int)strada_to_int(fd_val);
     int64_t req = strada_to_int(size_val);
     /* A negative size (e.g. from a wire-protocol length underflow) cast
      * straight to size_t became SIZE_MAX: malloc(size+1)==malloc(0) passed the
@@ -23557,13 +23694,16 @@ StradaValue* strada_read_fd(StradaValue *fd_val, StradaValue *size_val) {
     char *buf = malloc(size + 1);
     if (!buf) return strada_new_str("");
 
-    ssize_t n = read(fd, buf, size);
+    ssize_t n;
+    do {
+        n = read(fd, buf, size);
+    } while (n < 0 && errno == EINTR);
     if (n <= 0) {
         free(buf);
         return strada_new_str("");
     }
     buf[n] = '\0';
-    StradaValue *result = strada_new_str(buf);
+    StradaValue *result = strada_new_str_len(buf, (size_t)n);
     free(buf);
     return result;
 }
@@ -23607,18 +23747,36 @@ StradaValue* strada_open_fd(StradaValue *filename_val, StradaValue *mode_val) {
 }
 
 StradaValue* strada_write_fd(StradaValue *fd_val, StradaValue *data_val) {
-    /* Write to file descriptor, returns bytes written */
-    int fd = (int)strada_to_int(fd_val);
+    /* Write all bytes to file descriptor (binary-safe, retries on EINTR and partial writes) */
+    int fd = (!STRADA_IS_TAGGED_INT(fd_val) && fd_val && fd_val->type == STRADA_SOCKET && fd_val->value.sock)
+        ? fd_val->value.sock->fd : (int)strada_to_int(fd_val);
     char _tb[256];
-    const char *data = strada_to_str_buf(data_val, _tb, sizeof(_tb));
-    size_t len = strlen(data);
-    ssize_t n = write(fd, data, len);
-    return strada_new_int(n);
+    size_t len = 0;
+    char *owned = NULL;
+    const char *data = strada_sv_raw_bytes(data_val, _tb, sizeof(_tb), &len, &owned);
+    if (len == 0) {
+        free(owned);
+        return strada_new_int(0);
+    }
+    size_t written = 0;
+    while (written < len) {
+        ssize_t n = write(fd, data + written, len - written);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            free(owned);
+            return strada_new_int(written > 0 ? (int64_t)written : -1);
+        }
+        if (n == 0) break;
+        written += (size_t)n;
+    }
+    free(owned);
+    return strada_new_int((int64_t)written);
 }
 
 StradaValue* strada_read_all_fd(StradaValue *fd_val) {
     /* Read all available data from file descriptor */
-    int fd = (int)strada_to_int(fd_val);
+    int fd = (!STRADA_IS_TAGGED_INT(fd_val) && fd_val && fd_val->type == STRADA_SOCKET && fd_val->value.sock)
+        ? fd_val->value.sock->fd : (int)strada_to_int(fd_val);
 
     size_t capacity = 4096;
     size_t total = 0;
@@ -23636,6 +23794,7 @@ StradaValue* strada_read_all_fd(StradaValue *fd_val) {
             buf = newbuf;
         }
         ssize_t n = read(fd, buf + total, 1024);
+        if (n < 0 && errno == EINTR) continue;
         if (n <= 0) break;
         total += n;
     }
@@ -25961,9 +26120,13 @@ StradaValue* strada_fputs(StradaValue *str, StradaValue *fh) {
         return strada_new_int(-1);
     }
     char _tb[256];
-    const char *s = strada_to_str_buf(str, _tb, sizeof(_tb));
-    int result = fputs(s, fh->value.fh);
-    return strada_new_int(result >= 0 ? 1 : -1);
+    size_t len = 0;
+    char *owned = NULL;
+    const char *s = strada_sv_raw_bytes(str, _tb, sizeof(_tb), &len, &owned);
+    size_t written = len > 0 ? fwrite(s, 1, len, fh->value.fh) : 0;
+    strada_fh_writeback_sync(fh->value.fh);
+    free(owned);
+    return strada_new_int((written == len && !ferror(fh->value.fh)) ? 1 : -1);
 }
 
 StradaValue* strada_ferror(StradaValue *fh) {
@@ -26085,8 +26248,8 @@ StradaValue* strada_qx(StradaValue *cmd) {
     }
 
     char temp[1024];
-    while (fgets(temp, sizeof(temp), fp)) {
-        size_t chunk_len = strlen(temp);
+    size_t chunk_len;
+    while ((chunk_len = fread(temp, 1, sizeof(temp), fp)) > 0) {
         if (len + chunk_len + 1 > capacity) {
             capacity = (len + chunk_len + 1) * 2;
             char *newbuf = realloc(buf, capacity);
@@ -26105,7 +26268,7 @@ StradaValue* strada_qx(StradaValue *cmd) {
 
     strada_last_qx_status = pclose(fp);
 
-    StradaValue *result = strada_new_str(buf);
+    StradaValue *result = strada_new_str_len(buf, len);
     free(buf);
     return result;
 }
@@ -26253,8 +26416,18 @@ StradaValue* strada_setregid(StradaValue *rgid, StradaValue *egid) {
 
 /* ===== ADDITIONAL SOCKET OPERATIONS ===== */
 
+/* Extract a raw file descriptor from a STRADA_SOCKET, STRADA_FILEHANDLE, or int SV */
+static int strada_extract_fd(StradaValue *v) {
+    if (!v) return -1;
+    if (!STRADA_IS_TAGGED_INT(v)) {
+        if (v->type == STRADA_SOCKET && v->value.sock) return v->value.sock->fd;
+        if (v->type == STRADA_FILEHANDLE && v->value.fh) return fileno(v->value.fh);
+    }
+    return (int)strada_to_int(v);
+}
+
 StradaValue* strada_setsockopt(StradaValue *sock, StradaValue *level, StradaValue *optname, StradaValue *optval) {
-    int s = strada_to_int(sock);
+    int s = strada_extract_fd(sock);
     int lv = strada_to_int(level);
     int opt = strada_to_int(optname);
     int val = strada_to_int(optval);
@@ -26262,7 +26435,7 @@ StradaValue* strada_setsockopt(StradaValue *sock, StradaValue *level, StradaValu
 }
 
 StradaValue* strada_getsockopt(StradaValue *sock, StradaValue *level, StradaValue *optname) {
-    int s = strada_to_int(sock);
+    int s = strada_extract_fd(sock);
     int lv = strada_to_int(level);
     int opt = strada_to_int(optname);
     int val = 0;
@@ -26274,7 +26447,7 @@ StradaValue* strada_getsockopt(StradaValue *sock, StradaValue *level, StradaValu
 }
 
 StradaValue* strada_shutdown(StradaValue *sock, StradaValue *how) {
-    int s = strada_to_int(sock);
+    int s = strada_extract_fd(sock);
     int h = strada_to_int(how);
     return strada_new_int(shutdown(s, h));
 }
@@ -26307,7 +26480,7 @@ static StradaValue* strada_sockaddr_hash(struct sockaddr_storage *ss) {
 }
 
 StradaValue* strada_getpeername(StradaValue *sock) {
-    int s = strada_to_int(sock);
+    int s = strada_extract_fd(sock);
     struct sockaddr_storage addr;
     socklen_t len = sizeof(addr);
 
@@ -26318,7 +26491,7 @@ StradaValue* strada_getpeername(StradaValue *sock) {
 }
 
 StradaValue* strada_getsockname(StradaValue *sock) {
-    int s = strada_to_int(sock);
+    int s = strada_extract_fd(sock);
     struct sockaddr_storage addr;
     socklen_t len = sizeof(addr);
 
@@ -26425,12 +26598,15 @@ StradaValue* strada_poll(StradaValue *fds, StradaValue *timeout) {
         if (entry) {
             StradaValue *fd_val = strada_hash_get(entry->value.hv, "fd");
             StradaValue *ev_val = strada_hash_get(entry->value.hv, "events");
-            pfds[i].fd = fd_val ? strada_to_int(fd_val) : -1;
+            pfds[i].fd = fd_val ? strada_extract_fd(fd_val) : -1;
             pfds[i].events = ev_val ? strada_to_int(ev_val) : POLLIN;
         }
     }
 
-    int result = poll(pfds, nfds, (int)strada_to_int(timeout));
+    int result;
+    do {
+        result = poll(pfds, nfds, (int)strada_to_int(timeout));
+    } while (result < 0 && errno == EINTR);
 
     /* Update revents in original array */
     for (nfds_t i = 0; i < nfds; i++) {
@@ -26901,7 +27077,7 @@ StradaValue* strada_ttyname(StradaValue *fd) {
 }
 
 StradaValue* strada_tcgetattr(StradaValue *fd) {
-    int f = strada_to_int(fd);
+    int f = strada_extract_fd(fd);
     struct termios t;
 
     if (tcgetattr(f, &t) < 0) {
@@ -26919,10 +27095,14 @@ StradaValue* strada_tcgetattr(StradaValue *fd) {
 }
 
 StradaValue* strada_tcsetattr(StradaValue *fd, StradaValue *when, StradaValue *attrs) {
-    int f = strada_to_int(fd);
+    int f = strada_extract_fd(fd);
     int w = strada_to_int(when);
 
-    if (attrs->type != STRADA_HASH) return strada_new_int(-1);
+    if (!attrs || STRADA_IS_TAGGED_INT(attrs)) return strada_new_int(-1);
+    if (attrs->type == STRADA_REF && !strada_is_slot_ref(attrs) && attrs->value.rv) {
+        attrs = attrs->value.rv;
+    }
+    if (!attrs || STRADA_IS_TAGGED_INT(attrs) || attrs->type != STRADA_HASH) return strada_new_int(-1);
 
     struct termios t;
     if (tcgetattr(f, &t) < 0) return strada_new_int(-1);
@@ -26951,27 +27131,35 @@ StradaValue* strada_tcsetattr(StradaValue *fd, StradaValue *when, StradaValue *a
 }
 
 StradaValue* strada_cfgetospeed(StradaValue *termios) {
-    if (termios->type != STRADA_HASH) return strada_new_int(-1);
+    if (!termios || STRADA_IS_TAGGED_INT(termios)) return strada_new_int(-1);
+    if (termios->type == STRADA_REF && !strada_is_slot_ref(termios) && termios->value.rv) termios = termios->value.rv;
+    if (!termios || STRADA_IS_TAGGED_INT(termios) || termios->type != STRADA_HASH) return strada_new_int(-1);
     StradaValue *ospeed = strada_hash_get(termios->value.hv, "ospeed");
     if (ospeed) { strada_incref(ospeed); return ospeed; }
     return strada_new_int(0);
 }
 
 StradaValue* strada_cfsetospeed(StradaValue *termios, StradaValue *speed) {
-    if (termios->type != STRADA_HASH) return strada_new_int(-1);
+    if (!termios || STRADA_IS_TAGGED_INT(termios)) return strada_new_int(-1);
+    if (termios->type == STRADA_REF && !strada_is_slot_ref(termios) && termios->value.rv) termios = termios->value.rv;
+    if (!termios || STRADA_IS_TAGGED_INT(termios) || termios->type != STRADA_HASH) return strada_new_int(-1);
     strada_hash_set(termios->value.hv, "ospeed", speed);
     return strada_new_int(0);
 }
 
 StradaValue* strada_cfgetispeed(StradaValue *termios) {
-    if (termios->type != STRADA_HASH) return strada_new_int(-1);
+    if (!termios || STRADA_IS_TAGGED_INT(termios)) return strada_new_int(-1);
+    if (termios->type == STRADA_REF && !strada_is_slot_ref(termios) && termios->value.rv) termios = termios->value.rv;
+    if (!termios || STRADA_IS_TAGGED_INT(termios) || termios->type != STRADA_HASH) return strada_new_int(-1);
     StradaValue *ispeed = strada_hash_get(termios->value.hv, "ispeed");
     if (ispeed) { strada_incref(ispeed); return ispeed; }
     return strada_new_int(0);
 }
 
 StradaValue* strada_cfsetispeed(StradaValue *termios, StradaValue *speed) {
-    if (termios->type != STRADA_HASH) return strada_new_int(-1);
+    if (!termios || STRADA_IS_TAGGED_INT(termios)) return strada_new_int(-1);
+    if (termios->type == STRADA_REF && !strada_is_slot_ref(termios) && termios->value.rv) termios = termios->value.rv;
+    if (!termios || STRADA_IS_TAGGED_INT(termios) || termios->type != STRADA_HASH) return strada_new_int(-1);
     strada_hash_set(termios->value.hv, "ispeed", speed);
     return strada_new_int(0);
 }
@@ -27172,30 +27360,38 @@ StradaValue* strada_serial_open(const char *device, int baud, const char *config
 
 /* tcflush - flush input/output queues */
 StradaValue* strada_tcflush(StradaValue *fd, StradaValue *queue) {
-    int f = strada_to_int(fd);
+    int f = strada_extract_fd(fd);
     int q = strada_to_int(queue);
     return strada_new_int(tcflush(f, q));
 }
 
 /* tcdrain - wait until all output has been transmitted */
 StradaValue* strada_tcdrain(StradaValue *fd) {
-    int f = strada_to_int(fd);
-    return strada_new_int(tcdrain(f));
+    int f = strada_extract_fd(fd);
+    int rc;
+    do {
+        rc = tcdrain(f);
+    } while (rc < 0 && errno == EINTR);
+    return strada_new_int(rc);
 }
 
 /* ===== ADVANCED FILE OPERATIONS ===== */
 
 StradaValue* strada_fcntl(StradaValue *fd, StradaValue *cmd, StradaValue *arg) {
-    int f = strada_to_int(fd);
+    int f = strada_extract_fd(fd);
     int c = strada_to_int(cmd);
     int a = arg ? strada_to_int(arg) : 0;
     return strada_new_int(fcntl(f, c, a));
 }
 
 StradaValue* strada_flock(StradaValue *fd, StradaValue *operation) {
-    int f = strada_to_int(fd);
+    int f = strada_extract_fd(fd);
     int op = strada_to_int(operation);
-    return strada_new_int(flock(f, op));
+    int rc;
+    do {
+        rc = flock(f, op);
+    } while (rc < 0 && errno == EINTR);
+    return strada_new_int(rc);
 }
 
 StradaValue* strada_quotemeta(StradaValue *str) {
@@ -27221,7 +27417,7 @@ StradaValue* strada_quotemeta(StradaValue *str) {
 }
 
 StradaValue* strada_ioctl(StradaValue *fd, StradaValue *request, StradaValue *arg) {
-    int f = strada_to_int(fd);
+    int f = strada_extract_fd(fd);
     unsigned long req = (unsigned long)strada_to_int(request);
     int a = arg ? strada_to_int(arg) : 0;
     return strada_new_int(ioctl(f, req, a));
@@ -30767,12 +30963,19 @@ StradaValue* strada_socket_try_recv(StradaValue *sock, StradaValue *maxlen) {
         size_t take = (size_t)want < avail ? (size_t)want : avail;
         StradaValue *s = strada_new_str_len(sb->read_buf + sb->read_pos, take);
         sb->read_pos += take;
+        if (sb->read_pos >= sb->read_len) {
+            sb->read_pos = 0;
+            sb->read_len = 0;
+        }
         return s;
     }
 
     char *buf = malloc((size_t)want);
     if (!buf) return strada_new_undef();
-    ssize_t n = recv(sb->fd, buf, (size_t)want, MSG_DONTWAIT);
+    ssize_t n;
+    do {
+        n = recv(sb->fd, buf, (size_t)want, MSG_DONTWAIT);
+    } while (n < 0 && errno == EINTR);
     if (n > 0) {
         StradaValue *s = strada_new_str_len(buf, (size_t)n);
         free(buf);
@@ -30792,14 +30995,22 @@ StradaValue* strada_socket_try_send(StradaValue *sock, StradaValue *data) {
         && !(data->meta && data->meta->is_tied)) {
         size_t len = STRADA_STR_BYTELEN(data);
         if (len == 0 && data->value.pv[0] != '\0') len = strlen(data->value.pv);
-        ssize_t n = send(sock->value.sock->fd, data->value.pv, len, MSG_DONTWAIT | MSG_NOSIGNAL);
+        if (len == 0) return strada_new_int(0);
+        ssize_t n;
+        do {
+            n = send(sock->value.sock->fd, data->value.pv, len, MSG_DONTWAIT | MSG_NOSIGNAL);
+        } while (n < 0 && errno == EINTR);
         if (n >= 0) return strada_new_int(n);
         if (errno == EAGAIN || errno == EWOULDBLOCK) return strada_new_int(0);
         return strada_new_int(-1);
     }
     char *bytes = strada_to_str(data);
     size_t len = bytes ? strlen(bytes) : 0;
-    ssize_t n = send(sock->value.sock->fd, bytes ? bytes : "", len, MSG_DONTWAIT | MSG_NOSIGNAL);
+    if (len == 0) { free(bytes); return strada_new_int(0); }
+    ssize_t n;
+    do {
+        n = send(sock->value.sock->fd, bytes, len, MSG_DONTWAIT | MSG_NOSIGNAL);
+    } while (n < 0 && errno == EINTR);
     free(bytes);
     if (n >= 0) return strada_new_int(n);
     if (errno == EAGAIN || errno == EWOULDBLOCK) return strada_new_int(0);
@@ -31272,11 +31483,20 @@ StradaValue* strada_coro_resume(StradaValue *handle) {
 StradaValue* strada_coro_yield_io(StradaValue *fd, StradaValue *mask, StradaValue *timeout_ms) {
     StradaCoro *c = strada_current_coro;
     if (!c || c->state != 1) return strada_new_int(0);
-    /* (Suspending inside try{} is safe: the try stack is per-coro and the
-     * jmp_bufs target live coro-stack frames — see coro_ctx_install.) */
-    c->wait_fd = fd ? ev_resolve_fd(fd) : -1;
     char *ms = mask ? strada_to_str(mask) : NULL;
-    snprintf(c->wait_mask, sizeof(c->wait_mask), "%s", ms ? ms : "r");
+    const char *mstr = ms ? ms : "r";
+    /* If parking for read on a STRADA_SOCKET that already has unread bytes
+     * in its user-space read_buf (e.g. from a prior readline), return
+     * immediately without parking on epoll/poll (which would hang when the
+     * kernel socket buffer is already drained into read_buf). */
+    if (fd && !STRADA_IS_TAGGED_INT(fd) && fd->type == STRADA_SOCKET && fd->value.sock
+        && (mstr[0] == 'r' || mstr[1] == 'r')
+        && fd->value.sock->read_len > fd->value.sock->read_pos) {
+        if (ms) free(ms);
+        return strada_new_int(1);
+    }
+    c->wait_fd = fd ? ev_resolve_fd(fd) : -1;
+    snprintf(c->wait_mask, sizeof(c->wait_mask), "%s", mstr);
     if (ms) free(ms);
     c->wait_timeout_ms = strada_to_int(timeout_ms);
     c->state = 2;
@@ -31430,17 +31650,42 @@ StradaValue* strada_socket_connect_check(StradaValue *sock) {
  * newline ("" = EOF with nothing buffered; undef = would block). A buffer
  * that fills without a newline is returned as-is (degenerate long line). */
 StradaValue* strada_socket_try_readline(StradaValue *sock) {
+    return strada_socket_try_readline_max(sock, NULL);
+}
+
+/* Non-blocking buffered readline with an optional byte limit (max_sv NULL /
+ * <= 0: only the socket buffer size, STRADA_SOCKET_BUFSIZE, bounds a line).
+ * The returned line keeps its "\n" (and "\r"); the line ending does not
+ * count toward the limit. When the limit is hit first, the first max bytes
+ * are returned and the rest stays buffered for the next call. */
+StradaValue* strada_socket_try_readline_max(StradaValue *sock, StradaValue *max_sv) {
     if (!sock || STRADA_IS_TAGGED_INT(sock) || sock->type != STRADA_SOCKET || !sock->value.sock)
         return strada_new_undef();
     StradaSocketBuffer *sb = sock->value.sock;
+    size_t max = 0;
+    if (max_sv && (STRADA_IS_TAGGED_INT(max_sv) || max_sv->type != STRADA_UNDEF)) {
+        int64_t m = strada_to_int(max_sv);
+        if (m > 0) max = (size_t)m;
+    }
 
     for (;;) {
-        /* Scan buffered bytes for a newline */
+        /* Scan buffered bytes for a newline (or the limit) */
         for (size_t i = sb->read_pos; i < sb->read_len; i++) {
             if (sb->read_buf[i] == '\n') {
                 size_t n = i + 1 - sb->read_pos;
                 StradaValue *line = strada_new_str_len(sb->read_buf + sb->read_pos, n);
                 sb->read_pos += n;
+                return line;
+            }
+            if (max && i - sb->read_pos >= max) {
+                /* Byte i would be content beyond the limit, unless it is the
+                 * "\r" of a "\r\n" ending (need the next byte to tell). */
+                if (sb->read_buf[i] == '\r') {
+                    if (i + 1 >= sb->read_len) break;   /* undecided: read more */
+                    if (sb->read_buf[i + 1] == '\n') continue;
+                }
+                StradaValue *line = strada_new_str_len(sb->read_buf + sb->read_pos, max);
+                sb->read_pos += max;
                 return line;
             }
         }
@@ -31451,13 +31696,22 @@ StradaValue* strada_socket_try_readline(StradaValue *sock) {
         sb->read_len -= sb->read_pos;
         sb->read_pos = 0;
         if (sb->read_len >= sizeof(sb->read_buf)) {
-            /* No newline within a full buffer: hand it over whole */
+            /* No newline within a full buffer: hand it over whole (or just
+             * the first max bytes when a smaller limit was given) */
+            if (max && sb->read_len > max) {
+                StradaValue *line = strada_new_str_len(sb->read_buf, max);
+                sb->read_pos = max;
+                return line;
+            }
             StradaValue *line = strada_new_str_len(sb->read_buf, sb->read_len);
             sb->read_len = 0;
             return line;
         }
-        ssize_t n = recv(sb->fd, sb->read_buf + sb->read_len,
-                         sizeof(sb->read_buf) - sb->read_len, MSG_DONTWAIT);
+        ssize_t n;
+        do {
+            n = recv(sb->fd, sb->read_buf + sb->read_len,
+                     sizeof(sb->read_buf) - sb->read_len, MSG_DONTWAIT);
+        } while (n < 0 && errno == EINTR);
         if (n > 0) {
             sb->read_len += (size_t)n;
             continue;

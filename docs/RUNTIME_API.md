@@ -864,10 +864,14 @@ StradaValue* strada_str_from_fh(StradaValue *fh);
 StradaValue* strada_close(StradaValue *fh);
 
 // Read line from file or socket (used by diamond operator <$fh>)
-// For files: uses fgets()
-// For sockets: reads byte-by-byte until \n, strips \r for CRLF handling
+// Binary-safe, no fixed length cap. For sockets, \r is stripped (CRLF).
 // Returns: string without trailing newline, or undef at EOF
 StradaValue* strada_read_line(StradaValue *fh);
+
+// Same, with an optional byte limit (core::readline($fh, $max)).
+// max_sv NULL/undef/<= 0 = unlimited. When the limit is reached first, the
+// first max bytes are returned and the rest of the line stays unread.
+StradaValue* strada_read_line_max(StradaValue *fh, StradaValue *max_sv);
 
 // Read line from stdin
 StradaValue* strada_readline(void);
@@ -1157,6 +1161,12 @@ int strada_socket_send(StradaValue *socket, const char *data);
 
 // Receive data
 StradaValue* strada_socket_recv(StradaValue *socket, int maxlen);
+
+// Non-blocking buffered readline (keeps the "\n"); undef = would block,
+// "" = EOF. A line is capped at the 8192-byte socket buffer; the _max
+// variant takes a smaller byte limit (the line ending does not count).
+StradaValue* strada_socket_try_readline(StradaValue *socket);
+StradaValue* strada_socket_try_readline_max(StradaValue *socket, StradaValue *max_sv);
 
 // Close socket
 StradaValue* strada_socket_close(StradaValue *socket);

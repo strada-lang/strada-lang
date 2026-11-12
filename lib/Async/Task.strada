@@ -8,6 +8,7 @@
 #   use Async::Task;
 #   my scalar $c    = Async::Task::connect("example.com", 80);
 #   my str  $line   = Async::Task::readline($conn);          # undef at EOF
+#   my str  $l2     = Async::Task::readline($conn, 0, 1024); # at most 1024 bytes
 #   my str  $req    = Async::Task::recv($conn, 4096);        # "" at EOF
 #   my str  $req2   = Async::Task::recv($conn, 4096, 5000);  # 5s timeout -> undef
 #   my int  $sent   = Async::Task::send($conn, $bytes);
@@ -19,6 +20,11 @@
 # makes the call return undef once the deadline passes. Without it, calls
 # wait indefinitely. (For recv, undef-on-timeout is distinguishable from
 # EOF, which returns "".)
+#
+# Line length: readline returns at most 8192 bytes (the socket buffer); a
+# longer line comes back in pieces over several calls. The optional third
+# argument $max_bytes lowers that limit; the rest of a longer line is
+# returned by the next call. The line ending does not count toward it.
 #
 # try/catch works inside tasks, including across suspensions. Note: name
 # resolution in connect() (getaddrinfo) is still synchronous; only the TCP
@@ -63,13 +69,23 @@ func recv(scalar $sock, int $max, int $timeout_ms = 0) str {
 }
 
 # Read one line (newline stripped). Returns undef at EOF or on timeout.
-func readline(scalar $sock, int $timeout_ms = 0) str {
+# $max_bytes > 0 returns at most that many bytes (capped by the 8192-byte
+# socket buffer); the rest of a longer line is left for the next call.
+func readline(scalar $sock, int $timeout_ms = 0, int $max_bytes = 0) str {
     my int $deadline = $timeout_ms > 0 ? core::mono_ms() + $timeout_ms : 0;
     while (1) {
-        my scalar $line = core::socket_try_readline($sock);
+        my scalar $line = core::socket_try_readline($sock, $max_bytes);
         if (defined($line)) {
-            if (length($line) == 0) { return undef; }   # EOF
-            chomp($line);
+            my int $blen = core::byte_length($line);
+            if ($blen == 0) { return undef; }   # EOF
+            if ($blen > 0 && core::byte_substr($line, $blen - 1, 1) eq "\n") {
+                $blen = $blen - 1;
+                $line = core::byte_substr($line, 0, $blen);
+            }
+            if ($blen > 0 && core::byte_substr($line, $blen - 1, 1) eq "\r") {
+                $blen = $blen - 1;
+                $line = core::byte_substr($line, 0, $blen);
+            }
             return $line;
         }
         my int $left = remaining($deadline);
@@ -94,8 +110,7 @@ func send(scalar $sock, str $data) int {
             next;
         }
         if (park($sock, "w", 0) == 0) {
-            if (core::socket_send($sock, $rest) < 0) { return 0 - 1; }
-            return $total;
+            core::usleep(1000);
         }
     }
     return $total;

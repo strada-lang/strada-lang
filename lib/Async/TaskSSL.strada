@@ -108,7 +108,10 @@ func accept(int $server, int $timeout_ms = 0) scalar {
         park_fd($srv_fd, "r", $left);
     }
     my int $conn = ssl::attach_server_fd($server, $cfd);
-    if ($conn == 0) { return undef; }
+    if ($conn == 0) {
+        core::close_fd($cfd);
+        return undef;
+    }
     if (drive_handshake($conn, $cfd, $deadline) == 0) {
         ssl::close($conn);
         return undef;

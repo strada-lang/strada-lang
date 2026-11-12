@@ -991,7 +991,7 @@ Built-in namespaces that don't need importing:
 | `c::` | Low-level: `c::alloc`, `c::free`, `c::is_null`, ... |
 | `utf8::` | `utf8::is_utf8`, `utf8::valid`, `utf8::downgrade`, ... |
 | `usb::` | USB device access (libusb required) |
-| `ssl::` | TLS/SSL sockets: `ssl::connect`, `ssl::read`, `ssl::write` |
+| `ssl::` | TLS/SSL sockets: `ssl::connect`, `ssl::read`, `ssl::write`; `ssl::set_timeout` / `ssl::set_default_timeout` bound waits on non-blocking connections (default 5000 ms) |
 
 `core::` examples:
 

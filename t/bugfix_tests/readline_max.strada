@@ -1,0 +1,83 @@
+# EXPECT: readline limit ok
+# core::readline($fh) had no way to bound line length: a peer (or file) that
+# never sent a newline made it buffer without limit. readline($fh, $max) /
+# core::readline($fh, $max) now return at most $max bytes and leave the rest
+# of the line for the next call (like Python's readline(size) / C's fgets).
+
+func fail(str $msg) int {
+    say("FAIL " . $msg);
+    return 1;
+}
+
+func main() int {
+    # In-memory filehandle: long line split into $max-sized pieces.
+    my scalar $fh = core::open_str("abcdefghij\nxy\n\nlast", "r");
+    my str $a = core::readline($fh, 4);
+    my str $b = core::readline($fh, 4);
+    my str $c = core::readline($fh, 4);
+    if ($a ne "abcd" || $b ne "efgh" || $c ne "ij") { return ::fail("split: $a/$b/$c"); }
+    # Shorter than the limit: whole line, newline stripped.
+    if (core::readline($fh, 4) ne "xy") { return ::fail("short line"); }
+    # Empty line is still "" (not undef).
+    my scalar $e = core::readline($fh, 4);
+    if (!defined($e) || $e ne "") { return ::fail("empty line"); }
+    # Last line without newline, then undef at EOF.
+    if (core::readline($fh, 100) ne "last") { return ::fail("last line"); }
+    if (defined(core::readline($fh, 100))) { return ::fail("eof not undef"); }
+    core::close($fh);
+
+    # Exact fit: a line of exactly $max bytes, newline left for the next call
+    # (which returns ""), as documented.
+    $fh = core::open_str("1234\nok\n", "r");
+    if (core::readline($fh, 4) ne "1234") { return ::fail("exact fit"); }
+    if (core::readline($fh, 4) ne "") { return ::fail("exact fit tail"); }
+    if (core::readline($fh, 4) ne "ok") { return ::fail("after exact fit"); }
+    core::close($fh);
+
+    # The bare readline() builtin takes the limit too; 0 / negative = unlimited.
+    $fh = core::open_str("hello world\nhello world\nbinary\x00ok\n", "r");
+    if (readline($fh, 5) ne "hello") { return ::fail("builtin readline limit"); }
+    if (readline($fh, 0) ne " world") { return ::fail("limit 0 = unlimited"); }
+    if (core::readline($fh, -1) ne "hello world") { return ::fail("negative = unlimited"); }
+    my str $bin = core::readline($fh, 8);
+    if (core::byte_length($bin) != 8 || $bin ne "binary\x00o") { return ::fail("binary limit"); }
+    core::close($fh);
+
+    # Real file on disk with a 10000-byte line.
+    my str $path = "/tmp/strada_readline_max_" . core::getpid() . ".txt";
+    core::spew($path, ("Z" x 10000) . "\nend\n");
+    $fh = core::open($path, "r");
+    my int $pieces = 0;
+    my int $total = 0;
+    while (1) {
+        my str $p = core::readline($fh, 4096);
+        $pieces = $pieces + 1;
+        $total = $total + core::byte_length($p);
+        if (core::byte_length($p) < 4096) { last; }
+    }
+    if ($pieces != 3 || $total != 10000) { return ::fail("file pieces=$pieces total=$total"); }
+    if (core::readline($fh, 4096) ne "end") { return ::fail("file after long line"); }
+    core::close($fh);
+    core::unlink($path);
+
+    # Socket: \r\n stripped, limit applies to the returned bytes.
+    my scalar $srv = core::socket_server(0);
+    my int $port = core::getsockname($srv)->{"port"} + 0;
+    my scalar $cli = core::socket_client("127.0.0.1", $port);
+    my scalar $acc = core::socket_accept($srv);
+    core::socket_send($cli, ("S" x 6000) . "\r\nnext\r\n");
+    core::shutdown($cli, 1);
+    my str $s1 = core::readline($acc, 5000);
+    my str $s2 = core::readline($acc, 5000);
+    my str $s3 = core::readline($acc, 5000);
+    if (core::byte_length($s1) != 5000 || core::byte_length($s2) != 1000 || $s3 ne "next") {
+        return ::fail("socket " . core::byte_length($s1) . "/" . core::byte_length($s2) . "/" . $s3);
+    }
+    if (defined(core::readline($acc, 10))) { return ::fail("socket eof"); }
+    core::socket_close($acc);
+    core::socket_close($cli);
+    core::socket_close($srv);
+
+    say("readline limit ok");
+    return 0;
+}

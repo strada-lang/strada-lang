@@ -72,7 +72,9 @@ func main() int {
 ## Task API (`Async::Task`)
 
 - `recv($sock, $max [, $timeout_ms])` → data; `""` = EOF; undef = timeout
-- `readline($sock [, $timeout_ms])` → line (newline stripped); undef = EOF/timeout
+- `readline($sock [, $timeout_ms [, $max_bytes]])` → line (newline stripped); undef = EOF/timeout.
+  A line is returned in pieces of at most 8192 bytes (the socket buffer);
+  `$max_bytes` > 0 lowers that limit, leaving the rest of a longer line for the next call
 - `send($sock, $data)` → bytes sent (handles partial writes); -1 = error
 - `accept($listener [, $timeout_ms])` → socket; undef = timeout
 - `connect($host, $port [, $timeout_ms])` → socket; undef = failure/timeout.
