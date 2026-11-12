@@ -1043,6 +1043,20 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     emit($cg, "strada_new_undef()");
                 }
                 emit($cg, ";\n");
+                # Inside an anonymous function the loop variable is a LOCAL of
+                # that function. This declaration bypasses gen_statement's
+                # NODE_VAR_DECL branch (which does the registering), so without
+                # this every use of it was treated as a capture of an outer
+                # variable: "'i' undeclared". Registered after the initializer,
+                # which may itself legitimately read an outer variable.
+                if ($cg->{"in_anon_func"}) {
+                    my str $for_locals = $cg->{"anon_local_str"};
+                    if ($for_locals eq "") {
+                        $cg->{"anon_local_str"} = $init->{"name"};
+                    } else {
+                        $cg->{"anon_local_str"} = $for_locals . "," . $init->{"name"};
+                    }
+                }
             }
         }
 

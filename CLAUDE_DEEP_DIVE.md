@@ -2504,3 +2504,20 @@ See CLAUDE.md "Fast Compiler Iteration". Summary of the mechanics:
   missing prototype is a silent pointer truncation, not an error.
 - `t/run_tests.sh`: `QUICK=1` sets `STRADA_TEST_TCC=1` + `STRADA_DEFAULT_OPT=0`;
   the gcc path is split into compile + link for ccache regardless of `QUICK`.
+
+## Closure capture sites: `scalar_var_c_ref` (2026-11)
+
+Captures are discovered lazily during codegen, not by a prior AST walk: the
+`NODE_VARIABLE` branch of `gen_expression` decides param / local / capture when
+it emits the name, appending to `anon_capture_str`. `scalar_var_c_ref($cg, $name,
+$c_name)` (CodeGen.strada) is that decision as a function returning the C
+expression. Hand-emitting sites that now use it: `gen_regex_interpolated_pattern`
+(var parts), the int fast path of `NODE_INCREMENT`, and the `NODE_VARIABLE`
+branches of `chomp`/`chop` in CodeGenBuiltins. The C-style `for` init declaration
+registers its variable in `anon_local_str` after emitting the initializer.
+
+Also fixed alongside: a multi-part interpolated match pattern (`/^a$pat/`) built
+a string SV that was passed straight to `strada_to_str_ss` and never released
+(one leak per match). The match codegen now binds it to `__re_psv` and decrefs it
+unless `regex_pattern_is_single_var($pattern)` (then it is the variable itself,
+borrowed).

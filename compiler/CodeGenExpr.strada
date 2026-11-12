@@ -3205,32 +3205,9 @@ func gen_expression(scalar $cg, scalar $expr) void {
         } elsif ($var_name eq "b" && $cg->{"in_sort_block"}) {
             emit($cg, "__sort_b_");
         } elsif ($cg->{"in_anon_func"}) {
-            # Inside anonymous function - check if it's a param, local, or capture
-            my str $param_str = $cg->{"anon_param_str"};
-            my str $local_str = $cg->{"anon_local_str"};
-            my str $capture_str = $cg->{"anon_capture_str"};
-            if (str_contains_name($param_str, $var_name)) {
-                # It's a parameter - use directly (escaped for C)
-                emit($cg, $c_var_name);
-            } elsif (str_contains_name($local_str, $var_name)) {
-                # It's a local variable - use directly (escaped for C)
-                emit($cg, $c_var_name);
-            } else {
-                # It's a capture - get or add index
-                my int $idx = get_capture_index($capture_str, $var_name);
-                if ($idx < 0) {
-                    # New capture - add it
-                    if ($capture_str eq "") {
-                        $cg->{"anon_capture_str"} = $var_name;
-                    } else {
-                        $cg->{"anon_capture_str"} = $capture_str . "," . $var_name;
-                    }
-                    $idx = $cg->{"anon_capture_count"};
-                    $cg->{"anon_capture_count"} = $idx + 1;
-                }
-                # Use double pointer dereference for capture-by-reference
-                emit($cg, "(*__captures[" . $idx . "])");
-            }
+            # Inside anonymous function: a param/local by C name, anything
+            # else through its capture slot (registered on first use).
+            emit($cg, scalar_var_c_ref($cg, $var_name, $c_var_name));
         } else {
             emit($cg, $c_var_name);
         }
@@ -3283,9 +3260,16 @@ func gen_expression(scalar $cg, scalar $expr) void {
 
         # Also free interpolated pattern temp if needed
         if ($has_interp == 1) {
-            emit($cg, "char *__re_pat = strada_to_str_ss(");
+            # The pattern value is BORROWED only when the whole pattern is a
+            # single variable (/$pat/). Anything else (/^a$pat/) is a string
+            # built for this match, which leaked once per match when it was
+            # passed straight to strada_to_str_ss and never released.
+            emit($cg, "StradaValue *__re_psv = ");
             gen_regex_interpolated_pattern($cg, $pattern);
-            emit($cg, "); ");
+            emit($cg, "; char *__re_pat = strada_to_str_ss(__re_psv); ");
+            if (regex_pattern_is_single_var($pattern) == 0) {
+                emit($cg, "strada_decref(__re_psv); ");
+            }
         }
 
         if ($op eq "=~") {
@@ -3743,16 +3727,19 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 if (length($iv_check) > 0) { $is_int_var = 1; }
             }
             if ($is_int_var == 1) {
+                # The C lvalue: a capture slot when this is a closure touching
+                # an outer variable (the bare name is undeclared in there).
+                my str $iv_ref = scalar_var_c_ref($cg, $operand->{"name"}, $iv_name);
                 my str $delta = "1";
                 if ($op eq "--") { $delta = "-1"; }
                 if ($is_prefix == 1) {
                     # ++$i: assign new, yield new (tagged int → no refcounting)
-                    emit($cg, "(" . $iv_name . " = STRADA_MAKE_TAGGED_INT(strada_to_int(" . $iv_name . ") + " . $delta . "))");
+                    emit($cg, "(" . $iv_ref . " = STRADA_MAKE_TAGGED_INT(strada_to_int(" . $iv_ref . ") + " . $delta . "))");
                 } else {
                     # $i++: capture old, assign new, yield old. Old is
                     # tagged int — caller's strada_decref is a no-op so
                     # no leak even though we don't strada_incref it.
-                    emit($cg, "({ StradaValue *__pi_old = " . $iv_name . "; " . $iv_name . " = STRADA_MAKE_TAGGED_INT(strada_to_int(__pi_old) + " . $delta . "); __pi_old; })");
+                    emit($cg, "({ StradaValue *__pi_old = " . $iv_ref . "; " . $iv_ref . " = STRADA_MAKE_TAGGED_INT(strada_to_int(__pi_old) + " . $delta . "); __pi_old; })");
                 }
                 return;
             }

@@ -24,7 +24,7 @@ make tools                  # Build tools (stradadoc, strada-soinfo, strada-prof
 make run PROG=test_simple   # Compile and run an example program
 make test                   # Test runtime system
 make test-selfhost          # Verify self-compilation (stage 2)
-make test-suite             # Run comprehensive test suite (148 tests)
+make test-suite             # Run comprehensive test suite (233 tests)
 make test-suite V=1         # Verbose test output
 make examples               # Build all example programs
 make install                # Install to /usr/local (or PREFIX=/path make install)
@@ -277,7 +277,7 @@ my @flat = (1, @arr, 2)  # @arr elements are flattened into the list
 [ 1, 2, 3 ]              # Array reference
 { key => "value" }       # Hash reference
 $$ref, @$ref, %$ref      # Dereference (shorthand)
-${$ref}, @{$ref}, %{$ref}  # Dereference (braced)
+@{$ref}, %{$ref}          # Dereference (braced; ${$ref} is NOT accepted, use $$ref)
 ```
 
 ### Weak References
@@ -304,7 +304,7 @@ Note: the automatic **cycle collector** (default on, see Memory Management below
 make clean && make          # Full rebuild
 make run PROG=test_simple   # Test specific example
 make test-selfhost          # Verify compiler can compile itself
-make test-suite             # Run comprehensive test suite (148 tests)
+make test-suite             # Run comprehensive test suite (233 tests)
 ./t/run_tests.sh -v string  # Run tests matching "string" with verbose output
 ```
 
@@ -313,7 +313,7 @@ make test-suite             # Run comprehensive test suite (148 tests)
 Located in `t/`:
 
 ```bash
-./t/run_tests.sh            # Run all 148 tests
+./t/run_tests.sh            # Run all 233 tests
 ./t/run_tests.sh -v         # Verbose output
 ./t/run_tests.sh -t         # TAP format for CI/CD
 ./t/run_tests.sh regex      # Run only tests matching "regex"
@@ -580,10 +580,10 @@ The Strada interpreter (`strada-interp`) executes Strada programs without genera
 make interpreter
 
 # Run a program
-./strada-interp program.strada
+./interpreter/strada-interp program.strada
 
 # REPL
-./strada-interp
+./interpreter/strada-interp
 ```
 
 **Architecture:** Source → Lexer → Parser → AST → Bytecode Compiler (`vm_compiler.c`) → VM Execution (`vm.c`)
@@ -962,7 +962,30 @@ my scalar $f = func (int $n) int { return $n * $multiplier; };
 $f->(42);  # Arrow syntax for calling
 ```
 
-Capture-by-reference, mutations visible to outer scope. Transitive capture works: a closure nested inside another closure captures outer variables through the enclosing closure's `__captures` slots (gen at CodeGenExpr's capture-array emission forces the enclosing closure to capture pass-through names).
+**Scalars are captured BY VALUE** (`strada_closure_new` copies each captured
+slot at closure creation; deliberate, for thread safety). The closure's copy
+persists across calls, so a counter closure counts 1, 2, 3, but the outer
+variable is unchanged and later changes to it are not seen. Arrays and hashes
+are shared (`push(@a, …)` / `$h{k} = …` inside a closure are visible outside),
+so share mutable state through a container, a ref, or `our`.
+`examples/test_closures.strada` still asserts the old by-reference behaviour and
+fails at run time; the suite only compiles it.
+
+**Capture analysis is lazy** (2026-11): a variable is captured the first time
+codegen names it inside the anonymous function. So every codegen path that
+emits a variable's C name by hand, instead of via `gen_expression` on a
+`NODE_VARIABLE`, must call `scalar_var_c_ref($cg, $name, $c_name)` (CodeGen.strada),
+which returns the capture slot `(*__captures[N])` and registers the capture. Paths
+that emitted the bare name compiled fine in ordinary functions and failed in
+closures with "'name' undeclared": `/$var/` and `!~` regex patterns, `++`/`--` on
+int variables, `chomp($var)`/`chop($var)`. Likewise a declaration that bypasses
+`gen_statement`'s `NODE_VAR_DECL` branch (the C-style `for (my int $i …)` init)
+must add the name to `anon_local_str`, or it is treated as a capture. Regression:
+`examples/test_closure_capture_sites.strada`. Known gap: `s/$var/…/` does not
+interpolate variables in the PATTERN at all (it is passed as the literal regex
+`$var`), in or out of closures; use `re::replace_all($s, $var, …)`.
+
+Transitive capture works: a closure nested inside another closure captures outer variables through the enclosing closure's `__captures` slots (gen at CodeGenExpr's capture-array emission forces the enclosing closure to capture pass-through names).
 
 ### Async/Await
 
@@ -1146,7 +1169,7 @@ END { say("runs after main, LIFO order"); }
 - **`tie`/`untie`/`tied`**: Custom variable implementations dispatching FETCH/STORE/EXISTS/DELETE/FIRSTKEY/NEXTKEY/CLEAR. Zero overhead when untied.
 - **Private functions**: `private func helper(int $x) int { ... }` — `static` in C, not exported
 - **Dynamic return type**: `func flexible() dynamic { ... }` with `core::wantarray()` / `core::wanthash()`
-- **Package-qualified calls**: `::helper()` resolves to current package. Also `.::func()`, `__PACKAGE__::func()`.
+- **Package-qualified calls**: `::helper()` resolves to current package. Also `.::func()`. (`__PACKAGE__::func()` is accepted by the parser but fails at link: it emits `__PACKAGE___func`.)
 
 ### Stack Traces and Introspection
 
@@ -1189,7 +1212,7 @@ back.
 my array @data[1000];           # Pre-allocate array capacity
 my hash %cache[500];            # Pre-allocate hash capacity
 core::hash_default_capacity(1000);
-core::array_reserve(@arr, $n);
+reserve(@arr, $n);              # (core::array_reserve does not exist: link error)
 ```
 
 **Runtime optimizations** (automatic, no code changes needed):

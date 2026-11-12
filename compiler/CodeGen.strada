@@ -2430,6 +2430,59 @@ func get_capture_index(str $list, str $name) int {
     return -1;
 }
 
+# The C expression that names scalar variable $var_name at the current point
+# of code generation. Outside an anonymous function that is just its C name.
+# Inside one it is the C name for a parameter or local, and the capture slot
+# `(*__captures[N])` for anything else -- registering the capture on first use.
+#
+# EVERY codegen path that emits a variable's C name by hand (rather than via
+# gen_expression on a NODE_VARIABLE) must go through this. A path that emits
+# the bare name compiles fine in ordinary functions and then fails inside a
+# closure with "'name' undeclared", because the closure never captured it:
+# that was the bug for /$var/ patterns, $var++ on int variables and chomp($var).
+func scalar_var_c_ref(scalar $cg, str $var_name, str $c_var_name) str {
+    if (!$cg->{"in_anon_func"}) {
+        return $c_var_name;
+    }
+    if (str_contains_name($cg->{"anon_param_str"}, $var_name)) {
+        return $c_var_name;
+    }
+    if (str_contains_name($cg->{"anon_local_str"}, $var_name)) {
+        return $c_var_name;
+    }
+    my str $capture_str = $cg->{"anon_capture_str"};
+    my int $idx = get_capture_index($capture_str, $var_name);
+    if ($idx < 0) {
+        if ($capture_str eq "") {
+            $cg->{"anon_capture_str"} = $var_name;
+        } else {
+            $cg->{"anon_capture_str"} = $capture_str . "," . $var_name;
+        }
+        $idx = $cg->{"anon_capture_count"};
+        $cg->{"anon_capture_count"} = $idx + 1;
+    }
+    return "(*__captures[" . $idx . "])";
+}
+
+# 1 when an interpolated regex pattern is exactly one variable ("$name" and
+# nothing else), in which case gen_regex_interpolated_pattern yields that
+# variable's own (borrowed) value rather than a freshly built string.
+func regex_pattern_is_single_var(str $pattern) int {
+    my int $len = length($pattern);
+    if ($len < 2) { return 0; }
+    if (substr($pattern, 0, 1) ne "$") { return 0; }
+    my int $i = 1;
+    while ($i < $len) {
+        my str $vch = substr($pattern, $i, 1);
+        if ($vch eq "_" || ($vch ge "a" && $vch le "z") || ($vch ge "A" && $vch le "Z") || ($vch ge "0" && $vch le "9")) {
+            $i = $i + 1;
+        } else {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 # Generate code for regex pattern with variable interpolation
 # Pattern like "$foo" or "^$pattern$" gets converted to runtime string building
 func gen_regex_interpolated_pattern(scalar $cg, str $pattern) void {
@@ -2501,7 +2554,7 @@ func gen_regex_interpolated_pattern(scalar $cg, str $pattern) void {
     if ($num_parts == 1) {
         my scalar $p = $parts[0];
         if ($p->{"type"} eq "var") {
-            emit($cg, $p->{"value"});
+            emit($cg, scalar_var_c_ref($cg, $p->{"value"}, $p->{"value"}));
         } else {
             # STRADA_NEW_STR_LIT preserves embedded NUL bytes (sizeof(LIT)-1)
             emit($cg, "STRADA_NEW_STR_LIT(\"");
@@ -2520,7 +2573,7 @@ func gen_regex_interpolated_pattern(scalar $cg, str $pattern) void {
         my scalar $p = $parts[$pi];
         emit($cg, "StradaValue *__rp" . $pi . " = ");
         if ($p->{"type"} eq "var") {
-            emit($cg, $p->{"value"});
+            emit($cg, scalar_var_c_ref($cg, $p->{"value"}, $p->{"value"}));
         } else {
             emit($cg, "STRADA_NEW_STR_LIT(\"");
             emit_escaped_string($cg, $p->{"value"});

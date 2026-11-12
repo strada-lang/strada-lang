@@ -1,0 +1,75 @@
+# Closures must capture an outer variable no matter which codegen path names
+# it. These paths used to emit the bare C name, which is undeclared inside
+# the closure ("'pattern' undeclared" at the C compile):
+#   - a regex literal whose pattern interpolates the variable: /$pat/, !~
+#   - ++ / -- on an int variable (the tagged-int fast path)
+#   - chomp($var) / chop($var)
+# and a C-style for loop's own variable was not registered as a LOCAL of the
+# closure, so it was treated as a capture ("'i' undeclared").
+
+package Router;
+
+func path_limiter(str $pattern, int $limit) scalar {
+    return func (str $path) {
+        if ($path =~ /$pattern/) { return "limited:" . $limit; }
+        return "pass";
+    };
+}
+
+func prefix_id(str $prefix) scalar {
+    return func (str $path) {
+        if ($path !~ /$prefix/) { return "nomatch"; }
+        if ($path =~ /^$prefix\/(\d+)/) { return "id=" . $1; }
+        return "noid";
+    };
+}
+
+package main;
+
+our int $fails = 0;
+
+func check(str $what, str $got, str $want) void {
+    if ($got eq $want) { return; }
+    say("FAIL " . $what . ": got '" . $got . "' want '" . $want . "'");
+    $fails = $fails + 1;
+}
+
+func main() int {
+    # Regex pattern from a captured variable (single-variable and multi-part).
+    my scalar $api = Router::path_limiter("^/api/", 5);
+    my scalar $json = Router::path_limiter("\\.json\$", 9);
+    check("match", $api->("/api/users"), "limited:5");
+    check("no match", $api->("/home"), "pass");
+    check("second closure keeps its own pattern", $json->("/x.json") . " " . $api->("/api/z"), "limited:9 limited:5");
+    my scalar $users = Router::prefix_id("/users");
+    check("multi-part pattern + capture group", $users->("/users/42"), "id=42");
+    check("negated match", $users->("/other"), "nomatch");
+    check("multi-part pattern, no id", $users->("/users/x"), "noid");
+
+    # A pattern captured through two levels of closure.
+    my str $tail = "b+";
+    my scalar $make = func () { return func (str $s) { if ($s =~ /^a$tail/) { return 1; } return 0; }; };
+    my scalar $inner = $make->();
+    check("nested capture", "" . $inner->("abbb") . $inner->("ac"), "10");
+
+    # ++ / -- on a captured int. Scalars are captured by value: the closure
+    # keeps its own copy, which persists across calls; the outer one is untouched.
+    my int $n = 10;
+    my scalar $bump = func () { $n++; ++$n; $n--; return $n; };
+    check("increment state", "" . $bump->() . " " . $bump->() . " outer=" . $n, "11 12 outer=10");
+    my scalar $post = func () { my int $old = $n++; return $old * 100 + $n; };
+    check("post-increment value", "" . $post->(), "1011");
+
+    # chomp / chop on a captured string.
+    my str $line = "text\n";
+    my scalar $trim = func () { chomp($line); my str $a = $line; chop($line); return $a . "|" . $line; };
+    check("chomp/chop", $trim->(), "text|tex");
+
+    # A C-style for loop inside a closure: its variable is a local, and the
+    # body still reaches captured variables.
+    my scalar $sum = func (int $top) { my int $t = 0; for (my int $i = 1; $i <= $top; $i++) { $t += $i * $n; } return $t; };
+    check("for-loop local", "" . $sum->(4), "100");
+
+    if ($fails == 0) { say("All closure capture-site tests passed"); return 0; }
+    return 1;
+}

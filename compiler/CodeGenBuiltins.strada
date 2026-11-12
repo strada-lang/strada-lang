@@ -6324,7 +6324,7 @@ func gen_builtin_g7(scalar $cg, scalar $expr, str $name) int {
             my int $arg0_is_hash_access = $arg0->{"type"} == NODE_HASH_ACCESS();
             if ($arg0_is_var == 1) {
                 # In-place: modify $var, return the chomped string
-                my str $vname = escape_c_keyword($arg0->{"name"});
+                my str $vname = scalar_var_c_ref($cg, $arg0->{"name"}, escape_c_keyword($arg0->{"name"}));
                 emit($cg, "({ char *__chomp_in = strada_to_str_ss(" . $vname . "); ");
                 emit($cg, "char *__chomp_out = strada_chomp(__chomp_in); ");
                 emit($cg, "StradaValue *__chomp_new = strada_new_str(__chomp_out); ");
@@ -6393,7 +6393,7 @@ func gen_builtin_g7(scalar $cg, scalar $expr, str $name) int {
             my int $arg0_is_hash_access = $arg0->{"type"} == NODE_HASH_ACCESS();
             if ($arg0_is_var == 1) {
                 # In-place chop $var. Mirrors chomp's NODE_VARIABLE branch.
-                my str $vname = escape_c_keyword($arg0->{"name"});
+                my str $vname = scalar_var_c_ref($cg, $arg0->{"name"}, escape_c_keyword($arg0->{"name"}));
                 emit($cg, "({ char *__chop_in = strada_to_str_ss(" . $vname . "); ");
                 emit($cg, "char *__chop_out = strada_chop(__chop_in); ");
                 emit($cg, "StradaValue *__chop_new = strada_new_str(__chop_out); ");

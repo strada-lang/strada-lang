@@ -169,6 +169,9 @@ test_output_contains "$EXAMPLES_DIR/test_misc_libc.strada" "test_misc_libc" "All
 # changed to capture-by-value for thread safety - compile only
 test_compile "$EXAMPLES_DIR/test_closures.strada" "test_closures" "Closures"
 test_output_contains "$EXAMPLES_DIR/test_closure_params.strada" "test_closure_params" "All closure parameter tests passed" "Closure params"
+# Captured variables reached through codegen paths that emit a C name by hand:
+# /$pat/ regex patterns, ++/-- on ints, chomp/chop, and for-loop locals.
+test_output_contains "$EXAMPLES_DIR/test_closure_capture_sites.strada" "test_closure_capture_sites" "All closure capture-site tests passed" "Closure capture sites (regex pattern, ++, chomp, for-local)"
 
 # Test: Operators
 test_run "$EXAMPLES_DIR/test_operators.strada" "test_operators" "Operators"
