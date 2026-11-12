@@ -39,7 +39,8 @@ func main() int {
     # --- Non-flagged byte string holding raw UTF-8 bytes (é = 0xC3 0xA9) ---
     # "héllo v_SIG zz": the multi-byte é before the needle is what used to
     # shift the slice. v_SIG sits at byte offset 7, char offset 6.
-    my str $b = "héllo v_SIG zz";
+    # utf8::encode() clears STRADA_UTF8_FLAG (matching raw bytes from slurp/fread).
+    my str $b = utf8::encode("héllo v_SIG zz");
     my str $needle = "v_SIG";
 
     # Shape A: literal needle, no offset  (strada_index_sv)
@@ -49,7 +50,7 @@ func main() int {
     # Shape C: 3-arg with offset          (strada_index_offset -> strada_index_sv2)
     check("C byte/3-arg round-trip", substr($b, index($b, "v_SIG", 0), 5), "v_SIG");
     # 3-arg with a starting offset past an earlier copy of the needle
-    my str $b2 = "v_SIG héllo v_SIG zz";
+    my str $b2 = utf8::encode("v_SIG héllo v_SIG zz");
     check("C byte/3-arg with offset finds 2nd", substr($b2, index($b2, "v_SIG", 3), 5), "v_SIG");
     # length() must agree: a non-flagged byte string's length is its BYTE
     # count (é is 2 bytes, so "héllo v_SIG zz" is 15 bytes / 14 chars), so

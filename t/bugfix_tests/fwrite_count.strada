@@ -1,0 +1,16 @@
+# EXPECT: 5 4 9 0
+# core::fwrite returned undef instead of the number of bytes written, and
+# truncated strings at embedded NUL bytes.
+func main() int {
+    my str $path = "/tmp/strada_fwrite_test_" . core::getpid() . ".bin";
+    my scalar $fh = core::open($path, "wb");
+    my int $n1 = core::fwrite($fh, "hello");
+    my str $bin = "a" . chr(0) . "bcdef";
+    my int $n2 = core::fwrite($fh, $bin, 4);
+    core::close($fh);
+
+    my str $got = core::slurp($path);
+    core::unlink($path);
+    say($n1 . " " . $n2 . " " . core::byte_length($got) . " " . core::get_byte($got, 6));
+    return 0;
+}

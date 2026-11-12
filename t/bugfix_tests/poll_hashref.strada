@@ -1,0 +1,17 @@
+# EXPECT: 1 1
+# core::poll only accepted unboxed STRADA_HASH elements, ignoring the hash
+# references `[ { "fd" => ..., "events" => ... } ]` produced in Strada code.
+func main() int {
+    my scalar $p = core::pipe();
+    my int $rfd = $p->[0];
+    my int $wfd = $p->[1];
+    core::close_fd($wfd);
+
+    my scalar $entry = { "fd" => $rfd, "events" => 1 };
+    my int $ready = core::poll([$entry], 100);
+    my int $has_rev = ($entry->{"revents"} != 0) ? 1 : 0;
+    core::close_fd($rfd);
+
+    say($ready . " " . $has_rev);
+    return 0;
+}

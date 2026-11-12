@@ -289,7 +289,7 @@ if (math::isnan($x)) {
 ### math::isinf() - Check for Infinity
 
 ```strada
-my num $x = math::exp(1000);        # Infinity (overflow); note 1.0 / 0.0 does NOT give Inf
+my num $x = math::exp(1000);        # Infinity (overflow); note 1.0 / 0.0 throws "Illegal division by zero"
 if (math::isinf($x)) {              # 1 for +Inf, -1 for -Inf, 0 otherwise
     say("infinite");
 }

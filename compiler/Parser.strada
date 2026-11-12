@@ -36,6 +36,7 @@ func parser_new(scalar $tokens) scalar {
     $parser{"filename"} = "";
     $parser{"current_package"} = "";
     $parser{"const_names"} = {};  # Track declared const names
+    $parser{"structs"} = {};      # Track declared native struct types
     $parser{"errors"} = [];       # Recovered parse errors (see parse_function_guarded)
     return \%parser;
 }
@@ -708,6 +709,16 @@ func parse_type(scalar $parser) int {
         my int $funcptr_ret = parse_type($parser);  # Parse return type
         $parser->{"last_funcptr_return"} = $funcptr_ret;
         return TYPE_FUNCPTR();
+    }
+
+    # Native struct type name
+    if ($type_str eq "IDENT") {
+        my str $st_cand = $tok->{"value"};
+        if (defined($parser->{"structs"}->{$st_cand})) {
+            $parser->{"last_type_name"} = $st_cand;
+            parser_advance($parser);
+            return TYPE_SCALAR();
+        }
     }
     
     # Provide helpful error for common mistakes
@@ -2885,6 +2896,9 @@ func parse_var_decl(scalar $parser) scalar {
 
     my scalar $decl = ast_new_var_decl($name, $var_type, $sigil);
     ast_set_line($decl, $decl_line);
+    if (length($type_name) > 0) {
+        $decl->{"struct_name"} = $type_name;
+    }
 
     # Optional initial capacity for arrays: my array $name[size];
     if ($sigil eq "@") {
@@ -4121,6 +4135,9 @@ func parse_function(scalar $parser) scalar {
 
             my scalar $param = ast_new_param($pname, $param_type, $sigil);
             $param->{"is_variadic"} = $is_variadic;
+            if (length($param_type_name) > 0) {
+                $param->{"struct_name"} = $param_type_name;
+            }
             
             # Check for default value
             if (parser_check($parser, "ASSIGN")) {
@@ -4152,10 +4169,15 @@ func parse_function(scalar $parser) scalar {
     
     # Parse return type (optional — defaults to scalar if { follows)
     my int $ret_type = TYPE_SCALAR();
+    my str $ret_struct_name = "";
     if (!parser_check($parser, "LBRACE")) {
         $ret_type = parse_type($parser);
+        $ret_struct_name = $parser->{"last_type_name"};
     }
     $fn->{"return_type"} = $ret_type;
+    if (length($ret_struct_name) > 0) {
+        $fn->{"return_struct_name"} = $ret_struct_name;
+    }
 
     # Parse body
     $fn->{"body"} = parse_block($parser);
@@ -4394,6 +4416,67 @@ func parse_enum(scalar $parser) scalar {
     parser_expect($parser, "RBRACE");
 
     return $en;
+}
+
+# Parse native struct declaration: struct Name { int x; num y; str s; }
+func parse_struct(scalar $parser) scalar {
+    my int $st_line = parser_current_line($parser);
+    parser_advance($parser);  # skip 'struct'
+
+    my scalar $name_tok = parser_current($parser);
+    parser_expect($parser, "IDENT");
+    my str $sname = $name_tok->{"value"};
+
+    parser_expect($parser, "LBRACE");
+
+    my hash %st = ();
+    my array @fields = ();
+    my hash %field_map = ();
+    my int $offset = 0;
+    my int $fcount = 0;
+
+    while (!parser_check($parser, "RBRACE") && !parser_check($parser, "EOF")) {
+        my int $ftype = parse_type($parser);
+        if (parser_check($parser, "DOLLAR")) {
+            parser_advance($parser);
+        }
+        my str $fname = parse_var_name($parser);
+        my int $fsize = 8;
+        if ($ftype == TYPE_INT() || $ftype == TYPE_INT32() || $ftype == TYPE_UINT32() || $ftype == TYPE_BOOL()) {
+            $fsize = 4;
+        } elsif ($ftype == TYPE_STR()) {
+            $fsize = 64;
+        }
+        my hash %finfo = ();
+        $finfo{"name"} = $fname;
+        $finfo{"type"} = $ftype;
+        $finfo{"offset"} = $offset;
+        $finfo{"size"} = $fsize;
+        push(@fields, \%finfo);
+        $field_map{$fname} = \%finfo;
+        $offset = $offset + $fsize;
+        $fcount = $fcount + 1;
+        if (parser_check($parser, "SEMI") || parser_check($parser, "COMMA")) {
+            parser_advance($parser);
+        }
+    }
+
+    parser_expect($parser, "RBRACE");
+    if (parser_check($parser, "SEMI")) {
+        parser_advance($parser);
+    }
+
+    if ($offset == 0) {
+        $offset = 1;
+    }
+    $st{"name"} = $sname;
+    $st{"size"} = $offset;
+    $st{"fields"} = \@fields;
+    $st{"field_count"} = $fcount;
+    $st{"field_map"} = \%field_map;
+    $st{"line"} = $st_line;
+    $parser->{"structs"}->{$sname} = \%st;
+    return \%st;
 }
 
 # Parse package declaration
@@ -4813,6 +4896,33 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
         $i = $i + 1;
     }
 
+    # Merge native structs
+    my scalar $mod_struct_names = $mod_program->{"struct_names"};
+    my scalar $mod_structs = $mod_program->{"structs"};
+    $i = 0;
+    $count = $mod_program->{"struct_count"};
+    while ($i < $count) {
+        my str $ms_name = $mod_struct_names->[$i];
+        my scalar $ms_def = $mod_structs->{$ms_name};
+        ast_add_struct($program, $ms_def);
+        $i = $i + 1;
+    }
+
+    # Merge qw() imports from module
+    my scalar $mod_qwk = $mod_program->{"qw_import_keys"};
+    my scalar $mod_qwi = $mod_program->{"qw_imports"};
+    $i = 0;
+    $count = $mod_program->{"qw_import_count"};
+    while ($i < $count) {
+        my str $qkey = $mod_qwk->[$i];
+        if (!defined($program->{"qw_imports"}->{$qkey})) {
+            push($program->{"qw_import_keys"}, $qkey);
+            $program->{"qw_import_count"} = $program->{"qw_import_count"} + 1;
+        }
+        $program->{"qw_imports"}->{$qkey} = $mod_qwi->{$qkey};
+        $i = $i + 1;
+    }
+
     # Merge global variables from module (tagged with from_use=1 so
     # module-only codegen can skip globals that came in via `use`).
     my scalar $mod_globals = $mod_program->{"globals"};
@@ -5005,7 +5115,9 @@ func parse_use(scalar $parser, scalar $program) void {
             my int $qwl_n = $qwl_tok->{"word_count"};
             my int $qwl_i = 0;
             while ($qwl_i < $qwl_n) {
-                ast_add_import($program, $qwl_words->[$qwl_i]);
+                my str $qwl_w = $qwl_words->[$qwl_i];
+                ast_add_import($program, $qwl_w);
+                ast_add_qw_import($program, $program->{"package"}, $qwl_w, $mod_name . "::" . $qwl_w);
                 $qwl_i = $qwl_i + 1;
             }
             parser_advance($parser);
@@ -5018,7 +5130,9 @@ func parse_use(scalar $parser, scalar $program) void {
                 while (!parser_check($parser, "RPAREN")) {
                     if (parser_check($parser, "IDENT")) {
                         my scalar $import_tok = parser_current($parser);
-                        ast_add_import($program, $import_tok->{"value"});
+                        my str $imp_w = $import_tok->{"value"};
+                        ast_add_import($program, $imp_w);
+                        ast_add_qw_import($program, $program->{"package"}, $imp_w, $mod_name . "::" . $imp_w);
                     }
                     parser_advance($parser);
                 }
@@ -5139,6 +5253,15 @@ func resolve_use_module(scalar $parser, scalar $program, str $mod_name) void {
 
         ast_mark_module_loaded($program, $mod_name);
         load_module($program, $mod_name, $file_path);
+        my int $ps_i = 0;
+        my int $ps_n = $program->{"struct_count"} + 0;
+        my scalar $ps_names = $program->{"struct_names"};
+        my scalar $ps_map = $program->{"structs"};
+        while ($ps_i < $ps_n) {
+            my str $ps_nm = $ps_names->[$ps_i];
+            $parser->{"structs"}->{$ps_nm} = $ps_map->{$ps_nm};
+            $ps_i = $ps_i + 1;
+        }
     } else {
         # A `use` that resolves to nothing used to be silently ignored; the
         # program then failed at link time with undefined references (or,
@@ -6829,6 +6952,9 @@ func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low, sca
         } elsif (parser_check($parser, "ENUM")) {
             my scalar $en = parse_enum($parser);
             ast_add_enum($program, $en);
+        } elsif (parser_check($parser, "IDENT") && parser_current($parser)->{"value"} eq "struct") {
+            my scalar $st = parse_struct($parser);
+            ast_add_struct($program, $st);
         } elsif (parser_check($parser, "PACKAGE")) {
             # Flush has-constructor for previous package before switching
             my str $prev_pkg = $program->{"package"};

@@ -1,0 +1,19 @@
+# EXPECT: abc ABC xyz XYZ CAFé 4
+# tr/// rewrote shared strings in place (changing every variable sharing the
+# buffer) and double-decref'd `our` scalar globals.
+our str $g = "xyz";
+func main() int {
+    my str $a = "abc";
+    my str $b = $a;
+    $b =~ tr/a-z/A-Z/;
+
+    my str $g_copy = $g;
+    $g =~ tr/a-z/A-Z/;
+
+    my str $u = "café";
+    my str $u2 = $u;
+    $u2 =~ tr/a-z/A-Z/;
+
+    say($a . " " . $b . " " . $g_copy . " " . $g . " " . $u2 . " " . length($u2));
+    return 0;
+}

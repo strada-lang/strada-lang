@@ -1,0 +1,11 @@
+# EXPECT: 42 7
+# core::dl_call_int crashed when passed a plain tagged-int scalar argument
+# instead of an array reference.
+func main() int {
+    my int $lib = core::dl_open("");
+    my int $sym = core::dl_sym($lib, "abs");
+    my int $a = core::dl_call_int($sym, -42);
+    my int $b = core::dl_call_int($sym, [-7]);
+    say($a . " " . $b);
+    return 0;
+}

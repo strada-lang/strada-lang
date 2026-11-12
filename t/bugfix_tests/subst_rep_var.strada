@@ -1,0 +1,23 @@
+# EXPECT: aXc aX1c a[X-b]c a$wc G!
+# s/// did not interpolate $name or ${name} variables in the replacement string.
+our str $gv = "G";
+func main() int {
+    my str $w = "X";
+    my str $s1 = "abc";
+    $s1 =~ s/b/$w/;
+
+    my str $s2 = "abc";
+    $s2 =~ s/b/${w}1/;
+
+    my str $s3 = "abc";
+    $s3 =~ s/(b)/[$w-$1]/;
+
+    my str $s4 = "abc";
+    $s4 =~ s/b/\$w/;
+
+    my str $s5 = "x!";
+    $s5 =~ s/x/$gv/;
+
+    say($s1 . " " . $s2 . " " . $s3 . " " . $s4 . " " . $s5);
+    return 0;
+}

@@ -403,6 +403,9 @@ func main() int {
     my str $source = slurp($input_file);
 
     # Auto-detect stack trace need if not explicitly set
+    # Mode 1 = full stack trace + line numbers; Mode 2 = recursion-depth guard
+    # on non-leaf functions (zero overhead on leaf functions and statements);
+    # Mode 0 = explicitly disabled via --no-stack-trace.
     if ($enable_stack_trace == -1) {
         if (index($source, "try ") >= 0 || index($source, "try{") >= 0 ||
             index($source, "throw ") >= 0 || index($source, "throw(") >= 0 ||
@@ -410,7 +413,7 @@ func main() int {
             index($source, "stack_trace(") >= 0 || index($source, "stacktrace(") >= 0) {
             $enable_stack_trace = 1;
         } else {
-            $enable_stack_trace = 0;
+            $enable_stack_trace = 2;
         }
     }
 

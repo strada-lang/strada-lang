@@ -1,0 +1,20 @@
+{
+  "grammars": [
+    {
+      "name": "strada",
+      "camelcase": "Strada",
+      "scope": "source.strada",
+      "path": ".",
+      "file-types": ["strada"],
+      "highlights": "queries/highlights.scm"
+    }
+  ],
+  "metadata": {
+    "version": "1.0.0",
+    "license": "GPL-2.0",
+    "description": "Tree-sitter grammar for the Strada programming language",
+    "links": {
+      "repository": "https://github.com/strada-lang/strada-lang"
+    }
+  }
+}

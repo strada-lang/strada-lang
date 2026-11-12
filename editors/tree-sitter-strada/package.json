@@ -1,0 +1,20 @@
+{
+  "name": "tree-sitter-strada",
+  "version": "1.0.0",
+  "description": "Tree-sitter grammar for the Strada programming language",
+  "repository": "github:strada-lang/strada-lang",
+  "license": "GPL-2.0",
+  "main": "bindings/node",
+  "keywords": ["parser", "tree-sitter", "strada"],
+  "files": [
+    "grammar.js",
+    "queries/*",
+    "src/**"
+  ],
+  "tree-sitter": [
+    {
+      "scope": "source.strada",
+      "file-types": ["strada"]
+    }
+  ]
+}

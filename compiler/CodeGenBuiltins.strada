@@ -664,15 +664,29 @@ func gen_builtin_g1(scalar $cg, scalar $expr, str $name) int {
             # TIESCALAR and tie(@a, ...) TIEARRAY. (Everything used to be tied
             # as a hash, so a scalar tie died looking for TIEHASH.)
             my str $tie_fn = "strada_tie_hash";
+            my int $tie_by_slot = 0;
             my scalar $tie_var = $args->[0];
             if ($tie_var->{"type"} == NODE_VARIABLE()) {
                 my str $tie_sigil = $tie_var->{"sigil"};
-                if ($tie_sigil eq "$") { $tie_fn = "strada_tie_scalar"; }
+                if ($tie_sigil eq "$") {
+                    $tie_fn = "strada_tie_scalar";
+                    my str $tie_our = "" . $cg->{"our_vars"}->{escape_c_keyword($tie_var->{"name"})};
+                    if (length($tie_our) == 0 && $tie_var->{"name"} ne "__program_name" && index($tie_var->{"name"}, "::") < 0) {
+                        $tie_fn = "strada_tie_scalar_slot";
+                        $tie_by_slot = 1;
+                    }
+                }
                 if ($tie_sigil eq "@") { $tie_fn = "strada_tie_array"; }
             }
-            emit($cg, $tie_fn . "(");
-            gen_expression($cg, $args->[0]);
-            emit($cg, ", ");
+            if ($tie_by_slot == 1) {
+                emit($cg, $tie_fn . "(&(");
+                gen_expression($cg, $args->[0]);
+                emit($cg, "), ");
+            } else {
+                emit($cg, $tie_fn . "(");
+                gen_expression($cg, $args->[0]);
+                emit($cg, ", ");
+            }
             # Class name must be a string literal for now. Route through the
             # escaper (NOT raw concat) — a `"`/`\`/newline in the literal would
             # otherwise close the C string and inject arbitrary C (CWE-94).
@@ -1204,11 +1218,6 @@ func gen_builtin_g2(scalar $cg, scalar $expr, str $name) int {
             return 1;
         }
         
-        if ($name eq "sys::cstruct_new") {
-            emit($cg, "strada_new_hash()");
-            return 1;
-        }
-        
         if ($name eq "defined") {
             my scalar $args = $expr->{"args"};
             my scalar $arg = $args->[0];
@@ -1712,6 +1721,15 @@ func gen_builtin_g2(scalar $cg, scalar $expr, str $name) int {
         if ($name eq "utf8::decode") {
             my scalar $u8args = $expr->{"args"};
             my scalar $arg0 = $u8args->[0];
+            if ($arg0->{"type"} == NODE_VARIABLE() && $arg0->{"sigil"} eq "$" && $arg0->{"name"} ne "__program_name") {
+                my str $u8_our = "" . $cg->{"our_vars"}->{escape_c_keyword($arg0->{"name"})};
+                if (length($u8_our) == 0) {
+                    emit($cg, "strada_utf8_decode_slot(&(");
+                    gen_expression($cg, $arg0);
+                    emit($cg, "))");
+                    return 1;
+                }
+            }
             if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $arg0) == 1) {
                 emit($cg, "({ StradaValue *__arg_tmp = ");
                 gen_expression($cg, $arg0);
@@ -2384,26 +2402,20 @@ func gen_builtin_g3(scalar $cg, scalar $expr, str $name) int {
 
         # Pointer access for FFI
         if ($name eq "sys::int_ptr") {
-            emit($cg, "strada_int_ptr(");
             my scalar $args = $expr->{"args"};
-            gen_expression($cg, $args->[0]);
-            emit($cg, ")");
+            gen_call_with_arg_cleanup($cg, "strada_int_ptr", $args, 1);
             return 1;
         }
 
         if ($name eq "sys::num_ptr") {
-            emit($cg, "strada_num_ptr(");
             my scalar $args = $expr->{"args"};
-            gen_expression($cg, $args->[0]);
-            emit($cg, ")");
+            gen_call_with_arg_cleanup($cg, "strada_num_ptr", $args, 1);
             return 1;
         }
 
         if ($name eq "sys::str_ptr") {
-            emit($cg, "strada_str_ptr(");
             my scalar $args = $expr->{"args"};
-            gen_expression($cg, $args->[0]);
-            emit($cg, ")");
+            gen_call_with_arg_cleanup($cg, "strada_str_ptr", $args, 1);
             return 1;
         }
 
@@ -4218,39 +4230,35 @@ func gen_builtin_g5(scalar $cg, scalar $expr, str $name) int {
             return 1;
         }
 
-        # fwrite(fh, content) - write to file handle
+        # fwrite(fh, content[, n]) - write to file handle and return byte count
         if ($name eq "sys::fwrite") {
+            # fwrite(fh, data [, n]): write data (its first n bytes), binary-safe;
+            # the value is the number of bytes written.
             my scalar $args = $expr->{"args"};
             my scalar $data_arg = $args->[1];
+            emit($cg, "({ StradaValue *__fw_v = ");
+            gen_expression($cg, $data_arg);
             if ($expr->{"arg_count"} >= 3) {
-                # fwrite(fh, data, n): the first n bytes only.
-                emit($cg, "({ StradaValue *__fw_v = ");
-                gen_expression($cg, $data_arg);
                 emit($cg, "; StradaValue *__fw_n = ");
                 gen_expression($cg, $args->[2]);
-                emit($cg, "; strada_write_file_n(");
+                emit($cg, "; int64_t __fw_c = strada_fwrite_sv_n(");
                 gen_expression($cg, $args->[0]);
                 emit($cg, ", __fw_v, strada_to_int(__fw_n)); ");
                 if (needs_temp_cleanup($cg, $args->[2]) == 1) {
                     emit($cg, "strada_decref(__fw_n); ");
                 }
-                if (needs_temp_cleanup($cg, $data_arg) == 1) {
-                    emit($cg, "strada_decref(__fw_v); ");
-                }
-                emit($cg, "(StradaValue*)NULL; })");
-                return 1;
+            } else {
+                emit($cg, "; int64_t __fw_c = strada_fwrite_sv(");
+                gen_expression($cg, $args->[0]);
+                emit($cg, ", __fw_v); ");
             }
-            emit($cg, "({ StradaValue *__fw_v = ");
-            gen_expression($cg, $data_arg);
-            emit($cg, "; char *__fw_s = strada_to_str_ss(__fw_v); strada_write_file(");
-            gen_expression($cg, $args->[0]);
-            emit($cg, ", __fw_s); strada_cstr_free(__fw_s); ");
             if (needs_temp_cleanup($cg, $data_arg) == 1) {
                 emit($cg, "strada_decref(__fw_v); ");
             }
-            emit($cg, "(StradaValue*)NULL; })");
+            emit($cg, "strada_new_int(__fw_c); })");
             return 1;
         }
+
 
         # fread(fh) - read entire file from handle
         if ($name eq "sys::fread" && $expr->{"arg_count"} >= 2) {
@@ -4888,26 +4896,20 @@ func gen_builtin_g5(scalar $cg, scalar $expr, str $name) int {
 
         # Pointer access for FFI
         if ($name eq "sys::int_ptr") {
-            emit($cg, "strada_int_ptr(");
             my scalar $args = $expr->{"args"};
-            gen_expression($cg, $args->[0]);
-            emit($cg, ")");
+            gen_call_with_arg_cleanup($cg, "strada_int_ptr", $args, 1);
             return 1;
         }
 
         if ($name eq "sys::num_ptr") {
-            emit($cg, "strada_num_ptr(");
             my scalar $args = $expr->{"args"};
-            gen_expression($cg, $args->[0]);
-            emit($cg, ")");
+            gen_call_with_arg_cleanup($cg, "strada_num_ptr", $args, 1);
             return 1;
         }
 
         if ($name eq "sys::str_ptr") {
-            emit($cg, "strada_str_ptr(");
             my scalar $args = $expr->{"args"};
-            gen_expression($cg, $args->[0]);
-            emit($cg, ")");
+            gen_call_with_arg_cleanup($cg, "strada_str_ptr", $args, 1);
             return 1;
         }
 
@@ -5579,146 +5581,256 @@ func gen_builtin_g6(scalar $cg, scalar $expr, str $name) int {
             return 1;
         }
         
-        # cstruct_set_int
+        # cstruct_set_int(sv, [field,] offset, val)
         if ($name eq "sys::cstruct_set_int") {
             my scalar $args = $expr->{"args"};
+            if ($expr->{"arg_count"} == 3) {
+                emit($cg, "({ StradaValue *__csi_s0 = ");
+                gen_expression($cg, $args->[0]);
+                emit($cg, "; int64_t __csi_off = ");
+                emit_int_operand($cg, $args->[1]);
+                emit($cg, "; int64_t __csi_val = ");
+                emit_int_operand($cg, $args->[2]);
+                emit($cg, "; strada_cstruct_set_int(__csi_s0, \"\", (size_t)__csi_off, __csi_val); ");
+                if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $args->[0]) == 1) {
+                    emit($cg, "strada_decref(__csi_s0); ");
+                }
+                emit($cg, "(StradaValue*)NULL; })");
+                return 1;
+            }
             my scalar $field_arg = $args->[1];
-            emit($cg, "({ StradaValue *__csi_v = ");
-            gen_expression($cg, $field_arg);
-            emit($cg, "; char *__csi_s = strada_to_str_ss(__csi_v); strada_cstruct_set_int(");
+            emit($cg, "({ StradaValue *__csi_s0 = ");
             gen_expression($cg, $args->[0]);
-            emit($cg, ", __csi_s, strada_to_int(");
-            gen_expression($cg, $args->[2]);
-            emit($cg, "), strada_to_int(");
-            gen_expression($cg, $args->[3]);
-            emit($cg, ")); strada_cstr_free(__csi_s); ");
-            if (needs_temp_cleanup($cg, $field_arg) == 1) {
+            emit($cg, "; StradaValue *__csi_v = ");
+            gen_expression($cg, $field_arg);
+            emit($cg, "; char *__csi_s = strada_to_str_ss(__csi_v); int64_t __csi_off = ");
+            emit_int_operand($cg, $args->[2]);
+            emit($cg, "; int64_t __csi_val = ");
+            emit_int_operand($cg, $args->[3]);
+            emit($cg, "; strada_cstruct_set_int(__csi_s0, __csi_s, (size_t)__csi_off, __csi_val); strada_cstr_free(__csi_s); ");
+            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $field_arg) == 1) {
                 emit($cg, "strada_decref(__csi_v); ");
             }
+            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $args->[0]) == 1) {
+                emit($cg, "strada_decref(__csi_s0); ");
+            }
             emit($cg, "(StradaValue*)NULL; })");
             return 1;
         }
 
-        # cstruct_set_string
-        if ($name eq "sys::cstruct_set_string") {
+        # cstruct_set_string / cstruct_set_str(sv, [field,] offset, val)
+        if ($name eq "sys::cstruct_set_string" || $name eq "sys::cstruct_set_str") {
             my scalar $args = $expr->{"args"};
+            if ($expr->{"arg_count"} == 3) {
+                my scalar $val_arg3 = $args->[2];
+                emit($cg, "({ StradaValue *__css_s0 = ");
+                gen_expression($cg, $args->[0]);
+                emit($cg, "; int64_t __css_off = ");
+                emit_int_operand($cg, $args->[1]);
+                emit($cg, "; StradaValue *__css_vv = ");
+                gen_expression($cg, $val_arg3);
+                emit($cg, "; char *__css_vs = strada_to_str_ss(__css_vv); strada_cstruct_set_string(__css_s0, \"\", (size_t)__css_off, __css_vs); strada_cstr_free(__css_vs); ");
+                if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $val_arg3) == 1) {
+                    emit($cg, "strada_decref(__css_vv); ");
+                }
+                if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $args->[0]) == 1) {
+                    emit($cg, "strada_decref(__css_s0); ");
+                }
+                emit($cg, "(StradaValue*)NULL; })");
+                return 1;
+            }
             my scalar $field_arg = $args->[1];
             my scalar $val_arg = $args->[3];
-            emit($cg, "({ StradaValue *__css_fv = ");
+            emit($cg, "({ StradaValue *__css_s0 = ");
+            gen_expression($cg, $args->[0]);
+            emit($cg, "; StradaValue *__css_fv = ");
             gen_expression($cg, $field_arg);
+            emit($cg, "; int64_t __css_off = ");
+            emit_int_operand($cg, $args->[2]);
             emit($cg, "; StradaValue *__css_vv = ");
             gen_expression($cg, $val_arg);
-            emit($cg, "; char *__css_fs = strada_to_str_ss(__css_fv); char *__css_vs = strada_to_str_ss(__css_vv); strada_cstruct_set_string(");
-            gen_expression($cg, $args->[0]);
-            emit($cg, ", __css_fs, strada_to_int(");
-            gen_expression($cg, $args->[2]);
-            emit($cg, "), __css_vs); strada_cstr_free(__css_fs); strada_cstr_free(__css_vs); ");
-            if (needs_temp_cleanup($cg, $field_arg) == 1) {
+            emit($cg, "; char *__css_fs = strada_to_str_ss(__css_fv); char *__css_vs = strada_to_str_ss(__css_vv); strada_cstruct_set_string(__css_s0, __css_fs, (size_t)__css_off, __css_vs); strada_cstr_free(__css_fs); strada_cstr_free(__css_vs); ");
+            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $field_arg) == 1) {
                 emit($cg, "strada_decref(__css_fv); ");
             }
-            if (needs_temp_cleanup($cg, $val_arg) == 1) {
+            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $val_arg) == 1) {
                 emit($cg, "strada_decref(__css_vv); ");
             }
-            emit($cg, "(StradaValue*)NULL; })");
-            return 1;
-        }
-
-        # cstruct_set_double
-        if ($name eq "sys::cstruct_set_double") {
-            my scalar $args = $expr->{"args"};
-            my scalar $field_arg = $args->[1];
-            emit($cg, "({ StradaValue *__csd_v = ");
-            gen_expression($cg, $field_arg);
-            emit($cg, "; char *__csd_s = strada_to_str_ss(__csd_v); strada_cstruct_set_double(");
-            gen_expression($cg, $args->[0]);
-            emit($cg, ", __csd_s, strada_to_int(");
-            gen_expression($cg, $args->[2]);
-            emit($cg, "), strada_to_num(");
-            gen_expression($cg, $args->[3]);
-            emit($cg, ")); strada_cstr_free(__csd_s); ");
-            if (needs_temp_cleanup($cg, $field_arg) == 1) {
-                emit($cg, "strada_decref(__csd_v); ");
+            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $args->[0]) == 1) {
+                emit($cg, "strada_decref(__css_s0); ");
             }
             emit($cg, "(StradaValue*)NULL; })");
             return 1;
         }
 
-        # cstruct_get_int
+        # cstruct_set_double / cstruct_set_num(sv, [field,] offset, val)
+        if ($name eq "sys::cstruct_set_double" || $name eq "sys::cstruct_set_num") {
+            my scalar $args = $expr->{"args"};
+            if ($expr->{"arg_count"} == 3) {
+                emit($cg, "({ StradaValue *__csd_s0 = ");
+                gen_expression($cg, $args->[0]);
+                emit($cg, "; int64_t __csd_off = ");
+                emit_int_operand($cg, $args->[1]);
+                emit($cg, "; double __csd_val = ");
+                emit_num_operand($cg, $args->[2]);
+                emit($cg, "; strada_cstruct_set_double(__csd_s0, \"\", (size_t)__csd_off, __csd_val); ");
+                if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $args->[0]) == 1) {
+                    emit($cg, "strada_decref(__csd_s0); ");
+                }
+                emit($cg, "(StradaValue*)NULL; })");
+                return 1;
+            }
+            my scalar $field_arg = $args->[1];
+            emit($cg, "({ StradaValue *__csd_s0 = ");
+            gen_expression($cg, $args->[0]);
+            emit($cg, "; StradaValue *__csd_v = ");
+            gen_expression($cg, $field_arg);
+            emit($cg, "; char *__csd_s = strada_to_str_ss(__csd_v); int64_t __csd_off = ");
+            emit_int_operand($cg, $args->[2]);
+            emit($cg, "; double __csd_val = ");
+            emit_num_operand($cg, $args->[3]);
+            emit($cg, "; strada_cstruct_set_double(__csd_s0, __csd_s, (size_t)__csd_off, __csd_val); strada_cstr_free(__csd_s); ");
+            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $field_arg) == 1) {
+                emit($cg, "strada_decref(__csd_v); ");
+            }
+            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $args->[0]) == 1) {
+                emit($cg, "strada_decref(__csd_s0); ");
+            }
+            emit($cg, "(StradaValue*)NULL; })");
+            return 1;
+        }
+
+        # cstruct_get_int(sv, [field,] offset)
         if ($name eq "sys::cstruct_get_int") {
             my scalar $args = $expr->{"args"};
+            if ($expr->{"arg_count"} == 2) {
+                emit($cg, "({ StradaValue *__cgi_s0 = ");
+                gen_expression($cg, $args->[0]);
+                emit($cg, "; int64_t __cgi_off = ");
+                emit_int_operand($cg, $args->[1]);
+                emit($cg, "; int64_t __cgi_r = strada_cstruct_get_int(__cgi_s0, \"\", (size_t)__cgi_off); ");
+                if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $args->[0]) == 1) {
+                    emit($cg, "strada_decref(__cgi_s0); ");
+                }
+                emit($cg, "strada_new_int(__cgi_r); })");
+                return 1;
+            }
             my scalar $field_arg = $args->[1];
-            emit($cg, "({ StradaValue *__cgi_v = ");
-            gen_expression($cg, $field_arg);
-            emit($cg, "; char *__cgi_s = strada_to_str_ss(__cgi_v); int64_t __cgi_r = strada_cstruct_get_int(");
+            emit($cg, "({ StradaValue *__cgi_s0 = ");
             gen_expression($cg, $args->[0]);
-            emit($cg, ", __cgi_s, strada_to_int(");
-            gen_expression($cg, $args->[2]);
-            emit($cg, ")); strada_cstr_free(__cgi_s); ");
-            if (needs_temp_cleanup($cg, $field_arg) == 1) {
+            emit($cg, "; StradaValue *__cgi_v = ");
+            gen_expression($cg, $field_arg);
+            emit($cg, "; char *__cgi_s = strada_to_str_ss(__cgi_v); int64_t __cgi_off = ");
+            emit_int_operand($cg, $args->[2]);
+            emit($cg, "; int64_t __cgi_r = strada_cstruct_get_int(__cgi_s0, __cgi_s, (size_t)__cgi_off); strada_cstr_free(__cgi_s); ");
+            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $field_arg) == 1) {
                 emit($cg, "strada_decref(__cgi_v); ");
+            }
+            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $args->[0]) == 1) {
+                emit($cg, "strada_decref(__cgi_s0); ");
             }
             emit($cg, "strada_new_int(__cgi_r); })");
             return 1;
         }
 
-        # cstruct_get_string
-        if ($name eq "sys::cstruct_get_string") {
+        # cstruct_get_string / cstruct_get_str(sv, [field,] offset)
+        if ($name eq "sys::cstruct_get_string" || $name eq "sys::cstruct_get_str") {
             my scalar $args = $expr->{"args"};
+            if ($expr->{"arg_count"} == 2) {
+                emit($cg, "({ StradaValue *__cgs_s0 = ");
+                gen_expression($cg, $args->[0]);
+                emit($cg, "; int64_t __cgs_off = ");
+                emit_int_operand($cg, $args->[1]);
+                emit($cg, "; const char *__cgs_r = strada_cstruct_get_string(__cgs_s0, \"\", (size_t)__cgs_off); StradaValue *__cgs_sv = strada_new_str(__cgs_r); ");
+                if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $args->[0]) == 1) {
+                    emit($cg, "strada_decref(__cgs_s0); ");
+                }
+                emit($cg, "__cgs_sv; })");
+                return 1;
+            }
             my scalar $field_arg = $args->[1];
-            emit($cg, "({ StradaValue *__cgs_v = ");
-            gen_expression($cg, $field_arg);
-            emit($cg, "; char *__cgs_s = strada_to_str_ss(__cgs_v); const char *__cgs_r = strada_cstruct_get_string(");
+            emit($cg, "({ StradaValue *__cgs_s0 = ");
             gen_expression($cg, $args->[0]);
-            emit($cg, ", __cgs_s, strada_to_int(");
-            gen_expression($cg, $args->[2]);
-            emit($cg, ")); strada_cstr_free(__cgs_s); ");
-            if (needs_temp_cleanup($cg, $field_arg) == 1) {
+            emit($cg, "; StradaValue *__cgs_v = ");
+            gen_expression($cg, $field_arg);
+            emit($cg, "; char *__cgs_s = strada_to_str_ss(__cgs_v); int64_t __cgs_off = ");
+            emit_int_operand($cg, $args->[2]);
+            emit($cg, "; const char *__cgs_r = strada_cstruct_get_string(__cgs_s0, __cgs_s, (size_t)__cgs_off); strada_cstr_free(__cgs_s); StradaValue *__cgs_sv = strada_new_str(__cgs_r); ");
+            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $field_arg) == 1) {
                 emit($cg, "strada_decref(__cgs_v); ");
             }
-            emit($cg, "strada_new_str(__cgs_r); })");
+            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $args->[0]) == 1) {
+                emit($cg, "strada_decref(__cgs_s0); ");
+            }
+            emit($cg, "__cgs_sv; })");
             return 1;
         }
 
-        # cstruct_get_double
-        if ($name eq "sys::cstruct_get_double") {
+        # cstruct_get_double / cstruct_get_num(sv, [field,] offset)
+        if ($name eq "sys::cstruct_get_double" || $name eq "sys::cstruct_get_num") {
             my scalar $args = $expr->{"args"};
+            if ($expr->{"arg_count"} == 2) {
+                emit($cg, "({ StradaValue *__cgd_s0 = ");
+                gen_expression($cg, $args->[0]);
+                emit($cg, "; int64_t __cgd_off = ");
+                emit_int_operand($cg, $args->[1]);
+                emit($cg, "; double __cgd_r = strada_cstruct_get_double(__cgd_s0, \"\", (size_t)__cgd_off); ");
+                if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $args->[0]) == 1) {
+                    emit($cg, "strada_decref(__cgd_s0); ");
+                }
+                emit($cg, "strada_new_num(__cgd_r); })");
+                return 1;
+            }
             my scalar $field_arg = $args->[1];
-            emit($cg, "({ StradaValue *__cgd_v = ");
-            gen_expression($cg, $field_arg);
-            emit($cg, "; char *__cgd_s = strada_to_str_ss(__cgd_v); double __cgd_r = strada_cstruct_get_double(");
+            emit($cg, "({ StradaValue *__cgd_s0 = ");
             gen_expression($cg, $args->[0]);
-            emit($cg, ", __cgd_s, strada_to_int(");
-            gen_expression($cg, $args->[2]);
-            emit($cg, ")); strada_cstr_free(__cgd_s); ");
-            if (needs_temp_cleanup($cg, $field_arg) == 1) {
+            emit($cg, "; StradaValue *__cgd_v = ");
+            gen_expression($cg, $field_arg);
+            emit($cg, "; char *__cgd_s = strada_to_str_ss(__cgd_v); int64_t __cgd_off = ");
+            emit_int_operand($cg, $args->[2]);
+            emit($cg, "; double __cgd_r = strada_cstruct_get_double(__cgd_s0, __cgd_s, (size_t)__cgd_off); strada_cstr_free(__cgd_s); ");
+            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $field_arg) == 1) {
                 emit($cg, "strada_decref(__cgd_v); ");
+            }
+            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $args->[0]) == 1) {
+                emit($cg, "strada_decref(__cgd_s0); ");
             }
             emit($cg, "strada_new_num(__cgd_r); })");
             return 1;
         }
 
-        # cstruct_new
+        # cstruct_new([name,] size)
         if ($name eq "sys::cstruct_new") {
             my scalar $args = $expr->{"args"};
+            if ($expr->{"arg_count"} == 1) {
+                emit($cg, "({ int64_t __cn_sz = ");
+                emit_int_operand($cg, $args->[0]);
+                emit($cg, "; strada_cstruct_new(\"struct\", (size_t)(__cn_sz > 0 ? __cn_sz : 1)); })");
+                return 1;
+            }
             my scalar $name_arg = $args->[0];
             emit($cg, "({ StradaValue *__cn_v = ");
             gen_expression($cg, $name_arg);
-            emit($cg, "; char *__cn_s = strada_to_str_ss(__cn_v); StradaValue *__cn_r = strada_cstruct_new(__cn_s, strada_to_int(");
-            gen_expression($cg, $args->[1]);
-            emit($cg, ")); strada_cstr_free(__cn_s); ");
-            if (needs_temp_cleanup($cg, $name_arg) == 1) {
+            emit($cg, "; int64_t __cn_sz = ");
+            emit_int_operand($cg, $args->[1]);
+            emit($cg, "; char *__cn_s = strada_to_str_ss(__cn_v); StradaValue *__cn_r = strada_cstruct_new(__cn_s, (size_t)(__cn_sz > 0 ? __cn_sz : 1)); strada_cstr_free(__cn_s); ");
+            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $name_arg) == 1) {
                 emit($cg, "strada_decref(__cn_v); ");
             }
             emit($cg, "__cn_r; })");
             return 1;
         }
-        
-        # cstruct_ptr
+
+        # cstruct_ptr(sv) -> int address
         if ($name eq "sys::cstruct_ptr") {
-            emit($cg, "strada_cstruct_ptr(");
             my scalar $args = $expr->{"args"};
+            emit($cg, "({ StradaValue *__csp_s0 = ");
             gen_expression($cg, $args->[0]);
-            emit($cg, ")");
+            emit($cg, "; int64_t __csp_p = (int64_t)(intptr_t)strada_cstruct_ptr(__csp_s0); ");
+            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $args->[0]) == 1) {
+                emit($cg, "strada_decref(__csp_s0); ");
+            }
+            emit($cg, "strada_new_int(__csp_p); })");
             return 1;
         }
         
@@ -7501,12 +7613,12 @@ func gen_builtin_g8(scalar $cg, scalar $expr, str $name) int {
                 if ($id_cleanup0 == 1) {
                     emit($cg, "StradaValue *__id_a0 = ");
                     gen_expression($cg, $id_arg0);
-                    emit($cg, "; ");
+                    emit($cg, "; strada_cleanup_push(__id_a0); ");
                 }
                 if ($id_cleanup1 == 1) {
                     emit($cg, "StradaValue *__id_a1 = ");
                     gen_expression($cg, $id_arg1);
-                    emit($cg, "; ");
+                    emit($cg, "; strada_cleanup_push(__id_a1); ");
                 }
                 emit($cg, "StradaValue *__id_res = strada_idiv(");
                 if ($id_cleanup0 == 1) {
@@ -7521,11 +7633,11 @@ func gen_builtin_g8(scalar $cg, scalar $expr, str $name) int {
                     gen_expression($cg, $id_arg1);
                 }
                 emit($cg, "); ");
-                if ($id_cleanup0 == 1) {
-                    emit($cg, "strada_decref(__id_a0); ");
-                }
                 if ($id_cleanup1 == 1) {
-                    emit($cg, "strada_decref(__id_a1); ");
+                    emit($cg, "strada_cleanup_pop(); strada_decref(__id_a1); ");
+                }
+                if ($id_cleanup0 == 1) {
+                    emit($cg, "strada_cleanup_pop(); strada_decref(__id_a0); ");
                 }
                 emit($cg, "__id_res; })");
             } else {

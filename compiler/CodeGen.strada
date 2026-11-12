@@ -336,6 +336,16 @@ func codegen_new(str $filename, int $debug_info, int $enable_profiling, int $ena
     # Condition-level hash-fetch CSE state (see emit_condition_cse).
     # uses_tie is set from the program node in gen_program.
     $cg{"uses_tie"} = 0;
+    $cg{"func_tracks_depth"} = 0;
+    my hash %empty_struct_vars = ();
+    $cg{"struct_vars"} = \%empty_struct_vars;
+    my hash %empty_structs = ();
+    $cg{"structs"} = \%empty_structs;
+    my array @empty_struct_names = ();
+    $cg{"struct_names"} = \@empty_struct_names;
+    $cg{"struct_count"} = 0;
+    my hash %empty_qw_imports = ();
+    $cg{"qw_imports"} = \%empty_qw_imports;
     $cg{"cse_n"} = 0;
     my array @cse_ids = ();
     $cg{"cse_ids"} = \@cse_ids;
@@ -809,6 +819,7 @@ func codegen_register_function(scalar $cg, scalar $fn) void {
     $info{"param_count"} = $fn->{"param_count"};
     $info{"params"} = $fn->{"params"};
     $info{"return_type"} = $fn->{"return_type"};
+    $info{"return_struct_name"} = "" . $fn->{"return_struct_name"};
     # Track if this is an extern function for call site conversion
     if ($fn->{"type"} == NODE_EXTERN_FUNC()) {
         # A `is_strada_extern_decl` extern is a body-less qualified extern
@@ -2290,9 +2301,9 @@ func emit_indent(scalar $cg) void {
     }
 }
 
-# Emit stack_pop if stack tracing is enabled
+# Emit stack_pop if stack/recursion tracking is enabled for this function
 func emit_stack_pop(scalar $cg) void {
-    if ($cg->{"enable_stack_trace"} == 1) {
+    if ($cg->{"func_tracks_depth"} == 1) {
         emit_indent($cg);
         emit($cg, "strada_stack_pop_il();\n");
     }
@@ -2300,7 +2311,7 @@ func emit_stack_pop(scalar $cg) void {
 
 # Emit inline stack_pop (no indent, for use in single-line statements)
 func emit_stack_pop_inline(scalar $cg) str {
-    if ($cg->{"enable_stack_trace"} == 1) {
+    if ($cg->{"func_tracks_depth"} == 1) {
         return " strada_stack_pop_il();";
     }
     return "";
@@ -2498,6 +2509,89 @@ func func_body_has_local(scalar $body) int {
     return 0;
 }
 
+# Returns 1 if anything inside AST subtree $n invokes a function, method,
+# closure, or /e substitution (so unbounded recursion can only occur through
+# functions where stmt_has_call(body) == 1; leaf functions pay zero cost).
+func stmt_has_call(scalar $n) int {
+    my str $rt = reftype($n);
+    if ($rt eq "ARRAY") {
+        my int $len = scalar(@{$n});
+        my int $i = 0;
+        while ($i < $len) {
+            if (stmt_has_call($n->[$i]) == 1) { return 1; }
+            $i = $i + 1;
+        }
+        return 0;
+    }
+    if ($rt ne "HASH") { return 0; }
+    my int $type = $n->{"type"} + 0;
+    if ($type == NODE_CALL() || $type == NODE_METHOD_CALL() ||
+        $type == NODE_DYN_METHOD_CALL() || $type == NODE_CLOSURE_CALL() ||
+        $type == NODE_SUPER_CALL()) {
+        return 1;
+    }
+    if ($type == NODE_REGEX_SUBST() && index("" . $n->{"flags"}, "e") >= 0) {
+        return 1;
+    }
+    my scalar $ks = keys(%{$n});
+    my int $kn = scalar(@{$ks});
+    my int $k = 0;
+    while ($k < $kn) {
+        my scalar $v = $n->{$ks->[$k]};
+        my str $vt = reftype($v);
+        if ($vt eq "HASH" || $vt eq "ARRAY") {
+            if (stmt_has_call($v) == 1) { return 1; }
+        }
+        $k = $k + 1;
+    }
+    return 0;
+}
+
+# Resolve a native struct field on $obj_expr->$field_name; returns field info hash or 0.
+func resolve_struct_field(scalar $cg, scalar $obj_expr, str $field_name) scalar {
+    if ($cg->{"struct_count"} == 0) {
+        return 0;
+    }
+    my scalar $structs = $cg->{"structs"};
+    my str $sname = "";
+    my int $ot = $obj_expr->{"type"} + 0;
+    if ($ot == NODE_VARIABLE()) {
+        my str $vname = escape_c_keyword($obj_expr->{"name"});
+        $sname = "" . $cg->{"struct_vars"}->{$vname};
+    } elsif ($ot == NODE_CALL()) {
+        my str $cname = sanitize_name($obj_expr->{"name"});
+        my scalar $finfo = $cg->{"functions"}->{$cname};
+        if ($finfo) {
+            $sname = "" . $finfo->{"return_struct_name"};
+        }
+    }
+    if (length($sname) > 0 && defined($structs->{$sname})) {
+        my scalar $fmap = $structs->{$sname}->{"field_map"};
+        if (defined($fmap->{$field_name})) {
+            return $fmap->{$field_name};
+        }
+    }
+    # Fallback when $obj_expr is untyped scalar: if exactly one declared struct has $field_name
+    my scalar $snames = $cg->{"struct_names"};
+    my int $sc = $cg->{"struct_count"};
+    my scalar $found = 0;
+    my int $matches = 0;
+    my int $si = 0;
+    while ($si < $sc) {
+        my scalar $st = $structs->{$snames->[$si]};
+        my scalar $fm = $st->{"field_map"};
+        if (defined($fm->{$field_name})) {
+            $found = $fm->{$field_name};
+            $matches = $matches + 1;
+        }
+        $si = $si + 1;
+    }
+    if ($matches == 1) {
+        return $found;
+    }
+    return 0;
+}
+
 # Emit StradaValue* declaration with volatile qualifier when function contains try blocks
 # This is needed because setjmp/longjmp can corrupt non-volatile local variables
 # that were modified after setjmp was called. Using volatile ensures the variable
@@ -2677,26 +2771,45 @@ func scalar_var_c_ref(scalar $cg, str $var_name, str $c_var_name) str {
     return "(*__captures[" . $idx . "])";
 }
 
-# 1 when a regex pattern mentions a variable: a `$` followed by a letter or
-# underscore. (A `$` followed by anything else is the end-of-line anchor.)
+# 1 when a regex pattern or s/// replacement mentions a variable: an unescaped
+# `$` followed by a letter or underscore (or braced `${name}`).
 func regex_pattern_has_interp(str $pattern) int {
     my int $len = length($pattern);
     my int $i = 0;
-    while ($i + 1 < $len) {
-        if (substr($pattern, $i, 1) eq "$") {
+    while ($i < $len) {
+        my str $ch = substr($pattern, $i, 1);
+        if ($ch eq "\\") {
+            $i = $i + 2;
+        } elsif ($ch eq "$" && $i + 1 < $len) {
             my str $nch = substr($pattern, $i + 1, 1);
             if ($nch eq "_" || ($nch ge "a" && $nch le "z") || ($nch ge "A" && $nch le "Z")) {
                 return 1;
             }
             # ${name}
             if ($nch eq "{" && $i + 2 < $len) {
-                my str $bch0 = substr($pattern, $i + 2, 1);
-                if ($bch0 eq "_" || ($bch0 ge "a" && $bch0 le "z") || ($bch0 ge "A" && $bch0 le "Z")) {
-                    return 1;
+                my int $close = index($pattern, "}", $i + 2);
+                if ($close > $i + 2) {
+                    my str $bch0 = substr($pattern, $i + 2, 1);
+                    if ($bch0 eq "_" || ($bch0 ge "a" && $bch0 le "z") || ($bch0 ge "A" && $bch0 le "Z")) {
+                        my int $bi = $i + 3;
+                        my int $b_ok = 1;
+                        while ($bi < $close) {
+                            my str $bch = substr($pattern, $bi, 1);
+                            if (!($bch eq "_" || ($bch ge "a" && $bch le "z") || ($bch ge "A" && $bch le "Z") || ($bch ge "0" && $bch le "9"))) {
+                                $b_ok = 0;
+                            }
+                            $bi = $bi + 1;
+                        }
+                        if ($b_ok == 1) {
+                            return 1;
+                        }
+                    }
                 }
             }
+            $i = $i + 1;
+        } else {
+            $i = $i + 1;
         }
-        $i = $i + 1;
     }
     return 0;
 }
@@ -2707,40 +2820,12 @@ func regex_pattern_has_interp(str $pattern) int {
 func gen_subst_pattern_prelude(scalar $cg, str $pattern) void {
     emit($cg, "StradaValue *__subst_psv = ");
     gen_regex_interpolated_pattern($cg, $pattern);
-    emit($cg, "; char *__subst_pat = strada_to_str_ss(__subst_psv); ");
-    if (regex_pattern_is_single_var($pattern) == 0) {
-        emit($cg, "strada_decref(__subst_psv); ");
-    }
+    emit($cg, "; char *__subst_pat = strada_to_str_ss(__subst_psv); strada_decref(__subst_psv); ");
 }
 
-# 1 when an interpolated regex pattern is exactly one variable ("$name" and
-# nothing else), in which case gen_regex_interpolated_pattern yields that
-# variable's own (borrowed) value rather than a freshly built string.
-func regex_pattern_is_single_var(str $pattern) int {
-    my int $len = length($pattern);
-    if ($len < 2) { return 0; }
-    if (substr($pattern, 0, 1) ne "$") { return 0; }
-    # "${name}" and nothing else
-    if ($len > 3 && substr($pattern, 1, 1) eq "{" && substr($pattern, $len - 1, 1) eq "}") {
-        return regex_pattern_is_single_var("$" . substr($pattern, 2, $len - 3));
-    }
-    my int $i = 1;
-    while ($i < $len) {
-        my str $vch = substr($pattern, $i, 1);
-        if ($vch eq "_" || ($vch ge "a" && $vch le "z") || ($vch ge "A" && $vch le "Z") || ($vch ge "0" && $vch le "9")) {
-            $i = $i + 1;
-        } else {
-            return 0;
-        }
-    }
-    return 1;
-}
-
-# Generate code for regex pattern with variable interpolation
-# Pattern like "$foo" or "^$pattern$" gets converted to runtime string building
+# Generate code for regex pattern / replacement with variable interpolation.
+# Always yields an OWNED StradaValue* that the caller must strada_decref.
 func gen_regex_interpolated_pattern(scalar $cg, str $pattern) void {
-    # Parse pattern into parts (literals and variables)
-    # We manually track the count since bootstrap doesn't support scalar(@array)
     my array @parts = ();
     my int $num_parts = 0;
     my int $len = length($pattern);
@@ -2750,7 +2835,10 @@ func gen_regex_interpolated_pattern(scalar $cg, str $pattern) void {
     while ($i < $len) {
         my str $ch = substr($pattern, $i, 1);
 
-        if ($ch eq "$") {
+        if ($ch eq "\\" && $i + 1 < $len) {
+            $literal = $literal . "\\" . substr($pattern, $i + 1, 1);
+            $i = $i + 2;
+        } elsif ($ch eq "$") {
             # Save any accumulated literal
             if (length($literal) > 0) {
                 my hash %part = ();
@@ -2761,22 +2849,26 @@ func gen_regex_interpolated_pattern(scalar $cg, str $pattern) void {
                 $literal = "";
             }
 
-            # Parse variable name: $name, or the braced ${name} that lets a
-            # name be followed directly by word characters (/${stem}ing/).
+            # Parse variable name: $name, or braced ${name}. First char MUST be
+            # [A-Za-z_] so $1..$9 backreferences and $ anchors remain literal.
             $i = $i + 1;
             my str $varname = "";
             if ($i < $len && substr($pattern, $i, 1) eq "{") {
                 my int $close = index($pattern, "}", $i);
                 if ($close > $i + 1) {
                     my str $braced = substr($pattern, $i + 1, $close - $i - 1);
-                    my int $bi = 0;
-                    my int $b_ok = 1;
-                    while ($bi < length($braced)) {
-                        my str $bch = substr($braced, $bi, 1);
-                        if (!($bch eq "_" || ($bch ge "a" && $bch le "z") || ($bch ge "A" && $bch le "Z") || ($bch ge "0" && $bch le "9"))) {
-                            $b_ok = 0;
+                    my str $bfirst = substr($braced, 0, 1);
+                    my int $b_ok = 0;
+                    if ($bfirst eq "_" || ($bfirst ge "a" && $bfirst le "z") || ($bfirst ge "A" && $bfirst le "Z")) {
+                        $b_ok = 1;
+                        my int $bi = 1;
+                        while ($bi < length($braced)) {
+                            my str $bch = substr($braced, $bi, 1);
+                            if (!($bch eq "_" || ($bch ge "a" && $bch le "z") || ($bch ge "A" && $bch le "Z") || ($bch ge "0" && $bch le "9"))) {
+                                $b_ok = 0;
+                            }
+                            $bi = $bi + 1;
                         }
-                        $bi = $bi + 1;
                     }
                     if ($b_ok == 1) {
                         $varname = $braced;
@@ -2784,15 +2876,18 @@ func gen_regex_interpolated_pattern(scalar $cg, str $pattern) void {
                     }
                 }
             }
-            my int $braced_done = 0;
-            if (length($varname) > 0) { $braced_done = 1; }
-            while ($braced_done == 0 && $i < $len) {
-                my str $vch = substr($pattern, $i, 1);
-                if ($vch eq "_" || ($vch ge "a" && $vch le "z") || ($vch ge "A" && $vch le "Z") || ($vch ge "0" && $vch le "9")) {
-                    $varname = $varname . $vch;
-                    $i = $i + 1;
-                } else {
-                    last;
+            if (length($varname) == 0 && $i < $len) {
+                my str $vch0 = substr($pattern, $i, 1);
+                if ($vch0 eq "_" || ($vch0 ge "a" && $vch0 le "z") || ($vch0 ge "A" && $vch0 le "Z")) {
+                    while ($i < $len) {
+                        my str $vch = substr($pattern, $i, 1);
+                        if ($vch eq "_" || ($vch ge "a" && $vch le "z") || ($vch ge "A" && $vch le "Z") || ($vch ge "0" && $vch le "9")) {
+                            $varname = $varname . $vch;
+                            $i = $i + 1;
+                        } else {
+                            last;
+                        }
+                    }
                 }
             }
 
@@ -2803,7 +2898,7 @@ func gen_regex_interpolated_pattern(scalar $cg, str $pattern) void {
                 push(@parts, \%part);
                 $num_parts = $num_parts + 1;
             } else {
-                # Not a variable - preserve $ as literal (regex end-of-line anchor)
+                # Not a variable - preserve $ as literal ($ anchor or $1 capture)
                 $literal = $literal . "$";
             }
         } else {
@@ -2829,7 +2924,15 @@ func gen_regex_interpolated_pattern(scalar $cg, str $pattern) void {
     if ($num_parts == 1) {
         my scalar $p = $parts[0];
         if ($p->{"type"} eq "var") {
-            emit($cg, scalar_var_c_ref($cg, $p->{"value"}, $p->{"value"}));
+            my str $vn = $p->{"value"};
+            my str $cvn = escape_c_keyword($vn);
+            my str $our_k = "" . $cg->{"our_vars"}->{$cvn};
+            if (length($our_k) > 0) {
+                emit($cg, "strada_global_get(strada_new_str(\"" . $our_k . "\"))");
+            } else {
+                my str $cref = scalar_var_c_ref($cg, $vn, $cvn);
+                emit($cg, "({ StradaValue *__rv = " . $cref . "; strada_incref(__rv); __rv; })");
+            }
         } else {
             # STRADA_NEW_STR_LIT preserves embedded NUL bytes (sizeof(LIT)-1)
             emit($cg, "STRADA_NEW_STR_LIT(\"");
@@ -2840,19 +2943,27 @@ func gen_regex_interpolated_pattern(scalar $cg, str $pattern) void {
     }
 
     # Multiple parts - build with sequential concat (no leaked intermediates)
-    # Capture all parts into named temps, concat sequentially, free literal temps
     emit($cg, "({ ");
-    # Capture all parts into named temps
     my int $pi = 0;
     while ($pi < $num_parts) {
         my scalar $p = $parts[$pi];
         emit($cg, "StradaValue *__rp" . $pi . " = ");
         if ($p->{"type"} eq "var") {
-            emit($cg, scalar_var_c_ref($cg, $p->{"value"}, $p->{"value"}));
+            my str $vn = $p->{"value"};
+            my str $cvn = escape_c_keyword($vn);
+            my str $our_k = "" . $cg->{"our_vars"}->{$cvn};
+            if (length($our_k) > 0) {
+                emit($cg, "strada_global_get(strada_new_str(\"" . $our_k . "\"))");
+                $p->{"owned"} = 1;
+            } else {
+                emit($cg, scalar_var_c_ref($cg, $vn, $cvn));
+                $p->{"owned"} = 0;
+            }
         } else {
             emit($cg, "STRADA_NEW_STR_LIT(\"");
             emit_escaped_string($cg, $p->{"value"});
             emit($cg, "\")");
+            $p->{"owned"} = 1;
         }
         emit($cg, "; ");
         $pi = $pi + 1;
@@ -2864,11 +2975,11 @@ func gen_regex_interpolated_pattern(scalar $cg, str $pattern) void {
         emit($cg, "__rr = strada_concat_inplace(__rr, __rp" . $pi . "); ");
         $pi = $pi + 1;
     }
-    # Free literal temps (not variable refs which are borrowed)
+    # Free owned part temps (literals and our_vars globals)
     $pi = 0;
     while ($pi < $num_parts) {
         my scalar $p = $parts[$pi];
-        if ($p->{"type"} eq "lit") {
+        if ($p->{"owned"} == 1) {
             emit($cg, "strada_decref(__rp" . $pi . "); ");
         }
         $pi = $pi + 1;
@@ -3081,7 +3192,7 @@ func emit_int_operand(scalar $cg, scalar $expr) void {
             if ($is_int_call == 1) {
                 emit($cg, "({ StradaValue *__int_tmp = ");
                 gen_expression($cg, $expr);
-                emit($cg, "; STRADA_TAGGED_INT_VAL(__int_tmp); })");
+                emit($cg, "; __builtin_expect(STRADA_IS_TAGGED_INT(__int_tmp), 1) ? STRADA_TAGGED_INT_VAL(__int_tmp) : ({ int64_t __int_val = strada_to_int(__int_tmp); strada_decref(__int_tmp); __int_val; }); })");
             } else {
                 emit($cg, "({ StradaValue *__int_tmp = ");
                 gen_expression($cg, $expr);
@@ -3885,9 +3996,13 @@ func build_owned_call_builtins() scalar {
     $owned_set{"sys::array_default_capacity"} = 1;
     $owned_set{"sys::hash_default_capacity"} = 1;
     $owned_set{"sys::cstruct_new"} = 1;
+    $owned_set{"sys::cstruct_ptr"} = 1;
     $owned_set{"sys::cstruct_get_int"} = 1;
+    $owned_set{"sys::cstruct_get_num"} = 1;
+    $owned_set{"sys::cstruct_get_str"} = 1;
     $owned_set{"sys::cstruct_get_double"} = 1;
     $owned_set{"sys::cstruct_get_string"} = 1;
+    $owned_set{"sys::fwrite"} = 1;
     $owned_set{"sys::idiv"} = 1;
     $owned_set{"sys::exception_trace"} = 1;
     $owned_set{"async::select"} = 1;
@@ -4159,6 +4274,13 @@ func needs_temp_cleanup(scalar $cg, scalar $expr) int {
         return 1;
     }
 
+    # Native struct field read returns an owned StradaValue*
+    if ($type == NODE_FIELD_ACCESS()) {
+        if (resolve_struct_field($cg, $expr->{"object"}, $expr->{"field"}) != 0) {
+            return 1;
+        }
+    }
+
     # Reference expressions (\$var, \@arr, \%hash) create owned refs
     if ($type == NODE_REF()) {
         return 1;
@@ -4321,6 +4443,20 @@ func needs_temp_cleanup(scalar $cg, scalar $expr) int {
                     return 1;
                 }
             }
+            if ($has_colon < 0 && defined($cg->{"qw_imports"})) {
+                my str $qpkg = $fn_pkg;
+                if (length($qpkg) == 0) { $qpkg = "main"; }
+                my str $qtarget = "" . $cg->{"qw_imports"}->{$qpkg . "::" . $name};
+                if (length($qtarget) > 0) {
+                    my scalar $fn_info_qw = $funcs->{sanitize_name($qtarget)};
+                    if ($fn_info_qw != 0) {
+                        if ($fn_info_qw->{"return_type"} == TYPE_VOID()) {
+                            return 0;
+                        }
+                        return 1;
+                    }
+                }
+            }
         }
         # Unknown function - be conservative, don't cleanup
         return 0;
@@ -4425,6 +4561,13 @@ func return_needs_incref(scalar $cg, scalar $expr) int {
     # Anonymous functions (closures) create owned values with refcount=1
     if ($type == NODE_ANON_FUNC()) {
         return 0;
+    }
+
+    # Native struct field read returns an owned value
+    if ($type == NODE_FIELD_ACCESS()) {
+        if (resolve_struct_field($cg, $expr->{"object"}, $expr->{"field"}) != 0) {
+            return 0;
+        }
     }
 
     # Closure calls return owned values
@@ -4630,6 +4773,13 @@ func gen_hash_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op) 
         emit($cg, "StradaValue *__hca_rhs = ");
         gen_expression($cg, $rhs);
         emit($cg, "; ");
+        if ($op eq "/=") {
+            emit($cg, "if (strada_to_num(__hca_rhs) == 0.0) { ");
+            if ($rhs_cleanup == 1) { emit($cg, "strada_decref(__hca_rhs); "); }
+            if ($key_is_lit == 0 && $key_cleanup == 1) { emit($cg, "strada_decref(__hca_k); "); }
+            if ($hash_cleanup == 1) { emit($cg, "strada_decref(__hca_h); "); }
+            emit($cg, "strada_throw(\"Illegal division by zero\"); } ");
+        }
         if ($key_is_lit == 1) {
             if (key_is_hashable_ascii($key_expr->{"value"}) == 1) {
                 emit($cg, "strada_hv_compound_ph(__hca_h, ");
@@ -4687,7 +4837,7 @@ func gen_hash_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op) 
     } elsif ($op eq "*=") {
         emit($cg, "(STRADA_IS_TAGGED_INT(__hca_old) && STRADA_IS_TAGGED_INT(__hca_rhs) ? STRADA_MAKE_TAGGED_INT(STRADA_TAGGED_INT_VAL(__hca_old) * STRADA_TAGGED_INT_VAL(__hca_rhs)) : strada_new_num(strada_to_num(__hca_old) * strada_to_num(__hca_rhs)))");
     } elsif ($op eq "/=") {
-        emit($cg, "strada_new_num(strada_to_num(__hca_old) / strada_to_num(__hca_rhs))");
+        emit($cg, "strada_safe_div(strada_to_num(__hca_old), strada_to_num(__hca_rhs))");
     } else {
         # Fallback — compute as num
         emit($cg, "strada_new_num(strada_to_num(__hca_old))");
@@ -4752,7 +4902,14 @@ func gen_array_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op)
         gen_expression($cg, $arr_expr);
         emit($cg, "; StradaValue *__aca_rhs = ");
         gen_expression($cg, $rhs);
-        emit($cg, "; strada_array_compound(__aca_arr, ");
+        emit($cg, "; ");
+        if ($op eq "/=") {
+            emit($cg, "if (strada_to_num(__aca_rhs) == 0.0) { ");
+            if ($rhs_cleanup == 1) { emit($cg, "strada_decref(__aca_rhs); "); }
+            if ($arr_cleanup == 1) { emit($cg, "strada_decref(__aca_arr); "); }
+            emit($cg, "strada_throw(\"Illegal division by zero\"); } ");
+        }
+        emit($cg, "strada_array_compound(__aca_arr, ");
         emit_int_operand($cg, $idx_expr);
         emit($cg, ", __aca_rhs, " . $aca_opch . "); ");
         if ($rhs_cleanup == 1) { emit($cg, "strada_decref(__aca_rhs); "); }
@@ -4785,7 +4942,7 @@ func gen_array_compound_assign(scalar $cg, scalar $target, scalar $rhs, str $op)
     } elsif ($op eq "*=") {
         emit($cg, "(STRADA_IS_TAGGED_INT(__aca_old) && STRADA_IS_TAGGED_INT(__aca_rhs) ? STRADA_MAKE_TAGGED_INT(STRADA_TAGGED_INT_VAL(__aca_old) * STRADA_TAGGED_INT_VAL(__aca_rhs)) : strada_new_num(strada_to_num(__aca_old) * strada_to_num(__aca_rhs)))");
     } elsif ($op eq "/=") {
-        emit($cg, "strada_new_num(strada_to_num(__aca_old) / strada_to_num(__aca_rhs))");
+        emit($cg, "strada_safe_div(strada_to_num(__aca_old), strada_to_num(__aca_rhs))");
     } else {
         emit($cg, "strada_new_num(strada_to_num(__aca_old))");
     }

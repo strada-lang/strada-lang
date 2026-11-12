@@ -1,0 +1,20 @@
+# EXPECT: 1 1 1 1 yes 1
+# Bare `/regex/` only parsed after `(`, `,`, `{`, `;` — failing after `!`, `&&`,
+# `||`, `elsif`, `?`, `:`, and statement-modifier `if`/`unless`.
+func main() int {
+    $_ = "abc";
+    my int $r1 = (!/xyz/) ? 1 : 0;
+    my int $r2 = (/a/ && /c/) ? 1 : 0;
+    my int $r3 = (/z/ || /b/) ? 1 : 0;
+    my int $r4 = 0;
+    if (/z/) {
+        $r4 = 0;
+    } elsif (/b/) {
+        $r4 = 1;
+    }
+    my str $r5 = /b/ ? "yes" : "no";
+    my int $r6 = 0;
+    $r6 = 1 if /b/;
+    say($r1 . " " . $r2 . " " . $r3 . " " . $r4 . " " . $r5 . " " . $r6);
+    return 0;
+}

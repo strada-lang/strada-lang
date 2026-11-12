@@ -1,0 +1,8 @@
+# COMPILE-ERROR: Can't localize lexical variable
+# `local` on a `my` variable used to compile without an error and have no effect.
+func main() int {
+    my int $v = 1;
+    local $v = 2;
+    say($v);
+    return 0;
+}

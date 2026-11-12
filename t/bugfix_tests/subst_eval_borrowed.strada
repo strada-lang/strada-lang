@@ -1,0 +1,17 @@
+# EXPECT: aXcXe X a-Yc Y Z
+# s///e with a bare variable (or element) as the replacement expression
+# released a value it did not own: the variable was freed out from under the
+# program and read back as garbage.
+func main() int {
+    my str $w = "X";
+    my str $s = "abcbe";
+    $s =~ s/b/$w/eg;
+    my array @r = ("Y");
+    my hash %h = ("k" => "Z");
+    my str $t = "abc";
+    $t =~ s/b/"-" . $r[0]/e;
+    my str $u = "b";
+    $u =~ s/b/$h{"k"}/e;
+    say($s . " " . $w . " " . $t . " " . $r[0] . " " . $u);
+    return 0;
+}

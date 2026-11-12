@@ -1,0 +1,28 @@
+# EXPECT: nonzero 99 99 3.5 hi
+# core::int_ptr($x) returned 0 for a plain int variable (tagged int has no heap
+# box unless promoted through a slot reference).
+func mutate_and_ret() int {
+    my int $x = 5;
+    my int $p = core::int_ptr($x);
+    if ($p == 0) { return -1; }
+    core::ptr_set_int($p, 99);
+    return $x;
+}
+
+func main() int {
+    my int $x = 5;
+    my int $p = core::int_ptr($x);
+    my str $ok = ($p != 0) ? "nonzero" : "zero";
+    core::ptr_set_int($p, 99);
+
+    my num $n = 1.5;
+    my int $np = core::num_ptr($n);
+    core::ptr_set_num($np, 3.5);
+
+    my str $s = "hi";
+    my int $sp = core::str_ptr($s);
+    my str $got_s = ($sp != 0) ? $s : "bad";
+
+    say($ok . " " . $x . " " . mutate_and_ret() . " " . $n . " " . $got_s);
+    return 0;
+}

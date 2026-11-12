@@ -1,0 +1,57 @@
+# EXPECT: 10 2.5 hi 1 30 40 Alice Jr 31 95000.5 63 42
+# Native `struct` syntax was rejected by the parser, and `core::cstruct_new`
+# created an empty hash so `core::cstruct_get_*` always returned 0.
+struct Point {
+    int x;
+    int y;
+}
+
+struct Person {
+    str name;
+    int age;
+    num salary;
+}
+
+func make_point(int $x, int $y) Point {
+    my Point $p;
+    $p->x = $x;
+    $p->y = $y;
+    return $p;
+}
+
+func sum_point(Point $p) int {
+    return $p->x + $p->y;
+}
+
+func main() int {
+    my scalar $raw = core::cstruct_new(32);
+    core::cstruct_set_int($raw, 0, 10);
+    core::cstruct_set_double($raw, 8, 2.5);
+    core::cstruct_set_string($raw, 16, "hi");
+    my int $has_ptr = (core::cstruct_ptr($raw) != 0) ? 1 : 0;
+
+    my Point $pt = make_point(25, 40);
+    $pt->x += 5;
+
+    my Person $per;
+    $per->name = "Alice";
+    $per->name .= " Jr";
+    $per->age = 30;
+    $per->age += 1;
+    $per->salary = 95000.5;
+
+    my Person $clobber;
+    $clobber->age = 42;
+    $clobber->name = "x" x 100;
+
+    if (sum_point($pt) != 70) { return 1; }
+
+    say(core::cstruct_get_int($raw, 0) . " " .
+        core::cstruct_get_double($raw, 8) . " " .
+        core::cstruct_get_string($raw, 16) . " " .
+        $has_ptr . " " .
+        $pt->x . " " . $pt->y . " " .
+        $per->name . " " . $per->age . " " . $per->salary . " " .
+        length($clobber->name) . " " . $clobber->age);
+    return 0;
+}

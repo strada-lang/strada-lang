@@ -236,6 +236,18 @@ func ast_new_program() scalar {
     my array @method_modifiers = ();
     $node->{"method_modifiers"} = \@method_modifiers;
     $node->{"method_modifier_count"} = 0;
+    # qw() imported function map: "<from_pkg>::<short>" -> "<mod_name>::<short>"
+    my hash %qw_imports = ();
+    my array @qw_import_keys = ();
+    $node->{"qw_imports"} = \%qw_imports;
+    $node->{"qw_import_keys"} = \@qw_import_keys;
+    $node->{"qw_import_count"} = 0;
+    # Native struct definitions: structs->{Name} = {name, size, fields, field_count, field_map}
+    my hash %structs = ();
+    my array @struct_names = ();
+    $node->{"structs"} = \%structs;
+    $node->{"struct_names"} = \@struct_names;
+    $node->{"struct_count"} = 0;
     return $node;
 }
 
@@ -311,6 +323,32 @@ func ast_add_import(scalar $program, str $func_name) void {
     my scalar $imports = $program->{"imports"};
     push($imports, $func_name);
     $program->{"import_count"} = $program->{"import_count"} + 1;
+}
+
+# Record a `use Module qw(name)` binding for unqualified calls in $from_pkg
+func ast_add_qw_import(scalar $program, str $from_pkg, str $func_name, str $target_name) void {
+    my str $pkg = $from_pkg;
+    if (length($pkg) == 0) {
+        $pkg = "main";
+    }
+    my str $k = $pkg . "::" . $func_name;
+    my scalar $qwi = $program->{"qw_imports"};
+    if (!defined($qwi->{$k})) {
+        push($program->{"qw_import_keys"}, $k);
+        $program->{"qw_import_count"} = $program->{"qw_import_count"} + 1;
+    }
+    $qwi->{$k} = $target_name;
+}
+
+# Add a native struct definition to program
+func ast_add_struct(scalar $program, scalar $st) void {
+    my str $sname = $st->{"name"};
+    my scalar $structs = $program->{"structs"};
+    if (!defined($structs->{$sname})) {
+        push($program->{"struct_names"}, $sname);
+        $program->{"struct_count"} = $program->{"struct_count"} + 1;
+    }
+    $structs->{$sname} = $st;
 }
 
 # Add lib path to program
@@ -732,6 +770,20 @@ func ast_add_arg(scalar $call, scalar $arg) void {
         push($args, $pair_elems->[1]);
         $call->{"arg_count"} = $call->{"arg_count"} + 2;
         return;
+    }
+    # core::int_ptr($x): an int variable holds its value directly and has no
+    # address to hand out, so the plain form returned 0. The variable itself is
+    # what is meant; pass a reference to it, as core::int_ptr(\$x) does.
+    if ($arg && $arg->{"type"} == NODE_VARIABLE()) {
+        my str $ip_name = "" . $call->{"name"};
+        if ($ip_name eq "core::int_ptr" || $ip_name eq "sys::int_ptr"
+            || $ip_name eq "core::num_ptr" || $ip_name eq "sys::num_ptr"
+            || $ip_name eq "core::str_ptr" || $ip_name eq "sys::str_ptr") {
+            my str $ip_sigil = $arg->{"sigil"};
+            if ($ip_sigil eq "$") {
+                $arg = ast_new_ref($arg, "$");
+            }
+        }
     }
     push($args, $arg);
     $call->{"arg_count"} = $call->{"arg_count"} + 1;

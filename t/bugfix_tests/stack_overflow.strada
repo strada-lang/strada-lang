@@ -1,0 +1,6 @@
+# EXPECT-STDERR: stack overflow
+# With the recursion limit switched off, unbounded recursion exhausts the C
+# stack. That used to be a bare "Segmentation fault"; the runtime now says it
+# was a stack overflow before the process dies.
+func r(int $n) int { return r($n + 1) + 1; }
+func main() int { core::set_recursion_limit(0); r(0); return 0; }

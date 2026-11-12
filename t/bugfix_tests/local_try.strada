@@ -1,0 +1,36 @@
+# EXPECT: 1 1 1 99 10 hello
+# `local` inside a `try` block was not restored on normal exit; dynamic hash
+# key `local $h{$k} = v` wrote to literal "__dyn_key"; and `local $g = $lex`
+# did not incref borrowed lexicals.
+our int $g = 1;
+our str $gs = "init";
+our hash %gh = ("a" => 10, "b" => 20);
+
+func show() int { return $g; }
+
+func main() int {
+    try { local $g = 9; } catch ($e) { }
+    my int $after_ok = show();
+
+    try { local $g = 8; throw "boom"; } catch ($e) { }
+    my int $after_throw = show();
+
+    try { throw "boom"; } catch ($e) { local $g = 7; }
+    my int $after_catch = show();
+
+    my int $in_dyn = 0;
+    {
+        my str $k = "a";
+        local $gh{$k} = 99;
+        $in_dyn = $gh{"a"};
+    }
+    my int $restored_dyn = $gh{"a"};
+
+    my str $lex = "hel" . "lo";
+    {
+        local $gs = $lex;
+    }
+
+    say($after_ok . " " . $after_throw . " " . $after_catch . " " . $in_dyn . " " . $restored_dyn . " " . $lex);
+    return 0;
+}

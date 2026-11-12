@@ -128,6 +128,7 @@ typedef struct StradaMetadata {
     int32_t regex_pos;
     void *locked_keys;
     StradaValue *glob_scalar_slot;
+    StradaValue *tied_cache;
 } StradaMetadata;
 
 /* Value structure - core of Strada runtime (32 bytes) */
@@ -561,7 +562,9 @@ StradaValue* strada_str_from_fh(StradaValue *fh);
 StradaValue* strada_close(StradaValue *fh);  /* returns tagged int: 1 closed, 0 nothing */
 StradaValue* strada_read_file(StradaValue *fh);
 StradaValue* strada_read_file_n(StradaValue *fh, int64_t n);
-void strada_write_file_n(StradaValue *fh, StradaValue *data, int64_t n);
+int64_t strada_write_file_n(StradaValue *fh, StradaValue *data, int64_t n);  /* bytes written */
+int64_t strada_fwrite_sv(StradaValue *fh, StradaValue *data);
+int64_t strada_fwrite_sv_n(StradaValue *fh, StradaValue *data, int64_t n);
 StradaValue* strada_read_line(StradaValue *fh);
 StradaValue* strada_read_all_lines(StradaValue *fh);
 void strada_write_file(StradaValue *fh, const char *content);
@@ -632,6 +635,8 @@ StradaValue* strada_regex_find_all(const char *str, const char *pattern, const c
 void strada_set_captures_sv(StradaValue *match);
 StradaValue* strada_regex_build_result(const char *src, StradaValue *matches, StradaValue *replacements);
 StradaValue* strada_tr(StradaValue *sv, const char *search, const char *replace, const char *flags);
+StradaValue* strada_tr_slot(StradaValue **slot, const char *search, const char *replace, const char *flags);
+StradaValue* strada_tr_global(const char *key, const char *search, const char *replace, const char *flags);
 
 /* ============================================================
  * OOP - Blessed References
@@ -791,6 +796,7 @@ StradaValue* strada_utf8_is_utf8(StradaValue *sv);
 StradaValue* strada_utf8_valid(StradaValue *sv);
 StradaValue* strada_utf8_encode(StradaValue *sv);
 StradaValue* strada_utf8_decode(StradaValue *sv);
+StradaValue* strada_utf8_decode_slot(StradaValue **slot);
 StradaValue* strada_utf8_downgrade(StradaValue *sv, int fail_ok);
 StradaValue* strada_utf8_upgrade(StradaValue *sv);
 StradaValue* strada_utf8_unicode_to_native(StradaValue *sv);
@@ -1311,6 +1317,7 @@ void strada_local_restore_to(int depth);
 StradaValue* strada_tie_hash(StradaValue *ref, const char *classname, int argc, ...);
 StradaValue* strada_tie_array(StradaValue *ref, const char *classname, int argc, ...);
 StradaValue* strada_tie_scalar(StradaValue *ref, const char *classname, int argc, ...);
+StradaValue* strada_tie_scalar_slot(StradaValue **slot, const char *classname, int argc, ...);
 void strada_untie(StradaValue *ref);
 StradaValue* strada_tied(StradaValue *ref);
 StradaValue* strada_tied_hash_fetch(StradaValue *sv, const char *key);
@@ -1544,6 +1551,7 @@ StradaValue* strada_sortbuf_new(int64_t n);
 StradaValue* strada_inc_value(StradaValue *old, int64_t delta);
 StradaValue* strada_new_uint(uint64_t u);  /* UV: >INT64_MAX stored UV-flagged, else as signed int */
 StradaValue* strada_new_dualvar(int64_t iv, const char *s);  /* String + numeric override (e.g. $!) */
+StradaValue* strada_new_str_lit(const char *s, size_t len);
 StradaValue* strada_new_str_len_utf8(const char *s, size_t len);  /* Set SVf_UTF8 flag */
 StradaValue* strada_new_str_charflag(const char *s, const char *flag_src); /* UTF-8 flag iff flag_src is valid UTF-8 */
 void         strada_set_utf8_flag(StradaValue *sv, int on);     /* Toggle UTF-8 flag */
@@ -1552,7 +1560,7 @@ StradaValue* strada_new_str_like(const char *s, StradaValue *flag_src);  /* Mirr
 char* strada_tr_utf8(const char *subject, size_t subject_byte_len,
                      const char *from_set, const char *to_set,
                      int del, int comp, int squeeze, int *out_count);
-#define STRADA_NEW_STR_LIT(LIT) strada_new_str_len((LIT), sizeof(LIT) - 1)
+#define STRADA_NEW_STR_LIT(LIT) strada_new_str_lit((LIT), sizeof(LIT) - 1)
 void strada_break_self_cycle_impl(StradaValue *sv);
 StradaValue* strada_deref_array_value_owned(StradaValue *ref);
 StradaValue* strada_deref_hash_value_owned(StradaValue *ref);
@@ -1642,7 +1650,10 @@ extern int strada_last_qx_status;  /* wait status from most recent strada_qx (pc
 void strada_global_set_cstr(const char *name, StradaValue *val);
 StradaValue* strada_tied_hash_scalar(StradaValue *sv);
 StradaValue* strada_tied_scalar_fetch(StradaValue *sv);
+StradaValue* strada_copy_scalar(StradaValue *sv);
 int strada_tied_scalar_store(StradaValue *sv, StradaValue *val);
+StradaValue* strada_tied_scalar_assign(StradaValue *sv, StradaValue *val);
+StradaValue* strada_tied_scalar_compound(StradaValue *sv, StradaValue *rhs, int op, int want_result);
 StradaValue* strada_tied_array_fetch(StradaValue *sv, int64_t idx);
 void         strada_tied_array_store(StradaValue *sv, int64_t idx, StradaValue *val);
 int64_t      strada_tied_array_fetchsize(StradaValue *sv);

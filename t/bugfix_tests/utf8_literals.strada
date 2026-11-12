@@ -1,0 +1,28 @@
+# EXPECT: 4 5 é 4 8 5 5 1 4 5
+# Non-ASCII UTF-8 string literals counted bytes instead of characters in
+# length(), substr(), and index(), unlike strings built with chr().
+func main() int {
+    my str $s = "café";
+    my int $clen = length($s);
+    my int $blen = core::byte_length($s);
+    my str $last_ch = substr($s, 3, 1);
+    my int $bang = index("café!", "!");
+    my str $cat = "café: " . 42;
+    my int $cat_len = length($cat);
+
+    my str $bytes = utf8::encode($s);
+    my int $enc_len = length($bytes);
+
+    my str $path = "/tmp/strada_utf8_lit_" . core::getpid() . ".txt";
+    core::spew($path, $s);
+    my str $raw = core::slurp($path);
+    core::unlink($path);
+    my int $raw_len = length($raw);
+    my str $raw_copy = $raw;
+    my int $ok = utf8::decode($raw);
+    my int $dec_len = length($raw);
+    my int $copy_len = length($raw_copy);
+
+    say($clen . " " . $blen . " " . $last_ch . " " . $bang . " " . $cat_len . " " . $enc_len . " " . $raw_len . " " . $ok . " " . $dec_len . " " . $copy_len);
+    return 0;
+}

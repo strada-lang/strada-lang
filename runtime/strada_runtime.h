@@ -387,6 +387,7 @@ typedef struct StradaMetadata {
                               * stores X here and `${*$fh}` reads it.
                               * File::Temp->new stashes the temp filename
                               * in this slot. NULL until first assigned. */
+    StradaValue *tied_cache; /* Cached FETCH result for tied scalar exprs */
 } StradaMetadata;
 
 /* Main value structure - like Perl's SV (32 bytes) */
@@ -575,12 +576,13 @@ StradaValue* strada_sortbuf_new(int64_t n);
 StradaValue* strada_inc_value(StradaValue *old, int64_t delta);
 StradaValue* strada_new_uint(uint64_t u);  /* UV: >INT64_MAX stored UV-flagged, else as signed int */
 StradaValue* strada_new_num(double n);
-StradaValue* strada_safe_div(double a, double b);      /* Returns undef if b==0 */
-StradaValue* strada_safe_mod(int64_t a, int64_t b);    /* Returns undef if b==0 */
+StradaValue* strada_safe_div(double a, double b);      /* Throws on b==0 */
+StradaValue* strada_safe_mod(int64_t a, int64_t b);    /* Throws on b==0 */
 StradaValue* strada_new_str(const char *s);
 StradaValue* strada_new_dualvar(int64_t iv, const char *s);  /* String + numeric override (e.g. $!) */
 StradaValue* strada_new_str_take(char *s);  /* Take ownership of string */
 StradaValue* strada_new_str_len(const char *s, size_t len);  /* Binary-safe string */
+StradaValue* strada_new_str_lit(const char *s, size_t len);  /* String literal (UTF-8 char-flagged when valid UTF-8) */
 StradaValue* strada_new_str_len_utf8(const char *s, size_t len);  /* Set SVf_UTF8 flag */
 StradaValue* strada_new_str_charflag(const char *s, const char *flag_src); /* UTF-8 flag iff flag_src is valid UTF-8 */
 void         strada_set_utf8_flag(StradaValue *sv, int on);     /* Toggle UTF-8 flag */
@@ -595,7 +597,7 @@ char* strada_tr_utf8(const char *subject, size_t subject_byte_len,
  * sizeof on a string literal is computed at translation time and reflects
  * the actual byte width (adjacent literals like "\x00""ABC" concatenate
  * before sizeof, so the length count is accurate). */
-#define STRADA_NEW_STR_LIT(LIT) strada_new_str_len((LIT), sizeof(LIT) - 1)
+#define STRADA_NEW_STR_LIT(LIT) strada_new_str_lit((LIT), sizeof(LIT) - 1)
 
 size_t strada_str_len(StradaValue *sv);  /* Get string length (binary-safe) */
 StradaValue* strada_new_array(void);
@@ -904,7 +906,9 @@ StradaValue* strada_str_from_fh(StradaValue *fh);  /* Extract string from memstr
 StradaValue* strada_close(StradaValue *fh);  /* returns tagged int: 1 closed, 0 nothing to close */
 StradaValue* strada_read_file(StradaValue *fh);
 StradaValue* strada_read_file_n(StradaValue *fh, int64_t n);
-void strada_write_file_n(StradaValue *fh, StradaValue *data, int64_t n);
+int64_t strada_write_file_n(StradaValue *fh, StradaValue *data, int64_t n);  /* bytes written */
+int64_t strada_fwrite_sv(StradaValue *fh, StradaValue *data);
+int64_t strada_fwrite_sv_n(StradaValue *fh, StradaValue *data, int64_t n);
 StradaValue* strada_read_line(StradaValue *fh);
 StradaValue* strada_read_all_lines(StradaValue *fh);
 void strada_write_file(StradaValue *fh, const char *content);
@@ -1105,6 +1109,7 @@ StradaValue* strada_utf8_is_utf8(StradaValue *sv);
 StradaValue* strada_utf8_valid(StradaValue *sv);
 StradaValue* strada_utf8_encode(StradaValue *sv);
 StradaValue* strada_utf8_decode(StradaValue *sv);
+StradaValue* strada_utf8_decode_slot(StradaValue **slot);
 StradaValue* strada_utf8_downgrade(StradaValue *sv, int fail_ok);
 StradaValue* strada_utf8_upgrade(StradaValue *sv);
 StradaValue* strada_utf8_unicode_to_native(StradaValue *sv);
@@ -1944,6 +1949,8 @@ StradaValue* strada_select_get(void);
  * Transliteration (tr///)
  * ============================================================ */
 StradaValue* strada_tr(StradaValue *sv, const char *search, const char *replace, const char *flags);
+StradaValue* strada_tr_slot(StradaValue **slot, const char *search, const char *replace, const char *flags);
+StradaValue* strada_tr_global(const char *key, const char *search, const char *replace, const char *flags);
 
 /* ============================================================
  * local() - Dynamic scoping for our variables
@@ -1983,7 +1990,10 @@ StradaValue* strada_tied_hash_nextkey(StradaValue *sv, const char *lastkey);
 void strada_tied_hash_clear(StradaValue *sv);
 StradaValue* strada_tied_hash_scalar(StradaValue *sv);
 StradaValue* strada_tied_scalar_fetch(StradaValue *sv);
+StradaValue* strada_copy_scalar(StradaValue *sv);
 int strada_tied_scalar_store(StradaValue *sv, StradaValue *val);
+StradaValue* strada_tied_scalar_assign(StradaValue *sv, StradaValue *val);
+StradaValue* strada_tied_scalar_compound(StradaValue *sv, StradaValue *rhs, int op, int want_result);
 
 /* Tied-array dispatch — invokes TIEARRAY methods on the tied object.
  * Each helper no-ops or returns undef/0 on non-tied SVs. */
@@ -2063,6 +2073,7 @@ extern int (*strada_method_can_hook)(StradaValue *obj, const char *method);
 StradaValue* strada_tie_hash(StradaValue *ref, const char *classname, int argc, ...);
 StradaValue* strada_tie_array(StradaValue *ref, const char *classname, int argc, ...);
 StradaValue* strada_tie_scalar(StradaValue *ref, const char *classname, int argc, ...);
+StradaValue* strada_tie_scalar_slot(StradaValue **slot, const char *classname, int argc, ...);
 void strada_untie(StradaValue *ref);
 StradaValue* strada_tied(StradaValue *ref);
 

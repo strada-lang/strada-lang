@@ -1,0 +1,56 @@
+# EXPECT: 5 5 8 8 6 12 2 2 3 4 s:ab
+# Tied scalars only called STORE for statement-level `$x = EXPR;`: compound
+# assignment (`+=`, `.=`, `%=`), `++`/`--`, assignment in expression context,
+# and tying an int-initialized variable bypassed or dropped the tie.
+package Counter;
+func TIESCALAR(str $class, scalar $init) scalar {
+    my hash %self = ("v" => $init, "stores" => 0);
+    return bless(\%self, $class);
+}
+func FETCH(scalar $self) scalar {
+    return $self->{"v"};
+}
+func STORE(scalar $self, scalar $val) void {
+    $self->{"v"} = $val;
+    $self->{"stores"} = $self->{"stores"} + 1;
+}
+
+package main;
+func main() int {
+    my scalar $x = 0;
+    tie($x, "Counter", 0);
+
+    my scalar $y = ($x = 5);
+    my str $r1 = $x . " " . $y;
+
+    my scalar $z = ($x += 3);
+    my str $r2 = $x . " " . $z;
+
+    $x -= 2;
+    my str $r3 = "" . $x;
+
+    $x *= 2;
+    my str $r4 = "" . $x;
+
+    $x %= 5;
+    my str $r5 = "" . $x;
+
+    my scalar $post = $x++;
+    my scalar $mid = $x;
+    my scalar $pre = ++$x;
+    my str $r6 = $post . " " . $mid . " " . $pre;
+
+    my scalar $obj = tied($x);
+    if ($obj->{"stores"} != 7) {
+        say("bad stores: " . $obj->{"stores"});
+        return 1;
+    }
+
+    my scalar $s = "";
+    tie($s, "Counter", "s:");
+    $s .= "a";
+    $s = $s . "b";
+
+    say($r1 . " " . $r2 . " " . $r3 . " " . $r4 . " " . $r5 . " " . $r6 . " " . $s);
+    return 0;
+}

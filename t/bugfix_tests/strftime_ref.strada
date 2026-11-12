@@ -1,0 +1,7 @@
+# EXPECT: 2000-01-01 2000-01-01
+# core::strftime silently ignored a hash reference and formatted the current time.
+func main() int {
+    my hash %t = ("year" => 100, "mon" => 0, "mday" => 1, "hour" => 0, "min" => 0, "sec" => 0);
+    say(core::strftime("%Y-%m-%d", %t) . " " . core::strftime("%Y-%m-%d", \%t));
+    return 0;
+}

@@ -365,7 +365,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     my scalar $our_vars_chk = $cg->{"our_vars"};
                     my str $init_our_chk = "" . $our_vars_chk->{$init_name_chk};
                     if (length($init_our_chk) == 0) {
-                        emit($cg, "; strada_incref(" . $c_name . ")");
+                        emit($cg, "; " . $c_name . " = strada_copy_scalar(" . $c_name . ")");
                     }
                 } elsif ($init_type == NODE_SUBSCRIPT()) {
                     # Subscript is borrowed unless its source needed cleanup —
@@ -384,13 +384,34 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     if (return_needs_incref($cg, $init) == 1) {
                         emit($cg, "; strada_incref(" . $c_name . ")");
                     }
+                } elsif ($init_type == NODE_ASSIGN()) {
+                    # Nested assignment yields a borrowed reference
+                    emit($cg, "; strada_incref(" . $c_name . ")");
                 }
                 } # end else (non-array scalar context)
             } else {
-                emit($cg, " = strada_new_undef()");
+                my str $st_decl_name = "" . $stmt->{"struct_name"};
+                if (length($st_decl_name) > 0 && defined($cg->{"structs"}) && defined($cg->{"structs"}->{$st_decl_name})) {
+                    my int $st_sz = $cg->{"structs"}->{$st_decl_name}->{"size"} + 0;
+                    emit($cg, " = strada_cstruct_new(\"" . $st_decl_name . "\", " . $st_sz . ")");
+                } else {
+                    emit($cg, " = strada_new_undef()");
+                }
             }
         }
         emit($cg, ";\n");
+        # Track native struct type on variable
+        my str $var_st_name = "" . $stmt->{"struct_name"};
+        if (length($var_st_name) == 0 && $stmt->{"init"}) {
+            my scalar $sinit = $stmt->{"init"};
+            if ($sinit->{"type"} == NODE_CALL()) {
+                my scalar $sfi = $cg->{"functions"}->{sanitize_name($sinit->{"name"})};
+                if ($sfi) { $var_st_name = "" . $sfi->{"return_struct_name"}; }
+            } elsif ($sinit->{"type"} == NODE_VARIABLE()) {
+                $var_st_name = "" . $cg->{"struct_vars"}->{escape_c_keyword($sinit->{"name"})};
+            }
+        }
+        $cg->{"struct_vars"}->{$c_name} = $var_st_name;
         # Track variable for scope cleanup
         # Use escaped name for C code generation
         scope_track_var($cg, $c_name);
@@ -577,34 +598,37 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 emit($cg, "strada_local_save_hash_elem(__lh, ");
                 gen_str_literal_c($cg, $key_expr->{"value"});
                 emit($cg, ");\n");
-            } else {
-                # Capture the key-expr result, stringify, then decref.
-                # Without the explicit capture, owned-temp key exprs
-                # (anon-array for slice form, function calls, concat
-                # chains) leaked the result every local() call.
-                my int $k_cln = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $key_expr) == 1;
-                if ($k_cln == 1) {
-                    emit($cg, "{ StradaValue *__lk_sv = ");
-                    gen_expression($cg, $key_expr);
-                    emit($cg, "; char *__lk = strada_to_str_ss(__lk_sv); strada_local_save_hash_elem(__lh, __lk); strada_cstr_free(__lk); strada_decref(__lk_sv); }\n");
-                } else {
-                    emit($cg, "char *__lk = strada_to_str_ss(");
-                    gen_expression($cg, $key_expr);
-                    emit($cg, "); strada_local_save_hash_elem(__lh, __lk); strada_cstr_free(__lk);\n");
-                }
-            }
-            # If there's an initializer, set the new value
-            if ($stmt->{"init"}) {
-                emit_indent($cg);
-                emit($cg, "{ StradaValue *__lv = ");
-                gen_expression($cg, $stmt->{"init"});
-                emit($cg, "; strada_hv_store(__lh, ");
-                if ($key_expr->{"type"} == NODE_STR_LITERAL()) {
+                if ($stmt->{"init"}) {
+                    emit_indent($cg);
+                    emit($cg, "{ StradaValue *__lv = ");
+                    gen_expression($cg, $stmt->{"init"});
+                    emit($cg, "; strada_hv_store(__lh, ");
                     gen_str_literal_c($cg, $key_expr->{"value"});
-                } else {
-                    emit($cg, "\"__dyn_key\"");
+                    emit($cg, ", __lv);");
+                    if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $stmt->{"init"}) == 1) {
+                        emit($cg, " strada_decref(__lv);");
+                    }
+                    emit($cg, " }\n");
                 }
-                emit($cg, ", __lv); strada_decref(__lv); }\n");
+            } else {
+                my int $k_cln = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $key_expr) == 1;
+                emit($cg, "{ StradaValue *__lk_sv = ");
+                gen_expression($cg, $key_expr);
+                emit($cg, "; char *__lk = strada_to_str_ss(__lk_sv); strada_local_save_hash_elem(__lh, __lk);");
+                if ($stmt->{"init"}) {
+                    emit($cg, " { StradaValue *__lv = ");
+                    gen_expression($cg, $stmt->{"init"});
+                    emit($cg, "; strada_hv_store(__lh, __lk, __lv);");
+                    if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $stmt->{"init"}) == 1) {
+                        emit($cg, " strada_decref(__lv);");
+                    }
+                    emit($cg, " }");
+                }
+                emit($cg, " strada_cstr_free(__lk);");
+                if ($k_cln == 1) {
+                    emit($cg, " strada_decref(__lk_sv);");
+                }
+                emit($cg, " }\n");
             }
             if (length($our_check) > 0) {
                 emit_indent($cg);
@@ -622,9 +646,15 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         # If there's an initializer, set the new value
         if ($stmt->{"init"}) {
             emit_indent($cg);
-            emit($cg, "strada_global_set_cstr(\"" . $our_key . "\", ");
-            gen_expression($cg, $stmt->{"init"});
-            emit($cg, ");\n");
+            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $stmt->{"init"}) == 0) {
+                emit($cg, "{ StradaValue *__lv = ");
+                gen_expression($cg, $stmt->{"init"});
+                emit($cg, "; strada_incref(__lv); strada_global_set_cstr(\"" . $our_key . "\", __lv); }\n");
+            } else {
+                emit($cg, "strada_global_set_cstr(\"" . $our_key . "\", ");
+                gen_expression($cg, $stmt->{"init"});
+                emit($cg, ");\n");
+            }
         }
         return;
     }
@@ -1616,14 +1646,16 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     emit($cg, "return;\n");
                 }
             } else {
-                emit_stack_pop($cg);
-                emit_indent($cg);
-                emit($cg, "return");
                 if ($stmt->{"value"}) {
-                    emit($cg, " ");
+                    emit_indent($cg);
+                    emit($cg, "{ StradaValue *__retval = ");
                     gen_return_value($cg, $stmt->{"value"});
+                    emit($cg, "; " . emit_stack_pop_inline($cg) . " return __retval; }\n");
+                } else {
+                    emit_stack_pop($cg);
+                    emit_indent($cg);
+                    emit($cg, "return;\n");
                 }
-                emit($cg, ";\n");
             }
         } elsif ($stmt->{"value"}) {
             # Non-main function with return value - save, cleanup, return
@@ -1636,7 +1668,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             # values; a coerced int return is fresh and owned)
             if ($ret_coerced == 0 && return_needs_incref($cg, $stmt->{"value"}) == 1) {
                 emit_indent($cg);
-                emit($cg, "strada_incref(__retval);\n");
+                emit($cg, "__retval = strada_copy_scalar(__retval);\n");
             }
             # finally blocks run AFTER the return value is captured and
             # BEFORE scope cleanup decrefs the locals they may reference.
@@ -1884,6 +1916,13 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             $i = $i + 1;
         }
 
+        # A `local` made inside the try block ends with the block, on the
+        # normal path too (the catch arm already restores to this mark).
+        if (stmt_has_local($try_block) == 1) {
+            emit_indent($cg);
+            emit($cg, "strada_local_restore_to(__local_mark_" . $cleanup_var_id . ");\n");
+        }
+
         # Decrement try_depth before we emit the pop
         $cg->{"try_depth"} = $try_depth;
 
@@ -2008,6 +2047,10 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             while ($j < $catch_block->{"statement_count"}) {
                 gen_statement($cg, $catch_stmts->[$j]);
                 $j = $j + 1;
+            }
+            if (stmt_has_local($catch_block) == 1) {
+                emit_indent($cg);
+                emit($cg, "strada_local_restore_to(__local_mark_" . $cleanup_var_id . ");\n");
             }
 
             # No explicit cleanup_pop here — emit_scope_decref emits
@@ -2387,6 +2430,12 @@ func gen_function(scalar $cg, scalar $fn) void {
         $cg->{"has_local"} = 0;
         $cg->{"int_vars"} = {};
         $cg->{"num_vars"} = {};
+        $cg->{"struct_vars"} = {};
+        if ($cg->{"enable_stack_trace"} == 1) {
+            $cg->{"func_tracks_depth"} = 1;
+        } else {
+            $cg->{"func_tracks_depth"} = 0;
+        }
         # Store main's package for function call resolution
         $cg->{"current_fn_package"} = $fn->{"package"};
         # Note: previously emitted `__attribute__((flatten))` here for
@@ -2400,7 +2449,7 @@ func gen_function(scalar $cg, scalar $fn) void {
 
         # Push stack frame for stack traces (if enabled)
         my str $src_file = $cg->{"filename"};
-        if ($cg->{"enable_stack_trace"} == 1) {
+        if ($cg->{"func_tracks_depth"} == 1) {
             emit($cg, "    strada_stack_push_il(\"main\", \"" . $src_file . "\");\n\n");
         }
 
@@ -2580,8 +2629,15 @@ func gen_function(scalar $cg, scalar $fn) void {
                         emit($cg, "strada_new_array()");
                     }
                 } else {
+                    my str $gst_name = "" . $gvar->{"struct_name"};
+                    if (length($gst_name) > 0) {
+                        $cg->{"struct_vars"}->{$name} = $gst_name;
+                    }
                     if ($init) {
                         gen_expression($cg, $init);
+                    } elsif (length($gst_name) > 0 && defined($cg->{"structs"}) && defined($cg->{"structs"}->{$gst_name})) {
+                        my int $gst_sz = $cg->{"structs"}->{$gst_name}->{"size"} + 0;
+                        emit($cg, "strada_cstruct_new(\"" . $gst_name . "\", " . $gst_sz . ")");
                     } else {
                         emit($cg, "strada_new_undef()");
                     }
@@ -2660,8 +2716,12 @@ func gen_function(scalar $cg, scalar $fn) void {
             $i = $i + 1;
         }
         scope_pop($cg);
+        if ($cg->{"func_tracks_depth"} == 1) {
+            emit($cg, "    strada_stack_pop_il();\n");
+        }
         emit($cg, "}\n\n");
         $cg->{"in_main"} = 0;
+        $cg->{"func_tracks_depth"} = 0;
     } else {
         # Private functions get static prefix (file-scope only).
         # When this TU also defines `main`, the export_info table is
@@ -2699,9 +2759,15 @@ func gen_function(scalar $cg, scalar $fn) void {
 
         emit($cg, ") {\n");
 
+        if ($cg->{"enable_stack_trace"} == 1 || ($cg->{"enable_stack_trace"} == 2 && stmt_has_call($fn_body) == 1)) {
+            $cg->{"func_tracks_depth"} = 1;
+        } else {
+            $cg->{"func_tracks_depth"} = 0;
+        }
+
         # Push stack frame for stack traces (if enabled)
         my str $src_file = $cg->{"filename"};
-        if ($cg->{"enable_stack_trace"} == 1) {
+        if ($cg->{"func_tracks_depth"} == 1) {
             emit($cg, "strada_stack_push_il(\"" . $name . "\", \"" . $src_file . "\");\n");
         }
 
@@ -2756,6 +2822,7 @@ func gen_function(scalar $cg, scalar $fn) void {
         # Reset int_vars tracking for this function (prevents cross-function leaks)
         $cg->{"int_vars"} = {};
         $cg->{"num_vars"} = {};
+        $cg->{"struct_vars"} = {};
         # Detect "leaf-safe" function bodies: bodies that contain only
         # inline-able operations (arithmetic, comparisons, inline accessor
         # calls, literals, ternary) and can never throw or escape the
@@ -2784,6 +2851,9 @@ func gen_function(scalar $cg, scalar $fn) void {
                 # Track num-typed params for the numeric-coercion predicate
                 if ($param->{"param_type"} == TYPE_NUM()) {
                     $cg->{"num_vars"}->{$c_param_name} = 1;
+                }
+                if (length("" . $param->{"struct_name"}) > 0) {
+                    $cg->{"struct_vars"}->{$c_param_name} = "" . $param->{"struct_name"};
                 }
                 $cg->{"func_param_is_int"}->[$pc] = $is_int_param;
                 # Skip wrap when param is int (tagged-int immortal) OR when
@@ -2855,7 +2925,7 @@ func gen_function(scalar $cg, scalar $fn) void {
             emit($cg, "strada_local_restore_to(__local_saved_depth);\n");
         }
         # Pop stack frame for void functions falling through
-        if ($ret_type_id == TYPE_VOID() && $cg->{"enable_stack_trace"} == 1) {
+        if ($ret_type_id == TYPE_VOID() && $cg->{"func_tracks_depth"} == 1) {
             emit($cg, "strada_stack_pop_il();\n");
         }
         # Implicit return undef for non-void functions that fall through without return
@@ -2873,7 +2943,7 @@ func gen_function(scalar $cg, scalar $fn) void {
                     $pn_i2 = $pn_i2 + 1;
                 }
             }
-            if ($cg->{"enable_stack_trace"} == 1) {
+            if ($cg->{"func_tracks_depth"} == 1) {
                 emit($cg, "strada_stack_pop_il();\n");
             }
             emit($cg, "return strada_new_undef();\n");
@@ -2884,6 +2954,7 @@ func gen_function(scalar $cg, scalar $fn) void {
         $cg->{"ret_is_int"} = 0;
         $cg->{"ret_is_num"} = 0;
         $cg->{"current_fn_package"} = "";
+        $cg->{"func_tracks_depth"} = 0;
 
         # Clear func_params
         $cg->{"func_params"} = {};
@@ -2943,6 +3014,10 @@ func gen_async_function(scalar $cg, scalar $fn) void {
 
     # Save and check func_has_try for async inner function
     my int $saved_func_has_try = $cg->{"func_has_try"};
+    my int $saved_async_tracks_depth = $cg->{"func_tracks_depth"} + 0;
+    my scalar $saved_async_struct_vars = $cg->{"struct_vars"};
+    $cg->{"func_tracks_depth"} = 0;
+    $cg->{"struct_vars"} = {};
     my scalar $async_body = $fn->{"body"};
     if (func_body_has_try($async_body) == 1) {
         $cg->{"func_has_try"} = 1;
@@ -2973,6 +3048,8 @@ func gen_async_function(scalar $cg, scalar $fn) void {
 
     # Restore func_has_try
     $cg->{"func_has_try"} = $saved_func_has_try;
+    $cg->{"func_tracks_depth"} = $saved_async_tracks_depth;
+    $cg->{"struct_vars"} = $saved_async_struct_vars;
 
     emit($cg, "    return strada_undef_static();\n");
     emit($cg, "}\n\n");
@@ -3046,6 +3123,14 @@ func gen_program(scalar $cg, scalar $program) void {
     # ties a variable (tied FETCH is observable per-mention). Semantic
     # sets uses_tie on the program node.
     $cg->{"uses_tie"} = $program->{"uses_tie"};
+    if (defined($program->{"structs"})) {
+        $cg->{"structs"} = $program->{"structs"};
+        $cg->{"struct_names"} = $program->{"struct_names"};
+        $cg->{"struct_count"} = $program->{"struct_count"} + 0;
+    }
+    if (defined($program->{"qw_imports"})) {
+        $cg->{"qw_imports"} = $program->{"qw_imports"};
+    }
 
     # Store method modifiers
     $cg->{"method_modifiers"} = $program->{"method_modifiers"};

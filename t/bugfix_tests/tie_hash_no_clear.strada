@@ -1,0 +1,74 @@
+# EXPECT: 0 undef 0
+# Clearing `%h = ()` or `@a = ()` on a tied class without CLEAR threw
+# "Can't locate method CLEAR" instead of falling back.
+package IterHash;
+func TIEHASH(str $class) scalar {
+    my hash %d = ();
+    my hash %self = ("d" => \%d, "ks" => [], "idx" => 0);
+    return bless(\%self, $class);
+}
+func STORE(scalar $self, str $k, scalar $v) void { $self->{"d"}->{$k} = $v; }
+func FETCH(scalar $self, str $k) scalar { return $self->{"d"}->{$k}; }
+func DELETE(scalar $self, str $k) scalar { return delete($self->{"d"}->{$k}); }
+func FIRSTKEY(scalar $self) scalar {
+    my array @k = keys(%{$self->{"d"}});
+    $self->{"ks"} = \@k;
+    $self->{"idx"} = 0;
+    if (scalar(@k) == 0) { return undef; }
+    $self->{"idx"} = 1;
+    return $k[0];
+}
+func NEXTKEY(scalar $self, str $last) scalar {
+    my scalar $ks = $self->{"ks"};
+    my int $i = $self->{"idx"};
+    if ($i >= scalar(@{$ks})) { return undef; }
+    $self->{"idx"} = $i + 1;
+    return $ks->[$i];
+}
+
+package MinHash;
+func TIEHASH(str $class) scalar {
+    my hash %self = ();
+    return bless(\%self, $class);
+}
+func STORE(scalar $self, str $k, scalar $v) void { $self->{$k} = $v; }
+func FETCH(scalar $self, str $k) scalar { return $self->{$k}; }
+
+package SizeArr;
+func TIEARRAY(str $class) scalar {
+    my array @d = ();
+    my hash %self = ("d" => \@d);
+    return bless(\%self, $class);
+}
+func STORE(scalar $self, int $i, scalar $v) void { $self->{"d"}->[$i] = $v; }
+func FETCH(scalar $self, int $i) scalar { return $self->{"d"}->[$i]; }
+func FETCHSIZE(scalar $self) int { return scalar(@{$self->{"d"}}); }
+func STORESIZE(scalar $self, int $n) void {
+    while (scalar(@{$self->{"d"}}) > $n) { pop(@{$self->{"d"}}); }
+}
+
+package main;
+func main() int {
+    my hash %h1 = ();
+    tie(%h1, "IterHash");
+    $h1{"a"} = 1;
+    $h1{"b"} = 2;
+    %h1 = ();
+    my int $n1 = defined($h1{"a"}) ? 1 : 0;
+
+    my hash %h2 = ();
+    tie(%h2, "MinHash");
+    $h2{"k"} = "v";
+    %h2 = ();
+    my str $s2 = defined($h2{"k"}) ? "def" : "undef";
+
+    my array @a = ();
+    tie(@a, "SizeArr");
+    $a[0] = "x";
+    $a[1] = "y";
+    @a = ();
+    my int $n3 = scalar(@a);
+
+    say($n1 . " " . $s2 . " " . $n3);
+    return 0;
+}

@@ -1,0 +1,65 @@
+# EXPECT: div0 mod0 diveq0 numdiveq0 hashdiveq0 arrdiveq0 idiv0 12 7.5
+# Division and modulo by zero used to silently return `undef` instead of
+# throwing a catchable exception.
+func main() int {
+    my array @got = ();
+
+    try {
+        my num $x = 1.0 / 0.0;
+        push(@got, "bad1:" . $x);
+    } catch ($e) {
+        if ($e =~ /Illegal division by zero/) { push(@got, "div0"); }
+    }
+
+    my int $z = 0;
+    try {
+        my int $m = 5 % $z;
+        push(@got, "bad2:" . $m);
+    } catch ($e) {
+        if ($e =~ /Illegal modulus zero/) { push(@got, "mod0"); }
+    }
+
+    my scalar $s = 12;
+    try {
+        $s /= $z;
+        push(@got, "bad3");
+    } catch ($e) {
+        if ($e =~ /Illegal division by zero/) { push(@got, "diveq0"); }
+    }
+
+    my num $n = 7.5;
+    try {
+        $n /= 0.0;
+        push(@got, "bad4");
+    } catch ($e) {
+        if ($e =~ /Illegal division by zero/) { push(@got, "numdiveq0"); }
+    }
+
+    my hash %h = ("k" => 9);
+    try {
+        $h{"k"} /= 0;
+        push(@got, "bad5");
+    } catch ($e) {
+        if ($e =~ /Illegal division by zero/) { push(@got, "hashdiveq0"); }
+    }
+
+    my array @a = (9);
+    try {
+        $a[0] /= 0;
+        push(@got, "bad6");
+    } catch ($e) {
+        if ($e =~ /Illegal division by zero/) { push(@got, "arrdiveq0"); }
+    }
+
+    try {
+        my int $q = core::idiv(10, $z);
+        push(@got, "bad7:" . $q);
+    } catch ($e) {
+        if ($e =~ /Illegal division by zero/) { push(@got, "idiv0"); }
+    }
+
+    push(@got, "" . $s);
+    push(@got, "" . $n);
+    say(join(" ", @got));
+    return 0;
+}

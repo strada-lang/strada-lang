@@ -1,0 +1,10 @@
+# EXPECT-STDERR: Maximum recursion depth exceeded (1000)
+# Runaway recursion in a program without try/throw/caller/stack_trace used to
+# overflow the C stack with SIGSEGV instead of reporting the recursion limit.
+func r(int $n) int {
+    return r($n + 1) + 1;
+}
+func main() int {
+    say(r(0));
+    return 0;
+}

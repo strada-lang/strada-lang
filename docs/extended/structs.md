@@ -1,23 +1,73 @@
 # Structs in Strada
 
 Structs provide a way to group related data together, similar to C structs.
+Strada offers four ways to represent structured records depending on your use
+case:
 
-> **Status (current compiler):** Strada has **no working struct feature**.
->
-> - **Native struct syntax is not supported.** `struct Point { int x; int y; }`
->   is rejected by the parser (`unexpected 'struct' at top level`), as are
->   struct-typed variables (`my Point $pt;` — `expected a type (int, num, str,
->   array, hash, scalar), got 'Point'`). Field assignment without parentheses
->   (`$pt->x = 10;`) fails at the C-compile step.
-> - **The `core::cstruct_*` functions do not work.** They compile and link, but
->   `core::cstruct_new($size)` returns an ordinary empty hash, so
->   `core::cstruct_set_int/double/string` store nothing and
->   `core::cstruct_get_int` always returns 0.
->
-> Use one of the approaches below instead: a class with `has` attributes
-> (fixed, named, typed fields), a plain hash, or — for real C memory layouts —
-> the `c::` raw-memory functions. Every example on this page has been compiled
-> and run against the current compiler.
+1. **Native `struct` declarations** — fixed, typed fields backed by a
+   reference-counted C buffer with `->field` access.
+2. **Classes with `has` attributes** — OOP records with methods, inheritance,
+   defaults, and `DESTROY`.
+3. **Reference-counted `core::cstruct_*` buffers** — explicit byte-offset access
+   on an automatically freed buffer.
+4. **Raw `c::` memory functions** — manual `malloc`/`free` with exact integer
+   widths (`int8`/`16`/`32`/`64`, `float`, `double`, pointers) for C FFI.
+
+## Native `struct` Declarations
+
+Declare a `struct` at top level with `int` (8-byte `int64_t`), `num` (8-byte
+`double`), or `str` (64-byte inline NUL-terminated buffer) fields. Struct
+variables are zero-initialized when declared without `=` and are reference
+counted automatically.
+
+```strada
+struct Point {
+    int x;
+    int y;
+}
+
+struct Person {
+    str name;
+    int age;
+    num salary;
+}
+
+func sum_point(Point $p) int {
+    return $p->x + $p->y;
+}
+
+func main() int {
+    my Point $pt;
+    $pt->x = 10;
+    $pt->y = 20;
+    $pt->x += 5;
+    say(sum_point($pt));    # 35
+
+    my Person $per;
+    $per->name = "Alice";
+    $per->age = 30;
+    $per->salary = 95000.5;
+    say($per->name . " (" . $per->age . ")");
+    return 0;
+}
+```
+
+### Reference-Counted Byte Buffers: `core::cstruct_*`
+
+You can also allocate and access a reference-counted struct buffer by byte
+offset directly:
+
+```strada
+my scalar $raw = core::cstruct_new(32);
+core::cstruct_set_int($raw, 0, 10);
+core::cstruct_set_double($raw, 8, 2.5);
+core::cstruct_set_string($raw, 16, "hi");
+
+say(core::cstruct_get_int($raw, 0));       # 10
+say(core::cstruct_get_double($raw, 8));    # 2.5
+say(core::cstruct_get_string($raw, 16));   # hi
+my int $addr = core::cstruct_ptr($raw);    # raw C address for FFI
+```
 
 ## Fixed Fields: a Class with `has`
 

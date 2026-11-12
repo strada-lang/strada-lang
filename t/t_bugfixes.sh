@@ -39,7 +39,7 @@ for bf_src in "$SCRIPT_DIR"/bugfix_tests/*.strada; do
     case "$bf_head" in
         "# EXPECT-STDERR: "*)
             bf_want="${bf_head#\# EXPECT-STDERR: }"
-            if [ $bf_rc -ne 0 ] && [ $bf_rc -lt 124 ] && echo "$bf_got" | grep -qF "$bf_want"; then
+            if [ $bf_rc -ne 0 ] && [ $bf_rc -ne 124 ] && echo "$bf_got" | grep -qF "$bf_want"; then
                 PASSED=$((PASSED + 1)); log_pass "$bf_desc"
             else
                 FAILED=$((FAILED + 1)); log_fail "$bf_desc" "exit $bf_rc; expected a failure mentioning: $bf_want"

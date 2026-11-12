@@ -1829,6 +1829,12 @@ func lex_next_token(scalar $lexer) scalar {
             $type = "IDENT";
         }
 
+        # A statement-modifier or condition keyword is followed by an operand,
+        # so a `/` there starts a regex: `say("m") if /b/;`.
+        if ($type eq "IF" || $type eq "ELSIF" || $type eq "UNLESS" || $type eq "WHILE" || $type eq "UNTIL" || $type eq "RETURN") {
+            $lexer->{"expect_regex"} = 1;
+        }
+
         my hash %token = ();
         $token{"type"} = $type;
         $token{"value"} = $text;
@@ -1874,6 +1880,7 @@ func lex_next_token(scalar $lexer) scalar {
     if ($code == ord("=") && $code2 == ord("=")) {
         lex_advance($lexer);
         lex_advance($lexer);
+        $lexer->{"expect_regex"} = 1;
         my hash %token = ();
         $token{"type"} = "EQ";
         $token{"value"} = "==";
@@ -1885,6 +1892,7 @@ func lex_next_token(scalar $lexer) scalar {
     if ($code == ord("!") && $code2 == ord("=")) {
         lex_advance($lexer);
         lex_advance($lexer);
+        $lexer->{"expect_regex"} = 1;
         my hash %token = ();
         $token{"type"} = "NE";
         $token{"value"} = "!=";
@@ -1978,6 +1986,7 @@ func lex_next_token(scalar $lexer) scalar {
         $token{"type"} = "AND";
         $token{"value"} = "&&";
         $token{"line"} = $token_line;
+        $lexer->{"expect_regex"} = 1;   # an operand follows: `&& /re/`
         return \%token;
     }
 
@@ -1989,6 +1998,7 @@ func lex_next_token(scalar $lexer) scalar {
         $token{"type"} = "OR";
         $token{"value"} = "||";
         $token{"line"} = $token_line;
+        $lexer->{"expect_regex"} = 1;   # an operand follows: `|| /re/`
         return \%token;
     }
 
@@ -2148,6 +2158,7 @@ func lex_next_token(scalar $lexer) scalar {
     if ($code == ord("=") && $code2 == ord(">")) {
         lex_advance($lexer);
         lex_advance($lexer);
+        $lexer->{"expect_regex"} = 1;
         my hash %token = ();
         $token{"type"} = "FAT_ARROW";
         $token{"value"} = "=>";
@@ -2330,11 +2341,11 @@ func lex_next_token(scalar $lexer) scalar {
     if ($code == ord(")")) { $token{"type"} = "RPAREN"; return \%token; }
     if ($code == ord("{")) { $token{"type"} = "LBRACE"; $lexer->{"expect_regex"} = 1; return \%token; }
     if ($code == ord("}")) { $token{"type"} = "RBRACE"; return \%token; }
-    if ($code == ord("[")) { $token{"type"} = "LBRACKET"; return \%token; }
+    if ($code == ord("[")) { $token{"type"} = "LBRACKET"; $lexer->{"expect_regex"} = 1; return \%token; }
     if ($code == ord("]")) { $token{"type"} = "RBRACKET"; return \%token; }
     if ($code == ord(";")) { $token{"type"} = "SEMI"; $lexer->{"expect_regex"} = 1; return \%token; }
     if ($code == ord(",")) { $token{"type"} = "COMMA"; $lexer->{"expect_regex"} = 1; return \%token; }
-    if ($code == ord(":")) { $token{"type"} = "COLON"; return \%token; }
+    if ($code == ord(":")) { $token{"type"} = "COLON"; $lexer->{"expect_regex"} = 1; return \%token; }
     if ($code == ord("\$")) { $token{"type"} = "DOLLAR"; $lexer->{"after_sigil"} = 1; return \%token; }
     if ($code == ord("\@")) { $token{"type"} = "AT"; $lexer->{"after_sigil"} = 1; return \%token; }
     if ($code == ord("%")) { $token{"type"} = "PERCENT"; $lexer->{"after_sigil"} = 1; return \%token; }
@@ -2343,16 +2354,16 @@ func lex_next_token(scalar $lexer) scalar {
     if ($code == ord("*")) { $token{"type"} = "MULT"; return \%token; }
     if ($code == ord("/")) { $token{"type"} = "DIV"; return \%token; }
     if ($code == ord(".")) { $token{"type"} = "DOT"; return \%token; }
-    if ($code == ord("=")) { $token{"type"} = "ASSIGN"; return \%token; }
+    if ($code == ord("=")) { $token{"type"} = "ASSIGN"; $lexer->{"expect_regex"} = 1; return \%token; }
     if ($code == ord("<")) { $token{"type"} = "LT"; return \%token; }
     if ($code == ord(">")) { $token{"type"} = "GT"; return \%token; }
-    if ($code == ord("!")) { $token{"type"} = "NOT"; return \%token; }
+    if ($code == ord("!")) { $token{"type"} = "NOT"; $lexer->{"expect_regex"} = 1; return \%token; }
     if ($code == ord("\\")) { $token{"type"} = "BACKSLASH"; return \%token; }
     if ($code == ord("&")) { $token{"type"} = "AMPERSAND"; return \%token; }
     if ($code == ord("|")) { $token{"type"} = "PIPE"; return \%token; }
     if ($code == ord("^")) { $token{"type"} = "CARET"; return \%token; }
     if ($code == ord("~")) { $token{"type"} = "TILDE"; return \%token; }
-    if ($code == ord("?")) { $token{"type"} = "QUESTION"; return \%token; }
+    if ($code == ord("?")) { $token{"type"} = "QUESTION"; $lexer->{"expect_regex"} = 1; return \%token; }
 
     lex_error($lexer, "Unexpected character: " . chr($code), $token_line, $token_col);
 }

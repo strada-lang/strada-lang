@@ -1,0 +1,11 @@
+# EXPECT: 6 3
+# `use Module qw(names);` recorded the import list but did not allow calling
+# the imported functions unqualified.
+use lib "lib";
+use List qw(sum max);
+
+func main() int {
+    my array @n = (1, 2, 3);
+    say(sum(\@n) . " " . max(\@n));
+    return 0;
+}

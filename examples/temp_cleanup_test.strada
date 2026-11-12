@@ -41,11 +41,15 @@ func main() int {
         $i = $i + 1;
     }
 
-    # Test 2: Temporary division by zero in defined()
+    # Test 2: Catching division by zero inside a loop (no leaked temporaries)
     $i = 0;
     while ($i < 1000) {
-        if (defined(10 / 0)) {
-            # nothing
+        try {
+            if (defined(10 / 0)) {
+                # unreachable
+            }
+        } catch ($e) {
+            # expected Illegal division by zero
         }
         $i = $i + 1;
     }
@@ -106,10 +110,14 @@ func main() int {
         $i = $i + 1;
     }
 
-    # Test 11: Modulo by zero returning undef
+    # Test 11: Catching modulo by zero inside a loop (no leaked temporaries)
     $i = 0;
     while ($i < 1000) {
-        my scalar $result = 10 % 0;
+        try {
+            my scalar $result = 10 % 0;
+        } catch ($e) {
+            # expected Illegal modulus zero
+        }
         $i = $i + 1;
     }
 

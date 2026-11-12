@@ -15,7 +15,7 @@ func main() int {
     my int $i = 0;
     while ($i < $iterations) {
         # Non-flagged byte string with a multi-byte char before the needle.
-        my str $b = "héllo v_SIG " . $i;
+        my str $b = utf8::encode("héllo v_SIG ") . $i;
         my str $needle = "v_SIG";
 
         # Shape A: literal needle.

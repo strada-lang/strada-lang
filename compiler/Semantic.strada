@@ -926,10 +926,10 @@ func register_globals(scalar $ctx, scalar $ast) void {
         my int $var_type = $gvar->{"var_type"};
         my int $line = ast_get_line($gvar);
 
-        # Handle both var decls and const decls
+        # Handle var decls, our decls, and const decls
         my int $gvar_type = $gvar->{"type"};
         my str $sigil = "$";  # Default for consts
-        if ($gvar_type == NODE_VAR_DECL()) {
+        if ($gvar_type == NODE_VAR_DECL() || $gvar_type == NODE_OUR_DECL()) {
             $sigil = $gvar->{"sigil"};
         }
 
@@ -942,6 +942,10 @@ func register_globals(scalar $ctx, scalar $ast) void {
         my scalar $root_vars = $scope->{"vars"};
         my scalar $prev = $root_vars->{$name};
         if (is_valid_node($prev) == 1 && $prev->{"is_global"} == 1) {
+            if ($gvar_type == NODE_OUR_DECL()) {
+                $prev->{"is_our"} = 1;
+                next;
+            }
             my scalar $decls = $prev->{"decls"};
             my int $nd = size(@{$decls});
             # later declarations get a distinct C name
@@ -953,6 +957,9 @@ func register_globals(scalar $ctx, scalar $ast) void {
         scope_add_var($scope, $name, $sigil, $var_type, $line);
         my scalar $ginfo = $root_vars->{$name};
         $ginfo->{"is_global"} = 1;
+        if ($gvar_type == NODE_OUR_DECL()) {
+            $ginfo->{"is_our"} = 1;
+        }
         my array @first = ();
         push(@first, $gvar);
         $ginfo->{"decls"} = \@first;
@@ -1176,6 +1183,23 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
         my str $name = $expr->{"name"};
         my scalar $args = $expr->{"args"};
         my int $arg_count = $expr->{"arg_count"};
+
+        # Resolve unqualified calls imported via `use Module qw(names);`
+        if (index($name, "::") < 0 && defined($ctx->{"qw_imports"})) {
+            my str $imp_pkg = "main";
+            my scalar $cur_fn_q = $ctx->{"current_func"};
+            if ($cur_fn_q) {
+                my str $cfp = "" . $cur_fn_q->{"package"};
+                if (length($cfp) > 0) {
+                    $imp_pkg = $cfp;
+                }
+            }
+            my str $qw_target = "" . $ctx->{"qw_imports"}->{$imp_pkg . "::" . $name};
+            if (length($qw_target) > 0) {
+                $name = $qw_target;
+                $expr->{"name"} = $qw_target;
+            }
+        }
 
         # Constant-fold ord("literal"): rewrite the call node in place into
         # an int literal, so character-code comparisons can be WRITTEN as
@@ -1615,8 +1639,40 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         # Add variable to scope so subsequent references are valid
         my scalar $current_scope = $ctx->{"scope"};
         scope_add_var($current_scope, $name, $sigil, $var_type, $line);
+        $current_scope->{"vars"}->{$name}->{"is_our"} = 1;
 
         # Analyze initializer if present
+        my scalar $init_expr = $stmt->{"init"};
+        if (is_valid_node($init_expr) == 1) {
+            analyze_expression($ctx, $init_expr);
+        }
+        return;
+    }
+
+    # Dynamic localization: local $our_var = expr; or local $hash{key} = expr;
+    if ($node_type == NODE_LOCAL_DECL()) {
+        my str $name = $stmt->{"name"};
+        my str $sigil = $stmt->{"sigil"};
+        if ($stmt->{"is_hash_elem"} == 1) {
+            my scalar $hk = $stmt->{"hash_key"};
+            if (is_valid_node($hk) == 1) {
+                analyze_expression($ctx, $hk);
+            }
+            scope_mark_used($ctx->{"scope"}, $name);
+        } else {
+            if (index($name, "::") < 0 && $name ne "_" && $name ne "/" && $name ne "\\" && $name ne "," && $name ne "\"") {
+                my scalar $lk = scope_lookup_var($ctx->{"scope"}, $name);
+                if ($lk->{"found"} == 0) {
+                    semantic_error($ctx, "undefined variable '" . $sigil . $name . "'", $line);
+                } else {
+                    my scalar $vinfo = $lk->{"info"};
+                    if ($vinfo->{"is_our"} != 1) {
+                        semantic_error($ctx, "Can't localize lexical variable " . $sigil . $name, $line);
+                    }
+                    scope_mark_used($ctx->{"scope"}, $name);
+                }
+            }
+        }
         my scalar $init_expr = $stmt->{"init"};
         if (is_valid_node($init_expr) == 1) {
             analyze_expression($ctx, $init_expr);
@@ -1852,6 +1908,7 @@ func semantic_analyze(scalar $ast, int $show_warnings, int $strict_types) void {
     my scalar $ctx = ctx_new();
     $ctx->{"show_warnings"} = $show_warnings;
     $ctx->{"strict_types"} = $strict_types;
+    $ctx->{"qw_imports"} = $ast->{"qw_imports"};
 
     # First pass: register all functions and globals
     register_functions($ctx, $ast);
