@@ -346,6 +346,8 @@ func codegen_new(str $filename, int $debug_info, int $enable_profiling, int $ena
     $cg{"struct_count"} = 0;
     my hash %empty_qw_imports = ();
     $cg{"qw_imports"} = \%empty_qw_imports;
+    my hash %empty_raw_int = ();
+    $cg{"raw_int_funcs"} = \%empty_raw_int;
     $cg{"cse_n"} = 0;
     my array @cse_ids = ();
     $cg{"cse_ids"} = \@cse_ids;
@@ -2306,6 +2308,9 @@ func emit_stack_pop(scalar $cg) void {
     if ($cg->{"func_tracks_depth"} == 1) {
         emit_indent($cg);
         emit($cg, "strada_stack_pop_il();\n");
+    } elsif ($cg->{"func_tracks_depth"} == 2) {
+        emit_indent($cg);
+        emit($cg, "strada_depth_pop_il();\n");
     }
 }
 
@@ -2313,6 +2318,9 @@ func emit_stack_pop(scalar $cg) void {
 func emit_stack_pop_inline(scalar $cg) str {
     if ($cg->{"func_tracks_depth"} == 1) {
         return " strada_stack_pop_il();";
+    }
+    if ($cg->{"func_tracks_depth"} == 2) {
+        return " strada_depth_pop_il();";
     }
     return "";
 }
@@ -3187,7 +3195,28 @@ func emit_int_operand(scalar $cg, scalar $expr) void {
         # the int comparison codegen sends those through emit_num_operand (double),
         # which reads them correctly. (See check_overload_binary / the cmp_int gate.)
         my int $is_int_call = 0;
-        if ($type == NODE_CALL() && expr_is_int_typed($cg, $expr) == 1) { $is_int_call = 1; }
+        if ($type == NODE_CALL() && expr_is_int_typed($cg, $expr) == 1) {
+            $is_int_call = 1;
+            if ($expr->{"is_constant"} != 1) {
+                my str $raw_callee = resolve_raw_int_callee($cg, $cg->{"raw_int_funcs"}, $expr->{"name"}, "" . $cg->{"current_fn_package"});
+                if (length($raw_callee) > 0) {
+                    my int $raw_exp_ac = ($cg->{"raw_int_funcs"}->{$raw_callee} + 0) - 1;
+                    my int $raw_ac = $expr->{"arg_count"} + 0;
+                    if ($raw_ac == $raw_exp_ac) {
+                        my scalar $raw_args = $expr->{"args"};
+                        emit($cg, "__strada_raw_" . $raw_callee . "(");
+                        my int $rai = 0;
+                        while ($rai < $raw_ac) {
+                            emit_int_operand($cg, $raw_args->[$rai]);
+                            emit($cg, ", ");
+                            $rai = $rai + 1;
+                        }
+                        emit($cg, "strada_current_depth_il())");
+                        return;
+                    }
+                }
+            }
+        }
         if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $expr) == 1) {
             if ($is_int_call == 1) {
                 emit($cg, "({ StradaValue *__int_tmp = ");
@@ -3354,6 +3383,564 @@ func expr_is_int_typed(scalar $cg, scalar $expr) int {
         return 0;
     }
     return 0;
+}
+
+# True when gen_expression($cg, $expr) is statically guaranteed to produce a
+# tagged integer (STRADA_IS_TAGGED_INT) on every return path — never a heap
+# StradaValue*, so cleanup_push / cleanup_pop / decref are all no-ops.
+func expr_is_always_tagged_int(scalar $cg, scalar $expr) int {
+    my int $type = $expr->{"type"};
+    if ($type == NODE_INT_LITERAL()) {
+        if (bytes("" . $expr->{"value"}) < 16) {
+            return 1;
+        }
+        return 0;
+    }
+    if ($type == NODE_BINARY_OP() && $cg->{"has_overloads"} == 0) {
+        my str $op = $expr->{"op"};
+        if ($op eq "+" || $op eq "-" || $op eq "*" || $op eq "%") {
+            if (expr_is_int_typed($cg, $expr->{"left"}) == 1 && expr_is_int_typed($cg, $expr->{"right"}) == 1) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+# ============================================================
+# Unboxed int64_t Function Specialization (__strada_raw_*)
+# ============================================================
+
+func resolve_raw_int_callee(scalar $cg, scalar $raw_map, str $call_name, str $cur_pkg) str {
+    if (!$raw_map) { return ""; }
+    my str $c_name = sanitize_name($call_name);
+    if (($raw_map->{$c_name} + 0) > 0) {
+        return $c_name;
+    }
+    my int $has_colon = index($call_name, "::");
+    if ($has_colon < 0) {
+        if (length($cur_pkg) > 0 && $cur_pkg ne "main") {
+            my str $prefixed = sanitize_name($cur_pkg) . "_" . $c_name;
+            if (($raw_map->{$prefixed} + 0) > 0) {
+                return $prefixed;
+            }
+        }
+        if (defined($cg->{"qw_imports"})) {
+            my str $qpkg = $cur_pkg;
+            if (length($qpkg) == 0) { $qpkg = "main"; }
+            my str $qtarget = "" . $cg->{"qw_imports"}->{$qpkg . "::" . $call_name};
+            if (length($qtarget) > 0) {
+                my str $qc = sanitize_name($qtarget);
+                if (($raw_map->{$qc} + 0) > 0) {
+                    return $qc;
+                }
+            }
+        }
+    }
+    return "";
+}
+
+func raw_int_copy_scope(scalar $src) scalar {
+    my hash %dst = ();
+    my scalar $ks = keys(%{$src});
+    my int $n = size($ks);
+    my int $i = 0;
+    while ($i < $n) {
+        my str $k = $ks->[$i];
+        $dst{$k} = $src->{$k};
+        $i = $i + 1;
+    }
+    return \%dst;
+}
+
+func raw_int_cond_ok(scalar $cg, scalar $expr, scalar $in_scope, scalar $global_names, scalar $raw_map, str $cur_pkg) int {
+    if (!$expr) { return 0; }
+    my int $t = $expr->{"type"} + 0;
+    if ($t == NODE_BINARY_OP()) {
+        my str $op = $expr->{"op"};
+        if ($op eq "&&" || $op eq "||") {
+            if (raw_int_cond_ok($cg, $expr->{"left"}, $in_scope, $global_names, $raw_map, $cur_pkg) == 1 &&
+                raw_int_cond_ok($cg, $expr->{"right"}, $in_scope, $global_names, $raw_map, $cur_pkg) == 1) {
+                return 1;
+            }
+            return 0;
+        }
+    }
+    if ($t == NODE_UNARY_OP() && $expr->{"op"} eq "!") {
+        return raw_int_cond_ok($cg, $expr->{"operand"}, $in_scope, $global_names, $raw_map, $cur_pkg);
+    }
+    return raw_int_expr_ok($cg, $expr, $in_scope, $global_names, $raw_map, $cur_pkg);
+}
+
+func raw_int_expr_ok(scalar $cg, scalar $expr, scalar $in_scope, scalar $global_names, scalar $raw_map, str $cur_pkg) int {
+    if (!$expr) { return 0; }
+    my int $t = $expr->{"type"} + 0;
+    if ($t == NODE_INT_LITERAL()) {
+        return 1;
+    }
+    if ($t == NODE_VARIABLE()) {
+        if ($expr->{"sigil"} ne "$") { return 0; }
+        if (index($expr->{"name"}, "::") >= 0) { return 0; }
+        my str $vn = escape_c_keyword($expr->{"name"});
+        if (($global_names->{$vn} + 0) == 1) { return 0; }
+        if (length("" . $cg->{"our_vars"}->{$vn}) > 0) { return 0; }
+        if (($in_scope->{$vn} + 0) == 1) { return 1; }
+        return 0;
+    }
+    if ($t == NODE_UNARY_OP()) {
+        if ($expr->{"op"} eq "-") {
+            return raw_int_expr_ok($cg, $expr->{"operand"}, $in_scope, $global_names, $raw_map, $cur_pkg);
+        }
+        return 0;
+    }
+    if ($t == NODE_BINARY_OP()) {
+        my str $op = $expr->{"op"};
+        if ($op eq "+" || $op eq "-" || $op eq "*" || $op eq "%" ||
+            $op eq "==" || $op eq "!=" || $op eq "<" || $op eq ">" ||
+            $op eq "<=" || $op eq ">=") {
+            if (raw_int_expr_ok($cg, $expr->{"left"}, $in_scope, $global_names, $raw_map, $cur_pkg) == 1 &&
+                raw_int_expr_ok($cg, $expr->{"right"}, $in_scope, $global_names, $raw_map, $cur_pkg) == 1) {
+                return 1;
+            }
+        }
+        return 0;
+    }
+    if ($t == NODE_TERNARY()) {
+        if (raw_int_cond_ok($cg, $expr->{"condition"}, $in_scope, $global_names, $raw_map, $cur_pkg) == 1 &&
+            raw_int_expr_ok($cg, $expr->{"true_expr"}, $in_scope, $global_names, $raw_map, $cur_pkg) == 1 &&
+            raw_int_expr_ok($cg, $expr->{"false_expr"}, $in_scope, $global_names, $raw_map, $cur_pkg) == 1) {
+            return 1;
+        }
+        return 0;
+    }
+    if ($t == NODE_ASSIGN()) {
+        my scalar $tgt = $expr->{"target"};
+        my str $aop = $expr->{"op"};
+        if (!$tgt || $tgt->{"type"} != NODE_VARIABLE() || $tgt->{"sigil"} ne "$") { return 0; }
+        if (index($tgt->{"name"}, "::") >= 0) { return 0; }
+        my str $tvn = escape_c_keyword($tgt->{"name"});
+        if (($in_scope->{$tvn} + 0) != 1 || ($global_names->{$tvn} + 0) == 1 || length("" . $cg->{"our_vars"}->{$tvn}) > 0) {
+            return 0;
+        }
+        if ($aop eq "=" || $aop eq "+=" || $aop eq "-=" || $aop eq "*=") {
+            return raw_int_expr_ok($cg, $expr->{"value"}, $in_scope, $global_names, $raw_map, $cur_pkg);
+        }
+        return 0;
+    }
+    if ($t == NODE_INCREMENT()) {
+        my scalar $iop = $expr->{"operand"};
+        if (!$iop || $iop->{"type"} != NODE_VARIABLE() || $iop->{"sigil"} ne "$") { return 0; }
+        if (index($iop->{"name"}, "::") >= 0) { return 0; }
+        my str $ivn = escape_c_keyword($iop->{"name"});
+        if (($in_scope->{$ivn} + 0) == 1 && ($global_names->{$ivn} + 0) != 1 && length("" . $cg->{"our_vars"}->{$ivn}) == 0) {
+            return 1;
+        }
+        return 0;
+    }
+    if ($t == NODE_CALL()) {
+        if ($expr->{"is_constant"} == 1) { return 0; }
+        my str $rc = resolve_raw_int_callee($cg, $raw_map, $expr->{"name"}, $cur_pkg);
+        if (length($rc) == 0) { return 0; }
+        my int $exp_ac = ($raw_map->{$rc} + 0) - 1;
+        my int $ac = $expr->{"arg_count"} + 0;
+        if ($ac != $exp_ac) { return 0; }
+        my scalar $args = $expr->{"args"};
+        my int $ai = 0;
+        while ($ai < $ac) {
+            if (raw_int_expr_ok($cg, $args->[$ai], $in_scope, $global_names, $raw_map, $cur_pkg) == 0) {
+                return 0;
+            }
+            $ai = $ai + 1;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+func raw_int_block_ok(scalar $cg, scalar $block, scalar $in_scope, scalar $all_declared, scalar $global_names, scalar $raw_map, str $cur_pkg) int {
+    if (!$block || $block->{"type"} != NODE_BLOCK()) { return 0; }
+    my scalar $sub_scope = raw_int_copy_scope($in_scope);
+    my scalar $stmts = $block->{"statements"};
+    my int $n = $block->{"statement_count"} + 0;
+    my int $i = 0;
+    while ($i < $n) {
+        my scalar $st = $stmts->[$i];
+        my int $st_t = $st->{"type"} + 0;
+        if ($st_t == NODE_VAR_DECL()) {
+            if ($st->{"var_type"} != TYPE_INT() || $st->{"sigil"} ne "$") { return 0; }
+            if (length("" . $st->{"struct_name"}) > 0) { return 0; }
+            if (!$st->{"init"}) { return 0; }
+            my str $vn = escape_c_keyword($st->{"name"});
+            if (($all_declared->{$vn} + 0) == 1) { return 0; }
+            if (($global_names->{$vn} + 0) == 1) { return 0; }
+            if (length("" . $cg->{"our_vars"}->{$vn}) > 0) { return 0; }
+            if (raw_int_expr_ok($cg, $st->{"init"}, $sub_scope, $global_names, $raw_map, $cur_pkg) == 0) {
+                return 0;
+            }
+            $sub_scope->{$vn} = 1;
+            $all_declared->{$vn} = 1;
+        } elsif ($st_t == NODE_BLOCK()) {
+            if (raw_int_block_ok($cg, $st, $sub_scope, $all_declared, $global_names, $raw_map, $cur_pkg) == 0) {
+                return 0;
+            }
+        } elsif ($st_t == NODE_IF_STMT()) {
+            if (raw_int_cond_ok($cg, $st->{"condition"}, $sub_scope, $global_names, $raw_map, $cur_pkg) == 0) {
+                return 0;
+            }
+            if (raw_int_block_ok($cg, $st->{"then_block"}, $sub_scope, $all_declared, $global_names, $raw_map, $cur_pkg) == 0) {
+                return 0;
+            }
+            my scalar $econds = $st->{"elsif_conditions"};
+            my scalar $eblocks = $st->{"elsif_blocks"};
+            my int $ec = $st->{"elsif_count"} + 0;
+            my int $ei = 0;
+            while ($ei < $ec) {
+                if (raw_int_cond_ok($cg, $econds->[$ei], $sub_scope, $global_names, $raw_map, $cur_pkg) == 0) {
+                    return 0;
+                }
+                if (raw_int_block_ok($cg, $eblocks->[$ei], $sub_scope, $all_declared, $global_names, $raw_map, $cur_pkg) == 0) {
+                    return 0;
+                }
+                $ei = $ei + 1;
+            }
+            if ($st->{"else_block"}) {
+                if (raw_int_block_ok($cg, $st->{"else_block"}, $sub_scope, $all_declared, $global_names, $raw_map, $cur_pkg) == 0) {
+                    return 0;
+                }
+            }
+        } elsif ($st_t == NODE_WHILE_STMT()) {
+            if (length("" . $st->{"label"}) > 0) { return 0; }
+            if (raw_int_cond_ok($cg, $st->{"condition"}, $sub_scope, $global_names, $raw_map, $cur_pkg) == 0) {
+                return 0;
+            }
+            if (raw_int_block_ok($cg, $st->{"body"}, $sub_scope, $all_declared, $global_names, $raw_map, $cur_pkg) == 0) {
+                return 0;
+            }
+        } elsif ($st_t == NODE_RETURN_STMT()) {
+            if (!$st->{"value"}) { return 0; }
+            if (raw_int_expr_ok($cg, $st->{"value"}, $sub_scope, $global_names, $raw_map, $cur_pkg) == 0) {
+                return 0;
+            }
+        } elsif ($st_t == NODE_EXPR_STMT()) {
+            if (raw_int_expr_ok($cg, $st->{"expr"}, $sub_scope, $global_names, $raw_map, $cur_pkg) == 0) {
+                return 0;
+            }
+        } else {
+            return 0;
+        }
+        $i = $i + 1;
+    }
+    return 1;
+}
+
+func raw_int_always_returns(scalar $block) int {
+    if (!$block || $block->{"type"} != NODE_BLOCK()) { return 0; }
+    my scalar $stmts = $block->{"statements"};
+    my int $n = $block->{"statement_count"} + 0;
+    my int $i = 0;
+    while ($i < $n) {
+        my scalar $st = $stmts->[$i];
+        my int $st_t = $st->{"type"} + 0;
+        if ($st_t == NODE_RETURN_STMT()) { return 1; }
+        if ($st_t == NODE_BLOCK() && raw_int_always_returns($st) == 1) { return 1; }
+        if ($st_t == NODE_IF_STMT() && $st->{"else_block"}) {
+            if (raw_int_always_returns($st->{"then_block"}) == 1 &&
+                raw_int_always_returns($st->{"else_block"}) == 1) {
+                my int $all_elsif = 1;
+                my scalar $eblocks = $st->{"elsif_blocks"};
+                my int $ec = $st->{"elsif_count"} + 0;
+                my int $ei = 0;
+                while ($ei < $ec) {
+                    if (raw_int_always_returns($eblocks->[$ei]) == 0) { $all_elsif = 0; }
+                    $ei = $ei + 1;
+                }
+                if ($all_elsif == 1) { return 1; }
+            }
+        }
+        $i = $i + 1;
+    }
+    return 0;
+}
+
+func raw_int_expr_calls_self(scalar $cg, scalar $expr, scalar $raw_map, str $self_c, str $cur_pkg) int {
+    if (!$expr) { return 0; }
+    my int $t = $expr->{"type"} + 0;
+    if ($t == NODE_CALL()) {
+        my str $rc = resolve_raw_int_callee($cg, $raw_map, $expr->{"name"}, $cur_pkg);
+        if ($rc eq $self_c) { return 1; }
+        my scalar $args = $expr->{"args"};
+        my int $ac = $expr->{"arg_count"} + 0;
+        my int $ai = 0;
+        while ($ai < $ac) {
+            if (raw_int_expr_calls_self($cg, $args->[$ai], $raw_map, $self_c, $cur_pkg) == 1) { return 1; }
+            $ai = $ai + 1;
+        }
+        return 0;
+    }
+    if ($t == NODE_UNARY_OP() || $t == NODE_INCREMENT()) {
+        return raw_int_expr_calls_self($cg, $expr->{"operand"}, $raw_map, $self_c, $cur_pkg);
+    }
+    if ($t == NODE_BINARY_OP()) {
+        if (raw_int_expr_calls_self($cg, $expr->{"left"}, $raw_map, $self_c, $cur_pkg) == 1) { return 1; }
+        return raw_int_expr_calls_self($cg, $expr->{"right"}, $raw_map, $self_c, $cur_pkg);
+    }
+    if ($t == NODE_TERNARY()) {
+        if (raw_int_expr_calls_self($cg, $expr->{"condition"}, $raw_map, $self_c, $cur_pkg) == 1) { return 1; }
+        if (raw_int_expr_calls_self($cg, $expr->{"true_expr"}, $raw_map, $self_c, $cur_pkg) == 1) { return 1; }
+        return raw_int_expr_calls_self($cg, $expr->{"false_expr"}, $raw_map, $self_c, $cur_pkg);
+    }
+    if ($t == NODE_ASSIGN()) {
+        return raw_int_expr_calls_self($cg, $expr->{"value"}, $raw_map, $self_c, $cur_pkg);
+    }
+    return 0;
+}
+
+# True when at least one `return` statement in $block does NOT call $self_c
+# (guards against unconditional infinite self-recursion like `r($n+1)+1` where
+# gcc would turn tail accumulator recursion into an infinite loop instead of
+# hitting the stack-overflow guard when recursion_limit == 0).
+func raw_int_has_terminating_return(scalar $cg, scalar $block, scalar $raw_map, str $self_c, str $cur_pkg) int {
+    if (!$block || $block->{"type"} != NODE_BLOCK()) { return 0; }
+    my scalar $stmts = $block->{"statements"};
+    my int $n = $block->{"statement_count"} + 0;
+    my int $i = 0;
+    while ($i < $n) {
+        my scalar $st = $stmts->[$i];
+        my int $st_t = $st->{"type"} + 0;
+        if ($st_t == NODE_RETURN_STMT() && $st->{"value"}) {
+            if (raw_int_expr_calls_self($cg, $st->{"value"}, $raw_map, $self_c, $cur_pkg) == 0) {
+                return 1;
+            }
+        } elsif ($st_t == NODE_BLOCK()) {
+            if (raw_int_has_terminating_return($cg, $st, $raw_map, $self_c, $cur_pkg) == 1) { return 1; }
+        } elsif ($st_t == NODE_IF_STMT()) {
+            if (raw_int_has_terminating_return($cg, $st->{"then_block"}, $raw_map, $self_c, $cur_pkg) == 1) { return 1; }
+            my scalar $eblocks = $st->{"elsif_blocks"};
+            my int $ec = $st->{"elsif_count"} + 0;
+            my int $ei = 0;
+            while ($ei < $ec) {
+                if (raw_int_has_terminating_return($cg, $eblocks->[$ei], $raw_map, $self_c, $cur_pkg) == 1) { return 1; }
+                $ei = $ei + 1;
+            }
+            if ($st->{"else_block"}) {
+                if (raw_int_has_terminating_return($cg, $st->{"else_block"}, $raw_map, $self_c, $cur_pkg) == 1) { return 1; }
+            }
+        } elsif ($st_t == NODE_WHILE_STMT()) {
+            if (raw_int_has_terminating_return($cg, $st->{"body"}, $raw_map, $self_c, $cur_pkg) == 1) { return 1; }
+        }
+        $i = $i + 1;
+    }
+    return 0;
+}
+
+func gen_raw_int_cond(scalar $cg, scalar $expr, str $cur_pkg) void {
+    my int $t = $expr->{"type"} + 0;
+    if ($t == NODE_BINARY_OP()) {
+        my str $op = $expr->{"op"};
+        if ($op eq "&&" || $op eq "||") {
+            emit($cg, "(");
+            gen_raw_int_cond($cg, $expr->{"left"}, $cur_pkg);
+            emit($cg, " " . $op . " ");
+            gen_raw_int_cond($cg, $expr->{"right"}, $cur_pkg);
+            emit($cg, ")");
+            return;
+        }
+        if ($op eq "==" || $op eq "!=" || $op eq "<" || $op eq ">" || $op eq "<=" || $op eq ">=") {
+            emit($cg, "(");
+            gen_raw_int_expr($cg, $expr->{"left"}, $cur_pkg);
+            emit($cg, " " . $op . " ");
+            gen_raw_int_expr($cg, $expr->{"right"}, $cur_pkg);
+            emit($cg, ")");
+            return;
+        }
+    }
+    if ($t == NODE_UNARY_OP() && $expr->{"op"} eq "!") {
+        emit($cg, "!(");
+        gen_raw_int_cond($cg, $expr->{"operand"}, $cur_pkg);
+        emit($cg, ")");
+        return;
+    }
+    emit($cg, "((");
+    gen_raw_int_expr($cg, $expr, $cur_pkg);
+    emit($cg, ") != 0)");
+}
+
+func gen_raw_int_expr(scalar $cg, scalar $expr, str $cur_pkg) void {
+    my int $t = $expr->{"type"} + 0;
+    if ($t == NODE_INT_LITERAL()) {
+        emit($cg, "(int64_t)" . $expr->{"value"});
+        return;
+    }
+    if ($t == NODE_VARIABLE()) {
+        emit($cg, escape_c_keyword($expr->{"name"}));
+        return;
+    }
+    if ($t == NODE_UNARY_OP()) {
+        emit($cg, "((int64_t)(-(uint64_t)(");
+        gen_raw_int_expr($cg, $expr->{"operand"}, $cur_pkg);
+        emit($cg, ")))");
+        return;
+    }
+    if ($t == NODE_BINARY_OP()) {
+        my str $op = $expr->{"op"};
+        if ($op eq "+" || $op eq "-" || $op eq "*") {
+            emit($cg, "((int64_t)((uint64_t)(");
+            gen_raw_int_expr($cg, $expr->{"left"}, $cur_pkg);
+            emit($cg, ") " . $op . " (uint64_t)(");
+            gen_raw_int_expr($cg, $expr->{"right"}, $cur_pkg);
+            emit($cg, ")))");
+            return;
+        }
+        if ($op eq "%") {
+            my int $mid = $cg->{"tmp_counter"} + 0;
+            $cg->{"tmp_counter"} = $mid + 1;
+            emit($cg, "({ int64_t __rml" . $mid . " = ");
+            gen_raw_int_expr($cg, $expr->{"left"}, $cur_pkg);
+            emit($cg, "; int64_t __rmr" . $mid . " = ");
+            gen_raw_int_expr($cg, $expr->{"right"}, $cur_pkg);
+            emit($cg, "; if (__rmr" . $mid . " == 0) strada_safe_mod(__rml" . $mid . ", 0); strada_floored_mod(__rml" . $mid . ", __rmr" . $mid . "); })");
+            return;
+        }
+        if ($op eq "==" || $op eq "!=" || $op eq "<" || $op eq ">" || $op eq "<=" || $op eq ">=") {
+            emit($cg, "((int64_t)(");
+            gen_raw_int_expr($cg, $expr->{"left"}, $cur_pkg);
+            emit($cg, " " . $op . " ");
+            gen_raw_int_expr($cg, $expr->{"right"}, $cur_pkg);
+            emit($cg, "))");
+            return;
+        }
+    }
+    if ($t == NODE_TERNARY()) {
+        emit($cg, "(");
+        gen_raw_int_cond($cg, $expr->{"condition"}, $cur_pkg);
+        emit($cg, " ? ");
+        gen_raw_int_expr($cg, $expr->{"true_expr"}, $cur_pkg);
+        emit($cg, " : ");
+        gen_raw_int_expr($cg, $expr->{"false_expr"}, $cur_pkg);
+        emit($cg, ")");
+        return;
+    }
+    if ($t == NODE_ASSIGN()) {
+        my str $tvn = escape_c_keyword($expr->{"target"}->{"name"});
+        my str $aop = $expr->{"op"};
+        if ($aop eq "=") {
+            emit($cg, "(" . $tvn . " = ");
+            gen_raw_int_expr($cg, $expr->{"value"}, $cur_pkg);
+            emit($cg, ")");
+        } else {
+            my str $bop = substr($aop, 0, 1);
+            emit($cg, "(" . $tvn . " = (int64_t)((uint64_t)" . $tvn . " " . $bop . " (uint64_t)(");
+            gen_raw_int_expr($cg, $expr->{"value"}, $cur_pkg);
+            emit($cg, ")))");
+        }
+        return;
+    }
+    if ($t == NODE_INCREMENT()) {
+        my str $ivn = escape_c_keyword($expr->{"operand"}->{"name"});
+        my str $iop = "+";
+        if ($expr->{"op"} eq "--") { $iop = "-"; }
+        if ($expr->{"is_prefix"} == 1) {
+            emit($cg, "(" . $ivn . " = (int64_t)((uint64_t)" . $ivn . " " . $iop . " 1ULL))");
+        } else {
+            my int $iid = $cg->{"tmp_counter"} + 0;
+            $cg->{"tmp_counter"} = $iid + 1;
+            emit($cg, "({ int64_t __ri" . $iid . " = " . $ivn . "; " . $ivn . " = (int64_t)((uint64_t)__ri" . $iid . " " . $iop . " 1ULL); __ri" . $iid . "; })");
+        }
+        return;
+    }
+    if ($t == NODE_CALL()) {
+        my str $rc = resolve_raw_int_callee($cg, $cg->{"raw_int_funcs"}, $expr->{"name"}, $cur_pkg);
+        my scalar $args = $expr->{"args"};
+        my int $ac = $expr->{"arg_count"} + 0;
+        emit($cg, "__strada_raw_" . $rc . "(");
+        my int $ai = 0;
+        while ($ai < $ac) {
+            gen_raw_int_expr($cg, $args->[$ai], $cur_pkg);
+            emit($cg, ", ");
+            $ai = $ai + 1;
+        }
+        emit($cg, "__strada_depth + 1)");
+        return;
+    }
+}
+
+func gen_raw_int_block(scalar $cg, scalar $block, str $cur_pkg) void {
+    emit($cg, "{\n");
+    indent($cg);
+    my scalar $stmts = $block->{"statements"};
+    my int $n = $block->{"statement_count"} + 0;
+    my int $i = 0;
+    while ($i < $n) {
+        gen_raw_int_stmt($cg, $stmts->[$i], $cur_pkg);
+        $i = $i + 1;
+    }
+    dedent($cg);
+    emit_indent($cg);
+    emit($cg, "}");
+}
+
+func gen_raw_int_stmt(scalar $cg, scalar $st, str $cur_pkg) void {
+    my int $st_t = $st->{"type"} + 0;
+    if ($st_t == NODE_VAR_DECL()) {
+        my str $vn = escape_c_keyword($st->{"name"});
+        emit_indent($cg);
+        emit($cg, "int64_t " . $vn . " = ");
+        gen_raw_int_expr($cg, $st->{"init"}, $cur_pkg);
+        emit($cg, ";\n");
+        return;
+    }
+    if ($st_t == NODE_BLOCK()) {
+        emit_indent($cg);
+        gen_raw_int_block($cg, $st, $cur_pkg);
+        emit($cg, "\n");
+        return;
+    }
+    if ($st_t == NODE_IF_STMT()) {
+        emit_indent($cg);
+        emit($cg, "if (");
+        gen_raw_int_cond($cg, $st->{"condition"}, $cur_pkg);
+        emit($cg, ") ");
+        gen_raw_int_block($cg, $st->{"then_block"}, $cur_pkg);
+        my scalar $econds = $st->{"elsif_conditions"};
+        my scalar $eblocks = $st->{"elsif_blocks"};
+        my int $ec = $st->{"elsif_count"} + 0;
+        my int $ei = 0;
+        while ($ei < $ec) {
+            emit($cg, " else if (");
+            gen_raw_int_cond($cg, $econds->[$ei], $cur_pkg);
+            emit($cg, ") ");
+            gen_raw_int_block($cg, $eblocks->[$ei], $cur_pkg);
+            $ei = $ei + 1;
+        }
+        if ($st->{"else_block"}) {
+            emit($cg, " else ");
+            gen_raw_int_block($cg, $st->{"else_block"}, $cur_pkg);
+        }
+        emit($cg, "\n");
+        return;
+    }
+    if ($st_t == NODE_WHILE_STMT()) {
+        emit_indent($cg);
+        emit($cg, "while (");
+        gen_raw_int_cond($cg, $st->{"condition"}, $cur_pkg);
+        emit($cg, ") ");
+        gen_raw_int_block($cg, $st->{"body"}, $cur_pkg);
+        emit($cg, "\n");
+        return;
+    }
+    if ($st_t == NODE_RETURN_STMT()) {
+        emit_indent($cg);
+        emit($cg, "return ");
+        gen_raw_int_expr($cg, $st->{"value"}, $cur_pkg);
+        emit($cg, ";\n");
+        return;
+    }
+    if ($st_t == NODE_EXPR_STMT()) {
+        emit_indent($cg);
+        gen_raw_int_expr($cg, $st->{"expr"}, $cur_pkg);
+        emit($cg, ";\n");
+        return;
+    }
 }
 
 # Helper: emit a bool operand efficiently

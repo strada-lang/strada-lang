@@ -751,6 +751,10 @@ extern int strada_pending_call_line;  /* set by codegen at each call site; strad
 
 void strada_stack_push(const char *func_name, const char *file_name);
 void strada_stack_pop(void);
+void strada_depth_push(const char *func_name, const char *file_name);
+void strada_depth_pop(void);
+void strada_raw_depth_exceeded(int depth, const char *func_name, const char *file_name);
+int strada_current_depth(void);
 void strada_stack_set_line(int line);
 
 /* The gcc header inlines these against the thread-local stack; for tcc
@@ -758,6 +762,9 @@ void strada_stack_set_line(int line);
  * to the exported runtime functions — same semantics, one call. */
 #define strada_stack_push_il strada_stack_push
 #define strada_stack_pop_il  strada_stack_pop
+#define strada_depth_push_il strada_depth_push
+#define strada_depth_pop_il  strada_depth_pop
+#define strada_current_depth_il strada_current_depth
 #define strada_stack_line_il strada_stack_set_line
 void strada_print_stack_trace(void);
 char* strada_capture_stack_trace(void);
@@ -1651,6 +1658,7 @@ void strada_global_set_cstr(const char *name, StradaValue *val);
 StradaValue* strada_tied_hash_scalar(StradaValue *sv);
 StradaValue* strada_tied_scalar_fetch(StradaValue *sv);
 StradaValue* strada_copy_scalar(StradaValue *sv);
+#define strada_copy_scalar_il strada_copy_scalar
 int strada_tied_scalar_store(StradaValue *sv, StradaValue *val);
 StradaValue* strada_tied_scalar_assign(StradaValue *sv, StradaValue *val);
 StradaValue* strada_tied_scalar_compound(StradaValue *sv, StradaValue *rhs, int op, int want_result);

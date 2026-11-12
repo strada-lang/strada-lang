@@ -365,7 +365,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     my scalar $our_vars_chk = $cg->{"our_vars"};
                     my str $init_our_chk = "" . $our_vars_chk->{$init_name_chk};
                     if (length($init_our_chk) == 0) {
-                        emit($cg, "; " . $c_name . " = strada_copy_scalar(" . $c_name . ")");
+                        emit($cg, "; " . $c_name . " = strada_copy_scalar_il(" . $c_name . ")");
                     }
                 } elsif ($init_type == NODE_SUBSCRIPT()) {
                     # Subscript is borrowed unless its source needed cleanup —
@@ -1668,7 +1668,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             # values; a coerced int return is fresh and owned)
             if ($ret_coerced == 0 && return_needs_incref($cg, $stmt->{"value"}) == 1) {
                 emit_indent($cg);
-                emit($cg, "__retval = strada_copy_scalar(__retval);\n");
+                emit($cg, "__retval = strada_copy_scalar_il(__retval);\n");
             }
             # finally blocks run AFTER the return value is captured and
             # BEFORE scope cleanup decrefs the locals they may reference.
@@ -2738,6 +2738,55 @@ func gen_function(scalar $cg, scalar $fn) void {
         } elsif ($cg->{"aggressive_inline"} == 1) {
             $static_prefix = "static inline ";
         }
+        if (($cg->{"raw_int_funcs"}->{$name} + 0) > 0) {
+            my scalar $rparams = $fn->{"params"};
+            my int $rpc = $fn->{"param_count"} + 0;
+            emit($cg, "static inline int64_t __strada_raw_" . $name . "(");
+            my int $rpi = 0;
+            while ($rpi < $rpc) {
+                emit($cg, "int64_t " . escape_c_keyword($rparams->[$rpi]->{"name"}) . ", ");
+                $rpi = $rpi + 1;
+            }
+            emit($cg, "int __strada_depth) {\n");
+            emit($cg, "    (void)__strada_depth;\n");
+            if ($cg->{"enable_stack_trace"} == 2 && stmt_has_call($fn_body) == 1) {
+                emit($cg, "    if (__builtin_expect((unsigned)__strada_depth > (unsigned)(strada_recursion_limit - 1), 0)) {\n");
+                emit($cg, "        strada_raw_depth_exceeded(__strada_depth, \"" . $name . "\", \"" . $cg->{"filename"} . "\");\n");
+                emit($cg, "    }\n");
+            }
+            my str $rpkg = "" . $fn->{"package"};
+            indent($cg);
+            my scalar $rstmts = $fn_body->{"statements"};
+            my int $rsc = $fn_body->{"statement_count"} + 0;
+            my int $rsi = 0;
+            while ($rsi < $rsc) {
+                gen_raw_int_stmt($cg, $rstmts->[$rsi], $rpkg);
+                $rsi = $rsi + 1;
+            }
+            dedent($cg);
+            emit($cg, "    return 0;\n");
+            emit($cg, "}\n\n");
+
+            emit($cg, $static_prefix . $ret_type . " " . $name . "(");
+            $rpi = 0;
+            while ($rpi < $rpc) {
+                if ($rpi > 0) { emit($cg, ", "); }
+                my scalar $rparam = $rparams->[$rpi];
+                emit($cg, type_to_c($rparam->{"param_type"}) . " " . escape_c_keyword($rparam->{"name"}));
+                $rpi = $rpi + 1;
+            }
+            if ($rpc == 0) { emit($cg, "void"); }
+            emit($cg, ") {\n");
+            emit($cg, "    return strada_new_int(__strada_raw_" . $name . "(");
+            $rpi = 0;
+            while ($rpi < $rpc) {
+                emit($cg, "strada_to_int(" . escape_c_keyword($rparams->[$rpi]->{"name"}) . "), ");
+                $rpi = $rpi + 1;
+            }
+            emit($cg, "strada_current_depth_il()));\n");
+            emit($cg, "}\n\n");
+            return;
+        }
         emit($cg, $static_prefix . $ret_type . " " . $name . "(");
 
         my scalar $params = $fn->{"params"};
@@ -2759,8 +2808,10 @@ func gen_function(scalar $cg, scalar $fn) void {
 
         emit($cg, ") {\n");
 
-        if ($cg->{"enable_stack_trace"} == 1 || ($cg->{"enable_stack_trace"} == 2 && stmt_has_call($fn_body) == 1)) {
+        if ($cg->{"enable_stack_trace"} == 1) {
             $cg->{"func_tracks_depth"} = 1;
+        } elsif ($cg->{"enable_stack_trace"} == 2 && stmt_has_call($fn_body) == 1) {
+            $cg->{"func_tracks_depth"} = 2;
         } else {
             $cg->{"func_tracks_depth"} = 0;
         }
@@ -2769,6 +2820,8 @@ func gen_function(scalar $cg, scalar $fn) void {
         my str $src_file = $cg->{"filename"};
         if ($cg->{"func_tracks_depth"} == 1) {
             emit($cg, "strada_stack_push_il(\"" . $name . "\", \"" . $src_file . "\");\n");
+        } elsif ($cg->{"func_tracks_depth"} == 2) {
+            emit($cg, "strada_depth_push_il(\"" . $name . "\", \"" . $src_file . "\");\n");
         }
 
         # Add profiling entry if enabled
@@ -2927,6 +2980,8 @@ func gen_function(scalar $cg, scalar $fn) void {
         # Pop stack frame for void functions falling through
         if ($ret_type_id == TYPE_VOID() && $cg->{"func_tracks_depth"} == 1) {
             emit($cg, "strada_stack_pop_il();\n");
+        } elsif ($ret_type_id == TYPE_VOID() && $cg->{"func_tracks_depth"} == 2) {
+            emit($cg, "strada_depth_pop_il();\n");
         }
         # Implicit return undef for non-void functions that fall through without return
         if ($ret_type_id != TYPE_VOID()) {
@@ -2945,6 +3000,8 @@ func gen_function(scalar $cg, scalar $fn) void {
             }
             if ($cg->{"func_tracks_depth"} == 1) {
                 emit($cg, "strada_stack_pop_il();\n");
+            } elsif ($cg->{"func_tracks_depth"} == 2) {
+                emit($cg, "strada_depth_pop_il();\n");
             }
             emit($cg, "return strada_new_undef();\n");
         }
@@ -3397,6 +3454,97 @@ func gen_program(scalar $cg, scalar $program) void {
         }
     }
 
+    # Discover pure int64_t-specializable functions (closed fixed-point set).
+    if ($cg->{"tu_has_main"} == 1 && $cg->{"module_only_mode"} == 0 &&
+        $cg->{"enable_stack_trace"} != 1 && $cg->{"has_overloads"} == 0 &&
+        $cg->{"uses_tie"} == 0 && $cg->{"enable_profiling"} == 0 &&
+        $cg->{"full_profile"} == 0) {
+        my hash %global_names = ();
+        my int $gni = 0;
+        while ($gni < $global_count) {
+            my scalar $gvar_n = $program->{"globals"}->[$gni];
+            $global_names{escape_c_keyword($gvar_n->{"name"})} = 1;
+            $gni = $gni + 1;
+        }
+        my hash %raw_candidates = ();
+        my array @cand_fns = ();
+        my int $cand_n = 0;
+        my int $cfi = 0;
+        while ($cfi < $program->{"function_count"}) {
+            my scalar $cfn = $funcs->[$cfi];
+            my str $cfn_c = sanitize_name($cfn->{"name"});
+            my str $cfn_pkg = "" . $cfn->{"package"};
+            my int $cfn_ok = 1;
+            if ($cfn->{"name"} eq "main" || $cfn->{"type"} != NODE_FUNC() ||
+                $cfn->{"is_variadic"} == 1 || $cfn->{"return_type"} != TYPE_INT() ||
+                length("" . $cfn->{"return_struct_name"}) > 0 ||
+                cg_skip_for_module($program, $cfn->{"from_use"}) == 1) {
+                $cfn_ok = 0;
+            }
+            if ($cfn_ok == 1 && length($cfn_pkg) > 0 && $cfn_pkg ne "main") {
+                if ($program->{"method_modifier_count"} > 0) { $cfn_ok = 0; }
+                if ($cfn->{"param_count"} > 0 && $cfn->{"params"}->[0]->{"name"} eq "self") { $cfn_ok = 0; }
+            }
+            if ($cfn_ok == 1) {
+                my scalar $cparams = $cfn->{"params"};
+                my int $cpc = $cfn->{"param_count"} + 0;
+                my hash %pseen = ();
+                my int $cpi = 0;
+                while ($cpi < $cpc) {
+                    my scalar $cp = $cparams->[$cpi];
+                    my str $cpsig = "" . $cp->{"sigil"};
+                    my str $cpvn = escape_c_keyword($cp->{"name"});
+                    if ($cp->{"param_type"} != TYPE_INT() || ($cpsig ne "$" && $cpsig ne "") ||
+                        $cp->{"has_default"} == 1 || length("" . $cp->{"struct_name"}) > 0 ||
+                        ($pseen{$cpvn} + 0) == 1 || ($global_names{$cpvn} + 0) == 1 ||
+                        length("" . $cg->{"our_vars"}->{$cpvn}) > 0) {
+                        $cfn_ok = 0;
+                    }
+                    $pseen{$cpvn} = 1;
+                    $cpi = $cpi + 1;
+                }
+                if ($cfn_ok == 1) {
+                    $raw_candidates{$cfn_c} = $cpc + 1;
+                    $cand_fns[$cand_n] = $cfn;
+                    $cand_n = $cand_n + 1;
+                }
+            }
+            $cfi = $cfi + 1;
+        }
+        my int $changed = 1;
+        while ($changed == 1) {
+            $changed = 0;
+            my int $ci = 0;
+            while ($ci < $cand_n) {
+                my scalar $cfn2 = $cand_fns[$ci];
+                my str $cfn2_c = sanitize_name($cfn2->{"name"});
+                if (($raw_candidates{$cfn2_c} + 0) > 0) {
+                    my hash %init_scope = ();
+                    my hash %all_decl = ();
+                    my scalar $cp2 = $cfn2->{"params"};
+                    my int $cpc2 = $cfn2->{"param_count"} + 0;
+                    my int $pi2 = 0;
+                    while ($pi2 < $cpc2) {
+                        my str $pvn2 = escape_c_keyword($cp2->[$pi2]->{"name"});
+                        $init_scope{$pvn2} = 1;
+                        $all_decl{$pvn2} = 1;
+                        $pi2 = $pi2 + 1;
+                    }
+                    my scalar $cbody2 = $cfn2->{"body"};
+                    my str $cpkg2 = "" . $cfn2->{"package"};
+                    if (raw_int_block_ok($cg, $cbody2, \%init_scope, \%all_decl, \%global_names, \%raw_candidates, $cpkg2) == 0 ||
+                        raw_int_always_returns($cbody2) == 0 ||
+                        raw_int_has_terminating_return($cg, $cbody2, \%raw_candidates, $cfn2_c, $cpkg2) == 0) {
+                        delete($raw_candidates{$cfn2_c});
+                        $changed = 1;
+                    }
+                }
+                $ci = $ci + 1;
+            }
+        }
+        $cg->{"raw_int_funcs"} = \%raw_candidates;
+    }
+
     # Store BEGIN/END blocks and import calls in codegen context. In
     # module-only mode, filter out blocks contributed by other modules so the
     # generated function indices stay consecutive and don't reference bodies
@@ -3846,6 +3994,16 @@ func gen_program(scalar $cg, scalar $program) void {
                 $static_prefix = "static ";
             } elsif ($cg->{"aggressive_inline"} == 1) {
                 $static_prefix = "static inline ";
+            }
+            if (($cg->{"raw_int_funcs"}->{$name} + 0) > 0) {
+                emit($cg, "static inline int64_t __strada_raw_" . $name . "(");
+                my scalar $rfwd_params = $fn->{"params"};
+                my int $rfwd_j = 0;
+                while ($rfwd_j < $fn->{"param_count"}) {
+                    emit($cg, "int64_t " . escape_c_keyword($rfwd_params->[$rfwd_j]->{"name"}) . ", ");
+                    $rfwd_j = $rfwd_j + 1;
+                }
+                emit($cg, "int __strada_depth);\n");
             }
             emit($cg, $static_prefix . type_to_c($fn->{"return_type"}) . " " . $name . "(");
             

@@ -9604,26 +9604,28 @@ int strada_recursion_limit = 1000;  /* Default limit; 0 = disabled */
  * reached (runaway recursion ran until the C stack overflowed), and the pops
  * of the unrecorded calls drove the depth too low. */
 #ifdef STRADA_NO_TLS
-static int strada_call_overflow = 0;
+int strada_call_overflow = 0;
 #else
-static __thread int strada_call_overflow = 0;
+__thread int strada_call_overflow = 0;
 #endif
 
-/* Logical call depth (recorded frames + unrecorded deeper calls), saved by a
- * try frame and restored when an exception unwinds to it: the frames between
- * the throw and the catch never run their pops. */
+/* Logical call depth (recorded frames in low 9 bits + unrecorded overflow
+ * calls above), saved by a try frame and restored when an exception unwinds
+ * to it: the frames between the throw and the catch never run their pops. */
 int strada_stack_mark(void) {
-    return strada_call_depth + strada_call_overflow;
+    int d = strada_call_depth < 0 ? 0 : (strada_call_depth > STRADA_MAX_CALL_DEPTH ? STRADA_MAX_CALL_DEPTH : strada_call_depth);
+    int o = strada_call_overflow < 0 ? 0 : strada_call_overflow;
+    return (o << 9) | (d & 0x1ff);
 }
 void strada_stack_restore(int mark) {
-    if (mark < 0) mark = 0;
-    if (mark > STRADA_MAX_CALL_DEPTH) {
-        strada_call_depth = STRADA_MAX_CALL_DEPTH;
-        strada_call_overflow = mark - STRADA_MAX_CALL_DEPTH;
-    } else {
-        strada_call_depth = mark;
+    if (mark <= 0) {
+        strada_call_depth = 0;
         strada_call_overflow = 0;
+        return;
     }
+    int d = mark & 0x1ff;
+    strada_call_depth = d > STRADA_MAX_CALL_DEPTH ? STRADA_MAX_CALL_DEPTH : d;
+    strada_call_overflow = mark >> 9;
 }
 
 void strada_set_recursion_limit(int limit) {
@@ -9686,6 +9688,37 @@ void strada_stack_pop(void) {
     } else if (strada_call_depth > 0) {
         strada_call_depth--;
     }
+}
+
+void strada_depth_push(const char *func_name, const char *file_name) {
+    if (strada_recursion_limit > 0
+        && strada_call_depth + strada_call_overflow >= strada_recursion_limit) {
+        fprintf(stderr, "Error: Maximum recursion depth exceeded (%d)\n", strada_recursion_limit);
+        strada_print_stack_trace(stderr);
+        fprintf(stderr, "  -> %s (%s)\n", func_name, file_name);
+        fprintf(stderr, "\nHint: Use core::set_recursion_limit(n) to increase the limit, or 0 to disable.\n");
+        exit(1);
+    }
+    strada_call_overflow++;
+}
+
+void strada_depth_pop(void) {
+    if (strada_call_overflow > 0) {
+        strada_call_overflow--;
+    }
+}
+
+__attribute__((noreturn)) void strada_raw_depth_exceeded(int depth, const char *func_name, const char *file_name) {
+    strada_call_overflow = depth;
+    fprintf(stderr, "Error: Maximum recursion depth exceeded (%d)\n", strada_recursion_limit);
+    strada_print_stack_trace(stderr);
+    fprintf(stderr, "  -> %s (%s)\n", func_name, file_name);
+    fprintf(stderr, "\nHint: Use core::set_recursion_limit(n) to increase the limit, or 0 to disable.\n");
+    exit(1);
+}
+
+int strada_current_depth(void) {
+    return strada_call_depth + strada_call_overflow;
 }
 
 void strada_stack_set_line(int line) {
@@ -29734,6 +29767,7 @@ typedef struct StradaCoro {
     StradaStackFrame *frames_save;
     int frames_saved;
     int frames_save_cap;
+    int overflow_saved;
     StradaTryContext *try_save;     /* per-coro try frames (lazily sized) */
     int try_saved;
     int try_save_cap;
@@ -29748,6 +29782,7 @@ static void coro_ctx_install(StradaCoro *c) {
     memcpy(strada_call_stack, c->frames_save,
            (size_t)c->frames_saved * sizeof(StradaStackFrame));
     strada_call_depth = c->frames_saved;
+    strada_call_overflow = c->overflow_saved;
     /* try frames too: the jmp_bufs target frames on the (persistent) coro
      * stack, so they stay valid across suspensions; what is NOT safe is two
      * contexts sharing the same TLS slots — hence the swap. This is what
@@ -29775,6 +29810,7 @@ static void coro_ctx_stash(StradaCoro *c) {
     memcpy(c->frames_save, strada_call_stack,
            (size_t)strada_call_depth * sizeof(StradaStackFrame));
     c->frames_saved = strada_call_depth;
+    c->overflow_saved = strada_call_overflow;
     if (strada_try_depth > c->try_save_cap) {
         c->try_save_cap = strada_try_depth;
         c->try_save = realloc(c->try_save,
@@ -29840,6 +29876,7 @@ StradaValue* strada_coro_resume(StradaValue *handle) {
     StradaValue **host_cstash = host_cc > 0 ? malloc((size_t)host_cc * sizeof(StradaValue *)) : NULL;
     if (host_cstash) memcpy(host_cstash, strada_pending_cleanup, (size_t)host_cc * sizeof(StradaValue *));
     int host_cd = strada_call_depth;
+    int host_co = strada_call_overflow;
     StradaStackFrame *host_fstash = host_cd > 0 ? malloc((size_t)host_cd * sizeof(StradaStackFrame)) : NULL;
     if (host_fstash) memcpy(host_fstash, strada_call_stack, (size_t)host_cd * sizeof(StradaStackFrame));
     int host_td = strada_try_depth;
@@ -29860,6 +29897,7 @@ StradaValue* strada_coro_resume(StradaValue *handle) {
     free(host_cstash);
     if (host_fstash) memcpy(strada_call_stack, host_fstash, (size_t)host_cd * sizeof(StradaStackFrame));
     strada_call_depth = host_cd;
+    strada_call_overflow = host_co;
     free(host_fstash);
     if (host_tstash) memcpy(strada_try_stack, host_tstash, (size_t)host_td * sizeof(StradaTryContext));
     strada_try_depth = host_td;

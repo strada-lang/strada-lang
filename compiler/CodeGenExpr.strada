@@ -1539,7 +1539,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 # or FETCH when copying from a tied scalar variable.
                 if ($needs_incref == 1) {
                     gen_expression($cg, $target);
-                    emit($cg, " = strada_copy_scalar(");
+                    emit($cg, " = strada_copy_scalar_il(");
                     gen_expression($cg, $target);
                     emit($cg, "); ");
                 }
@@ -2913,14 +2913,15 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
                                 gen_expression($cg, $meth_target);
                                 emit($cg, "; ");
                             }
+                            my int $dv_in_try = cleanup_push_useful($cg);
                             my int $da = 0;
                             while ($da < $eff) {
                                 my scalar $an = $dv_nodes[$da];
                                 emit($cg, "StradaValue *__dv_a" . $da . " = ");
                                 if ($an) { gen_expression($cg, $an); } else { emit($cg, "strada_new_undef()"); }
                                 emit($cg, "; ");
-                                if ($cg->{"cleanup_enabled"} == 1 && $an && needs_temp_cleanup($cg, $an) == 1) {
-                                    emit($cg, "strada_cleanup_push(__dv_a" . $da . "); ");
+                                if ($dv_in_try == 1 && $an && needs_temp_cleanup($cg, $an) == 1 && expr_is_always_tagged_int($cg, $an) == 0) {
+                                    emit($cg, "if (!STRADA_IS_TAGGED_INT(__dv_a" . $da . ")) strada_cleanup_push(__dv_a" . $da . "); ");
                                 }
                                 $da = $da + 1;
                             }
@@ -2943,21 +2944,17 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
                             my int $da_pop = $eff - 1;
                             while ($da_pop >= 0) {
                                 my scalar $anp = $dv_nodes[$da_pop];
-                                if ($cg->{"cleanup_enabled"} == 1 && $anp && needs_temp_cleanup($cg, $anp) == 1) {
-                                    emit($cg, "strada_cleanup_pop(); ");
+                                if ($cg->{"cleanup_enabled"} == 1 && $anp && needs_temp_cleanup($cg, $anp) == 1 && expr_is_always_tagged_int($cg, $anp) == 0) {
+                                    if ($dv_in_try == 1) {
+                                        emit($cg, "if (!STRADA_IS_TAGGED_INT(__dv_a" . $da_pop . ")) { strada_cleanup_pop(); strada_decref(__dv_a" . $da_pop . "); } ");
+                                    } else {
+                                        emit($cg, "strada_decref(__dv_a" . $da_pop . "); ");
+                                    }
                                 }
                                 $da_pop = $da_pop - 1;
                             }
                             if ($meth_obj_cleanup == 1) {
                                 emit($cg, "strada_decref(__dv_obj); ");
-                            }
-                            my int $da3 = 0;
-                            while ($da3 < $eff) {
-                                my scalar $an3 = $dv_nodes[$da3];
-                                if ($cg->{"cleanup_enabled"} == 1 && $an3 && needs_temp_cleanup($cg, $an3) == 1) {
-                                    emit($cg, "strada_decref(__dv_a" . $da3 . "); ");
-                                }
-                                $da3 = $da3 + 1;
                             }
                             if ($is_void == 1) {
                                 emit($cg, "(StradaValue*)NULL; })");
@@ -3033,7 +3030,7 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
                 if ($cg->{"cleanup_enabled"} == 1) {
                     my int $c = 0;
                     while ($c < $arg_count) {
-                        if (needs_temp_cleanup($cg, $args->[$c]) == 1) {
+                        if (needs_temp_cleanup($cg, $args->[$c]) == 1 && expr_is_always_tagged_int($cg, $args->[$c]) == 0) {
                             $needs_arg_cleanup = 1;
                         }
                         $c = $c + 1;
@@ -3042,6 +3039,7 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
 
                 if ($needs_arg_cleanup == 1) {
                     # Capture temp args, call method, decref temps and pack_args
+                    my int $meth_in_try = cleanup_push_useful($cg);
                     emit($cg, "({ ");
                     if ($meth_obj_cleanup == 1) {
                         emit($cg, "StradaValue *__meth_obj = ");
@@ -3058,9 +3056,12 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
                         if (needs_temp_cleanup($cg, $args->[$a]) == 1) {
                             emit($cg, "StradaValue *__meth_arg_" . $a . " = ");
                             gen_expression($cg, $args->[$a]);
+                            emit($cg, "; ");
                             # owned temp: on the cleanup stack so a throw from
                             # the method releases it (longjmp skips the decref)
-                            emit($cg, "; strada_cleanup_push(__meth_arg_" . $a . "); ");
+                            if ($meth_in_try == 1 && expr_is_always_tagged_int($cg, $args->[$a]) == 0) {
+                                emit($cg, "if (!STRADA_IS_TAGGED_INT(__meth_arg_" . $a . ")) strada_cleanup_push(__meth_arg_" . $a . "); ");
+                            }
                         }
                         $a = $a + 1;
                     }
@@ -3086,8 +3087,12 @@ func gen_method_call_node(scalar $cg, scalar $expr) void {
                     # pop in reverse push order: args, then the receiver
                     my int $d = $arg_count - 1;
                     while ($d >= 0) {
-                        if (needs_temp_cleanup($cg, $args->[$d]) == 1) {
-                            emit($cg, "strada_cleanup_pop(); strada_decref(__meth_arg_" . $d . "); ");
+                        if (needs_temp_cleanup($cg, $args->[$d]) == 1 && expr_is_always_tagged_int($cg, $args->[$d]) == 0) {
+                            if ($meth_in_try == 1) {
+                                emit($cg, "if (!STRADA_IS_TAGGED_INT(__meth_arg_" . $d . ")) { strada_cleanup_pop(); strada_decref(__meth_arg_" . $d . "); } ");
+                            } else {
+                                emit($cg, "strada_decref(__meth_arg_" . $d . "); ");
+                            }
                         }
                         $d = $d - 1;
                     }
@@ -3239,6 +3244,8 @@ func gen_expression(scalar $cg, scalar $expr) void {
     if ($type == NODE_INT_LITERAL()) {
         if ($in_extern) {
             emit($cg, $expr->{"value"});
+        } elsif (bytes("" . $expr->{"value"}) < 16) {
+            emit($cg, "STRADA_MAKE_TAGGED_INT(" . $expr->{"value"} . ")");
         } else {
             emit($cg, "strada_new_int(" . $expr->{"value"} . ")");
         }
@@ -5832,8 +5839,10 @@ func gen_expression(scalar $cg, scalar $expr) void {
         } else {
             $cg->{"func_has_try"} = 0;
         }
-        if ($cg->{"enable_stack_trace"} == 1 || ($cg->{"enable_stack_trace"} == 2 && stmt_has_call($anon_body) == 1)) {
+        if ($cg->{"enable_stack_trace"} == 1) {
             $cg->{"func_tracks_depth"} = 1;
+        } elsif ($cg->{"enable_stack_trace"} == 2 && stmt_has_call($anon_body) == 1) {
+            $cg->{"func_tracks_depth"} = 2;
         } else {
             $cg->{"func_tracks_depth"} = 0;
         }
@@ -5866,6 +5875,8 @@ func gen_expression(scalar $cg, scalar $expr) void {
         $def = $def . "    (void)__captures;\n";
         if ($cg->{"func_tracks_depth"} == 1) {
             $def = $def . "    strada_stack_push_il(\"<anon>\", \"" . $cg->{"filename"} . "\");\n";
+        } elsif ($cg->{"func_tracks_depth"} == 2) {
+            $def = $def . "    strada_depth_push_il(\"<anon>\", \"" . $cg->{"filename"} . "\");\n";
         }
         $def = $def . $body_content;
 
@@ -5873,6 +5884,8 @@ func gen_expression(scalar $cg, scalar $expr) void {
         # If the closure has an explicit return, this is unreachable and optimized away
         if ($cg->{"func_tracks_depth"} == 1) {
             $def = $def . "    strada_stack_pop_il();\n";
+        } elsif ($cg->{"func_tracks_depth"} == 2) {
+            $def = $def . "    strada_depth_pop_il();\n";
         }
         $def = $def . "    return strada_undef_static();\n";
 

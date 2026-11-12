@@ -9062,11 +9062,12 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
             return;
         }
 
-        # Check if any arguments need temp cleanup (anonymous values)
+        # Check if any arguments need temp cleanup (anonymous heap values;
+        # tagged-int expressions are immortal and need neither push nor decref)
         my int $needs_temps = 0;
         my int $check_i = 0;
         while ($check_i < $arg_count) {
-            if (needs_temp_cleanup($cg, $args->[$check_i]) == 1) {
+            if (needs_temp_cleanup($cg, $args->[$check_i]) == 1 && expr_is_always_tagged_int($cg, $args->[$check_i]) == 0) {
                 $needs_temps = 1;
             }
             $check_i = $check_i + 1;
@@ -9102,9 +9103,10 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
                     emit($cg, "StradaValue *__arg" . $t . " = ");
                     gen_expression($cg, $args->[$t]);
                     emit($cg, "; ");
-                    # If inside a try block, register for cleanup in case the call throws
-                    if ($in_try > 0) {
-                        emit($cg, "strada_cleanup_push(__arg" . $t . "); ");
+                    # Register heap temps for cleanup in case the call throws;
+                    # skip tagged ints (both statically known and runtime-tagged).
+                    if ($in_try > 0 && expr_is_always_tagged_int($cg, $args->[$t]) == 0) {
+                        emit($cg, "if (!STRADA_IS_TAGGED_INT(__arg" . $t . ")) strada_cleanup_push(__arg" . $t . "); ");
                     }
                 }
                 $t = $t + 1;
@@ -9124,7 +9126,7 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
                     }
                     emit($cg, "; ");
                     if ($in_try > 0) {
-                        emit($cg, "strada_cleanup_push(__arg" . $dt . "); ");
+                        emit($cg, "if (!STRADA_IS_TAGGED_INT(__arg" . $dt . ")) strada_cleanup_push(__arg" . $dt . "); ");
                     }
                     $dt = $dt + 1;
                 }
@@ -9179,40 +9181,30 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
                 }
             }
             emit($cg, "); ");
-            # Decref temps and pop from cleanup stack
-            # Skip decref for args that are guaranteed tagged ints (int literals, int binary ops)
-            my int $d = 0;
-            while ($d < $arg_count) {
-                if (needs_temp_cleanup($cg, $args->[$d]) == 1) {
-                    # Pop from cleanup stack first (in case decref throws somehow)
+            # Decref default parameter temps first (reverse push order)
+            if ($func_info) {
+                my int $param_count = $func_info->{"param_count"};
+                my int $dd = $param_count - 1;
+                while ($dd >= $arg_count) {
                     if ($in_try > 0) {
-                        emit($cg, "strada_cleanup_pop(); ");
+                        emit($cg, "if (!STRADA_IS_TAGGED_INT(__arg" . $dd . ")) { strada_cleanup_pop(); strada_decref(__arg" . $dd . "); } ");
+                    } else {
+                        emit($cg, "strada_decref(__arg" . $dd . "); ");
                     }
-                    # Skip decref for int literal args and int binary ops (always tagged ints)
-                    my int $ad_type = $args->[$d]->{"type"};
-                    my int $skip_decref = 0;
-                    if ($ad_type == NODE_INT_LITERAL()) {
-                        $skip_decref = 1;
-                    } elsif ($ad_type == NODE_BINARY_OP() && expr_is_int_typed($cg, $args->[$d]) == 1) {
-                        $skip_decref = 1;
-                    }
-                    if ($skip_decref == 0) {
+                    $dd = $dd - 1;
+                }
+            }
+            # Decref temps and pop from cleanup stack (reverse push order)
+            my int $d = $arg_count - 1;
+            while ($d >= 0) {
+                if (needs_temp_cleanup($cg, $args->[$d]) == 1 && expr_is_always_tagged_int($cg, $args->[$d]) == 0) {
+                    if ($in_try > 0) {
+                        emit($cg, "if (!STRADA_IS_TAGGED_INT(__arg" . $d . ")) { strada_cleanup_pop(); strada_decref(__arg" . $d . "); } ");
+                    } else {
                         emit($cg, "strada_decref(__arg" . $d . "); ");
                     }
                 }
-                $d = $d + 1;
-            }
-            # Decref default parameter temps
-            if ($func_info) {
-                my int $param_count = $func_info->{"param_count"};
-                my int $dd = $arg_count;
-                while ($dd < $param_count) {
-                    if ($in_try > 0) {
-                        emit($cg, "strada_cleanup_pop(); ");
-                    }
-                    emit($cg, "strada_decref(__arg" . $dd . "); ");
-                    $dd = $dd + 1;
-                }
+                $d = $d - 1;
             }
             if ($is_dynamic_call == 1) {
                 emit($cg, "strada_set_call_context(0); ");

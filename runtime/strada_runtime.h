@@ -1045,15 +1045,21 @@ typedef struct {
 #ifdef STRADA_NO_TLS
 extern StradaStackFrame strada_call_stack[STRADA_MAX_CALL_DEPTH + 1];
 extern int strada_call_depth;
+extern int strada_call_overflow;
 #else
 extern __thread StradaStackFrame strada_call_stack[STRADA_MAX_CALL_DEPTH + 1];
 extern __thread int strada_call_depth;
+extern __thread int strada_call_overflow;
 #endif
 extern int strada_recursion_limit;  /* Configurable limit (default 1000, 0 = disabled) */
 extern int strada_pending_call_line;  /* set by codegen at each call site; strada_stack_push consumes */
 
 void strada_stack_push(const char *func_name, const char *file_name);
 void strada_stack_pop(void);
+void strada_depth_push(const char *func_name, const char *file_name);
+void strada_depth_pop(void);
+__attribute__((noreturn)) void strada_raw_depth_exceeded(int depth, const char *func_name, const char *file_name);
+int strada_current_depth(void);
 void strada_stack_set_line(int line);
 int strada_stack_mark(void);          /* logical call depth, incl. calls too deep to record */
 void strada_stack_restore(int mark);  /* reset it (exception unwound to a try frame) */
@@ -1066,8 +1072,13 @@ void strada_stack_restore(int mark);  /* reset it (exception unwound to a try fr
 static inline void strada_stack_push_il(const char *func_name, const char *file_name) {
     int d = strada_call_depth;
     if (__builtin_expect(d >= STRADA_MAX_CALL_DEPTH
-                         || (strada_recursion_limit > 0 && d >= strada_recursion_limit), 0)) {
-        strada_stack_push(func_name, file_name);  /* limit/overflow handling */
+                         || (unsigned)d > (unsigned)(strada_recursion_limit - 1), 0)) {
+        if (d >= STRADA_MAX_CALL_DEPTH
+            && (strada_recursion_limit <= 0 || d + strada_call_overflow < strada_recursion_limit)) {
+            strada_call_overflow++;
+            return;
+        }
+        strada_stack_push(func_name, file_name);  /* limit exceeded */
         return;
     }
     strada_call_depth = d + 1;
@@ -1077,10 +1088,25 @@ static inline void strada_stack_push_il(const char *func_name, const char *file_
     f->line = 0;
 }
 static inline void strada_stack_pop_il(void) {
-    /* At the array limit the call being popped may be an unrecorded one
-     * (see strada_call_overflow): let the out-of-line pop sort it out. */
-    if (__builtin_expect(strada_call_depth >= STRADA_MAX_CALL_DEPTH, 0)) { strada_stack_pop(); return; }
+    if (__builtin_expect(strada_call_overflow > 0, 0)) { strada_call_overflow--; return; }
     if (strada_call_depth > 0) strada_call_depth--;
+}
+/* Lightweight recursion-depth-only guard (mode 2: files without
+ * try/throw/caller/stack_trace). Tracks depth in strada_call_overflow
+ * without writing StradaStackFrame slots or hitting the 256-frame cap. */
+static inline void strada_depth_push_il(const char *func_name, const char *file_name) {
+    int o = strada_call_overflow;
+    if (__builtin_expect((unsigned)o > (unsigned)(strada_recursion_limit - 1), 0)) {
+        strada_depth_push(func_name, file_name);
+        return;
+    }
+    strada_call_overflow = o + 1;
+}
+static inline void strada_depth_pop_il(void) {
+    strada_call_overflow--;
+}
+static inline int strada_current_depth_il(void) {
+    return strada_call_depth + strada_call_overflow;
 }
 static inline void strada_stack_line_il(int line) {
     strada_call_stack[strada_call_depth].line = line;
@@ -1991,6 +2017,12 @@ void strada_tied_hash_clear(StradaValue *sv);
 StradaValue* strada_tied_hash_scalar(StradaValue *sv);
 StradaValue* strada_tied_scalar_fetch(StradaValue *sv);
 StradaValue* strada_copy_scalar(StradaValue *sv);
+static inline __attribute__((always_inline)) StradaValue* strada_copy_scalar_il(StradaValue *sv) {
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return sv;
+    if (__builtin_expect(sv->meta != NULL, 0)) return strada_copy_scalar(sv);
+    strada_incref(sv);
+    return sv;
+}
 int strada_tied_scalar_store(StradaValue *sv, StradaValue *val);
 StradaValue* strada_tied_scalar_assign(StradaValue *sv, StradaValue *val);
 StradaValue* strada_tied_scalar_compound(StradaValue *sv, StradaValue *rhs, int op, int want_result);
