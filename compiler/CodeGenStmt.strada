@@ -2899,7 +2899,11 @@ func gen_function(scalar $cg, scalar $fn) void {
         # recursive / large bodies it doesn't want to grow.
         my str $static_prefix = "";
         if ($fn->{"is_private"} == 1) {
-            $static_prefix = "static ";
+            if (length("" . $cg->{"split_dir"}) > 0) {
+                $static_prefix = "STRADA_SHARD_HIDDEN ";
+            } else {
+                $static_prefix = "static ";
+            }
         } elsif ($cg->{"aggressive_inline"} == 1) {
             $static_prefix = "static inline ";
         }
@@ -3206,7 +3210,11 @@ func gen_async_function(scalar $cg, scalar $fn) void {
     # Private functions get static prefix
     my str $static_prefix = "";
     if ($fn->{"is_private"} == 1) {
-        $static_prefix = "static ";
+        if (length("" . $cg->{"split_dir"}) > 0) {
+            $static_prefix = "STRADA_SHARD_HIDDEN ";
+        } else {
+            $static_prefix = "static ";
+        }
     }
 
     # --- Generate inner closure function ---
@@ -3477,6 +3485,10 @@ func gen_program(scalar $cg, scalar $program) void {
     if (defined($program->{"qw_imports"})) {
         $cg->{"qw_imports"} = $program->{"qw_imports"};
     }
+    if (defined($program->{"split_dir"}) && length("" . $program->{"split_dir"}) > 0
+        && ($program->{"import_lib_count"} + 0) == 0 && $cg->{"module_only_mode"} == 0) {
+        $cg->{"split_dir"} = "" . $program->{"split_dir"};
+    }
 
     # Store method modifiers
     $cg->{"method_modifiers"} = $program->{"method_modifiers"};
@@ -3614,11 +3626,22 @@ func gen_program(scalar $cg, scalar $program) void {
     emit($cg, "#include <stdint.h>\n");
     emit($cg, "#include <stdbool.h>\n");
     emit($cg, "#include <dlfcn.h>\n");
-    emit($cg, "#include <math.h>\n\n");
+    emit($cg, "#include <math.h>\n");
+    if (length("" . $cg->{"split_dir"}) > 0) {
+        emit($cg, "#ifndef STRADA_SHARD_HIDDEN\n#if defined(_WIN32)\n#define STRADA_SHARD_HIDDEN\n#else\n#define STRADA_SHARD_HIDDEN __attribute__((visibility(\"hidden\")))\n#endif\n#endif\n");
+    }
+    emit($cg, "\n");
+    if (length("" . $cg->{"split_dir"}) > 0) {
+        $cg->{"split_includes"} = sb_to_string($cg->{"output_sb"});
+    }
 
     # Full profiling: declare file ID variable
     if ($cg->{"full_profile"} == 1) {
-        emit($cg, "static int __fp_file_id = 0;\n\n");
+        if (length("" . $cg->{"split_dir"}) > 0) {
+            emit($cg, "STRADA_SHARD_HIDDEN int __fp_file_id = 0;\n\n");
+        } else {
+            emit($cg, "static int __fp_file_id = 0;\n\n");
+        }
     }
 
     # Emit top-level C blocks (includes, typedefs, etc.). In module-only
@@ -3712,7 +3735,9 @@ func gen_program(scalar $cg, scalar $program) void {
             # Handle const declarations - emit as global variable (initialized once in main)
             # Using #define with strada_new_* causes leaks since it creates new values on every use
             my str $gdecl_cname = escape_c_keyword($name);
-            if ($gvar_type == NODE_CONST_DECL()) {
+            if (length("" . $cg->{"split_dir"}) > 0) {
+                emit($cg, "STRADA_SHARD_HIDDEN StradaValue *" . $gdecl_cname . " = NULL;\n");
+            } elsif ($gvar_type == NODE_CONST_DECL()) {
                 emit($cg, "static StradaValue *" . $gdecl_cname . " = NULL;\n");
             } else {
                 emit($cg, "StradaValue *" . $gdecl_cname . " = NULL;\n");
@@ -3720,6 +3745,30 @@ func gen_program(scalar $cg, scalar $program) void {
             $g = $g + 1;
         }
         emit($cg, "\n");
+    }
+
+    if (length("" . $cg->{"split_dir"}) > 0) {
+        my str $ext_g = "";
+        if ($cg->{"full_profile"} == 1) {
+            $ext_g = $ext_g . "extern STRADA_SHARD_HIDDEN int __fp_file_id;\n";
+        }
+        $ext_g = $ext_g . "extern StradaValue *ARGV;\nextern StradaValue *ARGC;\nextern StradaValue *v_STDIN;\nextern StradaValue *v_STDOUT;\nextern StradaValue *v_STDERR;\nextern StradaValue *__child_status;\n";
+        if ($has_main == 1) {
+            $ext_g = $ext_g . "extern StradaValue *__program_name;\nextern StradaValue *_;\n";
+        }
+        if ($global_count > 0) {
+            my scalar $sglobals = $program->{"globals"};
+            my int $sg = 0;
+            while ($sg < $global_count) {
+                my scalar $sgvar = $sglobals->[$sg];
+                if (cg_skip_for_module($program, $sgvar->{"from_use"}) == 0 && $sgvar->{"type"} != NODE_OUR_DECL()) {
+                    $ext_g = $ext_g . "extern STRADA_SHARD_HIDDEN StradaValue *" . escape_c_keyword($sgvar->{"name"}) . ";\n";
+                }
+                $sg = $sg + 1;
+            }
+        }
+        $ext_g = $ext_g . "\n";
+        $cg->{"split_ext_globals"} = $ext_g;
     }
 
     # Store globals in codegen context for initialization in main
@@ -3746,6 +3795,7 @@ func gen_program(scalar $cg, scalar $program) void {
 
     # Discover pure int64_t-specializable functions (closed fixed-point set).
     if ($cg->{"tu_has_main"} == 1 && $cg->{"module_only_mode"} == 0 &&
+        length("" . $cg->{"split_dir"}) == 0 &&
         $cg->{"enable_stack_trace"} != 1 && $cg->{"has_overloads"} == 0 &&
         $cg->{"uses_tie"} == 0 && $cg->{"enable_profiling"} == 0 &&
         $cg->{"full_profile"} == 0) {
@@ -3875,6 +3925,11 @@ func gen_program(scalar $cg, scalar $program) void {
     }
     $cg->{"import_calls"} = $program->{"import_calls"};
     $cg->{"import_call_count"} = $program->{"import_call_count"};
+
+    my int $split_fwd_start = 0;
+    if (length("" . $cg->{"split_dir"}) > 0) {
+        $split_fwd_start = sb_length($cg->{"output_sb"});
+    }
 
     # Generate enum definitions
     my scalar $enums = $program->{"enums"};
@@ -4281,7 +4336,11 @@ func gen_program(scalar $cg, scalar $program) void {
             # Match storage class chosen by gen_function (see comment there).
             my str $static_prefix = "";
             if ($fn->{"is_private"} == 1) {
-                $static_prefix = "static ";
+                if (length("" . $cg->{"split_dir"}) > 0) {
+                    $static_prefix = "STRADA_SHARD_HIDDEN ";
+                } else {
+                    $static_prefix = "static ";
+                }
             } elsif ($cg->{"aggressive_inline"} == 1) {
                 $static_prefix = "static inline ";
             }
@@ -4321,6 +4380,11 @@ func gen_program(scalar $cg, scalar $program) void {
 
     # NOTE: OOP init forward declarations are generated after methods are tracked
     # and stored in oop_fwd_decls for insertion in get_output()
+
+    if (length("" . $cg->{"split_dir"}) > 0) {
+        my str $full_pre_now = sb_to_string($cg->{"output_sb"});
+        $cg->{"split_fwd_decls"} = substr_bytes($full_pre_now, $split_fwd_start, bytes($full_pre_now) - $split_fwd_start) . "\n";
+    }
 
     # Forward declarations for BEGIN/END blocks (only if they exist)
     my int $begin_block_count = $cg->{"begin_block_count"};
@@ -4363,21 +4427,33 @@ func gen_program(scalar $cg, scalar $program) void {
     }
     check_override_signatures($cg, $program);
 
+    my int $doing_split = 0;
+    if (length("" . $cg->{"split_dir"}) > 0) { $doing_split = 1; }
+    my array @split_codes = ();
+    my array @split_pkgs = ();
+    my array @split_c0 = ();
+
     $i = 0;
     while ($i < $program->{"function_count"}) {
         my scalar $fn = $funcs->[$i];
         my int $fn_type = $fn->{"type"};
-        my str $fn_pkg = $fn->{"package"};
+        my str $fn_pkg = "" . $fn->{"package"};
 
         if (cg_skip_for_module($program, $fn->{"from_use"}) == 1) {
             $i = $i + 1;
             next;
         }
 
+        if ($doing_split == 1) {
+            sb_clear($cg->{"output_sb"});
+        }
+
+        my int $emitted_fn = 1;
         if ($fn_type == NODE_EXTERN_FUNC()) {
-            # Extern with body - generate the function
             if ($fn->{"has_body"} == 1) {
                 gen_extern_function($cg, $fn);
+            } else {
+                $emitted_fn = 0;
             }
         } elsif ($fn_type == NODE_ASYNC_FUNC()) {
             gen_async_function($cg, $fn);
@@ -4386,8 +4462,27 @@ func gen_program(scalar $cg, scalar $program) void {
             our_shadow_restore($cg, 0);
         }
 
-        # (methods were tracked for OOP registration before this loop)
+        if ($doing_split == 1 && $emitted_fn == 1) {
+            my str $fcode = sb_to_string($cg->{"output_sb"});
+            my int $is_c0 = 0;
+            if (($fn->{"from_use"} + 0) != 0 || $fn->{"name"} eq "main"
+                || $fn_type == NODE_EXTERN_FUNC() || $fn_type == NODE_ASYNC_FUNC()
+                || length($fn_pkg) == 0 || $fn_pkg eq "main"
+                || index($fcode, "/* Begin __C__ block */") >= 0) {
+                $is_c0 = 1;
+            }
+            push(@split_codes, $fcode);
+            push(@split_pkgs, $fn_pkg);
+            push(@split_c0, $is_c0);
+            sb_clear($cg->{"output_sb"});
+        }
+
         $i = $i + 1;
+    }
+    if ($doing_split == 1) {
+        $cg->{"split_fn_codes"} = \@split_codes;
+        $cg->{"split_fn_pkgs"} = \@split_pkgs;
+        $cg->{"split_fn_c0"} = \@split_c0;
     }
 
     # Generate OOP init forward declarations (now that methods are tracked)
@@ -4591,6 +4686,7 @@ func gen_program(scalar $cg, scalar $program) void {
         }
     }
 
+    my int $marker_sb_start = sb_length($cg->{"output_sb"});
     # Generate import_object: object file list comment (for strada wrapper to parse)
     # NOTE: extern declarations are generated earlier with other forward declarations
     my int $io_count = $program->{"import_object_count"};
@@ -4645,6 +4741,11 @@ func gen_program(scalar $cg, scalar $program) void {
         emit($cg, "\n */\n\n");
     }
 
+    if (length("" . $cg->{"split_dir"}) > 0) {
+        my str $m_now = sb_to_string($cg->{"output_sb"});
+        $cg->{"split_markers"} = substr_bytes($m_now, $marker_sb_start, bytes($m_now) - $marker_sb_start);
+    }
+
     # Generate BEGIN/END block function bodies (only if they exist)
     if ($begin_block_count > 0 || $end_block_count > 0) {
         emit($cg, "\n/* BEGIN/END block implementations */\n");
@@ -4694,9 +4795,10 @@ func gen_program(scalar $cg, scalar $program) void {
     $cg->{"funcs_content"} = sb_to_string($cg->{"output_sb"});
     sb_clear($cg->{"output_sb"});
 
-    # Generate qualified name aliases if package is declared
+    # Generate qualified name aliases if package is declared (non-main only,
+    # and only for non-private functions actually belonging to $pkg_alias).
     my str $pkg_alias = $program->{"package"};
-    if ($pkg_alias ne "") {
+    if ($pkg_alias ne "" && $pkg_alias ne "main") {
         # Convert :: to __ for C identifier
         my str $prefix = "";
         my int $p = 0;
@@ -4718,11 +4820,16 @@ func gen_program(scalar $cg, scalar $program) void {
             my scalar $fn = $funcs->[$i];
             my int $fn_type = $fn->{"type"};
             my str $name = sanitize_name($fn->{"name"});
+            my str $fn_pkg_a = "" . $fn->{"package"};
 
-            # Skip main and extern functions
-            if ($name ne "main" && $fn_type != NODE_EXTERN_FUNC()) {
+            # Skip main, extern, private, imported, and functions from other packages
+            if ($name ne "main" && $fn_type != NODE_EXTERN_FUNC()
+                && $fn->{"is_private"} != 1 && $fn_pkg_a eq $pkg_alias
+                && cg_skip_for_module($program, $fn->{"from_use"}) == 0) {
                 my str $ret = type_to_c($fn->{"return_type"});
-                my str $qname = sanitize_name($prefix . $fn->{"name"});
+                my str $bare_a = "" . $fn->{"bare_name"};
+                if (length($bare_a) == 0) { $bare_a = $fn->{"name"}; }
+                my str $qname = sanitize_name($prefix . $bare_a);
 
                 # Generate: RetType QualifiedName(params) { return UnqualifiedName(params); }
                 emit($cg, $ret . " " . $qname . "(");

@@ -148,6 +148,7 @@ TESTS=(
     "test_arena_hardened"
     "test_encoding"
     "test_audit_2026_11_leaks"
+    "test_fast_codegen_leaks"
 )
 
 # c::callback needs libffi at build time — include only when configured in

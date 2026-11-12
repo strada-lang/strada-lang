@@ -392,7 +392,7 @@ func ast_needs_stack_trace(scalar $ast) int {
     return 0;
 }
 
-func compile(str $source, str $filename, int $debug_info, int $show_timing, int $show_warnings, int $strict_types, int $enable_profiling, int $enable_stack_trace, int $full_profile, scalar $lib_paths, scalar $lib_paths_low, scalar $implicit_objs, scalar $implicit_archs, scalar $implicit_libs, int $module_only_mode, str $module_target, int $check_only, scalar $pp_defines) str {
+func compile(str $source, str $filename, int $debug_info, int $show_timing, int $show_warnings, int $strict_types, int $enable_profiling, int $enable_stack_trace, int $full_profile, scalar $lib_paths, scalar $lib_paths_low, scalar $implicit_objs, scalar $implicit_archs, scalar $implicit_libs, int $module_only_mode, str $module_target, int $check_only, scalar $pp_defines, str $output_file, int $verbose, str $split_dir) str {
     my num $t0 = 0.0;
     my num $t1 = 0.0;
 
@@ -453,6 +453,7 @@ func compile(str $source, str $filename, int $debug_info, int $show_timing, int 
     my scalar $ast = parse_with_implicit_imports($tokens, $filename, $lib_paths, $lib_paths_low, $implicit_objs, $implicit_archs, $implicit_libs);
     $ast->{"module_only_mode"} = $module_only_mode;
     $ast->{"module_target"} = $module_target;
+    $ast->{"split_dir"} = $split_dir;
     $t1 = core::hires_time();
     if ($show_timing == 1) {
         say("  Parser:   " . ($t1 - $t0) . " seconds");
@@ -481,11 +482,10 @@ func compile(str $source, str $filename, int $debug_info, int $show_timing, int 
     # --check: validation only. Errors above have already die'd; a clean
     # program stops here without generating C.
     if ($check_only == 1) {
-        # Run the code generator too and discard its output: a few errors are
-        # only detected there (an unknown core::/math::/async:: builtin, a
-        # spread outside a call). Without this `--check` passed programs that
-        # then failed to build.
         generate($ast, $filename, 0, 0, $enable_stack_trace, 0);
+        if (length(core::getenv("STRADA_CLEAN_EXIT")) == 0) {
+            exit(0);
+        }
         return "";
     }
 
@@ -495,6 +495,16 @@ func compile(str $source, str $filename, int $debug_info, int $show_timing, int 
     $t1 = core::hires_time();
     if ($show_timing == 1) {
         say("  CodeGen:  " . ($t1 - $t0) . " seconds");
+    }
+
+    if (length($output_file) > 0) {
+        spew($output_file, $code);
+        if ($verbose == 1) {
+            say("Success! Generated " . $output_file);
+        }
+        if (length(core::getenv("STRADA_CLEAN_EXIT")) == 0) {
+            exit(0);
+        }
     }
 
     return $code;
@@ -559,6 +569,7 @@ func main() int {
     my array @implicit_libs = ();
     my int $module_only_mode = 0;
     my str $module_target = "";
+    my str $split_dir = "";
     # Start from 0 — @ARGV excludes program name (Perl-style)
     # For bootstrap compatibility, also skip if ARGV[0] looks like program name
     my int $i = 0;
@@ -677,6 +688,9 @@ func main() int {
             # preprocessed copy): used in diagnostics and to find `use`d files
             $i = $i + 1;
             if ($i < $arg_count) { $source_name = $ARGV[$i]; }
+        } elsif ($arg eq "--split-dir") {
+            $i = $i + 1;
+            if ($i < $arg_count) { $split_dir = $ARGV[$i]; }
         } elsif ($arg eq "-h" || $arg eq "--help") {
             print_usage();
             return 0;
@@ -745,20 +759,15 @@ func main() int {
     # Compile (pass lib paths, CLI-implicit imports, and module-only settings)
     my str $diag_name = $input_file;
     if (length($source_name) > 0) { $diag_name = $source_name; }
-    my str $code = compile($source, $diag_name, $debug_info, $show_timing, $show_warnings, $strict_types, $enable_profiling, $enable_stack_trace, $full_profile, \@lib_paths, \@lib_paths_low, \@implicit_objs, \@implicit_archs, \@implicit_libs, $module_only_mode, $module_target, $check_only, \@pp_defines);
+    my str $code = compile($source, $diag_name, $debug_info, $show_timing, $show_warnings, $strict_types, $enable_profiling, $enable_stack_trace, $full_profile, \@lib_paths, \@lib_paths_low, \@implicit_objs, \@implicit_archs, \@implicit_libs, $module_only_mode, $module_target, $check_only, \@pp_defines, $output_file, $verbose, $split_dir);
 
-    # --check: validation passed (any errors die before reaching here) —
-    # nothing to write.
     if ($check_only == 1) {
         return 0;
     }
 
-    # Write output
     spew($output_file, $code);
-
     if ($verbose == 1) {
         say("Success! Generated " . $output_file);
     }
-
     return 0;
 }

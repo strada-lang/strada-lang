@@ -582,6 +582,7 @@ StradaValue* strada_new_hash_presized(int capacity);
  * ones); _ph increfs like the classic strada_anon_hash. */
 StradaValue* strada_anon_hash_ph(int count, ...);
 StradaValue* strada_anon_hash_take_ph(int count, ...);
+StradaValue* strada_anon_hash_mask_ph(int count, uint32_t take_mask, ...);
 StradaValue* strada_new_filehandle(FILE *fh);
 
 /* Reference counting and type conversion.
@@ -602,6 +603,9 @@ StradaValue* strada_deref_array_value_owned(StradaValue *ref);
 StradaValue* strada_deref_hash_value_owned(StradaValue *ref);
 int64_t strada_to_int(StradaValue *sv);
 double strada_to_num(StradaValue *sv);
+int64_t strada_to_int_take(StradaValue *sv);
+double strada_to_num_take(StradaValue *sv);
+int strada_to_bool_take(StradaValue *sv);
 #else
 /* Header-only inline fast paths for callers */
 void strada_incref_impl(StradaValue *sv);
@@ -611,6 +615,9 @@ StradaValue* strada_deref_array_value_owned(StradaValue *ref);
 StradaValue* strada_deref_hash_value_owned(StradaValue *ref);
 int64_t strada_to_int_impl(StradaValue *sv);
 double strada_to_num_impl(StradaValue *sv);
+int64_t strada_to_int_take_impl(StradaValue *sv);
+double strada_to_num_take_impl(StradaValue *sv);
+int strada_to_bool_take_impl(StradaValue *sv);
 /* always_inline on these three is critical for OOP hot loops: the
  * tagged-int fast path is just a bit-test, and without forced inlining
  * gcc keeps the wrappers as out-of-line calls under -O3+LTO. Inlining
@@ -625,23 +632,41 @@ void strada_rc_trace(StradaValue *sv, const char *op, void *ra);
 #define STRADA_RC_HOOK(sv, op) do {} while (0)
 #endif
 
-static inline __attribute__((always_inline)) void strada_incref(StradaValue *sv) {
+#ifdef __OPTIMIZE__
+#define STRADA_HOT_INLINE static inline __attribute__((always_inline))
+#else
+#define STRADA_HOT_INLINE static inline
+#endif
+
+STRADA_HOT_INLINE void strada_incref(StradaValue *sv) {
     STRADA_RC_HOOK(sv, "incref");
     if (!sv || STRADA_IS_TAGGED_INT(sv)) return;
     strada_incref_impl(sv);
 }
-static inline __attribute__((always_inline)) void strada_decref(StradaValue *sv) {
+STRADA_HOT_INLINE void strada_decref(StradaValue *sv) {
     STRADA_RC_HOOK(sv, "decref");
     if (!sv || STRADA_IS_TAGGED_INT(sv)) return;
     strada_decref_impl(sv);
 }
-static inline __attribute__((always_inline)) int64_t strada_to_int(StradaValue *sv) {
+STRADA_HOT_INLINE int64_t strada_to_int(StradaValue *sv) {
     if (STRADA_IS_TAGGED_INT(sv)) return STRADA_TAGGED_INT_VAL(sv);
     return strada_to_int_impl(sv);
 }
-static inline __attribute__((always_inline)) double strada_to_num(StradaValue *sv) {
+STRADA_HOT_INLINE double strada_to_num(StradaValue *sv) {
     if (STRADA_IS_TAGGED_INT(sv)) return (double)STRADA_TAGGED_INT_VAL(sv);
     return strada_to_num_impl(sv);
+}
+STRADA_HOT_INLINE int64_t strada_to_int_take(StradaValue *sv) {
+    if (STRADA_IS_TAGGED_INT(sv)) return STRADA_TAGGED_INT_VAL(sv);
+    return strada_to_int_take_impl(sv);
+}
+STRADA_HOT_INLINE double strada_to_num_take(StradaValue *sv) {
+    if (STRADA_IS_TAGGED_INT(sv)) return (double)STRADA_TAGGED_INT_VAL(sv);
+    return strada_to_num_take_impl(sv);
+}
+STRADA_HOT_INLINE int strada_to_bool_take(StradaValue *sv) {
+    if (STRADA_IS_TAGGED_INT(sv)) return STRADA_TAGGED_INT_VAL(sv) != 0;
+    return strada_to_bool_take_impl(sv);
 }
 /* Fast-path inline: most calls in hot loops are on unique-held SVs that
  * cannot possibly form a cycle (rc<2). Skip the function call entirely
@@ -652,7 +677,7 @@ static inline __attribute__((always_inline)) double strada_to_num(StradaValue *s
  * live object can point to it, so its contents cannot reach back to it.
  * For REF wrappers, both the outer REF and inner container must be rc<2
  * to guarantee no cycle. */
-static inline __attribute__((always_inline)) void strada_break_self_cycle(StradaValue *sv) {
+STRADA_HOT_INLINE void strada_break_self_cycle(StradaValue *sv) {
     if (!sv || STRADA_IS_TAGGED_INT(sv)) return;
     /* Immortal (refcount sentinel > 1e9): small ints, statics, pooled-and-
      * neutralized SVs, and request-arena SVs after arena_end. They are never
@@ -1015,10 +1040,12 @@ int strada_in_try_block(void);
  * functions, not inline, so the per-thread storage never crosses the ABI
  * boundary (a tcc-built program linking the gcc runtime calls these rather than
  * touching the __thread variable, which tcc cannot express). */
-#define STRADA_MAX_PENDING_CLEANUP 4096
+#define STRADA_MAX_PENDING_CLEANUP 16384
 void strada_cleanup_push(StradaValue *sv);
 void strada_cleanup_push_slot(StradaValue **slot);  /* a variable: its CURRENT value is released on unwind */
 void strada_cleanup_pop(void);
+void strada_cleanup_pop_decref(StradaValue *sv);
+void strada_cleanup_pop_decref_n(int n);
 void strada_cleanup_drain(void);
 int strada_cleanup_mark(void);         /* Get current depth */
 void strada_cleanup_restore(int mark); /* Restore to depth (no decref) */
@@ -1225,6 +1252,8 @@ StradaValue* strada_deref_hash_value(StradaValue *ref);  /* deref_hash() builtin
 StradaValue* strada_deref_array_value(StradaValue *ref); /* deref_array() builtin */
 StradaValue* strada_anon_hash(int count, ...);        /* { key => val, ... } */
 StradaValue* strada_anon_array(int count, ...);       /* [ elem, ... ] */
+StradaValue* strada_anon_array_take(int count, uint32_t take_mask, ...);
+StradaValue* strada_anon_array_owned(int count, ...);
 StradaValue* strada_array_from_ref(StradaValue *ref); /* Copy array from ref */
 StradaValue* strada_hash_from_ref(StradaValue *ref);  /* Copy hash from ref */
 StradaValue* strada_hash_from_flat_array(StradaValue *arr); /* Convert flat array [k,v,k,v,...] to hash */
@@ -1278,6 +1307,7 @@ StradaValue* strada_overload_stringify(StradaValue *val);
 
 /* Variadic function support */
 StradaValue* strada_pack_args(int count, ...);        /* Pack args into array */
+StradaValue* strada_pack_args_take(int count, uint32_t take_mask, ...);
 
 /* Memory management */
 void strada_free(StradaValue *sv);  /* Explicitly free (decref) a value */
@@ -1524,6 +1554,7 @@ void strada_substr_assign(StradaValue **sv_ptr, int64_t offset, int64_t length, 
 int strada_regex_match_global(const char *str, const char *pattern, const char *flags, size_t *pos);
 StradaValue* strada_sv_replace_all(StradaValue *sv, const char *find, const char *replace);
 StradaValue* strada_concat_cstr_sv(const char *prefix, size_t prefix_len, StradaValue *b);
+StradaValue* strada_concat_sv_cstr(StradaValue *a, const char *suffix, size_t suffix_len);
 /* Multi-part concat (codegen-emitted for `.` chains / string interpolation).
  * Varargs groups of (int kind, payload): 0 = ASCII literal (const char*,
  * size_t), 2 = non-ASCII literal (same), 1 = StradaValue*. */
@@ -2194,40 +2225,9 @@ static inline __attribute__((always_inline)) int64_t strada_hv_fetch_int_ph(Stra
 /* Hash::Util::lock_keys check: if locked, reject inserts of keys not
  * in the allowed set. Existing keys may still be modified. Returns 1
  * if the operation is allowed, 0 if locked and rejected. On rejection
- * issues strada_die with Perl's canonical error format. */
-static inline int strada_hv_check_lock(StradaValue *sv, const char *key) {
-    if (!sv || STRADA_IS_TAGGED_INT(sv) || !sv->meta || !sv->meta->is_hash_locked) return 1;
-    /* Existing key — always allowed. */
-    StradaHash *hv = strada_deref_hash(sv);
-    if (hv && strada_hash_exists(hv, key)) return 1;
-    /* No allowed-keys set means lock-with-existing-keys-only (the
-     * `lock_keys(%h)` form). Existing keys checked above; everything
-     * else is rejected. */
-    if (!sv->meta->locked_keys) {
-        char msg[256];
-        snprintf(msg, sizeof(msg),
-                 "Attempt to access disallowed key '%s' in a restricted hash",
-                 key);
-        strada_die(msg);
-        return 0;
-    }
-    /* Check against the allowed-keys array (the `lock_keys(%h, @allowed)`
-     * form). Linear walk; the allowed set is typically small. */
-    StradaArray *ak = (StradaArray *)sv->meta->locked_keys;
-    if (ak) {
-        for (size_t i = 0; i < ak->size; i++) {
-            StradaValue *e = ak->elements[ak->head + i];
-            if (e && !STRADA_IS_TAGGED_INT(e) && e->type == STRADA_STR
-                && e->value.pv && strcmp(e->value.pv, key) == 0) return 1;
-        }
-    }
-    char msg[256];
-    snprintf(msg, sizeof(msg),
-             "Attempt to access disallowed key '%s' in a restricted hash",
-             key);
-    strada_die(msg);
-    return 0;
-}
+ * issues strada_die with Perl's canonical error format. Out-of-line in
+ * strada_runtime.c because callers already gate it on __builtin_expect. */
+int strada_hv_check_lock(StradaValue *sv, const char *key);
 
 /* In-place num store for accumulator assignments ($numvar = <numeric> /
  * $numvar += n). When a is the sole owner of a plain heap NUM, write the

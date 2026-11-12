@@ -408,3 +408,59 @@ if [ "$(cat "$aud_dir/eval_jit.rc" 2>/dev/null)" = "0" ] && [ "$(cat "$aud_dir/e
 else
     aud_record 1 "Eval & Strada::JIT" "out=$(cat "$aud_dir/eval_jit.out" 2>/dev/null) $(cat "$aud_dir/eval_jit_gcc.log" 2>/dev/null | tail -5)"
 fi
+
+# 5. Sharded --shared build + incremental single-shard rebuild + import_lib execution
+sh_src="$aud_dir/sharded_lib.strada"
+sh_so="$aud_dir/sharded_lib.so"
+sh_host="$aud_dir/sharded_host.strada"
+sh_bin="$aud_dir/sharded_host"
+python3 - "$sh_src" << 'PYEOF'
+import sys
+out = [
+    '__C__ {\nstatic int sh_c_magic(void) { return 77; }\n}\n',
+    'const int SH_CONST = 10;\n',
+    'my str $g_shared_prefix = "PFX";\n',
+    'package ShardC;\n',
+    'func c_val() int { my int $r = 0; __C__ { r = strada_new_int(sh_c_magic()); } return $r + SH_CONST; }\n',
+]
+for p in range(1, 30):
+    out.append(f'package ShardPkg{p};\n')
+    out.append(f'private func priv_{p}(str $s) str {{ my scalar $fn = func(str $x) str {{ return $x . "_{p}"; }}; return $fn->($s); }}\n')
+    for f in range(1, 18):
+        pad = "x" * 160
+        out.append(f'func fn_{f}(str $in) str {{ my scalar $h = {{"k" => "{pad}", "v" => $in}}; return ShardPkg{p}::priv_{p}($g_shared_prefix . ":" . $h->{{"v"}}); }}\n')
+out.append('package ShardTarget;\nfunc greet(str $who) str { return "v1:" . $who; }\npackage main;\n')
+open(sys.argv[1], "w").write("".join(out))
+PYEOF
+
+cat > "$sh_host" << 'EOF'
+import_lib "sharded_lib.so";
+func main() int {
+    my int $cv = ShardC::c_val();
+    my str $p5 = ShardPkg5::fn_3("ok");
+    my str $g = ShardTarget::greet("world");
+    say($cv . "|" . $p5 . "|" . $g);
+    return 0;
+}
+EOF
+
+sh_ok=1
+sh_diag=""
+sh_log1=$("$PROJECT_DIR/strada" -v -O0 --shared "$sh_src" -o "$sh_so" 2>&1)
+if echo "$sh_log1" | grep -q "C shards" &&
+   "$PROJECT_DIR/strada" -O0 -fno-lto -L "$aud_dir" "$sh_host" -o "$sh_bin" >"$aud_dir/sh_host.log" 2>&1; then
+    sh_out1=$(LD_LIBRARY_PATH="$aud_dir" "$sh_bin" 2>&1)
+    sed -i 's/return "v1:"/return "v2:"/' "$sh_src"
+    sh_log2=$("$PROJECT_DIR/strada" -v -O0 --shared "$sh_src" -o "$sh_so" 2>&1)
+    sh_out2=$(LD_LIBRARY_PATH="$aud_dir" "$sh_bin" 2>&1)
+    if [ "$sh_out1" = "87|PFX:ok_5|v1:world" ] &&
+       [ "$sh_out2" = "87|PFX:ok_5|v2:world" ] &&
+       echo "$sh_log2" | grep -q "Compiling 1/"; then
+        sh_ok=0
+    else
+        sh_diag="out1=$sh_out1 out2=$sh_out2 log2=$(echo "$sh_log2" | grep 'shards')"
+    fi
+else
+    sh_diag="build failed: $(cat "$aud_dir/sh_host.log" 2>/dev/null) $(echo "$sh_log1" | tail -3)"
+fi
+aud_record "$sh_ok" "strada --shared sharding: parallel multi-shard build, incremental 1-shard rebuild, hidden privates/closures/globals" "$sh_diag"

@@ -1400,11 +1400,29 @@ void strada_decref(StradaValue *sv) {
  * thin forwarder functions instead; at -O2 with LTO they inline back
  * to the originals and the overhead is a call insn at most. Keep
  * `alias` on Linux/ELF so the symbols share a single implementation. */
+int64_t strada_to_int_take(StradaValue *sv) {
+    if (STRADA_IS_TAGGED_INT(sv)) return STRADA_TAGGED_INT_VAL(sv);
+    if (!sv) return 0;
+    int64_t v = strada_to_int(sv);
+    strada_decref(sv);
+    return v;
+}
+
+double strada_to_num_take(StradaValue *sv) {
+    if (STRADA_IS_TAGGED_INT(sv)) return (double)STRADA_TAGGED_INT_VAL(sv);
+    if (!sv) return 0.0;
+    double v = strada_to_num(sv);
+    strada_decref(sv);
+    return v;
+}
+
 #ifdef __APPLE__
 void strada_incref_impl(StradaValue *sv) { strada_incref(sv); }
 void strada_decref_impl(StradaValue *sv) { strada_decref(sv); }
 int64_t strada_to_int_impl(StradaValue *sv) { return strada_to_int(sv); }
 double strada_to_num_impl(StradaValue *sv) { return strada_to_num(sv); }
+int64_t strada_to_int_take_impl(StradaValue *sv) { return strada_to_int_take(sv); }
+double strada_to_num_take_impl(StradaValue *sv) { return strada_to_num_take(sv); }
 /* ABI compat: pre-existing .o files compiled against the older runtime
  * call `strada_break_self_cycle` directly. The new header turns that
  * name into a static-inline wrapper, but the global symbol must still
@@ -1415,6 +1433,8 @@ void strada_incref_impl(StradaValue *sv) __attribute__((alias("strada_incref")))
 void strada_decref_impl(StradaValue *sv) __attribute__((alias("strada_decref")));
 int64_t strada_to_int_impl(StradaValue *sv) __attribute__((alias("strada_to_int")));
 double strada_to_num_impl(StradaValue *sv) __attribute__((alias("strada_to_num")));
+int64_t strada_to_int_take_impl(StradaValue *sv) __attribute__((alias("strada_to_int_take")));
+double strada_to_num_take_impl(StradaValue *sv) __attribute__((alias("strada_to_num_take")));
 void strada_break_self_cycle(StradaValue *sv) __attribute__((alias("strada_break_self_cycle_impl")));
 #endif
 
@@ -2460,6 +2480,19 @@ int strada_to_bool(StradaValue *sv) {
             return 1;
     }
 }
+
+int strada_to_bool_take(StradaValue *sv) {
+    if (STRADA_IS_TAGGED_INT(sv)) return STRADA_TAGGED_INT_VAL(sv) != 0;
+    if (!sv) return 0;
+    int r = strada_to_bool(sv);
+    strada_decref(sv);
+    return r;
+}
+#ifdef __APPLE__
+int strada_to_bool_take_impl(StradaValue *sv) { return strada_to_bool_take(sv); }
+#else
+int strada_to_bool_take_impl(StradaValue *sv) __attribute__((alias("strada_to_bool_take")));
+#endif
 
 /* ===== BINARY-SAFE STRING COMPARISON =====
  * Strings may hold NUL bytes (binary data, "a\0b"), so compare bytes and
@@ -4801,6 +4834,34 @@ static void hv_compound_fallback(StradaValue *sv, const char *key,
 /* op is '+', '-', '*', '/' or '.'. rhs is BORROWED. hash must equal
  * strada_hash_string(key) (codegen passes a compile-time djb2 for
  * ASCII literal keys). */
+int strada_hv_check_lock(StradaValue *sv, const char *key) {
+    if (!sv || STRADA_IS_TAGGED_INT(sv) || !sv->meta || !sv->meta->is_hash_locked) return 1;
+    StradaHash *hv = strada_deref_hash(sv);
+    if (hv && strada_hash_exists(hv, key)) return 1;
+    if (!sv->meta->locked_keys) {
+        char msg[256];
+        snprintf(msg, sizeof(msg),
+                 "Attempt to access disallowed key '%s' in a restricted hash",
+                 key);
+        strada_die(msg);
+        return 0;
+    }
+    StradaArray *ak = (StradaArray *)sv->meta->locked_keys;
+    if (ak) {
+        for (size_t i = 0; i < ak->size; i++) {
+            StradaValue *e = ak->elements[ak->head + i];
+            if (e && !STRADA_IS_TAGGED_INT(e) && e->type == STRADA_STR
+                && e->value.pv && strcmp(e->value.pv, key) == 0) return 1;
+        }
+    }
+    char msg[256];
+    snprintf(msg, sizeof(msg),
+             "Attempt to access disallowed key '%s' in a restricted hash",
+             key);
+    strada_die(msg);
+    return 0;
+}
+
 static void strada_hv_compound_len(StradaValue *sv, const char *key, size_t key_sz, unsigned int hash,
                                    StradaValue *rhs, int op);
 void strada_hv_compound_ph(StradaValue *sv, const char *key, unsigned int hash,
@@ -5860,17 +5921,23 @@ StradaValue* strada_concat_sv(StradaValue *a, StradaValue *b) {
         }
     }
 
-    /* Single allocation for result */
-    char *result = sr_xmalloc(len_a + len_b + 1);
-    if (len_a > 0) memcpy(result, str_a, len_a);
-    if (len_b > 0) memcpy(result + len_a, str_b, len_b);
-    result[len_a + len_b] = '\0';
+    /* Single allocation directly into StradaString */
+    size_t total64 = len_a + len_b;
+    if (total64 > UINT32_MAX) {
+        fprintf(stderr, "strada: string concat exceeds 4GB limit\n");
+        abort();
+    }
+    uint32_t total = (uint32_t)total64;
+    StradaString *ss = ss_new_uninit(total);
+    if (len_a > 0) memcpy(ss->data, str_a, len_a);
+    if (len_b > 0) memcpy(ss->data + len_a, str_b, len_b);
+    ss->data[total] = '\0';
 
     /* Create result StradaValue directly */
     StradaValue *sv = strada_value_alloc();
     sv->type = STRADA_STR;
     sv->refcount = 1;
-    sv->value.pv = ss_alloc_pv(result, len_a + len_b);
+    sv->value.pv = ss->data;
     /* Compute ASCII flag (bit 63) from the operands instead of rescanning
      * the combined buffer: STR operands already carry the flag, numeric
      * conversions are always ASCII, and only strada_to_str results
@@ -5883,8 +5950,8 @@ StradaValue* strada_concat_sv(StradaValue *a, StradaValue *b) {
     int b_ascii = (b && !STRADA_IS_TAGGED_INT(b) && b->type == STRADA_STR && b->value.pv)
                       ? STRADA_STR_IS_ASCII(b)
                       : (heap_b ? ((_str_flags(str_b, len_b) & STRADA_ASCII_FLAG) != 0) : 1);
-    sv->struct_size = (a_ascii && b_ascii) ? ((len_a + len_b) | STRADA_ASCII_FLAG)
-                                           : (len_a + len_b);
+    sv->struct_size = (a_ascii && b_ascii) ? ((size_t)total | STRADA_ASCII_FLAG)
+                                           : (size_t)total;
     /* Propagate SVf_UTF8: if either operand was char-oriented (UTF-8
      * flagged), the result is also char-oriented. Mirrors Perl's
      * "UTF8 contagion" so `decode(...) . "byte"` keeps char semantics
@@ -5895,7 +5962,6 @@ StradaValue* strada_concat_sv(StradaValue *a, StradaValue *b) {
     if (a_utf8 || b_utf8) {
         sv->struct_size |= STRADA_UTF8_FLAG;
     }
-    free(result);
     if (heap_a) free(heap_a);
     if (heap_b) free(heap_b);
     if (a_fetched) strada_decref(a_fetched);
@@ -5996,6 +6062,81 @@ StradaValue* strada_concat_cstr_sv(const char *prefix, size_t prefix_len, Strada
     return sv;
 }
 
+/* Concat a StradaValue with a C string literal suffix, avoiding intermediate SV allocation */
+StradaValue* strada_concat_sv_cstr(StradaValue *a, const char *suffix, size_t suffix_len) {
+    StradaValue *a_fetched = NULL;
+    if (a && !STRADA_IS_TAGGED_INT(a) && a->meta && a->meta->is_tied && a->meta->tied_obj) {
+        a_fetched = strada_tied_scalar_fetch(a);
+        a = a_fetched;
+    }
+
+    const char *str_a = "";
+    size_t len_a = 0;
+    char buf_a[32];
+    char *heap_a = NULL;
+
+    if (STRADA_IS_TAGGED_INT(a)) {
+        len_a = strada_fast_itoa(STRADA_TAGGED_INT_VAL(a), buf_a);
+        str_a = buf_a;
+    } else if (a) {
+        if (a->type == STRADA_STR && a->value.pv) {
+            str_a = a->value.pv;
+            len_a = STRADA_STR_BYTELEN(a);
+        } else if (a->type == STRADA_INT) {
+            if (a->struct_size & STRADA_UV_FLAG)
+                len_a = (size_t)snprintf(buf_a, sizeof(buf_a), "%llu", (unsigned long long)(uint64_t)a->value.iv);
+            else
+                len_a = strada_fast_itoa(a->value.iv, buf_a);
+            str_a = buf_a;
+        } else if (a->type == STRADA_NUM) {
+            len_a = strada_format_double(a->value.nv, buf_a, sizeof(buf_a));
+            str_a = buf_a;
+        } else if ((a->type == STRADA_REF && a->value.ptr) || SV_BLESSED(a)) {
+            heap_a = strada_to_str(a);
+            if (heap_a) { str_a = heap_a; len_a = strlen(heap_a); }
+        } else if (a->type == STRADA_FILEHANDLE) {
+            heap_a = strada_to_str(a);
+            if (heap_a) { str_a = heap_a; len_a = strlen(heap_a); }
+        } else if (a->type == STRADA_CLOSURE || a->type == STRADA_CPOINTER) {
+            heap_a = strada_to_str(a);
+            if (heap_a) { str_a = heap_a; len_a = strlen(heap_a); }
+        } else if (a->type == STRADA_ARRAY) {
+            int64_t n = a->value.av ? (int64_t)strada_array_length(a->value.av) : 0;
+            len_a = strada_fast_itoa(n, buf_a);
+            str_a = buf_a;
+        }
+    }
+
+    size_t total64 = len_a + suffix_len;
+    if (total64 > UINT32_MAX) {
+        fprintf(stderr, "strada: string concat exceeds 4GB limit\n");
+        abort();
+    }
+    uint32_t total = (uint32_t)total64;
+    StradaString *ss = ss_new_uninit(total);
+    if (len_a > 0) memcpy(ss->data, str_a, len_a);
+    if (suffix_len > 0) memcpy(ss->data + len_a, suffix, suffix_len);
+    ss->data[total] = '\0';
+
+    StradaValue *sv = strada_value_alloc();
+    sv->type = STRADA_STR;
+    sv->refcount = 1;
+    sv->value.pv = ss->data;
+    int a_ascii = (a && !STRADA_IS_TAGGED_INT(a) && a->type == STRADA_STR && a->value.pv)
+                      ? STRADA_STR_IS_ASCII(a)
+                      : (heap_a ? ((_str_flags(str_a, len_a) & STRADA_ASCII_FLAG) != 0) : 1);
+    int suffix_ascii = (_str_flags(suffix, suffix_len) & STRADA_ASCII_FLAG) != 0;
+    sv->struct_size = (a_ascii && suffix_ascii) ? ((size_t)total | STRADA_ASCII_FLAG)
+                                                : (size_t)total;
+    if ((a && !STRADA_IS_TAGGED_INT(a) && a->type == STRADA_STR && STRADA_STR_IS_UTF8(a))
+        || (!suffix_ascii && utf8_is_valid(suffix, suffix_len))) {
+        sv->struct_size |= STRADA_UTF8_FLAG;
+    }
+    if (heap_a) free(heap_a);
+    if (a_fetched) strada_decref(a_fetched);
+    return sv;
+}
+
 /* In-place string concatenation for $s = $s . expr and $s .= expr patterns.
  * CONSUMES a (reuses if refcount==1, otherwise decrefs after creating new).
  * BORROWS b (caller handles cleanup).
@@ -6042,7 +6183,7 @@ StradaValue* strada_concat_inplace(StradaValue *a, StradaValue *b) {
      * keys()/each() hand out zero-copy SS shares, and mutating or realloc'ing
      * a shared SS would corrupt the hash key it came from. */
     if (a && !STRADA_IS_TAGGED_INT(a) && a->type == STRADA_STR && a->refcount == 1 && a->value.pv
-        && SS_FROM_PV(a->value.pv)->refcount == 1) {
+        && !a->meta && SS_FROM_PV(a->value.pv)->refcount == 1) {
         size_t len_a = STRADA_STR_BYTELEN(a);
         size_t new_len = len_a + len_b;
         /* StradaString.len is uint32_t — bail loudly rather than silently
@@ -6118,7 +6259,7 @@ StradaValue* strada_concat_inplace_cstr(StradaValue *a, const char *str_b, size_
     /* SS refcount check: see strada_concat_inplace — never mutate a shared
      * StradaString (zero-copy keys()/each() shares). */
     if (a && !STRADA_IS_TAGGED_INT(a) && a->type == STRADA_STR && a->refcount == 1 && a->value.pv
-        && SS_FROM_PV(a->value.pv)->refcount == 1) {
+        && !a->meta && SS_FROM_PV(a->value.pv)->refcount == 1) {
         size_t len_a = STRADA_STR_BYTELEN(a);
         size_t new_len = len_a + len_b;
         /* StradaString.len is uint32_t — abort cleanly rather than truncate. */
@@ -6159,10 +6300,8 @@ StradaValue* strada_concat_inplace_cstr(StradaValue *a, const char *str_b, size_
         a->struct_size = new_flags;
         return a;
     }
-    /* Slow path: create new string */
-    StradaValue *b_sv = strada_new_str_lit(str_b, len_b);
-    StradaValue *result = strada_concat_sv(a, b_sv);
-    strada_decref(b_sv);
+    /* Slow path: create new string without temporary literal SV */
+    StradaValue *result = strada_concat_sv_cstr(a, str_b, len_b);
     strada_decref(a);
     return result;
 }
@@ -10096,6 +10235,7 @@ static void strada_snapshot_exception_trace(void) {
 #endif
 static STRADA_CLEANUP_TLS StradaValue *strada_pending_cleanup[STRADA_MAX_PENDING_CLEANUP];
 static STRADA_CLEANUP_TLS int strada_pending_cleanup_count = 0;
+static STRADA_CLEANUP_TLS int strada_pending_cleanup_overflow = 0;
 /* The value a pushed variable held when pushed. Never released from here:
  * it only keeps that value visibly referenced, so a leak checker run when
  * the program exits from deep inside (exit() in a callee) doesn't report
@@ -10103,8 +10243,10 @@ static STRADA_CLEANUP_TLS int strada_pending_cleanup_count = 0;
 static STRADA_CLEANUP_TLS StradaValue *strada_pending_cleanup_seen[STRADA_MAX_PENDING_CLEANUP];
 
 void strada_cleanup_push(StradaValue *sv) {
-    if (strada_pending_cleanup_count < STRADA_MAX_PENDING_CLEANUP)
+    if (__builtin_expect(strada_pending_cleanup_count < STRADA_MAX_PENDING_CLEANUP && strada_pending_cleanup_overflow == 0, 1))
         strada_pending_cleanup[strada_pending_cleanup_count++] = sv;
+    else
+        strada_pending_cleanup_overflow++;
 }
 /* A local variable or parameter is pushed by ADDRESS (tagged with bit 1
  * bit): it may be reassigned after the push, and unwinding must release the
@@ -10112,9 +10254,11 @@ void strada_cleanup_push(StradaValue *sv) {
  * already be freed). The throw drains the stack before longjmp'ing, while
  * the frames holding these variables still exist. */
 void strada_cleanup_push_slot(StradaValue **slot) {
-    if (strada_pending_cleanup_count < STRADA_MAX_PENDING_CLEANUP) {
+    if (__builtin_expect(strada_pending_cleanup_count < STRADA_MAX_PENDING_CLEANUP && strada_pending_cleanup_overflow == 0, 1)) {
         strada_pending_cleanup_seen[strada_pending_cleanup_count] = *slot;
         strada_pending_cleanup[strada_pending_cleanup_count++] = (StradaValue *)((uintptr_t)slot | 2);
+    } else {
+        strada_pending_cleanup_overflow++;
     }
 }
 /* Entries: a value (pointer, or a tagged int: bit 0 set), or a variable's
@@ -10130,13 +10274,35 @@ static inline void strada_cleanup_release(StradaValue *e) {
     }
 }
 void strada_cleanup_pop(void) {
-    if (strada_pending_cleanup_count > 0)
+    if (__builtin_expect(strada_pending_cleanup_overflow > 0, 0))
+        strada_pending_cleanup_overflow--;
+    else if (strada_pending_cleanup_count > 0)
         strada_pending_cleanup_count--;
+}
+void strada_cleanup_pop_decref(StradaValue *sv) {
+    if (__builtin_expect(strada_pending_cleanup_overflow > 0, 0))
+        strada_pending_cleanup_overflow--;
+    else if (strada_pending_cleanup_count > 0)
+        strada_pending_cleanup_count--;
+    if (sv && !STRADA_IS_TAGGED_INT(sv))
+        strada_decref(sv);
+}
+void strada_cleanup_pop_decref_n(int n) {
+    while (n > 0) {
+        n--;
+        if (__builtin_expect(strada_pending_cleanup_overflow > 0, 0)) {
+            strada_pending_cleanup_overflow--;
+        } else if (strada_pending_cleanup_count > 0) {
+            StradaValue *e = strada_pending_cleanup[--strada_pending_cleanup_count];
+            strada_cleanup_release(e);
+        }
+    }
 }
 
 /* Non-inline versions kept for dlsym/dynamic linking compatibility */
 
 void strada_cleanup_drain(void) {
+    strada_pending_cleanup_overflow = 0;
     while (strada_pending_cleanup_count > 0) {
         StradaValue *sv = strada_pending_cleanup[--strada_pending_cleanup_count];
         strada_cleanup_release(sv);
@@ -10145,18 +10311,32 @@ void strada_cleanup_drain(void) {
 
 /* Get current cleanup stack depth (for saving at try entry) */
 int strada_cleanup_mark(void) {
-    return strada_pending_cleanup_count;
+    return strada_pending_cleanup_count + strada_pending_cleanup_overflow;
 }
 
 /* Restore cleanup stack to a saved depth (pop without decref, for normal try exit) */
 void strada_cleanup_restore(int mark) {
-    if (mark >= 0 && mark <= strada_pending_cleanup_count) {
+    if (mark < 0) return;
+    int total = strada_pending_cleanup_count + strada_pending_cleanup_overflow;
+    if (mark > total) return;
+    if (mark >= strada_pending_cleanup_count) {
+        strada_pending_cleanup_overflow = mark - strada_pending_cleanup_count;
+    } else {
+        strada_pending_cleanup_overflow = 0;
         strada_pending_cleanup_count = mark;
     }
 }
 
 /* Drain cleanup stack down to a saved depth (decref and pop, for exception) */
 void strada_cleanup_drain_to(int mark) {
+    if (mark < 0) mark = 0;
+    if (mark >= strada_pending_cleanup_count) {
+        int want_ovf = mark - strada_pending_cleanup_count;
+        if (want_ovf < strada_pending_cleanup_overflow)
+            strada_pending_cleanup_overflow = want_ovf;
+        return;
+    }
+    strada_pending_cleanup_overflow = 0;
     while (strada_pending_cleanup_count > mark) {
         StradaValue *sv = strada_pending_cleanup[--strada_pending_cleanup_count];
         strada_cleanup_release(sv);
@@ -21637,6 +21817,22 @@ StradaValue* strada_anon_hash_take_ph(int count, ...) {
     return r;
 }
 
+StradaValue* strada_anon_hash_mask_ph(int count, uint32_t take_mask, ...) {
+    StradaValue *sv = strada_new_hash_presized(count > 0 ? count : 1);
+    StradaHash *hv = sv->value.hv;
+    va_list args;
+    va_start(args, take_mask);
+    for (int i = 0; i < count; i++) {
+        const char *key = va_arg(args, const char*);
+        unsigned int kh = va_arg(args, unsigned int);
+        StradaValue *val = va_arg(args, StradaValue*);
+        if ((i >= 32 || !((take_mask >> i) & 1u)) && val) strada_incref(val);
+        strada_hash_set_take_ph(hv, key, kh, val);
+    }
+    va_end(args);
+    return strada_ref_create_take(sv);
+}
+
 StradaValue* strada_anon_hash(int count, ...) {
     /* Create anonymous hash: { key => val, ... }
      * Presized: small literals ({ "l" => ..., "r" => ... } records) hit the
@@ -21692,6 +21888,46 @@ StradaValue* strada_anon_array(int count, ...) {
     va_end(args);
 
     /* Return as reference - take ownership since we just created the array */
+    return strada_ref_create_take(sv);
+}
+
+StradaValue* strada_anon_array_take(int count, uint32_t take_mask, ...) {
+    StradaValue *sv = strada_value_alloc();
+    sv->type = STRADA_ARRAY;
+    sv->refcount = 1;
+    sv->value.av = (count > 0) ? strada_array_new_cap((size_t)count) : strada_array_new();
+    strada_memprof_alloc(STRADA_ARRAY, sizeof(StradaValue) + sizeof(StradaArray));
+
+    va_list args;
+    va_start(args, take_mask);
+    StradaArray *av = sv->value.av;
+    for (int i = 0; i < count; i++) {
+        StradaValue *elem = va_arg(args, StradaValue*);
+        if (i >= 32 || !((take_mask >> i) & 1u)) {
+            strada_incref(elem);
+        }
+        av->elements[i] = elem;
+    }
+    av->size = (size_t)count;
+    va_end(args);
+    return strada_ref_create_take(sv);
+}
+
+StradaValue* strada_anon_array_owned(int count, ...) {
+    StradaValue *sv = strada_value_alloc();
+    sv->type = STRADA_ARRAY;
+    sv->refcount = 1;
+    sv->value.av = (count > 0) ? strada_array_new_cap((size_t)count) : strada_array_new();
+    strada_memprof_alloc(STRADA_ARRAY, sizeof(StradaValue) + sizeof(StradaArray));
+
+    va_list args;
+    va_start(args, count);
+    StradaArray *av = sv->value.av;
+    for (int i = 0; i < count; i++) {
+        av->elements[i] = va_arg(args, StradaValue*);
+    }
+    av->size = (size_t)count;
+    va_end(args);
     return strada_ref_create_take(sv);
 }
 
@@ -21863,19 +22099,45 @@ StradaValue* strada_new_array_from_av(StradaArray *av) {
 /* ===== VARIADIC FUNCTION SUPPORT ===== */
 
 StradaValue* strada_pack_args(int count, ...) {
-    /* Pack variable arguments into an array */
-    StradaValue *array = strada_new_array();
-    
+    StradaValue *sv = strada_value_alloc();
+    sv->type = STRADA_ARRAY;
+    sv->refcount = 1;
+    sv->value.av = (count > 0) ? strada_array_new_cap((size_t)count) : strada_array_new();
+    strada_memprof_alloc(STRADA_ARRAY, sizeof(StradaValue) + sizeof(StradaArray));
+
     va_list args;
     va_start(args, count);
-    
+    StradaArray *av = sv->value.av;
     for (int i = 0; i < count; i++) {
         StradaValue *arg = va_arg(args, StradaValue*);
-        strada_array_push(array->value.av, arg);
+        strada_incref(arg);
+        av->elements[i] = arg;
     }
-    
+    av->size = (size_t)count;
     va_end(args);
-    return array;
+    return sv;
+}
+
+StradaValue* strada_pack_args_take(int count, uint32_t take_mask, ...) {
+    StradaValue *sv = strada_value_alloc();
+    sv->type = STRADA_ARRAY;
+    sv->refcount = 1;
+    sv->value.av = (count > 0) ? strada_array_new_cap((size_t)count) : strada_array_new();
+    strada_memprof_alloc(STRADA_ARRAY, sizeof(StradaValue) + sizeof(StradaArray));
+
+    va_list args;
+    va_start(args, take_mask);
+    StradaArray *av = sv->value.av;
+    for (int i = 0; i < count; i++) {
+        StradaValue *arg = va_arg(args, StradaValue*);
+        if (i >= 32 || !((take_mask >> i) & 1u)) {
+            strada_incref(arg);
+        }
+        av->elements[i] = arg;
+    }
+    av->size = (size_t)count;
+    va_end(args);
+    return sv;
 }
 
 /* ===== ADDITIONAL UTILITY FUNCTIONS ===== */

@@ -252,6 +252,14 @@ func codegen_new(str $filename, int $debug_info, int $enable_profiling, int $ena
     # helper works equivalently whether called with the program or the cg context).
     $cg{"module_only_mode"} = 0;
     $cg{"module_target"} = "";
+    $cg{"split_dir"} = "";
+    $cg{"split_includes"} = "";
+    $cg{"split_ext_globals"} = "";
+    $cg{"split_fwd_decls"} = "";
+    $cg{"split_markers"} = "";
+    $cg{"split_fn_codes"} = [];
+    $cg{"split_fn_pkgs"} = [];
+    $cg{"split_fn_c0"} = [];
     $cg{"indent"} = 0;
     $cg{"debug_info"} = $debug_info;  # Emit #line directives for debugging
     $cg{"enable_profiling"} = $enable_profiling;  # Emit function profiling code
@@ -557,7 +565,7 @@ func emit_scope_decref_skip(scalar $cg, str $scope_str, int $count, str $cleaned
                         if (is_var_in_list($var_name, $no_push_str) == 1) {
                             emit($cg, "strada_decref(" . $var_name . ");\n");
                         } else {
-                            emit($cg, "strada_cleanup_pop(); strada_decref(" . $var_name . ");\n");
+                            emit($cg, "strada_cleanup_pop_decref(" . $var_name . ");\n");
                         }
                     }
                 }
@@ -578,7 +586,7 @@ func emit_scope_decref_skip(scalar $cg, str $scope_str, int $count, str $cleaned
                             if (is_var_in_list($var_name, $no_push_str) == 1) {
                                 emit($cg, "strada_decref(" . $var_name . ");\n");
                             } else {
-                                emit($cg, "strada_cleanup_pop(); strada_decref(" . $var_name . ");\n");
+                                emit($cg, "strada_cleanup_pop_decref(" . $var_name . ");\n");
                             }
                         }
                     }
@@ -662,7 +670,7 @@ func emit_scope_decref(scalar $cg, str $scope_str, int $count) void {
                     if (is_var_in_list($var_name, $no_push_str) == 1) {
                         emit($cg, "strada_decref(" . $var_name . ");\n");
                     } else {
-                        emit($cg, "strada_cleanup_pop(); strada_decref(" . $var_name . ");\n");
+                        emit($cg, "strada_cleanup_pop_decref(" . $var_name . ");\n");
                     }
                 }
             }
@@ -677,7 +685,7 @@ func emit_scope_decref(scalar $cg, str $scope_str, int $count) void {
                         if (is_var_in_list($var_name, $no_push_str) == 1) {
                             emit($cg, "strada_decref(" . $var_name . ");\n");
                         } else {
-                            emit($cg, "strada_cleanup_pop(); strada_decref(" . $var_name . ");\n");
+                            emit($cg, "strada_cleanup_pop_decref(" . $var_name . ");\n");
                         }
                     }
                 }
@@ -2335,6 +2343,23 @@ func ae_str_before(str $a, str $b) int {
     return 0;
 }
 
+func write_shard_if_changed(str $path, str $content) void {
+    my int $same = 0;
+    my int $fd = core::open_fd($path, "r");
+    if ($fd >= 0) {
+        close_fd($fd);
+        my str $old = slurp($path);
+        if ($old eq $content) {
+            $same = 1;
+        }
+    }
+    if ($same == 0) {
+        spew($path, $content);
+        my str $obj = substr($path, 0, length($path) - 2) . ".o";
+        core::unlink($obj);
+    }
+}
+
 # Get accumulated output as a single string
 func get_output(scalar $cg) str {
     # Get the current output from StringBuilder
@@ -2347,23 +2372,11 @@ func get_output(scalar $cg) str {
         my str $anon_decls = $cg->{"anon_func_decls"};
         my str $oop_decls = $cg->{"oop_fwd_decls"};
 
-        # Build result: preamble + oop_decls + auto_externs + anon_decls + funcs + final
-        my scalar $out_sb = sb_new();
-        sb_append($out_sb, $preamble);
-        if (length($oop_decls) > 0) {
-            sb_append($out_sb, $oop_decls);
-        }
-        # Extern prototypes for cross-module/stdlib functions called but not defined
-        # in this unit (separate compilation). Placed after the preamble (which has
-        # the includes defining StradaValue) and before the function bodies. All
-        # Strada functions use the StradaValue* convention, so an unspecified-arg
-        # `extern StradaValue* name();` is correct; the final link resolves them.
+        # Build auto_externs block once (deterministic insertion sort)
+        my str $ae_section = "";
         my scalar $auto_ext = $cg->{"auto_externs"};
         if (defined($auto_ext)) {
             my array @ae_names = keys(%{$auto_ext});
-            # Deterministic order (ccache-stable) via a bootstrap-safe manual
-            # insertion sort — see ae_str_before. The list is tiny (undeclared
-            # cross-module call names in this TU).
             my int $as_i = 1;
             while ($as_i < size(@ae_names)) {
                 my str $as_key = $ae_names[$as_i];
@@ -2379,21 +2392,105 @@ func get_output(scalar $cg) str {
             my int $ae_i = 0;
             while ($ae_i < size(@ae_names)) {
                 my str $ae_nm = $ae_names[$ae_i];
-                # Skip anything actually defined/declared in this unit (no clash).
                 if (!defined($cg->{"functions"}->{$ae_nm})) {
                     $ae_block = $ae_block . "extern StradaValue* " . $ae_nm . "();\n";
                 }
                 $ae_i = $ae_i + 1;
             }
             if (length($ae_block) > 0) {
-                sb_append($out_sb, "/* Extern prototypes: cross-module/stdlib calls (separate compilation) */\n");
-                sb_append($out_sb, $ae_block);
+                $ae_section = "/* Extern prototypes: cross-module/stdlib calls (separate compilation) */\n" . $ae_block;
             }
         }
+        my str $anon_section = "";
         if (length($anon_decls) > 0) {
-            sb_append($out_sb, "/* Anonymous function forward declarations */\n");
-            sb_append($out_sb, $anon_decls);
-            sb_append($out_sb, "\n");
+            $anon_section = "/* Anonymous function forward declarations */\n" . $anon_decls . "\n";
+        }
+
+        my str $split_dir = "" . $cg->{"split_dir"};
+        if (length($split_dir) > 0) {
+            my scalar $fn_codes = $cg->{"split_fn_codes"};
+            my scalar $fn_pkgs = $cg->{"split_fn_pkgs"};
+            my scalar $fn_c0 = $cg->{"split_fn_c0"};
+            my int $fn_n = size($fn_codes);
+
+            my hash %c_pkgs = ();
+            my int $fi = 0;
+            while ($fi < $fn_n) {
+                if (($fn_c0->[$fi] + 0) == 1) {
+                    my str $cp = "" . $fn_pkgs->[$fi];
+                    if (length($cp) > 0) { $c_pkgs{$cp} = 1; }
+                }
+                $fi = $fi + 1;
+            }
+
+            my int $nbuckets = 24;
+            my array @bucket_sbs = ();
+            my array @bucket_cnt = ();
+            my int $bi = 0;
+            while ($bi < $nbuckets) {
+                push(@bucket_sbs, sb_new());
+                push(@bucket_cnt, 0);
+                $bi = $bi + 1;
+            }
+
+            my scalar $sb0 = sb_new();
+            sb_append($sb0, $preamble);
+            if (length($oop_decls) > 0) { sb_append($sb0, $oop_decls); }
+            if (length($ae_section) > 0) { sb_append($sb0, $ae_section); }
+            if (length($anon_section) > 0) { sb_append($sb0, $anon_section); }
+
+            $fi = 0;
+            while ($fi < $fn_n) {
+                my str $fcode = "" . $fn_codes->[$fi];
+                my str $fpkg = "" . $fn_pkgs->[$fi];
+                if (($fn_c0->[$fi] + 0) == 1 || ($c_pkgs{$fpkg} + 0) == 1) {
+                    sb_append($sb0, $fcode);
+                } else {
+                    my int $bidx = djb2_hash_32($fpkg) % $nbuckets;
+                    if ($bidx < 0) { $bidx = 0 - $bidx; }
+                    sb_append($bucket_sbs[$bidx], $fcode);
+                    $bucket_cnt[$bidx] = $bucket_cnt[$bidx] + 1;
+                }
+                $fi = $fi + 1;
+            }
+            sb_append($sb0, $funcs);
+            sb_append($sb0, $final);
+
+            my str $s0_path = $split_dir . "/shard_00.c";
+            write_shard_if_changed($s0_path, sb_to_string($sb0));
+            my str $manifest = $s0_path . "\n";
+
+            my str $pure_prefix = "" . $cg->{"split_includes"} . $cg->{"split_ext_globals"} . $cg->{"split_fwd_decls"} . $oop_decls . $ae_section . $anon_section . "\n";
+            $bi = 0;
+            while ($bi < $nbuckets) {
+                my int $snum = $bi + 1;
+                my str $tag = "" . $snum;
+                if ($snum < 10) { $tag = "0" . $snum; }
+                my str $spath = $split_dir . "/shard_" . $tag . ".c";
+                if ($bucket_cnt[$bi] > 0) {
+                    write_shard_if_changed($spath, $pure_prefix . sb_to_string($bucket_sbs[$bi]));
+                    $manifest = $manifest . $spath . "\n";
+                } else {
+                    core::unlink($spath);
+                    core::unlink($split_dir . "/shard_" . $tag . ".o");
+                }
+                $bi = $bi + 1;
+            }
+            spew($split_dir . "/shards.txt", $manifest);
+            return "/* Strada split-shard build */\n" . $cg->{"split_markers"};
+        }
+
+        # Build result: preamble + oop_decls + auto_externs + anon_decls + funcs + final
+        my scalar $out_sb = sb_new();
+        sb_append($out_sb, $preamble);
+        if (length($oop_decls) > 0) {
+            sb_append($out_sb, $oop_decls);
+        }
+        if (length($ae_section) > 0) {
+            sb_append($out_sb, $ae_section);
+        }
+        if (length($anon_section) > 0) {
+            sb_append($out_sb, $anon_section);
         }
         sb_append($out_sb, $funcs);
         sb_append($out_sb, $final);
@@ -3315,9 +3412,9 @@ func emit_num_operand(scalar $cg, scalar $expr) void {
         } else {
             # Non-inlineable op: fall through to generic handler
             if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $expr) == 1) {
-                emit($cg, "({ StradaValue *__num_tmp = ");
+                emit($cg, "strada_to_num_take(");
                 gen_expression($cg, $expr);
-                emit($cg, "; double __num_val = strada_to_num(__num_tmp); strada_decref(__num_tmp); __num_val; })");
+                emit($cg, ")");
             } else {
                 emit($cg, "strada_to_num(");
                 gen_expression($cg, $expr);
@@ -3327,10 +3424,9 @@ func emit_num_operand(scalar $cg, scalar $expr) void {
     } else {
         # Check if expression creates a temp that needs cleanup
         if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $expr) == 1) {
-            # Wrap in statement expression to capture and cleanup temp
-            emit($cg, "({ StradaValue *__num_tmp = ");
+            emit($cg, "strada_to_num_take(");
             gen_expression($cg, $expr);
-            emit($cg, "; double __num_val = strada_to_num(__num_tmp); strada_decref(__num_tmp); __num_val; })");
+            emit($cg, ")");
         } else {
             emit($cg, "strada_to_num(");
             gen_expression($cg, $expr);
@@ -3372,9 +3468,9 @@ func emit_int_operand(scalar $cg, scalar $expr) void {
         } else {
             # Non-inlineable op: fall through to generic handler
             if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $expr) == 1) {
-                emit($cg, "({ StradaValue *__int_tmp = ");
+                emit($cg, "strada_to_int_take(");
                 gen_expression($cg, $expr);
-                emit($cg, "; int64_t __int_val; if (STRADA_IS_TAGGED_INT(__int_tmp)) { __int_val = STRADA_TAGGED_INT_VAL(__int_tmp); } else { __int_val = strada_to_int(__int_tmp); strada_decref(__int_tmp); } __int_val; })");
+                emit($cg, ")");
             } else {
                 emit($cg, "strada_to_int(");
                 gen_expression($cg, $expr);
@@ -3438,15 +3534,9 @@ func emit_int_operand(scalar $cg, scalar $expr) void {
             }
         }
         if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $expr) == 1) {
-            if ($is_int_call == 1) {
-                emit($cg, "({ StradaValue *__int_tmp = ");
-                gen_expression($cg, $expr);
-                emit($cg, "; __builtin_expect(STRADA_IS_TAGGED_INT(__int_tmp), 1) ? STRADA_TAGGED_INT_VAL(__int_tmp) : ({ int64_t __int_val = strada_to_int(__int_tmp); strada_decref(__int_tmp); __int_val; }); })");
-            } else {
-                emit($cg, "({ StradaValue *__int_tmp = ");
-                gen_expression($cg, $expr);
-                emit($cg, "; int64_t __int_val = strada_to_int(__int_tmp); strada_decref(__int_tmp); __int_val; })");
-            }
+            emit($cg, "strada_to_int_take(");
+            gen_expression($cg, $expr);
+            emit($cg, ")");
         } else {
             emit($cg, "strada_to_int(");
             gen_expression($cg, $expr);
@@ -3636,6 +3726,106 @@ func expr_is_always_tagged_int(scalar $cg, scalar $expr) int {
     if ($type == NODE_INT_LITERAL() && $cg) {
         if (bytes("" . $expr->{"value"}) < 16) {
             return 1;
+        }
+        return 0;
+    }
+    return 0;
+}
+
+# Conservative predicate: returns 1 only when evaluating $expr cannot execute
+# strada_throw / longjmp, so owned sibling temporaries evaluated alongside it
+# in a direct argument list (strada_pack_args_take / strada_anon_array_take /
+# strada_anon_hash_mask_ph) cannot leak on an exception unwind.
+func expr_cannot_throw(scalar $cg, scalar $expr) int {
+    if (!$expr) { return 1; }
+    my int $t = $expr->{"type"} + 0;
+    if ($t == NODE_INT_LITERAL() || $t == NODE_NUM_LITERAL() || $t == NODE_STR_LITERAL() || $t == NODE_UNDEF()) {
+        return 1;
+    }
+    if ($t == NODE_ANON_FUNC() || $t == NODE_FUNC_REF()) {
+        return 1;
+    }
+    if ($t == NODE_VARIABLE()) {
+        if ($cg->{"uses_tie"} == 0) {
+            return 1;
+        }
+        return 0;
+    }
+    if ($t == NODE_REF()) {
+        if ($cg->{"uses_tie"} == 0) {
+            return expr_cannot_throw($cg, $expr->{"target"});
+        }
+        return 0;
+    }
+    if ($t == NODE_HASH_ACCESS()) {
+        if ($cg->{"uses_tie"} == 0) {
+            if (expr_cannot_throw($cg, $expr->{"hash"}) == 1 && expr_cannot_throw($cg, $expr->{"key"}) == 1) {
+                return 1;
+            }
+        }
+        return 0;
+    }
+    if ($t == NODE_DEREF_HASH()) {
+        if ($cg->{"uses_tie"} == 0) {
+            if (expr_cannot_throw($cg, $expr->{"ref"}) == 1 && expr_cannot_throw($cg, $expr->{"key"}) == 1) {
+                return 1;
+            }
+        }
+        return 0;
+    }
+    if ($t == NODE_SUBSCRIPT()) {
+        if ($cg->{"uses_tie"} == 0) {
+            if (expr_cannot_throw($cg, $expr->{"array"}) == 1 && expr_cannot_throw($cg, $expr->{"index"}) == 1) {
+                return 1;
+            }
+        }
+        return 0;
+    }
+    if ($t == NODE_DEREF_ARRAY()) {
+        if ($cg->{"uses_tie"} == 0) {
+            if (expr_cannot_throw($cg, $expr->{"ref"}) == 1 && expr_cannot_throw($cg, $expr->{"index"}) == 1) {
+                return 1;
+            }
+        }
+        return 0;
+    }
+    if ($t == NODE_ANON_ARRAY()) {
+        my scalar $els = $expr->{"elements"};
+        my int $ec = $expr->{"element_count"} + 0;
+        my int $ei = 0;
+        while ($ei < $ec) {
+            my scalar $el = $els->[$ei];
+            if ($el->{"type"} == NODE_SPREAD() || array_flatten_kind($cg, $el) > 0) { return 0; }
+            if (expr_cannot_throw($cg, $el) == 0) { return 0; }
+            $ei = $ei + 1;
+        }
+        return 1;
+    }
+    if ($t == NODE_ANON_HASH()) {
+        if ($expr->{"key_exprs"}) {
+            my scalar $kes = $expr->{"key_exprs"};
+            my int $pc0 = $expr->{"pair_count"} + 0;
+            my int $ki = 0;
+            while ($ki < $pc0) {
+                if ($kes->[$ki]) { return 0; }
+                $ki = $ki + 1;
+            }
+        }
+        my scalar $vs = $expr->{"values"};
+        my int $pc = $expr->{"pair_count"} + 0;
+        my int $vi = 0;
+        while ($vi < $pc) {
+            if (expr_cannot_throw($cg, $vs->[$vi]) == 0) { return 0; }
+            $vi = $vi + 1;
+        }
+        return 1;
+    }
+    if ($t == NODE_BINARY_OP()) {
+        my str $op = "" . $expr->{"op"};
+        if ($op eq "." && $cg->{"has_overloads"} == 0 && $cg->{"uses_tie"} == 0) {
+            if (expr_cannot_throw($cg, $expr->{"left"}) == 1 && expr_cannot_throw($cg, $expr->{"right"}) == 1) {
+                return 1;
+            }
         }
         return 0;
     }
@@ -4566,9 +4756,9 @@ func emit_condition(scalar $cg, scalar $expr) void {
     # Fallback: use strada_to_bool on the expression
     # If expression produces temporary value, capture and free it
     if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $expr) == 1) {
-        emit($cg, "({ StradaValue *__cond_tmp = ");
+        emit($cg, "strada_to_bool_take(");
         gen_expression($cg, $expr);
-        emit($cg, "; int __cond_res = strada_to_bool(__cond_tmp); strada_decref(__cond_tmp); __cond_res; })");
+        emit($cg, ")");
     } else {
         emit($cg, "strada_to_bool(");
         gen_expression($cg, $expr);

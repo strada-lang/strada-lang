@@ -1,0 +1,239 @@
+#!/usr/bin/env strada
+# Valgrind leak, UAF, and exception-unwind regression test for compact codegen
+# and runtime helpers:
+#   - strada_pack_args_take (mixed borrowed/owned, nested literals, throwing callee,
+#     owned receiver, fallback mid-arg throw)
+#   - strada_anon_array_take & strada_anon_array_owned (>30 elements, mid-elem throw)
+#   - strada_anon_hash_mask_ph (nested containers, duplicate keys, mid-val throw)
+#   - strada_cleanup_pop_decref & strada_cleanup_pop_decref_n (1..5 temp args, defaults)
+#   - strada_to_int_take / strada_to_num_take / strada_to_bool_take
+#   - strada_concat_cstr_sv / strada_concat_sv_cstr / strada_concat_inplace_cstr (UTF-8 & NUL)
+
+package FastBox;
+
+func new(str $tag) scalar {
+    my hash %self = ("tag" => $tag, "count" => 0);
+    return bless(\%self, "FastBox");
+}
+
+func combine(scalar $self, str $a, scalar $b, scalar $arr, scalar $h) str {
+    $self->{"count"} = $self->{"count"} + 1;
+    return $self->{"tag"} . ":" . $a . ":" . $b . ":" . size(@{$arr}) . ":" . $h->{"msg"};
+}
+
+func explode(scalar $self, str $a, scalar $b, scalar $c) str {
+    die("explode:" . $self->{"tag"} . ":" . $a);
+    return "";
+}
+
+func devirt_calc(scalar $self, str $x, str $y = "def_y") str {
+    if ($x eq "throw") {
+        die("devirt_boom");
+    }
+    return $self->{"tag"} . "/" . $x . "/" . $y;
+}
+
+package main;
+
+func boom_str(str $label) str {
+    die("boom:" . $label);
+    return "";
+}
+
+func make_str(int $n) str {
+    return "heap_str_" . $n;
+}
+
+func make_num_str(int $n) str {
+    return "" . ($n + 0.5);
+}
+
+func multi_user_args(str $a, str $b, str $c, str $d = "d_default", int $flag = 7) str {
+    if ($a eq "FAIL") {
+        die("multi_fail");
+    }
+    return $a . "|" . $b . "|" . $c . "|" . $d . "|" . $flag;
+}
+
+func early_scope_returns(int $mode, str $in) str {
+    my str $outer = "outer_" . $in;
+    if ($mode == 1) {
+        my str $inner1 = "i1_" . $outer;
+        return $inner1;
+    }
+    {
+        my str $inner2 = "i2_" . $outer;
+        my array @tmp = ($outer, $inner2, "lit");
+        if ($mode == 2) {
+            return join(",", @tmp);
+        }
+    }
+    return $outer;
+}
+
+func main() int {
+    my str $shared = "borrowed_val_" . 42;
+    my hash %row = ("id" => "99", "title" => "Hello");
+    my scalar $row_ref = \%row;
+
+    for (my int $iter = 0; $iter < 50; $iter = $iter + 1) {
+        # 1. strada_pack_args_take: mixed borrowed + owned + nested containers
+        my scalar $box = FastBox::new("B" . $iter);
+        my str $res = $box->combine(
+            "lit_a",
+            $shared,
+            ["x", $shared, $row_ref->{"id"}, 123],
+            {"msg" => "ok_" . $shared, "sub" => ["p", "q"], "row_t" => $row_ref->{"title"}}
+        );
+        if (index($res, "borrowed_val_42:4:ok_borrowed_val_42") < 0) {
+            say("FAIL 1: " . $res);
+            return 1;
+        }
+
+        # Owned receiver + strada_pack_args_take
+        my str $res2 = FastBox::new("Tmp")->combine("k", $shared, [1, "two"], {"msg" => "m"});
+        if ($res2 ne "Tmp:k:borrowed_val_42:2:m") {
+            say("FAIL 2: " . $res2);
+            return 1;
+        }
+
+        # 2. Method throwing with strada_pack_args_take + owned receiver
+        my int $caught = 0;
+        try {
+            FastBox::new("ThrowRecv")->explode("owned_lit", $shared, ["nested", $shared]);
+        } catch ($e) {
+            if (index("" . $e, "explode:ThrowRecv:owned_lit") >= 0) {
+                $caught = 1;
+            }
+        }
+        if ($caught != 1) {
+            say("FAIL 3");
+            return 1;
+        }
+
+        # 3. Fallback method call when a later argument throws mid-evaluation
+        $caught = 0;
+        try {
+            $box->combine(make_str($iter), $shared, [make_str($iter + 1)], {"msg" => boom_str("mid")});
+        } catch ($e) {
+            if (index("" . $e, "boom:mid") >= 0) {
+                $caught = 1;
+            }
+        }
+        if ($caught != 1) {
+            say("FAIL 4");
+            return 1;
+        }
+
+        # 4. Devirtualized method call with defaults + throw
+        my str $dv = $box->devirt_calc(make_str($iter));
+        if (index($dv, "/def_y") < 0) {
+            say("FAIL 5: " . $dv);
+            return 1;
+        }
+        $caught = 0;
+        try {
+            $box->devirt_calc("throw", make_str($iter));
+        } catch ($e) {
+            $caught = 1;
+        }
+        if ($caught != 1) {
+            say("FAIL 6");
+            return 1;
+        }
+
+        # 5. strada_anon_array_owned (>30 owned elements) & mixed >30 elements
+        my scalar $big_owned = [
+            "s01", "s02", "s03", "s04", "s05", "s06", "s07", "s08", "s09", "s10",
+            "s11", "s12", "s13", "s14", "s15", "s16", "s17", "s18", "s19", "s20",
+            "s21", "s22", "s23", "s24", "s25", "s26", "s27", "s28", "s29", "s30",
+            "s31", "s32", "s33", "s34", "s35"
+        ];
+        if (size(@{$big_owned}) != 35 || $big_owned->[34] ne "s35") {
+            say("FAIL 7");
+            return 1;
+        }
+        my scalar $big_mixed = [
+            "m01", "m02", "m03", "m04", "m05", "m06", "m07", "m08", "m09", "m10",
+            "m11", "m12", "m13", "m14", "m15", "m16", "m17", "m18", "m19", "m20",
+            "m21", "m22", "m23", "m24", "m25", "m26", "m27", "m28", "m29", "m30",
+            "m31", $shared, "m33"
+        ];
+        if (size(@{$big_mixed}) != 33 || $big_mixed->[31] ne $shared) {
+            say("FAIL 8");
+            return 1;
+        }
+
+        # 6. Duplicate keys in strada_anon_hash_mask_ph + mid-elem/mid-val throws
+        my scalar $dup_h = {
+            "k" => "first_" . $shared,
+            "keep" => ["a", $shared],
+            "k" => "second_" . $shared
+        };
+        if ($dup_h->{"k"} ne "second_" . $shared) {
+            say("FAIL 9: " . $dup_h->{"k"});
+            return 1;
+        }
+        $caught = 0;
+        try {
+            my scalar $bad_arr = [make_str(1), make_str(2), boom_str("arr")];
+        } catch ($e) {
+            $caught = 1;
+        }
+        if ($caught != 1) { say("FAIL 10"); return 1; }
+
+        # 7. User calls: 1..4 owned temp args + default param + throw unwind
+        my str $u1 = multi_user_args(make_str(1), make_str(2), make_str(3));
+        if ($u1 ne "heap_str_1|heap_str_2|heap_str_3|d_default|7") {
+            say("FAIL 11: " . $u1);
+            return 1;
+        }
+        $caught = 0;
+        try {
+            multi_user_args("FAIL", make_str(10), make_str(20), make_str(30));
+        } catch ($e) {
+            $caught = 1;
+        }
+        if ($caught != 1) { say("FAIL 12"); return 1; }
+
+        # 8. Multi-concat + cstr prefix/suffix concat (UTF-8 and embedded NUL)
+        my str $mc = "pre:" . make_str($iter) . ":mid:" . $box->devirt_calc("ok") . ":end";
+        if (index($mc, ":mid:") < 0) { say("FAIL 13"); return 1; }
+
+        my str $utf = "café:" . $shared;
+        my str $utf2 = make_str($iter) . ":naïve";
+        if (bytes($utf) != 6 + bytes($shared) || index($utf2, ":naïve") < 0) {
+            say("FAIL 14");
+            return 1;
+        }
+        my str $nul = "a\x00b" . make_str(5) . "c\x00d";
+        if (bytes($nul) != 3 + 10 + 3) {
+            say("FAIL 15: " . bytes($nul));
+            return 1;
+        }
+
+        # 9. strada_to_num_take / strada_to_int_take / strada_to_bool_take + early returns
+        if (!(make_num_str(10) > 10.2 && (make_str(1) ? 1 : 0) == 1)) {
+            say("FAIL 16");
+            return 1;
+        }
+        my int $iv = 100 + make_num_str(2);
+        if ($iv != 102) {
+            say("FAIL 17: " . $iv);
+            return 1;
+        }
+        if (early_scope_returns(1, $shared) ne "i1_outer_" . $shared ||
+            early_scope_returns(2, $shared) ne "outer_" . $shared . ",i2_outer_" . $shared . ",lit") {
+            say("FAIL 18");
+            return 1;
+        }
+    }
+
+    if ($shared ne "borrowed_val_42") {
+        say("FAIL borrowed clobbered: " . $shared);
+        return 1;
+    }
+
+    say("PASS fast codegen leaks");
+    return 0;
+}

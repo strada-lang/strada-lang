@@ -3,10 +3,23 @@
 #ifndef STRADA_RUNTIME_TCC_H
 #define STRADA_RUNTIME_TCC_H
 
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include <stdint.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <setjmp.h>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 /* Forward declarations */
 typedef struct StradaValue StradaValue;
@@ -292,6 +305,7 @@ StradaValue* strada_new_hash_presized(int capacity);
  * ones); _ph increfs like the classic strada_anon_hash. */
 StradaValue* strada_anon_hash_ph(int count, ...);
 StradaValue* strada_anon_hash_take_ph(int count, ...);
+StradaValue* strada_anon_hash_mask_ph(int count, uint32_t take_mask, ...);
 StradaString *strada_intern_attr_ss(const char *key, unsigned int hash);
 StradaValue* strada_new_hash_with_capacity(size_t capacity);
 StradaValue* strada_new_filehandle(FILE *fh);
@@ -530,6 +544,8 @@ StradaValue* strada_deref_hash_value(StradaValue *ref);
 StradaValue* strada_deref_array_value(StradaValue *ref);
 StradaValue* strada_anon_hash(int count, ...);
 StradaValue* strada_anon_array(int count, ...);
+StradaValue* strada_anon_array_take(int count, uint32_t take_mask, ...);
+StradaValue* strada_anon_array_owned(int count, ...);
 StradaValue* strada_array_from_ref(StradaValue *ref);
 StradaValue* strada_hash_from_ref(StradaValue *ref);
 StradaValue* strada_hash_from_flat_array(StradaValue *arr);
@@ -703,6 +719,7 @@ StradaValue* strada_closure_call_method(StradaValue *closure, StradaValue *self,
 
 /* Variadic function support */
 StradaValue* strada_pack_args(int count, ...);
+StradaValue* strada_pack_args_take(int count, uint32_t take_mask, ...);
 
 /* ============================================================
  * Memory Management
@@ -737,6 +754,8 @@ int strada_in_try_block(void);
 void strada_cleanup_push(StradaValue *sv);
 void strada_cleanup_push_slot(StradaValue **slot);
 void strada_cleanup_pop(void);
+void strada_cleanup_pop_decref(StradaValue *sv);
+void strada_cleanup_pop_decref_n(int n);
 void strada_cleanup_drain(void);
 int strada_cleanup_mark(void);
 void strada_cleanup_restore(int mark);
@@ -1204,8 +1223,11 @@ StradaValue* strada_serial_open(const char *device, int baud, const char *config
 StradaValue* strada_tcflush(StradaValue *fd, StradaValue *queue);
 StradaValue* strada_tcdrain(StradaValue *fd);
 
-/* POSIX / Linux fcntl open flags (guarded by #ifndef so __C__ blocks that
- * later include <fcntl.h> or <termios.h> do not clash) */
+/* POSIX / Linux fcntl open flags (include <fcntl.h> first on POSIX so __C__
+ * blocks that later include <fcntl.h> see identical macro definitions) */
+#ifndef _WIN32
+#include <fcntl.h>
+#endif
 #ifndef O_RDONLY
 #define O_RDONLY   0x0
 #endif
@@ -1605,6 +1627,7 @@ void strada_pool_shutdown(void);
 StradaValue* strada_sv_replace_first(StradaValue *sv, const char *find, const char *replace);
 StradaValue* strada_sv_replace_all(StradaValue *sv, const char *find, const char *replace);
 StradaValue* strada_concat_cstr_sv(const char *prefix, size_t prefix_len, StradaValue *b);
+StradaValue* strada_concat_sv_cstr(StradaValue *a, const char *suffix, size_t suffix_len);
 StradaValue* strada_concat_multi(int nparts, ...);
 int strada_regex_match_global(const char *str, const char *pattern, const char *flags, size_t *pos);
 
@@ -1663,8 +1686,15 @@ StradaValue* strada_sleep(StradaValue *seconds);
 void strada_substr_assign(StradaValue **sv_ptr, int64_t offset, int64_t length, const char *replacement);
 int64_t strada_to_int(StradaValue *sv);
 int64_t strada_to_int_impl(StradaValue *sv);
+int64_t strada_to_int_take(StradaValue *sv);
+int64_t strada_to_int_take_impl(StradaValue *sv);
 double strada_to_num(StradaValue *sv);
 double strada_to_num_impl(StradaValue *sv);
+double strada_to_num_take(StradaValue *sv);
+double strada_to_num_take_impl(StradaValue *sv);
+int strada_to_bool_take(StradaValue *sv);
+int strada_to_bool_take_impl(StradaValue *sv);
+int strada_hv_check_lock(StradaValue *sv, const char *key);
 StradaValue* strada_usleep(StradaValue *usecs);
 void strada_hash_set_ss_take(StradaHash *hv, StradaString *key_ss, StradaValue *sv);
 void strada_hash_set_take_ph(StradaHash *hv, const char *key, unsigned int hash, StradaValue *sv);

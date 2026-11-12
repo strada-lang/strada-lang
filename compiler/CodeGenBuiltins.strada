@@ -3159,8 +3159,8 @@ func gen_builtin_g3(scalar $cg, scalar $expr, str $name) int {
             emit($cg, "StradaValue *__mp_r = strada_async_map(__mp_fn, __mp_it, ");
             if ($mp_argc > 2) { gen_expression($cg, $mpargs->[2]); } else { emit($cg, "NULL"); }
             emit($cg, "); ");
-            if ($mp_it_owned == 1) { emit($cg, "strada_cleanup_pop(); strada_decref(__mp_it); "); }
-            if ($mp_fn_owned == 1) { emit($cg, "strada_cleanup_pop(); strada_decref(__mp_fn); "); }
+            if ($mp_it_owned == 1) { emit($cg, "strada_cleanup_pop_decref(__mp_it); "); }
+            if ($mp_fn_owned == 1) { emit($cg, "strada_cleanup_pop_decref(__mp_fn); "); }
             emit($cg, "__mp_r; })");
             return 1;
         }
@@ -3201,8 +3201,8 @@ func gen_builtin_g3(scalar $cg, scalar $expr, str $name) int {
                 emit($cg, ", ");
                 if ($send_v_cleanup == 1) { emit($cg, "__send_v"); } else { gen_expression($cg, $args->[1]); }
                 emit($cg, "); ");
-                if ($send_v_cleanup == 1) { emit($cg, "strada_cleanup_pop(); strada_decref(__send_v); "); }
-                if ($send_c_cleanup == 1) { emit($cg, "strada_cleanup_pop(); strada_decref(__send_c); "); }
+                if ($send_v_cleanup == 1) { emit($cg, "strada_cleanup_pop_decref(__send_v); "); }
+                if ($send_c_cleanup == 1) { emit($cg, "strada_cleanup_pop_decref(__send_c); "); }
                 emit($cg, "strada_undef_static(); })");
             } else {
                 emit($cg, "(strada_channel_send(");
@@ -3219,7 +3219,7 @@ func gen_builtin_g3(scalar $cg, scalar $expr, str $name) int {
             if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $args->[0]) == 1) {
                 emit($cg, "({ StradaValue *__rcv_c = ");
                 gen_expression($cg, $args->[0]);
-                emit($cg, "; strada_cleanup_push(__rcv_c); StradaValue *__rcv_r = strada_channel_recv(__rcv_c); strada_cleanup_pop(); strada_decref(__rcv_c); __rcv_r; })");
+                emit($cg, "; strada_cleanup_push(__rcv_c); StradaValue *__rcv_r = strada_channel_recv(__rcv_c); strada_cleanup_pop_decref(__rcv_c); __rcv_r; })");
             } else {
                 emit($cg, "strada_channel_recv(");
                 gen_expression($cg, $args->[0]);
@@ -8138,10 +8138,10 @@ func gen_builtin_g8(scalar $cg, scalar $expr, str $name) int {
                 }
                 emit($cg, "); ");
                 if ($id_cleanup1 == 1) {
-                    emit($cg, "strada_cleanup_pop(); strada_decref(__id_a1); ");
+                    emit($cg, "strada_cleanup_pop_decref(__id_a1); ");
                 }
                 if ($id_cleanup0 == 1) {
-                    emit($cg, "strada_cleanup_pop(); strada_decref(__id_a0); ");
+                    emit($cg, "strada_cleanup_pop_decref(__id_a0); ");
                 }
                 emit($cg, "__id_res; })");
             } else {
@@ -9636,16 +9636,18 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
             # register owned temps whenever a try could catch the callee's
             # throw - in this function or in any caller (not just a lexical try)
             my int $in_try = cleanup_push_useful($cg);
+            my int $pushed_count = 0;
+            my str $last_pushed = "";
             my int $t = 0;
             while ($t < $arg_count) {
                 if (needs_temp_cleanup($cg, $args->[$t]) == 1) {
                     emit($cg, "StradaValue *__arg" . $t . " = ");
                     gen_expression($cg, $args->[$t]);
                     emit($cg, "; ");
-                    # Register heap temps for cleanup in case the call throws;
-                    # skip tagged ints (both statically known and runtime-tagged).
                     if ($in_try > 0 && expr_is_always_tagged_int($cg, $args->[$t]) == 0) {
-                        emit($cg, "if (!STRADA_IS_TAGGED_INT(__arg" . $t . ")) strada_cleanup_push(__arg" . $t . "); ");
+                        emit($cg, "strada_cleanup_push(__arg" . $t . "); ");
+                        $pushed_count = $pushed_count + 1;
+                        $last_pushed = "__arg" . $t;
                     }
                 }
                 $t = $t + 1;
@@ -9665,7 +9667,9 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
                     }
                     emit($cg, "; ");
                     if ($in_try > 0) {
-                        emit($cg, "if (!STRADA_IS_TAGGED_INT(__arg" . $dt . ")) strada_cleanup_push(__arg" . $dt . "); ");
+                        emit($cg, "strada_cleanup_push(__arg" . $dt . "); ");
+                        $pushed_count = $pushed_count + 1;
+                        $last_pushed = "__arg" . $dt;
                     }
                     $dt = $dt + 1;
                 }
@@ -9720,30 +9724,29 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
                 }
             }
             emit($cg, "); ");
-            # Decref default parameter temps first (reverse push order)
-            if ($func_info) {
-                my int $param_count = $func_info->{"param_count"};
-                my int $dd = $param_count - 1;
-                while ($dd >= $arg_count) {
-                    if ($in_try > 0) {
-                        emit($cg, "if (!STRADA_IS_TAGGED_INT(__arg" . $dd . ")) { strada_cleanup_pop(); strada_decref(__arg" . $dd . "); } ");
-                    } else {
-                        emit($cg, "strada_decref(__arg" . $dd . "); ");
-                    }
-                    $dd = $dd - 1;
+            if ($in_try > 0) {
+                if ($pushed_count == 1) {
+                    emit($cg, "strada_cleanup_pop_decref(" . $last_pushed . "); ");
+                } elsif ($pushed_count > 1) {
+                    emit($cg, "strada_cleanup_pop_decref_n(" . $pushed_count . "); ");
                 }
-            }
-            # Decref temps and pop from cleanup stack (reverse push order)
-            my int $d = $arg_count - 1;
-            while ($d >= 0) {
-                if (needs_temp_cleanup($cg, $args->[$d]) == 1 && expr_is_always_tagged_int($cg, $args->[$d]) == 0) {
-                    if ($in_try > 0) {
-                        emit($cg, "if (!STRADA_IS_TAGGED_INT(__arg" . $d . ")) { strada_cleanup_pop(); strada_decref(__arg" . $d . "); } ");
-                    } else {
+            } else {
+                # Decref default parameter temps first (reverse push order)
+                if ($func_info) {
+                    my int $param_count = $func_info->{"param_count"};
+                    my int $dd = $param_count - 1;
+                    while ($dd >= $arg_count) {
+                        emit($cg, "strada_decref(__arg" . $dd . "); ");
+                        $dd = $dd - 1;
+                    }
+                }
+                my int $d = $arg_count - 1;
+                while ($d >= 0) {
+                    if (needs_temp_cleanup($cg, $args->[$d]) == 1 && expr_is_always_tagged_int($cg, $args->[$d]) == 0) {
                         emit($cg, "strada_decref(__arg" . $d . "); ");
                     }
+                    $d = $d - 1;
                 }
-                $d = $d - 1;
             }
             if ($is_dynamic_call == 1) {
                 emit($cg, "strada_set_call_context(__prev_ctx); ");

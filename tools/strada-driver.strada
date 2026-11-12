@@ -34,6 +34,7 @@ our int $DEBUG_SYMBOLS = 0;
 our int $C_DEBUG_SYMBOLS = 0;
 our str $OUTPUT_FILE = "";
 our int $SHARED_LIB = 0;
+our str $ACTIVE_SHARD_DIR = "";
 our int $STATIC_LIB = 0;
 our int $TCC_MODE = 0;
 our int $OBJECT_ONLY = 0;
@@ -665,24 +666,37 @@ func fast_ld_flag() str {
 func build_gcc_flags() array {
     my array @f = ("-Wall", "-Wextra", "-Wno-unused-variable", "-Wno-unused-function",
                    "-Wno-unused-parameter", "-Wno-return-type", "-Wno-unused-result",
-                   "-Wno-comment", "-std=c99", "-ffunction-sections", "-fdata-sections");
+                   "-Wno-comment", "-std=c99");
+    if ($SHARED_LIB != 1) {
+        @f = (@f, "-ffunction-sections", "-fdata-sections");
+    }
     # GCC-only flags (skip on clang)
     my int $is_clang = cc_is_clang();
     if ($is_clang == 0) {
         @f = (@f, "-Wno-unused-but-set-variable");
         @f = (@f, "-Wno-clobbered");
+        @f = (@f, "-Wno-misleading-indentation");
     }
     if ($IS_DARWIN == 1) { @f = (@f, "-Wno-unused-value"); }
     @f = (@f, "-O" . $OPT_LEVEL);
-    if ($OPT_LEVEL eq "0" && $DEBUG_SYMBOLS != 1 && $C_DEBUG_SYMBOLS != 1) {
+    if ($DEBUG_SYMBOLS != 1 && $C_DEBUG_SYMBOLS != 1) {
         @f = (@f, "-pipe");
-        @f = (@f, "-fno-var-tracking");
-        @f = (@f, "-fno-var-tracking-assignments");
-        @f = (@f, "-fno-stack-protector");
         @f = (@f, "-fno-asynchronous-unwind-tables");
+        if ($is_clang == 0) {
+            @f = (@f, "-fno-var-tracking");
+            @f = (@f, "-fno-var-tracking-assignments");
+        }
+        if ($OPT_LEVEL eq "0") {
+            @f = (@f, "-fno-stack-protector");
+        }
     }
     my str $fld = fast_ld_flag();
-    if ($NO_LTO == 1) {
+    # Single-TU --shared builds do not link strada_runtime.o and have no second
+    # TU to cross-inline with; -flto=auto would re-compile every function a
+    # second time in lto1 during `cc -shared` and bypass ccache.
+    my int $single_tu_shared = ($SHARED_LIB == 1 && size(@EXTRA_C_FILES) == 0
+                                && size(@EXTRA_O_FILES) == 0 && size(@EXTRA_A_FILES) == 0) ? 1 : 0;
+    if ($NO_LTO == 1 || $single_tu_shared == 1) {
         @f = (@f, "-fno-lto");
         if (length($fld) > 0) { @f = (@f, $fld); }
     } elsif (($OPT_LEVEL eq "2" || $OPT_LEVEL eq "3" || $OPT_LEVEL eq "fast") && $is_clang == 0) {
@@ -966,6 +980,43 @@ func main() int {
     }
 
     info("Compiling " . $actual_input . " -> " . $cfile);
+    $ACTIVE_SHARD_DIR = "";
+    if ($SHARED_LIB == 1 && $TCC_MODE == 0 && $KEEP_C == 0
+        && size(@EXTRA_C_FILES) == 0 && size(@EXTRA_O_FILES) == 0 && size(@EXTRA_A_FILES) == 0
+        && env("STRADA_NO_SHARDS") ne "1") {
+        my scalar $ist = core::stat($actual_input);
+        if (defined($ist) && ($ist->{"size"} + 0) >= 131072) {
+            my str $sdir = scratch_path($input, ".shards");
+            if (length($sdir) > 0) {
+                core::mkdir($sdir, 448);
+                my scalar $dst = core::lstat($sdir);
+                if (defined($dst) && (($dst->{"mode"} & 61440) == 16384) && $dst->{"uid"} == core::getuid()) {
+                    my str $stamp_path = $sdir . "/flags.stamp";
+                    my str $stamp = join(" ", @CC) . "\n" . join(" ", @gcc_flags) . "\n"
+                        . join(" ", @include_flags) . "\n"
+                        . core::file_mtime($RUNTIME_DIR . "/strada_runtime.h") . "\n"
+                        . core::file_mtime($STRADAC) . "\n";
+                    my int $stamp_ok = 0;
+                    if (-f $stamp_path) {
+                        if (core::slurp($stamp_path) eq $stamp) { $stamp_ok = 1; }
+                    }
+                    if ($stamp_ok == 0) {
+                        my int $wi = 0;
+                        while ($wi <= 24) {
+                            my str $wtag = ($wi < 10) ? ("0" . $wi) : ("" . $wi);
+                            core::unlink($sdir . "/shard_" . $wtag . ".o");
+                            $wi = $wi + 1;
+                        }
+                        core::spew($stamp_path, $stamp);
+                    } elsif (size(@include_flags) > 0) {
+                        core::unlink($sdir . "/shard_00.o");
+                    }
+                    $ACTIVE_SHARD_DIR = $sdir;
+                    @sc = (@sc, "--split-dir", $sdir);
+                }
+            }
+        }
+    }
     if ($VERBOSE == 1) { @sc = (@sc, "-v"); }
     @sc = (@sc, $actual_input);
     @sc = (@sc, $cfile);
@@ -1041,11 +1092,19 @@ func main() int {
         my int $lli = 0;
         while ($lli < size(@ll)) {
             my str $lib = $ll[$lli];
-            my str $probe = "echo 'int main(void){return 0;}' | " . join(" ", map { sq($_) } @CC) . $probe_ldirs . " -x c - -l" . sq($lib) . " -o /dev/null 2>/dev/null";
-            if (core::system($probe) == 0) {
-                @link_flags = (@link_flags, "-l" . $lib);
-            } else {
-                say(STDERR, "Warning: skipping -l" . $lib . " (declared via link_lib by a used module, but not installed)");
+            my int $already = 0;
+            my int $ali = 0;
+            while ($ali < size(@LINK_LIBS)) {
+                if ($LINK_LIBS[$ali] eq $lib) { $already = 1; last; }
+                $ali = $ali + 1;
+            }
+            if ($already == 0) {
+                my str $probe = "echo 'int main(void){return 0;}' | " . join(" ", map { sq($_) } @CC) . $probe_ldirs . " -x c - -l" . sq($lib) . " -o /dev/null 2>/dev/null";
+                if (core::system($probe) == 0) {
+                    @link_flags = (@link_flags, "-l" . $lib);
+                } else {
+                    say(STDERR, "Warning: skipping -l" . $lib . " (declared via link_lib by a used module, but not installed)");
+                }
             }
             $lli = $lli + 1;
         }
@@ -1131,6 +1190,82 @@ func do_link(str $cfile, str $output, array @gcc_flags, array @include_flags,
         info("Compiling " . $cfile . " -> " . $output . " (shared library)");
         if ($TCC_MODE == 1) {
             link_shared_tcc($cfile, $output, @include_flags, @link_flags, @extra_files);
+        } elsif (length($ACTIVE_SHARD_DIR) > 0 && (-f ($ACTIVE_SHARD_DIR . "/shards.txt"))) {
+            my array @slines = split("\n", core::slurp($ACTIVE_SHARD_DIR . "/shards.txt"));
+            my array @sobjs = ();
+            my array @todo_srcs = ();
+            my array @todo_objs = ();
+            my int $si = 0;
+            while ($si < size(@slines)) {
+                my str $sc_path = trim($slines[$si]);
+                if (length($sc_path) > 0) {
+                    my str $so_path = substr($sc_path, 0, length($sc_path) - 2) . ".o";
+                    push(@sobjs, $so_path);
+                    if (!(-f $so_path)) {
+                        push(@todo_srcs, $sc_path);
+                        push(@todo_objs, $so_path);
+                    }
+                }
+                $si = $si + 1;
+            }
+            my int $ntodo = size(@todo_srcs);
+            if ($ntodo > 0) {
+                my int $njobs = 0 + trim(core::qx("nproc 2>/dev/null"));
+                if ($njobs < 1) { $njobs = 2; }
+                if ($njobs > 16) { $njobs = 16; }
+                info("Compiling " . $ntodo . "/" . size(@sobjs) . " C shards (" . $njobs . " parallel jobs)");
+                my array @pids = ();
+                my int $fail = 0;
+                my int $ti = 0;
+                while ($ti < $ntodo) {
+                    while (size(@pids) >= $njobs) {
+                        my int $wp = shift(@pids);
+                        if (core::waitpid($wp, 0) != 0) { $fail = 1; }
+                    }
+                    my str $tsrc = $todo_srcs[$ti];
+                    my str $tobj = $todo_objs[$ti];
+                    my array @c1 = ();
+                    @c1 = (@c1, @CC);
+                    @c1 = (@c1, "-c", "-fPIC");
+                    @c1 = (@c1, @gcc_flags);
+                    @c1 = (@c1, "-o", $tobj, $tsrc, "-I" . $RUNTIME_DIR);
+                    @c1 = (@c1, @include_flags);
+                    if ($VERBOSE == 1) {
+                        say($CYAN . "$" . $NC . " " . join(" ", @c1));
+                    }
+                    my int $pid = core::fork();
+                    if ($pid == 0) {
+                        my int $rc = core::system_argv($c1[0], @c1);
+                        core::_exit($rc == 0 ? 0 : 1);
+                    } elsif ($pid < 0) {
+                        if (run_argv(@c1) != 0) { $fail = 1; }
+                    } else {
+                        push(@pids, $pid);
+                    }
+                    $ti = $ti + 1;
+                }
+                while (size(@pids) > 0) {
+                    my int $wp = shift(@pids);
+                    if (core::waitpid($wp, 0) != 0) { $fail = 1; }
+                }
+                if ($fail != 0) { error("C compilation failed"); }
+            } else {
+                info("All " . size(@sobjs) . " C shards up to date");
+            }
+            my array @c2 = ();
+            @c2 = (@c2, @CC);
+            @c2 = (@c2, "-shared", "-fPIC");
+            @c2 = (@c2, @gcc_flags);
+            if (length($SHARED_UNDEFINED_FLAG) > 0) { @c2 = (@c2, $SHARED_UNDEFINED_FLAG); }
+            @c2 = (@c2, "-o", $output);
+            @c2 = (@c2, @sobjs);
+            @c2 = (@c2, @extra_files);
+            @c2 = (@c2, "-I" . $RUNTIME_DIR);
+            @c2 = (@c2, @include_flags);
+            @c2 = (@c2, @DLOPEN_LIBS);
+            @c2 = (@c2, "-lm", "-lpthread");
+            @c2 = (@c2, @link_flags);
+            if (run_argv(@c2) != 0) { error("link failed"); }
         } else {
             # Split compile/link so ccache caches the generated-C compile.
             my str $genobj = scratch_path_obj($cfile);
