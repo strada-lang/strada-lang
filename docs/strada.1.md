@@ -111,7 +111,7 @@ Strada is a strongly-typed programming language inspired by Perl. It features Pe
   Omit stack-trace frame tracking from the compiled program. Slightly faster; uncaught exceptions no longer print a Strada call stack.
 
 - **--check**
-  Syntax/semantic check only: stops after semantic analysis, writes no C and runs no C compiler. Reports every error found (with `file:line:col` locations and source snippets). Exit status 0 if clean, non-zero otherwise. Intended for editor integration.
+  Syntax/semantic check only: runs the parser, semantic analysis and the code generator (so unknown `core::`-style builtin names are caught), but writes no C and runs no C compiler. Reports every error found (with `file:line:col` locations and source snippets). Exit status 0 if clean, non-zero otherwise. Intended for editor integration.
 
 - **-w**, **--warnings**
   Show compiler warnings (unused variables, etc.).

@@ -1432,23 +1432,20 @@ Fri | #####
 # transliterate.strada
 func main() int {
     # ROT13 cipher. tr/// transliterates IN PLACE and returns the count of
-    # characters changed (the /r "return a copy" modifier is not supported).
-    # Make a real copy with `. ""` first (a plain `= $message` would alias the
-    # string, so the in-place tr would change the original too), then tr the copy.
+    # characters changed; with the /r modifier it leaves the string alone
+    # and returns the transliterated copy instead.
     my str $message = "Hello World";
-    my str $encoded = $message . "";
-    $encoded =~ tr/A-Za-z/N-ZA-Mn-za-m/;
+    my str $encoded = ($message =~ tr/A-Za-z/N-ZA-Mn-za-m/r);
     say("Original: " . $message);
     say("ROT13:    " . $encoded);     # "Uryyb Jbeyq"
 
     # Decode it back (ROT13 is its own inverse)
-    my str $decoded = $encoded . "";
-    $decoded =~ tr/A-Za-z/N-ZA-Mn-za-m/;
+    my str $decoded = ($encoded =~ tr/A-Za-z/N-ZA-Mn-za-m/r);
     say("Decoded:  " . $decoded);     # "Hello World"
 
     # Count specific characters
     my str $text = "The quick brown fox";
-    my int $vowels = ($text =~ tr/aeiouAEIOU/aeiouAEIOU/);
+    my int $vowels = ($text =~ tr/aeiouAEIOU//);   # empty replacement: count only
     say("Vowel count: " . $vowels);   # 5
 
     # Clean up data: squeeze whitespace and remove non-alpha

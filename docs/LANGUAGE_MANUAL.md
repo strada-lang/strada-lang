@@ -340,11 +340,12 @@ func verbose_operation() void {
 | `$ARGC` | Argument count |
 | `$_` | Default variable (in map/grep/sort) |
 | `$a`, `$b` | Sort comparison variables |
-| `__PACKAGE__` | Current package name (runtime) |
+| `__PACKAGE__` | Name of the package the code is written in |
 | `__FILE__` | Current source file |
 | `__LINE__` | Current line number |
 | `::func()` | Call func in current package (compile-time) |
 | `.::func()` | Alternate syntax for above |
+| `__PACKAGE__::func()` | Explicit form of above |
 
 ---
 
@@ -775,7 +776,7 @@ Removes `LENGTH` elements from `@ARRAY` starting at `OFFSET`, replacing them wit
 my array @a = (1, 2, 3, 4, 5);
 my array @removed = splice(@a, 1, 2);       # @removed=(2,3), @a=(1,4,5)
 splice(@a, 1, 0, 20, 30);                   # Insert: @a=(1,20,30,4,5)
-splice(@a, -2, 2, 98, 99);                  # @a=(1,20,30,98,99)
+splice(@a, -2, 2, 99);                      # @a=(1,20,30,99)
 ```
 
 ### 8.6 Iteration
@@ -860,7 +861,7 @@ untie(%HASH);
 tied(%HASH);
 ```
 
-`tie` binds a hash variable to a class that implements the TIEHASH interface. All subsequent operations on the hash (`FETCH`, `STORE`, `EXISTS`, `DELETE`, iteration via `FIRSTKEY`/`NEXTKEY`) are dispatched to methods on the tied object.
+`tie` binds a hash variable to a class that implements the TIEHASH interface. All subsequent operations on the hash (`FETCH`, `STORE`, `EXISTS`, `DELETE`, iteration via `FIRSTKEY`/`NEXTKEY`, `CLEAR`) are dispatched to methods on the tied object.
 
 **TIEHASH interface:**
 
@@ -871,9 +872,9 @@ tied(%HASH);
 | `STORE($self, $key, $val)` | `$h{"key"} = $val` |
 | `EXISTS($self, $key)` | `exists($h{"key"})` |
 | `DELETE($self, $key)` | `delete($h{"key"})` |
-| `FIRSTKEY($self)` | Start of `keys(%h)` / `each(%h)` |
+| `FIRSTKEY($self)` | Start of `keys(%h)` / `values(%h)` / `each(%h)` |
 | `NEXTKEY($self, $lastkey)` | Continue iteration |
-| `CLEAR($self)` | Reserved (`%h = ()` does not currently call it) |
+| `CLEAR($self)` | `%h = ()` (the hash stays tied) |
 
 `tied(%h)` returns the underlying blessed object if the hash is tied, or `undef` otherwise. `untie(%h)` removes the tie binding, restoring normal hash behavior.
 
@@ -1185,12 +1186,14 @@ Performs character-by-character transliteration (not regex). Each character in `
 | `c` | Complement: transliterate characters NOT in SEARCH |
 | `d` | Delete: remove SEARCH characters that have no REPLACEMENT |
 | `s` | Squeeze: collapse runs of the same replacement character to one |
+| `r` | Return: return modified copy, do not modify original |
 
 ```strada
 $s =~ tr/a-z/A-Z/;          # Lowercase to uppercase
 $s =~ tr/0-9//d;             # Delete all digits
 $s =~ tr/ / /s;              # Squeeze multiple spaces to one
-my int $n = ($s =~ tr/aeiou/aeiou/);  # Count vowels (map each to itself)
+my str $copy = ($s =~ tr/a-z/A-Z/r);  # Return uppercase copy
+my int $n = ($s =~ tr/aeiou//);       # Count vowels (no replacement)
 ```
 
 ### 12.7 Capture Variables and Functions
@@ -1422,10 +1425,11 @@ package MyPackage;
 
 ```strada
 use Module::Name;                    # Load the module
+use Module::Name qw(func1 func2);    # Same, with an import list
 use lib "lib";                       # Add a module search path
 ```
 
-There is no import list (`use Module qw(...)` is a parse error); call module functions by qualified name.
+An import list (`use Module qw(...)`) is accepted, but it does not create unqualified names; call module functions by qualified name.
 
 ### 15.3 Module Files
 
@@ -1538,9 +1542,9 @@ has ACCESS TYPE $NAME [= DEFAULT] [(OPTIONS)];
 
 | Option | Description |
 |--------|-------------|
-| `required` | Marks the attribute as required (not enforced at runtime: if omitted, the value is `undef`) |
-| `lazy` | Parsed and stored; reserved for future use |
-| `builder => "method"` | Parsed and stored; reserved for future use (the builder is not called) |
+| `required` | The attribute must be passed to the constructor, which otherwise throws `Missing required attribute 'NAME' for Pkg::new` |
+| `lazy` | With `builder`: the value is computed on first read |
+| `builder => "method"` | Method called on the first read while the attribute is unset; its result is stored |
 
 Options can be combined: `(required)`, `(lazy)`, `(lazy, builder => "_build_name")`
 
@@ -1550,7 +1554,7 @@ package Person;
 has ro str $name (required);              # Read-only, required
 has rw int $age = 0;                      # Read/write, default 0
 has rw str $email;                        # Read/write, no default
-has ro str $id (lazy, builder => "_build_id");  # Parsed; builder not yet called
+has ro str $id (lazy, builder => "_build_id");  # Built by $self->_build_id() on first read
 ```
 
 #### 16.6.2 Inheritance (`extends`)
@@ -2151,11 +2155,12 @@ See [Multithreading](#18-multithreading).
 | `$ARGC` | Argument count |
 | `$_` | Default variable in map/grep |
 | `$a`, `$b` | Sort comparison variables |
-| `__PACKAGE__` | Current package name (runtime) |
+| `__PACKAGE__` | Name of the package the code is written in |
 | `__FILE__` | Current file name |
 | `__LINE__` | Current line number |
 | `::func()` | Call func in current package (compile-time) |
 | `.::func()` | Alternate syntax for above |
+| `__PACKAGE__::func()` | Explicit form of above |
 
 ---
 
@@ -2188,7 +2193,7 @@ program         := (package_decl | use_decl | inherit_decl | extends_decl
                  |  with_decl | has_decl | method_modifier | func_def | stmt)*
 
 package_decl    := 'package' IDENT ';'
-use_decl        := 'use' qualified_name ';'
+use_decl        := 'use' qualified_name ('qw(' IDENT* ')')? ';'
 inherit_decl    := 'inherit' IDENT (',' IDENT)* ';'
 
 # Moose-style OOP declarations

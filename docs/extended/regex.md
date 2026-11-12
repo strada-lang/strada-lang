@@ -338,7 +338,8 @@ $word = uc($word);         # Using uc() function
 
 ## Variable Interpolation in Patterns
 
-Variables are interpolated in regex patterns (written bare, as `$name` — unlike
+Variables are interpolated in regex patterns, including the pattern side of
+`s///` (written bare, as `$name`, or braced, as `${name}` — unlike
 double-quoted strings, where only `${name}` interpolates and `"$name"` is literal text):
 
 ```strada
@@ -352,7 +353,14 @@ my str $suffix = "end";
 if ($text =~ /$suffix$/) {
     say("Text ends with " . $suffix);
 }
+
+# In a substitution pattern; ${name} separates the name from following text
+my str $stem = "wor";
+$text =~ s/${stem}ld/planet/;
 ```
+
+The replacement side of `s///` does not interpolate variables (only `$1`-style
+backreferences); use the `/e` modifier to compute a replacement.
 
 ### Escaping Special Characters
 
@@ -562,6 +570,7 @@ $str =~ tr/0-9/*/;
 | `c` | Complement -- transliterate characters NOT in SEARCHLIST |
 | `d` | Delete -- delete characters found in SEARCHLIST that have no replacement |
 | `s` | Squeeze -- collapse duplicate consecutive replaced characters into one |
+| `r` | Return -- return a modified copy instead of modifying in place |
 
 #### `d` (Delete) Flag
 
@@ -601,34 +610,29 @@ $data =~ tr/ -~//cd;         # Keep only printable ASCII (space through ~; \x es
 say($data);                  # abcdef
 ```
 
-#### No `r` (Return Copy) Flag
+#### `r` (Return Copy) Flag
 
-Perl's `r` flag is accepted but **not honoured** in compiled code: the string is
-still modified in place and the expression still yields the count. To keep the
-original, copy first:
+Return a modified copy instead of modifying the original:
 
 ```strada
 my str $original = "Hello World";
-my str $upper = $original;
-$upper =~ tr/a-z/A-Z/;
+my str $upper = ($original =~ tr/a-z/A-Z/r);
 say($original);              # Hello World  (unchanged)
 say($upper);                 # HELLO WORLD
 ```
 
 ### Return Value (Count)
 
-`tr///` returns the number of characters that were transliterated. To count
-without changing the string, map the set onto itself (an **empty** replacement
-list without the `d` flag returns 0, unlike Perl):
+`tr///` returns the number of characters that were transliterated (or matched):
 
 ```strada
 my str $text = "Hello World";
-my int $vowels = ($text =~ tr/aeiouAEIOU/aeiouAEIOU/);
+my int $vowels = ($text =~ tr/aeiouAEIOU//);
 say("Vowel count: " . $vowels);   # Vowel count: 3
 
-# Count without modifying (identity mapping)
+# Count without modifying (empty replacement = count only)
 my str $data = "abc123def456";
-my int $digits = ($data =~ tr/0-9/0-9/);
+my int $digits = ($data =~ tr/0-9//);
 say("Digit count: " . $digits);   # Digit count: 6
 ```
 

@@ -124,10 +124,8 @@ A Future represents an async operation that will complete in the future.
 
 `async::all()`, `async::race()` and `async::timeout()` block and return the
 result value(s) directly, so the `await` in front of them (as in the examples
-below) is optional. Leave it off when the result is an integer:
-`await async::race(...)` / `await async::timeout(...)` on an `int` result
-currently crashes, because `await` is then applied to a plain integer rather
-than a future (`my int $r = async::race(\@futures);` works).
+below) is optional: `await` applied to a value that is not a future simply
+passes it through (`my int $r = async::race(\@futures);` works too).
 
 #### `async::all()` - Wait for All
 

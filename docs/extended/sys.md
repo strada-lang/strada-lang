@@ -31,7 +31,7 @@ Close a file handle.
 my str $content = core::slurp($filename);
 ```
 
-Read entire file contents into a string.
+Read entire file contents into a string. Returns `undef` if `$filename` is a directory.
 
 ### core::slurp_fh
 
@@ -79,18 +79,20 @@ Write string to a file descriptor.
 core::fwrite($fh, $data);
 ```
 
-Write the string `$data` to a file handle. The whole string is written (a
-third "size" argument is accepted but ignored) and nothing useful is returned.
+Write the string `$data` to a file handle. With an optional third argument,
+`core::fwrite($fh, $data, $n)`, only the first `$n` bytes are written. Nothing
+useful is returned.
 
 ### core::fread
 
 ```strada
-my str $data = core::fread($fh);
+my str $data = core::fread($fh);       # whole file
+my str $part = core::fread($fh, $n);   # up to $n bytes
 ```
 
-Read the **entire** file behind the handle (it seeks to the start first, so the
-current position is ignored). A second "size" argument is accepted but ignored;
-for sized reads use `core::fgets()` or `core::read_fd(core::fileno($fh), $n)`.
+With one argument, read the **entire** file behind the handle (it seeks to the
+start first, so the current position is ignored). With a size argument, read up
+to `$n` bytes from the current position (an empty string at end of file).
 
 ### core::readline
 
@@ -1567,8 +1569,8 @@ Unlock memory pages.
 reserve(@arr, $count);   # pre-allocate array capacity
 ```
 
-Pre-allocate array capacity. This is a bare builtin (not under `core::`). There
-is no `array_capacity` or `array_shrink` function.
+Pre-allocate array capacity. `core::array_reserve(@arr, $count)` is accepted as
+an alias. There is no `array_capacity` or `array_shrink` function.
 
 ### core::hash_default_capacity
 
@@ -1976,7 +1978,7 @@ Stack trace:
   at main (myprogram.strada:7)
   -> recursive_func (myprogram.strada)
 
-Hint: Use sys::set_recursion_limit(n) to increase the limit, or 0 to disable.
+Hint: Use core::set_recursion_limit(n) to increase the limit, or 0 to disable.
 ```
 
 ## Call Context (Dynamic Return Type)

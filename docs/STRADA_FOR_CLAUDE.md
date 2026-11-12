@@ -73,7 +73,7 @@ my hash %config = ("port" => 8080, "host" => "localhost");
 our int $GLOBAL_COUNTER = 0;
 ```
 
-`local $var = expr;` does dynamic scoping on an `our` variable — the old value is restored when the enclosing **function** returns (not at the end of an inner block). `local($var) = ...` with parens is not accepted.
+`local $var = expr;` does dynamic scoping on an `our` variable — the old value is restored at the end of the enclosing block (function body, bare `{ }`, `if`/`elsif`/`else` or loop block; a `local` directly inside a `try` block lasts until the function returns). `local($var) = ...` with parens is not accepted.
 
 ### Primitive types
 
@@ -380,7 +380,7 @@ reverse($s)                     # reversed string (reversed copy of the array if
 sprintf("%d/%d", $a, $b)
 ```
 
-Many string built-ins default to `$_` when called with no arg (write the empty parens: `uc()`, `chomp()`): `chomp`, `uc`, `lc`, `length`, `ucfirst`, `lcfirst`, `trim`, `defined`, `chr`, `ord`, `say`, `print`, `chop`.
+Many string built-ins default to `$_` when called with no arg (`uc()`, `chomp()`; for `chomp`, `chop`, `uc`, `lc`, `ucfirst`, `lcfirst`, `trim`, `length`, `ord`, `chr` the parens may be dropped when the statement ends right there: `chomp;`, `$u = uc;`): `chomp`, `uc`, `lc`, `length`, `ucfirst`, `lcfirst`, `trim`, `defined`, `chr`, `ord`, `say`, `print`, `chop`.
 
 ### `.=`, `x`
 
@@ -505,7 +505,7 @@ $h{"a"}{"b"}{"c"} = 42;         # auto-creates intermediate hashrefs
 
 ## References and dereferencing
 
-Strada uses Perl-style references. `\` takes a reference; `$$`, `@$`, `%$` (or `@{...}`, `%{...}`) dereference. The braced scalar form `${$ref}` is **not** accepted — write `$$ref`.
+Strada uses Perl-style references. `\` takes a reference; `$$`, `@$`, `%$` (or `${...}`, `@{...}`, `%{...}`) dereference.
 
 ```strada
 my int $x = 10;
@@ -526,7 +526,8 @@ $$sref;                          # 10
 $aref->[0];                      # 1 (arrow is preferred for refs)
 $href->{"k"};                    # 1
 
-@{$aref};                        # braced forms (arrays and hashes only)
+${$sref};                        # braced forms
+@{$aref};
 %{$href};
 ```
 
@@ -581,15 +582,17 @@ $str =~ tr/a-z/A-Z/;                 # uppercase
 $str =~ y/abc/xyz/;                  # y/// is the same as tr///
 ```
 
-### Always name the match target
+### Default-target matching
 
-There is no implicit `$_` match: `m/PATTERN/` is a parse error, and a bare `/PATTERN/` used as a condition compiles but is **always true** (it does not test `$_`). Write the target explicitly:
+A bare `/PATTERN/` (or `m/PATTERN/`) used as a condition matches against `$_`. Write it directly after the opening `(` — `if (/a/)`, `!(/a/)`, `(/a/) && (/b/)`; after `!`, `&&`, `||` or a statement-modifier `if` without parentheses the `/` does not start a regex:
 
 ```strada
 foreach (@lines) {
-    if ($_ =~ /error/i) { ... }
+    if (/error/i) { ... }            # same as: if ($_ =~ /error/i)
 }
 ```
+
+Variables interpolate in patterns, including `s///` patterns, as `$name` or `${name}` (the replacement side takes `$1`-style backreferences but not variables).
 
 ### PCRE2 features available
 
@@ -649,8 +652,8 @@ has [ro|rw] TYPE $NAME [= DEFAULT] [(OPTIONS)];
 | `ro` | Generate getter only (default if omitted) |
 | `rw` | Generate getter + `set_NAME(val)` setter |
 | `= DEFAULT` | Default value if not passed to constructor |
-| `(required)` | Marks the attribute as required. Documentation only at present: the generated constructor does **not** raise an error when it is omitted (the attribute is just undef). |
-| `(lazy)`, `(builder => "method_name")` | Accepted by the parser but currently have **no effect** (the builder is never called). Compute lazily in a hand-written method instead. |
+| `(required)` | The generated constructor throws `Missing required attribute 'NAME' for Pkg::new` when it is omitted. |
+| `(lazy, builder => "method_name")`, `(builder => "method_name")` | The builder method runs on the first read while the attribute is unset; its result is stored. |
 
 ### Auto-generated constructor
 
@@ -660,7 +663,7 @@ When a package has `has` attributes and no explicit `func new(...)`, the compile
 my scalar $p = Person::new("name", "Alice", "age", 30);
 ```
 
-Pass the pairs **comma-separated**. Do not use `=>` in the call (`Person::new(name => "Alice")`): in a call argument list `k => v` builds a pair value rather than two arguments, so the attributes silently keep their defaults.
+Keys and values alternate. The fat comma also works (`Person::new(name => "Alice", age => 30)`): in a call argument list `=>` is a plain comma.
 
 If you write your own `new`, the auto-generated one is suppressed.
 
@@ -894,8 +897,8 @@ async func fetch(str $url) str { return "body of " . $url; }
 my scalar $f = fetch("http://example.com");
 my str $r = await $f;
 
-# Combinators — these block and return the result(s) directly; do not `await` them
-# (`await` on a plain int result currently crashes)
+# Combinators — these block and return the result(s) directly, so no `await` is needed
+# (`await` on a non-future value just passes it through)
 my array @futures = (fetch($u1), fetch($u2), fetch($u3));
 my array @results = async::all(@futures);
 my scalar $first = async::race(@futures);
@@ -1157,6 +1160,8 @@ say($config{"port"});           # FETCH dispatches to ConfigFile->FETCH(...)
 $config{"port"} = 8080;         # STORE
 untie(%config);
 ```
+
+`keys`/`values`/`each` on a tied hash go through `FIRSTKEY`/`NEXTKEY` (+ `FETCH`), and `%config = ()` calls `CLEAR`. A scalar can be tied too: `tie($x, "Class")` calls `TIESCALAR`, reads call `FETCH($self)`, and an assignment statement `$x = value;` calls `STORE($self, $value)`.
 
 ---
 
@@ -1434,5 +1439,5 @@ When generating Strada code:
 5. **`func main() int { return 0; }`** is the entry point of a complete program. No statements outside functions.
 6. **`core::` for system calls**, `math::` for math, `async::` for concurrency. No `use` needed for these.
 7. **Don't over-engineer.** Strada is Perl-flavored — small scripts and clean OOP both work without ceremony.
-8. **Interpolate with `"${name}"` only** — bare `"$name"` prints literally; use `.` or `sprintf` for elements and expressions. No `num()`/`str()`, no `and`/`or`/`not`, no `${$ref}`.
+8. **Interpolate with `"${name}"` only** — bare `"$name"` prints literally; use `.` or `sprintf` for elements and expressions. No `num()`/`str()`, no `and`/`or`/`not`.
 9. **Test locally:** `./strada --check yourfile.strada` for a fast syntax/semantic check, `./strada -O0 -r yourfile.strada` to compile and run quickly.

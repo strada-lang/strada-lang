@@ -87,7 +87,7 @@ our int $port = 8080;        # Key: "Config::port"
 # Dynamic scoping (local) - temporarily override our vars
 our str $mode = "normal";
 func risky() void {
-    local $mode = "safe";    # Temporarily "safe", restored when the function returns
+    local $mode = "safe";    # Temporarily "safe", restored on scope exit
                              # (no parens: local($mode) = ... is a parse error)
 }
 ```
@@ -417,7 +417,7 @@ my scalar $b = compute(20);
 my int $r1 = await $a;  # 20
 my int $r2 = await $b;  # 40
 
-# Wait for all (all/race/timeout block and return the result directly — no await)
+# Wait for all (all/race/timeout block and return the result directly — await is optional)
 my array @futures = (compute(1), compute(2), compute(3));
 my array @results = async::all(\@futures);  # (2, 4, 6)
 
@@ -763,6 +763,7 @@ $str =~ s/(\d+)/$1 * 2/eg;      # With /g: all occurrences
 my int $count = ($str =~ tr/a-z/A-Z/);  # Uppercase, returns count changed
 $str =~ tr/0-9//d;              # Delete digits (d flag)
 $str =~ tr/ / /s;               # Squeeze repeated spaces (s flag)
+my str $up = ($str =~ tr/a-z/A-Z/r);  # Return copy, don't modify original (r flag)
 $str =~ y/abc/xyz/;             # y/// is alias for tr///
 
 # Function-based alternatives (re:: = regex, str:: = literal string)
@@ -808,6 +809,7 @@ See `docs/EVENT_LOOP.md` for the full API, task rules, and caveats.
 # Using modules (compile-time source inclusion)
 use lib "lib";                # so Math/Utils.strada is found
 use Math::Utils;              # then call Math::Utils::add(1, 2)
+use Math::Utils qw(add multiply);  # import list accepted; calls stay qualified
 
 # In lib/Math/Utils.strada
 package Math::Utils;
@@ -956,13 +958,13 @@ if ($dog->can("speak")) { ... }   # Check if method exists
 my str $pkg = core::blessed($dog);  # "Dog" (bare blessed() is a legacy alias)
 
 # Current package
-say(__PACKAGE__);                 # Runtime "current package": "main" unless changed with
-                                  # core::set_package() — not the enclosing `package` block
+say(__PACKAGE__);                 # Name of the package this code is written in
 
 # Call function in current package (compile-time resolution)
 ::helper("arg");                  # Preferred shorthand
 .::helper("arg");                 # Alternate shorthand
-# Both resolve to PackageName_helper("arg") at compile time
+__PACKAGE__::helper("arg");       # Explicit form
+# All three resolve to PackageName_helper("arg") at compile time
 
 # Runtime package control (for multi-package files)
 core::inherit("Dog", "Animal");   # Explicit child and parent
@@ -1002,9 +1004,10 @@ use overload
 | `$obj->$method()` | Dynamic method dispatch (name from variable) |
 | `use overload "+" => "add", ...;` | Operator overloading for a package |
 | `set_package("Pkg")` | Set current package |
-| `__PACKAGE__` | Get current package name (runtime) |
+| `__PACKAGE__` | Name of the package the code is written in |
 | `::func()` | Call func in current package (compile-time) |
 | `.::func()` | Alternate syntax for above |
+| `__PACKAGE__::func()` | Explicit form of above |
 
 ## Moose-Style Declarative OOP
 
@@ -1016,7 +1019,7 @@ package Person;
 has ro str $name (required);          # Read-only, required in constructor
 has rw int $age = 0;                  # Read/write, default value
 has rw str $nickname;                 # Read/write, no default (undef)
-has ro str $id (lazy, builder => "_build_id");  # Parsed, but lazy/builder currently have no effect
+has ro str $id (lazy, builder => "_build_id");  # Computed by $self->_build_id() on first read
 
 # Inheritance
 package Employee;
@@ -1055,13 +1058,12 @@ around "validate" func(scalar $orig, scalar $self, scalar ...@args) scalar {
 | `has ro type $name;` | Read-only attribute (getter only) |
 | `has rw type $name;` | Read/write attribute (getter + `set_NAME()` setter) |
 | `has ro type $name = VALUE;` | Default value |
-| `has ro type $name (required);` | Marks the attribute required (not currently enforced: omitting it leaves the attribute undef, no error) |
-| `has ro type $name (lazy);` | Accepted by the parser; currently no effect |
-| `has ro type $name (lazy, builder => "method");` | Accepted by the parser; the builder is currently never called |
+| `has ro type $name (required);` | Required: the constructor throws `Missing required attribute 'name' for Pkg::new` if it is omitted |
+| `has ro type $name (lazy, builder => "method");` | The builder method is called on first read while the attribute is unset; the result is stored |
 
-**Auto-generated constructor:** `Package::new("name", "value", "age", 42)`
+**Auto-generated constructor:** `Package::new("name", "value", "age", 42)` or `Package::new(name => "value", age => 42)`
 
-Named arguments: keys and values alternate in the argument list, separated by commas (don't write `Package::new(name => "value")` — in a call, `=>` builds a pair value and the attribute silently keeps its default). Child constructors include parent attributes from the `extends` chain.
+Named arguments: keys and values alternate in the argument list (in a call, `=>` is a plain comma). Child constructors include parent attributes from the `extends` chain.
 
 **Generated accessor methods:**
 
@@ -1275,8 +1277,6 @@ my str $sval = core::dl_call_str_sv($fn, [args]);
 core::dl_call_void_sv($fn, [args]);
 
 # Pass pointers (for output params)
-# NOTE: core::int_ptr / core::num_ptr currently return 0 (examples/test_ffi.strada
-# skips these cases), so the pointer helpers below do not work at present.
 my int $x = 10;
 my int $ptr = core::int_ptr(\$x);
 core::dl_call_void($inc_fn, [$ptr]);  # modifies $x

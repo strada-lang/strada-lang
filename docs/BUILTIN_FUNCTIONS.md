@@ -18,7 +18,9 @@ end.
 > for `re::`/`str::`/`sb::`/`core::` aliases), and `compiler/Semantic.strada`
 > (`get_builtins()` is only the semantic fast-path — unknown `ns::` names
 > fall through to "analyze args and trust runtime", so a missing entry there
-> won't error but also won't document). `Async::*` actors/scopes additionally
+> won't error but also won't document; a name in a builtin namespace that no
+> codegen branch claims is a located compile error, `unknown builtin function
+> 'core::name'`). `Async::*` actors/scopes additionally
 > live in `lib/Async/`.
 
 > **Note on `sys::`** — `sys::` is the legacy alias for `core::` and still
@@ -271,8 +273,8 @@ Use `core::` in user code. `sys::` is a legacy alias (the compiler normalizes
 | `core::clearerr(fh)` | `scalar → void` | clearerr(3). |
 | `core::ferror(fh)` | `scalar → int` | ferror(3). |
 | `core::fileno(fh)` | `scalar → int` | Underlying fd. |
-| `core::fread(fh)` | `scalar → str` | Read the whole file behind fh (from the start; a length argument is ignored). |
-| `core::fwrite(fh, data)` | `scalar, str → void` | Write data to fh. |
+| `core::fread(fh [, len])` | `scalar [, int] → str` | With len, read up to len bytes from the current position; without it, read the whole file behind fh (from the start). |
+| `core::fwrite(fh, data [, len])` | `scalar, str [, int] → void` | Write data to fh (only the first len bytes when len is given). |
 | `core::fgetc(fh)` | `scalar → int` | Read one char (-1 on EOF). |
 | `core::fputc(c, fh)` | `int, scalar → int` | Write one char. |
 | `core::fgets(fh, max)` | `scalar, int → str` | Read up to max-1 bytes or through a newline (newline kept). |
@@ -284,7 +286,7 @@ Use `core::` in user code. `sys::` is a legacy alias (the compiler normalizes
 | `core::tmpfile()` | `→ scalar` | tmpfile(3) — auto-deleted filehandle. |
 | `core::mkstemp(template)` | `str → array` | mkstemp(3); returns [fd, actual_path]. |
 | `core::mkdtemp(template)` | `str → str` | mkdtemp(3); returns path. |
-| `core::slurp(path)` | `str → str` | Read entire file into a string. |
+| `core::slurp(path)` | `str → str` | Read entire file into a string (undef for a directory). |
 | `core::slurp_fd(fd)` | `int → str` | Slurp from open fd. |
 | `core::slurp_fh(fh)` | `scalar → str` | Slurp from open filehandle. |
 | `core::spew(path, data)` | `str, str → void` | Write entire string to file (truncate). |
@@ -607,9 +609,9 @@ A count suffix (`N`) or `*` (consume all remaining) follows each code. Endiannes
 | `core::cstruct_set_double(cs, field, offset, v)` | `scalar, str, int, num → void` | Write double field. |
 | `core::cstruct_set_string(cs, field, offset, v)` | `scalar, str, int, str → void` | Write string field. |
 | `core::cstruct_ptr(cs)` | `scalar → scalar` | Raw pointer to the struct. |
-| `core::int_ptr(v)` | `int → scalar` | Pointer to an int holding v. |
-| `core::num_ptr(v)` | `num → scalar` | Pointer to a double holding v. |
-| `core::str_ptr(v)` | `str → scalar` | Pointer to a C string. |
+| `core::int_ptr(\$v)` | `ref → scalar` | Pointer to the int64 behind int variable `$v`. |
+| `core::num_ptr(\$v)` | `ref → scalar` | Pointer to the double behind num variable `$v`. |
+| `core::str_ptr(\$v)` | `ref → scalar` | Pointer to the C string (char data) of `$v`. |
 | `core::ptr_deref_int(ptr)` | `scalar → int` | Read int through pointer. |
 | `core::ptr_deref_num(ptr)` | `scalar → num` | Read num through pointer. |
 | `core::ptr_deref_str(ptr)` | `scalar → str` | Read C string through pointer. |
@@ -756,7 +758,7 @@ for binary data.
 | `map { ... } @arr` | Transform. |
 | `grep { ... } @arr` | Filter. |
 | `clone(ref)` | Deep clone. |
-| `reserve(@arr, n)` | Preallocate capacity. |
+| `reserve(@arr, n)` | Preallocate capacity (also spelled `core::array_reserve(@arr, n)`). |
 | `deref(ref)` | Dereference. |
 | `derefto(ref, type)` | Type-checked deref. |
 | `deref_array(ref)`, `deref_hash(ref)` | Typed deref helpers. |

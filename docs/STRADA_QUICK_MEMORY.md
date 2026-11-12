@@ -311,7 +311,7 @@ async func work(int $n) int { return $n * $n; }
 my scalar $f1 = work(10);
 my int $a = await $f1;
 
-my array @results = async::all(\@futures);   # blocks, returns results (no await)
+my array @results = async::all(\@futures);   # blocks, returns results (await optional)
 my scalar $first = async::race(\@futures);   # first result
 
 my scalar $ch = async::channel(10);
@@ -365,7 +365,7 @@ Types: `defined`, `typeof`, `isa`
 
 `open($file, $mode) → fh` — modes: `"r"`, `"w"`, `"a"`, `"rb"`, `"<"`, `">"`, `">>"`, `"rw"`
 `close($fh)` | `slurp($file) → str` | `slurp_fh($fh) → str` | `spew($file, $str)`
-`readline($fh) → str` | `fread($fh, $size) → str` | `fwrite($fh, $data, $size) → int`
+`readline($fh) → str` | `fread($fh, $size) → str` | `fwrite($fh, $data, $size)`
 `tell($fh) → int` | `seek($fh, $offset, $whence)` — 0=SET, 1=CUR, 2=END
 `rewind($fh)` | `eof($fh) → 1/0` | `flush($fh)` | `fileno($fh) → int`
 `open_str($content, $mode) → fh` — in-memory I/O | `str_from_fh($fh) → str`
@@ -479,7 +479,7 @@ Types: `defined`, `typeof`, `isa`
 
 **PCRE2 features** (require libpcre2): `*?` `+?` lazy quantifiers | `\b` word boundary | `(?=...)` `(?!...)` lookahead | `(?<=...)` `(?<!...)` lookbehind | `(?P<name>...)` named captures
 
-**Transliteration flags:** `c` complement | `d` delete unmatched | `s` squeeze duplicates | Returns count of replacements (the `r` "return copy" flag is not honoured in compiled code: the string is still modified in place)
+**Transliteration flags:** `c` complement | `d` delete unmatched | `s` squeeze duplicates | `r` return copy | Returns count of replacements
 
 **Gotcha:** `replace_all()` is plain string replacement. `replace()` and `s///` use regex.
 

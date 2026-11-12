@@ -786,7 +786,7 @@ func main() int {
 }
 ```
 
-The class must implement `TIEHASH`, `FETCH`, and `STORE`. Optional methods include `DELETE`, `EXISTS`, `FIRSTKEY`, `NEXTKEY`, and `UNTIE`. When untied, the hash reverts to normal behavior with zero overhead.
+The class must implement `TIEHASH`, `FETCH`, and `STORE`. Optional methods include `DELETE`, `EXISTS`, `FIRSTKEY`, `NEXTKEY` (used by `keys`/`values`/`each`), `CLEAR` (`%h = ()`), and `UNTIE`. When untied, the hash reverts to normal behavior with zero overhead.
 
 ### Nested Structures
 
@@ -1079,6 +1079,7 @@ say("Vowels: " . $vowels);  # 3
 - `d` -- Delete characters not in the replacement list: `$s =~ tr/0-9//d;` removes all digits
 - `s` -- Squeeze repeated translated characters into one: `$s =~ tr/ / /s;` collapses multiple spaces
 - `c` -- Complement the search list (translate characters NOT in the list)
+- `r` -- Return a modified copy instead of changing the original: `my str $upper = ($s =~ tr/a-z/A-Z/r);`
 
 ---
 

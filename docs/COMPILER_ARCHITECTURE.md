@@ -476,7 +476,7 @@ StradaValue* Math_Utils_add(StradaValue* a, StradaValue* b) { ... }
 
 ### Selective Imports
 
-Import lists are not supported: `use Math::Utils qw(add multiply);` is a parse error. Call module functions by their qualified name (`Math::Utils::add(1, 2)`).
+`use Math::Utils qw(add multiply);` is accepted and the names are recorded as the module's import list, but no unqualified aliases are generated: call module functions by their qualified name (`Math::Utils::add(1, 2)`).
 
 ## `__C__` Blocks
 

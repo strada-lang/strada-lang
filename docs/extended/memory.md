@@ -293,6 +293,10 @@ func main() int {
 }
 ```
 
+A scalar can be tied the same way: `tie($name, "Class")` calls `TIESCALAR($class)`,
+reading `$name` calls `FETCH($self)`, and an assignment statement `$name = "hello";`
+calls `STORE($self, $value)`.
+
 ## Debugging Memory Issues
 
 ### Check for leaks

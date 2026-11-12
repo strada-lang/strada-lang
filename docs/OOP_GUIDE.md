@@ -217,8 +217,6 @@ func Person_set_name(scalar $self, str $name) void {
 }
 
 # Combined getter/setter
-# (call it as Person_age($p): the default is only filled in for direct calls;
-#  a dynamically dispatched $p->age() passes undef for the missing argument)
 func Person_age(scalar $self, int $new_age = -1) int {
     if ($new_age >= 0) {
         $self->{"age"} = $new_age;
@@ -306,14 +304,16 @@ func complex_operation(scalar $self) void {
     ::helper1();                     # Person_helper1
     ::helper2($self);                # Person_helper2
     .::helper3();                    # Alternate syntax
+    __PACKAGE__::helper4();          # Explicit form
 }
 ```
 
-Two equivalent syntaxes:
+Three equivalent syntaxes:
 - `::func()` — Preferred shorthand
 - `.::func()` — Alternate shorthand
+- `__PACKAGE__::func()` — Explicit form
 
-Both resolve to `PackageName_func()` at **compile time**.
+All resolve to `PackageName_func()` at **compile time**.
 
 ### Variadic Methods
 
@@ -1487,7 +1487,7 @@ has ro str $role = "user";
 # Read-write, no default (defaults to undef if not passed)
 has rw str $email;
 
-# With lazy and builder options (parsed but builder is for future use)
+# Computed on first read by calling the named builder method
 has ro str $display_name (lazy, builder => "_build_display_name");
 ```
 
@@ -1522,9 +1522,9 @@ say($user->name());        # "Alice" (getter)
 
 #### Options
 
-- **`required`**: The attribute must be passed to the constructor. If omitted from the constructor call, the value will be `undef` (no runtime enforcement currently -- this is a documentation hint and future-proofing).
-- **`lazy`**: Parsed and stored in the attribute metadata. Reserved for future use (lazy initialization with builder functions).
-- **`builder => "func_name"`**: Parsed and stored. Reserved for future use (names a function that computes the default value lazily).
+- **`required`**: The attribute must be passed to the constructor. If it is omitted from the constructor call, the constructor throws `Missing required attribute 'NAME' for Pkg::new`.
+- **`lazy`**: Used together with `builder`: the value is not computed until the first read.
+- **`builder => "func_name"`**: Names a method that computes the value. It is called (as `$self->func_name()`) the first time the accessor is read while the attribute is unset; the result is stored, so the builder runs at most once per object. A value passed to the constructor takes precedence.
 
 ---
 
@@ -1970,9 +1970,9 @@ has [ro|rw] TYPE $NAME [= DEFAULT_EXPR] [(OPTION, ...)];
 ```
 
 Options:
-- `required` -- Attribute should be provided in the constructor
-- `lazy` -- Reserved for future lazy initialization
-- `builder => "func_name"` -- Reserved for future builder functions
+- `required` -- Attribute must be provided in the constructor (throws if missing)
+- `lazy` -- Compute the value on first read (with `builder`)
+- `builder => "func_name"` -- Method called on first read to compute an unset attribute
 
 #### `extends` Statement
 
@@ -2170,7 +2170,7 @@ func new(str $name) scalar {
 
 ## 16. Tied Hashes (`tie` / `untie` / `tied`)
 
-Strada supports Perl-style tied hashes, which allow you to bind a hash variable to a class that intercepts all access operations. When a hash is tied, every read, write, and delete goes through methods you define on the tied class.
+Strada supports Perl-style tied hashes, which allow you to bind a hash variable to a class that intercepts all access operations. When a hash is tied, every read, write, delete, and iteration goes through methods you define on the tied class.
 
 ### Overview
 
@@ -2191,13 +2191,11 @@ To make a class work with `tie`, define these methods in your package:
 | `STORE` | `$hash{"key"} = $val` | `func STORE(scalar $self, str $key, scalar $val) void` |
 | `EXISTS` | `exists($hash{"key"})` | `func EXISTS(scalar $self, str $key) int` |
 | `DELETE` | `delete($hash{"key"})` | `func DELETE(scalar $self, str $key) void` |
-| `FIRSTKEY` | iteration start (see limitation below) | `func FIRSTKEY(scalar $self) scalar` |
-| `NEXTKEY` | iteration continue (see limitation below) | `func NEXTKEY(scalar $self, str $lastkey) scalar` |
-| `CLEAR` | clearing (see limitation below) | `func CLEAR(scalar $self) void` |
+| `FIRSTKEY` | `keys(%hash)` / `values(%hash)` / `each(%hash)` (start iteration) | `func FIRSTKEY(scalar $self) scalar` |
+| `NEXTKEY` | `keys(%hash)` / `values(%hash)` / `each(%hash)` (continue iteration) | `func NEXTKEY(scalar $self, str $lastkey) scalar` |
+| `CLEAR` | `%hash = ()` | `func CLEAR(scalar $self) void` |
 
-Only `TIEHASH` and `FETCH`/`STORE` are required. `EXISTS` and `DELETE` are only needed if you call `exists()`/`delete()` on the tied hash -- without them those calls throw a "Can't locate method" exception.
-
-**Current limitation:** compiled Strada code does not yet dispatch `keys()`, `values()`, `each()` or `%hash = ()` to the tied class. `keys()`/`values()`/`each()` on a tied hash see the (empty) underlying hash and return nothing, and `%hash = ()` replaces the hash and drops the tie without calling `CLEAR`. To iterate, call a method on the tied object (`tied(%hash)`) instead.
+Only `TIEHASH` and `FETCH`/`STORE` are required. The others are only needed if you use the corresponding operation on the tied hash (`exists()`, `delete()`, iteration, `%hash = ()`) -- without them those calls throw a "Can't locate method" exception. `%hash = ()` calls `CLEAR` and leaves the hash tied.
 
 ### Basic Example
 
@@ -2274,6 +2272,8 @@ func main() int {
    - `$hash{"key"} = $val` calls `STORE($tied_obj, "key", $val)`
    - `exists($hash{"key"})` calls `EXISTS($tied_obj, "key")`
    - `delete($hash{"key"})` calls `DELETE($tied_obj, "key")`
+   - `keys(%hash)`, `values(%hash)` and `each(%hash)` use `FIRSTKEY` and `NEXTKEY` to iterate (`values` and `each` then `FETCH` each key)
+   - `%hash = ()` calls `CLEAR($tied_obj)`
 3. `untie(%hash)` removes the binding, returning the hash to normal behavior.
 4. `tied(%hash)` returns the underlying tied object, or `undef` if the hash is not tied.
 

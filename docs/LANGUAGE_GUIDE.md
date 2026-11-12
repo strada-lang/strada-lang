@@ -1122,12 +1122,12 @@ my array @old = splice(@arr, 0, 1, 100, 200);
 # @old is (10), @arr is now (100, 200, 40, 50)
 
 # Insert without removing (length = 0)
-splice(@arr, 2, 0, 35, 36);
-# @arr is now (100, 200, 35, 36, 40, 50)
+splice(@arr, 2, 0, 35);
+# @arr is now (100, 200, 35, 40, 50)
 
 # Negative offset counts from the end
 splice(@arr, -1, 1);
-# Removes the last element; @arr is now (100, 200, 35, 36, 40)
+# Removes the last element; @arr is now (100, 200, 35, 40)
 ```
 
 ### Map, Grep, and Sort
@@ -2031,9 +2031,9 @@ $msg =~ tr/A-Za-z/N-ZA-Mn-za-m/;
 say($msg);  # "Uryyb"
 
 # Count characters (tr returns the count of transliterations;
-# translating a set to itself counts without changing the string)
+# an empty replacement list counts without changing the string)
 my str $str = "Hello World";
-my int $vowels = ($str =~ tr/aeiouAEIOU/aeiouAEIOU/);
+my int $vowels = ($str =~ tr/aeiouAEIOU//);
 say("Vowels: " . $vowels);  # 3
 ```
 
@@ -2044,6 +2044,7 @@ say("Vowels: " . $vowels);  # 3
 | `c` | Complement the search list (translate characters NOT in the list) |
 | `d` | Delete characters found in search list that have no replacement |
 | `s` | Squeeze duplicate replaced characters into a single character |
+| `r` | Return a modified copy instead of modifying in place |
 
 ```strada
 # Delete digits (d flag)
@@ -2060,6 +2061,12 @@ say($spaced);  # "too many spaces"
 my str $letters = "H3ll0 W0rld!";
 $letters =~ tr/a-zA-Z//cd;
 say($letters);  # "HllWrld"
+
+# Return copy without modifying original (r flag)
+my str $original = "hello";
+my str $upper = ($original =~ tr/a-z/A-Z/r);
+say($original);  # "hello" (unchanged)
+say($upper);     # "HELLO"
 ```
 
 ### Capturing
@@ -2774,7 +2781,7 @@ func main() int {
 
 #### The `__PACKAGE__` Keyword
 
-`__PACKAGE__` returns the current package name as a string at runtime:
+`__PACKAGE__` is the name, as a string, of the package the code is written in:
 
 ```strada
 package My::App;
@@ -2809,14 +2816,15 @@ func compute(int $x, int $y) int {
 }
 ```
 
-Two equivalent syntaxes are supported:
+Three equivalent syntaxes are supported:
 - `::func()` — Preferred shorthand
 - `.::func()` — Alternate shorthand
+- `__PACKAGE__::func()` — Explicit form
 
-Both resolve to `PackageName::func()` at compile time.
+All three resolve to `PackageName::func()` at compile time.
 
-**Note:** `__PACKAGE__` returns the package name as a string at runtime,
-while `::func()` is compile-time function resolution.
+**Note:** `__PACKAGE__` alone (without `::`) evaluates to the package name as a string,
+while `::func()` and `__PACKAGE__::func()` are compile-time function resolution.
 
 #### Inheritance
 
@@ -3168,9 +3176,9 @@ func _build_db_url(scalar $self) str {
 }
 ```
 
-**Note:** `lazy` and `builder` are currently accepted by the parser but not yet
-acted on: the builder method is never called, and the accessor returns `undef`
-unless a value was passed to the constructor.
+The builder runs the first time the accessor is read while the attribute is
+unset, and its result is stored, so it is called at most once per object. A
+value passed to the constructor takes precedence.
 
 #### Auto-Generated Constructor
 
@@ -3186,7 +3194,7 @@ $p->set_age(31);      # Uses rw setter
 say($p->age());       # 31
 ```
 
-If an attribute has a default value and is not provided in the constructor, the default is used. If an attribute is `required` and not provided, it will be `undef`.
+If an attribute has a default value and is not provided in the constructor, the default is used. If an attribute is `required` and not provided, the constructor throws `Missing required attribute 'name' for Person::new`.
 
 #### Inheritance with `extends`
 
@@ -4086,12 +4094,6 @@ core::dl_call_void($double_it_fn, [$nptr]);
 my int $val = core::ptr_deref_int($ptr);
 core::ptr_set_int($ptr, 42);
 ```
-
-**Note:** with the current compiler `core::int_ptr(\$var)` and
-`core::num_ptr(\$var)` return 0 (no pointer) for ordinary `my` variables, so
-the snippet above does not modify `$x`. For out-parameters, allocate C memory
-instead: `my int $p = c::alloc(8); c::write_int64($p, 10);`, pass `$p` to the
-C function, then read the result with `c::read_int64($p)` and `c::free($p)`.
 
 ### Pointer Functions (core:: namespace)
 

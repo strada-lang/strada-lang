@@ -458,7 +458,7 @@ Strada automatically detects excessive recursion and exits gracefully with a sta
 The default recursion limit is 1000 calls. When the limit is exceeded:
 
 ```
-Error: Maximum recursion depth exceeded (100)
+Error: Maximum recursion depth exceeded (1000)
 Stack trace:
   at infinite_recurse (broken.strada:2)
   at infinite_recurse (broken.strada:2)
@@ -466,13 +466,12 @@ Stack trace:
   at main (broken.strada:5)
   -> infinite_recurse (broken.strada)
 
-Hint: Use sys::set_recursion_limit(n) to increase the limit, or 0 to disable.
+Hint: Use core::set_recursion_limit(n) to increase the limit, or 0 to disable.
 ```
 
-**Current limitations** (verified against the current runtime):
+The program then exits with status 1.
 
-- The check is part of stack-trace tracking, which `stradac` only enables when the program uses `try`/`throw`/`core::caller()` (or when compiled with `stradac --stack-trace`). A program without any of those has no recursion check at all.
-- The tracked call depth saturates at 256 frames, so the limit only fires when it is set below 256 (the example above used `core::set_recursion_limit(100)`). With the default of 1000 the check never triggers, and runaway recursion ends in a stack-overflow segfault.
+**Current limitation:** the check is part of stack-trace tracking, which `stradac` only enables when the program uses `try`/`throw`/`core::caller()`/`core::stack_trace()` (or when compiled with `stradac --stack-trace`). A program without any of those has no recursion check at all, and runaway recursion ends in a stack-overflow segfault.
 
 ### Configuring the Limit
 

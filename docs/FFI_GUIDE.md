@@ -437,28 +437,32 @@ func main() int {
 ### Pointer Manipulation
 
 ```strada
-# Get raw pointer to a num variable's storage (pass the variable itself)
-my num $x = 1.5;
-my int $ptr = core::num_ptr($x);
+# Get raw pointer to variable
+my int $x = 42;
+my int $ptr = core::int_ptr(\$x);
 
 # Read through pointer
-my num $val = core::ptr_deref_num($ptr);
+my int $val = core::ptr_deref_int($ptr);
 
 # Write through pointer
-core::ptr_set_num($ptr, 2.5);
-say($x);  # 2.5
+core::ptr_set_int($ptr, 100);
+say($x);  # 100
+
+# num works the same way
+my num $n = 1.5;
+my int $nptr = core::num_ptr(\$n);
+core::ptr_set_num($nptr, 2.5);
+say($n);  # 2.5
 
 # String pointer (the char* of the string's bytes)
 my str $s = "hello";
-my int $str_ptr = core::str_ptr($s);
+my int $str_ptr = core::str_ptr(\$s);
 say(core::ptr_deref_str($str_ptr));  # hello
 ```
 
-Notes: pass the variable itself, not `\$var` — with a `\$var` reference these
-functions currently return 0. `core::int_ptr()` returns 0 for ordinary
-integers, because they are tagged values encoded in the pointer and have no
-address; for a writable C integer cell use `c::alloc()` with
-`c::write_int64()` / `c::read_int64()`.
+Note: pass `\$var` to `core::int_ptr()`. Called with a plain integer value
+(`core::int_ptr($x)`) it returns 0, because ordinary integers are tagged values
+encoded in the pointer and have no address.
 
 ### Callbacks
 

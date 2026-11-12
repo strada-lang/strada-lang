@@ -1514,7 +1514,7 @@ The `./strada` wrapper script does this automatically.
 
 ```c
 // Get pointer to an int variable's underlying value
-// (returns 0 for tagged integers, i.e. practically every int: they have no address)
+// (pass a `\$var` reference: a bare tagged integer has no address, and gives 0)
 StradaValue* strada_int_ptr(StradaValue *ref);
 
 // Get pointer to a num variable's underlying value

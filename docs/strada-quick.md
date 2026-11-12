@@ -34,7 +34,7 @@ With an installed toolchain, use `strada` instead of `./strada`. The default
 optimization is suitable for release-like runs; `-O0 --no-lto` shortens the
 edit/compile cycle when debugging.
 
-`--check` is the fastest feedback loop: it stops after semantic analysis, exits
+`--check` is the fastest feedback loop: it stops before any C is written, exits
 0 when the file is clean, and otherwise reports every error it finds (not just
 the first) as `file:line:col: message` with the source line and a caret. Run it
 after each edit, before paying for a full compile.

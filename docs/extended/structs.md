@@ -53,9 +53,9 @@ say("x = " . $pt->x());
 say("y = " . $pt->y());
 ```
 
-Pass the constructor pairs separated by commas (`"x", 10`). Do not write
-`Point::new(x => 10)`: in a call argument list `=>` builds a pair value, and
-the attribute silently keeps its default.
+Pass the constructor pairs separated by commas (`"x", 10`) or with the fat
+comma (`Point::new(x => 10, y => 20)`); in a call argument list `=>` is just a
+comma.
 
 ### Functions and Methods
 
