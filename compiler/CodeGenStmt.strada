@@ -91,6 +91,8 @@ func gen_block(scalar $cg, scalar $block) void {
     foreach my str $nv_k (keys(%{$cg->{"num_vars"}})) {
         $saved_num_vars{$nv_k} = $cg->{"num_vars"}->{$nv_k};
     }
+    my scalar $saved_boxed_vars = copy_type_map($cg->{"active_boxed_vars"});
+    my scalar $saved_locals_seen = copy_type_map($cg->{"func_locals_seen"});
 
     my scalar $stmts = $block->{"statements"};
     my int $i = 0;
@@ -101,6 +103,8 @@ func gen_block(scalar $cg, scalar $block) void {
 
     $cg->{"int_vars"} = \%saved_int_vars;
     $cg->{"num_vars"} = \%saved_num_vars;
+    $cg->{"active_boxed_vars"} = $saved_boxed_vars;
+    $cg->{"func_locals_seen"} = $saved_locals_seen;
     our_shadow_restore($cg, $our_shadow_at_entry);
 
     scope_pop($cg);
@@ -192,6 +196,26 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             $cg->{"num_vars"}->{$c_name} = 1;
         } else {
             $cg->{"num_vars"}->{$c_name} = "";
+        }
+
+        # Track native struct type before declaring variable (affects cell boxing)
+        my str $var_st_name = "" . $stmt->{"struct_name"};
+        if (length($var_st_name) == 0 && $stmt->{"init"}) {
+            my scalar $sinit = $stmt->{"init"};
+            if ($sinit->{"type"} == NODE_CALL()) {
+                my scalar $sfi = resolve_callee_func_info($cg, "" . $sinit->{"name"});
+                if ($sfi) { $var_st_name = "" . $sfi->{"return_struct_name"}; }
+            } elsif ($sinit->{"type"} == NODE_VARIABLE()) {
+                $var_st_name = "" . $cg->{"struct_vars"}->{escape_c_keyword($sinit->{"name"})};
+            }
+        }
+        my int $box_scalar = 0;
+        my str $target_lval = $c_name;
+        if ($sigil ne "%" && $sigil ne "@" && $var_type != TYPE_HASH() && $var_type != TYPE_ARRAY()) {
+            if (($cg->{"cand_boxed_vars"}->{$c_name} + 0) == 1 && length($var_st_name) == 0) {
+                $box_scalar = 1;
+                $target_lval = "(*__cell_" . $c_name . ")";
+            }
         }
 
         if ($sigil eq "%" || $var_type == TYPE_HASH()) {
@@ -343,13 +367,21 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 emit($cg, "; int64_t __cap_val = strada_to_int(__cap_tmp); strada_decref(__cap_tmp); __cap_val; }))");
             }
         } else {
-            emit_sv_ptr_decl($cg, $c_name);
+            if ($box_scalar == 1) {
+                if ($cg->{"func_has_try"} == 1) {
+                    emit($cg, "StradaValue ** volatile __cell_" . $c_name . " = strada_cell_alloc(); (*__cell_" . $c_name . ")");
+                } else {
+                    emit($cg, "StradaValue **__cell_" . $c_name . " = strada_cell_alloc(); (*__cell_" . $c_name . ")");
+                }
+            } else {
+                emit_sv_ptr_decl($cg, $c_name);
+            }
             if ($stmt->{"init"}) {
                 my scalar $init = $stmt->{"init"};
                 my int $init_type = $init->{"type"};
                 # Perl-style scalar context: my $n = @arr gives array count
                 if ($init_type == NODE_VARIABLE() && $init->{"sigil"} eq "@") {
-                    emit($cg, " = STRADA_MAKE_TAGGED_INT((int64_t)strada_size(");
+                    emit($cg, " = strada_new_int_il((int64_t)strada_size(");
                     gen_expression($cg, $init);
                     emit($cg, "))");
                 } elsif ($var_type == TYPE_NUM() && expr_is_numeric($cg, $init) == 0) {
@@ -393,29 +425,29 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                     my scalar $our_vars_chk = $cg->{"our_vars"};
                     my str $init_our_chk = "" . $our_vars_chk->{$init_name_chk};
                     if (length($init_our_chk) == 0) {
-                        emit($cg, "; " . $c_name . " = strada_copy_scalar_il(" . $c_name . ")");
+                        emit($cg, "; " . $target_lval . " = strada_copy_scalar_il(" . $target_lval . ")");
                     }
                 } elsif ($init_type == NODE_SUBSCRIPT()) {
                     # Subscript is borrowed unless its source needed cleanup —
                     # in that case codegen used strada_array_get_owned and the
                     # result is already owned. needs_temp_cleanup reflects this.
                     if (needs_temp_cleanup($cg, $init) == 0) {
-                        emit($cg, "; strada_incref(" . $c_name . ")");
+                        emit($cg, "; strada_incref(" . $target_lval . ")");
                     }
                 } elsif ($init_type == NODE_DEREF_ARRAY()) {
                     # Same as NODE_SUBSCRIPT.
                     if (needs_temp_cleanup($cg, $init) == 0) {
-                        emit($cg, "; strada_incref(" . $c_name . ")");
+                        emit($cg, "; strada_incref(" . $target_lval . ")");
                     }
                 } elsif ($init_type == NODE_TERNARY()) {
                     # Ternary expression may contain borrowed references in branches
                     if (return_needs_incref($cg, $init) == 1) {
-                        emit($cg, "; strada_incref(" . $c_name . ")");
+                        emit($cg, "; strada_incref(" . $target_lval . ")");
                     }
                 } elsif ($init_type == NODE_ASSIGN()) {
                     # Nested assignment yields a borrowed ref ONLY when target is local var
                     if (needs_temp_cleanup($cg, $init) == 0) {
-                        emit($cg, "; strada_incref(" . $c_name . ")");
+                        emit($cg, "; strada_incref(" . $target_lval . ")");
                     }
                 }
                 } # end else (non-array scalar context)
@@ -430,21 +462,17 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             }
         }
         emit($cg, ";\n");
-        # Track native struct type on variable
-        my str $var_st_name = "" . $stmt->{"struct_name"};
-        if (length($var_st_name) == 0 && $stmt->{"init"}) {
-            my scalar $sinit = $stmt->{"init"};
-            if ($sinit->{"type"} == NODE_CALL()) {
-                my scalar $sfi = resolve_callee_func_info($cg, "" . $sinit->{"name"});
-                if ($sfi) { $var_st_name = "" . $sfi->{"return_struct_name"}; }
-            } elsif ($sinit->{"type"} == NODE_VARIABLE()) {
-                $var_st_name = "" . $cg->{"struct_vars"}->{escape_c_keyword($sinit->{"name"})};
-            }
-        }
+        # Track native struct type and active boxing state for subsequent references
         $cg->{"struct_vars"}->{$c_name} = $var_st_name;
+        $cg->{"active_boxed_vars"}->{$c_name} = $box_scalar;
+        $cg->{"func_locals_seen"}->{$c_name} = 1;
         # Track variable for scope cleanup
         # Use escaped name for C code generation
-        scope_track_var($cg, $c_name);
+        if ($box_scalar == 1) {
+            scope_track_var($cg, "@cell:" . $c_name);
+        } else {
+            scope_track_var($cg, $c_name);
+        }
 
         # Track known blessed type for devirtualization
         # When $p = Point::new(...) or $p = Counter::new_counter(), we know the class
@@ -488,9 +516,17 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         # mismatched cleanup_pop.
         if (cleanup_push_useful($cg) == 1) {
             emit_indent($cg);
-            emit($cg, "strada_cleanup_push_slot((StradaValue **)&" . $c_name . ");\n");
+            if ($box_scalar == 1) {
+                emit($cg, "strada_cleanup_push_cell(__cell_" . $c_name . ");\n");
+            } else {
+                emit($cg, "strada_cleanup_push_slot((StradaValue **)&" . $c_name . ");\n");
+            }
         } else {
-            scope_mark_no_push($cg, $c_name);
+            if ($box_scalar == 1) {
+                scope_mark_no_push($cg, "@cell:" . $c_name);
+            } else {
+                scope_mark_no_push($cg, $c_name);
+            }
         }
         return;
     }
@@ -499,6 +535,8 @@ func gen_statement(scalar $cg, scalar $stmt) void {
     if ($type == NODE_CONST_DECL()) {
         my str $c_name = escape_c_keyword($stmt->{"name"});
         my scalar $init = $stmt->{"init"};
+        $cg->{"active_boxed_vars"}->{$c_name} = 0;
+        $cg->{"func_locals_seen"}->{$c_name} = 1;
 
         # Track variable for cleanup
         scope_track_var($cg, $c_name);
@@ -737,6 +775,8 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 } else {
                     $cg->{"num_vars"}->{$name} = "";
                 }
+                $cg->{"active_boxed_vars"}->{$name} = 0;
+                $cg->{"func_locals_seen"}->{$name} = 1;
                 emit_indent($cg);
                 emit_sv_ptr_decl($cg, $name);
                 if ($vsigil eq "%") {
@@ -988,6 +1028,8 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         }
         my scalar $w_saved_iv = copy_type_map($cg->{"int_vars"});
         my scalar $w_saved_nv = copy_type_map($cg->{"num_vars"});
+        my scalar $w_saved_bv = copy_type_map($cg->{"active_boxed_vars"});
+        my scalar $w_saved_fl = copy_type_map($cg->{"func_locals_seen"});
         my int $w_shadow = our_shadow_mark($cg);
         my scalar $stmts = $body->{"statements"};
         my int $i = 0;
@@ -997,6 +1039,8 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         }
         $cg->{"int_vars"} = $w_saved_iv;
         $cg->{"num_vars"} = $w_saved_nv;
+        $cg->{"active_boxed_vars"} = $w_saved_bv;
+        $cg->{"func_locals_seen"} = $w_saved_fl;
         our_shadow_restore($cg, $w_shadow);
 
         if (length($label) > 0) {
@@ -1093,6 +1137,8 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         }
         my scalar $dw_saved_iv = copy_type_map($cg->{"int_vars"});
         my scalar $dw_saved_nv = copy_type_map($cg->{"num_vars"});
+        my scalar $dw_saved_bv = copy_type_map($cg->{"active_boxed_vars"});
+        my scalar $dw_saved_fl = copy_type_map($cg->{"func_locals_seen"});
         my int $dw_shadow = our_shadow_mark($cg);
         my scalar $stmts = $body->{"statements"};
         my int $i = 0;
@@ -1102,6 +1148,8 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         }
         $cg->{"int_vars"} = $dw_saved_iv;
         $cg->{"num_vars"} = $dw_saved_nv;
+        $cg->{"active_boxed_vars"} = $dw_saved_bv;
+        $cg->{"func_locals_seen"} = $dw_saved_fl;
         our_shadow_restore($cg, $dw_shadow);
 
         if (length($label) > 0) {
@@ -1171,6 +1219,8 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         my int $has_var_decl = 0;
         my scalar $for_saved_iv = copy_type_map($cg->{"int_vars"});
         my scalar $for_saved_nv = copy_type_map($cg->{"num_vars"});
+        my scalar $for_saved_bv = copy_type_map($cg->{"active_boxed_vars"});
+        my scalar $for_saved_fl = copy_type_map($cg->{"func_locals_seen"});
         my int $for_shadow = our_shadow_mark($cg);
 
         if ($stmt->{"init"}) {
@@ -1189,6 +1239,8 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 } else {
                     $cg->{"num_vars"}->{$loop_var_name} = "";
                 }
+                $cg->{"active_boxed_vars"}->{$loop_var_name} = 0;
+                $cg->{"func_locals_seen"}->{$loop_var_name} = 1;
                 emit_indent($cg);
                 emit($cg, "{\n");
                 indent($cg);
@@ -1293,6 +1345,8 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         }
         $cg->{"int_vars"} = $for_saved_iv;
         $cg->{"num_vars"} = $for_saved_nv;
+        $cg->{"active_boxed_vars"} = $for_saved_bv;
+        $cg->{"func_locals_seen"} = $for_saved_fl;
         our_shadow_restore($cg, $for_shadow);
 
         if (length($label) > 0) {
@@ -1406,11 +1460,15 @@ func gen_statement(scalar $cg, scalar $stmt) void {
 
             my scalar $fr_saved_iv = copy_type_map($cg->{"int_vars"});
             my scalar $fr_saved_nv = copy_type_map($cg->{"num_vars"});
+            my scalar $fr_saved_bv = copy_type_map($cg->{"active_boxed_vars"});
+            my scalar $fr_saved_fl = copy_type_map($cg->{"func_locals_seen"});
             my int $fr_shadow = our_shadow_mark($cg);
             if ($var_decl) {
                 our_shadow_begin($cg, $var_name);
                 $cg->{"int_vars"}->{$var_name} = 1;
                 $cg->{"num_vars"}->{$var_name} = "";
+                $cg->{"active_boxed_vars"}->{$var_name} = 0;
+                $cg->{"func_locals_seen"}->{$var_name} = 1;
             }
 
             emit_indent($cg);
@@ -1481,6 +1539,8 @@ func gen_statement(scalar $cg, scalar $stmt) void {
 
             $cg->{"int_vars"} = $fr_saved_iv;
             $cg->{"num_vars"} = $fr_saved_nv;
+            $cg->{"active_boxed_vars"} = $fr_saved_bv;
+            $cg->{"func_locals_seen"} = $fr_saved_fl;
             our_shadow_restore($cg, $fr_shadow);
 
             scope_pop($cg);
@@ -1540,6 +1600,8 @@ func gen_statement(scalar $cg, scalar $stmt) void {
 
         my scalar $fe_saved_iv = copy_type_map($cg->{"int_vars"});
         my scalar $fe_saved_nv = copy_type_map($cg->{"num_vars"});
+        my scalar $fe_saved_bv = copy_type_map($cg->{"active_boxed_vars"});
+        my scalar $fe_saved_fl = copy_type_map($cg->{"func_locals_seen"});
         my int $fe_shadow = our_shadow_mark($cg);
         if ($var_decl) {
             our_shadow_begin($cg, $var_name);
@@ -1553,6 +1615,8 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             } else {
                 $cg->{"num_vars"}->{$var_name} = "";
             }
+            $cg->{"active_boxed_vars"}->{$var_name} = 0;
+            $cg->{"func_locals_seen"}->{$var_name} = 1;
         }
 
         emit_indent($cg);
@@ -1636,6 +1700,8 @@ func gen_statement(scalar $cg, scalar $stmt) void {
 
         $cg->{"int_vars"} = $fe_saved_iv;
         $cg->{"num_vars"} = $fe_saved_nv;
+        $cg->{"active_boxed_vars"} = $fe_saved_bv;
+        $cg->{"func_locals_seen"} = $fe_saved_fl;
         our_shadow_restore($cg, $fe_shadow);
 
         if ($foreach_arr_cleanup) {
@@ -2045,6 +2111,8 @@ func gen_statement(scalar $cg, scalar $stmt) void {
 
         my scalar $try_saved_iv = copy_type_map($cg->{"int_vars"});
         my scalar $try_saved_nv = copy_type_map($cg->{"num_vars"});
+        my scalar $try_saved_bv = copy_type_map($cg->{"active_boxed_vars"});
+        my scalar $try_saved_fl = copy_type_map($cg->{"func_locals_seen"});
         my int $try_shadow = our_shadow_mark($cg);
 
         # Generate try block
@@ -2057,6 +2125,8 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         }
         $cg->{"int_vars"} = $try_saved_iv;
         $cg->{"num_vars"} = $try_saved_nv;
+        $cg->{"active_boxed_vars"} = $try_saved_bv;
+        $cg->{"func_locals_seen"} = $try_saved_fl;
         our_shadow_restore($cg, $try_shadow);
 
         if (stmt_has_local($try_block) == 1) {
@@ -2186,10 +2256,14 @@ func gen_statement(scalar $cg, scalar $stmt) void {
 
             my scalar $ct_saved_iv = copy_type_map($cg->{"int_vars"});
             my scalar $ct_saved_nv = copy_type_map($cg->{"num_vars"});
+            my scalar $ct_saved_bv = copy_type_map($cg->{"active_boxed_vars"});
+            my scalar $ct_saved_fl = copy_type_map($cg->{"func_locals_seen"});
             my int $ct_shadow = our_shadow_mark($cg);
             our_shadow_begin($cg, $catch_var);
             $cg->{"int_vars"}->{$catch_var} = "";
             $cg->{"num_vars"}->{$catch_var} = "";
+            $cg->{"active_boxed_vars"}->{$catch_var} = 0;
+            $cg->{"func_locals_seen"}->{$catch_var} = 1;
 
             # Generate catch block statements
             my scalar $catch_stmts = $catch_block->{"statements"};
@@ -2200,6 +2274,8 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             }
             $cg->{"int_vars"} = $ct_saved_iv;
             $cg->{"num_vars"} = $ct_saved_nv;
+            $cg->{"active_boxed_vars"} = $ct_saved_bv;
+            $cg->{"func_locals_seen"} = $ct_saved_fl;
             our_shadow_restore($cg, $ct_shadow);
             if (stmt_has_local($catch_block) == 1) {
                 emit_indent($cg);
@@ -2295,10 +2371,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         my int $td = $cg->{"try_depth"} + 0;
         my int $ccc = $cg->{"catch_cleanup_count"} + 0;
         my scalar $throw_expr = $stmt->{"expr"};
-        my int $throw_is_var = 0;
-        if ($throw_expr->{"type"} == NODE_VARIABLE()) {
-            $throw_is_var = 1;
-        }
+        my int $throw_owned = needs_temp_cleanup($cg, $throw_expr);
 
         if ($ccc > 0) {
             # We're in a catch block (possibly inside an outer try) - need to clean up
@@ -2309,8 +2382,10 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             gen_expression($cg, $throw_expr);
             emit($cg, ";\n");
             indent($cg);
-            emit_indent($cg);
-            emit($cg, "strada_incref(__throw_val);\n");
+            if ($throw_owned == 0) {
+                emit_indent($cg);
+                emit($cg, "strada_incref(__throw_val);\n");
+            }
             if ($td == 0) {
                 # Not inside any outer try - clean up everything
                 scope_emit_all_cleanup($cg);
@@ -2320,11 +2395,6 @@ func gen_statement(scalar $cg, scalar $stmt) void {
                 # is released by the throw's drain to the try's mark
                 scope_emit_cleanup($cg);
             }
-            # Only decref if throw expression was NOT a variable (variables get decrefd by cleanup)
-            if ($throw_is_var == 0) {
-                emit_indent($cg);
-                emit($cg, "strada_decref(__throw_val);\n");
-            }
             emit_indent($cg);
             emit($cg, "strada_throw_value(__throw_val); }\n");
             dedent($cg);
@@ -2332,25 +2402,19 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         }
 
         if ($td > 0) {
-            # We're inside a try block (not a catch). The longjmp to the
-            # catch handler skips any scope_pop calls, so locals declared
-            # inside the try would leak. Mirror the outside-try / catch
-            # paths: capture the throw value, incref to protect it,
-            # emit scope cleanup, then throw. Borrowed-ref throw_expr
-            # (variable case) gets decref balance from the cleanup.
+            # We're inside a try block (not a catch). Protect borrowed refs with
+            # an extra incref before scope cleanup; owned temps already hold +1
+            # which strada_throw_value takes over without freeing before longjmp.
             emit_indent($cg);
             emit($cg, "{ StradaValue *__throw_val = ");
             gen_expression($cg, $throw_expr);
             emit($cg, ";\n");
             indent($cg);
-            emit_indent($cg);
-            emit($cg, "strada_incref(__throw_val);\n");
-            scope_emit_cleanup($cg);
-            # Only decref if throw expression was NOT a variable
-            if ($throw_is_var == 0) {
+            if ($throw_owned == 0) {
                 emit_indent($cg);
-                emit($cg, "strada_decref(__throw_val);\n");
+                emit($cg, "strada_incref(__throw_val);\n");
             }
+            scope_emit_cleanup($cg);
             emit_indent($cg);
             emit($cg, "strada_throw_value(__throw_val); }\n");
             dedent($cg);
@@ -2363,14 +2427,11 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         gen_expression($cg, $throw_expr);
         emit($cg, ";\n");
         indent($cg);
-        emit_indent($cg);
-        emit($cg, "strada_incref(__throw_val);\n");
-        scope_emit_all_cleanup($cg);
-        # Only decref if throw expression was NOT a variable (variables get decrefd by cleanup)
-        if ($throw_is_var == 0) {
+        if ($throw_owned == 0) {
             emit_indent($cg);
-            emit($cg, "strada_decref(__throw_val);\n");
+            emit($cg, "strada_incref(__throw_val);\n");
         }
+        scope_emit_all_cleanup($cg);
         emit_indent($cg);
         emit($cg, "strada_throw_value(__throw_val); }\n");
         dedent($cg);
@@ -2379,28 +2440,24 @@ func gen_statement(scalar $cg, scalar $stmt) void {
 
     # Label statement
     if ($type == NODE_LABEL()) {
-        # Register the label's scope depth so a backward `goto LABEL`
-        # can emit cleanup for the scopes it exits.
+        # Register the label's scope depth and try depth so a backward `goto LABEL`
+        # can unwind try frames and emit cleanup for the scopes it exits.
         my scalar $label_depths = $cg->{"label_depths"};
         $label_depths->{$stmt->{"name"}} = $cg->{"scope_depth"};
+        $cg->{"label_try_depths"}->{$stmt->{"name"}} = $cg->{"try_depth"};
         emit($cg, $stmt->{"name"} . ":;\n");
         return;
     }
 
     # Goto statement
     if ($type == NODE_GOTO()) {
-        # If the label has been registered (backward goto — the common
-        # case), emit cleanup for every scope between the goto and the
-        # label's scope. Without this, locals declared between the
-        # label and the goto leaked permanently. Forward gotos (label
-        # not yet seen) fall back to bare goto and may still leak —
-        # rare in practice, and over-cleaning here would double-free
-        # via the natural scope_pop on fall-through.
         my str $target = $stmt->{"target"};
         my scalar $label_depths = $cg->{"label_depths"};
         my int $has_target = exists(%{$label_depths}, $target);
         if ($has_target == 1) {
+            my int $target_td = $cg->{"label_try_depths"}->{$target} + 0;
             my int $target_depth = $label_depths->{$target} + 0;
+            emit_try_unwind_to($cg, $target_td);
             scope_emit_cleanup_to_depth($cg, $target_depth);
             emit_foreach_cleanup_from($cg, $target_depth);
         }
@@ -2468,6 +2525,8 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             scope_push($cg);
             my scalar $sw_saved_iv = copy_type_map($cg->{"int_vars"});
             my scalar $sw_saved_nv = copy_type_map($cg->{"num_vars"});
+            my scalar $sw_saved_bv = copy_type_map($cg->{"active_boxed_vars"});
+            my scalar $sw_saved_fl = copy_type_map($cg->{"func_locals_seen"});
             my int $sw_shadow = our_shadow_mark($cg);
             my scalar $block = $blocks->[$i];
             my scalar $stmts = $block->{"statements"};
@@ -2478,6 +2537,8 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             }
             $cg->{"int_vars"} = $sw_saved_iv;
             $cg->{"num_vars"} = $sw_saved_nv;
+            $cg->{"active_boxed_vars"} = $sw_saved_bv;
+            $cg->{"func_locals_seen"} = $sw_saved_fl;
             our_shadow_restore($cg, $sw_shadow);
             scope_pop($cg);
 
@@ -2499,6 +2560,8 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             scope_push($cg);
             my scalar $swd_saved_iv = copy_type_map($cg->{"int_vars"});
             my scalar $swd_saved_nv = copy_type_map($cg->{"num_vars"});
+            my scalar $swd_saved_bv = copy_type_map($cg->{"active_boxed_vars"});
+            my scalar $swd_saved_fl = copy_type_map($cg->{"func_locals_seen"});
             my int $swd_shadow = our_shadow_mark($cg);
             my scalar $def_stmts = $default_block->{"statements"};
             my int $k = 0;
@@ -2508,6 +2571,8 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             }
             $cg->{"int_vars"} = $swd_saved_iv;
             $cg->{"num_vars"} = $swd_saved_nv;
+            $cg->{"active_boxed_vars"} = $swd_saved_bv;
+            $cg->{"func_locals_seen"} = $swd_saved_fl;
             our_shadow_restore($cg, $swd_shadow);
             scope_pop($cg);
 
@@ -2587,6 +2652,18 @@ func gen_function(scalar $cg, scalar $fn) void {
     } else {
         $cg->{"func_has_try"} = 0;
     }
+
+    my hash %cand_boxed = ();
+    if (stmt_has_c_block($fn_body) == 0) {
+        ast_collect_anon_var_refs($fn_body, \%cand_boxed, 0);
+    }
+    $cg->{"cand_boxed_vars"} = \%cand_boxed;
+    $cg->{"active_boxed_vars"} = {};
+    $cg->{"func_locals_seen"} = {};
+    $cg->{"label_depths"} = {};
+    $cg->{"label_try_depths"} = {};
+
+    my str $emit_fn_name = mangle_c_func_ident($name, "" . $fn->{"name"}, 0);
 
     # Special case for main
     if ($name eq "main") {
@@ -2936,7 +3013,7 @@ func gen_function(scalar $cg, scalar $fn) void {
             emit($cg, "    return 0;\n");
             emit($cg, "}\n\n");
 
-            emit($cg, $static_prefix . $ret_type . " " . $name . "(");
+            emit($cg, $static_prefix . $ret_type . " " . $emit_fn_name . "(");
             $rpi = 0;
             while ($rpi < $rpc) {
                 if ($rpi > 0) { emit($cg, ", "); }
@@ -2956,7 +3033,7 @@ func gen_function(scalar $cg, scalar $fn) void {
             emit($cg, "}\n\n");
             return;
         }
-        emit($cg, $static_prefix . $ret_type . " " . $name . "(");
+        emit($cg, $static_prefix . $ret_type . " " . $emit_fn_name . "(");
 
         my scalar $params = $fn->{"params"};
         my int $i = 0;
@@ -2967,7 +3044,17 @@ func gen_function(scalar $cg, scalar $fn) void {
             my scalar $param = $params->[$i];
             my int $ptype = $param->{"param_type"};
             my str $c_param_name = escape_c_keyword($param->{"name"});
-            emit($cg, type_to_c($ptype) . " " . $c_param_name);
+            my str $psigil = "" . $param->{"sigil"};
+            my str $sig_pname = $c_param_name;
+            if ($cg->{"is_destroy_method"} != 1 && ($cand_boxed{$c_param_name} + 0) == 1
+                && length("" . $param->{"struct_name"}) == 0 && $psigil ne "@" && $psigil ne "%") {
+                $sig_pname = "__rawp_" . $c_param_name;
+            }
+            if ($cg->{"func_has_try"} == 1) {
+                emit($cg, type_to_c($ptype) . " volatile " . $sig_pname);
+            } else {
+                emit($cg, type_to_c($ptype) . " " . $sig_pname);
+            }
             $i = $i + 1;
         }
 
@@ -3086,21 +3173,47 @@ func gen_function(scalar $cg, scalar $fn) void {
                     $cg->{"struct_vars"}->{$c_param_name} = "" . $param->{"struct_name"};
                 }
                 $cg->{"func_param_is_int"}->[$pc] = $is_int_param;
-                # Skip wrap ONLY when param is int or body is leaf-safe AND param is NOT mutated!
-                my int $skip_wrap = 0;
-                if (($is_int_param == 1 || $is_leaf_body == 1) && node_writes_var($fn->{"body"}, $param->{"name"}) == 0) {
-                    $skip_wrap = 1;
-                } elsif (cleanup_push_useful($cg) == 0) {
-                    $skip_wrap = 2;
+                $cg->{"func_locals_seen"}->{$c_param_name} = 1;
+                my str $p_sigil = "" . $param->{"sigil"};
+                my int $box_param = 0;
+                if (($cand_boxed{$c_param_name} + 0) == 1 && length("" . $param->{"struct_name"}) == 0
+                    && $p_sigil ne "@" && $p_sigil ne "%") {
+                    $box_param = 1;
                 }
-                $cg->{"func_param_skip_wrap"}->[$pc] = $skip_wrap;
-                if ($skip_wrap == 0) {
-                    emit($cg, "strada_incref(" . $c_param_name . ");\n");
-                    # Push to cleanup stack for exception unwinding
-                    # by address: it may be reassigned before a callee throws
-                    emit($cg, "strada_cleanup_push_slot((StradaValue **)&" . $c_param_name . ");\n");
-                } elsif ($skip_wrap == 2) {
-                    emit($cg, "strada_incref(" . $c_param_name . ");\n");
+                if ($box_param == 1) {
+                    $cg->{"func_param_skip_wrap"}->[$pc] = 1;
+                    $cg->{"active_boxed_vars"}->{$c_param_name} = 1;
+                    if ($cg->{"func_has_try"} == 1) {
+                        emit($cg, "StradaValue ** volatile __cell_" . $c_param_name . " = strada_cell_alloc();\n");
+                    } else {
+                        emit($cg, "StradaValue **__cell_" . $c_param_name . " = strada_cell_alloc();\n");
+                    }
+                    emit($cg, "(*__cell_" . $c_param_name . ") = strada_copy_scalar_il(__rawp_" . $c_param_name . ");\n");
+                    my str $cell_track = "@cell:" . $c_param_name;
+                    scope_track_var($cg, $cell_track);
+                    if (cleanup_push_useful($cg) == 1) {
+                        emit($cg, "strada_cleanup_push_cell(__cell_" . $c_param_name . ");\n");
+                    } else {
+                        scope_mark_no_push($cg, $cell_track);
+                    }
+                } else {
+                    $cg->{"active_boxed_vars"}->{$c_param_name} = 0;
+                    # Skip wrap ONLY when param is int or body is leaf-safe AND param is NOT mutated!
+                    my int $skip_wrap = 0;
+                    if (($is_int_param == 1 || $is_leaf_body == 1) && node_writes_var($fn->{"body"}, $param->{"name"}) == 0) {
+                        $skip_wrap = 1;
+                    } elsif (cleanup_push_useful($cg) == 0) {
+                        $skip_wrap = 2;
+                    }
+                    $cg->{"func_param_skip_wrap"}->[$pc] = $skip_wrap;
+                    if ($skip_wrap == 0) {
+                        emit($cg, "strada_incref(" . $c_param_name . ");\n");
+                        # Push to cleanup stack for exception unwinding
+                        # by address: it may be reassigned before a callee throws
+                        emit($cg, "strada_cleanup_push_slot((StradaValue **)&" . $c_param_name . ");\n");
+                    } elsif ($skip_wrap == 2) {
+                        emit($cg, "strada_incref(" . $c_param_name . ");\n");
+                    }
                 }
                 $param_i = $param_i + 1;
             }
@@ -3243,14 +3356,34 @@ func gen_async_function(scalar $cg, scalar $fn) void {
         $cg->{"func_has_try"} = 0;
     }
 
-    # Unpack captured parameters (volatile when try is present!)
+    my scalar $saved_async_cand_boxed = $cg->{"cand_boxed_vars"};
+    my scalar $saved_async_active_boxed = $cg->{"active_boxed_vars"};
+    my scalar $saved_async_locals_seen = $cg->{"func_locals_seen"};
+    my scalar $saved_async_label_depths = $cg->{"label_depths"};
+    my scalar $saved_async_label_try_depths = $cg->{"label_try_depths"};
+
+    my hash %async_cand_boxed = ();
+    if (stmt_has_c_block($async_body) == 0) {
+        ast_collect_anon_var_refs($async_body, \%async_cand_boxed, 0);
+    }
+
+    # Unpack captured parameters (deferred boxing/cleanup below inside inner scope)
     my int $i = 0;
     while ($i < $param_count) {
         my scalar $p = $params->[$i];
         my str $pname = escape_c_keyword($p->{"name"});
+        my str $psigil = "" . $p->{"sigil"};
         emit($cg, "    ");
-        emit_sv_ptr_decl($cg, $pname);
-        emit($cg, " = (*__captures[" . $i . "]);\n");
+        if (($async_cand_boxed{$pname} + 0) == 1 && length("" . $p->{"struct_name"}) == 0 && $psigil ne "@" && $psigil ne "%") {
+            if ($cg->{"func_has_try"} == 1) {
+                emit($cg, "StradaValue * volatile __rawp_" . $pname . " = (*__captures[" . $i . "]);\n");
+            } else {
+                emit($cg, "StradaValue *__rawp_" . $pname . " = (*__captures[" . $i . "]);\n");
+            }
+        } else {
+            emit_sv_ptr_decl($cg, $pname);
+            emit($cg, " = (*__captures[" . $i . "]);\n");
+        }
         $i = $i + 1;
     }
     if ($param_count > 0) {
@@ -3332,6 +3465,11 @@ func gen_async_function(scalar $cg, scalar $fn) void {
     $cg->{"current_redo_label"} = "";
     $cg->{"func_tracks_depth"} = 0;
     $cg->{"struct_vars"} = {};
+    $cg->{"cand_boxed_vars"} = \%async_cand_boxed;
+    $cg->{"active_boxed_vars"} = {};
+    $cg->{"func_locals_seen"} = {};
+    $cg->{"label_depths"} = {};
+    $cg->{"label_try_depths"} = {};
 
     # Generate body
     indent($cg);
@@ -3345,6 +3483,8 @@ func gen_async_function(scalar $cg, scalar $fn) void {
     while ($api < $param_count) {
         my scalar $ap = $params->[$api];
         my str $ap_c = escape_c_keyword($ap->{"name"});
+        my str $ap_sig = "" . $ap->{"sigil"};
+        $cg->{"func_locals_seen"}->{$ap_c} = 1;
         if ($ap->{"param_type"} == TYPE_INT()) {
             $cg->{"int_vars"}->{$ap_c} = 1;
         } elsif ($ap->{"param_type"} == TYPE_NUM()) {
@@ -3353,15 +3493,36 @@ func gen_async_function(scalar $cg, scalar $fn) void {
         if (length("" . $ap->{"struct_name"}) > 0) {
             $cg->{"struct_vars"}->{$ap_c} = "" . $ap->{"struct_name"};
         }
-        if ($cg->{"cleanup_enabled"} == 1 && node_writes_var($async_body, $ap->{"name"}) == 1) {
+        if (($async_cand_boxed{$ap_c} + 0) == 1 && length("" . $ap->{"struct_name"}) == 0 && $ap_sig ne "@" && $ap_sig ne "%") {
+            $cg->{"active_boxed_vars"}->{$ap_c} = 1;
             emit_indent($cg);
-            emit($cg, "strada_incref(" . $ap_c . ");\n");
-            scope_track_var($cg, $ap_c);
+            if ($cg->{"func_has_try"} == 1) {
+                emit($cg, "StradaValue ** volatile __cell_" . $ap_c . " = strada_cell_alloc();\n");
+            } else {
+                emit($cg, "StradaValue **__cell_" . $ap_c . " = strada_cell_alloc();\n");
+            }
+            emit_indent($cg);
+            emit($cg, "(*__cell_" . $ap_c . ") = strada_copy_scalar_il(__rawp_" . $ap_c . ");\n");
+            my str $ac_track = "@cell:" . $ap_c;
+            scope_track_var($cg, $ac_track);
             if (cleanup_push_useful($cg) == 1) {
                 emit_indent($cg);
-                emit($cg, "strada_cleanup_push_slot((StradaValue **)&" . $ap_c . ");\n");
+                emit($cg, "strada_cleanup_push_cell(__cell_" . $ap_c . ");\n");
             } else {
-                scope_mark_no_push($cg, $ap_c);
+                scope_mark_no_push($cg, $ac_track);
+            }
+        } else {
+            $cg->{"active_boxed_vars"}->{$ap_c} = 0;
+            if ($cg->{"cleanup_enabled"} == 1 && node_writes_var($async_body, $ap->{"name"}) == 1) {
+                emit_indent($cg);
+                emit($cg, "strada_incref(" . $ap_c . ");\n");
+                scope_track_var($cg, $ap_c);
+                if (cleanup_push_useful($cg) == 1) {
+                    emit_indent($cg);
+                    emit($cg, "strada_cleanup_push_slot((StradaValue **)&" . $ap_c . ");\n");
+                } else {
+                    scope_mark_no_push($cg, $ap_c);
+                }
             }
         }
         $api = $api + 1;
@@ -3417,13 +3578,19 @@ func gen_async_function(scalar $cg, scalar $fn) void {
     $cg->{"func_has_try"} = $saved_func_has_try;
     $cg->{"func_tracks_depth"} = $saved_async_tracks_depth;
     $cg->{"struct_vars"} = $saved_async_struct_vars;
+    $cg->{"cand_boxed_vars"} = $saved_async_cand_boxed;
+    $cg->{"active_boxed_vars"} = $saved_async_active_boxed;
+    $cg->{"func_locals_seen"} = $saved_async_locals_seen;
+    $cg->{"label_depths"} = $saved_async_label_depths;
+    $cg->{"label_try_depths"} = $saved_async_label_try_depths;
 
     emit($cg, "    return strada_undef_static();\n");
     emit($cg, "}\n\n");
 
     # --- Generate outer wrapper ---
+    my str $emit_fn_name = mangle_c_func_ident($name, "" . $fn->{"name"}, 0);
     emit($cg, "/* Async wrapper: " . $name . " */\n");
-    emit($cg, $static_prefix . "StradaValue* " . $name . "(");
+    emit($cg, $static_prefix . "StradaValue* " . $emit_fn_name . "(");
     $i = 0;
     while ($i < $param_count) {
         if ($i > 0) { emit($cg, ", "); }
@@ -3555,6 +3722,48 @@ func gen_program(scalar $cg, scalar $program) void {
         $hmi = $hmi + 1;
     }
     $cg->{"tu_has_main"} = $tu_has_main;
+    my int $tu_try = 0;
+    if ($tu_has_main == 0 || $cg->{"module_only_mode"} == 1
+        || $program->{"import_lib_count"} > 0
+        || $program->{"import_object_count"} > 0
+        || $program->{"import_archive_count"} > 0) {
+        $tu_try = 1;
+    } else {
+        my int $tti = 0;
+        while ($tti < $program->{"function_count"}) {
+            my scalar $tfn = $funcs->[$tti];
+            if ($tfn->{"type"} != NODE_EXTERN_FUNC() && cg_skip_for_module($program, $tfn->{"from_use"}) == 0) {
+                if (ast_any_try($tfn->{"body"}) == 1) {
+                    $tu_try = 1;
+                    last;
+                }
+            }
+            $tti = $tti + 1;
+        }
+        if ($tu_try == 0 && $program->{"begin_block_count"} > 0) {
+            my scalar $tbbs = $program->{"begin_blocks"};
+            my int $tbi = 0;
+            while ($tbi < $program->{"begin_block_count"}) {
+                if (ast_any_try($tbbs->[$tbi]) == 1) {
+                    $tu_try = 1;
+                    last;
+                }
+                $tbi = $tbi + 1;
+            }
+        }
+        if ($tu_try == 0 && $program->{"end_block_count"} > 0) {
+            my scalar $tebs = $program->{"end_blocks"};
+            my int $tei = 0;
+            while ($tei < $program->{"end_block_count"}) {
+                if (ast_any_try($tebs->[$tei]) == 1) {
+                    $tu_try = 1;
+                    last;
+                }
+                $tei = $tei + 1;
+            }
+        }
+    }
+    $cg->{"tu_has_try"} = $tu_try;
     my int $aggressive = 0;
     if ($tu_has_main == 1 && $program->{"function_count"} <= 100) {
         $aggressive = 1;
@@ -3748,9 +3957,12 @@ func gen_program(scalar $cg, scalar $program) void {
             # Handle const declarations - emit as global variable (initialized once in main)
             # Using #define with strada_new_* causes leaks since it creates new values on every use
             my str $gdecl_cname = escape_c_keyword($name);
+            $cg->{"file_globals"}->{$gdecl_cname} = 1;
             if (length("" . $cg->{"split_dir"}) > 0) {
                 emit($cg, "STRADA_SHARD_HIDDEN StradaValue *" . $gdecl_cname . " = NULL;\n");
             } elsif ($gvar_type == NODE_CONST_DECL()) {
+                emit($cg, "static StradaValue *" . $gdecl_cname . " = NULL;\n");
+            } elsif ($has_main == 1 && $cg->{"module_only_mode"} == 0) {
                 emit($cg, "static StradaValue *" . $gdecl_cname . " = NULL;\n");
             } else {
                 emit($cg, "StradaValue *" . $gdecl_cname . " = NULL;\n");
@@ -4375,7 +4587,8 @@ func gen_program(scalar $cg, scalar $program) void {
                 }
                 emit($cg, "int __strada_depth);\n");
             }
-            emit($cg, $static_prefix . type_to_c($fn->{"return_type"}) . " " . $name . "(");
+            my str $fwd_cname = mangle_c_func_ident($name, "" . $fn->{"name"}, 0);
+            emit($cg, $static_prefix . type_to_c($fn->{"return_type"}) . " " . $fwd_cname . "(");
             
             my scalar $params = $fn->{"params"};
             my int $j = 0;
@@ -4783,6 +4996,11 @@ func gen_program(scalar $cg, scalar $program) void {
                 my scalar $begin_body = $begin_blocks->[$bi];
                 my scalar $begin_stmts = $begin_body->{"statements"};
                 my int $begin_stmt_count = $begin_body->{"statement_count"};
+                $cg->{"cand_boxed_vars"} = {};
+                $cg->{"active_boxed_vars"} = {};
+                $cg->{"func_locals_seen"} = {};
+                $cg->{"label_depths"} = {};
+                $cg->{"label_try_depths"} = {};
                 scope_push($cg);
                 my int $bs = 0;
                 while ($bs < $begin_stmt_count) {
@@ -4803,6 +5021,11 @@ func gen_program(scalar $cg, scalar $program) void {
                 my scalar $end_body = $end_blocks->[$ei];
                 my scalar $end_stmts = $end_body->{"statements"};
                 my int $end_stmt_count = $end_body->{"statement_count"};
+                $cg->{"cand_boxed_vars"} = {};
+                $cg->{"active_boxed_vars"} = {};
+                $cg->{"func_locals_seen"} = {};
+                $cg->{"label_depths"} = {};
+                $cg->{"label_try_depths"} = {};
                 scope_push($cg);
                 my int $es = 0;
                 while ($es < $end_stmt_count) {
@@ -4874,7 +5097,8 @@ func gen_program(scalar $cg, scalar $program) void {
                 if ($fn->{"param_count"} == 0) {
                     emit($cg, "void");
                 }
-                emit($cg, ") { return " . $name . "(");
+                my str $target_cname = mangle_c_func_ident($name, "" . $fn->{"name"}, 0);
+                emit($cg, ") { return " . $target_cname . "(");
 
                 $j = 0;
                 while ($j < $fn->{"param_count"}) {

@@ -309,9 +309,10 @@ say($f->(5));  # 50
 // Forward declaration: captures arrive as an array of capture cells
 StradaValue* __anon_func_0(StradaValue ***__captures, StradaValue *n);
 
-// In the enclosing function:
-StradaValue *x = strada_new_int(10);
-StradaValue *f = strada_closure_new((void*)&__anon_func_0, 1, 1, (StradaValue**[]){&x});
+// In the enclosing function (x is boxed in a shared PerlaCell when captured):
+StradaValue **__cell_x = strada_cell_alloc();
+*__cell_x = strada_new_int(10);
+StradaValue *f = strada_closure_new_shared((void*)&__anon_func_0, 1, 1, (StradaValue***[]){__cell_x}, (unsigned char[]){0});
 strada_say(strada_closure_call(f, 1, strada_new_int(5)));
 
 // Anonymous function definition:
@@ -322,11 +323,10 @@ StradaValue* __anon_func_0(StradaValue ***__captures, StradaValue *n) {
 
 ### Capture Mechanism
 
-Closures receive their captures through triple pointers. Scalars are captured **by value** (a snapshot taken when the closure is created); arrays and hashes are shared, since the snapshot is a pointer to the same container:
+Closures receive their captures through triple pointers. Captured lexical variables are boxed into shared refcounted `PerlaCell`s (`StradaValue **`), so scalars, arrays, and hashes all share true lexical bindings across closures and the enclosing scope:
 
-1. **At closure creation**: Addresses of captured variables are passed in an array
-   - `(StradaValue**[]){&var1, &var2}` - array of pointers to pointers
-   - `strada_closure_new()` copies each variable's current value into a private, refcounted cell owned by the closure (it does not keep the addresses)
+1. **At closure creation**: Shared cells (or global storage pointers) and capture modes are passed to `strada_closure_new_shared()`
+   - Each captured variable holds an incremented reference to the same `PerlaCell`, keeping the binding alive after the enclosing scope exits
 
 2. **Function signature**: Anonymous functions receive captures as first parameter
    - `StradaValue ***__captures` - pointer to array of double pointers
@@ -334,8 +334,8 @@ Closures receive their captures through triple pointers. Scalars are captured **
 3. **Capture access**: Variables are accessed through double dereference
    - `(*__captures[idx])` - dereference to get the actual StradaValue*
 
-4. **Mutation**: Assignments to captured variables update the closure's own cell
-   - `(*__captures[idx]) = new_value` - persists across calls of this closure, but does not modify the outer variable (and later changes to the outer variable are not seen by the closure)
+4. **Mutation**: Assignments to captured variables update the shared cell
+   - `(*__captures[idx]) = new_value` - persists across calls and is immediately visible to the enclosing scope and sibling closures
 
 ### Capture Detection
 

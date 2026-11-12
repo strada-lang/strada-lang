@@ -48,18 +48,35 @@ func new(scalar $handler, scalar $state) scalar {
                 last;   # inbox closed and drained
             }
             my scalar $reply_ch = $envelope->{"reply"};
-            my scalar $result;
+            my scalar $result = undef;
             my int $had_error = 0;
             try {
                 $result = $handler->($envelope->{"msg"}, $state);
             } catch ($e) {
                 $had_error = 1;
                 $selfref->{"error"} = $e;
+                $selfref->{"stopped"} = 1;
+                async::close($inbox);
             }
             if (defined($reply_ch)) {
-                async::send($reply_ch, $result);
+                try {
+                    async::send($reply_ch, $result);
+                } catch ($send_err) { }
             }
             if ($had_error == 1) {
+                # Unblock any callers already waiting on ask() for queued messages.
+                while (1) {
+                    my scalar $queued = async::recv($inbox);
+                    if (!defined($queued)) {
+                        last;
+                    }
+                    if (defined($queued->{"reply"})) {
+                        try {
+                            async::send($queued->{"reply"}, undef);
+                            async::close($queued->{"reply"});
+                        } catch ($q_err) { }
+                    }
+                }
                 last;   # poison message: stop processing
             }
         }
@@ -86,7 +103,11 @@ func ask(scalar $self, scalar $msg) scalar {
     my hash %env;
     $env{"msg"} = $msg;
     $env{"reply"} = $reply;
-    async::send($self->{"inbox"}, \%env);
+    try {
+        async::send($self->{"inbox"}, \%env);
+    } catch ($e) {
+        throw "Async::Actor: ask after stop";
+    }
     return async::recv($reply);
 }
 

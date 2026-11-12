@@ -52,13 +52,13 @@ func main() int {
     my scalar $inner = $make->();
     check("nested capture", "" . $inner->("abbb") . $inner->("ac"), "10");
 
-    # ++ / -- on a captured int. Scalars are captured by value: the closure
-    # keeps its own copy, which persists across calls; the outer one is untouched.
+    # ++ / -- on a captured int. Captured scalars share their lexical cell
+    # with the enclosing scope and sibling closures.
     my int $n = 10;
     my scalar $bump = func () { $n++; ++$n; $n--; return $n; };
-    check("increment state", "" . $bump->() . " " . $bump->() . " outer=" . $n, "11 12 outer=10");
+    check("increment state", "" . $bump->() . " " . $bump->() . " outer=" . $n, "11 12 outer=12");
     my scalar $post = func () { my int $old = $n++; return $old * 100 + $n; };
-    check("post-increment value", "" . $post->(), "1011");
+    check("post-increment value", "" . $post->(), "1213");
 
     # chomp / chop on a captured string.
     my str $line = "text\n";
@@ -66,9 +66,9 @@ func main() int {
     check("chomp/chop", $trim->(), "text|tex");
 
     # A C-style for loop inside a closure: its variable is a local, and the
-    # body still reaches captured variables.
+    # body still reaches captured variables ($n is now 13).
     my scalar $sum = func (int $top) { my int $t = 0; for (my int $i = 1; $i <= $top; $i++) { $t += $i * $n; } return $t; };
-    check("for-loop local", "" . $sum->(4), "100");
+    check("for-loop local", "" . $sum->(4), "130");
 
     if ($fails == 0) { say("All closure capture-site tests passed"); return 0; }
     return 1;

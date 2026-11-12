@@ -234,12 +234,12 @@ my int $r = $double->(21);     # 42
 
 # Call a closure with ->( ); `$double(21)` is a parse error.
 
-# Scalars are captured BY VALUE: the closure gets its own private copy,
-# which persists between calls but is not shared with the outer variable.
+# Captured scalars share a lexical binding with the enclosing scope
+# (and sibling closures): mutations are visible on both sides.
 my int $count = 0;
 my scalar $tick = func() int { $count = $count + 1; return $count; };
-$tick->(); say($tick->());      # 2  (the closure's own counter)
-say($count);                    # 0  (outer variable is unchanged)
+$tick->(); say($tick->());      # 2
+say($count);                    # 2
 
 # Arrays and hashes ARE shared with the enclosing scope:
 my array @seen = ();

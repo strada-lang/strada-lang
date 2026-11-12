@@ -322,17 +322,17 @@ my str $msg = $greet->("World");   # "Hello, World"
 my num $pi = $get_pi->();          # 3.14159
 
 # Capture variables from enclosing scope.
-# Scalars are captured BY VALUE (a private copy taken when the closure is created)
+# Scalars, arrays, and hashes share their lexical bindings across closures.
 my int $multiplier = 10;
 my scalar $scale = func (int $n) { return $n * $multiplier; };
 say($scale->(5));                  # 50
 
-# The closure's copy persists between calls, but the outer variable is NOT modified
+# Mutations inside a closure update the shared binding across closures and outer scope
 my int $count = 0;
 my scalar $inc = func () { $count = $count + 1; return $count; };
 $inc->();                          # returns 1
 $inc->();                          # returns 2
-say($count);                       # 0 (outer variable unchanged)
+say($count);                       # 2
 
 # Arrays and hashes ARE shared; use one (or a reference, \$x + $$ref) for shared state
 my hash %state = ("count" => 0);

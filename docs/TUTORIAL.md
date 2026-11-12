@@ -1362,15 +1362,15 @@ my scalar $scale = func (int $n) {
 say($scale->(5));   # 50
 say($scale->(7));   # 70
 
-# Captured by value when the closure is created - later changes
-# to the outer variable are not seen by the closure
+# Captured variables share their lexical binding - later changes
+# to the outer variable are seen by the closure
 $multiplier = 100;
-say($scale->(5));   # 50
+say($scale->(5));   # 500
 ```
 
 ### Closures with State
 
-Each closure keeps its own copy of the variables it captured, and that copy persists between calls:
+Closures share access to captured variables from their enclosing scope, keeping those bindings alive even after the enclosing function returns:
 
 ```strada
 func make_counter() scalar {

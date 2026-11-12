@@ -207,7 +207,7 @@ strada --object-full mylib.strada
 Compile with SSL support:
 
 ```
-strada app.strada lib/ssl/strada_ssl.c -l ssl -l crypto
+strada app.strada -l ssl -l crypto
 ```
 
 Create a debug build:

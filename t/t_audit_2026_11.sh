@@ -115,27 +115,8 @@ pid_stdlib_pure=$!
 ) &
 pid_cext_ej=$!
 
-# Bg 4: pacco & stradapm compile + SemVer/Manifest/Resolver + use parity
+# Bg 4: use parity
 (
-    pmrc=0
-    cat > "$aud_dir/pacco_entry.strada" << 'EOF'
-use lib "tools/pacco";
-EOF
-    cat "$PROJECT_DIR/tools/pacco/pacco.strada" >> "$aud_dir/pacco_entry.strada"
-    cat > "$aud_dir/stradapm_entry.strada" << 'EOF'
-use lib "tools/stradapm";
-EOF
-    cat "$PROJECT_DIR/tools/stradapm/stradapm.strada" >> "$aud_dir/stradapm_entry.strada"
-
-    aud_fast_compile "$aud_dir/pacco_entry.strada" "pacco_bin" || pmrc=1
-    aud_fast_compile "$aud_dir/stradapm_entry.strada" "stradapm_bin" || pmrc=1
-    mkdir -p "$aud_dir/pm_work1" "$aud_dir/pm_work2"
-    aud_fast_compile "$aud_src/pkgmgr_checks.strada" "pkgmgr_checks" &&
-    timeout 10 "$aud_dir/pkgmgr_checks" "$aud_dir/pm_work1" > "$aud_dir/pacco3.out" 2>&1 || pmrc=1
-    aud_fast_compile "$aud_src/stradapm_checks.strada" "stradapm_checks" &&
-    timeout 10 "$aud_dir/stradapm_checks" "$aud_dir/pm_work2" > "$aud_dir/pacco4.out" 2>&1 || pmrc=1
-    echo $pmrc > "$aud_dir/pkgmgr.rc"
-
     prc=0
     cat > "$aud_dir/parity_entry.strada" << EOF
 use lib "$aud_src";
@@ -385,15 +366,6 @@ fi
 
 # 4a
 aud_record "$cli_rc" "CLI tools: stradadoc --no-pager LANGUAGE, strada-md2html, strada-proftext/profhtml --help" "$cli_diag"
-
-# 4b
-if [ "$(cat "$aud_dir/pkgmgr.rc" 2>/dev/null)" = "0" ] &&
-   [ "$(cat "$aud_dir/pacco3.out" 2>/dev/null)" = "ALL_PKGMGR_OK" ] &&
-   [ "$(cat "$aud_dir/pacco4.out" 2>/dev/null)" = "ALL_STRADAPM_OK" ]; then
-    aud_record 0 "pacco & stradapm: compile and SemVer/Manifest/Resolver work" ""
-else
-    aud_record 1 "pacco & stradapm: compile and SemVer/Manifest/Resolver work" "out1=$(cat "$aud_dir/pacco3.out" 2>/dev/null) out2=$(cat "$aud_dir/pacco4.out" 2>/dev/null)"
-fi
 
 # 4c
 if [ "$vm_rc" -eq 0 ] && [ "$vm_out" = "ALL_VM_CHECKS_OK" ]; then

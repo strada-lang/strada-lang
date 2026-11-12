@@ -117,17 +117,18 @@ func test_capture_mutation() int {
         say("FAIL: capture mutation expected 1,2,3, got " . $r1 . "," . $r2 . "," . $r3);
         return 1;
     }
-    # Scalars are captured BY VALUE: the closure counts on its own copy, and
-    # the outer variable is untouched.
-    if ($count != 0) {
-        say("FAIL: outer variable should still be 0, got " . $count);
+    # Lexical variables share a refcounted cell across the enclosing scope and closures.
+    if ($count != 3) {
+        say("FAIL: outer variable should reflect closure mutations (3), got " . $count);
         return 1;
     }
-    # A later change to the outer variable is not seen by the closure either.
+    # A later change to the outer variable IS visible to the closure, and vice versa.
     $count = 100;
+    my scalar $dec = func () { $count = $count - 1; return $count; };
     my int $r4 = $inc->();
-    if ($r4 != 4) {
-        say("FAIL: closure should continue from its own copy (4), got " . $r4);
+    my int $r5 = $dec->();
+    if ($r4 != 101 || $r5 != 100 || $count != 100) {
+        say("FAIL: sibling closures and outer scope should share cell (101,100,100), got " . $r4 . "," . $r5 . "," . $count);
         return 1;
     }
     # Arrays and hashes ARE shared with the closure.

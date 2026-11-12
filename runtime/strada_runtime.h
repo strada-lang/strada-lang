@@ -95,6 +95,8 @@ typedef enum {
  * 7 %% -3 == -2. Caller must ensure b != 0. Used by both the runtime
  * (strada_safe_mod) and the codegen's inlined tagged-int modulo fast path. */
 static inline int64_t strada_floored_mod(int64_t a, int64_t b) {
+    if (b == 0) return 0;
+    if (a == INT64_MIN && b == -1) return 0;
     int64_t r = a % b;
     if (r != 0 && ((r < 0) != (b < 0))) r += b;
     return r;
@@ -130,7 +132,9 @@ static inline int64_t strada_floored_mod(int64_t a, int64_t b) {
  * in signed tagged range) — only heap ints reach this. struct_size is otherwise
  * unused for INT, so this never collides with the string-length/flags use. */
 #define STRADA_UV_FLAG ((size_t)1 << 61)
+#define STRADA_BOOL_FLAG ((size_t)1 << 60)
 #define STRADA_INT_IS_UV(sv) (!STRADA_IS_TAGGED_INT(sv) && (sv) && (sv)->type == STRADA_INT && (((sv)->struct_size & STRADA_UV_FLAG) != 0))
+#define STRADA_INT_IS_BOOL(sv) (!STRADA_IS_TAGGED_INT(sv) && (sv) && (sv)->type == STRADA_INT && (((sv)->struct_size & STRADA_BOOL_FLAG) != 0))
 
 #if STRADA_POINTER_SIZE == 4
 #define STRADA_TAGGED_INT_BITS 30
@@ -145,13 +149,17 @@ static inline int64_t strada_floored_mod(int64_t a, int64_t b) {
 /* Closure structure */
 typedef struct StradaClosure {
     void *func_ptr;           /* Pointer to generated C function */
-    int param_count;          /* Number of parameters */
+    int param_count;          /* Number of parameters (-1=cpointer/plain? -2=bound method -3=around) */
     int capture_count;        /* Number of captured variables */
     StradaValue ***captures;  /* Array of pointers to pointers (capture-by-reference) */
     unsigned char *capture_is_static; /* NULL or array of capture_count bytes; 1 = cell points to a static slot, do not free(cap) */
     char *prototype;          /* Perl prototype string (e.g. "$", "\\@") or NULL.
                                  Set by perla codegen when `sub (PROTO) { ... }`
                                  is used; consumed by Scalar::Util / prototype(\&). */
+    unsigned char is_func_ref; /* 1 for \&fn wrapper without closure env parameter */
+    unsigned char is_variadic; /* 1 for variadic target (trailing packed args array) */
+    unsigned char is_void;     /* 1 if target C function returns void */
+    int fixed_params;          /* Fixed param count before trailing variadic array */
 } StradaClosure;
 
 /* Thread types - store pthread handles as opaque pointers */
@@ -160,6 +168,8 @@ typedef struct StradaThread {
     StradaValue *closure;     /* The closure to run */
     StradaValue *result;      /* Return value from thread */
     int detached;             /* 1 if detached (self-cleanup) */
+    int finished;             /* 1 if worker finished */
+    pthread_mutex_t mu;       /* Protects detached/finished handoff */
 } StradaThread;
 
 typedef struct StradaMutex {
@@ -430,9 +440,11 @@ struct StradaArray {
  * Used for pass-by-reference patterns: func(\$var).
  * WARNING: The slot ref MUST NOT outlive the stack frame containing the variable. */
 #define STRADA_SLOT_REF_MARKER ((size_t)0xDEAD5107ULL)
+#define STRADA_CELL_REF_MARKER ((size_t)0xDEADCE11ULL)
 static inline int strada_is_slot_ref(StradaValue *sv) {
     return sv && !STRADA_IS_TAGGED_INT(sv) && sv->type == STRADA_REF &&
-           sv->struct_size == STRADA_SLOT_REF_MARKER;
+           (sv->struct_size == STRADA_SLOT_REF_MARKER ||
+            sv->struct_size == STRADA_CELL_REF_MARKER);
 }
 
 /* Refcounted string — single allocation for header + data.
@@ -845,6 +857,9 @@ int strada_index(const char *haystack, const char *needle);
 int64_t strada_index_sv(StradaValue *haystack_sv, const char *needle);
 int64_t strada_index_sv2(StradaValue *haystack_sv, StradaValue *needle_sv, int64_t offset);
 int strada_index_offset(const char *haystack, const char *needle, int offset);
+int64_t strada_byte_index(StradaValue *haystack_sv, StradaValue *needle_sv, int64_t offset);
+StradaValue* strada_new_bool(int b);
+int strada_is_bool(StradaValue *sv);
 int strada_rindex(const char *haystack, const char *needle);
 char* strada_upper(const char *str);
 char* strada_lower(const char *str);
@@ -1036,6 +1051,7 @@ int strada_in_try_block(void);
 #define STRADA_MAX_PENDING_CLEANUP 16384
 void strada_cleanup_push(StradaValue *sv);
 void strada_cleanup_push_slot(StradaValue **slot);  /* a variable: its CURRENT value is released on unwind */
+void strada_cleanup_push_cell(StradaValue **cell_slot);  /* a boxed PerlaCell: decrefs cell + current *cell_slot */
 void strada_cleanup_pop(void);
 void strada_cleanup_pop_decref(StradaValue *sv);
 void strada_cleanup_pop_decref_n(int n);
@@ -1148,6 +1164,7 @@ extern int strada_call_context;
 extern __thread int strada_call_context;
 #endif
 void strada_set_call_context(int ctx);
+int *strada_call_context_ptr(void);
 int strada_wantarray(void);
 int strada_wantscalar(void);
 int strada_wanthash(void);
@@ -1331,6 +1348,8 @@ void* strada_cpointer_get(StradaValue *sv);
 
 /* Closure support (uses triple pointers for capture-by-reference) */
 StradaValue* strada_closure_new(void *func, int params, int captures, StradaValue ***cap_array);
+StradaValue* strada_closure_new_shared(void *func, int params, int captures, StradaValue ***cap_array, unsigned char *is_static);
+StradaValue* strada_funcref_new(void *func, int params, int is_variadic, int is_void, int fixed_params);
 StradaValue* strada_closure_call(StradaValue *closure, int argc, ...);
 StradaValue* strada_closure_call_array(StradaValue *closure, StradaValue *args_sv);
 StradaValue*** strada_closure_get_captures(StradaValue *closure);
@@ -1362,6 +1381,8 @@ typedef struct PerlaCell {
 StradaValue **strada_cell_alloc(void);
 void strada_cell_incref(StradaValue **slot);
 int strada_cell_decref(StradaValue **slot);
+void strada_cell_release(StradaValue **slot);
+StradaValue* strada_cell_ref_create(StradaValue **cell_slot);
 
 /* Enhanced FFI */
 StradaValue* strada_c_call(const char *func_name, StradaValue **args, int arg_count);

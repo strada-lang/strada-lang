@@ -945,10 +945,10 @@ say($scale->(3));   # 30
 
 #### Mutation Through Captures
 
-Each closure keeps its own copy of a captured scalar. Assignments made inside
-the closure persist between calls to that closure, but they do not change the
-outer variable (and later changes to the outer variable are not seen by the
-closure):
+Closures share the lexical binding of captured variables (scalars, arrays, and
+hashes). Assignments made inside the closure update the variable in the
+enclosing scope (and later changes to the outer variable are seen by sibling
+closures and the closure itself):
 
 ```strada
 my int $count = 0;
@@ -960,7 +960,7 @@ my scalar $increment = func () {
 say($increment->());  # 1
 say($increment->());  # 2
 say($increment->());  # 3
-say($count);          # 0 (the outer variable is unchanged)
+say($count);          # 3
 ```
 
 To share mutable state with the enclosing scope, capture an array, a hash or a
@@ -2398,9 +2398,8 @@ thread::join($thread);
 ### Mutexes
 
 Mutexes prevent race conditions when multiple threads access shared data.
-A closure gets its own copy of each captured scalar (see
-[Mutation Through Captures](#mutation-through-captures)), so shared state
-must live in a hash or array that the threads reach through a reference:
+Variables captured by thread closures share their lexical binding; for structured
+or dynamic multi-field state, place it in a hash or array guarded by a mutex:
 
 ```strada
 my hash %shared = ("counter" => 0);

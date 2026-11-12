@@ -187,6 +187,14 @@ __C__ {
 #include <unistd.h>
 #include <time.h>
 #include <fcntl.h>
+#include <errno.h>
+#include <pthread.h>
+#if defined(__linux__) || defined(__FreeBSD__) || defined(__OpenBSD__)
+#include <sys/random.h>
+#define STRADA_HAVE_GETRANDOM 1
+#else
+#define STRADA_HAVE_GETRANDOM 0
+#endif
 
 /* Portability: crypt_r + struct crypt_data are glibc/libxcrypt extensions.
  * On musl, older systems, or minimal installs, only crypt() is available.
@@ -211,40 +219,69 @@ __C__ {
 char *crypt(const char *key, const char *salt);
 #endif
 
-/* Wrapper: use crypt_r when available, fall back to crypt() */
+/* Wrapper: use heap-allocated crypt_data with crypt_r when available,
+ * or mutex-guarded crypt() + strdup otherwise. Caller must free(). */
+static pthread_mutex_t strada_crypt_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 static char *strada_crypt(const char *password, const char *salt) {
 #if STRADA_HAVE_CRYPT_R
-    static struct crypt_data data;
-    memset(&data, 0, sizeof(data));
-    return crypt_r(password, salt, &data);
+    struct crypt_data *data = calloc(1, sizeof(*data));
+    if (!data) return NULL;
+    char *r = crypt_r(password, salt, data);
+    char *copy = r ? strdup(r) : NULL;
+    free(data);
+    return copy;
 #else
-    return crypt(password, salt);
+    pthread_mutex_lock(&strada_crypt_mutex);
+    char *r = crypt(password, salt);
+    char *copy = r ? strdup(r) : NULL;
+    pthread_mutex_unlock(&strada_crypt_mutex);
+    return copy;
 #endif
 }
 
-/* Last error message */
+/* Thread-local last error message */
+#ifdef __TINYC__
 static char crypt_last_error[256] = "";
+#else
+static __thread char crypt_last_error[256] = "";
+#endif
 
 /* Base64-like alphabet for salt generation */
 static const char crypt_salt_chars[] =
     "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
-/* Generate random bytes from /dev/urandom */
+/* Generate random bytes from /dev/urandom (falling back to getrandom) */
 static int crypt_get_random_bytes(unsigned char *buf, size_t len) {
+    size_t got = 0;
     int fd = open("/dev/urandom", O_RDONLY);
-    if (fd < 0) {
-        snprintf(crypt_last_error, sizeof(crypt_last_error), "Failed to open /dev/urandom");
+    if (fd >= 0) {
+        while (got < len) {
+            ssize_t n = read(fd, buf + got, len - got);
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                break;
+            }
+            if (n == 0) break;
+            got += (size_t)n;
+        }
+        close(fd);
+    }
+#if STRADA_HAVE_GETRANDOM
+    while (got < len) {
+        ssize_t n = getrandom(buf + got, len - got, 0);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (n == 0) break;
+        got += (size_t)n;
+    }
+#endif
+    if (got != len) {
+        snprintf(crypt_last_error, sizeof(crypt_last_error), "Failed to read random bytes from CSPRNG");
         return -1;
     }
-
-    ssize_t n = read(fd, buf, len);
-    close(fd);
-
-    if (n != (ssize_t)len) {
-        snprintf(crypt_last_error, sizeof(crypt_last_error), "Failed to read random bytes");
-        return -1;
-    }
-
     return 0;
 }
 
@@ -265,12 +302,13 @@ static void crypt_generate_salt_chars(char *buf, size_t len) {
     buf[len] = '\0';
 }
 
-/* Internal: generate salt for algorithm (returns static buffer) */
-static const char* crypt_gen_salt_internal(const char *algorithm, int rounds) {
-    static char salt[128];
+/* Internal: generate salt into caller buffer */
+static void crypt_gen_salt_internal(const char *algorithm, int rounds, char *salt, size_t salt_sz) {
     char random_chars[32];
 
     crypt_last_error[0] = '\0';
+    if (!salt || salt_sz == 0) return;
+    salt[0] = '\0';
 
     if (!algorithm) {
         algorithm = "sha512";
@@ -278,20 +316,20 @@ static const char* crypt_gen_salt_internal(const char *algorithm, int rounds) {
 
     if (strcmp(algorithm, "des") == 0) {
         crypt_generate_salt_chars(random_chars, 2);
-        snprintf(salt, sizeof(salt), "%s", random_chars);
+        snprintf(salt, salt_sz, "%s", random_chars);
     }
     else if (strcmp(algorithm, "md5") == 0) {
         crypt_generate_salt_chars(random_chars, 8);
-        snprintf(salt, sizeof(salt), "$1$%s$", random_chars);
+        snprintf(salt, salt_sz, "$1$%s$", random_chars);
     }
     else if (strcmp(algorithm, "sha256") == 0) {
         crypt_generate_salt_chars(random_chars, 16);
         if (rounds > 0) {
             if (rounds < 1000) rounds = 1000;
             if (rounds > 999999999) rounds = 999999999;
-            snprintf(salt, sizeof(salt), "$5$rounds=%d$%s$", rounds, random_chars);
+            snprintf(salt, salt_sz, "$5$rounds=%d$%s$", rounds, random_chars);
         } else {
-            snprintf(salt, sizeof(salt), "$5$%s$", random_chars);
+            snprintf(salt, salt_sz, "$5$%s$", random_chars);
         }
     }
     else if (strcmp(algorithm, "sha512") == 0) {
@@ -299,9 +337,9 @@ static const char* crypt_gen_salt_internal(const char *algorithm, int rounds) {
         if (rounds > 0) {
             if (rounds < 1000) rounds = 1000;
             if (rounds > 999999999) rounds = 999999999;
-            snprintf(salt, sizeof(salt), "$6$rounds=%d$%s$", rounds, random_chars);
+            snprintf(salt, salt_sz, "$6$rounds=%d$%s$", rounds, random_chars);
         } else {
-            snprintf(salt, sizeof(salt), "$6$%s$", random_chars);
+            snprintf(salt, salt_sz, "$6$%s$", random_chars);
         }
     }
     else if (strcmp(algorithm, "bcrypt") == 0) {
@@ -309,7 +347,7 @@ static const char* crypt_gen_salt_internal(const char *algorithm, int rounds) {
         int cost = (rounds > 0) ? rounds : 12;
         if (cost < 4) cost = 4;
         if (cost > 31) cost = 31;
-        snprintf(salt, sizeof(salt), "$2b$%02d$%s", cost, random_chars);
+        snprintf(salt, salt_sz, "$2b$%02d$%s", cost, random_chars);
     }
     else {
         snprintf(crypt_last_error, sizeof(crypt_last_error), "Unknown algorithm: %s", algorithm);
@@ -321,7 +359,6 @@ static const char* crypt_gen_salt_internal(const char *algorithm, int rounds) {
     if (crypt_last_error[0] != '\0') {
         salt[0] = '\0';
     }
-    return salt;
 }
 }
 
@@ -330,7 +367,6 @@ static const char* crypt_gen_salt_internal(const char *algorithm, int rounds) {
 func hashpw(str $password, str $salt) str {
     my str $result = "";
     __C__ {
-        static char result_buf[256];
         crypt_last_error[0] = '\0';
 
         char *pw_str = strada_to_str(password);
@@ -352,11 +388,10 @@ func hashpw(str $password, str $salt) str {
                 strada_decref(result);
                 result = strada_new_str("");
             } else {
-                strncpy(result_buf, hash_result, sizeof(result_buf) - 1);
-                result_buf[sizeof(result_buf) - 1] = '\0';
                 strada_decref(result);
-                result = strada_new_str(result_buf);
+                result = strada_new_str(hash_result);
             }
+            free(hash_result);
         }
         free(pw_str);
         free(salt_str);
@@ -370,7 +405,8 @@ func gen_salt(str $algorithm) str {
     my str $result = "";
     __C__ {
         char *algo_str = strada_to_str(algorithm);
-        const char *salt = crypt_gen_salt_internal(algo_str, 0);
+        char salt[128];
+        crypt_gen_salt_internal(algo_str, 0, salt, sizeof(salt));
         strada_decref(result);
         result = strada_new_str(salt);
         free(algo_str);
@@ -384,7 +420,8 @@ func gen_salt_rounds(str $algorithm, int $rounds) str {
     __C__ {
         char *algo_str = strada_to_str(algorithm);
         int rounds_val = (int)strada_to_int(rounds);
-        const char *salt = crypt_gen_salt_internal(algo_str, rounds_val);
+        char salt[128];
+        crypt_gen_salt_internal(algo_str, rounds_val, salt, sizeof(salt));
         strada_decref(result);
         result = strada_new_str(salt);
         free(algo_str);
@@ -427,6 +464,7 @@ func verify(str $password, str $hashed) int {
                     strada_decref(result);
                     result = strada_new_int((diff == 0) ? 1 : 0);
                 }
+                free(crypt_result);
             }
         }
         free(pw_str);
@@ -485,7 +523,8 @@ func is_supported(str $algorithm) int {
         if (!algo_str) {
             result = strada_new_int(0);
         } else {
-            const char *salt = crypt_gen_salt_internal(algo_str, 0);
+            char salt[128];
+            crypt_gen_salt_internal(algo_str, 0, salt, sizeof(salt));
 
             if (strlen(salt) == 0) {
                 result = strada_new_int(0);
@@ -497,6 +536,7 @@ func is_supported(str $algorithm) int {
                 } else {
                     result = strada_new_int(1);
                 }
+                free(crypt_result);
             }
         }
         free(algo_str);
@@ -508,6 +548,7 @@ func is_supported(str $algorithm) int {
 func error() str {
     my str $result = "";
     __C__ {
+        strada_decref(result);
         result = strada_new_str(crypt_last_error);
     }
     return $result;

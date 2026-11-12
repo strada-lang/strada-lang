@@ -579,6 +579,7 @@ enum BI {
     SYS_TV_INTERVAL = 733, SYS_UDP_BIND = 734, SYS_UDP_RECVFROM = 735,
     SYS_UDP_SENDTO = 736, SYS_UDP_SERVER = 737, SYS_UDP_SOCKET = 738,
     SYS_UTIMES = 739, SYS_WRITE_FD = 740,
+    SYS_BYTE_INDEX = 741,
     PLACEHOLDER_END = 999
 }
 
@@ -986,7 +987,8 @@ func init_builtins(scalar $interp) void {
     $b{"core::waitpid"} = BI::SYS_WAITPID; $b{"core::waitpid"} = BI::SYS_WAITPID;
     $b{"core::alarm"} = BI::SYS_ALARM; $b{"core::alarm"} = BI::SYS_ALARM;
     $b{"core::hex"} = BI::HEX; $b{"core::hex"} = BI::HEX;
-    $b{"core::byte_substr"} = BI::SYS_BYTE_SUBSTR; $b{"core::byte_substr"} = BI::SYS_BYTE_SUBSTR;
+    $b{"core::byte_substr"} = BI::SYS_BYTE_SUBSTR; $b{"sys::byte_substr"} = BI::SYS_BYTE_SUBSTR;
+    $b{"core::byte_index"} = BI::SYS_BYTE_INDEX; $b{"sys::byte_index"} = BI::SYS_BYTE_INDEX;
     $b{"core::calloc"} = BI::SYS_CALLOC; $b{"core::calloc"} = BI::SYS_CALLOC;
     $b{"core::cfgetispeed"} = BI::SYS_CFGETISPEED; $b{"core::cfgetispeed"} = BI::SYS_CFGETISPEED;
     $b{"core::cfgetospeed"} = BI::SYS_CFGETOSPEED; $b{"core::cfgetospeed"} = BI::SYS_CFGETOSPEED;
@@ -1425,7 +1427,7 @@ func interp_register_func(scalar $interp, str $name, scalar $params, int $param_
     if ($param_count > 0) {
         my scalar $last_param = $params->[$param_count - 1];
         my str $ls = $last_param->{"sigil"};
-        if ($ls eq "@" || $ls eq "...@") { $is_variadic = 1; }
+        if ($last_param->{"is_variadic"} == 1 || $ls eq "...@") { $is_variadic = 1; }
     }
     $fi{"is_variadic"} = $is_variadic;
     # Pre-compute param binding template (avoids per-param hash lookups in call_user_func)
@@ -1872,6 +1874,19 @@ func interp_run_main(scalar $interp, scalar $argv) int {
     # Set @ARGV in global env
     env_set($interp->{"global_env"}, "ARGV", $argv);
     my array @args = ();
+    if (defined($func_info->{"params"}) && size($func_info->{"params"}) >= 2) {
+        my array @full_argv = ();
+        my str $sname = $interp->{"filename"} // "strada";
+        push(@full_argv, $sname);
+        my int $ai = 0;
+        my int $ac = defined($argv) ? size($argv) : 0;
+        while ($ai < $ac) {
+            push(@full_argv, $argv->[$ai]);
+            $ai = $ai + 1;
+        }
+        push(@args, size(@full_argv));
+        push(@args, \@full_argv);
+    }
     $interp->{"had_explicit_return"} = 0;
     my scalar $result = call_user_func($interp, $func_info, \@args);
     # Only use the result if there was an explicit return statement
@@ -2041,6 +2056,9 @@ func eval_stmts_in_env(scalar $interp, scalar $stmts, int $count, scalar $env) s
     my int $i = 0;
     while ($i < $count) {
         $result = eval_node($interp, $stmts->[$i], $env);
+        if ($interp->{"signal"} != SIG::NONE) {
+            return $result;
+        }
         $i = $i + 1;
     }
     return $result;
@@ -2534,7 +2552,7 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         if ($r eq "ARRAY") { return "array"; }
         if ($r eq "HASH") { return "hash"; }
         if (length($r) > 0) { return "ref"; }
-        return "scalar";
+        return typeof($v);
     }
     if ($bid == BI::CAST_INT) {
         my int $v = $args->[0];
@@ -2684,6 +2702,12 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
     }
     # --- All remaining core::/core:: builtins (auto-generated call-through) ---
     if ($bid == BI::SYS_BYTE_SUBSTR) { return core::byte_substr($args->[0], $args->[1], $args->[2]); }
+    if ($bid == BI::SYS_BYTE_INDEX) {
+        if (size($args) >= 3) {
+            return core::byte_index($args->[0], $args->[1], $args->[2]);
+        }
+        return core::byte_index($args->[0], $args->[1]);
+    }
     if ($bid == BI::SYS_CALLOC) { return core::calloc($args->[0], $args->[1]); }
     if ($bid == BI::SYS_CFGETISPEED) { return core::cfgetispeed($args->[0]); }
     if ($bid == BI::SYS_CFGETOSPEED) { return core::cfgetospeed($args->[0]); }
@@ -2865,13 +2889,8 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         my scalar $v = $args->[0];
         my int $rc = 0;
         __C__ {
-            if (v && v->type != STRADA_UNDEF) {
-                strada_decref(rc);
-                rc = strada_new_int((int64_t)v->refcount);
-            } else {
-                strada_decref(rc);
-                rc = strada_new_int(0);
-            }
+            strada_decref(rc);
+            rc = strada_new_int(strada_refcount(v));
         }
         return $rc;
     }
@@ -4264,8 +4283,19 @@ func call_user_func(scalar $interp, scalar $func_info, scalar $args) scalar {
 
     # Execute body - save local stack depth for dynamic scope restore
     my int $local_depth = size($interp->{"local_stack"});
+    my scalar $result = undef;
 
-    my scalar $result = eval_block($interp, $body, $func_env);
+    try {
+        $result = eval_block($interp, $body, $func_env);
+    } catch ($e) {
+        # Always unwind dynamic local() bindings and call_depth on throw
+        while (size($interp->{"local_stack"}) > $local_depth) {
+            my scalar $save = pop($interp->{"local_stack"});
+            env_set($interp->{"global_env"}, $save->{"name"}, $save->{"value"});
+        }
+        $interp->{"call_depth"} = $interp->{"call_depth"} - 1;
+        throw($e);
+    }
 
     # Handle return signal (signal-based control flow)
     my int $sig = $interp->{"signal"};
@@ -4282,8 +4312,6 @@ func call_user_func(scalar $interp, scalar $func_info, scalar $args) scalar {
         env_set($interp->{"global_env"}, $save->{"name"}, $save->{"value"});
     }
 
-    # Break env parent chain to allow GC
-    $func_env->{"parent"} = undef;
     $interp->{"call_depth"} = $interp->{"call_depth"} - 1;
     return $result;
 }
@@ -4581,7 +4609,7 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
         if ($pc > 0) {
             my scalar $lp = $node->{"params"}->[$pc - 1];
             my str $ls = $lp->{"sigil"};
-            if ($ls eq "@" || $ls eq "...@") { $is_va = 1; }
+            if ($lp->{"is_variadic"} == 1 || $ls eq "...@") { $is_va = 1; }
         }
         $fi{"is_variadic"} = $is_va;
         return \%fi;
@@ -5192,8 +5220,12 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
     }
 
     # --- Literals ---
-    if ($type == NI::INT_LITERAL || $type == NI::STR_LITERAL || $type == NI::NUM_LITERAL) {
+    if ($type == NI::INT_LITERAL || $type == NI::STR_LITERAL) {
         return $node->{"value"};
+    }
+    if ($type == NI::NUM_LITERAL) {
+        my num $nv = $node->{"value"};
+        return $nv;
     }
 
     # --- Expression Statement (wraps most lines) ---
@@ -5274,37 +5306,54 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
     if ($type == NI::ASSIGN) {
         my str $op = $node->{"op"};
         my scalar $target = $node->{"target"};
-        my scalar $rhs = eval_node($interp, $node->{"value"}, $env);
+        my scalar $rhs = undef;
 
         if ($op ne "=") {
             my scalar $cur = eval_node($interp, $target, $env);
-            if ($op eq "+=") {
-                my scalar $ovl = check_overload($interp, $cur, "+");
-                if (defined($ovl)) {
-                    my array @oa = (); push(@oa, $cur); push(@oa, $rhs); push(@oa, 0);
-                    $rhs = call_user_func($interp, $ovl, \@oa);
-                } else { $rhs = $cur + $rhs; }
-            }
-            elsif ($op eq "-=") {
-                my scalar $ovl = check_overload($interp, $cur, "-");
-                if (defined($ovl)) {
-                    my array @oa = (); push(@oa, $cur); push(@oa, $rhs); push(@oa, 0);
-                    $rhs = call_user_func($interp, $ovl, \@oa);
-                } else { $rhs = $cur - $rhs; }
-            }
-            elsif ($op eq "*=") {
-                my scalar $ovl = check_overload($interp, $cur, "*");
-                if (defined($ovl)) {
-                    my array @oa = (); push(@oa, $cur); push(@oa, $rhs); push(@oa, 0);
-                    $rhs = call_user_func($interp, $ovl, \@oa);
-                } else { $rhs = $cur * $rhs; }
-            }
-            elsif ($op eq "/=") { $rhs = $cur / $rhs; }
-            elsif ($op eq "%=") { $rhs = $cur % $rhs; }
-            elsif ($op eq ".=") { $rhs = $cur . $rhs; }
-            elsif ($op eq "//=") {
+            if ($op eq "//=") {
                 if (defined($cur)) { return $cur; }
+                $rhs = eval_node($interp, $node->{"value"}, $env);
+            } elsif ($op eq "||=") {
+                if ($cur) { return $cur; }
+                $rhs = eval_node($interp, $node->{"value"}, $env);
+            } elsif ($op eq "&&=") {
+                if (!$cur) { return $cur; }
+                $rhs = eval_node($interp, $node->{"value"}, $env);
+            } else {
+                $rhs = eval_node($interp, $node->{"value"}, $env);
+                if ($op eq "+=") {
+                    my scalar $ovl = check_overload($interp, $cur, "+");
+                    if (defined($ovl)) {
+                        my array @oa = (); push(@oa, $cur); push(@oa, $rhs); push(@oa, 0);
+                        $rhs = call_user_func($interp, $ovl, \@oa);
+                    } else { $rhs = $cur + $rhs; }
+                }
+                elsif ($op eq "-=") {
+                    my scalar $ovl = check_overload($interp, $cur, "-");
+                    if (defined($ovl)) {
+                        my array @oa = (); push(@oa, $cur); push(@oa, $rhs); push(@oa, 0);
+                        $rhs = call_user_func($interp, $ovl, \@oa);
+                    } else { $rhs = $cur - $rhs; }
+                }
+                elsif ($op eq "*=") {
+                    my scalar $ovl = check_overload($interp, $cur, "*");
+                    if (defined($ovl)) {
+                        my array @oa = (); push(@oa, $cur); push(@oa, $rhs); push(@oa, 0);
+                        $rhs = call_user_func($interp, $ovl, \@oa);
+                    } else { $rhs = $cur * $rhs; }
+                }
+                elsif ($op eq "/=") { $rhs = $cur / $rhs; }
+                elsif ($op eq "%=") { $rhs = $cur % $rhs; }
+                elsif ($op eq "**=") { $rhs = $cur ** $rhs; }
+                elsif ($op eq ".=") { $rhs = $cur . $rhs; }
+                elsif ($op eq "&=") { $rhs = $cur & $rhs; }
+                elsif ($op eq "|=") { $rhs = $cur | $rhs; }
+                elsif ($op eq "^=") { $rhs = $cur ^ $rhs; }
+                elsif ($op eq "<<=") { $rhs = $cur << $rhs; }
+                elsif ($op eq ">>=") { $rhs = $cur >> $rhs; }
             }
+        } else {
+            $rhs = eval_node($interp, $node->{"value"}, $env);
         }
 
         assign_to($interp, $target, $rhs, $env);
@@ -6424,6 +6473,9 @@ func eval_string(str $code) scalar {
     if (index($trimmed, "enum ") == 0) { $is_top = 1; }
     if (index($trimmed, "has ") == 0) { $is_top = 1; }
     if (index($trimmed, "extends ") == 0) { $is_top = 1; }
+    if (index($trimmed, "const ") == 0 || index($trimmed, "our ") == 0) { $is_top = 1; }
+    if (index($trimmed, "before ") == 0 || index($trimmed, "after ") == 0 || index($trimmed, "around ") == 0) { $is_top = 1; }
+    if (index($trimmed, "use overload") == 0 || index($trimmed, "with ") == 0) { $is_top = 1; }
 
     my str $source = "";
     if ($is_top == 1) {
@@ -6436,8 +6488,34 @@ func eval_string(str $code) scalar {
     my scalar $tokens = lex_tokenize($source);
     my scalar $parser = parser_new($tokens);
     parser_set_filename($parser, "<eval>");
+    my scalar $ckeys = keys($g_eval_interp->{"constants"});
+    my int $cki = 0;
+    while ($cki < size($ckeys)) {
+        $parser->{"const_names"}->{$ckeys->[$cki]} = 1;
+        $cki = $cki + 1;
+    }
     my array @empty = ();
     my scalar $program = parse_program($parser, \@empty, \@empty, \@empty, \@empty);
+
+    # Run BEGIN blocks and store END blocks
+    my scalar $begin_blocks = $program->{"begin_blocks"};
+    my int $begin_count = defined($program->{"begin_block_count"}) ? $program->{"begin_block_count"} : 0;
+    my int $bi = 0;
+    while ($bi < $begin_count) {
+        try {
+            eval_block($g_eval_interp, $begin_blocks->[$bi], $g_eval_interp->{"global_env"});
+        } catch ($be) {
+            if (!is_signal($be, "return")) { throw($be); }
+        }
+        $bi = $bi + 1;
+    }
+    my scalar $end_blocks = $program->{"end_blocks"};
+    my int $end_count = defined($program->{"end_block_count"}) ? $program->{"end_block_count"} : 0;
+    my int $ei = 0;
+    while ($ei < $end_count) {
+        push($g_eval_interp->{"end_blocks"}, $end_blocks->[$ei]);
+        $ei = $ei + 1;
+    }
 
     # Register functions and find __eval__
     my scalar $funcs = $program->{"functions"};
@@ -6476,8 +6554,27 @@ func eval_string(str $code) scalar {
         $i = $i + 1;
     }
 
-    # Load OOP features
+    # Register globals (const, our, top-level my)
+    my scalar $globals = $program->{"globals"};
+    my int $global_count = defined($program->{"global_count"}) ? $program->{"global_count"} : 0;
+    $i = 0;
+    while ($i < $global_count) {
+        my scalar $g = $globals->[$i];
+        my int $gtype = $g->{"type"};
+        if ($gtype == NI::CONST_DECL) {
+            my str $cname = $g->{"name"};
+            my scalar $init_val = eval_node($g_eval_interp, $g->{"init"}, $g_eval_interp->{"global_env"});
+            $g_eval_interp->{"constants"}->{$cname} = $init_val;
+            env_set($g_eval_interp->{"global_env"}, $cname, $init_val);
+        } elsif ($gtype == NI::VAR_DECL || $gtype == NI::OUR_DECL) {
+            eval_node($g_eval_interp, $g, $g_eval_interp->{"global_env"});
+        }
+        $i = $i + 1;
+    }
+
+    # Load OOP features and import_libs
     interp_load_oop($g_eval_interp, $program);
+    interp_load_import_libs($g_eval_interp, $program);
 
     if (!defined($eval_func)) {
         return undef;

@@ -2736,7 +2736,11 @@ func parse_assignment(scalar $parser) scalar {
     
     if ($type eq "ASSIGN" || $type eq "PLUS_ASSIGN" ||
         $type eq "MINUS_ASSIGN" || $type eq "DOT_ASSIGN" ||
-        $type eq "STAR_ASSIGN" || $type eq "SLASH_ASSIGN") {
+        $type eq "STAR_ASSIGN" || $type eq "SLASH_ASSIGN" ||
+        $type eq "AND_ASSIGN" || $type eq "OR_ASSIGN" ||
+        $type eq "BIT_AND_ASSIGN" || $type eq "BIT_OR_ASSIGN" ||
+        $type eq "BIT_XOR_ASSIGN" || $type eq "LSHIFT_ASSIGN" ||
+        $type eq "RSHIFT_ASSIGN") {
         my str $op = $tok->{"value"};
         parser_advance($parser);
         my scalar $right = parse_assignment($parser);
@@ -3496,7 +3500,7 @@ func parse_return_stmt(scalar $parser) scalar {
     parser_expect($parser, "RETURN");
 
     my scalar $value = 0;
-    if (!parser_check($parser, "SEMI")) {
+    if (!parser_check($parser, "SEMI") && !parser_check($parser, "IF") && !parser_check($parser, "UNLESS")) {
         $value = parse_expression($parser);
     }
 

@@ -52,14 +52,21 @@ DBI_DEFINES ?=
 DBI_LIBS ?=
 endif
 CRYPT_LIBS ?= -lcrypt
+READLINE_CFLAGS ?=
 READLINE_LIBS ?= -lreadline
+SSL_CFLAGS ?=
 SSL_LIBS ?= -lssl -lcrypto
-HAVE_PCRE2 ?= 0
+SQLITE_CFLAGS ?=
+POSTGRES_CFLAGS ?=
+MYSQL_CFLAGS ?=
+FFI_CFLAGS ?=
+HAVE_LIBFFI ?= 0
+HAVE_PCRE2 ?= $(shell if [ -f vendor/pcre2/libpcre2-8.a ]; then echo 1; elif printf '\043define PCRE2_CODE_UNIT_WIDTH 8\n\043include <pcre2.h>\n' | $(CC) -E -x c - >/dev/null 2>&1; then echo 1; else echo 0; fi)
 PCRE2_CFLAGS ?=
 PCRE2_LIBS ?= -lpcre2-8
 STATIC_PCRE2 ?= 0
 PCRE2_STATIC_LIB ?=
-BUNDLED_PCRE2 ?= 0
+BUNDLED_PCRE2 ?= $(shell if [ -f vendor/pcre2/libpcre2-8.a ] && [ ! -f config.mk ]; then echo 1; else echo 0; fi)
 # Runtime memory-management features (compile-time, default ON). Set to 0 via
 # ./configure --without-cycle-gc / --without-arena, or `make HAVE_CYCLE_GC=0`.
 HAVE_CYCLE_GC ?= 1
@@ -251,8 +258,8 @@ $(RUNTIME_OBJ): $(RUNTIME_SRC) $(RUNTIME_HDR) $(if $(filter 1,$(BUNDLED_PCRE2)),
 # Some assemblers don't support this flag, so try with it first, fall back without
 $(RUNTIME_TCC_OBJ): $(RUNTIME_SRC) $(RUNTIME_HDR) $(RUNTIME_DIR)/strada_runtime_tcc.h
 	@echo "=== Building TCC runtime ==="
-	$(CC) $(CFLAGS) -fPIC -DSTRADA_NO_TLS -Wa,-mrelax-relocations=no -c $(RUNTIME_SRC) -I$(RUNTIME_DIR) -o $(RUNTIME_TCC_OBJ) 2>/dev/null || \
-	$(CC) $(CFLAGS) -fPIC -DSTRADA_NO_TLS -c $(RUNTIME_SRC) -I$(RUNTIME_DIR) -o $(RUNTIME_TCC_OBJ)
+	$(CC) $(CFLAGS) -fPIC -DSTRADA_NO_TLS $(MM_DEFINES) $(if $(filter 1,$(HAVE_PCRE2)),-DHAVE_PCRE2 $(PCRE2_CFLAGS)) $(if $(filter 1,$(HAVE_LIBFFI)),-DHAVE_LIBFFI $(FFI_CFLAGS)) -Wa,-mrelax-relocations=no -c $(RUNTIME_SRC) -I$(RUNTIME_DIR) -o $(RUNTIME_TCC_OBJ) 2>/dev/null || \
+	$(CC) $(CFLAGS) -fPIC -DSTRADA_NO_TLS $(MM_DEFINES) $(if $(filter 1,$(HAVE_PCRE2)),-DHAVE_PCRE2 $(PCRE2_CFLAGS)) $(if $(filter 1,$(HAVE_LIBFFI)),-DHAVE_LIBFFI $(FFI_CFLAGS)) -c $(RUNTIME_SRC) -I$(RUNTIME_DIR) -o $(RUNTIME_TCC_OBJ)
 
 # Build the runtime test
 runtime: $(RUNTIME_DIR)/test_runtime
@@ -487,7 +494,7 @@ tools: $(TOOL_BINS)
 # (including under `make -j`); without it a tool build could run `./strada`
 # before the driver exists and fail (e.g. a missing stradapp then breaks every
 # -D build). Prerequisite-only rule: merges into each tool's existing deps.
-$(TOOL_BINS): strada-driver
+$(TOOL_BINS): strada-driver $(RUNTIME_OBJ)
 
 tools/stradadoc: tools/stradadoc.strada stradac
 	@echo "Building stradadoc..."
@@ -505,9 +512,15 @@ tools/strada-md2html: tools/strada-md2html.strada stradac
 	@echo "Building strada-md2html..."
 	@./strada tools/strada-md2html.strada -o tools/strada-md2html
 
-tools/strada-jit: tools/strada-jit.strada stradac $(RUNTIME_TCC_OBJ)
+ifeq ($(HAVE_READLINE),1)
+tools/strada-jit: tools/strada-jit.strada stradac $(RUNTIME_TCC_OBJ) tools/stradapp lib/readline/readline.o
 	@echo "Building strada-jit..."
-	@./strada tools/strada-jit.strada -o tools/strada-jit -l readline
+	@./strada -DHAVE_READLINE $(READLINE_CFLAGS) tools/strada-jit.strada -o tools/strada-jit $(READLINE_LIBS)
+else
+tools/strada-jit: tools/strada-jit.strada stradac $(RUNTIME_TCC_OBJ)
+	@echo "Building strada-jit (without readline)..."
+	@./strada tools/strada-jit.strada -o tools/strada-jit
+endif
 
 tools/stradapp: tools/stradapp.strada stradac
 	@echo "Building stradapp (preprocessor)..."
@@ -557,16 +570,16 @@ libs: configure-check lib-dbi lib-crypt lib-ssl lib-readline lib-eval
 # Libraries are compiled with `./strada -M`, which execs strada-driver — so,
 # like the tools, they need it built first (not just stradac). Prerequisite-
 # only rule, merged into each lib's existing deps.
-lib/DBI.o lib/crypt.o lib/Eval.o lib/ssl.o lib/readline/readline.o: strada-driver
+lib/DBI.o lib/crypt.o lib/Eval.o lib/ssl.o lib/readline/readline.o: strada-driver $(RUNTIME_OBJ)
 
 # DBI library (database interface)
-lib/DBI.o: lib/DBI.strada stradac configure-check
+lib/DBI.o: lib/DBI.strada stradac tools/stradapp configure-check
 	@echo "Building DBI library..."
 	@if [ "$(HAVE_MYSQL)" != "1" ] && [ "$(HAVE_POSTGRES)" != "1" ] && [ "$(HAVE_SQLITE)" != "1" ]; then \
 	    echo "  No database drivers detected: building DBI without drivers"; \
 	    echo "  (DBI::connect will fail; install libsqlite3-dev / libmysqlclient-dev / libpq-dev and re-run ./configure)."; \
 	fi
-	@./strada -M $(DBI_DEFINES) lib/DBI.strada
+	@./strada -M $(DBI_DEFINES) $(MYSQL_CFLAGS) $(SQLITE_CFLAGS) $(POSTGRES_CFLAGS) lib/DBI.strada
 	@echo "  DBI drivers: MySQL=$(HAVE_MYSQL) SQLite=$(HAVE_SQLITE) PostgreSQL=$(HAVE_POSTGRES)"
 
 lib-dbi: lib/DBI.o
@@ -577,7 +590,7 @@ ifeq ($(HAVE_CRYPT_R),1)
 CRYPT_DEFINES = -DHAVE_CRYPT_R
 endif
 
-lib/crypt.o: lib/crypt.strada stradac
+lib/crypt.o: lib/crypt.strada stradac tools/stradapp
 	@echo "Building crypt library..."
 	./strada -M $(CRYPT_DEFINES) lib/crypt.strada
 
@@ -586,7 +599,7 @@ lib-crypt: lib/crypt.o
 # Eval library (string eval via tree-walking interpreter)
 lib/Eval.strada: compiler/AST.strada compiler/Lexer.strada interpreter/Stubs.strada compiler/Parser.strada lib/Strada/Interpreter.strada lib/Strada/Eval.strada
 	@echo "Generating Eval module (use Eval)..."
-	@cat compiler/AST.strada compiler/Lexer.strada interpreter/Stubs.strada compiler/Parser.strada lib/Strada/Interpreter.strada lib/Strada/Eval.strada | sed '/^=head/,/^=cut/d' > lib/Eval.strada
+	@{ printf 'package Strada::Interpreter;\n'; cat compiler/AST.strada compiler/Lexer.strada interpreter/Stubs.strada compiler/Parser.strada lib/Strada/Interpreter.strada lib/Strada/Eval.strada | sed '/^=head/,/^=cut/d'; } > lib/Eval.strada
 
 lib/Eval.o: lib/Eval.strada stradac
 	@echo "Building Eval library (string eval)..."
@@ -599,9 +612,9 @@ lib-eval: lib/Eval.o
 # compile fails; SSL is optional (TLS sockets), so skip it cleanly instead.
 # Run ./configure --with-ssl (and install OpenSSL) to enable.
 ifeq ($(HAVE_SSL),1)
-lib/ssl.o: lib/ssl.strada stradac
+lib/ssl.o: lib/ssl.strada stradac tools/stradapp
 	@echo "Building SSL library..."
-	./strada -M lib/ssl.strada
+	./strada -M $(SSL_CFLAGS) lib/ssl.strada
 
 lib-ssl: lib/ssl.o
 else
@@ -610,11 +623,16 @@ lib-ssl:
 endif
 
 # Readline library
-lib/readline/readline.o: lib/readline/readline.strada stradac
+ifeq ($(HAVE_READLINE),1)
+lib/readline/readline.o: lib/readline/readline.strada stradac tools/stradapp
 	@echo "Building readline library..."
-	./strada -M lib/readline/readline.strada
+	./strada -M $(READLINE_CFLAGS) lib/readline/readline.strada
 
 lib-readline: lib/readline/readline.o
+else
+lib-readline:
+	@echo "Skipping readline library (libreadline not detected — install libreadline-dev and re-run ./configure)"
+endif
 
 # =============================================================================
 # Installation

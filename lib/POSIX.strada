@@ -206,83 +206,128 @@ L<IPC::Open3>
 
 package POSIX;
 
-# ============================================================
-# Signal Constants
-# ============================================================
+__C__ {
+#include <errno.h>
+#include <signal.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
+#include <sys/stat.h>
 
-func SIGHUP() int { return 1; }
-func SIGINT() int { return 2; }
-func SIGQUIT() int { return 3; }
-func SIGILL() int { return 4; }
-func SIGTRAP() int { return 5; }
-func SIGABRT() int { return 6; }
-func SIGBUS() int { return 7; }
-func SIGFPE() int { return 8; }
-func SIGKILL() int { return 9; }
-func SIGUSR1() int { return 10; }
-func SIGSEGV() int { return 11; }
-func SIGUSR2() int { return 12; }
-func SIGPIPE() int { return 13; }
-func SIGALRM() int { return 14; }
-func SIGTERM() int { return 15; }
-func SIGCHLD() int { return 17; }
-func SIGCONT() int { return 18; }
-func SIGSTOP() int { return 19; }
-func SIGTSTP() int { return 20; }
-func SIGTTIN() int { return 21; }
-func SIGTTOU() int { return 22; }
+static StradaValue *posix_const_sv(int64_t v) {
+    return strada_new_int(v);
+}
+}
 
 # ============================================================
-# Wait Constants
+# Signal Constants (from OS <signal.h>)
 # ============================================================
 
-func WNOHANG() int { return 1; }
-func WUNTRACED() int { return 2; }
+func SIGHUP() int  { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(SIGHUP); } return $v; }
+func SIGINT() int  { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(SIGINT); } return $v; }
+func SIGQUIT() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(SIGQUIT); } return $v; }
+func SIGILL() int  { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(SIGILL); } return $v; }
+func SIGTRAP() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(SIGTRAP); } return $v; }
+func SIGABRT() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(SIGABRT); } return $v; }
+func SIGBUS() int  { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(SIGBUS); } return $v; }
+func SIGFPE() int  { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(SIGFPE); } return $v; }
+func SIGKILL() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(SIGKILL); } return $v; }
+func SIGUSR1() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(SIGUSR1); } return $v; }
+func SIGSEGV() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(SIGSEGV); } return $v; }
+func SIGUSR2() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(SIGUSR2); } return $v; }
+func SIGPIPE() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(SIGPIPE); } return $v; }
+func SIGALRM() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(SIGALRM); } return $v; }
+func SIGTERM() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(SIGTERM); } return $v; }
+func SIGCHLD() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(SIGCHLD); } return $v; }
+func SIGCONT() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(SIGCONT); } return $v; }
+func SIGSTOP() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(SIGSTOP); } return $v; }
+func SIGTSTP() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(SIGTSTP); } return $v; }
+func SIGTTIN() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(SIGTTIN); } return $v; }
+func SIGTTOU() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(SIGTTOU); } return $v; }
 
 # ============================================================
-# File Access Constants
+# Wait Constants (from OS <sys/wait.h>)
 # ============================================================
 
-func F_OK() int { return 0; }
-func R_OK() int { return 4; }
-func W_OK() int { return 2; }
-func X_OK() int { return 1; }
+func WNOHANG() int   { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(WNOHANG); } return $v; }
+func WUNTRACED() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(WUNTRACED); } return $v; }
 
 # ============================================================
-# File Mode Constants
+# File Access Constants (from OS <unistd.h>)
 # ============================================================
 
-func S_IRWXU() int { return 448; }   # 0700
-func S_IRUSR() int { return 256; }   # 0400
-func S_IWUSR() int { return 128; }   # 0200
-func S_IXUSR() int { return 64; }    # 0100
-
-func S_IRWXG() int { return 56; }    # 0070
-func S_IRGRP() int { return 32; }    # 0040
-func S_IWGRP() int { return 16; }    # 0020
-func S_IXGRP() int { return 8; }     # 0010
-
-func S_IRWXO() int { return 7; }     # 0007
-func S_IROTH() int { return 4; }     # 0004
-func S_IWOTH() int { return 2; }     # 0002
-func S_IXOTH() int { return 1; }     # 0001
-
-func S_ISUID() int { return 2048; }  # 04000
-func S_ISGID() int { return 1024; }  # 02000
-func S_ISVTX() int { return 512; }   # 01000
+func F_OK() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(F_OK); } return $v; }
+func R_OK() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(R_OK); } return $v; }
+func W_OK() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(W_OK); } return $v; }
+func X_OK() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(X_OK); } return $v; }
 
 # ============================================================
-# File Type Macros (from stat mode)
+# File Open / Seek / Poll / Socket Constants (from OS headers)
 # ============================================================
 
-func S_IFMT() int { return 61440; }  # 0170000 - file type mask
-func S_IFSOCK() int { return 49152; } # 0140000 - socket
-func S_IFLNK() int { return 40960; } # 0120000 - symbolic link
-func S_IFREG() int { return 32768; } # 0100000 - regular file
-func S_IFBLK() int { return 24576; } # 0060000 - block device
-func S_IFDIR() int { return 16384; } # 0040000 - directory
-func S_IFCHR() int { return 8192; }  # 0020000 - character device
-func S_IFIFO() int { return 4096; }  # 0010000 - FIFO
+func O_RDONLY() int   { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(O_RDONLY); } return $v; }
+func O_WRONLY() int   { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(O_WRONLY); } return $v; }
+func O_RDWR() int     { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(O_RDWR); } return $v; }
+func O_CREAT() int    { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(O_CREAT); } return $v; }
+func O_EXCL() int     { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(O_EXCL); } return $v; }
+func O_TRUNC() int    { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(O_TRUNC); } return $v; }
+func O_APPEND() int   { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(O_APPEND); } return $v; }
+func O_NONBLOCK() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(O_NONBLOCK); } return $v; }
+func O_CLOEXEC() int  { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(O_CLOEXEC); } return $v; }
+
+func SEEK_SET() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(SEEK_SET); } return $v; }
+func SEEK_CUR() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(SEEK_CUR); } return $v; }
+func SEEK_END() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(SEEK_END); } return $v; }
+
+func POLLIN() int   { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(POLLIN); } return $v; }
+func POLLOUT() int  { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(POLLOUT); } return $v; }
+func POLLERR() int  { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(POLLERR); } return $v; }
+func POLLHUP() int  { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(POLLHUP); } return $v; }
+func POLLNVAL() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(POLLNVAL); } return $v; }
+
+func AF_INET() int     { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(AF_INET); } return $v; }
+func AF_INET6() int    { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(AF_INET6); } return $v; }
+func AF_UNIX() int     { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(AF_UNIX); } return $v; }
+func SOCK_STREAM() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(SOCK_STREAM); } return $v; }
+func SOCK_DGRAM() int  { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(SOCK_DGRAM); } return $v; }
+
+# ============================================================
+# File Mode Constants (from OS <sys/stat.h>)
+# ============================================================
+
+func S_IRWXU() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(S_IRWXU); } return $v; }
+func S_IRUSR() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(S_IRUSR); } return $v; }
+func S_IWUSR() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(S_IWUSR); } return $v; }
+func S_IXUSR() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(S_IXUSR); } return $v; }
+
+func S_IRWXG() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(S_IRWXG); } return $v; }
+func S_IRGRP() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(S_IRGRP); } return $v; }
+func S_IWGRP() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(S_IWGRP); } return $v; }
+func S_IXGRP() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(S_IXGRP); } return $v; }
+
+func S_IRWXO() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(S_IRWXO); } return $v; }
+func S_IROTH() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(S_IROTH); } return $v; }
+func S_IWOTH() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(S_IWOTH); } return $v; }
+func S_IXOTH() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(S_IXOTH); } return $v; }
+
+func S_ISUID() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(S_ISUID); } return $v; }
+func S_ISGID() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(S_ISGID); } return $v; }
+func S_ISVTX() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(S_ISVTX); } return $v; }
+
+# ============================================================
+# File Type Macros (from OS <sys/stat.h>)
+# ============================================================
+
+func S_IFMT() int   { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(S_IFMT); } return $v; }
+func S_IFSOCK() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(S_IFSOCK); } return $v; }
+func S_IFLNK() int  { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(S_IFLNK); } return $v; }
+func S_IFREG() int  { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(S_IFREG); } return $v; }
+func S_IFBLK() int  { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(S_IFBLK); } return $v; }
+func S_IFDIR() int  { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(S_IFDIR); } return $v; }
+func S_IFCHR() int  { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(S_IFCHR); } return $v; }
+func S_IFIFO() int  { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(S_IFIFO); } return $v; }
 
 # File type test functions
 func S_ISREG(int $mode) int {
@@ -314,50 +359,50 @@ func S_ISSOCK(int $mode) int {
 }
 
 # ============================================================
-# Standard File Descriptors
+# Standard File Descriptors (from OS <unistd.h>)
 # ============================================================
 
-func STDIN_FILENO() int { return 0; }
-func STDOUT_FILENO() int { return 1; }
-func STDERR_FILENO() int { return 2; }
+func STDIN_FILENO() int  { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(STDIN_FILENO); } return $v; }
+func STDOUT_FILENO() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(STDOUT_FILENO); } return $v; }
+func STDERR_FILENO() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(STDERR_FILENO); } return $v; }
 
 # ============================================================
-# Error Constants (common ones)
+# Error Constants (from OS <errno.h>)
 # ============================================================
 
-func EPERM() int { return 1; }
-func ENOENT() int { return 2; }
-func ESRCH() int { return 3; }
-func EINTR() int { return 4; }
-func EIO() int { return 5; }
-func ENXIO() int { return 6; }
-func E2BIG() int { return 7; }
-func ENOEXEC() int { return 8; }
-func EBADF() int { return 9; }
-func ECHILD() int { return 10; }
-func EAGAIN() int { return 11; }
-func ENOMEM() int { return 12; }
-func EACCES() int { return 13; }
-func EFAULT() int { return 14; }
-func EBUSY() int { return 16; }
-func EEXIST() int { return 17; }
-func EXDEV() int { return 18; }
-func ENODEV() int { return 19; }
-func ENOTDIR() int { return 20; }
-func EISDIR() int { return 21; }
-func EINVAL() int { return 22; }
-func ENFILE() int { return 23; }
-func EMFILE() int { return 24; }
-func ENOTTY() int { return 25; }
-func EFBIG() int { return 27; }
-func ENOSPC() int { return 28; }
-func ESPIPE() int { return 29; }
-func EROFS() int { return 30; }
-func EMLINK() int { return 31; }
-func EPIPE() int { return 32; }
-func EDOM() int { return 33; }
-func ERANGE() int { return 34; }
-func EWOULDBLOCK() int { return 11; }
+func EPERM() int   { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(EPERM); } return $v; }
+func ENOENT() int  { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(ENOENT); } return $v; }
+func ESRCH() int   { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(ESRCH); } return $v; }
+func EINTR() int   { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(EINTR); } return $v; }
+func EIO() int     { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(EIO); } return $v; }
+func ENXIO() int   { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(ENXIO); } return $v; }
+func E2BIG() int   { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(E2BIG); } return $v; }
+func ENOEXEC() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(ENOEXEC); } return $v; }
+func EBADF() int   { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(EBADF); } return $v; }
+func ECHILD() int  { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(ECHILD); } return $v; }
+func EAGAIN() int  { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(EAGAIN); } return $v; }
+func ENOMEM() int  { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(ENOMEM); } return $v; }
+func EACCES() int  { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(EACCES); } return $v; }
+func EFAULT() int  { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(EFAULT); } return $v; }
+func EBUSY() int   { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(EBUSY); } return $v; }
+func EEXIST() int  { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(EEXIST); } return $v; }
+func EXDEV() int   { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(EXDEV); } return $v; }
+func ENODEV() int  { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(ENODEV); } return $v; }
+func ENOTDIR() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(ENOTDIR); } return $v; }
+func EISDIR() int  { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(EISDIR); } return $v; }
+func EINVAL() int  { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(EINVAL); } return $v; }
+func ENFILE() int  { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(ENFILE); } return $v; }
+func EMFILE() int  { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(EMFILE); } return $v; }
+func ENOTTY() int  { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(ENOTTY); } return $v; }
+func EFBIG() int   { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(EFBIG); } return $v; }
+func ENOSPC() int  { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(ENOSPC); } return $v; }
+func ESPIPE() int  { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(ESPIPE); } return $v; }
+func EROFS() int   { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(EROFS); } return $v; }
+func EMLINK() int  { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(EMLINK); } return $v; }
+func EPIPE() int   { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(EPIPE); } return $v; }
+func EDOM() int    { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(EDOM); } return $v; }
+func ERANGE() int  { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(ERANGE); } return $v; }
+func EWOULDBLOCK() int { my int $v = 0; __C__ { strada_decref(v); v = posix_const_sv(EWOULDBLOCK); } return $v; }
 
 # ============================================================
 # Utility Functions

@@ -233,6 +233,7 @@ func get_builtins() scalar {
     $b{"substr_bytes"} = 1;  # Byte-level substr
     $b{"index"} = 1;
     $b{"rindex"} = 1;
+    $b{"byte_index"} = 1;
     $b{"uc"} = 1;
     $b{"lc"} = 1;
     $b{"upper"} = 1;
@@ -752,6 +753,7 @@ func get_builtins() scalar {
     $b{"sys::set_byte"} = 1;
     $b{"sys::byte_length"} = 1;
     $b{"sys::byte_substr"} = 1;
+    $b{"sys::byte_index"} = 1;
     $b{"sys::pack"} = 1;
     $b{"sys::unpack"} = 1;
     $b{"sys::base64_encode"} = 1;
@@ -1191,6 +1193,7 @@ func stage0_expr_type(scalar $ctx, scalar $expr) int {
         my str $name = $expr->{"name"};
         # High-signal builtins; everything else stays unknown.
         if ($name eq "length" || $name eq "size" || $name eq "index" || $name eq "rindex"
+            || $name eq "byte_index" || $name eq "sys::byte_index" || $name eq "core::byte_index"
             || $name eq "ord" || $name eq "bytes" || $name eq "int"
             || $name eq "exists" || $name eq "defined") { return TYPE_INT(); }
         if ($name eq "substr" || $name eq "join" || $name eq "uc" || $name eq "lc"

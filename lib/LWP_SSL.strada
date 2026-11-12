@@ -45,9 +45,7 @@ is provided via the ssl module using extern "C".
 
 B<Compile with:>
 
-    ./stradac myapp.strada myapp.c
-    gcc -o myapp myapp.c lib/ssl/strada_ssl.c runtime/strada_runtime.c \
-        -Iruntime -lssl -lcrypto -ldl -lm
+    ./strada myapp.strada -l ssl -l crypto
 
 =head1 FUNCTIONS
 
@@ -312,13 +310,28 @@ func parse_url(str $url) hash {
         $remaining = substr($remaining, $path_start, length($remaining) - $path_start);
     }
 
-    my int $port_sep = index($host_part, ":");
-    if ($port_sep > 0) {
-        $result{"host"} = substr($host_part, 0, $port_sep);
-        my str $port_str = substr($host_part, $port_sep + 1, length($host_part) - $port_sep - 1);
-        $result{"port"} = cast_int($port_str);
+    if (length($host_part) >= 2 && substr($host_part, 0, 1) eq "[") {
+        my int $close_br = index($host_part, "]");
+        if ($close_br > 1) {
+            $result{"host"} = substr($host_part, 1, $close_br - 1);
+            if ($close_br + 1 < length($host_part) && substr($host_part, $close_br + 1, 1) eq ":") {
+                my str $port_str = substr($host_part, $close_br + 2, length($host_part) - $close_br - 2);
+                if (length($port_str) > 0) {
+                    $result{"port"} = cast_int($port_str);
+                }
+            }
+        } else {
+            $result{"host"} = $host_part;
+        }
     } else {
-        $result{"host"} = $host_part;
+        my int $port_sep = index($host_part, ":");
+        if ($port_sep > 0) {
+            $result{"host"} = substr($host_part, 0, $port_sep);
+            my str $port_str = substr($host_part, $port_sep + 1, length($host_part) - $port_sep - 1);
+            $result{"port"} = cast_int($port_str);
+        } else {
+            $result{"host"} = $host_part;
+        }
     }
 
     my int $query_start = index($remaining, "?");
@@ -397,6 +410,162 @@ func parse_headers(str $header_block) hash {
     return %headers;
 }
 
+# Internal: parse hex chunk size (stops at ';' chunk extension)
+func _parse_hex_len(str $line) int {
+    my int $semi = index($line, ";");
+    if ($semi >= 0) {
+        $line = substr($line, 0, $semi);
+    }
+    my int $i = 0;
+    my int $n = 0;
+    my int $digits = 0;
+    my int $len = length($line);
+    while ($i < $len) {
+        my str $ch = substr($line, $i, 1);
+        if ($ch eq " " || $ch eq "\t") {
+            if ($digits > 0) { last; }
+            $i = $i + 1;
+            next;
+        }
+        my int $o = ord($ch);
+        my int $d = -1;
+        if ($o >= 48 && $o <= 57) { $d = $o - 48; }
+        elsif ($o >= 97 && $o <= 102) { $d = $o - 97 + 10; }
+        elsif ($o >= 65 && $o <= 70) { $d = $o - 65 + 10; }
+        else { last; }
+        $n = ($n * 16) + $d;
+        $digits = $digits + 1;
+        $i = $i + 1;
+    }
+    return ($digits > 0) ? $n : -1;
+}
+
+# Internal: decode HTTP Transfer-Encoding: chunked body using raw byte offsets
+func _decode_chunked(str $raw_body) str {
+    my str $out = "";
+    my int $pos = 0;
+    my int $total = core::byte_length($raw_body);
+    while ($pos < $total) {
+        my int $nl = core::byte_index($raw_body, "\r\n", $pos);
+        if ($nl < 0) {
+            return $out;
+        }
+        my str $size_line = core::byte_substr($raw_body, $pos, $nl - $pos);
+        my int $chunk_len = LWP_SSL::_parse_hex_len($size_line);
+        if ($chunk_len < 0) {
+            return $out;
+        }
+        $pos = $nl + 2;
+        if ($chunk_len == 0) {
+            last;
+        }
+        if ($pos + $chunk_len > $total) {
+            $out = $out . core::byte_substr($raw_body, $pos, $total - $pos);
+            last;
+        }
+        $out = $out . core::byte_substr($raw_body, $pos, $chunk_len);
+        $pos = $pos + $chunk_len;
+        if ($pos + 2 <= $total && core::byte_substr($raw_body, $pos, 2) eq "\r\n") {
+            $pos = $pos + 2;
+        }
+    }
+    return $out;
+}
+
+# Internal: return 1 when chunked response body has received its 0-length terminator
+func _chunked_complete(str $raw, int $pos) int {
+    my int $total = core::byte_length($raw);
+    while ($pos < $total) {
+        my int $nl = core::byte_index($raw, "\r\n", $pos);
+        if ($nl < 0) { return 0; }
+        my str $size_line = core::byte_substr($raw, $pos, $nl - $pos);
+        my int $chunk_len = LWP_SSL::_parse_hex_len($size_line);
+        if ($chunk_len < 0) { return 1; }
+        $pos = $nl + 2;
+        if ($chunk_len == 0) {
+            return (core::byte_index($raw, "\r\n", $pos) >= 0) ? 1 : 0;
+        }
+        if ($pos + $chunk_len + 2 > $total) { return 0; }
+        $pos = $pos + $chunk_len + 2;
+    }
+    return 0;
+}
+
+# Internal: return 1 if buffered HTTP response contains the complete message
+func _response_complete(str $response, str $method) int {
+    my int $header_end = core::byte_index($response, "\r\n\r\n");
+    if ($header_end < 0) { return 0; }
+
+    my str $headers_part = core::byte_substr($response, 0, $header_end);
+    my int $first_eol = core::byte_index($headers_part, "\r\n");
+    my str $status_line = ($first_eol > 0) ? core::byte_substr($headers_part, 0, $first_eol) : $headers_part;
+    my array @sp = split(" ", $status_line);
+    my int $status = (scalar(@sp) >= 2) ? cast_int($sp[1]) : 0;
+    if (uc($method) eq "HEAD" || $status == 204 || $status == 304 || ($status >= 100 && $status < 200)) {
+        return 1;
+    }
+
+    my str $headers_lower = lc($headers_part);
+    my int $te_pos = core::byte_index($headers_lower, "transfer-encoding:");
+    if ($te_pos >= 0) {
+        my int $te_end = core::byte_index($headers_part, "\r\n", $te_pos);
+        if ($te_end < 0) { $te_end = core::byte_length($headers_part); }
+        my str $te_val = lc(core::byte_substr($headers_part, $te_pos + 18, $te_end - $te_pos - 18));
+        if (index($te_val, "chunked") >= 0) {
+            return LWP_SSL::_chunked_complete($response, $header_end + 4);
+        }
+    }
+
+    my int $cl_pos = core::byte_index($headers_lower, "content-length:");
+    if ($cl_pos >= 0) {
+        my int $cl_end = core::byte_index($headers_part, "\r\n", $cl_pos);
+        if ($cl_end < 0) { $cl_end = core::byte_length($headers_part); }
+        my str $cl_line = core::byte_substr($headers_part, $cl_pos + 15, $cl_end - $cl_pos - 15);
+        while (length($cl_line) > 0 && (substr($cl_line, 0, 1) eq " " || substr($cl_line, 0, 1) eq "\t")) {
+            $cl_line = substr($cl_line, 1, length($cl_line) - 1);
+        }
+        my int $content_length = cast_int($cl_line);
+        my int $body_bytes = core::byte_length($response) - ($header_end + 4);
+        if ($body_bytes >= $content_length) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+# Internal: format Host header value (bracketing IPv6 and appending non-default port)
+func _format_host_header(str $scheme, str $host, int $port) str {
+    my str $h = (index($host, ":") >= 0 && substr($host, 0, 1) ne "[") ? ("[" . $host . "]") : $host;
+    my int $def_port = ($scheme eq "https") ? 443 : 80;
+    if ($port != $def_port && $port > 0) {
+        return $h . ":" . $port;
+    }
+    return $h;
+}
+
+# Internal: resolve relative or absolute redirect Location against base URL
+func _resolve_url(str $base_url, str $location) str {
+    if (index($location, "://") > 0) {
+        return $location;
+    }
+    my hash %bu = LWP_SSL::parse_url($base_url);
+    my str $authority = LWP_SSL::_format_host_header($bu{"scheme"}, $bu{"host"}, $bu{"port"});
+    if (length($location) >= 2 && substr($location, 0, 2) eq "//") {
+        return $bu{"scheme"} . ":" . $location;
+    }
+    if (length($location) > 0 && substr($location, 0, 1) eq "/") {
+        return $bu{"scheme"} . "://" . $authority . $location;
+    }
+    my str $dir = $bu{"path"};
+    my int $slash = rindex($dir, "/");
+    if ($slash >= 0) {
+        $dir = substr($dir, 0, $slash + 1);
+    } else {
+        $dir = "/";
+    }
+    return $bu{"scheme"} . "://" . $authority . $dir . $location;
+}
+
 # Parse HTTP response
 func parse_response(str $raw) hash {
     my hash %response = ();
@@ -405,7 +574,7 @@ func parse_response(str $raw) hash {
     $response{"reason"} = "";
     $response{"content"} = "";
 
-    my int $sep = index($raw, "\r\n\r\n");
+    my int $sep = core::byte_index($raw, "\r\n\r\n");
     if ($sep < 0) {
         $response{"error"} = "Invalid HTTP response";
         return %response;
@@ -415,12 +584,12 @@ func parse_response(str $raw) hash {
     my int $raw_bytes = core::byte_length($raw);
     my str $body = core::byte_substr($raw, $sep + 4, $raw_bytes - $sep - 4);
 
-    my int $first_line_end = index($header_section, "\r\n");
+    my int $first_line_end = core::byte_index($header_section, "\r\n");
     my str $status_line = "";
     my str $headers_text = "";
     if ($first_line_end > 0) {
-        $status_line = substr($header_section, 0, $first_line_end);
-        $headers_text = substr($header_section, $first_line_end + 2, length($header_section) - $first_line_end - 2);
+        $status_line = core::byte_substr($header_section, 0, $first_line_end);
+        $headers_text = core::byte_substr($header_section, $first_line_end + 2, core::byte_length($header_section) - $first_line_end - 2);
     } else {
         $status_line = $header_section;
     }
@@ -443,6 +612,9 @@ func parse_response(str $raw) hash {
 
     my hash %hdrs = LWP_SSL::parse_headers($headers_text);
     $response{"headers"} = \%hdrs;
+    if (defined($hdrs{"transfer-encoding"}) && index(lc($hdrs{"transfer-encoding"}), "chunked") >= 0) {
+        $body = LWP_SSL::_decode_chunked($body);
+    }
     $response{"content"} = $body;
 
     my int $status = $response{"status"};
@@ -522,7 +694,7 @@ func _max_response_bytes(hash %options) int {
 # Internal: does a raw response's header section exceed $max bytes?
 func _headers_too_large(str $raw, int $max) int {
     if ($max <= 0) { return 0; }
-    my int $sep = index($raw, "\r\n\r\n");
+    my int $sep = core::byte_index($raw, "\r\n\r\n");
     if ($sep < 0) { return core::byte_length($raw) > $max ? 1 : 0; }
     return $sep > $max ? 1 : 0;
 }
@@ -530,9 +702,15 @@ func _headers_too_large(str $raw, int $max) int {
 # Read HTTP response from socket. Stops early once more than
 # $max_header_bytes arrive without the end of the headers, or once the
 # response grows past $max_response_bytes (0 = no limit for either).
-func read_http_response(scalar $sock, int $max_header_bytes = 65536, int $max_response_bytes = 67108864) str {
+func read_http_response(scalar $sock, int $max_header_bytes = 65536, int $max_response_bytes = 67108864, str $method = "GET", int $timeout_ms = 0) str {
     my str $response = "";
     while (1) {
+        if ($timeout_ms > 0) {
+            my scalar $ready = core::socket_select([$sock], $timeout_ms);
+            if (!defined($ready) || scalar($ready) == 0) {
+                break;
+            }
+        }
         my str $chunk = core::socket_recv($sock, 8192);
         if (!defined($chunk) || core::byte_length($chunk) == 0) {
             break;
@@ -541,8 +719,11 @@ func read_http_response(scalar $sock, int $max_header_bytes = 65536, int $max_re
         if ($max_response_bytes > 0 && core::byte_length($response) > $max_response_bytes) {
             break;
         }
-        if (index($response, "\r\n\r\n") < 0
+        if (core::byte_index($response, "\r\n\r\n") < 0
             && LWP_SSL::_headers_too_large($response, $max_header_bytes)) {
+            break;
+        }
+        if (LWP_SSL::_response_complete($response, $method)) {
             break;
         }
     }
@@ -550,7 +731,7 @@ func read_http_response(scalar $sock, int $max_header_bytes = 65536, int $max_re
 }
 
 # Internal: Make HTTP request (plain)
-func do_http_request(str $host, int $port, str $request, int $max_header_bytes = 65536, int $max_response_bytes = 67108864) hash {
+func do_http_request(str $host, int $port, str $request, int $max_header_bytes = 65536, int $max_response_bytes = 67108864, str $method = "GET", int $timeout_ms = 0) hash {
     my hash %response = ();
     $response{"success"} = 0;
 
@@ -561,7 +742,7 @@ func do_http_request(str $host, int $port, str $request, int $max_header_bytes =
     }
 
     core::socket_send($sock, $request);
-    my str $raw_response = LWP_SSL::read_http_response($sock, $max_header_bytes, $max_response_bytes);
+    my str $raw_response = LWP_SSL::read_http_response($sock, $max_header_bytes, $max_response_bytes, $method, $timeout_ms);
     core::socket_close($sock);
 
     if ($max_response_bytes > 0 && core::byte_length($raw_response) > $max_response_bytes) {
@@ -576,15 +757,18 @@ func do_http_request(str $host, int $port, str $request, int $max_header_bytes =
 }
 
 # Internal: Make HTTPS request (uses ssl module via extern "C")
-func do_https_request(str $host, int $port, str $request, int $max_header_bytes = 65536, int $max_response_bytes = 67108864) hash {
+func do_https_request(str $host, int $port, str $request, int $max_header_bytes = 65536, int $max_response_bytes = 67108864, str $method = "GET", int $timeout_ms = 0, int $verify = 1) hash {
     my hash %response = ();
     $response{"success"} = 0;
 
     # Connect using ssl module (extern "C")
-    my int $conn = ssl::connect($host, $port);
+    my int $conn = $verify ? ssl::connect($host, $port) : ssl::connect_insecure($host, $port);
     if (c::is_null($conn)) {
         $response{"error"} = "SSL connection failed to " . $host . ":" . $port;
         return %response;
+    }
+    if ($timeout_ms > 0) {
+        ssl::set_timeout($conn, $timeout_ms);
     }
 
     # Write request
@@ -598,8 +782,11 @@ func do_https_request(str $host, int $port, str $request, int $max_header_bytes 
         if ($max_response_bytes > 0 && core::byte_length($raw_response) > $max_response_bytes) {
             last;
         }
-        if (index($raw_response, "\r\n\r\n") < 0
+        if (core::byte_index($raw_response, "\r\n\r\n") < 0
             && LWP_SSL::_headers_too_large($raw_response, $max_header_bytes)) {
+            last;
+        }
+        if (LWP_SSL::_response_complete($raw_response, $method)) {
             last;
         }
         $chunk = ssl::read($conn, 8192);
@@ -619,8 +806,8 @@ func do_https_request(str $host, int $port, str $request, int $max_header_bytes 
     return LWP_SSL::parse_response($raw_response);
 }
 
-# Main request function
-func do_request(str $method, str $url, str $body, hash %options) hash {
+# Internal: perform one HTTP/HTTPS request without following redirects
+func _do_single_request(str $method, str $url, str $body, hash %options) hash {
     my hash %err_resp = ();
     $err_resp{"success"} = 0;
     if (LWP_SSL::_has_crlf($method) || LWP_SSL::_has_crlf($url)) {
@@ -652,14 +839,55 @@ func do_request(str $method, str $url, str $body, hash %options) hash {
         $path = $path . "?" . $query;
     }
 
-    my str $request = LWP_SSL::build_request($method, $host, $path, $body, %options);
+    my str $host_hdr = LWP_SSL::_format_host_header($scheme, $host, $port);
+    my str $request = LWP_SSL::build_request($method, $host_hdr, $path, $body, %options);
 
     my int $max_hdr = LWP_SSL::_max_header_bytes(%options);
     my int $max_resp = LWP_SSL::_max_response_bytes(%options);
+    my int $timeout_ms = 0;
+    if (defined($options{"timeout"}) && ($options{"timeout"} + 0) > 0) {
+        $timeout_ms = ($options{"timeout"} + 0) * 1000;
+    }
+    my int $verify = 1;
+    if (defined($options{"verify"})) {
+        $verify = ($options{"verify"} + 0) ? 1 : 0;
+    }
     if ($scheme eq "https") {
-        return LWP_SSL::do_https_request($host, $port, $request, $max_hdr, $max_resp);
+        return LWP_SSL::do_https_request($host, $port, $request, $max_hdr, $max_resp, $method, $timeout_ms, $verify);
     } else {
-        return LWP_SSL::do_http_request($host, $port, $request, $max_hdr, $max_resp);
+        return LWP_SSL::do_http_request($host, $port, $request, $max_hdr, $max_resp, $method, $timeout_ms);
+    }
+}
+
+# Main request function (with automatic redirect handling; disable with max_redirects => 0)
+func do_request(str $method, str $url, str $body, hash %options) hash {
+    my int $max_redir = 5;
+    if (defined($options{"max_redirects"})) {
+        $max_redir = $options{"max_redirects"} + 0;
+    }
+    my str $cur_method = $method;
+    my str $cur_url = $url;
+    my str $cur_body = $body;
+    my int $hops = 0;
+    while (1) {
+        my hash %resp = LWP_SSL::_do_single_request($cur_method, $cur_url, $cur_body, %options);
+        my int $st = defined($resp{"status"}) ? ($resp{"status"} + 0) : 0;
+        if (($st == 301 || $st == 302 || $st == 303 || $st == 307 || $st == 308) && $hops < $max_redir) {
+            my str $loc = "";
+            if (defined($resp{"headers"}) && defined($resp{"headers"}->{"location"})) {
+                $loc = $resp{"headers"}->{"location"};
+            }
+            if (length($loc) > 0) {
+                $cur_url = LWP_SSL::_resolve_url($cur_url, $loc);
+                if (($st == 301 || $st == 302 || $st == 303) && uc($cur_method) eq "POST") {
+                    $cur_method = "GET";
+                    $cur_body = "";
+                }
+                $hops = $hops + 1;
+                next;
+            }
+        }
+        return %resp;
     }
 }
 

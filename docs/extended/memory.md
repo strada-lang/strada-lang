@@ -191,7 +191,7 @@ func make_counter() scalar {
 my scalar $counter = make_counter();
 say($counter->());  # 1
 say($counter->());  # 2
-# The closure's own copy of $count stays alive as long as $counter exists
+# The shared cell for $count stays alive as long as $counter exists
 ```
 
 ## Thread Safety

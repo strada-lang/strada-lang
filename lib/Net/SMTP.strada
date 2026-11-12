@@ -290,7 +290,7 @@ func send_cmd(scalar $self, str $cmd) int {
 # closed rather than buffering without limit).
 func read_line(scalar $self) scalar {
     my int $max = $self->{"max_line"};
-    while (index($self->{"buf"}, "\n") < 0) {
+    while (core::byte_index($self->{"buf"}, "\n") < 0) {
         if ($max > 0 && core::byte_length($self->{"buf"}) > $max + 1) {
             SMTP::_line_too_long($self);
             return undef;
@@ -306,7 +306,7 @@ func read_line(scalar $self) scalar {
     }
     my str $b = $self->{"buf"};
     my int $blen = core::byte_length($b);
-    my int $nl = index($b, "\n");
+    my int $nl = core::byte_index($b, "\n");
     my str $line = core::byte_substr($b, 0, $nl);
     $self->{"buf"} = core::byte_substr($b, $nl + 1, $blen - $nl - 1);
     my int $llen = core::byte_length($line);
@@ -350,9 +350,9 @@ func recv_response(scalar $self) str {
             last;
         }
         $response = $response . $line . "\r\n";
-        if (length($line) < 3 || $line !~ /^[0-9]{3}/) { $code = 0; last; }
-        $code = core::atoi(substr($line, 0, 3));
-        if (length($line) == 3 || substr($line, 3, 1) ne "-") { last; }
+        if (core::byte_length($line) < 3 || $line !~ /^[0-9]{3}/) { $code = 0; last; }
+        $code = core::atoi(core::byte_substr($line, 0, 3));
+        if (core::byte_length($line) == 3 || core::byte_substr($line, 3, 1) ne "-") { last; }
     }
 
     $self->{"last_code"} = $code;
@@ -373,7 +373,7 @@ func command(scalar $self, str $cmd) int {
 }
 
 func _has_crlf(str $s) int {
-    return (index($s, "\r") >= 0 || index($s, "\n") >= 0) ? 1 : 0;
+    return (core::byte_index($s, "\r") >= 0 || core::byte_index($s, "\n") >= 0) ? 1 : 0;
 }
 
 # HELO command - simple greeting
@@ -559,25 +559,26 @@ func send_mail(scalar $self, str $from, scalar $to_list, str $subject, str $body
 # extra "."; every line ends in CRLF, preserving trailing blank lines (such
 # as the blank header/body separator when $body is empty).
 func dot_stuff(str $text) str {
-    if (length($text) == 0) {
+    if (core::byte_length($text) == 0) {
         return "";
     }
     my str $t = $text;
     $t =~ s/\r\n/\n/g;
-    my int $len = length($t);
+    $t =~ s/\r/\n/g;
+    my int $len = core::byte_length($t);
     my int $pos = 0;
     my str $result = "";
     while ($pos < $len) {
-        my int $nl = index($t, "\n", $pos);
+        my int $nl = core::byte_index($t, "\n", $pos);
         my str $line = "";
         if ($nl < 0) {
-            $line = substr($t, $pos, $len - $pos);
+            $line = core::byte_substr($t, $pos, $len - $pos);
             $pos = $len;
         } else {
-            $line = substr($t, $pos, $nl - $pos);
+            $line = core::byte_substr($t, $pos, $nl - $pos);
             $pos = $nl + 1;
         }
-        if (length($line) > 0 && substr($line, 0, 1) eq ".") {
+        if (core::byte_length($line) > 0 && core::byte_substr($line, 0, 1) eq ".") {
             $line = "." . $line;
         }
         $result = $result . $line . "\r\n";

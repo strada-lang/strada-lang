@@ -23,6 +23,484 @@
 
 my hash %g_defines = ();
 my array @g_include_paths = ();
+my int $g_include_depth = 0;
+
+func pp_parse_int_lit(str $s) int {
+    my str $t = trim($s);
+    my int $len = length($t);
+    if ($len == 0) { return 0; }
+    my int $neg = 0;
+    my int $i = 0;
+    my str $first = substr($t, 0, 1);
+    if ($first eq "-") {
+        $neg = 1;
+        $i = 1;
+    } elsif ($first eq "+") {
+        $i = 1;
+    }
+    if ($i >= $len) { return 0; }
+    my int $val = 0;
+    if ($i + 2 <= $len) {
+        my str $pfx = substr($t, $i, 2);
+        if ($pfx eq "0x" || $pfx eq "0X") {
+            $i = $i + 2;
+            while ($i < $len) {
+                my int $c = ord(substr($t, $i, 1));
+                my int $d = -1;
+                if ($c >= 48 && $c <= 57) { $d = $c - 48; }
+                elsif ($c >= 97 && $c <= 102) { $d = $c - 87; }
+                elsif ($c >= 65 && $c <= 70) { $d = $c - 55; }
+                if ($d < 0) { last; }
+                $val = $val * 16 + $d;
+                $i = $i + 1;
+            }
+            return $neg == 1 ? (0 - $val) : $val;
+        }
+        if ($pfx eq "0b" || $pfx eq "0B") {
+            $i = $i + 2;
+            while ($i < $len) {
+                my int $c = ord(substr($t, $i, 1));
+                if ($c == 48) { $val = $val * 2; }
+                elsif ($c == 49) { $val = $val * 2 + 1; }
+                else { last; }
+                $i = $i + 1;
+            }
+            return $neg == 1 ? (0 - $val) : $val;
+        }
+        if ($pfx eq "0o" || $pfx eq "0O") {
+            $i = $i + 2;
+            while ($i < $len) {
+                my int $c = ord(substr($t, $i, 1));
+                if ($c >= 48 && $c <= 55) { $val = $val * 8 + ($c - 48); }
+                else { last; }
+                $i = $i + 1;
+            }
+            return $neg == 1 ? (0 - $val) : $val;
+        }
+    }
+    if (substr($t, $i, 1) eq "0" && $len - $i > 1) {
+        $i = $i + 1;
+        while ($i < $len) {
+            my int $c = ord(substr($t, $i, 1));
+            if ($c >= 48 && $c <= 55) { $val = $val * 8 + ($c - 48); }
+            else { last; }
+            $i = $i + 1;
+        }
+        return $neg == 1 ? (0 - $val) : $val;
+    }
+    while ($i < $len) {
+        my int $c = ord(substr($t, $i, 1));
+        if ($c >= 48 && $c <= 57) {
+            $val = $val * 10 + ($c - 48);
+        } else {
+            last;
+        }
+        $i = $i + 1;
+    }
+    return $neg == 1 ? (0 - $val) : $val;
+}
+
+func pp_resolve_macro_val(str $name, int $depth) int {
+    if ($depth > 8) { return 0; }
+    if (!exists(%g_defines, $name)) { return 0; }
+    my str $raw = trim("" . $g_defines{$name});
+    if ($raw eq "") { return 0; }
+    my int $c0 = ord(substr($raw, 0, 1));
+    if (($c0 >= 48 && $c0 <= 57) || $c0 == 45 || $c0 == 43) {
+        return pp_parse_int_lit($raw);
+    }
+    if (exists(%g_defines, $raw)) {
+        return pp_resolve_macro_val($raw, $depth + 1);
+    }
+    return pp_eval_expr($raw);
+}
+
+func pp_skip_ws(str $s, int $pos, int $len) int {
+    while ($pos < $len) {
+        my int $c = ord(substr($s, $pos, 1));
+        if ($c == 32 || $c == 9 || $c == 13) {
+            $pos = $pos + 1;
+        } else {
+            last;
+        }
+    }
+    return $pos;
+}
+
+func pp_parse_primary(str $s, scalar $pos_ref, int $len) int {
+    my int $p = pp_skip_ws($s, $$pos_ref, $len);
+    $$pos_ref = $p;
+    if ($p >= $len) { return 0; }
+    my str $ch = substr($s, $p, 1);
+    if ($ch eq "(") {
+        $$pos_ref = $p + 1;
+        my int $v = pp_parse_or($s, $pos_ref, $len);
+        $p = pp_skip_ws($s, $$pos_ref, $len);
+        if ($p < $len && substr($s, $p, 1) eq ")") {
+            $p = $p + 1;
+        }
+        $$pos_ref = $p;
+        return $v;
+    }
+    my int $c = ord($ch);
+    if ($c >= 48 && $c <= 57) {
+        my int $start = $p;
+        while ($p < $len) {
+            my int $dc = ord(substr($s, $p, 1));
+            if (($dc >= 48 && $dc <= 57) || ($dc >= 97 && $dc <= 122) || ($dc >= 65 && $dc <= 90)) {
+                $p = $p + 1;
+            } else {
+                last;
+            }
+        }
+        $$pos_ref = $p;
+        return pp_parse_int_lit(substr($s, $start, $p - $start));
+    }
+    if (($c >= 97 && $c <= 122) || ($c >= 65 && $c <= 90) || $c == 95) {
+        my int $start = $p;
+        while ($p < $len && is_ident_char(substr($s, $p, 1)) == 1) {
+            $p = $p + 1;
+        }
+        my str $ident = substr($s, $start, $p - $start);
+        $$pos_ref = $p;
+        if ($ident eq "defined") {
+            $p = pp_skip_ws($s, $p, $len);
+            my int $has_paren = 0;
+            if ($p < $len && substr($s, $p, 1) eq "(") {
+                $has_paren = 1;
+                $p = pp_skip_ws($s, $p + 1, $len);
+            }
+            my int $ns = $p;
+            while ($p < $len && is_ident_char(substr($s, $p, 1)) == 1) {
+                $p = $p + 1;
+            }
+            my str $mname = substr($s, $ns, $p - $ns);
+            if ($has_paren == 1) {
+                $p = pp_skip_ws($s, $p, $len);
+                if ($p < $len && substr($s, $p, 1) eq ")") {
+                    $p = $p + 1;
+                }
+            }
+            $$pos_ref = $p;
+            if (length($mname) > 0 && exists(%g_defines, $mname)) { return 1; }
+            return 0;
+        }
+        return pp_resolve_macro_val($ident, 0);
+    }
+    $$pos_ref = $p + 1;
+    return 0;
+}
+
+func pp_parse_unary(str $s, scalar $pos_ref, int $len) int {
+    my int $p = pp_skip_ws($s, $$pos_ref, $len);
+    $$pos_ref = $p;
+    if ($p >= $len) { return 0; }
+    my str $ch = substr($s, $p, 1);
+    if ($ch eq "!" && ($p + 1 >= $len || substr($s, $p + 1, 1) ne "=")) {
+        $$pos_ref = $p + 1;
+        return pp_parse_unary($s, $pos_ref, $len) == 0 ? 1 : 0;
+    }
+    if ($ch eq "~") {
+        $$pos_ref = $p + 1;
+        return (0 - 1) - pp_parse_unary($s, $pos_ref, $len);
+    }
+    if ($ch eq "-") {
+        $$pos_ref = $p + 1;
+        return 0 - pp_parse_unary($s, $pos_ref, $len);
+    }
+    if ($ch eq "+") {
+        $$pos_ref = $p + 1;
+        return pp_parse_unary($s, $pos_ref, $len);
+    }
+    return pp_parse_primary($s, $pos_ref, $len);
+}
+
+func pp_parse_mul(str $s, scalar $pos_ref, int $len) int {
+    my int $left = pp_parse_unary($s, $pos_ref, $len);
+    while (1) {
+        my int $p = pp_skip_ws($s, $$pos_ref, $len);
+        $$pos_ref = $p;
+        if ($p >= $len) { last; }
+        my str $ch = substr($s, $p, 1);
+        if ($ch eq "*") {
+            $$pos_ref = $p + 1;
+            $left = $left * pp_parse_unary($s, $pos_ref, $len);
+        } elsif ($ch eq "/") {
+            $$pos_ref = $p + 1;
+            my int $r = pp_parse_unary($s, $pos_ref, $len);
+            if ($r != 0) { $left = $left / $r; } else { $left = 0; }
+        } elsif ($ch eq "%") {
+            $$pos_ref = $p + 1;
+            my int $r = pp_parse_unary($s, $pos_ref, $len);
+            if ($r != 0) { $left = $left % $r; } else { $left = 0; }
+        } else {
+            last;
+        }
+    }
+    return $left;
+}
+
+func pp_parse_add(str $s, scalar $pos_ref, int $len) int {
+    my int $left = pp_parse_mul($s, $pos_ref, $len);
+    while (1) {
+        my int $p = pp_skip_ws($s, $$pos_ref, $len);
+        $$pos_ref = $p;
+        if ($p >= $len) { last; }
+        my str $ch = substr($s, $p, 1);
+        if ($ch eq "+") {
+            $$pos_ref = $p + 1;
+            $left = $left + pp_parse_mul($s, $pos_ref, $len);
+        } elsif ($ch eq "-") {
+            $$pos_ref = $p + 1;
+            $left = $left - pp_parse_mul($s, $pos_ref, $len);
+        } else {
+            last;
+        }
+    }
+    return $left;
+}
+
+func pp_bit_shl(int $a, int $b) int {
+    if ($b <= 0) { return $a; }
+    if ($b >= 64) { return 0; }
+    my int $r = $a;
+    my int $i = 0;
+    while ($i < $b) {
+        $r = $r * 2;
+        $i = $i + 1;
+    }
+    return $r;
+}
+
+func pp_bit_shr(int $a, int $b) int {
+    if ($b <= 0) { return $a; }
+    if ($b >= 63) {
+        if ($a < 0) { return 0 - 1; }
+        return 0;
+    }
+    my int $r = $a;
+    my int $i = 0;
+    while ($i < $b) {
+        if ($r < 0 && ($r % 2) != 0) {
+            $r = ($r / 2) - 1;
+        } else {
+            $r = $r / 2;
+        }
+        $i = $i + 1;
+    }
+    return $r;
+}
+
+func pp_bit_op(int $a, int $b, int $op) int {
+    my int $sa = 0;
+    my int $sb = 0;
+    my int $half63 = 4611686018427387904;
+    if ($a < 0) {
+        $sa = 1;
+        $a = ($a + $half63) + $half63;
+    }
+    if ($b < 0) {
+        $sb = 1;
+        $b = ($b + $half63) + $half63;
+    }
+    my int $res = 0;
+    my int $pow = 1;
+    my int $i = 0;
+    while ($i < 63) {
+        my int $ba = $a % 2;
+        my int $bb = $b % 2;
+        $a = $a / 2;
+        $b = $b / 2;
+        my int $br = 0;
+        if ($op == 0) {
+            if ($ba != 0 && $bb != 0) { $br = 1; }
+        } elsif ($op == 1) {
+            if ($ba != $bb) { $br = 1; }
+        } else {
+            if ($ba != 0 || $bb != 0) { $br = 1; }
+        }
+        if ($br != 0) { $res = $res + $pow; }
+        if ($i < 62) { $pow = $pow * 2; }
+        $i = $i + 1;
+    }
+    my int $sr = 0;
+    if ($op == 0) {
+        if ($sa != 0 && $sb != 0) { $sr = 1; }
+    } elsif ($op == 1) {
+        if ($sa != $sb) { $sr = 1; }
+    } else {
+        if ($sa != 0 || $sb != 0) { $sr = 1; }
+    }
+    if ($sr != 0) {
+        $res = ($res - $half63) - $half63;
+    }
+    return $res;
+}
+
+func pp_parse_shift(str $s, scalar $pos_ref, int $len) int {
+    my int $left = pp_parse_add($s, $pos_ref, $len);
+    while (1) {
+        my int $p = pp_skip_ws($s, $$pos_ref, $len);
+        $$pos_ref = $p;
+        if ($p + 1 >= $len) { last; }
+        my str $op = substr($s, $p, 2);
+        if ($op eq "<<") {
+            $$pos_ref = $p + 2;
+            $left = pp_bit_shl($left, pp_parse_add($s, $pos_ref, $len));
+        } elsif ($op eq ">>") {
+            $$pos_ref = $p + 2;
+            $left = pp_bit_shr($left, pp_parse_add($s, $pos_ref, $len));
+        } else {
+            last;
+        }
+    }
+    return $left;
+}
+
+func pp_parse_rel(str $s, scalar $pos_ref, int $len) int {
+    my int $left = pp_parse_shift($s, $pos_ref, $len);
+    while (1) {
+        my int $p = pp_skip_ws($s, $$pos_ref, $len);
+        $$pos_ref = $p;
+        if ($p >= $len) { last; }
+        if ($p + 1 < $len) {
+            my str $op2 = substr($s, $p, 2);
+            if ($op2 eq "<=") {
+                $$pos_ref = $p + 2;
+                if ($left <= pp_parse_shift($s, $pos_ref, $len)) { $left = 1; } else { $left = 0; }
+                next;
+            }
+            if ($op2 eq ">=") {
+                $$pos_ref = $p + 2;
+                if ($left >= pp_parse_shift($s, $pos_ref, $len)) { $left = 1; } else { $left = 0; }
+                next;
+            }
+            if ($op2 eq "<<" || $op2 eq ">>") { last; }
+        }
+        my str $ch = substr($s, $p, 1);
+        if ($ch eq "<") {
+            $$pos_ref = $p + 1;
+            if ($left < pp_parse_shift($s, $pos_ref, $len)) { $left = 1; } else { $left = 0; }
+            next;
+        }
+        if ($ch eq ">") {
+            $$pos_ref = $p + 1;
+            if ($left > pp_parse_shift($s, $pos_ref, $len)) { $left = 1; } else { $left = 0; }
+            next;
+        }
+        last;
+    }
+    return $left;
+}
+
+func pp_parse_eq(str $s, scalar $pos_ref, int $len) int {
+    my int $left = pp_parse_rel($s, $pos_ref, $len);
+    while (1) {
+        my int $p = pp_skip_ws($s, $$pos_ref, $len);
+        $$pos_ref = $p;
+        if ($p + 1 >= $len) { last; }
+        my str $op = substr($s, $p, 2);
+        if ($op eq "==") {
+            $$pos_ref = $p + 2;
+            if ($left == pp_parse_rel($s, $pos_ref, $len)) { $left = 1; } else { $left = 0; }
+            next;
+        }
+        if ($op eq "!=") {
+            $$pos_ref = $p + 2;
+            if ($left != pp_parse_rel($s, $pos_ref, $len)) { $left = 1; } else { $left = 0; }
+            next;
+        }
+        last;
+    }
+    return $left;
+}
+
+func pp_parse_bitand(str $s, scalar $pos_ref, int $len) int {
+    my int $left = pp_parse_eq($s, $pos_ref, $len);
+    while (1) {
+        my int $p = pp_skip_ws($s, $$pos_ref, $len);
+        $$pos_ref = $p;
+        if ($p >= $len) { last; }
+        if (substr($s, $p, 1) eq "&" && ($p + 1 >= $len || substr($s, $p + 1, 1) ne "&")) {
+            $$pos_ref = $p + 1;
+            $left = pp_bit_op($left, pp_parse_eq($s, $pos_ref, $len), 0);
+            next;
+        }
+        last;
+    }
+    return $left;
+}
+
+func pp_parse_bitxor(str $s, scalar $pos_ref, int $len) int {
+    my int $left = pp_parse_bitand($s, $pos_ref, $len);
+    while (1) {
+        my int $p = pp_skip_ws($s, $$pos_ref, $len);
+        $$pos_ref = $p;
+        if ($p >= $len) { last; }
+        if (substr($s, $p, 1) eq "^") {
+            $$pos_ref = $p + 1;
+            $left = pp_bit_op($left, pp_parse_bitand($s, $pos_ref, $len), 1);
+            next;
+        }
+        last;
+    }
+    return $left;
+}
+
+func pp_parse_bitor(str $s, scalar $pos_ref, int $len) int {
+    my int $left = pp_parse_bitxor($s, $pos_ref, $len);
+    while (1) {
+        my int $p = pp_skip_ws($s, $$pos_ref, $len);
+        $$pos_ref = $p;
+        if ($p >= $len) { last; }
+        if (substr($s, $p, 1) eq "|" && ($p + 1 >= $len || substr($s, $p + 1, 1) ne "|")) {
+            $$pos_ref = $p + 1;
+            $left = pp_bit_op($left, pp_parse_bitxor($s, $pos_ref, $len), 2);
+            next;
+        }
+        last;
+    }
+    return $left;
+}
+
+func pp_parse_and(str $s, scalar $pos_ref, int $len) int {
+    my int $left = pp_parse_bitor($s, $pos_ref, $len);
+    while (1) {
+        my int $p = pp_skip_ws($s, $$pos_ref, $len);
+        $$pos_ref = $p;
+        if ($p + 1 >= $len) { last; }
+        if (substr($s, $p, 2) eq "&&") {
+            $$pos_ref = $p + 2;
+            my int $right = pp_parse_bitor($s, $pos_ref, $len);
+            if ($left != 0 && $right != 0) { $left = 1; } else { $left = 0; }
+            next;
+        }
+        last;
+    }
+    return $left;
+}
+
+func pp_parse_or(str $s, scalar $pos_ref, int $len) int {
+    my int $left = pp_parse_and($s, $pos_ref, $len);
+    while (1) {
+        my int $p = pp_skip_ws($s, $$pos_ref, $len);
+        $$pos_ref = $p;
+        if ($p + 1 >= $len) { last; }
+        if (substr($s, $p, 2) eq "||") {
+            $$pos_ref = $p + 2;
+            my int $right = pp_parse_and($s, $pos_ref, $len);
+            if ($left != 0 || $right != 0) { $left = 1; } else { $left = 0; }
+            next;
+        }
+        last;
+    }
+    return $left;
+}
+
+func pp_eval_expr(str $expr) int {
+    my int $pos = 0;
+    return pp_parse_or($expr, \$pos, length($expr));
+}
 
 func starts_with(str $s, str $prefix) int {
     my int $plen = length($prefix);
@@ -189,6 +667,7 @@ func preprocess(str $filename) str {
     my array @lines = split("\n", $content);
     my str $output = "";
     my array @cond_stack = ();
+    my array @cond_taken = ();
     my int $active = 1;
     my int $in_c_block = 0;       # 0 = outside, 1 = inside {..}, 2 = saw __C__ awaiting {
     my int $c_block_depth = 0;
@@ -337,33 +816,74 @@ func preprocess(str $filename) str {
                 } elsif ($word eq "ifdef") {
                     my str $name = strip_pp_comment($raw_rest);
                     push(@cond_stack, $active);
+                    my int $taken = 0;
                     if ($active) {
-                        $active = exists(%g_defines, $name);
+                        $active = exists(%g_defines, $name) ? 1 : 0;
+                        $taken = $active;
+                    } else {
+                        $taken = 1;
                     }
+                    push(@cond_taken, $taken);
                 } elsif ($word eq "ifndef") {
                     my str $name = strip_pp_comment($raw_rest);
                     push(@cond_stack, $active);
+                    my int $taken = 0;
                     if ($active) {
-                        $active = !exists(%g_defines, $name);
+                        $active = (!exists(%g_defines, $name)) ? 1 : 0;
+                        $taken = $active;
+                    } else {
+                        $taken = 1;
+                    }
+                    push(@cond_taken, $taken);
+                } elsif ($word eq "if") {
+                    my str $expr = strip_pp_comment($raw_rest);
+                    push(@cond_stack, $active);
+                    my int $taken = 0;
+                    if ($active) {
+                        $active = (pp_eval_expr($expr) != 0) ? 1 : 0;
+                        $taken = $active;
+                    } else {
+                        $taken = 1;
+                    }
+                    push(@cond_taken, $taken);
+                } elsif ($word eq "elif") {
+                    my str $expr = strip_pp_comment($raw_rest);
+                    if (size(@cond_stack) == 0) {
+                        die("stradapp: " . $filename . ":" . ($i + 1) . ": #elif without #if/#ifdef/#ifndef");
+                    }
+                    my int $top = size(@cond_stack) - 1;
+                    my int $parent_active = $cond_stack[$top];
+                    if ($parent_active && $cond_taken[$top] == 0) {
+                        $active = (pp_eval_expr($expr) != 0) ? 1 : 0;
+                        if ($active) {
+                            $cond_taken[$top] = 1;
+                        }
+                    } else {
+                        $active = 0;
                     }
                 } elsif ($word eq "else") {
                     my str $extra = strip_pp_comment($raw_rest);
                     if ($extra eq "") {
                         if (size(@cond_stack) == 0) {
-                            die("stradapp: " . $filename . ":" . ($i + 1) . ": #else without #ifdef/#ifndef");
+                            die("stradapp: " . $filename . ":" . ($i + 1) . ": #else without #if/#ifdef/#ifndef");
                         }
-                        my int $parent_active = $cond_stack[size(@cond_stack) - 1];
-                        if ($parent_active) {
-                            $active = !$active;
+                        my int $top = size(@cond_stack) - 1;
+                        my int $parent_active = $cond_stack[$top];
+                        if ($parent_active && $cond_taken[$top] == 0) {
+                            $active = 1;
+                            $cond_taken[$top] = 1;
+                        } else {
+                            $active = 0;
                         }
                     }
                 } elsif ($word eq "endif") {
                     my str $extra = strip_pp_comment($raw_rest);
                     if ($extra eq "") {
                         if (size(@cond_stack) == 0) {
-                            die("stradapp: " . $filename . ":" . ($i + 1) . ": #endif without #ifdef/#ifndef");
+                            die("stradapp: " . $filename . ":" . ($i + 1) . ": #endif without #if/#ifdef/#ifndef");
                         }
                         $active = pop(@cond_stack);
+                        pop(@cond_taken);
                     }
                 } elsif ($word eq "include") {
                     if ($active) {
@@ -387,7 +907,12 @@ func preprocess(str $filename) str {
                         if ($inc_path eq "") {
                             die("stradapp: " . $filename . ":" . ($i + 1) . ": cannot find include file: " . $inc_file);
                         }
+                        if ($g_include_depth >= 64) {
+                            die("stradapp: #include recursion depth exceeded (max 64) at " . $inc_path);
+                        }
+                        $g_include_depth = $g_include_depth + 1;
                         my str $inc_content = preprocess($inc_path);
+                        $g_include_depth = $g_include_depth - 1;
                         $output = $output . $inc_content;
                     }
                 } elsif ($word eq "error" && starts_with($raw_rest, "\"")) {

@@ -69,6 +69,7 @@ our array @LINK_LIBS = ();
 our array @INCLUDE_PATHS = ();
 our array @PP_DEFINES = ();
 our array @POSITIONAL = ();
+our array @RUN_ARGS = ();
 
 # Resolved paths / platform
 our str $HOME_DIR = "";
@@ -388,7 +389,24 @@ func parse_args(array @av) void {
     my int $n = size(@av);
     while ($i < $n) {
         my str $a = $av[$i];
-        if ($a eq "-c") { $KEEP_C = 1; $i = $i + 1; }
+        if ($RUN_AFTER == 1 && size(@POSITIONAL) >= 1) {
+            @RUN_ARGS = (@RUN_ARGS, $a);
+            $i = $i + 1;
+        } elsif ($a eq "--") {
+            $i = $i + 1;
+            if (size(@POSITIONAL) == 0 && $i < $n) {
+                @POSITIONAL = (@POSITIONAL, $av[$i]);
+                $i = $i + 1;
+            }
+            while ($i < $n) {
+                if ($RUN_AFTER == 1) {
+                    @RUN_ARGS = (@RUN_ARGS, $av[$i]);
+                } else {
+                    @POSITIONAL = (@POSITIONAL, $av[$i]);
+                }
+                $i = $i + 1;
+            }
+        } elsif ($a eq "-c") { $KEEP_C = 1; $i = $i + 1; }
         elsif ($a eq "-r" || $a eq "--run") { $RUN_AFTER = 1; $i = $i + 1; }
         elsif ($a eq "-o") { $OUTPUT_FILE = need_arg(@av, $i, $n, $a); $i = $i + 2; }
         elsif ($a eq "-O") { $OPT_LEVEL = need_arg(@av, $i, $n, $a); $i = $i + 2; }
@@ -625,6 +643,7 @@ func runtime_feature_flags() array {
 
 func build_runtime() void {
     info("Building pre-compiled runtime...");
+    my str $tmp_obj = $RUNTIME_OBJ . ".tmp." . core::getpid();
     my array @cmd = ();
     @cmd = (@cmd, @CC);
     @cmd = (@cmd, "-O2");
@@ -643,8 +662,15 @@ func build_runtime() void {
     @cmd = (@cmd, $RUNTIME_SRC);
     @cmd = (@cmd, "-I" . $RUNTIME_DIR);
     @cmd = (@cmd, "-o");
-    @cmd = (@cmd, $RUNTIME_OBJ);
-    if (run_argv(@cmd) != 0) { error("Failed to compile runtime"); }
+    @cmd = (@cmd, $tmp_obj);
+    if (run_argv(@cmd) != 0) {
+        core::unlink($tmp_obj);
+        error("Failed to compile runtime");
+    }
+    if (core::rename($tmp_obj, $RUNTIME_OBJ) != 0) {
+        core::unlink($tmp_obj);
+        error("Failed to install compiled runtime");
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -1132,6 +1158,11 @@ func main() int {
             if ($VERBOSE == 1) { say($CYAN . "$" . $NC . " " . $runpath); }
             say("---");
             my array @rcmd = ($runpath);
+            my int $rai = 0;
+            while ($rai < size(@RUN_ARGS)) {
+                @rcmd = (@rcmd, $RUN_ARGS[$rai]);
+                $rai = $rai + 1;
+            }
             exec_or_run(@rcmd);
         }
     }

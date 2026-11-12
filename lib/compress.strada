@@ -121,7 +121,10 @@ __C__ {
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 #include <zlib.h>
+
+#define COMPRESS_MAX_OUTPUT ((size_t)256U * 1024U * 1024U)
 
 /* Get byte length from StradaValue - binary safe */
 static size_t compress_get_byte_len(StradaValue *sv) {
@@ -173,113 +176,158 @@ static const char* compress_extract_bytes(StradaValue *sv, size_t *out_len, char
     *out_len = s ? strlen(s) : 0;
     return s ? s : "";
 }
+static StradaValue* compress_deflate_common(StradaValue *data, int window_bits) {
+    size_t input_len = 0;
+    char *owned = NULL;
+    const char *input = compress_extract_bytes(data, &input_len, &owned);
+
+    size_t cap = (input_len < COMPRESS_MAX_OUTPUT) ? (compressBound((uLong)(input_len > UINT_MAX ? 65536 : input_len)) + 64) : 65536;
+    if (cap < 1024) cap = 1024;
+    char *output = malloc(cap);
+    if (!output) {
+        free(owned);
+        return strada_new_str("");
+    }
+
+    z_stream strm;
+    memset(&strm, 0, sizeof(strm));
+    if (deflateInit2(&strm, Z_DEFAULT_COMPRESSION, Z_DEFLATED, window_bits, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+        free(output);
+        free(owned);
+        return strada_new_str("");
+    }
+
+    size_t in_pos = 0;
+    size_t out_pos = 0;
+    int ok = 1;
+    for (;;) {
+        if (strm.avail_in == 0 && in_pos < input_len) {
+            size_t rem = input_len - in_pos;
+            uInt chunk = (rem > (size_t)UINT_MAX) ? UINT_MAX : (uInt)rem;
+            strm.next_in = (Bytef*)(input + in_pos);
+            strm.avail_in = chunk;
+            in_pos += chunk;
+        }
+        if (out_pos == cap) {
+            if (cap >= COMPRESS_MAX_OUTPUT) { ok = 0; break; }
+            size_t new_cap = (cap > COMPRESS_MAX_OUTPUT / 2) ? COMPRESS_MAX_OUTPUT : cap * 2;
+            char *tmp = realloc(output, new_cap);
+            if (!tmp) { ok = 0; break; }
+            output = tmp;
+            cap = new_cap;
+        }
+        size_t avail = cap - out_pos;
+        uInt out_chunk = (avail > (size_t)UINT_MAX) ? UINT_MAX : (uInt)avail;
+        strm.next_out = (Bytef*)(output + out_pos);
+        strm.avail_out = out_chunk;
+
+        int flush = (in_pos >= input_len) ? Z_FINISH : Z_NO_FLUSH;
+        int ret = deflate(&strm, flush);
+        out_pos += (size_t)(out_chunk - strm.avail_out);
+        if (ret == Z_STREAM_END) break;
+        if (ret != Z_OK && ret != Z_BUF_ERROR) { ok = 0; break; }
+    }
+
+    deflateEnd(&strm);
+    free(owned);
+    if (!ok) {
+        free(output);
+        return strada_new_str("");
+    }
+    StradaValue *out_sv = strada_new_str_len(output, out_pos);
+    free(output);
+    return out_sv;
 }
 
-# Compress data using gzip format
+static StradaValue* compress_inflate_stream(const char *input, size_t input_len, int window_bits, int *truncated_out) {
+    if (truncated_out) *truncated_out = 0;
+    size_t cap = (input_len <= COMPRESS_MAX_OUTPUT / 4) ? (input_len * 4) : COMPRESS_MAX_OUTPUT;
+    if (cap < 1024) cap = 1024;
+    if (cap > COMPRESS_MAX_OUTPUT) cap = COMPRESS_MAX_OUTPUT;
+    char *output = malloc(cap);
+    if (!output) return NULL;
+
+    z_stream strm;
+    memset(&strm, 0, sizeof(strm));
+    if (inflateInit2(&strm, window_bits) != Z_OK) {
+        free(output);
+        return NULL;
+    }
+
+    size_t in_pos = 0;
+    size_t out_pos = 0;
+    int ok = 1;
+    for (;;) {
+        if (strm.avail_in == 0 && in_pos < input_len) {
+            size_t rem = input_len - in_pos;
+            uInt chunk = (rem > (size_t)UINT_MAX) ? UINT_MAX : (uInt)rem;
+            strm.next_in = (Bytef*)(input + in_pos);
+            strm.avail_in = chunk;
+            in_pos += chunk;
+        }
+        if (out_pos == cap) {
+            if (cap >= COMPRESS_MAX_OUTPUT) { ok = 0; break; }
+            size_t new_cap = (cap > COMPRESS_MAX_OUTPUT / 2) ? COMPRESS_MAX_OUTPUT : cap * 2;
+            char *tmp = realloc(output, new_cap);
+            if (!tmp) {
+                if (truncated_out) *truncated_out = 1;
+                ok = 0;
+                break;
+            }
+            output = tmp;
+            cap = new_cap;
+        }
+        size_t avail = cap - out_pos;
+        uInt out_chunk = (avail > (size_t)UINT_MAX) ? UINT_MAX : (uInt)avail;
+        strm.next_out = (Bytef*)(output + out_pos);
+        strm.avail_out = out_chunk;
+
+        int ret = inflate(&strm, Z_NO_FLUSH);
+        out_pos += (size_t)(out_chunk - strm.avail_out);
+        if (ret == Z_STREAM_END) break;
+        if (ret == Z_BUF_ERROR && strm.avail_in == 0 && in_pos >= input_len && strm.avail_out > 0) {
+            if (truncated_out) *truncated_out = 1;
+            ok = 0;
+            break;
+        }
+        if (ret != Z_OK && ret != Z_BUF_ERROR) {
+            ok = 0;
+            break;
+        }
+    }
+
+    inflateEnd(&strm);
+    if (!ok) {
+        free(output);
+        return NULL;
+    }
+    StradaValue *out_sv = strada_new_str_len(output, out_pos);
+    free(output);
+    return out_sv;
+}
+}
+
+# Compress data using gzip format (returns "" on error)
 func gzip(str $data) str {
     my str $result = "";
     __C__ {
-        size_t input_len = 0;
-        char *owned = NULL;
-        const char *input = compress_extract_bytes(data, &input_len, &owned);
-
-        /* Allocate output buffer (worst case: input + gzip overhead) */
-        size_t output_size = compressBound(input_len) + 32;
-        char *output = malloc(output_size);
-        if (!output) {
-            strada_decref(result);
-            result = data;  /* Return uncompressed if allocation failed */
-            strada_incref(result);
-        } else {
-            /* Initialize zlib stream for gzip (windowBits = 15 + 16 for gzip) */
-            z_stream strm;
-            memset(&strm, 0, sizeof(strm));
-
-            int ret = deflateInit2(&strm, Z_DEFAULT_COMPRESSION, Z_DEFLATED,
-                                   15 + 16, 8, Z_DEFAULT_STRATEGY);
-            if (ret != Z_OK) {
-                free(output);
-                strada_decref(result);
-                result = data;
-                strada_incref(result);
-            } else {
-                strm.next_in = (Bytef*)input;
-                strm.avail_in = input_len;
-                strm.next_out = (Bytef*)output;
-                strm.avail_out = output_size;
-
-                ret = deflate(&strm, Z_FINISH);
-                deflateEnd(&strm);
-
-                if (ret != Z_STREAM_END) {
-                    free(output);
-                    strada_decref(result);
-                    result = data;
-                    strada_incref(result);
-                } else {
-                    strada_decref(result);
-                    result = strada_new_str_len(output, strm.total_out);
-                    free(output);
-                }
-            }
-        }
-        free(owned);
+        strada_decref(result);
+        result = compress_deflate_common(data, 15 + 16);
     }
     return $result;
 }
 
-# Compress data using deflate format (no gzip header)
+# Compress data using deflate format (no gzip header; returns "" on error)
 func deflate(str $data) str {
     my str $result = "";
     __C__ {
-        size_t input_len = 0;
-        char *owned = NULL;
-        const char *input = compress_extract_bytes(data, &input_len, &owned);
-
-        size_t output_size = compressBound(input_len) + 32;
-        char *output = malloc(output_size);
-        if (!output) {
-            strada_decref(result);
-            result = data;
-            strada_incref(result);
-        } else {
-            z_stream strm;
-            memset(&strm, 0, sizeof(strm));
-
-            int ret = deflateInit2(&strm, Z_DEFAULT_COMPRESSION, Z_DEFLATED,
-                                   -15, 8, Z_DEFAULT_STRATEGY);
-            if (ret != Z_OK) {
-                free(output);
-                strada_decref(result);
-                result = data;
-                strada_incref(result);
-            } else {
-                strm.next_in = (Bytef*)input;
-                strm.avail_in = input_len;
-                strm.next_out = (Bytef*)output;
-                strm.avail_out = output_size;
-
-                ret = deflate(&strm, Z_FINISH);
-                deflateEnd(&strm);
-
-                if (ret != Z_STREAM_END) {
-                    free(output);
-                    strada_decref(result);
-                    result = data;
-                    strada_incref(result);
-                } else {
-                    strada_decref(result);
-                    result = strada_new_str_len(output, strm.total_out);
-                    free(output);
-                }
-            }
-        }
-        free(owned);
+        strada_decref(result);
+        result = compress_deflate_common(data, -15);
     }
     return $result;
 }
 
-# Decompress gzip data
+# Decompress gzip data (returns "" on invalid/truncated data)
 func gunzip(str $data) str {
     my str $result = "";
     __C__ {
@@ -287,61 +335,10 @@ func gunzip(str $data) str {
         char *owned = NULL;
         const char *input = compress_extract_bytes(data, &input_len, &owned);
         if (input_len > 0) {
-            /* Start with 4x input size, grow if needed */
-            size_t output_size = input_len * 4;
-            if (output_size < 1024) output_size = 1024;
-            char *output = malloc(output_size);
-            if (output) {
-                z_stream strm;
-                memset(&strm, 0, sizeof(strm));
-
-                int ret = inflateInit2(&strm, 15 + 16);
-                if (ret != Z_OK) {
-                    free(output);
-                } else {
-                    strm.next_in = (Bytef*)input;
-                    strm.avail_in = input_len;
-                    strm.next_out = (Bytef*)output;
-                    strm.avail_out = output_size;
-
-                    int success = 1;
-                    while (1) {
-                        ret = inflate(&strm, Z_NO_FLUSH);
-                        if (ret == Z_STREAM_END) {
-                            break;
-                        }
-                        if (ret == Z_BUF_ERROR && strm.avail_in == 0 && strm.avail_out > 0) {
-                            success = 0;
-                            break;
-                        }
-                        if (ret != Z_OK && ret != Z_BUF_ERROR) {
-                            success = 0;
-                            break;
-                        }
-                        if (strm.avail_out == 0) {
-                            size_t new_size = output_size * 2;
-                            char *new_output = realloc(output, new_size);
-                            if (!new_output) {
-                                success = 0;
-                                break;
-                            }
-                            output = new_output;
-                            strm.next_out = (Bytef*)(output + output_size);
-                            strm.avail_out = new_size - output_size;
-                            output_size = new_size;
-                        }
-                    }
-
-                    inflateEnd(&strm);
-
-                    if (!success) {
-                        free(output);
-                    } else {
-                        strada_decref(result);
-                        result = strada_new_str_len(output, strm.total_out);
-                        free(output);
-                    }
-                }
+            StradaValue *out = compress_inflate_stream(input, input_len, 15 + 16, NULL);
+            if (out) {
+                strada_decref(result);
+                result = out;
             }
         }
         free(owned);
@@ -349,7 +346,7 @@ func gunzip(str $data) str {
     return $result;
 }
 
-# Decompress deflate data (raw deflate or zlib-wrapped)
+# Decompress deflate data (raw deflate or zlib-wrapped; returns "" on error)
 func inflate(str $data) str {
     my str $result = "";
     __C__ {
@@ -359,64 +356,13 @@ func inflate(str $data) str {
         if (input_len > 0) {
             int wbits_list[2] = { -15, 15 };
             for (int wi = 0; wi < 2; wi++) {
-                size_t output_size = input_len * 4;
-                if (output_size < 1024) output_size = 1024;
-                char *output = malloc(output_size);
-                if (!output) break;
-
-                z_stream strm;
-                memset(&strm, 0, sizeof(strm));
-                int ret = inflateInit2(&strm, wbits_list[wi]);
-                if (ret != Z_OK) {
-                    free(output);
-                    break;
-                }
-
-                strm.next_in = (Bytef*)input;
-                strm.avail_in = input_len;
-                strm.next_out = (Bytef*)output;
-                strm.avail_out = output_size;
-
-                int success = 1;
                 int truncated = 0;
-                while (1) {
-                    ret = inflate(&strm, Z_NO_FLUSH);
-                    if (ret == Z_STREAM_END) {
-                        break;
-                    }
-                    if (ret == Z_BUF_ERROR && strm.avail_in == 0 && strm.avail_out > 0) {
-                        success = 0;
-                        truncated = 1;
-                        break;
-                    }
-                    if (ret != Z_OK && ret != Z_BUF_ERROR) {
-                        success = 0;
-                        break;
-                    }
-                    if (strm.avail_out == 0) {
-                        size_t new_size = output_size * 2;
-                        char *new_output = realloc(output, new_size);
-                        if (!new_output) {
-                            success = 0;
-                            truncated = 1;
-                            break;
-                        }
-                        output = new_output;
-                        strm.next_out = (Bytef*)(output + output_size);
-                        strm.avail_out = new_size - output_size;
-                        output_size = new_size;
-                    }
-                }
-
-                inflateEnd(&strm);
-
-                if (success) {
+                StradaValue *out = compress_inflate_stream(input, input_len, wbits_list[wi], &truncated);
+                if (out) {
                     strada_decref(result);
-                    result = strada_new_str_len(output, strm.total_out);
-                    free(output);
+                    result = out;
                     break;
                 }
-                free(output);
                 if (truncated) break;
             }
         }

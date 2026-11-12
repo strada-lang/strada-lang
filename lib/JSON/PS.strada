@@ -127,6 +127,43 @@ L<YAML>
 package JSON::PS;
 version "1.0.0";
 
+our str $g_last_error = "";
+
+# Return a JSON boolean true value (distinct from integer 1 via is_bool()).
+func true() scalar {
+    my scalar $v = undef;
+    __C__ {
+        strada_decref(v);
+        v = strada_new_bool(1);
+    }
+    return $v;
+}
+
+# Return a JSON boolean false value (distinct from integer 0 via is_bool()).
+func false() scalar {
+    my scalar $v = undef;
+    __C__ {
+        strada_decref(v);
+        v = strada_new_bool(0);
+    }
+    return $v;
+}
+
+# Return 1 if $value is a JSON boolean returned by true(), false(), or decode().
+func is_bool(scalar $value) int {
+    my int $b = 0;
+    __C__ {
+        strada_decref(b);
+        b = strada_new_int(strada_is_bool(value) ? 1 : 0);
+    }
+    return $b;
+}
+
+# Return last parse error description from decode() / decode_strict(), or "".
+func last_error() str {
+    return $g_last_error;
+}
+
 # ============================================================
 # JSON Encoding
 # ============================================================
@@ -263,13 +300,17 @@ func looks_like_num(str $s) int {
 # Encode any value to JSON
 func do_encode(scalar $value, int $canonical, int $depth) str {
     # Prevent infinite recursion
-    if ($depth > 100) {
+    if ($depth > 512) {
         return "null";
     }
 
     # Handle undef -> null
     if (!defined($value)) {
         return "null";
+    }
+
+    if (JSON::PS::is_bool($value)) {
+        return $value ? "true" : "false";
     }
 
     # Check what type of reference it is
@@ -319,17 +360,22 @@ func do_encode(scalar $value, int $canonical, int $depth) str {
         return JSON::PS::do_encode(deref($value), $canonical, $depth + 1);
     }
 
-    # Non-reference: could be int, num, or str
-    # Convert to string and check if it looks like a number
-    my str $str_val = "" . $value;
-
-    # Check if it looks like a number
-    if (JSON::PS::looks_like_num($str_val)) {
-        return $str_val;
+    # Non-reference: preserve dynamic type (int/num vs str) per RFC 8259
+    my str $vt = typeof($value);
+    if ($vt eq "int") {
+        return "" . $value;
+    }
+    if ($vt eq "num") {
+        my str $num_str = "" . $value;
+        if ($num_str eq "NaN" || $num_str eq "Inf" || $num_str eq "-Inf" ||
+            $num_str eq "nan" || $num_str eq "inf" || $num_str eq "-inf") {
+            return "null";
+        }
+        return $num_str;
     }
 
-    # It's a string - escape and quote
-    return "\"" . JSON::PS::escape_str($str_val) . "\"";
+    # String or fallback: always encode as JSON string
+    return "\"" . JSON::PS::escape_str("" . $value) . "\"";
 }
 
 # Public encode function - simple version
@@ -405,12 +451,26 @@ func parse_str(scalar $p) str {
         my str $ch = JSON::PS::advance($p);
 
         if ($ch eq "\"") {
+            my int $blen = core::byte_length($result);
+            my int $bi = 0;
+            my int $has_hi = 0;
+            while ($bi < $blen) {
+                if (core::get_byte($result, $bi) >= 128) {
+                    $has_hi = 1;
+                    last;
+                }
+                $bi = $bi + 1;
+            }
+            if ($has_hi && utf8::valid($result)) {
+                utf8::decode($result);
+            }
             return $result;
         }
 
         if ($ch eq "\\") {
             if ($p->{"pos"} >= $p->{"len"}) {
                 $p->{"err"} = 1;
+                $p->{"err_msg"} = "Unterminated escape in JSON string at char " . $p->{"pos"};
                 return "";
             }
             my str $escaped = JSON::PS::advance($p);
@@ -435,24 +495,31 @@ func parse_str(scalar $p) str {
                 my int $cp = JSON::PS::parse_hex4($p);
                 if ($cp < 0) {
                     $p->{"err"} = 1;
+                    $p->{"err_msg"} = "Invalid Unicode escape at char " . $p->{"pos"};
                     return "";
                 }
                 if ($cp >= 55296 && $cp <= 56319) {
                     # high surrogate: expect \uDC00-\uDFFF
                     if ($p->{"pos"} + 1 < $p->{"len"} && substr($p->{"json"}, $p->{"pos"}, 2) eq "\\u") {
+                        my int $saved_pos = $p->{"pos"};
                         $p->{"pos"} = $p->{"pos"} + 2;
                         my int $lo = JSON::PS::parse_hex4($p);
                         if ($lo < 0) {
                             $p->{"err"} = 1;
+                            $p->{"err_msg"} = "Invalid Unicode escape at char " . $p->{"pos"};
                             return "";
                         }
                         if ($lo >= 56320 && $lo <= 57343) {
                             $cp = 65536 + (($cp - 55296) * 1024) + ($lo - 56320);
                         } else {
-                            $result = $result . chr($cp);
-                            $cp = $lo;
+                            $p->{"pos"} = $saved_pos;
+                            $cp = 65533;
                         }
+                    } else {
+                        $cp = 65533;
                     }
+                } elsif ($cp >= 56320 && $cp <= 57343) {
+                    $cp = 65533;
                 }
                 if ($cp == 0) {
                     $result = $result . core::byte(0);
@@ -468,6 +535,7 @@ func parse_str(scalar $p) str {
     }
 
     $p->{"err"} = 1;
+    $p->{"err_msg"} = "Unterminated JSON string at char " . $p->{"pos"};
     return "";
 }
 
@@ -583,8 +651,9 @@ func match_kw(scalar $p, str $keyword) int {
 
 # Parse any JSON value (recursive)
 func do_parse(scalar $p, int $depth) scalar {
-    if ($depth > 100) {
+    if ($depth > 512) {
         $p->{"err"} = 1;
+        $p->{"err_msg"} = "Maximum nesting depth (512) exceeded at char " . $p->{"pos"};
         return undef;
     }
 
@@ -592,6 +661,7 @@ func do_parse(scalar $p, int $depth) scalar {
 
     if ($p->{"pos"} >= $p->{"len"}) {
         $p->{"err"} = 1;
+        $p->{"err_msg"} = "Unexpected end of JSON input at char " . $p->{"pos"};
         return undef;
     }
 
@@ -715,11 +785,11 @@ func do_parse(scalar $p, int $depth) scalar {
 
     # Keywords
     if (JSON::PS::match_kw($p, "true")) {
-        return 1;
+        return JSON::PS::true();
     }
 
     if (JSON::PS::match_kw($p, "false")) {
-        return 0;
+        return JSON::PS::false();
     }
 
     if (JSON::PS::match_kw($p, "null")) {
@@ -727,19 +797,36 @@ func do_parse(scalar $p, int $depth) scalar {
     }
 
     $p->{"err"} = 1;
+    $p->{"err_msg"} = "Invalid JSON value at char " . $p->{"pos"};
     return undef;
 }
 
 # Public decode function
 func decode(str $json) scalar {
+    $g_last_error = "";
     my scalar $p = JSON::PS::make_parser($json);
     my scalar $res = JSON::PS::do_parse($p, 0);
     if ($p->{"err"}) {
+        if (defined($p->{"err_msg"}) && $p->{"err_msg"} ne "") {
+            $g_last_error = $p->{"err_msg"};
+        } else {
+            $g_last_error = "Invalid JSON value at char " . $p->{"pos"};
+        }
         return undef;
     }
     JSON::PS::skip_ws($p);
     if ($p->{"pos"} != $p->{"len"}) {
+        $g_last_error = "Trailing characters after JSON value at char " . $p->{"pos"};
         return undef;
+    }
+    return $res;
+}
+
+# Decode a JSON string strictly, throwing on parse errors (while returning undef for "null")
+func decode_strict(str $json) scalar {
+    my scalar $res = JSON::PS::decode($json);
+    if ($g_last_error ne "") {
+        die("JSON decode error: " . $g_last_error);
     }
     return $res;
 }

@@ -31,7 +31,6 @@ Welcome to the Strada programming language documentation. Strada is a strongly-t
 | [Understanding the Compiler](UNDERSTANDING_THE_COMPILER.md) | Beginner-friendly, step-by-step tour of the compiler |
 | [Interpreter](INTERPRETER.md) | `strada-interp`: bytecode VM and tree-walking backends |
 | [Event Loop](EVENT_LOOP.md) | `Async::Loop` event loop and green tasks (experimental) |
-| [Packages](PACKAGES.md) | Pacco, the Strada package manager |
 | [Template Toolkit](TEMPLATE_TOOLKIT.md) | `lib/Template`: port of Perl's Template::Toolkit |
 | [Perl Integration](PERL_INTEGRATION.md) | Perl interop, Perla compiler, and conversion tools |
 
@@ -89,7 +88,7 @@ Compile and run:
 - Magic variables: `tie`/`untie`/`tied` for custom variable implementations
 
 ### Modern Features
-- **Closures** with captured variables (scalars are captured by value)
+- **Closures** with shared lexical variable captures
 - **Multithreading** with mutexes and condition variables
 - **Exception handling** with try/catch/throw
 - **OOP** with multiple inheritance, SUPER::, DESTROY

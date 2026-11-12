@@ -594,7 +594,7 @@ func run_file(scalar $interp, str $filename, scalar $argv) int {
 }
 
 # Execute a file using the bytecode VM backend
-func run_file_vm(str $filename) int {
+func run_file_vm(str $filename, scalar $argv) int {
     my str $source = slurp($filename);
 
     my str $source_dir = get_dirname($filename);
@@ -671,6 +671,23 @@ func run_file_vm(str $filename) int {
             }
             if (entry) {
                 VM *vvm = vm_new(vprog);
+                {
+                    char *fn_c = strada_to_str(filename);
+                    vvm->script_name = fn_c;
+                    VMArray *vargv = vm_array_new(8);
+                    if (argv && !STRADA_IS_TAGGED_INT(argv)) {
+                        StradaArray *av = strada_deref_array(argv);
+                        if (av) {
+                            for (size_t ai = 0; ai < av->size; ai++) {
+                                StradaValue *item = strada_array_get(av, (int64_t)ai);
+                                char *s = strada_to_str(item);
+                                vm_array_push(vargv, VM_MAKE_STR(s ? s : ""));
+                                free(s);
+                            }
+                        }
+                    }
+                    vvm->argv = vargv;
+                }
                 VMValue vresult = vm_execute(vvm, entry);
                 /* Run END blocks (LIFO order, mirroring the compiled backend) */
                 for (int ei = vprog->end_count - 1; ei >= 0; ei--) {
@@ -779,8 +796,9 @@ func main() int {
         } else {
             if (length($script) == 0) {
                 $script = $arg;
+            } else {
+                push(@script_args, $arg);
             }
-            push(@script_args, $arg);
             $parsing_opts = 0;
         }
 
@@ -804,7 +822,7 @@ func main() int {
     my int $exit_code = 0;
     if ($use_vm == 1) {
         try {
-            $exit_code = run_file_vm($script);
+            $exit_code = run_file_vm($script, \@script_args);
         } catch ($e) {
             say("VM error: " . $e);
             $exit_code = 1;

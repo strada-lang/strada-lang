@@ -1771,16 +1771,16 @@ $closure->(ARGS);
 
 ### 17.3 Capturing
 
-Scalar variables from the enclosing scope are captured **by value**: the closure takes a snapshot when it is created and keeps its own private, persistent copy (so a counter closure works, but later changes to the outer variable are not seen, and assignments inside the closure do not affect the outer variable):
+Scalar variables, arrays, and hashes from the enclosing scope share their lexical binding with closures (and across sibling closures): reassignments inside a closure update the outer variable, and changes outside are seen by the closure:
 
 ```strada
 my int $x = 10;
 my scalar $f = func () { return $x; };
 $x = 20;
-say($f->());  # 10
+say($f->());  # 20
 ```
 
-Arrays and hashes (and anything reached through a reference) are shared: `push(@a, 1)` or `$h->{"n"} = 1` inside a closure is visible outside. To share mutable scalar state, keep it in a hash/array reference or an `our` variable.
+Arrays, hashes, and `our` globals are likewise shared across scopes and closures.
 
 ---
 

@@ -319,13 +319,11 @@ StradaValue* __anon_func_0(StradaValue ***__captures, StradaValue *n) {
 
 ### Capture Semantics
 
-`strada_closure_new()` snapshots each captured variable: it allocates a private cell per capture, copies the variable's current `StradaValue*` into it and increments its refcount. The closure keeps those cells for its whole lifetime (so it stays valid after the enclosing function returns, and across threads).
+When an outer scalar variable is captured (or referenced via `\$var`), the compiler boxes it in a shared `PerlaCell` (`strada_cell_alloc()` / `strada_closure_new_shared()`). Both the enclosing scope and any closures capturing it read and write through the same refcounted cell, keeping it alive across function returns and across threads.
 
-- `StradaValue ***captures` - pointer to array of cells (double pointers)
-- `(*__captures[i])` - dereference to access the captured StradaValue*
-- Assignments like `(*__captures[i]) = value` update the closure's own cell, **not** the enclosing function's variable
-
-So scalar variables are effectively captured **by value**: an assignment inside the closure persists between calls of that closure but is not seen in the enclosing scope, and later assignments to the outer variable are not seen by the closure. Arrays and hashes are shared, because the cell holds a pointer to the same container: `push(@a, ...)` or `$h{"k"} = ...` inside a closure is visible outside.
+- `StradaValue ***captures` - pointer to array of shared cells (`StradaValue **`)
+- `(*__captures[i])` - dereference to access the captured `StradaValue*`
+- Assignments like `(*__captures[i]) = value` update the shared lexical cell, so mutations inside a closure are visible in the enclosing scope and sibling closures (and outer reassignments are seen by the closure). Arrays and hashes are also shared, since their cell holds a pointer to the same container.
 
 ## Thread Operations
 

@@ -3853,9 +3853,9 @@ func gen_builtin_g4(scalar $cg, scalar $expr, str $name) int {
             if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $int_arg) == 1) {
                 emit($cg, "({ StradaValue *__int_tmp = ");
                 gen_expression($cg, $int_arg);
-                emit($cg, "; StradaValue *__int_res = STRADA_MAKE_TAGGED_INT(strada_to_int(__int_tmp)); strada_decref(__int_tmp); __int_res; })");
+                emit($cg, "; StradaValue *__int_res = strada_new_int_il(strada_to_int(__int_tmp)); strada_decref(__int_tmp); __int_res; })");
             } else {
-                emit($cg, "STRADA_MAKE_TAGGED_INT(strada_to_int(");
+                emit($cg, "strada_new_int_il(strada_to_int(");
                 gen_expression($cg, $int_arg);
                 emit($cg, "))");
             }
@@ -4229,6 +4229,35 @@ func gen_builtin_g4(scalar $cg, scalar $expr, str $name) int {
                 }
                 emit($cg, "__idx_res; }))");
             }
+            return 1;
+        }
+
+        if ($name eq "byte_index" || $name eq "sys::byte_index") {
+            my scalar $args = $expr->{"args"};
+            my int $arg_count = $expr->{"arg_count"};
+            my scalar $arg0 = $args->[0];
+            my scalar $arg1 = $args->[1];
+            my int $arg0_needs_cleanup = needs_temp_cleanup($cg, $arg0);
+            my int $arg1_needs_cleanup = needs_temp_cleanup($cg, $arg1);
+
+            emit($cg, "(({ StradaValue *__bidx_str = ");
+            gen_expression($cg, $arg0);
+            emit($cg, "; StradaValue *__bidx_sub = ");
+            gen_expression($cg, $arg1);
+            emit($cg, "; StradaValue *__bidx_res = strada_new_int(strada_byte_index(__bidx_str, __bidx_sub, ");
+            if ($arg_count >= 3) {
+                emit_int_operand($cg, $args->[2]);
+            } else {
+                emit($cg, "0");
+            }
+            emit($cg, ")); ");
+            if ($arg0_needs_cleanup == 1) {
+                emit($cg, "strada_decref(__bidx_str); ");
+            }
+            if ($arg1_needs_cleanup == 1) {
+                emit($cg, "strada_decref(__bidx_sub); ");
+            }
+            emit($cg, "__bidx_res; }))");
             return 1;
         }
 
@@ -8726,6 +8755,10 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
             if ($is_known == 0 && length($c_name) > 0) {
                 $cg->{"auto_externs"}->{$c_name} = 1;
             }
+        }
+
+        if (defined($func_info) && length("" . $func_info->{"c_name"}) > 0) {
+            $c_name = "" . $func_info->{"c_name"};
         }
 
         # Handle extern function calls - convert between StradaValue* and raw C types

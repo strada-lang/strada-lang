@@ -227,6 +227,7 @@ my str $g_runtime_path = "";
 my str $g_compiler = "";
 my int $g_eval_count = 0;
 my str $g_tmpdir = "/tmp";
+my int $g_tmpdir_owned = 0;
 my int $g_initialized = 0;
 my str $g_current_package = "";
 my hash %g_state = ();  # Legacy - only used for Strada::JIT::state() compatibility
@@ -1143,8 +1144,22 @@ private func generate_source(str $input) str {
     return $src;
 }
 
+# Create a private 0700 temp directory if we don't have one yet
+private func ensure_private_tmpdir() void {
+    if ($g_tmpdir_owned == 1 && length($g_tmpdir) > 0 && core::is_dir($g_tmpdir) == 1) {
+        return;
+    }
+    my str $d = core::mkdtemp("/tmp/strada_jit_XXXXXX");
+    if (length($d) == 0) {
+        throw "Strada::JIT: Could not create private temp directory";
+    }
+    $g_tmpdir = $d;
+    $g_tmpdir_owned = 1;
+}
+
 # Compile and execute a single eval, returns result
 private func eval_one(str $input) scalar {
+    ensure_private_tmpdir();
     $g_eval_count = $g_eval_count + 1;
 
     my str $base = $g_tmpdir . "/strada_repl_lib_" . $g_eval_count;
@@ -1358,6 +1373,7 @@ func init(str ...@args) void {
         }
     }
 
+    ensure_private_tmpdir();
     $g_initialized = 1;
 }
 
@@ -1546,6 +1562,11 @@ func reset() void {
             core::unlink($files_to_delete[$fi]);
         }
         $fi = $fi + 1;
+    }
+    if ($g_tmpdir_owned == 1 && length($g_tmpdir) > 0 && $g_tmpdir ne "/tmp") {
+        core::rmdir($g_tmpdir);
+        $g_tmpdir = "/tmp";
+        $g_tmpdir_owned = 0;
     }
 }
 

@@ -710,10 +710,10 @@ func main() int {
 
     say("5 * 10 = " . $scale->(5));
 
-    # Captured by value when the closure is created - later changes
-    # to the outer variable don't affect the closure
+    # Captured variables share their lexical binding - later changes
+    # to the outer variable are visible to the closure
     $multiplier = 100;
-    say("still 5 * 10 = " . $scale->(5));
+    say("now 5 * 100 = " . $scale->(5));
 
     return 0;
 }

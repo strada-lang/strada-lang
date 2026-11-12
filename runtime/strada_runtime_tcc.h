@@ -72,6 +72,8 @@ typedef enum {
 /* Perl-style (floored) integer modulo — result takes the sign of the right
  * operand (-7 mod 3 == 2). Caller ensures b != 0. Mirrors strada_runtime.h. */
 static inline int64_t strada_floored_mod(int64_t a, int64_t b) {
+    if (b == 0) return 0;
+    if (a == INT64_MIN && b == -1) return 0;
     int64_t r = a % b;
     if (r != 0 && ((r < 0) != (b < 0))) r += b;
     return r;
@@ -87,7 +89,9 @@ static inline int64_t strada_floored_mod(int64_t a, int64_t b) {
 #define STRADA_STR_IS_UTF8(sv) (((sv)->struct_size & STRADA_UTF8_FLAG) != 0)
 #define STRADA_STR_IS_CHARS(sv) (((sv)->struct_size & STRADA_STR_FLAGS_MASK) != 0)
 #define STRADA_UV_FLAG ((size_t)1 << 61)
+#define STRADA_BOOL_FLAG ((size_t)1 << 60)
 #define STRADA_INT_IS_UV(sv) (!STRADA_IS_TAGGED_INT(sv) && (sv) && (sv)->type == STRADA_INT && (((sv)->struct_size & STRADA_UV_FLAG) != 0))
+#define STRADA_INT_IS_BOOL(sv) (!STRADA_IS_TAGGED_INT(sv) && (sv) && (sv)->type == STRADA_INT && (((sv)->struct_size & STRADA_BOOL_FLAG) != 0))
 
 #if STRADA_POINTER_SIZE == 4
 #define STRADA_TAGGED_INT_BITS 30
@@ -315,10 +319,13 @@ StradaValue* strada_call_named_guarded(StradaValue *name_sv, StradaValue *arg_sv
 
 /* Slot references — reference to a C local variable's storage (StradaValue**) */
 #define STRADA_SLOT_REF_MARKER ((size_t)0xDEAD5107ULL)
+#define STRADA_CELL_REF_MARKER ((size_t)0xDEADCE11ULL)
 StradaValue* strada_slot_ref_create(StradaValue **slot);
+StradaValue* strada_cell_ref_create(StradaValue **cell_slot);
 static inline int strada_is_slot_ref(StradaValue *sv) {
     return sv && !STRADA_IS_TAGGED_INT(sv) && sv->type == STRADA_REF &&
-           sv->struct_size == STRADA_SLOT_REF_MARKER;
+           (sv->struct_size == STRADA_SLOT_REF_MARKER ||
+            sv->struct_size == STRADA_CELL_REF_MARKER);
 }
 
 /* ============================================================
@@ -715,6 +722,8 @@ StradaValue* strada_overload_stringify(StradaValue *val);
  * Closures
  * ============================================================ */
 StradaValue* strada_closure_new(void *func, int arg_count, int capture_count, StradaValue ***captures);
+StradaValue* strada_closure_new_shared(void *func, int params, int captures, StradaValue ***cap_array, unsigned char *is_static);
+StradaValue* strada_funcref_new(void *func, int params, int is_variadic, int is_void, int fixed_params);
 StradaValue*** strada_closure_get_captures(StradaValue *closure);
 StradaValue* strada_closure_call(StradaValue *closure, int argc, ...);
 StradaValue* strada_closure_call_method(StradaValue *closure, StradaValue *self, StradaValue *args);
@@ -755,6 +764,7 @@ int strada_in_try_block(void);
  * thread-local internal storage; a tcc program calls into the gcc runtime. */
 void strada_cleanup_push(StradaValue *sv);
 void strada_cleanup_push_slot(StradaValue **slot);
+void strada_cleanup_push_cell(StradaValue **cell_slot);
 void strada_cleanup_pop(void);
 void strada_cleanup_pop_decref(StradaValue *sv);
 void strada_cleanup_pop_decref_n(int n);
@@ -820,7 +830,8 @@ StradaValue* strada_clone(StradaValue *sv);
 /* ============================================================
  * Dynamic Return Type (wantarray)
  * ============================================================ */
-extern int strada_call_context;
+int *strada_call_context_ptr(void);
+#define strada_call_context (*strada_call_context_ptr())
 void strada_set_call_context(int ctx);
 int strada_wantarray(void);
 int strada_wantscalar(void);
@@ -1806,6 +1817,10 @@ const char *strada_closure_get_prototype(StradaValue *closure);
 StradaValue **strada_cell_alloc(void);
 void strada_cell_incref(StradaValue **slot);
 int strada_cell_decref(StradaValue **slot);
+void strada_cell_release(StradaValue **slot);
+int64_t strada_byte_index(StradaValue *haystack_sv, StradaValue *needle_sv, int64_t offset);
+StradaValue* strada_new_bool(int b);
+int strada_is_bool(StradaValue *sv);
 int strada_sv_is_uint(StradaValue *sv);  /* non-negative integer in (INT64_MAX, UINT64_MAX] (UV-flagged int or UV-range string) */
 void strada_regex_set_subject_len(size_t n);
 void strada_regex_clear_subject_len(void);

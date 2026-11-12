@@ -1,6 +1,6 @@
 # Makefile for Strada Bootstrap Compiler
 
-CC = gcc
+CC ?= gcc
 CFLAGS = -Wall -Wextra -Wno-unused-variable -Wno-return-type -Wno-unused-but-set-variable -Wno-unused-result -Wno-comment -O2 -std=c99 -I../runtime
 LDFLAGS = 
 

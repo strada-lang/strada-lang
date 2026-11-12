@@ -212,6 +212,7 @@ typedef enum {
     OP_CALL_SPREAD,     /* u16 func_index — pop args_array, unpack and call function */
     OP_METHOD_CALL_SPREAD,  /* u16 method_str_idx — pop args_array, unpack and dispatch method */
     OP_CALL_CLOSURE_SPREAD, /* pop closure, pop args_array, unpack and call closure */
+    OP_PUSH_FLOAT,      /* push immediate IEEE-754 double (8 bytes) */
 
     OP_OPCODE_COUNT     /* must be last */
 } StradaOpcode;
@@ -513,6 +514,7 @@ enum {
     BUILTIN_INHERIT,
     BUILTIN_CAPTURES,
     BUILTIN_NAMED_CAPTURES,
+    BUILTIN_BYTE_INDEX,
 };
 
 /* Heap object type tag */
@@ -525,6 +527,7 @@ enum VMObjType {
     VM_OBJ_FILEHANDLE = 10,
     VM_OBJ_CELL = 12,     /* shared mutable cell for closure capture-by-reference */
     VM_OBJ_NATIVE_SV = 14, /* opaque StradaValue* from native library (passed through as-is) */
+    VM_OBJ_FLOAT = 16,    /* boxed IEEE-754 double */
 };
 typedef struct { enum VMObjType obj_type; } VMObjHeader;
 
@@ -607,7 +610,20 @@ static inline VMValue VM_MAKE_STR_N(const char *s, size_t len) {
     return VM_MAKE_PTR(vs);
 }
 
+typedef struct {
+    VMObjHeader hdr;
+    double val;
+} VMFloat;
+static inline VMFloat *VM_AS_FLOAT(VMValue v) { return (VMFloat*)VM_TO_PTR(v); }
+static inline VMValue VM_MAKE_FLOAT(double d) {
+    VMFloat *vf = (VMFloat*)malloc(sizeof(VMFloat));
+    vf->hdr.obj_type = VM_OBJ_FLOAT;
+    vf->val = d;
+    return VM_MAKE_PTR(vf);
+}
+
 #define vm_int(i)  VM_MAKE_INT(i)
+#define vm_float(d) VM_MAKE_FLOAT(d)
 #define vm_undef() VM_UNDEF_VAL
 #define vm_str(s)  VM_MAKE_STR(s)
 
@@ -820,6 +836,7 @@ typedef struct {
     VMValue default_fh;
     /* Command-line arguments */
     VMArray *argv;
+    char *script_name;
     /* Inline method cache for OOP dispatch */
     struct {
         const char *class_name;  /* pointer compare (interned) */
@@ -838,6 +855,7 @@ int vm_program_find_func(VMProgram *prog, const char *name);
 void vm_chunk_emit(VMChunk *chunk, uint8_t byte);
 void vm_chunk_emit_u16(VMChunk *chunk, uint16_t val);
 void vm_chunk_emit_i64(VMChunk *chunk, int64_t val);
+void vm_chunk_emit_f64(VMChunk *chunk, double val);
 void vm_chunk_emit_u32(VMChunk *chunk, uint32_t val);
 size_t vm_chunk_add_int_const(VMChunk *chunk, int64_t val);
 size_t vm_chunk_add_str_const(VMChunk *chunk, const char *s);

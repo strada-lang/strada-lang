@@ -394,7 +394,88 @@ typedef struct DbiStatement {
     char **mysql_param_buffers;
     int mysql_params_bound;
 #endif
+#ifdef HAVE_POSTGRES
+    char *pg_sql;
+    char **pg_param_values;
+    int *pg_param_lengths;
+    int pg_param_cap;
+    int pg_cur_row;
+#endif
 } DbiStatement;
+
+#ifdef HAVE_POSTGRES
+/* Append escaped conninfo key='value' to buffer */
+static void dbi_pg_append_conn_kv(char *dst, size_t cap, size_t *off, const char *key, const char *val) {
+    if (!val) val = "";
+    size_t klen = strlen(key);
+    if (*off > 0 && *off + 1 < cap) dst[(*off)++] = ' ';
+    for (size_t i = 0; i < klen && *off + 1 < cap; i++) dst[(*off)++] = key[i];
+    if (*off + 2 < cap) { dst[(*off)++] = '='; dst[(*off)++] = '\''; }
+    for (const char *p = val; *p && *off + 4 < cap; p++) {
+        if (*p == '\'' || *p == '\\') {
+            dst[(*off)++] = '\\';
+        }
+        dst[(*off)++] = *p;
+    }
+    if (*off + 1 < cap) dst[(*off)++] = '\'';
+    dst[*off] = '\0';
+}
+
+/* Rewrite SQL '?' placeholders outside single/double quotes into '$1', '$2', ... */
+static char* dbi_pg_rewrite_placeholders(const char *sql, int *out_nparams) {
+    if (!sql) { *out_nparams = 0; return strdup(""); }
+    size_t slen = strlen(sql);
+    size_t cap = slen + 64;
+    char *out = malloc(cap);
+    if (!out) { *out_nparams = 0; return NULL; }
+    size_t oi = 0;
+    int count = 0;
+    int in_sq = 0;
+    int in_dq = 0;
+    for (size_t i = 0; i < slen; i++) {
+        char c = sql[i];
+        if (in_sq) {
+            if (c == '\'' && i + 1 < slen && sql[i + 1] == '\'') {
+                if (oi + 2 >= cap) { cap *= 2; out = realloc(out, cap); }
+                out[oi++] = c;
+                out[oi++] = sql[++i];
+                continue;
+            }
+            if (c == '\'') in_sq = 0;
+        } else if (in_dq) {
+            if (c == '"' && i + 1 < slen && sql[i + 1] == '"') {
+                if (oi + 2 >= cap) { cap *= 2; out = realloc(out, cap); }
+                out[oi++] = c;
+                out[oi++] = sql[++i];
+                continue;
+            }
+            if (c == '"') in_dq = 0;
+        } else {
+            if (c == '\'') {
+                in_sq = 1;
+            } else if (c == '"') {
+                in_dq = 1;
+            } else if (c == '?') {
+                count++;
+                char num[24];
+                int nlen = snprintf(num, sizeof(num), "$%d", count);
+                if (oi + (size_t)nlen + 1 >= cap) {
+                    cap = cap * 2 + (size_t)nlen + 16;
+                    out = realloc(out, cap);
+                }
+                memcpy(out + oi, num, (size_t)nlen);
+                oi += (size_t)nlen;
+                continue;
+            }
+        }
+        if (oi + 2 >= cap) { cap *= 2; out = realloc(out, cap); }
+        out[oi++] = c;
+    }
+    out[oi] = '\0';
+    *out_nparams = count;
+    return out;
+}
+#endif
 
 /* Helper: Set error */
 static void dbi_set_error(DbiHandle *dbh, int code, const char *msg) {
@@ -549,11 +630,16 @@ static DbiHandle* dbi_connect_raw(const char *dsn, const char *user, const char 
 
 #ifdef HAVE_POSTGRES
         case DBI_DRIVER_POSTGRES: {
-            char conninfo[1024];
-            snprintf(conninfo, sizeof(conninfo),
-                    "host=%s port=%d dbname=%s user=%s password=%s",
-                    host ? host : "localhost", port ? port : 5432,
-                    database ? database : "", user ? user : "", pass ? pass : "");
+            char conninfo[2048];
+            size_t coff = 0;
+            conninfo[0] = '\0';
+            char portbuf[32];
+            snprintf(portbuf, sizeof(portbuf), "%d", port ? port : 5432);
+            dbi_pg_append_conn_kv(conninfo, sizeof(conninfo), &coff, "host", host ? host : "localhost");
+            dbi_pg_append_conn_kv(conninfo, sizeof(conninfo), &coff, "port", portbuf);
+            dbi_pg_append_conn_kv(conninfo, sizeof(conninfo), &coff, "dbname", database ? database : "");
+            dbi_pg_append_conn_kv(conninfo, sizeof(conninfo), &coff, "user", user ? user : "");
+            dbi_pg_append_conn_kv(conninfo, sizeof(conninfo), &coff, "password", pass ? pass : "");
             PGconn *pg = PQconnectdb(conninfo);
             if (PQstatus(pg) != CONNECTION_OK) {
                 dbi_set_error(dbh, -1, PQerrorMessage(pg));
@@ -668,9 +754,11 @@ static DbiStatement* dbi_prepare(DbiHandle *dbh, const char *sql) {
             sqlite3_stmt *stmt;
             int rc = sqlite3_prepare_v2((sqlite3*)dbh->conn, sql, -1, &stmt, NULL);
             if (rc != SQLITE_OK) {
-                dbi_set_error(dbh, rc, sqlite3_errmsg((sqlite3*)dbh->conn));
+                char *err = strdup(sqlite3_errmsg((sqlite3*)dbh->conn));
                 free(sth->sql);
                 free(sth);
+                dbi_set_error(dbh, rc, err ? err : "sqlite3_prepare_v2 failed");
+                free(err);
                 return NULL;
             }
             sth->stmt = stmt;
@@ -690,10 +778,13 @@ static DbiStatement* dbi_prepare(DbiHandle *dbh, const char *sql) {
         case DBI_DRIVER_MYSQL: {
             MYSQL_STMT *stmt = mysql_stmt_init((MYSQL*)dbh->conn);
             if (!stmt || mysql_stmt_prepare(stmt, sql, strlen(sql)) != 0) {
-                dbi_set_error(dbh, mysql_stmt_errno(stmt), mysql_stmt_error(stmt));
+                int eno = stmt ? mysql_stmt_errno(stmt) : -1;
+                char *err = stmt ? strdup(mysql_stmt_error(stmt)) : strdup("mysql_stmt_init failed");
                 if (stmt) mysql_stmt_close(stmt);
                 free(sth->sql);
                 free(sth);
+                dbi_set_error(dbh, eno, err ? err : "mysql_stmt_prepare failed");
+                free(err);
                 return NULL;
             }
             sth->stmt = stmt;
@@ -723,9 +814,19 @@ static DbiStatement* dbi_prepare(DbiHandle *dbh, const char *sql) {
 #endif
 
 #ifdef HAVE_POSTGRES
-        case DBI_DRIVER_POSTGRES:
+        case DBI_DRIVER_POSTGRES: {
+            int nparams = 0;
             sth->stmt = NULL;
+            sth->pg_sql = dbi_pg_rewrite_placeholders(sql, &nparams);
+            sth->num_params = nparams;
+            sth->pg_param_cap = nparams;
+            sth->pg_cur_row = -1;
+            if (nparams > 0) {
+                sth->pg_param_values = calloc((size_t)nparams, sizeof(char*));
+                sth->pg_param_lengths = calloc((size_t)nparams, sizeof(int));
+            }
             break;
+        }
 #endif
 
         default:
@@ -831,8 +932,63 @@ static int dbi_execute_raw(DbiStatement *sth) {
         }
 #endif
 #ifdef HAVE_POSTGRES
-        case DBI_DRIVER_POSTGRES:
-            return 0;
+        case DBI_DRIVER_POSTGRES: {
+            PGconn *pg = (PGconn*)dbh->conn;
+            if (!pg) return -1;
+            if (sth->result) {
+                PQclear((PGresult*)sth->result);
+                sth->result = NULL;
+            }
+            if (sth->column_names) {
+                for (int i = 0; i < sth->num_columns; i++) free(sth->column_names[i]);
+                free(sth->column_names);
+                sth->column_names = NULL;
+            }
+            sth->num_columns = 0;
+            sth->pg_cur_row = -1;
+            sth->row_count = 0;
+            sth->affected_rows = 0;
+
+            const char *q = sth->pg_sql ? sth->pg_sql : sth->sql;
+            PGresult *res = NULL;
+            if (sth->num_params > 0 && sth->pg_param_values) {
+                res = PQexecParams(pg, q, sth->num_params, NULL,
+                                   (const char * const *)sth->pg_param_values,
+                                   sth->pg_param_lengths, NULL, 0);
+            } else {
+                res = PQexec(pg, q);
+            }
+            if (!res) {
+                dbi_set_error(dbh, -1, PQerrorMessage(pg));
+                return -1;
+            }
+            ExecStatusType st = PQresultStatus(res);
+            if (st == PGRES_TUPLES_OK) {
+                sth->result = res;
+                sth->num_columns = PQnfields(res);
+                if (sth->num_columns > 0) {
+                    sth->column_names = calloc((size_t)sth->num_columns, sizeof(char*));
+                    for (int i = 0; i < sth->num_columns; i++) {
+                        const char *cn = PQfname(res, i);
+                        sth->column_names[i] = cn ? strdup(cn) : strdup("");
+                    }
+                }
+                sth->affected_rows = PQntuples(res);
+                return 0;
+            } else if (st == PGRES_COMMAND_OK) {
+                const char *tup = PQcmdTuples(res);
+                sth->affected_rows = (tup && *tup) ? atoi(tup) : 0;
+                sth->finished = 1;
+                PQclear(res);
+                return sth->affected_rows;
+            } else {
+                char *err = strdup(PQerrorMessage(pg));
+                PQclear(res);
+                dbi_set_error(dbh, (int)st, err ? err : "PostgreSQL query failed");
+                free(err);
+                return -1;
+            }
+        }
 #endif
         default:
             return -1;
@@ -884,6 +1040,22 @@ static void dbi_bind_str(DbiStatement *sth, int idx, const char *val) {
             break;
         }
 #endif
+#ifdef HAVE_POSTGRES
+        case DBI_DRIVER_POSTGRES: {
+            int p = idx - 1;
+            if (p >= 0 && p < sth->pg_param_cap && sth->pg_param_values) {
+                free(sth->pg_param_values[p]);
+                if (val) {
+                    sth->pg_param_values[p] = strdup(val);
+                    sth->pg_param_lengths[p] = (int)strlen(val);
+                } else {
+                    sth->pg_param_values[p] = NULL;
+                    sth->pg_param_lengths[p] = 0;
+                }
+            }
+            break;
+        }
+#endif
         default:
             break;
     }
@@ -908,6 +1080,17 @@ static void dbi_bind_null(DbiStatement *sth, int idx) {
             sth->mysql_param_nulls[param_idx] = 1;
             sth->mysql_param_binds[param_idx].buffer_type = MYSQL_TYPE_NULL;
             sth->mysql_param_binds[param_idx].is_null = (bool*)&sth->mysql_param_nulls[param_idx];
+            break;
+        }
+#endif
+#ifdef HAVE_POSTGRES
+        case DBI_DRIVER_POSTGRES: {
+            int p = idx - 1;
+            if (p >= 0 && p < sth->pg_param_cap && sth->pg_param_values) {
+                free(sth->pg_param_values[p]);
+                sth->pg_param_values[p] = NULL;
+                sth->pg_param_lengths[p] = 0;
+            }
             break;
         }
 #endif
@@ -944,6 +1127,18 @@ static void dbi_clear_bindings(DbiStatement *sth) {
             }
             break;
 #endif
+#ifdef HAVE_POSTGRES
+        case DBI_DRIVER_POSTGRES:
+            if (sth->pg_param_values) {
+                for (int i = 0; i < sth->pg_param_cap; i++) {
+                    free(sth->pg_param_values[i]);
+                    sth->pg_param_values[i] = NULL;
+                    sth->pg_param_lengths[i] = 0;
+                }
+            }
+            sth->pg_cur_row = -1;
+            break;
+#endif
         default:
             break;
     }
@@ -972,21 +1167,43 @@ static char *dbi_value_bytes(StradaValue *val, unsigned long *len) {
 static void dbi_bind_value(DbiStatement *sth, int idx, StradaValue *val) {
     if (!sth || !sth->dbh || !val) return;
 
+    int is_tied = (!STRADA_IS_TAGGED_INT(val) && val->meta && val->meta->is_tied);
+
+#ifdef HAVE_SQLITE3
+    if (sth->dbh->driver == DBI_DRIVER_SQLITE) {
+        if (!is_tied && (STRADA_IS_TAGGED_INT(val) || val->type == STRADA_INT)) {
+            sqlite3_bind_int64((sqlite3_stmt*)sth->stmt, idx, strada_to_int(val));
+            return;
+        }
+        if (!is_tied && val->type == STRADA_NUM) {
+            sqlite3_bind_double((sqlite3_stmt*)sth->stmt, idx, strada_to_num(val));
+            return;
+        }
+        if (!is_tied && val->type == STRADA_UNDEF) {
+            sqlite3_bind_null((sqlite3_stmt*)sth->stmt, idx);
+            return;
+        }
+        unsigned long str_len = 0;
+        char *str = dbi_value_bytes(val, &str_len);
+        if (str) {
+            if (str_len > 0 && memchr(str, '\0', str_len) != NULL) {
+                sqlite3_bind_blob((sqlite3_stmt*)sth->stmt, idx, str, (int)str_len, SQLITE_TRANSIENT);
+            } else {
+                sqlite3_bind_text((sqlite3_stmt*)sth->stmt, idx, str, (int)str_len, SQLITE_TRANSIENT);
+            }
+            free(str);
+        } else {
+            sqlite3_bind_null((sqlite3_stmt*)sth->stmt, idx);
+        }
+        return;
+    }
+#endif
+
     /* The value's bytes (binary-safe) - MUST be freed! */
     unsigned long str_len = 0;
-    char *str = dbi_value_bytes(val, &str_len);
+    char *str = (!is_tied && val->type == STRADA_UNDEF) ? NULL : dbi_value_bytes(val, &str_len);
 
     switch (sth->dbh->driver) {
-#ifdef HAVE_SQLITE3
-        case DBI_DRIVER_SQLITE:
-            if (str) {
-                /* SQLITE_TRANSIENT makes SQLite copy the string, so we can free it */
-                sqlite3_bind_text((sqlite3_stmt*)sth->stmt, idx, str, (int)str_len, SQLITE_TRANSIENT);
-            } else {
-                sqlite3_bind_null((sqlite3_stmt*)sth->stmt, idx);
-            }
-            break;
-#endif
 #ifdef HAVE_MYSQL
         case DBI_DRIVER_MYSQL: {
             int param_idx = idx - 1;  /* MySQL uses 0-based indexing */
@@ -1024,6 +1241,23 @@ static void dbi_bind_value(DbiStatement *sth, int idx, StradaValue *val) {
                 sth->mysql_param_nulls[param_idx] = 1;
                 sth->mysql_param_binds[param_idx].buffer_type = MYSQL_TYPE_NULL;
                 sth->mysql_param_binds[param_idx].is_null = (bool*)&sth->mysql_param_nulls[param_idx];
+            }
+            break;
+        }
+#endif
+#ifdef HAVE_POSTGRES
+        case DBI_DRIVER_POSTGRES: {
+            int p = idx - 1;
+            if (p >= 0 && p < sth->pg_param_cap && sth->pg_param_values) {
+                free(sth->pg_param_values[p]);
+                if (str) {
+                    sth->pg_param_values[p] = str;
+                    sth->pg_param_lengths[p] = (int)str_len;
+                    str = NULL;
+                } else {
+                    sth->pg_param_values[p] = NULL;
+                    sth->pg_param_lengths[p] = 0;
+                }
             }
             break;
         }
@@ -1084,11 +1318,17 @@ static int dbi_step(DbiStatement *sth) {
         }
 #endif
 #ifdef HAVE_POSTGRES
-        case DBI_DRIVER_POSTGRES:
+        case DBI_DRIVER_POSTGRES: {
             if (!sth->result) return 0;
-            if (sth->row_count < PQntuples((PGresult*)sth->result)) return 1;
+            int ntuples = PQntuples((PGresult*)sth->result);
+            if (sth->pg_cur_row + 1 < ntuples) {
+                sth->pg_cur_row++;
+                sth->row_count++;
+                return 1;
+            }
             sth->finished = 1;
             return 0;
+        }
 #endif
         default:
             return -1;
@@ -1147,10 +1387,10 @@ static int64_t dbi_column_int(DbiStatement *sth, int idx) {
 #endif
 #ifdef HAVE_POSTGRES
         case DBI_DRIVER_POSTGRES: {
-            if (!sth->result) return 0;
+            if (!sth->result || sth->pg_cur_row < 0) return 0;
             PGresult *res = (PGresult*)sth->result;
-            int row = sth->affected_rows;
-            if (PQgetisnull(res, row, idx)) return 0;
+            int row = sth->pg_cur_row;
+            if (row >= PQntuples(res) || PQgetisnull(res, row, idx)) return 0;
             return strtoll(PQgetvalue(res, row, idx), NULL, 10);
         }
 #endif
@@ -1177,10 +1417,10 @@ static double dbi_column_num(DbiStatement *sth, int idx) {
 #endif
 #ifdef HAVE_POSTGRES
         case DBI_DRIVER_POSTGRES: {
-            if (!sth->result) return 0.0;
+            if (!sth->result || sth->pg_cur_row < 0) return 0.0;
             PGresult *res = (PGresult*)sth->result;
-            int row = sth->affected_rows;
-            if (PQgetisnull(res, row, idx)) return 0.0;
+            int row = sth->pg_cur_row;
+            if (row >= PQntuples(res) || PQgetisnull(res, row, idx)) return 0.0;
             return strtod(PQgetvalue(res, row, idx), NULL);
         }
 #endif
@@ -1230,10 +1470,10 @@ static char* dbi_column_str_len(DbiStatement *sth, int idx, unsigned long *out_l
 #endif
 #ifdef HAVE_POSTGRES
         case DBI_DRIVER_POSTGRES: {
-            if (!sth->result) return strdup("");
+            if (!sth->result || sth->pg_cur_row < 0) return strdup("");
             PGresult *res = (PGresult*)sth->result;
-            int row = sth->affected_rows;
-            if (PQgetisnull(res, row, idx)) return strdup("");
+            int row = sth->pg_cur_row;
+            if (row >= PQntuples(res) || PQgetisnull(res, row, idx)) return strdup("");
             int n = PQgetlength(res, row, idx);
             const char *v = PQgetvalue(res, row, idx);
             if (!v || n <= 0) return strdup("");
@@ -1274,6 +1514,15 @@ static unsigned long dbi_column_len(DbiStatement *sth, int idx, const char *str)
         return n;
     }
 #endif
+#ifdef HAVE_POSTGRES
+    if (sth && sth->dbh && sth->dbh->driver == DBI_DRIVER_POSTGRES && sth->result
+        && sth->pg_cur_row >= 0 && sth->pg_cur_row < PQntuples((PGresult*)sth->result)
+        && idx >= 0 && idx < sth->num_columns
+        && !PQgetisnull((PGresult*)sth->result, sth->pg_cur_row, idx)) {
+        int n = PQgetlength((PGresult*)sth->result, sth->pg_cur_row, idx);
+        return n > 0 ? (unsigned long)n : 0;
+    }
+#endif
     return str ? (unsigned long)strlen(str) : 0;
 }
 
@@ -1294,8 +1543,10 @@ static int dbi_column_is_null(DbiStatement *sth, int idx) {
 #endif
 #ifdef HAVE_POSTGRES
         case DBI_DRIVER_POSTGRES: {
-            if (!sth->result) return 1;
-            return PQgetisnull((PGresult*)sth->result, sth->affected_rows, idx);
+            if (!sth->result || sth->pg_cur_row < 0) return 1;
+            PGresult *res = (PGresult*)sth->result;
+            if (sth->pg_cur_row >= PQntuples(res)) return 1;
+            return PQgetisnull(res, sth->pg_cur_row, idx);
         }
 #endif
         default:
@@ -1346,6 +1597,17 @@ static void dbi_free_statement(DbiStatement *sth) {
                 break;
         }
     }
+
+#ifdef HAVE_POSTGRES
+    free(sth->pg_sql);
+    if (sth->pg_param_values) {
+        for (int i = 0; i < sth->pg_param_cap; i++) {
+            free(sth->pg_param_values[i]);
+        }
+        free(sth->pg_param_values);
+    }
+    free(sth->pg_param_lengths);
+#endif
 
     free(sth->sql);
     if (sth->column_names) {
@@ -1410,8 +1672,14 @@ static int dbi_do_sql(DbiHandle *dbh, const char *sql) {
 #endif
     DbiStatement *sth = dbi_prepare(dbh, sql);
     if (!sth) return -1;
+    int saved_raise = dbh->raise_error;
+    dbh->raise_error = 0;
     int result = dbi_execute_raw(sth);
     dbi_free_statement(sth);
+    dbh->raise_error = saved_raise;
+    if (result < 0 && saved_raise && dbh->error_msg) {
+        strada_throw(dbh->error_msg);
+    }
     return result;
 }
 
@@ -1622,7 +1890,7 @@ func connect(str $dsn, str $username, str $password) scalar {
     $handle{"_ptr"} = $dbh_ptr;
     $handle{"dsn"} = $dsn;
     $handle{"connected"} = 1;
-    return \%handle;
+    return bless(\%handle, "DBI::db");
 }
 
 # Connect with attributes
@@ -1669,7 +1937,7 @@ func connect_attrs(str $dsn, str $username, str $password, scalar $attrs) scalar
     $handle{"_ptr"} = $dbh_ptr;
     $handle{"dsn"} = $dsn;
     $handle{"connected"} = 1;
-    return \%handle;
+    return bless(\%handle, "DBI::db");
 }
 
 # Disconnect from database
@@ -1715,7 +1983,7 @@ func prepare(scalar $dbh, str $sql) scalar {
     $handle{"_dbh"} = $dbh;
     $handle{"sql"} = $sql;
     $handle{"_executed"} = 0;
-    return \%handle;
+    return bless(\%handle, "DBI::st");
 }
 
 # Bind parameters and execute - internal helper
@@ -1781,7 +2049,13 @@ func exec(scalar $dbh, str $sql, scalar $params) int {
         return -1;
     }
 
-    my int $result = DBI::execute($sth, $params);
+    my int $result = -1;
+    try {
+        $result = DBI::execute($sth, $params);
+    } catch ($e) {
+        DBI::finish($sth);
+        throw($e);
+    }
     DBI::finish($sth);
     return $result;
 }
@@ -1959,9 +2233,15 @@ func selectall_arrayref(scalar $dbh, str $sql) scalar {
     if (!defined($sth)) {
         return undef;
     }
-    my array @empty = ();
-    DBI::execute($sth, \@empty);
-    my scalar $rows = DBI::fetchall_arrayref($sth);
+    my scalar $rows = undef;
+    try {
+        my array @empty = ();
+        DBI::execute($sth, \@empty);
+        $rows = DBI::fetchall_arrayref($sth);
+    } catch ($e) {
+        DBI::finish($sth);
+        throw($e);
+    }
     DBI::finish($sth);
     return $rows;
 }
@@ -1972,8 +2252,14 @@ func selectall_arrayref_bind(scalar $dbh, str $sql, scalar $params) scalar {
     if (!defined($sth)) {
         return undef;
     }
-    DBI::execute($sth, $params);
-    my scalar $rows = DBI::fetchall_arrayref($sth);
+    my scalar $rows = undef;
+    try {
+        DBI::execute($sth, $params);
+        $rows = DBI::fetchall_arrayref($sth);
+    } catch ($e) {
+        DBI::finish($sth);
+        throw($e);
+    }
     DBI::finish($sth);
     return $rows;
 }
@@ -2213,13 +2499,18 @@ func selectall_hashref(scalar $dbh, str $sql, scalar $params) scalar {
         return [];
     }
 
-    DBI::execute($sth, $params);
-
     my array @results = ();
-    my scalar $row = DBI::fetchrow_hashref($sth);
-    while (defined($row)) {
-        push(@results, $row);
-        $row = DBI::fetchrow_hashref($sth);
+    try {
+        DBI::execute($sth, $params);
+
+        my scalar $row = DBI::fetchrow_hashref($sth);
+        while (defined($row)) {
+            push(@results, $row);
+            $row = DBI::fetchrow_hashref($sth);
+        }
+    } catch ($e) {
+        DBI::finish($sth);
+        throw($e);
     }
 
     DBI::finish($sth);
@@ -2233,8 +2524,14 @@ func selectrow_hashref(scalar $dbh, str $sql, scalar $params) scalar {
         return undef;
     }
 
-    DBI::execute($sth, $params);
-    my scalar $row = DBI::fetchrow_hashref($sth);
+    my scalar $row = undef;
+    try {
+        DBI::execute($sth, $params);
+        $row = DBI::fetchrow_hashref($sth);
+    } catch ($e) {
+        DBI::finish($sth);
+        throw($e);
+    }
     DBI::finish($sth);
     return $row;
 }
@@ -2246,8 +2543,14 @@ func selectcol(scalar $dbh, str $sql, scalar $params) scalar {
         return undef;
     }
 
-    DBI::execute($sth, $params);
-    my scalar $row = DBI::fetchrow_array($sth);
+    my scalar $row = undef;
+    try {
+        DBI::execute($sth, $params);
+        $row = DBI::fetchrow_array($sth);
+    } catch ($e) {
+        DBI::finish($sth);
+        throw($e);
+    }
     DBI::finish($sth);
 
     if (defined($row) && scalar($row) > 0) {
@@ -2263,4 +2566,16 @@ func insert_get_id(scalar $dbh, str $sql, scalar $params) int {
         return -1;
     }
     return DBI::last_insert_id($dbh);
+}
+
+package DBI::db;
+
+func DESTROY(scalar $self) void {
+    DBI::disconnect($self);
+}
+
+package DBI::st;
+
+func DESTROY(scalar $self) void {
+    DBI::finish($self);
 }

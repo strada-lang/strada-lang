@@ -18,8 +18,10 @@
 # strada-jit - Interactive REPL for Strada
 # Uses the Strada::JIT library for compilation and evaluation
 
+#ifdef HAVE_READLINE
 use lib "lib/readline";
 use readline;
+#endif
 use lib "lib";
 use Strada::JIT;
 
@@ -321,7 +323,9 @@ func main(int $argc, array @argv) int {
     say("Type .help for help, .quit to exit");
     say("");
 
+#ifdef HAVE_READLINE
     readline::stifle_history(1000);
+#endif
 
     my str $buffer = "";
     my int $continuation = 0;
@@ -332,7 +336,12 @@ func main(int $argc, array @argv) int {
             $prompt = "...    ";
         }
 
+#ifdef HAVE_READLINE
         my str $line = readline::readline($prompt);
+#else
+        print($prompt);
+        my str $line = core::readline();
+#endif
         if (!defined($line)) {
             say("");
             last;
@@ -358,7 +367,9 @@ func main(int $argc, array @argv) int {
             next;
         }
 
+#ifdef HAVE_READLINE
         readline::add_history($input);
+#endif
 
         # Handle commands
         if ($input eq ".quit" || $input eq ".exit" || $input eq ".q") {
@@ -496,6 +507,8 @@ func main(int $argc, array @argv) int {
 
             say("Loading " . $filename . "...");
             my int $line_count = 0;
+            my str $load_buf = "";
+            my int $load_cont = 0;
             my scalar $file_line = core::fgets($lfh, 65536);
             while (defined($file_line)) {
                 $file_line =~ s/\n$//;
@@ -503,16 +516,45 @@ func main(int $argc, array @argv) int {
 
                 my str $trimmed_line = $file_line;
                 $trimmed_line =~ s/^\s+//;
-                if ($trimmed_line ne "" && $trimmed_line !~ /^#/) {
-                    $line_count = $line_count + 1;
+                if ($load_cont == 0 && ($trimmed_line eq "" || $trimmed_line =~ /^#/)) {
+                    $file_line = core::fgets($lfh, 65536);
+                    next;
+                }
+
+                $line_count = $line_count + 1;
+                if ($load_cont == 1) {
+                    $load_buf = $load_buf . "\n" . $file_line;
+                } else {
+                    $load_buf = $file_line;
+                }
+
+                if (Strada::JIT::is_balanced($load_buf) == 0) {
+                    $load_cont = 1;
+                    $file_line = core::fgets($lfh, 65536);
+                    next;
+                }
+                $load_cont = 0;
+
+                my str $chunk = $load_buf;
+                $chunk =~ s/^\s+//;
+                $chunk =~ s/\s+$//;
+                $load_buf = "";
+                if ($chunk ne "") {
                     try {
-                        Strada::JIT::eval($trimmed_line);
+                        Strada::JIT::eval($chunk);
                     } catch ($e) {
                         say("  Error: " . $e);
                     }
                 }
 
                 $file_line = core::fgets($lfh, 65536);
+            }
+            if ($load_cont == 1 && $load_buf ne "") {
+                try {
+                    Strada::JIT::eval($load_buf);
+                } catch ($e) {
+                    say("  Error: " . $e);
+                }
             }
             core::close($lfh);
             say("Loaded " . $line_count . " lines from " . $filename);
