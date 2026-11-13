@@ -179,6 +179,9 @@ done
 echo "Configuring Strada..."
 echo ""
 
+CFG_TMPDIR=$(mktemp -d)
+trap 'rm -rf "$CFG_TMPDIR"' EXIT INT TERM
+
 # Helper function to check for a library
 check_lib() {
     local name="$1"
@@ -186,7 +189,7 @@ check_lib() {
     local lib="$3"
     local func="$4"
 
-    local tmpfile=$(mktemp)
+    local tmpfile=$(mktemp "$CFG_TMPDIR/libcheck.XXXXXX")
     local tmpsrc="${tmpfile}.c"
     mv "$tmpfile" "$tmpsrc"
 
@@ -214,7 +217,9 @@ EOF
 check_header() {
     local header="$1"
     local cflags="$2"
-    local tmpsrc="$(mktemp).c"
+    local tmpfile=$(mktemp "$CFG_TMPDIR/hdrcheck.XXXXXX")
+    local tmpsrc="${tmpfile}.c"
+    rm -f "$tmpfile"
     printf '#include <%s>\nint main(void){return 0;}\n' "$header" > "$tmpsrc"
     local rc=1
     if $CC $cflags -fsyntax-only "$tmpsrc" 2>/dev/null; then rc=0; fi
@@ -402,7 +407,9 @@ if [ "$SKIP_EPOLL" = "1" ]; then
     HAVE_EPOLL=0
     echo -e "${YELLOW}disabled${NC}"
 else
-    ep_src=$(mktemp).c
+    ep_tmp=$(mktemp "$CFG_TMPDIR/epoll.XXXXXX")
+    ep_src="${ep_tmp}.c"
+    mv "$ep_tmp" "$ep_src"
     cat > "$ep_src" << 'EPEOF'
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
@@ -534,7 +541,7 @@ if [ "$SKIP_PCRE2" != "1" ]; then
             echo -e "${GREEN}yes${NC} (pkg-config)"
         else
             # Manual check: PCRE2 requires PCRE2_CODE_UNIT_WIDTH to be defined before including
-            tmpfile=$(mktemp)
+            tmpfile=$(mktemp "$CFG_TMPDIR/pcre2.XXXXXX")
             tmpsrc="${tmpfile}.c"
             mv "$tmpfile" "$tmpsrc"
             cat > "$tmpsrc" << EOF

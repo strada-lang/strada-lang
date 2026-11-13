@@ -392,6 +392,9 @@ func parse_args(array @av) void {
         if ($RUN_AFTER == 1 && size(@POSITIONAL) >= 1) {
             @RUN_ARGS = (@RUN_ARGS, $a);
             $i = $i + 1;
+        } elsif (length($SCRIPT_FILE) > 0 && $a ne "--chunked" && !sw($a, "--compiler=")) {
+            @POSITIONAL = (@POSITIONAL, $a);
+            $i = $i + 1;
         } elsif ($a eq "--") {
             $i = $i + 1;
             if (size(@POSITIONAL) == 0 && $i < $n) {
@@ -586,6 +589,7 @@ func handle_script() void {
     my array @cmd = ($jit);
     if ($picked == 0) { @cmd = (@cmd, "--compiler=gcc"); }
     @cmd = (@cmd, @JIT_PASSTHROUGH);
+    @cmd = (@cmd, "--");
     @cmd = (@cmd, $SCRIPT_FILE);
     @cmd = (@cmd, @POSITIONAL);
     exec_or_run(@cmd);

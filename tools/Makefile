@@ -35,5 +35,5 @@ strada2perl: strada2perl.strada
 	@echo "Built: strada2perl"
 
 clean:
-	rm -f $(TOOLS) *.o *.c
+	rm -f $(TOOLS) $(addsuffix .o,$(TOOLS)) $(addsuffix .c,$(TOOLS))
 	@echo "Cleaned tools directory"

@@ -140,10 +140,28 @@ func scope_lookup_var_sigil(scalar $scope, str $name, str $sigil) scalar {
     while (is_valid_scope($current) == 1) {
         my scalar $vars = $current->{"vars"};
         my scalar $var_info = $vars->{$name};
-        if (is_valid_node($var_info) == 1 && $var_info->{"sigil"} eq $sigil) {
-            $result{"found"} = 1;
-            $result{"info"} = $var_info;
-            return \%result;
+        if (is_valid_node($var_info) == 1) {
+            if ($var_info->{"sigil"} eq $sigil) {
+                $result{"found"} = 1;
+                $result{"info"} = $var_info;
+                return \%result;
+            } elsif ($var_info->{"is_global"} == 1 && $var_info->{"decls"}) {
+                my scalar $decls = $var_info->{"decls"};
+                my int $di = 0;
+                while ($di < size(@{$decls})) {
+                    my scalar $d = $decls->[$di];
+                    my str $dsig = "$";
+                    if ($d->{"type"} == NODE_VAR_DECL() || $d->{"type"} == NODE_OUR_DECL()) {
+                        $dsig = $d->{"sigil"};
+                    }
+                    if ($dsig eq $sigil) {
+                        $result{"found"} = 1;
+                        $result{"info"} = $var_info;
+                        return \%result;
+                    }
+                    $di = $di + 1;
+                }
+            }
         }
         $current = $current->{"parent"};
     }
@@ -171,9 +189,26 @@ func scope_mark_used_sigil(scalar $scope, str $name, str $sigil) void {
     while (is_valid_scope($current) == 1) {
         my scalar $vars = $current->{"vars"};
         my scalar $var_info = $vars->{$name};
-        if (is_valid_node($var_info) == 1 && $var_info->{"sigil"} eq $sigil) {
-            $var_info->{"used"} = 1;
-            return;
+        if (is_valid_node($var_info) == 1) {
+            if ($var_info->{"sigil"} eq $sigil) {
+                $var_info->{"used"} = 1;
+                return;
+            } elsif ($var_info->{"is_global"} == 1 && $var_info->{"decls"}) {
+                my scalar $decls = $var_info->{"decls"};
+                my int $di = 0;
+                while ($di < size(@{$decls})) {
+                    my scalar $d = $decls->[$di];
+                    my str $dsig = "$";
+                    if ($d->{"type"} == NODE_VAR_DECL() || $d->{"type"} == NODE_OUR_DECL()) {
+                        $dsig = $d->{"sigil"};
+                    }
+                    if ($dsig eq $sigil) {
+                        $var_info->{"used"} = 1;
+                        return;
+                    }
+                    $di = $di + 1;
+                }
+            }
         }
         $current = $current->{"parent"};
     }
@@ -1069,7 +1104,7 @@ func sem_file_key(scalar $node) str {
 
 # For a reference to a global with several file-level declarations, the C
 # name of the declaration that lexically precedes the reference/function.
-func resolve_shadowed_global(scalar $ctx, scalar $info, str $name, int $ref_line) str {
+func resolve_shadowed_global(scalar $ctx, scalar $info, str $name, int $ref_line, str $sigil) str {
     my scalar $decls = $info->{"decls"};
     my scalar $fn = $ctx->{"current_func"};
     my str $fkey = "";
@@ -1080,14 +1115,19 @@ func resolve_shadowed_global(scalar $ctx, scalar $info, str $name, int $ref_line
     } elsif (($ctx->{"cur_from_use"} + 0) == 1) {
         $fkey = "" . $ctx->{"cur_file"};
     }
+    if ($fline <= 0) { $fline = $ctx->{"cur_block_line"} + 0; }
     if ($fline <= 0) { return $name; }
     my str $best = $name;
     my int $best_line = -1;
     my int $i = 0;
     while ($i < size(@{$decls})) {
         my scalar $d = $decls->[$i];
+        my str $dsig = "$";
+        if ($d->{"type"} == NODE_VAR_DECL() || $d->{"type"} == NODE_OUR_DECL()) {
+            $dsig = $d->{"sigil"};
+        }
         my int $dl = ast_get_line($d);
-        if (sem_file_key($d) eq $fkey && $dl < $fline && $dl > $best_line) {
+        if ($dsig eq $sigil && sem_file_key($d) eq $fkey && $dl < $fline && $dl > $best_line) {
             $best_line = $dl;
             $best = $d->{"name"};
         }
@@ -1313,7 +1353,7 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
         if ($found == 1) {
             my scalar $vinfo = $lookup_result->{"info"};
             if ($vinfo->{"is_global"} == 1 && size(@{$vinfo->{"decls"}}) > 1) {
-                $expr->{"name"} = resolve_shadowed_global($ctx, $vinfo, $name, $line);
+                $expr->{"name"} = resolve_shadowed_global($ctx, $vinfo, $name, $line, $sigil);
             }
         }
         return;
@@ -1339,20 +1379,29 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
         $ctx->{"current_func"} = $expr;
         my scalar $af_outer = $ctx->{"scope"};
         $ctx->{"scope"} = scope_new($af_outer);
+        $ctx->{"scope"}->{"is_param_scope"} = 1;
         my scalar $af_params = $expr->{"params"};
         my hash %af_seen = ();
+        my hash %af_seen_bare = ();
         my int $af_pi = 0;
         while ($af_pi < $expr->{"param_count"}) {
             my scalar $af_p = $af_params->[$af_pi];
-            my str $af_key = $af_p->{"sigil"} . $af_p->{"name"};
+            my str $af_pname = $af_p->{"name"};
+            my str $af_key = $af_p->{"sigil"} . $af_pname;
+            my int $af_pl = ast_get_line($af_p);
+            if ($af_pl <= 0) { $af_pl = $line; }
             if ($af_seen{$af_key} == 1) {
-                my int $af_pl = ast_get_line($af_p);
-                if ($af_pl <= 0) { $af_pl = $line; }
                 semantic_error($ctx, "duplicate parameter '" . $af_key . "'", $af_pl);
+            } elsif ($af_seen_bare{$af_pname} == 1) {
+                semantic_error($ctx, "parameter '" . $af_key . "' conflicts with another parameter named '" . $af_pname . "'", $af_pl);
             } else {
                 $af_seen{$af_key} = 1;
+                $af_seen_bare{$af_pname} = 1;
             }
-            scope_add_var($ctx->{"scope"}, $af_p->{"name"}, $af_p->{"sigil"}, $af_p->{"param_type"}, ast_get_line($af_p));
+            if (($af_p->{"has_default"} + 0) == 1 && is_valid_node($af_p->{"default"}) == 1) {
+                analyze_expression($ctx, $af_p->{"default"});
+            }
+            scope_add_var($ctx->{"scope"}, $af_pname, $af_p->{"sigil"}, $af_p->{"param_type"}, ast_get_line($af_p));
             $af_pi = $af_pi + 1;
         }
         if (is_valid_node($expr->{"body"}) == 1) {
@@ -1774,7 +1823,7 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
                 scope_mark_used_sigil($ctx->{"scope"}, $sa_name, $matched_sigil);
                 my scalar $sa_vinfo = $sa_lk->{"info"};
                 if ($sa_vinfo->{"is_global"} == 1 && size(@{$sa_vinfo->{"decls"}}) > 1) {
-                    $sub_arr->{"name"} = resolve_shadowed_global($ctx, $sa_vinfo, $sa_name, ast_get_line($sub_arr));
+                    $sub_arr->{"name"} = resolve_shadowed_global($ctx, $sa_vinfo, $sa_name, ast_get_line($sub_arr), $matched_sigil);
                 }
             }
         } else {
@@ -1808,7 +1857,7 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
                 scope_mark_used_sigil($ctx->{"scope"}, $hh_name, $hmatched_sigil);
                 my scalar $hh_vinfo = $hh_lk->{"info"};
                 if ($hh_vinfo->{"is_global"} == 1 && size(@{$hh_vinfo->{"decls"}}) > 1) {
-                    $ha_hash->{"name"} = resolve_shadowed_global($ctx, $hh_vinfo, $hh_name, ast_get_line($ha_hash));
+                    $ha_hash->{"name"} = resolve_shadowed_global($ctx, $hh_vinfo, $hh_name, ast_get_line($ha_hash), $hmatched_sigil);
                 }
             }
         } else {
@@ -1842,7 +1891,7 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
                 scope_mark_used_sigil($ctx->{"scope"}, $hs_name, "%");
                 my scalar $hs_vinfo = $hs_lk->{"info"};
                 if ($hs_vinfo->{"is_global"} == 1 && size(@{$hs_vinfo->{"decls"}}) > 1) {
-                    $hs_src->{"name"} = resolve_shadowed_global($ctx, $hs_vinfo, $hs_name, ast_get_line($hs_src));
+                    $hs_src->{"name"} = resolve_shadowed_global($ctx, $hs_vinfo, $hs_name, ast_get_line($hs_src), "%");
                 }
             }
         } else {
@@ -2057,6 +2106,18 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
     # NODE_INT_LITERAL, NODE_NUM_LITERAL, NODE_STR_LITERAL, NODE_FUNC_REF
 }
 
+func scope_check_param_redecl(scalar $ctx, scalar $current_scope, str $name, str $sigil, str $kind, int $line) void {
+    my scalar $parent_scope = $current_scope->{"parent"};
+    if ($parent_scope && ($parent_scope->{"is_param_scope"} + 0) == 1) {
+        my scalar $pvars = $parent_scope->{"vars"};
+        if (exists(%{$pvars}, $name)) {
+            my scalar $prev_info = $pvars->{$name};
+            my int $prev_line = $prev_info->{"line"};
+            semantic_error($ctx, $kind . " '" . $sigil . $name . "' redeclares parameter '" . $prev_info->{"sigil"} . $name . "' (declared at line " . $prev_line . ")", $line);
+        }
+    }
+}
+
 func analyze_statement(scalar $ctx, scalar $stmt) void {
     my int $node_type = $stmt->{"type"};
     my int $line = ast_get_line($stmt);
@@ -2075,6 +2136,7 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
             my int $prev_line = $prev_info->{"line"};
             semantic_error($ctx, "variable '" . $sigil . $name . "' already declared in this scope (previous declaration at line " . $prev_line . ")", $line);
         }
+        scope_check_param_redecl($ctx, $current_scope, $name, $sigil, "variable", $line);
 
         # Add variable to scope
         scope_add_var($current_scope, $name, $sigil, $var_type, $line);
@@ -2115,6 +2177,7 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
             my int $prev_line = $prev_info->{"line"};
             semantic_error($ctx, "constant '" . $name . "' already declared in this scope (previous declaration at line " . $prev_line . ")", $line);
         }
+        scope_check_param_redecl($ctx, $current_scope, $name, "$", "constant", $line);
 
         # Add const to scope as a scalar
         scope_add_var($current_scope, $name, "$", $var_type, $line);
@@ -2207,6 +2270,7 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
                     my int $prev_line = $prev_info->{"line"};
                     semantic_error($ctx, "variable '" . $sigil . $name . "' already declared in this scope (previous declaration at line " . $prev_line . ")", $line);
                 }
+                scope_check_param_redecl($ctx, $current_scope, $name, $sigil, "variable", $line);
 
                 # Add variable to scope
                 scope_add_var($current_scope, $name, $sigil, $var_type, $line);
@@ -2467,11 +2531,13 @@ func analyze_function(scalar $ctx, scalar $fn) void {
     # Create function scope
     my scalar $old_scope = $ctx->{"scope"};
     $ctx->{"scope"} = scope_new($old_scope);
+    $ctx->{"scope"}->{"is_param_scope"} = 1;
 
     # Add parameters to scope
     my scalar $params = $fn->{"params"};
     my int $param_count = $fn->{"param_count"};
     my hash %seen_params = ();
+    my hash %seen_bare_params = ();
     my int $fn_line = ast_get_line($fn);
     for (my int $i = 0; $i < $param_count; $i = $i + 1) {
         my scalar $param = $params->[$i];
@@ -2480,12 +2546,18 @@ func analyze_function(scalar $ctx, scalar $fn) void {
         my int $ptype = $param->{"param_type"};
         my int $pline = ast_get_line($param);
         my str $pkey = $sigil . $pname;
+        my int $err_line = $pline;
+        if ($err_line <= 0) { $err_line = $fn_line; }
         if ($seen_params{$pkey} == 1) {
-            my int $err_line = $pline;
-            if ($err_line <= 0) { $err_line = $fn_line; }
             semantic_error($ctx, "duplicate parameter '" . $pkey . "'", $err_line);
+        } elsif ($seen_bare_params{$pname} == 1) {
+            semantic_error($ctx, "parameter '" . $pkey . "' conflicts with another parameter named '" . $pname . "'", $err_line);
         } else {
             $seen_params{$pkey} = 1;
+            $seen_bare_params{$pname} = 1;
+        }
+        if (($param->{"has_default"} + 0) == 1 && is_valid_node($param->{"default"}) == 1) {
+            analyze_expression($ctx, $param->{"default"});
         }
         scope_add_var($ctx->{"scope"}, $pname, $sigil, $ptype, $pline);
     }
@@ -2576,7 +2648,9 @@ func semantic_analyze(scalar $ast, int $show_warnings, int $strict_types) void {
             $ctx->{"cur_file"} = "" . $bblk->{"file"};
             $ctx->{"cur_from_use"} = $bblk->{"from_use"} + 0;
             $ctx->{"current_func"} = 0;
+            $ctx->{"cur_block_line"} = ast_get_line($bblk);
             analyze_block($ctx, $bblk);
+            $ctx->{"cur_block_line"} = 0;
         }
     }
     my int $ecount = $ast->{"end_block_count"} + 0;
@@ -2587,7 +2661,9 @@ func semantic_analyze(scalar $ast, int $show_warnings, int $strict_types) void {
             $ctx->{"cur_file"} = "" . $eblk->{"file"};
             $ctx->{"cur_from_use"} = $eblk->{"from_use"} + 0;
             $ctx->{"current_func"} = 0;
+            $ctx->{"cur_block_line"} = ast_get_line($eblk);
             analyze_block($ctx, $eblk);
+            $ctx->{"cur_block_line"} = 0;
         }
     }
 

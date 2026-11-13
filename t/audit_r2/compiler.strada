@@ -1,0 +1,220 @@
+#!/usr/bin/env strada
+# Cycle 2 Audit regression tests: Compiler & CodeGen fixes
+
+package R2BaseObj;
+has ro int $val (default => 10);
+func new(int $val = 10) scalar {
+    my hash %self = ("val" => $val);
+    return bless(\%self, "R2BaseObj");
+}
+func get_double(scalar $self) int {
+    return $self->val() * 2;
+}
+
+package R2SubObj;
+extends R2BaseObj;
+func new(int $val = 10) scalar {
+    my hash %self = ("val" => $val);
+    return bless(\%self, "R2SubObj");
+}
+# Overrides val() getter from parent has ro!
+func val(scalar $self) int {
+    return $self->{"val"} + 100;
+}
+
+package R2Vec;
+func new(int $x) scalar {
+    my hash %self = ("x" => $x);
+    return bless(\%self, "R2Vec");
+}
+func add_op(scalar $self, scalar $other, int $rev) scalar {
+    my int $ov = (ref($other) eq "R2Vec") ? $other->{"x"} : ($other + 0);
+    return R2Vec::new($self->{"x"} + $ov);
+}
+func str_op(scalar $self, scalar $unused, int $rev) str {
+    return "V(" . $self->{"x"} . ")";
+}
+use overload "+" => "add_op", '""' => "str_op";
+
+package R2InnerTryDestroy;
+func new() scalar {
+    my hash %self = ("k" => "v");
+    return bless(\%self, "R2InnerTryDestroy");
+}
+func DESTROY(scalar $self) void {
+    try { throw "inner_caught"; } catch ($e) {}
+}
+
+package R2OuterThrowDestroy;
+func new() scalar {
+    my hash %self = ("k" => "v");
+    return bless(\%self, "R2OuterThrowDestroy");
+}
+func DESTROY(scalar $self) void {
+    throw "outer_destroy_boom";
+}
+
+package main;
+
+our hash %g_r2_loc = ("k" => "orig", "n" => "0");
+
+func test_goto_local_try(int $mode) str {
+    $g_r2_loc{"k"} = "orig";
+    if ($mode == 1) {
+        {
+            local $g_r2_loc{"k"} = "inner";
+            goto AFTER_BLK;
+        }
+    }
+    if ($mode == 2) {
+        try {
+            local $g_r2_loc{"k"} = "in_try";
+            goto AFTER_TRY;
+        } catch ($e) {
+            return "bad_catch";
+        }
+    }
+    if ($mode == 3) {
+        my array @items = ("a", "b", "c");
+        foreach my str $it (@items) {
+            local $g_r2_loc{"k"} = "loop_" . $it;
+            if ($it eq "b") {
+                goto AFTER_FOREACH;
+            }
+        }
+    }
+    AFTER_BLK:
+    return "m1:" . $g_r2_loc{"k"};
+    AFTER_TRY:
+    return "m2:" . $g_r2_loc{"k"};
+    AFTER_FOREACH:
+    return "m3:" . $g_r2_loc{"k"};
+}
+
+func check_try_still_works() str {
+    try {
+        throw "ok_exc";
+    } catch ($e) {
+        return "" . $e;
+    }
+    return "fail";
+}
+
+func known_types_branch_and_loop(int $flag) str {
+    my scalar $v = 42;
+    if ($flag == 1) {
+        $v = 100;
+    } else {
+        $v = "hello";
+    }
+    # Branch intersection must not assume $v is still int
+    my str $res = "" . $v;
+
+    # Loop invalidation: $x starts as int, mutated to str inside loop
+    my scalar $x = 1;
+    my int $i = 0;
+    while ($i < 3) {
+        if ($i == 1) {
+            $x = "text";
+        }
+        $i++;
+    }
+    return $res . "|" . $x;
+}
+
+func switch_zero_edge(str $s) str {
+    switch ($s) {
+        case "0" { return "single_zero"; }
+        case "00" { return "double_zero"; }
+        default { return "other"; }
+    }
+    return "unreach";
+}
+
+func main() int {
+    my int $fail = 0;
+
+    # 1. goto crossing local/try/foreach restores local & unwinds try depth
+    if (test_goto_local_try(1) ne "m1:orig") {
+        say("FAIL: goto local m1"); $fail++;
+    }
+    if (test_goto_local_try(2) ne "m2:orig") {
+        say("FAIL: goto try m2"); $fail++;
+    }
+    if (check_try_still_works() ne "ok_exc") {
+        say("FAIL: try depth corrupted after goto out of try"); $fail++;
+    }
+    if (test_goto_local_try(3) ne "m3:orig") {
+        say("FAIL: goto foreach m3"); $fail++;
+    }
+
+    # 2. known_types branch intersection & loop invalidation
+    my str $kt1 = known_types_branch_and_loop(1);
+    my str $kt0 = known_types_branch_and_loop(0);
+    if ($kt1 ne "100|text" || $kt0 ne "hello|text") {
+        say("FAIL: known_types got kt1='" . $kt1 . "' kt0='" . $kt0 . "'");
+        $fail++;
+    }
+
+    # 3. Override of inherited `has` getter isn't bypassed by inlining
+    my scalar $sub = R2SubObj::new(5);
+    if ($sub->val() != 105) {
+        say("FAIL: subclass override val() got " . $sub->val());
+        $fail++;
+    }
+
+    # 4. Overload binary + stringify fallback
+    my scalar $v1 = R2Vec::new(10);
+    my scalar $v2 = R2Vec::new(20);
+    my scalar $v3 = $v1 + $v2;
+    if ("" . $v3 ne "V(30)") {
+        say("FAIL: overload + got '" . $v3 . "'");
+        $fail++;
+    }
+    my int $veq = ($v1 == $v1) ? 1 : 0;
+    if ($veq != 1) {
+        say("FAIL: overload fallback == self");
+        $fail++;
+    }
+
+    # 5. Interpolated expression and s///e
+    my int $n = 7;
+    my hash %ih = ("k" => "ok");
+    my str $interp = "sum=${$n + 5}:${$ih{"k"}}";
+    if ($interp ne "sum=12:ok") {
+        say("FAIL: interp got '" . $interp . "'");
+        $fail++;
+    }
+    my str $se = "x1 y2";
+    $se =~ s/(\d+)/($1 + 10)/eg;
+    if ($se ne "x11 y12") {
+        say("FAIL: s///e got '" . $se . "'");
+        $fail++;
+    }
+
+    # 6. switch "00" vs "0"
+    if (switch_zero_edge("0") ne "single_zero" || switch_zero_edge("00") ne "double_zero") {
+        say("FAIL: switch 0 vs 00");
+        $fail++;
+    }
+
+    # 7. DESTROY with internal try/catch must not clobber strada_free_depth for subsequent throwing DESTROY
+    my str $d_caught = "";
+    try {
+        {
+            my scalar $x = [R2InnerTryDestroy::new(), R2OuterThrowDestroy::new()];
+        }
+    } catch ($e) {
+        $d_caught = "" . $e;
+    }
+    if ($d_caught ne "outer_destroy_boom") {
+        say("FAIL: DESTROY free_depth caught='" . $d_caught . "'");
+        $fail++;
+    }
+
+    if ($fail == 0) {
+        say("ALL_R2_COMPILER_OK");
+        return 0;
+    }
+    return 1;
+}

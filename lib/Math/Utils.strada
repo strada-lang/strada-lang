@@ -81,7 +81,25 @@ func subtract(int $a, int $b) int {
     return $a - $b;
 }
 
-# Divide two numbers
+# Divide two numbers (exact 64-bit integer division)
 func divide(int $a, int $b) int {
-    return $a / $b;
+    my int $res = 0;
+    my int $err = 0;
+    __C__ {
+        int64_t av = strada_to_int(a);
+        int64_t bv = strada_to_int(b);
+        if (bv == 0) {
+            strada_decref(err);
+            err = strada_new_int(1);
+        } else if (av == INT64_MIN && bv == -1) {
+            strada_decref(err);
+            err = strada_new_int(2);
+        } else {
+            strada_decref(res);
+            res = strada_new_int(av / bv);
+        }
+    }
+    if ($err == 1) { throw "Illegal division by zero"; }
+    if ($err == 2) { throw "Integer overflow in divide"; }
+    return $res;
 }

@@ -1,0 +1,49 @@
+/*
+ Example test program for lib/tcc
+*/
+use lib "..";
+import_lib "tcc.so";
+
+func main() int {
+    my int $state = tcc::state_new();
+    if ($state == 0) {
+        say("FAIL: tcc::state_new returned 0");
+        return 1;
+    }
+    tcc::output_memory($state);
+    tcc::include_path($state, "../../runtime");
+    tcc::define($state, "STRADA_TCC_RUNTIME", "1");
+
+    my str $code = '
+    #include "strada_runtime_tcc.h"
+    StradaValue* double_it(StradaValue* x) {
+        int64_t val = strada_to_int(x);
+        return strada_new_int(val * 2);
+    }
+    ';
+
+    if (tcc::compile($state, $code) == 0) {
+        say("FAIL: tcc::compile: " . tcc::error());
+        tcc::state_delete($state);
+        return 1;
+    }
+    if (tcc::link($state) == 0) {
+        say("FAIL: tcc::link");
+        tcc::state_delete($state);
+        return 1;
+    }
+    my int $fn = tcc::symbol($state, "double_it");
+    if ($fn == 0) {
+        say("FAIL: symbol double_it not found");
+        tcc::state_delete($state);
+        return 1;
+    }
+    my scalar $res = core::dl_call_sv($fn, [21]);
+    tcc::state_delete($state);
+    if ($res != 42) {
+        say("FAIL: expected 42, got " . $res);
+        return 1;
+    }
+    say("PASS: lib/tcc example");
+    return 0;
+}

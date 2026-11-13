@@ -400,6 +400,8 @@ typedef struct StradaMetadata {
                               * File::Temp->new stashes the temp filename
                               * in this slot. NULL until first assigned. */
     StradaValue *tied_cache; /* Cached FETCH result for tied scalar exprs */
+    char *tied_each_key;     /* Tied hash each() iterator state (last key) */
+    uint8_t tied_each_started; /* 1 after tied FIRSTKEY called */
 } StradaMetadata;
 
 /* Main value structure - like Perl's SV (32 bytes) */
@@ -499,9 +501,13 @@ static inline void ss_decref(StradaString *ss) {
  * sizeof(StradaString) equals the offset of data[] for flexible array members. */
 #define SS_FROM_PV(pv) ((StradaString*)((char*)(pv) - sizeof(StradaString)))
 
+/* Abort with diagnostic on >4GB string allocation */
+__attribute__((noreturn)) void strada_str_oom_abort(size_t len);
+
 /* Allocate a StradaString and return pointer to its data (for use as value.pv).
  * The returned char* is valid for all string ops; to free, use SS_FREE_PV(). */
 static inline char *ss_alloc_pv(const char *s, size_t len) {
+    if (__builtin_expect(len > UINT32_MAX, 0)) strada_str_oom_abort(len);
     StradaString *ss = ss_new(s, (uint32_t)len, 0);
     return ss->data;
 }
@@ -1059,13 +1065,16 @@ void strada_cleanup_drain(void);
 int strada_cleanup_mark(void);         /* Get current depth */
 void strada_cleanup_restore(int mark); /* Restore to depth (no decref) */
 void strada_cleanup_drain_to(int mark); /* Drain to depth (with decref) */
+void strada_inflight_push(StradaValue *sv);
+void strada_inflight_pop(void);
 
 /* Macros for try/catch - used by generated code */
 #define STRADA_TRY_PUSH() (strada_try_depth < STRADA_MAX_TRY_DEPTH ? \
     (strada_try_stack[strada_try_depth].active = 1, strada_try_stack[strada_try_depth].cleanup_mark = strada_cleanup_mark(), \
      strada_try_stack[strada_try_depth].stack_mark = strada_stack_mark(), \
-     &strada_try_stack[strada_try_depth++].buf) : NULL)
-#define STRADA_TRY_POP() (strada_try_depth > 0 ? (strada_try_stack[--strada_try_depth].active = 0, 1) : 0)
+     &strada_try_stack[strada_try_depth++].buf) : strada_try_push_slot())
+#define STRADA_TRY_POP() (strada_try_depth > 0 && strada_try_depth <= STRADA_MAX_TRY_DEPTH ? \
+    (strada_try_stack[--strada_try_depth].active = 0, 1) : strada_try_pop_slot())
 
 /* Call stack for stack traces */
 #define STRADA_MAX_CALL_DEPTH 256
@@ -2247,6 +2256,7 @@ static inline __attribute__((always_inline)) int64_t strada_hv_fetch_int_ph(Stra
  * issues strada_die with Perl's canonical error format. Out-of-line in
  * strada_runtime.c because callers already gate it on __builtin_expect. */
 int strada_hv_check_lock(StradaValue *sv, const char *key);
+int strada_hv_check_lock_sv(StradaValue *sv, StradaValue *key);
 
 /* In-place num store for accumulator assignments ($numvar = <numeric> /
  * $numvar += n). When a is the sole owner of a plain heap NUM, write the
@@ -2295,6 +2305,9 @@ static inline void strada_hv_delete(StradaValue *sv, const char *key) {
 static inline void strada_hv_store_sv(StradaValue *sv, StradaValue *key, StradaValue *val) {
     if (!sv || STRADA_IS_TAGGED_INT(sv)) return;
     if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) { char *ks = strada_to_str(key); strada_tied_hash_store(sv, ks, val); free(ks); return; }
+    if (__builtin_expect(sv->meta && sv->meta->is_hash_locked, 0)) {
+        if (!strada_hv_check_lock_sv(sv, key)) return;
+    }
     strada_hash_set_sv(strada_deref_hash(sv), key, val);
 }
 static inline StradaValue* strada_hv_fetch_owned_sv(StradaValue *sv, StradaValue *key) {

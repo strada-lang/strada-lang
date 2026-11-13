@@ -206,64 +206,22 @@ func is_top_level_input(str $input) int {
     if (starts_with($input, "extends ")) { return 1; }
     if (starts_with($input, "use overload")) { return 1; }
     if (starts_with($input, "before ") || starts_with($input, "after ") || starts_with($input, "around ")) { return 1; }
-    if (starts_with($input, "use ")) { return 1; }
-    if (starts_with($input, "BEGIN ") || starts_with($input, "END ")) { return 1; }
+    if (starts_with($input, "const ") || starts_with($input, "our ") || starts_with($input, "with ")) { return 1; }
+    if (starts_with($input, "use ") || starts_with($input, "import_lib ") ||
+        starts_with($input, "import_object ") || starts_with($input, "import_archive ")) { return 1; }
+    if (starts_with($input, "BEGIN ") || starts_with($input, "END ") ||
+        starts_with($input, "BEGIN{") || starts_with($input, "END{")) { return 1; }
     return 0;
 }
 
-# Parse and evaluate REPL input
-func repl_eval(scalar $interp, str $input) scalar {
-    my str $trimmed = str_trim($input);
-    if (length($trimmed) == 0) { return undef; }
+my str $g_repl_pkg = "main";
 
-    # Auto-append semicolon for convenience if not ending with ; or }
-    my int $tlen = length($trimmed);
-    my str $last_char = substr($trimmed, $tlen - 1, 1);
-    if ($last_char ne ";" && $last_char ne "}") {
-        $trimmed = $trimmed . ";";
-    }
-
-    # Build source for parser
-    my str $source = "";
-    my int $is_top = is_top_level_input($trimmed);
-
-    if ($is_top) {
-        # Top-level: append a dummy function so we have a valid program
-        $source = $trimmed . "\nfunc __eval__() scalar { return undef; }\n";
-    } else {
-        # Wrap in a function for parsing
-        $source = "func __eval__() scalar {\n" . $trimmed . "\n}\n";
-    }
-
-    # Tokenize and parse
-    my scalar $tokens = lex_tokenize($source);
-    my scalar $parser = parser_new($tokens);
-    parser_set_filename($parser, "<repl>");
-    my array @empty = ();
-    my scalar $program = parse_program($parser, \@empty, \@empty, \@empty, \@empty);
-
-    # Register any non-__eval__ functions
-    my scalar $funcs = $program->{"functions"};
-    my int $func_count = $program->{"function_count"};
-    my scalar $eval_func = undef;
-    my int $i = 0;
-    while ($i < $func_count) {
-        my scalar $fn = $funcs->[$i];
-        if ($fn->{"name"} eq "__eval__") {
-            $eval_func = $fn;
-        } else {
-            Strada::Interpreter::interp_register_func($interp, $fn->{"name"}, $fn->{"params"}, $fn->{"param_count"}, $fn->{"body"}, $interp->{"global_env"});
-            if (defined($fn->{"package"}) && length("" . $fn->{"package"}) > 0) {
-                $interp->{"functions"}->{$fn->{"name"}}->{"package"} = $fn->{"package"};
-            }
-        }
-        $i = $i + 1;
-    }
-
-    # Register enums
+# Shared AST registration helper for repl_eval and load_file (enums, consts, OOP, import_lib, globals, BEGIN/END)
+func register_program_extras(scalar $interp, scalar $program) void {
+    # 1. Register enums
     my scalar $enums = $program->{"enums"};
     my int $enum_count = $program->{"enum_count"};
-    $i = 0;
+    my int $i = 0;
     while ($i < $enum_count) {
         my scalar $en = $enums->[$i];
         my str $enum_name = $en->{"name"};
@@ -279,8 +237,122 @@ func repl_eval(scalar $interp, str $input) scalar {
         $i = $i + 1;
     }
 
-    # Load OOP features (inherits, overloads, modifiers)
+    # 2. Evaluate const declarations before BEGIN blocks
+    my scalar $globals = $program->{"globals"};
+    my int $global_count = defined($program->{"global_count"}) ? $program->{"global_count"} : 0;
+    $i = 0;
+    while ($i < $global_count) {
+        my scalar $g = $globals->[$i];
+        if ($g->{"type"} == NODE_CONST_DECL()) {
+            my str $cname = $g->{"name"};
+            my scalar $init_val = Strada::Interpreter::eval_node($interp, $g->{"init"}, $interp->{"global_env"});
+            $interp->{"constants"}->{$cname} = $init_val;
+            Strada::Interpreter::env_set($interp->{"global_env"}, $cname, $init_val);
+        }
+        $i = $i + 1;
+    }
+
+    # 3. Load OOP features and import_lib native functions
     Strada::Interpreter::interp_load_oop($interp, $program);
+    Strada::Interpreter::interp_load_import_libs($interp, $program);
+
+    # 4. Evaluate non-const globals (our, top-level my)
+    $i = 0;
+    while ($i < $global_count) {
+        my scalar $g = $globals->[$i];
+        my int $gtype = $g->{"type"};
+        if ($gtype == NODE_VAR_DECL() || $gtype == NODE_OUR_DECL()) {
+            Strada::Interpreter::eval_node($interp, $g, $interp->{"global_env"});
+        }
+        $i = $i + 1;
+    }
+
+    # 5. Run BEGIN blocks (clearing any leaked signals)
+    my scalar $begin_blocks = $program->{"begin_blocks"};
+    my int $begin_count = defined($program->{"begin_block_count"}) ? $program->{"begin_block_count"} : 0;
+    my int $bi = 0;
+    while ($bi < $begin_count) {
+        try {
+            Strada::Interpreter::eval_block($interp, $begin_blocks->[$bi], $interp->{"global_env"});
+        } catch ($be) {
+            if (!Strada::Interpreter::is_signal($be, "return")) { throw($be); }
+        }
+        $interp->{"signal"} = 0; # SIG::NONE
+        $interp->{"signal_value"} = undef;
+        $interp->{"signal_label"} = "";
+        $bi = $bi + 1;
+    }
+
+    # 6. Store END blocks
+    my scalar $end_blocks = $program->{"end_blocks"};
+    my int $end_count = defined($program->{"end_block_count"}) ? $program->{"end_block_count"} : 0;
+    my int $ei = 0;
+    while ($ei < $end_count) {
+        push($interp->{"end_blocks"}, $end_blocks->[$ei]);
+        $ei = $ei + 1;
+    }
+}
+
+# Parse and evaluate REPL input
+func repl_eval(scalar $interp, str $input) scalar {
+    my str $trimmed = str_trim($input);
+    if (length($trimmed) == 0) { return undef; }
+
+    # Auto-append semicolon for convenience if not ending with ; or }
+    my int $tlen = length($trimmed);
+    my str $last_char = substr($trimmed, $tlen - 1, 1);
+    if ($last_char ne ";" && $last_char ne "}") {
+        $trimmed = $trimmed . ";";
+    }
+
+    # Build source for parser in active REPL package
+    my str $prev_pkg = $g_repl_pkg;
+    my str $next_pkg = Strada::Interpreter::extract_last_package($trimmed, $prev_pkg);
+    my str $source = "";
+    my int $is_top = is_top_level_input($trimmed);
+
+    if ($is_top) {
+        # Top-level: append a dummy function so we have a valid program
+        $source = "package " . $prev_pkg . ";\n" . $trimmed . "\npackage main;\nfunc __eval__() scalar { return undef; }\n";
+    } else {
+        # Wrap in a function for parsing
+        $source = "package " . $prev_pkg . ";\nfunc __eval__() scalar {\n" . $trimmed . "\n}\n";
+    }
+
+    # Tokenize and parse
+    my scalar $tokens = lex_tokenize($source);
+    my scalar $parser = parser_new($tokens);
+    parser_set_filename($parser, "<repl>");
+    my scalar $ckeys = keys($interp->{"constants"});
+    my int $cki = 0;
+    while ($cki < size($ckeys)) {
+        $parser->{"const_names"}->{$ckeys->[$cki]} = 1;
+        $cki = $cki + 1;
+    }
+    my array @empty = ();
+    my scalar $program = parse_program($parser, \@empty, \@empty, \@empty, \@empty);
+
+    # Register any non-__eval__ functions
+    my scalar $funcs = $program->{"functions"};
+    my int $func_count = $program->{"function_count"};
+    my scalar $eval_func = undef;
+    my int $i = 0;
+    while ($i < $func_count) {
+        my scalar $fn = $funcs->[$i];
+        if ($fn->{"name"} eq "__eval__" || (defined($fn->{"bare_name"}) && $fn->{"bare_name"} eq "__eval__")) {
+            $eval_func = $fn;
+        } else {
+            Strada::Interpreter::interp_register_func($interp, $fn->{"name"}, $fn->{"params"}, $fn->{"param_count"}, $fn->{"body"}, $interp->{"global_env"});
+            if (defined($fn->{"package"}) && length("" . $fn->{"package"}) > 0) {
+                $interp->{"functions"}->{$fn->{"name"}}->{"package"} = $fn->{"package"};
+            }
+        }
+        $i = $i + 1;
+    }
+
+    register_program_extras($interp, $program);
+    $g_repl_pkg = $next_pkg;
+    $interp->{"package"} = $prev_pkg;
 
     # If we have __eval__, execute its body in REPL env
     if (defined($eval_func)) {
@@ -289,13 +361,29 @@ func repl_eval(scalar $interp, str $input) scalar {
         my int $stmt_count = $body->{"statement_count"};
         # Catch return signals from the __eval__ body
         my scalar $result = undef;
+        my int $returned = 0;
         try {
             $result = Strada::Interpreter::eval_stmts_in_env($interp, $stmts, $stmt_count, $interp->{"global_env"});
+            if ($interp->{"signal"} == 1) { # SIG::RETURN
+                $result = $interp->{"signal_value"};
+                $returned = 1;
+            }
+            $interp->{"signal"} = 0; # SIG::NONE
+            $interp->{"signal_value"} = undef;
+            $interp->{"signal_label"} = "";
         } catch ($e) {
+            $interp->{"package"} = $next_pkg;
+            $interp->{"signal"} = 0; # SIG::NONE
+            $interp->{"signal_value"} = undef;
+            $interp->{"signal_label"} = "";
             if (Strada::Interpreter::is_signal($e, "return")) {
                 return $e->{"value"};
             }
             throw($e);
+        }
+        $interp->{"package"} = $next_pkg;
+        if ($returned == 1) {
+            return $result;
         }
         # Only return displayable result if the last statement is an expression
         if ($stmt_count > 0) {
@@ -311,6 +399,7 @@ func repl_eval(scalar $interp, str $input) scalar {
         return undef;
     }
 
+    $interp->{"package"} = $next_pkg;
     return undef;
 }
 
@@ -362,8 +451,8 @@ func load_file(scalar $interp, str $filename) void {
         $i = $i + 1;
     }
 
-    # Load OOP features
-    Strada::Interpreter::interp_load_oop($interp, $program);
+    # Load enums, constants, OOP, import_lib, globals, BEGIN/END
+    register_program_extras($interp, $program);
 
     say("Loaded " . $filename);
 }
@@ -456,13 +545,9 @@ func run_repl(scalar $interp) void {
             next;
         }
         if ($input eq ".clear") {
-            my hash %functions = ();
-            my hash %enums = ();
-            my hash %constants = ();
-            $interp->{"functions"} = \%functions;
-            $interp->{"enums"} = \%enums;
-            $interp->{"constants"} = \%constants;
-            $interp->{"global_env"} = Strada::Interpreter::env_new(undef);
+            Strada::Interpreter::interp_cleanup($interp);
+            $interp = Strada::Interpreter::interp_new();
+            $g_repl_pkg = "main";
             say("State cleared.");
             next;
         }
@@ -499,6 +584,7 @@ func run_repl(scalar $interp) void {
     if (length($histfile) > 0) {
         history_save($histfile);
     }
+    Strada::Interpreter::interp_cleanup($interp);
 }
 
 # Get directory of a file path

@@ -132,7 +132,7 @@ Returns array C<[fn_ptr, state]> or C<[0, 0]> on error.
     import_lib "tcc.so";
 
     my str $code = '
-    #include "strada_runtime.h"
+    #include "strada_runtime_tcc.h"
 
     StradaValue* double_it(StradaValue* x) {
         long long val = strada_to_int(x);

@@ -799,7 +799,7 @@ static DbiStatement* dbi_prepare(DbiHandle *dbh, const char *sql) {
         case DBI_DRIVER_MYSQL: {
             MYSQL_STMT *stmt = mysql_stmt_init((MYSQL*)dbh->conn);
             if (!stmt || mysql_stmt_prepare(stmt, sql, strlen(sql)) != 0) {
-                int eno = stmt ? mysql_stmt_errno(stmt) : -1;
+                int eno = stmt ? (int)mysql_stmt_errno(stmt) : -1;
                 char errbuf[1024];
                 const char *errmsg = stmt ? mysql_stmt_error(stmt) : "mysql_stmt_init failed";
                 snprintf(errbuf, sizeof(errbuf), "%s", errmsg ? errmsg : "mysql_stmt_prepare failed");
@@ -906,6 +906,11 @@ static int dbi_execute_raw(DbiStatement *sth) {
 #ifdef HAVE_SQLITE3
         case DBI_DRIVER_SQLITE: {
             sqlite3_stmt *stmt = (sqlite3_stmt*)sth->stmt;
+            if (!stmt) {
+                sth->affected_rows = 0;
+                sth->finished = 1;
+                return 0;
+            }
             int rc = sqlite3_step(stmt);
             if (rc == SQLITE_DONE) {
                 sth->affected_rows = sqlite3_changes((sqlite3*)dbh->conn);
@@ -1019,9 +1024,19 @@ static int dbi_execute_raw(DbiStatement *sth) {
             const char *q = sth->pg_sql ? sth->pg_sql : sth->sql;
             PGresult *res = NULL;
             if (sth->num_params > 0 && sth->pg_param_values) {
+                int *pg_fmts = calloc((size_t)sth->num_params, sizeof(int));
+                if (pg_fmts) {
+                    for (int pi = 0; pi < sth->num_params; pi++) {
+                        if (sth->pg_param_values[pi] && sth->pg_param_lengths[pi] > 0 &&
+                            memchr(sth->pg_param_values[pi], '\0', (size_t)sth->pg_param_lengths[pi]) != NULL) {
+                            pg_fmts[pi] = 1;
+                        }
+                    }
+                }
                 res = PQexecParams(pg, q, sth->num_params, NULL,
                                    (const char * const *)sth->pg_param_values,
-                                   sth->pg_param_lengths, NULL, 0);
+                                   sth->pg_param_lengths, pg_fmts, 0);
+                free(pg_fmts);
             } else {
                 res = PQexec(pg, q);
             }
@@ -1079,10 +1094,12 @@ static void dbi_bind_str(DbiStatement *sth, int idx, const char *val) {
     switch (sth->dbh->driver) {
 #ifdef HAVE_SQLITE3
         case DBI_DRIVER_SQLITE:
-            if (val) {
-                sqlite3_bind_text((sqlite3_stmt*)sth->stmt, idx, val, -1, SQLITE_TRANSIENT);
-            } else {
-                sqlite3_bind_null((sqlite3_stmt*)sth->stmt, idx);
+            if (sth->stmt) {
+                if (val) {
+                    sqlite3_bind_text((sqlite3_stmt*)sth->stmt, idx, val, -1, SQLITE_TRANSIENT);
+                } else {
+                    sqlite3_bind_null((sqlite3_stmt*)sth->stmt, idx);
+                }
             }
             break;
 #endif
@@ -1145,7 +1162,9 @@ static void dbi_bind_null(DbiStatement *sth, int idx) {
     switch (sth->dbh->driver) {
 #ifdef HAVE_SQLITE3
         case DBI_DRIVER_SQLITE:
-            sqlite3_bind_null((sqlite3_stmt*)sth->stmt, idx);
+            if (sth->stmt) {
+                sqlite3_bind_null((sqlite3_stmt*)sth->stmt, idx);
+            }
             break;
 #endif
 #ifdef HAVE_MYSQL
@@ -1184,8 +1203,10 @@ static void dbi_clear_bindings(DbiStatement *sth) {
     switch (sth->dbh->driver) {
 #ifdef HAVE_SQLITE3
         case DBI_DRIVER_SQLITE:
-            sqlite3_reset((sqlite3_stmt*)sth->stmt);
-            sqlite3_clear_bindings((sqlite3_stmt*)sth->stmt);
+            if (sth->stmt) {
+                sqlite3_reset((sqlite3_stmt*)sth->stmt);
+                sqlite3_clear_bindings((sqlite3_stmt*)sth->stmt);
+            }
             break;
 #endif
 #ifdef HAVE_MYSQL
@@ -1248,6 +1269,7 @@ static void dbi_bind_value(DbiStatement *sth, int idx, StradaValue *val) {
 
 #ifdef HAVE_SQLITE3
     if (sth->dbh->driver == DBI_DRIVER_SQLITE) {
+        if (!sth->stmt) return;
         if (!is_tied && (STRADA_IS_TAGGED_INT(val) || val->type == STRADA_INT)) {
             sqlite3_bind_int64((sqlite3_stmt*)sth->stmt, idx, strada_to_int(val));
             return;
@@ -1814,9 +1836,12 @@ static int dbi_rollback(DbiHandle *dbh) {
  * connection charset, Postgres' standard_conforming_strings), unlike the
  * hand-rolled fallback. Returns a malloc'd string the caller frees with
  * free(). Prefer bound ? placeholders over this where possible. */
-static char* dbi_quote(DbiHandle *dbh, const char *str) {
+static char* dbi_quote_len(DbiHandle *dbh, const char *str, size_t len) {
     if (!str) return strdup("NULL");
-    size_t len = strlen(str);
+    int mysql = (dbh && dbh->driver == DBI_DRIVER_MYSQL);
+    if (!mysql && memchr(str, '\0', len) != NULL) {
+        return NULL;
+    }
 
     if (dbh && dbh->connected) {
         switch (dbh->driver) {
@@ -1871,26 +1896,34 @@ static char* dbi_quote(DbiHandle *dbh, const char *str) {
      * '...' and double internal single quotes; also double backslashes for
      * MySQL, which treats '\' as an escape by default. */
     {
-        int mysql = (dbh && dbh->driver == DBI_DRIVER_MYSQL);
         char *quoted = malloc(len * 2 + 3);
+        if (!quoted) return NULL;
         char *p = quoted;
         *p++ = '\'';
-        while (*str) {
-            if (*str == '\'') {
+        for (size_t i = 0; i < len; i++) {
+            unsigned char c = (unsigned char)str[i];
+            if (c == '\'') {
                 *p++ = '\'';
                 *p++ = '\'';
-            } else if (*str == '\\' && mysql) {
+            } else if (c == '\\' && mysql) {
                 *p++ = '\\';
                 *p++ = '\\';
+            } else if (c == '\0' && mysql) {
+                *p++ = '\\';
+                *p++ = '0';
             } else {
-                *p++ = *str;
+                *p++ = (char)c;
             }
-            str++;
         }
         *p++ = '\'';
         *p = '\0';
         return quoted;
     }
+}
+
+static char* dbi_quote(DbiHandle *dbh, const char *str) {
+    if (!str) return strdup("NULL");
+    return dbi_quote_len(dbh, str, strlen(str));
 }
 
 /* Quote an SQL IDENTIFIER (table/column/sort-column name). Identifiers cannot
@@ -2416,21 +2449,31 @@ func rollback(scalar $dbh) int {
 }
 
 # Quote a string value for safe use in SQL
-func quote(scalar $dbh, str $value) str {
-    if (!defined($dbh)) {
-        return "''";
+func quote(scalar $dbh, scalar $value) str {
+    if (!defined($value)) {
+        return "NULL";
     }
 
-    my int $dbh_ptr = $dbh->{"_ptr"};
+    my int $dbh_ptr = defined($dbh) ? $dbh->{"_ptr"} : 0;
     my str $result = "";
+    my int $nul_err = 0;
     __C__ {
         DbiHandle *h = (DbiHandle *)(intptr_t)strada_to_int(dbh_ptr);
-        char *val_str = strada_to_str(value);
-        char *quoted = dbi_quote(h, val_str);
-        strada_decref(result);
-        result = strada_new_str(quoted);
-        free(quoted);
+        unsigned long val_len = 0;
+        char *val_str = dbi_value_bytes(value, &val_len);
+        char *quoted = dbi_quote_len(h, val_str, (size_t)val_len);
         free(val_str);
+        if (!quoted) {
+            strada_decref(nul_err);
+            nul_err = strada_new_int(1);
+        } else {
+            strada_decref(result);
+            result = strada_new_str(quoted);
+            free(quoted);
+        }
+    }
+    if ($nul_err == 1) {
+        throw "DBI::quote: cannot quote string containing embedded NUL byte";
     }
     return $result;
 }

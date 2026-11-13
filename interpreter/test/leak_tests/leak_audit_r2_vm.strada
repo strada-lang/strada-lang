@@ -1,0 +1,93 @@
+#!/usr/bin/env strada
+# Valgrind leak regression suite for Cycle 2 VM & Tree-Walk interpreter fixes
+
+package LeakInterpDyn;
+func new(str $v) scalar {
+    my hash %s = ("v" => $v);
+    return bless(\%s, "LeakInterpDyn");
+}
+func echo(scalar $self, str $x) str {
+    return $self->{"v"} . "_" . $x;
+}
+
+package main;
+
+our hash %g_h = ("k" => "orig");
+
+func local_throw_unwind(int $i) str {
+    $g_h{"k"} = "orig";
+    try {
+        local $g_h{"k"} = "tmp_" . $i;
+        throw "err_" . $i;
+    } catch ($e) {
+        return $g_h{"k"} . ":" . $e;
+    }
+    return "";
+}
+
+func main() int {
+    my int $i = 0;
+    while ($i < 30) {
+        # 1. do {} expression
+        my str $dv = do {
+            my str $tmp = "do_" . $i;
+            $tmp . "_x";
+        };
+        if (length($dv) == 0) { return 1; }
+
+        # 2. local %h{"k"} with throw unwind
+        if (local_throw_unwind($i) ne ("orig:err_" . $i)) { return 2; }
+
+        # 3. tr/// with capture + flags
+        my str $cap = "abc" . $i;
+        my scalar $tfn = func () int { return ($cap =~ tr/a-z/A-Z/); };
+        if ($tfn->() != 3) { return 3; }
+        my str $trd = "x1y2z";
+        ($trd =~ tr/0-9//d);
+
+        # 4. Live scalar ref
+        my str $sv = "s_" . $i;
+        my scalar $sr = \$sv;
+        $$sr = "u_" . $i;
+        if ($sv ne ("u_" . $i) || ref($sr) ne "SCALAR") { return 4; }
+
+        # 5. chomp / chop / unshift / splice / shallow copy
+        my str $ch = "ln_" . $i . "\n";
+        chomp($ch);
+        my array @a = ("b", "c");
+        unshift(@a, "a", "z");
+        my array @b = @a;
+        splice(@b, -1, 1, "end");
+        $b[0] = "mod";
+        if ($a[0] eq "mod") { return 5; }
+
+        # 6. Dynamic method call + missing throw + die()
+        my scalar $obj = LeakInterpDyn::new("ok");
+        my str $m = "echo";
+        if ($obj->$m("" . $i) ne ("ok_" . $i)) { return 6; }
+        try {
+            my str $bad = "missing_" . $i;
+            $obj->$bad();
+        } catch ($me) {
+        }
+        try {
+            die({"code" => $i});
+        } catch ($de) {
+        }
+
+        # 7. Closure capture s///e + ++
+        my int $cc = 0;
+        my str $cs = "n" . $i;
+        my scalar $cf = func () str {
+            $cs =~ s/(\d+)/($1 + 1)/e;
+            $cc++;
+            return $cs . ":" . $cc;
+        };
+        if (length($cf->()) == 0) { return 7; }
+
+        $i++;
+    }
+
+    say("LEAK_INTERP_R2_OK");
+    return 0;
+}

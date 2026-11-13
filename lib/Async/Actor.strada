@@ -37,12 +37,19 @@ version "1.0.0";
 func new(scalar $handler, scalar $state) scalar {
     my hash %self;
     my scalar $inbox = async::channel(0);
+    my scalar $stopped = async::atomic(0);
+    my scalar $err_mtx = async::mutex();
+    my hash %err_box;
+    $err_box{"error"} = undef;
+    my scalar $err_ref = \%err_box;
+
     $self{"inbox"} = $inbox;
-    $self{"stopped"} = 0;
+    $self{"stopped"} = $stopped;
+    $self{"err_mtx"} = $err_mtx;
+    $self{"err_box"} = $err_ref;
     $self{"_awaited"} = 0;
+    $self{"future"} = undef;
     my scalar $selfref = bless(\%self, "Async::Actor");
-    my scalar $self_w = $selfref;
-    core::weaken($self_w);
 
     my scalar $future = async::spawn(fn () scalar {
         while (1) {
@@ -57,10 +64,10 @@ func new(scalar $handler, scalar $state) scalar {
                 $result = $handler->($envelope->{"msg"}, $state);
             } catch ($e) {
                 $had_error = 1;
-                if (defined($self_w)) {
-                    $self_w->{"error"} = $e;
-                    $self_w->{"stopped"} = 1;
-                }
+                async::lock($err_mtx);
+                $err_ref->{"error"} = $e;
+                async::unlock($err_mtx);
+                async::atomic_store($stopped, 1);
                 async::close($inbox);
             }
             if (defined($reply_ch)) {
@@ -92,7 +99,7 @@ func new(scalar $handler, scalar $state) scalar {
 }
 
 func tell(scalar $self, scalar $msg) void {
-    if ($self->{"stopped"} == 1) {
+    if (async::atomic_load($self->{"stopped"}) == 1) {
         throw "Async::Actor: tell after stop";
     }
     my hash %env;
@@ -101,7 +108,7 @@ func tell(scalar $self, scalar $msg) void {
 }
 
 func ask(scalar $self, scalar $msg) scalar {
-    if ($self->{"stopped"} == 1) {
+    if (async::atomic_load($self->{"stopped"}) == 1) {
         throw "Async::Actor: ask after stop";
     }
     my scalar $reply = async::channel(1);
@@ -117,17 +124,32 @@ func ask(scalar $self, scalar $msg) scalar {
 }
 
 func error(scalar $self) scalar {
-    return $self->{"error"};
+    my scalar $mtx = $self->{"err_mtx"};
+    if (!defined($mtx)) { return undef; }
+    async::lock($mtx);
+    my scalar $err = $self->{"err_box"}->{"error"};
+    async::unlock($mtx);
+    return $err;
 }
 
 func stop(scalar $self) void {
     if ($self->{"_awaited"} == 1) {
         return;
     }
-    $self->{"stopped"} = 1;
+    async::atomic_store($self->{"stopped"}, 1);
     $self->{"_awaited"} = 1;
     async::close($self->{"inbox"});
-    try {
-        my scalar $ignored = await $self->{"future"};
-    } catch ($e) { }
+    if (defined($self->{"future"})) {
+        try {
+            my scalar $ignored = await $self->{"future"};
+        } catch ($e) { }
+    }
+}
+
+func DESTROY(scalar $self) void {
+    $self->stop();
+    if (defined($self->{"err_mtx"})) {
+        async::mutex_destroy($self->{"err_mtx"});
+        $self->{"err_mtx"} = undef;
+    }
 }

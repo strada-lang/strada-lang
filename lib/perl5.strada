@@ -315,8 +315,8 @@ func call(str $sub_name, str $arg) str {
             SAVETMPS;
             PUSHMARK(SP);
 
-            if (arg_str && strlen(arg_str) > 0) {
-                XPUSHs(sv_2mortal(newSVpv(arg_str, 0)));
+            if (arg && (STRADA_IS_TAGGED_INT(arg) || arg->type != STRADA_UNDEF)) {
+                XPUSHs(sv_2mortal(newSVpv(arg_str ? arg_str : "", 0)));
             }
 
             PUTBACK;

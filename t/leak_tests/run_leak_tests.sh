@@ -153,6 +153,7 @@ TESTS=(
     "test_phase3_codegen_leaks"
     "test_phase4_stdlib_leaks"
     "test_phase5_eval_jit_leaks"
+    "test_audit_r2_leaks"
 )
 
 FILTER="${1:-}"

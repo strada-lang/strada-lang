@@ -308,6 +308,10 @@ func parse_url(str $url) hash {
     $result{"query"} = "";
 
     my str $remaining = $url;
+    my int $frag_pos = index($remaining, "#");
+    if ($frag_pos >= 0) {
+        $remaining = substr($remaining, 0, $frag_pos);
+    }
 
     # Extract scheme
     my int $scheme_end = index($remaining, "://");
@@ -729,6 +733,9 @@ func _resolve_url(str $base_url, str $location) str {
     if (length($location) > 0 && substr($location, 0, 1) eq "/") {
         return $bu{"scheme"} . "://" . $authority . $location;
     }
+    if (length($location) > 0 && substr($location, 0, 1) eq "?") {
+        return $bu{"scheme"} . "://" . $authority . $bu{"path"} . $location;
+    }
     my str $dir = $bu{"path"};
     my int $slash = rindex($dir, "/");
     if ($slash >= 0) {
@@ -838,12 +845,30 @@ func _max_response_bytes(hash %options) int {
     return 67108864;
 }
 
-# Internal: does a raw response's header section exceed $max bytes?
+# Internal: does any HTTP response header block (including after 1xx interim responses) exceed $max bytes?
 func _headers_too_large(str $raw, int $max) int {
     if ($max <= 0) { return 0; }
-    my int $sep = core::byte_index($raw, "\r\n\r\n");
-    if ($sep < 0) { return core::byte_length($raw) > $max ? 1 : 0; }
-    return $sep > $max ? 1 : 0;
+    my int $hdr_start = 0;
+    my int $raw_len = core::byte_length($raw);
+    while (1) {
+        my int $sep = core::byte_index($raw, "\r\n\r\n", $hdr_start);
+        if ($sep < 0) {
+            return ($raw_len - $hdr_start) > $max ? 1 : 0;
+        }
+        if (($sep - $hdr_start) > $max) {
+            return 1;
+        }
+        my str $hdr_part = core::byte_substr($raw, $hdr_start, $sep - $hdr_start);
+        my int $first_eol = core::byte_index($hdr_part, "\r\n");
+        my str $status_line = ($first_eol > 0) ? core::byte_substr($hdr_part, 0, $first_eol) : $hdr_part;
+        my array @sp = split(" ", $status_line);
+        my int $st = (scalar(@sp) >= 2) ? cast_int($sp[1]) : 0;
+        if (LWP::_is_interim_status($st)) {
+            $hdr_start = $sep + 4;
+            next;
+        }
+        return 0;
+    }
 }
 
 # Internal: read HTTP response from socket. Stops early once more than
@@ -868,7 +893,7 @@ func read_response(scalar $sock, int $max_header_bytes = 65536, int $max_respons
             break;
         }
 
-        if (core::byte_index($response, "\r\n\r\n") < 0 && LWP::_headers_too_large($response, $max_header_bytes)) {
+        if (LWP::_headers_too_large($response, $max_header_bytes)) {
             break;
         }
         if (LWP::_response_complete($response, $method)) {

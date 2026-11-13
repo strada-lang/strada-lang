@@ -14,6 +14,7 @@
  */
 
 use lib "lib";
+use JSON;
 
 our hash %g_visited = ();
 
@@ -182,46 +183,12 @@ func _http_get(str $url) str {
 }
 
 # ============================================================
-# JSON decoder (minimal — handles CPAN API responses)
+# JSON decoder (native via JSON module)
 # ============================================================
 
 func json_decode(str $s) scalar {
-    # Use Strada's built-in JSON if available, otherwise shell out to python
-    my str $result = core::qx("echo '" . replace_all($s, "'", "'\\''") . "' | python3 -c \"import json,sys; print(json.dumps(json.load(sys.stdin)))\" 2>/dev/null");
-    if (length($result) == 0) { return undef; }
-    # For now, parse key fields manually from the JSON string
-    my hash %data = ();
-    # Extract download_url
-    my int $dl_idx = index($result, "\"download_url\"");
-    if ($dl_idx >= 0) {
-        my int $colon = index(substr($result, $dl_idx, 200), ":");
-        my int $quote1 = index(substr($result, $dl_idx + $colon, 200), "\"");
-        my int $quote2 = index(substr($result, $dl_idx + $colon + $quote1 + 1, 200), "\"");
-        if ($quote1 >= 0 && $quote2 >= 0) {
-            $data{"download_url"} = substr($result, $dl_idx + $colon + $quote1 + 1, $quote2);
-        }
-    }
-    # Extract name
-    my int $name_idx = index($result, "\"name\"");
-    if ($name_idx >= 0) {
-        my int $colon = index(substr($result, $name_idx, 100), ":");
-        my int $q1 = index(substr($result, $name_idx + $colon, 100), "\"");
-        my int $q2 = index(substr($result, $name_idx + $colon + $q1 + 1, 100), "\"");
-        if ($q1 >= 0 && $q2 >= 0) {
-            $data{"name"} = substr($result, $name_idx + $colon + $q1 + 1, $q2);
-        }
-    }
-    # Extract version
-    my int $ver_idx = index($result, "\"version\"");
-    if ($ver_idx >= 0) {
-        my int $colon = index(substr($result, $ver_idx, 100), ":");
-        my int $q1 = index(substr($result, $ver_idx + $colon, 100), "\"");
-        my int $q2 = index(substr($result, $ver_idx + $colon + $q1 + 1, 100), "\"");
-        if ($q1 >= 0 && $q2 >= 0) {
-            $data{"version"} = substr($result, $ver_idx + $colon + $q1 + 1, $q2);
-        }
-    }
-    return \%data;
+    if (length(trim($s)) == 0) { return undef; }
+    return JSON::decode($s);
 }
 
 # ============================================================
@@ -258,9 +225,9 @@ func _install_module(str $module, str $lib_dir, int $verbose, int $depth) int {
         return 0;
     }
 
-    my str $download_url = "" . $release->{"download_url"};
-    my str $name = "" . $release->{"name"};
-    my str $version = "" . $release->{"version"};
+    my str $download_url = defined($release->{"download_url"}) ? ("" . $release->{"download_url"}) : "";
+    my str $name = defined($release->{"name"}) ? ("" . $release->{"name"}) : "";
+    my str $version = defined($release->{"version"}) ? ("" . $release->{"version"}) : "";
 
     if (length($download_url) == 0 || is_valid_http_url($download_url) == 0) {
         say("  No valid download URL for " . $module);
@@ -292,7 +259,7 @@ func _install_module(str $module, str $lib_dir, int $verbose, int $depth) int {
 
     # Extract
     say("  Extracting...");
-    core::system_argv("tar", ["tar", "xzf", $tarball, "-C", $tmp_dir]);
+    core::system_argv("tar", ["tar", "xzf", $tarball, "-C", $tmp_dir, "--no-same-owner"]);
 
     # Find the extracted directory
     my str $extract_dir = core::qx("ls -d " . sq($tmp_dir) . "/*/ 2>/dev/null | head -1");
@@ -345,8 +312,8 @@ func _install_pure_perl(str $extract_dir, str $lib_dir, int $verbose) int {
         $lib_src = $extract_dir;
     }
 
-    # Copy all .pm files preserving directory structure
-    my str $find_result = core::qx("find '" . $lib_src . "' -name '*.pm' 2>/dev/null");
+    # Copy all .pm files preserving directory structure (skip symlinks)
+    my str $find_result = core::qx("find " . sq($lib_src) . " -type f -name '*.pm' 2>/dev/null");
     my array @pm_files = split("\n", trim($find_result));
     my int $count = 0;
     my int $fi = 0;
@@ -423,11 +390,11 @@ func _install_xs_module(str $extract_dir, str $lib_dir, int $verbose) int {
     }
 
     # Find all .xs files
-    my str $xs_list = core::qx("find '" . $extract_dir . "' -name '*.xs' 2>/dev/null");
+    my str $xs_list = core::qx("find " . sq($extract_dir) . " -name '*.xs' 2>/dev/null");
     my array @xs_files = split("\n", trim($xs_list));
 
     # Find all .c files that aren't xsubpp output (helper C files like mop.c)
-    my str $c_list = core::qx("find '" . $extract_dir . "' -maxdepth 2 -name '*.c' ! -name '*.xs.c' 2>/dev/null");
+    my str $c_list = core::qx("find " . sq($extract_dir) . " -maxdepth 2 -name '*.c' ! -name '*.xs.c' 2>/dev/null");
     my array @c_files = split("\n", trim($c_list));
 
     # Detect module name from directory
@@ -465,7 +432,7 @@ func _install_xs_module(str $extract_dir, str $lib_dir, int $verbose) int {
         if ($verbose == 1) { say("    xsubpp: " . $xs); }
 
         # Run xsubpp
-        my str $xspp_cmd = $xsubpp . " -typemap " . $typemap . " " . $xs . " > " . $c_file . " 2>/dev/null";
+        my str $xspp_cmd = sq($xsubpp) . " -typemap " . sq($typemap) . " " . sq($xs) . " > " . sq($c_file) . " 2>/dev/null";
         core::system($xspp_cmd);
 
         if (core::file_exists($c_file) != 1) {
@@ -490,16 +457,17 @@ func _install_xs_module(str $extract_dir, str $lib_dir, int $verbose) int {
         core::spew($c_file, $c_src);
 
         # Compile
-        my str $pcre2_flags = "";
+        my array @gcc_args = ("gcc", "-c", "-w", "-fPIC", "-O2", "-I" . $perla_runtime, "-I" . $runtime_dir, "-I" . $extract_dir);
         if (core::file_exists($pcre2_dir . "/pcre2.h") == 1) {
-            $pcre2_flags = " -DHAVE_PCRE2 -DPCRE2_STATIC -I" . $pcre2_dir;
+            push(@gcc_args, "-DHAVE_PCRE2");
+            push(@gcc_args, "-DPCRE2_STATIC");
+            push(@gcc_args, "-I" . $pcre2_dir);
         }
-        my str $gcc_cmd = "gcc -c -w -fPIC -O2 -I" . $perla_runtime . " -I" . $runtime_dir . " -I" . $extract_dir . $pcre2_flags . " -o " . $o_file . " " . $c_file . " 2>&1";
+        push(@gcc_args, "-o");
+        push(@gcc_args, $o_file);
+        push(@gcc_args, $c_file);
         if ($verbose == 1) { say("    gcc: " . $c_file); }
-        my str $gcc_out = core::qx($gcc_cmd);
-        if (length($gcc_out) > 0 && $verbose == 1) {
-            say("    " . $gcc_out);
-        }
+        core::system_argv("gcc", \@gcc_args);
         if (core::file_exists($o_file) == 1) {
             push(@obj_files, $o_file);
         } else {
@@ -530,13 +498,17 @@ func _install_xs_module(str $extract_dir, str $lib_dir, int $verbose) int {
             core::spew($c_file, $c_src);
         }
 
-        my str $pcre2_flags = "";
+        my array @gcc_args2 = ("gcc", "-c", "-w", "-fPIC", "-O2", "-I" . $perla_runtime, "-I" . $runtime_dir, "-I" . $extract_dir);
         if (core::file_exists($pcre2_dir . "/pcre2.h") == 1) {
-            $pcre2_flags = " -DHAVE_PCRE2 -DPCRE2_STATIC -I" . $pcre2_dir;
+            push(@gcc_args2, "-DHAVE_PCRE2");
+            push(@gcc_args2, "-DPCRE2_STATIC");
+            push(@gcc_args2, "-I" . $pcre2_dir);
         }
-        my str $gcc_cmd = "gcc -c -w -fPIC -O2 -I" . $perla_runtime . " -I" . $runtime_dir . " -I" . $extract_dir . $pcre2_flags . " -o " . $o_file . " " . $c_file . " 2>&1";
+        push(@gcc_args2, "-o");
+        push(@gcc_args2, $o_file);
+        push(@gcc_args2, $c_file);
         if ($verbose == 1) { say("    gcc: " . $c_file); }
-        my str $gcc_out = core::qx($gcc_cmd);
+        core::system_argv("gcc", \@gcc_args2);
         if (core::file_exists($o_file) == 1) {
             push(@obj_files, $o_file);
         }
@@ -551,9 +523,14 @@ func _install_xs_module(str $extract_dir, str $lib_dir, int $verbose) int {
     # Create static library
     my str $lib_name = replace_all($mod_name, "-", "_");
     my str $a_file = $lib_dir . "/" . $lib_name . ".xs.a";
-    core::system("mkdir -p " . $lib_dir);
-    my str $ar_cmd = "ar rcs " . $a_file . " " . join(" ", @obj_files);
-    core::system($ar_cmd);
+    core::system_argv("mkdir", ["mkdir", "-p", $lib_dir]);
+    my array @ar_args = ("ar", "rcs", $a_file);
+    my int $oi = 0;
+    while ($oi < size(@obj_files)) {
+        push(@ar_args, $obj_files[$oi]);
+        $oi++;
+    }
+    core::system_argv("ar", \@ar_args);
 
     if (core::file_exists($a_file) == 1) {
         say("  XS library: " . $a_file . " (" . size(@obj_files) . " objects)");
@@ -575,24 +552,31 @@ func _install_deps(str $module, str $lib_dir, int $verbose, int $depth) void {
     my str $json = _http_get("https://fastapi.metacpan.org/v1/release/" . $dist);
     if (length($json) == 0) { return; }
 
-    # Extract runtime requires using python
-    my str $deps_str = core::qx("echo " . sq($json) . " | python3 -c \"
-import json, sys
-d = json.load(sys.stdin)
-for dep in d.get('dependency', []):
-    if dep.get('phase') == 'runtime' and dep.get('relationship') == 'requires':
-        m = dep['module']
-        if m not in ('perl', 'strict', 'warnings', 'base', 'Carp', 'Exporter', 'overload', 'integer', 'constant', 'vars', 'File::Spec', 'Scalar::Util', 'List::Util', 'Encode', 'utf8', 'POSIX', 'Storable', 'IO::Handle', 'IO::File'):
-            print(m)
-\" 2>/dev/null");
+    # Extract runtime requires via JSON::decode
+    my scalar $data = JSON::decode($json);
+    if (!defined($data) || ref($data) ne "HASH" || !defined($data->{"dependency"})) { return; }
+    my scalar $dep_list = $data->{"dependency"};
+    if (ref($dep_list) ne "ARRAY") { return; }
 
-    my array @deps = split("\n", trim($deps_str));
+    my hash %core_mods = (
+        "perl" => 1, "strict" => 1, "warnings" => 1, "base" => 1, "Carp" => 1,
+        "Exporter" => 1, "overload" => 1, "integer" => 1, "constant" => 1, "vars" => 1,
+        "File::Spec" => 1, "Scalar::Util" => 1, "List::Util" => 1, "Encode" => 1,
+        "utf8" => 1, "POSIX" => 1, "Storable" => 1, "IO::Handle" => 1, "IO::File" => 1
+    );
     my int $di = 0;
-    while ($di < size(@deps)) {
-        my str $dep = trim($deps[$di]);
-        if (length($dep) > 0 && is_valid_module_name($dep) == 1) {
-            if ($verbose == 1) { say("  Dependency: " . $dep); }
-            _install_module($dep, $lib_dir, $verbose, $depth);
+    my int $dn = size($dep_list);
+    while ($di < $dn) {
+        my scalar $dep = $dep_list->[$di];
+        if (ref($dep) eq "HASH" &&
+            defined($dep->{"phase"}) && $dep->{"phase"} eq "runtime" &&
+            defined($dep->{"relationship"}) && $dep->{"relationship"} eq "requires" &&
+            defined($dep->{"module"})) {
+            my str $dep_mod = "" . $dep->{"module"};
+            if (!defined($core_mods{$dep_mod}) && is_valid_module_name($dep_mod) == 1) {
+                if ($verbose == 1) { say("  Dependency: " . $dep_mod); }
+                _install_module($dep_mod, $lib_dir, $verbose, $depth);
+            }
         }
         $di++;
     }
@@ -606,9 +590,9 @@ func _show_info(str $module) void {
     say("Module: " . $module);
     my scalar $release = _metacpan_release($module);
     if (defined($release)) {
-        say("Name: " . $release->{"name"});
-        say("Version: " . $release->{"version"});
-        say("Download: " . $release->{"download_url"});
+        say("Name: " . (defined($release->{"name"}) ? $release->{"name"} : ""));
+        say("Version: " . (defined($release->{"version"}) ? $release->{"version"} : ""));
+        say("Download: " . (defined($release->{"download_url"}) ? $release->{"download_url"} : ""));
     } else {
         say("Not found on CPAN");
     }
@@ -620,7 +604,7 @@ func _list_installed(str $lib_dir) void {
         return;
     }
     say("Installed modules in " . $lib_dir . ":");
-    my str $files = core::qx("find '" . $lib_dir . "' -name '*.pm' 2>/dev/null | sort");
+    my str $files = core::qx("find " . sq($lib_dir) . " -name '*.pm' 2>/dev/null | sort");
     my array @lines = split("\n", trim($files));
     my int $i = 0;
     while ($i < size(@lines)) {

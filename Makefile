@@ -713,16 +713,10 @@ install: stradac $(RUNTIME_OBJ) libs tools
 	        install -m 644 "$$f" "$$dir/"; \
 	    done; \
 	fi
-	@# Build and install tools (converters excluded)
+	@# Install tools (already built via 'tools' prerequisite; converters excluded)
 	@echo "Installing tools..."
-	@for tool in stradadoc strada-soinfo strada-md2man strada-md2html strada-jit stradapp strada-proftext strada-profhtml; do \
-	    if [ ! -x tools/$$tool ]; then \
-	        echo "  Building $$tool..."; \
-	        ./strada tools/$$tool.strada -o tools/$$tool 2>/dev/null || true; \
-	    fi; \
-	    if [ -x tools/$$tool ]; then \
-	        install -m 755 tools/$$tool $(INSTALL_BIN)/$$tool; \
-	    fi; \
+	@for tool in $(patsubst tools/%,%,$(TOOL_BINS)); do \
+	    install -m 755 tools/$$tool $(INSTALL_BIN)/$$tool; \
 	done
 	@# Also install stradapp to lib dir (strada wrapper looks for it there)
 	@if [ -x tools/stradapp ]; then \

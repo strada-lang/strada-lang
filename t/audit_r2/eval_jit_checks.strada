@@ -1,0 +1,145 @@
+#!/usr/bin/env strada
+# Cycle 2 Audit regression tests: Eval (tree-walk) & Strada::JIT fixes
+
+use lib "lib";
+use Eval;
+use Strada::JIT;
+
+func main() int {
+    my int $fail = 0;
+
+    # 1. Strada::Interpreter::eval_string persistent package & our globals + reset
+    Strada::Interpreter::init();
+    Strada::Interpreter::eval_string('
+        package R2EvalPkg;
+        our int $count = 10;
+        func bump(int $n) int {
+            $count = $count + $n;
+            return $count;
+        }
+    ');
+    my scalar $r1 = Strada::Interpreter::eval_string('bump(5)');
+    my scalar $r2 = Strada::Interpreter::eval_string('bump(7)');
+    if (($r1 + 0) != 15 || ($r2 + 0) != 22) {
+        say("FAIL: Eval persistent pkg/our got r1=" . $r1 . " r2=" . $r2);
+        $fail++;
+    }
+
+    # Explicit return vs implicit value, do {}, live scalar ref, local %h{k}, tr///, unshift/splice, shallow copy
+    Strada::Interpreter::eval_string('package main; our hash %eh = ("k" => "orig");');
+    my scalar $r3 = Strada::Interpreter::eval_string('
+        my int $x = 1;
+        my scalar $ref = \$x;
+        $$ref = 42;
+        my int $deref_ok = ($x == 42 && $$ref == 42 && ref($ref) eq "SCALAR") ? 1 : 0;
+
+        {
+            local $eh{"k"} = "temp";
+            if ($eh{"k"} ne "temp") { return "bad_local"; }
+        }
+        my int $loc_ok = ($eh{"k"} eq "orig") ? 1 : 0;
+
+        my int $do_val = do { my int $t = 9; $t + 1; };
+
+        my str $s = "abc";
+        my int $trc = ($s =~ tr/a-z/A-Z/);
+
+        my array @a = (3, 4);
+        unshift(@a, 1, 2);
+        my int $ulen = size(@a);
+        my array @b = @a;
+        $b[0] = 99;
+        my int $copy_ok = ($a[0] == 1 && $b[0] == 99) ? 1 : 0;
+
+        my array @rem = splice(@b, -2, 1, 77, 88);
+
+        return $deref_ok . ":" . $loc_ok . ":" . $do_val . ":" . $s . ":" . $trc . ":" . $ulen . ":" . $copy_ok . ":" . join(",", @rem) . ":" . join(",", @b);
+    ');
+    if ($r3 ne "1:1:10:ABC:3:4:1:3:99,2,77,88,4") {
+        say("FAIL: Eval TW features got '" . $r3 . "'");
+        $fail++;
+    }
+
+    Strada::Interpreter::reset();
+    Strada::Interpreter::eval_string('
+        package R2EvalPkg;
+        our int $count = 1;
+    ');
+    my scalar $after_rst = Strada::Interpreter::eval_string('$count');
+    if (($after_rst + 0) != 1) {
+        say("FAIL: Eval::reset got '" . $after_rst . "'");
+        $fail++;
+    }
+
+    # 2. Strada::JIT fixes:
+    # - depth-0 variable registration (inner `{ my int $inner = 5; }` doesn't register $inner globally)
+    # - regex literals with ; # { } inside don't break statement splitting
+    # - const/enum/has/extends/use overload dedup across multiple evals
+    # - add_lib_path + reset
+    Strada::JIT::init();
+    Strada::JIT::add_lib_path("lib");
+
+    Strada::JIT::eval('const int R2_CONST = 10;');
+    Strada::JIT::eval('const int R2_CONST = 10;');
+    Strada::JIT::eval('enum R2Enum { R2_A = 1, R2_B = 2 };');
+    Strada::JIT::eval('enum R2Enum { R2_A = 1, R2_B = 2 };');
+    Strada::JIT::eval('
+        package R2JBase;
+        has ro int $x (default => 3);
+        package R2JSub;
+        extends R2JBase;
+    ');
+    my scalar $jobj = Strada::JIT::eval('
+        package R2JBase;
+        has ro int $x (default => 3);
+        package R2JSub;
+        extends R2JBase;
+        package repl;
+        my scalar $o = R2JSub::new("x", 8);
+        $o->x() + R2_CONST + R2Enum::R2_B;
+    ');
+    if (($jobj + 0) != 20) {
+        say("FAIL: JIT dedup const/enum/has/extends got '" . $jobj . "'");
+        $fail++;
+    }
+
+    # Regex literal containing ; { } # must not split statement prematurely
+    my scalar $jrx = Strada::JIT::eval('
+        my str $txt = "a;b{my}#c";
+        $txt =~ s/[;{}#]/_/g;
+        return $txt;
+    ');
+    if ($jrx ne "a_b_my__c") {
+        say("FAIL: JIT regex literal got '" . $jrx . "'");
+        $fail++;
+    }
+
+    # Depth-0 `my` in nested block must not confuse top-level state or persist across top-level calls
+    Strada::JIT::eval('my int $top_v = 50;');
+    my scalar $jd0 = Strada::JIT::eval('
+        my int $res = $top_v;
+        if (1) {
+            my int $top_v = 999;
+            $res = $res + $top_v;
+        }
+        return $res;
+    ');
+    my scalar $j_top_after = Strada::JIT::eval('$top_v');
+    if (($jd0 + 0) != 1049 || ($j_top_after + 0) != 50) {
+        say("FAIL: JIT depth-0 var tracking got jd0=" . $jd0 . " after=" . $j_top_after);
+        $fail++;
+    }
+
+    Strada::JIT::reset();
+    my scalar $jr = Strada::JIT::eval('my int $fresh = 77; return $fresh;');
+    if (($jr + 0) != 77) {
+        say("FAIL: JIT after reset got '" . $jr . "'");
+        $fail++;
+    }
+
+    if ($fail == 0) {
+        say("ALL_R2_EVAL_JIT_OK");
+        return 0;
+    }
+    return 1;
+}

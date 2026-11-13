@@ -1003,8 +1003,18 @@ func parse_primary(scalar $parser) scalar {
             if (parser_is_simple_ident($vname) == 1) {
                 $interp_node = ast_new_variable($vname, "$");
             } else {
-                my scalar $itoks = lex_tokenize($vname);
+                my scalar $itoks = lex_tokenize_file($vname, $parser->{"filename"});
+                my int $base_line = $tok->{"line"} + 0;
+                if ($base_line > 1) {
+                    my int $ti = 0;
+                    my int $tc = size($itoks);
+                    while ($ti < $tc) {
+                        $itoks->[$ti]->{"line"} = ($itoks->[$ti]->{"line"} + 0) + $base_line - 1;
+                        $ti = $ti + 1;
+                    }
+                }
                 my scalar $iparser = parser_new($itoks);
+                parser_set_filename($iparser, $parser->{"filename"});
                 $iparser->{"const_names"} = $parser->{"const_names"};
                 $iparser->{"current_package"} = $parser->{"current_package"};
                 $iparser->{"structs"} = $parser->{"structs"};
@@ -2000,7 +2010,7 @@ func parse_primary(scalar $parser) scalar {
 
         # Parse block body - can be statements or bare expression
         while (!parser_check($parser, "RBRACE") && !parser_check($parser, "EOF")) {
-            if (parser_check($parser, "MY") || parser_check($parser, "LOCAL") ||
+            if (parser_check($parser, "MY") || (parser_check($parser, "IDENT") && parser_current($parser)->{"value"} eq "local") ||
                 parser_check($parser, "IF") || parser_check($parser, "WHILE") ||
                 parser_check($parser, "FOR") || parser_check($parser, "FOREACH")) {
                 ast_add_statement($block, parse_statement($parser));
@@ -2081,7 +2091,7 @@ func parse_primary(scalar $parser) scalar {
 
         # Parse block body - can be statements or bare expression
         while (!parser_check($parser, "RBRACE") && !parser_check($parser, "EOF")) {
-            if (parser_check($parser, "MY") || parser_check($parser, "LOCAL") ||
+            if (parser_check($parser, "MY") || (parser_check($parser, "IDENT") && parser_current($parser)->{"value"} eq "local") ||
                 parser_check($parser, "IF") || parser_check($parser, "WHILE") ||
                 parser_check($parser, "FOR") || parser_check($parser, "FOREACH")) {
                 ast_add_statement($block, parse_statement($parser));
@@ -2494,8 +2504,18 @@ func parse_regex_match(scalar $parser) scalar {
             my str $subst_flags = $right_tok->{"flags"};
             if (index($subst_flags, "e") >= 0) {
                 my str $repl_src = $right_tok->{"replacement"};
-                my scalar $repl_tokens = lex_tokenize($repl_src);
+                my scalar $repl_tokens = lex_tokenize_file($repl_src, $parser->{"filename"});
+                my int $rbase_line = $right_tok->{"line"} + 0;
+                if ($rbase_line > 1) {
+                    my int $rti = 0;
+                    my int $rtc = size($repl_tokens);
+                    while ($rti < $rtc) {
+                        $repl_tokens->[$rti]->{"line"} = ($repl_tokens->[$rti]->{"line"} + 0) + $rbase_line - 1;
+                        $rti = $rti + 1;
+                    }
+                }
                 my scalar $repl_parser = parser_new($repl_tokens);
+                parser_set_filename($repl_parser, $parser->{"filename"});
                 $repl_parser->{"const_names"} = $parser->{"const_names"};
                 $repl_parser->{"current_package"} = $parser->{"current_package"};
                 $repl_parser->{"structs"} = $parser->{"structs"};
@@ -7074,6 +7094,9 @@ func parse_has_declaration(scalar $parser, scalar $program) void {
         $attr_name = parse_var_name($parser);
     } elsif (parser_check($parser, "STR_LITERAL")) {
         $attr_name = parser_current($parser)->{"value"};
+        if (parser_is_simple_ident($attr_name) == 0) {
+            parser_error($parser, "invalid 'has' attribute name '" . $attr_name . "' (must be a valid identifier)");
+        }
         parser_advance($parser);
         if (parser_check($parser, "FAT_ARROW") || parser_check($parser, "COMMA")) {
             parser_advance($parser);
@@ -7171,6 +7194,9 @@ func parse_has_declaration(scalar $parser, scalar $program) void {
                     my scalar $builder_tok = parser_current($parser);
                     if ($builder_tok->{"type"} eq "STR_LITERAL" || $builder_tok->{"type"} eq "IDENT") {
                         $builder_name = $builder_tok->{"value"};
+                        if (length($builder_name) > 0 && parser_is_simple_ident($builder_name) == 0) {
+                            parser_error($parser, "invalid 'has' builder method name '" . $builder_name . "' (must be a valid identifier)");
+                        }
                         parser_advance($parser);
                     } else {
                         parser_expect($parser, "STR_LITERAL");
@@ -7526,8 +7552,20 @@ func parse_method_modifier(scalar $parser, scalar $program, str $mod_type) void 
         $c_pkg = substr($c_pkg, 0, $colon_idx) . "_" . substr($c_pkg, $colon_idx + 2, length($c_pkg) - $colon_idx - 2);
         $colon_idx = index($c_pkg, "::");
     }
+    my str $safe_mod_m = "";
+    my int $smi = 0;
+    my int $sml = length($method_name);
+    while ($smi < $sml) {
+        my int $smc = ord(substr($method_name, $smi, 1));
+        if (($smc >= 65 && $smc <= 90) || ($smc >= 97 && $smc <= 122) || ($smc >= 48 && $smc <= 57) || $smc == 95) {
+            $safe_mod_m = $safe_mod_m . chr($smc);
+        } else {
+            $safe_mod_m = $safe_mod_m . "_";
+        }
+        $smi = $smi + 1;
+    }
     my int $mod_count = $program->{"method_modifier_count"} + ($program->{"mod_seq_offset"} + 0);
-    my str $mod_func_name = $c_pkg . "___" . $mod_type . "_" . $method_name . "_" . $mod_count;
+    my str $mod_func_name = $c_pkg . "___" . $mod_type . "_" . $safe_mod_m . "_" . $mod_count;
 
     # Parse function parameters and body (reuse parse_function logic but without name)
     parser_expect($parser, "LPAREN");

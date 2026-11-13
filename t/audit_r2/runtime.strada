@@ -1,0 +1,201 @@
+#!/usr/bin/env strada
+# Cycle 2 Audit regression tests: C runtime & concurrency/unwinding
+
+package R2DieOnDestroy;
+func new(str $msg) scalar {
+    my hash %self = ("msg" => $msg);
+    return bless(\%self, "R2DieOnDestroy");
+}
+func DESTROY(scalar $self) void {
+    throw $self->{"msg"};
+}
+
+package R2OkDestroy;
+our int $g_destroyed = 0;
+func new() scalar {
+    my hash %self = ();
+    return bless(\%self, "R2OkDestroy");
+}
+func reset() void {
+    $g_destroyed = 0;
+}
+func count() int {
+    return $g_destroyed;
+}
+func DESTROY(scalar $self) void {
+    $g_destroyed = $g_destroyed + 1;
+}
+
+package main;
+
+func deep_try_rec(int $depth, int $max_depth) str {
+    if ($depth >= $max_depth) {
+        throw "bottom_" . $depth;
+    }
+    try {
+        return deep_try_rec($depth + 1, $max_depth);
+    } catch ($e) {
+        if ($depth == 0) {
+            return "caught_at_0:" . $e;
+        }
+        throw $e;
+    }
+    return "unreach";
+}
+
+func nested_try_destroy() str {
+    try {
+        my scalar $d = R2DieOnDestroy::new("destroy_boom");
+        throw "outer_body";
+    } catch ($e) {
+        return "" . $e;
+    }
+    return "none";
+}
+
+func tr_helper(str $s) str {
+    my str $cp = $s;
+    $cp =~ tr/a-z/A-Z/;
+    return $cp;
+}
+
+func spawn_detached_work() void {
+    my int $i = 0;
+    while ($i < 4) {
+        my scalar $t = thread::create(func () scalar {
+            my str $x = "thr_" . "ok";
+            return $x;
+        });
+        # Intentionally drop without join to verify detach cleanup
+        $i++;
+    }
+}
+
+func main() int {
+    my int $fail = 0;
+
+    # 1. Dynamic try-stack overflow (> 64 nested try blocks)
+    my str $dt = deep_try_rec(0, 90);
+    if ($dt ne "caught_at_0:bottom_90") {
+        say("FAIL: deep try stack got '" . $dt . "'");
+        $fail++;
+    }
+
+    # 2. tr/// flags: c, d, s, r, UTF-8, count
+    my str $t1 = "hello world";
+    my int $c1 = ($t1 =~ tr/a-z/A-Z/);
+    if ($t1 ne "HELLO WORLD" || $c1 != 10) {
+        say("FAIL: tr basic t1='" . $t1 . "' c1=" . $c1);
+        $fail++;
+    }
+
+    my str $t2 = "aabbccdd";
+    my int $c2 = ($t2 =~ tr/a-z/A-Z/s);
+    if ($t2 ne "ABCD" || $c2 != 8) {
+        say("FAIL: tr/s t2='" . $t2 . "' c2=" . $c2);
+        $fail++;
+    }
+
+    my str $t3 = "a1b2c3";
+    my int $c3 = ($t3 =~ tr/0-9//d);
+    if ($t3 ne "abc" || $c3 != 3) {
+        say("FAIL: tr/d t3='" . $t3 . "' c3=" . $c3);
+        $fail++;
+    }
+
+    my str $t4 = "abc123xyz";
+    my int $c4 = ($t4 =~ tr/0-9/_/c);
+    if ($t4 ne "___123___" || $c4 != 6) {
+        say("FAIL: tr/c t4='" . $t4 . "' c4=" . $c4);
+        $fail++;
+    }
+
+    my str $t5 = "abc";
+    my str $t5_r = ($t5 =~ tr/abc/xyz/r);
+    if ($t5 ne "abc" || $t5_r ne "xyz") {
+        say("FAIL: tr/r t5='" . $t5 . "' t5_r='" . $t5_r . "'");
+        $fail++;
+    }
+
+    my str $tu = "café";
+    my int $cu = ($tu =~ tr/é/e/);
+    if ($tu ne "cafe" || $cu != 1) {
+        say("FAIL: tr UTF-8 tu='" . $tu . "' cu=" . $cu);
+        $fail++;
+    }
+
+    # 3. Scalar string-ref open(">", \$buf) & close writeback + flush writeback
+    my str $sbuf = "";
+    my scalar $sfh = core::open(\$sbuf, "w");
+    if (!defined($sfh)) {
+        say("FAIL: open scalar ref w failed");
+        $fail++;
+    } else {
+        say($sfh, "line1");
+        say($sfh, "line2");
+        core::close($sfh);
+        if ($sbuf ne "line1\nline2\n") {
+            say("FAIL: scalar ref writeback got '" . $sbuf . "'");
+            $fail++;
+        }
+    }
+
+    my str $rbuf = "alpha\nbeta\n";
+    my scalar $rfh = core::open(\$rbuf, "r");
+    if (!defined($rfh)) {
+        say("FAIL: open scalar ref r failed");
+        $fail++;
+    } else {
+        my str $l1 = core::readline($rfh);
+        my str $l2 = core::readline($rfh);
+        core::close($rfh);
+        if ($l1 ne "alpha" || $l2 ne "beta") {
+            say("FAIL: scalar ref read got '" . $l1 . "' / '" . $l2 . "'");
+            $fail++;
+        }
+    }
+
+    # 4. concat_multi with many parts
+    my str $cm = "p1" . "-" . "p2" . "-" . "p3" . "-" . "p4" . "-" . "p5" . "-" . "p6";
+    if ($cm ne "p1-p2-p3-p4-p5-p6") {
+        say("FAIL: concat_multi got '" . $cm . "'");
+        $fail++;
+    }
+
+    # 5. DESTROY ordering / exception preservation & cleanup
+    my str $de = nested_try_destroy();
+    if ($de ne "outer_body" && $de ne "destroy_boom") {
+        say("FAIL: nested_try_destroy got '" . $de . "'");
+        $fail++;
+    }
+    my str $after_de = "";
+    try {
+        throw "clean_after";
+    } catch ($e2) {
+        $after_de = "" . $e2;
+    }
+    if ($after_de ne "clean_after") {
+        say("FAIL: exception state dirty after DESTROY throw");
+        $fail++;
+    }
+
+    # 6. Normal object DESTROY runs
+    R2OkDestroy::reset();
+    {
+        my scalar $okd = R2OkDestroy::new();
+    }
+    if (R2OkDestroy::count() != 1) {
+        say("FAIL: R2OkDestroy count=" . R2OkDestroy::count());
+        $fail++;
+    }
+
+    # 7. Detached thread cleanup
+    spawn_detached_work();
+    core::usleep(30000);
+
+    if ($fail == 0) {
+        say("ALL_R2_RUNTIME_OK");
+        return 0;
+    }
+    return 1;
+}

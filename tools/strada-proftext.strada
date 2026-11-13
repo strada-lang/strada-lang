@@ -24,6 +24,8 @@ __C__ {
 #include <stdint.h>
 
 static FILE *_fp_file = NULL;
+static int _fp_eof = 0;
+static long _fp_rem = 0;
 }
 
 func fp_open(str $filename) int {
@@ -32,6 +34,15 @@ func fp_open(str $filename) int {
         char *fname = strada_to_str(filename);
         _fp_file = fopen(fname, "rb");
         free(fname);
+        _fp_eof = _fp_file ? 0 : 1;
+        _fp_rem = 0;
+        if (_fp_file) {
+            if (fseek(_fp_file, 0, SEEK_END) == 0) {
+                long sz = ftell(_fp_file);
+                if (sz >= 0) _fp_rem = sz;
+                fseek(_fp_file, 0, SEEK_SET);
+            }
+        }
         strada_decref(ok);
         ok = strada_new_int(_fp_file ? 1 : 0);
     }
@@ -41,7 +52,28 @@ func fp_open(str $filename) int {
 func fp_close() void {
     __C__ {
         if (_fp_file) { fclose(_fp_file); _fp_file = NULL; }
+        _fp_eof = 1;
+        _fp_rem = 0;
     }
+}
+
+func fp_error() int {
+    my int $e = 0;
+    __C__ {
+        int err = (!_fp_file || _fp_eof || ferror(_fp_file)) ? 1 : 0;
+        strada_decref(e);
+        e = strada_new_int(err);
+    }
+    return $e;
+}
+
+func fp_remaining() int {
+    my int $r = 0;
+    __C__ {
+        strada_decref(r);
+        r = strada_new_int((int64_t)_fp_rem);
+    }
+    return $r;
 }
 
 func fp_read_magic() int {
@@ -50,8 +82,11 @@ func fp_read_magic() int {
         char buf[4];
         if (_fp_file && fread(buf, 1, 4, _fp_file) == 4 &&
             buf[0] == 'S' && buf[1] == 'T' && buf[2] == 'F' && buf[3] == 'P') {
+            if (_fp_rem >= 4) _fp_rem -= 4;
             strada_decref(ok);
             ok = strada_new_int(1);
+        } else {
+            _fp_eof = 1;
         }
     }
     return $ok;
@@ -61,7 +96,12 @@ func fp_read_u32() int {
     my int $val = 0;
     __C__ {
         uint32_t v = 0;
-        if (_fp_file) fread(&v, 4, 1, _fp_file);
+        if (!_fp_file || _fp_eof || fread(&v, 4, 1, _fp_file) != 1) {
+            _fp_eof = 1;
+            v = 0;
+        } else if (_fp_rem >= 4) {
+            _fp_rem -= 4;
+        }
         strada_decref(val);
         val = strada_new_int((int64_t)v);
     }
@@ -72,7 +112,12 @@ func fp_read_u64() int {
     my int $val = 0;
     __C__ {
         uint64_t v = 0;
-        if (_fp_file) fread(&v, 8, 1, _fp_file);
+        if (!_fp_file || _fp_eof || fread(&v, 8, 1, _fp_file) != 1) {
+            _fp_eof = 1;
+            v = 0;
+        } else if (_fp_rem >= 8) {
+            _fp_rem -= 8;
+        }
         strada_decref(val);
         val = strada_new_int((int64_t)v);
     }
@@ -83,15 +128,26 @@ func fp_read_string(int $len) str {
     my str $result = "";
     __C__ {
         int64_t n = strada_to_int(len);
-        if (n > 0 && n <= 1048576 && _fp_file && !feof(_fp_file)) {
+        if (n == 0) {
+            /* empty string is valid */
+        } else if (n > 0 && n <= 1048576 && _fp_file && !_fp_eof) {
             char *buf = (char *)malloc((size_t)n + 1);
             if (buf) {
                 size_t got = fread(buf, 1, (size_t)n, _fp_file);
+                if (got != (size_t)n) {
+                    _fp_eof = 1;
+                } else if (_fp_rem >= (long)got) {
+                    _fp_rem -= (long)got;
+                }
                 buf[got] = '\0';
                 strada_decref(result);
                 result = strada_new_str_len(buf, got);
                 free(buf);
+            } else {
+                _fp_eof = 1;
             }
+        } else if (n < 0 || n > 1048576) {
+            _fp_eof = 1;
         }
     }
     return $result;
@@ -230,17 +286,29 @@ func main() int {
     }
 
     my int $file_count = fp_read_u32();
+    if (fp_error() != 0 || $file_count < 0 || $file_count * 12 > fp_remaining()) {
+        say(STDERR, "Error: Truncated or corrupt STFP file header");
+        fp_close();
+        return 1;
+    }
     my array @files = ();
     my array @file_lines = ();
 
     my int $fi = 0;
     while ($fi < $file_count) {
         my int $nlen = fp_read_u32();
+        if (fp_error() != 0) { say(STDERR, "Error: Truncated STFP file"); fp_close(); return 1; }
         my str $fname = fp_read_string($nlen);
+        if (fp_error() != 0) { say(STDERR, "Error: Truncated STFP file"); fp_close(); return 1; }
         push(@files, $fname);
 
         my int $maxln = fp_read_u32();
         my int $nzcount = fp_read_u32();
+        if (fp_error() != 0 || $nzcount < 0 || $nzcount * 20 > fp_remaining()) {
+            say(STDERR, "Error: Corrupt line count in STFP file");
+            fp_close();
+            return 1;
+        }
 
         my array @lines = ();
         my int $li = 0;
@@ -248,6 +316,7 @@ func main() int {
             my int $lnum = fp_read_u32();
             my int $calls = fp_read_u64();
             my int $tns = fp_read_u64();
+            if (fp_error() != 0) { say(STDERR, "Error: Truncated STFP file"); fp_close(); return 1; }
             my scalar $entry = {};
             $entry->{"line"} = $lnum;
             $entry->{"calls"} = $calls;
@@ -260,6 +329,11 @@ func main() int {
     }
 
     my int $func_count = fp_read_u32();
+    if (fp_error() != 0 || $func_count < 0 || $func_count * 28 > fp_remaining()) {
+        say(STDERR, "Error: Corrupt function count in STFP file");
+        fp_close();
+        return 1;
+    }
     my array @funcs = ();
     my int $total_time_ns = 0;
     my int $total_calls = 0;
@@ -267,10 +341,12 @@ func main() int {
     $fi = 0;
     while ($fi < $func_count) {
         my int $nlen = fp_read_u32();
+        if (fp_error() != 0) { say(STDERR, "Error: Truncated STFP file"); fp_close(); return 1; }
         my str $fname = fp_read_string($nlen);
         my int $calls = fp_read_u64();
         my int $inclusive_ns = fp_read_u64();
         my int $exclusive_ns = fp_read_u64();
+        if (fp_error() != 0) { say(STDERR, "Error: Truncated STFP file"); fp_close(); return 1; }
 
         my scalar $entry = {};
         $entry->{"name"} = $fname;

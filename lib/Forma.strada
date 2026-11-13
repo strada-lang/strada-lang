@@ -29,10 +29,10 @@ Forma - Template rendering engine for Strada
     my hash %vars = ();
     $vars{"name"} = "Alice";
     $vars{"count"} = 42;
-    my str $html = FormaForma::render("welcome.html", \%vars);
+    my str $html = Forma::render("welcome.html", \%vars);
 
     # Render a template string directly
-    my str $result = FormaForma::render_string("Hello, {{name}}!", \%vars);
+    my str $result = Forma::render_string("Hello, {{name}}!", \%vars);
 
 =head1 DESCRIPTION
 
@@ -194,19 +194,19 @@ after changing template files at runtime to force a recompile on next render.
 
 Load a template file (uses cache if enabled).
 
-    my str $template = FormaForma::load("header.html");
+    my str $template = Forma::load("header.html");
 
 =head2 render($name, $vars)
 
 Render a template file with variables.
 
-    my str $html = FormaForma::render("page.html", \%vars);
+    my str $html = Forma::render("page.html", \%vars);
 
 =head2 render_string($template, $vars)
 
 Render a template string with variables.
 
-    my str $html = FormaForma::render_string("<h1>{{title}}</h1>", \%vars);
+    my str $html = Forma::render_string("<h1>{{title}}</h1>", \%vars);
 
 =head2 render_safe($name, $vars)
 
@@ -219,7 +219,7 @@ Use {{{var}}} for raw/unescaped output.
 
 Render a template string with HTML escaping.
 
-    my str $html = FormaForma::render_string_safe("<p>{{user_input}}</p>", \%vars);
+    my str $html = Forma::render_string_safe("<p>{{user_input}}</p>", \%vars);
 
 =head2 render_with_layout($template, $layout, $vars)
 
@@ -330,7 +330,7 @@ Strada code:
     $vars{"user"} = \%user;
     $vars{"posts"} = \@posts;
 
-    my str $html = FormaForma::render("profile.html", \%vars);
+    my str $html = Forma::render("profile.html", \%vars);
     say($html);
 
 =head1 SEE ALSO
@@ -1300,14 +1300,19 @@ func render_string(str $template, scalar $vars) str {
                         next;
                     }
 
-                    # Check for pipe syntax: {{varname | default "value"}}
-                    my int $pipe_pos = index($content, " | ");
-                    if ($pipe_pos > 0) {
-                        my str $var_name = substr($content, 0, $pipe_pos);
-                        my str $filter = substr($content, $pipe_pos + 3, length($content) - $pipe_pos - 3);
-                        $var_name = trim($var_name);
-                        $filter = trim($filter);
-                        my str $value = Forma::apply_filter($var_name, $filter, $vars);
+                    # Check for pipe syntax: {{varname | f1 | f2}}
+                    my array @pipe_parts = Forma::split_pipe_stages($content);
+                    if (scalar(@pipe_parts) > 1) {
+                        my str $var_name = trim($pipe_parts[0]);
+                        my str $value = Forma::resolve_var($var_name, $vars);
+                        my int $pi = 1;
+                        while ($pi < scalar(@pipe_parts)) {
+                            my str $stage = trim($pipe_parts[$pi]);
+                            if (length($stage) > 0) {
+                                $value = Forma::apply_filter_value($value, $stage, $vars);
+                            }
+                            $pi = $pi + 1;
+                        }
                         $result = $result . $value;
                         $i = $end + 2;
                         next;
@@ -1395,18 +1400,52 @@ func classify_tag(str $content) scalar {
     return {"k" => "g", "s" => "{{" . $content . "}}"};
 }
 
+# Split a {{...}} expression on '|' outside single/double quotes.
+private func split_pipe_stages(str $content) array {
+    my array @parts = ();
+    my int $len = length($content);
+    my int $start = 0;
+    my str $quote = "";
+    my int $i = 0;
+    while ($i < $len) {
+        my str $ch = substr($content, $i, 1);
+        if (length($quote) > 0) {
+            if ($ch eq "\\" && $i + 1 < $len) {
+                $i = $i + 2;
+                next;
+            }
+            if ($ch eq $quote) {
+                $quote = "";
+            }
+        } else {
+            if ($ch eq "\"" || $ch eq "'") {
+                $quote = $ch;
+            } elsif ($ch eq "|") {
+                push(@parts, substr($content, $start, $i - $start));
+                $start = $i + 1;
+            }
+        }
+        $i = $i + 1;
+    }
+    push(@parts, substr($content, $start, $len - $start));
+    return @parts;
+}
+
 # True if a leaf {{...}} tag already emits HTML or intentionally unescaped HTML
 private func is_pre_escaped_tag(str $tag_str) int {
     my int $tlen = length($tag_str);
     if ($tlen < 4) { return 0; }
-    my str $ilc = lc(trim(substr($tag_str, 2, $tlen - 4)));
+    my str $inner = trim(substr($tag_str, 2, $tlen - 4));
+    my str $ilc = lc($inner);
     if ($ilc eq "dump" || (length($ilc) >= 5 && substr($ilc, 0, 5) eq "dump ")) {
         return 1;
     }
-    my int $last_pipe = rindex($ilc, "|");
-    if ($last_pipe >= 0) {
-        my str $flt = trim(substr($ilc, $last_pipe + 1, length($ilc) - $last_pipe - 1));
-        if ($flt eq "escape" || $flt eq "h" || $flt eq "nl2br" || $flt eq "raw" || $flt eq "dump") {
+    my array @stages = Forma::split_pipe_stages($inner);
+    if (scalar(@stages) > 1) {
+        my str $last_stage = lc(trim($stages[scalar(@stages) - 1]));
+        my int $sp = index($last_stage, " ");
+        my str $flt = ($sp > 0) ? substr($last_stage, 0, $sp) : $last_stage;
+        if ($flt eq "escape" || $flt eq "h" || $flt eq "nl2br" || $flt eq "raw") {
             return 1;
         }
     }
@@ -3248,10 +3287,8 @@ func helper_money(str $val) str {
     return $sign . Forma::helper_commas($intpart) . $frac;
 }
 
-# Apply a filter to a value (for pipe syntax)
-func apply_filter(str $var_name, str $filter, scalar $vars) str {
-    my str $val = Forma::resolve_var($var_name, $vars);
-
+# Apply a filter directly to an already-resolved value (used by multi-stage pipes)
+private func apply_filter_value(str $val, str $filter, scalar $vars) str {
     # Parse filter name and args
     my int $space_pos = index($filter, " ");
     my str $filter_name = $filter;
@@ -3271,6 +3308,7 @@ func apply_filter(str $var_name, str $filter, scalar $vars) str {
             }
         }
     }
+    $filter_name = lc($filter_name);
 
     if ($filter_name eq "default") {
         if (length($val) == 0) {
@@ -3291,8 +3329,12 @@ func apply_filter(str $var_name, str $filter, scalar $vars) str {
         return Forma::helper_capitalize($val);
     }
 
-    if ($filter_name eq "escape") {
+    if ($filter_name eq "escape" || $filter_name eq "h") {
         return Forma::escape_html($val);
+    }
+
+    if ($filter_name eq "raw") {
+        return $val;
     }
 
     if ($filter_name eq "url_encode") {
@@ -3378,6 +3420,12 @@ func apply_filter(str $var_name, str $filter, scalar $vars) str {
 
     # Unknown filter - return value as-is
     return $val;
+}
+
+# Apply a filter to a value (for pipe syntax)
+func apply_filter(str $var_name, str $filter, scalar $vars) str {
+    my str $val = Forma::resolve_var($var_name, $vars);
+    return Forma::apply_filter_value($val, $filter, $vars);
 }
 
 # ============================================================

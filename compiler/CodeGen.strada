@@ -172,48 +172,48 @@ func mangle_c_func_ident(str $sanitized, str $orig_name, int $is_c_boundary) str
         return "" . $sanitized;
     }
     if ($sanitized eq "open" || $sanitized eq "close" || $sanitized eq "read" || $sanitized eq "write"
-        || $sanitized eq "lseek" || $sanitized eq "stat" || $sanitized eq "fstat" || $sanitized eq "lstat"
-        || $sanitized eq "access" || $sanitized eq "chmod" || $sanitized eq "chown" || $sanitized eq "mkdir"
-        || $sanitized eq "rmdir" || $sanitized eq "unlink" || $sanitized eq "link" || $sanitized eq "symlink"
-        || $sanitized eq "readlink" || $sanitized eq "rename" || $sanitized eq "remove" || $sanitized eq "dup"
-        || $sanitized eq "dup2" || $sanitized eq "pipe" || $sanitized eq "fork" || $sanitized eq "vfork"
-        || $sanitized eq "execve" || $sanitized eq "execvp" || $sanitized eq "execl" || $sanitized eq "wait"
-        || $sanitized eq "waitpid" || $sanitized eq "kill" || $sanitized eq "raise" || $sanitized eq "signal"
-        || $sanitized eq "alarm" || $sanitized eq "pause" || $sanitized eq "sleep" || $sanitized eq "usleep"
-        || $sanitized eq "getpid" || $sanitized eq "getppid" || $sanitized eq "getuid" || $sanitized eq "geteuid"
-        || $sanitized eq "getgid" || $sanitized eq "getegid" || $sanitized eq "chdir" || $sanitized eq "getcwd"
-        || $sanitized eq "umask" || $sanitized eq "isatty" || $sanitized eq "fsync" || $sanitized eq "truncate"
-        || $sanitized eq "ftruncate" || $sanitized eq "realpath" || $sanitized eq "socket" || $sanitized eq "bind"
-        || $sanitized eq "listen" || $sanitized eq "accept" || $sanitized eq "connect" || $sanitized eq "send"
-        || $sanitized eq "recv" || $sanitized eq "sendto" || $sanitized eq "recvfrom" || $sanitized eq "shutdown"
-        || $sanitized eq "select" || $sanitized eq "poll" || $sanitized eq "fopen" || $sanitized eq "fclose"
-        || $sanitized eq "fread" || $sanitized eq "fwrite" || $sanitized eq "fseek" || $sanitized eq "ftell"
-        || $sanitized eq "rewind" || $sanitized eq "fflush" || $sanitized eq "feof" || $sanitized eq "ferror"
-        || $sanitized eq "perror" || $sanitized eq "printf" || $sanitized eq "fprintf" || $sanitized eq "sprintf"
-        || $sanitized eq "snprintf" || $sanitized eq "scanf" || $sanitized eq "sscanf" || $sanitized eq "getchar"
-        || $sanitized eq "putchar" || $sanitized eq "puts" || $sanitized eq "fputs" || $sanitized eq "fgets"
-        || $sanitized eq "malloc" || $sanitized eq "calloc" || $sanitized eq "realloc" || $sanitized eq "free"
-        || $sanitized eq "abort" || $sanitized eq "exit" || $sanitized eq "_exit" || $sanitized eq "atexit"
-        || $sanitized eq "system" || $sanitized eq "getenv" || $sanitized eq "setenv" || $sanitized eq "unsetenv"
-        || $sanitized eq "rand" || $sanitized eq "srand" || $sanitized eq "qsort" || $sanitized eq "bsearch"
-        || $sanitized eq "atoi" || $sanitized eq "atol" || $sanitized eq "atof" || $sanitized eq "strtol"
-        || $sanitized eq "strtoul" || $sanitized eq "strtoll" || $sanitized eq "strtod" || $sanitized eq "strlen"
-        || $sanitized eq "strcmp" || $sanitized eq "strncmp" || $sanitized eq "strcpy" || $sanitized eq "strncpy"
-        || $sanitized eq "strcat" || $sanitized eq "strncat" || $sanitized eq "strchr" || $sanitized eq "strrchr"
-        || $sanitized eq "strstr" || $sanitized eq "strtok" || $sanitized eq "strerror" || $sanitized eq "index"
-        || $sanitized eq "rindex" || $sanitized eq "strcasecmp" || $sanitized eq "strncasecmp" || $sanitized eq "strdup"
-        || $sanitized eq "strndup" || $sanitized eq "memcpy" || $sanitized eq "memmove" || $sanitized eq "memset"
-        || $sanitized eq "memcmp" || $sanitized eq "memchr" || $sanitized eq "time" || $sanitized eq "ctime"
-        || $sanitized eq "gmtime" || $sanitized eq "localtime" || $sanitized eq "mktime" || $sanitized eq "strftime"
-        || $sanitized eq "difftime" || $sanitized eq "clock" || $sanitized eq "nanosleep" || $sanitized eq "sin"
-        || $sanitized eq "cos" || $sanitized eq "tan" || $sanitized eq "asin" || $sanitized eq "acos"
-        || $sanitized eq "atan" || $sanitized eq "atan2" || $sanitized eq "sinh" || $sanitized eq "cosh"
-        || $sanitized eq "tanh" || $sanitized eq "exp" || $sanitized eq "log" || $sanitized eq "log10"
-        || $sanitized eq "log2" || $sanitized eq "pow" || $sanitized eq "sqrt" || $sanitized eq "cbrt"
-        || $sanitized eq "hypot" || $sanitized eq "ceil" || $sanitized eq "floor" || $sanitized eq "round"
-        || $sanitized eq "trunc" || $sanitized eq "fabs" || $sanitized eq "fmod" || $sanitized eq "remainder"
-        || $sanitized eq "copysign" || $sanitized eq "fmax" || $sanitized eq "fmin" || $sanitized eq "abs"
-        || $sanitized eq "labs" || $sanitized eq "llabs" || $sanitized eq "div" || $sanitized eq "ldiv"
+        || $sanitized eq "lseek" || $sanitized eq "stat" || $sanitized eq "fstat" || $sanitized eq "lstat") { return "__strada_u_" . $sanitized; }
+    if ($sanitized eq "access" || $sanitized eq "chmod" || $sanitized eq "chown" || $sanitized eq "mkdir"
+        || $sanitized eq "rmdir" || $sanitized eq "unlink" || $sanitized eq "link" || $sanitized eq "symlink") { return "__strada_u_" . $sanitized; }
+    if ($sanitized eq "readlink" || $sanitized eq "rename" || $sanitized eq "remove" || $sanitized eq "dup"
+        || $sanitized eq "dup2" || $sanitized eq "pipe" || $sanitized eq "fork" || $sanitized eq "vfork") { return "__strada_u_" . $sanitized; }
+    if ($sanitized eq "execve" || $sanitized eq "execvp" || $sanitized eq "execl" || $sanitized eq "wait"
+        || $sanitized eq "waitpid" || $sanitized eq "kill" || $sanitized eq "raise" || $sanitized eq "signal") { return "__strada_u_" . $sanitized; }
+    if ($sanitized eq "alarm" || $sanitized eq "pause" || $sanitized eq "sleep" || $sanitized eq "usleep"
+        || $sanitized eq "getpid" || $sanitized eq "getppid" || $sanitized eq "getuid" || $sanitized eq "geteuid") { return "__strada_u_" . $sanitized; }
+    if ($sanitized eq "getgid" || $sanitized eq "getegid" || $sanitized eq "chdir" || $sanitized eq "getcwd"
+        || $sanitized eq "umask" || $sanitized eq "isatty" || $sanitized eq "fsync" || $sanitized eq "truncate") { return "__strada_u_" . $sanitized; }
+    if ($sanitized eq "ftruncate" || $sanitized eq "realpath" || $sanitized eq "socket" || $sanitized eq "bind"
+        || $sanitized eq "listen" || $sanitized eq "accept" || $sanitized eq "connect" || $sanitized eq "send") { return "__strada_u_" . $sanitized; }
+    if ($sanitized eq "recv" || $sanitized eq "sendto" || $sanitized eq "recvfrom" || $sanitized eq "shutdown"
+        || $sanitized eq "select" || $sanitized eq "poll" || $sanitized eq "fopen" || $sanitized eq "fclose") { return "__strada_u_" . $sanitized; }
+    if ($sanitized eq "fread" || $sanitized eq "fwrite" || $sanitized eq "fseek" || $sanitized eq "ftell"
+        || $sanitized eq "rewind" || $sanitized eq "fflush" || $sanitized eq "feof" || $sanitized eq "ferror") { return "__strada_u_" . $sanitized; }
+    if ($sanitized eq "perror" || $sanitized eq "printf" || $sanitized eq "fprintf" || $sanitized eq "sprintf"
+        || $sanitized eq "snprintf" || $sanitized eq "scanf" || $sanitized eq "sscanf" || $sanitized eq "getchar") { return "__strada_u_" . $sanitized; }
+    if ($sanitized eq "putchar" || $sanitized eq "puts" || $sanitized eq "fputs" || $sanitized eq "fgets"
+        || $sanitized eq "malloc" || $sanitized eq "calloc" || $sanitized eq "realloc" || $sanitized eq "free") { return "__strada_u_" . $sanitized; }
+    if ($sanitized eq "abort" || $sanitized eq "exit" || $sanitized eq "_exit" || $sanitized eq "atexit"
+        || $sanitized eq "system" || $sanitized eq "getenv" || $sanitized eq "setenv" || $sanitized eq "unsetenv") { return "__strada_u_" . $sanitized; }
+    if ($sanitized eq "rand" || $sanitized eq "srand" || $sanitized eq "qsort" || $sanitized eq "bsearch"
+        || $sanitized eq "atoi" || $sanitized eq "atol" || $sanitized eq "atof" || $sanitized eq "strtol") { return "__strada_u_" . $sanitized; }
+    if ($sanitized eq "strtoul" || $sanitized eq "strtoll" || $sanitized eq "strtod" || $sanitized eq "strlen"
+        || $sanitized eq "strcmp" || $sanitized eq "strncmp" || $sanitized eq "strcpy" || $sanitized eq "strncpy") { return "__strada_u_" . $sanitized; }
+    if ($sanitized eq "strcat" || $sanitized eq "strncat" || $sanitized eq "strchr" || $sanitized eq "strrchr"
+        || $sanitized eq "strstr" || $sanitized eq "strtok" || $sanitized eq "strerror" || $sanitized eq "index") { return "__strada_u_" . $sanitized; }
+    if ($sanitized eq "rindex" || $sanitized eq "strcasecmp" || $sanitized eq "strncasecmp" || $sanitized eq "strdup"
+        || $sanitized eq "strndup" || $sanitized eq "memcpy" || $sanitized eq "memmove" || $sanitized eq "memset") { return "__strada_u_" . $sanitized; }
+    if ($sanitized eq "memcmp" || $sanitized eq "memchr" || $sanitized eq "time" || $sanitized eq "ctime"
+        || $sanitized eq "gmtime" || $sanitized eq "localtime" || $sanitized eq "mktime" || $sanitized eq "strftime") { return "__strada_u_" . $sanitized; }
+    if ($sanitized eq "difftime" || $sanitized eq "clock" || $sanitized eq "nanosleep" || $sanitized eq "sin"
+        || $sanitized eq "cos" || $sanitized eq "tan" || $sanitized eq "asin" || $sanitized eq "acos") { return "__strada_u_" . $sanitized; }
+    if ($sanitized eq "atan" || $sanitized eq "atan2" || $sanitized eq "sinh" || $sanitized eq "cosh"
+        || $sanitized eq "tanh" || $sanitized eq "exp" || $sanitized eq "log" || $sanitized eq "log10") { return "__strada_u_" . $sanitized; }
+    if ($sanitized eq "log2" || $sanitized eq "pow" || $sanitized eq "sqrt" || $sanitized eq "cbrt"
+        || $sanitized eq "hypot" || $sanitized eq "ceil" || $sanitized eq "floor" || $sanitized eq "round") { return "__strada_u_" . $sanitized; }
+    if ($sanitized eq "trunc" || $sanitized eq "fabs" || $sanitized eq "fmod" || $sanitized eq "remainder"
+        || $sanitized eq "copysign" || $sanitized eq "fmax" || $sanitized eq "fmin" || $sanitized eq "abs") { return "__strada_u_" . $sanitized; }
+    if ($sanitized eq "labs" || $sanitized eq "llabs" || $sanitized eq "div" || $sanitized eq "ldiv"
         || $sanitized eq "dlopen" || $sanitized eq "dlsym" || $sanitized eq "dlclose" || $sanitized eq "dlerror") {
         return "__strada_u_" . $sanitized;
     }
@@ -1123,16 +1123,79 @@ func accessor_call_eq(scalar $a, scalar $b) int {
     return 1;
 }
 
-# Is this expression a zero-arg call to an inline int-typed has accessor?
+# Check if a method call's receiver is the current method's $self parameter.
+func receiver_is_current_self(scalar $cg, scalar $expr) int {
+    if (!$expr) { return 0; }
+    my str $pkg = $cg->{"current_fn_package"};
+    if (length($pkg) == 0 || $pkg eq "main") { return 0; }
+    my scalar $fpn = $cg->{"func_param_names"};
+    my int $fpc = $cg->{"func_param_count"} + 0;
+    if (!$fpn || $fpc <= 0) { return 0; }
+    my str $self_c = "" . $fpn->[0];
+    if (length($self_c) == 0) { return 0; }
+    my scalar $obj = $expr->{"base_object"};
+    if (!$obj) { $obj = $expr->{"object"}; }
+    if (!$obj) { return 0; }
+    if ($obj->{"type"} != NODE_VARIABLE()) { return 0; }
+    if (("" . $obj->{"sigil"}) ne "$") { return 0; }
+    my str $recv_c = escape_c_keyword(sanitize_name("" . $obj->{"name"}));
+    if ($recv_c eq $self_c) { return 1; }
+    return 0;
+}
+
+# Check if pkg or any ancestor or known subclass defines a non-synthesized override
+# of method, or an overriding attribute in a subclass.
+func has_user_method_override(scalar $cg, str $pkg, str $method) int {
+    my scalar $funcs = $cg->{"functions"};
+    if (!$funcs) { return 0; }
+    my str $self_fn = sanitize_name($pkg . "_" . $method);
+    my scalar $self_fi = $funcs->{$self_fn};
+    if (defined($self_fi) && ($self_fi->{"is_synthesized"} + 0) != 1) {
+        return 1;
+    }
+    my scalar $pl = $cg->{"pkg_list"};
+    my int $pc = $cg->{"pkg_count"} + 0;
+    my int $i = 0;
+    while ($i < $pc) {
+        my str $cand = "" . $pl->[$i];
+        if (length($cand) > 0 && $cand ne $pkg) {
+            if (is_subclass_compile_time($cg, $pkg, $cand, 0) == 1 ||
+                is_subclass_compile_time($cg, $cand, $pkg, 0) == 1) {
+                my scalar $fi = $funcs->{sanitize_name($cand . "_" . $method)};
+                if (defined($fi) && ($fi->{"is_synthesized"} + 0) != 1) {
+                    return 1;
+                }
+            }
+        }
+        $i = $i + 1;
+    }
+    my scalar $inh = $cg->{"inherits"};
+    my int $ic = $cg->{"inherit_count"} + 0;
+    my int $ii = 0;
+    while ($ii < $ic) {
+        my str $ch = "" . $inh->[$ii]->{"child"};
+        if (length($ch) > 0 && $ch ne $pkg && is_subclass_compile_time($cg, $ch, $pkg, 0) == 1) {
+            my scalar $fi2 = $funcs->{sanitize_name($ch . "_" . $method)};
+            if (defined($fi2) && ($fi2->{"is_synthesized"} + 0) != 1) {
+                return 1;
+            }
+        }
+        $ii = $ii + 1;
+    }
+    return 0;
+}
+
+# Is this expression a zero-arg call to an inline int-typed has accessor on $self?
 func is_inline_int_accessor_call(scalar $cg, scalar $expr) int {
     if (!$expr) { return 0; }
     if ($expr->{"type"} != NODE_METHOD_CALL()) { return 0; }
     if ($expr->{"arg_count"} != 0) { return 0; }
+    if (receiver_is_current_self($cg, $expr) == 0) { return 0; }
     if (length(is_inline_accessor($cg, $expr->{"method"})) == 0) { return 0; }
     return expr_is_int_typed($cg, $expr);
 }
 
-# Check if a zero-arg method call can be inlined as a direct hash access.
+# Check if a zero-arg method call on $self can be inlined as a direct hash access.
 # Returns the attribute name if inlineable, empty string otherwise.
 func is_inline_accessor(scalar $cg, str $method) str {
     # Skip UNIVERSAL methods
@@ -1146,43 +1209,36 @@ func is_inline_accessor(scalar $cg, str $method) str {
     my scalar $lookup = $cg->{"accessor_lookup"};
     if (!$lookup) { return ""; }
 
-    # Check direct match: method is a has attr of current package
+    if (has_method_modifier($cg, $method) == 1) { return ""; }
+    if (has_user_method_override($cg, $pkg, $method) == 1) { return ""; }
+
+    # Check direct match: method is a non-lazy has attr of current package
     my str $key = $pkg . "\t" . $method;
     if (length("" . $lookup->{$key}) > 0) {
-        # Check no modifiers
-        if (has_method_modifier($cg, $method) == 0) {
-            return $method;
-        }
-        return "";
+        return $method;
     }
 
-    # Check inherited: walk parent chain via inherits
-    my scalar $inherits = $cg->{"inherits"};
-    my int $ic = $cg->{"inherit_count"};
-    my int $ii = 0;
-    while ($ii < $ic) {
-        my scalar $entry = $inherits->[$ii];
-        if ($entry->{"child"} eq $pkg) {
-            my str $parent = $entry->{"parent"};
-            my str $pkey = $parent . "\t" . $method;
-            if (length("" . $lookup->{$pkey}) > 0) {
-                # Check no override in current package
-                my str $override = $pkg . "_" . $method;
-                my scalar $funcs = $cg->{"functions"};
-                if (length("" . $funcs->{$override}) == 0) {
-                    if (has_method_modifier($cg, $method) == 0) {
-                        return $method;
-                    }
+    # Check transitive ancestor packages via is_subclass_compile_time
+    my scalar $ha_attrs = $cg->{"has_attrs"};
+    my int $ha_count = $cg->{"has_attr_count"} + 0;
+    my int $hi = 0;
+    while ($hi < $ha_count) {
+        my str $a_name = "" . $ha_attrs->[$hi]->{"name"};
+        if ($a_name eq $method) {
+            my str $a_pkg = "" . $ha_attrs->[$hi]->{"package"};
+            if (is_subclass_compile_time($cg, $pkg, $a_pkg, 0) == 1) {
+                if (length("" . $lookup->{$a_pkg . "\t" . $method}) > 0) {
+                    return $method;
                 }
             }
         }
-        $ii = $ii + 1;
+        $hi = $hi + 1;
     }
 
     return "";
 }
 
-# Check if a 1-arg method call is an inline setter: $self->set_X(val) where X is has rw.
+# Check if a 1-arg method call on $self is an inline setter: $self->set_X(val) where X is has rw.
 # Returns the attribute name if inlineable, empty string otherwise.
 func is_inline_setter(scalar $cg, str $method) str {
     # Must start with "set_"
@@ -1193,11 +1249,13 @@ func is_inline_setter(scalar $cg, str $method) str {
     my str $pkg = $cg->{"current_fn_package"};
     if (length($pkg) == 0 || $pkg eq "main") { return ""; }
 
-    my scalar $ha_attrs = $cg->{"has_attrs"};
-    my int $ha_count = $cg->{"has_attr_count"};
-    my scalar $acc_lookup = $cg->{"accessor_lookup"};
+    if (has_method_modifier($cg, $method) == 1) { return ""; }
+    if (has_user_method_override($cg, $pkg, $method) == 1) { return ""; }
 
-    # Check direct match in current package
+    my scalar $ha_attrs = $cg->{"has_attrs"};
+    my int $ha_count = $cg->{"has_attr_count"} + 0;
+
+    # Check direct or transitive ancestor match
     my int $hi = 0;
     while ($hi < $ha_count) {
         my str $a_name = $ha_attrs->[$hi]->{"name"};
@@ -1205,42 +1263,10 @@ func is_inline_setter(scalar $cg, str $method) str {
         my int $a_rw = $ha_attrs->[$hi]->{"rw"};
         if ($a_name eq $attr_name && $a_rw == 1) {
             if ($a_pkg eq $pkg || is_subclass_compile_time($cg, $pkg, $a_pkg, 0) == 1) {
-                # Check no method override for the setter
-                my str $override = $pkg . "_set_" . $attr_name;
-                my scalar $funcs = $cg->{"functions"};
-                # The auto-generated setter IS in functions, so check if there's a user override
-                # by verifying the setter comes from has-attr (not user-defined)
-                # Actually: we know it's auto-generated because it's in has_attrs with rw=1.
-                # Only skip if there are method modifiers on the setter.
-                if (has_method_modifier($cg, $method) == 0) {
-                    return $attr_name;
-                }
+                return $attr_name;
             }
         }
         $hi = $hi + 1;
-    }
-
-    # Check inherited attrs
-    my scalar $inherits = $cg->{"inherits"};
-    my int $ic = $cg->{"inherit_count"};
-    my int $ii = 0;
-    while ($ii < $ic) {
-        if ($inherits->[$ii]->{"child"} eq $pkg) {
-            my str $parent = $inherits->[$ii]->{"parent"};
-            my int $pi = 0;
-            while ($pi < $ha_count) {
-                my str $pa_name = $ha_attrs->[$pi]->{"name"};
-                my str $pa_pkg = $ha_attrs->[$pi]->{"package"};
-                my int $pa_rw = $ha_attrs->[$pi]->{"rw"};
-                if ($pa_name eq $attr_name && $pa_rw == 1 && $pa_pkg eq $parent) {
-                    if (has_method_modifier($cg, $method) == 0) {
-                        return $attr_name;
-                    }
-                }
-                $pi = $pi + 1;
-            }
-        }
-        $ii = $ii + 1;
     }
 
     return "";
@@ -1295,8 +1321,9 @@ func node_is_leaf_safe(scalar $cg, scalar $node) int {
     if ($t == NODE_NUM_LITERAL()) { return 1; }
     if ($t == NODE_STR_LITERAL()) { return 1; }
     if ($t == NODE_METHOD_CALL()) {
-        # Only zero-arg inline-accessor method calls are safe.
+        # Only zero-arg inline-accessor method calls on $self are safe.
         if ($node->{"arg_count"} != 0) { return 0; }
+        if (receiver_is_current_self($cg, $node) == 0) { return 0; }
         if (length(is_inline_accessor($cg, $node->{"method"})) == 0) { return 0; }
         my scalar $obj = $node->{"base_object"};
         if (!$obj) { $obj = $node->{"object"}; }
@@ -1390,6 +1417,7 @@ func node_is_leaf_safe_nothrow(scalar $cg, scalar $node) int {
     }
     if ($t == NODE_METHOD_CALL()) {
         if ($node->{"arg_count"} != 0) { return 0; }
+        if (receiver_is_current_self($cg, $node) == 0) { return 0; }
         if (length(is_inline_accessor($cg, $node->{"method"})) == 0) { return 0; }
         my scalar $obj = $node->{"base_object"};
         if (!$obj) { $obj = $node->{"object"}; }
@@ -1529,7 +1557,7 @@ func gen_overload_reg_if(scalar $sb, str $pkg, scalar $pkg_ol, scalar $methods, 
     while ($i < $method_count) {
         my scalar $m = $methods->[$i];
         if ($m->{"method_name"} eq $method_name) {
-            sb_append($sb, "    strada_overload_register(\"" . $pkg . "\", \"" . $op . "\", __wrap_" . $m->{"func_name"} . ");\n");
+            sb_append($sb, "    strada_overload_register(" . c_str_lit($pkg) . ", " . c_str_lit($op) . ", __wrap_" . $m->{"func_name"} . ");\n");
             return;
         }
         $i = $i + 1;
@@ -1545,7 +1573,7 @@ func gen_overload_reg_stringify(scalar $sb, str $pkg, scalar $pkg_ol, scalar $me
     while ($i < $method_count) {
         my scalar $m = $methods->[$i];
         if ($m->{"method_name"} eq $method_name) {
-            sb_append($sb, "    strada_overload_register(\"" . $pkg . "\", \"\\\"\\\"\", __wrap_" . $m->{"func_name"} . ");\n");
+            sb_append($sb, "    strada_overload_register(" . c_str_lit($pkg) . ", \"\\\"\\\"\", __wrap_" . $m->{"func_name"} . ");\n");
             return;
         }
         $i = $i + 1;
@@ -1572,6 +1600,9 @@ func wrapper_default_literal(scalar $param) str {
     if ($dt == NODE_NUM_LITERAL()) {
         return "strada_new_num(" . $dv->{"value"} . ")";
     }
+    if ($dt == NODE_UNDEF()) {
+        return "strada_new_undef()";
+    }
     if ($dt == NODE_UNARY_OP()) {
         my str $du_op = $dv->{"op"};
         my scalar $du_arg = $dv->{"operand"};
@@ -1594,36 +1625,66 @@ func wrapper_default_literal(scalar $param) str {
     }
     if ($dt == NODE_STR_LITERAL()) {
         my str $ds = $dv->{"value"};
-        my str $dq = "";
-        my int $di = 0;
-        my int $dn = bytes($ds);
-        while ($di < $dn) {
-            my int $dc = char_at($ds, $di);
-            if ($dc == 34 || $dc == 92) {
-                $dq = $dq . "\\" . chr($dc);
-            } elsif ($dc == 10) {
-                $dq = $dq . "\\n";
-            } elsif ($dc == 9) {
-                $dq = $dq . "\\t";
-            } elsif ($dc < 32 || $dc >= 127) {
-                return "";      # leave unusual bytes to the ordinary path
-            } else {
-                $dq = $dq . chr($dc);
-            }
-            $di = $di + 1;
-        }
-        return "strada_new_str(\"" . $dq . "\")";
+        return "strada_new_str_len(" . c_str_lit($ds) . ", " . bytes($ds) . ")";
     }
     return "";
 }
 
-func wrapper_has_literal_default(scalar $m) int {
+# Produce an owned StradaValue* C expression for any parameter default
+# (literals, undef, empty containers, constants, function calls, expressions).
+func wrapper_default_expr(scalar $cg, str $pkg, scalar $param, scalar $extra_defs_sb) str {
+    if (!$param) { return ""; }
+    if ($param->{"has_default"} != 1) { return ""; }
+    my scalar $dv = $param->{"default"};
+    if (!$dv) { return ""; }
+    my str $lit = wrapper_default_literal($param);
+    if (length($lit) > 0) { return $lit; }
+    if (!$cg) { return ""; }
+
+    my scalar $saved_sb = $cg->{"output_sb"};
+    my int $saved_cleanup = $cg->{"cleanup_enabled"};
+    my int $saved_in_main = $cg->{"in_main"};
+    my str $saved_pkg = "" . $cg->{"current_fn_package"};
+    my str $saved_anon = "" . $cg->{"anon_func_defs"};
+    my scalar $saved_fpn = $cg->{"func_param_names"};
+    my int $saved_fpc = $cg->{"func_param_count"} + 0;
+
+    $cg->{"output_sb"} = sb_new();
+    $cg->{"cleanup_enabled"} = 1;
+    $cg->{"in_main"} = 0;
+    $cg->{"current_fn_package"} = $pkg;
+    $cg->{"anon_func_defs"} = "";
+    $cg->{"func_param_names"} = [];
+    $cg->{"func_param_count"} = 0;
+
+    gen_expression($cg, $dv);
+    my str $expr_c = sb_to_string($cg->{"output_sb"});
+    my int $is_owned = needs_temp_cleanup($cg, $dv);
+    my str $new_anons = "" . $cg->{"anon_func_defs"};
+    if (length($new_anons) > 0) {
+        sb_append($extra_defs_sb, $new_anons);
+    }
+
+    $cg->{"output_sb"} = $saved_sb;
+    $cg->{"cleanup_enabled"} = $saved_cleanup;
+    $cg->{"in_main"} = $saved_in_main;
+    $cg->{"current_fn_package"} = $saved_pkg;
+    $cg->{"anon_func_defs"} = $saved_anon;
+    $cg->{"func_param_names"} = $saved_fpn;
+    $cg->{"func_param_count"} = $saved_fpc;
+
+    if ($is_owned == 1) { return $expr_c; }
+    return "strada_copy_scalar_il(" . $expr_c . ")";
+}
+
+func wrapper_has_any_default(scalar $m) int {
     my scalar $wh_params = $m->{"params"};
     if (!$wh_params) { return 0; }
     my int $wh_n = $m->{"param_count"};
     my int $wh_i = 1;
     while ($wh_i < $wh_n) {
-        if (length(wrapper_default_literal($wh_params->[$wh_i])) > 0) { return 1; }
+        my scalar $wp = $wh_params->[$wh_i];
+        if ($wp && $wp->{"has_default"} == 1 && $wp->{"default"}) { return 1; }
         $wh_i = $wh_i + 1;
     }
     return 0;
@@ -1631,12 +1692,22 @@ func wrapper_has_literal_default(scalar $m) int {
 
 # Generate method wrapper functions for a single package
 # $pkg_info is a hash with "methods" array and "count" int
-func gen_method_wrappers_for_pkg(scalar $sb, str $pkg, scalar $pkg_info, int $has_overloads, scalar $overloads, scalar $method_modifiers, int $method_modifier_count) void {
+func gen_method_wrappers_for_pkg(scalar $cg, scalar $sb, str $pkg, scalar $pkg_info, int $has_overloads, scalar $overloads, scalar $method_modifiers, int $method_modifier_count) void {
     my int $method_count = $pkg_info->{"count"};
     my scalar $methods = $pkg_info->{"methods"};
     if ($method_count == 0) { return; }
 
-    sb_append($sb, "/* OOP method wrappers for package " . $pkg . " */\n");
+    my int $saved_w_in_main = $cg->{"in_main"};
+    my int $saved_w_cleanup = $cg->{"cleanup_enabled"};
+    $cg->{"in_main"} = 0;
+    $cg->{"cleanup_enabled"} = 1;
+    my int $use_push = cleanup_push_useful($cg);
+    $cg->{"in_main"} = $saved_w_in_main;
+    $cg->{"cleanup_enabled"} = $saved_w_cleanup;
+
+    my scalar $wsb = sb_new();
+    my scalar $extra_defs_sb = sb_new();
+    sb_append($wsb, "/* OOP method wrappers for package " . $pkg . " */\n");
 
     my int $i = 0;
     while ($i < $method_count) {
@@ -1647,37 +1718,48 @@ func gen_method_wrappers_for_pkg(scalar $sb, str $pkg, scalar $pkg_info, int $ha
         my int $is_void = $ret_type == TYPE_VOID();
 
         # Generate wrapper: __wrap_FuncName(self, args) { ... }
-        sb_append($sb, "static StradaValue* __wrap_" . $func_name . "(StradaValue* self, StradaValue* args) {\n");
+        sb_append($wsb, "static StradaValue* __wrap_" . $func_name . "(StradaValue* self, StradaValue* args) {\n");
 
         if ($param_count <= 1 && $m->{"is_variadic"} == 1) {
             # No-parens variadic function used as method: prepend self to args for @_
             # Use incref on self and args elements since the packed array takes shared ownership
-            sb_append($sb, "    StradaValue *__packed = strada_new_array();\n");
-            sb_append($sb, "    strada_incref(self);\n");
-            sb_append($sb, "    strada_array_push_take(__packed->value.av, self);\n");
-            sb_append($sb, "    if (args && args->type == STRADA_ARRAY && args->value.av) {\n");
-            sb_append($sb, "        for (size_t __i = 0; __i < args->value.av->size; __i++) {\n");
-            sb_append($sb, "            strada_incref(args->value.av->elements[args->value.av->head + __i]);\n");
-            sb_append($sb, "            strada_array_push_take(__packed->value.av, args->value.av->elements[args->value.av->head + __i]);\n");
-            sb_append($sb, "        }\n");
-            sb_append($sb, "    }\n");
+            sb_append($wsb, "    StradaValue *__packed = strada_new_array();\n");
+            sb_append($wsb, "    strada_incref(self);\n");
+            sb_append($wsb, "    strada_array_push_take(__packed->value.av, self);\n");
+            sb_append($wsb, "    if (args && args->type == STRADA_ARRAY && args->value.av) {\n");
+            sb_append($wsb, "        for (size_t __i = 0; __i < args->value.av->size; __i++) {\n");
+            sb_append($wsb, "            strada_incref(args->value.av->elements[args->value.av->head + __i]);\n");
+            sb_append($wsb, "            strada_array_push_take(__packed->value.av, args->value.av->elements[args->value.av->head + __i]);\n");
+            sb_append($wsb, "        }\n");
+            sb_append($wsb, "    }\n");
+            if ($use_push == 1) {
+                sb_append($wsb, "    strada_cleanup_push(__packed);\n");
+            }
             if ($is_void == 1) {
-                sb_append($sb, "    " . $func_name . "(__packed);\n");
-                sb_append($sb, "    strada_decref(__packed);\n");
-                sb_append($sb, "    return strada_undef_static();\n");
+                sb_append($wsb, "    " . $func_name . "(__packed);\n");
+                if ($use_push == 1) {
+                    sb_append($wsb, "    strada_cleanup_pop_decref(__packed);\n");
+                } else {
+                    sb_append($wsb, "    strada_decref(__packed);\n");
+                }
+                sb_append($wsb, "    return strada_undef_static();\n");
             } else {
-                sb_append($sb, "    StradaValue *__r = " . $func_name . "(__packed);\n");
-                sb_append($sb, "    strada_decref(__packed);\n");
-                sb_append($sb, "    return __r;\n");
+                sb_append($wsb, "    StradaValue *__r = " . $func_name . "(__packed);\n");
+                if ($use_push == 1) {
+                    sb_append($wsb, "    strada_cleanup_pop_decref(__packed);\n");
+                } else {
+                    sb_append($wsb, "    strada_decref(__packed);\n");
+                }
+                sb_append($wsb, "    return __r;\n");
             }
         } elsif ($param_count <= 1) {
             # 0 or 1 param (just self)
-            sb_append($sb, "    (void)args;\n");
+            sb_append($wsb, "    (void)args;\n");
             if ($is_void == 1) {
-                sb_append($sb, "    " . $func_name . "(self);\n");
-                sb_append($sb, "    return strada_undef_static();\n");
+                sb_append($wsb, "    " . $func_name . "(self);\n");
+                sb_append($wsb, "    return strada_undef_static();\n");
             } else {
-                sb_append($sb, "    return " . $func_name . "(self);\n");
+                sb_append($wsb, "    return " . $func_name . "(self);\n");
             }
         } else {
             # Multiple params - unpack from args
@@ -1686,128 +1768,156 @@ func gen_method_wrappers_for_pkg(scalar $sb, str $pkg, scalar $pkg_info, int $ha
 
             if ($is_variadic == 1) {
                 if ($variadic_idx == 1) {
-                    sb_append($sb, "    StradaValue *__va_empty = args ? NULL : strada_new_array();\n");
-                    sb_append($sb, "    StradaValue *__va_pass = args ? args : __va_empty;\n");
+                    sb_append($wsb, "    StradaValue *__va_empty = args ? NULL : strada_new_array();\n");
+                    sb_append($wsb, "    StradaValue *__va_pass = args ? args : __va_empty;\n");
+                    if ($use_push == 1) {
+                        sb_append($wsb, "    if (__va_empty) strada_cleanup_push(__va_empty);\n");
+                    }
                     if ($is_void == 1) {
-                        sb_append($sb, "    " . $func_name . "(self, __va_pass);\n");
-                        sb_append($sb, "    if (__va_empty) strada_decref(__va_empty);\n");
-                        sb_append($sb, "    return strada_undef_static();\n");
+                        sb_append($wsb, "    " . $func_name . "(self, __va_pass);\n");
+                        if ($use_push == 1) {
+                            sb_append($wsb, "    if (__va_empty) strada_cleanup_pop_decref(__va_empty);\n");
+                        } else {
+                            sb_append($wsb, "    if (__va_empty) strada_decref(__va_empty);\n");
+                        }
+                        sb_append($wsb, "    return strada_undef_static();\n");
                     } else {
-                        sb_append($sb, "    StradaValue *__va_res1 = " . $func_name . "(self, __va_pass);\n");
-                        sb_append($sb, "    if (__va_empty) strada_decref(__va_empty);\n");
-                        sb_append($sb, "    return __va_res1;\n");
+                        sb_append($wsb, "    StradaValue *__va_res1 = " . $func_name . "(self, __va_pass);\n");
+                        if ($use_push == 1) {
+                            sb_append($wsb, "    if (__va_empty) strada_cleanup_pop_decref(__va_empty);\n");
+                        } else {
+                            sb_append($wsb, "    if (__va_empty) strada_decref(__va_empty);\n");
+                        }
+                        sb_append($wsb, "    return __va_res1;\n");
                     }
                 } else {
-                    sb_append($sb, "    StradaArray *__args = args ? strada_deref_array(args) : NULL;\n");
-                    sb_append($sb, "    StradaValue *__va_arr = strada_new_array();\n");
+                    sb_append($wsb, "    StradaArray *__args = args ? strada_deref_array(args) : NULL;\n");
+                    sb_append($wsb, "    StradaValue *__va_arr = strada_new_array();\n");
                     my int $var_start = $variadic_idx - 1;
-                    sb_append($sb, "    if (__args) {\n");
-                    sb_append($sb, "        for (size_t __vi = " . $var_start . "; __vi < __args->size; __vi++) {\n");
-                    sb_append($sb, "            strada_array_push(strada_deref_array(__va_arr), __args->elements[__args->head + __vi]);\n");
-                    sb_append($sb, "        }\n");
-                    sb_append($sb, "    }\n");
+                    sb_append($wsb, "    if (__args) {\n");
+                    sb_append($wsb, "        for (size_t __vi = " . $var_start . "; __vi < __args->size; __vi++) {\n");
+                    sb_append($wsb, "            strada_array_push(strada_deref_array(__va_arr), __args->elements[__args->head + __vi]);\n");
+                    sb_append($wsb, "        }\n");
+                    sb_append($wsb, "    }\n");
+                    if ($use_push == 1) {
+                        sb_append($wsb, "    int __w_pushed = 1;\n");
+                        sb_append($wsb, "    strada_cleanup_push(__va_arr);\n");
+                    }
                     my scalar $wv_params = $m->{"params"};
                     my int $wv_j = 1;
                     while ($wv_j < $variadic_idx) {
                         my int $wv_idx = $wv_j - 1;
                         my str $wv_lit = "";
                         if ($wv_params) {
-                            $wv_lit = wrapper_default_literal($wv_params->[$wv_j]);
+                            $wv_lit = wrapper_default_expr($cg, $pkg, $wv_params->[$wv_j], $extra_defs_sb);
                         }
-                        sb_append($sb, "    StradaValue *__wa" . $wv_idx . " = __strada_get_arg(args, " . $wv_idx . "); int __wo" . $wv_idx . " = 0;\n");
+                        sb_append($wsb, "    StradaValue *__wa" . $wv_idx . " = __strada_get_arg(args, " . $wv_idx . "); int __wo" . $wv_idx . " = 0;\n");
                         if (length($wv_lit) > 0) {
-                            sb_append($sb, "    if (!__wa" . $wv_idx . ") { __wa" . $wv_idx . " = " . $wv_lit . "; __wo" . $wv_idx . " = 1; }\n");
+                            sb_append($wsb, "    if (!__wa" . $wv_idx . ") { __wa" . $wv_idx . " = " . $wv_lit . "; __wo" . $wv_idx . " = 1; }\n");
+                            if ($use_push == 1) {
+                                sb_append($wsb, "    if (__wo" . $wv_idx . ") { strada_cleanup_push(__wa" . $wv_idx . "); __w_pushed++; }\n");
+                            }
                         } else {
-                            sb_append($sb, "    if (!__wa" . $wv_idx . ") { __wa" . $wv_idx . " = strada_undef_static(); }\n");
+                            sb_append($wsb, "    if (!__wa" . $wv_idx . ") { __wa" . $wv_idx . " = strada_undef_static(); }\n");
                         }
                         $wv_j = $wv_j + 1;
                     }
                     if ($is_void == 1) {
-                        sb_append($sb, "    " . $func_name . "(self");
+                        sb_append($wsb, "    " . $func_name . "(self");
                     } else {
-                        sb_append($sb, "    StradaValue *__va_result = " . $func_name . "(self");
+                        sb_append($wsb, "    StradaValue *__va_result = " . $func_name . "(self");
                     }
                     my int $j = 1;
                     while ($j < $variadic_idx) {
                         my int $arg_idx = $j - 1;
-                        sb_append($sb, ", __wa" . $arg_idx);
+                        sb_append($wsb, ", __wa" . $arg_idx);
                         $j = $j + 1;
                     }
-                    sb_append($sb, ", __va_arr);\n");
-                    $wv_j = 1;
-                    while ($wv_j < $variadic_idx) {
-                        sb_append($sb, "    if (__wo" . ($wv_j - 1) . ") strada_decref(__wa" . ($wv_j - 1) . ");\n");
-                        $wv_j = $wv_j + 1;
-                    }
-                    sb_append($sb, "    strada_decref(__va_arr);\n");
-                    if ($is_void == 1) {
-                        sb_append($sb, "    return strada_undef_static();\n");
+                    sb_append($wsb, ", __va_arr);\n");
+                    if ($use_push == 1) {
+                        sb_append($wsb, "    strada_cleanup_pop_decref_n(__w_pushed);\n");
                     } else {
-                        sb_append($sb, "    return __va_result;\n");
+                        $wv_j = $variadic_idx - 1;
+                        while ($wv_j >= 1) {
+                            sb_append($wsb, "    if (__wo" . ($wv_j - 1) . ") strada_decref(__wa" . ($wv_j - 1) . ");\n");
+                            $wv_j = $wv_j - 1;
+                        }
+                        sb_append($wsb, "    strada_decref(__va_arr);\n");
+                    }
+                    if ($is_void == 1) {
+                        sb_append($wsb, "    return strada_undef_static();\n");
+                    } else {
+                        sb_append($wsb, "    return __va_result;\n");
                     }
                 }
-            } elsif (wrapper_has_literal_default($m) == 1) {
-                # A parameter with a default value. Direct calls fill defaults
-                # in at the call site; a dynamically dispatched call arrives
-                # here with the argument simply missing, and used to pass NULL
-                # (undef) on: `$obj->method()` ignored the default whenever the
-                # receiver's class was not known statically.
+            } elsif (wrapper_has_any_default($m) == 1) {
+                if ($use_push == 1) {
+                    sb_append($wsb, "    int __w_pushed = 0;\n");
+                }
                 my scalar $wd_params = $m->{"params"};
                 my int $wd_j = 1;
                 while ($wd_j < $param_count) {
                     my int $wd_idx = $wd_j - 1;
-                    my str $wd_lit = wrapper_default_literal($wd_params->[$wd_j]);
-                    sb_append($sb, "    StradaValue *__wa" . $wd_idx . " = __strada_get_arg(args, " . $wd_idx . "); int __wo" . $wd_idx . " = 0;\n");
+                    my str $wd_lit = wrapper_default_expr($cg, $pkg, $wd_params->[$wd_j], $extra_defs_sb);
+                    sb_append($wsb, "    StradaValue *__wa" . $wd_idx . " = __strada_get_arg(args, " . $wd_idx . "); int __wo" . $wd_idx . " = 0;\n");
                     if (length($wd_lit) > 0) {
-                        sb_append($sb, "    if (!__wa" . $wd_idx . ") { __wa" . $wd_idx . " = " . $wd_lit . "; __wo" . $wd_idx . " = 1; }\n");
+                        sb_append($wsb, "    if (!__wa" . $wd_idx . ") { __wa" . $wd_idx . " = " . $wd_lit . "; __wo" . $wd_idx . " = 1; }\n");
+                        if ($use_push == 1) {
+                            sb_append($wsb, "    if (__wo" . $wd_idx . ") { strada_cleanup_push(__wa" . $wd_idx . "); __w_pushed++; }\n");
+                        }
                     }
                     $wd_j = $wd_j + 1;
                 }
                 if ($is_void == 1) {
-                    sb_append($sb, "    " . $func_name . "(self");
+                    sb_append($wsb, "    " . $func_name . "(self");
                 } else {
-                    sb_append($sb, "    StradaValue *__wr = " . $func_name . "(self");
+                    sb_append($wsb, "    StradaValue *__wr = " . $func_name . "(self");
                 }
                 $wd_j = 1;
                 while ($wd_j < $param_count) {
-                    sb_append($sb, ", __wa" . ($wd_j - 1));
+                    sb_append($wsb, ", __wa" . ($wd_j - 1));
                     $wd_j = $wd_j + 1;
                 }
-                sb_append($sb, ");\n");
-                $wd_j = 1;
-                while ($wd_j < $param_count) {
-                    # strada_decref is a no-op on tagged ints, so one release
-                    # covers every kind of literal default.
-                    sb_append($sb, "    if (__wo" . ($wd_j - 1) . ") strada_decref(__wa" . ($wd_j - 1) . ");\n");
-                    $wd_j = $wd_j + 1;
+                sb_append($wsb, ");\n");
+                if ($use_push == 1) {
+                    sb_append($wsb, "    if (__w_pushed > 0) strada_cleanup_pop_decref_n(__w_pushed);\n");
+                } else {
+                    $wd_j = $param_count - 1;
+                    while ($wd_j >= 1) {
+                        sb_append($wsb, "    if (__wo" . ($wd_j - 1) . ") strada_decref(__wa" . ($wd_j - 1) . ");\n");
+                        $wd_j = $wd_j - 1;
+                    }
                 }
                 if ($is_void == 1) {
-                    sb_append($sb, "    return strada_undef_static();\n");
+                    sb_append($wsb, "    return strada_undef_static();\n");
                 } else {
-                    sb_append($sb, "    return __wr;\n");
+                    sb_append($wsb, "    return __wr;\n");
                 }
-} else {
+            } else {
                 if ($is_void == 1) {
-                    sb_append($sb, "    " . $func_name . "(self");
+                    sb_append($wsb, "    " . $func_name . "(self");
                 } else {
-                    sb_append($sb, "    return " . $func_name . "(self");
+                    sb_append($wsb, "    return " . $func_name . "(self");
                 }
                 my int $j = 1;
                 while ($j < $param_count) {
                     my int $arg_idx = $j - 1;
-                    sb_append($sb, ", __strada_get_arg(args, " . $arg_idx . ")");
+                    sb_append($wsb, ", __strada_get_arg(args, " . $arg_idx . ")");
                     $j = $j + 1;
                 }
-                sb_append($sb, ");\n");
+                sb_append($wsb, ");\n");
                 if ($is_void == 1) {
-                    sb_append($sb, "    return strada_undef_static();\n");
+                    sb_append($wsb, "    return strada_undef_static();\n");
                 }
             }
         }
 
-        sb_append($sb, "}\n\n");
+        sb_append($wsb, "}\n\n");
         $i = $i + 1;
     }
+
+    sb_append($sb, sb_to_string($extra_defs_sb));
+    sb_append($sb, sb_to_string($wsb));
 
     # Generate initialization function for this package
     my str $c_pkg = sanitize_name($pkg);
@@ -1824,7 +1934,7 @@ func gen_method_wrappers_for_pkg(scalar $sb, str $pkg, scalar $pkg_info, int $ha
         my str $func_name = $m->{"func_name"};
         my str $method_name = $m->{"method_name"};
 
-        sb_append($sb, "    strada_method_register(\"" . $pkg . "\", \"" . $method_name . "\", __wrap_" . $func_name . ");\n");
+        sb_append($sb, "    strada_method_register(" . c_str_lit($pkg) . ", " . c_str_lit($method_name) . ", __wrap_" . $func_name . ");\n");
         $i = $i + 1;
     }
 
@@ -1887,14 +1997,14 @@ func gen_method_wrappers_for_pkg(scalar $sb, str $pkg, scalar $pkg_info, int $ha
                 } elsif ($mod_type eq "around") {
                     $type_int = 3;
                 }
-                my str $func_name = $mod->{"func_name"};
+                my str $func_name = sanitize_name($mod->{"func_name"});
                 my str $method_name = $mod->{"method_name"};
                 # Find the wrapper for this modifier function
                 my int $wi = 0;
                 while ($wi < $method_count) {
                     my scalar $wm = $methods->[$wi];
                     if ($wm->{"func_name"} eq $func_name) {
-                        sb_append($sb, "    strada_modifier_register(\"" . $pkg . "\", \"" . $method_name . "\", " . $type_int . ", __wrap_" . $func_name . ");\n");
+                        sb_append($sb, "    strada_modifier_register(" . c_str_lit($pkg) . ", " . c_str_lit($method_name) . ", " . $type_int . ", __wrap_" . $func_name . ");\n");
                         $wi = $method_count;
                     }
                     $wi = $wi + 1;
@@ -1933,7 +2043,7 @@ func gen_all_method_wrappers(scalar $cg) str {
     while ($i < $num_pkgs) {
         my str $pkg = $pkg_list->[$i];
         my scalar $pkg_info = $pkg_methods->{$pkg};
-        gen_method_wrappers_for_pkg($sb, $pkg, $pkg_info, $has_overloads, $overloads, $method_modifiers, $method_modifier_count);
+        gen_method_wrappers_for_pkg($cg, $sb, $pkg, $pkg_info, $has_overloads, $overloads, $method_modifiers, $method_modifier_count);
         $i = $i + 1;
     }
 
@@ -2123,13 +2233,16 @@ func gen_overloaded_binary(scalar $cg, scalar $left, scalar $right, str $op) voi
         $left_tmp = needs_temp_cleanup($cg, $left);
         $right_tmp = needs_temp_cleanup($cg, $right);
     }
+    my int $use_push = cleanup_push_useful($cg);
     emit($cg, "({ StradaValue *__ol_l = ");
     gen_expression($cg, $left);
-    emit($cg, "; StradaValue *__ol_r = ");
+    emit($cg, "; ");
+    if ($left_tmp == 1 && $use_push == 1) { emit($cg, "strada_cleanup_push(__ol_l); "); }
+    emit($cg, "StradaValue *__ol_r = ");
     gen_expression($cg, $right);
-    emit($cg, "; StradaValue *__ol_res = strada_overload_binary(__ol_l, __ol_r, \"");
-    emit($cg, $op);
-    emit($cg, "\"); if (!__ol_res) { __ol_res = ");
+    emit($cg, "; ");
+    if ($right_tmp == 1 && $use_push == 1) { emit($cg, "strada_cleanup_push(__ol_r); "); }
+    emit($cg, "StradaValue *__ol_res = strada_overload_binary(__ol_l, __ol_r, " . c_str_lit($op) . "); if (!__ol_res) { __ol_res = ");
 
     # Generate the fallback - dispatch to appropriate helper
     if ($op eq "eq" || $op eq "ne" || $op eq "lt" || $op eq "gt" || $op eq "le" || $op eq "ge" || $op eq "cmp" || $op eq "<=>") {
@@ -2139,11 +2252,16 @@ func gen_overloaded_binary(scalar $cg, scalar $left, scalar $right, str $op) voi
     }
     emit($cg, "; }");
     # Clean up temporary operands
-    if ($left_tmp == 1) {
-        emit($cg, " strada_decref(__ol_l);");
-    }
-    if ($right_tmp == 1) {
-        emit($cg, " strada_decref(__ol_r);");
+    if ($use_push == 1) {
+        if ($right_tmp == 1) { emit($cg, " strada_cleanup_pop_decref(__ol_r);"); }
+        if ($left_tmp == 1) { emit($cg, " strada_cleanup_pop_decref(__ol_l);"); }
+    } else {
+        if ($left_tmp == 1) {
+            emit($cg, " strada_decref(__ol_l);");
+        }
+        if ($right_tmp == 1) {
+            emit($cg, " strada_decref(__ol_r);");
+        }
     }
     emit($cg, " __ol_res; })");
 }
@@ -2154,11 +2272,12 @@ func gen_overloaded_unary(scalar $cg, scalar $operand, str $op) void {
     if ($cg->{"cleanup_enabled"} == 1) {
         $op_tmp = needs_temp_cleanup($cg, $operand);
     }
+    my int $use_push = cleanup_push_useful($cg);
     emit($cg, "({ StradaValue *__ol_v = ");
     gen_expression($cg, $operand);
-    emit($cg, "; StradaValue *__ol_res = strada_overload_unary(__ol_v, \"");
-    emit($cg, $op);
-    emit($cg, "\"); if (!__ol_res) { __ol_res = ");
+    emit($cg, "; ");
+    if ($op_tmp == 1 && $use_push == 1) { emit($cg, "strada_cleanup_push(__ol_v); "); }
+    emit($cg, "StradaValue *__ol_res = strada_overload_unary(__ol_v, " . c_str_lit($op) . "); if (!__ol_res) { __ol_res = ");
 
     # Generate the fallback
     if ($op eq "neg") {
@@ -2172,7 +2291,11 @@ func gen_overloaded_unary(scalar $cg, scalar $operand, str $op) void {
     }
     emit($cg, "; }");
     if ($op_tmp == 1) {
-        emit($cg, " strada_decref(__ol_v);");
+        if ($use_push == 1) {
+            emit($cg, " strada_cleanup_pop_decref(__ol_v);");
+        } else {
+            emit($cg, " strada_decref(__ol_v);");
+        }
     }
     emit($cg, " __ol_res; })");
 }
@@ -3729,9 +3852,8 @@ func c_ctrl_escape(str $ch) str {
     return "\\" . chr(48 + $o2) . chr(48 + $o1) . chr(48 + $o0);
 }
 
-func c_str_lit(str $s) str {
+func c_str_escape(str $s) str {
     my scalar $sb = sb_new();
-    sb_append($sb, "\"");
     my int $i = 0;
     my int $len = bytes($s);
     while ($i < $len) {
@@ -3758,8 +3880,11 @@ func c_str_lit(str $s) str {
         }
         $i = $i + 1;
     }
-    sb_append($sb, "\"");
     return sb_to_string($sb);
+}
+
+func c_str_lit(str $s) str {
+    return "\"" . c_str_escape($s) . "\"";
 }
 
 func emit_escaped_string(scalar $cg, str $s) void {
@@ -3922,7 +4047,7 @@ func emit_int_operand(scalar $cg, scalar $expr) void {
         emit($cg, "strada_to_int(");
         gen_expression($cg, $expr);
         emit($cg, ")");
-    } elsif ($type == NODE_METHOD_CALL() && $expr->{"arg_count"} == 0 && length(is_inline_accessor($cg, $expr->{"method"})) > 0 && expr_is_int_typed($cg, $expr) == 1) {
+    } elsif ($type == NODE_METHOD_CALL() && $expr->{"arg_count"} == 0 && receiver_is_current_self($cg, $expr) == 1 && length(is_inline_accessor($cg, $expr->{"method"})) > 0 && expr_is_int_typed($cg, $expr) == 1) {
         # Inline int accessor in int context: emit strada_hv_fetch_int_ph directly,
         # returning int64_t with no StradaValue temp / incref / decref.
         my str $imethod = $expr->{"method"};
@@ -3933,11 +4058,11 @@ func emit_int_operand(scalar $cg, scalar $expr) void {
         if ($itarget_cleanup == 1) {
             emit($cg, "({ StradaValue *__iao = ");
             gen_expression($cg, $itarget);
-            emit($cg, "; int64_t __iar = strada_hv_fetch_int_ph(__iao, \"" . $imethod . "\", " . $ihash . "u); strada_decref(__iao); __iar; })");
+            emit($cg, "; int64_t __iar = strada_hv_fetch_int_ph(__iao, " . c_str_lit($imethod) . ", " . $ihash . "u); strada_decref(__iao); __iar; })");
         } else {
             emit($cg, "strada_hv_fetch_int_ph(");
             gen_expression($cg, $itarget);
-            emit($cg, ", \"" . $imethod . "\", " . $ihash . "u)");
+            emit($cg, ", " . c_str_lit($imethod) . ", " . $ihash . "u)");
         }
     } else {
         # Int-returning function calls whose bodies are int arithmetic / params /
@@ -4910,9 +5035,16 @@ func emit_regex_g_condition(scalar $cg, scalar $expr, str $pos_var) void {
     my str $op = $expr->{"op"};
 
     # Get the target string
-    emit($cg, "({ char *__re_str = strada_to_str(");
-    gen_expression($cg, $expr->{"target"});
-    emit($cg, "); int __re_res = ");
+    my int $re_tmp = ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $expr->{"target"}) == 1);
+    if ($re_tmp == 1) {
+        emit($cg, "({ StradaValue *__re_tv = ");
+        gen_expression($cg, $expr->{"target"});
+        emit($cg, "; char *__re_str = strada_to_str(__re_tv); strada_decref(__re_tv); int __re_res = ");
+    } else {
+        emit($cg, "({ char *__re_str = strada_to_str(");
+        gen_expression($cg, $expr->{"target"});
+        emit($cg, "); int __re_res = ");
+    }
     if ($op eq "!~") { emit($cg, "!"); }
     emit($cg, "strada_regex_match_global(__re_str, \"");
     # Emit pattern with C escaping
@@ -5394,9 +5526,15 @@ func build_owned_call_builtins() scalar {
     $owned_set{"is_ref"} = 1;
     $owned_set{"is_refto"} = 1;
     $owned_set{"deref"} = 1;
+    $owned_set{"sys::deref"} = 1;
     $owned_set{"derefto"} = 1;
+    $owned_set{"sys::derefto"} = 1;
     $owned_set{"deref_array"} = 1;
+    $owned_set{"sys::deref_array"} = 1;
     $owned_set{"deref_hash"} = 1;
+    $owned_set{"sys::deref_hash"} = 1;
+    $owned_set{"deref_set"} = 1;
+    $owned_set{"sys::deref_set"} = 1;
     $owned_set{"blessed"} = 1;
     $owned_set{"isa"} = 1;
     $owned_set{"can"} = 1;
@@ -6301,22 +6439,38 @@ func gen_call_with_arg_cleanup(scalar $cg, str $c_func_name, scalar $args, int $
         return;
     }
 
-    # Check which arguments are temporaries (supports arbitrary arg counts)
+    # Check which arguments are temporaries or need left-to-right hoisting
     my array @is_temp = ();
+    my array @need_copy = ();
     my int $has_temps = 0;
+    my int $need_hoist = 0;
     my int $i = 0;
     while ($i < $arg_count) {
-        if (needs_temp_cleanup($cg, $args->[$i]) == 1 && expr_is_always_tagged_int($cg, $args->[$i]) == 0) {
+        my scalar $a = $args->[$i];
+        my int $at = $a->{"type"};
+        if (needs_temp_cleanup($cg, $a) == 1 && expr_is_always_tagged_int($cg, $a) == 0) {
             push(@is_temp, 1);
+            push(@need_copy, 0);
             $has_temps = 1;
+            $need_hoist = 1;
         } else {
             push(@is_temp, 0);
+            my int $is_container = ($at == NODE_VARIABLE() && (("" . $a->{"sigil"}) eq "@" || ("" . $a->{"sigil"}) eq "%"));
+            my int $is_simple = ($at == NODE_VARIABLE() || $at == NODE_PARAM() || $at == NODE_INT_LITERAL() || $at == NODE_NUM_LITERAL() || $at == NODE_STR_LITERAL() || $at == NODE_UNDEF());
+            if ($arg_count >= 2 && $is_simple == 0) {
+                $need_hoist = 1;
+            }
+            if ($is_container == 1 || expr_is_always_tagged_int($cg, $a) == 1 || $at == NODE_INT_LITERAL() || $at == NODE_NUM_LITERAL() || $at == NODE_STR_LITERAL() || $at == NODE_UNDEF()) {
+                push(@need_copy, 0);
+            } else {
+                push(@need_copy, 1);
+            }
         }
         $i = $i + 1;
     }
 
-    if ($has_temps == 0) {
-        # No temporaries - emit simple call
+    if ($need_hoist == 0) {
+        # No temporaries or side-effect risks - emit simple call
         emit($cg, $c_func_name . "(");
         $i = 0;
         while ($i < $arg_count) {
@@ -6330,10 +6484,11 @@ func gen_call_with_arg_cleanup(scalar $cg, str $c_func_name, scalar $args, int $
         return;
     }
 
-    # Has temporaries - wrap with exception-safe cleanup
+    # Evaluate all args strictly left-to-right with exception-safe cleanup
     emit($cg, "({ ");
     my int $use_push = cleanup_push_useful($cg);
     my int $pushed = 0;
+    my int $owned_count = 0;
     my str $last_pushed = "";
 
     $i = 0;
@@ -6342,11 +6497,26 @@ func gen_call_with_arg_cleanup(scalar $cg, str $c_func_name, scalar $args, int $
             emit($cg, "StradaValue *__call_arg" . $i . " = ");
             gen_expression($cg, $args->[$i]);
             emit($cg, "; ");
+            $owned_count = $owned_count + 1;
             if ($use_push == 1) {
                 emit($cg, "strada_cleanup_push(__call_arg" . $i . "); ");
                 $pushed = $pushed + 1;
                 $last_pushed = "__call_arg" . $i;
             }
+        } elsif ($need_copy[$i] == 1 && $cg->{"cleanup_enabled"} == 1) {
+            emit($cg, "StradaValue *__call_arg" . $i . " = strada_copy_scalar_il(");
+            gen_expression($cg, $args->[$i]);
+            emit($cg, "); ");
+            $owned_count = $owned_count + 1;
+            if ($use_push == 1) {
+                emit($cg, "strada_cleanup_push(__call_arg" . $i . "); ");
+                $pushed = $pushed + 1;
+                $last_pushed = "__call_arg" . $i;
+            }
+        } else {
+            emit($cg, "StradaValue *__call_arg" . $i . " = ");
+            gen_expression($cg, $args->[$i]);
+            emit($cg, "; ");
         }
         $i = $i + 1;
     }
@@ -6358,24 +6528,20 @@ func gen_call_with_arg_cleanup(scalar $cg, str $c_func_name, scalar $args, int $
         if ($i > 0) {
             emit($cg, ", ");
         }
-        if ($is_temp[$i] == 1) {
-            emit($cg, "__call_arg" . $i);
-        } else {
-            gen_expression($cg, $args->[$i]);
-        }
+        emit($cg, "__call_arg" . $i);
         $i = $i + 1;
     }
     emit($cg, "); ");
 
-    # Decref all temp arguments (popping cleanup stack if pushed)
+    # Decref all owned arguments (popping cleanup stack if pushed)
     if ($pushed == 1) {
         emit($cg, "strada_cleanup_pop_decref(" . $last_pushed . "); ");
     } elsif ($pushed > 1) {
         emit($cg, "strada_cleanup_pop_decref_n(" . $pushed . "); ");
-    } else {
+    } elsif ($owned_count > 0) {
         $i = $arg_count - 1;
         while ($i >= 0) {
-            if ($is_temp[$i] == 1) {
+            if ($is_temp[$i] == 1 || ($need_copy[$i] == 1 && $cg->{"cleanup_enabled"} == 1)) {
                 emit($cg, "strada_decref(__call_arg" . $i . "); ");
             }
             $i = $i - 1;

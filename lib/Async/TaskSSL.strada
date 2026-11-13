@@ -131,7 +131,9 @@ func accept(int $server, int $timeout_ms = 0) scalar {
 
 # Read up to $max bytes. "" = closed; undef = timeout.
 func read(scalar $h, int $max, int $timeout_ms = 0) str {
+    if (!defined($h)) { return ""; }
     my int $conn = $h->{"ssl"};
+    if ($conn == 0) { return ""; }
     my int $fd = $h->{"fd"};
     my int $deadline = $timeout_ms > 0 ? core::mono_ms() + $timeout_ms : 0;
     while (1) {
@@ -148,7 +150,9 @@ func read(scalar $h, int $max, int $timeout_ms = 0) str {
 
 # Write all of $data. Returns bytes written, -1 on error.
 func write(scalar $h, str $data) int {
+    if (!defined($h)) { return 0 - 1; }
     my int $conn = $h->{"ssl"};
+    if ($conn == 0) { return 0 - 1; }
     my int $fd = $h->{"fd"};
     my int $total = core::byte_length($data);
     my int $sent = 0;
@@ -168,9 +172,16 @@ func write(scalar $h, str $data) int {
 }
 
 func close(scalar $h) void {
-    ssl::close($h->{"ssl"});
+    if (!defined($h)) { return; }
+    my int $conn = $h->{"ssl"};
+    if ($conn != 0) {
+        $h->{"ssl"} = 0;
+        ssl::close($conn);
+    }
     my scalar $tcp = $h->{"sock"};
     if (defined($tcp)) {
+        $h->{"sock"} = undef;
         core::socket_close($tcp);
     }
+    $h->{"fd"} = 0 - 1;
 }

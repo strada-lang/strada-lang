@@ -153,6 +153,8 @@ typedef struct StradaMetadata {
     void *locked_keys;
     StradaValue *glob_scalar_slot;
     StradaValue *tied_cache;
+    char *tied_each_key;
+    uint8_t tied_each_started;
 } StradaMetadata;
 
 /* Value structure - core of Strada runtime (32 bytes) */
@@ -775,6 +777,8 @@ void strada_cleanup_drain(void);
 int strada_cleanup_mark(void);
 void strada_cleanup_restore(int mark);
 void strada_cleanup_drain_to(int mark);
+void strada_inflight_push(StradaValue *sv);
+void strada_inflight_pop(void);
 
 /* ============================================================
  * Stack Trace Management
@@ -1550,6 +1554,9 @@ static inline int64_t strada_hv_fetch_int_ph(StradaValue *sv, const char *key, u
 static inline void strada_hv_store(StradaValue *sv, const char *key, StradaValue *val) {
     if (!sv || STRADA_IS_TAGGED_INT(sv)) return;
     if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) { strada_tied_hash_store(sv, key, val); return; }
+    if (__builtin_expect(sv->meta && sv->meta->is_hash_locked, 0)) {
+        if (!strada_hv_check_lock(sv, key)) return;
+    }
     strada_hash_set(strada_deref_hash(sv), key, val);
 }
 static inline int strada_hv_exists(StradaValue *sv, const char *key) {
@@ -1566,6 +1573,9 @@ static inline void strada_hv_delete(StradaValue *sv, const char *key) {
 static inline void strada_hv_store_sv(StradaValue *sv, StradaValue *key, StradaValue *val) {
     if (!sv || STRADA_IS_TAGGED_INT(sv)) return;
     if (__builtin_expect(sv->meta && sv->meta->is_tied, 0)) { char *ks = strada_to_str(key); strada_tied_hash_store(sv, ks, val); free(ks); return; }
+    if (__builtin_expect(sv->meta && sv->meta->is_hash_locked, 0)) {
+        if (!strada_hv_check_lock_sv(sv, key)) return;
+    }
     strada_hash_set_sv(strada_deref_hash(sv), key, val);
 }
 
@@ -1714,6 +1724,8 @@ double strada_to_num_take_impl(StradaValue *sv);
 int strada_to_bool_take(StradaValue *sv);
 int strada_to_bool_take_impl(StradaValue *sv);
 int strada_hv_check_lock(StradaValue *sv, const char *key);
+int strada_hv_check_lock_sv(StradaValue *sv, StradaValue *key);
+void strada_str_oom_abort(size_t len);
 StradaValue* strada_usleep(StradaValue *usecs);
 void strada_hash_set_ss_take(StradaHash *hv, StradaString *key_ss, StradaValue *sv);
 void strada_hash_set_take_ph(StradaHash *hv, const char *key, unsigned int hash, StradaValue *sv);
@@ -1731,6 +1743,7 @@ void strada_cstruct_set_int(StradaValue *sv, const char *field, size_t offset, i
 extern StradaThreadPool *strada_thread_pool;
 void strada_pool_submit(StradaFuture *future);
 static inline char *ss_alloc_pv(const char *s, size_t len) {
+    if (__builtin_expect(len > HASH_EMPTY, 0)) strada_str_oom_abort(len);
     StradaString *ss = ss_new(s, (uint32_t)len, 0);
     return ss->data;
 }
@@ -1932,9 +1945,8 @@ static inline void strada_av_delete_sv(StradaValue *sv, int64_t idx) {
 struct StradaMetadata *strada_ensure_meta(StradaValue *sv);
 extern StradaValue* (*strada_method_dispatch_hook)(StradaValue *obj, const char *method, StradaValue *args);
 extern int (*strada_method_can_hook)(StradaValue *obj, const char *method);
-/* strada_hv_check_lock / strada_hv_store_take are runtime-internal static
- * inlines (hash-lock checks, libc snprintf/strcmp); the generator never emits
- * them, so they are intentionally omitted from this TCC header. */
+/* strada_hv_check_lock / strada_hv_check_lock_sv are exported runtime functions
+ * declared above; strada_hv_store_take is omitted in TCC mode. */
 /* break_self_cycle is a static-inline early-out wrapper in the main header;
    under TCC just call the real runtime function (defined in the tcc runtime). */
 #define strada_break_self_cycle strada_break_self_cycle_impl

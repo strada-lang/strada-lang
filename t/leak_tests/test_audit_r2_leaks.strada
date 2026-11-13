@@ -1,0 +1,144 @@
+#!/usr/bin/env strada
+# Valgrind leak regression suite for Cycle 2 Audit (runtime, compiler, stdlib)
+
+package LeakR2Vec;
+func new(int $x) scalar {
+    my hash %self = ("x" => $x);
+    return bless(\%self, "LeakR2Vec");
+}
+func add_op(scalar $self, scalar $other, int $rev) scalar {
+    return LeakR2Vec::new($self->{"x"} + $other->{"x"});
+}
+func str_op(scalar $self, scalar $unused, int $rev) str {
+    return "V" . $self->{"x"};
+}
+use overload "+" => "add_op", '""' => "str_op";
+
+package LeakR2Die;
+func new() scalar {
+    my hash %self = ("k" => "v");
+    return bless(\%self, "LeakR2Die");
+}
+func DESTROY(scalar $self) void {
+    throw "destroy_err";
+}
+
+package LeakR2InnerTry;
+func new() scalar {
+    my hash %self = ("k" => "v");
+    return bless(\%self, "LeakR2InnerTry");
+}
+func DESTROY(scalar $self) void {
+    try { throw "inner_caught"; } catch ($e) {}
+}
+
+package main;
+
+our hash %g_leak_loc = ("k" => "orig");
+
+func deep_try_leak(int $d, int $lim) str {
+    if ($d >= $lim) { throw "end_" . $d; }
+    try {
+        return deep_try_leak($d + 1, $lim);
+    } catch ($e) {
+        if ($d == 0) { return "done_" . $e; }
+        throw $e;
+    }
+    return "";
+}
+
+func goto_across_scopes(int $i) str {
+    $g_leak_loc{"k"} = "orig";
+    try {
+        local $g_leak_loc{"k"} = "tmp_" . $i;
+        my str $owned = "str_" . $i;
+        if (length($owned) > 0) {
+            goto OUT_LABEL;
+        }
+    } catch ($e) {
+        return "err";
+    }
+    OUT_LABEL:
+    return $g_leak_loc{"k"};
+}
+
+func ret_with_destroy_die(int $i) str {
+    my scalar $dd = LeakR2Die::new();
+    return "ret_" . $i;
+}
+
+func ret_with_inner_try(int $i) str {
+    my scalar $it = LeakR2InnerTry::new();
+    return "ok_" . $i;
+}
+
+func main() int {
+    my int $i = 0;
+    while ($i < 40) {
+        # 1. Dynamic try stack (> 64 nested try frames)
+        if ($i < 5) {
+            my str $dt = deep_try_leak(0, 80);
+            if ($dt ne "done_end_80") { return 1; }
+        }
+
+        # 2. goto crossing try + local %h{"k"}
+        if (goto_across_scopes($i) ne "orig") { return 2; }
+
+        # 3. tr/// with flags (UTF-8, /c, /d, /s, /r)
+        my str $t = "aabbcc_" . $i . "_café";
+        ($t =~ tr/a-c/A-C/s);
+        ($t =~ tr/é/e/);
+        my str $tr_r = ($t =~ tr/0-9//dr);
+        if (length($tr_r) == 0) { return 3; }
+
+        # 4. Scalar string-ref open/write/close/read
+        my str $buf = "";
+        my scalar $fh = core::open(\$buf, "w");
+        say($fh, "row_" . $i);
+        core::close($fh);
+        my scalar $rfh = core::open(\$buf, "r");
+        my str $line = core::readline($rfh);
+        core::close($rfh);
+        if ($line ne ("row_" . $i)) { return 4; }
+
+        # 5. Overload binary + stringify fallback
+        my scalar $v1 = LeakR2Vec::new($i);
+        my scalar $v2 = LeakR2Vec::new(5);
+        my scalar $v3 = $v1 + $v2;
+        if ("" . $v3 ne ("V" . ($i + 5))) { return 5; }
+
+        # 6. DESTROY throwing during unwind (throw & return) and inner try inside DESTROY
+        try {
+            my scalar $dd = LeakR2Die::new();
+            throw "body_" . $i;
+        } catch ($de) {
+            if (length("" . $de) == 0) { return 6; }
+        }
+        try {
+            my str $rv = ret_with_destroy_die($i);
+            return 7;
+        } catch ($re) {
+            if (("" . $re) ne "destroy_err") { return 8; }
+        }
+        if (ret_with_inner_try($i) ne ("ok_" . $i)) { return 9; }
+
+        $i++;
+    }
+
+    # 6. DESTROY catching internal exception then outer throwing DESTROY in same container teardown
+    my str $dc6 = "";
+    try {
+        {
+            my scalar $pair = [LeakR2InnerTry::new(), LeakR2Die::new()];
+        }
+    } catch ($e) {
+        $dc6 = "" . $e;
+    }
+    if ($dc6 ne "destroy_err") {
+        say("FAIL r2 inner-try destroy: " . $dc6);
+        return 1;
+    }
+
+    say("LEAK_AUDIT_R2_OK");
+    return 0;
+}

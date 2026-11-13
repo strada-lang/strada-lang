@@ -214,6 +214,15 @@ typedef enum {
     OP_CALL_CLOSURE_SPREAD, /* pop closure, pop args_array, unpack and call closure */
     OP_PUSH_FLOAT,      /* push immediate IEEE-754 double (8 bytes) */
     OP_LOAD_CAPTURE_CELL, /* u16 cap_idx — push raw VMCell pointer from enclosing closure */
+    OP_RESET_LOCAL,     /* u16 slot — unbox cell / reset local slot on fresh my decl */
+    OP_CASE_EQ,         /* pop 2, push 1 if equal (string-aware for switch cases) */
+    OP_SAVE_HASH_ELEM,  /* pop key, pop hash — save hash element state for local */
+    OP_RESTORE_HASH_ELEM, /* restore most recent saved hash element */
+    OP_MAKE_SREF_LOCAL, /* u16 local_slot — create live scalar ref to local */
+    OP_MAKE_SREF_GLOBAL,/* u16 str_idx — create live scalar ref to global */
+    OP_MAKE_SREF_VAL,   /* pop value or VMCell — wrap in VMScalarRef */
+    OP_DEREF_SCALAR,    /* pop ref/val — deref VMScalarRef if SREF */
+    OP_STORE_SREF,      /* pop newv, pop ref — store newv through VMScalarRef, push newv */
 
     OP_OPCODE_COUNT     /* must be last */
 } StradaOpcode;
@@ -518,6 +527,12 @@ enum {
     BUILTIN_BYTE_INDEX,
     BUILTIN_CORE_OPEN_STR,
     BUILTIN_CORE_STR_FROM_FH,
+    BUILTIN_ARRAY_SHALLOW_COPY,
+    BUILTIN_HASH_SHALLOW_COPY,
+    BUILTIN_REFTYPE,
+    BUILTIN_DEREF,
+    BUILTIN_IS_REF,
+    BUILTIN_IS_REFTO,
 };
 
 /* Heap object type tag */
@@ -531,6 +546,7 @@ enum VMObjType {
     VM_OBJ_CELL = 12,     /* shared mutable cell for closure capture-by-reference */
     VM_OBJ_NATIVE_SV = 14, /* opaque StradaValue* from native library (passed through as-is) */
     VM_OBJ_FLOAT = 16,    /* boxed IEEE-754 double */
+    VM_OBJ_SREF = 18,     /* live scalar reference */
 };
 typedef struct VMObjHeader {
     enum VMObjType obj_type;
@@ -599,6 +615,14 @@ typedef struct {
     VMValue val;
 } VMCell;
 static inline VMCell *VM_AS_CELL(VMValue v) { return (VMCell*)VM_TO_PTR(v); }
+
+/* Live scalar reference (\$var, \$g, \expr) */
+typedef struct {
+    VMObjHeader hdr;
+    VMValue cell;      /* VM_OBJ_CELL holding target value (when global_name == NULL) */
+    char *global_name; /* non-NULL when referencing an `our` global */
+} VMScalarRef;
+static inline VMScalarRef *VM_AS_SREF(VMValue v) { return (VMScalarRef*)VM_TO_PTR(v); }
 
 /* Convenience: create a VM string */
 static inline VMValue VM_MAKE_STR(const char *s) {
@@ -752,6 +776,10 @@ typedef struct {
 typedef struct {
     char *name;
     VMValue saved_value;
+    int is_hash_elem;
+    VMHash *hash;
+    char *hash_key;
+    int existed;
 } VMGlobalSave;
 
 /* Native function pointer (for import_lib) */
@@ -848,6 +876,8 @@ typedef struct {
     int exc_cap;
     VMValue current_exception;
     int has_exception;
+    VMValue pending_exc;
+    int has_pending_exc;
     /* Globals for our/local */
     VMHash *globals;
     VMGlobalSave *global_saves;
@@ -932,5 +962,8 @@ int vm_class_isa(VMProgram *p, const char *cls, const char *target, int depth);
  * refresh cached stack/frame pointers after — both arrays may realloc). */
 VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc);
 struct StradaValue *vm_value_to_sv(VMValue v);
+void vm_run_globals_init(VM *vm);
+void vm_seed_globals(VM *vm, struct StradaValue *hash_sv, struct StradaValue *skip_hash_sv);
+void vm_export_globals(VM *vm, struct StradaValue *hash_sv);
 
 #endif

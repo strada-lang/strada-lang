@@ -1685,6 +1685,10 @@ func lex_dq_content(scalar $lexer, int $term_code, int $token_line) scalar {
         if ($code == ord("\\")) {
             lex_advance($lexer);
             if (lex_at_end($lexer) == 1) {
+                if ($term_code == 0) {
+                    sb_append($sb, "\\");
+                    next;
+                }
                 lex_error($lexer, "Unterminated string", $token_line, $lexer->{"tok_col"});
             }
             my int $next_code = lex_current_code($lexer);

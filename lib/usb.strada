@@ -686,7 +686,7 @@ func control_write(int $handle, int $request_type, int $request, int $value, int
         unsigned int tm = (unsigned int)strada_to_int(timeout);
 
         strada_decref(result);
-        if (!h) {
+        if (!h || length < 0 || length > 65535) {
             result = strada_new_int(LIBUSB_ERROR_INVALID_PARAM);
         } else {
             int ret = libusb_control_transfer(h, rt, req, val, index, (unsigned char *)d, (uint16_t)length, tm);
@@ -709,7 +709,7 @@ func control_read(int $handle, int $request_type, int $request, int $value, int 
         unsigned int tm = (unsigned int)strada_to_int(timeout);
 
         strada_decref(result);
-        if (!h || maxlen64 <= 0 || maxlen64 > 64 * 1024 * 1024) {
+        if (!h || maxlen64 <= 0 || maxlen64 > 65535) {
             result = strada_new_str("");
         } else {
             int maxlen = (int)maxlen64;

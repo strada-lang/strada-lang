@@ -31,6 +31,7 @@ my int $g_repl_cdebug = 0;
 my str $g_repl_tools_dir = "";
 my int $g_repl_memprof = 0;
 my str $g_repl_script = "";
+my array @g_repl_script_args = ();
 my int $g_repl_chunked = 0;  # --chunked: opt into the line-by-line REPL eval path for --script
 my str $g_repl_compiler = "";
 
@@ -134,20 +135,38 @@ func print_usage() void {
 }
 
 # Parse command line arguments
+# Returns: 0 = ok, 1 = help shown (exit 0), -1 = CLI error (exit 1)
 func parse_args(array @args) int {
     my int $i = 1;
     my int $argc = scalar(@args);
     while ($i < $argc) {
         my str $arg = $args[$i];
 
-        if ($arg eq "--help" || $arg eq "-h") {
+        if ($g_repl_script ne "") {
+            push(@g_repl_script_args, $arg);
+            $i = $i + 1;
+            next;
+        }
+
+        if ($arg eq "--") {
+            $i = $i + 1;
+            if ($i < $argc && $g_repl_script eq "") {
+                $g_repl_script = $args[$i];
+                $i = $i + 1;
+            }
+            while ($i < $argc) {
+                push(@g_repl_script_args, $args[$i]);
+                $i = $i + 1;
+            }
+            last;
+        } elsif ($arg eq "--help" || $arg eq "-h") {
             print_usage();
             return 1;
         } elsif ($arg eq "-L") {
             $i = $i + 1;
             if ($i >= $argc) {
                 say("Error: -L requires a path argument");
-                return 1;
+                return -1;
             }
             Strada::JIT::add_lib_path($args[$i]);
         } elsif ($arg =~ /^-L/) {
@@ -164,7 +183,7 @@ func parse_args(array @args) int {
         } elsif ($arg =~ /^-/) {
             say("Unknown option: " . $arg);
             say("Use --help for usage information");
-            return 1;
+            return -1;
         } else {
             $g_repl_script = $arg;
         }
@@ -194,7 +213,7 @@ func run_script(str $filename) int {
         return 1;
     }
     try {
-        return Strada::JIT::run_file($filename);
+        return Strada::JIT::run_file_argv($filename, \@g_repl_script_args);
     } catch ($e) {
         say("Error: " . $e);
         return 1;
@@ -263,6 +282,7 @@ func run_script_chunked(str $filename) int {
         $input =~ s/\s+$//;
 
         if ($input eq "") {
+            $buffer = "";
             next;
         }
 
@@ -270,6 +290,20 @@ func run_script_chunked(str $filename) int {
             Strada::JIT::eval($input);
         } catch ($e) {
             say("Error at line " . $line_num . ": " . $e);
+        }
+        $buffer = "";
+    }
+
+    if ($continuation == 1 && $buffer ne "") {
+        my str $trailing = $buffer;
+        $trailing =~ s/^\s+//;
+        $trailing =~ s/\s+$//;
+        if ($trailing ne "") {
+            try {
+                Strada::JIT::eval($trailing);
+            } catch ($e) {
+                say("Error at line " . $line_num . ": " . $e);
+            }
         }
     }
 
@@ -279,8 +313,11 @@ func run_script_chunked(str $filename) int {
 # Main REPL loop
 func main(int $argc, array @argv) int {
     # Parse command line arguments
-    if (parse_args(@argv) == 1) {
+    my int $parse_rc = parse_args(@argv);
+    if ($parse_rc > 0) {
         return 0;
+    } elsif ($parse_rc < 0) {
+        return 1;
     }
 
     # Detect tools directory from argv[0]
@@ -364,6 +401,7 @@ func main(int $argc, array @argv) int {
         $input =~ s/\s+$//;
 
         if ($input eq "") {
+            $buffer = "";
             next;
         }
 

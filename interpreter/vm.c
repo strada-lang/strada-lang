@@ -140,6 +140,12 @@ static void vm_gc_free_one(VMObjHeader *hdr) {
         free(nsv);
         break;
     }
+    case VM_OBJ_SREF: {
+        VMScalarRef *sr = (VMScalarRef*)hdr;
+        free(sr->global_name);
+        free(sr);
+        break;
+    }
     default:
         free(hdr);
         break;
@@ -249,6 +255,7 @@ static const char *vm_to_cstr(VMValue v, char *buf, size_t bufsz) {
             snprintf(buf, bufsz, "NativeSV(0x%lx)", (unsigned long)(uintptr_t)nsv->sv);
         return buf;
     }
+    case VM_OBJ_SREF: snprintf(buf, bufsz, "SCALAR(0x%lx)", (unsigned long)(uintptr_t)VM_TO_PTR(v)); return buf;
     default: return "";
     }
 }
@@ -686,6 +693,9 @@ VM *vm_new(VMProgram *prog) {
     vm->global_saves = calloc(vm->global_save_cap, sizeof(VMGlobalSave));
     vm->default_fh = VM_UNDEF_VAL;
     vm->current_exception = VM_UNDEF_VAL;
+    vm->has_exception = 0;
+    vm->pending_exc = VM_UNDEF_VAL;
+    vm->has_pending_exc = 0;
     vm->last_result = VM_UNDEF_VAL;
     vm->gc_threshold = 4096;
     memset(vm->regex_captures, 0, sizeof(vm->regex_captures));
@@ -732,8 +742,12 @@ void vm_gc_collect(VM *vm) {
     }
     for (int i = 0; i < vm->global_save_count; i++) {
         vm_gc_mark_val(vm->global_saves[i].saved_value, &work, &wlen, &wcap);
+        if (vm->global_saves[i].is_hash_elem && vm->global_saves[i].hash) {
+            vm_gc_mark_val(VM_MAKE_PTR(vm->global_saves[i].hash), &work, &wlen, &wcap);
+        }
     }
     vm_gc_mark_val(vm->current_exception, &work, &wlen, &wcap);
+    vm_gc_mark_val(vm->pending_exc, &work, &wlen, &wcap);
     vm_gc_mark_val(vm->default_fh, &work, &wlen, &wcap);
     vm_gc_mark_val(vm->last_result, &work, &wlen, &wcap);
     if (vm->argv) {
@@ -775,6 +789,11 @@ void vm_gc_collect(VM *vm) {
         case VM_OBJ_CELL: {
             VMCell *cell = (VMCell*)obj;
             vm_gc_mark_val(cell->val, &work, &wlen, &wcap);
+            break;
+        }
+        case VM_OBJ_SREF: {
+            VMScalarRef *sr = (VMScalarRef*)obj;
+            vm_gc_mark_val(sr->cell, &work, &wlen, &wcap);
             break;
         }
         default:
@@ -828,6 +847,7 @@ void vm_free(VM *vm) {
     free(vm->exc_stack);
     for (int i = 0; i < vm->global_save_count; i++) {
         free(vm->global_saves[i].name);
+        free(vm->global_saves[i].hash_key);
     }
     free(vm->global_saves);
     for (int i = 0; i < 10; i++) {
@@ -1414,6 +1434,8 @@ static StradaValue *vm_to_sv_depth(VMValue v, int depth) {
             strada_incref(nsv->sv);
             return nsv->sv;
         }
+        case VM_OBJ_CELL:
+            return vm_to_sv_depth(VM_AS_CELL(v)->val, depth + 1);
         case VM_OBJ_FILEHANDLE: {
             /* Filehandles pass through as opaque pointers; caller clears value.fh before decref */
             VMFileHandle *fh = (VMFileHandle*)VM_TO_PTR(v);
@@ -1689,7 +1711,18 @@ static void vm_unwind_global_saves(VM *vm, int target_depth) {
     if (!vm || target_depth < 0) return;
     while (vm->global_save_count > target_depth) {
         VMGlobalSave *gs = &vm->global_saves[--vm->global_save_count];
-        if (gs->name) {
+        if (gs->is_hash_elem) {
+            if (gs->hash && gs->hash_key) {
+                if (gs->existed) {
+                    vm_hash_set(gs->hash, gs->hash_key, gs->saved_value);
+                } else {
+                    vm_hash_delete(gs->hash, gs->hash_key);
+                }
+            }
+            free(gs->hash_key);
+            gs->hash_key = NULL;
+            gs->hash = NULL;
+        } else if (gs->name) {
             vm_hash_set(vm->globals, gs->name, gs->saved_value);
             free(gs->name);
             gs->name = NULL;
@@ -1933,6 +1966,10 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
     int call_argc = 0;
     uint16_t mcall_idx = 0;
     int mcall_argc = 0;
+    const char *mcall_method_cstr = NULL;
+    int mcall_is_dyn = 0;
+    char mcall_dyn_buf[256];
+    VMValue throw_exc = VM_UNDEF_VAL;
     VMValue clcall_val = VM_UNDEF_VAL;
     int clcall_argc = 0;
 
@@ -1993,6 +2030,15 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
         DT(OP_CALL_CLOSURE_SPREAD);
         DT(OP_PUSH_FLOAT);
         DT(OP_LOAD_CAPTURE_CELL);
+        DT(OP_RESET_LOCAL);
+        DT(OP_CASE_EQ);
+        DT(OP_SAVE_HASH_ELEM);
+        DT(OP_RESTORE_HASH_ELEM);
+        DT(OP_MAKE_SREF_LOCAL);
+        DT(OP_MAKE_SREF_GLOBAL);
+        DT(OP_MAKE_SREF_VAL);
+        DT(OP_DEREF_SCALAR);
+        DT(OP_STORE_SREF);
         #undef DT
         dt_init = 1;
     }
@@ -2050,6 +2096,18 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
             if (t == VM_OBJ_FLOAT) { SP_PUSH(VM_MAKE_FLOAT(VM_AS_FLOAT(v)->val)); DISPATCH(); }
         }
         SP_PUSH(v);
+        DISPATCH();
+    }
+
+    CASE(OP_RESET_LOCAL): {
+        uint16_t slot = read_u16(ip); ip += 2;
+        if (slot <= (uint16_t)chunk->local_count) {
+            if (VM_IS_PTR(locals[slot]) && VM_PTR_TYPE(locals[slot]) == VM_OBJ_CELL) {
+                locals[slot] = VM_UNDEF_VAL;
+            } else {
+                vm_temp_free(&locals[slot]);
+            }
+        }
         DISPATCH();
     }
 
@@ -2178,6 +2236,21 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
     CASE(OP_LE): { VMValue b = SP_POP(), a = SP_POP(); SP_PUSH(VM_MAKE_INT(vm_to_num(a) <= vm_to_num(b))); vm_temp_free(&a); vm_temp_free(&b); DISPATCH(); }
     CASE(OP_GT): { VMValue b = SP_POP(), a = SP_POP(); SP_PUSH(VM_MAKE_INT(vm_to_num(a) > vm_to_num(b))); vm_temp_free(&a); vm_temp_free(&b); DISPATCH(); }
     CASE(OP_GE): { VMValue b = SP_POP(), a = SP_POP(); SP_PUSH(VM_MAKE_INT(vm_to_num(a) >= vm_to_num(b))); vm_temp_free(&a); vm_temp_free(&b); DISPATCH(); }
+    CASE(OP_CASE_EQ): {
+        VMValue b = SP_POP(), a = SP_POP();
+        int eq = 0;
+        int sa = (VM_IS_PTR(a) && (VM_PTR_TYPE(a) == VM_OBJ_STR || VM_PTR_TYPE(a) == VM_OBJ_STRBUF));
+        int sb = (VM_IS_PTR(b) && (VM_PTR_TYPE(b) == VM_OBJ_STR || VM_PTR_TYPE(b) == VM_OBJ_STRBUF));
+        if (sa || sb) {
+            char ba[256], bb[256];
+            eq = (strcmp(vm_to_cstr(a, ba, sizeof(ba)), vm_to_cstr(b, bb, sizeof(bb))) == 0);
+        } else {
+            eq = (vm_to_num(a) == vm_to_num(b));
+        }
+        SP_PUSH(VM_MAKE_INT(eq));
+        vm_temp_free(&a); vm_temp_free(&b);
+        DISPATCH();
+    }
     CASE(OP_EQ): { VMValue b = SP_POP(), a = SP_POP(); SP_PUSH(VM_MAKE_INT(vm_to_num(a) == vm_to_num(b))); vm_temp_free(&a); vm_temp_free(&b); DISPATCH(); }
     CASE(OP_NE): { VMValue b = SP_POP(), a = SP_POP(); SP_PUSH(VM_MAKE_INT(vm_to_num(a) != vm_to_num(b))); vm_temp_free(&a); vm_temp_free(&b); DISPATCH(); }
 
@@ -2384,6 +2457,10 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
             frame->ip = ip; vm->stack_top = sp;
             v = vm_stringify_ov(vm, v);
             stack = vm->stack; RELOAD();
+            if (__builtin_expect(vm->has_pending_exc, 0)) {
+                throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                goto L_vm_throw_exc;
+            }
         }
         char buf[64];
         if (VM_IS_PTR(vm->default_fh) && VM_PTR_TYPE(vm->default_fh) == VM_OBJ_FILEHANDLE) {
@@ -2401,6 +2478,10 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
             frame->ip = ip; vm->stack_top = sp;
             v = vm_stringify_ov(vm, v);
             stack = vm->stack; RELOAD();
+            if (__builtin_expect(vm->has_pending_exc, 0)) {
+                throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                goto L_vm_throw_exc;
+            }
         }
         char buf[64];
         if (VM_IS_PTR(vm->default_fh) && VM_PTR_TYPE(vm->default_fh) == VM_OBJ_FILEHANDLE) {
@@ -2419,6 +2500,10 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
             SP_PUSH(fhv); vm->stack_top = sp;
             str = vm_stringify_ov(vm, str);
             stack = vm->stack; RELOAD();
+            if (__builtin_expect(vm->has_pending_exc, 0)) {
+                throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                goto L_vm_throw_exc;
+            }
             fhv = SP_POP();
         }
         char buf[64];
@@ -2437,6 +2522,10 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
             SP_PUSH(fhv); vm->stack_top = sp;
             str = vm_stringify_ov(vm, str);
             stack = vm->stack; RELOAD();
+            if (__builtin_expect(vm->has_pending_exc, 0)) {
+                throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                goto L_vm_throw_exc;
+            }
             fhv = SP_POP();
         }
         char buf[64];
@@ -2455,6 +2544,10 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
             SP_PUSH(b); vm->stack_top = sp;
             a = vm_stringify_ov(vm, a);
             stack = vm->stack; RELOAD();
+            if (__builtin_expect(vm->has_pending_exc, 0)) {
+                throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                goto L_vm_throw_exc;
+            }
             b = SP_POP();
         }
         if (__builtin_expect(vm_has_stringify(vm->program, b), 0)) {
@@ -2462,6 +2555,10 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
             SP_PUSH(a); vm->stack_top = sp;
             b = vm_stringify_ov(vm, b);
             stack = vm->stack; RELOAD();
+            if (__builtin_expect(vm->has_pending_exc, 0)) {
+                throw_exc = vm->pending_exc; vm->pending_exc = VM_UNDEF_VAL; vm->has_pending_exc = 0;
+                goto L_vm_throw_exc;
+            }
             a = SP_POP();
         }
         char ba[256], bb[256];
@@ -2483,7 +2580,7 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
         uint16_t idx = read_u16(ip); ip += 2;
         if (__builtin_expect(idx >= chunk->str_const_count, 0)) {
             fprintf(stderr, "VM error: str const %u out of bounds (%zu)\n", (unsigned)idx, chunk->str_const_count);
-            vm->stack_top = sp; vm->exec_base = saved_exec_base; return VM_UNDEF_VAL;
+            vm->stack_top = sp; vm->exec_base = saved_exec_base; VM_EXEC_RETURN(VM_UNDEF_VAL);
         }
         SP_PUSH(vm_str(chunk->str_consts[idx]));
         DISPATCH();
@@ -2676,6 +2773,14 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
                     cargs[0] = vm_val_copy(sorted->items[j]);
                     cargs[1] = vm_val_copy(key);
                     VMValue cres = vm_execute_call(vm, func_idx, cargs, 2);
+                    if (__builtin_expect(vm->has_pending_exc, 0)) {
+                        throw_exc = vm->pending_exc;
+                        vm->pending_exc = VM_UNDEF_VAL;
+                        vm->has_pending_exc = 0;
+                        stack = vm->stack;
+                        RELOAD();
+                        goto L_vm_throw_exc;
+                    }
                     int cmp_result = (int)vm_to_int(cres);
                     vm_temp_free(&cres);
 
@@ -2713,9 +2818,14 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
                     VMValue cargs[2] = { h->tied_obj, key };
                     VMValue r = vm_execute_call(vm, ffidx, cargs, 2);
                     stack = vm->stack;
-                    frame = &vm->frames[vm->frame_count - 1];
-                    chunk = frame->chunk; locals = frame->locals;
-                    sp = vm->stack_top;
+                    RELOAD();
+                    if (__builtin_expect(vm->has_pending_exc, 0)) {
+                        vm_temp_free(&key);
+                        throw_exc = vm->pending_exc;
+                        vm->pending_exc = VM_UNDEF_VAL;
+                        vm->has_pending_exc = 0;
+                        goto L_vm_throw_exc;
+                    }
                     SP_PUSH(r);
                     vm_temp_free(&key); DISPATCH();
                 }
@@ -2741,9 +2851,14 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
                     VMValue cargs[3] = { h->tied_obj, key, v };
                     vm_execute_call(vm, sfidx, cargs, 3);
                     stack = vm->stack;
-                    frame = &vm->frames[vm->frame_count - 1];
-                    chunk = frame->chunk; locals = frame->locals;
-                    sp = vm->stack_top;
+                    RELOAD();
+                    if (__builtin_expect(vm->has_pending_exc, 0)) {
+                        vm_temp_free(&key);
+                        throw_exc = vm->pending_exc;
+                        vm->pending_exc = VM_UNDEF_VAL;
+                        vm->has_pending_exc = 0;
+                        goto L_vm_throw_exc;
+                    }
                     vm_temp_free(&key); DISPATCH();
                 }
             }
@@ -2973,21 +3088,41 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
     }
 
     CASE(OP_TR): {
-        /* u16 from, u16 to, u16 flags, u16 store_slot (0xFFFF = none).
+        /* u16 from, u16 to, u16 flags, u8 store_kind (0=none,1=local,2=cap,3=global), u16 store_idx.
          * Delegates to the runtime's strada_tr (full d/c/s/r flag support,
          * Perl count return). Mutates the subject in place unless 'r'. */
         uint16_t from_idx = read_u16(ip); ip += 2;
         uint16_t to_idx = read_u16(ip); ip += 2;
         uint16_t flags_idx = read_u16(ip); ip += 2;
-        uint16_t store_slot = read_u16(ip); ip += 2;
+        uint8_t store_kind = *ip++;
+        uint16_t store_idx = read_u16(ip); ip += 2;
         VMValue str = SP_POP();
         const char *tr_flags = chunk->str_consts[flags_idx];
         StradaValue *subj = vm_to_sv(str);
         StradaValue *ret = strada_tr(subj, chunk->str_consts[from_idx],
                                      chunk->str_consts[to_idx], tr_flags);
-        if (store_slot != 0xFFFF && !strchr(tr_flags, 'r')) {
-            vm_temp_free(&locals[store_slot]);
-            locals[store_slot] = sv_to_vm(subj);
+        if (store_kind != 0 && !strchr(tr_flags, 'r')) {
+            VMValue updated = sv_to_vm(subj);
+            if (store_kind == 1) {
+                VMValue *loc = &locals[store_idx];
+                if (VM_IS_PTR(*loc) && VM_PTR_TYPE(*loc) == VM_OBJ_CELL) loc = &VM_AS_CELL(*loc)->val;
+                vm_temp_free(loc);
+                *loc = updated;
+            } else if (store_kind == 2) {
+                if (frame->closure && store_idx < (uint16_t)frame->closure->capture_count) {
+                    VMValue cv = frame->closure->captures[store_idx];
+                    if (VM_IS_PTR(cv) && VM_PTR_TYPE(cv) == VM_OBJ_CELL) {
+                        vm_temp_free(&VM_AS_CELL(cv)->val);
+                        VM_AS_CELL(cv)->val = updated;
+                    } else {
+                        frame->closure->captures[store_idx] = updated;
+                    }
+                } else {
+                    vm_temp_free(&updated);
+                }
+            } else if (store_kind == 3) {
+                vm_hash_set(vm->globals, chunk->str_consts[store_idx], updated);
+            }
         }
         SP_PUSH(sv_to_vm(ret));
         if (ret) strada_decref(ret);
@@ -3076,6 +3211,101 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
 
     CASE(OP_HASH_REF): DISPATCH();
 
+    CASE(OP_MAKE_SREF_LOCAL): {
+        uint16_t slot = read_u16(ip); ip += 2;
+        if (__builtin_expect(slot > (uint16_t)chunk->local_count, 0)) {
+            fprintf(stderr, "VM error: local slot %u out of bounds (%d)\n", (unsigned)slot, chunk->local_count);
+            vm->stack_top = sp; vm->exec_base = saved_exec_base; VM_EXEC_RETURN(VM_UNDEF_VAL);
+        }
+        VMValue cur = locals[slot];
+        VMValue cell_val;
+        if (VM_IS_PTR(cur) && VM_PTR_TYPE(cur) == VM_OBJ_CELL) {
+            cell_val = cur;
+        } else {
+            VMCell *cell = calloc(1, sizeof(VMCell));
+            vm_gc_init_hdr(&cell->hdr, VM_OBJ_CELL);
+            cell->val = cur;
+            cell_val = VM_MAKE_PTR(cell);
+            locals[slot] = cell_val;
+        }
+        VMScalarRef *sr = calloc(1, sizeof(VMScalarRef));
+        vm_gc_init_hdr(&sr->hdr, VM_OBJ_SREF);
+        sr->cell = cell_val;
+        sr->global_name = NULL;
+        SP_PUSH(VM_MAKE_PTR(sr));
+        DISPATCH();
+    }
+
+    CASE(OP_MAKE_SREF_GLOBAL): {
+        uint16_t name_idx = read_u16(ip); ip += 2;
+        const char *gname = chunk->str_consts[name_idx];
+        VMScalarRef *sr = calloc(1, sizeof(VMScalarRef));
+        vm_gc_init_hdr(&sr->hdr, VM_OBJ_SREF);
+        sr->cell = VM_UNDEF_VAL;
+        sr->global_name = strdup(gname);
+        SP_PUSH(VM_MAKE_PTR(sr));
+        DISPATCH();
+    }
+
+    CASE(OP_MAKE_SREF_VAL): {
+        VMValue v = SP_POP();
+        VMValue cell_val;
+        if (VM_IS_PTR(v) && VM_PTR_TYPE(v) == VM_OBJ_CELL) {
+            cell_val = v;
+        } else {
+            VMCell *cell = calloc(1, sizeof(VMCell));
+            vm_gc_init_hdr(&cell->hdr, VM_OBJ_CELL);
+            cell->val = v;
+            cell_val = VM_MAKE_PTR(cell);
+        }
+        VMScalarRef *sr = calloc(1, sizeof(VMScalarRef));
+        vm_gc_init_hdr(&sr->hdr, VM_OBJ_SREF);
+        sr->cell = cell_val;
+        sr->global_name = NULL;
+        SP_PUSH(VM_MAKE_PTR(sr));
+        DISPATCH();
+    }
+
+    CASE(OP_DEREF_SCALAR): {
+        VMValue r = SP_POP();
+        if (VM_IS_PTR(r) && VM_PTR_TYPE(r) == VM_OBJ_SREF) {
+            VMScalarRef *sr = VM_AS_SREF(r);
+            if (sr->global_name) {
+                SP_PUSH(vm_val_copy(vm_hash_get(vm->globals, sr->global_name)));
+            } else if (VM_IS_PTR(sr->cell) && VM_PTR_TYPE(sr->cell) == VM_OBJ_CELL) {
+                SP_PUSH(vm_val_copy(VM_AS_CELL(sr->cell)->val));
+            } else {
+                SP_PUSH(VM_UNDEF_VAL);
+            }
+        } else if (VM_IS_PTR(r) && VM_PTR_TYPE(r) == VM_OBJ_CELL) {
+            SP_PUSH(vm_val_copy(VM_AS_CELL(r)->val));
+        } else {
+            SP_PUSH(r);
+        }
+        DISPATCH();
+    }
+
+    CASE(OP_STORE_SREF): {
+        VMValue newv = SP_POP();
+        VMValue r = SP_POP();
+        if (VM_IS_PTR(r) && VM_PTR_TYPE(r) == VM_OBJ_SREF) {
+            VMScalarRef *sr = VM_AS_SREF(r);
+            if (sr->global_name) {
+                vm_hash_set(vm->globals, sr->global_name, vm_val_copy(newv));
+            } else if (VM_IS_PTR(sr->cell) && VM_PTR_TYPE(sr->cell) == VM_OBJ_CELL) {
+                VMValue old_cv = VM_AS_CELL(sr->cell)->val;
+                vm_temp_free(&old_cv);
+                VM_AS_CELL(sr->cell)->val = vm_val_copy(newv);
+            }
+        } else if (VM_IS_PTR(r) && VM_PTR_TYPE(r) == VM_OBJ_CELL) {
+            VMValue old_cv = VM_AS_CELL(r)->val;
+            vm_temp_free(&old_cv);
+            VM_AS_CELL(r)->val = vm_val_copy(newv);
+        }
+        SP_PUSH(newv);
+        DISPATCH();
+    }
+
     CASE(OP_IS_UNDEF): { VMValue v = SP_POP(); SP_PUSH(VM_MAKE_INT(VM_IS_UNDEF(v))); vm_temp_free(&v); DISPATCH(); }
 
     CASE(OP_ISA): {
@@ -3105,6 +3335,8 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
     CASE(OP_METHOD_CALL): {
         mcall_idx = read_u16(ip); ip += 2;
         mcall_argc = *ip++;
+        mcall_method_cstr = chunk->str_consts[mcall_idx];
+        mcall_is_dyn = 0;
         goto L_do_op_method_call;
     }
 
@@ -3117,13 +3349,14 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
             mcall_argc = aa->size;
             for (int i = 0; i < mcall_argc; i++) SP_PUSH(aa->items[i]);
         }
+        mcall_method_cstr = chunk->str_consts[mcall_idx];
+        mcall_is_dyn = 0;
         goto L_do_op_method_call;
     }
 
     L_do_op_method_call: {
-        uint16_t method_idx = mcall_idx;
         int argc = mcall_argc;
-        const char *method = chunk->str_consts[method_idx];
+        const char *method = mcall_method_cstr;
         VMValue self = stack[sp - argc - 1];
 
         /* Handle native OOP objects (VMNativeSV) — use strada_method_call for proper dispatch */
@@ -3300,7 +3533,7 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
 
                 /* Try native (import_lib) method */
                 if (vm->program->native_count > 0) {
-                    char native_name[256];
+                    char native_name[600];
                     snprintf(native_name, sizeof(native_name), "%s_%s", h->class_name, method);
                     for (int ni = 0; ni < vm->program->native_count; ni++) {
                         if (strcmp(vm->program->natives[ni].name, native_name) == 0) {
@@ -3322,25 +3555,37 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
                 /* Accessor: try hash get */
                 sp -= (argc + 1);
                 VMValue val = vm_hash_get(h, method);
-                if (!VM_IS_UNDEF(val)) {
+                if (!VM_IS_UNDEF(val) || (argc == 0 && vm_hash_exists(h, method))) {
                     if (VM_IS_PTR(val) && VM_PTR_TYPE(val) == VM_OBJ_STR) SP_PUSH(vm_str(VM_AS_STR(val)->data));
-                    else SP_PUSH(val);
+                    else SP_PUSH(vm_val_copy(val));
+                    DISPATCH();
+                } else if (strncmp(method, "set_", 4) == 0 && argc == 1) {
+                    /* After sp -= (argc+1), stack layout is: [self, arg] at sp, sp+1 */
+                    vm_hash_set(h, method + 4, stack[sp + 1]);
+                    SP_PUSH(VM_UNDEF_VAL);
+                    DISPATCH();
+                } else if (mcall_is_dyn) {
+                    vm->stack_top = sp;
+                    char errbuf[600];
+                    snprintf(errbuf, sizeof(errbuf), "Can't locate object method \"%s\" via package \"%s\"", method, h->class_name);
+                    throw_exc = vm_str(errbuf);
+                    goto L_vm_throw_exc;
                 } else {
-                    /* setter: set_xxx */
-                    if (strncmp(method, "set_", 4) == 0 && argc == 1) {
-                        /* After sp -= (argc+1), stack layout is: [self, arg] at sp, sp+1 */
-                        vm_hash_set(h, method + 4, stack[sp + 1]);
-                        SP_PUSH(VM_UNDEF_VAL);
-                    } else {
-                        SP_PUSH(VM_UNDEF_VAL);
-                    }
+                    SP_PUSH(VM_UNDEF_VAL);
+                    DISPATCH();
                 }
-                DISPATCH();
             }
         }
 
         /* Fall through — just try to call it */
         sp -= (argc + 1);
+        if (mcall_is_dyn) {
+            vm->stack_top = sp;
+            char errbuf[600];
+            snprintf(errbuf, sizeof(errbuf), "Can't call method \"%s\" on unblessed reference", method);
+            throw_exc = vm_str(errbuf);
+            goto L_vm_throw_exc;
+        }
         SP_PUSH(VM_UNDEF_VAL);
         DISPATCH();
     }
@@ -3404,93 +3649,24 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
 
         /* No parent method found — throw catchable exception */
         sp -= (argc + 1);
+        vm->stack_top = sp;
         char errbuf[256];
         snprintf(errbuf, sizeof(errbuf), "SUPER::%s - no parent method found", method);
-        VMValue exc = vm_str(errbuf);
-        if (vm->exc_top > 0) {
-            VMExcHandler *eh = &vm->exc_stack[--vm->exc_top];
-            while (vm->frame_count > eh->frame_count) {
-                VMFrame *f = &vm->frames[vm->frame_count - 1];
-                int lc = f->chunk->local_count;
-                locals_free(f->locals, lc + 1);
-                vm->frame_count--;
-            }
-            vm_unwind_global_saves(vm, eh->global_save_depth);
-            sp = eh->stack_base;
-            SP_PUSH(exc);
-            vm->stack_top = sp;
-            RELOAD();
-            ip = eh->catch_ip;
-            DISPATCH();
-        }
-        fprintf(stderr, "Uncaught exception: %s\n", errbuf);
-        vm->stack_top = sp;
-        vm->exec_base = saved_exec_base;
-        VM_EXEC_RETURN(VM_MAKE_INT(1));
+        throw_exc = vm_str(errbuf);
+        goto L_vm_throw_exc;
     }
 
     CASE(OP_DYN_METHOD_CALL): {
-        uint8_t argc = *ip++;
+        mcall_argc = *ip++;
         VMValue method_name = SP_POP();
-        char mbuf[64];
-        const char *method = vm_to_cstr(method_name, mbuf, 64);
-
-        VMValue self = stack[sp - argc - 1];
-
-        if (VM_IS_PTR(self) && VM_PTR_TYPE(self) == VM_OBJ_HASH) {
-            VMHash *h = VM_AS_HASH(self);
-            if (h->class_name) {
-                int fidx = vm_find_method(vm->program, h->class_name, method);
-                if (fidx >= 0) {
-                    if (vm->recursion_limit > 0 && (int)vm->frame_count >= vm->recursion_limit) {
-                        fprintf(stderr, "Deep recursion detected (limit %d) — see core::set_recursion_limit\n", vm->recursion_limit);
-                        exit(1);
-                    }
-                    VMChunk *callee = &vm->program->funcs[fidx];
-                    frame->ip = ip; vm->stack_top = sp;
-                    if (vm->frame_count >= vm->frame_cap) {
-                        vm->frame_cap *= 2;
-                        vm->frames = realloc(vm->frames, vm->frame_cap * sizeof(VMFrame));
-                    }
-                    VMFrame *nf = &vm->frames[vm->frame_count++];
-                    nf->chunk = callee; nf->ip = callee->code;
-                    nf->locals = locals_alloc(callee->local_count + 1, callee->int_only);
-                    nf->stack_base = sp - argc - 1;
-                    nf->closure = NULL;
-                    nf->global_save_depth = vm->global_save_count;
-                    if (__builtin_expect(callee->has_variadic, 0)) {
-                        int total_args = argc + 1;
-                        int fixed = callee->fixed_param_count;
-                        int vc = total_args - fixed;
-                        VMArray *va = vm_array_new(vc > 0 ? vc : 4);
-                        VMValue *tmp = malloc(total_args * sizeof(VMValue));
-                        for (int i = argc - 1; i >= 0; i--) tmp[i + 1] = stack[--sp];
-                        tmp[0] = stack[--sp];
-                        for (int i = 0; i < fixed && i < total_args; i++) {
-                            if (i < callee->local_count + 1) nf->locals[i] = tmp[i];
-                        }
-                        for (int i = fixed; i < total_args; i++) vm_array_push(va, tmp[i]);
-                        if (fixed < callee->local_count + 1) nf->locals[fixed] = VM_MAKE_PTR(va);
-                        free(tmp);
-                    } else {
-                        for (int i = argc - 1; i >= 0; i--) {
-                            VMValue av = stack[--sp];
-                            if (i + 1 < callee->local_count + 1) nf->locals[i + 1] = av;
-                        }
-                        nf->locals[0] = stack[--sp]; /* self */
-                    }
-                    frame = nf; chunk = callee; ip = callee->code; locals = nf->locals;
-                    vm->stack_top = sp;
-                    vm_val_free(&method_name);
-                    DISPATCH();
-                }
-            }
+        const char *mn = vm_to_cstr(method_name, mcall_dyn_buf, sizeof(mcall_dyn_buf));
+        if (mn != mcall_dyn_buf) {
+            snprintf(mcall_dyn_buf, sizeof(mcall_dyn_buf), "%s", mn);
         }
-        /* Fallback: hash accessor */
-        sp -= (argc + 1);
-        SP_PUSH(VM_UNDEF_VAL);
         vm_val_free(&method_name);
-        DISPATCH();
+        mcall_method_cstr = mcall_dyn_buf;
+        mcall_is_dyn = 1;
+        goto L_do_op_method_call;
     }
 
     CASE(OP_APPEND_LOCAL): {
@@ -3830,9 +4006,28 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
     }
 
     CASE(OP_THROW): {
-        VMValue exc = SP_POP();
+        throw_exc = SP_POP();
+        goto L_vm_throw_exc;
+    }
+
+    L_vm_throw_exc: {
         if (vm->exc_top > 0) {
-            VMExcHandler *eh = &vm->exc_stack[--vm->exc_top];
+            VMExcHandler *eh = &vm->exc_stack[vm->exc_top - 1];
+            if (vm->exec_base > 0 && eh->frame_count <= vm->exec_base) {
+                size_t base_sp = vm->frames[vm->exec_base].stack_base;
+                while (vm->frame_count > vm->exec_base) {
+                    VMFrame *f = &vm->frames[vm->frame_count - 1];
+                    vm_unwind_global_saves(vm, f->global_save_depth);
+                    locals_free(f->locals, f->chunk->local_count + 1);
+                    vm->frame_count--;
+                }
+                vm->has_pending_exc = 1;
+                vm->pending_exc = throw_exc;
+                vm->stack_top = base_sp;
+                vm->exec_base = saved_exec_base;
+                VM_EXEC_RETURN(VM_UNDEF_VAL);
+            }
+            vm->exc_top--;
             /* Unwind frames */
             while (vm->frame_count > eh->frame_count) {
                 VMFrame *f = &vm->frames[vm->frame_count - 1];
@@ -3842,13 +4037,26 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
             }
             vm_unwind_global_saves(vm, eh->global_save_depth);
             sp = eh->stack_base;
-            SP_PUSH(exc);
+            SP_PUSH(throw_exc);
             vm->stack_top = sp;
             RELOAD();
             ip = eh->catch_ip;
+        } else if (vm->exec_base > 0) {
+            size_t base_sp = vm->frames[vm->exec_base].stack_base;
+            while (vm->frame_count > vm->exec_base) {
+                VMFrame *f = &vm->frames[vm->frame_count - 1];
+                vm_unwind_global_saves(vm, f->global_save_depth);
+                locals_free(f->locals, f->chunk->local_count + 1);
+                vm->frame_count--;
+            }
+            vm->has_pending_exc = 1;
+            vm->pending_exc = throw_exc;
+            vm->stack_top = base_sp;
+            vm->exec_base = saved_exec_base;
+            VM_EXEC_RETURN(VM_UNDEF_VAL);
         } else {
             char buf[256];
-            fprintf(stderr, "Uncaught exception: %s\n", vm_to_cstr(exc, buf, 256));
+            fprintf(stderr, "Uncaught exception: %s\n", vm_to_cstr(throw_exc, buf, 256));
             vm_unwind_global_saves(vm, 0);
             vm->stack_top = sp;
             vm_run_end_blocks(vm);
@@ -3883,6 +4091,7 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
             vm->global_saves = realloc(vm->global_saves, vm->global_save_cap * sizeof(VMGlobalSave));
         }
         VMGlobalSave *gs = &vm->global_saves[vm->global_save_count++];
+        memset(gs, 0, sizeof(*gs));
         gs->name = strdup(name);
         gs->saved_value = vm_val_copy(vm_hash_get(vm->globals, name));
         DISPATCH();
@@ -3893,10 +4102,53 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
         const char *name = chunk->str_consts[name_idx];
         /* Find most recent save for this name */
         for (int i = vm->global_save_count - 1; i >= 0; i--) {
-            if (strcmp(vm->global_saves[i].name, name) == 0) {
+            if (!vm->global_saves[i].is_hash_elem && vm->global_saves[i].name &&
+                strcmp(vm->global_saves[i].name, name) == 0) {
                 vm_hash_set(vm->globals, name, vm->global_saves[i].saved_value);
                 free(vm->global_saves[i].name);
                 /* Remove this entry */
+                for (int j = i; j < vm->global_save_count - 1; j++)
+                    vm->global_saves[j] = vm->global_saves[j + 1];
+                vm->global_save_count--;
+                break;
+            }
+        }
+        DISPATCH();
+    }
+
+    CASE(OP_SAVE_HASH_ELEM): {
+        VMValue key = SP_POP(), hval = SP_POP();
+        if (vm->global_save_count >= vm->global_save_cap) {
+            vm->global_save_cap *= 2;
+            vm->global_saves = realloc(vm->global_saves, vm->global_save_cap * sizeof(VMGlobalSave));
+        }
+        VMGlobalSave *gs = &vm->global_saves[vm->global_save_count++];
+        memset(gs, 0, sizeof(*gs));
+        gs->is_hash_elem = 1;
+        if (VM_IS_PTR(hval) && VM_PTR_TYPE(hval) == VM_OBJ_HASH) {
+            char kbuf[256];
+            const char *ks = vm_to_cstr(key, kbuf, sizeof(kbuf));
+            gs->hash = VM_AS_HASH(hval);
+            gs->hash_key = strdup(ks);
+            gs->existed = vm_hash_exists(gs->hash, ks);
+            gs->saved_value = gs->existed ? vm_val_copy(vm_hash_get(gs->hash, ks)) : VM_UNDEF_VAL;
+        }
+        vm_temp_free(&key);
+        DISPATCH();
+    }
+
+    CASE(OP_RESTORE_HASH_ELEM): {
+        for (int i = vm->global_save_count - 1; i >= 0; i--) {
+            if (vm->global_saves[i].is_hash_elem) {
+                VMGlobalSave *gs = &vm->global_saves[i];
+                if (gs->hash && gs->hash_key) {
+                    if (gs->existed) {
+                        vm_hash_set(gs->hash, gs->hash_key, gs->saved_value);
+                    } else {
+                        vm_hash_delete(gs->hash, gs->hash_key);
+                    }
+                }
+                free(gs->hash_key);
                 for (int j = i; j < vm->global_save_count - 1; j++)
                     vm->global_saves[j] = vm->global_saves[j + 1];
                 vm->global_save_count--;
@@ -3969,12 +4221,18 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
                 break;
             }
             case VM_OBJ_CLOSURE: SP_PUSH(vm_str("CODE")); break;
-            case VM_OBJ_FLOAT: SP_PUSH(vm_str("")); break;
+            case VM_OBJ_SREF: SP_PUSH(vm_str("SCALAR")); break;
+            case VM_OBJ_FLOAT:
+            case VM_OBJ_STR:
+            case VM_OBJ_STRBUF:
+                SP_PUSH(vm_str(""));
+                break;
             default: SP_PUSH(vm_str("REF")); break;
             }
         } else {
             SP_PUSH(vm_str(""));
         }
+        vm_temp_free(&v);
         DISPATCH();
     }
 
@@ -4179,18 +4437,40 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
             break;
         }
         case BUILTIN_CORE_READLINE: {
-            if (argc >= 1 && VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_FILEHANDLE) {
+            FILE *fp = NULL;
+            if (argc == 0) {
+                fp = stdin;
+            } else if (VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_FILEHANDLE) {
                 VMFileHandle *fh = (VMFileHandle*)VM_TO_PTR(args[0]);
-                char line[4096];
-                if (fh->fp && fgets(line, sizeof(line), (FILE*)fh->fp)) {
-                    /* Strip trailing newline */
-                    size_t len = strlen(line);
-                    while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) len--;
-                    SP_PUSH(VM_MAKE_STR_N(line, len));
-                } else {
-                    SP_PUSH(VM_UNDEF_VAL);
+                fp = (FILE*)fh->fp;
+            }
+            int64_t max_bytes = (argc >= 2 && !VM_IS_UNDEF(args[1])) ? vm_to_int(args[1]) : 0;
+            if (fp) {
+                size_t cap = 256, len = 0;
+                char *buf = malloc(cap);
+                int c = EOF;
+                while ((max_bytes <= 0 || (int64_t)len < max_bytes) && (c = fgetc(fp)) != EOF) {
+                    if (len + 1 >= cap) {
+                        cap *= 2;
+                        buf = realloc(buf, cap);
+                    }
+                    buf[len++] = (char)c;
+                    if (c == '\n') break;
                 }
-            } else SP_PUSH(VM_UNDEF_VAL);
+                if (len == 0 && c == EOF) {
+                    free(buf);
+                    SP_PUSH(VM_UNDEF_VAL);
+                } else {
+                    if (len > 0 && buf[len - 1] == '\n') {
+                        len--;
+                        if (len > 0 && buf[len - 1] == '\r') len--;
+                    }
+                    SP_PUSH(VM_MAKE_STR_N(buf, len));
+                    free(buf);
+                }
+            } else {
+                SP_PUSH(VM_UNDEF_VAL);
+            }
             break;
         }
         case BUILTIN_CORE_EOF: {
@@ -4275,12 +4555,22 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
                 const char *cmd = vm_to_cstr(args[0], cbuf, 1024);
                 FILE *fp = popen(cmd, "r");
                 if (fp) {
-                    char out[8192]; size_t total = 0;
+                    size_t cap = 4096, total = 0;
+                    char *out = malloc(cap);
                     size_t n;
-                    while ((n = fread(out + total, 1, sizeof(out) - total - 1, fp)) > 0) total += n;
+                    for (;;) {
+                        if (total + 1024 >= cap) {
+                            cap *= 2;
+                            out = realloc(out, cap);
+                        }
+                        n = fread(out + total, 1, cap - total - 1, fp);
+                        if (n == 0) break;
+                        total += n;
+                    }
                     out[total] = 0;
                     pclose(fp);
                     SP_PUSH(VM_MAKE_STR_N(out, total));
+                    free(out);
                 } else SP_PUSH(vm_str(""));
             } else SP_PUSH(vm_str(""));
             break;
@@ -4762,7 +5052,10 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
                 if (offset < 0) offset = 0;
                 if (offset > arr->size) offset = arr->size;
                 int64_t length = (argc >= 3) ? vm_to_int(args[2]) : arr->size - offset;
-                if (length < 0) length = 0;
+                if (length < 0) {
+                    length = (arr->size - offset) + length;
+                    if (length < 0) length = 0;
+                }
                 if (offset + length > arr->size) length = arr->size - offset;
                 /* Collect removed elements */
                 VMArray *removed = vm_array_new(length > 0 ? (int)length : 8);
@@ -5723,9 +6016,17 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
                     for (int ai = 2; ai < argc && cn < 8; ai++) cargs[cn++] = args[ai];
                     VMValue obj = vm_execute_call(vm, tfidx, cargs, cn);
                     stack = vm->stack;
-                    frame = &vm->frames[vm->frame_count - 1];
-                    chunk = frame->chunk; locals = frame->locals;
-                    sp = vm->stack_top;
+                    RELOAD();
+                    if (__builtin_expect(vm->has_pending_exc, 0)) {
+                        for (int _ai = 0; _ai < argc && _ai < 16; _ai++) {
+                            if (VM_IS_PTR(args[_ai]) && (VM_PTR_TYPE(args[_ai]) == VM_OBJ_STR || VM_PTR_TYPE(args[_ai]) == VM_OBJ_STRBUF))
+                                vm_val_free(&args[_ai]);
+                        }
+                        throw_exc = vm->pending_exc;
+                        vm->pending_exc = VM_UNDEF_VAL;
+                        vm->has_pending_exc = 0;
+                        goto L_vm_throw_exc;
+                    }
                     VM_AS_HASH(args[0])->tied_obj = obj;
                     SP_PUSH(obj);
                     break;
@@ -5964,47 +6265,35 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
 
         /* === Common bare functions === */
         case BUILTIN_DIE: {
-            /* die(message) — throw exception. Mirrors OP_THROW exactly: the
-             * exception value is PUSHED for the catch prologue to pop (the
-             * old local_slot store skipped the push, so the catch prologue
-             * popped a phantom value and sp underflowed → "stack overflow"). */
-            if (argc >= 1) {
+            if (argc == 0) {
+                throw_exc = vm_str("Died");
+            } else if (VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_HASH && VM_AS_HASH(args[0])->class_name) {
+                throw_exc = args[0];
+            } else {
                 char buf[4096];
-                const char *msg = vm_to_cstr(args[0], buf, 4096);
-                VMValue exc = vm_str(msg);
-                if (vm->exc_top > 0) {
-                    VMExcHandler *eh = &vm->exc_stack[--vm->exc_top];
-                    while (vm->frame_count > eh->frame_count) {
-                        VMFrame *f = &vm->frames[vm->frame_count - 1];
-                        int lc = f->chunk->local_count;
-                        locals_free(f->locals, lc + 1);
-                        vm->frame_count--;
-                    }
-                    vm_unwind_global_saves(vm, eh->global_save_depth);
-                    sp = eh->stack_base;
-                    SP_PUSH(exc);
-                    vm->stack_top = sp;
-                    RELOAD();
-                    ip = eh->catch_ip;
-                    DISPATCH();
-                } else {
-                    fprintf(stderr, "Unhandled exception: %s\n", msg);
-                    vm_run_end_blocks(vm);
-                    exit(1);
-                }
+                throw_exc = vm_str(vm_to_cstr(args[0], buf, sizeof(buf)));
             }
-            SP_PUSH(VM_UNDEF_VAL);
-            break;
+            for (int _ai = 0; _ai < argc && _ai < 16; _ai++) {
+                if (VM_IS_PTR(args[_ai]) && (VM_PTR_TYPE(args[_ai]) == VM_OBJ_STR || VM_PTR_TYPE(args[_ai]) == VM_OBJ_STRBUF))
+                    vm_val_free(&args[_ai]);
+            }
+            vm->stack_top = sp;
+            goto L_vm_throw_exc;
         }
         case BUILTIN_WARN: {
             char buf[4096];
             for (int i = 0; i < argc; i++) {
-                const char *s = vm_to_cstr(args[i], buf, 4096);
+                const char *s = vm_to_cstr(args[i], buf, sizeof(buf));
                 fprintf(stderr, "%s", s);
             }
-            if (argc == 0 || (argc > 0 && strlen(vm_to_cstr(args[argc-1], buf, 4096)) > 0 &&
-                buf[strlen(buf)-1] != '\n'))
+            if (argc == 0) {
                 fprintf(stderr, "\n");
+            } else {
+                const char *last_s = vm_to_cstr(args[argc - 1], buf, sizeof(buf));
+                size_t last_len = strlen(last_s);
+                if (last_len == 0 || last_s[last_len - 1] != '\n')
+                    fprintf(stderr, "\n");
+            }
             SP_PUSH(VM_UNDEF_VAL);
             break;
         }
@@ -6043,14 +6332,130 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
                     case VM_OBJ_FLOAT: SP_PUSH(vm_str("num")); break;
                     case VM_OBJ_STR: case VM_OBJ_STRBUF: SP_PUSH(vm_str("str")); break;
                     case VM_OBJ_ARRAY: SP_PUSH(vm_str("array")); break;
-                    case VM_OBJ_HASH: SP_PUSH(vm_str("hash")); break;
+                    case VM_OBJ_HASH:
+                        SP_PUSH(vm_str(VM_AS_HASH(args[0])->class_name ? "ref" : "hash"));
+                        break;
                     case VM_OBJ_CLOSURE: SP_PUSH(vm_str("code")); break;
                     case VM_OBJ_FILEHANDLE: SP_PUSH(vm_str("filehandle")); break;
-                    case VM_OBJ_NATIVE_SV: SP_PUSH(vm_str("ref")); break;
+                    case VM_OBJ_NATIVE_SV:
+                    case VM_OBJ_SREF:
+                        SP_PUSH(vm_str("ref"));
+                        break;
                     default: SP_PUSH(vm_str("unknown")); break;
                     }
                 } else SP_PUSH(vm_str("unknown"));
             } else SP_PUSH(vm_str("undef"));
+            break;
+        }
+        case BUILTIN_ARRAY_SHALLOW_COPY: {
+            if (argc >= 1 && VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_ARRAY) {
+                VMArray *src = VM_AS_ARRAY(args[0]);
+                VMArray *cp = vm_array_new(src->size > 0 ? src->size : 8);
+                for (int i = 0; i < src->size; i++) {
+                    vm_array_push(cp, vm_val_copy(src->items[i]));
+                }
+                SP_PUSH(VM_MAKE_PTR(cp));
+            } else if (argc >= 1 && VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_HASH &&
+                       VM_AS_HASH(args[0])->size == 0) {
+                SP_PUSH(VM_MAKE_PTR(vm_array_new(8)));
+            } else if (argc >= 1 && !VM_IS_UNDEF(args[0])) {
+                VMArray *cp = vm_array_new(8);
+                vm_array_push(cp, vm_val_copy(args[0]));
+                SP_PUSH(VM_MAKE_PTR(cp));
+            } else {
+                SP_PUSH(VM_MAKE_PTR(vm_array_new(8)));
+            }
+            break;
+        }
+        case BUILTIN_HASH_SHALLOW_COPY: {
+            if (argc >= 1 && VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_HASH) {
+                VMHash *src = VM_AS_HASH(args[0]);
+                VMHash *cp = vm_hash_new(src->capacity > 16 ? src->capacity : 16);
+                for (int i = 0; i < src->capacity; i++) {
+                    if (src->entries[i].occupied == 1) {
+                        vm_hash_set_n(cp, src->entries[i].key, src->entries[i].keylen,
+                                      vm_val_copy(src->entries[i].value));
+                    }
+                }
+                SP_PUSH(VM_MAKE_PTR(cp));
+            } else if (argc >= 1 && VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_ARRAY) {
+                VMArray *src = VM_AS_ARRAY(args[0]);
+                VMHash *cp = vm_hash_new(src->size > 8 ? src->size : 16);
+                if (src->size > 0 && VM_IS_PTR(src->items[0]) && VM_PTR_TYPE(src->items[0]) == VM_OBJ_ARRAY) {
+                    for (int i = 0; i < src->size; i++) {
+                        if (VM_IS_PTR(src->items[i]) && VM_PTR_TYPE(src->items[i]) == VM_OBJ_ARRAY) {
+                            VMArray *pair = VM_AS_ARRAY(src->items[i]);
+                            if (pair->size >= 2) {
+                                char kbuf[256];
+                                const char *k = vm_to_cstr(pair->items[0], kbuf, sizeof(kbuf));
+                                vm_hash_set(cp, k, vm_val_copy(pair->items[1]));
+                            }
+                        }
+                    }
+                } else {
+                    for (int i = 0; i + 1 < src->size; i += 2) {
+                        char kbuf[256];
+                        const char *k = vm_to_cstr(src->items[i], kbuf, sizeof(kbuf));
+                        vm_hash_set(cp, k, vm_val_copy(src->items[i + 1]));
+                    }
+                }
+                SP_PUSH(VM_MAKE_PTR(cp));
+            } else {
+                SP_PUSH(VM_MAKE_PTR(vm_hash_new(16)));
+            }
+            break;
+        }
+        case BUILTIN_REFTYPE: {
+            if (argc >= 1 && VM_IS_PTR(args[0])) {
+                switch (VM_PTR_TYPE(args[0])) {
+                case VM_OBJ_ARRAY: SP_PUSH(vm_str("ARRAY")); break;
+                case VM_OBJ_HASH: {
+                    VMHash *h = VM_AS_HASH(args[0]);
+                    SP_PUSH(vm_str(h->class_name ? h->class_name : "HASH"));
+                    break;
+                }
+                case VM_OBJ_CLOSURE: SP_PUSH(vm_str("CODE")); break;
+                case VM_OBJ_SREF: SP_PUSH(vm_str("SCALAR")); break;
+                case VM_OBJ_NATIVE_SV: SP_PUSH(vm_str("REF")); break;
+                default: SP_PUSH(vm_str("")); break;
+                }
+            } else {
+                SP_PUSH(vm_str(""));
+            }
+            break;
+        }
+        case BUILTIN_DEREF: {
+            if (argc >= 1) {
+                if (VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_SREF) {
+                    VMScalarRef *sr = VM_AS_SREF(args[0]);
+                    if (sr->global_name) {
+                        SP_PUSH(vm_val_copy(vm_hash_get(vm->globals, sr->global_name)));
+                    } else if (VM_IS_PTR(sr->cell) && VM_PTR_TYPE(sr->cell) == VM_OBJ_CELL) {
+                        SP_PUSH(vm_val_copy(VM_AS_CELL(sr->cell)->val));
+                    } else {
+                        SP_PUSH(VM_UNDEF_VAL);
+                    }
+                } else if (VM_IS_PTR(args[0]) && VM_PTR_TYPE(args[0]) == VM_OBJ_CELL) {
+                    SP_PUSH(vm_val_copy(VM_AS_CELL(args[0])->val));
+                } else {
+                    SP_PUSH(vm_val_copy(args[0]));
+                }
+            } else {
+                SP_PUSH(VM_UNDEF_VAL);
+            }
+            break;
+        }
+        case BUILTIN_IS_REF:
+        case BUILTIN_IS_REFTO: {
+            int is_r = 0;
+            if (argc >= 1 && VM_IS_PTR(args[0])) {
+                enum VMObjType t = VM_PTR_TYPE(args[0]);
+                if (t == VM_OBJ_ARRAY || t == VM_OBJ_HASH || t == VM_OBJ_CLOSURE ||
+                    t == VM_OBJ_SREF || t == VM_OBJ_NATIVE_SV) {
+                    is_r = 1;
+                }
+            }
+            SP_PUSH(VM_MAKE_INT(is_r));
             break;
         }
         case BUILTIN_BYTE_INDEX: {
@@ -6167,7 +6572,9 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
         StradaValue **orig_sv = (cb->var_count > 32) ? malloc((size_t)cb->var_count * sizeof(StradaValue*)) : orig_sv_buf;
         for (int i = 0; i < cb->var_count; i++) {
             int slot = cb->var_slots[i];
-            orig_vars[i] = locals[slot];
+            VMValue raw_v = locals[slot];
+            if (VM_IS_PTR(raw_v) && VM_PTR_TYPE(raw_v) == VM_OBJ_CELL) raw_v = VM_AS_CELL(raw_v)->val;
+            orig_vars[i] = raw_v;
             sv_vars[i] = vm_to_sv(orig_vars[i]);
             orig_sv[i] = sv_vars[i];
             if (VM_IS_PTR(orig_vars[i]) && VM_PTR_TYPE(orig_vars[i]) == VM_OBJ_FILEHANDLE &&
@@ -6184,9 +6591,11 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
         /* Marshal back: StradaValue* → VMValue */
         for (int i = 0; i < cb->var_count; i++) {
             int slot = cb->var_slots[i];
+            VMValue *dst = &locals[slot];
+            if (VM_IS_PTR(*dst) && VM_PTR_TYPE(*dst) == VM_OBJ_CELL) dst = &VM_AS_CELL(*dst)->val;
             int is_fh = (VM_IS_PTR(orig_vars[i]) && VM_PTR_TYPE(orig_vars[i]) == VM_OBJ_FILEHANDLE);
             if (is_fh && sv_vars[i] == orig_sv[i]) {
-                locals[slot] = orig_vars[i];
+                *dst = orig_vars[i];
                 if (orig_sv[i] && !STRADA_IS_TAGGED_INT(orig_sv[i])) {
                     orig_sv[i]->value.fh = NULL;
                     strada_decref(orig_sv[i]); /* drop extra guard ref */
@@ -6197,7 +6606,7 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
                     orig_sv[i]->value.fh = NULL;
                     strada_decref(orig_sv[i]); /* drop extra guard ref */
                 }
-                locals[slot] = sv_to_vm(sv_vars[i]);
+                *dst = sv_to_vm(sv_vars[i]);
                 if (sv_vars[i]) strada_decref(sv_vars[i]);
             }
         }
@@ -6222,4 +6631,53 @@ VMValue vm_execute_call(VM *vm, int func_idx, VMValue *cargs, int cargc) {
     #undef DISPATCH
     #undef CASE
     #undef VM_EXEC_RETURN
+}
+
+void vm_run_globals_init(VM *vm) {
+    if (!vm || !vm->program) return;
+    int gidx = vm_program_find_func(vm->program, "__globals_init");
+    if (gidx >= 0 && vm->program->begin_count > 0 && vm->program->begin_blocks[0] == gidx) {
+        for (int i = 1; i < vm->program->begin_count; i++) {
+            vm->program->begin_blocks[i - 1] = vm->program->begin_blocks[i];
+        }
+        vm->program->begin_count--;
+        VMValue rv = vm_execute_call(vm, gidx, NULL, 0);
+        vm_val_free(&rv);
+    }
+}
+
+void vm_seed_globals(VM *vm, StradaValue *hash_sv, StradaValue *skip_hash_sv) {
+    if (!vm || !vm->globals || !hash_sv || STRADA_IS_TAGGED_INT(hash_sv)) return;
+    if (hash_sv->type == STRADA_REF && hash_sv->value.rv) hash_sv = hash_sv->value.rv;
+    if (!hash_sv || hash_sv->type != STRADA_HASH || !hash_sv->value.hv || !hash_sv->value.hv->entries) return;
+    if (skip_hash_sv && !STRADA_IS_TAGGED_INT(skip_hash_sv) && skip_hash_sv->type == STRADA_REF && skip_hash_sv->value.rv) {
+        skip_hash_sv = skip_hash_sv->value.rv;
+    }
+    StradaHash *hv = hash_sv->value.hv;
+    StradaHash *skip = (skip_hash_sv && !STRADA_IS_TAGGED_INT(skip_hash_sv) && skip_hash_sv->type == STRADA_HASH) ? skip_hash_sv->value.hv : NULL;
+    VM *prev_vm = g_active_vm;
+    g_active_vm = vm;
+    for (size_t i = 0; i < hv->next_slot; i++) {
+        if (!hv->entries[i].key) continue;
+        const char *k = hv->entries[i].key->data;
+        if (skip && strada_hash_exists(skip, k)) continue;
+        vm_hash_set(vm->globals, k, sv_to_vm(hv->entries[i].value));
+    }
+    g_active_vm = prev_vm;
+}
+
+void vm_export_globals(VM *vm, StradaValue *hash_sv) {
+    if (!vm || !vm->globals || !hash_sv || STRADA_IS_TAGGED_INT(hash_sv)) return;
+    if (hash_sv->type == STRADA_REF && hash_sv->value.rv) hash_sv = hash_sv->value.rv;
+    if (!hash_sv || hash_sv->type != STRADA_HASH || !hash_sv->value.hv) return;
+    VM *prev_vm = g_active_vm;
+    g_active_vm = vm;
+    VMHash *g = vm->globals;
+    for (int i = 0; i < g->capacity; i++) {
+        if (g->entries[i].occupied == 1 && g->entries[i].key) {
+            StradaValue *sv = vm_to_sv(g->entries[i].value);
+            strada_hash_set_take(hash_sv->value.hv, g->entries[i].key, sv);
+        }
+    }
+    g_active_vm = prev_vm;
 }

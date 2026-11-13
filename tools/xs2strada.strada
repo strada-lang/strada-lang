@@ -106,16 +106,14 @@ func get_section_name(str $line) str {
     return "";
 }
 
-func convert_c_body(str $code, str $ret_type, hash %param_types) str {
+func convert_c_body(str $code, str $ret_type, hash %param_types, int $needs_retval = 1) str {
     # Convert XS C code body with basic macro replacements
     # NOTE: Strada's replace_all() does NOT support \b word boundaries.
     # All XS macros below are unique enough that plain string matching is safe.
     my str $result = $code;
 
-    # Replace RETVAL with __retval (our Strada variable)
-    if (match($result, "RETVAL")) {
-        $result = replace_all($result, "RETVAL", "__retval");
-    }
+    # Note: RETVAL is kept as a typed C variable inside __C__ and converted to
+    # __retval after __xs_cleanup so C assignments (e.g. RETVAL = 1; or RETVAL = ptr;) compile.
 
     # Replace common Perl API macros
     # SvIV(x) -> strada_to_int(x)
@@ -159,19 +157,31 @@ func convert_c_body(str $code, str $ret_type, hash %param_types) str {
 
     # XSRETURN_UNDEF (must come before XSRETURN)
     if (index($result, "XSRETURN_UNDEF") >= 0) {
-        $result = str_replace($result, "XSRETURN_UNDEF", "return strada_new_undef() /* was XSRETURN_UNDEF */");
+        if ($needs_retval == 1) {
+            $result = str_replace($result, "XSRETURN_UNDEF", "do { strada_decref(__retval); __retval = strada_new_undef(); __xs_early = 1; goto __xs_cleanup; } while (0) /* was XSRETURN_UNDEF */");
+        } else {
+            $result = str_replace($result, "XSRETURN_UNDEF", "do { __xs_early = 1; goto __xs_cleanup; } while (0) /* was XSRETURN_UNDEF */");
+        }
     }
     # XSRETURN_YES
     if (index($result, "XSRETURN_YES") >= 0) {
-        $result = str_replace($result, "XSRETURN_YES", "return strada_new_int(1) /* was XSRETURN_YES */");
+        if ($needs_retval == 1) {
+            $result = str_replace($result, "XSRETURN_YES", "do { strada_decref(__retval); __retval = strada_new_int(1); __xs_early = 1; goto __xs_cleanup; } while (0) /* was XSRETURN_YES */");
+        } else {
+            $result = str_replace($result, "XSRETURN_YES", "do { __xs_early = 1; goto __xs_cleanup; } while (0) /* was XSRETURN_YES */");
+        }
     }
     # XSRETURN_NO
     if (index($result, "XSRETURN_NO") >= 0) {
-        $result = str_replace($result, "XSRETURN_NO", "return strada_new_int(0) /* was XSRETURN_NO */");
+        if ($needs_retval == 1) {
+            $result = str_replace($result, "XSRETURN_NO", "do { strada_decref(__retval); __retval = strada_new_int(0); __xs_early = 1; goto __xs_cleanup; } while (0) /* was XSRETURN_NO */");
+        } else {
+            $result = str_replace($result, "XSRETURN_NO", "do { __xs_early = 1; goto __xs_cleanup; } while (0) /* was XSRETURN_NO */");
+        }
     }
     # XSRETURN_EMPTY
     if (index($result, "XSRETURN_EMPTY") >= 0) {
-        $result = str_replace($result, "XSRETURN_EMPTY", "return /* was XSRETURN_EMPTY */");
+        $result = str_replace($result, "XSRETURN_EMPTY", "do { __xs_early = 1; goto __xs_cleanup; } while (0) /* was XSRETURN_EMPTY */");
     }
     # XSRETURN(n) -> REVIEW
     if (index($result, "XSRETURN(") >= 0) {
@@ -848,6 +858,20 @@ func main(int $argc, array @argv) int {
             }
 
             say($out, "    __C__ {");
+            say($out, "        int __xs_early = 0;");
+            say($out, "        (void)__xs_early;");
+            my int $uses_retval = ($needs_retval == 1 && index($code_body, "RETVAL") >= 0) ? 1 : 0;
+            if ($uses_retval == 1) {
+                if ($strada_ret eq "int") {
+                    say($out, "        int64_t RETVAL = 0;");
+                } elsif ($strada_ret eq "num") {
+                    say($out, "        double RETVAL = 0.0;");
+                } elsif ($strada_ret eq "str") {
+                    say($out, "        char *RETVAL = NULL;");
+                } else {
+                    say($out, "        StradaValue *RETVAL = NULL;");
+                }
+            }
 
             # Parameter extraction
             foreach my str $pn (@pnames) {
@@ -887,7 +911,7 @@ func main(int $argc, array @argv) int {
             }
 
             # CODE/PPCODE body
-            my str $converted = convert_c_body($code_body, $ret, %ptypes);
+            my str $converted = convert_c_body($code_body, $ret, %ptypes, $needs_retval);
             my array @code_lines = split("\n", $converted);
             foreach my str $cl (@code_lines) {
                 if (!match($cl, "^\\s*$")) {
@@ -906,6 +930,8 @@ func main(int $argc, array @argv) int {
                     }
                 }
             }
+
+            say($out, "    __xs_cleanup: ;");
 
             # Cleanup string params
             foreach my str $pn (@pnames) {
@@ -929,6 +955,24 @@ func main(int $argc, array @argv) int {
                 }
             }
 
+            # Convert typed C RETVAL into Strada __retval unless XSRETURN_* already set it
+            if ($uses_retval == 1) {
+                say($out, "        if (!__xs_early) {");
+                if ($strada_ret eq "int") {
+                    say($out, "            strada_decref(__retval);");
+                    say($out, "            __retval = strada_new_int((int64_t)RETVAL);");
+                } elsif ($strada_ret eq "num") {
+                    say($out, "            strada_decref(__retval);");
+                    say($out, "            __retval = strada_new_num((double)RETVAL);");
+                } elsif ($strada_ret eq "str") {
+                    say($out, "            strada_decref(__retval);");
+                    say($out, "            __retval = strada_new_str(RETVAL ? RETVAL : \"\");");
+                } else {
+                    say($out, "            if (RETVAL != NULL) { strada_decref(__retval); __retval = RETVAL; }");
+                }
+                say($out, "        }");
+            }
+
             # Return value conversion for simple return types
             if ($needs_retval == 1 && !match($code_body, "__retval") && !match($code_body, "RETVAL")) {
                 # No explicit RETVAL assignment - this is a simple passthrough function
@@ -940,6 +984,20 @@ func main(int $argc, array @argv) int {
             # No CODE section - function calls C function directly with same name and args
             say($out, "    # REVIEW: no CODE section - was a direct C function call");
             say($out, "    __C__ {");
+            say($out, "        int __xs_early = 0;");
+            say($out, "        (void)__xs_early;");
+            my int $uses_retval = ($needs_retval == 1 && index($code_body, "RETVAL") >= 0) ? 1 : 0;
+            if ($uses_retval == 1) {
+                if ($strada_ret eq "int") {
+                    say($out, "        int64_t RETVAL = 0;");
+                } elsif ($strada_ret eq "num") {
+                    say($out, "        double RETVAL = 0.0;");
+                } elsif ($strada_ret eq "str") {
+                    say($out, "        char *RETVAL = NULL;");
+                } else {
+                    say($out, "        StradaValue *RETVAL = NULL;");
+                }
+            }
             # Parameter extraction
             foreach my str $pn (@pnames) {
                 my str $ct = "SV*";

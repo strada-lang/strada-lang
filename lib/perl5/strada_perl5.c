@@ -159,16 +159,17 @@ char* strada_perl5_call(StradaValue *sub_sv, StradaValue *args_sv) {
 
     /* Push arguments from Strada array */
     int pushed = 0;
+    if (args_sv && !STRADA_IS_TAGGED_INT(args_sv) && args_sv->type == STRADA_REF) {
+        args_sv = strada_is_slot_ref(args_sv)
+            ? (args_sv->value.ptr ? *(StradaValue **)args_sv->value.ptr : NULL)
+            : args_sv->value.rv;
+    }
     if (args_sv && STRADA_IS_TAGGED_INT(args_sv)) {
-        /* Bare tagged-int argument: dereferencing its odd pointer as a struct
+        /* Tagged-int argument: dereferencing its odd pointer as a struct
          * below would be a wild read; push the unboxed value directly. */
         XPUSHs(sv_2mortal(newSViv(STRADA_TAGGED_INT_VAL(args_sv))));
         pushed++;
     } else if (args_sv) {
-        /* Dereference if it's a reference */
-        if (args_sv->type == STRADA_REF) {
-            args_sv = args_sv->value.rv;
-        }
         if (args_sv->type == STRADA_ARRAY) {
             StradaArray *arr = args_sv->value.av;
             size_t len = strada_array_length(arr);
@@ -243,9 +244,11 @@ StradaValue* strada_perl5_call_array(StradaValue *sub_sv, StradaValue *args_sv) 
     SAVETMPS;
     PUSHMARK(SP);
 
-    /* Push arguments from Strada array (guard tagged-int odd pointers) */
+    /* Push arguments from Strada array (guard slot refs & tagged-int odd pointers) */
     if (args_sv && !STRADA_IS_TAGGED_INT(args_sv) && args_sv->type == STRADA_REF) {
-        args_sv = args_sv->value.rv;
+        args_sv = strada_is_slot_ref(args_sv)
+            ? (args_sv->value.ptr ? *(StradaValue **)args_sv->value.ptr : NULL)
+            : args_sv->value.rv;
     }
     if (args_sv && !STRADA_IS_TAGGED_INT(args_sv) && args_sv->type == STRADA_ARRAY) {
         StradaArray *arr = args_sv->value.av;
@@ -473,7 +476,7 @@ int strada_perl5_require_raw(const char *module) {
 
 /* Set a Perl scalar variable - raw C types */
 void strada_perl5_set_scalar_raw(const char *name, const char *value) {
-    if (!my_perl) {
+    if (!my_perl || !name) {
         return;
     }
 
@@ -483,12 +486,18 @@ void strada_perl5_set_scalar_raw(const char *name, const char *value) {
     }
 
     SV *sv = get_sv(name, GV_ADD);
-    sv_setpv(sv, value);
+    if (sv) {
+        if (value) {
+            sv_setpv(sv, value);
+        } else {
+            sv_setsv(sv, &PL_sv_undef);
+        }
+    }
 }
 
 /* Get a Perl scalar variable - raw C types */
 char* strada_perl5_get_scalar_raw(const char *name) {
-    if (!my_perl) {
+    if (!my_perl || !name) {
         return strdup("");
     }
 
@@ -542,7 +551,7 @@ char* strada_perl5_call_str_raw(const char *sub_name, const char *arg) {
     SAVETMPS;
     PUSHMARK(SP);
 
-    if (arg && strlen(arg) > 0) {
+    if (arg != NULL) {
         XPUSHs(sv_2mortal(newSVpv(arg, 0)));
     }
 

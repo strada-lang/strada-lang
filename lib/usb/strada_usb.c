@@ -25,6 +25,8 @@
 /* Global libusb context */
 static libusb_context *usb_ctx = NULL;
 static int usb_initialized = 0;
+static libusb_device **cached_device_list = NULL;
+static ssize_t cached_device_count = 0;
 
 /* ===== Initialization ===== */
 
@@ -43,6 +45,11 @@ int strada_usb_init(void) {
 
 /* Cleanup libusb */
 void strada_usb_exit(void) {
+    if (cached_device_list) {
+        libusb_free_device_list(cached_device_list, 1);
+        cached_device_list = NULL;
+        cached_device_count = 0;
+    }
     if (usb_initialized && usb_ctx) {
         libusb_exit(usb_ctx);
         usb_ctx = NULL;
@@ -367,9 +374,9 @@ StradaValue* strada_usb_control_transfer(StradaValue *handle_sv,
 
     /* Check if this is a read or write based on request_type bit 7 */
     if (request_type & 0x80) {
-        /* Device-to-host (read) */
+        /* Device-to-host (read): wLength in USB 2.0 setup packet is uint16_t */
         int64_t length64 = strada_to_int(data_sv);
-        if (length64 <= 0 || length64 > 64 * 1024 * 1024) {
+        if (length64 <= 0 || length64 > 65535) {
             return strada_new_str("");
         }
         int length = (int)length64;
@@ -379,7 +386,7 @@ StradaValue* strada_usb_control_transfer(StradaValue *handle_sv,
         }
 
         int ret = libusb_control_transfer(handle, request_type, request,
-                                           value, index, buffer, length, timeout);
+                                           value, index, buffer, (uint16_t)length, timeout);
         if (ret < 0) {
             free(buffer);
             return strada_new_str("");
@@ -391,11 +398,16 @@ StradaValue* strada_usb_control_transfer(StradaValue *handle_sv,
     } else {
         /* Host-to-device (write) */
         char *data = strada_to_str(data_sv);   /* malloc'd — must free */
-        int length = (data_sv && !STRADA_IS_TAGGED_INT(data_sv) && data_sv->type == STRADA_STR)
-                         ? (int)STRADA_STR_BYTELEN(data_sv) : (int)strlen(data);
+        size_t slen = (data_sv && !STRADA_IS_TAGGED_INT(data_sv) && data_sv->type == STRADA_STR)
+                          ? STRADA_STR_BYTELEN(data_sv) : strlen(data);
+        if (slen > 65535) {
+            free(data);
+            return strada_new_int(LIBUSB_ERROR_INVALID_PARAM);
+        }
+        int length = (int)slen;
 
         int ret = libusb_control_transfer(handle, request_type, request,
-                                           value, index, (unsigned char *)data, length, timeout);
+                                           value, index, (unsigned char *)data, (uint16_t)length, timeout);
         free(data);   /* synchronous transfer has consumed it */
         return strada_new_int(ret);
     }
@@ -669,10 +681,6 @@ StradaValue* strada_usb_error_not_supported(void) { return strada_new_int(LIBUSB
 
 /* ============== Raw C Functions for extern "C" ============== */
 
-/* Cached device list for iteration */
-static libusb_device **cached_device_list = NULL;
-static ssize_t cached_device_count = 0;
-
 /* Refresh the device list cache */
 int strada_usb_refresh_device_list_raw(void) {
     if (!usb_initialized) strada_usb_init();
@@ -840,10 +848,10 @@ int strada_usb_last_transfer_len_raw(void) {
 /* Bulk read - returns data, length stored in last_transfer_len */
 char* strada_usb_bulk_read_raw(void *handle, int endpoint, int max_len, int timeout) {
     last_transfer_len = 0;
-    if (!handle) {
+    if (!handle || max_len <= 0 || max_len > 64 * 1024 * 1024) {
         return NULL;
     }
-    unsigned char *buffer = malloc(max_len);
+    unsigned char *buffer = malloc((size_t)max_len + 1);
     if (!buffer) {
         return NULL;
     }
@@ -856,6 +864,9 @@ char* strada_usb_bulk_read_raw(void *handle, int endpoint, int max_len, int time
         free(buffer);
         return NULL;
     }
+    if (transferred < 0) transferred = 0;
+    if (transferred > max_len) transferred = max_len;
+    buffer[transferred] = '\0';
 
     last_transfer_len = transferred;
     return (char *)buffer;
@@ -863,7 +874,7 @@ char* strada_usb_bulk_read_raw(void *handle, int endpoint, int max_len, int time
 
 /* Interrupt write */
 int strada_usb_interrupt_write_raw(void *handle, int endpoint, const char *data, int length, int timeout) {
-    if (!handle) return LIBUSB_ERROR_INVALID_PARAM;
+    if (!handle || length < 0) return LIBUSB_ERROR_INVALID_PARAM;
     int transferred = 0;
     int ret = libusb_interrupt_transfer((libusb_device_handle *)handle,
                                          (unsigned char)endpoint,
@@ -875,10 +886,10 @@ int strada_usb_interrupt_write_raw(void *handle, int endpoint, const char *data,
 /* Interrupt read - length stored in last_transfer_len */
 char* strada_usb_interrupt_read_raw(void *handle, int endpoint, int max_len, int timeout) {
     last_transfer_len = 0;
-    if (!handle) {
+    if (!handle || max_len <= 0 || max_len > 64 * 1024 * 1024) {
         return NULL;
     }
-    unsigned char *buffer = malloc(max_len);
+    unsigned char *buffer = malloc((size_t)max_len + 1);
     if (!buffer) {
         return NULL;
     }
@@ -891,6 +902,9 @@ char* strada_usb_interrupt_read_raw(void *handle, int endpoint, int max_len, int
         free(buffer);
         return NULL;
     }
+    if (transferred < 0) transferred = 0;
+    if (transferred > max_len) transferred = max_len;
+    buffer[transferred] = '\0';
 
     last_transfer_len = transferred;
     return (char *)buffer;
@@ -899,7 +913,7 @@ char* strada_usb_interrupt_read_raw(void *handle, int endpoint, int max_len, int
 /* Control transfer write */
 int strada_usb_control_write_raw(void *handle, int request_type, int request,
                                   int value, int idx, const char *data, int length, int timeout) {
-    if (!handle) return LIBUSB_ERROR_INVALID_PARAM;
+    if (!handle || length < 0 || length > 65535) return LIBUSB_ERROR_INVALID_PARAM;
     return libusb_control_transfer((libusb_device_handle *)handle,
                                     (uint8_t)request_type, (uint8_t)request,
                                     (uint16_t)value, (uint16_t)idx,
@@ -910,10 +924,10 @@ int strada_usb_control_write_raw(void *handle, int request_type, int request,
 char* strada_usb_control_read_raw(void *handle, int request_type, int request,
                                    int value, int idx, int max_len, int timeout) {
     last_transfer_len = 0;
-    if (!handle) {
+    if (!handle || max_len <= 0 || max_len > 65535) {
         return NULL;
     }
-    unsigned char *buffer = malloc(max_len);
+    unsigned char *buffer = malloc((size_t)max_len + 1);
     if (!buffer) {
         return NULL;
     }
@@ -926,6 +940,8 @@ char* strada_usb_control_read_raw(void *handle, int request_type, int request,
         free(buffer);
         return NULL;
     }
+    if (ret > max_len) ret = max_len;
+    buffer[ret] = '\0';
 
     last_transfer_len = ret;
     return (char *)buffer;

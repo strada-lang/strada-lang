@@ -1,0 +1,157 @@
+#!/usr/bin/env strada
+# Cycle 2 Audit regression tests: stdlib fixes
+
+use lib "lib";
+use JSON;
+use Getopt::Long;
+use Markdown;
+use YAML;
+use Forma;
+use Math::Utils;
+use LWP;
+use DBI;
+
+func main() int {
+    my int $fail = 0;
+
+    # 1. JSON::encode on unblessed scalar ref (string & int) + blessed ref + arrays/hashes
+    my str $jstr = "abc";
+    my int $jint = 123;
+    my scalar $jr1 = \$jstr;
+    my scalar $jr2 = \$jint;
+    my scalar $jobj = bless({"a" => 1}, "SomeClass");
+    my hash %jwrap = ("s" => $jr1, "n" => $jr2, "arr" => [1, 2]);
+    my str $je = JSON::encode(\%jwrap);
+    if (index($je, '"s":"abc"') < 0 || index($je, '"n":123') < 0 || index($je, '"arr":[1,2]') < 0) {
+        say("FAIL: JSON::encode scalar ref got '" . $je . "'");
+        $fail++;
+    }
+    my str $jbe = JSON::encode($jobj);
+    if (substr($jbe, 0, 1) ne '"') {
+        say("FAIL: JSON::encode blessed should stringify got '" . $jbe . "'");
+        $fail++;
+    }
+
+    # 2. Getopt::Long negation with aliases & value starting with '-'
+    my hash %gopts = ("verbose" => 1, "tag" => "");
+    my int $gok = Getopt::Long::GetOptions(["verbose|v!", "tag=s"], \%gopts);
+    if ($gok != 1 || $gopts{"verbose"} ne "0" || $gopts{"tag"} ne "-dashval") {
+        say("FAIL: Getopt::Long ok=" . $gok . " verbose='" . $gopts{"verbose"} . "' tag='" . $gopts{"tag"} . "'");
+        $fail++;
+    }
+
+    # 3. Markdown XSS sanitization & longer/nested fences
+    my str $md_in = "[bad1](data:text/html,x) [bad2](data:image/svg+xml,<svg/>) [bad3](data:application/pdf,x)\n\n~~~~markdown\n```\ncode\n```\n~~~~\n";
+    my str $md_out = Markdown::to_html($md_in);
+    if (index($md_out, "data:text/") >= 0 || index($md_out, "data:image/svg+xml") >= 0 || index($md_out, "data:application/") >= 0) {
+        say("FAIL: Markdown URL sanitization leaked data URL: " . $md_out);
+        $fail++;
+    }
+    if (index($md_out, "```\ncode\n```") < 0 && index($md_out, "```") < 0) {
+        say("FAIL: Markdown nested fence broken: " . $md_out);
+        $fail++;
+    }
+
+    # 4. YAML block scalars (|, >, |-, >+) & empty inline containers & Dump/Load
+    my str $yml = "lit: |\n  line1\n  line2\nfold: >\n  hello\n  world\nempty_a: []\nempty_h: {}\n";
+    my scalar $yp = YAML::Load($yml);
+    if ($yp->{"lit"} ne "line1\nline2\n" && $yp->{"lit"} ne "line1\nline2") {
+        say("FAIL: YAML literal block got '" . $yp->{"lit"} . "'");
+        $fail++;
+    }
+    if (index($yp->{"fold"}, "hello world") < 0) {
+        say("FAIL: YAML folded block got '" . $yp->{"fold"} . "'");
+        $fail++;
+    }
+    if (size($yp->{"empty_a"}) != 0 || size(keys($yp->{"empty_h"})) != 0) {
+        say("FAIL: YAML empty containers");
+        $fail++;
+    }
+    my str $yd = YAML::Dump({"k" => "v", "nums" => [1, 2]});
+    my scalar $yp2 = YAML::Load($yd);
+    if ($yp2->{"k"} ne "v" || $yp2->{"nums"}->[1] != 2) {
+        say("FAIL: YAML Dump/Load roundtrip");
+        $fail++;
+    }
+
+    # 5. Forma piped filters
+    my str $fout = Forma::render_string("{{ name | trim | upper }}", {"name" => "  strada  "});
+    if ($fout ne "STRADA") {
+        say("FAIL: Forma piped filters got '" . $fout . "'");
+        $fail++;
+    }
+
+    # 6. Math::Utils::divide normal + divide by zero throw
+    if (Math::Utils::divide(20, 4) != 5) {
+        say("FAIL: Math::Utils::divide(20,4)");
+        $fail++;
+    }
+    my int $div_threw = 0;
+    try {
+        Math::Utils::divide(10, 0);
+    } catch ($e) {
+        $div_threw = 1;
+    }
+    if ($div_threw != 1) {
+        say("FAIL: Math::Utils::divide by zero did not throw");
+        $fail++;
+    }
+
+    # 7. LWP parse_url / _resolve_url
+    my hash %pu = LWP::parse_url("http://example.com/a/b?q=1#frag");
+    if ($pu{"path"} ne "/a/b" || $pu{"query"} ne "q=1") {
+        say("FAIL: LWP::parse_url got path='" . $pu{"path"} . "' q='" . $pu{"query"} . "'");
+        $fail++;
+    }
+    my str $ru1 = LWP::_resolve_url("http://example.com/dir/page", "?q=9");
+    my str $ru2 = LWP::_resolve_url("http://example.com/dir/page", "//cdn.example.com/js");
+    if ($ru1 ne "http://example.com/dir/page?q=9" || $ru2 ne "http://cdn.example.com/js") {
+        say("FAIL: LWP::_resolve_url got ru1='" . $ru1 . "' ru2='" . $ru2 . "'");
+        $fail++;
+    }
+
+    # 8. DBI SQLite :memory: bind NULL/str/int, quote (incl NUL rejection), rollback
+    my scalar $dbh = DBI::connect("dbi:SQLite::memory:", "", "");
+    if (!defined($dbh)) {
+        say("FAIL: DBI SQLite :memory: connect");
+        $fail++;
+    } else {
+        DBI::do_sql($dbh, "CREATE TABLE r2 (id INTEGER PRIMARY KEY, name TEXT, note TEXT)");
+        DBI::begin_work($dbh);
+        DBI::exec($dbh, "INSERT INTO r2 (id, name, note) VALUES (?, ?, ?)", [1, "temp", undef]);
+        DBI::rollback($dbh);
+        my scalar $cnt_rows = DBI::selectall_arrayref($dbh, "SELECT id FROM r2");
+        if (size($cnt_rows) != 0) {
+            say("FAIL: DBI rollback didn't undo row");
+            $fail++;
+        }
+        DBI::exec($dbh, "INSERT INTO r2 (id, name, note) VALUES (?, ?, ?)", [2, "alice", undef]);
+        my scalar $row = DBI::selectrow_hashref($dbh, "SELECT id, name, note FROM r2 WHERE id = ?", [2]);
+        if (!defined($row) || $row->{"name"} ne "alice" || defined($row->{"note"})) {
+            say("FAIL: DBI selectrow_hashref undef/str");
+            $fail++;
+        }
+        my str $q = DBI::quote($dbh, "O'Reilly");
+        if ($q ne "'O''Reilly'") {
+            say("FAIL: DBI::quote got '" . $q . "'");
+            $fail++;
+        }
+        my int $nul_threw = 0;
+        try {
+            DBI::quote($dbh, "bad" . chr(0) . "nul");
+        } catch ($qe) {
+            $nul_threw = 1;
+        }
+        if ($nul_threw != 1) {
+            say("FAIL: DBI::quote with NUL byte should throw");
+            $fail++;
+        }
+        DBI::disconnect($dbh);
+    }
+
+    if ($fail == 0) {
+        say("ALL_R2_STDLIB_OK");
+        return 0;
+    }
+    return 1;
+}

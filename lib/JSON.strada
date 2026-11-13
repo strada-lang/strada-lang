@@ -254,27 +254,33 @@ static void json_enc(JsonB *b, StradaValue *v, int canonical, int depth) {
             return;
         }
         case STRADA_REF: {
-            StradaValue *t = v->value.rv;
-            /* Unblessed hash/array refs become objects/arrays. Anything
+            /* Unblessed hash/array/scalar refs become objects/arrays/values. Anything
              * else (incl. blessed objects, matching ref()'s class-name
              * return making JSON::PS take the scalar path) stringifies. */
             int blessed = (v->meta && v->meta->blessed_package) ? 1 : 0;
-            if (!blessed && t && !STRADA_IS_TAGGED_INT(t)) {
-                if (t->type == STRADA_HASH) { json_enc_hash(b, t->value.hv, canonical, depth); return; }
-                if (t->type == STRADA_ARRAY) {
-                    jb_putc(b, '[');
-                    StradaArray *av = t->value.av;
-                    size_t n = av ? strada_array_length(av) : 0;
-                    for (size_t i = 0; i < n; i++) {
-                        if (i) jb_putc(b, ',');
-                        json_enc(b, strada_array_get(av, i), canonical, depth + 1);
+            if (!blessed) {
+                StradaValue *t = strada_is_slot_ref(v)
+                    ? (v->value.ptr ? *(StradaValue **)v->value.ptr : NULL)
+                    : v->value.rv;
+                if (t) {
+                    if (!STRADA_IS_TAGGED_INT(t)) {
+                        if (t->type == STRADA_HASH) { json_enc_hash(b, t->value.hv, canonical, depth); return; }
+                        if (t->type == STRADA_ARRAY) {
+                            jb_putc(b, '[');
+                            StradaArray *av = t->value.av;
+                            size_t n = av ? strada_array_length(av) : 0;
+                            for (size_t i = 0; i < n; i++) {
+                                if (i) jb_putc(b, ',');
+                                json_enc(b, strada_array_get(av, i), canonical, depth + 1);
+                            }
+                            jb_putc(b, ']');
+                            return;
+                        }
                     }
-                    jb_putc(b, ']');
+                    /* scalar ref (including tagged int): encode the target */
+                    json_enc(b, t, canonical, depth + 1);
                     return;
                 }
-                /* scalar ref: encode the target (JSON::PS deref path) */
-                json_enc(b, t, canonical, depth + 1);
-                return;
             }
             /* fall through to stringify */
             break;

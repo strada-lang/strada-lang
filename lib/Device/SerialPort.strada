@@ -435,7 +435,7 @@ func is_open(scalar $self) int {
 # Get/set baud rate
 # Usage: $port->baudrate(115200);
 #        my int $baud = $port->baudrate();
-func baudrate(scalar $self, int $rate) int {
+func baudrate(scalar $self, int $rate = -1) int {
     if ($rate > 0) {
         $self->{"baudrate"} = $rate;
     }
@@ -443,7 +443,7 @@ func baudrate(scalar $self, int $rate) int {
 }
 
 # Get/set data bits (5, 6, 7, or 8)
-func databits(scalar $self, int $bits) int {
+func databits(scalar $self, int $bits = -1) int {
     if ($bits >= 5 && $bits <= 8) {
         $self->{"databits"} = $bits;
     }
@@ -451,7 +451,7 @@ func databits(scalar $self, int $bits) int {
 }
 
 # Get/set parity ("none", "even", "odd")
-func parity(scalar $self, str $p) str {
+func parity(scalar $self, str $p = "") str {
     if ($p eq "none" || $p eq "even" || $p eq "odd") {
         $self->{"parity"} = $p;
     }
@@ -459,7 +459,7 @@ func parity(scalar $self, str $p) str {
 }
 
 # Get/set stop bits (1 or 2)
-func stopbits(scalar $self, int $bits) int {
+func stopbits(scalar $self, int $bits = -1) int {
     if ($bits == 1 || $bits == 2) {
         $self->{"stopbits"} = $bits;
     }
@@ -467,7 +467,7 @@ func stopbits(scalar $self, int $bits) int {
 }
 
 # Get/set handshake ("none", "rts", "xoff")
-func handshake(scalar $self, str $h) str {
+func handshake(scalar $self, str $h = "") str {
     if ($h eq "none" || $h eq "rts" || $h eq "xoff") {
         $self->{"handshake"} = $h;
     }
@@ -475,11 +475,15 @@ func handshake(scalar $self, str $h) str {
 }
 
 # Get/set read timeout in milliseconds
-func read_timeout(scalar $self, int $ms) int {
-    if ($ms >= 0) {
-        $self->{"read_timeout"} = $ms;
+func read_timeout(scalar $self, scalar $ms = undef) int {
+    if (defined($ms) && ($ms + 0) >= 0) {
+        $self->{"read_timeout"} = $ms + 0;
     }
     return $self->{"read_timeout"};
+}
+
+func DESTROY(scalar $self) void {
+    SerialPort::close($self);
 }
 
 # Apply settings to already-open port

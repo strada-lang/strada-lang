@@ -115,10 +115,19 @@ func process_inline_emph(str $s) str {
 # Process inline formatting (bold, italic, code, links)
 # Protects inline `code` and link/image URLs from */_ emphasis corruption.
 func sanitize_url(str $u) str {
-    my str $t = $u;
-    $t =~ s/^[ \t\r\n]+//;
-    my str $low = lc($t);
-    if ($low =~ /^(javascript|vbscript|data):/) {
+    my str $cleaned = "";
+    my int $i = 0;
+    my int $len = length($u);
+    while ($i < $len) {
+        my str $ch = substr($u, $i, 1);
+        if (ord($ch) > 32) {
+            $cleaned = $cleaned . lc($ch);
+        }
+        $i = $i + 1;
+    }
+    if (index($cleaned, "javascript:") == 0 ||
+        index($cleaned, "vbscript:") == 0 ||
+        index($cleaned, "data:") == 0) {
         return "#";
     }
     return html_escape($u);
@@ -390,36 +399,71 @@ func get_blockquote_content(str $line) str {
     return $content;
 }
 
-# Check if line starts a code block (```)
-func is_code_fence(str $line) int {
-    if (length($line) >= 3 && substr($line, 0, 3) eq "~~~") {
-        return 1;
+# Parse opening code fence: returns [char, len] or ("", 0)
+func parse_open_fence(str $line) array {
+    my int $len = length($line);
+    if ($len < 3) {
+        return ("", 0);
     }
-    # Check for triple backtick using index
-    my int $pos = index($line, "`");
-    if ($pos == 0) {
-        if (length($line) >= 3) {
-            my str $first3 = substr($line, 0, 3);
-            if (index($first3, "`") == 0 && index($first3, "`", 1) == 1 && index($first3, "`", 2) == 2) {
-                return 1;
-            }
+    my str $ch = substr($line, 0, 1);
+    if ($ch ne "`" && $ch ne "~") {
+        return ("", 0);
+    }
+    my int $cnt = 0;
+    while ($cnt < $len && substr($line, $cnt, 1) eq $ch) {
+        $cnt = $cnt + 1;
+    }
+    if ($cnt < 3) {
+        return ("", 0);
+    }
+    if ($ch eq "`") {
+        my str $info = substr($line, $cnt, $len - $cnt);
+        if (index($info, "`") >= 0) {
+            return ("", 0);
         }
     }
+    return ($ch, $cnt);
+}
+
+func is_close_fence(str $line, str $fence_ch, int $open_len) int {
+    my int $len = length($line);
+    my int $cnt = 0;
+    while ($cnt < $len && substr($line, $cnt, 1) eq $fence_ch) {
+        $cnt = $cnt + 1;
+    }
+    if ($cnt < $open_len) {
+        return 0;
+    }
+    my int $k = $cnt;
+    while ($k < $len) {
+        my str $c = substr($line, $k, 1);
+        if ($c ne " " && $c ne "\t" && $c ne "\r") {
+            return 0;
+        }
+        $k = $k + 1;
+    }
+    return 1;
+}
+
+# Check if line starts a code block (```)
+func is_code_fence(str $line) int {
+    my array @f = parse_open_fence($line);
+    if ($f[1] >= 3) { return 1; }
     return 0;
 }
 
 # Get code fence language
-func get_fence_lang(str $line) str {
+func get_fence_lang(str $line, int $fence_len = 3) str {
     my str $lang = "";
-    if (length($line) > 3) {
-        $lang = substr($line, 3, length($line) - 3);
+    if (length($line) > $fence_len) {
+        $lang = substr($line, $fence_len, length($line) - $fence_len);
         $lang =~ s/[ \t\r\n]//g;
     }
     return $lang;
 }
 
-# Convert markdown to HTML
-func md2html(str $markdown) str {
+# Convert markdown to HTML (depth-guarded for nested blockquotes)
+func md2html_depth(str $markdown, int $depth) str {
     my array @lines = split("\n", $markdown);
     my str $html = "";
     my int $i = 0;
@@ -434,7 +478,8 @@ func md2html(str $markdown) str {
         $trimmed =~ s/[ \t]+$//;
 
         # Code block
-        if (is_code_fence($line) == 1) {
+        my array @fence = parse_open_fence($line);
+        if ($fence[1] >= 3) {
             # Close any open paragraph
             if ($in_paragraph == 1) {
                 $html = $html . "<p>" . process_inline($paragraph) . "</p>\n";
@@ -442,10 +487,12 @@ func md2html(str $markdown) str {
                 $paragraph = "";
             }
 
-            my str $lang = get_fence_lang($line);
+            my str $fence_ch = $fence[0];
+            my int $fence_len = $fence[1];
+            my str $lang = get_fence_lang($line, $fence_len);
             $i = $i + 1;
             my str $code = "";
-            while ($i < $num_lines && is_code_fence($lines[$i]) == 0) {
+            while ($i < $num_lines && is_close_fence($lines[$i], $fence_ch, $fence_len) == 0) {
                 if (length($code) > 0) {
                     $code = $code . "\n";
                 }
@@ -520,8 +567,13 @@ func md2html(str $markdown) str {
                 $quote_content = $quote_content . get_blockquote_content($lines[$i]);
                 $i = $i + 1;
             }
-            # Recursively process blockquote content
-            my str $inner = md2html($quote_content);
+            # Recursively process blockquote content (capped at depth 64)
+            my str $inner = "";
+            if ($depth < 64) {
+                $inner = md2html_depth($quote_content, $depth + 1);
+            } else {
+                $inner = "<p>" . process_inline($quote_content) . "</p>\n";
+            }
             $html = $html . "<blockquote>\n" . $inner . "</blockquote>\n";
             next;
         }
@@ -576,6 +628,10 @@ func md2html(str $markdown) str {
     }
 
     return $html;
+}
+
+func md2html(str $markdown) str {
+    return md2html_depth($markdown, 0);
 }
 
 # Strip HTML tags (and unescape entities produced by <code>) for plain-text <title>

@@ -1,0 +1,291 @@
+#!/usr/bin/env strada
+# Cycle 2 Audit regression tests for strada-interp (--tree-walk and --vm parity)
+
+package R2DynObj;
+func new(str $name) scalar {
+    my hash %self = ("name" => $name);
+    return bless(\%self, "R2DynObj");
+}
+func greet(scalar $self, str $who) str {
+    return $self->{"name"} . ":" . $who;
+}
+
+package R2ErrObj;
+func new(int $code) scalar {
+    my hash %self = ("code" => $code);
+    return bless(\%self, "R2ErrObj");
+}
+
+package main;
+
+const int R2_C = 77;
+enum R2E { R2_ONE = 11, R2_TWO = 22 }
+
+our hash %g_hloc = ("a" => "orig_a", "b" => "orig_b");
+our str $g_cap_tr = "abc";
+our int $g_idx_calls = 0;
+
+func next_idx() int {
+    $g_idx_calls = $g_idx_calls + 1;
+    return 0;
+}
+
+func local_hash_return(int $mode) str {
+    $g_hloc{"a"} = "orig_a";
+    if ($mode == 1) {
+        {
+            local $g_hloc{"a"} = "scoped_1";
+            if ($g_hloc{"a"} ne "scoped_1") { return "wrong"; }
+        }
+        return $g_hloc{"a"};
+    }
+    if ($mode == 2) {
+        local $g_hloc{"a"} = "early_ret";
+        return "mid";
+    }
+    if ($mode == 3) {
+        try {
+            local $g_hloc{"a"} = "in_throw";
+            throw "boom";
+        } catch ($e) {
+            return $g_hloc{"a"};
+        }
+    }
+    if ($mode == 4) {
+        my int $k = 0;
+        while ($k < 3) {
+            local $g_hloc{"a"} = "in_last_" . $k;
+            $k++;
+            last;
+        }
+        return $g_hloc{"a"};
+    }
+    return "none";
+}
+
+func sort_with_nested_return(int $x, int $y) int {
+    my scalar $helper = func (int $a, int $b) int {
+        if ($a < $b) { return -1; }
+        if ($a > $b) { return 1; }
+        return 0;
+    };
+    return $helper->($x, $y);
+}
+
+func test_map_grep_inner_return() array {
+    my array @nums = (1, 2, 3, 4);
+    my array @m = map {
+        my int $v = $_;
+        if ($v % 2 == 0) {
+            $v * 10;
+        } else {
+            $v;
+        }
+    } @nums;
+    return @m;
+}
+
+func test_finally_return_override() int {
+    try {
+        return 10;
+    } finally {
+        return 99;
+    }
+    return 0;
+}
+
+func test_local_shadows_const() int {
+    my int $R2_C = 123;
+    my int $R2_ONE = 456;
+    return $R2_C + $R2_ONE;
+}
+
+func main() int {
+    my int $fail = 0;
+
+    # 1. do { ... } expression
+    my int $dval = do {
+        my int $a = 5;
+        my int $b = 6;
+        $a * $b;
+    };
+    if ($dval != 30) { say("FAIL: do {} got " . $dval); $fail++; }
+
+    # 2. local %h{"k"} unwinding on normal/return/throw/last
+    if (local_hash_return(1) ne "orig_a") { say("FAIL: local_hash_return(1)"); $fail++; }
+    my str $m2 = local_hash_return(2);
+    if ($m2 ne "mid" || $g_hloc{"a"} ne "orig_a") { say("FAIL: local_hash_return(2) g=" . $g_hloc{"a"}); $fail++; }
+    if (local_hash_return(3) ne "orig_a") { say("FAIL: local_hash_return(3)"); $fail++; }
+    if (local_hash_return(4) ne "orig_a") { say("FAIL: local_hash_return(4)"); $fail++; }
+
+    # 3. tr/// + flags (c, d, s, r) + count + capture/global writeback
+    my str $s1 = "foo bar";
+    my int $c1 = ($s1 =~ tr/ao/AO/);
+    if ($s1 ne "fOO bAr" || $c1 != 3) { say("FAIL: tr basic"); $fail++; }
+
+    my str $s2 = "xxxyyyzzz";
+    my int $c2 = ($s2 =~ tr/xyz/XYZ/s);
+    if ($s2 ne "XYZ" || $c2 != 9) { say("FAIL: tr/s s2=" . $s2 . " c2=" . $c2); $fail++; }
+
+    my str $s3 = "a1b2c3";
+    my int $c3 = ($s3 =~ tr/0-9//d);
+    if ($s3 ne "abc" || $c3 != 3) { say("FAIL: tr/d"); $fail++; }
+
+    my str $s4 = "12ab34";
+    my int $c4 = ($s4 =~ tr/0-9/_/c);
+    if ($s4 ne "12__34" || $c4 != 2) { say("FAIL: tr/c s4=" . $s4); $fail++; }
+
+    my str $s5 = "abc";
+    my str $s5r = ($s5 =~ tr/a-c/A-C/r);
+    if ($s5 ne "abc" || $s5r ne "ABC") { say("FAIL: tr/r"); $fail++; }
+
+    ($g_cap_tr =~ tr/a-z/A-Z/);
+    if ($g_cap_tr ne "ABC") { say("FAIL: tr global g_cap_tr=" . $g_cap_tr); $fail++; }
+
+    my str $cap_str = "hello";
+    my scalar $tr_fn = func () int {
+        return ($cap_str =~ tr/el/31/);
+    };
+    my int $tr_fc = $tr_fn->();
+    if ($cap_str ne "h311o" || $tr_fc != 3) { say("FAIL: tr closure capture cap=" . $cap_str . " c=" . $tr_fc); $fail++; }
+
+    # 4. Live scalar ref \$x / $$r / ref / reftype / typeof / deref
+    my int $lv = 10;
+    my scalar $lr = \$lv;
+    $$lr = 77;
+    if ($lv != 77 || $$lr != 77 || ref($lr) ne "SCALAR" || reftype($lr) ne "SCALAR") {
+        say("FAIL: live scalar ref writeback lv=" . $lv . " ref=" . ref($lr));
+        $fail++;
+    }
+    $lv = 88;
+    if ($$lr != 88 || deref($lr) != 88) {
+        say("FAIL: live scalar ref readback");
+        $fail++;
+    }
+
+    # 5. chomp & chop in-place + return + captured var
+    my str $ch1 = "hello\n";
+    my str $chn = chomp($ch1);
+    if ($ch1 ne "hello" || $chn ne "hello") { say("FAIL: chomp local ch1=" . $ch1 . " ret=" . $chn); $fail++; }
+    my str $ch2 = "abcd";
+    my str $chp = chop($ch2);
+    if ($ch2 ne "abc" || $chp ne "abc") { say("FAIL: chop local ch2=" . $ch2 . " ret=" . $chp); $fail++; }
+
+    my str $cap_ch = "line\n";
+    my scalar $ch_fn = func () str { return chomp($cap_ch); };
+    if ($ch_fn->() ne "line" || $cap_ch ne "line") { say("FAIL: chomp capture"); $fail++; }
+
+    # 6. multi-arg unshift & splice
+    my array @ua = (3, 4);
+    my scalar $uret = unshift(@ua, 1, 2);
+    if (defined($uret) || size(@ua) != 4 || join(",", @ua) ne "1,2,3,4") { say("FAIL: multi-arg unshift"); $fail++; }
+    my array @srem = splice(@ua, -2, 1, 88, 99);
+    if (join(",", @srem) ne "3" || join(",", @ua) ne "1,2,88,99,4") {
+        say("FAIL: splice got rem=" . join(",", @srem) . " ua=" . join(",", @ua));
+        $fail++;
+    }
+
+    # 7. local shadows const/enum
+    if (test_local_shadows_const() != 579) { say("FAIL: local shadows const/enum"); $fail++; }
+
+    # 8. @b = @a and %h2 = %h1 shallow copy
+    my array @oa = (1, 2, 3);
+    my array @ca = @oa;
+    $ca[0] = 99;
+    if ($oa[0] != 1 || $ca[0] != 99) { say("FAIL: array copy aliased"); $fail++; }
+    my hash %oh = ("k" => 5);
+    my hash %ch = %oh;
+    $ch{"k"} = 99;
+    if ($oh{"k"} != 5 || $ch{"k"} != 99) { say("FAIL: hash copy aliased"); $fail++; }
+
+    # 9. Single evaluation of index/key on ++ and compound assign
+    $g_idx_calls = 0;
+    my array @sa = (10, 20);
+    $sa[next_idx()]++;
+    if ($g_idx_calls != 1 || $sa[0] != 11) { say("FAIL: single-eval arr[idx]++ calls=" . $g_idx_calls . " val=" . $sa[0]); $fail++; }
+    $g_idx_calls = 0;
+    $sa[next_idx()] += 5;
+    if ($g_idx_calls != 1 || $sa[0] != 16) { say("FAIL: single-eval arr[idx]+=5 calls=" . $g_idx_calls . " val=" . $sa[0]); $fail++; }
+
+    # 10. Signals/returns in sort/map/finally
+    my array @uns = (3, 1, 2);
+    my array @srt = sort { sort_with_nested_return($a, $b) } @uns;
+    if (join(",", @srt) ne "1,2,3") { say("FAIL: sort nested return"); $fail++; }
+    my array @mp = test_map_grep_inner_return();
+    if (join(",", @mp) ne "1,20,3,40") { say("FAIL: map"); $fail++; }
+    if (test_finally_return_override() != 99) { say("FAIL: finally return override"); $fail++; }
+
+    # 11. switch/case "00" vs "0"
+    my str $zs = "00";
+    my str $zr = "";
+    switch ($zs) {
+        case "0" { $zr = "one"; }
+        case "00" { $zr = "two"; }
+        default { $zr = "other"; }
+    }
+    if ($zr ne "two") { say("FAIL: switch 00 vs 0 got " . $zr); $fail++; }
+
+    # 12. Dynamic method call + catchable miss
+    my scalar $dobj = R2DynObj::new("Hi");
+    my str $mname = "greet";
+    if ($dobj->$mname("Bob") ne "Hi:Bob") { say("FAIL: dyn method call"); $fail++; }
+    my int $dyn_missed = 0;
+    my str $badm = "no_such_method_r2";
+    try {
+        $dobj->$badm();
+    } catch ($de) {
+        $dyn_missed = 1;
+    }
+    if ($dyn_missed != 1) { say("FAIL: missing dyn method did not throw"); $fail++; }
+
+    # 13. die() 0-arg and object throw
+    my int $d0 = 0;
+    try {
+        die();
+    } catch ($e0) {
+        if (length("" . $e0) > 0) { $d0 = 1; }
+    }
+    if ($d0 != 1) { say("FAIL: die() 0-arg"); $fail++; }
+
+    my int $dobj_ok = 0;
+    try {
+        die(R2ErrObj::new(503));
+    } catch ($eo) {
+        if (ref($eo) eq "R2ErrObj" && $eo->{"code"} == 503) { $dobj_ok = 1; }
+    }
+    if ($dobj_ok != 1) { say("FAIL: die(obj) catch"); $fail++; }
+
+    # 14. Closure capture s///e + ++ and loop OP_RESET_LOCAL
+    my int $cnt_cap = 0;
+    my str $str_cap = "x1y2";
+    my scalar $cap_mut = func () str {
+        $str_cap =~ s/(\d+)/($1 + 10)/eg;
+        $cnt_cap++;
+        return $str_cap . ":" . $cnt_cap;
+    };
+    my str $cm1 = $cap_mut->();
+    if ($cm1 ne "x11y12:1" || $cnt_cap != 1) { say("FAIL: capture s///e / ++ got " . $cm1); $fail++; }
+
+    # Loop-local reset across iterations (no stale undef/value carry-over)
+    my array @loop_outs = ();
+    my array @loop_souts = ();
+    my int $li = 0;
+    while ($li < 3) {
+        my scalar $fresh;
+        my str $sfresh;
+        if ($li == 0) { $fresh = "first"; $sfresh = "first"; }
+        push(@loop_outs, defined($fresh) ? $fresh : "UNDEF");
+        push(@loop_souts, $sfresh);
+        $li++;
+    }
+    if (join(",", @loop_outs) ne "first,UNDEF,UNDEF" || join(",", @loop_souts) ne "first,,") {
+        say("FAIL: loop-local reset got outs=" . join(",", @loop_outs) . " souts=" . join(",", @loop_souts));
+        $fail++;
+    }
+
+    if ($fail == 0) {
+        say("ALL_R2_INTERP_OK");
+        return 0;
+    }
+    return 1;
+}

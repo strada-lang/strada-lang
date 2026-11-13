@@ -235,6 +235,7 @@ my int $g_cdebug = 0;
 my array @g_open_libs = ();
 my array @g_so_files = ();
 my array @g_constants = ();
+my hash %g_constant_idx = ();
 my hash %g_oop_packages = ();
 
 # Detect stradac path
@@ -596,13 +597,146 @@ private func register_import(str $import_stmt) void {
     push(@g_imports, $normalized . ";");
 }
 
-# Replace string literals and # comments with spaces so regex scans don't false-positive
+private func jit_is_ident_char(str $c) int {
+    if ($c eq "") { return 0; }
+    my int $o = ord($c);
+    if (($o >= 65 && $o <= 90) || ($o >= 97 && $o <= 122) || ($o >= 48 && $o <= 57) || $c eq "_") {
+        return 1;
+    }
+    return 0;
+}
+
+private func jit_is_regex_prefix(str $prev_non_ws, str $prev_word) int {
+    if ($prev_non_ws eq "") { return 1; }
+    if (index("~([,{;=!?:&|", $prev_non_ws) >= 0) { return 1; }
+    if ($prev_word eq "return" || $prev_word eq "if" || $prev_word eq "elsif" ||
+        $prev_word eq "while" || $prev_word eq "unless" || $prev_word eq "when" ||
+        $prev_word eq "and" || $prev_word eq "or" || $prev_word eq "not") {
+        return 1;
+    }
+    return 0;
+}
+
+private func jit_matching_delim(str $open_d) str {
+    if ($open_d eq "{") { return "}"; }
+    if ($open_d eq "(") { return ")"; }
+    if ($open_d eq "[") { return "]"; }
+    if ($open_d eq "<") { return ">"; }
+    return $open_d;
+}
+
+private func jit_scan_delim_body(str $s, int $pos, str $open_d, str $close_d, int $allow_char_class, int $allow_newline) int {
+    my int $len = length($s);
+    my int $i = $pos;
+    my int $paired = ($open_d ne $close_d) ? 1 : 0;
+    my int $nest = 1;
+    my int $in_class = 0;
+    while ($i < $len) {
+        my str $c = substr($s, $i, 1);
+        if ($c eq "\\" && $i + 1 < $len) {
+            $i = $i + 2;
+            next;
+        }
+        if ($allow_newline == 0 && $c eq "\n") {
+            return -1;
+        }
+        if ($allow_char_class == 1 && $in_class == 1) {
+            if ($c eq "]") { $in_class = 0; }
+            $i = $i + 1;
+            next;
+        }
+        if ($allow_char_class == 1 && $c eq "[") {
+            $in_class = 1;
+            $i = $i + 1;
+            next;
+        }
+        if ($paired == 1 && $c eq $open_d) {
+            $nest = $nest + 1;
+        } elsif ($c eq $close_d) {
+            $nest = $nest - 1;
+            if ($nest == 0) {
+                return $i + 1;
+            }
+        }
+        $i = $i + 1;
+    }
+    return -1;
+}
+
+private func skip_regex_literal(str $s, int $pos, str $prev_non_ws, str $prev_word) int {
+    my int $len = length($s);
+    if ($pos >= $len) { return -1; }
+    my str $c = substr($s, $pos, 1);
+
+    if ($c eq "/") {
+        if (jit_is_regex_prefix($prev_non_ws, $prev_word) == 0) { return -1; }
+        if ($pos + 1 < $len && substr($s, $pos + 1, 1) eq "/" && $prev_non_ws ne "~") { return -1; }
+        my int $end_p = jit_scan_delim_body($s, $pos + 1, "/", "/", 1, 0);
+        if ($end_p < 0) { return -1; }
+        while ($end_p < $len && substr($s, $end_p, 1) =~ /[a-zA-Z]/) {
+            $end_p = $end_p + 1;
+        }
+        return $end_p;
+    }
+
+    my int $is_prev_ident = ($pos > 0) ? jit_is_ident_char(substr($s, $pos - 1, 1)) : 0;
+    if ($is_prev_ident == 1 || $prev_non_ws eq "\$" || $prev_non_ws eq "@" || $prev_non_ws eq "%") {
+        return -1;
+    }
+
+    my int $op_len = 0;
+    my int $bodies = 0;
+    if ($c eq "m" && $pos + 1 < $len) {
+        $op_len = 1;
+        $bodies = 1;
+    } elsif ($c eq "s" && $pos + 1 < $len) {
+        $op_len = 1;
+        $bodies = 2;
+    } elsif ($c eq "t" && $pos + 2 < $len && substr($s, $pos + 1, 1) eq "r") {
+        $op_len = 2;
+        $bodies = 2;
+    } else {
+        return -1;
+    }
+
+    my str $open_d = substr($s, $pos + $op_len, 1);
+    if (index("/{([|!#", $open_d) < 0) {
+        return -1;
+    }
+    my str $close_d = jit_matching_delim($open_d);
+    my int $allow_nl = ($open_d eq "/" ? 0 : 1);
+    my int $after1 = jit_scan_delim_body($s, $pos + $op_len + 1, $open_d, $close_d, 1, $allow_nl);
+    if ($after1 < 0) { return -1; }
+    my int $end_p = $after1;
+    if ($bodies == 2) {
+        if ($open_d ne $close_d) {
+            my int $k = $after1;
+            while ($k < $len && (substr($s, $k, 1) eq " " || substr($s, $k, 1) eq "\t" || substr($s, $k, 1) eq "\n")) {
+                $k = $k + 1;
+            }
+            if ($k >= $len || substr($s, $k, 1) ne $open_d) { return -1; }
+            $end_p = jit_scan_delim_body($s, $k + 1, $open_d, $close_d, 0, $allow_nl);
+        } else {
+            $end_p = jit_scan_delim_body($s, $after1, $open_d, $close_d, 0, $allow_nl);
+        }
+        if ($end_p < 0) { return -1; }
+    }
+    while ($end_p < $len && substr($s, $end_p, 1) =~ /[a-zA-Z]/) {
+        $end_p = $end_p + 1;
+    }
+    return $end_p;
+}
+
+# Replace string literals, regex literals, and # comments with spaces so scans never false-positive
 private func strip_strings_and_comments(str $input) str {
     my str $out = "";
     my int $len = length($input);
     my int $i = 0;
     my int $in_str = 0;
     my int $in_cmt = 0;
+    my str $prev_non_ws = "";
+    my str $cur_word = "";
+    my str $last_word = "";
     while ($i < $len) {
         my str $c = substr($input, $i, 1);
         if ($in_cmt == 1) {
@@ -612,71 +746,144 @@ private func strip_strings_and_comments(str $input) str {
             next;
         }
         if ($in_str == 1) {
-            if ($c eq "\\" && $i + 1 < $len) { $out = $out . "  "; $i = $i + 2; next; }
-            if ($c eq "\"") { $in_str = 0; }
-            $out = $out . " ";
+            if ($c eq "\\" && $i + 1 < $len) {
+                my str $n2 = substr($input, $i + 1, 1);
+                $out = $out . " " . (($n2 eq "\n") ? "\n" : " ");
+                $i = $i + 2;
+                next;
+            }
+            if ($c eq "\"") { $in_str = 0; $prev_non_ws = "\""; }
+            $out = $out . (($c eq "\n") ? "\n" : " ");
             $i = $i + 1;
             next;
         }
         if ($in_str == 2) {
-            if ($c eq "\\" && $i + 1 < $len) { $out = $out . "  "; $i = $i + 2; next; }
-            if ($c eq "'") { $in_str = 0; }
-            $out = $out . " ";
+            if ($c eq "\\" && $i + 1 < $len) {
+                my str $n2 = substr($input, $i + 1, 1);
+                $out = $out . " " . (($n2 eq "\n") ? "\n" : " ");
+                $i = $i + 2;
+                next;
+            }
+            if ($c eq "'") { $in_str = 0; $prev_non_ws = "'"; }
+            $out = $out . (($c eq "\n") ? "\n" : " ");
             $i = $i + 1;
             next;
         }
-        if ($c eq "\"") { $in_str = 1; $out = $out . " "; $i = $i + 1; next; }
-        if ($c eq "'") { $in_str = 2; $out = $out . " "; $i = $i + 1; next; }
-        if ($c eq "#") { $in_cmt = 1; $out = $out . " "; $i = $i + 1; next; }
+        if ($c eq "\"") { $in_str = 1; $cur_word = ""; $out = $out . " "; $i = $i + 1; next; }
+        if ($c eq "'") { $in_str = 2; $cur_word = ""; $out = $out . " "; $i = $i + 1; next; }
+        if ($c eq "#") { $in_cmt = 1; $cur_word = ""; $out = $out . " "; $i = $i + 1; next; }
+
+        my int $rx_end = skip_regex_literal($input, $i, $prev_non_ws, ($cur_word ne "" ? $cur_word : $last_word));
+        if ($rx_end > $i) {
+            my int $ri = $i;
+            while ($ri < $rx_end) {
+                my str $rc = substr($input, $ri, 1);
+                $out = $out . (($rc eq "\n") ? "\n" : " ");
+                $ri = $ri + 1;
+            }
+            $prev_non_ws = "/";
+            $cur_word = "";
+            $last_word = "";
+            $i = $rx_end;
+            next;
+        }
+
+        if (jit_is_ident_char($c) == 1) {
+            $cur_word = $cur_word . $c;
+            $last_word = $cur_word;
+            $prev_non_ws = $c;
+        } elsif ($c eq " " || $c eq "\t" || $c eq "\n" || $c eq "\r") {
+            if ($cur_word ne "") {
+                $last_word = $cur_word;
+                $cur_word = "";
+            }
+        } else {
+            if ($cur_word ne "") {
+                $last_word = $cur_word;
+                $cur_word = "";
+            } else {
+                $last_word = "";
+            }
+            $prev_non_ws = $c;
+        }
         $out = $out . $c;
         $i = $i + 1;
     }
     return $out;
 }
 
-# Check if input declares a specific variable
+# Check if input declares a specific variable at top level (brace/paren/bracket depth 0)
 private func input_declares_var(str $input, str $name, str $sigil) int {
-    my str $code = strip_strings_and_comments($input);
-    my str $pattern = "\\bmy\\s+([A-Za-z_][A-Za-z0-9_:]*\\s+)?\\" . $sigil . $name . "\\b";
-    if ($code =~ /$pattern/) {
-        return 1;
+    my str $cleaned = strip_strings_and_comments($input);
+    my int $len = length($cleaned);
+    my int $i = 0;
+    my int $depth = 0;
+    my int $pdepth = 0;
+    my int $bdepth = 0;
+    while ($i < $len) {
+        my str $c = substr($cleaned, $i, 1);
+        if ($c eq "{") { $depth = $depth + 1; $i = $i + 1; next; }
+        if ($c eq "}") { $depth = $depth - 1; $i = $i + 1; next; }
+        if ($c eq "(") { $pdepth = $pdepth + 1; $i = $i + 1; next; }
+        if ($c eq ")") { $pdepth = $pdepth - 1; $i = $i + 1; next; }
+        if ($c eq "[") { $bdepth = $bdepth + 1; $i = $i + 1; next; }
+        if ($c eq "]") { $bdepth = $bdepth - 1; $i = $i + 1; next; }
+        if ($depth == 0 && $pdepth == 0 && $bdepth == 0 && $c eq "m" && $i + 2 < $len && substr($cleaned, $i + 1, 1) eq "y") {
+            my str $after_my = substr($cleaned, $i + 2, 1);
+            my int $prev_ok = ($i == 0 || jit_is_ident_char(substr($cleaned, $i - 1, 1)) == 0) ? 1 : 0;
+            if ($prev_ok == 1 && ($after_my eq " " || $after_my eq "\t" || $after_my eq "\n")) {
+                my int $pos = $i + 2;
+                while ($pos < $len && (substr($cleaned, $pos, 1) eq " " || substr($cleaned, $pos, 1) eq "\t" || substr($cleaned, $pos, 1) eq "\n")) {
+                    $pos = $pos + 1;
+                }
+                my int $wstart = $pos;
+                my str $word = "";
+                while ($pos < $len && (substr($cleaned, $pos, 1) =~ /[A-Za-z0-9_:]/)) {
+                    $word = $word . substr($cleaned, $pos, 1);
+                    $pos = $pos + 1;
+                }
+                if ($word ne "") {
+                    while ($pos < $len && (substr($cleaned, $pos, 1) eq " " || substr($cleaned, $pos, 1) eq "\t" || substr($cleaned, $pos, 1) eq "\n")) {
+                        $pos = $pos + 1;
+                    }
+                    if ($pos < $len) {
+                        my str $sc = substr($cleaned, $pos, 1);
+                        if ($sc ne "\$" && $sc ne "@" && $sc ne "%") {
+                            $pos = $wstart;
+                        }
+                    } else {
+                        $pos = $wstart;
+                    }
+                }
+                if ($pos < $len && substr($cleaned, $pos, 1) eq $sigil) {
+                    $pos = $pos + 1;
+                    my str $vname = "";
+                    while ($pos < $len && jit_is_ident_char(substr($cleaned, $pos, 1)) == 1) {
+                        $vname = $vname . substr($cleaned, $pos, 1);
+                        $pos = $pos + 1;
+                    }
+                    if ($vname eq $name) {
+                        return 1;
+                    }
+                }
+            }
+        }
+        $i = $i + 1;
     }
     return 0;
 }
 
-# Register variables from input (only at brace/paren/bracket depth 0, skipping strings & comments)
+# Register variables from input (only at brace/paren/bracket depth 0, skipping strings, comments & regexes)
 private func register_variables(str $input) void {
+    my str $cleaned = strip_strings_and_comments($input);
     my int $i = 0;
-    my int $len = length($input);
+    my int $len = length($cleaned);
     my int $depth = 0;
     my int $pdepth = 0;
     my int $bdepth = 0;
-    my int $in_str = 0;
-    my int $in_cmt = 0;
 
     while ($i < $len) {
-        my str $c = substr($input, $i, 1);
-
-        if ($in_cmt == 1) {
-            if ($c eq "\n") { $in_cmt = 0; }
-            $i = $i + 1;
-            next;
-        }
-        if ($in_str == 1) {
-            if ($c eq "\\" && $i + 1 < $len) { $i = $i + 2; next; }
-            if ($c eq "\"") { $in_str = 0; }
-            $i = $i + 1;
-            next;
-        }
-        if ($in_str == 2) {
-            if ($c eq "\\" && $i + 1 < $len) { $i = $i + 2; next; }
-            if ($c eq "'") { $in_str = 0; }
-            $i = $i + 1;
-            next;
-        }
-        if ($c eq "\"") { $in_str = 1; $i = $i + 1; next; }
-        if ($c eq "'") { $in_str = 2; $i = $i + 1; next; }
-        if ($c eq "#") { $in_cmt = 1; $i = $i + 1; next; }
+        my str $c = substr($cleaned, $i, 1);
 
         if ($c eq "{") { $depth = $depth + 1; $i = $i + 1; next; }
         if ($c eq "}") { $depth = $depth - 1; $i = $i + 1; next; }
@@ -685,27 +892,27 @@ private func register_variables(str $input) void {
         if ($c eq "[") { $bdepth = $bdepth + 1; $i = $i + 1; next; }
         if ($c eq "]") { $bdepth = $bdepth - 1; $i = $i + 1; next; }
 
-        if ($depth == 0 && $pdepth == 0 && $bdepth == 0 && $c eq "m" && $i + 2 < $len && substr($input, $i + 1, 1) eq "y") {
-            my str $after_my = substr($input, $i + 2, 1);
+        if ($depth == 0 && $pdepth == 0 && $bdepth == 0 && $c eq "m" && $i + 2 < $len && substr($cleaned, $i + 1, 1) eq "y") {
+            my str $after_my = substr($cleaned, $i + 2, 1);
             my int $word_ok = 0;
             if ($after_my eq " " || $after_my eq "\t") {
                 if ($i == 0) {
                     $word_ok = 1;
                 } else {
-                    my str $prev = substr($input, $i - 1, 1);
+                    my str $prev = substr($cleaned, $i - 1, 1);
                     if (!($prev =~ /[a-zA-Z0-9_]/)) { $word_ok = 1; }
                 }
             }
             if ($word_ok == 1) {
                 my int $pos = $i + 2;
-                while ($pos < $len && (substr($input, $pos, 1) eq " " || substr($input, $pos, 1) eq "\t")) {
+                while ($pos < $len && (substr($cleaned, $pos, 1) eq " " || substr($cleaned, $pos, 1) eq "\t")) {
                     $pos = $pos + 1;
                 }
                 my str $type = "scalar";
                 my int $word_start = $pos;
                 my str $next_word = "";
                 while ($pos < $len) {
-                    my str $wc = substr($input, $pos, 1);
+                    my str $wc = substr($cleaned, $pos, 1);
                     if ($wc =~ /[a-zA-Z0-9_:]/) {
                         $next_word = $next_word . $wc;
                         $pos = $pos + 1;
@@ -715,16 +922,16 @@ private func register_variables(str $input) void {
                 }
                 if ($next_word eq "int" || $next_word eq "num" || $next_word eq "str" || $next_word eq "scalar" || $next_word eq "array" || $next_word eq "hash") {
                     $type = $next_word;
-                    while ($pos < $len && (substr($input, $pos, 1) eq " " || substr($input, $pos, 1) eq "\t")) {
+                    while ($pos < $len && (substr($cleaned, $pos, 1) eq " " || substr($cleaned, $pos, 1) eq "\t")) {
                         $pos = $pos + 1;
                     }
                 } elsif ($next_word ne "") {
                     my int $look = $pos;
-                    while ($look < $len && (substr($input, $look, 1) eq " " || substr($input, $look, 1) eq "\t")) {
+                    while ($look < $len && (substr($cleaned, $look, 1) eq " " || substr($cleaned, $look, 1) eq "\t")) {
                         $look = $look + 1;
                     }
                     if ($look < $len) {
-                        my str $sc = substr($input, $look, 1);
+                        my str $sc = substr($cleaned, $look, 1);
                         if ($sc eq "\$" || $sc eq "@" || $sc eq "%") {
                             $pos = $look;
                         } else {
@@ -737,14 +944,14 @@ private func register_variables(str $input) void {
                     $pos = $word_start;
                 }
                 if ($pos < $len) {
-                    my str $sigil = substr($input, $pos, 1);
+                    my str $sigil = substr($cleaned, $pos, 1);
                     if ($sigil eq "\$" || $sigil eq "@" || $sigil eq "%") {
                         if ($sigil eq "@") { $type = "array"; }
                         if ($sigil eq "%") { $type = "hash"; }
                         $pos = $pos + 1;
                         my str $name = "";
-                        while ($pos < $len && (substr($input, $pos, 1) =~ /[a-zA-Z0-9_]/)) {
-                            $name = $name . substr($input, $pos, 1);
+                        while ($pos < $len && (substr($cleaned, $pos, 1) =~ /[a-zA-Z0-9_]/)) {
+                            $name = $name . substr($cleaned, $pos, 1);
                             $pos = $pos + 1;
                         }
                         if ($name ne "") {
@@ -882,161 +1089,88 @@ private func convert_my_to_our(str $input) str {
 }
 
 private func first_toplevel_semi(str $s) int {
-    my int $n = length($s);
+    my str $cleaned = strip_strings_and_comments($s);
+    my int $n = length($cleaned);
     my int $i = 0;
     my int $depth = 0;
-    my int $in_str = 0;
-    my int $in_cmt = 0;
     while ($i < $n) {
-        my int $c = char_at($s, $i);
-        my int $adv = 1;
-        if ($in_cmt == 1) {
-            if ($c == 10) { $in_cmt = 0; }
-        } elsif ($in_str == 1) {
-            if ($c == 92) { $adv = 2; }
-            elsif ($c == 34) { $in_str = 0; }
-        } elsif ($in_str == 2) {
-            if ($c == 92) { $adv = 2; }
-            elsif ($c == 39) { $in_str = 0; }
-        } else {
-            if ($c == 34) { $in_str = 1; }
-            elsif ($c == 39) { $in_str = 2; }
-            elsif ($c == 35) { $in_cmt = 1; }
-            elsif ($c == 123 || $c == 40 || $c == 91) { $depth = $depth + 1; }
-            elsif ($c == 125 || $c == 41 || $c == 93) { $depth = $depth - 1; }
-            elsif ($c == 59 && $depth == 0) { return $i; }
-        }
-        $i = $i + $adv;
+        my str $c = substr($cleaned, $i, 1);
+        if ($c eq "{" || $c eq "(" || $c eq "[") { $depth = $depth + 1; }
+        elsif ($c eq "}" || $c eq ")" || $c eq "]") { $depth = $depth - 1; }
+        elsif ($c eq ";" && $depth == 0) { return $i; }
+        $i = $i + 1;
     }
     return -1;
 }
 
 # Index of the last top-level ';' in $s that has non-whitespace content after
-# it, or -1 if there is none. Respects "double" / 'single' string literals,
-# # comments, and (){}[] nesting. Used so multi-statement evals capture the trailing expression.
+# it, or -1 if there is none. Respects strings, regexes, # comments, and (){}[] nesting.
 private func last_toplevel_semi(str $s) int {
-    my int $n = length($s);
+    my str $cleaned = strip_strings_and_comments($s);
+    my int $n = length($cleaned);
     my int $i = 0;
     my int $depth = 0;
-    my int $in_str = 0;        # 0 normal, 1 inside "", 2 inside ''
-    my int $in_cmt = 0;
     my int $last_semi = -1;
+    my int $pending_semi = -1;
     while ($i < $n) {
-        my int $c = char_at($s, $i);
-        my int $adv = 1;
-        if ($in_cmt == 1) {
-            if ($c == 10) { $in_cmt = 0; }
-        } elsif ($in_str == 1) {
-            if ($c == 92) { $adv = 2; }          # backslash escape
-            elsif ($c == 34) { $in_str = 0; }    # "
-        } elsif ($in_str == 2) {
-            if ($c == 92) { $adv = 2; }
-            elsif ($c == 39) { $in_str = 0; }    # '
-        } else {
-            if ($c == 34) { $in_str = 1; }
-            elsif ($c == 39) { $in_str = 2; }
-            elsif ($c == 35) { $in_cmt = 1; }    # # comment
-            elsif ($c == 123 || $c == 40 || $c == 91) { $depth = $depth + 1; }   # { ( [
-            elsif ($c == 125 || $c == 41 || $c == 93) { $depth = $depth - 1; }   # } ) ]
-            elsif ($c == 59 && $depth == 0) { $last_semi = $i; }                 # ;
+        my str $c = substr($cleaned, $i, 1);
+        if ($pending_semi >= 0 && $c ne " " && $c ne "\t" && $c ne "\n" && $c ne "\r") {
+            $last_semi = $pending_semi;
+            $pending_semi = -1;
         }
-        $i = $i + $adv;
+        if ($c eq "{" || $c eq "(" || $c eq "[") { $depth = $depth + 1; }
+        elsif ($c eq "}" || $c eq ")" || $c eq "]") { $depth = $depth - 1; }
+        elsif ($c eq ";" && $depth == 0) { $pending_semi = $i; }
+        $i = $i + 1;
     }
-    if ($last_semi < 0) { return -1; }
-    # Require non-whitespace / non-comment after the candidate ';' (else trailing ';' = no result).
-    my int $j = $last_semi + 1;
-    while ($j < $n) {
-        my int $cc = char_at($s, $j);
-        if ($cc == 35) {
-            while ($j < $n && char_at($s, $j) != 10) { $j = $j + 1; }
-            next;
-        }
-        if ($cc != 32 && $cc != 9 && $cc != 10 && $cc != 13) { return $last_semi; }
-        $j = $j + 1;
-    }
-    return -1;
+    return $last_semi;
 }
 
 # Strip top-level (depth 0) `my [TYPE] SIGIL+name` prefixes so declarations
 # inside the wrapped helper closure assign to repl_eval()'s captured locals
 # instead of shadowing them inside the closure.
 private func strip_toplevel_my(str $input) str {
+    my str $cleaned = strip_strings_and_comments($input);
     my str $result = "";
     my int $len = length($input);
     my int $i = 0;
     my int $depth = 0;
     my int $pdepth = 0;
     my int $bdepth = 0;
-    my int $in_str = 0;
-    my int $in_cmt = 0;
 
     while ($i < $len) {
+        my str $cc = substr($cleaned, $i, 1);
         my str $c = substr($input, $i, 1);
 
-        if ($in_cmt == 1) {
-            $result = $result . $c;
-            if ($c eq "\n") { $in_cmt = 0; }
-            $i = $i + 1;
-            next;
-        }
+        if ($cc eq "{") { $depth = $depth + 1; $result = $result . $c; $i = $i + 1; next; }
+        if ($cc eq "}") { $depth = $depth - 1; $result = $result . $c; $i = $i + 1; next; }
+        if ($cc eq "(") { $pdepth = $pdepth + 1; $result = $result . $c; $i = $i + 1; next; }
+        if ($cc eq ")") { $pdepth = $pdepth - 1; $result = $result . $c; $i = $i + 1; next; }
+        if ($cc eq "[") { $bdepth = $bdepth + 1; $result = $result . $c; $i = $i + 1; next; }
+        if ($cc eq "]") { $bdepth = $bdepth - 1; $result = $result . $c; $i = $i + 1; next; }
 
-        if ($in_str == 1) {
-            if ($c eq "\\" && $i + 1 < $len) {
-                $result = $result . substr($input, $i, 2);
-                $i = $i + 2;
-                next;
-            }
-            if ($c eq "\"") { $in_str = 0; }
-            $result = $result . $c;
-            $i = $i + 1;
-            next;
-        }
-
-        if ($in_str == 2) {
-            if ($c eq "\\" && $i + 1 < $len) {
-                $result = $result . substr($input, $i, 2);
-                $i = $i + 2;
-                next;
-            }
-            if ($c eq "'") { $in_str = 0; }
-            $result = $result . $c;
-            $i = $i + 1;
-            next;
-        }
-
-        if ($c eq "\"") { $in_str = 1; $result = $result . $c; $i = $i + 1; next; }
-        if ($c eq "'") { $in_str = 2; $result = $result . $c; $i = $i + 1; next; }
-        if ($c eq "#") { $in_cmt = 1; $result = $result . $c; $i = $i + 1; next; }
-
-        if ($c eq "{") { $depth = $depth + 1; $result = $result . $c; $i = $i + 1; next; }
-        if ($c eq "}") { $depth = $depth - 1; $result = $result . $c; $i = $i + 1; next; }
-        if ($c eq "(") { $pdepth = $pdepth + 1; $result = $result . $c; $i = $i + 1; next; }
-        if ($c eq ")") { $pdepth = $pdepth - 1; $result = $result . $c; $i = $i + 1; next; }
-        if ($c eq "[") { $bdepth = $bdepth + 1; $result = $result . $c; $i = $i + 1; next; }
-        if ($c eq "]") { $bdepth = $bdepth - 1; $result = $result . $c; $i = $i + 1; next; }
-
-        if ($depth == 0 && $pdepth == 0 && $bdepth == 0 && $c eq "m" && $i + 2 < $len && substr($input, $i + 1, 1) eq "y") {
-            my str $after_my = substr($input, $i + 2, 1);
+        if ($depth == 0 && $pdepth == 0 && $bdepth == 0 && $cc eq "m" && $i + 2 < $len && substr($cleaned, $i + 1, 1) eq "y") {
+            my str $after_my = substr($cleaned, $i + 2, 1);
             if ($after_my eq " " || $after_my eq "\t") {
                 my int $word_ok = 0;
                 if ($i == 0) {
                     $word_ok = 1;
                 } else {
-                    my str $prev = substr($input, $i - 1, 1);
+                    my str $prev = substr($cleaned, $i - 1, 1);
                     if (!($prev =~ /[a-zA-Z0-9_]/)) {
                         $word_ok = 1;
                     }
                 }
                 if ($word_ok == 1) {
                     my int $j = $i + 2;
-                    while ($j < $len && (substr($input, $j, 1) eq " " || substr($input, $j, 1) eq "\t")) {
+                    while ($j < $len && (substr($cleaned, $j, 1) eq " " || substr($cleaned, $j, 1) eq "\t")) {
                         $j = $j + 1;
                     }
                     my str $vtype = "scalar";
                     my int $wstart = $j;
                     my str $word = "";
                     while ($j < $len) {
-                        my str $wc = substr($input, $j, 1);
+                        my str $wc = substr($cleaned, $j, 1);
                         if ($wc =~ /[a-zA-Z0-9_:]/) {
                             $word = $word . $wc;
                             $j = $j + 1;
@@ -1046,16 +1180,16 @@ private func strip_toplevel_my(str $input) str {
                     }
                     if ($word eq "int" || $word eq "num" || $word eq "str" || $word eq "scalar" || $word eq "array" || $word eq "hash") {
                         $vtype = $word;
-                        while ($j < $len && (substr($input, $j, 1) eq " " || substr($input, $j, 1) eq "\t")) {
+                        while ($j < $len && (substr($cleaned, $j, 1) eq " " || substr($cleaned, $j, 1) eq "\t")) {
                             $j = $j + 1;
                         }
                     } elsif ($word ne "") {
                         my int $look = $j;
-                        while ($look < $len && (substr($input, $look, 1) eq " " || substr($input, $look, 1) eq "\t")) {
+                        while ($look < $len && (substr($cleaned, $look, 1) eq " " || substr($cleaned, $look, 1) eq "\t")) {
                             $look = $look + 1;
                         }
                         if ($look < $len) {
-                            my str $sc = substr($input, $look, 1);
+                            my str $sc = substr($cleaned, $look, 1);
                             if ($sc eq "\$" || $sc eq "@" || $sc eq "%") {
                                 $j = $look;
                             } else {
@@ -1068,12 +1202,12 @@ private func strip_toplevel_my(str $input) str {
                         $j = $wstart;
                     }
                     if ($j < $len) {
-                        my str $sigil = substr($input, $j, 1);
+                        my str $sigil = substr($cleaned, $j, 1);
                         if ($sigil eq "$" || $sigil eq "@" || $sigil eq "%") {
                             $j = $j + 1;
                             my str $vname = "";
-                            while ($j < $len && (substr($input, $j, 1) =~ /[a-zA-Z0-9_]/)) {
-                                $vname = $vname . substr($input, $j, 1);
+                            while ($j < $len && (substr($cleaned, $j, 1) =~ /[a-zA-Z0-9_]/)) {
+                                $vname = $vname . substr($cleaned, $j, 1);
                                 $j = $j + 1;
                             }
                             if ($vname ne "") {
@@ -1210,7 +1344,7 @@ private func generate_source(str $input) str {
 
     # Check if this is a void function call (prints output, returns nothing useful)
     my int $is_void_call = 0;
-    if ($trimmed =~ /^(say|print|warn|push|pop|shift|unshift)\(/) {
+    if ($trimmed =~ /^(say|print|warn|die|push|pop|shift|unshift)\(/) {
         $is_void_call = 1;
     }
     foreach my str $fndef (@g_functions) {
@@ -1237,6 +1371,7 @@ private func generate_source(str $input) str {
     if ($trimmed =~ /^my\s+/) { $is_statement = 1; }
     if ($trimmed =~ /^our\s+/) { $is_statement = 1; }
     if ($trimmed =~ /^const\s+/) { $is_statement = 1; }
+    if ($trimmed =~ /^local\s+/) { $is_statement = 1; }
     if ($trimmed =~ /^if\s*\(/) { $is_statement = 1; }
     if ($trimmed =~ /^unless\s/) { $is_statement = 1; }
     if ($trimmed =~ /^while\s*\(/) { $is_statement = 1; }
@@ -1244,9 +1379,12 @@ private func generate_source(str $input) str {
     if ($trimmed =~ /^do\s*\{/) { $is_statement = 1; }
     if ($trimmed =~ /^for\s/) { $is_statement = 1; }
     if ($trimmed =~ /^foreach\s/) { $is_statement = 1; }
+    if ($trimmed =~ /^switch\s*\(/) { $is_statement = 1; }
     if ($trimmed =~ /^try\s*\{/) { $is_statement = 1; }
+    if ($trimmed =~ /^throw(\s|;|\(|$)/) { $is_statement = 1; }
+    if ($trimmed =~ /^goto\s+/) { $is_statement = 1; }
     if ($trimmed =~ /^\{/) { $is_statement = 1; }
-    if ($trimmed =~ /^[\$\@\%]\w+\s*=[^=~]/) { $is_statement = 1; }
+    if ($trimmed =~ /^[\$\@\%]\w+\s*([+\-*\/%.]?=|&&=|\|\|=|\/\/=)[^=~]/) { $is_statement = 1; }
     if ($trimmed =~ /^[\$\@\%]\w+\s*=$/) { $is_statement = 1; }
 
     my str $last_char = "";
@@ -1361,7 +1499,11 @@ private func generate_source(str $input) str {
             if ($last_char eq ";") {
                 $expr = substr($trimmed, 0, length($trimmed) - 1);
             }
-            $src = $src . "    my scalar \$__result = " . $expr . ";\n";
+            if ($expr eq "") {
+                $src = $src . "    my scalar \$__result = undef;\n";
+            } else {
+                $src = $src . "    my scalar \$__result = " . $expr . ";\n";
+            }
         }
 
         # Save all tracked variables back to global registry (inline __C__ path)
@@ -1514,13 +1656,17 @@ private func eval_one(str $input) scalar {
         # -O0 explicitly: snippets are one-shot (dlopen'd, executed, discarded),
         # so any -O2 + LTO time is pure overhead. -O0 also triggers strada's
         # speed flags (-pipe, -fno-var-tracking, etc).
-        my str $gcc_cmd = "./strada -O0 --shared " . shell_quote($src_file) . " -o " . shell_quote($so_file) . " 2>&1";
+        my str $lib_flags = "";
+        foreach my str $lp (@g_lib_paths) {
+            $lib_flags = $lib_flags . " -L " . shell_quote($lp);
+        }
+        my str $gcc_cmd = "./strada -O0 --shared" . $lib_flags . " " . shell_quote($src_file) . " -o " . shell_quote($so_file) . " 2>&1";
         # If stradac is not in ./, try using the strada wrapper from stradac's dir
         if ($g_stradac_path ne "./stradac" && $g_stradac_path ne "stradac") {
             my str $stradac_dir = core::dirname($g_stradac_path);
             my str $strada_bin = $stradac_dir . "/strada";
             if (core::is_file($strada_bin) == 1) {
-                $gcc_cmd = shell_quote($strada_bin) . " -O0 --shared " . shell_quote($src_file) . " -o " . shell_quote($so_file) . " 2>&1";
+                $gcc_cmd = shell_quote($strada_bin) . " -O0 --shared" . $lib_flags . " " . shell_quote($src_file) . " -o " . shell_quote($so_file) . " 2>&1";
             }
         }
         $pipe = core::popen($gcc_cmd, "r");
@@ -1636,6 +1782,17 @@ func init(str ...@args) void {
 }
 
 # Evaluate Strada code and return the result
+private func upsert_constant(str $key, str $entry) void {
+    if ($key ne "" && exists($g_constant_idx{$key})) {
+        $g_constants[$g_constant_idx{$key}] = $entry;
+        return;
+    }
+    if ($key ne "") {
+        $g_constant_idx{$key} = scalar(@g_constants);
+    }
+    push(@g_constants, $entry);
+}
+
 func eval(str $code) scalar {
     if ($g_initialized == 0) {
         throw "Strada::JIT::eval: Not initialized. Call Strada::JIT::init() first.";
@@ -1705,7 +1862,13 @@ func eval(str $code) scalar {
                 $const_line = $const_line . ";";
             }
         }
-        push(@g_constants, "package " . get_target_package() . ";\n" . $const_line);
+        my str $tpkg = get_target_package();
+        my str $entry = "package " . $tpkg . ";\n" . $const_line;
+        my str $ckey = "";
+        if ($const_line =~ /^\s*const\s+(?:(?:int|num|str|scalar|array|hash)\s+)?([A-Za-z_][A-Za-z0-9_]*)/) {
+            $ckey = $tpkg . "::const::" . $1;
+        }
+        upsert_constant($ckey, $entry);
         if ($rem ne "") {
             return eval($rem);
         }
@@ -1722,7 +1885,13 @@ func eval(str $code) scalar {
                 $enum_line = $enum_line . ";";
             }
         }
-        push(@g_constants, "package " . get_target_package() . ";\n" . $enum_line);
+        my str $tpkg = get_target_package();
+        my str $entry = "package " . $tpkg . ";\n" . $enum_line;
+        my str $ekey = "";
+        if ($enum_line =~ /^\s*enum\s+([A-Za-z_][A-Za-z0-9_:]*)/) {
+            $ekey = $tpkg . "::enum::" . $1;
+        }
+        upsert_constant($ekey, $entry);
         if ($eparts[1] ne "") {
             return eval($eparts[1]);
         }
@@ -1747,7 +1916,16 @@ func eval(str $code) scalar {
         }
         my str $tpkg = get_target_package();
         track_oop_package($tpkg);
-        push(@g_constants, "package " . $tpkg . ";\n" . $oop_stmt);
+        my str $entry = "package " . $tpkg . ";\n" . $oop_stmt;
+        my str $okey = "";
+        if ($oop_stmt =~ /^\s*has\s+.*?[\$@%]([A-Za-z_][A-Za-z0-9_]*)/) {
+            $okey = $tpkg . "::has::" . $1;
+        } elsif ($oop_stmt =~ /^\s*extends\s+/) {
+            $okey = $tpkg . "::extends";
+        } elsif ($oop_stmt =~ /^\s*use\s+overload\b/) {
+            $okey = $tpkg . "::overload";
+        }
+        upsert_constant($okey, $entry);
         if ($rem ne "") {
             return eval($rem);
         }
@@ -1792,7 +1970,7 @@ func eval(str $code) scalar {
 #
 # Reuses the `strada` driver script for the compile (so it benefits from
 # PCRE2 / runtime path / optimization handling without duplicating logic).
-func run_file(str $filename) int {
+func run_file_argv(str $filename, scalar $script_args) int {
     if ($g_initialized == 0) {
         throw "Strada::JIT::run_file: Not initialized. Call init() first.";
     }
@@ -1817,7 +1995,11 @@ func run_file(str $filename) int {
     my str $exe_file = $g_tmpdir . "/strada_script_" . $pid;
 
     # Compile via the driver — quote paths defensively in case they contain spaces.
-    my str $compile_cmd = shell_quote($strada_bin) . " -o " . shell_quote($exe_file) . " " . shell_quote($filename);
+    my str $lib_flags = "";
+    foreach my str $lp (@g_lib_paths) {
+        $lib_flags = $lib_flags . " -L " . shell_quote($lp);
+    }
+    my str $compile_cmd = shell_quote($strada_bin) . $lib_flags . " -o " . shell_quote($exe_file) . " " . shell_quote($filename);
     my int $rc = core::system($compile_cmd);
     if ($rc != 0 || core::is_file($exe_file) == 0) {
         if ($rc == 0) { $rc = 1; }
@@ -1825,9 +2007,20 @@ func run_file(str $filename) int {
     }
 
     # Exec and propagate the script's exit code.
-    $rc = core::system(shell_quote($exe_file));
+    my str $run_cmd = shell_quote($exe_file);
+    if (defined($script_args) && ref($script_args) eq "ARRAY") {
+        foreach my str $sa (@$script_args) {
+            $run_cmd = $run_cmd . " " . shell_quote($sa);
+        }
+    }
+    $rc = core::system($run_cmd);
     core::unlink($exe_file);
     return $rc;
+}
+
+func run_file(str $filename) int {
+    my array @empty = ();
+    return run_file_argv($filename, \@empty);
 }
 
 # Get a variable value from the persistent state (global registry)
@@ -1871,6 +2064,7 @@ func reset() void {
     # Clear state hashes/arrays first (before any loops)
     %g_var_types = ();
     %g_oop_packages = ();
+    %g_constant_idx = ();
     @g_functions = ();
     @g_constants = ();
     @g_imports = ();
@@ -2003,38 +2197,15 @@ func check_package_decl(str $input) int {
 
 # Check if braces/parens/brackets are balanced
 func is_balanced(str $input) int {
+    my str $cleaned = strip_strings_and_comments($input);
     my int $braces = 0;
     my int $parens = 0;
     my int $brackets = 0;
-    my int $in_str = 0;
-    my int $in_cmt = 0;
 
-    my int $len = length($input);
+    my int $len = length($cleaned);
     my int $i = 0;
     while ($i < $len) {
-        my str $c = substr($input, $i, 1);
-
-        if ($in_cmt == 1) {
-            if ($c eq "\n") { $in_cmt = 0; }
-            $i = $i + 1;
-            next;
-        }
-        if ($in_str == 1) {
-            if ($c eq "\\" && $i + 1 < $len) { $i = $i + 2; next; }
-            if ($c eq "\"") { $in_str = 0; }
-            $i = $i + 1;
-            next;
-        }
-        if ($in_str == 2) {
-            if ($c eq "\\" && $i + 1 < $len) { $i = $i + 2; next; }
-            if ($c eq "'") { $in_str = 0; }
-            $i = $i + 1;
-            next;
-        }
-
-        if ($c eq "\"") { $in_str = 1; $i = $i + 1; next; }
-        if ($c eq "'") { $in_str = 2; $i = $i + 1; next; }
-        if ($c eq "#") { $in_cmt = 1; $i = $i + 1; next; }
+        my str $c = substr($cleaned, $i, 1);
 
         if ($c eq "{") { $braces = $braces + 1; }
         if ($c eq "}") { $braces = $braces - 1; }

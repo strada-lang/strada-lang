@@ -63,7 +63,12 @@ func recv(scalar $sock, int $max, int $timeout_ms = 0) str {
         my int $left = remaining($deadline);
         if ($left < 0) { return undef; }
         if (park($sock, "r", $left) == 0) {
-            return core::socket_recv($sock, $max);   # not in a task: block
+            if ($deadline > 0) {
+                my array @ready = core::socket_select([$sock], $left);
+                if (scalar(@ready) == 0) { return undef; }
+            } else {
+                return core::socket_recv($sock, $max);   # not in a task: block
+            }
         }
     }
 }

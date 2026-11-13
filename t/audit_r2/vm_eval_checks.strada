@@ -1,0 +1,79 @@
+#!/usr/bin/env strada
+# Cycle 2 Audit regression tests: Eval::eval_string_vm (compiled with -DHAVE_VM)
+
+use lib "lib";
+use Eval;
+
+func main() int {
+    my int $fail = 0;
+
+    Strada::Interpreter::init();
+    Strada::Interpreter::eval_string_vm('
+        package R2VmPkg;
+        our int $v = 100;
+        func inc_v(int $d) int {
+            $v = $v + $d;
+            return $v;
+        }
+    ');
+    my scalar $r1 = Strada::Interpreter::eval_string_vm('inc_v(25)');
+    my scalar $r2 = Strada::Interpreter::eval_string_vm('inc_v(5)');
+    if (($r1 + 0) != 125 || ($r2 + 0) != 130) {
+        say("FAIL: eval_string_vm persistent pkg/our got r1=" . $r1 . " r2=" . $r2);
+        $fail++;
+    }
+
+    # Test VM features inside eval_string_vm: do {}, local %h{k}, tr///, chomp, die(0)/die(obj), closure ++/s///e, loop reset, switch
+    Strada::Interpreter::eval_string_vm('package main; our hash %vmh = ("a" => "orig");');
+    my scalar $r3 = Strada::Interpreter::eval_string_vm('
+        my int $do_r = do { my int $q = 4; $q * 3; };
+        {
+            local $vmh{"a"} = "tmp";
+            if ($vmh{"a"} ne "tmp") { return "bad_loc"; }
+        }
+        my int $loc_ok = ($vmh{"a"} eq "orig") ? 1 : 0;
+
+        my str $ts = "hello";
+        my int $tc = ($ts =~ tr/el/31/);
+
+        my int $c = 0;
+        my scalar $fn = func () int {
+            $c++;
+            return $c;
+        };
+        my int $f1 = $fn->();
+        my int $f2 = $fn->();
+
+        my array @sw = ();
+        my str $z = "00";
+        my str $swres = "";
+        switch ($z) {
+            case "0" { $swres = "zero"; }
+            case "00" { $swres = "two_zeros"; }
+            default { $swres = "def"; }
+        }
+
+        return $do_r . ":" . $loc_ok . ":" . $ts . ":" . $tc . ":" . $f1 . "," . $f2 . ":" . $swres;
+    ');
+    if ($r3 ne "12:1:h311o:3:1,2:two_zeros") {
+        say("FAIL: eval_string_vm features got '" . $r3 . "'");
+        $fail++;
+    }
+
+    Strada::Interpreter::reset();
+    Strada::Interpreter::eval_string_vm('
+        package R2VmPkg;
+        our int $v = 7;
+    ');
+    my scalar $r_rst = Strada::Interpreter::eval_string_vm('$v');
+    if (($r_rst + 0) != 7) {
+        say("FAIL: eval_string_vm after reset got '" . $r_rst . "'");
+        $fail++;
+    }
+
+    if ($fail == 0) {
+        say("ALL_R2_VM_EVAL_OK");
+        return 0;
+    }
+    return 1;
+}

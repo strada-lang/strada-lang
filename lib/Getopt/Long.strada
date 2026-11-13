@@ -182,7 +182,9 @@ func GetOptions(array @specs, hash %opts) int {
             my int $negatable = $parsed_neg[$j] + 0;
 
             # Check negation
-            if ($is_negation == 1 && $negatable == 1 && $neg_name eq $name) {
+            if ($is_negation == 1 && $negatable == 1 &&
+                ($neg_name eq $name ||
+                 Getopt::Long::matches_spec((length($neg_name) == 1 ? "-" . $neg_name : "--" . $neg_name), $name, $aliases) == 1)) {
                 $opts{$name} = "0";
                 $matched = 1;
                 last;
@@ -209,7 +211,25 @@ func GetOptions(array @specs, hash %opts) int {
                         $val = $arg_value;
                     } elsif ($i + 1 < $argc) {
                         my str $next_arg = $args[$i + 1];
-                        if ($next_arg eq "--" || $next_arg =~ /^-[A-Za-z-]/) {
+                        my int $looks_like_opt = 0;
+                        if ($next_arg eq "--" || (length($next_arg) >= 2 && substr($next_arg, 0, 2) eq "--")) {
+                            $looks_like_opt = 1;
+                        } elsif (length($next_arg) >= 2 && substr($next_arg, 0, 1) eq "-") {
+                            my str $next_base = $next_arg;
+                            my int $neq = index($next_arg, "=");
+                            if ($neq >= 0) {
+                                $next_base = substr($next_arg, 0, $neq);
+                            }
+                            my int $mj = 0;
+                            while ($mj < $num_specs) {
+                                if (Getopt::Long::matches_spec($next_base, $parsed_names[$mj], $parsed_aliases[$mj]) == 1) {
+                                    $looks_like_opt = 1;
+                                    last;
+                                }
+                                $mj++;
+                            }
+                        }
+                        if ($looks_like_opt == 1) {
                             warn("Option --" . $name . " requires an argument");
                             return 0;
                         }

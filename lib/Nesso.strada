@@ -633,6 +633,7 @@ func save(scalar $self, scalar $record) scalar {
             return $pk_val;
         }
         my int $id = DBI::insert_get_id($db, $sql, \@params);
+        if ($id < 0) { return -1; }
         $record->{$pk} = $id;
         $record->{"_is_new"} = 0;
         $self->snapshot_clean($record);   # now clean for future dirty tracking

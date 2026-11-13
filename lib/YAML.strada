@@ -651,10 +651,10 @@ func parse_inline_hash(str $s) scalar {
     while ($i < $count) {
         my str $part = YAML::trim($parts[$i]);
 
-        # Find the colon
-        my int $colon_pos = index($part, ":");
+        # Find the colon outside quotes
+        my int $colon_pos = YAML::find_mapping_colon($part);
         if ($colon_pos > 0) {
-            my str $key = YAML::trim(substr($part, 0, $colon_pos));
+            my str $key = YAML::unquote_key(substr($part, 0, $colon_pos));
             my str $val_str = "";
             if ($colon_pos + 1 < length($part)) {
                 $val_str = substr($part, $colon_pos + 1, length($part) - $colon_pos - 1);
@@ -808,9 +808,8 @@ func parse_hash(scalar $state, int $base_indent) scalar {
 
         if (length($after_colon) > 0) {
             # Value on same line
-            if ($after_colon eq "|") {
-                # Multi-line literal block
-                $result->{$key} = YAML::parse_literal_block($state, $indent);
+            if (YAML::is_block_scalar_spec($after_colon) == 1) {
+                $result->{$key} = YAML::parse_block_scalar($state, $indent, $after_colon);
             } else {
                 $result->{$key} = YAML::parse_value($after_colon);
             }
@@ -899,7 +898,11 @@ func parse_array(scalar $state, int $base_indent) scalar {
                 }
 
                 if (length($val_str) > 0) {
-                    $item->{$key} = YAML::parse_value($val_str);
+                    if (YAML::is_block_scalar_spec($val_str) == 1) {
+                        $item->{$key} = YAML::parse_block_scalar($state, $indent + 2, $val_str);
+                    } else {
+                        $item->{$key} = YAML::parse_value($val_str);
+                    }
                 } else {
                     my int $look = $state->{"pos"};
                     while ($look < $count && YAML::is_empty_or_comment($lines->[$look]) == 1) {
@@ -943,7 +946,11 @@ func parse_array(scalar $state, int $base_indent) scalar {
                                 $state->{"pos"} = $state->{"pos"} + 1;
 
                                 if (length($next_val_str) > 0) {
-                                    $item->{$next_key} = YAML::parse_value($next_val_str);
+                                    if (YAML::is_block_scalar_spec($next_val_str) == 1) {
+                                        $item->{$next_key} = YAML::parse_block_scalar($state, $next_indent, $next_val_str);
+                                    } else {
+                                        $item->{$next_key} = YAML::parse_value($next_val_str);
+                                    }
                                 } else {
                                     # Check for nested structure
                                     while ($state->{"pos"} < $count && YAML::is_empty_or_comment($lines->[$state->{"pos"}])) {
@@ -1045,6 +1052,46 @@ func parse_literal_block(scalar $state, int $base_indent) str {
     }
 
     return $result;
+}
+
+func is_block_scalar_spec(str $s) int {
+    if ($s eq "|" || $s eq "|-" || $s eq "|+" || $s eq ">" || $s eq ">-" || $s eq ">+") {
+        return 1;
+    }
+    return 0;
+}
+
+func parse_block_scalar(scalar $state, int $base_indent, str $spec) str {
+    my int $is_folded = (substr($spec, 0, 1) eq ">") ? 1 : 0;
+    my str $raw = YAML::parse_literal_block($state, $base_indent);
+    if ($spec eq "|-" || $spec eq ">-") {
+        while (length($raw) > 0 && substr($raw, length($raw) - 1, 1) eq "\n") {
+            $raw = substr($raw, 0, length($raw) - 1);
+        }
+    }
+    if ($is_folded == 1 && length($raw) > 0) {
+        my array @lines = split("\n", $raw);
+        my str $folded = "";
+        my int $n = size(@lines);
+        my int $li = 0;
+        my int $prev_blank = 1;
+        while ($li < $n) {
+            my str $ln = $lines[$li];
+            if (length($ln) == 0) {
+                $folded = $folded . "\n";
+                $prev_blank = 1;
+            } else {
+                if ($li > 0 && $prev_blank == 0) {
+                    $folded = $folded . " ";
+                }
+                $folded = $folded . $ln;
+                $prev_blank = 0;
+            }
+            $li = $li + 1;
+        }
+        return $folded;
+    }
+    return $raw;
 }
 
 # ============================================================
@@ -1216,9 +1263,21 @@ func dump_hash(scalar $hval, int $indent) str {
         my str $rtype = ref($val);
 
         my str $qkey = YAML::format_key($key);
-        if ($rtype eq "HASH" || $rtype eq "ARRAY") {
-            $result = $result . $pad . $qkey . ":\n";
-            $result = $result . YAML::dump_value($val, $indent + 2);
+        if ($rtype eq "HASH") {
+            my array @hk = keys($val);
+            if (size(@hk) == 0) {
+                $result = $result . $pad . $qkey . ": {}\n";
+            } else {
+                $result = $result . $pad . $qkey . ":\n";
+                $result = $result . YAML::dump_value($val, $indent + 2);
+            }
+        } elsif ($rtype eq "ARRAY") {
+            if (size($val) == 0) {
+                $result = $result . $pad . $qkey . ": []\n";
+            } else {
+                $result = $result . $pad . $qkey . ":\n";
+                $result = $result . YAML::dump_value($val, $indent + 2);
+            }
         } else {
             $result = $result . $pad . $qkey . ": " . YAML::dump_value($val, 0) . "\n";
         }
@@ -1249,9 +1308,21 @@ func dump_array(scalar $arr, int $indent) str {
                 my str $first_rtype = ref($first_val);
 
                 my str $qfirst_key = YAML::format_key($first_key);
-                if ($first_rtype eq "HASH" || $first_rtype eq "ARRAY") {
-                    $result = $result . $pad . "- " . $qfirst_key . ":\n";
-                    $result = $result . YAML::dump_value($first_val, $indent + 4);
+                if ($first_rtype eq "HASH") {
+                    my array @fk = keys($first_val);
+                    if (size(@fk) == 0) {
+                        $result = $result . $pad . "- " . $qfirst_key . ": {}\n";
+                    } else {
+                        $result = $result . $pad . "- " . $qfirst_key . ":\n";
+                        $result = $result . YAML::dump_value($first_val, $indent + 4);
+                    }
+                } elsif ($first_rtype eq "ARRAY") {
+                    if (size($first_val) == 0) {
+                        $result = $result . $pad . "- " . $qfirst_key . ": []\n";
+                    } else {
+                        $result = $result . $pad . "- " . $qfirst_key . ":\n";
+                        $result = $result . YAML::dump_value($first_val, $indent + 4);
+                    }
                 } else {
                     $result = $result . $pad . "- " . $qfirst_key . ": " . YAML::dump_value($first_val, 0) . "\n";
                 }
@@ -1264,9 +1335,21 @@ func dump_array(scalar $arr, int $indent) str {
                     my str $krtype = ref($kval);
 
                     my str $qkey = YAML::format_key($key);
-                    if ($krtype eq "HASH" || $krtype eq "ARRAY") {
-                        $result = $result . $pad . "  " . $qkey . ":\n";
-                        $result = $result . YAML::dump_value($kval, $indent + 4);
+                    if ($krtype eq "HASH") {
+                        my array @kk = keys($kval);
+                        if (size(@kk) == 0) {
+                            $result = $result . $pad . "  " . $qkey . ": {}\n";
+                        } else {
+                            $result = $result . $pad . "  " . $qkey . ":\n";
+                            $result = $result . YAML::dump_value($kval, $indent + 4);
+                        }
+                    } elsif ($krtype eq "ARRAY") {
+                        if (size($kval) == 0) {
+                            $result = $result . $pad . "  " . $qkey . ": []\n";
+                        } else {
+                            $result = $result . $pad . "  " . $qkey . ":\n";
+                            $result = $result . YAML::dump_value($kval, $indent + 4);
+                        }
                     } else {
                         $result = $result . $pad . "  " . $qkey . ": " . YAML::dump_value($kval, 0) . "\n";
                     }
@@ -1277,8 +1360,12 @@ func dump_array(scalar $arr, int $indent) str {
                 $result = $result . $pad . "- {}\n";
             }
         } elsif ($rtype eq "ARRAY") {
-            $result = $result . $pad . "-\n";
-            $result = $result . YAML::dump_array($val, $indent + 2);
+            if (size($val) == 0) {
+                $result = $result . $pad . "- []\n";
+            } else {
+                $result = $result . $pad . "-\n";
+                $result = $result . YAML::dump_array($val, $indent + 2);
+            }
         } else {
             $result = $result . $pad . "- " . YAML::dump_value($val, 0) . "\n";
         }
