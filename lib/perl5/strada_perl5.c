@@ -177,7 +177,9 @@ char* strada_perl5_call(StradaValue *sub_sv, StradaValue *args_sv) {
                 StradaValue *arg = strada_array_get(arr, i);
                 /* arg may be a tagged-int odd pointer — guard before any
                  * arg->type / arg->value access (else wild read / crash). */
-                if (STRADA_IS_TAGGED_INT(arg)) {
+                if (!arg || (!STRADA_IS_TAGGED_INT(arg) && arg->type == STRADA_UNDEF)) {
+                    XPUSHs(&PL_sv_undef);
+                } else if (STRADA_IS_TAGGED_INT(arg)) {
                     XPUSHs(sv_2mortal(newSViv(STRADA_TAGGED_INT_VAL(arg))));
                 } else if (arg->type == STRADA_INT) {
                     XPUSHs(sv_2mortal(newSViv(arg->value.iv)));
@@ -185,12 +187,13 @@ char* strada_perl5_call(StradaValue *sub_sv, StradaValue *args_sv) {
                     XPUSHs(sv_2mortal(newSVnv(arg->value.nv)));
                 } else {
                     char *str = strada_to_str(arg);     /* malloc'd — must free */
-                    XPUSHs(sv_2mortal(newSVpv(str, 0)));
+                    size_t slen = (arg->type == STRADA_STR) ? (size_t)strada_str_len(arg) : (str ? strlen(str) : 0);
+                    XPUSHs(sv_2mortal(newSVpvn(str ? str : "", slen)));
                     free(str);
                 }
                 pushed++;
             }
-        } else if (args_sv->type == STRADA_STR || args_sv->type == STRADA_INT || args_sv->type == STRADA_NUM) {
+        } else if (args_sv->type != STRADA_UNDEF) {
             /* Single scalar argument */
             if (args_sv->type == STRADA_INT) {
                 XPUSHs(sv_2mortal(newSViv(args_sv->value.iv)));
@@ -198,7 +201,8 @@ char* strada_perl5_call(StradaValue *sub_sv, StradaValue *args_sv) {
                 XPUSHs(sv_2mortal(newSVnv(args_sv->value.nv)));
             } else {
                 char *str = strada_to_str(args_sv);   /* malloc'd — must free */
-                XPUSHs(sv_2mortal(newSVpv(str, 0)));
+                size_t slen = (args_sv->type == STRADA_STR) ? (size_t)strada_str_len(args_sv) : (str ? strlen(str) : 0);
+                XPUSHs(sv_2mortal(newSVpvn(str ? str : "", slen)));
                 free(str);
             }
             pushed++;
@@ -212,6 +216,9 @@ char* strada_perl5_call(StradaValue *sub_sv, StradaValue *args_sv) {
 
     char *result = NULL;
     if (SvTRUE(ERRSV)) {
+        if (count > 0) {
+            (void)POPs;
+        }
         STRLEN len;
         const char *err = SvPV(ERRSV, len);
         result = strdup(err);
@@ -256,7 +263,9 @@ StradaValue* strada_perl5_call_array(StradaValue *sub_sv, StradaValue *args_sv) 
         for (size_t i = 0; i < len; i++) {
             StradaValue *arg = strada_array_get(arr, i);
             /* arg may be a tagged-int odd pointer — guard before arg->type. */
-            if (STRADA_IS_TAGGED_INT(arg)) {
+            if (!arg || (!STRADA_IS_TAGGED_INT(arg) && arg->type == STRADA_UNDEF)) {
+                XPUSHs(&PL_sv_undef);
+            } else if (STRADA_IS_TAGGED_INT(arg)) {
                 XPUSHs(sv_2mortal(newSViv(STRADA_TAGGED_INT_VAL(arg))));
             } else if (arg->type == STRADA_INT) {
                 XPUSHs(sv_2mortal(newSViv(arg->value.iv)));
@@ -264,7 +273,8 @@ StradaValue* strada_perl5_call_array(StradaValue *sub_sv, StradaValue *args_sv) 
                 XPUSHs(sv_2mortal(newSVnv(arg->value.nv)));
             } else {
                 char *str = strada_to_str(arg);     /* malloc'd — must free */
-                XPUSHs(sv_2mortal(newSVpv(str, 0)));
+                size_t slen = (arg->type == STRADA_STR) ? (size_t)strada_str_len(arg) : (str ? strlen(str) : 0);
+                XPUSHs(sv_2mortal(newSVpvn(str ? str : "", slen)));
                 free(str);
             }
         }
@@ -277,25 +287,34 @@ StradaValue* strada_perl5_call_array(StradaValue *sub_sv, StradaValue *args_sv) 
 
     StradaValue *result = strada_new_array();
 
-    if (!SvTRUE(ERRSV) && count > 0) {
-        /* Pop results in reverse order, store in temp array */
-        char **temp = malloc((size_t)count * sizeof(char*));
+    if (SvTRUE(ERRSV)) {
         for (int i = 0; i < count; i++) {
-            SV *sv = POPs;
-            if (SvOK(sv)) {
-                STRLEN len;
-                const char *str = SvPV(sv, len);
-                temp[i] = strdup(str);
-            } else {
-                temp[i] = strdup("");
+            (void)POPs;
+        }
+    } else if (count > 0) {
+        /* Pop results in reverse order, store in temp array */
+        StradaValue **temp = malloc((size_t)count * sizeof(StradaValue*));
+        if (temp) {
+            for (int i = 0; i < count; i++) {
+                SV *sv = POPs;
+                if (SvOK(sv)) {
+                    STRLEN len;
+                    const char *str = SvPV(sv, len);
+                    temp[i] = strada_new_str_len(str, (size_t)len);
+                } else {
+                    temp[i] = strada_new_undef();
+                }
+            }
+            /* Add in correct order (reverse of pop order) */
+            for (int i = count - 1; i >= 0; i--) {
+                strada_array_push_take(result->value.av, temp[i]);
+            }
+            free(temp);
+        } else {
+            for (int i = 0; i < count; i++) {
+                (void)POPs;
             }
         }
-        /* Add in correct order (reverse of pop order) */
-        for (int i = count - 1; i >= 0; i--) {
-            strada_array_push_take(result->value.av, strada_new_str(temp[i]));
-            free(temp[i]);
-        }
-        free(temp);
     }
 
     PUTBACK;
@@ -561,6 +580,9 @@ char* strada_perl5_call_str_raw(const char *sub_name, const char *arg) {
 
     char *result = NULL;
     if (SvTRUE(ERRSV)) {
+        if (count > 0) {
+            (void)POPs;
+        }
         STRLEN len;
         const char *err = SvPV(ERRSV, len);
         result = strdup(err);

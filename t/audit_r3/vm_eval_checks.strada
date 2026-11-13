@@ -1,0 +1,75 @@
+use lib "lib";
+use Eval;
+
+our int $g_fail = 0;
+
+func ok(int $cond, str $msg) void {
+    if ($cond == 0) {
+        say("FAIL: " . $msg);
+        $g_fail = $g_fail + 1;
+    }
+}
+
+func main() int {
+    # VM-16: Mixed top-level decl + body statements in eval_string_vm
+    my scalar $r1 = Strada::Interpreter::eval_string_vm('
+        func vm_sq(int $n) int { return $n * $n; }
+        vm_sq(7);
+    ');
+    ok(($r1 + 0) == 49, "eval_string_vm mixed func + expr");
+
+    my scalar $r2 = Strada::Interpreter::eval_string_vm('
+        package VMCnt;
+        our int $n = 0;
+        func inc() int { $n = $n + 1; return $n; }
+        package main;
+        VMCnt::inc();
+    ');
+    my scalar $r2b = Strada::Interpreter::eval_string_vm('VMCnt::inc();');
+    ok(($r2 + 0) == 1 && ($r2b + 0) == 2, "eval_string_vm mixed package + our + func + switch back");
+
+    # VM-15: Top-level my persistence across eval_string_vm calls (scalar, array, hash, redecl)
+    Strada::Interpreter::eval_string_vm('my int $vx = 10;');
+    my scalar $vx1 = Strada::Interpreter::eval_string_vm('$vx + 5');
+    ok(($vx1 + 0) == 15, "eval_string_vm my int persistence");
+
+    Strada::Interpreter::eval_string_vm('my array @va = (1, 2);');
+    my scalar $va1 = Strada::Interpreter::eval_string_vm('push(@va, 3); size(@va)');
+    ok(($va1 + 0) == 3, "eval_string_vm my array persistence");
+
+    Strada::Interpreter::eval_string_vm('my hash %vh = ("k" => "one");');
+    my scalar $vh1 = Strada::Interpreter::eval_string_vm('$vh{"m"} = "two"; $vh{"k"} . ":" . $vh{"m"}');
+    ok($vh1 eq "one:two", "eval_string_vm my hash persistence");
+
+    Strada::Interpreter::eval_string_vm('my int $vx = 99;');
+    my scalar $vx2 = Strada::Interpreter::eval_string_vm('$vx');
+    ok(($vx2 + 0) == 99, "eval_string_vm my int redeclaration updates value");
+
+    # VM-14: Runtime die()/throw inside eval_string_vm propagates out cleanly + compile error throws
+    my str $vm_exc = "";
+    try {
+        Strada::Interpreter::eval_string_vm('die("vm_boom");');
+    } catch ($e) {
+        $vm_exc = "" . $e;
+    }
+    ok($vm_exc eq "vm_boom", "eval_string_vm propagates uncaught VM exception");
+
+    my int $syn_caught = 0;
+    try {
+        Strada::Interpreter::eval_string_vm('my int $bad = ;');
+    } catch ($se) {
+        $syn_caught = 1;
+    }
+    ok($syn_caught == 1, "eval_string_vm propagates syntax error");
+
+    # Verify reset() clears my names too
+    Strada::Interpreter::reset();
+    my scalar $after_reset = Strada::Interpreter::eval_string_vm('my int $vx = 3; $vx + 1');
+    ok(($after_reset + 0) == 4, "eval_string_vm works cleanly after reset()");
+
+    if ($g_fail == 0) {
+        say("R3_VM_EVAL_OK");
+        return 0;
+    }
+    return 1;
+}

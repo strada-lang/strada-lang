@@ -78,6 +78,10 @@ func handshake(int $conn, int $fd, int $ms) int {
     return 0;
 }
 
+func _timeout_ms(int $sec) int {
+    return ($sec > 0) ? ($sec * 1000) : -1;
+}
+
 # Encrypt an SMTP client's connection (after STARTTLS, or straight away
 # for implicit TLS). Returns 1 on success.
 func attach(scalar $smtp, str $host, int $verify) int {
@@ -86,7 +90,7 @@ func attach(scalar $smtp, str $host, int $verify) int {
     my int $fd = core::socket_fd($sock);
     my int $conn = ssl::attach_fd($fd, $verify, $host);
     if ($conn == 0) { return 0; }
-    my int $ms = $smtp->{"timeout"} * 1000;
+    my int $ms = ::_timeout_ms($smtp->{"timeout"} + 0);
     if (::handshake($conn, $fd, $ms) == 0) { ssl::close($conn); return 0; }
     if ($verify == 1 && ssl::verify($conn) != 0) { ssl::close($conn); return 0; }
     my scalar $smtp_weak = $smtp;
@@ -100,7 +104,7 @@ func attach(scalar $smtp, str $host, int $verify) int {
             my int $n = ssl::try_write($conn, $slice);
             if ($n < 0) { return 0; }
             if ($n == 0) {
-                my int $cur_ms = defined($smtp_weak) ? (($smtp_weak->{"timeout"} + 0) * 1000) : $ms;
+                my int $cur_ms = defined($smtp_weak) ? ::_timeout_ms($smtp_weak->{"timeout"} + 0) : $ms;
                 if (::wait_fd($fd, ssl::want($conn), $cur_ms) == 0) { return 0; }
                 next;
             }
@@ -112,7 +116,7 @@ func attach(scalar $smtp, str $host, int $verify) int {
         while (1) {
             my scalar $chunk = ssl::try_read($conn, $max);
             if (defined($chunk)) { return $chunk; }
-            my int $cur_ms = defined($smtp_weak) ? (($smtp_weak->{"timeout"} + 0) * 1000) : $ms;
+            my int $cur_ms = defined($smtp_weak) ? ::_timeout_ms($smtp_weak->{"timeout"} + 0) : $ms;
             if (::wait_fd($fd, ssl::want($conn), $cur_ms) == 0) { return ""; }
         }
         return "";

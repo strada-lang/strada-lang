@@ -1,0 +1,111 @@
+#!/usr/bin/env strada
+# Valgrind leak regression suite for Cycle 3 VM & Tree-Walk interpreter fixes
+
+package LeakR3TieH;
+func TIEHASH(str $cls) scalar {
+    my hash %self = ("store" => {});
+    return bless(\%self, $cls);
+}
+func FETCH(scalar $self, str $k) scalar { return $self->{"store"}->{$k}; }
+func STORE(scalar $self, str $k, scalar $v) void { $self->{"store"}->{$k} = $v; }
+func EXISTS(scalar $self, str $k) int { return exists($self->{"store"}, $k) ? 1 : 0; }
+func DELETE(scalar $self, str $k) scalar {
+    my scalar $v = $self->{"store"}->{$k};
+    delete($self->{"store"}->{$k});
+    return $v;
+}
+
+package LeakR3OvBase;
+func new(int $v) scalar {
+    my hash %self = ("v" => $v);
+    return bless(\%self, "LeakR3OvBase");
+}
+func add(scalar $self, scalar $other, int $rev) scalar {
+    my int $ov = isa($other, "LeakR3OvBase") ? $other->{"v"} : ($other + 0);
+    return LeakR3OvBase::new($self->{"v"} + $ov);
+}
+func to_str(scalar $self, scalar $other, int $rev) str {
+    return "B_" . $self->{"v"};
+}
+use overload "+" => "add", '""' => "to_str";
+
+package LeakR3OvChild;
+extends LeakR3OvBase;
+func new(int $v) scalar {
+    my hash %self = ("v" => $v);
+    return bless(\%self, "LeakR3OvChild");
+}
+func to_str(scalar $self, scalar $other, int $rev) str {
+    return "C_" . $self->{"v"};
+}
+
+package main;
+
+our str $g_l3_v = "init";
+
+func make_long_key(int $i) str {
+    my str $s = "K" . $i . "_";
+    my int $j = 0;
+    while ($j < 200) {
+        $s = $s . "y";
+        $j = $j + 1;
+    }
+    return $s;
+}
+
+func main() int {
+    my int $i = 0;
+    while ($i < 25) {
+        # Inherited overload
+        my scalar $c1 = LeakR3OvChild::new($i);
+        my scalar $c2 = LeakR3OvChild::new(5);
+        my scalar $c3 = $c1 + $c2;
+        if (length("" . $c3) == 0) { return 1; }
+
+        # >128B concat hash keys & tied hash DELETE
+        my hash %h = ();
+        my str $lk = make_long_key($i);
+        $h{"pre_" . $lk} = "v_" . $i;
+        my scalar $d = delete($h{"pre_" . $lk});
+        if (defined($d) || exists($h{"pre_" . $lk})) { return 2; }
+
+        my hash %th = ();
+        tie(%th, "LeakR3TieH");
+        $th{"dk_" . $i} = "tv_" . $i;
+        my scalar $td = delete($th{"dk_" . $i});
+        if (defined($td) || exists($th{"dk_" . $i})) { return 3; }
+        untie(%th);
+
+        # >16 builtin args (push + sprintf)
+        my array @big = ();
+        push(@big, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, $i);
+        my str $sp = sprintf("%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d",
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, $i);
+        if (size(@big) != 19 || length($sp) < 20) { return 4; }
+
+        # s///ge with captures & binary NUL string ops
+        my str $txt = "foo_" . $i . "_bar";
+        $txt =~ s/([a-z]+)/$1 . ":" . length($1)/ge;
+        my str $bin = "A" . chr(0) . "B" . chr(0) . "C";
+        my str $bs = core::byte_substr($bin, -3, 2);
+        if (core::byte_length($bs) != 2 || length($txt) < 5) { return 5; }
+
+        # local + try/catch/finally unwind
+        try {
+            try {
+                local $g_l3_v = "try_" . $i;
+                throw "ex_" . $i;
+            } catch ($e) {
+                local $g_l3_v = "catch_" . $i;
+                throw "re_" . $e;
+            } finally {
+                if ($g_l3_v ne "init") { return 6; }
+            }
+        } catch ($outer_e) {
+            if ($g_l3_v ne "init") { return 7; }
+        }
+
+        $i = $i + 1;
+    }
+    return 0;
+}

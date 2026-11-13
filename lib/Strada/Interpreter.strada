@@ -598,6 +598,8 @@ __C__ {
 #include "vm_compiler.h"
 #endif
 
+extern void strada_set_captures_sv(StradaValue *match);
+
 /* ---- BigInt C helpers ---- */
 static int _bi_cmp(const char *a, const char *b) {
     size_t la = strlen(a), lb = strlen(b);
@@ -1517,11 +1519,14 @@ func interp_resolve_method(scalar $interp, str $pkg, str $method) scalar {
     }
 
     # Try pkg_method directly in functions hash (inline for speed)
+    my str $san_pkg = (index($pkg, "::") >= 0) ? sanitize_name($pkg) : $pkg;
     my str $func_key = $pkg . "_" . $method;
     my scalar $funcs = $interp->{"functions"};
     my scalar $fi = undef;
     if (exists($funcs, $func_key)) {
         $fi = $funcs->{$func_key};
+    } elsif ($san_pkg ne $pkg && exists($funcs, $san_pkg . "_" . $method)) {
+        $fi = $funcs->{$san_pkg . "_" . $method};
     }
     if (defined($fi)) {
         if (!exists($fi, "package") || length("" . $fi->{"package"}) == 0) {
@@ -1535,6 +1540,8 @@ func interp_resolve_method(scalar $interp, str $pkg, str $method) scalar {
     my scalar $mro = undef;
     if (exists($interp->{"mro"}, $pkg)) {
         $mro = $interp->{"mro"}->{$pkg};
+    } elsif ($san_pkg ne $pkg && exists($interp->{"mro"}, $san_pkg)) {
+        $mro = $interp->{"mro"}->{$san_pkg};
     }
     if (defined($mro)) {
         # Linear MRO walk (no recursion)
@@ -1542,9 +1549,17 @@ func interp_resolve_method(scalar $interp, str $pkg, str $method) scalar {
         my int $mlen = size($mro);
         while ($mi < $mlen) {
             my str $ancestor = $mro->[$mi];
+            my str $san_anc = (index($ancestor, "::") >= 0) ? sanitize_name($ancestor) : $ancestor;
             my str $anc_key = $ancestor . "_" . $method;
             if (exists($funcs, $anc_key)) {
                 my scalar $found = $funcs->{$anc_key};
+                if (!exists($found, "package") || length("" . $found->{"package"}) == 0) {
+                    $found->{"package"} = $ancestor;
+                }
+                $interp->{"method_cache"}->{$cache_key} = $found;
+                return $found;
+            } elsif ($san_anc ne $ancestor && exists($funcs, $san_anc . "_" . $method)) {
+                my scalar $found = $funcs->{$san_anc . "_" . $method};
                 if (!exists($found, "package") || length("" . $found->{"package"}) == 0) {
                     $found->{"package"} = $ancestor;
                 }
@@ -1567,6 +1582,45 @@ func interp_resolve_method(scalar $interp, str $pkg, str $method) scalar {
     }
     # Negative cache: store 0 sentinel to avoid re-searching
     $interp->{"method_cache"}->{$cache_key} = 0;
+    return undef;
+}
+
+# Find AUTOLOAD across a class and its inheritance chain / MRO
+func interp_find_autoload(scalar $interp, str $pkg) scalar {
+    if (length($pkg) == 0) { return undef; }
+    my str $san_pkg = (index($pkg, "::") >= 0) ? sanitize_name($pkg) : $pkg;
+    if (exists($interp->{"autoloads"}, $pkg)) {
+        return $interp->{"autoloads"}->{$pkg};
+    }
+    if ($san_pkg ne $pkg && exists($interp->{"autoloads"}, $san_pkg)) {
+        return $interp->{"autoloads"}->{$san_pkg};
+    }
+    if (exists($interp->{"mro"}, $pkg)) {
+        my scalar $mro = $interp->{"mro"}->{$pkg};
+        my int $mi = 0;
+        my int $mlen = size($mro);
+        while ($mi < $mlen) {
+            my str $anc = $mro->[$mi];
+            if (exists($interp->{"autoloads"}, $anc)) {
+                return $interp->{"autoloads"}->{$anc};
+            }
+            if (index($anc, "::") >= 0) {
+                my str $san_anc = sanitize_name($anc);
+                if (exists($interp->{"autoloads"}, $san_anc)) {
+                    return $interp->{"autoloads"}->{$san_anc};
+                }
+            }
+            $mi = $mi + 1;
+        }
+    } elsif (exists($interp->{"inherits"}, $pkg)) {
+        my scalar $parents = $interp->{"inherits"}->{$pkg};
+        my int $pi = 0;
+        while ($pi < size($parents)) {
+            my scalar $found = interp_find_autoload($interp, $parents->[$pi]);
+            if (defined($found)) { return $found; }
+            $pi = $pi + 1;
+        }
+    }
     return undef;
 }
 
@@ -1945,8 +1999,39 @@ func interp_run_main(scalar $interp, scalar $argv) int {
 }
 
 # ============================================================
-# Assignment Target
+# Assignment Target & Tied Hash Helpers
 # ============================================================
+
+func interp_hash_delete(scalar $interp, scalar $h, scalar $k) void {
+    my str $ks = defined($k) ? ("" . $k) : "";
+    if (ref($h) eq "HASH" && exists($h, "__tied__")) {
+        my scalar $tie_obj = $h->{"__tied__"};
+        my str $tie_pkg = get_obj_class($tie_obj);
+        if (length($tie_pkg) > 0) {
+            my scalar $del_fn = interp_resolve_method($interp, $tie_pkg, "DELETE");
+            if (defined($del_fn)) {
+                call_user_func($interp, $del_fn, [$tie_obj, $ks]);
+                return;
+            }
+        }
+    }
+    delete($h, $ks);
+}
+
+func interp_hash_exists(scalar $interp, scalar $h, scalar $k) int {
+    my str $ks = defined($k) ? ("" . $k) : "";
+    if (ref($h) eq "HASH" && exists($h, "__tied__")) {
+        my scalar $tie_obj = $h->{"__tied__"};
+        my str $tie_pkg = get_obj_class($tie_obj);
+        if (length($tie_pkg) > 0) {
+            my scalar $ex_fn = interp_resolve_method($interp, $tie_pkg, "EXISTS");
+            if (defined($ex_fn)) {
+                return call_user_func($interp, $ex_fn, [$tie_obj, $ks]) ? 1 : 0;
+            }
+        }
+    }
+    return exists($h, $ks) ? 1 : 0;
+}
 
 func assign_to(scalar $interp, scalar $target, scalar $value, scalar $env) void {
     my int $ttype = $target->{"type"};
@@ -1956,7 +2041,7 @@ func assign_to(scalar $interp, scalar $target, scalar $value, scalar $env) void 
         my str $sigil = $target->{"sigil"};
         my scalar $store_val = $value;
         if ($sigil eq "@") {
-            if (ref($store_val) eq "HASH" && size(keys($store_val)) == 0) {
+            if (!defined($store_val) || (ref($store_val) eq "HASH" && size(keys($store_val)) == 0)) {
                 my array @empty_arr = ();
                 $store_val = \@empty_arr;
             } elsif (ref($store_val) eq "ARRAY") {
@@ -1968,6 +2053,10 @@ func assign_to(scalar $interp, scalar $target, scalar $value, scalar $env) void 
                     $ci = $ci + 1;
                 }
                 $store_val = \@cp_arr;
+            } else {
+                my array @single_arr = ();
+                push(@single_arr, $store_val);
+                $store_val = \@single_arr;
             }
         } elsif ($sigil eq "%") {
             if (ref($store_val) eq "ARRAY") {
@@ -2069,6 +2158,46 @@ func assign_to(scalar $interp, scalar $target, scalar $value, scalar $env) void 
     die("Cannot assign to node type: " . ast_type_name($ttype));
 }
 
+func interp_regex_find_all(str $s, str $pat, str $flags, int $global) scalar {
+    my scalar $res = undef;
+    __C__ {
+        const char *src = (s && !STRADA_IS_TAGGED_INT(s) && s->type == STRADA_STR && s->value.pv) ? s->value.pv : "";
+        char *p = strada_to_str(pat);
+        char *f = strada_to_str(flags);
+        int g = (int)strada_to_int(global);
+        strada_regex_set_subject_for_sv(s);
+        StradaValue *m = strada_regex_find_all(src, p ? p : "", (f && f[0]) ? f : NULL, g);
+        strada_regex_clear_subject_len();
+        free(p);
+        free(f);
+        strada_decref(res);
+        res = m;
+    }
+    return $res;
+}
+
+func interp_set_captures(scalar $m) void {
+    __C__ {
+        StradaValue *mav = (m && !STRADA_IS_TAGGED_INT(m) && m->type == STRADA_REF) ? m->value.rv : m;
+        strada_set_captures_sv(mav);
+    }
+}
+
+func interp_regex_build_result(str $s, scalar $matches, scalar $repls) str {
+    my str $res = "";
+    __C__ {
+        const char *src = (s && !STRADA_IS_TAGGED_INT(s) && s->type == STRADA_STR && s->value.pv) ? s->value.pv : "";
+        StradaValue *mav = (matches && !STRADA_IS_TAGGED_INT(matches) && matches->type == STRADA_REF) ? matches->value.rv : matches;
+        StradaValue *rav = (repls && !STRADA_IS_TAGGED_INT(repls) && repls->type == STRADA_REF) ? repls->value.rv : repls;
+        strada_regex_set_subject_for_sv(s);
+        StradaValue *built = strada_regex_build_result(src, mav, rav);
+        strada_regex_clear_subject_len();
+        strada_decref(res);
+        res = built;
+    }
+    return $res;
+}
+
 func eval_lvalue_prepare(scalar $interp, scalar $target, scalar $env) scalar {
     my hash %prep = ();
     my int $ttype = $target->{"type"};
@@ -2106,8 +2235,10 @@ func eval_lvalue_prepare(scalar $interp, scalar $target, scalar $env) scalar {
         return \%prep;
     }
     if ($ttype == NI::DEREF_SCALAR) {
+        my scalar $rnode = $target->{"ref"};
+        if (!defined($rnode)) { $rnode = $target->{"target"}; }
         $prep{"kind"} = "scalar_ref";
-        $prep{"ref"} = eval_node($interp, $target->{"ref"}, $env);
+        $prep{"ref"} = eval_node($interp, $rnode, $env);
         $prep{"node"} = $target;
         return \%prep;
     }
@@ -2331,14 +2462,69 @@ func get_obj_class(scalar $obj) str {
     return "";
 }
 
+func check_overload_walk(scalar $interp, str $recv_pkg, str $cur_pkg, str $op, scalar $visited) scalar {
+    if (length($cur_pkg) == 0 || exists($visited, $cur_pkg)) { return undef; }
+    $visited->{$cur_pkg} = 1;
+    if (exists($interp->{"overloads"}, $cur_pkg)) {
+        my scalar $pkg_ovl = $interp->{"overloads"}->{$cur_pkg};
+        if (exists($pkg_ovl, $op)) {
+            my str $method_name = $pkg_ovl->{$op};
+            return interp_resolve_method($interp, $recv_pkg, $method_name);
+        }
+    }
+    if (exists($interp->{"inherits"}, $cur_pkg)) {
+        my scalar $parents = $interp->{"inherits"}->{$cur_pkg};
+        my int $pi = 0;
+        while ($pi < size($parents)) {
+            my scalar $found = check_overload_walk($interp, $recv_pkg, $parents->[$pi], $op, $visited);
+            if (defined($found)) { return $found; }
+            $pi = $pi + 1;
+        }
+    }
+    return undef;
+}
+
 func check_overload(scalar $interp, scalar $val, str $op) scalar {
     my str $pkg = get_obj_class($val);
     if (length($pkg) == 0) { return undef; }
-    if (!exists($interp->{"overloads"}, $pkg)) { return undef; }
-    my scalar $pkg_ovl = $interp->{"overloads"}->{$pkg};
-    if (!exists($pkg_ovl, $op)) { return undef; }
-    my str $method_name = $pkg_ovl->{$op};
-    return interp_resolve_method($interp, $pkg, $method_name);
+    if (exists($interp->{"overloads"}, $pkg)) {
+        my scalar $pkg_ovl = $interp->{"overloads"}->{$pkg};
+        if (exists($pkg_ovl, $op)) {
+            my str $method_name = $pkg_ovl->{$op};
+            return interp_resolve_method($interp, $pkg, $method_name);
+        }
+    }
+    if (exists($interp->{"mro"}, $pkg)) {
+        my scalar $mro = $interp->{"mro"}->{$pkg};
+        if (defined($mro)) {
+            my int $mi = 0;
+            my int $mlen = size($mro);
+            while ($mi < $mlen) {
+                my str $anc = $mro->[$mi];
+                if (exists($interp->{"overloads"}, $anc)) {
+                    my scalar $anc_ovl = $interp->{"overloads"}->{$anc};
+                    if (exists($anc_ovl, $op)) {
+                        my str $method_name = $anc_ovl->{$op};
+                        return interp_resolve_method($interp, $pkg, $method_name);
+                    }
+                }
+                $mi = $mi + 1;
+            }
+            return undef;
+        }
+    }
+    my hash %visited = ();
+    $visited{$pkg} = 1;
+    if (exists($interp->{"inherits"}, $pkg)) {
+        my scalar $parents = $interp->{"inherits"}->{$pkg};
+        my int $pi = 0;
+        while ($pi < size($parents)) {
+            my scalar $found = check_overload_walk($interp, $pkg, $parents->[$pi], $op, \%visited);
+            if (defined($found)) { return $found; }
+            $pi = $pi + 1;
+        }
+    }
+    return undef;
 }
 
 func eval_binop(scalar $interp, scalar $node, scalar $env) scalar {
@@ -2553,6 +2739,34 @@ func is_builtin(scalar $interp, str $name) int {
     return 0;
 }
 
+# Helper: format sprintf/printf across arbitrary arg counts using runtime C helper
+func interp_sprintf_arr(scalar $args, int $argc) str {
+    if ($argc <= 0) {
+        return "";
+    }
+    my scalar $fmt = $args->[0];
+    my array @rest = ();
+    my int $si = 1;
+    while ($si < $argc) {
+        push(@rest, $args->[$si]);
+        $si = $si + 1;
+    }
+    my scalar $rest_ref = \@rest;
+    my str $res = "";
+    __C__ {
+        StradaValue *av_sv = rest_ref;
+        if (av_sv && !STRADA_IS_TAGGED_INT(av_sv) && av_sv->type == STRADA_REF) {
+            av_sv = strada_is_slot_ref(av_sv)
+                ? (av_sv->value.ptr ? *(StradaValue **)av_sv->value.ptr : NULL)
+                : av_sv->value.rv;
+        }
+        StradaValue *out = strada_sprintf_sv_arr(fmt, av_sv);
+        strada_decref(res);
+        res = out ? out : strada_new_str("");
+    }
+    return $res;
+}
+
 func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
     my int $argc = size($args);
     my int $bid = $interp->{"builtin_ids"}->{$name};
@@ -2754,15 +2968,7 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         return lc($args->[0]);
     }
     if ($bid == BI::SPRINTF_FN) {
-        if ($argc == 1) { return sprintf($args->[0]); }
-        if ($argc == 2) { return sprintf($args->[0], $args->[1]); }
-        if ($argc == 3) { return sprintf($args->[0], $args->[1], $args->[2]); }
-        if ($argc == 4) { return sprintf($args->[0], $args->[1], $args->[2], $args->[3]); }
-        if ($argc == 5) { return sprintf($args->[0], $args->[1], $args->[2], $args->[3], $args->[4]); }
-        if ($argc == 6) { return sprintf($args->[0], $args->[1], $args->[2], $args->[3], $args->[4], $args->[5]); }
-        if ($argc == 7) { return sprintf($args->[0], $args->[1], $args->[2], $args->[3], $args->[4], $args->[5], $args->[6]); }
-        if ($argc == 8) { return sprintf($args->[0], $args->[1], $args->[2], $args->[3], $args->[4], $args->[5], $args->[6], $args->[7]); }
-        return sprintf($args->[0], $args->[1]);
+        return interp_sprintf_arr($args, $argc);
     }
     if ($bid == BI::MATCH_FN) {
         return match($args->[0], $args->[1]);
@@ -2866,10 +3072,10 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         return values($args->[0]);
     }
     if ($bid == BI::EXISTS_FN) {
-        return exists($args->[0], $args->[1]);
+        return interp_hash_exists($interp, $args->[0], $args->[1]);
     }
     if ($bid == BI::DELETE_FN) {
-        delete($args->[0], $args->[1]);
+        interp_hash_delete($interp, $args->[0], $args->[1]);
         return undef;
     }
     if ($bid == BI::EACH) {
@@ -3403,11 +3609,9 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         return 0;
     }
     if ($bid == BI::PRINTF) {
-        my str $fmt = $args->[0];
-        if ($argc == 1) { print($fmt); }
-        elsif ($argc == 2) { print(sprintf($fmt, $args->[1])); }
-        elsif ($argc == 3) { print(sprintf($fmt, $args->[1], $args->[2])); }
-        elsif ($argc == 4) { print(sprintf($fmt, $args->[1], $args->[2], $args->[3])); }
+        if ($argc >= 1) {
+            print(interp_sprintf_arr($args, $argc));
+        }
         return undef;
     }
     if ($bid == BI::READLINE_FN) {
@@ -3913,10 +4117,10 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         return undef;
     }
     if ($bid == BI::SYS_RAND) {
-        my int $r = 0;
+        my num $r = 0.0;
         __C__ {
             strada_decref(r);
-            r = strada_new_int((int64_t)rand());
+            r = strada_new_num((double)rand() / (double)RAND_MAX);
         }
         return $r;
     }
@@ -4079,6 +4283,7 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         my str $class_name = $args->[1];
         # Call TIEHASH constructor
         my array @tie_args = ();
+        push(@tie_args, $class_name);
         my int $tai = 2;
         while ($tai < $argc) {
             push(@tie_args, $args->[$tai]);
@@ -4735,9 +4940,15 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
 
         if (defined($node->{"init"}) && $node->{"init"} != 0) {
             $init = eval_node($interp, $node->{"init"}, $env);
-            if ($var_type == TI::ARRAY && ref($init) eq "HASH" && size(keys($init)) == 0) {
-                my array @empty_arr = ();
-                $init = \@empty_arr;
+            if ($var_type == TI::ARRAY && ref($init) ne "ARRAY") {
+                if (!defined($init) || (ref($init) eq "HASH" && size(keys($init)) == 0)) {
+                    my array @empty_arr = ();
+                    $init = \@empty_arr;
+                } else {
+                    my array @single_arr = ();
+                    push(@single_arr, $init);
+                    $init = \@single_arr;
+                }
             }
             if ($var_type == TI::HASH && ref($init) eq "ARRAY") {
                 my hash %h = ();
@@ -5160,6 +5371,8 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
             }
         }
 
+        interp_unwind_locals($interp, $try_local_depth);
+
         if ($has_finally == 1) {
             my int $saved_sig = $interp->{"signal"};
             my scalar $saved_sig_val = $interp->{"signal_value"};
@@ -5393,13 +5606,45 @@ func eval_node_extended(scalar $interp, scalar $node, scalar $env, int $type) sc
         }
 
         my str $pkg = get_obj_class($obj);
+        if (length($pkg) == 0) {
+            my str $ref_type = ref($obj);
+            if ($ref_type ne "HASH" && $ref_type ne "ARRAY" && $ref_type ne "" && $ref_type ne "0") {
+                $pkg = $ref_type;
+            }
+        }
+        if (length($pkg) == 0 && ref($obj) eq "" && defined($obj) && length("" . $obj) > 0) {
+            $pkg = "" . $obj;
+        }
 
         my scalar $func_info = undef;
         if (length($pkg) > 0) {
             $func_info = interp_resolve_method($interp, $pkg, $method);
         }
-        if (!defined($func_info)) {
+        if (!defined($func_info) && $pkg eq "main") {
             $func_info = interp_get_func($interp, $method);
+        }
+
+        if (!defined($func_info) && length($pkg) > 0) {
+            my str $native_name = $pkg . "_" . $method;
+            if (exists($interp->{"native_funcs"}, $native_name)) {
+                my scalar $nf = $interp->{"native_funcs"}->{$native_name};
+                return call_native($interp, $nf, \@args);
+            }
+        }
+
+        if (!defined($func_info) && length($pkg) > 0) {
+            my scalar $al_func = interp_find_autoload($interp, $pkg);
+            if (defined($al_func)) {
+                my array @al_args = ();
+                push(@al_args, $obj);
+                push(@al_args, $method);
+                my int $ali = 1;
+                while ($ali < size(\@args)) {
+                    push(@al_args, $args[$ali]);
+                    $ali = $ali + 1;
+                }
+                return call_user_func($interp, $al_func, \@al_args);
+            }
         }
 
         if (defined($func_info)) {
@@ -5644,11 +5889,17 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
 
         if (defined($node->{"init"}) && $node->{"init"} != 0) {
             $init = eval_node($interp, $node->{"init"}, $env);
-            # Array variable initialized with empty () produces empty hash from parser;
-            # convert to empty array
-            if ($var_type == TI::ARRAY && ref($init) eq "HASH" && size(keys($init)) == 0) {
-                my array @empty_arr = ();
-                $init = \@empty_arr;
+            # Array variable initialized with empty () produces empty hash from parser,
+            # undef produces empty array, and scalar init wraps as 1-element array
+            if ($var_type == TI::ARRAY) {
+                if (!defined($init) || (ref($init) eq "HASH" && size(keys($init)) == 0)) {
+                    my array @empty_arr = ();
+                    $init = \@empty_arr;
+                } elsif (ref($init) ne "ARRAY") {
+                    my array @single_arr = ();
+                    push(@single_arr, $init);
+                    $init = \@single_arr;
+                }
             }
             # Convert key-value list/pairs to hash for hash variables
             if ($var_type == TI::HASH && ref($init) eq "ARRAY") {
@@ -5762,10 +6013,48 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
                         $rhs = call_user_func($interp, $ovl, \@oa);
                     } else { $rhs = $cur * $rhs; }
                 }
-                elsif ($op eq "/=") { $rhs = $cur / $rhs; }
-                elsif ($op eq "%=") { $rhs = $cur % $rhs; }
-                elsif ($op eq "**=") { $rhs = $cur ** $rhs; }
-                elsif ($op eq ".=") { $rhs = $cur . $rhs; }
+                elsif ($op eq "/=") {
+                    my scalar $ovl = check_overload($interp, $cur, "/");
+                    if (defined($ovl)) {
+                        my array @oa = (); push(@oa, $cur); push(@oa, $rhs); push(@oa, 0);
+                        $rhs = call_user_func($interp, $ovl, \@oa);
+                    } else { $rhs = $cur / $rhs; }
+                }
+                elsif ($op eq "%=") {
+                    my scalar $ovl = check_overload($interp, $cur, "%");
+                    if (defined($ovl)) {
+                        my array @oa = (); push(@oa, $cur); push(@oa, $rhs); push(@oa, 0);
+                        $rhs = call_user_func($interp, $ovl, \@oa);
+                    } else { $rhs = $cur % $rhs; }
+                }
+                elsif ($op eq "**=") {
+                    my scalar $ovl = check_overload($interp, $cur, "**");
+                    if (defined($ovl)) {
+                        my array @oa = (); push(@oa, $cur); push(@oa, $rhs); push(@oa, 0);
+                        $rhs = call_user_func($interp, $ovl, \@oa);
+                    } else { $rhs = math::pow($cur, $rhs); }
+                }
+                elsif ($op eq ".=") {
+                    if ($interp->{"has_overloads"} == 1) {
+                        my scalar $ovl = check_overload($interp, $cur, ".");
+                        if (defined($ovl)) {
+                            my array @oa = (); push(@oa, $cur); push(@oa, $rhs); push(@oa, 0);
+                            $rhs = call_user_func($interp, $ovl, \@oa);
+                        } else {
+                            my scalar $rovl = check_overload($interp, $rhs, ".");
+                            if (defined($rovl)) {
+                                my array @oa = (); push(@oa, $rhs); push(@oa, $cur); push(@oa, 1);
+                                $rhs = call_user_func($interp, $rovl, \@oa);
+                            } else {
+                                my scalar $l_str_ovl = check_overload($interp, $cur, "\"\"");
+                                my scalar $r_str_ovl = check_overload($interp, $rhs, "\"\"");
+                                my scalar $cl = defined($l_str_ovl) ? call_user_func($interp, $l_str_ovl, [$cur, undef, 0]) : $cur;
+                                my scalar $cr = defined($r_str_ovl) ? call_user_func($interp, $r_str_ovl, [$rhs, undef, 0]) : $rhs;
+                                $rhs = $cl . $cr;
+                            }
+                        }
+                    } else { $rhs = $cur . $rhs; }
+                }
                 elsif ($op eq "&=") { $rhs = $cur & $rhs; }
                 elsif ($op eq "|=") { $rhs = $cur | $rhs; }
                 elsif ($op eq "^=") { $rhs = $cur ^ $rhs; }
@@ -5965,7 +6254,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
                 if ($del_type == NI::HASH_ACCESS) {
                     my scalar $del_hash = eval_node($interp, $del_arg->{"hash"}, $env);
                     my scalar $del_key = eval_node($interp, $del_arg->{"key"}, $env);
-                    delete($del_hash, $del_key);
+                    interp_hash_delete($interp, $del_hash, $del_key);
                     return undef;
                 }
                 if ($del_type == NI::DEREF_HASH) {
@@ -5973,7 +6262,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
                     if (!defined($del_ref_node)) { $del_ref_node = $del_arg->{"target"}; }
                     my scalar $del_hash = eval_node($interp, $del_ref_node, $env);
                     my scalar $del_key = eval_node($interp, $del_arg->{"key"}, $env);
-                    delete($del_hash, $del_key);
+                    interp_hash_delete($interp, $del_hash, $del_key);
                     return undef;
                 }
             }
@@ -5987,14 +6276,14 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
                 if ($ex_type == NI::HASH_ACCESS) {
                     my scalar $ex_hash = eval_node($interp, $ex_arg->{"hash"}, $env);
                     my scalar $ex_key = eval_node($interp, $ex_arg->{"key"}, $env);
-                    return exists($ex_hash, $ex_key) ? 1 : 0;
+                    return interp_hash_exists($interp, $ex_hash, $ex_key) ? 1 : 0;
                 }
                 if ($ex_type == NI::DEREF_HASH) {
                     my scalar $ex_ref_node = $ex_arg->{"ref"};
                     if (!defined($ex_ref_node)) { $ex_ref_node = $ex_arg->{"target"}; }
                     my scalar $ex_hash = eval_node($interp, $ex_ref_node, $env);
                     my scalar $ex_key = eval_node($interp, $ex_arg->{"key"}, $env);
-                    return exists($ex_hash, $ex_key) ? 1 : 0;
+                    return interp_hash_exists($interp, $ex_hash, $ex_key) ? 1 : 0;
                 }
             }
         }
@@ -6157,6 +6446,10 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
             if ($ref_type ne "HASH" && $ref_type ne "ARRAY" && $ref_type ne "" && $ref_type ne "0") {
                 $pkg = $ref_type;
             }
+        }
+        # Support "Pkg"->method(...) class method calls on string package names
+        if (length($pkg) == 0 && ref($obj) eq "" && defined($obj) && length("" . $obj) > 0) {
+            $pkg = "" . $obj;
         }
 
         # Handle isa() special method
@@ -6402,7 +6695,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
         if (length($pkg) > 0) {
             $func_info = interp_resolve_method($interp, $pkg, $method);
         }
-        if (!defined($func_info)) {
+        if (!defined($func_info) && $pkg eq "main") {
             $func_info = interp_get_func($interp, $method);
         }
 
@@ -6417,23 +6710,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
 
         # Try AUTOLOAD as fallback (walk inheritance chain)
         if (!defined($func_info) && length($pkg) > 0) {
-            my scalar $al_func = undef;
-            # Check own package
-            if (exists($interp->{"autoloads"}, $pkg)) {
-                $al_func = $interp->{"autoloads"}->{$pkg};
-            }
-            # Walk inheritance chain for AUTOLOAD
-            if (!defined($al_func) && exists($interp->{"inherits"}, $pkg)) {
-                my scalar $al_parents = $interp->{"inherits"}->{$pkg};
-                my int $api = 0;
-                while ($api < size($al_parents) && !defined($al_func)) {
-                    my str $ap = $al_parents->[$api];
-                    if (exists($interp->{"autoloads"}, $ap)) {
-                        $al_func = $interp->{"autoloads"}->{$ap};
-                    }
-                    $api = $api + 1;
-                }
-            }
+            my scalar $al_func = interp_find_autoload($interp, $pkg);
             if (defined($al_func)) {
                 # AUTOLOAD receives method name as first additional arg
                 my array @al_args = ();
@@ -6710,7 +6987,9 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
     # --- Regex Substitution ---
     if ($type == NI::REGEX_SUBST) {
         my scalar $target_node = $node->{"target"};
-        my str $target_val = eval_node($interp, $target_node, $env);
+        my scalar $lv = eval_lvalue_prepare($interp, $target_node, $env);
+        my scalar $raw_tv = eval_lvalue_read($interp, $lv, $env);
+        my str $target_val = defined($raw_tv) ? ("" . $raw_tv) : "";
         my str $pattern = $node->{"pattern"};
         my str $replacement = $node->{"replacement"};
         my str $flags = $node->{"flags"};
@@ -6742,7 +7021,10 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
         my str $result = $target_val;
         if ($is_eval) {
             # /e flag: evaluate replacement as expression for each match
-            my scalar $repl_node = $node->{"replacement_node"};
+            my scalar $repl_node = $node->{"eval_expr"};
+            if (!defined($repl_node) && exists($node, "replacement_node")) {
+                $repl_node = $node->{"replacement_node"};
+            }
 
             # Pre-parse replacement string into a callable function (if no AST node)
             my scalar $parsed_repl_fn = undef;
@@ -6755,26 +7037,13 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
                 $parsed_repl_fn = $repl_prog->{"functions"}->[0];
             }
 
-            if ($is_global) {
-                # Global eval: match on remaining text, build result piece by piece
-                my str $remaining = $result;
-                my str $built = "";
-                my int $safety = 0;
-                while ($safety < 1000 && match($remaining, $effective_pattern)) {
-                    my scalar $caps = captures();
-                    my str $full_match = $caps->[0];
-                    my int $match_len = length($full_match);
-                    if ($match_len == 0) { last; }
-
-                    my int $pos = index($remaining, $full_match);
-                    if ($pos < 0) { last; }
-
-                    # Add text before match
-                    if ($pos > 0) {
-                        $built = $built . substr($remaining, 0, $pos);
-                    }
-
-                    # Evaluate replacement expression
+            my scalar $matches = interp_regex_find_all($target_val, $pattern, $flags, $is_global);
+            my int $mcnt = size($matches);
+            if ($mcnt > 0) {
+                my array @repls = ();
+                my int $mi = 0;
+                while ($mi < $mcnt) {
+                    interp_set_captures($matches->[$mi]);
                     my scalar $eval_result = undef;
                     if (defined($repl_node)) {
                         $eval_result = eval_node($interp, $repl_node, $env);
@@ -6782,36 +7051,11 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
                         my array @empty_args = ();
                         $eval_result = call_user_func($interp, {"params" => $parsed_repl_fn->{"params"}, "param_count" => $parsed_repl_fn->{"param_count"}, "body" => $parsed_repl_fn->{"body"}, "closure_env" => $env}, \@empty_args);
                     }
-                    my str $eval_str = defined($eval_result) ? "" . $eval_result : "";
-                    $built = $built . $eval_str;
-
-                    # Advance past match
-                    $remaining = substr($remaining, $pos + $match_len);
-                    $safety = $safety + 1;
+                    my str $eval_str = defined($eval_result) ? ("" . $eval_result) : "";
+                    push(@repls, $eval_str);
+                    $mi = $mi + 1;
                 }
-                $result = $built . $remaining;
-            } else {
-                # Single eval replacement
-                if (match($result, $effective_pattern)) {
-                    my scalar $caps = captures();
-                    my str $full_match = $caps->[0];
-                    my int $match_len = length($full_match);
-
-                    my scalar $eval_result = undef;
-                    if (defined($repl_node)) {
-                        $eval_result = eval_node($interp, $repl_node, $env);
-                    } else {
-                        my array @empty_args = ();
-                        $eval_result = call_user_func($interp, {"params" => $parsed_repl_fn->{"params"}, "param_count" => $parsed_repl_fn->{"param_count"}, "body" => $parsed_repl_fn->{"body"}, "closure_env" => $env}, \@empty_args);
-                    }
-                    my str $eval_str = defined($eval_result) ? "" . $eval_result : "";
-
-                    # Find position and replace just the matched text
-                    my int $pos = index($result, $full_match);
-                    if ($pos >= 0) {
-                        $result = substr($result, 0, $pos) . $eval_str . substr($result, $pos + $match_len);
-                    }
-                }
+                $result = interp_regex_build_result($target_val, $matches, \@repls);
             }
         } else {
             if ($is_global) {
@@ -6834,7 +7078,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
                 $result = replace($target_val, $effective_pattern, $replacement);
             }
         }
-        assign_to($interp, $target_node, $result, $env);
+        eval_lvalue_write($interp, $lv, $result, $env);
         return $result;
     }
 
@@ -6907,6 +7151,7 @@ my str $g_eval_vm_pkg = "main";
 my str $g_eval_vm_decls = "";
 my int $g_eval_vm_decls_globals = 0;
 my hash %g_eval_vm_globals = ();
+my hash %g_eval_vm_our_names = ();
 
 func eval_is_ident_char(str $ch) int {
     my int $o = ord($ch);
@@ -6916,77 +7161,343 @@ func eval_is_ident_char(str $ch) int {
     return 0;
 }
 
-func extract_last_package(str $code, str $cur_pkg) str {
-    my str $res = $cur_pkg;
-    my int $len = length($code);
-    my int $i = 0;
-    my int $depth = 0;
-    my int $in_str = 0;
-    my int $in_cmt = 0;
-    my str $prev = "";
+func eval_is_ws_char(str $ch) int {
+    if ($ch eq " " || $ch eq "\t" || $ch eq "\n" || $ch eq "\r") {
+        return 1;
+    }
+    return 0;
+}
+
+func eval_skip_ws_cmt(str $code, int $pos, int $len) int {
+    my int $i = $pos;
     while ($i < $len) {
         my str $c = substr($code, $i, 1);
-        if ($in_cmt == 1) {
-            if ($c eq "\n") { $in_cmt = 0; }
+        if (eval_is_ws_char($c) == 1) {
             $i = $i + 1;
             next;
         }
-        if ($in_str == 1) {
-            if ($c eq "\\" && $i + 1 < $len) { $i = $i + 2; next; }
-            if ($c eq "\"") { $in_str = 0; }
-            $i = $i + 1;
+        if ($c eq "#") {
+            while ($i < $len && substr($code, $i, 1) ne "\n") {
+                $i = $i + 1;
+            }
             next;
         }
-        if ($in_str == 2) {
-            if ($c eq "\\" && $i + 1 < $len) { $i = $i + 2; next; }
-            if ($c eq "'") { $in_str = 0; }
-            $i = $i + 1;
+        last;
+    }
+    return $i;
+}
+
+func eval_read_word(str $code, int $pos, int $len) str {
+    my int $j = $pos;
+    while ($j < $len && eval_is_ident_char(substr($code, $j, 1)) == 1) {
+        $j = $j + 1;
+    }
+    return substr($code, $pos, $j - $pos);
+}
+
+func eval_scan_regex_body(str $code, int $pos, int $len) int {
+    my int $i = $pos;
+    while ($i < $len) {
+        my str $c = substr($code, $i, 1);
+        if ($c eq "\\" && $i + 1 < $len) {
+            $i = $i + 2;
             next;
         }
-        if ($c eq "\"") { $in_str = 1; $prev = $c; $i = $i + 1; next; }
-        if ($c eq "'") { $in_str = 2; $prev = $c; $i = $i + 1; next; }
-        if ($c eq "#") { $in_cmt = 1; $i = $i + 1; next; }
-        if ($c eq "{") { $depth = $depth + 1; $prev = $c; $i = $i + 1; next; }
-        if ($c eq "}") { if ($depth > 0) { $depth = $depth - 1; } $prev = $c; $i = $i + 1; next; }
-        if ($depth == 0 && $i + 8 <= $len && substr($code, $i, 7) eq "package") {
-            my int $prev_ok = ($prev eq "" || eval_is_ident_char($prev) == 0) ? 1 : 0;
-            my str $after = substr($code, $i + 7, 1);
-            if ($prev_ok == 1 && ($after eq " " || $after eq "\t" || $after eq "\n" || $after eq "\r")) {
-                my int $j = $i + 7;
-                while ($j < $len) {
-                    my str $ws = substr($code, $j, 1);
-                    if ($ws ne " " && $ws ne "\t" && $ws ne "\n" && $ws ne "\r") { last; }
-                    $j = $j + 1;
+        if ($c eq "/") {
+            return $i + 1;
+        }
+        $i = $i + 1;
+    }
+    return -1;
+}
+
+func eval_scan_unit(str $code, int $start, int $len, int $brace_mode) int {
+    my int $i = $start;
+    my int $depth = 0;
+    my int $pdepth = 0;
+    my int $bdepth = 0;
+    my int $seen_brace = 0;
+    my str $prev_sig = "";
+    my str $prev_word = "";
+
+    while ($i < $len) {
+        my str $c = substr($code, $i, 1);
+        if ($c eq "#") {
+            while ($i < $len && substr($code, $i, 1) ne "\n") {
+                $i = $i + 1;
+            }
+            next;
+        }
+        if ($c eq "\"" || $c eq "'") {
+            my str $q = $c;
+            $i = $i + 1;
+            while ($i < $len) {
+                my str $sc = substr($code, $i, 1);
+                if ($sc eq "\\" && $i + 1 < $len) {
+                    $i = $i + 2;
+                    next;
                 }
-                my int $name_start = $j;
-                while ($j < $len) {
-                    my str $nc = substr($code, $j, 1);
-                    if (eval_is_ident_char($nc) == 1 || $nc eq ":") {
-                        $j = $j + 1;
-                    } else {
-                        last;
+                if ($sc eq $q) {
+                    $i = $i + 1;
+                    last;
+                }
+                $i = $i + 1;
+            }
+            $prev_sig = $q;
+            $prev_word = "";
+            next;
+        }
+
+        if (($c eq "s" || $c eq "t" || $c eq "y" || $c eq "m") &&
+            ($i == $start || eval_is_ident_char(substr($code, $i - 1, 1)) == 0)) {
+            my str $w = eval_read_word($code, $i, $len);
+            if ($w eq "s" || $w eq "tr" || $w eq "y" || $w eq "m") {
+                my int $after_w = $i + length($w);
+                if ($after_w < $len && substr($code, $after_w, 1) eq "/") {
+                    my int $end1 = eval_scan_regex_body($code, $after_w + 1, $len);
+                    if ($end1 >= 0) {
+                        if ($w ne "m") {
+                            my int $end2 = eval_scan_regex_body($code, $end1, $len);
+                            if ($end2 >= 0) { $end1 = $end2; }
+                        }
+                        while ($end1 < $len && (substr($code, $end1, 1) =~ /[a-zA-Z]/)) {
+                            $end1 = $end1 + 1;
+                        }
+                        $i = $end1;
+                        $prev_sig = "/";
+                        $prev_word = "";
+                        next;
                     }
                 }
-                my int $k = $j;
-                while ($k < $len) {
-                    my str $ws2 = substr($code, $k, 1);
-                    if ($ws2 ne " " && $ws2 ne "\t" && $ws2 ne "\n" && $ws2 ne "\r") { last; }
-                    $k = $k + 1;
-                }
-                if ($j > $name_start && $k < $len && substr($code, $k, 1) eq ";") {
-                    $res = substr($code, $name_start, $j - $name_start);
-                    $i = $k + 1;
-                    $prev = ";";
+            }
+        }
+
+        if ($c eq "/") {
+            my int $is_rx = 0;
+            if ($prev_sig eq "" || $prev_sig eq "~" || $prev_sig eq "=" || $prev_sig eq "(" ||
+                $prev_sig eq "[" || $prev_sig eq "{" || $prev_sig eq "," || $prev_sig eq ";" ||
+                $prev_sig eq "!" || $prev_sig eq "?" || $prev_sig eq ":" || $prev_sig eq "&" ||
+                $prev_sig eq "|") {
+                $is_rx = 1;
+            } elsif ($prev_word eq "return" || $prev_word eq "if" || $prev_word eq "elsif" ||
+                     $prev_word eq "unless" || $prev_word eq "while" || $prev_word eq "until" ||
+                     $prev_word eq "split" || $prev_word eq "match") {
+                $is_rx = 1;
+            }
+            if ($is_rx == 1) {
+                my int $endr = eval_scan_regex_body($code, $i + 1, $len);
+                if ($endr >= 0) {
+                    while ($endr < $len && (substr($code, $endr, 1) =~ /[a-zA-Z]/)) {
+                        $endr = $endr + 1;
+                    }
+                    $i = $endr;
+                    $prev_sig = "/";
+                    $prev_word = "";
                     next;
                 }
             }
         }
-        if ($c ne " " && $c ne "\t" && $c ne "\n" && $c ne "\r") {
-            $prev = $c;
+
+        if (eval_is_ident_char($c) == 1) {
+            my str $w2 = eval_read_word($code, $i, $len);
+            $prev_word = $w2;
+            $prev_sig = "w";
+            $i = $i + length($w2);
+            next;
+        }
+
+        if ($c eq "{") {
+            $depth = $depth + 1;
+            $seen_brace = 1;
+        } elsif ($c eq "}") {
+            if ($depth > 0) { $depth = $depth - 1; }
+            if ($brace_mode == 1 && $seen_brace == 1 && $depth == 0 && $pdepth == 0 && $bdepth == 0) {
+                return $i + 1;
+            }
+        } elsif ($c eq "(") {
+            $pdepth = $pdepth + 1;
+        } elsif ($c eq ")") {
+            if ($pdepth > 0) { $pdepth = $pdepth - 1; }
+        } elsif ($c eq "[") {
+            $bdepth = $bdepth + 1;
+        } elsif ($c eq "]") {
+            if ($bdepth > 0) { $bdepth = $bdepth - 1; }
+        } elsif ($brace_mode == 0 && $c eq ";" && $depth == 0 && $pdepth == 0 && $bdepth == 0) {
+            return $i + 1;
+        }
+
+        if (eval_is_ws_char($c) == 0) {
+            $prev_sig = $c;
+            $prev_word = "";
         }
         $i = $i + 1;
     }
-    return $res;
+    return $len;
+}
+
+func split_eval_units(str $code, str $start_pkg) scalar {
+    my str $top = "";
+    my str $top_persist = "";
+    my str $body = "";
+    my str $cur_pkg = $start_pkg;
+    my str $body_pkg = $start_pkg;
+    my int $has_body = 0;
+
+    my int $len = length($code);
+    my int $pos = eval_skip_ws_cmt($code, 0, $len);
+
+    while ($pos < $len) {
+        if (substr($code, $pos, 1) eq ";") {
+            $pos = eval_skip_ws_cmt($code, $pos + 1, $len);
+            next;
+        }
+
+        my str $kw = eval_read_word($code, $pos, $len);
+        my int $is_brace_top = 0;
+        my int $is_semi_top = 0;
+        my int $is_oneshot = 0;
+
+        if ($kw eq "enum" || $kw eq "struct" || $kw eq "before" || $kw eq "after" || $kw eq "around") {
+            $is_brace_top = 1;
+        } elsif ($kw eq "BEGIN" || $kw eq "END") {
+            $is_brace_top = 1;
+            $is_oneshot = 1;
+        } elsif ($kw eq "package" || $kw eq "version" || $kw eq "inherit" || $kw eq "extends" ||
+                 $kw eq "with" || $kw eq "use" || $kw eq "import_lib" || $kw eq "import_object" ||
+                 $kw eq "import_archive" || $kw eq "link_lib" || $kw eq "has" || $kw eq "const" || $kw eq "our") {
+            $is_semi_top = 1;
+        } elsif ($kw eq "func" || $kw eq "fn" || $kw eq "private" || $kw eq "async" || $kw eq "extern") {
+            my int $scan_kw = $pos;
+            my str $w_cur = $kw;
+            my int $is_ext = 0;
+            while ($w_cur eq "private" || $w_cur eq "async" || $w_cur eq "extern") {
+                if ($w_cur eq "extern") { $is_ext = 1; }
+                $scan_kw = eval_skip_ws_cmt($code, $scan_kw + length($w_cur), $len);
+                $w_cur = eval_read_word($code, $scan_kw, $len);
+            }
+            if ($w_cur eq "func" || $w_cur eq "fn") {
+                my int $after_fn = eval_skip_ws_cmt($code, $scan_kw + length($w_cur), $len);
+                if ($after_fn < $len && eval_is_ident_char(substr($code, $after_fn, 1)) == 1) {
+                    if ($is_ext == 1) { $is_semi_top = 1; }
+                    else { $is_brace_top = 1; }
+                }
+            } elsif ($is_ext == 1) {
+                $is_semi_top = 1;
+            }
+        }
+
+        if ($is_brace_top == 1) {
+            my int $end = eval_scan_unit($code, $pos, $len, 1);
+            my str $chunk = substr($code, $pos, $end - $pos);
+            $top = $top . $chunk . "\n";
+            if ($is_oneshot == 0) {
+                $top_persist = $top_persist . $chunk . "\n";
+            }
+            $pos = eval_skip_ws_cmt($code, $end, $len);
+            next;
+        }
+
+        if ($is_semi_top == 1) {
+            my int $end = eval_scan_unit($code, $pos, $len, 0);
+            my str $chunk = substr($code, $pos, $end - $pos);
+            $chunk =~ s/\s+$//;
+            if (length($chunk) > 0 && substr($chunk, length($chunk) - 1, 1) ne ";") {
+                $chunk = $chunk . ";";
+            }
+            $top = $top . $chunk . "\n";
+            $top_persist = $top_persist . $chunk . "\n";
+            if ($kw eq "package") {
+                my int $ps = eval_skip_ws_cmt($code, $pos + 7, $end);
+                my int $pe = $ps;
+                while ($pe < $end) {
+                    my str $pc = substr($code, $pe, 1);
+                    if (eval_is_ident_char($pc) == 1 || $pc eq ":") { $pe = $pe + 1; }
+                    else { last; }
+                }
+                if ($pe > $ps) {
+                    $cur_pkg = substr($code, $ps, $pe - $ps);
+                }
+            }
+            $pos = eval_skip_ws_cmt($code, $end, $len);
+            next;
+        }
+
+        # Body unit: handle labeled loops & control-flow blocks cleanly
+        my str $ctrl_kw = $kw;
+        if (length($kw) > 0) {
+            my int $after_kw = eval_skip_ws_cmt($code, $pos + length($kw), $len);
+            if ($after_kw < $len && substr($code, $after_kw, 1) eq ":" &&
+                ($after_kw + 1 >= $len || substr($code, $after_kw + 1, 1) ne ":")) {
+                my int $after_lbl = eval_skip_ws_cmt($code, $after_kw + 1, $len);
+                $ctrl_kw = eval_read_word($code, $after_lbl, $len);
+            }
+        }
+
+        my int $is_block_stmt = 0;
+        if (substr($code, $pos, 1) eq "{" ||
+            $ctrl_kw eq "if" || $ctrl_kw eq "unless" || $ctrl_kw eq "while" ||
+            $ctrl_kw eq "until" || $ctrl_kw eq "for" || $ctrl_kw eq "foreach" ||
+            $ctrl_kw eq "switch" || $ctrl_kw eq "try" || $ctrl_kw eq "do") {
+            $is_block_stmt = 1;
+        }
+
+        my int $end = 0;
+        my str $chunk = "";
+        if ($is_block_stmt == 1) {
+            $end = eval_scan_unit($code, $pos, $len, 1);
+            if ($ctrl_kw eq "if" || $ctrl_kw eq "unless" || $ctrl_kw eq "try") {
+                my int $more = 1;
+                while ($more == 1) {
+                    my int $p2 = eval_skip_ws_cmt($code, $end, $len);
+                    my str $ckw = eval_read_word($code, $p2, $len);
+                    if ($ckw eq "elsif" || $ckw eq "else" || $ckw eq "catch" || $ckw eq "finally") {
+                        $end = eval_scan_unit($code, $p2, $len, 1);
+                    } else {
+                        $more = 0;
+                    }
+                }
+            } elsif ($ctrl_kw eq "do") {
+                my int $p2 = eval_skip_ws_cmt($code, $end, $len);
+                if (eval_read_word($code, $p2, $len) eq "while") {
+                    $end = eval_scan_unit($code, $p2, $len, 0);
+                } elsif ($p2 < $len && substr($code, $p2, 1) eq ";") {
+                    $end = $p2 + 1;
+                }
+            }
+            $chunk = substr($code, $pos, $end - $pos);
+        } else {
+            $end = eval_scan_unit($code, $pos, $len, 0);
+            $chunk = substr($code, $pos, $end - $pos);
+            $chunk =~ s/\s+$//;
+            if (length($chunk) > 0 && substr($chunk, length($chunk) - 1, 1) ne ";") {
+                $chunk = $chunk . ";";
+            }
+        }
+
+        if (length($chunk) > 0) {
+            if ($has_body == 0) {
+                $body_pkg = $cur_pkg;
+                $has_body = 1;
+            }
+            $body = $body . $chunk . "\n";
+        }
+        $pos = eval_skip_ws_cmt($code, $end, $len);
+    }
+
+    if ($has_body == 0) { $body_pkg = $cur_pkg; }
+
+    my hash %res = ();
+    $res{"top"} = $top;
+    $res{"top_persist"} = $top_persist;
+    $res{"body"} = $body;
+    $res{"last_pkg"} = $cur_pkg;
+    $res{"body_pkg"} = $body_pkg;
+    return \%res;
+}
+
+func extract_last_package(str $code, str $cur_pkg) str {
+    my scalar $u = split_eval_units($code, $cur_pkg);
+    return $u->{"last_pkg"};
 }
 
 # Initialize the interpreter eval engine.
@@ -7012,35 +7523,16 @@ func eval_string(str $code) scalar {
         return undef;
     }
 
-    # Auto-append semicolon if needed
-    my int $tlen = length($trimmed);
-    my str $last_char = substr($trimmed, $tlen - 1, 1);
-    if ($last_char ne ";" && $last_char ne "}") {
-        $trimmed = $trimmed . ";";
-    }
-
-    # Check if input is a top-level construct
-    my int $is_top = 0;
-    if (index($trimmed, "func ") == 0 || index($trimmed, "fn ") == 0) { $is_top = 1; }
-    if (index($trimmed, "async func") == 0 || index($trimmed, "async fn") == 0) { $is_top = 1; }
-    if (index($trimmed, "private func") == 0 || index($trimmed, "private fn") == 0) { $is_top = 1; }
-    if (index($trimmed, "package ") == 0) { $is_top = 1; }
-    if (index($trimmed, "enum ") == 0) { $is_top = 1; }
-    if (index($trimmed, "has ") == 0) { $is_top = 1; }
-    if (index($trimmed, "extends ") == 0) { $is_top = 1; }
-    if (index($trimmed, "const ") == 0 || index($trimmed, "our ") == 0) { $is_top = 1; }
-    if (index($trimmed, "before ") == 0 || index($trimmed, "after ") == 0 || index($trimmed, "around ") == 0) { $is_top = 1; }
-    if (index($trimmed, "use overload") == 0 || index($trimmed, "with ") == 0) { $is_top = 1; }
-    if (index($trimmed, "BEGIN ") == 0 || index($trimmed, "END ") == 0 ||
-        index($trimmed, "BEGIN{") == 0 || index($trimmed, "END{") == 0) { $is_top = 1; }
-
     my str $prev_pkg = $g_eval_pkg;
-    my str $next_pkg = extract_last_package($trimmed, $prev_pkg);
+    my scalar $units = split_eval_units($trimmed, $prev_pkg);
+    my str $next_pkg = $units->{"last_pkg"};
+    my str $body_pkg = $units->{"body_pkg"};
+    my str $body_src = $units->{"body"};
     my str $source = "";
-    if ($is_top == 1) {
-        $source = "package " . $prev_pkg . ";\n" . $trimmed . "\npackage main;\nfunc __eval__() scalar { return undef; }\n";
+    if (length($body_src) > 0) {
+        $source = "package " . $prev_pkg . ";\n" . $units->{"top"} . "\npackage " . $body_pkg . ";\nfunc __eval__() scalar {\n" . $body_src . "\n}\n";
     } else {
-        $source = "package " . $prev_pkg . ";\nfunc __eval__() scalar {\n" . $trimmed . "\n}\n";
+        $source = "package " . $prev_pkg . ";\n" . $units->{"top"} . "\npackage " . $next_pkg . ";\nfunc __eval__() scalar { return undef; }\n";
     }
 
     # Parse
@@ -7147,9 +7639,9 @@ func eval_string(str $code) scalar {
     }
 
     $g_eval_pkg = $next_pkg;
-    $g_eval_interp->{"package"} = $prev_pkg;
+    $g_eval_interp->{"package"} = $body_pkg;
 
-    if (!defined($eval_func)) {
+    if (!defined($eval_func) || length($body_src) == 0) {
         $g_eval_interp->{"package"} = $next_pkg;
         return undef;
     }
@@ -7159,9 +7651,11 @@ func eval_string(str $code) scalar {
     my scalar $stmts = $body->{"statements"};
     my int $stmt_count = $body->{"statement_count"};
     my scalar $result = undef;
+    my int $ls_depth = size($g_eval_interp->{"local_stack"});
 
     try {
         $result = eval_stmts_in_env($g_eval_interp, $stmts, $stmt_count, $g_eval_interp->{"global_env"});
+        interp_unwind_locals($g_eval_interp, $ls_depth);
         # Clear any stale signal from the eval (e.g., RETURN leaking from recursive calls)
         if ($g_eval_interp->{"signal"} == SIG::RETURN) {
             $result = $g_eval_interp->{"signal_value"};
@@ -7170,6 +7664,7 @@ func eval_string(str $code) scalar {
         $g_eval_interp->{"signal_value"} = undef;
         $g_eval_interp->{"signal_label"} = "";
     } catch ($e) {
+        interp_unwind_locals($g_eval_interp, $ls_depth);
         $g_eval_interp->{"package"} = $next_pkg;
         $g_eval_interp->{"signal"} = SIG::NONE;
         $g_eval_interp->{"signal_value"} = undef;
@@ -7228,6 +7723,7 @@ func interp_cleanup(scalar $interp) void {
 # Reset the eval engine state
 func reset() void {
     %g_eval_vm_globals = ();
+    %g_eval_vm_our_names = ();
     $g_eval_pkg = "main";
     $g_eval_vm_pkg = "main";
     $g_eval_vm_decls = "";
@@ -7279,36 +7775,17 @@ func eval_string_vm(str $code) scalar {
         return undef;
     }
 
-    # Auto-append semicolon if needed
-    my int $tlen = length($trimmed);
-    my str $last_char = substr($trimmed, $tlen - 1, 1);
-    if ($last_char ne ";" && $last_char ne "}") {
-        $trimmed = $trimmed . ";";
-    }
-
-    # Check if input is a top-level construct
-    my int $is_top = 0;
-    if (index($trimmed, "func ") == 0 || index($trimmed, "fn ") == 0) { $is_top = 1; }
-    if (index($trimmed, "async func") == 0 || index($trimmed, "async fn") == 0) { $is_top = 1; }
-    if (index($trimmed, "private func") == 0 || index($trimmed, "private fn") == 0) { $is_top = 1; }
-    if (index($trimmed, "package ") == 0) { $is_top = 1; }
-    if (index($trimmed, "enum ") == 0) { $is_top = 1; }
-    if (index($trimmed, "has ") == 0) { $is_top = 1; }
-    if (index($trimmed, "extends ") == 0) { $is_top = 1; }
-    if (index($trimmed, "const ") == 0 || index($trimmed, "our ") == 0) { $is_top = 1; }
-    if (index($trimmed, "before ") == 0 || index($trimmed, "after ") == 0 || index($trimmed, "around ") == 0) { $is_top = 1; }
-    if (index($trimmed, "use ") == 0 || index($trimmed, "with ") == 0) { $is_top = 1; }
-    if (index($trimmed, "import_lib ") == 0 || index($trimmed, "import_object ") == 0 || index($trimmed, "import_archive ") == 0) { $is_top = 1; }
-    if (index($trimmed, "BEGIN ") == 0 || index($trimmed, "END ") == 0 ||
-        index($trimmed, "BEGIN{") == 0 || index($trimmed, "END{") == 0) { $is_top = 1; }
-
     my str $prev_vm_pkg = $g_eval_vm_pkg;
-    my str $next_vm_pkg = extract_last_package($trimmed, $prev_vm_pkg);
+    my scalar $units = split_eval_units($trimmed, $prev_vm_pkg);
+    my str $next_vm_pkg = $units->{"last_pkg"};
+    my str $body_pkg = $units->{"body_pkg"};
+    my str $body_src = $units->{"body"};
+
     my str $source = $g_eval_vm_decls;
-    if ($is_top == 1) {
-        $source = $source . "package " . $prev_vm_pkg . ";\n" . $trimmed . "\npackage main;\nfunc __eval__() scalar { return undef; }\n";
+    if (length($body_src) > 0) {
+        $source = $source . "package " . $prev_vm_pkg . ";\n" . $units->{"top"} . "\npackage " . $body_pkg . ";\nfunc __eval__() scalar {\n" . $body_src . "\n}\n";
     } else {
-        $source = $source . "package " . $prev_vm_pkg . ";\nfunc __eval__() scalar {\n" . $trimmed . "\n}\n";
+        $source = $source . "package " . $prev_vm_pkg . ";\n" . $units->{"top"} . "\npackage " . $next_vm_pkg . ";\nfunc __eval__() scalar { return undef; }\n";
     }
 
     # Parse
@@ -7322,6 +7799,8 @@ func eval_string_vm(str $code) scalar {
     my hash %newly_declared = ();
     my scalar $pglobals = $program->{"globals"};
     my int $pglobal_cnt = defined($program->{"global_count"}) ? $program->{"global_count"} : 0;
+    my int $top_new_globals = $pglobal_cnt - $g_eval_vm_decls_globals;
+    if ($top_new_globals < 0) { $top_new_globals = 0; }
     my int $pgi = $g_eval_vm_decls_globals;
     while ($pgi < $pglobal_cnt) {
         my scalar $pg = $pglobals->[$pgi];
@@ -7334,7 +7813,11 @@ func eval_string_vm(str $code) scalar {
         $pgi = $pgi + 1;
     }
 
-    # Rewrite trailing expression statement of __eval__ to NI::RETURN_STMT so VM returns its value
+    # Promote top-level my declarations in __eval__ to persistent our declarations,
+    # and rewrite trailing expression statement of __eval__ to NI::RETURN_STMT.
+    my hash %added_our = ();
+    my str $added_our_stubs = "";
+    my int $added_our_cnt = 0;
     my scalar $pfuncs = $program->{"functions"};
     my int $pfcount = $program->{"function_count"};
     my str $eval_entry_name = "__eval__";
@@ -7347,6 +7830,27 @@ func eval_string_vm(str $code) scalar {
             if (defined($body)) {
                 my scalar $stmts = $body->{"statements"};
                 my int $scnt = $body->{"statement_count"};
+                my int $si = 0;
+                while ($si < $scnt) {
+                    my scalar $st = $stmts->[$si];
+                    if (defined($st) && $st->{"type"} == NI::VAR_DECL) {
+                        my str $vn = $st->{"name"};
+                        my str $vsig = $st->{"sigil"};
+                        my int $vt = $st->{"var_type"};
+                        $st->{"type"} = NI::OUR_DECL;
+                        if (length($vn) > 0) {
+                            $newly_declared{$vn} = 1;
+                            if (!exists(%g_eval_vm_our_names, $vn) && !exists(%added_our, $vn)) {
+                                $added_our{$vn} = 1;
+                                $added_our_stubs = $added_our_stubs . "our " . $vsig . $vn . ";\n";
+                                $added_our_cnt = $added_our_cnt + 1;
+                                my scalar $od = ast_new_our_decl($vn, $vt, $vsig);
+                                ast_add_global($program, $od);
+                            }
+                        }
+                    }
+                    $si = $si + 1;
+                }
                 if ($scnt > 0) {
                     my scalar $last_stmt = $stmts->[$scnt - 1];
                     if (defined($last_stmt)) {
@@ -7396,6 +7900,8 @@ func eval_string_vm(str $code) scalar {
     my scalar $globals_ref = \%g_eval_vm_globals;
     my scalar $skip_ref = \%newly_declared;
     my int $compiled_ok = 0;
+    my int $had_vm_exc = 0;
+    my scalar $vm_exc = undef;
     __C__ {
 #ifdef HAVE_VM
         VMProgram *vprog = vm_compile_program(program);
@@ -7410,12 +7916,31 @@ func eval_string_vm(str $code) scalar {
             }
             if (entry) {
                 VM *vvm = vm_new(vprog);
+                vvm->trap_uncaught = 1;
                 vm_run_globals_init(vvm);
-                vm_seed_globals(vvm, globals_ref, skip_ref);
-                VMValue vres = vm_execute(vvm, entry);
-                strada_decref(vm_result);
-                vm_result = vm_value_to_sv(vres);
+                if (!vvm->has_exception) {
+                    vm_seed_globals(vvm, globals_ref, skip_ref);
+                    VMValue vres = vm_execute(vvm, entry);
+                    if (!vvm->has_exception) {
+                        strada_decref(vm_result);
+                        vm_result = vm_value_to_sv(vres);
+                    }
+                }
+                if (vvm->has_exception) {
+                    strada_decref(had_vm_exc);
+                    had_vm_exc = STRADA_MAKE_TAGGED_INT(1);
+                    strada_decref(vm_exc);
+                    vm_exc = vm_value_to_sv(vvm->current_exception);
+                    vvm->has_exception = 0;
+                }
                 vm_run_end_blocks(vvm);
+                if (vvm->has_exception && !strada_to_int(had_vm_exc)) {
+                    strada_decref(had_vm_exc);
+                    had_vm_exc = STRADA_MAKE_TAGGED_INT(1);
+                    strada_decref(vm_exc);
+                    vm_exc = vm_value_to_sv(vvm->current_exception);
+                    vvm->has_exception = 0;
+                }
                 vm_export_globals(vvm, globals_ref);
                 vm_free(vvm);
             }
@@ -7424,19 +7949,26 @@ func eval_string_vm(str $code) scalar {
         }
 #endif
     }
-    if ($compiled_ok == 1) {
-        $g_eval_vm_pkg = $next_vm_pkg;
-        if ($is_top == 1) {
-            my int $is_oneshot = 0;
-            if (index($trimmed, "BEGIN ") == 0 || index($trimmed, "BEGIN{") == 0 ||
-                index($trimmed, "END ") == 0 || index($trimmed, "END{") == 0) {
-                $is_oneshot = 1;
-            }
-            if ($is_oneshot == 0) {
-                $g_eval_vm_decls = $g_eval_vm_decls . "package " . $prev_vm_pkg . ";\n" . $trimmed . "\n";
-                $g_eval_vm_decls_globals = $pglobal_cnt;
-            }
+    if ($compiled_ok == 0) {
+        throw("VM compilation failed");
+    }
+    $g_eval_vm_pkg = $next_vm_pkg;
+    if (length($units->{"top_persist"}) > 0) {
+        $g_eval_vm_decls = $g_eval_vm_decls . "package " . $prev_vm_pkg . ";\n" . $units->{"top_persist"} . "\n";
+        $g_eval_vm_decls_globals = $g_eval_vm_decls_globals + $top_new_globals;
+    }
+    if ($added_our_cnt > 0) {
+        $g_eval_vm_decls = $g_eval_vm_decls . $added_our_stubs;
+        $g_eval_vm_decls_globals = $g_eval_vm_decls_globals + $added_our_cnt;
+        foreach my str $ovn (keys(%added_our)) {
+            $g_eval_vm_our_names{$ovn} = 1;
         }
+    }
+    foreach my str $nvn (keys(%newly_declared)) {
+        $g_eval_vm_our_names{$nvn} = 1;
+    }
+    if ($had_vm_exc == 1) {
+        throw($vm_exc);
     }
     return $vm_result;
 }

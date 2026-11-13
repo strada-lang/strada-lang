@@ -602,36 +602,55 @@ func strip_pp_comment(str $s) str {
     my int $i = 0;
     my int $in_dq = 0;
     my int $in_sq = 0;
+    my str $out = "";
     while ($i < $len) {
         my str $ch = substr($s, $i, 1);
         if ($in_dq == 1) {
-            if ($ch eq "\\") {
+            if ($ch eq "\\" && $i + 1 < $len) {
+                $out = $out . substr($s, $i, 2);
                 $i = $i + 2;
                 next;
             }
             if ($ch eq "\"") {
                 $in_dq = 0;
             }
+            $out = $out . $ch;
         } elsif ($in_sq == 1) {
-            if ($ch eq "\\") {
+            if ($ch eq "\\" && $i + 1 < $len) {
+                $out = $out . substr($s, $i, 2);
                 $i = $i + 2;
                 next;
             }
             if ($ch eq "'") {
                 $in_sq = 0;
             }
+            $out = $out . $ch;
         } else {
             if ($ch eq "\"") {
                 $in_dq = 1;
+                $out = $out . $ch;
             } elsif ($ch eq "'") {
                 $in_sq = 1;
+                $out = $out . $ch;
             } elsif ($ch eq "#") {
-                return trim(substr($s, 0, $i));
+                return trim($out);
+            } elsif ($ch eq "/" && $i + 1 < $len && substr($s, $i + 1, 1) eq "/") {
+                return trim($out);
+            } elsif ($ch eq "/" && $i + 1 < $len && substr($s, $i + 1, 1) eq "*") {
+                my int $close = index($s, "*/", $i + 2);
+                if ($close < 0) {
+                    return trim($out);
+                }
+                $out = $out . " ";
+                $i = $close + 2;
+                next;
+            } else {
+                $out = $out . $ch;
             }
         }
         $i++;
     }
-    return trim($s);
+    return trim($out);
 }
 
 # Find '__C__' outside Strada string literals and '#' comments; returns index or -1.
@@ -762,8 +781,36 @@ func pp_detect_heredoc_tag(str $line) str {
             if ($j > $start) {
                 my str $tag = substr($line, $start, $j - $start);
                 if ($q eq "" || ($j < $len && substr($line, $j, 1) eq $q)) {
-                    # Guard against bit-shift `$x << 1`: bareword heredoc tags are uppercase identifiers or quoted
-                    if ($q ne "" || $tag =~ /^[A-Z_][A-Z0-9_]*$/) {
+                    # Guard against bit-shift `$x << 1` / `$x << y`: allow bareword heredocs with
+                    # lowercase letters unless `<<` follows a value-ending token other than
+                    # statement-intro keywords (`return`, `print`, `say`, `die`, `warn`, `throw`).
+                    my int $is_shift = 0;
+                    if ($q eq "") {
+                        my int $p = $i - 1;
+                        while ($p >= 0 && (substr($line, $p, 1) eq " " || substr($line, $p, 1) eq "\t")) {
+                            $p = $p - 1;
+                        }
+                        if ($p >= 0) {
+                            my str $pch = substr($line, $p, 1);
+                            if ($pch eq ")" || $pch eq "]" || $pch eq "}") {
+                                $is_shift = 1;
+                            } elsif (is_ident_char($pch) == 1) {
+                                my int $ws = $p;
+                                while ($ws > 0 && is_ident_char(substr($line, $ws - 1, 1)) == 1) {
+                                    $ws = $ws - 1;
+                                }
+                                my str $prev_w = substr($line, $ws, $p - $ws + 1);
+                                my str $sig_ch = "";
+                                if ($ws > 0) { $sig_ch = substr($line, $ws - 1, 1); }
+                                if ($sig_ch eq "$" || $sig_ch eq "@" || $sig_ch eq "%"
+                                    || ($prev_w ne "return" && $prev_w ne "print" && $prev_w ne "say"
+                                        && $prev_w ne "die" && $prev_w ne "warn" && $prev_w ne "throw")) {
+                                    $is_shift = 1;
+                                }
+                            }
+                        }
+                    }
+                    if ($q ne "" || ($is_shift == 0 && $tag =~ /^[A-Za-z_][A-Za-z0-9_]*$/)) {
                         return $tag;
                     }
                 }
@@ -1079,28 +1126,30 @@ func preprocess(str $filename) str {
                     }
                 } elsif ($word eq "else") {
                     my str $extra = strip_pp_comment($raw_rest);
-                    if ($extra eq "") {
-                        if (size(@cond_stack) == 0) {
-                            die("stradapp: " . $filename . ":" . ($i + 1) . ": #else without #if/#ifdef/#ifndef");
-                        }
-                        my int $top = size(@cond_stack) - 1;
-                        my int $parent_active = $cond_stack[$top];
-                        if ($parent_active && $cond_taken[$top] == 0) {
-                            $active = 1;
-                            $cond_taken[$top] = 1;
-                        } else {
-                            $active = 0;
-                        }
+                    if ($extra ne "") {
+                        die("stradapp: " . $filename . ":" . ($i + 1) . ": unexpected tokens after #else");
+                    }
+                    if (size(@cond_stack) == 0) {
+                        die("stradapp: " . $filename . ":" . ($i + 1) . ": #else without #if/#ifdef/#ifndef");
+                    }
+                    my int $top = size(@cond_stack) - 1;
+                    my int $parent_active = $cond_stack[$top];
+                    if ($parent_active && $cond_taken[$top] == 0) {
+                        $active = 1;
+                        $cond_taken[$top] = 1;
+                    } else {
+                        $active = 0;
                     }
                 } elsif ($word eq "endif") {
                     my str $extra = strip_pp_comment($raw_rest);
-                    if ($extra eq "") {
-                        if (size(@cond_stack) == 0) {
-                            die("stradapp: " . $filename . ":" . ($i + 1) . ": #endif without #if/#ifdef/#ifndef");
-                        }
-                        $active = pop(@cond_stack);
-                        pop(@cond_taken);
+                    if ($extra ne "") {
+                        die("stradapp: " . $filename . ":" . ($i + 1) . ": unexpected tokens after #endif");
                     }
+                    if (size(@cond_stack) == 0) {
+                        die("stradapp: " . $filename . ":" . ($i + 1) . ": #endif without #if/#ifdef/#ifndef");
+                    }
+                    $active = pop(@cond_stack);
+                    pop(@cond_taken);
                 } elsif ($word eq "include") {
                     if ($active) {
                         my str $rest = strip_pp_comment($raw_rest);

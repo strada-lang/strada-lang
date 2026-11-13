@@ -1,0 +1,383 @@
+package R3TieDelHash;
+func TIEHASH(str $cls, scalar $store) scalar {
+    my hash %self = ("store" => $store, "dels" => "");
+    return bless(\%self, $cls);
+}
+func FETCH(scalar $self, str $key) scalar {
+    return $self->{"store"}->{$key};
+}
+func STORE(scalar $self, str $key, scalar $val) void {
+    $self->{"store"}->{$key} = $val;
+}
+func EXISTS(scalar $self, str $key) int {
+    return exists($self->{"store"}, $key) ? 1 : 0;
+}
+func DELETE(scalar $self, str $key) scalar {
+    $self->{"dels"} = $self->{"dels"} . $key . ",";
+    my scalar $v = $self->{"store"}->{$key};
+    delete($self->{"store"}->{$key});
+    return $v;
+}
+
+package R3StrKeyObj;
+func new(str $s) scalar {
+    my hash %self = ("s" => $s);
+    return bless(\%self, "R3StrKeyObj");
+}
+func to_s(scalar $self, scalar $other, int $rev) str {
+    return $self->{"s"};
+}
+use overload '""' => "to_s";
+
+package R3CatObj;
+func new(int $v) scalar {
+    my hash %self = ("v" => $v);
+    return bless(\%self, "R3CatObj");
+}
+func cat_op(scalar $self, scalar $other, int $rev) str {
+    my str $a = "N(" . $self->{"v"} . ")";
+    my str $b = isa($other, "R3CatObj") ? ("N(" . $other->{"v"} . ")") : ("" . $other);
+    return $rev ? ($b . $a) : ($a . $b);
+}
+use overload "." => "cat_op";
+
+package R3NumBase;
+func new(int $v) scalar {
+    my hash %self = ("v" => $v);
+    return bless(\%self, "R3NumBase");
+}
+func _v(scalar $x) int {
+    if (isa($x, "R3NumBase")) { return $x->{"v"}; }
+    return $x + 0;
+}
+func add(scalar $self, scalar $other, int $rev) scalar {
+    return R3NumBase::new($self->{"v"} + _v($other));
+}
+func sub_op(scalar $self, scalar $other, int $rev) scalar {
+    my int $a = $self->{"v"};
+    my int $b = _v($other);
+    return R3NumBase::new($rev ? ($b - $a) : ($a - $b));
+}
+func mul(scalar $self, scalar $other, int $rev) scalar {
+    return R3NumBase::new($self->{"v"} * _v($other));
+}
+func div_op(scalar $self, scalar $other, int $rev) scalar {
+    my int $a = $self->{"v"};
+    my int $b = _v($other);
+    my int $r = $rev ? int($b / $a) : int($a / $b);
+    return R3NumBase::new($r);
+}
+func mod_op(scalar $self, scalar $other, int $rev) scalar {
+    my int $a = $self->{"v"};
+    my int $b = _v($other);
+    return R3NumBase::new($rev ? ($b % $a) : ($a % $b));
+}
+func pow_op(scalar $self, scalar $other, int $rev) scalar {
+    my int $a = $self->{"v"};
+    my int $b = _v($other);
+    my int $base = $rev ? $b : $a;
+    my int $exp = $rev ? $a : $b;
+    return R3NumBase::new(int($base ** $exp));
+}
+func cat_op(scalar $self, scalar $other, int $rev) str {
+    my str $a = "N(" . $self->{"v"} . ")";
+    my str $b = (ref($other) eq "HASH" && exists($other, "v")) ? ("N(" . $other->{"v"} . ")") : ("" . $other);
+    return $rev ? ($b . $a) : ($a . $b);
+}
+func cmp_num(scalar $self, scalar $other, int $rev) int {
+    my int $a = $self->{"v"};
+    my int $b = _v($other);
+    my int $d = $rev ? ($b - $a) : ($a - $b);
+    if ($d < 0) { return -1; }
+    if ($d > 0) { return 1; }
+    return 0;
+}
+func cmp_str(scalar $self, scalar $other, int $rev) int {
+    my str $a = "" . $self->{"v"};
+    my str $b = "" . _v($other);
+    return $rev ? ($b cmp $a) : ($a cmp $b);
+}
+func eq_num(scalar $self, scalar $other, int $rev) int { return $self->{"v"} == _v($other) ? 1 : 0; }
+func ne_num(scalar $self, scalar $other, int $rev) int { return $self->{"v"} != _v($other) ? 1 : 0; }
+func lt_num(scalar $self, scalar $other, int $rev) int {
+    my int $a = $self->{"v"};
+    my int $b = _v($other);
+    return ($rev ? ($b < $a) : ($a < $b)) ? 1 : 0;
+}
+func le_num(scalar $self, scalar $other, int $rev) int {
+    my int $a = $self->{"v"};
+    my int $b = _v($other);
+    return ($rev ? ($b <= $a) : ($a <= $b)) ? 1 : 0;
+}
+func gt_num(scalar $self, scalar $other, int $rev) int {
+    my int $a = $self->{"v"};
+    my int $b = _v($other);
+    return ($rev ? ($b > $a) : ($a > $b)) ? 1 : 0;
+}
+func ge_num(scalar $self, scalar $other, int $rev) int {
+    my int $a = $self->{"v"};
+    my int $b = _v($other);
+    return ($rev ? ($b >= $a) : ($a >= $b)) ? 1 : 0;
+}
+func eq_str(scalar $self, scalar $other, int $rev) int { return ("" . $self->{"v"}) eq ("" . _v($other)) ? 1 : 0; }
+func ne_str(scalar $self, scalar $other, int $rev) int { return ("" . $self->{"v"}) ne ("" . _v($other)) ? 1 : 0; }
+func neg_op(scalar $self, scalar $other, int $rev) scalar { return R3NumBase::new(0 - $self->{"v"}); }
+func not_op(scalar $self, scalar $other, int $rev) int { return $self->{"v"} == 0 ? 1 : 0; }
+func to_str(scalar $self, scalar $other, int $rev) str { return "B:" . $self->{"v"}; }
+
+use overload
+    "+" => "add", "-" => "sub_op", "*" => "mul", "/" => "div_op", "%" => "mod_op", "**" => "pow_op",
+    "<=>" => "cmp_num", "cmp" => "cmp_str",
+    "==" => "eq_num", "!=" => "ne_num", "<" => "lt_num", "<=" => "le_num", ">" => "gt_num", ">=" => "ge_num",
+    "eq" => "eq_str", "ne" => "ne_str",
+    "neg" => "neg_op", "!" => "not_op", '""' => "to_str";
+
+package R3NumChild;
+extends R3NumBase;
+func new(int $v) scalar {
+    my hash %self = ("v" => $v);
+    return bless(\%self, "R3NumChild");
+}
+func to_str(scalar $self, scalar $other, int $rev) str {
+    return "C:" . $self->{"v"};
+}
+
+package R3Dispatch;
+func new(str $name) scalar {
+    my hash %self = ("name" => $name);
+    return bless(\%self, "R3Dispatch");
+}
+func class_add(str $cls, int $a, int $b) str {
+    return $cls . ":" . ($a + $b);
+}
+func name(scalar $self) str {
+    return "M:" . $self->{"name"};
+}
+
+package R3AutoDispatch;
+extends R3Dispatch;
+func new(str $name) scalar {
+    my hash %self = ("name" => $name);
+    return bless(\%self, "R3AutoDispatch");
+}
+func AUTOLOAD(scalar $self, str $method, scalar ...@args) str {
+    return $method . ":" . $self->{"name"} . ":" . size(@args);
+}
+
+package R3AutoChild;
+extends R3AutoDispatch;
+func new(str $name) scalar {
+    my hash %self = ("name" => $name);
+    return bless(\%self, "R3AutoChild");
+}
+
+package main;
+
+our str $g_r3_loc = "outer";
+our int $g_rget = 0;
+our int $g_box = 10;
+our int $g_se = 0;
+
+func pick_box_ref() scalar {
+    $g_rget = $g_rget + 1;
+    return \$g_box;
+}
+
+func idx_zero_once() int {
+    $g_se = $g_se + 1;
+    return 0;
+}
+
+func make_pad320() str {
+    my str $s = "START_";
+    my int $i = 0;
+    while ($i < 310) {
+        $s = $s . "x";
+        $i = $i + 1;
+    }
+    return $s . "_END";
+}
+
+func local_try_ret() str {
+    my array @log = ();
+    my str $rv = sub_local_ret(\@log);
+    push(@log, "after:" . $g_r3_loc);
+    return $rv . "|" . join(",", @log);
+}
+
+func sub_local_ret(scalar $log) str {
+    try {
+        local $g_r3_loc = "in_try";
+        return $g_r3_loc;
+    } finally {
+        push($log, "fin:" . $g_r3_loc);
+    }
+    return "never";
+}
+
+func main() int {
+    # VM-01: tied hash DELETE + long concat key + INT64_MIN + overloaded key
+    my hash %backing = ("plain" => 11, "k_dyn" => 22);
+    my hash %th = ();
+    my scalar $tieobj = tie(%th, "R3TieDelHash", \%backing);
+    my scalar $d1 = delete($th{"plain"});
+    my str $dyn = "dyn";
+    my scalar $d2 = delete($th{"k_" . $dyn});
+    my int $d1_ok = (!defined($d1) && !exists($th{"plain"})) ? 1 : 0;
+    my int $d2_ok = (!defined($d2) && !exists($th{"k_" . $dyn})) ? 1 : 0;
+    my str $lpad = make_pad320();
+    my hash %lh = ();
+    $lh{"pre_" . $lpad} = "LVAL";
+    my int $ex1 = exists($lh{"pre_" . $lpad}) ? 1 : 0;
+    my scalar $lg1 = $lh{"pre_" . $lpad};
+    my scalar $ld1 = delete($lh{"pre_" . $lpad});
+    my int $ld1_ok = !defined($ld1) ? 1 : 0;
+    my int $ex2 = exists($lh{"pre_" . $lpad}) ? 1 : 0;
+    my int $min64 = -9223372036854775807 - 1;
+    $lh{"min_" . $min64} = "M64";
+    my scalar $ko = R3StrKeyObj::new("kobj");
+    $lh{"o_" . $ko} = "OV";
+    say("VM01:" . $d1_ok . "," . $d2_ok . "," . $tieobj->{"dels"} . $ex1 . "," . $lg1 . "," . $ld1_ok . "," . $ex2 . "," . $lh{"min_" . $min64} . "," . $lh{"o_" . $ko});
+
+    # VM-02: single-eval deref scalar ++/--
+    my scalar $r = \$g_box;
+    my int $i1 = $$r++;
+    my int $i2 = ++$$r;
+    my int $i3 = $$r--;
+    my int $i4 = --$$r;
+    $g_rget = 0;
+    $g_box = 20;
+    my int $i5 = ${pick_box_ref()}++;
+    my int $i6 = ++${pick_box_ref()};
+    say("VM02:" . $i1 . "," . $i2 . "," . $i3 . "," . $i4 . "," . $i5 . "," . $i6 . "," . $g_box . "," . $g_rget);
+
+    # VM-03 & VM-13: full overloads + inherited overloads + subclass override
+    my scalar $a = R3NumBase::new(7);
+    my scalar $b = R3NumBase::new(3);
+    my scalar $c = R3NumChild::new(5);
+    my scalar $d = R3NumChild::new(2);
+    my scalar $catobj = R3CatObj::new(7);
+    my scalar $sum_ab = $a + $b;
+    my scalar $sub_ba = 10 - $b;
+    my scalar $mul_ab = $a * $b;
+    my scalar $div_ab = $a / $b;
+    my scalar $mod_ab = $a % $b;
+    my scalar $pow_cd = $d ** 3;
+    my str $cat_s = $catobj . "!";
+    my scalar $neg_b = -$b;
+    my int $not_z = !R3NumBase::new(0);
+    my int $not_nz = !$b;
+    my scalar $cadd = $c + $d;
+    $cadd += 3;
+    say("VM03:" . ($sum_ab . "") . "," . ($sub_ba . "") . "," . ($mul_ab . "") . "," . ($div_ab . "") . "," . ($mod_ab . "") . "," . ($pow_cd . "") . "," . $cat_s . "," . ($a <=> $b) . "," . ($a cmp $b) . "," . ($a == 7) . "," . ($a != 8) . "," . ($b < $a) . "," . ($b <= 3) . "," . ($a > $b) . "," . ($a >= 7) . "," . ($a eq "7") . "," . ($a ne "8") . "," . ($neg_b . "") . "," . $not_z . "," . $not_nz);
+    say("VM13:" . ($c . "") . "," . ($cadd . ""));
+
+    # VM-05: package method calls, field vs 0-arg method, AUTOLOAD, missing throws
+    my str $pcall = "R3Dispatch"->class_add(4, 5);
+    my scalar $obj = R3Dispatch::new("hero");
+    my str $fld = $obj->{"name"};
+    my str $mth = $obj->name();
+    my scalar $aobj = R3AutoDispatch::new("auto");
+    my str $acall = $aobj->dyn_call(10, 20);
+    my scalar $acobj = R3AutoChild::new("auto2");
+    my str $accall = $acobj->dyn2(99);
+    my str $miss_msg = "";
+    try {
+        $obj->totally_missing();
+    } catch ($me) {
+        $miss_msg = "caught";
+    }
+    say("VM05:" . $pcall . "," . $fld . "," . $mth . "," . $acall . "," . $accall . "," . $miss_msg);
+
+    # VM-07: concat preserving non-string LHS and stringify overload
+    my scalar $ns = 12;
+    $ns .= "34";
+    my scalar $ovl = R3NumChild::new(9);
+    my str $ov_cat = "";
+    $ov_cat .= $ovl;
+    say("VM07:" . $ns . "," . $ov_cat);
+
+    # VM-08: binary strings with NUL bytes
+    my str $bin = "A" . chr(0) . "BC" . chr(0) . "Z";
+    my str $tmpf = "/tmp/strada_r3_vm_bin.dat";
+    core::spew($tmpf, $bin);
+    my str $sl = core::slurp($tmpf);
+    core::unlink($tmpf);
+    my array @bytes = core::unpack("C*", $sl);
+    my str $mut = core::set_byte($sl, 1, 88);
+    my str $bs1 = core::byte_substr($sl, -3, 2);
+    my str $bs2 = core::byte_substr($sl, 1, -1);
+    my array @b1 = core::unpack("C*", $bs1);
+    my array @b2 = core::unpack("C*", $bs2);
+    my array @bm = core::unpack("C*", $mut);
+    say("VM08:" . size(@bytes) . ":" . join(",", @bytes) . "|" . join(",", @bm) . "|" . join(",", @b1) . "|" . join(",", @b2));
+
+    # VM-09 & VM-12: local + try/catch/finally unwind
+    $g_r3_loc = "outer";
+    my str $lt_ret = local_try_ret();
+    my array @llog = ();
+    my int $li = 0;
+    while ($li < 2) {
+        $li = $li + 1;
+        try {
+            local $g_r3_loc = "loop_" . $li;
+            if ($li == 1) { next; }
+            last;
+        } finally {
+            push(@llog, "f" . $li . ":" . $g_r3_loc);
+        }
+    }
+    push(@llog, "end:" . $g_r3_loc);
+    my array @clog = ();
+    try {
+        try {
+            local $g_r3_loc = "try_err";
+            throw "e1";
+        } catch ($e) {
+            push(@clog, "c_entry:" . $g_r3_loc);
+            local $g_r3_loc = "in_catch";
+            throw "e2";
+        } finally {
+            push(@clog, "fin:" . $g_r3_loc);
+        }
+    } catch ($e2) {
+        push(@clog, "outer:" . $g_r3_loc . ":" . $e2);
+    }
+    say("VM09:" . $lt_ret . "|" . join(",", @llog) . "|" . join(",", @clog));
+
+    # VM-10 & VM-11: 1-arg splice, >20 args, labeled do/redo/last, s///ge single-eval lvalue & captures
+    my array @sp = (10, 20, 30, 40, 50);
+    my array @rem = splice(@sp, 2);
+    my array @many = ();
+    push(@many, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20);
+    my str $sfmt = sprintf("%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20);
+
+    my int $do_tries = 0;
+    my int $do_sum = 0;
+    OUTER: do {
+        $do_tries = $do_tries + 1;
+        if ($do_tries == 2) {
+            $do_sum = $do_sum + 100;
+            redo OUTER;
+        }
+        $do_sum = $do_sum + $do_tries;
+        if ($do_tries == 3) {
+            last OUTER;
+        }
+    } while ($do_tries < 5);
+
+    my array @words = ("ab_cd");
+    $g_se = 0;
+    $words[idx_zero_once()] =~ s/([a-z]+)/$1 . "(" . length($1) . ")"/ge;
+    my int $se1 = $g_se;
+    $g_se = 0;
+    $words[idx_zero_once()] =~ tr/a-z/A-Z/;
+    my int $se2 = $g_se;
+    my str $zv = "axb";
+    $zv =~ s/(a|)/"[" . $1 . "]"/ge;
+    say("VM10:" . join(",", @sp) . "|" . join(",", @rem) . "|" . size(@many) . "|" . ($sfmt eq "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20" ? "OK" : "BAD") . "|" . $do_sum . "," . $do_tries);
+    say("VM11:" . $words[0] . "," . $se1 . "," . $se2 . "," . $zv);
+
+    return 0;
+}

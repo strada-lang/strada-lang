@@ -1993,12 +1993,19 @@ func parse_primary(scalar $parser) scalar {
         return ast_new_unary_op("!", $operand);
     }
     
-    # Function reference (&func_name)
+    # Function reference (&func_name or &Pkg::func_name)
     if ($type eq "AMPERSAND") {
         parser_advance($parser);
         my scalar $func_tok = parser_current($parser);
-        parser_expect($parser, "IDENT");
-        return ast_new_func_ref($func_tok->{"value"});
+        parser_expect_ident_like($parser);
+        my str $fn_name = $func_tok->{"value"};
+        while (parser_check($parser, "DOUBLE_COLON")) {
+            parser_advance($parser);
+            my scalar $seg_tok = parser_current($parser);
+            parser_expect_ident_like($parser);
+            $fn_name = $fn_name . "::" . $seg_tok->{"value"};
+        }
+        return ast_new_func_ref($fn_name);
     }
 
     # map { block } @array - transforms each element using $_
@@ -2815,7 +2822,10 @@ func parse_assignment(scalar $parser) scalar {
         parser_advance($parser);
         my scalar $right = parse_assignment($parser);
         if ($left->{"type"} == NODE_VARIABLE()) {
-            return ast_new_assign("=", $left, ast_new_binary_op($bop, $left, $right));
+            my scalar $lcopy = ast_new_variable($left->{"name"}, $left->{"sigil"});
+            $lcopy->{"line"} = $left->{"line"};
+            $lcopy->{"column"} = $left->{"column"};
+            return ast_new_assign("=", $left, ast_new_binary_op($bop, $lcopy, $right));
         }
         return ast_new_assign($bop . "=", $left, $right);
     }
@@ -2828,7 +2838,10 @@ func parse_assignment(scalar $parser) scalar {
         parser_advance($parser);
         my scalar $right = parse_assignment($parser);
         if ($left->{"type"} == NODE_VARIABLE()) {
-            return ast_new_assign("=", $left, ast_new_binary_op("x", $left, $right));
+            my scalar $lcopy = ast_new_variable($left->{"name"}, $left->{"sigil"});
+            $lcopy->{"line"} = $left->{"line"};
+            $lcopy->{"column"} = $left->{"column"};
+            return ast_new_assign("=", $left, ast_new_binary_op("x", $lcopy, $right));
         }
         return ast_new_assign("x=", $left, $right);
     }
@@ -3304,9 +3317,7 @@ func parse_while_stmt(scalar $parser, str $label) scalar {
         }
 
         parser_expect($parser, "DOLLAR");
-        my scalar $wv_name_tok = parser_current($parser);
-        parser_expect($parser, "IDENT");
-        $while_var_name = $wv_name_tok->{"value"};
+        $while_var_name = parse_var_name($parser);
         parser_expect($parser, "ASSIGN");
 
         my scalar $init_expr = parse_expression($parser);
@@ -3418,17 +3429,13 @@ func parse_for_array_style(scalar $parser, str $label, int $fas_line) scalar {
             parser_advance($parser);
         }
 
-        my scalar $name_tok = parser_current($parser);
-        parser_expect($parser, "IDENT");
-        $var_name = $name_tok->{"value"};
+        $var_name = parse_var_name($parser);
 
         $var_decl = ast_new_var_decl($var_name, $var_type, $sigil);
     } else {
         # for $var (@array) - must be existing variable with $ sigil
         parser_expect($parser, "DOLLAR");
-        my scalar $name_tok = parser_current($parser);
-        parser_expect($parser, "IDENT");
-        $var_name = $name_tok->{"value"};
+        $var_name = parse_var_name($parser);
     }
 
     parser_expect($parser, "LPAREN");
@@ -3487,10 +3494,9 @@ func parse_for_stmt(scalar $parser, str $label) scalar {
             parser_advance($parser);
         }
 
-        my scalar $name_tok = parser_current($parser);
-        parser_expect($parser, "IDENT");
+        my str $for_vname = parse_var_name($parser);
 
-        $init = ast_new_var_decl($name_tok->{"value"}, $var_type, $sigil);
+        $init = ast_new_var_decl($for_vname, $var_type, $sigil);
 
         if (parser_check($parser, "ASSIGN")) {
             parser_advance($parser);
@@ -3547,17 +3553,13 @@ func parse_foreach_stmt(scalar $parser, str $label) scalar {
             parser_advance($parser);
         }
 
-        my scalar $name_tok = parser_current($parser);
-        parser_expect($parser, "IDENT");
-        $var_name = $name_tok->{"value"};
+        $var_name = parse_var_name($parser);
 
         $var_decl = ast_new_var_decl($var_name, $var_type, $sigil);
     } elsif (parser_check($parser, "DOLLAR")) {
         # foreach $var (@array) - existing variable with $ sigil
         parser_advance($parser);
-        my scalar $name_tok = parser_current($parser);
-        parser_expect($parser, "IDENT");
-        $var_name = $name_tok->{"value"};
+        $var_name = parse_var_name($parser);
     } else {
         # foreach (@array) - implicit $_ loop variable (declared as my scalar $_)
         $var_name = "_";
@@ -3906,9 +3908,7 @@ func parse_statement(scalar $parser) scalar {
 
             # Now parse the variable: $var
             parser_expect($parser, "DOLLAR");
-            my scalar $name_tok = parser_current($parser);
-            parser_expect($parser, "IDENT");
-            my str $catch_var = $name_tok->{"value"};
+            my str $catch_var = parse_var_name($parser);
             parser_expect($parser, "RPAREN");
 
             my scalar $catch_block = parse_block($parser);
@@ -4148,20 +4148,6 @@ func is_c_keyword(str $name) int {
     if ($name eq "continue") { return 1; }
     if ($name eq "return") { return 1; }
     if ($name eq "goto") { return 1; }
-    if ($name eq "next") { return 1; }
-    if ($name eq "last") { return 1; }
-    if ($name eq "unless") { return 1; }
-    if ($name eq "until") { return 1; }
-    if ($name eq "redo") { return 1; }
-    if ($name eq "foreach") { return 1; }
-    if ($name eq "try") { return 1; }
-    if ($name eq "catch") { return 1; }
-    if ($name eq "throw") { return 1; }
-    if ($name eq "elsif") { return 1; }
-    if ($name eq "my") { return 1; }
-    if ($name eq "use") { return 1; }
-    if ($name eq "package") { return 1; }
-    if ($name eq "version") { return 1; }
     if ($name eq "do") { return 1; }
     if ($name eq "int") { return 1; }
     if ($name eq "char") { return 1; }
@@ -4178,12 +4164,14 @@ func is_c_keyword(str $name) int {
     if ($name eq "register") { return 1; }
     if ($name eq "volatile") { return 1; }
     if ($name eq "auto") { return 1; }
+    if ($name eq "struct") { return 1; }
     if ($name eq "union") { return 1; }
     if ($name eq "enum") { return 1; }
     if ($name eq "typedef") { return 1; }
     if ($name eq "sizeof") { return 1; }
     if ($name eq "inline") { return 1; }
     if ($name eq "restrict") { return 1; }
+    if ($name eq "bool") { return 1; }
     return 0;
 }
 
@@ -4240,8 +4228,9 @@ func parse_function(scalar $parser) scalar {
         $func_name = $name_tok->{"value"};
     }
 
-    # Check for C keywords - they can't be used as function names
-    if (is_c_keyword($func_name) == 1) {
+    # Check for C keywords in top-level main (package functions are prefixed as Pkg_name)
+    my str $fn_cur_pkg = "" . $parser->{"current_package"};
+    if ((length($fn_cur_pkg) == 0 || $fn_cur_pkg eq "main") && is_c_keyword($func_name) == 1) {
         parser_error($parser, "'" . $func_name . "' is a keyword and cannot be used as a function name");
     }
 
@@ -4915,6 +4904,12 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
     $mod_program->{"package"} = $mod_name;
     $mod_parser->{"current_package"} = $mod_name;
     my str $current_mod_pkg = $mod_name;
+    my array @mod_pkgs = ();
+    my hash %mod_pkg_seen = ();
+    if (length($current_mod_pkg) > 0 && $current_mod_pkg ne "main") {
+        push(@mod_pkgs, $current_mod_pkg);
+        $mod_pkg_seen{$current_mod_pkg} = 1;
+    }
 
     # Parse the module's contents (full parity with parse_program)
     while (!parser_check($mod_parser, "EOF")) {
@@ -4964,9 +4959,12 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
             my scalar $st = parse_struct($mod_parser);
             ast_add_struct($mod_program, $st);
         } elsif (parser_check($mod_parser, "PACKAGE")) {
-            flush_has_constructor($mod_program, $current_mod_pkg);
             parse_package($mod_parser, $mod_program);
             $current_mod_pkg = $mod_program->{"package"};
+            if (length($current_mod_pkg) > 0 && $current_mod_pkg ne "main" && !exists(%mod_pkg_seen, $current_mod_pkg)) {
+                push(@mod_pkgs, $current_mod_pkg);
+                $mod_pkg_seen{$current_mod_pkg} = 1;
+            }
         } elsif (parser_check($mod_parser, "VERSION")) {
             parse_version($mod_parser, $mod_program);
         } elsif (parser_check($mod_parser, "INHERIT")) {
@@ -5043,8 +5041,12 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
         }
     }
 
-    # Flush auto-constructor for the last package in the module
-    flush_has_constructor($mod_program, $current_mod_pkg);
+    # Flush auto-constructors for all packages declared in this module after the entire module is parsed
+    my int $mpi = 0;
+    while ($mpi < size(@mod_pkgs)) {
+        flush_has_constructor($mod_program, $mod_pkgs[$mpi]);
+        $mpi = $mpi + 1;
+    }
 
     # Get the module's primary package name for tagging
     my str $src_module = $mod_program->{"package"};
@@ -7228,9 +7230,11 @@ func parse_has_declaration(scalar $parser, scalar $program) void {
     # eager default_node=0 on %attr so neither new() nor inline-accessor bypasses it!
     my scalar $eager_default_node = $default_node;
     my str $meta_builder = $builder_name;
-    if ($is_lazy == 1 && length($builder_name) == 0 && $default_node != 0) {
+    if ($is_lazy == 1) {
         $eager_default_node = 0;
-        $meta_builder = "__lazy";
+        if (length($builder_name) == 0 && $default_node != 0) {
+            $meta_builder = "__lazy";
+        }
     }
 
     # Store attribute metadata on program
@@ -7434,8 +7438,13 @@ func flush_has_constructor(scalar $program, str $pkg) void {
     ast_add_statement($ctor_body, $self_decl);
 
     # Parse named args: while ($__i + 1 < scalar(@args)) { $self{$args[$__i]} = $args[$__i + 1]; $__i += 2; }
+    # Initialize $__i to scalar(@args) % 2 so both Pkg::new("k", v) (even args)
+    # and "Pkg"->new("k", v) (odd args with leading $self class name) work.
     my scalar $i_decl = ast_new_var_decl("__i", TYPE_INT(), "$");
-    $i_decl->{"init"} = ast_new_int_literal(0);
+    my scalar $init_args_var = ast_new_variable("args", "@");
+    my scalar $init_scalar_call = ast_new_call("scalar");
+    ast_add_arg($init_scalar_call, $init_args_var);
+    $i_decl->{"init"} = ast_new_binary_op("%", $init_scalar_call, ast_new_int_literal(2));
     ast_add_statement($ctor_body, $i_decl);
 
     my scalar $i_var = ast_new_variable("__i", "$");
@@ -7495,7 +7504,12 @@ func flush_has_constructor(scalar $program, str $pkg) void {
             my scalar $rhs = ast_new_binary_op("//", $s_val, $a_default);
 
             my scalar $attr_assign = ast_new_assign("=", $self_acc, $rhs);
-            ast_add_statement($ctor_body, ast_new_expr_stmt($attr_assign));
+            my scalar $def_stmt = ast_new_expr_stmt($attr_assign);
+            my str $attr_decl_pkg = "" . $attr->{"package"};
+            if (length($attr_decl_pkg) > 0) {
+                $def_stmt->{"eval_package"} = $attr_decl_pkg;
+            }
+            ast_add_statement($ctor_body, $def_stmt);
         }
 
         # (required): the constructor refuses to build the object without it.
@@ -7653,6 +7667,14 @@ func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low, sca
     # Store low-priority paths to add after parsing
     my int $low_path_count = size($lib_paths_low);
 
+    my array @main_pkgs = ();
+    my hash %main_pkg_seen = ();
+    my str $init_main_pkg = "" . $program->{"package"};
+    if (length($init_main_pkg) > 0 && $init_main_pkg ne "main") {
+        push(@main_pkgs, $init_main_pkg);
+        $main_pkg_seen{$init_main_pkg} = 1;
+    }
+
     while (!parser_check($parser, "EOF")) {
         # Stray `;` between top-level items (e.g. `func f() { ... };`)
         if (parser_check($parser, "SEMI")) {
@@ -7745,10 +7767,12 @@ func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low, sca
             my scalar $st = parse_struct($parser);
             ast_add_struct($program, $st);
         } elsif (parser_check($parser, "PACKAGE")) {
-            # Flush has-constructor for previous package before switching
-            my str $prev_pkg = $program->{"package"};
-            flush_has_constructor($program, $prev_pkg);
             parse_package($parser, $program);
+            my str $new_pkg = "" . $program->{"package"};
+            if (length($new_pkg) > 0 && $new_pkg ne "main" && !exists(%main_pkg_seen, $new_pkg)) {
+                push(@main_pkgs, $new_pkg);
+                $main_pkg_seen{$new_pkg} = 1;
+            }
         } elsif (parser_check($parser, "VERSION")) {
             parse_version($parser, $program);
         } elsif (parser_check($parser, "INHERIT")) {
@@ -7828,9 +7852,7 @@ func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low, sca
         }
     }
 
-    # Flush has-constructor for the last package
-    my str $final_pkg = $program->{"package"};
-    flush_has_constructor($program, $final_pkg);
+    $program->{"main_packages"} = \@main_pkgs;
 
     # Add low-priority library paths last (after all use lib statements)
     $path_i = 0;
@@ -7858,6 +7880,14 @@ func parse_program(scalar $parser, scalar $lib_paths, scalar $lib_paths_low, sca
         my str $a_path = $implicit_archs->[$imp_i];
         parse_implicit_import_archive($parser, $program, $a_path);
         $imp_i = $imp_i + 1;
+    }
+
+    # Flush auto-constructors for all main-file packages now that reopened
+    # packages, forward inheritance, and CLI object/archive imports are loaded.
+    my int $mp_i = 0;
+    while ($mp_i < size(@main_pkgs)) {
+        flush_has_constructor($program, $main_pkgs[$mp_i]);
+        $mp_i = $mp_i + 1;
     }
 
 
@@ -7986,6 +8016,49 @@ func parse_with_implicit_imports(scalar $tokens, str $filename, scalar $lib_path
         while ($imp_i < $imp_lib_count) {
             parse_implicit_import_lib($parser, $program, $implicit_libs->[$imp_i]);
             $imp_i = $imp_i + 1;
+        }
+        if ($imp_lib_count > 0) {
+            my scalar $mpkgs = $program->{"main_packages"};
+            if (defined($mpkgs) && size(@{$mpkgs}) > 0) {
+                my hash %mpkg_set = ();
+                my int $mi = 0;
+                while ($mi < size(@{$mpkgs})) {
+                    $mpkg_set{$mpkgs->[$mi]} = 1;
+                    $mi = $mi + 1;
+                }
+                my scalar $old_funcs = $program->{"functions"};
+                my int $old_fc = $program->{"function_count"} + 0;
+                my array @kept_funcs = ();
+                my int $fi = 0;
+                while ($fi < $old_fc) {
+                    my scalar $fn = $old_funcs->[$fi];
+                    if ($fn->{"is_synthesized"} == 1 && $fn->{"bare_name"} eq "new" &&
+                        ($mpkg_set{"" . $fn->{"package"}} + 0) == 1) {
+                        $fi = $fi + 1;
+                        next;
+                    }
+                    push(@kept_funcs, $fn);
+                    $fi = $fi + 1;
+                }
+                $program->{"functions"} = \@kept_funcs;
+                $program->{"function_count"} = size(@kept_funcs);
+                $mi = 0;
+                while ($mi < size(@{$mpkgs})) {
+                    flush_has_constructor($program, $mpkgs->[$mi]);
+                    $mi = $mi + 1;
+                }
+                if (length($filename) > 0) {
+                    my scalar $all_f = $program->{"functions"};
+                    my int $all_n = $program->{"function_count"} + 0;
+                    my int $si = 0;
+                    while ($si < $all_n) {
+                        if (length("" . $all_f->[$si]->{"file"}) == 0) {
+                            $all_f->[$si]->{"file"} = $filename;
+                        }
+                        $si = $si + 1;
+                    }
+                }
+            }
         }
     }
     return $program;

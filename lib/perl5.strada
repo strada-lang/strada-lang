@@ -275,11 +275,11 @@ func eval(str $code) str {
             if (SvTRUE(ERRSV)) {
                 STRLEN len;
                 const char *err = SvPV(ERRSV, len);
-                result = strada_new_str(err);
+                result = strada_new_str_len(err, (size_t)len);
             } else if (perl_result && SvOK(perl_result)) {
                 STRLEN len;
                 const char *str = SvPV(perl_result, len);
-                result = strada_new_str(str);
+                result = strada_new_str_len(str, (size_t)len);
             } else {
                 result = strada_new_str("");
             }
@@ -309,6 +309,9 @@ func call(str $sub_name, str $arg) str {
         } else {
             char *sub_str = strada_to_str(sub_name);
             char *arg_str = strada_to_str(arg);
+            size_t arg_len = (arg && !STRADA_IS_TAGGED_INT(arg) && arg->type == STRADA_STR)
+                ? (size_t)strada_str_len(arg)
+                : (arg_str ? strlen(arg_str) : 0);
 
             dSP;
             ENTER;
@@ -316,7 +319,7 @@ func call(str $sub_name, str $arg) str {
             PUSHMARK(SP);
 
             if (arg && (STRADA_IS_TAGGED_INT(arg) || arg->type != STRADA_UNDEF)) {
-                XPUSHs(sv_2mortal(newSVpv(arg_str ? arg_str : "", 0)));
+                XPUSHs(sv_2mortal(newSVpvn(arg_str ? arg_str : "", arg_len)));
             }
 
             PUTBACK;
@@ -327,15 +330,18 @@ func call(str $sub_name, str $arg) str {
 
             strada_decref(result);
             if (SvTRUE(ERRSV)) {
+                if (count > 0) {
+                    (void)POPs;
+                }
                 STRLEN len;
                 const char *err = SvPV(ERRSV, len);
-                result = strada_new_str(err);
+                result = strada_new_str_len(err, (size_t)len);
             } else if (count > 0) {
                 SV *ret = POPs;
                 if (SvOK(ret)) {
                     STRLEN len;
                     const char *str = SvPV(ret, len);
-                    result = strada_new_str(str);
+                    result = strada_new_str_len(str, (size_t)len);
                 } else {
                     result = strada_new_str("");
                 }
@@ -353,7 +359,7 @@ func call(str $sub_name, str $arg) str {
 
 # Call a Perl subroutine with no arguments
 func call_noargs(str $sub_name) str {
-    return perl5::call($sub_name, "");
+    return perl5::call($sub_name, undef);
 }
 
 # Call a Perl subroutine that returns a list, get as joined string
@@ -439,6 +445,9 @@ func set_var(str $name, str $value) void {
         if (my_perl) {
             char *orig_name = strada_to_str(name);
             char *value_str = strada_to_str(value);
+            size_t vlen = (value && !STRADA_IS_TAGGED_INT(value) && value->type == STRADA_STR)
+                ? (size_t)strada_str_len(value)
+                : (value_str ? strlen(value_str) : 0);
             const char *name_str = orig_name;
 
             /* Skip the sigil if present */
@@ -447,7 +456,9 @@ func set_var(str $name, str $value) void {
             }
 
             SV *sv = get_sv(name_str, GV_ADD);
-            sv_setpv(sv, value_str);
+            if (sv) {
+                sv_setpvn(sv, value_str ? value_str : "", vlen);
+            }
             free(orig_name);
             free(value_str);
         }
@@ -475,7 +486,7 @@ func get_var(str $name) str {
             if (sv && SvOK(sv)) {
                 STRLEN len;
                 const char *str = SvPV(sv, len);
-                result = strada_new_str(str);
+                result = strada_new_str_len(str, (size_t)len);
             } else {
                 result = strada_new_str("");
             }
@@ -494,7 +505,7 @@ func get_error() str {
         } else if (SvTRUE(ERRSV)) {
             STRLEN len;
             const char *err = SvPV(ERRSV, len);
-            result = strada_new_str(err);
+            result = strada_new_str_len(err, (size_t)len);
         } else {
             result = strada_new_str("");
         }

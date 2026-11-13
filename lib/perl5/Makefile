@@ -5,6 +5,15 @@
 #
 # Requirements: libperl-dev (Debian/Ubuntu) or perl-devel (RHEL/Fedora)
 
+-include ../../config.mk
+
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+    SHARED_LDFLAGS = -dynamiclib -Wl,-undefined,dynamic_lookup
+else
+    SHARED_LDFLAGS = -shared
+endif
+
 CC ?= gcc
 CFLAGS = -Wall -Wextra -fPIC -O2
 
@@ -25,7 +34,7 @@ $(TARGET): strada_perl5.c
 		echo "Error: Perl embedding not available. Install libperl-dev or perl-devel."; \
 		exit 1; \
 	fi
-	$(CC) -shared $(CFLAGS) -o $@ $< $(RUNTIME_INC) $(PERL_CFLAGS) $(PERL_LDFLAGS)
+	$(CC) $(SHARED_LDFLAGS) $(CFLAGS) -o $@ $< $(RUNTIME_INC) $(PERL_CFLAGS) $(PERL_LDFLAGS)
 	@echo "Built $(TARGET)"
 
 clean:

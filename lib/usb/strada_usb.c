@@ -30,9 +30,7 @@ static ssize_t cached_device_count = 0;
 
 /* ===== Initialization ===== */
 
-/* Initialize libusb
- * Returns 0 on success, negative error code on failure */
-int strada_usb_init(void) {
+static int usb_ensure_init(void) {
     if (usb_initialized) {
         return 0;
     }
@@ -43,8 +41,14 @@ int strada_usb_init(void) {
     return ret;
 }
 
+/* Initialize libusb
+ * Returns 0 on success, negative error code on failure */
+StradaValue* strada_usb_init(void) {
+    return strada_new_int(usb_ensure_init());
+}
+
 /* Cleanup libusb */
-void strada_usb_exit(void) {
+StradaValue* strada_usb_exit(void) {
     if (cached_device_list) {
         libusb_free_device_list(cached_device_list, 1);
         cached_device_list = NULL;
@@ -55,17 +59,21 @@ void strada_usb_exit(void) {
         usb_ctx = NULL;
         usb_initialized = 0;
     }
+    return strada_new_undef();
 }
 
 /* Set debug level (0=none, 1=error, 2=warning, 3=info, 4=debug) */
-void strada_usb_set_debug(StradaValue *level_sv) {
-    if (!usb_initialized) strada_usb_init();
+StradaValue* strada_usb_set_debug(StradaValue *level_sv) {
+    if (usb_ensure_init() != 0) {
+        return strada_new_undef();
+    }
     int level = (int)strada_to_int(level_sv);
 #if LIBUSB_API_VERSION >= 0x01000106
     libusb_set_option(usb_ctx, LIBUSB_OPTION_LOG_LEVEL, level);
 #else
     libusb_set_debug(usb_ctx, level);
 #endif
+    return strada_new_undef();
 }
 
 /* Get libusb error string */
@@ -80,12 +88,13 @@ StradaValue* strada_usb_strerror(StradaValue *errcode_sv) {
 /* Get list of USB devices
  * Returns array of device info hashes with vid, pid, bus, address */
 StradaValue* strada_usb_get_device_list(void) {
-    if (!usb_initialized) strada_usb_init();
+    StradaValue *result = strada_new_array();
+    if (usb_ensure_init() != 0) {
+        return result;
+    }
 
     libusb_device **list;
     ssize_t count = libusb_get_device_list(usb_ctx, &list);
-
-    StradaValue *result = strada_new_array();
 
     if (count < 0) {
         return result;
@@ -131,7 +140,9 @@ StradaValue* strada_usb_get_device_list(void) {
 /* Open device by VID:PID
  * Returns device handle (as int) or 0 on failure */
 StradaValue* strada_usb_open_device(StradaValue *vid_sv, StradaValue *pid_sv) {
-    if (!usb_initialized) strada_usb_init();
+    if (usb_ensure_init() != 0) {
+        return strada_new_int(0);
+    }
 
     uint16_t vid = (uint16_t)strada_to_int(vid_sv);
     uint16_t pid = (uint16_t)strada_to_int(pid_sv);
@@ -147,7 +158,9 @@ StradaValue* strada_usb_open_device(StradaValue *vid_sv, StradaValue *pid_sv) {
 /* Open device by bus and address
  * Returns device handle or 0 on failure */
 StradaValue* strada_usb_open_device_by_path(StradaValue *bus_sv, StradaValue *addr_sv) {
-    if (!usb_initialized) strada_usb_init();
+    if (usb_ensure_init() != 0) {
+        return strada_new_int(0);
+    }
 
     int target_bus = (int)strada_to_int(bus_sv);
     int target_addr = (int)strada_to_int(addr_sv);
@@ -683,7 +696,9 @@ StradaValue* strada_usb_error_not_supported(void) { return strada_new_int(LIBUSB
 
 /* Refresh the device list cache */
 int strada_usb_refresh_device_list_raw(void) {
-    if (!usb_initialized) strada_usb_init();
+    if (usb_ensure_init() != 0) {
+        return -1;
+    }
 
     /* Free old list if exists */
     if (cached_device_list) {
@@ -762,13 +777,13 @@ void strada_usb_free_device_list_raw(void) {
 
 /* Open device by VID:PID - returns handle as pointer */
 void* strada_usb_open_device_raw(int vid, int pid) {
-    if (!usb_initialized) strada_usb_init();
+    if (usb_ensure_init() != 0) return NULL;
     return libusb_open_device_with_vid_pid(usb_ctx, (uint16_t)vid, (uint16_t)pid);
 }
 
 /* Open device by bus/address - returns handle as pointer */
 void* strada_usb_open_device_by_path_raw(int bus, int addr) {
-    if (!usb_initialized) strada_usb_init();
+    if (usb_ensure_init() != 0) return NULL;
 
     libusb_device **list;
     ssize_t count = libusb_get_device_list(usb_ctx, &list);
@@ -1016,7 +1031,7 @@ int strada_usb_reset_device_raw(void *handle) {
 
 /* Debug level */
 void strada_usb_set_debug_raw(int level) {
-    if (!usb_initialized) strada_usb_init();
+    if (usb_ensure_init() != 0) return;
 #if LIBUSB_API_VERSION >= 0x01000106
     libusb_set_option(usb_ctx, LIBUSB_OPTION_LOG_LEVEL, level);
 #else

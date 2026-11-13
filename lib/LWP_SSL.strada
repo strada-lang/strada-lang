@@ -276,6 +276,19 @@ func _strip_crlf(str $s) str {
     return replace_all($out, "\n", "");
 }
 
+# Check RFC 3986 scheme before "://" (ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ))
+func _has_valid_scheme(str $u) int {
+    my int $pos = index($u, "://");
+    if ($pos <= 0) {
+        return 0;
+    }
+    my str $scheme = substr($u, 0, $pos);
+    if ($scheme =~ /^[a-zA-Z][a-zA-Z0-9+.-]*$/) {
+        return $pos;
+    }
+    return 0;
+}
+
 # Parse a URL into components
 func parse_url(str $url) hash {
     my hash %result = ();
@@ -291,9 +304,9 @@ func parse_url(str $url) hash {
         $remaining = substr($remaining, 0, $frag_pos);
     }
 
-    my int $scheme_end = index($remaining, "://");
+    my int $scheme_end = LWP_SSL::_has_valid_scheme($remaining);
     if ($scheme_end > 0) {
-        $result{"scheme"} = substr($remaining, 0, $scheme_end);
+        $result{"scheme"} = lc(substr($remaining, 0, $scheme_end));
         $remaining = substr($remaining, $scheme_end + 3, length($remaining) - $scheme_end - 3);
         if ($result{"scheme"} eq "https") {
             $result{"port"} = 443;
@@ -488,7 +501,10 @@ func _chunked_complete(str $raw, int $pos) int {
         if ($chunk_len < 0) { return 1; }
         $pos = $nl + 2;
         if ($chunk_len == 0) {
-            return (core::byte_index($raw, "\r\n", $pos) >= 0) ? 1 : 0;
+            if ($pos + 2 <= $total && core::byte_substr($raw, $pos, 2) eq "\r\n") {
+                return 1;
+            }
+            return (core::byte_index($raw, "\r\n\r\n", $pos) >= 0) ? 1 : 0;
         }
         if ($pos + $chunk_len + 2 > $total) { return 0; }
         $pos = $pos + $chunk_len + 2;
@@ -652,8 +668,16 @@ func _format_host_header(str $scheme, str $host, int $port) str {
 
 # Internal: resolve relative or absolute redirect Location against base URL
 func _resolve_url(str $base_url, str $location) str {
-    if (index($location, "://") > 0) {
-        return $location;
+    my int $sch_pos = LWP_SSL::_has_valid_scheme($location);
+    if ($sch_pos > 0) {
+        my str $sch = lc(substr($location, 0, $sch_pos));
+        if ($sch eq "http" || $sch eq "https") {
+            return $location;
+        }
+        return "";
+    }
+    if ($location =~ /^[a-zA-Z][a-zA-Z0-9+.-]*:/) {
+        return "";
     }
     my hash %bu = LWP_SSL::parse_url($base_url);
     my str $authority = LWP_SSL::_format_host_header($bu{"scheme"}, $bu{"host"}, $bu{"port"});
@@ -839,15 +863,61 @@ func _headers_too_large(str $raw, int $max) int {
     }
 }
 
-# Read HTTP response from socket. Stops early once more than
-# $max_header_bytes arrive without the end of the headers, or once the
-# response grows past $max_response_bytes (0 = no limit for either).
-func read_http_response(scalar $sock, int $max_header_bytes = 65536, int $max_response_bytes = 67108864, str $method = "GET", int $timeout_ms = 0) str {
+# Internal: check for incomplete headers, truncated chunked stream, or Content-Length shortfall.
+func _check_framing_truncation(str $raw, str $method) str {
+    if (core::byte_length($raw) == 0) {
+        return "";
+    }
+    my int $hdr_start = 0;
+    my int $header_end = -1;
+    my str $headers_part = "";
+    my int $status = 0;
+    while (1) {
+        $header_end = core::byte_index($raw, "\r\n\r\n", $hdr_start);
+        if ($header_end < 0) {
+            return "Truncated HTTP response headers";
+        }
+        $headers_part = core::byte_substr($raw, $hdr_start, $header_end - $hdr_start);
+        my int $first_eol = core::byte_index($headers_part, "\r\n");
+        my str $status_line = ($first_eol > 0) ? core::byte_substr($headers_part, 0, $first_eol) : $headers_part;
+        my array @sp = split(" ", $status_line);
+        $status = (scalar(@sp) >= 2) ? cast_int($sp[1]) : 0;
+        if (LWP_SSL::_is_interim_status($status)) {
+            $hdr_start = $header_end + 4;
+            next;
+        }
+        last;
+    }
+    if (uc($method) eq "HEAD" || $status == 204 || $status == 304 || ($status >= 100 && $status < 200)) {
+        return "";
+    }
+    my scalar $te_val = LWP_SSL::_find_header_value($headers_part, "transfer-encoding:");
+    if (defined($te_val) && index($te_val, "chunked") >= 0) {
+        if (!LWP_SSL::_chunked_complete($raw, $header_end + 4)) {
+            return "Truncated chunked HTTP response";
+        }
+        return "";
+    }
+    my scalar $cl_val = LWP_SSL::_find_header_value($headers_part, "content-length:");
+    if (defined($cl_val)) {
+        my int $content_length = cast_int($cl_val);
+        my int $body_bytes = core::byte_length($raw) - ($header_end + 4);
+        if ($body_bytes < $content_length) {
+            return "Truncated HTTP response body";
+        }
+    }
+    return "";
+}
+
+# Read HTTP response from socket returning {raw => str, timed_out => int}.
+func _read_http_response_ex(scalar $sock, int $max_header_bytes = 65536, int $max_response_bytes = 67108864, str $method = "GET", int $timeout_ms = 0) hash {
     my str $response = "";
+    my int $timed_out = 0;
     while (1) {
         if ($timeout_ms > 0) {
             my scalar $ready = core::socket_select([$sock], $timeout_ms);
             if (!defined($ready) || scalar($ready) == 0) {
+                $timed_out = 1;
                 break;
             }
         }
@@ -866,7 +936,18 @@ func read_http_response(scalar $sock, int $max_header_bytes = 65536, int $max_re
             break;
         }
     }
-    return $response;
+    my hash %res = ();
+    $res{"raw"} = $response;
+    $res{"timed_out"} = $timed_out;
+    return %res;
+}
+
+# Read HTTP response from socket. Stops early once more than
+# $max_header_bytes arrive without the end of the headers, or once the
+# response grows past $max_response_bytes (0 = no limit for either).
+func read_http_response(scalar $sock, int $max_header_bytes = 65536, int $max_response_bytes = 67108864, str $method = "GET", int $timeout_ms = 0) str {
+    my hash %rd = LWP_SSL::_read_http_response_ex($sock, $max_header_bytes, $max_response_bytes, $method, $timeout_ms);
+    return $rd{"raw"};
 }
 
 # Internal: Make HTTP request (plain)
@@ -885,7 +966,8 @@ func do_http_request(str $host, int $port, str $request, int $max_header_bytes =
         $response{"error"} = "Send failed to " . $host . ":" . $port;
         return %response;
     }
-    my str $raw_response = LWP_SSL::read_http_response($sock, $max_header_bytes, $max_response_bytes, $method, $timeout_ms);
+    my hash %rd = LWP_SSL::_read_http_response_ex($sock, $max_header_bytes, $max_response_bytes, $method, $timeout_ms);
+    my str $raw_response = $rd{"raw"};
     core::socket_close($sock);
 
     if ($max_response_bytes > 0 && core::byte_length($raw_response) > $max_response_bytes) {
@@ -894,6 +976,15 @@ func do_http_request(str $host, int $port, str $request, int $max_header_bytes =
     }
     if (LWP_SSL::_headers_too_large($raw_response, $max_header_bytes)) {
         $response{"error"} = "HTTP response headers exceed " . $max_header_bytes . " bytes";
+        return %response;
+    }
+    if ($rd{"timed_out"} == 1) {
+        $response{"error"} = "HTTP read timeout";
+        return %response;
+    }
+    my str $trunc_err = LWP_SSL::_check_framing_truncation($raw_response, $method);
+    if (length($trunc_err) > 0) {
+        $response{"error"} = $trunc_err;
         return %response;
     }
     return LWP_SSL::parse_response($raw_response);
@@ -951,6 +1042,11 @@ func do_https_request(str $host, int $port, str $request, int $max_header_bytes 
         $response{"error"} = "HTTP response headers exceed " . $max_header_bytes . " bytes";
         return %response;
     }
+    my str $trunc_err = LWP_SSL::_check_framing_truncation($raw_response, $method);
+    if (length($trunc_err) > 0) {
+        $response{"error"} = $trunc_err;
+        return %response;
+    }
     return LWP_SSL::parse_response($raw_response);
 }
 
@@ -974,6 +1070,11 @@ func _do_single_request(str $method, str $url, str $body, hash %options) hash {
                 return %err_resp;
             }
         }
+    }
+
+    if (LWP_SSL::_has_valid_scheme($url) == 0 && $url =~ /^[a-zA-Z][a-zA-Z0-9+.-]*:/) {
+        $err_resp{"error"} = "Unsupported URL scheme";
+        return %err_resp;
     }
 
     my hash %url_parts = LWP_SSL::parse_url($url);
@@ -1002,8 +1103,11 @@ func _do_single_request(str $method, str $url, str $body, hash %options) hash {
     }
     if ($scheme eq "https") {
         return LWP_SSL::do_https_request($host, $port, $request, $max_hdr, $max_resp, $method, $timeout_ms, $verify);
-    } else {
+    } elsif ($scheme eq "http") {
         return LWP_SSL::do_http_request($host, $port, $request, $max_hdr, $max_resp, $method, $timeout_ms);
+    } else {
+        $err_resp{"error"} = "Unsupported URL scheme: " . $scheme;
+        return %err_resp;
     }
 }
 
@@ -1033,6 +1137,11 @@ func do_request(str $method, str $url, str $body, hash %options) hash {
                     return %resp;
                 }
                 my str $next_url = LWP_SSL::_resolve_url($cur_url, $loc);
+                if (length($next_url) == 0) {
+                    $resp{"success"} = 0;
+                    $resp{"error"} = "Unsupported redirect URL scheme";
+                    return %resp;
+                }
                 %cur_opts = LWP_SSL::_redirect_options(%cur_opts, $cur_url, $next_url);
                 $cur_url = $next_url;
                 if (($st == 301 || $st == 302 || $st == 303) && uc($cur_method) eq "POST") {

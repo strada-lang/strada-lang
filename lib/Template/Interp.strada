@@ -408,13 +408,19 @@ func exec_include(scalar $tt, scalar $node, scalar $stash, scalar $sb, int $shar
     my str $name = Template::Stash::as_text(Template::Expr::eval_node($node->{"name"}, $stash));
     my scalar $prev = undef;
     if ($share == 0) { $prev = Template::Stash::push_frame($stash); }
-    bind_params($node->{"params"}, $stash);
-    my scalar $nodes = resolve_template_nodes($tt, $name, $stash);
-    my int $depth = ($stash->{"__depth__"} // 0) + 0;
-    my int $max = ($stash->{"__maxrec__"} // 100) + 0;
-    if ($depth >= $max) {
+    my scalar $nodes = undef;
+    my int $depth = 0;
+    try {
+        bind_params($node->{"params"}, $stash);
+        $nodes = resolve_template_nodes($tt, $name, $stash);
+        $depth = ($stash->{"__depth__"} // 0) + 0;
+        my int $max = ($stash->{"__maxrec__"} // 100) + 0;
+        if ($depth >= $max) {
+            throw(Template::Exception::make("file", $name . ": recursion limit exceeded"));
+        }
+    } catch ($prep_err) {
         if ($share == 0) { Template::Stash::pop_frame($stash, $prev); }
-        throw(Template::Exception::make("file", $name . ": recursion limit exceeded"));
+        throw($prep_err);
     }
     $stash->{"__depth__"} = $depth + 1;
     my int $returned = 0;

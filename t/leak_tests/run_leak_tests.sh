@@ -154,6 +154,7 @@ TESTS=(
     "test_phase4_stdlib_leaks"
     "test_phase5_eval_jit_leaks"
     "test_audit_r2_leaks"
+    "test_audit_r3_leaks"
 )
 
 FILTER="${1:-}"
@@ -185,6 +186,9 @@ for test in "${TESTS[@]}"; do
     case "$test" in
         test_crypt|test_combined)
             EXTRA_FLAGS="-lcrypt"
+            ;;
+        test_audit_r3_leaks)
+            EXTRA_FLAGS="-lcrypt -lsqlite3"
             ;;
         test_import_lib_devirt)
             # Pre-build the companion shared library the host imports

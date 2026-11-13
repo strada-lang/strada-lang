@@ -1,0 +1,80 @@
+#!/usr/bin/env strada
+# Valgrind leak regression suite for Cycle 3 Audit (runtime, compiler, stdlib)
+
+use lib "lib";
+use Forma;
+use JSON::PS;
+use YAML;
+use DBI;
+use Nesso;
+use Nesso::Record;
+use crypt;
+use LWP;
+use Template;
+
+func leak_closures_and_sort(int $i) int {
+    my str $pfx = "k" . $i;
+    my scalar $f = func (int $n) {
+        if ($n <= 0) { return 0; }
+        return 1;
+    };
+    my array @a = (3, 1, 2);
+    my array @s = sort { $a <=> $b; } @a;
+    if ($s[0] != 1 || $f->(1) != 1) { return 1; }
+    my str $res = "xy";
+    $res =~ s/([xy])/ "[" . $pfx . $1 . "]" /ge;
+    if (length($res) == 0) { return 1; }
+    return 0;
+}
+
+func main() int {
+    my scalar $dbh = DBI::connect("dbi:SQLite::memory:", "", "");
+    DBI::do_sql($dbh, "CREATE TABLE l3 (id TEXT PRIMARY KEY, val TEXT)");
+    my scalar $orm = Nesso::new($dbh);
+    $orm->define("l3", {"table" => "l3", "columns" => ["id", "val"], "primary" => "id"});
+    my scalar $tt = Template::new({});
+
+    my int $i = 0;
+    while ($i < 30) {
+        if (leak_closures_and_sort($i) != 0) { return 1; }
+
+        my str $f1 = Forma::render_string('{{ a | replace("", "x") }}:{{ b | url_decode }}',
+                                          {"a" => "hi", "b" => "caf%C3%A9"});
+        if ($f1 ne "hi:café") { return 2; }
+
+        my scalar $jp = JSON::PS::decode('{"k":"café","t":true,"f":false,"n":null}');
+        if ($jp->{"k"} ne "café") { return 3; }
+
+        my scalar $yp = YAML::Load("items:\n- a\n- b\nempty: |\nnext: 1\n");
+        if (size($yp->{"items"}) != 2 || $yp->{"next"} != 1) { return 4; }
+
+        my str $qi = DBI::quote_identifier($dbh, 'col"_' . $i);
+        if (length($qi) == 0) { return 5; }
+        my scalar $bad = DBI::selectall_arrayref($dbh, "SELECT * FROM no_such_tbl_r3");
+        if (defined($bad)) { return 6; }
+
+        my scalar $rec = $orm->create("l3", {"id" => "r_" . $i, "val" => "v" . $i});
+        if (!defined($rec)) { return 7; }
+        $rec->save();
+
+        if ($i < 5) {
+            my str $salt = crypt::gen_salt("sha256");
+            my str $pw = crypt::hashpw("pw" . $i, $salt);
+            if (crypt::verify("pw" . $i, $pw) != 1 || crypt::verify("pw", "*locked") != 0) { return 8; }
+        }
+
+        my hash %pu = LWP::parse_url("http://example.com/a/b?x=" . $i);
+        if ($pu{"path"} ne "/a/b") { return 9; }
+
+        try {
+            $tt->process_string("[% INCLUDE __missing_r3_leak__ %]", {"x" => "1"});
+        } catch ($te) {
+        }
+        if ($tt->process_string("[% x %]", {"x" => "ok"}) ne "ok") { return 10; }
+
+        $i++;
+    }
+    DBI::disconnect($dbh);
+    say("AUDIT_R3_LEAKS_OK");
+    return 0;
+}

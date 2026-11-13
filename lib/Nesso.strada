@@ -158,14 +158,20 @@ func build_where_clause(scalar $self, scalar $schema, scalar $conds, scalar $par
     return $where;
 }
 
-# Quote a validated SQL identifier using ANSI double quotes (SQLite & PostgreSQL)
-private func quote_ident(str $ident) str {
-    return "\"" . replace($ident, "\"", "\"\"") . "\"";
+# Quote a validated SQL identifier (MySQL backticks via DBI, ANSI double quotes otherwise)
+private func quote_ident(str $ident, scalar $dbh = undef) str {
+    if (core::byte_index($ident, chr(0)) >= 0) {
+        throw "Nesso::quote_identifier: cannot quote identifier containing embedded NUL byte";
+    }
+    if (defined($dbh)) {
+        return DBI::quote_identifier($dbh, $ident);
+    }
+    return "\"" . replace_all($ident, "\"", "\"\"") . "\"";
 }
 
 # Build the SQL fragment for one column's condition (dispatching on value type).
 func build_cond_fragment(scalar $self, str $col, scalar $val, scalar $params) str {
-    my str $qcol = Nesso::quote_ident($col);
+    my str $qcol = Nesso::quote_ident($col, $self->{"_dbh"});
     # undef -> IS NULL (NOT "= ?" with a NULL bind, which never matches in SQL)
     if (!defined($val)) {
         return $qcol . " IS NULL";
@@ -208,7 +214,7 @@ func build_cond_fragment(scalar $self, str $col, scalar $val, scalar $params) st
 
 # Build "col IN (...)" / "col NOT IN (...)" and bind each element.
 func build_in_fragment(scalar $self, str $col, scalar $vals, scalar $params, int $negate) str {
-    my str $qcol = Nesso::quote_ident($col);
+    my str $qcol = Nesso::quote_ident($col, $self->{"_dbh"});
     if (ref($vals) ne "ARRAY") {
         throw "Nesso: IN on '" . $col . "' requires an array";
     }
@@ -234,7 +240,7 @@ func build_in_fragment(scalar $self, str $col, scalar $vals, scalar $params, int
 
 # Build the fragment for a single { operator => operand } pair (whitelisted).
 func build_op_fragment(scalar $self, str $col, str $rawop, scalar $operand, scalar $params) str {
-    my str $qcol = Nesso::quote_ident($col);
+    my str $qcol = Nesso::quote_ident($col, $self->{"_dbh"});
     my str $op = uc(trim($rawop));
 
     # Normalize aliases / symbolic spellings to a canonical form
@@ -328,7 +334,7 @@ func build_order_clause(scalar $self, scalar $schema, scalar $spec) str {
         if ($self->col_allowed($schema, $col) == 0) {
             throw "Nesso: _order references unknown column '" . $col . "'";
         }
-        my str $qcol = Nesso::quote_ident($col);
+        my str $qcol = Nesso::quote_ident($col, $self->{"_dbh"});
         my str $piece = $qcol;
         if ($dir ne "") {
             if ($dir ne "ASC" && $dir ne "DESC") {
@@ -522,9 +528,9 @@ func save(scalar $self, scalar $record) scalar {
     my scalar $db = $self->{"_dbh"};
 
     my str $table = $schema->{"table"};
-    my str $qtable = Nesso::quote_ident($table);
+    my str $qtable = Nesso::quote_ident($table, $self->{"_dbh"});
     my str $pk = $schema->{"primary"};
-    my str $qpk = Nesso::quote_ident($pk);
+    my str $qpk = Nesso::quote_ident($pk, $self->{"_dbh"});
     my scalar $cols = $schema->{"columns"};
     my int $ncols = size($cols);
 
@@ -572,7 +578,7 @@ func save(scalar $self, scalar $record) scalar {
             if ($first == 0) {
                 $sql = $sql . ", ";
             }
-            $sql = $sql . Nesso::quote_ident($col) . " = ?";
+            $sql = $sql . Nesso::quote_ident($col, $self->{"_dbh"}) . " = ?";
             push(@params, $record->{$col});
             $first = 0;
             $d++;
@@ -610,7 +616,7 @@ func save(scalar $self, scalar $record) scalar {
                         $col_list = $col_list . ", ";
                         $placeholders = $placeholders . ", ";
                     }
-                    $col_list = $col_list . Nesso::quote_ident($col);
+                    $col_list = $col_list . Nesso::quote_ident($col, $self->{"_dbh"});
                     $placeholders = $placeholders . "?";
                     push(@params, $val);
                     $first = 0;
@@ -646,8 +652,8 @@ func find(scalar $self, str $model, scalar $id) scalar {
     my scalar $schema = $self->get_schema($model);
     my scalar $db = $self->{"_dbh"};
 
-    my str $qtable = Nesso::quote_ident($schema->{"table"});
-    my str $qpk = Nesso::quote_ident($schema->{"primary"});
+    my str $qtable = Nesso::quote_ident($schema->{"table"}, $self->{"_dbh"});
+    my str $qpk = Nesso::quote_ident($schema->{"primary"}, $self->{"_dbh"});
     my str $sql = "SELECT * FROM " . $qtable . " WHERE " . $qpk . " = ?";
     $self->log_sql($sql, [$id]);
     my scalar $row = DBI::selectrow_hashref($db, $sql, [$id]);
@@ -659,7 +665,7 @@ func find_by(scalar $self, str $model, scalar $conds) scalar {
     my scalar $schema = $self->get_schema($model);
     my scalar $db = $self->{"_dbh"};
 
-    my str $qtable = Nesso::quote_ident($schema->{"table"});
+    my str $qtable = Nesso::quote_ident($schema->{"table"}, $self->{"_dbh"});
     my str $sql = "SELECT * FROM " . $qtable;
     my array @params = ();
 
@@ -719,7 +725,7 @@ func where(scalar $self, str $model, scalar $conds) scalar {
     my scalar $schema = $self->get_schema($model);
     my scalar $db = $self->{"_dbh"};
 
-    my str $qtable = Nesso::quote_ident($schema->{"table"});
+    my str $qtable = Nesso::quote_ident($schema->{"table"}, $self->{"_dbh"});
     my str $sql = "SELECT * FROM " . $qtable;
     my array @params = ();
 
@@ -754,7 +760,7 @@ func all(scalar $self, str $model) scalar {
     my scalar $schema = $self->get_schema($model);
     my scalar $db = $self->{"_dbh"};
 
-    my str $qtable = Nesso::quote_ident($schema->{"table"});
+    my str $qtable = Nesso::quote_ident($schema->{"table"}, $self->{"_dbh"});
     my str $sql = "SELECT * FROM " . $qtable;
     $self->log_sql($sql, []);
     my scalar $rows = DBI::selectall_hashref($db, $sql, []);
@@ -766,7 +772,7 @@ func count(scalar $self, str $model, scalar $conds) int {
     my scalar $schema = $self->get_schema($model);
     my scalar $db = $self->{"_dbh"};
 
-    my str $qtable = Nesso::quote_ident($schema->{"table"});
+    my str $qtable = Nesso::quote_ident($schema->{"table"}, $self->{"_dbh"});
     my str $sql = "SELECT COUNT(*) FROM " . $qtable;
     my array @params = ();
 
@@ -789,9 +795,9 @@ func delete(scalar $self, scalar $record) int {
     my scalar $schema = $self->get_schema($model_name);
     my scalar $db = $self->{"_dbh"};
 
-    my str $qtable = Nesso::quote_ident($schema->{"table"});
+    my str $qtable = Nesso::quote_ident($schema->{"table"}, $self->{"_dbh"});
     my str $pk = $schema->{"primary"};
-    my str $qpk = Nesso::quote_ident($pk);
+    my str $qpk = Nesso::quote_ident($pk, $self->{"_dbh"});
     my scalar $pk_val = $record->{$pk};
 
     my str $sql = "DELETE FROM " . $qtable . " WHERE " . $qpk . " = ?";
@@ -809,7 +815,7 @@ func delete(scalar $self, scalar $record) int {
 func update_all(scalar $self, str $model, scalar $conds, scalar $attrs) int {
     my scalar $schema = $self->get_schema($model);
     my scalar $db = $self->{"_dbh"};
-    my str $qtable = Nesso::quote_ident($schema->{"table"});
+    my str $qtable = Nesso::quote_ident($schema->{"table"}, $self->{"_dbh"});
     my str $pk = $schema->{"primary"};
     my scalar $cols = $schema->{"columns"};
 
@@ -822,7 +828,7 @@ func update_all(scalar $self, str $model, scalar $conds, scalar $attrs) int {
         my str $col = $cols->[$i];
         if ($col ne $pk && exists(%{$attrs}, $col)) {
             if ($first == 0) { $set = $set . ", "; }
-            $set = $set . Nesso::quote_ident($col) . " = ?";
+            $set = $set . Nesso::quote_ident($col, $self->{"_dbh"}) . " = ?";
             push(@params, $attrs->{$col});
             $first = 0;
         }
@@ -846,7 +852,7 @@ func update_all(scalar $self, str $model, scalar $conds, scalar $attrs) int {
 func delete_all(scalar $self, str $model, scalar $conds) int {
     my scalar $schema = $self->get_schema($model);
     my scalar $db = $self->{"_dbh"};
-    my str $qtable = Nesso::quote_ident($schema->{"table"});
+    my str $qtable = Nesso::quote_ident($schema->{"table"}, $self->{"_dbh"});
 
     my str $sql = "DELETE FROM " . $qtable;
     my array @params = ();

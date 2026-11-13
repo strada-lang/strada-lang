@@ -468,7 +468,7 @@ func main() int {
     $z =~ s/b*/"X"/ge;
     my int $v = 10;
     my array @v = (1, 2, 3);
-    if ($z eq "XaXaX" && $v == 10 && size(@v) == 3) {
+    if ($z eq "XaXXaX" && $v == 10 && size(@v) == 3) {
         say("VM_ONLY_OK");
         return 0;
     }

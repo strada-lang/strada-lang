@@ -1,0 +1,130 @@
+use lib "lib";
+use Eval;
+use Strada::JIT;
+
+package EJBase;
+func new(int $v) scalar {
+    my hash %self = ("v" => $v);
+    return bless(\%self, "EJBase");
+}
+func to_str(scalar $self, scalar $other, int $rev) str {
+    return "EB:" . $self->{"v"};
+}
+use overload '""' => "to_str";
+
+package main;
+
+our int $g_fail = 0;
+
+func ok(int $cond, str $msg) void {
+    if ($cond == 0) {
+        say("FAIL: " . $msg);
+        $g_fail = $g_fail + 1;
+    }
+}
+
+func test_eval_tw() void {
+    # Mixed top-level func + expression in single eval call (VM-16)
+    my scalar $r1 = Strada::Interpreter::eval('func r3_sq(int $n) int { return $n * $n; } r3_sq(6)');
+    ok(($r1 + 0) == 36, "Eval mixed func + expr");
+
+    # Mixed package + func + package + call
+    my scalar $r2 = Strada::Interpreter::eval('
+        package EJCnt;
+        our int $c = 10;
+        func bump() int { $c = $c + 5; return $c; }
+        package main;
+        EJCnt::bump();
+    ');
+    ok(($r2 + 0) == 15, "Eval mixed package + our + func + pkg switch + call");
+
+    # local unwind when eval_string throws (VM-12)
+    Strada::Interpreter::eval('our str $g_ev_l = "outer";');
+    try {
+        Strada::Interpreter::eval('local $g_ev_l = "inner"; die("eval_boom");');
+    } catch ($e) {
+    }
+    my scalar $r3 = Strada::Interpreter::eval('$g_ev_l');
+    ok($r3 eq "outer", "Eval local unwind on exception");
+
+    # Single-eval s///ge in interpreter (VM-11)
+    my scalar $r4 = Strada::Interpreter::eval('
+        our int $scnt = 0;
+        func slot0() int { $scnt = $scnt + 1; return 0; }
+        my array @w = ("ab_cd");
+        $w[slot0()] =~ s/([a-z]+)/$1 . "!"/ge;
+        $w[0] . ":" . $scnt;
+    ');
+    ok($r4 eq "ab!_cd!:1", "Eval s///ge single-eval lvalue and captures");
+
+    # Inherited overload in interpreter (VM-13)
+    Strada::Interpreter::eval('
+        package EvOvBase;
+        func new(int $v) scalar { my hash %s = ("v" => $v); return bless(\%s, "EvOvBase"); }
+        func add(scalar $self, scalar $other, int $rev) scalar { return EvOvBase::new($self->{"v"} + $other->{"v"}); }
+        func ts(scalar $self, scalar $other, int $rev) str { return "OB:" . $self->{"v"}; }
+        use overload "+" => "add", "\"\"" => "ts";
+        package EvOvChild;
+        extends EvOvBase;
+        func new(int $v) scalar { my hash %s = ("v" => $v); return bless(\%s, "EvOvChild"); }
+        func ts(scalar $self, scalar $other, int $rev) str { return "OC:" . $self->{"v"}; }
+        package main;
+    ');
+    my scalar $r5 = Strada::Interpreter::eval('
+        my scalar $a = EvOvChild::new(4);
+        my scalar $b = EvOvChild::new(5);
+        my scalar $sum = $a + $b;
+        ($a . "") . "," . ($sum . "");
+    ');
+    ok($r5 eq "OC:4,OB:9", "Eval inherited overload + child stringify");
+
+    Strada::Interpreter::reset();
+}
+
+func test_jit() void {
+    Strada::JIT::init();
+    Strada::JIT::eval('my array @ja = ("first", "second", "third");');
+
+    # VM-17: shift() and pop() return popped/shifted values
+    my scalar $sh = Strada::JIT::eval('shift(@ja)');
+    my scalar $pp = Strada::JIT::eval('pop(@ja)');
+    ok($sh eq "first", "JIT shift returns shifted value");
+    ok($pp eq "third", "JIT pop returns popped value");
+
+    # VM-18: newline after my/type
+    Strada::JIT::eval("my\nint\n\$jnl = 41;");
+    my scalar $rnl = Strada::JIT::eval('$jnl + 1');
+    ok(($rnl + 0) == 42, "JIT my/type with newlines");
+
+    # VM-18: standalone my without trailing semicolon
+    Strada::JIT::eval('my int $jnl');
+    my scalar $rz = Strada::JIT::eval('$jnl');
+    ok(($rz + 0) == 0, "JIT standalone my without semicolon resets to 0");
+
+    # VM-18: if () {} followed by my hash %h without modulo parse error
+    my scalar $rh = Strada::JIT::eval('if (1) { my int $tmp = 1; } my hash %jh = ("a" => 9); $jh{"a"};');
+    ok(($rh + 0) == 9, "JIT hash decl after brace block");
+
+    # VM-18: failed JIT eval rolls back g_var_types so subsequent evals succeed
+    my int $caught = 0;
+    try {
+        Strada::JIT::eval('my int $broken_jit_var = ;');
+    } catch ($je) {
+        $caught = 1;
+    }
+    ok($caught == 1, "JIT syntax error throws");
+    my scalar $ok_after = Strada::JIT::eval('1 + 2');
+    ok(($ok_after + 0) == 3, "JIT continues cleanly after failed var registration");
+
+    Strada::JIT::reset();
+}
+
+func main() int {
+    test_eval_tw();
+    test_jit();
+    if ($g_fail == 0) {
+        say("R3_EVAL_JIT_OK");
+        return 0;
+    }
+    return 1;
+}

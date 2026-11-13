@@ -176,17 +176,17 @@ package Gettext;
 
 extern "C" {
     # Locale functions
-    func gt_setlocale(int $category, int $locale) int;
+    func gt_setlocale(int $category, int64 $locale) int64;
 
     # Core gettext functions
-    func gt_textdomain(int $domain) int;
-    func gt_bindtextdomain(int $domain, int $dirname) int;
-    func gt_bind_textdomain_codeset(int $domain, int $codeset) int;
-    func gt_gettext(int $msgid) int;
-    func gt_dgettext(int $domain, int $msgid) int;
-    func gt_ngettext(int $singular, int $plural, int $n) int;
-    func gt_dngettext(int $domain, int $singular, int $plural, int $n) int;
-    func gt_dcgettext(int $domain, int $msgid, int $category) int;
+    func gt_textdomain(int64 $domain) int64;
+    func gt_bindtextdomain(int64 $domain, int64 $dirname) int64;
+    func gt_bind_textdomain_codeset(int64 $domain, int64 $codeset) int64;
+    func gt_gettext(int64 $msgid) int64;
+    func gt_dgettext(int64 $domain, int64 $msgid) int64;
+    func gt_ngettext(int64 $singular, int64 $plural, size_t $n) int64;
+    func gt_dngettext(int64 $domain, int64 $singular, int64 $plural, size_t $n) int64;
+    func gt_dcgettext(int64 $domain, int64 $msgid, int $category) int64;
 
     # Utility functions
     func gt_has_gettext() int;
@@ -288,7 +288,8 @@ func gettext(str $msgid) str {
 func n(str $singular, str $plural, int $n) str {
     my int $singular_ptr = c::str_to_ptr($singular);
     my int $plural_ptr = c::str_to_ptr($plural);
-    my int $result_ptr = gt_ngettext($singular_ptr, $plural_ptr, $n);
+    my int $nn = ($n >= 0) ? $n : 0;
+    my int $result_ptr = gt_ngettext($singular_ptr, $plural_ptr, $nn);
     my str $result = c::ptr_to_str($result_ptr);
     c::free($singular_ptr);
     c::free($plural_ptr);
@@ -322,7 +323,8 @@ func dn(str $domain, str $singular, str $plural, int $n) str {
     my int $domain_ptr = c::str_to_ptr($domain);
     my int $singular_ptr = c::str_to_ptr($singular);
     my int $plural_ptr = c::str_to_ptr($plural);
-    my int $result_ptr = gt_dngettext($domain_ptr, $singular_ptr, $plural_ptr, $n);
+    my int $nn = ($n >= 0) ? $n : 0;
+    my int $result_ptr = gt_dngettext($domain_ptr, $singular_ptr, $plural_ptr, $nn);
     my str $result = c::ptr_to_str($result_ptr);
     c::free($domain_ptr);
     c::free($singular_ptr);

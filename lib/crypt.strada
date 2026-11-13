@@ -439,13 +439,14 @@ func verify(str $password, str $hashed) int {
         char *pw_str = strada_to_str(password);
         char *hash_str = strada_to_str(hashed);
 
-        if (!pw_str || !hash_str || strlen(hash_str) == 0) {
+        if (!pw_str || !hash_str || hash_str[0] == '\0' || hash_str[0] == '*' || strlen(hash_str) < 13) {
             strada_decref(result);
             result = strada_new_int(0);
         } else {
             char *crypt_result = strada_crypt(pw_str, hash_str);
 
-            if (!crypt_result) {
+            if (!crypt_result || crypt_result[0] == '\0' || crypt_result[0] == '*') {
+                free(crypt_result);
                 strada_decref(result);
                 result = strada_new_int(0);
             } else {

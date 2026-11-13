@@ -1708,7 +1708,7 @@ static void dbi_free_statement(DbiStatement *sth) {
 #endif
 #ifdef HAVE_MYSQL
             case DBI_DRIVER_MYSQL:
-                if (sth->dbh->connected && sth->stmt) mysql_stmt_close((MYSQL_STMT*)sth->stmt);
+                if (sth->stmt) mysql_stmt_close((MYSQL_STMT*)sth->stmt);
                 break;
 #endif
 #ifdef HAVE_POSTGRES
@@ -1865,8 +1865,17 @@ static char* dbi_quote_len(DbiHandle *dbh, const char *str, size_t len) {
                     char *out = malloc(len * 2 + 3);
                     if (out) {
                         out[0] = '\'';
+#if defined(MYSQL_VERSION_ID) && MYSQL_VERSION_ID >= 50706
+                        unsigned long n = mysql_real_escape_string_quote(
+                            (MYSQL*)dbh->conn, out + 1, str, (unsigned long)len, '\'');
+#else
                         unsigned long n = mysql_real_escape_string(
                             (MYSQL*)dbh->conn, out + 1, str, (unsigned long)len);
+#endif
+                        if (n == (unsigned long)-1) {
+                            free(out);
+                            break;
+                        }
                         out[1 + n] = '\'';
                         out[2 + n] = '\0';
                         return out;
@@ -1938,6 +1947,7 @@ static char* dbi_quote_identifier(DbiHandle *dbh, const char *name) {
     char q = (dbh && dbh->driver == DBI_DRIVER_MYSQL) ? '`' : '"';
     size_t len = strlen(name);
     char *out = malloc(len * 2 + 3);
+    if (!out) return NULL;
     char *p = out;
     *p++ = q;
     while (*name) {
@@ -2375,7 +2385,10 @@ func selectall_arrayref(scalar $dbh, str $sql) scalar {
     my scalar $rows = undef;
     try {
         my array @empty = ();
-        DBI::execute($sth, \@empty);
+        if (DBI::execute($sth, \@empty) < 0) {
+            DBI::_destroy_st($sth);
+            return undef;
+        }
         $rows = DBI::fetchall_arrayref($sth);
     } catch ($e) {
         DBI::_destroy_st($sth);
@@ -2393,7 +2406,10 @@ func selectall_arrayref_bind(scalar $dbh, str $sql, scalar $params) scalar {
     }
     my scalar $rows = undef;
     try {
-        DBI::execute($sth, $params);
+        if (DBI::execute($sth, $params) < 0) {
+            DBI::_destroy_st($sth);
+            return undef;
+        }
         $rows = DBI::fetchall_arrayref($sth);
     } catch ($e) {
         DBI::_destroy_st($sth);
@@ -2486,14 +2502,26 @@ func quote(scalar $dbh, scalar $value) str {
 func quote_identifier(scalar $dbh, str $name) str {
     my int $dbh_ptr = defined($dbh) ? $dbh->{"_ptr"} : 0;
     my str $result = "";
+    my int $nul_err = 0;
     __C__ {
         DbiHandle *h = (DbiHandle *)(intptr_t)strada_to_int(dbh_ptr);
+        size_t nm_len = (size_t)strada_str_len(name);
         char *nm = strada_to_str(name);
-        char *quoted = dbi_quote_identifier(h, nm);
-        strada_decref(result);
-        result = strada_new_str(quoted);
-        free(quoted);
+        if (strlen(nm) != nm_len) {
+            strada_decref(nul_err);
+            nul_err = strada_new_int(1);
+        } else {
+            char *quoted = dbi_quote_identifier(h, nm);
+            if (quoted) {
+                strada_decref(result);
+                result = strada_new_str(quoted);
+                free(quoted);
+            }
+        }
         free(nm);
+    }
+    if ($nul_err == 1) {
+        throw "DBI::quote_identifier: cannot quote identifier containing embedded NUL byte";
     }
     return $result;
 }
@@ -2665,7 +2693,10 @@ func selectall_hashref(scalar $dbh, str $sql, scalar $params) scalar {
 
     my array @results = ();
     try {
-        DBI::execute($sth, $params);
+        if (DBI::execute($sth, $params) < 0) {
+            DBI::_destroy_st($sth);
+            return undef;
+        }
 
         my scalar $row = DBI::fetchrow_hashref($sth);
         while (defined($row)) {
@@ -2690,7 +2721,10 @@ func selectrow_hashref(scalar $dbh, str $sql, scalar $params) scalar {
 
     my scalar $row = undef;
     try {
-        DBI::execute($sth, $params);
+        if (DBI::execute($sth, $params) < 0) {
+            DBI::_destroy_st($sth);
+            return undef;
+        }
         $row = DBI::fetchrow_hashref($sth);
     } catch ($e) {
         DBI::_destroy_st($sth);
@@ -2709,7 +2743,10 @@ func selectcol(scalar $dbh, str $sql, scalar $params) scalar {
 
     my scalar $row = undef;
     try {
-        DBI::execute($sth, $params);
+        if (DBI::execute($sth, $params) < 0) {
+            DBI::_destroy_st($sth);
+            return undef;
+        }
         $row = DBI::fetchrow_array($sth);
     } catch ($e) {
         DBI::_destroy_st($sth);

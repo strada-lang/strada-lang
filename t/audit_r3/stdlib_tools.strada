@@ -1,0 +1,324 @@
+#!/usr/bin/env strada
+# Cycle 3 Audit regression tests: stdlib & tools runtime behavior
+
+use lib "lib";
+use Gettext;
+use crypt;
+use Forma;
+use JSON::PS;
+use Template;
+use Net::SMTP;
+use Net::SMTP_SSL;
+use DBI;
+use LWP;
+use LWP_SSL;
+use Device::SerialPort;
+use Async::Task;
+use YAML;
+use Nesso;
+use Nesso::Record;
+
+func test_gettext() int {
+    Gettext::init("messages", "/tmp");
+    my str $s1 = Gettext::n("one item", "%d items", 1);
+    my str $s0 = Gettext::n("one item", "%d items", -5);
+    my str $d0 = Gettext::dn("messages", "one item", "%d items", -3);
+    if ($s1 ne "one item" || $s0 ne "%d items" || $d0 ne "%d items") {
+        say("FAIL Gettext: s1='" . $s1 . "' s0='" . $s0 . "' d0='" . $d0 . "'");
+        return 1;
+    }
+    return 0;
+}
+
+func test_crypt() int {
+    my str $salt = crypt::gen_salt("sha256");
+    my str $hashed = crypt::hashpw("s3cr3t!", $salt);
+    if (length($hashed) < 13 || crypt::verify("s3cr3t!", $hashed) != 1) {
+        say("FAIL crypt: hash/verify failed");
+        return 1;
+    }
+    if (crypt::verify("wrong", $hashed) != 0) {
+        say("FAIL crypt: wrong password accepted");
+        return 1;
+    }
+    if (crypt::verify("", "") != 0 || crypt::verify("pw", "") != 0 ||
+        crypt::verify("pw", "short") != 0 || crypt::verify("pw", "*locked") != 0 ||
+        crypt::verify("pw", "*1234567890123") != 0) {
+        say("FAIL crypt: invalid/locked hash accepted");
+        return 1;
+    }
+    return 0;
+}
+
+func test_forma() int {
+    my str $r1 = Forma::render_string('{{ v | replace("", "x") }}', {"v" => "abc"});
+    if ($r1 ne "abc") {
+        say("FAIL Forma empty replace: got '" . $r1 . "'");
+        return 1;
+    }
+    my str $r2 = Forma::render_string("{{ u | url_decode }}", {"u" => "caf%C3%A9+100%25"});
+    if ($r2 ne "café 100%") {
+        say("FAIL Forma url_decode: got '" . $r2 . "'");
+        return 1;
+    }
+    return 0;
+}
+
+func test_json_ps() int {
+    my scalar $d = JSON::PS::decode('{"k":"café","t":true,"f":false,"n":null,"arr":[1,2]}');
+    if (!defined($d) || $d->{"k"} ne "café" || !JSON::PS::is_bool($d->{"t"}) ||
+        $d->{"t"} != 1 || $d->{"f"} != 0 || defined($d->{"n"}) || $d->{"arr"}->[1] != 2) {
+        say("FAIL JSON::PS UTF-8 / keyword decode");
+        return 1;
+    }
+    return 0;
+}
+
+func test_template() int {
+    my scalar $tt = Template::new({});
+    my int $threw = 0;
+    try {
+        $tt->process_string("[% INCLUDE __missing_r3_tpl__ %]", {"x" => "ok"});
+    } catch ($e) {
+        $threw = 1;
+    }
+    if ($threw != 1) {
+        say("FAIL Template INCLUDE missing did not throw");
+        return 1;
+    }
+    my str $after = $tt->process_string("[% x %]", {"x" => "recovered"});
+    if ($after ne "recovered") {
+        say("FAIL Template frame leaked across error: got '" . $after . "'");
+        return 1;
+    }
+    return 0;
+}
+
+func test_smtp() int {
+    my scalar $srv = core::socket_server(0);
+    my int $port = core::getsockname($srv)->{"port"};
+    my scalar $cli = core::socket_client("127.0.0.1", $port);
+    my scalar $acc = core::socket_accept($srv);
+    my scalar $smtp = bless({"sock" => $cli, "connected" => 1}, "SMTP");
+    $cli = undef;
+    $smtp = undef;
+    my str $eof = core::socket_recv($acc, 16);
+    core::socket_close($acc);
+    core::socket_close($srv);
+    if ($eof ne "") {
+        say("FAIL SMTP DESTROY did not close socket");
+        return 1;
+    }
+    if (SMTP_SSL::_timeout_ms(0) != -1 || SMTP_SSL::_timeout_ms(-2) != -1 || SMTP_SSL::_timeout_ms(3) != 3000) {
+        say("FAIL SMTP_SSL _timeout_ms mapping");
+        return 1;
+    }
+    return 0;
+}
+
+func test_dbi() int {
+    my scalar $dbh = DBI::connect("dbi:SQLite::memory:", "", "");
+    if (!defined($dbh)) {
+        say("FAIL DBI connect");
+        return 1;
+    }
+    DBI::do_sql($dbh, "CREATE TABLE t3 (id INTEGER PRIMARY KEY, val TEXT)");
+    DBI::exec($dbh, "INSERT INTO t3 (id, val) VALUES (?, ?)", [1, "ok"]);
+
+    my str $qi = DBI::quote_identifier($dbh, 'weird"col');
+    if (index($qi, '"') < 0) {
+        say("FAIL DBI quote_identifier: got '" . $qi . "'");
+        DBI::disconnect($dbh);
+        return 1;
+    }
+    my int $qi_nul = 0;
+    try {
+        DBI::quote_identifier($dbh, "bad" . chr(0) . "col");
+    } catch ($e) {
+        $qi_nul = 1;
+    }
+    if ($qi_nul != 1) {
+        say("FAIL DBI quote_identifier NUL did not throw");
+        DBI::disconnect($dbh);
+        return 1;
+    }
+
+    my scalar $r1 = DBI::selectall_arrayref($dbh, "SELECT * FROM no_such_table_r3");
+    my scalar $r2 = DBI::selectall_arrayref_bind($dbh, "SELECT * FROM no_such_table_r3 WHERE id = ?", [1]);
+    my scalar $r3 = DBI::selectall_hashref($dbh, "SELECT * FROM no_such_table_r3 WHERE id = ?", [1]);
+    my scalar $r4 = DBI::selectrow_hashref($dbh, "SELECT * FROM no_such_table_r3 WHERE id = ?", [1]);
+    my scalar $r5 = DBI::selectcol($dbh, "SELECT * FROM no_such_table_r3", []);
+    if (defined($r1) || defined($r2) || (defined($r3) && size($r3) != 0) || defined($r4) || defined($r5)) {
+        say("FAIL DBI failed select* did not return undef/empty");
+        DBI::disconnect($dbh);
+        return 1;
+    }
+    DBI::disconnect($dbh);
+    return 0;
+}
+
+func test_lwp() int {
+    my hash %bad_scheme = LWP::do_request("GET", "ftp://example.com/file", "", {});
+    if ($bad_scheme{"success"} == 1 || length($bad_scheme{"error"}) == 0) {
+        say("FAIL LWP did not reject non-http scheme");
+        return 1;
+    }
+    if (LWP::_resolve_url("http://example.com/a", "javascript:alert(1)") ne "") {
+        say("FAIL LWP _resolve_url allowed javascript scheme");
+        return 1;
+    }
+    if (LWP::_chunked_complete("5\r\nhello\r\n0\r\nX-Tr: 1\r\n\r\n", 0) != 1 ||
+        LWP::_chunked_complete("5\r\nhello\r\n0\r\nX-Tr: 1\r\n", 0) != 0) {
+        say("FAIL LWP _chunked_complete trailer CRLF check");
+        return 1;
+    }
+
+    # Loopback truncated Content-Length test for LWP and LWP_SSL::do_http_request
+    my scalar $srv = core::socket_server(0);
+    my int $port = core::getsockname($srv)->{"port"};
+    my int $pid = core::fork();
+    if ($pid == 0) {
+        my int $i = 0;
+        while ($i < 2) {
+            my scalar $acc = core::socket_accept($srv);
+            core::socket_recv($acc, 4096);
+            core::socket_send($acc, "HTTP/1.1 200 OK\r\nContent-Length: 500\r\nConnection: close\r\n\r\npartial");
+            core::socket_close($acc);
+            $i++;
+        }
+        core::exit(0);
+    }
+    core::socket_close($srv);
+    my hash %res1 = LWP::do_request("GET", "http://127.0.0.1:" . $port . "/", "", {"timeout" => 2});
+    my hash %res2 = LWP_SSL::do_http_request("127.0.0.1", $port, "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n", 8192, 65536, "GET", 2000);
+    core::waitpid($pid, 0);
+    if ($res1{"success"} == 1 || length($res1{"error"}) == 0) {
+        say("FAIL LWP truncated body reported success");
+        return 1;
+    }
+    if (defined($res2{"ok"}) && $res2{"ok"} == 1 && length($res2{"error"}) == 0) {
+        say("FAIL LWP_SSL truncated body reported ok");
+        return 1;
+    }
+    return 0;
+}
+
+func test_serial_and_async() int {
+    my scalar $p = core::pipe();
+    my scalar $sp = SerialPort::new("/dev/null");
+    $sp->{"fd"} = $p->[0];
+    $sp->{"is_open"} = 0;
+    $sp->baudrate(115200);
+    $sp->databits(8);
+    $sp->parity("none");
+    $sp->stopbits(1);
+    $sp->handshake("none");
+    $sp->read_timeout(100);
+    $sp->close();
+    if ($sp->{"fd"} != -1) {
+        say("FAIL SerialPort::close did not close raw fd");
+        core::close($p->[1]);
+        return 1;
+    }
+    core::close($p->[1]);
+
+    my scalar $srv = core::socket_server(0);
+    my int $port = core::getsockname($srv)->{"port"};
+    my scalar $cli = Async::Task::connect("127.0.0.1", $port, 1000);
+    my scalar $acc = Async::Task::accept($srv, 1000);
+    if (!defined($cli) || !defined($acc)) {
+        say("FAIL Async::Task::connect/accept");
+        core::socket_close($srv);
+        return 1;
+    }
+    core::socket_send($cli, "ping");
+    my str $got = core::socket_recv($acc, 16);
+    core::socket_close($acc);
+    core::socket_close($cli);
+    core::socket_close($srv);
+    if ($got ne "ping") {
+        say("FAIL Async::Task socket recv got '" . $got . "'");
+        return 1;
+    }
+    return 0;
+}
+
+func test_yaml() int {
+    my scalar $y1 = YAML::Load("- a\n- b\n");
+    if (size($y1) != 2 || $y1->[1] ne "b") {
+        say("FAIL YAML trailing newline list size=" . size($y1));
+        return 1;
+    }
+    my scalar $y2 = YAML::Load("items:\n- x\n- y\n");
+    if (size($y2->{"items"}) != 2 || $y2->{"items"}->[0] ne "x") {
+        say("FAIL YAML indentless sequence in mapping");
+        return 1;
+    }
+    my scalar $y3 = YAML::Load("empty: |\nnext: 42\n");
+    if ($y3->{"empty"} ne "" || $y3->{"next"} != 42) {
+        say("FAIL YAML empty block scalar before next key: empty='" . $y3->{"empty"} . "' next='" . $y3->{"next"} . "'");
+        return 1;
+    }
+    my scalar $y4 = YAML::Load("lead: |\n\n  hello\nstrip: |-\n  a\n  b\nkeep: |+\n  k\n\nfoldstrip: >-\n  foo\n  bar\n");
+    if ($y4->{"lead"} ne "\nhello\n" || $y4->{"strip"} ne "a\nb" ||
+        index($y4->{"keep"}, "k\n") != 0 || $y4->{"foldstrip"} ne "foo bar") {
+        say("FAIL YAML block scalar styles lead='" . $y4->{"lead"} . "' strip='" . $y4->{"strip"} . "' foldstrip='" . $y4->{"foldstrip"} . "'");
+        return 1;
+    }
+    return 0;
+}
+
+func test_nesso() int {
+    my scalar $dbh = DBI::connect("dbi:SQLite::memory:", "", "");
+    DBI::do_sql($dbh, "CREATE TABLE items (id TEXT PRIMARY KEY, title TEXT)");
+    my scalar $orm = Nesso::new($dbh);
+    $orm->define("items", {"table" => "items", "columns" => ["id", "title"], "primary" => "id"});
+    my scalar $rec = $orm->create("items", {"id" => "r1", "title" => "hello"});
+    if (!defined($rec) || $rec->{"title"} ne "hello") {
+        say("FAIL Nesso create");
+        DBI::disconnect($dbh);
+        return 1;
+    }
+    $rec->save();
+    my scalar $found = $orm->find("items", "r1");
+    if (!defined($found) || $found->{"title"} ne "hello") {
+        say("FAIL Nesso find");
+        DBI::disconnect($dbh);
+        return 1;
+    }
+    my int $nul_threw = 0;
+    try {
+        $orm->define("bad_r3", {"table" => "bad" . chr(0) . "tbl", "columns" => ["id", "title"], "primary" => "id"});
+        my scalar $br = $orm->create("bad_r3", {"id" => "1", "title" => "x"});
+        $br->save();
+    } catch ($e) {
+        $nul_threw = 1;
+    }
+    if ($nul_threw != 1) {
+        say("FAIL Nesso quote_ident did not reject NUL byte");
+        DBI::disconnect($dbh);
+        return 1;
+    }
+    DBI::disconnect($dbh);
+    return 0;
+}
+
+func main() int {
+    my int $fail = 0;
+    $fail += test_gettext();
+    $fail += test_crypt();
+    $fail += test_forma();
+    $fail += test_json_ps();
+    $fail += test_template();
+    $fail += test_smtp();
+    $fail += test_dbi();
+    $fail += test_lwp();
+    $fail += test_serial_and_async();
+    $fail += test_yaml();
+    $fail += test_nesso();
+    if ($fail == 0) {
+        say("ALL_R3_STDLIB_OK");
+        return 0;
+    }
+    return 1;
+}

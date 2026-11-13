@@ -1,0 +1,213 @@
+#!/usr/bin/env strada
+# Cycle 3 Audit regression tests: Runtime & Concurrency/GC fixes
+
+use lib "lib";
+use Async::Loop;
+use Async::Task;
+
+package R3LongTie;
+func TIESCALAR(str $class, scalar $init) scalar {
+    my hash %self = ("v" => $init, "fetches" => 0, "stores" => 0);
+    return bless(\%self, $class);
+}
+func FETCH(scalar $self) scalar {
+    $self->{"fetches"} = $self->{"fetches"} + 1;
+    return $self->{"v"};
+}
+func STORE(scalar $self, scalar $val) void {
+    $self->{"v"} = $val;
+    $self->{"stores"} = $self->{"stores"} + 1;
+}
+
+package R3TieHash;
+func TIEHASH(str $class) scalar {
+    my hash %self = ("d" => {"a" => 10});
+    return bless(\%self, $class);
+}
+func FETCH(scalar $self, str $k) scalar {
+    return $self->{"d"}->{$k};
+}
+func STORE(scalar $self, str $k, scalar $v) void {
+    $self->{"d"}->{$k} = $v;
+}
+
+package R3LongOverload;
+func new(str $s) scalar {
+    my hash %self = ("s" => $s);
+    return bless(\%self, "R3LongOverload");
+}
+func as_str(scalar $self, scalar $other, int $rev) str {
+    return $self->{"s"};
+}
+use overload '""' => "as_str";
+
+package R3CycleTracker;
+our int $destroyed = 0;
+func new(str $tag) scalar {
+    my hash %self = ("tag" => $tag);
+    return bless(\%self, "R3CycleTracker");
+}
+func DESTROY(scalar $self) void {
+    $destroyed = $destroyed + 1;
+}
+func count() int { return $destroyed; }
+func reset() void { $destroyed = 0; }
+
+package main;
+
+our hash %g_loc_exists = ("has_undef" => undef);
+our str $g_coro_loc = "root";
+our hash %g_coro_h = ("k" => "hroot");
+
+func make_long_str(str $prefix, str $suffix, int $pad_len) str {
+    my str $out = $prefix;
+    my int $i = 0;
+    while ($i < $pad_len) {
+        $out = $out . "Z";
+        $i = $i + 1;
+    }
+    return $out . $suffix;
+}
+
+func run_self_cycle_scope() int {
+    R3CycleTracker::reset();
+    my scalar $tracker = R3CycleTracker::new("in_rec");
+    my scalar $rec = undef;
+    $rec = func (int $n) int {
+        my scalar $keep = $tracker;
+        if ($n <= 0) {
+            return length($keep->{"tag"});
+        }
+        return $n + $rec->($n - 1);
+    };
+    my int $sum = $rec->(4);
+    # Reassign $rec in same scope: PerlaCell must break self-cycle immediately
+    $rec = "reassigned";
+    $tracker = undef;
+    return $sum;
+}
+
+func main() int {
+    my int $fail = 0;
+
+    # 1. Long (>256 byte) tied scalar stringification in raw byte consumers
+    my str $long_tail = make_long_str("HEAD_", "_TAIL_END", 320);
+    my scalar $ts = "";
+    tie($ts, "R3LongTie", $long_tail);
+    if (length($ts) != 334 || !($ts =~ /_TAIL_END$/) || ($ts ne $long_tail)) {
+        say("FAIL: long tied scalar len=" . length($ts));
+        $fail = $fail + 1;
+    }
+
+    # 2. Long (>256 byte) overloaded "" object stringification
+    my str $ov_expected = make_long_str("OV_", "_OVERLOAD_DONE", 320);
+    my scalar $ov = R3LongOverload::new($ov_expected);
+    my str $ov_s = "" . $ov;
+    if (length($ov_s) != 337 || !($ov =~ /_OVERLOAD_DONE$/) || ($ov ne $ov_expected)) {
+        say("FAIL: long overload string len=" . length($ov_s));
+        $fail = $fail + 1;
+    }
+
+    # 3. Tied scalar pre/post ++ and --
+    my scalar $tc = 10;
+    tie($tc, "R3LongTie", 10);
+    my scalar $p1 = ++$tc;
+    my scalar $p2 = $tc++;
+    my scalar $p3 = --$tc;
+    my scalar $p4 = $tc--;
+    my int $fin = $tc + 0;
+    if ($p1 != 11 || $p2 != 11 || $p3 != 11 || $p4 != 11 || $fin != 10) {
+        say("FAIL: tied incr/decr p=" . $p1 . "," . $p2 . "," . $p3 . "," . $p4 . " fin=" . $fin);
+        $fail = $fail + 1;
+    }
+    my scalar $t_obj = tied($tc);
+    if (!defined($t_obj) || $t_obj->{"stores"} < 4) {
+        say("FAIL: tied() object missing or stores too low");
+        $fail = $fail + 1;
+    }
+    untie($tc);
+    if (defined(tied($tc))) {
+        say("FAIL: untie scalar failed");
+        $fail = $fail + 1;
+    }
+
+    # Tied hash tied()/untie()
+    my hash %th = ();
+    tie(%th, "R3TieHash");
+    if (!defined(tied(%th))) {
+        say("FAIL: tied(%th) should be defined");
+        $fail = $fail + 1;
+    }
+    untie(%th);
+    if (defined(tied(%th))) {
+        say("FAIL: untie(%th) failed");
+        $fail = $fail + 1;
+    }
+
+    # 4. local $h{k} preserves non-existent vs explicit undef key
+    if (exists($g_loc_exists{"missing"}) != 0 || exists($g_loc_exists{"has_undef"}) != 1) {
+        say("FAIL: pre-local hash exists check");
+        $fail = $fail + 1;
+    }
+    {
+        local $g_loc_exists{"missing"} = "tmp_val";
+        local $g_loc_exists{"has_undef"} = "not_undef";
+        if ($g_loc_exists{"missing"} ne "tmp_val" || $g_loc_exists{"has_undef"} ne "not_undef") {
+            say("FAIL: inner local hash values wrong");
+            $fail = $fail + 1;
+        }
+    }
+    if (exists($g_loc_exists{"missing"}) != 0) {
+        say("FAIL: local missing hash key was not deleted on restore");
+        $fail = $fail + 1;
+    }
+    if (exists($g_loc_exists{"has_undef"}) != 1 || defined($g_loc_exists{"has_undef"})) {
+        say("FAIL: local undef hash key not preserved properly");
+        $fail = $fail + 1;
+    }
+
+    # 5. Async::Loop coroutine preserves local scalar + local hash elem across yield/resume
+    my scalar $loop = Async::Loop::new();
+    my scalar $coro_out = {};
+    $loop->spawn(func () void {
+        local $g_coro_loc = "c1";
+        local $g_coro_h{"k"} = "hc1";
+        Async::Task::sleep(15);
+        $coro_out->{"c1"} = $g_coro_loc . ":" . $g_coro_h{"k"};
+    });
+    $loop->spawn(func () void {
+        local $g_coro_loc = "c2";
+        local $g_coro_h{"k"} = "hc2";
+        Async::Task::sleep(5);
+        $coro_out->{"c2a"} = $g_coro_loc . ":" . $g_coro_h{"k"};
+        Async::Task::sleep(20);
+        $coro_out->{"c2b"} = $g_coro_loc . ":" . $g_coro_h{"k"};
+    });
+    $loop->run();
+    if ($coro_out->{"c1"} ne "c1:hc1" || $coro_out->{"c2a"} ne "c2:hc2"
+        || $coro_out->{"c2b"} ne "c2:hc2"
+        || $g_coro_loc ne "root" || $g_coro_h{"k"} ne "hroot") {
+        say("FAIL: coro local state mismatch");
+        $fail = $fail + 1;
+    }
+
+    # 6. Self-referential closure PerlaCell cycle breaking (M3)
+    my int $csum = run_self_cycle_scope();
+    if ($csum != 16 || R3CycleTracker::count() != 1) {
+        say("FAIL: self-cycle cleanup sum=" . $csum . " destroyed=" . R3CycleTracker::count());
+        $fail = $fail + 1;
+    }
+
+    # 7. quotemeta sanity
+    my str $qm = core::quotemeta("a.b*c[d]");
+    if ($qm ne "a\\.b\\*c\\[d\\]") {
+        say("FAIL: quotemeta got '" . $qm . "'");
+        $fail = $fail + 1;
+    }
+
+    if ($fail == 0) {
+        say("R3_RUNTIME_OK");
+        return 0;
+    }
+    return 1;
+}

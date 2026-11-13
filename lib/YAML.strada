@@ -697,6 +697,10 @@ func parse_inline_array(str $s) scalar {
 # Main YAML Load function - parse YAML string into Strada data structure
 func Load(str $yaml) scalar {
     my array @lines = split("\n", $yaml);
+    if (length($yaml) > 0 && substr($yaml, length($yaml) - 1, 1) eq "\n" &&
+        size(@lines) > 0 && $lines[size(@lines) - 1] eq "") {
+        pop(@lines);
+    }
     my int $line_count = size(@lines);
 
     # Index for tracking current position
@@ -823,9 +827,10 @@ func parse_hash(scalar $state, int $base_indent) scalar {
             if ($state->{"pos"} < $count) {
                 my str $next_line = $lines->[$state->{"pos"}];
                 my int $next_indent = YAML::get_indent($next_line);
+                my str $next_trim = YAML::trim($next_line);
 
-                if ($next_indent > $indent) {
-                    # Nested block
+                if ($next_indent > $indent || ($next_indent == $indent && (substr($next_trim, 0, 2) eq "- " || $next_trim eq "-"))) {
+                    # Nested block (including indentless YAML sequences at same indent)
                     $result->{$key} = YAML::parse_block($state, $next_indent);
                 } else {
                     # Empty value
@@ -959,7 +964,8 @@ func parse_array(scalar $state, int $base_indent) scalar {
                                     if ($state->{"pos"} < $count) {
                                         my str $sub_line = $lines->[$state->{"pos"}];
                                         my int $sub_indent = YAML::get_indent($sub_line);
-                                        if ($sub_indent > $next_indent) {
+                                        my str $sub_trim = YAML::trim($sub_line);
+                                        if ($sub_indent > $next_indent || ($sub_indent == $next_indent && (substr($sub_trim, 0, 2) eq "- " || $sub_trim eq "-"))) {
                                             $item->{$next_key} = YAML::parse_block($state, $sub_indent);
                                         } else {
                                             $item->{$next_key} = "";
@@ -1004,12 +1010,15 @@ func parse_array(scalar $state, int $base_indent) scalar {
     return $result;
 }
 
-# Parse literal block (|)
-func parse_literal_block(scalar $state, int $base_indent) str {
+# Internal: read raw block scalar text along with leading/trailing blank metadata
+private func _read_block_scalar_raw(scalar $state, int $base_indent) hash {
     my str $result = "";
     my scalar $lines = $state->{"lines"};
     my int $count = $state->{"count"};
     my int $block_indent = -1;
+    my int $leading_blanks = 0;
+    my int $trailing_blanks = 0;
+    my int $has_content = 0;
 
     while ($state->{"pos"} < $count) {
         my str $line = $lines->[$state->{"pos"}];
@@ -1019,39 +1028,55 @@ func parse_literal_block(scalar $state, int $base_indent) str {
         }
         my int $indent = YAML::get_indent($line);
 
-        # Empty lines in literal block
+        # Empty / whitespace-only lines inside block scalar
         if (YAML::trim($line) eq "") {
-            if ($block_indent >= 0) {
-                $result = $result . "\n";
+            if ($block_indent < 0) {
+                $leading_blanks = $leading_blanks + 1;
+            } else {
+                $trailing_blanks = $trailing_blanks + 1;
             }
             $state->{"pos"} = $state->{"pos"} + 1;
             next;
         }
 
-        # Check if we've exited the block
-        if ($block_indent >= 0 && $indent <= $base_indent) {
-            return $result;
+        # Check if we've exited the block (including empty block before next key at <= base_indent)
+        if ($indent <= $base_indent) {
+            last;
         }
 
         # Set block indent on first content line
         if ($block_indent < 0) {
             $block_indent = $indent;
-        }
-
-        # Add line content (without leading indent)
-        if ($indent >= $block_indent) {
-            if (length($result) > 0) {
+            my int $lb = 0;
+            while ($lb < $leading_blanks) {
                 $result = $result . "\n";
+                $lb = $lb + 1;
             }
-            $result = $result . substr($line, $block_indent, length($line) - $block_indent);
         } else {
-            return $result;
+            my int $tb = 0;
+            while ($tb <= $trailing_blanks) {
+                $result = $result . "\n";
+                $tb = $tb + 1;
+            }
+            $trailing_blanks = 0;
         }
 
+        $has_content = 1;
+        $result = $result . substr($line, $block_indent, length($line) - $block_indent);
         $state->{"pos"} = $state->{"pos"} + 1;
     }
 
-    return $result;
+    my hash %info = ();
+    $info{"raw"} = $result;
+    $info{"has_content"} = $has_content;
+    $info{"leading_blanks"} = $leading_blanks;
+    $info{"trailing_blanks"} = $trailing_blanks;
+    return %info;
+}
+
+# Parse literal block (|)
+func parse_literal_block(scalar $state, int $base_indent) str {
+    return YAML::parse_block_scalar($state, $base_indent, "|");
 }
 
 func is_block_scalar_spec(str $s) int {
@@ -1063,12 +1088,24 @@ func is_block_scalar_spec(str $s) int {
 
 func parse_block_scalar(scalar $state, int $base_indent, str $spec) str {
     my int $is_folded = (substr($spec, 0, 1) eq ">") ? 1 : 0;
-    my str $raw = YAML::parse_literal_block($state, $base_indent);
-    if ($spec eq "|-" || $spec eq ">-") {
-        while (length($raw) > 0 && substr($raw, length($raw) - 1, 1) eq "\n") {
-            $raw = substr($raw, 0, length($raw) - 1);
+    my str $chomp = (length($spec) >= 2) ? substr($spec, 1, 1) : "";
+    my hash %info = YAML::_read_block_scalar_raw($state, $base_indent);
+    my int $has_content = $info{"has_content"};
+    if ($has_content == 0) {
+        if ($chomp eq "+") {
+            my str $bl = "";
+            my int $bi = 0;
+            while ($bi < $info{"leading_blanks"}) {
+                $bl = $bl . "\n";
+                $bi = $bi + 1;
+            }
+            return $bl;
         }
+        return "";
     }
+
+    my str $raw = $info{"raw"};
+    my str $out = $raw;
     if ($is_folded == 1 && length($raw) > 0) {
         my array @lines = split("\n", $raw);
         my str $folded = "";
@@ -1089,9 +1126,21 @@ func parse_block_scalar(scalar $state, int $base_indent, str $spec) str {
             }
             $li = $li + 1;
         }
-        return $folded;
+        $out = $folded;
     }
-    return $raw;
+
+    if ($chomp eq "-") {
+        return $out;
+    }
+    if ($chomp eq "+") {
+        my int $tb = 0;
+        while ($tb <= $info{"trailing_blanks"}) {
+            $out = $out . "\n";
+            $tb = $tb + 1;
+        }
+        return $out;
+    }
+    return $out . "\n";
 }
 
 # ============================================================

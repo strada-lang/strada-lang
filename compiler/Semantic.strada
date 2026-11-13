@@ -829,6 +829,9 @@ func ctx_new() scalar {
     $ctx{"scope"} = scope_new(0);
     $ctx{"current_func"} = 0;
     $ctx{"cur_file"} = "";
+    $ctx{"cur_pkg"} = "main";
+    $ctx{"cur_block_line"} = 0;
+    $ctx{"local_shadow_id"} = 0;
     $ctx{"errors"} = [];
 
     # Register built-in global variables: ARGV (array) and ARGC (int)
@@ -1038,6 +1041,30 @@ func register_import_archive_functions(scalar $ctx, scalar $ast) void {
     }
 }
 
+func sem_sanitize_pkg(str $pkg) str {
+    if (length($pkg) == 0) { return "main"; }
+    my str $res = $pkg;
+    my int $ci = index($res, "::");
+    while ($ci >= 0) {
+        $res = substr($res, 0, $ci) . "_" . substr($res, $ci + 2, length($res) - $ci - 2);
+        $ci = index($res, "::");
+    }
+    return $res;
+}
+
+func sem_alloc_local_cname(scalar $ctx, scalar $scope, str $name) str {
+    my scalar $p = $scope->{"parent"};
+    while (is_valid_scope($p) == 1 && is_valid_scope($p->{"parent"}) == 1) {
+        if (exists(%{$p->{"vars"}}, $name)) {
+            my int $id = ($ctx->{"local_shadow_id"} + 0) + 1;
+            $ctx->{"local_shadow_id"} = $id;
+            return $name . "__lsh" . $id;
+        }
+        $p = $p->{"parent"};
+    }
+    return "";
+}
+
 # Register global variables in the global scope
 func register_globals(scalar $ctx, scalar $ast) void {
     my int $global_count = $ast->{"global_count"};
@@ -1060,24 +1087,30 @@ func register_globals(scalar $ctx, scalar $ast) void {
         if ($gvar_type == NODE_VAR_DECL() || $gvar_type == NODE_OUR_DECL()) {
             $sigil = $gvar->{"sigil"};
         }
+        $gvar->{"orig_name"} = $name;
+        if ($gvar_type == NODE_OUR_DECL()) {
+            my str $opkg = "" . $gvar->{"package"};
+            if (length($opkg) == 0) { $opkg = "main"; }
+            $gvar->{"our_key"} = $opkg . "::" . $name;
+            $gvar->{"name"} = "__our_" . sem_sanitize_pkg($opkg) . "__" . $name;
+        }
 
         # File-level `my`/const variables are lexical, as in Perl: the same
         # name may be declared again later (another package in the same
         # file, or another module). Every declaration must become its own C
         # global, and each reference binds to the nearest declaration before
-        # it in the same file. (They used to share one C name, so a second
-        # `my $X` was a C "redefinition" error.)
+        # it in the same file. Meanwhile `our` globals are package-scoped
+        # and keyed by their package so an `our` in PkgB never hijacks a
+        # file-scoped `my` or PkgA's `our` with the same bare name.
         my scalar $root_vars = $scope->{"vars"};
         my scalar $prev = $root_vars->{$name};
         if (is_valid_node($prev) == 1 && $prev->{"is_global"} == 1) {
-            if ($gvar_type == NODE_OUR_DECL()) {
-                $prev->{"is_our"} = 1;
-                next;
-            }
             my scalar $decls = $prev->{"decls"};
             my int $nd = size(@{$decls});
-            # later declarations get a distinct C name
-            $gvar->{"name"} = $name . "__shadow" . $nd;
+            if ($gvar_type != NODE_OUR_DECL()) {
+                # later lexical declarations get a distinct C name
+                $gvar->{"name"} = $name . "__shadow" . $nd;
+            }
             push(@{$decls}, $gvar);
             next;
         }
@@ -1102,9 +1135,8 @@ func sem_file_key(scalar $node) str {
     return "";
 }
 
-# For a reference to a global with several file-level declarations, the C
-# name of the declaration that lexically precedes the reference/function.
-func resolve_shadowed_global(scalar $ctx, scalar $info, str $name, int $ref_line, str $sigil) str {
+func resolve_global_decl_node(scalar $ctx, scalar $info, str $name, int $ref_line, str $sigil) scalar {
+    if (length($name) < 0) { return 0; }
     my scalar $decls = $info->{"decls"};
     my scalar $fn = $ctx->{"current_func"};
     my str $fkey = "";
@@ -1116,24 +1148,79 @@ func resolve_shadowed_global(scalar $ctx, scalar $info, str $name, int $ref_line
         $fkey = "" . $ctx->{"cur_file"};
     }
     if ($fline <= 0) { $fline = $ctx->{"cur_block_line"} + 0; }
-    if ($fline <= 0) { return $name; }
-    my str $best = $name;
+    my str $cur_pkg = "" . $ctx->{"cur_pkg"};
+    if (length($cur_pkg) == 0) { $cur_pkg = "main"; }
+
+    my scalar $best_node = 0;
     my int $best_line = -1;
+    my scalar $pkg_our_node = 0;
+    my scalar $file_fallback_node = 0;
     my int $i = 0;
     while ($i < size(@{$decls})) {
         my scalar $d = $decls->[$i];
+        my int $dt = $d->{"type"};
         my str $dsig = "$";
-        if ($d->{"type"} == NODE_VAR_DECL() || $d->{"type"} == NODE_OUR_DECL()) {
+        if ($dt == NODE_VAR_DECL() || $dt == NODE_OUR_DECL()) {
             $dsig = $d->{"sigil"};
         }
-        my int $dl = ast_get_line($d);
-        if ($dsig eq $sigil && sem_file_key($d) eq $fkey && $dl < $fline && $dl > $best_line) {
-            $best_line = $dl;
-            $best = $d->{"name"};
+        if ($dsig eq $sigil) {
+            my int $eligible = 0;
+            if ($dt == NODE_OUR_DECL()) {
+                my str $dpkg = "" . $d->{"package"};
+                if (length($dpkg) == 0) { $dpkg = "main"; }
+                if ($dpkg eq $cur_pkg) {
+                    $eligible = 1;
+                    if (is_valid_node($pkg_our_node) == 0) {
+                        $pkg_our_node = $d;
+                    }
+                }
+            } else {
+                if (sem_file_key($d) eq $fkey) {
+                    $eligible = 1;
+                    if (is_valid_node($file_fallback_node) == 0) {
+                        $file_fallback_node = $d;
+                    }
+                }
+            }
+            if ($eligible == 1 && sem_file_key($d) eq $fkey && $fline > 0) {
+                my int $dl = ast_get_line($d);
+                if ($dl < $fline && $dl > $best_line) {
+                    $best_line = $dl;
+                    $best_node = $d;
+                }
+            }
         }
         $i = $i + 1;
     }
-    return $best;
+    if (is_valid_node($best_node) == 1) { return $best_node; }
+    if (is_valid_node($pkg_our_node) == 1) { return $pkg_our_node; }
+    if (is_valid_node($file_fallback_node) == 1) { return $file_fallback_node; }
+    return 0;
+}
+
+# For a reference to a global with several file-level declarations, the C
+# name of the declaration that lexically precedes the reference/function.
+func resolve_shadowed_global(scalar $ctx, scalar $info, str $name, int $ref_line, str $sigil) str {
+    my scalar $d = resolve_global_decl_node($ctx, $info, $name, $ref_line, $sigil);
+    if (is_valid_node($d) == 1) {
+        return "" . $d->{"name"};
+    }
+    return $name;
+}
+
+func sem_resolve_vinfo_cname(scalar $ctx, scalar $vinfo, str $orig_name, int $line, str $sigil) str {
+    my str $cn = "" . $vinfo->{"c_name"};
+    if (length($cn) > 0) {
+        return $cn;
+    }
+    if ($vinfo->{"is_global"} == 1 && defined($vinfo->{"decls"})) {
+        my scalar $d = resolve_global_decl_node($ctx, $vinfo, $orig_name, $line, $sigil);
+        if (is_valid_node($d) == 1) {
+            return "" . $d->{"name"};
+        }
+        semantic_error($ctx, "undefined variable '" . $sigil . $orig_name . "'", $line);
+    }
+    return $orig_name;
 }
 
 # ============================================================
@@ -1191,7 +1278,9 @@ func stage0_expr_type(scalar $ctx, scalar $expr) int {
         my str $sigil = $expr->{"sigil"};
         if ($sigil eq "@") { return TYPE_ARRAY(); }
         if ($sigil eq "%") { return TYPE_HASH(); }
-        my scalar $lk = scope_lookup_var_sigil($ctx->{"scope"}, $expr->{"name"}, "$");
+        my str $vname = $expr->{"orig_name"};
+        if (length($vname) == 0) { $vname = "" . $expr->{"name"}; }
+        my scalar $lk = scope_lookup_var_sigil($ctx->{"scope"}, $vname, "$");
         if ($lk->{"found"} == 1) {
             my scalar $info = $lk->{"info"};
             return $info->{"type"};
@@ -1259,15 +1348,19 @@ func stage0_expr_type(scalar $ctx, scalar $expr) int {
 }
 
 # Validate interpolated scalar variables ($var and ${var}) inside regex
-# patterns and non-/e substitution replacements (matching CodeGen's rules).
-func analyze_regex_interp(scalar $ctx, str $pattern, int $line) void {
+# patterns and non-/e substitution replacements (matching CodeGen's rules),
+# rewriting any shadowed/disambiguated variable references to their C aliases.
+func analyze_regex_interp(scalar $ctx, str $pattern, int $line) str {
     my int $len = length($pattern);
     my int $i = 0;
+    my scalar $sb = sb_new();
     while ($i < $len) {
         my str $ch = substr($pattern, $i, 1);
         if ($ch eq "\\" && $i + 1 < $len) {
+            sb_append($sb, substr($pattern, $i, 2));
             $i = $i + 2;
         } elsif ($ch eq "$") {
+            my int $start_i = $i;
             $i = $i + 1;
             my str $varname = "";
             if ($i < $len && substr($pattern, $i, 1) eq "{") {
@@ -1314,14 +1407,25 @@ func analyze_regex_interp(scalar $ctx, str $pattern, int $line) void {
                 my scalar $rlk = scope_lookup_var_sigil($ctx->{"scope"}, $varname, "$");
                 if ($rlk->{"found"} == 0) {
                     semantic_error($ctx, "undefined variable '$" . $varname . "'", $line);
+                    sb_append($sb, substr($pattern, $start_i, $i - $start_i));
                 } else {
                     scope_mark_used_sigil($ctx->{"scope"}, $varname, "$");
+                    my str $cn = sem_resolve_vinfo_cname($ctx, $rlk->{"info"}, $varname, $line, "$");
+                    if ($cn ne $varname) {
+                        sb_append($sb, chr(36) . "{" . $cn . "}");
+                    } else {
+                        sb_append($sb, substr($pattern, $start_i, $i - $start_i));
+                    }
                 }
+            } else {
+                sb_append($sb, "$");
             }
         } else {
+            sb_append($sb, $ch);
             $i = $i + 1;
         }
     }
+    return sb_to_string($sb);
 }
 
 func sem_is_builtin_namespace(str $ns) int {
@@ -1348,13 +1452,10 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
         my int $found = $lookup_result->{"found"};
         if ($found == 0) {
             semantic_error($ctx, "undefined variable '" . $sigil . $name . "'", $line);
-        }
-        scope_mark_used_sigil($ctx->{"scope"}, $name, $sigil);
-        if ($found == 1) {
-            my scalar $vinfo = $lookup_result->{"info"};
-            if ($vinfo->{"is_global"} == 1 && size(@{$vinfo->{"decls"}}) > 1) {
-                $expr->{"name"} = resolve_shadowed_global($ctx, $vinfo, $name, $line, $sigil);
-            }
+        } else {
+            scope_mark_used_sigil($ctx->{"scope"}, $name, $sigil);
+            $expr->{"orig_name"} = $name;
+            $expr->{"name"} = sem_resolve_vinfo_cname($ctx, $lookup_result->{"info"}, $name, $line, $sigil);
         }
         return;
     }
@@ -1364,6 +1465,7 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
     # void function!) and preserve semantic errors collected inside its body.
     if ($node_type == NODE_ANON_FUNC()) {
         my scalar $af_saved_func = $ctx->{"current_func"};
+        my str $af_saved_pkg = "" . $ctx->{"cur_pkg"};
         if (is_valid_node($af_saved_func) == 1) {
             if (length("" . $expr->{"file"}) == 0) {
                 $expr->{"file"} = $af_saved_func->{"file"};
@@ -1372,6 +1474,9 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
             if (length("" . $expr->{"package"}) == 0) {
                 $expr->{"package"} = $af_saved_func->{"package"};
             }
+        }
+        if (length("" . $expr->{"package"}) > 0) {
+            $ctx->{"cur_pkg"} = "" . $expr->{"package"};
         }
         if (length("" . $expr->{"name"}) == 0) {
             $expr->{"name"} = "<closure>";
@@ -1401,7 +1506,13 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
             if (($af_p->{"has_default"} + 0) == 1 && is_valid_node($af_p->{"default"}) == 1) {
                 analyze_expression($ctx, $af_p->{"default"});
             }
+            my str $af_calias = sem_alloc_local_cname($ctx, $ctx->{"scope"}, $af_pname);
             scope_add_var($ctx->{"scope"}, $af_pname, $af_p->{"sigil"}, $af_p->{"param_type"}, ast_get_line($af_p));
+            if (length($af_calias) > 0) {
+                $af_p->{"orig_name"} = $af_pname;
+                $af_p->{"name"} = $af_calias;
+                $ctx->{"scope"}->{"vars"}->{$af_pname}->{"c_name"} = $af_calias;
+            }
             $af_pi = $af_pi + 1;
         }
         if (is_valid_node($expr->{"body"}) == 1) {
@@ -1409,6 +1520,7 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
         }
         $ctx->{"scope"} = $af_outer;
         $ctx->{"current_func"} = $af_saved_func;
+        $ctx->{"cur_pkg"} = $af_saved_pkg;
         return;
     }
 
@@ -1570,13 +1682,14 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
             # Not found - try package-prefixed name if we're in a package
             if ($colon_idx < 0) {
                 my scalar $cur_fn = $ctx->{"current_func"};
-                my str $pkg = "";
-                my int $has_cur_fn = 0;
-                if ($cur_fn) {
-                    $has_cur_fn = 1;
+                my str $pkg = "" . $ctx->{"eval_package"};
+                if (length($pkg) == 0) {
+                    if ($cur_fn) {
+                        $pkg = "" . $cur_fn->{"package"};
+                    }
                 }
-                if ($has_cur_fn == 1) {
-                    $pkg = $cur_fn->{"package"};
+                if (length($pkg) == 0) {
+                    $pkg = "" . $ctx->{"cur_pkg"};
                 }
                 if (length($pkg) > 0 && $pkg ne "main") {
                     # Convert :: to _ in package name for underscore format lookup
@@ -1778,7 +1891,9 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
             if ($tgt->{"type"} == NODE_VARIABLE()) {
                 my str $tsigil = $tgt->{"sigil"};
                 if ($tsigil eq "$") {
-                    my scalar $lk = scope_lookup_var_sigil($ctx->{"scope"}, $tgt->{"name"}, "$");
+                    my str $t_orig = "" . $tgt->{"orig_name"};
+                    if (length($t_orig) == 0) { $t_orig = "" . $tgt->{"name"}; }
+                    my scalar $lk = scope_lookup_var_sigil($ctx->{"scope"}, $t_orig, "$");
                     if ($lk->{"found"} == 1) {
                         my int $dtype = $lk->{"info"}->{"type"};
                         my int $atype = stage0_expr_type($ctx, $expr->{"value"});
@@ -1789,7 +1904,7 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
                             if ($aline == 0) { $aline = ast_get_line($tgt); }
                             if ($aline == 0) { $aline = ast_get_line($expr->{"value"}); }
                             semantic_warn($ctx, "assigning a " . ast_data_type_name($atype)
-                                . " value to '$" . $tgt->{"name"} . "' (declared "
+                                . " value to '$" . $t_orig . "' (declared "
                                 . ast_data_type_name($dtype) . ")", $aline);
                         }
                     }
@@ -1805,8 +1920,14 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
         my scalar $sub_arr = $expr->{"array"};
         if ($sub_arr->{"type"} == NODE_VARIABLE() && $sub_arr->{"sigil"} eq "@") {
             my str $sa_name = $sub_arr->{"name"};
+            my int $sa_line = ast_get_line($sub_arr);
             my scalar $sa_lk = scope_lookup_var_sigil($ctx->{"scope"}, $sa_name, "@");
             my str $matched_sigil = "@";
+            if ($sa_lk->{"found"} == 1 && $sa_lk->{"info"}->{"is_global"} == 1 && defined($sa_lk->{"info"}->{"decls"})) {
+                if (is_valid_node(resolve_global_decl_node($ctx, $sa_lk->{"info"}, $sa_name, $sa_line, "@")) == 0) {
+                    $sa_lk->{"found"} = 0;
+                }
+            }
             if ($sa_lk->{"found"} == 0) {
                 my scalar $sa_slk = scope_lookup_var_sigil($ctx->{"scope"}, $sa_name, "$");
                 if ($sa_slk->{"found"} == 1) {
@@ -1818,13 +1939,11 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
                 }
             }
             if ($sa_lk->{"found"} == 0) {
-                semantic_error($ctx, "undefined variable '@" . $sa_name . "'", ast_get_line($sub_arr));
+                semantic_error($ctx, "undefined variable '@" . $sa_name . "'", $sa_line);
             } else {
                 scope_mark_used_sigil($ctx->{"scope"}, $sa_name, $matched_sigil);
-                my scalar $sa_vinfo = $sa_lk->{"info"};
-                if ($sa_vinfo->{"is_global"} == 1 && size(@{$sa_vinfo->{"decls"}}) > 1) {
-                    $sub_arr->{"name"} = resolve_shadowed_global($ctx, $sa_vinfo, $sa_name, ast_get_line($sub_arr), $matched_sigil);
-                }
+                $sub_arr->{"orig_name"} = $sa_name;
+                $sub_arr->{"name"} = sem_resolve_vinfo_cname($ctx, $sa_lk->{"info"}, $sa_name, $sa_line, $matched_sigil);
             }
         } else {
             analyze_expression($ctx, $sub_arr);
@@ -1839,8 +1958,14 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
         my scalar $ha_hash = $expr->{"hash"};
         if ($ha_hash->{"type"} == NODE_VARIABLE() && $ha_hash->{"sigil"} eq "%") {
             my str $hh_name = $ha_hash->{"name"};
+            my int $hh_line = ast_get_line($ha_hash);
             my scalar $hh_lk = scope_lookup_var_sigil($ctx->{"scope"}, $hh_name, "%");
             my str $hmatched_sigil = "%";
+            if ($hh_lk->{"found"} == 1 && $hh_lk->{"info"}->{"is_global"} == 1 && defined($hh_lk->{"info"}->{"decls"})) {
+                if (is_valid_node(resolve_global_decl_node($ctx, $hh_lk->{"info"}, $hh_name, $hh_line, "%")) == 0) {
+                    $hh_lk->{"found"} = 0;
+                }
+            }
             if ($hh_lk->{"found"} == 0) {
                 my scalar $hh_slk = scope_lookup_var_sigil($ctx->{"scope"}, $hh_name, "$");
                 if ($hh_slk->{"found"} == 1) {
@@ -1852,13 +1977,11 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
                 }
             }
             if ($hh_lk->{"found"} == 0) {
-                semantic_error($ctx, "undefined variable '%" . $hh_name . "'", ast_get_line($ha_hash));
+                semantic_error($ctx, "undefined variable '%" . $hh_name . "'", $hh_line);
             } else {
                 scope_mark_used_sigil($ctx->{"scope"}, $hh_name, $hmatched_sigil);
-                my scalar $hh_vinfo = $hh_lk->{"info"};
-                if ($hh_vinfo->{"is_global"} == 1 && size(@{$hh_vinfo->{"decls"}}) > 1) {
-                    $ha_hash->{"name"} = resolve_shadowed_global($ctx, $hh_vinfo, $hh_name, ast_get_line($ha_hash), $hmatched_sigil);
-                }
+                $ha_hash->{"orig_name"} = $hh_name;
+                $ha_hash->{"name"} = sem_resolve_vinfo_cname($ctx, $hh_lk->{"info"}, $hh_name, $hh_line, $hmatched_sigil);
             }
         } else {
             analyze_expression($ctx, $ha_hash);
@@ -1884,15 +2007,14 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
         my scalar $hs_src = $expr->{"source"};
         if ($hs_src->{"type"} == NODE_VARIABLE() && $hs_src->{"sigil"} eq "@") {
             my str $hs_name = $hs_src->{"name"};
+            my int $hs_line = ast_get_line($hs_src);
             my scalar $hs_lk = scope_lookup_var_sigil($ctx->{"scope"}, $hs_name, "%");
             if ($hs_lk->{"found"} == 0) {
-                semantic_error($ctx, "undefined variable '%" . $hs_name . "'", ast_get_line($hs_src));
+                semantic_error($ctx, "undefined variable '%" . $hs_name . "'", $hs_line);
             } else {
                 scope_mark_used_sigil($ctx->{"scope"}, $hs_name, "%");
-                my scalar $hs_vinfo = $hs_lk->{"info"};
-                if ($hs_vinfo->{"is_global"} == 1 && size(@{$hs_vinfo->{"decls"}}) > 1) {
-                    $hs_src->{"name"} = resolve_shadowed_global($ctx, $hs_vinfo, $hs_name, ast_get_line($hs_src), "%");
-                }
+                $hs_src->{"orig_name"} = $hs_name;
+                $hs_src->{"name"} = sem_resolve_vinfo_cname($ctx, $hs_lk->{"info"}, $hs_name, $hs_line, "%");
             }
         } else {
             analyze_expression($ctx, $hs_src);
@@ -2051,21 +2173,21 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
     # Regex match ($str =~ /pattern/)
     if ($node_type == NODE_REGEX_MATCH()) {
         analyze_expression($ctx, $expr->{"target"});
-        analyze_regex_interp($ctx, "" . $expr->{"pattern"}, $line);
+        $expr->{"pattern"} = analyze_regex_interp($ctx, "" . $expr->{"pattern"}, $line);
         return;
     }
 
     # Regex substitution ($str =~ s/pattern/replacement/flags)
     if ($node_type == NODE_REGEX_SUBST()) {
         analyze_expression($ctx, $expr->{"target"});
-        analyze_regex_interp($ctx, "" . $expr->{"pattern"}, $line);
+        $expr->{"pattern"} = analyze_regex_interp($ctx, "" . $expr->{"pattern"}, $line);
         my str $sflags = "" . $expr->{"flags"};
         if (index($sflags, "e") >= 0) {
             if (is_valid_node($expr->{"eval_expr"}) == 1) {
                 analyze_expression($ctx, $expr->{"eval_expr"});
             }
         } else {
-            analyze_regex_interp($ctx, "" . $expr->{"replacement"}, $line);
+            $expr->{"replacement"} = analyze_regex_interp($ctx, "" . $expr->{"replacement"}, $line);
         }
         return;
     }
@@ -2091,6 +2213,8 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
                 semantic_error($ctx, "undefined variable '$" . $rl_var . "'", $line);
             } else {
                 scope_mark_used_sigil($ctx->{"scope"}, $rl_var, "$");
+                $expr->{"orig_varname"} = $rl_var;
+                $expr->{"varname"} = sem_resolve_vinfo_cname($ctx, $rl_lk->{"info"}, $rl_var, $line, "$");
             }
         }
         return;
@@ -2138,18 +2262,36 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         }
         scope_check_param_redecl($ctx, $current_scope, $name, $sigil, "variable", $line);
 
-        # Add variable to scope
-        scope_add_var($current_scope, $name, $sigil, $var_type, $line);
-
-        # Analyze optional initial_capacity expression if present
-        if (is_valid_node($stmt->{"initial_capacity"}) == 1) {
-            analyze_expression($ctx, $stmt->{"initial_capacity"});
+        my str $c_alias = sem_alloc_local_cname($ctx, $current_scope, $name);
+        my scalar $init_expr = $stmt->{"init"};
+        my int $init_before = 0;
+        if (length($c_alias) > 0 && is_valid_node($init_expr) == 1 && $init_expr->{"type"} != NODE_ANON_FUNC()) {
+            $init_before = 1;
+            if (is_valid_node($stmt->{"initial_capacity"}) == 1) {
+                analyze_expression($ctx, $stmt->{"initial_capacity"});
+            }
+            analyze_expression($ctx, $init_expr);
         }
 
-        # Analyze initializer if present
-        my scalar $init_expr = $stmt->{"init"};
+        # Add variable to scope
+        scope_add_var($current_scope, $name, $sigil, $var_type, $line);
+        if (length($c_alias) > 0) {
+            $stmt->{"orig_name"} = $name;
+            $stmt->{"name"} = $c_alias;
+            $current_scope->{"vars"}->{$name}->{"c_name"} = $c_alias;
+        }
+
+        if ($init_before == 0) {
+            # Analyze optional initial_capacity expression if present
+            if (is_valid_node($stmt->{"initial_capacity"}) == 1) {
+                analyze_expression($ctx, $stmt->{"initial_capacity"});
+            }
+            # Analyze initializer if present
+            if (is_valid_node($init_expr) == 1) {
+                analyze_expression($ctx, $init_expr);
+            }
+        }
         if (is_valid_node($init_expr) == 1) {
-            analyze_expression($ctx, $init_expr);
             # Stage-0 type check (scalar declarations only — array/hash
             # initializers are flattening lists with their own semantics).
             if ($ctx->{"strict_types"} == 1 && $sigil eq "$") {
@@ -2179,12 +2321,24 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         }
         scope_check_param_redecl($ctx, $current_scope, $name, "$", "constant", $line);
 
+        my str $const_calias = sem_alloc_local_cname($ctx, $current_scope, $name);
+        my scalar $init_expr = $stmt->{"init"};
+        my int $c_init_before = 0;
+        if (length($const_calias) > 0 && is_valid_node($init_expr) == 1 && $init_expr->{"type"} != NODE_ANON_FUNC()) {
+            $c_init_before = 1;
+            analyze_expression($ctx, $init_expr);
+        }
+
         # Add const to scope as a scalar
         scope_add_var($current_scope, $name, "$", $var_type, $line);
+        if (length($const_calias) > 0) {
+            $stmt->{"orig_name"} = $name;
+            $stmt->{"name"} = $const_calias;
+            $current_scope->{"vars"}->{$name}->{"c_name"} = $const_calias;
+        }
 
         # Analyze initializer (required for const)
-        my scalar $init_expr = $stmt->{"init"};
-        if (is_valid_node($init_expr) == 1) {
+        if ($c_init_before == 0 && is_valid_node($init_expr) == 1) {
             analyze_expression($ctx, $init_expr);
         }
         return;
@@ -2195,11 +2349,27 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         my str $name = $stmt->{"name"};
         my str $sigil = $stmt->{"sigil"};
         my int $var_type = $stmt->{"var_type"};
+        my str $opkg = "" . $ctx->{"cur_pkg"};
+        if (length($opkg) == 0) { $opkg = "main"; }
+        my str $our_key = $opkg . "::" . $name;
+        my str $our_cname = "__our_" . sem_sanitize_pkg($opkg) . "__" . $name;
+
+        my scalar $current_scope = $ctx->{"scope"};
+        my str $our_shadow = sem_alloc_local_cname($ctx, $current_scope, $name);
+        if (length($our_shadow) > 0) {
+            my int $sid = ($ctx->{"local_shadow_id"} + 0);
+            $our_cname = $our_cname . "__lsh" . $sid;
+        }
+        $stmt->{"orig_name"} = $name;
+        $stmt->{"our_key"} = $our_key;
+        $stmt->{"name"} = $our_cname;
 
         # Add variable to scope so subsequent references are valid
-        my scalar $current_scope = $ctx->{"scope"};
         scope_add_var($current_scope, $name, $sigil, $var_type, $line);
-        $current_scope->{"vars"}->{$name}->{"is_our"} = 1;
+        my scalar $oinfo = $current_scope->{"vars"}->{$name};
+        $oinfo->{"is_our"} = 1;
+        $oinfo->{"c_name"} = $our_cname;
+        $oinfo->{"our_key"} = $our_key;
 
         # Analyze initializer if present
         my scalar $init_expr = $stmt->{"init"};
@@ -2224,6 +2394,25 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
                     semantic_error($ctx, "undefined variable '%" . $name . "'", $line);
                 } else {
                     scope_mark_used_sigil($ctx->{"scope"}, $name, "%");
+                    my scalar $hvinfo = $hlk->{"info"};
+                    if ($hvinfo->{"is_global"} == 1 && defined($hvinfo->{"decls"})) {
+                        my scalar $hd = resolve_global_decl_node($ctx, $hvinfo, $name, $line, "%");
+                        if (is_valid_node($hd) == 1) {
+                            $stmt->{"name"} = $hd->{"name"};
+                            if (length("" . $hd->{"our_key"}) > 0) {
+                                $stmt->{"our_key"} = $hd->{"our_key"};
+                            }
+                        } else {
+                            semantic_error($ctx, "undefined variable '%" . $name . "'", $line);
+                        }
+                    } else {
+                        if (length("" . $hvinfo->{"c_name"}) > 0) {
+                            $stmt->{"name"} = $hvinfo->{"c_name"};
+                        }
+                        if (length("" . $hvinfo->{"our_key"}) > 0) {
+                            $stmt->{"our_key"} = $hvinfo->{"our_key"};
+                        }
+                    }
                 }
             }
         } else {
@@ -2233,10 +2422,30 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
                     semantic_error($ctx, "undefined variable '" . $sigil . $name . "'", $line);
                 } else {
                     my scalar $vinfo = $lk->{"info"};
-                    if ($vinfo->{"is_our"} != 1) {
-                        semantic_error($ctx, "Can't localize lexical variable " . $sigil . $name, $line);
+                    if ($vinfo->{"is_global"} == 1 && defined($vinfo->{"decls"})) {
+                        my scalar $ld = resolve_global_decl_node($ctx, $vinfo, $name, $line, $sigil);
+                        if (is_valid_node($ld) == 0) {
+                            semantic_error($ctx, "undefined variable '" . $sigil . $name . "'", $line);
+                        } elsif ($ld->{"type"} != NODE_OUR_DECL()) {
+                            semantic_error($ctx, "Can't localize lexical variable " . $sigil . $name, $line);
+                        } else {
+                            scope_mark_used_sigil($ctx->{"scope"}, $name, $sigil);
+                            $stmt->{"name"} = $ld->{"name"};
+                            $stmt->{"our_key"} = $ld->{"our_key"};
+                        }
+                    } else {
+                        if ($vinfo->{"is_our"} != 1) {
+                            semantic_error($ctx, "Can't localize lexical variable " . $sigil . $name, $line);
+                        } else {
+                            if (length("" . $vinfo->{"c_name"}) > 0) {
+                                $stmt->{"name"} = $vinfo->{"c_name"};
+                            }
+                            if (length("" . $vinfo->{"our_key"}) > 0) {
+                                $stmt->{"our_key"} = $vinfo->{"our_key"};
+                            }
+                        }
+                        scope_mark_used_sigil($ctx->{"scope"}, $name, $sigil);
                     }
-                    scope_mark_used_sigil($ctx->{"scope"}, $name, $sigil);
                 }
             }
         }
@@ -2272,8 +2481,14 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
                 }
                 scope_check_param_redecl($ctx, $current_scope, $name, $sigil, "variable", $line);
 
+                my str $d_calias = sem_alloc_local_cname($ctx, $current_scope, $name);
                 # Add variable to scope
                 scope_add_var($current_scope, $name, $sigil, $var_type, $line);
+                if (length($d_calias) > 0) {
+                    $var->{"orig_name"} = $name;
+                    $var->{"name"} = $d_calias;
+                    $current_scope->{"vars"}->{$name}->{"c_name"} = $d_calias;
+                }
                 $i = $i + 1;
             }
         } else {
@@ -2282,11 +2497,15 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
                 my scalar $var = $vars->[$i];
                 my str $name = $var->{"name"};
                 my str $sigil = $var->{"sigil"};
+                my int $vline = ast_get_line($var);
+                if ($vline <= 0) { $vline = $line; }
                 my scalar $dlk = scope_lookup_var_sigil($current_scope, $name, $sigil);
                 if ($dlk->{"found"} == 0) {
                     semantic_error($ctx, "undefined variable '" . $sigil . $name . "'", $line);
                 } else {
                     scope_mark_used_sigil($current_scope, $name, $sigil);
+                    $var->{"orig_name"} = $name;
+                    $var->{"name"} = sem_resolve_vinfo_cname($ctx, $dlk->{"info"}, $name, $vline, $sigil);
                 }
                 $i = $i + 1;
             }
@@ -2308,6 +2527,17 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
 
     # Expression statement
     if ($node_type == NODE_EXPR_STMT()) {
+        my str $epkg = "" . $stmt->{"eval_package"};
+        if (length($epkg) > 0) {
+            my str $saved_pkg = "" . $ctx->{"cur_pkg"};
+            my str $saved_eval_pkg = "" . $ctx->{"eval_package"};
+            $ctx->{"cur_pkg"} = $epkg;
+            $ctx->{"eval_package"} = $epkg;
+            analyze_expression($ctx, $stmt->{"expr"});
+            $ctx->{"cur_pkg"} = $saved_pkg;
+            $ctx->{"eval_package"} = $saved_eval_pkg;
+            return;
+        }
         analyze_expression($ctx, $stmt->{"expr"});
         return;
     }
@@ -2445,8 +2675,16 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
             my str $fe_vname = $fe_decl->{"name"};
             my str $fe_sigil = $fe_decl->{"sigil"};
             my int $fe_vtype = $fe_decl->{"var_type"};
+            my str $fe_calias = sem_alloc_local_cname($ctx, $ctx->{"scope"}, $fe_vname);
             scope_add_var($ctx->{"scope"}, $fe_vname, $fe_sigil, $fe_vtype, $line);
             scope_mark_used_sigil($ctx->{"scope"}, $fe_vname, $fe_sigil);
+            if (length($fe_calias) > 0) {
+                $fe_decl->{"orig_name"} = $fe_vname;
+                $fe_decl->{"name"} = $fe_calias;
+                $stmt->{"orig_var_name"} = $fe_vname;
+                $stmt->{"var_name"} = $fe_calias;
+                $ctx->{"scope"}->{"vars"}->{$fe_vname}->{"c_name"} = $fe_calias;
+            }
         } else {
             my str $fe_existing = "" . $stmt->{"var_name"};
             if (length($fe_existing) > 0) {
@@ -2455,6 +2693,8 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
                     semantic_error($ctx, "undefined variable '$" . $fe_existing . "'", $line);
                 } else {
                     scope_mark_used_sigil($ctx->{"scope"}, $fe_existing, "$");
+                    $stmt->{"orig_var_name"} = $fe_existing;
+                    $stmt->{"var_name"} = sem_resolve_vinfo_cname($ctx, $fe_lk->{"info"}, $fe_existing, $line, "$");
                 }
             }
         }
@@ -2479,8 +2719,14 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
 
             my str $catch_var = "" . $clause->{"catch_var"};
             if (length($catch_var) > 0) {
+                my str $c_calias = sem_alloc_local_cname($ctx, $ctx->{"scope"}, $catch_var);
                 scope_add_var($ctx->{"scope"}, $catch_var, "$", TYPE_SCALAR(), $line);
                 scope_mark_used_sigil($ctx->{"scope"}, $catch_var, "$");
+                if (length($c_calias) > 0) {
+                    $clause->{"orig_catch_var"} = $catch_var;
+                    $clause->{"catch_var"} = $c_calias;
+                    $ctx->{"scope"}->{"vars"}->{$catch_var}->{"c_name"} = $c_calias;
+                }
             }
 
             if (is_valid_node($clause->{"catch_block"}) == 1) {
@@ -2525,8 +2771,11 @@ func analyze_block(scalar $ctx, scalar $block) void {
 }
 
 func analyze_function(scalar $ctx, scalar $fn) void {
-    # Set current function for return type checking
+    # Set current function and package context
     $ctx->{"current_func"} = $fn;
+    my str $f_pkg = "" . $fn->{"package"};
+    if (length($f_pkg) == 0) { $f_pkg = "main"; }
+    $ctx->{"cur_pkg"} = $f_pkg;
 
     # Create function scope
     my scalar $old_scope = $ctx->{"scope"};
@@ -2571,6 +2820,7 @@ func analyze_function(scalar $ctx, scalar $fn) void {
     # Restore scope
     $ctx->{"scope"} = $old_scope;
     $ctx->{"current_func"} = 0;
+    $ctx->{"cur_pkg"} = "main";
 }
 
 # ============================================================
@@ -2621,6 +2871,10 @@ func semantic_analyze(scalar $ast, int $show_warnings, int $strict_types) void {
             $ctx->{"cur_file"} = "" . $gvar->{"file"};
             $ctx->{"cur_from_use"} = $gvar->{"from_use"} + 0;
             $ctx->{"current_func"} = 0;
+            my str $gpkg = "" . $gvar->{"package"};
+            if (length($gpkg) == 0) { $gpkg = "main"; }
+            $ctx->{"cur_pkg"} = $gpkg;
+            $ctx->{"cur_block_line"} = ast_get_line($gvar);
             if (is_valid_node($gvar->{"initial_capacity"}) == 1) {
                 analyze_expression($ctx, $gvar->{"initial_capacity"});
             }
@@ -2630,12 +2884,15 @@ func semantic_analyze(scalar $ast, int $show_warnings, int $strict_types) void {
                     my int $gv_type = $gvar->{"var_type"};
                     my int $ga_type = stage0_expr_type($ctx, $gvar->{"init"});
                     if (stage0_types_compatible($gv_type, $ga_type) == 0) {
-                        semantic_warn($ctx, "initializing '$" . $gvar->{"name"} . "' (declared "
+                        my str $gv_oname = "" . $gvar->{"orig_name"};
+                        if (length($gv_oname) == 0) { $gv_oname = "" . $gvar->{"name"}; }
+                        semantic_warn($ctx, "initializing '$" . $gv_oname . "' (declared "
                             . ast_data_type_name($gv_type) . ") with a "
                             . ast_data_type_name($ga_type) . " value", ast_get_line($gvar));
                     }
                 }
             }
+            $ctx->{"cur_block_line"} = 0;
         }
     }
 
@@ -2648,6 +2905,9 @@ func semantic_analyze(scalar $ast, int $show_warnings, int $strict_types) void {
             $ctx->{"cur_file"} = "" . $bblk->{"file"};
             $ctx->{"cur_from_use"} = $bblk->{"from_use"} + 0;
             $ctx->{"current_func"} = 0;
+            my str $bpkg = "" . $bblk->{"source_module"};
+            if (length($bpkg) == 0) { $bpkg = "main"; }
+            $ctx->{"cur_pkg"} = $bpkg;
             $ctx->{"cur_block_line"} = ast_get_line($bblk);
             analyze_block($ctx, $bblk);
             $ctx->{"cur_block_line"} = 0;
@@ -2661,6 +2921,9 @@ func semantic_analyze(scalar $ast, int $show_warnings, int $strict_types) void {
             $ctx->{"cur_file"} = "" . $eblk->{"file"};
             $ctx->{"cur_from_use"} = $eblk->{"from_use"} + 0;
             $ctx->{"current_func"} = 0;
+            my str $epkg = "" . $eblk->{"source_module"};
+            if (length($epkg) == 0) { $epkg = "main"; }
+            $ctx->{"cur_pkg"} = $epkg;
             $ctx->{"cur_block_line"} = ast_get_line($eblk);
             analyze_block($ctx, $eblk);
             $ctx->{"cur_block_line"} = 0;

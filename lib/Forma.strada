@@ -3664,6 +3664,7 @@ func helper_replace(str $args, scalar $vars) str {
     # Simple replace all
     my str $result = "";
     my int $find_len = length($find);
+    if ($find_len == 0) { return $text; }
     my int $i = 0;
     while ($i < length($text)) {
         if ($i + $find_len <= length($text) && substr($text, $i, $find_len) eq $find) {
@@ -3868,27 +3869,43 @@ func int_to_hex(int $n, int $width) str {
     return $result;
 }
 
-# {{url_decode value}} - URL decode a string
+func is_hex_byte(int $b) int {
+    if (($b >= 48 && $b <= 57) || ($b >= 65 && $b <= 70) || ($b >= 97 && $b <= 102)) {
+        return 1;
+    }
+    return 0;
+}
+
+# {{url_decode value}} - URL decode a string (UTF-8 byte-accurate)
 func helper_url_decode(str $val) str {
-    my str $result = "";
-    my int $len = length($val);
+    my str $in = $val;
+    if (utf8::is_utf8($in)) {
+        $in = utf8::encode($in);
+    }
+    my str $bytes = "";
+    my int $blen = core::byte_length($in);
     my int $i = 0;
-    while ($i < $len) {
-        my str $ch = substr($val, $i, 1);
-        if ($ch eq "+" ) {
-            $result = $result . " ";
+    while ($i < $blen) {
+        my int $b = core::get_byte($in, $i);
+        if ($b == 43) {
+            $bytes = $bytes . " ";
             $i = $i + 1;
-        } elsif ($ch eq "%" && $i + 2 < $len) {
-            my str $hex = substr($val, $i + 1, 2);
+        } elsif ($b == 37 && $i + 2 < $blen &&
+                 Forma::is_hex_byte(core::get_byte($in, $i + 1)) == 1 &&
+                 Forma::is_hex_byte(core::get_byte($in, $i + 2)) == 1) {
+            my str $hex = core::byte_substr($in, $i + 1, 2);
             my int $code = Forma::hex_to_int($hex);
-            $result = $result . chr($code);
+            $bytes = $bytes . core::pack("C", $code);
             $i = $i + 3;
         } else {
-            $result = $result . $ch;
+            $bytes = $bytes . core::byte_substr($in, $i, 1);
             $i = $i + 1;
         }
     }
-    return $result;
+    if (utf8::valid($bytes)) {
+        utf8::decode($bytes);
+    }
+    return $bytes;
 }
 
 # Convert hex string to integer

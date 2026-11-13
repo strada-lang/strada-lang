@@ -67,6 +67,9 @@ our array @IMPLICIT_IMPORT_ARCHS = ();
 our array @IMPLICIT_IMPORT_LIBS = ();
 our array @LINK_LIBS = ();
 our array @INCLUDE_PATHS = ();
+our array @EXTRA_GCC_FLAGS = ();
+our array @EXTRA_INCLUDE_FLAGS = ();
+our array @EXTRA_LINK_FLAGS = ();
 our array @PP_DEFINES = ();
 our array @POSITIONAL = ();
 our array @RUN_ARGS = ();
@@ -459,6 +462,17 @@ func parse_args(array @av) void {
         elsif (sw($a, "-I")) { @INCLUDE_PATHS = (@INCLUDE_PATHS, substr($a, 2, length($a) - 2)); $i = $i + 1; }
         elsif ($a eq "-D") { @PP_DEFINES = (@PP_DEFINES, need_arg(@av, $i, $n, $a)); $i = $i + 2; }
         elsif (sw($a, "-D")) { @PP_DEFINES = (@PP_DEFINES, substr($a, 2, length($a) - 2)); $i = $i + 1; }
+        elsif ($a eq "-pthread") { @EXTRA_GCC_FLAGS = (@EXTRA_GCC_FLAGS, "-pthread"); @EXTRA_LINK_FLAGS = (@EXTRA_LINK_FLAGS, "-pthread"); $i = $i + 1; }
+        elsif (sw($a, "-Wl,")) { @EXTRA_LINK_FLAGS = (@EXTRA_LINK_FLAGS, $a); $i = $i + 1; }
+        elsif ($a eq "-isystem") { my str $isys = need_arg(@av, $i, $n, $a); @EXTRA_INCLUDE_FLAGS = (@EXTRA_INCLUDE_FLAGS, "-isystem", $isys); $i = $i + 2; }
+        elsif (sw($a, "-isystem")) { @EXTRA_INCLUDE_FLAGS = (@EXTRA_INCLUDE_FLAGS, "-isystem", substr($a, 8, length($a) - 8)); $i = $i + 1; }
+        elsif (sw($a, "-f") || $a eq "-pipe" || sw($a, "-m")) {
+            @EXTRA_GCC_FLAGS = (@EXTRA_GCC_FLAGS, $a);
+            if (sw($a, "-fstack-protector") || sw($a, "-fsanitize")) {
+                @EXTRA_LINK_FLAGS = (@EXTRA_LINK_FLAGS, $a);
+            }
+            $i = $i + 1;
+        }
         elsif ($a eq "-v" || $a eq "--verbose") { $VERBOSE = 1; $i = $i + 1; }
         elsif ($a eq "-h" || $a eq "--help") { usage(); }
         elsif ($a eq "--repl") { $REPL_MODE = 1; $i = $i + 1; }
@@ -708,6 +722,8 @@ func build_gcc_flags() array {
         @f = (@f, "-Wno-misleading-indentation");
     }
     if ($IS_DARWIN == 1) { @f = (@f, "-Wno-unused-value"); }
+    my int $egf = 0;
+    while ($egf < size(@EXTRA_GCC_FLAGS)) { @f = (@f, $EXTRA_GCC_FLAGS[$egf]); $egf = $egf + 1; }
     @f = (@f, "-O" . $OPT_LEVEL);
     if ($DEBUG_SYMBOLS != 1 && $C_DEBUG_SYMBOLS != 1) {
         @f = (@f, "-pipe");
@@ -952,6 +968,8 @@ func main() int {
     my array @include_flags = ();
     my int $ii = 0;
     while ($ii < size(@INCLUDE_PATHS)) { @include_flags = (@include_flags, "-I" . $INCLUDE_PATHS[$ii]); $ii = $ii + 1; }
+    $ii = 0;
+    while ($ii < size(@EXTRA_INCLUDE_FLAGS)) { @include_flags = (@include_flags, $EXTRA_INCLUDE_FLAGS[$ii]); $ii = $ii + 1; }
     # OpenSSL compile flags (configure's STRADA_SSL_CFLAGS): needed to compile
     # lib/ssl.strada's `#include <openssl/ssl.h>` __C__ block when OpenSSL lives
     # off the default include path (e.g. Homebrew's keg-only openssl@3 on macOS).
@@ -960,6 +978,12 @@ func main() int {
     if (length($__ssl_cf) > 0) { @include_flags = (@include_flags, split_ws($__ssl_cf)); }
 
     my array @link_flags = ();
+    my int $lpi = 0;
+    while ($lpi < size(@LIB_PATHS)) { @link_flags = (@link_flags, "-L" . $LIB_PATHS[$lpi]); $lpi = $lpi + 1; }
+    $lpi = 0;
+    while ($lpi < size(@LIB_PATHS_LOW)) { @link_flags = (@link_flags, "-L" . $LIB_PATHS_LOW[$lpi]); $lpi = $lpi + 1; }
+    my int $elf = 0;
+    while ($elf < size(@EXTRA_LINK_FLAGS)) { @link_flags = (@link_flags, $EXTRA_LINK_FLAGS[$elf]); $elf = $elf + 1; }
     my int $li = 0;
     while ($li < size(@LINK_LIBS)) { @link_flags = (@link_flags, "-l" . $LINK_LIBS[$li]); $li = $li + 1; }
     if (env("STRADA_HAVE_PCRE2") eq "1") {
@@ -1165,6 +1189,16 @@ func main() int {
         # linker path — both probes and links. No-op on Linux / when SSL is on
         # the default path (STRADA_SSL_LIBS has no -L).
         my str $probe_ldirs = "";
+        my int $pli = 0;
+        while ($pli < size(@LIB_PATHS)) {
+            if (-d $LIB_PATHS[$pli]) { $probe_ldirs = $probe_ldirs . " -L" . sq($LIB_PATHS[$pli]); }
+            $pli = $pli + 1;
+        }
+        $pli = 0;
+        while ($pli < size(@LIB_PATHS_LOW)) {
+            if (-d $LIB_PATHS_LOW[$pli]) { $probe_ldirs = $probe_ldirs . " -L" . sq($LIB_PATHS_LOW[$pli]); }
+            $pli = $pli + 1;
+        }
         if (index($llibs, "ssl") >= 0 || index($llibs, "crypto") >= 0) {
             my array @__slt = split_ws(env("STRADA_SSL_LIBS"));
             my int $__sti = 0;

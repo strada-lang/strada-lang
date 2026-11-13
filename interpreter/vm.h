@@ -856,7 +856,7 @@ typedef struct {
 } VMFrame;
 
 /* VM state */
-typedef struct {
+typedef struct VM {
     VMValue *stack;
     size_t stack_top;
     size_t stack_cap;
@@ -900,6 +900,11 @@ typedef struct {
     size_t gc_threshold;
     int gc_pause;
     VMValue last_result;
+    /* Re-entrant VM save/restore + exception trapping */
+    size_t saved_locals_top;
+    struct VM *saved_active_vm;
+    int trap_uncaught;
+    int end_ran;
 } VM;
 
 /* Program API */

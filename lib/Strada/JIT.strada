@@ -812,6 +812,10 @@ private func strip_strings_and_comments(str $input) str {
     return $out;
 }
 
+private func jit_is_ws(str $ch) int {
+    return ($ch eq " " || $ch eq "\t" || $ch eq "\n" || $ch eq "\r") ? 1 : 0;
+}
+
 # Check if input declares a specific variable at top level (brace/paren/bracket depth 0)
 private func input_declares_var(str $input, str $name, str $sigil) int {
     my str $cleaned = strip_strings_and_comments($input);
@@ -831,9 +835,9 @@ private func input_declares_var(str $input, str $name, str $sigil) int {
         if ($depth == 0 && $pdepth == 0 && $bdepth == 0 && $c eq "m" && $i + 2 < $len && substr($cleaned, $i + 1, 1) eq "y") {
             my str $after_my = substr($cleaned, $i + 2, 1);
             my int $prev_ok = ($i == 0 || jit_is_ident_char(substr($cleaned, $i - 1, 1)) == 0) ? 1 : 0;
-            if ($prev_ok == 1 && ($after_my eq " " || $after_my eq "\t" || $after_my eq "\n")) {
+            if ($prev_ok == 1 && jit_is_ws($after_my) == 1) {
                 my int $pos = $i + 2;
-                while ($pos < $len && (substr($cleaned, $pos, 1) eq " " || substr($cleaned, $pos, 1) eq "\t" || substr($cleaned, $pos, 1) eq "\n")) {
+                while ($pos < $len && jit_is_ws(substr($cleaned, $pos, 1)) == 1) {
                     $pos = $pos + 1;
                 }
                 my int $wstart = $pos;
@@ -843,7 +847,7 @@ private func input_declares_var(str $input, str $name, str $sigil) int {
                     $pos = $pos + 1;
                 }
                 if ($word ne "") {
-                    while ($pos < $len && (substr($cleaned, $pos, 1) eq " " || substr($cleaned, $pos, 1) eq "\t" || substr($cleaned, $pos, 1) eq "\n")) {
+                    while ($pos < $len && jit_is_ws(substr($cleaned, $pos, 1)) == 1) {
                         $pos = $pos + 1;
                     }
                     if ($pos < $len) {
@@ -895,7 +899,7 @@ private func register_variables(str $input) void {
         if ($depth == 0 && $pdepth == 0 && $bdepth == 0 && $c eq "m" && $i + 2 < $len && substr($cleaned, $i + 1, 1) eq "y") {
             my str $after_my = substr($cleaned, $i + 2, 1);
             my int $word_ok = 0;
-            if ($after_my eq " " || $after_my eq "\t") {
+            if (jit_is_ws($after_my) == 1) {
                 if ($i == 0) {
                     $word_ok = 1;
                 } else {
@@ -905,7 +909,7 @@ private func register_variables(str $input) void {
             }
             if ($word_ok == 1) {
                 my int $pos = $i + 2;
-                while ($pos < $len && (substr($cleaned, $pos, 1) eq " " || substr($cleaned, $pos, 1) eq "\t")) {
+                while ($pos < $len && jit_is_ws(substr($cleaned, $pos, 1)) == 1) {
                     $pos = $pos + 1;
                 }
                 my str $type = "scalar";
@@ -922,12 +926,12 @@ private func register_variables(str $input) void {
                 }
                 if ($next_word eq "int" || $next_word eq "num" || $next_word eq "str" || $next_word eq "scalar" || $next_word eq "array" || $next_word eq "hash") {
                     $type = $next_word;
-                    while ($pos < $len && (substr($cleaned, $pos, 1) eq " " || substr($cleaned, $pos, 1) eq "\t")) {
+                    while ($pos < $len && jit_is_ws(substr($cleaned, $pos, 1)) == 1) {
                         $pos = $pos + 1;
                     }
                 } elsif ($next_word ne "") {
                     my int $look = $pos;
-                    while ($look < $len && (substr($cleaned, $look, 1) eq " " || substr($cleaned, $look, 1) eq "\t")) {
+                    while ($look < $len && jit_is_ws(substr($cleaned, $look, 1)) == 1) {
                         $look = $look + 1;
                     }
                     if ($look < $len) {
@@ -1151,7 +1155,7 @@ private func strip_toplevel_my(str $input) str {
 
         if ($depth == 0 && $pdepth == 0 && $bdepth == 0 && $cc eq "m" && $i + 2 < $len && substr($cleaned, $i + 1, 1) eq "y") {
             my str $after_my = substr($cleaned, $i + 2, 1);
-            if ($after_my eq " " || $after_my eq "\t") {
+            if (jit_is_ws($after_my) == 1) {
                 my int $word_ok = 0;
                 if ($i == 0) {
                     $word_ok = 1;
@@ -1163,7 +1167,7 @@ private func strip_toplevel_my(str $input) str {
                 }
                 if ($word_ok == 1) {
                     my int $j = $i + 2;
-                    while ($j < $len && (substr($cleaned, $j, 1) eq " " || substr($cleaned, $j, 1) eq "\t")) {
+                    while ($j < $len && jit_is_ws(substr($cleaned, $j, 1)) == 1) {
                         $j = $j + 1;
                     }
                     my str $vtype = "scalar";
@@ -1180,12 +1184,12 @@ private func strip_toplevel_my(str $input) str {
                     }
                     if ($word eq "int" || $word eq "num" || $word eq "str" || $word eq "scalar" || $word eq "array" || $word eq "hash") {
                         $vtype = $word;
-                        while ($j < $len && (substr($cleaned, $j, 1) eq " " || substr($cleaned, $j, 1) eq "\t")) {
+                        while ($j < $len && jit_is_ws(substr($cleaned, $j, 1)) == 1) {
                             $j = $j + 1;
                         }
                     } elsif ($word ne "") {
                         my int $look = $j;
-                        while ($look < $len && (substr($cleaned, $look, 1) eq " " || substr($cleaned, $look, 1) eq "\t")) {
+                        while ($look < $len && jit_is_ws(substr($cleaned, $look, 1)) == 1) {
                             $look = $look + 1;
                         }
                         if ($look < $len) {
@@ -1211,11 +1215,20 @@ private func strip_toplevel_my(str $input) str {
                                 $j = $j + 1;
                             }
                             if ($vname ne "") {
+                                if ($sigil eq "%") {
+                                    my int $rp = length($result) - 1;
+                                    while ($rp >= 0 && jit_is_ws(substr($result, $rp, 1)) == 1) {
+                                        $rp = $rp - 1;
+                                    }
+                                    if ($rp >= 0 && substr($result, $rp, 1) eq "}") {
+                                        $result = $result . "; ";
+                                    }
+                                }
                                 my int $k = $j;
-                                while ($k < $len && (substr($input, $k, 1) eq " " || substr($input, $k, 1) eq "\t")) {
+                                while ($k < $len && jit_is_ws(substr($input, $k, 1)) == 1) {
                                     $k = $k + 1;
                                 }
-                                if ($k < $len && substr($input, $k, 1) eq ";") {
+                                if ($k == $len || substr($input, $k, 1) eq ";") {
                                     # Standalone `my int $x;` -> reset to default value
                                     my str $defv = "undef";
                                     if ($sigil eq "@" || $sigil eq "%") { $defv = "()"; }
@@ -1344,7 +1357,7 @@ private func generate_source(str $input) str {
 
     # Check if this is a void function call (prints output, returns nothing useful)
     my int $is_void_call = 0;
-    if ($trimmed =~ /^(say|print|warn|die|push|pop|shift|unshift)\(/) {
+    if ($trimmed =~ /^(say|print|warn|die|push|unshift)\(/) {
         $is_void_call = 1;
     }
     foreach my str $fndef (@g_functions) {
@@ -1538,6 +1551,23 @@ private func ensure_private_tmpdir() void {
     $g_tmpdir_owned = 1;
 }
 
+private func snapshot_var_types() scalar {
+    my hash %copy = ();
+    foreach my str $k (keys(%g_var_types)) {
+        $copy{$k} = $g_var_types{$k};
+    }
+    return \%copy;
+}
+
+private func restore_var_types(scalar $saved) void {
+    %g_var_types = ();
+    if (defined($saved)) {
+        foreach my str $k (keys(%{$saved})) {
+            $g_var_types{$k} = $saved->{$k};
+        }
+    }
+}
+
 # Compile and execute a single eval, returns result
 private func eval_one(str $input) scalar {
     ensure_private_tmpdir();
@@ -1548,7 +1578,8 @@ private func eval_one(str $input) scalar {
     my str $c_file = $base . ".c";
     my str $so_file = $base . ".so";
 
-    # Register any new variables
+    # Register any new variables (snapshot for rollback if compilation/load fails)
+    my scalar $saved_vtypes = snapshot_var_types();
     register_variables($input);
 
     # Generate Strada source
@@ -1562,6 +1593,7 @@ private func eval_one(str $input) scalar {
     # Write source file
     my scalar $fh = core::open($src_file, "w");
     if (!defined($fh)) {
+        restore_var_types($saved_vtypes);
         throw "JIT: Could not create temp file: " . $src_file;
     }
     core::fwrite($fh, $strada_src);
@@ -1587,6 +1619,7 @@ private func eval_one(str $input) scalar {
     if (core::is_file($c_file) == 0) {
         # Clean up
         core::unlink($src_file);
+        restore_var_types($saved_vtypes);
         # Extract useful error message
         my str $err_msg = $compile_output;
         $err_msg =~ s/^Strada Compiler[^\n]*\n//;
@@ -1616,6 +1649,7 @@ private func eval_one(str $input) scalar {
         if ($g_runtime_path eq "") {
             core::unlink($src_file);
             core::unlink($c_file);
+            restore_var_types($saved_vtypes);
             throw "JIT: Could not find Strada runtime files for tcc backend";
         }
 
@@ -1649,6 +1683,7 @@ private func eval_one(str $input) scalar {
         if (core::is_file($so_file) == 0) {
             core::unlink($src_file);
             core::unlink($c_file);
+            restore_var_types($saved_vtypes);
             throw "JIT C compile error (tcc): " . $tcc_output;
         }
     } else {
@@ -1685,6 +1720,7 @@ private func eval_one(str $input) scalar {
             if (core::is_file($c_file) == 1) {
                 core::unlink($c_file);
             }
+            restore_var_types($saved_vtypes);
             throw "JIT C compile error (gcc): " . $output;
         }
     }
@@ -1713,6 +1749,7 @@ private func eval_one(str $input) scalar {
             core::unlink($c_file);
         }
         core::unlink($so_file);
+        restore_var_types($saved_vtypes);
         throw "JIT: Could not load compiled library: " . $dl_err;
     }
 
@@ -1970,6 +2007,15 @@ func eval(str $code) scalar {
 #
 # Reuses the `strada` driver script for the compile (so it benefits from
 # PCRE2 / runtime path / optimization handling without duplicating logic).
+func decode_wait_status(int $rc) int {
+    if ($rc < 0) { return 127; }
+    my int $es = core::exit_status($rc);
+    if ($es >= 0) { return $es; }
+    my int $sig = $rc & 127;
+    if ($sig > 0 && $sig != 127) { return 128 + $sig; }
+    return 1;
+}
+
 func run_file_argv(str $filename, scalar $script_args) int {
     if ($g_initialized == 0) {
         throw "Strada::JIT::run_file: Not initialized. Call init() first.";
@@ -2000,7 +2046,7 @@ func run_file_argv(str $filename, scalar $script_args) int {
         $lib_flags = $lib_flags . " -L " . shell_quote($lp);
     }
     my str $compile_cmd = shell_quote($strada_bin) . $lib_flags . " -o " . shell_quote($exe_file) . " " . shell_quote($filename);
-    my int $rc = core::system($compile_cmd);
+    my int $rc = decode_wait_status(core::system($compile_cmd));
     if ($rc != 0 || core::is_file($exe_file) == 0) {
         if ($rc == 0) { $rc = 1; }
         return $rc;
@@ -2013,7 +2059,7 @@ func run_file_argv(str $filename, scalar $script_args) int {
             $run_cmd = $run_cmd . " " . shell_quote($sa);
         }
     }
-    $rc = core::system($run_cmd);
+    $rc = decode_wait_status(core::system($run_cmd));
     core::unlink($exe_file);
     return $rc;
 }

@@ -259,7 +259,12 @@ func _install_module(str $module, str $lib_dir, int $verbose, int $depth) int {
 
     # Extract
     say("  Extracting...");
-    core::system_argv("tar", ["tar", "xzf", $tarball, "-C", $tmp_dir, "--no-same-owner"]);
+    my int $tar_rc = core::system_argv("tar", ["tar", "xzf", $tarball, "-C", $tmp_dir, "--no-same-owner"]);
+    if ($tar_rc != 0) {
+        say("  Extract failed (tar exit " . $tar_rc . ")");
+        core::system_argv("rm", ["rm", "-rf", $tmp_dir]);
+        return 0;
+    }
 
     # Find the extracted directory
     my str $extract_dir = core::qx("ls -d " . sq($tmp_dir) . "/*/ 2>/dev/null | head -1");
@@ -550,10 +555,18 @@ func _install_deps(str $module, str $lib_dir, int $verbose, int $depth) void {
     # Get runtime dependencies from MetaCPAN
     my str $dist = replace_all($module, "::", "-");
     my str $json = _http_get("https://fastapi.metacpan.org/v1/release/" . $dist);
-    if (length($json) == 0) { return; }
-
-    # Extract runtime requires via JSON::decode
-    my scalar $data = JSON::decode($json);
+    my scalar $data = (length($json) > 0) ? JSON::decode($json) : undef;
+    if (!defined($data) || ref($data) ne "HASH" || !defined($data->{"dependency"})) {
+        my str $mod_json = _http_get("https://fastapi.metacpan.org/v1/module/" . $module);
+        my scalar $mdata = (length($mod_json) > 0) ? JSON::decode($mod_json) : undef;
+        if (defined($mdata) && ref($mdata) eq "HASH" && defined($mdata->{"distribution"})) {
+            my str $real_dist = "" . $mdata->{"distribution"};
+            if (length($real_dist) > 0 && $real_dist ne $dist) {
+                $json = _http_get("https://fastapi.metacpan.org/v1/release/" . $real_dist);
+                $data = (length($json) > 0) ? JSON::decode($json) : undef;
+            }
+        }
+    }
     if (!defined($data) || ref($data) ne "HASH" || !defined($data->{"dependency"})) { return; }
     my scalar $dep_list = $data->{"dependency"};
     if (ref($dep_list) ne "ARRAY") { return; }
@@ -599,6 +612,9 @@ func _show_info(str $module) void {
 }
 
 func _list_installed(str $lib_dir) void {
+    while (length($lib_dir) > 1 && substr($lib_dir, length($lib_dir) - 1, 1) eq "/") {
+        $lib_dir = substr($lib_dir, 0, length($lib_dir) - 1);
+    }
     if (core::is_dir($lib_dir) != 1) {
         say("No modules installed (directory not found: " . $lib_dir . ")");
         return;
@@ -612,11 +628,13 @@ func _list_installed(str $lib_dir) void {
         if (length($pm) > 0) {
             # Convert path to module name
             my str $rel = $pm;
-            if (index($rel, $lib_dir) == 0) {
-                $rel = substr($rel, length($lib_dir) + 1, length($rel) - length($lib_dir) - 1);
+            my str $prefix = ($lib_dir eq "/") ? "/" : ($lib_dir . "/");
+            if (index($rel, $prefix) == 0) {
+                $rel = substr($rel, length($prefix), length($rel) - length($prefix));
             }
-            if (index($rel, ".pm") >= 0) {
-                $rel = substr($rel, 0, length($rel) - 3);
+            my int $rlen = length($rel);
+            if ($rlen > 3 && substr($rel, $rlen - 3, 3) eq ".pm") {
+                $rel = substr($rel, 0, $rlen - 3);
             }
             my str $mod = replace_all($rel, "/", "::");
             say("  " . $mod);

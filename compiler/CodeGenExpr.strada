@@ -162,6 +162,94 @@ func autoviv_link_type(scalar $node) int {
     return 0;
 }
 
+func autoviv_chain_needs_cleanup(scalar $cg, scalar $node) int {
+    if ($cg->{"cleanup_enabled"} != 1 || autoviv_link_type($node) == 0) { return 0; }
+    my scalar $cur = $node;
+    while (autoviv_link_type($cur) == 1) {
+        my int $ct = $cur->{"type"};
+        if ($ct == NODE_HASH_ACCESS()) { $cur = $cur->{"hash"}; }
+        elsif ($ct == NODE_SUBSCRIPT()) { $cur = $cur->{"array"}; }
+        else { $cur = $cur->{"ref"}; }
+    }
+    return needs_temp_cleanup($cg, $cur);
+}
+
+func emit_autoviv_step(scalar $cg, str $fn, scalar $cont_expr, int $propagate_flag, scalar $key_expr, int $kind) void {
+    my int $root_cl = 0;
+    if ($propagate_flag == 0 && $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $cont_expr) == 1) { $root_cl = 1; }
+    my int $mark_on = 0;
+    if (($cg->{"autoviv_mark_active"} + 0) == 1) { $mark_on = 1; }
+    my int $imm_decref = 0;
+    if ($root_cl == 1 && $mark_on == 0 && $cont_expr->{"type"} == NODE_VARIABLE()) { $imm_decref = 1; }
+    my int $wrap_root = 0;
+    if ($root_cl == 1 && ($mark_on == 1 || $imm_decref == 1)) { $wrap_root = 1; }
+
+    if ($wrap_root == 1) {
+        my int $uid = $cg->{"tmp_counter"} + 0;
+        $cg->{"tmp_counter"} = $uid + 1;
+        my str $rt_var = "__av_rt_" . $uid;
+        my str $r_var = "__av_rs_" . $uid;
+        emit($cg, "({ ");
+        if ($kind == 1) {
+            emit($cg, "StradaValue *__av_k_" . $uid . " = ");
+            gen_expression($cg, $key_expr);
+            emit($cg, "; ");
+        }
+        emit($cg, "StradaValue *" . $rt_var . " = ");
+        gen_expression($cg, $cont_expr);
+        emit($cg, "; ");
+        if ($mark_on == 1) {
+            emit($cg, "strada_cleanup_push(" . $rt_var . "); ");
+        }
+        if ($kind == 1) {
+            emit($cg, "StradaValue *" . $r_var . " = " . $fn . "_sv(" . $rt_var . ", __av_k_" . $uid . "); ");
+            if (needs_temp_cleanup($cg, $key_expr) == 1) {
+                emit($cg, "strada_decref(__av_k_" . $uid . "); ");
+            }
+        } elsif ($kind == 0) {
+            emit($cg, "StradaValue *" . $r_var . " = " . $fn . "(" . $rt_var . ", ");
+            gen_str_literal_c($cg, $key_expr->{"value"});
+            emit($cg, "); ");
+        } else {
+            emit($cg, "StradaValue *" . $r_var . " = " . $fn . "(" . $rt_var . ", ");
+            emit_int_operand($cg, $key_expr);
+            emit($cg, "); ");
+        }
+        if ($imm_decref == 1) {
+            emit($cg, "strada_decref(" . $rt_var . "); ");
+        }
+        emit($cg, $r_var . "; })");
+        return;
+    }
+
+    if ($kind == 1) {
+        emit($cg, "({ StradaValue *__av_k = ");
+        gen_expression($cg, $key_expr);
+        emit($cg, "; StradaValue *__av_r = " . $fn . "_sv(");
+        if ($propagate_flag > 0) { $cg->{"autoviv"} = $propagate_flag; }
+        gen_expression($cg, $cont_expr);
+        emit($cg, ", __av_k); ");
+        if (needs_temp_cleanup($cg, $key_expr) == 1) {
+            emit($cg, "strada_decref(__av_k); ");
+        }
+        emit($cg, "__av_r; })");
+    } elsif ($kind == 0) {
+        emit($cg, $fn . "(");
+        if ($propagate_flag > 0) { $cg->{"autoviv"} = $propagate_flag; }
+        gen_expression($cg, $cont_expr);
+        emit($cg, ", ");
+        gen_str_literal_c($cg, $key_expr->{"value"});
+        emit($cg, ")");
+    } else {
+        emit($cg, $fn . "(");
+        if ($propagate_flag > 0) { $cg->{"autoviv"} = $propagate_flag; }
+        gen_expression($cg, $cont_expr);
+        emit($cg, ", ");
+        emit_int_operand($cg, $key_expr);
+        emit($cg, ")");
+    }
+}
+
 # Generate the container sub-expression of an assignment target,
 # autovivifying intermediate access links. $want: 1 = this level must
 # hold a hash, 2 = an array. The flag is set immediately before the
@@ -295,6 +383,13 @@ func gen_assign_container(scalar $cg, scalar $node, int $want) void {
     gen_expression($cg, $node);
 }
 
+func gen_assign_container_marked(scalar $cg, scalar $node, int $want, int $mark_active) void {
+    my int $saved_avm = $cg->{"autoviv_mark_active"} + 0;
+    $cg->{"autoviv_mark_active"} = $mark_active;
+    gen_assign_container($cg, $node, $want);
+    $cg->{"autoviv_mark_active"} = $saved_avm;
+}
+
 func gen_assign_hash_access(scalar $cg, scalar $expr, scalar $target) void {
     my int $is_void = 0;
     if (($expr->{"is_void_stmt"} + 0) == 1) { $is_void = 1; }
@@ -305,9 +400,19 @@ func gen_assign_hash_access(scalar $cg, scalar $expr, scalar $target) void {
     my int $key_is_literal = $key_expr->{"type"} == NODE_STR_LITERAL();
     my int $key_is_concat = is_concat_str_literal_left($key_expr);
     my int $ha_h_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $target->{"hash"}) == 1 && autoviv_link_type($target->{"hash"}) == 0;
-    if ($is_void == 0 || $is_anonymous == 1 || $ha_h_cleanup == 1) {
-        emit($cg, "({ StradaValue *__hset_h = ");
-        gen_assign_container($cg, $target->{"hash"}, 1);
+    my int $av_chain_cl = autoviv_chain_needs_cleanup($cg, $target->{"hash"});
+    if ($is_void == 0 || $is_anonymous == 1 || $ha_h_cleanup == 1 || $av_chain_cl == 1) {
+        my int $av_uid = 0;
+        if ($av_chain_cl == 1) {
+            $av_uid = $cg->{"tmp_counter"} + 0;
+            $cg->{"tmp_counter"} = $av_uid + 1;
+        }
+        emit($cg, "({ ");
+        if ($av_chain_cl == 1) {
+            emit($cg, "int __av_mk_" . $av_uid . " = strada_cleanup_mark(); ");
+        }
+        emit($cg, "StradaValue *__hset_h = ");
+        gen_assign_container_marked($cg, $target->{"hash"}, 1, $av_chain_cl);
         emit($cg, "; ");
         if ($key_is_literal == 1) {
             emit($cg, "StradaValue *__hset_v = ");
@@ -370,6 +475,9 @@ func gen_assign_hash_access(scalar $cg, scalar $expr, scalar $target) void {
         }
         if ($ha_h_cleanup == 1) {
             emit($cg, "strada_decref(__hset_h); ");
+        }
+        if ($av_chain_cl == 1) {
+            emit($cg, "strada_cleanup_drain_to(__av_mk_" . $av_uid . "); ");
         }
         if ($is_void == 1) {
             if ($is_anonymous == 1) {
@@ -444,9 +552,19 @@ func gen_assign_deref_hash(scalar $cg, scalar $expr, scalar $target) void {
     if (autoviv_link_type($target->{"ref"}) == 1) {
         $hst_ref_cleanup = 0;
     }
-    if ($is_void == 0 || $is_anonymous == 1) {
-        emit($cg, "({ StradaValue *__hst_c = ");
-        gen_assign_container($cg, $target->{"ref"}, 1);
+    my int $av_chain_cl = autoviv_chain_needs_cleanup($cg, $target->{"ref"});
+    if ($is_void == 0 || $is_anonymous == 1 || $av_chain_cl == 1) {
+        my int $av_uid = 0;
+        if ($av_chain_cl == 1) {
+            $av_uid = $cg->{"tmp_counter"} + 0;
+            $cg->{"tmp_counter"} = $av_uid + 1;
+        }
+        emit($cg, "({ ");
+        if ($av_chain_cl == 1) {
+            emit($cg, "int __av_mk_" . $av_uid . " = strada_cleanup_mark(); ");
+        }
+        emit($cg, "StradaValue *__hst_c = ");
+        gen_assign_container_marked($cg, $target->{"ref"}, 1, $av_chain_cl);
         emit($cg, "; ");
         if ($key_is_literal == 1) {
             emit($cg, "StradaValue *__hset_v = ");
@@ -495,6 +613,9 @@ func gen_assign_deref_hash(scalar $cg, scalar $expr, scalar $target) void {
         }
         if ($hst_ref_cleanup == 1) {
             emit($cg, "strada_decref(__hst_c); ");
+        }
+        if ($av_chain_cl == 1) {
+            emit($cg, "strada_cleanup_drain_to(__av_mk_" . $av_uid . "); ");
         }
         if ($is_void == 1) {
             emit($cg, "strada_decref(__hset_v); })");
@@ -578,12 +699,21 @@ func gen_assign_subscript(scalar $cg, scalar $expr, scalar $target) void {
     if (autoviv_link_type($arr_expr) == 1) {
         $arr_needs_cleanup = 0;
     }
+    my int $av_chain_cl = autoviv_chain_needs_cleanup($cg, $arr_expr);
 
-    if ($is_void == 0 || $idx_needs_cleanup == 1 || $val_needs_cleanup == 1 || $arr_needs_cleanup == 1) {
+    if ($is_void == 0 || $idx_needs_cleanup == 1 || $val_needs_cleanup == 1 || $arr_needs_cleanup == 1 || $av_chain_cl == 1) {
+        my int $av_uid = 0;
+        if ($av_chain_cl == 1) {
+            $av_uid = $cg->{"tmp_counter"} + 0;
+            $cg->{"tmp_counter"} = $av_uid + 1;
+        }
         emit($cg, "({ ");
+        if ($av_chain_cl == 1) {
+            emit($cg, "int __av_mk_" . $av_uid . " = strada_cleanup_mark(); ");
+        }
         if ($arr_needs_cleanup == 1) {
             emit($cg, "StradaValue *__ast_arr = ");
-            gen_assign_container($cg, $arr_expr, 2);
+            gen_assign_container_marked($cg, $arr_expr, 2, $av_chain_cl);
             emit($cg, "; ");
         }
         if ($idx_needs_cleanup == 1) {
@@ -601,11 +731,11 @@ func gen_assign_subscript(scalar $cg, scalar $expr, scalar $target) void {
         }
         if ($cg->{"uses_tie"} == 1) {
             emit($cg, "strada_av_store_sv(");
-            if ($arr_needs_cleanup == 1) { emit($cg, "__ast_arr"); } else { gen_assign_container($cg, $arr_expr, 2); }
+            if ($arr_needs_cleanup == 1) { emit($cg, "__ast_arr"); } else { gen_assign_container_marked($cg, $arr_expr, 2, $av_chain_cl); }
             emit($cg, ", strada_to_int(");
         } else {
             emit($cg, "strada_array_set(strada_deref_array(");
-            if ($arr_needs_cleanup == 1) { emit($cg, "__ast_arr"); } else { gen_assign_container($cg, $arr_expr, 2); }
+            if ($arr_needs_cleanup == 1) { emit($cg, "__ast_arr"); } else { gen_assign_container_marked($cg, $arr_expr, 2, $av_chain_cl); }
             emit($cg, "), strada_to_int(");
         }
         if ($idx_needs_cleanup == 1) { emit($cg, "__idx_tmp"); } else { gen_expression($cg, $idx_expr); }
@@ -614,6 +744,7 @@ func gen_assign_subscript(scalar $cg, scalar $expr, scalar $target) void {
         emit($cg, "); ");
         if ($idx_needs_cleanup == 1) { emit($cg, "strada_decref(__idx_tmp); "); }
         if ($arr_needs_cleanup == 1) { emit($cg, "strada_decref(__ast_arr); "); }
+        if ($av_chain_cl == 1) { emit($cg, "strada_cleanup_drain_to(__av_mk_" . $av_uid . "); "); }
         if ($is_void == 1) {
             if ($val_needs_cleanup == 1) { emit($cg, "strada_decref(__val_tmp); "); }
             emit($cg, "})");
@@ -654,12 +785,21 @@ func gen_assign_deref_array(scalar $cg, scalar $expr, scalar $target) void {
     if (autoviv_link_type($ref_expr) == 1) {
         $ref_needs_cleanup = 0;
     }
+    my int $av_chain_cl = autoviv_chain_needs_cleanup($cg, $ref_expr);
 
-    if ($is_void == 0 || $idx_needs_cleanup == 1 || $val_needs_cleanup == 1 || $ref_needs_cleanup == 1) {
+    if ($is_void == 0 || $idx_needs_cleanup == 1 || $val_needs_cleanup == 1 || $ref_needs_cleanup == 1 || $av_chain_cl == 1) {
+        my int $av_uid = 0;
+        if ($av_chain_cl == 1) {
+            $av_uid = $cg->{"tmp_counter"} + 0;
+            $cg->{"tmp_counter"} = $av_uid + 1;
+        }
         emit($cg, "({ ");
+        if ($av_chain_cl == 1) {
+            emit($cg, "int __av_mk_" . $av_uid . " = strada_cleanup_mark(); ");
+        }
         if ($ref_needs_cleanup == 1) {
             emit($cg, "StradaValue *__ast_ref = ");
-            gen_assign_container($cg, $ref_expr, 2);
+            gen_assign_container_marked($cg, $ref_expr, 2, $av_chain_cl);
             emit($cg, "; ");
         }
         if ($idx_needs_cleanup == 1) {
@@ -677,11 +817,11 @@ func gen_assign_deref_array(scalar $cg, scalar $expr, scalar $target) void {
         }
         if ($cg->{"uses_tie"} == 1) {
             emit($cg, "strada_av_store_sv(");
-            if ($ref_needs_cleanup == 1) { emit($cg, "__ast_ref"); } else { gen_assign_container($cg, $ref_expr, 2); }
+            if ($ref_needs_cleanup == 1) { emit($cg, "__ast_ref"); } else { gen_assign_container_marked($cg, $ref_expr, 2, $av_chain_cl); }
             emit($cg, ", strada_to_int(");
         } else {
             emit($cg, "strada_array_set(strada_deref_array(");
-            if ($ref_needs_cleanup == 1) { emit($cg, "__ast_ref"); } else { gen_assign_container($cg, $ref_expr, 2); }
+            if ($ref_needs_cleanup == 1) { emit($cg, "__ast_ref"); } else { gen_assign_container_marked($cg, $ref_expr, 2, $av_chain_cl); }
             emit($cg, "), strada_to_int(");
         }
         if ($idx_needs_cleanup == 1) { emit($cg, "__idx_tmp"); } else { gen_expression($cg, $idx_expr); }
@@ -690,6 +830,7 @@ func gen_assign_deref_array(scalar $cg, scalar $expr, scalar $target) void {
         emit($cg, "); ");
         if ($idx_needs_cleanup == 1) { emit($cg, "strada_decref(__idx_tmp); "); }
         if ($ref_needs_cleanup == 1) { emit($cg, "strada_decref(__ast_ref); "); }
+        if ($av_chain_cl == 1) { emit($cg, "strada_cleanup_drain_to(__av_mk_" . $av_uid . "); "); }
         if ($is_void == 1) {
             if ($val_needs_cleanup == 1) { emit($cg, "strada_decref(__val_tmp); "); }
             emit($cg, "})");
@@ -1184,7 +1325,11 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                         if (needs_temp_cleanup($cg, $oa_rhs) == 1) {
                             emit($cg, " strada_decref(__oa_el);");
                         }
-                        emit($cg, " strada_global_set_cstr(\"" . $arr_our_key . "\", __oa_arr); (StradaValue*)NULL; })");
+                        if ($is_void == 0) {
+                            emit($cg, " strada_incref(__oa_arr); strada_global_set_cstr(" . c_str_lit($arr_our_key) . ", __oa_arr); __oa_arr; })");
+                        } else {
+                            emit($cg, " strada_global_set_cstr(" . c_str_lit($arr_our_key) . ", __oa_arr); (StradaValue*)NULL; })");
+                        }
                         return;
                     }
                     my int $oa_rt = $oa_rhs->{"type"};
@@ -1197,7 +1342,11 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                         gen_expression($cg, $oa_rhs);
                         emit($cg, "; StradaValue *__oa_val = strada_hash_to_flat_array(__oa_src);");
                         if (needs_temp_cleanup($cg, $oa_rhs) == 1) { emit($cg, " strada_decref(__oa_src);"); }
-                        emit($cg, " strada_global_set_cstr(\"" . $arr_our_key . "\", __oa_val); (StradaValue*)NULL; })");
+                        if ($is_void == 0) {
+                            emit($cg, " strada_incref(__oa_val); strada_global_set_cstr(" . c_str_lit($arr_our_key) . ", __oa_val); __oa_val; })");
+                        } else {
+                            emit($cg, " strada_global_set_cstr(" . c_str_lit($arr_our_key) . ", __oa_val); (StradaValue*)NULL; })");
+                        }
                         return;
                     }
                     if (($oa_rt == NODE_VARIABLE() && $oa_rhs->{"sigil"} eq "@")
@@ -1211,7 +1360,11 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                         gen_expression($cg, $oa_rhs);
                         emit($cg, "; StradaValue *__oa_val = strada_array_copy(__oa_src);");
                         if (needs_temp_cleanup($cg, $oa_rhs) == 1) { emit($cg, " strada_decref(__oa_src);"); }
-                        emit($cg, " strada_global_set_cstr(\"" . $arr_our_key . "\", __oa_val); (StradaValue*)NULL; })");
+                        if ($is_void == 0) {
+                            emit($cg, " strada_incref(__oa_val); strada_global_set_cstr(" . c_str_lit($arr_our_key) . ", __oa_val); __oa_val; })");
+                        } else {
+                            emit($cg, " strada_global_set_cstr(" . c_str_lit($arr_our_key) . ", __oa_val); (StradaValue*)NULL; })");
+                        }
                         return;
                     }
                     my int $rhs_needs_cleanup = needs_temp_cleanup($cg, $oa_rhs);
@@ -1220,7 +1373,11 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                     if ($rhs_needs_cleanup == 0) {
                         emit($cg, "; strada_incref(__oa_val)");
                     }
-                    emit($cg, "; strada_global_set_cstr(\"" . $arr_our_key . "\", __oa_val); (StradaValue*)NULL; })");
+                    if ($is_void == 0) {
+                        emit($cg, "; strada_incref(__oa_val); strada_global_set_cstr(" . c_str_lit($arr_our_key) . ", __oa_val); __oa_val; })");
+                    } else {
+                        emit($cg, "; strada_global_set_cstr(" . c_str_lit($arr_our_key) . ", __oa_val); (StradaValue*)NULL; })");
+                    }
                     return;
                 }
                 my scalar $val = $expr->{"value"};
@@ -1345,14 +1502,14 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                     emit($cg, "({ StradaValue *__oh_val = ");
                     if ($val_type == NODE_ANON_HASH() && $val->{"pair_count"} == 0) {
                         emit($cg, "strada_new_hash()");
-                    } elsif ($val_type == NODE_ANON_ARRAY() || $val_type == NODE_MAP()
-                             || ($val_type == NODE_VARIABLE() && $val->{"sigil"} eq "@")) {
+                    } elsif (is_flat_array_for_hash($val) == 1) {
                         # strada_hash_from_flat_array consumes its input array!
                         emit($cg, "({ StradaValue *__oh_src = ");
                         gen_expression($cg, $val);
                         if (needs_temp_cleanup($cg, $val) == 0) { emit($cg, "; strada_incref(__oh_src)"); }
                         emit($cg, "; strada_hash_from_flat_array(__oh_src); })");
-                    } elsif ($val_type == NODE_VARIABLE() && $val->{"sigil"} eq "%") {
+                    } elsif ((($val_type == NODE_VARIABLE() || $val_type == NODE_DEREF_SCALAR()) && $val->{"sigil"} eq "%")
+                             || $val_type == NODE_DEREF_HASH()) {
                         emit($cg, "({ StradaValue *__oh_src = ");
                         gen_expression($cg, $val);
                         emit($cg, "; StradaValue *__h = strada_hash_from_ref(__oh_src);");
@@ -1390,15 +1547,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                     if ($cg->{"uses_tie"} == 1) {
                         emit($cg, "))");
                     }
-                } elsif ($val_type == NODE_ANON_ARRAY() || $val_type == NODE_MAP()) {
-                    emit($cg, "({ StradaValue *__new_h = strada_hash_from_flat_array(");
-                    gen_expression($cg, $val);
-                    emit($cg, "); StradaValue *__old_h = ");
-                    gen_expression($cg, $target);
-                    emit($cg, "; ");
-                    gen_expression($cg, $target);
-                    emit($cg, " = __new_h; strada_decref(__old_h); __new_h; })");
-                } elsif ($val_type == NODE_VARIABLE() && $val->{"sigil"} eq "@") {
+                } elsif (is_flat_array_for_hash($val) == 1) {
                     # strada_hash_from_flat_array consumes its input array; incref when borrowed!
                     emit($cg, "({ StradaValue *__hfa_p = ");
                     gen_expression($cg, $val);
@@ -1410,8 +1559,9 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                     emit($cg, "; ");
                     gen_expression($cg, $target);
                     emit($cg, " = __new_h; strada_decref(__old_h); __new_h; })");
-                } elsif ($val_type == NODE_VARIABLE() && $val->{"sigil"} eq "%") {
-                    # Hash copy: %h = %other (compute copy BEFORE decrefing old target for %h = %h!)
+                } elsif ((($val_type == NODE_VARIABLE() || $val_type == NODE_DEREF_SCALAR()) && $val->{"sigil"} eq "%")
+                         || $val_type == NODE_DEREF_HASH()) {
+                    # Hash copy: %h = %other / %{$href} (compute copy BEFORE decrefing old target for %h = %h!)
                     emit($cg, "({ StradaValue *__hcs = ");
                     gen_expression($cg, $val);
                     emit($cg, "; StradaValue *__new_h = strada_hash_from_ref(__hcs); ");
@@ -3832,9 +3982,15 @@ func gen_expression(scalar $cg, scalar $expr) void {
         my scalar $do_block = $expr->{"block"};
         my scalar $do_stmts = $do_block->{"statements"};
         my int $do_n = $do_block->{"statement_count"};
+        my int $do_has_local = stmt_has_local($do_block);
         emit($cg, "({ StradaValue *__do_res_" . $do_id . " = NULL; {\n");
         indent($cg);
         scope_push($cg);
+        if ($do_has_local == 1) {
+            emit_indent($cg);
+            emit($cg, "int __local_do_mark_" . $do_id . " = strada_local_depth_get();\n");
+            local_mark_push($cg, $cg->{"scope_depth"}, "__local_do_mark_" . $do_id);
+        }
         my int $di = 0;
         while ($di < $do_n) {
             my scalar $dstmt = $do_stmts->[$di];
@@ -3858,6 +4014,11 @@ func gen_expression(scalar $cg, scalar $expr) void {
         }
         # Scope cleanup (local decrefs) BEFORE yielding — the result is
         # already owned/incref'd so it survives.
+        if ($do_has_local == 1) {
+            local_mark_pop($cg);
+            emit_indent($cg);
+            emit($cg, "strada_local_restore_to(__local_do_mark_" . $do_id . ");\n");
+        }
         scope_pop($cg);
         dedent($cg);
         emit_indent($cg);
@@ -4610,17 +4771,9 @@ func gen_expression(scalar $cg, scalar $expr) void {
             if ($sub_av == 2) {
                 $sub_av_fn = "strada_autoviv_elem_array";
             }
-            emit($cg, $sub_av_fn . "(");
-            # The array sub-expression itself needs autoviv (as an ARRAY,
-            # since this node indexes it) if it's another access node
-            if ($arr_expr->{"type"} == NODE_HASH_ACCESS() || $arr_expr->{"type"} == NODE_DEREF_HASH()
-                || $arr_expr->{"type"} == NODE_SUBSCRIPT() || $arr_expr->{"type"} == NODE_DEREF_ARRAY()) {
-                $cg->{"autoviv"} = 2;
-            }
-            gen_expression($cg, $arr_expr);
-            emit($cg, ", ");
-            emit_int_operand($cg, $expr->{"index"});
-            emit($cg, ")");
+            my int $sub_prop = 0;
+            if (autoviv_link_type($arr_expr) == 1) { $sub_prop = 2; }
+            emit_autoviv_step($cg, $sub_av_fn, $arr_expr, $sub_prop, $expr->{"index"}, 2);
             return;
         }
 
@@ -4682,36 +4835,12 @@ func gen_expression(scalar $cg, scalar $expr) void {
             if ($autoviv == 2) {
                 $av_fn = "strada_autoviv_array";
             }
-            # The hash sub-expression also needs autoviv (as a HASH, since
-            # this node subscripts it with a key) if it's another access
-            # node. Set the flag immediately before generating the hash
-            # sub-expression — NOT earlier — so a hash access inside the
-            # key expression can't consume it by mistake.
             my scalar $hash_sub = $expr->{"hash"};
-            my int $av_propagate = 0;
-            if ($hash_sub->{"type"} == NODE_HASH_ACCESS() || $hash_sub->{"type"} == NODE_DEREF_HASH()
-                || $hash_sub->{"type"} == NODE_SUBSCRIPT() || $hash_sub->{"type"} == NODE_DEREF_ARRAY()) {
-                $av_propagate = 1;
-            }
-            if ($key_is_literal == 1) {
-                emit($cg, $av_fn . "(");
-                if ($av_propagate == 1) { $cg->{"autoviv"} = 1; }
-                gen_expression($cg, $expr->{"hash"});
-                emit($cg, ", ");
-                gen_str_literal_c($cg, $key_expr->{"value"});
-                emit($cg, ")");
-            } else {
-                emit($cg, "({ StradaValue *__av_k = ");
-                gen_expression($cg, $key_expr);
-                emit($cg, "; StradaValue *__av_r = " . $av_fn . "_sv(");
-                if ($av_propagate == 1) { $cg->{"autoviv"} = 1; }
-                gen_expression($cg, $expr->{"hash"});
-                emit($cg, ", __av_k); ");
-                if (needs_temp_cleanup($cg, $key_expr) == 1) {
-                    emit($cg, "strada_decref(__av_k); ");
-                }
-                emit($cg, "__av_r; })");
-            }
+            my int $av_prop = 0;
+            if (autoviv_link_type($hash_sub) == 1) { $av_prop = 1; }
+            my int $av_kind = 1;
+            if ($key_is_literal == 1) { $av_kind = 0; }
+            emit_autoviv_step($cg, $av_fn, $hash_sub, $av_prop, $key_expr, $av_kind);
             return;
         }
 
@@ -4980,33 +5109,12 @@ func gen_expression(scalar $cg, scalar $expr) void {
             if ($dh_av == 2) {
                 $dh_av_fn = "strada_autoviv_array";
             }
-            # Propagate (as HASH) right before generating the ref
-            # sub-expression so key-expression accesses can't consume it
             my scalar $ref_sub = $expr->{"ref"};
-            my int $dh_propagate = 0;
-            if ($ref_sub->{"type"} == NODE_HASH_ACCESS() || $ref_sub->{"type"} == NODE_DEREF_HASH()
-                || $ref_sub->{"type"} == NODE_SUBSCRIPT() || $ref_sub->{"type"} == NODE_DEREF_ARRAY()) {
-                $dh_propagate = 1;
-            }
-            if ($key_is_literal == 1) {
-                emit($cg, $dh_av_fn . "(");
-                if ($dh_propagate == 1) { $cg->{"autoviv"} = 1; }
-                gen_expression($cg, $expr->{"ref"});
-                emit($cg, ", ");
-                gen_str_literal_c($cg, $key_expr->{"value"});
-                emit($cg, ")");
-            } else {
-                emit($cg, "({ StradaValue *__av_k = ");
-                gen_expression($cg, $key_expr);
-                emit($cg, "; StradaValue *__av_r = " . $dh_av_fn . "_sv(");
-                if ($dh_propagate == 1) { $cg->{"autoviv"} = 1; }
-                gen_expression($cg, $expr->{"ref"});
-                emit($cg, ", __av_k); ");
-                if (needs_temp_cleanup($cg, $key_expr) == 1) {
-                    emit($cg, "strada_decref(__av_k); ");
-                }
-                emit($cg, "__av_r; })");
-            }
+            my int $dh_prop = 0;
+            if (autoviv_link_type($ref_sub) == 1) { $dh_prop = 1; }
+            my int $dh_kind = 1;
+            if ($key_is_literal == 1) { $dh_kind = 0; }
+            emit_autoviv_step($cg, $dh_av_fn, $ref_sub, $dh_prop, $key_expr, $dh_kind);
             return;
         }
 
@@ -5094,15 +5202,9 @@ func gen_expression(scalar $cg, scalar $expr) void {
             if ($da_av == 2) {
                 $da_av_fn = "strada_autoviv_elem_array";
             }
-            emit($cg, $da_av_fn . "(");
-            if ($ref_expr->{"type"} == NODE_HASH_ACCESS() || $ref_expr->{"type"} == NODE_DEREF_HASH()
-                || $ref_expr->{"type"} == NODE_SUBSCRIPT() || $ref_expr->{"type"} == NODE_DEREF_ARRAY()) {
-                $cg->{"autoviv"} = 2;
-            }
-            gen_expression($cg, $ref_expr);
-            emit($cg, ", ");
-            emit_int_operand($cg, $expr->{"index"});
-            emit($cg, ")");
+            my int $da_prop = 0;
+            if (autoviv_link_type($ref_expr) == 1) { $da_prop = 2; }
+            emit_autoviv_step($cg, $da_av_fn, $ref_expr, $da_prop, $expr->{"index"}, 2);
             return;
         }
 
@@ -6070,12 +6172,23 @@ func gen_expression(scalar $cg, scalar $expr) void {
         my str $saved_map_elem = "" . $cg->{"current_elem_var"};
         $cg->{"in_map_block"} = 1;
         $cg->{"current_elem_var"} = $map_el_var;
+        my int $map_has_local = stmt_has_local($block);
+        my int $map_local_id = 0;
+        my str $m_lmark = "";
         scope_push($cg);
         $cg->{"loop_break_depth"} = $cg->{"scope_depth"};
         $cg->{"loop_redo_depth"} = $cg->{"scope_depth"};
         $cg->{"loop_try_depth"} = $cg->{"try_depth"};
         $cg->{"loop_local_var"} = "";
         $cg->{"loop_finally_mark"} = $cg->{"finally_count"};
+        if ($map_has_local == 1) {
+            $map_local_id = $cg->{"tmp_counter"} + 0;
+            $cg->{"tmp_counter"} = $map_local_id + 1;
+            $m_lmark = "__local_map_mark_" . $map_local_id;
+            emit($cg, "int " . $m_lmark . " = strada_local_depth_get(); ");
+            local_mark_push($cg, $cg->{"scope_depth"}, $m_lmark);
+            $cg->{"loop_local_var"} = $m_lmark;
+        }
         my str $map_redo_lbl = "__map_redo_" . $map_id;
         $cg->{"current_redo_label"} = $map_redo_lbl;
         emit($cg, $map_redo_lbl . ": __attribute__((unused)); ");
@@ -6116,6 +6229,10 @@ func gen_expression(scalar $cg, scalar $expr) void {
             }
         }
         scope_pop($cg);
+        if ($map_has_local == 1) {
+            local_mark_pop($cg);
+            emit($cg, "strada_local_restore_to(" . $m_lmark . "); ");
+        }
         scope_pop($cg);
 
         $cg->{"in_map_block"} = $saved_in_map;
@@ -6312,12 +6429,23 @@ func gen_expression(scalar $cg, scalar $expr) void {
         my str $saved_grep_elem = "" . $cg->{"current_elem_var"};
         $cg->{"in_grep_block"} = 1;
         $cg->{"current_elem_var"} = $grep_el_var;
+        my int $grep_has_local = stmt_has_local($block);
+        my int $grep_local_id = 0;
+        my str $g_lmark = "";
         scope_push($cg);
         $cg->{"loop_break_depth"} = $cg->{"scope_depth"};
         $cg->{"loop_redo_depth"} = $cg->{"scope_depth"};
         $cg->{"loop_try_depth"} = $cg->{"try_depth"};
         $cg->{"loop_local_var"} = "";
         $cg->{"loop_finally_mark"} = $cg->{"finally_count"};
+        if ($grep_has_local == 1) {
+            $grep_local_id = $cg->{"tmp_counter"} + 0;
+            $cg->{"tmp_counter"} = $grep_local_id + 1;
+            $g_lmark = "__local_grep_mark_" . $grep_local_id;
+            emit($cg, "int " . $g_lmark . " = strada_local_depth_get(); ");
+            local_mark_push($cg, $cg->{"scope_depth"}, $g_lmark);
+            $cg->{"loop_local_var"} = $g_lmark;
+        }
         my str $grep_redo_lbl = "__grep_redo_" . $grep_id;
         $cg->{"current_redo_label"} = $grep_redo_lbl;
         emit($cg, $grep_redo_lbl . ": __attribute__((unused)); ");
@@ -6347,6 +6475,10 @@ func gen_expression(scalar $cg, scalar $expr) void {
             }
         }
         scope_pop($cg);
+        if ($grep_has_local == 1) {
+            local_mark_pop($cg);
+            emit($cg, "strada_local_restore_to(" . $g_lmark . "); ");
+        }
         scope_pop($cg);
 
         $cg->{"in_grep_block"} = $saved_in_grep;

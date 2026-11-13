@@ -1,0 +1,10 @@
+VM01:1,1,plain,k_dyn,1,LVAL,1,0,M64,OV
+VM02:10,12,12,10,20,22,22,2
+VM03:B:10,B:7,B:21,B:2,B:1,B:8,N(7)!,1,1,1,1,1,1,1,1,1,1,B:-3,1,0
+VM13:C:5,B:10
+VM05:R3Dispatch:9,hero,M:hero,dyn_call:auto:2,dyn2:auto2:1,caught
+VM07:1234,C:9
+VM08:6:65,0,66,67,0,90|65,88,66,67,0,90|67,0|0,66,67,0
+VM09:in_try|fin:outer,after:outer|f1:outer,f2:outer,end:outer|c_entry:outer,fin:outer,outer:outer:e2
+VM10:10,20|30,40,50|20|OK|104,3
+VM11:AB(2)_CD(2),1,1,[a][]x[]b[]

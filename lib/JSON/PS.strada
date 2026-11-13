@@ -404,7 +404,7 @@ func encode_opts(scalar $value, scalar $options) str {
 func make_parser(str $json) scalar {
     my str $raw = $json;
     if (utf8::is_utf8($raw)) {
-        utf8::encode($raw);
+        $raw = utf8::encode($raw);
     }
     return {
         "json" => $raw,
@@ -667,14 +667,14 @@ func parse_num(scalar $p) scalar {
 
 # Check if string matches keyword at current position
 func match_kw(scalar $p, str $keyword) int {
-    my int $klen = length($keyword);
+    my int $klen = core::byte_length($keyword);
     my int $pos = $p->{"pos"};
 
     if ($pos + $klen > $p->{"len"}) {
         return 0;
     }
 
-    my str $sub = substr($p->{"json"}, $pos, $klen);
+    my str $sub = core::byte_substr($p->{"json"}, $pos, $klen);
     if ($sub eq $keyword) {
         $p->{"pos"} = $pos + $klen;
         return 1;

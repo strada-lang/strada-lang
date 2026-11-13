@@ -647,6 +647,43 @@ func emit_var_cleanup_stmt(scalar $cg, str $var_name, int $no_push) void {
     }
 }
 
+# Shared Pass 1 helper: break direct self-reference cycles in alive scope vars.
+func emit_scope_break_cycles(scalar $cg, str $scope_str, str $skip_list) void {
+    my int $in_anon = $cg->{"in_anon_func"};
+    my str $capture_str = $cg->{"anon_capture_str"};
+    my int $p1 = 0;
+    my int $l1 = length($scope_str);
+    my str $vn1 = "";
+    while ($p1 <= $l1) {
+        my int $emit_now = 0;
+        if ($p1 == $l1) {
+            if (length($vn1) > 0) { $emit_now = 1; }
+        } else {
+            my str $c1 = substr($scope_str, $p1, 1);
+            if ($c1 eq ",") {
+                if (length($vn1) > 0) { $emit_now = 1; }
+            } else {
+                $vn1 = $vn1 . $c1;
+            }
+        }
+        if ($emit_now == 1) {
+            if (($in_anon == 0 || is_var_in_list($vn1, $capture_str) == 0)
+                && (length($skip_list) == 0 || is_var_in_list($vn1, $skip_list) == 0)
+                && (length($vn1) <= 6 || substr($vn1, 0, 6) ne "@cell:")) {
+                # int- and num-declared vars are coerced to canonical INT/NUM on
+                # every init and assignment, so they can never hold a container cycle.
+                if (length("" . $cg->{"int_vars"}->{$vn1}) == 0
+                    && length("" . $cg->{"num_vars"}->{$vn1}) == 0) {
+                    emit_indent($cg);
+                    emit($cg, "strada_break_self_cycle(" . $vn1 . ");\n");
+                }
+            }
+            $vn1 = "";
+        }
+        $p1 = $p1 + 1;
+    }
+}
+
 # Helper to emit decref for vars in a scope, skipping already-cleaned names
 # Returns updated cleaned list (comma-separated) with this scope's vars added
 func emit_scope_decref_skip(scalar $cg, str $scope_str, int $count, str $cleaned) str {
@@ -657,6 +694,8 @@ func emit_scope_decref_skip(scalar $cg, str $scope_str, int $count, str $cleaned
     my str $capture_str = $cg->{"anon_capture_str"};
     my str $no_push_str = $cg->{"current_no_push_str"};
     if (!$no_push_str) { $no_push_str = ""; }
+
+    emit_scope_break_cycles($cg, $scope_str, $cleaned);
 
     my int $pos = 0;
     my int $len = length($scope_str);
@@ -723,36 +762,7 @@ func emit_scope_decref(scalar $cg, str $scope_str, int $count) void {
     # point to the same array). Breaking the cycle here just clears
     # self-ref slots inside hashes/arrays and decref's the cleared
     # ref — never frees the var itself.
-    my int $p1 = 0;
-    my int $l1 = length($scope_str);
-    my str $vn1 = "";
-    while ($p1 <= $l1) {
-        my int $emit_now = 0;
-        if ($p1 == $l1) {
-            if (length($vn1) > 0) { $emit_now = 1; }
-        } else {
-            my str $c1 = substr($scope_str, $p1, 1);
-            if ($c1 eq ",") {
-                if (length($vn1) > 0) { $emit_now = 1; }
-            } else {
-                $vn1 = $vn1 . $c1;
-            }
-        }
-        if ($emit_now == 1) {
-            if (($in_anon == 0 || is_var_in_list($vn1, $capture_str) == 0)
-                && (length($vn1) <= 6 || substr($vn1, 0, 6) ne "@cell:")) {
-                # int- and num-declared vars are coerced to canonical INT/NUM on
-                # every init and assignment, so they can never hold a container cycle.
-                if (length("" . $cg->{"int_vars"}->{$vn1}) == 0
-                    && length("" . $cg->{"num_vars"}->{$vn1}) == 0) {
-                    emit_indent($cg);
-                    emit($cg, "strada_break_self_cycle(" . $vn1 . ");\n");
-                }
-            }
-            $vn1 = "";
-        }
-        $p1 = $p1 + 1;
-    }
+    emit_scope_break_cycles($cg, $scope_str, "");
 
     # Pass 2: cleanup_pop + decref each var. Vars whose push was elided
     # (recorded in current_no_push_str) get only a decref — the matching
@@ -3253,7 +3263,18 @@ func node_writes_var(scalar $n, str $name) int {
 }
 
 func stmt_has_local(scalar $stmt) int {
-    if (!$stmt || reftype($stmt) ne "HASH") { return 0; }
+    if (!$stmt) { return 0; }
+    my str $rt = reftype($stmt);
+    if ($rt eq "ARRAY") {
+        my int $an = scalar(@{$stmt});
+        my int $ai = 0;
+        while ($ai < $an) {
+            if (stmt_has_local($stmt->[$ai]) == 1) { return 1; }
+            $ai = $ai + 1;
+        }
+        return 0;
+    }
+    if ($rt ne "HASH") { return 0; }
     my int $type = $stmt->{"type"} + 0;
     if ($type == NODE_LOCAL_DECL()) {
         return 1;
@@ -3261,56 +3282,34 @@ func stmt_has_local(scalar $stmt) int {
     if ($type == NODE_ANON_FUNC()) {
         return 0;
     }
-    if ($type == NODE_BLOCK() || $type == NODE_DO_EXPR()) {
-        my scalar $stmts = $stmt->{"statements"};
-        my int $count = $stmt->{"statement_count"} + 0;
-        my int $i = 0;
-        while ($i < $count) {
-            if (stmt_has_local($stmts->[$i]) == 1) { return 1; }
-            $i = $i + 1;
+    my scalar $ks = keys(%{$stmt});
+    my int $kn = scalar(@{$ks});
+    my int $k = 0;
+    while ($k < $kn) {
+        my scalar $v = $stmt->{$ks->[$k]};
+        my str $vt = reftype($v);
+        if ($vt eq "HASH" || $vt eq "ARRAY") {
+            if (stmt_has_local($v) == 1) { return 1; }
         }
-        return 0;
+        $k = $k + 1;
     }
-    if ($type == NODE_EXPR_STMT()) {
-        return stmt_has_local($stmt->{"expr"});
+    return 0;
+}
+
+# 1 when an initializer expression produces a flat key/value list rather than a
+# single hash ref (so `my %h = <expr>`, `our %h = <expr>`, or `%h = <expr>`
+# should populate entries rather than flatten/deref a hashref).
+func is_flat_array_for_hash(scalar $node) int {
+    if (!$node || reftype($node) ne "HASH") { return 0; }
+    my int $t = $node->{"type"} + 0;
+    if ($t == NODE_MAP() || $t == NODE_GREP() || $t == NODE_SORT()
+        || $t == NODE_ANON_ARRAY() || $t == NODE_ARRAY_SLICE()
+        || $t == NODE_HASH_SLICE() || $t == NODE_DEREF_ARRAY()) {
+        return 1;
     }
-    if ($type == NODE_IF_STMT()) {
-        if (stmt_has_local($stmt->{"then_block"}) == 1) { return 1; }
-        if (stmt_has_local($stmt->{"else_block"}) == 1) { return 1; }
-        my scalar $elsif_blocks = $stmt->{"elsif_blocks"};
-        my int $elsif_count = $stmt->{"elsif_count"} + 0;
-        my int $ei = 0;
-        while ($ei < $elsif_count) {
-            if (stmt_has_local($elsif_blocks->[$ei]) == 1) { return 1; }
-            $ei = $ei + 1;
-        }
-        return 0;
-    }
-    if ($type == NODE_WHILE_STMT() || $type == NODE_DO_WHILE_STMT() || $type == NODE_FOR_STMT() || $type == NODE_FOREACH_STMT()) {
-        return stmt_has_local($stmt->{"body"});
-    }
-    if ($type == NODE_TRY_CATCH()) {
-        if (stmt_has_local($stmt->{"try_block"}) == 1) { return 1; }
-        my scalar $cclauses = $stmt->{"catch_clauses"};
-        my int $ccnt = $stmt->{"catch_count"} + 0;
-        my int $ci = 0;
-        while ($ci < $ccnt) {
-            if ($cclauses && $cclauses->[$ci] && stmt_has_local($cclauses->[$ci]->{"catch_block"}) == 1) { return 1; }
-            $ci = $ci + 1;
-        }
-        if (stmt_has_local($stmt->{"finally_block"}) == 1) { return 1; }
-        return 0;
-    }
-    if ($type == NODE_SWITCH()) {
-        my scalar $blocks = $stmt->{"blocks"};
-        my int $count = $stmt->{"case_count"} + 0;
-        my int $i = 0;
-        while ($i < $count) {
-            if ($blocks && stmt_has_local($blocks->[$i]) == 1) { return 1; }
-            $i = $i + 1;
-        }
-        if ($stmt->{"has_default"} && stmt_has_local($stmt->{"default_block"}) == 1) { return 1; }
-        return 0;
+    if ($t == NODE_VARIABLE() || $t == NODE_DEREF_SCALAR()) {
+        my str $sig = "" . $node->{"sigil"};
+        if ($sig eq "@") { return 1; }
     }
     return 0;
 }
@@ -3496,27 +3495,65 @@ func inline_ctor_missing_required(scalar $cg, str $c_pkg, scalar $args, int $arg
     my scalar $rq_attrs = $cg->{"has_attrs"};
     my int $rq_n = 0 + $cg->{"has_attr_count"};
     my str $rq_pkg = strada_pkg_for_c($cg, $c_pkg);
-    my int $rq_i = 0;
-    while ($rq_i < $rq_n) {
-        my scalar $rq_attr = $rq_attrs->[$rq_i];
-        if ($rq_attr->{"required"} == 1) {
-            my str $rq_owner = $rq_attr->{"package"};
-            if ($rq_owner eq $rq_pkg || pkg_c_safe($rq_owner) eq $c_pkg || is_subclass_compile_time($cg, $rq_pkg, $rq_owner, 0) == 1) {
-                my str $rq_name = $rq_attr->{"name"};
-                my int $rq_found = 0;
-                my int $rq_k = 0;
-                while ($rq_k < $arg_count) {
-                    my scalar $rq_key = $args->[$rq_k];
-                    if ($rq_key->{"type"} == NODE_STR_LITERAL()) {
-                        my str $rq_kv = $rq_key->{"value"};
-                        if ($rq_kv eq $rq_name) { $rq_found = 1; }
-                    }
-                    $rq_k = $rq_k + 2;
+    my scalar $inh = $cg->{"inherits"};
+    my int $ic = $cg->{"inherit_count"} + 0;
+
+    # BFS child -> ancestors so overridden attributes follow MRO order.
+    my array @pkg_chain = ();
+    my hash %seen_pkg = ();
+    push(@pkg_chain, $rq_pkg);
+    $seen_pkg{$rq_pkg} = 1;
+    my int $qi = 0;
+    while ($qi < scalar(@pkg_chain)) {
+        my str $cur_p = $pkg_chain[$qi];
+        my str $cur_c = pkg_c_safe($cur_p);
+        my int $ii = 0;
+        while ($ii < $ic) {
+            my str $ch = "" . $inh->[$ii]->{"child"};
+            if ($ch eq $cur_p || pkg_c_safe($ch) eq $cur_c) {
+                my str $par = "" . $inh->[$ii]->{"parent"};
+                if (length($par) > 0 && !$seen_pkg{$par}) {
+                    $seen_pkg{$par} = 1;
+                    push(@pkg_chain, $par);
                 }
-                if ($rq_found == 0) { return 1; }
             }
+            $ii = $ii + 1;
         }
-        $rq_i = $rq_i + 1;
+        $qi = $qi + 1;
+    }
+
+    my hash %seen_attr = ();
+    my int $pi = 0;
+    my int $pn = scalar(@pkg_chain);
+    while ($pi < $pn) {
+        my str $cur_p = $pkg_chain[$pi];
+        my str $cur_c = pkg_c_safe($cur_p);
+        my int $rq_i = 0;
+        while ($rq_i < $rq_n) {
+            my scalar $rq_attr = $rq_attrs->[$rq_i];
+            my str $rq_owner = "" . $rq_attr->{"package"};
+            if ($rq_owner eq $cur_p || pkg_c_safe($rq_owner) eq $cur_c) {
+                my str $rq_name = "" . $rq_attr->{"name"};
+                if (!$seen_attr{$rq_name}) {
+                    $seen_attr{$rq_name} = 1;
+                    if (($rq_attr->{"required"} + 0) == 1) {
+                        my int $rq_found = 0;
+                        my int $rq_k = 0;
+                        while ($rq_k < $arg_count) {
+                            my scalar $rq_key = $args->[$rq_k];
+                            if ($rq_key->{"type"} == NODE_STR_LITERAL()) {
+                                my str $rq_kv = $rq_key->{"value"};
+                                if ($rq_kv eq $rq_name) { $rq_found = 1; }
+                            }
+                            $rq_k = $rq_k + 2;
+                        }
+                        if ($rq_found == 0) { return 1; }
+                    }
+                }
+            }
+            $rq_i = $rq_i + 1;
+        }
+        $pi = $pi + 1;
     }
     return 0;
 }
@@ -5033,33 +5070,45 @@ func emit_regex_g_condition(scalar $cg, scalar $expr, str $pos_var) void {
     my str $pattern = $expr->{"pattern"};
     my str $flags = $expr->{"flags"};
     my str $op = $expr->{"op"};
+    my int $has_interp = regex_pattern_has_interp($pattern);
 
     # Get the target string
     my int $re_tmp = ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $expr->{"target"}) == 1);
     if ($re_tmp == 1) {
         emit($cg, "({ StradaValue *__re_tv = ");
         gen_expression($cg, $expr->{"target"});
-        emit($cg, "; char *__re_str = strada_to_str(__re_tv); strada_decref(__re_tv); int __re_res = ");
+        emit($cg, "; char *__re_str = strada_to_str(__re_tv); strada_decref(__re_tv); ");
     } else {
         emit($cg, "({ char *__re_str = strada_to_str(");
         gen_expression($cg, $expr->{"target"});
-        emit($cg, "); int __re_res = ");
+        emit($cg, "); ");
+    }
+    if ($has_interp == 1) {
+        emit($cg, "StradaValue *__re_psv = ");
+        gen_regex_interpolated_pattern($cg, $pattern);
+        emit($cg, "; char *__re_pat = strada_to_str_ss(__re_psv); strada_decref(__re_psv); int __re_res = ");
+    } else {
+        emit($cg, "int __re_res = ");
     }
     if ($op eq "!~") { emit($cg, "!"); }
-    emit($cg, "strada_regex_match_global(__re_str, \"");
-    # Emit pattern with C escaping
-    my int $i = 0;
-    my int $len = length($pattern);
-    while ($i < $len) {
-        my str $ch = substr($pattern, $i, 1);
-        if ($ch eq "\\") { emit($cg, "\\\\"); }
-        elsif ($ch eq "\"") { emit($cg, "\\\""); }
-        elsif ($ch eq "\n") { emit($cg, "\\n"); }
-        elsif ($ch eq "\t") { emit($cg, "\\t"); }
-        else { emit($cg, c_ctrl_escape($ch)); }
-        $i = $i + 1;
+    if ($has_interp == 1) {
+        emit($cg, "strada_regex_match_global(__re_str, __re_pat, \"" . $flags . "\", &" . $pos_var . "); strada_cstr_free(__re_pat); free(__re_str); __re_res; })");
+    } else {
+        emit($cg, "strada_regex_match_global(__re_str, \"");
+        # Emit pattern with C escaping
+        my int $i = 0;
+        my int $len = length($pattern);
+        while ($i < $len) {
+            my str $ch = substr($pattern, $i, 1);
+            if ($ch eq "\\") { emit($cg, "\\\\"); }
+            elsif ($ch eq "\"") { emit($cg, "\\\""); }
+            elsif ($ch eq "\n") { emit($cg, "\\n"); }
+            elsif ($ch eq "\t") { emit($cg, "\\t"); }
+            else { emit($cg, c_ctrl_escape($ch)); }
+            $i = $i + 1;
+        }
+        emit($cg, "\", \"" . $flags . "\", &" . $pos_var . "); free(__re_str); __re_res; })");
     }
-    emit($cg, "\", \"" . $flags . "\", &" . $pos_var . "); free(__re_str); __re_res; })");
 }
 
 # ===== Condition-level CSE for repeated literal-key hash fetches =====

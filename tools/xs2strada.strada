@@ -779,13 +779,15 @@ func main(int $argc, array @argv) int {
             $param_list = $param_list . $st . " $" . $pn;
         }
 
-        # Add variadic note
+        # Add variadic parameter and review note (note goes after `{`, never inside signature parens)
+        my str $var_review = "";
         if ($is_var == 1) {
             if (length($param_list) > 0) {
-                $param_list = $param_list . "  # REVIEW: was variadic (...)";
+                $param_list = $param_list . ", scalar ...@xs_args";
             } else {
-                $param_list = "# REVIEW: was variadic (...)";
+                $param_list = "scalar ...@xs_args";
             }
+            $var_review = "  # REVIEW: was variadic (...)";
         }
 
         # Type review comment
@@ -793,6 +795,7 @@ func main(int $argc, array @argv) int {
         if ($ret_known == 0) {
             $type_review = "  # REVIEW: return type was " . $ret;
         }
+        $type_review = $type_review . $var_review;
 
         # ALIAS comment
         if (exists($f{"alias"})) {

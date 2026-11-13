@@ -322,18 +322,41 @@ private func apply_settings(scalar $self) int {
         return 0;
     }
     my int $fd = $self->{"fd"};
+    my int $baud_const = SerialPort::baud_to_const($self->{"baudrate"});
+    my int $dbits = $self->{"databits"};
+    my str $parity = $self->{"parity"};
+    my int $sbits = $self->{"stopbits"};
     my str $hs = $self->{"handshake"};
     my int $to_ms = $self->{"read_timeout"};
+    my int $par_mode = 0;
+    if ($parity eq "even") { $par_mode = 1; }
+    elsif ($parity eq "odd") { $par_mode = 2; }
     my int $hs_mode = 0;
     if ($hs eq "rts") { $hs_mode = 1; }
     elsif ($hs eq "xoff") { $hs_mode = 2; }
     my int $rc = 0;
     __C__ {
         int sfd = (int)strada_to_int(fd);
+        speed_t spd = (speed_t)strada_to_int(baud_const);
+        int db = (int)strada_to_int(dbits);
+        int pm = (int)strada_to_int(par_mode);
+        int sb = (int)strada_to_int(sbits);
         int hmode = (int)strada_to_int(hs_mode);
         int rto = (int)strada_to_int(to_ms);
         struct termios t;
         if (tcgetattr(sfd, &t) == 0) {
+            cfsetispeed(&t, spd);
+            cfsetospeed(&t, spd);
+            t.c_cflag &= ~CSIZE;
+            if (db == 5) t.c_cflag |= CS5;
+            else if (db == 6) t.c_cflag |= CS6;
+            else if (db == 7) t.c_cflag |= CS7;
+            else t.c_cflag |= CS8;
+            t.c_cflag &= ~(PARENB | PARODD);
+            if (pm == 1) t.c_cflag |= PARENB;
+            else if (pm == 2) t.c_cflag |= (PARENB | PARODD);
+            if (sb == 2) t.c_cflag |= CSTOPB;
+            else t.c_cflag &= ~CSTOPB;
 #ifdef CRTSCTS
             if (hmode == 1) {
                 t.c_cflag |= CRTSCTS;
@@ -420,11 +443,11 @@ private func baud_to_const(int $baud) int {
 
 # Close the serial port
 func close(scalar $self) void {
-    if ($self->{"is_open"} == 1) {
+    if (defined($self->{"fd"}) && $self->{"fd"} >= 0) {
         core::close_fd($self->{"fd"});
-        $self->{"fd"} = -1;
-        $self->{"is_open"} = 0;
     }
+    $self->{"fd"} = -1;
+    $self->{"is_open"} = 0;
 }
 
 # Check if port is open
@@ -493,10 +516,7 @@ func write_settings(scalar $self) int {
         return 0;
     }
 
-    # Close and reopen with new settings
-    my str $device = $self->{"device"};
-    SerialPort::close($self);
-    return SerialPort::open($self);
+    return SerialPort::apply_settings($self);
 }
 
 # Write data to serial port

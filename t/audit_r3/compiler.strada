@@ -1,0 +1,279 @@
+#!/usr/bin/env strada
+# Cycle 3 Audit regression tests: Compiler & CodeGen fixes
+
+package R3PkgA;
+our scalar $shared = "val_A";
+func get_shared() str { return "" . $shared; }
+
+package R3PkgB;
+our scalar $shared = "val_B";
+func get_shared() str { return "" . $shared; }
+
+package R3Parent;
+func pkg_helper() str {
+    return "from_R3Parent";
+}
+has ro str $origin (default => pkg_helper());
+has rw scalar $ovr (default => 77);
+has rw int $keep (default => 12);
+
+package R3Child;
+extends R3Parent;
+has rw scalar $ovr;
+
+package R3Lazy;
+our int $built = 0;
+func get_built() int { return $built; }
+func make_val() int {
+    $built = $built + 1;
+    return 55;
+}
+has ro int $eager (default => 10);
+has ro int $laz (lazy, default => R3Lazy::make_val());
+
+package R3Around;
+our int $hook_ran = 0;
+func get_hook_ran() int { return $hook_ran; }
+has ro int $x (default => 1);
+around "new" func(scalar $orig, str $cls, scalar ...@args) scalar {
+    $hook_ran = $hook_ran + 1;
+    return $orig->($cls, ...@args);
+}
+
+package R3Req;
+has ro int $must (required => 1);
+has ro int $opt (default => 3);
+
+package R3MethObj;
+func new() scalar {
+    my hash %self = ("log" => "");
+    return bless(\%self, "R3MethObj");
+}
+func next(scalar $self) str {
+    return "meth_next";
+}
+func print(scalar $self, str $s) str {
+    $self->{"log"} = "printed:" . $s;
+    return $self->{"log"};
+}
+
+package main;
+
+our str $g_h1 = "outer_h1";
+our int $g_h3 = 10;
+our hash %g_h8 = ();
+
+func test_h1_nested_local_and_regex(int $sel) str {
+    my str $res = "";
+    if ($sel == 1) {
+        local $g_h1 = "branch1";
+        my str $re1 = "alp";
+        my int $m1 = ("alpha" =~ /$re1/) ? 1 : 0;
+        $res = $g_h1 . ":" . $m1;
+    } else {
+        local $g_h1 = "branch2";
+        my str $re1 = "bet";
+        my int $m2 = ("beta" =~ /$re1/) ? 1 : 0;
+        $res = $g_h1 . ":" . $m2;
+    }
+    return $res . ":" . $g_h1;
+}
+
+func void_helper(int $n) void {
+    my int $tmp = $n + 1;
+    if ($tmp < 0) { say("neg"); }
+}
+
+func test_m4_regex_g(str $pat) str {
+    my str $txt = "foo 12 bar 34 baz";
+    my str $acc = "";
+    while ($txt =~ /$pat/g) {
+        $acc = $acc . $1 . ",";
+    }
+    return $acc;
+}
+
+func build_self_cycle() scalar {
+    my hash %h = ("tag" => "alive");
+    $h{"self"} = \%h;
+    return \%h;
+}
+
+func inspect_self_cycle(scalar $node) int {
+    my scalar $alias = $node;
+    return defined($alias->{"self"}) ? 1 : 0;
+}
+
+func main() int {
+    my int $fail = 0;
+
+    # H1: nested local shadowing + regex interp var resolution
+    if (test_h1_nested_local_and_regex(1) ne "branch1:1:outer_h1"
+        || test_h1_nested_local_and_regex(2) ne "branch2:1:outer_h1") {
+        say("FAIL: H1");
+        $fail = $fail + 1;
+    }
+
+    # H2: %h = @pairs, our %GH = @pairs, %h = %{$ref}, our @GA in scalar expr context
+    my array @pairs = ("k1", "v1", "k2", "v2");
+    my hash %h2a = @pairs;
+    our hash %g_h2b = @pairs;
+    my scalar $href = {"a" => 10, "b" => 20};
+    my hash %h2c = %{$href};
+    our array @g_h2_arr = ();
+    my scalar $aref = (@g_h2_arr = (4, 5, 6));
+    if ($h2a{"k1"} ne "v1" || $g_h2b{"k2"} ne "v2" || $h2c{"b"} != 20 || $aref->[1] != 5) {
+        say("FAIL: H2");
+        $fail = $fail + 1;
+    }
+
+    # H3: local $g inside do, map, grep
+    my int $do_val = do { local $g_h3 = 111; $g_h3 + 1; };
+    my array @map_vals = map { local $g_h3 = $_ * 10; $g_h3 + 1; } (1, 2, 3);
+    my array @grep_vals = grep { local $g_h3 = $_; ($g_h3 % 2) == 0; } (1, 2, 3, 4);
+    if ($do_val != 112 || $g_h3 != 10
+        || $map_vals[0] != 11 || $map_vals[2] != 31
+        || size(@grep_vals) != 2 || $grep_vals[0] != 2 || $grep_vals[1] != 4) {
+        say("FAIL: H3");
+        $fail = $fail + 1;
+    }
+
+    # H4a: for (my $i = ...) with redo preserves outer $init
+    my int $redos = 0;
+    my int $iters = 0;
+    for (my int $fi = 0; $fi < 3; $fi = $fi + 1) {
+        $iters = $iters + 1;
+        if ($fi == 1 && $redos == 0) {
+            $redos = 1;
+            redo;
+        }
+    }
+    if ($iters != 4 || $redos != 1) {
+        say("FAIL: H4 for+redo iters=" . $iters);
+        $fail = $fail + 1;
+    }
+
+    # H4b: foreach range & array + catch($e) PerlaCell closure capture
+    my array @rfns = ();
+    foreach my int $r (10..12) {
+        push(@rfns, func () int { return $r; });
+    }
+    my array @src_items = ("x", "y", "z");
+    my array @afns = ();
+    foreach my str $it (@src_items) {
+        push(@afns, func () str { return $it; });
+    }
+    my array @cfns = ();
+    for (my int $ei = 0; $ei < 2; $ei = $ei + 1) {
+        try {
+            throw "err_" . $ei;
+        } catch ($ce) {
+            push(@cfns, func () str { return "" . $ce; });
+        }
+    }
+    if ($rfns[0]->() != 10 || $rfns[2]->() != 12
+        || $afns[0]->() ne "x" || $afns[2]->() ne "z"
+        || $cfns[0]->() ne "err_0" || $cfns[1]->() ne "err_1") {
+        say("FAIL: H4 closure PerlaCell captures");
+        $fail = $fail + 1;
+    }
+
+    # H5: MRO defaults + declaring package ctx + child override without default + lazy + around new + required check
+    my scalar $ch = R3Child::new("keep", 99);
+    my scalar $ch_dyn = "R3Child"->new("keep", 88);
+    if ($ch->origin() ne "from_R3Parent" || $ch->keep() != 99 || defined($ch->ovr())
+        || $ch_dyn->origin() ne "from_R3Parent" || $ch_dyn->keep() != 88 || defined($ch_dyn->ovr())) {
+        say("FAIL: H5 child ctor MRO/override/pkg");
+        $fail = $fail + 1;
+    }
+    my scalar $lz = R3Lazy::new("eager", 4);
+    if (R3Lazy::get_built() != 0 || $lz->laz() != 55 || R3Lazy::get_built() != 1) {
+        say("FAIL: H5 lazy has");
+        $fail = $fail + 1;
+    }
+    my scalar $ar = "R3Around"->new("x", 8);
+    my scalar $ar2 = R3Around::new("x", 9);
+    if (R3Around::get_hook_ran() != 1 || $ar->x() != 8 || $ar2->x() != 9) {
+        say("FAIL: H5 around new bypassed");
+        $fail = $fail + 1;
+    }
+    my int $req_threw = 0;
+    try {
+        my scalar $bad_req = R3Req::new("opt", 1);
+        if (defined($bad_req)) { $req_threw = 0; }
+    } catch ($e) {
+        $req_threw = 1;
+    }
+    if ($req_threw != 1) {
+        say("FAIL: H5 required attr did not throw");
+        $fail = $fail + 1;
+    }
+
+    # H7: two packages declaring `our $shared` stay isolated
+    if (R3PkgA::get_shared() ne "val_A" || R3PkgB::get_shared() ne "val_B") {
+        say("FAIL: H7 our pkg isolation");
+        $fail = $fail + 1;
+    }
+
+    # H8: chained autovivification + our %GH autoviv
+    my scalar $av = {};
+    $av->{"a"}[0]{"b"} = 42;
+    $g_h8{"x"}[1]{"y"} = 99;
+    if ($av->{"a"}[0]{"b"} != 42 || $g_h8{"x"}[1]{"y"} != 99) {
+        say("FAIL: H8 autoviv");
+        $fail = $fail + 1;
+    }
+
+    # M2: 0-arg die(), die in ternary, set_package & void call in expr context
+    my int $die0 = 0;
+    try {
+        die();
+    } catch ($e0) {
+        $die0 = 1;
+    }
+    my int $tern = (1 == 1) ? 5 : die("no");
+    my scalar $sp_ret = set_package("main");
+    my scalar $void_ret = void_helper(3);
+    if ($die0 != 1 || $tern != 5 || defined($sp_ret) || defined($void_ret)) {
+        say("FAIL: M2 void exprs");
+        $fail = $fail + 1;
+    }
+
+    # M4, M5, M6, L1
+    my str $gmatches = test_m4_regex_g("([a-z]+)");
+    my scalar $mo = R3MethObj::new();
+    my str $mn = $mo->next();
+    my num $mdiv = length($mo->next()) / 3;
+    my str $mp = $mo->print("ok");
+    my str $hd = <<EOF /* multi-line
+    comment after heredoc opener */
+hello_hd
+EOF
+    ;
+    my str $qqs = qq(\101\u0042\u{43});
+    my scalar $fnref = \&R3PkgA::get_shared;
+    if ($gmatches ne "foo,bar,baz," || $mn ne "meth_next" || $mdiv != 3 || $mp ne "printed:ok"
+        || chomp($hd) ne "hello_hd" || $qqs ne "ABC" || $fnref->() ne "val_A") {
+        say("FAIL: M4/M5/M6/L1 gm=" . $gmatches . " qq=" . $qqs . " fn=" . $fnref->());
+        $fail = $fail + 1;
+    }
+
+    # M3: break_self_cycle must not clobber live caller self-referential containers
+    my scalar $sc = build_self_cycle();
+    if (inspect_self_cycle($sc) != 1 || !defined($sc->{"self"}) || $sc->{"self"}->{"tag"} ne "alive") {
+        say("FAIL: M3 build/inspect hash self cycle");
+        $fail = $fail + 1;
+    }
+    my scalar $sc2 = {"tag" => "ref"};
+    $sc2->{"self"} = $sc2;
+    if (inspect_self_cycle($sc2) != 1 || !defined($sc2->{"self"}) || $sc2->{"self"}->{"tag"} ne "ref") {
+        say("FAIL: M3 ref self cycle");
+        $fail = $fail + 1;
+    }
+
+    if ($fail == 0) {
+        say("R3_COMPILER_OK");
+        return 0;
+    }
+    return 1;
+}

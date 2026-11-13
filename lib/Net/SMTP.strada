@@ -514,6 +514,10 @@ func close(scalar $self) void {
     }
 }
 
+func DESTROY(scalar $self) void {
+    SMTP::close($self);
+}
+
 # Get last response code
 func code(scalar $self) int {
     return $self->{"last_code"};

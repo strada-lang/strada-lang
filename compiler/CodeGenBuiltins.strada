@@ -4708,6 +4708,10 @@ func gen_builtin_g5(scalar $cg, scalar $expr, str $name) int {
         if ($name eq "die") {
             my scalar $args = $expr->{"args"};
             my int $argc = $expr->{"arg_count"};
+            if ($argc == 0) {
+                emit($cg, "({ strada_die(\"Died\"); (StradaValue*)NULL; })");
+                return 1;
+            }
             my scalar $arg0 = $args->[0];
             if ($argc > 1) {
                 # Multi-arg die: stringify and concat all args (Perl
@@ -4726,15 +4730,15 @@ func gen_builtin_g5(scalar $cg, scalar $expr, str $name) int {
                     emit($cg, "} ");
                     $di = $di + 1;
                 }
-                emit($cg, "strada_cleanup_push(__die_msg); strada_die_sv(__die_msg); })");
+                emit($cg, "strada_cleanup_push(__die_msg); strada_die_sv(__die_msg); (StradaValue*)NULL; })");
             } elsif (needs_temp_cleanup($cg, $arg0) == 1) {
                 emit($cg, "({ StradaValue *__die_arg = ");
                 gen_expression($cg, $arg0);
-                emit($cg, "; strada_cleanup_push(__die_arg); strada_die_sv(__die_arg); })");
+                emit($cg, "; strada_cleanup_push(__die_arg); strada_die_sv(__die_arg); (StradaValue*)NULL; })");
             } else {
-                emit($cg, "strada_die_sv(");
+                emit($cg, "({ strada_die_sv(");
                 gen_expression($cg, $arg0);
-                emit($cg, ")");
+                emit($cg, "); (StradaValue*)NULL; })");
             }
             return 1;
         }
@@ -4745,18 +4749,23 @@ func gen_builtin_g5(scalar $cg, scalar $expr, str $name) int {
             # access, etc.) doesn't end up shared between the exception
             # state and a still-tracked owning slot.
             my scalar $args = $expr->{"args"};
+            my int $targc = $expr->{"arg_count"};
+            if ($targc == 0) {
+                emit($cg, "({ strada_throw(\"Died\"); (StradaValue*)NULL; })");
+                return 1;
+            }
             my scalar $arg0 = $args->[0];
             my int $throw_arg_cleanup = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $arg0) == 1;
             if ($throw_arg_cleanup == 1) {
                 # Owned ref — strada_throw_value adopts directly, no extra incref needed.
-                emit($cg, "strada_throw_value(");
+                emit($cg, "({ strada_throw_value(");
                 gen_expression($cg, $arg0);
-                emit($cg, ")");
+                emit($cg, "); (StradaValue*)NULL; })");
             } else {
                 # Borrowed ref (e.g. a variable) — incref before transfer.
                 emit($cg, "({ StradaValue *__throw_arg = ");
                 gen_expression($cg, $arg0);
-                emit($cg, "; strada_incref(__throw_arg); strada_throw_value(__throw_arg); })");
+                emit($cg, "; strada_incref(__throw_arg); strada_throw_value(__throw_arg); (StradaValue*)NULL; })");
             }
             return 1;
         }
@@ -4949,19 +4958,13 @@ func gen_builtin_g5(scalar $cg, scalar $expr, str $name) int {
         
         # abs - absolute value
         if ($name eq "math::abs") {
-            emit($cg, "strada_abs(");
-            my scalar $args = $expr->{"args"};
-            gen_expression($cg, $args->[0]);
-            emit($cg, ")");
+            gen_call_with_arg_cleanup($cg, "strada_abs", $expr->{"args"}, 1);
             return 1;
         }
         
         # sqrt - square root
         if ($name eq "math::sqrt") {
-            emit($cg, "strada_sqrt(");
-            my scalar $args = $expr->{"args"};
-            gen_expression($cg, $args->[0]);
-            emit($cg, ")");
+            gen_call_with_arg_cleanup($cg, "strada_sqrt", $expr->{"args"}, 1);
             return 1;
         }
         
@@ -5103,58 +5106,41 @@ func gen_builtin_g5(scalar $cg, scalar $expr, str $name) int {
 
         # clock_gettime - get clock time
         if ($name eq "sys::clock_gettime") {
-            emit($cg, "strada_clock_gettime(");
-            my scalar $args = $expr->{"args"};
             my int $arg_count = $expr->{"arg_count"};
             if ($arg_count > 0) {
-                gen_expression($cg, $args->[0]);
+                gen_call_with_arg_cleanup($cg, "strada_clock_gettime", $expr->{"args"}, 1);
             } else {
-                emit($cg, "NULL");
+                emit($cg, "strada_clock_gettime(NULL)");
             }
-            emit($cg, ")");
             return 1;
         }
 
         # clock_getres - get clock resolution
         if ($name eq "sys::clock_getres") {
-            emit($cg, "strada_clock_getres(");
-            my scalar $args = $expr->{"args"};
             my int $arg_count = $expr->{"arg_count"};
             if ($arg_count > 0) {
-                gen_expression($cg, $args->[0]);
+                gen_call_with_arg_cleanup($cg, "strada_clock_getres", $expr->{"args"}, 1);
             } else {
-                emit($cg, "NULL");
+                emit($cg, "strada_clock_getres(NULL)");
             }
-            emit($cg, ")");
             return 1;
         }
 
         # dl_open - open shared library
         if ($name eq "sys::dl_open") {
-            emit($cg, "strada_dl_open(");
-            my scalar $args = $expr->{"args"};
-            gen_expression($cg, $args->[0]);
-            emit($cg, ")");
+            gen_call_with_arg_cleanup($cg, "strada_dl_open", $expr->{"args"}, 1);
             return 1;
         }
 
         # strada_read_meta_section - read .strada_meta ELF section (no dlopen)
         if ($name eq "strada_read_meta_section") {
-            emit($cg, "strada_read_meta_section(");
-            my scalar $rms_args = $expr->{"args"};
-            gen_expression($cg, $rms_args->[0]);
-            emit($cg, ")");
+            gen_call_with_arg_cleanup($cg, "strada_read_meta_section", $expr->{"args"}, 1);
             return 1;
         }
 
         # strada_call_named_guarded - dlsym self + call under try frame
         if ($name eq "strada_call_named_guarded") {
-            emit($cg, "strada_call_named_guarded(");
-            my scalar $cng_args = $expr->{"args"};
-            gen_expression($cg, $cng_args->[0]);
-            emit($cg, ", ");
-            gen_expression($cg, $cng_args->[1]);
-            emit($cg, ")");
+            gen_call_with_arg_cleanup($cg, "strada_call_named_guarded", $expr->{"args"}, 2);
             return 1;
         }
 
@@ -5196,144 +5182,58 @@ func gen_builtin_g5(scalar $cg, scalar $expr, str $name) int {
 
         # dl_call_int - call function returning int
         if ($name eq "sys::dl_call_int") {
-            emit($cg, "strada_dl_call_int(");
-            my scalar $args = $expr->{"args"};
-            gen_expression($cg, $args->[0]);
-            emit($cg, ", ");
-            gen_expression($cg, $args->[1]);
-            emit($cg, ")");
+            gen_call_with_arg_cleanup($cg, "strada_dl_call_int", $expr->{"args"}, 2);
             return 1;
         }
 
         # dl_call_num - call function returning num
         if ($name eq "sys::dl_call_num") {
-            emit($cg, "strada_dl_call_num(");
-            my scalar $args = $expr->{"args"};
-            gen_expression($cg, $args->[0]);
-            emit($cg, ", ");
-            gen_expression($cg, $args->[1]);
-            emit($cg, ")");
+            gen_call_with_arg_cleanup($cg, "strada_dl_call_num", $expr->{"args"}, 2);
             return 1;
         }
 
         # dl_call_str - call function returning string
         if ($name eq "sys::dl_call_str") {
-            emit($cg, "strada_dl_call_str(");
-            my scalar $args = $expr->{"args"};
-            gen_expression($cg, $args->[0]);
-            emit($cg, ", ");
-            gen_expression($cg, $args->[1]);
-            emit($cg, ")");
+            gen_call_with_arg_cleanup($cg, "strada_dl_call_str", $expr->{"args"}, 2);
             return 1;
         }
 
         # dl_call_void - call function with no return
         if ($name eq "sys::dl_call_void") {
-            emit($cg, "strada_dl_call_void(");
-            my scalar $args = $expr->{"args"};
-            gen_expression($cg, $args->[0]);
-            emit($cg, ", ");
-            gen_expression($cg, $args->[1]);
-            emit($cg, ")");
+            gen_call_with_arg_cleanup($cg, "strada_dl_call_void", $expr->{"args"}, 2);
             return 1;
         }
 
         # dl_call_int_sv - call function passing StradaValue* directly, returns int
         if ($name eq "sys::dl_call_int_sv") {
-            my scalar $args = $expr->{"args"};
-            my scalar $arg1 = $args->[1];
-            # Clean up the args array if it's a temporary (like anonymous array)
-            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $arg1) == 1) {
-                emit($cg, "({ StradaValue *__dl_args = ");
-                gen_expression($cg, $arg1);
-                emit($cg, "; StradaValue *__dl_res = strada_dl_call_int_sv(");
-                gen_expression($cg, $args->[0]);
-                emit($cg, ", __dl_args); strada_decref(__dl_args); __dl_res; })");
-            } else {
-                emit($cg, "strada_dl_call_int_sv(");
-                gen_expression($cg, $args->[0]);
-                emit($cg, ", ");
-                gen_expression($cg, $arg1);
-                emit($cg, ")");
-            }
+            gen_call_with_arg_cleanup($cg, "strada_dl_call_int_sv", $expr->{"args"}, 2);
             return 1;
         }
 
         # dl_call_str_sv - call function passing StradaValue* directly, returns string
         if ($name eq "sys::dl_call_str_sv") {
-            my scalar $args = $expr->{"args"};
-            my scalar $arg1 = $args->[1];
-            # Clean up the args array if it's a temporary (like anonymous array)
-            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $arg1) == 1) {
-                emit($cg, "({ StradaValue *__dl_args = ");
-                gen_expression($cg, $arg1);
-                emit($cg, "; StradaValue *__dl_res = strada_dl_call_str_sv(");
-                gen_expression($cg, $args->[0]);
-                emit($cg, ", __dl_args); strada_decref(__dl_args); __dl_res; })");
-            } else {
-                emit($cg, "strada_dl_call_str_sv(");
-                gen_expression($cg, $args->[0]);
-                emit($cg, ", ");
-                gen_expression($cg, $arg1);
-                emit($cg, ")");
-            }
+            gen_call_with_arg_cleanup($cg, "strada_dl_call_str_sv", $expr->{"args"}, 2);
             return 1;
         }
 
         # dl_call_void_sv - call function passing StradaValue* directly, no return
         if ($name eq "sys::dl_call_void_sv") {
-            my scalar $args = $expr->{"args"};
-            my scalar $arg1 = $args->[1];
-            # Clean up the args array if it's a temporary (like anonymous array)
-            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $arg1) == 1) {
-                emit($cg, "({ StradaValue *__dl_args = ");
-                gen_expression($cg, $arg1);
-                emit($cg, "; StradaValue *__dl_res = strada_dl_call_void_sv(");
-                gen_expression($cg, $args->[0]);
-                emit($cg, ", __dl_args); strada_decref(__dl_args); __dl_res; })");
-            } else {
-                emit($cg, "strada_dl_call_void_sv(");
-                gen_expression($cg, $args->[0]);
-                emit($cg, ", ");
-                gen_expression($cg, $arg1);
-                emit($cg, ")");
-            }
+            gen_call_with_arg_cleanup($cg, "strada_dl_call_void_sv", $expr->{"args"}, 2);
             return 1;
         }
 
         if ($name eq "sys::dl_call_sv") {
-            my scalar $args = $expr->{"args"};
-            my scalar $arg1 = $args->[1];
-            # Clean up the args array if it's a temporary (like anonymous array)
-            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $arg1) == 1) {
-                emit($cg, "({ StradaValue *__dl_args = ");
-                gen_expression($cg, $arg1);
-                emit($cg, "; StradaValue *__dl_res = strada_dl_call_sv(");
-                gen_expression($cg, $args->[0]);
-                emit($cg, ", __dl_args); strada_decref(__dl_args); __dl_res; })");
-            } else {
-                emit($cg, "strada_dl_call_sv(");
-                gen_expression($cg, $args->[0]);
-                emit($cg, ", ");
-                gen_expression($cg, $arg1);
-                emit($cg, ")");
-            }
+            gen_call_with_arg_cleanup($cg, "strada_dl_call_sv", $expr->{"args"}, 2);
             return 1;
         }
 
         if ($name eq "sys::dl_call_export_info") {
-            emit($cg, "strada_dl_call_export_info(");
-            my scalar $args = $expr->{"args"};
-            gen_expression($cg, $args->[0]);
-            emit($cg, ")");
+            gen_call_with_arg_cleanup($cg, "strada_dl_call_export_info", $expr->{"args"}, 1);
             return 1;
         }
 
         if ($name eq "sys::dl_call_version") {
-            emit($cg, "strada_dl_call_version(");
-            my scalar $args = $expr->{"args"};
-            gen_expression($cg, $args->[0]);
-            emit($cg, ")");
+            gen_call_with_arg_cleanup($cg, "strada_dl_call_version", $expr->{"args"}, 1);
             return 1;
         }
 
@@ -5357,46 +5257,27 @@ func gen_builtin_g5(scalar $cg, scalar $expr, str $name) int {
         }
 
         if ($name eq "sys::ptr_deref_int") {
-            emit($cg, "strada_ptr_deref_int(");
-            my scalar $args = $expr->{"args"};
-            gen_expression($cg, $args->[0]);
-            emit($cg, ")");
+            gen_call_with_arg_cleanup($cg, "strada_ptr_deref_int", $expr->{"args"}, 1);
             return 1;
         }
 
         if ($name eq "sys::ptr_deref_num") {
-            emit($cg, "strada_ptr_deref_num(");
-            my scalar $args = $expr->{"args"};
-            gen_expression($cg, $args->[0]);
-            emit($cg, ")");
+            gen_call_with_arg_cleanup($cg, "strada_ptr_deref_num", $expr->{"args"}, 1);
             return 1;
         }
 
         if ($name eq "sys::ptr_deref_str") {
-            emit($cg, "strada_ptr_deref_str(");
-            my scalar $args = $expr->{"args"};
-            gen_expression($cg, $args->[0]);
-            emit($cg, ")");
+            gen_call_with_arg_cleanup($cg, "strada_ptr_deref_str", $expr->{"args"}, 1);
             return 1;
         }
 
         if ($name eq "sys::ptr_set_int") {
-            emit($cg, "strada_ptr_set_int(");
-            my scalar $args = $expr->{"args"};
-            gen_expression($cg, $args->[0]);
-            emit($cg, ", ");
-            gen_expression($cg, $args->[1]);
-            emit($cg, ")");
+            gen_call_with_arg_cleanup($cg, "strada_ptr_set_int", $expr->{"args"}, 2);
             return 1;
         }
 
         if ($name eq "sys::ptr_set_num") {
-            emit($cg, "strada_ptr_set_num(");
-            my scalar $args = $expr->{"args"};
-            gen_expression($cg, $args->[0]);
-            emit($cg, ", ");
-            gen_expression($cg, $args->[1]);
-            emit($cg, ")");
+            gen_call_with_arg_cleanup($cg, "strada_ptr_set_num", $expr->{"args"}, 2);
             return 1;
         }
 
@@ -7179,9 +7060,9 @@ func gen_builtin_g7(scalar $cg, scalar $expr, str $name) int {
             my scalar $args = $expr->{"args"};
             my scalar $pkg_arg = $args->[0];
             if ($pkg_arg->{"type"} == NODE_STR_LITERAL()) {
-                emit($cg, "strada_set_package(");
+                emit($cg, "(strada_set_package(");
                 gen_str_literal_c($cg, $pkg_arg->{"value"});
-                emit($cg, ")");
+                emit($cg, "), strada_undef_static())");
             } else {
                 emit($cg, "({ StradaValue *__setpkg_t = ");
                 gen_expression($cg, $pkg_arg);
@@ -7189,7 +7070,7 @@ func gen_builtin_g7(scalar $cg, scalar $expr, str $name) int {
                 if (needs_temp_cleanup($cg, $pkg_arg) == 1) {
                     emit($cg, "strada_decref(__setpkg_t); ");
                 }
-                emit($cg, "strada_set_package(__setpkg_s); strada_cstr_free(__setpkg_s); })");
+                emit($cg, "strada_set_package(__setpkg_s); strada_cstr_free(__setpkg_s); strada_undef_static(); })");
             }
             return 1;
         }
@@ -7203,9 +7084,9 @@ func gen_builtin_g7(scalar $cg, scalar $expr, str $name) int {
                 my scalar $parent_arg = $args->[0];
                 if ($parent_arg->{"type"} == NODE_STR_LITERAL()) {
                     # String literal - emit directly
-                    emit($cg, "strada_inherit_from(");
+                    emit($cg, "(strada_inherit_from(");
                     gen_str_literal_c($cg, $parent_arg->{"value"});
-                    emit($cg, ")");
+                    emit($cg, "), strada_undef_static())");
                 } else {
                     # Expression - need to free temp
                     emit($cg, "({ StradaValue *__inh_p = ");
@@ -7216,7 +7097,7 @@ func gen_builtin_g7(scalar $cg, scalar $expr, str $name) int {
                     if (needs_temp_cleanup($cg, $parent_arg) == 1) {
                         emit($cg, "strada_decref(__inh_p); ");
                     }
-                    emit($cg, "})");
+                    emit($cg, "strada_undef_static(); })");
                 }
             } else {
                 # Two args: inherit(child, parent)
@@ -7227,11 +7108,11 @@ func gen_builtin_g7(scalar $cg, scalar $expr, str $name) int {
 
                 if ($child_is_lit == 1 && $parent_is_lit == 1) {
                     # Both literals - emit directly
-                    emit($cg, "strada_inherit(");
+                    emit($cg, "(strada_inherit(");
                     gen_str_literal_c($cg, $child_arg->{"value"});
                     emit($cg, ", ");
                     gen_str_literal_c($cg, $parent_arg->{"value"});
-                    emit($cg, ")");
+                    emit($cg, "), strada_undef_static())");
                 } else {
                     # At least one expression - wrap for cleanup
                     emit($cg, "({ StradaValue *__inh_c = ");
@@ -7248,7 +7129,7 @@ func gen_builtin_g7(scalar $cg, scalar $expr, str $name) int {
                     if (needs_temp_cleanup($cg, $parent_arg) == 1) {
                         emit($cg, "strada_decref(__inh_p); ");
                     }
-                    emit($cg, "})");
+                    emit($cg, "strada_undef_static(); })");
                 }
             }
             return 1;
@@ -8692,15 +8573,13 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
                 }
             }
 
-            # Decref the temp StradaValue args (skip for c_extern - no allocations)
-            if ($is_c_extern == 0) {
-                my int $d = 0;
-                while ($d < $arg_count) {
-                    if (needs_temp_cleanup($cg, $args->[$d]) == 1) {
-                        emit($cg, "strada_decref(__sv_arg" . $d . "); ");
-                    }
-                    $d = $d + 1;
+            # Decref the temp StradaValue args (including c_extern)
+            my int $d = 0;
+            while ($d < $arg_count) {
+                if (needs_temp_cleanup($cg, $args->[$d]) == 1) {
+                    emit($cg, "strada_decref(__sv_arg" . $d . "); ");
                 }
+                $d = $d + 1;
             }
 
             # Convert return value back to StradaValue*
@@ -8762,7 +8641,7 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
         #   - $func_info is known and synthesized (`has` ctor) and pkg declares `has` attrs, OR
         #   - !$func_info and the target package is locally known (`has`-less pkg with no explicit `new`).
         my int $ctor_is_user_defined = 1;
-        if ($has_spread == 0 && $arg_count >= 2 && ($arg_count % 2) == 0) {
+        if ($has_spread == 0 && $arg_count >= 2 && ($arg_count % 2) == 0 && has_method_modifier($cg, "new") == 0) {
             my int $cnl2 = length($c_name);
             if ($cnl2 > 4 && substr($c_name, $cnl2 - 4, 4) eq "_new") {
                 my str $check_pkg2 = substr($c_name, 0, $cnl2 - 4);
@@ -8820,26 +8699,8 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
                 my str $cn_suffix = substr($c_name, $cnl - 4, 4);
                 if ($cn_suffix eq "_new") { $is_ctor = 1; }
             }
-            # Only inline for classes without inheritance (simple case)
-            my int $has_parents = 0;
-            if ($is_ctor == 1) {
-                my str $ctor_pkg = substr($c_name, 0, $cnl - 4);
-                my scalar $inh_list = $cg->{"inherits"};
-                my int $inh_ct = $cg->{"inherit_count"};
-                my int $ii = 0;
-                while ($ii < $inh_ct) {
-                    my str $child = $inh_list->[$ii]->{"child"};
-                    my int $ci2 = index($child, "::");
-                    while ($ci2 >= 0) {
-                        $child = substr($child, 0, $ci2) . "_" . substr($child, $ci2 + 2, length($child) - $ci2 - 2);
-                        $ci2 = index($child, "::");
-                    }
-                    if ($child eq $ctor_pkg) { $has_parents = 1; }
-                    $ii = $ii + 1;
-                }
-            }
             if ($is_ctor == 1 && $arg_count >= 2) {
-                my str $ctor_pkg_chk = substr($c_name, 0, $cnl - 4);
+                my str $pkg_name = substr($c_name, 0, $cnl - 4);
                 my int $all_lit_keys = 1;
                 if (($arg_count % 2) != 0) { $all_lit_keys = 0; }
                 my int $ki = 0;
@@ -8852,45 +8713,115 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
                 # A (required) attribute the call does not pass: leave it to the
                 # real constructor, which throws. (Inlined, the object was
                 # simply built without it.)
-                if ($all_lit_keys == 1 && inline_ctor_missing_required($cg, $ctor_pkg_chk, $args, $arg_count) == 1) {
+                if ($all_lit_keys == 1 && inline_ctor_missing_required($cg, $pkg_name, $args, $arg_count) == 1) {
                     $all_lit_keys = 0;
                 }
+                # Build deduplicated MRO package chain (child before ancestors)
+                # and verify every ancestor is locally declared (not external)
+                # and does not supply a custom non-synthesized new() when the child lacks one.
+                my array @pkg_chain = ();
+                my int $pc_len = 0;
                 if ($all_lit_keys == 1) {
-                    # Inline constructor: create hash, set entries directly, bless
-                    my str $pkg_name = substr($c_name, 0, $cnl - 4);
-
-                    # Build package chain for inherited defaults
-                    my array @pkg_chain = ();
                     push(@pkg_chain, $pkg_name);
-                    my int $pc_len = 1;
-                    if ($has_parents == 1) {
-                        my scalar $inh_list2 = $cg->{"inherits"};
-                        my int $inh_ct2 = $cg->{"inherit_count"};
-                        my int $pci = 0;
-                        while ($pci < $pc_len) {
-                            my str $check_pkg = $pkg_chain[$pci];
-                            my int $pi = 0;
-                            while ($pi < $inh_ct2) {
-                                my str $ichild = $inh_list2->[$pi]->{"child"};
-                                my int $ci3 = index($ichild, "::");
-                                while ($ci3 >= 0) {
-                                    $ichild = substr($ichild, 0, $ci3) . "_" . substr($ichild, $ci3 + 2, length($ichild) - $ci3 - 2);
-                                    $ci3 = index($ichild, "::");
-                                }
-                                if ($ichild eq $check_pkg) {
-                                    my str $iparent = $inh_list2->[$pi]->{"parent"};
-                                    my int $ci4 = index($iparent, "::");
-                                    while ($ci4 >= 0) {
-                                        $iparent = substr($iparent, 0, $ci4) . "_" . substr($iparent, $ci4 + 2, length($iparent) - $ci4 - 2);
-                                        $ci4 = index($iparent, "::");
+                    $pc_len = 1;
+                    my hash %chain_seen = ();
+                    $chain_seen{$pkg_name} = 1;
+                    my scalar $inh_list2 = $cg->{"inherits"};
+                    my int $inh_ct2 = $cg->{"inherit_count"} + 0;
+                    my scalar $pl_p = $cg->{"pkg_list"};
+                    my int $pc_p = $cg->{"pkg_count"} + 0;
+                    my scalar $ha_p = $cg->{"has_attrs"};
+                    my int $hac_p = $cg->{"has_attr_count"} + 0;
+                    my int $pci = 0;
+                    while ($pci < $pc_len && $all_lit_keys == 1) {
+                        my str $check_pkg = $pkg_chain[$pci];
+                        my int $pi = 0;
+                        while ($pi < $inh_ct2) {
+                            if (pkg_c_safe("" . $inh_list2->[$pi]->{"child"}) eq $check_pkg) {
+                                my str $iparent = pkg_c_safe("" . $inh_list2->[$pi]->{"parent"});
+                                if (($chain_seen{$iparent} + 0) == 0) {
+                                    $chain_seen{$iparent} = 1;
+                                    my int $parent_local = 0;
+                                    my int $pk_i = 0;
+                                    while ($pk_i < $pc_p) {
+                                        if (pkg_c_safe("" . $pl_p->[$pk_i]) eq $iparent) {
+                                            $parent_local = 1;
+                                            last;
+                                        }
+                                        $pk_i = $pk_i + 1;
+                                    }
+                                    if ($parent_local == 0) {
+                                        my int $ha_i = 0;
+                                        while ($ha_i < $hac_p) {
+                                            if (pkg_c_safe("" . $ha_p->[$ha_i]->{"package"}) eq $iparent) {
+                                                $parent_local = 1;
+                                                last;
+                                            }
+                                            $ha_i = $ha_i + 1;
+                                        }
+                                    }
+                                    if ($parent_local == 0) {
+                                        $all_lit_keys = 0;
+                                        last;
+                                    }
+                                    if (!$func_info) {
+                                        my scalar $pfi = $cg->{"functions"}->{$iparent . "_new"};
+                                        if ($pfi && (($pfi->{"return_type"} + 0) > 0 || ($pfi->{"is_extern"} + 0) == 1) && ($pfi->{"is_synthesized"} + 0) != 1) {
+                                            $all_lit_keys = 0;
+                                            last;
+                                        }
                                     }
                                     push(@pkg_chain, $iparent);
                                     $pc_len = $pc_len + 1;
                                 }
-                                $pi = $pi + 1;
                             }
-                            $pci = $pci + 1;
+                            $pi = $pi + 1;
                         }
+                        $pci = $pci + 1;
+                    }
+                }
+                if ($all_lit_keys == 1) {
+                    # Collect unique default attrs in MRO order (child before parent)
+                    # so overridden child attrs (including ones without a default)
+                    # suppress parent defaults and capacity is exact.
+                    my hash %ctor_seen_attrs = ();
+                    my int $ctor_can_throw = 0;
+                    my int $csi = 0;
+                    while ($csi < $arg_count) {
+                        $ctor_seen_attrs{"" . $args->[$csi]->{"value"}} = 1;
+                        if (expr_cannot_throw($cg, $args->[$csi + 1]) == 0) {
+                            $ctor_can_throw = 1;
+                        }
+                        $csi = $csi + 2;
+                    }
+                    my scalar $ha_attrs = $cg->{"has_attrs"};
+                    my int $ha_count = $cg->{"has_attr_count"};
+                    my array @ctor_def_names = ();
+                    my array @ctor_def_nodes = ();
+                    my array @ctor_def_pkgs = ();
+                    my int $pj0 = 0;
+                    while ($pj0 < $pc_len) {
+                        my str $want_pkg = $pkg_chain[$pj0];
+                        my int $di0 = 0;
+                        while ($di0 < $ha_count) {
+                            my scalar $attr0 = $ha_attrs->[$di0];
+                            if (pkg_c_safe("" . $attr0->{"package"}) eq $want_pkg) {
+                                my str $anm0 = "" . $attr0->{"name"};
+                                if (($ctor_seen_attrs{$anm0} + 0) == 0) {
+                                    $ctor_seen_attrs{$anm0} = 1;
+                                    if ($attr0->{"default_node"} != 0) {
+                                        push(@ctor_def_names, $anm0);
+                                        push(@ctor_def_nodes, $attr0->{"default_node"});
+                                        push(@ctor_def_pkgs, "" . $attr0->{"package"});
+                                        if (expr_cannot_throw($cg, $attr0->{"default_node"}) == 0) {
+                                            $ctor_can_throw = 1;
+                                        }
+                                    }
+                                }
+                            }
+                            $di0 = $di0 + 1;
+                        }
+                        $pj0 = $pj0 + 1;
                     }
 
                     # Fused-ctor fast path: replace the 5-call inline sequence
@@ -8900,14 +8831,16 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
                     #   - 2 or 3 explicit attrs
                     #   - all values are int-typed (tagged ints, no refcount
                     #     concerns; eliminates the v_owned branch)
-                    #   - all has-attrs in chain are explicitly set (no
-                    #     defaults to apply)
+                    #   - no remaining defaults to apply (child overrides already
+                    #     resolved via @ctor_def_names above)
                     #   - we're outside any try frame (so no need to
                     #     cleanup_push the partial object)
                     # The fused fn keeps hash buckets in registers across the
                     # 2-3 direct inserts, dropping ~25ns per object on hot
                     # OOP loops vs the 5 separate calls.
-                    if (($arg_count == 4 || $arg_count == 6) && cleanup_push_useful($cg) == 0) {
+                    my int $no_defaults = 0;
+                    if (size(@ctor_def_names) == 0) { $no_defaults = 1; }
+                    if (($arg_count == 4 || $arg_count == 6) && $no_defaults == 1 && cleanup_push_useful($cg) == 0) {
                         my int $all_int_vals = 1;
                         my int $fvi = 1;
                         while ($fvi < $arg_count) {
@@ -8917,40 +8850,7 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
                             }
                             $fvi = $fvi + 2;
                         }
-                        # Check no defaults need application: every has-attr
-                        # in the chain must either have no default OR be set
-                        # explicitly in args.
-                        my int $no_defaults = 1;
-                        my scalar $ha_attrs3 = $cg->{"has_attrs"};
-                        my int $ha_count3 = $cg->{"has_attr_count"};
-                        my int $da3 = 0;
-                        while ($da3 < $ha_count3 && $no_defaults == 1) {
-                            my scalar $dattr3 = $ha_attrs3->[$da3];
-                            my str $dpkg3 = $dattr3->{"package"};
-                            my int $dc3 = index($dpkg3, "::");
-                            while ($dc3 >= 0) {
-                                $dpkg3 = substr($dpkg3, 0, $dc3) . "_" . substr($dpkg3, $dc3 + 2, length($dpkg3) - $dc3 - 2);
-                                $dc3 = index($dpkg3, "::");
-                            }
-                            my int $in_chain3 = 0;
-                            my int $pj3 = 0;
-                            while ($pj3 < $pc_len) {
-                                if ($dpkg3 eq $pkg_chain[$pj3]) { $in_chain3 = 1; }
-                                $pj3 = $pj3 + 1;
-                            }
-                            if ($in_chain3 == 1 && $dattr3->{"default_node"} != 0) {
-                                my str $dn3 = $dattr3->{"name"};
-                                my int $set3 = 0;
-                                my int $ds3 = 0;
-                                while ($ds3 < $arg_count) {
-                                    if ($args->[$ds3]->{"value"} eq $dn3) { $set3 = 1; }
-                                    $ds3 = $ds3 + 2;
-                                }
-                                if ($set3 == 0) { $no_defaults = 0; }
-                            }
-                            $da3 = $da3 + 1;
-                        }
-                        if ($all_int_vals == 1 && $no_defaults == 1) {
+                        if ($all_int_vals == 1) {
                             # Emit fused call.
                             my int $fbn = $cg->{"tmp_counter"} + 0;
                             $cg->{"tmp_counter"} = $fbn + 1;
@@ -8994,51 +8894,6 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
                         }
                     }
 
-                    # Collect unique default attrs in MRO order (child before parent)
-                    # so overridden child defaults win and capacity is exact.
-                    my hash %ctor_seen_attrs = ();
-                    my int $ctor_can_throw = 0;
-                    my int $csi = 0;
-                    while ($csi < $arg_count) {
-                        $ctor_seen_attrs{"" . $args->[$csi]->{"value"}} = 1;
-                        if (expr_cannot_throw($cg, $args->[$csi + 1]) == 0) {
-                            $ctor_can_throw = 1;
-                        }
-                        $csi = $csi + 2;
-                    }
-                    my scalar $ha_attrs = $cg->{"has_attrs"};
-                    my int $ha_count = $cg->{"has_attr_count"};
-                    my array @ctor_def_names = ();
-                    my array @ctor_def_nodes = ();
-                    my int $pj0 = 0;
-                    while ($pj0 < $pc_len) {
-                        my str $want_pkg = $pkg_chain[$pj0];
-                        my int $di0 = 0;
-                        while ($di0 < $ha_count) {
-                            my scalar $attr0 = $ha_attrs->[$di0];
-                            if ($attr0->{"default_node"} != 0) {
-                                my str $attr_pkg0 = $attr0->{"package"};
-                                my int $col_idx0 = index($attr_pkg0, "::");
-                                while ($col_idx0 >= 0) {
-                                    $attr_pkg0 = substr($attr_pkg0, 0, $col_idx0) . "_" . substr($attr_pkg0, $col_idx0 + 2, length($attr_pkg0) - $col_idx0 - 2);
-                                    $col_idx0 = index($attr_pkg0, "::");
-                                }
-                                if ($attr_pkg0 eq $want_pkg) {
-                                    my str $anm0 = "" . $attr0->{"name"};
-                                    if (($ctor_seen_attrs{$anm0} + 0) == 0) {
-                                        $ctor_seen_attrs{$anm0} = 1;
-                                        push(@ctor_def_names, $anm0);
-                                        push(@ctor_def_nodes, $attr0->{"default_node"});
-                                        if (expr_cannot_throw($cg, $attr0->{"default_node"}) == 0) {
-                                            $ctor_can_throw = 1;
-                                        }
-                                    }
-                                }
-                            }
-                            $di0 = $di0 + 1;
-                        }
-                        $pj0 = $pj0 + 1;
-                    }
                     my int $total_attrs = ($arg_count / 2) + size(@ctor_def_names);
                     emit($cg, "({ StradaValue *__ct_h = strada_new_hash_presized(" . $total_attrs . "); ");
                     emit($cg, "StradaValue *__ct_ref = strada_ref_create_take(__ct_h); ");
@@ -9074,11 +8929,21 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
                         emit($cg, "}\n");
                         $ci = $ci + 2;
                     }
+                    my str $saved_def_pkg = "" . $cg->{"package"};
+                    my str $saved_def_fnpkg = "" . $cg->{"current_fn_package"};
                     my int $di = 0;
                     my int $ndf = size(@ctor_def_names);
                     while ($di < $ndf) {
                         my str $attr_name = $ctor_def_names[$di];
                         my scalar $dnode = $ctor_def_nodes[$di];
+                        my str $dpkg_ctx = $ctor_def_pkgs[$di];
+                        if (length($dpkg_ctx) > 0) {
+                            $cg->{"package"} = $dpkg_ctx;
+                            $cg->{"current_fn_package"} = $dpkg_ctx;
+                        } else {
+                            $cg->{"package"} = $saved_def_pkg;
+                            $cg->{"current_fn_package"} = $saved_def_fnpkg;
+                        }
                         my int $d_owned = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $dnode) == 1;
                         if ($d_owned == 1 && key_is_hashable_ascii($attr_name) == 1) {
                             emit($cg, "strada_hash_set_take_ph(__ct_h->value.hv, " . c_str_lit($attr_name) . ", " . djb2_hash_32($attr_name) . "u, ");
@@ -9095,6 +8960,8 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
                         }
                         $di = $di + 1;
                     }
+                    $cg->{"package"} = $saved_def_pkg;
+                    $cg->{"current_fn_package"} = $saved_def_fnpkg;
                     if ($ctor_needs_push == 1) {
                         emit($cg, "strada_cleanup_pop(); ");
                     }
@@ -9322,7 +9189,7 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
             if ($returns_void == 0) {
                 emit($cg, "__va_result; })");
             } else {
-                emit($cg, "})");
+                emit($cg, "strada_undef_static(); })");
             }
             return;
         }
@@ -9356,14 +9223,14 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
             }
         }
 
-        if ($needs_temps == 1 || ($arg_count > 1 && $last_impure_idx >= 0)) {
-            my int $returns_void = 0;
-            if ($func_info) {
-                my int $ret_type = $func_info->{"return_type"};
-                if ($ret_type == TYPE_VOID()) {
-                    $returns_void = 1;
-                }
+        my int $returns_void = 0;
+        if ($func_info) {
+            my int $ret_type = $func_info->{"return_type"};
+            if ($ret_type == TYPE_VOID()) {
+                $returns_void = 1;
             }
+        }
+        if ($needs_temps == 1 || ($arg_count > 1 && $last_impure_idx >= 0)) {
 
             # Generate block with LTR hoisted temps and cleanup
             emit($cg, "({ ");
@@ -9491,12 +9358,18 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
             if ($returns_void == 0) {
                 emit($cg, "__call_result; })");
             } else {
-                emit($cg, "})");
+                emit($cg, "strada_undef_static(); })");
             }
         } else {
             # No temps needed, simple call
             if ($is_dynamic_call == 1) {
-                emit($cg, "({ int __prev_ctx = strada_wantarray() ? 1 : (strada_wanthash() ? 2 : 0); strada_set_call_context(" . $dyn_ctx . "); StradaValue *__dyn_r = ");
+                if ($returns_void == 0) {
+                    emit($cg, "({ int __prev_ctx = strada_wantarray() ? 1 : (strada_wanthash() ? 2 : 0); strada_set_call_context(" . $dyn_ctx . "); StradaValue *__dyn_r = ");
+                } else {
+                    emit($cg, "({ int __prev_ctx = strada_wantarray() ? 1 : (strada_wanthash() ? 2 : 0); strada_set_call_context(" . $dyn_ctx . "); ");
+                }
+            } elsif ($returns_void == 1) {
+                emit($cg, "(");
             }
             # Stash call-site line for caller() — see comment above.
             # Wrap the call in a comma expression so this stays an
@@ -9553,7 +9426,13 @@ func gen_user_call(scalar $cg, scalar $expr, str $name) void {
                 }
             }
             if ($is_dynamic_call == 1) {
-                emit($cg, "; strada_set_call_context(__prev_ctx); __dyn_r; })");
+                if ($returns_void == 0) {
+                    emit($cg, "; strada_set_call_context(__prev_ctx); __dyn_r; })");
+                } else {
+                    emit($cg, "; strada_set_call_context(__prev_ctx); strada_undef_static(); })");
+                }
+            } elsif ($returns_void == 1) {
+                emit($cg, ", strada_undef_static())");
             }
         }
         return;

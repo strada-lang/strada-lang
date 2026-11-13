@@ -126,6 +126,15 @@ func send(scalar $sock, str $data) int {
 # to non-blocking once (recv/send use per-call MSG_DONTWAIT; accept has no
 # such flag).
 func accept(scalar $listener, int $timeout_ms = 0) scalar {
+    if ($timeout_ms < 0) {
+        return undef;
+    }
+    # Check readiness before flipping O_NONBLOCK so synchronous callers outside
+    # a task keep the listener in blocking mode when a connection is already waiting.
+    my scalar $imm_ready = core::socket_select([$listener], 0);
+    if (defined($imm_ready) && scalar($imm_ready) > 0) {
+        return core::socket_accept($listener);
+    }
     core::socket_set_nonblocking($listener, 1);
     my int $deadline = $timeout_ms > 0 ? core::mono_ms() + $timeout_ms : 0;
     while (1) {
@@ -154,12 +163,22 @@ func accept(scalar $listener, int $timeout_ms = 0) scalar {
 func connect(str $host, int $port, int $timeout_ms = 0) scalar {
     my int $deadline = $timeout_ms > 0 ? core::mono_ms() + $timeout_ms : 0;
     # Strip bracketed IPv6 literal notation (e.g. "[::1]")
+    my int $was_bracketed_v6 = 0;
     if (length($host) >= 2 && substr($host, 0, 1) eq "[" && substr($host, length($host) - 1, 1) eq "]") {
         $host = substr($host, 1, length($host) - 2);
+        $was_bracketed_v6 = 1;
     }
     # Hostnames resolve on a background thread so a slow DNS lookup never
     # stalls the loop; numeric addresses skip the round-trip entirely.
-    if ($host !~ /^[0-9.:a-fA-F]+$/ || $host !~ /[0-9]/) {
+    my int $is_numeric_ip = 0;
+    if ($was_bracketed_v6 == 1 || index($host, ":") >= 0) {
+        if ($host =~ /^[0-9a-fA-F:]+(\.[0-9]+)*$/) {
+            $is_numeric_ip = 1;
+        }
+    } elsif ($host =~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) {
+        $is_numeric_ip = 1;
+    }
+    if ($is_numeric_ip == 0) {
         my scalar $rf = async::resolve($host);
         while (async::is_done($rf) == 0) {
             if (remaining($deadline) < 0) { return undef; }

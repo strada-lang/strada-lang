@@ -164,16 +164,43 @@ static int ast_op_code(StradaValue *node) {
 
 /* Loop context for last/next/redo */
 typedef struct LoopCtx {
-    size_t break_patches[64];
+    size_t *break_patches;
     int break_count;
-    size_t next_patches[64];
+    int break_cap;
+    size_t *next_patches;
     int next_count;
+    int next_cap;
     size_t continue_target;     /* address to jump to for 'next' (set after body) */
     size_t redo_target;         /* address to jump to for 'redo' (body start, after condition) */
     const char *label;          /* label name or NULL */
     int local_restore_depth;
     struct LoopCtx *parent;
 } LoopCtx;
+
+static void loop_add_break_patch(LoopCtx *lc, size_t off) {
+    if (lc->break_count >= lc->break_cap) {
+        lc->break_cap = lc->break_cap > 0 ? lc->break_cap * 2 : 16;
+        lc->break_patches = realloc(lc->break_patches, (size_t)lc->break_cap * sizeof(size_t));
+    }
+    lc->break_patches[lc->break_count++] = off;
+}
+
+static void loop_add_next_patch(LoopCtx *lc, size_t off) {
+    if (lc->next_count >= lc->next_cap) {
+        lc->next_cap = lc->next_cap > 0 ? lc->next_cap * 2 : 16;
+        lc->next_patches = realloc(lc->next_patches, (size_t)lc->next_cap * sizeof(size_t));
+    }
+    lc->next_patches[lc->next_count++] = off;
+}
+
+static void loop_free_patches(LoopCtx *lc) {
+    free(lc->break_patches);
+    free(lc->next_patches);
+    lc->break_patches = NULL;
+    lc->next_patches = NULL;
+    lc->break_count = lc->break_cap = 0;
+    lc->next_count = lc->next_cap = 0;
+}
 
 /* Capture tracking for closures */
 typedef struct {
@@ -236,6 +263,7 @@ typedef struct TryCtx {
     int handlers_active;        /* number of active OP_TRY_BEGIN frames on exc_stack for this try */
     StradaValue *finally_block; /* non-NULL if this try statement has a finally block */
     LoopCtx *enclosing_loop;    /* ctx->loop_ctx when this try was entered */
+    int local_restore_depth;    /* ctx->local_restore_count when this try was entered */
     struct TryCtx *parent;
 } TryCtx;
 
@@ -434,10 +462,23 @@ static int loop_in_chain(LoopCtx *chain, LoopCtx *target) {
     return 0;
 }
 
-/* Unwind all active try/finally contexts in the current function before OP_RETURN.
- * Expects the return value to already be on top of the VM stack, and leaves it there. */
+/* Unwind all active try/finally contexts and local saves in the current function
+ * before OP_RETURN. Expects return value on VM stack top, leaves it there. */
 static void emit_try_unwind_for_return(CompCtx *ctx) {
-    if (!ctx->try_ctx) return;
+    int saved_lr_count = ctx->local_restore_count;
+    char *saved_lr_ptrs[32];
+    if (saved_lr_count > 0) {
+        memcpy(saved_lr_ptrs, ctx->local_restores, (size_t)saved_lr_count * sizeof(char *));
+    }
+    int cur_lr = saved_lr_count;
+
+    if (!ctx->try_ctx) {
+        while (cur_lr > 0) {
+            emit_local_restore(ctx->chunk, saved_lr_ptrs[--cur_lr]);
+        }
+        return;
+    }
+
     int any_finally = 0;
     for (TryCtx *tc = ctx->try_ctx; tc != NULL; tc = tc->parent) {
         if (tc->finally_block) { any_finally = 1; break; }
@@ -448,37 +489,71 @@ static void emit_try_unwind_for_return(CompCtx *ctx) {
         vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
         vm_chunk_emit_u16(ctx->chunk, (uint16_t)ret_slot);
     }
+
     TryCtx *saved_try = ctx->try_ctx;
     for (TryCtx *tc = saved_try; tc != NULL; tc = tc->parent) {
+        while (cur_lr > tc->local_restore_depth) {
+            emit_local_restore(ctx->chunk, saved_lr_ptrs[--cur_lr]);
+        }
         for (int h = 0; h < tc->handlers_active; h++) {
             vm_chunk_emit(ctx->chunk, OP_TRY_END);
         }
         if (tc->finally_block) {
             ctx->try_ctx = tc->parent;
+            ctx->local_restore_count = cur_lr;
+            for (int j = cur_lr; j < saved_lr_count; j++) ctx->local_restores[j] = NULL;
             compile_block(ctx, tc->finally_block);
         }
     }
     ctx->try_ctx = saved_try;
+    ctx->local_restore_count = saved_lr_count;
+    if (saved_lr_count > 0) {
+        memcpy(ctx->local_restores, saved_lr_ptrs, (size_t)saved_lr_count * sizeof(char *));
+    }
+    while (cur_lr > 0) {
+        emit_local_restore(ctx->chunk, saved_lr_ptrs[--cur_lr]);
+    }
     if (any_finally) {
         vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
         vm_chunk_emit_u16(ctx->chunk, (uint16_t)ret_slot);
     }
 }
 
-/* Unwind active try/finally contexts nested inside `target` loop before last/next/redo. */
+/* Unwind active try/finally contexts and local saves nested inside `target` loop before last/next/redo. */
 static void emit_try_unwind_for_loop(CompCtx *ctx, LoopCtx *target) {
-    if (!ctx->try_ctx || !target) return;
-    TryCtx *saved_try = ctx->try_ctx;
-    for (TryCtx *tc = saved_try; tc != NULL && loop_in_chain(tc->enclosing_loop, target); tc = tc->parent) {
-        for (int h = 0; h < tc->handlers_active; h++) {
-            vm_chunk_emit(ctx->chunk, OP_TRY_END);
+    if (!target) return;
+    int saved_lr_count = ctx->local_restore_count;
+    char *saved_lr_ptrs[32];
+    if (saved_lr_count > 0) {
+        memcpy(saved_lr_ptrs, ctx->local_restores, (size_t)saved_lr_count * sizeof(char *));
+    }
+    int cur_lr = saved_lr_count;
+
+    if (ctx->try_ctx) {
+        TryCtx *saved_try = ctx->try_ctx;
+        for (TryCtx *tc = saved_try; tc != NULL && loop_in_chain(tc->enclosing_loop, target); tc = tc->parent) {
+            while (cur_lr > tc->local_restore_depth && cur_lr > target->local_restore_depth) {
+                emit_local_restore(ctx->chunk, saved_lr_ptrs[--cur_lr]);
+            }
+            for (int h = 0; h < tc->handlers_active; h++) {
+                vm_chunk_emit(ctx->chunk, OP_TRY_END);
+            }
+            if (tc->finally_block) {
+                ctx->try_ctx = tc->parent;
+                ctx->local_restore_count = cur_lr;
+                for (int j = cur_lr; j < saved_lr_count; j++) ctx->local_restores[j] = NULL;
+                compile_block(ctx, tc->finally_block);
+            }
         }
-        if (tc->finally_block) {
-            ctx->try_ctx = tc->parent;
-            compile_block(ctx, tc->finally_block);
+        ctx->try_ctx = saved_try;
+        ctx->local_restore_count = saved_lr_count;
+        if (saved_lr_count > 0) {
+            memcpy(ctx->local_restores, saved_lr_ptrs, (size_t)saved_lr_count * sizeof(char *));
         }
     }
-    ctx->try_ctx = saved_try;
+    while (cur_lr > target->local_restore_depth) {
+        emit_local_restore(ctx->chunk, saved_lr_ptrs[--cur_lr]);
+    }
 }
 
 /* Detect "str_literal" . expr pattern for hash concat key optimization */
@@ -730,9 +805,173 @@ static void compile_in_place_str_op(CompCtx *ctx, StradaValue *arg0, int is_chop
     }
 }
 
+typedef enum {
+    LV_NONE = 0,
+    LV_LOCAL,
+    LV_CAPTURE,
+    LV_GLOBAL,
+    LV_INDEX,
+    LV_SREF
+} VMLValueKind;
+
+typedef struct {
+    VMLValueKind kind;
+    int slot;
+    int key_slot;
+    int is_hash;
+    int depth_pushed;
+    const char *global_name;
+} VMLValueTarget;
+
+/* Prepare an lvalue target for read+writeback without re-evaluating container/index/ref side effects. */
+static VMLValueTarget compile_lvalue_prepare(CompCtx *ctx, StradaValue *target) {
+    VMLValueTarget lv = {0};
+    target = ast_deref(target);
+    if (!target || STRADA_IS_TAGGED_INT(target)) return lv;
+    int nt = (int)ast_int(target, "type");
+    if (nt == NI_VARIABLE) {
+        const char *vname = ast_str(target, "name");
+        const char *vsigil = ast_str(target, "sigil");
+        char sc = (vsigil && vsigil[0]) ? vsigil[0] : '$';
+        int slot = ctx_find_local_sigil(ctx, vname, sc);
+        if (slot >= 0) { lv.kind = LV_LOCAL; lv.slot = slot; return lv; }
+        int cap = ctx_resolve_capture(ctx, vname, sc);
+        if (cap >= 0) { lv.kind = LV_CAPTURE; lv.slot = cap; return lv; }
+        if (is_our_var(vname)) { lv.kind = LV_GLOBAL; lv.global_name = vname; return lv; }
+        return lv;
+    }
+    StradaValue *cont = NULL, *idx = NULL;
+    int is_hash = 0;
+    if (extract_cont_idx(target, &is_hash, &cont, &idx)) {
+        int d = ctx->assign_depth++;
+        char cbuf[32], kbuf[32];
+        snprintf(cbuf, sizeof(cbuf), "__lv_c%d", d);
+        snprintf(kbuf, sizeof(kbuf), "__lv_k%d", d);
+        lv.slot = ctx_get_or_add_local(ctx, cbuf, '$');
+        lv.key_slot = ctx_get_or_add_local(ctx, kbuf, '$');
+        lv.is_hash = is_hash;
+        lv.depth_pushed = 1;
+        lv.kind = LV_INDEX;
+        compile_expr(ctx, cont);
+        vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)lv.slot);
+        compile_expr(ctx, idx);
+        vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)lv.key_slot);
+        return lv;
+    }
+    if (nt == NI_DEREF_SCALAR) {
+        StradaValue *ref_node = ast_get(target, "ref");
+        if (!ref_node) ref_node = ast_get(target, "target");
+        int d = ctx->assign_depth++;
+        char rbuf[32];
+        snprintf(rbuf, sizeof(rbuf), "__lv_r%d", d);
+        lv.slot = ctx_get_or_add_local(ctx, rbuf, '$');
+        lv.depth_pushed = 1;
+        lv.kind = LV_SREF;
+        compile_expr(ctx, ref_node);
+        vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)lv.slot);
+        return lv;
+    }
+    return lv;
+}
+
+static void compile_lvalue_load(CompCtx *ctx, const VMLValueTarget *lv) {
+    switch (lv->kind) {
+    case LV_LOCAL:
+        vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)lv->slot);
+        break;
+    case LV_CAPTURE:
+        vm_chunk_emit(ctx->chunk, OP_LOAD_CAPTURE);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)lv->slot);
+        break;
+    case LV_GLOBAL: {
+        size_t gk = vm_chunk_add_str_const(ctx->chunk, lv->global_name);
+        vm_chunk_emit(ctx->chunk, OP_LOAD_GLOBAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)gk);
+        break;
+    }
+    case LV_INDEX:
+        vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)lv->slot);
+        vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)lv->key_slot);
+        vm_chunk_emit(ctx->chunk, lv->is_hash ? OP_HASH_GET : OP_ARRAY_GET);
+        break;
+    case LV_SREF:
+        vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)lv->slot);
+        vm_chunk_emit(ctx->chunk, OP_DEREF_SCALAR);
+        break;
+    default:
+        vm_chunk_emit(ctx->chunk, OP_PUSH_UNDEF);
+        break;
+    }
+}
+
+static void compile_lvalue_store_slot(CompCtx *ctx, const VMLValueTarget *lv, int val_slot, int leave_on_stack) {
+    switch (lv->kind) {
+    case LV_LOCAL:
+        vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)val_slot);
+        vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)lv->slot);
+        if (leave_on_stack) {
+            vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)lv->slot);
+        }
+        break;
+    case LV_CAPTURE:
+        vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)val_slot);
+        if (leave_on_stack) vm_chunk_emit(ctx->chunk, OP_DUP);
+        vm_chunk_emit(ctx->chunk, OP_STORE_CAPTURE);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)lv->slot);
+        break;
+    case LV_GLOBAL: {
+        size_t gk = vm_chunk_add_str_const(ctx->chunk, lv->global_name);
+        vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)val_slot);
+        if (leave_on_stack) vm_chunk_emit(ctx->chunk, OP_DUP);
+        vm_chunk_emit(ctx->chunk, OP_STORE_GLOBAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)gk);
+        break;
+    }
+    case LV_INDEX:
+        vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)lv->slot);
+        vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)lv->key_slot);
+        vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)val_slot);
+        vm_chunk_emit(ctx->chunk, lv->is_hash ? OP_HASH_SET : OP_ARRAY_SET);
+        if (leave_on_stack) {
+            vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)val_slot);
+        }
+        break;
+    case LV_SREF:
+        vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)lv->slot);
+        vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)val_slot);
+        vm_chunk_emit(ctx->chunk, OP_STORE_SREF);
+        if (!leave_on_stack) vm_chunk_emit(ctx->chunk, OP_POP);
+        break;
+    default:
+        if (leave_on_stack) vm_chunk_emit(ctx->chunk, OP_PUSH_UNDEF);
+        break;
+    }
+}
+
+static void compile_lvalue_finish(CompCtx *ctx, const VMLValueTarget *lv) {
+    if (lv->depth_pushed) ctx->assign_depth--;
+}
+
 /* Compile tr/// — pushes the result value (count, or the modified copy when
- * the /r flag is used). The subject variable is updated in place via the
- * OP_TR store_kind/store_idx operands. */
+ * the /r flag is used). The subject variable or lvalue is updated in place unless /r. */
 static void compile_tr(CompCtx *ctx, StradaValue *node) {
     StradaValue *target = ast_get(node, "target");
     target = ast_deref(target);
@@ -740,47 +979,72 @@ static void compile_tr(CompCtx *ctx, StradaValue *node) {
     const char *to = ast_str(node, "replace");
     const char *tr_flags = ast_str(node, "flags");
     if (!tr_flags) tr_flags = "";
+    int has_r = (strchr(tr_flags, 'r') != NULL);
 
-    uint8_t store_kind = 0;
-    uint16_t store_idx = 0xFFFF;
-    if (!strchr(tr_flags, 'r') && target && !STRADA_IS_TAGGED_INT(target) &&
-        (int)ast_int(target, "type") == NI_VARIABLE) {
-        const char *tname = ast_str(target, "name");
-        const char *tsigil = ast_str(target, "sigil");
-        char sc = (tsigil && tsigil[0]) ? tsigil[0] : '$';
-        int slot = ctx_find_local_sigil(ctx, tname, sc);
-        if (slot >= 0) {
-            store_kind = 1;
-            store_idx = (uint16_t)slot;
-        } else {
-            int cap = ctx_resolve_capture(ctx, tname, sc);
-            if (cap >= 0) {
-                store_kind = 2;
-                store_idx = (uint16_t)cap;
-            } else if (is_our_var(tname)) {
-                store_kind = 3;
-                store_idx = (uint16_t)vm_chunk_add_str_const(ctx->chunk, tname);
-            }
-        }
-    }
-    compile_expr(ctx, target);
     size_t from_idx = vm_chunk_add_str_const(ctx->chunk, from);
     size_t to_idx = vm_chunk_add_str_const(ctx->chunk, to);
     size_t flags_idx = vm_chunk_add_str_const(ctx->chunk, tr_flags);
+
+    if (has_r) {
+        compile_expr(ctx, target);
+        vm_chunk_emit(ctx->chunk, OP_TR);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)from_idx);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)to_idx);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)flags_idx);
+        vm_chunk_emit(ctx->chunk, 0);
+        vm_chunk_emit_u16(ctx->chunk, 0xFFFF);
+        return;
+    }
+
+    VMLValueTarget lv = compile_lvalue_prepare(ctx, target);
+    if (lv.kind == LV_LOCAL || lv.kind == LV_CAPTURE || lv.kind == LV_GLOBAL) {
+        uint8_t store_kind = (lv.kind == LV_LOCAL) ? 1 : (lv.kind == LV_CAPTURE ? 2 : 3);
+        uint16_t store_idx = (lv.kind == LV_GLOBAL)
+            ? (uint16_t)vm_chunk_add_str_const(ctx->chunk, lv.global_name)
+            : (uint16_t)lv.slot;
+        compile_lvalue_load(ctx, &lv);
+        vm_chunk_emit(ctx->chunk, OP_TR);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)from_idx);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)to_idx);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)flags_idx);
+        vm_chunk_emit(ctx->chunk, store_kind);
+        vm_chunk_emit_u16(ctx->chunk, store_idx);
+        compile_lvalue_finish(ctx, &lv);
+        return;
+    }
+    if (lv.kind == LV_INDEX || lv.kind == LV_SREF) {
+        int str_slot = ctx_add_local(ctx, "__tr_s", '$');
+        int cnt_slot = ctx_add_local(ctx, "__tr_cnt", '$');
+        compile_lvalue_load(ctx, &lv);
+        vm_chunk_emit(ctx->chunk, OP_TR);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)from_idx);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)to_idx);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)flags_idx);
+        vm_chunk_emit(ctx->chunk, 1);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)str_slot);
+        vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)cnt_slot);
+        compile_lvalue_store_slot(ctx, &lv, str_slot, 0);
+        vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)cnt_slot);
+        compile_lvalue_finish(ctx, &lv);
+        return;
+    }
+
+    compile_expr(ctx, target);
     vm_chunk_emit(ctx->chunk, OP_TR);
     vm_chunk_emit_u16(ctx->chunk, (uint16_t)from_idx);
     vm_chunk_emit_u16(ctx->chunk, (uint16_t)to_idx);
     vm_chunk_emit_u16(ctx->chunk, (uint16_t)flags_idx);
-    vm_chunk_emit(ctx->chunk, store_kind);
-    vm_chunk_emit_u16(ctx->chunk, store_idx);
+    vm_chunk_emit(ctx->chunk, 0);
+    vm_chunk_emit_u16(ctx->chunk, 0xFFFF);
 }
 
 
 /* Compile s/PAT/EXPR/e[g]: an inline find/eval/append loop. The parser has
  * already parsed the replacement source into node->{eval_expr}; each match
  * sets the VM capture state, then the expression is evaluated inline and
- * appended. Pushes the rebuilt string AND stores it back into the target
- * variable slot/global. Value left on stack = the new string. */
+ * appended. Pushes the rebuilt string AND stores it back into the target lvalue. */
 static int compile_regex_subst_e(CompCtx *ctx, StradaValue *node) {
     StradaValue *target = ast_get(node, "target");
     target = ast_deref(target);
@@ -790,15 +1054,8 @@ static int compile_regex_subst_e(CompCtx *ctx, StradaValue *node) {
     const char *flags = ast_str(node, "flags");
     int is_global = flags && strchr(flags, 'g') != NULL;
 
-    if (!target || STRADA_IS_TAGGED_INT(target) ||
-        (int)ast_int(target, "type") != NI_VARIABLE) return 0;
-    const char *vname = ast_str(target, "name");
-    const char *vsigil = ast_str(target, "sigil");
-    char sc = (vsigil && vsigil[0]) ? vsigil[0] : '$';
-    int slot = ctx_find_local_sigil(ctx, vname, sc);
-    int cap = (slot < 0) ? ctx_resolve_capture(ctx, vname, sc) : -1;
-    int use_global = (slot < 0 && cap < 0 && is_our_var(vname)) ? 1 : 0;
-    if (slot < 0 && cap < 0 && !use_global) return 0;
+    VMLValueTarget lv = compile_lvalue_prepare(ctx, target);
+    if (lv.kind == LV_NONE) return 0;
 
     size_t pat_idx = add_pattern_const(ctx, pattern, flags);
     int w = ctx_add_local(ctx, "__se_w", '$');   /* subject */
@@ -807,23 +1064,19 @@ static int compile_regex_subst_e(CompCtx *ctx, StradaValue *node) {
     int ms = ctx_add_local(ctx, "__se_s", '$');  /* match start */
     int me = ctx_add_local(ctx, "__se_e", '$');  /* match end */
     int wl = ctx_add_local(ctx, "__se_l", '$');  /* byte length of subject */
-    int le = ctx_add_local(ctx, "__se_le", '$'); /* end of previous non-empty match */
 
 #define E8(op)   vm_chunk_emit(ctx->chunk, (op))
 #define E16(v)   vm_chunk_emit_u16(ctx->chunk, (uint16_t)(v))
 #define LD(sl)   do { E8(OP_LOAD_LOCAL); E16(sl); } while (0)
 #define ST(sl)   do { E8(OP_STORE_LOCAL); E16(sl); } while (0)
 
-    /* W = target; O = ""; P = 0; WL = bytes(W); LE = -1 */
-    if (slot >= 0) LD(slot);
-    else if (cap >= 0) { E8(OP_LOAD_CAPTURE); E16(cap); }
-    else { size_t gk = vm_chunk_add_str_const(ctx->chunk, vname); E8(OP_LOAD_GLOBAL); E16(gk); }
+    /* W = target; O = ""; P = 0; WL = bytes(W) */
+    compile_lvalue_load(ctx, &lv);
     ST(w);
     LD(w); E8(OP_BYTES); ST(wl);
     size_t empty_idx = vm_chunk_add_str_const(ctx->chunk, "");
     E8(OP_PUSH_STR); E16(empty_idx); ST(o);
     E8(OP_PUSH_INT); vm_chunk_emit_i64(ctx->chunk, 0); ST(pp);
-    E8(OP_PUSH_INT); vm_chunk_emit_i64(ctx->chunk, -1); ST(le);
 
     size_t loop_top = ctx->chunk->code_len;
     /* (S, E) = find(W, P) */
@@ -838,23 +1091,6 @@ static int compile_regex_subst_e(CompCtx *ctx, StradaValue *node) {
     size_t after_tail_patches[4];
     int atp_count = 0;
 
-    if (is_global) {
-        /* Skip duplicate zero-width match right at end of previous non-empty match */
-        LD(ms); LD(me); E8(OP_EQ);
-        E8(OP_JMP_IF_FALSE); size_t not_skip_empty = emit_patch_u16(ctx);
-        LD(ms); LD(le); E8(OP_EQ);
-        E8(OP_JMP_IF_FALSE); size_t not_at_le = emit_patch_u16(ctx);
-        LD(me); LD(wl); E8(OP_GE);
-        E8(OP_JMP_IF_TRUE); after_tail_patches[atp_count++] = emit_patch_u16(ctx);
-        LD(o); LD(w); LD(me); E8(OP_PUSH_INT); vm_chunk_emit_i64(ctx->chunk, 1); E8(OP_SUBSTR); E8(OP_CONCAT); ST(o);
-        LD(me); E8(OP_PUSH_INT); vm_chunk_emit_i64(ctx->chunk, 1); E8(OP_ADD); ST(pp);
-        E8(OP_PUSH_INT); vm_chunk_emit_i64(ctx->chunk, -1); ST(le);
-        E8(OP_JMP); size_t back0 = emit_patch_u16(ctx);
-        patch_u16(ctx, back0, (uint16_t)loop_top);
-        patch_u16(ctx, not_at_le, (uint16_t)ctx->chunk->code_len);
-        patch_u16(ctx, not_skip_empty, (uint16_t)ctx->chunk->code_len);
-    }
-
     /* O = O . <eval_expr> (captures are live) */
     LD(o); compile_expr(ctx, eval_expr); E8(OP_CONCAT); ST(o);
 
@@ -866,12 +1102,10 @@ static int compile_regex_subst_e(CompCtx *ctx, StradaValue *node) {
         E8(OP_JMP_IF_TRUE); after_tail_patches[atp_count++] = emit_patch_u16(ctx);
         LD(o); LD(w); LD(me); E8(OP_PUSH_INT); vm_chunk_emit_i64(ctx->chunk, 1); E8(OP_SUBSTR); E8(OP_CONCAT); ST(o);
         LD(me); E8(OP_PUSH_INT); vm_chunk_emit_i64(ctx->chunk, 1); E8(OP_ADD); ST(pp);
-        E8(OP_PUSH_INT); vm_chunk_emit_i64(ctx->chunk, -1); ST(le);
         E8(OP_JMP); size_t back1 = emit_patch_u16(ctx);
         patch_u16(ctx, back1, (uint16_t)loop_top);
         patch_u16(ctx, non_empty_patch, (uint16_t)ctx->chunk->code_len);
         LD(me); ST(pp);
-        LD(me); ST(le);
         E8(OP_JMP); size_t back2 = emit_patch_u16(ctx);
         patch_u16(ctx, back2, (uint16_t)loop_top);
     } else {
@@ -885,10 +1119,8 @@ static int compile_regex_subst_e(CompCtx *ctx, StradaValue *node) {
         patch_u16(ctx, after_tail_patches[pi], (uint16_t)ctx->chunk->code_len);
     }
     /* store back + leave value */
-    LD(o);
-    if (slot >= 0) { ST(slot); LD(slot); }
-    else if (cap >= 0) { E8(OP_DUP); E8(OP_STORE_CAPTURE); E16(cap); }
-    else { size_t gk = vm_chunk_add_str_const(ctx->chunk, vname); E8(OP_DUP); E8(OP_STORE_GLOBAL); E16(gk); }
+    compile_lvalue_store_slot(ctx, &lv, o, 1);
+    compile_lvalue_finish(ctx, &lv);
     return 1;
 
 #undef E8
@@ -1997,7 +2229,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         }
 
         /* Built-in: splice() */
-        if (strcmp(name, "splice") == 0 && argc >= 2) {
+        if (strcmp(name, "splice") == 0 && argc >= 1 && argc <= 255) {
             for (int i = 0; i < argc; i++) compile_expr(ctx, ast_arr_get(args, i));
             vm_chunk_emit(ctx->chunk, OP_BUILTIN);
             vm_chunk_emit_u16(ctx->chunk, BUILTIN_ARRAY_SPLICE);
@@ -2016,11 +2248,8 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
 
         /* Built-in: sprintf() */
         if (strcmp(name, "sprintf") == 0) {
-            /* OP_SPRINTF's VM handler pops into a fixed VMValue args[32];
-             * reject (rather than silently emit an out-of-range argc) so the
-             * bytecode can never drive that buffer past its bound. */
-            if (argc > 32) {
-                fprintf(stderr, "VM compile error: sprintf() with %d arguments exceeds the bytecode VM limit of 32\n", argc);
+            if (argc > 255) {
+                fprintf(stderr, "VM compile error: sprintf() with %d arguments exceeds the bytecode VM limit of 255\n", argc);
                 exit(1);
             }
             for (int i = 0; i < argc; i++) {
@@ -2416,7 +2645,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         if (strcmp(name, "is_refto") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_IS_REFTO); vm_chunk_emit(ctx->chunk, 1); break; }
         if (strcmp(name, "dumper_str") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_DUMPER_STR); vm_chunk_emit(ctx->chunk, 1); break; }
         if (strcmp(name, "nsort") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_NSORT); vm_chunk_emit(ctx->chunk, 1); break; }
-        if (strcmp(name, "cast_int") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_CAST_INT); vm_chunk_emit(ctx->chunk, 1); break; }
+        if ((strcmp(name, "cast_int") == 0 || strcmp(name, "int") == 0) && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_CAST_INT); vm_chunk_emit(ctx->chunk, 1); break; }
         if (strcmp(name, "cast_num") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_CAST_NUM); vm_chunk_emit(ctx->chunk, 1); break; }
         if (strcmp(name, "cast_str") == 0 && argc == 1) { compile_expr(ctx, ast_arr_get(args, 0)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_CAST_STR); vm_chunk_emit(ctx->chunk, 1); break; }
         if (strcmp(name, "byte_index") == 0 && (argc == 2 || argc == 3)) { for (int i = 0; i < argc; i++) compile_expr(ctx, ast_arr_get(args, i)); vm_chunk_emit(ctx->chunk, OP_BUILTIN); vm_chunk_emit_u16(ctx->chunk, BUILTIN_BYTE_INDEX); vm_chunk_emit(ctx->chunk, (uint8_t)argc); break; }
@@ -2968,14 +3197,6 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         int is_inc = (strcmp(inc_op, "++") == 0);
         int otype = (operand && !STRADA_IS_TAGGED_INT(operand)) ? (int)ast_int(operand, "type") : 0;
 
-        if (otype == NI_DEREF_SCALAR) {
-            StradaValue *inner = ast_deref(ast_get(operand, "ref"));
-            if (inner && !STRADA_IS_TAGGED_INT(inner) && (int)ast_int(inner, "type") == NI_VARIABLE) {
-                operand = inner;
-                otype = NI_VARIABLE;
-            }
-        }
-
         StradaValue *cont = NULL, *idx = NULL;
         int is_hash = 0;
 
@@ -3072,6 +3293,46 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
             vm_chunk_emit_u16(ctx->chunk, (uint16_t)(is_pre ? n_slot : o_slot));
             ctx->assign_depth--;
+        } else if (otype == NI_DEREF_SCALAR) {
+            StradaValue *ref_node = ast_get(operand, "ref");
+            if (!ref_node) ref_node = ast_get(operand, "target");
+            int d = ctx->assign_depth++;
+            char rbuf[32], obuf[32], nbuf[32];
+            snprintf(rbuf, sizeof(rbuf), "__inc_r%d", d);
+            snprintf(obuf, sizeof(obuf), "__inc_o%d", d);
+            snprintf(nbuf, sizeof(nbuf), "__inc_n%d", d);
+            int r_slot = ctx_get_or_add_local(ctx, rbuf, '$');
+            int o_slot = ctx_get_or_add_local(ctx, obuf, '$');
+            int n_slot = ctx_get_or_add_local(ctx, nbuf, '$');
+
+            compile_expr(ctx, ref_node);
+            vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)r_slot);
+
+            vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)r_slot);
+            vm_chunk_emit(ctx->chunk, OP_DEREF_SCALAR);
+            vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)o_slot);
+
+            vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)o_slot);
+            vm_chunk_emit(ctx->chunk, OP_PUSH_INT);
+            vm_chunk_emit_i64(ctx->chunk, 1);
+            vm_chunk_emit(ctx->chunk, is_inc ? OP_ADD : OP_SUB);
+            vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)n_slot);
+
+            vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)r_slot);
+            vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)n_slot);
+            vm_chunk_emit(ctx->chunk, OP_STORE_SREF);
+            vm_chunk_emit(ctx->chunk, OP_POP);
+
+            vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)(is_pre ? n_slot : o_slot));
+            ctx->assign_depth--;
         } else {
             vm_chunk_emit(ctx->chunk, OP_PUSH_UNDEF);
         }
@@ -3095,66 +3356,28 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         /* s///e: evaluated replacement (parser supplies eval_expr) */
         if (strchr(flags, 'e') && compile_regex_subst_e(ctx, node)) break;
 
-        if (target && !STRADA_IS_TAGGED_INT(target) &&
-            (int)ast_int(target, "type") == NI_VARIABLE) {
-            const char *vname = ast_str(target, "name");
-            const char *vsigil = ast_str(target, "sigil");
-            char sc = (vsigil && vsigil[0]) ? vsigil[0] : '$';
-            int slot = ctx_find_local_sigil(ctx, vname, sc);
-            int cap = (slot < 0) ? ctx_resolve_capture(ctx, vname, sc) : -1;
-            int is_global_var = (slot < 0 && cap < 0 && is_our_var(vname)) ? 1 : 0;
+        VMLValueTarget lv = compile_lvalue_prepare(ctx, target);
+        if (lv.kind != LV_NONE) {
+            compile_lvalue_load(ctx, &lv);
 
-            if (slot >= 0 || cap >= 0 || is_global_var) {
-                /* Load the target string */
-                if (slot >= 0) {
-                    vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
-                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
-                } else if (cap >= 0) {
-                    vm_chunk_emit(ctx->chunk, OP_LOAD_CAPTURE);
-                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)cap);
-                } else {
-                    size_t gk = vm_chunk_add_str_const(ctx->chunk, vname);
-                    vm_chunk_emit(ctx->chunk, OP_LOAD_GLOBAL);
-                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)gk);
-                }
+            size_t pat_idx = add_pattern_const(ctx, pattern, flags);
+            vm_chunk_emit(ctx->chunk, OP_PUSH_STR);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)pat_idx);
 
-                size_t pat_idx = add_pattern_const(ctx, pattern, flags);
-                vm_chunk_emit(ctx->chunk, OP_PUSH_STR);
-                vm_chunk_emit_u16(ctx->chunk, (uint16_t)pat_idx);
+            size_t repl_idx = vm_chunk_add_str_const(ctx->chunk, replacement);
+            vm_chunk_emit(ctx->chunk, OP_PUSH_STR);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)repl_idx);
 
-                size_t repl_idx = vm_chunk_add_str_const(ctx->chunk, replacement);
-                vm_chunk_emit(ctx->chunk, OP_PUSH_STR);
-                vm_chunk_emit_u16(ctx->chunk, (uint16_t)repl_idx);
+            vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+            vm_chunk_emit_u16(ctx->chunk, is_global ? BUILTIN_REPLACE_ALL : BUILTIN_REPLACE);
+            vm_chunk_emit(ctx->chunk, 3);
 
-                /* Use BUILTIN_REPLACE for /g, OP_STR_REPLACE for non-/g */
-                if (is_global) {
-                    vm_chunk_emit(ctx->chunk, OP_BUILTIN);
-                    vm_chunk_emit_u16(ctx->chunk, BUILTIN_REPLACE_ALL);
-                    vm_chunk_emit(ctx->chunk, 3);
-                } else {
-                    vm_chunk_emit(ctx->chunk, OP_BUILTIN);
-                    vm_chunk_emit_u16(ctx->chunk, BUILTIN_REPLACE);
-                    vm_chunk_emit(ctx->chunk, 3);
-                }
-
-                /* Store result back */
-                if (slot >= 0) {
-                    vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
-                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
-                    vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
-                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
-                } else if (cap >= 0) {
-                    vm_chunk_emit(ctx->chunk, OP_DUP);
-                    vm_chunk_emit(ctx->chunk, OP_STORE_CAPTURE);
-                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)cap);
-                } else {
-                    size_t gk = vm_chunk_add_str_const(ctx->chunk, vname);
-                    vm_chunk_emit(ctx->chunk, OP_DUP);
-                    vm_chunk_emit(ctx->chunk, OP_STORE_GLOBAL);
-                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)gk);
-                }
-                break;
-            }
+            int val_slot = ctx_add_local(ctx, "__rs_v", '$');
+            vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)val_slot);
+            compile_lvalue_store_slot(ctx, &lv, val_slot, 1);
+            compile_lvalue_finish(ctx, &lv);
+            break;
         }
         vm_chunk_emit(ctx->chunk, OP_PUSH_UNDEF);
         break;
@@ -3477,14 +3700,14 @@ static void compile_block_expr(CompCtx *ctx, StradaValue *body, int fallback_slo
             StradaValue *elsif_conds = ast_get(last_stmt, "elsif_conditions");
             StradaValue *elsif_blocks = ast_get(last_stmt, "elsif_blocks");
             int elsif_count = (int)ast_int(last_stmt, "elsif_count");
-            size_t end_patches[32];
+            size_t *end_patches = malloc((size_t)(elsif_count + 2) * sizeof(size_t));
             int end_patch_count = 0;
 
             vm_chunk_emit(ctx->chunk, OP_JMP);
             end_patches[end_patch_count++] = emit_patch_u16(ctx);
             patch_u16(ctx, else_patch, (uint16_t)ctx->chunk->code_len);
 
-            for (int i = 0; i < elsif_count && i < 30; i++) {
+            for (int i = 0; i < elsif_count; i++) {
                 compile_expr(ctx, ast_arr_get(elsif_conds, i));
                 vm_chunk_emit(ctx->chunk, OP_JMP_IF_FALSE);
                 size_t next_patch = emit_patch_u16(ctx);
@@ -3502,6 +3725,7 @@ static void compile_block_expr(CompCtx *ctx, StradaValue *body, int fallback_slo
             for (int i = 0; i < end_patch_count; i++) {
                 patch_u16(ctx, end_patches[i], (uint16_t)ctx->chunk->code_len);
             }
+            free(end_patches);
             return;
         }
         compile_stmt(ctx, last_stmt);
@@ -3921,12 +4145,8 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         } else {
             vm_chunk_emit(ctx->chunk, OP_PUSH_UNDEF);
         }
-        /* Unwind any enclosing try/finally blocks before returning */
+        /* Unwind any enclosing try/finally blocks and local saves in LIFO order */
         emit_try_unwind_for_return(ctx);
-        /* Emit local restores before return */
-        for (int i = ctx->local_restore_count - 1; i >= 0; i--) {
-            emit_local_restore(ctx->chunk, ctx->local_restores[i]);
-        }
         vm_chunk_emit(ctx->chunk, OP_RETURN);
         break;
     }
@@ -3942,7 +4162,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         StradaValue *elsif_blocks = ast_get(node, "elsif_blocks");
         int elsif_count = (int)ast_int(node, "elsif_count");
 
-        size_t end_patches[32];
+        size_t *end_patches = malloc((size_t)(elsif_count + 2) * sizeof(size_t));
         int end_patch_count = 0;
 
         vm_chunk_emit(ctx->chunk, OP_JMP);
@@ -3950,7 +4170,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
 
         patch_u16(ctx, else_patch, (uint16_t)ctx->chunk->code_len);
 
-        for (int i = 0; i < elsif_count && i < 30; i++) {
+        for (int i = 0; i < elsif_count; i++) {
             compile_expr(ctx, ast_arr_get(elsif_conds, i));
             vm_chunk_emit(ctx->chunk, OP_JMP_IF_FALSE);
             size_t next_patch = emit_patch_u16(ctx);
@@ -3968,6 +4188,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         for (int i = 0; i < end_patch_count; i++) {
             patch_u16(ctx, end_patches[i], (uint16_t)ctx->chunk->code_len);
         }
+        free(end_patches);
         break;
     }
 
@@ -4006,6 +4227,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
             patch_u16(ctx, lctx.break_patches[i], (uint16_t)ctx->chunk->code_len);
         }
 
+        loop_free_patches(&lctx);
         ctx->loop_ctx = lctx.parent;
         break;
     }
@@ -4014,6 +4236,8 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         LoopCtx lctx = {0};
         lctx.parent = ctx->loop_ctx;
         lctx.local_restore_depth = ctx->local_restore_count;
+        const char *dlabel = ast_str(node, "label");
+        if (dlabel[0]) lctx.label = dlabel;
         ctx->loop_ctx = &lctx;
 
         size_t loop_top = ctx->chunk->code_len;
@@ -4034,6 +4258,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
             patch_u16(ctx, lctx.break_patches[i], (uint16_t)ctx->chunk->code_len);
         }
 
+        loop_free_patches(&lctx);
         ctx->loop_ctx = lctx.parent;
         break;
     }
@@ -4088,6 +4313,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
             patch_u16(ctx, lctx.break_patches[i], (uint16_t)ctx->chunk->code_len);
         }
 
+        loop_free_patches(&lctx);
         ctx->loop_ctx = lctx.parent;
         break;
     }
@@ -4165,6 +4391,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
             patch_u16(ctx, lctx.break_patches[i], (uint16_t)ctx->chunk->code_len);
         }
 
+        loop_free_patches(&lctx);
         ctx->loop_ctx = lctx.parent;
         break;
     }
@@ -4179,15 +4406,8 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         }
         if (target) {
             emit_try_unwind_for_loop(ctx, target);
-            for (int _li = ctx->local_restore_count - 1; _li >= target->local_restore_depth; _li--) {
-                emit_local_restore(ctx->chunk, ctx->local_restores[_li]);
-            }
             vm_chunk_emit(ctx->chunk, OP_JMP);
-            if (target->break_count < 64) {
-                target->break_patches[target->break_count++] = emit_patch_u16(ctx);
-            } else {
-                emit_patch_u16(ctx);
-            }
+            loop_add_break_patch(target, emit_patch_u16(ctx));
         }
         break;
     }
@@ -4202,28 +4422,23 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         }
         if (target) {
             emit_try_unwind_for_loop(ctx, target);
-            for (int _li = ctx->local_restore_count - 1; _li >= target->local_restore_depth; _li--) {
-                emit_local_restore(ctx->chunk, ctx->local_restores[_li]);
-            }
             vm_chunk_emit(ctx->chunk, OP_JMP);
-            /* Forward-patch to continue_target (set after body compilation) */
-            if (target->next_count < 64) {
-                target->next_patches[target->next_count++] = emit_patch_u16(ctx);
-            } else {
-                emit_patch_u16(ctx);
-            }
+            loop_add_next_patch(target, emit_patch_u16(ctx));
         }
         break;
     }
 
     case NI_REDO: {
-        if (ctx->loop_ctx) {
-            emit_try_unwind_for_loop(ctx, ctx->loop_ctx);
-            for (int _li = ctx->local_restore_count - 1; _li >= ctx->loop_ctx->local_restore_depth; _li--) {
-                emit_local_restore(ctx->chunk, ctx->local_restores[_li]);
-            }
+        const char *label = ast_str(node, "label");
+        LoopCtx *target = ctx->loop_ctx;
+        if (label[0]) {
+            while (target && (!target->label || strcmp(target->label, label) != 0))
+                target = target->parent;
+        }
+        if (target) {
+            emit_try_unwind_for_loop(ctx, target);
             vm_chunk_emit(ctx->chunk, OP_JMP);
-            vm_chunk_emit_u16(ctx->chunk, (uint16_t)ctx->loop_ctx->redo_target);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)target->redo_target);
         }
         break;
     }
@@ -4234,22 +4449,11 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         StradaValue *stmt = ast_get(node, "statement");
 
         if (stmt && !STRADA_IS_TAGGED_INT(stmt)) {
-            /* Set a pending label that the next loop will pick up */
-            /* We compile the statement normally — the while/for handler
-             * will check ctx->loop_ctx->label after creating the loop context */
-            /* Simple approach: set label on the loop context after creation.
-             * We do this by temporarily storing the label and having the
-             * loop handler check for it. For simplicity, just compile the
-             * inner statement and if it creates a loop context, set the label. */
-            /* Actually, the loop context is created inside compile_stmt for
-             * WHILE/FOR. We can't set the label from here.
-             * Solution: pre-create a loop context with the label, and have
-             * the loop handler re-use it if present. */
-
             /* Simpler: detect labeled loops and set label directly */
             StradaValue *inner = ast_deref(stmt);
             int inner_type = inner ? (int)ast_int(inner, "type") : 0;
-            if (inner_type == NI_WHILE_STMT || inner_type == NI_FOR_STMT || inner_type == NI_FOREACH_STMT) {
+            if (inner_type == NI_WHILE_STMT || inner_type == NI_FOR_STMT ||
+                inner_type == NI_FOREACH_STMT || inner_type == NI_DO_WHILE_STMT) {
                 /* Create a "pending label" by wrapping in a loop context */
                 LoopCtx labeled_ctx = {0};
                 labeled_ctx.parent = ctx->loop_ctx;
@@ -4270,6 +4474,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
                     patch_u16(ctx, labeled_ctx.next_patches[i], (uint16_t)labeled_ctx.redo_target);
                 }
 
+                loop_free_patches(&labeled_ctx);
                 ctx->loop_ctx = labeled_ctx.parent;
             } else {
                 compile_stmt(ctx, stmt);
@@ -4334,6 +4539,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         TryCtx tctx = {0};
         tctx.finally_block = has_finally ? finally_block : NULL;
         tctx.enclosing_loop = ctx->loop_ctx;
+        tctx.local_restore_depth = ctx->local_restore_count;
         tctx.parent = ctx->try_ctx;
 
         size_t finally_rethrow_patch = 0;
@@ -4368,7 +4574,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         vm_chunk_emit(ctx->chunk, OP_JMP);
         size_t normal_end_patch = emit_patch_u16(ctx);
 
-        size_t catch_end_patches[64];
+        size_t *catch_end_patches = (catch_count > 0) ? malloc((size_t)catch_count * sizeof(size_t)) : NULL;
         int catch_end_count = 0;
 
         if (catch_count > 0) {
@@ -4403,10 +4609,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
                         vm_chunk_emit(ctx->chunk, OP_TRY_END);
                     }
                     vm_chunk_emit(ctx->chunk, OP_JMP);
-                    if (catch_end_count < 64)
-                        catch_end_patches[catch_end_count++] = emit_patch_u16(ctx);
-                    else
-                        emit_patch_u16(ctx);
+                    catch_end_patches[catch_end_count++] = emit_patch_u16(ctx);
 
                     patch_u16(ctx, next_catch, (uint16_t)ctx->chunk->code_len);
                 } else {
@@ -4421,10 +4624,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
                         vm_chunk_emit(ctx->chunk, OP_TRY_END);
                     }
                     vm_chunk_emit(ctx->chunk, OP_JMP);
-                    if (catch_end_count < 64)
-                        catch_end_patches[catch_end_count++] = emit_patch_u16(ctx);
-                    else
-                        emit_patch_u16(ctx);
+                    catch_end_patches[catch_end_count++] = emit_patch_u16(ctx);
 
                     had_catch_all = 1;
                     break;
@@ -4457,6 +4657,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         for (int i = 0; i < catch_end_count; i++) {
             patch_u16(ctx, catch_end_patches[i], (uint16_t)ctx->chunk->code_len);
         }
+        free(catch_end_patches);
         if (has_finally) {
             compile_block(ctx, finally_block);
         }
@@ -4550,60 +4751,27 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
             break;
         }
 
-        if (target && !STRADA_IS_TAGGED_INT(target) &&
-            (int)ast_int(target, "type") == NI_VARIABLE) {
-            const char *vname = ast_str(target, "name");
-            const char *vsigil = ast_str(target, "sigil");
-            char sc = (vsigil && vsigil[0]) ? vsigil[0] : '$';
-            int slot = ctx_find_local_sigil(ctx, vname, sc);
-            int cap = (slot < 0) ? ctx_resolve_capture(ctx, vname, sc) : -1;
-            int is_gvar = (slot < 0 && cap < 0 && is_our_var(vname)) ? 1 : 0;
+        VMLValueTarget lv = compile_lvalue_prepare(ctx, target);
+        if (lv.kind != LV_NONE) {
+            compile_lvalue_load(ctx, &lv);
 
-            if (slot >= 0 || cap >= 0 || is_gvar) {
-                /* Load the target string */
-                if (slot >= 0) {
-                    vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
-                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
-                } else if (cap >= 0) {
-                    vm_chunk_emit(ctx->chunk, OP_LOAD_CAPTURE);
-                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)cap);
-                } else {
-                    size_t gk = vm_chunk_add_str_const(ctx->chunk, vname);
-                    vm_chunk_emit(ctx->chunk, OP_LOAD_GLOBAL);
-                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)gk);
-                }
+            size_t pat_idx = add_pattern_const(ctx, pattern, flags);
+            vm_chunk_emit(ctx->chunk, OP_PUSH_STR);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)pat_idx);
 
-                size_t pat_idx = add_pattern_const(ctx, pattern, flags);
-                vm_chunk_emit(ctx->chunk, OP_PUSH_STR);
-                vm_chunk_emit_u16(ctx->chunk, (uint16_t)pat_idx);
+            size_t repl_idx = vm_chunk_add_str_const(ctx->chunk, replacement);
+            vm_chunk_emit(ctx->chunk, OP_PUSH_STR);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)repl_idx);
 
-                size_t repl_idx = vm_chunk_add_str_const(ctx->chunk, replacement);
-                vm_chunk_emit(ctx->chunk, OP_PUSH_STR);
-                vm_chunk_emit_u16(ctx->chunk, (uint16_t)repl_idx);
+            vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+            vm_chunk_emit_u16(ctx->chunk, is_global_flag ? BUILTIN_REPLACE_ALL : BUILTIN_REPLACE);
+            vm_chunk_emit(ctx->chunk, 3);
 
-                if (is_global_flag) {
-                    vm_chunk_emit(ctx->chunk, OP_BUILTIN);
-                    vm_chunk_emit_u16(ctx->chunk, BUILTIN_REPLACE_ALL);
-                    vm_chunk_emit(ctx->chunk, 3);
-                } else {
-                    vm_chunk_emit(ctx->chunk, OP_BUILTIN);
-                    vm_chunk_emit_u16(ctx->chunk, BUILTIN_REPLACE);
-                    vm_chunk_emit(ctx->chunk, 3);
-                }
-
-                /* Store result back */
-                if (slot >= 0) {
-                    vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
-                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
-                } else if (cap >= 0) {
-                    vm_chunk_emit(ctx->chunk, OP_STORE_CAPTURE);
-                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)cap);
-                } else {
-                    size_t gk = vm_chunk_add_str_const(ctx->chunk, vname);
-                    vm_chunk_emit(ctx->chunk, OP_STORE_GLOBAL);
-                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)gk);
-                }
-            }
+            int val_slot = ctx_add_local(ctx, "__rs_v", '$');
+            vm_chunk_emit(ctx->chunk, OP_STORE_LOCAL);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)val_slot);
+            compile_lvalue_store_slot(ctx, &lv, val_slot, 0);
+            compile_lvalue_finish(ctx, &lv);
         }
         break;
     }
