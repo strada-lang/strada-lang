@@ -441,9 +441,13 @@ func compile(str $source, str $filename, int $debug_info, int $show_timing, int 
         my int $pdi = 0;
         while ($pdi < size(@{$pp_defines})) {
             my str $dn = $pp_defines->[$pdi];
+            my str $dv = "1";
             my int $deq = index($dn, "=");
-            if ($deq > 0) { $dn = substr($dn, 0, $deq); }
-            if (length($dn) > 0) { $dh{$dn} = 1; }
+            if ($deq > 0) {
+                $dv = substr($dn, $deq + 1, length($dn) - $deq - 1);
+                $dn = substr($dn, 0, $deq);
+            }
+            if (length($dn) > 0) { $dh{$dn} = $dv; }
             $pdi = $pdi + 1;
         }
         $cli_defs = \%dh;

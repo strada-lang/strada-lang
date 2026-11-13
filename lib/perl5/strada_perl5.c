@@ -187,7 +187,8 @@ char* strada_perl5_call(StradaValue *sub_sv, StradaValue *args_sv) {
                     XPUSHs(sv_2mortal(newSVnv(arg->value.nv)));
                 } else {
                     char *str = strada_to_str(arg);     /* malloc'd — must free */
-                    size_t slen = (arg->type == STRADA_STR) ? (size_t)strada_str_len(arg) : (str ? strlen(str) : 0);
+                    size_t slen = (arg->type == STRADA_STR) ? STRADA_STR_BYTELEN(arg) : (str ? strlen(str) : 0);
+                    if (slen == 0 && str && str[0] != '\0') slen = strlen(str);
                     XPUSHs(sv_2mortal(newSVpvn(str ? str : "", slen)));
                     free(str);
                 }
@@ -201,7 +202,8 @@ char* strada_perl5_call(StradaValue *sub_sv, StradaValue *args_sv) {
                 XPUSHs(sv_2mortal(newSVnv(args_sv->value.nv)));
             } else {
                 char *str = strada_to_str(args_sv);   /* malloc'd — must free */
-                size_t slen = (args_sv->type == STRADA_STR) ? (size_t)strada_str_len(args_sv) : (str ? strlen(str) : 0);
+                size_t slen = (args_sv->type == STRADA_STR) ? STRADA_STR_BYTELEN(args_sv) : (str ? strlen(str) : 0);
+                if (slen == 0 && str && str[0] != '\0') slen = strlen(str);
                 XPUSHs(sv_2mortal(newSVpvn(str ? str : "", slen)));
                 free(str);
             }
@@ -273,7 +275,8 @@ StradaValue* strada_perl5_call_array(StradaValue *sub_sv, StradaValue *args_sv) 
                 XPUSHs(sv_2mortal(newSVnv(arg->value.nv)));
             } else {
                 char *str = strada_to_str(arg);     /* malloc'd — must free */
-                size_t slen = (arg->type == STRADA_STR) ? (size_t)strada_str_len(arg) : (str ? strlen(str) : 0);
+                size_t slen = (arg->type == STRADA_STR) ? STRADA_STR_BYTELEN(arg) : (str ? strlen(str) : 0);
+                if (slen == 0 && str && str[0] != '\0') slen = strlen(str);
                 XPUSHs(sv_2mortal(newSVpvn(str ? str : "", slen)));
                 free(str);
             }

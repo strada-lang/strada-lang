@@ -1,0 +1,117 @@
+#!/usr/bin/env strada
+# Cycle 4 Audit regression tests: Runtime/GC fixes (RT-02..RT-07)
+
+use lib "lib";
+
+package R4ThrowToStr;
+func new(str $val) scalar {
+    my hash %self = ("val" => $val);
+    return bless(\%self, "R4ThrowToStr");
+}
+func to_str(scalar $self, scalar $other, int $rev) str {
+    die("ov_str_boom");
+}
+use overload '""' => "to_str";
+
+package R4ThrowDot;
+func new(str $val) scalar {
+    my hash %self = ("val" => $val);
+    return bless(\%self, "R4ThrowDot");
+}
+func concat_op(scalar $self, scalar $other, int $rev) str {
+    die("ov_concat_boom");
+}
+use overload "." => "concat_op";
+
+package main;
+
+func rt_prematch() str {
+    my str $r = "";
+    __C__ { strada_decref(r); r = strada_prematch(); }
+    return $r;
+}
+func rt_postmatch() str {
+    my str $r = "";
+    __C__ { strada_decref(r); r = strada_postmatch(); }
+    return $r;
+}
+
+func check(int $cond, str $label) int {
+    if (!$cond) {
+        say("FAIL: " . $label);
+        return 1;
+    }
+    return 0;
+}
+
+func main() int {
+    my int $fail = 0;
+
+    # RT-03: substitution capture preservation + named captures (%+) + pre/postmatch
+    my str $seed = "alpha-42-omega";
+    $seed =~ m/(42)/;
+    $fail = $fail + check($1 eq "42", "RT-03 initial capture \$1");
+
+    my str $s1 = "foo foo";
+    $s1 =~ s/f[o]{2}/bar/;
+    my array @c0 = captures();
+    $fail = $fail + check($s1 eq "bar foo", "RT-03 no-capture subst result");
+    $fail = $fail + check($1 eq "42", "RT-03 preserve \$1 across no-capture subst");
+    $fail = $fail + check($c0[0] eq "foo", "RT-03 \$& updated by no-capture subst");
+
+    my str $s2 = "pre_KEY=VAL_post";
+    $s2 =~ s/(?<k>[A-Z]+)=(?<v>[A-Z]+)/X/;
+    my hash %nc = named_captures();
+    $fail = $fail + check($s2 eq "pre_X_post", "RT-03 named-capture subst result");
+    $fail = $fail + check($nc{"k"} eq "KEY" && $nc{"v"} eq "VAL", "RT-03 named_captures populated");
+    $fail = $fail + check(rt_prematch() eq "pre_" && rt_postmatch() eq "_post", "RT-03 pre/postmatch updated");
+    $fail = $fail + check($1 eq "KEY" && $2 eq "VAL", "RT-03 \$1/\$2 updated on capturing subst");
+
+    # RT-04: sprintf %*vX with UTF-8 multi-byte separator
+    my str $vout = sprintf("%*v02X", "→", "AB");
+    $fail = $fail + check($vout eq "41→42", "RT-04 sprintf %*v with UTF-8 sep (got=" . $vout . ")");
+
+    # RT-05: UTF-8 rindex (2-arg and 3-arg) + empty needle
+    my str $uh = "héllo héllo";
+    utf8::upgrade($uh);
+    $fail = $fail + check(rindex($uh, "é") == 7, "RT-05 UTF-8 2-arg rindex");
+    $fail = $fail + check(rindex($uh, "é", 5) == 1, "RT-05 UTF-8 3-arg rindex before 5");
+    $fail = $fail + check(rindex($uh, "") == 11, "RT-05 UTF-8 empty needle returns char len");
+    $fail = $fail + check(rindex($uh, "", 3) == 3, "RT-05 UTF-8 empty needle with max_pos");
+    $fail = $fail + check(rindex($uh, "h", -1) == -1, "RT-05 negative max_pos returns -1");
+
+    # RT-06: split preserves UTF-8 flag on split pieces
+    my str $us = "α→β→γ";
+    utf8::upgrade($us);
+    my array @sp1 = split("→", $us);
+    $fail = $fail + check(size(\@sp1) == 3 && $sp1[1] eq "β", "RT-06 UTF-8 literal split values");
+    $fail = $fail + check(utf8::is_utf8($sp1[0]) == 1 && utf8::is_utf8($sp1[2]) == 1, "RT-06 UTF-8 flag preserved on literal split");
+    my array @sp2 = split(/→+/, $us);
+    $fail = $fail + check(size(\@sp2) == 3 && utf8::is_utf8($sp2[1]) == 1, "RT-06 UTF-8 flag preserved on regex split");
+    my array @sp3 = split("", "αβ");
+    $fail = $fail + check(size(\@sp3) == 2 && $sp3[0] eq "α" && $sp3[1] eq "β", "RT-06 UTF-8 empty pattern split");
+
+    # RT-07 + CC-02: exception unwinding inside concat_sv, concat_cstr_sv, concat_sv_cstr, concat_inplace, overloaded '.'
+    my scalar $bad = R4ThrowToStr::new("x");
+    my scalar $bad2 = R4ThrowDot::new("y");
+    my str $err = "";
+    try { my str $t = "pfx" . $bad; } catch ($e) { $err = "" . $e; }
+    $fail = $fail + check(index($err, "ov_str_boom") >= 0, "RT-07 concat_cstr_sv throw caught");
+    $err = "";
+    try { my str $t = $bad . "sfx"; } catch ($e) { $err = "" . $e; }
+    $fail = $fail + check(index($err, "ov_str_boom") >= 0, "RT-07 concat_sv_cstr throw caught");
+    $err = "";
+    try { my scalar $a = "lhs"; my str $t = $a . $bad; } catch ($e) { $err = "" . $e; }
+    $fail = $fail + check(index($err, "ov_str_boom") >= 0, "RT-07 concat_sv throw caught");
+    $err = "";
+    try { my str $acc = "start"; $acc .= $bad; } catch ($e) { $err = "" . $e; }
+    $fail = $fail + check(index($err, "ov_str_boom") >= 0, "RT-07 concat_inplace throw caught");
+    $err = "";
+    try { my str $t = $bad2 . "z"; } catch ($e) { $err = "" . $e; }
+    $fail = $fail + check(index($err, "ov_concat_boom") >= 0, "CC-02 overloaded concat throw caught");
+
+    if ($fail == 0) {
+        say("R4_RUNTIME_OK");
+    }
+    return $fail;
+}

@@ -310,8 +310,9 @@ func call(str $sub_name, str $arg) str {
             char *sub_str = strada_to_str(sub_name);
             char *arg_str = strada_to_str(arg);
             size_t arg_len = (arg && !STRADA_IS_TAGGED_INT(arg) && arg->type == STRADA_STR)
-                ? (size_t)strada_str_len(arg)
+                ? STRADA_STR_BYTELEN(arg)
                 : (arg_str ? strlen(arg_str) : 0);
+            if (arg_len == 0 && arg_str && arg_str[0] != '\0') arg_len = strlen(arg_str);
 
             dSP;
             ENTER;
@@ -446,8 +447,9 @@ func set_var(str $name, str $value) void {
             char *orig_name = strada_to_str(name);
             char *value_str = strada_to_str(value);
             size_t vlen = (value && !STRADA_IS_TAGGED_INT(value) && value->type == STRADA_STR)
-                ? (size_t)strada_str_len(value)
+                ? STRADA_STR_BYTELEN(value)
                 : (value_str ? strlen(value_str) : 0);
+            if (vlen == 0 && value_str && value_str[0] != '\0') vlen = strlen(value_str);
             const char *name_str = orig_name;
 
             /* Skip the sigil if present */

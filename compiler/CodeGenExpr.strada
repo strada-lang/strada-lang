@@ -4507,7 +4507,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 my str $delta = "1";
                 if ($op eq "--") { $delta = "-1"; }
                 if ($is_prefix == 1) {
-                    emit($cg, "(" . $iv_ref . " = strada_new_int_il((int64_t)((uint64_t)strada_to_int(" . $iv_ref . ") + (uint64_t)(" . $delta . "))))");
+                    emit($cg, "({ StradaValue *__pi_old = " . $iv_ref . "; StradaValue *__pi_new = strada_new_int_il((int64_t)((uint64_t)strada_to_int(__pi_old) + (uint64_t)(" . $delta . "))); strada_decref(__pi_old); " . $iv_ref . " = __pi_new; strada_incref(__pi_new); __pi_new; })");
                 } else {
                     emit($cg, "({ StradaValue *__pi_old = " . $iv_ref . "; " . $iv_ref . " = strada_new_int_il((int64_t)((uint64_t)strada_to_int(__pi_old) + (uint64_t)(" . $delta . "))); __pi_old; })");
                 }
@@ -4563,26 +4563,14 @@ func gen_expression(scalar $cg, scalar $expr) void {
             emit($cg, "StradaValue *__ii_old = __ii_av ? strada_array_get(__ii_av, __ii_idx) : NULL; ");
             emit($cg, "StradaValue *__ii_new = strada_inc_value(__ii_old, " . $delta . "); ");
             emit($cg, "if (__ii_old) strada_incref(__ii_old); ");
-            emit($cg, "if (__ii_av) { strada_array_set(__ii_av, __ii_idx, __ii_new); strada_decref(__ii_new); } ");
-            # array_set increfs the new value (refcount 1 → 2) and decrefs
-            # the previous slot. Without the explicit decref(__ii_new)
-            # here, the new value was left at refcount 2 — only the array
-            # owns it after we exit this expression, so we drop our hold.
-            # (The old `else strada_decref(__ii_new);` branch handles the
-            # NULL-av error path.)
-            emit($cg, "else strada_decref(__ii_new); ");
+            emit($cg, "if (__ii_av) { strada_array_set(__ii_av, __ii_idx, __ii_new); } ");
             if ($inc_arr_cleanup == 1) {
                 emit($cg, "strada_decref(__ii_src); ");
-                # Source decref is safe here: the array_set already
-                # transferred ownership of __ii_new into the array, and
-                # the existing incref(__ii_old) above ensures __ii_old
-                # survives a potential array-free when the source is the
-                # last holder.
             }
             if ($is_prefix == 1) {
                 emit($cg, "if (__ii_old) strada_decref(__ii_old); __ii_new; })");
             } else {
-                emit($cg, "__ii_old ? __ii_old : strada_new_undef(); })");
+                emit($cg, "strada_decref(__ii_new); __ii_old ? __ii_old : strada_new_undef(); })");
             }
         } elsif ($operand_type == NODE_HASH_ACCESS()) {
             # $h{k}++ / $h{k}-- / ++$h{k} / --$h{k}
@@ -4607,8 +4595,8 @@ func gen_expression(scalar $cg, scalar $expr) void {
             # NULL slot (tied/non-hash) falls back to the fetch/store path so
             # tie FETCH/STORE magic still fires.
             emit($cg, "; StradaValue **__ih_slot = strada_hv_fetch_lvalue_sv_key(__ih_h, __ih_kv, 1); StradaValue *__ih_old; StradaValue *__ih_new; ");
-            emit($cg, "if (__ih_slot) { __ih_old = *__ih_slot; __ih_new = strada_inc_value(__ih_old, " . $delta . "); *__ih_slot = __ih_new; } ");
-            emit($cg, "else { char *__ih_k = strada_to_str_ss(__ih_kv); __ih_old = strada_hv_fetch_owned(__ih_h, __ih_k); __ih_new = strada_inc_value(__ih_old, " . $delta . "); strada_hv_store(__ih_h, __ih_k, __ih_new); strada_decref(__ih_new); strada_cstr_free(__ih_k); } ");
+            emit($cg, "if (__ih_slot) { __ih_old = *__ih_slot; __ih_new = strada_inc_value(__ih_old, " . $delta . "); strada_incref(__ih_new); *__ih_slot = __ih_new; } ");
+            emit($cg, "else { char *__ih_k = strada_to_str_ss(__ih_kv); __ih_old = strada_hv_fetch_owned(__ih_h, __ih_k); __ih_new = strada_inc_value(__ih_old, " . $delta . "); strada_hv_store(__ih_h, __ih_k, __ih_new); strada_cstr_free(__ih_k); } ");
             if ($key_needs_cleanup == 1) {
                 emit($cg, "strada_decref(__ih_kv); ");
             }
@@ -4616,13 +4604,11 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 emit($cg, "strada_decref(__ih_h); ");
             }
             if ($is_prefix == 1) {
-                # Prefix returns the NEW value (owned: incref over the slot's
-                # ref); release the old value the slot no longer holds.
-                emit($cg, "strada_decref(__ih_old); strada_incref(__ih_new); __ih_new; })");
+                # Prefix returns our owned ref on __ih_new and releases __ih_old.
+                emit($cg, "strada_decref(__ih_old); __ih_new; })");
             } else {
-                # Postfix returns the OLD value; the slot's ownership of it
-                # transferred to the result when we overwrote the slot.
-                emit($cg, "__ih_old; })");
+                # Postfix returns __ih_old and releases our ref on __ih_new.
+                emit($cg, "strada_decref(__ih_new); __ih_old; })");
             }
         } elsif ($operand_type == NODE_DEREF_HASH()) {
             # $ref->{k}++ / $h{a}->{b}++ — same shape as NODE_HASH_ACCESS
@@ -4643,14 +4629,14 @@ func gen_expression(scalar $cg, scalar $expr) void {
             # Single-probe lvalue RMW (see NODE_HASH_ACCESS above for the
             # rationale); NULL slot (tied/non-hash) falls back to fetch/store.
             emit($cg, "; StradaValue **__ih_slot = strada_hv_fetch_lvalue_sv_key(__ih_h, __ih_kv, 1); StradaValue *__ih_old; StradaValue *__ih_new; ");
-            emit($cg, "if (__ih_slot) { __ih_old = *__ih_slot; __ih_new = strada_inc_value(__ih_old, " . $delta . "); *__ih_slot = __ih_new; } ");
-            emit($cg, "else { char *__ih_k = strada_to_str_ss(__ih_kv); __ih_old = strada_hv_fetch_owned(__ih_h, __ih_k); __ih_new = strada_inc_value(__ih_old, " . $delta . "); strada_hv_store(__ih_h, __ih_k, __ih_new); strada_decref(__ih_new); strada_cstr_free(__ih_k); } ");
+            emit($cg, "if (__ih_slot) { __ih_old = *__ih_slot; __ih_new = strada_inc_value(__ih_old, " . $delta . "); strada_incref(__ih_new); *__ih_slot = __ih_new; } ");
+            emit($cg, "else { char *__ih_k = strada_to_str_ss(__ih_kv); __ih_old = strada_hv_fetch_owned(__ih_h, __ih_k); __ih_new = strada_inc_value(__ih_old, " . $delta . "); strada_hv_store(__ih_h, __ih_k, __ih_new); strada_cstr_free(__ih_k); } ");
             if ($dhi_key_cleanup == 1) { emit($cg, "strada_decref(__ih_kv); "); }
             if ($dhi_ref_cleanup == 1) { emit($cg, "strada_decref(__ih_h); "); }
             if ($is_prefix == 1) {
-                emit($cg, "strada_decref(__ih_old); strada_incref(__ih_new); __ih_new; })");
+                emit($cg, "strada_decref(__ih_old); __ih_new; })");
             } else {
-                emit($cg, "__ih_old; })");
+                emit($cg, "strada_decref(__ih_new); __ih_old; })");
             }
         } elsif ($operand_type == NODE_DEREF_SCALAR()) {
             my int $id_ref_cl = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $operand->{"ref"}) == 1;

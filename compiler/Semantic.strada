@@ -1553,6 +1553,8 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
                 if (length($cfp) > 0) {
                     $imp_pkg = $cfp;
                 }
+            } elsif (length("" . $ctx->{"cur_pkg"}) > 0) {
+                $imp_pkg = "" . $ctx->{"cur_pkg"};
             }
             my str $qw_target = "" . $ctx->{"qw_imports"}->{$imp_pkg . "::" . $name};
             if (length($qw_target) > 0) {

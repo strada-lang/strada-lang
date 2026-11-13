@@ -1,0 +1,95 @@
+#!/usr/bin/env strada
+# Valgrind leak regression suite for Cycle 4 Audit (Runtime/GC + Compiler/CodeGen + DBI)
+
+use lib "lib";
+use DBI;
+
+package LeakR4ThrowToStr;
+func new() scalar {
+    my hash %self = ("s" => "v");
+    return bless(\%self, "LeakR4ThrowToStr");
+}
+func to_str(scalar $self, scalar $other, int $rev) str {
+    die("r4_str_err");
+}
+use overload '""' => "to_str";
+
+package LeakR4ThrowDot;
+func new() scalar {
+    my hash %self = ("s" => "v");
+    return bless(\%self, "LeakR4ThrowDot");
+}
+func concat_op(scalar $self, scalar $other, int $rev) str {
+    die("r4_cat_err");
+}
+use overload "." => "concat_op";
+
+package LeakR4Tie;
+func TIEHASH(str $cls) scalar {
+    my hash %self = ("d" => {"k" => 0});
+    return bless(\%self, $cls);
+}
+func FETCH(scalar $self, str $k) scalar { return $self->{"d"}->{$k}; }
+func STORE(scalar $self, str $k, scalar $v) void { $self->{"d"}->{$k} = $v; }
+
+package main;
+
+func main() int {
+    my scalar $dbh = DBI::connect("dbi:SQLite::memory:", "", "");
+    my hash %tied = ();
+    tie(%tied, "LeakR4Tie");
+    my scalar $ov1 = LeakR4ThrowToStr::new();
+    my scalar $ov2 = LeakR4ThrowDot::new();
+
+    my int $i = 0;
+    while ($i < 40) {
+        # RT-03: substitution captures + named captures
+        my str $t = "k=v_" . $i;
+        $t =~ m/(v_\d+)/;
+        my str $s1 = "foo";
+        $s1 =~ s/f[o]{2}/bar/;
+        my str $s2 = "k=val";
+        $s2 =~ s/(?<kk>\w+)=(?<vv>\w+)/$1:$2/;
+        my hash %nc = named_captures();
+        if ($nc{"kk"} ne "k") { return 1; }
+
+        # RT-04: sprintf %*vX with UTF-8 separator
+        my str $vs = sprintf("%*v02X", "→", "ABC");
+        if (length($vs) == 0) { return 2; }
+
+        # RT-05 + RT-06: UTF-8 rindex + split
+        my str $us = "hé→hé→hé";
+        utf8::upgrade($us);
+        if (rindex($us, "é", 5) < 0) { return 3; }
+        my array @parts = split("→", $us);
+        if (size(\@parts) != 3 || utf8::is_utf8($parts[1]) != 1) { return 4; }
+
+        # RT-07 + CC-02: throwing overload concats across all concat entry points
+        try { my str $x = "a" . $ov1; } catch ($e) {}
+        try { my str $x = $ov1 . "b"; } catch ($e) {}
+        try { my str $a = "lhs"; my str $x = $a . $ov1; } catch ($e) {}
+        try { my str $acc = "start"; $acc .= $ov1; } catch ($e) {}
+        try { my str $x = $ov2 . "c"; } catch ($e) {}
+
+        # CC-01 + CC-03: tied/hash/array ++/-- + free() in expr context
+        my int $x = (++$tied{"k"}) + ($tied{"k"}++);
+        my scalar $hr = {"a" => $i};
+        my int $y = (++$hr->{"a"}) + 1;
+        if ($x < 0 || $y < 0) { return 5; }
+        my scalar $fv = "tmp_" . $i;
+        my scalar $fr = sys::free(\$fv);
+        if (defined($fr)) { return 6; }
+
+        # SL-02: DBI::quote_identifier UTF-8
+        my str $uid = "u_" . $i . "_é";
+        utf8::upgrade($uid);
+        my str $qi = DBI::quote_identifier($dbh, $uid);
+        if (utf8::is_utf8($qi) != 1) { return 7; }
+
+        $i = $i + 1;
+    }
+
+    DBI::disconnect($dbh);
+    say("AUDIT_R4_LEAKS_OK");
+    return 0;
+}

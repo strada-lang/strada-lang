@@ -2130,6 +2130,21 @@ func assign_to(scalar $interp, scalar $target, scalar $value, scalar $env) void 
     if ($ttype == NI::DEREF_HASH) {
         my scalar $ref_val = eval_node($interp, $target->{"ref"}, $env);
         my str $key = eval_node($interp, $target->{"key"}, $env);
+        if (ref($ref_val) eq "HASH" && exists($ref_val, "__tied__")) {
+            my scalar $tie_obj = $ref_val->{"__tied__"};
+            my str $tie_pkg = $tie_obj->{"__class__"};
+            if (length($tie_pkg) > 0) {
+                my scalar $store_fn = interp_resolve_method($interp, $tie_pkg, "STORE");
+                if (defined($store_fn)) {
+                    my array @store_args = ();
+                    push(@store_args, $tie_obj);
+                    push(@store_args, $key);
+                    push(@store_args, $value);
+                    call_user_func($interp, $store_fn, \@store_args);
+                    return;
+                }
+            }
+        }
         $ref_val->{$key} = $value;
         return;
     }
@@ -2460,6 +2475,147 @@ func get_obj_class(scalar $obj) str {
         return $obj->{"__class__"};
     }
     return "";
+}
+
+func interp_resolve_obj_pkg(scalar $obj) str {
+    my str $pkg = get_obj_class($obj);
+    if (length($pkg) == 0) {
+        my str $ref_type = ref($obj);
+        if ($ref_type ne "HASH" && $ref_type ne "ARRAY" && $ref_type ne "" && $ref_type ne "0") {
+            $pkg = $ref_type;
+        }
+    }
+    if (length($pkg) == 0 && ref($obj) eq "" && defined($obj) && length("" . $obj) > 0) {
+        $pkg = "" . $obj;
+    }
+    return $pkg;
+}
+
+func interp_dispatch_method(scalar $interp, scalar $obj, str $pkg, str $method, scalar $args, int $allow_hash_field, str $err_prefix) scalar {
+    my scalar $func_info = undef;
+    if (length($pkg) > 0) {
+        $func_info = interp_resolve_method($interp, $pkg, $method);
+    }
+    if (!defined($func_info) && $pkg eq "main") {
+        $func_info = interp_get_func($interp, $method);
+    }
+
+    if (!defined($func_info) && length($pkg) > 0) {
+        my str $native_name = $pkg . "_" . $method;
+        if (exists($interp->{"native_funcs"}, $native_name)) {
+            my scalar $nf = $interp->{"native_funcs"}->{$native_name};
+            return call_native($interp, $nf, $args);
+        }
+    }
+
+    if (!defined($func_info) && length($pkg) > 0) {
+        my scalar $al_func = interp_find_autoload($interp, $pkg);
+        if (defined($al_func)) {
+            my array @al_args = ();
+            push(@al_args, $obj);
+            push(@al_args, $method);
+            my int $ali = 1;
+            while ($ali < size($args)) {
+                push(@al_args, $args->[$ali]);
+                $ali = $ali + 1;
+            }
+            return call_user_func($interp, $al_func, \@al_args);
+        }
+    }
+
+    if (defined($func_info)) {
+        my int $mod_count = size($interp->{"method_modifiers"});
+        if ($mod_count == 0) {
+            return call_user_func($interp, $func_info, $args);
+        }
+
+        my scalar $mods = $interp->{"method_modifiers"};
+        my array @mod_classes = ($pkg);
+        if (exists($interp->{"mro"}, $pkg)) {
+            my scalar $mro_list = $interp->{"mro"}->{$pkg};
+            my int $mri = 0;
+            while ($mri < size($mro_list)) {
+                push(@mod_classes, $mro_list->[$mri]);
+                $mri = $mri + 1;
+            }
+        }
+
+        my int $ci = 0;
+        while ($ci < size(\@mod_classes)) {
+            my str $mcls = $mod_classes[$ci];
+            my int $mi = 0;
+            while ($mi < $mod_count) {
+                my scalar $mod = $mods->[$mi];
+                if ($mod->{"mod_type"} eq "before" && $mod->{"method_name"} eq $method && $mod->{"package"} eq $mcls) {
+                    my scalar $mod_fi = $mod->{"func_info"};
+                    if (defined($mod_fi)) {
+                        call_user_func($interp, $mod_fi, $args);
+                    }
+                }
+                $mi = $mi + 1;
+            }
+            $ci = $ci + 1;
+        }
+
+        my int $ran_around = 0;
+        my scalar $result = undef;
+        $ci = 0;
+        while ($ci < size(\@mod_classes) && $ran_around == 0) {
+            my str $mcls = $mod_classes[$ci];
+            my int $mi = 0;
+            while ($mi < $mod_count && $ran_around == 0) {
+                my scalar $mod = $mods->[$mi];
+                if ($mod->{"mod_type"} eq "around" && $mod->{"method_name"} eq $method && $mod->{"package"} eq $mcls) {
+                    my scalar $mod_fi = $mod->{"func_info"};
+                    if (defined($mod_fi)) {
+                        my hash %orig = ();
+                        $orig{"__orig_func__"} = $func_info;
+                        my array @around_args = ();
+                        push(@around_args, \%orig);
+                        push(@around_args, $args->[0]);
+                        my int $aai = 1;
+                        while ($aai < size($args)) {
+                            push(@around_args, $args->[$aai]);
+                            $aai = $aai + 1;
+                        }
+                        $result = call_user_func($interp, $mod_fi, \@around_args);
+                        $ran_around = 1;
+                    }
+                }
+                $mi = $mi + 1;
+            }
+            $ci = $ci + 1;
+        }
+
+        if ($ran_around == 0) {
+            $result = call_user_func($interp, $func_info, $args);
+        }
+
+        $ci = 0;
+        while ($ci < size(\@mod_classes)) {
+            my str $mcls = $mod_classes[$ci];
+            my int $mi = 0;
+            while ($mi < $mod_count) {
+                my scalar $mod = $mods->[$mi];
+                if ($mod->{"mod_type"} eq "after" && $mod->{"method_name"} eq $method && $mod->{"package"} eq $mcls) {
+                    my scalar $mod_fi = $mod->{"func_info"};
+                    if (defined($mod_fi)) {
+                        call_user_func($interp, $mod_fi, $args);
+                    }
+                }
+                $mi = $mi + 1;
+            }
+            $ci = $ci + 1;
+        }
+
+        return $result;
+    }
+
+    if ($allow_hash_field == 1 && ref($obj) eq "HASH" && exists($obj, $method)) {
+        return $obj->{$method};
+    }
+
+    die($err_prefix . $method . " on " . (length($pkg) > 0 ? $pkg : "unblessed reference"));
 }
 
 func check_overload_walk(scalar $interp, str $recv_pkg, str $cur_pkg, str $op, scalar $visited) scalar {
@@ -2938,6 +3094,9 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         return index($args->[0], $args->[1], $args->[2]);
     }
     if ($bid == BI::RINDEX) {
+        if ($argc >= 3) {
+            return rindex($args->[0], $args->[1], $args->[2]);
+        }
         return rindex($args->[0], $args->[1]);
     }
     if ($bid == BI::JOIN) {
@@ -3401,10 +3560,10 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         return \@sorted;
     }
     if ($bid == BI::DUMPER_STR) {
-        # Return string representation using dumper
-        my scalar $v = $args->[0];
-        if (!defined($v)) { return "undef"; }
-        return "" . $v;
+        if ($argc >= 1) {
+            return dumper_str($args->[0]);
+        }
+        return "undef";
     }
     if ($bid == BI::STRADA_NEW_UNDEF) {
         return undef;
@@ -3513,31 +3672,24 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         return \%h;
     }
     if ($bid == BI::UNIVERSAL_ISA) {
+        if ($argc < 2) { return 0; }
         my scalar $obj = $args->[0];
         my str $target = $args->[1];
-        my str $pkg = get_obj_class($obj);
-        if (length($pkg) == 0) {
-            my str $rt = ref($obj);
-            if ($rt ne "HASH" && $rt ne "ARRAY" && $rt ne "" && $rt ne "0") {
-                $pkg = $rt;
-            }
-        }
+        my str $pkg = interp_resolve_obj_pkg($obj);
         if (length($pkg) > 0) {
             return interp_isa($interp, $pkg, $target) ? 1 : 0;
         }
         return 0;
     }
     if ($bid == BI::UNIVERSAL_CAN) {
+        if ($argc < 2) { return 0; }
         my scalar $obj = $args->[0];
         my str $method_name = $args->[1];
-        my str $pkg = get_obj_class($obj);
-        if (length($pkg) == 0) {
-            my str $rt = ref($obj);
-            if ($rt ne "HASH" && $rt ne "ARRAY" && $rt ne "" && $rt ne "0") {
-                $pkg = $rt;
-            }
-        }
+        my str $pkg = interp_resolve_obj_pkg($obj);
         if (length($pkg) > 0) {
+            if ($method_name eq "isa" || $method_name eq "can") {
+                return 1;
+            }
             my scalar $fi = interp_resolve_method($interp, $pkg, $method_name);
             return defined($fi) ? 1 : 0;
         }
@@ -3546,15 +3698,10 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
 
     # ---- Additional bare builtins ----
     if ($bid == BI::ISA) {
+        if ($argc < 2) { return 0; }
         my scalar $obj = $args->[0];
         my str $target = $args->[1];
-        my str $pkg = get_obj_class($obj);
-        if (length($pkg) == 0) {
-            my str $rt = ref($obj);
-            if ($rt ne "HASH" && $rt ne "ARRAY" && $rt ne "" && $rt ne "0") {
-                $pkg = $rt;
-            }
-        }
+        my str $pkg = interp_resolve_obj_pkg($obj);
         if (length($pkg) > 0) {
             return interp_isa($interp, $pkg, $target) ? 1 : 0;
         }
@@ -3600,8 +3747,11 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
         if ($argc >= 2) {
             my scalar $obj = $args->[0];
             my str $method_name = $args->[1];
-            my str $pkg = get_obj_class($obj);
+            my str $pkg = interp_resolve_obj_pkg($obj);
             if (length($pkg) > 0) {
+                if ($method_name eq "isa" || $method_name eq "can") {
+                    return 1;
+                }
                 my scalar $found = interp_resolve_method($interp, $pkg, $method_name);
                 return defined($found) ? 1 : 0;
             }
@@ -6439,18 +6589,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
         }
 
         # Get object's class
-        my str $pkg = get_obj_class($obj);
-        # Also check for C runtime blessing (from compiled .so objects)
-        if (length($pkg) == 0) {
-            my str $ref_type = ref($obj);
-            if ($ref_type ne "HASH" && $ref_type ne "ARRAY" && $ref_type ne "" && $ref_type ne "0") {
-                $pkg = $ref_type;
-            }
-        }
-        # Support "Pkg"->method(...) class method calls on string package names
-        if (length($pkg) == 0 && ref($obj) eq "" && defined($obj) && length("" . $obj) > 0) {
-            $pkg = "" . $obj;
-        }
+        my str $pkg = interp_resolve_obj_pkg($obj);
 
         # Handle isa() special method
         if ($method eq "isa") {
@@ -6465,6 +6604,9 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
         if ($method eq "can") {
             if (length($pkg) > 0 && $argc >= 1) {
                 my str $target_method = $args[1];
+                if ($target_method eq "isa" || $target_method eq "can") {
+                    return 1;
+                }
                 my scalar $found = interp_resolve_method($interp, $pkg, $target_method);
                 return defined($found) ? 1 : 0;
             }
@@ -6690,139 +6832,7 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
             # sub/neg/abs/etc. - fall through to user-defined functions
         }
 
-        # Resolve method through inheritance chain
-        my scalar $func_info = undef;
-        if (length($pkg) > 0) {
-            $func_info = interp_resolve_method($interp, $pkg, $method);
-        }
-        if (!defined($func_info) && $pkg eq "main") {
-            $func_info = interp_get_func($interp, $method);
-        }
-
-        # Try native functions (import_lib) as fallback
-        if (!defined($func_info) && length($pkg) > 0) {
-            my str $native_name = $pkg . "_" . $method;
-            if (exists($interp->{"native_funcs"}, $native_name)) {
-                my scalar $nf = $interp->{"native_funcs"}->{$native_name};
-                return call_native($interp, $nf, \@args);
-            }
-        }
-
-        # Try AUTOLOAD as fallback (walk inheritance chain)
-        if (!defined($func_info) && length($pkg) > 0) {
-            my scalar $al_func = interp_find_autoload($interp, $pkg);
-            if (defined($al_func)) {
-                # AUTOLOAD receives method name as first additional arg
-                my array @al_args = ();
-                push(@al_args, $obj);
-                push(@al_args, $method);
-                my int $ali = 1;
-                while ($ali < size(\@args)) {
-                    push(@al_args, $args[$ali]);
-                    $ali = $ali + 1;
-                }
-                return call_user_func($interp, $al_func, \@al_args);
-            }
-        }
-
-        if (defined($func_info)) {
-            # Check for before/after modifiers
-            my int $mod_count = size($interp->{"method_modifiers"});
-
-            # Fast path: no modifiers (common case), skip all modifier loops
-            if ($mod_count == 0) {
-                return call_user_func($interp, $func_info, \@args);
-            }
-
-            my scalar $mods = $interp->{"method_modifiers"};
-
-            # Build class search order (most-derived first) across MRO
-            my array @mod_classes = ($pkg);
-            if (exists($interp->{"mro"}, $pkg)) {
-                my scalar $mro_list = $interp->{"mro"}->{$pkg};
-                my int $mri = 0;
-                while ($mri < size($mro_list)) {
-                    push(@mod_classes, $mro_list->[$mri]);
-                    $mri = $mri + 1;
-                }
-            }
-
-            # Execute before modifiers (across MRO, most-derived first)
-            my int $ci = 0;
-            while ($ci < size(\@mod_classes)) {
-                my str $mcls = $mod_classes[$ci];
-                my int $mi = 0;
-                while ($mi < $mod_count) {
-                    my scalar $mod = $mods->[$mi];
-                    if ($mod->{"mod_type"} eq "before" && $mod->{"method_name"} eq $method && $mod->{"package"} eq $mcls) {
-                        my scalar $mod_fi = $mod->{"func_info"};
-                        if (defined($mod_fi)) {
-                            call_user_func($interp, $mod_fi, \@args);
-                        }
-                    }
-                    $mi = $mi + 1;
-                }
-                $ci = $ci + 1;
-            }
-
-            # Execute around modifier (first found walking MRO most-derived first; passes ($orig, $self, @args))
-            my int $ran_around = 0;
-            my scalar $result = undef;
-            $ci = 0;
-            while ($ci < size(\@mod_classes) && $ran_around == 0) {
-                my str $mcls = $mod_classes[$ci];
-                my int $mi = 0;
-                while ($mi < $mod_count && $ran_around == 0) {
-                    my scalar $mod = $mods->[$mi];
-                    if ($mod->{"mod_type"} eq "around" && $mod->{"method_name"} eq $method && $mod->{"package"} eq $mcls) {
-                        my scalar $mod_fi = $mod->{"func_info"};
-                        if (defined($mod_fi)) {
-                            my hash %orig = ();
-                            $orig{"__orig_func__"} = $func_info;
-                            my array @around_args = ();
-                            push(@around_args, \%orig);
-                            push(@around_args, $args[0]);
-                            my int $aai = 1;
-                            while ($aai < size(\@args)) {
-                                push(@around_args, $args[$aai]);
-                                $aai = $aai + 1;
-                            }
-                            $result = call_user_func($interp, $mod_fi, \@around_args);
-                            $ran_around = 1;
-                        }
-                    }
-                    $mi = $mi + 1;
-                }
-                $ci = $ci + 1;
-            }
-
-            # Call the actual method if no around modifier handled it
-            if ($ran_around == 0) {
-                $result = call_user_func($interp, $func_info, \@args);
-            }
-
-            # Execute after modifiers (across MRO)
-            $ci = 0;
-            while ($ci < size(\@mod_classes)) {
-                my str $mcls = $mod_classes[$ci];
-                my int $mi = 0;
-                while ($mi < $mod_count) {
-                    my scalar $mod = $mods->[$mi];
-                    if ($mod->{"mod_type"} eq "after" && $mod->{"method_name"} eq $method && $mod->{"package"} eq $mcls) {
-                        my scalar $mod_fi = $mod->{"func_info"};
-                        if (defined($mod_fi)) {
-                            call_user_func($interp, $mod_fi, \@args);
-                        }
-                    }
-                    $mi = $mi + 1;
-                }
-                $ci = $ci + 1;
-            }
-
-            return $result;
-        }
-
-        die("Undefined method: " . $method . " on " . (length($pkg) > 0 ? $pkg : "unblessed reference"));
+        return interp_dispatch_method($interp, $obj, $pkg, $method, \@args, 0, "Undefined method: ");
     }
 
     # --- Array Subscript ---
@@ -6860,6 +6870,19 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
     if ($type == NI::DEREF_HASH) {
         my scalar $ref_val = eval_node($interp, $node->{"ref"}, $env);
         my str $key = eval_node($interp, $node->{"key"}, $env);
+        if (ref($ref_val) eq "HASH" && exists($ref_val, "__tied__")) {
+            my scalar $tie_obj = $ref_val->{"__tied__"};
+            my str $tie_pkg = $tie_obj->{"__class__"};
+            if (length($tie_pkg) > 0) {
+                my scalar $fetch_fn = interp_resolve_method($interp, $tie_pkg, "FETCH");
+                if (defined($fetch_fn)) {
+                    my array @fetch_args = ();
+                    push(@fetch_args, $tie_obj);
+                    push(@fetch_args, $key);
+                    return call_user_func($interp, $fetch_fn, \@fetch_args);
+                }
+            }
+        }
         return $ref_val->{$key};
     }
 
@@ -7101,29 +7124,10 @@ func eval_node(scalar $interp, scalar $node, scalar $env) scalar {
     if ($type == NI::FIELD_ACCESS) {
         my scalar $obj = eval_node($interp, $node->{"object"}, $env);
         my str $field = $node->{"field"};
-
-        my str $pkg = get_obj_class($obj);
-
-        # Try as method call with no args
-        my scalar $func_info = undef;
-        if (length($pkg) > 0) {
-            $func_info = interp_resolve_method($interp, $pkg, $field);
-        }
-        if (!defined($func_info)) {
-            $func_info = interp_get_func($interp, $field);
-        }
-        if (defined($func_info)) {
-            my array @args = ();
-            push(@args, $obj);
-            return call_user_func($interp, $func_info, \@args);
-        }
-
-        # Fallback: try hash access
-        if (ref($obj) eq "HASH" && exists($obj, $field)) {
-            return $obj->{$field};
-        }
-
-        die("Undefined field/method: " . $field);
+        my str $pkg = interp_resolve_obj_pkg($obj);
+        my array @args = ();
+        push(@args, $obj);
+        return interp_dispatch_method($interp, $obj, $pkg, $field, \@args, 1, "Undefined field/method: ");
     }
 
     # --- Extern Func (skip in interpreter) ---

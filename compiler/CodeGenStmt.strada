@@ -3245,6 +3245,7 @@ func gen_function(scalar $cg, scalar $fn) void {
         if ($global_count > 0) {
             emit($cg, "    /* Initialize global variables */\n");
             my scalar $globals = $cg->{"globals"};
+            my str $saved_ginit_pkg = "" . $cg->{"current_fn_package"};
             my int $g = 0;
             while ($g < $global_count) {
                 my scalar $gvar = $globals->[$g];
@@ -3259,6 +3260,10 @@ func gen_function(scalar $cg, scalar $fn) void {
                     $g = $g + 1;
                     next;
                 }
+
+                my str $gvar_pkg = "" . $gvar->{"package"};
+                if (length($gvar_pkg) == 0) { $gvar_pkg = "main"; }
+                $cg->{"current_fn_package"} = $gvar_pkg;
 
                 # Handle our declarations - use global registry
                 if ($gvar_type == NODE_OUR_DECL()) {
@@ -3331,6 +3336,7 @@ func gen_function(scalar $cg, scalar $fn) void {
                 emit($cg, ";\n");
                 $g = $g + 1;
             }
+            $cg->{"current_fn_package"} = $saved_ginit_pkg;
             emit($cg, "\n");
         }
 
@@ -6170,6 +6176,7 @@ func gen_global_constructor(scalar $cg) void {
     # Initialize globals
     if ($global_count > 0) {
         my scalar $globals = $cg->{"globals"};
+        my str $saved_gctor_pkg = "" . $cg->{"current_fn_package"};
         my int $g = 0;
         while ($g < $global_count) {
             my scalar $gvar = $globals->[$g];
@@ -6185,6 +6192,10 @@ func gen_global_constructor(scalar $cg) void {
                 $g = $g + 1;
                 next;
             }
+
+            my str $gctor_pkg = "" . $gvar->{"package"};
+            if (length($gctor_pkg) == 0) { $gctor_pkg = "main"; }
+            $cg->{"current_fn_package"} = $gctor_pkg;
 
             # Handle our declarations - use global registry
             if ($gvar_type == NODE_OUR_DECL()) {
@@ -6257,6 +6268,7 @@ func gen_global_constructor(scalar $cg) void {
             emit($cg, "    }\n");
             $g = $g + 1;
         }
+        $cg->{"current_fn_package"} = $saved_gctor_pkg;
     }
 
     # Call BEGIN blocks in shared library constructor

@@ -1,0 +1,175 @@
+#!/usr/bin/env strada
+# Cycle 4 regression tests for Strada Interpreter & Bytecode VM (VM-01..VM-11)
+
+package R4ModBase;
+func new(int $v) scalar {
+    my hash %self = ("v" => $v);
+    return bless(\%self, "R4ModBase");
+}
+func speak(scalar $self) str { return "base:" . $self->{"v"}; }
+func sum_var(scalar $self, int ...@nums) int {
+    my int $tot = $self->{"v"};
+    foreach my $n (@nums) { $tot = $tot + $n; }
+    return $tot;
+}
+func add_two(scalar $self, int $x) int { return $self->{"v"} + $x; }
+
+package R4ModChild;
+inherit R4ModBase;
+our str $log = "";
+func reset_log() void { $log = ""; }
+func get_log() str { return $log; }
+func new(int $v) scalar {
+    my hash %self = ("v" => $v);
+    return bless(\%self, "R4ModChild");
+}
+before "speak" func(scalar $self) void {
+    my int $local = 77;
+    $log = $log . "B" . $local . ":";
+}
+after "speak" func(scalar $self) void {
+    $log = $log . ":A";
+}
+before "sum_var" func(scalar $self) void {
+    my int $guard = 11;
+    $log = $log . "VB" . $guard . ":";
+}
+after "sum_var" func(scalar $self) void {
+    $log = $log . ":VA";
+}
+around "add_two" func(scalar $orig, scalar $self, int $x) int {
+    return $orig->($self, $x) * 10;
+}
+
+package R4ModGrand;
+inherit R4ModChild;
+func new(int $v) scalar {
+    my hash %self = ("v" => $v);
+    return bless(\%self, "R4ModGrand");
+}
+
+package R4FieldCls;
+func new(int $x) scalar {
+    my hash %self = ("x" => $x);
+    return bless(\%self, "R4FieldCls");
+}
+func val(scalar $self) int { return $self->{"x"} * 3; }
+
+package R4TieH;
+func TIEHASH(str $cls) scalar {
+    my hash %self = ("d" => {"k" => "init"});
+    return bless(\%self, $cls);
+}
+func FETCH(scalar $self, str $k) scalar { return "T:" . ($self->{"d"}->{$k} // ""); }
+func STORE(scalar $self, str $k, scalar $v) void { $self->{"d"}->{$k} = $v; }
+
+package main;
+
+our str $g_init_ok = func() str {
+    my scalar $inner = func() str { return "nested_global"; };
+    return $inner->();
+}->();
+
+our int $g_begin_val = 0;
+BEGIN {
+    my scalar $b1 = func() int {
+        my scalar $b2 = func() int { return 42; };
+        return $b2->();
+    };
+    $g_begin_val = $b1->();
+}
+
+# Trap function in main named "val" and "unblessed_key" to test VM-05 isolation
+func val(scalar $x) str { return "HIJACKED_VAL"; }
+func ukey(scalar $x) str { return "HIJACKED_UKEY"; }
+
+func main() int {
+    # VM-01: nested closures, sort blocks, BEGIN & global init realloc safety
+    say("ginit=" . $g_init_ok . " begin=" . $g_begin_val);
+    my array @nums = (5, 2, 8, 1);
+    my array @sorted = sort {
+        my scalar $cmp_fn = func(int $x, int $y) int { return $x <=> $y; };
+        $cmp_fn->($a, $b);
+    } @nums;
+    say("sorted=" . join(",", @sorted));
+
+    # VM-02: foreach my lexical scoping, outer shadowing, per-iteration capture, bare foreach $_
+    my int $item = 999;
+    my array @cap_fns = ();
+    foreach my $item ((10, 20, 30)) {
+        push(@cap_fns, func() int { return $item; });
+    }
+    say("outer_item=" . $item . " caps=" . $cap_fns[0]->() . "," . $cap_fns[1]->() . "," . $cap_fns[2]->());
+    my int $sum_bare = 0;
+    foreach ((1, 2, 3, 4)) {
+        $sum_bare = $sum_bare + $_;
+    }
+    say("bare=" . $sum_bare);
+
+    # VM-03: sibling closures sharing mutable outer lexical
+    my int $shared = 1;
+    my scalar $c_inc = func() int { $shared = $shared + 5; return $shared; };
+    my scalar $c_read = func() int { return $shared * 2; };
+    say("sibling=" . $c_inc->() . "," . $c_read->());
+
+    # VM-05: $obj->field without parens & unblessed hash field not hijacked by main::
+    my scalar $fc = R4FieldCls::new(7);
+    my scalar $uh = {"ukey" => "raw42"};
+    say("field=" . $fc->val . " uh=" . $uh->ukey);
+
+    # VM-06: before/after on inherited & variadic methods + extra args not clobbering hook locals
+    R4ModChild::reset_log();
+    my scalar $mc = R4ModChild::new(5);
+    my str $sp = $mc->speak();
+    my int $sv = $mc->sum_var(1, 2, 3);
+    my int $av = $mc->add_two(4);
+    my scalar $mg = R4ModGrand::new(6);
+    my int $gv = $mg->add_two(3);
+    say("mod=" . $sp . " sv=" . $sv . " av=" . $av . " gv=" . $gv . " log=" . R4ModChild::get_log());
+
+    # VM-07: tied hash via hash ref deref ($href->{$k})
+    my hash %th = ();
+    tie(%th, "R4TieH");
+    my scalar $href = \%th;
+    my str $tv0 = $href->{"k"};
+    $href->{"k"} = "updated";
+    my str $tv1 = $href->{"k"};
+    say("tied_ref=" . $tv0 . "|" . $tv1);
+
+    # VM-08: unblessed method call throws catchable error
+    my str $uerr = "";
+    try {
+        my scalar $plain = {};
+        $plain->missing_meth();
+        $uerr = "no_throw";
+    } catch ($e) {
+        $uerr = (index("" . $e, "unblessed") >= 0) ? "unblessed_caught" : ("other:" . $e);
+    }
+    say("uerr=" . $uerr);
+
+    # VM-09: string class isa/can, can("isa"), structured array/hash die preserved
+    my int $s_isa = "R4ModGrand"->isa("R4ModBase") ? 1 : 0;
+    my int $s_can = "R4ModChild"->can("speak") ? 1 : 0;
+    my int $o_can_isa = $mc->can("isa") ? 1 : 0;
+    say("isa_can=" . $s_isa . "," . $s_can . "," . $o_can_isa);
+
+    my str $dres = "";
+    try { die([10, 20]); } catch ($e) {
+        $dres = ref($e) . ":" . $e->[1];
+    }
+    my str $dres2 = "";
+    try { die({"code" => 404}); } catch ($e) {
+        $dres2 = ref($e) . ":" . $e->{"code"};
+    }
+    say("die_ref=" . $dres . "|" . $dres2);
+
+    # VM-10: dumper_str formats data instead of raw address
+    my str $ds = dumper_str({"k" => "v"});
+    say("dumper=" . (index($ds, "k") >= 0 && index($ds, "v") >= 0 ? "ok" : $ds));
+
+    # VM-11: UTF-8 2-arg and 3-arg rindex
+    my str $ru = "héllo héllo";
+    say("rindex=" . rindex($ru, "é") . "," . rindex($ru, "é", 4) . "," . rindex($ru, "é", -1));
+
+    return 0;
+}

@@ -1,0 +1,83 @@
+#!/usr/bin/env strada
+# Valgrind leak regression suite for Cycle 4 VM & Tree-Walk interpreter fixes
+
+package LeakR4ModBase;
+func new(int $v) scalar {
+    my hash %self = ("v" => $v);
+    return bless(\%self, "LeakR4ModBase");
+}
+func calc(scalar $self, int ...@nums) int {
+    my int $s = $self->{"v"};
+    foreach my $n (@nums) { $s = $s + $n; }
+    return $s;
+}
+
+package LeakR4ModChild;
+inherit LeakR4ModBase;
+func new(int $v) scalar {
+    my hash %self = ("v" => $v);
+    return bless(\%self, "LeakR4ModChild");
+}
+before "calc" func(scalar $self) void { my int $tmp = 5; }
+after "calc" func(scalar $self) void { my int $tmp = 6; }
+
+package LeakR4Tie;
+func TIEHASH(str $cls) scalar {
+    my hash %self = ("d" => {"k" => 0});
+    return bless(\%self, $cls);
+}
+func FETCH(scalar $self, str $k) scalar { return $self->{"d"}->{$k}; }
+func STORE(scalar $self, str $k, scalar $v) void { $self->{"d"}->{$k} = $v; }
+
+package main;
+
+func main() int {
+    my hash %th = ();
+    tie(%th, "LeakR4Tie");
+    my scalar $href = \%th;
+    my scalar $mc = LeakR4ModChild::new(10);
+
+    my int $i = 0;
+    while ($i < 25) {
+        # Sort with nested closure comparator + foreach my closure capture
+        my array @arr = (3, 1, 2);
+        my array @sa = sort {
+            my scalar $c = func(int $x, int $y) int { return $x <=> $y; };
+            $c->($a, $b);
+        } @arr;
+        if ($sa[0] != 1) { return 1; }
+
+        my int $x = 100;
+        my array @cf = ();
+        foreach my $x ((1, 2, 3)) {
+            push(@cf, func() int { return $x; });
+        }
+        if ($x != 100 || $cf[2]->() != 3) { return 2; }
+
+        # Sibling closures sharing cell
+        my int $sc = $i;
+        my scalar $f1 = func() int { $sc = $sc + 1; return $sc; };
+        my scalar $f2 = func() int { return $sc; };
+        if ($f1->() != $f2->()) { return 3; }
+
+        # Modifier on inherited variadic method
+        if ($mc->calc(1, 2) != 13) { return 4; }
+
+        # Tied hash deref
+        $href->{"k"} = $i;
+        if ($href->{"k"} != $i) { return 5; }
+
+        # String isa/can + rindex + dumper_str + structured die
+        if (!("LeakR4ModChild"->isa("LeakR4ModBase")) || !$mc->can("calc")) { return 6; }
+        if (rindex("héhé", "é", 2) != 1) { return 7; }
+        my str $ds = dumper_str({"i" => $i});
+        if (length($ds) == 0) { return 8; }
+        try { die([1, $i]); } catch ($e) {
+            if ($e->[1] != $i) { return 9; }
+        }
+        $i = $i + 1;
+    }
+
+    say("LEAK_R4_VM_OK");
+    return 0;
+}

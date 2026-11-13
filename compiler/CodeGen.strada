@@ -2329,10 +2329,12 @@ func gen_overloaded_concat(scalar $cg, scalar $left, scalar $right) void {
     if ($left_tmp == 1) { emit($cg, " strada_cleanup_push(__ol_l);"); }
     if ($right_tmp == 1) { emit($cg, " strada_cleanup_push(__ol_r);"); }
     emit($cg, " StradaValue *__ol_ls = strada_overload_stringify(__ol_l);");
+    emit($cg, " if (__ol_ls) strada_cleanup_push(__ol_ls);");
     emit($cg, " StradaValue *__ol_rs = strada_overload_stringify(__ol_r);");
+    emit($cg, " if (__ol_rs) strada_cleanup_push(__ol_rs);");
     emit($cg, " StradaValue *__ol_res = strada_concat_sv(__ol_ls ? __ol_ls : __ol_l, __ol_rs ? __ol_rs : __ol_r);");
-    emit($cg, " if (__ol_ls) strada_decref(__ol_ls);");
-    emit($cg, " if (__ol_rs) strada_decref(__ol_rs);");
+    emit($cg, " if (__ol_rs) strada_cleanup_pop_decref(__ol_rs);");
+    emit($cg, " if (__ol_ls) strada_cleanup_pop_decref(__ol_ls);");
     if ($right_tmp == 1) { emit($cg, " strada_cleanup_pop();"); }
     if ($left_tmp == 1) { emit($cg, " strada_cleanup_pop();"); }
     if ($left_tmp == 1) {
@@ -6185,8 +6187,8 @@ func needs_temp_cleanup(scalar $cg, scalar $expr) int {
         return 1;
     }
 
-    # await, diamond readline <$fh>, and SUPER::method() all return owned SVs
-    if ($type == NODE_AWAIT() || $type == NODE_READLINE() || $type == NODE_SUPER_CALL()) {
+    # await, diamond readline <$fh>, SUPER::method(), and ++/-- all return owned SVs
+    if ($type == NODE_AWAIT() || $type == NODE_READLINE() || $type == NODE_SUPER_CALL() || $type == NODE_INCREMENT()) {
         return 1;
     }
 

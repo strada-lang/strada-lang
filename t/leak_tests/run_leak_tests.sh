@@ -155,6 +155,7 @@ TESTS=(
     "test_phase5_eval_jit_leaks"
     "test_audit_r2_leaks"
     "test_audit_r3_leaks"
+    "test_audit_r4_leaks"
 )
 
 FILTER="${1:-}"

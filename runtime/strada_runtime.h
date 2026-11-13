@@ -869,6 +869,7 @@ int64_t strada_byte_index(StradaValue *haystack_sv, StradaValue *needle_sv, int6
 StradaValue* strada_new_bool(int b);
 int strada_is_bool(StradaValue *sv);
 int strada_rindex(const char *haystack, const char *needle);
+int strada_rindex_from(const char *haystack, const char *needle, int max_char_pos);
 char* strada_upper(const char *str);
 char* strada_lower(const char *str);
 char* strada_uc(const char *str);  /* Alias for upper */

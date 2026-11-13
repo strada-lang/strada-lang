@@ -1070,7 +1070,7 @@ func gen_builtin_g1(scalar $cg, scalar $expr, str $name) int {
                 my int $plen = length($pat_val);
                 while ($pi2 < $plen) {
                     my str $pc = substr($pat_val, $pi2, 1);
-                    if ($pc eq "." || $pc eq "*" || $pc eq "?" ||
+                    if ($pc eq "." || $pc eq "*" || $pc eq "+" || $pc eq "?" ||
                         $pc eq "[" || $pc eq "]" || $pc eq "(" || $pc eq ")" ||
                         $pc eq "{" || $pc eq "}" || $pc eq "^" || $pc eq "$" ||
                         $pc eq "|" || $pc eq "\\") {
@@ -4227,6 +4227,7 @@ func gen_builtin_g4(scalar $cg, scalar $expr, str $name) int {
 
         if ($name eq "rindex") {
             my scalar $args = $expr->{"args"};
+            my int $arg_count = $expr->{"arg_count"};
             my scalar $arg0 = $args->[0];
             my scalar $arg1 = $args->[1];
             my int $arg0_needs_cleanup = needs_temp_cleanup($cg, $arg0);
@@ -4238,7 +4239,13 @@ func gen_builtin_g4(scalar $cg, scalar $expr, str $name) int {
             gen_expression($cg, $arg1);
             emit($cg, "; char *__ridx_s1 = strada_to_str_ss(__ridx_str); ");
             emit($cg, "char *__ridx_s2 = strada_to_str_ss(__ridx_sub); ");
-            emit($cg, "StradaValue *__ridx_res = strada_new_int(strada_rindex(__ridx_s1, __ridx_s2)); ");
+            if ($arg_count >= 3) {
+                emit($cg, "int __ridx_pos = (int)(");
+                emit_int_operand($cg, $args->[2]);
+                emit($cg, "); StradaValue *__ridx_res = strada_new_int(strada_rindex_from(__ridx_s1, __ridx_s2, __ridx_pos)); ");
+            } else {
+                emit($cg, "StradaValue *__ridx_res = strada_new_int(strada_rindex(__ridx_s1, __ridx_s2)); ");
+            }
             emit($cg, "strada_cstr_free(__ridx_s1); strada_cstr_free(__ridx_s2); ");
             if ($arg0_needs_cleanup == 1) {
                 emit($cg, "strada_decref(__ridx_str); ");
@@ -5581,7 +5588,7 @@ func gen_builtin_g6(scalar $cg, scalar $expr, str $name) int {
                 } else {
                     my str $fr_ref = scalar_var_c_ref($cg, $ref_arg->{"target"}->{"name"}, $fr_cname);
                     # Generate: (strada_free(ref), ref = strada_new_undef())
-                    emit($cg, "(strada_free(" . $fr_ref . "), " . $fr_ref . " = strada_new_undef())");
+                    emit($cg, "(strada_free(" . $fr_ref . "), " . $fr_ref . " = strada_new_undef(), strada_undef_static())");
                 }
             } else {
                 # Fallback: just call the runtime function with arg cleanup

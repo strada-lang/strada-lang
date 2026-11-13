@@ -849,17 +849,90 @@ func lex_pp_skip(scalar $lexer, int $stop_else, int $start_line) str {
                 $lexer->{"column"} = 1;
                 return "elif:" . $eexpr;
             }
+        } elsif ($q == $pos && $q + 1 < $len && char_at($src, $q) == 61) {
+            my int $pod_c2 = char_at($src, $q + 1);
+            if (($pod_c2 >= 65 && $pod_c2 <= 90) || ($pod_c2 >= 97 && $pod_c2 <= 122)) {
+                my str $pod_w = lex_pp_word_at($src, $q + 1, $len);
+                if ($pod_w ne "cut") {
+                    # Skip POD section (=head1, =pod, etc. at col 0) through =cut
+                    while ($pos < $len && char_at($src, $pos) != 10) { $pos = $pos + 1; }
+                    while ($pos < $len) {
+                        $pos = $pos + 1;
+                        $line = $line + 1;
+                        if ($pos < $len && char_at($src, $pos) == 61) {
+                            my str $cw = lex_pp_word_at($src, $pos + 1, $len);
+                            if ($cw eq "cut") {
+                                my int $after_cut = $pos + 4;
+                                if ($after_cut >= $len || char_at($src, $after_cut) == 32 || char_at($src, $after_cut) == 9 || char_at($src, $after_cut) == 10 || char_at($src, $after_cut) == 13) {
+                                    while ($pos < $len && char_at($src, $pos) != 10) { $pos = $pos + 1; }
+                                    last;
+                                }
+                            }
+                        }
+                        while ($pos < $len && char_at($src, $pos) != 10) { $pos = $pos + 1; }
+                    }
+                    next;
+                }
+            }
+            $pos = $q;
         } else {
             # Scan skipped Strada line for __C__ { ... } blocks (and skip
-            # strings/block-comments) so C #if/#ifdef/#else/#endif inside
-            # __C__ { ... } (even indented as `# if` / `# endif`) never
-            # prematurely close the outer Strada #ifdef/#ifndef.
+            # comments, strings, POD, and regexes) so C #if/#ifdef/#else/#endif
+            # inside __C__ { ... } or apostrophes inside /don't/ or POD never
+            # confuse outer #ifdef/#endif nesting.
             my int $sc = $q;
+            my int $can_regex = 1;
             while ($sc < $len && char_at($src, $sc) != 10) {
                 my int $cc = char_at($src, $sc);
-                if ($cc == 35) {
+                if ($cc == 32 || $cc == 9 || $cc == 13) {
+                    $sc = $sc + 1;
+                } elsif ($cc == 35) {
                     # '#' Strada comment to end of line
                     while ($sc < $len && char_at($src, $sc) != 10) { $sc = $sc + 1; }
+                } elsif ($cc == 47 && $sc + 1 < $len && char_at($src, $sc + 1) == 47) {
+                    if ($can_regex == 1) {
+                        # '//' comment in dead code (or empty regex //)
+                        while ($sc < $len && char_at($src, $sc) != 10) { $sc = $sc + 1; }
+                    } else {
+                        # Binary '//' defined-or operator
+                        $sc = $sc + 2;
+                        $can_regex = 1;
+                    }
+                } elsif ($cc == 47 && $sc + 1 < $len && char_at($src, $sc + 1) == 42) {
+                    # /* ... */ block comment
+                    $sc = $sc + 2;
+                    while ($sc < $len) {
+                        my int $b1 = char_at($src, $sc);
+                        if ($b1 == 10) { $line = $line + 1; }
+                        if ($b1 == 42 && $sc + 1 < $len && char_at($src, $sc + 1) == 47) {
+                            $sc = $sc + 2;
+                            last;
+                        }
+                        $sc = $sc + 1;
+                    }
+                } elsif ($cc == 47 && $can_regex == 1) {
+                    # Regex literal /.../ on this line (avoid false apostrophe/quote inside /don't/)
+                    my int $rj = $sc + 1;
+                    my int $rclosed = 0;
+                    while ($rj < $len && char_at($src, $rj) != 10) {
+                        my int $rc = char_at($src, $rj);
+                        if ($rc == 92 && $rj + 1 < $len && char_at($src, $rj + 1) != 10) {
+                            $rj = $rj + 2;
+                        } elsif ($rc == 47) {
+                            $rj = $rj + 1;
+                            $rclosed = 1;
+                            last;
+                        } else {
+                            $rj = $rj + 1;
+                        }
+                    }
+                    if ($rclosed == 1) {
+                        $sc = $rj;
+                        $can_regex = 0;
+                    } else {
+                        $sc = $sc + 1;
+                        $can_regex = 1;
+                    }
                 } elsif ($cc == 34 || $cc == 39) {
                     # String literal ("..." or '...')
                     my int $qch = $cc;
@@ -874,24 +947,14 @@ func lex_pp_skip(scalar $lexer, int $stop_else, int $start_line) str {
                             $sc = $sc + 1;
                         }
                     }
-                } elsif ($cc == 47 && $sc + 1 < $len && char_at($src, $sc + 1) == 42) {
-                    # /* ... */ block comment
-                    $sc = $sc + 2;
-                    while ($sc < $len) {
-                        my int $b1 = char_at($src, $sc);
-                        if ($b1 == 10) { $line = $line + 1; }
-                        if ($b1 == 42 && $sc + 1 < $len && char_at($src, $sc + 1) == 47) {
-                            $sc = $sc + 2;
-                            last;
-                        }
-                        $sc = $sc + 1;
-                    }
+                    $can_regex = 0;
                 } elsif (lex_pp_is_word_char($cc) == 1) {
                     my int $ws = $sc;
                     while ($sc < $len && lex_pp_is_word_char(char_at($src, $sc)) == 1) {
                         $sc = $sc + 1;
                     }
-                    if ($sc - $ws == 5 && substr_bytes($src, $ws, 5) eq "__C__") {
+                    my str $kw = substr_bytes($src, $ws, $sc - $ws);
+                    if ($kw eq "__C__") {
                         while ($sc < $len) {
                             my int $wc = char_at($src, $sc);
                             if ($wc == 10) { $line = $line + 1; $sc = $sc + 1; }
@@ -964,9 +1027,19 @@ func lex_pp_skip(scalar $lexer, int $stop_else, int $start_line) str {
                                 lex_error($lexer, "Unterminated __C__ block", $c_line, 1);
                             }
                         }
+                        $can_regex = 0;
+                    } elsif ($kw eq "split" || $kw eq "return" || $kw eq "if" || $kw eq "elsif" || $kw eq "unless" || $kw eq "while" || $kw eq "until" || $kw eq "for" || $kw eq "die" || $kw eq "warn" || $kw eq "say" || $kw eq "print" || $kw eq "and" || $kw eq "or" || $kw eq "not" || $kw eq "eq" || $kw eq "ne" || $kw eq "cmp" || $kw eq "m" || $kw eq "qr" || $kw eq "s") {
+                        $can_regex = 1;
+                    } else {
+                        $can_regex = 0;
                     }
                 } else {
                     $sc = $sc + 1;
+                    if ($cc == 41 || $cc == 93 || $cc == 125 || $cc == 36 || $cc == 64 || $cc == 37) {
+                        $can_regex = 0;
+                    } else {
+                        $can_regex = 1;
+                    }
                 }
             }
             $pos = $sc;
@@ -3106,8 +3179,8 @@ func lex_next_token(scalar $lexer) scalar {
         return \%token;
     }
 
-    # Diamond operator <STDIN> — bareword filehandle
-    if ($code == ord("<") && (($code2 >= ord("A") && $code2 <= ord("Z")) || ($code2 >= ord("a") && $code2 <= ord("z")))) {
+    # Diamond operator <STDIN> — bareword filehandle (only when NOT after a value)
+    if ($code == ord("<") && $lexer->{"after_value"} == 0 && (($code2 >= ord("A") && $code2 <= ord("Z")) || ($code2 >= ord("a") && $code2 <= ord("z")))) {
         # Check if it's a bareword followed by > (e.g., <STDIN>)
         my int $save_pos = $lexer->{"pos"};
         my int $save_line = $lexer->{"line"};
@@ -3122,6 +3195,7 @@ func lex_next_token(scalar $lexer) scalar {
             $token{"type"} = "DIAMOND";
             $token{"value"} = $bw_name;
             $token{"line"} = $token_line;
+            $lexer->{"after_value"} = 1;
             return \%token;
         }
         # Not a diamond — restore position
@@ -3130,24 +3204,28 @@ func lex_next_token(scalar $lexer) scalar {
         $lexer->{"column"} = $save_col;
     }
 
-    # Diamond operator <$fh> for reading from filehandle (<60, $36)
-    if ($code == ord("<") && $code2 == ord("\$")) {
+    # Diamond operator <$fh> for reading from filehandle (<60, $36) (only when NOT after a value)
+    if ($code == ord("<") && $code2 == ord("\$") && $lexer->{"after_value"} == 0) {
+        my int $save_pos = $lexer->{"pos"};
+        my int $save_line = $lexer->{"line"};
+        my int $save_col = $lexer->{"column"};
         lex_advance($lexer);  # Skip <
         lex_advance($lexer);  # Skip $
         my str $varname = lex_read_identifier($lexer);
-        if ($varname eq "") {
-            lex_error($lexer, "Expected variable name in diamond operator", $token_line, $lexer->{"tok_col"});
-        }
         my int $close = lex_current_code($lexer);
-        if ($close != 62) {  # >
-            lex_error($lexer, "Expected '>' to close diamond operator", $token_line, $lexer->{"tok_col"});
+        if (length($varname) > 0 && $close == 62) {  # >
+            lex_advance($lexer);  # Skip >
+            my hash %token = ();
+            $token{"type"} = "DIAMOND";
+            $token{"value"} = $varname;  # Just the variable name without $
+            $token{"line"} = $token_line;
+            $lexer->{"after_value"} = 1;
+            return \%token;
         }
-        lex_advance($lexer);  # Skip >
-        my hash %token = ();
-        $token{"type"} = "DIAMOND";
-        $token{"value"} = $varname;  # Just the variable name without $
-        $token{"line"} = $token_line;
-        return \%token;
+        # Not <$fh> — restore position and fall through to '<' operator
+        $lexer->{"pos"} = $save_pos;
+        $lexer->{"line"} = $save_line;
+        $lexer->{"column"} = $save_col;
     }
 
     # Check for <=> (spaceship) before <= (<60, =61, >62)
@@ -3748,16 +3826,15 @@ func lex_tokenize_file(str $source, str $filename) array {
 func lex_tokenize_file_defs(str $source, str $filename, scalar $cli_defs) array {
     my hash $lexer = lex_new($source);
     $lexer->{"file"} = $filename;
+    lex_pp_init($lexer);
     if ($cli_defs) {
-        my hash %own = ();
+        my scalar $defs = $lexer->{"pp_defines"};
         my array @dk = keys(%{$cli_defs});
         my int $dki = 0;
         while ($dki < size(@dk)) {
-            $own{$dk[$dki]} = $cli_defs->{$dk[$dki]};
+            $defs->{$dk[$dki]} = $cli_defs->{$dk[$dki]};
             $dki = $dki + 1;
         }
-        $lexer->{"pp_defines"} = \%own;
-        $lexer->{"pp_depth"} = 0;
     }
     my array @tokens = ();
     my str $prev_type = "";

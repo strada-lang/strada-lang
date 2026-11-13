@@ -417,6 +417,7 @@ StradaValue* strada_substr_bytes(StradaValue *str, int64_t offset, int64_t lengt
 int strada_index(const char *haystack, const char *needle);
 int strada_index_offset(const char *haystack, const char *needle, int offset);
 int strada_rindex(const char *haystack, const char *needle);
+int strada_rindex_from(const char *haystack, const char *needle, int max_char_pos);
 char* strada_upper(const char *str);
 char* strada_lower(const char *str);
 char* strada_uc(const char *str);
@@ -1729,9 +1730,9 @@ static inline void strada_stack_args1_init(StradaStackArgs1 *sa, StradaValue *el
 
 /* Autovivifying hash fetch: creates intermediate hash if key missing */
 static inline StradaValue* strada_hv_autoviv(StradaValue *sv, const char *key) {
-    if (!sv || STRADA_IS_TAGGED_INT(sv)) return strada_new_hash();
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return strada_undef_static();
     StradaHash *hv = strada_deref_hash(sv);
-    if (!hv) return strada_new_hash();
+    if (!hv) return strada_undef_static();
     StradaValue *result = strada_hash_get(hv, key);
     if (!result || STRADA_IS_TAGGED_INT(result) || (result->type == STRADA_UNDEF)) {
         result = strada_new_hash();

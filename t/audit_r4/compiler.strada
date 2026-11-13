@@ -1,0 +1,98 @@
+#!/usr/bin/env strada
+# Cycle 4 Audit regression tests: Compiler/Lexer fixes (CC-01, CC-03..CC-06)
+
+package R4PkgUser;
+func pkg_double(int $n) int { return $n * 2; }
+our int $g_val = pkg_double(21);
+
+func get_g() int { return $g_val; }
+
+package R4TieInc;
+func TIEHASH(str $cls) scalar {
+    my hash %self = ("d" => {"a" => 10});
+    return bless(\%self, $cls);
+}
+func FETCH(scalar $self, str $k) scalar { return $self->{"d"}->{$k}; }
+func STORE(scalar $self, str $k, scalar $v) void { $self->{"d"}->{$k} = $v; }
+
+package main;
+
+func check(int $cond, str $label) int {
+    if (!$cond) {
+        say("FAIL: " . $label);
+        return 1;
+    }
+    return 0;
+}
+
+# CC-06: #if 0 containing POD, // comments with quotes, and regex literals
+#if 0
+=pod
+
+This POD has an unbalanced ' quote and #endif inside it!
+
+=cut
+my str $x = "unused"; // comment with ' quote and #endif
+$x =~ /#endif/;
+#endif
+
+func make_arr_ref(int $a, int $b) scalar {
+    return [$a, $b];
+}
+
+func make_hash_ref(int $v) scalar {
+    return {"k" => $v};
+}
+
+func main() int {
+    my int $fail = 0;
+
+    # CC-01: prefix/postfix ++/-- on int local, subscript, hash, tied hash in expr context
+    my int $iv = 5;
+    my int $iv_pre = (++$iv) + 10;
+    my int $iv_post = ($iv++) + 10;
+    $fail = $fail + check($iv_pre == 16 && $iv_post == 16 && $iv == 7, "CC-01 int local prefix/postfix ++");
+
+    my array @arr = (10, 20);
+    my int $a1 = (++$arr[0]) + 1;
+    my int $a2 = ($arr[1]--) + 1;
+    $fail = $fail + check($a1 == 12 && $arr[0] == 11 && $a2 == 21 && $arr[1] == 19, "CC-01 array elem ++/--");
+
+    my scalar $hr = make_hash_ref(30);
+    my int $h1 = (++$hr->{"k"}) + 1;
+    $fail = $fail + check($h1 == 32 && $hr->{"k"} == 31, "CC-01 hash ref deref ++ in expr");
+
+    my scalar $ar = make_arr_ref(1, 2);
+    my int $ar1 = (++$ar->[1]) + 1;
+    $fail = $fail + check($ar1 == 4 && $ar->[1] == 3, "CC-01 array ref deref ++ in expr");
+
+    my hash %th = ();
+    tie(%th, "R4TieInc");
+    my int $t1 = (++$th{"a"}) + 1;
+    my int $t2 = ($th{"a"}++) + 1;
+    $fail = $fail + check($t1 == 12 && $t2 == 12 && $th{"a"} == 12, "CC-01 tied hash prefix/postfix ++");
+
+    # CC-03: sys::free(\$var) yields undef safely in expression context
+    my scalar $fv = "hello";
+    my scalar $fr = sys::free(\$fv);
+    $fail = $fail + check(!defined($fr), "CC-03 free() returns undef in expr context");
+
+    # CC-04: global initializer calling unqualified sibling function in package + R4PkgHelp resolved
+    $fail = $fail + check(R4PkgUser::get_g() == 42, "CC-04 our global init sibling fn call");
+
+    # CC-05: $a < $b && $c > $d not misparsed as <...> diamond after value
+    my int $cmp_a = 3;
+    my int $cmp_b = 5;
+    my int $cmp_c = 9;
+    my int $cmp_d = 2;
+    my int $cmp_res = ($cmp_a < $cmp_b && $cmp_c > $cmp_d) ? 1 : 0;
+    $fail = $fail + check($cmp_res == 1, "CC-05 < and > comparison not mislexed as diamond");
+
+    # CC-06: verify #if 0 skipped cleanly and code below still parses normally
+    $fail = $fail + check(1 == 1, "CC-06 #if 0 POD + // + regex skipped cleanly");
+
+    if ($fail == 0) {
+        say("R4_COMPILER_OK");
+    }
+    return $fail;
+}

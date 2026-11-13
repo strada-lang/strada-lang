@@ -2505,16 +2505,18 @@ func quote_identifier(scalar $dbh, str $name) str {
     my int $nul_err = 0;
     __C__ {
         DbiHandle *h = (DbiHandle *)(intptr_t)strada_to_int(dbh_ptr);
-        size_t nm_len = (size_t)strada_str_len(name);
         char *nm = strada_to_str(name);
-        if (strlen(nm) != nm_len) {
+        size_t nm_len = (name && !STRADA_IS_TAGGED_INT(name) && name->type == STRADA_STR)
+            ? STRADA_STR_BYTELEN(name) : (nm ? strlen(nm) : 0);
+        if (nm_len == 0 && nm && nm[0] != '\0') nm_len = strlen(nm);
+        if (!nm || strlen(nm) != nm_len) {
             strada_decref(nul_err);
             nul_err = strada_new_int(1);
         } else {
             char *quoted = dbi_quote_identifier(h, nm);
             if (quoted) {
                 strada_decref(result);
-                result = strada_new_str(quoted);
+                result = strada_new_str_like(quoted, name);
                 free(quoted);
             }
         }

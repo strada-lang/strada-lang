@@ -1,0 +1,13 @@
+ginit=nested_global begin=42
+sorted=1,2,5,8
+outer_item=999 caps=10,20,30
+bare=10
+sibling=6,12
+field=21 uh=raw42
+mod=base:5 sv=11 av=90 gv=90 log=B77::AVB11::VA
+tied_ref=T:init|T:updated
+uerr=unblessed_caught
+isa_can=1,1,1
+die_ref=ARRAY:20|HASH:404
+dumper=ok
+rindex=7,1,-1

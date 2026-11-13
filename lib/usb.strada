@@ -567,16 +567,13 @@ func bulk_write(int $handle, int $endpoint, str $data, int $timeout) int {
 
         strada_decref(result);
         if (!h) {
-            strada_decref(result);
             result = strada_new_int(LIBUSB_ERROR_INVALID_PARAM);
         } else {
             int transferred = 0;
             int ret = libusb_bulk_transfer(h, ep, (unsigned char *)d, length, &transferred, tm);
             if (ret < 0) {
-                strada_decref(result);
                 result = strada_new_int(ret);
             } else {
-                strada_decref(result);
                 result = strada_new_int(transferred);
             }
         }
@@ -596,24 +593,20 @@ func bulk_read(int $handle, int $endpoint, int $max_len, int $timeout) str {
 
         strada_decref(result);
         if (!h || maxlen64 <= 0 || maxlen64 > 64 * 1024 * 1024) {
-            strada_decref(result);
             result = strada_new_str("");
         } else {
             int maxlen = (int)maxlen64;
             unsigned char *buffer = malloc((size_t)maxlen);
             if (!buffer) {
-                strada_decref(result);
                 result = strada_new_str("");
             } else {
                 int transferred = 0;
                 int ret = libusb_bulk_transfer(h, ep, buffer, maxlen, &transferred, tm);
                 if (ret < 0 && ret != LIBUSB_ERROR_TIMEOUT) {
                     free(buffer);
-                    strada_decref(result);
                     result = strada_new_str("");
                 } else {
                     last_transfer_len = transferred;
-                    strada_decref(result);
                     result = strada_new_str_len((char *)buffer, transferred);
                     free(buffer);
                 }
@@ -636,16 +629,13 @@ func interrupt_write(int $handle, int $endpoint, str $data, int $timeout) int {
 
         strada_decref(result);
         if (!h) {
-            strada_decref(result);
             result = strada_new_int(LIBUSB_ERROR_INVALID_PARAM);
         } else {
             int transferred = 0;
             int ret = libusb_interrupt_transfer(h, ep, (unsigned char *)d, length, &transferred, tm);
             if (ret < 0) {
-                strada_decref(result);
                 result = strada_new_int(ret);
             } else {
-                strada_decref(result);
                 result = strada_new_int(transferred);
             }
         }
@@ -664,24 +654,20 @@ func interrupt_read(int $handle, int $endpoint, int $max_len, int $timeout) str 
 
         strada_decref(result);
         if (!h || maxlen64 <= 0 || maxlen64 > 64 * 1024 * 1024) {
-            strada_decref(result);
             result = strada_new_str("");
         } else {
             int maxlen = (int)maxlen64;
             unsigned char *buffer = malloc((size_t)maxlen);
             if (!buffer) {
-                strada_decref(result);
                 result = strada_new_str("");
             } else {
                 int transferred = 0;
                 int ret = libusb_interrupt_transfer(h, ep, buffer, maxlen, &transferred, tm);
                 if (ret < 0 && ret != LIBUSB_ERROR_TIMEOUT) {
                     free(buffer);
-                    strada_decref(result);
                     result = strada_new_str("");
                 } else {
                     last_transfer_len = transferred;
-                    strada_decref(result);
                     result = strada_new_str_len((char *)buffer, transferred);
                     free(buffer);
                 }
@@ -707,11 +693,9 @@ func control_write(int $handle, int $request_type, int $request, int $value, int
 
         strada_decref(result);
         if (!h || length < 0 || length > 65535) {
-            strada_decref(result);
             result = strada_new_int(LIBUSB_ERROR_INVALID_PARAM);
         } else {
             int ret = libusb_control_transfer(h, rt, req, val, index, (unsigned char *)d, (uint16_t)length, tm);
-            strada_decref(result);
             result = strada_new_int(ret);
         }
     }
@@ -732,23 +716,19 @@ func control_read(int $handle, int $request_type, int $request, int $value, int 
 
         strada_decref(result);
         if (!h || maxlen64 <= 0 || maxlen64 > 65535) {
-            strada_decref(result);
             result = strada_new_str("");
         } else {
             int maxlen = (int)maxlen64;
             unsigned char *buffer = malloc((size_t)maxlen);
             if (!buffer) {
-                strada_decref(result);
                 result = strada_new_str("");
             } else {
                 int ret = libusb_control_transfer(h, rt, req, val, index, buffer, (uint16_t)maxlen, tm);
                 if (ret < 0) {
                     free(buffer);
-                    strada_decref(result);
                     result = strada_new_str("");
                 } else {
                     last_transfer_len = ret;
-                    strada_decref(result);
                     result = strada_new_str_len((char *)buffer, ret);
                     free(buffer);
                 }
@@ -823,14 +803,11 @@ func get_string_descriptor(int $handle, int $idx) str {
             unsigned char buffer[256];
             int ret = libusb_get_string_descriptor_ascii(h, index, buffer, sizeof(buffer));
             if (ret >= 0) {
-                strada_decref(result);
                 result = strada_new_str((char *)buffer);
             } else {
-                strada_decref(result);
                 result = strada_new_str("");
             }
         } else {
-            strada_decref(result);
             result = strada_new_str("");
         }
     }

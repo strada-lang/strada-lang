@@ -220,10 +220,14 @@ static void libtcc_add_runtime_symbols(TCCState *s) {
     ADD_SYM(strada_is_true);
     ADD_SYM(strada_is_defined);
     ADD_SYM(strada_typeof);
-    ADD_SYM(strada_str_concat);
-    ADD_SYM(strada_str_length);
+    ADD_SYM(strada_concat);
+    ADD_SYM(strada_concat_sv);
+    ADD_SYM(strada_str_len);
+    ADD_SYM(strada_length_sv);
     ADD_SYM(strada_substr);
     ADD_SYM(strada_index);
+    ADD_SYM(strada_rindex);
+    ADD_SYM(strada_rindex_from);
     ADD_SYM(strada_uc);
     ADD_SYM(strada_lc);
     ADD_SYM(strada_chr);
@@ -243,7 +247,8 @@ static void libtcc_add_runtime_symbols(TCCState *s) {
     ADD_SYM(strada_tls_exists);
     ADD_SYM(strada_tls_delete);
     ADD_SYM(strada_exception_trace_get);
-    ADD_SYM(strada_split);
+    ADD_SYM(strada_string_split);
+    ADD_SYM(strada_regex_split);
     ADD_SYM(strada_char_at);
     ADD_SYM(strada_array_push);
     ADD_SYM(strada_array_pop);
@@ -272,7 +277,8 @@ static void libtcc_add_runtime_symbols(TCCState *s) {
     ADD_SYM(strada_warn);
     ADD_SYM(strada_die);
     ADD_SYM(strada_regex_match);
-    ADD_SYM(strada_regex_subst);
+    ADD_SYM(strada_regex_replace);
+    ADD_SYM(strada_regex_replace_all);
     ADD_SYM(strada_bless);
     ADD_SYM(strada_blessed);
     ADD_SYM(strada_isa);

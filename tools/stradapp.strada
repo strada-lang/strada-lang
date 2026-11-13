@@ -953,7 +953,7 @@ func preprocess(str $filename) str {
         my int $c_scan_from = -1;
         if ($in_c_block != 0) {
             $c_scan_from = 0;
-        } else {
+        } elsif ($active) {
             my int $kw_pos = find_c_block_kw($line);
             if ($kw_pos >= 0) {
                 $in_c_block = 2;
@@ -1249,6 +1249,24 @@ func print_usage() void {
 func main(int $argc, array @argv) int {
     my str $input_file = "";
     my str $output_file = "";
+
+    my str $env_defs = core::getenv("STRADA_DEFINES");
+    if (length($env_defs) > 0) {
+        my array @eparts = split(" ", $env_defs);
+        my int $ei = 0;
+        while ($ei < size(@eparts)) {
+            my str $ed = $eparts[$ei];
+            if (length($ed) > 0) {
+                my int $eeq = index($ed, "=");
+                if ($eeq > 0) {
+                    $g_defines{substr($ed, 0, $eeq)} = substr($ed, $eeq + 1);
+                } else {
+                    $g_defines{$ed} = "1";
+                }
+            }
+            $ei = $ei + 1;
+        }
+    }
 
     my int $i = 1;
     while ($i < $argc) {
