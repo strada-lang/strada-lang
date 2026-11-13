@@ -5,7 +5,7 @@
 #
 # Requirements: libperl-dev (Debian/Ubuntu) or perl-devel (RHEL/Fedora)
 
-CC = gcc
+CC ?= gcc
 CFLAGS = -Wall -Wextra -fPIC -O2
 
 # Get Perl embedding flags

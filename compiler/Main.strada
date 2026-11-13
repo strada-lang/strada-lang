@@ -389,6 +389,13 @@ func ast_needs_stack_trace(scalar $ast) int {
         if (ast_stmt_needs_stack_trace($ends->[$i]) == 1) { return 1; }
         $i = $i + 1;
     }
+    my scalar $mms = $ast->{"method_modifiers"};
+    my int $mc = $ast->{"method_modifier_count"} + 0;
+    $i = 0;
+    while ($i < $mc) {
+        if (ast_stmt_needs_stack_trace($mms->[$i]->{"body"}) == 1) { return 1; }
+        $i = $i + 1;
+    }
     return 0;
 }
 
@@ -479,9 +486,11 @@ func compile(str $source, str $filename, int $debug_info, int $show_timing, int 
         }
     }
 
-    # --check: validation only. Errors above have already die'd; a clean
-    # program stops here without generating C.
+    # --check: validation only. Clear split_dir so --check never emits shard
+    # files, run full codegen validation for semantic/codegen-time errors, and
+    # stop before writing C output.
     if ($check_only == 1) {
+        $ast->{"split_dir"} = "";
         generate($ast, $filename, 0, 0, $enable_stack_trace, 0);
         if (length(core::getenv("STRADA_CLEAN_EXIT")) == 0) {
             exit(0);

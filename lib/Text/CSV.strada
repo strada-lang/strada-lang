@@ -444,6 +444,9 @@ func combine(scalar $self, scalar $fields) int {
         if (index($field, "\n") >= 0 || index($field, "\r") >= 0) {
             $need_quote = 1;
         }
+        if ($escape ne "" && index($field, $escape) >= 0) {
+            $need_quote = 1;
+        }
 
         my str $escaped = Text::CSV::_escape_field($field, $quote, $escape);
         if ($need_quote) {

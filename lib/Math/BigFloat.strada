@@ -211,7 +211,7 @@ static char *_bf_normalize(const char *m, int64_t *scale) {
 func new(str $val) scalar {
     my hash %self = ();
     my int $sign = 1;
-    my str $input = $val;
+    my str $input = trim($val);
 
     # Handle sign
     if (length($input) > 0 && substr($input, 0, 1) eq "-") {
@@ -219,6 +219,34 @@ func new(str $val) scalar {
         $input = substr($input, 1, length($input) - 1);
     } elsif (length($input) > 0 && substr($input, 0, 1) eq "+") {
         $input = substr($input, 1, length($input) - 1);
+    }
+
+    # Validate digits and at most one decimal point
+    my int $ilen = length($input);
+    my int $dots = 0;
+    my int $digits = 0;
+    my int $valid = ($ilen > 0) ? 1 : 0;
+    for (my int $i = 0; $i < $ilen; $i++) {
+        my str $ch = substr($input, $i, 1);
+        if ($ch eq ".") {
+            $dots++;
+            if ($dots > 1) {
+                $valid = 0;
+                last;
+            }
+        } elsif ($ch ge "0" && $ch le "9") {
+            $digits++;
+        } else {
+            $valid = 0;
+            last;
+        }
+    }
+    if ($digits == 0) {
+        $valid = 0;
+    }
+    if ($valid == 0) {
+        $input = "0";
+        $sign = 1;
     }
 
     # Find decimal point
@@ -236,9 +264,14 @@ func new(str $val) scalar {
         $scale = 0;
     }
 
-    # Strip leading zeros from mantissa
-    while (length($mantissa) > 1 && substr($mantissa, 0, 1) eq "0") {
-        $mantissa = substr($mantissa, 1, length($mantissa) - 1);
+    # Strip leading zeros from mantissa in O(N)
+    my int $mlen = length($mantissa);
+    my int $nz = 0;
+    while ($nz < $mlen - 1 && substr($mantissa, $nz, 1) eq "0") {
+        $nz++;
+    }
+    if ($nz > 0) {
+        $mantissa = substr($mantissa, $nz, $mlen - $nz);
     }
 
     # Normalize: strip trailing zeros, adjust scale
@@ -653,6 +686,10 @@ func div_precision(scalar $self, scalar $other, int $prec) scalar {
         return bless(\%r, "BigFloat");
     }
 
+    if ($prec < 0) {
+        $prec = 0;
+    }
+
     # We divide mantissa_a * 10^prec by mantissa_b
     # Result scale = self.scale - other.scale + prec
     my int $ea = $self->{"e"};
@@ -663,16 +700,17 @@ func div_precision(scalar $self, scalar $other, int $prec) scalar {
         char *a_str = strada_to_str(ma);
         char *b_str = strada_to_str(mb);
         int64_t precision = strada_to_int(prec);
+        if (precision < 0) precision = 0;
 
         /* Extend a with zeros for precision */
         char *extended = _bf_pad_right(a_str, (size_t)precision);
-        char *q = _bf_divmod(extended, b_str, NULL);
+        char *q = extended ? _bf_divmod(extended, b_str, NULL) : NULL;
 
         free(a_str);
         free(b_str);
         free(extended);
         strada_decref(result_m);
-        result_m = strada_new_str(q);
+        result_m = strada_new_str(q ? q : "0");
         free(q);
     }
 

@@ -24,6 +24,56 @@
 my hash %g_defines = ();
 my array @g_include_paths = ();
 my int $g_include_depth = 0;
+my int $g_eval_depth = 0;
+
+func pp_is_pure_int(str $s) int {
+    my str $t = trim($s);
+    my int $len = length($t);
+    if ($len == 0) { return 0; }
+    my int $i = 0;
+    my str $first = substr($t, 0, 1);
+    if ($first eq "-" || $first eq "+") { $i = 1; }
+    if ($i >= $len) { return 0; }
+    if ($i + 2 <= $len) {
+        my str $pfx = substr($t, $i, 2);
+        if ($pfx eq "0x" || $pfx eq "0X") {
+            $i = $i + 2;
+            if ($i >= $len) { return 0; }
+            while ($i < $len) {
+                my int $c = ord(substr($t, $i, 1));
+                if (!(($c >= 48 && $c <= 57) || ($c >= 97 && $c <= 102) || ($c >= 65 && $c <= 70))) { return 0; }
+                $i = $i + 1;
+            }
+            return 1;
+        }
+        if ($pfx eq "0b" || $pfx eq "0B") {
+            $i = $i + 2;
+            if ($i >= $len) { return 0; }
+            while ($i < $len) {
+                my int $c = ord(substr($t, $i, 1));
+                if ($c != 48 && $c != 49) { return 0; }
+                $i = $i + 1;
+            }
+            return 1;
+        }
+        if ($pfx eq "0o" || $pfx eq "0O") {
+            $i = $i + 2;
+            if ($i >= $len) { return 0; }
+            while ($i < $len) {
+                my int $c = ord(substr($t, $i, 1));
+                if ($c < 48 || $c > 55) { return 0; }
+                $i = $i + 1;
+            }
+            return 1;
+        }
+    }
+    while ($i < $len) {
+        my int $c = ord(substr($t, $i, 1));
+        if ($c < 48 || $c > 57) { return 0; }
+        $i = $i + 1;
+    }
+    return 1;
+}
 
 func pp_parse_int_lit(str $s) int {
     my str $t = trim($s);
@@ -101,18 +151,20 @@ func pp_parse_int_lit(str $s) int {
 }
 
 func pp_resolve_macro_val(str $name, int $depth) int {
-    if ($depth > 8) { return 0; }
+    if ($depth > 16 || $g_eval_depth > 16) { return 0; }
     if (!exists(%g_defines, $name)) { return 0; }
     my str $raw = trim("" . $g_defines{$name});
     if ($raw eq "") { return 0; }
-    my int $c0 = ord(substr($raw, 0, 1));
-    if (($c0 >= 48 && $c0 <= 57) || $c0 == 45 || $c0 == 43) {
+    if (pp_is_pure_int($raw) == 1) {
         return pp_parse_int_lit($raw);
     }
     if (exists(%g_defines, $raw)) {
         return pp_resolve_macro_val($raw, $depth + 1);
     }
-    return pp_eval_expr($raw);
+    $g_eval_depth = $g_eval_depth + 1;
+    my int $res = pp_eval_expr($raw);
+    $g_eval_depth = $g_eval_depth - 1;
+    return $res;
 }
 
 func pp_skip_ws(str $s, int $pos, int $len) int {
@@ -498,8 +550,12 @@ func pp_parse_or(str $s, scalar $pos_ref, int $len) int {
 }
 
 func pp_eval_expr(str $expr) int {
+    if ($g_eval_depth > 16) { return 0; }
+    $g_eval_depth = $g_eval_depth + 1;
     my int $pos = 0;
-    return pp_parse_or($expr, \$pos, length($expr));
+    my int $res = pp_parse_or($expr, \$pos, length($expr));
+    $g_eval_depth = $g_eval_depth - 1;
+    return $res;
 }
 
 func starts_with(str $s, str $prefix) int {
@@ -653,6 +709,109 @@ func find_include(str $filename, str $current_dir) str {
     return "";
 }
 
+func pp_is_pod_start(str $line) int {
+    if (length($line) < 2 || substr($line, 0, 1) ne "=") { return 0; }
+    my str $ch1 = substr($line, 1, 1);
+    my int $c = ord($ch1);
+    if (!(($c >= 97 && $c <= 122) || ($c >= 65 && $c <= 90))) { return 0; }
+    if (starts_with($line, "=cut") == 1 && (length($line) == 4 || substr($line, 4, 1) eq " " || substr($line, 4, 1) eq "\t")) {
+        return 0;
+    }
+    return 1;
+}
+
+func pp_is_pod_end(str $trimmed) int {
+    if ($trimmed eq "=cut") { return 1; }
+    if (starts_with($trimmed, "=cut ") == 1 || starts_with($trimmed, "=cut\t") == 1) { return 1; }
+    return 0;
+}
+
+func pp_detect_heredoc_tag(str $line) str {
+    my int $len = length($line);
+    my int $i = 0;
+    my int $in_dq = 0;
+    my int $in_sq = 0;
+    while ($i < $len) {
+        my str $ch = substr($line, $i, 1);
+        if ($in_dq == 1) {
+            if ($ch eq "\\") { $i = $i + 2; next; }
+            if ($ch eq "\"") { $in_dq = 0; }
+            $i = $i + 1;
+            next;
+        }
+        if ($in_sq == 1) {
+            if ($ch eq "\\") { $i = $i + 2; next; }
+            if ($ch eq "'") { $in_sq = 0; }
+            $i = $i + 1;
+            next;
+        }
+        if ($ch eq "\"") { $in_dq = 1; $i = $i + 1; next; }
+        if ($ch eq "'") { $in_sq = 1; $i = $i + 1; next; }
+        if ($ch eq "#") { return ""; }
+        if ($ch eq "<" && $i + 2 < $len && substr($line, $i + 1, 1) eq "<") {
+            my int $j = $i + 2;
+            my str $q = "";
+            if ($j < $len && (substr($line, $j, 1) eq "'" || substr($line, $j, 1) eq "\"")) {
+                $q = substr($line, $j, 1);
+                $j = $j + 1;
+            }
+            my int $start = $j;
+            while ($j < $len && is_ident_char(substr($line, $j, 1)) == 1) {
+                $j = $j + 1;
+            }
+            if ($j > $start) {
+                my str $tag = substr($line, $start, $j - $start);
+                if ($q eq "" || ($j < $len && substr($line, $j, 1) eq $q)) {
+                    # Guard against bit-shift `$x << 1`: bareword heredoc tags are uppercase identifiers or quoted
+                    if ($q ne "" || $tag =~ /^[A-Z_][A-Z0-9_]*$/) {
+                        return $tag;
+                    }
+                }
+            }
+        }
+        $i = $i + 1;
+    }
+    return "";
+}
+
+func pp_scan_strada_state(str $line, scalar $dq_ref, scalar $sq_ref, scalar $cmt_ref) void {
+    my int $len = length($line);
+    my int $i = 0;
+    while ($i < $len) {
+        my str $ch = substr($line, $i, 1);
+        if ($$cmt_ref == 1) {
+            if ($ch eq "*" && $i + 1 < $len && substr($line, $i + 1, 1) eq "/") {
+                $$cmt_ref = 0;
+                $i = $i + 2;
+                next;
+            }
+            $i = $i + 1;
+            next;
+        }
+        if ($$dq_ref == 1) {
+            if ($ch eq "\\") { $i = $i + 2; next; }
+            if ($ch eq "\"") { $$dq_ref = 0; }
+            $i = $i + 1;
+            next;
+        }
+        if ($$sq_ref == 1) {
+            if ($ch eq "\\") { $i = $i + 2; next; }
+            if ($ch eq "'") { $$sq_ref = 0; }
+            $i = $i + 1;
+            next;
+        }
+        if ($ch eq "/" && $i + 1 < $len && substr($line, $i + 1, 1) eq "*") {
+            $$cmt_ref = 1;
+            $i = $i + 2;
+            next;
+        }
+        if ($ch eq "#") { last; }
+        if ($ch eq "\"") { $$dq_ref = 1; }
+        elsif ($ch eq "'") { $$sq_ref = 1; }
+        $i = $i + 1;
+    }
+}
+
 func preprocess(str $filename) str {
     my str $content = slurp($filename);
     if (!defined($content)) {
@@ -674,6 +833,12 @@ func preprocess(str $filename) str {
     my int $c_in_block_cmt = 0;
     my int $c_in_str = 0;
     my int $c_in_chr = 0;
+    my int $in_pod = 0;
+    my int $in_ml_dq = 0;
+    my int $in_ml_sq = 0;
+    my int $in_block_cmt = 0;
+    my str $heredoc_tag = "";
+    my str $pending_heredoc = "";
 
     my int $i = 0;
     my int $num_lines = size(@lines);
@@ -685,6 +850,57 @@ func preprocess(str $filename) str {
         # comment, a directive, an inactive branch) so compiler diagnostics
         # point at the right line of the original file
         my int $before = length($output);
+
+        # Inside multiline POD / heredoc / quoted literal / C block comment:
+        # never interpret `#...` as a preprocessor directive.
+        if (length($heredoc_tag) > 0) {
+            if ($trimmed eq $heredoc_tag) {
+                $heredoc_tag = "";
+            }
+            if ($active) {
+                $output = $output . $line . "\n";
+            } else {
+                $output = $output . "\n";
+            }
+            $i++;
+            next;
+        }
+        if ($in_pod == 1) {
+            if (pp_is_pod_end($trimmed) == 1) {
+                $in_pod = 0;
+            }
+            if ($active) {
+                $output = $output . $line . "\n";
+            } else {
+                $output = $output . "\n";
+            }
+            $i++;
+            next;
+        }
+        if ($in_ml_dq == 1 || $in_ml_sq == 1 || $in_block_cmt == 1) {
+            pp_scan_strada_state($line, \$in_ml_dq, \$in_ml_sq, \$in_block_cmt);
+            if ($in_ml_dq == 0 && $in_ml_sq == 0 && $in_block_cmt == 0 && length($pending_heredoc) > 0) {
+                $heredoc_tag = $pending_heredoc;
+                $pending_heredoc = "";
+            }
+            if ($active) {
+                $output = $output . $line . "\n";
+            } else {
+                $output = $output . "\n";
+            }
+            $i++;
+            next;
+        }
+        if ($in_c_block == 0 && pp_is_pod_start($line) == 1) {
+            $in_pod = 1;
+            if ($active) {
+                $output = $output . $line . "\n";
+            } else {
+                $output = $output . "\n";
+            }
+            $i++;
+            next;
+        }
 
         # Check for __C__ block start or continuation
         my int $c_scan_from = -1;
@@ -936,6 +1152,13 @@ func preprocess(str $filename) str {
                 }
             }
         } else {
+            my str $hd = pp_detect_heredoc_tag($line);
+            pp_scan_strada_state($line, \$in_ml_dq, \$in_ml_sq, \$in_block_cmt);
+            if ($in_ml_dq == 1 || $in_ml_sq == 1 || $in_block_cmt == 1) {
+                $pending_heredoc = $hd;
+            } elsif (length($hd) > 0) {
+                $heredoc_tag = $hd;
+            }
             if ($active) {
                 $output = $output . $line . "\n";
             }

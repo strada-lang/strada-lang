@@ -165,7 +165,7 @@ func emit_subst_target_begin(scalar $cg, scalar $tgt) void {
         my str $vc = escape_c_keyword($tgt->{"name"});
         my str $our_k = "" . $cg->{"our_vars"}->{$vc};
         if (length($our_k) > 0) {
-            emit($cg, "({ StradaValue *__subst_tv = strada_global_get(strada_new_str(" . c_str_lit($our_k) . ")); int64_t __subst_cnt = 0; ");
+            emit($cg, "({ StradaValue *__subst_tv = strada_global_get_cstr(" . c_str_lit($our_k) . "); int64_t __subst_cnt = 0; ");
             return;
         }
         my str $vref = scalar_var_c_ref($cg, $tgt->{"name"}, $vc);
@@ -1035,7 +1035,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                             my str $sa_vc = escape_c_keyword($sa_tgt->{"name"});
                             my str $sa_our = "" . $cg->{"our_vars"}->{$sa_vc};
                             if (length($sa_our) > 0) {
-                                emit($cg, "StradaValue *__sa_tv = strada_global_get(strada_new_str(" . c_str_lit($sa_our) . ")); strada_substr_assign(&__sa_tv, __sa_off, __sa_len, __sa_r); strada_global_set_cstr(" . c_str_lit($sa_our) . ", __sa_tv); ");
+                                emit($cg, "StradaValue *__sa_tv = strada_global_get_cstr(" . c_str_lit($sa_our) . "); strada_substr_assign(&__sa_tv, __sa_off, __sa_len, __sa_r); strada_global_set_cstr(" . c_str_lit($sa_our) . ", __sa_tv); ");
                             } else {
                                 my str $sa_ref = scalar_var_c_ref($cg, $sa_tgt->{"name"}, $sa_vc);
                                 emit($cg, "strada_substr_assign((StradaValue**)&" . $sa_ref . ", __sa_off, __sa_len, __sa_r); ");
@@ -1152,7 +1152,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                     my str $rl_our = "" . $cg->{"our_vars"}->{$rl_cname};
                     emit($cg, "({ StradaValue *__new_a = ");
                     if (length($rl_our) > 0) {
-                        emit($cg, "({ StradaValue *__rl_fh = strada_global_get(strada_new_str(" . c_str_lit($rl_our) . ")); StradaValue *__rl_al = strada_read_all_lines(__rl_fh); strada_decref(__rl_fh); __rl_al; })");
+                        emit($cg, "({ StradaValue *__rl_fh = strada_global_get_cstr(" . c_str_lit($rl_our) . "); StradaValue *__rl_al = strada_read_all_lines(__rl_fh); strada_decref(__rl_fh); __rl_al; })");
                     } else {
                         emit($cg, "strada_read_all_lines(" . scalar_var_c_ref($cg, $varname, $rl_cname) . ")");
                     }
@@ -1392,8 +1392,11 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 my scalar $pn_rhs = $expr->{"value"};
                 emit($cg, "({ StradaValue *__pn_v = ");
                 gen_expression($cg, $pn_rhs);
-                emit($cg, "; strada_decref(__program_name); __program_name = __pn_v; strada_incref(__program_name); ");
-                emit($cg, "strada_setprocname(__pn_v); __pn_v; })");
+                emit($cg, "; StradaValue *__pn_old = __program_name; ");
+                if (needs_temp_cleanup($cg, $pn_rhs) == 0) {
+                    emit($cg, "strada_incref(__pn_v); ");
+                }
+                emit($cg, "__program_name = __pn_v; if (__pn_old) strada_decref(__pn_old); strada_setprocname(__pn_v); __pn_v; })");
                 return;
             }
 
@@ -1426,7 +1429,8 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
             my int $rhs_type = $rhs->{"type"};
             my int $tied_eq_wrap = 0;
             if ($cg->{"uses_tie"} == 1 && $target_type == NODE_VARIABLE() &&
-                $target->{"sigil"} eq "$" && index($target->{"name"}, "::") < 0) {
+                $target->{"sigil"} eq "$" && $target->{"name"} ne "__program_name" &&
+                index($target->{"name"}, "::") < 0) {
                 $tied_eq_wrap = 1;
                 emit($cg, "(strada_scalar_is_tied(");
                 gen_expression($cg, $target);
@@ -1517,14 +1521,24 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 }
             }
             my int $needs_incref = 0;
-            # Variable assignment shares reference
+            # Variable assignment shares reference (except `our` globals, which
+            # already return an owned ref from strada_global_get_cstr).
             if ($rhs_type == NODE_VARIABLE()) {
-                $needs_incref = 1;
+                my str $rhs_vc = escape_c_keyword($rhs->{"name"});
+                if (length("" . $cg->{"our_vars"}->{$rhs_vc}) == 0) {
+                    $needs_incref = 1;
+                }
             }
             # Array access returns borrowed reference — must incref to own
             # it — UNLESS the source was owned and codegen used the
             # _owned variant (needs_temp_cleanup detects this).
             if ($rhs_type == NODE_SUBSCRIPT() || $rhs_type == NODE_DEREF_ARRAY()) {
+                if (needs_temp_cleanup($cg, $rhs) == 0) {
+                    $needs_incref = 1;
+                }
+            }
+            # bless() returns its first arg borrowed when the arg is a local variable
+            if ($rhs_type == NODE_CALL() && $rhs->{"name"} eq "bless") {
                 if (needs_temp_cleanup($cg, $rhs) == 0) {
                     $needs_incref = 1;
                 }
@@ -1635,10 +1649,11 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                 my str $our_ca_key = "" . $our_ca_vars->{$our_ca_name};
                 if (length($our_ca_key) > 0) {
                     my int $our_rhs_cl = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $expr->{"value"}) == 1;
-                    if ($op eq "&&=" || $op eq "||=") {
+                    if ($op eq "&&=" || $op eq "||=" || $op eq "//=") {
                         my str $our_sc = "strada_to_bool(__our_old)";
                         if ($op eq "&&=") { $our_sc = "!strada_to_bool(__our_old)"; }
-                        emit($cg, "({ StradaValue *__our_old = strada_global_get(strada_new_str(" . c_str_lit($our_ca_key) . ")); ");
+                        elsif ($op eq "//=") { $our_sc = "strada_defined_bool(__our_old)"; }
+                        emit($cg, "({ StradaValue *__our_old = strada_global_get_cstr(" . c_str_lit($our_ca_key) . "); ");
                         emit($cg, "StradaValue *__our_new; if (" . $our_sc . ") { __our_new = __our_old; ");
                         if ($is_void == 1) { emit($cg, "strada_decref(__our_new); __our_new = NULL; "); }
                         emit($cg, "} else { StradaValue *__our_rhs = ");
@@ -1650,7 +1665,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                         if ($is_void == 1) { emit($cg, "(StradaValue*)NULL; })"); } else { emit($cg, "__our_new; })"); }
                         return;
                     }
-                    emit($cg, "({ StradaValue *__our_old = strada_global_get(strada_new_str(" . c_str_lit($our_ca_key) . ")); ");
+                    emit($cg, "({ StradaValue *__our_old = strada_global_get_cstr(" . c_str_lit($our_ca_key) . "); ");
                     emit($cg, "StradaValue *__our_rhs = ");
                     gen_expression($cg, $expr->{"value"});
                     emit($cg, "; ");
@@ -1670,6 +1685,20 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
                         if ($our_rhs_cl == 1) { emit($cg, "strada_decref(__our_rhs); "); }
                         emit($cg, "strada_decref(__our_old); ");
                         emit($cg, "StradaValue *__our_new = strada_safe_div(__our_da, __our_db); ");
+                    } elsif ($op eq "%=") {
+                        emit($cg, "int64_t __oml = strada_to_int(__our_old); int64_t __omr = strada_to_int(__our_rhs); ");
+                        if ($our_rhs_cl == 1) { emit($cg, "strada_decref(__our_rhs); "); }
+                        emit($cg, "strada_decref(__our_old); ");
+                        emit($cg, "if (__omr == 0) { strada_safe_mod(__oml, 0); } StradaValue *__our_new = strada_new_int_il(strada_floored_mod(__oml, __omr)); ");
+                    } elsif ($op eq "**=") {
+                        emit($cg, "double __opl = strada_to_num(__our_old); double __opr = strada_to_num(__our_rhs); ");
+                        if ($our_rhs_cl == 1) { emit($cg, "strada_decref(__our_rhs); "); }
+                        emit($cg, "strada_decref(__our_old); ");
+                        emit($cg, "StradaValue *__our_new = strada_new_num(pow(__opl, __opr)); ");
+                    } elsif ($op eq "x=") {
+                        emit($cg, "StradaValue *__our_new = strada_string_repeat(__our_old, (int64_t)strada_to_int(__our_rhs)); ");
+                        if ($our_rhs_cl == 1) { emit($cg, "strada_decref(__our_rhs); "); }
+                        emit($cg, "strada_decref(__our_old); ");
                     } elsif ($op eq "&=" || $op eq "|=" || $op eq "^=" || $op eq "<<=" || $op eq ">>=") {
                         emit($cg, "int64_t __obl = strada_to_int(__our_old); int64_t __obr = strada_to_int(__our_rhs); ");
                         if ($our_rhs_cl == 1) { emit($cg, "strada_decref(__our_rhs); "); }
@@ -2106,7 +2135,7 @@ func gen_assign_node(scalar $cg, scalar $expr) void {
             # Fast path: .= "string literal" — direct C string append, no StradaValue
             if ($rhs_val->{"type"} == NODE_STR_LITERAL()) {
                 my str $lit_val = $rhs_val->{"value"};
-                my int $lit_len = length($lit_val);
+                my int $lit_len = bytes($lit_val);
                 gen_expression($cg, $target);
                 emit($cg, " = strada_concat_inplace_cstr(");
                 gen_expression($cg, $target);
@@ -3689,9 +3718,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
         my scalar $our_vars = $cg->{"our_vars"};
         my str $our_key = "" . $our_vars->{$c_var_name};
         if (length($our_key) > 0) {
-            emit($cg, "strada_global_get(strada_new_str(\"");
-            emit($cg, $our_key);
-            emit($cg, "\"))");
+            emit($cg, "strada_global_get_cstr(" . c_str_lit($our_key) . ")");
             return;
         }
         # Handle magic variables for map/sort/grep blocks (only when in those contexts)
@@ -4102,10 +4129,10 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 # our variable: global_get (returns owned ref), increment, global_set (consumes ref)
                 my str $delta = "1";
                 if ($op eq "--") { $delta = "-1"; }
-                emit($cg, "({ StradaValue *__incr_old = strada_global_get(strada_new_str(\"" . $incr_our_key . "\")); ");
+                emit($cg, "({ StradaValue *__incr_old = strada_global_get_cstr(" . c_str_lit($incr_our_key) . "); ");
                 emit($cg, "StradaValue *__incr_new = strada_new_num(strada_to_num(__incr_old) + " . $delta . ".0); ");
                 emit($cg, "strada_incref(__incr_new); ");
-                emit($cg, "strada_global_set_cstr(\"" . $incr_our_key . "\", __incr_new); ");
+                emit($cg, "strada_global_set_cstr(" . c_str_lit($incr_our_key) . ", __incr_new); ");
                 if ($is_prefix == 1) {
                     emit($cg, "strada_decref(__incr_old); __incr_new; })");
                 } else {
@@ -4992,12 +5019,20 @@ func gen_expression(scalar $cg, scalar $expr) void {
             }
         }
 
+        my int $dm_mval_cl = 0;
+        if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $dm_meth_expr) == 1) {
+            $dm_mval_cl = 1;
+        }
+        my int $dm_push = cleanup_push_useful($cg);
         if ($dm_has_spread == 1) {
             # Build args array dynamically with spread support
             emit($cg, "({ StradaValue *__dm_mval = ");
             gen_expression($cg, $dm_meth_expr);
-            emit($cg, "; char *__dm_mname = strada_to_str_ss(__dm_mval); ");
+            emit($cg, "; ");
+            if ($dm_push == 1 && $dm_mval_cl == 1) { emit($cg, "strada_cleanup_push(__dm_mval); "); }
+            emit($cg, "char __dm_mbuf[256]; const char *__dm_mname = strada_to_str_buf(__dm_mval, __dm_mbuf, sizeof(__dm_mbuf)); ");
             emit($cg, "StradaValue *__dm_pa = strada_new_array(); ");
+            if ($dm_push == 1) { emit($cg, "strada_cleanup_push(__dm_pa); "); }
 
             my int $dm_a = 0;
             while ($dm_a < $dm_arg_count) {
@@ -5027,12 +5062,17 @@ func gen_expression(scalar $cg, scalar $expr) void {
             emit($cg, "StradaValue *__dm_obj = ");
             gen_expression($cg, $dm_base);
             emit($cg, "; ");
-            if ($dm_base_cleanup == 1) { emit($cg, "strada_cleanup_push(__dm_obj); "); }
-            emit($cg, "StradaValue *__dm_res = strada_method_call(__dm_obj, __dm_mname, __dm_pa); strada_cstr_free(__dm_mname); ");
-            if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $dm_meth_expr) == 1) {
-                emit($cg, "strada_decref(__dm_mval); ");
+            if ($dm_push == 1) { emit($cg, "strada_cleanup_pop(); "); }
+            if ($dm_push == 1 && $dm_base_cleanup == 1) { emit($cg, "strada_cleanup_push(__dm_obj); "); }
+            emit($cg, "StradaValue *__dm_res = strada_method_call(__dm_obj, __dm_mname, __dm_pa); ");
+            if ($dm_base_cleanup == 1) {
+                if ($dm_push == 1) { emit($cg, "strada_cleanup_pop_decref(__dm_obj); "); }
+                else { emit($cg, "strada_decref(__dm_obj); "); }
             }
-            if ($dm_base_cleanup == 1) { emit($cg, "strada_cleanup_pop_decref(__dm_obj); "); }
+            if ($dm_mval_cl == 1) {
+                if ($dm_push == 1) { emit($cg, "strada_cleanup_pop_decref(__dm_mval); "); }
+                else { emit($cg, "strada_decref(__dm_mval); "); }
+            }
             emit($cg, "__dm_res; })");
         } else {
             # No spread - use regular strada_pack_args
@@ -5050,7 +5090,9 @@ func gen_expression(scalar $cg, scalar $expr) void {
 
             emit($cg, "({ StradaValue *__dm_mval = ");
             gen_expression($cg, $dm_meth_expr);
-            emit($cg, "; char *__dm_mname = strada_to_str_ss(__dm_mval); ");
+            emit($cg, "; ");
+            if ($dm_push == 1 && $dm_mval_cl == 1) { emit($cg, "strada_cleanup_push(__dm_mval); "); }
+            emit($cg, "char __dm_mbuf[256]; const char *__dm_mname = strada_to_str_buf(__dm_mval, __dm_mbuf, sizeof(__dm_mbuf)); ");
 
             if ($dm_needs_arg_cleanup == 1) {
                 # Capture temp args
@@ -5060,6 +5102,9 @@ func gen_expression(scalar $cg, scalar $expr) void {
                         emit($cg, "StradaValue *__dm_arg_" . $dm_a2 . " = ");
                         gen_expression($cg, $dm_args->[$dm_a2]);
                         emit($cg, "; ");
+                        if ($dm_push == 1) {
+                            emit($cg, "strada_cleanup_push(__dm_arg_" . $dm_a2 . "); ");
+                        }
                     }
                     $dm_a2 = $dm_a2 + 1;
                 }
@@ -5075,23 +5120,29 @@ func gen_expression(scalar $cg, scalar $expr) void {
                     $dm_i = $dm_i + 1;
                 }
                 emit($cg, "); ");
+                if ($dm_push == 1) { emit($cg, "strada_cleanup_push(__dm_pa); "); }
                 emit($cg, "StradaValue *__dm_obj = ");
                 gen_expression($cg, $dm_base);
                 emit($cg, "; ");
-                if ($dm_base_cleanup == 1) { emit($cg, "strada_cleanup_push(__dm_obj); "); }
+                if ($dm_push == 1) { emit($cg, "strada_cleanup_pop(); "); }
+                if ($dm_push == 1 && $dm_base_cleanup == 1) { emit($cg, "strada_cleanup_push(__dm_obj); "); }
                 emit($cg, "StradaValue *__dm_res = strada_method_call(__dm_obj, __dm_mname, __dm_pa); ");
-                my int $dm_d = 0;
-                while ($dm_d < $dm_arg_count) {
+                if ($dm_base_cleanup == 1) {
+                    if ($dm_push == 1) { emit($cg, "strada_cleanup_pop_decref(__dm_obj); "); }
+                    else { emit($cg, "strada_decref(__dm_obj); "); }
+                }
+                my int $dm_d = $dm_arg_count - 1;
+                while ($dm_d >= 0) {
                     if (needs_temp_cleanup($cg, $dm_args->[$dm_d]) == 1) {
-                        emit($cg, "strada_decref(__dm_arg_" . $dm_d . "); ");
+                        if ($dm_push == 1) { emit($cg, "strada_cleanup_pop_decref(__dm_arg_" . $dm_d . "); "); }
+                        else { emit($cg, "strada_decref(__dm_arg_" . $dm_d . "); "); }
                     }
-                    $dm_d = $dm_d + 1;
+                    $dm_d = $dm_d - 1;
                 }
-                emit($cg, "strada_cstr_free(__dm_mname); ");
-                if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $dm_meth_expr) == 1) {
-                    emit($cg, "strada_decref(__dm_mval); ");
+                if ($dm_mval_cl == 1) {
+                    if ($dm_push == 1) { emit($cg, "strada_cleanup_pop_decref(__dm_mval); "); }
+                    else { emit($cg, "strada_decref(__dm_mval); "); }
                 }
-                if ($dm_base_cleanup == 1) { emit($cg, "strada_cleanup_pop_decref(__dm_obj); "); }
                 emit($cg, "__dm_res; })");
             } else {
                 # No temp args
@@ -5102,15 +5153,22 @@ func gen_expression(scalar $cg, scalar $expr) void {
                     gen_expression($cg, $dm_args->[$dm_i2]);
                     $dm_i2 = $dm_i2 + 1;
                 }
-                emit($cg, "); StradaValue *__dm_obj = ");
+                emit($cg, "); ");
+                if ($dm_push == 1) { emit($cg, "strada_cleanup_push(__dm_pa); "); }
+                emit($cg, "StradaValue *__dm_obj = ");
                 gen_expression($cg, $dm_base);
                 emit($cg, "; ");
-                if ($dm_base_cleanup == 1) { emit($cg, "strada_cleanup_push(__dm_obj); "); }
-                emit($cg, "StradaValue *__dm_res = strada_method_call(__dm_obj, __dm_mname, __dm_pa); strada_cstr_free(__dm_mname); ");
-                if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $dm_meth_expr) == 1) {
-                    emit($cg, "strada_decref(__dm_mval); ");
+                if ($dm_push == 1) { emit($cg, "strada_cleanup_pop(); "); }
+                if ($dm_push == 1 && $dm_base_cleanup == 1) { emit($cg, "strada_cleanup_push(__dm_obj); "); }
+                emit($cg, "StradaValue *__dm_res = strada_method_call(__dm_obj, __dm_mname, __dm_pa); ");
+                if ($dm_base_cleanup == 1) {
+                    if ($dm_push == 1) { emit($cg, "strada_cleanup_pop_decref(__dm_obj); "); }
+                    else { emit($cg, "strada_decref(__dm_obj); "); }
                 }
-                if ($dm_base_cleanup == 1) { emit($cg, "strada_cleanup_pop_decref(__dm_obj); "); }
+                if ($dm_mval_cl == 1) {
+                    if ($dm_push == 1) { emit($cg, "strada_cleanup_pop_decref(__dm_mval); "); }
+                    else { emit($cg, "strada_decref(__dm_mval); "); }
+                }
                 emit($cg, "__dm_res; })");
             }
         }
@@ -5130,11 +5188,13 @@ func gen_expression(scalar $cg, scalar $expr) void {
 
         my str $fn_pkg = $cg->{"current_fn_package"};
         my int $self_cl = $cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $args->[0]) == 1;
+        my int $sp_push = cleanup_push_useful($cg);
         emit($cg, "({ StradaValue *__super_self = ");
         gen_expression($cg, $args->[0]);
         emit($cg, "; ");
-        if ($self_cl == 1) { emit($cg, "strada_cleanup_push(__super_self); "); }
+        if ($sp_push == 1 && $self_cl == 1) { emit($cg, "strada_cleanup_push(__super_self); "); }
         emit($cg, "StradaValue *__super_pa = strada_new_array(); ");
+        if ($sp_push == 1) { emit($cg, "strada_cleanup_push(__super_pa); "); }
         my int $si = 1;
         while ($si < $arg_count) {
             my scalar $sarg = $args->[$si];
@@ -5156,8 +5216,12 @@ func gen_expression(scalar $cg, scalar $expr) void {
             }
             $si = $si + 1;
         }
+        if ($sp_push == 1) { emit($cg, "strada_cleanup_pop(); "); }
         emit($cg, "StradaValue *__super_res = strada_super_call(__super_self, " . c_str_lit($fn_pkg) . ", " . c_str_lit($method) . ", __super_pa); ");
-        if ($self_cl == 1) { emit($cg, "strada_cleanup_pop_decref(__super_self); "); }
+        if ($self_cl == 1) {
+            if ($sp_push == 1) { emit($cg, "strada_cleanup_pop_decref(__super_self); "); }
+            else { emit($cg, "strada_decref(__super_self); "); }
+        }
         emit($cg, "__super_res; })");
         return;
     }
@@ -5734,6 +5798,13 @@ func gen_expression(scalar $cg, scalar $expr) void {
             $map_is_range = 1;
             $map_arr_cleanup = 0;
         }
+        my int $saved_map_depth = $cg->{"scope_depth"};
+        my int $saved_map_brk = $cg->{"loop_break_depth"};
+        my int $saved_map_redo = $cg->{"loop_redo_depth"};
+        my int $saved_map_try = $cg->{"loop_try_depth"};
+        my str $saved_map_lvar = "" . $cg->{"loop_local_var"};
+        my int $saved_map_fmark = $cg->{"loop_finally_mark"};
+        my str $saved_map_rlbl = "" . $cg->{"current_redo_label"};
         emit($cg, "({ ");
         if ($map_is_range == 1) {
             emit($cg, "int64_t __map_rs_" . $map_id . " = ");
@@ -5746,13 +5817,19 @@ func gen_expression(scalar $cg, scalar $expr) void {
             gen_expression($cg, $array_expr);
             # Push so a throwing block body lets the catch's drain
             # decref the source on the longjmp path.
-            emit($cg, "; strada_cleanup_push(__map_sv_" . $map_id . "); StradaArray *__map_input_" . $map_id . " = strada_deref_array(__map_sv_" . $map_id . "); ");
+            emit($cg, "; strada_cleanup_push(__map_sv_" . $map_id . "); ");
+            foreach_cleanup_enter($cg, $saved_map_depth, "__map_sv_" . $map_id);
+            emit($cg, "StradaArray *__map_input_" . $map_id . " = strada_deref_array(__map_sv_" . $map_id . "); ");
         } else {
             emit($cg, "StradaArray *__map_input_" . $map_id . " = strada_deref_array(");
             gen_expression($cg, $array_expr);
             emit($cg, "); ");
         }
-        emit($cg, "StradaValue *__map_result_" . $map_id . " = strada_new_array(); strada_cleanup_push(__map_result_" . $map_id . "); ");
+        emit($cg, "StradaValue *__map_result_" . $map_id . " = strada_new_array(); ");
+        if ($cg->{"cleanup_enabled"} == 1) {
+            emit($cg, "strada_cleanup_push(__map_result_" . $map_id . "); ");
+            foreach_cleanup_enter($cg, $saved_map_depth, "__map_result_" . $map_id);
+        }
         my str $map_el_var = "__map_e_" . $map_id;
         if ($map_is_range == 1) {
             emit($cg, "for (int64_t __map_i_" . $map_id . " = __map_rs_" . $map_id . "; __map_i_" . $map_id . " <= __map_re_" . $map_id . "; __map_i_" . $map_id . "++) { ");
@@ -5767,6 +5844,15 @@ func gen_expression(scalar $cg, scalar $expr) void {
         my str $saved_map_elem = "" . $cg->{"current_elem_var"};
         $cg->{"in_map_block"} = 1;
         $cg->{"current_elem_var"} = $map_el_var;
+        scope_push($cg);
+        $cg->{"loop_break_depth"} = $cg->{"scope_depth"};
+        $cg->{"loop_redo_depth"} = $cg->{"scope_depth"};
+        $cg->{"loop_try_depth"} = $cg->{"try_depth"};
+        $cg->{"loop_local_var"} = "";
+        $cg->{"loop_finally_mark"} = $cg->{"finally_count"};
+        my str $map_redo_lbl = "__map_redo_" . $map_id;
+        $cg->{"current_redo_label"} = $map_redo_lbl;
+        emit($cg, $map_redo_lbl . ": __attribute__((unused)); ");
         scope_push($cg);
 
         my scalar $stmts = $block->{"statements"};
@@ -5804,14 +5890,25 @@ func gen_expression(scalar $cg, scalar $expr) void {
             }
         }
         scope_pop($cg);
+        scope_pop($cg);
 
         $cg->{"in_map_block"} = $saved_in_map;
         $cg->{"current_elem_var"} = $saved_map_elem;
+        $cg->{"loop_break_depth"} = $saved_map_brk;
+        $cg->{"loop_redo_depth"} = $saved_map_redo;
+        $cg->{"loop_try_depth"} = $saved_map_try;
+        $cg->{"loop_local_var"} = $saved_map_lvar;
+        $cg->{"loop_finally_mark"} = $saved_map_fmark;
+        $cg->{"current_redo_label"} = $saved_map_rlbl;
 
         emit($cg, "} ");
         # Pop the cleanup-stack entries we pushed (result, then optionally source).
-        emit($cg, "strada_cleanup_pop(); ");
+        if ($cg->{"cleanup_enabled"} == 1) {
+            foreach_cleanup_leave($cg);
+            emit($cg, "strada_cleanup_pop(); ");
+        }
         if ($map_arr_cleanup == 1) {
+            foreach_cleanup_leave($cg);
             emit($cg, "strada_cleanup_pop_decref(__map_sv_" . $map_id . "); ");
         }
         emit($cg, "__map_result_" . $map_id . "; })");
@@ -5945,6 +6042,13 @@ func gen_expression(scalar $cg, scalar $expr) void {
             $grep_is_range = 1;
             $grep_arr_cleanup = 0;
         }
+        my int $saved_grep_depth = $cg->{"scope_depth"};
+        my int $saved_grep_brk = $cg->{"loop_break_depth"};
+        my int $saved_grep_redo = $cg->{"loop_redo_depth"};
+        my int $saved_grep_try = $cg->{"loop_try_depth"};
+        my str $saved_grep_lvar = "" . $cg->{"loop_local_var"};
+        my int $saved_grep_fmark = $cg->{"loop_finally_mark"};
+        my str $saved_grep_rlbl = "" . $cg->{"current_redo_label"};
         emit($cg, "({ ");
         if ($grep_is_range == 1) {
             emit($cg, "int64_t __grep_rs_" . $grep_id . " = ");
@@ -5955,13 +6059,19 @@ func gen_expression(scalar $cg, scalar $expr) void {
         } elsif ($grep_arr_cleanup == 1) {
             emit($cg, "StradaValue *__grep_sv_" . $grep_id . " = ");
             gen_expression($cg, $array_expr);
-            emit($cg, "; strada_cleanup_push(__grep_sv_" . $grep_id . "); StradaArray *__grep_input_" . $grep_id . " = strada_deref_array(__grep_sv_" . $grep_id . "); ");
+            emit($cg, "; strada_cleanup_push(__grep_sv_" . $grep_id . "); ");
+            foreach_cleanup_enter($cg, $saved_grep_depth, "__grep_sv_" . $grep_id);
+            emit($cg, "StradaArray *__grep_input_" . $grep_id . " = strada_deref_array(__grep_sv_" . $grep_id . "); ");
         } else {
             emit($cg, "StradaArray *__grep_input_" . $grep_id . " = strada_deref_array(");
             gen_expression($cg, $array_expr);
             emit($cg, "); ");
         }
-        emit($cg, "StradaValue *__grep_result_" . $grep_id . " = strada_new_array(); strada_cleanup_push(__grep_result_" . $grep_id . "); ");
+        emit($cg, "StradaValue *__grep_result_" . $grep_id . " = strada_new_array(); ");
+        if ($cg->{"cleanup_enabled"} == 1) {
+            emit($cg, "strada_cleanup_push(__grep_result_" . $grep_id . "); ");
+            foreach_cleanup_enter($cg, $saved_grep_depth, "__grep_result_" . $grep_id);
+        }
         my str $grep_el_var = "__grep_e_" . $grep_id;
         if ($grep_is_range == 1) {
             emit($cg, "for (int64_t __grep_i_" . $grep_id . " = __grep_rs_" . $grep_id . "; __grep_i_" . $grep_id . " <= __grep_re_" . $grep_id . "; __grep_i_" . $grep_id . "++) { ");
@@ -5976,6 +6086,15 @@ func gen_expression(scalar $cg, scalar $expr) void {
         my str $saved_grep_elem = "" . $cg->{"current_elem_var"};
         $cg->{"in_grep_block"} = 1;
         $cg->{"current_elem_var"} = $grep_el_var;
+        scope_push($cg);
+        $cg->{"loop_break_depth"} = $cg->{"scope_depth"};
+        $cg->{"loop_redo_depth"} = $cg->{"scope_depth"};
+        $cg->{"loop_try_depth"} = $cg->{"try_depth"};
+        $cg->{"loop_local_var"} = "";
+        $cg->{"loop_finally_mark"} = $cg->{"finally_count"};
+        my str $grep_redo_lbl = "__grep_redo_" . $grep_id;
+        $cg->{"current_redo_label"} = $grep_redo_lbl;
+        emit($cg, $grep_redo_lbl . ": __attribute__((unused)); ");
         scope_push($cg);
 
         my scalar $stmts = $block->{"statements"};
@@ -6002,12 +6121,23 @@ func gen_expression(scalar $cg, scalar $expr) void {
             }
         }
         scope_pop($cg);
+        scope_pop($cg);
 
         $cg->{"in_grep_block"} = $saved_in_grep;
         $cg->{"current_elem_var"} = $saved_grep_elem;
+        $cg->{"loop_break_depth"} = $saved_grep_brk;
+        $cg->{"loop_redo_depth"} = $saved_grep_redo;
+        $cg->{"loop_try_depth"} = $saved_grep_try;
+        $cg->{"loop_local_var"} = $saved_grep_lvar;
+        $cg->{"loop_finally_mark"} = $saved_grep_fmark;
+        $cg->{"current_redo_label"} = $saved_grep_rlbl;
         emit($cg, "} ");
-        emit($cg, "strada_cleanup_pop(); ");
+        if ($cg->{"cleanup_enabled"} == 1) {
+            foreach_cleanup_leave($cg);
+            emit($cg, "strada_cleanup_pop(); ");
+        }
         if ($grep_arr_cleanup == 1) {
+            foreach_cleanup_leave($cg);
             emit($cg, "strada_cleanup_pop_decref(__grep_sv_" . $grep_id . "); ");
         }
         emit($cg, "__grep_result_" . $grep_id . "; })");
@@ -6247,7 +6377,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 }
             } else {
                 $cg->{"active_boxed_vars"}->{$ap_c} = 0;
-                if ($cg->{"cleanup_enabled"} == 1 && node_writes_var($anon_body, $ap->{"name"}) == 1) {
+                if ($cg->{"cleanup_enabled"} == 1 && (node_writes_var($anon_body, $ap->{"name"}) == 1 || node_is_leaf_safe($cg, $anon_body) == 0)) {
                     emit_indent($cg);
                     emit($cg, "strada_incref(" . $ap_c . ");\n");
                     scope_track_var($cg, $ap_c);
@@ -6395,7 +6525,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
                             $modes_str = $modes_str . "0";
                         }
                     } else {
-                        if (($cg->{"active_boxed_vars"}->{$c_cap} + 0) == 1) {
+                        if (($cg->{"active_boxed_vars"}->{$c_cap} + 0) == 1 || ("" . $cg->{"declaring_boxed_var"}) eq $c_cap) {
                             $ptrs_str = $ptrs_str . "__cell_" . $c_cap;
                             $modes_str = $modes_str . "0";
                         } elsif (($cg->{"file_globals"}->{$c_cap} + 0) == 1 && ($cg->{"func_locals_seen"}->{$c_cap} + 0) == 0) {
@@ -6439,10 +6569,18 @@ func gen_expression(scalar $cg, scalar $expr) void {
             }
         }
 
+        my int $use_cl_stack = cleanup_push_useful($cg);
         if ($expr->{"has_spread"} == 1 || $arg_count > 16) {
             emit($cg, "({ StradaValue *__cl_fn2 = ");
             gen_expression($cg, $expr->{"closure"});
-            emit($cg, "; StradaValue *__cl_arr = strada_new_array(); ");
+            emit($cg, "; ");
+            if ($callee_cleanup == 1 && $use_cl_stack == 1) {
+                emit($cg, "strada_cleanup_push(__cl_fn2); ");
+            }
+            emit($cg, "StradaValue *__cl_arr = strada_new_array(); ");
+            if ($use_cl_stack == 1) {
+                emit($cg, "strada_cleanup_push(__cl_arr); ");
+            }
             my int $si = 0;
             while ($si < $arg_count) {
                 my scalar $sarg = $args->[$si];
@@ -6465,22 +6603,37 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 $si = $si + 1;
             }
             emit($cg, "StradaValue *__cl_res2 = strada_closure_call_array(__cl_fn2, __cl_arr); ");
-            if ($callee_cleanup == 1) {
-                emit($cg, "strada_decref(__cl_fn2); ");
+            if ($use_cl_stack == 1) {
+                emit($cg, "strada_cleanup_pop_decref(__cl_arr); ");
+            } else {
+                emit($cg, "strada_decref(__cl_arr); ");
             }
-            emit($cg, "strada_decref(__cl_arr); __cl_res2; })");
+            if ($callee_cleanup == 1) {
+                if ($use_cl_stack == 1) {
+                    emit($cg, "strada_cleanup_pop_decref(__cl_fn2); ");
+                } else {
+                    emit($cg, "strada_decref(__cl_fn2); ");
+                }
+            }
+            emit($cg, "__cl_res2; })");
         } elsif ($needs_arg_cleanup == 1 || $callee_cleanup == 1) {
             emit($cg, "({ ");
             if ($callee_cleanup == 1) {
                 emit($cg, "StradaValue *__cl_fn = ");
                 gen_expression($cg, $expr->{"closure"});
                 emit($cg, "; ");
+                if ($use_cl_stack == 1) {
+                    emit($cg, "strada_cleanup_push(__cl_fn); ");
+                }
             }
             my int $ca = 0;
             while ($ca < $arg_count) {
                 emit($cg, "StradaValue *__cla" . $ca . " = ");
                 gen_expression($cg, $args->[$ca]);
                 emit($cg, "; ");
+                if ($use_cl_stack == 1 && needs_temp_cleanup($cg, $args->[$ca]) == 1) {
+                    emit($cg, "strada_cleanup_push(__cla" . $ca . "); ");
+                }
                 $ca = $ca + 1;
             }
             emit($cg, "StradaValue *__clres = strada_closure_call(");
@@ -6496,15 +6649,23 @@ func gen_expression(scalar $cg, scalar $expr) void {
                 $ca = $ca + 1;
             }
             emit($cg, "); ");
-            if ($callee_cleanup == 1) {
-                emit($cg, "strada_decref(__cl_fn); ");
-            }
-            $ca = 0;
-            while ($ca < $arg_count) {
+            $ca = $arg_count - 1;
+            while ($ca >= 0) {
                 if (needs_temp_cleanup($cg, $args->[$ca]) == 1) {
-                    emit($cg, "strada_decref(__cla" . $ca . "); ");
+                    if ($use_cl_stack == 1) {
+                        emit($cg, "strada_cleanup_pop_decref(__cla" . $ca . "); ");
+                    } else {
+                        emit($cg, "strada_decref(__cla" . $ca . "); ");
+                    }
                 }
-                $ca = $ca + 1;
+                $ca = $ca - 1;
+            }
+            if ($callee_cleanup == 1) {
+                if ($use_cl_stack == 1) {
+                    emit($cg, "strada_cleanup_pop_decref(__cl_fn); ");
+                } else {
+                    emit($cg, "strada_decref(__cl_fn); ");
+                }
             }
             emit($cg, "__clres; })");
         } else {
@@ -6641,7 +6802,7 @@ func gen_expression(scalar $cg, scalar $expr) void {
         my str $rl_cname = escape_c_keyword($varname);
         my str $rl_our = "" . $cg->{"our_vars"}->{$rl_cname};
         if (length($rl_our) > 0) {
-            emit($cg, "({ StradaValue *__rl_fh = strada_global_get(strada_new_str(" . c_str_lit($rl_our) . ")); StradaValue *__rl_r = strada_read_line(__rl_fh); strada_decref(__rl_fh); __rl_r; })");
+            emit($cg, "({ StradaValue *__rl_fh = strada_global_get_cstr(" . c_str_lit($rl_our) . "); StradaValue *__rl_r = strada_read_line(__rl_fh); strada_decref(__rl_fh); __rl_r; })");
         } else {
             emit($cg, "strada_read_line(" . scalar_var_c_ref($cg, $varname, $rl_cname) . ")");
         }

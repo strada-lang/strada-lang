@@ -127,8 +127,5 @@ func dir_chunk(str $s) scalar  { my hash %h = (); $h{"k"} = "dir";  $h{"src"} = 
 # index() starting at $from (Strada index() searches the whole string; slice + offset).
 func index_from(str $hay, str $needle, int $from) int {
     if ($from <= 0) { return index($hay, $needle); }
-    my int $n = length($hay);
-    if ($from >= $n) { return -1; }
-    my int $rel = index(substr($hay, $from, $n - $from), $needle);
-    return ($rel < 0) ? -1 : ($from + $rel);
+    return index($hay, $needle, $from);
 }

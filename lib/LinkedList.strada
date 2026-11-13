@@ -169,6 +169,7 @@ func _node_new(scalar $value) scalar {
     my hash %node = ();
     $node{"value"} = $value;
     $node{"next"} = undef;
+    $node{"prev"} = undef;
     return \%node;
 }
 
@@ -189,6 +190,13 @@ func is_empty(scalar $self) int {
 }
 
 func clear(scalar $self) void {
+    my scalar $cur = $self->{"head"};
+    while (defined($cur)) {
+        my scalar $nxt = $cur->{"next"};
+        $cur->{"prev"} = undef;
+        $cur->{"next"} = undef;
+        $cur = $nxt;
+    }
     $self->{"head"} = undef;
     $self->{"tail"} = undef;
     $self->{"len"} = 0;
@@ -204,6 +212,8 @@ func push(scalar $self, scalar $value) void {
     my scalar $tail = $self->{"tail"};
     if (defined($tail)) {
         $tail->{"next"} = $node;
+        $node->{"prev"} = $tail;
+        core::weaken($node->{"prev"});
     } else {
         $self->{"head"} = $node;
     }
@@ -220,6 +230,8 @@ func unshift(scalar $self, scalar $value) void {
     my scalar $head = $self->{"head"};
     if (defined($head)) {
         $node->{"next"} = $head;
+        $head->{"prev"} = $node;
+        core::weaken($head->{"prev"});
     } else {
         $self->{"tail"} = $node;
     }
@@ -235,8 +247,11 @@ func shift(scalar $self) scalar {
 
     my scalar $value = $head->{"value"};
     my scalar $next_node = $head->{"next"};
+    $head->{"next"} = undef;
     $self->{"head"} = $next_node;
-    if (!defined($next_node)) {
+    if (defined($next_node)) {
+        $next_node->{"prev"} = undef;
+    } else {
         $self->{"tail"} = undef;
     }
     $self->{"len"} = $self->{"len"} - 1;
@@ -244,19 +259,14 @@ func shift(scalar $self) scalar {
 }
 
 func pop(scalar $self) scalar {
-    my scalar $head = $self->{"head"};
-    if (!defined($head)) {
+    my scalar $tail = $self->{"tail"};
+    if (!defined($tail)) {
         return undef;
     }
 
-    my scalar $cur = $head;
-    my scalar $prev = undef;
-    while (defined($cur->{"next"})) {
-        $prev = $cur;
-        $cur = deref($cur->{"next"});
-    }
-
-    my scalar $value = $cur->{"value"};
+    my scalar $value = $tail->{"value"};
+    my scalar $prev = $tail->{"prev"};
+    $tail->{"prev"} = undef;
     if (defined($prev)) {
         $prev->{"next"} = undef;
         $self->{"tail"} = $prev;
@@ -295,7 +305,7 @@ func get(scalar $self, int $index) scalar {
     my int $i = 0;
     my scalar $cur = $self->{"head"};
     while ($i < $index && defined($cur)) {
-        $cur = deref($cur->{"next"});
+        $cur = $cur->{"next"};
         $i = $i + 1;
     }
     if (!defined($cur)) {
@@ -315,7 +325,7 @@ func set(scalar $self, int $index, scalar $value) scalar {
     my int $i = 0;
     my scalar $cur = $self->{"head"};
     while ($i < $index && defined($cur)) {
-        $cur = deref($cur->{"next"});
+        $cur = $cur->{"next"};
         $i = $i + 1;
     }
     if (!defined($cur)) {
@@ -331,7 +341,7 @@ func to_array(scalar $self) array {
     my scalar $cur = $self->{"head"};
     while (defined($cur)) {
         push(@out, $cur->{"value"});
-        $cur = deref($cur->{"next"});
+        $cur = $cur->{"next"};
     }
     return @out;
 }
@@ -348,6 +358,6 @@ func each(scalar $self, scalar $fn) void {
     my scalar $cur = $self->{"head"};
     while (defined($cur)) {
         $fn->($cur->{"value"});
-        $cur = deref($cur->{"next"});
+        $cur = $cur->{"next"};
     }
 }

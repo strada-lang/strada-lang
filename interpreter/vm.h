@@ -213,6 +213,7 @@ typedef enum {
     OP_METHOD_CALL_SPREAD,  /* u16 method_str_idx — pop args_array, unpack and dispatch method */
     OP_CALL_CLOSURE_SPREAD, /* pop closure, pop args_array, unpack and call closure */
     OP_PUSH_FLOAT,      /* push immediate IEEE-754 double (8 bytes) */
+    OP_LOAD_CAPTURE_CELL, /* u16 cap_idx — push raw VMCell pointer from enclosing closure */
 
     OP_OPCODE_COUNT     /* must be last */
 } StradaOpcode;
@@ -515,6 +516,8 @@ enum {
     BUILTIN_CAPTURES,
     BUILTIN_NAMED_CAPTURES,
     BUILTIN_BYTE_INDEX,
+    BUILTIN_CORE_OPEN_STR,
+    BUILTIN_CORE_STR_FROM_FH,
 };
 
 /* Heap object type tag */
@@ -529,7 +532,13 @@ enum VMObjType {
     VM_OBJ_NATIVE_SV = 14, /* opaque StradaValue* from native library (passed through as-is) */
     VM_OBJ_FLOAT = 16,    /* boxed IEEE-754 double */
 };
-typedef struct { enum VMObjType obj_type; } VMObjHeader;
+typedef struct VMObjHeader {
+    enum VMObjType obj_type;
+    uint8_t gc_marked;
+    uint8_t gc_immortal;
+    struct VMObjHeader *gc_next;
+} VMObjHeader;
+void vm_gc_init_hdr(VMObjHeader *hdr, enum VMObjType type);
 
 /* Forward declarations */
 typedef struct VMArray VMArray;
@@ -595,7 +604,7 @@ static inline VMCell *VM_AS_CELL(VMValue v) { return (VMCell*)VM_TO_PTR(v); }
 static inline VMValue VM_MAKE_STR(const char *s) {
     size_t len = strlen(s);
     VMString *vs = (VMString*)malloc(sizeof(VMString) + len + 1);
-    vs->hdr.obj_type = VM_OBJ_STR;
+    vm_gc_init_hdr(&vs->hdr, VM_OBJ_STR);
     vs->len = (uint32_t)len;
     memcpy(vs->data, s, len + 1);
     return VM_MAKE_PTR(vs);
@@ -603,7 +612,7 @@ static inline VMValue VM_MAKE_STR(const char *s) {
 
 static inline VMValue VM_MAKE_STR_N(const char *s, size_t len) {
     VMString *vs = (VMString*)malloc(sizeof(VMString) + len + 1);
-    vs->hdr.obj_type = VM_OBJ_STR;
+    vm_gc_init_hdr(&vs->hdr, VM_OBJ_STR);
     vs->len = (uint32_t)len;
     memcpy(vs->data, s, len);
     vs->data[len] = '\0';
@@ -617,7 +626,7 @@ typedef struct {
 static inline VMFloat *VM_AS_FLOAT(VMValue v) { return (VMFloat*)VM_TO_PTR(v); }
 static inline VMValue VM_MAKE_FLOAT(double d) {
     VMFloat *vf = (VMFloat*)malloc(sizeof(VMFloat));
-    vf->hdr.obj_type = VM_OBJ_FLOAT;
+    vm_gc_init_hdr(&vf->hdr, VM_OBJ_FLOAT);
     vf->val = d;
     return VM_MAKE_PTR(vf);
 }
@@ -668,6 +677,9 @@ typedef struct {
     void *fp;  /* FILE* */
     int is_pipe;
     int is_popen;
+    char *mem_buf;
+    size_t mem_len;
+    int is_mem; /* 1 = fmemopen read, 2 = open_memstream write */
 } VMFileHandle;
 
 /* Opaque wrapper for native StradaValue* objects (e.g., from import_lib OOP) */
@@ -733,6 +745,7 @@ typedef struct {
     size_t stack_base;
     size_t frame_count;
     uint16_t local_slot; /* where to store caught exception */
+    int global_save_depth;
 } VMExcHandler;
 
 /* Global save for local() */
@@ -750,6 +763,9 @@ typedef struct {
     VMNativeFunc fn;
     void *dl_handle;  /* dlopen handle */
     void *sym;        /* dlsym pointer to the actual C function */
+    int param_count;
+    int is_variadic;
+    int return_type;
 } VMNativeEntry;
 
 /* JIT-compiled __C__ block */
@@ -795,6 +811,10 @@ typedef struct {
     char *cblock_prelude;       /* program-level __C__ blocks (file-scope
                                  * helpers/includes), prepended to every
                                  * function-level block's JIT unit */
+    VMObjHeader *compile_objects; /* compile-time immortal GC objects (e.g., default_val) */
+    void **dl_handles;          /* all dlopen'd import_lib handles */
+    int dl_handle_count;
+    int dl_handle_cap;
 } VMProgram;
 
 /* Call frame */
@@ -804,6 +824,7 @@ typedef struct {
     VMValue *locals;
     size_t stack_base;
     VMClosure *closure;  /* non-NULL if called as closure */
+    int global_save_depth;
 } VMFrame;
 
 /* VM state */
@@ -843,6 +864,12 @@ typedef struct {
         const char *method;      /* pointer compare (str_consts) */
         int func_idx;
     } method_cache[32];
+    /* Mark-sweep GC state */
+    VMObjHeader *gc_objects;
+    size_t gc_count;
+    size_t gc_threshold;
+    int gc_pause;
+    VMValue last_result;
 } VM;
 
 /* Program API */
@@ -864,6 +891,9 @@ size_t vm_chunk_add_str_const(VMChunk *chunk, const char *s);
 const char *vm_program_find_parent(VMProgram *prog, const char *class_name);
 VM *vm_new(VMProgram *prog);
 void vm_free(VM *vm);
+void vm_gc_collect(VM *vm);
+void vm_gc_set_compiling_prog(VMProgram *prog, VM **saved_vm);
+void vm_run_end_blocks(VM *vm);
 VMValue vm_execute(VM *vm, const char *func_name);
 
 /* VMArray API */

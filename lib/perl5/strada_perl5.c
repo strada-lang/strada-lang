@@ -39,6 +39,25 @@
 /* Global Perl interpreter (singleton) */
 static PerlInterpreter *my_perl = NULL;
 
+static int perl5_valid_module_name(const char *m) {
+    if (!m || !*m || strlen(m) > 1024) return 0;
+    for (const char *p = m; *p; p++) {
+        char c = *p;
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+              (c >= '0' && c <= '9') || c == '_' || c == ':')) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static void perl5_push_inc(const char *path) {
+    AV *inc = GvAVn(PL_incgv);
+    if (inc && path) {
+        av_push(inc, newSVpv(path, 0));
+    }
+}
+
 /* Initialize the Perl interpreter */
 int strada_perl5_init(void) {
     if (my_perl) {
@@ -255,9 +274,9 @@ StradaValue* strada_perl5_call_array(StradaValue *sub_sv, StradaValue *args_sv) 
 
     StradaValue *result = strada_new_array();
 
-    if (!SvTRUE(ERRSV)) {
+    if (!SvTRUE(ERRSV) && count > 0) {
         /* Pop results in reverse order, store in temp array */
-        char **temp = malloc(count * sizeof(char*));
+        char **temp = malloc((size_t)count * sizeof(char*));
         for (int i = 0; i < count; i++) {
             SV *sv = POPs;
             if (SvOK(sv)) {
@@ -270,7 +289,7 @@ StradaValue* strada_perl5_call_array(StradaValue *sub_sv, StradaValue *args_sv) 
         }
         /* Add in correct order (reverse of pop order) */
         for (int i = count - 1; i >= 0; i--) {
-            strada_array_push(result->value.av, strada_new_str(temp[i]));
+            strada_array_push_take(result->value.av, strada_new_str(temp[i]));
             free(temp[i]);
         }
         free(temp);
@@ -289,9 +308,14 @@ int strada_perl5_use(StradaValue *module_sv) {
         return 0;
     }
 
-    const char *module = strada_to_str(module_sv);
+    char *module = strada_to_str(module_sv);
+    if (!perl5_valid_module_name(module)) {
+        free(module);
+        return 0;
+    }
     char code[2048];
     snprintf(code, sizeof(code), "use %s; 1;", module);
+    free(module);
 
     eval_pv(code, FALSE);
     return !SvTRUE(ERRSV);
@@ -303,9 +327,14 @@ int strada_perl5_require(StradaValue *module_sv) {
         return 0;
     }
 
-    const char *module = strada_to_str(module_sv);
+    char *module = strada_to_str(module_sv);
+    if (!perl5_valid_module_name(module)) {
+        free(module);
+        return 0;
+    }
     char code[2048];
     snprintf(code, sizeof(code), "require %s; 1;", module);
+    free(module);
 
     eval_pv(code, FALSE);
     return !SvTRUE(ERRSV);
@@ -317,8 +346,9 @@ void strada_perl5_set_scalar(StradaValue *name_sv, StradaValue *value_sv) {
         return;
     }
 
-    const char *name = strada_to_str(name_sv);
-    const char *value = strada_to_str(value_sv);
+    char *orig_name = strada_to_str(name_sv);
+    char *value = strada_to_str(value_sv);
+    const char *name = orig_name;
 
     /* Skip the sigil if present */
     if (name[0] == '$') {
@@ -327,6 +357,8 @@ void strada_perl5_set_scalar(StradaValue *name_sv, StradaValue *value_sv) {
 
     SV *sv = get_sv(name, GV_ADD);
     sv_setpv(sv, value);
+    free(orig_name);
+    free(value);
 }
 
 /* Get a Perl scalar variable */
@@ -335,7 +367,8 @@ char* strada_perl5_get_scalar(StradaValue *name_sv) {
         return strdup("");
     }
 
-    const char *name = strada_to_str(name_sv);
+    char *orig_name = strada_to_str(name_sv);
+    const char *name = orig_name;
 
     /* Skip the sigil if present */
     if (name[0] == '$') {
@@ -343,6 +376,7 @@ char* strada_perl5_get_scalar(StradaValue *name_sv) {
     }
 
     SV *sv = get_sv(name, 0);
+    free(orig_name);
     if (sv && SvOK(sv)) {
         STRLEN len;
         const char *str = SvPV(sv, len);
@@ -373,10 +407,9 @@ void strada_perl5_add_inc(StradaValue *path_sv) {
         return;
     }
 
-    const char *path = strada_to_str(path_sv);
-    char code[2048];
-    snprintf(code, sizeof(code), "push @INC, '%s';", path);
-    eval_pv(code, FALSE);
+    char *path = strada_to_str(path_sv);
+    perl5_push_inc(path);
+    free(path);
 }
 
 /* ============== Raw C Functions for extern "C" ============== */
@@ -414,7 +447,7 @@ void strada_perl5_run_raw(const char *code) {
 
 /* Use a Perl module - raw C types */
 int strada_perl5_use_raw(const char *module) {
-    if (!my_perl) {
+    if (!my_perl || !perl5_valid_module_name(module)) {
         return 0;
     }
 
@@ -427,7 +460,7 @@ int strada_perl5_use_raw(const char *module) {
 
 /* Require a Perl module - raw C types */
 int strada_perl5_require_raw(const char *module) {
-    if (!my_perl) {
+    if (!my_perl || !perl5_valid_module_name(module)) {
         return 0;
     }
 
@@ -495,9 +528,7 @@ void strada_perl5_add_inc_raw(const char *path) {
         return;
     }
 
-    char code[2048];
-    snprintf(code, sizeof(code), "push @INC, '%s';", path);
-    eval_pv(code, FALSE);
+    perl5_push_inc(path);
 }
 
 /* Call a Perl subroutine with a single string argument - raw C types */

@@ -2,7 +2,7 @@
 # Requires: libreadline-dev (apt install libreadline-dev)
 
 STRADA = ../../strada
-CC = gcc
+CC ?= gcc
 CFLAGS = -fPIC -O2 -I../../runtime
 LDFLAGS = -shared -lreadline
 
@@ -11,7 +11,7 @@ LDFLAGS = -shared -lreadline
 all: readline.so
 
 readline.so: readline.strada
-	$(STRADA) --shared readline.strada
+	$(STRADA) --shared readline.strada -o readline.so -lreadline
 	@echo "Built readline.so"
 	@echo "Install libreadline-dev if you get linker errors:"
 	@echo "  sudo apt install libreadline-dev"

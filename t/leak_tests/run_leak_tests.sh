@@ -149,7 +149,13 @@ TESTS=(
     "test_encoding"
     "test_audit_2026_11_leaks"
     "test_fast_codegen_leaks"
+    "test_closure_cycles_and_tls"
+    "test_phase3_codegen_leaks"
+    "test_phase4_stdlib_leaks"
+    "test_phase5_eval_jit_leaks"
 )
+
+FILTER="${1:-}"
 
 # c::callback needs libffi at build time — include only when configured in
 # (the exit-time trampoline registry sweep is what keeps this leak-free).
@@ -166,6 +172,9 @@ echo "========================================"
 echo ""
 
 for test in "${TESTS[@]}"; do
+    if [[ -n "$FILTER" ]] && [[ "$test" != *"$FILTER"* ]]; then
+        continue
+    fi
     echo "----------------------------------------"
     echo "Building: $test"
     echo "----------------------------------------"
@@ -198,7 +207,7 @@ for test in "${TESTS[@]}"; do
     echo ""
 
     # Run with valgrind and capture output
-    VALGRIND_OUT=$(valgrind --leak-check=full --error-exitcode=99 "t/leak_tests/${test}" 2>&1)
+    VALGRIND_OUT=$(valgrind --leak-check=full --errors-for-leak-kinds=definite,indirect --error-exitcode=99 "t/leak_tests/${test}" 2>&1)
     VALGRIND_EXIT=$?
 
     # Show program output
@@ -209,11 +218,11 @@ for test in "${TESTS[@]}"; do
     DEFINITELY_LOST=$(echo "$VALGRIND_OUT" | grep "definitely lost:" | awk '{print $4}')
     INDIRECTLY_LOST=$(echo "$VALGRIND_OUT" | grep "indirectly lost:" | awk '{print $4}')
 
-    if [[ "$DEFINITELY_LOST" == "0" ]] && [[ "$INDIRECTLY_LOST" == "0" ]]; then
+    if [[ "$VALGRIND_EXIT" -eq 0 ]] && [[ "$DEFINITELY_LOST" == "0" ]] && [[ "$INDIRECTLY_LOST" == "0" ]]; then
         echo "LEAK CHECK: PASS (no leaks detected)"
         PASSED=$((PASSED + 1))
     else
-        echo "LEAK CHECK: FAIL"
+        echo "LEAK CHECK: FAIL (exit=$VALGRIND_EXIT)"
         echo "  Definitely lost: $DEFINITELY_LOST bytes"
         echo "  Indirectly lost: $INDIRECTLY_LOST bytes"
         echo ""
@@ -232,6 +241,7 @@ echo "========================================"
 for test in "${TESTS[@]}"; do
     rm -f "t/leak_tests/${test}"
 done
+rm -f "t/leak_tests/test_import_lib_devirt_lib.so"
 
 if [[ $FAILED -gt 0 ]]; then
     exit 1

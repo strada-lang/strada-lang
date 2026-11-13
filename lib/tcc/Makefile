@@ -2,7 +2,7 @@
 # Requires: libtcc-dev (sudo apt install libtcc-dev)
 
 STRADA = ../../strada
-CC = gcc
+CC ?= gcc
 CFLAGS = -fPIC -O2 -I../../runtime
 
 .PHONY: all clean install
@@ -10,7 +10,7 @@ CFLAGS = -fPIC -O2 -I../../runtime
 all: tcc.so
 
 tcc.so: tcc.strada
-	$(STRADA) --shared tcc.strada -l tcc -l dl
+	$(STRADA) --shared tcc.strada -o tcc.so -ltcc -ldl
 	@echo "Built tcc.so"
 	@echo "Install libtcc-dev if you get linker errors:"
 	@echo "  sudo apt install libtcc-dev"

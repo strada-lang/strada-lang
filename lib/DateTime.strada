@@ -273,22 +273,25 @@ func now() scalar {
 
     __C__ {
         time_t t = time(NULL);
-        struct tm *tm_val = localtime(&t);
+        struct tm tm_buf = {0};
+        struct tm *tm_val = localtime_r(&t, &tm_buf);
 
         strada_decref(epoch);
         epoch = strada_new_int((int64_t)t);
-        strada_decref(year);
-        year = strada_new_int(tm_val->tm_year + 1900);
-        strada_decref(month);
-        month = strada_new_int(tm_val->tm_mon + 1);
-        strada_decref(day);
-        day = strada_new_int(tm_val->tm_mday);
-        strada_decref(hour);
-        hour = strada_new_int(tm_val->tm_hour);
-        strada_decref(minute);
-        minute = strada_new_int(tm_val->tm_min);
-        strada_decref(second);
-        second = strada_new_int(tm_val->tm_sec);
+        if (tm_val) {
+            strada_decref(year);
+            year = strada_new_int(tm_val->tm_year + 1900);
+            strada_decref(month);
+            month = strada_new_int(tm_val->tm_mon + 1);
+            strada_decref(day);
+            day = strada_new_int(tm_val->tm_mday);
+            strada_decref(hour);
+            hour = strada_new_int(tm_val->tm_hour);
+            strada_decref(minute);
+            minute = strada_new_int(tm_val->tm_min);
+            strada_decref(second);
+            second = strada_new_int(tm_val->tm_sec);
+        }
     }
 
     my hash %dt = ();
@@ -315,22 +318,25 @@ func now_utc() scalar {
 
     __C__ {
         time_t t = time(NULL);
-        struct tm *tm_val = gmtime(&t);
+        struct tm tm_buf = {0};
+        struct tm *tm_val = gmtime_r(&t, &tm_buf);
 
         strada_decref(epoch);
         epoch = strada_new_int((int64_t)t);
-        strada_decref(year);
-        year = strada_new_int(tm_val->tm_year + 1900);
-        strada_decref(month);
-        month = strada_new_int(tm_val->tm_mon + 1);
-        strada_decref(day);
-        day = strada_new_int(tm_val->tm_mday);
-        strada_decref(hour);
-        hour = strada_new_int(tm_val->tm_hour);
-        strada_decref(minute);
-        minute = strada_new_int(tm_val->tm_min);
-        strada_decref(second);
-        second = strada_new_int(tm_val->tm_sec);
+        if (tm_val) {
+            strada_decref(year);
+            year = strada_new_int(tm_val->tm_year + 1900);
+            strada_decref(month);
+            month = strada_new_int(tm_val->tm_mon + 1);
+            strada_decref(day);
+            day = strada_new_int(tm_val->tm_mday);
+            strada_decref(hour);
+            hour = strada_new_int(tm_val->tm_hour);
+            strada_decref(minute);
+            minute = strada_new_int(tm_val->tm_min);
+            strada_decref(second);
+            second = strada_new_int(tm_val->tm_sec);
+        }
     }
 
     my hash %dt = ();
@@ -355,23 +361,31 @@ func from_epoch(int $timestamp) scalar {
     my int $minute = 0;
     my int $second = 0;
 
+    my int $ok = 1;
     __C__ {
         time_t t = (time_t)strada_to_int(timestamp);
-        struct tm *tm_val = localtime(&t);
+        struct tm tm_buf = {0};
+        struct tm *tm_val = localtime_r(&t, &tm_buf);
 
-        strada_decref(year);
-        year = strada_new_int(tm_val->tm_year + 1900);
-        strada_decref(month);
-        month = strada_new_int(tm_val->tm_mon + 1);
-        strada_decref(day);
-        day = strada_new_int(tm_val->tm_mday);
-        strada_decref(hour);
-        hour = strada_new_int(tm_val->tm_hour);
-        strada_decref(minute);
-        minute = strada_new_int(tm_val->tm_min);
-        strada_decref(second);
-        second = strada_new_int(tm_val->tm_sec);
+        if (!tm_val) {
+            strada_decref(ok);
+            ok = strada_new_int(0);
+        } else {
+            strada_decref(year);
+            year = strada_new_int(tm_val->tm_year + 1900);
+            strada_decref(month);
+            month = strada_new_int(tm_val->tm_mon + 1);
+            strada_decref(day);
+            day = strada_new_int(tm_val->tm_mday);
+            strada_decref(hour);
+            hour = strada_new_int(tm_val->tm_hour);
+            strada_decref(minute);
+            minute = strada_new_int(tm_val->tm_min);
+            strada_decref(second);
+            second = strada_new_int(tm_val->tm_sec);
+        }
     }
+    if ($ok == 0) { return undef; }
 
     my hash %dt = ();
     $dt{"year"} = $year;
@@ -394,23 +408,31 @@ func from_epoch_utc(int $timestamp) scalar {
     my int $minute = 0;
     my int $second = 0;
 
+    my int $ok = 1;
     __C__ {
         time_t t = (time_t)strada_to_int(timestamp);
-        struct tm *tm_val = gmtime(&t);
+        struct tm tm_buf = {0};
+        struct tm *tm_val = gmtime_r(&t, &tm_buf);
 
-        strada_decref(year);
-        year = strada_new_int(tm_val->tm_year + 1900);
-        strada_decref(month);
-        month = strada_new_int(tm_val->tm_mon + 1);
-        strada_decref(day);
-        day = strada_new_int(tm_val->tm_mday);
-        strada_decref(hour);
-        hour = strada_new_int(tm_val->tm_hour);
-        strada_decref(minute);
-        minute = strada_new_int(tm_val->tm_min);
-        strada_decref(second);
-        second = strada_new_int(tm_val->tm_sec);
+        if (!tm_val) {
+            strada_decref(ok);
+            ok = strada_new_int(0);
+        } else {
+            strada_decref(year);
+            year = strada_new_int(tm_val->tm_year + 1900);
+            strada_decref(month);
+            month = strada_new_int(tm_val->tm_mon + 1);
+            strada_decref(day);
+            day = strada_new_int(tm_val->tm_mday);
+            strada_decref(hour);
+            hour = strada_new_int(tm_val->tm_hour);
+            strada_decref(minute);
+            minute = strada_new_int(tm_val->tm_min);
+            strada_decref(second);
+            second = strada_new_int(tm_val->tm_sec);
+        }
     }
+    if ($ok == 0) { return undef; }
 
     my hash %dt = ();
     $dt{"year"} = $year;
@@ -440,9 +462,11 @@ func parse(str $input, str $fmt) scalar {
         char *fmt_str = strada_to_str(fmt);
 
         struct tm tm_val = {0};
+        tm_val.tm_mday = 1;
+        tm_val.tm_isdst = -1;
         char *result = strptime(input_str, fmt_str, &tm_val);
 
-        if (result != NULL) {
+        if (result != NULL && *result == '\0') {
             strada_decref(success);
             success = strada_new_int(1);
             strada_decref(year);
@@ -1042,9 +1066,13 @@ func timezone_name() str {
     my str $name = "";
     __C__ {
         time_t t = time(NULL);
-        struct tm *tm_val = localtime(&t);
+        struct tm tm_buf = {0};
+        struct tm *tm_val = localtime_r(&t, &tm_buf);
         char buf[64];
-        strftime(buf, sizeof(buf), "%Z", tm_val);
+        buf[0] = '\0';
+        if (tm_val) {
+            strftime(buf, sizeof(buf), "%Z", tm_val);
+        }
         strada_decref(name);
         name = strada_new_str(buf);
     }

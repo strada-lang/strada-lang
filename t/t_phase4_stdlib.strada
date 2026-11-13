@@ -1,0 +1,307 @@
+use lib "lib";
+use LWP;
+use Net::SMTP;
+use Async::Loop;
+use Async::Actor;
+use DBI;
+use Nesso;
+use Nesso::Record;
+use Markdown;
+use Forma;
+use JSON;
+use JSON::PS;
+use YAML;
+use Text::CSV;
+use Getopt::Long;
+use compress;
+use Math::BigInt;
+use Math::BigFloat;
+use List::Util;
+use DateTime;
+
+our int $g_fail = 0;
+
+func ok(int $cond, str $label) void {
+    if ($cond == 0) {
+        say("FAIL: " . $label);
+        $g_fail = $g_fail + 1;
+    }
+}
+
+func test_lwp() void {
+    ok(LWP::_parse_hex_len("1a") == 26, "LWP _parse_hex_len valid hex");
+    ok(LWP::_parse_hex_len("ffffffffffffffff") == -1, "LWP _parse_hex_len overflow guard");
+    ok(LWP::_parse_hex_len("4000000000000000") == -1, "LWP _parse_hex_len 2^62 overflow guard");
+    ok(LWP::_is_interim_status(100) == 1, "LWP _is_interim_status 100");
+    ok(LWP::_is_interim_status(101) == 0, "LWP _is_interim_status 101 kept");
+    ok(LWP::_is_interim_status(103) == 1, "LWP _is_interim_status 103");
+    ok(LWP::_is_interim_status(200) == 0, "LWP _is_interim_status 200");
+
+    my str $r100 = "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi";
+    my hash %p100 = LWP::parse_response($r100);
+    ok($p100{"status"} == 200 && $p100{"content"} eq "hi", "LWP parse_response skips 100 Continue");
+
+    my str $r101 = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n";
+    my hash %p101 = LWP::parse_response($r101);
+    ok($p101{"status"} == 101, "LWP parse_response preserves 101 Switching Protocols");
+
+    my hash %orig_opts = (
+        "headers" => {
+            "Authorization" => "Bearer secret",
+            "Cookie" => "sid=123",
+            "Proxy-Authorization" => "Basic abc",
+            "X-Keep" => "yes"
+        }
+    );
+    my hash %xorg = LWP::_redirect_options(%orig_opts, "http://a.example/p", "http://b.example/q");
+    my scalar $xh = $xorg{"headers"};
+    ok(!defined($xh->{"Authorization"}) && !defined($xh->{"Cookie"}) && !defined($xh->{"Proxy-Authorization"}), "LWP cross-origin redirect strips sensitive headers");
+    ok(defined($xh->{"X-Keep"}) && $xh->{"X-Keep"} eq "yes", "LWP cross-origin redirect keeps non-sensitive headers");
+
+    my hash %same = LWP::_redirect_options(%orig_opts, "http://a.example/p", "http://a.example/r");
+    my scalar $sh = $same{"headers"};
+    ok(defined($sh->{"Authorization"}) && defined($sh->{"Cookie"}), "LWP same-origin redirect keeps auth and cookie");
+}
+
+func test_smtp_bad_greeting(int $port) void {
+    my scalar $srv = core::socket_server_host("127.0.0.1", $port, 4);
+    ok(defined($srv), "SMTP bad greeting test server bound");
+    if (!defined($srv)) { return; }
+
+    my int $pid = core::fork();
+    if ($pid == 0) {
+        my scalar $c = core::socket_accept($srv);
+        if (defined($c)) {
+            core::socket_send($c, "554 Service unavailable\r\n");
+            core::usleep(10000);
+            core::socket_close($c);
+        }
+        core::socket_close($srv);
+        exit(0);
+    }
+
+    my scalar $smtp = SMTP::new("127.0.0.1", $port);
+    ok(!defined($smtp), "SMTP::new returns undef on 554 greeting");
+    core::waitpid($pid, 0);
+    core::socket_close($srv);
+}
+
+func test_async_loop_actor() void {
+    my scalar $loop = Async::Loop::new();
+    my int $timer_fired = 0;
+    my int $task_done = 0;
+
+    $loop->timer_after(5, func () {
+        $timer_fired = $timer_fired + 1;
+    });
+    $loop->spawn(func () {
+        async::sleep(5);
+        $task_done = $task_done + 1;
+    });
+    $loop->run();
+    $loop->close();
+    ok($timer_fired == 1 && $task_done == 1, "Async::Loop timer + task ran and closed");
+
+    my hash %st = ("n" => 0);
+    my scalar $actor = Async::Actor::new(func (scalar $m, scalar $s) scalar {
+        if ($m eq "inc") { $s->{"n"} = $s->{"n"} + 1; }
+        return $s->{"n"};
+    }, \%st);
+    $actor->tell("inc");
+    my scalar $v = $actor->ask("inc");
+    $actor->stop();
+    ok($v == 2, "Async::Actor tell/ask/stop works");
+}
+
+func test_nesso() void {
+    my scalar $db = DBI::connect("dbi:SQLite::memory:", "", "");
+    ok(defined($db), "Nesso SQLite :memory: connected");
+    DBI::do_sql($db, "CREATE TABLE items (id TEXT PRIMARY KEY, name TEXT, qty INTEGER)");
+    my scalar $n = Nesso::new($db);
+    $n->define("items", {
+        "table"   => "items",
+        "columns" => ["id", "name", "qty"],
+        "primary" => "id"
+    });
+
+    my scalar $rec = $n->create("items", {
+        "id"   => "uuid-1",
+        "name" => "widget",
+        "qty"  => 5
+    });
+    ok($rec->is_new() == 1, "Nesso string-PK record starts is_new=1");
+    my scalar $saved_id = $rec->save();
+    ok($saved_id eq "uuid-1" && $rec->is_new() == 0, "Nesso string-PK save returns id and flips is_new=0");
+
+    my scalar $found = $n->find("items", "uuid-1");
+    ok(defined($found) && $found->{"name"} eq "widget", "Nesso find with string PK");
+
+    $found->update({
+        "name" => "gadget",
+        "_model" => "hacked",
+        "evil; DROP TABLE items; --" => "x"
+    });
+    ok($found->{"name"} eq "gadget" && $found->{"_model"} eq "items", "Nesso Record::update enforces column allowlist");
+
+    my scalar $reread = $n->find("items", "uuid-1");
+    ok(defined($reread) && $reread->{"name"} eq "gadget", "Nesso update persisted to DB");
+    $reread->{"_rel_fake"} = "cached";
+    $reread->reload();
+    ok(!defined($reread->{"_rel_fake"}), "Nesso Record::reload clears _rel_* cache");
+}
+
+func test_markdown_forma() void {
+    my str $md = Markdown::to_html("[js](javascript:alert(1)) [vb](vbscript:msgbox) ![img](data:text/html,<script>)");
+    ok(index($md, "javascript:") < 0 && index($md, "vbscript:") < 0 && index($md, "data:text/html") < 0, "Markdown blocks dangerous URL schemes");
+
+    my str $code = "```\"onclick=alert(1)\nx\n```";
+    my str $md_code = Markdown::to_html($code);
+    ok(index($md_code, "\"onclick=") < 0, "Markdown escapes quotes in code block language");
+
+    my str $sw = Forma::render_string_safe(
+        "{{#switch role}}{{#case \"admin\"}}A{{/case}}{{#default}}D{{/default}}{{/switch}}|{{val | escape}}|{{val | nl2br}}|{{{raw}}}|{{u | url_encode}}",
+        { "role" => "guest", "val" => "<a>\nb", "raw" => "<b>ok</b>", "u" => "café" }
+    );
+    ok($sw eq "D|&lt;a&gt;\nb|&lt;a&gt;<br>\nb|<b>ok</b>|caf%C3%A9", "Forma switch/#default + no-double-escape + raw + url_encode: " . $sw);
+
+    # Check render_string_safe restores escape state after an exception
+    my int $caught = 0;
+    try {
+        Forma::render_string_safe("{{bad | no_such_filter}}", { "bad" => "x" });
+    } catch ($e) {
+        $caught = 1;
+    }
+    my str $after_plain = Forma::render_string("{{x}}", { "x" => "<ok>" });
+    ok($after_plain eq "<ok>", "Forma render_string unescaped after render_string_safe (caught=" . $caught . ")");
+
+    ok(Forma::looks_like_number("-1.5e-2") == 1, "Forma looks_like_number valid sci");
+    ok(Forma::looks_like_number("1e2e3") == 0, "Forma looks_like_number rejects double exp");
+    ok(Forma::looks_like_number("1e+") == 0, "Forma looks_like_number rejects trailing exp sign");
+}
+
+func test_json_yaml_csv_getopt_compress() void {
+    # JSON & JSON::PS reject raw control bytes in strings
+    my str $bad_json = "\"a" . chr(1) . "b\"";
+    my int $j_bad = 0;
+    try {
+        my scalar $r = JSON::decode($bad_json);
+        if (!defined($r)) { $j_bad = 1; }
+    } catch ($e) {
+        $j_bad = 1;
+    }
+    ok($j_bad == 1, "JSON rejects unescaped control byte 0x01");
+
+    my int $jps_bad = 0;
+    try {
+        my scalar $r = JSON::PS::decode($bad_json);
+        if (!defined($r)) { $jps_bad = 1; }
+    } catch ($e) {
+        $jps_bad = 1;
+    }
+    ok($jps_bad == 1, "JSON::PS rejects unescaped control byte 0x01");
+
+    my scalar $mixed = JSON::PS::decode("\"café \\u263A\"");
+    ok(defined($mixed) && $mixed eq "café ☺", "JSON::PS preserves mixed raw UTF-8 + \\uXXXX");
+
+    # YAML inline split, nested - key:, \r literal, depth guard, key quoting round-trip
+    my scalar $yh = YAML::Load("{a: [1, 2], b: \"x,y\"}");
+    ok(ref($yh) eq "HASH" && size($yh->{"a"}) == 2 && $yh->{"b"} eq "x,y", "YAML inline split respects brackets and quotes");
+
+    my scalar $yl = YAML::Load("- items:\n    - x\n    - y\n");
+    ok(ref($yl) eq "ARRAY" && size($yl->[0]->{"items"}) == 2 && $yl->[0]->{"items"}->[1] eq "y", "YAML nested list under - key:");
+
+    my scalar $ylit = YAML::Load("txt: |\r\n  a\r\n\r\n  b\r\n");
+    ok(index($ylit->{"txt"}, "\r") < 0 && index($ylit->{"txt"}, "a\n\nb") == 0, "YAML strips \\r in literal block");
+
+    my str $deep = "";
+    my int $d = 0;
+    while ($d < 70) {
+        my int $sp = 0;
+        while ($sp < $d * 2) {
+            $deep = $deep . " ";
+            $sp = $sp + 1;
+        }
+        $deep = $deep . "k" . $d . ":\n";
+        $d = $d + 1;
+    }
+    $deep = $deep . "  leaf: 1\n";
+    my int $ydeep_threw = 0;
+    try {
+        YAML::Load($deep);
+    } catch ($e) {
+        $ydeep_threw = 1;
+    }
+    ok($ydeep_threw == 1, "YAML depth > 64 throws");
+
+    my hash %yk = ("a: b" => "1", "true" => "2", "" => "empty");
+    my str $ydumped = YAML::Dump(\%yk);
+    my scalar $yrt = YAML::Load($ydumped);
+    ok(ref($yrt) eq "HASH" && $yrt->{"a: b"} eq "1" && $yrt->{"true"} eq "2" && $yrt->{""} eq "empty", "YAML Dump quotes special keys for round-trip");
+
+    # Text::CSV escape_char quoting
+    my scalar $csv = Text::CSV::new({"escape_char" => "\\"});
+    ok($csv->combine(["a\\b", "plain"]) == 1, "Text::CSV combine succeeds");
+    my str $cline = $csv->string();
+    ok(substr($cline, 0, 1) eq "\"", "Text::CSV quotes field containing escape_char");
+    ok($csv->parse($cline) == 1 && $csv->fields()->[0] eq "a\\b", "Text::CSV round-trips field with escape_char");
+
+    # compress multi-member gzip
+    my str $multi_gz = compress::gzip("hello ") . compress::gzip("world");
+    my str $ungz = compress::gunzip($multi_gz);
+    ok($ungz eq "hello world", "compress::gunzip handles concatenated multi-member gzip");
+}
+
+func test_numeric_list_datetime() void {
+    my scalar $bi = BigInt::new("12345678901234567890");
+    my scalar $bi2 = $bi->add(BigInt::new("10"));
+    ok($bi2->to_str() eq "12345678901234567900", "BigInt add");
+
+    my scalar $bf = BigFloat::new("1.25");
+    ok($bf->add(BigFloat::new("2.50"))->to_str() eq "3.75", "BigFloat add");
+
+    my array @a1 = ("a", "b");
+    my array @a2 = (1, 2);
+    my array @z = List::Util::zip(@a1, @a2);
+    ok(size(@z) == 4 && $z[0] eq "a" && $z[1] == 1 && $z[2] eq "b" && $z[3] == 2, "List::Util::zip");
+
+    my scalar $dt = DateTime::make_utc(2026, 1, 15, 12, 0, 0);
+    my scalar $dt2 = DateTime::add_months($dt, 2);
+    ok(DateTime::year($dt2) == 2026 && DateTime::month($dt2) == 3, "DateTime make_utc + add_months");
+}
+
+func main(int $argc, array @argv) int {
+    if ($argc > 1 && $argv[1] eq "--getopt-go1") {
+        my hash %g1 = ("flag" => 1);
+        my int $ok1 = Getopt::Long::GetOptions(["flag!"], \%g1);
+        say(($ok1 == 1 && $g1{"flag"} == 0) ? "GO1_OK" : "GO1_FAIL");
+        return ($ok1 == 1 && $g1{"flag"} == 0) ? 0 : 1;
+    }
+    if ($argc > 1 && $argv[1] eq "--getopt-go2") {
+        my hash %g2 = ("count" => 0);
+        my int $ok2 = Getopt::Long::GetOptions(["count=i"], \%g2);
+        say(($ok2 == 0) ? "GO2_OK" : "GO2_FAIL");
+        return ($ok2 == 0) ? 0 : 1;
+    }
+    if ($argc > 1 && $argv[1] eq "--getopt-go3") {
+        my hash %g3 = ("name" => "", "other" => 0);
+        my int $ok3 = Getopt::Long::GetOptions(["name=s", "other"], \%g3);
+        say(($ok3 == 0) ? "GO3_OK" : "GO3_FAIL");
+        return ($ok3 == 0) ? 0 : 1;
+    }
+
+    my int $smtp_port = $argc > 1 ? core::atoi($argv[1]) : 19425;
+    test_lwp();
+    test_smtp_bad_greeting($smtp_port);
+    test_async_loop_actor();
+    test_nesso();
+    test_markdown_forma();
+    test_json_yaml_csv_getopt_compress();
+    test_numeric_list_datetime();
+
+    if ($g_fail == 0) {
+        say("PHASE4_STDLIB_OK");
+        return 0;
+    }
+    say("PHASE4_FAILS=" . $g_fail);
+    return 1;
+}

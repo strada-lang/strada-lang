@@ -1,31 +1,24 @@
-# Makefile for building Strada shared libraries in lib/
+# Makefile for building Strada libraries in lib/
 #
 # Usage:
-#   make        # build all shared libraries
-#   make dbi    # build DBI library only
-#   make ssl    # build SSL library only
-#   make perl5  # build Perl 5 integration library only
-#   make clean  # clean all libraries
+#   make        # build configured core libraries (via top-level Makefile)
+#   make perl5  # build Perl 5 integration C library (requires libperl-dev)
+#   make usb    # build USB C library (requires libusb-1.0-0-dev)
+#   make clean  # clean built library artifacts
 
-SUBDIRS = dbi ssl perl5
+SUBDIRS = Digest perl5 usb readline tcc
 STRADA = ../strada
-LIB_STRADA = $(wildcard *.strada)
-LIB_SO = $(LIB_STRADA:.strada=.so)
 
-.PHONY: all clean strada-libs $(SUBDIRS)
+.PHONY: all clean $(SUBDIRS)
 
-all: $(SUBDIRS) strada-libs
+all:
+	$(MAKE) -C .. libs
 
 $(SUBDIRS):
 	$(MAKE) -C $@
-
-strada-libs: $(LIB_SO)
-
-%.so: %.strada
-	$(STRADA) --shared $< -o $@
 
 clean:
 	@for dir in $(SUBDIRS); do \
 		$(MAKE) -C $$dir clean; \
 	done
-	@rm -f $(LIB_SO) *.o
+	@rm -f *.so *.o

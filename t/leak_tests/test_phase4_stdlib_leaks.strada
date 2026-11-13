@@ -1,0 +1,71 @@
+use lib "lib";
+use JSON;
+use JSON::PS;
+use YAML;
+use Text::CSV;
+use Markdown;
+use Forma;
+use compress;
+use Async::Loop;
+use Async::Actor;
+use Math::BigInt;
+use Math::BigFloat;
+use DateTime;
+use DBI;
+use Nesso;
+use Nesso::Record;
+
+func main() int {
+    my scalar $db = DBI::connect("dbi:SQLite::memory:", "", "");
+    DBI::do_sql($db, "CREATE TABLE t (id TEXT PRIMARY KEY, v TEXT)");
+    my scalar $n = Nesso::new($db);
+    $n->define("t", { "table" => "t", "columns" => ["id", "v"], "primary" => "id" });
+
+    my int $i = 0;
+    while ($i < 20) {
+        my str $enc = JSON::encode({"i" => $i, "u" => "café ☺"});
+        my scalar $dec = JSON::decode($enc);
+        my scalar $dec_ps = JSON::PS::decode("\"café \\u263A\"");
+
+        my str $y = YAML::Dump({"a: b" => $i, "items" => ["x", "y"]});
+        my scalar $yd = YAML::Load($y);
+
+        my scalar $csv = Text::CSV::new({"escape_char" => "\\"});
+        $csv->combine(["a\\b", "v" . $i]);
+        $csv->parse($csv->string());
+
+        my str $md = Markdown::to_html("[x](javascript:alert(1)) **bold**");
+        my str $fm = Forma::render_string_safe("{{#switch k}}{{#case \"a\"}}{{v}}{{/case}}{{#default}}D{{/default}}{{/switch}}", {"k" => "x", "v" => "<a>"});
+
+        my str $gz = compress::gzip("hello ") . compress::gzip("world");
+        my str $un = compress::gunzip($gz);
+
+        my scalar $bi = BigInt::new("10000000000000000000")->add(BigInt::from_int($i));
+        my scalar $bf = BigFloat::new("1.5")->add(BigFloat::new("2.25"));
+        my scalar $dt = DateTime::add_months(DateTime::make_utc(2026, 1, 1, 0, 0, 0), 1);
+
+        my scalar $rec = $n->create("t", { "id" => "k" . $i, "v" => $un });
+        $rec->save();
+        my scalar $f = $n->find("t", "k" . $i);
+        $f->update({"v" => "u" . $i, "badcol" => "x"});
+        $f->reload();
+
+        $i = $i + 1;
+    }
+
+    my scalar $loop = Async::Loop::new();
+    $loop->timer_after(2, func () {});
+    $loop->spawn(func () { async::sleep(2); });
+    $loop->run();
+    $loop->close();
+
+    my scalar $actor = Async::Actor::new(func (scalar $m, scalar $s) scalar {
+        return $s->{"n"} + 1;
+    }, {"n" => 0});
+    $actor->ask("hi");
+    $actor->stop();
+
+    core::gc_collect();
+    say("ok");
+    return 0;
+}

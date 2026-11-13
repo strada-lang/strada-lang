@@ -211,9 +211,13 @@ func new(str $val) scalar {
         $digits = "0";
         $sign = 1;
     } else {
-        # Strip leading zeros
-        while (length($digits) > 1 && substr($digits, 0, 1) eq "0") {
-            $digits = substr($digits, 1, length($digits) - 1);
+        # Strip leading zeros in O(N)
+        my int $nz = 0;
+        while ($nz < $dlen - 1 && substr($digits, $nz, 1) eq "0") {
+            $nz++;
+        }
+        if ($nz > 0) {
+            $digits = substr($digits, $nz, $dlen - $nz);
         }
     }
 
@@ -543,12 +547,18 @@ func pow(scalar $self, int $exp) scalar {
         return BigInt::new("1");
     }
 
-    # Simple repeated multiplication (avoids integer division issue)
+    # Exponentiation by squaring in O(log exp) multiplications
     my scalar $result = BigInt::new("1");
-    my int $i = 0;
-    while ($i < $exp) {
-        $result = $result->mul($self);
-        $i++;
+    my scalar $base = $self->clone();
+    my int $e = $exp;
+    while ($e > 0) {
+        if ($e % 2 == 1) {
+            $result = $result->mul($base);
+        }
+        $e = $e / 2;
+        if ($e > 0) {
+            $base = $base->mul($base);
+        }
     }
 
     return $result;

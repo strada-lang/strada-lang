@@ -199,7 +199,7 @@ func new(str $host, int $port) scalar {
     if (!defined($sock)) { return undef; }
     $obj->{"socket"} = $sock;
     SMTP::set_timeout($obj, 30);
-    if (!SMTP::greeting($obj)) { return undef; }
+    if (!SMTP::greeting($obj)) { SMTP::close($obj); return undef; }
     return $obj;
 }
 
@@ -263,8 +263,19 @@ func debug(scalar $self, int $on) void {
 func send_raw(scalar $self, str $data) int {
     my scalar $fn = $self->{"send_fn"};
     if (defined($fn)) { return $fn->($data); }
-    if (!defined($self->{"socket"})) { return 0; }
-    return core::socket_send($self->{"socket"}, $data);
+    my scalar $sock = $self->{"socket"};
+    if (!defined($sock)) { return 0; }
+    my int $total = core::byte_length($data);
+    my int $sent = 0;
+    while ($sent < $total) {
+        my str $slice = ($sent == 0) ? $data : core::byte_substr($data, $sent, $total - $sent);
+        my int $n = core::socket_send($sock, $slice);
+        if ($n <= 0) {
+            return $sent > 0 ? $sent : -1;
+        }
+        $sent = $sent + $n;
+    }
+    return $sent;
 }
 
 # Internal: read some bytes ("" when the connection closed or timed out)

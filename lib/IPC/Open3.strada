@@ -338,10 +338,12 @@ func cmd_output(str $cmd) str {
     if ($pid == 0) {
         # Child
         core::close_fd($pipe[0]);
-        core::dup2($pipe[1], 1);
-        core::close_fd($pipe[1]);
+        if ($pipe[1] != 1) {
+            core::dup2($pipe[1], 1);
+            core::close_fd($pipe[1]);
+        }
         core::exec($cmd);
-        exit(127);
+        core::_exit(127);
     } elsif ($pid > 0) {
         # Parent
         core::close_fd($pipe[1]);
@@ -364,7 +366,7 @@ func run(str $cmd) int {
 
     if ($pid == 0) {
         core::exec($cmd);
-        exit(127);
+        core::_exit(127);
     } elsif ($pid > 0) {
         my int $raw_status = core::waitpid($pid, 0);
         return core::exit_status($raw_status);

@@ -109,6 +109,12 @@ while [ $# -gt 0 ]; do
         --without-libffi)
             SKIP_LIBFFI=1
             ;;
+        --with-ssl)
+            FORCE_SSL=1
+            ;;
+        --without-ssl)
+            SKIP_SSL=1
+            ;;
         --with-ccache)
             USE_CCACHE=1
             ;;
@@ -155,6 +161,8 @@ while [ $# -gt 0 ]; do
             echo "  --with-arena        Enable the request arena allocator (default)"
             echo "  --without-arena     Disable the request arena allocator"
             echo "  --without-libffi    Disable c::callback trampolines (drops the -lffi link dep)"
+            echo "  --with-ssl          Force OpenSSL support (fail if not found)"
+            echo "  --without-ssl       Disable OpenSSL support"
             echo "  --with-ccache       Wrap the toolchain C compiler with ccache (default if found)"
             echo "  --without-ccache    Build the toolchain with plain gcc (no ccache)"
             echo "  --help, -h          Show this help"
@@ -426,29 +434,39 @@ else
 fi
 
 # Check OpenSSL
-printf "  Checking for OpenSSL... "
-if [ "$HAS_PKGCONFIG" = "1" ] && check_pkg openssl && check_header "openssl/ssl.h" "$(pkg-config --cflags openssl)"; then
-    HAVE_SSL=1
-    SSL_CFLAGS="$(pkg-config --cflags openssl)"
-    SSL_LIBS="$(pkg-config --libs openssl)"
-    echo -e "${GREEN}yes${NC} (pkg-config)"
-elif check_lib "OpenSSL" "openssl/ssl.h" "ssl" "SSL_new"; then
-    # openssl/ssl.h on the default include path (Linux, or macOS with -I already set)
-    HAVE_SSL=1
-    SSL_LIBS="-lssl -lcrypto"
-    echo -e "${GREEN}yes${NC}"
-elif [ "$UNAME_S" = "Darwin" ] && command -v brew >/dev/null 2>&1 && \
-     SSL_PREFIX="$(brew --prefix openssl@3 2>/dev/null || brew --prefix openssl 2>/dev/null)" && \
-     [ -n "$SSL_PREFIX" ] && [ -f "$SSL_PREFIX/include/openssl/ssl.h" ]; then
-    # macOS: Apple ships LibreSSL and no OpenSSL headers in the SDK; OpenSSL comes
-    # from Homebrew, kept "keg-only" (off the default include/lib path), so neither
-    # pkg-config (no PKG_CONFIG_PATH) nor check_lib finds it. Point at the keg.
-    HAVE_SSL=1
-    SSL_CFLAGS="-I$SSL_PREFIX/include"
-    SSL_LIBS="-L$SSL_PREFIX/lib -lssl -lcrypto"
-    echo -e "${GREEN}yes${NC} (Homebrew: $SSL_PREFIX)"
+if [ "$SKIP_SSL" != "1" ]; then
+    printf "  Checking for OpenSSL... "
+    if [ "$HAS_PKGCONFIG" = "1" ] && check_pkg openssl && check_header "openssl/ssl.h" "$(pkg-config --cflags openssl)"; then
+        HAVE_SSL=1
+        SSL_CFLAGS="$(pkg-config --cflags openssl)"
+        SSL_LIBS="$(pkg-config --libs openssl)"
+        echo -e "${GREEN}yes${NC} (pkg-config)"
+    elif check_lib "OpenSSL" "openssl/ssl.h" "ssl" "SSL_new"; then
+        # openssl/ssl.h on the default include path (Linux, or macOS with -I already set)
+        HAVE_SSL=1
+        SSL_LIBS="-lssl -lcrypto"
+        echo -e "${GREEN}yes${NC}"
+    elif [ "$UNAME_S" = "Darwin" ] && command -v brew >/dev/null 2>&1 && \
+         SSL_PREFIX="$(brew --prefix openssl@3 2>/dev/null || brew --prefix openssl 2>/dev/null)" && \
+         [ -n "$SSL_PREFIX" ] && [ -f "$SSL_PREFIX/include/openssl/ssl.h" ]; then
+        # macOS: Apple ships LibreSSL and no OpenSSL headers in the SDK; OpenSSL comes
+        # from Homebrew, kept "keg-only" (off the default include/lib path), so neither
+        # pkg-config (no PKG_CONFIG_PATH) nor check_lib finds it. Point at the keg.
+        HAVE_SSL=1
+        SSL_CFLAGS="-I$SSL_PREFIX/include"
+        SSL_LIBS="-L$SSL_PREFIX/lib -lssl -lcrypto"
+        echo -e "${GREEN}yes${NC} (Homebrew: $SSL_PREFIX)"
+    else
+        echo -e "${RED}no${NC}"
+        if [ "$FORCE_SSL" = "1" ]; then
+            echo "Error: OpenSSL requested but not found"
+            echo "Install with: apt install libssl-dev"
+            exit 1
+        fi
+    fi
 else
-    echo -e "${RED}no${NC}"
+    printf "  Checking for OpenSSL... "
+    echo -e "${YELLOW}disabled${NC}"
 fi
 
 # Check zlib

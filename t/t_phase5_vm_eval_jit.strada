@@ -1,0 +1,181 @@
+use lib "lib";
+use Eval;
+use Strada::JIT;
+
+our int $g_fail = 0;
+
+func ok(int $cond, str $label) void {
+    if ($cond == 0) {
+        say("FAIL: " . $label);
+        $g_fail = $g_fail + 1;
+    }
+}
+
+func snapshot_jit_dirs() hash {
+    my hash %seen = ();
+    my array @entries = core::readdir("/tmp");
+    foreach my str $e (@entries) {
+        if (index($e, "strada_jit_") == 0) {
+            my str $full = "/tmp/" . $e;
+            if (core::is_dir($full) == 1) {
+                $seen{$full} = 1;
+            }
+        }
+    }
+    return %seen;
+}
+
+func find_new_jit_dir(hash %before) str {
+    my hash %after = snapshot_jit_dirs();
+    foreach my str $k (keys(%after)) {
+        if (!exists(%before, $k)) {
+            return $k;
+        }
+    }
+    return "";
+}
+
+func count_real_entries(str $dir) int {
+    my array @entries = core::readdir($dir);
+    my int $c = 0;
+    foreach my str $e (@entries) {
+        if ($e ne "." && $e ne "..") {
+            $c = $c + 1;
+        }
+    }
+    return $c;
+}
+
+func test_eval_module() void {
+    # 1. BEGIN seeing enums, consts, user functions + our init non-clobbering
+    Strada::Interpreter::eval('
+        enum Color { RED = 1, GREEN = 2 }
+        const int BASE = 40;
+        func helper(int $x) int { return $x + BASE + Color::GREEN; }
+        our int $boot = 0;
+        BEGIN { $boot = helper(0); }
+    ');
+    my scalar $r1 = Strada::Interpreter::eval('$boot');
+    ok(($r1 + 0) == 42, "Eval BEGIN sees enum/const/func and our does not clobber BEGIN");
+
+    # 2. Block-scoped local across if-block, last/next, and try/catch unwind
+    Strada::Interpreter::eval('our int $g = 10;');
+    my scalar $r2 = Strada::Interpreter::eval('
+        if (1) { local $g = 20; }
+        my int $after_if = $g;
+
+        my int $li = 0;
+        while ($li < 2) {
+            local $g = 30;
+            $li = $li + 1;
+            if ($li == 1) { next; }
+            last;
+        }
+        my int $after_loop = $g;
+
+        my int $seen_in_catch = -1;
+        try {
+            local $g = 99;
+            throw "boom";
+        } catch ($e) {
+            $seen_in_catch = $g;
+        }
+        $after_if * 10000 + $after_loop * 100 + $seen_in_catch * 1 + ($g == 10 ? 0 : 1);
+    ');
+    ok(($r2 + 0) == 101010, "Eval local restored on block, next/last, and before catch");
+
+    # 3. Per-iteration loop lexical environments for closures
+    my scalar $r3 = Strada::Interpreter::eval('
+        my array @fns = ();
+        for (my int $i = 0; $i < 3; $i = $i + 1) {
+            push(@fns, func() int { return $i; });
+        }
+        my array @items = (10, 20, 30);
+        my array @fns2 = ();
+        foreach my int $x (@items) {
+            push(@fns2, func() int { return $x; });
+        }
+        $fns[0]->() * 100000 + $fns[1]->() * 10000 + $fns[2]->() * 1000 + $fns2[0]->() * 100 + $fns2[1]->() + ($fns2[2]->() == 30 ? 0 : 1);
+    ');
+    ok(($r3 + 0) == 12000 + 1000 + 20, "Eval per-iteration loop closure capture");
+
+    # 4. sys::* builtin aliases and core::refcount
+    my scalar $r4 = Strada::Interpreter::eval('
+        my str $enc = sys::base64_encode("hi");
+        my str $dec = sys::base64_decode($enc);
+        my int $bl = sys::byte_length("abc");
+        my scalar $hr = { "a" => 1 };
+        my int $rc = core::refcount($hr);
+        ($enc eq "aGk=" && $dec eq "hi" && $bl == 3 && $rc >= 1) ? 1 : 0;
+    ');
+    ok(($r4 + 0) == 1, "Eval sys::* aliases and core::refcount");
+
+    # 5. Reset clears state and remains reusable
+    Strada::Interpreter::reset();
+    my scalar $r5 = Strada::Interpreter::eval('21 * 2');
+    ok(($r5 + 0) == 42, "Eval reset and reuse");
+    Strada::Interpreter::reset();
+}
+
+func test_jit_module() str {
+    my hash %before1 = snapshot_jit_dirs();
+    Strada::JIT::init();
+    my str $dir1 = find_new_jit_dir(%before1);
+    ok($dir1 ne "" && core::is_dir($dir1) == 1, "JIT init creates private tmpdir");
+
+    # 1. Multi-func in one eval()
+    my scalar $jf = Strada::JIT::eval('func f1(int $x) int { return $x + 1; } func f2(int $x) int { return f1($x) * 2; } f2(20)');
+    ok(($jf + 0) == 42, "JIT multi-func in one eval");
+
+    # 2. Single-quoted '{', '# {' comments, and '; my int $fake = ...' inside strings
+    my scalar $js = Strada::JIT::eval("my str \$brace = '{'; # unbalanced { in comment\nmy str \$semi = '; my int \$fake = 9;';\nlength(\$brace) + length(\$semi)");
+    ok(($js + 0) == 20, "JIT string/comment-aware tokenizer");
+
+    # 3. OOP package + has + before modifier + class-typed my variable
+    Strada::JIT::eval('package Box; has rw int $v; func bump(scalar $self, int $d) int { $self->set_v($self->v() + $d); return $self->v(); } before "bump" func(scalar $self, int $d) void { $self->set_v($self->v() + 100); }');
+    my scalar $jb1 = Strada::JIT::eval('package main; my Box $b = Box::new("v", 10); $b->bump(5)');
+    ok(($jb1 + 0) == 115, "JIT OOP has + before modifier");
+    my scalar $jb2 = Strada::JIT::eval('$b->bump(7)');
+    ok(($jb2 + 0) == 222, "JIT class-typed variable persistence across eval");
+    Strada::JIT::eval('package Box; before "bump" func(scalar $self, int $d) void { $self->set_v($self->v() + 1000); }');
+    my scalar $jb3 = Strada::JIT::eval('package main; $b->bump(3)');
+    ok(($jb3 + 0) == 1325, "JIT stacked before modifiers without duplication");
+
+    # 4. Exception persistence in closure-wrapped eval
+    Strada::JIT::eval('my int $n = 1;');
+    my int $caught = 0;
+    try {
+        Strada::JIT::eval('$n = 77; throw "jit_boom";');
+    } catch ($e) {
+        $caught = 1;
+    }
+    ok($caught == 1, "JIT exception propagated");
+    my scalar $jn = Strada::JIT::eval('$n');
+    ok(($jn + 0) == 77, "JIT exception preserves mutated variable");
+
+    # 5. Immediate unlink of .strada/.c/.so in tmpdir while loaded
+    ok(count_real_entries($dir1) == 0, "JIT tmpdir has 0 leftover .strada/.c/.so entries while loaded");
+
+    # 6. reset() deletes tmpdir, and fresh eval() creates new tmpdir cleaned up by END
+    Strada::JIT::reset();
+    ok(core::is_dir($dir1) == 0, "JIT reset removes tmpdir");
+
+    my hash %before2 = snapshot_jit_dirs();
+    my scalar $jpost = Strada::JIT::eval('6 * 7');
+    ok(($jpost + 0) == 42, "JIT reusable after reset");
+    my str $dir2 = find_new_jit_dir(%before2);
+    ok($dir2 ne "" && core::is_dir($dir2) == 1, "JIT post-reset eval creates new tmpdir");
+    return $dir2;
+}
+
+func main() int {
+    test_eval_module();
+    my str $dir2 = test_jit_module();
+    if ($g_fail != 0) {
+        say("PHASE5_INPROC_FAIL=" . $g_fail);
+        return 1;
+    }
+    say("JIT_TMPDIR_END=" . $dir2);
+    say("PHASE5_INPROC_OK");
+    return 0;
+}

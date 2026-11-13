@@ -503,6 +503,7 @@ func _parse_hex_len(str $line) int {
         elsif ($o >= 97 && $o <= 102) { $d = $o - 97 + 10; }
         elsif ($o >= 65 && $o <= 70) { $d = $o - 65 + 10; }
         else { last; }
+        if ($n > 288230376151711743) { return -1; }
         $n = ($n * 16) + $d;
         $digits = $digits + 1;
         $i = $i + 1;
@@ -561,40 +562,142 @@ func _chunked_complete(str $raw, int $pos) int {
     return 0;
 }
 
+# Internal: return 1 for interim 1xx status codes that precede a final response (100, 102..199; not 101)
+func _is_interim_status(int $status) int {
+    if ($status == 100 || ($status >= 102 && $status < 200)) {
+        return 1;
+    }
+    return 0;
+}
+
+# Internal: find trimmed lowercase value of a header at start of a header line, or undef if absent
+func _find_header_value(str $headers_part, str $hdr_lower_colon) scalar {
+    my int $first_eol = core::byte_index($headers_part, "\r\n");
+    if ($first_eol < 0) {
+        $first_eol = core::byte_index($headers_part, "\n");
+    }
+    if ($first_eol < 0) {
+        return undef;
+    }
+    my int $hlen = core::byte_length($headers_part);
+    my str $tail_lc = lc(core::byte_substr($headers_part, $first_eol, $hlen - $first_eol));
+    my str $needle = "\n" . $hdr_lower_colon;
+    my int $found = core::byte_index($tail_lc, $needle);
+    if ($found < 0) {
+        return undef;
+    }
+    my int $val_start = $found + core::byte_length($needle);
+    my int $val_end = core::byte_index($tail_lc, "\n", $val_start);
+    if ($val_end < 0) {
+        $val_end = core::byte_length($tail_lc);
+    }
+    my str $val = core::byte_substr($tail_lc, $val_start, $val_end - $val_start);
+    my int $vlen = core::byte_length($val);
+    if ($vlen > 0 && core::byte_substr($val, $vlen - 1, 1) eq "\r") {
+        $val = core::byte_substr($val, 0, $vlen - 1);
+    }
+    while (length($val) > 0 && (substr($val, 0, 1) eq " " || substr($val, 0, 1) eq "\t")) {
+        $val = substr($val, 1, length($val) - 1);
+    }
+    return $val;
+}
+
+# Internal: check case-insensitively whether a header exists in a custom headers hash ref
+func _has_header_ci(scalar $headers, str $target_lower) int {
+    if (!defined($headers)) { return 0; }
+    foreach my str $hk (keys($headers)) {
+        if (lc($hk) eq $target_lower) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+# Internal: compare scheme, host, and port of two URLs
+func _same_origin(str $u1, str $u2) int {
+    my hash %p1 = LWP::parse_url($u1);
+    my hash %p2 = LWP::parse_url($u2);
+    if (lc($p1{"scheme"}) ne lc($p2{"scheme"})) { return 0; }
+    if (lc($p1{"host"}) ne lc($p2{"host"})) { return 0; }
+    if (($p1{"port"} + 0) != ($p2{"port"} + 0)) { return 0; }
+    return 1;
+}
+
+# Internal: strip Authorization/Cookie/Proxy-Authorization when redirecting cross-origin
+func _redirect_options(hash %orig, str $prev_url, str $next_url) hash {
+    my int $same = LWP::_same_origin($prev_url, $next_url);
+    if ($same) {
+        return %orig;
+    }
+    my hash %copy = ();
+    foreach my str $k (keys(%orig)) {
+        if ($k eq "headers") { next; }
+        $copy{$k} = $orig{$k};
+    }
+    if (defined($orig{"headers"})) {
+        my scalar $oh = $orig{"headers"};
+        my hash %nh = ();
+        foreach my str $hk (keys($oh)) {
+            my str $lhk = lc($hk);
+            if ($lhk eq "authorization" || $lhk eq "cookie" || $lhk eq "proxy-authorization") {
+                next;
+            }
+            $nh{$hk} = $oh->{$hk};
+        }
+        $copy{"headers"} = \%nh;
+    }
+    return %copy;
+}
+
+# Internal: send all bytes of $data on socket, looping on partial writes
+func _send_all(scalar $sock, str $data) int {
+    my int $total = core::byte_length($data);
+    my int $sent = 0;
+    while ($sent < $total) {
+        my str $slice = ($sent == 0) ? $data : core::byte_substr($data, $sent, $total - $sent);
+        my int $n = core::socket_send($sock, $slice);
+        if ($n <= 0) {
+            return -1;
+        }
+        $sent = $sent + $n;
+    }
+    return $sent;
+}
+
 # Internal: return 1 if buffered HTTP response contains the complete message
 func _response_complete(str $response, str $method) int {
-    my int $header_end = core::byte_index($response, "\r\n\r\n");
-    if ($header_end < 0) { return 0; }
-
-    my str $headers_part = core::byte_substr($response, 0, $header_end);
-    my int $first_eol = core::byte_index($headers_part, "\r\n");
-    my str $status_line = ($first_eol > 0) ? core::byte_substr($headers_part, 0, $first_eol) : $headers_part;
-    my array @sp = split(" ", $status_line);
-    my int $status = (scalar(@sp) >= 2) ? cast_int($sp[1]) : 0;
+    my int $hdr_start = 0;
+    my int $header_end = -1;
+    my str $headers_part = "";
+    my int $status = 0;
+    while (1) {
+        $header_end = core::byte_index($response, "\r\n\r\n", $hdr_start);
+        if ($header_end < 0) { return 0; }
+        $headers_part = core::byte_substr($response, $hdr_start, $header_end - $hdr_start);
+        my int $first_eol = core::byte_index($headers_part, "\r\n");
+        my str $status_line = ($first_eol > 0) ? core::byte_substr($headers_part, 0, $first_eol) : $headers_part;
+        my array @sp = split(" ", $status_line);
+        $status = (scalar(@sp) >= 2) ? cast_int($sp[1]) : 0;
+        if (LWP::_is_interim_status($status)) {
+            $hdr_start = $header_end + 4;
+            next;
+        }
+        last;
+    }
     if (uc($method) eq "HEAD" || $status == 204 || $status == 304 || ($status >= 100 && $status < 200)) {
         return 1;
     }
 
-    my str $headers_lower = lc($headers_part);
-    my int $te_pos = core::byte_index($headers_lower, "transfer-encoding:");
-    if ($te_pos >= 0) {
-        my int $te_end = core::byte_index($headers_part, "\r\n", $te_pos);
-        if ($te_end < 0) { $te_end = core::byte_length($headers_part); }
-        my str $te_val = lc(core::byte_substr($headers_part, $te_pos + 18, $te_end - $te_pos - 18));
+    my scalar $te_val = LWP::_find_header_value($headers_part, "transfer-encoding:");
+    if (defined($te_val)) {
         if (index($te_val, "chunked") >= 0) {
             return LWP::_chunked_complete($response, $header_end + 4);
         }
     }
 
-    my int $cl_pos = core::byte_index($headers_lower, "content-length:");
-    if ($cl_pos >= 0) {
-        my int $cl_end = core::byte_index($headers_part, "\r\n", $cl_pos);
-        if ($cl_end < 0) { $cl_end = core::byte_length($headers_part); }
-        my str $cl_line = core::byte_substr($headers_part, $cl_pos + 15, $cl_end - $cl_pos - 15);
-        while (length($cl_line) > 0 && (substr($cl_line, 0, 1) eq " " || substr($cl_line, 0, 1) eq "\t")) {
-            $cl_line = substr($cl_line, 1, length($cl_line) - 1);
-        }
-        my int $content_length = cast_int($cl_line);
+    my scalar $cl_val = LWP::_find_header_value($headers_part, "content-length:");
+    if (defined($cl_val)) {
+        my int $content_length = cast_int($cl_val);
         my int $body_bytes = core::byte_length($response) - ($header_end + 4);
         if ($body_bytes >= $content_length) {
             return 1;
@@ -644,27 +747,38 @@ func parse_response(str $raw) hash {
     $response{"reason"} = "";
     $response{"content"} = "";
 
-    # Find header/body separator using raw byte offset
-    my int $sep = core::byte_index($raw, "\r\n\r\n");
-    if ($sep < 0) {
-        $response{"error"} = "Invalid HTTP response: no header separator";
-        return %response;
-    }
-
-    my str $header_section = core::byte_substr($raw, 0, $sep);
+    # Find final header/body separator using raw byte offset, skipping interim 1xx headers
     my int $raw_bytes = core::byte_length($raw);
-    my str $body = core::byte_substr($raw, $sep + 4, $raw_bytes - $sep - 4);
-
-    # Parse status line
-    my int $first_line_end = core::byte_index($header_section, "\r\n");
+    my int $hdr_start = 0;
+    my int $sep = -1;
+    my str $header_section = "";
     my str $status_line = "";
     my str $headers_text = "";
-    if ($first_line_end > 0) {
-        $status_line = core::byte_substr($header_section, 0, $first_line_end);
-        $headers_text = core::byte_substr($header_section, $first_line_end + 2, core::byte_length($header_section) - $first_line_end - 2);
-    } else {
-        $status_line = $header_section;
+    while (1) {
+        $sep = core::byte_index($raw, "\r\n\r\n", $hdr_start);
+        if ($sep < 0) {
+            $response{"error"} = "Invalid HTTP response: no header separator";
+            return %response;
+        }
+        $header_section = core::byte_substr($raw, $hdr_start, $sep - $hdr_start);
+        my int $first_line_end = core::byte_index($header_section, "\r\n");
+        if ($first_line_end > 0) {
+            $status_line = core::byte_substr($header_section, 0, $first_line_end);
+            $headers_text = core::byte_substr($header_section, $first_line_end + 2, core::byte_length($header_section) - $first_line_end - 2);
+        } else {
+            $status_line = $header_section;
+            $headers_text = "";
+        }
+        my array @sp_chk = split(" ", $status_line);
+        my int $st_chk = (scalar(@sp_chk) >= 2) ? cast_int($sp_chk[1]) : 0;
+        if (LWP::_is_interim_status($st_chk)) {
+            $hdr_start = $sep + 4;
+            next;
+        }
+        last;
     }
+
+    my str $body = core::byte_substr($raw, $sep + 4, $raw_bytes - $sep - 4);
 
     # Parse "HTTP/1.1 200 OK"
     my array @status_parts = split(" ", $status_line);
@@ -830,7 +944,7 @@ func _do_single_request(str $method, str $url, str $body, hash %options) hash {
     # Body for POST/PUT
     my int $body_len = core::byte_length($body);
     if ($body_len > 0) {
-        if (!defined($options{"headers"}) || !defined($options{"headers"}->{"Content-Type"})) {
+        if (!defined($options{"headers"}) || !LWP::_has_header_ci($options{"headers"}, "content-type")) {
             $request = $request . "Content-Type: application/x-www-form-urlencoded\r\n";
         }
         $request = $request . "Content-Length: " . $body_len . "\r\n";
@@ -855,7 +969,11 @@ func _do_single_request(str $method, str $url, str $body, hash %options) hash {
         return %response;
     }
 
-    core::socket_send($sock, $request);
+    if (LWP::_send_all($sock, $request) < 0) {
+        core::socket_close($sock);
+        $response{"error"} = "Send failed to " . $host . ":" . $port;
+        return %response;
+    }
 
     my int $max_hdr = LWP::_max_header_bytes(%options);
     my int $max_resp = LWP::_max_response_bytes(%options);
@@ -886,9 +1004,10 @@ func do_request(str $method, str $url, str $body, hash %options) hash {
     my str $cur_method = $method;
     my str $cur_url = $url;
     my str $cur_body = $body;
+    my hash %cur_opts = %options;
     my int $hops = 0;
     while (1) {
-        my hash %resp = LWP::_do_single_request($cur_method, $cur_url, $cur_body, %options);
+        my hash %resp = LWP::_do_single_request($cur_method, $cur_url, $cur_body, %cur_opts);
         my int $st = defined($resp{"status"}) ? ($resp{"status"} + 0) : 0;
         if (($st == 301 || $st == 302 || $st == 303 || $st == 307 || $st == 308) && $hops < $max_redir) {
             my str $loc = "";
@@ -896,7 +1015,14 @@ func do_request(str $method, str $url, str $body, hash %options) hash {
                 $loc = $resp{"headers"}->{"location"};
             }
             if (length($loc) > 0) {
-                $cur_url = LWP::_resolve_url($cur_url, $loc);
+                if (LWP::_has_crlf($loc)) {
+                    $resp{"success"} = 0;
+                    $resp{"error"} = "Invalid CR/LF in redirect Location";
+                    return %resp;
+                }
+                my str $next_url = LWP::_resolve_url($cur_url, $loc);
+                %cur_opts = LWP::_redirect_options(%cur_opts, $cur_url, $next_url);
+                $cur_url = $next_url;
                 if (($st == 301 || $st == 302 || $st == 303) && uc($cur_method) eq "POST") {
                     $cur_method = "GET";
                     $cur_body = "";

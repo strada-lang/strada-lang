@@ -1041,6 +1041,7 @@ func codegen_register_function(scalar $cg, scalar $fn) void {
 
     # Track variadic function info
     $info{"is_variadic"} = $fn->{"is_variadic"};
+    $info{"is_synthesized"} = $fn->{"is_synthesized"};
     $info{"variadic_param_idx"} = -1;
     if ($fn->{"is_variadic"} == 1) {
         my scalar $params = $fn->{"params"};
@@ -1271,6 +1272,7 @@ func node_is_leaf_safe(scalar $cg, scalar $node) int {
         return 1;
     }
     if ($t == NODE_BINARY_OP()) {
+        if ($cg->{"has_overloads"} == 1) { return 0; }
         my str $op = $node->{"op"};
         # Only arithmetic and numeric/relational ops. Excludes ".", "x", "=~",
         # "//", "and"/"or", etc. that can allocate or call user code.
@@ -1284,6 +1286,7 @@ func node_is_leaf_safe(scalar $cg, scalar $node) int {
         return 1;
     }
     if ($t == NODE_UNARY_OP()) {
+        if ($cg->{"has_overloads"} == 1) { return 0; }
         return node_is_leaf_safe($cg, $node->{"operand"});
     }
     if ($t == NODE_VARIABLE()) { return 1; }
@@ -1306,6 +1309,7 @@ func node_is_leaf_safe(scalar $cg, scalar $node) int {
         return 1;
     }
     if ($t == NODE_HASH_ACCESS()) {
+        if ($cg->{"uses_tie"} == 1) { return 0; }
         # $hash{key} — strada_hv_fetch_owned/_ph never throws (returns undef
         # on missing key) and doesn't escape the hash. Key must also be safe.
         if (node_is_leaf_safe($cg, $node->{"hash"}) == 0) { return 0; }
@@ -1313,12 +1317,14 @@ func node_is_leaf_safe(scalar $cg, scalar $node) int {
         return 1;
     }
     if ($t == NODE_DEREF_HASH()) {
+        if ($cg->{"uses_tie"} == 1) { return 0; }
         # $ref->{key} — uses the same safe runtime path as NODE_HASH_ACCESS.
         if (node_is_leaf_safe($cg, $node->{"ref"}) == 0) { return 0; }
         if (node_is_leaf_safe($cg, $node->{"key"}) == 0) { return 0; }
         return 1;
     }
     if ($t == NODE_SUBSCRIPT()) {
+        if ($cg->{"uses_tie"} == 1) { return 0; }
         # $arr[idx] — strada_array_get/_owned never throws, returns undef
         # for out-of-bounds. Both array expression and index must be safe.
         if (node_is_leaf_safe($cg, $node->{"array"}) == 0) {
@@ -1328,6 +1334,7 @@ func node_is_leaf_safe(scalar $cg, scalar $node) int {
         return 1;
     }
     if ($t == NODE_DEREF_ARRAY()) {
+        if ($cg->{"uses_tie"} == 1) { return 0; }
         if (node_is_leaf_safe($cg, $node->{"ref"}) == 0) { return 0; }
         if (node_is_leaf_safe($cg, $node->{"index"}) == 0) { return 0; }
         return 1;
@@ -1362,6 +1369,7 @@ func node_is_leaf_safe_nothrow(scalar $cg, scalar $node) int {
         return 1;
     }
     if ($t == NODE_BINARY_OP()) {
+        if ($cg->{"has_overloads"} == 1) { return 0; }
         my str $op = "" . $node->{"op"};
         if ($op eq "+" || $op eq "-" || $op eq "*" ||
             $op eq "==" || $op eq "!=" || $op eq "<" || $op eq ">" ||
@@ -1373,6 +1381,7 @@ func node_is_leaf_safe_nothrow(scalar $cg, scalar $node) int {
         return 0;
     }
     if ($t == NODE_UNARY_OP()) {
+        if ($cg->{"has_overloads"} == 1) { return 0; }
         return node_is_leaf_safe_nothrow($cg, $node->{"operand"});
     }
     if ($t == NODE_VARIABLE() || $t == NODE_PARAM() || $t == NODE_INT_LITERAL()
@@ -1393,18 +1402,22 @@ func node_is_leaf_safe_nothrow(scalar $cg, scalar $node) int {
         return 1;
     }
     if ($t == NODE_HASH_ACCESS()) {
+        if ($cg->{"uses_tie"} == 1) { return 0; }
         if (node_is_leaf_safe_nothrow($cg, $node->{"hash"}) == 0) { return 0; }
         return node_is_leaf_safe_nothrow($cg, $node->{"key"});
     }
     if ($t == NODE_DEREF_HASH()) {
+        if ($cg->{"uses_tie"} == 1) { return 0; }
         if (node_is_leaf_safe_nothrow($cg, $node->{"ref"}) == 0) { return 0; }
         return node_is_leaf_safe_nothrow($cg, $node->{"key"});
     }
     if ($t == NODE_SUBSCRIPT()) {
+        if ($cg->{"uses_tie"} == 1) { return 0; }
         if (node_is_leaf_safe_nothrow($cg, $node->{"array"}) == 0) { return 0; }
         return node_is_leaf_safe_nothrow($cg, $node->{"index"});
     }
     if ($t == NODE_DEREF_ARRAY()) {
+        if ($cg->{"uses_tie"} == 1) { return 0; }
         if (node_is_leaf_safe_nothrow($cg, $node->{"ref"}) == 0) { return 0; }
         return node_is_leaf_safe_nothrow($cg, $node->{"index"});
     }
@@ -2318,7 +2331,7 @@ func emit_line_directive(scalar $cg, int $line) void {
     # otherwise break out of the #line string literal and inject C (CWE-94).
     # This directive is emitted per-statement under -g, so it fires even when
     # the program never uses __FILE__.
-    emit($cg, "#line " . $line . " ");
+    emit($cg, "\n#line " . $line . " ");
     gen_str_literal_c($cg, $filename);
     emit($cg, "\n");
 }
@@ -2844,84 +2857,36 @@ func emit_stack_pop_inline(scalar $cg) str {
     return "";
 }
 
-# Scan a statement to check if it contains any try blocks
+# Scan a statement or expression subtree to check if it contains any try blocks
+# (stopping at NODE_ANON_FUNC boundaries, since closures have their own frame).
 # Returns 1 if try found, 0 otherwise
 func stmt_has_try(scalar $stmt) int {
-    # If $stmt is null, $stmt->{"type"} returns 0/undef which won't match any NODE_* constant
+    if (!$stmt) { return 0; }
+    my str $rt = reftype($stmt);
+    if ($rt eq "ARRAY") {
+        my int $len = scalar(@{$stmt});
+        my int $i = 0;
+        while ($i < $len) {
+            if (stmt_has_try($stmt->[$i]) == 1) { return 1; }
+            $i = $i + 1;
+        }
+        return 0;
+    }
+    if ($rt ne "HASH") { return 0; }
     my int $type = $stmt->{"type"} + 0;
-
-    # Direct try statement
-    if ($type == NODE_TRY_CATCH()) {
-        return 1;
+    if ($type == NODE_TRY_CATCH()) { return 1; }
+    if ($type == NODE_ANON_FUNC()) { return 0; }
+    my scalar $ks = keys(%{$stmt});
+    my int $kn = scalar(@{$ks});
+    my int $k = 0;
+    while ($k < $kn) {
+        my scalar $v = $stmt->{$ks->[$k]};
+        my str $vt = reftype($v);
+        if ($vt eq "HASH" || $vt eq "ARRAY") {
+            if (stmt_has_try($v) == 1) { return 1; }
+        }
+        $k = $k + 1;
     }
-
-    # Check block statements
-    if ($type == NODE_BLOCK()) {
-        my scalar $stmts = $stmt->{"statements"};
-        my int $count = $stmt->{"statement_count"};
-        my int $i = 0;
-        while ($i < $count) {
-            if (stmt_has_try($stmts->[$i]) == 1) {
-                return 1;
-            }
-            $i = $i + 1;
-        }
-        return 0;
-    }
-
-    # Check if/elsif/else
-    if ($type == NODE_IF_STMT()) {
-        if (stmt_has_try($stmt->{"then_block"}) == 1) {
-            return 1;
-        }
-        my int $ei = 0;
-        my int $ec = $stmt->{"elsif_count"} + 0;
-        my scalar $eblocks = $stmt->{"elsif_blocks"};
-        while ($ei < $ec) {
-            if (stmt_has_try($eblocks->[$ei]) == 1) {
-                return 1;
-            }
-            $ei = $ei + 1;
-        }
-        if (stmt_has_try($stmt->{"else_block"}) == 1) {
-            return 1;
-        }
-        return 0;
-    }
-
-    # Check while/do-while/for loops
-    if ($type == NODE_WHILE_STMT() || $type == NODE_DO_WHILE_STMT() || $type == NODE_FOR_STMT()) {
-        if (stmt_has_try($stmt->{"body"}) == 1) {
-            return 1;
-        }
-        return 0;
-    }
-
-    # Check foreach
-    if ($type == NODE_FOREACH_STMT()) {
-        if (stmt_has_try($stmt->{"body"}) == 1) {
-            return 1;
-        }
-        return 0;
-    }
-
-    # Check switch/case
-    if ($type == NODE_SWITCH()) {
-        my scalar $blocks = $stmt->{"blocks"};
-        my int $count = $stmt->{"case_count"} + 0;
-        my int $i = 0;
-        while ($i < $count) {
-            if (stmt_has_try($blocks->[$i]) == 1) {
-                return 1;
-            }
-            $i = $i + 1;
-        }
-        if ($stmt->{"has_default"} && stmt_has_try($stmt->{"default_block"}) == 1) {
-            return 1;
-        }
-        return 0;
-    }
-
     return 0;
 }
 
@@ -2938,7 +2903,16 @@ func ast_any_try(scalar $n) int {
         return 0;
     }
     if ($rt ne "HASH") { return 0; }
-    if (($n->{"type"} + 0) == NODE_TRY_CATCH()) { return 1; }
+    my int $nt = $n->{"type"} + 0;
+    if ($nt == NODE_TRY_CATCH() || $nt == NODE_ASYNC_FUNC() || $nt == NODE_AWAIT()) { return 1; }
+    if ($nt == NODE_CALL()) {
+        my str $cn = "" . $n->{"name"};
+        if ((length($cn) >= 7 && substr($cn, 0, 7) eq "async::") ||
+            (length($cn) >= 6 && substr($cn, 0, 6) eq "coro::") ||
+            (length($cn) >= 8 && substr($cn, 0, 8) eq "sys::dl_")) {
+            return 1;
+        }
+    }
     my scalar $ks = keys(%{$n});
     my int $kn = scalar(@{$ks});
     my int $k = 0;
@@ -3683,7 +3657,7 @@ func gen_regex_interpolated_pattern(scalar $cg, str $pattern) void {
             my str $cvn = escape_c_keyword($vn);
             my str $our_k = "" . $cg->{"our_vars"}->{$cvn};
             if (length($our_k) > 0) {
-                emit($cg, "strada_global_get(strada_new_str(\"" . $our_k . "\"))");
+                emit($cg, "strada_global_get_cstr(" . c_str_lit($our_k) . ")");
             } else {
                 my str $cref = scalar_var_c_ref($cg, $vn, $cvn);
                 emit($cg, "({ StradaValue *__rv = " . $cref . "; strada_incref(__rv); __rv; })");
@@ -3708,7 +3682,7 @@ func gen_regex_interpolated_pattern(scalar $cg, str $pattern) void {
             my str $cvn = escape_c_keyword($vn);
             my str $our_k = "" . $cg->{"our_vars"}->{$cvn};
             if (length($our_k) > 0) {
-                emit($cg, "strada_global_get(strada_new_str(\"" . $our_k . "\"))");
+                emit($cg, "strada_global_get_cstr(" . c_str_lit($our_k) . ")");
                 $p->{"owned"} = 1;
             } else {
                 emit($cg, scalar_var_c_ref($cg, $vn, $cvn));
@@ -6327,34 +6301,24 @@ func gen_call_with_arg_cleanup(scalar $cg, str $c_func_name, scalar $args, int $
         return;
     }
 
-    # Check which arguments are temporaries (up to 8 args supported)
-    my int $temp0 = 0;
-    my int $temp1 = 0;
-    my int $temp2 = 0;
-    my int $temp3 = 0;
+    # Check which arguments are temporaries (supports arbitrary arg counts)
+    my array @is_temp = ();
     my int $has_temps = 0;
-
-    if ($arg_count > 0 && needs_temp_cleanup($cg, $args->[0]) == 1) {
-        $temp0 = 1;
-        $has_temps = 1;
-    }
-    if ($arg_count > 1 && needs_temp_cleanup($cg, $args->[1]) == 1) {
-        $temp1 = 1;
-        $has_temps = 1;
-    }
-    if ($arg_count > 2 && needs_temp_cleanup($cg, $args->[2]) == 1) {
-        $temp2 = 1;
-        $has_temps = 1;
-    }
-    if ($arg_count > 3 && needs_temp_cleanup($cg, $args->[3]) == 1) {
-        $temp3 = 1;
-        $has_temps = 1;
+    my int $i = 0;
+    while ($i < $arg_count) {
+        if (needs_temp_cleanup($cg, $args->[$i]) == 1 && expr_is_always_tagged_int($cg, $args->[$i]) == 0) {
+            push(@is_temp, 1);
+            $has_temps = 1;
+        } else {
+            push(@is_temp, 0);
+        }
+        $i = $i + 1;
     }
 
     if ($has_temps == 0) {
         # No temporaries - emit simple call
         emit($cg, $c_func_name . "(");
-        my int $i = 0;
+        $i = 0;
         while ($i < $arg_count) {
             if ($i > 0) {
                 emit($cg, ", ");
@@ -6366,46 +6330,36 @@ func gen_call_with_arg_cleanup(scalar $cg, str $c_func_name, scalar $args, int $
         return;
     }
 
-    # Has temporaries - wrap with cleanup
+    # Has temporaries - wrap with exception-safe cleanup
     emit($cg, "({ ");
+    my int $use_push = cleanup_push_useful($cg);
+    my int $pushed = 0;
+    my str $last_pushed = "";
 
-    # Declare temp variables for each temporary argument
-    if ($temp0 == 1) {
-        emit($cg, "StradaValue *__call_arg0 = ");
-        gen_expression($cg, $args->[0]);
-        emit($cg, "; ");
-    }
-    if ($temp1 == 1) {
-        emit($cg, "StradaValue *__call_arg1 = ");
-        gen_expression($cg, $args->[1]);
-        emit($cg, "; ");
-    }
-    if ($temp2 == 1) {
-        emit($cg, "StradaValue *__call_arg2 = ");
-        gen_expression($cg, $args->[2]);
-        emit($cg, "; ");
-    }
-    if ($temp3 == 1) {
-        emit($cg, "StradaValue *__call_arg3 = ");
-        gen_expression($cg, $args->[3]);
-        emit($cg, "; ");
+    $i = 0;
+    while ($i < $arg_count) {
+        if ($is_temp[$i] == 1) {
+            emit($cg, "StradaValue *__call_arg" . $i . " = ");
+            gen_expression($cg, $args->[$i]);
+            emit($cg, "; ");
+            if ($use_push == 1) {
+                emit($cg, "strada_cleanup_push(__call_arg" . $i . "); ");
+                $pushed = $pushed + 1;
+                $last_pushed = "__call_arg" . $i;
+            }
+        }
+        $i = $i + 1;
     }
 
     # Emit the call with result capture
     emit($cg, "StradaValue *__call_result = " . $c_func_name . "(");
-    my int $i = 0;
+    $i = 0;
     while ($i < $arg_count) {
         if ($i > 0) {
             emit($cg, ", ");
         }
-        if ($i == 0 && $temp0 == 1) {
-            emit($cg, "__call_arg0");
-        } elsif ($i == 1 && $temp1 == 1) {
-            emit($cg, "__call_arg1");
-        } elsif ($i == 2 && $temp2 == 1) {
-            emit($cg, "__call_arg2");
-        } elsif ($i == 3 && $temp3 == 1) {
-            emit($cg, "__call_arg3");
+        if ($is_temp[$i] == 1) {
+            emit($cg, "__call_arg" . $i);
         } else {
             gen_expression($cg, $args->[$i]);
         }
@@ -6413,18 +6367,19 @@ func gen_call_with_arg_cleanup(scalar $cg, str $c_func_name, scalar $args, int $
     }
     emit($cg, "); ");
 
-    # Decref all temp arguments
-    if ($temp0 == 1) {
-        emit($cg, "strada_decref(__call_arg0); ");
-    }
-    if ($temp1 == 1) {
-        emit($cg, "strada_decref(__call_arg1); ");
-    }
-    if ($temp2 == 1) {
-        emit($cg, "strada_decref(__call_arg2); ");
-    }
-    if ($temp3 == 1) {
-        emit($cg, "strada_decref(__call_arg3); ");
+    # Decref all temp arguments (popping cleanup stack if pushed)
+    if ($pushed == 1) {
+        emit($cg, "strada_cleanup_pop_decref(" . $last_pushed . "); ");
+    } elsif ($pushed > 1) {
+        emit($cg, "strada_cleanup_pop_decref_n(" . $pushed . "); ");
+    } else {
+        $i = $arg_count - 1;
+        while ($i >= 0) {
+            if ($is_temp[$i] == 1) {
+                emit($cg, "strada_decref(__call_arg" . $i . "); ");
+            }
+            $i = $i - 1;
+        }
     }
 
     # Return the result

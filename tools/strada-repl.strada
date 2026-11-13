@@ -23,20 +23,16 @@ func main(int $argc, array @argv) int {
     if (core::is_file($jit) == 0) {
         $jit = "strada-jit";
     }
-    __C__ {
-        const char *prog = strada_to_str(jit);
-        int n = (int)strada_av_length(argv->value.av);
-        char **c_argv = malloc((size_t)(n + 1) * sizeof(char *));
-        if (c_argv) {
-            c_argv[0] = (char *)prog;
-            for (int i = 1; i < n; i++) {
-                c_argv[i] = (char *)strada_to_str(strada_av_get(argv->value.av, i));
-            }
-            c_argv[n] = NULL;
-            execvp(prog, c_argv);
-            free(c_argv);
-        }
+    my array @args = ($jit);
+    my int $i = 1;
+    while ($i < $argc) {
+        push(@args, $argv[$i]);
+        $i = $i + 1;
     }
-    say("Error: could not execute strada-jit");
-    return 1;
+    my int $rc = core::system_argv($jit, \@args);
+    if ($rc < 0) {
+        say("Error: could not execute strada-jit");
+        return 1;
+    }
+    return $rc;
 }

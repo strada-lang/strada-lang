@@ -191,7 +191,16 @@ func GetOptions(array @specs, hash %opts) int {
             # Check match
             if (Getopt::Long::matches_spec($arg_name, $name, $aliases) == 1) {
                 if ($type eq "bool") {
-                    $opts{$name} = "1";
+                    if ($has_eq == 1) {
+                        my str $lval = lc($arg_value);
+                        if ($lval eq "0" || $lval eq "false" || $lval eq "no" || $arg_value eq "") {
+                            $opts{$name} = "0";
+                        } else {
+                            $opts{$name} = "1";
+                        }
+                    } else {
+                        $opts{$name} = "1";
+                    }
                     $matched = 1;
                 } else {
                     # Needs a value
@@ -199,10 +208,23 @@ func GetOptions(array @specs, hash %opts) int {
                     if ($has_eq == 1) {
                         $val = $arg_value;
                     } elsif ($i + 1 < $argc) {
+                        my str $next_arg = $args[$i + 1];
+                        if ($next_arg eq "--" || $next_arg =~ /^-[A-Za-z-]/) {
+                            warn("Option --" . $name . " requires an argument");
+                            return 0;
+                        }
                         $i++;
-                        $val = $args[$i];
+                        $val = $next_arg;
                     } else {
                         warn("Option --" . $name . " requires an argument");
+                        return 0;
+                    }
+                    if ($type eq "int" && $val !~ /^-?[0-9]+$/) {
+                        warn("Option --" . $name . " requires an integer argument");
+                        return 0;
+                    }
+                    if ($type eq "float" && $val !~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?$/) {
+                        warn("Option --" . $name . " requires a numeric argument");
                         return 0;
                     }
                     $opts{$name} = $val;

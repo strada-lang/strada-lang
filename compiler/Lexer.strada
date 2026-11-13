@@ -28,11 +28,14 @@ func lex_new(str $source) scalar {
     # Use bytes() not length() since char_at() works on byte positions
     $lexer{"length"} = bytes($source);
     $lexer{"expect_regex"} = 0;
+    $lexer{"expect_subst"} = 0;
     $lexer{"heredoc_pending_semi"} = 0;
     $lexer{"heredoc_resume_pos"} = 0;
     $lexer{"heredoc_resume_line"} = 0;
     $lexer{"pp_depth"} = 0;
     $lexer{"after_sigil"} = 0;
+    $lexer{"after_arrow"} = 0;
+    $lexer{"after_value"} = 0;
     $lexer{"tok_col"} = 1;
     return \%lexer;
 }
@@ -1380,6 +1383,50 @@ func lex_read_number(scalar $lexer) scalar {
                 $is_float = 1;
                 sb_append($sb, chr($code));
                 lex_advance($lexer);
+            } elsif (($code == ord("e") || $code == ord("E")) && $is_hex == 0 && $is_bin == 0 && $is_oct == 0) {
+                my int $e1 = lex_peek_code($lexer, 1);
+                my int $has_exp = 0;
+                my int $has_sign = 0;
+                if ($e1 >= ord("0") && $e1 <= ord("9")) {
+                    $has_exp = 1;
+                } elsif ($e1 == ord("+") || $e1 == ord("-")) {
+                    my int $e2 = lex_peek_code($lexer, 2);
+                    if ($e2 >= ord("0") && $e2 <= ord("9")) {
+                        $has_exp = 1;
+                        $has_sign = 1;
+                    }
+                }
+                if ($has_exp == 1) {
+                    sb_append($sb, chr($code));
+                    lex_advance($lexer);
+                    if ($has_sign == 1) {
+                        sb_append($sb, chr($e1));
+                        lex_advance($lexer);
+                    }
+                    while (!lex_at_end($lexer)) {
+                        my int $ec = lex_current_code($lexer);
+                        if ($ec >= ord("0") && $ec <= ord("9")) {
+                            sb_append($sb, chr($ec));
+                            lex_advance($lexer);
+                        } elsif ($ec == ord("_") && lex_peek_code($lexer, 1) >= ord("0") && lex_peek_code($lexer, 1) <= ord("9")) {
+                            lex_advance($lexer);
+                        } else {
+                            last;
+                        }
+                    }
+                    my hash %etok = ();
+                    $etok{"type"} = "NUM_LITERAL";
+                    $etok{"value"} = sb_to_string($sb);
+                    return \%etok;
+                }
+                my hash %token = ();
+                if ($is_float) {
+                    $token{"type"} = "NUM_LITERAL";
+                } else {
+                    $token{"type"} = "INT_LITERAL";
+                }
+                $token{"value"} = sb_to_string($sb);
+                return \%token;
             } else {
                 my hash %token = ();
                 if ($is_float) {
@@ -1505,6 +1552,65 @@ func lex_read_u_escape(scalar $lexer) str {
         }
     }
     return chr($hv);
+}
+
+# Read ${...} interpolation body with balanced brace and quote tracking so nested
+# hash/code braces and strings (e.g. "${$h{"k"}}") do not truncate at the first '}'.
+func lex_read_braced_interp(scalar $lexer, int $token_line, str $err_msg) str {
+    lex_advance($lexer); # Skip opening {
+    my scalar $ivar_sb = sb_new();
+    my str $source = $lexer->{"source"};
+    my int $depth = 1;
+    my int $in_sq = 0;
+    my int $in_dq = 0;
+    my int $esc = 0;
+
+    while (1) {
+        if (lex_at_end($lexer) == 1) {
+            lex_error($lexer, $err_msg, $token_line, $lexer->{"tok_col"});
+        }
+        my int $vc = lex_current_code($lexer);
+        my int $vpos = $lexer->{"pos"};
+        if ($esc == 1) {
+            $esc = 0;
+            sb_append($ivar_sb, substr_bytes($source, $vpos, 1));
+            lex_advance($lexer);
+            next;
+        }
+        if ($in_sq == 1) {
+            if ($vc == 92) { $esc = 1; }
+            elsif ($vc == 39) { $in_sq = 0; }
+            sb_append($ivar_sb, substr_bytes($source, $vpos, 1));
+            lex_advance($lexer);
+            next;
+        }
+        if ($in_dq == 1) {
+            if ($vc == 92) { $esc = 1; }
+            elsif ($vc == 34) { $in_dq = 0; }
+            sb_append($ivar_sb, substr_bytes($source, $vpos, 1));
+            lex_advance($lexer);
+            next;
+        }
+        if ($vc == 39) {
+            $in_sq = 1;
+        } elsif ($vc == 34) {
+            $in_dq = 1;
+        } elsif ($vc == 123) {
+            $depth = $depth + 1;
+        } elsif ($vc == 125) {
+            $depth = $depth - 1;
+            if ($depth == 0) {
+                lex_advance($lexer); # Skip closing }
+                my str $ivar = sb_to_string($ivar_sb);
+                if (length($ivar) == 0) {
+                    lex_error($lexer, "Empty variable name in interpolation", $lexer->{"line"}, $lexer->{"column"});
+                }
+                return $ivar;
+            }
+        }
+        sb_append($ivar_sb, substr_bytes($source, $vpos, 1));
+        lex_advance($lexer);
+    }
 }
 
 # Read a double-quoted string (with interpolation support) - optimized with char codes
@@ -1678,35 +1784,12 @@ func lex_dq_content(scalar $lexer, int $term_code, int $token_line) scalar {
 
             # 123 = {
             if (!lex_at_end($lexer) && $peek_code == ord("{")) {
-                lex_advance($lexer); # Skip {
-                my scalar $ivar_sb = sb_new();
-
-                while (1) {
-                    if (lex_at_end($lexer) == 1) {
-                        lex_error($lexer, "Unterminated interpolation in string", $token_line, $lexer->{"tok_col"});
-                    }
-                    my int $vc = lex_current_code($lexer);
-                    # 125 = }
-                    if ($vc == 125) {
-                        lex_advance($lexer); # Skip }
-
-                        my str $ivar = sb_to_string($ivar_sb);
-                        if (length($ivar) == 0) {
-                            lex_error($lexer, "Empty variable name in interpolation", $lexer->{"line"}, $lexer->{"column"});
-                        }
-
-                        # Save current part and variable
-                        push(\@parts, sb_to_string($sb));
-                        push(\@vars, $ivar);
-                        $var_count = $var_count + 1;
-                        $sb = sb_new();  # Reset StringBuilder
-                        $has_interp = 1;
-                        break;
-                    }
-                    # Variable names are ASCII, so chr() is safe here
-                    sb_append($ivar_sb, chr($vc));
-                    lex_advance($lexer);
-                }
+                my str $ivar = lex_read_braced_interp($lexer, $token_line, "Unterminated interpolation in string");
+                push(\@parts, sb_to_string($sb));
+                push(\@vars, $ivar);
+                $var_count = $var_count + 1;
+                $sb = sb_new();  # Reset StringBuilder
+                $has_interp = 1;
             } else {
                 # Just a literal $ not followed by {
                 sb_append($sb, "$");
@@ -2382,34 +2465,12 @@ func lex_read_q_string(scalar $lexer, int $token_line, int $is_qq) scalar {
 
             # 123 = {
             if ($peek_code == ord("{")) {
-                lex_advance($lexer); # Skip {
-                my scalar $ivar_sb = sb_new();
-
-                while (1) {
-                    my int $vc = lex_current_code($lexer);
-                    if ($vc == 0) {
-                        lex_error($lexer, "Unterminated interpolation in qq string", $token_line, $lexer->{"tok_col"});
-                    }
-                    # 125 = }
-                    if ($vc == 125) {
-                        lex_advance($lexer); # Skip }
-
-                        my str $ivar = sb_to_string($ivar_sb);
-                        if (length($ivar) == 0) {
-                            lex_error($lexer, "Empty variable name in interpolation", $lexer->{"line"}, $lexer->{"column"});
-                        }
-
-                        # Save current part and variable
-                        push(\@parts, sb_to_string($sb));
-                        push(\@vars, $ivar);
-                        $var_count = $var_count + 1;
-                        $sb = sb_new();  # Reset StringBuilder
-                        $has_interp = 1;
-                        break;
-                    }
-                    sb_append($ivar_sb, chr($vc));
-                    lex_advance($lexer);
-                }
+                my str $ivar = lex_read_braced_interp($lexer, $token_line, "Unterminated interpolation in qq string");
+                push(\@parts, sb_to_string($sb));
+                push(\@vars, $ivar);
+                $var_count = $var_count + 1;
+                $sb = sb_new();  # Reset StringBuilder
+                $has_interp = 1;
                 $handled = 1;
             } else {
                 # Just a literal $ not followed by {
@@ -2679,11 +2740,42 @@ func lex_keyword_or_ident(str $text) str {
     return "IDENT";
 }
 
+# Validate whether code after qw/q/qq is an actual delimiter (avoid mistaking
+# `q / 2`, `q != 1`, `q <= 5`, `q << 2`, `q || 1` for a quoted string).
+func lex_is_q_delim(scalar $lexer, int $had_ws, int $delim) int {
+    if ($delim == 40 || $delim == 91 || $delim == 123) {
+        return 1;
+    }
+    if ($had_ws == 1) {
+        return 0;
+    }
+    if ($delim == 47) {
+        return 1;
+    }
+    my int $nxt = lex_peek_code($lexer, 1);
+    if ($delim == 33) {
+        if ($nxt == ord("=") || $nxt == ord("~")) { return 0; }
+        return 1;
+    }
+    if ($delim == 60) {
+        if ($nxt == ord("=") || $nxt == ord("<")) { return 0; }
+        return 1;
+    }
+    if ($delim == 124) {
+        if ($nxt == ord("|")) { return 0; }
+        return 1;
+    }
+    return 0;
+}
+
 func lex_next_token(scalar $lexer) scalar {
-    # Clear after_sigil flag unless we just set it
-    # (it will be re-set below if the current token is a sigil)
+    # Clear after_sigil and after_arrow flags unless we just set them
+    # (re-set below if the current token is a sigil or -> / ::)
     my int $saved_after_sigil = $lexer->{"after_sigil"};
+    my int $saved_after_arrow = $lexer->{"after_arrow"};
+    my int $saved_expect_subst = $lexer->{"expect_subst"};
     $lexer->{"after_sigil"} = 0;
+    $lexer->{"after_arrow"} = 0;
 
     lex_skip_whitespace($lexer);
 
@@ -2745,55 +2837,68 @@ func lex_next_token(scalar $lexer) scalar {
         }
     }
 
-    # Check for regex/substitution after =~ or !~ BEFORE identifier check
-    if ($lexer->{"expect_regex"} == 1) {
+    # Check for regex/substitution after =~ or !~ or operand position BEFORE identifier check
+    if ($lexer->{"expect_regex"} == 1 && $saved_after_arrow == 0 && $saved_after_sigil == 0 && $lexer->{"after_value"} == 0) {
         # /=47
         if ($code == ord("/")) {
             $lexer->{"expect_regex"} = 0;
+            $lexer->{"expect_subst"} = 0;
             return lex_read_regex_literal($lexer, $token_line);
         }
         # m/pattern/flags: the explicit spelling of a match. Skip the `m`
-        # and read an ordinary /regex/ literal.
+        # and read an ordinary /regex/ literal (no whitespace before `/`).
         if ($code == ord("m")) {
             my int $m_peek = char_at($lexer->{"source"}, $lexer->{"pos"} + 1);
             if ($m_peek == ord("/")) {
                 $lexer->{"expect_regex"} = 0;
+                $lexer->{"expect_subst"} = 0;
                 lex_advance($lexer);
                 return lex_read_regex_literal($lexer, $token_line);
             }
         }
-        # s=115
-        if ($code == ord("s")) {
-            my int $peek_code = char_at($lexer->{"source"}, $lexer->{"pos"} + 1);
-            # /=47
-            if ($peek_code == ord("/")) {
-                $lexer->{"expect_regex"} = 0;
-                return lex_read_subst_literal($lexer, $token_line);
-            }
-        }
-        # tr=116,114 or y=121 followed by /
-        if ($code == ord("t")) {
-            my int $peek1 = char_at($lexer->{"source"}, $lexer->{"pos"} + 1);
-            # r=114
-            if ($peek1 == 114) {
-                my int $peek2 = char_at($lexer->{"source"}, $lexer->{"pos"} + 2);
+        # s/// and tr/// and y/// are only valid immediately after =~ (expect_subst == 1),
+        # so bare `s/2` or `tr/2` in expression position lexes as division.
+        if ($saved_expect_subst == 1) {
+            # s=115
+            if ($code == ord("s")) {
+                my int $peek_code = char_at($lexer->{"source"}, $lexer->{"pos"} + 1);
                 # /=47
-                if ($peek2 == 47) {
+                if ($peek_code == ord("/")) {
                     $lexer->{"expect_regex"} = 0;
-                    return lex_read_tr_literal($lexer, $token_line, 2);
+                    $lexer->{"expect_subst"} = 0;
+                    return lex_read_subst_literal($lexer, $token_line);
+                }
+            }
+            # tr=116,114 or y=121 followed by /
+            if ($code == ord("t")) {
+                my int $peek1 = char_at($lexer->{"source"}, $lexer->{"pos"} + 1);
+                # r=114
+                if ($peek1 == 114) {
+                    my int $peek2 = char_at($lexer->{"source"}, $lexer->{"pos"} + 2);
+                    # /=47
+                    if ($peek2 == 47) {
+                        $lexer->{"expect_regex"} = 0;
+                        $lexer->{"expect_subst"} = 0;
+                        return lex_read_tr_literal($lexer, $token_line, 2);
+                    }
+                }
+            }
+            if ($code == ord("y")) {
+                my int $peek1 = char_at($lexer->{"source"}, $lexer->{"pos"} + 1);
+                # /=47
+                if ($peek1 == 47) {
+                    $lexer->{"expect_regex"} = 0;
+                    $lexer->{"expect_subst"} = 0;
+                    return lex_read_tr_literal($lexer, $token_line, 1);
                 }
             }
         }
-        if ($code == ord("y")) {
-            my int $peek1 = char_at($lexer->{"source"}, $lexer->{"pos"} + 1);
-            # /=47
-            if ($peek1 == 47) {
-                $lexer->{"expect_regex"} = 0;
-                return lex_read_tr_literal($lexer, $token_line, 1);
-            }
-        }
-        # Not a regex/subst/tr - reset flag and continue with normal parsing
+        # Not a regex/subst/tr - reset flags and continue with normal parsing
         $lexer->{"expect_regex"} = 0;
+        $lexer->{"expect_subst"} = 0;
+    } else {
+        $lexer->{"expect_regex"} = 0;
+        $lexer->{"expect_subst"} = 0;
     }
 
     # Identifiers and keywords: a-z=97-122, A-Z=65-90, _=95
@@ -2801,36 +2906,36 @@ func lex_next_token(scalar $lexer) scalar {
         my str $text = lex_read_identifier($lexer);
 
         # Check for quote-like operators: qw(), q(), qq()
-        # Skip when after a sigil ($q, @q, %q should be variable names, not quote ops)
-        if ($saved_after_sigil == 0) {
-        if ($text eq "qw") {
+        # Skip after sigils ($q, @q, %q), arrows/namespaces ($obj->q(), Pkg::q()),
+        # or value-ending tokens (binary expression position).
+        if ($saved_after_sigil == 0 && $saved_after_arrow == 0 && $lexer->{"after_value"} == 0) {
+        if ($text eq "qw" || $text eq "q" || $text eq "qq") {
+            my int $ws_pos = $lexer->{"pos"};
+            my int $ws_line = $lexer->{"line"};
+            my int $ws_col = $lexer->{"column"};
             lex_skip_whitespace($lexer);
-            my int $delim = lex_current_code($lexer);
-            # (=40, [=91, {=123, <=60, /=47, !=33, |=124
-            if ($delim == 40 || $delim == 91 || $delim == 123 || $delim == 60 || $delim == 47 || $delim == 33 || $delim == 124) {
-                return lex_read_qw($lexer, $token_line);
+            my int $had_ws = 0;
+            if ($lexer->{"pos"} > $ws_pos) {
+                $had_ws = 1;
             }
-        }
-
-        if ($text eq "q") {
-            lex_skip_whitespace($lexer);
             my int $delim = lex_current_code($lexer);
-            if ($delim == 40 || $delim == 91 || $delim == 123 || $delim == 60 || $delim == 47 || $delim == 33 || $delim == 124) {
-                return lex_read_q_string($lexer, $token_line, 0);
+            if (lex_is_q_delim($lexer, $had_ws, $delim) == 1) {
+                if ($text eq "qw") {
+                    return lex_read_qw($lexer, $token_line);
+                } elsif ($text eq "q") {
+                    return lex_read_q_string($lexer, $token_line, 0);
+                } else {
+                    return lex_read_q_string($lexer, $token_line, 1);
+                }
             }
-        }
-
-        if ($text eq "qq") {
-            lex_skip_whitespace($lexer);
-            my int $delim = lex_current_code($lexer);
-            if ($delim == 40 || $delim == 91 || $delim == 123 || $delim == 60 || $delim == 47 || $delim == 33 || $delim == 124) {
-                return lex_read_q_string($lexer, $token_line, 1);
-            }
+            $lexer->{"pos"} = $ws_pos;
+            $lexer->{"line"} = $ws_line;
+            $lexer->{"column"} = $ws_col;
         }
         }
 
         # __C__ { ... } - raw C code block
-        if ($text eq "__C__") {
+        if ($text eq "__C__" && $saved_after_sigil == 0 && $saved_after_arrow == 0) {
             return lex_read_c_block($lexer, $token_line);
         }
 
@@ -3051,6 +3156,7 @@ func lex_next_token(scalar $lexer) scalar {
         lex_advance($lexer);
         lex_advance($lexer);
         lex_advance($lexer);
+        $lexer->{"expect_regex"} = 1;
         my hash %token = ();
         $token{"type"} = "DOR_ASSIGN";
         $token{"value"} = "//=";
@@ -3062,6 +3168,7 @@ func lex_next_token(scalar $lexer) scalar {
     if ($code == ord("/") && $code2 == ord("/")) {
         lex_advance($lexer);
         lex_advance($lexer);
+        $lexer->{"expect_regex"} = 1;
         my hash %token = ();
         $token{"type"} = "DEFINED_OR";
         $token{"value"} = "//";
@@ -3072,6 +3179,7 @@ func lex_next_token(scalar $lexer) scalar {
     # << — left shift or heredoc
     if ($code == ord("<") && $code2 == ord("<")) {
         # Check for heredoc: <<IDENT, <<'IDENT', <<"IDENT"
+        # Only valid when previous token does not end a value expression (`$x<<SHIFT` is LSHIFT).
         my int $pos_save = $lexer->{"pos"};
         lex_advance($lexer);
         lex_advance($lexer);
@@ -3079,12 +3187,14 @@ func lex_next_token(scalar $lexer) scalar {
         # Check if followed by alpha/underscore or quote — indicates heredoc
         my int $is_heredoc = 0;
         my int $hd_quoted = 0;
-        if (($hd_code >= ord("A") && $hd_code <= ord("Z")) || ($hd_code >= ord("a") && $hd_code <= ord("z")) || $hd_code == ord("_")) {
-            $is_heredoc = 1;
-        } elsif ($hd_code == ord("'") || $hd_code == ord("\"")) {
-            $is_heredoc = 1;
-            $hd_quoted = $hd_code;
-            lex_advance($lexer);
+        if ($lexer->{"after_value"} == 0) {
+            if (($hd_code >= ord("A") && $hd_code <= ord("Z")) || ($hd_code >= ord("a") && $hd_code <= ord("z")) || $hd_code == ord("_")) {
+                $is_heredoc = 1;
+            } elsif ($hd_code == ord("'") || $hd_code == ord("\"")) {
+                $is_heredoc = 1;
+                $hd_quoted = $hd_code;
+                lex_advance($lexer);
+            }
         }
 
         if ($is_heredoc == 1) {
@@ -3215,6 +3325,7 @@ func lex_next_token(scalar $lexer) scalar {
     if ($code == ord(":") && $code2 == ord(":")) {
         lex_advance($lexer);
         lex_advance($lexer);
+        $lexer->{"after_arrow"} = 1;
         my hash %token = ();
         $token{"type"} = "DOUBLE_COLON";
         $token{"value"} = "::";
@@ -3226,6 +3337,7 @@ func lex_next_token(scalar $lexer) scalar {
     if ($code == ord("-") && $code2 == ord(">")) {
         lex_advance($lexer);
         lex_advance($lexer);
+        $lexer->{"after_arrow"} = 1;
         my hash %token = ();
         $token{"type"} = "ARROW";
         $token{"value"} = "->";
@@ -3397,6 +3509,7 @@ func lex_next_token(scalar $lexer) scalar {
         lex_advance($lexer);
         lex_advance($lexer);
         $lexer->{"expect_regex"} = 1;
+        $lexer->{"expect_subst"} = 1;
         my hash %token = ();
         $token{"type"} = "MATCH_OP";
         $token{"value"} = "=~";
@@ -3547,35 +3660,41 @@ func lex_tokenize_file_defs(str $source, str $filename, scalar $cli_defs) array 
         # Disambiguate PERCENT (hash sigil) vs MOD (modulo operator)
         # If previous token could end a value expression, % is modulo
         if ($cur_type eq "PERCENT") {
-            my int $is_mod = 0;
-            if ($prev_type eq "RBRACE") {
-                $is_mod = $last_rbrace_is_expr;
-            } elsif ($prev_is_word == 1 && $prev2_type eq "DOLLAR") {
-                # Keyword-named scalar variable: $int % 2, $byte % 2, $next % 2, $default % 2
-                $is_mod = 1;
-            } elsif (lex_is_value_ending_token($prev_type) == 1) {
-                $is_mod = 1;
-            }
-            if ($is_mod == 1) {
+            if (lex_prev_ends_value($prev_type, $prev_is_word, $prev2_type, $last_rbrace_is_expr) == 1) {
                 $token->{"type"} = "MOD";
                 $cur_type = "MOD";
             }
         }
 
+        my int $cur_is_word = 0;
+        if ($token->{"is_word"} != 0) {
+            $cur_is_word = 1;
+        }
+        $lexer->{"after_value"} = lex_prev_ends_value($cur_type, $cur_is_word, $prev_type, $last_rbrace_is_expr);
+
         push(@tokens, $token);
         $prev3_type = $prev2_type;
         $prev2_type = $prev_type;
         $prev_type = $cur_type;
-        $prev_is_word = 0;
-        if ($token->{"is_word"} != 0) {
-            $prev_is_word = 1;
-        }
+        $prev_is_word = $cur_is_word;
 
         if ($cur_type eq "EOF") {
             $token->{"pp_cli_defines"} = $cli_defs;
             return \@tokens;
         }
     }
+}
+
+# Shared helper: returns 1 when the previous token closes a value expression
+# (used to disambiguate both `%` as MOD vs hash sigil and `<<` as LSHIFT vs heredoc).
+func lex_prev_ends_value(str $prev_type, int $prev_is_word, str $prev2_type, int $last_rbrace_is_expr) int {
+    if ($prev_type eq "RBRACE") {
+        return $last_rbrace_is_expr;
+    }
+    if ($prev_is_word == 1 && $prev2_type eq "DOLLAR") {
+        return 1;
+    }
+    return lex_is_value_ending_token($prev_type);
 }
 
 # Check if a token type can end a value expression

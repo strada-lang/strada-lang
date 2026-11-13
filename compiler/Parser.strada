@@ -614,6 +614,10 @@ func parse_var_name(scalar $parser) str {
         parser_advance($parser);
         return "do";
     }
+    if ($tok->{"is_word"} != 0) {
+        parser_advance($parser);
+        return $tok->{"value"};
+    }
 
     parser_error($parser, "expected a variable name after '$', got " . friendly_token($type_str, $tok->{"value"}));
 }
@@ -917,6 +921,25 @@ func parse_anon_func(scalar $parser, int $line) scalar {
     return $anon;
 }
 
+# Returns 1 when $s is a simple [A-Za-z_][A-Za-z0-9_]* variable identifier.
+func parser_is_simple_ident(str $s) int {
+    my int $slen = length($s);
+    if ($slen == 0) { return 0; }
+    my int $i = 0;
+    while ($i < $slen) {
+        my int $c = ord(substr($s, $i, 1));
+        my int $is_alpha = (($c >= 65 && $c <= 90) || ($c >= 97 && $c <= 122) || $c == 95);
+        my int $is_digit = ($c >= 48 && $c <= 57);
+        if ($i == 0) {
+            if (!$is_alpha) { return 0; }
+        } elsif (!$is_alpha && !$is_digit) {
+            return 0;
+        }
+        $i = $i + 1;
+    }
+    return 1;
+}
+
 # Primary expressions: literals, variables, parenthesized, etc.
 func parse_primary(scalar $parser) scalar {
     my scalar $tok = parser_current($parser);
@@ -972,13 +995,26 @@ func parse_primary(scalar $parser) scalar {
         # Start with the first part
         my scalar $result = ast_new_str_literal($parts->[0]);
 
-        # Alternate: variable, then next part
+        # Alternate: interpolated variable or expression, then next part
         my int $i = 0;
         while ($i < $num_vars) {
-            # Concatenate variable
             my str $vname = $vars->[$i];
-            my scalar $var_node = ast_new_variable($vname, "$");
-            $result = ast_new_binary_op(".", $result, $var_node);
+            my scalar $interp_node = 0;
+            if (parser_is_simple_ident($vname) == 1) {
+                $interp_node = ast_new_variable($vname, "$");
+            } else {
+                my scalar $itoks = lex_tokenize($vname);
+                my scalar $iparser = parser_new($itoks);
+                $iparser->{"const_names"} = $parser->{"const_names"};
+                $iparser->{"current_package"} = $parser->{"current_package"};
+                $iparser->{"structs"} = $parser->{"structs"};
+                $interp_node = parse_expression($iparser);
+                if (!parser_check($iparser, "EOF")) {
+                    my scalar $ibad = parser_current($iparser);
+                    parser_error($parser, "unexpected " . friendly_token($ibad->{"type"}, $ibad->{"value"}) . " in \${...} string interpolation");
+                }
+            }
+            $result = ast_new_binary_op(".", $result, $interp_node);
 
             # Concatenate next string part
             my scalar $part_node = ast_new_str_literal($parts->[$i + 1]);
@@ -2096,9 +2132,9 @@ func parse_postfix(scalar $parser, scalar $left) scalar {
             if (parser_check($parser, "LPAREN")) {
                 parser_advance($parser);
                 my array @args = ();
-                my int $arg_count = 0;
+                my scalar $ccall = ast_new_closure_call($left, \@args, 0);
 
-                # Parse arguments (with spread operator support)
+                # Parse arguments (with spread operator and => pair unpacking via ast_add_arg)
                 my int $has_closure_spread = 0;
                 if (!parser_check($parser, "RPAREN")) {
                     if (parser_check($parser, "ELLIPSIS")) {
@@ -2106,11 +2142,11 @@ func parse_postfix(scalar $parser, scalar $left) scalar {
                         my scalar $spread_target = parse_expression($parser);
                         my scalar $spread = ast_new_spread($spread_target);
                         push(@args, $spread);
+                        $ccall->{"arg_count"} = $ccall->{"arg_count"} + 1;
                         $has_closure_spread = 1;
                     } else {
-                        push(@args, parse_expression($parser));
+                        ast_add_arg($ccall, parse_expression($parser));
                     }
-                    $arg_count = $arg_count + 1;
 
                     while (parser_check($parser, "COMMA")) {
                         parser_advance($parser);
@@ -2119,15 +2155,14 @@ func parse_postfix(scalar $parser, scalar $left) scalar {
                             my scalar $spread_target = parse_expression($parser);
                             my scalar $spread = ast_new_spread($spread_target);
                             push(@args, $spread);
+                            $ccall->{"arg_count"} = $ccall->{"arg_count"} + 1;
                             $has_closure_spread = 1;
                         } else {
-                            push(@args, parse_expression($parser));
+                            ast_add_arg($ccall, parse_expression($parser));
                         }
-                        $arg_count = $arg_count + 1;
                     }
                 }
                 parser_expect($parser, "RPAREN");
-                my scalar $ccall = ast_new_closure_call($left, \@args, $arg_count);
                 if ($has_closure_spread == 1) {
                     $ccall->{"has_spread"} = 1;
                 }
@@ -2186,7 +2221,8 @@ func parse_postfix(scalar $parser, scalar $left) scalar {
                 $left = $dyn_call;
             }
             # Struct field access ->field or method call ->method()
-            elsif (parser_check($parser, "IDENT")) {
+            # Accept any word/keyword identifier (e.g. ->num(), ->str(), ->next(), ->default()).
+            elsif (parser_check($parser, "IDENT") || parser_current($parser)->{"is_word"} != 0) {
                 my scalar $field_tok = parser_current($parser);
                 parser_advance($parser);
                 my scalar $field = ast_new_field_access($left, $field_tok->{"value"});
@@ -2462,7 +2498,8 @@ func parse_regex_match(scalar $parser) scalar {
                 my scalar $repl_parser = parser_new($repl_tokens);
                 $repl_parser->{"const_names"} = $parser->{"const_names"};
                 $repl_parser->{"current_package"} = $parser->{"current_package"};
-                my scalar $eval_expr = parse_ternary($repl_parser);
+                $repl_parser->{"structs"} = $parser->{"structs"};
+                my scalar $eval_expr = parse_expression($repl_parser);
                 if (!parser_check($repl_parser, "EOF")) {
                     my scalar $bad_tok = parser_current($repl_parser);
                     parser_error($parser, "unexpected " . friendly_token($bad_tok->{"type"}, $bad_tok->{"value"}) . " in s///e replacement expression");
@@ -2821,7 +2858,27 @@ func parse_case_value(scalar $parser) scalar {
         return $var;
     }
 
-    # Bareword/identifier or qualified name (e.g., enum value like Status::PENDING)
+    # Unary +/- literal or value in case (e.g., case -1 { ... })
+    if ($type eq "MINUS") {
+        parser_advance($parser);
+        my scalar $neg_inner = parser_current($parser);
+        my str $neg_t = $neg_inner->{"type"};
+        if ($neg_t eq "INT_LITERAL") {
+            parser_advance($parser);
+            return ast_new_int_literal("-" . $neg_inner->{"value"});
+        }
+        if ($neg_t eq "NUM_LITERAL") {
+            parser_advance($parser);
+            return ast_new_num_literal("-" . $neg_inner->{"value"});
+        }
+        return ast_new_unary_op("-", parse_case_value($parser));
+    }
+    if ($type eq "PLUS") {
+        parser_advance($parser);
+        return parse_case_value($parser);
+    }
+
+    # Bareword/identifier or qualified name (e.g., enum value like Status::PENDING or const FOO)
     if ($type eq "IDENT") {
         my str $name = $tok->{"value"};
         my int $const_line = parser_current_line($parser);
@@ -2836,6 +2893,13 @@ func parse_case_value(scalar $parser) scalar {
                 $name = $name . "::" . $next_tok->{"value"};
             }
             # Return as a constant reference (will be handled by codegen)
+            my scalar $const_ref = ast_new_call($name);
+            $const_ref->{"is_constant"} = 1;
+            ast_set_line($const_ref, $const_line);
+            return $const_ref;
+        }
+
+        if ($parser->{"const_names"}->{$name}) {
             my scalar $const_ref = ast_new_call($name);
             $const_ref->{"is_constant"} = 1;
             ast_set_line($const_ref, $const_line);
@@ -2868,7 +2932,7 @@ func parse_destructure_decl(scalar $parser, int $decl_line) scalar {
     my array @vars = ();
     my int $var_count = 0;
 
-    while (!parser_check($parser, "RPAREN")) {
+    while (!parser_check($parser, "RPAREN") && !parser_check($parser, "EOF")) {
         # Check if next token is a sigil (no explicit type)
         my scalar $peek = parser_current($parser);
         my str $peek_type = $peek->{"type"};
@@ -3288,11 +3352,17 @@ func parse_until_stmt(scalar $parser, str $label) scalar {
     return $until_stmt;
 }
 
-# Parse do-while loop: do { body } while (condition);
+# Parse do-while loop (`do { body } while (condition);`) or standalone `do { body };` block
 func parse_do_while_stmt(scalar $parser, str $label) scalar {
     my int $do_line = parser_current_line($parser);
     parser_expect($parser, "DO");
     my scalar $body = parse_block($parser);
+    if (length($label) == 0 && !parser_check($parser, "WHILE")) {
+        parser_match($parser, "SEMI");
+        my scalar $do_stmt = ast_new_expr_stmt(ast_new_do_expr($body));
+        ast_set_line($do_stmt, $do_line);
+        return $do_stmt;
+    }
     parser_expect($parser, "WHILE");
     parser_expect($parser, "LPAREN");
     my scalar $condition = parse_expression($parser);
@@ -5086,6 +5156,8 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
     while ($i < $count) {
         my scalar $mentry = $mod_inhs->[$i];
         ast_add_inherit($program, $mentry->{"child"}, $mentry->{"parent"});
+        my scalar $added_inh = $program->{"inherits"}->[$program->{"inherit_count"} - 1];
+        $added_inh->{"from_use"} = 1;
         $i = $i + 1;
     }
 
@@ -5094,7 +5166,9 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
     $i = $base_has_count;
     $count = $mod_program->{"has_attr_count"};
     while ($i < $count) {
-        push($program->{"has_attrs"}, $mod_has->[$i]);
+        my scalar $mha_item = $mod_has->[$i];
+        $mha_item->{"from_use"} = 1;
+        push($program->{"has_attrs"}, $mha_item);
         $program->{"has_attr_count"} = $program->{"has_attr_count"} + 1;
         $i = $i + 1;
     }
@@ -5142,6 +5216,7 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
     $count = $mod_program->{"enum_count"};
     while ($i < $count) {
         my scalar $en = $mod_enums->[$i];
+        $en->{"from_use"} = 1;
         ast_add_enum($program, $en);
         $i = $i + 1;
     }
@@ -5153,8 +5228,11 @@ func load_module(scalar $program, str $mod_name, str $file_path) void {
     $count = $mod_program->{"struct_count"};
     while ($i < $count) {
         my str $ms_name = $mod_struct_names->[$i];
-        my scalar $ms_def = $mod_structs->{$ms_name};
-        ast_add_struct($program, $ms_def);
+        if (!defined($program->{"structs"}->{$ms_name})) {
+            my scalar $ms_def = $mod_structs->{$ms_name};
+            $ms_def->{"from_use"} = 1;
+            ast_add_struct($program, $ms_def);
+        }
         $i = $i + 1;
     }
 
@@ -5275,7 +5353,7 @@ func parse_use_overload(scalar $parser, scalar $program) void {
     my scalar $pkg_ol = $overloads->{$pkg};
 
     # Parse comma-separated "op" => "method_name" pairs until semicolon
-    while (!parser_check($parser, "SEMI")) {
+    while (!parser_check($parser, "SEMI") && !parser_check($parser, "EOF")) {
         # Skip commas between pairs
         if (parser_check($parser, "COMMA")) {
             parser_advance($parser);
@@ -5315,6 +5393,11 @@ func parse_use_overload(scalar $parser, scalar $program) void {
 
     parser_expect($parser, "SEMI");
     $program->{"has_overloads"} = 1;
+    if (!defined($program->{"overload_local"})) {
+        my hash %oll = ();
+        $program->{"overload_local"} = \%oll;
+    }
+    $program->{"overload_local"}->{$pkg} = 1;
 }
 
 # Parse use statement
@@ -5381,7 +5464,7 @@ func parse_use(scalar $parser, scalar $program) void {
                 parser_advance($parser);
                 parser_expect($parser, "LPAREN");
                 # Collect the import list
-                while (!parser_check($parser, "RPAREN")) {
+                while (!parser_check($parser, "RPAREN") && !parser_check($parser, "EOF")) {
                     if (parser_check($parser, "IDENT")) {
                         my scalar $import_tok = parser_current($parser);
                         my str $imp_w = $import_tok->{"value"};
@@ -5578,8 +5661,9 @@ func do_import_lib_at(scalar $parser, scalar $program, str $lib_name, str $so_pa
     # Add to program
     ast_add_import_lib($program, $lib_info);
 
-    # Pull in any extern-C link deps the library advertised via link_lib.
+    # Pull in any extern-C link deps and OOP/type metadata advertised by the library.
     merge_link_libs($program, $lib_info->{"link_libs"});
+    merge_imported_meta($parser, $program, $lib_info);
 
     # Check if library defines an import() function
     my str $import_fn_name = sanitize_name($lib_name) . "_import";
@@ -5675,6 +5759,59 @@ func export_meta_hash32(str $metadata) int {
 # Parse export metadata string into lib_info structure
 # Format: "func:name:return_type:param_count:param_types\n" for each function
 # Note: Bootstrap compiler doesn't support scalar(@array), so we parse manually
+func meta_split(str $s, str $sep) array {
+    my array @out = ();
+    my int $len = length($s);
+    my int $pos = 0;
+    my str $cur = "";
+    while ($pos < $len) {
+        my str $ch = substr($s, $pos, 1);
+        if ($ch eq $sep) {
+            push(@out, $cur);
+            $cur = "";
+        } else {
+            $cur = $cur . $ch;
+        }
+        $pos = $pos + 1;
+    }
+    push(@out, $cur);
+    return @out;
+}
+
+func meta_hex_nibble(str $c) int {
+    my int $o = ord($c);
+    if ($o >= 48 && $o <= 57) { return $o - 48; }
+    if ($o >= 97 && $o <= 102) { return $o - 87; }
+    if ($o >= 65 && $o <= 70) { return $o - 55; }
+    return 0;
+}
+
+func meta_hex_decode(str $h) str {
+    my scalar $sb = sb_new();
+    my int $len = length($h);
+    my int $i = 0;
+    while ($i + 1 < $len) {
+        my int $b = meta_hex_nibble(substr($h, $i, 1)) * 16 + meta_hex_nibble(substr($h, $i + 1, 1));
+        sb_append($sb, chr($b));
+        $i = $i + 2;
+    }
+    return sb_to_string($sb);
+}
+
+func meta_str_to_int(str $s) int {
+    if (length($s) > 0 && substr($s, 0, 1) eq "-") {
+        return 0 - str_to_int(substr($s, 1, length($s) - 1));
+    }
+    return str_to_int($s);
+}
+
+func meta_lit_to_ast(str $dk, str $dv) scalar {
+    if ($dk eq "i") { return ast_new_int_literal($dv); }
+    if ($dk eq "n") { return ast_new_num_literal($dv); }
+    if ($dk eq "s") { return ast_new_str_literal(meta_hex_decode($dv)); }
+    return 0;
+}
+
 func parse_export_metadata(str $lib_name, str $so_path, str $metadata) scalar {
     my hash %lib_info = ();
     $lib_info{"lib_name"} = $lib_name;
@@ -5706,6 +5843,12 @@ func parse_export_metadata(str $lib_name, str $so_path, str $metadata) scalar {
     # Collected `use:Module` entries (Strada module deps of the artifact —
     # resolved transitively by do_import_object_at).
     my array @use_deps_local = ();
+    my array @inherits_local = ();
+    my array @has_attrs_local = ();
+    my array @overloads_local = ();
+    my array @enums_local = ();
+    my array @constants_local = ();
+    my array @structs_local = ();
 
     # Parse metadata line by line manually (bootstrap doesn't support split well)
     my int $meta_len = length($metadata);
@@ -5754,6 +5897,110 @@ func parse_export_metadata(str $lib_name, str $so_path, str $metadata) scalar {
                 # mod:NAME → a method name with before/after/around hooks
                 # in this library; never devirtualize it.
                 push(@modified_methods, substr($line, 4, length($line) - 4));
+            } elsif (length($line) > 8 && substr($line, 0, 8) eq "inherit|") {
+                my array @pf = meta_split($line, "|");
+                if (size(@pf) >= 3) {
+                    my hash %ie = ();
+                    $ie{"child"} = $pf[1];
+                    $ie{"parent"} = $pf[2];
+                    push(@inherits_local, \%ie);
+                    $packages{$pf[1]} = 1;
+                }
+            } elsif (length($line) > 9 && substr($line, 0, 9) eq "overload|") {
+                my array @pf = meta_split($line, "|");
+                if (size(@pf) >= 4) {
+                    my hash %oe = ();
+                    $oe{"pkg"} = $pf[1];
+                    $oe{"op"} = meta_hex_decode($pf[2]);
+                    $oe{"method"} = $pf[3];
+                    push(@overloads_local, \%oe);
+                    $packages{$pf[1]} = 1;
+                }
+            } elsif (length($line) > 4 && substr($line, 0, 4) eq "has|") {
+                my array @pf = meta_split($line, "|");
+                if (size(@pf) >= 10) {
+                    my hash %ha = ();
+                    my scalar $dnode = meta_lit_to_ast($pf[8], $pf[9]);
+                    my int $lz = meta_str_to_int($pf[6]);
+                    $ha{"package"} = $pf[1];
+                    $ha{"name"} = $pf[2];
+                    $ha{"attr_type"} = meta_str_to_int($pf[3]);
+                    $ha{"rw"} = meta_str_to_int($pf[4]);
+                    $ha{"required"} = meta_str_to_int($pf[5]);
+                    $ha{"lazy"} = $lz;
+                    $ha{"builder"} = $pf[7];
+                    if ($lz == 1 && $pf[7] eq "__lazy") {
+                        $ha{"default_node"} = 0;
+                        $ha{"lazy_default_node"} = $dnode;
+                    } else {
+                        $ha{"default_node"} = $dnode;
+                        $ha{"lazy_default_node"} = $dnode;
+                    }
+                    $ha{"from_use"} = 1;
+                    push(@has_attrs_local, \%ha);
+                    $packages{$pf[1]} = 1;
+                }
+            } elsif (length($line) > 5 && substr($line, 0, 5) eq "enum|") {
+                my array @pf = meta_split($line, "|");
+                if (size(@pf) >= 3) {
+                    my scalar $en = ast_new_enum($pf[1]);
+                    $en->{"from_use"} = 1;
+                    if (length($pf[2]) > 0) {
+                        my array @mems = meta_split($pf[2], ",");
+                        my int $emi = 0;
+                        while ($emi < size(@mems)) {
+                            my array @kv = meta_split($mems[$emi], "=");
+                            if (size(@kv) >= 2) {
+                                ast_add_enum_member($en, $kv[0], meta_str_to_int($kv[1]));
+                            }
+                            $emi = $emi + 1;
+                        }
+                    }
+                    push(@enums_local, $en);
+                }
+            } elsif (length($line) > 6 && substr($line, 0, 6) eq "const|") {
+                my array @pf = meta_split($line, "|");
+                if (size(@pf) >= 5) {
+                    my hash %ce = ();
+                    $ce{"name"} = $pf[1];
+                    $ce{"var_type"} = meta_str_to_int($pf[2]);
+                    $ce{"kind"} = $pf[3];
+                    $ce{"value"} = $pf[4];
+                    push(@constants_local, \%ce);
+                }
+            } elsif (length($line) > 7 && substr($line, 0, 7) eq "struct|") {
+                my array @pf = meta_split($line, "|");
+                if (size(@pf) >= 4) {
+                    my hash %st = ();
+                    my array @sfields = ();
+                    my hash %sfmap = ();
+                    my int $sfc = 0;
+                    if (length($pf[3]) > 0) {
+                        my array @rawf = meta_split($pf[3], ";");
+                        my int $rfi = 0;
+                        while ($rfi < size(@rawf)) {
+                            my array @fp = meta_split($rawf[$rfi], ",");
+                            if (size(@fp) >= 4) {
+                                my hash %fi = ();
+                                $fi{"name"} = $fp[0];
+                                $fi{"type"} = meta_str_to_int($fp[1]);
+                                $fi{"offset"} = meta_str_to_int($fp[2]);
+                                $fi{"size"} = meta_str_to_int($fp[3]);
+                                push(@sfields, \%fi);
+                                $sfmap{$fp[0]} = \%fi;
+                                $sfc = $sfc + 1;
+                            }
+                            $rfi = $rfi + 1;
+                        }
+                    }
+                    $st{"name"} = $pf[1];
+                    $st{"size"} = meta_str_to_int($pf[2]);
+                    $st{"fields"} = \@sfields;
+                    $st{"field_count"} = $sfc;
+                    $st{"field_map"} = \%sfmap;
+                    $st{"from_use"} = 1;
+                    push(@structs_local, \%st);
+                }
             }
         }
     }
@@ -5762,6 +6009,12 @@ func parse_export_metadata(str $lib_name, str $so_path, str $metadata) scalar {
     $lib_info{"function_count"} = $fn_count;
     $lib_info{"link_libs"} = \@link_libs_local;
     $lib_info{"use_deps"} = \@use_deps_local;
+    $lib_info{"inherits"} = \@inherits_local;
+    $lib_info{"has_attrs"} = \@has_attrs_local;
+    $lib_info{"overloads"} = \@overloads_local;
+    $lib_info{"enums"} = \@enums_local;
+    $lib_info{"constants"} = \@constants_local;
+    $lib_info{"structs"} = \@structs_local;
     $lib_info{"has_mod_info"} = $has_mod_info;
     $lib_info{"modified_methods"} = \@modified_methods;
 
@@ -5778,6 +6031,129 @@ func parse_export_metadata(str $lib_name, str $so_path, str $metadata) scalar {
     $lib_info{"oop_init_funcs"} = \@oop_inits;
 
     return \%lib_info;
+}
+
+func merge_imported_meta(scalar $parser, scalar $program, scalar $info) void {
+    my scalar $inhs = $info->{"inherits"};
+    if (defined($inhs)) {
+        my int $ii = 0;
+        while ($ii < size(@{$inhs})) {
+            my str $ch = $inhs->[$ii]->{"child"};
+            my str $pa = $inhs->[$ii]->{"parent"};
+            my int $dup = 0;
+            my int $ei = 0;
+            my int $en = $program->{"inherit_count"} + 0;
+            while ($ei < $en) {
+                my scalar $cur = $program->{"inherits"}->[$ei];
+                if ($cur->{"child"} eq $ch && $cur->{"parent"} eq $pa) { $dup = 1; last; }
+                $ei = $ei + 1;
+            }
+            if ($dup == 0) {
+                ast_add_inherit($program, $ch, $pa);
+                $program->{"inherits"}->[$program->{"inherit_count"} - 1]->{"from_use"} = 1;
+            }
+            $ii = $ii + 1;
+        }
+    }
+
+    my scalar $has_list = $info->{"has_attrs"};
+    if (defined($has_list)) {
+        my int $hi = 0;
+        while ($hi < size(@{$has_list})) {
+            my scalar $ha = $has_list->[$hi];
+            my int $dup = 0;
+            my int $ei = 0;
+            my int $en = $program->{"has_attr_count"} + 0;
+            while ($ei < $en) {
+                my scalar $cur = $program->{"has_attrs"}->[$ei];
+                if ($cur->{"package"} eq $ha->{"package"} && $cur->{"name"} eq $ha->{"name"}) { $dup = 1; last; }
+                $ei = $ei + 1;
+            }
+            if ($dup == 0) {
+                push($program->{"has_attrs"}, $ha);
+                $program->{"has_attr_count"} = $program->{"has_attr_count"} + 1;
+            }
+            $hi = $hi + 1;
+        }
+    }
+
+    my scalar $ols = $info->{"overloads"};
+    if (defined($ols) && size(@{$ols}) > 0) {
+        $program->{"has_overloads"} = 1;
+        my scalar $dst_ols = $program->{"overloads"};
+        my int $oi = 0;
+        while ($oi < size(@{$ols})) {
+            my str $opkg = $ols->[$oi]->{"pkg"};
+            my str $oop = $ols->[$oi]->{"op"};
+            my str $ometh = $ols->[$oi]->{"method"};
+            if (length("" . $dst_ols->{$opkg}) == 0) {
+                my hash %new_pkg_ol = ();
+                $dst_ols->{$opkg} = \%new_pkg_ol;
+            }
+            $dst_ols->{$opkg}->{$oop} = $ometh;
+            $program->{"overloaded_ops"}->{$oop} = 1;
+            $oi = $oi + 1;
+        }
+    }
+
+    my scalar $ens = $info->{"enums"};
+    if (defined($ens)) {
+        my int $eni = 0;
+        while ($eni < size(@{$ens})) {
+            my scalar $en = $ens->[$eni];
+            my int $dup = 0;
+            my int $eei = 0;
+            my int $een = $program->{"enum_count"} + 0;
+            while ($eei < $een) {
+                if ($program->{"enums"}->[$eei]->{"name"} eq $en->{"name"}) { $dup = 1; last; }
+                $eei = $eei + 1;
+            }
+            if ($dup == 0) {
+                ast_add_enum($program, $en);
+            }
+            $eni = $eni + 1;
+        }
+    }
+
+    my scalar $consts = $info->{"constants"};
+    if (defined($consts)) {
+        my int $ci = 0;
+        while ($ci < size(@{$consts})) {
+            my scalar $ce = $consts->[$ci];
+            my str $cname = $ce->{"name"};
+            $parser->{"const_names"}->{$cname} = 1;
+            my int $dup = 0;
+            my int $gi = 0;
+            my int $gn = $program->{"global_count"} + 0;
+            while ($gi < $gn) {
+                if ($program->{"globals"}->[$gi]->{"name"} eq $cname) { $dup = 1; last; }
+                $gi = $gi + 1;
+            }
+            if ($dup == 0) {
+                my scalar $cinit = meta_lit_to_ast($ce->{"kind"}, $ce->{"value"});
+                if ($cinit != 0) {
+                    my scalar $cdecl = ast_new_const_decl($cname, $ce->{"var_type"}, $cinit);
+                    $cdecl->{"from_use"} = 0;
+                    ast_add_global($program, $cdecl);
+                }
+            }
+            $ci = $ci + 1;
+        }
+    }
+
+    my scalar $sts = $info->{"structs"};
+    if (defined($sts)) {
+        my int $si = 0;
+        while ($si < size(@{$sts})) {
+            my scalar $st = $sts->[$si];
+            my str $sname = $st->{"name"};
+            if (!defined($program->{"structs"}->{$sname})) {
+                ast_add_struct($program, $st);
+            }
+            $parser->{"structs"}->{$sname} = $program->{"structs"}->{$sname};
+            $si = $si + 1;
+        }
+    }
 }
 
 # Parse a single export metadata line
@@ -6286,8 +6662,9 @@ func do_import_object_at(scalar $parser, scalar $program, str $obj_file, str $o_
     # Add to program
     ast_add_import_object($program, $obj_info);
 
-    # Pull in any extern-C link deps the .o advertised via link_lib.
+    # Pull in any extern-C link deps and OOP/type metadata the .o advertised.
     merge_link_libs($program, $obj_info->{"link_libs"});
+    merge_imported_meta($parser, $program, $obj_info);
 
     # Resolve the artifact's Strada module deps (use: metadata lines).
     # A module-only .o contains none of its deps' code, so each dep must
@@ -6547,8 +6924,9 @@ func do_import_archive_at(scalar $parser, scalar $program, str $arch_file, str $
     # Add to program
     ast_add_import_archive($program, $arch_info);
 
-    # Pull in any extern-C link deps the .a advertised via link_lib.
+    # Pull in any extern-C link deps and OOP/type metadata the .a advertised.
     merge_link_libs($program, $arch_info->{"link_libs"});
+    merge_imported_meta($parser, $program, $arch_info);
 
     # Check if archive defines an import() function
     my str $arch_import_fn = sanitize_name($arch_name) . "_import";
@@ -7155,7 +7533,7 @@ func parse_method_modifier(scalar $parser, scalar $program, str $mod_type) void 
     parser_expect($parser, "LPAREN");
     my scalar $fn = ast_new_function($mod_func_name, TYPE_VOID());
     # Parse params
-    while (!parser_check($parser, "RPAREN")) {
+    while (!parser_check($parser, "RPAREN") && !parser_check($parser, "EOF")) {
         if ($fn->{"param_count"} > 0) {
             parser_expect($parser, "COMMA");
         }

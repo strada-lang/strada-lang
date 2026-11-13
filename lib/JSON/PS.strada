@@ -400,30 +400,63 @@ func encode_opts(scalar $value, scalar $options) str {
 # JSON Decoding
 # ============================================================
 
-# Parser state
+# Parser state (normalized to UTF-8 bytes for consistent mixed raw/\uXXXX handling)
 func make_parser(str $json) scalar {
+    my str $raw = $json;
+    if (utf8::is_utf8($raw)) {
+        utf8::encode($raw);
+    }
     return {
-        "json" => $json,
+        "json" => $raw,
         "pos" => 0,
-        "len" => length($json),
+        "len" => core::byte_length($raw),
         "err" => 0
     };
 }
 
-# Get current character without advancing
+# Encode a Unicode code point to raw UTF-8 bytes without triggering char-flag upgrade
+private func cp_to_utf8(int $cp) str {
+    if ($cp < 0 || $cp > 1114111) {
+        $cp = 65533;
+    }
+    if ($cp < 128) {
+        return core::byte($cp);
+    }
+    if ($cp < 2048) {
+        my int $b0 = 192 + cast_int(($cp - ($cp % 64)) / 64);
+        my int $b1 = 128 + ($cp % 64);
+        return core::byte($b0) . core::byte($b1);
+    }
+    if ($cp < 65536) {
+        my int $b0 = 224 + cast_int(($cp - ($cp % 4096)) / 4096);
+        my int $rem = $cp % 4096;
+        my int $b1 = 128 + cast_int(($rem - ($rem % 64)) / 64);
+        my int $b2 = 128 + ($cp % 64);
+        return core::byte($b0) . core::byte($b1) . core::byte($b2);
+    }
+    my int $b0 = 240 + cast_int(($cp - ($cp % 262144)) / 262144);
+    my int $r1 = $cp % 262144;
+    my int $b1 = 128 + cast_int(($r1 - ($r1 % 4096)) / 4096);
+    my int $r2 = $cp % 4096;
+    my int $b2 = 128 + cast_int(($r2 - ($r2 % 64)) / 64);
+    my int $b3 = 128 + ($cp % 64);
+    return core::byte($b0) . core::byte($b1) . core::byte($b2) . core::byte($b3);
+}
+
+# Get current byte without advancing
 func peek(scalar $p) str {
     if ($p->{"pos"} >= $p->{"len"}) {
         return "";
     }
-    return substr($p->{"json"}, $p->{"pos"}, 1);
+    return core::byte_substr($p->{"json"}, $p->{"pos"}, 1);
 }
 
-# Get current character and advance
+# Get current byte and advance
 func advance(scalar $p) str {
     if ($p->{"pos"} >= $p->{"len"}) {
         return "";
     }
-    my str $ch = substr($p->{"json"}, $p->{"pos"}, 1);
+    my str $ch = core::byte_substr($p->{"json"}, $p->{"pos"}, 1);
     $p->{"pos"} = $p->{"pos"} + 1;
     return $ch;
 }
@@ -461,7 +494,7 @@ func parse_str(scalar $p) str {
                 }
                 $bi = $bi + 1;
             }
-            if ($has_hi && utf8::valid($result)) {
+            if ($has_hi && !utf8::is_utf8($result) && utf8::valid($result)) {
                 utf8::decode($result);
             }
             return $result;
@@ -500,7 +533,7 @@ func parse_str(scalar $p) str {
                 }
                 if ($cp >= 55296 && $cp <= 56319) {
                     # high surrogate: expect \uDC00-\uDFFF
-                    if ($p->{"pos"} + 1 < $p->{"len"} && substr($p->{"json"}, $p->{"pos"}, 2) eq "\\u") {
+                    if ($p->{"pos"} + 1 < $p->{"len"} && core::byte_substr($p->{"json"}, $p->{"pos"}, 2) eq "\\u") {
                         my int $saved_pos = $p->{"pos"};
                         $p->{"pos"} = $p->{"pos"} + 2;
                         my int $lo = JSON::PS::parse_hex4($p);
@@ -521,15 +554,16 @@ func parse_str(scalar $p) str {
                 } elsif ($cp >= 56320 && $cp <= 57343) {
                     $cp = 65533;
                 }
-                if ($cp == 0) {
-                    $result = $result . core::byte(0);
-                } else {
-                    $result = $result . chr($cp);
-                }
+                $result = $result . JSON::PS::cp_to_utf8($cp);
             } else {
                 $result = $result . $escaped;
             }
         } else {
+            if (core::get_byte($ch, 0) < 32) {
+                $p->{"err"} = 1;
+                $p->{"err_msg"} = "Unescaped control character in JSON string at char " . $p->{"pos"};
+                return "";
+            }
             $result = $result . $ch;
         }
     }

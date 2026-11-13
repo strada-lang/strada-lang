@@ -3,7 +3,8 @@
 # Runs test programs under valgrind and checks for leaks
 # Usage: ./run_leak_tests.sh [-v] [pattern]
 
-INTERP="$(dirname "$0")/../../strada-interp"
+INTERP="${INTERP:-$(dirname "$0")/../../strada-interp}"
+INTERP_FLAGS="${INTERP_FLAGS:-}"
 TEST_DIR="$(dirname "$0")"
 PASS=0
 FAIL=0
@@ -43,15 +44,13 @@ for test_file in "$TEST_DIR"/leak_*.strada; do
     # Run under valgrind
     local_output=$(valgrind --leak-check=full --errors-for-leak-kinds=definite \
         --error-exitcode=42 \
-        $INTERP "$test_file" 2>&1)
+        $INTERP $INTERP_FLAGS "$test_file" 2>&1)
     exit_code=$?
 
     # Extract leak summary
-    definitely_lost=$(echo "$local_output" | grep "definitely lost:" | grep -oP '\d+(?= bytes)')
+    definitely_lost=$(echo "$local_output" | grep "definitely lost:" | sed -E 's/.*definitely lost: ([0-9,]+) bytes.*/\1/' | tr -d ',')
 
-    # Threshold: small leaks (<2KB) are from the Strada compiler's refcount
-    # handling in function calls and are not interpreter bugs
-    LEAK_THRESHOLD=2048
+    LEAK_THRESHOLD="${LEAK_THRESHOLD:-0}"
 
     if [ "$exit_code" -eq 42 ]; then
         if [ -n "$definitely_lost" ] && [ "$definitely_lost" -le "$LEAK_THRESHOLD" ]; then
@@ -65,8 +64,8 @@ for test_file in "$TEST_DIR"/leak_*.strada; do
             FAIL=$((FAIL + 1))
         fi
     elif [ "$exit_code" -ne 0 ]; then
-        echo -e "  ${YELLOW}ERROR${NC}: $test_name (exit code $exit_code)"
-        SKIP=$((SKIP + 1))
+        echo -e "  ${RED}FAIL${NC}: $test_name (exit code $exit_code)"
+        FAIL=$((FAIL + 1))
     else
         echo -e "  ${GREEN}PASS${NC}: $test_name"
         PASS=$((PASS + 1))

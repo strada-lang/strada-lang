@@ -39,7 +39,10 @@ func new(scalar $handler, scalar $state) scalar {
     my scalar $inbox = async::channel(0);
     $self{"inbox"} = $inbox;
     $self{"stopped"} = 0;
+    $self{"_awaited"} = 0;
     my scalar $selfref = bless(\%self, "Async::Actor");
+    my scalar $self_w = $selfref;
+    core::weaken($self_w);
 
     my scalar $future = async::spawn(fn () scalar {
         while (1) {
@@ -54,8 +57,10 @@ func new(scalar $handler, scalar $state) scalar {
                 $result = $handler->($envelope->{"msg"}, $state);
             } catch ($e) {
                 $had_error = 1;
-                $selfref->{"error"} = $e;
-                $selfref->{"stopped"} = 1;
+                if (defined($self_w)) {
+                    $self_w->{"error"} = $e;
+                    $self_w->{"stopped"} = 1;
+                }
                 async::close($inbox);
             }
             if (defined($reply_ch)) {
@@ -116,10 +121,11 @@ func error(scalar $self) scalar {
 }
 
 func stop(scalar $self) void {
-    if ($self->{"stopped"} == 1) {
+    if ($self->{"_awaited"} == 1) {
         return;
     }
     $self->{"stopped"} = 1;
+    $self->{"_awaited"} = 1;
     async::close($self->{"inbox"});
     try {
         my scalar $ignored = await $self->{"future"};

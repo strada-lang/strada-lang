@@ -108,10 +108,10 @@ StradaValue* strada_usb_get_device_list(void) {
             char vidpid[16];
             snprintf(vidpid, sizeof(vidpid), "%04x:%04x",
                 desc.idVendor, desc.idProduct);
-            strada_hash_set(dev_info->value.hv, "vidpid",
+            strada_hash_set_take(dev_info->value.hv, "vidpid",
                 strada_new_str(vidpid));
 
-            strada_array_push(result->value.av, dev_info);
+            strada_array_push_take(result->value.av, dev_info);
         }
     }
 
@@ -260,8 +260,12 @@ StradaValue* strada_usb_bulk_transfer(StradaValue *handle_sv, StradaValue *endpo
     /* Check endpoint direction */
     if (endpoint & 0x80) {
         /* IN endpoint - read data */
-        int length = (int)strada_to_int(data_sv);  /* data_sv is the length for reads */
-        unsigned char *buffer = malloc(length);
+        int64_t length64 = strada_to_int(data_sv);  /* data_sv is the length for reads */
+        if (length64 <= 0 || length64 > 64 * 1024 * 1024) {
+            return strada_new_str("");
+        }
+        int length = (int)length64;
+        unsigned char *buffer = malloc((size_t)length);
         if (!buffer) {
             return strada_new_str("");
         }
@@ -278,8 +282,8 @@ StradaValue* strada_usb_bulk_transfer(StradaValue *handle_sv, StradaValue *endpo
     } else {
         /* OUT endpoint - write data */
         char *data = strada_to_str(data_sv);   /* malloc'd — must free */
-        int length = (!STRADA_IS_TAGGED_INT(data_sv) && data_sv->struct_size > 0)
-                         ? (int)data_sv->struct_size : (int)strlen(data);
+        int length = (data_sv && !STRADA_IS_TAGGED_INT(data_sv) && data_sv->type == STRADA_STR)
+                         ? (int)STRADA_STR_BYTELEN(data_sv) : (int)strlen(data);
 
         int ret = libusb_bulk_transfer(handle, endpoint, (unsigned char *)data,
                                         length, &transferred, timeout);
@@ -306,8 +310,12 @@ StradaValue* strada_usb_interrupt_transfer(StradaValue *handle_sv, StradaValue *
 
     if (endpoint & 0x80) {
         /* IN endpoint - read */
-        int length = (int)strada_to_int(data_sv);
-        unsigned char *buffer = malloc(length);
+        int64_t length64 = strada_to_int(data_sv);
+        if (length64 <= 0 || length64 > 64 * 1024 * 1024) {
+            return strada_new_str("");
+        }
+        int length = (int)length64;
+        unsigned char *buffer = malloc((size_t)length);
         if (!buffer) {
             return strada_new_str("");
         }
@@ -324,8 +332,8 @@ StradaValue* strada_usb_interrupt_transfer(StradaValue *handle_sv, StradaValue *
     } else {
         /* OUT endpoint - write */
         char *data = strada_to_str(data_sv);   /* malloc'd — must free */
-        int length = (!STRADA_IS_TAGGED_INT(data_sv) && data_sv->struct_size > 0)
-                         ? (int)data_sv->struct_size : (int)strlen(data);
+        int length = (data_sv && !STRADA_IS_TAGGED_INT(data_sv) && data_sv->type == STRADA_STR)
+                         ? (int)STRADA_STR_BYTELEN(data_sv) : (int)strlen(data);
 
         int ret = libusb_interrupt_transfer(handle, endpoint, (unsigned char *)data,
                                              length, &transferred, timeout);
@@ -360,8 +368,12 @@ StradaValue* strada_usb_control_transfer(StradaValue *handle_sv,
     /* Check if this is a read or write based on request_type bit 7 */
     if (request_type & 0x80) {
         /* Device-to-host (read) */
-        int length = (int)strada_to_int(data_sv);
-        unsigned char *buffer = malloc(length);
+        int64_t length64 = strada_to_int(data_sv);
+        if (length64 <= 0 || length64 > 64 * 1024 * 1024) {
+            return strada_new_str("");
+        }
+        int length = (int)length64;
+        unsigned char *buffer = malloc((size_t)length);
         if (!buffer) {
             return strada_new_str("");
         }
@@ -379,8 +391,8 @@ StradaValue* strada_usb_control_transfer(StradaValue *handle_sv,
     } else {
         /* Host-to-device (write) */
         char *data = strada_to_str(data_sv);   /* malloc'd — must free */
-        int length = (!STRADA_IS_TAGGED_INT(data_sv) && data_sv->struct_size > 0)
-                         ? (int)data_sv->struct_size : (int)strlen(data);
+        int length = (data_sv && !STRADA_IS_TAGGED_INT(data_sv) && data_sv->type == STRADA_STR)
+                         ? (int)STRADA_STR_BYTELEN(data_sv) : (int)strlen(data);
 
         int ret = libusb_control_transfer(handle, request_type, request,
                                            value, index, (unsigned char *)data, length, timeout);
@@ -525,20 +537,20 @@ StradaValue* strada_usb_get_config_descriptor(StradaValue *handle_sv, StradaValu
                     case LIBUSB_TRANSFER_TYPE_BULK: type_str = "bulk"; break;
                     case LIBUSB_TRANSFER_TYPE_INTERRUPT: type_str = "interrupt"; break;
                 }
-                strada_hash_set(ep_info->value.hv, "type", strada_new_str(type_str));
+                strada_hash_set_take(ep_info->value.hv, "type", strada_new_str(type_str));
 
                 /* Decode direction */
-                strada_hash_set(ep_info->value.hv, "direction",
+                strada_hash_set_take(ep_info->value.hv, "direction",
                     strada_new_str((ep->bEndpointAddress & 0x80) ? "in" : "out"));
 
-                strada_array_push(endpoints->value.av, ep_info);
+                strada_array_push_take(endpoints->value.av, ep_info);
             }
-            strada_hash_set(iface_info->value.hv, "endpoints", endpoints);
+            strada_hash_set_take(iface_info->value.hv, "endpoints", endpoints);
 
-            strada_array_push(interfaces->value.av, iface_info);
+            strada_array_push_take(interfaces->value.av, iface_info);
         }
     }
-    strada_hash_set(result->value.hv, "interfaces", interfaces);
+    strada_hash_set_take(result->value.hv, "interfaces", interfaces);
 
     libusb_free_config_descriptor(config);
     return result;

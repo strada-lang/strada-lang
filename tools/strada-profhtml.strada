@@ -83,14 +83,16 @@ func fp_read_string(int $len) str {
     my str $result = "";
     __C__ {
         int64_t n = strada_to_int(len);
-        char *buf = (char *)malloc(n + 1);
-        if (buf && _fp_file) {
-            fread(buf, 1, n, _fp_file);
-            buf[n] = '\0';
-            strada_decref(result);
-            result = strada_new_str(buf);
+        if (n > 0 && n <= 1048576 && _fp_file && !feof(_fp_file)) {
+            char *buf = (char *)malloc((size_t)n + 1);
+            if (buf) {
+                size_t got = fread(buf, 1, (size_t)n, _fp_file);
+                buf[got] = '\0';
+                strada_decref(result);
+                result = strada_new_str_len(buf, got);
+                free(buf);
+            }
         }
-        free(buf);
     }
     return $result;
 }

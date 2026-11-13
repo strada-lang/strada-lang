@@ -24,6 +24,8 @@ func html_escape(str $s) str {
     $result =~ s/&/&amp;/g;
     $result =~ s/</&lt;/g;
     $result =~ s/>/&gt;/g;
+    $result =~ s/"/&quot;/g;
+    $result =~ s/'/&#39;/g;
     return $result;
 }
 
@@ -112,6 +114,16 @@ func process_inline_emph(str $s) str {
 
 # Process inline formatting (bold, italic, code, links)
 # Protects inline `code` and link/image URLs from */_ emphasis corruption.
+func sanitize_url(str $u) str {
+    my str $t = $u;
+    $t =~ s/^[ \t\r\n]+//;
+    my str $low = lc($t);
+    if ($low =~ /^(javascript|vbscript|data):/) {
+        return "#";
+    }
+    return html_escape($u);
+}
+
 func process_inline(str $line) str {
     my str $result = $line;
     my array @tokens = ();
@@ -168,7 +180,7 @@ func process_inline(str $line) str {
                         my str $after = substr($result, $close_paren + 1, length($result) - $close_paren - 1);
                         my int $tidx = size(@tokens);
                         my str $ph = $soh . "T" . $tidx . $stx;
-                        push(@tokens, "<img src=\"" . $url . "\" alt=\"" . $alt . "\">");
+                        push(@tokens, "<img src=\"" . sanitize_url($url) . "\" alt=\"" . html_escape($alt) . "\">");
                         $result = $before . $ph . $after;
                         $search_from = length($before) + length($ph);
                     }
@@ -203,7 +215,7 @@ func process_inline(str $line) str {
                         my str $after = substr($result, $close_paren + 1, length($result) - $close_paren - 1);
                         my int $tidx = size(@tokens);
                         my str $ph = $soh . "T" . $tidx . $stx;
-                        push(@tokens, "<a href=\"" . $url . "\">" . process_inline_emph($text) . "</a>");
+                        push(@tokens, "<a href=\"" . sanitize_url($url) . "\">" . process_inline_emph($text) . "</a>");
                         $result = $before . $ph . $after;
                         $search_from = length($before) + length($ph);
                     }
@@ -441,7 +453,7 @@ func md2html(str $markdown) str {
                 $i = $i + 1;
             }
             if (length($lang) > 0) {
-                $html = $html . "<pre><code class=\"language-" . $lang . "\">" . $code . "</code></pre>\n";
+                $html = $html . "<pre><code class=\"language-" . html_escape($lang) . "\">" . $code . "</code></pre>\n";
             } else {
                 $html = $html . "<pre><code>" . $code . "</code></pre>\n";
             }

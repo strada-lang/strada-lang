@@ -32,6 +32,19 @@ CFLAGS += -DHAVE_READLINE $(READLINE_CFLAGS)
 LDFLAGS += $(READLINE_LIBS)
 endif
 
+ifeq ($(HAVE_CYCLE_GC),1)
+CFLAGS += -DSTRADA_CYCLE_GC
+endif
+ifeq ($(HAVE_ARENA),1)
+CFLAGS += -DSTRADA_ARENA
+endif
+ifeq ($(HAVE_EPOLL),1)
+CFLAGS += -DSTRADA_HAVE_EPOLL
+endif
+ifeq ($(HAVE_EPOLL),0)
+CFLAGS += -DSTRADA_NO_EPOLL
+endif
+
 # Source files (order matters - concatenated)
 # Stubs.strada provides sanitize_name() needed by Parser before Strada::Interpreter is loaded
 # Strada::Interpreter is pulled in via "use" from lib/Strada/Interpreter.strada
@@ -88,6 +101,7 @@ bootstrap: Combined.strada $(BOOTSTRAP_STRADAC)
 # Run interpreter's own test suite
 test: strada-interp
 	bash test/run_tests.sh
+	INTERP="test/../strada-interp --vm" bash test/run_tests.sh
 
 # Run compiler test suite through interpreter to find language gaps
 test-compiler-compat: strada-interp

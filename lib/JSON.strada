@@ -439,6 +439,11 @@ static int jp_string(JsonP *p, char **out, size_t *out_len) {
                     break;
             }
         } else {
+            if ((unsigned char)c < 0x20) {
+                jp_set_err("Unescaped control character in JSON string", p->pos);
+                free(b.buf);
+                return 0;
+            }
             jb_putc(&b, c);
         }
     }

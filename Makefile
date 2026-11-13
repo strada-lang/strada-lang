@@ -407,14 +407,16 @@ examples: stradac $(RUNTIME_OBJ)
 test-selfhost: stradac
 	@echo "=== Testing self-hosting compiler (stage 2) ==="
 	@echo "Compiling Lexer.strada with self-hosting compiler..."
-	$(STRADAC) $(COMPILER_DIR)/Lexer.strada /tmp/Lexer_stage2.c
+	@tmpdir=$$(mktemp -d); trap 'rm -rf "$$tmpdir"' EXIT; \
+	$(STRADAC) $(COMPILER_DIR)/Lexer.strada "$$tmpdir/Lexer_stage2.c"
 	@echo "✓ Self-hosting compiler can compile its own modules"
 
 # Test all examples compile and link successfully
 # Use GNU timeout (gtimeout on macOS via coreutils); fall back to no timeout if absent.
 test-examples: stradac $(RUNTIME_OBJ)
 	@echo "=== Testing all examples ==="
-	@TIMEOUT_CMD=""; \
+	@tmpdir=$$(mktemp -d); trap 'rm -rf "$$tmpdir"' EXIT; \
+	TIMEOUT_CMD=""; \
 	if command -v timeout >/dev/null 2>&1; then TIMEOUT_CMD="timeout 5"; \
 	elif command -v gtimeout >/dev/null 2>&1; then TIMEOUT_CMD="gtimeout 5"; \
 	fi; \
@@ -422,8 +424,8 @@ test-examples: stradac $(RUNTIME_OBJ)
 	for f in $(EXAMPLES_DIR)/*.strada; do \
 	    name=$$(basename $$f .strada); \
 	    printf "Testing $$name... "; \
-	    if $$TIMEOUT_CMD $(STRADAC) $$f /tmp/$$name.c >/dev/null 2>&1; then \
-	        if $(CC) -o /tmp/$$name /tmp/$$name.c $(RUNTIME_OBJ) -I$(RUNTIME_DIR) $(LDFLAGS) 2>/dev/null; then \
+	    if $$TIMEOUT_CMD $(STRADAC) $$f "$$tmpdir/$$name.c" >/dev/null 2>&1; then \
+	        if $(CC) -o "$$tmpdir/$$name" "$$tmpdir/$$name.c" $(RUNTIME_OBJ) -I$(RUNTIME_DIR) $(LDFLAGS) 2>/dev/null; then \
 	            echo "OK"; \
 	            passed=$$((passed + 1)); \
 	        else \
@@ -706,7 +708,9 @@ install: stradac $(RUNTIME_OBJ) libs tools
 	@echo "Installing documentation..."
 	@if [ -d docs ]; then \
 	    find docs -name "*.md" | while read f; do \
-	        install -m 644 "$$f" $(INSTALL_DOC)/; \
+	        dir=$$(dirname "$$f" | sed 's|^docs|$(INSTALL_DOC)|'); \
+	        mkdir -p "$$dir"; \
+	        install -m 644 "$$f" "$$dir/"; \
 	    done; \
 	fi
 	@# Build and install tools (converters excluded)
@@ -770,11 +774,13 @@ uninstall:
 	@echo "=== Uninstalling Strada from $(PREFIX) ==="
 	rm -f $(INSTALL_BIN)/stradac
 	rm -f $(INSTALL_BIN)/strada
+	rm -f $(INSTALL_BIN)/strada-driver
 	rm -f $(INSTALL_BIN)/stradadoc
 	rm -f $(INSTALL_BIN)/strada-soinfo
 	rm -f $(INSTALL_BIN)/strada-md2man
 	rm -f $(INSTALL_BIN)/strada-md2html
 	rm -f $(INSTALL_BIN)/strada-jit
+	rm -f $(INSTALL_BIN)/stradapp
 	rm -f $(INSTALL_BIN)/strada-proftext
 	rm -f $(INSTALL_BIN)/strada-profhtml
 	rm -f $(INSTALL_BIN)/strada-interp

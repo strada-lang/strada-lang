@@ -1,0 +1,58 @@
+use lib "lib";
+use Eval;
+use Strada::JIT;
+
+my hash %g_unread_file_scope_guard = ("guard" => 1);
+
+func main() int {
+    # 1. Exercise Strada::Interpreter::eval (Eval) features and reset
+    my int $i = 0;
+    while ($i < 2) {
+        Strada::Interpreter::eval('
+            enum E { ONE = 1, TWO = 2 }
+            const int K = 40;
+            func add_k(int $x) int { return $x + K + E::TWO; }
+            our int $boot = 0;
+            BEGIN { $boot = add_k(0); }
+        ');
+        Strada::Interpreter::eval('our int $g = 10;');
+        Strada::Interpreter::eval('
+            try { local $g = 99; throw "boom"; } catch ($e) {}
+            my array @fns = ();
+            for (my int $j = 0; $j < 3; $j = $j + 1) {
+                push(@fns, func() int { return $j; });
+            }
+            my scalar $c = undef;
+            $c = func() scalar { return $c; };
+            $c->();
+            $g + $fns[0]->() + $fns[1]->() + $fns[2]->();
+        ');
+        Strada::Interpreter::reset();
+        $i = $i + 1;
+    }
+
+    # 2. Exercise Strada::JIT features and reset
+    Strada::JIT::init();
+    Strada::JIT::eval('my int $x = 10;');
+    Strada::JIT::eval('func f1(int $v) int { return $v + 1; } func f2(int $v) int { return f1($v) * 2; } f2($x)');
+    Strada::JIT::eval('package LeakBox; has rw int $v; func bump(scalar $self, int $d) int { $self->set_v($self->v() + $d); return $self->v(); } before "bump" func(scalar $self, int $d) void { $self->set_v($self->v() + 10); }');
+    my scalar $lb = Strada::JIT::eval('package main; my LeakBox $lb = LeakBox::new("v", 5); $lb->bump(2)');
+    if (($lb + 0) != 17) {
+        die("Unexpected LeakBox value");
+    }
+    Strada::JIT::eval('func throw_with_arg(int $a) void { if ($a > 0) { throw "arg_boom"; } }');
+    try {
+        Strada::JIT::eval('$x = 77; throw "boom";');
+    } catch ($e) {}
+    try {
+        Strada::JIT::eval('throw_with_arg(5);');
+    } catch ($e2) {}
+    my scalar $xv = Strada::JIT::eval('$x');
+    if (($xv + 0) != 77) {
+        die("Unexpected JIT persisted x");
+    }
+    Strada::JIT::reset();
+
+    say("PHASE5_LEAKS_OK");
+    return 0;
+}

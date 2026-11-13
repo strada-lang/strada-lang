@@ -99,18 +99,19 @@ func readline(scalar $sock, int $timeout_ms = 0, int $max_bytes = 0) str {
 # Send all of $data (handles partial writes). Returns bytes sent, -1 error.
 func send(scalar $sock, str $data) int {
     my int $total = core::byte_length($data);
-    my str $rest = $data;
-    while (core::byte_length($rest) > 0) {
-        my int $rlen = core::byte_length($rest);
-        my int $n = core::socket_try_send($sock, $rest);
+    my int $sent = 0;
+    while ($sent < $total) {
+        my int $rlen = $total - $sent;
+        my str $slice = ($sent == 0) ? $data : core::byte_substr($data, $sent, $rlen);
+        my int $n = core::socket_try_send($sock, $slice);
         if ($n < 0) { return 0 - 1; }
         if ($n == $rlen) { return $total; }
         if ($n > 0) {
-            $rest = core::byte_substr($rest, $n, $rlen - $n);
+            $sent = $sent + $n;
             next;
         }
         if (park($sock, "w", 0) == 0) {
-            core::usleep(1000);
+            core::nanosleep(1000000);
         }
     }
     return $total;
@@ -130,29 +131,42 @@ func accept(scalar $listener, int $timeout_ms = 0) scalar {
         my int $left = remaining($deadline);
         if ($left < 0) { return undef; }
         if (park($listener, "r", $left) == 0) {
+            if ($deadline > 0) {
+                my scalar $ready = core::socket_select([$listener], $left);
+                if (!defined($ready) || scalar($ready) == 0) {
+                    core::socket_set_nonblocking($listener, 0);
+                    return undef;
+                }
+            }
+            core::socket_set_nonblocking($listener, 0);
             return core::socket_accept($listener);    # not in a task: block
         }
     }
 }
 
 # Connect without blocking the loop during the TCP handshake. Returns the
-# connected socket, or undef on failure/timeout. (getaddrinfo name
-# resolution is still synchronous.)
+# connected socket, or undef on failure/timeout.
 func connect(str $host, int $port, int $timeout_ms = 0) scalar {
+    my int $deadline = $timeout_ms > 0 ? core::mono_ms() + $timeout_ms : 0;
+    # Strip bracketed IPv6 literal notation (e.g. "[::1]")
+    if (length($host) >= 2 && substr($host, 0, 1) eq "[" && substr($host, length($host) - 1, 1) eq "]") {
+        $host = substr($host, 1, length($host) - 2);
+    }
     # Hostnames resolve on a background thread so a slow DNS lookup never
     # stalls the loop; numeric addresses skip the round-trip entirely.
-    if ($host !~ /^[]0-9.:a-fA-F[]+$/ || $host !~ /[0-9]/) {
+    if ($host !~ /^[0-9.:a-fA-F]+$/ || $host !~ /[0-9]/) {
         my scalar $rf = async::resolve($host);
         while (async::is_done($rf) == 0) {
+            if (remaining($deadline) < 0) { return undef; }
             sleep(1);   # parks in a task; 1ms blocking poll outside one
         }
         my scalar $ip = await $rf;
         if (!defined($ip)) { return undef; }
         $host = "" . $ip;
     }
+    if (remaining($deadline) < 0) { return undef; }
     my scalar $sock = core::socket_try_connect($host, $port);
     if (!defined($sock)) { return undef; }
-    my int $deadline = $timeout_ms > 0 ? core::mono_ms() + $timeout_ms : 0;
     while (1) {
         my int $st = core::socket_connect_check($sock);
         if ($st == 0) { return $sock; }
@@ -168,7 +182,7 @@ func connect(str $host, int $port, int $timeout_ms = 0) scalar {
         if (park($sock, "w", $left) == 0) {
             # Not in a task: brief sleep-poll fallback (handshakes finish
             # quickly; outside a loop there is nothing to suspend on).
-            core::usleep(1000);
+            core::nanosleep(1000000);
         }
     }
 }
@@ -181,6 +195,8 @@ func sleep(int $ms) void {
         throw "Async::Task: illegal suspension";
     }
     if ($r == 0) {
-        core::usleep($ms * 1000);                     # not in a task: block
+        if ($ms > 0) {
+            core::nanosleep($ms * 1000000);         # not in a task: block
+        }
     }
 }

@@ -5,7 +5,7 @@
 #   RHEL/CentOS:   yum install libusb1-devel
 #   macOS:         brew install libusb
 
-CC = gcc
+CC ?= gcc
 CFLAGS = -Wall -Wextra -fPIC -O2 -I../../runtime
 LDFLAGS = -shared -lusb-1.0
 

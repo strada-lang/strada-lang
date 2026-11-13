@@ -12,6 +12,35 @@ func html_escape(str $s) str {
     return $result;
 }
 
+# HTML attribute escape (escapes quotes in addition to &, <, >)
+private func attr_escape(str $s) str {
+    my str $result = ::html_escape($s);
+    $result =~ s/"/&quot;/g;
+    $result =~ s/'/&#39;/g;
+    return $result;
+}
+
+# Sanitize URL against dangerous schemes (javascript:, vbscript:, data:text/html)
+private func safe_url(str $url) str {
+    my int $len = length($url);
+    my int $i = 0;
+    my str $cleaned = "";
+    # Strip control characters / leading whitespace used to obfuscate schemes
+    while ($i < $len) {
+        my int $c = ord(substr($url, $i, 1));
+        if ($c > 32) {
+            $cleaned = $cleaned . lc(substr($url, $i, 1));
+        }
+        $i = $i + 1;
+    }
+    if (index($cleaned, "javascript:") == 0 ||
+        index($cleaned, "vbscript:") == 0 ||
+        index($cleaned, "data:text/html") == 0) {
+        return "#";
+    }
+    return ::attr_escape(trim($url));
+}
+
 # Process emphasis (**bold**, __bold__, *italic*, _italic_) on unprotected text
 private func process_emphasis(str $text) str {
     my str $result = $text;
@@ -147,7 +176,7 @@ private func process_inline(str $line) str {
         my str $url = substr($result, $open_paren + 1, $close_paren - $open_paren - 1);
         my str $after = substr($result, $close_paren + 1, length($result) - $close_paren - 1);
         my str $tok = $sentinel . "MDTOK" . size(@tokens) . $sentinel;
-        push(@tokens, "<img src=\"" . $url . "\" alt=\"" . $alt . "\">");
+        push(@tokens, "<img src=\"" . ::safe_url($url) . "\" alt=\"" . ::attr_escape($alt) . "\">");
         $result = $before . $tok . $after;
         $search_pos = length($before) + length($tok);
     }
@@ -178,7 +207,7 @@ private func process_inline(str $line) str {
         my str $url = substr($result, $open_paren + 1, $close_paren - $open_paren - 1);
         my str $after = substr($result, $close_paren + 1, length($result) - $close_paren - 1);
         my str $tok = $sentinel . "MDTOK" . size(@tokens) . $sentinel;
-        push(@tokens, "<a href=\"" . $url . "\">" . $text . "</a>");
+        push(@tokens, "<a href=\"" . ::safe_url($url) . "\">" . $text . "</a>");
         $result = $before . $tok . $after;
         $search_pos = length($before) + length($tok);
     }
@@ -406,7 +435,7 @@ func to_html(str $markdown) str {
                 $i = $i + 1;
             }
             if (length($lang) > 0) {
-                $html = $html . "<pre><code class=\"language-" . $lang . "\">" . $code . "</code></pre>\n";
+                $html = $html . "<pre><code class=\"language-" . ::attr_escape($lang) . "\">" . $code . "</code></pre>\n";
             } else {
                 $html = $html . "<pre><code>" . $code . "</code></pre>\n";
             }

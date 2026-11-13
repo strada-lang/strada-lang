@@ -344,11 +344,6 @@ static void strada_md5_base64_encode_16(const uint8_t *input, char *output) {
     output[22] = '\0';
 }
 
-/* Static buffers for results */
-static uint8_t strada_md5_last_digest[16];
-static char strada_md5_hex_result[33];
-static char strada_md5_b64_result[23];
-
 static const uint8_t *strada_md5_get_bytes(StradaValue *sv, size_t *out_len, char **out_owned) {
     *out_owned = NULL;
     if (!sv) {
@@ -386,11 +381,12 @@ func md5(str $data) str {
     __C__ {
         size_t len = 0;
         char *owned = NULL;
+        uint8_t digest[16];
         const uint8_t *input = strada_md5_get_bytes(data, &len, &owned);
-        strada_md5_compute(input, len, strada_md5_last_digest);
+        strada_md5_compute(input, len, digest);
         free(owned);
         strada_decref(result);
-        result = strada_new_str_len((const char*)strada_md5_last_digest, 16);
+        result = strada_new_str_len((const char*)digest, 16);
     }
     return $result;
 }
@@ -410,18 +406,19 @@ func md5_hex(str $data) str {
         char *owned = NULL;
         const uint8_t *input = strada_md5_get_bytes(data, &len, &owned);
         uint8_t digest[16];
+        char hex_result[33];
         int i;
 
         strada_md5_compute(input, len, digest);
 
         for (i = 0; i < 16; i++) {
-            sprintf(&strada_md5_hex_result[i*2], "%02x", digest[i]);
+            sprintf(&hex_result[i*2], "%02x", digest[i]);
         }
-        strada_md5_hex_result[32] = '\0';
+        hex_result[32] = '\0';
 
         free(owned);
         strada_decref(result);
-        result = strada_new_str(strada_md5_hex_result);
+        result = strada_new_str(hex_result);
     }
     return $result;
 }
@@ -442,13 +439,14 @@ func md5_base64(str $data) str {
         char *owned = NULL;
         const uint8_t *input = strada_md5_get_bytes(data, &len, &owned);
         uint8_t digest[16];
+        char b64_result[23];
 
         strada_md5_compute(input, len, digest);
-        strada_md5_base64_encode_16(digest, strada_md5_b64_result);
+        strada_md5_base64_encode_16(digest, b64_result);
 
         free(owned);
         strada_decref(result);
-        result = strada_new_str(strada_md5_b64_result);
+        result = strada_new_str(b64_result);
     }
     return $result;
 }

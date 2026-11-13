@@ -180,6 +180,25 @@ __C__ {
 
 /* Global Perl interpreter (singleton) */
 static PerlInterpreter *my_perl = NULL;
+
+static int perl5_valid_module_name(const char *m) {
+    if (!m || !*m || strlen(m) > 1024) return 0;
+    for (const char *p = m; *p; p++) {
+        char c = *p;
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+              (c >= '0' && c <= '9') || c == '_' || c == ':')) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static void perl5_push_inc(const char *path) {
+    AV *inc = GvAVn(PL_incgv);
+    if (inc && path) {
+        av_push(inc, newSVpv(path, 0));
+    }
+}
 }
 
 # Initialize the Perl interpreter
@@ -245,11 +264,14 @@ func eval(str $code) str {
     my str $result = "";
     __C__ {
         if (!my_perl) {
+            strada_decref(result);
             result = strada_new_str("Error: Perl not initialized");
         } else {
-            const char *code_str = strada_to_str(code);
+            char *code_str = strada_to_str(code);
             SV *perl_result = eval_pv(code_str, FALSE);
+            free(code_str);
 
+            strada_decref(result);
             if (SvTRUE(ERRSV)) {
                 STRLEN len;
                 const char *err = SvPV(ERRSV, len);
@@ -270,8 +292,9 @@ func eval(str $code) str {
 func run(str $code) void {
     __C__ {
         if (my_perl) {
-            const char *code_str = strada_to_str(code);
+            char *code_str = strada_to_str(code);
             eval_pv(code_str, FALSE);
+            free(code_str);
         }
     }
 }
@@ -281,10 +304,11 @@ func call(str $sub_name, str $arg) str {
     my str $result = "";
     __C__ {
         if (!my_perl) {
+            strada_decref(result);
             result = strada_new_str("Error: Perl not initialized");
         } else {
-            const char *sub_str = strada_to_str(sub_name);
-            const char *arg_str = strada_to_str(arg);
+            char *sub_str = strada_to_str(sub_name);
+            char *arg_str = strada_to_str(arg);
 
             dSP;
             ENTER;
@@ -298,7 +322,10 @@ func call(str $sub_name, str $arg) str {
             PUTBACK;
             int count = call_pv(sub_str, G_SCALAR | G_EVAL);
             SPAGAIN;
+            free(sub_str);
+            free(arg_str);
 
+            strada_decref(result);
             if (SvTRUE(ERRSV)) {
                 STRLEN len;
                 const char *err = SvPV(ERRSV, len);
@@ -332,8 +359,29 @@ func call_noargs(str $sub_name) str {
 # Call a Perl subroutine that returns a list, get as joined string
 # Use split() on the result to get an array
 func call_list(str $sub_name, str $sep) str {
-    # Build Perl code to call sub and join results
-    my str $code = "join('" . $sep . "', " . $sub_name . "())";
+    # Reject unsafe characters in Perl sub name and escape single quotes in $sep
+    if (length($sub_name) == 0) {
+        return "";
+    }
+    my int $nlen = length($sub_name);
+    for (my int $i = 0; $i < $nlen; $i++) {
+        my str $ch = substr($sub_name, $i, 1);
+        my int $ok = (($ch ge "a" && $ch le "z") || ($ch ge "A" && $ch le "Z") ||
+                      ($ch ge "0" && $ch le "9") || $ch eq "_" || $ch eq ":");
+        if (!$ok) {
+            return "";
+        }
+    }
+    my str $esc_sep = "";
+    my int $slen = length($sep);
+    for (my int $i = 0; $i < $slen; $i++) {
+        my str $ch = substr($sep, $i, 1);
+        if ($ch eq "\\" || $ch eq "'") {
+            $esc_sep = $esc_sep . "\\";
+        }
+        $esc_sep = $esc_sep . $ch;
+    }
+    my str $code = "join('" . $esc_sep . "', " . $sub_name . "())";
     return perl5::eval($code);
 }
 
@@ -345,11 +393,17 @@ func use_module(str $module) int {
         if (!my_perl) {
             result = strada_new_int(0);
         } else {
-            const char *mod_str = strada_to_str(module);
-            char code[2048];
-            snprintf(code, sizeof(code), "use %s; 1;", mod_str);
-            eval_pv(code, FALSE);
-            result = strada_new_int(!SvTRUE(ERRSV) ? 1 : 0);
+            char *mod_str = strada_to_str(module);
+            if (!perl5_valid_module_name(mod_str)) {
+                free(mod_str);
+                result = strada_new_int(0);
+            } else {
+                char code[2048];
+                snprintf(code, sizeof(code), "use %s; 1;", mod_str);
+                free(mod_str);
+                eval_pv(code, FALSE);
+                result = strada_new_int(!SvTRUE(ERRSV) ? 1 : 0);
+            }
         }
     }
     return $result;
@@ -363,11 +417,17 @@ func require_module(str $module) int {
         if (!my_perl) {
             result = strada_new_int(0);
         } else {
-            const char *mod_str = strada_to_str(module);
-            char code[2048];
-            snprintf(code, sizeof(code), "require %s; 1;", mod_str);
-            eval_pv(code, FALSE);
-            result = strada_new_int(!SvTRUE(ERRSV) ? 1 : 0);
+            char *mod_str = strada_to_str(module);
+            if (!perl5_valid_module_name(mod_str)) {
+                free(mod_str);
+                result = strada_new_int(0);
+            } else {
+                char code[2048];
+                snprintf(code, sizeof(code), "require %s; 1;", mod_str);
+                free(mod_str);
+                eval_pv(code, FALSE);
+                result = strada_new_int(!SvTRUE(ERRSV) ? 1 : 0);
+            }
         }
     }
     return $result;
@@ -377,8 +437,9 @@ func require_module(str $module) int {
 func set_var(str $name, str $value) void {
     __C__ {
         if (my_perl) {
-            const char *name_str = strada_to_str(name);
-            const char *value_str = strada_to_str(value);
+            char *orig_name = strada_to_str(name);
+            char *value_str = strada_to_str(value);
+            const char *name_str = orig_name;
 
             /* Skip the sigil if present */
             if (name_str[0] == '$') {
@@ -387,6 +448,8 @@ func set_var(str $name, str $value) void {
 
             SV *sv = get_sv(name_str, GV_ADD);
             sv_setpv(sv, value_str);
+            free(orig_name);
+            free(value_str);
         }
     }
 }
@@ -395,10 +458,12 @@ func set_var(str $name, str $value) void {
 func get_var(str $name) str {
     my str $result = "";
     __C__ {
+        strada_decref(result);
         if (!my_perl) {
             result = strada_new_str("");
         } else {
-            const char *name_str = strada_to_str(name);
+            char *orig_name = strada_to_str(name);
+            const char *name_str = orig_name;
 
             /* Skip the sigil if present */
             if (name_str[0] == '$') {
@@ -406,6 +471,7 @@ func get_var(str $name) str {
             }
 
             SV *sv = get_sv(name_str, 0);
+            free(orig_name);
             if (sv && SvOK(sv)) {
                 STRLEN len;
                 const char *str = SvPV(sv, len);
@@ -422,6 +488,7 @@ func get_var(str $name) str {
 func get_error() str {
     my str $result = "";
     __C__ {
+        strada_decref(result);
         if (!my_perl) {
             result = strada_new_str("Perl not initialized");
         } else if (SvTRUE(ERRSV)) {
@@ -439,10 +506,9 @@ func get_error() str {
 func add_inc(str $path) void {
     __C__ {
         if (my_perl) {
-            const char *path_str = strada_to_str(path);
-            char code[2048];
-            snprintf(code, sizeof(code), "push @INC, '%s';", path_str);
-            eval_pv(code, FALSE);
+            char *path_str = strada_to_str(path);
+            perl5_push_inc(path_str);
+            free(path_str);
         }
     }
 }

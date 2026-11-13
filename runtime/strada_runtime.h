@@ -1280,6 +1280,8 @@ void strada_inherit(const char *child, const char *parent);     /* Set up inheri
 void strada_inherit_from(const char *parent);                   /* Inherit from parent (1 arg, uses current package) */
 void strada_method_register(const char *package, const char *name, StradaMethod func);
 void strada_modifier_register(const char *package, const char *method, int type, StradaMethod func);
+void strada_oop_clear_modifiers(const char *package);
+void strada_oop_reset_package(const char *package);
 StradaValue* strada_method_call(StradaValue *obj, const char *method, StradaValue *args);
 StradaValue* strada_method_call_ph(StradaValue *obj, const char *method, StradaValue *args, unsigned int method_hash);
 /* Per-call-site monomorphic inline cache for method dispatch. Codegen emits
@@ -1328,6 +1330,7 @@ int strada_refcount(StradaValue *sv);  /* Get reference count */
 /* Weak references */
 void strada_weaken(StradaValue **ref_ptr);   /* Make a reference weak */
 void strada_weaken_hv_entry(StradaHash *hv, const char *key);  /* Weaken a hash entry value */
+void strada_array_weaken_elem(StradaValue *arr_sv, int64_t idx);  /* Weaken an array element */
 int strada_isweak(StradaValue *ref);        /* Check if reference is weak */
 void strada_weak_registry_init(void);       /* Initialize weak reference registry */
 void strada_weak_registry_remove_target(StradaValue *target);  /* Notify weak refs when target dies */
@@ -1978,6 +1981,8 @@ void strada_full_profile_write(void);
 void strada_global_set(StradaValue *name, StradaValue *val);
 void strada_global_set_cstr(const char *name, StradaValue *val);
 StradaValue* strada_global_get(StradaValue *name);
+StradaValue* strada_global_get_cstr(const char *name);
+void strada_global_weaken_cstr(const char *name);
 int strada_global_exists(StradaValue *name);
 void strada_global_delete(StradaValue *name);
 StradaValue* strada_global_keys(void);

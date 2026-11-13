@@ -343,6 +343,7 @@ func strerror(int $errcode) str {
     __C__ {
         int ec = (int)strada_to_int(errcode);
         const char *str = libusb_strerror(ec);
+        strada_decref(result);
         result = strada_new_str(str ? str : "Unknown error");
     }
     return $result;
@@ -388,10 +389,10 @@ func get_device_list() array {
                     char vidpid[16];
                     snprintf(vidpid, sizeof(vidpid), "%04x:%04x",
                         desc.idVendor, desc.idProduct);
-                    strada_hash_set(dev_info->value.hv, "vidpid",
+                    strada_hash_set_take(dev_info->value.hv, "vidpid",
                         strada_new_str(vidpid));
 
-                    strada_array_push(result->value.av, dev_info);
+                    strada_array_push_take(result->value.av, dev_info);
                 }
             }
             libusb_free_device_list(list, 1);
@@ -581,13 +582,15 @@ func bulk_read(int $handle, int $endpoint, int $max_len, int $timeout) str {
     __C__ {
         libusb_device_handle *h = (libusb_device_handle *)(intptr_t)strada_to_int(handle);
         unsigned char ep = (unsigned char)(strada_to_int(endpoint) | 0x80);
-        int maxlen = (int)strada_to_int(max_len);
+        int64_t maxlen64 = strada_to_int(max_len);
         int tm = (int)strada_to_int(timeout);
 
-        if (!h) {
+        strada_decref(result);
+        if (!h || maxlen64 <= 0 || maxlen64 > 64 * 1024 * 1024) {
             result = strada_new_str("");
         } else {
-            unsigned char *buffer = malloc(maxlen);
+            int maxlen = (int)maxlen64;
+            unsigned char *buffer = malloc((size_t)maxlen);
             if (!buffer) {
                 result = strada_new_str("");
             } else {
@@ -640,13 +643,15 @@ func interrupt_read(int $handle, int $endpoint, int $max_len, int $timeout) str 
     __C__ {
         libusb_device_handle *h = (libusb_device_handle *)(intptr_t)strada_to_int(handle);
         unsigned char ep = (unsigned char)(strada_to_int(endpoint) | 0x80);
-        int maxlen = (int)strada_to_int(max_len);
+        int64_t maxlen64 = strada_to_int(max_len);
         int tm = (int)strada_to_int(timeout);
 
-        if (!h) {
+        strada_decref(result);
+        if (!h || maxlen64 <= 0 || maxlen64 > 64 * 1024 * 1024) {
             result = strada_new_str("");
         } else {
-            unsigned char *buffer = malloc(maxlen);
+            int maxlen = (int)maxlen64;
+            unsigned char *buffer = malloc((size_t)maxlen);
             if (!buffer) {
                 result = strada_new_str("");
             } else {
@@ -700,13 +705,15 @@ func control_read(int $handle, int $request_type, int $request, int $value, int 
         uint8_t req = (uint8_t)strada_to_int(request);
         uint16_t val = (uint16_t)strada_to_int(value);
         uint16_t index = (uint16_t)strada_to_int(idx);
-        int maxlen = (int)strada_to_int(max_len);
+        int64_t maxlen64 = strada_to_int(max_len);
         unsigned int tm = (unsigned int)strada_to_int(timeout);
 
-        if (!h) {
+        strada_decref(result);
+        if (!h || maxlen64 <= 0 || maxlen64 > 64 * 1024 * 1024) {
             result = strada_new_str("");
         } else {
-            unsigned char *buffer = malloc(maxlen);
+            int maxlen = (int)maxlen64;
+            unsigned char *buffer = malloc((size_t)maxlen);
             if (!buffer) {
                 result = strada_new_str("");
             } else {
@@ -784,6 +791,7 @@ func get_string_descriptor(int $handle, int $idx) str {
         libusb_device_handle *h = (libusb_device_handle *)(intptr_t)strada_to_int(handle);
         int index = (int)strada_to_int(idx);
 
+        strada_decref(result);
         if (h && index > 0) {
             unsigned char buffer[256];
             int ret = libusb_get_string_descriptor_ascii(h, index, buffer, sizeof(buffer));
@@ -865,20 +873,20 @@ func get_config_descriptor(int $handle, int $config_index) hash {
                                 case LIBUSB_TRANSFER_TYPE_BULK: type_str = "bulk"; break;
                                 case LIBUSB_TRANSFER_TYPE_INTERRUPT: type_str = "interrupt"; break;
                             }
-                            strada_hash_set(ep_info->value.hv, "type", strada_new_str(type_str));
+                            strada_hash_set_take(ep_info->value.hv, "type", strada_new_str(type_str));
 
                             /* Decode direction */
-                            strada_hash_set(ep_info->value.hv, "direction",
+                            strada_hash_set_take(ep_info->value.hv, "direction",
                                 strada_new_str((ep->bEndpointAddress & 0x80) ? "in" : "out"));
 
-                            strada_array_push(endpoints->value.av, ep_info);
+                            strada_array_push_take(endpoints->value.av, ep_info);
                         }
-                        strada_hash_set(iface_info->value.hv, "endpoints", endpoints);
+                        strada_hash_set_take(iface_info->value.hv, "endpoints", endpoints);
 
-                        strada_array_push(interfaces->value.av, iface_info);
+                        strada_array_push_take(interfaces->value.av, iface_info);
                     }
                 }
-                strada_hash_set(result->value.hv, "interfaces", interfaces);
+                strada_hash_set_take(result->value.hv, "interfaces", interfaces);
 
                 libusb_free_config_descriptor(config);
             }

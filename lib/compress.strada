@@ -115,6 +115,7 @@ L<LWP>, L<ssl>
 =cut
 
 package compress;
+link_lib "z";
 
 # C includes
 __C__ {
@@ -284,7 +285,16 @@ static StradaValue* compress_inflate_stream(const char *input, size_t input_len,
 
         int ret = inflate(&strm, Z_NO_FLUSH);
         out_pos += (size_t)(out_chunk - strm.avail_out);
-        if (ret == Z_STREAM_END) break;
+        if (ret == Z_STREAM_END) {
+            if (window_bits == (15 + 16) && (strm.avail_in > 0 || in_pos < input_len)) {
+                if (inflateReset(&strm) != Z_OK) {
+                    ok = 0;
+                    break;
+                }
+                continue;
+            }
+            break;
+        }
         if (ret == Z_BUF_ERROR && strm.avail_in == 0 && in_pos >= input_len && strm.avail_out > 0) {
             if (truncated_out) *truncated_out = 1;
             ok = 0;

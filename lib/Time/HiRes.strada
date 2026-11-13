@@ -208,8 +208,10 @@ func clock_realtime() num {
 
 # sleep_ms($milliseconds) - Sleep for specified milliseconds
 func sleep_ms(int $ms) int {
-    my int $usecs = $ms * 1000;
-    return core::usleep($usecs);
+    if ($ms <= 0) {
+        return 0;
+    }
+    return core::nanosleep($ms * 1000000);
 }
 
 # sleep_us($microseconds) - Sleep for specified microseconds (alias)

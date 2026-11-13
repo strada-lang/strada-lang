@@ -180,7 +180,11 @@ __C__ {
 #include <dlfcn.h>
 
 /* Error message buffer */
+#ifdef __TINYC__
 static char libtcc_error_msg[1024] = "";
+#else
+static __thread char libtcc_error_msg[1024] = "";
+#endif
 
 static void libtcc_error_handler(void *opaque, const char *msg) {
     (void)opaque;
@@ -336,10 +340,11 @@ func include_path(int $state, str $path) int {
     my int $result = 0;
     __C__ {
         TCCState *s = (TCCState*)(intptr_t)strada_to_int(state);
-        const char *p = strada_to_str(path);
+        char *p = strada_to_str(path);
         if (s && p) {
             result = strada_new_int(tcc_add_include_path(s, p) == 0 ? 1 : 0);
         }
+        free(p);
     }
     return $result;
 }
@@ -349,10 +354,11 @@ func lib_path(int $state, str $path) int {
     my int $result = 0;
     __C__ {
         TCCState *s = (TCCState*)(intptr_t)strada_to_int(state);
-        const char *p = strada_to_str(path);
+        char *p = strada_to_str(path);
         if (s && p) {
             result = strada_new_int(tcc_add_library_path(s, p) == 0 ? 1 : 0);
         }
+        free(p);
     }
     return $result;
 }
@@ -362,10 +368,11 @@ func add_lib(int $state, str $name) int {
     my int $result = 0;
     __C__ {
         TCCState *s = (TCCState*)(intptr_t)strada_to_int(state);
-        const char *n = strada_to_str(name);
+        char *n = strada_to_str(name);
         if (s && n) {
             result = strada_new_int(tcc_add_library(s, n) == 0 ? 1 : 0);
         }
+        free(n);
     }
     return $result;
 }
@@ -374,11 +381,13 @@ func add_lib(int $state, str $name) int {
 func define(int $state, str $name, str $value) void {
     __C__ {
         TCCState *s = (TCCState*)(intptr_t)strada_to_int(state);
-        const char *n = strada_to_str(name);
-        const char *v = strada_to_str(value);
+        char *n = strada_to_str(name);
+        char *v = strada_to_str(value);
         if (s && n) {
             tcc_define_symbol(s, n, v && v[0] ? v : NULL);
         }
+        free(n);
+        free(v);
     }
 }
 
@@ -387,12 +396,13 @@ func compile(int $state, str $code) int {
     my int $result = 0;
     __C__ {
         TCCState *s = (TCCState*)(intptr_t)strada_to_int(state);
-        const char *c = strada_to_str(code);
+        char *c = strada_to_str(code);
         libtcc_error_msg[0] = '\0';
         if (s && c) {
             int ret = tcc_compile_string(s, c);
             result = strada_new_int(ret == 0 ? 1 : 0);
         }
+        free(c);
     }
     return $result;
 }
@@ -419,11 +429,12 @@ func symbol(int $state, str $name) int {
     my int $ptr = 0;
     __C__ {
         TCCState *s = (TCCState*)(intptr_t)strada_to_int(state);
-        const char *n = strada_to_str(name);
+        char *n = strada_to_str(name);
         if (s && n) {
             void *sym = tcc_get_symbol(s, n);
             ptr = strada_new_int((int64_t)(intptr_t)sym);
         }
+        free(n);
     }
     return $ptr;
 }
@@ -432,6 +443,7 @@ func symbol(int $state, str $name) int {
 func error() str {
     my str $msg = "";
     __C__ {
+        strada_decref(msg);
         msg = strada_new_str(libtcc_error_msg);
     }
     return $msg;
@@ -463,6 +475,10 @@ func compile_func(str $code, str $func_name, str $inc_path) array {
     }
 
     my int $fn = tcc::symbol($state, $func_name);
+    if ($fn == 0) {
+        tcc::state_delete($state);
+        return @result;
+    }
 
     $result[0] = $fn;
     $result[1] = $state;

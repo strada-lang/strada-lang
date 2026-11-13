@@ -158,11 +158,17 @@ func build_where_clause(scalar $self, scalar $schema, scalar $conds, scalar $par
     return $where;
 }
 
+# Quote a validated SQL identifier using ANSI double quotes (SQLite & PostgreSQL)
+private func quote_ident(str $ident) str {
+    return "\"" . replace($ident, "\"", "\"\"") . "\"";
+}
+
 # Build the SQL fragment for one column's condition (dispatching on value type).
 func build_cond_fragment(scalar $self, str $col, scalar $val, scalar $params) str {
+    my str $qcol = Nesso::quote_ident($col);
     # undef -> IS NULL (NOT "= ?" with a NULL bind, which never matches in SQL)
     if (!defined($val)) {
-        return $col . " IS NULL";
+        return $qcol . " IS NULL";
     }
 
     my str $r = ref($val);
@@ -197,11 +203,12 @@ func build_cond_fragment(scalar $self, str $col, scalar $val, scalar $params) st
 
     # plain scalar -> equality
     push(@{$params}, $val);
-    return $col . " = ?";
+    return $qcol . " = ?";
 }
 
 # Build "col IN (...)" / "col NOT IN (...)" and bind each element.
 func build_in_fragment(scalar $self, str $col, scalar $vals, scalar $params, int $negate) str {
+    my str $qcol = Nesso::quote_ident($col);
     if (ref($vals) ne "ARRAY") {
         throw "Nesso: IN on '" . $col . "' requires an array";
     }
@@ -220,13 +227,14 @@ func build_in_fragment(scalar $self, str $col, scalar $vals, scalar $params, int
         $i++;
     }
     if ($negate == 1) {
-        return $col . " NOT IN (" . $ph . ")";
+        return $qcol . " NOT IN (" . $ph . ")";
     }
-    return $col . " IN (" . $ph . ")";
+    return $qcol . " IN (" . $ph . ")";
 }
 
 # Build the fragment for a single { operator => operand } pair (whitelisted).
 func build_op_fragment(scalar $self, str $col, str $rawop, scalar $operand, scalar $params) str {
+    my str $qcol = Nesso::quote_ident($col);
     my str $op = uc(trim($rawop));
 
     # Normalize aliases / symbolic spellings to a canonical form
@@ -240,8 +248,8 @@ func build_op_fragment(scalar $self, str $col, str $rawop, scalar $operand, scal
     elsif ($op eq "NIN" || $op eq "NOT_IN") { $op = "NOT IN"; }
 
     # Null-checks (operand ignored)
-    if ($op eq "IS NULL") { return $col . " IS NULL"; }
-    if ($op eq "IS NOT NULL" || $op eq "NOT NULL") { return $col . " IS NOT NULL"; }
+    if ($op eq "IS NULL") { return $qcol . " IS NULL"; }
+    if ($op eq "IS NOT NULL" || $op eq "NOT NULL") { return $qcol . " IS NOT NULL"; }
 
     # Set membership
     if ($op eq "IN") { return $self->build_in_fragment($col, $operand, $params, 0); }
@@ -254,13 +262,13 @@ func build_op_fragment(scalar $self, str $col, str $rawop, scalar $operand, scal
         }
         push(@{$params}, $operand->[0]);
         push(@{$params}, $operand->[1]);
-        return $col . " BETWEEN ? AND ?";
+        return $qcol . " BETWEEN ? AND ?";
     }
 
     # A NULL operand collapses comparisons to IS [NOT] NULL (or never-true)
     if (!defined($operand)) {
-        if ($op eq "=") { return $col . " IS NULL"; }
-        if ($op eq "!=") { return $col . " IS NOT NULL"; }
+        if ($op eq "=") { return $qcol . " IS NULL"; }
+        if ($op eq "!=") { return $qcol . " IS NOT NULL"; }
         return "0=1";
     }
 
@@ -268,7 +276,7 @@ func build_op_fragment(scalar $self, str $col, str $rawop, scalar $operand, scal
     if ($op eq "=" || $op eq "!=" || $op eq ">" || $op eq ">=" || $op eq "<" || $op eq "<="
         || $op eq "LIKE" || $op eq "NOT LIKE" || $op eq "ILIKE" || $op eq "NOT ILIKE") {
         push(@{$params}, $operand);
-        return $col . " " . $op . " ?";
+        return $qcol . " " . $op . " ?";
     }
 
     throw "Nesso: unsupported operator '" . $rawop . "' on column '" . $col . "'";
@@ -320,12 +328,13 @@ func build_order_clause(scalar $self, scalar $schema, scalar $spec) str {
         if ($self->col_allowed($schema, $col) == 0) {
             throw "Nesso: _order references unknown column '" . $col . "'";
         }
-        my str $piece = $col;
+        my str $qcol = Nesso::quote_ident($col);
+        my str $piece = $qcol;
         if ($dir ne "") {
             if ($dir ne "ASC" && $dir ne "DESC") {
                 throw "Nesso: invalid _order direction '" . $dir . "'";
             }
-            $piece = $col . " " . $dir;
+            $piece = $qcol . " " . $dir;
         }
         if ($out ne "") { $out = $out . ", "; }
         $out = $out . $piece;
@@ -501,38 +510,41 @@ func create(scalar $self, str $model, scalar $attrs) scalar {
         $i++;
     }
 
-    return $self->wrap_record($model, \%record);
+    my scalar $rec = $self->wrap_record($model, \%record);
+    $rec->{"_is_new"} = 1;
+    return $rec;
 }
 
-# Save a record (INSERT or UPDATE). Returns the id.
-func save(scalar $self, scalar $record) int {
+# Save a record (INSERT or UPDATE). Returns the primary key value (or -1 on exec error).
+func save(scalar $self, scalar $record) scalar {
     my str $model_name = $record->{"_model"};
     my scalar $schema = $self->get_schema($model_name);
     my scalar $db = $self->{"_dbh"};
 
     my str $table = $schema->{"table"};
+    my str $qtable = Nesso::quote_ident($table);
     my str $pk = $schema->{"primary"};
+    my str $qpk = Nesso::quote_ident($pk);
     my scalar $cols = $schema->{"columns"};
     my int $ncols = size($cols);
 
-    # Check if this is an update (has primary key value > 0)
+    # Determine INSERT vs UPDATE without coercing strings/UUIDs or numeric 0 PKs
     my scalar $pk_val = $record->{$pk};
-    my int $is_update = (defined($pk_val) && $pk_val + 0 > 0) ? 1 : 0;
+    my int $is_update = 0;
+    if (defined($record->{"_is_new"})) {
+        $is_update = ($record->{"_is_new"} + 0) ? 0 : 1;
+    } elsif (defined($pk_val) && ("" . $pk_val) ne "") {
+        $is_update = 1;
+    }
     my int $ts = (defined($schema->{"timestamps"}) && $schema->{"timestamps"}) ? 1 : 0;
 
     if ($is_update == 1) {
-        # UPDATE — dirty tracking: write only the columns that changed since the
-        # record was loaded. updated_at is bumped only when something else
-        # changed; created_at is never rewritten. If nothing changed, the save
-        # is a no-op (no query) — which also avoids clobbering columns another
-        # process updated concurrently.
+        # UPDATE — dirty tracking
         my array @dirty = ();
         my int $i = 0;
         while ($i < $ncols) {
             my str $col = $cols->[$i];
             if ($col ne $pk) {
-                # When timestamps are enabled, created_at/updated_at are managed
-                # below, not by ordinary dirty detection.
                 if ($ts == 1 && ($col eq "created_at" || $col eq "updated_at")) {
                     # skip — handled after the scan
                 } elsif (Nesso::col_dirty($record, $col)) {
@@ -548,10 +560,10 @@ func save(scalar $self, scalar $record) int {
         }
 
         if (scalar(@dirty) == 0) {
-            return $pk_val + 0;   # nothing changed — no-op
+            return $pk_val;   # nothing changed — no-op
         }
 
-        my str $sql = "UPDATE " . $table . " SET ";
+        my str $sql = "UPDATE " . $qtable . " SET ";
         my array @params = ();
         my int $first = 1;
         my int $d = 0;
@@ -560,17 +572,20 @@ func save(scalar $self, scalar $record) int {
             if ($first == 0) {
                 $sql = $sql . ", ";
             }
-            $sql = $sql . $col . " = ?";
+            $sql = $sql . Nesso::quote_ident($col) . " = ?";
             push(@params, $record->{$col});
             $first = 0;
             $d++;
         }
-        $sql = $sql . " WHERE " . $pk . " = ?";
+        $sql = $sql . " WHERE " . $qpk . " = ?";
         push(@params, $pk_val);
         $self->log_sql($sql, \@params);
-        DBI::exec($db, $sql, \@params);
+        my int $rc = DBI::exec($db, $sql, \@params);
+        if ($rc < 0) {
+            return -1;
+        }
         $self->snapshot_clean($record);   # record now matches the database
-        return $pk_val + 0;
+        return $pk_val;
     } else {
         # INSERT
         if ($ts == 1) {
@@ -584,17 +599,18 @@ func save(scalar $self, scalar $record) int {
         my str $placeholders = "";
         my array @params = ();
         my int $first = 1;
+        my int $has_explicit_pk = (defined($pk_val) && ("" . $pk_val) ne "") ? 1 : 0;
         my int $i = 0;
         while ($i < $ncols) {
             my str $col = $cols->[$i];
-            if ($col ne $pk) {
+            if ($col ne $pk || $has_explicit_pk == 1) {
                 my scalar $val = $record->{$col};
                 if (defined($val)) {
                     if ($first == 0) {
                         $col_list = $col_list . ", ";
                         $placeholders = $placeholders . ", ";
                     }
-                    $col_list = $col_list . $col;
+                    $col_list = $col_list . Nesso::quote_ident($col);
                     $placeholders = $placeholders . "?";
                     push(@params, $val);
                     $first = 0;
@@ -602,23 +618,36 @@ func save(scalar $self, scalar $record) int {
             }
             $i++;
         }
-        my str $sql = "INSERT INTO " . $table . " (" . $col_list . ") VALUES (" . $placeholders . ")";
+        my str $sql = "";
+        if ($col_list eq "") {
+            $sql = "INSERT INTO " . $qtable . " DEFAULT VALUES";
+        } else {
+            $sql = "INSERT INTO " . $qtable . " (" . $col_list . ") VALUES (" . $placeholders . ")";
+        }
         $self->log_sql($sql, \@params);
+        if ($has_explicit_pk == 1) {
+            my int $rc = DBI::exec($db, $sql, \@params);
+            if ($rc < 0) { return -1; }
+            $record->{"_is_new"} = 0;
+            $self->snapshot_clean($record);
+            return $pk_val;
+        }
         my int $id = DBI::insert_get_id($db, $sql, \@params);
         $record->{$pk} = $id;
+        $record->{"_is_new"} = 0;
         $self->snapshot_clean($record);   # now clean for future dirty tracking
         return $id;
     }
 }
 
-# Find a record by primary key
-func find(scalar $self, str $model, int $id) scalar {
+# Find a record by primary key (accepts int or string/UUID primary keys)
+func find(scalar $self, str $model, scalar $id) scalar {
     my scalar $schema = $self->get_schema($model);
     my scalar $db = $self->{"_dbh"};
 
-    my str $table = $schema->{"table"};
-    my str $pk = $schema->{"primary"};
-    my str $sql = "SELECT * FROM " . $table . " WHERE " . $pk . " = ?";
+    my str $qtable = Nesso::quote_ident($schema->{"table"});
+    my str $qpk = Nesso::quote_ident($schema->{"primary"});
+    my str $sql = "SELECT * FROM " . $qtable . " WHERE " . $qpk . " = ?";
     $self->log_sql($sql, [$id]);
     my scalar $row = DBI::selectrow_hashref($db, $sql, [$id]);
     return $self->wrap_record($model, $row);
@@ -629,8 +658,8 @@ func find_by(scalar $self, str $model, scalar $conds) scalar {
     my scalar $schema = $self->get_schema($model);
     my scalar $db = $self->{"_dbh"};
 
-    my str $table = $schema->{"table"};
-    my str $sql = "SELECT * FROM " . $table;
+    my str $qtable = Nesso::quote_ident($schema->{"table"});
+    my str $sql = "SELECT * FROM " . $qtable;
     my array @params = ();
 
     my str $wc = $self->build_where_clause($schema, $conds, \@params);
@@ -689,8 +718,8 @@ func where(scalar $self, str $model, scalar $conds) scalar {
     my scalar $schema = $self->get_schema($model);
     my scalar $db = $self->{"_dbh"};
 
-    my str $table = $schema->{"table"};
-    my str $sql = "SELECT * FROM " . $table;
+    my str $qtable = Nesso::quote_ident($schema->{"table"});
+    my str $sql = "SELECT * FROM " . $qtable;
     my array @params = ();
 
     my str $wc = $self->build_where_clause($schema, $conds, \@params);
@@ -724,8 +753,8 @@ func all(scalar $self, str $model) scalar {
     my scalar $schema = $self->get_schema($model);
     my scalar $db = $self->{"_dbh"};
 
-    my str $table = $schema->{"table"};
-    my str $sql = "SELECT * FROM " . $table;
+    my str $qtable = Nesso::quote_ident($schema->{"table"});
+    my str $sql = "SELECT * FROM " . $qtable;
     $self->log_sql($sql, []);
     my scalar $rows = DBI::selectall_hashref($db, $sql, []);
     return $self->tag_rows($model, $rows);
@@ -736,8 +765,8 @@ func count(scalar $self, str $model, scalar $conds) int {
     my scalar $schema = $self->get_schema($model);
     my scalar $db = $self->{"_dbh"};
 
-    my str $table = $schema->{"table"};
-    my str $sql = "SELECT COUNT(*) FROM " . $table;
+    my str $qtable = Nesso::quote_ident($schema->{"table"});
+    my str $sql = "SELECT COUNT(*) FROM " . $qtable;
     my array @params = ();
 
     my str $wc = $self->build_where_clause($schema, $conds, \@params);
@@ -759,11 +788,12 @@ func delete(scalar $self, scalar $record) int {
     my scalar $schema = $self->get_schema($model_name);
     my scalar $db = $self->{"_dbh"};
 
-    my str $table = $schema->{"table"};
+    my str $qtable = Nesso::quote_ident($schema->{"table"});
     my str $pk = $schema->{"primary"};
+    my str $qpk = Nesso::quote_ident($pk);
     my scalar $pk_val = $record->{$pk};
 
-    my str $sql = "DELETE FROM " . $table . " WHERE " . $pk . " = ?";
+    my str $sql = "DELETE FROM " . $qtable . " WHERE " . $qpk . " = ?";
     $self->log_sql($sql, [$pk_val]);
     return DBI::exec($db, $sql, [$pk_val]);
 }
@@ -778,7 +808,7 @@ func delete(scalar $self, scalar $record) int {
 func update_all(scalar $self, str $model, scalar $conds, scalar $attrs) int {
     my scalar $schema = $self->get_schema($model);
     my scalar $db = $self->{"_dbh"};
-    my str $table = $schema->{"table"};
+    my str $qtable = Nesso::quote_ident($schema->{"table"});
     my str $pk = $schema->{"primary"};
     my scalar $cols = $schema->{"columns"};
 
@@ -791,7 +821,7 @@ func update_all(scalar $self, str $model, scalar $conds, scalar $attrs) int {
         my str $col = $cols->[$i];
         if ($col ne $pk && exists(%{$attrs}, $col)) {
             if ($first == 0) { $set = $set . ", "; }
-            $set = $set . $col . " = ?";
+            $set = $set . Nesso::quote_ident($col) . " = ?";
             push(@params, $attrs->{$col});
             $first = 0;
         }
@@ -799,7 +829,7 @@ func update_all(scalar $self, str $model, scalar $conds, scalar $attrs) int {
     }
     if ($set eq "") { return 0; }
 
-    my str $sql = "UPDATE " . $table . " SET " . $set;
+    my str $sql = "UPDATE " . $qtable . " SET " . $set;
     # WHERE params are appended AFTER the SET params (correct bind order).
     my str $wc = $self->build_where_clause($schema, $conds, \@params);
     if ($wc ne "") {
@@ -815,9 +845,9 @@ func update_all(scalar $self, str $model, scalar $conds, scalar $attrs) int {
 func delete_all(scalar $self, str $model, scalar $conds) int {
     my scalar $schema = $self->get_schema($model);
     my scalar $db = $self->{"_dbh"};
-    my str $table = $schema->{"table"};
+    my str $qtable = Nesso::quote_ident($schema->{"table"});
 
-    my str $sql = "DELETE FROM " . $table;
+    my str $sql = "DELETE FROM " . $qtable;
     my array @params = ();
     my str $wc = $self->build_where_clause($schema, $conds, \@params);
     if ($wc ne "") {
@@ -913,7 +943,7 @@ func related(scalar $self, scalar $record, str $name) scalar {
         if (!defined($fk_val)) {
             return undef;
         }
-        return $self->find($rel_model, $fk_val + 0);
+        return $self->find($rel_model, $fk_val);
     }
 
     if ($type eq "has_one") {

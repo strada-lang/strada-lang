@@ -1,0 +1,356 @@
+package MyTie;
+
+func TIEHASH(scalar ...@args) scalar {
+    my hash %self = ();
+    my hash %data = ();
+    $self{"data"} = \%data;
+    return bless(\%self, "MyTie");
+}
+
+func FETCH(scalar $self, str $key) scalar {
+    return $self->{"data"}->{$key};
+}
+
+func STORE(scalar $self, str $key, scalar $val) void {
+    $self->{"data"}->{$key} = $val;
+}
+
+package BaseWithNew;
+has ro int $base_v = 10;
+
+func new(scalar ...@args) scalar {
+    my hash %self = ("base_v" => 77);
+    if (size(@args) > 0) {
+        $self{"base_v"} = $args[0];
+    }
+    return bless(\%self, "BaseWithNew");
+}
+
+package SubWithHas;
+extends BaseWithNew;
+has ro int $extra = 5;
+
+package SubSynth;
+has ro int $a = 3;
+has rw str $b = "hi";
+
+package DynObj;
+
+func new() scalar {
+    my hash %self = ("v" => 1);
+    return bless(\%self, "DynObj");
+}
+
+func boom(scalar $self, str $msg) void {
+    throw "dyn:" . $msg;
+}
+
+func ping(scalar $self, str $msg) str {
+    return "pong:" . $msg;
+}
+
+package main;
+
+our str $OUR_S = "ab";
+our int $OUR_N = 10;
+our int $OUR_DEF = undef;
+our scalar $OUR_WEAK = undef;
+our scalar $OUR_FE = undef;
+our int $OUR_FE_I = 0;
+
+func maybe_throw(int $do_throw) int {
+    if ($do_throw == 1) {
+        throw "init_boom";
+    }
+    return 42;
+}
+
+func var_throw_p3(scalar ...@a) int {
+    throw "cl_" . size(@a);
+}
+
+func mutating_helper(scalar $aref, int $idx) str {
+    $aref->[$idx] = "MUTATED_" . $idx;
+    return $aref->[$idx];
+}
+
+func map_early_ret(scalar $aref) int {
+    my int $dummy = scalar(map {
+        if ($_ == 3) {
+            return 33;
+        }
+        $_ * 10;
+    } @{$aref});
+    return $dummy;
+}
+
+func grep_early_ret(scalar $aref) int {
+    my array @out = grep {
+        if ($_ == 4) {
+            return 44;
+        }
+        $_ > 1;
+    } @{$aref};
+    return size(@out);
+}
+
+func map_throw(scalar $aref) void {
+    my array @out = map {
+        if ($_ == 2) {
+            throw "map_boom";
+        }
+        "item_" . $_;
+    } @{$aref};
+}
+
+func grep_throw(scalar $aref) void {
+    my array @out = grep {
+        if ($_ == 2) {
+            throw "grep_boom";
+        }
+        1;
+    } @{$aref};
+}
+
+func q_expr(int $q) int {
+    my int $a = $q / 2;
+    my int $b = ($q != 1) ? 1 : 0;
+    my int $c = ($q <= 8) ? 1 : 0;
+    my int $d = $q << 1;
+    my int $e = ($q || 0) ? 1 : 0;
+    if ($a != 4 || $b != 1 || $c != 1 || $d != 16 || $e != 1) {
+        return 0;
+    }
+    my str $s1 = q/abc/;
+    my str $s2 = q!def!;
+    my str $s3 = q<ghi>;
+    my str $s4 = q|jkl|;
+    if ($s1 ne "abc" || $s2 ne "def" || $s3 ne "ghi" || $s4 ne "jkl") {
+        return 0;
+    }
+    return 1;
+}
+
+func check_ok(int $cond, str $msg) void {
+    if (!$cond) {
+        throw "ASSERT_FAIL: " . $msg;
+    }
+}
+
+func main() int {
+    # 1. Lexer q disambiguation
+    check_ok(q_expr(8) == 1, "q disambiguation");
+
+    # 2. tie with dynamic class expression
+    my str $cls = "My" . "Tie";
+    my hash %th = ();
+    tie(%th, $cls);
+    $th{"k"} = "v1";
+    check_ok($th{"k"} eq "v1", "dynamic tie class");
+
+    # 3. sys::weaken on our, local, boxed, hash entry, array element
+    {
+        my scalar $strong_o = {"x" => 1};
+        $OUR_WEAK = $strong_o;
+        sys::weaken($OUR_WEAK);
+        check_ok(sys::isweak($OUR_WEAK) == 1 && $OUR_WEAK->{"x"} == 1, "weaken our live");
+        $strong_o = undef;
+        check_ok(!defined($OUR_WEAK), "weaken our cleared");
+    }
+    {
+        my scalar $strong_b = {"x" => 2};
+        my scalar $boxed = $strong_b;
+        my scalar $cap_fn = func () scalar { return $boxed; };
+        sys::weaken($boxed);
+        check_ok(sys::isweak($boxed) == 1 && $cap_fn->()->{"x"} == 2, "weaken boxed live");
+        $strong_b = undef;
+        check_ok(!defined($boxed), "weaken boxed cleared");
+    }
+    {
+        my scalar $strong_ha = {"x" => 3};
+        my hash %wh = ("ref" => $strong_ha);
+        my array @wa = ($strong_ha);
+        sys::weaken($wh{"ref"});
+        sys::weaken($wa[0]);
+        check_ok(sys::isweak($wh{"ref"}) == 1 && sys::isweak($wa[0]) == 1, "weaken hash/array live");
+        $strong_ha = undef;
+        check_ok(!defined($wh{"ref"}) && !defined($wa[0]), "weaken hash/array cleared");
+    }
+
+    # 4. NODE_VAR_DECL self-capturing recursive closure + throw in boxed init + bless decl
+    my scalar $fact = func (int $n) int {
+        if ($n <= 1) { return 1; }
+        return $n * $fact->($n - 1);
+    };
+    check_ok($fact->(5) == 120, "self-capturing recursive closure");
+
+    my int $caught_boxed = 0;
+    try {
+        my scalar $bx = maybe_throw(1);
+        my scalar $use_bx = func () scalar { return $bx; };
+    } catch ($e) {
+        $caught_boxed = ($e eq "init_boom") ? 1 : 0;
+    }
+    check_ok($caught_boxed == 1, "boxed var init throw");
+
+    my scalar $blessed_decl = bless({"n" => 9}, "DynObj");
+    check_ok($blessed_decl->{"n"} == 9 && $blessed_decl->ping("ok") eq "pong:ok", "my scalar = bless");
+
+    # 5. NODE_DESTRUCTURE: slurp @rest/%rest, int/num coercion, our target
+    my array @dsrc = ("7", "2.5", "extra1", "extra2");
+    my int $di = 0;
+    my num $dn = 0.0;
+    my ($d1, $d2, @drest) = @dsrc;
+    check_ok($d1 eq "7" && size(@drest) == 2 && $drest[1] eq "extra2", "destructure array slurp");
+    my ($ds1, %hrest) = ("head", "ka", "va", "kb", "vb");
+    check_ok($ds1 eq "head" && $hrest{"ka"} eq "va" && $hrest{"kb"} eq "vb", "destructure hash slurp");
+    ($OUR_S, $OUR_N) = ("destr", "15");
+    check_ok($OUR_S eq "destr" && $OUR_N == 15, "destructure our targets");
+
+    # 6. foreach variants: non-decl local & our, range, typed int, array mutating body
+    my scalar $fe_local = "init";
+    my array @farr = ("p", "q", "r");
+    my str $facc = "";
+    foreach $fe_local (@farr) {
+        $facc = $facc . $fe_local;
+    }
+    check_ok($facc eq "pqr" && $fe_local eq "r", "non-decl array foreach");
+
+    foreach $OUR_FE (@farr) {
+        $facc = $facc . $OUR_FE;
+    }
+    check_ok($facc eq "pqrpqr" && $OUR_FE eq "r", "non-decl our array foreach");
+
+    my int $fe_ri = 0;
+    foreach $fe_ri (1..4) {
+        $fe_ri = $fe_ri + 10;
+    }
+    check_ok($fe_ri == 14, "non-decl range foreach");
+
+    foreach $OUR_FE_I (2..3) { }
+    check_ok($OUR_FE_I == 3, "non-decl our range foreach");
+
+    my int $tsum = 0;
+    my array @num_strs = ("10", "20", "30");
+    foreach my int $tn (@num_strs) {
+        $tsum = $tsum + $tn;
+    }
+    check_ok($tsum == 60, "typed my int foreach over strings");
+
+    my array @mut_arr = ("keep0", "keep1");
+    my str $mut_seen = "";
+    foreach my $mitem (@mut_arr) {
+        mutating_helper(\@mut_arr, 0);
+        $mut_seen = $mut_seen . $mitem . ";";
+    }
+    check_ok($mut_seen eq "keep0;keep1;", "foreach item survives container mutation");
+
+    # 7. $0 assign, our compound ops, UTF-8 .=
+    my str $orig0 = $0;
+    $0 = $0;
+    check_ok($0 eq $orig0, "dollar-0 self assign");
+    $0 = "phase3_" . 9;
+    check_ok($0 eq "phase3_9", "dollar-0 owned assign");
+
+    $OUR_DEF //= 88;
+    check_ok($OUR_DEF == 88, "our //=");
+    $OUR_N %= 4;
+    check_ok($OUR_N == 3, "our %=");
+    $OUR_N **= 3;
+    check_ok($OUR_N == 27, "our **=");
+    $OUR_S = "z";
+    $OUR_S x= 3;
+    check_ok($OUR_S eq "zzz", "our x=");
+
+    my str $u8 = "hello ";
+    $u8 .= "café";
+    check_ok(bytes($u8) == 11 && $u8 eq "hello café", "UTF-8 .= byte length");
+
+    # 8. map/grep loop control, early return, throw
+    my int $rsum = 0;
+    my int $redos = 0;
+    my array @mres = map {
+        if ($_ == 2) { next; }
+        if ($_ == 3 && $redos == 0) {
+            $redos = 1;
+            $_ = 30;
+            redo;
+        }
+        if ($_ == 5) { last; }
+        $_ * 2;
+    } (1, 2, 3, 4, 5, 6);
+    check_ok(size(@mres) == 3 && $mres[0] == 2 && $mres[1] == 60 && $mres[2] == 8, "map next/redo/last");
+
+    my int $gredos = 0;
+    my array @gres = grep {
+        if ($_ == 2) { next; }
+        if ($_ == 3 && $gredos == 0) {
+            $gredos = 1;
+            redo;
+        }
+        if ($_ == 5) { last; }
+        $_ % 2 == 1;
+    } (1, 2, 3, 4, 5, 6);
+    check_ok(size(@gres) == 2 && $gres[0] == 1 && $gres[1] == 3, "grep next/redo/last");
+
+    my array @ret_in = (1, 2, 3, 4);
+    check_ok(map_early_ret(\@ret_in) == 33, "map early return");
+    check_ok(grep_early_ret(\@ret_in) == 44, "grep early return");
+
+    my int $mthrown = 0;
+    try { map_throw(\@ret_in); } catch ($me) { if ($me eq "map_boom") { $mthrown = 1; } }
+    check_ok($mthrown == 1, "map throw");
+
+    my int $gthrown = 0;
+    try { grep_throw(\@ret_in); } catch ($gre) { if ($gre eq "grep_boom") { $gthrown = 1; } }
+    check_ok($gthrown == 1, "grep throw");
+
+    # 9. C-keyword catch variables & closure capturing catch var
+    my scalar $c_cap = undef;
+    try {
+        throw "kw_err";
+    } catch ($register) {
+        $c_cap = func () str { return "caught:" . $register; };
+    }
+    check_ok($c_cap->() eq "caught:kw_err", "C-keyword catch var + capture");
+
+    # 10. has + user-defined new vs synthesized new
+    my scalar $base_user = BaseWithNew::new("base_v" => 123);
+    check_ok($base_user->{"base_v"} eq "base_v", "user-defined BaseWithNew::new is not overridden by inline ctor");
+    my scalar $sub_inh = SubWithHas::new("base_v" => 456, "extra" => 7);
+    check_ok($sub_inh->{"base_v"} == 456 && $sub_inh->{"extra"} == 7, "SubWithHas inherits base_v attr into synthesized new");
+    my scalar $sub_syn = SubSynth::new("a" => 9, "b" => "ok");
+    check_ok($sub_syn->{"a"} == 9 && $sub_syn->{"b"} eq "ok", "SubSynth uses synthesized new");
+
+    # 11. NODE_DYN_METHOD_CALL & NODE_CLOSURE_CALL throw cleanup
+    my scalar $dobj = DynObj::new();
+    my str $dm = "boom";
+    my int $dcaught = 0;
+    try {
+        $dobj->$dm("arg_" . 1);
+    } catch ($de) {
+        $dcaught = ($de eq "dyn:arg_1") ? 1 : 0;
+    }
+    check_ok($dcaught == 1, "dyn method call throw");
+
+    my hash %fnh = ("fn" => \&var_throw_p3);
+    my int $clcaught = 0;
+    my array @sp = (1..20);
+    try {
+        $fnh{"fn"}->(...@sp);
+    } catch ($ce) {
+        $clcaught = ($ce eq "cl_20") ? 1 : 0;
+    }
+    check_ok($clcaught == 1, "closure call spread throw");
+
+    my int $clpos = 0;
+    try {
+        $fnh{"fn"}->(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18);
+    } catch ($ce2) {
+        $clpos = ($ce2 eq "cl_18") ? 1 : 0;
+    }
+    check_ok($clpos == 1, "closure call >16 positional args throw");
+
+    say("PHASE3_COMPILER_OK");
+    return 0;
+}

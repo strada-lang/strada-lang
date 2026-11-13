@@ -30,19 +30,25 @@ use Nesso;
 package Nesso::Record;
 
 # Save this record to the database (INSERT or UPDATE)
-func save(scalar $self) int {
+func save(scalar $self) scalar {
     my scalar $nesso = $self->{"_nesso"};
     return Nesso::save($nesso, $self);
 }
 
-# Update attributes and save in one call
-func update(scalar $self, scalar $attrs) int {
+# Update attributes and save in one call (enforces schema col_allowed; ignores internal _* and PK)
+func update(scalar $self, scalar $attrs) scalar {
+    my scalar $nesso = $self->{"_nesso"};
+    my str $model = $self->{"_model"};
+    my scalar $schema = Nesso::get_schema($nesso, $model);
+    my str $pk = $schema->{"primary"};
     my array @keys = keys($attrs);
     my int $i = 0;
     my int $n = scalar(@keys);
     while ($i < $n) {
         my str $key = $keys[$i];
-        $self->{$key} = $attrs->{$key};
+        if (substr($key, 0, 1) ne "_" && $key ne $pk && Nesso::col_allowed($nesso, $schema, $key) == 1) {
+            $self->{$key} = $attrs->{$key};
+        }
         $i++;
     }
     return $self->save();
@@ -62,8 +68,15 @@ func reload(scalar $self) scalar {
     my str $pk = $schema->{"primary"};
     my scalar $pk_val = $self->{$pk};
 
-    my scalar $fresh = Nesso::find($nesso, $model, $pk_val + 0);
+    my scalar $fresh = Nesso::find($nesso, $model, $pk_val);
     if (defined($fresh)) {
+        # Clear any cached relation entries from previous state
+        my array @cur_keys = keys(%{$self});
+        foreach my str $ck (@cur_keys) {
+            if (length($ck) >= 5 && substr($ck, 0, 5) eq "_rel_") {
+                delete($self->{$ck});
+            }
+        }
         # Copy all fields from fresh record
         my array @keys = keys($fresh);
         my int $i = 0;
@@ -75,6 +88,8 @@ func reload(scalar $self) scalar {
             }
             $i++;
         }
+        $self->{"_is_new"} = 0;
+        Nesso::snapshot_clean($nesso, $self);
     }
     return $self;
 }
@@ -106,8 +121,11 @@ func id(scalar $self) scalar {
 
 # Check if this is a new record (not yet saved)
 func is_new(scalar $self) int {
+    if (defined($self->{"_is_new"})) {
+        return ($self->{"_is_new"} + 0) ? 1 : 0;
+    }
     my scalar $id_val = $self->id();
-    if (!defined($id_val) || $id_val + 0 == 0) {
+    if (!defined($id_val) || ("" . $id_val) eq "") {
         return 1;
     }
     return 0;

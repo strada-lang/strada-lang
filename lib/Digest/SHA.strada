@@ -70,14 +70,12 @@ Compute SHA-1 hash. Returns 40-character lowercase hex string.
     use lib "lib";
     use Digest::SHA;
 
-    my str $password = "secret123";
-    my str $hash = Digest::SHA::sha256_hex($password);
-    say("Password hash: " . $hash);
+    my str $data = "hello world";
+    my str $hash = Digest::SHA::sha256_hex($data);
+    say("SHA-256 digest: " . $hash);
 
-    # Verify
-    if (Digest::SHA::sha256_hex($input) eq $hash) {
-        say("Password matches!");
-    }
+    # Note: Do NOT use raw unsalted SHA-256 for password storage;
+    # use crypt::hashpw($password) (from `use crypt;`) instead.
 
 =cut
 

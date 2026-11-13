@@ -52,6 +52,10 @@ func escape_man(str $s) str {
     $s =~ s/\\/\\\\/g;
     # Escape minus signs (use \- for literal minus)
     $s =~ s/-/\\-/g;
+    # Protect leading '.' or "'" so roff does not interpret them as requests
+    if (length($s) > 0 && (substr($s, 0, 1) eq "." || substr($s, 0, 1) eq "'")) {
+        $s = "\\&" . $s;
+    }
     return $s;
 }
 

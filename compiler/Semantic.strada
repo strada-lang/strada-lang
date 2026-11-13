@@ -877,6 +877,10 @@ func register_functions(scalar $ctx, scalar $ast) void {
             $info{"is_extern"} = $fn->{"is_extern"};
             $info{"is_variadic"} = $fn->{"is_variadic"};
             $info{"is_decl_only"} = $new_is_decl;
+            $info{"is_private"} = $fn->{"is_private"} + 0;
+            $info{"package"} = $fn_pkg;
+            $info{"from_use"} = $fn->{"from_use"} + 0;
+            $info{"file"} = "" . $fn->{"file"};
             $info{"line"} = $line;
             $ctx->{"functions"}->{$name} = \%info;
         }
@@ -1064,13 +1068,19 @@ func sem_file_key(scalar $node) str {
 }
 
 # For a reference to a global with several file-level declarations, the C
-# name of the declaration that lexically precedes the current function.
-func resolve_shadowed_global(scalar $ctx, scalar $info, str $name) str {
+# name of the declaration that lexically precedes the reference/function.
+func resolve_shadowed_global(scalar $ctx, scalar $info, str $name, int $ref_line) str {
     my scalar $decls = $info->{"decls"};
     my scalar $fn = $ctx->{"current_func"};
-    if (is_valid_node($fn) == 0) { return $name; }
-    my str $fkey = sem_file_key($fn);
-    my int $fline = ast_get_line($fn);
+    my str $fkey = "";
+    my int $fline = $ref_line;
+    if (is_valid_node($fn) == 1) {
+        $fkey = sem_file_key($fn);
+        if ($fline <= 0) { $fline = ast_get_line($fn); }
+    } elsif (($ctx->{"cur_from_use"} + 0) == 1) {
+        $fkey = "" . $ctx->{"cur_file"};
+    }
+    if ($fline <= 0) { return $name; }
     my str $best = $name;
     my int $best_line = -1;
     my int $i = 0;
@@ -1303,7 +1313,7 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
         if ($found == 1) {
             my scalar $vinfo = $lookup_result->{"info"};
             if ($vinfo->{"is_global"} == 1 && size(@{$vinfo->{"decls"}}) > 1) {
-                $expr->{"name"} = resolve_shadowed_global($ctx, $vinfo, $name);
+                $expr->{"name"} = resolve_shadowed_global($ctx, $vinfo, $name, $line);
             }
         }
         return;
@@ -1330,9 +1340,18 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
         my scalar $af_outer = $ctx->{"scope"};
         $ctx->{"scope"} = scope_new($af_outer);
         my scalar $af_params = $expr->{"params"};
+        my hash %af_seen = ();
         my int $af_pi = 0;
         while ($af_pi < $expr->{"param_count"}) {
             my scalar $af_p = $af_params->[$af_pi];
+            my str $af_key = $af_p->{"sigil"} . $af_p->{"name"};
+            if ($af_seen{$af_key} == 1) {
+                my int $af_pl = ast_get_line($af_p);
+                if ($af_pl <= 0) { $af_pl = $line; }
+                semantic_error($ctx, "duplicate parameter '" . $af_key . "'", $af_pl);
+            } else {
+                $af_seen{$af_key} = 1;
+            }
             scope_add_var($ctx->{"scope"}, $af_p->{"name"}, $af_p->{"sigil"}, $af_p->{"param_type"}, ast_get_line($af_p));
             $af_pi = $af_pi + 1;
         }
@@ -1590,6 +1609,38 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
             }
         }
 
+        if ($fn_info->{"is_private"} == 1) {
+            my str $callee_pkg = "" . $fn_info->{"package"};
+            if (length($callee_pkg) == 0) { $callee_pkg = "main"; }
+            my str $caller_pkg = "main";
+            my scalar $cur_f = $ctx->{"current_func"};
+            if (is_valid_node($cur_f) == 1) {
+                my str $cp = "" . $cur_f->{"package"};
+                if (length($cp) > 0) { $caller_pkg = $cp; }
+            }
+            my int $priv_ok = 0;
+            if ($caller_pkg eq $callee_pkg) {
+                if ($caller_pkg eq "main") {
+                    my int $cfu = $ctx->{"cur_from_use"} + 0;
+                    if (is_valid_node($cur_f) == 1) { $cfu = $cur_f->{"from_use"} + 0; }
+                    if ($cfu == ($fn_info->{"from_use"} + 0)) {
+                        my str $cfk_m = "" . $ctx->{"cur_file"};
+                        if (is_valid_node($cur_f) == 1 && length("" . $cur_f->{"file"}) > 0) {
+                            $cfk_m = "" . $cur_f->{"file"};
+                        }
+                        if ($cfu == 0 || $cfk_m eq ("" . $fn_info->{"file"})) {
+                            $priv_ok = 1;
+                        }
+                    }
+                } else {
+                    $priv_ok = 1;
+                }
+            }
+            if ($priv_ok == 0) {
+                semantic_error($ctx, "cannot call private function '" . $name . "' from outside package '" . $callee_pkg . "'", $line);
+            }
+        }
+
         my int $expected = $fn_info->{"param_count"};
         my int $actual = $expr->{"arg_count"};
 
@@ -1723,7 +1774,7 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
                 scope_mark_used_sigil($ctx->{"scope"}, $sa_name, $matched_sigil);
                 my scalar $sa_vinfo = $sa_lk->{"info"};
                 if ($sa_vinfo->{"is_global"} == 1 && size(@{$sa_vinfo->{"decls"}}) > 1) {
-                    $sub_arr->{"name"} = resolve_shadowed_global($ctx, $sa_vinfo, $sa_name);
+                    $sub_arr->{"name"} = resolve_shadowed_global($ctx, $sa_vinfo, $sa_name, ast_get_line($sub_arr));
                 }
             }
         } else {
@@ -1757,7 +1808,7 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
                 scope_mark_used_sigil($ctx->{"scope"}, $hh_name, $hmatched_sigil);
                 my scalar $hh_vinfo = $hh_lk->{"info"};
                 if ($hh_vinfo->{"is_global"} == 1 && size(@{$hh_vinfo->{"decls"}}) > 1) {
-                    $ha_hash->{"name"} = resolve_shadowed_global($ctx, $hh_vinfo, $hh_name);
+                    $ha_hash->{"name"} = resolve_shadowed_global($ctx, $hh_vinfo, $hh_name, ast_get_line($ha_hash));
                 }
             }
         } else {
@@ -1791,7 +1842,7 @@ func analyze_expression(scalar $ctx, scalar $expr) void {
                 scope_mark_used_sigil($ctx->{"scope"}, $hs_name, "%");
                 my scalar $hs_vinfo = $hs_lk->{"info"};
                 if ($hs_vinfo->{"is_global"} == 1 && size(@{$hs_vinfo->{"decls"}}) > 1) {
-                    $hs_src->{"name"} = resolve_shadowed_global($ctx, $hs_vinfo, $hs_name);
+                    $hs_src->{"name"} = resolve_shadowed_global($ctx, $hs_vinfo, $hs_name, ast_get_line($hs_src));
                 }
             }
         } else {
@@ -2202,18 +2253,18 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         my scalar $ret_val = $stmt->{"value"};
         if (is_valid_node($ret_val) == 1) {
             analyze_expression($ctx, $ret_val);
-            # Stage-0 type check: returned value vs declared return type.
-            if ($ctx->{"strict_types"} == 1) {
-                my scalar $cur = $ctx->{"current_func"};
-                if ($cur) {
-                    my int $rtype = $cur->{"return_type"};
-                    if ($rtype != TYPE_DYNAMIC()) {
-                        my int $atype = stage0_expr_type($ctx, $ret_val);
-                        if (stage0_types_compatible($rtype, $atype) == 0) {
-                            semantic_warn($ctx, "returning a " . ast_data_type_name($atype)
-                                . " value from '" . $cur->{"name"} . "' (declared to return "
-                                . ast_data_type_name($rtype) . ")", $line);
-                        }
+            my scalar $cur = $ctx->{"current_func"};
+            if ($cur) {
+                my int $rtype = $cur->{"return_type"};
+                if ($rtype == TYPE_VOID()) {
+                    semantic_error($ctx, "cannot return a value from void function '" . $cur->{"name"} . "'", $line);
+                } elsif ($ctx->{"strict_types"} == 1 && $rtype != TYPE_DYNAMIC()) {
+                    # Stage-0 type check: returned value vs declared return type.
+                    my int $atype = stage0_expr_type($ctx, $ret_val);
+                    if (stage0_types_compatible($rtype, $atype) == 0) {
+                        semantic_warn($ctx, "returning a " . ast_data_type_name($atype)
+                            . " value from '" . $cur->{"name"} . "' (declared to return "
+                            . ast_data_type_name($rtype) . ")", $line);
                     }
                 }
             }
@@ -2420,12 +2471,22 @@ func analyze_function(scalar $ctx, scalar $fn) void {
     # Add parameters to scope
     my scalar $params = $fn->{"params"};
     my int $param_count = $fn->{"param_count"};
+    my hash %seen_params = ();
+    my int $fn_line = ast_get_line($fn);
     for (my int $i = 0; $i < $param_count; $i = $i + 1) {
         my scalar $param = $params->[$i];
         my str $pname = $param->{"name"};
         my str $sigil = $param->{"sigil"};
         my int $ptype = $param->{"param_type"};
         my int $pline = ast_get_line($param);
+        my str $pkey = $sigil . $pname;
+        if ($seen_params{$pkey} == 1) {
+            my int $err_line = $pline;
+            if ($err_line <= 0) { $err_line = $fn_line; }
+            semantic_error($ctx, "duplicate parameter '" . $pkey . "'", $err_line);
+        } else {
+            $seen_params{$pkey} = 1;
+        }
         scope_add_var($ctx->{"scope"}, $pname, $sigil, $ptype, $pline);
     }
 
@@ -2486,6 +2547,7 @@ func semantic_analyze(scalar $ast, int $show_warnings, int $strict_types) void {
         for (my int $gi = 0; $gi < $gcount; $gi = $gi + 1) {
             my scalar $gvar = $globals->[$gi];
             $ctx->{"cur_file"} = "" . $gvar->{"file"};
+            $ctx->{"cur_from_use"} = $gvar->{"from_use"} + 0;
             $ctx->{"current_func"} = 0;
             if (is_valid_node($gvar->{"initial_capacity"}) == 1) {
                 analyze_expression($ctx, $gvar->{"initial_capacity"});
@@ -2512,6 +2574,7 @@ func semantic_analyze(scalar $ast, int $show_warnings, int $strict_types) void {
         for (my int $bi = 0; $bi < $bcount; $bi = $bi + 1) {
             my scalar $bblk = $bblocks->[$bi];
             $ctx->{"cur_file"} = "" . $bblk->{"file"};
+            $ctx->{"cur_from_use"} = $bblk->{"from_use"} + 0;
             $ctx->{"current_func"} = 0;
             analyze_block($ctx, $bblk);
         }
@@ -2522,6 +2585,7 @@ func semantic_analyze(scalar $ast, int $show_warnings, int $strict_types) void {
         for (my int $ei = 0; $ei < $ecount; $ei = $ei + 1) {
             my scalar $eblk = $eblocks->[$ei];
             $ctx->{"cur_file"} = "" . $eblk->{"file"};
+            $ctx->{"cur_from_use"} = $eblk->{"from_use"} + 0;
             $ctx->{"current_func"} = 0;
             analyze_block($ctx, $eblk);
         }
@@ -2539,6 +2603,7 @@ func semantic_analyze(scalar $ast, int $show_warnings, int $strict_types) void {
             next;
         }
         $ctx->{"cur_file"} = $fn->{"file"};
+        $ctx->{"cur_from_use"} = $fn->{"from_use"} + 0;
         analyze_function($ctx, $fn);
     }
 

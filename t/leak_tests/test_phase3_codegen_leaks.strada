@@ -1,0 +1,150 @@
+package MyLeakTie;
+
+func TIEHASH(scalar ...@args) scalar {
+    my hash %self = ("d" => {});
+    return bless(\%self, "MyLeakTie");
+}
+
+func FETCH(scalar $self, str $k) scalar {
+    return $self->{"d"}->{$k};
+}
+
+func STORE(scalar $self, str $k, scalar $v) void {
+    $self->{"d"}->{$k} = $v;
+}
+
+package LeakDynObj;
+
+func new() scalar {
+    my hash %h = ();
+    return bless(\%h, "LeakDynObj");
+}
+
+func explode(scalar $self, str $a, str $b) void {
+    throw "boom:" . $a . ":" . $b;
+}
+
+package main;
+
+our str $L_OUR_S = "init";
+our int $L_OUR_N = 10;
+our int $L_OUR_UNDEF = undef;
+our scalar $L_OUR_FE = undef;
+
+func throw_val() scalar {
+    throw "var_init_boom";
+}
+
+func var_throw(scalar ...@a) int {
+    throw "c_" . size(@a);
+}
+
+func map_ret(scalar $arr) str {
+    my array @x = map {
+        my str $tmp = "m_" . $_;
+        if ($_ == 2) {
+            return $tmp;
+        }
+        $tmp;
+    } @{$arr};
+    return "none";
+}
+
+func grep_ret(scalar $arr) int {
+    my array @x = grep {
+        my str $tmp = "g_" . $_;
+        if ($_ == 2) {
+            return 99;
+        }
+        length($tmp) > 0;
+    } @{$arr};
+    return size(@x);
+}
+
+func main() int {
+    my int $iter = 0;
+    my scalar $dobj = LeakDynObj::new();
+    my str $dmeth = "explode";
+
+    while ($iter < 40) {
+        # Dynamic tie class expression + sys::weaken
+        my str $cls = "MyLeak" . "Tie";
+        my hash %th = ();
+        tie(%th, $cls);
+        my scalar $strong = {"val" => "x_" . $iter};
+        $th{"item"} = $strong;
+        sys::weaken($th{"item"});
+        $strong = undef;
+
+        # Self-capturing closure cycle + throw before boxed capture
+        my scalar $rec = undef;
+        $rec = func (int $n) int {
+            if ($n <= 0) { return 0; }
+            return $n + $rec->($n - 1);
+        };
+        my int $x = $rec->(3);
+
+        try {
+            my scalar $b = throw_val();
+            my scalar $c = func () scalar { return $b; };
+        } catch ($register) {
+            my str $msg = "" . $register;
+        }
+
+        # Destructure, our compound ops, $0 assign
+        my array @src = ("a_" . $iter, $iter + 1, "b_" . $iter, "c_" . $iter);
+        my ($d1, $d2, @drest) = @src;
+        my ($hk, %hrest) = ("h", "k1", "v_" . $iter, "k2", "w_" . $iter);
+        $L_OUR_UNDEF //= 5;
+        $L_OUR_N += $iter;
+        $L_OUR_S = "s";
+        $L_OUR_S x= 2;
+        $0 = "leak_p3_" . $iter;
+
+        # Foreach non-decl & typed
+        my scalar $fe_loc = undef;
+        foreach $fe_loc (@src) { }
+        foreach $L_OUR_FE (@src) { }
+        my array @istrs = ("1", "2", "3");
+        foreach my int $ti (@istrs) { }
+
+        # map/grep early return & throw
+        my array @in_arr = (1, 2, 3);
+        my str $mr = map_ret(\@in_arr);
+        my int $gr = grep_ret(\@in_arr);
+        try {
+            my array @mt = map {
+                my str $s = "row_" . $_;
+                if ($_ eq "b") { throw $s; }
+                $s;
+            } ("a", "b", "c");
+        } catch ($e1) { }
+        try {
+            my array @gt = grep {
+                my str $s = "g_" . $_;
+                if ($_ eq "b") { throw $s; }
+                1;
+            } ("a", "b", "c");
+        } catch ($e2) { }
+
+        # Dyn method call & closure spread call throwing
+        try {
+            $dobj->$dmeth("a_" . $iter, "b_" . $iter);
+        } catch ($e3) { }
+        my hash %ch = ("fn" => \&var_throw);
+        my array @sp_args = ("x_" . $iter, 2, 3, 4, 5);
+        try {
+            $ch{"fn"}->(...@sp_args);
+        } catch ($e4) { }
+        try {
+            $ch{"fn"}->("p_" . $iter, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, "q_" . $iter);
+        } catch ($e5) { }
+
+        $iter = $iter + 1;
+    }
+
+    $L_OUR_FE = undef;
+    sys::gc_collect();
+    say("OK");
+    return 0;
+}

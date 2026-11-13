@@ -493,12 +493,20 @@ func none(array @list) int {
 func uniq(array @list) array {
     my array @result = ();
     my hash %seen = ();
+    my int $seen_undef = 0;
     my int $len = scalar(@list);
     for (my int $i = 0; $i < $len; $i++) {
-        my str $key = $list[$i];
-        if (!defined($seen{$key})) {
-            push(@result, $list[$i]);
-            $seen{$key} = 1;
+        if (!defined($list[$i])) {
+            if ($seen_undef == 0) {
+                push(@result, undef);
+                $seen_undef = 1;
+            }
+        } else {
+            my str $key = "" . $list[$i];
+            if (!defined($seen{$key})) {
+                push(@result, $list[$i]);
+                $seen{$key} = 1;
+            }
         }
     }
     return @result;
@@ -523,25 +531,7 @@ func reverse(array @list) array {
 
 # sort_num - Return array sorted numerically ascending
 func sort_num(array @list) array {
-    my array @result = ();
-    my int $len = scalar(@list);
-
-    # Copy to result
-    for (my int $i = 0; $i < $len; $i++) {
-        push(@result, $list[$i]);
-    }
-
-    # Bubble sort (simple, not optimal for large lists)
-    for (my int $i = 0; $i < $len - 1; $i++) {
-        for (my int $j = 0; $j < $len - $i - 1; $j++) {
-            if ($result[$j] > $result[$j + 1]) {
-                my num $temp = $result[$j];
-                $result[$j] = $result[$j + 1];
-                $result[$j + 1] = $temp;
-            }
-        }
-    }
-
+    my array @result = sort { $a <=> $b } @list;
     return @result;
 }
 
@@ -553,25 +543,7 @@ func sort_num_desc(array @list) array {
 
 # sort_str - Return array sorted alphabetically
 func sort_str(array @list) array {
-    my array @result = ();
-    my int $len = scalar(@list);
-
-    # Copy to result
-    for (my int $i = 0; $i < $len; $i++) {
-        push(@result, $list[$i]);
-    }
-
-    # Bubble sort with string comparison
-    for (my int $i = 0; $i < $len - 1; $i++) {
-        for (my int $j = 0; $j < $len - $i - 1; $j++) {
-            if ($result[$j] gt $result[$j + 1]) {
-                my str $temp = $result[$j];
-                $result[$j] = $result[$j + 1];
-                $result[$j + 1] = $temp;
-            }
-        }
-    }
-
+    my array @result = sort { $a cmp $b } @list;
     return @result;
 }
 
@@ -588,7 +560,9 @@ func shuffle(array @list) array {
     # Fisher-Yates shuffle
     my int $i = $len - 1;
     while ($i > 0) {
-        my int $j = core::rand() % ($i + 1);
+        my int $j = math::floor(core::rand() * ($i + 1));
+        if ($j < 0) { $j = 0; }
+        if ($j > $i) { $j = $i; }
         my scalar $temp = $result[$i];
         $result[$i] = $result[$j];
         $result[$j] = $temp;

@@ -135,12 +135,20 @@ func maxstr(scalar $list) scalar {
 
 func uniq(scalar $list) array {
     my hash %seen;
+    my int $seen_undef = 0;
     my array @out;
     foreach my $x (@{$list}) {
-        my str $k = "" . $x;
-        if (!exists(%seen, $k)) {
-            $seen{$k} = 1;
-            push(@out, $x);
+        if (!defined($x)) {
+            if ($seen_undef == 0) {
+                $seen_undef = 1;
+                push(@out, undef);
+            }
+        } else {
+            my str $k = "" . $x;
+            if (!exists(%seen, $k)) {
+                $seen{$k} = 1;
+                push(@out, $x);
+            }
         }
     }
     return @out;

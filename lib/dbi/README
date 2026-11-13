@@ -37,21 +37,18 @@ brew install libpq
 
 ## Building
 
+DBI is built from the repository root (generating `lib/DBI.o`):
+
 ```bash
-cd lib/dbi
+# Detect SQLite, MySQL, and PostgreSQL development headers
+./configure
 
-# SQLite only (default)
-make
-
-# With MySQL support
-make MYSQL=1
-
-# With PostgreSQL support
-make POSTGRES=1
-
-# All drivers
-make MYSQL=1 POSTGRES=1
+# Build DBI (or run `make libs` / `make`)
+make lib-dbi
 ```
+
+Note: programs that `use DBI;` must still pass the active database driver link
+flags at final link time (e.g. `-lsqlite3`, `-lmysqlclient`, `-lpq`).
 
 ## Usage
 
@@ -69,7 +66,7 @@ my scalar $dbh = DBI::connect("dbi:SQLite::memory:", "", "");
 DBI::do_sql($dbh, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)");
 
 # Insert with placeholders (safe from SQL injection)
-DBI::do($dbh, "INSERT INTO users (name) VALUES (?)", ["Alice"]);
+DBI::exec($dbh, "INSERT INTO users (name) VALUES (?)", ["Alice"]);
 
 # Query
 my scalar $sth = DBI::prepare($dbh, "SELECT * FROM users");

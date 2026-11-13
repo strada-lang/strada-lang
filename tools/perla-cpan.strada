@@ -15,6 +15,27 @@
 
 use lib "lib";
 
+our hash %g_visited = ();
+
+func sq(str $s) str {
+    return "'" . replace_all($s, "'", "'\\''") . "'";
+}
+
+func is_valid_module_name(str $m) int {
+    if ($m =~ /^[A-Za-z_][A-Za-z0-9_]*(::[A-Za-z_][A-Za-z0-9_]*)*$/) {
+        return 1;
+    }
+    return 0;
+}
+
+func is_valid_http_url(str $u) int {
+    if (!($u =~ /^https?:\/\//)) { return 0; }
+    if (index($u, "'") >= 0 || index($u, "\n") >= 0 || index($u, "\r") >= 0 || index($u, " ") >= 0) {
+        return 0;
+    }
+    return 1;
+}
+
 func main() int {
     my int $argc = size(@ARGV);
     if ($argc < 1) {
@@ -30,17 +51,31 @@ func main() int {
     }
 
     my int $verbose = 0;
-    my str $command = $ARGV[0];
+    my str $command = "";
     my array @args = ();
-    my int $i = 1;
+    my int $i = 0;
     while ($i < $argc) {
-        if ($ARGV[$i] eq "-v" || $ARGV[$i] eq "--verbose") {
+        my str $tok = $ARGV[$i];
+        if ($tok eq "-v" || $tok eq "--verbose") {
             $verbose = 1;
-        } elsif ($ARGV[$i] eq "--lib") {
+        } elsif ($tok eq "--lib") {
             $i++;
-            if ($i < $argc) { $lib_dir = $ARGV[$i]; }
+            if ($i < $argc) {
+                $lib_dir = $ARGV[$i];
+            } else {
+                say(STDERR, "Error: --lib requires a directory path");
+                return 1;
+            }
+        } elsif ($tok eq "-h" || $tok eq "--help") {
+            _usage();
+            return 0;
+        } elsif (substr($tok, 0, 1) eq "-") {
+            say(STDERR, "Error: unknown option: " . $tok);
+            return 1;
+        } elsif (length($command) == 0) {
+            $command = $tok;
         } else {
-            push(@args, $ARGV[$i]);
+            push(@args, $tok);
         }
         $i++;
     }
@@ -52,7 +87,11 @@ func main() int {
         }
         my int $ai = 0;
         while ($ai < size(@args)) {
-            my int $ok = _install_module($args[$ai], $lib_dir, $verbose);
+            if (is_valid_module_name($args[$ai]) == 0) {
+                say(STDERR, "Invalid module name: " . $args[$ai]);
+                return 1;
+            }
+            my int $ok = _install_module($args[$ai], $lib_dir, $verbose, 0);
             if ($ok == 0) {
                 say("FAILED: " . $args[$ai]);
                 return 1;
@@ -65,6 +104,10 @@ func main() int {
     if ($command eq "info") {
         if (size(@args) == 0) {
             say("Usage: perla-cpan info Module::Name");
+            return 1;
+        }
+        if (is_valid_module_name($args[0]) == 0) {
+            say(STDERR, "Invalid module name: " . $args[0]);
             return 1;
         }
         _show_info($args[0]);
@@ -99,19 +142,20 @@ func _usage() void {
 # ============================================================
 
 func _metacpan_release(str $module) scalar {
-    # Module::Name → Module-Name for release lookup
+    if (is_valid_module_name($module) == 0) { return undef; }
+    # Module::Name -> Module-Name for release lookup
     my str $dist = replace_all($module, "::", "-");
     my str $url = "https://fastapi.metacpan.org/v1/release/" . $dist;
-    my str $result = core::qx("curl -sL '" . $url . "' 2>/dev/null | python3 -c \"import json,sys; d=json.load(sys.stdin); print(d.get('download_url','')); print(d.get('name','')); print(d.get('version',''))\" 2>/dev/null");
+    my str $result = core::qx("curl -sL " . sq($url) . " 2>/dev/null | python3 -c \"import json,sys; d=json.load(sys.stdin); print(d.get('download_url','')); print(d.get('name','')); print(d.get('version',''))\" 2>/dev/null");
     my array @lines = split("\n", $result);
     if (size(@lines) < 3 || length($lines[0]) == 0) {
         # Dist name didn't match — look up the module to find its distribution
         my str $mod_url = "https://fastapi.metacpan.org/v1/module/" . $module;
-        $result = core::qx("curl -sL '" . $mod_url . "' 2>/dev/null | python3 -c \"import json,sys; d=json.load(sys.stdin); print(d.get('distribution',''))\" 2>/dev/null");
+        $result = core::qx("curl -sL " . sq($mod_url) . " 2>/dev/null | python3 -c \"import json,sys; d=json.load(sys.stdin); print(d.get('distribution',''))\" 2>/dev/null");
         my str $real_dist = trim($result);
-        if (length($real_dist) > 0 && $real_dist ne $dist) {
+        if (length($real_dist) > 0 && $real_dist ne $dist && $real_dist =~ /^[A-Za-z0-9._-]+$/) {
             $url = "https://fastapi.metacpan.org/v1/release/" . $real_dist;
-            $result = core::qx("curl -sL '" . $url . "' 2>/dev/null | python3 -c \"import json,sys; d=json.load(sys.stdin); print(d.get('download_url','')); print(d.get('name','')); print(d.get('version',''))\" 2>/dev/null");
+            $result = core::qx("curl -sL " . sq($url) . " 2>/dev/null | python3 -c \"import json,sys; d=json.load(sys.stdin); print(d.get('download_url','')); print(d.get('name','')); print(d.get('version',''))\" 2>/dev/null");
             @lines = split("\n", $result);
         }
         if (size(@lines) < 3 || length($lines[0]) == 0) { return undef; }
@@ -124,6 +168,7 @@ func _metacpan_release(str $module) scalar {
 }
 
 func _metacpan_module(str $module) scalar {
+    if (is_valid_module_name($module) == 0) { return undef; }
     my str $url = "https://fastapi.metacpan.org/v1/module/" . $module;
     my str $json_str = _http_get($url);
     if (length($json_str) == 0) { return undef; }
@@ -131,7 +176,8 @@ func _metacpan_module(str $module) scalar {
 }
 
 func _http_get(str $url) str {
-    my str $result = core::qx("curl -sL '" . $url . "' 2>/dev/null");
+    if (is_valid_http_url($url) == 0) { return ""; }
+    my str $result = core::qx("curl -sL " . sq($url) . " 2>/dev/null");
     return $result;
 }
 
@@ -182,7 +228,20 @@ func json_decode(str $s) scalar {
 # Module installation
 # ============================================================
 
-func _install_module(str $module, str $lib_dir, int $verbose) int {
+func _install_module(str $module, str $lib_dir, int $verbose, int $depth) int {
+    if (is_valid_module_name($module) == 0) {
+        say(STDERR, "Invalid module name: " . $module);
+        return 0;
+    }
+    if ($depth > 16) {
+        say(STDERR, "Dependency depth exceeded at " . $module);
+        return 0;
+    }
+    if (exists(%g_visited, $module)) {
+        return 1;
+    }
+    $g_visited{$module} = 1;
+
     say("Installing " . $module . " ...");
 
     # Check if already installed
@@ -203,49 +262,56 @@ func _install_module(str $module, str $lib_dir, int $verbose) int {
     my str $name = "" . $release->{"name"};
     my str $version = "" . $release->{"version"};
 
-    if (length($download_url) == 0) {
-        say("  No download URL for " . $module);
+    if (length($download_url) == 0 || is_valid_http_url($download_url) == 0) {
+        say("  No valid download URL for " . $module);
+        return 0;
+    }
+    if (!($name =~ /^[A-Za-z0-9._-]+$/)) {
+        say("  Invalid distribution name: " . $name);
         return 0;
     }
 
     say("  Found: " . $name . " v" . $version);
     if ($verbose == 1) { say("  URL: " . $download_url); }
 
-    # Download
-    my str $tmp_dir = "/tmp/perla-cpan-" . core::getpid();
-    core::system("mkdir -p " . $tmp_dir);
+    # Download safely into private temp directory
+    my str $tmp_dir = core::mkdtemp("/tmp/perla-cpan-XXXXXX");
+    if (length($tmp_dir) == 0) {
+        say("  Failed to create temporary directory");
+        return 0;
+    }
 
     my str $tarball = $tmp_dir . "/" . $name . ".tar.gz";
     say("  Downloading...");
-    my int $dl_ok = core::system("curl -sL '" . $download_url . "' -o '" . $tarball . "'");
+    my int $dl_ok = core::system_argv("curl", ["curl", "-fsL", $download_url, "-o", $tarball]);
     if ($dl_ok != 0) {
         say("  Download failed");
-        core::system("rm -rf " . $tmp_dir);
+        core::system_argv("rm", ["rm", "-rf", $tmp_dir]);
         return 0;
     }
 
     # Extract
     say("  Extracting...");
-    core::system("cd " . $tmp_dir . " && tar xzf *.tar.gz 2>/dev/null");
+    core::system_argv("tar", ["tar", "xzf", $tarball, "-C", $tmp_dir]);
 
     # Find the extracted directory
-    my str $extract_dir = core::qx("ls -d " . $tmp_dir . "/*/ 2>/dev/null | head -1");
+    my str $extract_dir = core::qx("ls -d " . sq($tmp_dir) . "/*/ 2>/dev/null | head -1");
     $extract_dir = trim($extract_dir);
     if (length($extract_dir) == 0) {
         say("  Extract failed");
-        core::system("rm -rf " . $tmp_dir);
+        core::system_argv("rm", ["rm", "-rf", $tmp_dir]);
         return 0;
     }
     if ($verbose == 1) { say("  Extracted to: " . $extract_dir); }
 
     # Check if this is an XS module (has .xs files)
-    my str $xs_files = core::qx("find '" . $extract_dir . "' -name '*.xs' 2>/dev/null");
+    my str $xs_files = core::qx("find " . sq($extract_dir) . " -name '*.xs' 2>/dev/null");
     my int $is_xs = length(trim($xs_files)) > 0;
 
     if ($is_xs == 1) {
         say("  XS module detected — compiling against perla_perl.h");
         my int $ok = _install_xs_module($extract_dir, $lib_dir, $verbose);
-        core::system("rm -rf " . $tmp_dir);
+        core::system_argv("rm", ["rm", "-rf", $tmp_dir]);
         return $ok;
     }
 
@@ -255,11 +321,11 @@ func _install_module(str $module, str $lib_dir, int $verbose) int {
 
     # Install runtime dependencies
     if ($ok == 1) {
-        _install_deps($module, $lib_dir, $verbose);
+        _install_deps($module, $lib_dir, $verbose, $depth + 1);
     }
 
     # Cleanup
-    core::system("rm -rf " . $tmp_dir);
+    core::system_argv("rm", ["rm", "-rf", $tmp_dir]);
 
     if ($ok == 1) {
         say("  Installed " . $module . " to " . $lib_dir);
@@ -306,11 +372,11 @@ func _install_pure_perl(str $extract_dir, str $lib_dir, int $verbose) int {
         }
         if ($last_slash > 0) {
             my str $parent = substr($dest, 0, $last_slash);
-            core::system("mkdir -p '" . $parent . "'");
+            core::system_argv("mkdir", ["mkdir", "-p", $parent]);
         }
 
         # Copy file
-        core::system("cp '" . $pm . "' '" . $dest . "'");
+        core::system_argv("cp", ["cp", $pm, $dest]);
         if ($verbose == 1) { say("    " . $rel); }
         $count++;
         $fi++;
@@ -502,14 +568,15 @@ func _install_xs_module(str $extract_dir, str $lib_dir, int $verbose) int {
     return $ok;
 }
 
-func _install_deps(str $module, str $lib_dir, int $verbose) void {
+func _install_deps(str $module, str $lib_dir, int $verbose, int $depth) void {
+    if ($depth > 16) { return; }
     # Get runtime dependencies from MetaCPAN
     my str $dist = replace_all($module, "::", "-");
     my str $json = _http_get("https://fastapi.metacpan.org/v1/release/" . $dist);
     if (length($json) == 0) { return; }
 
     # Extract runtime requires using python
-    my str $deps_str = core::qx("echo '" . replace_all($json, "'", "'\\''") . "' | python3 -c \"
+    my str $deps_str = core::qx("echo " . sq($json) . " | python3 -c \"
 import json, sys
 d = json.load(sys.stdin)
 for dep in d.get('dependency', []):
@@ -523,9 +590,9 @@ for dep in d.get('dependency', []):
     my int $di = 0;
     while ($di < size(@deps)) {
         my str $dep = trim($deps[$di]);
-        if (length($dep) > 0) {
+        if (length($dep) > 0 && is_valid_module_name($dep) == 1) {
             if ($verbose == 1) { say("  Dependency: " . $dep); }
-            _install_module($dep, $lib_dir, $verbose);
+            _install_module($dep, $lib_dir, $verbose, $depth);
         }
         $di++;
     }

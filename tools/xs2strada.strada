@@ -293,6 +293,10 @@ func main(int $argc, array @argv) int {
 
     # Read input
     my scalar $fh = core::open($input_file, "r");
+    if (!defined($fh)) {
+        say(STDERR, "Error: cannot open input file: " . $input_file);
+        return 1;
+    }
     my array @lines = <$fh>;
     core::close($fh);
 
@@ -664,6 +668,10 @@ func main(int $argc, array @argv) int {
 
     # ---- Phase 4: Generate Strada output ----
     my scalar $out = core::open($output_file, "w");
+    if (!defined($out)) {
+        say(STDERR, "Error: cannot open output file: " . $output_file);
+        return 1;
+    }
 
     # Header
     say($out, "# Converted from XS: " . $input_file);

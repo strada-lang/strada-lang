@@ -89,19 +89,22 @@ func attach(scalar $smtp, str $host, int $verify) int {
     my int $ms = $smtp->{"timeout"} * 1000;
     if (::handshake($conn, $fd, $ms) == 0) { ssl::close($conn); return 0; }
     if ($verify == 1 && ssl::verify($conn) != 0) { ssl::close($conn); return 0; }
+    my scalar $smtp_weak = $smtp;
+    core::weaken($smtp_weak);
     $smtp->{"buf"} = "";
     $smtp->{"send_fn"} = func (str $data) {
         my int $total = core::byte_length($data);
-        my str $left = $data;
-        while (core::byte_length($left) > 0) {
-            my int $rlen = core::byte_length($left);
-            my int $n = ssl::try_write($conn, $left);
+        my int $sent = 0;
+        while ($sent < $total) {
+            my str $slice = ($sent == 0) ? $data : core::byte_substr($data, $sent, $total - $sent);
+            my int $n = ssl::try_write($conn, $slice);
             if ($n < 0) { return 0; }
             if ($n == 0) {
-                if (::wait_fd($fd, ssl::want($conn), $ms) == 0) { return 0; }
+                my int $cur_ms = defined($smtp_weak) ? (($smtp_weak->{"timeout"} + 0) * 1000) : $ms;
+                if (::wait_fd($fd, ssl::want($conn), $cur_ms) == 0) { return 0; }
                 next;
             }
-            $left = ($n < $rlen) ? core::byte_substr($left, $n, $rlen - $n) : "";
+            $sent = $sent + $n;
         }
         return $total;
     };
@@ -109,7 +112,8 @@ func attach(scalar $smtp, str $host, int $verify) int {
         while (1) {
             my scalar $chunk = ssl::try_read($conn, $max);
             if (defined($chunk)) { return $chunk; }
-            if (::wait_fd($fd, ssl::want($conn), $ms) == 0) { return ""; }
+            my int $cur_ms = defined($smtp_weak) ? (($smtp_weak->{"timeout"} + 0) * 1000) : $ms;
+            if (::wait_fd($fd, ssl::want($conn), $cur_ms) == 0) { return ""; }
         }
         return "";
     };
@@ -134,6 +138,6 @@ func new_tls(str $host, int $port, int $verify) scalar {
     if (!defined($sock)) { return undef; }
     $smtp->{"socket"} = $sock;
     if (::attach($smtp, $host, $verify) == 0) { SMTP::close($smtp); return undef; }
-    if (!SMTP::greeting($smtp)) { return undef; }
+    if (!SMTP::greeting($smtp)) { SMTP::close($smtp); return undef; }
     return $smtp;
 }

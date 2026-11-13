@@ -165,14 +165,17 @@ func readline(str $prompt) str {
             readline_initialized = 1;
         }
 
-        const char *p = strada_to_str(prompt);
+        char *p = strada_to_str(prompt);
         char *line = readline(p);
+        free(p);
 
+        strada_decref(result);
         if (line) {
             result = strada_new_str(line);
             got_line = strada_new_int(1);
             free(line);
         } else {
+            result = strada_new_str("");
             got_line = strada_new_int(0);
         }
     }
@@ -186,10 +189,11 @@ func readline(str $prompt) str {
 # Add a line to history
 func add_history(str $line) void {
     __C__ {
-        const char *l = strada_to_str(line);
+        char *l = strada_to_str(line);
         if (l && l[0] != '\0') {
             add_history(l);
         }
+        free(l);
     }
 }
 
@@ -217,6 +221,7 @@ func history_get(int $index) str {
         int idx = (int)strada_to_int(index);
         HIST_ENTRY *entry = history_get(idx + history_base);
         if (entry && entry->line) {
+            strada_decref(result);
             result = strada_new_str(entry->line);
             found = strada_new_int(1);
         }
@@ -239,8 +244,9 @@ func stifle_history(int $max) void {
 func read_history(str $filename) int {
     my int $result = 0;
     __C__ {
-        const char *fn = strada_to_str(filename);
+        char *fn = strada_to_str(filename);
         int ret = read_history(fn);
+        free(fn);
         result = strada_new_int(ret == 0 ? 1 : 0);
     }
     return $result;
@@ -250,8 +256,9 @@ func read_history(str $filename) int {
 func write_history(str $filename) int {
     my int $result = 0;
     __C__ {
-        const char *fn = strada_to_str(filename);
+        char *fn = strada_to_str(filename);
         int ret = write_history(fn);
+        free(fn);
         result = strada_new_int(ret == 0 ? 1 : 0);
     }
     return $result;
@@ -263,13 +270,14 @@ func append_history(int $count, str $filename) int {
     my int $result = 0;
     __C__ {
         int n = (int)strada_to_int(count);
-        const char *fn = strada_to_str(filename);
+        char *fn = strada_to_str(filename);
 #ifdef READLINE_IS_LIBEDIT
         /* libedit doesn't have append_history, use write_history instead */
         int ret = write_history(fn);
 #else
         int ret = append_history(n, fn);
 #endif
+        free(fn);
         result = strada_new_int(ret == 0 ? 1 : 0);
     }
     return $result;
@@ -279,9 +287,11 @@ func append_history(int $count, str $filename) int {
 func set_variable(str $name, str $value) int {
     my int $result = 0;
     __C__ {
-        const char *n = strada_to_str(name);
-        const char *v = strada_to_str(value);
+        char *n = strada_to_str(name);
+        char *v = strada_to_str(value);
         int ret = rl_variable_bind(n, v);
+        free(n);
+        free(v);
         result = strada_new_int(ret == 0 ? 1 : 0);
     }
     return $result;

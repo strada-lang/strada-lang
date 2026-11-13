@@ -53,6 +53,7 @@ func new() scalar {
     $self{"watchers"} = {};      # fd -> { mask, subs => [ {mask, cb, id} ... ] }
     $self{"timers"} = [];        # [ { at, cb, id, dead } ... ]
     $self{"timer_by_id"} = {};   # id -> timer hashref (including while in @due)
+    $self{"_coros"} = {};        # active coro handle -> 1
     $self{"next_id"} = 1;
     $self{"running"} = 0;
     $self{"ntasks"} = 0;
@@ -66,6 +67,13 @@ func close(scalar $self) void {
     $self->{"watchers"} = {};
     $self->{"timers"} = [];
     $self->{"timer_by_id"} = {};
+    if (defined($self->{"_coros"})) {
+        foreach my str $ck (keys(%{$self->{"_coros"}})) {
+            core::coro_free($ck + 0);
+        }
+        $self->{"_coros"} = {};
+    }
+    $self->{"ntasks"} = 0;
     if (defined($self->{"epfd"}) && $self->{"epfd"} >= 0) {
         core::close_fd($self->{"epfd"});
         $self->{"epfd"} = 0 - 1;
@@ -73,26 +81,7 @@ func close(scalar $self) void {
 }
 
 func DESTROY(scalar $self) void {
-    __C__ {
-        if (self && !STRADA_IS_TAGGED_INT(self)) {
-            StradaHash *hv = NULL;
-            if (self->type == STRADA_REF && self->value.rv && !STRADA_IS_TAGGED_INT(self->value.rv) && self->value.rv->type == STRADA_HASH) {
-                hv = self->value.rv->value.hv;
-            } else if (self->type == STRADA_HASH) {
-                hv = self->value.hv;
-            }
-            if (hv) {
-                StradaValue *ep = strada_hash_get(hv, "epfd");
-                if (ep) {
-                    int fd = (int)strada_to_int(ep);
-                    if (fd >= 0) {
-                        close(fd);
-                        strada_hash_set_take(hv, "epfd", strada_new_int(-1));
-                    }
-                }
-            }
-        }
-    }
+    Async::Loop::close($self);
 }
 
 # Subscribe to fd readiness. $cb->($fd, $mask) per event. Returns a
@@ -193,6 +182,7 @@ func stop(scalar $self) void {
 # exception in the task is contained at the task boundary and reported.
 func spawn(scalar $self, scalar $closure) void {
     my int $coro = core::coro_create($closure);
+    $self->{"_coros"}->{$coro} = 1;
     $self->{"ntasks"} = $self->{"ntasks"} + 1;
     advance_task($self, $coro);
 }
@@ -210,24 +200,29 @@ private func advance_task(scalar $self, int $coro) void {
                 warn("[Async::Loop] task died: " . $err . "\n");
             }
         }
+        delete($self->{"_coros"}->{$coro});
         core::coro_free($coro);
         $self->{"ntasks"} = $self->{"ntasks"} - 1;
         return;
     }
-    # Suspended: wire up its wake-up sources.
+    # Suspended: wire up its wake-up sources. Use a weakened $self reference
+    # so watcher/timer closures never anchor the loop in a ref cycle.
     my int $wfd = core::coro_wait_fd($coro);
     my str $wmask = core::coro_wait_mask($coro);
     my int $wtimeout = core::coro_wait_timeout($coro);
 
     my scalar $woken = { "done" => 0, "sub" => 0, "timer" => 0 };
+    my scalar $self_w = $self;
+    core::weaken($self_w);
 
     if ($wfd >= 0) {
         $woken->{"sub"} = watch($self, $wfd, $wmask, fn (int $fd, str $mask) {
             if ($woken->{"done"} == 1) { return; }
             $woken->{"done"} = 1;
-            unwatch_sub($self, $fd, $woken->{"sub"});
-            if ($woken->{"timer"} > 0) { timer_cancel($self, $woken->{"timer"}); }
-            advance_task($self, $coro);
+            if (!defined($self_w)) { return; }
+            unwatch_sub($self_w, $fd, $woken->{"sub"});
+            if ($woken->{"timer"} > 0) { timer_cancel($self_w, $woken->{"timer"}); }
+            advance_task($self_w, $coro);
         });
     }
     if ($wtimeout > 0 || $wfd < 0) {
@@ -235,8 +230,9 @@ private func advance_task(scalar $self, int $coro) void {
         $woken->{"timer"} = timer_after($self, $ms, fn () {
             if ($woken->{"done"} == 1) { return; }
             $woken->{"done"} = 1;
-            if ($wfd >= 0) { unwatch_sub($self, $wfd, $woken->{"sub"}); }
-            advance_task($self, $coro);
+            if (!defined($self_w)) { return; }
+            if ($wfd >= 0) { unwatch_sub($self_w, $wfd, $woken->{"sub"}); }
+            advance_task($self_w, $coro);
         });
     }
 }
@@ -350,13 +346,31 @@ private func fire_due_timers(scalar $self) void {
         }
     }
     $self->{"timers"} = \@keep;
-    foreach my scalar $t (@due) {
+    my int $ndue = size(@due);
+    my int $di = 0;
+    while ($di < $ndue) {
+        my scalar $t = $due[$di];
         delete($by_id->{$t->{"id"}});
+        $di = $di + 1;
         if ($t->{"dead"} == 1) {
             next;
         }
         my scalar $cb = $t->{"cb"};
-        $cb->();
+        try {
+            $cb->();
+        } catch ($e) {
+            my int $rem = $di;
+            while ($rem < $ndue) {
+                my scalar $rt = $due[$rem];
+                if ($rt->{"dead"} == 0) {
+                    push(@{$self->{"timers"}}, $rt);
+                } else {
+                    delete($by_id->{$rt->{"id"}});
+                }
+                $rem = $rem + 1;
+            }
+            throw $e;
+        }
     }
 }
 

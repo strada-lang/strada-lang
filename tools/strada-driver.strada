@@ -747,9 +747,66 @@ func build_gcc_flags() array {
     }
     if ($OPT_LEVEL eq "3" || $OPT_LEVEL eq "fast") { @f = (@f, "-march=native"); }
     if ($DEBUG_SYMBOLS == 1 || $C_DEBUG_SYMBOLS == 1) { @f = (@f, "-g"); }
-    my int $d = 0;
-    while ($d < size(@PP_DEFINES)) { @f = (@f, "-D" . $PP_DEFINES[$d]); $d = $d + 1; }
     return @f;
+}
+
+func format_pp_c_defines(int $feature_macros) str {
+    if (size(@PP_DEFINES) == 0) { return ""; }
+    my str $defs = "";
+    my int $di = 0;
+    while ($di < size(@PP_DEFINES)) {
+        my str $d = $PP_DEFINES[$di];
+        my int $eq = index($d, "=");
+        my str $name = ($eq >= 0) ? substr($d, 0, $eq) : $d;
+        my str $val = ($eq >= 0) ? substr($d, $eq + 1, length($d) - $eq - 1) : "1";
+        if ($name =~ /^[A-Za-z_][A-Za-z0-9_]*$/ && index($val, "\n") < 0 && index($val, "\r") < 0) {
+            my int $is_feat = (substr($name, 0, 1) eq "_") ? 1 : 0;
+            if ($is_feat == $feature_macros) {
+                $defs = $defs . "#ifndef " . $name . "\n#define " . $name . " " . $val . "\n#endif\n";
+            }
+        }
+        $di = $di + 1;
+    }
+    return $defs;
+}
+
+func inject_c_defines(str $cfile) void {
+    my str $feat_defs = format_pp_c_defines(1);
+    my str $user_defs = format_pp_c_defines(0);
+    if (length($feat_defs) == 0 && length($user_defs) == 0) { return; }
+    my str $content = core::slurp($cfile);
+    if (length($content) == 0) { return; }
+    my str $marker = "/* stradapp injected defines */\n";
+    if (index($content, $marker) >= 0) { return; }
+    my str $patched = $content;
+    if (length($user_defs) > 0) {
+        my str $hdr1 = "#include \"strada_runtime.h\"\n";
+        my str $hdr2 = "#include \"strada_runtime_tcc.h\"\n";
+        my str $target = $hdr1;
+        my int $pos = index($patched, $target);
+        if ($pos < 0) {
+            $target = $hdr2;
+            $pos = index($patched, $target);
+        }
+        if ($pos >= 0) {
+            my int $ins = $pos + length($target);
+            $patched = substr($patched, 0, $ins) . $marker . $user_defs
+                . substr($patched, $ins, length($patched) - $ins);
+        } else {
+            $patched = $marker . $user_defs . $patched;
+        }
+    }
+    if (length($feat_defs) > 0) {
+        $patched = "/* stradapp feature defines */\n" . $feat_defs . $patched;
+    }
+    core::spew($cfile, $patched);
+}
+
+func build_user_c_define_flags() array {
+    my array @df = ();
+    my int $di = 0;
+    while ($di < size(@PP_DEFINES)) { @df = (@df, "-D" . $PP_DEFINES[$di]); $di = $di + 1; }
+    return @df;
 }
 
 # ---------------------------------------------------------------------------
@@ -1020,22 +1077,23 @@ func main() int {
                     my str $stamp_path = $sdir . "/flags.stamp";
                     my str $stamp = join(" ", @CC) . "\n" . join(" ", @gcc_flags) . "\n"
                         . join(" ", @include_flags) . "\n"
+                        . join(" ", @PP_DEFINES) . "\n"
                         . core::file_mtime($RUNTIME_DIR . "/strada_runtime.h") . "\n"
                         . core::file_mtime($STRADAC) . "\n";
                     my int $stamp_ok = 0;
                     if (-f $stamp_path) {
                         if (core::slurp($stamp_path) eq $stamp) { $stamp_ok = 1; }
                     }
-                    if ($stamp_ok == 0) {
+                    if ($stamp_ok == 0 || size(@include_flags) > 0) {
                         my int $wi = 0;
-                        while ($wi <= 24) {
+                        while ($wi <= 64) {
                             my str $wtag = ($wi < 10) ? ("0" . $wi) : ("" . $wi);
                             core::unlink($sdir . "/shard_" . $wtag . ".o");
                             $wi = $wi + 1;
                         }
-                        core::spew($stamp_path, $stamp);
-                    } elsif (size(@include_flags) > 0) {
-                        core::unlink($sdir . "/shard_00.o");
+                        if ($stamp_ok == 0) {
+                            core::spew($stamp_path, $stamp);
+                        }
                     }
                     $ACTIVE_SHARD_DIR = $sdir;
                     @sc = (@sc, "--split-dir", $sdir);
@@ -1233,6 +1291,7 @@ func do_link(str $cfile, str $output, array @gcc_flags, array @include_flags,
                     my str $so_path = substr($sc_path, 0, length($sc_path) - 2) . ".o";
                     push(@sobjs, $so_path);
                     if (!(-f $so_path)) {
+                        inject_c_defines($sc_path);
                         push(@todo_srcs, $sc_path);
                         push(@todo_objs, $so_path);
                     }
@@ -1299,6 +1358,7 @@ func do_link(str $cfile, str $output, array @gcc_flags, array @include_flags,
             if (run_argv(@c2) != 0) { error("link failed"); }
         } else {
             # Split compile/link so ccache caches the generated-C compile.
+            inject_c_defines($cfile);
             my str $genobj = scratch_path_obj($cfile);
             my array @c1 = ();
             @c1 = (@c1, @CC);
@@ -1340,6 +1400,7 @@ func do_link(str $cfile, str $output, array @gcc_flags, array @include_flags,
         if ($MODULE_ONLY_MODE == 1) { @oextra = ("-fno-lto", "-fPIC"); }
         if ($TCC_MODE == 1) { warn("--tcc is not supported with --object; compiling with the C compiler"); }
         info("Compiling " . $cfile . " -> " . $output . " (object file)");
+        inject_c_defines($cfile);
         my array @cmd = ();
         @cmd = (@cmd, @CC);
         @cmd = (@cmd, "-c");
@@ -1373,6 +1434,7 @@ func do_link(str $cfile, str $output, array @gcc_flags, array @include_flags,
         my str $rtobj = $sldir . "/" . $outbase . "_runtime.o";
         @CLEANUP = (@CLEANUP, $objf, $rtobj);
         my array @extra_objs = ();
+        my array @user_c_defs = build_user_c_define_flags();
         my int $ci = 0;
         while ($ci < size(@EXTRA_C_FILES)) {
             my str $cf = $EXTRA_C_FILES[$ci];
@@ -1383,6 +1445,7 @@ func do_link(str $cfile, str $output, array @gcc_flags, array @include_flags,
             @cc1 = (@cc1, @CC);
             @cc1 = (@cc1, "-c");
             @cc1 = (@cc1, @gcc_flags);
+            @cc1 = (@cc1, @user_c_defs);
             @cc1 = (@cc1, @sl_fat);
             @cc1 = (@cc1, "-o");
             @cc1 = (@cc1, $on);
@@ -1394,6 +1457,7 @@ func do_link(str $cfile, str $output, array @gcc_flags, array @include_flags,
             $ci = $ci + 1;
         }
         info("Compiling " . $cfile . " -> " . $objf);
+        inject_c_defines($cfile);
         my array @cc2 = ();
         @cc2 = (@cc2, @CC);
         @cc2 = (@cc2, "-c");
@@ -1426,6 +1490,7 @@ func do_link(str $cfile, str $output, array @gcc_flags, array @include_flags,
         if ($TCC_MODE == 1) { warn("--tcc is not supported with --static; compiling with the C compiler"); }
         info("Compiling " . $cfile . " -> " . $output . " (static binary)");
         warn("Static binaries cannot use FFI/dynamic library loading (sys::dl_open, import_lib)");
+        inject_c_defines($cfile);
         my array @rt_flags = runtime_feature_flags();
         my array @cmd = ();
         @cmd = (@cmd, @CC);
@@ -1459,6 +1524,7 @@ func do_link(str $cfile, str $output, array @gcc_flags, array @include_flags,
         if ($TCC_MODE == 1) {
             link_exe_tcc($cfile, $output, $rdynamic, @include_flags, @link_flags, @extra_files, $skip_runtime);
         } elsif ($skip_runtime == 1) {
+            inject_c_defines($cfile);
             my array @cmd = ();
             @cmd = (@cmd, @CC);
             if (length($rdynamic) > 0) { @cmd = (@cmd, $rdynamic); }
@@ -1477,6 +1543,7 @@ func do_link(str $cfile, str $output, array @gcc_flags, array @include_flags,
             if (run_argv(@cmd) != 0) { error("C compilation failed"); }
         } else {
             # Split compile/link for ccache.
+            inject_c_defines($cfile);
             my str $genobj = scratch_path_obj($cfile);
             my array @c1 = ();
             @c1 = (@c1, @CC);
@@ -1550,14 +1617,13 @@ func tcc_compile_obj(str $cfile, int $pic, array @include_flags) str {
         }
     }
     core::spew($cfile, $content);
+    inject_c_defines($cfile);
     my str $tccobj = mkdtemp_tracked("/tmp/strada_tcc_XXXXXX") . "/o.o";
     @CLEANUP = (@CLEANUP, $tccobj);
     my array @cmd = ("tcc", "-c", $cfile);
     if ($pic == 1) { @cmd = (@cmd, "-fPIC"); }
     @cmd = (@cmd, "-I" . $RUNTIME_DIR);
     @cmd = (@cmd, @include_flags);
-    my int $di = 0;
-    while ($di < size(@PP_DEFINES)) { @cmd = (@cmd, "-D" . $PP_DEFINES[$di]); $di = $di + 1; }
     @cmd = (@cmd, "-o");
     @cmd = (@cmd, $tccobj);
     if (run_argv(@cmd) != 0) { error("tcc compilation failed"); }

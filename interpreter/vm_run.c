@@ -116,11 +116,7 @@ int main(int argc, char **argv) {
     VMValue result = vm_execute(vm, entry);
 
     /* Run END blocks (LIFO order) */
-    if (prog->end_count > 0) {
-        for (int i = prog->end_count - 1; i >= 0; i--) {
-            vm_execute(vm, prog->func_names[prog->end_blocks[i]]);
-        }
-    }
+    vm_run_end_blocks(vm);
 
     int exit_code = VM_IS_INT(result) ? (int)VM_INT_VAL(result) : 0;
 

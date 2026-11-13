@@ -1,0 +1,125 @@
+package CycleObj;
+
+func new(scalar $cb) scalar {
+    my hash %h = ("cb" => $cb);
+    return bless(\%h, "CycleObj");
+}
+
+package main;
+
+func make_self_cycle() void {
+    my scalar $f = undef;
+    $f = func () { return $f; };
+}
+
+func make_mutual_cycle() void {
+    my scalar $a = undef;
+    my scalar $b = undef;
+    $a = func () { return $b; };
+    $b = func () { return $a; };
+}
+
+func make_obj_closure_cycle() void {
+    my scalar $obj = CycleObj::new(undef);
+    my int $cap = 99;
+    $obj->{"cb"} = func () { return $obj->{"x"} // $cap; };
+}
+
+func make_shared_cell_cycle() void {
+    my scalar $shared = [1, 2, 3];
+    my scalar $c1 = func () { return $shared; };
+    my scalar $c2 = undef;
+    $c2 = func () { return [$c1, $c2]; };
+    $shared = [$c1, $c2];
+}
+
+func worker_sprintf_and_local() int {
+    our str $THR_G = "init";
+    local $THR_G = "temp";
+    my str $s = sprintf("tid=%s n=%04d", $THR_G, 42);
+    return length($s);
+}
+
+func variadic_throw(scalar ...@rest) int {
+    throw "v_err";
+}
+
+func destroy_throw_inner() void {
+    my scalar $x = bless({}, "ThrowOnDestroy");
+}
+
+package ThrowOnDestroy;
+func DESTROY(scalar $self) void {
+    throw "destroy_boom";
+}
+
+package main;
+
+func main() int {
+    # 1. Closure & closure-object cycles reclaimed by Cycle GC
+    my int $i = 0;
+    while ($i < 200) {
+        make_self_cycle();
+        make_mutual_cycle();
+        make_obj_closure_cycle();
+        make_shared_cell_cycle();
+        $i = $i + 1;
+    }
+    my int $freed = 0;
+    __C__ {
+        strada_gc_collect();
+        freed = strada_new_int((int64_t)strada_gc_objects_freed());
+    }
+    if ($freed < 200) {
+        say("FAIL gc_objects_freed=" . $freed);
+        return 1;
+    }
+
+    # 2. Worker threads using sprintf cache + local()
+    my int $t = 0;
+    while ($t < 10) {
+        my scalar $th = thread::create(\&worker_sprintf_and_local);
+        my int $res = thread::join($th);
+        if ($res <= 0) { return 1; }
+        $t = $t + 1;
+    }
+
+    # 3. Detached threads
+    my int $d = 0;
+    while ($d < 5) {
+        my scalar $th = thread::create(\&worker_sprintf_and_local);
+        thread::detach($th);
+        $d = $d + 1;
+    }
+    core::usleep(50000);
+
+    # 4. sort on non-array scalar + regex s/// capture + >16 arg variadic throw
+    my @sorted_scalar = sort("only_one");
+    if ($sorted_scalar[0] ne "only_one") { return 1; }
+    my str $txt = "foo 123 bar";
+    $txt =~ s/(\d+)/[$1]/;
+    $txt =~ s/(\w+)/$1/;
+    my scalar $vfn = \&variadic_throw;
+    try {
+        $vfn->(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20);
+    } catch ($e) {
+    }
+
+    # 5. Exception unwind from DESTROY
+    my int $dc = 0;
+    try {
+        destroy_throw_inner();
+    } catch ($e2) {
+        $dc = 1;
+    }
+    if ($dc != 1) { return 1; }
+
+    # 6. $$ref overwriting closures & hashes cleanly
+    my scalar $v = {"k" => [1, 2, 3]};
+    my scalar $r = \$v;
+    $$r = func () { return 7; };
+    $$r = "plain";
+
+    say("OK");
+    return 0;
+}

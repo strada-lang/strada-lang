@@ -688,6 +688,8 @@ void strada_inherit_from(const char *parent);
 void strada_method_register(const char *package, const char *name, StradaMethod func);
 void strada_register_method(const char *package, const char *name, void *func);
 void strada_modifier_register(const char *package, const char *method, int type, StradaMethod func);
+void strada_oop_clear_modifiers(const char *package);
+void strada_oop_reset_package(const char *package);
 StradaValue* strada_method_call(StradaValue *obj, const char *method, StradaValue *args);
 StradaValue* strada_method_call_ph(StradaValue *obj, const char *method, StradaValue *args, unsigned int method_hash);
 /* Per-call-site monomorphic dispatch cache; see strada_runtime.h. Must stay
@@ -746,6 +748,7 @@ void strada_free_hash(StradaHash *hv);
 /* Weak references */
 void strada_weaken(StradaValue **ref_ptr);
 void strada_weaken_hv_entry(StradaHash *hv, const char *key);
+void strada_array_weaken_elem(StradaValue *arr_sv, int64_t idx);
 int strada_isweak(StradaValue *ref);
 void strada_weak_registry_init(void);
 void strada_weak_registry_remove_target(StradaValue *target);
@@ -1472,7 +1475,10 @@ void strada_memprof_report(void);
  * Global Variable Registry
  * ============================================================ */
 void strada_global_set(StradaValue *name, StradaValue *val);
+void strada_global_set_cstr(const char *name, StradaValue *val);
 StradaValue* strada_global_get(StradaValue *name);
+StradaValue* strada_global_get_cstr(const char *name);
+void strada_global_weaken_cstr(const char *name);
 int strada_global_exists(StradaValue *name);
 void strada_global_delete(StradaValue *name);
 StradaValue* strada_global_keys(void);
@@ -1932,6 +1938,7 @@ extern int (*strada_method_can_hook)(StradaValue *obj, const char *method);
 /* break_self_cycle is a static-inline early-out wrapper in the main header;
    under TCC just call the real runtime function (defined in the tcc runtime). */
 #define strada_break_self_cycle strada_break_self_cycle_impl
+void strada_rc_trace(StradaValue *sv, const char *op, void *ra);
 
 
 /* ---- Event loop support (Async::Loop): epoll/eventfd primitives,

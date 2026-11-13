@@ -57,6 +57,7 @@
 #define NI_C_BLOCK       119
 #define NI_SPREAD        120
 #define NI_CATCH_CLAUSE  121
+#define NI_READLINE      124
 #define NI_DESTRUCTURE   125
 #define NI_DO_WHILE_STMT 126
 #define NI_CONST_DECL    127
@@ -169,6 +170,7 @@ typedef struct LoopCtx {
     size_t continue_target;     /* address to jump to for 'next' (set after body) */
     size_t redo_target;         /* address to jump to for 'redo' (body start, after condition) */
     const char *label;          /* label name or NULL */
+    int local_restore_depth;
     struct LoopCtx *parent;
 } LoopCtx;
 
@@ -213,6 +215,19 @@ static int is_const_var(const char *name) {
     for (int i = 0; i < g_const_count; i++)
         if (strcmp(g_const_vars[i], name) == 0) return 1;
     return 0;
+}
+
+static void reset_compiler_globals(void) {
+    for (int i = 0; i < g_our_count; i++) {
+        free(g_our_vars[i]);
+        g_our_vars[i] = NULL;
+    }
+    g_our_count = 0;
+    for (int i = 0; i < g_const_count; i++) {
+        free(g_const_vars[i]);
+        g_const_vars[i] = NULL;
+    }
+    g_const_count = 0;
 }
 
 typedef struct TryCtx {
@@ -331,6 +346,18 @@ static int ctx_add_capture(CompCtx *ctx, const char *name, int outer_slot) {
     ctx->captures[idx].outer_slot = outer_slot;
     ctx->capture_count++;
     return idx;
+}
+
+static int ctx_resolve_capture(CompCtx *ctx, const char *name, char sigil) {
+    int cap = ctx_find_capture(ctx, name);
+    if (cap >= 0) return cap;
+    if (!ctx->is_closure || !ctx->parent_ctx) return -1;
+    CompCtx *parent = (CompCtx*)ctx->parent_ctx;
+    int parent_slot = ctx_find_local_sigil(parent, name, sigil);
+    if (parent_slot >= 0) return ctx_add_capture(ctx, name, parent_slot);
+    int pcap = ctx_resolve_capture(parent, name, sigil);
+    if (pcap >= 0) return ctx_add_capture(ctx, name, -1);
+    return -1;
 }
 
 static size_t emit_patch_u16(CompCtx *ctx) {
@@ -724,46 +751,13 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
             vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
         } else {
-            /* Try capture */
-            int cap = ctx_find_capture(ctx, name);
+            /* Try capture (including transitive multi-level parent captures) */
+            int cap = ctx_resolve_capture(ctx, name, sigil[0]);
             if (cap >= 0) {
                 vm_chunk_emit(ctx->chunk, OP_LOAD_CAPTURE);
                 vm_chunk_emit_u16(ctx->chunk, (uint16_t)cap);
-            } else if (ctx->is_closure && ctx->parent_ctx) {
-                /* Auto-capture from parent scope */
-                CompCtx *parent = (CompCtx*)ctx->parent_ctx;
-                int parent_slot = ctx_find_local_sigil(parent, name, sigil[0]);
-                if (parent_slot >= 0) {
-                    cap = ctx_add_capture(ctx, name, parent_slot);
-                    vm_chunk_emit(ctx->chunk, OP_LOAD_CAPTURE);
-                    vm_chunk_emit_u16(ctx->chunk, (uint16_t)cap);
-                } else {
-                    /* Try parent's captures */
-                    int pcap = ctx_find_capture(parent, name);
-                    if (pcap >= 0) {
-                        cap = ctx_add_capture(ctx, name, -1);
-                        vm_chunk_emit(ctx->chunk, OP_LOAD_CAPTURE);
-                        vm_chunk_emit_u16(ctx->chunk, (uint16_t)cap);
-                    } else if (is_our_var(name) || is_const_var(name)) {
-                        /* our variable or const inside closure */
-                        size_t key_idx = vm_chunk_add_str_const(ctx->chunk, name);
-                        vm_chunk_emit(ctx->chunk, OP_LOAD_GLOBAL);
-                        vm_chunk_emit_u16(ctx->chunk, (uint16_t)key_idx);
-                    } else if (strcmp(name, "ARGV") == 0) {
-                        vm_chunk_emit(ctx->chunk, OP_BUILTIN);
-                        vm_chunk_emit_u16(ctx->chunk, BUILTIN_CORE_ARGV);
-                        vm_chunk_emit(ctx->chunk, 0);
-                    } else if (strcmp(name, "ARGC") == 0) {
-                        vm_chunk_emit(ctx->chunk, OP_BUILTIN);
-                        vm_chunk_emit_u16(ctx->chunk, BUILTIN_CORE_ARGV);
-                        vm_chunk_emit(ctx->chunk, 0);
-                        vm_chunk_emit(ctx->chunk, OP_ARRAY_SIZE);
-                    } else {
-                        vm_chunk_emit(ctx->chunk, OP_PUSH_UNDEF);
-                    }
-                }
             } else if (is_our_var(name) || is_const_var(name)) {
-                /* our variable or const — load from global registry */
+                /* our variable or const inside closure / function */
                 size_t key_idx = vm_chunk_add_str_const(ctx->chunk, name);
                 vm_chunk_emit(ctx->chunk, OP_LOAD_GLOBAL);
                 vm_chunk_emit_u16(ctx->chunk, (uint16_t)key_idx);
@@ -1194,10 +1188,10 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                 vm_chunk_emit_u16(ctx->chunk, (uint16_t)outer_slot);
                 outer_slots[i] = outer_slot;
             } else {
-                /* Try capture from parent */
+                /* Try capture from parent (pass raw VMCell so multi-level closures share mutation) */
                 int cap = ctx_find_capture(ctx, inner.captures[i].name);
                 if (cap >= 0) {
-                    vm_chunk_emit(ctx->chunk, OP_LOAD_CAPTURE);
+                    vm_chunk_emit(ctx->chunk, OP_LOAD_CAPTURE_CELL);
                     vm_chunk_emit_u16(ctx->chunk, (uint16_t)cap);
                     outer_slots[i] = 0xFFFF; /* no outer local to store back to */
                 } else {
@@ -1238,6 +1232,31 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
         int num = (int)ast_int(node, "number");
         vm_chunk_emit(ctx->chunk, OP_LOAD_CAPTURE_VAR);
         vm_chunk_emit(ctx->chunk, (uint8_t)num);
+        break;
+    }
+
+    case NI_READLINE: {
+        const char *name = ast_str(node, "varname");
+        int slot = ctx_find_local_sigil(ctx, name, '$');
+        if (slot >= 0) {
+            vm_chunk_emit(ctx->chunk, OP_LOAD_LOCAL);
+            vm_chunk_emit_u16(ctx->chunk, (uint16_t)slot);
+        } else {
+            int cap = ctx_resolve_capture(ctx, name, '$');
+            if (cap >= 0) {
+                vm_chunk_emit(ctx->chunk, OP_LOAD_CAPTURE);
+                vm_chunk_emit_u16(ctx->chunk, (uint16_t)cap);
+            } else if (is_our_var(name) || is_const_var(name)) {
+                size_t key_idx = vm_chunk_add_str_const(ctx->chunk, name);
+                vm_chunk_emit(ctx->chunk, OP_LOAD_GLOBAL);
+                vm_chunk_emit_u16(ctx->chunk, (uint16_t)key_idx);
+            } else {
+                vm_chunk_emit(ctx->chunk, OP_PUSH_UNDEF);
+            }
+        }
+        vm_chunk_emit(ctx->chunk, OP_BUILTIN);
+        vm_chunk_emit_u16(ctx->chunk, BUILTIN_CORE_READLINE);
+        vm_chunk_emit(ctx->chunk, 1);
         break;
     }
 
@@ -1746,6 +1765,8 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
 
             int bid = -1;
             if (strcmp(fn, "open") == 0) bid = BUILTIN_CORE_OPEN;
+            else if (strcmp(fn, "open_str") == 0) bid = BUILTIN_CORE_OPEN_STR;
+            else if (strcmp(fn, "str_from_fh") == 0) bid = BUILTIN_CORE_STR_FROM_FH;
             else if (strcmp(fn, "close") == 0) bid = BUILTIN_CORE_CLOSE;
             else if (strcmp(fn, "readline") == 0) bid = BUILTIN_CORE_READLINE;
             else if (strcmp(fn, "eof") == 0) bid = BUILTIN_CORE_EOF;
@@ -2420,15 +2441,8 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             int slot = ctx_find_local_sigil(ctx, vname, vsigil[0]);
 
             if (slot < 0) {
-                /* Try capture */
-                int cap = ctx_find_capture(ctx, vname);
-                if (cap < 0 && ctx->is_closure && ctx->parent_ctx) {
-                    CompCtx *parent = (CompCtx*)ctx->parent_ctx;
-                    int parent_slot = ctx_find_local_sigil(parent, vname, vsigil[0]);
-                    if (parent_slot >= 0) {
-                        cap = ctx_add_capture(ctx, vname, parent_slot);
-                    }
-                }
+                /* Try capture (including transitive parent captures) */
+                int cap = ctx_resolve_capture(ctx, vname, vsigil[0]);
                 if (cap >= 0) {
                     int cop = compound_op_to_opcode(op);
                     if (is_shortcircuit_assign(op)) {
@@ -3510,6 +3524,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
     case NI_WHILE_STMT: {
         LoopCtx lctx = {0};
         lctx.parent = ctx->loop_ctx;
+        lctx.local_restore_depth = ctx->local_restore_count;
         const char *wlabel = ast_str(node, "label");
         if (wlabel[0]) lctx.label = wlabel;
         ctx->loop_ctx = &lctx;
@@ -3548,6 +3563,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
     case NI_DO_WHILE_STMT: {
         LoopCtx lctx = {0};
         lctx.parent = ctx->loop_ctx;
+        lctx.local_restore_depth = ctx->local_restore_count;
         ctx->loop_ctx = &lctx;
 
         size_t loop_top = ctx->chunk->code_len;
@@ -3578,6 +3594,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
 
         LoopCtx lctx = {0};
         lctx.parent = ctx->loop_ctx;
+        lctx.local_restore_depth = ctx->local_restore_count;
         const char *flabel = ast_str(node, "label");
         if (flabel[0]) lctx.label = flabel;
         ctx->loop_ctx = &lctx;
@@ -3649,6 +3666,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
 
         LoopCtx lctx = {0};
         lctx.parent = ctx->loop_ctx;
+        lctx.local_restore_depth = ctx->local_restore_count;
         const char *felabel = ast_str(node, "label");
         if (felabel[0]) lctx.label = felabel;
         ctx->loop_ctx = &lctx;
@@ -3711,6 +3729,11 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         }
         if (target) {
             emit_try_unwind_for_loop(ctx, target);
+            for (int _li = ctx->local_restore_count - 1; _li >= target->local_restore_depth; _li--) {
+                size_t kidx = vm_chunk_add_str_const(ctx->chunk, ctx->local_restores[_li]);
+                vm_chunk_emit(ctx->chunk, OP_RESTORE_GLOBAL);
+                vm_chunk_emit_u16(ctx->chunk, (uint16_t)kidx);
+            }
             vm_chunk_emit(ctx->chunk, OP_JMP);
             if (target->break_count < 64) {
                 target->break_patches[target->break_count++] = emit_patch_u16(ctx);
@@ -3731,6 +3754,11 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
         }
         if (target) {
             emit_try_unwind_for_loop(ctx, target);
+            for (int _li = ctx->local_restore_count - 1; _li >= target->local_restore_depth; _li--) {
+                size_t kidx = vm_chunk_add_str_const(ctx->chunk, ctx->local_restores[_li]);
+                vm_chunk_emit(ctx->chunk, OP_RESTORE_GLOBAL);
+                vm_chunk_emit_u16(ctx->chunk, (uint16_t)kidx);
+            }
             vm_chunk_emit(ctx->chunk, OP_JMP);
             /* Forward-patch to continue_target (set after body compilation) */
             if (target->next_count < 64) {
@@ -3745,6 +3773,11 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
     case NI_REDO: {
         if (ctx->loop_ctx) {
             emit_try_unwind_for_loop(ctx, ctx->loop_ctx);
+            for (int _li = ctx->local_restore_count - 1; _li >= ctx->loop_ctx->local_restore_depth; _li--) {
+                size_t kidx = vm_chunk_add_str_const(ctx->chunk, ctx->local_restores[_li]);
+                vm_chunk_emit(ctx->chunk, OP_RESTORE_GLOBAL);
+                vm_chunk_emit_u16(ctx->chunk, (uint16_t)kidx);
+            }
             vm_chunk_emit(ctx->chunk, OP_JMP);
             vm_chunk_emit_u16(ctx->chunk, (uint16_t)ctx->loop_ctx->redo_target);
         }
@@ -3776,6 +3809,7 @@ static void compile_stmt(CompCtx *ctx, StradaValue *node) {
                 /* Create a "pending label" by wrapping in a loop context */
                 LoopCtx labeled_ctx = {0};
                 labeled_ctx.parent = ctx->loop_ctx;
+                labeled_ctx.local_restore_depth = ctx->local_restore_count;
                 labeled_ctx.label = label;
                 /* Record loop top for 'next LABEL' — same as the start of the inner loop */
                 labeled_ctx.redo_target = ctx->chunk->code_len;
@@ -4188,8 +4222,18 @@ static void compile_block(CompCtx *ctx, StradaValue *block) {
     StradaValue *stmts = ast_get(block, "statements");
     int count = (int)ast_int(block, "statement_count");
 
+    int saved_lr = ctx->local_restore_count;
     for (int i = 0; i < count; i++) {
         compile_stmt(ctx, ast_arr_get(stmts, i));
+    }
+    while (ctx->local_restore_count > saved_lr) {
+        ctx->local_restore_count--;
+        char *lr_name = ctx->local_restores[ctx->local_restore_count];
+        ctx->local_restores[ctx->local_restore_count] = NULL;
+        size_t key_idx = vm_chunk_add_str_const(ctx->chunk, lr_name);
+        vm_chunk_emit(ctx->chunk, OP_RESTORE_GLOBAL);
+        vm_chunk_emit_u16(ctx->chunk, (uint16_t)key_idx);
+        free(lr_name);
     }
 }
 
@@ -4203,7 +4247,17 @@ static int compile_function(VMProgram *prog, StradaValue *func_node) {
     if (existing_idx >= 0) {
         chunk = &prog->funcs[existing_idx];
         /* Reset the chunk for recompilation */
-        chunk->code_len = 0;
+        char *saved_name = chunk->name;
+        free(chunk->code);
+        free(chunk->int_consts);
+        for (size_t ci = 0; ci < chunk->str_const_count; ci++) free(chunk->str_consts[ci]);
+        free(chunk->str_consts);
+        for (int ci = 0; ci < chunk->capture_count; ci++) free(chunk->capture_names[ci]);
+        free(chunk->capture_names);
+        memset(chunk, 0, sizeof(VMChunk));
+        chunk->name = saved_name;
+        chunk->code_cap = 256;
+        chunk->code = malloc(chunk->code_cap);
     } else {
         chunk = vm_program_add_func(prog, name);
     }
@@ -4350,13 +4404,14 @@ static void process_oop_decls(VMProgram *prog, StradaValue *ast) {
 
 /* ===== import_lib processing ===== */
 
-static void process_import_libs(VMProgram *prog, StradaValue *ast) {
+static int process_import_libs(VMProgram *prog, StradaValue *ast) {
     StradaValue *import_libs = ast_get(ast, "import_libs");
     int import_count = (int)ast_int(ast, "import_lib_count");
-    if (import_count <= 0 || !import_libs) return;
+    int errors = 0;
+    if (import_count <= 0 || !import_libs) return 0;
 
     import_libs = ast_deref(import_libs);
-    if (!import_libs || STRADA_IS_TAGGED_INT(import_libs) || import_libs->type != STRADA_ARRAY) return;
+    if (!import_libs || STRADA_IS_TAGGED_INT(import_libs) || import_libs->type != STRADA_ARRAY) return 0;
 
     for (int li = 0; li < import_count; li++) {
         StradaValue *lib_info = ast_deref(strada_array_get(import_libs->value.av, li));
@@ -4370,14 +4425,42 @@ static void process_import_libs(VMProgram *prog, StradaValue *ast) {
         void *dl = dlopen(so_path, RTLD_NOW | RTLD_GLOBAL);
         if (!dl) {
             fprintf(stderr, "VM: failed to load %s: %s\n", so_path, dlerror());
+            errors++;
             continue;
         }
 
-        /* Call OOP init if present */
-        char oop_init_name[256];
-        snprintf(oop_init_name, sizeof(oop_init_name), "__%s_oop_init", lib_name);
-        void (*oop_init)(void) = dlsym(dl, oop_init_name);
-        if (oop_init) oop_init();
+        if (prog->dl_handle_count >= prog->dl_handle_cap) {
+            int new_cap = prog->dl_handle_cap ? prog->dl_handle_cap * 2 : 8;
+            void **new_handles = realloc(prog->dl_handles, (size_t)new_cap * sizeof(void *));
+            if (new_handles) {
+                prog->dl_handles = new_handles;
+                prog->dl_handle_cap = new_cap;
+            }
+        }
+        if (prog->dl_handle_count < prog->dl_handle_cap) {
+            prog->dl_handles[prog->dl_handle_count++] = dl;
+        }
+
+        /* Call OOP init functions if present (with fallback to __<lib_name>_oop_init) */
+        StradaValue *oop_arr = ast_deref(ast_get(lib_info, "oop_init_funcs"));
+        int ran_oop = 0;
+        if (oop_arr && !STRADA_IS_TAGGED_INT(oop_arr) && oop_arr->type == STRADA_ARRAY) {
+            for (size_t oi = 0; oi < oop_arr->value.av->size; oi++) {
+                StradaValue *fn_sv = ast_deref(strada_array_get(oop_arr->value.av, oi));
+                if (fn_sv && !STRADA_IS_TAGGED_INT(fn_sv) && fn_sv->type == STRADA_STR &&
+                    fn_sv->value.pv && fn_sv->value.pv[0]) {
+                    void (*oop_init)(void) = dlsym(dl, fn_sv->value.pv);
+                    if (oop_init) oop_init();
+                    ran_oop = 1;
+                }
+            }
+        }
+        if (!ran_oop && lib_name[0]) {
+            char oop_init_name[256];
+            snprintf(oop_init_name, sizeof(oop_init_name), "__%s_oop_init", lib_name);
+            void (*oop_init)(void) = dlsym(dl, oop_init_name);
+            if (oop_init) oop_init();
+        }
 
         /* Get exported functions from AST metadata */
         StradaValue *fn_arr = ast_get(lib_info, "functions");
@@ -4414,7 +4497,11 @@ static void process_import_libs(VMProgram *prog, StradaValue *ast) {
                 sym = dlsym(dl, sym_name);
             }
             /* fprintf(stderr, "DBG: fn=%s sym=%p\n", fn_name, sym); */
-            if (!sym) continue;
+            if (!sym) {
+                fprintf(stderr, "VM: missing native symbol '%s' in %s\n", fn_name, so_path);
+                errors++;
+                continue;
+            }
 
             /* Register the native function */
             if (prog->native_count >= prog->native_cap) {
@@ -4427,8 +4514,12 @@ static void process_import_libs(VMProgram *prog, StradaValue *ast) {
             ne->fn = NULL; /* we use sym directly */
             ne->dl_handle = dl;
             ne->sym = sym;
+            ne->param_count = (int)ast_int(fn_info, "param_count");
+            ne->is_variadic = (int)ast_int(fn_info, "is_variadic");
+            ne->return_type = (int)ast_int(fn_info, "return_type");
         }
     }
+    return errors;
 }
 
 /* Find a native function by name */
@@ -4542,7 +4633,10 @@ static void synthesize_modifier_wrappers(VMProgram *prog) {
 }
 
 VMProgram *vm_compile_program(StradaValue *ast) {
+    reset_compiler_globals();
     VMProgram *prog = vm_program_new();
+    VM *saved_vm = NULL;
+    vm_gc_set_compiling_prog(prog, &saved_vm);
 
     StradaValue *funcs = ast_get(ast, "functions");
     int func_count = (int)ast_int(ast, "function_count");
@@ -4553,7 +4647,7 @@ VMProgram *vm_compile_program(StradaValue *ast) {
 
     /* Process import_lib declarations — must be done before function compilation
      * so that calls to imported functions can be resolved */
-    process_import_libs(prog, ast);
+    total_errors += process_import_libs(prog, ast);
 
     /* Process global (our) declarations */
     StradaValue *globals = ast_get(ast, "globals");
@@ -4683,6 +4777,8 @@ VMProgram *vm_compile_program(StradaValue *ast) {
 
     if (total_errors > 0) {
         fprintf(stderr, "%d error%s during compilation\n", total_errors, total_errors > 1 ? "s" : "");
+        vm_gc_set_compiling_prog(NULL, &saved_vm);
+        reset_compiler_globals();
         vm_program_free(prog);
         return NULL;
     }
@@ -4799,5 +4895,7 @@ VMProgram *vm_compile_program(StradaValue *ast) {
         }
     }
 
+    vm_gc_set_compiling_prog(NULL, &saved_vm);
+    reset_compiler_globals();
     return prog;
 }

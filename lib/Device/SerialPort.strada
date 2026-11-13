@@ -313,9 +313,61 @@ func new(str $device) scalar {
     return bless(\%self, "SerialPort");
 }
 
+__C__ {
+#include <termios.h>
+}
+
+private func apply_settings(scalar $self) int {
+    if ($self->{"is_open"} == 0 || $self->{"fd"} < 0) {
+        return 0;
+    }
+    my int $fd = $self->{"fd"};
+    my str $hs = $self->{"handshake"};
+    my int $to_ms = $self->{"read_timeout"};
+    my int $hs_mode = 0;
+    if ($hs eq "rts") { $hs_mode = 1; }
+    elsif ($hs eq "xoff") { $hs_mode = 2; }
+    my int $rc = 0;
+    __C__ {
+        int sfd = (int)strada_to_int(fd);
+        int hmode = (int)strada_to_int(hs_mode);
+        int rto = (int)strada_to_int(to_ms);
+        struct termios t;
+        if (tcgetattr(sfd, &t) == 0) {
+#ifdef CRTSCTS
+            if (hmode == 1) {
+                t.c_cflag |= CRTSCTS;
+            } else {
+                t.c_cflag &= ~CRTSCTS;
+            }
+#endif
+            if (hmode == 2) {
+                t.c_iflag |= (IXON | IXOFF);
+            } else {
+                t.c_iflag &= ~(IXON | IXOFF);
+            }
+            int vtime = 0;
+            if (rto > 0) {
+                vtime = (rto + 99) / 100;
+                if (vtime > 255) vtime = 255;
+            }
+            t.c_cc[VMIN] = 0;
+            t.c_cc[VTIME] = (cc_t)vtime;
+            if (tcsetattr(sfd, TCSANOW, &t) == 0) {
+                strada_decref(rc);
+                rc = strada_new_int(1);
+            }
+        }
+    }
+    return $rc;
+}
+
 # Open the serial port with current settings
 # Returns: 1 on success, 0 on failure
 func open(scalar $self) int {
+    if ($self->{"is_open"} == 1 || $self->{"fd"} >= 0) {
+        SerialPort::close($self);
+    }
     my str $device = $self->{"device"};
     my int $baud = $self->{"baudrate"};
 
@@ -344,6 +396,7 @@ func open(scalar $self) int {
 
     $self->{"fd"} = $fd;
     $self->{"is_open"} = 1;
+    SerialPort::apply_settings($self);
     return 1;
 }
 
@@ -549,7 +602,7 @@ func command(scalar $self, str $cmd, int $timeout_ms) str {
 
     # Small delay for device to respond
     if ($timeout_ms > 0) {
-        core::usleep($timeout_ms * 1000);
+        core::nanosleep($timeout_ms * 1000000);
     }
 
     # Read response

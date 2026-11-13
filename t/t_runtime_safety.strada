@@ -1,0 +1,116 @@
+package RtsObj;
+has ro int $x = 0;
+func new(int $v = 0) scalar {
+    my hash %h = ("x" => $v);
+    return bless(\%h, "RtsObj");
+}
+func ping(scalar $self) int {
+    return $self->{"x"} + 1;
+}
+
+package main;
+
+func check_shifted_isa(scalar $o, str $drop, str $cls) int {
+    my @args = ($drop, $cls);
+    shift(@args);
+    return $o->isa(@args);
+}
+
+func check_shifted_can(scalar $o, str $drop, str $meth) int {
+    my @args = ($drop, $meth);
+    shift(@args);
+    return $o->can(@args);
+}
+
+func variadic_throw(scalar ...@rest) int {
+    if (scalar(@rest) > 20) {
+        throw "boom:" . $rest[20];
+    }
+    return scalar(@rest);
+}
+
+func main() int {
+    my scalar $o = RtsObj::new(10);
+
+    # 1. isa / can on non-string args (no SIGSEGV) + shifted arrays (av->head > 0)
+    if ($o->isa(123) != 0) { say("FAIL isa(123)"); return 1; }
+    if ($o->can(456) != 0) { say("FAIL can(456)"); return 1; }
+    if ($o->isa("RtsObj") != 1) { say("FAIL isa(RtsObj)"); return 1; }
+    if ($o->can("ping") != 1) { say("FAIL can(ping)"); return 1; }
+    my @sargs = ("skip", "RtsObj");
+    shift(@sargs);
+    if ($o->isa(...@sargs) != 1) { say("FAIL shifted isa"); return 1; }
+    my @cargs = ("skip", "ping");
+    shift(@cargs);
+    if ($o->can(...@cargs) != 1) { say("FAIL shifted can"); return 1; }
+    my int $head_ok = 0;
+    __C__ {
+        StradaValue *sa = (sargs && sargs->type == STRADA_REF) ? sargs->value.rv : sargs;
+        StradaValue *ca = (cargs && cargs->type == STRADA_REF) ? cargs->value.rv : cargs;
+        strada_incref(sa);
+        strada_incref(ca);
+        StradaValue *r1 = strada_method_call(o, "isa", sa);
+        StradaValue *r2 = strada_method_call(o, "can", ca);
+        if (strada_to_bool(r1) && strada_to_bool(r2)) head_ok = strada_new_int(1);
+        strada_decref(r1);
+        strada_decref(r2);
+    }
+    if ($head_ok != 1) { say("FAIL av->head isa/can"); return 1; }
+
+    # 2. core::setrlimit with invalid / tagged-int arg (no SIGSEGV)
+    if (core::setrlimit(7, 123) != -1) { say("FAIL setrlimit int"); return 1; }
+    if (core::setrlimit(7, undef) != -1) { say("FAIL setrlimit undef"); return 1; }
+
+    # 3. split preserves trailing element starting with NUL byte ("\0abc")
+    my str $nul_str = "a," . chr(0) . "abc";
+    my array @sp = split(",", $nul_str);
+    if (scalar(@sp) != 2 || length($sp[1]) != 4) {
+        say("FAIL split NUL len=" . length($sp[1]) . " size=" . scalar(@sp));
+        return 1;
+    }
+
+    # 4. $$ref self-overwrite & container overwrite
+    my scalar $sv = "hello";
+    my scalar $r = \$sv;
+    $$r = $$r;
+    if ($sv ne "hello") { say("FAIL self-overwrite"); return 1; }
+    $$r = [1, 2, 3];
+    if (ref($sv) ne "ARRAY" || scalar(@$sv) != 3) { say("FAIL array overwrite"); return 1; }
+    $$r = {"a" => 7};
+    if (ref($sv) ne "HASH" || $sv->{"a"} != 7) { say("FAIL hash overwrite"); return 1; }
+    my scalar $fn_ref = func () { return 42; };
+    $$r = $fn_ref;
+    if ($$r->() != 42 || $fn_ref->() != 42) { say("FAIL closure overwrite"); return 1; }
+
+    # 5. Instance pool releases child references immediately
+    my int $alive = 1;
+    {
+        my scalar $holder = bless({"child" => bless({"n" => 99}, "ChildBox"), "k2" => 2}, "PooledBox");
+        if ($holder->{"child"}->{"n"} != 99) { $alive = 0; }
+    }
+    my scalar $holder2 = bless({"child" => undef, "k2" => 5}, "PooledBox");
+    if ($alive != 1 || defined($holder2->{"child"}) || $holder2->{"k2"} != 5) {
+        say("FAIL pooled box");
+        return 1;
+    }
+
+    # 6. >16 arg closure throw caught cleanly
+    my scalar $vfn = \&variadic_throw;
+    my int $caught = 0;
+    try {
+        $vfn->(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,"ok");
+    } catch ($e) {
+        if ($e eq "boom:ok") { $caught = 1; }
+    }
+    if ($caught != 1) { say("FAIL variadic throw"); return 1; }
+
+    # 7. strada_array_weaken_elem weakens array elements in place
+    my array @warr = ({"v" => 77});
+    __C__ {
+        strada_array_weaken_elem(warr, 0);
+    }
+    if (defined($warr[0])) { say("FAIL array elem weaken"); return 1; }
+
+    say("RUNTIME_SAFETY_OK");
+    return 0;
+}
