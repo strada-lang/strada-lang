@@ -91,8 +91,9 @@ enum {
 /* ===== AST helpers ===== */
 
 static StradaValue *ast_deref(StradaValue *v) {
-    if (!v || STRADA_IS_TAGGED_INT(v)) return v;
-    while (v->type == STRADA_REF && v->value.rv) v = v->value.rv;
+    while (v && !STRADA_IS_TAGGED_INT(v) && v->type == STRADA_REF && v->value.rv) {
+        v = v->value.rv;
+    }
     return v;
 }
 
@@ -1478,7 +1479,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
                                 key_expr->type == STRADA_HASH);
             if (has_expr_key) {
                 compile_expr(ctx, key_expr);
-            } else if (keys_arr && keys_arr->type == STRADA_ARRAY) {
+            } else if (keys_arr && !STRADA_IS_TAGGED_INT(keys_arr) && keys_arr->type == STRADA_ARRAY) {
                 /* Static string key */
                 StradaValue *kv = strada_array_get(keys_arr->value.av, i);
                 const char *ks = (kv && !STRADA_IS_TAGGED_INT(kv) && kv->type == STRADA_STR) ? kv->value.pv : "";
@@ -1488,7 +1489,7 @@ static void compile_expr(CompCtx *ctx, StradaValue *node) {
             } else {
                 vm_chunk_emit(ctx->chunk, OP_PUSH_UNDEF);
             }
-            if (vals_arr && vals_arr->type == STRADA_ARRAY) {
+            if (vals_arr && !STRADA_IS_TAGGED_INT(vals_arr) && vals_arr->type == STRADA_ARRAY) {
                 compile_expr(ctx, ast_arr_get(vals_arr, i));
             } else {
                 vm_chunk_emit(ctx->chunk, OP_PUSH_UNDEF);

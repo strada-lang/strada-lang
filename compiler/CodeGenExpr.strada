@@ -3923,30 +3923,30 @@ func gen_expression(scalar $cg, scalar $expr) void {
         my int $len = bytes($val);
         while ($i < $len) {
             my int $code = char_at($val, $i);
-            if ($code == ord("\n")) {
+            if ($code == 10) {  # '\n'
                 emit($cg, "\\n");
-            } elsif ($code == ord("\t")) {
+            } elsif ($code == 9) {  # '\t'
                 emit($cg, "\\t");
-            } elsif ($code == ord("\r")) {
+            } elsif ($code == 13) {  # '\r'
                 emit($cg, "\\r");
-            } elsif ($code == 0) {
+            } elsif ($code == 0) {  # '\0'
                 # 3-digit octal so a following digit isn't merged into the escape
                 emit($cg, "\\000");
-            } elsif ($code == 7) {
+            } elsif ($code == 7) {  # '\a'
                 emit($cg, "\\a");
-            } elsif ($code == 8) {
+            } elsif ($code == 8) {  # '\b'
                 emit($cg, "\\b");
-            } elsif ($code == 12) {
+            } elsif ($code == 12) {  # '\f'
                 emit($cg, "\\f");
-            } elsif ($code == 11) {
+            } elsif ($code == 11) {  # '\v'
                 emit($cg, "\\v");
-            } elsif ($code == 27) {
+            } elsif ($code == 27) {  # '\e'
                 emit($cg, "\\033");
-            } elsif ($code == ord("\"")) {
+            } elsif ($code == 34) {  # '"'
                 emit($cg, "\\\"");
-            } elsif ($code == ord("\\")) {
+            } elsif ($code == 92) {  # '\\'
                 emit($cg, "\\\\");
-            } elsif ($code >= ord(" ") && $code <= ord("~")) {
+            } elsif ($code >= 32 && $code <= 126) {  # ' '..'~'
                 # Printable ASCII - output as-is
                 emit($cg, chr($code));
             } else {

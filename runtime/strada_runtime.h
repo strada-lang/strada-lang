@@ -482,14 +482,14 @@ void ss_incref(StradaString *ss);
 void ss_decref(StradaString *ss);
 #else
 static inline void ss_incref(StradaString *ss) {
-    if (!ss) return;
+    if (!ss || ss->refcount >= 0x20000000u) return;
     if (strada_threading_active)
         __sync_add_and_fetch(&ss->refcount, 1);
     else
         ss->refcount++;
 }
 static inline void ss_decref(StradaString *ss) {
-    if (!ss) return;
+    if (!ss || ss->refcount >= 0x20000000u) return;
     if (strada_threading_active) {
         if (__sync_sub_and_fetch(&ss->refcount, 1) == 0) ss_decref_slow(ss);
     } else {
@@ -2205,7 +2205,7 @@ static inline StradaValue* strada_hv_unwrap_meta_sv(StradaValue *sv) {
             ? (cur->value.ptr ? *(StradaValue**)cur->value.ptr : NULL)
             : cur->value.rv;
     }
-    return cur;
+    return (cur && !STRADA_IS_TAGGED_INT(cur)) ? cur : NULL;
 }
 static inline StradaValue* strada_hv_fetch(StradaValue *sv, const char *key) {
     if (!sv || STRADA_IS_TAGGED_INT(sv)) return strada_undef_static();

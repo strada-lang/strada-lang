@@ -1055,7 +1055,7 @@ func sem_sanitize_pkg(str $pkg) str {
 func sem_alloc_local_cname(scalar $ctx, scalar $scope, str $name) str {
     my scalar $p = $scope->{"parent"};
     while (is_valid_scope($p) == 1 && is_valid_scope($p->{"parent"}) == 1) {
-        if (exists(%{$p->{"vars"}}, $name)) {
+        if (exists($p->{"vars"}->{$name})) {
             my int $id = ($ctx->{"local_shadow_id"} + 0) + 1;
             $ctx->{"local_shadow_id"} = $id;
             return $name . "__lsh" . $id;
@@ -2236,7 +2236,7 @@ func scope_check_param_redecl(scalar $ctx, scalar $current_scope, str $name, str
     my scalar $parent_scope = $current_scope->{"parent"};
     if ($parent_scope && ($parent_scope->{"is_param_scope"} + 0) == 1) {
         my scalar $pvars = $parent_scope->{"vars"};
-        if (exists(%{$pvars}, $name)) {
+        if (exists($pvars->{$name})) {
             my scalar $prev_info = $pvars->{$name};
             my int $prev_line = $prev_info->{"line"};
             semantic_error($ctx, $kind . " '" . $sigil . $name . "' redeclares parameter '" . $prev_info->{"sigil"} . $name . "' (declared at line " . $prev_line . ")", $line);
@@ -2257,7 +2257,7 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         # Check for redeclaration in current scope
         my scalar $current_scope = $ctx->{"scope"};
         my scalar $scope_vars = $current_scope->{"vars"};
-        if (exists(%{$scope_vars}, $name)) {
+        if (exists($scope_vars->{$name})) {
             my scalar $prev_info = $scope_vars->{$name};
             my int $prev_line = $prev_info->{"line"};
             semantic_error($ctx, "variable '" . $sigil . $name . "' already declared in this scope (previous declaration at line " . $prev_line . ")", $line);
@@ -2316,7 +2316,7 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
         # Check for redeclaration in current scope
         my scalar $current_scope = $ctx->{"scope"};
         my scalar $scope_vars = $current_scope->{"vars"};
-        if (exists(%{$scope_vars}, $name)) {
+        if (exists($scope_vars->{$name})) {
             my scalar $prev_info = $scope_vars->{$name};
             my int $prev_line = $prev_info->{"line"};
             semantic_error($ctx, "constant '" . $name . "' already declared in this scope (previous declaration at line " . $prev_line . ")", $line);
@@ -2476,7 +2476,7 @@ func analyze_statement(scalar $ctx, scalar $stmt) void {
                 my int $var_type = $var->{"var_type"};
 
                 # Check for redeclaration in current scope
-                if (exists(%{$scope_vars}, $name)) {
+                if (exists($scope_vars->{$name})) {
                     my scalar $prev_info = $scope_vars->{$name};
                     my int $prev_line = $prev_info->{"line"};
                     semantic_error($ctx, "variable '" . $sigil . $name . "' already declared in this scope (previous declaration at line " . $prev_line . ")", $line);

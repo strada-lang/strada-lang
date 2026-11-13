@@ -86,6 +86,29 @@ func main() int {
         my str $qi = DBI::quote_identifier($dbh, $uid);
         if (utf8::is_utf8($qi) != 1) { return 7; }
 
+        # Tagged-int guard leak check across scalar/slot-ref hash ops
+        my scalar $ti = 42 + $i;
+        $ti->{"k"} = 99;
+        $ti->{"k"} += 1;
+        my str $sfx = "b";
+        my scalar $ck = $ti->{"a" . $sfx};
+        my array @tk = keys(%{$ti});
+        my array @tv = values(%{$ti});
+        my int $iv = 7 + $i;
+        my scalar $tir = \$iv;
+        $tir->{"k"} = 1;
+        $tir->{"k"} += 1;
+        if (defined($ck) || scalar(@tk) != 0 || scalar(@tv) != 0 || scalar(keys(%{$tir})) != 0) { return 8; }
+
+        # Embedded-NUL literal fast-path fallback leak check
+        my str $nb = "a" . chr(0) . "b";
+        if ($nb eq "a\x00c" || !("a\x00b" eq $nb) || index($nb, "\x00") != 1 || index($nb, "a\x00c") != -1) { return 9; }
+        switch ($nb) {
+            case "a\x00c" { return 9; }
+            case "a\x00b" { }
+            default { return 9; }
+        }
+
         $i = $i + 1;
     }
 

@@ -171,5 +171,16 @@ func main() int {
     my str $ru = "héllo héllo";
     say("rindex=" . rindex($ru, "é") . "," . rindex($ru, "é", 4) . "," . rindex($ru, "é", -1));
 
+    # Tagged-int guard & srand arity checks
+    my scalar $ti = 42;
+    $ti->{"k"} = 99;
+    $ti->{"k"} += 1;
+    my array @tk = keys(%{$ti});
+    my array @tv = values(%{$ti});
+    core::srand(42);
+    my num $r1 = core::rand();
+    core::srand();
+    say("ti=" . $ti . "," . scalar(@tk) . "," . scalar(@tv) . " srand=" . ($r1 >= 0.0 && $r1 <= 1.0 ? 1 : 0));
+
     return 0;
 }

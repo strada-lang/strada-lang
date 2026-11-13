@@ -11,3 +11,4 @@ isa_can=1,1,1
 die_ref=ARRAY:20|HASH:404
 dumper=ok
 rindex=7,1,-1
+ti=42,0,0 srand=1

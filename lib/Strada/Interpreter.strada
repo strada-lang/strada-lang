@@ -1318,18 +1318,13 @@ func native_call(scalar $fn_ptr, scalar $args, int $arg_count, int $ret_is_void)
         int64_t argc = strada_to_int(arg_count);
         int64_t is_void = strada_to_int(ret_is_void);
         /* Get the underlying array - args may be an array or array ref */
-        StradaArray *av = NULL;
-        if (args->type == STRADA_ARRAY) {
-            av = args->value.av;
-        } else if (args->type == STRADA_REF && args->value.rv && args->value.rv->type == STRADA_ARRAY) {
-            av = args->value.rv->value.av;
-        }
+        StradaArray *av = strada_deref_array(args);
 
         /* Extract argument pointers */
         StradaValue *a[8] = {NULL};
         if (av) {
             for (int i = 0; i < argc && i < 8 && i < (int64_t)av->size; i++) {
-                a[i] = av->elements[i];
+                a[i] = av->elements[av->head + i];
             }
         }
 
@@ -4261,8 +4256,9 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
     }
     if ($bid == BI::SYS_SRAND) {
         __C__ {
-            StradaValue *seed_v = ((StradaArray*)args->value.rv->value.av)->elements[0];
-            srand((unsigned int)strada_to_int(seed_v));
+            StradaArray *av = strada_deref_array(args);
+            StradaValue *seed_v = (av && av->size > 0) ? av->elements[av->head] : NULL;
+            srand(seed_v ? (unsigned int)strada_to_int(seed_v) : (unsigned int)time(NULL));
         }
         return undef;
     }
@@ -4276,8 +4272,9 @@ func call_builtin(scalar $interp, str $name, scalar $args, scalar $env) scalar {
     }
     if ($bid == BI::SYS_SRANDOM) {
         __C__ {
-            StradaValue *seed_v = ((StradaArray*)args->value.rv->value.av)->elements[0];
-            srandom((unsigned int)strada_to_int(seed_v));
+            StradaArray *av = strada_deref_array(args);
+            StradaValue *seed_v = (av && av->size > 0) ? av->elements[av->head] : NULL;
+            srandom(seed_v ? (unsigned int)strada_to_int(seed_v) : (unsigned int)time(NULL));
         }
         return undef;
     }

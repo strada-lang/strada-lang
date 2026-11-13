@@ -76,6 +76,78 @@ func main() int {
     check(defined($brows) && scalar(@{$brows}) == 1 && $brows->[0]->[0] eq $bin, "a binary column is fetched whole (array row)");
     check(defined(DBI::selectrow_hashref($dbh, "SELECT id FROM strada_dbi_mysql_bin WHERE b = ?", [$bin])), "a binary value matches in WHERE");
 
+    # EvilCRM / Cannoli regression: non-temporary schema_migrations-style table,
+    # empty SELECT returning [] (never undef), prepared SELECT execute() >= 0 & re-exec,
+    # DECIMAL scale preservation, BIGINT UNSIGNED > INT64_MAX, UTF-8 DBI::quote
+    DBI::do_sql($dbh, "DROP TABLE IF EXISTS strada_dbi_mig_t");
+    DBI::do_sql($dbh, "CREATE TABLE strada_dbi_mig_t (version VARCHAR(190) NOT NULL PRIMARY KEY, price DECIMAL(16,2) NOT NULL DEFAULT 0, big BIGINT UNSIGNED NOT NULL DEFAULT 0) ENGINE=InnoDB");
+
+    my scalar $empty_sh = DBI::selectall_hashref($dbh, "SELECT version FROM strada_dbi_mig_t", []);
+    check(defined($empty_sh) && scalar(@{$empty_sh}) == 0, "empty SELECT selectall_hashref returns [] not undef");
+    my scalar $empty_sr = DBI::selectrow_hashref($dbh, "SELECT version FROM strada_dbi_mig_t", []);
+    check(!defined($empty_sr), "empty SELECT selectrow_hashref returns undef");
+    my scalar $empty_sc = DBI::selectcol($dbh, "SELECT MAX(version) FROM strada_dbi_mig_t", []);
+    check(!defined($empty_sc), "empty MAX() selectcol returns undef");
+    my scalar $empty_aa = DBI::selectall_arrayref($dbh, "SELECT version FROM strada_dbi_mig_t");
+    check(defined($empty_aa) && scalar(@{$empty_aa}) == 0, "empty selectall_arrayref returns []");
+    my scalar $empty_ab = DBI::selectall_arrayref_bind($dbh, "SELECT version FROM strada_dbi_mig_t WHERE version = ?", ["missing"]);
+    check(defined($empty_ab) && scalar(@{$empty_ab}) == 0, "empty selectall_arrayref_bind returns []");
+
+    DBI::exec($dbh, "INSERT INTO strada_dbi_mig_t (version, price, big) VALUES (?, ?, ?)", ["001_init", "1250.00", "42"]);
+    DBI::do_sql($dbh, "INSERT INTO strada_dbi_mig_t (version, price, big) VALUES ('002_jobs', 0.00, 18446744073709551600)");
+
+    my scalar $sth_sel = DBI::prepare($dbh, "SELECT version, price, big FROM strada_dbi_mig_t WHERE version = ?");
+    my int $exec_rc1 = DBI::execute($sth_sel, ["001_init"]);
+    check($exec_rc1 >= 0, "prepared SELECT execute() returns >= 0");
+    my scalar $r1 = DBI::fetchrow_hashref($sth_sel);
+    check(defined($r1) && $r1->{"version"} eq "001_init", "prepared SELECT fetches version");
+    check(defined($r1) && ("" . $r1->{"price"}) eq "1250.00", "DECIMAL(16,2) preserves trailing .00 scale");
+    check(defined($r1) && $r1->{"big"} == 42, "BIGINT UNSIGNED <= INT64_MAX returns int 42");
+    DBI::finish($sth_sel);
+
+    my int $exec_rc2 = DBI::execute($sth_sel, ["002_jobs"]);
+    check($exec_rc2 >= 0, "prepared SELECT re-execute returns >= 0");
+    my scalar $r2 = DBI::fetchrow_hashref($sth_sel);
+    check(defined($r2) && ("" . $r2->{"price"}) eq "0.00", "DECIMAL(16,2) 0.00 preserves scale");
+    check(defined($r2) && ("" . $r2->{"big"}) eq "18446744073709551600", "BIGINT UNSIGNED > INT64_MAX preserves full digits as str");
+    DBI::_destroy_st($sth_sel);
+
+    my scalar $migs = DBI::selectall_hashref($dbh, "SELECT version FROM strada_dbi_mig_t", []);
+    my hash %done = ();
+    foreach my scalar $mr (@{$migs}) {
+        $done{$mr->{"version"}} = 1;
+    }
+    check(scalar(@{$migs}) == 2 && exists(%done, "001_init") && exists(%done, "002_jobs"), "Migrator::applied SELECT returns all versions");
+    my scalar $cur_ver = DBI::selectcol($dbh, "SELECT MAX(version) FROM strada_dbi_mig_t", []);
+    check(defined($cur_ver) && ("" . $cur_ver) eq "002_jobs", "Migrator::current MAX(version) returns 002_jobs");
+
+    # Tagged-int (int), num, 0, negative int, and undef bind parameters on MySQL
+    my int $bind_id = 77;
+    my int $bind_zero = 0;
+    my num $bind_price = 19.75;
+    DBI::exec($dbh, "INSERT INTO strada_dbi_mig_t (version, price, big) VALUES (?, ?, ?)", ["003_int_bind", $bind_price, $bind_id]);
+    DBI::exec($dbh, "INSERT INTO strada_dbi_mig_t (version, price, big) VALUES (?, ?, ?)", ["004_zero_bind", 0, $bind_zero]);
+    my scalar $int_row = DBI::selectrow_hashref($dbh, "SELECT version, price, big FROM strada_dbi_mig_t WHERE big = ?", [$bind_id]);
+    check(defined($int_row) && $int_row->{"version"} eq "003_int_bind", "SELECT with tagged-int bind parameter matches row");
+    check(defined($int_row) && ("" . $int_row->{"price"}) eq "19.75", "num bind parameter stored as 19.75");
+    check(defined($int_row) && $int_row->{"big"} == 77, "int bind parameter stored as 77");
+    my scalar $zero_row = DBI::selectrow_hashref($dbh, "SELECT version, big FROM strada_dbi_mig_t WHERE big = ?", [0]);
+    check(defined($zero_row) && $zero_row->{"version"} eq "004_zero_bind" && $zero_row->{"big"} == 0, "tagged-int 0 bind parameter works");
+    DBI::exec($dbh, "INSERT INTO strada_dbi_mysql_t (s, n) VALUES (?, ?)", [-42, undef]);
+    my scalar $neg_cnt = DBI::selectcol($dbh, "SELECT COUNT(*) FROM strada_dbi_mysql_t WHERE s = ?", [-42]);
+    check(core::atoi("" . $neg_cnt) == 1, "negative tagged-int bind parameter works");
+    check(DBI::quote($dbh, 12345) eq "'12345'", "DBI::quote handles tagged-int value");
+
+    my str $u8 = "café's";
+    utf8::upgrade($u8);
+    my str $qu8 = DBI::quote($dbh, $u8);
+    check(utf8::is_utf8($qu8) == 1 && index($qu8, "café") >= 0, "DBI::quote preserves UTF-8 flag");
+
+    DBI::do_sql($dbh, "DROP TABLE strada_dbi_mig_t");
+
+    # Dangling statement destroyed after disconnect should not crash
+    my scalar $dangling_sth = DBI::prepare($dbh, "SELECT 1");
+    DBI::execute($dangling_sth, []);
     DBI::disconnect($dbh);
     if ($g_fail > 0) { say("FAIL: " . $g_fail . " DBI MySQL check(s) failed"); return 1; }
     say("PASS: All DBI MySQL tests passed");

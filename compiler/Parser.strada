@@ -6328,7 +6328,7 @@ func str_to_int(str $s) int {
     while ($i < $len) {
         my str $ch = substr($s, $i, 1);
         if ($ch ge "0" && $ch le "9") {
-            $result = $result * 10 + (ord($ch) - ord("0"));
+            $result = $result * 10 + (ord($ch) - 48);  # '0'
         }
         $i = $i + 1;
     }

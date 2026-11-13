@@ -75,6 +75,14 @@ func main() int {
         try { die([1, $i]); } catch ($e) {
             if ($e->[1] != $i) { return 9; }
         }
+        my scalar $ti = 42 + $i;
+        $ti->{"k"} = 99;
+        $ti->{"k"} += 1;
+        my array @tk = keys(%{$ti});
+        my array @tv = values(%{$ti});
+        if (scalar(@tk) != 0 || scalar(@tv) != 0) { return 10; }
+        core::srand($i);
+        core::srand();
         $i = $i + 1;
     }
 

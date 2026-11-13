@@ -139,10 +139,12 @@ extern int strada_threading_active;
  * arrays, class instances) so valgrind/ASan report each leak at the call
  * that really allocated it rather than wherever a recycled block was first
  * malloc'd. Slower; for debugging only. */
+static void ss_init_singletons(void);
 static int strada_no_pool = 0;
 __attribute__((constructor)) static void strada_no_pool_init(void) {
     const char *e = getenv("STRADA_NO_POOL");
     strada_no_pool = (e && *e && *e != '0');
+    ss_init_singletons();
 }
 static StradaString *ss_pool_stack[SS_POOL_MAX];
 static int ss_pool_count = 0;
@@ -219,18 +221,47 @@ StradaString *strada_intern_attr_ss(const char *key, unsigned int hash) {
 
 /* ===== StradaString implementation ===== */
 
+/* Immortal static singletons for 0- and 1-byte StradaStrings so frequent empty
+ * strings and per-char strings require no heap allocation or refcount churn. */
+#define SS_IMMORTAL_REFCOUNT (1u << 30)
+typedef union {
+    StradaString hdr;
+    unsigned char raw[16]; /* sizeof(StradaString)=12 + up to 2 bytes data */
+} StradaStaticSS;
+static StradaStaticSS ss_empty_singleton;
+static StradaStaticSS ss_char_singletons[256];
+static int ss_singletons_ready = 0;
+
+static void ss_init_singletons(void) {
+    if (__atomic_load_n(&ss_singletons_ready, __ATOMIC_ACQUIRE)) return;
+    ss_empty_singleton.hdr.refcount = SS_IMMORTAL_REFCOUNT;
+    ss_empty_singleton.hdr.hash = 5381u;
+    ss_empty_singleton.hdr.len = 0;
+    ss_empty_singleton.raw[sizeof(StradaString)] = '\0';
+    for (int i = 0; i < 256; i++) {
+        int sc = (int)(char)(unsigned char)i;
+        uint32_t h = ((5381u << 5) + 5381u) + (uint32_t)sc;
+        ss_char_singletons[i].hdr.refcount = SS_IMMORTAL_REFCOUNT;
+        ss_char_singletons[i].hdr.hash = h;
+        ss_char_singletons[i].hdr.len = 1;
+        ss_char_singletons[i].raw[sizeof(StradaString)] = (unsigned char)i;
+        ss_char_singletons[i].raw[sizeof(StradaString) + 1] = '\0';
+    }
+    __atomic_store_n(&ss_singletons_ready, 1, __ATOMIC_RELEASE);
+}
+
 /* Exported SS refcount ops (STRADA_RUNTIME_IMPL branch of the header):
  * tcc-compiled code and pre-built .so modules call these symbols; gcc
  * TUs use the header's static-inline twins. Keep the bodies in sync. */
 void ss_incref(StradaString *ss) {
-    if (!ss) return;
+    if (!ss || ss->refcount >= 0x20000000u) return;
     if (strada_threading_active)
         __sync_add_and_fetch(&ss->refcount, 1);
     else
         ss->refcount++;
 }
 void ss_decref(StradaString *ss) {
-    if (!ss) return;
+    if (!ss || ss->refcount >= 0x20000000u) return;
     if (strada_threading_active) {
         if (__sync_sub_and_fetch(&ss->refcount, 1) == 0) ss_decref_slow(ss);
     } else {
@@ -239,6 +270,17 @@ void ss_decref(StradaString *ss) {
 }
 
 StradaString *ss_new(const char *s, uint32_t len, uint32_t hash) {
+    if (len <= 1) {
+        if (__builtin_expect(!__atomic_load_n(&ss_singletons_ready, __ATOMIC_ACQUIRE), 0)) {
+            ss_init_singletons();
+        }
+        if (len == 0) {
+            if (hash == 0 || hash == 5381u) return &ss_empty_singleton.hdr;
+        } else if (s) {
+            StradaString *cs = &ss_char_singletons[(unsigned char)s[0]].hdr;
+            if (hash == 0 || hash == cs->hash) return cs;
+        }
+    }
     StradaString *ss;
     if (!strada_threading_active && len <= SS_POOL_DATA_MAX && ss_pool_count > 0) {
         ss = ss_pool_stack[--ss_pool_count];
@@ -389,11 +431,11 @@ static void strada_meta_pool_cleanup(void) {
         free(meta_pool[i]);
     meta_pool_count = 0;
 }
-#define SV_IS_TIED(sv) ((sv)->meta && (sv)->meta->is_tied)
-#define SV_IS_WEAK(sv) ((sv)->meta && (sv)->meta->is_weak)
-#define SV_BLESSED(sv) ((sv)->meta ? (sv)->meta->blessed_package : NULL)
-#define SV_STRUCT_NAME(sv) ((sv)->meta ? (sv)->meta->struct_name : NULL)
-#define SV_TIED_OBJ(sv) ((sv)->meta ? (sv)->meta->tied_obj : NULL)
+#define SV_IS_TIED(sv) (!STRADA_IS_TAGGED_INT(sv) && (sv)->meta && (sv)->meta->is_tied)
+#define SV_IS_WEAK(sv) (!STRADA_IS_TAGGED_INT(sv) && (sv)->meta && (sv)->meta->is_weak)
+#define SV_BLESSED(sv) ((!STRADA_IS_TAGGED_INT(sv) && (sv)->meta) ? (sv)->meta->blessed_package : NULL)
+#define SV_STRUCT_NAME(sv) ((!STRADA_IS_TAGGED_INT(sv) && (sv)->meta) ? (sv)->meta->struct_name : NULL)
+#define SV_TIED_OBJ(sv) ((!STRADA_IS_TAGGED_INT(sv) && (sv)->meta) ? (sv)->meta->tied_obj : NULL)
 
 /* Forward declaration — defined in async section below */
 extern int strada_threading_active;
@@ -1303,6 +1345,7 @@ static void strada_free_queue_push(StradaValue *sv) {
 }
 
 static inline void strada_set_may_self_ref(StradaValue *c) {
+    if (!c || STRADA_IS_TAGGED_INT(c)) return;
     if (strada_threading_active)
         __atomic_or_fetch(&c->struct_size, STRADA_MAY_SELF_REF, __ATOMIC_RELAXED);
     else
@@ -1310,6 +1353,7 @@ static inline void strada_set_may_self_ref(StradaValue *c) {
 }
 
 static inline void strada_clear_may_self_ref(StradaValue *c) {
+    if (!c || STRADA_IS_TAGGED_INT(c)) return;
     if (strada_threading_active)
         __atomic_and_fetch(&c->struct_size, ~STRADA_MAY_SELF_REF, __ATOMIC_RELAXED);
     else
@@ -1448,6 +1492,12 @@ void strada_break_self_cycle_impl(StradaValue *sv) {
  * after strada_free_hash() so it can reuse the pools and free helpers. The decref
  * hot path only needs the forward declaration + the gating flags here. */
 static int           cc_enabled    = 1;       /* automatic collection on by default */
+__attribute__((constructor)) static void strada_cc_env_init(void) {
+    const char *gc_env = getenv("STRADA_GC");
+    if (gc_env && (strcmp(gc_env, "off") == 0 || strcmp(gc_env, "0") == 0)) {
+        cc_enabled = 0;
+    }
+}
 /* Adaptive trigger: cc_threshold starts at the base and DOUBLES every time a
  * collection frees nothing (a cycle-free program converges to near-zero
  * collection work — profiling stradac showed ~18% of the whole compile spent
@@ -23110,7 +23160,7 @@ StradaValue* strada_new_blessed_3attr_hv_take(
  * and strada_deref_set). Releases all owned internal storage without freeing
  * the StradaValue shell itself. */
 static void strada_release_payload(StradaValue *sv) {
-    if (!sv) return;
+    if (!sv || STRADA_IS_TAGGED_INT(sv)) return;
 #ifdef STRADA_CYCLE_GC
     if (!cc_self_collecting
         && (sv->type == STRADA_ARRAY || sv->type == STRADA_HASH || sv->type == STRADA_REF

@@ -319,6 +319,8 @@ __C__ {
 #include <strings.h>
 #include <stdint.h>
 #include <ctype.h>
+#include <limits.h>
+#include <errno.h>
 
 /* strdup/strtok_r come from <string.h> and strcasecmp/strncasecmp from
    <strings.h>. strada_runtime.h already defines _GNU_SOURCE before it
@@ -422,7 +424,22 @@ static void dbi_pg_append_conn_kv(char *dst, size_t cap, size_t *off, const char
     dst[*off] = '\0';
 }
 
-/* Rewrite SQL '?' placeholders outside single/double quotes into '$1', '$2', ... */
+/* Ensure capacity in dbi_pg_rewrite_placeholders; frees and returns 0 on OOM. */
+static int dbi_pg_ensure_cap(char **out, size_t *cap, size_t need) {
+    if (need < *cap) return 1;
+    size_t new_cap = *cap * 2 + need + 16;
+    char *tmp = realloc(*out, new_cap);
+    if (!tmp) {
+        free(*out);
+        *out = NULL;
+        return 0;
+    }
+    *out = tmp;
+    *cap = new_cap;
+    return 1;
+}
+
+/* Rewrite SQL '?' placeholders outside single/double quotes and comments into '$1', '$2', ... */
 static char* dbi_pg_rewrite_placeholders(const char *sql, int *out_nparams) {
     if (!sql) { *out_nparams = 0; return strdup(""); }
     size_t slen = strlen(sql);
@@ -433,11 +450,23 @@ static char* dbi_pg_rewrite_placeholders(const char *sql, int *out_nparams) {
     int count = 0;
     int in_sq = 0;
     int in_dq = 0;
+    int in_line_comment = 0;
+    int in_block_comment = 0;
     for (size_t i = 0; i < slen; i++) {
         char c = sql[i];
-        if (in_sq) {
+        if (in_line_comment) {
+            if (c == '\n') in_line_comment = 0;
+        } else if (in_block_comment) {
+            if (c == '*' && i + 1 < slen && sql[i + 1] == '/') {
+                if (!dbi_pg_ensure_cap(&out, &cap, oi + 2)) { *out_nparams = 0; return NULL; }
+                out[oi++] = c;
+                out[oi++] = sql[++i];
+                in_block_comment = 0;
+                continue;
+            }
+        } else if (in_sq) {
             if (c == '\'' && i + 1 < slen && sql[i + 1] == '\'') {
-                if (oi + 2 >= cap) { cap *= 2; out = realloc(out, cap); }
+                if (!dbi_pg_ensure_cap(&out, &cap, oi + 2)) { *out_nparams = 0; return NULL; }
                 out[oi++] = c;
                 out[oi++] = sql[++i];
                 continue;
@@ -445,14 +474,22 @@ static char* dbi_pg_rewrite_placeholders(const char *sql, int *out_nparams) {
             if (c == '\'') in_sq = 0;
         } else if (in_dq) {
             if (c == '"' && i + 1 < slen && sql[i + 1] == '"') {
-                if (oi + 2 >= cap) { cap *= 2; out = realloc(out, cap); }
+                if (!dbi_pg_ensure_cap(&out, &cap, oi + 2)) { *out_nparams = 0; return NULL; }
                 out[oi++] = c;
                 out[oi++] = sql[++i];
                 continue;
             }
             if (c == '"') in_dq = 0;
         } else {
-            if (c == '\'') {
+            if (c == '-' && i + 1 < slen && sql[i + 1] == '-') {
+                in_line_comment = 1;
+            } else if (c == '/' && i + 1 < slen && sql[i + 1] == '*') {
+                if (!dbi_pg_ensure_cap(&out, &cap, oi + 2)) { *out_nparams = 0; return NULL; }
+                out[oi++] = c;
+                out[oi++] = sql[++i];
+                in_block_comment = 1;
+                continue;
+            } else if (c == '\'') {
                 in_sq = 1;
             } else if (c == '"') {
                 in_dq = 1;
@@ -460,16 +497,13 @@ static char* dbi_pg_rewrite_placeholders(const char *sql, int *out_nparams) {
                 count++;
                 char num[24];
                 int nlen = snprintf(num, sizeof(num), "$%d", count);
-                if (oi + (size_t)nlen + 1 >= cap) {
-                    cap = cap * 2 + (size_t)nlen + 16;
-                    out = realloc(out, cap);
-                }
+                if (!dbi_pg_ensure_cap(&out, &cap, oi + (size_t)nlen + 1)) { *out_nparams = 0; return NULL; }
                 memcpy(out + oi, num, (size_t)nlen);
                 oi += (size_t)nlen;
                 continue;
             }
         }
-        if (oi + 2 >= cap) { cap *= 2; out = realloc(out, cap); }
+        if (!dbi_pg_ensure_cap(&out, &cap, oi + 2)) { *out_nparams = 0; return NULL; }
         out[oi++] = c;
     }
     out[oi] = '\0';
@@ -751,6 +785,46 @@ static int dbi_ping(DbiHandle *dbh) {
     }
 }
 
+#ifdef HAVE_MYSQL
+static void dbi_mysql_init_columns_from_meta(DbiStatement *sth, MYSQL_RES *meta) {
+    if (!sth || !meta) return;
+    int ncols = (int)mysql_num_fields(meta);
+    if (ncols <= 0) return;
+    if (sth->column_names) {
+        for (int i = 0; i < sth->num_columns; i++) free(sth->column_names[i]);
+        free(sth->column_names);
+        sth->column_names = NULL;
+    }
+    free(sth->column_types);
+    sth->column_types = NULL;
+    sth->column_names = calloc((size_t)ncols, sizeof(char*));
+    sth->column_types = calloc((size_t)ncols, sizeof(int));
+    if (!sth->column_names || !sth->column_types) {
+        free(sth->column_names);
+        sth->column_names = NULL;
+        free(sth->column_types);
+        sth->column_types = NULL;
+        sth->num_columns = 0;
+        return;
+    }
+    sth->num_columns = ncols;
+    MYSQL_FIELD *fields = mysql_fetch_fields(meta);
+    for (int i = 0; i < ncols; i++) {
+        sth->column_names[i] = strdup(fields[i].name ? fields[i].name : "");
+        enum enum_field_types ft = fields[i].type;
+        if (ft == MYSQL_TYPE_TINY || ft == MYSQL_TYPE_SHORT || ft == MYSQL_TYPE_LONG ||
+            ft == MYSQL_TYPE_LONGLONG || ft == MYSQL_TYPE_INT24) {
+            sth->column_types[i] = 1;
+        } else if (ft == MYSQL_TYPE_FLOAT || ft == MYSQL_TYPE_DOUBLE) {
+            sth->column_types[i] = 2;
+        } else {
+            /* Keep DECIMAL/NEWDECIMAL as string to preserve fixed-point scale and precision. */
+            sth->column_types[i] = 3;
+        }
+    }
+}
+#endif
+
 /* Prepare statement */
 static DbiStatement* dbi_prepare(DbiHandle *dbh, const char *sql) {
     if (!dbh || !dbh->connected || !sql) return NULL;
@@ -823,23 +897,7 @@ static DbiStatement* dbi_prepare(DbiHandle *dbh, const char *sql) {
 
             MYSQL_RES *meta = mysql_stmt_result_metadata(stmt);
             if (meta) {
-                sth->num_columns = mysql_num_fields(meta);
-                sth->column_names = calloc(sth->num_columns, sizeof(char*));
-                sth->column_types = calloc(sth->num_columns, sizeof(int));
-                MYSQL_FIELD *fields = mysql_fetch_fields(meta);
-                for (int i = 0; i < sth->num_columns; i++) {
-                    sth->column_names[i] = strdup(fields[i].name);
-                    enum enum_field_types ft = fields[i].type;
-                    if (ft == MYSQL_TYPE_TINY || ft == MYSQL_TYPE_SHORT || ft == MYSQL_TYPE_LONG ||
-                        ft == MYSQL_TYPE_LONGLONG || ft == MYSQL_TYPE_INT24) {
-                        sth->column_types[i] = 1;
-                    } else if (ft == MYSQL_TYPE_FLOAT || ft == MYSQL_TYPE_DOUBLE || ft == MYSQL_TYPE_DECIMAL ||
-                               ft == MYSQL_TYPE_NEWDECIMAL) {
-                        sth->column_types[i] = 2;
-                    } else {
-                        sth->column_types[i] = 3;
-                    }
-                }
+                dbi_mysql_init_columns_from_meta(sth, meta);
                 mysql_free_result(meta);
             }
             break;
@@ -944,9 +1002,8 @@ static int dbi_execute_raw(DbiStatement *sth) {
                 dbi_set_error(dbh, mysql_stmt_errno(stmt), mysql_stmt_error(stmt));
                 return -1;
             }
-            sth->affected_rows = mysql_stmt_affected_rows(stmt);
 
-            /* For SELECT queries, store result and set up bindings */
+            /* For SELECT / SHOW queries, store result and bind columns */
             MYSQL_RES *meta = mysql_stmt_result_metadata(stmt);
             if (meta) {
                 /* Enable max_length tracking so buffers are sized to actual data */
@@ -962,6 +1019,10 @@ static int dbi_execute_raw(DbiStatement *sth) {
                     mysql_free_result(meta);
                     dbi_set_error(dbh, eno, errbuf);
                     return -1;
+                }
+
+                if ((sth->num_columns == 0 || !sth->column_names) && mysql_num_fields(meta) > 0) {
+                    dbi_mysql_init_columns_from_meta(sth, meta);
                 }
 
                 int ncols = sth->num_columns;
@@ -997,7 +1058,14 @@ static int dbi_execute_raw(DbiStatement *sth) {
                 }
 
                 mysql_free_result(meta);
+                unsigned long long nr = (unsigned long long)mysql_stmt_num_rows(stmt);
+                sth->affected_rows = (nr == (unsigned long long)-1) ? 0
+                    : (nr > (unsigned long long)INT_MAX ? INT_MAX : (int)nr);
+                return 0;
             }
+            unsigned long long ar = (unsigned long long)mysql_stmt_affected_rows(stmt);
+            sth->affected_rows = (ar == (unsigned long long)-1) ? 0
+                : (ar > (unsigned long long)INT_MAX ? INT_MAX : (int)ar);
             return sth->affected_rows;
         }
 #endif
@@ -1274,11 +1342,11 @@ static void dbi_bind_value(DbiStatement *sth, int idx, StradaValue *val) {
             sqlite3_bind_int64((sqlite3_stmt*)sth->stmt, idx, strada_to_int(val));
             return;
         }
-        if (!is_tied && val->type == STRADA_NUM) {
+        if (!is_tied && !STRADA_IS_TAGGED_INT(val) && val->type == STRADA_NUM) {
             sqlite3_bind_double((sqlite3_stmt*)sth->stmt, idx, strada_to_num(val));
             return;
         }
-        if (!is_tied && val->type == STRADA_UNDEF) {
+        if (!is_tied && !STRADA_IS_TAGGED_INT(val) && val->type == STRADA_UNDEF) {
             sqlite3_bind_null((sqlite3_stmt*)sth->stmt, idx);
             return;
         }
@@ -1300,7 +1368,7 @@ static void dbi_bind_value(DbiStatement *sth, int idx, StradaValue *val) {
 
     /* The value's bytes (binary-safe) - MUST be freed! */
     unsigned long str_len = 0;
-    char *str = (!is_tied && val->type == STRADA_UNDEF) ? NULL : dbi_value_bytes(val, &str_len);
+    char *str = (!is_tied && !STRADA_IS_TAGGED_INT(val) && val->type == STRADA_UNDEF) ? NULL : dbi_value_bytes(val, &str_len);
 
     switch (sth->dbh->driver) {
 #ifdef HAVE_MYSQL
@@ -1466,7 +1534,18 @@ static int dbi_column_type(DbiStatement *sth, int idx) {
 #ifdef HAVE_MYSQL
         case DBI_DRIVER_MYSQL:
             if (sth->column_types && idx >= 0 && idx < sth->num_columns) {
-                return sth->column_types[idx];
+                int ctype = sth->column_types[idx];
+                if (ctype == 1 && sth->mysql_buffers && sth->mysql_nulls && !sth->mysql_nulls[idx] && sth->mysql_buffers[idx]) {
+                    const char *buf = sth->mysql_buffers[idx];
+                    if (buf[0] != '-') {
+                        errno = 0;
+                        unsigned long long uv = strtoull(buf, NULL, 10);
+                        if (errno == ERANGE || uv > (unsigned long long)INT64_MAX) {
+                            return 3;
+                        }
+                    }
+                }
+                return ctype;
             }
             return 3;
 #endif
@@ -2484,7 +2563,7 @@ func quote(scalar $dbh, scalar $value) str {
             nul_err = strada_new_int(1);
         } else {
             strada_decref(result);
-            result = strada_new_str(quoted);
+            result = strada_new_str_like(quoted, value);
             free(quoted);
         }
     }

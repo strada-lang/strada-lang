@@ -1889,7 +1889,7 @@ static VMValue vm_invoke_native_entry(VM *vm, VMNativeEntry *ne, VMValue *raw_ar
     if (sync_self_hash && argc >= 1 && sv_args[0] && !STRADA_IS_TAGGED_INT(sv_args[0])) {
         StradaValue *ss = sv_args[0];
         if (ss->type == STRADA_REF && ss->value.rv) ss = ss->value.rv;
-        if (ss->type == STRADA_HASH && ss->value.hv) {
+        if (ss && !STRADA_IS_TAGGED_INT(ss) && ss->type == STRADA_HASH && ss->value.hv) {
             StradaHash *sshv = ss->value.hv;
             for (size_t cb = 0; cb < sshv->next_slot; cb++) {
                 StradaHashEntry *ce = &sshv->entries[cb];
@@ -7166,7 +7166,7 @@ void vm_run_globals_init(VM *vm) {
 void vm_seed_globals(VM *vm, StradaValue *hash_sv, StradaValue *skip_hash_sv) {
     if (!vm || !vm->globals || !hash_sv || STRADA_IS_TAGGED_INT(hash_sv)) return;
     if (hash_sv->type == STRADA_REF && hash_sv->value.rv) hash_sv = hash_sv->value.rv;
-    if (!hash_sv || hash_sv->type != STRADA_HASH || !hash_sv->value.hv || !hash_sv->value.hv->entries) return;
+    if (!hash_sv || STRADA_IS_TAGGED_INT(hash_sv) || hash_sv->type != STRADA_HASH || !hash_sv->value.hv || !hash_sv->value.hv->entries) return;
     if (skip_hash_sv && !STRADA_IS_TAGGED_INT(skip_hash_sv) && skip_hash_sv->type == STRADA_REF && skip_hash_sv->value.rv) {
         skip_hash_sv = skip_hash_sv->value.rv;
     }
@@ -7186,7 +7186,7 @@ void vm_seed_globals(VM *vm, StradaValue *hash_sv, StradaValue *skip_hash_sv) {
 void vm_export_globals(VM *vm, StradaValue *hash_sv) {
     if (!vm || !vm->globals || !hash_sv || STRADA_IS_TAGGED_INT(hash_sv)) return;
     if (hash_sv->type == STRADA_REF && hash_sv->value.rv) hash_sv = hash_sv->value.rv;
-    if (!hash_sv || hash_sv->type != STRADA_HASH || !hash_sv->value.hv) return;
+    if (!hash_sv || STRADA_IS_TAGGED_INT(hash_sv) || hash_sv->type != STRADA_HASH || !hash_sv->value.hv) return;
     VM *prev_vm = g_active_vm;
     g_active_vm = vm;
     VMHash *g = vm->globals;

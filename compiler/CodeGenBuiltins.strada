@@ -4159,8 +4159,8 @@ func gen_builtin_g4(scalar $cg, scalar $expr, str $name) int {
                     emit($cg, "strada_decref(__idx_sub); ");
                 }
                 emit($cg, "__idx_res; }))");
-            } elsif ($arg1->{"type"} == NODE_STR_LITERAL()) {
-                # Fast path: literal needle → strada_index_sv (no string extraction)
+            } elsif ($arg1->{"type"} == NODE_STR_LITERAL() && str_has_nul($arg1->{"value"}) == 0) {
+                # Fast path: literal needle without embedded NUL → strada_index_sv (no string extraction)
                 my str $needle_lit = $arg1->{"value"};
                 if ($arg0_needs_cleanup == 1) {
                     emit($cg, "(({ StradaValue *__idx_str = ");

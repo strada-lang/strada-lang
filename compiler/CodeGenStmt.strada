@@ -2833,11 +2833,11 @@ func gen_statement(scalar $cg, scalar $stmt) void {
         my int $target_depth = 0;
         my scalar $label_depths = $cg->{"label_depths"};
         my scalar $g_depths = $cg->{"goto_label_depths"};
-        if ($label_depths && exists(%{$label_depths}, $target)) {
+        if ($label_depths && exists($label_depths->{$target})) {
             $has_target = 1;
             $target_depth = $label_depths->{$target} + 0;
             $target_td = $cg->{"label_try_depths"}->{$target} + 0;
-        } elsif ($g_depths && exists(%{$g_depths}, $target)) {
+        } elsif ($g_depths && exists($g_depths->{$target})) {
             $has_target = 1;
             $target_depth = $g_depths->{$target} + 0;
             $target_td = $cg->{"goto_label_try_depths"}->{$target} + 0;
@@ -2915,7 +2915,7 @@ func gen_statement(scalar $cg, scalar $stmt) void {
             } else {
                 emit($cg, "} else if (");
             }
-            if ($case_expr->{"type"} == NODE_STR_LITERAL()) {
+            if ($case_expr->{"type"} == NODE_STR_LITERAL() && str_has_nul($case_expr->{"value"}) == 0) {
                 emit($cg, "strada_str_eq_lit(" . $switch_var . ", ");
                 gen_str_literal_c($cg, $case_expr->{"value"});
                 emit($cg, ")");

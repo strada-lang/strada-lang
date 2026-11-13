@@ -110,6 +110,35 @@ func main() int {
     try { my str $t = $bad2 . "z"; } catch ($e) { $err = "" . $e; }
     $fail = $fail + check(index($err, "ov_concat_boom") >= 0, "CC-02 overloaded concat throw caught");
 
+    # Tagged-int guard checks (hash/ref/keys/values/slot-ref on scalar/int values)
+    my scalar $ti = 42;
+    $ti->{"k"} = 99;
+    $ti->{"k"} += 1;
+    my str $sfx = "b";
+    my scalar $ck = $ti->{"a" . $sfx};
+    my array @tk = keys(%{$ti});
+    my array @tv = values(%{$ti});
+    $fail = $fail + check(!defined($ck) && scalar(@tk) == 0 && scalar(@tv) == 0 && $ti == 42, "tagged-int scalar hash/keys/values guards");
+    my int $iv = 7;
+    my scalar $tir = \$iv;
+    $tir->{"k"} = 1;
+    $tir->{"k"} += 1;
+    $fail = $fail + check(scalar(keys(%{$tir})) == 0 && $iv == 7, "tagged-int slot-ref hash guards");
+
+    # Embedded-NUL string literal fast-path guards (cmp, 2-arg index, switch/case)
+    my str $nb = "a" . chr(0) . "b";
+    $fail = $fail + check($nb eq "a\x00b" && !($nb eq "a\x00c") && ($nb ne "a\x00c"), "embedded-NUL RHS eq/ne literal");
+    $fail = $fail + check("a\x00b" eq $nb && !("a\x00c" eq $nb) && ("a\x00c" ne $nb), "embedded-NUL LHS eq/ne literal");
+    $fail = $fail + check($nb lt "a\x00c" && "a\x00a" lt $nb && $nb gt "a\x00a", "embedded-NUL lt/gt literal");
+    $fail = $fail + check(index("abc", "\x00") == -1 && index($nb, "\x00") == 1 && index($nb, "a\x00c") == -1 && index($nb, "a\x00b") == 0, "embedded-NUL 2-arg index literal");
+    my int $sw_hit = 0;
+    switch ($nb) {
+        case "a\x00c" { $sw_hit = -1; }
+        case "a\x00b" { $sw_hit = 1; }
+        default { $sw_hit = -2; }
+    }
+    $fail = $fail + check($sw_hit == 1, "embedded-NUL switch/case literal");
+
     if ($fail == 0) {
         say("R4_RUNTIME_OK");
     }

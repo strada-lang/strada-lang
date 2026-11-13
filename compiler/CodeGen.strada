@@ -60,7 +60,7 @@ func sanitize_name(str $name) str {
             # this a crafted name (e.g. an import name containing ';', '(', or a
             # space) would inject raw tokens into the generated C symbol.
             my int $code = char_at($name, $i);
-            if (($code >= ord("0") && $code <= ord("9")) || ($code >= ord("A") && $code <= ord("Z")) || ($code >= ord("a") && $code <= ord("z")) || $code == ord("_")) {
+            if (($code >= 48 && $code <= 57) || ($code >= 65 && $code <= 90) || ($code >= 97 && $code <= 122) || $code == 95) {  # '0'..'9', 'A'..'Z', 'a'..'z', '_'
                 $result = $result . $ch;
             } else {
                 $result = $result . "_";
@@ -1736,7 +1736,7 @@ func gen_method_wrappers_for_pkg(scalar $cg, scalar $sb, str $pkg, scalar $pkg_i
             sb_append($wsb, "    StradaValue *__packed = strada_new_array();\n");
             sb_append($wsb, "    strada_incref(self);\n");
             sb_append($wsb, "    strada_array_push_take(__packed->value.av, self);\n");
-            sb_append($wsb, "    if (args && args->type == STRADA_ARRAY && args->value.av) {\n");
+            sb_append($wsb, "    if (args && !STRADA_IS_TAGGED_INT(args) && args->type == STRADA_ARRAY && args->value.av) {\n");
             sb_append($wsb, "        for (size_t __i = 0; __i < args->value.av->size; __i++) {\n");
             sb_append($wsb, "            strada_incref(args->value.av->elements[args->value.av->head + __i]);\n");
             sb_append($wsb, "            strada_array_push_take(__packed->value.av, args->value.av->elements[args->value.av->head + __i]);\n");
@@ -2483,6 +2483,21 @@ func emit_line_for_stmt(scalar $cg, scalar $stmt) void {
     }
 }
 
+# Return 1 if $s contains any embedded NUL byte, 0 otherwise.
+# Used instead of index($s, "\x00") because C string literal fast-paths
+# truncate at NUL (and passing "\000" as const char* is treated as "").
+func str_has_nul(str $s) int {
+    my int $blen = bytes($s);
+    my int $i = 0;
+    while ($i < $blen) {
+        if (char_at($s, $i) == 0) {  # '\0'
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    return 0;
+}
+
 # Generate string comparison with proper cleanup of temporaries
 # If one side is a string literal, use strada_str_*_lit to avoid creating temporaries
 func gen_str_cmp(scalar $cg, scalar $expr, str $op) void {
@@ -2507,7 +2522,7 @@ func gen_str_cmp(scalar $cg, scalar $expr, str $op) void {
     }
 
     # Case 1: Right side is string literal (without embedded NUL) - use strada_str_*_lit
-    if ($right_type == NODE_STR_LITERAL() && index($right->{"value"}, "\x00") < 0) {
+    if ($right_type == NODE_STR_LITERAL() && str_has_nul($right->{"value"}) == 0) {
         if ($cg->{"cleanup_enabled"} == 1 && needs_temp_cleanup($cg, $left) == 1) {
             emit($cg, "({ StradaValue *__cmp_l = ");
             gen_expression($cg, $left);
@@ -2529,7 +2544,7 @@ func gen_str_cmp(scalar $cg, scalar $expr, str $op) void {
     }
 
     # Case 2: Left side is string literal (without embedded NUL) - swap and use strada_str_*_lit
-    if ($left_type == NODE_STR_LITERAL() && index($left->{"value"}, "\x00") < 0) {
+    if ($left_type == NODE_STR_LITERAL() && str_has_nul($left->{"value"}) == 0) {
         my str $swapped = $cmp_suffix;
         if ($op eq "lt") {
             $swapped = "gt";
@@ -2601,22 +2616,22 @@ func gen_str_literal_c(scalar $cg, str $val) void {
     while ($i < $len) {
         my str $ch = substr_bytes($val, $i, 1);
         my int $byte = ord($ch);
-        if ($byte == ord("\\")) {
+        if ($byte == 92) {  # '\\'
             emit($cg, $bs);
             emit($cg, $bs);
-        } elsif ($byte == ord("\"")) {
+        } elsif ($byte == 34) {  # '"'
             emit($cg, $bs);
             emit($cg, chr(34));
-        } elsif ($byte == ord("\n")) {
+        } elsif ($byte == 10) {  # '\n'
             emit($cg, $bs);
             emit($cg, "n");
-        } elsif ($byte == ord("\r")) {
+        } elsif ($byte == 13) {  # '\r'
             emit($cg, $bs);
             emit($cg, "r");
-        } elsif ($byte == ord("\t")) {
+        } elsif ($byte == 9) {  # '\t'
             emit($cg, $bs);
             emit($cg, "t");
-        } elsif ($byte >= ord(" ") && $byte < 127) {
+        } elsif ($byte >= 32 && $byte < 127) {  # ' '..'~'
             emit($cg, $ch);
         } else {
             # Non-printable or high-bit byte - emit as \ooo (3-digit
@@ -2992,6 +3007,17 @@ func emit_stack_pop_inline(scalar $cg) str {
     return "";
 }
 
+func ast_is_leaf_node_type(int $t) int {
+    if ($t == NODE_VARIABLE() || $t == NODE_INT_LITERAL() || $t == NODE_NUM_LITERAL() ||
+        $t == NODE_STR_LITERAL() || $t == NODE_UNDEF() || $t == NODE_LAST() ||
+        $t == NODE_NEXT() || $t == NODE_REDO() || $t == NODE_LABEL() ||
+        $t == NODE_GOTO() || $t == NODE_DUNDER_PACKAGE() || $t == NODE_DUNDER_FILE() ||
+        $t == NODE_DUNDER_LINE() || $t == NODE_CAPTURE_VAR() || $t == NODE_FUNC_REF()) {
+        return 1;
+    }
+    return 0;
+}
+
 # Scan a statement or expression subtree to check if it contains any try blocks
 # (stopping at NODE_ANON_FUNC boundaries, since closures have their own frame).
 # Returns 1 if try found, 0 otherwise
@@ -2999,7 +3025,7 @@ func stmt_has_try(scalar $stmt) int {
     if (!$stmt) { return 0; }
     my str $rt = reftype($stmt);
     if ($rt eq "ARRAY") {
-        my int $len = scalar(@{$stmt});
+        my int $len = size($stmt);
         my int $i = 0;
         while ($i < $len) {
             if (stmt_has_try($stmt->[$i]) == 1) { return 1; }
@@ -3011,8 +3037,9 @@ func stmt_has_try(scalar $stmt) int {
     my int $type = $stmt->{"type"} + 0;
     if ($type == NODE_TRY_CATCH()) { return 1; }
     if ($type == NODE_ANON_FUNC()) { return 0; }
+    if (ast_is_leaf_node_type($type) == 1) { return 0; }
     my scalar $ks = keys(%{$stmt});
-    my int $kn = scalar(@{$ks});
+    my int $kn = size($ks);
     my int $k = 0;
     while ($k < $kn) {
         my scalar $v = $stmt->{$ks->[$k]};
@@ -3029,7 +3056,7 @@ func stmt_has_try(scalar $stmt) int {
 func ast_any_try(scalar $n) int {
     my str $rt = reftype($n);
     if ($rt eq "ARRAY") {
-        my int $len = scalar(@{$n});
+        my int $len = size($n);
         my int $i = 0;
         while ($i < $len) {
             if (ast_any_try($n->[$i]) == 1) { return 1; }
@@ -3048,8 +3075,9 @@ func ast_any_try(scalar $n) int {
             return 1;
         }
     }
+    if (ast_is_leaf_node_type($nt) == 1) { return 0; }
     my scalar $ks = keys(%{$n});
-    my int $kn = scalar(@{$ks});
+    my int $kn = size($ks);
     my int $k = 0;
     while ($k < $kn) {
         my scalar $v = $n->{$ks->[$k]};
@@ -3066,7 +3094,7 @@ func ast_any_try(scalar $n) int {
 func stmt_has_c_block(scalar $n) int {
     my str $rt = reftype($n);
     if ($rt eq "ARRAY") {
-        my int $len = scalar(@{$n});
+        my int $len = size($n);
         my int $i = 0;
         while ($i < $len) {
             if (stmt_has_c_block($n->[$i]) == 1) { return 1; }
@@ -3075,9 +3103,11 @@ func stmt_has_c_block(scalar $n) int {
         return 0;
     }
     if ($rt ne "HASH") { return 0; }
-    if (($n->{"type"} + 0) == NODE_C_BLOCK()) { return 1; }
+    my int $type = $n->{"type"} + 0;
+    if ($type == NODE_C_BLOCK()) { return 1; }
+    if (ast_is_leaf_node_type($type) == 1) { return 0; }
     my scalar $ks = keys(%{$n});
-    my int $kn = scalar(@{$ks});
+    my int $kn = size($ks);
     my int $k = 0;
     while ($k < $kn) {
         my scalar $v = $n->{$ks->[$k]};
@@ -3131,7 +3161,7 @@ func ast_collect_regex_var_refs(str $pat, scalar $out_hash) void {
 func ast_collect_anon_var_refs(scalar $n, scalar $out_hash, int $inside_anon) void {
     my str $rt = reftype($n);
     if ($rt eq "ARRAY") {
-        my int $len = scalar(@{$n});
+        my int $len = size($n);
         my int $i = 0;
         while ($i < $len) {
             ast_collect_anon_var_refs($n->[$i], $out_hash, $inside_anon);
@@ -3165,8 +3195,9 @@ func ast_collect_anon_var_refs(scalar $n, scalar $out_hash, int $inside_anon) vo
             }
         }
     }
+    if (ast_is_leaf_node_type($type) == 1) { return; }
     my scalar $ks = keys(%{$n});
-    my int $kn = scalar(@{$ks});
+    my int $kn = size($ks);
     my int $k = 0;
     while ($k < $kn) {
         my scalar $v = $n->{$ks->[$k]};
@@ -3204,7 +3235,7 @@ func func_body_has_try(scalar $body) int {
 func node_writes_var(scalar $n, str $name) int {
     my str $rt = reftype($n);
     if ($rt eq "ARRAY") {
-        my int $len = scalar(@{$n});
+        my int $len = size($n);
         my int $i = 0;
         while ($i < $len) {
             if (node_writes_var($n->[$i], $name) == 1) { return 1; }
@@ -3220,7 +3251,7 @@ func node_writes_var(scalar $n, str $name) int {
         if ($type == NODE_ASSIGN() && defined($tgt) && reftype($tgt) eq "HASH" && ($tgt->{"type"} + 0) == NODE_CALL()) {
             if (("" . $tgt->{"name"}) eq "substr") {
                 my scalar $sa = $tgt->{"args"};
-                if (defined($sa) && reftype($sa) eq "ARRAY" && scalar(@{$sa}) > 0) {
+                if (defined($sa) && reftype($sa) eq "ARRAY" && size($sa) > 0) {
                     $tgt = $sa->[0];
                 }
             }
@@ -3241,17 +3272,18 @@ func node_writes_var(scalar $n, str $name) int {
         my str $fn = "" . $n->{"name"};
         if ($fn eq "chomp" || $fn eq "chop") {
             my scalar $cargs = $n->{"args"};
-            if (defined($cargs) && reftype($cargs) eq "ARRAY" && scalar(@{$cargs}) > 0) { $tgt = $cargs->[0]; }
+            if (defined($cargs) && reftype($cargs) eq "ARRAY" && size($cargs) > 0) { $tgt = $cargs->[0]; }
         } elsif ($fn eq "substr") {
             my scalar $sargs = $n->{"args"};
-            if (defined($sargs) && reftype($sargs) eq "ARRAY" && scalar(@{$sargs}) >= 4) { $tgt = $sargs->[0]; }
+            if (defined($sargs) && reftype($sargs) eq "ARRAY" && size($sargs) >= 4) { $tgt = $sargs->[0]; }
         }
     }
     if (defined($tgt) && reftype($tgt) eq "HASH") {
         if (($tgt->{"type"} + 0) == NODE_VARIABLE() && ("" . $tgt->{"name"}) eq $name) { return 1; }
     }
+    if (ast_is_leaf_node_type($type) == 1) { return 0; }
     my scalar $ks = keys(%{$n});
-    my int $kn = scalar(@{$ks});
+    my int $kn = size($ks);
     my int $k = 0;
     while ($k < $kn) {
         my scalar $v = $n->{$ks->[$k]};
@@ -3268,7 +3300,7 @@ func stmt_has_local(scalar $stmt) int {
     if (!$stmt) { return 0; }
     my str $rt = reftype($stmt);
     if ($rt eq "ARRAY") {
-        my int $an = scalar(@{$stmt});
+        my int $an = size($stmt);
         my int $ai = 0;
         while ($ai < $an) {
             if (stmt_has_local($stmt->[$ai]) == 1) { return 1; }
@@ -3284,8 +3316,9 @@ func stmt_has_local(scalar $stmt) int {
     if ($type == NODE_ANON_FUNC()) {
         return 0;
     }
+    if (ast_is_leaf_node_type($type) == 1) { return 0; }
     my scalar $ks = keys(%{$stmt});
-    my int $kn = scalar(@{$ks});
+    my int $kn = size($ks);
     my int $k = 0;
     while ($k < $kn) {
         my scalar $v = $stmt->{$ks->[$k]};
@@ -3333,7 +3366,7 @@ func func_body_has_local(scalar $body) int {
 func stmt_has_call(scalar $n) int {
     my str $rt = reftype($n);
     if ($rt eq "ARRAY") {
-        my int $len = scalar(@{$n});
+        my int $len = size($n);
         my int $i = 0;
         while ($i < $len) {
             if (stmt_has_call($n->[$i]) == 1) { return 1; }
@@ -3351,8 +3384,9 @@ func stmt_has_call(scalar $n) int {
     if ($type == NODE_REGEX_SUBST() && index("" . $n->{"flags"}, "e") >= 0) {
         return 1;
     }
+    if (ast_is_leaf_node_type($type) == 1) { return 0; }
     my scalar $ks = keys(%{$n});
-    my int $kn = scalar(@{$ks});
+    my int $kn = size($ks);
     my int $k = 0;
     while ($k < $kn) {
         my scalar $v = $n->{$ks->[$k]};
@@ -3897,19 +3931,19 @@ func c_str_escape(str $s) str {
     my int $len = bytes($s);
     while ($i < $len) {
         my int $code = char_at($s, $i);
-        if ($code == ord("\\")) {
+        if ($code == 92) {  # '\\'
             sb_append($sb, "\\\\");
-        } elsif ($code == ord("\"")) {
+        } elsif ($code == 34) {  # '"'
             sb_append($sb, "\\\"");
-        } elsif ($code == ord("\n")) {
+        } elsif ($code == 10) {  # '\n'
             sb_append($sb, "\\n");
-        } elsif ($code == ord("\t")) {
+        } elsif ($code == 9) {  # '\t'
             sb_append($sb, "\\t");
-        } elsif ($code == ord("\r")) {
+        } elsif ($code == 13) {  # '\r'
             sb_append($sb, "\\r");
-        } elsif ($code == 0) {
+        } elsif ($code == 0) {  # '\0'
             sb_append($sb, "\\000");
-        } elsif ($code < ord(" ") || $code == 127) {
+        } elsif ($code < 32 || $code == 127) {  # ' ', DEL
             my int $o2 = $code / 64;
             my int $o1 = ($code / 8) % 8;
             my int $o0 = $code % 8;
@@ -3931,20 +3965,20 @@ func emit_escaped_string(scalar $cg, str $s) void {
     my int $len = bytes($s);
     while ($i < $len) {
         my int $code = char_at($s, $i);
-        if ($code == ord("\\")) {
+        if ($code == 92) {  # '\\'
             emit($cg, "\\\\");
-        } elsif ($code == ord("\"")) {
+        } elsif ($code == 34) {  # '"'
             emit($cg, "\\\"");
-        } elsif ($code == ord("\n")) {
+        } elsif ($code == 10) {  # '\n'
             emit($cg, "\\n");
-        } elsif ($code == ord("\t")) {
+        } elsif ($code == 9) {  # '\t'
             emit($cg, "\\t");
-        } elsif ($code == ord("\r")) {
+        } elsif ($code == 13) {  # '\r'
             emit($cg, "\\r");
-        } elsif ($code == 0) {
+        } elsif ($code == 0) {  # '\0'
             # 3-digit octal so a following digit isn't merged into the escape
             emit($cg, "\\000");
-        } elsif ($code < ord(" ") || $code == 127) {
+        } elsif ($code < 32 || $code == 127) {  # ' ', DEL
             my int $o2 = $code / 64;
             my int $o1 = ($code / 8) % 8;
             my int $o0 = $code % 8;
